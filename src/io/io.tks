@@ -40,6 +40,58 @@ pub extern fn read_stdin() -> str = "tk_rt_read_stdin" from "teko_rt"
 // Returns error? (null = success, non-null = error with message).
 pub extern fn write_file(path: str, content: str) -> error | null = "tk_rt_write_file" from "teko_rt"
 
+/**
+ * append_file_raw — the runtime symbol `append_file` wraps: 0 on success, `APPEND_FAILED` when the
+ * file could not be opened or the bytes could not all be written. Kept private so every caller goes
+ * through the typed wrapper.
+ *
+ * A SCALAR RETURN AND NOT `error | null`, which is a compiler constraint and not a preference — the
+ * very one `read_line`/`read_stdin` above record: a brand-new `error`-shaped `extern fn` needs a
+ * per-name lift in codegen (`emit_host_ffi`) that the RELEASED bootstrap seed's frozen codegen
+ * cannot learn post-release. The plain Teko wrapper below restores the `error | null` surface at no
+ * ABI cost.
+ *
+ * @param path     the file to append to; created when absent
+ * @param content  the bytes to append, exactly as given (no newline is added)
+ * @return         0 on success, `APPEND_FAILED` on failure
+ */
+extern fn append_file_raw(path: str, content: str) -> i32 = "tk_rt_append_file" from "teko_rt"
+
+/**
+ * APPEND_FAILED — `TK_RT_APPEND_FAILED` (src/runtime/teko_rt.h) at the Teko level.
+ */
+const APPEND_FAILED: i32 = -1
+
+/**
+ * append_file — APPEND `content` to the file at `path`, creating it when absent.
+ *
+ * THE POINT IS WHAT IT DOES NOT DO. Appending by reading the whole file back, concatenating and
+ * rewriting it costs two allocations the size of the file per record, and Teko's arena frees ONCE,
+ * at process exit — so N records allocate the SUM of 1..N file sizes and never give a byte back.
+ * That is quadratic, and it is what flooded the regression tier's memory (8.4 GB anon-rss measured
+ * on the base). One append is linear.
+ *
+ * THE CROSS-PROCESS RACE NARROWS, AND ONLY AS FAR AS THE HOST ALLOWS. POSIX specifies a `write` to
+ * an `O_APPEND` descriptor as seek-and-write ATOMIC with respect to other writers, so two processes
+ * appending small records to one path can no longer overwrite each other. NOT AN UNLIMITED PROMISE:
+ * a write above some size may be partial and is then finished by a second one, which is no longer
+ * one atomic act — WHERE THAT SIZE LIES IS NOT MEASURED HERE. The MSVC CRT's `_O_APPEND` is
+ * documented as a seek followed by a write rather than one operation, so Windows keeps the race it
+ * always had.
+ *
+ * @param path     the file to append to; created when absent
+ * @param content  the bytes to append, exactly as given (no newline is added)
+ * @return         nothing on success, or the failure
+ * @throws         when the file could not be opened, or the bytes could not all be written
+ * @since 0.3.1.0
+ */
+pub fn append_file(path: str, content: str) -> error | null {
+    if append_file_raw(path, content) == APPEND_FAILED {
+        return error { message = "teko::io::append_file: could not append to the file" }
+    }
+    null
+}
+
 // teko::io::write_file_bytes(path, data) — write raw bytes to a file (C7.12: .tkl output).
 // Accepts a []byte slice, so binary data (e.g. ZIP archives) is written without UTF-8 reinterpretation.
 // Returns error? (null = success, non-null = error with message).
