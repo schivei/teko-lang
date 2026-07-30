@@ -1128,7 +1128,10 @@ necessidade.
 
 ### O FACTO DE PLATAFORMA QUE DECIDE COMO "SEM C LANG" SE APLICA — medido
 
-**Medido na árvore:** `grep syscall src/ --include=*.tks` → **zero**. Não há primitiva de chamada de
+**Medido na árvore:** `grep syscall src/ --include=*.tks` → **duas ocorrências, ambas COMENTÁRIOS** em
+`src/runtime/teko_rt.tks` (eu escrevi "zero" na primeira medição; corrigido por um arquiteto que voltou a
+medir — **a conclusão não muda**, não há primitiva de chamada de sistema na superfície, mas o número
+estava errado e o registo tem de estar certo). Não há primitiva de chamada de
 sistema crua na superfície. A única forma de alcançar o SO é o FFI, e ele liga a **símbolos de libc por
 nome**:
 
@@ -1286,3 +1289,40 @@ declaração com o ficheiro da declaração — nunca uma metade de cada.
 `call_inst` é chamada em dez ficheiros fora da sua namespace. **Uma mudança de assinatura pública exige
 a suíte, não só as fixtures do arco.** Eu drenei sem relatório, sabendo o risco e tendo-o escrito — e o
 risco materializou-se exactamente onde estava previsto.
+
+## `git merge-file --union` NÃO É SEGURA EM `.tks` — e a lei larga era minha (2026-07-30)
+
+Eu escrevera, depois de um dreno bem-sucedido: *"`git merge-file --union` é a resolução correcta para
+conflitos puramente aditivos de fixture."* Estava larga, e custou sete pernas de CI vermelhas.
+
+**O que aconteceu.** Em `1103ffb` e `ffe7580` resolvi conflitos em
+`examples/regressions/own_native/src/corpus.tks` com `--union`. Sete vezes, a união escolheu uma
+fronteira de hunk que fez desaparecer o `0`, o `}`, a linha vazia e o `/**` entre uma função e a
+seguinte — deixando o corpo de uma a correr para dentro do doc-comment da outra:
+
+```teko
+fn f_slice_elem_store_boundaries() -> i64 {
+    …
+    if ys.len != 5 { return 11 }
+ * D27_TENTH_F32 — `0.1` held as an `f32` …
+```
+
+O ficheiro **não deu conflito** e **não deu erro de sintaxe evidente**: perdeu as declarações e todo
+`f_*` passou a `unknown function`. Sete pernas de CI vermelhas, e eu diagnostiquei-o duas vezes na
+direcção errada (cap de declarações, árvore não carregada) antes de a causa aparecer.
+
+**A lei, estreitada:**
+
+> `--union` só é segura quando as hunks em conflito são **registos inteiros e auto-delimitados** — uma
+> linha por caso, um bloco fechado, uma tabela. **Um corpo de função `.tks` não é auto-delimitado**: a
+> união pode apagar a fronteira entre dois registos e o resultado **compila-se como se fosse outra
+> coisa** em vez de dar conflito. Um conflito é um aviso; um splice silencioso não é.
+
+**A conferência obrigatória depois de QUALQUER resolução automática num `.tks`:** contar as `fn`
+declaradas antes e depois — **o número não pode DESCER**. Numa fixture, além disso, todo o `f_*`
+chamado no `main.tks` tem de resolver (é a conferência de DIRECÇÃO, e corre nos dois sentidos).
+
+**E a lição de método, que é a mesma de outras três vezes neste dia:** uma reparação que fecha uma
+função com `0 }` pode estar a inventar a cauda e a enfraquecer a fixture em silêncio. **Verifica-a
+contra o commit anterior ao dano** — foi o que fiz aqui (`e0a3491`/`0ddd4a6` terminavam em `0`, logo a
+reparação era fiel). Acreditar numa reparação é tão barato como acreditar num verde.

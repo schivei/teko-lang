@@ -1572,10 +1572,17 @@ jobs:
         uses: actions/checkout@v4
 
       # The own==C differential and the region-drop unit test compile C with the host cc.
+      #
+      # `llvm` RIDES ALONG, and it is not decoration: `scripts/check_coff.sh` reads the CROSS-emitted
+      # COFF object with `llvm-readobj`/`llvm-objdump` (the only parsers that read COFF on a Linux
+      # host), and it FAILS CLOSED when they are absent — *"a gate that passes with nothing to check
+      # is a hidden error"*. Measured on run 30528940780: the `own_cross_x86_64_windows_emits_coff`
+      # row became REACHABLE for the first time (the rows before it now pass) and immediately failed
+      # for lack of the parser. The `clang` package does not carry it; `llvm` does.
       - name: Install cc
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y clang
+          sudo apt-get install -y clang llvm
 
       - name: Download the published asset
         uses: actions/download-artifact@v4
@@ -1698,10 +1705,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # `llvm` carries `llvm-readobj`/`llvm-objdump`, which `scripts/check_coff.sh` needs to read the
+      # cross-emitted COFF object on a Linux host — and that gate fails CLOSED when they are absent.
       - name: Install the host clang the corpus links with
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y clang
+          sudo apt-get install -y clang llvm
 
       - name: Install wasmtime (the F7 wasm32-wasi scenario's executor)
         run: |
@@ -2210,11 +2219,13 @@ jobs:
             fi
           done
 
+      # `llvm` carries `llvm-readobj`/`llvm-objdump`, which `scripts/check_coff.sh` needs to read the
+      # cross-emitted COFF object on a Linux host — and that gate fails CLOSED when they are absent.
       - name: Install cc (Linux only — macOS and the Windows images ship clang)
         if: steps.probe.outputs.present == 'true' && runner.os == 'Linux'
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y clang
+          sudo apt-get install -y clang llvm
 
       - name: Provision the COMMITTED seed (sha256-verified before decompression)
         if: steps.probe.outputs.present == 'true'

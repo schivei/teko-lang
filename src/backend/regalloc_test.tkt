@@ -266,9 +266,9 @@ fn rgt_full_subst(n: u32) -> []SubstEntry {
 
 /**
  * rgt_all_kinds — one instruction of every `MInst` case (unique virtual ids
- * `0..49`), for the `map_minst_regs` coverage test.
+ * `0..50`), for the `map_minst_regs` coverage test.
  *
- * @return []MInst  the 29-instruction stream
+ * @return []MInst  the 30-instruction stream
  */
 fn rgt_all_kinds() -> []MInst {
     mut xs: []MInst = teko::list::empty()
@@ -292,6 +292,7 @@ fn rgt_all_kinds() -> []MInst {
     xs = teko::list::push(xs, MCvt { op = MCvtOp::Scvtf; dst = rgt_vf(33); a = rgt_v(34); src_wide = true; dst_wide = true })
     xs = teko::list::push(xs, load_inst(MMemSize::X, false, rgt_v(35), MMem { base = rgt_v(36); offset = 0 to i32 }))
     xs = teko::list::push(xs, store_inst(MMemSize::X, rgt_v(37), MMem { base = rgt_v(38); offset = 0 to i32 }))
+    xs = teko::list::push(xs, fspill_inst(rgt_vf(50), 0, false))
     xs = teko::list::push(xs, frame_addr_inst(rgt_v(39), 0))
     xs = teko::list::push(xs, MAdrp { dst = rgt_v(40); sym = "s"; kind = MRelocKind::PageHi })
     xs = teko::list::push(xs, MAddLo { dst = rgt_v(41); a = rgt_v(42); sym = "s"; kind = MRelocKind::PageLo })
@@ -307,8 +308,8 @@ fn rgt_all_kinds() -> []MInst {
 #test
 fn rgt_map_minst_covers_every_case() {
     let kinds = rgt_all_kinds()
-    let table = rgt_full_subst(50 to u32)
-    teko::assert::is_true(kinds.len == (29 to u64))
+    let table = rgt_full_subst(51 to u32)
+    teko::assert::is_true(kinds.len == (30 to u64))
     mut i: u64 = 0
     loop {
         if i >= kinds.len { break }
@@ -397,9 +398,11 @@ fn rgt_regalloc_gpr_spill_interp_equivalence() {
 }
 
 /**
- * rgt_fpr_spill_abi — a register file with a single FPR (v0) so any function
- * with FPR pressure spills an FPR value (the A3 honest-stop case); ample GPRs
- * so only the FPRs spill.
+ * rgt_fpr_spill_abi — a register file with a single ALLOCATABLE FPR (v0) so any
+ * function with FPR pressure spills an FPR value; ample GPRs so only the FPRs spill.
+ * Two FPRs (v1, v2) are reserved as spill scratch, which is what an FPR spill needs
+ * now that it LOWERS (0.3.1.0 degrau 29) instead of raising an honest-stop: one reload
+ * scratch per simultaneously spilled FPR use, and `MFAlu`'s two uses are the maximum.
  *
  * @return AbiDescriptor  the descriptor
  */
@@ -412,7 +415,7 @@ fn rgt_fpr_spill_abi() -> AbiDescriptor {
         gpr_caller_saved = teko::list::empty()
         fpr_caller_saved = teko::list::empty()
         gpr_spill_scratch = push_range(teko::list::empty(), 13, 15)
-        fpr_spill_scratch = teko::list::empty()
+        fpr_spill_scratch = push_range(teko::list::empty(), 1, 2)
         spill_slot_bytes = 8
         spill_slot_align = 8
         shadow_space = 0 to u32
@@ -453,12 +456,41 @@ fn rgt_regalloc_module_carries_tables_and_propagates() {
     }
     teko::assert::is_true(cm.funcs.len == (2 to u64))
     teko::assert::is_true(cm.rodata.len == (1 to u64))
-    let bad = rgt_module_of(rgt_named_func("main", rgt_fpr_spill_fixture()))
-    let is_err = match regalloc_module(rgt_fpr_spill_abi(), bad) {
-        MModule => false
-        error => true
+    let pressured = rgt_module_of(rgt_named_func("main", rgt_fpr_spill_fixture()))
+    let spilled = match regalloc_module(rgt_fpr_spill_abi(), pressured) {
+        MModule as x => x
+        error => return
     }
-    teko::assert::is_true(is_err)
+    teko::assert::is_true(spilled.funcs.len == (1 to u64))
+    teko::assert::is_true(all_physical(spilled.funcs[0]))
+    teko::assert::is_true(spilled.funcs[0].frame.len > (0 to u64))
+    teko::assert::is_true(rgt_has_fspill(spilled.funcs[0]))
+}
+
+/**
+ * rgt_has_fspill — whether `f` contains at least one `MFSpill`, the ONE instruction an
+ * FPR spill lowers to. Asserting its PRESENCE is what separates "the allocation
+ * succeeded" from "the allocation actually spilled a float": a fixture that stopped
+ * spilling would otherwise pass the all-physical and frame-grew checks unchanged.
+ *
+ * @param MFunc f  the colored function to scan
+ * @return bool  true iff any block holds an `MFSpill`
+ */
+fn rgt_has_fspill(f: MFunc) -> bool {
+    mut bi: u64 = 0
+    loop {
+        if bi >= f.blocks.len { break }
+        let b = f.blocks[bi]
+        mut ii: u64 = 0
+        loop {
+            if ii >= b.insts.len { break }
+            let is_fspill = match b.insts[ii] { MFSpill => true; _ => false }
+            if is_fspill { return true }
+            ii++
+        }
+        bi++
+    }
+    false
 }
 
 /**

@@ -606,6 +606,42 @@ fn encodes_fpr_memory_widths() {
 
 #test
 /**
+ * encodes_the_fpr_spill_from_sp — an `MFSpill` resolves through the frame layout to
+ * `STR/LDR Dt, [sp, #slot_offset]`, ONE word and no address register: AArch64 reaches
+ * the slot straight from SP, which is why the GPR spill's `frame_addr`+`ldr` pair is
+ * not needed for a float. Pinned against `llvm-mc`: `str d9,[sp,#24]` = `0xFD000FE9`,
+ * `ldr d9,[sp,#24]` = `0xFD400FE9`, `str d9,[sp]` = `0xFD0003E9`.
+ *
+ * Always the `D` width, for `f32` and `f64` alike: the transfer is a bit-preserving
+ * save/restore, never a conversion, and a spill slot is 8 bytes wide either way.
+ *
+ * @return void
+ */
+fn encodes_the_fpr_spill_from_sp() {
+    let fl = layout_of(32 to u32, l0(), l0(), l2(24, 0))
+    assert_word_with(fl, fspill_inst(fp(9), 0, false), 0xFD000FE9)
+    assert_word_with(fl, fspill_inst(fp(9), 0, true), 0xFD400FE9)
+    assert_word_with(fl, fspill_inst(fp(9), 1, false), 0xFD0003E9)
+}
+
+/**
+ * assert_word_with — assert that `inst` encodes to the exact 32-bit `expected` word
+ * under an explicit `layout` (the frame-resolved forms: `MFrameAddr`, `MFSpill`).
+ *
+ * @param FrameLayout layout  the enclosing frame
+ * @param MInst inst  the instruction to encode
+ * @param u32 expected  the known-good arm64 instruction word
+ * @return void
+ */
+fn assert_word_with(layout: FrameLayout, inst: MInst, expected: u32) {
+    match encode_inst_word(layout, inst) {
+        EncWord as x => teko::assert::is_true(x.word == expected)
+        error => teko::assert::is_true(false)
+    }
+}
+
+#test
+/**
  * fpr_memory_keeps_the_unscaled_stop — an FPR offset the scaled unsigned form
  * cannot express still raises `A4-ldur`, the same stop the GPR widths raise: the
  * float family closing did not widen the addressing surface, only the widths.
