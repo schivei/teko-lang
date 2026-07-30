@@ -19,6 +19,40 @@ hipótese, está dito.
 
 
 
+## 0k. TERCEIRO REINÍCIO DO CONTENTOR — restaurado de um INSTANTÂNEO ANTIGO (2026-07-30 ~10:19)
+
+Não foi um reinício limpo: a árvore local voltou a **`9bc292a`** (`merge(carga): cargo/20-extern-return-narrowing`), este ficheiro **não existia**, e as worktrees dos agentes de hoje (`wt-d30`, `wt-d31`, `wt-unkfn`, `wt-winleg`) tinham desaparecido — só restavam as de sessões anteriores. Recuperado com `git fetch` + `git checkout -B … origin/…`.
+
+**O que se perdeu:** uma secção §0j já escrita e NÃO empurrada. **O que se salvou:** tudo o que estava empurrado, incluindo o dreno do degrau 30. A lei *"escreveu? comita e empurra"* vale para mim exactamente como para os agentes — e esta foi a terceira vez hoje que o contentor a cobrou.
+
+## 0j. A EXECUÇÃO PÓS-DRENO, MEDIDA INTEIRA — e o `own_native` falha por TRÊS razões diferentes
+
+Execução `30528940780` sobre `954b2c9`, log integral. **`unknown function` desapareceu do CI** — zero ocorrências, o dano de §0h está fechado. E o `own_native` continua vermelho, mas por causas novas, **diferentes por perna**, porque a feature pára na PRIMEIRA fila que falha e cada perna chega a uma fila diferente:
+
+| pernas | fila que falha | causa | dono |
+|---|---|---|---|
+| `linux-x86_64-musl`, `Memory paranoid (musl)`, `regressor wasm` | `own_cross_x86_64_windows_emits_coff` | `check_coff: FAIL — o parser 'llvm-readobj' está ausente` | **minha (CI)** |
+| `linux-arm64-glibc`, `Memory paranoid (arm64)`, `macos-arm64` | `own_arith_exit` | `A4-fp: float-op / FPR encoding deferred` = **degrau 29** | `cargo/0.3.1.0-degrau-29` |
+| `windows-x86_64` | `own_arith_exit` | `exit -1073741819` = **0xC0000005 ACCESS_VIOLATION**, sem escrever nada | `cargo/0.3.1.0-windows-leg-2` |
+
+Três coisas que isto ensina:
+
+1. **A fila do COFF passou a ser ALCANÇÁVEL pela primeira vez.** Eu tinha registado que ela *"nunca é atingida"* — era verdade e deixou de ser, porque as filas anteriores passaram a passar. É a segunda vaga ao nível da fixture: **o que se mede é só o que a execução alcança**.
+2. A guarda `check_coff` fez exactamente o que devia: *"a gate that passes with nothing to check is a hidden error"*. Um `OBJ_CHECK_ALLOW_SKIP=1` no CI teria escondido isto e é proibido. **Conserto: `llvm` entra ao lado do `clang` nos três sítios de instalação do `pr.yml`** — o pacote `clang` não carrega `llvm-readobj`, o `llvm` carrega. Conferido: zero `install -y clang` sem `llvm` depois da mudança.
+3. **A ACCESS_VIOLATION de Windows tem a MESMA assinatura em duas fixturas independentes** — `own_native.exe` e o `alias_fat_field` do `regressor.tkr`, ambas `-1073741819` e ambas sem escrever nada. Isso promove a hipótese de causa única no emissor/encoder de Windows, e é evidência que o agente da perna Windows ainda não tinha.
+
+### O RESTO DA MEDIÇÃO, sem surpresas
+
+- Stop nativo, único em todo o log: `native backend N1: 'vt_table' is not a fat-pointer local (internal) [in cg_pair_is_iface_vtable]` — **degrau 31 confirmado pelo CI**, nas duas pernas de fixpoint nativo, com o front-end inteiro a passar (lexer/parser 143/143, checker **6462/6462**, monomorph 0/0, consteval **576/576**).
+- `assertion failed` em todo o log: **duas** ocorrências, e são o MESMO teste na MESMA perna (`pt_a_mingw_cc_is_convicted_by_its_path_without_any_probe`, Windows). Fora de Windows, zero pânicos.
+- Unitários: **1140** em seis pernas; Windows arranca 368 e aborta no tal teste.
+- **Zero `skipped`** nas 28 linhas de tally.
+- `regressions 1 run, 0 skipped, 1 failed` × 12 continua a ser o unitário que prova por inversão que um regressor listado e inexistente é erro de manifesto. Não é defeito.
+
+### UM NÚMERO QUE NÃO GOSTO, e fica a olho
+
+O `own_native` passou a compilar em **620 s** (musl), **815 s** (arm64-glibc), **628 s** (macOS) e **1301 s** (Windows) — `compile 99%`, um build. Antes do dreno falhava em ~520 ms, mas falhava DEPRESSA por erro de compilação, logo os números não se comparam directamente. **Não afirmo regressão de desempenho**; afirmo que uma fixture a 21 minutos de compilação numa perna vai começar a esbarrar em timeouts, e que isto precisa de uma medição própria (a mesma fixture, o mesmo compilador, antes e depois do dano) antes de se lhe chamar qualquer coisa.
+
 ## 0i. DEGRAU 30 DRENADO, e há DEGRAU 31 — a escada avançou por medição (2026-07-30)
 
 `cargo/0.3.1.0-degrau-30` @ `a082254` drenado no vagão. `drain_guard`: sem mudança em
