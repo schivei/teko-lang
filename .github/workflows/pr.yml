@@ -1676,7 +1676,16 @@ jobs:
   # That is why the flag lives HERE and not on the `test-*` legs: a lane that cannot run part of
   # the corpus cannot honestly demand that none of it be skipped.
   regressor-full:
-    needs: [plan, artifact-linux-x86_64-glibc]
+    # REPOINTED FROM THE glibc LEG TO THE musl ONE (owner ruling 2026-07-30). This job needs a
+    # compiler it can RUN, and `artifact-linux-x86_64-glibc` carries `fixpoint_backend: native`, so
+    # it is RED BY DESIGN until the native ladder closes — which made this whole job `skipped` on
+    # every run (measured: run 30500310856, `regressor-full = skipped`). That is not a leg stopping
+    # where it went red; it is a LANE-WIDE job that happened to be wired to a red producer by a
+    # fixed artifact name. It was also the ONLY job carrying a wasm engine, so the wasm32-wasi row
+    # ran literally nowhere — wider than the KNOWN-STOP in scripts/wasm_known_stop_gate.sh described.
+    # linux-x86_64-musl is the same architecture on the same runner with the C route, and it is
+    # green, so this lane measures again instead of waiting on a ladder it does not depend on.
+    needs: [plan, artifact-linux-x86_64-musl]
     if: needs.plan.outputs.run == 'true' && needs.plan.outputs.full == 'true'
     name: regressor / all capabilities (wasm, fail-closed)
     runs-on: ubuntu-latest
@@ -1722,14 +1731,14 @@ jobs:
       - name: Download the published x86_64 asset
         uses: actions/download-artifact@v4
         with:
-          name: teko-assets-linux-x86_64-glibc
+          name: teko-assets-linux-x86_64-musl
           path: dl
 
       - name: Restore the executable bit
         run: |
           set -eu
-          chmod +x dl/linux-x86_64-glibc/teko
-          dl/linux-x86_64-glibc/teko --version
+          chmod +x dl/linux-x86_64-musl/teko
+          dl/linux-x86_64-musl/teko --version
 
       # `--arith-cast-gate` ENABLED HERE (D4), owner ruling 2026-07-27: *"posso baixar a guarda:
       # <= 5% e então habilita o D4"*. The ceiling moved 2% -> 5% in the same ruling; see
@@ -1749,7 +1758,7 @@ jobs:
         shell: bash
         env:
           REGRESSION_REQUIRE_TOOLS: "1"
-        run: ./dl/linux-x86_64-glibc/teko test . --arith-cast-gate 2>&1 | tee teko-test.log
+        run: ./dl/linux-x86_64-musl/teko test . --arith-cast-gate 2>&1 | tee teko-test.log
 
       # NO SKIPS IN THE COMPILER'S OWN CI, evaluated AFTER the lane rather than inside the
       # executor. Owner ruling 2026-07-27: *"não podem haver skips, se houver é falha (deve ser
@@ -2303,6 +2312,94 @@ jobs:
           TEKO_MEM_PARANOID: '1'
         run: ./dl/linux-x86_64-glibc/teko test .
 
+  # ══ mem-paranoid-linux-x86_64-musl ═════════════════════════════════════════════════════════
+  # TIER: full only.
+  #
+  # THE MEMORY ORACLE, SPLIT OFF FROM THE NATIVE SELF-HOST KNOWN-STOP (owner ruling 2026-07-30:
+  # *"tem que ter pra glibc e musl (geramos ambas)"*). Two defects made the single `mem-paranoid`
+  # job report nothing at all, and BOTH had to be fixed for the oracle to run again:
+  #
+  #   1. IT RODE A RED PRODUCER. `mem-paranoid` needs `artifact-linux-x86_64-glibc`, which carries
+  #      `fixpoint_backend: native` and is therefore RED BY DESIGN until the native ladder closes —
+  #      so the job was `skipped` on every run, and the `Sanitizer gate` correctly refused to accept
+  #      its absence ("a gate that accepts its absence gates nothing"). Measured in run
+  #      30500310856: `mem-paranoid = skipped`.
+  #   2. THE ORACLE SAT BEHIND A STALE PIN. Its first step asserts the native self-host stops at
+  #      *"needs slice elements held BY VALUE"*, and steps run in order — so even with a green
+  #      producer the oracle would never be reached, because that degrau is CLOSED and the self-host
+  #      now stops at `resolve_generic_inst`. The pin would fail with "not at the degrau this step
+  #      pins", which is the pin working (owner: *"ou pq mudamos a direção... ou pq de fato o
+  #      corrigimos"*) — but it still blocks the unrelated oracle behind it.
+  #
+  # So the oracle lives HERE, on its own, riding a leg whose producer is GREEN. This job makes no
+  # claim about the native self-host; that claim stays in `mem-paranoid`, where it belongs.
+  #
+  # WHY musl AND glibc, not one of them: we SHIP both, so a leak that only the musl allocator
+  # surfaces is a leak we ship. `TEKO_MEM_PARANOID` is teko's OWN arena bookkeeping rather than a
+  # libc sanitizer, so the two runs mostly agree — but "mostly" is not a reason to measure one.
+  mem-paranoid-linux-x86_64-musl:
+    needs: [plan, artifact-linux-x86_64-musl]
+    if: needs.plan.outputs.run == 'true' && needs.plan.outputs.full == 'true'
+    name: Memory paranoid (linux-x86_64-musl)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download the published linux-x86_64-musl asset
+        uses: actions/download-artifact@v4
+        with:
+          name: teko-assets-linux-x86_64-musl
+          path: dl
+
+      - name: Restore the executable bit
+        run: |
+          set -eu
+          chmod +x dl/linux-x86_64-musl/teko
+          dl/linux-x86_64-musl/teko --version
+
+      - name: Run the regression executor under TEKO_MEM_PARANOID
+        env:
+          TEKO_MEM_PARANOID: '1'
+        run: ./dl/linux-x86_64-musl/teko test .
+
+  # ══ mem-paranoid-linux-arm64-glibc ═════════════════════════════════════════════════════════
+  # TIER: full only. SAME BODY as mem-paranoid-linux-x86_64-musl above, for the glibc half of the
+  # owner's "glibc e musl" ruling — on arm64, because that is the glibc leg whose producer is GREEN
+  # (x86_64-glibc carries the native backend and is red by design). The oracle therefore covers both
+  # libcs and both architectures between the two jobs, without waiting on the native ladder.
+  mem-paranoid-linux-arm64-glibc:
+    needs: [plan, artifact-linux-arm64-glibc]
+    if: needs.plan.outputs.run == 'true' && needs.plan.outputs.full == 'true'
+    name: Memory paranoid (linux-arm64-glibc)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download the published linux-arm64-glibc asset
+        uses: actions/download-artifact@v4
+        with:
+          name: teko-assets-linux-arm64-glibc
+          path: dl
+
+      - name: Restore the executable bit
+        run: |
+          set -eu
+          chmod +x dl/linux-arm64-glibc/teko
+          dl/linux-arm64-glibc/teko --version
+
+      - name: Run the regression executor under TEKO_MEM_PARANOID
+        env:
+          TEKO_MEM_PARANOID: '1'
+        run: ./dl/linux-arm64-glibc/teko test .
+
   # ══ gate ═══════════════════════════════════════════════════════════════════════════════════
   gate:
     name: CI gate
@@ -2649,7 +2746,7 @@ jobs:
   sanitizer-gate:
     name: Sanitizer gate
     runs-on: ubuntu-latest
-    needs: [plan, artifact-linux-x86_64-glibc, mem-paranoid]
+    needs: [plan, artifact-linux-x86_64-glibc, mem-paranoid, mem-paranoid-linux-x86_64-musl, mem-paranoid-linux-arm64-glibc]
     if: always()
     permissions:
       contents: read
@@ -2687,6 +2784,8 @@ jobs:
           PLAN_RESULT: ${{ needs.plan.result }}
           ANCHOR_RESULT: ${{ needs.artifact-linux-x86_64-glibc.result }}
           MEM_PARANOID: ${{ needs.mem-paranoid.result }}
+          MP_XM: ${{ needs.mem-paranoid-linux-x86_64-musl.result }}
+          MP_AG: ${{ needs.mem-paranoid-linux-arm64-glibc.result }}
         run: |
           set -u
           if [ "$FULL" = "true" ]; then MODE=full; else MODE=light; fi
@@ -2695,6 +2794,8 @@ jobs:
           echo "plan.run                            = $CHANGES"
           echo "artifact-linux-x86_64-glibc (anchor) = $ANCHOR_RESULT   (both tiers)"
           echo "mem-paranoid                         = $MEM_PARANOID   (full only)"
+          echo "mem-paranoid-linux-x86_64-musl        = $MP_XM   (full only)"
+          echo "mem-paranoid-linux-arm64-glibc        = $MP_AG   (full only)"
 
           FAILED=0
           if [ "$PLAN_RESULT" != "success" ]; then
@@ -2719,10 +2820,25 @@ jobs:
           # instrumented — a backend that writes objects directly has no clang to instrument it.
           # `mem-paranoid` stays because its oracle is the ARENA, not C: poison-on-free plus
           # never-reuse, which the runtime carries in whatever language it is written in.
+          # BOTH LIBCS, BECAUSE WE SHIP BOTH (owner ruling 2026-07-30: "tem que ter pra glibc e musl
+          # (geramos ambas)"). These two ride GREEN producers, so unlike `mem-paranoid` they actually
+          # run — a leak the musl allocator surfaces is a leak we ship, and measuring one libc while
+          # publishing two is the same class of blind spot as a row nobody runs.
           if [ "$MODE" = "full" ]; then
             if [ "$MEM_PARANOID" != "success" ]; then
-              echo "ERROR: mem-paranoid = $MEM_PARANOID (full mode requires success — it is the only"
-              echo "memory oracle left, and a gate that accepts its absence gates nothing)"
+              echo "ERROR: mem-paranoid = $MEM_PARANOID (full mode requires success — it carries the"
+              echo "native self-host KNOWN-STOP, and its producer is the native leg, red by design."
+              echo "Its pinned degrau is ALSO stale: it names 'needs slice elements held BY VALUE',"
+              echo "closed since, while the self-host now stops at resolve_generic_inst. Re-shaping"
+              echo "that pin is an owner decision, not a softening of this gate.)"
+              FAILED=1
+            fi
+            if [ "$MP_XM" != "success" ]; then
+              echo "ERROR: mem-paranoid-linux-x86_64-musl = $MP_XM (full mode requires success)"
+              FAILED=1
+            fi
+            if [ "$MP_AG" != "success" ]; then
+              echo "ERROR: mem-paranoid-linux-arm64-glibc = $MP_AG (full mode requires success)"
               FAILED=1
             fi
           elif [ "$MEM_PARANOID" != "skipped" ]; then
