@@ -852,6 +852,125 @@ fn collect_variant_def_decl(acc: []LVariantDef, td: parser::TypeDecl, table: che
 }
 
 /**
+ * collect_field_decls — the DECLARED field types of every field-shaped type declaration in `prog`,
+ * in program order: the checker-typed companion of `collect_struct_layouts` (degrau 25, #382).
+ *
+ * Keyed by the SAME canonical declaration name the layout table is keyed by (`td.name`, the key
+ * `find_struct_layout` probes), so one struct-literal store site resolves its offset and its
+ * DECLARED field type out of two tables that can never disagree about which declaration they
+ * describe. A `class` contributes its EFFECTIVE instance fields (`class_instance_fields` — the same
+ * base-first flattening `push_class_layout` registers), so a field inherited from a base coerces
+ * exactly like one declared on the class itself.
+ *
+ * @param prog  the whole typed program to scan
+ * @return      every field-shaped declaration's declared field types, in program order
+ * @throws      propagated from a class's base-chain walk (an unknown or non-class base — an
+ *              invariant the checker already enforces)
+ */
+fn collect_field_decls(prog: checker::TProgram) -> []LFieldDecls | error {
+    let dtable = declared_type_table(prog)
+    let ctable = checker::type_table_of(prog)
+    mut out: []LFieldDecls = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        out = match collect_field_decls_item(out, prog.items[i], dtable, ctable) {
+            []LFieldDecls as next => next
+            error as e => return e
+        }
+        i++
+    }
+    out
+}
+
+/**
+ * collect_field_decls_item — accumulate `it`'s declared field types onto `acc` when it is a
+ * field-shaped type declaration, unchanged for every other item kind.
+ *
+ * @param acc     the field-declaration table accumulated so far
+ * @param it      the typed top-level item to inspect
+ * @param dtable  the (bare name, namespace)-keyed table `checker::resolve_type` reads
+ * @param ctable  the canonically-keyed table a class's base-chain walk reads
+ * @return        `acc`, extended with `it`'s declared field types when it declares any
+ * @throws        propagated from a class's base-chain walk
+ */
+fn collect_field_decls_item(acc: []LFieldDecls, it: checker::TItem, dtable: checker::TypeTable, ctable: checker::TypeTable) -> []LFieldDecls | error {
+    match it {
+        parser::TypeDecl as td => collect_field_decls_decl(acc, td, dtable, ctable)
+        _ => acc
+    }
+}
+
+/**
+ * collect_field_decls_decl — accumulate `td`'s declared field types onto `acc` when its body is
+ * field-shaped (a `struct`'s own fields, a `class`'s effective instance fields); unchanged for any
+ * other declaration shape (enum/flags/variant/alias/interface/trait).
+ *
+ * @param acc     the field-declaration table accumulated so far
+ * @param td      the type declaration to fold
+ * @param dtable  the (bare name, namespace)-keyed table `checker::resolve_type` reads
+ * @param ctable  the canonically-keyed table a class's base-chain walk reads
+ * @return        `acc`, with `td`'s declared field types appended when applicable
+ * @throws        propagated from a class's base-chain walk
+ */
+fn collect_field_decls_decl(acc: []LFieldDecls, td: parser::TypeDecl, dtable: checker::TypeTable, ctable: checker::TypeTable) -> []LFieldDecls | error {
+    match td.body {
+        parser::StructBody as sb => teko::list::push(acc, field_decls_of(td.name, sb.fields, dtable))
+        parser::ClassBody as cb => {
+            let fields = match class_instance_fields(td.name, cb, ctable) { []parser::Field as fs => fs; error as e => return e }
+            teko::list::push(acc, field_decls_of(td.name, fields, dtable))
+        }
+        _ => acc
+    }
+}
+
+/**
+ * field_decls_of — one declaration's `LFieldDecls`: each field's syntactic annotation resolved
+ * through the checker's OWN resolver (`checker::resolve_type`, over the declaring namespace), in
+ * declared order.
+ *
+ * An annotation that does not resolve (a generic type parameter, a forward reference a synthesized
+ * fixture never declared) contributes the `Void` marker, which `find_field_decl_type` reports as
+ * "no declared type" — the store site then lowers the value plainly, exactly as it did before this
+ * table existed. Resolution never fails the whole build for a field whose type only ever mattered
+ * to a placement that does not need coercion.
+ *
+ * @param name    the declaration's canonical (declaring) name — the lookup key
+ * @param fields  the declaration's fields, in declared order
+ * @param dtable  the (bare name, namespace)-keyed table `checker::resolve_type` reads
+ * @return        the declaration's field names + resolved declared field types, parallel and in order
+ */
+fn field_decls_of(name: str, fields: []parser::Field, dtable: checker::TypeTable) -> LFieldDecls {
+    let ns = checker::name_qualifier(name)
+    mut names: []str = teko::list::empty()
+    mut types: []checker::Type = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= fields.len { break }
+        names = teko::list::push(names, fields[i].name)
+        types = teko::list::push(types, resolved_field_type(fields[i].type_ann, ns, dtable))
+        i++
+    }
+    LFieldDecls { name = name; field_names = names; field_types = types }
+}
+
+/**
+ * resolved_field_type — a field annotation as a resolved `checker::Type`, or the `Void` marker when
+ * it does not resolve (`field_decls_of`'s "no declared type" answer).
+ *
+ * @param te      the field's syntactic type annotation
+ * @param ns      the namespace the field was declared in
+ * @param dtable  the (bare name, namespace)-keyed table `checker::resolve_type` reads
+ * @return        the resolved declared type, or `Void` when the annotation does not resolve
+ */
+fn resolved_field_type(te: parser::TypeExpr, ns: str, dtable: checker::TypeTable) -> checker::Type {
+    match checker::resolve_type(te, dtable, ns) {
+        checker::Type as t => t
+        error => checker::Void { }
+    }
+}
+
+/**
  * variant_body_expanded — a variant body's union type-expr as a resolved `checker::Variant`: the
  * checker's own `resolve_type` over the program's type table, with a NOMINAL fallback
  * (`nominal_member_types`) when the body does not resolve — a synthesized fixture whose case names

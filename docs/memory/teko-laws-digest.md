@@ -545,3 +545,300 @@ nada.
 `join` achatado hoje não fecha a porta ao `errors.Join` verdadeiro do Go (com `Unwrap() []error`).
 Precisamente porque a fábrica esconde o layout, crescê-lo depois não toca em código de utilizador.
 Adiado, não descartado — e adiado sem juros.
+
+## Lei — cross-compiling SIM, mingw NUNCA (dono, 2026-07-29)
+
+Palavras dele, sobre a descoberta de que o CI instalava mingw de propósito:
+
+> queremos sim Cross compiling quando todos os natives estiverem funcionando, mas não quero saber de
+> mingw.
+
+Duas metades, e a segunda não espera pela primeira.
+
+### A proibição já existia e cobria só metade do compilador
+
+`src/build/linker.tks` implementa-a bem — `linker_is_mingw`, `mingw_rejected_error`,
+`resolve_linker` que nunca devolve `"cc"`. Mas medi: `linker_is_mingw|resolve_linker` **não aparece
+em nenhum ficheiro fora de `linker.tks`**. Ela guarda a rota NATIVA e mais nada.
+
+A rota C nunca foi guardada, e por isso passou por mingw em **dois** sítios, ambos medidos em log de
+CI, não inferidos:
+
+1. **O runner Windows.** `resolve_cc` devolve `"cc"` por padrão em todo host, e o passo de
+   diagnóstico imprimiu `cc /c/mingw64/bin/cc`. Com o Windows em `fixpoint_backend=c`, o binário que
+   publicamos e o corpus que ele compila saíam por mingw — e o clang da imagem nem era usado.
+2. **A perna Linux `regressor-full`.** `.github/workflows/pr.yml` instalava
+   `gcc-mingw-w64-x86-64` **deliberadamente**, para servir a linha
+   `own_cross_x86_64_windows_emits_coff`.
+
+### O segundo sítio não precisava de mingw para nada
+
+A linha que supostamente exigia o cross-linker é:
+
+```
+Scenario: own_cross_x86_64_windows_emits_coff (0.3.1 C5 — the object is the claim)
+  Given target = "x86_64-windows"
+  When built
+  Then object well-formed
+```
+
+Sem `and run`, sem `Then exit`. **A afirmação é o objeto**, e o próprio nome do cenário o diz. O
+`scripts/check_coff.sh` é cross-format por desenho. Provar que um `.o` é COFF bem formado não pede
+linker nenhum — o mingw estava lá porque o `When built` linkava, não porque a linha o conferisse.
+
+A lição, que é a desta lane inteira: **uma capacidade instalada para satisfazer um passo é sinal de
+que o passo afirma mais do que verifica.** Antes de instalar a ferramenta, leia a afirmação.
+
+### Porque clang-com-alvo-MSVC e não `cl.exe`
+
+O emissor de C usa 49 statement-expressions `({ ... })` mais `__builtin_`/`__attribute__`. O C23
+padronizou `typeof` mas **não** as statement-expressions, e o `cl.exe` rejeita-as. O clang aceita-as
+mesmo com `--target=x86_64-pc-windows-msvc`, porque quem compila é o clang e a MSVC entra só como
+headers/libs/linker. Trocar para `cl.exe` obrigaria a reescrever os 49 sítios; o dono decidiu não
+pagar isso agora.
+
+### O que fica para depois, e com que instrumento
+
+Cross-link completo (Linux → binário Windows) sem mingw exige o **linker próprio** que o dono
+planeia para uma versão adiante. Até lá, o cross honesto é: emitir o objeto, validar o formato,
+parar. Adiado por ordem explícita — *"quando todos os natives estiverem funcionando"* — não por
+incapacidade.
+
+## Lei — wasm prova-se com um app real, e WASI/Browser ganham versão própria (dono, 2026-07-29)
+
+Palavras dele:
+
+> Acredito que as falhas do wasm ocorrem pq o compilador está tentando compilar a si mesmo em wasm,
+> o que não deveria acontecer, e por isso também WASI e Browser ganham cada um uma versão dedicada,
+> compilando um app real.
+
+### A premissa, corrigida por medição
+
+O compilador **não** se compila em wasm, e nada tenta. Não existe perna produtora wasm:
+`scripts/ci_producer_matrix.sh` declara `linux-*`, `macos-arm64` e `windows-x86_64`, e o
+*"wasm regressor"* que ele cita em `:146` é **consumidor** — baixa o asset `linux-x86_64-glibc` e usa
+esse compilador x86-64 para construir um programa wasm. Fica registado para ninguém re-derivar.
+
+E não poderia ser de outro modo com proveito: **o WASI não tem `fork`/`exec` e o browser não tem
+sistema de ficheiros.** Um compilador que lança processos e percorre árvores de ficheiros é o pior
+candidato possível a binário wasm por esta rota.
+
+### A conclusão, que fica de pé — e com razão mais forte
+
+O programa que a linha wasm compila é `cases/wasm_exit7.tks`, e é uma linha:
+
+```teko
+exit(7)
+```
+
+Sem `alloca`, sem rodata, sem assinatura com `Ptr`. E esses três são **exatamente** o subconjunto que
+o `C1-wasm64-scope` de `src/backend/stackify.tks` ainda recusa. Logo a fixture está calibrada para
+passar por evitar tudo o que é difícil: **ela ficaria verde mesmo que o wasm estivesse quebrado para
+qualquer programa real.**
+
+É a quinta vez nesta lane que o mesmo padrão morde — *fixture que verifica que compila, não que
+funciona*. A regra que já valia para valores vale igual para alvos: **uma fixture calibrada para o
+subconjunto suportado não mede o alvo, mede a calibração.**
+
+### O que isto muda no pin
+
+O KNOWN-STOP do wasm (`scripts/wasm_known_stop_gate.sh`) continua válido, mas a sua migalha de
+promoção passou a começar noutro sítio. Não é "dar motor a uma perna both-tier" — é **trocar a
+fixture por um app real que exercite alloca, rodata e assinaturas `Ptr`**, e esperar vermelho no
+início. Esse vermelho É o item de trabalho da versão do wasm, e casa com o seguimento já nomeado:
+fiar `ptr64` pelo frame e pela rodata. Como WASI e Browser são só 64 bits por ordem do dono, o app
+cai em wasm64 — onde a paragem vive. As duas restrições encontram-se na mesma migalha.
+
+## Leis — sem `void`, sem sobrecarga, e o `main` híbrido (dono, 2026-07-30)
+
+### Duas leis em que EU escorreguei, registadas para não se repetir
+
+Propus ao dono `fn main() -> void` e `fn main() -> i32`, *"exatamente como o `Main` do C#"*. Ele
+cortou:
+
+> Não temos `void` eu os bani, do mesmo modo, não temos sobrecarga de função/metodo, também os bani
+
+Ambas estão no código como lei, e eu podia tê-las medido antes de propor:
+
+- **`void` não é valor.** `src/checker/resolve.tks:1741` — *"void is not a value, M.3"*; `Ref<void>`
+  é rejeitado; `src/checker/typer.tks:1661` tipa argumentos *"(void rejected)"*. A grafia de função
+  sem valor de retorno é simplesmente **sem seta**: `fn ensure_rt_dir_abs() {`.
+- **Sem sobrecarga.** `src/checker/collect.tks:1291` — *"W10b's no-overloading/override-only
+  ruling"*. O compilador trabalha em volta disso e **documenta** que trabalha: é a razão declarada
+  do `<src>_to_<dst>` em `src/casting/casting.tks:16` e de dois nomes distintos em
+  `src/lir/lower.tks:10565`.
+
+**A lição de método**, não de conteúdo: quando eu invoco uma das quatro referências de desenho, tenho
+de verificar que a *nossa* superfície suporta o que a referência oferece. O C# aceita `void` ou `int`
+no `Main` **porque tem sobrecarga**; nós temos nenhum dos dois. O espelho do C# aqui vale para a
+REGRA DE ENTRADA HÍBRIDA, não para o conjunto de assinaturas.
+
+### O `main` híbrido — as três decisões, fechadas
+
+> Creio que poderia ser híbrido, como no C#. Se existe funcao main, então usa ela e o main.tks é
+> livre, se não, o arquivo é como é hoje. Mas, a funcao main teria que residir dentro do main.tks
+> somente e haver somente um de cada (somente uma funcao e somente um arquivo main).
+
+1. **Assinatura: `fn main() -> i32`, e só.** Dono: *"Sai com i32 (sem saída não será aceito)"* — um
+   `fn main()` sem seta é **erro honesto**, nunca exit 0 implícito. Sem `void` para oferecer e sem
+   sobrecarga para permitir duas formas, há exatamente uma.
+2. **Misturar `fn main` com instruções no topo: REJEITAR.** Ambiguidade de ponto de entrada, e o C#
+   também rejeita.
+3. **Sem parâmetros** — e aqui a proibição de sobrecarga **responde sozinha**: o C# pode oferecer
+   `Main()` e `Main(string[] args)` justamente porque tem sobrecarga. Nós não podemos, logo há uma
+   forma, e os argumentos vêm de `args()`.
+
+### `args()` bare — o precedente é o `println`, não um conceito novo
+
+> Sem parâmetros, mas, `teko::env::args()` poderia ser global para reduzir o tamanho da escrita
+> `args()`
+
+A lista de builtins chamáveis sem qualificador é **fechada** e vive em `src/checker/scope.tks:525`:
+`print`, `println`, `write`, `ewrite`, `eprint`, `eprintln`, mais `panic` e `exit`
+(`src/checker/typer.tks:1613`/`:1621`). O `println` já existe nas DUAS grafias — bare e
+`teko::io::println` — logo `args()` bare ao lado de `teko::env::args()` segue precedente e não abre
+conceito.
+
+**Duas armadilhas, ambas com regressão a apontá-las:**
+
+- **Sequestro.** `src/checker/resolve.tks:782`: builtins R2 são casados **primeiro**, *"bare only — a
+  builtin is never namespaced"*. A regressão `builtin_name_not_hijacked` existe porque uma função de
+  utilizador com nome de builtin tem de correr o próprio corpo. Pôr `args()` na lista bare exige a
+  mesma proteção, e essa regressão tem de crescer para cobrir `args()`.
+- **A lei de 2026-07-29 do próprio dono** — *"a builtin call is resolved by NAME and QUALIFIER, not
+  name alone"*, com regressões que rejeitam builtin por namespace inventado e por alias de `use`. A
+  grafia bare nova não pode abrir buraco nisso.
+
+**É UMA CHAMADA, NÃO UM IDENTIFICADOR GLOBAL** (dono, 2026-07-30, corrigindo a minha grafia: *"Eu
+escrevi `args`? Desculpe, quis dizer `args()`"*). A distinção não é cosmética: `args()` entra com a
+MESMA forma dos oito builtins bare que já existem, todos invocados com parênteses, e **não** abre a
+categoria "variável global" — que a linguagem não tem, e que traria consigo perguntas que uma chamada
+não traz (quando é avaliada, se é constante, se pode ser sombreada por um `let`).
+
+**E uma primeira vez:** `args()` seria o primeiro builtin bare que **devolve dados**. Os oito atuais
+são todos I/O ou controlo de fluxo, nenhum produz valor. Não é impedimento, é onde esperar a
+surpresa.
+
+### O que a medição já garante que é barato
+
+A guarda que proíbe declarações no `main.tks` é **uma linha**, em
+`src/parser/parse_file.tks:149`, e é puramente sintática. E o ponto de entrada **já** se chama
+`main`: `src/build/project.tks:2255` identifica o main virtual *"by its exact, un-namespaced `main`
+symbol"*, `src/backend/stackify.tks:4739` procura `funcs[i].symbol == "main"`, e
+`src/checker/initanalysis.tks:281` já isenta `main` da análise de inicialização. O main virtual já é
+baixado como uma função literalmente chamada `main` — o híbrido deixa o utilizador **escrever** a
+função que hoje é sintetizada, em vez de acrescentar um conceito.
+
+**O risco real está noutro sítio:** `teko test .` e o harness de regressão SINTETIZAM mains
+(`src/build/regr_group.tks` dobra snippets num despachante; `project.tks` chega a descartar o
+`LFunc` do main virtual). A regra "só um `main`, e só no `main.tks`" tem de valer sem quebrar os
+mains sintetizados dos testes. É ali que o defeito vai aparecer.
+
+### O sítio exato da colisão, medido — e é um descarte, não um conflito
+
+Dono, 2026-07-30: *"o compilador precisa entender que se trata da main do próprio programa ao
+encontrar um `main()` em um teste e fazer o mangle"*.
+
+Medido: **o mecanismo de modos já existe.** `src/codegen/codegen.tks:11495` —
+
+> prototypes and function bodies are emitted IDENTICALLY across modes; only the trailing `main()`
+> differs: Program = the virtual-main (loose statements), TestPlain/TestCov = the native test gate.
+
+Logo **não há colisão hoje**: em modo de teste o main virtual não é renomeado, ele **desaparece**, e o
+portão de teste ocupa o símbolo. É por isso que `teko test .` funciona — e é exatamente por isso que a
+main do programa **não é assertável**.
+
+A instrução do dono converte um **DESCARTE** num **RENAME**, num sítio só: o switch de modo que
+escolhe o `main()` final. O `strip_virtual_main` (`src/build/project.tks:2243`) NÃO é esse sítio — ele
+tem um único chamador e é o caminho de biblioteca estática. E o harness de regressão também não é: ele
+trabalha ao nível do FONTE, `regr_group_main_text` **gera um `main.tks`** por grupo dobrado.
+
+**A invariante que cobre os dois casos sem caso especial:**
+
+1. O símbolo bare `main` pertence a **quem é a entrada do artefacto que se está a construir** — modo
+   Program: o programa; modo Teste: o portão de teste.
+2. A entrada do programa é **sempre também** emitida sob `<project>__main`, em todo modo, logo é
+   chamável e assertável.
+
+O híbrido cai de graça nessa invariante: um `fn main() -> i32` escrito pelo utilizador **já** é
+manglado para `<project>__main` pelo mangler ordinário, logo em modo de teste já é emitido e chamável.
+O único que precisa de tratamento novo é o main **virtual** (instruções soltas).
+
+### Dois factos do espécime real que mudam o desenho
+
+O `main.tks` do próprio compilador é o único espécime grande, e vive na **raiz do projeto**, ao lado de
+`src/` (com `source = "src"`), não dentro. Ele documenta a própria forma:
+
+> SHAPE (§2.20 — entry point). A LINEAR virtual main: top-level statements + local var/const only
+> (no fn/type declarations — those live in modules). Output contract: natural end → exit 0;
+> `teko::exit(n)` → exit n; panic → stderr + exit ≠0. **NO value return.**
+
+1. **`fn main() -> i32` é contrato NOVO, não renomeação.** Hoje o código de saída sai por
+   `teko::exit(n)` DENTRO do corpo, e o main virtual explicitamente não devolve valor. As duas formas
+   vão coexistir — o que torna "um `fn main` sem seta é erro honesto" ainda mais necessário: senão
+   haveria um main que nem devolve nem tem contrato de saída.
+2. **O caso motivador do `args()` está na PRIMEIRA linha do compilador**: `let args = teko::env::args()`.
+
+E há uma disciplina a respeitar: o ficheiro declara-se par semântico do `main.c`
+(*"main.tks and main.c must therefore stay SEMANTICALLY EQUIVALENT"*), logo mexer na convenção de
+entrada toca a regra do par.
+
+## Buraco de portão — 16 ficheiros commitados sem `fmt`, e nada no CI verifica (medido 2026-07-30)
+
+Levantado por um agente como red-flag adjacente ao trabalho de relocações: `teko fmt --check`
+devolvia rc=1 em `src/backend/objfile_elf.tks` **sem alteração alguma**, já no vagão.
+
+### A medição, e uma hipótese minha refutada
+
+`teko fmt --check src/` → **rc=1, 16 ficheiros**. (Cuidado com o método: `rc=$?` depois de um
+`| head` dá o estado do `head`, não do comando — errei isso na primeira tentativa e li rc=0.)
+
+O que o `fmt` quer em `objfile_elf.tks` é re-indentar sete campos de um literal de struct aninhado
+de 8 para 12 espaços, **deixando o fecho `})` a 4**. Eu argumentei que corpo a 12 com fecho a 4 é
+inconsistência interna, logo bug do formatador.
+
+**Falso, e o teste que decide não depende de opinião: um formatador tem de ser PONTO FIXO.**
+Depois de um `fmt`, o `--check` devolve rc=0; a segunda passagem não muda nada. Ele **converge numa
+passagem**. Logo a forma estranha é a convenção tal como implementada, e os 16 ficheiros foram
+commitados sem `fmt`. Terceira hipótese minha refutada por medição neste dia.
+
+### NÃO É BURACO DE PORTÃO — e o dono cortou a minha conclusão
+
+Eu concluí que "nenhum passo do `pr.yml` corre `fmt --check`" era um buraco, pela régua do tronco.
+**Errado.** O dono, 2026-07-30:
+
+> fmt check é dev mode e ele não está assim tão bom. E pq dev mode, para ter convenção e não
+> imposição. Mais vale um `fmt --apply` que um `fmt --check`
+
+O formatador é **ferramenta de convenção, não regra de CI**. Não existe portão de `fmt` e não deve
+existir: um ficheiro fora de formato não é erro escondido, é estilo não convergido — e a régua do
+tronco fala de erros que não disparam, não de convenções não aplicadas. **Nunca armar `fmt --check`
+no CI.** Os 16 ficheiros são dívida de conveniência, opcional, sem portão a impô-la.
+
+A lição de método, que é a minha e não do formatador: **invocar uma lei do projeto não dispensa
+verificar que ela se aplica.** Estiquei "sem erros escondidos" até cobrir estilo, o que ela não
+cobre. É a mesma forma do erro de hoje com o C# — invocar a referência sem medir se ela vale aqui.
+
+### A superfície do `fmt`, medida, e a armadilha nela
+
+```
+usage: teko fmt [--check] <path>...
+flags:  --check    report unformatted files without rewriting them
+```
+
+Uma flag só, e **aplicar já é o padrão** — `teko fmt <path>` reescreve no lugar. Logo o modo que o
+dono valoriza já existe; o `--check` é que é o opt-in.
+
+O que dá força ao `--apply` que ele sugeriu não é ter mais um nome: é que hoje **`teko fmt src/`
+reescreve 16 ficheiros sem flag e sem confirmação**. Para ferramenta em dev mode, o caminho
+destrutivo ser o mais curto é armadilha; um `--apply` explícito torna a reescrita deliberada. Fica
+como sugestão registada, não como trabalho despachado — a decisão é do dono.
+
+### Se algum dia se reformatar os 16, a ordem é esta
+
+Reformatação é churn de ficheiro inteiro, e no dia da medição **cinco dos 16 estavam sob edição
+ativa** por cinco agentes (`typer.tks`, `project.tks`, `lower_const.tks`, `codegen_test.tkt`,
+`linker.tks`). Fazê-la com frentes abertas compra conflito sem ganho. No ponto calmo: drenar os
+agentes, `teko fmt` sobre os 16, e **confirmar que o ponto de fixo continua a fechar** — reformatar
+não deve mudar bytes emitidos, mas isso é afirmação a verificar, não a assumir. **Sem portão no
+fim.**
