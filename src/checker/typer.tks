@@ -1351,14 +1351,7 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable) -> TExpr
                             mut ba = match type_expr(bdargs[bii], env, table) { TExpr as te => te; error as e => return e }
                             if type_is_void(ba.type) { return error { message = "a `void` expression cannot be passed as an argument (M.1)" } }
                             let bpt = bf.params[bii]
-                            if !assignable_to(ba.type, bpt, table) {
-                                if !literal_adopts(ba, bpt) { return teko::error::err_typed(error { message = "argument type mismatch" }, type_render(bpt), type_render(ba.type)) }
-                                ba = TExpr { kind = ba.kind; type = bpt; line = ba.line; col = ba.col }
-                            } else {
-                                if !arg_keeps_narrow_type(bpt, ba.type, table) {
-                                    ba = TExpr { kind = ba.kind; type = bpt; line = ba.line; col = ba.col }
-                                }
-                            }
+                            ba = match coerce_argument_into(ba, bpt, table) { TExpr as x => x; error as e => return e }
                             biargs = teko::list::push(biargs, ba)
                             bii++
                         }
@@ -1443,15 +1436,7 @@ fn type_contract_dispatch(ib: parser::InterfaceBody, struct_name: str, mc: parse
         mut a = match type_expr(dargs[ii], env, table) { TExpr as te => te; error as e => return e }
         if type_is_void(a.type) { return error { message = "a `void` expression cannot be passed as an argument (M.1)" } }
         let pt = f.params[ii]
-        if !assignable_to(a.type, pt, table) {
-            match struct_iface_named_stop(a.type, pt, table) { error as se => return se; null => { } }
-            if !literal_adopts(a, pt) { return teko::error::err_typed(error { message = "argument type mismatch" }, type_render(pt), type_render(a.type)) }
-            a = TExpr { kind = a.kind; type = pt; line = a.line; col = a.col }
-        } else {
-            if !arg_keeps_narrow_type(pt, a.type, table) {
-                a = TExpr { kind = a.kind; type = pt; line = a.line; col = a.col }
-            }
-        }
+        a = match coerce_argument_into(a, pt, table) { TExpr as x => x; error as e => return e }
         iargs = teko::list::push(iargs, a)
         ii++
     }
@@ -1735,16 +1720,7 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable) -> TExpr | error {
                     _ => { }
                 }
                 if !auto_reffed {
-                    if !assignable_to(a.type, f.params[i], table) {
-                        // (C1.8/E2) attach expected/actual — THE user's reported mismatch (mirrors expr.c).
-                        match struct_iface_named_stop(a.type, f.params[i], table) { error as se => return se; null => { } }
-                        if !literal_adopts(a, f.params[i]) { return teko::error::err_typed(error { message = "argument type mismatch" }, type_render(f.params[i]), type_render(a.type)) }
-                        a = TExpr { kind = a.kind; type = f.params[i]; line = a.line; col = a.col }   // C6 literal adopts the param type
-                    } else {
-                        if !arg_keeps_narrow_type(f.params[i], a.type, table) {
-                            a = TExpr { kind = a.kind; type = f.params[i]; line = a.line; col = a.col }
-                        }
-                    }
+                    a = match coerce_argument_into(a, f.params[i], table) { TExpr as x => x; error as e => return e }
                 }
                 args = teko::list::push(args, a)
                 i++
@@ -4262,6 +4238,38 @@ fn type_binding_value(b: parser::Binding, env: Env, table: TypeTable) -> TExpr |
  *               `env.fn_unsafe` was set once by `type_function`/`type_method` before this body's
  *               statements were typed
  */
+/**
+ * bind_value_into_annotation — the `let x: T = value` rung ladder for a value that does not already
+ * widen into its annotation `T`, in order: the struct/interface honest-stop that names a nominal
+ * mismatch precisely → the implicit numeric widening (`widen_value_into` — a narrower same-family
+ * value, or a machine integer into `bigint`/`dec`) → a fitting bare LITERAL adopting the declared
+ * narrow type (`annotated_literal_ok` proves the fit against the RAW initializer, then
+ * `retype_literal` rewrites the leaf so codegen sees the declared width, recursing into an array
+ * literal's elements) → the honest stop annotated with expected and actual.
+ *
+ * Separate from `coerce_value_into` on purpose, and not a twin of it: this rung ladder proves a
+ * literal's fit against the UNTYPED source expression (`raw`), which is the only place a negative
+ * literal's sign and an array literal's element-wise fit are still visible. Both ladders put the
+ * implicit widening at the same rung — after admissibility, before literal adoption — so an
+ * annotated binding and an assignment cannot disagree about a widening they both now accept.
+ *
+ * @param v      the typed initializer
+ * @param raw    the initializer's untyped source expression (the literal-fit proof reads this)
+ * @param ann    the resolved annotation type
+ * @param table  the folded type table
+ * @return       the initializer as a value of `ann`
+ * @throws       the nominal-mismatch stop, or the annotation mismatch with expected/actual attached
+ * @since        0.3.1
+ */
+fn bind_value_into_annotation(v: TExpr, raw: parser::Expr, ann: Type, table: TypeTable) -> TExpr | error {
+    match struct_iface_named_stop(v.type, ann, table) { error as se => return se; null => { } }
+    match widen_value_into(v, ann) { TExpr as w => return w; null => { } }
+    match annotated_literal_ok(raw, ann) {
+        null => retype_literal(v, ann)
+        error as e => teko::error::err_typed(e, type_render(ann), type_render(v.type))
+    }
+}
+
 fn type_binding(b: parser::Binding, env: Env, table: TypeTable) -> TypedStmt | error {
     mut v = match type_binding_value(b, env, table) { TExpr as te => te; error as e => return e }
     mut bound = v.type
@@ -4270,34 +4278,10 @@ fn type_binding(b: parser::Binding, env: Env, table: TypeTable) -> TypedStmt | e
         let at = match resolve_type(b.type_ann, table, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the binding's enclosing namespace
         let is_ref_binding = match at { Reference => true; _ => false }
         if !is_ref_binding && !assignable_to(v.type, at, table) {
-            // (C1.8/E2) wrap with expected=type_render(at), actual=type_render(v.type) — mirrors
-            // typer.c type_binding's tk_error_types wrap of annotated_literal_reason's message.
-            match struct_iface_named_stop(v.type, at, table) { error as se => return se; null => { } }
-            match annotated_literal_ok(b.value, at) {
-                null => {
-                    // a fitting bare-literal (plain-scalar) initializer ADOPTS the declared narrow
-                    // type — retype the leaf itself (same mechanism as the arg/struct-field/negative-
-                    // literal adoption sites), so codegen/VM see the narrow width (`mut y: u8 = 1`
-                    // stores/shifts at width 8, not the literal's native i64). Mirrors typer.c.
-                    // (#71) retype_literal RECURSES into an array literal's elements (`[]u8 = [1,2,3]`
-                    // narrows each leaf, not just the array's own type) — a plain leaf still takes
-                    // the annotation wholesale, unchanged from before.
-                    v = retype_literal(v, at)
-                }
-                error as e => return teko::error::err_typed(e, type_render(at), type_render(v.type))
-            }
+            v = match bind_value_into_annotation(v, b.value, at, table) { TExpr as x => x; error as e => return e }
         }
         bound = at
-        // (#4) annotation-directed element type: a sentinel empty list/array (`teko::list::empty()`
-        // / `[]`) ADOPTS the annotation's concrete slice type, so codegen sees the element WITHOUT
-        // back-inference. Mirrors type_assign's target-adopt and emit_as's wrap.
-        let v_is_sentinel_slice = match v.type { Slice as vs => match vs.element { Void => true; _ => false }; _ => false }
-        let bound_is_concrete_slice = match bound { Slice as bs => match bs.element { Void => false; _ => true }; _ => false }
-        if v_is_sentinel_slice {
-            if bound_is_concrete_slice {
-                v = TExpr { kind = v.kind; type = bound; line = v.line; col = v.col }
-            }
-        }
+        v = adopt_sentinel_slice_type(v, bound)
     }
     // (#4) REJECT an untyped empty collection. The element type MUST be fixed at the declaration —
     // by the binding annotation (`: []T`) or by typed initial elements (a non-empty literal / a
@@ -4373,21 +4357,10 @@ fn type_field_assign(a: parser::Assign, env: Env, table: TypeTable) -> TypedStmt
         if !rb.is_mut { return error { message = "cannot assign to a field of an immutable binding — declare it `mut` (B.21)" } }
     }
 
-    // Type-check the RHS against the FIELD type (same widen/adopt rule as a simple assign / binding).
-    mut v = match type_expr(a.value, env, table) { TExpr as te => te; error as e => return e }
+    let v = match type_expr(a.value, env, table) { TExpr as te => te; error as e => return e }
     if type_contains_ref(field_t) || type_contains_ref(v.type) { return error { message = "a reference cannot be stored in a field (parameter-only in this version)" } }
-    if !assignable_to(v.type, field_t, table) {
-        if !literal_adopts(v, field_t) { return teko::error::err_typed(error { message = "assigned value does not match the field type" }, type_render(field_t), type_render(v.type)) }
-        v = retype_literal(v, field_t)
-    }
-    let v_is_sentinel_slice = match v.type { Slice as vs => match vs.element { Void => true; _ => false }; _ => false }
-    let field_is_concrete_slice = match field_t { Slice as bs => match bs.element { Void => false; _ => true }; _ => false }
-    if v_is_sentinel_slice {
-        if field_is_concrete_slice {
-            v = TExpr { kind = v.kind; type = field_t; line = v.line; col = v.col }
-        }
-    }
-    TypedStmt { node = TAssign { kind = parser::AssignKind::Field; name = ""; op = a.op; bound = field_t; value = v; deref = false; target = lhs }; env = env }
+    let coerced = match coerce_value_into(v, field_t, table, "assigned value does not match the field type") { TExpr as x => x; error as e => return e }
+    TypedStmt { node = TAssign { kind = parser::AssignKind::Field; name = ""; op = a.op; bound = field_t; value = adopt_sentinel_slice_type(coerced, field_t); deref = false; target = lhs }; env = env }
 }
 
 /**
@@ -4418,10 +4391,7 @@ fn type_index_assign(a: parser::Assign, env: Env, table: TypeTable) -> TypedStmt
     let lhs = match type_expr(a.target, env, table) { TExpr as te => te; error as e => return e }
     mut v = match type_expr(a.value, env, table) { TExpr as te => te; error as e => return e }
     if type_contains_ref(elem) || type_contains_ref(v.type) { return error { message = "a reference cannot be stored in a slice element (parameter-only in this version)" } }
-    if !assignable_to(v.type, elem, table) {
-        if !literal_adopts(v, elem) { return teko::error::err_typed(error { message = "assigned value does not match the slice element type" }, type_render(elem), type_render(v.type)) }
-        v = retype_literal(v, elem)
-    }
+    v = match coerce_value_into(v, elem, table, "assigned value does not match the slice element type") { TExpr as x => x; error as e => return e }
     TypedStmt { node = TAssign { kind = parser::AssignKind::Index; name = ""; op = a.op; bound = elem; value = v; deref = false; target = lhs }; env = env }
 }
 
@@ -4468,31 +4438,8 @@ fn type_assign(a: parser::Assign, env: Env, table: TypeTable) -> TypedStmt | err
     if !both_bare_ref {
         if type_contains_ref(tb.type) || type_contains_ref(v.type) { return error { message = "a reference cannot be bound to a local (parameter-only in this version)" } }
     }
-    // The value must WIDEN into the target's type (B.14 case→variant, T→T?) OR be a fitting literal
-    // that adopts it (C6) — same rule as an annotated binding (the single source of truth).
-    if !assignable_to(v.type, tb.type, table) {
-        // (C1.8/E2) attach expected=type_render(tb.type), actual=type_render(v.type) — mirrors
-        // typer.c type_assign's tk_error_types wrap.
-        if !literal_adopts(v, tb.type) { return teko::error::err_typed(error { message = "assigned value does not match the target type" }, type_render(tb.type), type_render(v.type)) }
-        // a fitting bare-literal (plain-scalar) RHS ADOPTS the target's narrow type — retype the leaf
-        // itself (mirrors type_binding's identical adoption above), so a plain `y = 200` on a `u8`
-        // slot stores/re-widths at 8 bits, not the literal's native i64.
-        // (#71) retype_literal recurses into an array literal's elements — see type_binding.
-        v = retype_literal(v, tb.type)
-    }
-    // (#4) a sentinel empty list/array ADOPTS the target's concrete slice type so codegen sees the
-    // element. OTHERWISE keep the value's NATURAL (case / T) type and store the target as `bound` —
-    // codegen's emit_as wraps the value into the target at the assign site (case→variant, T→T?, a
-    // fitting literal). Mirrors type_binding (clobbering the case type made `node = OptionalType{…}`
-    // emit the case's fields under the variant's C type → a field-designator error).
-    let v_is_sentinel_slice = match v.type { Slice as vs => match vs.element { Void => true; _ => false }; _ => false }
-    let bound_is_concrete_slice = match tb.type { Slice as bs => match bs.element { Void => false; _ => true }; _ => false }
-    if v_is_sentinel_slice {
-        if bound_is_concrete_slice {
-            v = TExpr { kind = v.kind; type = tb.type; line = v.line; col = v.col }
-        }
-    }
-    TypedStmt { node = TAssign { kind = parser::AssignKind::Simple; name = a.name; op = a.op; bound = tb.type; value = v; deref = false; target = no_texpr() }; env = env }   // mut rule enforced (B.21)
+    let coerced = match coerce_value_into(v, tb.type, table, "assigned value does not match the target type") { TExpr as x => x; error as e => return e }
+    TypedStmt { node = TAssign { kind = parser::AssignKind::Simple; name = a.name; op = a.op; bound = tb.type; value = adopt_sentinel_slice_type(coerced, tb.type); deref = false; target = no_texpr() }; env = env }
 }
 
 fn type_return(r: parser::Return, env: Env, table: TypeTable) -> TypedStmt | error {
@@ -4606,6 +4553,171 @@ fn function_return(f: parser::Function, table: TypeTable, ref_ns: str) -> Type |
 // never drift apart. A case widens into a named variant (`let s: Shape = Circle { … }`), a nested
 // case widens transitively, and `T` widens into `T?`.
 fn assignable_to(from: Type, to: Type, table: TypeTable) -> bool { widens_into(from, to, table) }
+
+/**
+ * bignum_ctor_of — which `bigint`/`dec` constructor receives a machine integer, and therefore what
+ * type the argument must arrive as. `u64` is the one source whose whole range the `i64`-taking `of`
+ * cannot accept, so it routes to `of_u64`; every other integer prim widens losslessly into `i64`
+ * and takes `of`.
+ *
+ * @param from  the machine integer type being widened into a bignum
+ * @return      `"of_u64"` for a `u64` source, `"of"` for every other integer
+ * @since       0.3.1
+ */
+fn bignum_ctor_of(from: Type) -> str {
+    if prim_kind_of(from) == PrimKind::U64 { return "of_u64" }
+    "of"
+}
+
+/**
+ * widen_int_into_bignum — the implicit widening of a machine INTEGER VALUE into `bigint`/`dec`, as a
+ * call to the library constructor that receives it. The owner's rule puts `bigint`/`dec` in the same
+ * sentence as the machine widths (*"o mesmo vale para floats e para bigint e decimal"*), and a
+ * bignum holds every machine integer, so this direction can never overflow and never panics.
+ *
+ * Distinct from `bignum_adopt_operand`, which handles the same target for a bare LITERAL operand of a
+ * bignum OPERATOR. That one could stay literal-only because `big + 1` is the only shape an operator
+ * meets; a declared target (`let b: bigint = some_i32`) meets real VALUES, which is precisely the
+ * case that used to be rejected with "no implicit conversion".
+ *
+ * @param v       the typed integer value
+ * @param target  the candidate target type
+ * @return        the constructor call yielding `v` as a bignum, or `null` when `target` is not a
+ *                bignum or `v` is not a machine integer
+ * @since         0.3.1
+ */
+fn widen_int_into_bignum(v: TExpr, target: Type) -> TExpr | null {
+    let kind = bignum_kind(target)
+    if kind == "" { return null }
+    if !is_integer(v.type) { return null }
+    let ctor = bignum_ctor_of(v.type)
+    let arg = bignum_ctor_argument(v, ctor)
+    bignum_call(kind, ctor, teko::list::push(teko::list::empty(), arg), bignum_named(kind))
+}
+
+/**
+ * bignum_ctor_argument — the value as the constructor's own parameter type: `of_u64` already receives
+ * the `u64` unchanged, while `of` receives an `i64`, so a narrower integer is first wrapped in the
+ * lossless widening `TCast` that both backends lower to nothing.
+ *
+ * @param v     the typed integer value
+ * @param ctor  the constructor name `bignum_ctor_of` chose
+ * @return      `v`, widened to the constructor's parameter type when it is not already that type
+ * @since       0.3.1
+ */
+fn bignum_ctor_argument(v: TExpr, ctor: str) -> TExpr {
+    if ctor == "of_u64" { return v }
+    let carrier = Prim { kind = PrimKind::I64 }
+    if type_eq(v.type, carrier) { return v }
+    TExpr { kind = TCast { expr = v }; type = carrier; line = v.line; col = v.col }
+}
+
+/**
+ * widen_value_into — the implicit WIDENING step of the value-into-target ladder: a lossless machine
+ * widening (`numeric_widens_implicitly` — the same predicate the arithmetic W-RULE uses) becomes a
+ * synthetic widening `TCast`, and a machine integer into `bigint`/`dec` becomes the library
+ * constructor call. Answers `null` when no implicit widening applies, leaving the caller's remaining
+ * rungs (literal adoption, then the honest stop) to decide.
+ *
+ * The synthetic `TCast` is deliberately a REAL node in the typed tree rather than a retyped leaf:
+ * the ARITH-CAST-RATE gate (D4) counts `TCast` nodes, so an implicit widening is COUNTED by the same
+ * meter that bounds hand-written casts instead of slipping past it.
+ *
+ * @param v       the typed value
+ * @param target  the declared target type
+ * @return        the value as a value of `target`, or `null` when it does not implicitly widen
+ * @see           numeric_widens_implicitly — the rule, its C# lineage, and its Rust divergence
+ * @since         0.3.1
+ */
+fn widen_value_into(v: TExpr, target: Type) -> TExpr | null {
+    if numeric_widens_implicitly(v.type, target) {
+        return TExpr { kind = TCast { expr = v }; type = target; line = v.line; col = v.col }
+    }
+    widen_int_into_bignum(v, target)
+}
+
+/**
+ * coerce_value_into — the ONE ladder a value climbs to reach a declared target type, in order:
+ * already admissible (`assignable_to` — B.14 case→variant, `T`→`T?`, upcasts) → implicit numeric
+ * widening (`widen_value_into`) → a fitting bare LITERAL adopting the target (`retype_literal`, C6)
+ * → the honest stop naming expected and actual.
+ *
+ * One function because the rungs used to be open-coded at every target site — assignment, field
+ * assignment, index assignment, write-through-reference — and a rung added to one was a rung missing
+ * from the others. The implicit widening is exactly the kind of rung that would have been added
+ * unevenly.
+ *
+ * @param v       the typed value
+ * @param target  the declared target type
+ * @param table   the folded type table
+ * @param what    the diagnostic message for the target kind ("assigned value does not match …")
+ * @return        the value as a value of `target`
+ * @throws        `what`, annotated with the rendered expected/actual types, when no rung applies
+ * @since         0.3.1
+ */
+/**
+ * adopt_sentinel_slice_type — an UNTYPED empty collection (`teko::list::empty()` / `[]`, whose
+ * element type is still the `Void` sentinel) ADOPTS the declared target's concrete slice type, so
+ * codegen sees the element with no back-inference (#4). Every other value KEEPS its own natural type
+ * and the target rides along as the statement's `bound`, because the emit wraps the value at the use
+ * site — clobbering a case type here made a variant member emit its own fields under the union's C
+ * type and cc reject the field designators.
+ *
+ * Extracted because the identical five lines stood in `type_binding`, `type_assign` and
+ * `type_field_assign` — three copies of one rule, the shape that decays into two of them being
+ * updated and the third not.
+ *
+ * @param v       the typed value
+ * @param target  the declared target type
+ * @return        `v` retyped to `target` when it is a sentinel empty collection and `target` is a
+ *                concrete slice, else `v` unchanged
+ */
+fn adopt_sentinel_slice_type(v: TExpr, target: Type) -> TExpr {
+    let v_is_sentinel = match v.type { Slice as vs => match vs.element { Void => true; _ => false }; _ => false }
+    if !v_is_sentinel { return v }
+    let target_is_concrete = match target { Slice as bs => match bs.element { Void => false; _ => true }; _ => false }
+    if !target_is_concrete { return v }
+    TExpr { kind = v.kind; type = target; line = v.line; col = v.col }
+}
+
+fn coerce_value_into(v: TExpr, target: Type, table: TypeTable, what: str) -> TExpr | error {
+    if assignable_to(v.type, target, table) { return v }
+    match widen_value_into(v, target) { TExpr as w => return w; null => { } }
+    if literal_adopts(v, target) { return retype_literal(v, target) }
+    teko::error::err_typed(error { message = what }, type_render(target), type_render(v.type))
+}
+
+/**
+ * coerce_argument_into — the value-into-target ladder for a CALL ARGUMENT, whose rungs differ from
+ * `coerce_value_into`'s in two ways an assignment has no equivalent of: an ALREADY-admissible argument
+ * normally ADOPTS the parameter's type, except where the emit wraps the value at the use site and the
+ * argument must keep its narrow type (`arg_keeps_narrow_type`); and a fitting literal is retyped
+ * SHALLOW (its own `.type` replaced, leaves untouched), which is what the three argument sites have
+ * always done.
+ *
+ * One function because those three sites — the plain call, the interface dispatch, and the base-class
+ * dispatch — each carried their own copy of the whole ladder, and the copies had ALREADY drifted: only
+ * one of the three consulted `struct_iface_named_stop`, so a nominal struct/interface mismatch got a
+ * precise diagnostic through a direct call and a bare "argument type mismatch" through a dispatched
+ * one. Adding the implicit-widening rung to three copies would have been the next drift.
+ *
+ * @param a      the typed argument
+ * @param pt     the parameter's declared type
+ * @param table  the folded type table
+ * @return       the argument as a value of `pt`
+ * @throws       the nominal-mismatch stop, or "argument type mismatch" with expected/actual attached
+ * @since        0.3.1
+ */
+fn coerce_argument_into(a: TExpr, pt: Type, table: TypeTable) -> TExpr | error {
+    if assignable_to(a.type, pt, table) {
+        if arg_keeps_narrow_type(pt, a.type, table) { return a }
+        return TExpr { kind = a.kind; type = pt; line = a.line; col = a.col }
+    }
+    match struct_iface_named_stop(a.type, pt, table) { error as se => return se; null => { } }
+    match widen_value_into(a, pt) { TExpr as w => return w; null => { } }
+    if literal_adopts(a, pt) { return TExpr { kind = a.kind; type = pt; line = a.line; col = a.col } }
+    teko::error::err_typed(error { message = "argument type mismatch" }, type_render(pt), type_render(a.type))
+}
 
 /** arg_keeps_narrow_type — an argument that WIDENS into a parameter type `pt` normally ADOPTS `pt`
     (its TExpr.type is rewritten to `pt`); but where the EMIT wraps the value at the use site, the
@@ -5036,11 +5148,35 @@ fn retype_returns_in_expr(e: TExpr, ret: Type, table: TypeTable) -> TExpr {
     }
 }
 
+/**
+ * yields_declared_return — may a value of type `from` be the value a function declaring `ret` yields?
+ * Admissible when it widens into `ret` (B.14 case→variant, `T`→`T?`, an upcast), when it IMPLICITLY
+ * widens as a number (`numeric_widens_implicitly` — the owner's 2026-07-29 rule, the same rung the
+ * assignment and argument ladders take), or when it is a fitting bare LITERAL adopting `ret` (C6).
+ *
+ * The return site is a VALIDATOR, not a rewriter — it reports whether the body is well-typed and never
+ * touches the typed tree — so the implicit widening needs no node inserted here, exactly as the
+ * literal rung needs none: a value that widens losslessly already IS the wider type's own bit pattern.
+ *
+ * Shared by the `return` statement and the trailing-expression checks, which are twins of each other
+ * and were each carrying their own spelling of the same disjunction.
+ *
+ * @param from   the yielded value's type
+ * @param value  the yielded value (the literal rung inspects its shape)
+ * @param ret    the function's declared return type
+ * @param table  the folded type table
+ * @return       whether the value is admissible as the declared return
+ * @since        0.3.1
+ */
+fn yields_declared_return(value: TExpr, ret: Type, table: TypeTable) -> bool {
+    assignable_to(value.type, ret, table) || numeric_widens_implicitly(value.type, ret) || literal_adopts(value, ret)
+}
+
 fn check_return_stmt(s: TStatement, ret: Type, table: TypeTable) -> error | null {
     match s {
         TReturn as r => {
             if r.has_value {
-                if assignable_to(r.value.type, ret, table) || literal_adopts(r.value, ret) { null }   // a fitting int/float/byte literal adopts the return type (C6)
+                if yields_declared_return(r.value, ret, table) { null }
                 // (C1.8/E2) attach expected=type_render(ret), actual=type_render(r.value.type) —
                 // mirrors typer.c check_return_stmt's tk_error_types wrap.
                 else { teko::error::err_typed(error { message = "return value does not match the function's declared return type" }, type_render(ret), type_render(r.value.type)) }
@@ -5267,7 +5403,7 @@ fn check_trailing_value(stmts: []TStatement, ret: Type, table: TypeTable) -> err
     match stmts[stmts.len - 1] {
         TExprStmt as es => {
             if texpr_diverges(es.expr) { null }   // a trailing panic/exit yields no value (M.3)
-            else { if assignable_to(es.expr.type, ret, table) || literal_adopts(es.expr, ret) { null }   // a fitting trailing literal adopts the return type (C6)
+            else { if yields_declared_return(es.expr, ret, table) { null }
                 // (C1.8/E2) attach expected=type_render(ret), actual=type_render(es.expr.type) — mirrors
                 // typer.c check_trailing_value's tk_error_types wrap.
                 else { teko::error::err_typed(error { message = "the function's final expression does not match its declared return type" }, type_render(ret), type_render(es.expr.type)) } }

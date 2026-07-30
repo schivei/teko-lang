@@ -2734,18 +2734,25 @@ fn prim_float_tag(k: checker::PrimKind) -> str | error {
     }
 }
 
-// cast_may_lose — an INT->INT cast src->dst may lose data (needs a runtime guard) when
-// SOME value of the source type falls outside the destination's representable range.
-// Conservative: if we cannot prove source range ⊆ dest range, guard. Floats are handled
-// separately (float->int always guards). (C: `cast_may_lose`.)
+/**
+ * cast_may_lose — may an INT->INT cast `src`->`dst` lose data, and therefore need a runtime fit
+ * guard? True when SOME value of the source type falls outside the destination's representable
+ * range: a true narrowing at equal signedness, an unsigned source into a signed destination of the
+ * same-or-smaller width (the destination spends one bit on the sign), or ANY signed source into an
+ * unsigned destination (a negative value never fits).
+ *
+ * Delegates to the checker's `cast_is_lossless_widen`, of which this is the exact complement, so
+ * the two EMISSION routes ask ONE width table. It used to carry its own copy, and the native route
+ * carried none — the divergence that let `300 to u8` answer 300 natively while the C route
+ * correctly panicked.
+ *
+ * @param src  the cast operand's PrimKind
+ * @param dst  the cast target's PrimKind
+ * @return     whether the pair needs the fail-loud runtime range check
+ * @see        checker::cast_is_lossless_widen — the single source of truth this negates
+ */
 pub fn cast_may_lose(src: checker::PrimKind, dst: checker::PrimKind) -> bool {
-    let ss = cg_prim_is_signed_int(src)
-    let ds = cg_prim_is_signed_int(dst)
-    let sw = cg_int_width(src)
-    let dw = cg_int_width(dst)
-    if ss == ds { return sw > dw }   // same signedness: only true narrowing loses
-    if !ss && ds { return sw >= dw }   // u->i: dest loses one bit of magnitude at equal width
-    true   // i->u: negatives never fit
+    !checker::cast_is_lossless_widen(src, dst)
 }
 
 // ---------------------------------------------------------------------------

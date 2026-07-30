@@ -652,3 +652,69 @@ Feature: bulk byte-append — `teko::mem::append_fo` lowers to the runtime's own
   Scenario: append_fo_interleaved_buffers (own-native — two alternating builder chains, each against its own oracle)
     When built and run
     Then exit = 42
+Feature: no cast truncates — a narrowing `to` whose value does not fit its destination PANICS on both routes (0.3.1 aridade numérica, owner ruling 2026-07-29)
+
+  # Owner, literal (2026-07-29): *"Uma rule para cast (implícito ou explícito), não pode truncar, no
+  # caso de explícito de tipo maior que outro, deve ser feito em runtime (e panicar se overflow)."*
+  #
+  # `docs/design/cast-width-hygiene-0.3.1.md` §4.1 asserted this guard was already live "end-to-end".
+  # It was live on the C route ONLY: `emit_cast` routes a lossy int→int cast through the runtime's
+  # `tk_to_<dst>_<carrier>`, which calls `tk_panic_cast`. The NATIVE route had no equivalent — it
+  # emitted a bare `Trunc`, and `Trunc` selects a 32-BIT move on both isels. Measured before the fix,
+  # native route, each a silent wrong answer where the C route already panicked or already kept the
+  # value:
+  #
+  #   u64 300  to u8   → 300          (a `u8` holding a number no `u8` represents)
+  #   i64 2^40 to i32  → 0            (real overflow, silent)
+  #   i64 2^40 to u64  → 0            (equal widths still picked `Trunc`)
+  #   i64 -5   to i8   → 4294967291   (the 32-bit move zero-extends where the sign had to live)
+  #   i64 -1   to u32  → 4294967295   (a negative accepted by an unsigned destination)
+  #
+  # These three rows pin the PANIC side; the FIT side (an in-range narrow keeping its exact value,
+  # and a widen still costing no guard) is pinned by value inside this channel's own build
+  # (`f_cast_narrow_in_range_keeps_value`, `f_cast_narrow_negative_keeps_sign`,
+  # `f_cast_same_width_sign_change_keeps_value`, `f_cast_widen_keeps_value`). They need their OWN
+  # files because a panic aborts the process and would take every later assertion with it.
+  #
+  # `Then it traps` + `stderr pattern` rather than an exit code, for the reason `TK_PANIC_MARKER`
+  # itself records: an abort's status is synthesised from the wait status by whoever ran the child,
+  # so no number distinguishes "the guard fired" from "the program crashed". The pattern names WHICH
+  # guard killed it and that the program chose to.
+  Scenario: cast_narrow_panics_u64_to_u8 (own-native — 300 does not fit a u8)
+    Given source = "cases/cast_narrow_panics_u64_to_u8.tks"
+    When built and run
+    Then it traps
+    And stderr pattern = "teko: deliberate panic: impossible conversion"
+
+  Scenario: cast_narrow_panics_u64_to_u8 (C route — the route that was already right)
+    Given source = "cases/cast_narrow_panics_u64_to_u8.tks"
+    Given env = ["TEKO_BACKEND=c"]
+    When built and run
+    Then it traps
+    And stderr pattern = "teko: deliberate panic: impossible conversion"
+
+  Scenario: cast_narrow_panics_i64_to_i32 (own-native — 2^40 does not fit an i32)
+    Given source = "cases/cast_narrow_panics_i64_to_i32.tks"
+    When built and run
+    Then it traps
+    And stderr pattern = "teko: deliberate panic: impossible conversion"
+
+  Scenario: cast_narrow_panics_i64_to_i32 (C route)
+    Given source = "cases/cast_narrow_panics_i64_to_i32.tks"
+    Given env = ["TEKO_BACKEND=c"]
+    When built and run
+    Then it traps
+    And stderr pattern = "teko: deliberate panic: impossible conversion"
+
+  Scenario: cast_narrow_panics_negative_to_unsigned (own-native — a negative never fits an unsigned destination)
+    Given source = "cases/cast_narrow_panics_negative_to_unsigned.tks"
+    When built and run
+    Then it traps
+    And stderr pattern = "teko: deliberate panic: impossible conversion"
+
+  Scenario: cast_narrow_panics_negative_to_unsigned (C route)
+    Given source = "cases/cast_narrow_panics_negative_to_unsigned.tks"
+    Given env = ["TEKO_BACKEND=c"]
+    When built and run
+    Then it traps
+    And stderr pattern = "teko: deliberate panic: impossible conversion"

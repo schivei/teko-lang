@@ -3454,3 +3454,174 @@ fn f_append_fo_interleaved_buffers() -> i64 {
     if str_of_bytes(b) != str_of_bytes(d26_push_run(fresh_b, "bbb", rounds)) { return 4 }
     0
 }
+
+/**
+ * CastWidenHolder — a struct with one wide integer field, the target `f_implicit_widen_targets`
+ * writes a NARROWER value into. The implicit-widening rung had to be added to the field-assignment
+ * ladder as well as the plain-local one (`coerce_value_into` is now the single ladder both use), and
+ * a struct field is the shape that proves the field path took it.
+ */
+type CastWidenHolder = struct {
+    /** The wide slot a narrower value widens into with no `to` written. */
+    wide: i64
+}
+
+/**
+ * cast_widen_consumer — a function whose parameter is WIDER than the argument its caller passes, so
+ * the implicit widening has to reach the argument site too, not only assignments and bindings.
+ *
+ * @param v  the wide parameter a narrower argument widens into
+ * @return   `v` unchanged
+ */
+fn cast_widen_consumer(v: i64) -> i64 { v }
+
+/**
+ * f_cast_narrow_in_range_keeps_value — the FIT side of the narrowing guard (0.3.1 aridade numérica):
+ * a `to` whose operand lands inside the destination's own range must answer with that exact value.
+ *
+ * Measured wrong before the guard landed, on the native route only: `300 to u8` answered **300** — a
+ * `u8` holding a number no `u8` represents, because the native backend lowered every narrowing `to`
+ * to a bare `Trunc` and `Trunc` selects a 32-BIT move, which never reaches the 8-bit width. The
+ * in-range values here are the other half of that proof: the guard must not have replaced a wrong
+ * answer with a panic on values that were always fine.
+ *
+ * @return 0 when every in-range narrow keeps its value, else the number of the failing check
+ */
+fn f_cast_narrow_in_range_keeps_value() -> i64 {
+    mut a: u64 = 44
+    if (a to u8) != 44 to u8 { return 1 }
+    a = 255
+    if (a to u8) != 255 to u8 { return 2 }
+    mut b: u64 = 65535
+    if (b to u16) != 65535 to u16 { return 3 }
+    mut c: i64 = 2147483647
+    if (c to i32) != 2147483647 to i32 { return 4 }
+    0
+}
+
+/**
+ * f_cast_narrow_negative_keeps_sign — a SIGNED narrowing whose value fits must keep its SIGN.
+ *
+ * Measured wrong before the guard landed, native route only: `-5 to i32` answered **4294967291** and
+ * `-5 to i8` the same, because the 32-bit move `Trunc` selected zero-extends the low half where the
+ * sign had to survive. Now the conversion carries no width instruction at all — a value that fits
+ * both types already has one shared 64-bit two's-complement pattern — so the sign cannot be lost.
+ *
+ * @return 0 when every in-range signed narrow keeps its value and sign, else the failing check
+ */
+fn f_cast_narrow_negative_keeps_sign() -> i64 {
+    mut a: i64 = -5
+    if (a to i32) != -5 to i32 { return 1 }
+    if (a to i16) != -5 to i16 { return 2 }
+    if (a to i8) != -5 to i8 { return 3 }
+    mut b: i64 = -2147483648
+    if (b to i32) != -2147483648 to i32 { return 4 }
+    0
+}
+
+/**
+ * f_cast_same_width_sign_change_keeps_value — an EQUAL-WIDTH `to` across the sign boundary
+ * (`i64` → `u64`) on a value both types represent.
+ *
+ * Measured wrong before the guard landed, native route only: `2^40 to u64` from an `i64` answered
+ * **0**. Equal widths are not a widen, so the old lowering still picked `Trunc`, and the 32-bit move
+ * erased the whole top half of a value that needed no conversion whatsoever.
+ *
+ * @return 0 when the equal-width conversion is the identity it must be, else the failing check
+ */
+fn f_cast_same_width_sign_change_keeps_value() -> i64 {
+    mut a: i64 = 1099511627776
+    if (a to u64) != 1099511627776 to u64 { return 1 }
+    mut b: u64 = 1099511627776
+    if (b to i64) != 1099511627776 { return 2 }
+    mut c: i64 = 0
+    if (c to u64) != 0 to u64 { return 3 }
+    0
+}
+
+/**
+ * f_cast_widen_keeps_value — the widening `to`, which never needed a guard and must not have gained
+ * one: the guard is skipped exactly when `checker::cast_is_lossless_widen` says the destination holds
+ * every source value, so a widen still costs no compare and no branch.
+ *
+ * @return 0 when every widening `to` keeps its value, else the number of the failing check
+ */
+fn f_cast_widen_keeps_value() -> i64 {
+    mut a: u8 = 200 to u8
+    let wide_unsigned: u64 = a to u64
+    if wide_unsigned != 200 to u64 { return 1 }
+    mut b: i32 = -5 to i32
+    let wide_signed: i64 = b to i64
+    if wide_signed != -5 { return 2 }
+    mut c: u32 = 4294967295 to u32
+    let wide_peer: i64 = c to i64
+    if wide_peer != 4294967295 { return 3 }
+    0
+}
+
+/**
+ * f_implicit_widen_owner_snippet — the owner's own program, verbatim in shape (owner 2026-07-29):
+ * an `i32` flows into an `i64` through a compound `+=`, a compound `*=`, and a plain `=`, with no
+ * `to` written anywhere. All three were REJECTED before this ("assigned value does not match the
+ * target type") while `b + a` — the same two widths, one regime over — already compiled.
+ *
+ * @return 0 when all three forms compile and compute the stated values, else the failing check
+ */
+fn f_implicit_widen_owner_snippet() -> i64 {
+    mut a: i32 = 1000
+    mut b: i64 = 1
+    b += a
+    if b != 1001 { return 1 }
+    b = 3
+    b *= a
+    if b != 3000 { return 2 }
+    b = a
+    if b != 1000 { return 3 }
+    0
+}
+
+/**
+ * f_implicit_widen_boundary_values — the implicit widening at each source type's EXTREME, where a
+ * lost bit would be visible: `u32::MAX` into both `u64` and `i64` (the W-RULE's mixed-sign peer case
+ * — lossless only because the signed side is strictly wider), and `i32::MIN` into `i64`.
+ *
+ * @return 0 when every boundary value survives the implicit widening, else the failing check
+ */
+fn f_implicit_widen_boundary_values() -> i64 {
+    mut a: u32 = 4294967295 to u32
+    mut wide: u64 = 0 to u64
+    wide = a
+    if wide != 4294967295 to u64 { return 1 }
+    mut signed_wide: i64 = 0
+    signed_wide = a
+    if signed_wide != 4294967295 { return 2 }
+    mut b: i32 = -2147483648 to i32
+    signed_wide = b
+    if signed_wide != -2147483648 { return 3 }
+    mut c: u8 = 255 to u8
+    wide = c
+    if wide != 255 to u64 { return 4 }
+    0
+}
+
+/**
+ * f_implicit_widen_targets — the implicit widening at every target site the ladder now serves: an
+ * annotated `let`, a struct FIELD assignment, a slice ELEMENT assignment, and a call ARGUMENT. The
+ * rungs used to be open-coded per site, so a rung added to one was a rung missing from the others;
+ * this pins that they all took it.
+ *
+ * @return 0 when each target site widens the narrower value, else the number of the failing check
+ */
+fn f_implicit_widen_targets() -> i64 {
+    mut n: i32 = 7
+    let bound: i64 = n
+    if bound != 7 { return 1 }
+    mut h = CastWidenHolder { wide = 0 }
+    h.wide = n
+    if h.wide != 7 { return 2 }
+    mut xs: []i64 = teko::list::push(teko::list::empty(), 0)
+    xs[0] = n
+    if xs[0] != 7 { return 3 }
+    if cast_widen_consumer(n) != 7 { return 4 }
+    0
+}
