@@ -2712,3 +2712,95 @@ de duas encarnacoes por plataforma.
 `prune_platform`; a validacao de vocabulario fechado para `#arch` **e** `#os`; e do lado dos
 regressivos o `Given platforms` com a guarda do "nao-aplicavel em toda a matriz". As tres inversoes
 de §21.2, §21.3 e §21.4 entram com ele.
+
+---
+
+## 22. O caso que motivava o `#arch` era um teste mal escrito — e isso torna a §21 melhor
+
+**A proposta fica de pe.** O dono pediu o `#arch`, o `#os` existe e esta orfao, e a peca vale por si.
+O que muda e a resposta a pergunta 3: **deixa de ser principio e passa a ser exemplo trabalhado**, e
+e o melhor que este documento vai ter — um **falso positivo perfeito**.
+
+### 22.1 O que era, medido
+
+`xat_sysv_call_args_keep_independent_per_file_counting` parecia falhar em macOS-arm64, linux-arm64 e
+windows-x86_64 e passar em linux-x86_64. **Nada disso era sobre a plataforma:**
+
+* o texto esperado, `"fmov.d %pf0, %0"`, era uma **quimera** — mnemonica do ramo FPR com a grafia do
+  ramo GPR. `reg_ref_x86` marca o ficheiro em **qualquer** operando FPR e `pin_reg_args_x86` constroi
+  destino e origem da **mesma** decisao, logo **nenhuma seleccao pode emitir aquele texto**, em
+  hospedeiro nenhum. O certo e `fmov.d %pf0, %f0` — e esta agora na arvore
+  (`isel_x86_64_test.tkt:226,895,918`);
+* a primeira asserçao dos **dois** testes era byte-identica, logo um vermelho com o gemeo verde e
+  impossivel em qualquer hospedeiro;
+* eles caem em **shards diferentes** (3 e 4), e **pre-C0** o `SIGABRT` levava o resto do shard:
+  **quantos chegavam a ser IMPRESSOS era escalonamento** — macOS 2, arm64 e windows 1, linux-x86_64
+  **zero**;
+* com o C0 dentro, linux-x86_64 relata **1146 corridos, 1144 passados, os DOIS vermelhos**.
+
+**A perna que eu li como verde relatava um facto sobre o RELATORIO, nunca sobre a semantica.**
+
+**E a conclusao que interessa: se o `#arch` existisse ontem, alguem o teria posto nestes dois, e o
+defeito ficava enterrado com ar de plataforma** — em tres plataformas, com selo de qualidade. O
+conserto foram **4 literais de string e zero linhas de `.tks`**, e a inversao da 2/1146 vermelhos → 0.
+
+### 22.2 A pre-condicao, e ela e ordenacao e nao conselho
+
+> **`#arch` (e `#os`, e o `Given platforms` de §21.3) so sao admissiveis sobre uma suite que NAO
+> ABORTA.**
+
+Uma suite que aborta ao primeiro vermelho nao relata semantica: relata **ate onde chegou**. Um filtro
+por plataforma assente nesse relatorio esconde precisamente aquilo que nao se consegue medir — e este
+caso e a prova, porque a diferenca entre pernas era **escalonamento** e leu-se como plataforma.
+
+**Correccao ao meu proprio §21.6, que dizia que isto nao tocava em crumb nenhum: toca. O crumb do
+`#arch` DEPENDE do C0**, e a dependencia e desta natureza — sem o C0, o instrumento que decidiria se
+um `#arch` e justificado esta cego. Ordem: **C0 antes de `#arch`, sempre.**
+
+### 22.3 Que evidencia justifica um `#arch` — tres provas, todas baratas, todas falsificaveis
+
+*"Falha noutro hospedeiro"* **nao chega**, e este caso e a razao: foi exactamente o que ele parecia.
+Um autor que queira `#arch` apresenta **as tres**, e a terceira e verificavel por maquina.
+
+**E1 — A falha sobrevive ao relatorio.** As duas suites correram **ate ao fim** (C0), e a diferenca
+persiste com contagens completas dos dois lados. Uma diferenca observada sobre uma suite que abortou e
+uma diferenca de **escalonamento**. *Este caso morre aqui:* com contagem completa, linux-x86_64 e
+vermelho como os outros.
+
+**E2 — A expectativa e alcancavel.** O autor nomeia a **linha** que produz o valor esperado no
+hospedeiro onde passa. Nao uma crenca: um sitio. *Este caso morre aqui tambem:* nenhum caminho emite
+`%pf0, %0`. Uma quimera e inalcancavel em **todo** o lado e so **parece** dependente do hospedeiro
+quando o relatorio esta truncado.
+
+**E3 — A divergencia esta no codigo sob teste, nao na entrada do teste.** O autor nomeia a **leitura
+do hospedeiro** — que chamada consulta `teko::os()`, `teko::arch()`, `TEKO_TARGET` ou um alvo por
+omissao. **Se nao houver leitura, nao ha dependencia de arquitectura, e acabou.**
+
+**E o E3 e mecanico, o que o torna guarda em vez de ritual.** Varri o corpus `.tkt` inteiro por
+`host_default_target` / `host_target_for_os` / `TEKO_TARGET`: **4 ficheiros, todos em `src/build/`,
+nenhum em `src/backend/`.** Um teste de seleccao constroi um `lir::LFunc` **sintetico** — a entrada e
+independente do hospedeiro por construcao, logo um resultado dependente do hospedeiro **e impossivel**
+a menos que o codigo sob teste leia o hospedeiro. Ele nao le.
+
+> **A guarda: `#arch`/`#os` num `#test` de um modulo que NAO LE o hospedeiro e recusado
+> automaticamente.** Nao ha julgamento humano no caminho — a pergunta e "este modulo consulta a
+> plataforma?", e a resposta e um `grep` que ja corri.
+
+*Prova:* um `#arch` plantado num `#test` de `src/backend/` faz a guarda **falhar** nomeando o teste ·
+**vivacidade**: o mesmo `#arch` num `#test` de `src/build/` (que le o hospedeiro) **passa** para a via
+das excepcoes, com E1 e E2 por apresentar. Se a guarda recusasse os dois, era cega — e ja tivemos tres
+dessas.
+
+### 22.4 O que este caso me ensinou sobre a proposta
+
+A §21.4 dizia que `#arch` responde *"este codigo EXISTE aqui?"* e nunca *"comporta-se de outra maneira
+aqui?"*. **Mantem-se, e agora tem um caso a sustenta-la em vez de so uma frase.** O acrescento e mais
+duro do que o principio: **a evidencia que um autor traz para pedir um `#arch` e, quase sempre, a
+mesma evidencia que um teste partido produz.** Por isso a admissao nao pode assentar no sintoma
+(*"falha ali"*) — tem de assentar em E2 (o caminho existe) e E3 (a leitura existe), que um teste
+partido **nao consegue apresentar**.
+
+E deixo o dado a descoberto, porque e ele que fecha o arco: **este defeito so foi diagnosticavel
+porque o C0 entrou.** O mecanismo que eu desenhei para nao perder o veredicto de uma corrida foi o que
+tornou visivel um defeito que tres pernas relatavam como plataforma. **A captura nao paga so a
+fiabilidade do relatorio — paga a capacidade de distinguir um defeito de um hospedeiro.**
