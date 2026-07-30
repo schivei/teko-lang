@@ -95,8 +95,8 @@ fn xat_dump(f: lir::LFunc) -> str {
  * xat_kitchen_sink — a two-param (I64,I64) function exercising every integer
  * `LBinOp` arithmetic/bitwise/shift/compare case plus every integer `LUnOp`
  * case (the coverage sweep for `select_bin_x86`/`select_un_x86`'s integer
- * dispatch), ending `ret`. The float cases stop and are covered by direct
- * unit calls (`xat_float_bin_honest_stops`/`xat_float_un_honest_stops`).
+ * dispatch), ending `ret`. The float family has its own sweep,
+ * `xat_float_kitchen_sink` (`B1-fp`, closed 2026-07-29).
  *
  * @return lir::LFunc  the built function
  */
@@ -168,7 +168,7 @@ fn xat_kitchen_sink_covers_every_int_bin_and_un_op() {
 /**
  * xat_one_param_func — a single-parameter function of machine class `ty` (its
  * own return type too), its param read via `LParam` and returned directly — the
- * coverage sweep for `select_param_x86`'s GPR path and its float stop.
+ * coverage sweep for `select_param_x86`'s per-register-file receipt.
  *
  * @param lir::LType ty  the parameter's (and return's) machine class
  * @return lir::LFunc  the built function
@@ -191,15 +191,39 @@ fn xat_select_succeeds(f: lir::LFunc) -> bool {
 }
 
 #test
-fn xat_param_covers_scalar_gpr_classes_and_float_stops() {
+/**
+ * xat_param_covers_every_scalar_class — every scalar `LType` a parameter can
+ * carry now selects: the GPR widths through `MMovX86` out of the SysV integer
+ * argument register, and `F32`/`F64` through `MFMovX86` out of XMM0 (`B1-fp`,
+ * closed 2026-07-29 — both float classes used to be the float honest-stop).
+ *
+ * @return void
+ */
+fn xat_param_covers_every_scalar_class() {
     teko::assert::is_true(xat_select_succeeds(xat_one_param_func(lir::LType::I8)))
     teko::assert::is_true(xat_select_succeeds(xat_one_param_func(lir::LType::I16)))
     teko::assert::is_true(xat_select_succeeds(xat_one_param_func(lir::LType::I32)))
     teko::assert::is_true(xat_select_succeeds(xat_one_param_func(lir::LType::I64)))
     teko::assert::is_true(xat_select_succeeds(xat_one_param_func(lir::LType::Ptr)))
     teko::assert::is_true(xat_select_succeeds(xat_one_param_func(lir::LType::Void)))
-    teko::assert::is_true(!xat_select_succeeds(xat_one_param_func(lir::LType::F32)))
-    teko::assert::is_true(!xat_select_succeeds(xat_one_param_func(lir::LType::F64)))
+    teko::assert::is_true(xat_select_succeeds(xat_one_param_func(lir::LType::F32)))
+    teko::assert::is_true(xat_select_succeeds(xat_one_param_func(lir::LType::F64)))
+}
+
+#test
+/**
+ * xat_float_param_lands_in_xmm0_and_returns_in_xmm0 — an f64 parameter is
+ * received by an `MFMovX86` out of XMM0 (the SysV first float argument register)
+ * and returned by an `MFMovX86` into XMM0 (the float result register), the two
+ * ends of `B1-fp`'s ABI plumbing. Asserts the printed FPR operand spelling, so a
+ * regression that quietly re-routed either end through a GPR `mov` fails here.
+ *
+ * @return void
+ */
+fn xat_float_param_lands_in_xmm0_and_returns_in_xmm0() {
+    let text = xat_dump(xat_one_param_func(lir::LType::F64))
+    teko::assert::str_contains(text, "fmov.d %f0, %pf0")
+    teko::assert::str_contains(text, "fmov.d %pf0, %f0")
 }
 
 #test
@@ -246,15 +270,45 @@ fn xat_load_ty_succeeds(ty: lir::LType) -> bool {
 }
 
 #test
+/**
+ * xat_mem_size_covers_every_transfer_class — every real machine class a load can
+ * name selects, integer AND float (`B1-fp`, closed 2026-07-29 — `F32`/`F64` used
+ * to be the float honest-stop); only `Void`, which names no transfer width at
+ * all, is still rejected as malformed.
+ *
+ * @return void
+ */
 fn xat_mem_size_covers_every_transfer_class() {
     teko::assert::is_true(xat_load_ty_succeeds(lir::LType::I8))
     teko::assert::is_true(xat_load_ty_succeeds(lir::LType::I16))
     teko::assert::is_true(xat_load_ty_succeeds(lir::LType::I32))
     teko::assert::is_true(xat_load_ty_succeeds(lir::LType::I64))
     teko::assert::is_true(xat_load_ty_succeeds(lir::LType::Ptr))
-    teko::assert::is_true(!xat_load_ty_succeeds(lir::LType::F32))
-    teko::assert::is_true(!xat_load_ty_succeeds(lir::LType::F64))
+    teko::assert::is_true(xat_load_ty_succeeds(lir::LType::F32))
+    teko::assert::is_true(xat_load_ty_succeeds(lir::LType::F64))
     teko::assert::is_true(!xat_load_ty_succeeds(lir::LType::Void))
+}
+
+#test
+/**
+ * xat_float_load_store_are_scalar_sse_moves — an f64 load and an f64 store name
+ * the `f64` transfer width and carry FPR-file operands (`B1-fp`), so the printed
+ * form is the scalar SSE move over an XMM register rather than an integer `mov.q`
+ * over a GPR.
+ *
+ * @return void
+ */
+fn xat_float_load_store_are_scalar_sse_moves() {
+    let f0 = lir::new_func("main", 0, teko::list::empty(), lir::LType::F64)
+    let base = lir::alloc_vreg(f0)
+    let ld = lir::alloc_vreg(base.func)
+    let s0 = lir::append_inst(ld.func, 0, lir::alloca_inst(base.vreg, 8, 8, 0, 0))
+    let s1 = lir::append_inst(s0, 0, lir::load_inst(ld.vreg, base.vreg, lir::LType::F64, 0, 0))
+    let s2 = lir::append_inst(s1, 0, lir::store_inst(base.vreg, ld.vreg, lir::LType::F64, 0, 0))
+    let s3 = lir::append_inst(s2, 0, lir::ret_inst(ld.vreg, 0, 0))
+    let text = xat_dump(s3)
+    teko::assert::str_contains(text, "mov.f64 %f1, [%0 + 0]")
+    teko::assert::str_contains(text, "mov.f64 [%0 + 0], %f1")
 }
 
 #test

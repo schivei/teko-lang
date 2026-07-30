@@ -35,7 +35,7 @@ const SHIFT_COUNT_REG_X86: MReg = preg(1, MRegClass::GPR)
 
 /**
  * inst_regs_x86 — decompose one `MInstX86` into its def/use registers, the x86
- * mirror of the neutral `inst_regs` over the 19-case `MInstX86` variant
+ * mirror of the neutral `inst_regs` over the 27-case `MInstX86` variant
  * (`minst_x86.tks:490`). Feeds the SAME register-abstract interval/scan core the
  * arm64 walk feeds, so the def/use table is the single source of truth both
  * `compute_intervals_x86` and `rewrite_inst_x86` read. Three x86-specific shapes
@@ -84,6 +84,14 @@ fn inst_regs_x86(inst: MInstX86) -> InstRegs {
         MCallX86 as x => ir_call(x.ret_reg, x.has_result, x.uses)
         MCallIndX86 as x => ir_call(x.ret_reg, x.has_result, cons_reg(x.target, x.uses))
         MRetX86 => ir_none()
+        MFAluX86 as x => ir_def_use(x.dst, two_regs(x.dst, x.src))
+        MFMovX86 as x => ir_def_use(x.dst, one_reg(x.src))
+        MFCmpX86 as x => ir_use(two_regs(x.a, x.b))
+        MSetPX86 as x => ir_def(x.dst)
+        MCvtX86 as x => ir_def_use(x.dst, one_reg(x.src))
+        MOutArgX86 as x => ir_use(one_reg(x.src))
+        MInArgX86 as x => ir_def(x.dst)
+        MFSpillX86 as x => if x.is_load { ir_def(x.reg) } else { ir_use(one_reg(x.reg)) }
     }
 }
 
@@ -521,7 +529,7 @@ fn compute_intervals_x86(stream: []NumberedInstX86, order: []u32, reachable: []u
 
 /**
  * map_minst_x86 — a copy of `inst` with every `MReg` field replaced through
- * `table` (a flat per-case reconstruction over the 19-case variant, mirroring
+ * `table` (a flat per-case reconstruction over the 27-case variant, mirroring
  * `inst_regs_x86`'s dispatch, and the neutral `map_minst_regs`). `MCallX86`/
  * `MCallIndX86` map their `uses` element-wise, their `ret_reg`, and (indirect)
  * their `target`. This is the single point the x86 machine-IR's register-field
@@ -554,6 +562,14 @@ fn map_minst_x86(inst: MInstX86, table: []SubstEntry) -> MInstX86 {
         MCallX86 as x => call_x86(x.sym, map_regs_list(x.uses, table), subst_find(table, x.ret_reg), x.has_result, x.variadic)
         MCallIndX86 as x => call_ind_x86(subst_find(table, x.target), map_regs_list(x.uses, table), subst_find(table, x.ret_reg), x.has_result)
         MRetX86 => ret_x86()
+        MFAluX86 as x => falu_x86(x.op, subst_find(table, x.dst), subst_find(table, x.src), x.dbl)
+        MFMovX86 as x => fmov_x86(subst_find(table, x.dst), subst_find(table, x.src), x.dbl)
+        MFCmpX86 as x => fcmp_x86(subst_find(table, x.a), subst_find(table, x.b), x.dbl)
+        MSetPX86 as x => setp_x86(subst_find(table, x.dst), x.is_np)
+        MCvtX86 as x => cvt_x86(x.op, subst_find(table, x.dst), subst_find(table, x.src))
+        MOutArgX86 as x => out_arg_x86(x.size, subst_find(table, x.src), x.index)
+        MInArgX86 as x => in_arg_x86(x.size, subst_find(table, x.dst), x.index)
+        MFSpillX86 as x => fspill_x86(subst_find(table, x.reg), x.slot, x.is_load)
     }
 }
 
@@ -605,6 +621,38 @@ fn emit_gpr_reload_x86(sv: MReg, slot: u64) -> []MInstX86 {
 }
 
 /**
+ * emit_spill_reload_x86 — the reload sequence for one spilled value into scratch
+ * `sv`, by `sv`'s register file: the two-instruction GPR pair
+ * (`emit_gpr_reload_x86`) or the single-instruction FPR `movsd`
+ * (`MFSpillX86`, which needs no address scratch — see its own doc for why the GPR
+ * pair cannot be reused for a float).
+ *
+ * @param MReg sv  the scratch to reload into (its `reg_class` picks the form)
+ * @param u64 slot  the absolute frame slot
+ * @return []MInstX86  the reload sequence
+ */
+fn emit_spill_reload_x86(sv: MReg, slot: u64) -> []MInstX86 {
+    if sv.reg_class == MRegClass::FPR { return minst_x86_single(fspill_x86(sv, slot, true)) }
+    emit_gpr_reload_x86(sv, slot)
+}
+
+/**
+ * emit_spill_store_x86 — the spill-store sequence for the value already in
+ * scratch `dsv`, by `dsv`'s register file: the two-instruction GPR pair
+ * (`emit_gpr_store_x86`, which needs the distinct address scratch `asv`) or the
+ * single-instruction FPR `movsd` (`MFSpillX86`, which ignores `asv`).
+ *
+ * @param MReg dsv  the scratch holding the value (its `reg_class` picks the form)
+ * @param MReg asv  a distinct GPR scratch for the GPR path's slot address
+ * @param u64 slot  the absolute frame slot
+ * @return []MInstX86  the store sequence
+ */
+fn emit_spill_store_x86(dsv: MReg, asv: MReg, slot: u64) -> []MInstX86 {
+    if dsv.reg_class == MRegClass::FPR { return minst_x86_single(fspill_x86(dsv, slot, false)) }
+    emit_gpr_store_x86(dsv, asv, slot)
+}
+
+/**
  * emit_gpr_store_x86 — the two-instruction GPR spill store of the value already
  * in `dsv`: compute the slot address into a distinct scratch `asv`, then store
  * `dsv`'s qword to `[asv]`. The x86 mirror of the neutral `emit_gpr_store`, over
@@ -649,9 +697,10 @@ type UseAccX86 = struct {
  * add_use_subst_x86 — the substitution table extended for one instruction
  * operand use `u`: a physical pin or an already-mapped id is left as-is; an
  * `InReg` use maps to its color; a `Spilled` GPR use draws the next reload
- * scratch, whose reload is appended. FPR spills are ruled out upstream
- * (`detect_fpr_spill_x86`), so the scratch is always GPR. The x86 mirror of the
- * neutral `add_use_subst`; reuses `subst_has`/`assign_lookup`/`spill_scratch`.
+ * scratch OF ITS OWN REGISTER FILE, whose reload is appended (`B1-fp`: an FPR
+ * spill draws an FPR scratch and reloads with one `movsd`, an integer one keeps
+ * the GPR `lea`+`mov` pair). The x86 mirror of the neutral `add_use_subst`;
+ * reuses `subst_has`/`assign_lookup`/`spill_scratch`.
  *
  * @param AbiDescriptor abi  the register file (for spill scratch)
  * @param ScanResult sr  the allocation
@@ -666,8 +715,8 @@ fn add_use_subst_x86(abi: AbiDescriptor, sr: ScanResult, u: MReg, frame_base: u6
     let la = assign_lookup(sr, u.id)
     if !la.found { return acc }
     if la.is_spill {
-        let sv = spill_scratch(abi, MRegClass::GPR, acc.nth)
-        let reloads2 = minst_x86_cat(acc.reloads, emit_gpr_reload_x86(sv, frame_base + la.slot))
+        let sv = spill_scratch(abi, u.reg_class, acc.nth)
+        let reloads2 = minst_x86_cat(acc.reloads, emit_spill_reload_x86(sv, frame_base + la.slot))
         let table2 = teko::list::push(acc.table, SubstEntry { vid = u.id; to = sv })
         return UseAccX86 { table = table2; reloads = reloads2; nth = acc.nth + 1 }
     }
@@ -679,8 +728,8 @@ fn add_use_subst_x86(abi: AbiDescriptor, sr: ScanResult, u: MReg, frame_base: u6
  * rewrite_inst_x86 — expand one instruction into its final physical sequence:
  * the reloads for its spilled uses, the register-substituted instruction, and
  * the store for a spilled def. Non-spilled operands map to their `InReg`
- * physreg; physical pins pass through. Assumes GPR-only spills (guaranteed by
- * `regalloc_func_x86`'s `detect_fpr_spill_x86` pre-check). The x86 mirror of the
+ * physreg; physical pins pass through. Spills of BOTH register files lower here
+ * (`B1-fp`), each drawing a scratch of its own class. The x86 mirror of the
  * neutral `rewrite_inst`.
  *
  * @param AbiDescriptor abi  the register file (for spill scratch)
@@ -706,12 +755,12 @@ fn rewrite_inst_x86(abi: AbiDescriptor, sr: ScanResult, inst: MInstX86, frame_ba
             let la = assign_lookup(sr, d.id)
             if la.found {
                 if la.is_spill {
-                    let dsv = spill_scratch(abi, MRegClass::GPR, 0 to u32)
+                    let dsv = spill_scratch(abi, d.reg_class, 0 to u32)
                     let asv = spill_scratch(abi, MRegClass::GPR, 1 to u32)
                     if !subst_has(table, d.id) {
                         table = teko::list::push(table, SubstEntry { vid = d.id; to = dsv })
                     }
-                    stores = emit_gpr_store_x86(dsv, asv, frame_base + la.slot)
+                    stores = emit_spill_store_x86(dsv, asv, frame_base + la.slot)
                 } else {
                     if !subst_has(table, d.id) {
                         table = teko::list::push(table, SubstEntry { vid = d.id; to = preg(la.phys, d.reg_class) })
@@ -806,55 +855,6 @@ pub fn all_physical_x86(f: MFuncX86) -> bool {
 }
 
 /**
- * inst_has_fpr_spill_x86 — whether any operand of `inst` is an FPR spill. The
- * x86 mirror of the neutral `inst_has_fpr_spill`, driven by `inst_regs_x86`;
- * reuses the register-abstract `reg_is_fpr_spill`.
- *
- * @param ScanResult sr  the allocation
- * @param MInstX86 inst  the instruction to scan
- * @return bool  true iff an FPR spill operand is present
- */
-fn inst_has_fpr_spill_x86(sr: ScanResult, inst: MInstX86) -> bool {
-    let ir = inst_regs_x86(inst)
-    if ir.has_def {
-        if reg_is_fpr_spill(sr, ir.def_reg) { return true }
-    }
-    mut i: u64 = 0
-    loop {
-        if i >= ir.uses.len { break }
-        if reg_is_fpr_spill(sr, ir.uses[i]) { return true }
-        i++
-    }
-    false
-}
-
-/**
- * detect_fpr_spill_x86 — whether allocating `f` under `sr` spills any FPR value.
- * B1 lowers GPR spills only (like A3); an FPR spill is a NAMED honest-stop
- * (`regalloc_func_x86` returns an error), inherited from A3's `A3-fpr-spill`.
- * The x86 mirror of the neutral `detect_fpr_spill`.
- *
- * @param ScanResult sr  the allocation
- * @param MFuncX86 f  the function
- * @return bool  true iff any FPR value is spilled
- */
-fn detect_fpr_spill_x86(sr: ScanResult, f: MFuncX86) -> bool {
-    mut bi: u64 = 0
-    loop {
-        if bi >= f.blocks.len { break }
-        let b = f.blocks[bi]
-        mut ii: u64 = 0
-        loop {
-            if ii >= b.insts.len { break }
-            if inst_has_fpr_spill_x86(sr, b.insts[ii]) { return true }
-            ii++
-        }
-        bi++
-    }
-    false
-}
-
-/**
  * regalloc_func_x86 — allocate one x86 function end-to-end: RPO-order, number,
  * compute intervals, scan (the SHARED `linear_scan`), rewrite. A real `loop`
  * back-edge now ALLOCATES (§6.2 LANDED, #389 F2): `compute_intervals_x86` widens
@@ -868,7 +868,7 @@ fn detect_fpr_spill_x86(sr: ScanResult, f: MFuncX86) -> bool {
  *
  * @param AbiDescriptor abi  the register file (`SYSV64`)
  * @param MFuncX86 f  the selected function (virtual MRegs + SysV pins)
- * @return MFuncX86 | error  the fully-colored function, or a named honest-stop
+ * @return MFuncX86 | error  the fully-colored function, or a propagated interval error
  */
 pub fn regalloc_func_x86(abi: AbiDescriptor, f: MFuncX86) -> MFuncX86 | error {
     let order = rpo_block_order_x86(f)
@@ -878,9 +878,6 @@ pub fn regalloc_func_x86(abi: AbiDescriptor, f: MFuncX86) -> MFuncX86 | error {
         error as e => return e
     }
     let sr = linear_scan(abi, ivals)
-    if detect_fpr_spill_x86(sr, f) {
-        return error { message = "regalloc x86-64: FPR-value spill not yet supported (B1 lowers GPR spills only; the inherited A3-fpr-spill deferral)" }
-    }
     rewrite_func_x86(abi, f, sr)
 }
 

@@ -24,15 +24,43 @@ pub type MAluOpX86 = enum { Add; Sub; And; Or; Xor }
 pub type MShiftOpX86 = enum { Shl; Shr; Sar }
 
 /**
- * MMemSizeX86 — the access width an `MLoadX86`/`MStoreX86` transfers, in
- * x86-64 integer-width naming: `B` (byte, 8-bit), `W` (word, 16-bit), `D`
- * (doubleword, 32-bit), `Q` (quadword, 64-bit). The SSE single/double float
- * widths are the `B1-fp` honest-stop (0.3.1) — they enter the enum with the
- * float memory ops, not here.
+ * MFAluOpX86 — the closed set of x86-64 scalar SSE float ALU operations
+ * `MFAluX86` selects: `FAdd`/`FSub`/`FMul`/`FDiv` (ADDSD/SUBSD/MULSD/DIVSD for
+ * the `dbl` f64 form, ADDSS/SUBSS/MULSS/DIVSS for the f32 form), one per
+ * `LBinOp` float-arithmetic case — the arm64 `MFAluOp` mirror (`B1-fp`,
+ * closed 2026-07-29).
  *
- * @since #386 B1-2
+ * @since #386 B1-fp
  */
-pub type MMemSizeX86 = enum { B; W; D; Q }
+pub type MFAluOpX86 = enum { FAdd; FSub; FMul; FDiv }
+
+/**
+ * MCvtOpX86 — the closed set of x86-64 int/float conversion mnemonics
+ * `MCvtX86` selects: `Cvtsi2sd` (signed GPR -> f64, `LUnOp::IToF` — always the
+ * wide/f64 form, since the lowering decomposes an `int to f32` cast into
+ * `IToF`+`FToF` rather than asking for a narrow convert), `Cvttsd2si`/
+ * `Cvttss2si` (f64/f32 -> signed GPR, truncating, `LUnOp::FToI`, picked by the
+ * OPERAND's recorded width), and `Cvtsd2ss`/`Cvtss2sd` (the two directions of
+ * `LUnOp::FToF`, likewise picked by the operand's width — sound because the
+ * lowering never emits an identity `FToF`, so the two widths always differ).
+ *
+ * @since #386 B1-fp
+ */
+pub type MCvtOpX86 = enum { Cvtsi2sd; Cvttsd2si; Cvttss2si; Cvtsd2ss; Cvtss2sd }
+
+/**
+ * MMemSizeX86 — the access width an `MLoadX86`/`MStoreX86` transfers: the
+ * GPR/pointer integer widths `B` (byte, 8-bit), `W` (word, 16-bit), `D`
+ * (doubleword, 32-bit), `Q` (quadword, 64-bit), plus the SSE scalar float
+ * widths `F32`/`F64` (MOVSS/MOVSD) closed alongside the rest of the float
+ * family (`B1-fp`, 2026-07-29) — the arm64 `MMemSize` mirror, spelled `F32`/
+ * `F64` rather than reusing the letters `S`/`D` (already `X86_REG_RSP_ID`-
+ * adjacent and, for `D`, already the 32-bit INTEGER width here) so no reader
+ * has to disambiguate "D means doubleword" from "D means double" case by case.
+ *
+ * @since #386 B1-2, B1-fp
+ */
+pub type MMemSizeX86 = enum { B; W; D; Q; F32; F64 }
 
 /**
  * RelocKindX86 — which x86-64 ELF relocation an address-materialization or
@@ -352,6 +380,99 @@ pub type MStoreX86 = struct {
 }
 
 /**
+ * MFSpillX86 — spill an FPR value to, or reload it from, its frame slot in ONE
+ * instruction: `movsd [rsp + slot_offsets[slot]], xmm` and the load direction, the
+ * offset resolved once the frame layout is known.
+ *
+ * It exists because the GPR spill PAIR cannot be reused for a float. That pair is
+ * `lea addr, [frame slot]` + `mov value, [addr]`, and for a GPR the SAME scratch
+ * carries the address and then the value; a float needs an FPR for the value and a
+ * GPR for the address at the same time, and both x86-64 ABIs reserve exactly two
+ * GPR spill scratches — which one instruction with two spilled integer uses
+ * already consumes. Resolving the offset in the encoder, as `MFrameAddrX86`
+ * already does for the address form, removes the address register from the problem
+ * entirely (and emits one instruction where the GPR path emits two).
+ *
+ * Always the 8-byte `MOVSD` width, for `f32` and `f64` alike: the transfer is a
+ * BIT-PRESERVING save/restore of whatever the register holds, never an arithmetic
+ * conversion, and a spill slot is 8 bytes wide either way.
+ *
+ * @since #386 B1-fp
+ */
+pub type MFSpillX86 = struct {
+    /**
+     * reg — the FPR whose value is saved, or which the value is reloaded into.
+     */
+    reg: MReg
+    /**
+     * slot — the absolute frame-slot index of the spill slot.
+     */
+    slot: u64
+    /**
+     * is_load — true for the reload (memory -> register), false for the spill
+     * store (register -> memory).
+     */
+    is_load: bool
+}
+
+/**
+ * MOutArgX86 — store one OUTGOING call argument into the caller-owned stack-arg
+ * area (`mov [rsp + out_arg_base + 8*index], src`, resolved once the frame
+ * layout is known), the selection of an argument past its class's
+ * argument-register window (`B1-args`). Both x86-64 ABIs place such an argument
+ * at a fixed offset from the caller's RSP AT THE CALL — SysV from RSP itself,
+ * Win64 from just above the 32-byte shadow area — so the offset is a frame
+ * concern the machine IR carries only as an INDEX, exactly as `MFrameAddrX86`
+ * carries a slot index rather than a resolved displacement.
+ *
+ * @since #386 B1-args
+ */
+pub type MOutArgX86 = struct {
+    /**
+     * size — the transfer width of the stored argument (its own recorded
+     * machine width, matching what the register path would have moved).
+     */
+    size: MMemSizeX86
+    /**
+     * src — the register holding the argument value.
+     */
+    src: MReg
+    /**
+     * index — the argument's position in the stack-arg area, counting only the
+     * arguments that overflowed a register window (0 is the first such).
+     */
+    index: u32
+}
+
+/**
+ * MInArgX86 — load one INCOMING parameter out of the caller-owned stack-arg
+ * area (`mov dst, [rsp + in_arg_base + 8*index]`, resolved once the frame layout
+ * is known), the selection of an `LParam` past its class's argument-register
+ * window (`B1-args`). Addressed from RSP rather than RBP on purpose: the
+ * displacement the frame layout resolves already accounts for the return
+ * address, the saved RBP, the callee-saved pushes and the `sub rsp` region, so a
+ * function receiving stack parameters needs no frame pointer and is NOT forced
+ * to become framed.
+ *
+ * @since #386 B1-args
+ */
+pub type MInArgX86 = struct {
+    /**
+     * size — the transfer width of the loaded parameter.
+     */
+    size: MMemSizeX86
+    /**
+     * dst — the destination register the parameter is written to.
+     */
+    dst: MReg
+    /**
+     * index — the parameter's position in the stack-arg area, counting only the
+     * parameters that overflowed a register window (0 is the first such).
+     */
+    index: u32
+}
+
+/**
  * MFrameAddrX86 — the abstract address of a reserved frame slot
  * (`lea dst, [rsp+off]`, resolved once B1 finalizes the frame layout), the
  * selection of `LAlloca`. The base-RSP `lea` always emits a SIB byte at
@@ -480,15 +601,149 @@ pub type MCallIndX86 = struct {
 pub type MRetX86 = struct { }
 
 /**
+ * MFAluX86 — a two-address scalar SSE float ALU op: `dst = dst <op> src`
+ * (ADDSD/SUBSD/MULSD/DIVSD, or the `SS` single-precision forms when `!dbl`),
+ * the selection of a float `LBin` arithmetic case (`B1-fp`). Destructive like
+ * every x86 RMW form: a preceding `MFMovX86` seeds `dst` with the left operand
+ * (mirrors `MAluRmX86`'s integer two-address shape, §4.2).
+ *
+ * @since #386 B1-fp
+ */
+pub type MFAluX86 = struct {
+    /**
+     * op — which float ALU mnemonic to emit.
+     */
+    op: MFAluOpX86
+    /**
+     * dst — the destination register, read and written (the two-address tie).
+     */
+    dst: MReg
+    /**
+     * src — the second source register operand.
+     */
+    src: MReg
+    /**
+     * dbl — true for the f64 (`SD`) form, false for the f32 (`SS`) form.
+     */
+    dbl: bool
+}
+
+/**
+ * MFMovX86 — a register-register move whose operands' OWN `reg_class` fields
+ * pick the concrete form: FPR-to-FPR is MOVSD/MOVSS (a scalar float copy,
+ * `dbl` selects double/single); GPR-to-FPR or FPR-to-GPR is MOVQ/MOVD (a raw
+ * bit-pattern crossing, `dbl` selects the 64-/32-bit transfer) — the selection
+ * of `LConstFloat`'s GPR-staged materialization, a parameter/return/edge-move
+ * float value, and the bit-extract/bit-rebuild halves of `select_fneg_x86`'s
+ * sign-bit flip. One case for both directions, mirroring how arm64's `FMOV`
+ * mnemonic itself spans both register files (`fmov_inst`, `isel_arm64.tks`).
+ *
+ * @since #386 B1-fp
+ */
+pub type MFMovX86 = struct {
+    /**
+     * dst — the destination register (its `reg_class` picks the form).
+     */
+    dst: MReg
+    /**
+     * src — the source register (its `reg_class` picks the form).
+     */
+    src: MReg
+    /**
+     * dbl — true for the 64-bit (MOVSD/MOVQ) form, false for the 32-bit
+     * (MOVSS/MOVD) form.
+     */
+    dbl: bool
+}
+
+/**
+ * MFCmpX86 — a scalar SSE float compare (UCOMISD/UCOMISS) setting flags from
+ * `a <=> b`, the selection of a float `LBin` compare — both the plain-VALUE
+ * case (`select_fcmp_value_x86`, followed by `MSetccX86`/`MSetPX86`) and the
+ * branch-fused case (`select_fused_branch_x86`). The unordered (NaN) result
+ * sets CF=PF=ZF=1, which is why every `<`/`<=`/`>`/`>=` selection swaps `a`/
+ * `b` to land on the CF-based `HI`/`HS` condition (`B1-fp`, mirrors arm64's
+ * `MFCmp`).
+ *
+ * @since #386 B1-fp
+ */
+pub type MFCmpX86 = struct {
+    /**
+     * a — the first compared register operand (ModRM.reg field).
+     */
+    a: MReg
+    /**
+     * b — the second compared register operand (ModRM.rm field).
+     */
+    b: MReg
+    /**
+     * dbl — true for the f64 (UCOMISD) form, false for the f32 (UCOMISS) form.
+     */
+    dbl: bool
+}
+
+/**
+ * MSetPX86 — `dst = (parity) ? 1 : 0` (`SETP`/`SETNP` then `movzx`), reading
+ * the PARITY flag a preceding `MFCmpX86` set (1 iff the compared operands are
+ * UNORDERED — either is NaN). The x86-only second half of the ordered-equal /
+ * unordered-not-equal composite `select_fcmp_value_x86` builds for
+ * `FCmpEq`/`FCmpNe` (an `MSetccX86::EQ`/`NE` alone would wrongly call a NaN
+ * compare "equal", since UCOMISD also sets ZF on the unordered result) — kept
+ * OUT of the shared `MCond` (which `cond_cc_x86`/arm64's own condition mapper
+ * both match exhaustively) so this x86-only parity concern never forces an
+ * unrelated arm64 file to grow a dead match arm.
+ *
+ * @since #386 B1-fp
+ */
+pub type MSetPX86 = struct {
+    /**
+     * dst — the destination register the 0/1 result is written to.
+     */
+    dst: MReg
+    /**
+     * is_np — true for `SETNP` (ordered: parity CLEAR), false for `SETP`
+     * (unordered: parity SET).
+     */
+    is_np: bool
+}
+
+/**
+ * MCvtX86 — an int/float conversion (CVTSI2SD/CVTTSD2SI/CVTSD2SS/CVTSS2SD),
+ * the selection of `IToF`/`FToI`/`FToF` (`B1-fp`, mirrors arm64's `MCvt`).
+ *
+ * @since #386 B1-fp
+ */
+pub type MCvtX86 = struct {
+    /**
+     * op — which conversion mnemonic to emit (fixes both operands' register
+     * files: `Cvtsi2sd` reads GPR/writes FPR, `Cvttsd2si` reads FPR/writes
+     * GPR, `Cvtsd2ss`/`Cvtss2sd` read and write FPR).
+     */
+    op: MCvtOpX86
+    /**
+     * dst — the destination register.
+     */
+    dst: MReg
+    /**
+     * src — the source register.
+     */
+    src: MReg
+}
+
+/**
  * MInstX86 — the x86-64 machine-instruction payload: one of the SysV-keyed
  * cases above. An `MInstX86` carries virtual registers (the shared regalloc
  * colors them) and physical-register pins (the SysV ABI); it holds no encoded
- * bytes. The SSE float family (float ALU/compare/convert/negate) is the
- * `B1-fp` honest-stop (0.3.1) and enters this variant then, not now (§4.1).
+ * bytes. The SSE float family (`MFAluX86`/`MFMovX86`/`MFCmpX86`/`MSetPX86`/
+ * `MCvtX86`) closed the `B1-fp` honest-stop (2026-07-29), mirroring arm64's
+ * float cases over the parallel two-address x86 shape (§4.1/§4.2), and
+ * `MOutArgX86`/`MInArgX86` closed `B1-args`, the stack half of both ABIs'
+ * argument passing, while `MFSpillX86` closed the inherited FPR-spill deferral
+ * the float family made reachable.
  *
- * @since #386 B1-2
+ * @since #386 B1-2, B1-fp, B1-args
  */
-pub type MInstX86 = variant MMovImmX86 | MMovX86 | MAluRmX86 | MImulX86 | MDivSeqX86 | MShiftX86 | MCmpX86 | MSetccX86 | MJccX86 | MNegX86 | MNotX86 | MLoadX86 | MStoreX86 | MFrameAddrX86 | MLeaRipX86 | MJmpX86 | MCallX86 | MCallIndX86 | MRetX86
+pub type MInstX86 = variant MMovImmX86 | MMovX86 | MAluRmX86 | MImulX86 | MDivSeqX86 | MShiftX86 | MCmpX86 | MSetccX86 | MJccX86 | MNegX86 | MNotX86 | MLoadX86 | MStoreX86 | MFrameAddrX86 | MLeaRipX86 | MJmpX86 | MCallX86 | MCallIndX86 | MRetX86 | MFAluX86 | MFMovX86 | MFCmpX86 | MSetPX86 | MCvtX86 | MOutArgX86 | MInArgX86 | MFSpillX86
 
 /**
  * MBlockX86 — an x86-64 machine basic block: its id, its block-args (the
@@ -701,6 +956,69 @@ pub fn not_x86(dst: MReg, wide: bool) -> MInstX86 {
 }
 
 /**
+ * falu_x86 — a two-address float `dst = dst <op> src` instruction (MFAluX86).
+ *
+ * @param MFAluOpX86 op  which float ALU mnemonic to emit
+ * @param MReg dst  the destination register (read and written)
+ * @param MReg src  the second source register
+ * @param bool dbl  true for the f64 form, false for the f32 form
+ * @return MInstX86  the built instruction
+ */
+pub fn falu_x86(op: MFAluOpX86, dst: MReg, src: MReg, dbl: bool) -> MInstX86 {
+    MFAluX86 { op = op; dst = dst; src = src; dbl = dbl }
+}
+
+/**
+ * fmov_x86 — a `dst = src` move whose operands' register files pick MOVSD/
+ * MOVSS (FPR-FPR) or MOVQ/MOVD (crossing GPR/FPR) instruction (MFMovX86).
+ *
+ * @param MReg dst  the destination register
+ * @param MReg src  the source register
+ * @param bool dbl  true for the 64-bit form, false for the 32-bit form
+ * @return MInstX86  the built instruction
+ */
+pub fn fmov_x86(dst: MReg, src: MReg, dbl: bool) -> MInstX86 {
+    MFMovX86 { dst = dst; src = src; dbl = dbl }
+}
+
+/**
+ * fcmp_x86 — a scalar float compare instruction (MFCmpX86), setting the flags
+ * from `a <=> b` with no destination register.
+ *
+ * @param MReg a  the first compared register
+ * @param MReg b  the second compared register
+ * @param bool dbl  true for the f64 form, false for the f32 form
+ * @return MInstX86  the built instruction
+ */
+pub fn fcmp_x86(a: MReg, b: MReg, dbl: bool) -> MInstX86 {
+    MFCmpX86 { a = a; b = b; dbl = dbl }
+}
+
+/**
+ * setp_x86 — a `dst = (parity) ? 1 : 0` instruction (MSetPX86), materializing
+ * a preceding `MFCmpX86`'s PARITY flag as a plain value.
+ *
+ * @param MReg dst  the destination register
+ * @param bool is_np  true for `SETNP` (ordered), false for `SETP` (unordered)
+ * @return MInstX86  the built instruction
+ */
+pub fn setp_x86(dst: MReg, is_np: bool) -> MInstX86 {
+    MSetPX86 { dst = dst; is_np = is_np }
+}
+
+/**
+ * cvt_x86 — an int/float conversion instruction (MCvtX86).
+ *
+ * @param MCvtOpX86 op  which conversion mnemonic to emit
+ * @param MReg dst  the destination register
+ * @param MReg src  the source register
+ * @return MInstX86  the built instruction
+ */
+pub fn cvt_x86(op: MCvtOpX86, dst: MReg, src: MReg) -> MInstX86 {
+    MCvtX86 { op = op; dst = dst; src = src }
+}
+
+/**
  * load_x86 — a memory-load instruction (MLoadX86).
  *
  * @param MMemSizeX86 size  the access width
@@ -723,6 +1041,42 @@ pub fn load_x86(size: MMemSizeX86, sign: bool, dst: MReg, mem: MMem) -> MInstX86
  */
 pub fn store_x86(size: MMemSizeX86, src: MReg, mem: MMem) -> MInstX86 {
     MStoreX86 { size = size; src = src; mem = mem }
+}
+
+/**
+ * fspill_x86 — an FPR spill store / reload instruction (MFSpillX86).
+ *
+ * @param MReg reg  the FPR saved or reloaded
+ * @param u64 slot  the absolute frame-slot index of the spill slot
+ * @param bool is_load  true for the reload, false for the spill store
+ * @return MInstX86  the built instruction
+ */
+pub fn fspill_x86(reg: MReg, slot: u64, is_load: bool) -> MInstX86 {
+    MFSpillX86 { reg = reg; slot = slot; is_load = is_load }
+}
+
+/**
+ * out_arg_x86 — an outgoing stack-argument store instruction (MOutArgX86).
+ *
+ * @param MMemSizeX86 size  the transfer width of the stored argument
+ * @param MReg src  the register holding the argument value
+ * @param u32 index  the argument's position in the stack-arg area
+ * @return MInstX86  the built instruction
+ */
+pub fn out_arg_x86(size: MMemSizeX86, src: MReg, index: u32) -> MInstX86 {
+    MOutArgX86 { size = size; src = src; index = index }
+}
+
+/**
+ * in_arg_x86 — an incoming stack-parameter load instruction (MInArgX86).
+ *
+ * @param MMemSizeX86 size  the transfer width of the loaded parameter
+ * @param MReg dst  the destination register
+ * @param u32 index  the parameter's position in the stack-arg area
+ * @return MInstX86  the built instruction
+ */
+pub fn in_arg_x86(size: MMemSizeX86, dst: MReg, index: u32) -> MInstX86 {
+    MInArgX86 { size = size; dst = dst; index = index }
 }
 
 /**
@@ -950,14 +1304,30 @@ fn wide_suffix_x86(wide: bool) -> str {
 }
 
 /**
- * reg_ref_x86 — a register operand's printer text: `%N` for a virtual
- * register, `%pN` for a physical one.
+ * reg_class_sigil_x86 — the register-file marker a printed operand carries after
+ * its `%`/`%p` prefix: `"f"` for the FPR (XMM) file, empty for the GPR file
+ * (`B1-fp`). XMM ids share the GPR numbering space, so without this marker a
+ * dumped `fmov.d %p0, %p0` could mean RAX or XMM0 and a test could not tell a
+ * float move from an integer one. The GPR side stays unmarked so every
+ * pre-existing integer golden reads byte-identically.
+ *
+ * @param MRegClass c  the register's class
+ * @return str  the class marker, or the empty string for a GPR
+ */
+fn reg_class_sigil_x86(c: MRegClass) -> str {
+    if c == MRegClass::FPR { "f" } else { "" }
+}
+
+/**
+ * reg_ref_x86 — a register operand's printer text: `%N` for a virtual GPR, `%pN`
+ * for a physical one, each gaining the `f` file marker (`%fN`/`%pfN`) when the
+ * operand lives in the FPR (XMM) file.
  *
  * @param MReg r  the register to render
  * @return str  the operand text
  */
 fn reg_ref_x86(r: MReg) -> str {
-    let num = teko::u64_to_str(r.id to u64)
+    let num = teko::str::concat(reg_class_sigil_x86(r.reg_class), teko::u64_to_str(r.id to u64))
     if r.is_phys { teko::str::concat("%p", num) } else { teko::str::concat("%", num) }
 }
 
@@ -1014,10 +1384,41 @@ fn shift_op_name_x86(op: MShiftOpX86) -> str {
  * mem_size_name_x86 — the printer suffix for an `MMemSizeX86`.
  *
  * @param MMemSizeX86 s  the access width to name
- * @return str  its lowercase letter (b/w/d/q)
+ * @return str  its lowercase letter (b/w/d/q) or float name (f32/f64)
  */
 fn mem_size_name_x86(s: MMemSizeX86) -> str {
-    match s { B => "b"; W => "w"; D => "d"; Q => "q" }
+    match s { B => "b"; W => "w"; D => "d"; Q => "q"; F32 => "f32"; F64 => "f64" }
+}
+
+/**
+ * falu_op_name_x86 — the printer mnemonic for an `MFAluOpX86`.
+ *
+ * @param MFAluOpX86 op  the operation to name
+ * @return str  its lowercase mnemonic
+ */
+fn falu_op_name_x86(op: MFAluOpX86) -> str {
+    match op { FAdd => "fadd"; FSub => "fsub"; FMul => "fmul"; FDiv => "fdiv" }
+}
+
+/**
+ * cvt_op_name_x86 — the printer mnemonic for an `MCvtOpX86`.
+ *
+ * @param MCvtOpX86 op  the operation to name
+ * @return str  its lowercase mnemonic
+ */
+fn cvt_op_name_x86(op: MCvtOpX86) -> str {
+    match op { Cvtsi2sd => "cvtsi2sd"; Cvttsd2si => "cvttsd2si"; Cvttss2si => "cvttss2si"; Cvtsd2ss => "cvtsd2ss"; Cvtss2sd => "cvtss2sd" }
+}
+
+/**
+ * fdbl_suffix_x86 — the printer suffix for a float `dbl` flag: `"d"` for the
+ * f64 (double) form, `"s"` for the f32 (single) form.
+ *
+ * @param bool dbl  the flag to render
+ * @return str  the float-width suffix
+ */
+fn fdbl_suffix_x86(dbl: bool) -> str {
+    if dbl { "d" } else { "s" }
 }
 
 /**
@@ -1174,6 +1575,57 @@ fn print_not_x86(i: MNotX86) -> str {
 }
 
 /**
+ * print_falu_x86 — `<op>.<w> dst, src` (the two-address float RMW form).
+ *
+ * @param MFAluX86 i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_falu_x86(i: MFAluX86) -> str {
+    teko::str::concat(falu_op_name_x86(i.op), ".", fdbl_suffix_x86(i.dbl), " ", reg_ref_x86(i.dst), ", ", reg_ref_x86(i.src))
+}
+
+/**
+ * print_fmov_x86 — `fmov.<w> dst, src`.
+ *
+ * @param MFMovX86 i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_fmov_x86(i: MFMovX86) -> str {
+    teko::str::concat("fmov.", fdbl_suffix_x86(i.dbl), " ", reg_ref_x86(i.dst), ", ", reg_ref_x86(i.src))
+}
+
+/**
+ * print_fcmp_x86 — `ucomis.<w> a, b`.
+ *
+ * @param MFCmpX86 i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_fcmp_x86(i: MFCmpX86) -> str {
+    teko::str::concat("ucomis.", fdbl_suffix_x86(i.dbl), " ", reg_ref_x86(i.a), ", ", reg_ref_x86(i.b))
+}
+
+/**
+ * print_setp_x86 — `setp dst` / `setnp dst`.
+ *
+ * @param MSetPX86 i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_setp_x86(i: MSetPX86) -> str {
+    let mnemonic = if i.is_np { "setnp" } else { "setp" }
+    teko::str::concat(mnemonic, " ", reg_ref_x86(i.dst))
+}
+
+/**
+ * print_cvt_x86 — `<op> dst, src`.
+ *
+ * @param MCvtX86 i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_cvt_x86(i: MCvtX86) -> str {
+    teko::str::concat(cvt_op_name_x86(i.op), " ", reg_ref_x86(i.dst), ", ", reg_ref_x86(i.src))
+}
+
+/**
  * print_load_x86 — `<mov|movsx>.<size> dst, [mem]` (the `movsx` marks a
  * sign-extending narrow load).
  *
@@ -1193,6 +1645,38 @@ fn print_load_x86(i: MLoadX86) -> str {
  */
 fn print_store_x86(i: MStoreX86) -> str {
     teko::str::concat("mov.", mem_size_name_x86(i.size), " ", mem_ref_x86(i.mem), ", ", reg_ref_x86(i.src))
+}
+
+/**
+ * print_fspill_x86 — `movsd %fN, [spill #slot]` / `movsd [spill #slot], %fN`.
+ *
+ * @param MFSpillX86 i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_fspill_x86(i: MFSpillX86) -> str {
+    let slot = teko::str::concat("[spill #", teko::u64_to_str(i.slot), "]")
+    if i.is_load { return teko::str::concat("movsd ", reg_ref_x86(i.reg), ", ", slot) }
+    teko::str::concat("movsd ", slot, ", ", reg_ref_x86(i.reg))
+}
+
+/**
+ * print_out_arg_x86 — `mov.<size> [outarg #index], src`.
+ *
+ * @param MOutArgX86 i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_out_arg_x86(i: MOutArgX86) -> str {
+    teko::str::concat("mov.", mem_size_name_x86(i.size), " [outarg #", teko::u64_to_str(i.index to u64), "], ", reg_ref_x86(i.src))
+}
+
+/**
+ * print_in_arg_x86 — `mov.<size> dst, [inarg #index]`.
+ *
+ * @param MInArgX86 i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_in_arg_x86(i: MInArgX86) -> str {
+    teko::str::concat("mov.", mem_size_name_x86(i.size), " ", reg_ref_x86(i.dst), ", [inarg #", teko::u64_to_str(i.index to u64), "]")
 }
 
 /**
@@ -1291,6 +1775,14 @@ fn print_minst_x86(i: MInstX86) -> str {
         MCallX86 as x => print_call_x86(x)
         MCallIndX86 as x => print_call_ind_x86(x)
         MRetX86 as x => print_ret_x86(x)
+        MFAluX86 as x => print_falu_x86(x)
+        MFMovX86 as x => print_fmov_x86(x)
+        MFCmpX86 as x => print_fcmp_x86(x)
+        MSetPX86 as x => print_setp_x86(x)
+        MCvtX86 as x => print_cvt_x86(x)
+        MOutArgX86 as x => print_out_arg_x86(x)
+        MInArgX86 as x => print_in_arg_x86(x)
+        MFSpillX86 as x => print_fspill_x86(x)
     }
 }
 
