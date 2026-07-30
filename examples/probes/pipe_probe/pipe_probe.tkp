@@ -1,0 +1,45 @@
+# The pipe BOTTOM probe (cargo/0.3.1.0-fundacao-f5-pipe).
+#
+# Proves the runtime primitives this change adds (src/runtime/teko_rt.{c,h}: tk_rt_pipe,
+# tk_rt_pipe_read_fd, tk_rt_pipe_write_fd, tk_rt_close_fd, tk_rt_fd_wait_readable, tk_rt_fd_read,
+# tk_rt_fd_read_failed, and tk_rt_spawn_redirected's three DESCRIPTOR slots) actually LOWER through
+# a Teko `extern fn` and behave as documented, end to end — the same standing, and the same reason
+# for existing, as examples/probes/spawn_redirected_probe beside it.
+#
+# THE TWO INVERSIONS, EACH WITH BOTH HALVES AND EACH WITH A DEADLINE:
+#
+#   * WRITE -> READ. Connected, the child's stdout reaches the parent (exit 10/11 on failure);
+#     DISCONNECTED, the very same child's output does not (exit 12). Without the negative half the
+#     positive one proves nothing — a reader that happened to observe the child's inherited stdout
+#     by some other route would pass it.
+#
+#   * END-OF-FILE. With the parent's copy of the write end CLOSED, the read end sees EOF and the
+#     drain terminates (exit 13/14); with that copy still OPEN, it does NOT — the wait expires
+#     instead (exit 15), which is the classic defect of pipes made visible. The deadline is what
+#     makes that case a RESULT and not a hang: a read that blocks forever does not go red, it
+#     pends, and a suite that pends never reports at all.
+#
+# THE PATH ROUTE IS ASSERTED HERE TOO (exit 17/18), because the whole corpus depends on it and the
+# descriptor tokens were appended to the payload precisely so it could not change.
+#
+# BINDS THE RUNTIME SYMBOLS DIRECTLY, not `teko::process`: an external standalone project has no
+# visibility into that module's plain (non-extern) Teko wrapper functions — only a LOCAL `extern fn`
+# declaration reaches a runtime symbol from outside the compiler's own project. Same pattern, same
+# paragraph, as spawn_redirected_probe's own manifest.
+#
+# C ROUTE ONLY, AND THAT IS A PRE-EXISTING BACKEND GAP, NOT A PROPERTY OF THESE PRIMITIVES.
+# `fd_read` is a `str`-returning `extern fn`, and the native backend cannot lower one: its `LCall`
+# captures exactly ONE result register, where a `str` is a two-word fat pointer. MEASURED, with none
+# of this change's code in the picture: a throwaway project binding the UNTOUCHED, pre-existing
+# `tk_rt_os` as `extern fn host_os() -> str` returns 42 through `TEKO_BACKEND=c` and exits 1 on the
+# own backend, because the received `str` arrives with `len == 0`. Built on the own backend this
+# probe panics `out of memory (str concat)` for the same reason — a garbage length reaching `~`.
+# The fix lives in `src/backend/`, which this change does not touch.
+#
+#   TK_RT_DIR=<repo>/src/runtime TEKO_BACKEND=c teko build examples/probes/pipe_probe
+#   ./examples/probes/pipe_probe/bin/pipe_probe      # -> 42
+name = "pipe_probe"
+source = "src"
+
+[artifact]
+kind = "binary"

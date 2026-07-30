@@ -1,0 +1,177 @@
+/**
+ * The runtime symbol `pipe` wraps — see `src/process/process.tks` for the maintained, typed
+ * surface. Bound directly here (not through `teko::process`) because an external standalone project
+ * has no visibility into that module's plain Teko wrapper functions; only a LOCAL `extern fn`
+ * declaration, pointed at the SAME `teko_rt` symbol, reaches a runtime primitive from outside the
+ * compiler's own project — the same pattern `examples/probes/spawn_redirected_probe` uses.
+ *
+ * Both descriptors come back PACKED into one `i64` (the read end in the low 32 bits, the write end
+ * in the high 32): one register, because a pipe is created atomically and two calls could not
+ * return the two ends of the same pipe.
+ *
+ * @return the packed descriptor pair, or a negative value when the host refused
+ */
+pub extern fn pipe_raw() -> i64 = "tk_rt_pipe" from "teko_rt"
+
+/**
+ * The read end of a `pipe_raw` packing.
+ *
+ * @param packed  what `pipe_raw` returned
+ * @return        the reading descriptor, or a negative value when `packed` held no pipe
+ */
+pub extern fn pipe_read_fd(packed: i64) -> i64 = "tk_rt_pipe_read_fd" from "teko_rt"
+
+/**
+ * The write end of a `pipe_raw` packing.
+ *
+ * @param packed  what `pipe_raw` returned
+ * @return        the writing descriptor, or a negative value when `packed` held no pipe
+ */
+pub extern fn pipe_write_fd(packed: i64) -> i64 = "tk_rt_pipe_write_fd" from "teko_rt"
+
+/**
+ * Close one descriptor. THE CALL THAT TURNS A HANG INTO AN END-OF-FILE: while this process still
+ * holds a copy of a pipe's write end, the pipe has a writer and the read end never reaches EOF.
+ *
+ * @param fd  the descriptor to close
+ * @return    0 on success, a negative value on failure
+ */
+pub extern fn close_fd(fd: i64) -> i32 = "tk_rt_close_fd" from "teko_rt"
+
+/**
+ * Block until reading `fd` would not block, or until `timeout_ms` elapses: 1 ready (data OR
+ * end-of-file), 0 the deadline expired, -1 the descriptor could not be observed.
+ *
+ * @param fd          the descriptor to watch
+ * @param timeout_ms  the deadline in milliseconds
+ * @return            1 / 0 / -1
+ */
+pub extern fn fd_wait_readable(fd: i64, timeout_ms: i64) -> i32 = "tk_rt_fd_wait_readable" from "teko_rt"
+
+/**
+ * Read at most `cap` bytes from `fd`. An EMPTY result is end-of-file OR a failure; `fd_read_failed`
+ * tells them apart.
+ *
+ * @param fd   the descriptor to read
+ * @param cap  the most bytes to ask for
+ * @return     what one read yielded
+ */
+pub extern fn fd_read(fd: i64, cap: u64) -> str = "tk_rt_fd_read" from "teko_rt"
+
+/**
+ * Did the LAST `fd_read` fail, as opposed to reaching end-of-file?
+ *
+ * @return true iff the last read call itself failed
+ */
+pub extern fn fd_read_failed() -> bool = "tk_rt_fd_read_failed" from "teko_rt"
+
+/**
+ * The runtime symbol `spawn_redirected` wraps. `payload` is the self-describing flattening
+ * `src/process/process.tks`'s `spawn_payload` builds: `<argc>` NUL `argv[0]` … NUL `<envc>` NUL
+ * `env[0]` … NUL `dir` NUL `in_path` NUL `out_path` NUL `err_path` NUL `<in_fd>` NUL `<out_fd>` NUL
+ * `<err_fd>`.
+ *
+ * @param payload  the flattened spawn arguments
+ * @return         the opaque handle, or a negative value when no child ever started
+ */
+pub extern fn spawn_redirected_raw(payload: str) -> i64 = "tk_rt_spawn_redirected" from "teko_rt"
+
+/**
+ * Block until the child `raw` names exits, and return its status.
+ *
+ * @param raw  the handle `spawn_redirected_raw` returned
+ * @return     the child's exit status, or a negative value when `raw` named no real child
+ */
+pub extern fn wait_one_raw(raw: i64) -> i32 = "tk_rt_wait_one" from "teko_rt"
+
+/**
+ * Read a whole file back, so the PATH route can be asserted against what the child actually wrote.
+ *
+ * @param path  the file to read
+ * @return      its bytes, or the read failure
+ */
+pub extern fn read_file(path: str) -> str | error = "tk_rt_read_file" from "teko_rt"
+
+/**
+ * Delete a file, so the PATH-route assertions leave no scratch behind in the working directory.
+ *
+ * @param path  the file to delete
+ * @return      nothing on success, or the failure
+ */
+pub extern fn remove_file(path: str) -> error | null = "tk_rt_remove_file" from "teko_rt"
+
+/**
+ * The NUL byte every field of a `spawn_redirected_raw` payload joins on — see
+ * `src/process/process.tks`'s `TOKEN_SEP` for why NUL is safe as a universal separator here.
+ *
+ * @return the one-byte separator, as a `str`
+ */
+pub fn sep() -> str { "\0" }
+
+/**
+ * NO_FD — "this slot names no descriptor", spelled as the empty payload token.
+ *
+ * @return the empty descriptor token
+ */
+pub fn no_fd() -> str { "" }
+
+/**
+ * Fails loudly when a probe invariant does not hold, exiting with the invariant's own code — the
+ * same "one exit code per checked invariant" style `examples/probes/spawn_redirected_probe` uses.
+ *
+ * @param held  the invariant's truth value
+ * @param code  the exit code identifying this invariant, used only on failure
+ * @return      nothing
+ */
+pub fn demand(held: bool, code: i32) {
+    if held { return }
+    exit(code)
+}
+
+/**
+ * One `sh -c <script>` payload, with each of the three standard streams bound either to a
+ * DESCRIPTOR token or left empty, and stdout optionally backed by a PATH instead.
+ *
+ * `sh` unqualified and not `/bin/sh`: the absolute path is a claim about the host's directory
+ * layout, the bare name goes through the host's own executable lookup.
+ *
+ * @param script    the shell script the child runs
+ * @param out_path  the file backing the child's stdout ("" = none)
+ * @param in_fd     the descriptor token for stdin ("" = none)
+ * @param out_fd    the descriptor token for stdout ("" = none)
+ * @param err_fd    the descriptor token for stderr ("" = none)
+ * @return          the flattened payload
+ */
+pub fn shell_payload(script: str, out_path: str, in_fd: str, out_fd: str, err_fd: str) -> str {
+    let head = "3" ~ sep() ~ "sh" ~ sep() ~ "-c" ~ sep() ~ script
+    let mid = "0" ~ sep() ~ "" ~ sep() ~ "" ~ sep() ~ out_path ~ sep() ~ ""
+    let tail = in_fd ~ sep() ~ out_fd ~ sep() ~ err_fd
+    head ~ sep() ~ mid ~ sep() ~ tail
+}
+
+/**
+ * A descriptor as the payload spells it.
+ *
+ * @param fd  the descriptor
+ * @return    its decimal spelling
+ */
+pub fn fd_token(fd: i64) -> str { teko::str::i64_to_str(fd) }
+
+/**
+ * Drain `fd` until end-of-file, under a TOTAL deadline, returning "" when the deadline expired
+ * first — which is exactly the reading the WITHHELD-end-of-file inversion asserts on.
+ *
+ * @param fd           the reading end
+ * @param deadline_ms  the budget for one wait; the drain terminates on end-of-file
+ * @return             what the writer sent, or "" when no end-of-file arrived in time
+ */
+pub fn drain(fd: i64, deadline_ms: i64) -> str {
+    mut acc = ""
+    loop {
+        if fd_wait_readable(fd, deadline_ms) != 1 { return "" }
+        let chunk = fd_read(fd, 65536)
+        if chunk.len == 0 { return acc }
+        acc = acc ~ chunk
+    }
+    acc
+}
