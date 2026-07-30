@@ -12079,7 +12079,7 @@ fn append_param_ltypes(out: []LType, p: parser::Param, enums: []LEnumInfo, table
  */
 pub fn lower_program(prog: checker::TProgram, flat_symbols: bool = false) -> LModule | error {
     let table = checker::type_table_of(prog)
-    match fat_divergence_guard(prog, table) { error as e => return e; null => { } }
+    match fat_divergence_guard(prog, table, checker::type_table_rekeyed(table)) { error as e => return e; null => { } }
     let enums = collect_enums(prog)
     let layouts = match collect_struct_layouts(prog, enums, table) { []LStructLayout as ls => ls; error as e => return e }
     let externs = collect_externs(prog)
@@ -12138,19 +12138,32 @@ const FAT_DIVERGENCE_LIMIT: u64 = 20
  * a function carries `namespace` directly; a type declaration's `name` is CANONICAL, so
  * `checker::name_qualifier` recovers it.
  *
- * A NON-ANSWER IS NOT A DIVERGENCE. When the checker's resolver cannot resolve an annotation at all,
- * this guard stays silent instead of guessing which side is right: a generic type-PARAMETER (`T`) is
- * never registered as a type, and a still-unstamped generic instantiation resolves only after the
- * monomorph pass. Those are legitimately unresolvable here, and reporting them would make the guard
- * cry wolf on every generic in the tree.
+ * THE ORACLE IS THE RE-KEYED TABLE, and that detail is the difference between a guard and a
+ * decoration. The first version of this guard asked `resolve_type` against `checker::type_table_of`'s
+ * table directly and reported ZERO disagreements over the compiler's own 143 files — while the SAME
+ * build still stopped on `vt_table`, an annotation the two predicates provably disagreed about. It
+ * was BLIND, not lenient: that table is keyed CANONICALLY (`"teko::checker::TypeTable"` with an empty
+ * namespace) and `resolve_type`'s qualified arm matches a bare name against a real namespace, so it
+ * answered "cannot resolve" for every namespaced type in the tree and the guard read that as
+ * agreement. `checker::type_table_rekeyed` converts the table into the shape the resolver reads, and
+ * only then does the oracle answer. A guard has to be proven by inversion like anything else — a
+ * guard that cannot fail is not evidence.
  *
- * @param prog   the whole typed program
- * @param table  the program's type table (`checker::type_table_of`)
- * @return       `null` when every annotation agrees, else a NAMED error listing the disagreements
+ * A NON-ANSWER IS STILL NOT A DIVERGENCE. When the resolver cannot resolve an annotation even against
+ * the re-keyed table, this guard stays silent instead of guessing which side is right: a generic
+ * type-PARAMETER (`T`) is never registered as a type, and a still-unstamped generic instantiation
+ * resolves only after the monomorph pass. Those are legitimately unresolvable here, and reporting
+ * them would make the guard cry wolf on every generic in the tree.
+ *
+ * @param prog    the whole typed program
+ * @param table   the program's type table (`checker::type_table_of`) — what the SYNTACTIC predicate
+ *                is given, and therefore what it must be judged against
+ * @param rtable  the same table re-keyed for the checker's resolver (`checker::type_table_rekeyed`)
+ * @return        `null` when every annotation agrees, else a NAMED error listing the disagreements
  * @since 0.3.1.0 degrau 31 (the qualified-alias family, closed as a family)
  */
-fn fat_divergence_guard(prog: checker::TProgram, table: checker::TypeTable) -> null | error {
-    let found = fat_divergences(prog, table)
+fn fat_divergence_guard(prog: checker::TProgram, table: checker::TypeTable, rtable: checker::TypeTable) -> null | error {
+    let found = fat_divergences(prog, table, rtable)
     if found.len == 0 { return null }
     error { message = teko::str::concat("native backend N1: the syntactic fat-pointer predicate disagrees with the checker on ", teko::u64_to_str(found.len), " annotation(s) (internal) — ", fat_divergence_lines(found)) }
 }
@@ -12165,12 +12178,12 @@ fn fat_divergence_guard(prog: checker::TProgram, table: checker::TypeTable) -> n
  * @param table  the program's type table
  * @return       one line per disagreement, in program order (empty when they agree everywhere)
  */
-fn fat_divergences(prog: checker::TProgram, table: checker::TypeTable) -> []str {
+fn fat_divergences(prog: checker::TProgram, table: checker::TypeTable, rtable: checker::TypeTable) -> []str {
     mut out: []str = teko::list::empty()
     mut i: u64 = 0
     loop {
         if i >= prog.items.len { break }
-        out = fat_divergences_of_item(out, prog.items[i], table)
+        out = fat_divergences_of_item(out, prog.items[i], table, rtable)
         i++
     }
     out
@@ -12186,10 +12199,10 @@ fn fat_divergences(prog: checker::TProgram, table: checker::TypeTable) -> []str 
  * @param table  the program's type table
  * @return       `acc`, extended with `it`'s disagreements
  */
-fn fat_divergences_of_item(acc: []str, it: checker::TItem, table: checker::TypeTable) -> []str {
+fn fat_divergences_of_item(acc: []str, it: checker::TItem, table: checker::TypeTable, rtable: checker::TypeTable) -> []str {
     match it {
-        checker::TFunction as f => fat_divergences_of_params(acc, f, table)
-        parser::TypeDecl as td => fat_divergences_of_decl(acc, td, table)
+        checker::TFunction as f => fat_divergences_of_params(acc, f, table, rtable)
+        parser::TypeDecl as td => fat_divergences_of_decl(acc, td, table, rtable)
         _ => acc
     }
 }
@@ -12203,12 +12216,12 @@ fn fat_divergences_of_item(acc: []str, it: checker::TItem, table: checker::TypeT
  * @param table  the program's type table
  * @return       `acc`, extended with `f`'s disagreeing parameters
  */
-fn fat_divergences_of_params(acc: []str, f: checker::TFunction, table: checker::TypeTable) -> []str {
+fn fat_divergences_of_params(acc: []str, f: checker::TFunction, table: checker::TypeTable, rtable: checker::TypeTable) -> []str {
     mut out = acc
     mut i: u64 = 0
     loop {
         if i >= f.params.len { break }
-        out = fat_divergence_line_of(out, f.params[i].type_ann, table, f.namespace, "parameter", f.name, f.params[i].name)
+        out = fat_divergence_line_of(out, f.params[i].type_ann, table, rtable, f.namespace, "parameter", f.name, f.params[i].name)
         i++
     }
     out
@@ -12229,7 +12242,7 @@ fn fat_divergences_of_params(acc: []str, f: checker::TFunction, table: checker::
  * @param table  the program's type table
  * @return       `acc`, extended with `td`'s disagreeing fields
  */
-fn fat_divergences_of_decl(acc: []str, td: parser::TypeDecl, table: checker::TypeTable) -> []str {
+fn fat_divergences_of_decl(acc: []str, td: parser::TypeDecl, table: checker::TypeTable, rtable: checker::TypeTable) -> []str {
     let fields = match td.body {
         parser::StructBody as sb => sb.fields
         parser::ClassBody as cb => cb.fields
@@ -12240,7 +12253,7 @@ fn fat_divergences_of_decl(acc: []str, td: parser::TypeDecl, table: checker::Typ
     mut i: u64 = 0
     loop {
         if i >= fields.len { break }
-        out = fat_divergence_line_of(out, fields[i].type_ann, table, ns, "field", td.name, fields[i].name)
+        out = fat_divergence_line_of(out, fields[i].type_ann, table, rtable, ns, "field", td.name, fields[i].name)
         i++
     }
     out
@@ -12259,8 +12272,8 @@ fn fat_divergences_of_decl(acc: []str, td: parser::TypeDecl, table: checker::Typ
  * @param name   the parameter's or field's own name — for the diagnostic
  * @return       `acc`, extended when `te` disagrees
  */
-fn fat_divergence_line_of(acc: []str, te: parser::TypeExpr, table: checker::TypeTable, ns: str, place: str, owner: str, name: str) -> []str {
-    let truth = match checker::resolve_type(te, table, ns) { checker::Type as t => t; error => return acc }
+fn fat_divergence_line_of(acc: []str, te: parser::TypeExpr, table: checker::TypeTable, rtable: checker::TypeTable, ns: str, place: str, owner: str, name: str) -> []str {
+    let truth = match checker::resolve_type(te, rtable, ns) { checker::Type as t => t; error => return acc }
     let semantic = is_fat_type(truth)
     if typeexpr_is_fat(te, table) == semantic { return acc }
     teko::list::push(acc, teko::str::concat(place, " `", name, "` of `", owner, "`: syntax says ", fat_word(!semantic), ", the checker says ", fat_word(semantic)))

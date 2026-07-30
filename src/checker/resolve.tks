@@ -148,6 +148,58 @@ pub fn type_table_find_path(table: TypeTable, qual: str, last: str) -> parser::T
 }
 
 /**
+ * type_table_rekeyed — `table` with every entry re-keyed from `type_table_of`'s CANONICAL shape
+ * (`name = "ns::Name"`, `namespace = ""`) into the shape the R0-R5 SOURCE-reference resolvers read
+ * (`name` bare, `namespace` the real declaring namespace). An entry already in that second shape —
+ * anything with a non-empty `namespace` — is carried through untouched, so this is idempotent and
+ * safe to apply to either table.
+ *
+ * WHY IT HAD TO EXIST, and it was found BY INVERSION rather than by reading (0.3.1.0 degrau 31). A
+ * divergence guard was built to assert that this backend's SYNTACTIC fat-pointer predicate agrees
+ * with `resolve_type`, the checker's own answer. Run over the compiler's own source it reported ZERO
+ * disagreements — while the very same build still stopped on `native backend N1: \`vt_table\` is not a
+ * fat-pointer local`, an annotation the two predicates provably disagreed about. The guard was not
+ * lenient; it was BLIND. `resolve_type` reaches a qualified reference through
+ * `resolve_qualified_type_reg`, which matches an entry's `name` against the path's LAST SEGMENT and
+ * its `namespace` against the qualifier. Against a canonical-keyed table BOTH tests fail for every
+ * namespaced type, so `resolve_type` answered `error` — "cannot resolve" — and a guard that treats a
+ * non-answer as agreement said nothing.
+ *
+ * That is the whole reason the lowering backend grew a second, weaker resolution of its own instead
+ * of asking the checker: not that the checker does not know, but that the TABLE it is handed is in a
+ * shape the checker's resolver cannot query. Re-keying is the smaller fix than changing
+ * `type_table_of`, whose canonical keys every existing probe already depends on.
+ *
+ * @param table  the folded type table, in either shape
+ * @return       the same registrations, keyed (bare name + declaring namespace)
+ * @since 0.3.1.0 degrau 31
+ */
+pub fn type_table_rekeyed(table: TypeTable) -> TypeTable {
+    mut out: []TypeReg = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= table.len { break }
+        out = teko::list::push(out, rekeyed_reg(table[i]))
+        i++
+    }
+    out
+}
+
+/**
+ * rekeyed_reg — `type_table_rekeyed`'s per-entry step: an entry that already carries a real
+ * `namespace` is returned unchanged; one keyed canonically has its name split into the bare last
+ * segment and the qualifier.
+ *
+ * @param r  the registration to re-key
+ * @return   the registration in (bare name + declaring namespace) form
+ * @since 0.3.1.0 degrau 31
+ */
+fn rekeyed_reg(r: TypeReg) -> TypeReg {
+    if r.namespace != "" { return r }
+    TypeReg { name = name_last_segment(r.name); namespace = name_qualifier(r.name); file = r.file; vis = r.vis; decl = r.decl }
+}
+
+/**
  * reg_declaring_ns — a registration's DECLARING namespace, tolerant of BOTH `TypeTable` shapes: the
  * typing collect table carries it in `namespace` directly, while `type_table_of`'s re-collection
  * leaves `namespace` empty and folds it into the CANONICAL `name` instead, where `name_qualifier`
