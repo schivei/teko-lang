@@ -1562,3 +1562,36 @@ O dono pediu que a `main` passasse ao orquestrador um id para buscar *"a ref do 
 leitura**"*. A rota de classe entrega semântica de referência (medido: `objecto é ponteiro` é
 literalmente verdade) — mas **se `let` não morde numa classe, a metade SÓ-LEITURA não é exprimível
 hoje**. Aliasing sem restrição não chega para o `Rx`/`Tx` da §18.
+
+## `let` proíbe escrita DIRECTA, sempre, em todos os níveis (dono, 2026-07-30)
+
+> *"`let` deve sempre proibir escrita direta, ponto. Ela protege campos em todos os níveis, como se
+> estivesse declarando em C# um `{ public get; private set; }`"*
+
+A analogia é a regra, e é precisa: **de fora só se lê; escrever é privilégio dos métodos da própria
+classe.** Junta-se ao esclarecimento do mesmo dia — *"o que o `let` não protege… quando o método de
+uma classe realiza mutação na própria classe, e isso é desejado"*.
+
+| sob `let` | veredicto |
+|---|---|
+| `a.campo = v` de fora | **RECUSADO** |
+| `o.interior.campo = v` de fora | **RECUSADO** — em todos os níveis, não só o primeiro |
+| `a.set_name(v)`, com o método a fazer `self.name = n` | **PERMITIDO** — é o `private set` |
+
+E vale **igual para struct e para classe**: a assimetria medida hoje (struct recusa por B.21, classe
+deixa passar a qualquer profundidade) é o defeito, não o desenho.
+
+### O estado medido no dia da lei
+
+| caso | hoje | face à lei |
+|---|---|---|
+| `let` struct, escrita directa | recusado (B.21) | conforme |
+| `let` classe, escrita directa | **compila** | **VIOLA** |
+| `let` classe, escrita directa no interior | **compila** | **VIOLA em profundidade** |
+| `let` classe, método muta `self` | compila | conforme |
+
+### O que isto destranca no desenho da concorrência
+
+A `main` passa ao orquestrador *"a ref do canal **somente leitura**"*. Com esta lei, **o só-leitura
+passa a ser exprimível**: é um `let`. Sem ela, a rota de classe dava aliasing sem restrição — e
+aliasing sem restrição não serve de `Rx`.
