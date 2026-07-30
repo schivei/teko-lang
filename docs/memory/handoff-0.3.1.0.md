@@ -63,11 +63,50 @@ Quatro coisas, e três são notícia boa:
    perdida.** O que existe é uma discrepância entre a escada local dos agentes e a do CI, e isso é o
    achado a registar. Prioridade da fila baixa de 2 para o fim.
 
+### CORRECÇÃO À CORRECÇÃO — três agentes contra uma leitura de CI, e eu dispensei depressa demais
+
+Escrevi acima *"NÃO despachar guardas perdidas — não há prova de que exista guarda perdida"*. **Isso foi
+prematuro.** Contagem actual: **três agentes independentes** (`zext`, `cast-narrow`, e o do degrau 28)
+reportam as mesmas duas linhas a falhar, com a mesma mensagem, em corridas separadas:
+
+```
+native_iface_fat_known_stop.tkr → "expected a compile failure but the build succeeded"
+diagnostics.tkr                 → "expected a compile failure but the build succeeded"
+```
+
+E o CI mostra `regression ok` para as duas. **Três observações concordantes não são ruído.** O que eu tenho
+não é "nenhuma prova de defeito" — é **uma discrepância reproduzível**, e essa é a coisa a investigar.
+
+### O EIXO PROVÁVEL, e é verificável com um comando
+
+**O CI e os agentes não correm a suíte com a MESMA geração.** As pernas `test` correm o **asset publicado**
+(que é a **gen1**, produzida por `produce_assets.sh`) sobre a árvore. Os agentes correm a **gen2** que
+construíram. E `scripts/fixpoint_gate.sh` **assere `gen2 == gen3`, nunca `gen1 == gen2`** — o próprio
+cabeçalho di-lo, e com razão: sob a cadeia 0.3.1.0 a gen1 vem de um gerador diferente, logo `gen1 != gen2`
+é a forma saudável.
+
+**Consequência que ninguém escreveu ainda:** se a gen1 e a gen2 divergirem em **comportamento** (não só em
+bytes), as pernas `test` medem a gen1 e ninguém mede a gen2 — e uma rejeição que só a gen2 perde é
+**invisível ao CI por construção**. Isso é um buraco de cobertura, não um defeito de fixture.
+
+**O PASSO que o fecha** (e é um passo, não um alarme — lei de forma do dono): correr as duas linhas com a
+**gen1** e com a **gen2** da MESMA árvore e comparar. Três resultados possíveis, e cada um diz o que fazer:
+
+| resultado | significado |
+| --- | --- |
+| gen1 rejeita, gen2 **não** | **a gen2 perdeu a guarda.** É defeito real e o CI não o vê. O mais grave dos três |
+| as duas rejeitam | o que os agentes viram vem da semente deles (`bootstrap/teko.c`), não da gen2 — e aí a lição da semente aplica-se |
+| nenhuma rejeita | o CI está a medir outra coisa, e a pergunta muda para *o que o asset publicado é de facto* |
+
+**Custo: uma escada, que o agente já constrói de qualquer maneira.** É o próximo despacho depois do `.exe`.
+
 **A LIÇÃO, e é geral:** um agente que semeia de `bootstrap/teko.c` está a construir a partir da SAÍDA
 desta árvore, não do release. As falhas que ele vê e o CI não vê podem ser artefactos dessa diferença —
 como já aconteceu hoje com "três erros de tipo" que eram do binário obsoleto. **Um relatório de agente
 que nomeia uma regressão tem de dizer com que semente correu**, e o integrador tem de a confrontar com
-o CI antes de a pôr na fila. Eu não o fiz, e quase despachei trabalho sobre um defeito inexistente.
+o CI antes de a pôr na fila. **Mas confrontar não é dispensar:** quando o agente e o CI discordam, o
+resultado é uma DISCREPÂNCIA a medir, não um lado a acreditar. Eu fiz as duas coisas erradas em sequência —
+primeiro aceitei sem confrontar, depois dispensei sem medir.
 
 ### CRUMB 5 do AArch64-ELF — NÃO APLICADO, e a razão é medição, não preguiça
 
