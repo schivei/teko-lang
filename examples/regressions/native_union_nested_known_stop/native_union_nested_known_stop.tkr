@@ -1,27 +1,32 @@
-# A KNOWN-STOP in its OWN project, for the same structural reason as
-# `native_union_known_stop`: a build that stops at the FIRST error hides the rest, so two known-stops
-# cannot share a project — the second one's message would never be reached.
+# CLOSED — 0.3.1.0 degrau 25 (cargo/0.3.1.0-degrau-25). This project used to be a KNOWN-STOP pinning
+# `needs the null-union wrapper the placement does not declare a type for`, and its own note asked to
+# be promoted "back to `When built and run` / `Then exit = 42`, IN THIS SAME PROJECT" the day the gap
+# closed. It closed, so it is promoted — the scenario below runs the SAME unchanged `src/probe.tks`
+# and asserts its VALUE.
 #
-# NOT a bad fixture. The owner's own test applies: nothing here declares a loose `null`. Both
-# placements assign `null` to a field DECLARED to accept it (`v: i64 | null`,
-# `inner: Inner_qopt | null`), and the checker agrees — 1443 items pass clean. The stop is the
-# backend's, and its wording says so: the *placement* carries no type down to lowering.
+# What the stop was. Every own-backend placement coerces its value into the slot's DECLARED type
+# (`lower_value_into_type`), except two that had no declared type to coerce against: a struct-literal
+# field (the layout table keeps machine classes, not checker types) and a call argument. The note was
+# right that "the *placement* carries no type down to lowering" — that was exactly the defect, not a
+# property of the language. `collect_field_decls` (the checker-typed companion of the layout table)
+# and `callee_param_types` (off `TCall.callee_type`) are what those two placements now read.
 #
-# PROMOTE the day the .32 lands: back to `When built and run` / `Then exit = 42`, IN THIS SAME
-# PROJECT. (This note used to say "source back into `bulk`" — that channel was dissolved, owner
-# ruling 2026-07-29, cargo/0.3.1-dissolver-bulk: its 214 files were never distributed among the ten
-# permitted regression channels, so the whole project was retired rather than fixed. This scenario
-# already gates `teko test .` from right here; there is nowhere better to send it.)
+# The five shapes this note recorded as "CONFIRMED STILL THE SAME STOP" while triaging `bulk`
+# (2026-07-29) — a single-level struct-literal `null` field, a self-referential linked-list `next`
+# field, an arena-boxed field, a variant-payload field, a recursive-payload field — were all
+# struct-literal-field bare `null`s, i.e. all one gap, and all closed by that one fix. The wider
+# corpus rows (`union_placement_field_and_argument`, `union_placement_nested_variant`, in
+# `own_native`) cover the axes this project does not: the FAT (`str`) union member, a class instance
+# field, a bare `T` at a call argument, and a bare variant CASE placed into a `<variant> | null` slot.
 #
-# CONFIRMED STILL THE SAME STOP, five ways, while triaging `bulk` for dissolution (2026-07-29): a
-# single-level struct-literal `null` field (`Box { v = null }`), a self-referential linked-list
-# `next` field, an arena-boxed field, a variant-payload field and a recursive-payload field ALL hit
-# this exact diagnostic on the native backend today. None of the five is a new shape — every one is
-# a struct-literal-field bare `null`, which is precisely what this scenario already pins at its
-# innermost level (`Inner_qopt { v = null }`) — so none of them earns a fixture of its own; they are
-# reported here, not re-pinned.
-Feature: native backend — a null-union nested inside a struct field (KNOWN-STOP, .32)
+# NOT superseded by them: this project is the only one that nests a null-union struct INSIDE another
+# null-union field, and it is the shape the stop was first measured on.
+Feature: native backend — a null-union nested inside a struct field (CLOSED — 0.3.1.0 degrau 25)
 
-  Scenario: assigning `null` to a field declared to accept it stops honestly when nested
-    When compilation fails
-    Then diagnostic = "needs the null-union wrapper the placement does not declare a type for"
+  # src/probe.tks — the body authored 2026-07-24 (`1201088`), unchanged since, and green through the
+  # C route the whole time. The native backend now lowers it too: both levels present (30), the inner
+  # level `null` (fallback 5), the outer level `null` (fallback 7), summing to 42 — so a wrapper
+  # written at either level with the wrong tag shows up as a WRONG SUM, not as a stop.
+  Scenario: a null-union field nested inside a null-union field now round-trips both levels
+    When built and run
+    Then exit = 42
