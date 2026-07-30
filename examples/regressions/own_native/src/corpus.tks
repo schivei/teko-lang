@@ -3292,3 +3292,165 @@ fn f_union_placement_nested_variant() -> i64 {
     }
     0
 }
+
+/**
+ * d26_push_str — append every byte of `s` onto `dst` ONE AT A TIME through `teko::mem::push_fo`
+ * (0.3.1.0 degrau 26). This is the per-byte chain `teko::mem::append_fo` was introduced to replace
+ * (#148 R2), kept here as an INDEPENDENT ORACLE: it reaches a DIFFERENT runtime entry
+ * (`tk_slice_push_fo`, not `tk_append_bytes_fo`) and never calls `append_fo` at all, so a buffer
+ * built through it agrees with an `append_fo`-built one only when the bulk append is genuinely
+ * correct — no shared code path can make the two agree by accident.
+ *
+ * @param dst  the buffer to append onto
+ * @param s    the fragment whose UTF-8 bytes are appended, in order
+ * @return     the grown buffer
+ */
+fn d26_push_str(dst: []byte, s: str) -> []byte {
+    let src = teko::text::bytes_of_str(s)
+    mut out = dst
+    mut i: u64 = 0
+    loop {
+        if i >= src.len { break }
+        out = teko::mem::push_fo(out, src[i])
+        i++
+    }
+    out
+}
+
+/**
+ * d26_push_run — `seed` appended onto `dst` `times` times, byte at a time through the per-byte
+ * oracle (`d26_push_str`) (0.3.1.0 degrau 26).
+ *
+ * @param dst    the buffer to append onto
+ * @param seed   the fragment repeated
+ * @param times  how many times `seed` is appended
+ * @return       the grown buffer
+ */
+fn d26_push_run(dst: []byte, seed: str, times: i64) -> []byte {
+    mut out = dst
+    mut i: i64 = 0
+    loop {
+        if i >= times { break }
+        out = d26_push_str(out, seed)
+        i++
+    }
+    out
+}
+
+/**
+ * d26_append_repeat — the LINEAR BUILDER CHAIN `teko::codegen::cb` is written in: one `[]byte`
+ * threaded through a bracketed run of `teko::mem::append_fo` calls, each taking the buffer the
+ * previous call returned (0.3.1.0 degrau 26). With `times` large enough the chain crosses several
+ * geometric copy-grows, so the free-old (`_fo`) path — the one that frees the superseded buffer —
+ * actually runs rather than being asserted about.
+ *
+ * @param seed   the fragment repeated between the brackets
+ * @param times  how many times `seed` is appended
+ * @return       `"["`, then `seed` `times` times, then `"]"`, as bytes
+ */
+fn d26_append_repeat(seed: str, times: i64) -> []byte {
+    mut b: []byte = teko::list::empty()
+    b = teko::mem::append_fo(b, "[")
+    mut i: i64 = 0
+    loop {
+        if i >= times { break }
+        b = teko::mem::append_fo(b, seed)
+        i++
+    }
+    teko::mem::append_fo(b, "]")
+}
+
+/**
+ * d26_push_repeat — `d26_append_repeat`'s content built by the per-byte oracle instead, so the two
+ * can be compared without either one being the specification (0.3.1.0 degrau 26).
+ *
+ * @param seed   the fragment repeated between the brackets
+ * @param times  how many times `seed` is appended
+ * @return       `"["`, then `seed` `times` times, then `"]"`, as bytes
+ */
+fn d26_push_repeat(seed: str, times: i64) -> []byte {
+    let fresh: []byte = teko::list::empty()
+    let opened = d26_push_str(fresh, "[")
+    d26_push_str(d26_push_run(opened, seed, times), "]")
+}
+
+/**
+ * f_append_fo_bulk_bytes — 0.3.1.0 degrau 26: `teko::mem::append_fo([]byte, str) -> []byte` (the
+ * `#148 R2` bulk byte-append, free-old on grow BY DECREE) lowers to the runtime's own
+ * `tk_append_bytes_fo` through the out-parameter-length convention. Before the fix the own backend
+ * had no lowering for it at all and the native self-build stopped at `teko::codegen::cb`, the
+ * compiler's own byte-buffer append.
+ *
+ * Checked BY VALUE, never by length alone: the fragment is `café🐝` (an accented letter, 2 UTF-8
+ * bytes, plus a 4-byte emoji, beside two 1-byte ASCII letters — this lane's own sonda), so a
+ * length taken from the WRONG operand or a `&out_len` slot never loaded back cannot hide behind an
+ * all-ASCII fixture; the content is read back through `str_of_bytes`, so swapped arguments show up
+ * as reversed text rather than as a coincidentally-right length. The EMPTY fragment is its own row:
+ * the runtime short-circuits `n == 0` by handing the SAME pointer back, which is the one path that
+ * appends nothing and must still leave a readable buffer behind.
+ *
+ * @return 0 when every append round-trips, else the number of the failing check
+ */
+fn f_append_fo_bulk_bytes() -> i64 {
+    mut b: []byte = teko::list::empty()
+    b = teko::mem::append_fo(b, "café🐝")
+    if b.len != 9 { return 1 }
+    if str_of_bytes(b) != "café🐝" { return 2 }
+    b = teko::mem::append_fo(b, "")
+    if b.len != 9 { return 3 }
+    if str_of_bytes(b) != "café🐝" { return 4 }
+    b = teko::mem::append_fo(b, "!")
+    if b.len != 10 { return 5 }
+    if str_of_bytes(b) != "café🐝!" { return 6 }
+    0
+}
+
+/**
+ * f_append_fo_grow_chain — 0.3.1.0 degrau 26: a linear builder chain long enough to cross several
+ * copy-grows, compared against the per-byte `push_fo` oracle that builds the same content through a
+ * DIFFERENT runtime entry (`d26_push_str`). The comparison is what makes the row independent of any
+ * expected string written by hand: only a bulk append that keeps every prefix, appends at the right
+ * offset and returns the right length can agree with a buffer grown one byte at a time.
+ *
+ * @return 0 when the two builders agree on length and on content, else the number of the failing
+ *         check
+ */
+fn f_append_fo_grow_chain() -> i64 {
+    let fragments: i64 = 40
+    let built = d26_append_repeat("xy", fragments)
+    let oracle = d26_push_repeat("xy", fragments)
+    if oracle.len != 82 { return 1 }
+    if built.len != oracle.len { return 2 }
+    if str_of_bytes(built) != str_of_bytes(oracle) { return 3 }
+    0
+}
+
+/**
+ * f_append_fo_interleaved_buffers — 0.3.1.0 degrau 26: TWO independent builder chains grown
+ * ALTERNATELY, each compared against its own per-byte oracle. The runtime's in-place fast path is
+ * keyed by the buffer's own pointer and length, so a bulk append that ignored either — appending
+ * into whichever buffer the live-tail cache happened to hold last — would splice the two chains into
+ * each other. One buffer alone cannot show that; two alternating ones can, which is why this row is
+ * separate from the single-chain one above.
+ *
+ * @return 0 when both chains match their oracles, else the number of the failing check
+ */
+fn f_append_fo_interleaved_buffers() -> i64 {
+    let rounds: i64 = 12
+    mut a: []byte = teko::list::empty()
+    mut b: []byte = teko::list::empty()
+    mut i: i64 = 0
+    loop {
+        if i >= rounds { break }
+        a = teko::mem::append_fo(a, "aa")
+        b = teko::mem::append_fo(b, "bbb")
+        i++
+    }
+    if a.len != 24 { return 1 }
+    if b.len != 36 { return 2 }
+    let fresh_a: []byte = teko::list::empty()
+    let fresh_b: []byte = teko::list::empty()
+    if str_of_bytes(a) != str_of_bytes(d26_push_run(fresh_a, "aa", rounds)) { return 3 }
+    if str_of_bytes(b) != str_of_bytes(d26_push_run(fresh_b, "bbb", rounds)) { return 4 }
+    0
+}
