@@ -1595,3 +1595,40 @@ deixa passar a qualquer profundidade) é o defeito, não o desenho.
 A `main` passa ao orquestrador *"a ref do canal **somente leitura**"*. Com esta lei, **o só-leitura
 passa a ser exprimível**: é um `let`. Sem ela, a rota de classe dava aliasing sem restrição — e
 aliasing sem restrição não serve de `Rx`.
+
+## O `push` de um canal devolve `error | null` — não pânico, não predicado (dono, 2026-07-30)
+
+> *"channel, pensei em ter opção bounded e unbounded (a primeira faz guarda e barra o push), serve
+> para muitos casos, mas exige um verificador se está livre pra gravar, como no C#). Mas, pensei de
+> um modo mais simples, sem pânico, ao fazer push em um canal, retorna um `error | null`, nulo se
+> sucesso, error dizendo o pq foi negado o push (o guarda do bounded)."*
+
+- **Duas formas de canal**: **bounded** (com guarda que barra o `push`) e **unbounded**.
+- **O `push` devolve `error | null`** — `null` é sucesso, o `error` **diz porque foi negado**.
+- **Sem pânico.** Um canal cheio não mata o produtor.
+- **Sem predicado `pode_gravar?`.**
+
+### Porque a forma simples é também a mais correcta
+
+Um predicado separado seguido de um `push` é **TOCTOU**: entre a pergunta e a escrita, outro produtor
+enche a vaga, e num canal MPSC há N produtores por construção. **Um `push` que devolve o veredicto é
+atómico** — a pergunta e a acção são a mesma operação. A forma do dono não é só mais leve: elimina
+uma corrida que o modelo do C# obriga o utilizador a gerir à mão.
+
+E encaixa no idioma da casa sem o alargar: **`-> error | null` tem 78 usos** em `src/` (mais 13 na
+ordem inversa).
+
+### O que isto obriga a redecidir, e é demonstrável
+
+O desenho da concorrência assumia contrapressão **por bloqueio**:
+
+> *"limitado, com contrapressão — o tubo do SO dá-a de graça: **quem escreve bloqueia**"* (§18)
+> *"se ele parasse num `wait_one` a meio, os handlers encheriam o canal limitado e **parariam**"*
+
+O argumento de ausência-de-impasse depende de os handlers **pararem** quando o canal enche. Com um
+`push` que devolve `error`, **não param** — recebem um erro e têm de decidir. A pergunta que passa a
+existir e não existia: **o que faz um handler de dreno quando o canal está cheio?** Se descarta,
+perde-se saída — e não perder saída é a razão de ser do journaling inteiro. Se repete em ciclo, é
+bloqueio outra vez, mas **sob controlo de quem escreve**, que é provavelmente o ponto.
+
+Isto não é objecção à lei: é o que a lei desloca, e tem de ser respondido por quem desenhar o `C1`.
