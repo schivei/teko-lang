@@ -6623,22 +6623,90 @@ fn lower_null_pattern_test(ctx: LowerCtx, subj: MatchSubj, line: u32, col: u32) 
  * `lower_variant_tag_eq_test`/`bind_case_payload` read), then store tag `0` for a `null` value,
  * or tag `1` plus the lowered payload for any other value.
  *
+ * A payload that is ITSELF a union takes the nested arm (`lower_null_union_nested_present`) — the
+ * TWIN of the split degrau 23 gave `lower_variant_construct`, and the twin that had NOT diverged
+ * along with it. `SqD25 { … }` placed into a `ShapeD25 | null` slot (`ShapeD25 = variant CircD25 |
+ * SqD25`) used to store the bare `SqD25` struct's own address as the payload, so a later
+ * `match s { CircD25 …; SqD25 … }` read that struct's FIRST FIELD as `ShapeD25`'s tag, matched no
+ * arm, and fell through the whole `match` with no diagnostic — measured against a C route that
+ * answered correctly. It is exactly degrau 23's defect on the null-bearing axis.
+ *
  * @param LowerCtx ctx  the lowering context to append the construction's instructions into
  * @param checker::Type payload  the union's non-null member type (drives the payload's SHAPE —
- *                               a fat member writes both halves, any other one word)
+ *                               a fat member writes both halves, a union member an inner wrapper,
+ *                               any other one word)
  * @param checker::TExpr e  the value being coerced (a `TNullLit`, or an expression of the
  *                          payload type)
  * @return Lowered  the wrapper's alloca'd base address
  * @throws  propagated from lowering a non-null payload expression
- * @since 0.3.1 (null-union C7 own-backend gap — wasm_panic_hook)
+ * @since 0.3.1 (null-union C7 own-backend gap — wasm_panic_hook); 0.3.1.0 degrau 25 (the nested
+ *        union payload)
  */
 fn lower_null_union_construct(ctx: LowerCtx, payload: checker::Type, e: checker::TExpr) -> Lowered | error {
+    match e.kind {
+        checker::TNullLit => return lower_null_union_absent(ctx, e)
+        _ => { }
+    }
+    if payload_needs_inner_wrapper(ctx, payload, e) { return lower_null_union_nested_present(ctx, payload, e) }
     let base = ctx_alloc(ctx)
     let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, variant_wrapper_bytes(), variant_wrapper_align(), e.line, e.col))
-    match e.kind {
-        checker::TNullLit => store_variant_tag(with_alloca, base.vreg, 0, e.line, e.col)
-        _ => store_variant_payload(with_alloca, base.vreg, 1, payload, e)
+    store_variant_payload(with_alloca, base.vreg, 1, payload, e)
+}
+
+/**
+ * lower_null_union_absent — the `null` arm of `lower_null_union_construct`: the uniform wrapper with
+ * tag `0` and no payload written (the ABSENT case carries none).
+ *
+ * @param ctx  the lowering context to append the construction's instructions into
+ * @param e    the `null` literal (for its source position)
+ * @return Lowered  the wrapper's alloca'd base address
+ * @since 0.3.1.0 (degrau 25 — extracted so the present arms can each pick their own shape)
+ */
+fn lower_null_union_absent(ctx: LowerCtx, e: checker::TExpr) -> Lowered {
+    let base = ctx_alloc(ctx)
+    let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, variant_wrapper_bytes(), variant_wrapper_align(), e.line, e.col))
+    store_variant_tag(with_alloca, base.vreg, 0, e.line, e.col)
+}
+
+/**
+ * payload_needs_inner_wrapper — is `payload` itself a union (an inline `A | B`, or a nominal naming
+ * a declared `variant`) that `e` is NOT already a value of? Then `e` is a bare CASE of that inner
+ * union and needs its own wrapper built before this level can store it — the same question
+ * `lower_variant_construct`'s DIRECT-vs-NESTED split answers on the general-variant axis.
+ *
+ * @param ctx      the lowering context (its declared-`variant` table expands a nominal union)
+ * @param payload  the enclosing union's non-null member type
+ * @param e        the value being placed into the payload
+ * @return         whether an inner wrapper must be built for `e` first
+ * @since 0.3.1.0 (degrau 25 — the nested union payload)
+ */
+fn payload_needs_inner_wrapper(ctx: LowerCtx, payload: checker::Type, e: checker::TExpr) -> bool {
+    match expand_named_variant(payload, ctx.variants) {
+        checker::Variant => match expand_named_variant(e.type, ctx.variants) { checker::Variant => false; _ => true }
+        _ => false
     }
+}
+
+/**
+ * lower_null_union_nested_present — the NESTED-payload arm of `lower_null_union_construct`: build
+ * `e`'s own wrapper against the payload union first (`lower_value_into_type`, so nesting resolves to
+ * any depth), then store THAT wrapper's address as this level's payload, boxed at the payload
+ * union's own registered width (`store_scalar_variant_payload_value`) exactly as
+ * `lower_nested_variant_construct` boxes its own inner wrapper.
+ *
+ * @param ctx      the lowering context to append the construction's instructions into
+ * @param payload  the enclosing union's non-null member type (itself a union)
+ * @param e        the bare case value being placed into the payload
+ * @return Lowered  the OUTER wrapper's alloca'd base address
+ * @throws  propagated from the inner construction, or when the payload union's width is not pinned
+ * @since 0.3.1.0 (degrau 25 — the nested union payload)
+ */
+fn lower_null_union_nested_present(ctx: LowerCtx, payload: checker::Type, e: checker::TExpr) -> Lowered | error {
+    let inner = match lower_value_into_type(ctx, payload, e) { Lowered as x => x; error as err => return err }
+    let base = ctx_alloc(inner.ctx)
+    let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, variant_wrapper_bytes(), variant_wrapper_align(), e.line, e.col))
+    let tagged = store_variant_tag(with_alloca, base.vreg, 1, e.line, e.col)
+    store_scalar_variant_payload_value(base.vreg, payload, Lowered { ctx = tagged.ctx; vreg = inner.vreg }, e)
 }
 
 /**
