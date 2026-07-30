@@ -1442,3 +1442,156 @@ como teste, e continua a sair como sai. Capturar ali seria apagar o observável 
 medir.
 
 **Prazo, palavra dele:** *"Quanto ao 'quando', imediatamente, a dor é latente."*
+
+## `chan<T>` é MPSC — o fan-out é OUTRA estrutura (dono, 2026-07-30)
+
+> *"chan<T> é fan-in, vários escritores, um leitor. Para ter um fan-out 'N:M', teria que ser outro
+> tipo de estrutura, que até pode operar sobre um 'chan<T>' mas que precisaria de uma segunda
+> estrutura capaz de broadcasting e múltiplas cópias."*
+
+A fronteira, escrita para não se dissolver:
+
+- **`chan<T>` = N escritores, UM leitor.** É exactamente a forma que o fan-in dos handlers de
+  processo precisa: cada processo escreve, o orquestrador é o único que lê e apenda.
+- **N:M não é uma opção do `chan<T>`** — é uma estrutura à parte, que *pode assentar sobre* um canal
+  mas exige **broadcasting** e **múltiplas cópias**.
+- A consequência que ninguém pode esquecer: com **região raiz por tarefa**, uma cópia difundida
+  **atravessa fronteiras de arena**. Quem é dono do valor difundido e quando morre são perguntas por
+  responder, e é dívida NOMEADA, não resolvida.
+- Corolário do estilo da casa: a garantia do único leitor tem de ser **imposta**, não convencionada.
+  Uma garantia que não pode falhar nem em compilação nem em execução é decoração — apanhámos três
+  dessas nesta lane.
+
+## O canal é alfândega: só cópias, arena própria, e é singleton (dono, 2026-07-30)
+
+> *"Canais não devem poder operar sobre o mutável ou referência, logo, tudo que por ele passa é
+> cópia, o dado nasce em alguma origem (que tem sua arena), é copiado para o canal (que tem a sua
+> arena) e então transferido ou copiado por quem as consome, e no momento do consumo, a mensagem é
+> popada da memória do canal. […] todo canal deve residir na arena do programa ou na spine, é
+> singleton."*
+
+Cinco afirmações, e nenhuma é opcional:
+
+1. **O canal NÃO opera sobre `mut` nem sobre referência.** Não é recomendação — é o que o tipo tem
+   de recusar. Um `chan<T>` de referências é um erro, não um mau uso.
+2. **Tudo o que passa é CÓPIA.** Três arenas, não duas: a **origem** tem a sua, o **canal** tem a
+   sua, o **consumidor** tem a sua.
+3. **No consumo a mensagem é POPADA** da memória do canal — o canal não acumula o que já entregou.
+4. **O canal não é grátis.** É o preço do sincronismo, e paga-se de olhos abertos: ele é o **apoio
+   alfandegário** entre tarefas.
+5. **Todo o canal reside na arena do PROGRAMA ou na spine, e é SINGLETON.** Não é por tarefa.
+
+### O que isto resolve, e é por construção e não por disciplina
+
+- **A dívida da posse do N:M evapora-se.** A §18 tinha-a nomeado bem: *"num MPSC cada registo é
+  consumido uma vez; numa difusão é consumido N vezes, e é por isso que precisa de regra de posse"*.
+  Com cópia obrigatória, **N cópias não têm dono partilhado nenhum** — cada receptor copia para a
+  sua arena. Não há contagem de referências para desenhar.
+- **O ponteiro pendurado através de fronteiras de arena não pode existir.** A §17 avisou que *"um
+  valor na raiz da tarefa A é ponteiro pendurado no instante em que A rebobina"*. Nada atravessa por
+  referência, logo não há o que pendurar. **A regra do dono é anterior ao problema, não posterior.**
+- **O canal na arena do programa é o encaixe que faltava entre o `C-A` e o `C1`.** A raiz por tarefa
+  não engole o canal: o canal é explicitamente global e singleton, e é por isso que ele consegue ser
+  a alfândega — uma alfândega dentro de um dos países não é alfândega.
+- **O `.tkcov` fecha.** Os escritores mandam registos, um leitor apenda: linear na entrada, sem
+  releitura, sem sobreposição. A pergunta que estava pendente — *esperar pelo C4 ou fechar já* —
+  deixa de ter dois lados.
+
+### Prioridade que veio com o ruling
+
+> *"precisamos priorizar, assim que uma vaga se abrir (de agentes), iniciar a fundação para ensinar
+> o compilador as bases necessárias antes de podermos aplicá-las nos testes."*
+
+A fundação primeiro, a aplicação aos testes depois. Não é "faz um pedaço e completa" — é a ordem que
+o próprio arquitecto já tinha achado: **C0 · C-A · C1**, e só então o resto.
+
+## `ref` é mutável POR DEFINIÇÃO — não existe `ref mut` (dono, 2026-07-30)
+
+> *"`ref mut` não faz sentido, por definição `ref` só pode ser mutável"*
+
+Uma referência que não pode escrever não é uma referência — é uma vista. Logo:
+
+- **`ref mut` / `mut ref` NÃO existem**, e o parser recusá-los está **certo**;
+- **todo `ref` permite escrita**, nas duas posições de binder (local e parâmetro);
+- `B.21` (*"cannot assign to a field of an immutable binding — declare it `mut`"*) **não se aplica a
+  um `ref`**: a mutabilidade não é opcional nele.
+
+### O estado medido no dia da lei (semente 0.3.0.31-beta, rota C e nativa)
+
+| posição | escrever através do `ref` | face à lei |
+|---|---|---|
+| local `ref r: T = c` | **atravessa** (exit 0) | conforme |
+| parâmetro `ref p: T` | **recusado** com B.21 | **VIOLA** |
+| `ref mut` / `mut ref` | erro de parse | conforme |
+| local `ref r = c` (sem anotação) | **cópia silenciosa** (exit 1) | **VIOLA** — e em silêncio |
+
+**As duas posições de binder discordam uma da outra**, e nenhuma das duas violações avisa de forma
+útil: a de parâmetro manda declarar `mut`, que não existe para `ref`; a do local não diz nada.
+
+## Os TRÊS modos de binding, e o que cada um afirma (dono, 2026-07-30)
+
+> *"Temos 3 modos de variáveis: `let`: que protege tudo, proíbe mutação profundamente (largo); `mut`:
+> o inverso de `let`; `ref`: valor como referência, com várias abordagens, não apenas variáveis."*
+
+| modo | afirma |
+|---|---|
+| **`let`** | proíbe mutação **PROFUNDAMENTE** — protege tudo, e é largo |
+| **`mut`** | o **inverso** de `let` |
+| **`ref`** | valor **como referência** — e **não só em variáveis**: várias posições |
+
+O `ref` é mutável por definição (lei anterior do mesmo dia), logo os três não são três graus da
+mesma escala: `let`/`mut` são o eixo da **mutabilidade**; `ref` é o eixo da **identidade** (valor vs.
+referência), e nasce mutável.
+
+### O estado medido no dia da lei — `let` NÃO protege classes
+
+Semente `0.3.0.31-beta`, projecto mínimo, código de saída lido:
+
+| caso | resultado | face à lei |
+|---|---|---|
+| `let` **struct**, escrita no campo | **recusado** (B.21) | conforme |
+| `let` **classe**, escrita no campo | **compila e muta** (exit 0) | **VIOLA** |
+| `let` **classe**, escrita no campo do INTERIOR | **compila e muta** (exit 0) | **VIOLA em profundidade** |
+
+**`let` protege structs e é transparente para classes, a qualquer profundidade.** Não é um caso de
+canto: é metade do sistema de tipos a ignorar o modo.
+
+### E porque isto morde o desenho do canal
+
+O dono pediu que a `main` passasse ao orquestrador um id para buscar *"a ref do canal **somente
+leitura**"*. A rota de classe entrega semântica de referência (medido: `objecto é ponteiro` é
+literalmente verdade) — mas **se `let` não morde numa classe, a metade SÓ-LEITURA não é exprimível
+hoje**. Aliasing sem restrição não chega para o `Rx`/`Tx` da §18.
+
+## `let` proíbe escrita DIRECTA, sempre, em todos os níveis (dono, 2026-07-30)
+
+> *"`let` deve sempre proibir escrita direta, ponto. Ela protege campos em todos os níveis, como se
+> estivesse declarando em C# um `{ public get; private set; }`"*
+
+A analogia é a regra, e é precisa: **de fora só se lê; escrever é privilégio dos métodos da própria
+classe.** Junta-se ao esclarecimento do mesmo dia — *"o que o `let` não protege… quando o método de
+uma classe realiza mutação na própria classe, e isso é desejado"*.
+
+| sob `let` | veredicto |
+|---|---|
+| `a.campo = v` de fora | **RECUSADO** |
+| `o.interior.campo = v` de fora | **RECUSADO** — em todos os níveis, não só o primeiro |
+| `a.set_name(v)`, com o método a fazer `self.name = n` | **PERMITIDO** — é o `private set` |
+
+E vale **igual para struct e para classe**: a assimetria medida hoje (struct recusa por B.21, classe
+deixa passar a qualquer profundidade) é o defeito, não o desenho.
+
+### O estado medido no dia da lei
+
+| caso | hoje | face à lei |
+|---|---|---|
+| `let` struct, escrita directa | recusado (B.21) | conforme |
+| `let` classe, escrita directa | **compila** | **VIOLA** |
+| `let` classe, escrita directa no interior | **compila** | **VIOLA em profundidade** |
+| `let` classe, método muta `self` | compila | conforme |
+
+### O que isto destranca no desenho da concorrência
+
+A `main` passa ao orquestrador *"a ref do canal **somente leitura**"*. Com esta lei, **o só-leitura
+passa a ser exprimível**: é um `let`. Sem ela, a rota de classe dava aliasing sem restrição — e
+aliasing sem restrição não serve de `Rx`.

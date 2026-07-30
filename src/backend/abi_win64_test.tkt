@@ -114,6 +114,7 @@ fn wn_tiny_abi() -> AbiDescriptor {
         spill_slot_align = 8
         shadow_space = 32 to u32
         max_reg_arg_bytes = 8 to u32
+        arg_slots_shared = true
     }
 }
 
@@ -149,9 +150,30 @@ fn wn_pressure_spills_furthest_next_use() {
 }
 
 #test
+/**
+ * wn_win64_passes_a_16_byte_aggregate_by_reference — Microsoft x64 hands an
+ * aggregate to a callee in a register only at size 1/2/4/8, so a 16-byte `tk_str`
+ * travels BY REFERENCE; SysV's 16 is the contrast that keeps the flat pair.
+ *
+ * @return void
+ */
 fn wn_win64_passes_a_16_byte_aggregate_by_reference() {
-    // Microsoft x64 hands an aggregate to a callee in a register only at size
-    // 1/2/4/8; a 16-byte `tk_str` travels BY REFERENCE. SysV's 16 is the contrast.
     teko::assert::is_true(WIN64.max_reg_arg_bytes == (8 to u32))
     teko::assert::is_true(SYSV64.max_reg_arg_bytes == (16 to u32))
+}
+
+#test
+/**
+ * wn_win64_shares_argument_slots_across_both_register_files — the `B3-argslot`
+ * fact, pinned on the descriptor: Win64 numbers its integer and its XMM argument
+ * registers by ONE shared argument position, while SysV and AAPCS64 count each
+ * file on its own. Inverting either constant is what put a Win64 call's
+ * `uint64_t *out_len` in a register the MSVC-built callee never reads.
+ *
+ * @return void
+ */
+fn wn_win64_shares_argument_slots_across_both_register_files() {
+    teko::assert::is_true(WIN64.arg_slots_shared)
+    teko::assert::is_false(SYSV64.arg_slots_shared)
+    teko::assert::is_false(AAPCS64.arg_slots_shared)
 }

@@ -95,16 +95,62 @@ pub type Regex = struct { pattern: str; ast: RegexNode }
 fn one(node: RegexNode) -> []RegexNode { teko::list::push(teko::list::empty(), node) }
 fn one_of(wrapped: []RegexNode) -> RegexNode { wrapped[0] }
 
-// --- pattern scanning helpers (over the pattern's raw ASCII bytes) ---
+// --- pattern scanning helpers (over the pattern's raw UTF-8 bytes) ---
 
-// one ASCII pattern byte decoded to its `char` value (via the ROUND 0 codepoint-ops
-// bridge: wrap the byte as a 1-byte str, then read its first — only — codepoint).
-fn byte_char(b: byte) -> char {
-    char_at(one_byte(b), 0)
+/**
+ * CPScan — one decoded pattern codepoint: its scalar value plus how many `[]byte` positions it
+ * occupied, so a caller can advance its own scan cursor by the right amount.
+ */
+pub type CPScan = struct {
+    /** the decoded Unicode scalar value */
+    cp: u32
+    /** the number of raw bytes this codepoint consumed (1-4) */
+    width: u64
 }
 
-fn byte_cp(b: byte) -> u32 {
-    byte_char(b) to u32
+/**
+ * utf8_width — the byte width of the UTF-8 codepoint whose LEAD byte is `b0`. Every byte a caller
+ * offers here comes from `bytes_of_str` on a `str`, which the language already guarantees is valid
+ * UTF-8 (B.36) — so classifying the lead byte is enough; there is no invalid-lead case left to
+ * report, since that already ended at the `str`'s own boundary.
+ *
+ * @param b0  the lead byte of a codepoint
+ * @return    1 for ASCII, 2/3/4 for a two/three/four-byte lead
+ */
+fn utf8_width(b0: byte) -> u64 {
+    if b0 <= 0x7F { return 1 }
+    if b0 <= 0xDF { return 2 }
+    if b0 <= 0xEF { return 3 }
+    4
+}
+
+/**
+ * decode_codepoint — decodes the FULL UTF-8 codepoint starting at byte offset `pos` in `p`.
+ *
+ * THE DEFECT THIS CLOSES: the parser used to walk the pattern BYTE BY BYTE, turning every raw byte
+ * into its own `RChar` node — correct only for ASCII. A multi-byte pattern character (e.g. the em
+ * dash `—`, U+2014, 3 bytes) became THREE separate nodes, each decoded from a LONE byte wrapped as
+ * if it were its own one-byte string; a lead or continuation byte in isolation is not valid UTF-8,
+ * so none of the three ever decoded back to U+2014. The matcher's other side, `is_match`, decodes
+ * the SUBJECT text correctly (`chars()`, real codepoints) — so a literal non-ASCII pattern
+ * character could never match the identical text it was quoted from, however plainly that text
+ * sat in the captured stream. This function decodes the WHOLE codepoint in one step so the parser
+ * advances by codepoints, the same unit `is_match` already scans in.
+ *
+ * @param p    the pattern's raw bytes (`bytes_of_str` on a `str` — valid UTF-8 by construction)
+ * @param pos  the byte offset of the codepoint's lead byte
+ * @return     the decoded codepoint and its width in bytes
+ */
+fn decode_codepoint(p: []byte, pos: u64) -> CPScan {
+    let width = utf8_width(p[pos])
+    mut bytes: []byte = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= width { break }
+        bytes = teko::list::push(bytes, p[pos + i])
+        i++
+    }
+    CPScan { cp = char_at(str_of_bytes(bytes), 0) to u32; width = width }
 }
 
 // --- the parser: recursive descent, `[]byte` pattern -> RegexNode | error ---
@@ -161,6 +207,16 @@ fn parse_repeat(p: []byte, pos: u64) -> PState | error {
     base
 }
 
+/**
+ * parse_atom — the highest-precedence grammar rule: `.` | `^` | `$` | a `(...)` group | a `[...]`
+ * class | a literal codepoint. A literal is decoded whole via `decode_codepoint`, so a multi-byte
+ * pattern character advances the cursor by its own byte width, never by a fixed one byte.
+ *
+ * @param p    the pattern's raw bytes
+ * @param pos  the byte offset to parse from
+ * @return     the parsed node and the position just past it
+ * @throws     an unterminated group, a bare `\`, a stray `)`, or a quantifier with nothing to repeat
+ */
 fn parse_atom(p: []byte, pos: u64) -> PState | error {
     if pos >= p.len { return error { message = "regex: unexpected end of pattern" } }
     let b = p[pos]
@@ -182,11 +238,21 @@ fn parse_atom(p: []byte, pos: u64) -> PState | error {
     if b == b'*' || b == b'+' || b == b'?' {
         return error { message = "regex: quantifier with nothing to repeat" }
     }
-    PState { pos = pos + 1; node = RChar { cp = byte_cp(b) } }
+    let scan = decode_codepoint(p, pos)
+    PState { pos = pos + scan.width; node = RChar { cp = scan.cp } }
 }
 
-// `[...]` — pos is just AFTER the `[`. Supports `^` negation (first byte) and `a-z`
-// ranges; a lone trailing `-` (e.g. `[a-]`) is a literal `-`, mirroring common practice.
+/**
+ * parse_class — a `[...]` character class; `pos` is just AFTER the `[`. Supports `^` negation (the
+ * first byte) and `a-z` ranges; a lone trailing `-` (e.g. `[a-]`) is a literal `-`, mirroring common
+ * practice. Each member is decoded as a whole codepoint (`decode_codepoint`), so a multi-byte class
+ * member or range endpoint is never split across raw bytes.
+ *
+ * @param p    the pattern's raw bytes
+ * @param pos  the byte offset just past the class's opening `[`
+ * @return     the parsed `RClass` node and the position just past its closing `]`
+ * @throws     an unterminated or empty class, or a range whose endpoints are out of order
+ */
 fn parse_class(p: []byte, pos: u64) -> PState | error {
     mut at = pos
     mut negate = false
@@ -197,16 +263,16 @@ fn parse_class(p: []byte, pos: u64) -> PState | error {
         if at >= p.len { return error { message = "regex: unterminated character class — expected ']'" } }
         if p[at] == b']' && !first { break }
         first = false
-        let lo = byte_cp(p[at])
-        // a range `a-z`: needs a '-' NOT immediately followed by ']' (that '-' is literal).
-        if at + 2 < p.len && p[at + 1] == b'-' && p[at + 2] != b']' {
-            let hi = byte_cp(p[at + 2])
-            if hi < lo { return error { message = "regex: character class range out of order" } }
-            ranges = teko::list::push(ranges, RRange { lo = lo; hi = hi })
-            at = at + 3
+        let lo = decode_codepoint(p, at)
+        let after_lo = at + lo.width
+        if after_lo + 1 < p.len && p[after_lo] == b'-' && p[after_lo + 1] != b']' {
+            let hi = decode_codepoint(p, after_lo + 1)
+            if hi.cp < lo.cp { return error { message = "regex: character class range out of order" } }
+            ranges = teko::list::push(ranges, RRange { lo = lo.cp; hi = hi.cp })
+            at = after_lo + 1 + hi.width
         } else {
-            ranges = teko::list::push(ranges, RRange { lo = lo; hi = lo })
-            at = at + 1
+            ranges = teko::list::push(ranges, RRange { lo = lo.cp; hi = lo.cp })
+            at = after_lo
         }
     }
     if ranges.len == 0 { return error { message = "regex: empty character class" } }

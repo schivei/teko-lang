@@ -108,6 +108,20 @@ pub type FrameLayoutX86 = struct {
      * below the local slots, and is 16-aligned so `movaps` is legal.
      */
     fpr_save_base: u32
+    /**
+     * caller_shadow — the shadow space the CALLER reserved below the incoming
+     * stack arguments (`abi.shadow_space`: 32 under Win64, 0 everywhere else), the
+     * distance `in_arg_base_x86` must skip to reach incoming stack argument 0.
+     *
+     * NOT `shadow_bytes_x86`, and the difference is the defect it fixes: that one
+     * is 0 for a LEAF, because a leaf reserves no shadow of its OWN — but the
+     * shadow below THIS function's incoming arguments belongs to whoever called
+     * it, and every Win64 caller reserves it whether or not this callee goes on to
+     * call anything. Reading the caller-side number off the callee-side one made a
+     * Win64 callee load its fifth argument 32 bytes low, out of its own home-space
+     * area.
+     */
+    caller_shadow: u32
 }
 
 /**
@@ -917,19 +931,27 @@ const RSP_BASE_X86: MReg = preg(X86_REG_RSP_ID, MRegClass::GPR)
 /**
  * in_arg_base_x86 — the RSP-relative byte offset of the FIRST incoming
  * stack-argument slot (`B1-args`). The caller placed stack argument `j` at
- * `entry_rsp + 8 + 8*j` (past the return address `call` pushed), and the prologue
- * has since moved RSP down by `push rbp` (8) + one push per callee-saved GPR +
- * the `sub rsp` region — so a FRAMED function reads it at
- * `16 + 8*n_saved + size + 8*j` and a frameless one at `8 + 8*j`. Resolved here
- * rather than at isel because only the finished layout knows those three numbers.
+ * `entry_rsp + 8 + caller_shadow + 8*j` (past the return address `call` pushed and
+ * past the shadow area it reserved at its own RSP), and the prologue has since
+ * moved RSP down by `push rbp` (8) + one push per callee-saved GPR + the
+ * `sub rsp` region — so a FRAMED function reads it at
+ * `16 + 8*n_saved + size + caller_shadow + 8*j` and a frameless one at
+ * `8 + caller_shadow + 8*j`. Resolved here rather than at isel because only the
+ * finished layout knows those numbers.
+ *
+ * THE `caller_shadow` TERM IS THE MIRROR OF `out_arg_base`, and its absence was a
+ * measured Win64 defect: the caller stores stack argument 0 at `rsp + 32`
+ * (`encode_out_arg_x86` through `out_arg_base`) while the callee read the same
+ * argument 32 bytes lower, inside the home space instead of the argument. SysV
+ * keeps `shadow_space` 0, so every SysV offset here is byte-identical.
  *
  * @param FrameLayoutX86 layout  the enclosing function's resolved frame
  * @return u32  the RSP-relative offset of incoming stack-argument slot 0
  */
 fn in_arg_base_x86(layout: FrameLayoutX86) -> u32 {
-    if !frame_is_framed_x86(layout) { return X86_GPR_BYTES }
+    if !frame_is_framed_x86(layout) { return X86_GPR_BYTES + layout.caller_shadow }
     let n_saved = layout.saved_gpr.len to u32
-    (2 to u32) * X86_GPR_BYTES + (n_saved * X86_GPR_BYTES) + layout.size
+    (2 to u32) * X86_GPR_BYTES + (n_saved * X86_GPR_BYTES) + layout.size + layout.caller_shadow
 }
 
 /**
@@ -1514,6 +1536,7 @@ pub fn compute_frame_layout_x86(abi: AbiDescriptor, f: MFuncX86) -> FrameLayoutX
         call_align = needs_call_align_x86(f)
         out_arg_base = shadow
         fpr_save_base = arg_region
+        caller_shadow = abi.shadow_space
     }
 }
 

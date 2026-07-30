@@ -1974,3 +1974,399 @@ medidas.** E o corolário que o degrau 25 deu, que vale como régua:
 
 Ao fechar qualquer coisa nesta lane: **varra a família inteira e liste os irmãos**, inclusive os que
 não vai corrigir.
+
+## 0x · A leitura da 30563221738 — o que é defeito e o que é o runner a cair
+
+Execução `30563221738` sobre `9a59758`, lida com a execução **ainda a correr**. Cinco causas
+distintas, e três delas não são defeito nenhum:
+
+| perna | veredicto | causa |
+|---|---|---|
+| `artifact / linux-x86_64-glibc`, `artifact / linux-arm64-musl` | **degrau 32, já conhecido** | `TEKO_FIXPOINT_BACKEND: native` → `builtin one_byte not yet lowered (N2) [in teko::encoding::json::parse_string]`. Front-end inteiro passa antes: lexer 143/143, checker 6202/6202, consteval 473/473 |
+| `regressor / all capabilities` | **infra** | `exit 143` + `The runner has received a shutdown signal` |
+| `test / linux-x86_64-musl`, `Memory paranoid (linux-x86_64-musl)` | **infra** | `cancelled` |
+| `test / macos-arm64` | **meu defeito de CI, JÁ CORRIGIDO em `112cae8`** | `check_coff: FAIL — 'llvm-readobj' is absent on Darwin-arm64` |
+| `test / linux-arm64-glibc` | **defeito real, novo** | o casador de padrões |
+| `test / windows-x86_64` | **defeito real, novo** | `ACCESS_VIOLATION` |
+
+### O casador de padrões que se desmente a si próprio
+
+`assert_failure_names_the_scenario_and_both_values` falhou com *"stderr did not contain the declared
+pattern"* — e **a cauda que ele próprio imprime contém o padrão, literalmente**:
+
+```
+  pattern: the_named_case: assertion failed: eq_i64 — expected 42, got 41
+  captured stderr tail:
+teko: deliberate panic: the_named_case: assertion failed: eq_i64 — expected 42, got 41
+```
+
+Ou o buffer que ele CASA não é o que ele IMPRIME, ou o `—` (U+2014) atravessa um dos caminhos
+transformado, ou a captura fecha antes de o `panic` acabar de escrever. Despachado em
+`cargo/0.3.1.0-matcher-padrao-stderr` com ordem de **nomear a causa antes de corrigir**.
+
+Nota que este cenário é precisamente um `deliberate panic` — o caso que o martelo do dono manda
+capturar em modo teste. O defeito do casador é anterior a isso e independente dele.
+
+### Windows: `own_arith_exit` morre em 0xC0000005
+
+```
+exit -1073741819, expected 0        (= 0xC0000005 = ACCESS_VIOLATION)
+the program wrote nothing to stdout or stderr
+```
+
+Escreveu **zero bytes** — morre antes de qualquer saída. Passa em Linux e macOS: é do Win64. A
+primeira suspeita é a que já estava **nomeada e não despachada**: `B3-argslot` — no Win64 os slots de
+registo de argumentos são partilhados por posição entre inteiros e flutuantes; no SysV os dois
+ficheiros contam independentemente. Despachado em `cargo/0.3.1.0-win-arith-av` com ordem de
+**varrer o conjunto de sítios, não perseguir a instância** — que é a objecção que o dono já fez uma
+vez sobre a vtable.
+
+Medido de passagem, e é grave por si: **1946 segundos (32 min) para UM build** em Windows. O dono
+tinha dito 15–20 min como pior caso da org.
+
+### Os unitários: 1129, não 1196
+
+1129 `... ok` em todas as pernas que lá chegaram (arm64-glibc, macos, windows, regressor), e **zero
+`assertion failed` que não seja deliberada**. O número anterior era 1196; a diferença de 67 é
+compatível com a remoção do wasm (57 sítios), mas **compatível não é medido** — fica dito como
+hipótese, não como facto.
+
+### Dois alertas vivos, e a barra do tronco não os aceita
+
+```
+src/lir/frame_escape.tks:274:9: warning: redundant cast: this `to u64` is a provable no-op
+src/lir/frame_escape.tks:290:9: warning: redundant cast: this `to u64` is a provable no-op
+```
+
+`frame_escape.tks` nasceu nesta lane, e é minha. Despachado em
+`cargo/0.3.1.0-cast-hygiene-frame-escape`, com a ordem explícita de **parar e reportar** se o cast
+não for mesmo um no-op — nesse caso o defeito seria do detector, e silenciar o alerta seria o erro.
+
+## 0y · A fronteira do log de CI era minha, não do GitHub
+
+Eu tinha escrito no cabeçalho do `scripts/ci_full_log.sh` que enquanto a execução corre não há como
+ler uma perna vermelha, e que faria falta um `upload-artifact` por job em `pr.yml`. **É falso.** O
+404 é só do ZIP da execução inteira. Os logs **por job**, **integrais**, descarregam-se com a
+execução a meio:
+
+```
+mcp__github__get_job_logs  run_id=<id>  failed_only=true  return_content=false   → logs_url assinado
+curl -sS -o job.txt '<logs_url>'                                                 → o log inteiro
+```
+
+Medido: 4 jobs, 1465–3967 linhas cada, com uma perna ainda `in_progress`. A linha que interessava
+estava a 1538 — fora do alcance de qualquer cauda. **Nenhuma mudança em `pr.yml` era precisa.** É a
+segunda vez neste mesmo ficheiro que proponho mexer no CI para resolver uma limitação do meu
+conhecimento do instrumento. O cabeçalho ficou corrigido contra mim.
+
+Achado de graça: os subagentes **não têm** o MCP do GitHub. Quem busca o URL assinado tem de ser eu;
+o que se delega é a ANÁLISE do ficheiro já em disco.
+
+### Adenda à 30563221738 — a sétima perna, e é a primeira sem log NENHUM
+
+`Memory paranoid (linux-arm64-glibc)` (job `90942752362`) fechou depois de eu ter lido a execução, e
+o veredicto é **infra**, mas por uma assinatura nova que vale registar:
+
+| facto | valor |
+|---|---|
+| `conclusion` | `failure` |
+| passo `Run the regression executor under TEKO_MEM_PARANOID` | **`in_progress`** — nunca concluiu |
+| passo `Post Checkout` | **`pending`** — nunca correu |
+| duração | 16:55:42 → 18:02:44 = **67 min** |
+| `timeout-minutes` do job | **120** — logo **não** foi o timeout do workflow |
+| log | `BlobNotFound` — **zero bytes escritos** |
+
+**Não há o que diagnosticar, e digo-o em vez de inventar uma causa.** Um passo que fica `in_progress`
+com o job `completed`, sem log nenhum, é o hospedeiro a morrer — a mesma família do `exit 143` +
+*shutdown signal* do `regressor` e dos dois `cancelled` da mesma execução. Quatro pernas desta
+execução caíram por causa de runner.
+
+**A hipótese que NÃO afirmo, mas que os números permitem:** o passo pode ter morrido ainda a
+compilar. Medido nas pernas irmãs da mesma execução — corpus `own_native` em **1174 s** no arm64
+simples, e **1946 s para UM build** em Windows. Sob `TEKO_MEM_PARANOID` o arm64 é mais lento ainda.
+67 min sem uma linha de saída é compatível com isso. **Compatível não é medido** — para o provar era
+preciso um log, e é precisamente o que não existe.
+
+**O que isto acrescenta ao instrumento:** o `BlobNotFound` é um sinal útil e não um erro meu. Log
+ausente + passo `in_progress` + job `completed` = **hospedeiro**, e distingue-se de um defeito sem
+gastar uma única leitura de conteúdo. Fica na caixa de ferramentas ao lado do `exit 143`.
+
+## 0z · O casador não estava avariado — o compilador de padrões andava a bytes
+
+O defeito da perna `test / linux-arm64-glibc` não era nenhuma das minhas quatro hipóteses (buffer
+casado ≠ buffer impresso, em-dash transformado no caminho, corrida na captura, normalização do
+`.tkr`). Era uma quinta, e está uma camada abaixo de tudo isso:
+
+> **`teko::regex::compile` percorria o padrão BYTE A BYTE, não por codepoint.**
+
+O padrão declarado traz `—` (U+2014, **3 bytes** em UTF-8: `E2 80 94`). O compilador de padrões
+fazia **três nós `RChar` de um byte cada**, e um byte de continuação isolado não é UTF-8 válido —
+nenhum dos três volta a descodificar para U+2014. Do outro lado, o `is_match` descodifica o **sujeito**
+correctamente por `chars()`, em codepoints reais. **Três pseudo-codepoints malformados nunca consomem
+um codepoint real.** Logo o padrão não podia ser encontrado — não "às vezes": **sempre**, em qualquer
+plataforma, para qualquer padrão com um carácter não-ASCII.
+
+**A inversão:** dois `#test` novos que afirmam exactamente o par padrão/texto do CI. Sobre a árvore
+sem o fixo, **os dois FALHAM**; com o fixo, **os dois passam**, e a suíte inteira fica em **1131
+testes, 0 falhados**. Reproduzido localmente em x86_64 — o que por si já desmente as hipóteses de
+corrida e de truncamento, que exigiriam a plataforma.
+
+### O alcance, medido antes de eu o contar
+
+| | n |
+|---|---|
+| padrões declarados no corpus `.tkr` | **275** |
+| com byte não-ASCII | **21** |
+| destes, `Then diagnostic` — **não afectados** | **17** |
+| destes, `stderr pattern` — **afectados** | **4**, todos em `own_native.tkr` |
+
+O `Then diagnostic` compara por **substring** (`teko::str::contains`, `regression.tks:1780`), não por
+regex — por isso os 17 estavam verdes e continuam. O `pattern` é que entra em
+`TkrMatchMode::Pattern` (`tkr.tks:1113`) e daí no compilador de padrões. **Medi, não inferi**: a
+diferença entre "21 linhas partidas" e "4" era exactamente esta, e eu ia a caminho de dizer 21.
+
+Fora do arnês, **zero** chamadas a `teko::regex` com literal não-ASCII — só três ficheiros usam a
+biblioteca. Não há varrimento a fazer, e poupei um despacho por ter medido primeiro.
+
+### O que este defeito ensina, e é maior do que ele
+
+**Consertar as 4 fixtures trocando o `—` por `-` teria funcionado e teria sido errado.** Escondia um
+defeito de BIBLIOTECA — `teko::regex` é linguagem, não arnês — que morderia o primeiro utilizador a
+escrever um padrão com acento. O agente foi à raiz e não ao sintoma, e é a diferença entre a perna
+ficar verde e o compilador ficar certo.
+
+## 0aa · A parede que comeu meia hora a dois agentes: não havia compilador
+
+O verificador não encontrou defeito em ramo nenhum. Encontrou isto, e é maior:
+
+> **`scripts/fetch_teko.sh` exige `gh` com acesso ao repositório, e esta caixa não o tem.** A única
+> semente em disco era **`0.3.0.30-beta`**, uma versão atrás — e essa **não constrói a árvore**:
+> pára em `src/build/project.tks:2076: unknown function: arch`, porque `teko::arch()` só passou a
+> builtin reconhecido pela semente **depois** do 0.3.0.30.
+
+E o modo de falha era o pior possível: **nada dizia "não tens compilador"**. Dizia coisas sobre
+`arch`, e o `build_with_seed_fallback.sh` esgotava `MAX_PROBES=64` a procurar um degrau construível
+que não existia. Dois agentes queimaram 34 e 38 minutos, 145 e 143 chamadas, contra isto — sem
+conseguirem nomear a parede, porque a parede não se apresentava.
+
+### O desbloqueio, e veio de um instrumento que só o integrador tem
+
+O MCP do GitHub lê artefactos de CI; os subagentes não o têm. A perna `artifact / linux-x86_64-musl`
+da run `30568806559` publicou um `teko-assets-linux-x86_64-musl` — que é um **gen1 `0.3.0.31-beta`**.
+
+```
+mcp__github__actions_list  method=list_workflow_run_artifacts  resource_id=<run>
+mcp__github__actions_get   method=download_workflow_run_artifact  resource_id=<artifact>
+curl <url> | unzip
+```
+
+**Provado, com números:**
+
+| | |
+|---|---|
+| rota nativa | lexer 143/143 · checker 6202/6202 · consteval 473/473 → pára no **degrau 32** |
+| rota C (`TEKO_BACKEND=c`) | **gen1 construído em 88.6 s, pico 1693 MB, rc=0** |
+
+O `arch` desapareceu. A paragem nativa é a mesma do CI — não é defeito de ramo nenhum.
+
+### O conserto durável, e uma correcção a mim a meio dele
+
+`fetch_teko.sh` ganha uma **cache partilhada** (`$TEKO_SEED_CACHE`, por omissão `~/.teko-seed`):
+quem tem como buscar a semente deposita-a uma vez, e todos os worktrees a encontram sem rede e sem
+credencial. Sem `gh` **e** sem cache, o guião **falha alto** e diz como encher a cache — em vez de
+devolver silêncio e deixar o chamador cair numa semente velha.
+
+**E a primeira versão da detecção estava errada.** Escrevi `command -v gh || ! gh auth status` e
+**não disparou**: nesta caixa o `gh` existe e o `gh auth status` sai **0** — o que falha é o
+**acesso ao repositório**, com um 403 que chega como corpo JSON no sítio da etiqueta. Verifiquei um
+**proxy** da condição em vez da condição. A detecção certa é **tentar a chamada e validar a forma
+do que volta**: uma etiqueta casa `^v?N.N.N.N`; um objecto de erro, um vazio e um `null` não casam,
+e caem todos no mesmo ramo sem eu ter de enumerar os modos de falha do `gh`.
+
+Inversão dos dois braços, medida:
+
+```
+cache presente  → "a usar a cache partilhada" · teko 0.3.0.31-beta · rc=0
+cache ausente   → FATAL, nomeia o que falta e como enchê-la · rc=1
+```
+
+É a terceira vez hoje que apanho a mesma patologia, e a segunda em código meu: **uma guarda que
+verifica a coisa errada passa, e passar é o que a torna pior do que não existir.**
+
+## 0ab · A superfície do esboço do dono, MEDIDA — e um `ref` que mente em silêncio
+
+O dono desenhou o encerramento do orquestrador assim:
+
+```teko
+fn orchestrate(c: u64) {
+  ref ch = teko::threads::get_channel_reader(c)
+  loop ch.is_open() {
+   // lê e processa
+  }
+}
+```
+
+Com a semente `0.3.0.31-beta` na mão, fui compilar a superfície em vez de a ler. Resultados, todos
+com programa a correr e código de saída lido:
+
+| forma | veredicto |
+|---|---|
+| `loop <cond> { }` | **EXISTE e compila** — a forma do esboço é real |
+| `ref x: T = <expr>` (local, anotado) | **recusado, e bem**: *"a `ref` binding's source must be a mutable variable (a `var`) or another reference — not an expression"* |
+| `ref x = <expr>` (local, **sem** anotação) | **COMPILA — e é uma CÓPIA** |
+| `ref p: T` (parâmetro, leitura) | funciona |
+| `ref mut p: T` / `mut ref p: T` | **não existe** — erro de parse nas duas ordens |
+| `ref p: T` + escrita no corpo | recusado (B.21) — **não há write-through** |
+
+### O silêncio é o defeito, não a cópia
+
+```
+CONTROLO   mut c; c.open = false; lê c.open              → exit 0   (a mutação ACONTECE)
+ref r = c; muta c;  lê r.open                            → exit 1   (r NÃO vê)
+ref r = c; muta r;  lê c.open                            → exit 1   (c NÃO vê)
+```
+
+**Não aliasa em nenhuma direcção.** E o instrumento está verificado: o controlo prova que a
+atribuição a campo funciona, logo o resultado não é do teste.
+
+Zero diagnósticos. **Nem erro, nem alerta**, e nas **duas rotas** — C e nativa concordam, portanto
+pela regra do oráculo isto não é defeito do backend nativo: é a superfície da linguagem. Alguém
+escreve `ref`, acredita que tem um alias, e recebe uma cópia.
+
+O contraste é o que fecha o caso: a forma **anotada** aplica a regra com uma mensagem precisa; a
+**não anotada**, com a mesma expressão à direita, passa. Um dos dois caminhos não consulta a regra.
+
+### Porque isto morde o desenho do dono exactamente onde dói
+
+A condição de paragem do orquestrador é `ch.is_open()`. Se `ch` for uma cópia, `is_open()` lê um
+retrato congelado do instante da ligação, **o `defer` da `main` fecha o canal e o orquestrador não
+dá por isso** — o laço não termina. A terminação do desenho depende de o alias ser real.
+
+Ressalva honesta: com o modelo de **handles por id** que o dono acabou de fixar, um
+`get_channel_reader(id)` pode devolver um *handle pequeno e copiável* que consulta o registo a cada
+chamada — e aí a cópia é inofensiva. **Isso é decisão de desenho e não é minha.** O que é meu é
+dizer que hoje a palavra `ref` não entrega o que promete e não avisa.
+
+## 0ac · CORRECÇÃO à 0ab: o `ref` aliasa. O que mente é a AUSÊNCIA DA ANOTAÇÃO
+
+O dono corrigiu-me o instrumento — *"a função Get precisa retornar ref e a atribuição da struct tem
+que ser mut"* — e voltei a medir. **A minha conclusão anterior estava errada e a correcção estreita
+o defeito em vez de o apagar.**
+
+Mesma fonte `mut`, mesma expressão, só muda a anotação:
+
+```
+ref r: Ch = c    →  exit 0   ALIASA CORRECTAMENTE
+ref r     = c    →  exit 1   CÓPIA SILENCIOSA
+```
+
+**A anotação é portante, e a sua ausência não avisa.** Zero diagnósticos, nas duas rotas. Não é que
+o `ref` não funcione — é que há **uma grafia dele que se degrada em silêncio**, e é a grafia mais
+natural de escrever. Isso é pior do que uma capacidade em falta: é uma capacidade que finge.
+
+## 0ad · As três rotas para o canal, medidas — e a que o dono apontou é a que anda
+
+O dono ofereceu uma terceira hipótese: *"usar classe para o canal, assim até pode passar o canal
+diretamente ao invés de usar referência, já que objeto é ponteiro"*. Fui medir as três.
+
+| rota | veredicto medido |
+|---|---|
+| **classe** — passa directa | **FUNCIONA HOJE.** `let c = Ch::of()`, passa a `fn shut(c: Ch)`, muta lá dentro, lê cá fora → **exit 0**. E `let b = a; b.open = false;` lê `a.open` → **exit 0**. Aliasa nas duas direcções, **sem `ref` e sem `mut`** |
+| **`ref` anotado** | funciona (acima), mas exige a anotação em toda a parte |
+| **`-> ref T` de um registo** | **BLOQUEADA DUAS VEZES** |
+
+E o duplo bloqueio da terceira merece ser dito com precisão, porque é o caminho que o esboço
+original pedia:
+
+1. **O portão de solidez recusa-o por desenho.** `check_ref_return_passdown` diz: *"a `-> ref T`
+   function may return only one of its own `ref` parameters (identity pass-down) — a reference to a
+   local, a `ref` local, or a stored field cannot escape **until the transitive-escape spine
+   lands**"*. Uma consulta a registo devolve exactamente "a stored field". Medido: o pass-down de um
+   parâmetro próprio compila; o resto é honest-stop.
+2. **E nem sequer se consegue escrever o registo.** Não há estado mutável ao nível do módulo: `mut
+   REG = …` fora de uma função dá *"expected a declaration"*. O registo teria de viver no runtime,
+   atrás de um `extern fn` — e aí o portão nem se aplica, porque já não é código Teko.
+
+**Conclusão que é do dono e não minha, mas que a medição sustenta:** a rota de classe entrega
+semântica de referência **hoje, sem esperar pela espinha de escape transitivo**, e sem depender da
+grafia que mente. `objecto é ponteiro` é literalmente verdade nesta linguagem, e foi medido.
+
+## 0ae · Os `#test` NUNCA passam pelo backend próprio — e isso fala directo ao argumento da superfície
+
+Achado do agente do C0, **verificado por mim antes de o passar** (não aceite de palavra):
+
+```
+src/lir/lower.tks:13480    if f.is_test { return LowerItemOut { … } }     ← descarta ANTES de baixar a LIR
+src/build/project.tks:3440,4697   codegen::tk_emit_c_test(prog, true)      ← o portão NATIVO emite C
+src/codegen/codegen.tks:11699     "tk_emit_c_test — the NATIVE TEST-GATE emission entry"
+```
+
+**O corpo de um `#test` não chega ao backend próprio, nem sequer na rota nativa.** `lower_item_function`
+descarta-o antes de baixar para LIR, e o `run_native_gate` emite sempre o arnês por `tk_emit_c_test`.
+
+Isto não é uma opinião sobre o desenho: é o que a árvore faz hoje, e tem uma consequência que o dono
+tem de saber, porque contradiz um pressuposto dele:
+
+> *"estamos ensinando o compilador a não emitir C, gen2 e gen3 trabalham os testes de modo nativo,
+> logo, precisa ter superfície"*
+
+**Os testes não trabalham de modo nativo.** O produto sob teste é nativo; o **arnês e os corpos de
+teste** são emitidos em C, nas duas rotas. Não digo que esteja errado — digo que o pressuposto que
+sustentava a exigência de superfície não se verifica hoje, e o dono decide o que fazer com isso.
+
+### O requisito de backend do C0: EXISTE, e não é degrau novo
+
+Medido no objecto emitido (x86-64/ELF, `objdump -dr`):
+
+```
+lea 0x0(%rip),%rcx
+    R_X86_64_PC32   .Lclofn0-0x4        ← o `lea` de símbolo COM relocação
+```
+
+`select_func_addr_x86` e `select_func_addr` (ADRP+ADD no arm64) existem nos dois backends. **Tomar o
+endereço de uma função e passá-lo não é capacidade em falta.**
+
+A ressalva, que é o que fica por fazer e não é do C0: o símbolo apanhado é o **thunk liftado**, e
+`lower_fn_value` constrói um par `{fn, env}` **caixotado** passando um ponteiro, enquanto a rota C
+passa `tk_closure` **por valor**. **As duas rotas discordam entre si**, e nenhuma produz um
+`void (*)(void)`. Falta **coerção no front-end**, não capacidade no backend. E a superfície §14.3
+(`run_capturing(body: cabi fn())`) **não é escrevível**: `cabi` não é token deste lexer.
+
+### A inversão do C0, medida
+
+Projecto isolado, mesmo compilador, mesmo C emitido — só o runtime muda:
+
+| | arcos reportados | saída |
+|---|---|---|
+| **com** captura | **5 de 5** — `5 ran; 5 passed; 0 failed` | **0** |
+| **sem** captura | **2 de 5**, sem linha de sumário | **134 (SIGABRT)** |
+
+**Os 3 arcos em falta não falharam: nunca correram.** É a diferença entre um teste vermelho e uma
+suíte muda, e é o argumento inteiro do C0 num número.
+
+### Um defeito que o próprio C0 introduziu e que ele apanhou no seu delta
+
+`emit_test_main_analyze` continuou a fechar em `return 0` cego depois de passar a capturar — e
+`run_analyzer` **lê** esse estado. Ou seja: **`teko test . --analyzer` reportava VERDE uma suíte com
+falhas.** Corrigido em `c716c69f`, com o fecho a passar a função partilhada e a guarda a afirmar os
+dois perfis. É a patologia do dia — um instrumento que passa por olhar para o sítio errado — desta
+vez apanhada pelo próprio autor.
+
+### Adjacente, para mim, fora do C0
+
+`teko_rt_type_ok` (`src/checker/typer.tks:5599`) aceita `Named` em posição de **retorno** num extern
+`from "teko_rt"`, mas o codegen não emite protótipo para esses externs — o sítio de chamada gerado é
+um `invalid initializer` do `cc`. **A árvore aceita no checker o que rejeita no `cc`.** Ou a lei
+deixa de aceitar `Named` no retorno, ou o codegen emite o protótipo mangled.
+
+## 0af · Erro meu de coordenação: retomei um agente que ainda corria
+
+Mandei uma mensagem ao agente do C0 (a semente resolvida) e a ferramenta disse *"had no active task"*.
+Não era verdade — ficaram **duas execuções do mesmo agente na mesma branch e no mesmo worktree**. O
+resultado medido, e falta pouco para ter sido pior:
+
+- uma delas **esmagou uma correcção** que a outra tinha acabado de escrever (reconstituída, sem dano);
+- três `teko test .` de ~2,5 GB numa caixa de 16 GB → uma corrida degradada e **um OOM-kill (137)**.
+
+**A lei que fica: não retomar um agente sem confirmar que parou de facto.** O sinal "no active task"
+não é prova. E worktree por agente não chega se o mesmo agente for instanciado duas vezes.

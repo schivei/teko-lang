@@ -733,6 +733,7 @@ fn xat_no_arg_reg_by_ref_abi() -> AbiDescriptor {
         spill_slot_align = 8 to u32
         shadow_space = 32 to u32
         max_reg_arg_bytes = 8 to u32
+        arg_slots_shared = true
     }
 }
 
@@ -742,4 +743,182 @@ fn xat_by_ref_without_an_argument_register_is_an_internal_stop() {
         MFuncX86 => teko::assert::is_true(false)
         error as e => teko::assert::str_contains(e.message, "cannot pass a by-reference aggregate")
     }
+}
+
+/**
+ * xat_mixed_class_params — a five-parameter `(F64, I64, F64, I64, I64)` function
+ * whose entry block reads every parameter through `LParam`, the fixture that tells
+ * the two argument-slot rules apart (`B3-argslot`).
+ *
+ * The shape is chosen so NO position agrees between them: under SysV's per-file
+ * counters the parameters land in XMM0/RDI/XMM1/RSI/RDX and none overflows, while
+ * under Win64's shared positions they land in XMM0/RDX/XMM2/R9 and the fifth
+ * overflows to the stack-argument area. A rule read from the wrong ABI therefore
+ * cannot produce this fixture's expected text by accident.
+ *
+ * @return lir::LFunc  the built function
+ */
+fn xat_mixed_class_params() -> lir::LFunc {
+    let ptypes = xat_mixed_class_types()
+    mut f = lir::new_func("teko__demo__mixed", 5, ptypes, lir::LType::I64)
+    mut i: u64 = 0
+    loop {
+        if i >= ptypes.len { break }
+        f = lir::append_inst(f, 0, lir::param_inst(i to u32, i to u32, 0, 0))
+        i++
+    }
+    xat_ret(f, 4)
+}
+
+/**
+ * xat_mixed_class_types — the `(F64, I64, F64, I64, I64)` machine-class list both
+ * mixed-class fixtures are built from.
+ *
+ * @return []lir::LType  the five parameter classes, in declaration order
+ */
+fn xat_mixed_class_types() -> []lir::LType {
+    mut ptypes: []lir::LType = teko::list::empty()
+    ptypes = teko::list::push(ptypes, lir::LType::F64)
+    ptypes = teko::list::push(ptypes, lir::LType::I64)
+    ptypes = teko::list::push(ptypes, lir::LType::F64)
+    ptypes = teko::list::push(ptypes, lir::LType::I64)
+    teko::list::push(ptypes, lir::LType::I64)
+}
+
+#test
+/**
+ * xat_win64_params_number_both_files_by_shared_position — the callee half of
+ * `B3-argslot`: Win64 argument position `k` owns the k-th register of WHICHEVER
+ * file the parameter belongs to, so `(F64, I64, F64, I64, I64)` arrives in
+ * XMM0, RDX, XMM2, R9 and the fifth position — past the four shared slots — in the
+ * caller's stack-argument area.
+ *
+ * The old per-file counting answered XMM0, RCX, XMM1, RDX and put NOTHING on the
+ * stack; every one of those five is asserted against here.
+ *
+ * @return void
+ */
+fn xat_win64_params_number_both_files_by_shared_position() {
+    let text = xat_dump_abi(WIN64, xat_mixed_class_params())
+    teko::assert::str_contains(text, "fmov.d %f0, %pf0")
+    teko::assert::str_contains(text, "mov.q %1, %p2")
+    teko::assert::str_contains(text, "fmov.d %f2, %pf2")
+    teko::assert::str_contains(text, "mov.q %3, %p9")
+    teko::assert::str_contains(text, "mov.q %4, [inarg #0]")
+}
+
+#test
+/**
+ * xat_sysv_params_keep_independent_per_file_counting — the byte-identity
+ * guardrail for the same fixture: SysV counts each register file on its own, so
+ * the two floats take XMM0/XMM1, the three integers take RDI/RSI/RDX and nothing
+ * reaches the stack-argument area.
+ *
+ * @return void
+ */
+fn xat_sysv_params_keep_independent_per_file_counting() {
+    let text = xat_dump_abi(SYSV64, xat_mixed_class_params())
+    teko::assert::str_contains(text, "fmov.d %f0, %pf0")
+    teko::assert::str_contains(text, "mov.q %1, %p7")
+    teko::assert::str_contains(text, "fmov.d %f2, %pf1")
+    teko::assert::str_contains(text, "mov.q %3, %p6")
+    teko::assert::str_contains(text, "mov.q %4, %p2")
+    teko::assert::is_false(teko::runtime::str_contains(text, "[inarg #"))
+}
+
+/**
+ * xat_mixed_class_call — a `main` that materializes five values of classes
+ * `(F64, I64, F64, I64, I64)` and hands them to `teko__demo__mixed` as one
+ * result-producing call, then returns the result: the CALLER half of the
+ * mixed-class fixture, mirroring `xat_mixed_class_params`'s signature exactly.
+ *
+ * @return lir::LFunc  the built function
+ */
+fn xat_mixed_class_call() -> lir::LFunc {
+    let f0 = lir::new_func("main", 0, teko::list::empty(), lir::LType::I64)
+    let a = xat_fconst(f0, 1)
+    let b = xat_const(a.func, 2)
+    let c = xat_fconst(b.func, 3)
+    let d = xat_const(c.func, 4)
+    let e = xat_const(d.func, 5)
+    let r = lir::alloc_vreg(e.func)
+    mut args: []u32 = teko::list::empty()
+    args = teko::list::push(args, a.vreg)
+    args = teko::list::push(args, b.vreg)
+    args = teko::list::push(args, c.vreg)
+    args = teko::list::push(args, d.vreg)
+    args = teko::list::push(args, e.vreg)
+    let s0 = lir::append_inst(r.func, 0, lir::call_inst(r.vreg, "teko__demo__mixed", args, false, 0, 0))
+    xat_ret(s0, r.vreg)
+}
+
+/**
+ * xat_fconst — append `%r = const.f64 <bits>` to `f0`, the float twin of
+ * `xat_const`, so a fixture can produce an FPR-classed argument operand.
+ *
+ * @param lir::LFunc f0  the function to extend
+ * @param u64 bits  the literal's IEEE-754 bit pattern
+ * @return lir::FreshVReg  the advanced function + the result VReg
+ */
+fn xat_fconst(f0: lir::LFunc, bits: u64) -> lir::FreshVReg {
+    let r = lir::alloc_vreg(f0)
+    lir::FreshVReg { func = lir::append_inst(r.func, 0, lir::const_float_inst(r.vreg, bits, true, 0, 0)); vreg = r.vreg }
+}
+
+#test
+/**
+ * xat_win64_call_args_number_both_files_by_shared_position — the CALLER half of
+ * `B3-argslot`, and the shape that faulted on Windows: an outgoing
+ * `(f64, i64, f64, i64, i64)` argument list takes XMM0, RDX, XMM2, R9 and one
+ * stack slot, never the SysV-style XMM0, RCX, XMM1, RDX with nothing on the stack.
+ *
+ * This is `tk_ftoa_len(double, uint64_t *out_len)` generalized: its out-pointer is
+ * argument POSITION 1, so it belongs in RDX, and the per-file counter left it in
+ * RCX while the MSVC-built callee wrote through whatever RDX happened to hold.
+ *
+ * Every operand is spelled with its OWN register-file marker, the one
+ * `reg_ref_x86` prints: a virtual FPR is `%fN`, never `%N`. `pin_reg_args_x86`
+ * builds an argument move's destination AND its source from the one `is_fpr`
+ * decision, so an `fmov` whose source carried the GPR spelling was a text no
+ * selection could ever emit — a guard that failed on every host, not a
+ * platform difference. `xat_float_param_lands_in_xmm0_and_returns_in_xmm0`
+ * had already been asserting `fmov.d %pf0, %f0` green over this same pin.
+ *
+ * Inverted against the per-file counting this rule replaced (`WIN64` with
+ * `arg_slots_shared = false`) 4 of these 5 assertions go red; against the
+ * shared-position rule, 0 of 5.
+ *
+ * @return void
+ */
+fn xat_win64_call_args_number_both_files_by_shared_position() {
+    let text = xat_dump_abi(WIN64, xat_mixed_class_call())
+    teko::assert::str_contains(text, "fmov.d %pf0, %f0")
+    teko::assert::str_contains(text, "mov.q %p2, %1")
+    teko::assert::str_contains(text, "fmov.d %pf2, %f2")
+    teko::assert::str_contains(text, "mov.q %p9, %3")
+    teko::assert::str_contains(text, "mov.q [outarg #0], %4")
+}
+
+#test
+/**
+ * xat_sysv_call_args_keep_independent_per_file_counting — the byte-identity
+ * guardrail for the caller half: the same argument list keeps SysV's
+ * XMM0/RDI/XMM1/RSI/RDX with no outgoing stack slot at all.
+ *
+ * The float sources carry the `%fN` file marker for the same reason the Win64
+ * twin above does — the caller-side spelling is the printer's, not the
+ * fixture author's. Its first assertion is BYTE-IDENTICAL to the Win64 twin's,
+ * which is why the two can only ever be red together: a CI leg reporting one
+ * and not the other reported an incomplete run, never a platform difference.
+ *
+ * @return void
+ */
+fn xat_sysv_call_args_keep_independent_per_file_counting() {
+    let text = xat_dump_abi(SYSV64, xat_mixed_class_call())
+    teko::assert::str_contains(text, "fmov.d %pf0, %f0")
+    teko::assert::str_contains(text, "mov.q %p7, %1")
+    teko::assert::str_contains(text, "fmov.d %pf1, %f2")
+    teko::assert::str_contains(text, "mov.q %p6, %3")
+    teko::assert::str_contains(text, "mov.q %p2, %4")
+    teko::assert::is_false(teko::runtime::str_contains(text, "[outarg #"))
 }
