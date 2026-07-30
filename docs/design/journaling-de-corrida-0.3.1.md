@@ -3291,3 +3291,249 @@ do crumb.
 O saldo e negativo em trabalho: **sai** o caminho bloqueante do `recv` e **sai** o panico do segundo
 leitor; **entra** a saida `null`, o `chan_await_record` e a definicao de `is_open` com as duas parcelas.
 **11 crumbs, sem alteracao.**
+
+---
+
+## 26. O `Rec` binario, com assercoes e cobertura — e a Lei 3 fa-lo ENCOLHER
+
+As tres leis condicionam-se, e a ordem de leitura importa: a **Lei 3** tira o texto livre do canal, e
+so por causa disso a **Lei 2** cabe la dentro sem estourar o tecto que a **Lei 1** precisa de ter.
+
+### 26.1 Verificacoes que me foram pedidas — duas confirmadas, uma REFUTADA
+
+| afirmacao | veredicto |
+|---|---|
+| `write_u32` desloca bytes ⇒ little-endian fixo, independente do hospedeiro | **confirmado** (`tkb_buf.tks:8-15`) |
+| 24 funcoes de assercao distintas, volume concentrado em tres | **confirmado**: **24** distintas, **4185** chamadas, e `is_true` **3237** + `str_contains` **574** + `is_false` **311** = **4122**, ou seja **98,5 %** |
+| *"o `.tkb` nao tem magic nem versao"* | **REFUTADO** |
+
+**O `.tkb` TEM os dois, e o precedente e melhor do que se pensava.** `tkb_read.tks:1007` e `:1032`
+devolvem `"not a .tkb (bad magic)"`; `:1010` e `:1035` comparam `TKB_EXPR_VERSION` e
+`TKB_PROGRAM_VERSION` e **a mensagem de recusa diz o que fazer** (*"pre-0.3.1 artifacts ... must be
+rebuilt with the current compiler"*); e `:1016`/`:1041` verificam um hash. **Magic + versao + hash +
+remedio.** Nao ha nada a inventar: o `.tkj` copia esta forma.
+
+### 26.2 A Lei 3 aplicada primeiro — e o `Rec` ENCOLHE
+
+Eu escrevi em §24.4 que um `#test` a chamar `println("ola")` produzia um `Rec` de `kind = "out"`
+embrulhado pelo fundo de emissao. **Sai, e a lei esta certa: sao dois fluxos e nao um.**
+
+E ha um sitio onde por o texto livre que ja existe e ja foi construido para isto — o **terceiro canal**
+(`VERDICT_CHANNEL_ENV`, §15.1), que ficou no desenho precisamente porque *"ha exactamente tres fluxos
+herdaveis em POSIX e em Windows"*. Logo:
+
+| fluxo | por onde | atribuicao |
+|---|---|---|
+| **texto livre** (prints, diagnosticos de build) | **stdout/stderr** do filho → o handler reencaminha para o stdout/stderr do orquestrador | por **prefixo** `out\|`/`err\|`, ja medido em uso |
+| **registos estruturados** (assercao, cobertura, veredicto) | **o terceiro canal** → `chan<Rec>` → segmento `.tkj` | por **campo** `writer`, dentro do registo |
+
+**E dai vem o encolhimento, em cascata:**
+
+1. **sai a variante `out`/`err`** do `Rec`;
+2. o que sobra no canal e **diagnostico**, nao **produto** — e por isso **a variante `cont` de §24.5
+   dissolve-se**: eu tinha escolhido *partir* em vez de *truncar* porque perder saida violava a
+   premissa. Com o produto fora do canal, o que la viaja e um `expected`/`got` que se localiza nos
+   primeiros bytes. **Passa a cap com marca explicita `truncated`**, e a razao da inversao esta dita:
+   truncar o produto era perda, truncar um diagnostico e um corte assinalado;
+3. **`REC_MAX` deixa de ter de acomodar texto arbitrario**, que era a condicao que o integrador
+   nomeou;
+4. e a previsibilidade de §24.1 **volta a ser funcao da estrutura**: um ciclo patologico a imprimir
+   inunda o **stdout**, que tem contrapressao do SO, e nao o anel.
+
+**O custo declarado, e nao escondido:** as duas metades passam a ter garantias **diferentes**. Entre
+**processos** a saida livre e atribuida por prefixo. Entre **raias**, com `print` directo para um
+stdout partilhado, **N raias entrelacam-se e a atribuicao perde-se**. E defensavel — o texto livre de
+uma raia e diagnostico humano, e o que precisa de atribuicao (veredicto, assercao, cobertura) viaja
+pelo canal com o `writer` dentro — mas **e decisao, nao consequencia**, e fica escrita como tal.
+
+### 26.3 A forma do `Rec` — variante por especie
+
+```teko
+/**
+ * Rec — um registo do journal. VARIANTE e nao struct plana: um `assert` e um `cov` nao tem campos em
+ * comum alem do cabecalho, e uma struct plana pagaria os dois em cada registo.
+ *
+ * SEM `out`/`err` (Lei 3): texto livre nao entra no tunel.
+ *
+ * @since 0.3.1
+ */
+pub type Rec = variant RecAssert | RecCov | RecVerdict
+
+/**
+ * RecHead — o que TODO o registo carrega, e nada mais entra aqui.
+ *
+ * @since 0.3.1
+ */
+pub type RecHead = struct {
+    /** quem escreveu — a mesma chave do segmento (§2.2) e o que torna o fan-in atribuivel. */
+    writer: str
+    /** ordinal monotonico POR ESCRITOR: da a ordem por origem (§16.5) e torna uma perda DETECTAVEL. */
+    seq: u64
+    /** o que o registo nomeia: o `#test` ou `<ficheiro>.tkr[<cenario>]`. */
+    subject: str
+}
+
+/**
+ * RecAssert — UMA assercao: o que tocou, o que era esperado, o que foi medido.
+ *
+ * ISTO E O QUE FALTAVA, e o custo de nao o ter esta medido: a fixture `ref_mutable_binder` pontuava
+ * SETE assercoes em sete bits do codigo de saida, e quando falhou o que se soube foi `exit 99,
+ * expected 127` — bits descodificados a mao. Pior: os 7 bits so cobriam escritas de CAMPO, logo a
+ * fixture nao via a reatribuicao de valor inteiro, e o referente escalar dava SIGSEGV enquanto ela
+ * devolvia um numero plausivel. **Um numero que aliasa direccoes nao medidas e pior que um teste em
+ * falta.** Com esta variante, cada assercao e uma linha com nome, esperado e medido.
+ *
+ * @since 0.3.1
+ */
+pub type RecAssert = struct {
+    /** o cabecalho comum. */
+    head: RecHead
+    /** qual das 24 (`is_true`, `str_contains`, …) — a especie decide como `expected`/`got` se leem. */
+    kind: str
+    /** `<ficheiro>:<linha>:<coluna>` do sitio de chamada, injectado pelo codegen (§26.5). */
+    site: str
+    /** o texto do argumento, tal como escrito na fonte — o "o que tocou". */
+    expr: str
+    /** o que era esperado, ja renderizado. */
+    expected: str
+    /** o que foi medido. */
+    got: str
+    /** verdadeiro quando `expected`/`got` foram cortados em `REC_MAX` — corte ASSINALADO, nunca mudo. */
+    truncated: bool
+}
+
+/**
+ * RecCov — cobertura, LINEAR a medida que entra (a lei do dono sobre o `.tkcov`, §5.2).
+ *
+ * COM UM CONSUMIDOR SO, A SOBREPOSICAO POR CONCORRENCIA DEIXA DE TER COMO ACONTECER — que era o
+ * defeito com que este documento comecou. O agregador le no fim, como ele ja tinha fixado.
+ *
+ * @since 0.3.1
+ */
+pub type RecCov = struct {
+    /** o cabecalho comum. */
+    head: RecHead
+    /** que sumidouro: `fn` / `line` / `branch`. */
+    sink: str
+    /** os identificadores empacotados que este registo acrescenta (o formato do `.tkcov`, §5.2). */
+    ids: []u64
+}
+
+/**
+ * RecVerdict — o veredicto MEIO-PRONTO de um caso: decidido na origem, somado no fim.
+ *
+ * "MEIO-PRONTO" E O CONTRATO: quem correu o caso ja sabe se ele passou, falhou ou saiu — e essa
+ * decisao viaja decidida. O que o sumarizador NAO recebe pronto esta em §26.6, e e exactamente o que
+ * so ele pode fazer.
+ *
+ * @since 0.3.1
+ */
+pub type RecVerdict = struct {
+    /** o cabecalho comum. */
+    head: RecHead
+    /** `ok` / `fail` / `exited` / `skip` / `not-applicable` (§21.3). */
+    outcome: str
+    /** o valor de `exit(n)` quando `outcome` e `exited` (§14); 0 nos outros. */
+    code: i32
+    /** quantas assercoes este caso correu — permite detectar um caso que morreu a meio. */
+    asserts: u64
+    /** nanossegundos de parede do caso. */
+    ns: u64
+}
+```
+
+### 26.4 O enquadramento binario, e porque ele e o argumento mais forte
+
+**O argumento do enquadramento e melhor do que o da velocidade, e e o que defende a lei.** Um registo
+de uma linha em texto tem de responder ao que acontece quando a carga contem uma quebra de linha — **e
+contem**: `expected`/`got` de um `str_contains` sobre um diagnostico de compilador tem-nas as dezenas
+(e o `COMPILE_FAIL_HEAD_LINES` existe precisamente para as cortar). Ou se escapa, pagando custo e bugs
+**nas duas pontas**, ou se quebra a invariante de uma linha e **o entrelacamento volta**. **Com quadro
+prefixado por comprimento, a carga e opaca e o conteudo nao pode corromper o enquadramento.**
+
+```
+cabecalho do ficheiro (uma vez):
+  magic     "TKJ1"        4 bytes
+  format    u32           a versao do FORMATO — governa a leitura
+  toolchain u32 u32 u32   a versao do compilador que escreveu — governa a INTERPRETACAO (§26.4.1)
+
+quadro (repetido, append-only):
+  len   u32               bytes da carga que se segue
+  kind  u8                1=assert 2=cov 3=verdict
+  carga len bytes         opaca ao enquadramento
+```
+
+Tudo little-endian por `write_u32` (`tkb_buf.tks:8-15`), **sem hash de ficheiro**: um `.tkj` cresce por
+append e um hash total exigiria reescreve-lo. **Um quadro rasgado no fim detecta-se por `len` maior do
+que o que resta** — o analogo append-only da regra de §4 (*"a ultima linha sem `\n` e descartada"*),
+e a mesma resposta ao mesmo modo de falha.
+
+#### 26.4.1 A travessia entre maquinas — e a descoberta que ela obriga
+
+O cenario do dono — *"CI falhou mas guardou o journal, baixo e inspecciono na minha maquina"* —
+**e LEITURA, nao execucao nem transpile**. Um journal e o registo do que aconteceu, nao um programa.
+Confirmo a leitura do integrador.
+
+**E ele obriga a uma distincao que eu nao tinha: nem tudo no `.tkj` e igualmente portavel.**
+
+| conteudo | portavel entre versoes? |
+|---|---|
+| `RecAssert`, `RecVerdict` | **sim** — sao auto-descritivos, texto e numeros |
+| `RecCov` | **NAO** |
+
+**A razao esta medida na arvore**, no comentario do proprio protocolo `.tkcov`: *"the coverage id is
+the prog.items index in BOTH processes (they share the same TProgram)"*. **Um identificador de
+cobertura e um indice para um `TProgram` — e dois compiladores diferentes tem `TProgram` diferentes.**
+
+Logo a regra do leitor, e ela e precisa em vez de binaria: **`format` diferente ⇒ recusa total, com a
+mensagem no estilo do `.tkb` (dizer o remedio). `toolchain` diferente ⇒ assercoes e veredictos
+renderizam-se; a cobertura e RECUSADA com a razao nomeada.** Renderizar cobertura de outra versao
+seria interpretar indices para uma tabela que nao se tem — o erro escondido classico.
+
+**A fronteira de conversao:** o `.tkj` em disco e **sempre** binario; o orquestrador desserializa,
+imprime o humano e reescreve o binario no segmento. E **`--replay` le o binario** — e a mesma leitura
+que o `teko journal <path>.tkj -o saida.log` faz, com dois frontends sobre **um** leitor.
+
+### 26.5 A superficie de assercao — 4185 sitios, ZERO tocados
+
+**As tres de maior volume sao 98,5 % das chamadas** (3237 + 574 + 311 de 4185). Se mudar a assinatura
+delas custasse tocar nos sitios, isto era um mes.
+
+**Nao custa, e a razao ja esta a funcionar na arvore ao lado.** `teko::assert::*` sao **builtins
+injectados** (`scope.tks`), logo **o codegen e que lowera a chamada**. Ele ja faz exactamente isto para
+outra coisa: `emit_cov_line` emite `tk_cov_line_at(<fn_idx>, <line>)` — **a posicao e injectada pelo
+compilador, nao escrita pelo autor**.
+
+Portanto: `teko::assert::is_true(c)` lowera para `teko__assert__is_true(c, <site_id>)`, onde `site_id`
+indexa uma tabela estatica que o codegen emite com `<ficheiro:linha:coluna>` e **o texto do argumento
+tal como escrito**. **Os 4185 sitios de chamada nao mudam um caracter.** O que muda: uma tabela nova no
+emissor, o parametro extra nas 24 assinaturas do seed C, e o `RecAssert` a ser emitido em vez de
+(apenas) o panico.
+
+**Isto e a diferenca entre um crumb e um mes, e o precedente esta no mesmo ficheiro.**
+
+*Guarda:* o `expr` de um `RecAssert` tem de **casar com a fonte** naquele `site` — verificavel lendo o
+ficheiro na posicao dada · **vivacidade**: duas assercoes na mesma linha tem `site` **diferentes**
+(coluna), senao a tabela esta a colapsar sitios.
+
+### 26.6 Quem agrega o que
+
+| chega **pronto** no `Rec` | o sumarizador ainda **calcula** |
+|---|---|
+| o veredicto de cada caso (`outcome`, `code`) | as somas por fase e o TOTAL (§13) |
+| cada assercao com `expected`/`got`/`site` | a lista de achados NOMEADOS, ordenada |
+| os ids de cobertura por sumidouro | a **uniao** entre escritores — so o pai a pode fazer |
+| a contagem de assercoes e o tempo por caso | as **fasquias**: exigem a caminhada estatica sobre o `TProgram`, que so o pai tem |
+| — | `never-ran` = `plan` − recebidos (§13.2) |
+
+**A regra: o sumarizador nao RE-DECIDE nada.** Ele soma, une e renderiza. Um veredicto que chegasse
+por decidir poria a decisao longe de quem tem os factos — que e o defeito do `exit 99` da
+`ref_mutable_binder`, uma camada acima.
+
+### 26.7 O custo
+
+**Nenhum crumb novo, e o saldo e negativo.** Toca no **C1** (o enquadramento e o `Rec`), no **C4** (o
+sumarizador recebe mais pronto e calcula menos) e acrescenta o subcomando `teko journal` ao **C9**, que
+ja era o `--replay` — **dois frontends, um leitor**. **Nao toca em F1–F6**: e superficie do que o F4 ja
+constroi. E **sai** trabalho: a variante `cont`, o embrulho de `out`/`err` no fundo de emissao, e a
+necessidade de `REC_MAX` acomodar texto arbitrario. **11 crumbs.**
