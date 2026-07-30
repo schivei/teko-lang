@@ -2095,3 +2095,146 @@ nao-atomico colide de forma reprodutivel com duas raias e 100 000 voltas.
    e a costura nao muda, mas simetrico no papel nao e medido.
 4. **A arena por tarefa nao da threads a Teko.** Ela remove o que travava a S8; `spawn` e `chan<T>`
    continuam por construir, e o §16 continua a construir apenas o fundo minimo.
+
+---
+
+## 18. `chan<T>` e MPSC — a fronteira, fixada pelo dono (2026-07-30)
+
+> *"`chan<T>` e fan-in, varios escritores, um leitor. Para ter um fan-out 'N:M', teria que ser outro
+> tipo de estrutura, que ate pode operar sobre um `chan<T>` mas que precisaria de uma segunda
+> estrutura capaz de broadcasting e multiplas copias."*
+
+**Lei do desenho: `chan<T>` e MPSC. N escritores, UM leitor. Nao e MPMC, nao e difusao.**
+
+### 18.1 Como o TIPO o impoe — e a resposta nao e "por convencao"
+
+O tipo parte-se em dois, e os dois extremos nao sao o mesmo valor:
+
+```teko
+/**
+ * Tx — o extremo de ESCRITA de um canal. Copiavel de proposito: os N escritores sao a metade que
+ * pode ser multipla.
+ *
+ * @since 0.3.1
+ */
+pub type Tx = struct { raw: i64 }
+
+/**
+ * Rx — o extremo de LEITURA. UM, e a unicidade e a razao de ele existir como tipo separado.
+ *
+ * PORQUE UM TIPO E NAO UMA REGRA: com um `chan<T>` unico, "nao chames `recv` em duas tarefas" e uma
+ * frase num comentario, e uma frase nao falha. Com o extremo separado, ter dois leitores exige ter
+ * dois `Rx` — e passa a ser um ACTO explicito que o §18.2 faz falhar, em vez de um descuido que
+ * ninguem ve.
+ *
+ * @since 0.3.1
+ */
+pub type Rx = struct { raw: i64 }
+
+/**
+ * open — abrir um canal e devolver os seus dois extremos.
+ *
+ * @param cap_bytes  a folga do anel; LIMITADO por lei (§15.7/§16.5)
+ * @param producers  quantos escritores vao existir (o `recv` so diz `closed` quando o ultimo sair)
+ * @return           o extremo de escrita (copiavel) e o de leitura (unico)
+ * @throws           quando o canal nao pode ser criado
+ * @since 0.3.1
+ */
+pub fn open(cap_bytes: u64, producers: u32) -> ChanEnds | error
+
+/** send — empurrar um registo rotulado. N escritores, sem coordenacao entre eles. */
+pub fn send(t: Tx, writer: str, bytes: str) -> null | error
+
+/** recv — tirar o proximo registo. UM leitor; um segundo PANICA (§18.2). */
+pub fn recv(r: Rx) -> ChanMsg | closed
+```
+
+### 18.2 Erro de verificador, erro de runtime, ou corrida silenciosa? — **runtime, hoje; e nunca silenciosa**
+
+Fui medir antes de prometer, porque foi a §17 que me ensinou a nao repetir adjectivo emprestado.
+
+| camada | estado MEDIDO | o que apanha |
+|---|---|---|
+| **tipo separado (`Tx`/`Rx`)** | desenhavel hoje | obriga a que dois leitores sejam um acto explicito: copiar o `Rx` |
+| **verificador** | **NAO disponivel hoje.** A rede de unicidade existe — `spine.tks` tem o reticulado `UsUnique < UsShared < UsTop` — mas **nao e consultada em lado nenhum**; o proprio `borrow.tks` diz do seu par: *"Consulted NOWHERE yet ... fixpoint is preserved by construction"* | (nada, hoje) |
+| **runtime** | **disponivel, e e o que garante** | tudo o resto, incluindo o que chegue por FFI ou pelo runtime em C |
+
+**A garantia efectiva e de RUNTIME e e deterministica:** `tk_chan` grava a identidade da tarefa que
+fez o **primeiro** `recv`. Um `recv` vindo de outra tarefa **panica** com a mensagem nomeada
+(`teko: chan has a second reader — chan<T> is MPSC`). Nao ha corrida silenciosa: ou e o dono do
+`Rx` a ler, ou o programa para e diz porque.
+
+E ela **pode falhar**, que e a unica coisa que a distingue de decoracao:
+
+```teko
+#test
+/**
+ * ch_a_second_reader_panics — o segundo leitor tem de PARAR o programa, com a fronteira nomeada.
+ *
+ * @throws quando um segundo `recv` de outra tarefa NAO panica — o que significaria que a fronteira
+ *         do dono e um comentario
+ */
+fn ch_a_second_reader_panics() {
+    teko::assert::str_contains(ch_run_two_readers().panic_text, "chan<T> is MPSC")
+}
+
+#test
+/**
+ * ch_the_guard_is_not_vacuous — vivacidade: o canal com UM leitor tem de entregar os registos dos
+ * DOIS escritores. Sem isto, um canal que panicasse sempre passaria o teste acima.
+ */
+fn ch_the_guard_is_not_vacuous() {
+    teko::assert::eq_u64(ch_run_two_writers_one_reader().received, 2)
+}
+```
+
+**O que NAO prometo:** rejeicao em compilacao. Ela e alcancavel — o consult site seria o reticulado de
+`spine.tks`, um `Rx` que ele junte a `UsShared` e um erro — mas **ligar a espinha e trabalho que nao
+esta nos 11 crumbs** e nao o contrabandeio para dentro deles. Fica **REPORTADO** como o upgrade
+natural: quando a espinha for consultada, esta regra e um dos seus primeiros clientes, e o painel de
+runtime continua como rede para o que vier por FFI.
+
+### 18.3 O meu fan-in ja e estritamente MPSC — verificado, e o unico ponto duvidoso nomeado
+
+Percorri o desenho a procura de um segundo leitor. **Nao ha.**
+
+* §16.4 `orchestrate` — o **unico** `recv` do documento;
+* §16.4 `drain_into` — so `send`, e ha **2 por filho** (stdout e stderr), logo `2N` escritores para
+  `N` filhos e **1** leitor;
+* §2.4 `gate_summary` e §13 `summarize` — leem **segmentos de journal em disco**, nunca o canal;
+* `pump` (§15.3) era a forma central que a §16 rectificou; ela nao lia canal nenhum, porque nessa
+  versao nao havia canal.
+
+**O ponto que merecia ser nomeado e a invariante do consumidor, e ela ja implicava isto sem o dizer:**
+*"o orquestrador nunca bloqueia em nada que nao seja `recv`"* (§16.4). Um segundo leitor seria uma
+segunda tarefa bloqueada em `recv` — proibida por essa linha antes de a lei do dono existir. A lei do
+dono torna explicito o que a invariante ja exigia.
+
+### 18.4 A segunda estrutura (N:M) — NOMEADA, nao desenhada, e com a divida precisa
+
+O dono disse que o N:M pode assentar sobre um `chan<T>` mas exige difusao e **multiplas copias**. A
+divida nao e a difusao: e a **posse**.
+
+**A diferenca essencial, em uma linha:** num MPSC cada registo e consumido **uma** vez, logo nao ha
+contagem de referencias e nao ha pergunta de tempo de vida. Numa difusao o registo e consumido **N**
+vezes, e e *por isso* — nao por gosto — que ela precisa de uma regra de posse.
+
+**E com a raiz por tarefa (C-A, §17) a pergunta fica afiada:** um valor alocado na raiz da tarefa A e
+um ponteiro pendurado no instante em que A rebobina. Portanto uma difusao **nao pode transportar
+referencias para arenas alheias**. Quem pegar nisto tem de decidir, e ainda ninguem decidiu:
+
+| pergunta | opcoes conhecidas, nenhuma escolhida |
+|---|---|
+| **quem e dono do valor difundido** | (i) ninguem — o runtime guarda-o numa area `malloc`ada e cada receptor **copia para a SUA arena ao receber** (e a forma que o `tk_chan` de §16 ja usa para bytes); (ii) uma regiao partilhada com contagem de referencias; (iii) valor imutavel com prova de escape de que sobrevive a todos os receptores |
+| **quando morre** | (i) na ultima copia feita — precisa de saber quantos receptores ha; (ii) na contagem a chegar a zero; (iii) no fecho do ultimo receptor |
+| **o que acontece a um receptor lento** | com contrapressao, ele trava os outros; sem ela, a memoria cresce. O MPSC resolve-o com um anel limitado; a difusao tem de o resolver **por receptor** |
+
+**Nao construo nada disto, e nao e preciso para os 11 crumbs.** Fica registado com detalhe suficiente
+para nao ser redescoberto: a difusao e um problema de **tempo de vida atraves de fronteiras de
+arena**, e so se torna respondivel **depois** do C-A, porque e o C-A que cria as fronteiras.
+
+### 18.5 O que isto muda nos crumbs
+
+**Nada.** Os 11 crumbs ficam como estao — o fan-in ja era MPSC (§18.3), e a fronteira do dono
+confirma-o em vez de o alterar. A unica adicao e dentro do C1: o `Tx`/`Rx` separados e o painel de
+segundo-leitor, que sao ~15 linhas do `tk_chan` que aquele crumb ja constroi.
