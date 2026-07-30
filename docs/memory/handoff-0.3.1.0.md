@@ -109,6 +109,32 @@ resultado é uma DISCREPÂNCIA a medir, não um lado a acreditar. Eu fiz as duas
 primeiro aceitei sem confrontar, depois dispensei sem medir.
 
 
+
+### ESTADO MEDIDO DO VAGÃO — topo `2d65bb87`, execução 30515067207 (log integral)
+
+**O que MELHOROU hoje, medido e não suposto:**
+
+| | antes | agora |
+| --- | --- | --- |
+| fase de testes unitários | abortava com SIGABRT; **269 dos 1117** nunca arrancavam | **1117/1117, zero pânicos** em todas as pernas Linux |
+| `assertion failed: str_contains` | em duas pernas | **desapareceu** |
+| degrau 28 (`s[i] = v`) | vermelho em **todas** as pernas | **fechado** |
+| `LNK1120`/`LNK2019` (Windows, 128 bits) | matava a perna `artifact` | **zero** |
+| skips | **21** na perna arm64-glibc | **`0 skipped` em TODAS as pernas** |
+| pernas do Windows | nunca corriam (sem asset) | correm — e destaparam o `.exe` |
+
+**OS TRÊS VERMELHOS QUE RESTAM, todos com dono:**
+
+| vermelho | onde | quem |
+| --- | --- | --- |
+| `assertion failed: is_true` | `pt_target_name_and_objfmt_are_one_source`, **só macOS** | agente vivo (gémeo) |
+| `native backend N1: builtin ftoa` | `teko::codegen::cb_f64_literal` — a paragem do self-host | agente vivo (degrau 27) |
+| `A4-fp: float-op / FPR encoding deferred to 0.3.1` | `own_arith_exit`, arm64 | **degrau 29, na fila** |
+| `ERROR: … no dl/windows-x86_64/teko.exe` | `src/build/project.tks:1827` e `:2635` | agente vivo (`.exe`) |
+
+**CINCO AGENTES VIVOS** (todos com escrita recente): degrau 27, leitura fora de fronteira, gémeo de macOS,
+`kind` desconhecido, `.exe`. **Teto é 4** — quando dois fecharem, repor só um.
+
 ### DISCIPLINA DE PUSH — medida em 2026-07-30, e o defeito era meu
 
 **Medido:** das últimas oito execuções de `pr.yml` no vagão, **sete estavam `cancelled`**. A única com
@@ -176,7 +202,7 @@ fechar, o ponto de fixo nativo não fecha e as duas pernas nativas ficam vermelh
 | 26 | `append_fo` sem lowering, em `teko::codegen::cb` | **fechado e DRENADO** — confirmado: já não aparece |
 | **27** | **builtin `ftoa` sem lowering**, em `teko::codegen::cb_f64_literal` | **ABERTO — é a paragem viva do self-host**, idêntica em `artifact/linux-x86_64-glibc` e `artifact/linux-arm64-musl` |
 | **29** | **`A4-fp`: codificação de operação de float / FPR em arm64**, em `own_arith_exit` | **ABERTO — descoberto ao drenar o 28.** É o **gémeo arm64** do arco `b1-fp-x86`, que fechou os floats só para x86-64 |
-| **28** | **atribuição a elemento de slice (`s[i] = v`) sem lowering**, em `own_native::f_implicit_widen_targets` | **ABERTO, e é REGRESSÃO DO MEU DRENO** — parte a linha `own_arith_exit` em **todas** as pernas |
+| 28 | atribuição a elemento de slice (`s[i] = v`) sem lowering | **FECHADO e DRENADO** (`36b2ab45`) — confirmado no CI: já não aparece. Foi regressão do meu dreno |
 
 Texto exacto das duas, do log completo (§2c):
 
