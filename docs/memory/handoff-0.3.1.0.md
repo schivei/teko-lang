@@ -19,6 +19,50 @@ hipótese, está dito.
 
 
 
+## 0t. A PERNA WINDOWS: a minha hipótese REFUTADA, e um erro ENGOLIDO (2026-07-30)
+
+`cargo/0.3.1.0-windows-leg-3` @ `8b8496d` drenado, com o `drain_guard` já a afirmar o destino. Conferências: `fn` do `lower.tks` **571 → 574**, `isel_x86_64.tks` **64 → 68**, zero splices.
+
+**Nota de método sobre a conferência de chaves:** ela acusou `+2` em `lower_test.tkt`. **Ruído do meu instrumento** — `+2` antes do merge, `+2` na branch e `+2` depois, e o ficheiro tem 4 interpolações `$"{…}"` cujas chavetas o contador lê como aberturas. **A invariante certa é o DELTA, não o zero absoluto.** Já me tinha registado que contar chaves é ruído em ficheiros com interpolação; a lição agora é a correcção do método, não a repetição do aviso.
+
+### A CAUSA: `/tmp` não existe em Windows, e o erro era ENGOLIDO
+
+Eu tinha-lhe mandado a hipótese de que o *read-modify-write* do `verdict_emit` fosse a causa. **Refutada, e estruturalmente, não por estatística:** `tk_rt_read_file` faz `fclose` **antes** de devolver, e só então `tk_rt_write_file` faz `fopen` — nunca coexistem dois handles, e no teste unitário não há segundo escritor. **O probe dele correu com o read-modify-write intacto e passou.**
+
+A cadeia real, sem saltos escondidos:
+
+```
+process_test.tkt:22  literal "/tmp/.regr-verdict-emit-test.chan"
+  → verdict_emit → teko::io::write_file → tk_rt_write_file
+  → fopen(p, "wb")  →  NULL em Windows, que nao tem /tmp
+  → erro ENGOLIDO por  match { error => { } }
+  → read_file erra → content = "" → a 3.ª assercao falha
+```
+
+**O defeito que interessa não é o `/tmp`: é o `match { error => { } }`.** A escrita falhava, ninguém era avisado, e a asserção que rebentava era **três passos a jusante** — a apontar para a semântica do acrescentar quando o que partira fora a abertura do ficheiro. Um erro engolido move o sintoma para longe da causa, que é exactamente o que nos custou meio dia com o `unknown function`.
+
+O conserto pina a mesma regra sem o host (canal relativo ao directório de trabalho, a convenção que o harness já usa), **sem retirar cobertura** — a asserção de conteúdo fica e entram duas que provam o passo que falhava em silêncio. E a **ordem** das asserções passa a diagnosticar: falha a 1.ª/2.ª = a escrita; falha a 3.ª = a semântica.
+
+### A ABI DO PAR GORDO: as quatro entradas, enumeradas e não amostradas
+
+`fat_arg_builtin_arity` passa a ser a **fonte única** — **1** para os sete, **2** para `tk_str_eq`, `tk_str_contains`, `tk_str_ends_with`, `tk_rt_last_index_of_ok`, **0** para a família que o runtime achatou de propósito — e `is_str_arg_builtin` **deriva** dela (`== 1`). Conferido no vagão: a função deriva mesmo, e os quatro símbolos estão lá.
+
+Goldens `WIN64` que **enumeram as quatro**, mais o espelho SysV e um que afirma que a família achatada **não** materializa nada. **Provado por inversão:** com a regra antiga (só aridade 1), `xat_win64_tk_str_eq_passes_both_pairs_by_reference` falha em `assertion failed: str_contains`.
+
+### RITUAL
+
+`native_dry_gate` **idêntica** (degrau 32) medida na **gen2 de cada árvore**, dito explicitamente; **fixpoint `gen2 == gen3` byte a byte e `gen2.c == gen3.c`**; unitários **1175** (1167 + 8), 0 falhas; regressões **11 corridas, 0 falhadas** — e desta vez `regressor.tkr` ok com **`alias_fat_field` nas duas rotas** (em Linux); `TEKO_MEM_PARANOID=1` exit 0.
+
+### A PREVISÃO QUE ELE DEIXOU, e vale mais que o conserto
+
+**`B3-argslot` vai morder a perna Windows LOGO A SEGUIR a esta correcção.** `arg_slot_x86`/`select_param_x86` contam os dois ficheiros de registos **independentemente** — a regra da **SysV**. O Win64 numera as ranhuras **partilhadas por posição** (XMM0 *e* RCX são ambos a ranhura 0). Logo toda a entrada de runtime com um `double` à cabeça e GPRs a seguir sai com os registos deslocados um lugar: `tk_ftoa_len`, `tk_f64_g17_len`, `tk_fmt_f_len`/`_e_`/`_g_`/`_p_`, `tk_fmt_n_f_len`, `tk_fmt_dyn_f64_len`. O `out_len` de `tk_ftoa_len(double, uint64_t*)` viaja em RCX e o chamado lê RDX → **escrita por ponteiro lixo**. O corpus toca-o em `f_static_format_spec` e `f_dynamic_format_spec`.
+
+**Teko↔Teko fica consistente** (as duas pontas usam a mesma contagem); **só as chamadas para C partem**. O próprio `abi_win64.tks:6` já nomeia isto como adiado. **Não corrigido de propósito:** exige campo novo no `AbiDescriptor`, com raio de explosão sobre os quatro descritores e os goldens do regalloc, e é classe de defeito distinta. **Fica na fila com causa já provada — não é para descobrir outra vez.**
+
+### POR MEDIR
+
+O arco C de `alias_fat_field` **em Windows** continua por medir (não há runner aqui; em Linux passa nas duas rotas). Nada nesta branch executa código Win64 — **a prova é de EMISSÃO, não de execução**. E uma função Teko com 3+ parâmetros `str` a transbordar a janela de 4 registos do Win64 não foi exercitada.
+
 ## 0s. O `exit 25` NÃO ERA DE arm64 — era uso-depois-do-retorno em TODA a arquitectura (2026-07-30)
 
 `cargo/0.3.1.0-agregado-copia-arm64` @ `080c320` drenado. Conferências: `fn` do `lower.tks` **559 → 571**, `corpus.tks` **246 → 246** (intocado), guarda nova com 14 `fn` e **nenhuma órfã**, zero splices, 138 chamadas `f_*` todas definidas.
