@@ -10,20 +10,29 @@
  * @return void
  */
 fn verdict_channel_path_reads_the_env_var() {
-    match teko::env::set_var(VERDICT_CHANNEL_ENV, VERDICT_PATH_TEST_CHANNEL) { error => { }; null => { } }
-    teko::assert::is_true(verdict_channel_path() == VERDICT_PATH_TEST_CHANNEL)
+    match teko::env::set_var(VERDICT_CHANNEL_ENV, verdict_path_test_channel()) { error => { }; null => { } }
+    teko::assert::is_true(verdict_channel_path() == verdict_path_test_channel())
 }
 
 /**
- * VERDICT_PATH_TEST_CHANNEL — the channel name `verdict_channel_path_reads_the_env_var` round-trips
- * through the environment. Never opened, and deliberately NOT the emit test's name so the two
- * cannot interfere whichever order (or worker) runs them.
+ * verdict_path_test_channel — the channel name `verdict_channel_path_reads_the_env_var` round-trips
+ * through the environment. Never opened, and deliberately NOT the emit test's name so the two cannot
+ * interfere whichever order (or worker) runs them.
+ *
+ * A FUNCTION AND NOT A CONST, because the name is DERIVED: `teko::test::scoped` appends the running
+ * test's identity, which a `const` cannot do and which is what makes "whichever worker runs them"
+ * true by construction rather than by the two names happening to differ.
+ *
+ * @return this test's own channel name, relative to the working directory
  */
-const VERDICT_PATH_TEST_CHANNEL: str = ".teko-verdict-path-test.chan"
+fn verdict_path_test_channel() -> str { teko::test::scoped(".teko-verdict-path-test.chan") }
 
 /**
- * VERDICT_EMIT_TEST_CHANNEL — the channel file `verdict_emit_appends_to_the_named_channel` writes,
+ * verdict_emit_test_channel — the channel file `verdict_emit_appends_to_the_named_channel` writes,
  * reads back and removes.
+ *
+ * SCOPED, for the reason its sibling above is: the name carries the running test's identity, so a
+ * second test that ever spelled the same base could not collide with this one in another shard.
  *
  * RELATIVE, AND THAT IS THE FIX: this test used to name `/tmp/.regr-verdict-emit-test.chan`, which
  * is a claim about the HOST's directory layout and not about `verdict_emit`. Windows has no `/tmp`,
@@ -33,8 +42,10 @@ const VERDICT_PATH_TEST_CHANNEL: str = ".teko-verdict-path-test.chan"
  * directory is writable on every host that runs this suite, and it is the same convention the
  * regression harness already uses for its own scratch files (`build/regression.tks`'s
  * `bin/.regr-work/…`), rather than a second one invented here.
+ *
+ * @return this test's own channel file, relative to the working directory
  */
-const VERDICT_EMIT_TEST_CHANNEL: str = ".teko-verdict-emit-test.chan"
+fn verdict_emit_test_channel() -> str { teko::test::scoped(".teko-verdict-emit-test.chan") }
 
 /**
  * verdict_emit_ok — did `verdict_emit(line)` report success?
@@ -58,13 +69,13 @@ fn verdict_emit_ok(line: str) -> bool {
  *
  * The two `verdict_emit_ok` assertions pin the SAME rule as before plus the step that was silently
  * failing (the append itself succeeds), and the channel is a working-directory-relative name
- * (`VERDICT_EMIT_TEST_CHANNEL`) so the assertion speaks about `verdict_emit` on every host instead
+ * (`verdict_emit_test_channel`) so the assertion speaks about `verdict_emit` on every host instead
  * of about the runner's `/tmp`.
  *
  * @return void
  */
 fn verdict_emit_appends_to_the_named_channel() {
-    let path = VERDICT_EMIT_TEST_CHANNEL
+    let path = verdict_emit_test_channel()
     match teko::fs::remove_file(path) { error => { }; null => { } }
     match teko::env::set_var(VERDICT_CHANNEL_ENV, path) { error => { }; null => { } }
     teko::assert::is_true(verdict_emit_ok("first"))

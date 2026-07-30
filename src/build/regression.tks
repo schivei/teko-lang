@@ -254,18 +254,30 @@ const REGR_JOBS_ENV: str = "TEKO_REGR_JOBS"
  * @return     the parsed count, or `REGR_JOBS_DEFAULT` when it is empty, non-numeric or zero
  * @since 0.3.1
  */
-fn regr_jobs_of(raw: str) -> u64 {
+fn regr_jobs_of(raw: str) -> u64 { regr_jobs_of_default(raw, REGR_JOBS_DEFAULT) }
+
+/**
+ * regr_jobs_of_default — the job-count parser with the FALLBACK named by the caller, so the test
+ * gate's own concurrency knob (`project.tks::test_jobs`) reuses this one parser instead of growing a
+ * second decimal scanner with its own idea of what a malformed value means.
+ *
+ * @param raw       the env value as written
+ * @param fallback  the count to answer for an empty, non-numeric or zero value
+ * @return          the parsed count, or `fallback`
+ * @since 0.3.1.2
+ */
+fn regr_jobs_of_default(raw: str, fallback: u64) -> u64 {
     mut v: u64 = 0
     mut i: u64 = 0
     loop {
         if i >= raw.len { break }
         let c = raw[i]
-        if c < b'0' { return REGR_JOBS_DEFAULT }
-        if c > b'9' { return REGR_JOBS_DEFAULT }
+        if c < b'0' { return fallback }
+        if c > b'9' { return fallback }
         v = (v * 10) + ((c to u64) - (b'0' to u64))
         i = i + 1
     }
-    if v == 0 { return REGR_JOBS_DEFAULT }
+    if v == 0 { return fallback }
     v
 }
 
@@ -470,8 +482,25 @@ fn tool_on_path(name: str) -> bool {
  * readings of the host toolchain, so the last one's capture files are the only ones worth keeping,
  * and a unique prefix per call would litter the work tree with a file per row for no diagnostic
  * gain.
+ *
+ * THAT ARGUMENT HOLDS FOR ONE PROCESS AND FAILS FOR MANY, which is why `tool_query_line` no longer
+ * uses this constant directly (see `tool_query_prefix`). Measured: an audit by MTIME of one whole
+ * unit-gate run shows `.toolquery.{in,out,err}` among the files it rewrites, and the answer read back
+ * out of `.out` decides SKIP versus FAIL for regression rows. Two concurrent readers do not merely
+ * lose a file — the first one reads the SECOND one's answer, and answers a different question with it.
  */
 const TOOL_QUERY_PREFIX: str = "bin/.regr-work/.toolquery"
+
+/**
+ * tool_query_prefix — `TOOL_QUERY_PREFIX`, scoped to the test that is asking when a test is asking.
+ *
+ * Outside a test `teko::test::scope()` is empty and this is byte-for-byte the old constant, so the
+ * production regression runner's paths are unchanged; inside a test it is that test's own, so two
+ * tests in two shards cannot answer each other's question.
+ *
+ * @return the capture prefix this caller may write
+ */
+fn tool_query_prefix() -> str { teko::test::scoped(TOOL_QUERY_PREFIX) }
 
 /**
  * tool_query_line — ASK a host tool a question and read its one-line answer: run `argv`, and on a
@@ -490,7 +519,7 @@ const TOOL_QUERY_PREFIX: str = "bin/.regr-work/.toolquery"
  * @since 0.3.1
  */
 fn tool_query_line(argv: []str) -> str {
-    let cap = run_captured(argv, "", TOOL_QUERY_PREFIX)
+    let cap = run_captured(argv, "", tool_query_prefix())
     if cap.exit != 0 { return "" }
     trimmed_line(first_line(cap.stdout))
 }

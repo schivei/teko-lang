@@ -1166,11 +1166,11 @@ fn pt_the_c_route_refusal_teaches_the_same_law_as_the_native_one() {
  */
 #test
 fn pt_a_mingw_cc_is_convicted_by_its_path_without_any_probe() {
-    let by_path = mingw_cc_evidence("/c/mingw64/bin/cc", "bin/pt-probe")
+    let by_path = mingw_cc_evidence("/c/mingw64/bin/cc", teko::test::scoped("bin/.pt-probe"))
     teko::assert::str_contains(by_path, "/c/mingw64/bin/cc")
     teko::assert::str_contains(by_path, MINGW_PATH_EVIDENCE_PHRASE)
     teko::assert::is_false(teko::str::contains(by_path, MINGW_TRIPLE_EVIDENCE_PHRASE))
-    teko::assert::str_contains(mingw_cc_evidence("x86_64-w64-mingw32-gcc", "bin/pt-probe"), MINGW_PATH_EVIDENCE_PHRASE)
+    teko::assert::str_contains(mingw_cc_evidence("x86_64-w64-mingw32-gcc", teko::test::scoped("bin/.pt-probe")), MINGW_PATH_EVIDENCE_PHRASE)
     teko::assert::str_contains(mingw_path_evidence("C:/msys64/mingw64/bin/clang.exe"), MINGW_PATH_EVIDENCE_PHRASE)
 }
 
@@ -1223,8 +1223,8 @@ fn pt_the_triple_reading_convicts_the_gnu_abi_and_acquits_the_unknown() {
  */
 #test
 fn pt_a_compiler_with_no_dumpmachine_is_unknown_not_guilty() {
-    teko::assert::is_true(cc_target_triple("sh", "bin/pt-probe-sh") == "")
-    teko::assert::is_true(mingw_cc_evidence("sh", "bin/pt-probe-sh") == "")
+    teko::assert::is_true(cc_target_triple("sh", teko::test::scoped("bin/.pt-probe-sh")) == "")
+    teko::assert::is_true(mingw_cc_evidence("sh", teko::test::scoped("bin/.pt-probe-sh")) == "")
 }
 
 /**
@@ -1364,4 +1364,68 @@ fn unsupported_target_error_lists_arm64_linux() {
             teko::assert::is_true(teko::str::contains(e.message, "aarch64-linux"))
         }
     }
+}
+
+/**
+ * pt_test_jobs_parses_its_env_and_falls_back_safely — the gate's concurrency knob reuses the
+ * regression pool's ONE decimal parser (`regr_jobs_of_default`), with the gate's own fallback.
+ *
+ * A malformed value must mean "the author did not mean zero shards", never zero: a run that silently
+ * launched no shard would report an EMPTY suite as a passing one, which is the class of silent
+ * success this whole change exists to remove.
+ */
+#test
+fn pt_test_jobs_parses_its_env_and_falls_back_safely() {
+    teko::assert::eq_u64(regr_jobs_of_default("8", TEST_JOBS_DEFAULT), 8)
+    teko::assert::eq_u64(regr_jobs_of_default("1", TEST_JOBS_DEFAULT), 1)
+    teko::assert::eq_u64(regr_jobs_of_default("", TEST_JOBS_DEFAULT), TEST_JOBS_DEFAULT)
+    teko::assert::eq_u64(regr_jobs_of_default("0", TEST_JOBS_DEFAULT), TEST_JOBS_DEFAULT)
+    teko::assert::eq_u64(regr_jobs_of_default("four", TEST_JOBS_DEFAULT), TEST_JOBS_DEFAULT)
+    teko::assert::eq_u64(regr_jobs_of_default("2x", TEST_JOBS_DEFAULT), TEST_JOBS_DEFAULT)
+}
+
+/**
+ * pt_a_gate_shard_names_itself_and_owns_its_dump — each shard of the in-process suite must carry BOTH
+ * env tokens: which shard it is, and where ITS coverage goes.
+ *
+ * The second is not decoration. Every shard runs the same binary, so a shared `TEKO_TKCOV` would have
+ * the shards clobber one another's dump and the coverage floors would then judge the suite on whatever
+ * shard finished last — a wrong number that looks like a right one.
+ */
+#test
+fn pt_a_gate_shard_names_itself_and_owns_its_dump() {
+    let spec = gate_shard_spec("bin/teko-tktest", teko::test::scoped("bin/.shard/"), 2, 4)
+    teko::assert::len_eq(spec.argv.len, 1)
+    teko::assert::eq_str(spec.argv[0], "bin/teko-tktest")
+    teko::assert::len_eq(spec.env.len, 2)
+    teko::assert::eq_str(spec.env[0], "TEKO_TEST_SHARD=2/4")
+    teko::assert::eq_str(spec.env[1], teko::str::concat("TEKO_TKCOV=", teko::test::scoped("bin/.shard/"), "2.tkcov"))
+    teko::assert::eq_str(spec.prefix, teko::str::concat(teko::test::scoped("bin/.shard/"), "2"))
+}
+
+/**
+ * pt_the_first_failing_shard_decides_in_shard_order — a sharded run's exit code must be a function of
+ * the SOURCE, never of which process finished first, so it is the first failure in SHARD order.
+ */
+#test
+fn pt_the_first_failing_shard_decides_in_shard_order() {
+    mut all_ok: []CapResult = teko::list::push(teko::list::empty(), pt_cap_exit(0))
+    all_ok = teko::list::push(all_ok, pt_cap_exit(0))
+    teko::assert::eq_i64(first_shard_failure(all_ok) to i64, 0)
+    mut mixed: []CapResult = teko::list::push(teko::list::empty(), pt_cap_exit(0))
+    mixed = teko::list::push(mixed, pt_cap_exit(134))
+    mixed = teko::list::push(mixed, pt_cap_exit(7))
+    teko::assert::eq_i64(first_shard_failure(mixed) to i64, 134)
+    let none: []CapResult = teko::list::empty()
+    teko::assert::eq_i64(first_shard_failure(none) to i64, 0)
+}
+
+/**
+ * pt_cap_exit — a `CapResult` carrying only an exit code, for the shard-verdict tests above.
+ *
+ * @param code  the exit code to carry
+ * @return      a capture whose every other field is empty
+ */
+fn pt_cap_exit(code: i32) -> CapResult {
+    CapResult { exit = code; stdout = ""; stderr = ""; harness_ns = 0; child_ns = 0; cmd = ""; chan_text = "" }
 }

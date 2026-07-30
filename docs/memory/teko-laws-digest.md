@@ -1409,3 +1409,52 @@ resposta em ambos.
 **Como se prova o conserto:** por **colisão forçada** — dois testes que partilhem o caminho, postos em
 shards diferentes de propósito, a atropelarem-se antes e não depois. É o que transforma *"corrigi"* em
 *"provei"*, e é o mesmo padrão da prova por reversão que fechou o degrau 29.
+
+## EM MODO TESTE, `panic`/`exit` CAPTURAM-SE — nunca chega syscall de saída (ruling do dono, 2026-07-30)
+
+O dono, batendo o martelo depois de o dizer, nas suas palavras, **mais de dez vezes**:
+
+> *"Sobre (panic/exit) abortar, já falei mais de 10 vezes que em modo teste tem que capturar e não
+> direcionar para a saída padrão […] **É PARA CAPTURAR E SAIR ELEGANTE ANTES SEM ENVIAR SYSCALL DE
+> SAÍDA QUANDO COMPILAR TESTES**, como? Problema do arquiteto resolver. **Uma coisa é um aborto
+> externo, de fora do programa, outra coisa é o próprio programa sair, e para sair ele tem que ser
+> determinístico.**"*
+
+**A distinção é a lei, e é ela que arruma tudo o resto:**
+
+| | quem manda | o que se faz |
+|---|---|---|
+| o **próprio programa** sai (`panic`, `exit`) | nós | **captura-se**; é determinístico e nunca emite a syscall em modo teste |
+| aborto **externo** (SO, hardware) | ninguém nosso | **convive-se**; protege-se o melhor possível |
+
+E o dono fecha a segunda metade, que impede a solução de inchar:
+
+> *"[…] irrecuperáveis provindos de ações externas (do próprio SO ou hardware) que não seja capturável
+> está além de quem há de resolver, como uma tela azul no Windows por falha de memória […] ou mesmo a
+> falta de energia […] **O software não tem que lidar com isso, tem que conviver e fazer o melhor para
+> se proteger.**"*
+
+**A CONSEQUÊNCIA, que é dele e é o argumento inteiro:**
+
+> *"Logo, a concorrência de escrita no `.tkcov` se resolve sem problemas, as threads e concorrências
+> também, canais vivem pacificamente, tudo passa a ser testável no menor grão possível e tudo ao mesmo
+> tempo se houver poder computacional."*
+
+Ou seja: **quase toda a ansiedade de durabilidade que o desenho do journaling carregava vinha de o
+programa se matar a si próprio.** Um teste que panica hoje mata o processo, leva consigo os testes que
+ainda não correram, salta o `atexit`, deixa o `.tkcov` por despejar e o sumário por escrever. Com a
+captura, **nada disso acontece**: o arnês continua, o tally existe, os canais fecham, a cobertura
+despeja. O que sobra para o journal é só o **externo** — e para o externo a regra é conviver.
+
+**Isto reordena o desenho `journaling-de-corrida-0.3.1.md`:** o `never-ran` deixa de ser uma coluna
+calculada a partir de um `plan` para reconstruir o que a morte levou, e a justificação do crumb que
+existia só para isso muda de forma. O journal **não deixa de fazer falta** (o externo continua a
+existir, e o `--replay` continua a valer), mas **deixa de ser a defesa principal**.
+
+**Fronteira que fica dita, para não se partir o que já é lei:** a captura é de **modo teste** — *"quando
+compilar testes"*. Um programa de fixture cujo contrato **é** o código de saída (as cinco filas com
+`Then exit` e `Given source`, alvos cruzados 42/210/7 e o par oráculo) é compilado como PROGRAMA, não
+como teste, e continua a sair como sai. Capturar ali seria apagar o observável que a fila existe para
+medir.
+
+**Prazo, palavra dele:** *"Quanto ao 'quando', imediatamente, a dor é latente."*

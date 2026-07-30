@@ -1,0 +1,53 @@
+/**
+ * teko::test — the surface a test uses to name things that belong to IT and to nobody else.
+ *
+ * WHY IT EXISTS (owner, 2026-07-30, reading the parallelism landed in this same change: "implementou-se
+ * o paralelismo mas faltou o controle de concorrência, aí o arquivo acaba sofrendo sobrescrita"). The
+ * first shared resource to be caught was the coverage dump, and it was fixed by ISOLATION — one file
+ * per shard, then merged. That is the right answer and it was applied to exactly one resource. Every
+ * other fixed scratch path a test writes has the same shape.
+ *
+ * AND THE SHARD SPLIT MAKES IT WORSE, by the same property that makes it a good split: it is
+ * round-robin by ordinal, because per-test cost is uneven, so NEIGHBOURING tests land in DIFFERENT
+ * processes — and neighbouring tests are precisely the ones sharing a scratch path, because they live
+ * in the same file and the same family.
+ *
+ * SO THE DISCIPLINE IS UNIFORM, NOT PER-RESOURCE: a scratch path derives from the IDENTITY of the test
+ * that writes it. Not a lock — isolation. A lock would serialise the very thing that was parallelised
+ * and would still leave the last writer's bytes in the file for the next run to read.
+ */
+
+/**
+ * scope_rt — the runtime's token for the test running right now.
+ *
+ * An FFI bottom because the identity lives where the per-test channel lives (src/runtime/teko_rt.c):
+ * the channel already records the label, and the shard index is already parsed there.
+ *
+ * @return  `.s<shard>-<sanitised label>`, or "" when no test is running
+ */
+pub extern fn scope_rt() -> str = "tk_test_scope" from "teko_rt"
+
+/**
+ * scope — the token identifying the test running right now, or "" outside a test.
+ *
+ * EMPTY OUTSIDE A TEST IS THE POINT, not a fallback. The same path-composing code runs in PRODUCTION
+ * (the regression runner asks the host toolchain the same questions the unit tests ask it), and there
+ * the path must stay byte-for-byte what it was. Scoping applies exactly where the concurrency it
+ * guards against exists.
+ *
+ * @return  a filesystem-safe token unique to the running test, or "" when none is running
+ */
+pub fn scope() -> str { scope_rt() }
+
+/**
+ * scoped — `base` with the running test's scope appended, so two tests can never derive the same path
+ * even when they spell the same base.
+ *
+ * This is the ONE composer every scratch path in the corpus goes through, so "which paths are
+ * isolated" is answerable by reading its call sites instead of by grepping for literals — which is how
+ * the fixed paths got missed in the first place.
+ *
+ * @param base  the path a test would otherwise have hard-coded
+ * @return      `base` outside a test, `base` + the scope token inside one
+ */
+pub fn scoped(base: str) -> str { teko::str::concat(base, scope()) }

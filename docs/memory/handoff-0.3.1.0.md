@@ -19,6 +19,41 @@ hipótese, está dito.
 
 
 
+## 0u. A SUÍTE DE TESTES REFEITA — o ruling que se repetia há sessões, construído (2026-07-30)
+
+`cargo/0.3.1.0-testes-paralelos-canais` @ `19e4bc4` drenado. 25 ficheiros, +2899/−424, 9 ficheiros novos.
+
+**Conferências, todas limpas:** `fn` **nunca desce** (`lower` 574, `regression` 106→108, `project` 216→222, `scope` 29→35, `codegen` 368→369); delta de chaves **zero**; zero restos do molde antigo (`bad = N` no `main.tks`: **0**).
+
+### O QUE PASSOU A EXISTIR
+
+- **Canal próprio de `stdout`/`stderr` por teste**, com **veredicto-primeiro**: `test <label> ... ok` passa a ser uma linha **atómica** que nenhum corpo de teste desloca. Era a posição variável dessa linha que me fez contar a suíte mal **duas vezes** e inventar uma diferença entre pernas que não existia.
+- **Asserções 3 → 24**, cada falha a dizer esperado e obtido (`eq_i64 — expected 42, got 41`). E o defeito estrutural que veio ao de cima: **a família estava enumerada em TRÊS sítios paralelos** (typer, `lir::lower`, `codegen`) — *"era assim que uma asserção passava no typer e falhava no LINKER"*. Colapsada numa fonte única, com um teste que fixa a **contagem** contra uma lista legível.
+- **Endereçamento por saída eliminado**: 129 casos passam a `scenario(nome, obtido, esperado)`, os bool a `scenario_true`, e o `.tkr` de 89 → **203** filas — porque **41 sondas não tinham linha própria**: a única coisa que as afirmava era o `exit = 42` partilhado. Um teste de emparelhamento obriga os dois ficheiros a mover-se juntos.
+- **Paralelismo 4,47×** (43,5 s → 9,7 s), união dos shards **exactamente** igual à suíte serial.
+- **Espaço de scratch com identidade**, guarda textual + observacional, e **prova por colisão forçada**.
+
+### AS CINCO FILAS QUE FICAM COM `Then exit`, e é deliberado
+
+Medido por mim, contando **só linhas de passo** (não prosa em comentários): **exactamente 5**, e **as cinco têm `Given source`** — programas autónomos cujo contrato **É** o código de saída (alvos cruzados 42/210/7 e o par oráculo do degrau 30). Não são casos endereçados por número; são observáveis de um programa.
+
+### TRÊS ACHADOS QUE VALEM MAIS QUE A OBRA
+
+1. **A fila `d29_float_memory_widths` vinha SEM PASSOS** — sem `When`, sem `Then`. Uma linha que **não afirmava nada**, invisível porque o canal era verde pelo `exit = 42` partilhado. Prova, num caso concreto, de que o endereçamento por saída escondia **cobertura vazia**, não só anónima.
+2. **O `.toolquery` é o pior caminho fixo da árvore**, e só apareceu porque ele auditou por **MEDIÇÃO** (marcar `mtime`, correr o gate: **62 ficheiros sob 9 prefixos**) e não por `grep` de literais — o meu método era estruturalmente incapaz. O perigo não é perder um ficheiro: **o primeiro leitor lê a resposta do segundo e responde outra pergunta com ela** — e essa resposta decide **SKIP contra FAIL**. O doc-comment dele argumentava *a favor* da partilha; o argumento valia para um processo e é falso para muitos.
+3. **A guarda mordeu-o a ele na estreia** e ele tirou a **necessidade** em vez de alargar a regra. É a lição que eu falhei ao pôr o `llvm` onde a string batia.
+
+E uma distinção fina que ele fez e vale registar: renomear `bin/pt-probe` → `bin/.pt-probe` foi **fazer a necessidade caber na regra**; alargar o espaço de scratch com `.teko-` foi **a regra a seguir uma necessidade real** que a perna Windows descobriu por outro caminho. As duas parecem a mesma operação e não são.
+
+### DUAS FALHAS DE MÉTODO MINHAS, NESTA MESMA CONFERÊNCIA
+
+- **A guarda do dreno disparou e eu ignorei-a.** O `drain_guard` disse `RECUSADO — o checkout está em cargo/0.3.1.0-arq-concorrencia` (um agente voltou a trocar a branch partilhada) e o meu `git merge` correu **na mesma chamada**, sem estar encadeado ao veredicto. **Uma guarda cujo veredicto ninguém lê é só uma mensagem.** Passei a encadear com `&&`.
+- **O meu instrumento foi mais estreito que a verdade, duas vezes:** o regex dos nomes do driver não conhecia `scenario_named_ok`, e o bloco-scan contou **prosa dentro de comentários** (`Then exit = 42` citado a explicar o mecanismo antigo) como linhas de passo. Nas duas **verifiquei em vez de afirmar**, e é essa a diferença.
+
+### O ADENDO DO SUMÁRIO É OBRA DO ARQUITECTO, com o inventário já feito
+
+Ele recusou-o com razão e deixou o levantamento: a **fase unitária não tem tally nenhum** e **aborta no primeiro falhado**; a fase regressiva **já conta** os três e **já imprime** cada skip com a razão, mas a soma vive dentro de `run_regression_sources`, que devolve um `i32`; a cobertura já tem a união correcta sob shards. **Falta:** um tally unitário que **sobreviva ao abort** (o padrão certo é o do `.tkcov` — ficheiro nomeado por env, escrito no hook de saída **e** em `tk_test_fail_report`, porque `abort()` salta o `atexit`), o `run_regression_sources` a devolver as razões, e uma linha única sobre as duas fases.
+
 ## 0t. A PERNA WINDOWS: a minha hipótese REFUTADA, e um erro ENGOLIDO (2026-07-30)
 
 `cargo/0.3.1.0-windows-leg-3` @ `8b8496d` drenado, com o `drain_guard` já a afirmar o destino. Conferências: `fn` do `lower.tks` **571 → 574**, `isel_x86_64.tks` **64 → 68**, zero splices.
