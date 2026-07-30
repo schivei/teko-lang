@@ -1,7 +1,7 @@
 ---
 section: design
 created: 2026-07-30
-source: ruling do dono ("sem meio termos, sem faz isso e depois completa"), ruling do dono ("journaling"), docs/design/concorrencia-adiantada-s8.md §3.2 (fork_join — atribuicao estatica de raia), src/build/regression.tks (run_pool / ProcSpec / o terceiro canal), src/runtime/teko_rt.c:1214 (o despejo periodico que ja sobrevive a SIGKILL), cargo/0.3.1.0-testes-paralelos-canais (teko::test::scoped + a guarda textual)
+source: ruling do dono ("sem meio termos, sem faz isso e depois completa"), ruling do dono ("journaling"), ADENDO do dono 2026-07-30 ("colocar um sumario ... que aponta todos os erros, skips e sucessos, bem como a cobertura medida" — §13), docs/design/concorrencia-adiantada-s8.md §3.2 (fork_join — atribuicao estatica de raia), src/build/regression.tks (run_pool / ProcSpec / o terceiro canal), src/runtime/teko_rt.c:1214 (o despejo periodico que ja sobrevive a SIGKILL), cargo/0.3.1.0-testes-paralelos-canais (teko::test::scoped + a guarda textual)
 status: DESENHO — nenhuma linha de produto escrita nesta carga; C1–C9 executaveis hoje, nenhum crumb depende de capacidade inexistente
 branch: cargo/0.3.1.0-arq-concorrencia (de remodel/0.3.1.0-linux-native-2 @ 44e39eb)
 ---
@@ -13,8 +13,12 @@ branch: cargo/0.3.1.0-arq-concorrencia (de remodel/0.3.1.0-linux-native-2 @ 44e3
 > *"Ja nomearia esse 'encerramento elegante' com um nome que o liga muito bem: `journaling`."* — dono
 
 O paralelismo de testes esta medido (4,22x; 20,674 s -> 4,904 s) e o `.tkcov` foi isolado. Este
-documento fecha o resto, e fecha-o **com um mecanismo so**. Nao ha fase 2: os nove crumbs abaixo sao
+documento fecha o resto, e fecha-o **com um mecanismo so**. Nao ha fase 2: os dez crumbs abaixo sao
 todos executaveis sobre a arvore de hoje, e nenhum espera capacidade que nao exista.
+
+**§13 e o adendo do dono (2026-07-30):** o sumario final sobre as duas fases — erros, skips e
+sucessos nomeados, mais a cobertura medida. Ele nao e um enfeite pregado no fim: e a leitura humana
+do mesmo `fold`, e por isso sobrevive a morte da corrida que o produziu.
 
 ---
 
@@ -683,16 +687,25 @@ Cada crumb e independentemente fechavel e cada um entrega algo sozinho.
 | **C1** | `teko::journal` (modulo) + fundos `tk_journal_open/append/note` + `tk_rt_rename`; `teko::process::verdict_emit` passa a delegar em `append` | `src/journal/journal.tks` (novo), `src/runtime/teko_rt.{c,h}`, `src/process/process.tks`, `src/checker/scope.tks` (injeccao do namespace) | o sumidouro duravel existe; `verdict_emit` deixa de ser O(n^2) (~490 MB -> ~280 KB de I/O) |
 | **C2** | identidade da corrida: `run_id`/`run_root`/`scratch`/`sweep`, `TEKO_RUN` herdado por `spawn_spec`; `teko::test::scoped` re-apontada; ferrolho da raiz | `src/journal/journal.tks`, `src/test/test.tks`, `src/build/regression.tks` | lixo de corrida anterior fica estruturalmente inalcancavel; duas corridas no mesmo worktree deixam de partilhar rascunho |
 | **C3** | migrar as **28 familias** (§3.2, §3.3) para `scratch`, incluindo `/tmp/teko_arena_obs.txt` | `regression.tks`, `project.tks`, `teko_rt.c`, 4 `.tkt` | a regra passa a ser total; a auditoria passa a ser "ler os chamadores de um compositor" |
-| **C4** | `fold` + `gate_summary`; `merge_shard_coverage` falivel; shard sem `end` = falha nomeada | `project.tks` | **fecha o defeito medido**: um `.tkcov` em falta deixa de flutuar sobre o da corrida anterior |
+| **C4** | `fold` + `summarize` + `render_summary` (§13); `merge_shard_coverage` falivel; shard sem `end` = falha nomeada | `project.tks`, `src/journal/summary.tks` (novo) | **fecha o defeito medido**: um `.tkcov` em falta deixa de flutuar sobre o da corrida anterior — e passa a ser VISTO, no sumario |
+| **C4b** | o arnes journaliza: `emit_test_main`/`emit_test_call` emitem `plan`/`begin`/`ok` alem das linhas que ja imprimem | `src/codegen/codegen.tks` | **a fase unitaria passa a saber contar** — hoje nao ha sumario nenhum e um `panic` mata a suite sem nomear os que nunca correram (§13.2) |
 | **C5** | braco dos sinais educados (INT/TERM/HUP/QUIT) + `tk_journal_note` no manipulador de crash | `teko_rt.c` | cancelamento de CI e Ctrl-C deixam de ser mudos; fecha o buraco existente do despejo de arena no crash |
 | **C6** | G1 alargada a `.tks`, compositor unico, inversao estendida | `src/test/scratch_guard_test.tkt` | reincidencia por grafia fica bloqueada nas 28 familias, nao nas 14 visiveis |
 | **C7** | G2 observacional + inversao de tres bracos (incl. vivacidade do instrumento) | `src/journal/journal_guard_test.tkt` (novo) | reincidencia por caminho composto em execucao fica bloqueada; a guarda pode falhar, e a inversao prova-o |
 | **C8** | a prova por colisao forcada (3 `#test` + 2 filhos `sh` com rendezvous) | `src/journal/journal_collision_test.tkt` (novo) | "corrigi" vira "provei", com o ANTES na mesma corrida |
-| **C9** | `teko test --replay <run>` (o sumarizador como comando) + fase de regressao repartida por `run_pool`, com a medicao build-vs-linhas de §9 | `project.tks`, `regression.tks` | um OOM deixa de perder o veredicto; a fase de regressao entra no mesmo mecanismo |
+| **C9** | `teko test --replay <run>` (o mesmo sumario, depois do facto) + o aviso de corrida nao-sumarizada no `sweep` + fase de regressao repartida por `run_pool`, com a medicao build-vs-linhas de §9 | `project.tks`, `regression.tks` | um OOM deixa de perder o veredicto — a corrida seguinte **sumariza a morta** (§13.5); a fase de regressao entra no mesmo mecanismo |
 
 **Pontos de ritual (gate completo obrigatorio):** depois de **C2** (muda caminho em toda a arvore),
-depois de **C4** (muda o comportamento do gate), depois de **C8** (a prova tem de correr verde e o
-braco "antes" tem de continuar a falhar quando o mecanismo e removido), depois de **C9**.
+depois de **C4b** (muda o arnes emitido, logo muda TODA a fase unitaria), depois de **C8** (a prova
+tem de correr verde e o braco "antes" tem de continuar a falhar quando o mecanismo e removido),
+depois de **C9**.
+
+**O custo do adendo, dito em separado para ser auditavel:** o sumario **nao** cabe inteiro no C4.
+`summarize`/`render_summary` sao um `fold` puro e cabem (C4 cresce ~1 unidade); a releitura cabe no
+C9 (que ja era o comando `--replay`). O que **nao** cabia e o crumb novo **C4b**: hoje a fase
+unitaria nao emite nada alem de `test <label> ... ` / `ok` para stdout, e um sumario nao pode ser
+lido do proprio stdout sem parsing fragil nem distinguir "morreu" de "nunca correu" (§13.2).
+**Total: 9 -> 10 crumbs, um novo, dois crescidos.**
 
 **Ordem e semente:** nenhum crumb usa funcionalidade de linguagem ausente da semente. Os fundos novos
 sao `extern fn` sobre `teko_rt.{c,h}` — C mantido, excepcao explicita ao congelamento. O unico custo
@@ -741,3 +754,259 @@ afirma-se por `Then stdout pattern = "scenario <nome>: ok"`, na forma que
 nenhum canal novo, porque um canal novo custa uma build e o alvo do dono e dez.
 
 **Nenhuma tensao por resolver. Nao ha HALT.**
+
+---
+
+## 13. O sumario final — adendo do dono, 2026-07-30
+
+> *"Colocar um sumario (no fim de todos os testes, unitarios e regressivos) que aponta todos os
+> erros, skips e sucessos, bem como a cobertura medida."*
+
+O desenho acima nao o resolvia. Resolvia o `gate_summary` da fase **unitaria** (§2.4) e deixava a
+fase de regressao a reportar-se sozinha, que e exactamente a separacao que o adendo fecha. Esta
+seccao acrescenta-o, e acrescenta-o **como consequencia do journal e nao ao lado dele**.
+
+### 13.1 Porque isto e uma releitura e nao um acumulador
+
+As duas fases escrevem na **mesma raiz de corrida**. Logo nao ha nada por juntar: o sumario das duas
+e um `fold` sobre uma raiz, e o `fold` ja existe (C4). A fase de cada registo deriva do prefixo do
+escritor (`s<i>` = shard unitaria, `r<i>` = filho de regressao, `m` = orquestrador) — **zero
+canalizacao nova**.
+
+E dai vem a propriedade que o adendo torna valiosa em vez de bonita: **um sumario que so existe se a
+corrida chegar ao fim e o sumario que falta exactamente quando e preciso.** Este existe depois do
+facto (§13.5).
+
+### 13.2 O buraco que o adendo desenterra, e e maior do que parecia
+
+Fui ver o que a fase unitaria reporta hoje. **Nao reporta nada.** `emit_test_main`
+(`src/codegen/codegen.tks:11990-12017`) chama cada `#test`, cada um imprime `test <label> ... ` e
+`ok`, e o `main` faz `return 0`. Nao ha linha de total, nao ha contagem, nao ha coluna de skip.
+
+E e **fail-fast**: uma assercao falhada faz `panic` -> `abort`, o processo morre, e **todos os testes
+seguintes nunca correm, nem sao contados nem nomeados**. O leitor ve um `test X ... ` pendurado sem
+`ok` e mais nada. Nao ha como saber quantos ficaram por correr.
+
+Por isso o C4b existe e por isso ele **nao cabia** no C4: sem um registo `plan` (quantos testes esta
+shard ia correr) e um `begin` por teste, o sumario nao pode dizer `never-ran`, e `never-ran` e
+precisamente o numero que hoje esta invisivel. Sob sharding a coisa melhora sozinha — as outras tres
+shards acabam — mas so o journal permite dizer **qual** shard morreu, **em que teste**, e **quantos**
+ficaram por correr.
+
+> Nao parseio o meu proprio stdout para isto. Um sumario derivado das linhas `test ... ok` seria
+> fragil (o teste imprime o que quiser no meio) e, sobretudo, **nao distingue "morreu" de "nunca
+> correu"** — que e a unica distincao que o dono precisa de ler.
+
+### 13.3 A superficie
+
+```teko
+/**
+ * Finding — UM achado nomeado do sumario: uma falha, um skip, ou um escritor que morreu.
+ *
+ * NOMEADO, NUNCA CONTADO. Um numero nao se pode agir: "1 skipped" nao diz qual fila nem porque, e a
+ * lei desta casa e que um skip no CI do proprio compilador E falha (`scripts/no_skips_gate.sh`). Uma
+ * lei sem instrumento e uma lei que ninguem aplica.
+ *
+ * @since 0.3.1
+ */
+pub type Finding = struct {
+    /** `unit` ou `regression`, derivado do prefixo do escritor. */
+    phase: str
+    /** que escritor o produziu (`s2`, `r0`, `m`). */
+    writer: str
+    /** o que ele nomeia: o `#test`, ou `<ficheiro>.tkr[<cenario> linha <n>]`. */
+    label: str
+    /** porque — a razao honesta que o produtor ja escreve hoje, transportada em vez de resumida. */
+    reason: str
+}
+
+/**
+ * RunSummary — o veredicto INTEIRO de uma corrida: as duas fases, os achados nomeados, a cobertura.
+ *
+ * @since 0.3.1
+ */
+pub type RunSummary = struct {
+    /** o carimbo da corrida que este sumario descreve. */
+    run: str
+    /** testes/linhas que passaram, por fase e no total (`unit`, `regression`, `total`). */
+    passed: PhaseTally
+    /** os que falharam. */
+    failed: PhaseTally
+    /** os que foram saltados por capacidade ausente. */
+    skipped: PhaseTally
+    /** os que NUNCA correram porque o escritor morreu antes de lá chegar (`plan` menos o resto). */
+    never_ran: PhaseTally
+    /** cada falha, nomeada. */
+    fails: []Finding
+    /** cada skip, nomeado COM a razao. */
+    skips: []Finding
+    /** cada escritor sem registo `end`, com o ultimo teste que chegou a comecar. */
+    dead: []Finding
+    /** funcoes/linhas/ramos medidos, do fold dos despejos desta corrida. */
+    cov: CovTriple
+    /** quantos despejos de cobertura eram esperados e nao apareceram (§2.4). */
+    cov_missing: u64
+}
+
+/**
+ * summarize — o sumario das DUAS fases, como funcao pura sobre os registos.
+ *
+ * PURA DE PROPOSITO: e o que permite testa-la sobre registos sinteticos (§13.6) sem correr uma
+ * suite, e e o que permite ao `--replay` produzir byte-a-byte o mesmo bloco depois do facto.
+ *
+ * @param recs  os registos que `fold` devolveu
+ * @return      o veredicto agregado
+ * @since 0.3.1
+ */
+pub fn summarize(recs: []Record) -> RunSummary
+
+/**
+ * render_summary — o bloco que o humano le, em texto estavel.
+ *
+ * ESTAVEL PORQUE E LIDO POR UM SCRIPT TAMBEM. `scripts/no_skips_gate.sh` reconstitui hoje os skips
+ * por tres padroes de `grep` diferentes, um dos quais (`regression ok ... 2 scenario row(s)
+ * skipped`) existe so porque um skip pode esconder-se atras de um `ok`. Com uma seccao `SKIPPED`
+ * nomeada, um skip nunca se esconde e o script colapsa para UM padrao.
+ *
+ * @param s  o veredicto a renderizar
+ * @return   o bloco, com quebras de linha, terminado pela linha de fecho
+ * @since 0.3.1
+ */
+pub fn render_summary(s: RunSummary) -> str
+```
+
+### 13.4 O bloco, como o dono o vai ler
+
+```
+teko: ===== summary (run 1753891200123456789-48213) =====
+teko:   unit          1167 passed     0 failed    0 skipped    0 never-ran
+teko:   regression       8 passed     1 failed    2 skipped    0 never-ran
+teko:   TOTAL         1175 passed     1 failed    2 skipped    0 never-ran
+teko:
+teko:   FAILED (1):
+teko:     regression  r0  own_native.tkr[own_defer_arm_write_propagates]: exit 1, expected stdout pattern absent
+teko:
+teko:   SKIPPED (2) — SKIPPED IS FAILURE IN THIS PROJECT'S OWN CI:
+teko:     regression  r0  own_native.tkr[wasm32-wasi row 3]: wasmtime not found on PATH for target wasm32-wasi
+teko:     regression  r0  own_native.tkr[wasm32-wasi row 7]: wasmtime not found on PATH for target wasm32-wasi
+teko:
+teko:   COVERAGE (4 shard dumps + 63 regression dumps merged, 0 missing):
+teko:     functions   92% (4811/5219)    floor 90   ok
+teko:     lines       88% (61233/69582)  floor 85   ok
+teko:     branches    74% (18220/24486)  floor 70   ok
+teko: ===== 1 failed, 2 skipped — run FAILED =====
+```
+
+Quatro coisas que este bloco faz e que hoje ninguem faz:
+
+1. **Soma as duas fases.** A linha `TOTAL` nao existe em lado nenhum da arvore.
+2. **Nomeia cada skip com a sua razao.** O `wasmtime not found on PATH for target wasm32-wasi` que
+   viaja pelas pernas do CI ja e produzido — `regression.tks:611` — e ja e impresso em linha
+   (`regr_row_skip_line`, `regression.tks:2593`). O que faltava era ele **aparecer no fim**, junto,
+   em vez de estar espalhado a 4000 linhas de transcricao do sitio onde o leitor olha.
+3. **Mostra a cobertura medida e as fasquias lado a lado**, incluindo `missing` — o numero do defeito
+   que C4 fecha passa a ser visto, em vez de calculado em silencio.
+4. **Tem uma linha de fecho.** "O sumario chegou a ser impresso?" passa a ser respondivel; e um `grep`
+   por `===== .* run ` que hoje nao tem alvo.
+
+**O que este sumario NAO muda: a politica.** Nomear um skip nao o transforma em falha. A separacao ja
+esta decidida e esta certa (`scripts/no_skips_gate.sh`: *"a skipped row is a legitimate outcome of
+the LANGUAGE ... o que NAO lhes pertence e o NOSSO CI reportar verde sobre linhas que nunca
+executou"*), e `REGRESSION_REQUIRE_TOOLS=1` continua a ser o botao fail-closed. O sumario da a lei o
+**instrumento**; quem decide continua a ser a lane.
+
+### 13.5 A corrida morta tambem e sumarizada
+
+Duas mortes por OOM hoje (`rc=137`), em duas maquinas. Nesses dois casos o orquestrador nunca chegou
+a imprimir bloco nenhum. Com o journal:
+
+* os segmentos estao em disco, carimbados;
+* `teko test --replay <run>` imprime **o mesmo bloco**, com `dead: s2 (morreu em <ultimo teste>)` e
+  `never-ran: 291`;
+* e o `sweep` da corrida SEGUINTE (C2), antes de varrer, ve uma raiz sem sumario e diz uma linha:
+
+```
+teko: warning: run 1753891200123456789-48213 ended without a summary (2 failures, 1 writer dead) — `teko test --replay 1753891200123456789-48213`
+```
+
+**Uma corrida morta passa a ser sumarizada pela seguinte.** E isso nao e um extra do adendo: e a
+razao pela qual `sweep` varre na abertura e nao no fecho, que ja estava fixada no `@return` de
+`teko::journal::sweep` (§2.2) antes de o adendo existir.
+
+### 13.6 A guarda do sumario — e ela tambem tem de poder falhar
+
+Um sumario e um instrumento, e um instrumento cego e a patologia desta lane (tres vezes hoje). Por
+isso o `summarize` puro tem inversao de tres bracos, e o terceiro e o que importa:
+
+```teko
+#test
+/**
+ * js_the_summary_names_every_finding — a inversao: alimentado com uma falha, dois skips e um
+ * escritor morto, o sumario tem de nomear os quatro. Um sumario que os contasse sem os nomear
+ * passaria neste teste se ele afirmasse numeros; por isso afirma NOMES.
+ *
+ * @throws quando algum achado plantado nao aparece no bloco renderizado
+ */
+fn js_the_summary_names_every_finding() {
+    let block = teko::journal::render_summary(teko::journal::summarize(js_planted_records()))
+    teko::assert::str_contains(block, "own_native.tkr[wasm32-wasi row 3]")
+    teko::assert::str_contains(block, "wasmtime not found on PATH")
+    teko::assert::str_contains(block, "js_planted_failure")
+    teko::assert::str_contains(block, "never-ran")
+}
+
+#test
+/**
+ * js_an_empty_run_is_a_FAILURE_not_a_green — O BRACO DE VIVACIDADE, e e o unico indispensavel.
+ *
+ * Zero registos significa que a corrida nao produziu nada, e um sumario que renderize "0 failed" com
+ * ar de verde sobre zero registos e exactamente a guarda cega que deu ZERO tres vezes hoje numa
+ * arvore que continuava a parar. Um instrumento que nao pode falhar e decoracao — inclusive este.
+ *
+ * @throws quando um sumario vazio nao se declara falhado
+ */
+fn js_an_empty_run_is_a_FAILURE_not_a_green() {
+    let block = teko::journal::render_summary(teko::journal::summarize(teko::list::empty()))
+    teko::assert::str_contains(block, "no records — run produced nothing")
+    teko::assert::str_absent(block, "run PASSED")
+}
+
+#test
+/**
+ * js_a_dead_writer_cannot_read_as_passed — a shard que morre a meio nao pode arredondar para verde,
+ * e a contagem de `never-ran` tem de ser a diferenca para o `plan` que ela declarou.
+ *
+ * @throws quando um `plan` de 300 com 9 vereditos nao rende 291 nunca-corridos
+ */
+fn js_a_dead_writer_cannot_read_as_passed() {
+    let s = teko::journal::summarize(js_records_of_a_dead_shard(300, 9))
+    teko::assert::eq_u64(s.never_ran.total, 291)
+    teko::assert::eq_u64(s.dead.len, 1)
+    teko::assert::str_absent(teko::journal::render_summary(s), "run PASSED")
+}
+```
+
+### 13.7 Fixture de regressao
+
+Um cenario no canal **existente** (`own_native`) — nenhum canal novo, nenhuma build nova:
+
+```
+  Scenario: journal_summary_names_a_planted_skip
+    Given args = ["--replay-fixture"]
+    When built and run
+    Then stdout pattern = "scenario journal_summary_names_a_planted_skip: ok"
+```
+
+O caso monta registos sinteticos com uma falha e um skip, renderiza, e afirma pelo NOME (nunca pelo
+codigo de saida — ruling do dono de hoje). A prova de que o bloco sobrevive a morte da corrida e o
+`#test` `js_a_dead_writer_cannot_read_as_passed` acima, que nao precisa de matar processo nenhum
+porque `summarize` e pura.
+
+### 13.8 O que o sumario NAO cobre
+
+1. **Nao muda a politica de skip** (§13.4) — nomeia, nao decide.
+2. **Nao torna a fase unitaria tolerante a falhas.** O `panic` continua a matar a shard; o que muda e
+   que a morte passa a ser nomeada e os nao-corridos contados. Tornar cada `#test` isolado e
+   `teko::isolate` (S8), que nao existe — e §11.5 ja o diz.
+3. **Nao inclui a cobertura de uma shard cujo despejo falta.** Ela e reportada como `missing`, e a
+   corrida falha (C4). Estimar o que falta seria inventar o numero que a fasquia julga.
