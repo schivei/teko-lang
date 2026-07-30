@@ -431,10 +431,19 @@ honest-stop; a comment-only touch). **`teko::time`'s `DateTime`/`TimeSpan`/`Date
 stdlib types** — narrowing their tick field is an observable stdlib change (a 292-year range instead of
 an astronomical one). Ratify with (c).
 
-> Note on `teko_rt.c`'s *arithmetic* helpers `tk_div`/`tk_rem`/`tk_int_to_float` (`teko_rt.c:2327+`,
-> `__int128` params): these are the runtime's INTERNAL wide-arith and are **out of scope** — the language
-> ceases to *expose* i128, but the runtime may keep a wider internal type. They are reachable only via
-> codegen for 64-bit division; nothing in Wave A/B requires touching them. Flagged, not changed.
+> Note on `teko_rt.c`'s *arithmetic* helpers `tk_div`/`tk_rem`/`tk_int_to_float` (`__int128` params):
+> this doc called them the runtime's INTERNAL wide-arith and put them **out of scope**, on the reasoning
+> that the language may stop *exposing* i128 while the runtime keeps a wider internal type.
+> **SUPERSEDED by the owner ruling of 2026-07-30** (*"é pra remover suporte de 128 bits como primitivas
+> (inteiros e flutuantes), para isto foram criados os arbitrários bigint e dec"*): they are REMOVED,
+> together with the whole `*_i128`/`*_u128` helper family, the `tk_to_{u,i}128*` casts and the 128-bit
+> cast CARRIER (now `int64_t`/`uint64_t`). Two facts closed it: (1) nothing ever called the trio —
+> integer `/` and `%` route through the per-width `tk_div_<tag>`/`tk_mod_<tag>` helpers and an int->float
+> cast is a plain C cast; (2) being the runtime's only NON-static `__int128` functions, they were the
+> sole reason `teko_rt.o` referenced the libgcc 128-bit builtins `__divti3`/`__udivti3`/`__modti3`/
+> `__umodti3`/`__floattidf`/`__floatuntidf`, which MSVC's `link.exe` cannot resolve — six LNK2019s that
+> reddened `artifact / windows-x86_64` the moment the Windows leg moved off mingw. "Internal wide-arith
+> the surface cannot reach" was still a cost, and it was being paid at the link.
 
 ---
 
