@@ -1461,3 +1461,46 @@ A fronteira, escrita para não se dissolver:
 - Corolário do estilo da casa: a garantia do único leitor tem de ser **imposta**, não convencionada.
   Uma garantia que não pode falhar nem em compilação nem em execução é decoração — apanhámos três
   dessas nesta lane.
+
+## O canal é alfândega: só cópias, arena própria, e é singleton (dono, 2026-07-30)
+
+> *"Canais não devem poder operar sobre o mutável ou referência, logo, tudo que por ele passa é
+> cópia, o dado nasce em alguma origem (que tem sua arena), é copiado para o canal (que tem a sua
+> arena) e então transferido ou copiado por quem as consome, e no momento do consumo, a mensagem é
+> popada da memória do canal. […] todo canal deve residir na arena do programa ou na spine, é
+> singleton."*
+
+Cinco afirmações, e nenhuma é opcional:
+
+1. **O canal NÃO opera sobre `mut` nem sobre referência.** Não é recomendação — é o que o tipo tem
+   de recusar. Um `chan<T>` de referências é um erro, não um mau uso.
+2. **Tudo o que passa é CÓPIA.** Três arenas, não duas: a **origem** tem a sua, o **canal** tem a
+   sua, o **consumidor** tem a sua.
+3. **No consumo a mensagem é POPADA** da memória do canal — o canal não acumula o que já entregou.
+4. **O canal não é grátis.** É o preço do sincronismo, e paga-se de olhos abertos: ele é o **apoio
+   alfandegário** entre tarefas.
+5. **Todo o canal reside na arena do PROGRAMA ou na spine, e é SINGLETON.** Não é por tarefa.
+
+### O que isto resolve, e é por construção e não por disciplina
+
+- **A dívida da posse do N:M evapora-se.** A §18 tinha-a nomeado bem: *"num MPSC cada registo é
+  consumido uma vez; numa difusão é consumido N vezes, e é por isso que precisa de regra de posse"*.
+  Com cópia obrigatória, **N cópias não têm dono partilhado nenhum** — cada receptor copia para a
+  sua arena. Não há contagem de referências para desenhar.
+- **O ponteiro pendurado através de fronteiras de arena não pode existir.** A §17 avisou que *"um
+  valor na raiz da tarefa A é ponteiro pendurado no instante em que A rebobina"*. Nada atravessa por
+  referência, logo não há o que pendurar. **A regra do dono é anterior ao problema, não posterior.**
+- **O canal na arena do programa é o encaixe que faltava entre o `C-A` e o `C1`.** A raiz por tarefa
+  não engole o canal: o canal é explicitamente global e singleton, e é por isso que ele consegue ser
+  a alfândega — uma alfândega dentro de um dos países não é alfândega.
+- **O `.tkcov` fecha.** Os escritores mandam registos, um leitor apenda: linear na entrada, sem
+  releitura, sem sobreposição. A pergunta que estava pendente — *esperar pelo C4 ou fechar já* —
+  deixa de ter dois lados.
+
+### Prioridade que veio com o ruling
+
+> *"precisamos priorizar, assim que uma vaga se abrir (de agentes), iniciar a fundação para ensinar
+> o compilador as bases necessárias antes de podermos aplicá-las nos testes."*
+
+A fundação primeiro, a aplicação aos testes depois. Não é "faz um pedaço e completa" — é a ordem que
+o próprio arquitecto já tinha achado: **C0 · C-A · C1**, e só então o resto.
