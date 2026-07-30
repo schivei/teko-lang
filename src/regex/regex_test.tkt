@@ -55,6 +55,41 @@ fn literal_searches_anywhere_in_the_input() {
 
 #test
 /**
+ * literal_multibyte_codepoint_matches_the_same_text — a pattern literal that is NOT ASCII must find
+ * itself in input carrying the identical text, and must still refuse input that only LOOKS similar.
+ * Regression for the defect where the parser walked the pattern BYTE BY BYTE: a multi-byte codepoint
+ * (the em dash `—`, U+2014, 3 bytes) became three separate one-byte `RChar` nodes, none of which ever
+ * decoded back to U+2014 — so the declared text could never be found, even though it sat byte-for-byte
+ * in the subject (cargo/0.3.1.0-matcher-padrao-stderr — CI run 30563221738, `own_native.tkr` ::
+ * `assert_failure_names_the_scenario_and_both_values`).
+ *
+ * @return void
+ */
+fn literal_multibyte_codepoint_matches_the_same_text() {
+    let panic_text = "teko: deliberate panic: the_named_case: assertion failed: eq_i64 — expected 42, got 41\nteko: stack trace:\n"
+    teko::assert::is_true(matched("the_named_case: assertion failed: eq_i64 — expected 42, got 41", panic_text))
+    teko::assert::is_false(matched("the_named_case: assertion failed: eq_i64 - expected 42, got 41", panic_text))
+    teko::assert::is_true(matched("café", "a café au lait"))
+    teko::assert::is_false(matched("café", "a cafe au lait"))
+}
+
+#test
+/**
+ * class_member_multibyte_codepoint — a `[...]` class member (and a range endpoint) decodes as a
+ * WHOLE codepoint too, not one raw byte at a time — the same defect class as the literal case,
+ * closed by the same fix (`decode_codepoint`), covered separately so the class parser cannot regress
+ * to it unnoticed.
+ *
+ * @return void
+ */
+fn class_member_multibyte_codepoint() {
+    teko::assert::is_true(matched("[é—]", "café"))
+    teko::assert::is_true(matched("[é—]", "em—dash"))
+    teko::assert::is_false(matched("^[é—]+$", "abc"))
+}
+
+#test
+/**
  * panic_marker_pattern_survives_position_and_backtrace — the pattern shape `.tkr` panic scenarios
  * actually carry: marker + reason, asserted against a stderr that also holds a source position
  * ahead of it and a backtrace after it. Those are exactly the parts that differ per platform (glibc
