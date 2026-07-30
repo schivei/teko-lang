@@ -1878,3 +1878,50 @@ tentada*. Juntas fecham as duas maneiras de um teste ser verde sem afirmar nada.
 
 Se a **regressão** entra no mesmo regime — o dono diz *"e até regressões"*, e o `.tkr` tem passos
 declarados que são contáveis da mesma maneira, mas o corpo do cenário é um programa à parte.
+
+## Teste sem asserção e sem saída é FALHA; o fold é categoria própria que o GATE trata como skip (dono, 2026-07-30)
+
+> *"tem o caso do teste não executar nenhuma asserção e não dar saída alguma, eu colocaria como falha
+> **por não ter dado resultado**. Também tem o que faz fold… esse eu criaria uma **categoria
+> diferente**, mas que, para nós, no **gate de CI faria erro igual o skip**, pq não daria como falha
+> pelo teste, pq pode ser que a pessoa trabalhe no **modo TDD**."*
+
+Duas regras, e a segunda tem duas moradas:
+
+1. **Zero asserções executadas E zero saída ⇒ FALHA.** O critério é *não ter dado resultado* — um
+   teste que não afirma nada e não diz nada não é verde, é mudo.
+2. **O fold (guarda morta) é CATEGORIA PRÓPRIA, não falha de teste** — porque em TDD é um estado
+   legítimo de trabalho. **Mas no gate de CI é erro, igual ao skip.**
+
+### A segunda regra é a lei do SKIPPED estendida, e a extensão é exacta
+
+*"SKIPPED é falha"* já era lei. Uma guarda morta **é um skip disfarçado**: o teste corre, fica verde,
+e não afirma nada. A regra do dono diz onde cada leitura vale: **na máquina de quem escreve, é um
+aviso; no portão, é erro.** O mesmo facto, dois veredictos, e a diferença é o sítio — não o facto.
+
+### O que já existe, medido
+
+`src/checker/test_assert.tks` + o analisador de suíte **já produzem a categoria e já a imprimem**:
+
+```
+analyzer: {misleading} MISLEADING, {foundational} FOUNDATIONAL, {dead} DEAD, {redundant} REDUNDANT, {live} LIVE
+```
+
+E é explicitamente **de tempo de desenvolvimento** — `project.tks:3773` chama-lhe *"the dev-time
+whole-suite stale/redundant/misleading analyzer"*. **A categoria existe e relata; o que falta é o
+portão promovê-la a erro.** A lei não pede máquina nova: pede que o gate leia o que já se imprime.
+
+### E a regra 1 é o remédio para a cegueira que a §27 mediu
+
+O arquitecto mediu que **102 dos 1042 `#test` (9,8 %) não têm uma única `teko::assert::` directa no
+corpo** — e foi honesto: a maioria chama auxiliares locais que afirmam lá dentro, logo o número mede
+**invisibilidade à análise estática**, não ausência.
+
+**A regra 1 do dono é imune a essa cegueira, porque é de EXECUÇÃO.** Um teste que chama um auxiliar
+que afirma **emite `RecAssert` em execução**, veja a análise estática o que vir. Logo:
+
+- a **análise estática** diz quantas asserções *deviam* ocorrer — e é cega a 9,8 %;
+- a **regra 1** apanha o caso terminal — *nenhuma* asserção e *nenhuma* saída — **sem depender de
+  ver o corpo**.
+
+**Uma é o esperado, a outra é a rede.** E a rede não tem furo onde a primeira tem.
