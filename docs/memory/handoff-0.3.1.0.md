@@ -15,6 +15,45 @@ hipótese, está dito.
 
 
 
+
+## 0b. AS DUAS CONSEQUÊNCIAS DO DRENO SEM RELATÓRIOS — ambas previstas, ambas materializadas
+
+Eu drenei quatro branches sem relatório, **escrevi que o CI seria o árbitro**, e o CI cobrou as duas
+coisas que faltavam. Registadas porque cada uma tem uma lição que não é sobre estas branches.
+
+### CONSEQUÊNCIA 1 — um valor por omissão resolve-se no CHAMADOR (24 jobs vermelhos por um token)
+
+`call_inst` ganhou `ret_type: LType = LType::I64`. Dentro de `teko::lir` compila; mas o **valor** por
+omissão é materializado em **cada sítio de chamada**, e **dez ficheiros fora de `teko::lir`** chamam-na.
+Consertado em `fbbed32b` qualificando o default. A regra está no digesto.
+
+**E o diagnóstico apontou o ficheiro errado.** Dizia `isel_arm64_test.tkt:397:112`; esse ficheiro está
+**intacto** e a sua linha 397 tem **18 caracteres**. `397:112` é a posição do `LType::I64` em
+**`src/lir/lir.tks`** — a mensagem junta o **ficheiro do chamador** com a **linha:coluna da declaração**.
+Gastei várias medições a confirmar que o ficheiro acusado estava limpo. **Achado a corrigir** quando esta
+família for tocada.
+
+### CONSEQUÊNCIA 2 — dois agentes no mesmo comportamento, em direcções opostas, sem se verem
+
+- Um fixou de manhã um **texto dourado** do LIR para a leitura indexada de `str`, com **igualdade de
+  texto inteiro**, e escreveu no doc-comment que a forma forte foi escolhida para não passar se o
+  lowering deixasse de produzir texto.
+- O outro, à tarde, **acrescentou guarda de fronteira à LEITURA** de elemento (`icmp`/`branch`/
+  `tk_panic_oob_at` antes do load) — porque o nativo devolvia lixo onde a rota C panicava.
+
+**As duas mudanças estão certas. A expectativa envelheceu em horas**, e `lwt_lowers_str_index_loads_the_byte_off_rodata`
+aborta com SIGABRT — o que mata **todas** as pernas `test` e `Memory paranoid`, porque a fase unitária
+pára no primeiro `assert` falhado.
+
+**A lição que interessa, e não é "usem dourados mais fracos":** foi precisamente a **força** do dourado
+que apanhou isto em horas em vez de meses. Enfraquecê-lo seria trocar detecção por conforto. O que
+falta é **coordenação**: dois agentes cujo trabalho se cruza no mesmo comportamento têm de saber um do
+outro, e **é o integrador que o sabe** — a colisão declarada no brief cobria FICHEIROS
+(`src/lir/lower.tks`), e estes dois nem partilhavam ficheiro: um mexeu no lowering, o outro no `.tkt`.
+
+**Regra nova para os briefs: declarar a colisão por COMPORTAMENTO, não só por ficheiro.** "Alguém está a
+mudar o que a leitura indexada emite" é a informação que faltava, e nenhum dos dois a teve.
+
 ## 0a. REINÍCIO DO CONTENTOR — 2026-07-30 ~06:50 UTC, e o que se salvou
 
 **Os CINCO agentes morreram com o contentor, e todos os worktrees (`/home/user/wt-*`) desapareceram.**
