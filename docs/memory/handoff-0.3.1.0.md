@@ -13,6 +13,61 @@ hipótese, está dito.
 - **O repo é um FORK.** `schivei/teko-lang`; o upstream é `teko-org/teko-lang`. `release.yml` e
   (desde hoje) `nightly.yml` só correm na org.
 
+
+## 0. MODO AUTÓNOMO — 2026-07-30, o dono foi dormir
+
+*"Vou dormir, te deixo no modo autônomo, tem bastante trabalho por aí."*
+
+**O que o integrador faz enquanto ele dorme:** drenar agentes que terminam, despachar da fila ao teto de
+4, verificar CI pelo log integral (`scripts/ci_full_log.sh`), e manter este documento vivo. **Não** promove
+ao tronco, **não** faz bump de versão, **não** fecha a lane — isso é dele.
+
+### CINCO AGENTES A CORRER (teto 4, um a mais por ordem explícita)
+
+| agente | branch | porquê |
+| --- | --- | --- |
+| **degrau 27 — `ftoa`** | `cargo/0.3.1.0-degrau-27` | a paragem viva do self-host; destranca o ponto de fixo **e** torna efectiva a lei da emissão nativa |
+| **último abort unitário (`zext`)** | `cargo/0.3.1-zext-expectativa` | provado por sonda que é o ÚLTIMO: sem ele, **1117** testes arrancam e a fase unitária fica verde |
+| **leitura fora de fronteira** | `cargo/0.3.1-leitura-fora-de-fronteira` | divergência medida: nativo devolve lixo, rota C panica. Valor errado calado |
+| **gémeo de macOS** | `cargo/0.3.1-gemeo-macos` | teste sem dependência do host que falha só em macOS |
+| **`kind` desconhecido panica** | `cargo/0.3.1-kind-desconhecido-panica` | **5º por ordem directa**: *"precisa de correção já, ou estaremos ferindo nossas leis"* |
+
+**Quando o do `kind` terminar, voltar ao teto de 4.**
+
+### FILA, por valor
+
+1. **`.exe` no Windows** — `src/build/` não acrescenta `.exe`; a perna `test / windows-x86_64` não arranca por isso.
+2. **Terceira passagem do documento do `tdb`** — em forma de **PROPOSTA** (lei nova de forma), com interop fora, alvo *"a melhor experiência de dev"*, e "SEM C LANG".
+3. **`kind = "tool"`** — **BLOQUEADO** pelo portão do `tdb` (proposta, não entra nesta versão nem na seguinte).
+4. **As duas regressões "expected a compile failure but the build succeeded"** (`native_iface_fat_known_stop.tkr`, `diagnostics.tkr`) — **atenção: é KNOWN-STOP a ficar vermelho, e pela lei do dono isso NÃO significa necessariamente que o defeito foi corrigido; pode significar que uma GUARDA se perdeu.** Não owned. Vale investigar.
+5. `own_native.tkr → own_cross_x86_64_windows_emits_coff` — o `cc` falha no C gerado. Não owned.
+
+### CRUMB 5 do AArch64-ELF — NÃO APLICADO, e a razão é medição, não preguiça
+
+O agente deixou-mo por ser workflow (só o integrador toca `.github/workflows/`). **Medi antes de aplicar, e
+ele ficou em grande parte OBSOLETO pelo próprio dreno do crumb 3:**
+
+- os **21 skips** da perna `linux-arm64-glibc` eram **todos** `unsupported TEKO_TARGET "arm64-linux"`. Com
+  `Arm64Linux` a existir, vão a **zero** sem tocar em CI. A metade valiosa do crumb 5 aconteceu sozinha.
+- o que sobraria era acrescentar `no_skips_gate.sh` + provisionar wasmtime aarch64. **E aí colide:**
+  `scripts/no_skips_gate.sh` rejeita **qualquer** skip, incluindo a linha wasm — logo, sem wasmtime, a perna
+  ficaria vermelha pela linha wasm. **Mas pôr wasmtime numa perna de teste faz `scripts/wasm_known_stop_gate.sh`
+  ficar VERMELHO por desenho** (ele assere que existe **exactamente um** provedor de motor wasm, o
+  `regressor-full`), e retirar esse pin é a *promoção* que o dono ruleou ser trabalho da versão dedicada do
+  wasm: *"KNOWN-STOP, wasm terá a própria versão para refinar."*
+
+**Portanto é uma colisão entre dois rulings do dono** (skip é falha × wasm refina na sua versão), e negociação
+de KNOWN-STOP é **dono↔integrador**, nunca de agente. **Fica para ele decidir, com o número na mão:** depois do
+crumb 3, quantos skips restam de facto na perna arm64? Se for **só a linha wasm**, o pin já cobre e não há nada
+a fazer. **A próxima execução do CI sobre `36b2ab45` ou posterior responde** — é a primeira com `Arm64Linux`.
+
+### O PATCH DO AGENTE **NÃO** DEVE SER APLICADO VERBATIM, se algum dia entrar
+
+Ele propôs `run: … teko test . 2>&1 | tee teko-test.log`. Isso **reintroduz** o defeito que custou a esta lane
+um `exit 127` opaco no Windows: os passos correm com `-e -o pipefail`, e sem `set +e` o teste que falha mata o
+passo antes do gate. E `rc=$?` depois de um pipe dá o estado do **último** comando do pipe. A forma correcta
+está no passo do Windows em `pr.yml`: `set +e` → comando → `rc=$?` → `set -e` → `cat` → gate.
+
 ## 1. A escada de degraus — onde está
 
 Cada paragem do backend nativo é um "degrau". A escada é o produto desta lane: enquanto ela não
