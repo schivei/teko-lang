@@ -1831,3 +1831,50 @@ que não é veredicto.
 **As duas metades passam a ter garantias diferentes.** Isso é defensável — saída livre não é
 resultado — mas tem de ser **decisão declarada** e não acidente, ou alguém vai depurar durante uma
 tarde à procura de por que motivo duas linhas se misturaram.
+
+## Medir asserções: o estático contra o executado (dono, 2026-07-30)
+
+> *"hoje não temos visibilidade de quantas asserções deveriam ocorrer… é possível em tempo de
+> compilação dos testes e até regressões levantar todos, assim, nada passa pelo invisível ao gate…
+> um teste com 3 asserções onde uma ou duas são executadas, é sinal de falha… podem ser
+> condicionais, sendo possível prever somente as asserções na raiz de um teste `#test` e nada mais,
+> ou, todas, mas algumas como **obrigatórias** e outras como **fluxo** (não são opcionais mas podem ou
+> não ocorrer)? De qq forma, ao menos o **número de assertividades executadas** são passíveis de
+> medição."*
+
+### Metade da máquina já existe, e é a metade cara
+
+`src/checker/test_assert.tks` **já percorre o corpo de um `#test`, encontra cada
+`teko::assert::is_true`/`is_false` e conta-as** (`AssertStats { total, folded }`). E já tem
+vocabulário de veredicto para o problema irmão: `folded == total` ⇒ **FOUNDATIONAL**; `folded >= 1`
+com produção coberta ⇒ **MISLEADING** — a *guarda morta*, uma asserção cujo predicado dobra em
+constante e por isso **nunca pode falhar**.
+
+**O que falta é o outro lado: ninguém sabe quantas EXECUTARAM.** A lei é a comparação.
+
+### A distinção do dono é COMPUTÁVEL, e não precisa de heurística
+
+*Obrigatória* vs *fluxo* não tem de ser anotação humana:
+
+- **obrigatória** = a asserção **não está aninhada em nenhum construto condicional** (`if`, `match`,
+  `loop`, arco de erro). Se o corpo do teste correr até ao fim, ela **corre**.
+- **fluxo** = todas as outras. Contam-se, não se exigem.
+
+O compilador tem a estrutura para o decidir — o próprio módulo já dobra sobre blocos de instruções
+(`assert_stats_add`, *"the fold over a statement block"*). A regra do portão sai directa:
+**toda a obrigatória tem de executar; as de fluxo são contadas e relatadas.**
+
+### E apanha um defeito que ninguém nomeou
+
+Um teste cujas asserções estão **todas dentro de um ramo que nunca corre** é **verde hoje**: a
+cobertura diz que tocou produção, e a contagem estática diz que tem asserções. Só a comparação
+estático-contra-executado o revela.
+
+**É a mesma família da guarda morta, descoberta em execução em vez de em compilação.** O
+`test_assert.tks` apanha a asserção que *não pode* falhar; esta lei apanha a que *não chegou a ser
+tentada*. Juntas fecham as duas maneiras de um teste ser verde sem afirmar nada.
+
+### O que fica por decidir
+
+Se a **regressão** entra no mesmo regime — o dono diz *"e até regressões"*, e o `.tkr` tem passos
+declarados que são contáveis da mesma maneira, mas o corpo do cenário é um programa à parte.
