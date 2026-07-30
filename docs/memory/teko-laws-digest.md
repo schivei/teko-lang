@@ -988,3 +988,57 @@ isso que torna barata a migração para repo próprio que o dono quer.
 depurar o próprio compilador. Se o nativo estiver quebrado, `tdb` está quebrado. E atenção: *"não
 escrever em C"* e *"não compilar pela rota C"* são coisas **diferentes** — a primeira é ordem do dono,
 a segunda não foi dita. Se a rota C for a rede de segurança do arranque, é decisão dele.
+
+### A CORREÇÃO DO DONO À LEI, e é a que importa mais: A SUÍTE NÃO É A ASSERÇÃO PRINCIPAL
+
+Verbatim, 2026-07-30: *"este é o ponto de falha dos agentes, estão testando `teko test .` mas a
+principal asserção que é o build nativo seco de gen2 não o fazem, aí normalmente vai passar verde
+mesmo."*
+
+**Ele está certo, e o defeito era do meu enunciado.** Eu escrevi a emissão nativa como um
+**complemento** ao `teko test .`. É o contrário:
+
+| | |
+| --- | --- |
+| **asserção PRINCIPAL** | a **build nativa SECA da gen2** (`TEKO_BACKEND=native <gen1> . -o … --no-verify --release`) |
+| asserção secundária | `teko test .` |
+
+**E a razão pela qual passar só a suíte dá verde por construção:** a suíte corre por uma gen2
+construída pela **ROTA C**. Uma mudança de lowering/isel/encode **não atravessa** esse caminho.
+Portanto o agente mede exactamente o único caminho que a sua mudança não afecta, e o verde é
+verdadeiro e inútil ao mesmo tempo.
+
+### O INSTRUMENTO, porque a frase já foi dita e não pegou: `scripts/native_dry_gate.sh`
+
+Duas vezes num dia um agente reportou verde e a paragem seguinte apareceu no CI. Uma regra que depende
+de o agente se lembrar de um comando falha em silêncio. **O gate devolve uma ASSINATURA comparável:**
+
+```
+bash scripts/native_dry_gate.sh <gen1> --save   .native-base.sig   # na BASE, antes de tocar em nada
+bash scripts/native_dry_gate.sh <gen1> --expect .native-base.sig   # na branch, com a gen1 RECONSTRUÍDA
+```
+
+**E resolve o problema que a minha lei não resolvia** — que a build nativa não pode ter sucesso hoje, e
+que um agente cumpridor perguntou, com razão, de que serve correr algo que sempre falha. A saída não é
+esperar pelo degrau 27: é **comparar**. A paragem é um observável estável.
+
+- assinatura **IGUAL** → a mudança não introduziu nem desbloqueou paragem. Verde honesto.
+- assinatura **DIFERENTE** → notícia nos dois sentidos, e o relatório diz qual: **progresso** (o degrau
+  caiu — actualizar a escada e a assinatura de base para todos os agentes seguintes) ou **regressão**.
+- e o caso mais grave, que a assinatura nomeia à parte: **`FAILED WITHOUT A NAMED N1 STOP`**. Uma
+  falha nativa sem paragem nomeada **não é a escada, é defeito** — e é precisamente o que a suíte verde
+  esconde.
+
+**A GEN1 TEM DE VIR DA ÁRVORE QUE SE MEDE.** Para uma mudança no gerador, a pergunta é o que o
+COMPILADOR passou a emitir, logo a gen1 do `--expect` é construída da branch. Usar a gen1 da base nos
+dois lados mede o efeito da mudança na FONTE, não no gerador — medição legítima, mas outra.
+
+**NÃO PINA NENHUM DEGRAU POR NOME, de propósito.** Um gate que nomeasse `ftoa` teria de ser editado a
+cada degrau, e um gate que se edita a cada degrau é um gate que se ignora. Compara com o que o agente
+mediu na base, portanto sobrevive à escada inteira sem toque.
+
+**UM DEFEITO MEU NESTE GATE, apanhado por inversão contra ele próprio e registado porque é a classe que
+mais volta:** com `/bin/true` como gen1, dava `rc=0`, log vazio, e a assinatura dizia **COMPLETED**. Um
+"compilador" que não faz nada e sai 0 lido como sucesso é literalmente o *"AN ABSENT OBJECT WAS A
+PASS"* do cabeçalho de `scripts/check_elf.sh`. **Um sucesso tem de ser corroborado por um ARTEFACTO,
+nunca por um código de saída sozinho** — o gate exige agora o executável em `out/`.
