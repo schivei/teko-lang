@@ -139,6 +139,7 @@ fn sg_is_tkt(name: str) -> bool { teko::str::ends_with(name, ".tkt") }
  */
 fn sg_unscoped_in_file(path: str) -> str {
     let text = match teko::io::read_file(path) { str as s => s; error => return teko::str::concat(path, ": unreadable") }
+    if !sg_text_mentions_scratch(text) { return "" }
     let lines = sg_lines(text)
     mut i: u64 = 0
     loop {
@@ -147,6 +148,30 @@ fn sg_unscoped_in_file(path: str) -> str {
         i = i + 1
     }
     ""
+}
+
+/**
+ * sg_text_mentions_scratch — whether the WHOLE file text names the scratch namespace at all: three
+ * substring scans, no allocation, no line list.
+ *
+ * MEASURED, and this is why it exists: splitting every `.tkt` into a line LIST first cost the suite
+ * 95.6 s against 20.7 s before this guard existed — the push-per-line is quadratic in the file, and
+ * almost every file has no scratch literal to find. The fast reject brings the whole guard under the
+ * noise floor while leaving the exact per-line answer for the files that do mention one, which are the
+ * only ones whose offending LINE anybody needs named.
+ *
+ * @param text  the file's whole text
+ * @return      true iff any scratch prefix appears anywhere in it
+ */
+fn sg_text_mentions_scratch(text: str) -> bool {
+    let prefixes = sg_scratch_prefixes()
+    mut i: u64 = 0
+    loop {
+        if i >= prefixes.len { break }
+        if teko::str::contains(text, prefixes[i]) { return true }
+        i = i + 1
+    }
+    false
 }
 
 /**
