@@ -55,8 +55,9 @@ ruling de 2026-07-27 registado como **superseded por medição** em vez de apaga
 
 ### O QUE ENTROU EM CADA UMA (para o histórico)
 
-Cinco branches, **todas integralmente empurradas** (zero commits à frente do remoto — verificado após
-o reinício). Os agentes morreram com o container; o trabalho não.
+Os SHAs abaixo são os das branches **como estavam ao serem drenadas**. Todas estavam integralmente
+empurradas quando o container reiniciou — zero commits à frente do remoto, verificado um por um. **Os
+agentes morreram com o container; o trabalho não, e foi a regra de "empurrar sempre" que o garantiu.**
 
 ### `cargo/0.3.1-aridade-numerica` @ `f1ee57df` — 19 ficheiros, +1290
 Ruling do dono: menor cabe em maior sem cast; estreitamento **nunca trunca** e panica em runtime só
@@ -114,9 +115,14 @@ gates estruturais (`objfile_gate_test.sh`, `wasm_known_stop_gate.sh`,
 
 ## 4. DECISÕES DO DONO EM ABERTO
 
-Nenhuma bloqueante. A única que sobrou:
+Uma só, e não é bloqueante para a lane:
 
-- **Nada.** Todas as decisões levantadas hoje foram respondidas. Se aparecer, é nova.
+- **`fmt --apply`: dizer se pode andar.** Ele **aprovou** (*"Sim: fmt --apply explícito"*), mas o
+  despacho do agente foi **recusado na camada de permissão** imediatamente depois, e eu não o repeti —
+  chamada recusada trata-se como decisão, não como falha. As duas coisas contradizem-se, então a
+  próxima sessão deve **perguntar se foi clique errado** antes de despachar. Uma palavra basta.
+
+Todo o resto levantado neste dia foi respondido e está executado ou registado.
 
 ## 5. LEIS E DIRETRIZES — onde vivem
 
