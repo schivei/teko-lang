@@ -84,3 +84,299 @@ fn verdict_emit_appends_to_the_named_channel() {
     teko::assert::is_true(content == "first\nsecond\n")
     match teko::fs::remove_file(path) { error => { }; null => { } }
 }
+
+/**
+ * PIPE_DEADLINE_MS — the budget every pipe read in this file runs under.
+ *
+ * A DEADLINE IS WHAT KEEPS THESE TESTS FROM HANGING INSTEAD OF FAILING. Two of them deliberately
+ * arrange a pipe that will never reach end-of-file; without a budget the runner would block there
+ * forever, and a suite that never reports is strictly worse than a red one. Two seconds is wide
+ * enough that a loaded CI box never trips it by accident and short enough that a genuine hang is
+ * reported in seconds.
+ */
+const PIPE_DEADLINE_MS: i64 = 2000
+
+/**
+ * PIPE_NO_EOF_DEADLINE_MS — the budget the WITHHELD-end-of-file test runs under.
+ *
+ * Deliberately shorter than `PIPE_DEADLINE_MS`, because this one is expected to EXPIRE: it is the
+ * measurement of the classic pipe defect, and paying two seconds for a result that is known in
+ * advance would only slow the suite.
+ */
+const PIPE_NO_EOF_DEADLINE_MS: i64 = 400
+
+/**
+ * shell_argv — `sh -c <script>`, the child every test here launches.
+ *
+ * `sh` UNQUALIFIED AND NOT `/bin/sh`, because the absolute path is a claim about the host's
+ * directory layout that Windows does not honour; the bare name goes through the host's own
+ * executable lookup, which is exactly what `build/regression.tks`'s `tool_on_path` already relies
+ * on for its cross-host probes.
+ *
+ * @param script  the shell script the child runs
+ * @return        the child's argument vector
+ */
+fn shell_argv(script: str) -> []str {
+    mut v: []str = teko::list::push(teko::list::empty(), "sh")
+    v = teko::list::push(v, "-c")
+    teko::list::push(v, script)
+}
+
+/**
+ * drained — everything a child sent to `p`'s write end, with the parent's own copy of that end
+ * closed first.
+ *
+ * THE CLOSE IS THE WHOLE POINT AND IT IS NOT A DETAIL. While this process still holds a copy of the
+ * write end, the pipe has a writer, and the read end never reaches end-of-file no matter what the
+ * child does. Every test that expects a drain to TERMINATE goes through here so the close cannot be
+ * forgotten in one of them; the one test that expects a drain NOT to terminate does not.
+ *
+ * @param p            the pipe whose read end to drain
+ * @param deadline_ms  the total budget for the drain
+ * @return             what the writer sent, or the drain's failure
+ * @throws             when the deadline expired before end-of-file, or a read failed
+ */
+fn drained(p: Pipe, deadline_ms: i64) -> str | error {
+    match close_fd(p.write_fd) { error as e => return e; null => { } }
+    let got = read_to_eof(p.read_fd, deadline_ms)
+    match close_fd(p.read_fd) { error => { }; null => { } }
+    got
+}
+
+/**
+ * drain_text — `drained`, with the failure arm collapsed to "" so a test can assert on ONE value.
+ *
+ * @param p            the pipe whose read end to drain
+ * @param deadline_ms  the total budget for the drain
+ * @return             what the writer sent, or "" when the drain failed
+ */
+fn drain_text(p: Pipe, deadline_ms: i64) -> str {
+    match drained(p, deadline_ms) { str as s => s; error => "" }
+}
+
+/**
+ * opened_pipe — one pipe, or a failure loud enough to name itself.
+ *
+ * @return the pipe, with both ends open
+ */
+fn opened_pipe() -> Pipe {
+    match pipe() {
+        Pipe as p => p
+        error => { teko::assert::is_true(false); Pipe { read_fd = NO_FD; write_fd = NO_FD } }
+    }
+}
+
+#test
+/**
+ * pipe_returns_two_open_distinct_descriptors — `pipe()` hands back two real, different descriptors.
+ *
+ * DISTINCT IS PART OF THE CONTRACT, not a coincidence of the packing: the read end and the write
+ * end are two separate objects, and a packing bug that folded them onto one value would still pass
+ * a "both are non-negative" check while making every later test meaningless.
+ *
+ * @return void
+ */
+fn pipe_returns_two_open_distinct_descriptors() {
+    let p = opened_pipe()
+    teko::assert::ge_i64(p.read_fd, 0)
+    teko::assert::ge_i64(p.write_fd, 0)
+    teko::assert::ne_i64(p.read_fd, p.write_fd)
+    match close_fd(p.write_fd) { error => { teko::assert::is_true(false) }; null => { } }
+    match close_fd(p.read_fd) { error => { teko::assert::is_true(false) }; null => { } }
+}
+
+#test
+/**
+ * closing_the_same_descriptor_twice_is_reported — `close_fd` answers honestly the second time.
+ *
+ * The ownership rule these primitives run on says the CALLER closes; a close that silently
+ * succeeded on an already-closed descriptor would hide a double-close, which on a busy process is
+ * how one caller ends up closing a descriptor another has since been given.
+ *
+ * @return void
+ */
+fn closing_the_same_descriptor_twice_is_reported() {
+    let p = opened_pipe()
+    match close_fd(p.write_fd) { error => { teko::assert::is_true(false) }; null => { } }
+    match close_fd(p.write_fd) { error => { }; null => { teko::assert::is_true(false) } }
+    match close_fd(p.read_fd) { error => { teko::assert::is_true(false) }; null => { } }
+}
+
+#test
+/**
+ * a_child_stdout_arrives_through_the_pipe — THE FIRST INVERSION, positive half: what the child
+ * writes into the pipe reaches the parent.
+ *
+ * No scratch file is created, named, read back or removed anywhere in this test — the bytes go from
+ * the child's stdout to this process's memory. That absence is the deliverable.
+ *
+ * @return void
+ */
+fn a_child_stdout_arrives_through_the_pipe() {
+    let p = opened_pipe()
+    let h = spawn_redirected_fds(shell_argv("printf pipe-mark"), "", teko::list::empty(), NO_FD, p.write_fd, NO_FD)
+    teko::assert::ge_i64(h.raw, 0)
+    teko::assert::eq_str(drain_text(p, PIPE_DEADLINE_MS), "pipe-mark")
+    teko::assert::is_true(wait_one(h) == 0)
+}
+
+#test
+/**
+ * an_unconnected_pipe_delivers_nothing — THE FIRST INVERSION, negative half: with the pipe NOT
+ * given to the child, the very same child's output does not arrive.
+ *
+ * WITHOUT THIS HALF THE POSITIVE HALF PROVES NOTHING. A test that only ever sees the expected bytes
+ * cannot tell a working pipe from a reader that happens to observe the child's inherited stdout by
+ * some other route; the two halves differ in exactly one thing — whether the write end was passed —
+ * and the byte count differs with it.
+ *
+ * @return void
+ */
+fn an_unconnected_pipe_delivers_nothing() {
+    let p = opened_pipe()
+    let h = spawn_redirected_fds(shell_argv("printf pipe-mark"), "", teko::list::empty(), NO_FD, NO_FD, NO_FD)
+    teko::assert::ge_i64(h.raw, 0)
+    teko::assert::is_true(wait_one(h) == 0)
+    teko::assert::eq_str(drain_text(p, PIPE_DEADLINE_MS), "")
+}
+
+#test
+/**
+ * the_read_end_sees_eof_once_the_child_is_gone — THE SECOND INVERSION, positive half: after the
+ * child exits and the parent has closed its own copy of the write end, the read end reaches
+ * end-of-file and the drain TERMINATES.
+ *
+ * Termination is the assertion. `read_to_eof` returning at all — with a budget still unspent — is
+ * what says end-of-file arrived; the content merely confirms nothing was lost on the way.
+ *
+ * @return void
+ */
+fn the_read_end_sees_eof_once_the_child_is_gone() {
+    let p = opened_pipe()
+    let h = spawn_redirected_fds(shell_argv("printf a; printf b"), "", teko::list::empty(), NO_FD, p.write_fd, NO_FD)
+    teko::assert::ge_i64(h.raw, 0)
+    match drained(p, PIPE_DEADLINE_MS) {
+        str as s => teko::assert::eq_str(s, "ab")
+        error => teko::assert::is_true(false)
+    }
+    teko::assert::is_true(wait_one(h) == 0)
+}
+
+#test
+/**
+ * a_write_end_left_open_in_the_parent_withholds_eof — THE SECOND INVERSION, negative half, and the
+ * classic defect of pipes: a parent that forgets to close its own copy of the write end reads
+ * forever, because it is itself the writer keeping the pipe open.
+ *
+ * THE DEADLINE IS WHAT MAKES THIS A TEST AT ALL. Without it this case does not go red, it HANGS —
+ * and a hung suite reports nothing, which is worse than a failure. Here the missing end-of-file
+ * comes back as an ERROR from `read_to_eof`, a value that can be asserted on, and the closing
+ * `close_fd` pair then proves the pipe was healthy all along: the only thing wrong was the open end.
+ *
+ * @return void
+ */
+fn a_write_end_left_open_in_the_parent_withholds_eof() {
+    let p = opened_pipe()
+    let h = spawn_redirected_fds(shell_argv("printf half"), "", teko::list::empty(), NO_FD, p.write_fd, NO_FD)
+    teko::assert::ge_i64(h.raw, 0)
+    teko::assert::is_true(wait_one(h) == 0)
+    match read_to_eof(p.read_fd, PIPE_NO_EOF_DEADLINE_MS) {
+        str => teko::assert::is_true(false)
+        error => { }
+    }
+    match close_fd(p.write_fd) { error => { teko::assert::is_true(false) }; null => { } }
+    match read_to_eof(p.read_fd, PIPE_DEADLINE_MS) {
+        str as rest => teko::assert::eq_str(rest, "")
+        error => teko::assert::is_true(false)
+    }
+    match close_fd(p.read_fd) { error => { teko::assert::is_true(false) }; null => { } }
+}
+
+#test
+/**
+ * one_write_end_can_back_both_child_streams — the same write end bound to the child's stdout AND to
+ * its stderr merges the two into one ordered stream.
+ *
+ * NOT A CURIOSITY — this is the ordinary way to capture a child whose diagnostics interleave with
+ * its output, and it is the case that fails when the child arm closes a source descriptor after the
+ * first `dup2` instead of after the last: the second bind would then be operating on a descriptor
+ * that no longer exists, and the child's stderr would vanish silently.
+ *
+ * @return void
+ */
+fn one_write_end_can_back_both_child_streams() {
+    let p = opened_pipe()
+    let h = spawn_redirected_fds(shell_argv("printf O; printf E 1>&2"), "", teko::list::empty(), NO_FD, p.write_fd, p.write_fd)
+    teko::assert::ge_i64(h.raw, 0)
+    teko::assert::eq_str(drain_text(p, PIPE_DEADLINE_MS), "OE")
+    teko::assert::is_true(wait_one(h) == 0)
+}
+
+#test
+/**
+ * a_pipe_can_feed_the_child_stdin — the read end of one pipe drives a child's standard input, so
+ * the parent's write end is the child's input without a `.in` file anywhere.
+ *
+ * The symmetric half of the capture story: the input redirection accepts a descriptor by the same
+ * rule the two output ones do, which is what will let a caller stop staging `.in` files.
+ *
+ * @return void
+ */
+fn a_pipe_can_feed_the_child_stdin() {
+    let feed = opened_pipe()
+    let cap = opened_pipe()
+    match close_fd(feed.write_fd) { error => { teko::assert::is_true(false) }; null => { } }
+    let h = spawn_redirected_fds(shell_argv("cat; printf .done"), "", teko::list::empty(), feed.read_fd, cap.write_fd, NO_FD)
+    teko::assert::ge_i64(h.raw, 0)
+    match close_fd(feed.read_fd) { error => { teko::assert::is_true(false) }; null => { } }
+    teko::assert::eq_str(drain_text(cap, PIPE_DEADLINE_MS), ".done")
+    teko::assert::is_true(wait_one(h) == 0)
+}
+
+#test
+/**
+ * the_path_route_is_unchanged — a caller that names a PATH still gets a file, byte for byte as
+ * before the descriptor slots existed.
+ *
+ * THE CORPUS DEPENDS ON THIS. Every capture in `build/regression.tks` and `build/project.tks` goes
+ * through the path route today; the descriptor slots were APPENDED to the payload precisely so this
+ * assertion could not change, and this test is what says the appending achieved that rather than
+ * merely intending it.
+ *
+ * @return void
+ */
+fn the_path_route_is_unchanged() {
+    let outp = teko::test::scoped(".teko-pipe-path-route.out")
+    match teko::fs::remove_file(outp) { error => { }; null => { } }
+    let h = spawn_redirected(shell_argv("printf path-mark"), "", teko::list::empty(), "", outp, "")
+    teko::assert::ge_i64(h.raw, 0)
+    teko::assert::is_true(wait_one(h) == 0)
+    let got = match teko::io::read_file(outp) { str as s => s; error => "" }
+    teko::assert::eq_str(got, "path-mark")
+    match teko::fs::remove_file(outp) { error => { }; null => { } }
+}
+
+#test
+/**
+ * fd_read_on_a_closed_descriptor_is_an_error_not_an_end_of_file — an empty result means end-of-file
+ * and ONLY end-of-file; a broken descriptor comes back on the error arm.
+ *
+ * The distinction is what lets `read_to_eof` loop until empty and still be correct: were a failed
+ * read to look like end-of-file, a drain interrupted by a descriptor problem would return a
+ * TRUNCATED capture and call it complete.
+ *
+ * @return void
+ */
+fn fd_read_on_a_closed_descriptor_is_an_error_not_an_end_of_file() {
+    let p = opened_pipe()
+    match close_fd(p.read_fd) { error => { teko::assert::is_true(false) }; null => { } }
+    match close_fd(p.write_fd) { error => { teko::assert::is_true(false) }; null => { } }
+    match fd_read(p.read_fd, READ_CHUNK) {
+        str => teko::assert::is_true(false)
+        error => { }
+    }
+    match fd_read(NO_FD, READ_CHUNK) {
+        str => teko::assert::is_true(false)
+        error => { }
+    }
+}
