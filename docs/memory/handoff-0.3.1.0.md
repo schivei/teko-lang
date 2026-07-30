@@ -36,7 +36,7 @@ ao tronco, **não** faz bump de versão, **não** fecha a lane — isso é dele.
 
 ### FILA, por valor
 
-1. **`.exe` no Windows** — `src/build/` não acrescenta `.exe`; a perna `test / windows-x86_64` não arranca por isso.
+1. **`.exe` no Windows** — brief pronto e MEDIDO, ver §3d. Dois sítios de chamada, e o desenho certo já existe no mesmo ficheiro.
 2. **Terceira passagem do documento do `tdb`** — em forma de **PROPOSTA** (lei nova de forma), com interop fora, alvo *"a melhor experiência de dev"*, e "SEM C LANG".
 3. **`kind = "tool"`** — **BLOQUEADO** pelo portão do `tdb` (proposta, não entra nesta versão nem na seguinte).
 4. **As duas regressões "expected a compile failure but the build succeeded"** (`native_iface_fat_known_stop.tkr`, `diagnostics.tkr`) — **atenção: é KNOWN-STOP a ficar vermelho, e pela lei do dono isso NÃO significa necessariamente que o defeito foi corrigido; pode significar que uma GUARDA se perdeu.** Não owned. Vale investigar.
@@ -491,6 +491,51 @@ primeira passaria se o `tool` fosse carregado e por acaso não colidisse.
 **Referência nomeada e aplicável: C#.** `dotnet tool` (`PackageType=DotnetTool`) é o único dos quatro
 com um TIPO de pacote declarado; `cargo install` e `go install` dão o mesmo efeito instalando algo que
 por acaso tem binário, **sem** tipo próprio. O dono atribuiu C# para addins, e aqui aplica-se de facto.
+
+
+## 3d. O `.exe` do Windows — medido, e o brief está pronto
+
+**O sintoma:** `test / windows-x86_64` morre em `ERROR: the producer's upload has no dl/windows-x86_64/teko.exe`.
+O produtor publicou `teko`. O CI está correcto nos **dois** lados (`produce_assets.sh` já trata `*.exe`, o
+consumidor espera `teko.exe`); é o **produto** que nomeia a saída sem extensão em todos os hosts. Um ficheiro
+PE chamado `teko` **não é lançável por nome**, porque o Windows resolve um nome sem extensão acrescentando
+`.exe`.
+
+**OS DOIS SÍTIOS, medidos em `src/build/project.tks`** — e são dois, o que faz disto um caso de família:
+
+```
+1827:    let binp = teko::str::concat(od, "/", stem)     <- rota C
+2635:    let binp = teko::str::concat(od, "/", stem)     <- rota NATIVA
+```
+
+**Consertar só um é o defeito "um dos membros da família".** As duas rotas produzem executáveis e as duas
+nomeiam-nos igual.
+
+**E O DESENHO CERTO JÁ EXISTE, 800 linhas abaixo, no mesmo ficheiro** — não se inventa nada:
+
+```teko
+fn archive_output_path(od: str, stem: str, format: ArchiveFormat) -> str {
+    match format {
+        Coff => teko::str::concat(od, "/", teko::str::concat(stem, ".lib"))
+        _    => teko::str::concat(od, "/", teko::str::concat("lib", teko::str::concat(stem, ".a")))
+    }
+}
+```
+
+O arquivo **já** é nomeado por formato de alvo (`.lib` em COFF, `lib*.a` no resto). O executável não. **O
+conserto é um irmão desta função** — `binary_output_path(od, stem, target)` — chamado dos dois sítios, e
+**não** um `if` improvisado em cada um. Assim, o próximo alvo que precise de sufixo entra num só lugar.
+
+**O que o brief tem de exigir além disso:**
+- **quem CONSOME `binp`** nos dois sítios — se algum passa o caminho ao linker, ao `chmod`, ou o imprime,
+  todos têm de ver o mesmo nome. Um sítio que continue a montar o nome à mão é o defeito de volta.
+- **`teko test .` e o harness de regressão**: se algum invoca o binário construído por nome derivado, tem de
+  seguir o mesmo helper. Medir, não presumir.
+- **fixture**: construir para alvo Windows e afirmar que o ficheiro emitido termina em `.exe`; e que nos
+  outros alvos **não** termina em `.exe`. As duas metades — só a primeira passaria se o sufixo fosse posto
+  em todos os hosts, o que partiria Linux e macOS.
+- **não tocar** `produce_assets.sh` nem `pr.yml`: ambos já estão certos, e o segundo é do integrador.
+
 
 ## 4. DECISÕES DO DONO EM ABERTO
 
