@@ -1498,7 +1498,60 @@ fn lower_unary(ctx: LowerCtx, e: checker::TExpr, u: checker::TUnary) -> Lowered 
     let op = match lunop_of(u.op, k) { LUnOp as o => o; error as err => return err }
     let r = ctx_alloc(ao.ctx)
     let inst = un_inst(r.vreg, op, ao.vreg, e.line, e.col)
-    Lowered { ctx = ctx_append(r.ctx, inst); vreg = r.vreg }
+    let raw = Lowered { ctx = ctx_append(r.ctx, inst); vreg = r.vreg }
+    narrow_unary_float_to_result(ctx, e, k, raw)
+}
+
+/**
+ * narrow_unary_float_to_result — append the `FToF` narrowing a float unary owes when its
+ * OPERAND is an `f64` but its own resolved type is `f32`, and nothing otherwise.
+ *
+ * MEASURED DEFECT, and it is a silently WRONG VALUE (0.3.1.0 degrau 29). `mut n: f32 = -7.25`
+ * reaches here as a `TUnary` whose OPERAND literal is typed `f64` — the expected `f32` is not
+ * propagated through the minus — while the unary expression itself is the declared `f32`. Without
+ * this narrowing the `FNeg` result is an `f64` value that every later width-sensitive decision then
+ * read at single width: on x86-64 the following `n to f64` was selected as a NARROWING (its
+ * direction is read off the operand's recorded width, which said `f64`) and the value handed to
+ * `tk_ftoa` was the 64 bits `0xc01d0000c0e80000` — the f64 `-7.25`'s upper half with the f32
+ * `-7.25` merged into its lower half. Measured against the C route on the same program:
+ * `-7.2500028745271266` against `-7.25`, and `0` when the value crossed a call. The positive
+ * literal `mut n: f32 = 7.25` was already correct, because there the literal ITSELF resolves to
+ * `f32` and `lower_number` reads its width from its own type.
+ *
+ * The repair belongs here rather than at the cast site because the value is wrong BEFORE any cast:
+ * an `f32` variable was holding a double. `lower_int_to_f32` already owns the same narrowing for
+ * the integer-source direction and both now share `narrow_float_to_f32`.
+ *
+ * @param ctx  the lowering context (its declared-enum table, which `prim_kind_of` consults)
+ * @param e    the unary expression, carrying its own resolved type
+ * @param operand_kind  the operand's PrimKind (already resolved by the caller)
+ * @param done  the already-emitted unary result
+ * @return  the result narrowed to `f32`, or `done` unchanged when no narrowing is owed
+ */
+fn narrow_unary_float_to_result(ctx: LowerCtx, e: checker::TExpr, operand_kind: checker::PrimKind, done: Lowered) -> Lowered {
+    if !prim_is_float_kind(operand_kind) { return done }
+    if operand_kind == checker::PrimKind::F32 { return done }
+    match prim_kind_of(e.type, ctx.enums, "unary result") {
+        checker::PrimKind as p => if p == checker::PrimKind::F32 { narrow_float_to_f32(done, e) } else { done }
+        error => done
+    }
+}
+
+/**
+ * narrow_float_to_f32 — append one `FToF` that narrows an already-lowered `f64` value to `f32`.
+ *
+ * `FToF` carries no direction of its own: every backend reads it off the OPERAND's recorded width
+ * (`is_same_width_float_cast`'s own doc), so this is the narrowing form exactly when the operand is
+ * a double — which both callers guarantee.
+ *
+ * @param ao  the already-lowered `f64` value
+ * @param e   the expression the instruction takes its source position from
+ * @return    the narrowed `f32` value
+ */
+fn narrow_float_to_f32(ao: Lowered, e: checker::TExpr) -> Lowered {
+    let narrow = ctx_alloc(ao.ctx)
+    let to_f32 = un_inst(narrow.vreg, LUnOp::FToF, ao.vreg, e.line, e.col)
+    Lowered { ctx = ctx_append(narrow.ctx, to_f32); vreg = narrow.vreg }
 }
 
 /**
@@ -1602,9 +1655,7 @@ fn is_int_to_narrow_float_cast(src: checker::PrimKind, dst: checker::PrimKind) -
 fn lower_int_to_f32(ao: Lowered, e: checker::TExpr) -> Lowered {
     let wide = ctx_alloc(ao.ctx)
     let to_f64 = un_inst(wide.vreg, LUnOp::IToF, ao.vreg, e.line, e.col)
-    let narrow = ctx_alloc(ctx_append(wide.ctx, to_f64))
-    let to_f32 = un_inst(narrow.vreg, LUnOp::FToF, wide.vreg, e.line, e.col)
-    Lowered { ctx = ctx_append(narrow.ctx, to_f32); vreg = narrow.vreg }
+    narrow_float_to_f32(Lowered { ctx = ctx_append(wide.ctx, to_f64); vreg = wide.vreg }, e)
 }
 
 /**

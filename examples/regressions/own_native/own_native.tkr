@@ -1077,3 +1077,87 @@ Feature: 0.3.1.0 degrau 30 — o padrao `null` num match sobre uniao de QUALQUER
     Given env = ["TEKO_BACKEND=c"]
     When built and run
     Then exit = 42
+
+Feature: F11 familia float em arm64 — o gemeo do arco B1-fp do x86-64 (0.3.1.0 degrau 29)
+
+  # A PARAGEM QUE MORREU: `A4-fp: float-op / FPR encoding deferred to 0.3.1`. Ela fazia falhar o
+  # projecto INTEIRO em arm64 — a primeira fila (`own_arith_exit`) e com ela todas as linhas deste
+  # canal em `test / linux-arm64-glibc`, `Memory paranoid (linux-arm64-glibc)` e `test / macos-arm64`.
+  #
+  # PORQUE E QUE CADA FILA AFIRMA UM VALOR E NUNCA "compilou": esta familia esconde valores errados
+  # CALADOS, e ja o fez tres vezes nesta lane. O degrau 27 mediu `$"{f:F2}"` com `f: f32 = 2.5` a dar
+  # `0.10` pela rota propria e `2.50` pela rota C; o arco do x86 mediu que "a LIR perdia a LARGURA do
+  # float". Todo texto esperado abaixo e o que a ROTA C imprime para o MESMO programa, medido antes de
+  # a asserçao ser escrita.
+  #
+  # O PAR `2.5`/`0.1` E ESCOLHIDO DE PROPOSITO: `2.5` e exactamente representavel nas DUAS larguras,
+  # `0.1` em nenhuma. Uma rota que acerta num e erra no outro esta a ler o registo na largura errada,
+  # nao a arredondar mal. Por isso as filas f64 e f32 afirmam os MESMOS decimais e textos DIFERENTES.
+  #
+  # DUAS COISAS QUE A SUPERFICIE NAO ADMITE, e sao ditas em vez de ignoradas: `%` sobre floats e
+  # recusado pelo checker (`bitwise/remainder needs an integer (not a float — B.38)`), e `x / 0.0`
+  # ARMADILHA (`teko: deliberate panic: division by zero`), pelo que os infinitos aqui nascem de uma
+  # multiplicaçao que transborda.
+  Scenario: d29_f64_arith_values (own-native — `+ - * /` em binario64 sobre valores de REGISTO e sobre consts, cada resultado com os seus 17 digitos)
+    When built and run
+    Then exit = 42
+
+  # A largura de baixo, e o gemeo que apanha um registo lido na largura errada: `0.1f + 2.5f` da
+  # `2.5999999046325684` onde binario64 da `2.6000000000000001`, e `0.1f * 2.5f` da `0.25` nas duas —
+  # o par `*`/`+` separa um defeito de largura de um defeito de aritmetica.
+  Scenario: d29_f32_arith_values (own-native — as mesmas cinco operacoes em binario32, mais alargar e estreitar)
+    When built and run
+    Then exit = 42
+
+  Scenario: d29_float_compare_ordered (own-native — as seis comparacoes nas duas larguras, incluindo `+0.0 == -0.0`, que sao IGUAIS com padroes de bits diferentes)
+    When built and run
+    Then exit = 42
+
+  # A METADE QUE DECIDE A ESCOLHA DA CONDICAO NO arm64: um `FCMP` com NaN poe `N=0 Z=0 C=1 V=1`, e
+  # tanto o `lt` (`N!=V`) como o `le` (`Z==1 || N!=V`) do INTEIRO leem VERDADE nisso — `nan < x` dava
+  # true. As quatro relacionais tem de ser FALSAS contra um NaN, `==` falsa mesmo contra si mesmo e
+  # `!=` VERDADEIRA.
+  Scenario: d29_float_compare_unordered (own-native — NaN contra as seis comparacoes, nas duas larguras)
+    When built and run
+    Then exit = 42
+
+  # As palavras de conversao do AArch64 carregam DOIS campos de largura independentes (`sf` para o
+  # lado inteiro, `type` para o lado float), e uma instrucao de largura unica nao consegue expressar
+  # tres das quatro combinacoes. A fila que sustenta isto e `16777217 to f32`: binario32 tem 24 bits
+  # de significando, logo o valor arredonda para `16777216` enquanto o mesmo inteiro para `f64` e
+  # exacto — uma conversao que devolvesse um double onde se pediu um single passa todas as outras.
+  Scenario: d29_int_float_casts (own-native — `int -> float` e `float -> int` nas duas direccoes e nas duas larguras)
+    When built and run
+    Then exit = 42
+
+  # `-(+0.0)` e `-0.0`, cujo texto `%.17g` e `-0`, enquanto `0.0 - 0.0` e `+0.0` e da `0`. O degrau 27
+  # mediu exactamente esta perda de sinal na estrada dos literais, logo as duas grafias sao afirmadas
+  # lado a lado. O arm64 tem `FNEG` real (o irmao x86 faz XOR do bit de sinal por um GPR).
+  Scenario: d29_float_negate_signed_zero (own-native — negacao nas duas larguras, sobre `+0.0`, `-0.0`, `2.5`, `0.1` e um infinito)
+    When built and run
+    Then exit = 42
+
+  # A ABI: os dois ficheiros de registo classificam-se INDEPENDENTEMENTE (`v0`..`v7` para floats,
+  # `x0`..`x7` para inteiros) e o resultado volta em `d0`/`s0`, nao em `x0`. A fila de oito argumentos
+  # enche a janela float exactamente; a mista intercala os dois ficheiros; a de `f32` repete o
+  # exercicio em precisao simples, onde a soma dos MESMOS decimais da texto diferente — o que prova
+  # que os argumentos viajaram como singles.
+  Scenario: d29_float_registers_and_return (own-native — floats a atravessar uma CHAMADA em registos de virgula flutuante, a entrar e a sair)
+    When built and run
+    Then exit = 42
+
+  # MAIS floats vivos sobre uma chamada do que a ABI tem registos callee-saved (o AAPCS64 preserva so
+  # as metades baixas de `v8`..`v15`), que e o caso que o alocador arm64 recusava por inteiro
+  # (`regalloc: FPR-value spill not yet supported`) enquanto o irmao x86 ja o tinha fechado. A
+  # asserçao e o VALOR: um spill que guardasse o double e recarregasse um single muda a soma.
+  Scenario: d29_float_spill_across_call (own-native — dezasseis floats vivos sobre uma chamada, forcando o spill de FPR)
+    When built and run
+    Then exit = 42
+
+  # As larguras `S`/`D` de memoria eram a outra metade da paragem `A4-fp`, e o seu imediato e ESCALADO
+  # PELO TAMANHO DO ACESSO (4 para um single, 8 para um double), logo uma forma que reutilizasse a
+  # escala da outra largura enderecava o byte errado. Os campos adjacentes cobrem o caso do vizinho
+  # sobreposto; as duas fatias cobrem o do passo.
+  Scenario: d29_float_memory_widths (own-native — floats a atravessar MEMORIA nas duas larguras, em campos de struct e em fatias)
+    When built and run
+    Then exit = 42

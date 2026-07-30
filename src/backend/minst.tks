@@ -534,6 +534,19 @@ pub type MExt = struct {
  * MCvt — an int/float conversion (SCVTF/UCVTF/FCVTZS/FCVTZU/FCVT), the
  * selection of `IToF`/`FToI`/`FToF`.
  *
+ * THE TWO WIDTH FLAGS ARE THE WHOLE POINT, and their absence was a measured
+ * defect of exactly the class this family keeps producing (0.3.1.0 degrau 29).
+ * Every AArch64 conversion word carries TWO independent width fields — `sf`
+ * (the GPR side: `W` or `X`) and `type` (the FPR side: `S` or `D`) — and for
+ * `FCVT` both are float widths naming the two ENDS of the convert. With no
+ * width on the instruction the encoder had to guess one, and a guess is a
+ * silently wrong VALUE: reading an `f32` operand with the `D` template decodes
+ * its 32 live bits as the low half of a double and truncates to nonsense, and
+ * an `FCVT` with no direction narrows where it should widen. The sibling
+ * `MCvtOpX86` encodes the same two facts in its mnemonic set
+ * (`Cvttsd2si`/`Cvttss2si`, `Cvtsd2ss`/`Cvtss2sd`); AArch64's five mnemonics
+ * are width-parametric instead, so the widths ride the struct.
+ *
  * @since #383 A2-1
  */
 pub type MCvt = struct {
@@ -549,6 +562,23 @@ pub type MCvt = struct {
      * a — the source register operand.
      */
     a: MReg
+    /**
+     * src_wide — whether the SOURCE operand is the 64-bit form of ITS OWN
+     * register file: `X` (not `W`) for a GPR source, `D` (not `S`) for an FPR
+     * source. The encoder routes it to `sf` or to `type` by which file `a`
+     * lives in, so one flag serves both `SCVTF`'s integer source and
+     * `FCVTZS`'s float source.
+     */
+    src_wide: bool
+    /**
+     * dst_wide — whether the DESTINATION operand is the 64-bit form of its own
+     * register file: `X` for a GPR destination, `D` for an FPR one. For `Fcvt`
+     * (both operands FPR) `src_wide` and `dst_wide` name the convert's two
+     * ends and MUST differ — an identity `FCVT` has no encoding, and the
+     * lowering never emits one (`is_same_width_float_cast` returns the operand
+     * unchanged).
+     */
+    dst_wide: bool
 }
 
 /**
@@ -598,6 +628,46 @@ pub type MStore = struct {
      * mem — the base-plus-displacement address stored to.
      */
     mem: MMem
+}
+
+/**
+ * MFSpill — spill an FPR value to, or reload it from, its frame slot in ONE
+ * instruction: `STR Dt, [sp, #slot_offsets[slot]]` and the load direction, the
+ * offset resolved once the frame layout is known. The arm64 twin of
+ * `MFSpillX86`.
+ *
+ * It exists because the GPR spill PAIR cannot be reused for a float. That pair is
+ * `ADD addr, sp, #slotoff` + `LDR value, [addr]`, and for a GPR the SAME scratch
+ * carries the address and then the value; a float needs an FPR for the value and a
+ * GPR for the address at the same time, and the three reserved GPR scratches are
+ * already sized to `MMSub`'s three spilled integer uses. AArch64 does not need the
+ * address register at all — `LDR/STR Dt, [sp, #imm12*8]` reaches the slot straight
+ * from SP, which is how the callee-saved FPR area is already saved
+ * (`str_fpr_sp`/`ldr_fpr_sp`) — so resolving the offset in the encoder, as
+ * `MFrameAddr` already does for the address form, removes the register from the
+ * problem entirely and emits ONE instruction where the GPR path emits two.
+ *
+ * Always the 8-byte `D` width, for `f32` and `f64` alike: the transfer is a
+ * BIT-PRESERVING save/restore of whatever the register holds, never an arithmetic
+ * conversion, and a spill slot is 8 bytes wide either way. A single-precision
+ * value's 32 live bits ride back unchanged in the low half.
+ *
+ * @since 0.3.1.0 degrau 29 (A4-fp)
+ */
+pub type MFSpill = struct {
+    /**
+     * reg — the FPR whose value is saved, or which the value is reloaded into.
+     */
+    reg: MReg
+    /**
+     * slot — the absolute frame-slot index of the spill slot.
+     */
+    slot: u64
+    /**
+     * is_load — true for the reload (memory -> register), false for the spill
+     * store (register -> memory).
+     */
+    is_load: bool
 }
 
 /**
@@ -803,7 +873,7 @@ pub type MRet = struct { }
  *
  * @since #383 A2-1
  */
-pub type MInst = variant MAlu | MAluImm | MMSub | MNeg | MMvn | MFAlu | MFNeg | MCmp | MCmpImm | MFCmp | MCSet | MMovZ | MMovK | MMovN | MFMov | MMov | MExt | MCvt | MLoad | MStore | MFrameAddr | MAdrp | MAddLo | MBranch | MBranchCond | MCbz | MCall | MCallIndirect | MRet
+pub type MInst = variant MAlu | MAluImm | MMSub | MNeg | MMvn | MFAlu | MFNeg | MCmp | MCmpImm | MFCmp | MCSet | MMovZ | MMovK | MMovN | MFMov | MMov | MExt | MCvt | MLoad | MStore | MFSpill | MFrameAddr | MAdrp | MAddLo | MBranch | MBranchCond | MCbz | MCall | MCallIndirect | MRet
 
 /**
  * MBlock — a machine basic block: its id, its block-args (the SSA-lite
@@ -1135,10 +1205,12 @@ pub fn ext_inst(op: MExtOp, dst: MReg, a: MReg) -> MInst {
  * @param MCvtOp op  which conversion mnemonic to emit
  * @param MReg dst  the destination register
  * @param MReg a  the source register
+ * @param bool src_wide  whether `a` is the 64-bit form of its register file (X/D)
+ * @param bool dst_wide  whether `dst` is the 64-bit form of its register file (X/D)
  * @return MInst  the built instruction
  */
-pub fn cvt_inst(op: MCvtOp, dst: MReg, a: MReg) -> MInst {
-    MCvt { op = op; dst = dst; a = a }
+pub fn cvt_inst(op: MCvtOp, dst: MReg, a: MReg, src_wide: bool, dst_wide: bool) -> MInst {
+    MCvt { op = op; dst = dst; a = a; src_wide = src_wide; dst_wide = dst_wide }
 }
 
 /**
@@ -1164,6 +1236,18 @@ pub fn load_inst(size: MMemSize, sign: bool, dst: MReg, mem: MMem) -> MInst {
  */
 pub fn store_inst(size: MMemSize, src: MReg, mem: MMem) -> MInst {
     MStore { size = size; src = src; mem = mem }
+}
+
+/**
+ * fspill_inst — a one-instruction FPR spill store or reload (MFSpill).
+ *
+ * @param MReg reg  the FPR saved, or reloaded into
+ * @param u64 slot  the absolute frame-slot index of the spill slot
+ * @param bool is_load  true for the reload, false for the spill store
+ * @return MInst  the built instruction
+ */
+pub fn fspill_inst(reg: MReg, slot: u64, is_load: bool) -> MInst {
+    MFSpill { reg = reg; slot = slot; is_load = is_load }
 }
 
 /**
@@ -1744,13 +1828,33 @@ fn print_ext(i: MExt) -> str {
 }
 
 /**
- * print_cvt — `<op> dst, a`.
+ * operand_width_letter — one operand's AArch64 register-form letter: `x`/`w` for
+ * a GPR and `d`/`s` for an FPR. A conversion's two ends live in different
+ * register files, so a single suffix helper would print `d` where the ISA writes
+ * `x` — this keeps each end's letter the one the assembler uses.
+ *
+ * @param MReg r  the operand (its `reg_class` picks the letter pair)
+ * @param bool wide  whether the operand is its file's 64-bit form
+ * @return str  the register-form letter
+ */
+fn operand_width_letter(r: MReg, wide: bool) -> str {
+    if r.reg_class == MRegClass::FPR { return dbl_suffix(wide) }
+    wide_suffix(wide)
+}
+
+/**
+ * print_cvt — `<op>.<dst><src> dst, a`, the two width flags rendered as one
+ * two-letter suffix in operand order (`scvtf.dx`, `fcvtzs.xd`, `fcvt.sd`).
+ * Rendering them is not decoration: a conversion's whole correctness is which
+ * width each end reads, so a golden that showed only `fcvt %0, %1` could not
+ * tell a narrowing convert from a widening one.
  *
  * @param MCvt i  the instruction to render
  * @return str  the rendered text
  */
 fn print_cvt(i: MCvt) -> str {
-    teko::str::concat(cvt_op_name(i.op), " ", reg_ref(i.dst), ", ", reg_ref(i.a))
+    let widths = teko::str::concat(operand_width_letter(i.dst, i.dst_wide), operand_width_letter(i.a, i.src_wide))
+    teko::str::concat(cvt_op_name(i.op), ".", widths, " ", reg_ref(i.dst), ", ", reg_ref(i.a))
 }
 
 /**
@@ -1773,6 +1877,19 @@ fn print_load(i: MLoad) -> str {
  */
 fn print_store(i: MStore) -> str {
     teko::str::concat("str.", mem_size_name(i.size), " ", reg_ref(i.src), ", ", mem_ref(i.mem))
+}
+
+/**
+ * print_fspill — `fspill.<dir> reg, #slot`, the direction spelled out (`ld`/`st`)
+ * rather than left as a bare flag: a spill whose direction is wrong writes the
+ * slot where it meant to read it, so the golden has to show which way it went.
+ *
+ * @param MFSpill i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_fspill(i: MFSpill) -> str {
+    let dir = if i.is_load { "ld" } else { "st" }
+    teko::str::concat("fspill.", dir, " ", reg_ref(i.reg), ", #", teko::u64_to_str(i.slot))
 }
 
 /**
@@ -1903,6 +2020,7 @@ fn print_minst(i: MInst) -> str {
         MCvt as x => print_cvt(x)
         MLoad as x => print_load(x)
         MStore as x => print_store(x)
+        MFSpill as x => print_fspill(x)
         MFrameAddr as x => print_frame_addr(x)
         MAdrp as x => print_adrp(x)
         MAddLo as x => print_add_lo(x)

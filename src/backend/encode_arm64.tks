@@ -271,15 +271,46 @@ fn cond_code(c: MCond) -> u32 {
 }
 
 /**
- * honest_fp — the single named honest-stop the float family (`MFAlu`/`MFNeg`/
- * `MFCmp`/`MFMov`/`MCvt`) and the FPR (`S`/`D`) memory widths raise: FP encoding
- * is regular but deferred to 0.3.1 (appendix of the A4 crumb plan), so a float
- * fixture stops IDENTICALLY on the own-native side and is compared at the stop.
+ * ftype_bit — the `type` field's double-precision bit for a `dbl` float
+ * operand: `ARM64_FTYPE_D` (the `D` form), or 0 (the `S` form). The float
+ * family's exact counterpart of `sf_bit`: every FP template in
+ * `encode_arm64_consts.tks` is stored in its single-precision shape and ORs
+ * this bit back in for the double one.
  *
- * @return error  the `A4-fp` named honest-stop
+ * @param bool dbl  true for the 64-bit (double-precision) form
+ * @return u32  `ARM64_FTYPE_D` when dbl, else 0
  */
-fn honest_fp() -> error {
-    error { message = "A4-fp: float-op / FPR encoding deferred to 0.3.1 (encodings in the A4 crumb-plan appendix)" }
+fn ftype_bit(dbl: bool) -> u32 {
+    if dbl { ARM64_FTYPE_D } else { 0 to u32 }
+}
+
+/**
+ * cross_width_bits — the width bits of an FMOV that CROSSES the GPR/FPR
+ * boundary (`FMOV Wd, Sn` / `FMOV Xd, Dn` and their reverse): `sf` and `type`
+ * move together there, because the transfer's two ends are the same number of
+ * bits by construction. Kept as one named function so no call site can set one
+ * of the pair and forget the other.
+ *
+ * @param bool dbl  true for the 64-bit crossing (X <-> D), false for 32-bit (W <-> S)
+ * @return u32  the `sf` and `type` bits for that crossing width
+ */
+fn cross_width_bits(dbl: bool) -> u32 {
+    sf_bit(dbl) | ftype_bit(dbl)
+}
+
+/**
+ * internal_fp — the named error for an `MInst` shape the AArch64 float family
+ * has no encoding for and that no selection produces: an `MFMov` between two
+ * GPRs (that is `MMov`'s job) or an identity `FCVT` (same width both ends,
+ * which the lowering elides). Not an honest-stop for a deferred feature — a
+ * total match's unreachable arm, named so that a future selection bug reports
+ * itself instead of emitting a wrong word.
+ *
+ * @param str what  which impossible shape was reached
+ * @return error  the named internal error
+ */
+fn internal_fp(what: str) -> error {
+    error { message = teko::str::concat("encode arm64: ", what, " has no float encoding (internal)") }
 }
 
 /**
@@ -385,40 +416,41 @@ fn ext_base(op: MExtOp) -> u32 {
 /**
  * load_form — the LDR-family template + access scale for a load width, keyed
  * by `MMemSize` and sign-extension: the plain forms (LDR/LDRB/LDRH), the
- * sign-extending narrow forms (LDRSB/LDRSH into X, LDRSW), and the `S`/`D`
- * FPR widths that raise the `A4-fp` honest-stop.
+ * sign-extending narrow forms (LDRSB/LDRSH into X, LDRSW), and the FPR
+ * single/double widths (`LDR St`/`LDR Dt`, which have no sign-extending variant
+ * — `sign` is meaningless for a float and is ignored on those two arms).
  *
  * @param MMemSize size  the access width
  * @param bool sign  true for a sign-extending narrow load
- * @return MemForm | error  the template + scale, or the `A4-fp` honest-stop
+ * @return MemForm  the template + scale
  */
-fn load_form(size: MMemSize, sign: bool) -> MemForm | error {
+fn load_form(size: MMemSize, sign: bool) -> MemForm {
     match size {
         B => MemForm { base = if sign { ARM64_LDRSB } else { ARM64_LDRB }; scale = ARM64_SCALE_B }
         H => MemForm { base = if sign { ARM64_LDRSH } else { ARM64_LDRH }; scale = ARM64_SCALE_H }
         W => MemForm { base = if sign { ARM64_LDRSW } else { ARM64_LDR_W }; scale = ARM64_SCALE_W }
         X => MemForm { base = ARM64_LDR_X; scale = ARM64_SCALE_X }
-        S => honest_fp()
-        D => honest_fp()
+        S => MemForm { base = ARM64_LDR_FPR32; scale = ARM64_SCALE_S }
+        D => MemForm { base = ARM64_LDR_FPR64; scale = ARM64_SCALE_D }
     }
 }
 
 /**
  * store_form — the STR-family template + access scale for a store width, keyed
- * by `MMemSize`: STR/STRB/STRH/STR(X), with the `S`/`D` FPR widths raising the
- * `A4-fp` honest-stop.
+ * by `MMemSize`: STR/STRB/STRH/STR(X) for the GPR widths and `STR St`/`STR Dt`
+ * for the FPR ones.
  *
  * @param MMemSize size  the access width
- * @return MemForm | error  the template + scale, or the `A4-fp` honest-stop
+ * @return MemForm  the template + scale
  */
-fn store_form(size: MMemSize) -> MemForm | error {
+fn store_form(size: MMemSize) -> MemForm {
     match size {
         B => MemForm { base = ARM64_STRB; scale = ARM64_SCALE_B }
         H => MemForm { base = ARM64_STRH; scale = ARM64_SCALE_H }
         W => MemForm { base = ARM64_STR_W; scale = ARM64_SCALE_W }
         X => MemForm { base = ARM64_STR_X; scale = ARM64_SCALE_X }
-        S => honest_fp()
-        D => honest_fp()
+        S => MemForm { base = ARM64_STR_FPR32; scale = ARM64_SCALE_S }
+        D => MemForm { base = ARM64_STR_FPR64; scale = ARM64_SCALE_D }
     }
 }
 
@@ -615,15 +647,170 @@ fn encode_ext(i: MExt) -> EncWord {
 }
 
 /**
+ * falu_base — the single-precision template word of a float ALU mnemonic, the
+ * float family's counterpart of `alu_reg_base`.
+ *
+ * @param MFAluOp op  the float ALU operation
+ * @return u32  its `type=00` template word (operand fields zero)
+ */
+fn falu_base(op: MFAluOp) -> u32 {
+    match op {
+        FAdd => ARM64_FADD
+        FSub => ARM64_FSUB
+        FMul => ARM64_FMUL
+        FDiv => ARM64_FDIV
+    }
+}
+
+/**
+ * encode_falu — a register-register float ALU op: `falu_base | type | Rm(b) |
+ * Rn(a) | Rd(dst)`, the exact shape `encode_alu` has for integers with
+ * `ftype_bit` where it has `sf_bit`.
+ *
+ * @param MFAlu i  the float ALU instruction (operands physical)
+ * @return EncWord  the encoded word
+ */
+fn encode_falu(i: MFAlu) -> EncWord {
+    plain_word(falu_base(i.op) | ftype_bit(i.dbl) | enc_rm(i.b) | enc_rn(i.a) | enc_rd(i.dst))
+}
+
+/**
+ * encode_fneg — a float negate: `FNEG | type | Rn(a) | Rd(dst)`. One word, and
+ * the TRUE IEEE negate: it flips the sign bit, so `-0.0` stays a negative zero
+ * and a NaN keeps its payload — unlike a `0.0 - x` subtraction, which mis-signs
+ * a zero operand under round-to-nearest.
+ *
+ * @param MFNeg i  the float negate instruction (operands physical)
+ * @return EncWord  the encoded word
+ */
+fn encode_fneg(i: MFNeg) -> EncWord {
+    plain_word(ARM64_FNEG | ftype_bit(i.dbl) | enc_rn(i.a) | enc_rd(i.dst))
+}
+
+/**
+ * encode_fcmp — a float compare: `FCMP | type | Rm(b) | Rn(a)`, writing NZCV
+ * and no register (the `Rd` field is the fixed `opcode2` of the register form,
+ * already zero in the template).
+ *
+ * @param MFCmp i  the float compare instruction (operands physical)
+ * @return EncWord  the encoded word
+ */
+fn encode_fcmp(i: MFCmp) -> EncWord {
+    plain_word(ARM64_FCMP | ftype_bit(i.dbl) | enc_rm(i.b) | enc_rn(i.a))
+}
+
+/**
+ * fmov_base_bits — the template word plus width bits of an `MFMov`, chosen by
+ * WHICH register files its two operands live in: FPR-to-FPR is the scalar
+ * `FMOV Sd, Sn` (only `type` varies), and either crossing form is the raw
+ * bit-pattern transfer whose `sf` and `type` move together
+ * (`cross_width_bits`). A GPR-to-GPR `MFMov` is not a float instruction at all
+ * — `MMov` owns that — so it is a named internal error rather than a guessed
+ * word.
+ *
+ * @param MFMov i  the move instruction (operands physical)
+ * @return u32 | error  the base word with width bits, or the internal error
+ */
+fn fmov_base_bits(i: MFMov) -> u32 | error {
+    let dst_fpr = i.dst.reg_class == MRegClass::FPR
+    let src_fpr = i.src.reg_class == MRegClass::FPR
+    if dst_fpr && src_fpr { return ARM64_FMOV_FPR_FPR | ftype_bit(i.dbl) }
+    if dst_fpr { return ARM64_FMOV_FPR_GPR | cross_width_bits(i.dbl) }
+    if src_fpr { return ARM64_FMOV_GPR_FPR | cross_width_bits(i.dbl) }
+    internal_fp("an MFMov between two GPRs")
+}
+
+/**
+ * encode_fmov — a float move: `fmov_base_bits | Rn(src) | Rd(dst)`. The three
+ * legal shapes (FPR-FPR, GPR-to-FPR, FPR-to-GPR) differ only in the base word,
+ * so the operand placement is shared.
+ *
+ * @param MFMov i  the move instruction (operands physical)
+ * @return EncWord | error  the encoded word, or the internal error
+ */
+fn encode_fmov(i: MFMov) -> EncWord | error {
+    let base = match fmov_base_bits(i) { u32 as b => b; error as e => return e }
+    plain_word(base | enc_rn(i.src) | enc_rd(i.dst))
+}
+
+/**
+ * int_float_cvt_bits — the template word plus width bits of an int/float
+ * conversion. The two width fields are assigned BY REGISTER FILE, not by
+ * operand position: `sf` always names the integer end and `type` always names
+ * the float end, so `SCVTF`/`UCVTF` (integer source) read `src_wide` into `sf`
+ * while `FCVTZS`/`FCVTZU` (integer destination) read `dst_wide` into it. Both
+ * halves of one convert are therefore independent, which is the whole reason
+ * `MCvt` carries two flags.
+ *
+ * @param MCvtOp op  the conversion mnemonic (never `Fcvt`, whose two ends are both float)
+ * @param bool src_wide  whether the source operand is its file's 64-bit form
+ * @param bool dst_wide  whether the destination operand is its file's 64-bit form
+ * @return u32 | error  the base word with width bits, or the internal error for `Fcvt`
+ */
+fn int_float_cvt_bits(op: MCvtOp, src_wide: bool, dst_wide: bool) -> u32 | error {
+    match op {
+        Scvtf => ARM64_SCVTF | sf_bit(src_wide) | ftype_bit(dst_wide)
+        Ucvtf => ARM64_UCVTF | sf_bit(src_wide) | ftype_bit(dst_wide)
+        Fcvtzs => ARM64_FCVTZS | sf_bit(dst_wide) | ftype_bit(src_wide)
+        Fcvtzu => ARM64_FCVTZU | sf_bit(dst_wide) | ftype_bit(src_wide)
+        Fcvt => internal_fp("an Fcvt routed through the int/float conversion form")
+    }
+}
+
+/**
+ * fcvt_word — the whole word of a float-to-float convert, chosen by the two
+ * ends' widths: `FCVT Dd, Sn` widens and `FCVT Sd, Dn` narrows. Both widths sit
+ * in fixed fields of the word, so neither direction is an OR away from the
+ * other. Equal widths name an identity convert, which has no encoding and which
+ * no lowering emits.
+ *
+ * @param bool src_wide  true when the source is `D` (f64)
+ * @param bool dst_wide  true when the destination is `D` (f64)
+ * @return u32 | error  the finished template, or the internal error for an identity convert
+ */
+fn fcvt_word(src_wide: bool, dst_wide: bool) -> u32 | error {
+    if src_wide == dst_wide { return internal_fp("an identity FCVT (both ends the same width)") }
+    if dst_wide { return ARM64_FCVT_D_S }
+    ARM64_FCVT_S_D
+}
+
+/**
+ * cvt_base — the template word plus width bits of any `MCvt`: the
+ * float-to-float family through `fcvt_word`, every int/float direction through
+ * `int_float_cvt_bits`.
+ *
+ * @param MCvt i  the conversion instruction
+ * @return u32 | error  the base word with width bits, or a named internal error
+ */
+fn cvt_base(i: MCvt) -> u32 | error {
+    let is_fcvt = match i.op { Scvtf => false; Ucvtf => false; Fcvtzs => false; Fcvtzu => false; Fcvt => true }
+    if is_fcvt { return fcvt_word(i.src_wide, i.dst_wide) }
+    int_float_cvt_bits(i.op, i.src_wide, i.dst_wide)
+}
+
+/**
+ * encode_cvt — an int/float conversion: `cvt_base | Rn(a) | Rd(dst)`. The whole
+ * width decision lives in `cvt_base`; the operand placement is the same
+ * two-register shape as every other one-source form.
+ *
+ * @param MCvt i  the conversion instruction (operands physical)
+ * @return EncWord | error  the encoded word, or a named internal error
+ */
+fn encode_cvt(i: MCvt) -> EncWord | error {
+    let base = match cvt_base(i) { u32 as b => b; error as e => return e }
+    plain_word(base | enc_rn(i.a) | enc_rd(i.dst))
+}
+
+/**
  * encode_load — a scaled-offset load: `load_form.base | (imm12<<10) | Rn(base)
- * | Rd(dst)`, with the offset scaled by the access width. FPR widths raise
- * `A4-fp`; an unscaled/out-of-range offset raises `A4-ldur`.
+ * | Rd(dst)`, with the offset scaled by the access width. An
+ * unscaled/out-of-range offset raises `A4-ldur`.
  *
  * @param MLoad i  the load instruction (operands physical)
  * @return EncWord | error  the encoded word, or a named honest-stop
  */
 fn encode_load(i: MLoad) -> EncWord | error {
-    let form = match load_form(i.size, i.sign) { MemForm as f => f; error as e => return e }
+    let form = load_form(i.size, i.sign)
     let imm = match scaled_offset(i.mem.offset, form.scale) { u32 as v => v; error as e => return e }
     let field = (imm & ARM64_IMM12_MASK) << ARM64_IMM12_SHIFT
     plain_word(form.base | field | enc_rn(i.mem.base) | enc_rd(i.dst))
@@ -631,14 +818,14 @@ fn encode_load(i: MLoad) -> EncWord | error {
 
 /**
  * encode_store — a scaled-offset store: `store_form.base | (imm12<<10) |
- * Rn(base) | Rt(src)`, with the offset scaled by the access width. FPR widths
- * raise `A4-fp`; an unscaled/out-of-range offset raises `A4-ldur`.
+ * Rn(base) | Rt(src)`, with the offset scaled by the access width. An
+ * unscaled/out-of-range offset raises `A4-ldur`.
  *
  * @param MStore i  the store instruction (operands physical)
  * @return EncWord | error  the encoded word, or a named honest-stop
  */
 fn encode_store(i: MStore) -> EncWord | error {
-    let form = match store_form(i.size) { MemForm as f => f; error as e => return e }
+    let form = store_form(i.size)
     let imm = match scaled_offset(i.mem.offset, form.scale) { u32 as v => v; error as e => return e }
     let field = (imm & ARM64_IMM12_MASK) << ARM64_IMM12_SHIFT
     plain_word(form.base | field | enc_rn(i.mem.base) | enc_rd(i.src))
@@ -1627,6 +1814,25 @@ pub fn emit_epilogue(layout: FrameLayout) -> []u32 | error {
 }
 
 /**
+ * encode_fspill — resolve `MFSpill{reg, slot, is_load}` to `STR Dt, [sp,
+ * #slot_offsets[slot]]` (or the load direction), by building the equivalent
+ * `MStore`/`MLoad` at the `D` width with `SP` as its base and handing it to
+ * `encode_store`/`encode_load`. An FPR spill is therefore encoded by exactly the
+ * code every other float memory access goes through, and a slot offset the scaled
+ * 12-bit field cannot express raises the SAME `A4-ldur` stop any other
+ * out-of-range access raises rather than a stop of its own.
+ *
+ * @param FrameLayout layout  the enclosing function's resolved frame
+ * @param MFSpill i  the spill store or reload (operand physical)
+ * @return EncWord | error  the encoded word, or a named honest-stop
+ */
+fn encode_fspill(layout: FrameLayout, i: MFSpill) -> EncWord | error {
+    let mem = MMem { base = preg(ARM64_SP_ID, MRegClass::GPR); offset = slot_offset(layout, i.slot) to i32 }
+    if i.is_load { return encode_load(MLoad { size = MMemSize::D; sign = false; dst = i.reg; mem = mem }) }
+    encode_store(MStore { size = MMemSize::D; src = i.reg; mem = mem })
+}
+
+/**
  * encode_frame_addr — resolve a SMALL `MFrameAddr{dst, slot}` (a slot offset
  * within the inline 12-bit ADD-imm field) to `ADD dst, sp,
  * #slot_offset(layout, slot)`, the A4-2 replacement for A4-1's `A4-frame`
@@ -1653,8 +1859,10 @@ fn encode_frame_addr(layout: FrameLayout, i: MFrameAddr) -> EncWord | error {
  * dispatch. The position-independent integer/control/memory subset encodes
  * fully; branches and symbol references return placeholder words flagged for
  * A4-3 patching; `MFrameAddr` resolves through `layout` to the real `ADD dst,
- * sp, #off` (A4-2); the float family, big immediates, unscaled offsets, and
- * big-frame offsets return their NAMED honest-stops.
+ * sp, #off` (A4-2); the float family encodes fully too (0.3.1.0 degrau 29
+ * closed the `A4-fp` stop, the arm64 twin of the x86 `B1-fp` arc); big
+ * immediates, unscaled offsets, and big-frame offsets return their NAMED
+ * honest-stops.
  *
  * @param FrameLayout layout  the enclosing function's resolved frame (for `MFrameAddr`)
  * @param MInst inst  the instruction to encode (all operands physical)
@@ -1667,21 +1875,22 @@ pub fn encode_inst_word(layout: FrameLayout, inst: MInst) -> EncWord | error {
         MMSub as x => encode_msub(x)
         MNeg as x => encode_neg(x)
         MMvn as x => encode_mvn(x)
-        MFAlu => honest_fp()
-        MFNeg => honest_fp()
+        MFAlu as x => encode_falu(x)
+        MFNeg as x => encode_fneg(x)
         MCmp as x => encode_cmp(x)
         MCmpImm as x => encode_cmp_imm(x)
-        MFCmp => honest_fp()
+        MFCmp as x => encode_fcmp(x)
         MCSet as x => encode_cset(x)
         MMovZ as x => encode_movz(x)
         MMovK as x => encode_movk(x)
         MMovN as x => encode_movn(x)
-        MFMov => honest_fp()
+        MFMov as x => encode_fmov(x)
         MMov as x => encode_mov(x)
         MExt as x => encode_ext(x)
-        MCvt => honest_fp()
+        MCvt as x => encode_cvt(x)
         MLoad as x => encode_load(x)
         MStore as x => encode_store(x)
+        MFSpill as x => encode_fspill(layout, x)
         MFrameAddr as x => encode_frame_addr(layout, x)
         MAdrp as x => encode_adrp(x)
         MAddLo as x => encode_add_lo(x)

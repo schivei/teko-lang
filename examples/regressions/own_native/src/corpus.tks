@@ -4861,3 +4861,524 @@ fn d30_arm_tag(n: i64) -> i64 {
         error => 3
     }
 }
+
+/**
+ * D29_TENTH_F64 — `0.1` at binary64, the value that is NOT exactly representable in
+ * either width and whose text therefore NAMES the width the register was read at
+ * (0.3.1.0 degrau 29). Its `f32` sibling `D29_TENTH_F32` holds the same decimal at
+ * single precision and renders differently, which is the whole probe.
+ */
+const D29_TENTH_F64: f64 = 0.1
+
+/**
+ * D29_TENTH_F32 — `0.1` at binary32, the single-precision half of the matched pair.
+ */
+const D29_TENTH_F32: f32 = 0.1
+
+/**
+ * D29_HALVES_F64 — `2.5` at binary64: exactly representable in BOTH widths, so it is
+ * the CONTROL against `D29_TENTH_F64`. A route that computes with `2.5` correctly and
+ * with `0.1` wrongly is reading the register at the wrong width, not mis-rounding.
+ */
+const D29_HALVES_F64: f64 = 2.5
+
+/**
+ * D29_HALVES_F32 — `2.5` at binary32, the control's single-precision half.
+ */
+const D29_HALVES_F32: f32 = 2.5
+
+/**
+ * d29_f64_runtime — one of four RUNTIME `f64` values selected by `tag`, so the value
+ * reaching an arithmetic instruction is a value in a REGISTER and not a literal the
+ * front end could fold into the result. Degrau 27 measured that literals and runtime
+ * values travel different roads (a `LConstFloat` bit pattern versus a spelled C
+ * constant), so every arithmetic assertion below is made twice — once over these and
+ * once over the `D29_*` consts.
+ *
+ * @param tag  which value: 0 -> `0.1`, 1 -> `2.5`, 2 -> `-7.25`, anything else -> `0.0`
+ * @return     the selected value
+ */
+fn d29_f64_runtime(tag: i64) -> f64 {
+    mut tenth: f64 = 0.1
+    mut halves: f64 = 2.5
+    mut neg: f64 = -7.25
+    mut zero: f64 = 0.0
+    if tag == 0 { return tenth }
+    if tag == 1 { return halves }
+    if tag == 2 { return neg }
+    zero
+}
+
+/**
+ * d29_f32_runtime — the single-precision twin of `d29_f64_runtime`, the same four
+ * decimals held as `f32`. Kept as its own function rather than a narrowing of the
+ * other so the value is born single and never passes through a double register.
+ *
+ * @param tag  which value: 0 -> `0.1`, 1 -> `2.5`, 2 -> `-7.25`, anything else -> `0.0`
+ * @return     the selected value
+ */
+fn d29_f32_runtime(tag: i64) -> f32 {
+    mut tenth: f32 = 0.1
+    mut halves: f32 = 2.5
+    mut neg: f32 = -7.25
+    mut zero: f32 = 0.0
+    if tag == 0 { return tenth }
+    if tag == 1 { return halves }
+    if tag == 2 { return neg }
+    zero
+}
+
+/**
+ * f_d29_f64_arith_values — 0.3.1.0 degrau 29: the `f64` arithmetic the arm64 encoder
+ * refused outright until this degrau (`A4-fp: float-op / FPR encoding deferred`), now
+ * asserted by VALUE rather than by "it compiled".
+ *
+ * Every expected text is the one the C ROUTE prints for this same program, measured
+ * before the assertion was written. `+`, `-` and `/` over `0.1` are the load-bearing
+ * ones: their results have seventeen significant digits, so a single bit read at the
+ * wrong width or a mnemonic swapped for its sibling changes the text. `*` gives the
+ * exactly-representable `0.25`, which is the control — a route that gets only the
+ * control right is not computing, it is guessing.
+ *
+ * `%` is NOT covered because the surface does not admit it: `a % b` over floats is
+ * rejected by the checker (`bitwise/remainder needs an integer (not a float — B.38)`),
+ * measured on this compiler.
+ *
+ * @return 0 when every result matches the C route's text, else the failing check's number
+ */
+fn f_d29_f64_arith_values() -> i64 {
+    let a = d29_f64_runtime(0)
+    let b = d29_f64_runtime(1)
+    if teko::ftoa(a + b) != "2.6000000000000001" { return 1 }
+    if teko::ftoa(a - b) != "-2.3999999999999999" { return 2 }
+    if teko::ftoa(a * b) != "0.25" { return 3 }
+    if teko::ftoa(a / b) != "0.040000000000000001" { return 4 }
+    if teko::ftoa(a + a + a) != "0.30000000000000004" { return 5 }
+    if teko::ftoa(D29_TENTH_F64 + D29_HALVES_F64) != "2.6000000000000001" { return 6 }
+    if teko::ftoa(D29_TENTH_F64 - D29_HALVES_F64) != "-2.3999999999999999" { return 7 }
+    if teko::ftoa(D29_TENTH_F64 * D29_HALVES_F64) != "0.25" { return 8 }
+    if teko::ftoa(D29_TENTH_F64 / D29_HALVES_F64) != "0.040000000000000001" { return 9 }
+    let neg = d29_f64_runtime(2)
+    if teko::ftoa(neg + b) != "-4.75" { return 10 }
+    if teko::ftoa(neg * b) != "-18.125" { return 11 }
+    0
+}
+
+/**
+ * f_d29_f32_arith_values — the SAME five operations at binary32, and this is the twin
+ * that catches a register read at the wrong width. `0.1f + 2.5f` is
+ * `2.5999999046325684` while `0.1 + 2.5` at binary64 is `2.6000000000000001`: a
+ * backend that computed the single-precision program in `D` registers would produce
+ * the f64 text here and still "compile". `0.1f * 2.5f` is `0.25` in BOTH widths, so
+ * the pair `*`/`+` separates a width bug from an arithmetic bug.
+ *
+ * The last two checks are the two conversion directions the width flags decide:
+ * widening a single to double must give the single's exact value
+ * (`0.10000000149011612`), and narrowing the double `0.1` must give that SAME value —
+ * which is the proof that the `f32` literal road (`FMOV` + `FCVT Sd, Dn`) and the
+ * runtime `f32` road end at the same number.
+ *
+ * @return 0 when every result matches the C route's text, else the failing check's number
+ */
+fn f_d29_f32_arith_values() -> i64 {
+    let a = d29_f32_runtime(0)
+    let b = d29_f32_runtime(1)
+    if teko::ftoa(a + b) != "2.5999999046325684" { return 1 }
+    if teko::ftoa(a - b) != "-2.4000000953674316" { return 2 }
+    if teko::ftoa(a * b) != "0.25" { return 3 }
+    if teko::ftoa(a / b) != "0.039999999105930328" { return 4 }
+    if teko::ftoa(a + a + a) != "0.30000001192092896" { return 5 }
+    if teko::ftoa(D29_TENTH_F32 + D29_HALVES_F32) != "2.5999999046325684" { return 6 }
+    if teko::ftoa(D29_TENTH_F32 - D29_HALVES_F32) != "-2.4000000953674316" { return 7 }
+    if teko::ftoa(D29_TENTH_F32 * D29_HALVES_F32) != "0.25" { return 8 }
+    if teko::ftoa(D29_TENTH_F32 / D29_HALVES_F32) != "0.039999999105930328" { return 9 }
+    if teko::ftoa(a to f64) != "0.10000000149011612" { return 10 }
+    if teko::ftoa((D29_TENTH_F64 to f32) to f64) != "0.10000000149011612" { return 11 }
+    let neg = d29_f32_runtime(2)
+    if teko::ftoa(neg + b) != "-4.75" { return 12 }
+    if teko::ftoa(neg * b) != "-18.125" { return 13 }
+    0
+}
+
+/**
+ * f_d29_float_compare_ordered — 0.3.1.0 degrau 29: the six float comparisons at BOTH
+ * widths, over ORDERED operands. On AArch64 these are one `FCMP` plus a condition
+ * code, and the condition is not the integer one: `<` tests `lo` (C clear) and `<=`
+ * tests `ls`, because the signed `lt`/`le` read TRUE on an `FCMP`'s unordered result.
+ * These rows pin the ordered half; `f_d29_float_compare_unordered` pins the half that
+ * distinguishes the two choices.
+ *
+ * `+0.0 == -0.0` is here on purpose: IEEE says the two zeros compare EQUAL even though
+ * their bit patterns differ, so a comparison lowered as a bit test rather than an
+ * `FCMP` fails exactly here.
+ *
+ * @return 0 when every comparison agrees with IEEE, else the failing check's number
+ */
+fn f_d29_float_compare_ordered() -> i64 {
+    let a = d29_f64_runtime(0)
+    let b = d29_f64_runtime(1)
+    if !(a < b) { return 1 }
+    if !(a <= b) { return 2 }
+    if a > b { return 3 }
+    if a >= b { return 4 }
+    if a == b { return 5 }
+    if !(a != b) { return 6 }
+    if !(b <= b) { return 7 }
+    if !(b >= b) { return 8 }
+    if !(b == b) { return 9 }
+    let c = d29_f32_runtime(0)
+    let d = d29_f32_runtime(1)
+    if !(c < d) { return 10 }
+    if !(c <= d) { return 11 }
+    if c > d { return 12 }
+    if c >= d { return 13 }
+    if c == d { return 14 }
+    if !(c != d) { return 15 }
+    let neg = d29_f64_runtime(2)
+    if !(neg < a) { return 16 }
+    if !(a > neg) { return 17 }
+    let zero = d29_f64_runtime(3)
+    let minus_zero = d29_f64_runtime(2) * zero
+    if !(zero == minus_zero) { return 18 }
+    if !(zero <= minus_zero) { return 19 }
+    if !(zero >= minus_zero) { return 20 }
+    if zero < minus_zero { return 21 }
+    0
+}
+
+/**
+ * f_d29_float_compare_unordered — the NaN half of the comparison family, and the reason
+ * the arm64 selection may not reuse the integer conditions. An `FCMP` whose operand is
+ * a NaN sets `N=0 Z=0 C=1 V=1`; the signed `lt` (`N!=V`) and `le` (`Z==1 || N!=V`) both
+ * read TRUE on that, so `nan < x` would be true. `lo` (`C==0`) and `ls`
+ * (`C==0 || Z==1`) read FALSE, which is what IEEE requires.
+ *
+ * All four relational comparisons must be FALSE against a NaN, `==` must be false
+ * (including against itself) and `!=` must be TRUE. The NaN is produced by runtime
+ * arithmetic (`inf - inf`) so no folder can spell it, and the surface admits it —
+ * `f_ftoa_nonfinite_text` already renders one. It is NOT produced by dividing by zero:
+ * `x / 0.0` traps on this surface (`teko: deliberate panic: division by zero`, measured
+ * on this compiler), so the overflowing multiplication is the only spelling available.
+ *
+ * @return 0 when every NaN comparison follows IEEE, else the failing check's number
+ */
+fn f_d29_float_compare_unordered() -> i64 {
+    let nan = d29_nan()
+    let b = d29_f64_runtime(1)
+    if nan < b { return 1 }
+    if nan <= b { return 2 }
+    if nan > b { return 3 }
+    if nan >= b { return 4 }
+    if b < nan { return 5 }
+    if b <= nan { return 6 }
+    if b > nan { return 7 }
+    if b >= nan { return 8 }
+    if nan == nan { return 9 }
+    if !(nan != nan) { return 10 }
+    if nan == b { return 11 }
+    if !(nan != b) { return 12 }
+    let nan32 = nan to f32
+    let d = d29_f32_runtime(1)
+    if nan32 < d { return 13 }
+    if nan32 <= d { return 14 }
+    if nan32 > d { return 15 }
+    if nan32 >= d { return 16 }
+    if nan32 == nan32 { return 17 }
+    if !(nan32 != nan32) { return 18 }
+    0
+}
+
+/**
+ * d29_positive_infinity — a POSITIVE infinity produced at RUNTIME by overflowing
+ * binary64 multiplication, so no folder can have spelled it. Division by zero is not an
+ * alternative: `x / 0.0` traps on this surface.
+ *
+ * @return `+inf`
+ */
+fn d29_positive_infinity() -> f64 {
+    mut huge: f64 = 1.0e308
+    mut ten: f64 = 10.0
+    huge * ten
+}
+
+/**
+ * d29_nan — a NaN produced at RUNTIME by `inf - inf`, the infinity itself produced by
+ * an overflowing binary64 multiplication so that no constant folder can have spelled
+ * either one (the same construction `d27_infinity` uses).
+ *
+ * @return a NaN
+ */
+fn d29_nan() -> f64 {
+    let pinf = d29_positive_infinity()
+    pinf - pinf
+}
+
+/**
+ * f_d29_int_float_casts — 0.3.1.0 degrau 29: `int -> float` and `float -> int` in both
+ * directions at both widths, the family whose AArch64 words carry TWO independent width
+ * fields (`sf` for the integer end, `type` for the float end). A single-width
+ * conversion instruction cannot express three of the four combinations, which is why
+ * `MCvt` gained `src_wide`/`dst_wide` in this degrau.
+ *
+ * The load-bearing row is `16777217 to f32`: binary32 has 24 significand bits, so the
+ * value rounds to `16777216` while the same integer converted to `f64` is exact. A
+ * conversion that produced a double where a single was asked for renders `16777217`
+ * here and passes every other check in this function.
+ *
+ * `float -> int` truncates toward zero in both directions of sign (`-7.25 -> -7`, not
+ * `-8`), which is what `FCVTZS` means and what the C route does.
+ *
+ * @return 0 when every conversion matches the C route, else the failing check's number
+ */
+fn f_d29_int_float_casts() -> i64 {
+    if d29_f64_runtime(2) to i64 != -7 { return 1 }
+    if d29_f64_runtime(1) to i64 != 2 { return 2 }
+    if d29_f64_runtime(0) to i64 != 0 { return 3 }
+    if d29_f32_runtime(2) to i64 != -7 { return 4 }
+    if d29_f32_runtime(1) to i64 != 2 { return 5 }
+    if d29_f32_runtime(0) to i64 != 0 { return 6 }
+    mut n: i64 = -9
+    if teko::ftoa(n to f64) != "-9" { return 7 }
+    if teko::ftoa((n to f32) to f64) != "-9" { return 8 }
+    mut big: i64 = 16777217
+    if teko::ftoa(big to f64) != "16777217" { return 9 }
+    if teko::ftoa((big to f32) to f64) != "16777216" { return 10 }
+    if (big to f64) to i64 != 16777217 { return 11 }
+    if (big to f32) to i64 != 16777216 { return 12 }
+    mut small: i64 = 3
+    if teko::ftoa(small to f64) != "3" { return 13 }
+    if teko::ftoa((small to f32) to f64) != "3" { return 14 }
+    0
+}
+
+/**
+ * f_d29_float_negate_signed_zero — 0.3.1.0 degrau 29: unary float negate at both
+ * widths, and the value that catches every implementation that spells it `0.0 - x`.
+ * AArch64 has a REAL `FNEG` (unlike the x86 twin, which flips the sign bit through a
+ * GPR), and it is the true IEEE negate: `-(+0.0)` is `-0.0`, whose `%.17g` text is
+ * `-0`, while `0.0 - 0.0` is `+0.0` and renders `0`. Degrau 27 measured this exact
+ * sign loss on the literal road, so both spellings are asserted side by side.
+ *
+ * @return 0 when every negation keeps its sign, else the failing check's number
+ */
+fn f_d29_float_negate_signed_zero() -> i64 {
+    let zero = d29_f64_runtime(3)
+    let minus_one = d29_f64_runtime(2)
+    if teko::ftoa(-zero) != "-0" { return 1 }
+    if teko::ftoa(zero - zero) != "0" { return 2 }
+    if teko::ftoa(minus_one * zero) != "-0" { return 3 }
+    if teko::ftoa(- -zero) != "0" { return 4 }
+    let halves = d29_f64_runtime(1)
+    if teko::ftoa(-halves) != "-2.5" { return 5 }
+    if teko::ftoa(- -halves) != "2.5" { return 6 }
+    let tenth = d29_f64_runtime(0)
+    if teko::ftoa(-tenth) != "-0.10000000000000001" { return 7 }
+    let zero32 = d29_f32_runtime(3)
+    if teko::ftoa(-zero32) != "-0" { return 8 }
+    let halves32 = d29_f32_runtime(1)
+    if teko::ftoa(-halves32) != "-2.5" { return 9 }
+    let tenth32 = d29_f32_runtime(0)
+    if teko::ftoa(-tenth32) != "-0.10000000149011612" { return 10 }
+    let nan = d29_nan()
+    let pinf = d29_positive_infinity()
+    if teko::ftoa(pinf) != "inf" { return 11 }
+    if teko::ftoa(-pinf) != "-inf" { return 12 }
+    if nan == nan { return 13 }
+    0
+}
+
+/**
+ * d29_fp_sum8 — eight `f64` parameters summed, so a call site must fill the WHOLE
+ * AAPCS64 float argument window (`v0`..`v7`) and the callee must read all eight back
+ * out of it. An argument classified into the wrong register file, or a class index
+ * counted against the integer window, lands a wrong number here rather than failing to
+ * build.
+ *
+ * @param p0  the first float argument (v0)
+ * @param p1  the second float argument (v1)
+ * @param p2  the third float argument (v2)
+ * @param p3  the fourth float argument (v3)
+ * @param p4  the fifth float argument (v4)
+ * @param p5  the sixth float argument (v5)
+ * @param p6  the seventh float argument (v6)
+ * @param p7  the eighth float argument (v7)
+ * @return    the sum of all eight
+ */
+fn d29_fp_sum8(p0: f64, p1: f64, p2: f64, p3: f64, p4: f64, p5: f64, p6: f64, p7: f64) -> f64 {
+    p0 + p1 + p2 + p3 + p4 + p5 + p6 + p7
+}
+
+/**
+ * d29_mixed_abi — four integer and four float parameters INTERLEAVED, because AAPCS64
+ * classifies the two files INDEPENDENTLY: the integers fill `x0`..`x3` and the floats
+ * fill `v0`..`v3` regardless of their positions in the signature. A backend that
+ * counted one shared index would read a float out of an integer register.
+ *
+ * @param i0  the first integer argument (x0)
+ * @param f0  the first float argument (v0)
+ * @param i1  the second integer argument (x1)
+ * @param f1  the second float argument (v1)
+ * @param i2  the third integer argument (x2)
+ * @param f2  the third float argument (v2)
+ * @param i3  the fourth integer argument (x3)
+ * @param f3  the fourth float argument (v3)
+ * @return    the integer part of `i0*1000 + i1*100 + i2*10 + i3` plus the truncated float sum
+ */
+fn d29_mixed_abi(i0: i64, f0: f64, i1: i64, f1: f64, i2: i64, f2: f64, i3: i64, f3: f64) -> i64 {
+    let ints = i0 * 1000 + i1 * 100 + i2 * 10 + i3
+    let floats = f0 + f1 + f2 + f3
+    ints + (floats to i64)
+}
+
+/**
+ * d29_f32_sum4 — four `f32` parameters summed, the SINGLE-precision half of the
+ * argument-window twin: the same `v0`..`v3` registers carry `s` views instead of `d`
+ * ones, and the sum must be computed at single precision.
+ *
+ * @param p0  the first float argument (s0)
+ * @param p1  the second float argument (s1)
+ * @param p2  the third float argument (s2)
+ * @param p3  the fourth float argument (s3)
+ * @return    the single-precision sum
+ */
+fn d29_f32_sum4(p0: f32, p1: f32, p2: f32, p3: f32) -> f32 {
+    p0 + p1 + p2 + p3
+}
+
+/**
+ * f_d29_float_registers_and_return — 0.3.1.0 degrau 29: floats crossing a CALL in
+ * floating-point registers, in and out. The AAPCS64 rule under test is that the two
+ * register files are classified independently (`v0`..`v7` for floats, `x0`..`x7` for
+ * integers) and that the result comes back in `d0`/`s0` rather than `x0`.
+ *
+ * The eight-argument row fills the float window exactly; the mixed row interleaves the
+ * two files; the `f32` row repeats the exercise at single precision, where the sum's
+ * text differs from the `f64` sum of the same decimals — which is what proves the
+ * arguments travelled as singles and not as doubles.
+ *
+ * @return 0 when every call returns the C route's value, else the failing check's number
+ */
+fn f_d29_float_registers_and_return() -> i64 {
+    let t = d29_f64_runtime(0)
+    let h = d29_f64_runtime(1)
+    if teko::ftoa(d29_fp_sum8(t, t, t, t, t, t, t, t)) != "0.79999999999999993" { return 1 }
+    if teko::ftoa(d29_fp_sum8(h, h, h, h, h, h, h, h)) != "20" { return 2 }
+    if teko::ftoa(d29_fp_sum8(t, h, t, h, t, h, t, h)) != "10.399999999999999" { return 3 }
+    if d29_mixed_abi(1, h, 2, h, 3, h, 4, h) != 1244 { return 4 }
+    if d29_mixed_abi(9, t, 8, t, 7, t, 6, t) != 9876 { return 5 }
+    let t32 = d29_f32_runtime(0)
+    let h32 = d29_f32_runtime(1)
+    if teko::ftoa(d29_f32_sum4(t32, t32, t32, t32) to f64) != "0.40000000596046448" { return 6 }
+    if teko::ftoa(d29_f32_sum4(h32, h32, h32, h32) to f64) != "10" { return 7 }
+    if teko::ftoa(d29_f32_sum4(t32, h32, t32, h32) to f64) != "5.1999998092651367" { return 8 }
+    0
+}
+
+/**
+ * d29_scale — a one-argument float function whose only purpose is to BE a call, so a
+ * caller holding many live floats across it must park them where a call cannot clobber
+ * them (`v8`..`v15`, callee-saved) or spill them to the frame.
+ *
+ * @param x  the value to scale
+ * @return   `x * 2.0`
+ */
+fn d29_scale(x: f64) -> f64 {
+    mut two: f64 = 2.0
+    x * two
+}
+
+/**
+ * f_d29_float_spill_across_call — 0.3.1.0 degrau 29: MORE live floats across a call
+ * than the ABI has callee-saved float registers, which is the case the arm64 allocator
+ * used to refuse outright (`regalloc: FPR-value spill not yet supported`). AAPCS64
+ * preserves only the low halves of `v8`..`v15` across a call, so sixteen values live
+ * over one forces the allocator past that window and into the frame.
+ *
+ * A spilled float now travels through one `MFSpill` (`STR/LDR Dt, [sp, #off]`), and the
+ * assertion is the VALUE: a spill that stored the double but reloaded a single, or that
+ * addressed the wrong slot, changes the sum. The final sum is asserted at seventeen
+ * digits precisely so a lost low bit cannot hide.
+ *
+ * @return 0 when the sum survives the spills, else 1
+ */
+fn f_d29_float_spill_across_call() -> i64 {
+    let a = d29_f64_runtime(0)
+    let b = d29_f64_runtime(1)
+    let v00 = a + b
+    let v01 = a - b
+    let v02 = a * b
+    let v03 = a / b
+    let v04 = v00 + a
+    let v05 = v01 + a
+    let v06 = v02 + a
+    let v07 = v03 + a
+    let v08 = v00 * b
+    let v09 = v01 * b
+    let v10 = v02 * b
+    let v11 = v03 * b
+    let v12 = v04 - b
+    let v13 = v05 - b
+    let v14 = v06 - b
+    let v15 = v07 - b
+    let scaled = d29_scale(a)
+    let left = v00 + v01 + v02 + v03 + v04 + v05 + v06 + v07
+    let right = v08 + v09 + v10 + v11 + v12 + v13 + v14 + v15
+    if teko::ftoa(left + right + scaled) != "-6.3049999999999988" { return 1 }
+    0
+}
+
+/**
+ * D29Widths — a struct holding one value of EACH float width side by side, so a field
+ * read/write goes through the `S` and `D` memory forms (`LDR/STR St` and `Dt`) rather
+ * than through registers only. The two fields are adjacent on purpose: a store that
+ * used the wrong width would overwrite its neighbour, and the sibling read catches it.
+ */
+type D29Widths = struct {
+    /**
+     * narrow — the binary32 field, transferred by `LDR/STR St` (scale 4).
+     */
+    narrow: f32
+    /**
+     * wide — the binary64 field, transferred by `LDR/STR Dt` (scale 8). NOT spelled
+     * `double`: the C route emits a struct field's Teko name VERBATIM, so a field named
+     * after a C keyword produces `double double;` and the generated C does not compile
+     * (measured on this compiler, 0.3.1.0 degrau 29).
+     */
+    wide: f64
+}
+
+/**
+ * f_d29_float_memory_widths — 0.3.1.0 degrau 29: floats crossing MEMORY at both
+ * widths. The `S`/`D` load and store forms were the other half of the `A4-fp` stop
+ * (`load_form`/`store_form` raised it for exactly those two widths), and their
+ * immediate is SCALED BY THE ACCESS SIZE — 4 for a single, 8 for a double — so a form
+ * that reused the other width's scale addresses the wrong byte.
+ *
+ * Struct fields cover the adjacent-neighbour case; the two slices cover the strided
+ * one, where an element read at the wrong width lands halfway into its neighbour.
+ *
+ * @return 0 when every value survives its round trip through memory, else the failing check's number
+ */
+fn f_d29_float_memory_widths() -> i64 {
+    mut w = D29Widths { narrow = d29_f32_runtime(0); wide = d29_f64_runtime(0) }
+    if teko::ftoa(w.narrow to f64) != "0.10000000149011612" { return 1 }
+    if teko::ftoa(w.wide) != "0.10000000000000001" { return 2 }
+    w.narrow = d29_f32_runtime(1)
+    if teko::ftoa(w.narrow to f64) != "2.5" { return 3 }
+    if teko::ftoa(w.wide) != "0.10000000000000001" { return 4 }
+    w.wide = d29_f64_runtime(2)
+    if teko::ftoa(w.wide) != "-7.25" { return 5 }
+    if teko::ftoa(w.narrow to f64) != "2.5" { return 6 }
+    mut ds: []f64 = [1.0, 2.0, 3.0]
+    ds[1] = d29_f64_runtime(0)
+    if teko::ftoa(ds[0]) != "1" { return 7 }
+    if teko::ftoa(ds[1]) != "0.10000000000000001" { return 8 }
+    if teko::ftoa(ds[2]) != "3" { return 9 }
+    mut ss: []f32 = [1.0, 2.0, 3.0]
+    ss[2] = d29_f32_runtime(0)
+    if teko::ftoa(ss[0] to f64) != "1" { return 10 }
+    if teko::ftoa(ss[1] to f64) != "2" { return 11 }
+    if teko::ftoa(ss[2] to f64) != "0.10000000149011612" { return 12 }
+    if teko::ftoa(ds[1] + ss[2] to f64) != "0.20000000149011612" { return 13 }
+    0
+}
