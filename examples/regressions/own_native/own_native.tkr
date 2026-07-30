@@ -1245,3 +1245,40 @@ Feature: 0.3.1.0 degrau 30 — o padrao `null` num match sobre uniao de QUALQUER
   Scenario: implicit_widen_targets (own-native — o cenario afirma-se pelo nome, nao por um codigo de saida)
     When built and run
     Then stdout pattern = "scenario implicit_widen_targets: ok"
+
+Feature: teko::assert — uma falha diz o CENARIO, o esperado e o obtido, e a asserção de "isto falha" e um observavel de PROCESSO
+
+  # PORQUE ESTAS LINHAS SAO AQUI E NAO NO GATE UNITARIO. Uma asserção que falha PANICA (M.1), logo
+  # aborta o processo inteiro; um `#test` nao pode afirmar a metade que falha sem matar a suite. Um
+  # processo filho pode, e e por isso que "isto panica" pertence ao regressor e nao a uma asserção
+  # `panics(fn)` — o canal de falha DENTRO da linguagem e a uniao `T | error`, que `is_ok`/`is_error`
+  # afirmam.
+  #
+  # E prova tambem o outro lado do canal proprio: a mensagem nomeia o cenario, e e isso que substitui
+  # a tabela mental de codigos de saida.
+
+  Scenario: assert_failure_names_the_scenario_and_both_values (own-native)
+    Given source = "cases/assert_named_failure.tks"
+    When built and run
+    Then it traps
+    And stderr pattern = "the_named_case: assertion failed: eq_i64 — expected 42, got 41"
+
+  Scenario: assert_failure_names_the_scenario_and_both_values (C route — o oraculo)
+    Given source = "cases/assert_named_failure.tks"
+    Given env = ["TEKO_BACKEND=c"]
+    When built and run
+    Then it traps
+    And stderr pattern = "the_named_case: assertion failed: eq_i64 — expected 42, got 41"
+
+  Scenario: scenario_ok_without_a_name_is_itself_a_failure (own-native — um `ok` silencioso de um caso sem nome e o buraco que este mecanismo fecha)
+    Given source = "cases/assert_ok_without_a_name.tks"
+    When built and run
+    Then it traps
+    And stderr pattern = "assertion failed: scenario_ok — no scenario is named"
+
+  Scenario: scenario_ok_without_a_name_is_itself_a_failure (C route — o oraculo)
+    Given source = "cases/assert_ok_without_a_name.tks"
+    Given env = ["TEKO_BACKEND=c"]
+    When built and run
+    Then it traps
+    And stderr pattern = "assertion failed: scenario_ok — no scenario is named"

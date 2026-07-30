@@ -1,0 +1,141 @@
+/**
+ * at_the_holding_numeric_assertions_return — every numeric assertion RETURNS on the case it admits.
+ *
+ * A passing assertion is the only half of an assertion this in-process suite can exercise: the
+ * failing half PANICS by design (M.1), which aborts the whole gate. The failing half's message is
+ * proved instead where a panic is a legitimate observable — a `.tkr` scenario over a child process —
+ * so this test's claim is precisely "the admitting case does not fire".
+ */
+#test
+fn at_the_holding_numeric_assertions_return() {
+    teko::assert::eq_i64(42, 42)
+    teko::assert::ne_i64(41, 42)
+    teko::assert::lt_i64(41, 42)
+    teko::assert::le_i64(42, 42)
+    teko::assert::gt_i64(43, 42)
+    teko::assert::ge_i64(42, 42)
+    teko::assert::eq_u64(42, 42)
+    teko::assert::len_eq(3, 3)
+}
+
+/**
+ * at_eq_f64_admits_within_the_tolerance_and_at_it — the tolerance is INCLUSIVE, and a difference in
+ * either direction is measured by magnitude, so the argument order of `got`/`want` cannot change the
+ * verdict.
+ */
+#test
+fn at_eq_f64_admits_within_the_tolerance_and_at_it() {
+    teko::assert::eq_f64(1.0, 1.0, 0.0)
+    teko::assert::eq_f64(1.5, 1.4, 0.1)
+    teko::assert::eq_f64(1.4, 1.5, 0.1)
+}
+
+/**
+ * at_the_holding_text_assertions_return — the `str` family on the cases each admits, including the
+ * two vacuous ones an empty needle/prefix produces (an empty substring is contained in anything, and
+ * every string starts and ends with "").
+ */
+#test
+fn at_the_holding_text_assertions_return() {
+    teko::assert::eq_str("abc", "abc")
+    teko::assert::ne_str("abc", "abd")
+    teko::assert::str_contains("abcdef", "cde")
+    teko::assert::str_contains("abcdef", "")
+    teko::assert::str_absent("abcdef", "xyz")
+    teko::assert::str_starts_with("abcdef", "abc")
+    teko::assert::str_starts_with("abcdef", "")
+    teko::assert::str_ends_with("abcdef", "def")
+    teko::assert::str_ends_with("abcdef", "")
+}
+
+/**
+ * at_bytes_eq_admits_equal_buffers_and_two_empties — `[]byte` content equality, including the empty
+ * pair, which has no first differing index and must therefore take the length arm and pass.
+ */
+#test
+fn at_bytes_eq_admits_equal_buffers_and_two_empties() {
+    mut a: []byte = teko::list::empty()
+    a = teko::list::push(a, b'x')
+    a = teko::list::push(a, b'y')
+    mut b: []byte = teko::list::empty()
+    b = teko::list::push(b, b'x')
+    b = teko::list::push(b, b'y')
+    teko::assert::bytes_eq(a, b)
+    let e0: []byte = teko::list::empty()
+    let e1: []byte = teko::list::empty()
+    teko::assert::bytes_eq(e0, e1)
+}
+
+/**
+ * at_union_outcome_assertions_take_the_arm_the_caller_narrowed — the null-union and error-union
+ * assertions, driven from the `match` that did the narrowing, which is the shape that makes them
+ * expressible with no generics in the seed.
+ */
+#test
+fn at_union_outcome_assertions_take_the_arm_the_caller_narrowed() {
+    teko::assert::is_present("a str", at_narrowed_present(at_some_str()))
+    teko::assert::is_absent("a str", at_narrowed_present(at_no_str()))
+    teko::assert::is_ok("a parse", at_narrowed_ok(at_good()))
+    teko::assert::is_error("a parse", at_narrowed_ok(at_bad()))
+}
+
+/**
+ * at_some_str — a present `str | null`, so the presence assertions have a real union to narrow.
+ *
+ * @return a present value
+ */
+fn at_some_str() -> str | null { "here" }
+
+/**
+ * at_no_str — an absent `str | null`.
+ *
+ * @return null
+ */
+fn at_no_str() -> str | null { null }
+
+/**
+ * at_narrowed_present — whether `x` reached its non-null arm. The `match` is HERE, in the caller,
+ * exactly as `teko::assert::is_present`'s contract requires.
+ *
+ * @param x  the union to narrow
+ * @return   true iff `x` carries a value
+ */
+fn at_narrowed_present(x: str | null) -> bool {
+    match x { str => true; null => false }
+}
+
+/**
+ * at_good — a succeeding `str | error`.
+ *
+ * @return the value member
+ */
+fn at_good() -> str | error { "value" }
+
+/**
+ * at_bad — a failing `str | error`.
+ *
+ * @return the error member
+ */
+fn at_bad() -> str | error { error { message = "no" } }
+
+/**
+ * at_narrowed_ok — whether `r` reached its value arm.
+ *
+ * @param r  the error union to narrow
+ * @return   true iff `r` carries a value
+ */
+fn at_narrowed_ok(r: str | error) -> bool {
+    match r { str => true; error => false }
+}
+
+/**
+ * at_the_scenario_frame_names_and_announces — `scenario_begin` + `scenario_ok` complete, which is the
+ * whole replacement for addressing a case by the number it exits with. The announcement lands on this
+ * test's OWN channel, so it appears attributed under this test's verdict line and nowhere else.
+ */
+#test
+fn at_the_scenario_frame_names_and_announces() {
+    teko::assert::scenario_begin("at_a_named_case")
+    teko::assert::eq_i64(7, 7)
+    teko::assert::scenario_ok()
+}
