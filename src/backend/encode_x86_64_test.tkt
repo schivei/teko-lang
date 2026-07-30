@@ -48,7 +48,7 @@ fn ex_mem(base: MReg, off: i32) -> MMem {
  */
 fn ex_layout() -> FrameLayoutX86 {
     let slots = teko::list::push(teko::list::push(teko::list::empty(), 16 to u32), 24 to u32)
-    FrameLayoutX86 { size = 32 to u32; saved_gpr = teko::list::empty(); saved_fpr = teko::list::empty(); slot_offsets = slots; call_align = false; out_arg_base = 0 to u32; fpr_save_base = 0 to u32 }
+    FrameLayoutX86 { size = 32 to u32; saved_gpr = teko::list::empty(); saved_fpr = teko::list::empty(); slot_offsets = slots; call_align = false; out_arg_base = 0 to u32; fpr_save_base = 0 to u32; caller_shadow = 0 to u32 }
 }
 
 /**
@@ -549,7 +549,7 @@ fn fx_none_u32() -> []u32 {
  * @return FrameLayoutX86  the fixture frame
  */
 fn fx_frame(size: u32, saved: []u32, slots: []u32) -> FrameLayoutX86 {
-    FrameLayoutX86 { size = size; saved_gpr = saved; saved_fpr = teko::list::empty(); slot_offsets = slots; call_align = false; out_arg_base = 0 to u32; fpr_save_base = 0 to u32 }
+    FrameLayoutX86 { size = size; saved_gpr = saved; saved_fpr = teko::list::empty(); slot_offsets = slots; call_align = false; out_arg_base = 0 to u32; fpr_save_base = 0 to u32; caller_shadow = 0 to u32 }
 }
 
 /**
@@ -712,7 +712,7 @@ fn ex_func_makes_call_x86_detects_indirect() {
  * @return FrameLayoutX86  the fixture frame
  */
 fn fx_xmm_frame(size: u32, saved_fpr: []u32, fpr_save_base: u32) -> FrameLayoutX86 {
-    FrameLayoutX86 { size = size; saved_gpr = fx_none_u32(); saved_fpr = saved_fpr; slot_offsets = fx_none_u32(); call_align = false; out_arg_base = 0 to u32; fpr_save_base = fpr_save_base }
+    FrameLayoutX86 { size = size; saved_gpr = fx_none_u32(); saved_fpr = saved_fpr; slot_offsets = fx_none_u32(); call_align = false; out_arg_base = 0 to u32; fpr_save_base = fpr_save_base; caller_shadow = 0 to u32 }
 }
 
 #test
@@ -980,4 +980,56 @@ fn ex_module_globals_honest_stops() {
 fn ex_module_propagates_function_stop() {
     let f = fx_1block_func("main", fx_i1(ret_x86()), fx_alloca_frame(0xFFFFFF00 to u32, 8 to u32))
     teko::assert::str_contains(fx_module_stop(fx_module_of1(f)), "B1-bigframe")
+}
+
+/**
+ * fx_in_arg_hex — the hex of a one-block function encoded under `abi`, whose body
+ * is a single `MInArgX86{Q, RAX, 0}` load of incoming stack argument 0 followed by
+ * `ret`. The reader behind the caller-shadow goldens: the displacement inside
+ * those bytes IS `in_arg_base_x86`'s answer.
+ *
+ * @param AbiDescriptor abi  the register file to encode under
+ * @return str  the encoded bytes as hex, or `<err>` on an unexpected honest-stop
+ */
+fn fx_in_arg_hex(abi: AbiDescriptor) -> str {
+    let f = fx_1block_func("main", fx_i2(in_arg_x86(MMemSizeX86::Q, ex_p(0), 0 to u32), ret_x86()), fx_no_frame())
+    match encode_func_x86(abi, f) {
+        EncodedFuncX86 as ef => teko::crypto::to_hex(ef.bytes)
+        error as e => "<err>"
+    }
+}
+
+#test
+/**
+ * ex_win64_incoming_stack_arg_skips_the_callers_shadow — a Win64 callee reads its
+ * first INCOMING stack argument 32 bytes higher than a SysV one, because the Win64
+ * caller reserved the 32-byte home space between its own RSP and that argument.
+ *
+ * The two hex strings differ in exactly the displacement byte: SysV loads
+ * `[rsp+8]` (`488b442408`), Win64 `[rsp+40]` (`488b442428`). Before this term
+ * existed both read `[rsp+8]` while `encode_out_arg_x86` stored the argument at
+ * `[rsp+32]` of the caller — a 32-byte disagreement between the two halves of one
+ * ABI contract.
+ *
+ * @return void
+ */
+fn ex_win64_incoming_stack_arg_skips_the_callers_shadow() {
+    teko::assert::is_true(fx_in_arg_hex(SYSV64) == "488b442408c3")
+    teko::assert::is_true(fx_in_arg_hex(WIN64) == "488b442428c3")
+}
+
+#test
+/**
+ * ex_frame_layout_carries_the_callers_shadow_unconditionally — `caller_shadow`
+ * comes off the DESCRIPTOR, not off `shadow_bytes_x86`: a Win64 LEAF (which
+ * reserves no shadow of its own, so its `out_arg_base` is 0) still has 32 bytes of
+ * the CALLER's shadow below its incoming arguments.
+ *
+ * @return void
+ */
+fn ex_frame_layout_carries_the_callers_shadow_unconditionally() {
+    let leaf = fx_1block_func("main", fx_i1(ret_x86()), fx_no_frame())
+    teko::assert::is_true(compute_frame_layout_x86(WIN64, leaf).out_arg_base == (0 to u32))
+    teko::assert::is_true(compute_frame_layout_x86(WIN64, leaf).caller_shadow == (32 to u32))
+    teko::assert::is_true(compute_frame_layout_x86(SYSV64, leaf).caller_shadow == (0 to u32))
 }
