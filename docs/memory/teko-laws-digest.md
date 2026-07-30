@@ -1527,3 +1527,38 @@ Uma referência que não pode escrever não é uma referência — é uma vista.
 
 **As duas posições de binder discordam uma da outra**, e nenhuma das duas violações avisa de forma
 útil: a de parâmetro manda declarar `mut`, que não existe para `ref`; a do local não diz nada.
+
+## Os TRÊS modos de binding, e o que cada um afirma (dono, 2026-07-30)
+
+> *"Temos 3 modos de variáveis: `let`: que protege tudo, proíbe mutação profundamente (largo); `mut`:
+> o inverso de `let`; `ref`: valor como referência, com várias abordagens, não apenas variáveis."*
+
+| modo | afirma |
+|---|---|
+| **`let`** | proíbe mutação **PROFUNDAMENTE** — protege tudo, e é largo |
+| **`mut`** | o **inverso** de `let` |
+| **`ref`** | valor **como referência** — e **não só em variáveis**: várias posições |
+
+O `ref` é mutável por definição (lei anterior do mesmo dia), logo os três não são três graus da
+mesma escala: `let`/`mut` são o eixo da **mutabilidade**; `ref` é o eixo da **identidade** (valor vs.
+referência), e nasce mutável.
+
+### O estado medido no dia da lei — `let` NÃO protege classes
+
+Semente `0.3.0.31-beta`, projecto mínimo, código de saída lido:
+
+| caso | resultado | face à lei |
+|---|---|---|
+| `let` **struct**, escrita no campo | **recusado** (B.21) | conforme |
+| `let` **classe**, escrita no campo | **compila e muta** (exit 0) | **VIOLA** |
+| `let` **classe**, escrita no campo do INTERIOR | **compila e muta** (exit 0) | **VIOLA em profundidade** |
+
+**`let` protege structs e é transparente para classes, a qualquer profundidade.** Não é um caso de
+canto: é metade do sistema de tipos a ignorar o modo.
+
+### E porque isto morde o desenho do canal
+
+O dono pediu que a `main` passasse ao orquestrador um id para buscar *"a ref do canal **somente
+leitura**"*. A rota de classe entrega semântica de referência (medido: `objecto é ponteiro` é
+literalmente verdade) — mas **se `let` não morde numa classe, a metade SÓ-LEITURA não é exprimível
+hoje**. Aliasing sem restrição não chega para o `Rx`/`Tx` da §18.
