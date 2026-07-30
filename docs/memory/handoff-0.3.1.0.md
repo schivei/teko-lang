@@ -19,6 +19,26 @@ hipótese, está dito.
 
 
 
+## 0w. macOS PRECISA DOS MESMOS PARSERS — o "não medido" era o registo certo (2026-07-30)
+
+Eu tinha escrito, quando o `llvm`+`lld` entraram nas sete pernas Linux: *"macOS e Windows ficam NÃO MEDIDOS quanto aos parsers: param antes de chegar às filas de objecto."* **Agora está medido**, e o registo honesto valeu — não presumi que estavam bem, e não estavam:
+
+```
+own_cross_x86_64_windows_emits_coff …
+check_coff: FAIL — the cross-format COFF parser 'llvm-readobj' is absent on Darwin-arm64
+```
+
+Mesma causa das pernas Linux, outro gestor de pacotes. Acrescentei à perna `test / macos-arm64` o mesmo passo (`brew install --quiet llvm lld` + PATH) **mais um passo de verificação que falha alto e cedo** — o `own_native` compila 31 projectos antes de chegar à fila cross, e um parser em falta só aparecia **800 segundos** mais tarde. A linha de verificação custa um segundo e nomeia o que falta.
+
+**Conferido:** 8 pernas com o passo, 8 instalações, YAML válido, 27 jobs.
+
+**Windows continua não medido** quanto aos parsers, e continua a ser o registo certo: ela ainda tem defeito próprio antes de lá chegar.
+
+### DUAS COISAS QUE ESTA LEITURA CONFIRMOU DE GRAÇA
+
+1. **O canal por teste funciona.** A linha do log vem prefixada — `out| teko: regression FAIL examples/regressions/__definitely_missing__.tkr` — ou seja, a saída do teste `run_regression_sources_missing_path_is_a_manifest_error` está **atribuída ao teste que a escreveu**, em vez de solta no meio da transcrição. É exactamente o que a suíte refeita prometia.
+2. **O log integral que eu já tinha em disco respondeu sem uma única chamada.** Eu tinha gasto uma chamada numa cauda de 50 linhas que não alcançava a fila; a resposta estava no `cilog-3ee472b` descarregado meia hora antes. **Antes de pedir, procurar no que já se tem.**
+
 ## 0v. O WASM SAIU — 57 sítios, e eu tinha encontrado 8 (2026-07-30)
 
 Ruling do dono: *"remova todo código e CI sobre wasm, é pra remover, **não é mover, não KNOWN-STOP**, quando chegar o momento reescrevemos certo e do zero"* — o que **revoga** o ruling dele de 29/07 que criara o pino. `cargo/0.3.1.0-expurgo-wasm` @ `499fbc2` drenado: **62 ficheiros, +383 / −12 074**.
