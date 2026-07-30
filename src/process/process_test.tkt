@@ -227,17 +227,24 @@ fn a_child_stdout_arrives_through_the_pipe() {
  *
  * WITHOUT THIS HALF THE POSITIVE HALF PROVES NOTHING. A test that only ever sees the expected bytes
  * cannot tell a working pipe from a reader that happens to observe the child's inherited stdout by
- * some other route; the two halves differ in exactly one thing — whether the write end was passed —
+ * some other route; the two halves differ in exactly one thing — where the child's stdout went —
  * and the byte count differs with it.
+ *
+ * THE CHILD IS SENT TO A FILE RATHER THAN LEFT TO INHERIT, and that is not incidental: an inheriting
+ * child writes onto the RUNNER's own stdout, and its `pipe-mark` then lands in the middle of the
+ * suite's report. Naming a destination keeps the inversion exact — the same child, the same bytes,
+ * everywhere except the pipe — without corrupting the output the runner is judged by.
  *
  * @return void
  */
 fn an_unconnected_pipe_delivers_nothing() {
+    let elsewhere = teko::test::scoped(".teko-pipe-elsewhere.out")
     let p = opened_pipe()
-    let h = spawn_redirected_fds(shell_argv("printf pipe-mark"), "", teko::list::empty(), NO_FD, NO_FD, NO_FD)
+    let h = spawn_redirected(shell_argv("printf pipe-mark"), "", teko::list::empty(), "", elsewhere, "")
     teko::assert::ge_i64(h.raw, 0)
     teko::assert::is_true(wait_one(h) == 0)
     teko::assert::eq_str(drain_text(p, PIPE_DEADLINE_MS), "")
+    match teko::fs::remove_file(elsewhere) { error => { }; null => { } }
 }
 
 #test
