@@ -739,34 +739,121 @@ fn pt_error_text(v: null | error) -> str {
  */
 fn pt_cross_target() -> NativeTarget { NativeTarget::Wasm32Wasi }
 
+/**
+ * pt_cross_object_target — a RELOCATABLE-OBJECT target that `cross_note` classifies as CROSS on
+ * EVERY host: whichever of `x86_64-windows` / `x86_64-linux` this host does not default to (no host
+ * defaults to both, so one of the two is always cross). The wasm fixture cannot serve here: its
+ * "no link step" verdict comes from the OBJECT FORMAT, one rule earlier than the cross rule this
+ * target exists to pin, so a wasm target would pass the assertion without ever reaching it.
+ *
+ * @return a non-wasm target that is cross on the host running the suite
+ */
+fn pt_cross_object_target() -> NativeTarget {
+    if host_default_target_guess() == NativeTarget::X8664Windows { return NativeTarget::X8664Linux }
+    NativeTarget::X8664Windows
+}
+
 #test
 /**
- * pt_target_name_and_objfmt_are_one_source — the canonical os-arch name of each target round-trips
- * through `target_from_name` (the D39 single string space: what the reverse direction emits, the
- * forward direction accepts), and each name carries the object format the `--allow-undef`
- * translation and the COFF import-lib rule key on.
+ * pt_target_name_is_the_canonical_os_arch_name — the reverse (variant → name) direction of the D39
+ * single os-arch string space, for EVERY `NativeTarget` variant: the spelling the
+ * `[extern.libs.<os-arch>]` section key, the `on "<os-arch>"` regressor routing and the cross-emit
+ * note all share.
  *
- * @return void
+ * WHY THIS IS ONE OF FIVE TESTS AND NOT ONE OF FOURTEEN ASSERTIONS: the assert seed reports the line
+ * of the ENCLOSING DECLARATION, not of the failing assertion (measured: the arm64-macos SIGABRT
+ * named `project_test.tkt:738`, which was the `fn` line of the single test these five replace, so
+ * the trace located nothing). One test per FAMILY names the family that diverged — the fact that
+ * decides the next step — without inflating the suite count by thirteen.
  */
-fn pt_target_name_and_objfmt_are_one_source() {
+fn pt_target_name_is_the_canonical_os_arch_name() {
     teko::assert::is_true(target_name(NativeTarget::X8664Linux) == "x86_64-linux")
     teko::assert::is_true(target_name(NativeTarget::Arm64Macho) == "arm64-macos")
+    teko::assert::is_true(target_name(NativeTarget::Arm64Linux) == "arm64-linux")
     teko::assert::is_true(target_name(NativeTarget::X8664Windows) == "x86_64-windows")
     teko::assert::is_true(target_name(NativeTarget::Wasm32Wasi) == "wasm32-wasi")
-    match target_from_name(target_name(NativeTarget::X8664Windows)) {
-        NativeTarget as t => teko::assert::is_true(t == NativeTarget::X8664Windows)
-        error => teko::assert::is_true(false)
-    }
+    teko::assert::is_true(target_name(NativeTarget::Wasm64Wasi) == "wasm64-wasi")
+    teko::assert::is_true(target_name(NativeTarget::Wasm32Browser) == "wasm32-browser")
+}
+
+#test
+/**
+ * pt_target_objfmt_keys_the_linker_rules — the object format each variant emits, as the token the
+ * `--allow-undef` translation (§5.2) and the COFF import-lib rule (R5) key on. Both ELF targets are
+ * asserted, so the `Arm64Linux` arm cannot go missing from the family the way it did while this was
+ * a single test.
+ */
+fn pt_target_objfmt_keys_the_linker_rules() {
     teko::assert::is_true(target_objfmt(NativeTarget::X8664Linux) == OBJFMT_ELF)
+    teko::assert::is_true(target_objfmt(NativeTarget::Arm64Linux) == OBJFMT_ELF)
     teko::assert::is_true(target_objfmt(NativeTarget::Arm64Macho) == OBJFMT_MACHO)
     teko::assert::is_true(target_objfmt(NativeTarget::X8664Windows) == OBJFMT_COFF)
+    teko::assert::is_true(target_objfmt(NativeTarget::Wasm32Wasi) == OBJFMT_WASM)
     teko::assert::is_true(target_objfmt(NativeTarget::Wasm64Wasi) == OBJFMT_WASM)
-    teko::assert::is_true(target_name(NativeTarget::Arm64Linux) == "arm64-linux")
-    teko::assert::is_true(target_objfmt(NativeTarget::Arm64Linux) == OBJFMT_ELF)
-    teko::assert::is_true(target_links_with_cc(NativeTarget::X8664Linux))
-    teko::assert::is_false(target_links_with_cc(NativeTarget::Wasm32Wasi))
+    teko::assert::is_true(target_objfmt(NativeTarget::Wasm32Browser) == OBJFMT_WASM)
+}
+
+#test
+/**
+ * pt_target_name_round_trips_through_target_from_name — the D39 closure claim: what the reverse
+ * direction EMITS, the forward direction ACCEPTS, for every variant. `aarch64-linux` is asserted
+ * alongside it because that is the spelling `cc -dumpmachine` reports for `Arm64Linux`, and an
+ * alias that stops resolving is the same outage as a canonical name that stops resolving.
+ */
+fn pt_target_name_round_trips_through_target_from_name() {
+    teko::assert::is_true(target_matches(target_name(NativeTarget::X8664Linux), NativeTarget::X8664Linux))
+    teko::assert::is_true(target_matches(target_name(NativeTarget::Arm64Macho), NativeTarget::Arm64Macho))
+    teko::assert::is_true(target_matches(target_name(NativeTarget::Arm64Linux), NativeTarget::Arm64Linux))
+    teko::assert::is_true(target_matches(target_name(NativeTarget::X8664Windows), NativeTarget::X8664Windows))
+    teko::assert::is_true(target_matches(target_name(NativeTarget::Wasm32Wasi), NativeTarget::Wasm32Wasi))
+    teko::assert::is_true(target_matches(target_name(NativeTarget::Wasm64Wasi), NativeTarget::Wasm64Wasi))
+    teko::assert::is_true(target_matches(target_name(NativeTarget::Wasm32Browser), NativeTarget::Wasm32Browser))
+    teko::assert::is_true(target_matches("aarch64-linux", NativeTarget::Arm64Linux))
+}
+
+#test
+/**
+ * pt_links_with_cc_is_relative_to_the_host — the "will a link step run?" rule, stated the only way
+ * it can be stated portably: `links_with_cc` is a function of the target AND of the host, so the
+ * host side must be NAMED, never assumed.
+ *
+ * THE BUG THIS ASSERTION REPLACES, and it is the whole reason for this split: the single test used
+ * to assert `target_links_with_cc(NativeTarget::X8664Linux)` outright. That reads "x86_64-linux
+ * links" — true only on a host whose own default IS x86_64-linux. On arm64-macos the host default
+ * is `Arm64Macho`, so `cross_note(X8664Linux).is_cross` holds, a cross build stops at the OBJECT,
+ * and the honest answer is FALSE — the assertion was the failure, not the platform. It survived
+ * because the OS-only Phase-1 host guess answered `X8664Linux` for every linux host; once
+ * `host_target_for_os` learned the arch, arm64-linux joined arm64-macos in refuting it.
+ *
+ * WHAT IS ASSERTED INSTEAD, all four host-independent: the host's OWN target always links (never
+ * wasm, never cross); a wasm target NEVER links, and pinning a compiler does not change that,
+ * because the format rule runs first; a cross OBJECT target does not link unpinned; and pinning is
+ * the escape hatch that makes it link.
+ */
+fn pt_links_with_cc_is_relative_to_the_host() {
+    teko::assert::is_true(target_links_with_cc(host_default_target_guess()))
+    teko::assert::is_false(target_links_with_cc(pt_cross_target()))
+    teko::assert::is_false(links_with_cc(pt_cross_target(), true))
+    teko::assert::is_false(links_with_cc(pt_cross_object_target(), false))
+    teko::assert::is_true(links_with_cc(pt_cross_object_target(), true))
+}
+
+#test
+/**
+ * pt_target_os_name_is_the_os_half_of_the_name — the OS half of each canonical name, in the same
+ * vocabulary `teko::os()` and the bare-OS `[extern.libs.<os>]` key use; `""` for the wasm targets,
+ * which name a machine model and a host environment rather than an OS. Both linux targets are
+ * asserted: they share one OS name across two archs, which is exactly what the bare-OS section key
+ * relies on.
+ */
+fn pt_target_os_name_is_the_os_half_of_the_name() {
+    teko::assert::is_true(target_os_name(NativeTarget::X8664Linux) == "linux")
+    teko::assert::is_true(target_os_name(NativeTarget::Arm64Linux) == "linux")
+    teko::assert::is_true(target_os_name(NativeTarget::Arm64Macho) == "macos")
     teko::assert::is_true(target_os_name(NativeTarget::X8664Windows) == "windows")
     teko::assert::is_true(target_os_name(NativeTarget::Wasm32Wasi) == "")
+    teko::assert::is_true(target_os_name(NativeTarget::Wasm64Wasi) == "")
+    teko::assert::is_true(target_os_name(NativeTarget::Wasm32Browser) == "")
 }
 
 #test
