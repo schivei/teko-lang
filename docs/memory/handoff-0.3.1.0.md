@@ -103,7 +103,66 @@ primeiros; o quarto (aridade) deu quatro conflitos, todos resolvidos por composi
 gates estruturais (`objfile_gate_test.sh`, `wasm_known_stop_gate.sh`,
 `native_selfhost_known_stop_test.sh`, `ci_gate_coverage.sh`).
 
+## 2b. REGRESSÕES DO DRENO (2026-07-30) — duas, e uma NÃO está explicada
+
+O dreno das cinco branches ficou verde no ritual local mas **acendeu duas pernas que estavam verdes**.
+Ambas são minhas: eu drenei um arco que muda o Windows **sem a medição no Windows que eu próprio
+declarei necessária** no mesmo dia. A regra existia; não a apliquei ao meu dreno.
+
+### `artifact / windows-x86_64` — EXPLICADA, conserto a decidir por medição
+O link passou a ir por `link.exe` da MSVC (era o objetivo) e morre em **seis símbolos de inteiro de
+128 bits**:
+
+```
+__divti3 __udivti3 __modti3 __umodti3 __floattidf __floatuntidf   (LNK1120)
+```
+
+São helpers que o mingw trazia pela **libgcc**; a MSVC não tem libgcc e o **compiler-rt do clang não é
+ligado por omissão em alvo MSVC**.
+
+**Medido na árvore:** a linguagem **rejeita** `i128`/`u128` na superfície (fixtures de compile-fail
+`reject_i128`/`reject_u128`) e **nenhum `.tks` invoca** os helpers — mas `teko_rt.h` tem **56**
+ocorrências de `__int128`, e os braços i128 dentro de `tk_div`/`tk_rem`/`tk_int_to_float` é que puxam
+os builtins.
+
+**Dois consertos, e a sonda decide:** (a) ligar o compiler-rt do clang, se a lib existir na imagem;
+(b) excluir os braços i128 em alvo MSVC, que são inalcançáveis da superfície. A sonda
+(`theory/sonda-toolchain`) foi estendida para reproduzir o `LNK2019` e medir três candidatos: clang
+nu, `--rtlib=compiler-rt`, e a lib de builtins nomeada. **Uma vaga de agente está guardada para este
+conserto.**
+
+### `test / linux-arm64-glibc` e `Memory paranoid (linux-arm64-glibc)` — METADE explicada
+
+**Explicado: 21 skips.** As linhas que precisam do alvo próprio do host saltam porque **`arm64-linux`
+não existe em `NativeTarget`**:
+
+```
+unsupported TEKO_TARGET "arm64-linux" — supported: x86_64-linux, x86_64-windows, arm64-macos, wasm32-wasi, ...
+teko: regressions 10 run, 21 skipped, 1 failed (8 builds)
+```
+
+O corpus cresceu muito com os cinco drenos e **toda** linha own-native nova salta ali. Sob a lei do
+dono, skip é falha. **É exatamente o que o agente dos crumbs AArch64-ELF está a corrigir** (crumb 3
+cria `Arm64Linux`); quando aterrar, as 21 correm.
+
+**NÃO EXPLICADO: `1 failed` + exit 134 (SIGABRT).** Não sei qual linha falha, nem se o 134 é crash
+próprio ou o harness a abortar sobre a falha.
+
+**Limite de ferramenta que causou isso, e vale saber:** os testes unitários correm no **início** do
+log e o `get_job_logs` só dá a **cauda** — a mensagem do pânico está fora de alcance por essa via.
+Descartei a hipótese óbvia por medição local: os 194 testes novos em `src/build/project_test.tkt`
+(branch do mingw) **são seguros ao host** — ramificam em `teko::os()` e usam variantes de
+`NativeTarget` explícitas, sem afirmar um ramo fixo de `host_target_for_os`.
+
+**Recomendação registada: NÃO escavar antes do crumb 3.** Quando ele aterrar, esta perna muda de forma
+(21 skips passam a corridas) e o vermelho restante, se sobreviver, aparece em contexto legível com o
+log a caber na cauda. Escavar antes é gastar contexto num quadro que vai mudar.
+
 ## 3. FILA — não despachado
+
+**Vagas: 3 de 4 ocupadas** (teto 4). A correr: **AArch64-ELF crumbs 2–5**, **`MRelocKind::None`**,
+**`fmt --apply`**. **A quarta está GUARDADA de propósito** para o conserto do Windows i128, que entra
+assim que a sonda responder.
 
 | item | porquê | nota |
 | --- | --- | --- |
