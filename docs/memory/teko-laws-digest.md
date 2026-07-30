@@ -1504,3 +1504,26 @@ Cinco afirmações, e nenhuma é opcional:
 
 A fundação primeiro, a aplicação aos testes depois. Não é "faz um pedaço e completa" — é a ordem que
 o próprio arquitecto já tinha achado: **C0 · C-A · C1**, e só então o resto.
+
+## `ref` é mutável POR DEFINIÇÃO — não existe `ref mut` (dono, 2026-07-30)
+
+> *"`ref mut` não faz sentido, por definição `ref` só pode ser mutável"*
+
+Uma referência que não pode escrever não é uma referência — é uma vista. Logo:
+
+- **`ref mut` / `mut ref` NÃO existem**, e o parser recusá-los está **certo**;
+- **todo `ref` permite escrita**, nas duas posições de binder (local e parâmetro);
+- `B.21` (*"cannot assign to a field of an immutable binding — declare it `mut`"*) **não se aplica a
+  um `ref`**: a mutabilidade não é opcional nele.
+
+### O estado medido no dia da lei (semente 0.3.0.31-beta, rota C e nativa)
+
+| posição | escrever através do `ref` | face à lei |
+|---|---|---|
+| local `ref r: T = c` | **atravessa** (exit 0) | conforme |
+| parâmetro `ref p: T` | **recusado** com B.21 | **VIOLA** |
+| `ref mut` / `mut ref` | erro de parse | conforme |
+| local `ref r = c` (sem anotação) | **cópia silenciosa** (exit 1) | **VIOLA** — e em silêncio |
+
+**As duas posições de binder discordam uma da outra**, e nenhuma das duas violações avisa de forma
+útil: a de parâmetro manda declarar `mut`, que não existe para `ref`; a do local não diz nada.
