@@ -2224,6 +2224,48 @@ fn binary_output_path(od: str, stem: str, t: NativeTarget) -> str {
 }
 
 /**
+ * OBJ_SUFFIX — the extension of the relocatable object the own backend writes beside the
+ * executable, on every object format alike (`.o`, never `.obj`: the transitional `cc`-as-linker
+ * takes the name it is given, and one spelling keeps the harness's cross-check on one name).
+ */
+const OBJ_SUFFIX: str = ".o"
+
+/**
+ * object_output_path — the emitted object's on-disk path under `od`, which carries NO target
+ * extension: unlike the executable, an object is never launched by name, so its name is the same on
+ * every target.
+ *
+ * @param od    the slash-stripped output directory (already created)
+ * @param stem  the output artifact name (the manifest `name`)
+ * @return      the object's on-disk path
+ * @since 0.3.1
+ */
+fn object_output_path(od: str, stem: str) -> str {
+    teko::str::concat(od, "/", teko::str::concat(stem, OBJ_SUFFIX))
+}
+
+/**
+ * sibling_object_path — the object that a build named `binp` (a `binary_output_path` answer) wrote
+ * beside it: the same path with the target's executable extension REPLACED by `.o`.
+ *
+ * IT EXISTS BECAUSE `binp ~ ".o"` IS ONLY RIGHT WHERE THE EXECUTABLE HAS NO EXTENSION, and that was
+ * every target until a PE one had `.exe`. A consumer that appends to the artifact name asks for
+ * `<stem>.exe.o` and finds nothing — the object check would report a malformed artifact for a build
+ * that emitted a perfect one, which is the worst kind of red: honest-looking and wrong.
+ *
+ * @param binp  the executable path the build wrote (`binary_output_path`)
+ * @param t     the own-backend target that build emitted for
+ * @return      the path of the object written beside it
+ * @since 0.3.1
+ */
+fn sibling_object_path(binp: str, t: NativeTarget) -> str {
+    let sfx = executable_suffix(t)
+    if sfx.len == 0 { return teko::str::concat(binp, OBJ_SUFFIX) }
+    if !teko::str::ends_with(binp, sfx) { return teko::str::concat(binp, OBJ_SUFFIX) }
+    teko::str::concat(teko::str::slice_to(binp, binp.len - sfx.len), OBJ_SUFFIX)
+}
+
+/**
  * links_with_cc — the ONE rule for "will this build actually run a `cc`/`ld` LINK step?", given
  * whether a cross toolchain was explicitly pinned.
  *
@@ -2696,7 +2738,7 @@ fn report_object_only(dir: str, objp: str, t: NativeTarget) -> i32 {
  * @return      0 on a successful write+link (or write, for a cross target), else the failing status
  */
 fn finish_native_object(dir: str, od: str, stem: str, obj: []byte, prog: checker::TProgram, m: Manifest) -> i32 {
-    let objp = teko::str::concat(od, "/", teko::str::concat(stem, ".o"))
+    let objp = object_output_path(od, stem)
     let target = resolved_target()
     let binp = binary_output_path(od, stem, target)
     match teko::io::write_file_bytes(objp, obj) { error as e => return fail(dir, e.message); null => { } }
