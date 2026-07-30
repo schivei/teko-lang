@@ -4411,9 +4411,14 @@ fn build_closure_thunk(symbol: str, target_sym: str, ptypes: []LType, ret_ty: LT
 /**
  * build_closure_literal — a closure VALUE `{fn@0, env@8}` (§5.3): alloca a
  * 16-byte slot, store `fn_symbol`'s `LFuncAddr` VReg at offset 0 and
- * `env_vreg` at offset 8 — the RESULT is the slot's base address (a Ptr
- * VReg), the same memory shape `lower_closure_fatptr` reads back (A1-7,
- * #382).
+ * `env_vreg` at offset 8, then COPY the filled slot into runtime storage
+ * (`emit_elem_box`) — the RESULT is that copy's base address (a Ptr VReg),
+ * the same memory shape `lower_closure_fatptr` reads back (A1-7, #382).
+ *
+ * The copy is the closure's OTHER half of the same lifetime rule
+ * `build_lambda_env` documents: both words of a returned closure have to
+ * survive the frame that built it, so boxing only the env would move the
+ * dangling pointer rather than remove it.
  *
  * @param LowerCtx ctx  the lowering context
  * @param str fn_symbol  the callable's (already-mangled or lifted) symbol
@@ -4435,7 +4440,7 @@ fn build_closure_literal(ctx: LowerCtx, fn_symbol: str, env_vreg: u32, line: u32
     let eslot = ctx_alloc(with_fn_store)
     let with_eslot_addr = ctx_append(eslot.ctx, field_addr_inst(eslot.vreg, base.vreg, ptr_size, line, col))
     let with_env_store = ctx_append(with_eslot_addr, store_inst(eslot.vreg, env_vreg, LType::Ptr, line, col))
-    Lowered { ctx = with_env_store; vreg = base.vreg }
+    emit_elem_box(Lowered { ctx = with_env_store; vreg = base.vreg }, ptr_size * 2, line, col)
 }
 
 /**
@@ -4641,9 +4646,15 @@ fn store_lambda_captures(ctx: LowerCtx, base: u32, layout: LStructLayout, captur
 
 /**
  * build_lambda_env — a lambda's env VALUE: a null Ptr const when it captures
- * nothing, else an alloca'd aggregate (`lambda_env_layout`) with every
- * capture's CURRENT value stored in (`store_lambda_captures`) — the address
- * the lifted body's `bind_lambda_captures` reads back from (A1-7, #382).
+ * nothing, else an aggregate (`lambda_env_layout`) with every capture's
+ * CURRENT value stored in (`store_lambda_captures`) — the address the lifted
+ * body's `bind_lambda_captures` reads back from (A1-7, #382).
+ *
+ * The filled aggregate is built in a frame `alloca` and then COPIED into runtime storage
+ * (`emit_elem_box`), because a closure outlives the statement that made it: `fn f() -> (u64) ->
+ * void { (n: u64) => { … } }` returns a value whose env word would otherwise aim at the frame the
+ * `ret` popped. `frame_escape_guard` reports exactly that shape, and reported it on the corpus's
+ * own `rd_tick_fn` (0.3.1.0 degrau agregado-copia).
  *
  * @param LowerCtx ctx  the lowering context (the ENCLOSING scope)
  * @param LStructLayout layout  the env aggregate's resolved layout
@@ -4660,7 +4671,8 @@ fn build_lambda_env(ctx: LowerCtx, layout: LStructLayout, captures: []checker::T
     }
     let base = ctx_alloc(ctx)
     let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, layout.size, layout.align, line, col))
-    store_lambda_captures(with_alloca, base.vreg, layout, captures, line, col)
+    let filled = match store_lambda_captures(with_alloca, base.vreg, layout, captures, line, col) { Lowered as x => x; error as err => return err }
+    emit_elem_box(filled, layout.size, line, col)
 }
 
 /**
@@ -4888,7 +4900,8 @@ fn lower_binding(ctx: LowerCtx, b: checker::TBinding) -> LowerStmtOut | error {
         if b.kind == parser::BindKind::Mut { return bind_mutable_fat(fo, name, b.value.line, b.value.col) }
         return LowerStmtOut { ctx = ctx_bind_fat(fo.ctx, name, fo.ptr, fo.len); terminated = false }
     }
-    let lo = match lower_value_into_type(ctx, b.bound, b.value) { Lowered as x => x; error as err => return err }
+    let raw = match lower_value_into_type(ctx, b.bound, b.value) { Lowered as x => x; error as err => return err }
+    let lo = own_bound_value(raw, b.value)
     if contains_str(lo.ctx.addr_taken, name) { return bind_addr_taken_scalar(lo, name, b.bound, b.value.line, b.value.col) }
     LowerStmtOut { ctx = ctx_bind(lo.ctx, name, lo.vreg); terminated = false }
 }
@@ -5084,8 +5097,9 @@ fn lower_return(ctx: LowerCtx, r: checker::TReturn) -> LowerStmtOut | error {
     }
     if is_fat_type(replayed.ret_type) { return lower_return_fat(replayed, r) }
     let lo = match lower_return_value(replayed, r.value) { Lowered as x => x; error as err => return err }
-    let inst = ret_inst(lo.vreg, r.value.line, r.value.col)
-    LowerStmtOut { ctx = ctx_append(lo.ctx, inst); terminated = true }
+    let owned = own_returned_value(lo, r.value.line, r.value.col)
+    let inst = ret_inst(owned.vreg, r.value.line, r.value.col)
+    LowerStmtOut { ctx = ctx_append(owned.ctx, inst); terminated = true }
 }
 
 /**
@@ -9159,13 +9173,15 @@ fn unsized_aggregate_push_stop(form: str) -> error {
  * hold: the value itself for a register value (`box_bytes` = 0), else the address of a FRESH
  * per-EXECUTION runtime copy of the aggregate (`tk_slice_elem_box`).
  *
- * Three call sites need it: the slice a push grows, the tag+payload wrapper a variant
- * construction builds, and an array literal's own filled buffer (`lower_array_lit`, 0.3.1.0
- * array-literal-escape). All three hold (or, for the array literal, ARE) an aggregate BY
- * ADDRESS, and the address this backend lowers an aggregate to belongs to an `alloca` — ONE frame
- * slot per INSTRUCTION, not per EXECUTION — so a container filled in a loop would otherwise hold N
- * copies of the same address, and a value returned to the caller would point at a frame already
- * unwound by the time it is read (NATIVE-AGG-SLICE-BY-ADDRESS).
+ * Four call sites need it: the slice a push grows, the tag+payload wrapper a variant
+ * construction builds, an array literal's own filled buffer (`lower_array_lit`, 0.3.1.0
+ * array-literal-escape), and the value an `LRet` carries out of the frame that produced it
+ * (`own_returned_value`, 0.3.1.0 degrau agregado-copia). All four hold (or, for the array literal
+ * and the return, ARE) an aggregate BY ADDRESS, and the address this backend lowers an aggregate
+ * to belongs to an `alloca` — ONE frame slot per INSTRUCTION, not per EXECUTION — so a container
+ * filled in a loop would otherwise hold N copies of the same address, and a value returned to the
+ * caller would point at a frame already unwound by the time it is read
+ * (NATIVE-AGG-SLICE-BY-ADDRESS).
  *
  * @param v           the already-lowered value (for an aggregate, the address of its frame slot)
  * @param box_bytes   the aggregate's byte width, or 0 for a value that needs no copy
@@ -9173,13 +9189,275 @@ fn unsized_aggregate_push_stop(form: str) -> error {
  * @return            the value the container must store
  */
 fn box_aggregate_value(v: Lowered, box_bytes: u32, e: checker::TExpr) -> Lowered {
+    box_aggregate_value_at(v, box_bytes, e.line, e.col)
+}
+
+/**
+ * box_aggregate_value_at — `box_aggregate_value`'s body, positioned by a bare (line, col) instead
+ * of by an expression node. The synthesized auto-return of a function's trailing tail
+ * (`lower_fn_body`) has a position but no `checker::TExpr` of its own to hand over, and inventing
+ * a placeholder expression just to carry two integers would put a fake node in the lowering path.
+ *
+ * @param v           the already-lowered value (for an aggregate, the address of its frame slot)
+ * @param box_bytes   the aggregate's byte width, or 0 for a value that needs no copy
+ * @param line        the source line to propagate onto the emitted copy
+ * @param col         the source column to propagate onto the emitted copy
+ * @return            the value the container (or the caller) may hold
+ */
+fn box_aggregate_value_at(v: Lowered, box_bytes: u32, line: u32, col: u32) -> Lowered {
     if box_bytes == 0 { return v }
+    emit_elem_box(v, box_bytes, line, col)
+}
+
+/**
+ * emit_elem_box — the `tk_slice_elem_box` call itself, WITHOUT the "0 means no copy" shortcut its
+ * callers apply.
+ *
+ * The shortcut is right for a type-driven width (0 there means "a register value, which needs no
+ * storage of its own") and WRONG for a length-driven one: an EMPTY array literal is 0 bytes wide
+ * and still must not hand its caller a frame address. `tk_alloc` already maps `n == 0` to a unique
+ * block, so the zero-width box is a real, distinct, frame-independent pointer.
+ *
+ * @param v      the already-lowered value (the address of the bytes to copy)
+ * @param bytes  the copy width, which MAY be 0
+ * @param line   the source line to propagate onto the emitted copy
+ * @param col    the source column to propagate onto the emitted copy
+ * @return       the address of the runtime copy
+ */
+fn emit_elem_box(v: Lowered, bytes: u32, line: u32, col: u32) -> Lowered {
     let size = ctx_alloc(v.ctx)
-    let with_size = ctx_append(size.ctx, const_int_inst(size.vreg, box_bytes to i64, e.line, e.col))
+    let with_size = ctx_append(size.ctx, const_int_inst(size.vreg, bytes to i64, line, col))
     mut args: []u32 = teko::list::push(teko::list::empty(), v.vreg)
     args = teko::list::push(args, size.vreg)
     let boxed = ctx_alloc(with_size)
-    Lowered { ctx = ctx_append(boxed.ctx, call_inst(boxed.vreg, "tk_slice_elem_box", args, false, e.line, e.col)); vreg = boxed.vreg }
+    Lowered { ctx = ctx_append(boxed.ctx, call_inst(boxed.vreg, "tk_slice_elem_box", args, false, line, col)); vreg = boxed.vreg }
+}
+
+/**
+ * returned_aggregate_box_bytes — how many bytes a `return` must copy into storage of its own
+ * before the `LRet` carries the address out, or 0 when the returned value needs no copy.
+ *
+ * THIS IS THE ARM64 DIVERGENCE OF 0.3.1.0 (degrau agregado-copia). An aggregate's value in this
+ * backend IS the address of an `alloca` (NATIVE-AGG-SLICE-BY-ADDRESS), so `return P{…}` handed the
+ * caller the address of a frame slot the `ret` had just popped. Every read of it is a
+ * use-after-return: it survived on x86-64 because nothing the caller ran next happened to reuse
+ * those bytes, and it did NOT survive on arm64, where the very next call's prologue
+ * (`stp x29, x30, [sp, #-N]`) lands on them. The oracle agreed with that reading: the same 22
+ * probes fail 15 times on the own backend and 0 times through the C route, on the SAME host.
+ *
+ * A fat (`str`/`[]T`) return is not an aggregate here — it travels as a (ptr, len) pair through
+ * `lower_return_fat`/`lower_fn_body_fat`, whose ptr half already points at owned storage — so it
+ * answers 0 and is left alone. Everything else defers to `aggregate_box_bytes`, the SAME single
+ * query the push and the variant payload use, so a return can never disagree with a push about
+ * how wide a value of a given type is.
+ *
+ * @param t    the enclosing function's own declared return type (`LowerCtx.ret_type`)
+ * @param ctx  the lowering context (its registered layouts and declared-variant table)
+ * @return     the byte width the return must own, or 0 for a value that escapes safely as it is
+ */
+fn returned_aggregate_box_bytes(t: checker::Type, ctx: LowerCtx) -> u32 {
+    if is_fat_type(t) { return 0 to u32 }
+    match aggregate_box_bytes(t, ctx) {
+        u32 as n => n
+        null => 0 to u32
+    }
+}
+
+/**
+ * own_returned_value — the value an `LRet` may legally carry: the lowered value itself when it is
+ * self-contained, else a FRESH copy of the aggregate in storage that outlives the returning frame
+ * (`returned_aggregate_box_bytes`, `box_aggregate_value_at`).
+ *
+ * The copy is emitted CALLEE-side, before the `ret`, and that side is not a preference: a
+ * caller-side copy would have to run after the frame is already popped, and the copy itself is a
+ * call whose own prologue lands on the very bytes it was about to read.
+ *
+ * @param v     the lowered return value (for an aggregate, the address of its frame slot)
+ * @param line  the source line to propagate onto the emitted copy
+ * @param col   the source column to propagate onto the emitted copy
+ * @return      the value the `LRet` carries
+ */
+fn own_returned_value(v: Lowered, line: u32, col: u32) -> Lowered {
+    box_aggregate_value_at(v, returned_aggregate_box_bytes(v.ctx.ret_type, v.ctx), line, col)
+}
+
+/**
+ * aggregate_box_align — the alignment of the storage `aggregate_box_bytes` sizes, so an `alloca`
+ * that receives a copy of a value of type `t` is aligned the way the type's own layout demands.
+ * The size query alone is not enough for a FRAME copy (`copy_aggregate_place`): the runtime box
+ * comes back from the allocator already maximally aligned, but an `alloca` is aligned to whatever
+ * the instruction is told.
+ *
+ * @param t    the type whose value may need storage of its own
+ * @param ctx  the lowering context (its registered layouts and declared-variant table)
+ * @return     the alignment, or `null` in exactly the cases `aggregate_box_bytes` answers `null`
+ */
+fn aggregate_box_align(t: checker::Type, ctx: LowerCtx) -> u32 | null {
+    if is_register_value_type(t, ctx.enums) { return null }
+    match expand_named_variant(t, ctx.variants) {
+        checker::Named as n => named_layout_align(n, ctx)
+        checker::Variant => variant_wrapper_align()
+        checker::Error => error_struct_layout().align
+        _ => null
+    }
+}
+
+/**
+ * named_layout_align — a nominal aggregate's alignment: the `align` of the `struct`/`class` layout
+ * registered under its name, or `null` when nothing is registered under it — `named_layout_bytes`
+ * one field over, so the size and the alignment of a copy always come from the SAME layout entry.
+ *
+ * @param n    the resolved nominal type
+ * @param ctx  the lowering context (its registered layouts)
+ * @return     the instance's alignment, or `null` for a nominal never laid out
+ */
+fn named_layout_align(n: checker::Named, ctx: LowerCtx) -> u32 | null {
+    match find_known_struct_layout(ctx.layouts, n.name) {
+        LStructLayout as l => l.align
+        null => null
+    }
+}
+
+/**
+ * expr_is_aggregate_place — does `e` denote EXISTING storage someone else also names, as opposed
+ * to producing a fresh value of its own?
+ *
+ * A bound local, a field, an indexed element and a path expression all hand back the address of
+ * storage that outlives the expression; a literal, a call, an `if`/`match` value and a cast all
+ * produce their own. The distinction is the whole of the value-copy rule: only a PLACE needs a
+ * copy, because only a place can be written through afterward by the name it was read from.
+ *
+ * @param e  the expression whose value is about to be bound, assigned or embedded
+ * @return   true iff reading `e` yields storage that is still reachable under another name
+ */
+fn expr_is_aggregate_place(e: checker::TExpr) -> bool {
+    match e.kind {
+        checker::TVar => true
+        checker::TFieldAccess => true
+        checker::TSafeFieldAccess => true
+        checker::TIndex => true
+        checker::TPathExpr => true
+        _ => false
+    }
+}
+
+/**
+ * aggregate_place_copy_bytes — how many bytes a value must be copied over before it is bound,
+ * assigned or embedded, or 0 when no copy is owed.
+ *
+ * THE ALIASING HALF OF THE SAME DEFECT `returned_aggregate_box_bytes` fixes the lifetime half of.
+ * An aggregate's value here IS an address, so `let u = t` made `u` a SECOND NAME for `t`'s storage
+ * and `t.a = 99` was observable through `u` — where the C route, which holds an aggregate local
+ * inline and assigns it field for field, answered with the value `u` was bound to. Measured over
+ * 22 probes: 15 wrong on the own backend, 0 wrong through the C route, same host.
+ *
+ * A copy is owed only for a PLACE (`expr_is_aggregate_place`) of a type whose whole-type width is
+ * a fact (`aggregate_box_bytes`, the SAME query the push and the return use). An ARGUMENT position
+ * is deliberately NOT a caller of this: the C route passes an aggregate parameter by pointer, so a
+ * method's `self.n = …` is visible to its caller on BOTH routes, and copying at the call would
+ * break the semantics the oracle pins.
+ *
+ * @param e    the expression whose value is about to be bound, assigned or embedded
+ * @param ctx  the lowering context (its registered layouts and declared-variant table)
+ * @return     the byte width to copy, or 0 when the value is already the binder's own
+ */
+fn aggregate_place_copy_bytes(e: checker::TExpr, ctx: LowerCtx) -> u32 {
+    if !expr_is_aggregate_place(e) { return 0 to u32 }
+    match aggregate_box_bytes(e.type, ctx) {
+        u32 as n => n
+        null => 0 to u32
+    }
+}
+
+/**
+ * copy_aggregate_place — a FRAME-lifetime copy of an aggregate read out of a place: a fresh
+ * `alloca` of the type's own size/alignment plus one `tk_mem_copy` into it, the same runtime touch
+ * `copy_error_value` and `store_assign_aggregate_ref` already use (no LIR memcpy op exists).
+ *
+ * The frame is the right lifetime because the destination is a LOCAL, and every construct that can
+ * carry a local's value past the frame boxes it into runtime storage of its own on the way out —
+ * the push (`push_box_bytes`), the variant payload (`variant_payload_box_bytes`), the array
+ * literal, and now the return (`own_returned_value`). A destination whose OWN lifetime is unknown
+ * takes `box_aggregate_value` instead, which is why a struct literal's field does.
+ *
+ * `tk_mem_copy` is a CALL, and that is safe here in a way it would not be at a return: the source
+ * is live storage the caller still names, never a frame the `ret` already popped.
+ *
+ * @param ctx    the lowering context
+ * @param v      the place's already-lowered base address
+ * @param bytes  the copy width (`aggregate_place_copy_bytes`, non-zero)
+ * @param align  the copy's alignment (`aggregate_box_align`)
+ * @param line   the source line to propagate onto the emitted copy
+ * @param col    the source column to propagate onto the emitted copy
+ * @return       the fresh slot's base address
+ */
+fn copy_aggregate_place(ctx: LowerCtx, v: u32, bytes: u32, align: u32, line: u32, col: u32) -> Lowered {
+    let dst = ctx_alloc(ctx)
+    let with_alloca = ctx_append(dst.ctx, alloca_inst(dst.vreg, bytes, align, line, col))
+    let width = ctx_alloc(with_alloca)
+    let with_width = ctx_append(width.ctx, const_int_inst(width.vreg, bytes to i64, line, col))
+    let args = teko::list::push(two_args(dst.vreg, v), width.vreg)
+    Lowered { ctx = ctx_append(with_width, void_call_inst("tk_mem_copy", args, false, line, col)); vreg = dst.vreg }
+}
+
+/**
+ * own_bound_value — the value a `let`/`mut` binding or an assignment may store: the lowered value
+ * itself when it is already the binder's own, else a frame copy of the place it was read from
+ * (`aggregate_place_copy_bytes`, `copy_aggregate_place`).
+ *
+ * @param v  the already-lowered value
+ * @param e  the expression it was lowered from (its kind decides place-ness, its position the copy)
+ * @return   the value to store into the binding's slot
+ */
+fn own_bound_value(v: Lowered, e: checker::TExpr) -> Lowered {
+    let bytes = aggregate_place_copy_bytes(e, v.ctx)
+    if bytes == 0 { return v }
+    match aggregate_box_align(e.type, v.ctx) {
+        u32 as align => copy_aggregate_place(v.ctx, v.vreg, bytes, align, e.line, e.col)
+        null => v
+    }
+}
+
+/**
+ * embedded_aggregate_box_bytes — how many bytes a value written into a CONTAINER SLOT (an
+ * aggregate's field, a slice's element) must be copied into runtime storage of its own, or 0 when
+ * the value is self-contained.
+ *
+ * UNCONDITIONAL for an aggregate, and NOT gated on place-ness the way `aggregate_place_copy_bytes`
+ * is — that difference is the last of the 15 measured divergences. A container's field holds an
+ * aggregate BY ADDRESS and the container's OWN lifetime is unknown to the writer, so a field
+ * pointed at a FRESH frame `alloca` is just as wrong as one pointed at a place: `return N { p =
+ * P{…}; n = 1 }` copied the 16-byte `N` out correctly and left its `p` word aimed at the frame the
+ * `ret` popped. This is the SAME rule the push, the variant payload and the array literal already
+ * obey; the field slot was the one container that did not.
+ *
+ * @param t    the value's own type
+ * @param ctx  the lowering context (its registered layouts and declared-variant table)
+ * @return     the byte width to copy, or 0 for a value no container needs to own
+ */
+fn embedded_aggregate_box_bytes(t: checker::Type, ctx: LowerCtx) -> u32 {
+    if is_fat_type(t) { return 0 to u32 }
+    match aggregate_box_bytes(t, ctx) {
+        u32 as n => n
+        null => 0 to u32
+    }
+}
+
+/**
+ * own_embedded_value — the value a CONTAINER SLOT may hold: the lowered value itself when it is
+ * self-contained, else a RUNTIME copy of the aggregate (`box_aggregate_value`).
+ *
+ * The runtime arena rather than the frame, and that is the difference from `own_bound_value`: the
+ * destination here is a field of an aggregate, or an element of a slice, whose own lifetime the
+ * writer does not know, so the copy has to outlive the statement that wrote it — which a frame
+ * `alloca` does not promise.
+ *
+ * @param v  the already-lowered value
+ * @param e  the expression it was lowered from (its type fixes the width, its position the copy)
+ * @return   the value to store into the container's slot
+ */
+fn own_embedded_value(v: Lowered, e: checker::TExpr) -> Lowered {
+    box_aggregate_value(v, embedded_aggregate_box_bytes(e.type, v.ctx), e)
 }
 
 /**
@@ -10759,7 +11037,8 @@ fn store_struct_field(ctx: LowerCtx, base: u32, offset: u32, decl: checker::Type
         let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, offset, line, col))
         return store_fat_slot(with_addr, addr.vreg, fo, line, col)
     }
-    let vo = match lower_expr(ctx, value) { Lowered as x => x; error as err => return err }
+    let raw = match lower_expr(ctx, value) { Lowered as x => x; error as err => return err }
+    let vo = own_embedded_value(raw, value)
     let addr = ctx_alloc(vo.ctx)
     let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, offset, line, col))
     ctx_append(with_addr, store_inst(addr.vreg, vo.vreg, ltype_of(value.type, vo.ctx.enums), line, col))
@@ -11094,7 +11373,7 @@ fn lower_array_lit(ctx: LowerCtx, e: checker::TExpr, al: checker::TArrayLit) -> 
     let base = ctx_alloc(ctx)
     let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, total, elem_byte_align(elem_t, ctx.enums), e.line, e.col))
     let filled = match store_array_elements(with_alloca, base.vreg, elem_t, al.elements, stride, e.line, e.col) { Lowered as x => x; error as err => return err }
-    box_aggregate_value(filled, total, e)
+    emit_elem_box(filled, total, e.line, e.col)
 }
 
 /** store_array_elements — lower each non-spread element in turn, storing it at its
@@ -11416,7 +11695,8 @@ fn lower_assign_simple(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | err
     let slot = lenv_lookup_scalar_slot(ctx.env, a.name)
     if slot.found { return store_assign_value(ctx, slot.slot, slot.ty, a) }
     if a.op == lexer::TokenKind::Assign {
-        let vo = match lower_value_into_type(ctx, a.bound, a.value) { Lowered as x => x; error as err => return err }
+        let raw = match lower_value_into_type(ctx, a.bound, a.value) { Lowered as x => x; error as err => return err }
+        let vo = own_bound_value(raw, a.value)
         return LowerStmtOut { ctx = ctx_reassign(vo.ctx, a.name, vo.vreg); terminated = false }
     }
     let cur = lenv_lookup(ctx.env, a.name)
@@ -11498,7 +11778,8 @@ fn lower_assign_field(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | erro
  */
 fn store_assign_value(ctx: LowerCtx, addr: u32, field_ty: LType, a: checker::TAssign) -> LowerStmtOut | error {
     if a.op == lexer::TokenKind::Assign {
-        let vo = match lower_value_into_type(ctx, a.bound, a.value) { Lowered as x => x; error as err => return err }
+        let raw = match lower_value_into_type(ctx, a.bound, a.value) { Lowered as x => x; error as err => return err }
+        let vo = own_embedded_value(raw, a.value)
         return LowerStmtOut { ctx = ctx_append(vo.ctx, store_inst(addr, vo.vreg, field_ty, a.value.line, a.value.col)); terminated = false }
     }
     let cr = ctx_alloc(ctx)
@@ -11751,7 +12032,8 @@ fn lower_fn_body(ctx: LowerCtx, body: []checker::TStatement, ret_ty: LType, line
     let tail = match lower_block_value(ctx, body, ret_ty, ctx.ret_type) { LowerBlockValue as x => x; error as err => return err }
     if tail.terminated { return tail.ctx }
     let replayed = match replay_defers(tail.ctx, 0) { LowerCtx as c => c; error as err => return err }
-    ctx_append(replayed, ret_inst(tail.vreg, line, col))
+    let owned = own_returned_value(Lowered { ctx = replayed; vreg = tail.vreg }, line, col)
+    ctx_append(owned.ctx, ret_inst(owned.vreg, line, col))
 }
 
 /**
@@ -12150,7 +12432,9 @@ pub fn lower_program(prog: checker::TProgram, flat_symbols: bool = false) -> LMo
         i++
     }
     let vmain = match lower_virtual_main(loose, layouts, enums, m.rodata, lifted, externs, flat_symbols, variants, ref_fns, field_decls) { LoweredFunction as x => x; error as err => return err }
-    fold_lifted_funcs(add_func(with_rodata(m, vmain.rodata), vmain.func), vmain.lifted)
+    let whole = fold_lifted_funcs(add_func(with_rodata(m, vmain.rodata), vmain.func), vmain.lifted)
+    match frame_escape_guard(whole) { error as e => return e; null => { } }
+    whole
 }
 
 /**
