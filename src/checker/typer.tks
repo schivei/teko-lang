@@ -4367,10 +4367,49 @@ fn lvalue_root(e: parser::Expr) -> LvalueRoot {
     }
 }
 
-// (#88) a FIELD-target assignment `recv.field op= value`. The parser routes EVERY `recv.field = …` here;
-// this branch decides Ref-deref (`r.value` on a `Ref<T>` — the legacy MEM-1b-ii path, preserved) vs a
-// struct/class field WRITE, enforcing write-visibility == read-visibility (the RULING). Mirrors
-// typer.c::type_field_assign.
+/**
+ * field_write_root_writable — the DIRECT-field-write guard: `recv.field = v` is admitted only when
+ * the ROOT variable of the receiver chain is a writable binding. It walks `a.b.c` to `a`, so the
+ * protection holds at EVERY depth, not just the first field.
+ *
+ * `let` forbids a direct write, full stop — for a CLASS exactly as for a struct (owner ruling
+ * 2026-07-30: `let` protects fields at every level, like a C# `{ public get; private set; }`).
+ * Until that ruling a class receiver skipped this guard entirely, on the reasoning that a class is
+ * a reference type and mutation flows through the handle; the effect was that `let` bit structs and
+ * was transparent to classes — half the type system ignoring the mode. Writing remains the
+ * privilege of the declaring type's own methods, which reach their fields through the RECEIVER
+ * binder — the receiver is the object AS a reference, so it is defined writable
+ * (`is_method_receiver`) and `self.name = n` stays legal, which is the `private set` half of the
+ * analogy.
+ *
+ * @param receiver  the untyped receiver expression of the field-access LHS
+ * @param env       the typing environment, consulted for the root binding's writability
+ * @return          null when the write is admitted
+ * @throws          when the receiver roots at a temporary, at an unbound name, or at a binding that
+ *                  is neither `mut` nor a `ref`
+ * @since           0.3.1
+ */
+fn field_write_root_writable(receiver: parser::Expr, env: Env) -> error | null {
+    let root = lvalue_root(receiver)
+    if !root.reachable { return error { message = "cannot assign to a field of a temporary value — the receiver is not a mutable variable" } }
+    let rb = match lookup_binding(env, root.name) { ValBinding as vb => vb; error as e => return e }
+    if rb.is_mut { return null }
+    error { message = $"cannot assign to a field of immutable `{root.name}` — declare it `mut`, or let the declaring type's own method write it (`let` protects fields at every level; there is no `ref mut`) (B.21)" }
+}
+
+/**
+ * type_field_assign — type a FIELD-target assignment `recv.field op= value` (#88). The parser routes
+ * EVERY `recv.field = …` here; this branch decides Ref-deref (`r.value` on a `Ref<T>` — the legacy
+ * MEM-1b-ii path, preserved) versus a struct/class field WRITE, enforcing write-visibility ==
+ * read-visibility (the RULING) and the `let`-protects-every-level guard above.
+ *
+ * @param a      the raw assignment (`a.target` is the `FieldAccess` LHS)
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       the typed `TAssign` (kind `Field`, or `RefDeref` for a `Ref<T>.value` write)
+ * @throws       when the LHS is not a field access, the receiver's root is not writable, or the
+ *               value does not match the field type
+ */
 fn type_field_assign(a: parser::Assign, env: Env, table: TypeTable) -> TypedStmt | error {
     // Type the LHS field-access EXPR — this resolves the receiver + field type AND enforces read-side
     // visibility (a private class field written externally is rejected here with the SAME "field is
@@ -4399,13 +4438,7 @@ fn type_field_assign(a: parser::Assign, env: Env, table: TypeTable) -> TypedStmt
     // A struct/class FIELD write. Structs are VALUE types → the receiver must be a MUTABLE lvalue (its
     // root variable a `mut` binding — the RULING). Classes are REFERENCE types (the value is a pointer;
     // mutation flows through it — like a `Ref<T>`), so the handle need not be `mut`.
-    let recv_is_class = match recv.type { Named as nm => match find_class_body(nm.name, table) { parser::ClassBody => true; error => false }; _ => false }
-    if !recv_is_class {
-        let root = lvalue_root(lhs_fa.receiver)
-        if !root.reachable { return error { message = "cannot assign to a field of a temporary value — the receiver is not a mutable variable" } }
-        let rb = match lookup_binding(env, root.name) { ValBinding as vb => vb; error as e => return e }
-        if !rb.is_mut { return error { message = "cannot assign to a field of an immutable binding — declare it `mut` (B.21)" } }
-    }
+    match field_write_root_writable(lhs_fa.receiver, env) { error as e => return e; null => { } }
 
     let v = match type_expr(a.value, env, table) { TExpr as te => te; error as e => return e }
     if type_contains_ref(field_t) || type_contains_ref(v.type) { return error { message = "a reference cannot be stored in a field (parameter-only in this version)" } }
@@ -5837,6 +5870,27 @@ fn discard_param_type(gov: parser::Function | null, idx: u64, table: TypeTable, 
  *                           the method's own `is_unsafe` nor its owning type's is set — a method
  *                           inherits its OWNER type's unsafe-ness (`method_is_effective_unsafe`)
  */
+/**
+ * is_method_receiver — is parameter `i` the method's RECEIVER (the implicit `self`)? The receiver is
+ * the only parameter the parser leaves UNTYPED, and it can only be the first one; every other
+ * parameter carries its annotation from source.
+ *
+ * It matters to mutability because writing a field is the privilege of the declaring type's own
+ * methods (owner ruling 2026-07-30, the `private set` half of the `let` analogy) and a method
+ * reaches its fields through this binder. The receiver is the object AS a reference — the identity
+ * axis, born mutable — so it is defined writable while every other parameter stays immutable (B.21)
+ * unless it is declared `ref`.
+ *
+ * @param f  the method being typed
+ * @param i  the parameter index
+ * @return   true iff parameter `i` is the implicit receiver
+ * @since    0.3.1
+ */
+fn is_method_receiver(f: parser::Function, i: u64) -> bool {
+    if i != 0 { return false }
+    !f.params[0].has_type
+}
+
 fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable, has_base_binding: bool, base_binding_name: str, base_name: str, declaring_class: str) -> TFunction | error {
     // (W10b.CLASS residual — intern visibility) this body's OWN field/method accesses are
     // checked against `declaring_class` (see type_struct_methods's own comment on why this can
@@ -5890,10 +5944,10 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
                 }
             }
         }
-        local = define(local, f.params[i].name, pt, false)
+        local = define(local, f.params[i].name, pt, is_method_receiver(f, i))
         i++
     }
-    if inject_base_binding { local = define(local, base_binding_name, Named { name = if name_qualifier(base_name) != "" { base_name } else { qualify(env.cur_ns, base_name) } }, false) }   // (#109 W3 / #152) canonical: base_name arrives PRE-QUALIFIED from canon_class_bases (cross-ns exact); a bare (unresolvable/root) one qualifies by the class's own ns
+    if inject_base_binding { local = define(local, base_binding_name, Named { name = if name_qualifier(base_name) != "" { base_name } else { qualify(env.cur_ns, base_name) } }, true) }   // (#109 W3 / #152) canonical: base_name arrives PRE-QUALIFIED from canon_class_bases (cross-ns exact); a bare (unresolvable/root) one qualifies by the class's own ns
     let ret = match function_return(f, tbl, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the fn's enclosing namespace
     if is_ref_null_variant(ret) { return error { message = "a function cannot return an optional reference (`Ref<T> | null`) — references are pass-down only (R3)" } }
     if f.is_extern {
