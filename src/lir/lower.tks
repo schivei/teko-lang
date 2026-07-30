@@ -562,12 +562,39 @@ fn lower_div_zero_guard(ctx: LowerCtx, divisor: u32, line: u32, col: u32) -> Low
     let with_zero = ctx_append(z.ctx, const_int_inst(z.vreg, 0, line, col))
     let c = ctx_alloc(with_zero)
     let with_cmp = ctx_append(c.ctx, bin_inst(c.vreg, LBinOp::ICmpNe, divisor, z.vreg, line, col))
-    let okb = alloc_block(with_cmp.func)
+    lower_trap_unless(with_cmp, c.vreg, "tk_panic_div0", line, col)
+}
+
+/**
+ * lower_trap_unless — the compare-then-trap skeleton EVERY compiler-organized runtime guard
+ * shares: continue into a fresh "ok" block when `cond` holds, and branch into a fresh "trap"
+ * block that calls `panic_symbol` when it does not. Extracted so the division-by-zero guard
+ * (`lower_div_zero_guard`) and the cast fit guard (`lower_cast_fit_guard`) cannot drift — a
+ * guard whose trap block were built one way here and another way there is exactly the pair of
+ * twins that decays into one of them being fixed and the other not.
+ *
+ * The trap block closes with a JUMP TO ITSELF: a dead terminator (the `_Noreturn` runtime call
+ * never comes back) that keeps the block well-formed without inventing a placeholder return
+ * value the enclosing function's own type may not even have room for. Both guards fire inside
+ * arbitrary EXPRESSION lowering, where a fat-returning function must still compile.
+ *
+ * @param ctx           the lowering context, positioned right after `cond` is computed
+ * @param cond          the VReg holding the "everything is fine" condition (nonzero = fine)
+ * @param panic_symbol  the `_Noreturn` runtime symbol the trap block calls (`tk_panic_div0`,
+ *                      `tk_panic_cast`) — the SAME symbol the C route's own helper calls, so
+ *                      both routes panic with the identical message and exit status
+ * @param line          the source line of the guarded expression
+ * @param col           the source column of the guarded expression
+ * @return              the advanced context, now emitting into the "ok" block — `cond` is
+ *                      proven true on every path that reaches it
+ */
+fn lower_trap_unless(ctx: LowerCtx, cond: u32, panic_symbol: str, line: u32, col: u32) -> LowerCtx {
+    let okb = alloc_block(ctx.func)
     let trapb = alloc_block(okb.func)
-    let br = branch_inst(c.vreg, okb.block_id, teko::list::empty(), trapb.block_id, teko::list::empty(), line, col)
-    let branched = ctx_append(ctx_with(with_cmp, trapb.func, with_cmp.block_id, with_cmp.env), br)
+    let br = branch_inst(cond, okb.block_id, teko::list::empty(), trapb.block_id, teko::list::empty(), line, col)
+    let branched = ctx_append(ctx_with(ctx, trapb.func, ctx.block_id, ctx.env), br)
     let trap_ctx = ctx_goto(branched, trapb.block_id)
-    let called = ctx_append(trap_ctx, void_call_inst("tk_panic_div0", teko::list::empty(), false, line, col))
+    let called = ctx_append(trap_ctx, void_call_inst(panic_symbol, teko::list::empty(), false, line, col))
     let trap_closed = ctx_append(called, jump_inst(trapb.block_id, teko::list::empty(), line, col))
     ctx_with(trap_closed, trap_closed.func, okb.block_id, branched.env)
 }
@@ -592,28 +619,197 @@ pub fn lunop_of(op: lexer::TokenKind, k: checker::PrimKind) -> LUnOp | error {
     }
 }
 
-/** cast_unop_of — the conversion LUnOp for a numeric `to` cast from `src` to `dst`
-    machine classes. int->float = IToF, float->int = FToI, float->float = FToF, and
-    int->int widens (SExt/ZExt by source signedness) or truncates (Trunc). A same-class
-    int cast maps to Trunc (a harmless identity width); a same-class float cast to FToF. */
-fn cast_unop_of(src: checker::PrimKind, dst: checker::PrimKind) -> LUnOp {
+/**
+ * cast_unop_of — the conversion LUnOp for a numeric `to` cast between two FLOAT-INVOLVED
+ * machine classes: int->float = IToF, float->int = FToI, float->float = FToF. The int->int
+ * family never reaches here: it carries no conversion instruction at all
+ * (`lower_int_cast` — a value proven to FIT its destination already holds the destination's
+ * own 64-bit two's-complement bit pattern), so there is no `Trunc` opcode left for an
+ * integer `to` to select.
+ *
+ * @param src  the cast operand's PrimKind (at least one of the pair is a float)
+ * @param dst  the cast target's PrimKind
+ * @return     the conversion LUnOp for the float-involved pair
+ * @throws     when BOTH ends are integers — that pair belongs to `lower_int_cast` and must
+ *             never reach an opcode choice here, so the invariant break stops loudly instead
+ *             of silently selecting an extend that would drop the guard with it
+ */
+fn cast_unop_of(src: checker::PrimKind, dst: checker::PrimKind) -> LUnOp | error {
     let src_f = prim_is_float_kind(src)
     let dst_f = prim_is_float_kind(dst)
     if src_f && dst_f { return LUnOp::FToF }
     if src_f { return LUnOp::FToI }
     if dst_f { return LUnOp::IToF }
-    cast_int_unop_of(src, dst)
+    error { message = "native backend: an int->int `to` cast carries no conversion opcode — it is lowered by `lower_int_cast` (the fit guard), never by `cast_unop_of`" }
 }
 
-/** cast_int_unop_of — the int->int conversion LUnOp: widen with sign/zero extend (by the
-    SOURCE's signedness) or truncate to a narrower/equal width. Bool is excluded from casts
-    by the checker (cast direction law), so a bool source here would be an invariant break
-    — treated as unsigned (ZExt widens). */
-fn cast_int_unop_of(src: checker::PrimKind, dst: checker::PrimKind) -> LUnOp {
-    let sw = prim_width_of(src)
-    let dw = prim_width_of(dst)
-    if dw > sw { return if prim_is_signed_int(src) { LUnOp::SExt } else { LUnOp::ZExt } }
-    LUnOp::Trunc
+/** The lowest value an `i8` destination represents — the `to i8` guard's floor. */
+const CAST_FLOOR_I8: i64 = -128
+/** The highest value an `i8` destination represents — the `to i8` guard's ceiling. */
+const CAST_CEIL_I8: i64 = 127
+/** The lowest value an `i16` destination represents — the `to i16` guard's floor. */
+const CAST_FLOOR_I16: i64 = -32768
+/** The highest value an `i16` destination represents — the `to i16` guard's ceiling. */
+const CAST_CEIL_I16: i64 = 32767
+/** The lowest value an `i32` destination represents — the `to i32` guard's floor. */
+const CAST_FLOOR_I32: i64 = -2147483648
+/** The highest value an `i32` destination represents — the `to i32` guard's ceiling. */
+const CAST_CEIL_I32: i64 = 2147483647
+/** The highest value an `i64` destination represents — the `to i64` guard's ceiling. */
+const CAST_CEIL_I64: i64 = 9223372036854775807
+/** The lowest value ANY unsigned destination represents — every unsigned guard's floor. */
+const CAST_FLOOR_UNSIGNED: i64 = 0
+/** The highest value a `u8`/`byte` destination represents — the `to u8` guard's ceiling. */
+const CAST_CEIL_U8: i64 = 255
+/** The highest value a `u16` destination represents — the `to u16` guard's ceiling. */
+const CAST_CEIL_U16: i64 = 65535
+/** The highest value a `u32` destination represents — the `to u32` guard's ceiling. */
+const CAST_CEIL_U32: i64 = 4294967295
+
+/**
+ * The half-open interval a narrowing `to`'s operand must land inside for the conversion to be
+ * value-preserving. Either end may be ABSENT: a bound the source type cannot reach is not a
+ * check, it is a tautology, and emitting it would cost a compare and a branch per cast to
+ * prove something the type system already proved.
+ */
+type CastFitBounds = struct {
+    /** Whether the operand must be compared against `floor` at all. */
+    has_floor: bool
+    /** The lowest value the destination represents, as the LIR's i64 register carrier. */
+    floor: i64
+    /** Whether the operand must be compared against `ceil` at all. */
+    has_ceil: bool
+    /** The highest value the destination represents, as the LIR's i64 register carrier. */
+    ceil: i64
+}
+
+/**
+ * cast_signed_dst_bounds — the fit interval for a SIGNED destination, as the LIR i64 carrier
+ * holds it. `i64` has no ceiling to check from a signed source (the carrier IS an i64) and no
+ * floor either, which is why only the narrower three carry both ends.
+ *
+ * @param dst  the signed destination PrimKind
+ * @return     the destination's own representable interval
+ */
+fn cast_signed_dst_bounds(dst: checker::PrimKind) -> CastFitBounds {
+    if dst == checker::PrimKind::I8 { return CastFitBounds { has_floor = true; floor = CAST_FLOOR_I8; has_ceil = true; ceil = CAST_CEIL_I8 } }
+    if dst == checker::PrimKind::I16 { return CastFitBounds { has_floor = true; floor = CAST_FLOOR_I16; has_ceil = true; ceil = CAST_CEIL_I16 } }
+    if dst == checker::PrimKind::I32 { return CastFitBounds { has_floor = true; floor = CAST_FLOOR_I32; has_ceil = true; ceil = CAST_CEIL_I32 } }
+    CastFitBounds { has_floor = false; floor = 0; has_ceil = true; ceil = CAST_CEIL_I64 }
+}
+
+/**
+ * cast_unsigned_dst_bounds — the fit interval for an UNSIGNED destination. The floor is always
+ * zero (a negative value never fits an unsigned type — the case the C route's `tk_to_u*_s`
+ * helpers reject first). `u64`'s ceiling is `U64_MAX`, which the LIR's i64 register carrier
+ * cannot spell, and it never needs to: a `u64` destination is only ever narrowing from a
+ * SIGNED source (an unsigned source is at most 64 bits wide, hence always a lossless widen),
+ * and every non-negative i64 fits a u64. So `u64` carries the floor alone.
+ *
+ * @param dst  the unsigned destination PrimKind
+ * @return     the destination's own representable interval
+ */
+fn cast_unsigned_dst_bounds(dst: checker::PrimKind) -> CastFitBounds {
+    if dst == checker::PrimKind::U8 { return CastFitBounds { has_floor = true; floor = CAST_FLOOR_UNSIGNED; has_ceil = true; ceil = CAST_CEIL_U8 } }
+    if dst == checker::PrimKind::U16 { return CastFitBounds { has_floor = true; floor = CAST_FLOOR_UNSIGNED; has_ceil = true; ceil = CAST_CEIL_U16 } }
+    if dst == checker::PrimKind::U32 { return CastFitBounds { has_floor = true; floor = CAST_FLOOR_UNSIGNED; has_ceil = true; ceil = CAST_CEIL_U32 } }
+    CastFitBounds { has_floor = true; floor = CAST_FLOOR_UNSIGNED; has_ceil = false; ceil = 0 }
+}
+
+/**
+ * cast_fit_bounds — the interval a `src`-typed operand must land inside to reach `dst` without
+ * losing its value, with the ends the SOURCE cannot leave dropped. An UNSIGNED source never
+ * goes below zero, so its floor check is deleted; that is the whole difference between the two
+ * carriers the C route names `_s` and `_u`.
+ *
+ * @param src  the cast operand's PrimKind
+ * @param dst  the cast target's PrimKind
+ * @return     the interval to guard, with tautological ends already removed
+ */
+fn cast_fit_bounds(src: checker::PrimKind, dst: checker::PrimKind) -> CastFitBounds {
+    let raw = if prim_is_signed_int(dst) { cast_signed_dst_bounds(dst) } else { cast_unsigned_dst_bounds(dst) }
+    if prim_is_signed_int(src) { return raw }
+    CastFitBounds { has_floor = false; floor = 0; has_ceil = raw.has_ceil; ceil = raw.ceil }
+}
+
+/**
+ * lower_cast_bound_guard — ONE end of the fit interval: materialize `bound`, compare the
+ * operand against it with `op`, and trap into `tk_panic_cast` when the comparison fails.
+ *
+ * @param ctx    the lowering context
+ * @param value  the already-lowered operand VReg to range-check
+ * @param op     the comparison that must HOLD (`ICmpGeS` for a floor, `ICmpLeS`/`ICmpLeU` for
+ *               a ceiling — the U-variant when the source is unsigned, so a `u64` above
+ *               `I64_MAX` is not read as a negative number)
+ * @param bound  the interval end, as the LIR's i64 register carrier
+ * @param line   the source line of the cast expression
+ * @param col    the source column of the cast expression
+ * @return       the advanced context, emitting into the block where the bound is proven
+ */
+fn lower_cast_bound_guard(ctx: LowerCtx, value: u32, op: LBinOp, bound: i64, line: u32, col: u32) -> LowerCtx {
+    let b = ctx_alloc(ctx)
+    let with_bound = ctx_append(b.ctx, const_int_inst(b.vreg, bound, line, col))
+    let c = ctx_alloc(with_bound)
+    let with_cmp = ctx_append(c.ctx, bin_inst(c.vreg, op, value, b.vreg, line, col))
+    lower_trap_unless(with_cmp, c.vreg, "tk_panic_cast", line, col)
+}
+
+/**
+ * lower_cast_fit_guard — the compiler-organized guard that makes a NARROWING integer `to` cast
+ * fail loud instead of answering with a different number (owner ruling 2026-07-29: *"Uma rule
+ * para cast (implícito ou explícito), não pode truncar [...] deve ser feito em runtime (e
+ * panicar se overflow)"*). No cast truncates. A `to` whose operand does not fit its destination
+ * PANICS; a `to` whose operand does fit keeps its value exactly.
+ *
+ * WHAT THIS REPAIRS, measured. The guard is not new law — it is `docs/design/cast-width-
+ * hygiene-0.3.1.md` §4.1's PHASE16 "checked, fail-loud, no silent truncation" contract, which
+ * the C route has honoured all along (`codegen.tks`'s `emit_cast` routes a lossy int->int cast
+ * through the runtime's `tk_to_<dst>_<carrier>`, which calls `tk_panic_cast`). This backend had
+ * no equivalent: it emitted a bare `Trunc`, and `Trunc` selects a 32-BIT move on both isels.
+ * Three wrong answers followed, each a native-only divergence from the C route:
+ * `300 to u8` answered 300 (a `u8` holding a value no `u8` represents — the 32-bit move never
+ * reaches the 8-bit width), `2^40 to u64` from an `i64` answered 0 (equal widths still picked
+ * `Trunc`), and `-5 to i32` answered 4294967291 (the 32-bit move zero-extends where the sign
+ * had to survive). All three now panic or keep their value.
+ *
+ * WHY NO CONVERSION INSTRUCTION IS LEFT BEHIND. Once the guard proves the operand lands inside
+ * the destination's own interval, the conversion is the IDENTITY: a value representable in both
+ * types has the SAME 64-bit two's-complement bit pattern under both, so there is nothing for an
+ * extend or a truncate to change. `lower_int_cast` therefore hands the operand's own VReg
+ * straight back, which is also why neither isel needs a new case for this.
+ *
+ * @param ctx   the lowering context, positioned right after the operand is lowered
+ * @param value the already-lowered operand VReg
+ * @param src   the cast operand's PrimKind
+ * @param dst   the cast target's PrimKind
+ * @param line  the source line of the cast expression
+ * @param col   the source column of the cast expression
+ * @return      the advanced context; unchanged when the pair is a lossless widen (the checker's
+ *              `cast_is_lossless_widen` is the single source of truth both routes ask)
+ */
+fn lower_cast_fit_guard(ctx: LowerCtx, value: u32, src: checker::PrimKind, dst: checker::PrimKind, line: u32, col: u32) -> LowerCtx {
+    if checker::cast_is_lossless_widen(src, dst) { return ctx }
+    let bounds = cast_fit_bounds(src, dst)
+    let ceil_op = if prim_is_signed_int(src) { LBinOp::ICmpLeS } else { LBinOp::ICmpLeU }
+    let floored = if bounds.has_floor { lower_cast_bound_guard(ctx, value, LBinOp::ICmpGeS, bounds.floor, line, col) } else { ctx }
+    if !bounds.has_ceil { return floored }
+    lower_cast_bound_guard(floored, value, ceil_op, bounds.ceil, line, col)
+}
+
+/**
+ * lower_int_cast — the whole int->int (and `byte`/enum-ordinal) `to` cast: guard the fit, then
+ * reuse the operand's own VReg as the result. See `lower_cast_fit_guard` for why the guard is
+ * the entire conversion and no extend/truncate instruction survives it.
+ *
+ * @param operand  the already-lowered operand
+ * @param src      the cast operand's PrimKind
+ * @param dst      the cast target's PrimKind
+ * @param line     the source line of the cast expression
+ * @param col      the source column of the cast expression
+ * @return         the operand's VReg, reachable only on the path where it fits `dst`
+ */
+fn lower_int_cast(operand: Lowered, src: checker::PrimKind, dst: checker::PrimKind, line: u32, col: u32) -> Lowered {
+    Lowered { ctx = lower_cast_fit_guard(operand.ctx, operand.vreg, src, dst, line, col); vreg = operand.vreg }
 }
 
 /** prim_width_of — the bit width of an integer/float PrimKind (bool = 1). Local copy of
@@ -1269,8 +1465,11 @@ fn lower_logical_not(ao: Lowered, line: u32, col: u32) -> Lowered {
 }
 
 /**
- * lower_cast — a numeric `to` cast: lower the inner value, then emit the conversion LUn chosen by
- * the src/dst machine classes. Only numeric casts are in the N1 subset; a cast to/from a non-
+ * lower_cast — a numeric `to` cast: lower the inner value, then convert it. An int->int pair (which
+ * includes `byte` and an enum ordinal) routes to `lower_int_cast`, where the conversion is a RUNTIME
+ * FIT GUARD and no truncation — no cast may answer with a different number than it was given. A
+ * float-involved pair emits the conversion LUn `cast_unop_of` chooses. Only numeric casts are in the
+ * N1 subset; a cast to/from a non-
  * primitive honest-stops — EXCEPT a `Variant`-targeted cast, which is never a user `to` (the
  * checker restricts `to` to numeric/char/bool): it is the synthetic widening node the const inliner
  * (`widen_inlined_const`, #630) wraps a variant const's collapsed case-member initializer in when a
@@ -1295,8 +1494,10 @@ fn lower_cast(ctx: LowerCtx, e: checker::TExpr, c: checker::TCast) -> Lowered | 
     let ao = match lower_expr(ctx, c.expr) { Lowered as x => x; error as err => return err }
     let src = match prim_kind_of(c.expr.type, ctx.enums, "cast source") { checker::PrimKind as p => p; error as err => return err }
     let dst = match prim_kind_of(e.type, ctx.enums, "cast target") { checker::PrimKind as p => p; error as err => return err }
+    if !prim_is_float_kind(src) && !prim_is_float_kind(dst) { return lower_int_cast(ao, src, dst, e.line, e.col) }
+    let op = match cast_unop_of(src, dst) { LUnOp as o => o; error as err => return err }
     let r = ctx_alloc(ao.ctx)
-    let inst = un_inst(r.vreg, cast_unop_of(src, dst), ao.vreg, e.line, e.col)
+    let inst = un_inst(r.vreg, op, ao.vreg, e.line, e.col)
     Lowered { ctx = ctx_append(r.ctx, inst); vreg = r.vreg }
 }
 
