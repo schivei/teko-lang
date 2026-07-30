@@ -422,6 +422,7 @@ pub fn inst_regs(inst: MInst) -> InstRegs {
         MCvt as x => ir_def_use(x.dst, one_reg(x.a))
         MLoad as x => ir_def_use(x.dst, one_reg(x.mem.base))
         MStore as x => ir_use(two_regs(x.src, x.mem.base))
+        MFSpill as x => if x.is_load { ir_def(x.reg) } else { ir_use(one_reg(x.reg)) }
         MFrameAddr as x => ir_def(x.dst)
         MAdrp as x => ir_def(x.dst)
         MAddLo as x => ir_def_use(x.dst, one_reg(x.a))
@@ -1594,9 +1595,10 @@ pub fn map_minst_regs(inst: MInst, table: []SubstEntry) -> MInst {
         MFMov as x => MFMov { dbl = x.dbl; dst = subst_find(table, x.dst); src = subst_find(table, x.src) }
         MMov as x => MMov { wide = x.wide; dst = subst_find(table, x.dst); src = subst_find(table, x.src) }
         MExt as x => MExt { op = x.op; dst = subst_find(table, x.dst); a = subst_find(table, x.a) }
-        MCvt as x => MCvt { op = x.op; dst = subst_find(table, x.dst); a = subst_find(table, x.a) }
+        MCvt as x => MCvt { op = x.op; dst = subst_find(table, x.dst); a = subst_find(table, x.a); src_wide = x.src_wide; dst_wide = x.dst_wide }
         MLoad as x => MLoad { size = x.size; sign = x.sign; dst = subst_find(table, x.dst); mem = MMem { base = subst_find(table, x.mem.base); offset = x.mem.offset } }
         MStore as x => MStore { size = x.size; src = subst_find(table, x.src); mem = MMem { base = subst_find(table, x.mem.base); offset = x.mem.offset } }
+        MFSpill as x => MFSpill { reg = subst_find(table, x.reg); slot = x.slot; is_load = x.is_load }
         MFrameAddr as x => MFrameAddr { dst = subst_find(table, x.dst); slot = x.slot }
         MAdrp as x => MAdrp { dst = subst_find(table, x.dst); sym = x.sym; kind = x.kind }
         MAddLo as x => MAddLo { dst = subst_find(table, x.dst); a = subst_find(table, x.a); sym = x.sym; kind = x.kind }
@@ -1669,12 +1671,45 @@ fn emit_gpr_store(dsv: MReg, asv: MReg, slot: u64) -> []MInst {
 }
 
 /**
+ * emit_spill_reload — the reload sequence for one spilled value into scratch
+ * `sv`, by `sv`'s register file: the two-instruction GPR pair
+ * (`emit_gpr_reload`) or the single-instruction FPR `MFSpill` (which needs no
+ * address scratch — see `MFSpill`'s own doc for why the GPR pair cannot be
+ * reused for a float). The arm64 twin of `emit_spill_reload_x86`.
+ *
+ * @param MReg sv  the scratch to reload into (its `reg_class` picks the form)
+ * @param u64 slot  the absolute frame slot
+ * @return []MInst  the reload sequence
+ */
+fn emit_spill_reload(sv: MReg, slot: u64) -> []MInst {
+    if sv.reg_class == MRegClass::FPR { return minst_single(fspill_inst(sv, slot, true)) }
+    emit_gpr_reload(sv, slot)
+}
+
+/**
+ * emit_spill_store — the spill-store sequence for the value already in scratch
+ * `dsv`, by `dsv`'s register file: the two-instruction GPR pair
+ * (`emit_gpr_store`, which needs the distinct address scratch `asv`) or the
+ * single-instruction FPR `MFSpill` (which ignores `asv`).
+ *
+ * @param MReg dsv  the scratch holding the value (its `reg_class` picks the form)
+ * @param MReg asv  a distinct GPR scratch for the GPR path's slot address
+ * @param u64 slot  the absolute frame slot
+ * @return []MInst  the store sequence
+ */
+fn emit_spill_store(dsv: MReg, asv: MReg, slot: u64) -> []MInst {
+    if dsv.reg_class == MRegClass::FPR { return minst_single(fspill_inst(dsv, slot, false)) }
+    emit_gpr_store(dsv, asv, slot)
+}
+
+/**
  * add_use_subst — the substitution table extended for one instruction operand
  * use `u`: a physical pin or an already-mapped id is left as-is; an `InReg`
- * use maps to its color; a `Spilled` GPR use draws the next reload scratch
- * (`nth`), whose reload is appended to `reloads`. Returns the grown table, the
- * grown reloads, and the advanced scratch counter via `UseAcc`. FPR spills are
- * ruled out upstream (`detect_fpr_spill`), so the scratch is always GPR.
+ * use maps to its color; a `Spilled` use draws the next reload scratch
+ * (`nth`) OF ITS OWN REGISTER FILE, whose reload is appended to `reloads`
+ * (0.3.1.0 degrau 29: an FPR spill draws an FPR scratch and reloads with one
+ * `MFSpill`, an integer one keeps the GPR `frame_addr`+`ldr` pair). Returns the
+ * grown table, the grown reloads, and the advanced scratch counter via `UseAcc`.
  *
  * @param AbiDescriptor abi  the register file (for spill scratch)
  * @param ScanResult sr  the allocation
@@ -1689,8 +1724,8 @@ fn add_use_subst(abi: AbiDescriptor, sr: ScanResult, u: MReg, frame_base: u64, a
     let la = assign_lookup(sr, u.id)
     if !la.found { return acc }
     if la.is_spill {
-        let sv = spill_scratch(abi, MRegClass::GPR, acc.nth)
-        let reloads2 = minst_cat(acc.reloads, emit_gpr_reload(sv, frame_base + la.slot))
+        let sv = spill_scratch(abi, u.reg_class, acc.nth)
+        let reloads2 = minst_cat(acc.reloads, emit_spill_reload(sv, frame_base + la.slot))
         let table2 = teko::list::push(acc.table, SubstEntry { vid = u.id; to = sv })
         return UseAcc { table = table2; reloads = reloads2; nth = acc.nth + 1 }
     }
@@ -1724,8 +1759,11 @@ type UseAcc = struct {
  * rewrite_inst — expand one instruction into its final physical sequence: the
  * reloads for its spilled uses, the register-substituted instruction, and the
  * store for a spilled def (§3.4). Non-spilled operands map to their `InReg`
- * physreg; physical pins pass through. Assumes GPR-only spills (guaranteed by
- * `regalloc_func`'s `detect_fpr_spill` pre-check).
+ * physreg; physical pins pass through. A spilled value of EITHER register file
+ * lowers (0.3.1.0 degrau 29): the scratch is drawn from the value's own class and
+ * the sequence shape comes from `emit_spill_reload`/`emit_spill_store`. The GPR
+ * path's second (address) scratch is still a GPR, and it is unused on the FPR
+ * path, which addresses the slot from SP directly.
  *
  * @param AbiDescriptor abi  the register file (for spill scratch)
  * @param ScanResult sr  the allocation
@@ -1750,12 +1788,12 @@ pub fn rewrite_inst(abi: AbiDescriptor, sr: ScanResult, inst: MInst, frame_base:
             let la = assign_lookup(sr, d.id)
             if la.found {
                 if la.is_spill {
-                    let dsv = spill_scratch(abi, MRegClass::GPR, 0 to u32)
+                    let dsv = spill_scratch(abi, d.reg_class, 0 to u32)
                     let asv = spill_scratch(abi, MRegClass::GPR, 1 to u32)
                     if !subst_has(table, d.id) {
                         table = teko::list::push(table, SubstEntry { vid = d.id; to = dsv })
                     }
-                    stores = emit_gpr_store(dsv, asv, frame_base + la.slot)
+                    stores = emit_spill_store(dsv, asv, frame_base + la.slot)
                 } else {
                     if !subst_has(table, d.id) {
                         table = teko::list::push(table, SubstEntry { vid = d.id; to = preg(la.phys, d.reg_class) })
@@ -1785,67 +1823,6 @@ fn count_spills(sr: ScanResult) -> u64 {
         i++
     }
     n
-}
-
-/**
- * reg_is_fpr_spill — whether the virtual register `r` is spilled in `sr` AND
- * lives in the FPR class (the case A3 honest-stops).
- *
- * @param ScanResult sr  the allocation
- * @param MReg r  the register to test
- * @return bool  true iff an FPR spill
- */
-fn reg_is_fpr_spill(sr: ScanResult, r: MReg) -> bool {
-    if r.is_phys { return false }
-    if r.reg_class != MRegClass::FPR { return false }
-    let la = assign_lookup(sr, r.id)
-    la.found && la.is_spill
-}
-
-/**
- * inst_has_fpr_spill — whether any operand of `inst` is an FPR spill.
- *
- * @param ScanResult sr  the allocation
- * @param MInst inst  the instruction to scan
- * @return bool  true iff an FPR spill operand is present
- */
-fn inst_has_fpr_spill(sr: ScanResult, inst: MInst) -> bool {
-    let ir = inst_regs(inst)
-    if ir.has_def {
-        if reg_is_fpr_spill(sr, ir.def_reg) { return true }
-    }
-    mut i: u64 = 0
-    loop {
-        if i >= ir.uses.len { break }
-        if reg_is_fpr_spill(sr, ir.uses[i]) { return true }
-        i++
-    }
-    false
-}
-
-/**
- * detect_fpr_spill — whether allocating `f` under `sr` spills any FPR value.
- * A3 lowers GPR spills only; an FPR spill is a NAMED honest-stop
- * (`regalloc_func` returns an error), deferred to a follow-up.
- *
- * @param ScanResult sr  the allocation
- * @param MFunc f  the function
- * @return bool  true iff any FPR value is spilled
- */
-fn detect_fpr_spill(sr: ScanResult, f: MFunc) -> bool {
-    mut bi: u64 = 0
-    loop {
-        if bi >= f.blocks.len { break }
-        let b = f.blocks[bi]
-        mut ii: u64 = 0
-        loop {
-            if ii >= b.insts.len { break }
-            if inst_has_fpr_spill(sr, b.insts[ii]) { return true }
-            ii++
-        }
-        bi++
-    }
-    false
 }
 
 /**
@@ -1953,12 +1930,16 @@ pub fn all_physical(f: MFunc) -> bool {
  * intervals, scan, rewrite. A real `loop` back-edge now ALLOCATES (§6.2 LANDED,
  * #389 F2): `compute_intervals` widens every interval live at a loop header to
  * reach its latch (`extend_over_loops`), so a loop-carried value survives the
- * whole body across the back-edge. Still returns a NAMED honest-stop error on an
- * FPR-value spill (A3 lowers GPR spills only). The RPO order is computed once
+ * whole body across the back-edge. The RPO order is computed once
  * and threaded so the numbering and the natural-loop detection share one
  * topological linearization (#443); the entry-reachable set is threaded beside
  * it so a dead-block edge (a `match`'s unreachable fallback, A4-6 #385) is never
  * mistaken for a loop.
+ *
+ * The FPR-spill honest-stop that used to sit between the scan and the rewrite is
+ * GONE (0.3.1.0 degrau 29): a spilled float now lowers to one `MFSpill`, so both
+ * register files spill and there is nothing left for a pre-check to reject. That
+ * closes the arm64 half of the same gap the x86 twin closed with `MFSpillX86`.
  *
  * @param AbiDescriptor abi  the register file
  * @param MFunc f  the selected function (virtual MRegs + ABI pins)
@@ -1972,9 +1953,6 @@ pub fn regalloc_func(abi: AbiDescriptor, f: MFunc) -> MFunc | error {
         error as e => return e
     }
     let sr = linear_scan(abi, ivals)
-    if detect_fpr_spill(sr, f) {
-        return error { message = "regalloc: FPR-value spill not yet supported (A3 lowers GPR spills only; own-backend FPR-spill deferral)" }
-    }
     rewrite_func(abi, f, sr)
 }
 

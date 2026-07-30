@@ -57,6 +57,21 @@ fn iat_const_float(f0: lir::LFunc, bits: u64) -> lir::FreshVReg {
 }
 
 /**
+ * iat_f32_const — append an `f32`-DECLARED float literal to `f0`, its `bits`
+ * still the f64 pattern (`LConstFloat`'s own contract) and its `wide` flag
+ * false. The sibling of `iat_const_float` for the road an `f32` literal takes,
+ * which is a different one: it owes a narrowing convert.
+ *
+ * @param lir::LFunc f0  the function to extend
+ * @param u64 bits  the literal's f64 IEEE bit pattern
+ * @return lir::FreshVReg  the advanced function + the literal's VReg
+ */
+fn iat_f32_const(f0: lir::LFunc, bits: u64) -> lir::FreshVReg {
+    let r = lir::alloc_vreg(f0)
+    lir::FreshVReg { func = lir::append_inst(r.func, 0, lir::const_float_inst(r.vreg, bits, false, 0, 0)); vreg = r.vreg }
+}
+
+/**
  * iat_ret — append `ret value` to `f0`.
  *
  * @param lir::LFunc f0  the function to extend
@@ -226,9 +241,90 @@ fn iat_float_kitchen_sink_covers_every_float_op() {
     teko::assert::str_contains(text, "fdiv.d ")
     teko::assert::str_contains(text, "fcmp.d ")
     teko::assert::str_contains(text, "fneg.d ")
-    teko::assert::str_contains(text, "scvtf ")
-    teko::assert::str_contains(text, "fcvtzs ")
-    teko::assert::str_contains(text, "fcvt ")
+    teko::assert::str_contains(text, "scvtf.dx ")
+    teko::assert::str_contains(text, "fcvtzs.xd ")
+    teko::assert::str_contains(text, "fcvt.sd ")
+}
+
+/**
+ * iat_f32_const_narrows_and_records_single — the `f32` LITERAL road, which is
+ * not the `f64` one: `LConstFloat.bits` is always the f64 pattern, so an
+ * `f32`-declared literal must be STAGED into a double and then narrowed by
+ * `FCVT Sd, Dn`, and the value must be recorded SINGLE so every later
+ * width-sensitive decision reads `.s`. Asserting the narrowing convert is
+ * present AND that the following float op selected the `.s` form is what
+ * distinguishes a real narrowing from a bit pattern left at double width.
+ */
+#test
+fn iat_f32_const_narrows_and_records_single() {
+    mut f = iat_two_i64_params("teko__demo__f32_literal")
+    let a = iat_f32_const(f, 4612811918334230528 to u64)
+    f = a.func
+    let sum = iat_bin(f, lir::LBinOp::FAdd, a.vreg, a.vreg)
+    f = iat_ret(sum.func, sum.vreg)
+    let mf = match select_lfunc(f) { MFunc as x => x; error => return }
+    let text = minst_print(add_mfunc(empty_mmodule(), mf))
+    teko::assert::str_contains(text, "fcvt.sd ")
+    teko::assert::str_contains(text, "fadd.s ")
+}
+
+/**
+ * iat_f32_ftof_widens — the reverse direction: an `FToF` whose OPERAND is a
+ * single widens, so the selected convert must be `fcvt.ds` (destination double,
+ * source single). A direction read from the wrong end is the defect this pins.
+ */
+#test
+fn iat_f32_ftof_widens() {
+    mut f = iat_two_i64_params("teko__demo__f32_widen")
+    let a = iat_f32_const(f, 4612811918334230528 to u64)
+    f = a.func
+    let wide = iat_un(f, lir::LUnOp::FToF, a.vreg)
+    f = iat_ret(wide.func, wide.vreg)
+    let mf = match select_lfunc(f) { MFunc as x => x; error => return }
+    let text = minst_print(add_mfunc(empty_mmodule(), mf))
+    teko::assert::str_contains(text, "fcvt.ds ")
+}
+
+/**
+ * iat_f32_ftoi_reads_single — an `FToI` over a SINGLE operand must read the
+ * source at single width (`fcvtzs.ds`: destination the wide integer, source the
+ * single float). Reading it as a double decodes 32 live bits as a double's low
+ * half and truncates to nonsense — a silently wrong VALUE, not a crash.
+ */
+#test
+fn iat_f32_ftoi_reads_single() {
+    mut f = iat_two_i64_params("teko__demo__f32_to_int")
+    let a = iat_f32_const(f, 4612811918334230528 to u64)
+    f = a.func
+    let n = iat_un(f, lir::LUnOp::FToI, a.vreg)
+    f = iat_ret(n.func, n.vreg)
+    let mf = match select_lfunc(f) { MFunc as x => x; error => return }
+    let text = minst_print(add_mfunc(empty_mmodule(), mf))
+    teko::assert::str_contains(text, "fcvtzs.xs ")
+}
+
+/**
+ * iat_float_lt_le_take_the_ordered_conditions — an `FCmpLt`/`FCmpLe` must land
+ * on the NaN-correct `lo`/`ls` conditions, never the signed-integer `lt`/`le`
+ * (which read TRUE on an `FCMP`'s unordered result, making `nan < x` true).
+ */
+#test
+fn iat_float_lt_le_take_the_ordered_conditions() {
+    mut f = iat_two_i64_params("teko__demo__float_order")
+    let a = iat_const_float(f, 4607182418800017408 to u64)
+    f = a.func
+    let b = iat_const_float(f, 4611686018427387904 to u64)
+    f = b.func
+    let lt = iat_bin(f, lir::LBinOp::FCmpLt, a.vreg, b.vreg)
+    f = lt.func
+    let le = iat_bin(f, lir::LBinOp::FCmpLe, a.vreg, b.vreg)
+    f = iat_ret(le.func, le.vreg)
+    let mf = match select_lfunc(f) { MFunc as x => x; error => return }
+    let text = minst_print(add_mfunc(empty_mmodule(), mf))
+    teko::assert::str_contains(text, ", lo")
+    teko::assert::str_contains(text, ", ls")
+    teko::assert::is_true(!teko::str::contains(text, ", lt"))
+    teko::assert::is_true(!teko::str::contains(text, ", le"))
 }
 
 #test

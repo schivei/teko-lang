@@ -502,13 +502,21 @@ fn select_const_int(ctx0: SelCtx, inst: lir::LInst, c: lir::LConstInt) -> SelCtx
 }
 
 /**
- * select_const_float — the `LConstFloat` selection: materialize its IEEE
- * bit pattern into a scratch GPR via `materialize_int`, then `FMOV` it
- * across the GPR/FPR boundary into the result (§3.1 of the isel plan).
- * Always the f64/D form, the same widest-default reasoning as
- * `select_const_int`. `c.bits` is decoded through `decode_signed64` FIRST
- * (not widened directly) so the GPR staging value is the exact signed
- * two's-complement i64 reading of the IEEE bit pattern.
+ * select_const_float — the `LConstFloat` selection: materialize its IEEE bit
+ * pattern into a scratch GPR via `materialize_int`, then `FMOV` it across the
+ * GPR/FPR boundary into the result (§3.1 of the isel plan). `c.bits` is decoded
+ * through `decode_signed64` FIRST (not widened directly) so the GPR staging
+ * value is the exact signed two's-complement i64 reading of the IEEE bit
+ * pattern.
+ *
+ * `LConstFloat.bits` is ALWAYS the f64 pattern, whatever `c.wide` says, so an
+ * `f32`-declared literal needs one more step: the staged f64 is NARROWED by
+ * `FCVT Sd, Dn` into the result, the same correctly-rounded conversion a C
+ * compiler performs on `float f = <double literal>;`. Skipping it is the bug the
+ * x86 twin already measured and this side still had — the value stayed an f64
+ * pattern in a register that everything downstream then read at single width,
+ * and the vinfo recorded it WIDE, so `FToF`'s direction, a compare's scalar
+ * width and a stack argument's transfer size all went wrong from one place.
  *
  * @param SelCtx ctx0  the context to extend
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
@@ -516,10 +524,16 @@ fn select_const_int(ctx0: SelCtx, inst: lir::LInst, c: lir::LConstInt) -> SelCtx
  * @return SelCtx  the advanced context
  */
 fn select_const_float(ctx0: SelCtx, inst: lir::LInst, c: lir::LConstFloat) -> SelCtx {
-    let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::FPR, true)
+    let dst = vreg(inst.result, MRegClass::FPR)
+    let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::FPR, c.wide)
     let scratch = selctx_scratch(ctx1, MRegClass::GPR)
     let materialized = materialize_int(scratch.ctx, scratch.reg, decode_signed64(c.bits), true)
-    selctx_emit(materialized, fmov_inst(true, vreg(inst.result, MRegClass::FPR), scratch.reg))
+    if c.wide {
+        return selctx_emit(materialized, fmov_inst(true, dst, scratch.reg))
+    }
+    let staged = selctx_scratch(materialized, MRegClass::FPR)
+    let ctx2 = selctx_emit(staged.ctx, fmov_inst(true, staged.reg, scratch.reg))
+    selctx_emit(ctx2, cvt_inst(MCvtOp::Fcvt, dst, staged.reg, true, false))
 }
 
 /**
@@ -604,6 +618,41 @@ fn select_icmp(ctx0: SelCtx, inst: lir::LInst, cond: MCond, a: u32, bb: u32, wid
 }
 
 /**
+ * float_lt_cond — the condition an ORDERED float `<` tests after an `FCMP`:
+ * `LO` (the AArch64 `CC` encoding, "C clear"), NOT the signed-integer `LT`.
+ *
+ * `FCMP` writes a four-way NZCV result, and `C` is clear in EXACTLY ONE of the
+ * four cases: less-than gives `N=1 Z=0 C=0 V=0`, equal gives `C=1`,
+ * greater-than gives `C=1`, and UNORDERED (either operand NaN) gives
+ * `N=0 Z=0 C=1 V=1`. So `C==0` is precisely "ordered and less than", which is
+ * what the source `<` means. The signed `LT` (`N!=V`) reads TRUE on the
+ * unordered case, which would make `nan < x` true — the same NaN hole the x86
+ * twin closes by swapping the operands onto the CF-based `HI`
+ * (`select_fcmp_value_x86`). Cross-checked against `clang
+ * --target=aarch64-linux-gnu`, which picks the equivalent `MI` (`N==1`, set in
+ * that same single case) for a C `<` on doubles.
+ *
+ * @return MCond  the condition an ordered float `<` tests
+ */
+fn float_lt_cond() -> MCond {
+    MCond::LO
+}
+
+/**
+ * float_le_cond — the condition an ORDERED float `<=` tests after an `FCMP`:
+ * `LS` (`C==0 || Z==1`), NOT the signed-integer `LE`. True for less-than
+ * (`C=0`) and for equal (`Z=1`), false for greater-than (`C=1, Z=0`) and false
+ * for UNORDERED (`C=1, Z=0`); the signed `LE` (`Z==1 || N!=V`) would again read
+ * TRUE on unordered. This is the condition `clang --target=aarch64-linux-gnu`
+ * emits for a C `<=` on doubles.
+ *
+ * @return MCond  the condition an ordered float `<=` tests
+ */
+fn float_le_cond() -> MCond {
+    MCond::LS
+}
+
+/**
  * select_fcmp — a float compare `LBinOp` used as a plain value: `MFCmp`
  * then `MCSet`, mirroring `select_icmp`.
  *
@@ -670,8 +719,8 @@ fn select_bin(ctx0: SelCtx, f: lir::LFunc, inst: lir::LInst, b: lir::LBin) -> Se
         lir::LBinOp::FDiv => select_falu(ctx0, inst, MFAluOp::FDiv, b.a, b.b, a_info.wide)
         lir::LBinOp::FCmpEq => select_fcmp(ctx0, inst, MCond::EQ, b.a, b.b, a_info.wide)
         lir::LBinOp::FCmpNe => select_fcmp(ctx0, inst, MCond::NE, b.a, b.b, a_info.wide)
-        lir::LBinOp::FCmpLt => select_fcmp(ctx0, inst, MCond::LT, b.a, b.b, a_info.wide)
-        lir::LBinOp::FCmpLe => select_fcmp(ctx0, inst, MCond::LE, b.a, b.b, a_info.wide)
+        lir::LBinOp::FCmpLt => select_fcmp(ctx0, inst, float_lt_cond(), b.a, b.b, a_info.wide)
+        lir::LBinOp::FCmpLe => select_fcmp(ctx0, inst, float_le_cond(), b.a, b.b, a_info.wide)
         lir::LBinOp::FCmpGt => select_fcmp(ctx0, inst, MCond::GT, b.a, b.b, a_info.wide)
         lir::LBinOp::FCmpGe => select_fcmp(ctx0, inst, MCond::GE, b.a, b.b, a_info.wide)
     }
@@ -749,7 +798,14 @@ fn select_identity_mov(ctx0: SelCtx, inst: lir::LInst, a: u32, wide: bool) -> Se
 /**
  * select_itof — the `IToF` selection: one `SCVTF` (signed source — `LUnOp`
  * declares no unsigned `IToF` variant, so signed is the total, documented
- * default).
+ * default) reading the WIDE `X` integer form and producing the WIDE `D` float.
+ *
+ * Both widths are exact rather than defaults, and they are the x86 twin's
+ * (`select_itof_x86`, whose `CVTSI2SD` also pins `REX.W` + double): the integer
+ * carrier of every LIR value is `i64`, and an `int to f32` cast is decomposed by
+ * the lowering into this `IToF` followed by an `FToF` narrowing
+ * (`lower.tks`'s `int_to_narrow_float_cast`), so `IToF` alone never has to
+ * produce a single.
  *
  * @param SelCtx ctx0  the context to extend
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
@@ -759,36 +815,50 @@ fn select_identity_mov(ctx0: SelCtx, inst: lir::LInst, a: u32, wide: bool) -> Se
 fn select_itof(ctx0: SelCtx, inst: lir::LInst, a: u32) -> SelCtx {
     let dst = vreg(inst.result, MRegClass::FPR)
     let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::FPR, true)
-    selctx_emit(ctx1, cvt_inst(MCvtOp::Scvtf, dst, vreg(a, MRegClass::GPR)))
+    selctx_emit(ctx1, cvt_inst(MCvtOp::Scvtf, dst, vreg(a, MRegClass::GPR), true, true))
 }
 
 /**
  * select_ftoi — the `FToI` selection: one `FCVTZS` (signed destination,
- * mirroring `select_itof`'s default).
+ * mirroring `select_itof`'s default) into the wide `X` integer form, reading the
+ * source at the OPERAND's own recorded float width.
+ *
+ * The source width is the load-bearing half: reading an `f32` value with the `D`
+ * template decodes its 32 live bits as the low half of a double and truncates to
+ * nonsense. Its x86 twin makes the same choice by picking between
+ * `CVTTSD2SI`/`CVTTSS2SI` from the same recorded width.
  *
  * @param SelCtx ctx0  the context to extend
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
  * @param u32 a  the FPR operand VReg
+ * @param bool a_wide  the operand's own recorded float width (true f64, false f32)
  * @return SelCtx  the advanced context
  */
-fn select_ftoi(ctx0: SelCtx, inst: lir::LInst, a: u32) -> SelCtx {
+fn select_ftoi(ctx0: SelCtx, inst: lir::LInst, a: u32, a_wide: bool) -> SelCtx {
     let dst = vreg(inst.result, MRegClass::GPR)
     let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::GPR, true)
-    selctx_emit(ctx1, cvt_inst(MCvtOp::Fcvtzs, dst, vreg(a, MRegClass::FPR)))
+    selctx_emit(ctx1, cvt_inst(MCvtOp::Fcvtzs, dst, vreg(a, MRegClass::FPR), a_wide, true))
 }
 
 /**
- * select_ftof — the `FToF` selection: one `FCVT`.
+ * select_ftof — the `FToF` selection: one `FCVT`, its DIRECTION taken from the
+ * operand's own recorded width (`a_wide` narrows f64->f32, `!a_wide` widens
+ * f32->f64). Sound because the lowering never emits an identity `FToF`
+ * (`is_same_width_float_cast` returns the operand unchanged instead), so the two
+ * widths always differ and "not the operand's width" names exactly one target —
+ * the same argument `select_ftof_x86` runs on its own two mnemonics.
  *
  * @param SelCtx ctx0  the context to extend
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
  * @param u32 a  the FPR operand VReg
+ * @param bool a_wide  the operand's own recorded width (true f64, false f32)
  * @return SelCtx  the advanced context
  */
-fn select_ftof(ctx0: SelCtx, inst: lir::LInst, a: u32) -> SelCtx {
+fn select_ftof(ctx0: SelCtx, inst: lir::LInst, a: u32, a_wide: bool) -> SelCtx {
+    let dst_wide = !a_wide
     let dst = vreg(inst.result, MRegClass::FPR)
-    let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::FPR, true)
-    selctx_emit(ctx1, cvt_inst(MCvtOp::Fcvt, dst, vreg(a, MRegClass::FPR)))
+    let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::FPR, dst_wide)
+    selctx_emit(ctx1, cvt_inst(MCvtOp::Fcvt, dst, vreg(a, MRegClass::FPR), a_wide, dst_wide))
 }
 
 /**
@@ -810,8 +880,8 @@ fn select_un(ctx0: SelCtx, inst: lir::LInst, u: lir::LUn) -> SelCtx {
         lir::LUnOp::ZExt => select_identity_mov(ctx0, inst, u.a, a_info.wide)
         lir::LUnOp::SExt => select_identity_mov(ctx0, inst, u.a, a_info.wide)
         lir::LUnOp::IToF => select_itof(ctx0, inst, u.a)
-        lir::LUnOp::FToI => select_ftoi(ctx0, inst, u.a)
-        lir::LUnOp::FToF => select_ftof(ctx0, inst, u.a)
+        lir::LUnOp::FToI => select_ftoi(ctx0, inst, u.a, a_info.wide)
+        lir::LUnOp::FToF => select_ftof(ctx0, inst, u.a, a_info.wide)
     }
 }
 
@@ -1024,8 +1094,8 @@ fn cmp_kind_of(op: lir::LBinOp) -> CmpKind {
         lir::LBinOp::ICmpGeU => CmpKind { is_cmp = true; is_float = false; cond = MCond::HS }
         lir::LBinOp::FCmpEq => CmpKind { is_cmp = true; is_float = true; cond = MCond::EQ }
         lir::LBinOp::FCmpNe => CmpKind { is_cmp = true; is_float = true; cond = MCond::NE }
-        lir::LBinOp::FCmpLt => CmpKind { is_cmp = true; is_float = true; cond = MCond::LT }
-        lir::LBinOp::FCmpLe => CmpKind { is_cmp = true; is_float = true; cond = MCond::LE }
+        lir::LBinOp::FCmpLt => CmpKind { is_cmp = true; is_float = true; cond = float_lt_cond() }
+        lir::LBinOp::FCmpLe => CmpKind { is_cmp = true; is_float = true; cond = float_le_cond() }
         lir::LBinOp::FCmpGt => CmpKind { is_cmp = true; is_float = true; cond = MCond::GT }
         lir::LBinOp::FCmpGe => CmpKind { is_cmp = true; is_float = true; cond = MCond::GE }
         _ => CmpKind { is_cmp = false; is_float = false; cond = MCond::EQ }
