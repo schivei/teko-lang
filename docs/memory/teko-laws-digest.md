@@ -733,3 +733,52 @@ função que hoje é sintetizada, em vez de acrescentar um conceito.
 (`src/build/regr_group.tks` dobra snippets num despachante; `project.tks` chega a descartar o
 `LFunc` do main virtual). A regra "só um `main`, e só no `main.tks`" tem de valer sem quebrar os
 mains sintetizados dos testes. É ali que o defeito vai aparecer.
+
+### O sítio exato da colisão, medido — e é um descarte, não um conflito
+
+Dono, 2026-07-30: *"o compilador precisa entender que se trata da main do próprio programa ao
+encontrar um `main()` em um teste e fazer o mangle"*.
+
+Medido: **o mecanismo de modos já existe.** `src/codegen/codegen.tks:11495` —
+
+> prototypes and function bodies are emitted IDENTICALLY across modes; only the trailing `main()`
+> differs: Program = the virtual-main (loose statements), TestPlain/TestCov = the native test gate.
+
+Logo **não há colisão hoje**: em modo de teste o main virtual não é renomeado, ele **desaparece**, e o
+portão de teste ocupa o símbolo. É por isso que `teko test .` funciona — e é exatamente por isso que a
+main do programa **não é assertável**.
+
+A instrução do dono converte um **DESCARTE** num **RENAME**, num sítio só: o switch de modo que
+escolhe o `main()` final. O `strip_virtual_main` (`src/build/project.tks:2243`) NÃO é esse sítio — ele
+tem um único chamador e é o caminho de biblioteca estática. E o harness de regressão também não é: ele
+trabalha ao nível do FONTE, `regr_group_main_text` **gera um `main.tks`** por grupo dobrado.
+
+**A invariante que cobre os dois casos sem caso especial:**
+
+1. O símbolo bare `main` pertence a **quem é a entrada do artefacto que se está a construir** — modo
+   Program: o programa; modo Teste: o portão de teste.
+2. A entrada do programa é **sempre também** emitida sob `<project>__main`, em todo modo, logo é
+   chamável e assertável.
+
+O híbrido cai de graça nessa invariante: um `fn main() -> i32` escrito pelo utilizador **já** é
+manglado para `<project>__main` pelo mangler ordinário, logo em modo de teste já é emitido e chamável.
+O único que precisa de tratamento novo é o main **virtual** (instruções soltas).
+
+### Dois factos do espécime real que mudam o desenho
+
+O `main.tks` do próprio compilador é o único espécime grande, e vive na **raiz do projeto**, ao lado de
+`src/` (com `source = "src"`), não dentro. Ele documenta a própria forma:
+
+> SHAPE (§2.20 — entry point). A LINEAR virtual main: top-level statements + local var/const only
+> (no fn/type declarations — those live in modules). Output contract: natural end → exit 0;
+> `teko::exit(n)` → exit n; panic → stderr + exit ≠0. **NO value return.**
+
+1. **`fn main() -> i32` é contrato NOVO, não renomeação.** Hoje o código de saída sai por
+   `teko::exit(n)` DENTRO do corpo, e o main virtual explicitamente não devolve valor. As duas formas
+   vão coexistir — o que torna "um `fn main` sem seta é erro honesto" ainda mais necessário: senão
+   haveria um main que nem devolve nem tem contrato de saída.
+2. **O caso motivador do `args()` está na PRIMEIRA linha do compilador**: `let args = teko::env::args()`.
+
+E há uma disciplina a respeitar: o ficheiro declara-se par semântico do `main.c`
+(*"main.tks and main.c must therefore stay SEMANTICALLY EQUIVALENT"*), logo mexer na convenção de
+entrada toca a regra do par.
