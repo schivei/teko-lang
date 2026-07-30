@@ -14,6 +14,103 @@ hipótese, está dito.
   (desde hoje) `nightly.yml` só correm na org.
 
 
+
+## 0a. REINÍCIO DO CONTENTOR — 2026-07-30 ~06:50 UTC, e o que se salvou
+
+**Os CINCO agentes morreram com o contentor, e todos os worktrees (`/home/user/wt-*`) desapareceram.**
+A lei de *"escreveu? comita e empurra JÁ"* pagou-se: **quatro das cinco branches tinham trabalho
+empurrado e completo**. A quinta — o `.exe` — **não tinha branch nenhuma**, logo esse trabalho está
+perdido por inteiro. Foi a mais recente (despachada ~05:43), e o brief está pronto em §3d.
+
+**Drenei as quatro num só ciclo** (`9de67a6` → `ffe7580`, **27 ficheiros, +1700/−149**):
+`gemeo-macos`, `kind-desconhecido-panica`, `degrau-27`, `leitura-fora-de-fronteira`.
+
+**NENHUMA TRAZIA RELATÓRIO**, portanto o ritual não foi confirmado por elas nem por mim: verifiquei
+estrutura e deixei o CI ser o árbitro. Isso está dito aqui de propósito — se algo estourar, é este o
+sítio onde a razão está escrita.
+
+### O QUE OS COMMITS DELAS REVELARAM, e duas coisas corrigem-me
+
+**1. O gémeo de macOS NÃO era um gémeo divergido, e o erro era meu.** Eu escrevi que
+`pt_target_name_and_objfmt_are_one_source` era *"inteiramente independente do host"* e que, portanto,
+falhar num só host **tinha** de ser divergência de geração. **Falso.** A assertiva que caía era
+
+```teko
+teko::assert::is_true(target_links_with_cc(NativeTarget::X8664Linux))
+```
+
+e `target_links_with_cc` → `links_with_cc` → **`cross_note`**, que compara com
+`host_default_target_guess()`. Em arm64-macos o anfitrião é `Arm64Macho`, logo `x86_64-linux` **é**
+cruzado, uma build cruzada para no objecto, e a resposta honesta é **`false`**.
+
+**Eu li os SÍTIOS DE CHAMADA como literais e não segui a FUNÇÃO CHAMADA até ao estado do host.** É a
+mesma classe do meu erro do `sed -E`: afirmei uma causa com confiança sem seguir a cadeia até ao fim.
+
+**E o raio estava a crescer:** a assertiva só sobrevivia porque a adivinha antiga, só de SO, respondia
+`X8664Linux` para **qualquer** anfitrião Linux. Desde que `host_target_for_os` aprendeu a arquitectura,
+**`arm64-linux` junta-se a `arm64-macos` a refutá-la** — a mesma assertiva ia começar a cair também na
+perna `linux-arm64-glibc`. O conserto chegou antes de o segundo host a apanhar.
+
+**2. Um TERCEIRO valor errado calado da mesma classe, achado pela varredura de irmãos do degrau 27.**
+Todo renderer `tk_*` declara parâmetro `double`, mas um buraco `f32` guarda **precisão simples**, e
+**nada o alargava**: a rota C recebia o `(double)` implícito do `cc`, o backend próprio **não recebia
+nada**. Medido no mesmo programa:
+
+| forma | rota C | backend próprio |
+| --- | --- | --- |
+| `$"{f:F2}"` com `f: f32 = 2.5` | `2.50` | **`0.10`** |
+| `$"{f:G}"` | `2.5` | **`4.65274e-310`** |
+
+**Verde desde o degrau 19.** E o par de constantes da fixture é escolhido: `2.5` é exactamente
+representável nas duas larguras, `0.1` não — logo uma rota que acerta numa e erra na outra está a ler o
+registo na largura errada. Veio junto `fix(lir,backend): o LCall passa a registar a classe do resultado
+— o buraco que faltava do B1-fp`.
+
+### O QUE APRENDI A DRENAR, e custou-me dois danos no mesmo passo
+
+Ao resolver os conflitos aditivos do corpus, fiz **duas coisas erradas seguidas**:
+
+1. **Um script meu truncou `examples/regressions/own_native/main.tks` a ZERO bytes** — abriu o ficheiro
+   em `'w'` e só **depois** falhou na escrita (tinha invertido a ordem de `re.subn`, que devolve
+   `(texto, contagem)`). O `git merge --abort` restaurou tudo. **Regra: nunca abrir em `'w'` antes de o
+   novo conteúdo estar calculado e validado.**
+2. **A minha resolução por regex ficou desequilibrada.** Refiz com `git merge-file --union`, que é a
+   resolução correcta para um conflito puramente aditivo, e é do git em vez de minha.
+
+**E a verificação que eu usava estava ERRADA para estes ficheiros.** O handoff mandava contar
+`{`/`}` — mas `main.tks` tem **231 chaves em 117 linhas**, porque conta as da interpolação `$"{...}"`.
+O contador é ruído aqui, e eu quase abortei um dreno são por causa dele.
+
+**As verificações que DE FACTO detectam uma união má, e são estas que ficam:**
+
+| conferência | porquê |
+| --- | --- |
+| `fn`/`const` **duplicados** no corpus | é o sintoma directo de uma união que duplicou um bloco |
+| chamadas `if f_*()` duplicadas no `main` | idem, do outro lado |
+| **códigos de saída** duplicados | duas fixtures a reclamar o mesmo número |
+| linhas `Scenario:` duplicadas, **chave = a linha INTEIRA** | um detector por primeiro token já deu falso positivo aqui e quase apagou metade da cobertura de cast |
+| `fn f_*` definidas e **não chamadas** pelo `main` | excepção conhecida e única: `f_fat_field_len` |
+
+Todas passaram. **Faixas de saída, medidas e sem colisão:** 213–215 (degrau 28), 220–225 (degrau 27),
+230–234 (leitura fora de fronteira).
+
+
+### O DREGRAU 27 FECHOU, E A ESCADA AVANÇOU — medido no CI, SHA `ffe7580`
+
+A paragem do `ftoa` **desapareceu**. O compilador nativo atravessa agora, sem parar:
+
+```
+lexer 143/143 ✓   parser 143/143 ✓   checker 6449/6449 ✓   monomorph 0/0 ✓   consteval 571/571 ✓
+teko: .: native backend N1: `null` match pattern not yet lowered (N2) [in `teko::codegen::emit_variant_wrap`]
+```
+
+**Isto prova duas coisas ao mesmo tempo:** o degrau 27 está fechado, e **o meu dreno de quatro branches
+sem relatório está são pelo menos até ao fim do front-end** — o checker passou de 6406 para 6449 itens
+(as fixtures novas) e todas as fases passam.
+
+**Degrau 30 é agora o ÚNICO obstáculo entre a lane e uma gen2 nativa, que nunca existiu.** É a mesma
+família que os degraus 25 e o arco `null-adopt` já tocaram, portanto há molde.
+
 ## 0. MODO AUTÓNOMO — 2026-07-30, o dono foi dormir
 
 *"Vou dormir, te deixo no modo autônomo, tem bastante trabalho por aí."*
@@ -200,7 +297,9 @@ fechar, o ponto de fixo nativo não fecha e as duas pernas nativas ficam vermelh
 | 24 | `f64_bits`/`f64_from_bits` — alias do próprio VReg | **fechado**, confirmado no CI |
 | 25 | união-nula em colocações sem tipo declarado | **fechado**, confirmado no CI |
 | 26 | `append_fo` sem lowering, em `teko::codegen::cb` | **fechado e DRENADO** — confirmado: já não aparece |
-| **27** | **builtin `ftoa` sem lowering**, em `teko::codegen::cb_f64_literal` | **ABERTO — é a paragem viva do self-host**, idêntica em `artifact/linux-x86_64-glibc` e `artifact/linux-arm64-musl` |
+| **30** | **padrão `null` num `match` sem lowering**, em `teko::codegen::emit_variant_wrap` | **ABERTO — é a paragem VIVA do self-host.** Agente vivo. É o **único obstáculo** entre nós e uma gen2 nativa |
+| **29** | **`A4-fp`: codificação de float/FPR em arm64**, em `own_arith_exit` | **ABERTO** — o gémeo arm64 do arco `b1-fp-x86`. Na fila |
+| 27 | builtin `ftoa` sem lowering, em `teko::codegen::cb_f64_literal` | **FECHADO e DRENADO** (`ffe7580`) — aguarda confirmação de CI. Trouxe consigo o `f32` calado dos renderers |
 | **29** | **`A4-fp`: codificação de operação de float / FPR em arm64**, em `own_arith_exit` | **ABERTO — descoberto ao drenar o 28.** É o **gémeo arm64** do arco `b1-fp-x86`, que fechou os floats só para x86-64 |
 | 28 | atribuição a elemento de slice (`s[i] = v`) sem lowering | **FECHADO e DRENADO** (`36b2ab45`) — confirmado no CI: já não aparece. Foi regressão do meu dreno |
 
