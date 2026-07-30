@@ -1360,6 +1360,34 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # OS PARSERS DE OBJECTO, TAMBÉM AQUI — e esta perna estava MEDIDA COMO DESCONHECIDA, não como
+      # boa. Quando o `llvm`+`lld` entraram nas pernas Linux ficou escrito que macOS e Windows
+      # paravam antes de chegar às filas de objecto, logo não se sabia se tinham os parsers. Agora
+      # sabe-se, e a medição é do CI (run 30559176876, `test / macos-arm64`):
+      #
+      #   check_coff: FAIL — the cross-format COFF parser 'llvm-readobj' is absent on Darwin-arm64
+      #
+      # É a MESMA causa das pernas Linux, com outro gestor de pacotes. O `objdump` que a Apple
+      # instala é LLVM por baixo, mas não expõe `llvm-readobj`, que é o que lê COFF em qualquer
+      # hospedeiro. `scripts/check_coff.sh` e `scripts/check_elf.sh` falham CLOSED sem eles — é a
+      # regra da casa, e não se contorna com OBJ_CHECK_ALLOW_SKIP.
+      #
+      # `--quiet` porque uma fórmula já instalada não é erro; o passo seguinte é que decide.
+      - name: Install the object-format parsers the cross gates read with
+        run: |
+          set -eu
+          brew install --quiet llvm lld
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+
+      # FALHA ALTO E CEDO, em vez de deixar a fila de objecto morrer 800 segundos mais tarde: o
+      # `own_native` compila 31 projectos antes de chegar à fila cross, e um parser em falta só
+      # aparecia lá no fim. Esta linha custa um segundo e nomeia o que falta.
+      - name: Verify the parsers are on PATH (fail loud before the corpus runs)
+        run: |
+          set -eu
+          llvm-readobj --version
+          llvm-objdump --version
+
       - name: Report the host toolchain (diagnostic — never fails the job)
         shell: bash
         run: |
