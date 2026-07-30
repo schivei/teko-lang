@@ -695,3 +695,159 @@ sua ausência é um defeito de dez minutos a diagnosticar:
 ```teko
         else if debug_arg_has_prefix(args[i]) { i = i + 1 }
 ```
+
+---
+
+# 5. Como se chega ao SO
+
+**Um depurador tem de parar um processo, ler-lhe os registos e ler-lhe a memória.** Nenhuma dessas três
+coisas existe na nossa superfície hoje. Esta secção mostra a forma que as alcança **sem uma linha de C
+nossa e sem a rota C**, e diz o que está medido e o que é o crumb `M2.0`.
+
+## 5.1 O estado medido, hoje
+
+| medição | resultado |
+| --- | --- |
+| `grep syscall src/ --include=*.tks` | **2 ocorrências, e ambas são COMENTÁRIOS** — `src/runtime/teko_rt.tks:635` e `:643`, os dois a descrever *"the SAME deferred `extern`/syscall bottom"*. **Não existe primitiva de chamada de sistema crua na nossa superfície**, e nem a palavra existe em código |
+| a única forma de alcançar o SO | o **FFI, que liga a símbolos POR NOME**: `pub extern fn run(args: []str) -> i32 = "tk_rt_run" from "teko_rt"` |
+| quantos `pub extern fn` existem, e para onde apontam | **24, e TODOS levam `from "teko_rt"`.** Nenhum aponta para uma biblioteca da plataforma |
+| existe forma declarada de apontar para a libc? | **sim, e está no tipo.** `TExternDecl.from_lib: str` tem o comentário literal **`("" = implicit libc; valid iff is_extern)`** (`src/checker/tast.tks:172`). Uma declaração **sem** cláusula `from` significa **libc implícita** |
+| existe forma declarada de apontar para uma biblioteca de plataforma nomeada? | **sim, e já é usada.** `teko.tkp:72-73` tem `[extern.libs.windows]` com `kernel32 = []`, e `applicable_extern_libs(m, target)` (`src/build/project.tks:1244`) já resolve as declarações aplicáveis por alvo |
+| os tipos de transporte de largura de ponteiro existem? | **sim.** `ptr` e `uptr` no checker (`src/checker/scope.tks:387-388`), documentados como *"opaque FFI pointer (transport-only)"* e *"opaque word-size unsigned (transport-only)"* |
+
+**A leitura honesta destas seis linhas:** o mecanismo está **declarado e tipado**; o que está **por andar**
+é o caminho de libc implícita pela rota nativa, porque **nenhum dos 24 externs da árvore o exercita**.
+
+**Isso é exactamente um crumb de medição, e é o `M2.0`** (§3.2): declarar `extern fn getpid() -> i32 =
+"getpid"`, construir pela rota nativa, correr, e ver o pid. Se funcionar, as fases 2 e 3 assentam num
+caminho provado. Se falhar, o crumb reporta **onde** falha — checker, símbolo indefinido, ou linha de
+linker — e o conserto é um crumb nomeado, em vez de uma descoberta a meio da fase 3. **É o crumb mais
+importante da proposta, e é por isso que abre a fase e não fecha.**
+
+## 5.2 A forma das declarações
+
+Nenhuma linha de C. Nenhum ficheiro novo em `src/runtime/`. Nenhuma compilação pela rota C.
+
+```teko
+/**
+ * ptrace — the Linux process-tracing entry point, bound by name to the platform's C ABI library.
+ *
+ * NO C OF OURS. This is a Teko declaration that links to a symbol the platform already exports;
+ * the same mechanism every one of the 24 existing `extern fn` declarations in this tree uses, with
+ * an EMPTY providing library, which `TExternDecl.from_lib` documents as implicit libc.
+ *
+ * `addr` and `data` are `uptr` because they are transport-only opaque words here: a request either
+ * ignores them or treats them as an address in the TRACEE's space, which is not a pointer this
+ * process may ever dereference. Typing them as `uptr` says exactly that.
+ *
+ * @param request  the PTRACE_* request, from the named constants beside this declaration
+ * @param pid      the tracee's process id
+ * @param addr     the request's address operand, in the TRACEE's address space, or 0
+ * @param data     the request's data operand, or 0
+ * @return         the request's result; -1 signals failure, which the caller MUST check
+ * @since 0.3.1 tdb proposal, fase 2
+ * @see dbg_spawn_traced  the only caller that passes PTRACE_TRACEME
+ */
+pub extern fn ptrace(request: i32, pid: i32, addr: uptr, data: uptr) -> i64 = "ptrace"
+
+/**
+ * dbg_spawn_traced — fork, mark the child traceable, and exec the target, leaving it STOPPED at
+ * its first instruction.
+ *
+ * Stopped-at-entry is not a convenience: it is the only moment at which breakpoints can be planted
+ * before any user code runs, so `tdb exec` with a breakpoint in `main` cannot miss it.
+ *
+ * @param argv  the target program and its arguments, argv[0] being the program
+ * @return      the tracee's process id, stopped and waiting
+ * @throws      when the fork or the exec fails, naming which and why
+ * @since 0.3.1 tdb proposal, fase 2
+ */
+pub fn dbg_spawn_traced(argv: []str) -> i32 | error
+```
+
+## 5.3 Como "SEM C LANG" se lê, e é um facto de plataforma
+
+**Duas leituras da ordem, e uma delas é inexequível — por facto de plataforma, não por preferência:**
+
+| leitura | consequência |
+| --- | --- |
+| **(a) sem C ESCRITO por nós e sem BACKEND C**, com `extern` para a biblioteca de ABI-C da plataforma | **possível hoje.** Nenhuma linha de C nossa. É como toda linguagem compilada alcança o SO |
+| **(b) sem tocar em nada da plataforma — chamada de sistema crua** | **impossível em dois dos três alvos.** Em macOS a Apple **não garante a ABI de syscall** e quebra-a entre versões; em Windows **não há interface de syscall estável** — a fronteira suportada é `kernel32`/`ntdll` |
+
+**E o precedente é o Go — a referência que o dono atribuiu para comportamentos:** o Go faz syscalls
+**cruas em Linux**, mas passa por **libSystem em Darwin** e por **`kernel32` em Windows`**. Ou seja: a
+própria linguagem nomeada como modelo adopta (a) onde (b) não é possível.
+
+> **A assunção sob a qual a proposta prossegue, declarada:** *"SEM C LANG"* = **nenhuma linha de C
+> escrita por nós e nenhuma compilação pela rota C**. `extern` para a biblioteca da plataforma é
+> permitido, porque a alternativa não é mais pura — é inexequível em dois dos três alvos.
+>
+> **Se o dono quiser (b) em Linux por princípio, isso é uma primitiva de linguagem nova e um arco
+> próprio**, e tem de ser dito. Não é pré-requisito desta proposta: o `tdb` em Linux funciona por (a), e
+> trocar (a) por (b) mais tarde muda **uma declaração por chamada**, não o desenho.
+
+**E isto corrige, por lei, o que a 2.ª passagem recomendou.** Ela orçou o chão de controlo *"pela via
+Teko + shim no `teko_rt.c`"*, argumentando que a exceção mantida de `src/runtime/teko_rt.{c,h}` a
+tornava legal. **A ordem `"SEM C LANG, somente Teko nativo"` é posterior e mais forte**, e retira essa
+via. A rota desta proposta é o `extern` de libc implícita, que **não escreve C nenhum** — e é por isso
+que `M2.0` é o crumb que abre a fase 2 em vez de um shim que já não é permitido.
+
+---
+
+# 6. Como o `tdb` se prova
+
+**Esta é a parte mais interessante do desenho, e a restrição que a torna interessante é dura:**
+
+> **A suíte do `tdb` não pode depender do `tdb`, nem de um binário Teko correcto, nem de um depurador de
+> terceiros.**
+
+As três dependências proibidas são a mesma dependência: **um oráculo que partilha a origem do que está a
+ser testado**. Se o `tdb` lê o `.tsym` v2 que sai do nosso compilador, então o compilador a mentir e o
+`tdb` a reportar a mentira fielmente são **indistinguíveis** — a suíte fica verde e a ferramenta ensina
+errado.
+
+## 6.1 O oráculo é a FIXTURE, e é escrita à mão
+
+**A resolução é a que o dono ratificou:** as fixtures do `tdb` são **objectos escritos à mão, com
+tabelas de correcção conhecida**. Um objecto cujos bytes foram escritos por uma pessoa, com uma tabela
+cuja resposta certa é conhecida **antes** de o `tdb` existir, é um oráculo **independente por
+construção** — e não precisa que nenhum gdb concorde com ele.
+
+**E os dois ficheiros do PoC da 2.ª passagem já SÃO o primeiro fixture.** Estão versionados, em
+`docs/design/debugger-poc/`, e correm hoje:
+
+| ficheiro | o que fixa | porque é oráculo |
+| --- | --- | --- |
+| `mini.s` | duas molduras, posições conhecidas, tabelas escritas **byte a byte com `.byte`** | **nenhuma ferramenta as gerou.** A resposta certa é a que a pessoa escreveu, e é verificável lendo o ficheiro |
+| `adv.s` | **cinco** molduras através de **todas** as formas de frame do nosso encoder — incluindo a função frameless que chama e nunca retorna | prova que o desenrolar não depende da sorte de uma forma de frame ser a comum |
+| `hello.tks` | o texto Teko que as tabelas **apontam**, e que **nunca é compilado** | a isolação **é** o ponto: o depurador lista texto Teko enquanto passa por código de máquina que nenhum compilador Teko produziu. Prova-se o leitor, não o compilador |
+| `reproduce.sh` | corre e **sai 0** | documentação que executa |
+
+**A promoção destes quatro a fixtures citadas por um teste é o crumb `F0.1`**, e é a razão de a fase 0
+ser a que se pode fazer antes do portão sem desperdício (§7.2).
+
+## 6.2 Os três níveis da suíte, e o que cada um pode e não pode usar
+
+| nível | pode usar | prova o quê | onde |
+| --- | --- | --- | --- |
+| **1 — o leitor contra fixtures escritas à mão** | um objecto `.s` e um `.tsym` escritos à mão; **nenhum compilador** | que o leitor de `.tsym` v2, a resolução linha↔endereço e o desenrolar dão a resposta **conhecida**. E que uma tabela deliberadamente **errada** falha | `/tdb/tests`, e corre em qualquer host |
+| **2 — o emissor contra goldens** | o compilador; **nenhum `tdb`** | que o `.tsym` v2 emitido para um `.tks` conhecido é **byte-a-byte** o esperado, e que um objecto com `MLineMark` é byte-idêntico a um sem | `src/`, na suíte do compilador |
+| **3 — a ponta a ponta** | os dois | que os níveis 1 e 2 concordam sobre o **mesmo** binário: uma sessão dirigida por script pára onde a fixture diz que devia parar | a perna nativa do CI |
+
+**A propriedade que faz isto ser uma prova e não uma tautologia:** os níveis 1 e 2 têm **oráculos
+diferentes**. O nível 2 compara o emissor com bytes escritos por uma pessoa; o nível 1 compara o leitor
+com tabelas escritas por uma pessoa. **Uma discordância no nível 3 localiza-se imediatamente** — se o
+nível 2 está verde e o 3 vermelho, o defeito é do leitor; se o 1 está verde e o 3 vermelho, é do
+emissor. Nenhum dos dois pode encobrir o outro, porque nenhum dos dois é a referência do outro.
+
+## 6.3 O que substitui o gdb como leitor independente
+
+A 2.ª passagem argumentava que o DWARF valia por ser o **único leitor independente** da nossa tabela de
+linha — que sem ele, o `tdb` e o compilador a mentirem juntos seriam indetectáveis. **Esse argumento
+está satisfeito sem DWARF nenhum, e é o §6.1 que o satisfaz:** a fixture escrita à mão é o leitor
+independente, e é melhor nesse papel do que o gdb, por três razões medíveis — corre em qualquer host sem
+instalar nada; a sua resposta certa é **legível no próprio ficheiro** em vez de sair de outro programa; e
+não muda de comportamento entre versões de uma ferramenta que não controlamos.
+
+**Logo o gdb era conveniência, não necessidade**, e o interop sair do caminho crítico não deixa o `tdb`
+sem oráculo. Deixa-o com um melhor.
