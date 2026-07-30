@@ -1042,3 +1042,58 @@ mais volta:** com `/bin/true` como gen1, dava `rc=0`, log vazio, e a assinatura 
 "compilador" que não faz nada e sai 0 lido como sucesso é literalmente o *"AN ABSENT OBJECT WAS A
 PASS"* do cabeçalho de `scripts/check_elf.sh`. **Um sucesso tem de ser corroborado por um ARTEFACTO,
 nunca por um código de saída sozinho** — o gate exige agora o executável em `out/`.
+
+### PRECISADO PELO DONO — `/tdb` na RAIZ, e `kind = "tool"` é um TIPO NOVO no `.tkp` (2026-07-30)
+
+Verbatim: *"`/tdb` e por um motivo obvio, o que tem em /tooling nao e escrito em teko, e ainda precisam
+ser reescritos, do zero. Ja o tdb e da familia teko, e quando digo tooling de pacote, e um tkp que emite
+um tkl de um executavel sob um novo tipo no tkp `kind=tool`, agregando na familia como um executavel
+empacotavel que sera compilado na maquina do dev como um executavel normal mas sem adicionar como
+dependencia de projeto (nao entra nas dependencias do tkp)."*
+
+**A DECISÃO: `/tdb` na raiz.** A minha recomendação de `tooling/tdb/` cai. **E cai por uma razão melhor
+do que a que eu media:** `tooling/*` são **geradores de integração de editor** (gramáticas para vim,
+nano, emacs, vscode) — utilitários de uma vez. `tdb` é **componente da cadeia de ferramentas**. São
+famílias diferentes, e a distinção não é de linguagem, é de papel.
+
+**Uma correcção factual ao que ele disse, para o registo não ficar torto:** os cinco projetos em
+`tooling/` **são** escritos em Teko — medido, **6 `.tks` cada**. O que não é Teko é o que eles
+**produzem** (ficheiros de gramática). A decisão dele fica de pé pelo eixo do papel, não pelo da
+linguagem.
+
+### O QUE `kind = "tool"` É, e é uma FEATURE de manifesto, não um directório
+
+| propriedade | valor |
+| --- | --- |
+| declara-se em | `[artifact] kind = "tool"` no `.tkp` |
+| emite | um **`.tkl`** que contém um **executável** |
+| agrega | na família Teko, como executável **empacotável** |
+| na máquina do dev | compila como executável **normal** |
+| dependências | **NÃO entra em `[deps]`** de nenhum projeto — usar uma ferramenta não a torna dependência |
+
+**A REFERÊNCIA É C#, e é a que o dono atribuiu para addins:** `dotnet tool` é exactamente isto — um
+pacote NuGet com `PackageType=DotnetTool`, instalável global ou localmente, que **nunca** vira
+`PackageReference`. `cargo install` e `go install` fazem o mesmo efeito mas **sem um tipo de pacote
+próprio**: instalam um crate/módulo que por acaso tem binário. O C# é o único dos quatro com um TIPO
+declarado, que é precisamente o que o dono pediu. Referência nomeada e aplicável.
+
+### O DEFEITO QUE BLOQUEIA A FEATURE, medido em `src/build/manifest.tks:558-566`
+
+```teko
+if q.text == "static" { artifact = Artifact::Static }
+else if q.text == "shared" { artifact = Artifact::Shared }
+else if q.text == "package" { artifact = Artifact::Package }
+else { artifact = Artifact::Binary }
+```
+
+**Um `kind` desconhecido torna-se `Binary` EM SILÊNCIO** — e o doc-comment por cima até o admite
+(*"unknown → Binary"*). Consequências, e ambas são da classe que esta lane já pagou várias vezes:
+
+1. **`kind = "tool"` escrito hoje é silenciosamente um binário comum.** Alguém pode adoptar a grafia
+   antes de a feature existir e ter um verde que não significa nada.
+2. **`kind = "binari"` também é um binário.** Um erro de escrita no manifesto não tem diagnóstico.
+
+**Portanto o crumb 1 da feature não é acrescentar `Tool` ao enum — é FECHAR O SILÊNCIO:** um `kind`
+desconhecido tem de ser **erro duro** com a lista dos aceites. Só depois `Tool` entra, e entra num sítio
+onde a grafia errada grita. É o padrão *"tornar o estado errado inexpressável"* que fechou o degrau da
+relocação, aplicado ao manifesto.
