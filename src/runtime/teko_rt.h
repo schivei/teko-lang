@@ -824,16 +824,37 @@ int32_t tk_rt_close_fd(int64_t fd);
 // `tk_win32_spawn_redirected` block it sits beside.
 #define TK_RT_PIPE_POLL_INTERVAL_MS (2)
 int32_t tk_rt_fd_wait_readable(int64_t fd, int64_t timeout_ms);
-// teko::process::fd_read(fd, cap) — read AT MOST `cap` bytes from `fd`, returning what one read
-// call yielded. An EMPTY result means end-of-file OR a failure, and `tk_rt_fd_read_failed()`
-// (below) is what tells them apart — the same sticky-flag shape `tk_rt_read_line`/
-// `tk_rt_stdin_eof` already use, and for the same reason: a brand-new `str | error`-shaped extern
-// needs a per-name lift in codegen that the released SEED cannot learn, while a plain `str` return
-// needs none.
-tk_str tk_rt_fd_read(int64_t fd, uint64_t cap);
-// tk_rt_fd_read_failed() — did the LAST tk_rt_fd_read fail (as opposed to reaching end-of-file)?
-// Read it immediately after an empty result; any later tk_rt_fd_read overwrites it.
-bool tk_rt_fd_read_failed(void);
+// teko::process::fd_fill(fd, timeout_ms) — wait for `fd` under the deadline, then read one buffer's
+// worth of it into a runtime-owned staging buffer, and return HOW MANY bytes landed there:
+//   n > 0                    n bytes are staged; drain them with tk_rt_fd_take_byte
+//   0                        END-OF-FILE — the last write end is gone and nothing more will arrive
+//   TK_RT_FD_FILL_TIMEOUT    the deadline expired with neither bytes nor end-of-file
+//   TK_RT_FD_FILL_ERROR      the descriptor could not be waited on or read at all
+//
+// TWO SCALAR CALLS AND NOT ONE `str` RETURN, AND THAT IS MEASURED, NOT TASTE. The native backend
+// cannot lower ANY fat return through a general `extern fn`: its `LCall` captures exactly one result
+// register, where a `str` and a `[]byte` are both two-word values. Measured with none of this
+// block's code in the picture — a throwaway project binding the untouched, pre-existing `tk_rt_os`
+// as `extern fn host_os() -> str` exits 42 under `TEKO_BACKEND=c` and 1 on the own backend (the
+// received `str` arriving with `len == 0`), and the same project binding `tk_rt_secure_bytes` as
+// `-> []byte` reads `len == 0` there too. The fat-returning host FFI that DOES work natively
+// (`tk_rt_read_file`, `tk_rt_getcwd`) works per-NAME, through a lift the released seed's frozen
+// codegen already carries and cannot learn a new entry for. A pair of scalar calls needs no lift on
+// either backend, which is the only shape a brand-new primitive can take today.
+//
+// ONE STAGING BUFFER FOR THE WHOLE PROCESS, and the constraint is stated rather than hidden: a fill
+// discards whatever a previous fill left unread, so a caller must drain one fill completely before
+// starting the next, and two interleaved drains of two descriptors would consume each other's
+// bytes. That is the same single-slot sticky-state shape `tk_rt_stdin_eof_flag` already uses. It is
+// enough for one drain at a time, which is what a caller reading one child's stream does; a reader
+// multiplexing several children needs a buffer per descriptor, and that belongs with the channel
+// this change deliberately does not build.
+#define TK_RT_FD_FILL_TIMEOUT (-1)
+#define TK_RT_FD_FILL_ERROR   (-2)
+int64_t tk_rt_fd_fill(int64_t fd, int64_t timeout_ms);
+// tk_rt_fd_take_byte() — the next staged byte as 0..255, or -1 once the last fill is exhausted.
+// Scalar in and scalar out, for the reason tk_rt_fd_fill is.
+int32_t tk_rt_fd_take_byte(void);
 // =========================================================================
 
 // teko::env::args() — the captured process argv as owned tk_str's; *n receives the count.

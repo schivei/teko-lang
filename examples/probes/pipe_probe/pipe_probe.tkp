@@ -27,17 +27,26 @@
 # declaration reaches a runtime symbol from outside the compiler's own project. Same pattern, same
 # paragraph, as spawn_redirected_probe's own manifest.
 #
-# C ROUTE ONLY, AND THAT IS A PRE-EXISTING BACKEND GAP, NOT A PROPERTY OF THESE PRIMITIVES.
-# `fd_read` is a `str`-returning `extern fn`, and the native backend cannot lower one: its `LCall`
-# captures exactly ONE result register, where a `str` is a two-word fat pointer. MEASURED, with none
-# of this change's code in the picture: a throwaway project binding the UNTOUCHED, pre-existing
-# `tk_rt_os` as `extern fn host_os() -> str` returns 42 through `TEKO_BACKEND=c` and exits 1 on the
-# own backend, because the received `str` arrives with `len == 0`. Built on the own backend this
-# probe panics `out of memory (str concat)` for the same reason — a garbage length reaching `~`.
-# The fix lives in `src/backend/`, which this change does not touch.
+# BOTH BACKENDS, AND THAT IS WHY THE READ SURFACE IS TWO SCALAR CALLS. The first shape tried here
+# was a single `fd_read(fd, cap) -> str`, and it does not lower on the own backend at all: that
+# backend's call lowering captures exactly ONE result register, where a `str` is a two-word fat
+# pointer. MEASURED, with none of this change's code in the picture — a throwaway project binding
+# the untouched, pre-existing `tk_rt_os` as `extern fn host_os() -> str` exits 42 under
+# `TEKO_BACKEND=c` and 1 on the own backend (the received `str` arriving with `len == 0`), and the
+# same project binding `tk_rt_secure_bytes` as `-> []byte` reads `len == 0` there too. The
+# fat-returning host FFI that DOES work natively (`teko::io::read_file`, `teko::env::cwd`) works
+# per-NAME, through a lift the released seed's frozen codegen already carries and cannot learn a new
+# entry for. So `fd_fill`/`fd_take_byte` are scalar in and scalar out, and this probe reports 42 on
+# both routes.
 #
-#   TK_RT_DIR=<repo>/src/runtime TEKO_BACKEND=c teko build examples/probes/pipe_probe
-#   ./examples/probes/pipe_probe/bin/pipe_probe      # -> 42
+# THE PATH-ROUTE ASSERTION READS ITS FILE BACK THROUGH A SECOND CHILD (`cat`) AND A PIPE, not
+# through `teko::io::read_file`, for the same backend reason: the own backend rejects that builtin
+# outright ("native backend N1: builtin `read_file` not yet lowered (N2)"). Reading the file with
+# the very primitives under test is also the stronger assertion.
+#
+#   TK_RT_DIR=<repo>/src/runtime teko build examples/probes/pipe_probe    # own backend  -> 42
+#   TK_RT_DIR=<repo>/src/runtime TEKO_BACKEND=c teko build examples/probes/pipe_probe  # -> 42
+#   ./examples/probes/pipe_probe/bin/pipe_probe
 name = "pipe_probe"
 source = "src"
 

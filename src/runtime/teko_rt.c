@@ -2724,26 +2724,40 @@ int32_t tk_rt_fd_wait_readable(int64_t fd, int64_t timeout_ms) {
 #endif
 }
 
-// tk_rt_fd_read_failed_flag — set by the LAST tk_rt_fd_read: true iff the host read call itself
-// failed, as opposed to reporting end-of-file. The same sticky-flag shape tk_rt_stdin_eof_flag uses
-// above, and for the same recorded reason — a plain `str` return needs no per-name codegen lift,
-// where a fresh `str | error` extern would need one the released seed cannot have.
-static bool tk_rt_fd_read_failed_flag = false;
+// tk_rt_fd_stage — the ONE staging buffer tk_rt_fd_fill writes and tk_rt_fd_take_byte drains. A
+// single process-wide slot, exactly as teko_rt.h states: a fill discards whatever the previous one
+// left, so one drain must finish before the next begins. Static rather than arena-allocated so a
+// fill costs no allocation at all — the whole point of staging is that the per-byte call underneath
+// it never touches the host.
+static tk_byte tk_rt_fd_stage[TK_RT_PIPE_CAPACITY];
+// tk_rt_fd_staged — how many bytes of tk_rt_fd_stage the last fill left, and how many of those have
+// already been taken.
+static size_t tk_rt_fd_staged = 0;
+static size_t tk_rt_fd_taken = 0;
 
-tk_str tk_rt_fd_read(int64_t fd, uint64_t cap) {
-    tk_rt_fd_read_failed_flag = (fd < 0);
-    if (fd < 0 || cap == 0) return (tk_str){ NULL, 0 };
-    tk_byte *buf = (tk_byte *)tk_alloc(cap);
+int64_t tk_rt_fd_fill(int64_t fd, int64_t timeout_ms) {
+    tk_rt_fd_staged = 0;
+    tk_rt_fd_taken = 0;
+    if (fd < 0) return TK_RT_FD_FILL_ERROR;
+    int32_t ready = tk_rt_fd_wait_readable(fd, timeout_ms);
+    if (ready == TK_RT_FD_WAIT_TIMEOUT) return TK_RT_FD_FILL_TIMEOUT;
+    if (ready != TK_RT_FD_WAIT_READY) return TK_RT_FD_FILL_ERROR;
 #ifdef _WIN32
-    int got = _read((int)fd, buf, (unsigned int)cap);
+    int got = _read((int)fd, tk_rt_fd_stage, (unsigned int)sizeof tk_rt_fd_stage);
 #else
-    ssize_t got = read((int)fd, buf, (size_t)cap);
+    ssize_t got = read((int)fd, tk_rt_fd_stage, sizeof tk_rt_fd_stage);
 #endif
-    if (got < 0) { tk_rt_fd_read_failed_flag = true; return (tk_str){ NULL, 0 }; }
-    return (tk_str){ buf, (size_t)got };
+    if (got < 0) return TK_RT_FD_FILL_ERROR;
+    tk_rt_fd_staged = (size_t)got;
+    return (int64_t)got;
 }
 
-bool tk_rt_fd_read_failed(void) { return tk_rt_fd_read_failed_flag; }
+int32_t tk_rt_fd_take_byte(void) {
+    if (tk_rt_fd_taken >= tk_rt_fd_staged) return -1;
+    int32_t b = (int32_t)tk_rt_fd_stage[tk_rt_fd_taken];
+    tk_rt_fd_taken += 1;
+    return b;
+}
 
 // Captured process argv (the generated `main` calls tk_set_args before the virtual-main body).
 // tk_g_argc / tk_g_argv are declared near the top (the stack-trace's .tsym loader uses them).

@@ -49,21 +49,24 @@ pub extern fn close_fd(fd: i64) -> i32 = "tk_rt_close_fd" from "teko_rt"
 pub extern fn fd_wait_readable(fd: i64, timeout_ms: i64) -> i32 = "tk_rt_fd_wait_readable" from "teko_rt"
 
 /**
- * Read at most `cap` bytes from `fd`. An EMPTY result is end-of-file OR a failure; `fd_read_failed`
- * tells them apart.
+ * Wait under the deadline, then stage one buffer's worth of `fd` inside the runtime: `n > 0` bytes
+ * staged, `0` end-of-file, `-1` the deadline expired, `-2` the descriptor could not be read.
  *
- * @param fd   the descriptor to read
- * @param cap  the most bytes to ask for
- * @return     what one read yielded
+ * SCALAR IN AND SCALAR OUT, which is why this probe runs on BOTH backends where a `str`-returning
+ * primitive would run on neither but the C one.
+ *
+ * @param fd          the descriptor to read
+ * @param timeout_ms  the deadline for the wait that precedes the read
+ * @return            bytes staged, 0 at end-of-file, or a negative reading
  */
-pub extern fn fd_read(fd: i64, cap: u64) -> str = "tk_rt_fd_read" from "teko_rt"
+pub extern fn fd_fill(fd: i64, timeout_ms: i64) -> i64 = "tk_rt_fd_fill" from "teko_rt"
 
 /**
- * Did the LAST `fd_read` fail, as opposed to reaching end-of-file?
+ * The next staged byte as 0..255, or -1 once the last fill is spent.
  *
- * @return true iff the last read call itself failed
+ * @return the next byte, or -1
  */
-pub extern fn fd_read_failed() -> bool = "tk_rt_fd_read_failed" from "teko_rt"
+pub extern fn fd_take_byte() -> i32 = "tk_rt_fd_take_byte" from "teko_rt"
 
 /**
  * The runtime symbol `spawn_redirected` wraps. `payload` is the self-describing flattening
@@ -83,22 +86,6 @@ pub extern fn spawn_redirected_raw(payload: str) -> i64 = "tk_rt_spawn_redirecte
  * @return     the child's exit status, or a negative value when `raw` named no real child
  */
 pub extern fn wait_one_raw(raw: i64) -> i32 = "tk_rt_wait_one" from "teko_rt"
-
-/**
- * Read a whole file back, so the PATH route can be asserted against what the child actually wrote.
- *
- * @param path  the file to read
- * @return      its bytes, or the read failure
- */
-pub extern fn read_file(path: str) -> str | error = "tk_rt_read_file" from "teko_rt"
-
-/**
- * Delete a file, so the PATH-route assertions leave no scratch behind in the working directory.
- *
- * @param path  the file to delete
- * @return      nothing on success, or the failure
- */
-pub extern fn remove_file(path: str) -> error | null = "tk_rt_remove_file" from "teko_rt"
 
 /**
  * The NUL byte every field of a `spawn_redirected_raw` payload joins on — see
@@ -158,20 +145,40 @@ pub fn shell_payload(script: str, out_path: str, in_fd: str, out_fd: str, err_fd
 pub fn fd_token(fd: i64) -> str { teko::str::i64_to_str(fd) }
 
 /**
- * Drain `fd` until end-of-file, under a TOTAL deadline, returning "" when the deadline expired
+ * Drain `fd` until end-of-file, under a deadline per fill, returning "" when the deadline expired
  * first — which is exactly the reading the WITHHELD-end-of-file inversion asserts on.
  *
  * @param fd           the reading end
- * @param deadline_ms  the budget for one wait; the drain terminates on end-of-file
+ * @param deadline_ms  the budget for one fill; the drain terminates on end-of-file
  * @return             what the writer sent, or "" when no end-of-file arrived in time
  */
 pub fn drain(fd: i64, deadline_ms: i64) -> str {
-    mut acc = ""
+    mut acc: []byte = teko::list::empty()
     loop {
-        if fd_wait_readable(fd, deadline_ms) != 1 { return "" }
-        let chunk = fd_read(fd, 65536)
-        if chunk.len == 0 { return acc }
-        acc = acc ~ chunk
+        let n = fd_fill(fd, deadline_ms)
+        if n < 0 { return "" }
+        if n == 0 { break }
+        acc = take_staged(acc, n to u64)
     }
-    acc
+    match teko::text::str_from_utf8(acc) { str as s => s; error => "" }
+}
+
+/**
+ * `acc` with everything the last `fd_fill` staged appended, in arrival order.
+ *
+ * @param acc  what has been drained so far
+ * @param n    how many bytes the fill reported
+ * @return     `acc` followed by those bytes
+ */
+pub fn take_staged(acc: []byte, n: u64) -> []byte {
+    mut out = acc
+    mut k: u64 = 0
+    loop {
+        if k >= n { break }
+        let b = fd_take_byte()
+        if b == -1 { break }
+        out = teko::list::push(out, b to byte)
+        k = k + 1
+    }
+    out
 }
