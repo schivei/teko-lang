@@ -140,13 +140,36 @@ fn sg_is_tkt(name: str) -> bool { teko::str::ends_with(name, ".tkt") }
 fn sg_unscoped_in_file(path: str) -> str {
     let text = match teko::io::read_file(path) { str as s => s; error => return teko::str::concat(path, ": unreadable") }
     if !sg_text_mentions_scratch(text) { return "" }
-    let lines = sg_lines(text)
+    let bad = sg_first_violating_line(text)
+    if bad.len == 0 { return "" }
+    teko::str::concat(path, ": ", bad)
+}
+
+/**
+ * sg_first_violating_line — the first offending LINE of `text`, or "".
+ *
+ * Walks the text by index and slices one line at a time instead of building a list of every line.
+ * That is not a micro-optimisation: `teko::list::push` copies, so a list of a 1400-line file is
+ * quadratic in the file, and the five files that reach this point are the biggest `.tkt` in the tree.
+ *
+ * @param text  the file's whole text
+ * @return      the offending line, or "" when there is none
+ */
+fn sg_first_violating_line(text: str) -> str {
+    mut start: u64 = 0
     mut i: u64 = 0
     loop {
-        if i >= lines.len { break }
-        if sg_line_violates(lines[i]) { return teko::str::concat(path, ": ", lines[i]) }
+        if i >= text.len { break }
+        if text[i] == b'\n' {
+            let line = teko::str::slice(text, start, i)
+            if sg_line_violates(line) { return line }
+            start = i + 1
+        }
         i = i + 1
     }
+    if start >= text.len { return "" }
+    let last = teko::str::slice(text, start, text.len)
+    if sg_line_violates(last) { return last }
     ""
 }
 
@@ -196,26 +219,4 @@ fn sg_line_violates(line: str) -> bool {
         i = i + 1
     }
     false
-}
-
-/**
- * sg_lines — `text` split on `\n`, the trailing empty piece dropped.
- *
- * @param text  the file text
- * @return      its lines
- */
-fn sg_lines(text: str) -> []str {
-    mut out: []str = teko::list::empty()
-    mut start: u64 = 0
-    mut i: u64 = 0
-    loop {
-        if i >= text.len { break }
-        if text[i] == b'\n' {
-            out = teko::list::push(out, teko::str::slice(text, start, i))
-            start = i + 1
-        }
-        i = i + 1
-    }
-    if start < text.len { out = teko::list::push(out, teko::str::slice(text, start, text.len)) }
-    out
 }
