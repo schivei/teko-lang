@@ -1589,6 +1589,11 @@ pub fn emit_to(sink: Sink, seg: Journal, line: str) -> null | error
 
 ### 15.7 `chan<T>`: o primeiro consumidor real, registado e NAO construido
 
+> **RECTIFICADO POR §16 (correccao do dono, 2026-07-30).** O requisito 1 desta tabela esta
+> **REFUTADO** — eu desenhei um laco central a esperar em `2 x jobs` origens, e a forma e FAN-IN: um
+> tubo por constructo, um handler por filho, e o orquestrador com um `recv` so. A tabela fica com a
+> linha riscada para o erro ser legivel; a lista corrigida esta em §16.4.
+
 `docs/design/concorrencia-adiantada-s8.md` §3.3 reservou `chan<T>` e recusou congela-lo com uma razao
 explicita: *"Congelar `chan<T>` agora seria congelar a peca que os casos reais nao usam."*
 
@@ -1599,7 +1604,7 @@ congelar:
 
 | requisito medido no `pump` | porque, e o que reprova |
 |---|---|
-| **espera multi-origem** | o laco espera em `2 x jobs` origens ao mesmo tempo. Um `recv` de UMA origem nao exprime isto: obriga a sondagem ciclica, que e ocupada ou lenta. **Um `chan<T>` sem espera multi-origem nao serve este caso** — e este e o caso real |
+| ~~**espera multi-origem**~~ **REFUTADO (§16)** | eu escrevi que um `recv` de uma origem so nao exprimia o caso. Exprime — a multiplicidade vive nos HANDLERS, cada um bloqueado no SEU tubo, e o orquestrador tem uma origem so. A peca que eu dava como o requisito dificil **nao existe**, e com ela cai o `poll(2)`/`WaitForMultipleObjects` e a assimetria do Windows que eu declarara por medir |
 | **fecho distinguivel de vazio** | `recv` tem de responder "fechado" diferente de "nada agora", porque e o fecho que autoriza o `wait_one` (§15.4). `-> T \| closed` |
 | **limitado, com contrapressao** | o tubo do SO da-a de graca: quem escreve bloqueia. Um `chan<T>` ilimitado tem a memoria como unico limite — e nos morremos de OOM duas vezes hoje. **Limitado, por omissao** |
 | **ordem por origem, nao global** | o relatorio e por indice de filho (§determinismo do `run_pool`). O canal so tem de preservar a ordem DENTRO de cada origem; uma ordem global seria uma promessa mais cara e inutil |
@@ -1629,3 +1634,266 @@ Quatro requisitos vindos de necessidade, nenhum de antecipacao. **Nao construo n
    estao declarados, mas eu nao os corri. A perna Windows tem de trazer a sua propria medicao — e
    dizer que "deve funcionar igual" seria a suposicao que este documento inteiro existe para nao
    fazer.
+
+---
+
+## 16. FAN-IN: um tubo por constructo — correccao do dono, 2026-07-30
+
+> *"Nao e 'Um' tubo, mas um por constructo, e isso e o pq de ter um orquestrador e operar com
+> `chan<>`, cada processo recebe um handler que le a saida e grava no canal, o orquestrador le do
+> canal e apenda no arquivo."*
+
+**O erro e meu e e de forma.** A §15.3 desenhou um **laco central** a esperar em `2 x jobs` origens
+com `poll(2)`. A forma e **fan-in**:
+
+```
+filho 1 ──tubo──▶ handler 1 ─┐
+filho 2 ──tubo──▶ handler 2 ─┼──▶ chan ──▶ orquestrador ──▶ apenda no segmento
+filho N ──tubo──▶ handler N ─┘
+```
+
+Um tubo **por constructo**, um handler **por filho** que drena o SEU tubo e grava no canal, e o
+orquestrador com **um `recv` so**.
+
+### 16.1 O que a correccao apaga do meu desenho
+
+| eu tinha | a forma do dono |
+|---|---|
+| `tk_rt_wait_readable` (`poll(2)` / `WaitForMultipleObjects`) | **nao existe.** Cada handler faz um `read(2)` bloqueante no seu tubo |
+| um laco central com `2 x jobs` descritores | **um `recv`.** A multiplicidade vive nos produtores |
+| "Windows precisa de forma equivalente e nao esta medido" | **desaparece.** `ReadFile` bloqueante e simetrico com `read(2)`; nao ha `WaitForMultipleObjects` |
+| o invariante da drenagem no laco central | **no handler.** Mesmo invariante, outra casa |
+
+**A parte que eu dava como o requisito dificil evapora-se.** Isso e o sinal de que a forma esta certa:
+a que eu propus precisava da primitiva mais assimetrica entre os dois SO, e esta nao precisa dela.
+
+### 16.2 A DEPENDENCIA, dita e nao contornada
+
+**A forma do dono exige `spawn` e `chan<T>`. Nenhuma das duas existe.** Sao duas das cinco primitivas
+RESERVADAS de `docs/design/concorrencia-adiantada-s8.md` §3.3, e nao ha por onde fugir: um handler que
+bloqueia num `read` precisa de **contexto de execucao proprio**, e um processo por handler seria
+absurdo (dobrava a contagem de processos para drenar tubos).
+
+E o S8 nomeia o que trava a primitiva GERAL, medido: `tk_arena_push(void)` / `tk_arena_pop(void)`
+(`teko_rt.h:156-157`) **nao recebem parametro** — empilham marcas numa pilha global sobre a regiao
+raiz do processo. Duas raias a faze-lo corrompem-se. O pre-requisito real da S8 e **regiao raiz por
+tarefa**, e o proprio S8 classifica-o: *"e caro e toca a disciplina de memoria inteira"*.
+
+### 16.3 Porque esse bloqueio NAO trava ESTE caso — e e a medicao que o desbloqueia
+
+**O corpo de um handler de dreno nao aloca da arena.** Ele le bytes de um descritor e empurra-os para
+um canal. Verificado: `tk_str_concat` e a familia de strings usam **`malloc`**, nao a arena
+(`teko_rt.c:139`; o proprio comentario de observabilidade chama-lhes *"dark matter ... outside the
+arena"*), e `malloc` e seguro em threads nas duas libc que usamos.
+
+Portanto o **minimo viavel** nao e a primitiva geral. E isto:
+
+> **O corpo do handler vive no RUNTIME, em C, e nunca chama codigo Teko.** Zero risco de arena, zero
+> mudanca no codegen, zero mudanca no verificador.
+
+```c
+// tk_chan — a fila MPSC de REGISTOS que o fan-in precisa: N produtores, UM consumidor, limitada.
+//
+// REGISTOS E NAO UM FLUXO DE BYTES, e esta e a descoberta desta forma: se o canal transportasse
+// bytes, dois filhos entrelacavam-se num fluxo so e a ATRIBUICAO perdia-se — que e exactamente o
+// defeito que este documento inteiro existe para fechar, reencarnado uma camada acima. Cada registo
+// traz o seu escritor.
+typedef struct tk_chan tk_chan;
+// tk_chan_open — abrir um canal com `cap_bytes` de folga. LIMITADO por lei (§15.7): um canal sem
+// limite tem a memoria como unico travao, e nos morremos de OOM duas vezes no dia deste desenho.
+tk_chan *tk_chan_open(uint64_t cap_bytes, uint32_t producers);
+// tk_chan_recv — bloquear ate haver um registo. Devolve 0 no registo, 1 quando TODOS os produtores
+// fecharam. A distincao entre "vazio agora" e "fechado" e o que autoriza o wait_one (§15.4).
+int32_t tk_chan_recv(tk_chan *c, tk_str *writer_out, tk_str *bytes_out);
+// tk_rt_spawn_drainer — um handler: uma thread cujo corpo e ESTA funcao C — `read(fd)` ate EOF,
+// empurrando cada bloco para `c` com o rotulo `writer`, e no fim baixa a contagem de produtores.
+//
+// NAO E `teko::isolate::spawn`. Nao corre codigo Teko, nao toca na arena, nao tem valor de retorno
+// que o mundo seguro veja. E o fundo sobre o qual `spawn` VAI assentar, e nao a primitiva.
+int32_t tk_rt_spawn_drainer(int64_t fd, tk_chan *c, tk_str writer);
+```
+
+O custo, em linhas de C mantido, e para ser comparado com o que ja ha:
+
+| peca | POSIX | Windows | forma |
+|---|---|---|---|
+| `tk_chan` (anel + mutex + duas variaveis de condicao + contagem de produtores) | ~120 | ~120 | `pthread_mutex`/`pthread_cond` · `CRITICAL_SECTION`/`CONDITION_VARIABLE` |
+| `tk_rt_spawn_drainer` | ~40 | ~40 | `pthread_create` · `CreateThread` |
+| `tk_rt_spawn_piped` + `tk_rt_child_fd` (§15.2) | ~50 | ~50 | `pipe` · `CreatePipe` |
+
+**~210 linhas de C mantido, simetricas entre os dois SO** — contra *"caro e toca a disciplina de
+memoria inteira"* da regiao raiz por tarefa, que este caminho **nao precisa de tocar**.
+
+### 16.4 A superficie em Teko, e o orquestrador com UM `recv`
+
+```teko
+/**
+ * Chan — a fila de registos por onde os handlers falam com o orquestrador.
+ *
+ * @since 0.3.1
+ */
+pub type Chan = struct {
+    /** a referencia opaca do runtime. */
+    raw: i64
+}
+
+/**
+ * ChanMsg — um registo tirado do canal: de QUEM veio e o que ele disse.
+ *
+ * O ROTULO VIAJA COM OS BYTES, nunca ao lado. Um canal de bytes puros entrelacava dois filhos num
+ * fluxo so e perdia a atribuicao — o mesmo defeito deste documento, uma camada acima.
+ *
+ * @since 0.3.1
+ */
+pub type ChanMsg = struct {
+    /** a identidade do escritor (`s2`, `r0`) — a mesma chave do segmento de journal (§2.2). */
+    writer: str
+    /** o bloco de bytes que o handler leu, na ordem em que o leu. */
+    bytes: str
+}
+
+/**
+ * drain_into — pôr um handler a drenar cada tubo de `h` para `c`.
+ *
+ * UM POR CONSTRUCTO, e e por isso que isto recebe UM `ProcHandle` e nao a lista: a multiplicidade
+ * vive aqui, num handler por fluxo, e nao no consumidor.
+ *
+ * @param h       o filho cujos tubos vao ser drenados
+ * @param c       o canal para onde os blocos vao
+ * @param writer  a identidade com que os blocos deste filho sao rotulados
+ * @throws        quando o handler nao pode ser criado (limite de threads)
+ * @since 0.3.1
+ */
+pub fn drain_into(h: ProcHandle, c: Chan, writer: str) -> null | error
+
+/**
+ * recv — tirar o proximo registo do canal, bloqueando ate haver um.
+ *
+ * UMA ORIGEM SO, e e a rectificacao de §15.7: eu tinha escrito que o caso exigia espera
+ * multi-origem. Nao exige. Cada handler bloqueia no SEU tubo; aqui chega um `recv` — e com ele cai o
+ * `poll(2)`, cai o `WaitForMultipleObjects` e cai a assimetria de Windows que eu declarara por medir.
+ *
+ * @param c  o canal
+ * @return   o proximo registo, ou `closed` quando TODOS os produtores fecharam
+ * @since 0.3.1
+ */
+pub fn recv(c: Chan) -> ChanMsg | closed
+```
+
+E o orquestrador inteiro, que e o ponto do *"algo burro mas extremamente eficiente"*:
+
+```teko
+/**
+ * orchestrate — o consumidor: um `recv`, um `append`, ate todos os produtores fecharem.
+ *
+ * O INVARIANTE DA DRENAGEM MUDOU DE CASA, NAO DESAPARECEU (§15.3). Ele vive agora no handler, que le
+ * o seu tubo ate EOF e so entao baixa a contagem. Aqui a regra e a irma dele, e e a UNICA coisa que
+ * este laco tem de respeitar:
+ *
+ *   **o orquestrador nunca bloqueia em nada que nao seja `recv`.**
+ *
+ * Se ele parasse num `wait_one` a meio, os handlers encheriam o canal limitado e parariam — o mesmo
+ * impasse de §15.3, uma camada acima. Por isso o `wait_one` de cada filho corre DEPOIS de `closed`,
+ * e nesse ponto o filho ja fechou os seus fluxos: a espera passa a ser limitada pela saida dele, e
+ * nunca pela leitura do pai.
+ *
+ * @param c      o canal onde todos os handlers falam
+ * @param sinks  o segmento de journal de cada escritor
+ * @return       quantos registos foram apendados
+ */
+fn orchestrate(c: Chan, sinks: []Journal) -> u64 {
+    mut n: u64 = 0
+    loop {
+        match recv(c) {
+            ChanMsg as m => {
+                match teko::journal::append(sink_of(sinks, m.writer), "out", m.bytes) { error as e => return n; null => { } }
+                n = n + 1
+            }
+            closed => break
+        }
+    }
+    n
+}
+```
+
+### 16.5 Os requisitos, CORRIGIDOS — o que este uso mede sobre `chan<T>`
+
+| requisito | estado | o que o uso mediu |
+|---|---|---|
+| ~~espera multi-origem~~ | **REFUTADO** | o consumidor precisa de `recv` de origem UNICA; a multiplicidade e dos produtores |
+| **fan-in de N produtores para 1 consumidor** | **NOVO, e e o requisito central** | e a forma inteira. Um `chan<T>` que so admita um produtor nao serve |
+| **fecho POR PRODUTOR** | confirmado, e afinado | nao chega saber "fechado": e preciso que o canal conte os produtores e so diga `closed` quando o ultimo sair. E o que autoriza o `wait_one` sem impasse |
+| **limitado, com contrapressao** | confirmado, e agora e OBRIGATORIO | com fan-in, N produtores enchem mais depressa do que um consumidor esvazia. Ilimitado = OOM, e nos morremos disso duas vezes |
+| **ordem por origem, nao global** | confirmado, e agora e ESTRUTURAL | um handler por origem empurra na ordem em que leu; a ordem por origem sai de graca e a global continua a nao fazer falta |
+| **registos, nao fluxo de bytes** | **NOVO** | sem o rotulo a viajar com os bytes, o fan-in entrelaca dois filhos e perde a atribuicao — o defeito deste documento, uma camada acima |
+
+Seis linhas, **duas novas e uma refutada**, todas vindas de um caso real. O S8 recusou congelar
+`chan<T>` porque *"seria congelar a peca que os casos reais nao usam"*. **O caso real chegou.** Isto e
+a diferenca entre congelar por antecipacao e congelar por necessidade medida — e continuo a **nao**
+congelar: registo a forma, construo o fundo minimo, e a primitiva geral e do dono.
+
+### 16.6 A prova, com o segundo braco que a forma nova exige
+
+A prova de §15.5 mantem-se (um filho que escreve 200 000 bytes, mais do triplo do buffer) e **ganha o
+braco do consumidor**, porque o fan-in traz um segundo impasse possivel:
+
+```teko
+#test
+/**
+ * fi_n_children_fan_in_without_interleaving — N filhos a escrever muito ao mesmo tempo, e cada
+ * segmento recebe os SEUS bytes inteiros e por ordem.
+ *
+ * O que isto apanha e o que um canal de bytes puros faria: os blocos chegam entrelacados no tempo
+ * (e devem — sao concorrentes), mas o rotulo separa-os, e a ordem DENTRO de cada escritor tem de ser
+ * a ordem de leitura.
+ *
+ * @throws quando algum segmento perde bytes ou os recebe fora de ordem
+ */
+fn fi_n_children_fan_in_without_interleaving() {
+    let segs = fi_run_fan_in(4, 200000, 5000)
+    teko::assert::eq_u64(fi_total_bytes(segs), 800000)
+    teko::assert::is_true(fi_each_writer_is_in_read_order(segs))
+}
+
+#test
+/**
+ * fi_an_orchestrator_that_waits_mid_loop_deadlocks — O SEGUNDO BRACO, e ele so existe por causa do
+ * fan-in: um canal LIMITADO com N produtores para num consumidor que se distrai.
+ *
+ * A inversao de §15.5 provava o lado do handler. Esta prova o lado do consumidor: um `wait_one` a
+ * meio do laco enche o canal, para todos os handlers, e nada avanca. Corre com PRAZO, porque um
+ * teste que pendura nao e um teste.
+ *
+ * @throws quando a ordem errada TERMINA — o que significaria que esta prova deixou de provar
+ */
+fn fi_an_orchestrator_that_waits_mid_loop_deadlocks() {
+    teko::assert::is_true(fi_run_waiting_mid_loop(4, 200000, 5000).timed_out)
+    teko::assert::is_false(fi_run_fan_in(4, 200000, 5000).timed_out)
+}
+```
+
+### 16.7 O custo em crumbs, e o prazo
+
+**Continua sem crumb novo.** O **C1** ja era "o sumidouro do escritor"; passa a incluir o `tk_chan`, o
+handler de dreno e os tubos. O **C3** encolhe (§15.1). O **C7** ganha os dois bracos de impasse. O
+**C0** fica.
+
+**Total: 10 crumbs.** E o C1 cresce em conteudo — ~210 linhas de C mantido, simetricas entre POSIX e
+Windows — sem tocar na regiao raiz por tarefa, que continua a ser a divida da S8 e continua a nao ser
+paga aqui.
+
+Prazo do dono: *"imediatamente, a dor e latente"*. O C0 e o C1 entram ja.
+
+### 16.8 O que isto NAO e, dito para nao ser lido a mais
+
+1. **Nao e `teko::isolate::spawn`.** O handler e uma thread cujo corpo e uma funcao C do runtime que
+   nunca chama codigo Teko. Nao ha superficie de threads em Teko no fim disto.
+2. **Nao e `chan<T>`.** E `tk_chan`: um canal de REGISTOS DE BYTES, sem tipo generico, interno ao
+   runtime. Quando `chan<T>` for construido, este e o fundo sobre que assenta — nao e trabalho
+   deitado fora, mas tambem nao e a primitiva.
+3. **Nao resolve a regiao raiz por tarefa.** Contorna-a, e o contorno tem uma condicao verificavel: o
+   corpo do handler nao aloca da arena. Se algum dia ele precisar de correr codigo Teko, a condicao
+   cai e a divida da S8 volta inteira.
+4. **Windows continua sem medicao minha.** A forma agora e simetrica (thread + leitura bloqueante dos
+   dois lados), o que remove a assimetria que eu tinha declarado — mas simetrico no papel nao e
+   medido, e a perna Windows tem de trazer a sua propria medicao.
