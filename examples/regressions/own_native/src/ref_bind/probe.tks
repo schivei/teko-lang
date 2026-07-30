@@ -1,0 +1,361 @@
+/**
+ * REFERENCE BINDINGS ON THE OWN BACKEND — the IDENTITY axis, measured against the C route (owner
+ * ruling 2026-07-30: "by definition a `ref` can only be mutable"; `let`/`mut` is the mutability
+ * axis, `ref` is value-versus-reference). Every claim below asserts what the program must DO.
+ *
+ * THE DEFECT THESE FIXTURES PIN. The C emitter takes the address in `emit_as_r`'s very first arm —
+ * an `expected` type that is a `Reference` over a value that is not one emits `&` — and it does so
+ * at EVERY placement. The own backend's declared analog, `lower_value_into_type`, had arcs for the
+ * two variant shapes and none for `Reference`, so a `ref` LOCAL never reached an address-of at all:
+ *
+ *   · an AGGREGATE source fell through to `own_bound_value`, the VALUE-binding copy rule, and bound
+ *     a fresh 16-byte frame slot plus a `tk_mem_copy` — visible in the object, `lea 0x10(%rsp),%r12`
+ *     then `call tk_mem_copy`, where the C route emitted `tk_t_Ch * r = &d`. A write to the source
+ *     was invisible through the reference and a write through the reference invisible in the source;
+ *   · a REGISTER-VALUE source was worse than wrong: `collect_addr_taken_locals` short-circuited on
+ *     `ref_fns.len == 0`, so a program declaring no `ref` PARAMETER never reified the source into a
+ *     frame slot, the binding aliased the scalar's own VALUE as if it were an address, and the first
+ *     read through it SIGSEGV'd;
+ *   · a later WHOLE-VALUE reassignment `d = Ch { … }` rebound the name to the new value's own fresh
+ *     storage (an SSA-lite shadow), which no alias can see by construction.
+ *
+ * The `ref` PARAMETER was the ONE position that already worked, because `lower_args_ref_aware` had
+ * its own auto-ref. That is why the project regressor `ref_mutable_binder` scored 99 of 127 through
+ * the own backend and 127 through the C route, on the SAME host: the three bits that fell are the
+ * three LOCAL directions and the parameter's two survived.
+ *
+ * MEASURED ON BOTH ROUTES, same host, before any fix: 20 probes of this shape, 11 wrong through the
+ * own backend (5 of them a SIGSEGV rather than a wrong answer) and 0 wrong through the C route.
+ * After: 0 and 0.
+ *
+ * THE INVERSION IS PART OF THE FAMILY. `a_plain_mut_binding_of_an_aggregate_still_copies` asserts
+ * what must NOT alias: a fix that made every aggregate binding share its source's storage would pass
+ * every other probe here and silently break the value-binding rule `agg_copy` pins.
+ */
+
+/**
+ * Ch — the two-field referent every struct-shaped probe here aliases. Two fields, not one, so a
+ * write landing in the WRONG cell of a copy cannot masquerade as a write that crossed the reference.
+ */
+type Ch = struct {
+    /** open — the flag every direction writes and reads back. */
+    open: bool
+
+    /** tag — a witness field, never written after construction: it pins the referent's identity. */
+    tag: i64
+}
+
+/**
+ * Col — a declared enum, the REGISTER-VALUE referent whose source has no address of its own until
+ * the address-taken pre-pass reifies it into a frame slot.
+ */
+type Col = enum { Red; Green }
+
+/**
+ * Holder — a class, i.e. a REFERENCE type, whose field a probe writes through an aliasing `ref`.
+ */
+type Holder = class {
+    /** name — the field written through the source handle and read back through the reference. */
+    pub name: str
+
+    /**
+     * of — build a holder.
+     *
+     * @param n  the initial name
+     * @return   the new object
+     */
+    pub fn of(n: str) -> Holder {
+        Holder { name = n }
+    }
+}
+
+/**
+ * shut — write `false` into a referent through a `ref` PARAMETER, the one binder position that
+ * already took an address before this degrau.
+ *
+ * @param ch  the referent to close, aliased write-through
+ */
+fn shut(ref ch: Ch) {
+    ch.open = false
+}
+
+/**
+ * hand_back — pass a `ref` parameter straight out again as the function's own `ref` result, the
+ * pass-down the checker admits for a `-> ref T` return.
+ *
+ * @param ch  the aliased referent
+ * @return    the same reference, unchanged
+ */
+fn hand_back(ref ch: Ch) -> ref Ch {
+    ch
+}
+
+/**
+ * inferred_ref_local_aliases_its_source — an UN-ANNOTATED `ref r = d` sees a write made to its
+ * SOURCE. The spelling that carried no `Ref<>` annotation to survive on, and the direction whose bit
+ * fell in CI.
+ *
+ * @return true iff the reference read back the source's new value
+ */
+pub fn inferred_ref_local_aliases_its_source() -> bool {
+    mut d = Ch { open = true; tag = 9 }
+    ref r = d
+    d.open = false
+    !r.open
+}
+
+/**
+ * annotated_ref_local_aliases_its_source — the CONTROL: `ref r: Ch = d`, the annotated spelling that
+ * already aliased correctly through the C route. Scored beside the inferred one so the two are
+ * proven to agree — and it is the probe that showed the own-backend defect was NOT the inference,
+ * because it fell too.
+ *
+ * @return true iff the reference read back the source's new value
+ */
+pub fn annotated_ref_local_aliases_its_source() -> bool {
+    mut d = Ch { open = true; tag = 9 }
+    ref r: Ch = d
+    d.open = false
+    !r.open
+}
+
+/**
+ * write_through_a_ref_local_reaches_the_source — the reverse direction, the identity axis proper: a
+ * write performed THROUGH the reference is visible in the SOURCE.
+ *
+ * @return true iff the source read back the value written through the reference
+ */
+pub fn write_through_a_ref_local_reaches_the_source() -> bool {
+    mut d = Ch { open = false; tag = 9 }
+    ref r: Ch = d
+    r.open = true
+    d.open
+}
+
+/**
+ * ref_local_over_a_scalar_aliases — a reference over a REGISTER-VALUE source. The source has no
+ * address until the address-taken pre-pass reifies it, and that pre-pass used to run only for
+ * programs declaring a `ref` PARAMETER — so this shape did not answer wrongly, it crashed.
+ *
+ * @return true iff the reference read back the source's new value
+ */
+pub fn ref_local_over_a_scalar_aliases() -> bool {
+    mut n = 1
+    ref r: i64 = n
+    n = 2
+    r.value == 2
+}
+
+/**
+ * write_through_a_scalar_ref_local_reaches_the_source — the reverse direction over a register-value
+ * referent: `r.value = 2` must land in the source's own cell.
+ *
+ * @return true iff the source read back the value written through the reference
+ */
+pub fn write_through_a_scalar_ref_local_reaches_the_source() -> bool {
+    mut n = 1
+    ref r: i64 = n
+    r.value = 2
+    n == 2
+}
+
+/**
+ * ref_local_over_an_enum_aliases — the same register-value shape at a DECLARED enum, whose machine
+ * class the enum table fixes rather than the primitive table.
+ *
+ * @return true iff the reference read back the source's new value
+ */
+pub fn ref_local_over_an_enum_aliases() -> bool {
+    mut c = Col::Red
+    ref r: Col = c
+    c = Col::Green
+    r.value == Col::Green
+}
+
+/**
+ * ref_local_over_a_str_aliases — a reference over a FAT source: the address is the `{ptr, len}`
+ * pair's own frame slot, not the string's content pointer, so a reassignment that changes BOTH
+ * halves must be visible through the reference.
+ *
+ * @return true iff the reference read back the source's new value
+ */
+pub fn ref_local_over_a_str_aliases() -> bool {
+    mut s = "a"
+    ref r: str = s
+    s = "bb"
+    r.value == "bb"
+}
+
+/**
+ * ref_local_over_a_slice_aliases — the other fat shape, where a stale length is the failure a
+ * pointer-only alias would produce.
+ *
+ * @return true iff the reference read back the source's new elements
+ */
+pub fn ref_local_over_a_slice_aliases() -> bool {
+    mut xs: []i64 = [1]
+    ref r: []i64 = xs
+    xs = [2, 3]
+    if r.value.len != 2 { return false }
+    r.value[0] == 2
+}
+
+/**
+ * ref_local_forwarded_into_a_ref_parameter_reaches_the_source — a `ref` LOCAL handed to a `ref`
+ * PARAMETER carries its pointer as a plain value, so the callee's write must reach the ORIGINAL
+ * source two levels up, not the local handle.
+ *
+ * @return true iff the source saw the write the callee made
+ */
+pub fn ref_local_forwarded_into_a_ref_parameter_reaches_the_source() -> bool {
+    mut d = Ch { open = true; tag = 9 }
+    ref r: Ch = d
+    shut(r)
+    !d.open
+}
+
+/**
+ * ref_local_chained_into_another_ref_local_aliases — `ref q: Ch = r` over a reference forwards the
+ * pointer rather than taking the address OF the handle, so `q` names the original source.
+ *
+ * @return true iff the second reference read back the source's new value
+ */
+pub fn ref_local_chained_into_another_ref_local_aliases() -> bool {
+    mut d = Ch { open = true; tag = 9 }
+    ref r: Ch = d
+    ref q: Ch = r
+    d.open = false
+    !q.open
+}
+
+/**
+ * ref_local_returned_by_passdown_aliases — a reference produced by a `-> ref T` pass-down still
+ * names the CALLER's own cell, so a write through it is visible there.
+ *
+ * @return true iff the caller's variable saw the write made through the returned reference
+ */
+pub fn ref_local_returned_by_passdown_aliases() -> bool {
+    mut c = Ch { open = true; tag = 7 }
+    ref r: Ch = hand_back(c)
+    r.open = false
+    !c.open
+}
+
+/**
+ * ref_local_bound_in_a_loop_aliases_each_turn — the binding is re-executed every iteration, so the
+ * alias must be re-established every iteration rather than captured once at the loop head.
+ *
+ * @return true iff the source saw the write made through the reference inside the loop
+ */
+pub fn ref_local_bound_in_a_loop_aliases_each_turn() -> bool {
+    mut d = Ch { open = true; tag = 9 }
+    mut i = 0
+    loop {
+        if i >= 2 { break }
+        ref r: Ch = d
+        r.open = false
+        i = i + 1
+    }
+    !d.open
+}
+
+/**
+ * ref_local_bound_in_a_lambda_aliases — a LIFTED body runs its own address-taken pre-pass, so the
+ * rule must hold inside a lambda exactly as it does in a named function.
+ *
+ * @return true iff the reference inside the lambda read back the lambda-local's new value
+ */
+pub fn ref_local_bound_in_a_lambda_aliases() -> bool {
+    let f: () -> bool = () => {
+        mut d = Ch { open = true; tag = 9 }
+        ref r: Ch = d
+        d.open = false
+        !r.open
+    }
+    f()
+}
+
+/**
+ * ref_local_over_a_class_sees_a_field_write — a class is a REFERENCE type already, so a `ref` over
+ * one must still see a field written through the source handle.
+ *
+ * @return true iff the reference read back the field the source handle wrote
+ */
+pub fn ref_local_over_a_class_sees_a_field_write() -> bool {
+    mut a = Holder::of("a")
+    ref r: Holder = a
+    a.name = "b"
+    r.name == "b"
+}
+
+/**
+ * whole_value_reassignment_reaches_a_ref_local — a WHOLE-VALUE reassignment of the source, not just
+ * a field write. The own backend rebound the name to the new value's own fresh storage, which no
+ * alias can see; the C route holds the local inline and assigns it field for field.
+ *
+ * @return true iff the reference read back the whole new value
+ */
+pub fn whole_value_reassignment_reaches_a_ref_local() -> bool {
+    mut d = Ch { open = true; tag = 9 }
+    ref r: Ch = d
+    d = Ch { open = false; tag = 9 }
+    !r.open
+}
+
+/**
+ * whole_value_reassignment_of_a_null_union_reaches_a_ref_local — the same reassignment arc at a
+ * `T | null` source, whose storage is the tag+payload wrapper rather than a struct layout.
+ *
+ * @return true iff the reference read back the wrapper's new payload
+ */
+pub fn whole_value_reassignment_of_a_null_union_reaches_a_ref_local() -> bool {
+    mut o: i64 | null = 1
+    ref r: i64 | null = o
+    o = 2
+    match r.value {
+        i64 as v => v == 2
+        null => false
+    }
+}
+
+/**
+ * ref_parameter_write_reaches_the_caller — the position that already worked, kept as a probe so a
+ * change to the shared address-of primitive cannot break it unobserved.
+ *
+ * @return true iff the caller's variable saw the write the callee made
+ */
+pub fn ref_parameter_write_reaches_the_caller() -> bool {
+    mut c = Ch { open = true; tag = 7 }
+    shut(c)
+    !c.open
+}
+
+/**
+ * a_plain_mut_binding_of_an_aggregate_still_copies — THE INVERSION. `mut r = d` is the mutability
+ * axis alone and must still COPY, so a write to the source stays invisible through `r`. A fix that
+ * made every aggregate binding share its source's storage would pass every other probe in this file
+ * and silently break the value-binding rule.
+ *
+ * @return true iff the plain binding did NOT alias
+ */
+pub fn a_plain_mut_binding_of_an_aggregate_still_copies() -> bool {
+    mut d = Ch { open = true; tag = 9 }
+    mut r = d
+    d.open = false
+    r.open
+}
+
+/**
+ * an_unaliased_aggregate_reassignment_still_rebinds — the SECOND inversion, at the reassignment arc:
+ * a source nothing aliases keeps the ordinary path, and a COPY taken before the reassignment must
+ * still hold the old value afterwards.
+ *
+ * @return true iff the earlier copy kept the value it was bound to
+ */
+pub fn an_unaliased_aggregate_reassignment_still_rebinds() -> bool {
+    mut d = Ch { open = true; tag = 9 }
+    mut keep = d
+    d = Ch { open = false; tag = 9 }
+    if d.open { return false }
+    keep.open
+}
