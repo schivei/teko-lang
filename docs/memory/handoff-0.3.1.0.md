@@ -108,6 +108,36 @@ o CI antes de a pôr na fila. **Mas confrontar não é dispensar:** quando o age
 resultado é uma DISCREPÂNCIA a medir, não um lado a acreditar. Eu fiz as duas coisas erradas em sequência —
 primeiro aceitei sem confrontar, depois dispensei sem medir.
 
+
+### DISCIPLINA DE PUSH — medida em 2026-07-30, e o defeito era meu
+
+**Medido:** das últimas oito execuções de `pr.yml` no vagão, **sete estavam `cancelled`**. A única com
+veredito era `ebfb6be8`, muito atrás do topo. Eu estava a ler CI de uma execução velha sem perceber porquê.
+
+**A CAUSA, e não é intermitência do GitHub.** `pr.yml:219-221`:
+
+```yaml
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+```
+
+Com `cancel-in-progress: false`, o grupo mantém **uma** execução a correr e **uma** pendente. Uma terceira
+que chegue **cancela a pendente**. Logo cada push meu deslocava a que estava à espera, e só a que já corria
+chegava a veredito.
+
+**A consequência é pior que atraso: é CEGUEIRA.** Um dreno de produto empurrado entre dois commits de
+documentação pode nunca ser medido, porque o push seguinte cancela a sua execução pendente. **Um dreno que
+ninguém correu é exactamente o "verde sobre linha não executada" que esta lane persegue** — na outra ponta.
+
+**REGRA ADOPTADA, e vale para qualquer sessão:**
+
+- **um push por ciclo**, não um por commit. Comitar localmente à vontade; empurrar uma vez.
+- **um dreno de produto empurra-se SOZINHO**, e espera-se pelo seu veredito antes de empurrar documentação
+  por cima. O que precisa de CI tem prioridade no canal.
+- **antes de ler CI, confirmar que a execução escolhida NÃO é `cancelled`** — uma `cancelled` não tem
+  veredito e ler-lhe as partes que correram é tirar conclusão de meia medição.
+
 ### CRUMB 5 do AArch64-ELF — NÃO APLICADO, e a razão é medição, não preguiça
 
 O agente deixou-mo por ser workflow (só o integrador toca `.github/workflows/`). **Medi antes de aplicar, e
