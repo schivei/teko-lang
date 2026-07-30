@@ -2568,3 +2568,147 @@ propria classe, e isso e desejado"*). **Nao encosto a decisao do dono a nenhuma 
    mas e uma divergencia entre a lei e a arvore, e quem a resolver deve saber que existe.
 2. `ref r = c` sem anotacao **compila e copia, sem diagnostico** (medido). O meu desenho e imune por
    construcao (§19.3), mas qualquer outro que use `ref` nao e.
+
+---
+
+## 21. `#arch("…")` — o irmao do `#os`, e a fronteira que impede que ele esconda um teste mau
+
+### 21.1 O desenho
+
+**Simetria total com o `#os`**, porque a maquinaria toda ja existe e o custo esta em copiar uma forma
+provada: campo `arch_guard` ao lado de `os_guard` (`ast.tks:400`), leitura em `parse_decl.tks:890`,
+serializacao nos tres sitios do `.tkb` (`tkb_write:521`, `tkb_read:727`, `tkb_frame:301`), e o filtro
+em `prune_os`, que passa a `prune_platform(program, tos, tarch)`.
+
+**Composicao: E, nunca OU.** Um item com `#os("linux") #arch("arm64")` existe **so** em linux-arm64.
+Nao ha forma de exprimir "ou", e a ausencia e deliberada: um `ou` num filtro de compilacao e a porta
+por onde entra o item que existe em duas plataformas e nao foi provado em nenhuma.
+
+**O `match` cresce? Digo o que medi.** `prune_os` (`project.tks:124`) trata **so**
+`parser::Function`; `parse_decl.tks:1292` recusa `#os` em qualquer outra posicao. **Recomendo manter
+`#arch` tambem so em funcao**, e a razao nao e preguica: um `const` ou um `type` que difere por
+arquitectura e exprimivel por **uma funcao** guardada (`fn word_size() -> u64`), e essa forma tem
+ainda a vantagem de o valor divergente ter um NOME. Se o dono quiser `#arch` em `type`/`const`, o
+`match` de `prune_os` cresce com um braco por especie de item, mais o espelho na recusa de posicao —
+**e a serializacao do `.tkb` ja nao chega, porque um `type` podado muda a tabela de tipos**. Digo-o
+para a decisao ser tomada com o custo a vista, e nao a decido.
+
+### 21.2 O vocabulario, e o erro escondido que EU consigo provar hoje
+
+**O `#os` de hoje aceita qualquer string e compara-a por igualdade:**
+
+```teko
+parser::Function as f => { if f.os_guard != "" && f.os_guard != tos { keep = false } }
+```
+
+Logo `#os("Linux")` — L maiusculo — **remove a funcao em TODAS as plataformas, em silencio**. Nao e
+hipotese: e a leitura directa da linha 124. Um filtro mal escrito nao falha; **desaparece com o
+codigo**.
+
+**E a casa ja tem a regra certa, aplicada a outra coisa.** `unsupported_target_error`
+(`project.tks:1961`) existe precisamente para *"um `TEKO_TARGET` que `target_from_name` nao
+reconhece... um erro de COMPILACAO, nunca um mis-lower silencioso"*, e **lista o conjunto aceite**.
+
+**Proposta: `#arch` valida contra um vocabulario FECHADO em tempo de compilacao, e o `#os` passa a
+validar tambem.** O vocabulario ja e canonico e esta fixado no runtime (`teko_rt.c:2418-2429`):
+**`"arm64"`** (nao `aarch64`) e **`"x86_64"`** (nao `amd64`); os SO saem do mesmo par que
+`NativeTarget` ja enumera (`macos`, `linux`, `windows`).
+
+*Prova:* `#arch("x86-64")` e um **erro de compilacao** que nomeia o valor e lista o conjunto aceite ·
+**reversao**: `#arch("x86_64")` compila e o item sobrevive na plataforma certa · **vivacidade**: o
+mesmo item **desaparece** na outra, senao o filtro nao esta a filtrar.
+
+### 21.3 O cenario `.tkr` que nao deve CORRER — a forma honesta
+
+`Then on "<os-arch>"` **sobrepoe expectativas**; nao impede execucao. `skip` e falha por lei. Falta a
+terceira forma, e ela ja existe na casa — no `#os`:
+
+> **`Given platforms = ["linux-x86_64", "macos-arm64"]`. Numa plataforma fora da lista o cenario NAO E
+> SALTADO: ele NAO EXISTE nesta corrida** — exactamente como `prune_os` remove um item do programa e
+> ninguem lhe chama skip.
+
+A distincao e de significado e nao de palavra: **um skip diz "nao consegui"; um nao-aplicavel diz
+"isto nao existe aqui".** O primeiro e falha por lei porque esconde trabalho por fazer; o segundo e a
+mesma operacao que a compilacao condicional ja faz, e por isso e legitimo pela mesma razao.
+
+O sumario de §13 ganha uma coluna `not-applicable`, **separada de `skipped`** — juntar as duas seria
+reintroduzir o skip com outro nome.
+
+**A guarda que impede isto de virar esconderijo, e e a metade que faz a proposta valer:**
+
+> **Um cenario nao-aplicavel em TODAS as pernas da matriz e uma FALHA.**
+
+Verificavel por agregacao: a uniao dos `Given platforms` de cada cenario tem de intersectar pelo menos
+uma perna da matriz declarada. Um cenario que nao corre em lado nenhum e cobertura falsa com selo de
+qualidade — e e exactamente o que uma lista de plataformas facilita se nada a vigiar.
+
+*Prova:* um cenario com `Given platforms = ["plan9-vax"]` faz a guarda **falhar** nomeando-o ·
+vivacidade: um cenario com uma plataforma real da matriz passa.
+
+### 21.4 A pergunta contra a proposta — e a resposta e que o caso `xat_` NAO merece `#arch`
+
+Pediste-me para a fazer, e ela e a parte util.
+
+**A fronteira, em uma linha:**
+
+> **`#arch` responde "este codigo EXISTE aqui?". Nunca responde "este codigo COMPORTA-SE de outra
+> maneira aqui?".**
+
+| classe | merece | porque |
+|---|---|---|
+| codigo cuja **existencia** e especifica da arquitectura — uma ligacao FFI, um intrinseco, um numero de chamada de sistema, um registo com nome de plataforma | **`#arch`** | noutra arquitectura ele nao compila nem liga. Nao ha resultado para comparar |
+| teste cujo **resultado** difere por hospedeiro | **corrigir** | um resultado que muda com o hospedeiro significa que o hospedeiro e uma **entrada nao nomeada**. Nomeia-se a entrada e o teste volta a ser universal |
+
+**E o `xat_` cai do segundo lado.** Nao encontrei
+`xat_sysv_call_args_keep_independent_per_file_counting` na arvore ao topo — digo-o em vez de fingir
+que li o corpo — mas o **nome** e a familia dizem o suficiente, e a familia esta ca
+(`src/backend/isel_x86_64_test.tkt`): sao testes de **seleccao de instrucao** que constroem um
+`lir::LFunc` sintetico e afirmam o que o classificador SysV faz com ele. Isso e uma **funcao pura da
+entrada**. A mesma entrada tem de dar a mesma saida num Mac, num arm64 e num Windows — o classificador
+SysV nao muda de opiniao consoante quem o corre.
+
+**Hipotese, e ela e verificavel em vez de opinada:** se ele passa **so** em linux-x86_64, o alvo esta
+a ser apanhado do **hospedeiro** em vez de ser dito pelo teste. Num macOS arm64 o codigo exercitado nao
+e o SysV — e o AAPCS64; num Windows x86_64 e o Win64. **O teste nao e dependente de arquitectura: e um
+teste que se esqueceu de nomear o seu alvo.**
+
+*Como se decide sem discutir:* passa-se o alvo **explicitamente** ao que esta sob teste. Se passar a
+verde nas quatro pernas, era isso — e um `#arch` ali teria **escondido** o defeito e comprado cobertura
+falsa nas tres plataformas onde ele falha. Se continuar vermelho com o alvo explicito, entao ha uma
+dependencia real do hospedeiro, e **essa** merece ser nomeada — mas nomeada no sitio certo, que e a
+dependencia, nao o teste.
+
+**A guarda que torna isto lei em vez de conselho:**
+
+> **`#arch` (e `#os`) num `#test` sao PROIBIDOS**, salvo entrada numa lista de excepcoes com razao
+> escrita.
+
+Um `#test` sobre um backend de alvo cruzado e precisamente o que tem de correr em **todo** o lado: e
+para isso que ele existe. *Prova:* um `#test` com `#arch` fora da lista faz a guarda falhar nomeando o
+teste · vivacidade: uma funcao **nao**-`#test` com `#arch` passa.
+
+### 21.5 Porque nenhum dos dois mecanismos tem utilizadores — opiniao MEDIDA
+
+`#os` tem zero usos e `Then on` tambem. Nao acho que a superficie seja indescobrivel: **acho que o
+corpus que precisaria dela ainda nao e Teko.**
+
+Medido: a divisao POSIX/Windows do projecto vive toda em `teko_rt.c`, e la ela ja se escreve
+`#ifdef _WIN32` — ha dezenas (`:2243` *"No fork/dup2 on Windows"*, `:2262`, `:30`). **O `#os` foi
+construido para uma divisao do lado Teko que ainda nao existe, porque o runtime ainda e C.**
+
+Isso faz uma previsao falsificavel: **`#os` ganha os primeiros utilizadores exactamente quando
+`feat/issue-runtime-em-teko` aterrar** — e a §16/§17 deste documento ja precisam dele (o
+`tk_task_current` tem duas encarnacoes de plataforma, o `pipe` tem duas). Se o runtime aterrar em Teko
+e `#os` continuar com zero usos, a minha explicacao esta errada e a superficie e que e o problema.
+
+### 21.6 O custo
+
+**Nao toca em nenhum dos 11 crumbs nem na fundacao F1–F6.** E ortogonal: compilacao condicional e
+seleccao de regressivos. As unicas duas linhas de contacto: o sumario de §13 ganha a coluna
+`not-applicable` (dentro do **C4**), e o `#os` validado ajuda o F1/F5, que sao os primeiros a precisar
+de duas encarnacoes por plataforma.
+
+**Um crumb**, com quatro pecas e as suas guardas: `arch_guard` no parser/AST/`.tkb`;
+`prune_platform`; a validacao de vocabulario fechado para `#arch` **e** `#os`; e do lado dos
+regressivos o `Given platforms` com a guarda do "nao-aplicavel em toda a matriz". As tres inversoes
+de §21.2, §21.3 e §21.4 entram com ele.
