@@ -18,7 +18,7 @@
 # stdout+stderr on failure — a silent "exit 1, no output" gate is never acceptable.
 # `AR_CHECK_REQUIRE_TOOLS=1` turns an honest-skip (wrong host, or no archive given) into a
 # HARD FAILURE instead of exit 0 — set this on a runner where the toolchain is guaranteed
-# present, mirroring `validate_wasm_own.sh`'s `REQUIRE_WASM_ENGINE` seam.
+# present.
 #
 # usage: scripts/check_ar_elf.sh <archive.a> [symbol_that_must_resolve]
 #   AR_CHECK_REQUIRE_TOOLS=1   (default: unset) — an honest-skip becomes a hard failure.

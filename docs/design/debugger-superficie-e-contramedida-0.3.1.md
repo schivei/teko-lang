@@ -1524,7 +1524,6 @@ onde vem o valor** do `tdb` e portanto **o que priorizar** nele:
 | **monomorfização** | **não**, e medi: `tk_emit_tsym` já emite `<símbolo>\t<nome-teko>`, e o `bt` do `tdb` mostra `ns::fn` | vantagem já paga pelo `.tsym` |
 | **`defer`** | **não, e é bom que não** — com granularidade de statement, o `step` **entra** nas linhas do `defer`, que é o comportamento certo: esse código corre | nada a fazer; **não esconder** |
 | **concorrência** | **não hoje.** Medi `concorrencia-adiantada-s8.md` (`cargo/20-concorrencia-adiantada`): o chão é `pthread_create`/`pthread_join`/`pthread_self` — **threads 1:1 do SO**, sem escalonador nosso, sem pilhas geridas. É exactamente o que gdb/lldb modelam nativamente. | **`tdb` não precisa de modelo de tarefas na fase inicial** — e é isto que mantém T1…T5 em 18 crumbs em vez de o dobro |
-| **wasm** | **não** — o caminho da indústria é DWARF em seção customizada + extensão do DevTools | fora do arco |
 
 **O gatilho que MUDARIA o escopo do `tdb`, nomeado:** no dia em que Teko ganhar **escalonador
 próprio, tarefas verdes ou pilhas geridas/crescíveis**, `tdb` passa a precisar de um modelo de
@@ -1706,7 +1705,6 @@ e é, por §10.3, também o primeiro fixture do `tdb`.
   — **tudo já na semente**. Nada a sequenciar por causa dela. O único bloco que precisaria de
   funcionalidade não aterrada é o `tdb` em Teko **puro** (`unsafe`/`ptr<T>`/`c_types`) — e é por isso
   que ele é orçado pela via do shim em `teko_rt.c` (§9.5).
-* **`wasm` fora**, por decisão do dono; `objfile_wasm.tks` intocado.
 
 **Sem HALT.** As tensões resolveram-se por lei ou por medição: `.tsym` vs. formato novo pela
 legislação que já designou `.tsym` *"for the debugger"*; `tdb`-projeto vs. `teko lsp`-subcomando pela

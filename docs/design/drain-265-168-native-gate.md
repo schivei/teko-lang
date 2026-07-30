@@ -5,7 +5,7 @@
 Status: DESIGN (architect). Implementation crumbs. Companion to
 `teko-native-test-gate` (owner standing ruling 2026-07-06: the `#test` gate NEVER runs on
 the VM — it compiles to a NATIVE binary that knows the product-under-test + its access
-points; VM stays dev/debug/WASM only). This is THE shared-villain kill: it drops the
+points; VM stays dev/debug only). This is THE shared-villain kill: it drops the
 compiler's gate-time peak from 1595 MB → ~366 MB (the child runs in its own process) AND
 the 15.6 s VM interpret → a sub-second native run. Both axes bank it once.
 

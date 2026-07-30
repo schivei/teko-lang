@@ -154,7 +154,7 @@ fn supported_targets() -> []TargetRow { /* crumb C3 */ }
  *
  * @field name    the canonical "<arch>-<os>" key (e.g. "x86_64-linux")
  * @field variant the dispatch discriminant for emit_native
- * @field objfmt  the object format token ("elf" | "macho" | "coff" | "wasm")
+ * @field objfmt  the object format token ("elf" | "macho" | "coff")
  * @since 0.3.1
  */
 type TargetRow = struct { name: str; variant: NativeTarget; objfmt: str }
@@ -166,7 +166,7 @@ arm64 fallback) on miss:
 ```teko
 /**
  * target_from_name — map a raw TEKO_TARGET value (canonical name or a recognized alias, e.g.
- * "x86_64-elf" → x86_64-linux, "wasm" → wasm32-wasi) to its NativeTarget via supported_targets.
+ * "x86_64-elf" → x86_64-linux) to its NativeTarget via supported_targets.
  * REPLACES the pre-0.3.1 silent Arm64Macho fallback: an unsupported/typo value is now a hard error
  * (R2) whose message lists the supported set from supported_targets — no silent mis-lower.
  *
@@ -228,7 +228,7 @@ Reporting surface: a field on the build report, printed as an explicit line, e.g
 `cross: emitted x86_64-windows on host x86_64-linux — not executed`. This reuses the exact
 honest-skip discipline the regressor already uses for absent run-wrappers
 (`resolve_run_wrapper`, `docs/design/regressor-principal-0.3.1.md` §2g). A cross native build is,
-for the run step, the same shape as a wasm target whose wrapper is absent: emitted, verified
+for the run step: emitted, verified
 well-formed (`check_object_wellformed`, §2f of that doc), NOT run.
 
 ---

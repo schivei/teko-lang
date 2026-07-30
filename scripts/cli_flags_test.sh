@@ -83,7 +83,7 @@ run_flag
 # AND THEN A THIRD RULING LANDED, which is why this block reads the way it does now. The C backend
 # came BACK (`theory/volta-o-backend-c`), and with it the plan the fixpoint gate records: *".31 com
 # as duas rotas, .32 ensina o nativo, .33 remove"* — RESEQUENCED BY PLATFORM on the 0.3.1 lane,
-# where the Linux leg generates native first, macOS/Windows/wasm keep the C route, and THE C LIVES
+# where the Linux leg generates native first, macOS/Windows keep the C route, and THE C LIVES
 # UNTIL 0.3.1.4. So there are TWO backends today and `TEKO_BACKEND` is the live way to choose
 # between them — `scripts/fixpoint_gate.sh` pins it to `c` to get a gen2 at all. The 2026-07-27
 # ruling is not cancelled, it is DEFERRED to the wagon that retires the C, after 0.3.1.4.

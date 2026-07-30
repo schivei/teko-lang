@@ -604,50 +604,36 @@ planeia para uma versão adiante. Até lá, o cross honesto é: emitir o objeto,
 parar. Adiado por ordem explícita — *"quando todos os natives estiverem funcionando"* — não por
 incapacidade.
 
-## Lei — wasm prova-se com um app real, e WASI/Browser ganham versão própria (dono, 2026-07-29)
+## Lei — wasm SAI da árvore por inteiro, e volta reescrito do zero (dono, 2026-07-30)
 
 Palavras dele:
 
-> Acredito que as falhas do wasm ocorrem pq o compilador está tentando compilar a si mesmo em wasm,
-> o que não deveria acontecer, e por isso também WASI e Browser ganham cada um uma versão dedicada,
-> compilando um app real.
+> Faça o seguinte: remova todo código e CI sobre wasm, é pra remover, não é mover, não KNOWN-STOP,
+> quando chegar o momento reescrevemos certo e do zero.
 
-### A premissa, corrigida por medição
+**Isto REVOGA a lei de 2026-07-29** (*"KNOWN-STOP, wasm terá a própria versão para refinar"*), que
+vivia aqui e mandava PINAR o buraco em vez de o remover. O pino `scripts/wasm_known_stop_gate.sh`
+não fica; sai.
 
-O compilador **não** se compila em wasm, e nada tenta. Não existe perna produtora wasm:
-`scripts/ci_producer_matrix.sh` declara `linux-*`, `macos-arm64` e `windows-x86_64`, e o
-*"wasm regressor"* que ele cita em `:146` é **consumidor** — baixa o asset `linux-x86_64-glibc` e usa
-esse compilador x86-64 para construir um programa wasm. Fica registado para ninguém re-derivar.
+### As duas medições que levaram à ordem, e que valem como calibração
 
-E não poderia ser de outro modo com proveito: **o WASI não tem `fork`/`exec` e o browser não tem
-sistema de ficheiros.** Um compilador que lança processos e percorre árvores de ficheiros é o pior
-candidato possível a binário wasm por esta rota.
-
-### A conclusão, que fica de pé — e com razão mais forte
-
-O programa que a linha wasm compila é `cases/wasm_exit7.tks`, e é uma linha:
-
-```teko
-exit(7)
-```
-
-Sem `alloca`, sem rodata, sem assinatura com `Ptr`. E esses três são **exatamente** o subconjunto que
-o `C1-wasm64-scope` de `src/backend/stackify.tks` ainda recusa. Logo a fixture está calibrada para
-passar por evitar tudo o que é difícil: **ela ficaria verde mesmo que o wasm estivesse quebrado para
-qualquer programa real.**
+1. **A fila `wasm32-wasi` não corria em lado nenhum.** O único job com motor de wasm era o
+   `regressor-full`, ligado a um produtor vermelho por desenho, logo `skipped` em todas as corridas.
+   O buraco era mais largo do que o KNOWN-STOP descrevia.
+2. **A fixture estava calibrada para passar.** O programa era uma linha, `exit(7)`: sem `alloca`,
+   sem rodata, sem assinatura com `Ptr` — exactamente o subconjunto que o backend recusava. Ficaria
+   verde mesmo que o wasm estivesse quebrado para qualquer programa real.
 
 É a quinta vez nesta lane que o mesmo padrão morde — *fixture que verifica que compila, não que
 funciona*. A regra que já valia para valores vale igual para alvos: **uma fixture calibrada para o
-subconjunto suportado não mede o alvo, mede a calibração.**
+subconjunto suportado não mede o alvo, mede a calibração.** Uma remoção que apaga esta fixture não
+perde cobertura: retira uma mentira.
 
-### O que isto muda no pin
+### O que a remoção implica para quem vier depois
 
-O KNOWN-STOP do wasm (`scripts/wasm_known_stop_gate.sh`) continua válido, mas a sua migalha de
-promoção passou a começar noutro sítio. Não é "dar motor a uma perna both-tier" — é **trocar a
-fixture por um app real que exercite alloca, rodata e assinaturas `Ptr`**, e esperar vermelho no
-início. Esse vermelho É o item de trabalho da versão do wasm, e casa com o seguimento já nomeado:
-fiar `ptr64` pelo frame e pela rodata. Como WASI e Browser são só 64 bits por ordem do dono, o app
-cai em wasm64 — onde a paragem vive. As duas restrições encontram-se na mesma migalha.
+Não há desenho guardado, nem enum desactivado, nem ficheiro comentado, nem doc a explicar como era.
+Quando o wasm voltar, é escrito do zero — palavra do dono. Um agente que encontre um vestígio de
+wasm nesta árvore encontrou um defeito da remoção, não uma migalha deixada de propósito.
 
 ## Leis — sem `void`, sem sobrecarga, e o `main` híbrido (dono, 2026-07-30)
 
@@ -724,8 +710,7 @@ surpresa.
 A guarda que proíbe declarações no `main.tks` é **uma linha**, em
 `src/parser/parse_file.tks:149`, e é puramente sintática. E o ponto de entrada **já** se chama
 `main`: `src/build/project.tks:2255` identifica o main virtual *"by its exact, un-namespaced `main`
-symbol"*, `src/backend/stackify.tks:4739` procura `funcs[i].symbol == "main"`, e
-`src/checker/initanalysis.tks:281` já isenta `main` da análise de inicialização. O main virtual já é
+symbol"*, e `src/checker/initanalysis.tks:281` já isenta `main` da análise de inicialização. O main virtual já é
 baixado como uma função literalmente chamada `main` — o híbrido deixa o utilizador **escrever** a
 função que hoje é sintetizada, em vez de acrescentar um conceito.
 
@@ -1389,7 +1374,6 @@ tranca. Mas a correcção de UM recurso não é a correcção: **o que fecha é 
 | caminho fixo escrito durante a corrida | usos |
 |---|---|
 | **`bin/teko`** | **9** |
-| `bin/teko.wasm` | 3 |
 | `bin/teko.o` | 3 |
 | `out/x` / `bin/x` | 2 / 2 |
 | `bin/pt-probe` / `bin/pt-probe-sh` | 2 / 2 |

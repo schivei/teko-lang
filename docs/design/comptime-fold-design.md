@@ -445,8 +445,8 @@ Coordination, not co-option:
 > **[integrator-pinned, veto open]** Do NOT double-implement `TIndex`-of-const. Two
 > clean options for the owner/integrator to pick (§11 Q2): (a) AL0 Tier-6 defers to
 > this general folder (AL0 keeps its two Huffman *generators* as-is per
-> `al-wave-crumbs.md:104`, and its three fold targets — `gzip_header`, `wasm_preamble`,
-> `wasm_narrow_msg_bytes` — resolve once Layer 1c lands); or (b) this design's Layer 1c
+> `al-wave-crumbs.md:104`, and its fold target `gzip_header` resolves once Layer 1c
+> lands); or (b) this design's Layer 1c
 > waits until AL0 Tier-6 lands and reuses it. Recommendation: (a) — the general folder
 > is the honest home for `TIndex`-of-const, and AL0's own note calls Tier-6 "um crumb
 > próprio, não um sweep" with "ganho de perf ~zero," so the value is honesty/W15, which
@@ -990,8 +990,7 @@ sites gain the `agg` argument (mechanical).
   separate product code**, so there is **no stale AL0 code to remove**. Option (a) of §5
   is taken: the general folder is the home; AL0 does **not** ship a parallel Tier-6.
 - **AL0 keeps its two Huffman generators** (`al-wave-crumbs.md:104`) unchanged. Its three
-  fold targets — `gzip_header` (`gzip.tks:33`), `wasm_preamble` (`objfile_wasm.tks:172`),
-  and `wasm_narrow_msg_bytes` — resolve once CF4b lands, **provided AL0 does its own
+  fold target `gzip_header` (`gzip.tks:33`) resolves once CF4b lands, **provided AL0 does its own
   source rewrite** to index the module const directly inside a const initializer
   (`const GZIP_HEADER: []byte = [GZIP_MAGIC[0], GZIP_MAGIC[1], …]`, the shape
   `al-wave-crumbs.md:96` already prescribes). CF4 does **not** touch any AL file and does

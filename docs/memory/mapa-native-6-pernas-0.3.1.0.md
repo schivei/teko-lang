@@ -131,8 +131,7 @@ Only **windows-x86_64** in Probe A:
 
 ## Probe B: Cross-Compilation to Canonical Targets
 
-Each leg cross-compiles to multiple targets: arm64-macos, x86_64-linux, x86_64-windows,
-wasm32-wasi, wasm64-wasi, wasm32-browser.
+Each leg cross-compiles to multiple targets: arm64-macos, x86_64-linux, x86_64-windows.
 
 ### Target: x86_64-linux
 
@@ -148,12 +147,6 @@ source platform.
 
 **All lowering and semantic messages remain byte-identical across the six legs.**
 The 1 EMISSION failure (`isel x86-64: B1-args`) is identical on all six legs.
-
-### Target: wasm32-wasi, wasm64-wasi, wasm32-browser
-
-WebAssembly targets show increased distinct-stop counts (17–18) due to WebAssembly-specific
-lowering and emission constraints. These backend-specific stops (LOWERING and EMISSION)
-remain consistent across the six legs.
 
 ---
 

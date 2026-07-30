@@ -39,7 +39,7 @@ decisions.
 
 The **only** item the owner left open is *server/registry: later vs parallel-now* — and the
 owner's direction for THIS work is explicit: **"servidor depois, primeiro versão + definições"**
-→ the registry server, the site `teko-lang.cloud`, and the wasm playground (#509) are §7
+→ the registry server and the site `teko-lang.cloud` are §7
 (deferred). Everything else above is settled and this doc merely consolidates it.
 
 ---
@@ -602,8 +602,8 @@ building your own source — works now.
   The registry (deferred, §7) needs anti-squat policy + publisher identity verification. Recorded
   as a registry-layer requirement, not a compiler one.
 - **Runtime capability / sandbox.** v1 = full-trust-once-installed (like Cargo/npm). FUTURE =
-  capability-based execution / an opt-in **WASI-sandbox** for running tools in isolation (chroot to
-  project, client-open / server-opt-in). Connects to wasm backend targets (N6a WASI / N6b browser).
+  capability-based execution / an opt-in **sandbox** for running tools in isolation (chroot to
+  project, client-open / server-opt-in).
   Recorded as a future direction, out of PK0–PK3 scope.
 
 ---
@@ -702,7 +702,7 @@ honest-stop); `path=`/`git=` tools are full-trust.
 #### 5.3.3 Security note (restated)
 
 A `tool` runs arbitrary code when executed → authenticity is NOT deferred for tools (§4.3). The
-future WASI-sandbox option (§4.3) is the isolation path for running an untrusted tool. This is the
+future sandbox option (§4.3) is the isolation path for running an untrusted tool. This is the
 ONE seam where the "integrity-now, authenticity-later" default is overridden.
 
 ---
@@ -876,7 +876,7 @@ later without redesign.
 - **Registry server + site `teko-lang.cloud` + package server.** The owner's direction: server
   LATER; first the version + the definitions (this doc). The VPS (`root@187.77.42.87`,
   runner `vps-x64`, dokploy) is the eventual home.
-- **Wasm playground (#509).** Rides the wasm backend targets (N6a WASI / N6b browser); out of the
+- **Playground (#509).** Needs a target the browser can run, which this project does not emit; out of the
   package-manager scope now.
 - **Bindgen (#506).** The multi-language FFI binding generator (`--emit-bindings`) and the `.tks`
   link-only consumption path are a SIBLING track (pós-LTS for the non-`.tks` targets); the `.tkh`

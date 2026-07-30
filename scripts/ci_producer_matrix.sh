@@ -78,7 +78,7 @@
 #
 # A régua continua a medir (x86 + arm, glibc + musl) e ganham-se duas pernas verdes que provam o
 # resto do oleoduto — produção de asset, testes, determinismo — que o vermelho total escondia.
-# macOS, Windows e wasm carregam `"c"`, porque o plano sequenciado por plataforma
+# macOS e Windows carregam `"c"`, porque o plano sequenciado por plataforma
 # (docs/memory/0.3.1-plano-sequenciado-por-plataforma.md) os migra em 0.3.1.1–0.3.1.4 e retira a
 # rota C depois disso.
 #
@@ -143,7 +143,7 @@ A_WX='{"producer":"windows-x86_64","os":"windows-latest","timeout":90,"kind":"na
 A_MAC='{"producer":"macos-arm64","os":"macos-latest","timeout":60,"kind":"native","seed":"macos-arm64","produces":"macos-arm64","fixpoint_backend":"c"}'
 
 # linux-x86_64-glibc is declared in both tiers and is the ONLY Linux leg on light: it is the asset
-# every fixed-name consumer downloads (the wasm regressor, mem-paranoid), so a light run without
+# every fixed-name consumer downloads (the fail-closed regressor, mem-paranoid), so a light run without
 # it would leave those lanes with nothing to fetch.
 A_XG='{"producer":"linux-x86_64-glibc","os":"ubuntu-latest","timeout":90,"kind":"linux","seed":"linux-x86_64-glibc","produces":"linux-x86_64-glibc","fixpoint_backend":"native"}'
 

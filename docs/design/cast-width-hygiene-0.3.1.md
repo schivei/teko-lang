@@ -90,8 +90,8 @@ total numeric casts  `x to <numtype>`   : 2649        (26.4 casts / KLOC)
 `x to u32)` (narrow-into-arg/field, closing paren) : 306
 ```
 
-Densest files (numeric casts): `stackify.tks` **169**, `codegen.tks` **117**,
-`stackify_consts.tks` **114**, `encode_arm64_consts.tks` **103**, um backend encoder **98**,
+Densest files (numeric casts): `codegen.tks` **117**,
+`encode_arm64_consts.tks` **103**, um backend encoder **98**,
 `objfile_macho.tks` **97**, `objfile_elf.tks` **86**, `encode_x86_consts.tks` **86**,
 `math/checked.tks` **77**, `emit/tkb_write.tks` **77**. The backend/emit tier is where the manual
 equalizations concentrate.
@@ -103,10 +103,10 @@ reach. Concrete:
 
 - **`.len to u64`** (15 sites): `.len` is **already `u64`** (`typer.tks:1527-1528` types
   `str`/slice `.len` as `Prim{U64}`). `x.len to u64` is a literal no-op.
-- **Redundant equalize-in-comparison** — `stackify.tks:105 (i to u32) == id`,
-  `:300`, `:577`, `:2245 i to u32`. `i` is `i64`, `id` is `u32`; **comparison already allows
-  mixed width** (§0), so the `to u32` is dead weight today, before any rule change.
-- **Literal shift/const casts** — `stackify.tks:450 bits >> (32 to u64)`. Under context-typed
+- **Redundant equalize-in-comparison** — a `(i to u32) == id` where `i` is `i64` and `id` is
+  `u32`; **comparison already allows mixed width** (§0), so the `to u32` is dead weight today,
+  before any rule change.
+- **Literal shift/const casts** — a `bits >> (32 to u64)`. Under context-typed
   literals (.29, `literal-context-typing.md`) `32` already adopts the operand width; the `to u64`
   is redundant.
 
@@ -126,8 +126,8 @@ call/field boundary purely to satisfy a too-narrow declared type.
 Because arithmetic is same-type-only, mixed-width math is hand-equalized in the corpus. Both
 directions exist:
 
-- **DOWN** (narrow both/one to the smaller): `stackify.tks:226 ((scopes.len - 1) - i) to u32`,
-  `:2248 order.len to u32` — compute wide, then chop to the consumer's narrow width.
+- **DOWN** (narrow both/one to the smaller): a `((scopes.len - 1) - i) to u32` or an
+  `order.len to u32` — compute wide, then chop to the consumer's narrow width.
 - **UP** (widen both to a common wide type): the `to u64`/`to i64`/`to u128` family (438 + 218 +
   71 sites) — e.g. `encode_arm64.tks:1955 acc.base + ((ef.words.len to u32) * ARM64_WORD_BYTES)`
   mixes a `u32` base with widened terms by hand.
@@ -300,9 +300,9 @@ the widen the source used to spell.
   sweep target of Failure (2).
 
 - **Signature sweep (crumb 3):** the 90 `.len to u32` sites exist because a **declared field/param
-  is `u32`** (WASM local index, block offset, saved-reg count). Sweep those declarations to the
+  is `u32`** (a block offset, a saved-reg count). Sweep those declarations to the
   natural width:
-  - WASM/DWARF/ELF/Mach-O/COFF offset & index fields that are genuinely 32-bit **on the wire** stay
+  - DWARF/ELF/Mach-O/COFF offset & index fields that are genuinely 32-bit **on the wire** stay
     `u32` **but** the narrow moves to **one guarded boundary cast at serialization**, not sprinkled
     at every `.len` read. (The wire format's u32 IS the deliberate exceptional cast — §5, kept and
     documented.)
@@ -454,7 +454,7 @@ casts that are the deliberate exceptions. Report exact before/after in the crumb
 
 **Every surviving conversion is a documented exception** — a bare `to` (panics, positioned) OR a
 `teko::casting::*` call (returns `T | error`, no panic). Each falls in one of: (a) wire/ABI width
-(ELF/Mach-O/COFF/WASM/DWARF fixed 32-bit fields — one converter at the serialization boundary);
+(ELF/Mach-O/COFF/DWARF fixed 32-bit fields — one converter at the serialization boundary);
 (b) intentional truncation with a guard (hash folding, masking); (c) int↔float / float width change
 (B.38 explicit). The **choice between `to` and `casting::*` is the §10.2 policy**. Every surviving
 site should carry a Javadoc `@see` or one-line rationale so the audit is self-describing. Both forms
@@ -479,7 +479,7 @@ for the clean base.
 | **C2 — DONE** | **Backend confirm = no-op.** Verify the synthetic widen lowers through `cast_int_unop_of`/`emit_cast` byte-identically to a hand-written `to`; add a differential fixture (`a:u32 + b:u64` with & without the manual cast → identical binary). **No backend code change.** | **S** | native gate; emit goldens re-baselined ONLY where a genuine widen now differs (expected — §7) | C1 — confirmed by inspection (`widen_operand` emits the SAME `TCast{expr;type}` shape `type_cast` builds for a manual `to`, so `lir/lower.tks::cast_int_unop_of`/`codegen.tks::emit_cast` are untouched) plus the `width_rule_same_sign_widen`/`width_rule_mixed_sign_peer_ok` rota C e backend nativo fixtures |
 | **C6 — DONE** | **`teko::casting` stdlib module (D5 refinement — no-panic checked converters).** New module `src/casting/casting.tks` (namespace `teko::casting`); per-source→dest checked converters returning `T \| error` (§10 surface). Additive; **built and SEEDED before C3/C4 so the inevitable narrows they meet can route to `casting::*` (error) instead of a bare `to` (panic).** Family derived from the *surviving-narrow* inventory, NOT the cartesian product. | **M** | full gate; rota C e backend nativo on every converter's round-trip + at-boundary reject proof; **100% coverage (W15/D39)**; each converter has an executable `.tks` proof | C1 (fixed set) — shipped 8 converters (`u64_to_u32`, `i64_to_u32`, `u64_to_u8`, `u32_to_u8`, `u64_to_u16`, `u32_to_u16`, `i64_to_i32`, `u32_to_i32`), each with an in-range + out-of-range `#test` (`src/casting/casting_test.tkt`) plus the `casting_native_roundtrip` rota C e backend nativo regression fixture |
 | **C3** | **Signature sweep (`.len` etc.).** Widen internal count/length/offset params from `u32`/`i32` to `u64` where no wire reason; the genuine wire narrow becomes **one `casting::*` call (recoverable flow) or one guarded `to` (internal invariant) at the serialization boundary** (§10.2 policy); delete the 15 `.len to u64` no-ops. ~30–50 decl edits → ~120 call-site cast deletions. | **L** | full gate; per-file fixpoint; the 90 `.len to u32` panic edges gone (assert via an overflow fixture that used to panic) | C1, C2, **C6**, ref adoption (SW4) |
-| **C4** | **Cast sweep + `redundant cast` ERROR in ONE wagon (D1, "varre → liga").** Delete class-1 (same-type) + class-3 (W-RULE-redundant) + class-2 (literal-context) casts, densest in `stackify/codegen/stackify_consts/encode_*`; route any *inevitable* narrow uncovered here to `casting::*` or a guarded `to` per §10.2; **the SAME commit turned the `redundant cast` diagnostic ON as a hard ERROR** (no warn phase — owner 2026-07-24) so the corpus was **never red between wagons**. **That diagnostic is a WARNING since the 2026-07-27 reversal** (§4/§9) — the sweep this crumb performed still stands, only its enforcement moved to D4's ≤2% gate. Driven by the crumb-5 probe's candidate list, each removal fixpoint-verified; the probe must report **zero** candidates before the error flips on inside the wagon. | **L** | full gate; gen2==gen3 after every file batch; rota C e backend nativo unchanged; a seeded redundant cast is diagnosed (as an ERROR when this crumb landed, as a WARNING since 2026-07-27); CAST-DENSITY reported | C3, C6 |
+| **C4** | **Cast sweep + `redundant cast` ERROR in ONE wagon (D1, "varre → liga").** Delete class-1 (same-type) + class-3 (W-RULE-redundant) + class-2 (literal-context) casts, densest in `codegen/encode_*`; route any *inevitable* narrow uncovered here to `casting::*` or a guarded `to` per §10.2; **the SAME commit turned the `redundant cast` diagnostic ON as a hard ERROR** (no warn phase — owner 2026-07-24) so the corpus was **never red between wagons**. **That diagnostic is a WARNING since the 2026-07-27 reversal** (§4/§9) — the sweep this crumb performed still stands, only its enforcement moved to D4's ≤2% gate. Driven by the crumb-5 probe's candidate list, each removal fixpoint-verified; the probe must report **zero** candidates before the error flips on inside the wagon. | **L** | full gate; gen2==gen3 after every file batch; rota C e backend nativo unchanged; a seeded redundant cast is diagnosed (as an ERROR when this crumb landed, as a WARNING since 2026-07-27); CAST-DENSITY reported | C3, C6 |
 | **C5** | **Metric gate + probe.** Ship the ARITH-CAST-RATE probe and wire it into CI (≤2%, D4) so the class cannot return. **The probe counts a bare `to` AND a `teko::casting::*` call as the SAME "conversion" unit** (§5) — both are the raríssima exception the gate bounds. **No D2 surface work** — removed by the owner's ruling; the anti-regression diagnostic already landed inside C4 (as an error then, as a warning since 2026-07-27), which is precisely why THIS gate is the one that has to bite. | **M** | full gate; CI metric gate green (≤2% counting `to` + `casting::*`); the D1 diagnostic stays silent on a genuine boundary cast, fires on a seeded no-op | C4 |
 
 **Ritual points (full gate must pass):** end of **C1** (rule cemented — the seed everything else
@@ -537,7 +537,7 @@ to expect the D1 error) — it must not both survive and remain a no-op once the
    is gated as a ritual; do it AFTER C1/C2 cement the rule so cascaded mixed-width math just works
    instead of demanding new casts.
 
-4. **Genuine wire-format narrows must survive.** ELF/Mach-O/COFF/WASM/DWARF have real 32-bit
+4. **Genuine wire-format narrows must survive.** ELF/Mach-O/COFF/DWARF have real 32-bit
    on-wire fields; the sweep must NOT delete those narrows — it must **relocate** them to one
    guarded boundary cast (§3, §5). Risk: over-eager sweep corrupts an object file. Mitigation: the
    probe (crumb 5) classifies a cast as boundary (feeds a serialization write) vs internal; only
