@@ -2290,3 +2290,83 @@ original pedia:
 **Conclusão que é do dono e não minha, mas que a medição sustenta:** a rota de classe entrega
 semântica de referência **hoje, sem esperar pela espinha de escape transitivo**, e sem depender da
 grafia que mente. `objecto é ponteiro` é literalmente verdade nesta linguagem, e foi medido.
+
+## 0ae · Os `#test` NUNCA passam pelo backend próprio — e isso fala directo ao argumento da superfície
+
+Achado do agente do C0, **verificado por mim antes de o passar** (não aceite de palavra):
+
+```
+src/lir/lower.tks:13480    if f.is_test { return LowerItemOut { … } }     ← descarta ANTES de baixar a LIR
+src/build/project.tks:3440,4697   codegen::tk_emit_c_test(prog, true)      ← o portão NATIVO emite C
+src/codegen/codegen.tks:11699     "tk_emit_c_test — the NATIVE TEST-GATE emission entry"
+```
+
+**O corpo de um `#test` não chega ao backend próprio, nem sequer na rota nativa.** `lower_item_function`
+descarta-o antes de baixar para LIR, e o `run_native_gate` emite sempre o arnês por `tk_emit_c_test`.
+
+Isto não é uma opinião sobre o desenho: é o que a árvore faz hoje, e tem uma consequência que o dono
+tem de saber, porque contradiz um pressuposto dele:
+
+> *"estamos ensinando o compilador a não emitir C, gen2 e gen3 trabalham os testes de modo nativo,
+> logo, precisa ter superfície"*
+
+**Os testes não trabalham de modo nativo.** O produto sob teste é nativo; o **arnês e os corpos de
+teste** são emitidos em C, nas duas rotas. Não digo que esteja errado — digo que o pressuposto que
+sustentava a exigência de superfície não se verifica hoje, e o dono decide o que fazer com isso.
+
+### O requisito de backend do C0: EXISTE, e não é degrau novo
+
+Medido no objecto emitido (x86-64/ELF, `objdump -dr`):
+
+```
+lea 0x0(%rip),%rcx
+    R_X86_64_PC32   .Lclofn0-0x4        ← o `lea` de símbolo COM relocação
+```
+
+`select_func_addr_x86` e `select_func_addr` (ADRP+ADD no arm64) existem nos dois backends. **Tomar o
+endereço de uma função e passá-lo não é capacidade em falta.**
+
+A ressalva, que é o que fica por fazer e não é do C0: o símbolo apanhado é o **thunk liftado**, e
+`lower_fn_value` constrói um par `{fn, env}` **caixotado** passando um ponteiro, enquanto a rota C
+passa `tk_closure` **por valor**. **As duas rotas discordam entre si**, e nenhuma produz um
+`void (*)(void)`. Falta **coerção no front-end**, não capacidade no backend. E a superfície §14.3
+(`run_capturing(body: cabi fn())`) **não é escrevível**: `cabi` não é token deste lexer.
+
+### A inversão do C0, medida
+
+Projecto isolado, mesmo compilador, mesmo C emitido — só o runtime muda:
+
+| | arcos reportados | saída |
+|---|---|---|
+| **com** captura | **5 de 5** — `5 ran; 5 passed; 0 failed` | **0** |
+| **sem** captura | **2 de 5**, sem linha de sumário | **134 (SIGABRT)** |
+
+**Os 3 arcos em falta não falharam: nunca correram.** É a diferença entre um teste vermelho e uma
+suíte muda, e é o argumento inteiro do C0 num número.
+
+### Um defeito que o próprio C0 introduziu e que ele apanhou no seu delta
+
+`emit_test_main_analyze` continuou a fechar em `return 0` cego depois de passar a capturar — e
+`run_analyzer` **lê** esse estado. Ou seja: **`teko test . --analyzer` reportava VERDE uma suíte com
+falhas.** Corrigido em `c716c69f`, com o fecho a passar a função partilhada e a guarda a afirmar os
+dois perfis. É a patologia do dia — um instrumento que passa por olhar para o sítio errado — desta
+vez apanhada pelo próprio autor.
+
+### Adjacente, para mim, fora do C0
+
+`teko_rt_type_ok` (`src/checker/typer.tks:5599`) aceita `Named` em posição de **retorno** num extern
+`from "teko_rt"`, mas o codegen não emite protótipo para esses externs — o sítio de chamada gerado é
+um `invalid initializer` do `cc`. **A árvore aceita no checker o que rejeita no `cc`.** Ou a lei
+deixa de aceitar `Named` no retorno, ou o codegen emite o protótipo mangled.
+
+## 0af · Erro meu de coordenação: retomei um agente que ainda corria
+
+Mandei uma mensagem ao agente do C0 (a semente resolvida) e a ferramenta disse *"had no active task"*.
+Não era verdade — ficaram **duas execuções do mesmo agente na mesma branch e no mesmo worktree**. O
+resultado medido, e falta pouco para ter sido pior:
+
+- uma delas **esmagou uma correcção** que a outra tinha acabado de escrever (reconstituída, sem dano);
+- três `teko test .` de ~2,5 GB numa caixa de 16 GB → uma corrida degradada e **um OOM-kill (137)**.
+
+**A lei que fica: não retomar um agente sem confirmar que parou de facto.** O sinal "no active task"
+não é prova. E worktree por agente não chega se o mesmo agente for instanciado duas vezes.
