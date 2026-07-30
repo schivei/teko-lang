@@ -2009,3 +2009,41 @@ os 2 `.chan` também somem.** Os 46 `.tkcov` ficam, e é coerente: pela lei mais
 O dono lembrou ter pedido antes suporte a pipe e unix socks. **Varri `src/` e `docs/`: zero
 ocorrências** de `AF_UNIX`, `sockaddr_un`, `socketpair`, "unix socket" ou "named pipe". O pedido
 não foi perdido pela memória dele — **nunca foi registrado**.
+
+## O `chan<T>` pode ser AÇÚCAR sobre o transporte do SO (dono, 2026-07-30)
+
+> *"até canais `chan<T>` poderiam se beneficiar dessa arquitetura, já existe, só precisa de um
+> 'açúcar'."*
+
+Em vez de construir o `tk_chan` como maquinaria própria, o `chan<T>` assenta sobre o transporte que
+o sistema **já dá**. E o que vem junto não é pouco — é literalmente a lista de requisitos do desenho:
+
+| requisito desenhado à mão | o SO já dá |
+|---|---|
+| capacidade limitada | o buffer do socket **é** o limite |
+| contrapressão | escrita bloqueia ou devolve `EAGAIN` quando enche |
+| espera com prazo | `poll` com deadline exato |
+| N escritores, um leitor | vários descritores para o mesmo par |
+| entre threads **e** entre processos | o mesmo objeto serve os dois |
+
+### O enquadramento: medido, e é onde o açúcar tem limite
+
+Testado nesta caixa (Linux):
+
+```
+SOCK_SEQPACKET socketpair: OK
+duas escritas de 3 e 5  ->  duas leituras de 3 e 5   fronteira PRESERVADA
+o mesmo em SOCK_STREAM  ->  uma leitura de 8 bytes   fronteira PERDIDA — colou
+```
+
+**`SOCK_SEQPACKET` sobre `AF_UNIX` preserva fronteira de mensagem** — exatamente o enquadramento que
+o desenho fez à mão com prefixo de comprimento.
+
+**Mas só no Linux.** macOS não tem `SEQPACKET` em `AF_UNIX` (só `STREAM` e `DGRAM`), e o `AF_UNIX`
+de Windows é **só `STREAM`**. *(Estas duas de conhecimento, NÃO medidas nesta caixa — e a diferença
+importa.)* Logo o subconjunto portátil é `STREAM`, que **cola as mensagens**, e o prefixo de
+comprimento **continua a fazer falta**.
+
+**Nada se perde**: o desenho já o tem. O que muda é que ele deixa de ser invenção e passa a ser a
+camada fina que falta ao `STREAM` — e no Linux poderia até desaparecer, se se quisesse pagar
+divergência entre plataformas, que **não** se quer.
