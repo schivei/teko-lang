@@ -5,7 +5,7 @@ perder o fio. **Este documento é a fonte única do estado.** Tudo aqui é medid
 hipótese, está dito.
 
 - **PR:** `schivei/teko-lang#99`
-- **Vagão:** `remodel/0.3.1.0-linux-native-2`, HEAD **`b48227de`** (worktree `/home/user/wt-lin`)
+- **Vagão:** `remodel/0.3.1.0-linux-native-2`, HEAD **`757e575`** (worktree `/home/user/wt-lin`)
 - **Como ler o CI sem cegueira:** `scripts/ci_full_log.sh` (§2c). Foi o instrumento que faltava todo o
   dia, e a §2b existe porque eu não sabia que existia.
 - **Objetivo da lane:** as pernas Linux gerarem com o backend NATIVO (o `fixpoint_backend` por perna
@@ -18,6 +18,322 @@ hipótese, está dito.
 
 
 
+
+## 0i. DEGRAU 30 DRENADO, e há DEGRAU 31 — a escada avançou por medição (2026-07-30)
+
+`cargo/0.3.1.0-degrau-30` @ `a082254` drenado no vagão. `drain_guard`: sem mudança em
+`.github/workflows/`. Merge `ort` sem conflitos, 7 ficheiros, +905/−82.
+
+### A PARAGEM VIVA NÃO ERA O `null` — ERA A ARIDADE
+
+`lower_null_pattern_test` testava a etiqueta literal `0` sob a guarda do classificador de união-nula de
+**dois** membros, logo só respondia a `{ null, X }`. O `emit_variant_wrap` do próprio compilador faz
+`match … { []byte as o; error as e; null }` sobre `[]byte | null | error` — **três** membros.
+
+E o gémeo obrigatório: `return null` para dentro de três membros caía no `lower_variant_construct`,
+cuja busca POR TIPO não tem caso `Null`, e parava com *"value's type is not a member of its declared
+variant (internal)"*. **Landar só o leitor teria sido pior que nada** — um braço `null` a testar uma
+etiqueta que ninguém escreve.
+
+Achado de brinde, corrigido pelo agente: as etiquetas `0`/`1` eram literais enquanto o classificador
+aceitava **as duas ordens** de membro — um `{ X, null }` teria os dois braços trocados, **em silêncio**.
+Agora são procuradas (`variant_null_member_index`).
+
+### DEGRAU 31 — o novo stop, e é PROGRESSO, não defeito
+
+```
+base: native backend N1: `null` match pattern not yet lowered (N2) [in `teko::codegen::emit_variant_wrap`]
+nova: native backend N1: `vt_table` is not a fat-pointer local (internal) [in `teko::codegen::cg_pair_is_iface_vtable`]
+```
+
+Provado com um diferencial **2×2** (compilador base/novo × fonte base/nova): o compilador **novo** na
+fonte **base intocada** dá a paragem nova; o compilador **base** na fonte nova continua a dar a antiga.
+**A fronteira é do gerador, não da fonte.**
+
+Mecanismo, com repro de 10 linhas reproduzido NO COMPILADOR DA BASE: `typeexpr_is_fat_named` desiste em
+`single_segment_name(nt.path)` e o doc de `typeexpr_is_fat_walk` di-lo — *"multi-segment path … is
+never fat"*. Um parâmetro cujo tipo é um alias **QUALIFICADO** para um gordo
+(`vt_table: checker::TypeTable`, alias de `[]TypeReg`) é ligado como ESCALAR e a leitura fat estoura.
+Alias de um só segmento funciona; qualificado não. **Não é** o `native_iface_fat_known_stop` (esse é o
+RESULTADO de despacho, não o parâmetro).
+
+### O RITUAL QUE O AGENTE CORREU (e é o padrão a exigir)
+
+- FIXPOINT **gen2 == gen3 byte a byte** e `gen2.c == gen3.c`, duas vezes: antes e depois do merge forward.
+- Unitários na **gen2** da árvore fundida: **1140 testes, 1140 ok, zero pânicos**. Contagem de `#test`:
+  base 1131 → HEAD 1140, **as +9 são todas de upstream, zero do agente**.
+- `TEKO_MEM_PARANOID=1` exit 0, pico **2192.7 MB** (gen1 normal 1562.8 MB).
+- Corpus `own_native` completo: rota própria **42**, rota C **42**.
+- Os três known-stops da família medidos na gen2 — **nenhum levantou**.
+- Semente: `bootstrap/teko.c` → gen0 → gen1 (`TEKO_BACKEND=c`), porque **`fetch_teko.sh` dá HTTP 403**.
+
+### AS TRÊS CONFERÊNCIAS DE §0h/§0c, CORRIDAS POR MIM NO MERGE
+
+| conferência | antes | depois |
+|---|---|---|
+| `fn` em `corpus.tks` (não pode DESCER) | 202 | **235** |
+| splices / chaves desequilibradas em todos os `.tks` | — | **0** |
+| `f_*` chamado sem definição (direcção 1) | — | **nenhuma** (129 chamadas) |
+| `f_*` definido e nunca chamado (direcção 2) | — | só `f_fat_field_len`, a excepção legítima que o agente nomeou |
+
+### DUAS COISAS REPORTADAS PELO AGENTE, e a primeira é uma LEI NOVA
+
+1. **NENHUM código de saída de fixture pode passar de 255 — e 256 mapeia para 0.** Medido:
+   `exit(260)` dá **4** no POSIX. A fixture `own_native/main.tks` usa 260–269 **e também usa 4–13**,
+   logo uma falha na linha 260 sai com o código da linha 4: **a falha é atribuída à cena errada.**
+   Não é falso-verde (o `.tkr` espera 42), é MENTIRA SOBRE QUAL linha quebrou — e a barra do tronco
+   proíbe exactamente isto. Pior ainda: a faixa 250–259 que o agente sugeriu tem o 256, que mapeia
+   para **0**.
+   **Corolário da família, medido em todo o repo:** os únicos códigos > 255 são estes dez, num único
+   ficheiro (`examples/regressions/own_native/main.tks`). O `99999999999` de
+   `src/casting/casting.tks` é um literal numérico de teste de cast, não um código de saída.
+   **Faixas livres ≤ 255 nesta fixture:** 81-89, 93-99, 101-129, 141-159, 162-169, 177-189, 193-209,
+   **235-255**. O remap fica enfileirado para 235–244, com a guarda a fechar dos dois lados: nenhum
+   código de fixture > 255.
+2. **A rota C não alarga união em união mais larga.** `let l: i64 | null | error = if n == 0 { null }
+   else { n }` — o `if` junta-se em `i64 | null` e a rota C emite `tk_u_null_i64` para um slot
+   `tk_u_null_i64_error`: `error: invalid initializer`. Pré-existente, família do ALARGAMENTO de
+   uniões, não do padrão `null`.
+
+E uma atribuição que se fecha: o SIGABRT de `lwt_lowers_str_index_loads_the_byte_off_rodata` foi
+atribuído por medição a `1ea5b68` (a guarda de fronteira, que mudou só `src/lir/lower.tks` e nunca o
+teste que fixava a sua saída) e **já estava corrigido upstream em `3fe4018`**. Não é do agente, e está
+fechado.
+
+### A REPARAÇÃO DAS CAUDAS, medida uma TERCEIRA vez — e o número muda
+
+O agente do degrau 30 reparou o mesmo dano de §0h, e mediu-o contra os progenitores `5f5eca0`/`880dc37`:
+**sete aberturas `/**` e SEIS finais de função** (`0` + `}`) perdidos nas junturas, com o ficheiro a não
+lexar em `3710:18: unexpected character`. Eu contei "sete caudas" e o agente do `unknown function`
+também. **Sete/seis, não sete/sete** — a discrepância fica registada em vez de arredondada, porque a
+lei de §0h depende de se contar o que se mediu.
+
+## 0h. O `unknown function` ERA DANO MEU — a `--union` comeu sete caudas de função (2026-07-30)
+
+**A causa está encontrada, e não era do compilador.** Nenhuma das minhas duas hipóteses (cap de
+declarações, árvore `src/` não carregada) estava certa. O `corpus.tks` da fixture `own_native` estava
+**com o fonte estragado**, e quem o estragou fui eu, ao resolver dois merges com `git merge-file
+--union`.
+
+### O QUE A `--union` DEIXOU
+
+Sete vezes, o corpo de uma função corria directamente para dentro do doc-comment da função seguinte —
+o `0`, o `}`, a linha vazia e o `/**` **todos ausentes**:
+
+```teko
+fn f_slice_elem_store_boundaries() -> i64 {
+    …
+    if ys.len != 5 { return 11 }
+ * D27_TENTH_F32 — `0.1` held as an `f32`, whose EXACT binary64 value …
+```
+
+Sítios (linhas na árvore reparada): **3707, 3833, 3893, 3949, 4010, 4085, 4121**.
+
+### A REPARAÇÃO É FIEL, e verifiquei-o em vez de acreditar
+
+`+ 0` / `+ }` podia ser um fecho arbitrário que enfraquecia a fixture em silêncio — uma função cuja
+cauda original devolvia outra coisa passaria a devolver `0` e o teste ficava verde por engano. Fui aos
+commits **anteriores** ao dano:
+
+| commit | cauda de `f_slice_elem_store_boundaries` |
+|---|---|
+| `e0a3491`, `0ddd4a6` (pré-dano) | `… if ys.len != 5 { return 11 }` / **`0`** |
+| `ffe7580` (pós-dano) | o corpo do `d27_ftoa_of` — o splice |
+
+A cauda restaurada é a original. O dano entrou em **`1103ffb`** e **`ffe7580`**, os dois merges que eu
+resolvi com `--union`.
+
+### A LEI, corrigida (era minha, e estava demasiado larga)
+
+Eu escrevera: *"`git merge-file --union` é a resolução correcta para conflitos puramente aditivos de
+fixture."* **Estreita-se:**
+
+> `--union` só é segura quando as hunks em conflito são **registos inteiros e auto-delimitados** (uma
+> linha por caso, um bloco fechado). **Um corpo de função `.tks` não é um registo auto-delimitado**: a
+> `--union` pode escolher uma fronteira de hunk que faz desaparecer o fecho de um lado e o abridor do
+> outro, e o resultado **compila-se como se fosse outra coisa** em vez de dar conflito.
+>
+> Depois de QUALQUER resolução automática num `.tks`, a conferência obrigatória é **contar as `fn`
+> declaradas antes e depois**: o número não pode DESCER. E no caso de uma fixture, todo o `f_*`
+> chamado no `main.tks` tem de resolver.
+
+Isto explica também porque é que o meu contra-exemplo de §0f (a chamada da linha 90 desconhecida e a
+da linha 80 conhecida) não era um cap: **o ficheiro inteiro perdia as declarações**, e o que se via
+era a cauda por ordem de CHAMADA. A leitura de §0f fica de pé; a causa é esta.
+
+### O QUE JÁ ESTÁ REPARADO, e a colisão que fica para o dreno
+
+- `cargo/0.3.1-own-native-unknown-fn` @ `7a2f49b` — as sete caudas; e `e8f76fb` acrescenta o que
+  faltava no instrumento: **o excerto de um build falhado passa a guardar os DOIS extremos** (foi a
+  cauda que me fez ler uma fronteira inexistente).
+- `cargo/0.3.1.0-degrau-29` @ `1601eb4` — **as MESMAS sete truncaturas**, reparadas em paralelo,
+  porque o agente precisava da fixture inteira para construir. **Colisão por comportamento, não por
+  ficheiro.** No dreno toma-se UMA das reparações; o resto de cada branch é aditivo.
+
+### DOIS DEGRAUS FECHADOS EM BRANCH (a aguardar o fim dos agentes, não drenados)
+
+- **Degrau 29** — `cargo/0.3.1.0-degrau-29` @ `5c5c4c4`: *"fechar A4-fp — a família float inteira
+  baixa em arm64, pinada por byte"*.
+- **Degrau 30** — `cargo/0.3.1.0-degrau-30` @ `d4d48e2`: *"o padrão `null` num match deixa de assumir
+  a aridade dois"*, + `643b688` (valor nas duas rotas, saídas 260-269).
+- **Perna Windows** — `cargo/0.3.1.0-windows-leg-2` @ `50d8307`: *"a asserção mingw deixa de falar do
+  cc do HOST"*.
+
+Nenhum agente reportou fim; **não se drena branch de agente vivo**. Empurram ao escrever, logo nada se
+perde se o contentor cair.
+
+### CONFIRMADO NESTE CICLO: o `.exe` resolveu o que tinha de resolver
+
+A perna `test / windows-x86_64` **deixou de morrer por falta de `teko.exe`**: agora arranca 368 testes
+unitários e constrói 26 projectos de regressão antes de parar. O que a mata hoje é outra coisa (§0f,
+causa 3), e está despachada.
+
+## 0g. A FASE UNITÁRIA DEIXOU DE ABORTAR — em TODAS as pernas menos Windows (2026-07-30)
+
+Pergunta pendente do ciclo, respondida pelo log INTEGRAL da execução `30526530472` (topo `757e575`,
+`scripts/ci_full_log.sh`, 12 jobs em falha, nada truncado).
+
+### A RESPOSTA
+
+| perna | `test … …` arrancados | pânicos |
+|---|---|---|
+| `test / linux-x86_64-musl` | **1140** | 0 |
+| `test / linux-arm64-glibc` | **1140** | 0 |
+| `test / macos-arm64` | **1140** | 0 |
+| `Memory paranoid (linux-x86_64-musl)` | **1140** | 0 |
+| `Memory paranoid (linux-arm64-glibc)` | **1140** | 0 |
+| `regressor / all capabilities (wasm)` | **1140** | 0 |
+| `test / windows-x86_64` | **368** e ABORTA | **1** |
+
+`grep -o 'assertion failed: [a-z_]*'` sobre o log inteiro dá **duas** ocorrências e **as duas são o
+mesmo teste na mesma perna** (o ficheiro do job e o ficheiro do passo repetem a linha):
+`pt_a_mingw_cc_is_convicted_by_its_path_without_any_probe … assertion failed: is_true`. O conserto dos
+dourados (`e317b44`) **aguentou**: fora de Windows não há pânico nenhum.
+
+E **zero `skip`** em toda a suíte, nas sete pernas — `grep -oiE 'test … \.\.\. skip[a-z]*'` não devolve
+nada, e o tally de regressões dá `0 skipped` em todas as 28 linhas.
+
+### DUAS CORRECÇÕES DE CONTAGEM, e a segunda é um erro meu de método
+
+1. O número real é **1140**, não 1133 nem 1117. A árvore cresceu.
+2. Eu primeiro anunciei **1138** e uma perna com **1133** — "cinco testes que não correm no
+   regressor wasm". **Era artefacto do meu `grep`.** Eu ancorava em `... ok` na MESMA linha, e um
+   teste que imprime saída própria empurra o `ok` para a linha seguinte:
+
+   ```
+   test teko::checker::same_type_cast_is_redundant_warning ... warning: redundant cast: …
+   ok
+   ```
+
+   Os cinco "ausentes" eram quatro testes de aviso de cast redundante e um de uso do `fmt`. O
+   regressor corre `teko test . --arith-cast-gate` (as outras pernas correm `teko test .` seco), e é
+   o gate que ARMA o aviso — daí a saída interleaved só ali. Contando `test … \.\.\.` sem ancorar no
+   `ok`, as seis pernas dão **1140 exactamente iguais**. **Lição: uma fronteira de `grep` não é um
+   facto.** É a mesma família do erro da cauda (§0f, causa 2), no mesmo dia.
+
+### DUAS COISAS QUE O TALLY MOSTRA E NÃO SÃO DEFEITO
+
+- `regressions 1 run, 0 skipped, 1 failed` × 12 → é o teste unitário
+  `run_regression_sources_missing_path_is_a_manifest_error` a provar por INVERSÃO que um regressor
+  listado e inexistente é erro de manifesto (`examples/regressions/__definitely_missing__.tkr`). A
+  falha é o entregável do teste.
+- **Não há `A4-fp: float-op` em nenhuma perna.** O único stop nativo no log integral é o do degrau 30
+  (`native backend N1: 'null' match pattern not yet lowered (N2)`). Ou seja: **o degrau 29 não está no
+  caminho crítico do CI hoje** — o fixpoint pára antes de o alcançar. Fecha-se por valor próprio, não
+  para desbloquear a lane.
+
+## 0f. A VAGA DE 12 JOBS VERMELHOS DE `757e575` — LIDA, e METADE NÃO É DEFEITO (2026-07-30)
+
+Doze jobs vermelhos chegaram por webhook em duas execuções seguidas (`30526044023` sobre `d3ab105`,
+`30526530472` sobre `757e575` — o topo actual). Os dois commits são de documentação, logo **o estado
+é o mesmo nas duas** e a vaga não foi causada por eles. Li o log INTEGRAL (§2c) e a vaga tem **três**
+causas, não doze. Quem recuperar a sessão não precisa de repetir a leitura.
+
+### CAUSA 1 — `artifact / linux-x86_64-glibc` e `artifact / linux-arm64-musl`: **VERMELHO POR DESENHO**
+
+```
+fixpoint: | teko: .: native backend N1: `null` match pattern not yet lowered (N2)
+          [in `teko::codegen::emit_variant_wrap`]
+fixpoint: VERDICT: FAILED — gen1 does not build the source it came from
+```
+
+Isto é o **degrau 30**, o degrau aberto que está a ser trabalhado. E não é regressão: está escrito no
+próprio `pr.yml`, no comentário do passo do fixpoint (linhas ~451-455):
+
+> *"A `native` LEG IS EXPECTED TO GO RED TODAY, and that is the deliverable, not a regression to patch
+> around — the native backend does not build the compiler yet and the stop it reaches is named by
+> address in `docs/memory/0.3.1.0-linux-native-first-stop.md`. The red measures the distance left. To
+> turn it back, one word per leg in `scripts/ci_producer_matrix.sh`."*
+
+**Não voltes a diagnosticar isto.** As pernas `native` do fixpoint só ficam verdes quando o backend
+nativo construir o compilador. Enquanto o degrau 30 estiver aberto, este vermelho é a régua.
+
+**E é por isto que outros três gates caem em cascata, sem terem defeito próprio:**
+
+| Gate | Porque cai |
+|---|---|
+| `CI gate` | a âncora `artifact-linux-x86_64-glibc` é a perna do fixpoint nativo |
+| `Sanitizer gate` | o `mem-paranoid` consome a saída dessa mesma âncora |
+| `Test suite gate` | a âncora falha e o `test-linux-x86_64-glibc` fica `skipped` por condição |
+
+Ou seja: **1 causa → 5 jobs vermelhos.** Contar jobs sobre-conta causas; foi por isso que a vaga
+pareceu um colapso e não é.
+
+### CAUSA 2 — `own_native` falha em TODAS as pernas, e a lista de erros é uma **CAUDA**
+
+`test / linux-x86_64-musl`, `test / linux-arm64-glibc`, `test / macos-arm64`,
+`test / windows-x86_64`, `Memory paranoid` (musl e arm64-glibc) e `regressor / wasm`: todas dão
+`regressions 11 run, 0 skipped, 1 failed` (Windows dá 2, ver Causa 3) e a fila é sempre a mesma —
+`examples/regressions/own_native/own_native.tkr — own_arith_exit[0]: compile failed (exit 1)` com
+`unknown function: f_*`. Universal, não é gémeo divergente.
+
+**A ARMADILHA, e eu quase caí nela:** o harness imprime *"captured output **tail**"*. Os
+`unknown function` que aparecem no log são as linhas **81..120** do `main.tks` — exactamente as
+**últimas 40** chamadas. Isso PARECE uma fronteira posicional que deixa as 79 primeiras resolver, e
+não é: é a cauda a cortar as anteriores.
+
+A medição que desfaz a ilusão, e é um contra-exemplo, não uma opinião:
+
+| chamada em `main.tks` | definição em `src/corpus.tks` | na cauda desconhecida? |
+|---|---|---|
+| linha 90 `f_arm64_bigframe_locals` | **2909** | **SIM** |
+| linha 80 `f_div_signed_i32_value` | **2935** (DEPOIS) | não |
+
+Se a fronteira fosse a ordem de DEFINIÇÃO, a de 2909 resolvia e a de 2935 não. É o contrário. O que
+separa as duas é a ordem de **CHAMADA** — o que é exactamente o que uma cauda truncada produz, e é
+incompatível com "cap de N funções por ficheiro". Primeira hipótese passa a ser: **a árvore `src/` do
+fixture não está a ser carregada de todo** e por isso *todo* o `f_*` é desconhecido. Medição que
+decide: correr o build do fixture **sem o harness** e ver se o PRIMEIRO erro é a linha 2 (`f_arith`).
+Isto foi enviado ao agente que possui o assunto (`cargo/0.3.1-own-native-unknown-fn`).
+
+### CAUSA 3 — Windows tem DUAS falhas próprias, e uma delas é um teste que assere sobre o host
+
+O envelope de known-stop rebentou honestamente — é a guarda a funcionar:
+`known-stop: more than the pinned row failed (or none did) — this envelope must not cover a second`.
+
+1. **`pt_a_mingw_cc_is_convicted_by_its_path_without_any_probe`** (`src/build/project_test.tkt:1160`)
+   → `teko: deliberate panic: assertion failed: is_true`. A mensagem diz `is_true`, logo a linha 1165
+   (`is_false`) está excluída. Candidata: a **1164**,
+   `is_true(mingw_cc_evidence(HOST_CC_NAME, …) == "")` — porque o próprio doc-comment do teste diz
+   *"the Windows runner's `cc` resolves to `/c/mingw64/bin/cc`"* e a seguir assere que o cc deste host
+   **não** é MinGW. Em Windows as duas frases contradizem-se. `mingw_cc_evidence`
+   (`src/build/project.tks:1540`) convicta por caminho **ou** por triplo, e o triplo **executa** o
+   compilador — duas dependências do host dentro de uma linha que se lê como literal.
+   **É a terceira vez nesta lane** que uma asserção aparentemente literal chega a estado do host por
+   saltos. Lição de novo: *segue o callee, não leias o call site como literal.*
+2. **`regressor.tkr` → `alias_fat_field (own-native)[0]: exit -1073741819`** = `0xC0000005`,
+   ACCESS_VIOLATION, e *"the program wrote nothing to stdout or stderr"*. A MESMA fila passa em Linux
+   e macOS: **gémeo divergente**, e vale a regra do oráculo (é bug do nativo até prova em contrário).
+
+Ambas foram despachadas juntas para `cargo/0.3.1.0-windows-leg-2` — a perna Windows é **both-tier**,
+logo bloqueia o `Test suite gate` em qualquer modo, e é por isso que as duas andam no mesmo brief.
+
+### O QUE ISTO MUDA NA MINHA CONTABILIDADE
+
+Eu tinha registado `regressions 11 run, 0 skipped, 1 failed` como o estado medido do vagão, sem dizer
+que **essa 1 é o `own_native` e faz a perna cair**. Não é uma falha tolerada por envelope nenhum em
+Linux/macOS: é vermelho a sério, em todas as pernas, e é o item de maior valor da fila depois dos
+degraus. Fica corrigido aqui.
 
 ## 0e. O `.exe` FECHADO — e o brief que eu escrevi estava incompleto (2026-07-30, `cff49b4`)
 
