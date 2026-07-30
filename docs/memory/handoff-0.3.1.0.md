@@ -18,6 +18,44 @@ hipótese, está dito.
 
 
 
+
+## 0e. O `.exe` FECHADO — e o brief que eu escrevi estava incompleto (2026-07-30, `cff49b4`)
+
+Eu medi **dois** sítios que nomeavam o executável (`project.tks:1827` e `:2635`) e escrevi o brief sobre
+eles. **São NOVE.** O agente enumerou-os, e cinco dos sete que eu não vi **teriam ficado inlançáveis em
+Windows** pela mesma regra do loader: `run_native_gate`, `run_project`, `run_analyzer`,
+`run_one_test_cov`, `build_regression_cov_exe`. Consertar só os meus dois seria o defeito "um dos membros
+da família" — no brief onde eu próprio invoquei esse corolário.
+
+**A generalização que ele fez e eu não tinha visto:** a regra chaveia-se no **FORMATO DE IMAGEM**
+(`target_objfmt`), não no SO — *"`.exe` não é um hábito do Windows, é como um PE se nomeia para o loader
+o achar"*. Isso absorveu **de graça** um terceiro nome montado à mão, o `.wasm` de `emit_native_wasm`, e
+o próximo alvo que emita PE ou wasm herda o nome certo sem segunda decisão.
+
+**E apanhou o efeito de segunda ordem que eu não previ:** `tkr_run_one_row` fazia
+`check_object_wellformed(binp ~ ".o")` — com `.exe` isso pediria `bin/snippet.exe.o` e faria uma build
+**perfeita** reportar artefacto malformado. Resolvido com um `sibling_object_path` que **substitui** a
+extensão em vez de a concatenar.
+
+### CORRECÇÃO À MINHA FILA — `own_cross_x86_64_windows_emits_coff` NÃO é uma falha
+
+Eu listei-a como item da fila. **Não é:** a linha `own_arith_exit` é a primeira do canal, a feature pára
+na primeira falha, e **`own_cross_x86_64_windows_emits_coff` nunca é alcançada**. Não falha — **não
+corre**. Sai da fila; entra como consequência do §0d.
+
+**Isso torna o §0d mais sério do que o vermelho sugere:** um canal que reporta pela linha errada faz
+todo agente que o leia tirar a conclusão errada, e eu fi-lo duas vezes (atribuí à `A4-fp` do arm64 e à
+corrupção de ambiente de um agente). Despachado com mandato de **bissetar antes de consertar** e de
+**não tocar na cobertura** — o defeito é a composição do build, não as fixtures.
+
+### Um achado adjacente que fica registado, não corrigido
+
+`emitted-C identity: gen2.c != gen3.c` (10 719 554 vs 10 719 618 bytes) **com binários idênticos**, e
+presente **também na base**. A diferença medida é `double ceiling = 5;` contra `5.0` mais deslocamento de
+gensym: **gen1 (da semente) e gen2 (da árvore) diferem como GERADORES**, o que é a forma saudável sob
+esta cadeia. O veredito pinado — binário `gen2 == gen3` — passa. **Não é regressão**, e vale saber antes
+que alguém o descubra e assuste.
+
 ## 0d. `unknown function: f_*` É REAL NO CI — e eu descartei o relato do agente (2026-07-30)
 
 **Correcção a mim, e é a segunda vez hoje que dispenso um agente depressa demais.**
