@@ -747,3 +747,47 @@ rebaseie fica com a branch impublicável (force-push bloqueado para toda a gente
 mas **não precisa de publicar**: commita local, diz o SHA, e o integrador drena do objecto
 partilhado. Nenhuma lei é revogada e nada se perde. Aconteceu duas vezes nesta sessão, e nas duas o
 agente parou correctamente em vez de forçar.
+
+## `theory/**` é o campo de provas do agente — e eu não o usei (dono, 2026-07-30)
+
+Eu relatei que o agente das relocações arm64 *"honestamente não pôde provar sem hardware arm64"* e
+que ficava à espera do `test / macos-arm64` do vagão. O dono cortou:
+
+> Como não? É pra isso que DEVE usar uma 'theory/**'.
+
+Ele está certo, e a falha é de **despacho**, não do agente: todos os briefs daquele dia diziam
+*"você não tem esse host, então diga honestamente o que não conseguiu verificar"* — quando a
+instrução correta era *"empurre para `theory/**` e prove no host real"*.
+
+### O que a fast-lane realmente oferece (medido, não suposto)
+
+`.github/workflows/agent-fast-lane.yml`, gatilho `push: branches: ['theory/**']` (exclusivo, por
+ruling do dono no mesmo dia):
+
+- **O host é escolhível**: `runs-on: ${{ github.event.inputs.runner || 'macos-latest' }}`, opções
+  `macos-latest` · `ubuntu-latest` · `ubuntu-24.04-arm` · `windows-latest`. **Um push simples corre
+  em macOS-arm64**, que era exatamente o host de que o agente precisava.
+- **Não é smoke test**: gen1 pela rota C, **o ponto de fixo (gen2 == gen3)**, as sondas, provisiona
+  **mingw e wasmtime**, corre a **suíte inteira**, e acaba no portão de **no-skips**.
+- O cabeçalho manda **TROCAR** o host, nunca acrescentar uma segunda perna — uma de cada vez, de
+  propósito.
+
+Ou seja: um push dava a prova do link real em arm64. O agente entregou meia prova por omissão minha.
+
+### A regra, para todo brief futuro
+
+Um agente que não tem o host **não declara a limitação e passa** — ele **empurra `theory/<nome>`**
+com o mesmo conteúdo da sua `cargo/**` (a `cargo/**` é a rede, a `theory/**` é o campo de provas) e
+**reporta o nome da branch**. Trocar o host precisa de `workflow_dispatch`, e os agentes batem em
+403 na API do GitHub — logo **o dispatch é do integrador**. O agente empurra e reporta; eu troco o
+runner.
+
+**A limitação honestamente declarada continua a valer como último recurso**, não como primeira
+resposta. "Não consegui verificar" só é aceitável depois de a fast-lane não servir, não em vez dela.
+
+### E uma recomendação minha que estava errada duas vezes
+
+Quando o dono quis travar a fast-lane em `theory/**`, eu recomendei **não** travar. Ele travou. Só
+ao medir a lane percebi porquê: é a exclusividade que a torna um campo de provas previsível e
+barato para os agentes. Recomendei mal, e o erro só apareceu quando precisei da ferramenta que a
+minha própria recomendação teria diluído.
