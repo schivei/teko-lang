@@ -2990,3 +2990,150 @@ mentir. Nao ha julgamento: conta-se um teste por variante.
 lei do dono **retira** trabalho: sai o caminho de bloqueio dentro do `push`, entra um `enum` de cinco
 variantes e um ciclo de repeticao de sete linhas. **O `chan_await_space` e a unica adicao**, e existe
 para nao queimar CPU, nao para dar garantias.
+
+---
+
+## 24. O registo de UMA LINHA — e a minha conta do `unbounded` estava certa pela razao errada
+
+> *"O numero de escritas e previsivel (de acordo com a quantidade de testes e regressivos)...
+> padronizar uma estrutura single-line de saida, e quem vai escrever precisa formatar no padrao
+> esperado e identificar quem escreveu... um contrato entre quem executa e quem escreve, alem de
+> padronizar o tipo T em `chan<T>`."*
+
+### 24.1 A conta refeita — o meu argumento de §23.3 CAI
+
+Eu escrevi que nenhum canal nosso qualificava para `unbounded` porque *"o volume depende de quantos
+testes falham"*. **Com registo padronizado isso deixa de ser verdade, e o dono tem razao:** cada
+escrita ganha tecto, o numero de escritas sai de uma contagem que existe antes de correr, e
+`volume = registos x tecto` fica conhecido. **O que era imprevisivel era o texto livre. Deixa de haver
+texto livre.**
+
+E fui medir o factor que faltava — **quantos registos por teste**:
+
+| | medido |
+|---|---|
+| sitios de impressao em todo o corpus `.tkt` | **3**, em **2** ficheiros (de **81**) |
+| logo, registos por `#test` | **1** (o veredicto), salvo tres excepcoes |
+| veredictos unitarios | ~1167 |
+| linhas de regressao | ~1155 |
+| **total conhecido antes de correr** | **~2300 registos** |
+
+**A conta do dono verifica-se do lado unitario.** A previsibilidade e real.
+
+**E mesmo assim fico com `bounded` — por outra razao, e e esta que quero registada:**
+
+> **O volume previsto e uma propriedade do caminho FELIZ. O canal existe para sobreviver ao infeliz.**
+
+Os ~2300 registos sao o que uma corrida **correcta** produz. Um teste com um ciclo a imprimir produz
+uma infinidade deles — e esse teste e precisamente o defeito que se quer encontrar. **Com `unbounded`,
+esse defeito vira um OOM; com `bounded`, vira contrapressao e um relatorio.** Nos morremos de OOM duas
+vezes no dia deste desenho, e nenhuma delas estava no plano.
+
+E ha uma segunda metade, que a medicao tambem mostra: **o lado dos regressivos nao ganha tecto com
+esta lei.** Um filho de regressao e uma build inteira do compilador, e o que sai do seu stdout sao
+diagnosticos em texto livre. O contrato padroniza o que o **arnes** emite; nao padroniza o que uma
+build de terceiros imprime. **Logo a previsibilidade vale para o trafego de veredicto e nao vale para
+o trafego de saida de processo** — e o canal transporta os dois.
+
+**Conclusao inalterada, argumento substituido: todos os nossos canais sao `bounded`.** As duas formas
+existem porque o dono as pediu e servem quem escreve Teko; o compilador usa uma so.
+
+### 24.2 O registo, e porque cada campo existe
+
+Cinco campos. **Um campo que nao sirva a agregacao, o sumario ou a atribuicao nao entra**, e digo o
+que ficou de fora e porque.
+
+```teko
+/**
+ * Rec — UM registo de uma linha: o tipo unico que atravessa todos os canais deste desenho.
+ *
+ * UMA LINHA E O CONTRATO, e a razao e o fan-in: N handlers a entregar texto livre entrelacam-se e a
+ * atribuicao perde-se (§16.5). Com um registo por linha e o escritor la dentro, o entrelacamento
+ * deixa de ser possivel — nao por disciplina, por forma.
+ *
+ * @since 0.3.1
+ */
+pub type Rec = struct {
+    /** quem escreveu (`s2`, `r0`) — a MESMA chave do segmento de journal (§2.2). Sem ela o fan-in
+        nao sabe a que segmento apendar: e o campo que a §18.5 exigia e nao tinha forma. */
+    writer: str
+    /** ordinal monotonico POR ESCRITOR. Da a ordem por origem (§16.5) e torna uma perda
+        DETECTAVEL — um salto na sequencia e uma falha nomeavel em vez de um silencio. */
+    seq: u64
+    /** a especie: `begin`/`ok`/`fail`/`skip`/`out`/`end`/`cont`. E por ela que o sumario de §13
+        separa passados, falhados, saltados e nao-corridos sem interpretar texto. */
+    kind: str
+    /** o que o registo nomeia: o `#test` ou `<ficheiro>.tkr[<cenario>]`. E o que torna um achado
+        NOMEADO em vez de contado (§13.3). */
+    subject: str
+    /** o corpo, com quebras de linha escapadas e limitado por `REC_MAX`. Uma linha que exceda parte
+        em registos `cont` (§24.5). */
+    payload: str
+}
+```
+
+**O que NAO entra, e porque:** um **carimbo de tempo**. Ele convida a ordenar globalmente, e a §16.5
+decidiu explicitamente que a ordem e **por origem e nao global** — uma ordem global seria uma promessa
+mais cara e inutil, e um campo que a torna tentadora e um campo que a vai produzir.
+
+### 24.3 O `T` — a primitiva fica generica, o nosso uso e que e instanciado
+
+**`chan<T>` continua generico como superficie de linguagem.** Quem escreve Teko escolhe o seu `T`; a
+primitiva nao ganha um tipo privilegiado, e um canal especializado no compilador seria a linguagem a
+servir-se a si propria a frente do utilizador.
+
+**O que se padroniza e o NOSSO uso: todos os canais deste desenho sao `chan<Rec>`.** A distincao
+importa porque a §23 fixou o `push` como `-> error | null` para a primitiva inteira; nada disso muda
+por o nosso `T` ser um so.
+
+### 24.4 O contrato — imposto no FUNDO DE EMISSAO, nao por disciplina
+
+Um contrato que so falhe em execucao, depois de o registo ja ter sido mal escrito, e convencao. Este
+falha **antes**, e a razao e estrutural:
+
+> **Um programa gerado so alcanca o stdout por `tk_print`/`tk_println`/`tk_write` — ha um fundo so.**
+> Logo o registo nao e formatado por quem escreve: e **embrulhado** por quem emite.
+
+Um `#test` que chame `teko::io::println("ola")` nao produz uma linha solta: produz um `Rec` com
+`kind = "out"`, o `writer` e o `subject` do teste que corre (o canal por teste ja os tem,
+`tk_test_begin`) e `payload = "ola"`. **Quem escreve nao pode violar o formato porque nunca o
+escreve.** E o *"algo burro mas extremamente eficiente"* aplicado ao contrato.
+
+*E a guarda e um `grep`, no espirito de §22:* **nada no programa gerado escreve no stdout fora
+daqueles tres fundos.** Verificavel por varredura do C emitido; um `fputs(..., stdout)` novo no
+codegen falha a guarda. *Vivacidade:* os tres fundos legitimos **passam**, senao a guarda estaria a
+proibir a unica via que existe.
+
+**O que NAO medi:** o custo do embrulho por linha impressa. E irrelevante no corpus de hoje — **3
+sitios de impressao em 81 ficheiros** — mas o numero pertence ao crumb, nao a minha opiniao.
+
+### 24.5 O `Oversize` deixa de existir — e o que sobra a proteger e melhor
+
+O integrador tem razao: com registo limitado por contrato, um `Oversize` deixaria de ser condicao de
+**ritmo** e passaria a **violacao de contrato**. **Mas a resposta certa nao e trata-lo melhor: e
+elimina-lo.**
+
+Uma linha que exceda `REC_MAX` **parte-se em registos `cont`** — o primeiro traz o inicio, os
+seguintes trazem `kind = "cont"` com o mesmo `writer`/`seq`-base, e o sumarizador recompoe. **Partir
+preserva a saida; truncar perde-a, e nao perder saida e a premissa deste documento inteiro.**
+
+Com isso, **nenhum registo pode ser maior do que o anel**, e a razao `Oversize` do §23.4 **nao tem
+como ser produzida**. Pela minha propria guarda de la — *"toda a razao tem de ter um teste que a
+PRODUZA"* — ela **sai da enumeracao**. Ficam **quatro**: `Full` (a unica repetivel), `Closed`,
+`NoReader`, `NotAProducer`.
+
+**E o que sobra a proteger nao desaparece, muda de sitio e fica mais barato:** passa a ser uma
+**invariante de arranque** — `capacidade_do_anel >= REC_MAX` — afirmada **uma vez**, e nao um ramo
+avaliado em cada `push`. Uma verificacao de O(1) por processo em vez de O(1) por escrita.
+
+**A minha conclusao de §23.4 mantem-se no que importa e melhora no resto:** eu disse que era preciso
+distinguir *"agora nao cabe"* de *"nunca cabe"* para o ciclo de repeticao nao ser infinito. Continua
+verdade — **e a lei do dono resolve-o por construcao em vez de por enumeracao**, que e melhor. O ciclo
+de §23.2 so pode ver `Full`, e `Full` e sempre transitorio porque o consumidor esta vivo (a invariante
+do consumidor, §16.4).
+
+### 24.6 O custo
+
+**Nenhum crumb novo, e o C1 encolhe:** sai um ramo de recusa e o seu teste, entra um `Rec` de cinco
+campos, o embrulho no fundo de emissao e a divisao em `cont`. A §18.5 tinha registado *"registos, nao
+fluxo de bytes"* como requisito **sem forma**; esta seccao e a forma, e vem do dono.
