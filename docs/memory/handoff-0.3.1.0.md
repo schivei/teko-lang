@@ -19,6 +19,42 @@ hipótese, está dito.
 
 
 
+## 0p. A GUARDA DO DRENO EXISTE, o harness deixou de cegar — e a MINHA contagem estava mal rotulada (2026-07-30)
+
+`cargo/0.3.1-own-native-unknown-fn` @ `53cc553` drenado. Delta: **só quatro ficheiros do compilador**, zero fixtures — logo zero colisão com o degrau 29 e o 31. `drain_guard` OK.
+
+Conferências: `fn` do `regression.tks` **103 → 106**, `lower.tks` **549 → 549** (intocado), `fixture_guard.tks` novo com **14 `fn`**. E a conferência de direcção **dentro** do módulo novo: das 14, nenhuma é órfã — as que não são chamadas de fora são chamadas no ficheiro ou pelos 9 testes. (A minha primeira medição excluiu o próprio ficheiro e por isso *pareceu* dar oito não-chamadas: **excluir o ficheiro de si mesmo é a mesma falha de direcção que já registei em §0c**.)
+
+### A CAUSA REAL, e a hipótese do harness estava ERRADA
+
+Eu suspeitei que o harness `Given source` ACRESCENTASSE ao conjunto de fontes. **Medido e refutado:** `compile_snippet_text` escreve um projecto de raspadinha em `<prefix>.proj/` e nunca toca no projecto no disco — provado sem harness nenhum, `teko build examples/regressions/own_native` falha igual. A primeira linha do log, enterrada por 119 iguais:
+
+```
+teko: examples/regressions/own_native: src/corpus.tks:3710:18: unexpected character
+main.tks:2:4: unknown function: f_arith        ← e 118 iguais
+```
+
+**Um ficheiro que não lexa não contribui declaração nenhuma.** Foi isso — não um cap, não a árvore `src/` não carregada, não o harness.
+
+### A CONTAGEM FECHADA — e o mal rotulado era MEU
+
+`git diff cff49b4 7a2f49b` insere **+7 `/**`, +6 `}`, +6 `    0`**, em **7 sítios**. Portanto o agente do degrau 30 tinha razão (**sete aberturas, seis finais**) e o meu "sete caudas" era o número de **SÍTIOS** com o rótulo errado. Registo-o porque a lei de §0h manda contar o que se mediu — e um número certo com um nome errado é uma medição errada.
+
+**E uma segunda reconciliação, que ele fez bem:** o piso que ele pinou é **229** sob a regra *`fn`/`pub fn` na coluna 0*; a minha nota dizia 202→235 sob a regra *incluindo indentadas*. Medido agora no vagão: **coluna 0 = 246, com indentadas = 252**. Ele **escreveu a regra ao lado do número**, que é o que torna um piso comparável quando outro degrau o subir. É o padrão a exigir de qualquer número pinado.
+
+### O QUE PASSOU A EXISTIR
+
+1. **O harness deixou de cegar.** `compile_failure_message` citava só a cauda de 40 linhas — correcto para um `cc` (diagnósticos no fim), **cego para uma cascata** (causa no início). Passa a guardar **20 + marcador de elisão + 40**. Prova por reversão, mesmo splice fabricado, dois binários: revertido → 40 linhas, começa em `main.tks:91`, **zero** linhas nomeiam a causa; com conserto → **4** linhas nomeiam-na, nas posições 4–7. **Foi esta cegueira que me fez ler uma fronteira posicional que não existia.**
+2. **A guarda do dreno** (`src/build/fixture_guard.tks`, 9 testes): profundidade de chaves 0 e zero doc-comments órfãos em todo `.tks`/`.tkt` de `examples/regressions/` — **428 ficheiros varridos, zero suspeitos** —, zero `f_*` sem declaração, e o piso de declarações. Reusa `snippet_brace_delta` e `is_ident_byte` em vez de duplicar (colisão de nome apanhada e resolvida **por reuso, não por renomear**).
+3. **Revertido** o remap 260→235 e a metade da guarda que o policiava. A medição continua verdadeira (`exit(260)`→4, `exit(256)`→0) — **o nível estava errado, por ruling do dono**. O `main.tks` está byte a byte como o vagão.
+
+### DUAS MEDIÇÕES QUE VALEM POR SI
+
+- **`own_cross_x86_64_windows_emits_coff` é alcançado E passa** neste hospedeiro: `own_native.tkr` = **ok, 27 builds, 1 fila saltada** (wasmtime ausente). É a confirmação independente de que o que falta nas pernas musl é o parser, não a fixture.
+- `teko test .` na gen2: **1146 ok, 0 FAILED**; regressões **11 run, 1 skipped, 0 failed** — o `1 skipped` é o wasmtime ausente **na máquina local**, não no CI.
+
+**Nota sobre a geração medida, e está certa:** ele mediu o `native_dry_gate` com a **gen1 da semente** nos dois lados de propósito — para comparar a MESMA geradora sobre fontes diferentes — e por isso viu `… emit_u32_le` e não o `vt_table`. Duas geradoras param em sítios diferentes; o que importa é que os dois lados usem a mesma, e usou.
+
 ## 0o. DEGRAU 29 DRENADO — o A4-fp morreu, e ele achou um valor errado CALADO no x86 (2026-07-30)
 
 `cargo/0.3.1.0-degrau-29` @ `1a1ed32` drenado. 15 ficheiros, +1686/−185. `drain_guard` OK, `.github/` intocado.
