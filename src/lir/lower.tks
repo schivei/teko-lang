@@ -3478,7 +3478,10 @@ fn builtin_peak_rss_symbol(last: str) -> str | null {
  * `f64_bits`/`f64_from_bits` are NOT in this table — they never reach it: `lower_call` intercepts
  * both directly (`is_f64_bitcast_call`/`lower_f64_bitcast_call`) as a zero-instruction bit
  * reinterpretation, never as a runtime CALL, so this resolver never sees either name (0.3.1.0
- * degrau 24).
+ * degrau 24). `append_fo` is not in it either, for the mirror-image reason: its result is FAT, so
+ * `lower_call_fat` intercepts it (`is_append_fo_call`/`lower_append_fo_call`) before any symbol
+ * resolution happens — a bare symbol here could not carry the out-parameter length its runtime twin
+ * returns through (0.3.1.0 degrau 26).
  *
  * @param last  the call path's LAST segment (the bare builtin name)
  * @return      the `tk_*` runtime symbol, or `null` when `last` names no directly-lowered builtin
@@ -8175,12 +8178,13 @@ pub fn lower_fat_expr(ctx: LowerCtx, e: checker::TExpr) -> LoweredFat | error {
  * closes only the PLAIN direct-call producer, the shape the corpus probe measured actually
  * reaching this site (#382 N2, call-gordo degrau).
  *
- * The `teko::list::*`/`teko::mem::push_fo` GROWTH-BUILTIN family and the `teko::str::concat`/
- * `teko::string::concat` STRING-BUILDING builtin are intercepted BEFORE the hidden-out-slot
- * convention is applied (`lower_list_builtin`, `lower_concat_call`): those calls target the
- * runtime's OWN fixed C ABI (`tk_slice_push`, `tk_str_concat`), which owes this backend no hidden
+ * The `teko::list::*`/`teko::mem::push_fo` GROWTH-BUILTIN family, the `teko::str::concat`/
+ * `teko::string::concat` STRING-BUILDING builtin and the `teko::mem::append_fo` BULK BYTE-APPEND are
+ * intercepted BEFORE the hidden-out-slot convention is applied (`lower_list_builtin`,
+ * `lower_concat_call`, `lower_append_fo_call`): those calls target the runtime's OWN fixed C ABI
+ * (`tk_slice_push`, `tk_str_concat`, `tk_append_bytes_fo`), which owes this backend no hidden
  * length register — their length travels back through an explicit `uint64_t *out_len` argument
- * instead (list-builtin degrau; concat: 0.3.1.0 degrau 9).
+ * instead (list-builtin degrau; concat: 0.3.1.0 degrau 9; append_fo: 0.3.1.0 degrau 26).
  *
  * @param ctx  the lowering context
  * @param e    the fat-typed call expression (its type is `str`/`[]T`)
@@ -8194,6 +8198,7 @@ fn lower_call_fat(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall) -> Lower
     if cl.is_iface_dispatch { return error { message = "native backend N1: fat-pointer interface-dispatch result not yet lowered (N2)" } }
     if cl.call_ns.len == 0 && is_list_builtin_call(cl.callee) { return lower_list_builtin(ctx, e, cl) }
     if cl.call_ns.len == 0 && is_concat_builtin_call(cl.callee) { return lower_concat_call(ctx, e, cl) }
+    if cl.call_ns.len == 0 && is_append_fo_call(cl.callee) { return lower_append_fo_call(ctx, e, cl) }
     let sym = match call_symbol(cl, ctx.externs, ctx.flat_symbols) { str as s => s; error as err => return err }
     let lo = match lower_args(ctx, cl.args, callee_param_types(cl)) { LoweredArgs as x => x; error as err => return err }
     lower_len_out_call(lo.ctx, sym, lo.vregs, e)
@@ -8268,6 +8273,61 @@ fn lower_concat_elements(ctx: LowerCtx, e: checker::TExpr, elements: []checker::
         i++
     }
     acc
+}
+
+/**
+ * is_append_fo_call — recognizes the checker's OWN `teko::mem::append_fo` builtin (the `#148 R2`
+ * BULK byte-append, `([]byte, str) -> []byte`, free-old on grow BY DECREE). Resolved by BARE LAST
+ * SEGMENT, because that is how the checker itself resolves it: `append_fo` lives in `scope.tks`'s
+ * `builtin_fn` table, which keys on the last path segment ALONE, so any prefix ending in the name
+ * reaches the same builtin — the SAME shape `is_concat_builtin_call` recognizes its own family by,
+ * and for the same reason. A user-DECLARED `append_fo` never reaches here: `lookup_call` wins over
+ * the builtin fallback, so the checker leaves a non-empty `call_ns` behind and every call site of
+ * this predicate tests `call_ns.len == 0` first (0.3.1.0 degrau 26).
+ *
+ * @param callee  the call's callee path
+ * @return        true iff `callee`'s bare last segment names the bulk byte-append builtin
+ */
+fn is_append_fo_call(callee: parser::Path) -> bool {
+    let segs = callee.segments
+    segs.len > 0 && segs[segs.len - 1].name == "append_fo"
+}
+
+/**
+ * lower_append_fo_call — `teko::mem::append_fo(dst: []byte, src: str) -> []byte`: the runtime's own
+ * bulk byte-append (`tk_append_bytes_fo`, `teko_rt.h`), reached through the ESTABLISHED
+ * out-parameter-length convention (`lower_len_out_call`) with both arguments ABI-flattened to their
+ * (ptr, len) pairs — `four_args`, byte for byte the shape `lower_concat_elements` already passes to
+ * `tk_str_concat_len`, because the two runtime entries take the identical five operands
+ * (`a.ptr, a.len, b.ptr, b.len, &out_len`). No runtime entry was added and no new ABI shape was
+ * invented: `tk_append_bytes_fo` has been in `teko_rt.c` since `#148 R2` for the retired C emitter's
+ * own `cb`, which is the very call site that stopped the native self-build here
+ * (`teko::codegen::cb`).
+ *
+ * **Design reference: Go's `append`.** Its contract is the one this builtin already implements and
+ * the one the free-old (`_fo`) decree needs: the RESULT is the only slice valid after the call, the
+ * input's buffer may have been grown in place or replaced by a larger copy, and nothing may read
+ * the old buffer afterwards. `tk_append_bytes_fo` measures exactly that — in place when `dst` is the
+ * live tail with spare capacity, a geometric copy-grow otherwise, and on the copy path the old
+ * buffer is dead (parked for reuse; `TEKO_MEM_PARANOID` poisons it instead, so a violated decree
+ * fails the gate loudly). Zig's answer — an explicit allocator argument, the CALLER freeing the old
+ * buffer — was checked against our surface and does NOT fit it: no allocator value reaches a Teko
+ * builtin call, and `teko::mem::free` is a SEPARATE builtin this backend does not lower at all yet
+ * (measured, `docs/memory/0.3.1.0-linux-native-first-stop.md`'s degrau-26 family table). Go's
+ * one-value-in, one-value-out spelling is what `b = teko::mem::append_fo(b, s)` already is.
+ *
+ * @param ctx  the lowering context
+ * @param e    the call expression (its type is `[]byte`)
+ * @param cl   the call node (`args[0]` the destination buffer, `args[1]` the appended `str`)
+ * @return     the grown buffer as its (ptr, len) pair
+ * @throws     on a malformed call (an arity the checker's own fixed signature forbids), or
+ *             propagated from lowering either argument as a fat-pointer producer
+ */
+fn lower_append_fo_call(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall) -> LoweredFat | error {
+    if cl.args.len != 2 { return error { message = "native backend N1: `teko::mem::append_fo` expects (bytes, str) (internal)" } }
+    let dst = match lower_fat_expr(ctx, cl.args[0]) { LoweredFat as x => x; error as err => return err }
+    let src = match lower_fat_expr(dst.ctx, cl.args[1]) { LoweredFat as x => x; error as err => return err }
+    lower_len_out_call(src.ctx, "tk_append_bytes_fo", four_args(dst.ptr, dst.len, src.ptr, src.len), e)
 }
 
 /**
