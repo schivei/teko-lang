@@ -1974,3 +1974,90 @@ medidas.** E o corolário que o degrau 25 deu, que vale como régua:
 
 Ao fechar qualquer coisa nesta lane: **varra a família inteira e liste os irmãos**, inclusive os que
 não vai corrigir.
+
+## 0x · A leitura da 30563221738 — o que é defeito e o que é o runner a cair
+
+Execução `30563221738` sobre `9a59758`, lida com a execução **ainda a correr**. Cinco causas
+distintas, e três delas não são defeito nenhum:
+
+| perna | veredicto | causa |
+|---|---|---|
+| `artifact / linux-x86_64-glibc`, `artifact / linux-arm64-musl` | **degrau 32, já conhecido** | `TEKO_FIXPOINT_BACKEND: native` → `builtin one_byte not yet lowered (N2) [in teko::encoding::json::parse_string]`. Front-end inteiro passa antes: lexer 143/143, checker 6202/6202, consteval 473/473 |
+| `regressor / all capabilities` | **infra** | `exit 143` + `The runner has received a shutdown signal` |
+| `test / linux-x86_64-musl`, `Memory paranoid (linux-x86_64-musl)` | **infra** | `cancelled` |
+| `test / macos-arm64` | **meu defeito de CI, JÁ CORRIGIDO em `112cae8`** | `check_coff: FAIL — 'llvm-readobj' is absent on Darwin-arm64` |
+| `test / linux-arm64-glibc` | **defeito real, novo** | o casador de padrões |
+| `test / windows-x86_64` | **defeito real, novo** | `ACCESS_VIOLATION` |
+
+### O casador de padrões que se desmente a si próprio
+
+`assert_failure_names_the_scenario_and_both_values` falhou com *"stderr did not contain the declared
+pattern"* — e **a cauda que ele próprio imprime contém o padrão, literalmente**:
+
+```
+  pattern: the_named_case: assertion failed: eq_i64 — expected 42, got 41
+  captured stderr tail:
+teko: deliberate panic: the_named_case: assertion failed: eq_i64 — expected 42, got 41
+```
+
+Ou o buffer que ele CASA não é o que ele IMPRIME, ou o `—` (U+2014) atravessa um dos caminhos
+transformado, ou a captura fecha antes de o `panic` acabar de escrever. Despachado em
+`cargo/0.3.1.0-matcher-padrao-stderr` com ordem de **nomear a causa antes de corrigir**.
+
+Nota que este cenário é precisamente um `deliberate panic` — o caso que o martelo do dono manda
+capturar em modo teste. O defeito do casador é anterior a isso e independente dele.
+
+### Windows: `own_arith_exit` morre em 0xC0000005
+
+```
+exit -1073741819, expected 0        (= 0xC0000005 = ACCESS_VIOLATION)
+the program wrote nothing to stdout or stderr
+```
+
+Escreveu **zero bytes** — morre antes de qualquer saída. Passa em Linux e macOS: é do Win64. A
+primeira suspeita é a que já estava **nomeada e não despachada**: `B3-argslot` — no Win64 os slots de
+registo de argumentos são partilhados por posição entre inteiros e flutuantes; no SysV os dois
+ficheiros contam independentemente. Despachado em `cargo/0.3.1.0-win-arith-av` com ordem de
+**varrer o conjunto de sítios, não perseguir a instância** — que é a objecção que o dono já fez uma
+vez sobre a vtable.
+
+Medido de passagem, e é grave por si: **1946 segundos (32 min) para UM build** em Windows. O dono
+tinha dito 15–20 min como pior caso da org.
+
+### Os unitários: 1129, não 1196
+
+1129 `... ok` em todas as pernas que lá chegaram (arm64-glibc, macos, windows, regressor), e **zero
+`assertion failed` que não seja deliberada**. O número anterior era 1196; a diferença de 67 é
+compatível com a remoção do wasm (57 sítios), mas **compatível não é medido** — fica dito como
+hipótese, não como facto.
+
+### Dois alertas vivos, e a barra do tronco não os aceita
+
+```
+src/lir/frame_escape.tks:274:9: warning: redundant cast: this `to u64` is a provable no-op
+src/lir/frame_escape.tks:290:9: warning: redundant cast: this `to u64` is a provable no-op
+```
+
+`frame_escape.tks` nasceu nesta lane, e é minha. Despachado em
+`cargo/0.3.1.0-cast-hygiene-frame-escape`, com a ordem explícita de **parar e reportar** se o cast
+não for mesmo um no-op — nesse caso o defeito seria do detector, e silenciar o alerta seria o erro.
+
+## 0y · A fronteira do log de CI era minha, não do GitHub
+
+Eu tinha escrito no cabeçalho do `scripts/ci_full_log.sh` que enquanto a execução corre não há como
+ler uma perna vermelha, e que faria falta um `upload-artifact` por job em `pr.yml`. **É falso.** O
+404 é só do ZIP da execução inteira. Os logs **por job**, **integrais**, descarregam-se com a
+execução a meio:
+
+```
+mcp__github__get_job_logs  run_id=<id>  failed_only=true  return_content=false   → logs_url assinado
+curl -sS -o job.txt '<logs_url>'                                                 → o log inteiro
+```
+
+Medido: 4 jobs, 1465–3967 linhas cada, com uma perna ainda `in_progress`. A linha que interessava
+estava a 1538 — fora do alcance de qualquer cauda. **Nenhuma mudança em `pr.yml` era precisa.** É a
+segunda vez neste mesmo ficheiro que proponho mexer no CI para resolver uma limitação do meu
+conhecimento do instrumento. O cabeçalho ficou corrigido contra mim.
+
+Achado de graça: os subagentes **não têm** o MCP do GitHub. Quem busca o URL assinado tem de ser eu;
+o que se delega é a ANÁLISE do ficheiro já em disco.

@@ -21,9 +21,23 @@
 #
 #   · Enquanto a execução está EM CURSO dá **404**, e o 404 chega já no PEDIDO DO URL, não no download
 #     (medido na 30509727122, ainda a correr: `get_workflow_run_logs_url` responde 404 e não devolve
-#     URL nenhum). O ZIP só nasce quando a execução TERMINA. Para espiar uma perna vermelha antes do
-#     fim da execução, o log completo não serve — e aí, sim, um artefacto por job seria o instrumento.
-#     Fica registado, não implementado: precisa da palavra do dono, porque mexe em `pr.yml`.
+#     URL nenhum). O ZIP só nasce quando a execução TERMINA.
+#
+# CORRECÇÃO A ESTE PRÓPRIO CABEÇALHO (2026-07-30, execução 30563221738, ainda a correr). Eu tinha
+# escrito aqui que "para espiar uma perna vermelha antes do fim da execução, o log completo não serve"
+# e que faria falta um artefacto-em-falha em `pr.yml`. **É falso, e a fronteira era minha, não do
+# GitHub.** O 404 é só do ZIP DA EXECUÇÃO INTEIRA. Os logs POR JOB, INTEGRAIS, estão disponíveis
+# enquanto a execução corre:
+#
+#     mcp__github__get_job_logs  run_id=<run-id>  failed_only=true  return_content=false
+#         → devolve um `logs_url` ASSINADO por job falhado (expira em ~10 min)
+#     curl -sS -o job.txt '<logs_url>'
+#         → o log INTEGRAL desse job, não uma cauda
+#
+# Medido na 30563221738 com uma perna ainda `in_progress`: 4 jobs, 1465–3967 linhas cada, nada
+# truncado, e a linha que interessava estava a 1538 — muito além de qualquer `tail_lines`. Nenhuma
+# mudança em `pr.yml` foi precisa. O padrão repete-se: eu propus mexer no CI para resolver uma
+# limitação do meu conhecimento do instrumento, e é a segunda vez neste mesmo ficheiro.
 #   · O que NENHUM download desfaz é o truncamento que o NOSSO harness faz: quando uma linha de
 #     regressão falha, ele imprime `captured output tail:` e corta. Esse limite é do produto, não do
 #     GitHub, e é um achado à parte.
