@@ -417,3 +417,281 @@ optimização minha.
 
 **E o número que interessa mais do que o total:** **a fase 1, com 11 crumbs, rende sozinha** — stack
 traces por linha em produção, para todo programa Teko, sem uma linha de depurador escrita.
+
+---
+
+# 4. O que o compilador tem de passar a produzir
+
+## 4.1 O `.tsym` é a semente, e a legislação já o disse
+
+`TEKO_LEGISLATION.md:350`, literal e verificado nesta árvore hoje:
+
+> **`.tsym`** — *Teko Symbols* (debug symbols: file:line + names **for the debugger** + stack traces
+> — Eixo E).
+
+**A legislação já designou o `.tsym` como o artefacto de informação de depuração "for the debugger".**
+Estender o `.tsym` é **obedecer**; inventar um formato novo seria abrir um segundo para um propósito já
+legislado. Não há tensão a resolver: a lei decidiu antes de a pergunta existir.
+
+E o formato foi desenhado para evoluir. O cabeçalho que o emissor escreve hoje
+(`src/codegen/codegen.tks:12189`) **leva a versão**:
+
+```
+# teko symbol map (.tsym v1): <c-symbol>\t<teko-name>\t<file>:<line>
+```
+
+Logo: um leitor v2 aceita um v1 **degradando** (sem linhas, sem frames, sem locais), e um leitor v1 vê
+um cabeçalho que não reconhece e **para honestamente**. Nada a inventar, e a compatibilidade é aditiva.
+
+## 4.2 As quatro tabelas, e o estado medido HOJE
+
+Medido nesta árvore, no SHA `e317b44`. **Metade do trabalho já está feita, e é isso que separa
+"construir um depurador" de "construir um leitor sobre tabelas que já temos".**
+
+| tabela | o `tdb` precisa? | estado medido hoje |
+| --- | --- | --- |
+| **função → nome Teko, ficheiro, linha de declaração** | sim | **JÁ EXISTE e JÁ É EMITIDO.** `tk_emit_tsym` escreve `<símbolo-manglado>\t<nome-teko>\t<ficheiro>:<linha>` por função, e `checker::TFunction` carrega `file` e `line` (`src/checker/tast.tks:166-167`, com o comentário *"for the .tsym symbol map"*) |
+| **descritor de frame** (framed?, tamanho, base de frame, offset do retorno) | **sim, e é o que dá o `bt` sem inferência** | **JÁ É CALCULADO, e é exacto.** `compute_frame_layout_x86` → `FrameLayoutX86` (`src/backend/encode_x86_64.tks:1501`) e `compute_frame_layout` → `FrameLayout` (`src/backend/encode_arm64.tks:1066`). **Falta serializá-lo** — uma linha de texto por função |
+| **locais** (nome → slot → tipo) | sim, para `print x` | **JÁ EXISTE em `LEnv` e é DESCARTADO.** `LEnv` é `{ names, vregs, len_vregs, has_len, is_slot, is_scalar_slot, slot_ltype }` (`src/lir/lower.tks:33`) — nome, slot **e** tipo de máquina, tudo lá. E `lenv_bind_scalar_slot(env, name, slot, ty)` (`:113`) **já liga um local nomeado a um slot de frame com o seu tipo** |
+| **endereço → linha** | **sim, é o coração** | **NÃO EXISTE.** `LInst` carrega `line: u32; col: u32` com valores reais — e o doc-comment em `src/lir/lir.tks:206-209` diz literalmente *"the source position propagated from the TExpr (for the .tsym map and **future debug info**)"*. **A posição chega ao LIR e morre lá.** `MInst` não a carrega |
+
+**Três linhas dizem "já existe" ou "já é calculado". Uma diz "não existe".** O único produtor novo é o
+que leva a posição do LIR até aos bytes finais — e §4.3 explica por que forma.
+
+## 4.3 O achado desta passagem, medido hoje: o produtor de `.tsym` tem de MUDAR DE CASA
+
+**Isto não é um alarme; é um crumb com uma ordem obrigatória** (`C1.4`, §3.1), e é a razão de ele
+existir.
+
+Medido:
+
+| facto | onde |
+| --- | --- |
+| o produtor de `.tsym` vive **dentro do emissor de C** | `fn tk_emit_tsym(prog: checker::TProgram) -> str` em `src/codegen/codegen.tks:12187`, e o comentário admite-o: *"mirror of codegen.c tk_emit_tsym"* |
+| e é chamado pela rota **NATIVA** | `src/build/project.tks:1845` e `:2642` — o segundo dentro do caminho de `finish_native_object` |
+| e o expurgo vai apagar a casa | `docs/design/expurgo-do-c-e-a-busca-por-linker-0.3.1.md`, fatia **6**: *"REMOVER DO FONTE … a emissão de C"* — **pendente** |
+
+**A consequência, e é aritmética simples:** no dia em que a fatia 6 correr, a rota nativa perde o
+produtor de `.tsym` se ele ainda estiver em `codegen.tks`. Não é uma incompatibilidade futura — é uma
+dependência viva **hoje**, do caminho que fica sobre o caminho que sai.
+
+**A resolução, e é barata:** `C1.4` move o produtor para um módulo próprio (`src/backend/tsym.tks`),
+**antes** de qualquer crumb de linhagem, com a prova de que o `.tsym` v1 emitido depois da mudança é
+**byte-idêntico** ao de hoje. O crumb não depende do portão e não depende do `tdb`: **é higiene do
+expurgo que a proposta descobriu, e reporto-a para cima como tal.**
+
+E há uma segunda razão para a mudança de casa, que é do formato e não do expurgo: `tk_emit_tsym` usa
+`cb_fn_name` — o **manglador de símbolos do emissor de C** — para escrever a chave de cada linha. A
+chave tem de casar com o símbolo que está na tabela de símbolos do objeto **nativo**. Medido, e é boa
+notícia: `LFunc.symbol` é documentado como *"its ALREADY-mangled symbol"* (`src/lir/lir.tks:216-219`),
+logo a rota nativa já carrega o nome manglado e a chave casa. **O produtor mudar de casa é o que torna
+essa coincidência um contrato em vez de sorte.**
+
+## 4.4 O `.tsym` v2, linha por linha
+
+**Texto, separado por tabulações, como o v1.** Deliberado: legível, diffável, e o leitor não precisa de
+um descodificador binário — o que poupa crumbs na fase 4. **E é a escolha que `M1.0` mede antes de a
+fixar** (§3.1): se o número de bytes no corpus real passar o limiar que o próprio crumb fixa, entra um
+formato compacto e o leitor muda; se não passar, o texto fica e a poupança é real.
+
+| linha | forma | o que dá ao dev |
+| --- | --- | --- |
+| cabeçalho | `# teko symbol map (.tsym v2)` + a legenda das linhas | o leitor v1 para honestamente; o v2 sabe o que segue |
+| **`S`** (já existe como linha sem prefixo no v1) | `S <símbolo> <nome-teko> <ficheiro> <linha-decl>` | os nomes qualificados Teko no `bt` |
+| **`L`** | `L <símbolo> <offset-hex> <linha> <coluna>` — uma por posição sobrevivente | `break ficheiro.tks:41`, a listagem, `next`, `step` |
+| **`F`** | `F <símbolo> <framed 0\|1> <tamanho> <reg-base> <offset-do-retorno>` | o `bt` **pela verdade do compilador**, em qualquer arquitetura |
+| **`V`** | `V <símbolo> <nome> <offset-do-slot> <tipo> <linha-decl>` | `print x`, `locals`, `args` |
+| **`T`** | `T <tipo> <forma> <rail>` — a descrição dos tipos de layout **congelado**, e o rail da união quando é união | a formatação legível de §2.2, sem o formatador adivinhar invariantes internos |
+
+**Duas regras de honestidade que ficam escritas na especificação (`C1.10`), e não no emissor:**
+
+1. **Só se descreve tipo cujo layout esteja CONGELADO.** Um local cujo tipo não está no registo **não
+   recebe linha `V`** — e o `tdb` responde *"`s`: str — layout not frozen at build time"*, que é uma
+   resposta honesta, em vez de mostrar bytes com confiança. É a regra que faz `M5.0` ser uma medição e
+   não um bloqueio: se `str` ainda for de duas palavras no dia da fase 5, os locais de tipo `str` ficam
+   sem descrição e **tudo o resto avança**.
+2. **Uma localização só é válida onde é válida.** Sob o perfil `vars`, **todo local nomeado é fixado a
+   um slot de frame** — e a localização passa a ser um único offset válido em **todo** o escopo, em vez
+   de um registo que já tem outra coisa fora do intervalo de vida do valor. O mecanismo **já existe na
+   árvore**: `lenv_bind_scalar_slot`. É literalmente o que um compilador de C faz sem optimização, e é
+   mais barato **e** mais correcto do que descrever localizações por intervalo.
+
+## 4.5 As formas em Teko
+
+O que o implementador acrescenta, com as assinaturas. `void` e sobrecarga são banidos: nenhuma destas
+devolve nada sem valor, e cada operação tem um nome só.
+
+```teko
+/**
+ * MLineMark — a zero-byte machine pseudo-instruction carrying the source position of the
+ * instructions that follow it, until the next mark.
+ *
+ * WHY A MARK AND NOT A PARALLEL ARRAY. The register allocator rewrites the instruction stream
+ * one-to-MANY: `rewrite_inst` expands spills and reloads, so an array indexed alongside
+ * `MBlock.insts` desynchronises at the FIRST spill and then lies about every position after it,
+ * silently. A mark is carried by the stream itself, so it cannot drift from what it marks.
+ *
+ * Encodes to ZERO bytes. An object built with marks is byte-identical to one built without them,
+ * which is the property the golden test asserts and the reason this is safe to add at any time.
+ *
+ * @since 0.3.1 tdb proposal, fase 1
+ * @see LInst  the LIR instruction whose `line`/`col` this carries forward
+ */
+pub type MLineMark = struct { line: u32; col: u32 }
+
+/**
+ * LineRow — one resolved address-to-position row of the `.tsym` v2 `L` table.
+ *
+ * `offset` is relative to the start of the owning function's symbol, NOT absolute: the debugger
+ * resolves the symbol's address from the object's own symbol table, which we already emit, so no
+ * relocation and no load-address arithmetic enters this format.
+ *
+ * @since 0.3.1 tdb proposal, fase 1
+ */
+pub type LineRow = struct { symbol: str; offset: u64; line: u32; col: u32 }
+
+/**
+ * FrameRow — one function's frame descriptor, the `F` table of `.tsym` v2.
+ *
+ * This is the row that lets `bt` be the STRONGEST claim of the whole arc rather than the most
+ * fragile one: it is serialized from `compute_frame_layout_x86`/`compute_frame_layout`, which are
+ * EXACT because the compiler computed them. No prologue analysis, no heuristic, no inference —
+ * and it is correct on every architecture for the same reason, so arm64 needs no separate proof.
+ *
+ * @since 0.3.1 tdb proposal, fase 1
+ * @see compute_frame_layout_x86  the producer on x86-64
+ * @see compute_frame_layout      the producer on arm64
+ */
+pub type FrameRow = struct { symbol: str; framed: bool; size: u64; base_reg: u32; ra_offset: i64 }
+
+/**
+ * LocalRow — one named local's location and type, the `V` table of `.tsym` v2.
+ *
+ * `slot_offset` is a FRAME-RELATIVE offset and is valid for the WHOLE scope of the binding, because
+ * under the `vars` profile every named local is pinned to a frame slot. A location that were only
+ * valid inside a value's live range would make `print x` print another variable's value in silence
+ * and with confidence — which is worse than refusing to answer.
+ *
+ * @since 0.3.1 tdb proposal, fase 1
+ * @see lenv_bind_scalar_slot  the existing binder this profile routes every named local through
+ */
+pub type LocalRow = struct { symbol: str; name: str; slot_offset: i64; ty: str; decl_line: u32 }
+
+/**
+ * DebugInfo — how much debug information a build emits, the `--debug=<value>` axis.
+ *
+ * LEVELLED and not boolean, because the two levels answer different questions and the cheaper one
+ * is genuinely useful alone: `Lines` answers "where am I and how did I get here" and is what turns
+ * production stack traces from per-function into per-line; `Vars` adds "what is `x` worth".
+ *
+ * @since 0.3.1 tdb proposal, fase 1
+ * @see opt_level_of  the sibling build AXIS, likewise CLI-only and absent from `teko.tkp`
+ */
+pub type DebugInfo = enum { None; Lines; Vars }
+
+/**
+ * debug_info_of_value — map the text after `--debug=` to a level, or FAIL.
+ *
+ * DELIBERATELY UNLIKE `opt_level_of_value`, which resolves a malformed suffix to level 2. An
+ * unrecognised optimization level costs speed; an unrecognised DEBUG level costs a whole debugging
+ * session spent chasing a breakpoint that silently never resolved. No silent coercion.
+ *
+ * @param v  the substring after `--debug=`
+ * @return   the level for "none", "lines" or "vars"
+ * @throws   when `v` is none of the three, naming all accepted values
+ */
+fn debug_info_of_value(v: str) -> DebugInfo | error {
+    if v == "none" { return DebugInfo::None }
+    if v == "lines" { return DebugInfo::Lines }
+    if v == "vars" { return DebugInfo::Vars }
+    error { message = "teko: --debug=" ~ v ~ ": unknown level — accepted: none, lines, vars" }
+}
+
+/**
+ * emit_tsym_v2 — serialize the whole debug map for a built program.
+ *
+ * Lives in its OWN module and not in the C emitter. That is not tidiness: the C emitter is scheduled
+ * for deletion by slice 6 of the C purge (`REMOVER DO FONTE … a emissão de C`), and the native route
+ * calls this producer today, so leaving it there means the purge takes the native route's symbol map
+ * with it.
+ *
+ * At `DebugInfo::None` this returns the v1 body BYTE-IDENTICAL to what ships today, so the level is
+ * additive and no existing consumer changes.
+ *
+ * @param prog   the checked program (function names, files, declaration lines)
+ * @param lines  the resolved address-to-position rows, empty at `DebugInfo::None`
+ * @param frames the per-function frame descriptors, empty at `DebugInfo::None`
+ * @param locals the named locals, empty unless `DebugInfo::Vars`
+ * @param level  the requested debug level
+ * @return       the whole `.tsym` text, ready to write beside the binary and into the `.tkl`
+ */
+pub fn emit_tsym_v2(prog: checker::TProgram, lines: []LineRow, frames: []FrameRow,
+                    locals: []LocalRow, level: DebugInfo) -> str
+```
+
+**Onde isto toca o que já existe:**
+
+| função existente | o que muda |
+| --- | --- |
+| `tk_emit_tsym` (`src/codegen/codegen.tks:12187`) | **sai de `codegen.tks`** e passa a ser o caminho `None` de `emit_tsym_v2` |
+| `new_func` / `LFunc` (`src/lir/lir.tks:219`, `:321`) | ganham `file` e `decl_line` |
+| `rewrite_inst` (`src/backend/regalloc.tks`) | **não muda** — é a razão de o `MLineMark` ser uma marca no fluxo |
+| `compute_frame_layout_x86` / `compute_frame_layout` | **não mudam** — só passam a ter o resultado serializado |
+| `lenv_bind_scalar_slot` (`src/lir/lower.tks:113`) | **não muda** — passa a ser o caminho de **todo** local nomeado sob o perfil `vars` |
+| `assign_lookup` (`src/backend/regalloc.tks:1475`) | **não muda** — é a chave do JOIN por `vreg_id`, e é já pública |
+| `project_arg_of` (`src/main.tks`) | ganha o salto de `--debug=` — **obrigatório**, §4.7 |
+
+## 4.6 A forma do projeto
+
+```
+/tdb/tdb.tkp          name = "tdb"; source = "src"; [artifact] kind = "tool"; command = "tdb"
+/tdb/main.tks         o virtual-main, sem declarações, como o main.tks do compilador
+/tdb/src/…            cli.tks, session.tks, control.tks, breakpoints.tks, tsym.tks, unwind.tks,
+                      format.tks, dap.tks
+/tdb/tests/…          as fixtures escritas à mão (§6)
+```
+
+**`kind = "tool"`, e o estado medido hoje é melhor do que a 2.ª passagem registou.** Ela nomeou dois
+defeitos a bloquear a feature. **O primeiro está CONSERTADO na árvore de hoje** — `manifest.tks` já
+emite `unknown [artifact] kind "…" — accepted kinds: …` com a lista dos aceites, e existe
+`artifact_kinds_listed()` para a produzir. Logo `kind = "tool"` escrito hoje **é erro duro**, que é
+exactamente o diagnóstico honesto de *"esta feature ainda não existe"*, e já não um verde falso.
+
+**O segundo continua de pé, e é um passo com ordem obrigatória, não um alarme.** Medido em
+`src/build/tkp_rule.tks:16-22`: `check_main_file_rule` exige `main.tks` para `Binary` e **proíbe-o para
+tudo o que não seja `Binary`**, com a mensagem *"a library project (static/shared/package) may not have
+a main.tks"*. **Um `tool` é um executável e TEM `main.tks`.** Logo o crumb que acrescenta `Tool` ao enum
+tem de tocar esta função **no mesmo crumb**, ou toda ferramenta falha a construir com uma mensagem que
+enumera três kinds que não a incluem.
+
+**E o `Tool` não é um kind do zero:** é **o caminho do `Binary` mais o tail do `Package`** — as duas
+metades já estão escritas no despacho de `backend()`. O que isso resolve, sem tensão nenhuma com o
+enunciado do dono: o `.tkl` de um `tool` **não leva binário pré-construído**. Leva o `.tkb` — a árvore
+tipada serializada, que já é o payload do `Package` — mais a declaração do comando; e **a máquina do dev
+compila-o para o seu alvo**, que é o que ele descreveu. Nada de binários não-portáveis num pacote.
+
+**E a regra de `[deps]`, como o dono a precisou:** um `tool` declarado em `[deps]` **não é recusado — é
+ignorado**, sem importar e sem linkar. Isso é mais forte do que uma recusa, e é o que torna o
+acoplamento estrutural em vez de voluntário:
+
+> **O `tdb` acopla-se ao compilador por FORMATO (o `.tsym` v2), NUNCA importando `src/`.**
+
+Um `tool` não tem por onde declarar o compilador como dependência, logo o `tdb` **não tem por onde**
+importar o checker. A migração para repo próprio deixa de ser disciplina e passa a ser inevitável — que
+é o objectivo do dono, obtido por construção. **E o corolário é `C1.10`:** emissor e leitor viverão em
+repos diferentes, logo o `.tsym` v2 precisa de **especificação escrita**, e o leitor da fase 4 é escrito
+contra ela e não contra o emissor.
+
+## 4.7 A linha que não pode faltar
+
+`project_arg_of` devolve **o primeiro positional que não reconhece como flag**. Uma flag nova que não
+entre na sua lista de saltos é lida como **o caminho do projeto**, sem erro de flag desconhecida.
+`--debug=vars` tornar-se-ia silenciosamente um caminho, e a construção falharia a dizer que o projeto
+não existe.
+
+**Todo crumb que acrescente flag toca `project_arg_of` e paga o teste que o prova.** É uma linha, e a
+sua ausência é um defeito de dez minutos a diagnosticar:
+
+```teko
+        else if debug_arg_has_prefix(args[i]) { i = i + 1 }
+```
