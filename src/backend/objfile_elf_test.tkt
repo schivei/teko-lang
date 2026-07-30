@@ -207,3 +207,278 @@ fn elf_symbol_index_finds_and_sentinels() {
     teko::assert::is_true(elf_symbol_index(syms, "main") == (1 to u32))
     teko::assert::is_true(elf_symbol_index(syms, "absent") == (2 to u32))
 }
+
+/**
+ * EL_EHDR_MACHINE_FIELD — the `Elf64_Ehdr.e_machine` byte offset (16 bytes of
+ * `e_ident` then the 2-byte `e_type`), read as a little-endian u16.
+ */
+const EL_EHDR_MACHINE_FIELD: u64 = 18 to u64
+
+/**
+ * EL_EHDR_SHOFF_FIELD — the `Elf64_Ehdr.e_shoff` byte offset (the section-header
+ * table's file offset), read as a little-endian u32 since every object this
+ * writer emits is far below 4 GiB.
+ */
+const EL_EHDR_SHOFF_FIELD: u64 = 40 to u64
+
+/**
+ * EL_EHDR_FLAGS_FIELD — the `Elf64_Ehdr.e_flags` byte offset (the
+ * processor-specific ABI flags), read as a little-endian u32.
+ */
+const EL_EHDR_FLAGS_FIELD: u64 = 48 to u64
+
+/**
+ * EL_SHDR_SIZE — the `Elf64_Shdr` stride in the section-header table.
+ */
+const EL_SHDR_SIZE: u64 = 64 to u64
+
+/**
+ * EL_SHDR_OFFSET_FIELD — the `Elf64_Shdr.sh_offset` offset within a section
+ * header (the section image's file offset).
+ */
+const EL_SHDR_OFFSET_FIELD: u64 = 24 to u64
+
+/**
+ * EL_SHNDX_RELA_TEXT — `.rela.text`'s fixed section-header index in the writer's
+ * section order (`""`, `.text`, `.rodata`, `.symtab`, `.strtab`, `.shstrtab`,
+ * `.rela.text`).
+ */
+const EL_SHNDX_RELA_TEXT: u64 = 6 to u64
+
+/**
+ * EL_SHNDX_RELA_RODATA — `.rela.rodata`'s fixed section-header index: the
+ * optional eighth header the writer appends only when a relocation's patch site
+ * lies inside `.rodata`. Naming the index rather than scanning for the first
+ * `SHT_RELA` keeps the two relocation tables distinguishable even when
+ * `.rela.text` is empty and the two share a file offset.
+ */
+const EL_SHNDX_RELA_RODATA: u64 = 7 to u64
+
+/**
+ * EL_RELA_SIZE — the `Elf64_Rela` stride (`r_offset`, `r_info`, `r_addend`).
+ */
+const EL_RELA_SIZE: u64 = 24 to u64
+
+/**
+ * EL_RELA_TYPE_FIELD — the offset, within an `Elf64_Rela`, of `r_info`'s low
+ * 32 bits: the `R_<arch>_*` relocation type.
+ */
+const EL_RELA_TYPE_FIELD: u64 = 8 to u64
+
+/**
+ * EL_RELA_SYM_FIELD — the offset, within an `Elf64_Rela`, of `r_info`'s high
+ * 32 bits: the target's `.symtab` index.
+ */
+const EL_RELA_SYM_FIELD: u64 = 12 to u64
+
+/**
+ * EL_RELA_ADDEND_FIELD — the offset, within an `Elf64_Rela`, of `r_addend`'s low
+ * 32 bits (every addend these fixtures build is small and non-negative).
+ */
+const EL_RELA_ADDEND_FIELD: u64 = 16 to u64
+
+/**
+ * el_section_offset — the file offset of the section whose header sits at index
+ * `shndx`, read from the object's own section-header table so a fixture never
+ * hardcodes a layout-dependent constant.
+ *
+ * @param []byte obj  the emitted ELF object bytes
+ * @param u64 shndx  the section-header index
+ * @return u64  that section's `sh_offset`
+ */
+fn el_section_offset(obj: []byte, shndx: u64) -> u64 {
+    let shoff = el_u32_at(obj, EL_EHDR_SHOFF_FIELD) to u64
+    el_u32_at(obj, shoff + (shndx * EL_SHDR_SIZE) + EL_SHDR_OFFSET_FIELD) to u64
+}
+
+/**
+ * el_rela_field — one 32-bit field of row `n` of the relocation section at
+ * section-header index `shndx`, located through the object's own section-header
+ * table so the assertion survives any layout shift.
+ *
+ * @param []byte obj  the emitted ELF object bytes
+ * @param u64 shndx  the relocation section's header index
+ * @param u64 n  the zero-based row index within that table
+ * @param u64 field  the field's byte offset within the `Elf64_Rela`
+ * @return u32  the little-endian u32 at that field
+ */
+fn el_rela_field(obj: []byte, shndx: u64, n: u64, field: u64) -> u32 {
+    el_u32_at(obj, el_section_offset(obj, shndx) + (n * EL_RELA_SIZE) + field)
+}
+
+/**
+ * el_arm64_gpr — a physical arm64 GPR operand with the given ISA id (the arm64
+ * fixture shorthand; the encoder runs post-regalloc, every operand physical).
+ *
+ * @param u32 id  the arm64 ISA register number
+ * @return MReg  the physical GPR operand
+ */
+fn el_arm64_gpr(id: u32) -> MReg {
+    preg(id, MRegClass::GPR)
+}
+
+/**
+ * el_arm64_func — a single-block, frameless arm64 `MFunc` with the given symbol
+ * and instruction stream.
+ *
+ * @param str sym  the function's symbol
+ * @param []MInst insts  the block's instructions
+ * @return MFunc  the assembled arm64 function
+ */
+fn el_arm64_func(sym: str, insts: []MInst) -> MFunc {
+    MFunc { symbol = sym; blocks = [MBlock { id = 0 to u32; params = teko::list::empty(); insts = insts }]; frame = teko::list::empty() }
+}
+
+/**
+ * el_arm64_reloc_module — a frameless arm64 `main` of `adrp x0,"s0"; add-lo
+ * x0,x0,"s0"; bl tk_exit` plus one `.rodata` datum `s0 = "A\0"`. Exercises all
+ * THREE relocation kinds a real arm64 compile produces — the address pair
+ * against a DEFINED `.rodata` local and the branch against an UNDEFINED extern —
+ * in one object.
+ *
+ * @return MModule  the one-function, one-rodata, three-reloc arm64 module
+ */
+fn el_arm64_reloc_module() -> MModule {
+    let insts = [adrp_inst(el_arm64_gpr(0), "s0", MRelocKind::PageHi), add_lo_inst(el_arm64_gpr(0), el_arm64_gpr(0), "s0", MRelocKind::PageLo), call_inst("tk_exit", teko::list::empty(), el_arm64_gpr(0), false, false)]
+    let rodata = [lir::LRodata { symbol = "s0"; bytes = [0x41 to byte, 0 to byte]; relocs = teko::list::empty() }]
+    MModule { funcs = [el_arm64_func("main", insts)]; rodata = rodata; globals = teko::list::empty(); layouts = teko::list::empty() }
+}
+
+/**
+ * el_arm64_object_of — encode `m` under `AAPCS64` and assemble its AArch64 ELF
+ * object, or an empty buffer on an unexpected honest-stop (so a golden field
+ * assertion fails loudly rather than aborting the run).
+ *
+ * @param MModule m  the arm64 module to encode + emit
+ * @return []byte  the AArch64 ELF object bytes, or empty on error
+ */
+fn el_arm64_object_of(m: MModule) -> []byte {
+    match encode_module(AAPCS64, m) {
+        EncodedModule as x => emit_elf_arm64(x)
+        error as e => teko::list::empty()
+    }
+}
+
+#test
+/**
+ * the AArch64 ELF object's header names AArch64 (`e_machine` = 183) with NO
+ * processor flags (`e_flags` = 0), and its three `.rela.text` rows carry the
+ * numbers a real `clang --target=aarch64-linux-gnu` object carries for the same
+ * four shapes: `ADR_PREL_PG_HI21`(275) then `ADD_ABS_LO12_NC`(277) for the
+ * `.rodata` address pair, then `CALL26`(283) for the `bl`. The pair points at
+ * the `.rodata` SECTION symbol (index 1, ahead of the global `main` at 2) with
+ * the datum's offset folded onto the addend; the `bl` points at the undefined
+ * `tk_exit` (index 3, last, as ELF requires). Every assertion is on emitted
+ * BYTES, not on the fact that anything compiled.
+ *
+ * @return void
+ */
+fn elf_arm64_object_header_and_relas_are_golden() {
+    let obj = el_arm64_object_of(el_arm64_reloc_module())
+    teko::assert::is_true(el_u16_at(obj, EL_EHDR_MACHINE_FIELD) == (183 to u32))
+    teko::assert::is_true(el_u32_at(obj, EL_EHDR_FLAGS_FIELD) == (0 to u32))
+    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_TEXT, 0 to u64, EL_RELA_TYPE_FIELD) == (275 to u32))
+    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_TEXT, 0 to u64, EL_RELA_SYM_FIELD) == (1 to u32))
+    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_TEXT, 0 to u64, EL_RELA_ADDEND_FIELD) == (0 to u32))
+    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_TEXT, 1 to u64, EL_RELA_TYPE_FIELD) == (277 to u32))
+    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_TEXT, 1 to u64, EL_RELA_SYM_FIELD) == (1 to u32))
+    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_TEXT, 2 to u64, EL_RELA_TYPE_FIELD) == (283 to u32))
+    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_TEXT, 2 to u64, EL_RELA_SYM_FIELD) == (3 to u32))
+}
+
+/**
+ * el_arm64_abs64_enc — a hand-built arm64 `EncodedModule` with no functions and
+ * a 16-byte `.rodata` = an 8-byte pointer slot at offset 0 then the target datum
+ * at offset 8, plus one `Abs64`/`Rodata` relocation. `encode_module` never
+ * produces this (its rodata-pointer honest-stop fires first), so feeding
+ * `emit_elf_arm64` directly is the only way to pin the `R_AARCH64_ABS64` number
+ * the `.rela.rodata` row will carry the day that stop opens.
+ *
+ * @return EncodedModule  the hand-built rodata-internal-pointer arm64 module
+ */
+fn el_arm64_abs64_enc() -> EncodedModule {
+    let rodata = [0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0x41 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte]
+    let ptr = Symbol { name = "ptr"; defined = true; sect = 2 to u8; offset = 0 to u32; local = true }
+    let target = Symbol { name = "target"; defined = true; sect = 2 to u8; offset = 8 to u32; local = true }
+    let rr = Reloc { offset = 0 to u32; sym = "target"; kind = MRelocKind::Abs64; sect = RelocSect::Rodata }
+    EncodedModule { text = teko::list::empty(); rodata = rodata; symbols = [ptr, target]; relocs = [rr] }
+}
+
+#test
+/**
+ * an `Abs64` arm64 relocation whose patch site is INSIDE `.rodata` lands in
+ * `.rela.rodata` as `R_AARCH64_ABS64`(257) against the `.rodata` section symbol,
+ * with the target datum's offset (8) folded onto the addend, and NOT in
+ * `.rela.text`: the `sect` partition `arm64_rodata_reloc_reqs` performs is the
+ * same one the x86 adapter performs, so the two cannot drift.
+ *
+ * @return void
+ */
+fn elf_arm64_abs64_lands_in_rela_rodata() {
+    let obj = emit_elf_arm64(el_arm64_abs64_enc())
+    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_RODATA, 0 to u64, EL_RELA_TYPE_FIELD) == (257 to u32))
+    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_RODATA, 0 to u64, EL_RELA_ADDEND_FIELD) == (8 to u32))
+}
+
+/**
+ * EL_LDST_LO12_TYPES — every `R_AARCH64_LDST*_ABS_LO12_NC` relocation number
+ * (`/usr/include/elf.h`: LDST8=278, LDST16=284, LDST32=285, LDST64=286,
+ * LDST128=299). Each patches the SAME 12 bits as `ADD_ABS_LO12_NC` but SCALED by
+ * the access size, so any `MRelocKind` mapping to one of these would mis-scale
+ * the immediate silently — an object that links and computes garbage.
+ */
+const EL_LDST_LO12_TYPES: []u32 = [278 to u32, 284 to u32, 285 to u32, 286 to u32, 299 to u32]
+
+/**
+ * el_kind_is_not_an_ldst_form — assert that `kind`'s AArch64 ELF relocation type
+ * is none of the load/store low-12 forms.
+ *
+ * @param MRelocKind kind  the relocation kind under test
+ * @return void
+ */
+fn el_kind_is_not_an_ldst_form(kind: MRelocKind) {
+    let rtype = elf_reloc_type_arm64(kind)
+    mut i: u64 = 0
+    loop {
+        if i >= EL_LDST_LO12_TYPES.len { break }
+        teko::assert::is_true(rtype != EL_LDST_LO12_TYPES[i])
+        i++
+    }
+}
+
+#test
+/**
+ * elf_arm64_reloc_kinds_are_add_form_only — `PageLo` is the `ADD` low-12 form
+ * (277), and NO `MRelocKind` maps to any load/store low-12 form. isel attaches a
+ * relocation to `MAdrp`/`MAddLo`/`MCall` only, so the day a peephole folds an
+ * `add lo12` into an `ldr [x, #lo12]` this assertion fails loudly and the new
+ * shape gets the OWN kind it needs, instead of silently inheriting an unscaled
+ * immediate.
+ *
+ * @return void
+ */
+fn elf_arm64_reloc_kinds_are_add_form_only() {
+    teko::assert::is_true(elf_reloc_type_arm64(MRelocKind::PageLo) == (277 to u32))
+    el_kind_is_not_an_ldst_form(MRelocKind::PageHi)
+    el_kind_is_not_an_ldst_form(MRelocKind::PageLo)
+    el_kind_is_not_an_ldst_form(MRelocKind::Call)
+    el_kind_is_not_an_ldst_form(MRelocKind::Abs64)
+}
+
+#test
+/**
+ * elf_x86_bytes_are_unchanged_by_the_arm64_adapter — the x86-64 adapter still
+ * stamps `e_machine` = 62 and still resolves its rodata reference to
+ * `R_X86_64_PC32`(2) against the section symbol with the folded addend. The
+ * AArch64 sibling is an ADDITION: it shares `emit_elf_object` and therefore could
+ * only have regressed x86 by changing the writer, which it does not.
+ *
+ * @return void
+ */
+fn elf_x86_bytes_are_unchanged_by_the_arm64_adapter() {
+    let obj = emit_elf(el_rodata_off_module())
+    teko::assert::is_true(el_u16_at(obj, EL_EHDR_MACHINE_FIELD) == (62 to u32))
+    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_TEXT, 0 to u64, EL_RELA_TYPE_FIELD) == (2 to u32))
+    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_TEXT, 0 to u64, EL_RELA_SYM_FIELD) == (1 to u32))
+    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_TEXT, 0 to u64, EL_RELA_ADDEND_FIELD) == (4 to u32))
+}
