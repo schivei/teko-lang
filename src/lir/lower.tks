@@ -3356,17 +3356,31 @@ fn lower_arg_vregs(ctx: LowerCtx, arg: checker::TExpr) -> LoweredArgs | error {
     LoweredArgs { ctx = lo.ctx; vregs = single_arg(lo.vreg) }
 }
 
-/** lower_call_symbol — emit the LCall for an ALREADY-RESOLVED symbol over an
-    already-lowered argument list. A void-returning call (a diverging builtin or a void fn)
-    emits a valueless instruction and returns a dummy VReg the caller must not read; a value
-    call allocates a result VReg. */
+/**
+ * lower_call_symbol — emit the `LCall` for an ALREADY-RESOLVED symbol over an already-lowered
+ * argument list.
+ *
+ * A void-returning call (a diverging builtin or a `void` fn) emits a valueless instruction and
+ * returns a dummy VReg the caller must not read; a value call allocates a result VReg and STAMPS
+ * the call with the machine class its result comes back in (`ltype_of(e.type)` — `LCall.ret_type`),
+ * which is what tells the isel to read XMM0/D0 rather than RAX/x0 for a float-returning callee
+ * (0.3.1.0 degrau 27; before it, every float result was read out of the integer register and then
+ * recorded as an integer value).
+ *
+ * @param ctx    the lowering context
+ * @param e      the call expression (its own type IS the call's result type)
+ * @param sym    the already-resolved callee symbol
+ * @param vregs  the already-lowered, ABI-flattened argument VRegs
+ * @return       the advanced context + the result VReg (a dummy `0` for a `void` call)
+ * @throws       never directly; the union member keeps this callable from the propagating chain
+ */
 fn lower_call_symbol(ctx: LowerCtx, e: checker::TExpr, sym: str, vregs: []u32) -> Lowered | error {
     if type_is_void(e.type) {
         let inst = void_call_inst(sym, vregs, false, e.line, e.col)
         return Lowered { ctx = ctx_append(ctx, inst); vreg = 0 }
     }
     let r = ctx_alloc(ctx)
-    let inst = call_inst(r.vreg, sym, vregs, false, e.line, e.col)
+    let inst = call_inst(r.vreg, sym, vregs, false, e.line, e.col, ltype_of(e.type, ctx.enums))
     Lowered { ctx = ctx_append(r.ctx, inst); vreg = r.vreg }
 }
 
@@ -4071,6 +4085,12 @@ fn iface_call_args(data: u32, rest: []u32) -> []u32 {
  * @return Lowered | error  the advanced context + the call's result VReg (0
  *                          for a void call)
  *
+ * A value call is STAMPED with the machine class its result comes back in
+ * (`ltype_of(e.type)` — `LCallIndirect.ret_type`), the same fact
+ * `lower_call_symbol` stamps on a direct call: a float-returning interface
+ * method or closure returns in XMM0/d0, not in the integer result register
+ * (0.3.1.0 degrau 27).
+ *
  * @since #382 A1-6
  */
 fn lower_call_indirect(ctx: LowerCtx, e: checker::TExpr, target: u32, args: []u32) -> Lowered | error {
@@ -4079,7 +4099,7 @@ fn lower_call_indirect(ctx: LowerCtx, e: checker::TExpr, target: u32, args: []u3
         return Lowered { ctx = ctx_append(ctx, inst); vreg = 0 }
     }
     let r = ctx_alloc(ctx)
-    let inst = call_indirect_inst(r.vreg, target, args, false, e.line, e.col)
+    let inst = call_indirect_inst(r.vreg, target, args, false, e.line, e.col, ltype_of(e.type, ctx.enums))
     Lowered { ctx = ctx_append(r.ctx, inst); vreg = r.vreg }
 }
 
@@ -4308,7 +4328,7 @@ fn build_closure_thunk(symbol: str, target_sym: str, ptypes: []LType, ret_ty: LT
         return append_inst(f2, 0, ret_void_inst(line, col))
     }
     let r = alloc_vreg(f1)
-    let f2 = append_inst(r.func, 0, call_inst(r.vreg, target_sym, args, false, line, col))
+    let f2 = append_inst(r.func, 0, call_inst(r.vreg, target_sym, args, false, line, col, ret_ty))
     append_inst(f2, 0, ret_inst(r.vreg, line, col))
 }
 
