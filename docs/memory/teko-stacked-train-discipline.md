@@ -791,3 +791,35 @@ Quando o dono quis travar a fast-lane em `theory/**`, eu recomendei **não** tra
 ao medir a lane percebi porquê: é a exclusividade que a torna um campo de provas previsível e
 barato para os agentes. Recomendei mal, e o erro só apareceu quando precisei da ferramenta que a
 minha própria recomendação teria diluído.
+
+### O agente dispara o próprio CI — mas nunca espera por ele (dono, 2026-07-30)
+
+> Em theory, prefira por CI de push, isso resolve o problema e até o agente consegue disparar, o
+> problema é que ele vai ficar idle aguardando resposta.
+
+**CI de push, não de dispatch.** Duas razões, e a segunda foi medida:
+
+1. Um push a `theory/**` já dispara a `agent-fast-lane.yml` — o agente aciona a validação completa
+   sozinho, sem pedir nada ao integrador.
+2. **`workflow_dispatch` não existe para um workflow que só vive numa `theory/**`.** Medido: a API
+   devolve **404**. O GitHub só o expõe quando o ficheiro está no **branch default**. (Cuidado com a
+   distinção que eu próprio conflacionei: a **fast-lane VIVE no default**, logo ela É dispatchável
+   pelo integrador, e com escolha de `runner`. O que não é dispatchável é uma sonda criada só na
+   theory.)
+
+**E o modo de falha que o dono nomeou: o agente fica ocioso à espera.** Pior — ele fica ocioso **e
+cego**, porque não tem acesso à API do GitHub (403 medido em vários agentes hoje). Esperar queima
+tempo de parede sem forma nenhuma de ler o resultado.
+
+**A disciplina, para todo brief:**
+
+1. **Empurre a theory no momento em que aparecer uma pergunta que só um host responde** — não ao
+   fim. Se a resposta pode mudar o desenho, quer-se a resposta antes de construir sobre suposição.
+2. **Siga imediatamente.** Nunca bloqueie no CI.
+3. **Reporte o nome da branch E a pergunta feita.** O integrador lê o CI e devolve a medição; a
+   conversa do agente é retomável por `SendMessage`, logo ele continua de onde estava com o dado na
+   mão, sem ter esperado.
+
+O corolário para o integrador: **ler o CI de theory é trabalho meu, não do agente.** Se eu não o
+fizer, o agente entrega sobre suposição — e foi exatamente o que aconteceu com a relocação arm64,
+onde eu aceitei "não pude verificar" como resposta em vez de ter mandado medir.
