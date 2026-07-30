@@ -2192,3 +2192,57 @@ cache ausente   → FATAL, nomeia o que falta e como enchê-la · rc=1
 
 É a terceira vez hoje que apanho a mesma patologia, e a segunda em código meu: **uma guarda que
 verifica a coisa errada passa, e passar é o que a torna pior do que não existir.**
+
+## 0ab · A superfície do esboço do dono, MEDIDA — e um `ref` que mente em silêncio
+
+O dono desenhou o encerramento do orquestrador assim:
+
+```teko
+fn orchestrate(c: u64) {
+  ref ch = teko::threads::get_channel_reader(c)
+  loop ch.is_open() {
+   // lê e processa
+  }
+}
+```
+
+Com a semente `0.3.0.31-beta` na mão, fui compilar a superfície em vez de a ler. Resultados, todos
+com programa a correr e código de saída lido:
+
+| forma | veredicto |
+|---|---|
+| `loop <cond> { }` | **EXISTE e compila** — a forma do esboço é real |
+| `ref x: T = <expr>` (local, anotado) | **recusado, e bem**: *"a `ref` binding's source must be a mutable variable (a `var`) or another reference — not an expression"* |
+| `ref x = <expr>` (local, **sem** anotação) | **COMPILA — e é uma CÓPIA** |
+| `ref p: T` (parâmetro, leitura) | funciona |
+| `ref mut p: T` / `mut ref p: T` | **não existe** — erro de parse nas duas ordens |
+| `ref p: T` + escrita no corpo | recusado (B.21) — **não há write-through** |
+
+### O silêncio é o defeito, não a cópia
+
+```
+CONTROLO   mut c; c.open = false; lê c.open              → exit 0   (a mutação ACONTECE)
+ref r = c; muta c;  lê r.open                            → exit 1   (r NÃO vê)
+ref r = c; muta r;  lê c.open                            → exit 1   (c NÃO vê)
+```
+
+**Não aliasa em nenhuma direcção.** E o instrumento está verificado: o controlo prova que a
+atribuição a campo funciona, logo o resultado não é do teste.
+
+Zero diagnósticos. **Nem erro, nem alerta**, e nas **duas rotas** — C e nativa concordam, portanto
+pela regra do oráculo isto não é defeito do backend nativo: é a superfície da linguagem. Alguém
+escreve `ref`, acredita que tem um alias, e recebe uma cópia.
+
+O contraste é o que fecha o caso: a forma **anotada** aplica a regra com uma mensagem precisa; a
+**não anotada**, com a mesma expressão à direita, passa. Um dos dois caminhos não consulta a regra.
+
+### Porque isto morde o desenho do dono exactamente onde dói
+
+A condição de paragem do orquestrador é `ch.is_open()`. Se `ch` for uma cópia, `is_open()` lê um
+retrato congelado do instante da ligação, **o `defer` da `main` fecha o canal e o orquestrador não
+dá por isso** — o laço não termina. A terminação do desenho depende de o alias ser real.
+
+Ressalva honesta: com o modelo de **handles por id** que o dono acabou de fixar, um
+`get_channel_reader(id)` pode devolver um *handle pequeno e copiável* que consulta o registo a cada
+chamada — e aí a cópia é inofensiva. **Isso é decisão de desenho e não é minha.** O que é meu é
+dizer que hoje a palavra `ref` não entrega o que promete e não avisa.
