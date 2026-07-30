@@ -28,7 +28,9 @@
 #ifdef _WIN32
 #include "../win32_compat.h"  // chdir→_chdir, mkdir, getcwd, setenv, dirent shim, tk_win32_spawnvp
 #include <malloc.h>   // _aligned_malloc / _aligned_free — over-aligned arena chunks (tk_chunk_alloc)
-#include <io.h>        // _dup, _dup2, _close — fd-redirect around tk_rt_run_quiet's _spawnvp (issue #73); _pipe, _read, _get_osfhandle (F5)
+#include <io.h>        // _dup, _dup2, _close — fd-redirect around tk_rt_run_quiet's _spawnvp (issue #73); _pipe, _read, _get_osfhandle (F5); _open/_write (append)
+#include <fcntl.h>    // _O_WRONLY/_O_CREAT/_O_APPEND/_O_BINARY/_O_NOINHERIT — tk_rt_append_file, tk_rt_pipe
+#include <sys/stat.h> // _S_IREAD/_S_IWRITE — the mode tk_rt_append_file creates a new file with
 #else
 #include <unistd.h>   // chdir, fork, execvp, _exit (host FFI bottoms)
 #include <sys/wait.h> // waitpid — teko::process::run
@@ -2364,6 +2366,39 @@ tk_ffi_ures tk_rt_write_file(tk_str path, tk_str content) {
     int rc = fclose(f);
     if (put != content.len || rc != 0) return (tk_ffi_ures){ .ok = false, .err = tk_str_of_cstr("short write on file") };
     return (tk_ffi_ures){ .ok = true };
+}
+
+// (0.3.1.0) tk_rt_append_file(path, content) — see teko_rt.h for the contract and for why this is a
+// primitive rather than a read-modify-write. RAW `open`+`write` and not stdio "ab": the POSIX
+// append guarantee is a property of a `write` to an `O_APPEND` DESCRIPTOR, and stdio is free to
+// split one `fwrite` across several of them, which would give up exactly the atomicity this exists
+// to gain. The loop below finishes a PARTIAL write — necessary for correctness, and the one case
+// that is no longer a single atomic act (teko_rt.h says so rather than pretending otherwise).
+int32_t tk_rt_append_file(tk_str path, tk_str content) {
+    char *p = tk_cstr(path);
+#ifdef _WIN32
+    int fd = _open(p, _O_WRONLY | _O_CREAT | _O_APPEND | _O_BINARY, _S_IREAD | _S_IWRITE);
+#else
+    int fd = open(p, O_WRONLY | O_CREAT | O_APPEND, 0644);
+#endif
+    if (fd < 0) return TK_RT_APPEND_FAILED;
+    size_t done = 0;
+    int32_t status = 0;
+    while (done < content.len) {
+#ifdef _WIN32
+        int put = _write(fd, content.ptr + done, (unsigned int)(content.len - done));
+#else
+        ssize_t put = write(fd, content.ptr + done, content.len - done);
+#endif
+        if (put <= 0) { status = TK_RT_APPEND_FAILED; break; }
+        done += (size_t)put;
+    }
+#ifdef _WIN32
+    if (_close(fd) != 0) status = TK_RT_APPEND_FAILED;
+#else
+    if (close(fd) != 0) status = TK_RT_APPEND_FAILED;
+#endif
+    return status;
 }
 
 // C7.12 — write raw bytes to a file (the .tkl package output path; binary, not UTF-8).

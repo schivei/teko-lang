@@ -682,6 +682,32 @@ tk_str tk_rt_read_stdin(void);
 tk_ffi_sres tk_rt_getenv(tk_str name);
 // teko::io::write_file(path, content) — (over)write the file; error on failure.
 tk_ffi_ures tk_rt_write_file(tk_str path, tk_str content);
+// (0.3.1.0) teko::io::append_file(path, content) — APPEND `content` to the file at `path`, creating
+// it when absent. 0 on success, TK_RT_APPEND_FAILED when the file could not be opened or the bytes
+// could not all be written.
+//
+// WHY A PRIMITIVE AND NOT A READ-MODIFY-WRITE. `teko::process::verdict_emit` used to append by
+// reading the WHOLE file back, concatenating, and rewriting it. Two arena allocations the size of
+// the file per record, and the arena frees ONCE, at process exit (`tk_regions_free_all` — "free
+// EVERY still-live region"), so the bytes allocated over N records are the SUM of 1..N file sizes:
+// QUADRATIC, and never reclaimed. Measured on the regression tier: 8.4 GB anon-rss on the base.
+// One `open(O_APPEND)`+`write` per record makes that linear.
+//
+// A SCALAR RETURN AND NOT `tk_ffi_ures`, for the reason `teko_rt.h` already records for
+// `tk_rt_read_line`: a brand-new `error`-shaped extern needs a per-name lift in codegen that the
+// RELEASED bootstrap seed's frozen codegen cannot learn. `teko::io::append_file` is a plain Teko
+// wrapper over this scalar (src/io/io.tks), so the caller still sees `error | null`.
+//
+// THE RACE NARROWS, AND ONLY AS FAR AS THE HOST ALLOWS. POSIX specifies that a `write` to a
+// descriptor opened `O_APPEND` seeks to end and writes ATOMICALLY with respect to other writers, so
+// two processes appending small records to one path can no longer overwrite each other — the window
+// the old read-modify-write left wide open. NOT AN UNLIMITED PROMISE: a `write` may still be
+// PARTIAL above some size, and this function then loops to finish it, which is no longer one atomic
+// act. WHERE THAT SIZE LIES IS NOT MEASURED HERE. And the MSVC CRT's `_O_APPEND` is documented as a
+// seek-to-end followed by a write, not one atomic operation, so the Windows arm keeps the race it
+// always had; naming it is the honest move, hiding it behind the POSIX guarantee is not.
+#define TK_RT_APPEND_FAILED (-1)
+int32_t tk_rt_append_file(tk_str path, tk_str content);
 // teko::io::write_file_bytes(path, data) — write a raw []byte slice to the file; error on failure.
 // Takes the byte list as a ptr+len pair (the C7.14 tk_byte_list ABI). Shares the same
 // write-path as tk_rt_write_file; accepts binary data (not UTF-8-restricted).

@@ -374,9 +374,20 @@ pub fn verdict_channel_path() -> str {
  * THE FALLBACK IS THE POINT (R0): a binary run by hand, with no `VERDICT_CHANNEL_ENV` in its
  * environment, still shows every record it emits — the protocol is observable without a flag.
  *
- * NOT ATOMIC ACROSS PROCESSES: appending is a read-modify-write of the whole file, correct for the
- * one writer per channel every caller of this module upholds (a channel path is unique per child),
- * and wrong for a path two processes write concurrently.
+ * ONE APPEND PER RECORD, AND THE SHAPE IT REPLACED WAS QUADRATIC. This used to read the WHOLE
+ * channel file back, concatenate the new record onto it, and rewrite the lot. Two arena allocations
+ * the size of the file per record — and Teko's arena frees ONCE, at process exit
+ * (`tk_regions_free_all`: "free EVERY still-live region") — so N records allocated the SUM of 1..N
+ * file sizes and never returned a byte. That is what flooded the regression tier: 8.4 GB anon-rss
+ * measured on the base. `teko::io::append_file` writes only the new record, so the cost is linear
+ * and the file is never read at all.
+ *
+ * THE CROSS-PROCESS RACE NARROWS WITH IT, which is a correctness gain and not only a speed one: a
+ * read-modify-write lets a second process clobber a record the first had already written, while a
+ * POSIX `O_APPEND` write is specified to seek and write ATOMICALLY against other writers. NOT AN
+ * UNLIMITED PROMISE — a large enough record may still be split across two writes, and the size at
+ * which that begins IS NOT MEASURED HERE; the MSVC CRT implements `_O_APPEND` as a seek followed by
+ * a write, so Windows keeps the race it always had.
  *
  * @param line  one record, WITHOUT a trailing newline (one is added)
  * @return      nothing on success, or the write failure
@@ -385,8 +396,7 @@ pub fn verdict_channel_path() -> str {
 pub fn verdict_emit(line: str) -> null | error {
     let path = verdict_channel_path()
     if path.len == 0 { teko::io::eprintln(line); return null }
-    let prior = match teko::io::read_file(path) { str as s => s; error => "" }
-    teko::io::write_file(path, prior ~ line ~ "\n")
+    teko::io::append_file(path, line ~ "\n")
 }
 
 /**

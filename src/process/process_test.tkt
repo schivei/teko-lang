@@ -387,3 +387,187 @@ fn a_fill_on_a_broken_descriptor_is_an_error_not_an_end_of_file() {
         error => { }
     }
 }
+
+/**
+ * APPEND_RECORDS — how many records the append tests emit.
+ *
+ * BIG ENOUGH THAT THE CURVE IS NOT NOISE. The old read-modify-write allocated the SUM of 1..N file
+ * sizes, so its cost grows with N squared while the append's grows with N; at 800 records of about
+ * 64 bytes that is roughly 41 MB against 51 KB, a separation no page-granularity reading can blur.
+ * A hundred records would leave both inside one allocator chunk and prove nothing.
+ */
+const APPEND_RECORDS: u64 = 800
+
+/**
+ * append_record_text — the record emitted at index `k`, padded so every record is the same width
+ * and the arithmetic above is a size and not an estimate.
+ *
+ * THE INDEX IS IN THE TEXT ON PURPOSE: it is what lets the liveness assertion check ORDER, not just
+ * a line count. An append that silently dropped or reordered records would satisfy "the file has N
+ * lines" and fail here.
+ *
+ * @param k  the record's index
+ * @return   the record, WITHOUT a trailing newline
+ */
+fn append_record_text(k: u64) -> str {
+    "record-" ~ teko::str::u64_to_str(k) ~ "-0123456789012345678901234567890123456789"
+}
+
+/**
+ * append_all — emit `n` records to `path` with the CURRENT (append) implementation.
+ *
+ * @param path  the channel file
+ * @param n     how many records
+ * @return      true iff every append reported success
+ */
+fn append_all(path: str, n: u64) -> bool {
+    mut ok = true
+    mut k: u64 = 0
+    loop {
+        if k >= n { break }
+        match teko::io::append_file(path, append_record_text(k) ~ "\n") { error => { ok = false }; null => { } }
+        k = k + 1
+    }
+    ok
+}
+
+/**
+ * rewrite_all — emit `n` records to `path` the way `verdict_emit` USED to: read the whole file back,
+ * concatenate, rewrite.
+ *
+ * KEPT ALIVE DELIBERATELY, and only here. It is the control arm of the cost measurement — a claim
+ * that the new shape is cheaper is worth nothing without the old one measured beside it on the same
+ * host, in the same process, on the same records.
+ *
+ * @param path  the channel file
+ * @param n     how many records
+ * @return      true iff every rewrite reported success
+ */
+fn rewrite_all(path: str, n: u64) -> bool {
+    mut ok = true
+    mut k: u64 = 0
+    loop {
+        if k >= n { break }
+        let prior = match teko::io::read_file(path) { str as s => s; error => "" }
+        match teko::io::write_file(path, prior ~ append_record_text(k) ~ "\n") { error => { ok = false }; null => { } }
+        k = k + 1
+    }
+    ok
+}
+
+/**
+ * nth_line — line `k` of `text`, counting from zero, without its newline.
+ *
+ * @param text  the whole file
+ * @param k     the line index
+ * @return      that line, or "" when there are fewer
+ */
+fn nth_line(text: str, k: u64) -> str {
+    let lines = teko::iter::split_lines(text)
+    if k >= lines.len { return "" }
+    lines[k]
+}
+
+/**
+ * lines_in — how many lines `text` holds; a trailing newline does not add an empty one
+ * (`teko::iter::split_lines`).
+ *
+ * @param text  the whole file
+ * @return      the count of lines
+ */
+fn lines_in(text: str) -> u64 { teko::iter::split_lines(text).len }
+
+#test
+/**
+ * append_file_keeps_every_record_in_order — LIVENESS BEFORE COST: `teko::io::append_file` writes
+ * every record, in call order, losing none.
+ *
+ * A TEST THAT ONLY COUNTED LINES WOULD PASS ON A BROKEN APPEND. An implementation that dropped a
+ * record in the middle and duplicated another, or that reordered under buffering, keeps the count
+ * exactly right; only checking each record AT ITS INDEX catches it. So the first, the last and a
+ * middle one are all asserted by position, and only then is the count.
+ *
+ * @return void
+ */
+fn append_file_keeps_every_record_in_order() {
+    let path = teko::test::scoped(".teko-append-order.log")
+    match teko::fs::remove_file(path) { error => { }; null => { } }
+    teko::assert::is_true(append_all(path, APPEND_RECORDS))
+    let text = match teko::io::read_file(path) { str as s => s; error => "" }
+    teko::assert::eq_u64(lines_in(text), APPEND_RECORDS)
+    teko::assert::eq_str(nth_line(text, 0), append_record_text(0))
+    teko::assert::eq_str(nth_line(text, APPEND_RECORDS / 2), append_record_text(APPEND_RECORDS / 2))
+    teko::assert::eq_str(nth_line(text, APPEND_RECORDS - 1), append_record_text(APPEND_RECORDS - 1))
+    match teko::fs::remove_file(path) { error => { }; null => { } }
+}
+
+#test
+/**
+ * append_file_and_the_old_rewrite_agree_byte_for_byte — the two shapes produce the SAME file.
+ *
+ * THE COST MEASUREMENT IS ONLY MEANINGFUL IF THE TWO ARMS DO THE SAME WORK. Were the append to
+ * write less — a dropped record, a missing newline — it would also allocate less, and the numbers
+ * beside it would be measuring the difference in output rather than the difference in cost.
+ *
+ * @return void
+ */
+fn append_file_and_the_old_rewrite_agree_byte_for_byte() {
+    let by_append = teko::test::scoped(".teko-append-agree-a.log")
+    let by_rewrite = teko::test::scoped(".teko-append-agree-b.log")
+    match teko::fs::remove_file(by_append) { error => { }; null => { } }
+    match teko::fs::remove_file(by_rewrite) { error => { }; null => { } }
+    teko::assert::is_true(append_all(by_append, 64))
+    teko::assert::is_true(rewrite_all(by_rewrite, 64))
+    let a = match teko::io::read_file(by_append) { str as s => s; error => "" }
+    let b = match teko::io::read_file(by_rewrite) { str as s => s; error => "" }
+    teko::assert::eq_str(a, b)
+    match teko::fs::remove_file(by_append) { error => { }; null => { } }
+    match teko::fs::remove_file(by_rewrite) { error => { }; null => { } }
+}
+
+#test
+/**
+ * appending_allocates_far_less_than_rewriting — THE COST INVERSION, with both numbers taken on this
+ * host, in this process, over the same records.
+ *
+ * ORDER MATTERS AND IS NOT ARBITRARY: `teko::mem::peak_rss` only ever grows, so the CHEAP arm runs
+ * FIRST and its whole contribution is charged before the expensive one begins. Reading the peak at
+ * three points then attributes each arm its own growth.
+ *
+ * THE RATIO IS THE ASSERTION, NOT A BYTE COUNT. An absolute threshold would be a claim about this
+ * machine's allocator and page size; "the rewrite grew the process by many times what the append
+ * did" is a claim about the two SHAPES, and it is the one that holds on every host. The margin is
+ * deliberately loose — the arithmetic predicts roughly 800x at this record count, and demanding
+ * only 8x leaves the test immune to allocator rounding while still failing outright if the
+ * quadratic shape ever comes back.
+ *
+ * `peak_rss` answering 0 means the host cannot report it, and the comparison is then skipped rather
+ * than faked — the liveness tests above stand on their own.
+ *
+ * @return void
+ */
+fn appending_allocates_far_less_than_rewriting() {
+    let path = teko::test::scoped(".teko-append-cost.log")
+    let base = teko::mem::peak_rss()
+    if base == 0 { return }
+    match teko::fs::remove_file(path) { error => { }; null => { } }
+    teko::assert::is_true(append_all(path, APPEND_RECORDS))
+    let after_append = teko::mem::peak_rss()
+    match teko::fs::remove_file(path) { error => { }; null => { } }
+    teko::assert::is_true(rewrite_all(path, APPEND_RECORDS))
+    let after_rewrite = teko::mem::peak_rss()
+    match teko::fs::remove_file(path) { error => { }; null => { } }
+    let append_growth = after_append - base
+    let rewrite_growth = after_rewrite - after_append
+    teko::assert::gt_i64(rewrite_growth to i64, (append_growth * COST_MARGIN) to i64)
+}
+
+/**
+ * COST_MARGIN — how many times the append's growth the rewrite's growth must exceed for the cost
+ * inversion to count as measured.
+ *
+ * EIGHT, WHERE THE ARITHMETIC PREDICTS ABOUT EIGHT HUNDRED. The gap is the point: a margin near the
+ * prediction would turn allocator rounding into a flaky failure, while eight is still two orders of
+ * magnitude away from the quadratic shape ever passing.
+ */
+const COST_MARGIN: u64 = 8
