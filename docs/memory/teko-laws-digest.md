@@ -1595,3 +1595,417 @@ deixa passar a qualquer profundidade) é o defeito, não o desenho.
 A `main` passa ao orquestrador *"a ref do canal **somente leitura**"*. Com esta lei, **o só-leitura
 passa a ser exprimível**: é um `let`. Sem ela, a rota de classe dava aliasing sem restrição — e
 aliasing sem restrição não serve de `Rx`.
+
+## O `push` de um canal devolve `error | null` — não pânico, não predicado (dono, 2026-07-30)
+
+> *"channel, pensei em ter opção bounded e unbounded (a primeira faz guarda e barra o push), serve
+> para muitos casos, mas exige um verificador se está livre pra gravar, como no C#). Mas, pensei de
+> um modo mais simples, sem pânico, ao fazer push em um canal, retorna um `error | null`, nulo se
+> sucesso, error dizendo o pq foi negado o push (o guarda do bounded)."*
+
+- **Duas formas de canal**: **bounded** (com guarda que barra o `push`) e **unbounded**.
+- **O `push` devolve `error | null`** — `null` é sucesso, o `error` **diz porque foi negado**.
+- **Sem pânico.** Um canal cheio não mata o produtor.
+- **Sem predicado `pode_gravar?`.**
+
+### Porque a forma simples é também a mais correcta
+
+Um predicado separado seguido de um `push` é **TOCTOU**: entre a pergunta e a escrita, outro produtor
+enche a vaga, e num canal MPSC há N produtores por construção. **Um `push` que devolve o veredicto é
+atómico** — a pergunta e a acção são a mesma operação. A forma do dono não é só mais leve: elimina
+uma corrida que o modelo do C# obriga o utilizador a gerir à mão.
+
+E encaixa no idioma da casa sem o alargar: **`-> error | null` tem 78 usos** em `src/` (mais 13 na
+ordem inversa).
+
+### O que isto obriga a redecidir, e é demonstrável
+
+O desenho da concorrência assumia contrapressão **por bloqueio**:
+
+> *"limitado, com contrapressão — o tubo do SO dá-a de graça: **quem escreve bloqueia**"* (§18)
+> *"se ele parasse num `wait_one` a meio, os handlers encheriam o canal limitado e **parariam**"*
+
+O argumento de ausência-de-impasse depende de os handlers **pararem** quando o canal enche. Com um
+`push` que devolve `error`, **não param** — recebem um erro e têm de decidir. A pergunta que passa a
+existir e não existia: **o que faz um handler de dreno quando o canal está cheio?** Se descarta,
+perde-se saída — e não perder saída é a razão de ser do journaling inteiro. Se repete em ciclo, é
+bloqueio outra vez, mas **sob controlo de quem escreve**, que é provavelmente o ponto.
+
+Isto não é objecção à lei: é o que a lei desloca, e tem de ser respondido por quem desenhar o `C1`.
+
+## O canal transporta um REGISTO de UMA LINHA, com quem o escreveu (dono, 2026-07-30)
+
+> *"é dar ao desenvolvedor as duas formas, mas, no nosso caso, o número de escritas é previsível (de
+> acordo com a quantidade de testes e regressivos), só uma coisa que eu proporia para evitar problemas
+> com múltiplas linhas impressas, padronizar uma estrutura single-line de saída, e quem vai escrever
+> (teste unitário ou regressor) precisa formatar no padrão esperado e identificar quem escreveu. Dessa
+> forma é possível definir um contrato entre quem executa e quem escreve, além de padronizar o tipo T
+> em `chan<T>`."*
+
+Quatro afirmações:
+
+1. **As duas formas existem para quem escreve Teko** — `bounded` e `unbounded` são superfície da
+   linguagem, não decisão nossa.
+2. **No nosso uso o número de escritas é PREVISÍVEL** — sai da quantidade de testes e regressivos.
+3. **A saída é uma estrutura de UMA LINHA, padronizada**, e quem escreve **formata no padrão e
+   identifica-se**.
+4. **Isso define um contrato entre quem executa e quem escreve — e fixa o `T` do `chan<T>`.**
+
+### Porque isto desmente a conclusão do `unbounded`, e a desmente por outra via
+
+A §23 concluiu que *"nenhum canal qualifica para `unbounded`"*, com o critério *"o volume total é
+conhecido antes do primeiro push"*, e o argumento de que **o volume depende de quantos testes falham**.
+
+**As duas frases do dono, juntas, atacam esse argumento pela raiz:** com registo de **uma linha
+padronizada**, cada escrita tem **tamanho limitado**, e o **número** de escritas sai da contagem de
+testes — que se conhece antes de correr. **Volume = registos × tecto por registo**, e ambos são
+conhecidos. O que era imprevisível era o texto livre; deixa de haver texto livre.
+
+Isto não obriga a escolher `unbounded` — obriga a **refazer a conta** antes de a escolha ser
+declarada, que é outra coisa.
+
+### O que fecha, e estava aberto desde a §18
+
+A §18 já exigia que *"o canal transporta REGISTOS, não bytes — sem o rótulo a viajar com os bytes, o
+fan-in **entrelaça dois filhos e perde a atribuição**"*. Ficou como requisito **sem forma**. A lei
+dá-lhe a forma: **uma linha, padrão fixo, com a identidade de quem escreveu**. O `T` deixa de ser
+genérico e passa a ser o registo.
+
+### E afia o `Oversize` da §23
+
+Com registo limitado por contrato, um `Oversize` deixa de ser condição de execução a tratar em ciclo
+e passa a ser **violação de contrato** — quem escreveu não formatou no padrão. É um erro de
+programação, não de ritmo, e o tratamento é outro.
+
+## O `pop` é atómico como o `push` — devolve `T | error | null` (dono, 2026-07-30)
+
+> *"O pop do canal, assim como o push, deve ser atômico, logo `ch.pop()` deve retornar `T | error |
+> null`, onde o error é nosso checked e null quer dizer que **nada foi lido**."*
+
+| resultado | significado |
+|---|---|
+| `T` | leu-se um registo |
+| `null` | **nada foi lido** — não é fecho, não é erro |
+| `error` | o `error` checked da casa, a dizer porquê |
+
+### É o mesmo argumento do `push`, e é por isso que é lei e não gosto
+
+Um `is_empty()` seguido de um `pop` é **TOCTOU**, exactamente como um `pode_gravar?` seguido de um
+`push`: entre a pergunta e a leitura o estado muda. **Um `pop` que devolve o veredicto é atómico** —
+a pergunta e a acção são a mesma operação. A simetria não é estética: é a mesma correcção aplicada
+às duas pontas.
+
+### O que isto OBRIGA a mudar, e é a parte que se perde se não for dita
+
+**O `null` deixa de poder significar fecho.** Um desenho que fizesse
+
+```teko
+match chan_recv(c) { Rec as r => agrega(r); null => break }
+```
+
+está **errado sob esta lei**: `null` é *"agora não havia nada"*, e sair do laço aí é terminar uma
+corrida viva por o consumidor ter chegado à frente do produtor. A terminação tem de vir de outro
+sítio — e já vem: **`loop ch.is_open()`**, a condição que o dono fixou. O `null` mantém o laço a
+girar; o fecho tira-o de lá.
+
+Corolário: as razões de `error` do lado da leitura têm de ser enumeráveis como as do `push`, e a
+guarda é a mesma — **toda a razão tem de ter um teste que a produza**.
+
+## O `Rec` viaja BINÁRIO no túnel (dono, 2026-07-30)
+
+> *"por estar transacionando em um túnel seguro (o usuário não vê a saída até o orquestrador a
+> imprimir), não seria melhor a serialização e desserialização do `Rec` ser binária? Menos itens para
+> trafegar no túnel, canal otimizado, limpo e rápido."*
+
+A premissa é a que decide: **o túnel é interno.** O artefacto legível é o que o **orquestrador
+imprime**, não o que atravessa o canal — logo o canal não paga nada por ser ilegível a olho.
+
+### E há um argumento mais forte do que a velocidade: o ENQUADRAMENTO
+
+Um registo de **uma linha em texto** tem de responder a uma pergunta que não tem resposta boa:
+**e se a carga contiver uma quebra de linha?** E contém — o lado dos regressivos transporta
+**diagnósticos de compilador em texto livre** (é o que `COMPILE_FAIL_HEAD_LINES` existe para cortar,
+e o que *"the build's own output follows IN FULL"* imprime). Com texto:
+
+- ou se **escapa**, e paga-se custo e bugs em cada ponta;
+- ou se **quebra a invariante** de uma linha por registo, e o entrelaçamento volta.
+
+Com **quadro binário prefixado por comprimento**, a carga é **bytes opacos** e o conteúdo **não pode
+corromper o enquadramento**. É correcção, não desempenho. E o `REC_MAX` passa a ser exacto e
+verificável em vez de estimado.
+
+### Precedente na casa, e não é pequeno
+
+O compilador **já escreve um formato binário próprio**: `src/emit/tkb_{buf,frame,read,write}.tks`. O
+idioma existe, a máquina de escrita/leitura existe, e o `os_guard` já viaja lá dentro. **Não se
+inventa um formato — reaproveita-se uma disciplina que já passou pelo fixpoint.**
+
+### O que fica por decidir, e é do desenho
+
+1. **O journal em disco é binário também, ou é a fronteira onde se converte?** Se o orquestrador
+   desserializa e imprime, a conversão tem um sítio único — provavelmente o certo. Mas então o
+   `--replay` lê qual dos dois?
+2. **Ordem de bytes.** Mesma máquina, mesmo processo-pai: não é problema *hoje*. Dizer que é
+   suposição, e não descobrir isso quando alguém puser o túnel entre máquinas.
+3. **Depurar o próprio túnel.** Um canal binário não se lê com `cat`. Se alguma vez fizer falta,
+   faz falta uma ferramenta — e é melhor sabê-lo antes do que a meio de um incidente.
+
+## O `Rec` transporta ASSERÇÕES, COBERTURA e o veredicto MEIO-PRONTO (dono, 2026-07-30)
+
+> *"O journal (a mensagem vinda dos testes) precisa trafegar infos de asserção, o que muda algumas
+> funções de testes, isso faria então trafegar uma lista de asserções e a cobertura pelo `Rec`,
+> dizendo **o que tocou, o que era esperado e o que foi medido**, o veredito também pode caminhar
+> junto, chegar **'meio-pronto'**, uma vez que precisaremos sumarizar ao fim de tudo, não apenas ir
+> imprimindo as linhas que chegam (na ordem que chegarem)."*
+
+Quatro coisas, e a última é a que muda o orquestrador:
+
+1. **O `Rec` deixa de ser uma linha de saída.** Transporta **asserções** (o que tocou, o que era
+   esperado, o que foi medido), **cobertura**, e o **veredicto**.
+2. **As funções de asserção mudam** para emitir estrutura em vez de só panicar ou imprimir.
+3. **O veredicto chega meio-pronto** — o sumarizador **agrega**, não re-deriva.
+4. **O orquestrador NÃO é um `append` da ordem de chegada.** Há uma passagem de sumário no fim.
+
+### Isto é a máquina que faltava ao `.tkcov`, e fecha o arco do próprio dia
+
+O dono já tinha dito, horas antes: *"não precisa reler `.tkcov`, precisa apendar… se remodelar para
+cobertura linear (à medida que entra), só precisará ler no fim para agregar"*. **Esta lei é isso**: a
+cobertura viaja **como registo no canal**, o consumidor é **um só**, e a sobreposição de escrita por
+concorrência deixa de ter como acontecer. O `O(n²)` do `tk_covb_add` a re-varrer o vector deixa de
+ser o problema porque **deixa de haver releitura**.
+
+### E retira a razão de existir às fixtures que se afirmam por código de saída
+
+O dono também já tinha dito: *"um teste afirma o que deve FAZER, não o número com que sai"* e *"uma
+hora tu fica sem faixa mesmo"*. **Hoje mediu-se o custo disso na prática**: a fixture
+`ref_mutable_binder` pontua **sete asserções em sete bits do código de saída**, e quando falhou em CI
+o que se soube foi `exit 99, expected 127` — sete factos comprimidos num número, que só se leem
+descodificando bits à mão.
+
+**Com asserções a viajar no `Rec`, isso deixa de ser preciso**: cada asserção diz por si o que era
+esperado e o que foi medido. A lei não é uma melhoria de conforto — **é o que torna possível cumprir
+a lei anterior.**
+
+### O que fica por desenhar
+
+- **A forma do `Rec`** deixa de poder ser plana: precisa de variante por espécie (`out`, `err`,
+  `assert`, `cov`, `verdict`). O que reforça a decisão do **binário**: campos estruturados com
+  valores esperado/medido em texto de uma linha exigiriam escape e parsing nas duas pontas.
+- **A superfície de asserção**: medidas hoje, **24 funções distintas** em uso (3265 `is_true`, 575
+  `str_contains`, 311 `is_false`, e a cauda). Mudá-las é mexer no que a árvore inteira usa.
+- **Quem agrega o quê**: o que o sumarizador recebe pronto e o que ainda calcula.
+
+## Os `print` das threads vão para stdout/stderr, NÃO para o túnel (dono, 2026-07-30)
+
+> *"quaisquer prints executados nas threads, devem sair pela saída padrão stdout/stderr, para evitar
+> de enviar lixo para o túnel."*
+
+**O túnel transporta estrutura — asserções, cobertura, veredicto — e não saída livre do utilizador.**
+Um `println` dentro de um teste é depuração de quem o escreveu, não é veredicto.
+
+### Isto CORRIGE o desenho, e a correcção é minha também
+
+A §24 dizia o contrário — que um `#test` a chamar `println("olá")` produzia um `Rec` com
+`kind = "out"`, embrulhado por quem emite. **Eu publiquei isso no artefacto.** A lei retira-o.
+
+### E há um argumento a favor que o dono não fez, e é o mais forte
+
+O arquitecto tinha medido que **o número de escritas é previsível** — ~2300, um registo por `#test` —
+e tinha logo a seguir nomeado o que quebra essa previsibilidade: *"um teste com um ciclo a imprimir
+produz uma infinidade"*. **Esta lei remove essa quebra pela raiz.** Com os `print` fora do canal:
+
+- o número de escritas volta a ser função da **estrutura** (testes, asserções, cobertura), não do que
+  um autor decidiu imprimir;
+- um ciclo de `print` patológico passa a inundar o **stdout**, que tem contrapressão do SO, em vez de
+  um anel limitado que teria de o recusar com `Full`;
+- e o `REC_MAX` deixa de ter de acomodar texto arbitrário.
+
+### O custo, dito e não escondido — e é uma assimetria deliberada
+
+Do lado dos **processos** a saída livre é atribuída: o executor prefixa `out|`/`err|` e diz de quem é
+(medido: 14 linhas assim na perna macOS de hoje). Do lado das **threads**, com os `print` a ir
+directos para um stdout partilhado, **N threads entrelaçam-se e a atribuição perde-se** — que é
+exactamente o defeito que este desenho inteiro existe para resolver, aqui aceite de propósito para o
+que não é veredicto.
+
+**As duas metades passam a ter garantias diferentes.** Isso é defensável — saída livre não é
+resultado — mas tem de ser **decisão declarada** e não acidente, ou alguém vai depurar durante uma
+tarde à procura de por que motivo duas linhas se misturaram.
+
+## Medir asserções: o estático contra o executado (dono, 2026-07-30)
+
+> *"hoje não temos visibilidade de quantas asserções deveriam ocorrer… é possível em tempo de
+> compilação dos testes e até regressões levantar todos, assim, nada passa pelo invisível ao gate…
+> um teste com 3 asserções onde uma ou duas são executadas, é sinal de falha… podem ser
+> condicionais, sendo possível prever somente as asserções na raiz de um teste `#test` e nada mais,
+> ou, todas, mas algumas como **obrigatórias** e outras como **fluxo** (não são opcionais mas podem ou
+> não ocorrer)? De qq forma, ao menos o **número de assertividades executadas** são passíveis de
+> medição."*
+
+### Metade da máquina já existe, e é a metade cara
+
+`src/checker/test_assert.tks` **já percorre o corpo de um `#test`, encontra cada
+`teko::assert::is_true`/`is_false` e conta-as** (`AssertStats { total, folded }`). E já tem
+vocabulário de veredicto para o problema irmão: `folded == total` ⇒ **FOUNDATIONAL**; `folded >= 1`
+com produção coberta ⇒ **MISLEADING** — a *guarda morta*, uma asserção cujo predicado dobra em
+constante e por isso **nunca pode falhar**.
+
+**O que falta é o outro lado: ninguém sabe quantas EXECUTARAM.** A lei é a comparação.
+
+### A distinção do dono é COMPUTÁVEL, e não precisa de heurística
+
+*Obrigatória* vs *fluxo* não tem de ser anotação humana:
+
+- **obrigatória** = a asserção **não está aninhada em nenhum construto condicional** (`if`, `match`,
+  `loop`, arco de erro). Se o corpo do teste correr até ao fim, ela **corre**.
+- **fluxo** = todas as outras. Contam-se, não se exigem.
+
+O compilador tem a estrutura para o decidir — o próprio módulo já dobra sobre blocos de instruções
+(`assert_stats_add`, *"the fold over a statement block"*). A regra do portão sai directa:
+**toda a obrigatória tem de executar; as de fluxo são contadas e relatadas.**
+
+### E apanha um defeito que ninguém nomeou
+
+Um teste cujas asserções estão **todas dentro de um ramo que nunca corre** é **verde hoje**: a
+cobertura diz que tocou produção, e a contagem estática diz que tem asserções. Só a comparação
+estático-contra-executado o revela.
+
+**É a mesma família da guarda morta, descoberta em execução em vez de em compilação.** O
+`test_assert.tks` apanha a asserção que *não pode* falhar; esta lei apanha a que *não chegou a ser
+tentada*. Juntas fecham as duas maneiras de um teste ser verde sem afirmar nada.
+
+### O que fica por decidir
+
+Se a **regressão** entra no mesmo regime — o dono diz *"e até regressões"*, e o `.tkr` tem passos
+declarados que são contáveis da mesma maneira, mas o corpo do cenário é um programa à parte.
+
+## Teste sem asserção e sem saída é FALHA; o fold é categoria própria que o GATE trata como skip (dono, 2026-07-30)
+
+> *"tem o caso do teste não executar nenhuma asserção e não dar saída alguma, eu colocaria como falha
+> **por não ter dado resultado**. Também tem o que faz fold… esse eu criaria uma **categoria
+> diferente**, mas que, para nós, no **gate de CI faria erro igual o skip**, pq não daria como falha
+> pelo teste, pq pode ser que a pessoa trabalhe no **modo TDD**."*
+
+Duas regras, e a segunda tem duas moradas:
+
+1. **Zero asserções executadas E zero saída ⇒ FALHA.** O critério é *não ter dado resultado* — um
+   teste que não afirma nada e não diz nada não é verde, é mudo.
+2. **O fold (guarda morta) é CATEGORIA PRÓPRIA, não falha de teste** — porque em TDD é um estado
+   legítimo de trabalho. **Mas no gate de CI é erro, igual ao skip.**
+
+### A segunda regra é a lei do SKIPPED estendida, e a extensão é exacta
+
+*"SKIPPED é falha"* já era lei. Uma guarda morta **é um skip disfarçado**: o teste corre, fica verde,
+e não afirma nada. A regra do dono diz onde cada leitura vale: **na máquina de quem escreve, é um
+aviso; no portão, é erro.** O mesmo facto, dois veredictos, e a diferença é o sítio — não o facto.
+
+### O que já existe, medido
+
+`src/checker/test_assert.tks` + o analisador de suíte **já produzem a categoria e já a imprimem**:
+
+```
+analyzer: {misleading} MISLEADING, {foundational} FOUNDATIONAL, {dead} DEAD, {redundant} REDUNDANT, {live} LIVE
+```
+
+E é explicitamente **de tempo de desenvolvimento** — `project.tks:3773` chama-lhe *"the dev-time
+whole-suite stale/redundant/misleading analyzer"*. **A categoria existe e relata; o que falta é o
+portão promovê-la a erro.** A lei não pede máquina nova: pede que o gate leia o que já se imprime.
+
+### E a regra 1 é o remédio para a cegueira que a §27 mediu
+
+O arquitecto mediu que **102 dos 1042 `#test` (9,8 %) não têm uma única `teko::assert::` directa no
+corpo** — e foi honesto: a maioria chama auxiliares locais que afirmam lá dentro, logo o número mede
+**invisibilidade à análise estática**, não ausência.
+
+**A regra 1 do dono é imune a essa cegueira, porque é de EXECUÇÃO.** Um teste que chama um auxiliar
+que afirma **emite `RecAssert` em execução**, veja a análise estática o que vir. Logo:
+
+- a **análise estática** diz quantas asserções *deviam* ocorrer — e é cega a 9,8 %;
+- a **regra 1** apanha o caso terminal — *nenhuma* asserção e *nenhuma* saída — **sem depender de
+  ver o corpo**.
+
+**Uma é o esperado, a outra é a rede.** E a rede não tem furo onde a primeira tem.
+
+## O fold é COMBINATÓRIO com o resultado — e a contagem tem de ser impressa (dono, 2026-07-30)
+
+> *"o fold (no resultado de teste) é combinatório, quer dizer, é possível que todas as asserções
+> sejam verdadeiras e todas serem folded, o mesmo ao contrário (padrão TDD) onde coloca todas em
+> falha, mas são folded. Logo, a contagem de folded deve imprimir que algo como `n of x tests are
+> folded`."*
+
+**São dois eixos independentes, e hoje estão colapsados num rótulo só:**
+
+| | todas passam | todas falham |
+|---|---|---|
+| **nenhuma dobrada** | verde com sentido | vermelho com sentido |
+| **todas dobradas** | **verde sem sentido** | **TDD legítimo** (vermelho por motivo que não é defeito) |
+
+Uma suíte verde não diz se as asserções **podiam** ter falhado. Passar e dobrar são perguntas
+diferentes, e a resposta a uma não implica nada sobre a outra.
+
+### Medido: a contagem existe e é DESCARTADA
+
+`src/checker/test_assert.tks` calcula `AssertStats { total, folded }` — **um número**. E
+`src/build/project.tks:4129`, em `combined_status`, faz:
+
+```teko
+let has_folded = folded >= 1
+```
+
+**Colapsa o número num booleano** para escolher o rótulo. Consequência exata: **"1 de 40 dobradas" e
+"40 de 40 dobradas" classificam igual**. A regra `folded == total ⇒ FOUNDATIONAL` só pega o caso
+extremo quando é o teste inteiro; tudo no meio some.
+
+E o sumário da corrida (`N ran; N passed; 0 failed; 0 exited`) **não menciona fold de todo** — o
+número nunca chega a quem lê o resultado.
+
+### A regra
+
+**O sumário imprime a contagem, no seu próprio eixo**, ao lado de passou/falhou e nunca em vez dela.
+E combina com a lei irmã do mesmo dia — *o fold é categoria própria, não falha de teste; mas no
+portão de CI é erro, igual ao skip*: **na máquina de quem escreve, `n de x dobradas` é informação de
+TDD; no portão, é o que reprova.**
+
+## O túnel tem transporte PRÓPRIO — socket/pipe nomeado, sem mexer em stdout/stderr (dono, 2026-07-30)
+
+> *"encontramos o túnel para o tráfego de dados binários para o journal, tanto entre threads quanto
+> processos, sem redesignar um stdout / stderr"*
+
+### A tensão que isto resolve, e que estava no desenho sem ninguém a nomear
+
+Duas leis do mesmo dia puxavam em sentidos opostos:
+
+- o fan-in **redireciona a saída do filho** para um tubo, e um handler drena para o canal;
+- mas os `print` **têm de ir para o stdout/stderr de verdade**, porque saída livre não é veredito.
+
+Se o stdout do filho está redirecionado para o tubo, **os `print` dele não chegam ao stdout real.**
+As duas leis não cabiam juntas com um transporte só.
+
+**Com transporte próprio para o journal, cabem:** o `stdout`/`stderr` do filho ficam **herdados e
+intactos**, e o tráfego binário do `Rec` viaja por um canal que não é nenhum dos três fluxos padrão.
+
+### O que está medido sobre as plataformas
+
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| `AF_UNIX` + `sockaddr_un` | sim | sim | **sim, desde a build 1803** — suporte de sistema, não emulação |
+| `socketpair()` | sim | sim | **não** — lá é listener `AF_UNIX` num caminho + connect |
+| passar **descritor** pelo canal | `SCM_RIGHTS` | `SCM_RIGHTS` | **não existe equivalente** — é `DuplicateHandle` com o PID do destino |
+| pipe **anônimo** esperável com prazo | sim (`poll`) | sim | **não** — daí a sondagem de 2 ms do F5 |
+| pipe **nomeado** (`\\.\pipe\`) com `FILE_FLAG_OVERLAPPED` | — | — | **sim, esperável** |
+
+**O que entrou no F5 é o pipe ANÔNIMO** (`_pipe`, e o `PeekNamedPipe` só porque é a API que espia
+qualquer pipe). O `\\.\pipe\` é o que fecharia a assimetria — **outra primitiva, não um ajuste.**
+
+### E mata lixo que o F4 sozinho não matava
+
+O agente do F5 mediu: **576 arquivos desaparecem** quando o F4 aterrar, e **48 ficam** — 2 `.chan` e
+46 `.tkcov` — *"por serem canais de caminho nomeado e não fluxos padrão"*. **Com transporte próprio,
+os 2 `.chan` também somem.** Os 46 `.tkcov` ficam, e é coerente: pela lei mais recente a cobertura
+**não viaja no canal**.
+
+### Registro de falha nossa
+
+O dono lembrou ter pedido antes suporte a pipe e unix socks. **Varri `src/` e `docs/`: zero
+ocorrências** de `AF_UNIX`, `sockaddr_un`, `socketpair`, "unix socket" ou "named pipe". O pedido
+não foi perdido pela memória dele — **nunca foi registrado**.
