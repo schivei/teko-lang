@@ -175,6 +175,63 @@ void      *tk_region_lookup(tk_region *r, uint64_t type_id);
 // registry is empty, so a second call (e.g. atexit after an explicit panic/exit call) is a no-op.
 void       tk_regions_free_all(void);
 
+// --- the PER-TEST CHANNEL (owner ruling: "para os que rodam em processo, passar um canal proprio
+// pra stdin, out e err"). ---------------------------------------------------------------------
+//
+// A `#test` runs IN PROCESS, in the same address space and on the same two FILE* streams as every
+// other test of the run. That made the run's output UNATTRIBUTABLE: the harness printed
+// `test <label> ... `, the test's own body then printed whatever it prints, and the closing `ok`
+// landed on the NEXT line — a suite count taken by grepping `... ok` under-reported the run, and a
+// failing test's report showed a NEIGHBOUR's bytes. Under parallelism that is not confusing, it is
+// unusable.
+//
+// So a test gets its OWN out/err channel: between tk_test_begin and tk_test_end every tk_print /
+// tk_println / tk_write / tk_eprint / tk_ewrite / tk_eprintln byte is appended to a per-test buffer
+// instead of the shared stream, and tk_test_end then writes ONE deterministic block: the verdict
+// line first (so `test <label> ... ok` is ATOMIC and countable), then that test's own bytes, each
+// line prefixed and therefore attributed. tk_panic/tk_panic_str do the same for a FAILING test
+// before they abort, which is what makes a failure report show what THAT test wrote.
+//
+// The channel is a process-wide singleton, not a stack: tests do not nest.
+//
+// TK_TEST_LABEL_MAX — the label buffer, sized so no qualified `namespace::name` in this corpus is
+// truncated; a longer one is clipped rather than growing an allocation on the panic path.
+#define TK_TEST_LABEL_MAX 512
+// TK_TEST_CHAN_MIN_CAP — the first allocation a captured channel makes. Most tests print nothing,
+// so the buffers stay NULL for the whole run and the capture costs one branch per print.
+#define TK_TEST_CHAN_MIN_CAP 256
+// TK_TEST_OUT_PREFIX / TK_TEST_ERR_PREFIX — what opens each attributed line of a test's own output.
+// Neither may begin with `test ` : a suite count greps `^test <label> ... ` and a captured line that
+// could impersonate a verdict line would recreate the miscount this channel exists to end.
+#define TK_TEST_OUT_PREFIX "     out| "
+#define TK_TEST_ERR_PREFIX "     err| "
+// TK_TEST_SHARD_ENV — the env key selecting `<i>/<n>` sharding of an in-process suite.
+#define TK_TEST_SHARD_ENV "TEKO_TEST_SHARD"
+// --- the SCENARIO NAME (what `teko::assert` addresses a case BY) ------------------------------
+//
+// A scenario used to be addressed by the exit code its failure produced. That space holds 255 values,
+// it collides with itself long before a corpus is exhausted, and `exit(260)` TRUNCATES to 4 in
+// silence — a fixture with 119 cases had ten of them aliasing cases 5..13. A NAME has none of those
+// properties, so the name is what an assertion reports and what a passing case announces.
+//
+// tk_assert_scenario_set — name the case every later assertion failure is prefixed with.
+void tk_assert_scenario_set(tk_str name);
+// tk_assert_scenario_prefix — `"<name>: "`, or an empty str when no case is named (so an assertion
+// outside a scenario keeps its historic message byte-for-byte).
+tk_str tk_assert_scenario_prefix(void);
+// tk_assert_scenario_ok — announce `<name>: ok` on the CURRENT channel (a test's own channel when one
+// is open, the real stdout otherwise). Panics when no case is named: a silent "ok" for an unnamed
+// scenario is the reporting hole this whole mechanism exists to close.
+void tk_assert_scenario_ok(void);
+// tk_test_begin — open `label`'s channel; every subsequent print is captured, not written.
+void tk_test_begin(tk_str label);
+// tk_test_end — close the open channel and emit the `ok` verdict block (verdict line, then the
+// captured stdout/stderr lines, prefixed). A no-op when no channel is open.
+void tk_test_end(void);
+// tk_test_shard_take — the SHARD filter: count this test and answer whether THIS process owns it.
+// With no shard selected (`TEKO_TEST_SHARD` unset/malformed) every test is owned, so the emitted
+// harness is behaviourally identical to the unsharded one. See teko_rt.c for the `i/n` protocol.
+bool tk_test_shard_take(void);
 // tk_print — write exactly s.len bytes from s.ptr to stdout; no newline, no NUL.
 void tk_print(tk_str s);
 // tk_println — tk_print(s) then a single '\n' (0x0A).

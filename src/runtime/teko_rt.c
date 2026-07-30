@@ -1594,12 +1594,190 @@ void tk_arena_commit(void) {
     tk_arena_msp -= 1;
 }
 
+// --- the PER-TEST CHANNEL ---------------------------------------------------------------------
+//
+// See teko_rt.h for WHY this exists. The short version, measured on this tree: a `#test` that
+// prints anything of its own pushed the harness's closing `ok` onto the NEXT line, so a suite count
+// anchored on `... ok` under-reported the run and a failing test's report quoted a NEIGHBOUR's
+// bytes. The fix is not tidier printing — it is that a test never writes to the shared stream at
+// all while it runs.
+//
+// TWO BUFFERS, NOT ONE. stdout and stderr are different claims (what the program produced vs. what
+// it complained about) and a report that merges them destroys the distinction the streams exist to
+// make; they are emitted under different prefixes for that reason.
+//
+// THE ORDER IS VERDICT-FIRST, deliberately, over interleaving-with-a-prefix. Interleaving keeps
+// chronology but leaves the verdict line's POSITION dependent on how much the test printed — which
+// is exactly the property that broke counting. Verdict-first makes `test <label> ... ok` one ATOMIC
+// line whose shape no test body can perturb, and the captured bytes that follow are unambiguously
+// that test's because nothing else can come between them.
+//
+// The channel is a process-wide singleton, not a stack: tests do not nest.
+typedef struct { char *buf; size_t len; size_t cap; } tk_chan;
+
+static tk_chan tk_chan_out = { NULL, 0, 0 };
+static tk_chan tk_chan_err = { NULL, 0, 0 };
+static char    tk_chan_label[TK_TEST_LABEL_MAX];
+static size_t  tk_chan_label_len = 0;
+static bool    tk_chan_open      = false;
+
+// tk_chan_append — append n bytes to a channel, growing geometrically. A failed growth DROPS the
+// bytes instead of aborting: losing a diagnostic line is bad, killing the run that would have
+// reported it is worse.
+static void tk_chan_append(tk_chan *c, const void *p, size_t n) {
+    if (n == 0) return;
+    if (c->len + n > c->cap) {
+        size_t want = c->cap ? c->cap : TK_TEST_CHAN_MIN_CAP;
+        while (want < c->len + n) want *= 2;
+        char *grown = (char *)realloc(c->buf, want);
+        if (!grown) return;
+        c->buf = grown;
+        c->cap = want;
+    }
+    memcpy(c->buf + c->len, p, n);
+    c->len += n;
+}
+
+// tk_chan_emit_prefixed — write a captured buffer to dst as whole LINES, each opened by prefix, so
+// every line is attributed to the test whose verdict line precedes it. An unterminated last line
+// gets its newline here: a report made of half-lines cannot be read by line-oriented tooling.
+static void tk_chan_emit_prefixed(FILE *dst, const tk_chan *c, const char *prefix) {
+    size_t i = 0;
+    while (i < c->len) {
+        size_t j = i;
+        while (j < c->len && c->buf[j] != '\n') j += 1;
+        fputs(prefix, dst);
+        fwrite(c->buf + i, 1, j - i, dst);
+        fputc('\n', dst);
+        i = (j < c->len) ? j + 1 : j;
+    }
+}
+
+// tk_chan_emit_body — both captured streams of the closing channel: stdout first (what the test
+// produced), then stderr (what it complained about).
+static void tk_chan_emit_body(void) {
+    tk_chan_emit_prefixed(stdout, &tk_chan_out, TK_TEST_OUT_PREFIX);
+    tk_chan_emit_prefixed(stdout, &tk_chan_err, TK_TEST_ERR_PREFIX);
+}
+
+// tk_chan_verdict_line — `test <label> ... <verdict>` on the REAL stdout, then a flush, so the test's
+// name is on the wire before anything (including an abort three lines later) can lose it.
+static void tk_chan_verdict_line(const char *verdict) {
+    fputs("test ", stdout);
+    fwrite(tk_chan_label, 1, tk_chan_label_len, stdout);
+    fputs(" ... ", stdout);
+    fputs(verdict, stdout);
+    fputc('\n', stdout);
+    fflush(stdout);
+}
+
+void tk_test_begin(tk_str label) {
+    tk_chan_out.len = 0;
+    tk_chan_err.len = 0;
+    tk_chan_label_len = label.len < sizeof tk_chan_label ? label.len : sizeof tk_chan_label - 1;
+    if (tk_chan_label_len) memcpy(tk_chan_label, label.ptr, tk_chan_label_len);
+    tk_chan_open = true;
+}
+
+void tk_test_end(void) {
+    if (!tk_chan_open) return;
+    tk_chan_open = false;
+    tk_chan_verdict_line("ok");
+    tk_chan_emit_body();
+}
+
+// tk_test_fail_report — the FAILING half of tk_test_end, called from the panic path before it
+// aborts: the same verdict line with FAILED, then this test's OWN captured bytes. Closing the
+// channel FIRST is what lets the panic message itself reach the real stderr.
+static void tk_test_fail_report(void) {
+    if (!tk_chan_open) return;
+    tk_chan_open = false;
+    tk_chan_verdict_line("FAILED");
+    tk_chan_emit_body();
+    fflush(stdout);
+}
+
+// --- the SHARD filter ---------------------------------------------------------------------------
+//
+// Parallelism for an in-process suite cannot be threads: the arena, the coverage sinks and this very
+// channel are process-wide singletons, and making them thread-local would be a far larger change
+// than the parallelism is worth. It is PROCESSES — the driver runs the SAME test binary N times,
+// each with `TEKO_TEST_SHARD=<i>/<n>`, and each process runs only the tests whose ORDINAL is
+// congruent to i mod n. Round-robin, not contiguous blocks, because per-test cost is uneven and a
+// contiguous split puts the whole expensive tail in one shard.
+//
+// The ordinal is counted HERE, so it is the same sequence in every shard regardless of which tests
+// each one actually ran — the property that makes the union of the shards exactly the suite.
+static long tk_shard_index = -1;
+static long tk_shard_count = 0;
+static long tk_shard_seen  = 0;
+
+// tk_shard_parse — read TK_TEST_SHARD_ENV once, as `<i>/<n>` with 0 <= i < n. Anything else (unset,
+// empty, non-numeric, out of range) selects NO sharding, which is the safe reading: a mistyped value
+// must run the whole suite, never silently skip most of it.
+static void tk_shard_parse(void) {
+    tk_shard_count = 0;
+    tk_shard_index = 0;
+    const char *v = getenv(TK_TEST_SHARD_ENV);
+    if (!v || !*v) return;
+    char *end = NULL;
+    long i = strtol(v, &end, 10);
+    if (!end || *end != '/') return;
+    long n = strtol(end + 1, &end, 10);
+    if (!end || *end != '\0') return;
+    if (n <= 1 || i < 0 || i >= n) return;
+    tk_shard_index = i;
+    tk_shard_count = n;
+}
+
+bool tk_test_shard_take(void) {
+    if (tk_shard_index < 0) tk_shard_parse();
+    long ordinal = tk_shard_seen;
+    tk_shard_seen += 1;
+    if (tk_shard_count <= 1) return true;
+    return (ordinal % tk_shard_count) == tk_shard_index;
+}
+
+// --- the SCENARIO NAME ---------------------------------------------------------------------------
+//
+// See teko_rt.h for WHY a case is addressed by name and not by the exit code its failure produces.
+// The name lives HERE rather than in the assert seed because the thing it is written onto is the
+// per-test channel above: `<name>: ok` has to land on the running test's own channel, and the panic
+// prefix has to survive the seed being replaced by the corpus's own strong definitions.
+static char   tk_scen_name[TK_TEST_LABEL_MAX];
+static size_t tk_scen_len = 0;
+static char   tk_scen_prefix[TK_TEST_LABEL_MAX + 2];
+
+void tk_assert_scenario_set(tk_str name) {
+    tk_scen_len = name.len < sizeof tk_scen_name ? name.len : sizeof tk_scen_name - 1;
+    if (tk_scen_len) memcpy(tk_scen_name, name.ptr, tk_scen_len);
+    memcpy(tk_scen_prefix, tk_scen_name, tk_scen_len);
+    tk_scen_prefix[tk_scen_len]     = ':';
+    tk_scen_prefix[tk_scen_len + 1] = ' ';
+}
+
+tk_str tk_assert_scenario_prefix(void) {
+    if (tk_scen_len == 0) return (tk_str){ (const tk_byte *)"", 0 };
+    return (tk_str){ (const tk_byte *)tk_scen_prefix, tk_scen_len + 2 };
+}
+
+void tk_assert_scenario_ok(void) {
+    if (tk_scen_len == 0) tk_panic("assertion failed: scenario_ok — no scenario is named (scenario_begin was never called)");
+    char line[TK_TEST_LABEL_MAX + 4];
+    memcpy(line, tk_scen_name, tk_scen_len);
+    memcpy(line + tk_scen_len, ": ok", 4);
+    tk_println((tk_str){ (const tk_byte *)line, tk_scen_len + 4 });
+    tk_scen_len = 0;
+}
+
 void tk_print(tk_str s) {
     // Exactly s.len bytes; tolerate embedded NUL; no strlen/puts.
+    if (tk_chan_open) { tk_chan_append(&tk_chan_out, s.ptr, s.len); return; }
     fwrite(s.ptr, 1, s.len, stdout);
 }
 
 void tk_println(tk_str s) {
+    if (tk_chan_open) { tk_chan_append(&tk_chan_out, s.ptr, s.len); tk_chan_append(&tk_chan_out, "\n", 1); return; }
     tk_print(s);
     fputc('\n', stdout);   // single 0x0A
 }
@@ -1623,10 +1801,10 @@ void tk_flush_out(void) {
 
 // Host output FFI bottoms (scope.c: write/ewrite/eprint/eprintln) — exactly s.len bytes, tolerate
 // embedded NUL. write → stdout; ewrite/eprint → stderr; eprintln → stderr + '\n'.
-void tk_write(tk_str s)    { fwrite(s.ptr, 1, s.len, stdout); }
-void tk_ewrite(tk_str s)   { fwrite(s.ptr, 1, s.len, stderr); }
-void tk_eprint(tk_str s)   { fwrite(s.ptr, 1, s.len, stderr); }
-void tk_eprintln(tk_str s) { fwrite(s.ptr, 1, s.len, stderr); fputc('\n', stderr); }
+void tk_write(tk_str s)    { if (tk_chan_open) { tk_chan_append(&tk_chan_out, s.ptr, s.len); return; } fwrite(s.ptr, 1, s.len, stdout); }
+void tk_ewrite(tk_str s)   { if (tk_chan_open) { tk_chan_append(&tk_chan_err, s.ptr, s.len); return; } fwrite(s.ptr, 1, s.len, stderr); }
+void tk_eprint(tk_str s)   { if (tk_chan_open) { tk_chan_append(&tk_chan_err, s.ptr, s.len); return; } fwrite(s.ptr, 1, s.len, stderr); }
+void tk_eprintln(tk_str s) { if (tk_chan_open) { tk_chan_append(&tk_chan_err, s.ptr, s.len); tk_chan_append(&tk_chan_err, "\n", 1); return; } fwrite(s.ptr, 1, s.len, stderr); fputc('\n', stderr); }
 
 // teko::float::parse(str) -> f64 — strtod over a NUL-terminated copy (s may contain no NUL and is
 // not NUL-terminated). A non-numeric / empty string yields 0.0 (strtod's no-conversion result).
@@ -1640,6 +1818,9 @@ double tk_float_parse(tk_str s) {
 
 _Noreturn void tk_panic(const char *msg) {
     // Loud + non-zero (M.1): the TK_PANIC_MARKER line first, then SIGABRT via abort().
+    // The per-test channel is closed and REPORTED first, so the reader sees which test died and
+    // what THAT test had written before the panic message rather than a neighbour's bytes.
+    tk_test_fail_report();
     fputs(TK_PANIC_MARKER, stderr);
     fputs(msg, stderr);
     fputc('\n', stderr);
@@ -1655,6 +1836,7 @@ _Noreturn void tk_panic(const char *msg) {
 // tolerating embedded NUL (exactly msg.len bytes to stderr). The error case `panic(error)` lowers
 // to its `.message` str at the call site.
 _Noreturn void tk_panic_str(tk_str msg) {
+    tk_test_fail_report();
     fputs(TK_PANIC_MARKER, stderr);
     fwrite(msg.ptr, 1, msg.len, stderr);
     fputc('\n', stderr);

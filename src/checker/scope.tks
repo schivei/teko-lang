@@ -484,6 +484,93 @@ fn host_surface_fn(name: str) -> Type | error {
 }
 
 /**
+ * assert_void_sig — the `Func` type of an assertion: `params` in, nothing out. EVERY `teko::assert`
+ * entry has this shape, because an assertion's only outputs are "returned" and "panicked" (M.1), so
+ * the shape is written once here instead of once per name.
+ *
+ * @param params  the assertion's parameter types, in signature order
+ * @return        the `Func` type the typer injects for it
+ */
+fn assert_void_sig(params: []Type) -> Type {
+    Func { params = params; ret = Void { }; variadic = false; param_names = []; n_required = params.len; defaults = [] }
+}
+
+/**
+ * assert_pair_sig — the `Func` type of a two-operand assertion over ONE type (`eq_i64`, `eq_str`, …).
+ *
+ * @param t  the type both operands carry
+ * @return   the `Func` type for `(t, t) -> void`
+ */
+fn assert_pair_sig(t: Type) -> Type {
+    assert_void_sig(teko::list::push(teko::list::push(teko::list::empty(), t), t))
+}
+
+/**
+ * assert_named_flag_sig — the `Func` type of a `(str, bool) -> void` assertion: a NAME plus the bool
+ * the caller's own `match` produced.
+ *
+ * The shape exists because narrowing lives at the MATCH, not in a callee: a non-generic seed cannot
+ * take a `T | null` and ask whether it is null, but the caller already knows — so the caller passes
+ * the answer and the member's NAME, and the failure message can then say which union it was about.
+ * That is what makes null-union presence and error-union outcome assertable with no generics.
+ *
+ * @return the `Func` type for `(str, bool) -> void`
+ */
+fn assert_named_flag_sig() -> Type {
+    assert_void_sig(teko::list::push(teko::list::push(teko::list::empty(), Str { }), Prim { kind = PrimKind::Bool }))
+}
+
+/**
+ * assert_builtin_fn — the injected signature of a `teko::assert::<name>` assertion, or `null` when
+ * `name` is not one.
+ *
+ * THIS IS THE ONE PLACE THE FAMILY IS ENUMERATED. Before this, the same list of names was written
+ * three times (here, `lir::lower`'s `assert_seed_symbol`, `codegen`'s `cg_assert_c_symbol`), so a new
+ * assertion that reached only two of the three type-checked and then failed to link. The other two
+ * now ask `assert_builtin_name`, which asks this, so adding an assertion touches ONE list.
+ *
+ * @param name  the last path segment of the call being resolved
+ * @return      the assertion's `Func` type, or `null` when `name` names no assertion
+ */
+fn assert_builtin_fn(name: str) -> Type | null {
+    let str_t = Str { }
+    let bool_t = Prim { kind = PrimKind::Bool }
+    if name == "is_true" || name == "is_false" { return assert_void_sig(teko::list::push(teko::list::empty(), bool_t)) }
+    if name == "scenario_begin" { return assert_void_sig(teko::list::push(teko::list::empty(), str_t)) }
+    if name == "scenario_ok" { return assert_void_sig(teko::list::empty()) }
+    if name == "eq_i64" || name == "ne_i64" || name == "lt_i64" || name == "le_i64" || name == "gt_i64" || name == "ge_i64" {
+        return assert_pair_sig(Prim { kind = PrimKind::I64 })
+    }
+    if name == "eq_u64" || name == "len_eq" { return assert_pair_sig(Prim { kind = PrimKind::U64 }) }
+    if name == "eq_f64" {
+        let f64_t = Prim { kind = PrimKind::F64 }
+        mut fp: []Type = teko::list::push(teko::list::push(teko::list::empty(), f64_t), f64_t)
+        fp = teko::list::push(fp, f64_t)
+        return assert_void_sig(fp)
+    }
+    if name == "eq_str" || name == "ne_str" || name == "str_contains" || name == "str_absent" || name == "str_starts_with" || name == "str_ends_with" {
+        return assert_pair_sig(str_t)
+    }
+    if name == "bytes_eq" { return assert_pair_sig(Slice { element = Byte { } }) }
+    if name == "is_present" || name == "is_absent" || name == "is_ok" || name == "is_error" { return assert_named_flag_sig() }
+    null
+}
+
+/**
+ * assert_builtin_name — whether `last` names a `teko::assert` assertion, i.e. whether a
+ * `teko::assert::<last>` call lowers to the `teko__assert__<last>` seed symbol.
+ *
+ * Both backends' assert lowering (`lir::lower::assert_seed_symbol`, `codegen::cg_assert_c_symbol`)
+ * ask THIS, so the name a caller may type and the symbol the backends emit can never drift apart.
+ *
+ * @param last  the last path segment of a `teko::…::assert::<last>` call
+ * @return      true iff it names an injected assertion
+ */
+pub fn assert_builtin_name(last: str) -> bool {
+    match assert_builtin_fn(last) { Type => true; null => false }
+}
+
+/**
  * Resolve an INJECTED built-in FUNCTION name to its `Func` type (mirrors `scope.c`'s
  * `tk_builtin_fn`): `print`/`println` + `teko::assert`, the self-host str/byte stdlib surface,
  * the D3 coverage sinks, the arena checkpoint/rewind/commit primitives, the heap-backed
@@ -574,8 +661,7 @@ fn builtin_fn(name: str) -> Type | error {
     if name == "floor" { return Func { params = teko::list::push(teko::list::empty(), Prim { kind = PrimKind::F64 }); ret = Prim { kind = PrimKind::F64 }; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::empty(), Prim { kind = PrimKind::F64 })).len; defaults = [] } }
     if name == "f64_from_bits" { return Func { params = teko::list::push(teko::list::empty(), Prim { kind = PrimKind::U64 }); ret = Prim { kind = PrimKind::F64 }; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::empty(), Prim { kind = PrimKind::U64 })).len; defaults = [] } }
     if name == "f64_bits" { return Func { params = teko::list::push(teko::list::empty(), Prim { kind = PrimKind::F64 }); ret = Prim { kind = PrimKind::U64 }; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::empty(), Prim { kind = PrimKind::F64 })).len; defaults = [] } }
-    if name == "is_true" || name == "is_false" { return Func { params = teko::list::push(teko::list::empty(), Prim { kind = PrimKind::Bool }); ret = void_t; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::empty(), Prim { kind = PrimKind::Bool })).len; defaults = [] } }
-    if name == "str_contains" { return Func { params = teko::list::push(teko::list::push(teko::list::empty(), str_t), str_t); ret = void_t; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::push(teko::list::empty(), str_t), str_t)).len; defaults = [] } }
+    match assert_builtin_fn(name) { Type as at => return at; null => { } }
     if name == "slice" {
         mut p: []Type = teko::list::push(teko::list::empty(), str_t)   // []Type: a heterogeneous param list (str, u64, u64)
         p = teko::list::push(p, Prim { kind = PrimKind::U64 })

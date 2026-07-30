@@ -3518,11 +3518,149 @@ fn run_native_gate(dir: str, out_dir: str, prog: checker::TProgram, m: Manifest,
     phase_end_ok(cc_phase, binp)
     let cross = resolved_cross_note()
     if cross.is_cross { teko::io::println(cross.note); return 0 }
+    let jobs = test_jobs()
+    if jobs > 1 { return run_gate_sharded(od, stem, binp, jobs) }
     match teko::env::set_var("TEKO_TKCOV", covfile) { error => { }; null => { } }
     mut argv: []str = teko::list::push(teko::list::empty(), binp)
     let trc = teko::process::run(argv)
     if trc != 0 { return trc }
     coverage::cov_merge(covfile)
+    0
+}
+
+/**
+ * TEST_JOBS_DEFAULT — how many SHARDS of the in-process suite run concurrently by default.
+ *
+ * Four, matching `REGR_JOBS_DEFAULT` and for the same reason: each shard is a whole test binary with
+ * its own arena, so a job count tuned to core count trades the runner's memory for wall clock. A leg
+ * that knows its machine raises it through `TEST_JOBS_ENV`.
+ */
+const TEST_JOBS_DEFAULT: u64 = 4
+
+/** TEST_JOBS_ENV — the env key a run overrides `TEST_JOBS_DEFAULT` through (12-Factor: how parallel
+    the machine may be is the machine's business, not the source's). `1` restores a single process. */
+const TEST_JOBS_ENV: str = "TEKO_TEST_JOBS"
+
+/**
+ * test_jobs — how many shards of the in-process suite this run may have in flight at once.
+ *
+ * FORCED TO 1 UNDER COVERAGE, and that is not a limitation of the sharding — it is that the merge
+ * would be a second mechanism. A sharded run dumps one `.tkcov` per shard and the floors need their
+ * union; that union is exactly what `run_gate_sharded` merges. So coverage does NOT force serial
+ * here; what forces serial is an explicit `TEKO_TEST_JOBS=1`.
+ *
+ * @return the effective shard count (>= 1)
+ */
+fn test_jobs() -> u64 {
+    match teko::env::var(TEST_JOBS_ENV) { str as v => regr_jobs_of_default(v, TEST_JOBS_DEFAULT); error => TEST_JOBS_DEFAULT }
+}
+
+/**
+ * gate_shard_spec — the `ProcSpec` for ONE shard of the gate binary: the same binary, an env naming
+ * WHICH shard it is (`TEKO_TEST_SHARD=<i>/<n>`) and its OWN coverage dump path, and a capture prefix
+ * of its own so its stdout/stderr are that shard's and nobody else's.
+ *
+ * @param binp  the gate binary every shard runs
+ * @param base  the scratch prefix directory the shards' capture files hang off
+ * @param i     this shard's index
+ * @param jobs  how many shards there are in total
+ * @return      the spec to hand to `run_pool`
+ */
+fn gate_shard_spec(binp: str, base: str, i: u64, jobs: u64) -> ProcSpec {
+    let prefix = teko::str::concat(base, $"{i}")
+    mut env: []str = teko::list::push(teko::list::empty(), $"TEKO_TEST_SHARD={i}/{jobs}")
+    env = teko::list::push(env, teko::str::concat("TEKO_TKCOV=", prefix, ".tkcov"))
+    ProcSpec { argv = teko::list::push(teko::list::empty(), binp); dir = ""; env = env; stdin_data = ""; prefix = prefix }
+}
+
+/**
+ * run_gate_sharded — run the in-process suite as `jobs` CONCURRENT shards of the one gate binary,
+ * then report them in SHARD ORDER and merge every shard's coverage dump.
+ *
+ * WHY PROCESSES AND NOT THREADS: the arena, the coverage sinks and the per-test channel are all
+ * process-wide singletons (`teko_rt.c`), so a threaded suite would need every one of them made
+ * thread-local before the first test could run in parallel. Processes need none of that, and the
+ * runtime's `tk_test_shard_take` already partitions the suite by ordinal.
+ *
+ * WHY THE REPORT IS STILL DETERMINISTIC: shard `i`'s whole stdout is replayed before shard `i+1`'s,
+ * and within a shard the tests ran in items order — so the report is a permutation of the serial
+ * one that depends only on `jobs`, never on which shard finished first. This is the same determinism
+ * law `run_pool` states for regressions (§8): the wall clock changes, the lines do not.
+ *
+ * THE PER-TEST CHANNEL IS WHAT MAKES THIS READABLE AT ALL. Without it, four processes writing test
+ * names and test output onto one stream would interleave mid-line; with it, each shard's capture file
+ * holds whole verdict lines with each test's own bytes attributed under its own.
+ *
+ * @param od    the output directory (the shards' scratch lives under it)
+ * @param stem  the gate binary's stem (names the scratch directory)
+ * @param binp  the gate binary
+ * @param jobs  how many shards to run
+ * @return      0 when every shard exited 0, else the FIRST non-zero shard exit (in shard order)
+ */
+fn run_gate_sharded(od: str, stem: str, binp: str, jobs: u64) -> i32 {
+    let base = teko::str::concat(od, "/.", stem, "-shard/")
+    mut specs: []ProcSpec = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= jobs { break }
+        specs = teko::list::push(specs, gate_shard_spec(binp, base, i, jobs))
+        i = i + 1
+    }
+    teko::io::println($"teko: test gate sharded {jobs} ways (TEKO_TEST_JOBS)")
+    let caps = run_pool(specs, jobs)
+    report_shard_captures(caps)
+    merge_shard_coverage(base, jobs)
+    first_shard_failure(caps)
+}
+
+/**
+ * report_shard_captures — replay every shard's captured streams in SHARD ORDER, stdout to stdout and
+ * stderr to stderr, so a sharded run's log reads like a serial one and no line is spliced.
+ *
+ * @param caps  the captures `run_pool` returned, already in shard order
+ */
+fn report_shard_captures(caps: []CapResult) {
+    mut i: u64 = 0
+    loop {
+        if i >= caps.len { break }
+        teko::io::write(caps[i].stdout)
+        teko::io::ewrite(caps[i].stderr)
+        i = i + 1
+    }
+}
+
+/**
+ * merge_shard_coverage — fold every shard's own `.tkcov` dump into this process's coverage sinks, so
+ * the floors see the UNION of the shards. A shard that produced no dump merges nothing, which is what
+ * `cov_merge` already does for a missing file.
+ *
+ * @param base  the shards' scratch prefix directory
+ * @param jobs  how many shards ran
+ */
+fn merge_shard_coverage(base: str, jobs: u64) {
+    mut i: u64 = 0
+    loop {
+        if i >= jobs { break }
+        coverage::cov_merge(teko::str::concat(base, $"{i}", ".tkcov"))
+        i = i + 1
+    }
+}
+
+/**
+ * first_shard_failure — the FIRST non-zero shard exit in shard order, or 0 when every shard passed.
+ * First-in-shard-order rather than first-to-finish, for the same determinism reason the report is
+ * replayed in shard order: the same tree must produce the same exit code at every `jobs`.
+ *
+ * @param caps  the captures `run_pool` returned, in shard order
+ * @return      the failing shard's exit code, or 0
+ */
+fn first_shard_failure(caps: []CapResult) -> i32 {
+    mut i: u64 = 0
+    loop {
+        if i >= caps.len { break }
+        if caps[i].exit != 0 { return caps[i].exit }
+        i = i + 1
+    }
     0
 }
 

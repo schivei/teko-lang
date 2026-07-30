@@ -2745,29 +2745,36 @@ fn cg_prim_is_float(k: checker::PrimKind) -> bool { checker::prim_is_float(k) }
  */
 fn cg_prim_is_int(k: checker::PrimKind) -> bool { checker::prim_is_int(k) }
 
-/** cg_assert_c_symbol — the C symbol for an INJECTED `teko::assert::<name>` call, or "" when the
- *  call is not a `teko::assert::*` builtin. The injected assertions (is_true/is_false/str_contains)
- *  are recognized by the checker as builtins WITHOUT a resolved namespace (empty call_ns), so a
- *  standalone project that does not itself define `teko::assert` would otherwise emit the BARE last
- *  segment (`is_true(...)`) — undeclared C, breaking the native test gate. This mirrors the VM's
- *  `teko::assert::*` recognition (segments[0]=="teko" && segments[len-2]=="assert") and emits the
- *  `teko__assert__<name>` symbol the assert seed (src/assert/assert.{c,h}) defines/declares, so the
- *  native gate compiles the same assertions the VM interprets. The caller only consults this when
- *  `call_ns` is empty; a project that DEFINES its own `teko::assert` resolves the call with a
- *  namespace and keeps the existing resolved-user-call lowering (cb_fn_name → the same mangled
- *  symbol), so the emitted C is byte-unchanged for the compiler's own corpus (the fixpoint is intact).
+/**
+ * cg_assert_c_symbol — the C symbol for an INJECTED `teko::assert::<name>` call, or "" when the call
+ * is not a `teko::assert::*` builtin.
  *
- *  @param callee  the call's callee path (parser::Path)
- *  @return        "teko__assert__<name>" for is_true/is_false/str_contains under teko::assert, else ""
- *  @since #168 */
+ * The injected assertions are recognized by the checker as builtins WITHOUT a resolved namespace
+ * (empty `call_ns`), so a standalone project that does not itself define `teko::assert` would
+ * otherwise emit the BARE last segment (`is_true(...)`) — undeclared C, breaking the native test
+ * gate. This keys on the same shape the lowering does (`segments[0] == "teko"` and
+ * `segments[len-2] == "assert"`) and emits the `teko__assert__<name>` symbol the assert seed
+ * (src/assert/assert.{c,h}) defines/declares.
+ *
+ * The caller only consults this when `call_ns` is empty; a project that DEFINES its own
+ * `teko::assert` resolves the call with a namespace and keeps the resolved-user-call lowering
+ * (`cb_fn_name` → the same mangled symbol), so the emitted C is byte-unchanged for the compiler's own
+ * corpus and the FIXPOINT is intact.
+ *
+ * WHICH names are assertions is asked of `checker::assert_builtin_name`, never re-listed here — see
+ * that function for the drift this collapse ends.
+ *
+ * @param callee  the call's callee path (parser::Path)
+ * @return        "teko__assert__<name>" for an injected assertion under `teko::assert`, else ""
+ * @since #168
+ */
 fn cg_assert_c_symbol(callee: parser::Path) -> str {
     let segs = callee.segments
     if segs.len < 2 { return "" }
     if segs[0].name != "teko" { return "" }
     if segs[segs.len - 2].name != "assert" { return "" }
-    let last = segs[segs.len - 1].name
-    if last == "is_true" || last == "is_false" || last == "str_contains" {
-        return teko::str::concat("teko__assert__", last)
+    if checker::assert_builtin_name(segs[segs.len - 1].name) {
+        return teko::str::concat("teko__assert__", segs[segs.len - 1].name)
     }
     ""
 }
@@ -12077,21 +12084,42 @@ fn emit_test_main_analyze(buf: []byte, prog: CgProg) -> []byte | error {
  * @return     the buffer with this test's invocation appended
  */
 fn emit_test_call(buf: []byte, f: checker::TFunction, idx: u64, cov: bool) -> []byte {
-    let label = if f.namespace.len != 0 { teko::str::concat(f.namespace, "::", f.name) } else { f.name }
-    let head = teko::str::concat("test ", label, " ... ")
-    mut b = cb(buf, "    tk_arena_push();\n")
-    b = cb(b, "    tk_print((tk_str){ (const tk_byte *)\"")
-    b = cb_cstr_escaped(b, head)
-    b = cb(b, "\", ")
-    b = cb_u64_digits(b, head.len)
-    b = cb(b, " });\n")
-    b = cb(b, "    tk_flush_out();\n")
+    mut b = cb(buf, "    if (tk_test_shard_take()) {\n")
+    b = cb(b, "    tk_arena_push();\n")
+    b = emit_test_channel_open(b, f)
     if cov { b = cb(cb_u64_digits(cb(b, "    tk_cov_enter("), idx), ");\n") }
     b = cb_fn_name(cb(b, "    "), f.namespace, f.name)
     b = cb(b, "();\n")
     if cov { b = cb(b, "    tk_cov_leave();\n") }
-    b = cb(b, "    tk_println((tk_str){ (const tk_byte *)\"ok\", 2 });\n")
+    b = cb(b, "    tk_test_end();\n")
     b = cb(b, "    tk_arena_pop();\n")
+    b = cb(b, "    }\n")
+    b
+}
+
+/**
+ * emit_test_channel_open — the `tk_test_begin("<label>")` call that gives ONE test its own out/err
+ * channel, replacing the old `tk_print("test <label> ... ")` + `tk_flush_out()` pair.
+ *
+ * WHY THE VERDICT LINE MOVED TO THE END (owner ruling: a test in process gets its own channel). The
+ * old harness printed the label BEFORE the body and `ok` AFTER it, on the shared stream — so a test
+ * that printed anything of its own split its own verdict line in two and pushed `ok` onto the next
+ * line. Measured on this tree, and it made a suite count anchored on `... ok` wrong. Now the label is
+ * only REMEMBERED here; `tk_test_end` (or the panic path, for a failure) writes the whole verdict
+ * line at once and then this test's captured bytes under it. The flush the old pair needed for
+ * crash-attribution moved into `tk_chan_verdict_line`, which flushes every verdict line.
+ *
+ * @param buf  the output byte buffer to append the emitted C to
+ * @param f    the `#test` whose namespace + name form the label
+ * @return     the buffer with the channel-open call appended
+ */
+fn emit_test_channel_open(buf: []byte, f: checker::TFunction) -> []byte {
+    let label = if f.namespace.len != 0 { teko::str::concat(f.namespace, "::", f.name) } else { f.name }
+    mut b = cb(buf, "    tk_test_begin((tk_str){ (const tk_byte *)\"")
+    b = cb_cstr_escaped(b, label)
+    b = cb(b, "\", ")
+    b = cb_u64_digits(b, label.len)
+    b = cb(b, " });\n")
     b
 }
 
@@ -12112,15 +12140,8 @@ fn emit_test_call(buf: []byte, f: checker::TFunction, idx: u64, cov: bool) -> []
  * @since 0.3.0.29
  */
 fn emit_test_call_analyze(buf: []byte, f: checker::TFunction, idx: u64) -> []byte {
-    let label = if f.namespace.len != 0 { teko::str::concat(f.namespace, "::", f.name) } else { f.name }
-    let head = teko::str::concat("test ", label, " ... ")
     mut b = cb(buf, "    tk_arena_push();\n")
-    b = cb(b, "    tk_print((tk_str){ (const tk_byte *)\"")
-    b = cb_cstr_escaped(b, head)
-    b = cb(b, "\", ")
-    b = cb_u64_digits(b, head.len)
-    b = cb(b, " });\n")
-    b = cb(b, "    tk_flush_out();\n")
+    b = emit_test_channel_open(b, f)
     b = cb(b, "    tk_cov_reset(); tk_cov_branch_reset(); tk_cov_line_reset();\n")
     b = cb(cb_u64_digits(cb(b, "    tk_cov_enter("), idx), ");\n")
     b = cb_fn_name(cb(b, "    "), f.namespace, f.name)
@@ -12129,7 +12150,7 @@ fn emit_test_call_analyze(buf: []byte, f: checker::TFunction, idx: u64) -> []byt
     b = cb(b, "    { const char *d = getenv(\"TEKO_ANALYZE_DIR\"); if (d) { char p[1024]; snprintf(p, sizeof p, \"%s/")
     b = cb_u64_digits(b, idx)
     b = cb(b, ".tkcov\", d); tk_cov_dump(p); } }\n")
-    b = cb(b, "    tk_println((tk_str){ (const tk_byte *)\"ok\", 2 });\n")
+    b = cb(b, "    tk_test_end();\n")
     b = cb(b, "    tk_arena_pop();\n")
     b
 }
