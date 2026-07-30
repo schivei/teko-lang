@@ -3373,19 +3373,42 @@ const ASSERT_SEED_PREFIX: str = "teko__assert__"
  * `checker::assert_builtin_fn`, and every consumer that has ever kept a private
  * copy of that list has drifted from it.
  *
- * The prefix test is the RECONSTRUCTION `ASSERT_SEED_PREFIX ~ tail == sym` rather
- * than a byte loop, because this compiler has no `teko::str::starts_with` builtin
- * (only `ends_with`/`contains`) and the tail has to be cut anyway to ask the
- * question.
+ * THE PREFIX TEST ALLOCATES NOTHING, and that is a measured requirement rather
+ * than a preference. This runs once per lowered call — hundreds of thousands of
+ * times over a coverage build of the own-backend corpus — and the first shape of
+ * it cut the tail with `teko::str::slice_from` and rebuilt the symbol with
+ * `teko::str::concat` BEFORE knowing whether the prefix even matched, so every
+ * call in the program leaked two fresh heap strings into the arena: the gate's
+ * `teko` process reached `anon-rss 14488300 kB` and was OOM-killed. The byte loop
+ * answers `false` for every non-assertion symbol without touching the allocator,
+ * and only a genuine hit pays for the slice.
  *
  * @param str sym  the resolved C symbol
  * @return u64  the count of leading by-value `tk_str` parameters (0, 1 or 2)
  */
 fn assert_seed_fat_arity(sym: str) -> u64 {
-    if sym.len <= ASSERT_SEED_PREFIX.len { return 0 }
-    let last = teko::str::slice_from(sym, ASSERT_SEED_PREFIX.len)
-    if teko::str::concat(ASSERT_SEED_PREFIX, last) != sym { return 0 }
-    checker::assert_fat_arg_arity(last)
+    if !has_assert_seed_prefix(sym) { return 0 }
+    checker::assert_fat_arg_arity(teko::str::slice_from(sym, ASSERT_SEED_PREFIX.len))
+}
+
+/**
+ * has_assert_seed_prefix — does `sym` begin with `ASSERT_SEED_PREFIX` and carry at least one byte
+ * after it? A local byte-level prefix test, because this compiler has no `teko::str::starts_with`
+ * builtin — only `ends_with`/`contains` — and the same reason `build::project`'s own `bp_prefix`
+ * exists.
+ *
+ * @param str sym  the resolved C symbol
+ * @return bool  true iff `sym` is `ASSERT_SEED_PREFIX` followed by a non-empty name
+ */
+fn has_assert_seed_prefix(sym: str) -> bool {
+    if sym.len <= ASSERT_SEED_PREFIX.len { return false }
+    mut i: u64 = 0
+    loop {
+        if i >= ASSERT_SEED_PREFIX.len { break }
+        if sym[i] != ASSERT_SEED_PREFIX[i] { return false }
+        i++
+    }
+    true
 }
 
 /**
