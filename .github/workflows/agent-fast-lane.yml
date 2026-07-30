@@ -339,28 +339,38 @@ jobs:
       # deles."* Moving two steps down the file is the cheapest 26% that exists here — a red run drops
       # from ~150s to ~111s, and a green run pays exactly what it paid before, just later.
       #
-      # Mingw and not MSVC — owner ruling 2026-07-27: *"eu não gosto, discordo total de usar essa
-      # 'coisa', mas como MSVC exigiria adição de flags em C e não devemos mais emitir C, continue
-      # no mingw."* The kept choice is the one that asks nothing of the C seam we are removing.
-      # `brew`, not `apt-get` — this leg is macOS. clang ships with the Xcode CLT, so only the two
-      # cross capabilities need installing.
+      # MINGW IS GONE FROM HERE, AND A SUPERSEDED RULING IS RECORDED RATHER THAN DELETED. This block
+      # used to install `mingw-w64` on the strength of an owner ruling of 2026-07-27: *"eu não gosto,
+      # discordo total de usar essa 'coisa', mas como MSVC exigiria adição de flags em C e não devemos
+      # mais emitir C, continue no mingw."*
       #
-      # BOTH ARE PROVISIONED, never one: the suite would SKIP the missing one's rows and
-      # `no_skips_gate.sh` would fail the run for a reason that has nothing to do with the question
-      # being asked. A lane that reds on its own missing toolchain teaches nothing.
-      - name: Provision the two capabilities the SUITE needs (mingw cross-linker, wasmtime)
+      # THAT RULING'S PREMISE WAS MEASURED FALSE on 2026-07-30, by a probe run on the real Windows
+      # runner (`theory/sonda-toolchain`): MSVC needs NO extra C flags there, because the image's clang
+      # ALREADY targets `x86_64-pc-windows-msvc` by default and already invokes MSVC's `link.exe`. The
+      # `-###` driver output is byte-identical with and without `--target=x86_64-pc-windows-msvc` — the
+      # flag is a no-op on that host. With the premise gone, the ruling that stood on it goes too, and
+      # the newer one governs: *"queremos sim Cross compiling quando todos os natives estiverem
+      # funcionando, mas não quero saber de mingw"* (2026-07-30).
+      #
+      # It is written out rather than removed because a quiet deletion invites the next reader to
+      # "restore" it from the older quote. A ruling superseded BY MEASUREMENT should say so.
+      #
+      # `brew`, not `apt-get` — this leg is macOS by default. clang ships with the Xcode CLT, so only
+      # the wasm engine needs installing. It stays provisioned because the suite would SKIP the wasm
+      # rows without it and `no_skips_gate.sh` would red the run for a reason unrelated to the question
+      # being asked — a lane that reds on its own missing toolchain teaches nothing.
+      - name: Provision the wasm engine the SUITE needs
         if: ${{ github.event.inputs.run_tests != 'false' }}
         shell: bash
         run: |
           set -eu
-          brew install mingw-w64 wasmtime
+          brew install wasmtime
 
-      - name: Verify both are on PATH (fail loud before the suite, not inside it)
+      - name: Verify wasmtime is on PATH (fail loud before the suite, not inside it)
         if: ${{ github.event.inputs.run_tests != 'false' }}
         shell: bash
         run: |
           set -eu
-          x86_64-w64-mingw32-gcc --version | head -n1
           wasmtime --version
 
       # Only reached when the fixpoint HELD. A suite run before that point would be testing a
