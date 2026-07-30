@@ -1897,3 +1897,201 @@ Prazo do dono: *"imediatamente, a dor e latente"*. O C0 e o C1 entram ja.
 4. **Windows continua sem medicao minha.** A forma agora e simetrica (thread + leitura bloqueante dos
    dois lados), o que remove a assimetria que eu tinha declarado — mas simetrico no papel nao e
    medido, e a perna Windows tem de trazer a sua propria medicao.
+
+---
+
+## 17. A arena por tarefa — PRE-REQUISITO, nao divida — ruling do dono, 2026-07-30
+
+> *"Mas ai nao resolve nada, o processo precisa funcionar tanto nativo quanto em C, sem excecoes."*
+
+**A minha saida de emergencia esta invalidada, e a razao esta na arvore.** Escrevi em §16.3 que o
+corpo do handler *"vive no runtime, em C, e nunca chama codigo Teko"*. `feat/issue-runtime-em-teko`
+esta viva e `docs/design/romaneio-morte-do-c-031.md` lista `src/runtime/teko_rt.c` entre os ficheiros
+que MORREM. As minhas ~210 linhas iam para dentro de um ficheiro com morte planeada, e a condicao que
+suspendia a divida **cai por construcao** no dia em que o runtime for Teko. Nao e risco: e o objectivo
+declarado desta lane. **Isso e o meio-termo que o dono proibiu.**
+
+### 17.1 Primeiro a medicao, porque "caro" nao e um numero — e eu repeti um adjectivo
+
+Classifiquei a arena por tarefa como *"cara e toca a disciplina de memoria inteira"*. **Essa frase e
+do `concorrencia-adiantada-s8.md` e eu repeti-a sem a medir.** Fui medir. E menor do que o adjectivo,
+e esta concentrada num ficheiro so.
+
+**As variaveis que uma segunda tarefa corrompe** (todas em `src/runtime/teko_rt.c`):
+
+| # | variavel | linha | porque corrompe |
+|---:|---|---:|---|
+| 1 | `tk_g_regs` | 1149 | registo intrusivo de regioes vivas; duas tarefas a prepender perdem nos |
+| 2 | `tk_g_root` | 1150 | a propria regiao raiz — o comentario ja diz *"single-threaded seed (S8 revisit)"* |
+| 3 | `tk_arena_marks[64]` | 1551 | a pilha de marcas: o `pop` de A liberta o que B usa |
+| 4 | `tk_arena_msp` | 1552 | o topo dessa pilha |
+| 5 | `tk_push_cache[]` | 2773 | cache de cauda viva, chaveada por regiao+geracao — um falso acerto escreve em memoria alheia |
+| 6 | `tk_free_bins[]` | 1168 | bins da lista livre |
+| 7 | `tk_free_large` | 1169 | lista livre grande |
+| 8 | `tk_free_parked_bytes` + `_reused_bytes` + `_reused_count` | 1170 | contadores da lista livre |
+
+**A que NAO pode ser por tarefa, e e a armadilha do "poe tudo em thread-local":**
+
+| # | variavel | linha | porque |
+|---:|---|---:|---|
+| 9 | `tk_g_region_gen` | 1151 | a geracao tem de ser unica **entre tarefas**, nao dentro de cada uma. Por tarefa, duas tarefas emitem a mesma geracao e o `tk_push_cache` volta a falsear. **Fica global e passa a atomica.** |
+
+**As tres familias com a mesma patologia, fora da arena:**
+
+| # | familia | linha | nota |
+|---:|---|---:|---|
+| 10 | `tk_fn_stack`/`tk_fn_sp`/`tk_fn_cap` | 2568-2570 | pilha de atribuicao de cobertura — por tarefa |
+| 11 | tabelas `tk_obs_*` | 1236-1254 | observabilidade — por tarefa, ou atomicas |
+| 12 | `tk_test_jb` / `tk_test_capturing` (§14) | C0 | **por tarefa, obrigatoriamente**: um `panic` numa tarefa que saltasse para a moldura de outra e pior do que o `abort` que substitui |
+
+**TOTAL: 12 familias de variavel, num ficheiro so.**
+
+**E o numero que decide o custo e o outro — o que NAO muda:**
+
+| simbolo | referencias | muda? |
+|---|---:|---|
+| `tk_alloc` | 54 | **nao** |
+| `tk_region_alloc` | 41 | **nao** |
+| `tk_region_new` | 35 | **nao** |
+| `tk_region_drop` | 34 | **nao** |
+| `tk_region_root` | 27 | **nao** |
+| `tk_arena_pop` | 20 | **nao** |
+| `tk_regions_free_all` | 17 | **nao** |
+| `tk_arena_push` | 12 | **nao** |
+| `tk_region_register` / `tk_region_lookup` | 19 | **nao** |
+
+**~259 referencias, e nenhuma muda de forma** — porque as assinaturas ficam identicas e passam a ler
+`tk_task_current()` por dentro. E por isso que as 64 referencias em `src/codegen/codegen.tks` (que sao
+literais de C emitido) tambem nao mudam: o C emitido continua a dizer `tk_arena_push();`.
+
+**A conta honesta: 12 declaracoes movem-se, ~259 chamadas ficam.** O custo esta concentrado, nao
+espalhado — o contrario do que o adjectivo que eu repeti dizia.
+
+### 17.2 A pergunta central: uma tarefa com raiz propria numa linguagem sem tarefas
+
+`_Thread_local` resolve o C de hoje e **nao** resolve o nativo. A resposta que serve as duas
+encarnacoes nao e uma tecnica — e uma **costura**:
+
+> **Todo o estado da tabela de §17.1 colapsa num `tk_task`, e ha UM acessor: `tk_task_current()`.
+> A costura entre as duas encarnacoes e essa funcao, e so essa.**
+
+```c
+// tk_task — TODO o estado que uma tarefa nao partilha: a sua regiao raiz, a sua pilha de marcas, a
+// sua cache de cauda, as suas listas livres, o seu buffer de captura (§14).
+//
+// UMA STRUCT E NAO DOZE VARIAVEIS, e e isso que torna a costura possivel: com doze globais haveria
+// doze acessos a portar; com uma, ha um.
+typedef struct tk_task tk_task;
+// tk_task_current — a tarefa que corre AGORA. A UNICA linha do runtime que sabe o que e uma thread.
+tk_task *tk_task_current(void);
+```
+
+E as duas encarnacoes da mesma funcao:
+
+| encarnacao | implementacao | custo de backend |
+|---|---|---|
+| **C de hoje** | `static _Thread_local tk_task *tk_g_task;` — uma linha (C11, e a arvore ja usa `_Noreturn`) | nenhum |
+| **Teko nativo de amanha** | `pthread_getspecific` / `TlsGetValue`, ligados por `extern fn` — a FFI que ja existe | **nenhum** |
+
+**E aqui esta a resposta a objeccao, e ela e o ponto inteiro:** a versao nativa **nao precisa de
+nenhuma capacidade nova do backend proprio.** `pthread_getspecific` e uma chamada C ordinaria a um
+simbolo externo — exactamente o que `extern fn` ja emite hoje, dezenas de vezes. Nao ha relocacao de
+TLS por inventar, nao ha registo reservado, nao ha modelo de armazenamento por escolher.
+
+E se um dia se quiser o acesso mais rapido (relocacoes TLS reais no emissor ELF/COFF), **troca-se uma
+funcao** e nenhuma das ~259 chamadas sabe. Isso e a diferenca entre uma costura e uma saida de
+emergencia: a costura tem duas implementacoes hoje e admite uma terceira amanha; a saida tinha uma so
+e expirava.
+
+**O custo que eu NAO medi, e digo-o:** quanto custa um `pthread_getspecific` por `tk_alloc` nesta
+arvore. A mitigacao esta desenhada — `tk_alloc_in(tk_task *, size)` com `tk_alloc` a ser o invocador
+de uma consulta so, e os ciclos quentes (`tk_slice_push`) a buscarem uma vez — mas **o numero e a
+primeira coisa do crumb**, e se ele desmentir a forma, e a medicao que fica.
+
+### 17.3 A resposta a pergunta de ordenacao, e ela e SIM, trava
+
+**O fan-in NAO pode entrar antes da arena por tarefa.** Digo-o em vez de arranjar outra condicao.
+
+A razao e estrutural e sobrevive ao romaneio: um handler de dreno, **assim que o runtime for Teko**,
+aloca — qualquer codigo Teko aloca. E mesmo hoje, o empurrao de um bloco para o `tk_chan` copia bytes,
+e uma copia que passe por `tk_alloc` toca a raiz partilhada. Fazer o fan-in primeiro e construir por
+cima de uma suposicao com data de validade.
+
+**Portanto entra um crumb, e ele e um PRE-REQUISITO:**
+
+**C-A — a arena por tarefa.** As 12 familias de §17.1 colapsam em `tk_task`; `tk_g_region_gen` fica
+global e passa a atomica; `tk_task_current()` com as duas encarnacoes; a guarda de §17.4.
+
+**Ordem: C0 · C-A · C1 · C2 · C3 · C4 · C5 · C6 · C7 · C8 · C9. Total: 10 -> 11 crumbs.**
+
+O **C0 continua a poder ir a frente**: a captura corre no arnes de uma shard que ainda e
+single-threaded, e nao ha handler nenhum antes do C1. Mas o C-A **tem de mover `tk_test_jb` para
+dentro do `tk_task`** quando aterrar, e isso esta na sua lista (familia 12) para nao se perder.
+
+**Ponto de ritual: depois do C-A.** Ele mexe na disciplina de memoria do compilador inteiro, e o
+fixpoint (gen1 == gen2) e o unico juiz que serve.
+
+### 17.4 A guarda, e a regra que sobrevive
+
+Mesmo com arena por tarefa sobra **uma** regra, e portanto sobra uma guarda: **nenhuma tarefa
+rebobina ou liberta a regiao de outra.** Ela tem de poder falhar.
+
+```teko
+#test
+/**
+ * ta_two_tasks_do_not_share_a_root — duas tarefas alocam, uma rebobina, e os bytes da outra ficam
+ * INTACTOS.
+ *
+ * @throws quando a rebobinagem de uma tarefa toca a canaria da outra
+ */
+fn ta_two_tasks_do_not_share_a_root() {
+    let r = ta_run_two_tasks_with_canaries()
+    teko::assert::is_true(r.other_canary_intact)
+}
+
+#test
+/**
+ * ta_the_guard_is_not_vacuous — O BRACO DE VIVACIDADE, e sem ele os outros dois nao valem nada.
+ *
+ * Se `tk_task_current()` devolvesse a MESMA tarefa as duas raias, o teste acima passaria por nao
+ * haver duas coisas para corromper — verde sobre um instrumento cego, que e a patologia que ja nos
+ * deu ZERO tres vezes nesta lane. Por isso afirma-se primeiro que as raizes sao DIFERENTES.
+ *
+ * @throws quando as duas tarefas observam a mesma raiz, ou a mesma geracao
+ */
+fn ta_the_guard_is_not_vacuous() {
+    let r = ta_run_two_tasks_with_canaries()
+    teko::assert::ne_i64(r.root_a, r.root_b)
+    teko::assert::is_true(ta_all_generations_distinct(r.gens))
+}
+
+#test
+/**
+ * ta_a_shared_root_corrupts — A INVERSAO POR REVERSAO: a mesma canaria contra uma raiz PARTILHADA
+ * (a forma de hoje) tem de ser destruida.
+ *
+ * Sem este braco a guarda so diz "nao vi problema", que e o que uma guarda cega tambem diz.
+ *
+ * @throws quando a forma partilhada NAO corrompe — o que significaria que esta prova nao prova
+ */
+fn ta_a_shared_root_corrupts() {
+    teko::assert::is_false(ta_run_two_tasks_on_one_root().other_canary_intact)
+}
+```
+
+A geracao tem a sua propria afirmacao (`ta_all_generations_distinct`) porque e a variavel que **fica**
+global: duas tarefas a criar regioes em ciclo nunca podem observar a mesma geracao, e um incremento
+nao-atomico colide de forma reprodutivel com duas raias e 100 000 voltas.
+
+### 17.5 O que continua por resolver, e nao escondo
+
+1. **`pthread_getspecific` por alocacao nao esta medido** (§17.2). E o primeiro passo do C-A.
+2. **`tk_region_register`/`tk_region_lookup` (DI) sao por regiao**, logo seguem a raiz para dentro do
+   `tk_task` — mas o S8 ja tinha reportado que um `#singleton` resolvido em duas tarefas e uma segunda
+   corrida da mesma familia. Com a raiz por tarefa, dois `#singleton` passam a ser **duas instancias**,
+   e isso e uma mudanca de SEMANTICA de DI, nao so de seguranca. **REPORTADO, nao decidido por mim:**
+   e uma escolha do dono se um `#singleton` e por processo ou por tarefa.
+3. **Windows continua sem medicao minha.** `TlsGetValue` e a forma simetrica de `pthread_getspecific`
+   e a costura nao muda, mas simetrico no papel nao e medido.
+4. **A arena por tarefa nao da threads a Teko.** Ela remove o que travava a S8; `spawn` e `chan<T>`
+   continuam por construir, e o §16 continua a construir apenas o fundo minimo.
