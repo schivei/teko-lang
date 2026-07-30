@@ -2282,13 +2282,31 @@ jobs:
       # NOT SKIPPED, NOT PINNED TO THE C ROUTE. Pinning `TEKO_BACKEND=c` would make the step pass
       # while measuring a road we are retiring — and `fixpoint_gate.sh` records what that costs:
       # the variable *"LEAKS INTO EVERYTHING THAT RUNS BELOW IT"* and turned a regressor green
-      # without fixing it. So the native route stays selected and the step asserts what it ACTUALLY
-      # produces today: the aggregate-push degrau, by name and by site.
+      # without fixing it. So the native route stays selected.
       #
-      # THE DAY .32 CLOSES IT, THIS GOES RED — the build succeeds, the expected stop is absent, and
-      # the failure is the SIGNAL to restore the two lines this replaced:
+      # IT NO LONGER NAMES WHICH DEGRAU (owner signed off 2026-07-30). It used to `grep` for
+      # *"needs slice elements held BY VALUE"* and fail when the stop was anything else — and that
+      # degrau CLOSED, so the pin was already stale: the native self-host now stops at
+      # `resolve_generic_inst`. A pin keyed on the current degrau goes red on EVERY degrau the ladder
+      # closes, which is noise: closing one is progress, and progress must not read as breakage. The
+      # owner's own warning cuts both ways here — *"um KNOWN-STOP que falha (vermelho) não
+      # necessariamente significa que o erro que existia foi corrigido"* — and a pin that cannot tell
+      # "we advanced" from "we broke" tells you nothing.
+      #
+      # WHAT IT ASSERTS INSTEAD is the pair that is actually stable across the whole ladder:
+      #   1. the native self-host does NOT complete; and
+      #   2. the way it fails is a NAMED HONEST STOP (`native backend N1`) — not a crash, not a
+      #      silent wrong answer, not an empty failure.
+      # (2) is the half that earns its keep every run. "Paragem barulhenta é sempre melhor que
+      # resposta errada calada": the day the native backend starts failing by segfault or by
+      # producing garbage instead of stopping by name, THIS step is what catches it, and no
+      # degrau-specific pin ever could.
+      #
+      # SO IT GOES RED EXACTLY ONCE, on the real event: the day the native self-host SUCCEEDS. That
+      # red is the signal to delete this step and restore the plain build:
       #     run: ./dl/linux-x86_64-glibc/teko . -o gen2-mp --no-verify --release
-      - name: KNOWN-STOP (.32) — the native self-host stops at the aggregate-push degrau
+      # The degrau it reaches today is printed for the record, never asserted.
+      - name: KNOWN-STOP (.32) — the native self-host stops, and stops HONESTLY
         env:
           TEKO_MEM_PARANOID: '1'
         run: |
@@ -2296,15 +2314,18 @@ jobs:
           if ./dl/linux-x86_64-glibc/teko . -o gen2-mp --no-verify --release > mp.log 2>&1; then
             echo "KNOWN-STOP LIFTED: the native backend self-hosted."
             echo "This step exists to assert that it CANNOT yet. Promote it:"
-            echo "  restore 'run: ./dl/linux-x86_64-glibc/teko . -o gen2-mp --no-verify --release'"
+            echo "  delete this step and restore"
+            echo "  'run: ./dl/linux-x86_64-glibc/teko . -o gen2-mp --no-verify --release'"
             exit 1
           fi
-          if ! grep -q 'needs slice elements held BY VALUE' mp.log; then
-            echo "the native self-host failed, but NOT at the degrau this step pins:"
+          if ! grep -q 'native backend N1' mp.log; then
+            echo "the native self-host failed, but NOT by a named honest stop — this is the case"
+            echo "this step exists to catch: a crash or a silent wrong answer where a barulhenta"
+            echo "stop belongs. The tail below is the whole evidence:"
             tail -n 20 mp.log
             exit 1
           fi
-          echo "KNOWN-STOP held — the native self-host stops where .32 will pick it up:"
+          echo "KNOWN-STOP held — it stops, and it stops by name. Today's degrau, for the record:"
           grep -m1 'native backend N1' mp.log
 
       - name: Run the single regression executor (TEKO_MEM_PARANOID)
