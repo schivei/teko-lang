@@ -1794,3 +1794,40 @@ a lei anterior.**
 - **A superfície de asserção**: medidas hoje, **24 funções distintas** em uso (3265 `is_true`, 575
   `str_contains`, 311 `is_false`, e a cauda). Mudá-las é mexer no que a árvore inteira usa.
 - **Quem agrega o quê**: o que o sumarizador recebe pronto e o que ainda calcula.
+
+## Os `print` das threads vão para stdout/stderr, NÃO para o túnel (dono, 2026-07-30)
+
+> *"quaisquer prints executados nas threads, devem sair pela saída padrão stdout/stderr, para evitar
+> de enviar lixo para o túnel."*
+
+**O túnel transporta estrutura — asserções, cobertura, veredicto — e não saída livre do utilizador.**
+Um `println` dentro de um teste é depuração de quem o escreveu, não é veredicto.
+
+### Isto CORRIGE o desenho, e a correcção é minha também
+
+A §24 dizia o contrário — que um `#test` a chamar `println("olá")` produzia um `Rec` com
+`kind = "out"`, embrulhado por quem emite. **Eu publiquei isso no artefacto.** A lei retira-o.
+
+### E há um argumento a favor que o dono não fez, e é o mais forte
+
+O arquitecto tinha medido que **o número de escritas é previsível** — ~2300, um registo por `#test` —
+e tinha logo a seguir nomeado o que quebra essa previsibilidade: *"um teste com um ciclo a imprimir
+produz uma infinidade"*. **Esta lei remove essa quebra pela raiz.** Com os `print` fora do canal:
+
+- o número de escritas volta a ser função da **estrutura** (testes, asserções, cobertura), não do que
+  um autor decidiu imprimir;
+- um ciclo de `print` patológico passa a inundar o **stdout**, que tem contrapressão do SO, em vez de
+  um anel limitado que teria de o recusar com `Full`;
+- e o `REC_MAX` deixa de ter de acomodar texto arbitrário.
+
+### O custo, dito e não escondido — e é uma assimetria deliberada
+
+Do lado dos **processos** a saída livre é atribuída: o executor prefixa `out|`/`err|` e diz de quem é
+(medido: 14 linhas assim na perna macOS de hoje). Do lado das **threads**, com os `print` a ir
+directos para um stdout partilhado, **N threads entrelaçam-se e a atribuição perde-se** — que é
+exactamente o defeito que este desenho inteiro existe para resolver, aqui aceite de propósito para o
+que não é veredicto.
+
+**As duas metades passam a ter garantias diferentes.** Isso é defensável — saída livre não é
+resultado — mas tem de ser **decisão declarada** e não acidente, ou alguém vai depurar durante uma
+tarde à procura de por que motivo duas linhas se misturaram.
