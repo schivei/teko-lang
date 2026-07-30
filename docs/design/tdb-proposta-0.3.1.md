@@ -851,3 +851,207 @@ não muda de comportamento entre versões de uma ferramenta que não controlamos
 
 **Logo o gdb era conveniência, não necessidade**, e o interop sair do caminho crítico não deixa o `tdb`
 sem oráculo. Deixa-o com um melhor.
+
+---
+
+# 7. O portão
+
+**Verbatim, e é o enquadramento inteiro:** *"a ideia é uma proposta, não iremos implementar nada disso
+nessa versão ou em outra próxima, primeiro precisamos do teko 100% nativo (emissão e linhagem)."*
+
+**Este documento é PROPOSTA.** Não é fila, não é plano de execução, não é orçamento a consumir. **Nada do
+arco `tdb` entra nesta versão nem na seguinte.** Quem despachar um crumb das fases 1 a 7 antes do portão
+está a violar isto.
+
+**E o portão tem DUAS metades** — *"emissão"* **e** *"ligação"*. A segunda palavra não é interpretação:
+está ratificada em `docs/design/expurgo-do-c-e-a-busca-por-linker-0.3.1.md`, com as palavras do dono:
+
+> *"não é .c que importa, importa o linker, dito isso, nem mesmo cc ou gcc importam, importa o linker pq
+> não devemos mais emitir nenhum arquivo .c e todos os arquivos .c e .h presentes no [repo] … incluindo
+> ajustes nas lanes e no compilador para procurar pelo linker e não pelo compilador C."*
+
+## 7.1 As duas metades, com o número de HOJE
+
+**Isto está medido em 2026-07-30, no SHA `e317b44`, e é deliberadamente o número de hoje e não o de
+ontem** — a metade da emissão mexeu desde que o portão foi enunciado.
+
+### Metade 1 — EMISSÃO: mais perto do que quando o portão foi enunciado
+
+O portão foi enunciado com a paragem viva no **degrau 27** (`ftoa`). **O `ftoa` caiu.** O self-host
+nativo atravessa agora, sem parar, o front-end inteiro:
+
+```
+lexer 143/143 ✓   parser 143/143 ✓   checker 6449/6449 ✓   monomorph 0/0 ✓   consteval 571/571 ✓
+teko: .: native backend N1: `null` match pattern not yet lowered (N2) [in `teko::codegen::emit_variant_wrap`]
+```
+
+| item | estado hoje |
+| --- | --- |
+| a paragem viva | **degrau 30** — `` `null` match pattern `` em `emit_variant_wrap`. **Não** o degrau 27 |
+| lexer, parser, checker, monomorph, consteval | **todos passam.** O checker subiu de 6406 para 6449 itens |
+| degraus 28 e 29 | **28 fechado no CI**; 29 na escada, com lane |
+| o que o degrau 30 separa | **é o ÚNICO obstáculo entre a lane e uma gen2 nativa, que nunca existiu** |
+| a família do degrau 30 | a mesma que os degraus 25 e o arco `null-adopt` já tocaram — **há molde** |
+| a forma da paragem | **honesta e nomeada** (`native backend N1`), e o pin do CI afirma o par estável (não completa **e** falha por paragem nomeada), deliberadamente não o texto do degrau corrente |
+
+**A leitura, e é boa notícia dentro do plano:** a metade da emissão está a **um degrau** de um marco que
+nunca existiu. Isso não abre o portão — o portão exige as duas metades — mas muda o que se pode dizer
+sobre o horizonte: em vez de *"a escada está no degrau 27, no meio do front-end"*, o número de hoje é
+*"o front-end inteiro passa, e falta um degrau para a primeira gen2 nativa"*.
+
+### Metade 2 — LIGAÇÃO: não mexeu
+
+Medido na tabela de fatias de `expurgo-do-c-e-a-busca-por-linker-0.3.1.md:440`: **4 de 9 entregues.**
+
+| fatia | conteúdo | estado |
+| --- | --- | --- |
+| 1 | o mapa medido | **entregue** |
+| 2 | `ci_provision_teko.sh` provisiona o runtime da era do seed | **entregue** |
+| 3a | asserção de arquitetura no asset publicado | **entregue** |
+| 3b | **`src/build/linker.tks`** — a busca pelo LINKER, asserção de arquitetura, recusa nomeada de MinGW | **entregue** (363 linhas na árvore) |
+| 4 | `teko_rt.tks` fecha o bottom com `extern fn` + o arena vai para Teko | **pendente** |
+| 5 | `build_cc_argv` parte-se — a metade de compilar C morre, a de linkar vira linha de linker | **pendente** |
+| **6** | **REMOVER DO FONTE a sondagem inteira e a emissão de C** | **pendente** |
+| 7 | apagar os oito ficheiros, **depois** do gen1 | **pendente** |
+| 8 | gen2 e gen3 nativos com os ficheiros ausentes + o hello world sozinho | **pendente** |
+| 9 | as lanes | **pendente** |
+
+**A leitura honesta:** a **busca** pelo linker está entregue — o compilador já sabe procurar um linker em
+vez de um compilador de C. O que falta é o **expurgo**: a emissão de C sair do fonte (fatia 6), os
+ficheiros desaparecerem (7), e um gen2/gen3 nativo provar-se com eles ausentes (8). **É a metade que
+governa o portão hoje**, e não mexeu desde o enunciado.
+
+### O portão, numa linha
+
+> **O portão abre quando o degrau 30 e os seus sucessores fecharem (emissão, hoje a um degrau da
+> primeira gen2 nativa) E as fatias 4 a 9 do expurgo fecharem (ligação, hoje 4 de 9, com a fatia 6 — a
+> emissão de C sair do fonte — ainda por fazer).**
+
+**E a razão prática de o portão existir, que é o que evita trabalho desperdiçado:** um crumb do `tdb`
+escrito hoje assenta numa árvore que ainda liga por `cc`. O `tdb` precisa de parar processos e ler
+tabelas de um binário que **ele próprio** ainda não produz de ponta a ponta. Fazê-lo antes do portão é
+construir sobre a metade que vai mudar.
+
+## 7.2 O que se pode fazer antes do portão sem desperdício
+
+**Três coisas, e a primeira é a recomendação.**
+
+| item | porque não expira | custo |
+| --- | --- | --- |
+| **A fase 0 inteira — o arnês e o oráculo (§3.0)** | é **activo de teste**, e é agnóstico de camada, de depurador e de rota de ligação. As suas fixtures são objectos escritos à mão que **não passam pelo nosso compilador** (§6.1), logo nada nelas muda quando a emissão ou a ligação mudarem. E o seu fixture principal **já está versionado neste repo** | **3 crumbs**, e nenhum toca `src/` |
+| **`C1.10` — a especificação escrita do `.tsym` v2** | é doc-only, e é o **contrato** de que o `tdb` dependerá num repo diferente. Escrevê-la antes é o que impede o formato de ser definido pela implementação | **1 crumb**, em `docs/` |
+| **`C1.4` — o produtor de `.tsym` muda de casa** | **não é do `tdb`: é higiene do expurgo** (§4.3). É uma dependência viva hoje, do caminho que fica sobre o caminho que sai, e o crumb prova-se por identidade byte-a-byte. Vale por si, com ou sem `tdb` | **1 crumb**, e **reporto-o para cima** como item do expurgo, não como crumb desta proposta |
+
+**A recomendação:** se se quiser gastar o mínimo antes do portão, gaste-se a **fase 0**. Três crumbs, zero
+toques em `src/`, e o resultado é uma suíte que continua a valer no dia em que tudo o resto mudar — mais
+`C1.10`, que é uma folha de `docs/`.
+
+**E o que NÃO se faz antes do portão, dito para não haver dúvida:** as fases 1 a 7. Incluindo a fase 1,
+apesar de ela render sozinha, porque toca `src/lir` e `src/backend` — exactamente onde a escada de
+degraus está a trabalhar.
+
+---
+
+# 8. As referências
+
+## 8.1 O Go é o precedente DIRECTO, e é o único que o é
+
+O dono nomeou-o: *"um [depurador] próprio (como em Go)"*. **A referência é directa, e verifica-se em
+dois pontos.**
+
+**(a) A forma.** O `dlv dap` é **um modo do próprio binário**, não um adaptador separado —
+verificado na documentação do delve (`Documentation/api/dap/README.md`): *"starts a single-use DAP-only
+server"*, cujo *"primary user … is VS Code Go"*. **`tdb dap` copia isso** (§2.4, §3.6), e é o que evita um
+segundo executável para manter, com um segundo ciclo de release e uma segunda versão a divergir.
+
+**(b) O CRITÉRIO — porque é que o Go construiu um.** Verificado (`go.dev/doc/gdb`, literal):
+
+> *"GDB does not understand Go programs well. The **stack management, threading, and runtime** contain
+> aspects that differ enough from the execution model GDB expects that they can confuse the debugger and
+> cause **incorrect results** … it is not a reliable debugger for Go programs, **particularly heavily
+> concurrent ones**."*
+
+E a razão que a documentação do próprio Go dá para preferir o delve: *"It understands the Go runtime,
+data structures, and expressions better than GDB"*.
+
+**O critério é claro: um depurador de terceiros modela o SEU modelo de execução.** Onde o nosso difere,
+ele não fica incompleto — fica **errado**, o que é pior.
+
+**E o aviso de escopo, medido, que ordena a fase 7 por último:** o delve — uma década de manutenção e
+patrocínio corporativo — cobre **cinco** pares de plataforma (`linux/amd64`, `linux/arm64`, `linux/386`,
+`windows/amd64`, `darwin/amd64`), e **não cobre `darwin/arm64`**. **Isto não é argumento contra o `tdb`**
+— o dono decidiu-o, e um depurador que cobre Linux é infinitamente mais do que nenhum. É o que faz a fase
+7 ser **uma plataforma de cada vez**, com uma medição a abrir cada metade.
+
+## 8.2 O que no NOSSO runtime dá o mesmo forçamento — candidatos, e o estado medido
+
+Apliquei o critério do Go a Teko. **O resultado importa mesmo com o `tdb` já decidido, porque diz de onde
+vem o valor do `tdb` e portanto o que priorizar nele.**
+
+| propriedade | torna um depurador de terceiros **errado** ou só **incompleto**? | consequência para a proposta |
+| --- | --- | --- |
+| **`defer` que dispara em toda saída de escopo** | **é o candidato mais forte, e é de COMPORTAMENTO.** Um `next` sobre um `return` **executa código que não está naquela linha** — os `defer` do escopo. Um depurador que assuma "uma linha, um passo" mostra o programa a saltar para linhas que já passaram, ou a demorar num `return` sem explicação | **o `tdb` não esconde e não simplifica:** com granularidade de statement, o `step` **entra** nas linhas do `defer`, porque esse código corre. É `T4.4`, e o teste é o `next` sobre um `return` com `defer` |
+| **`T \| error` como valor, com três rails** (`niche`, `InlineTag`, box-em-arena) | **incompleto num, ERRADO noutro.** O rail `niche` de uma palavra **não tem palavra de tag nenhuma** — o padrão do ponteiro discrimina. Um leitor genérico vê uma palavra e não tem como saber que membro está activo; se adivinhar, mente | **é o que faz `T5.3` existir**, e é a razão de o **rail ir no formato** e não no formatador (§3.5) |
+| **arena** (região raiz, bump, push/pop) | **incompleto, não errado** | o formatador de arena é **valor** (melhor experiência), não correcção |
+| **monomorfização** | **incompleto, e nós já o resolvemos** — o `.tsym` já emite `<símbolo>\t<nome-teko>`, logo o `bt` do `tdb` mostra `ns::fn` em vez do símbolo manglado | vantagem **já paga** pelo formato que existe |
+| **`str` com dois contadores** (caracteres e bytes) | **errado, se descrito com o layout errado** | é por isso que `M5.0` mede o layout no dia da fase, e a regra do congelamento (§4.4) impede uma descrição errada de existir |
+| **concorrência** | **não hoje.** Medido: o chão desenhado é `pthread_create`/`pthread_join`/`pthread_self` — **threads 1:1 do SO**, sem escalonador nosso e sem pilhas geridas. É exactamente o que um depurador genérico modela nativamente | **o `tdb` não precisa de modelo de tarefas nesta proposta** — e é isto que mantém as fases 2 a 6 no número que têm em vez do dobro |
+
+**A leitura, e é o que fundamenta a tese de §1:** dos seis, **dois** já forçam a resposta hoje — o
+`defer`, por comportamento, e o rail `niche`, por representação. Os outros quatro são valor ou já estão
+pagos. **Dois forçamentos bastam**, porque são exactamente os dois que aparecem em todo programa Teko
+real: um `return` num escopo com `defer`, e um `T | error` a ser inspeccionado.
+
+## 8.3 O gatilho de futuro, nomeado
+
+> **No dia em que Teko ganhar escalonador próprio, tarefas verdes, ou pilhas geridas/crescíveis, o
+> precedente do Go morde com muito mais força — e o orçamento da proposta SOBE.**
+
+O `tdb` passaria a precisar de um modelo de tarefas: listar, comutar entre elas, e desenrolar pilhas
+segmentadas. E é exactamente a lista que a documentação do Go nomeia (*"stack management, threading, and
+runtime"*) como a razão de o gdb não servir.
+
+**Estado medido hoje: a condição NÃO está satisfeita.** A palavra "corrotina" no desenho de concorrência
+adiantada tem como chão uma thread do SO. **Reabrir esta secção quando mudar** — e quando mudar, o valor
+do `tdb` sobe mais do que o custo, porque é o cenário em que um depurador de terceiros deixa de ser
+incompleto e passa a ser errado.
+
+## 8.4 As outras três, e o que cada uma contribui
+
+Atribuições do dono: superfície → Rust, controlo → Zig, addins → C#, comportamentos → Go.
+
+| referência | o que esta proposta adopta | o que **não** adopta, e porquê |
+| --- | --- | --- |
+| **Rust** → superfície | **o eixo nivelado com valores nomeados.** O rustc documenta `line-tables-only` como *"the minimal amount of debug info for backtraces with filename/line number info, but not anything else"* — **um nível de primeira classe**, distinto de `full`. O nosso `--debug=lines` **é** esse nível, e `--debug=vars` é o `full`. E `-g` significa `full` em gcc, clang **e** rustc, logo é alias de `vars` e de mais nada | `split-debuginfo` (`dsymutil`/`dwp`/PDB): são optimizações de **tamanho** de DWARF, e o DWARF não está nesta proposta |
+| **Zig** → controlo | **o padrão de ler informação de posição PRÓPRIA para stack traces**, sem depender de terceiros — que é o que o `.tsym` já faz por função e o que a fase 1 leva à linha. Com a referência ao lado, deixa de ser medição solta e passa a **precedente de desenho** | o Zig lê **DWARF e PDB de verdade** (`SelfInfo` por formato de objeto). Nós propomos um formato nosso, mais barato de ler e legível; **e registo a diferença**: no dia em que o `tdb` quiser entrar em código de biblioteca da plataforma, um leitor de DWARF entra como arco próprio, e o `.tsym` v2 fica como o caminho rápido |
+| **C#** → addins | **`kind = "tool"`, e é a única das quatro referências com um TIPO de pacote declarado** para "executável que se instala mas não é dependência". Adopto três coisas nomeadamente: o tipo declarado; **o nome do comando declarado à parte do nome do projeto** (`command = "tdb"`, o `ToolCommandName`), porque é o que evita a colisão silenciosa que `cargo install` e `go install` têm; e a regra de que **o tipo, não a disciplina**, decide a entrada em `[deps]` | **o modelo de depuração do .NET não se aplica, e não o invoco.** É um runtime gerido, com um contrato de depuração dentro do runtime. Teko compila para nativo. E não copio o `PackageOutputPath`: já temos `-o` |
+
+---
+
+# 9. O que medi de novo nesta passagem
+
+Tudo abaixo é desta árvore, no SHA `e317b44`, 2026-07-30. **Duas medições corrigem o registo.**
+
+| # | medição | consequência |
+| --- | --- | --- |
+| 1 | **`tk_emit_tsym` vive no emissor de C** (`src/codegen/codegen.tks:12187`) **e é chamado pela rota NATIVA** (`src/build/project.tks:1845`, `:2642`, dentro de `finish_native_object`) — e a fatia 6 do expurgo apaga essa casa | **o achado da passagem.** Vira o crumb `C1.4`, com ordem obrigatória antes de qualquer linhagem, e **reporta-se para cima como higiene do expurgo** (não é do `tdb`) |
+| 2 | **`grep syscall src/ --include=*.tks` dá DUAS ocorrências, e ambas são comentários** (`src/runtime/teko_rt.tks:635`, `:643`) | corrige o digest, que registou zero. **A conclusão não muda** — não há primitiva de syscall crua, e nem a palavra existe em código — mas o número certo é 2 |
+| 3 | **`TExternDecl.from_lib` documenta `"" = implicit libc`** (`src/checker/tast.tks:172`), **e os 24 `pub extern fn` da árvore levam TODOS `from "teko_rt"`** | o mecanismo de alcançar a libc está **declarado e tipado**, e o caminho está **por exercitar**. Vira `M2.0`, o crumb que abre a fase 2 — e **substitui o shim em `teko_rt.c` que a 2.ª passagem recomendou** e que *"SEM C LANG"* retirou |
+| 4 | **`kind` desconhecido JÁ É ERRO DURO** com a lista dos aceites (`src/build/manifest.tks:550`, `artifact_kinds_listed()`) | a RED-FLAG 7 da 2.ª passagem está **CONSERTADA na árvore**. `kind = "tool"` hoje é erro honesto, não verde falso. **Um crumb menos** |
+| 5 | **`check_main_file_rule` continua a proibir `main.tks` fora de `Binary`** (`src/build/tkp_rule.tks:16-22`), com a mensagem que enumera `static/shared/package` | continua de pé, e entra como **passo com ordem obrigatória** (§4.6): o crumb que acrescenta `Tool` toca esta função no mesmo crumb |
+| 6 | **`LFunc` NÃO tem `file`/`decl_line`** (`src/lir/lir.tks:219`) e **`LInst` TEM `line`/`col`**, com o doc-comment a dizer *"for the .tsym map and future debug info"* (`:206-209`) | confirma `C1.1`, e confirma que a posição **chega ao LIR e morre lá** |
+| 7 | **`LFunc.symbol` é *"its ALREADY-mangled symbol"*** (`src/lir/lir.tks:216-219`) | a chave do `.tsym` casa com o símbolo do objeto **nativo**. O produtor mudar de casa (`C1.4`) é o que torna isso um contrato em vez de sorte |
+| 8 | **`str` continua com DUAS palavras** e `length in BYTES` (`src/runtime/teko_rt.h:44-48`), apesar de a decisão dos dois contadores estar registada | a decisão existe, o layout não mudou. Vira `M5.0` — **medir no dia da fase**, e a regra do congelamento faz o resto avançar sem ele |
+| 9 | **A emissão está no degrau 30**, com lexer/parser/checker (6449)/monomorph/consteval **todos a passar** | o portão está **mais perto** na metade da emissão do que quando foi enunciado (era o degrau 27, `ftoa`). §7.1 |
+| 10 | **A ligação está em 4 de 9 fatias**, com `src/build/linker.tks` entregue (363 linhas) e a **fatia 6 pendente** | a metade que **governa** o portão hoje. §7.1 |
+| 11 | `FrameLayoutX86`/`FrameLayout` e `compute_frame_layout*` existem e são exactos; `LEnv` carrega `names`/`vregs`/`is_scalar_slot`/`slot_ltype`; `lenv_bind_scalar_slot` e `assign_lookup` são públicas | confirma que **três das quatro tabelas já existem ou já são calculadas** (§4.2), e que os locais são um **JOIN** por `vreg_id`, não plumbing |
+| 12 | `TEKO_LEGISLATION.md:350` continua a designar o `.tsym` como *"debug symbols … **for the debugger**"* | estender o `.tsym` é **obedecer**. Sem tensão a resolver |
+
+**Sem alarmes por precaução.** As duas incertezas materiais desta proposta — o caminho de libc implícita
+pela rota nativa, e o layout de `str` — estão **dentro do plano**, como `M2.0` e `M5.0`, que é onde a lei
+de forma manda que estejam.
+
+**Nada nesta proposta precisa de palavra do dono para ser executável.** A única coisa que ele pode querer
+dizer, e que não bloqueia nada, está declarada em §5.3: se quiser **chamada de sistema crua em Linux por
+princípio**, em vez do `extern` para a biblioteca da plataforma, isso é uma primitiva de linguagem nova e
+um arco próprio — e trocar depois muda **uma declaração por chamada**, não o desenho.
