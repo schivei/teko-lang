@@ -621,3 +621,34 @@ Feature: union placement — a value written into a union-typed slot is wrapped,
   Scenario: union_placement_nested_variant (own-native — a bare variant case placed into a `<variant> | null` slot, through both match levels)
     When built and run
     Then exit = 42
+
+Feature: bulk byte-append — `teko::mem::append_fo` lowers to the runtime's own memcpy grow
+
+  # (0.3.1.0 degrau 26) `teko::mem::append_fo([]byte, str) -> []byte` (#148 R2 — bulk append with
+  # free-old on grow BY DECREE) had NO lowering in the own backend, so the native self-build stopped
+  # at `teko::codegen::cb`: the compiler's own byte-buffer append, the one call site every byte of
+  # the C route's output passes through. `tk_append_bytes_fo` was already in `teko_rt.c` and takes
+  # the IDENTICAL five operands `tk_str_concat_len` does, so the fix is degrau 9's molde unchanged —
+  # both arguments flattened to their (ptr, len) pairs through the out-parameter-length convention.
+  #
+  # The first row checks the append BY VALUE with the lane's own `café🐝` sonda (an accented letter
+  # plus an emoji, so a length read off the wrong operand cannot hide behind ASCII) plus the empty
+  # fragment, whose `n == 0` path hands the same pointer back.
+  Scenario: append_fo_bulk_bytes (own-native — a `[]byte` builder, checked by content through `str_of_bytes`)
+    When built and run
+    Then exit = 42
+
+  # The second row runs a chain long enough to cross several geometric copy-grows (so the free-old
+  # path actually runs) and compares it against the SAME content grown ONE BYTE AT A TIME through
+  # `teko::mem::push_fo` — a different runtime entry, so the two agree only when the bulk append
+  # keeps every prefix, writes at the right offset and returns the right length.
+  Scenario: append_fo_grow_chain (own-native — a 40-fragment builder chain against the per-byte `push_fo` oracle)
+    When built and run
+    Then exit = 42
+
+  # The third row grows TWO independent chains ALTERNATELY. The runtime's in-place fast path is keyed
+  # by the buffer's own pointer and length, so an append that ignored either would splice the two
+  # chains into each other — which one buffer alone cannot show.
+  Scenario: append_fo_interleaved_buffers (own-native — two alternating builder chains, each against its own oracle)
+    When built and run
+    Then exit = 42
