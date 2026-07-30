@@ -897,6 +897,22 @@ fn kind_name(k: MRelocKind) -> str {
 }
 
 /**
+ * reloc_shape — an `EncWord`'s pending relocation rendered as `<sym>/<kind>`, or
+ * `<none>` when it owes none: the whole record in one comparable string, so a
+ * fixture asserts symbol AND kind together and can never read one without the
+ * other.
+ *
+ * @param EncWord ew  the encoded word whose relocation is rendered
+ * @return str  `<sym>/<kind>`, or `<none>` for a word that owes no relocation
+ */
+fn reloc_shape(ew: EncWord) -> str {
+    match ew.reloc {
+        null => "<none>"
+        EncReloc as r => teko::str::concat(r.sym, "/", kind_name(r.kind))
+    }
+}
+
+/**
  * field_stop — the honest-stop message of a `branch_disp_field` result, or
  * `<ok>` when it produces a field.
  *
@@ -973,6 +989,46 @@ fn reloc_records_carry_exact_offsets_kinds_syms() {
     teko::assert::is_true(e.relocs[2].offset == (12 to u32))
     teko::assert::is_true(e.relocs[2].sym == "tk_exit")
     teko::assert::is_true(kind_name(e.relocs[2].kind) == "Call")
+}
+
+#test
+/**
+ * a_non_relocating_word_owes_no_relocation_kind — the regression that kills the
+ * seed of the `ARM64_RELOC_BRANCH26`-on-`ADRP` bug at the type level: a word
+ * that references no symbol carries `reloc == null`, never a defaulted
+ * `MRelocKind`. `plain_word` used to fill `reloc_kind = MRelocKind::Call` on
+ * every position-independent instruction and rely on a separate `has_reloc`
+ * flag to make it inert — so "branch relocation" was the resting value of a
+ * field every instruction in the stream carried. There is now nothing to
+ * default: a movz, an add, a cmp and a ret all owe `null`, and only the three
+ * symbol-referencing forms owe a record at all.
+ *
+ * @return void
+ */
+fn a_non_relocating_word_owes_no_relocation_kind() {
+    teko::assert::is_true(enc(movz_inst(true, p(0), 1, 0)).reloc == null)
+    teko::assert::is_true(enc(alu_inst(MAluOp::Add, true, p(0), p(1), p(2))).reloc == null)
+    teko::assert::is_true(enc(cmp_inst(true, p(0), p(1))).reloc == null)
+    teko::assert::is_true(enc(RET_INST).reloc == null)
+    teko::assert::is_true(enc(branch_inst(0 to u32)).reloc == null)
+}
+
+#test
+/**
+ * a_relocating_word_owes_exactly_its_own_kind — the other half of the same
+ * regression: each of the three symbol-referencing words owes a relocation whose
+ * kind names the INSTRUCTION FIELD being patched, read straight off the nullable
+ * record instead of off a flag-plus-kind pair. `ADRP` owes `PageHi`, the
+ * completing `ADD` owes `PageLo`, and only `BL` owes `Call` — the pairing whose
+ * mispairing Apple's `ld` rejects.
+ *
+ * @return void
+ */
+fn a_relocating_word_owes_exactly_its_own_kind() {
+    let no_uses: []MReg = teko::list::empty()
+    teko::assert::is_true(reloc_shape(enc(adrp_inst(p(1), "g", MRelocKind::PageHi))) == "g/PageHi")
+    teko::assert::is_true(reloc_shape(enc(add_lo_inst(p(1), p(1), "g", MRelocKind::PageLo))) == "g/PageLo")
+    teko::assert::is_true(reloc_shape(enc(call_inst("tk_exit", no_uses, p(0), false, false))) == "tk_exit/Call")
 }
 
 #test
