@@ -3403,3 +3403,108 @@ fn lwt_two_pair_entries_are_not_single_str_builtins() {
     teko::assert::is_true(is_str_arg_builtin("tk_println"))
     teko::assert::is_false(is_str_arg_builtin("tk_str_concat_len"))
 }
+
+#test
+/**
+ * lwt_fat_arg_arity_spans_the_assert_seed — the ABI-arity table answers for the SECOND
+ * hand-written C seed too (`src/assert/assert.{c,h}`), not only the runtime.
+ *
+ * WHAT IT PINS. `teko__assert__scenario_begin(tk_str)` is one leading by-value aggregate, the four
+ * `(tk_str, bool)` narrowing assertions are one each, and the seven `(tk_str, tk_str)` /
+ * `([]byte, []byte)` pairs are two. A `0` for any of them puts the flat `(ptr, len)` form in
+ * RCX/RDX for an MSVC-built callee that reads RCX as a POINTER to the struct — measured 2026-07-30
+ * as `examples/regressions/own_native` faulting with ACCESS_VIOLATION (0xC0000005) on its FIRST
+ * case, `own_arith_exit`, without writing a byte, because `scenario()` opens with
+ * `scenario_begin(name)`.
+ *
+ * THE SCALAR ASSERTIONS MUST STAY 0: they take no aggregate, so a non-zero answer would
+ * re-materialize a pair that does not exist and shift every later argument down a register.
+ *
+ * @return void
+ */
+fn lwt_fat_arg_arity_spans_the_assert_seed() {
+    teko::assert::is_true(fat_arg_builtin_arity("teko__assert__scenario_begin") == 1)
+    teko::assert::is_true(fat_arg_builtin_arity("teko__assert__is_present") == 1)
+    teko::assert::is_true(fat_arg_builtin_arity("teko__assert__is_absent") == 1)
+    teko::assert::is_true(fat_arg_builtin_arity("teko__assert__is_ok") == 1)
+    teko::assert::is_true(fat_arg_builtin_arity("teko__assert__is_error") == 1)
+    teko::assert::is_true(fat_arg_builtin_arity("teko__assert__eq_str") == 2)
+    teko::assert::is_true(fat_arg_builtin_arity("teko__assert__ne_str") == 2)
+    teko::assert::is_true(fat_arg_builtin_arity("teko__assert__str_contains") == 2)
+    teko::assert::is_true(fat_arg_builtin_arity("teko__assert__str_absent") == 2)
+    teko::assert::is_true(fat_arg_builtin_arity("teko__assert__str_starts_with") == 2)
+    teko::assert::is_true(fat_arg_builtin_arity("teko__assert__str_ends_with") == 2)
+    teko::assert::is_true(fat_arg_builtin_arity("teko__assert__bytes_eq") == 2)
+    teko::assert::is_true(fat_arg_builtin_arity("teko__assert__is_true") == 0)
+    teko::assert::is_true(fat_arg_builtin_arity("teko__assert__scenario_ok") == 0)
+    teko::assert::is_true(fat_arg_builtin_arity("teko__assert__eq_i64") == 0)
+    teko::assert::is_true(fat_arg_builtin_arity("teko__assert__eq_f64") == 0)
+    teko::assert::is_true(fat_arg_builtin_arity("teko__assert__len_eq") == 0)
+    teko::assert::is_true(fat_arg_builtin_arity("teko__assert__not_an_assertion") == 0)
+    teko::assert::is_true(fat_arg_builtin_arity("teko__assert__") == 0)
+    teko::assert::is_true(fat_arg_builtin_arity("scenario_begin") == 0)
+}
+
+#test
+/**
+ * lwt_fat_arg_arity_transcribes_the_whole_runtime_header — the arity table answers for EVERY
+ * `teko_rt.h` entry with a leading by-value `tk_str`, not only the ones a builtin table names.
+ *
+ * WHY THE WHOLE HEADER. A runtime symbol reaches the backend through two seams, and the second is
+ * open-ended: `extern fn f(s: str) = "tk_…" from "teko_rt"` names ANY symbol in the header, and this
+ * compiler's own source carries such declarations — `src/assert/assert.tks` binds
+ * `tk_assert_scenario_set`, `src/process/process.tks` binds `tk_rt_spawn_redirected`, the coverage
+ * sink binds `tk_cov_merge`. Each was passed the flat `(ptr, len)` pair on Win64 while its
+ * MSVC-built callee expected a pointer; measured on the emitted object, `teko_extprobe__probe`
+ * loaded RCX/RDX with the pair for `tk_assert_scenario_set` before this table was completed.
+ *
+ * THE FLATTENED TWINS MUST STAY 0: `teko_rt.h` deliberately declares a second spelling of the same
+ * operations taking `(const tk_byte *ptr, uint64_t len, …)`, and those take no aggregate at all.
+ *
+ * @return void
+ */
+fn lwt_fat_arg_arity_transcribes_the_whole_runtime_header() {
+    teko::assert::is_true(fat_arg_builtin_arity("tk_assert_scenario_set") == 1)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_test_begin") == 1)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_cov_merge") == 1)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_rt_spawn_redirected") == 1)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_float_parse") == 1)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_str_len") == 1)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_str_hash") == 1)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_char_at") == 1)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_rt_read_file") == 1)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_rt_getenv") == 1)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_rt_chdir") == 1)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_rt_mkdir") == 1)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_rt_remove_file") == 1)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_rt_list_dir") == 1)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_rt_write_file_bytes") == 1)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_str_cmp") == 2)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_str_concat") == 2)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_intern_put") == 2)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_rt_write_file") == 2)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_rt_setenv") == 2)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_rt_last_index_of") == 2)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_i64_to_str_len") == 0)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_str_slice_to_len") == 0)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_fmt_dyn_f64_len") == 0)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_slice_push") == 0)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_set_args") == 0)
+}
+
+#test
+/**
+ * lwt_assert_seed_entries_are_not_single_str_builtins — the dispatch guardrail for the widened
+ * arity table: an assert-seed entry with ONE leading by-value `tk_str` must NOT satisfy
+ * `is_str_arg_builtin`, whose truth routes a call into `lower_str_arg_call` — a lowering written
+ * for the io group alone, whose argument must be one of `lower_fat_expr`'s closed producers. Had
+ * the predicate stayed spelled `fat_arg_builtin_arity(sym) == 1`, widening the table would have
+ * dragged `scenario_begin` onto that path and honest-stopped every corpus that names a scenario.
+ *
+ * @return void
+ */
+fn lwt_assert_seed_entries_are_not_single_str_builtins() {
+    teko::assert::is_false(is_str_arg_builtin("teko__assert__scenario_begin"))
+    teko::assert::is_false(is_str_arg_builtin("teko__assert__is_present"))
+    teko::assert::is_false(is_str_arg_builtin("teko__assert__eq_str"))
+}

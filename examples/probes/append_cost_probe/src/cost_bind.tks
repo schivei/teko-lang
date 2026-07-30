@@ -1,0 +1,122 @@
+/**
+ * The append primitive under measurement — see `src/io/io.tks` for the maintained, typed surface.
+ * Bound directly because an external standalone project has no visibility into that module's plain
+ * Teko wrapper functions.
+ *
+ * @param path     the file to append to; created when absent
+ * @param content  the bytes to append, exactly as given
+ * @return         0 on success, -1 on failure
+ */
+pub extern fn append_file(path: str, content: str) -> i32 = "tk_rt_append_file" from "teko_rt"
+
+/**
+ * RECORDS — how many records each arm emits.
+ *
+ * BIG ENOUGH THAT THE CURVE IS NOT ROUNDING. The rewrite's cost grows with N squared, so at 800
+ * records of 50 bytes it asks for about 62 MiB where the append asks for none; a hundred records
+ * would leave both inside one arena chunk and prove nothing.
+ */
+pub const RECORDS: u64 = 800
+
+/**
+ * COST_MARGIN — how many times the append's growth the rewrite's growth must exceed for the
+ * inversion to count as measured.
+ *
+ * EIGHT, WHERE THE MEASUREMENT SHOWS THE APPEND AT ZERO. The margin exists so the assertion is a
+ * claim about the two SHAPES and not about this machine's page size; it is deliberately two orders
+ * of magnitude looser than the reading, so allocator rounding can never fail it while the quadratic
+ * shape can never pass it.
+ */
+pub const COST_MARGIN: u64 = 8
+
+/**
+ * The record at index `k` — 49 bytes plus the newline its caller adds.
+ *
+ * @param k  the record's index
+ * @return   the record, WITHOUT a trailing newline
+ */
+pub fn record_text(k: u64) -> str {
+    "record-" ~ teko::str::u64_to_str(k) ~ "-0123456789012345678901234567890123456789"
+}
+
+/**
+ * Emit `n` records to `path` with the CURRENT shape: one append per record, the file never read.
+ *
+ * @param path  the channel file
+ * @param n     how many records
+ * @return      true iff every append reported success
+ */
+pub fn append_all(path: str, n: u64) -> bool {
+    mut ok = true
+    mut k: u64 = 0
+    loop {
+        if k >= n { break }
+        if append_file(path, record_text(k) ~ "\n") != 0 { ok = false }
+        k = k + 1
+    }
+    ok
+}
+
+/**
+ * Emit `n` records to `path` the way `verdict_emit` USED to: read the whole file back, concatenate,
+ * rewrite the lot. The CONTROL arm, and the reason this probe is a C-route reading — the own backend
+ * lowers neither of the two builtins it is built from.
+ *
+ * @param path  the channel file
+ * @param n     how many records
+ * @return      true iff every rewrite reported success
+ */
+pub fn rewrite_all(path: str, n: u64) -> bool {
+    mut ok = true
+    mut k: u64 = 0
+    loop {
+        if k >= n { break }
+        let prior = match teko::io::read_file(path) { str as s => s; error => "" }
+        match teko::io::write_file(path, prior ~ record_text(k) ~ "\n") { error => { ok = false }; null => { } }
+        k = k + 1
+    }
+    ok
+}
+
+/**
+ * The whole content of `path`, or "" when it could not be read.
+ *
+ * @param path  the file to read
+ * @return      its bytes
+ */
+pub fn file_text(path: str) -> str {
+    match teko::io::read_file(path) { str as s => s; error => "" }
+}
+
+/**
+ * Delete `path`, ignoring an absence.
+ *
+ * @param path  the file to delete
+ * @return      nothing
+ */
+pub fn discard(path: str) {
+    match teko::fs::remove_file(path) { error => { }; null => { } }
+}
+
+/**
+ * A byte count rendered as MiB to one decimal place, for the report this probe prints.
+ *
+ * @param bytes  the count
+ * @return       the count in MiB, one decimal place
+ */
+pub fn mib(bytes: u64) -> str {
+    let tenths = (bytes * 10) / 1048576
+    teko::str::u64_to_str(tenths / 10) ~ "." ~ teko::str::u64_to_str(tenths % 10)
+}
+
+/**
+ * Fails loudly when a probe invariant does not hold, exiting with the invariant's own code.
+ *
+ * @param held  the invariant's truth value
+ * @param code  the exit code identifying this invariant, used only on failure
+ * @return      nothing
+ */
+pub fn demand(held: bool, code: i32) {
+    if held { return }
+    exit(code)
+}

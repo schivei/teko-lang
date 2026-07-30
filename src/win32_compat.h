@@ -221,6 +221,35 @@ static inline HANDLE tk_win32_redirect_handle(const char *path, DWORD which, boo
     return CreateFileA(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, disposition, FILE_ATTRIBUTE_NORMAL, NULL);
 }
 
+// (0.3.1.0 F5) tk_win32_redirect_handle_of_fd — the INHERITABLE HANDLE for one child stream backed
+// by a CRT DESCRIPTOR the caller already owns (a `tk_rt_pipe` end). The caller's own descriptor is
+// left untouched: what CreateProcess receives is an explicit inheritable DUPLICATE, closed by
+// `tk_win32_spawn_redirected` right after the launch exactly like the path-opened handles beside
+// it. That split is the Windows spelling of the same ownership rule the POSIX arm follows — the
+// parent's copy of a pipe's write end dies only when the CALLER closes it, because that close is
+// what lets the read end reach end-of-file.
+//
+// NULL when `fd` names nothing (< 0, or not an open CRT descriptor), which the caller reads as
+// "fall back to the path, or inherit".
+static inline HANDLE tk_win32_redirect_handle_of_fd(int fd) {
+    if (fd < 0) return NULL;
+    HANDLE src = (HANDLE)_get_osfhandle(fd);
+    if (src == INVALID_HANDLE_VALUE) return NULL;
+    HANDLE self = GetCurrentProcess();
+    HANDLE dup = NULL;
+    if (!DuplicateHandle(self, src, self, &dup, 0, TRUE, DUPLICATE_SAME_ACCESS)) return NULL;
+    return dup;
+}
+
+// (0.3.1.0 F5) tk_win32_child_handle — the inheritable HANDLE one child stream resolves to, with
+// the DESCRIPTOR winning over the path when both are given — the same precedence the POSIX arm's
+// `tk_rt_open_redirect` applies, so a caller reads one rule and not two.
+static inline HANDLE tk_win32_child_handle(int fd, const char *path, DWORD which, bool for_write) {
+    HANDLE from_fd = tk_win32_redirect_handle_of_fd(fd);
+    if (from_fd) return from_fd;
+    return tk_win32_redirect_handle(path, which, for_write);
+}
+
 // tk_win32_build_envblock — the CreateProcess environment block: the process's own inherited
 // environment with `extra` (`K=V` tokens) appended, `"K=V\0…\0\0"`-shaped. Returns NULL ("inherit
 // unchanged") when `extra_n` is zero — the common case, and the one that needs no block at all.
@@ -249,22 +278,29 @@ static inline char *tk_win32_build_envblock(char *const *extra, size_t extra_n) 
 }
 
 // tk_win32_spawn_redirected — CreateProcess `argv` without waiting, its three standard streams
-// redirected per `in_path`/`out_path`/`err_path` (NULL/"" = inherit) and its working directory set
-// to `dir` (NULL/"" = inherit), with `extra` environment tokens appended to the inherited block.
+// redirected per `in_fd`/`out_fd`/`err_fd` (a CRT descriptor the caller owns, else < 0) falling
+// back to `in_path`/`out_path`/`err_path` (NULL/"" = inherit), and its working directory set to
+// `dir` (NULL/"" = inherit), with `extra` environment tokens appended to the inherited block.
 // Returns the child's HANDLE cast to an opaque i64 (closed once, by `tk_win32_wait_one`), or -1 on
 // failure.
+//
+// (0.3.1.0 F5) THE DESCRIPTOR SLOTS ARE WHY THE CAPTURE NEED NOT BE A FILE. A caller passing a
+// `tk_rt_pipe` write end here gets the child's stream on the pipe instead of on a scratch file, and
+// keeps its own copy of that end — this function closes only the three handles IT created, which
+// for a descriptor slot is the inheritable duplicate and never the caller's descriptor.
 static inline int64_t tk_win32_spawn_redirected(char *const *argv, const char *dir,
                                                  char *const *extra, size_t extra_n,
-                                                 const char *in_path, const char *out_path, const char *err_path) {
+                                                 const char *in_path, const char *out_path, const char *err_path,
+                                                 int in_fd, int out_fd, int err_fd) {
     char *cmdline = tk_win32_join_cmdline(argv);
     char *envblock = tk_win32_build_envblock(extra, extra_n);
     STARTUPINFOA si;
     ZeroMemory(&si, sizeof si);
     si.cb = sizeof si;
     si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdInput  = tk_win32_redirect_handle(in_path,  STD_INPUT_HANDLE,  false);
-    si.hStdOutput = tk_win32_redirect_handle(out_path, STD_OUTPUT_HANDLE, true);
-    si.hStdError  = tk_win32_redirect_handle(err_path, STD_ERROR_HANDLE,  true);
+    si.hStdInput  = tk_win32_child_handle(in_fd,  in_path,  STD_INPUT_HANDLE,  false);
+    si.hStdOutput = tk_win32_child_handle(out_fd, out_path, STD_OUTPUT_HANDLE, true);
+    si.hStdError  = tk_win32_child_handle(err_fd, err_path, STD_ERROR_HANDLE,  true);
     PROCESS_INFORMATION pi;
     ZeroMemory(&pi, sizeof pi);
     BOOL ok = CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, 0,
