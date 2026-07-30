@@ -344,6 +344,51 @@ VARIANTE por testes de PROPRIEDADE — algo como `artifact_requires_main(a)` e
 espalhadas. É o mesmo padrão que fechou o degrau da relocação: **tornar o estado errado
 inexpressável**, em vez de corrigir cada sítio que o expressa.
 
+### CORRECÇÕES DO DONO, 2026-07-30 — e a metade que faltava na dele
+
+**(1) O `if` ajusta-se, não se refactoriza.** Verbatim: *"é visível que SIM tem que acrescentar o novo
+tipo E ajustar o if adicionando um AND (&&) NOT (!=) Tool"*. Aceito: a forma é
+`artifact != Artifact::Binary && artifact != Artifact::Tool && has_main`.
+
+**MAS A DELE É NECESSÁRIA E NÃO SUFICIENTE, e a razão é um corolário que ele próprio ratificou:**
+*"uma paragem que dispara para 1 dos 4 membros de uma família é pior que nenhuma."* `check_main_file_rule`
+tem **DOIS** `if`, e ele nomeou o segundo:
+
+```teko
+if artifact == Artifact::Binary && !has_main { return error { … "requires a main.tks" } }   // <- ESTE também
+if artifact != Artifact::Binary && has_main  { return error { … "may not have a main.tks" } }
+```
+
+Se só o segundo levar `&& != Tool`, um **`tool` SEM `main.tks` passa em silêncio** — e um `tool` sem
+`main` não tem comando para instalar. O primeiro `if` tem de virar `(Binary || Tool) && !has_main`.
+Um buraco no sentido oposto é a mesma classe de defeito.
+
+*(Nota: quando se escreve `Binary || Tool` num sítio e `!= Binary && != Tool` no outro, isso **é** o
+predicado — dar-lhe nome é só grafia, e é barato. Mas a decisão da forma é do dono, e ele escolheu o
+`&&`; a metade que falta é o que não é negociável.)*
+
+**(2) Um `tool` em `[deps]` NÃO é recusado — é TOLERADO e IGNORADO.** Verbatim: *"Não precisa recusar,
+só não precisa existir como dependência, e se existir (aqui sim tem trabalho) precisa ser ignorado pelo
+compilador (para não importar/linkar)."*
+
+Ele tem razão que aqui há trabalho, e **localizei-o**: `src/build/project.tks:215-232`,
+`load_deps_program`. O laço faz, por cada entrada de `m.deps`, um `load_dep_program(m.deps[di])` que lê
+o `.tkb` do dependente e **injecta os seus itens** no ambiente de tipos.
+
+```teko
+if di >= m.deps.len { break }
+let dep_prog = match load_dep_program(m.deps[di]) { … }
+```
+
+**O conserto: resolver o KIND do dependente ANTES de carregar o `.tkb`, e saltar quando for `Tool`.** E
+uma consequência que simplifica: como um dependente Teko entra por **injecção de itens**, saltar o
+carregamento **salta o link por construção** — não há um segundo sítio a tratar. O que existe hoje é o
+oposto do que se quer: `load_dep_program` vai directo ao `.tkb`, sem consultar o kind.
+
+**A fixture obrigatória:** um projeto que declara um `tool` em `[deps]` **constrói**, e um símbolo do
+`tool` **não é resolúvel** no projeto. Provar as duas metades — que não estoura E que não importa. Só a
+primeira passaria se o `tool` fosse carregado e por acaso não colidisse.
+
 **A ORDEM DOS CRUMBS, e ela importa:**
 
 1. **`kind` desconhecido passa a ERRO DURO**, com a lista dos aceites na mensagem. Sozinho, e primeiro
