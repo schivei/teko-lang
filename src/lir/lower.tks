@@ -3303,24 +3303,44 @@ fn lower_f64_bitcast_call(ctx: LowerCtx, c: checker::TCall) -> Lowered | error {
  * `pub` precisely so the backend reads the SAME closed list rather than
  * re-deriving it (a second copy could drift and would fault silently).
  *
- * DERIVED, NOT A SECOND LIST: it is exactly `fat_arg_builtin_arity(sym) == 1`, so
- * the arity table below is the ONE place a runtime entry's by-value `tk_str`
- * parameters are written down.
+ * DERIVED, NOT A SECOND LIST: it is exactly `takes_one_str_by_value`, the single
+ * place the io group's lone by-value `tk_str` parameter is written down, and the
+ * same predicate `fat_arg_builtin_arity` folds into its `1` answer.
+ *
+ * IT IS NOT `fat_arg_builtin_arity(sym) == 1`, and the difference is a ROUTING
+ * one rather than an ABI one: this predicate does not merely describe the C
+ * signature, it selects `lower_str_arg_call`, whose argument must be one of
+ * `lower_fat_expr`'s closed producer set. The `teko__assert__` seed entries also
+ * declare one leading by-value `tk_str` (`scenario_begin`, `is_present`, …), so
+ * an arity-keyed spelling would drag them onto a lowering that was never written
+ * for them; they keep the ordinary argument path and are corrected at the ABI
+ * seam instead, which is where the Win64 difference actually lives.
  *
  * @param str sym  the resolved runtime symbol (`call_symbol`'s result)
  * @return bool  true iff `sym` is one of the seven single-`tk_str`-arg
  *               runtime entries
  */
 pub fn is_str_arg_builtin(sym: str) -> bool {
-    fat_arg_builtin_arity(sym) == 1
+    takes_one_str_by_value(sym)
 }
 
 /**
  * fat_arg_builtin_arity — how many LEADING by-value `tk_str` parameters does the
- * runtime entry `sym` declare (`teko_rt.h`)? The ABI-arity table the x86 isel
- * reads to decide how many flattened `(ptr, len)` pairs it must re-materialize
- * and pass BY REFERENCE on an ABI that carries no 16-byte aggregate in a register
+ * C entry `sym` declare? The ABI-arity table the x86 isel reads to decide how
+ * many flattened `(ptr, len)` pairs it must re-materialize and pass BY REFERENCE
+ * on an ABI that carries no 16-byte aggregate in a register
  * (`isel_x86_64.tks::by_ref_fat_pairs_x86`).
+ *
+ * IT SPANS BOTH HAND-WRITTEN C SEEDS, and that is the whole point: this
+ * repository has TWO of them, `src/runtime/teko_rt.{c,h}` and
+ * `src/assert/assert.{c,h}`, and BOTH declare by-value `tk_str` parameters. The
+ * first round of this work swept only the runtime, which left every
+ * `teko::assert::<name>` call passing the flat pair to a callee that expects a
+ * pointer — measured as `own_native`'s ACCESS_VIOLATION on its FIRST case
+ * (2026-07-30, the corpus's `scenario()` harness opens with
+ * `teko::assert::scenario_begin(name)`). The assert half is DERIVED from
+ * `checker::assert_fat_arg_arity`, i.e. from the family's one signature table,
+ * so a new assertion taking a `str` is covered the day it is declared.
  *
  * ONE — the io group plus `tk_panic_str`, every `(tk_str) -> void`/`_Noreturn`
  * entry the N1 builtin table resolves DIRECTLY (`call_symbol`).
@@ -3347,14 +3367,45 @@ pub fn is_str_arg_builtin(sym: str) -> bool {
  * byte. The former single-`tk_str` fix keyed on a two-operand argument list and
  * was structurally unable to reach a call carrying TWO pairs.
  *
- * @param str sym  the resolved runtime symbol (`call_symbol`'s result, or one of
+ * @param str sym  the resolved C symbol (`call_symbol`'s result, or one of
  *                 the hardcoded symbols this module emits)
  * @return u64  the count of leading by-value `tk_str` parameters (0, 1 or 2)
  */
 pub fn fat_arg_builtin_arity(sym: str) -> u64 {
     if takes_one_str_by_value(sym) { return 1 }
     if takes_two_strs_by_value(sym) { return 2 }
-    0
+    assert_seed_fat_arity(sym)
+}
+
+/**
+ * ASSERT_SEED_PREFIX — the symbol prefix `assert_seed_symbol` builds every
+ * `teko::assert::<name>` call's C-seed symbol from (`src/assert/assert.h`).
+ */
+const ASSERT_SEED_PREFIX: str = "teko__assert__"
+
+/**
+ * assert_seed_fat_arity — the leading by-value `tk_str` count of the
+ * `teko__assert__` seed entry `sym` names, or 0 when `sym` is not one.
+ *
+ * Splits the symbol back into the bare assertion name and asks the checker's own
+ * signature table (`checker::assert_fat_arg_arity`) rather than re-listing which
+ * assertions take a `str`: the family is enumerated once, in
+ * `checker::assert_builtin_fn`, and every consumer that has ever kept a private
+ * copy of that list has drifted from it.
+ *
+ * The prefix test is the RECONSTRUCTION `ASSERT_SEED_PREFIX ~ tail == sym` rather
+ * than a byte loop, because this compiler has no `teko::str::starts_with` builtin
+ * (only `ends_with`/`contains`) and the tail has to be cut anyway to ask the
+ * question.
+ *
+ * @param str sym  the resolved C symbol
+ * @return u64  the count of leading by-value `tk_str` parameters (0, 1 or 2)
+ */
+fn assert_seed_fat_arity(sym: str) -> u64 {
+    if sym.len <= ASSERT_SEED_PREFIX.len { return 0 }
+    let last = teko::str::slice_from(sym, ASSERT_SEED_PREFIX.len)
+    if teko::str::concat(ASSERT_SEED_PREFIX, last) != sym { return 0 }
+    checker::assert_fat_arg_arity(last)
 }
 
 /**
@@ -3770,7 +3821,7 @@ fn assert_seed_symbol(callee: parser::Path) -> str | null {
     if segs[segs.len - 2].name != "assert" { return null }
     let last = segs[segs.len - 1].name
     if checker::assert_builtin_name(last) {
-        return teko::str::concat("teko__assert__", last)
+        return teko::str::concat(ASSERT_SEED_PREFIX, last)
     }
     null
 }
