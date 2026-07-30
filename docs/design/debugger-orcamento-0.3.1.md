@@ -862,8 +862,7 @@ já é necessário por outra razão.
 - **Semente de bootstrap.** Reli o corpus à procura de uma dependência de funcionalidade nova:
   não há. O desenho usa `struct`, `variant`, `enum`, `[]T`, `match`, e `teko::list::push` — tudo
   no que a semente já entende. Nada a sequenciar por causa da semente.
-- **`wasm` está fora**, por decisão do dono, e o desenho não o toca: `dwarf.tks` é chamado dos
-  escritores ELF e Mach-O apenas; `objfile_wasm.tks` fica intocado.
+- `dwarf.tks` é chamado dos escritores ELF e Mach-O apenas.
 
 ---
 

@@ -20,7 +20,7 @@
 # output" gate is never acceptable. `AR_CHECK_REQUIRE_TOOLS=1` turns an honest-skip (no
 # archive given, or neither `llvm-lib` nor `lib.exe` found) into a HARD FAILURE instead of
 # exit 0 — set this on a runner where the toolchain is guaranteed present (the theory CI's
-# windows-latest job), mirroring `validate_wasm_own.sh`'s `REQUIRE_WASM_ENGINE` seam.
+# windows-latest job).
 #
 # usage: scripts/check_ar_coff.sh <archive.lib> [symbol_that_must_resolve]
 #   AR_CHECK_REQUIRE_TOOLS=1   (default: unset) — an honest-skip becomes a hard failure.

@@ -19,6 +19,51 @@ hipótese, está dito.
 
 
 
+## 0v. O WASM SAIU — 57 sítios, e eu tinha encontrado 8 (2026-07-30)
+
+Ruling do dono: *"remova todo código e CI sobre wasm, é pra remover, **não é mover, não KNOWN-STOP**, quando chegar o momento reescrevemos certo e do zero"* — o que **revoga** o ruling dele de 29/07 que criara o pino. `cargo/0.3.1.0-expurgo-wasm` @ `499fbc2` drenado: **62 ficheiros, +383 / −12 074**.
+
+**A enumeração deu 57 sítios. A minha lista tinha 8.** Oito ficheiros inteiros (incluindo `stackify.tks` com 222 `fn` e `objfile_wasm.tks` com 22), 16 sítios em `project.tks`, 10 em `regression.tks`, 4 em `tkr.tks` (o campo `check_module_valid` com **48 ocorrências**), 6 scripts, ~25 docs. E um que eu não nomeei e ele encontrou: **o `agent-fast-lane.yml` instalava `wasmtime` por `brew`**.
+
+### O PRÉ-REQUISITO QUE ELE MEDIU, e sem o qual a branch não podia entrar
+
+Com `wasm32-wasi` fora de `target_from_name`, a fila **deixa de saltar e passa a FALHAR**:
+
+```
+teko: .: unsupported TEKO_TARGET "wasm32-wasi" — supported targets: x86_64-linux …
+```
+
+Porque `host_cc_cannot_link_cross_reason` faz `match target_from_name(target) { … error => return "" }` — um alvo irresolúvel **não pré-salta**, chega ao build e morre no R2. As minhas edições (fixture + CI) tinham de entrar **no mesmo dreno**, e entraram.
+
+### O QUE EU APLIQUEI, e uma armadilha que a medição evitou
+
+**Os números de linha que ele me deu não serviam** — a suíte refeita reescreveu o `own_native.tkr` entre a base dele e o meu vagão, e a fila estava na linha 205, não na 181. **Ancorei tudo em conteúdo**, e cada substituição com `assert count == 1` antes de escrever.
+
+- `own_native.tkr`: fila removida, duas prosas corrigidas, **zero menções**; `cases/wasm_exit7.tks` removido no mesmo passo (o `.tkr` e a fonte são uma unidade atómica).
+- `pr.yml`: **6 blocos** de KNOWN-STOP, o `env WASMTIME_VERSION`, os passos `Install wasmtime` e `Verify wasmtime`, o nome do job, e **três passagens de prosa reescritas em vez de apagadas** — um comentário que mente é pior que nenhum.
+- `agent-fast-lane.yml`: o bloco do `brew install wasmtime`.
+- `.gitignore`: `*.wasm`.
+
+**Conferências:** YAML válido, 27 jobs; emparelhamento do driver com o `.tkr` **172 == 172**, zero fontes órfãs; **zero menções de wasm em qualquer ficheiro não-`.md`** fora do `bootstrap/`.
+
+### A RECONCILIAÇÃO DELE, que é o que uma remoção exige
+
+**Testes 1175 → 1108, Δ = −67, e os 67 são wasm um a um:** 13 (`objfile_wasm_test`) + 48 (`stackify_test`) + 3 (os aliases `wasi`/`wasm64`/`browser`) + 2 (`resolve_run_wrapper`, `wrap_argv_with_wrapper`) + 1 (`a_wasm_target_keeps_naming_a_module`). **Zero testes não-wasm desapareceram.** E o corredor bate a contagem estática: 1108 = 1108.
+
+**`fn` desce 344, de propósito** — e **uma nasceu**: `emit_only_row_verdict`, extracção W15 de um bloco de `//` que ele teve de tocar. Duas coisas foram **reescritas em vez de removidas** (`pt_cross_target`, `[extern.libs.wasm32-wasi]`) para não apagar de mais.
+
+**Endurecimento acidental que vale registar:** o `_ =>` de `emit_static_lib` desapareceu — com quatro variantes o dispatch fica **exaustivo**.
+
+### O QUE ELE DEIXOU DE PROPÓSITO, e a razão é boa
+
+**Citações literais do dono** que nomeiam wasm — *"falsificar uma citação é pior do que o vestígio"*. O **rasto histórico de auditoria** (a série `const-tb1..tb6`, marcada `[HISTÓRICO]`, e transcrições de medição): é o registo do que foi EXECUTADO. E **`#530`/`#535`/`#509`** continuam no MASTER_PLAN — *"cancelar um item de onda agendado é decisão do dono, não limpeza"*.
+
+**O `bootstrap/teko.c` ainda contém o backend wasm compilado** — é SAÍDA, não entrada; sai na próxima colheita.
+
+### RITUAL
+
+`native_dry_gate` **idêntica** (degrau 32) com a gen1 **construída da árvore**, e uma nota de calibração dele que vale a pena reter: **com a gen1 = semente crua a assinatura é OUTRA** (`a push whose element is an AGGREGATE … in emit_u32_le`) — igual nos dois lados, mas mede outra coisa. **Fixpoint `gen2 == gen3` e `gen2.c == gen3.c`.** Unitários **1108, 0 falhados**. Auditoria W15 vazia.
+
 ## 0u. A SUÍTE DE TESTES REFEITA — o ruling que se repetia há sessões, construído (2026-07-30)
 
 `cargo/0.3.1.0-testes-paralelos-canais` @ `19e4bc4` drenado. 25 ficheiros, +2899/−424, 9 ficheiros novos.

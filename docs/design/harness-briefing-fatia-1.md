@@ -42,7 +42,8 @@ nativo — **troca gate por nenhum gate**.
 
 Logo a ordem correcta é: **primeiro nasce o `main` sintetizado e a rota C passa a consumi-LO** (é o
 "corrigir a emissão em C" do ruling); só depois o backend pode ser escolhido. A razão de risco que o
-dono deu — *"pode quebrar Windows, Mac e wasm"* — aponta para o mesmo sítio (§C).
+dono deu — *"pode quebrar Windows, Mac e wasm"* — aponta para o mesmo sítio (§C); a cauda wasm
+dessa citação saiu da árvore por ordem dele em 2026-07-30, o risco de Windows e macOS fica.
 
 ### A.1 A fatia, por ordem
 
@@ -306,7 +307,7 @@ que comparar.
 
 ---
 
-## C — O RISCO DE WINDOWS, macOS E wasm, NOMEADO
+## C — O RISCO DE WINDOWS E macOS, NOMEADO
 
 ### C.1 O estado medido
 
@@ -318,18 +319,13 @@ que comparar.
 | **`macos-arm64`** | **c** |
 | **`windows-x86_64`** | **c** |
 
-wasm não é perna produtora — é alvo — e tem uma paragem própria e relevante:
-`src/backend/stackify.tks` recusa `LFuncAddr` com *"stackify: C1-funcaddr — a function-value address
-needs the wasm funcref table, not yet implemented"*.
-
 ### C.2 O que exactamente parte, item a item
 
 | # | o que parte | quando |
 |---|---|---|
 | 1 | **macOS e Windows ficam SEM GATE** | se `emit_test_main`/`emit_test_call` forem apagados antes de o sintetizador estar ligado à rota C. Essas duas pernas correm o gate pela rota C; sem `main` de teste, o binário de gate não tem o que chamar |
 | 2 | **macOS e Windows morrem no build do gate** | se o gate passar a escolher o backend antes de a rota C consumir o sintetizador — cairiam na rota nativa, cujos vãos nessas pernas são conhecidos e por fechar: `B1-fp` (a família de vírgula flutuante no x86-64), `B1-args` (passagem por pilha no Windows), o `TimeDateStamp` do PE (que já partiu o fixpoint de Windows na 0.3.0.31) |
-| 3 | **wasm nunca aceita a metade de threads** | `LFuncAddr` é recusado pelo `stackify`, e o ponto de entrada de uma thread É um endereço de função. Não é risco de calendário: é limite de alvo, e tem de estar escrito para não ser descoberto tarde |
-| 4 | **a atribuição de cobertura desalinha em silêncio** | se o sintetizador inserir ou remover itens de `prog.items`. Não é específico de plataforma, mas é o único desta lista que **não dá erro** — dá números errados |
+| 3 | **a atribuição de cobertura desalinha em silêncio** | se o sintetizador inserir ou remover itens de `prog.items`. Não é específico de plataforma, mas é o único desta lista que **não dá erro** — dá números errados |
 
 ### C.3 O teste que prova ANTES de partir
 
@@ -340,8 +336,7 @@ máquina" e "as seis pernas concordam".
 |---|---|---|
 | `gate_main_synthesis_is_byte_identical` | o stdout do gate com o `main` sintetizado é byte-idêntico ao do `main` emitido à mão | **as seis pernas**, rota C |
 | `gate_backend_resolution_per_leg` | `backend_of()` resolve `Backend::C` em `macos-arm64` e `windows-x86_64`, e `Native` nas quatro Linux | pré-voo, barato, antes de qualquer emissão |
-| `wasm_thread_entry_stops_honestly` | um ponto de entrada de thread para alvo wasm **pára com a mensagem `C1-funcaddr`** e não com um símbolo indefinido | fixa o limite (3) como CONTRATO, não como surpresa |
-| `gate_main_not_in_coverage_denominator` | a percentagem de cobertura não muda com a chegada do `main` sintetizado | apanha (4), que é o único silencioso |
+| `gate_main_not_in_coverage_denominator` | a percentagem de cobertura não muda com a chegada do `main` sintetizado | apanha (3), que é o único silencioso |
 
 **A ordem de execução importa:** `gate_backend_resolution_per_leg` é pré-voo e custa milissegundos —
 corre primeiro. Se ele falhar, P2 nas seis pernas não vale nada, porque estaria a medir a rota errada.

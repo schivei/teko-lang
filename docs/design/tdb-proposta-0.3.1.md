@@ -468,7 +468,7 @@ Medido:
 | facto | onde |
 | --- | --- |
 | o produtor de `.tsym` vive **dentro do emissor de C** | `fn tk_emit_tsym(prog: checker::TProgram) -> str` em `src/codegen/codegen.tks:12187`, e o comentário admite-o: *"mirror of codegen.c tk_emit_tsym"* |
-| e é chamado de **CINCO** sítios, entre eles a rota **NATIVA** e a de **wasm** | em `src/build/project.tks`, hoje `:1781` e `:1845` (em `backend`), **`:2749` (em `finish_native_object` — a rota nativa)**, `:3039` (em `emit_native_wasm`) e `:3912` (em `build_debug_binary`). **Cinco, e não dois:** medi dois na primeira leitura e a base avançou entretanto, o que **agrava** o achado em vez de o aliviar |
+| e é chamado de **QUATRO** sítios, entre eles a rota **NATIVA** | em `src/build/project.tks`, hoje `:1781` e `:1845` (em `backend`), **`:2749` (em `finish_native_object` — a rota nativa)** e `:3912` (em `build_debug_binary`). **Quatro, e não dois:** medi dois na primeira leitura e a base avançou entretanto, o que **agrava** o achado em vez de o aliviar |
 | e o expurgo vai apagar a casa | `docs/design/expurgo-do-c-e-a-busca-por-linker-0.3.1.md`, fatia **6**: *"REMOVER DO FONTE … a emissão de C"* — **pendente** |
 
 **A consequência, e é aritmética simples:** no dia em que a fatia 6 correr, a rota nativa perde o
@@ -1034,7 +1034,7 @@ Tudo abaixo é desta árvore, no SHA `e317b44`, 2026-07-30. **Duas medições co
 
 | # | medição | consequência |
 | --- | --- | --- |
-| 1 | **`tk_emit_tsym` vive no emissor de C** (`src/codegen/codegen.tks:12187`) **e é chamado de CINCO sítios**, entre eles a rota **nativa** (`finish_native_object`), a de **wasm** e a de `teko run` — e a fatia 6 do expurgo apaga essa casa | **o achado da passagem.** Vira o crumb `C1.4`, com ordem obrigatória antes de qualquer linhagem, e **reporta-se para cima como higiene do expurgo** (não é do `tdb`). **Medi dois sítios; a base avançou durante a escrita e são cinco** — o acoplamento é mais largo do que a primeira leitura, e o crumb vale mais |
+| 1 | **`tk_emit_tsym` vive no emissor de C** (`src/codegen/codegen.tks:12187`) **e é chamado de QUATRO sítios**, entre eles a rota **nativa** (`finish_native_object`) e a de `teko run` — e a fatia 6 do expurgo apaga essa casa | **o achado da passagem.** Vira o crumb `C1.4`, com ordem obrigatória antes de qualquer linhagem, e **reporta-se para cima como higiene do expurgo** (não é do `tdb`). **Medi dois sítios; a base avançou durante a escrita e são quatro** — o acoplamento é mais largo do que a primeira leitura, e o crumb vale mais |
 | 2 | **`grep syscall src/ --include=*.tks` dá DUAS ocorrências, e ambas são comentários** (`src/runtime/teko_rt.tks:635`, `:643`) | corrige o digest, que registou zero. **A conclusão não muda** — não há primitiva de syscall crua, e nem a palavra existe em código — mas o número certo é 2 |
 | 3 | **`TExternDecl.from_lib` documenta `"" = implicit libc`** (`src/checker/tast.tks:172`), **e os 24 `pub extern fn` da árvore levam TODOS `from "teko_rt"`** | o mecanismo de alcançar a libc está **declarado e tipado**, e o caminho está **por exercitar**. Vira `M2.0`, o crumb que abre a fase 2 — e **substitui o shim em `teko_rt.c` que a 2.ª passagem recomendou** e que *"SEM C LANG"* retirou |
 | 4 | **`kind` desconhecido JÁ É ERRO DURO** com a lista dos aceites (`src/build/manifest.tks:550`, `artifact_kinds_listed()`) | a RED-FLAG 7 da 2.ª passagem está **CONSERTADA na árvore**. `kind = "tool"` hoje é erro honesto, não verde falso. **Um crumb menos** |

@@ -95,9 +95,6 @@ Veredito por alvo:
   índice const-expr**; (ii) trocar `gzip_cm_deflate()` por um `const GZIP_CM_DEFLATE: byte = 8
   to byte` (ele já é `{ 8 to byte }`). Então `const GZIP_HEADER: []byte = [GZIP_MAGIC[0],
   GZIP_MAGIC[1], GZIP_CM_DEFLATE, 0 to byte, …]`.
-- **`wasm_preamble` (objfile_wasm.tks:172) → PRECISA ESTENDER const-eval** (mesmo Tier-6
-  `TIndex`-de-const para `WASM_MAGIC[0..3]`; `WASM_VERSION_1` já é Tier-3 OK).
-- **`wasm_narrow_msg_bytes` (stackify.tks:4503) → PRECISA ESTENDER const-eval** (str→[]byte em
   posição const) OU manter gerador. Um byte-array literal perde a string legível; a extensão
   limpa é permitir `const MSG: []byte = "…"` (coerção str→bytes const).
 

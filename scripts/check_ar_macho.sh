@@ -16,9 +16,8 @@
 # runs and prints the underlying tool's OWN stdout+stderr on failure — a silent "exit 1,
 # no output" gate is never acceptable. `AR_CHECK_REQUIRE_TOOLS=1` turns an honest-skip
 # (host/tool absent, or no archive given) into a HARD FAILURE instead of exit 0 — set this
-# on a runner where the toolchain is guaranteed present (pr.yml's `ar-validation` macos leg),
-# mirroring `validate_wasm_own.sh`'s `REQUIRE_WASM_ENGINE` seam, so a provisioning gap can
-# never masquerade as a silent pass.
+# on a runner where the toolchain is guaranteed present (pr.yml's `ar-validation` macos leg), so a
+# provisioning gap can never masquerade as a silent pass.
 #
 # usage: scripts/check_ar_macho.sh <archive.a> [symbol_that_must_resolve]
 #   AR_CHECK_REQUIRE_TOOLS=1   (default: unset) — an honest-skip becomes a hard failure.

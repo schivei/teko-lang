@@ -370,8 +370,7 @@ observabilidade sumiria. Paridade proposta (mapeando às fases C `codegen`/`emit
 - cada cauda: `select/regalloc/encode` → uma fase `codegen (native)` (em `debug`, três
   sub-fases nomeadas `isel`/`regalloc`/`encode`).
 - `finish_native_object`: `write_file_bytes(.o)` → fase `emit obj`; `link_object` → fase
-  `link` (a START-line antes do `cc`-linker, mesmo motivo do `cc`). `emit_native_wasm`:
-  `emit obj`→ `emit wasm`, sem `link`.
+  `link` (a START-line antes do `cc`-linker, mesmo motivo do `cc`).
 
 Regra: mesmas labels/mesma forma que o caminho C, para o leitor de log não distinguir o
 backend pela ausência de output. Nenhuma dessas fases altera os bytes do `.o`/binário.
@@ -704,7 +703,7 @@ e uma chamada por fragmento sem probe. **Mesmos bytes emitidos** (a ordem/conte�
 
 - **AL4 — Paridade native.** Aplicar AL2/E3 aos `objfile_*`/`encode_*`/`tkb_buf`
   (`list::push` byte-a-byte → builder/append robusto). Fecha o "mesmo vale para native" do
-  owner; `cmp` dos goldens de `.o`/`.wasm` como ritual.
+  owner; `cmp` dos goldens de `.o` como ritual.
 
 ### Ganho honesto
 
@@ -738,7 +737,7 @@ e uma chamada por fragmento sem probe. **Mesmos bytes emitidos** (a ordem/conte�
 - **E3** (`[]byte`→`Builder`): churn de assinaturas + risco de um alias romper o decreto de
   cadeia LINEAR (o mesmo invariante que `append_fo`/`push_fo` já exigem). Evitar contágio unsafe
   (Builder SAFE, não RawBuf). Regressão por crumb: fixpoint + `cmp`.
-- **E4** native: muda memória/perf dos writers, não os bytes; `cmp` dos goldens `.o`/`.wasm`.
+- **E4** native: muda memória/perf dos writers, não os bytes; `cmp` dos goldens `.o`.
 - Todos independentes do const wave.
 
 ---
@@ -829,8 +828,8 @@ já no seed: enums+`==`, structs, closures/`ProgressFn` já usados).
 
 ### Crumb 7 — Paridade native (estrutural, muitas caudas)
 - Arquivos: `src/build/project.tks` (`emit_native` + 5 caudas + `finish_native_object`
-  recebem `cfg`; fases `lower`/`codegen (native)`/`emit obj`/`link`; wasm: `emit wasm`).
-- **Sem mudar bytes** do `.o`/binário/`.wasm`. Regressão: `diff_c_own.sh`/`native_regressions.sh`
+  recebem `cfg`; fases `lower`/`codegen (native)`/`emit obj`/`link`).
+- **Sem mudar bytes** do `.o`/binário. Regressão: `diff_c_own.sh`/`native_regressions.sh`
   como ponto ritual; um `.tkt` de fixture native com `CI=1` mostrando START `link …`.
 - Risco: estrutural (mecânico). Independe do const wave.
 
