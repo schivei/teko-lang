@@ -2134,3 +2134,61 @@ biblioteca. Não há varrimento a fazer, e poupei um despacho por ter medido pri
 defeito de BIBLIOTECA — `teko::regex` é linguagem, não arnês — que morderia o primeiro utilizador a
 escrever um padrão com acento. O agente foi à raiz e não ao sintoma, e é a diferença entre a perna
 ficar verde e o compilador ficar certo.
+
+## 0aa · A parede que comeu meia hora a dois agentes: não havia compilador
+
+O verificador não encontrou defeito em ramo nenhum. Encontrou isto, e é maior:
+
+> **`scripts/fetch_teko.sh` exige `gh` com acesso ao repositório, e esta caixa não o tem.** A única
+> semente em disco era **`0.3.0.30-beta`**, uma versão atrás — e essa **não constrói a árvore**:
+> pára em `src/build/project.tks:2076: unknown function: arch`, porque `teko::arch()` só passou a
+> builtin reconhecido pela semente **depois** do 0.3.0.30.
+
+E o modo de falha era o pior possível: **nada dizia "não tens compilador"**. Dizia coisas sobre
+`arch`, e o `build_with_seed_fallback.sh` esgotava `MAX_PROBES=64` a procurar um degrau construível
+que não existia. Dois agentes queimaram 34 e 38 minutos, 145 e 143 chamadas, contra isto — sem
+conseguirem nomear a parede, porque a parede não se apresentava.
+
+### O desbloqueio, e veio de um instrumento que só o integrador tem
+
+O MCP do GitHub lê artefactos de CI; os subagentes não o têm. A perna `artifact / linux-x86_64-musl`
+da run `30568806559` publicou um `teko-assets-linux-x86_64-musl` — que é um **gen1 `0.3.0.31-beta`**.
+
+```
+mcp__github__actions_list  method=list_workflow_run_artifacts  resource_id=<run>
+mcp__github__actions_get   method=download_workflow_run_artifact  resource_id=<artifact>
+curl <url> | unzip
+```
+
+**Provado, com números:**
+
+| | |
+|---|---|
+| rota nativa | lexer 143/143 · checker 6202/6202 · consteval 473/473 → pára no **degrau 32** |
+| rota C (`TEKO_BACKEND=c`) | **gen1 construído em 88.6 s, pico 1693 MB, rc=0** |
+
+O `arch` desapareceu. A paragem nativa é a mesma do CI — não é defeito de ramo nenhum.
+
+### O conserto durável, e uma correcção a mim a meio dele
+
+`fetch_teko.sh` ganha uma **cache partilhada** (`$TEKO_SEED_CACHE`, por omissão `~/.teko-seed`):
+quem tem como buscar a semente deposita-a uma vez, e todos os worktrees a encontram sem rede e sem
+credencial. Sem `gh` **e** sem cache, o guião **falha alto** e diz como encher a cache — em vez de
+devolver silêncio e deixar o chamador cair numa semente velha.
+
+**E a primeira versão da detecção estava errada.** Escrevi `command -v gh || ! gh auth status` e
+**não disparou**: nesta caixa o `gh` existe e o `gh auth status` sai **0** — o que falha é o
+**acesso ao repositório**, com um 403 que chega como corpo JSON no sítio da etiqueta. Verifiquei um
+**proxy** da condição em vez da condição. A detecção certa é **tentar a chamada e validar a forma
+do que volta**: uma etiqueta casa `^v?N.N.N.N`; um objecto de erro, um vazio e um `null` não casam,
+e caem todos no mesmo ramo sem eu ter de enumerar os modos de falha do `gh`.
+
+Inversão dos dois braços, medida:
+
+```
+cache presente  → "a usar a cache partilhada" · teko 0.3.0.31-beta · rc=0
+cache ausente   → FATAL, nomeia o que falta e como enchê-la · rc=1
+```
+
+É a terceira vez hoje que apanho a mesma patologia, e a segunda em código meu: **uma guarda que
+verifica a coisa errada passa, e passar é o que a torna pior do que não existir.**
