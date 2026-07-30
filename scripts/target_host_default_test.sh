@@ -73,8 +73,14 @@ fi
 
 # ROUTING IS THIS SCRIPT'S JOB, NOT THE CHECKER'S. Each checker now fails closed on a host it
 # cannot serve, so every host we schedule has to be routed HERE. `Linux` now covers aarch64
-# too: check_elf.sh derives the expected e_machine from the host, and refusing aarch64 was
-# how an arm64 Linux leg would report PASS having validated no object at all.
+# too: check_elf.sh derives the expected e_machine from the os-arch it is HANDED, falling back
+# to the host when handed none, and refusing aarch64 was how an arm64 Linux leg would report
+# PASS having validated no object at all.
+#
+# THIS SCRIPT DELIBERATELY DECLARES NO EXPECTED OS-ARCH TO THE CHECKER. Its whole subject is
+# the R1 host DEFAULT: `TEKO_TARGET` is unset, so what the object must carry is precisely "this
+# host's own architecture", which is exactly check_elf.sh's no-argument fallback. Naming an
+# os-arch here would assert the host's arch against itself and make the check tautological.
 #
 # The fall-through is a HARD FAILURE, not a note. "The build itself already proved it" is not
 # the same claim as "the bytes are well-formed" — the very bug this script exists to catch (a

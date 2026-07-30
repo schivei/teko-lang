@@ -110,6 +110,32 @@ Feature: F5 own-native corpus — os cenarios que o backend nativo tem de fechar
     When built
     Then object well-formed
 
+  # (AArch64-ELF crumb 3) The arm64/Linux-ELF target, which until now DID NOT EXIST: `NativeTarget`
+  # carried `Arm64Macho` and `X8664Linux` but no `Arm64Linux`, so `host_target_for_os("linux",
+  # "arm64")` honestly REFUSED — and every own-native row on the arm64-Linux leg honest-skipped
+  # behind that refusal while the leg reported green. The refusal was correct code for a target that
+  # did not exist; the fix was to make the target exist.
+  #
+  # `When built`, not `When built and run`, for the SAME reason the COFF row above gives: on an
+  # x86_64 host `arm64-linux` is CROSS, the run is honest-skipped, and a declared `Then exit` would
+  # be a claim no host here can keep — which is a skip, and `no_skips_gate.sh` is right to fail a
+  # lane over it. The claim this row makes is the OBJECT: a well-formed, linker-consumable AArch64
+  # `ET_REL` carrying e_machine 183.
+  #
+  # AND IT IS THE ROW THAT NEEDED check_elf.sh's SECOND ARGUMENT. Before that argument existed the
+  # checker derived its expected `e_machine` from `uname -m`, so this row's perfectly correct
+  # AArch64 bytes would have been rejected on an x86_64 host with "not an X86-64 object" — a false
+  # red produced by asking the host a question only the TARGET can answer. Measured, both
+  # directions: with the argument, an AArch64 object passes as `arm64-linux` and FAILS as
+  # `x86_64-linux`; the mirror case (x86_64 bytes claimed as `arm64-linux`) fails too.
+  #
+  # The exit code lives on `own_host_os_arch_exit210_runs` below, where a host can actually check it.
+  Scenario: own_cross_arm64_linux_emits_elf (AArch64-ELF — the object is the claim)
+    Given target = "arm64-linux"
+    Given source = "cases/cross_exit210.tks"
+    When built
+    Then object well-formed
+
   # (0.3.1 C5) The host os-arch spelled EXPLICITLY: the reproduced-good path of the motivating bug
   # (an explicit TEKO_TARGET made the whole vertical work, exit 42).
   #
@@ -127,6 +153,27 @@ Feature: F5 own-native corpus — os cenarios que o backend nativo tem de fechar
     Given source = "cases/cross_exit42.tks"
     When built and run
     Then exit = 42
+    Then object well-formed
+
+  # (AArch64-ELF crumb 3) THE VALUE THE arm64-Linux LANE OWES, and the only row that can collect it:
+  # `host-os-arch` resolves to whatever os-arch this host natively builds, so this row RUNS on every
+  # host — and on an arm64 Linux runner that name is now `arm64-linux`, which means the whole
+  # vertical is exercised end to end and JUDGED BY ITS VALUE: arm64 isel → AAPCS64 regalloc → arm64
+  # encode → `emit_elf_arm64` → the host `cc` links the ELF → the binary runs → exit 210. Before
+  # `Arm64Linux` existed, `tkr_resolve_target_name` degraded `host-os-arch` to the plain `host`
+  # sentinel there (the resolver had no name to spell out) and the row honest-skipped.
+  #
+  # `Then object well-formed` collects the second half on the same build: the emitted object's
+  # `e_machine` must be the one the RESOLVED os-arch names — AArch64 on the arm64 leg, X86-64 on the
+  # x86_64 leg — which is the assertion check_elf.sh's second argument makes possible.
+  #
+  # 210 is this lane's own exit value, distinct from the corpus-wide 42, so a row asserting it can
+  # never be satisfied by another fixture's binary being run by mistake.
+  Scenario: own_host_os_arch_exit210_runs (AArch64-ELF — the host vertical, judged by its value)
+    Given target = "host-os-arch"
+    Given source = "cases/cross_exit210.tks"
+    When built and run
+    Then exit = 210
     Then object well-formed
 
 

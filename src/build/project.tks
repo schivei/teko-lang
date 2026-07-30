@@ -749,6 +749,7 @@ fn default_cc_for_target(t: NativeTarget) -> str {
         NativeTarget::X8664Windows => HOST_CC_NAME
         NativeTarget::X8664Linux => HOST_CC_NAME
         NativeTarget::Arm64Macho => HOST_CC_NAME
+        NativeTarget::Arm64Linux => HOST_CC_NAME
         NativeTarget::Wasm32Wasi => HOST_CC_NAME
         NativeTarget::Wasm64Wasi => HOST_CC_NAME
         NativeTarget::Wasm32Browser => HOST_CC_NAME
@@ -1893,7 +1894,10 @@ fn c_backend_selected() -> bool {
  * NativeTarget — which own-AOT-backend target the temporary `TEKO_TARGET` env
  * seam selects (D-D, #386 B1-8; #387 B2-8; #388 B3-4; the wasm variants at
  * #389 C1-5/C1-7): `Arm64Macho` (arm64 machine code in a Mach-O object — the
- * A4 reference, and the macOS host default), `X8664Linux` (x86-64 SysV machine
+ * A4 reference, and the macOS host default), `Arm64Linux` (the SAME arm64
+ * machine code and the SAME AAPCS64 ABI as `Arm64Macho`, differing ONLY in the
+ * object container — ELF instead of Mach-O — and the arm64-linux host default),
+ * `X8664Linux` (x86-64 SysV machine
  * code in an ELF object — the linux host default), `X8664Windows` (x86-64 Win64
  * machine code — the SAME x86 ISA as `X8664Linux`, differing only in the ABI
  * register file and PE/COFF object format — the windows host default),
@@ -1911,7 +1915,7 @@ fn c_backend_selected() -> bool {
  * `TEKO_BACKEND` and is read only when the own backend is already active;
  * D1/#390 supersedes it with the real `--target` manifest flag.
  */
-type NativeTarget = enum { Arm64Macho; X8664Linux; X8664Windows; Wasm32Wasi; Wasm64Wasi; Wasm32Browser }
+type NativeTarget = enum { Arm64Macho; Arm64Linux; X8664Linux; X8664Windows; Wasm32Wasi; Wasm64Wasi; Wasm32Browser }
 
 /**
  * unsupported_target_error — the honest R2 diagnostic (owner ruling 2026-07-24,
@@ -1930,6 +1934,7 @@ fn unsupported_target_error(name: str) -> error {
         "unsupported TEKO_TARGET \"", name,
         "\" — supported targets: x86_64-linux (alias x86_64-elf), ",
         "x86_64-windows (aliases x86_64-win, x86_64-pe, x86_64-coff), arm64-macos, ",
+        "arm64-linux (alias aarch64-linux), ",
         "wasm32-wasi (aliases wasm32, wasm, wasi), wasm64-wasi (alias wasm64), ",
         "wasm32-browser (aliases wasm-browser, browser)") }
 }
@@ -1938,9 +1943,12 @@ fn unsupported_target_error(name: str) -> error {
  * target_from_name — map a raw `TEKO_TARGET` value to a `NativeTarget`:
  * `x86_64-linux` selects the x86-64 SysV/ELF pipeline, `x86_64-windows` the
  * x86-64 Win64/PE-COFF
- * pipeline, `arm64-macos` the arm64/Mach-O pipeline (all canonical, OS-based
+ * pipeline, `arm64-macos` the arm64/Mach-O pipeline, `arm64-linux` the
+ * arm64/ELF pipeline (all canonical, OS-based
  * per ruling #390; `x86_64-elf`/`x86_64-coff`/`x86_64-win`/
- * `x86_64-pe` are accepted as deprecated format-named aliases),
+ * `x86_64-pe` are accepted as deprecated format-named aliases, and
+ * `aarch64-linux` as the spelling alias `cc -dumpmachine` reports for the same
+ * target — `arch_token_canonical` already folds `aarch64` onto `arm64`),
  * `wasm32-wasi`/`wasm32`/`wasm`/`wasi` select the WASI wasm32 target (#389
  * C1-5), `wasm64-wasi`/`wasm64` select the wasm64 target (#389 C1-7, §6), and
  * `wasm32-browser`/`wasm-browser`/`browser` select the Browser variant. Every
@@ -1961,6 +1969,8 @@ fn target_from_name(name: str) -> NativeTarget | error {
     if name == "x86_64-pe" { return NativeTarget::X8664Windows }
     if name == "x86_64-coff" { return NativeTarget::X8664Windows }
     if name == "arm64-macos" { return NativeTarget::Arm64Macho }
+    if name == "arm64-linux" { return NativeTarget::Arm64Linux }
+    if name == "aarch64-linux" { return NativeTarget::Arm64Linux }
     if name == "wasm32-wasi" { return NativeTarget::Wasm32Wasi }
     if name == "wasm32" { return NativeTarget::Wasm32Wasi }
     if name == "wasm" { return NativeTarget::Wasm32Wasi }
@@ -1998,14 +2008,16 @@ fn host_target_for_os_guess(os: str) -> NativeTarget {
  * sistema e arquitetura atuais quando não definido"). Phase 2 of the two-phase host default
  * (teko-target-crosslink-0.3.1.md §2.1), now that `teko::arch()` is a seed-recognized builtin:
  * `linux`+`x86_64` selects `X8664Linux`, `windows`+`x86_64` selects `X8664Windows`,
- * `macos`+`arm64` selects `Arm64Macho` — the only three (os, arch) pairs this backend has a
- * real codegen pipeline for. Every OTHER pair (an `arm64` linux host, an `x86_64` macOS host,
- * an `arm64` windows host, or an `unknown` arch) is now an honest R2 error naming the
- * unsupported os-arch, reusing `unsupported_target_error`'s own message (D39 single source) —
+ * `macos`+`arm64` selects `Arm64Macho`, `linux`+`arm64` selects `Arm64Linux` — the four
+ * (os, arch) pairs this backend has a real codegen pipeline for. Every OTHER pair (an
+ * `x86_64` macOS host, an `arm64` windows host, or an `unknown` arch) is an honest R2 error
+ * naming the unsupported os-arch, reusing `unsupported_target_error`'s own message (D39
+ * single source) —
  * REPLACES the old Phase-1 behavior of silently guessing the OS's dominant arch regardless of
  * the host's REAL arch, which is exactly the bug class this whole design exists to close (a
  * linux x86_64 host used to emit arm64 Mach-O before R1; an arm64 linux host would otherwise
- * now silently emit x86_64 ELF instead — this closes THAT one too). Split out as a pure
+ * silently emit x86_64 ELF instead — that pair is no longer a guess NOR a refusal, it is a
+ * real target). Split out as a pure
  * function of the os/arch strings (rather than reading `teko::os()`/`teko::arch()` inline) so
  * the (os, arch) × target mapping is independently testable without depending on the real host.
  *
@@ -2018,6 +2030,7 @@ fn host_target_for_os(os: str, arch: str) -> NativeTarget | error {
     if os == "linux" && arch == "x86_64" { return NativeTarget::X8664Linux }
     if os == "windows" && arch == "x86_64" { return NativeTarget::X8664Windows }
     if os == "macos" && arch == "arm64" { return NativeTarget::Arm64Macho }
+    if os == "linux" && arch == "arm64" { return NativeTarget::Arm64Linux }
     unsupported_target_error($"{arch}-{os}")
 }
 
@@ -2028,7 +2041,7 @@ fn host_target_for_os(os: str, arch: str) -> NativeTarget | error {
  * `Arm64Macho` regardless of the real host, so a linux x86_64 host silently emitted an arm64
  * Mach-O object that `cc`/`ld` then rejected with an opaque cross-format error; the OS-only
  * Phase-1 fix left the SAME class of bug open one dimension over (an arm64 linux host silently
- * emitting x86_64 ELF) — this now names that host honestly instead.
+ * emitting x86_64 ELF) — that host now resolves to `Arm64Linux` and emits its OWN arm64 ELF.
  *
  * @return the resolved own-backend target for the current host, or the honest R2 error when
  *         this backend has no target for the host's (os, arch) pair
@@ -2103,6 +2116,7 @@ fn resolved_target() -> NativeTarget {
 fn target_name(t: NativeTarget) -> str {
     match t {
         NativeTarget::Arm64Macho => "arm64-macos"
+        NativeTarget::Arm64Linux => "arm64-linux"
         NativeTarget::X8664Linux => "x86_64-linux"
         NativeTarget::X8664Windows => "x86_64-windows"
         NativeTarget::Wasm32Wasi => "wasm32-wasi"
@@ -2111,7 +2125,7 @@ fn target_name(t: NativeTarget) -> str {
     }
 }
 
-/** OBJFMT_ELF — the object-format token of the ELF target (x86_64-linux). */
+/** OBJFMT_ELF — the object-format token of the ELF targets (x86_64-linux, arm64-linux). */
 const OBJFMT_ELF: str = "elf"
 
 /** OBJFMT_MACHO — the object-format token of the Mach-O target (arm64-macos). */
@@ -2137,6 +2151,7 @@ const OBJFMT_WASM: str = "wasm"
 fn target_objfmt(t: NativeTarget) -> str {
     match t {
         NativeTarget::Arm64Macho => OBJFMT_MACHO
+        NativeTarget::Arm64Linux => OBJFMT_ELF
         NativeTarget::X8664Linux => OBJFMT_ELF
         NativeTarget::X8664Windows => OBJFMT_COFF
         NativeTarget::Wasm32Wasi => OBJFMT_WASM
@@ -2212,6 +2227,7 @@ fn build_links_binary(t: NativeTarget, m: Manifest) -> bool {
 fn target_os_name(t: NativeTarget) -> str {
     match t {
         NativeTarget::Arm64Macho => "macos"
+        NativeTarget::Arm64Linux => "linux"
         NativeTarget::X8664Linux => "linux"
         NativeTarget::X8664Windows => "windows"
         NativeTarget::Wasm32Wasi => ""
@@ -2238,6 +2254,7 @@ fn target_os_name(t: NativeTarget) -> str {
 fn target_arch_name(t: NativeTarget) -> str {
     match t {
         NativeTarget::Arm64Macho => "arm64"
+        NativeTarget::Arm64Linux => "arm64"
         NativeTarget::X8664Linux => "x86_64"
         NativeTarget::X8664Windows => "x86_64"
         NativeTarget::Wasm32Wasi => ""
@@ -2449,6 +2466,7 @@ fn emit_native(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Ma
         NativeTarget::X8664Linux => emit_native_x86(dir, od, stem, lmod, prog, m)
         NativeTarget::X8664Windows => emit_native_win(dir, od, stem, lmod, prog, m)
         NativeTarget::Arm64Macho => emit_native_arm64(dir, od, stem, lmod, prog, m)
+        NativeTarget::Arm64Linux => emit_native_arm64_linux(dir, od, stem, lmod, prog, m)
         NativeTarget::Wasm32Wasi => emit_native_wasm(dir, od, stem, lmod, prog, m, false, false)
         NativeTarget::Wasm64Wasi => emit_native_wasm(dir, od, stem, lmod, prog, m, false, true)
         NativeTarget::Wasm32Browser => emit_native_wasm(dir, od, stem, lmod, prog, m, true, false)
@@ -2478,6 +2496,31 @@ fn emit_native_arm64(dir: str, od: str, stem: str, lmod: teko::lir::LModule, pro
     let col = match teko::backend::regalloc_module(teko::backend::AAPCS64, sel) { teko::backend::MModule as x => x; error as e => return fail(dir, e.message) }
     let enc = match teko::backend::encode_module(teko::backend::AAPCS64, col) { teko::backend::EncodedModule as x => x; error as e => return fail(dir, e.message) }
     finish_native_object(dir, od, stem, teko::backend::emit_macho(enc), prog, m)
+}
+
+/**
+ * emit_native_arm64_linux — the arm64/Linux-ELF own-backend tail: the SAME pipeline as
+ * `emit_native_arm64` (platform-ABI entry wrap → arm64 isel → AAPCS64 regalloc → arm64
+ * encode) with the object format swapped from Mach-O to ELF (`emit_elf_arm64`). Exactly ONE
+ * call differs, and nothing else may: the two arm64 paths share isel, regalloc, and the
+ * encoder, so the arm64-macos differential keeps covering the arm64-linux codegen — a drift
+ * between the two tails would silently void that coverage.
+ *
+ * @param dir   the project directory (for diagnostics)
+ * @param od    the slash-stripped output directory (already created)
+ * @param stem  the output artifact name (the manifest `name`)
+ * @param lmod  the target-independent lowered module
+ * @param prog  the checked program (extern-reachability, `.tsym`)
+ * @param m     the resolved manifest (link knobs)
+ * @return      0 on a successful build+link, else the failing status
+ * @since 0.3.1
+ */
+fn emit_native_arm64_linux(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog: checker::TProgram, m: Manifest) -> i32 {
+    let entry = match teko::lir::wrap_native_entry(lmod) { teko::lir::LModule as x => x; error as e => return fail(dir, e.message) }
+    let sel = match teko::backend::select_module(entry) { teko::backend::MModule as x => x; error as e => return fail(dir, e.message) }
+    let col = match teko::backend::regalloc_module(teko::backend::AAPCS64, sel) { teko::backend::MModule as x => x; error as e => return fail(dir, e.message) }
+    let enc = match teko::backend::encode_module(teko::backend::AAPCS64, col) { teko::backend::EncodedModule as x => x; error as e => return fail(dir, e.message) }
+    finish_native_object(dir, od, stem, teko::backend::emit_elf_arm64(enc), prog, m)
 }
 
 /**
@@ -2652,6 +2695,7 @@ fn emit_static_lib(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m
     match target {
         NativeTarget::X8664Linux => emit_static_lib_x86(dir, od, stem, lmod)
         NativeTarget::Arm64Macho => emit_static_lib_macho(dir, od, stem, lmod)
+        NativeTarget::Arm64Linux => emit_static_lib_arm64_linux(dir, od, stem, lmod)
         NativeTarget::X8664Windows => emit_static_lib_coff(dir, od, stem, lmod)
         _ => fail(dir, "static library output has no wasm convention to wrap into (M.3)")
     }
@@ -2716,6 +2760,29 @@ fn emit_static_lib_macho(dir: str, od: str, stem: str, lmod: teko::lir::LModule)
     let col = match teko::backend::regalloc_module(teko::backend::AAPCS64, sel) { teko::backend::MModule as x => x; error as e => return fail(dir, e.message) }
     let enc = match teko::backend::encode_module(teko::backend::AAPCS64, col) { teko::backend::EncodedModule as x => x; error as e => return fail(dir, e.message) }
     finish_static_archive(dir, od, stem, teko::backend::emit_macho(enc), enc.symbols, ArchiveFormat::Bsd)
+}
+
+/**
+ * emit_static_lib_arm64_linux — the arm64/Linux-ELF static-archive tail: select, allocate,
+ * and encode exactly as `emit_native_arm64_linux` does, then hand the encoded module's ELF
+ * object bytes AND its neutral symbol list to `finish_static_archive` under the GNU archive
+ * format (the format an ELF platform's `ar`/`ld` expect, the same choice
+ * `emit_static_lib_x86` makes). MANDATORY rather than optional: without this arm the
+ * dispatch's `_` arm would answer an arm64-Linux `.a` request with the WASM diagnostic,
+ * which is a fabricated explanation of a real capability.
+ *
+ * @param dir   the project directory (for diagnostics)
+ * @param od    the slash-stripped output directory (already created)
+ * @param stem  the output artifact name (the manifest `name`)
+ * @param lmod  the target-independent lowered module
+ * @return      0 on a successful write+archive, else the failing status
+ * @since 0.3.1
+ */
+fn emit_static_lib_arm64_linux(dir: str, od: str, stem: str, lmod: teko::lir::LModule) -> i32 {
+    let sel = match teko::backend::select_module(lmod) { teko::backend::MModule as x => x; error as e => return fail(dir, e.message) }
+    let col = match teko::backend::regalloc_module(teko::backend::AAPCS64, sel) { teko::backend::MModule as x => x; error as e => return fail(dir, e.message) }
+    let enc = match teko::backend::encode_module(teko::backend::AAPCS64, col) { teko::backend::EncodedModule as x => x; error as e => return fail(dir, e.message) }
+    finish_static_archive(dir, od, stem, teko::backend::emit_elf_arm64(enc), enc.symbols, ArchiveFormat::Gnu)
 }
 
 /**

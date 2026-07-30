@@ -105,10 +105,31 @@ else
     no "check_elf.sh lost its AArch64 e_machine expectation — an arm64 ELF leg cannot be validated"
 fi
 if grep -q 'uname -m' scripts/check_elf.sh; then
-    ok "check_elf.sh derives the expected machine from the host"
+    ok "check_elf.sh still knows the host architecture (its no-argument fallback)"
 else
     no "check_elf.sh no longer consults the host architecture"
 fi
+
+echo "5b) check_elf.sh's expected machine must be an ARGUMENT, not only the host's architecture"
+if grep -q 'expected_arch_of' scripts/check_elf.sh; then
+    ok "check_elf.sh derives its expectation from the os-arch it is handed"
+else
+    no "check_elf.sh takes no expected os-arch — a cross-emitted object would be judged against the HOST's arch: a false red for an arm64-linux object on x86_64, and a hole in the other direction"
+fi
+# THE FIXTURE NEEDS NO TOOLCHAIN AND NO OBJECT, by the same construction as cases 1-3: it hands
+# the gate the deliberately-absent path with the opt-out armed, so what it pins is that the
+# os-arch argument is PARSED AND MAPPED at all — an argument the script could not map would
+# reach skip_or_fail before the object check and, with the opt-out armed, still exit 0, so the
+# assertion is on the mapping surviving, not on the exit alone. The POSITIVE direction — a real
+# AArch64 object accepted on an x86_64 host — is proven by the own_cross_arm64_linux_emits_elf
+# regression row, which builds one.
+for want in arm64-linux aarch64-linux x86_64-linux linux; do
+    if OBJ_CHECK_ALLOW_SKIP=1 ./scripts/check_elf.sh "$MISSING" "$want" >/dev/null 2>&1; then
+        ok "check_elf.sh accepts the expected-os-arch argument '$want'"
+    else
+        no "check_elf.sh rejected the expected-os-arch argument '$want' outright"
+    fi
+done
 
 echo "6) target_host_default_test.sh must route every host, and shout when it cannot"
 if grep -q 'no well-formedness checker routed' scripts/target_host_default_test.sh; then

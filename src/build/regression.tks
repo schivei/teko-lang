@@ -952,8 +952,16 @@ fn wellformed_script_for(target: str) -> str {
  * here is always a genuine rejection. These three scripts are the ONLY `scripts/*` that survive
  * the regression-script cull — leaf tools, not orchestration.
  *
+ * THE TARGET IS PASSED AS THE SECOND ARGUMENT, not merely used to pick the script. A leaf
+ * checker that derives its expectation from the HOST answers the wrong question for a cross
+ * build: an object emitted FOR `arm64-linux` ON an x86_64 host is correct AArch64, and a
+ * host-derived expectation calls it "not an X86-64 object" — a false red — while the mirror
+ * case (an x86_64 host accidentally emitting arm64 bytes for an `x86_64-linux` row) is the one
+ * the check exists to catch. Handing the checker the os-arch the build was ASKED for makes the
+ * assertion parametric in both directions at once.
+ *
  * @param objp    the emitted object path (`<oout>/<name>.o`)
- * @param target  the effective os-arch (selects elf/macho/coff)
+ * @param target  the effective os-arch (selects elf/macho/coff AND the expected machine)
  * @return        the verdict (ok / FAIL / skip-when-no-checker-for-target)
  * @since 0.3.1
  */
@@ -962,6 +970,7 @@ fn check_object_wellformed(objp: str, target: str) -> RegrOutcome {
     if script.len == 0 { return regr_skip(teko::str::concat("no object well-formedness checker for target ", target)) }
     mut argv: []str = teko::list::push(teko::list::empty(), script)
     argv = teko::list::push(argv, objp)
+    argv = teko::list::push(argv, target)
     let cap = run_captured(argv, "", objp ~ ".wellformed")
     if cap.exit != 0 {
         return regr_fail($"object well-formedness check failed{captured_output_block(cap)}")
