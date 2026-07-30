@@ -420,18 +420,29 @@ fn xat_dump_abi(abi: AbiDescriptor, f: lir::LFunc) -> str {
 }
 
 #test
+/**
+ * xat_win64_str_pair_travels_by_reference — the ONE-pair family (the io group plus
+ * `tk_panic_str`): the 16-byte copy's address, `.ptr` at +0, `.len` at +8, and that
+ * ADDRESS — never the pair — in RCX, the sole argument register used.
+ *
+ * @return void
+ */
 fn xat_win64_str_pair_travels_by_reference() {
     let text = xat_dump_abi(WIN64, xat_str_pair_call("tk_println"))
-    // the 16-byte copy's address, then `.ptr` at +0 and `.len` at +8 …
     teko::assert::str_contains(text, "lea %2, [frame #0]")
     teko::assert::str_contains(text, "mov.q [%2 + 0], %0")
     teko::assert::str_contains(text, "mov.q [%2 + 8], %1")
-    // … and that ADDRESS — not the pair — in RCX, the sole argument register used.
     teko::assert::str_contains(text, "mov.q %p1, %2")
     teko::assert::str_contains(text, "call @tk_println(%p1)")
 }
 
 #test
+/**
+ * xat_win64_str_pair_reserves_one_16_byte_frame_slot — one by-value `tk_str` costs
+ * exactly one 16-byte, 8-aligned frame slot.
+ *
+ * @return void
+ */
 fn xat_win64_str_pair_reserves_one_16_byte_frame_slot() {
     let mf = match select_lfunc_x86(WIN64, xat_str_pair_call("tk_println")) { MFuncX86 as x => x; error => return }
     teko::assert::is_true(mf.frame.len == 1)
@@ -440,10 +451,15 @@ fn xat_win64_str_pair_reserves_one_16_byte_frame_slot() {
 }
 
 #test
+/**
+ * xat_sysv_str_pair_stays_in_two_registers — SysV carries a 2-eightbyte aggregate
+ * in RDI/RSI, so this is the byte-identity guardrail: no frame slot, no stores,
+ * both halves pinned as ordinary register arguments.
+ *
+ * @return void
+ */
 fn xat_sysv_str_pair_stays_in_two_registers() {
     let text = xat_dump_abi(SYSV64, xat_str_pair_call("tk_println"))
-    // SysV carries a 2-eightbyte aggregate in RDI/RSI — the byte-identity guardrail:
-    // no frame slot, no stores, both halves pinned as ordinary register arguments.
     teko::assert::str_contains(text, "call @tk_println(%p7, %p6)")
     teko::assert::is_false(teko::runtime::str_contains(text, "[frame #"))
     let mf = match select_lfunc_x86(SYSV64, xat_str_pair_call("tk_println")) { MFuncX86 as x => x; error => return }
@@ -451,18 +467,254 @@ fn xat_sysv_str_pair_stays_in_two_registers() {
 }
 
 #test
+/**
+ * xat_win64_non_str_builtin_pair_stays_in_two_registers — the by-reference path is
+ * keyed on the CLOSED by-value-`tk_str` arity table, never on "a call with two
+ * arguments": an ordinary two-scalar call keeps RCX/RDX.
+ *
+ * @return void
+ */
 fn xat_win64_non_str_builtin_pair_stays_in_two_registers() {
-    // The by-reference path is keyed on the CLOSED `tk_str`-argument builtin list,
-    // never on "a call with two arguments": an ordinary two-scalar call keeps RCX/RDX.
     let text = xat_dump_abi(WIN64, xat_str_pair_call("teko__demo__f"))
     teko::assert::str_contains(text, "call @teko__demo__f(%p1, %p2)")
     teko::assert::is_false(teko::runtime::str_contains(text, "[frame #"))
 }
 
 /**
+ * xat_two_str_pairs_call — a `main` whose body materializes TWO flattened `tk_str`
+ * pairs (`%0`/`%1` and `%2`/`%3` — a rodata address plus a constant length each,
+ * exactly the four operands `lower.tks::fat_eq_call_args` emits) and hands all four
+ * to `sym` as one result-producing call, then returns the result.
+ *
+ * The fixture behind the two-pair Win64 goldens: `tk_str_eq`, `tk_str_contains` and
+ * `tk_str_ends_with` all have this shape.
+ *
+ * @param str sym  the called runtime symbol
+ * @return lir::LFunc  the built function
+ */
+fn xat_two_str_pairs_call(sym: str) -> lir::LFunc {
+    let f0 = lir::new_func("main", 0, teko::list::empty(), lir::LType::I64)
+    let a = xat_str_pair_operands(f0, ".Lstr0", 10)
+    let b = xat_str_pair_operands(a.func, ".Lstr1", 20)
+    let r = lir::alloc_vreg(b.func)
+    let args = xat_four_vregs(a.ptr, a.len, b.ptr, b.len)
+    let s0 = lir::append_inst(r.func, 0, lir::call_inst(r.vreg, sym, args, false, 0, 0))
+    lir::append_inst(s0, 0, lir::ret_inst(r.vreg, 0, 0))
+}
+
+/**
+ * XatStrPairOperands — one flattened `tk_str` operand pair plus the function that
+ * defines both halves.
+ */
+type XatStrPairOperands = struct {
+    /** the function with both defining instructions appended. */
+    func: lir::LFunc
+    /** the VReg holding the pointer half (a rodata address). */
+    ptr: u32
+    /** the VReg holding the byte length. */
+    len: u32
+}
+
+/**
+ * xat_str_pair_operands — append the two instructions that define one flattened
+ * `tk_str` pair: the rodata address of `symbol` and the constant length `len`.
+ *
+ * @param lir::LFunc f  the function to extend
+ * @param str symbol  the rodata symbol the pointer half addresses
+ * @param i64 len  the constant byte length
+ * @return XatStrPairOperands  the extended function + the pair's two VRegs
+ */
+fn xat_str_pair_operands(f: lir::LFunc, symbol: str, len: i64) -> XatStrPairOperands {
+    let p = lir::alloc_vreg(f)
+    let n = lir::alloc_vreg(p.func)
+    let s0 = lir::append_inst(n.func, 0, lir::global_addr_inst(p.vreg, symbol, 0, 0))
+    let s1 = lir::append_inst(s0, 0, lir::const_int_inst(n.vreg, len, 0, 0))
+    XatStrPairOperands { func = s1; ptr = p.vreg; len = n.vreg }
+}
+
+/**
+ * xat_four_vregs — the four VRegs of two flattened pairs, in ABI order.
+ *
+ * @param u32 a  the first pair's pointer half
+ * @param u32 b  the first pair's length
+ * @param u32 c  the second pair's pointer half
+ * @param u32 d  the second pair's length
+ * @return []u32  the four ids, in order
+ */
+fn xat_four_vregs(a: u32, b: u32, c: u32, d: u32) -> []u32 {
+    teko::list::push(teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), a), b), c), d)
+}
+
+/**
+ * xat_last_index_of_call — `tk_rt_last_index_of_ok(hay, needle, out_index)`: TWO
+ * flattened pairs followed by an ordinary pointer operand (an `LAlloca`'s address),
+ * the exact shape `lower.tks::lower_last_index_of_call` emits and the only
+ * two-pair entry with a trailing scalar.
+ *
+ * @return lir::LFunc  the built function
+ */
+fn xat_last_index_of_call() -> lir::LFunc {
+    let f0 = lir::new_func("main", 0, teko::list::empty(), lir::LType::I64)
+    let a = xat_str_pair_operands(f0, ".Lstr0", 10)
+    let b = xat_str_pair_operands(a.func, ".Lstr1", 20)
+    let out = lir::alloc_vreg(b.func)
+    let s0 = lir::append_inst(out.func, 0, lir::alloca_inst(out.vreg, 8 to u32, 8 to u32, 0, 0))
+    let r = lir::alloc_vreg(s0)
+    let args = teko::list::push(xat_four_vregs(a.ptr, a.len, b.ptr, b.len), out.vreg)
+    let s1 = lir::append_inst(r.func, 0, lir::call_inst(r.vreg, "tk_rt_last_index_of_ok", args, false, 0, 0))
+    lir::append_inst(s1, 0, lir::ret_inst(r.vreg, 0, 0))
+}
+
+#test
+/**
+ * xat_win64_tk_str_eq_passes_both_pairs_by_reference — the golden for the shape the
+ * Windows leg faulted on with ACCESS_VIOLATION: each pair gets its OWN 16-byte
+ * frame copy (`.ptr` at +0, `.len` at +8, from that pair's own two VRegs), and the
+ * two ADDRESSES — not the four halves — travel in RCX and RDX.
+ *
+ * The `is_false` is the load-bearing half: `%p8` (R8) appearing would mean a third
+ * register was pinned, which is exactly the flat four-operand form the callee reads
+ * as two pointers.
+ *
+ * @return void
+ */
+fn xat_win64_tk_str_eq_passes_both_pairs_by_reference() {
+    let text = xat_dump_abi(WIN64, xat_two_str_pairs_call("tk_str_eq"))
+    teko::assert::str_contains(text, "[frame #0]")
+    teko::assert::str_contains(text, "[frame #1]")
+    teko::assert::str_contains(text, "+ 0], %0")
+    teko::assert::str_contains(text, "+ 8], %1")
+    teko::assert::str_contains(text, "+ 0], %2")
+    teko::assert::str_contains(text, "+ 8], %3")
+    teko::assert::str_contains(text, "call @tk_str_eq(%p1, %p2)")
+    teko::assert::is_false(teko::runtime::str_contains(text, "%p8"))
+}
+
+#test
+/**
+ * xat_win64_two_pairs_reserve_two_16_byte_frame_slots — two by-value `tk_str`
+ * arguments cost two 16-byte, 8-aligned frame slots, not one shared copy.
+ *
+ * @return void
+ */
+fn xat_win64_two_pairs_reserve_two_16_byte_frame_slots() {
+    let mf = match select_lfunc_x86(WIN64, xat_two_str_pairs_call("tk_str_eq")) { MFuncX86 as x => x; error => return }
+    teko::assert::is_true(mf.frame.len == 2)
+    teko::assert::is_true(mf.frame[0].bytes == (16 to u32))
+    teko::assert::is_true(mf.frame[0].align == (8 to u32))
+    teko::assert::is_true(mf.frame[1].bytes == (16 to u32))
+    teko::assert::is_true(mf.frame[1].align == (8 to u32))
+}
+
+/**
+ * xat_two_pair_entries — every runtime entry whose FIRST TWO parameters are
+ * by-value `tk_str` and whose argument list is exactly those two pairs
+ * (`teko_rt.h`: `tk_str_eq`, `tk_str_ends_with`, `tk_str_contains`).
+ * `tk_rt_last_index_of_ok` is the fourth member of the family and is covered
+ * separately because it carries a trailing out-parameter.
+ *
+ * ENUMERATED, NOT SAMPLED: the defect this pins was a fix that covered the
+ * one-`tk_str` family and left the two-`tk_str` one emitting SysV's form on Win64,
+ * so a golden for whichever entry a fixture happens to touch would repeat the
+ * mistake at the next entry.
+ *
+ * @return []str  the three symbols, in `teko_rt.h` declaration order
+ */
+fn xat_two_pair_entries() -> []str {
+    teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), "tk_str_eq"), "tk_str_ends_with"), "tk_str_contains")
+}
+
+#test
+/**
+ * xat_win64_every_two_pair_entry_travels_by_reference — the family sweep: EVERY
+ * entry of `xat_two_pair_entries` emits two frame copies and a call using exactly
+ * RCX and RDX under WIN64, and the SysV four-register form under SYSV64.
+ *
+ * @return void
+ */
+fn xat_win64_every_two_pair_entry_travels_by_reference() {
+    let entries = xat_two_pair_entries()
+    mut i: u64 = 0
+    loop {
+        if i >= entries.len { break }
+        let sym = entries[i]
+        let win = xat_dump_abi(WIN64, xat_two_str_pairs_call(sym))
+        teko::assert::str_contains(win, "[frame #1]")
+        teko::assert::str_contains(win, teko::str::concat("call @", sym, "(%p1, %p2)"))
+        let sysv = xat_dump_abi(SYSV64, xat_two_str_pairs_call(sym))
+        teko::assert::str_contains(sysv, teko::str::concat("call @", sym, "(%p7, %p6, %p2, %p1)"))
+        teko::assert::is_false(teko::runtime::str_contains(sysv, "[frame #"))
+        i++
+    }
+}
+
+#test
+/**
+ * xat_win64_last_index_of_out_slot_follows_the_two_references — the fourth family
+ * member: `tk_rt_last_index_of_ok`'s two references take RCX/RDX and its
+ * `uint64_t *out_index` takes the NEXT register (R8), never RCX — the numbering
+ * that a per-pair-agnostic pinning would have got wrong.
+ *
+ * @return void
+ */
+fn xat_win64_last_index_of_out_slot_follows_the_two_references() {
+    let text = xat_dump_abi(WIN64, xat_last_index_of_call())
+    teko::assert::str_contains(text, "call @tk_rt_last_index_of_ok(%p1, %p2, %p8)")
+}
+
+#test
+/**
+ * xat_sysv_last_index_of_stays_in_five_registers — the byte-identity guardrail for
+ * the trailing-scalar member: SysV pins all five operands as ordinary register
+ * arguments and reserves no pair copy (its only frame slot is the `LAlloca`'s own).
+ *
+ * @return void
+ */
+fn xat_sysv_last_index_of_stays_in_five_registers() {
+    let text = xat_dump_abi(SYSV64, xat_last_index_of_call())
+    teko::assert::str_contains(text, "call @tk_rt_last_index_of_ok(%p7, %p6, %p2, %p1, %p8)")
+    let mf = match select_lfunc_x86(SYSV64, xat_last_index_of_call()) { MFuncX86 as x => x; error => return }
+    teko::assert::is_true(mf.frame.len == 1)
+    teko::assert::is_true(mf.frame[0].bytes == (8 to u32))
+}
+
+#test
+/**
+ * xat_win64_runtime_flattened_entries_stay_in_registers — the entries the RUNTIME
+ * itself declares flattened (`tk_str_concat_len`, `tk_str_slice_len`,
+ * `tk_str_of_bytes_len`, `tk_slice_str_eq` — each taking `const tk_byte *ptr,
+ * uint64_t len, …`) take no by-value aggregate at all, so the flat pair IS their C
+ * ABI on Win64 too and NOTHING may be materialized for them.
+ *
+ * @return void
+ */
+fn xat_win64_runtime_flattened_entries_stay_in_registers() {
+    let entries = xat_flattened_entries()
+    mut i: u64 = 0
+    loop {
+        if i >= entries.len { break }
+        let text = xat_dump_abi(WIN64, xat_two_str_pairs_call(entries[i]))
+        teko::assert::str_contains(text, teko::str::concat("call @", entries[i], "(%p1, %p2, %p8, %p9)"))
+        teko::assert::is_false(teko::runtime::str_contains(text, "[frame #"))
+        i++
+    }
+}
+
+/**
+ * xat_flattened_entries — the runtime entries whose `tk_str` arguments were
+ * flattened IN THE RUNTIME's own signature on purpose, and which must therefore
+ * keep the plain register form on every ABI.
+ *
+ * @return []str  the four flattened symbols the native LIR calls
+ */
+fn xat_flattened_entries() -> []str {
+    teko::list::push(teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), "tk_str_concat_len"), "tk_str_slice_len"), "tk_str_of_bytes_len"), "tk_slice_str_eq")
+}
+
+/**
  * xat_no_arg_reg_by_ref_abi — a degenerate register file with NO integer
  * argument register and Win64's by-reference aggregate rule, the only input that
- * reaches `pin_str_pair_by_ref_x86`'s "no argument register" internal arm (every
+ * reaches `pin_fat_slot_addrs_x86`'s "no argument register" internal arm (every
  * shipped x86-64 descriptor has at least four).
  *
  * @return AbiDescriptor  the degenerate register file

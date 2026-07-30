@@ -1352,77 +1352,216 @@ const X86_STR_ARG_ALIGN: u32 = 8 to u32
 const X86_STR_LEN_OFFSET: i32 = 8 to i32
 
 /**
- * str_pair_by_ref_x86 — must this call's argument list, which the TARGET-NEUTRAL
- * LIR flattened from ONE by-value `tk_str` into the two scalar operands
- * `(ptr, len)` (`lower.tks::lower_str_arg_call`), be re-materialized and passed
- * BY REFERENCE instead?
+ * by_ref_fat_pairs_x86 — how many of this call's leading flattened `(ptr, len)`
+ * pairs, which the TARGET-NEUTRAL LIR produced from by-value `tk_str` parameters
+ * (`lower.tks::lower_str_arg_call`, `fat_eq_call_args`, `lower_last_index_of_call`),
+ * must be re-materialized and passed BY REFERENCE instead?
  *
- * True exactly when the ABI cannot carry a 16-byte aggregate in registers
- * (`max_reg_arg_bytes < 16` — Win64, which passes an aggregate in a register
- * ONLY at size 1/2/4/8) AND the callee is one of the closed set of
- * single-`tk_str`-argument runtime entries (`lir::is_str_arg_builtin`, read from
- * the LIR so the list is single-sourced) AND the flat pair is actually present.
- * On SysV/AAPCS64/LP64D (`max_reg_arg_bytes == 16`) it is always false, so those
- * targets keep the byte-identical two-register sequence (FIXPOINT).
+ * ZERO on an ABI that carries a 16-byte aggregate in registers
+ * (`max_reg_arg_bytes == 16` — SysV/AAPCS64/LP64D), where the flat pair IS the
+ * true C ABI, so those targets keep the byte-identical register sequence
+ * (FIXPOINT). Otherwise (Win64: an aggregate travels in a register ONLY at size
+ * 1/2/4/8) it is the callee's own fat arity, read from the LIR
+ * (`lir::fat_arg_builtin_arity`) so the table is single-sourced — one pair for the
+ * io group, TWO for `tk_str_eq`/`tk_str_contains`/`tk_str_ends_with`/
+ * `tk_rt_last_index_of_ok`.
  *
  * @param AbiDescriptor abi  the target ABI register file
  * @param str symbol  the call's already-final runtime symbol
- * @param []u32 args  the call's flattened argument VRegs
- * @return bool  true iff the pair must travel by reference
+ * @return u64  the number of leading pairs to pass by reference (0 on SysV)
  */
-fn str_pair_by_ref_x86(abi: AbiDescriptor, symbol: str, args: []u32) -> bool {
-    abi.max_reg_arg_bytes < X86_STR_ARG_BYTES && lir::is_str_arg_builtin(symbol) && args.len == (2 to u64)
+fn by_ref_fat_pairs_x86(abi: AbiDescriptor, symbol: str) -> u64 {
+    if abi.max_reg_arg_bytes >= X86_STR_ARG_BYTES { return 0 }
+    lir::fat_arg_builtin_arity(symbol)
 }
 
 /**
- * pin_str_pair_by_ref_x86 — pass a flattened `(ptr, len)` `tk_str` pair the
- * Win64 way: BY REFERENCE. Reserve a 16-byte frame slot, take its address
- * (`MFrameAddrX86` — the encoder resolves it to `lea scratch, [rsp+off]`, above
- * the shadow region `compute_frame_layout_x86` already reserves), store `ptr` at
- * +0 and `len` at +8, then pin that ADDRESS into the ABI's FIRST integer
- * argument register (RCX) as the call's single `use`.
+ * FatSlotsX86 — the frame-slot ADDRESSES of every re-materialized `tk_str`
+ * argument, in declaration order, plus the context that reserved and filled them.
  *
- * This is the whole content of the B3 Windows differential's `own_print_exit`
- * SIGSEGV: emitting SysV's two-register form on Win64 makes the C-built callee
- * (`void tk_print(tk_str s)`, which under Win64 compiles to `movq (%rcx), %rcx` /
- * `movl 0x8(%rcx), %r8d`) read the STRING'S OWN first 16 bytes as `{ptr; len}`
- * and `fwrite` through the resulting garbage pointer. `tk_exit(i32)` — a scalar —
- * was unaffected, which is why the `own_exit_code` fixture passed while
- * `own_print_exit` faulted.
+ * @since 0.3.1.0 (Win64 fat-pair generalization)
+ */
+type FatSlotsX86 = struct {
+    /**
+     * ctx — the context with each slot reserved and both halves stored.
+     */
+    ctx: SelCtxX86
+    /**
+     * addrs — one scratch register per pair, holding that pair's slot address.
+     */
+    addrs: []MReg
+}
+
+/**
+ * materialize_one_fat_pair_x86 — reserve a 16-byte frame slot, take its address
+ * (`MFrameAddrX86` — the encoder resolves it to `lea scratch, [rsp+off]`, above
+ * the shadow region `compute_frame_layout_x86` already reserves) and store the
+ * pair into it: `ptr` at +0 and `len` at +8, `tk_str`'s own field order.
  *
  * Both halves store at `Q` width. `len` is a `size_t`, and the SysV path already
- * relies on the same invariant (it moves the whole 64-bit register into RSI), so
- * a narrow producer's zero-extended upper half is not a new assumption. Neither
- * half can be float-class — `lower_str_arg_call` builds the pair from a fat
- * pointer's address and byte length — so there is no `B1-fp` arm here.
+ * relies on the same invariant (it moves the whole 64-bit register into its
+ * argument register), so a narrow producer's zero-extended upper half is not a new
+ * assumption. Neither half can be float-class — every producer of a flattened pair
+ * builds it from a fat pointer's address and byte length — so there is no `B1-fp`
+ * arm here.
  *
- * @param AbiDescriptor abi  the target ABI register file (its first GPR arg reg)
  * @param SelCtxX86 ctx0  the context to extend
- * @param []u32 args  the flattened pair — `args[0]` = ptr, `args[1]` = len
- * @return PinnedArgsX86 | error  the pinned address, or a NAMED honest-stop
+ * @param u32 ptr  the VReg holding the pair's pointer half
+ * @param u32 len  the VReg holding the pair's byte length
+ * @return FreshScratchX86  the advanced context + the register holding the slot's
+ *                          address
  */
-fn pin_str_pair_by_ref_x86(abi: AbiDescriptor, ctx0: SelCtxX86, args: []u32) -> PinnedArgsX86 | error {
-    let slot = arg_reg(abi, MRegClass::GPR, 0 to u32)
-    if !slot.ok {
-        return error { message = "isel x86-64: an ABI with no integer argument register cannot pass a by-reference aggregate (internal)" }
-    }
+fn materialize_one_fat_pair_x86(ctx0: SelCtxX86, ptr: u32, len: u32) -> FreshScratchX86 {
     let frame_slot = ctx0.func.frame.len
     let with_slot = append_frame_x86(ctx0.func, lir::LAlloca { bytes = X86_STR_ARG_BYTES; align = X86_STR_ARG_ALIGN })
     let ctx1 = SelCtxX86 { func = with_slot; vinfo = ctx0.vinfo; next_scratch = ctx0.next_scratch; cur_block = ctx0.cur_block; next_block = ctx0.next_block }
     let scratch = selctx_x86_scratch(ctx1, MRegClass::GPR)
     let ctx2 = selctx_x86_emit(scratch.ctx, frame_addr_x86(scratch.reg, frame_slot))
-    let ctx3 = selctx_x86_emit(ctx2, store_x86(MMemSizeX86::Q, vreg(args[0], MRegClass::GPR), MMem { base = scratch.reg; offset = 0 to i32 }))
-    let ctx4 = selctx_x86_emit(ctx3, store_x86(MMemSizeX86::Q, vreg(args[1], MRegClass::GPR), MMem { base = scratch.reg; offset = X86_STR_LEN_OFFSET }))
-    let ctx5 = selctx_x86_emit(ctx4, mov_x86(slot.reg, scratch.reg, true))
-    PinnedArgsX86 { ctx = ctx5; uses = teko::list::push(teko::list::empty(), slot.reg) }
+    let ctx3 = selctx_x86_emit(ctx2, store_x86(MMemSizeX86::Q, vreg(ptr, MRegClass::GPR), MMem { base = scratch.reg; offset = 0 to i32 }))
+    let ctx4 = selctx_x86_emit(ctx3, store_x86(MMemSizeX86::Q, vreg(len, MRegClass::GPR), MMem { base = scratch.reg; offset = X86_STR_LEN_OFFSET }))
+    FreshScratchX86 { ctx = ctx4; reg = scratch.reg }
+}
+
+/**
+ * materialize_fat_pairs_x86 — the FIRST of the two by-reference passes: one frame
+ * copy per leading pair (`materialize_one_fat_pair_x86`), in declaration order, so
+ * `args[2k]`/`args[2k+1]` land in the slot whose address becomes argument `k`.
+ *
+ * Run entirely BEFORE any physical argument register is pinned, for the same
+ * reason `store_stack_args_x86` runs before `pin_reg_args_x86`: the memory traffic
+ * of a later pair would otherwise sit BETWEEN an earlier pair's pin and the call,
+ * competing with a live fixed interval for no reason.
+ *
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param []u32 args  the call's flattened argument VRegs (the pairs lead)
+ * @param u64 pairs  how many leading pairs to copy
+ * @return FatSlotsX86  the advanced context + one slot address per pair
+ */
+fn materialize_fat_pairs_x86(ctx0: SelCtxX86, args: []u32, pairs: u64) -> FatSlotsX86 {
+    mut ctx = ctx0
+    mut addrs: []MReg = teko::list::empty()
+    mut k: u64 = 0
+    loop {
+        if k >= pairs { break }
+        let one = materialize_one_fat_pair_x86(ctx, args[k * 2], args[k * 2 + 1])
+        ctx = one.ctx
+        addrs = teko::list::push(addrs, one.reg)
+        k++
+    }
+    FatSlotsX86 { ctx = ctx; addrs = addrs }
+}
+
+/**
+ * pin_fat_slot_addrs_x86 — the SECOND pass over the pairs: move each slot ADDRESS
+ * into the integer argument register of its own position (`addrs[k]` → argument
+ * `k`: RCX, then RDX, …) and collect those physregs as the call's `uses`.
+ *
+ * @param AbiDescriptor abi  the target ABI register file
+ * @param SelCtxX86 ctx0  the context whose slots are already filled
+ * @param []MReg addrs  one slot address per pair, in declaration order
+ * @return PinnedArgsX86 | error  the pinned addresses, or a NAMED honest-stop when
+ *                                the ABI has no argument register at that position
+ */
+fn pin_fat_slot_addrs_x86(abi: AbiDescriptor, ctx0: SelCtxX86, addrs: []MReg) -> PinnedArgsX86 | error {
+    mut ctx = ctx0
+    mut uses: []MReg = teko::list::empty()
+    mut k: u64 = 0
+    loop {
+        if k >= addrs.len { break }
+        let slot = arg_reg(abi, MRegClass::GPR, k to u32)
+        if !slot.ok {
+            return error { message = "isel x86-64: an ABI with no integer argument register cannot pass a by-reference aggregate (internal)" }
+        }
+        ctx = selctx_x86_emit(ctx, mov_x86(slot.reg, addrs[k], true))
+        uses = teko::list::push(uses, slot.reg)
+        k++
+    }
+    PinnedArgsX86 { ctx = ctx; uses = uses }
+}
+
+/**
+ * pin_trailing_scalar_args_x86 — the args AFTER the by-reference pairs, pinned
+ * into the integer argument registers that follow them: `tk_rt_last_index_of_ok`'s
+ * `uint64_t *out_index` is exactly this case (two references in RCX/RDX, the
+ * out-slot address in R8).
+ *
+ * An FPR-class trailing argument honest-stops BY NAME rather than emitting a
+ * guess: Win64 numbers its float argument registers in the SAME positional slots
+ * as its integer ones (XMM2 for argument 2, not "the third float"), which
+ * `arg_slot_x86`'s per-file counting does not model, and no fat-argument runtime
+ * entry has such a parameter. A trailing argument past the register window
+ * honest-stops too — with four integer argument registers and at most two pairs
+ * plus one out-slot, no shipped entry reaches it.
+ *
+ * @param AbiDescriptor abi  the target ABI register file
+ * @param PinnedArgsX86 pinned  the pairs already pinned (its context + uses)
+ * @param []u32 args  the call's flattened argument VRegs
+ * @param u64 pairs  how many leading pairs were passed by reference
+ * @return PinnedArgsX86 | error  every argument pinned, or a NAMED honest-stop
+ */
+fn pin_trailing_scalar_args_x86(abi: AbiDescriptor, pinned: PinnedArgsX86, args: []u32, pairs: u64) -> PinnedArgsX86 | error {
+    mut ctx = pinned.ctx
+    mut uses = pinned.uses
+    mut i: u64 = pairs * 2
+    loop {
+        if i >= args.len { break }
+        let info = vinfo_get(ctx.vinfo, args[i])
+        if info.reg_class == MRegClass::FPR {
+            return error { message = "isel x86-64: B3-argslot — a FLOAT argument after a by-reference aggregate needs Win64's shared argument-slot numbering (0.3.1)" }
+        }
+        let slot = arg_reg(abi, MRegClass::GPR, (i - pairs) to u32)
+        if !slot.ok {
+            return error { message = "isel x86-64: B1-args — an argument after a by-reference aggregate overflowed the integer argument window (0.3.1)" }
+        }
+        ctx = selctx_x86_emit(ctx, mov_x86(slot.reg, vreg(args[i], MRegClass::GPR), info.wide))
+        uses = teko::list::push(uses, slot.reg)
+        i++
+    }
+    PinnedArgsX86 { ctx = ctx; uses = uses }
+}
+
+/**
+ * pin_fat_pairs_by_ref_x86 — pass the call's `pairs` leading flattened `tk_str`
+ * pairs the Win64 way: BY REFERENCE, one 16-byte frame copy each, their addresses
+ * in the first `pairs` integer argument registers, then any trailing scalar in the
+ * register after them.
+ *
+ * THIS IS THE 0xC0000005 THE WINDOWS LEG MEASURED, in both its shapes. Emitting
+ * SysV's register form on Win64 makes a C-built callee read the STRING'S OWN first
+ * 16 bytes as `{ptr; len}` and dereference the resulting garbage: with ONE
+ * `tk_str` that was `own_print_exit`'s SIGSEGV (`void tk_print(tk_str s)` compiles
+ * to `movq (%rcx), %rcx` / `movl 0x8(%rcx), %r8d` there), and with TWO it is
+ * `own_native`'s ACCESS_VIOLATION through `tk_str_eq(a, b)` — which reads RCX and
+ * RDX as POINTERS to the two structs while the flat form put `a.ptr` in RCX and
+ * `a.len` in RDX. `tk_exit(i32)` — a scalar — was unaffected either way, which is
+ * why `own_exit_code` passed while everything touching a string faulted.
+ *
+ * The former fix covered only the one-pair family: it keyed on a TWO-operand
+ * argument list, so a four- or five-operand call could not reach it at all.
+ *
+ * @param AbiDescriptor abi  the target ABI register file
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param []u32 args  the flattened arguments — pair `k` is `args[2k]`/`args[2k+1]`
+ * @param u64 pairs  how many leading pairs travel by reference
+ * @return PinnedArgsX86 | error  the pinned arguments, or a NAMED honest-stop
+ */
+fn pin_fat_pairs_by_ref_x86(abi: AbiDescriptor, ctx0: SelCtxX86, args: []u32, pairs: u64) -> PinnedArgsX86 | error {
+    let slots = materialize_fat_pairs_x86(ctx0, args, pairs)
+    let refs = match pin_fat_slot_addrs_x86(abi, slots.ctx, slots.addrs) { PinnedArgsX86 as p => p; error as e => return e }
+    pin_trailing_scalar_args_x86(abi, refs, args, pairs)
 }
 
 /**
  * pin_call_args_x86 — the argument-pinning entry a DIRECT call goes through: the
  * by-reference `tk_str` path when the target ABI demands it
- * (`str_pair_by_ref_x86`), else the plain per-argument register pinning
+ * (`by_ref_fat_pairs_x86`), else the plain per-argument register pinning
  * (`pin_args_x86`). An indirect call never reaches a `tk_str` runtime builtin (it
  * has no symbol), so it stays on `pin_args_x86` directly.
+ *
+ * A flattened argument list SHORTER than the symbol's fat arity is an internal
+ * inconsistency between this table and the lowering that built the call, and it
+ * stops by name: falling through to `pin_args_x86` would emit the very
+ * garbage-ABI call this whole path exists to prevent, silently.
  *
  * @param AbiDescriptor abi  the target ABI register file
  * @param SelCtxX86 ctx0  the context to extend
@@ -1432,10 +1571,12 @@ fn pin_str_pair_by_ref_x86(abi: AbiDescriptor, ctx0: SelCtxX86, args: []u32) -> 
  * @return PinnedArgsX86 | error  the pinned args, or a NAMED honest-stop
  */
 fn pin_call_args_x86(abi: AbiDescriptor, ctx0: SelCtxX86, symbol: str, args: []u32, variadic: bool) -> PinnedArgsX86 | error {
-    if !variadic && str_pair_by_ref_x86(abi, symbol, args) {
-        return pin_str_pair_by_ref_x86(abi, ctx0, args)
+    let pairs = by_ref_fat_pairs_x86(abi, symbol)
+    if variadic || pairs == 0 { return pin_args_x86(abi, ctx0, args, variadic) }
+    if args.len < pairs * 2 {
+        return error { message = teko::str::concat("isel x86-64: `", symbol, "` was lowered with fewer flattened operands than its by-value `tk_str` arity (internal)") }
     }
-    pin_args_x86(abi, ctx0, args, variadic)
+    pin_fat_pairs_by_ref_x86(abi, ctx0, args, pairs)
 }
 
 /**
@@ -1489,7 +1630,7 @@ fn call_result_reg_x86(ret_type: lir::LType) -> MReg {
 
 /**
  * select_call_x86 — the `LCall` selection (§4.5): lower the arguments into
- * the target ABI's registers (`pin_call_args_x86` — which routes a flattened
+ * the target ABI's registers (`pin_call_args_x86` — which routes EVERY flattened
  * `tk_str` pair through the by-reference path on an ABI that demands it), emit
  * `MCallX86{sym, uses, ret_reg, has_result, variadic}` with the result pinned to
  * RAX (decision D-A —
