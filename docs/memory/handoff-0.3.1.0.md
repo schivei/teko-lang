@@ -19,6 +19,95 @@ hipótese, está dito.
 
 
 
+## 0i. DEGRAU 30 DRENADO, e há DEGRAU 31 — a escada avançou por medição (2026-07-30)
+
+`cargo/0.3.1.0-degrau-30` @ `a082254` drenado no vagão. `drain_guard`: sem mudança em
+`.github/workflows/`. Merge `ort` sem conflitos, 7 ficheiros, +905/−82.
+
+### A PARAGEM VIVA NÃO ERA O `null` — ERA A ARIDADE
+
+`lower_null_pattern_test` testava a etiqueta literal `0` sob a guarda do classificador de união-nula de
+**dois** membros, logo só respondia a `{ null, X }`. O `emit_variant_wrap` do próprio compilador faz
+`match … { []byte as o; error as e; null }` sobre `[]byte | null | error` — **três** membros.
+
+E o gémeo obrigatório: `return null` para dentro de três membros caía no `lower_variant_construct`,
+cuja busca POR TIPO não tem caso `Null`, e parava com *"value's type is not a member of its declared
+variant (internal)"*. **Landar só o leitor teria sido pior que nada** — um braço `null` a testar uma
+etiqueta que ninguém escreve.
+
+Achado de brinde, corrigido pelo agente: as etiquetas `0`/`1` eram literais enquanto o classificador
+aceitava **as duas ordens** de membro — um `{ X, null }` teria os dois braços trocados, **em silêncio**.
+Agora são procuradas (`variant_null_member_index`).
+
+### DEGRAU 31 — o novo stop, e é PROGRESSO, não defeito
+
+```
+base: native backend N1: `null` match pattern not yet lowered (N2) [in `teko::codegen::emit_variant_wrap`]
+nova: native backend N1: `vt_table` is not a fat-pointer local (internal) [in `teko::codegen::cg_pair_is_iface_vtable`]
+```
+
+Provado com um diferencial **2×2** (compilador base/novo × fonte base/nova): o compilador **novo** na
+fonte **base intocada** dá a paragem nova; o compilador **base** na fonte nova continua a dar a antiga.
+**A fronteira é do gerador, não da fonte.**
+
+Mecanismo, com repro de 10 linhas reproduzido NO COMPILADOR DA BASE: `typeexpr_is_fat_named` desiste em
+`single_segment_name(nt.path)` e o doc de `typeexpr_is_fat_walk` di-lo — *"multi-segment path … is
+never fat"*. Um parâmetro cujo tipo é um alias **QUALIFICADO** para um gordo
+(`vt_table: checker::TypeTable`, alias de `[]TypeReg`) é ligado como ESCALAR e a leitura fat estoura.
+Alias de um só segmento funciona; qualificado não. **Não é** o `native_iface_fat_known_stop` (esse é o
+RESULTADO de despacho, não o parâmetro).
+
+### O RITUAL QUE O AGENTE CORREU (e é o padrão a exigir)
+
+- FIXPOINT **gen2 == gen3 byte a byte** e `gen2.c == gen3.c`, duas vezes: antes e depois do merge forward.
+- Unitários na **gen2** da árvore fundida: **1140 testes, 1140 ok, zero pânicos**. Contagem de `#test`:
+  base 1131 → HEAD 1140, **as +9 são todas de upstream, zero do agente**.
+- `TEKO_MEM_PARANOID=1` exit 0, pico **2192.7 MB** (gen1 normal 1562.8 MB).
+- Corpus `own_native` completo: rota própria **42**, rota C **42**.
+- Os três known-stops da família medidos na gen2 — **nenhum levantou**.
+- Semente: `bootstrap/teko.c` → gen0 → gen1 (`TEKO_BACKEND=c`), porque **`fetch_teko.sh` dá HTTP 403**.
+
+### AS TRÊS CONFERÊNCIAS DE §0h/§0c, CORRIDAS POR MIM NO MERGE
+
+| conferência | antes | depois |
+|---|---|---|
+| `fn` em `corpus.tks` (não pode DESCER) | 202 | **235** |
+| splices / chaves desequilibradas em todos os `.tks` | — | **0** |
+| `f_*` chamado sem definição (direcção 1) | — | **nenhuma** (129 chamadas) |
+| `f_*` definido e nunca chamado (direcção 2) | — | só `f_fat_field_len`, a excepção legítima que o agente nomeou |
+
+### DUAS COISAS REPORTADAS PELO AGENTE, e a primeira é uma LEI NOVA
+
+1. **NENHUM código de saída de fixture pode passar de 255 — e 256 mapeia para 0.** Medido:
+   `exit(260)` dá **4** no POSIX. A fixture `own_native/main.tks` usa 260–269 **e também usa 4–13**,
+   logo uma falha na linha 260 sai com o código da linha 4: **a falha é atribuída à cena errada.**
+   Não é falso-verde (o `.tkr` espera 42), é MENTIRA SOBRE QUAL linha quebrou — e a barra do tronco
+   proíbe exactamente isto. Pior ainda: a faixa 250–259 que o agente sugeriu tem o 256, que mapeia
+   para **0**.
+   **Corolário da família, medido em todo o repo:** os únicos códigos > 255 são estes dez, num único
+   ficheiro (`examples/regressions/own_native/main.tks`). O `99999999999` de
+   `src/casting/casting.tks` é um literal numérico de teste de cast, não um código de saída.
+   **Faixas livres ≤ 255 nesta fixture:** 81-89, 93-99, 101-129, 141-159, 162-169, 177-189, 193-209,
+   **235-255**. O remap fica enfileirado para 235–244, com a guarda a fechar dos dois lados: nenhum
+   código de fixture > 255.
+2. **A rota C não alarga união em união mais larga.** `let l: i64 | null | error = if n == 0 { null }
+   else { n }` — o `if` junta-se em `i64 | null` e a rota C emite `tk_u_null_i64` para um slot
+   `tk_u_null_i64_error`: `error: invalid initializer`. Pré-existente, família do ALARGAMENTO de
+   uniões, não do padrão `null`.
+
+E uma atribuição que se fecha: o SIGABRT de `lwt_lowers_str_index_loads_the_byte_off_rodata` foi
+atribuído por medição a `1ea5b68` (a guarda de fronteira, que mudou só `src/lir/lower.tks` e nunca o
+teste que fixava a sua saída) e **já estava corrigido upstream em `3fe4018`**. Não é do agente, e está
+fechado.
+
+### A REPARAÇÃO DAS CAUDAS, medida uma TERCEIRA vez — e o número muda
+
+O agente do degrau 30 reparou o mesmo dano de §0h, e mediu-o contra os progenitores `5f5eca0`/`880dc37`:
+**sete aberturas `/**` e SEIS finais de função** (`0` + `}`) perdidos nas junturas, com o ficheiro a não
+lexar em `3710:18: unexpected character`. Eu contei "sete caudas" e o agente do `unknown function`
+também. **Sete/seis, não sete/sete** — a discrepância fica registada em vez de arredondada, porque a
+lei de §0h depende de se contar o que se mediu.
+
 ## 0h. O `unknown function` ERA DANO MEU — a `--union` comeu sete caudas de função (2026-07-30)
 
 **A causa está encontrada, e não era do compilador.** Nenhuma das minhas duas hipóteses (cap de
