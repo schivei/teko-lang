@@ -1195,3 +1195,40 @@ são válidos, mas só se puder prová-los que não são possíveis."* Portanto:
 **A PROVA DE QUE A LEI É NECESSÁRIA está na própria história deste documento:** a red-flag 3 não medida
 fez o dono rejeitar um arco inteiro. Um alarme não provado não é prudência — **custa uma decisão
 errada**.
+
+### O PORTÃO DO `tdb` — É PROPOSTA, E NÃO ENTRA ANTES DE TEKO SER 100% NATIVO (dono, 2026-07-30)
+
+Verbatim: *"a ideia é uma proposta, não iremos implementar nada disso nessa versão ou em outra próxima,
+primeiro precisamos do teko 100% nativo (emissão e linhagem)."*
+
+**O documento é PROPOSTA. Não é plano de execução, não é fila, não é orçamento a consumir.** Nada do
+arco `tdb` — nem os crumbs do piso, nem `kind = "tool"` como parte dele — entra nesta versão nem na
+seguinte. Quem despachar um crumb do `tdb` antes do portão está a violar isto.
+
+**O PORTÃO, e ele é MAIOR que a escada de degraus.** *"emissão e linhagem"* — a segunda palavra é
+**ligação**, e não é interpretação minha: está ratificada em
+`docs/design/expurgo-do-c-e-a-busca-por-linker-0.3.1.md`, com as palavras dele:
+
+> *"não é .c que importa, importa o linker, dito isso, nem mesmo cc ou gcc importam, importa o linker
+> pq não devemos mais emitir nenhum arquivo .c e todos os arquivos .c e .h presentes no [repo] …
+> incluindo ajustes nas lanes e no compilador para procurar pelo linker e não pelo compilador C."*
+>
+> *"E sobre mingw, proibido, tem que usar o linker nativo e não emulado"*
+
+**Portanto o portão tem DUAS metades, e a escada de degraus é só a primeira:**
+
+| metade | estado |
+| --- | --- |
+| **emissão** nativa — o backend nativo gera e auto-hospeda | escada de degraus; a paragem viva é o **degrau 27** (`ftoa`) |
+| **ligação** nativa — linker próprio, sem `cc`/`gcc`, sem emulação | o **expurgo do C**, com a sua própria fatia 6 (*"REMOVER DO FONTE … a emissão de C"*) pendente |
+
+**A CONSEQUÊNCIA PRÁTICA, e é o que evita trabalho desperdiçado:** um crumb do `tdb` escrito hoje
+assenta numa árvore que ainda liga por `cc`. O `tdb` precisa de parar processos e ler tabelas de um
+binário que **ele** próprio não produziu ainda de ponta a ponta. Fazer o `tdb` antes do portão é
+construir sobre a metade que vai mudar.
+
+**E há um item da proposta que NÃO está bloqueado, e vale separá-lo** — porque não é do `tdb`: o
+`kind` desconhecido a panicar (ordem directa do dono, `manifest.tks:565`) é defeito vivo hoje, com
+consequência hoje (`kind = "binari"` constrói em silêncio). Esse fica na fila normal. O que espera é o
+`kind = "tool"` **enquanto veículo do `tdb`** — a feature de manifesto pode andar quando o dono quiser,
+mas não é pré-requisito de nada nesta versão.
