@@ -1232,3 +1232,57 @@ construir sobre a metade que vai mudar.
 consequência hoje (`kind = "binari"` constrói em silêncio). Esse fica na fila normal. O que espera é o
 `kind = "tool"` **enquanto veículo do `tdb`** — a feature de manifesto pode andar quando o dono quiser,
 mas não é pré-requisito de nada nesta versão.
+
+## ARMADILHA DE LINGUAGEM — UM VALOR POR OMISSÃO É RESOLVIDO NO CHAMADOR (medido 2026-07-30)
+
+**Custou o vagão inteiro vermelho, e 24 jobs a falhar por um token.** O degrau 27 deu a `call_inst` e a
+`call_indirect_inst` um parâmetro com valor por omissão:
+
+```teko
+pub fn call_inst(…, ret_type: LType = LType::I64) -> LInst      // em src/lir/lir.tks, namespace teko::lir
+```
+
+Dentro de `teko::lir`, `LType::I64` escreve-se nu e compila. Mas **o valor por omissão é materializado em
+CADA SÍTIO DE CHAMADA**, e há **dez ficheiros fora de `teko::lir`** a chamar `call_inst`. Num chamador em
+`teko::backend`, `LType` nu não é visível:
+
+```
+type 'LType' is not visible bare from namespace 'teko::backend' — it is declared in: teko::lir
+```
+
+**A REGRA:** num parâmetro com valor por omissão, o **tipo** resolve-se na namespace que DECLARA, mas a
+**expressão do valor** resolve-se na namespace que CHAMA. Portanto **o valor por omissão tem de ser
+escrito totalmente qualificado**, mesmo quando parece redundante dentro da própria namespace.
+
+**O precedente correcto já existia na mesma árvore** — `src/lir/lower.tks:11782`:
+
+```teko
+pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::list::empty(), …)
+```
+
+Tipo nu (`[]LStructLayout`), **valor totalmente qualificado** (`teko::list::empty()`). Era o molde a
+seguir.
+
+### E UM DEFEITO DE DIAGNÓSTICO, que quase me fez consertar o ficheiro errado
+
+A mensagem dizia:
+
+```
+src/backend/isel_arm64_test.tkt:397:112: type 'LType' is not visible bare …
+```
+
+**Aquele ficheiro está intacto** — não foi tocado pelo dreno, e a sua linha 397 tem **18 caracteres**,
+logo a coluna 112 não existe. Medido: `397:112` é a posição do `LType::I64` em
+**`src/lir/lir.tks`**, a DECLARAÇÃO. **O diagnóstico junta o ficheiro do CHAMADOR com a linha:coluna da
+DECLARAÇÃO** — e apontar para uma posição que não existe é pior que não apontar, porque manda o leitor
+procurar no sítio errado. Eu perdi várias medições a confirmar que o ficheiro acusado estava limpo.
+
+**Achado a corrigir quando esta família for tocada:** ou a posição é a do sítio de chamada, ou é a da
+declaração com o ficheiro da declaração — nunca uma metade de cada.
+
+### E A LIÇÃO DE PROCESSO, que é a mais caras das três
+
+**O agente do degrau 27 nunca correu a suíte completa** (o contentor matou-o antes do relatório), e
+`call_inst` é chamada em dez ficheiros fora da sua namespace. **Uma mudança de assinatura pública exige
+a suíte, não só as fixtures do arco.** Eu drenei sem relatório, sabendo o risco e tendo-o escrito — e o
+risco materializou-se exactamente onde estava previsto.
