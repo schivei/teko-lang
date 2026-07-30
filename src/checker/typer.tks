@@ -4184,30 +4184,80 @@ fn type_ref_binding_value(bv: parser::Expr, rf: Reference, env: Env, table: Type
     if !type_eq(v.type, rf.inner) {
         return teko::error::err_typed(error { message = "a `ref` binding's source must be the referent's own type (or another reference)" }, type_render(rf.inner), type_render(v.type))
     }
-    match bv.kind {
-        parser::Var as var => match lookup_binding(env, var.name) {
-            ValBinding as vb => {
-                if !vb.is_mut { return error { message = $"cannot take a reference to immutable `{var.name}` — a `ref` binding needs a mutable source (a `var`) or another reference" } }
-                v
-            }
-            error => return error { message = "a `ref` binding's source must be a mutable variable (a `var`) or another reference" }
-        }
-        _ => error { message = "a `ref` binding's source must be a mutable variable (a `var`) or another reference — not an expression" }
-    }
+    ref_source_mutable_var(bv, v, env)
+}
+
+/**
+ * ref_source_mutable_var — the ALIAS-path source rule, shared by the annotated (`ref r: T = c`) and
+ * the inferred (`ref r = c`) reference binding: the source must be a bare variable whose binding is
+ * writable. A `ref` aliases an existing cell, so a temporary or an immutable `let` has no cell to
+ * write through and the honest stop names the real fix rather than degrading into a copy.
+ *
+ * @param bv   the binding's source expression, untyped (the only place a bare `Var` is still visible)
+ * @param v    the same expression already typed (returned unchanged when the rule holds)
+ * @param env  the typing environment, consulted for the source binding's writability
+ * @return     `v` unchanged
+ * @throws     when the source is not a bare variable, is unbound, or names a non-writable binding
+ * @since      0.3.1
+ */
+fn ref_source_mutable_var(bv: parser::Expr, v: TExpr, env: Env) -> TExpr | error {
+    let var = match bv.kind { parser::Var as x => x; _ => return error { message = "a `ref` binding's source must be a mutable variable (a `var`) or another reference — not an expression" } }
+    let vb = match lookup_binding(env, var.name) { ValBinding as b => b; error => return error { message = "a `ref` binding's source must be a mutable variable (a `var`) or another reference" } }
+    if vb.is_mut { return v }
+    error { message = $"cannot take a reference to immutable `{var.name}` — a `ref` binding needs a mutable source (a `var`) or another reference" }
+}
+
+/**
+ * type_inferred_ref_value — type the source of an UN-ANNOTATED reference binding `ref r = c`, whose
+ * referent type is inferred from the source instead of read off a `Ref<>`-wrapped annotation (owner
+ * ruling 2026-07-30). Same two cases as the annotated path and no third one: an already-`Reference`
+ * value forwards unchanged, any other value must be a writable variable and keeps its BARE type on
+ * the alias path (codegen's `emit_as_r` sees the `Reference`-expected / bare-value mismatch and
+ * emits the `&`). There is deliberately NO copy fallback — the silent copy this replaces compiled
+ * `ref r = c` into an ordinary `mut` snapshot and let every later write to `c` go unseen by `r`.
+ *
+ * @param bv     the binding's source expression
+ * @param env    the typing environment
+ * @param table  the resolved type table
+ * @return       the typed source (bare-typed on the alias path, `Reference`-typed when forwarding)
+ * @throws       when the source is neither a writable variable nor an already-`Reference` value
+ * @since        0.3.1
+ */
+fn type_inferred_ref_value(bv: parser::Expr, env: Env, table: TypeTable) -> TExpr | error {
+    let v = match type_expr(bv, env, table) { TExpr as te => te; error as e => return e }
+    match v.type { Reference => return v; _ => { } }
+    ref_source_mutable_var(bv, v, env)
+}
+
+/**
+ * ref_bound_of — the BOUND type of a reference binding whose referent type came from the source
+ * rather than an annotation: a forwarded reference keeps its own `Reference` type (a reference to a
+ * reference is not a thing the surface can spell), any other referent type `T` binds as `Ref<T>`.
+ *
+ * @param t  the typed source's type
+ * @return   `t` when it is already a `Reference`, else `Reference { inner = t }`
+ * @since    0.3.1
+ */
+fn ref_bound_of(t: Type) -> Type {
+    match t { Reference => t; _ => Reference { inner = t } }
 }
 
 /**
  * Types a binding's value with the annotation as its expected type (so a generic constructor
- * targets the concrete instance from `: Box<i64>`) — or, when the annotation is a `Reference`
- * (a `ref` binding), routes through `type_ref_binding_value`'s mutable-source/forwarding rule
- * instead of the ordinary widening/literal-adoption path (0.3.1 — owner ruling 2026-07-24).
+ * targets the concrete instance from `: Box<i64>`) — or, when the binder was `ref`, routes through
+ * the mutable-source/forwarding rule instead of the ordinary widening/literal-adoption path
+ * (0.3.1 — owner rulings 2026-07-24 and 2026-07-30). The reference-ness is read from `b.is_ref`,
+ * the binder's own identity axis, so an UN-annotated `ref r = c` takes the same rule as `ref r: T =
+ * c` instead of falling through to the plain-value path that used to copy it.
  *
  * @param b      the binding whose value is typed
  * @param env    the typing environment
  * @param table  the resolved type table
  * @return       the typed initializer
+ * @throws       when a `ref` binder's source breaks the mutable-source/forwarding rule
  */
 fn type_binding_value(b: parser::Binding, env: Env, table: TypeTable) -> TExpr | error {
+    if b.is_ref && !b.has_type { return type_inferred_ref_value(b.value, env, table) }
     if b.has_type {
         let at = match resolve_type(b.type_ann, table, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the binding's enclosing namespace
         match at { Reference as rf => return type_ref_binding_value(b.value, rf, env, table); _ => { } }
@@ -4272,7 +4322,7 @@ fn bind_value_into_annotation(v: TExpr, raw: parser::Expr, ann: Type, table: Typ
 
 fn type_binding(b: parser::Binding, env: Env, table: TypeTable) -> TypedStmt | error {
     mut v = match type_binding_value(b, env, table) { TExpr as te => te; error as e => return e }
-    mut bound = v.type
+    mut bound = if b.is_ref && !b.has_type { ref_bound_of(v.type) } else { v.type }
     if type_is_void(bound) { return error { message = "cannot bind a `void` expression — it yields no value (M.1)" } }
     if b.has_type {
         let at = match resolve_type(b.type_ann, table, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the binding's enclosing namespace

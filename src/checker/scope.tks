@@ -11,7 +11,10 @@ use teko::parser
  *
  * @param name      the bound identifier
  * @param type      the binding's resolved value type
- * @param is_mut    true ONLY for a `mut` local; let/const/params/match-bindings are false (B.21)
+ * @param is_mut    true iff writes THROUGH this binding are permitted: a `mut` local, or a binding
+ *                  of `Reference` type in ANY binder position (a `ref` is mutable by definition —
+ *                  owner ruling 2026-07-30). `let`/`const`/plain params/match-binders are false
+ *                  (B.21). `define` computes it via `binding_is_writable`
  * @param ns        the declaring namespace of a top-level fn/const; "" for locals/params (#41)
  * @param is_const  true iff this names a module-level `const` (#594 crumb 2)
  * @param vis       the declaring visibility of a top-level `const` — gates a namespace-qualified
@@ -135,10 +138,39 @@ pub fn with_file(env: Env, file: str) -> Env { Env { base = env.base; bindings =
 // used when entering a free function).
 pub fn with_owner(env: Env, owner: str) -> Env { Env { base = env.base; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = owner; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file } }
 
-// define a LOCAL name (append). `is_mut`: a `mut` binding passes true; everything else false (B.21).
-// Locals carry no namespace ("").
+/**
+ * binding_is_writable — the SINGLE decision point for "may this binding be written through?"
+ * (owner ruling 2026-07-30). `let`/`mut` is the MUTABILITY axis; `ref` is the IDENTITY axis and is
+ * born mutable — by definition a `ref` can only be mutable, so `ref mut` does not exist and every
+ * reference binding grants write-through in EVERY binder position. A caller that knows only the
+ * declared `mut`-ness therefore ORs in the reference axis HERE instead of at each of the fourteen
+ * `define` call sites — which is exactly the defect this replaces: a `ref` PARAMETER was defined
+ * with `is_mut = false` (params are immutable — B.21) and every write through it was refused B.21.
+ *
+ * @param t       the binding's resolved value type
+ * @param is_mut  true iff the binder itself declared mutability (`mut`, or the `ref` desugar)
+ * @return        true iff writes through this binding are permitted
+ * @since         0.3.1
+ */
+fn binding_is_writable(t: Type, is_mut: bool) -> bool {
+    if is_mut { return true }
+    match t { Reference => true; _ => false }
+}
+
+/**
+ * define — bind a LOCAL name in `env` (appended; later bindings shadow earlier). Locals carry no
+ * namespace (""). `is_mut` states only what the BINDER declared: a `mut` local (and the `ref`
+ * desugar) passes true, `let`/`const`/params/match-binders pass false (B.21). The reference axis is
+ * added by `binding_is_writable`, so a `ref`-typed binding is writable whichever binder defined it.
+ *
+ * @param env     the environment to extend
+ * @param name    the bound identifier
+ * @param t       the binding's resolved value type
+ * @param is_mut  true iff the binder declared mutability
+ * @return        `env` extended with the new local binding
+ */
 pub fn define(env: Env, name: str, t: Type, is_mut: bool) -> Env {
-    Env { base = env.base; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = is_mut; ns = ""; is_const = false; vis = parser::Visibility::Pub }); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file }
+    Env { base = env.base; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = binding_is_writable(t, is_mut); ns = ""; is_const = false; vis = parser::Visibility::Pub }); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file }
 }
 
 // (#41) define a TOP-LEVEL FUNCTION binding carrying its declaring namespace.
