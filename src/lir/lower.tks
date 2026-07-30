@@ -4411,9 +4411,14 @@ fn build_closure_thunk(symbol: str, target_sym: str, ptypes: []LType, ret_ty: LT
 /**
  * build_closure_literal — a closure VALUE `{fn@0, env@8}` (§5.3): alloca a
  * 16-byte slot, store `fn_symbol`'s `LFuncAddr` VReg at offset 0 and
- * `env_vreg` at offset 8 — the RESULT is the slot's base address (a Ptr
- * VReg), the same memory shape `lower_closure_fatptr` reads back (A1-7,
- * #382).
+ * `env_vreg` at offset 8, then COPY the filled slot into runtime storage
+ * (`emit_elem_box`) — the RESULT is that copy's base address (a Ptr VReg),
+ * the same memory shape `lower_closure_fatptr` reads back (A1-7, #382).
+ *
+ * The copy is the closure's OTHER half of the same lifetime rule
+ * `build_lambda_env` documents: both words of a returned closure have to
+ * survive the frame that built it, so boxing only the env would move the
+ * dangling pointer rather than remove it.
  *
  * @param LowerCtx ctx  the lowering context
  * @param str fn_symbol  the callable's (already-mangled or lifted) symbol
@@ -4435,7 +4440,7 @@ fn build_closure_literal(ctx: LowerCtx, fn_symbol: str, env_vreg: u32, line: u32
     let eslot = ctx_alloc(with_fn_store)
     let with_eslot_addr = ctx_append(eslot.ctx, field_addr_inst(eslot.vreg, base.vreg, ptr_size, line, col))
     let with_env_store = ctx_append(with_eslot_addr, store_inst(eslot.vreg, env_vreg, LType::Ptr, line, col))
-    Lowered { ctx = with_env_store; vreg = base.vreg }
+    emit_elem_box(Lowered { ctx = with_env_store; vreg = base.vreg }, ptr_size * 2, line, col)
 }
 
 /**
@@ -4641,9 +4646,15 @@ fn store_lambda_captures(ctx: LowerCtx, base: u32, layout: LStructLayout, captur
 
 /**
  * build_lambda_env — a lambda's env VALUE: a null Ptr const when it captures
- * nothing, else an alloca'd aggregate (`lambda_env_layout`) with every
- * capture's CURRENT value stored in (`store_lambda_captures`) — the address
- * the lifted body's `bind_lambda_captures` reads back from (A1-7, #382).
+ * nothing, else an aggregate (`lambda_env_layout`) with every capture's
+ * CURRENT value stored in (`store_lambda_captures`) — the address the lifted
+ * body's `bind_lambda_captures` reads back from (A1-7, #382).
+ *
+ * The filled aggregate is built in a frame `alloca` and then COPIED into runtime storage
+ * (`emit_elem_box`), because a closure outlives the statement that made it: `fn f() -> (u64) ->
+ * void { (n: u64) => { … } }` returns a value whose env word would otherwise aim at the frame the
+ * `ret` popped. `frame_escape_guard` reports exactly that shape, and reported it on the corpus's
+ * own `rd_tick_fn` (0.3.1.0 degrau agregado-copia).
  *
  * @param LowerCtx ctx  the lowering context (the ENCLOSING scope)
  * @param LStructLayout layout  the env aggregate's resolved layout
@@ -4660,7 +4671,8 @@ fn build_lambda_env(ctx: LowerCtx, layout: LStructLayout, captures: []checker::T
     }
     let base = ctx_alloc(ctx)
     let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, layout.size, layout.align, line, col))
-    store_lambda_captures(with_alloca, base.vreg, layout, captures, line, col)
+    let filled = match store_lambda_captures(with_alloca, base.vreg, layout, captures, line, col) { Lowered as x => x; error as err => return err }
+    emit_elem_box(filled, layout.size, line, col)
 }
 
 /**
@@ -9194,8 +9206,27 @@ fn box_aggregate_value(v: Lowered, box_bytes: u32, e: checker::TExpr) -> Lowered
  */
 fn box_aggregate_value_at(v: Lowered, box_bytes: u32, line: u32, col: u32) -> Lowered {
     if box_bytes == 0 { return v }
+    emit_elem_box(v, box_bytes, line, col)
+}
+
+/**
+ * emit_elem_box — the `tk_slice_elem_box` call itself, WITHOUT the "0 means no copy" shortcut its
+ * callers apply.
+ *
+ * The shortcut is right for a type-driven width (0 there means "a register value, which needs no
+ * storage of its own") and WRONG for a length-driven one: an EMPTY array literal is 0 bytes wide
+ * and still must not hand its caller a frame address. `tk_alloc` already maps `n == 0` to a unique
+ * block, so the zero-width box is a real, distinct, frame-independent pointer.
+ *
+ * @param v      the already-lowered value (the address of the bytes to copy)
+ * @param bytes  the copy width, which MAY be 0
+ * @param line   the source line to propagate onto the emitted copy
+ * @param col    the source column to propagate onto the emitted copy
+ * @return       the address of the runtime copy
+ */
+fn emit_elem_box(v: Lowered, bytes: u32, line: u32, col: u32) -> Lowered {
     let size = ctx_alloc(v.ctx)
-    let with_size = ctx_append(size.ctx, const_int_inst(size.vreg, box_bytes to i64, line, col))
+    let with_size = ctx_append(size.ctx, const_int_inst(size.vreg, bytes to i64, line, col))
     mut args: []u32 = teko::list::push(teko::list::empty(), v.vreg)
     args = teko::list::push(args, size.vreg)
     let boxed = ctx_alloc(with_size)
@@ -11342,7 +11373,7 @@ fn lower_array_lit(ctx: LowerCtx, e: checker::TExpr, al: checker::TArrayLit) -> 
     let base = ctx_alloc(ctx)
     let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, total, elem_byte_align(elem_t, ctx.enums), e.line, e.col))
     let filled = match store_array_elements(with_alloca, base.vreg, elem_t, al.elements, stride, e.line, e.col) { Lowered as x => x; error as err => return err }
-    box_aggregate_value(filled, total, e)
+    emit_elem_box(filled, total, e.line, e.col)
 }
 
 /** store_array_elements — lower each non-spread element in turn, storing it at its
@@ -12401,7 +12432,9 @@ pub fn lower_program(prog: checker::TProgram, flat_symbols: bool = false) -> LMo
         i++
     }
     let vmain = match lower_virtual_main(loose, layouts, enums, m.rodata, lifted, externs, flat_symbols, variants, ref_fns, field_decls) { LoweredFunction as x => x; error as err => return err }
-    fold_lifted_funcs(add_func(with_rodata(m, vmain.rodata), vmain.func), vmain.lifted)
+    let whole = fold_lifted_funcs(add_func(with_rodata(m, vmain.rodata), vmain.func), vmain.lifted)
+    match frame_escape_guard(whole) { error as e => return e; null => { } }
+    whole
 }
 
 /**
