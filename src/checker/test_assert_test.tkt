@@ -643,3 +643,45 @@ fn taf_arg_text_falls_back_for_an_unwritten_shape() {
     let lam = TExpr { kind = TLambda { params = teko::list::empty(); body = teko::list::empty(); captures = teko::list::empty(); ret = Void { }; lift_id = 0 }; type = Void { }; line = 0; col = 0 }
     teko::assert::eq_str(assert_arg_text(lam), "<lambda>")
 }
+
+/**
+ * THE FOLD AXIS IS COMBINATORIAL, and the census keeps it as a NUMBER: a test whose every predicate
+ * folds cannot fail — and that is true whether the run is green or red — while a test where only
+ * some fold is a different animal that a `folded >= 1` boolean would flatten into the same verdict.
+ */
+#test
+fn taf_census_separates_fully_folded_tests_from_partly_folded_ones() {
+    let all_folded = taf_named_fn("a", taf_one_assert_blk(), "p.tks", true)
+    mut mixed_body = teko::list::push(teko::list::empty(), taf_expr_stmt(taf_assert("is_true", taf_bool(true))))
+    mixed_body = teko::list::push(mixed_body, taf_expr_stmt(taf_assert("is_true", taf_var("x"))))
+    let partly = taf_named_fn("b", mixed_body, "p.tks", true)
+    let live = taf_named_fn("c", teko::list::push(teko::list::empty(), taf_expr_stmt(taf_assert("is_true", taf_var("x")))), "p.tks", true)
+    mut fns = teko::list::push(teko::list::empty(), all_folded)
+    fns = teko::list::push(fns, partly)
+    fns = teko::list::push(fns, live)
+    let c = assert_census(taf_prog(fns))
+    teko::assert::is_true(c.tests_all_folded > 0)
+    teko::assert::is_true(c.tests_some_folded > 0)
+    teko::assert::is_true(c.tests_all_folded == 1)
+    teko::assert::is_true(c.tests_some_folded == 1)
+    teko::assert::is_true(c.folded == 2)
+    teko::assert::is_true(c.bool_predicate == 4)
+}
+
+/** A test with no assertion at all is neither fully nor partly folded — the zero-total guard. */
+#test
+fn taf_census_does_not_call_an_assertionless_test_folded() {
+    let c = assert_census(taf_prog(teko::list::push(teko::list::empty(), taf_named_fn("t", teko::list::empty(), "p.tks", true))))
+    teko::assert::is_true(c.tests_all_folded == 0)
+    teko::assert::is_true(c.tests_some_folded == 0)
+}
+
+/** The fold line reports BOTH units — folded assertions and fully/partly folded tests. */
+#test
+fn taf_fold_line_reports_assertions_and_tests() {
+    mut body = teko::list::push(teko::list::empty(), taf_expr_stmt(taf_assert("is_true", taf_bool(true))))
+    body = teko::list::push(body, taf_expr_stmt(taf_assert("is_true", taf_var("x"))))
+    let line = assert_fold_line(assert_census(taf_prog(teko::list::push(teko::list::empty(), taf_named_fn("t", body, "p.tks", true)))))
+    teko::assert::str_contains(line, "1 of 2 bool-predicate assertions fold to a constant")
+    teko::assert::str_contains(line, "0 of 1 #test fully folded (cannot fail), 1 partly")
+}

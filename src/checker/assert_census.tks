@@ -14,6 +14,12 @@ pub type AssertCensus = struct {
     declared: u64
     /** the bool-predicate subset (`is_true`/`is_false`), the population the fold axis decides. */
     bool_predicate: u64
+    /** how many of those bool-predicate assertions have a comptime-decided predicate (dead guards). */
+    folded: u64
+    /** `#test` functions whose EVERY bool-predicate assertion folds — they cannot fail. */
+    tests_all_folded: u64
+    /** `#test` functions where SOME but not all fold — the band a `folded >= 1` boolean erases. */
+    tests_some_folded: u64
     /** declared assertions reached on EVERY run of their test. */
     mandatory: u64
     /** declared assertions reached only on some paths (conditional, in a `loop`, or after an exit). */
@@ -32,7 +38,10 @@ pub type AssertCensus = struct {
  * @return  a census with every field at zero
  */
 fn census_empty() -> AssertCensus {
-    AssertCensus { tests = 0; declared = 0; bool_predicate = 0; mandatory = 0; flow = 0; hopped = 0; silent_direct = 0; silent_hopped = 0 }
+    AssertCensus {
+        tests = 0; declared = 0; bool_predicate = 0; folded = 0; tests_all_folded = 0; tests_some_folded = 0
+        mandatory = 0; flow = 0; hopped = 0; silent_direct = 0; silent_hopped = 0
+    }
 }
 
 /**
@@ -74,6 +83,9 @@ fn census_add_test(c: AssertCensus, f: TFunction, helpers: []TFunction) -> Asser
         tests = c.tests + 1
         declared = c.declared + full.len
         bool_predicate = c.bool_predicate + stats.total
+        folded = c.folded + stats.folded
+        tests_all_folded = c.tests_all_folded + census_is_all_folded(stats)
+        tests_some_folded = c.tests_some_folded + census_is_some_folded(stats)
         mandatory = c.mandatory + census_count_kind(full, AssertKind::Mandatory)
         flow = c.flow + census_count_kind(full, AssertKind::Flow)
         hopped = c.hopped + census_count_hopped(full)
@@ -91,6 +103,37 @@ fn census_add_test(c: AssertCensus, f: TFunction, helpers: []TFunction) -> Asser
 fn census_is_silent(sites: []AssertSite) -> u64 {
     if sites.len == 0 { return 1 }
     0
+}
+
+/**
+ * One when EVERY bool-predicate assertion of a test folds to a constant, zero otherwise.
+ *
+ * This is the corner the owner's table names twice: all-green-all-folded is a green that says
+ * nothing, all-red-all-folded is legitimate TDD. Either way the test cannot fail on its own
+ * predicates, and the outcome alone does not reveal which of the two it is.
+ *
+ * @param s  the test's bool-predicate tally
+ * @return   1 when the test asserts at least once and every predicate folds, else 0
+ */
+fn census_is_all_folded(s: AssertStats) -> u64 {
+    if s.total == 0 { return 0 }
+    if s.folded < s.total { return 0 }
+    1
+}
+
+/**
+ * One when SOME but not all of a test's bool-predicate assertions fold, zero otherwise.
+ *
+ * This band is exactly what a `folded >= 1` boolean throws away: with it, "1 of 40 folded" and
+ * "40 of 40 folded" become the same verdict.
+ *
+ * @param s  the test's bool-predicate tally
+ * @return   1 when at least one but not every predicate folds, else 0
+ */
+fn census_is_some_folded(s: AssertStats) -> u64 {
+    if s.folded == 0 { return 0 }
+    if s.folded >= s.total { return 0 }
+    1
 }
 
 /**
@@ -180,6 +223,30 @@ pub fn assert_census_line(c: AssertCensus) -> str {
     let cls = $"{c.mandatory} MANDATORY / {c.flow} FLOW"
     let silent = $"silent {c.silent_direct} -> {c.silent_hopped}"
     $"teko: assert-census: {c.tests} #test declare {c.declared} assertions ({c.bool_predicate} bool-predicate, {c.hopped} via a {ASSERT_HOP_DEPTH}-hop helper), {cls}, {silent}"
+}
+
+/**
+ * The one-line FOLD report: how many assertions cannot discriminate, and how many `#test` cannot
+ * fail at all.
+ *
+ * BOTH units are printed because they are different questions and only one of them was ever asked.
+ * The ASSERTION count is the density of dead guards, and it is the number a `folded >= 1` boolean
+ * destroys — with that boolean, "1 of 40 folded" and "40 of 40 folded" classify identically, so the
+ * whole middle of the range is invisible. The TEST count is the one the owner's table is about:
+ * fold and outcome are INDEPENDENT axes, so an all-green suite and an all-red TDD suite can both be
+ * entirely folded, and a green run alone never says whether its assertions could have failed.
+ * Neither number implies the other, so neither one replaces the other.
+ *
+ * The existing `FOUNDATIONAL`/`MISLEADING` classification is deliberately untouched; this axis is
+ * reported ALONGSIDE it, not in its place.
+ *
+ * @param c  the accumulated census
+ * @return   the formatted report line (no trailing newline)
+ */
+pub fn assert_fold_line(c: AssertCensus) -> str {
+    let assertions = $"{c.folded} of {c.bool_predicate} bool-predicate assertions fold to a constant"
+    let tests = $"{c.tests_all_folded} of {c.tests} #test fully folded (cannot fail), {c.tests_some_folded} partly"
+    $"teko: assert-fold: {assertions}, {tests}"
 }
 
 /**
