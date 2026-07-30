@@ -703,13 +703,19 @@ conceito.
 
 - **Sequestro.** `src/checker/resolve.tks:782`: builtins R2 são casados **primeiro**, *"bare only — a
   builtin is never namespaced"*. A regressão `builtin_name_not_hijacked` existe porque uma função de
-  utilizador com nome de builtin tem de correr o próprio corpo. Pôr `args` na lista bare exige a
-  mesma proteção, e essa regressão tem de crescer para cobrir `args`.
+  utilizador com nome de builtin tem de correr o próprio corpo. Pôr `args()` na lista bare exige a
+  mesma proteção, e essa regressão tem de crescer para cobrir `args()`.
 - **A lei de 2026-07-29 do próprio dono** — *"a builtin call is resolved by NAME and QUALIFIER, not
   name alone"*, com regressões que rejeitam builtin por namespace inventado e por alias de `use`. A
   grafia bare nova não pode abrir buraco nisso.
 
-**E uma primeira vez:** `args` seria o primeiro builtin bare que **devolve dados**. Os oito atuais
+**É UMA CHAMADA, NÃO UM IDENTIFICADOR GLOBAL** (dono, 2026-07-30, corrigindo a minha grafia: *"Eu
+escrevi `args`? Desculpe, quis dizer `args()`"*). A distinção não é cosmética: `args()` entra com a
+MESMA forma dos oito builtins bare que já existem, todos invocados com parênteses, e **não** abre a
+categoria "variável global" — que a linguagem não tem, e que traria consigo perguntas que uma chamada
+não traz (quando é avaliada, se é constante, se pode ser sombreada por um `let`).
+
+**E uma primeira vez:** `args()` seria o primeiro builtin bare que **devolve dados**. Os oito atuais
 são todos I/O ou controlo de fluxo, nenhum produz valor. Não é impedimento, é onde esperar a
 surpresa.
 
