@@ -1632,3 +1632,47 @@ perde-se saída — e não perder saída é a razão de ser do journaling inteir
 bloqueio outra vez, mas **sob controlo de quem escreve**, que é provavelmente o ponto.
 
 Isto não é objecção à lei: é o que a lei desloca, e tem de ser respondido por quem desenhar o `C1`.
+
+## O canal transporta um REGISTO de UMA LINHA, com quem o escreveu (dono, 2026-07-30)
+
+> *"é dar ao desenvolvedor as duas formas, mas, no nosso caso, o número de escritas é previsível (de
+> acordo com a quantidade de testes e regressivos), só uma coisa que eu proporia para evitar problemas
+> com múltiplas linhas impressas, padronizar uma estrutura single-line de saída, e quem vai escrever
+> (teste unitário ou regressor) precisa formatar no padrão esperado e identificar quem escreveu. Dessa
+> forma é possível definir um contrato entre quem executa e quem escreve, além de padronizar o tipo T
+> em `chan<T>`."*
+
+Quatro afirmações:
+
+1. **As duas formas existem para quem escreve Teko** — `bounded` e `unbounded` são superfície da
+   linguagem, não decisão nossa.
+2. **No nosso uso o número de escritas é PREVISÍVEL** — sai da quantidade de testes e regressivos.
+3. **A saída é uma estrutura de UMA LINHA, padronizada**, e quem escreve **formata no padrão e
+   identifica-se**.
+4. **Isso define um contrato entre quem executa e quem escreve — e fixa o `T` do `chan<T>`.**
+
+### Porque isto desmente a conclusão do `unbounded`, e a desmente por outra via
+
+A §23 concluiu que *"nenhum canal qualifica para `unbounded`"*, com o critério *"o volume total é
+conhecido antes do primeiro push"*, e o argumento de que **o volume depende de quantos testes falham**.
+
+**As duas frases do dono, juntas, atacam esse argumento pela raiz:** com registo de **uma linha
+padronizada**, cada escrita tem **tamanho limitado**, e o **número** de escritas sai da contagem de
+testes — que se conhece antes de correr. **Volume = registos × tecto por registo**, e ambos são
+conhecidos. O que era imprevisível era o texto livre; deixa de haver texto livre.
+
+Isto não obriga a escolher `unbounded` — obriga a **refazer a conta** antes de a escolha ser
+declarada, que é outra coisa.
+
+### O que fecha, e estava aberto desde a §18
+
+A §18 já exigia que *"o canal transporta REGISTOS, não bytes — sem o rótulo a viajar com os bytes, o
+fan-in **entrelaça dois filhos e perde a atribuição**"*. Ficou como requisito **sem forma**. A lei
+dá-lhe a forma: **uma linha, padrão fixo, com a identidade de quem escreveu**. O `T` deixa de ser
+genérico e passa a ser o registo.
+
+### E afia o `Oversize` da §23
+
+Com registo limitado por contrato, um `Oversize` deixa de ser condição de execução a tratar em ciclo
+e passa a ser **violação de contrato** — quem escreveu não formatou no padrão. É um erro de
+programação, não de ritmo, e o tratamento é outro.
