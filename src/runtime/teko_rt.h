@@ -303,6 +303,31 @@ void tk_test_report(tk_test_outcome e);
 void tk_test_summary(void);
 // tk_test_any_failed — did any `#test` of this run end other than `ok`? The gate binary's exit status.
 bool tk_test_any_failed(void);
+// --- the GUARD's way in ---------------------------------------------------------------------------
+//
+// §14.3 of the design gives the capture a Teko surface, `run_capturing(body: cabi fn())`. MEASURED:
+// that surface does not exist and cannot be written today — `cabi` is not a token this lexer mints
+// and `fn() -> T` in parameter position does not parse. C0 does not need it (the `#test` harness is
+// emitted C, and `&<symbol>` asks the language for nothing), but the GUARD does need a way in, and a
+// guard that cannot fail is decoration.
+//
+// So the runtime owns the probe bodies and a `#test` reaches them through one ordinary extern call.
+// Each `TK_TEST_PROBE_*` selector names a body whose ending is known, so the guard can assert that
+// the body RAN and that the ending HAPPENED — not merely that the process is still alive, which a
+// test that never ran a body would satisfy too.
+#define TK_TEST_PROBE_RETURNS 0   /* a body that returns normally      -> TK_TEST_OK */
+#define TK_TEST_PROBE_PANICS  1   /* a body that panics explicitly     -> TK_TEST_PANICKED */
+#define TK_TEST_PROBE_EXITS   2   /* a body that calls exit()          -> TK_TEST_EXITED */
+#define TK_TEST_PROBE_DIV0    3   /* a body that divides by zero       -> TK_TEST_PANICKED */
+// TK_TEST_PROBE_EXIT_CODE — the value TK_TEST_PROBE_EXITS tries to leave with, and which the capture
+// must hand back in `code`. Nonzero and not 1, so it cannot be confused with a status the harness
+// itself produces.
+#define TK_TEST_PROBE_EXIT_CODE 7
+// TK_TEST_PROBE_UNKNOWN — the `how` of a selector that names no body. Distinct from all three real
+// results so an out-of-range selector is a reported failure rather than a silent pass.
+#define TK_TEST_PROBE_UNKNOWN 3
+// tk_test_capture_probe — run the body `which` names under the capture and report how it ended.
+tk_test_outcome tk_test_capture_probe(int32_t which);
 // tk_print — write exactly s.len bytes from s.ptr to stdout; no newline, no NUL.
 void tk_print(tk_str s);
 // tk_println — tk_print(s) then a single '\n' (0x0A).

@@ -51,3 +51,58 @@ pub fn scope() -> str { scope_rt() }
  * @return      `base` outside a test, `base` + the scope token inside one
  */
 pub fn scoped(base: str) -> str { teko::str::concat(base, scope()) }
+
+/**
+ * TestOutcome — how one `#test` body ended, and with which value when it ended by exiting.
+ *
+ * THE VALUE LIVES HERE AND NOT IN THE PROCESS, and that is the whole difference (owner ruling
+ * 2026-07-30). `exit(7)` inside a `#test` is a FACT ABOUT THE TEST that the harness reports and moves
+ * past; `exit(7)` in a program is the program's contract with whoever invoked it, and that one still
+ * leaves by the syscall.
+ *
+ * The field layout mirrors the runtime's `tk_test_outcome` exactly — two `i32`s in this order — which
+ * is what lets the value cross the `teko_rt` boundary by value.
+ *
+ * @since 0.3.1
+ */
+pub type TestOutcome = struct {
+    /** how the body ended: one of `HOW_OK`, `HOW_PANICKED`, `HOW_EXITED`. */
+    how: i32
+    /** the value of `exit(n)` when `how` is `HOW_EXITED`; 0 otherwise. */
+    code: i32
+}
+
+/** HOW_OK — the body returned normally. */
+pub const HOW_OK: i32 = 0
+/** HOW_PANICKED — the body panicked: an explicit `panic`, a failed assertion, or an implicit panic. */
+pub const HOW_PANICKED: i32 = 1
+/** HOW_EXITED — the body called `exit(n)`; `TestOutcome.code` carries the n. */
+pub const HOW_EXITED: i32 = 2
+
+/** PROBE_RETURNS — the guard's body that returns normally. */
+pub const PROBE_RETURNS: i32 = 0
+/** PROBE_PANICS — the guard's body that panics explicitly. */
+pub const PROBE_PANICS: i32 = 1
+/** PROBE_EXITS — the guard's body that calls `exit(PROBE_EXIT_CODE)`. */
+pub const PROBE_EXITS: i32 = 2
+/** PROBE_DIV0 — the guard's body that divides by zero (the IMPLICIT panic). */
+pub const PROBE_DIV0: i32 = 3
+/** PROBE_EXIT_CODE — the value `PROBE_EXITS` tries to leave with, and which the capture hands back. */
+pub const PROBE_EXIT_CODE: i32 = 7
+
+/**
+ * capture_probe — run one body of known ending under the runtime's capture and report how it ended.
+ *
+ * WHY THE BODIES LIVE IN THE RUNTIME AND NOT HERE, measured on this tree rather than assumed: the
+ * design's surface for this is `run_capturing(body: cabi fn())`, and `cabi` is not a token this lexer
+ * mints while `fn() -> T` in parameter position does not parse. Handing a Teko function's address to
+ * an extern is a language feature that does not exist yet (crumb C1 of concorrencia-adiantada-s8).
+ * The capture itself needs nothing from it — the `#test` harness is emitted C, where `&<symbol>` asks
+ * the language for nothing — but the GUARD needs a way in, and a guard that cannot fail is
+ * decoration. When `cabi fn` lands, this is replaced by `run_capturing` and the bodies move here.
+ *
+ * @param which  one of the `PROBE_*` selectors
+ * @return       how that body ended, and with which value
+ * @since 0.3.1
+ */
+pub extern fn capture_probe(which: i32) -> TestOutcome = "tk_test_capture_probe" from "teko_rt"
