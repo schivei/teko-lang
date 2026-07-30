@@ -1965,3 +1965,47 @@ número nunca chega a quem lê o resultado.
 E combina com a lei irmã do mesmo dia — *o fold é categoria própria, não falha de teste; mas no
 portão de CI é erro, igual ao skip*: **na máquina de quem escreve, `n de x dobradas` é informação de
 TDD; no portão, é o que reprova.**
+
+## O túnel tem transporte PRÓPRIO — socket/pipe nomeado, sem mexer em stdout/stderr (dono, 2026-07-30)
+
+> *"encontramos o túnel para o tráfego de dados binários para o journal, tanto entre threads quanto
+> processos, sem redesignar um stdout / stderr"*
+
+### A tensão que isto resolve, e que estava no desenho sem ninguém a nomear
+
+Duas leis do mesmo dia puxavam em sentidos opostos:
+
+- o fan-in **redireciona a saída do filho** para um tubo, e um handler drena para o canal;
+- mas os `print` **têm de ir para o stdout/stderr de verdade**, porque saída livre não é veredito.
+
+Se o stdout do filho está redirecionado para o tubo, **os `print` dele não chegam ao stdout real.**
+As duas leis não cabiam juntas com um transporte só.
+
+**Com transporte próprio para o journal, cabem:** o `stdout`/`stderr` do filho ficam **herdados e
+intactos**, e o tráfego binário do `Rec` viaja por um canal que não é nenhum dos três fluxos padrão.
+
+### O que está medido sobre as plataformas
+
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| `AF_UNIX` + `sockaddr_un` | sim | sim | **sim, desde a build 1803** — suporte de sistema, não emulação |
+| `socketpair()` | sim | sim | **não** — lá é listener `AF_UNIX` num caminho + connect |
+| passar **descritor** pelo canal | `SCM_RIGHTS` | `SCM_RIGHTS` | **não existe equivalente** — é `DuplicateHandle` com o PID do destino |
+| pipe **anônimo** esperável com prazo | sim (`poll`) | sim | **não** — daí a sondagem de 2 ms do F5 |
+| pipe **nomeado** (`\\.\pipe\`) com `FILE_FLAG_OVERLAPPED` | — | — | **sim, esperável** |
+
+**O que entrou no F5 é o pipe ANÔNIMO** (`_pipe`, e o `PeekNamedPipe` só porque é a API que espia
+qualquer pipe). O `\\.\pipe\` é o que fecharia a assimetria — **outra primitiva, não um ajuste.**
+
+### E mata lixo que o F4 sozinho não matava
+
+O agente do F5 mediu: **576 arquivos desaparecem** quando o F4 aterrar, e **48 ficam** — 2 `.chan` e
+46 `.tkcov` — *"por serem canais de caminho nomeado e não fluxos padrão"*. **Com transporte próprio,
+os 2 `.chan` também somem.** Os 46 `.tkcov` ficam, e é coerente: pela lei mais recente a cobertura
+**não viaja no canal**.
+
+### Registro de falha nossa
+
+O dono lembrou ter pedido antes suporte a pipe e unix socks. **Varri `src/` e `docs/`: zero
+ocorrências** de `AF_UNIX`, `sockaddr_un`, `socketpair`, "unix socket" ou "named pipe". O pedido
+não foi perdido pela memória dele — **nunca foi registrado**.
