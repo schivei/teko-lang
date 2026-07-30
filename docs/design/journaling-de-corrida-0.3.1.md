@@ -419,6 +419,13 @@ As 28 familias migram por substituicao mecanica do compositor. As 22 comparacoes
 
 ## 4. Os modos de falha, por caminho de saida
 
+> **REORDENADO POR §14 (ruling do dono, 2026-07-30).** Em **modo teste** as quatro primeiras linhas
+> desta tabela **deixam de ocorrer**: `panic` e `exit` sao CAPTURADOS e nao emitem syscall de saida,
+> logo nao ha `atexit` saltado, nao ha shard morta por sua propria mao, e a tabela reduz-se a **duas
+> classes** — o programa termina (sempre elegante) ou algo de FORA o mata. A tabela abaixo fica como
+> esta porque continua a valer **fora** do modo teste (modo `Program`, o compilador em uso real) e
+> para a classe externa. Le-a com §14 ao lado.
+
 O dono pediu a tabela por **caminho de saida**, porque a casa ja tem a nocao de que caminhos saltam
 que limpeza (`tk_panic` chama `tk_regions_free_all()` a mao porque `abort()` salta o `atexit`,
 `teko_rt.c:1660`). Aqui esta, e a ultima coluna e o argumento inteiro:
@@ -688,14 +695,15 @@ Cada crumb e independentemente fechavel e cada um entrega algo sozinho.
 | **C2** | identidade da corrida: `run_id`/`run_root`/`scratch`/`sweep`, `TEKO_RUN` herdado por `spawn_spec`; `teko::test::scoped` re-apontada; ferrolho da raiz | `src/journal/journal.tks`, `src/test/test.tks`, `src/build/regression.tks` | lixo de corrida anterior fica estruturalmente inalcancavel; duas corridas no mesmo worktree deixam de partilhar rascunho |
 | **C3** | migrar as **28 familias** (§3.2, §3.3) para `scratch`, incluindo `/tmp/teko_arena_obs.txt` | `regression.tks`, `project.tks`, `teko_rt.c`, 4 `.tkt` | a regra passa a ser total; a auditoria passa a ser "ler os chamadores de um compositor" |
 | **C4** | `fold` + `summarize` + `render_summary` (§13); `merge_shard_coverage` falivel; shard sem `end` = falha nomeada | `project.tks`, `src/journal/summary.tks` (novo) | **fecha o defeito medido**: um `.tkcov` em falta deixa de flutuar sobre o da corrida anterior — e passa a ser VISTO, no sumario |
-| **C4b** | o arnes journaliza: `emit_test_main`/`emit_test_call` emitem `plan`/`begin`/`ok` alem das linhas que ja imprimem | `src/codegen/codegen.tks` | **a fase unitaria passa a saber contar** — hoje nao ha sumario nenhum e um `panic` mata a suite sem nomear os que nunca correram (§13.2) |
+| ~~C4b~~ | **DISSOLVIDO NO C4 por §14.** Existia para reconstruir o que a morte levou; com a captura o arnes chega sempre ao fim e o tally e um contador. Os registos por teste ficam (valem para o `--replay` depois de morte EXTERNA), mas deixam de ser a fonte do numero | — | — |
 | **C5** | braco dos sinais educados (INT/TERM/HUP/QUIT) + `tk_journal_note` no manipulador de crash | `teko_rt.c` | cancelamento de CI e Ctrl-C deixam de ser mudos; fecha o buraco existente do despejo de arena no crash |
 | **C6** | G1 alargada a `.tks`, compositor unico, inversao estendida | `src/test/scratch_guard_test.tkt` | reincidencia por grafia fica bloqueada nas 28 familias, nao nas 14 visiveis |
 | **C7** | G2 observacional + inversao de tres bracos (incl. vivacidade do instrumento) | `src/journal/journal_guard_test.tkt` (novo) | reincidencia por caminho composto em execucao fica bloqueada; a guarda pode falhar, e a inversao prova-o |
 | **C8** | a prova por colisao forcada (3 `#test` + 2 filhos `sh` com rendezvous) | `src/journal/journal_collision_test.tkt` (novo) | "corrigi" vira "provei", com o ANTES na mesma corrida |
 | **C9** | `teko test --replay <run>` (o mesmo sumario, depois do facto) + o aviso de corrida nao-sumarizada no `sweep` + fase de regressao repartida por `run_pool`, com a medicao build-vs-linhas de §9 | `project.tks`, `regression.tks` | um OOM deixa de perder o veredicto — a corrida seguinte **sumariza a morta** (§13.5); a fase de regressao entra no mesmo mecanismo |
 
-**Pontos de ritual (gate completo obrigatorio):** depois de **C2** (muda caminho em toda a arvore),
+**Pontos de ritual (gate completo obrigatorio):** depois de **C0** (§14 — muda o arnes de TODOS os
+1167 `#test`), depois de **C2** (muda caminho em toda a arvore),
 depois de **C4b** (muda o arnes emitido, logo muda TODA a fase unitaria), depois de **C8** (a prova
 tem de correr verde e o braco "antes" tem de continuar a falhar quando o mecanismo e removido),
 depois de **C9**.
@@ -706,6 +714,10 @@ C9 (que ja era o comando `--replay`). O que **nao** cabia e o crumb novo **C4b**
 unitaria nao emite nada alem de `test <label> ... ` / `ok` para stdout, e um sumario nao pode ser
 lido do proprio stdout sem parsing fragil nem distinguir "morreu" de "nunca correu" (§13.2).
 **Total: 9 -> 10 crumbs, um novo, dois crescidos.**
+
+**E o ruling do dono (§14) devolve o que o adendo custou:** entra o **C0** (a captura, e vai a
+frente de tudo) e o **C4b dissolve-se** nele, porque o tally deixa de precisar de reconstrucao.
+**10 -> 10.** Ordem final: **C0** · C1 · C2 · C3 · C4 · C5 · C6 · C7 · C8 · C9.
 
 **Ordem e semente:** nenhum crumb usa funcionalidade de linguagem ausente da semente. Os fundos novos
 sao `extern fn` sobre `teko_rt.{c,h}` — C mantido, excepcao explicita ao congelamento. O unico custo
@@ -722,7 +734,9 @@ Dito na primeira pessoa, com a razao, e nao como alarme:
    `TEKO_JOURNAL_FSYNC=1` existe e o seu custo esta estimado em §5.1; por omissao esta desligado
    porque paga 36 % do gate por um risco que nao e o nosso (o nosso e o OOM killer).
 2. **`SIGKILL` e `SIGSTOP` nao sao capturaveis.** Nenhum encerramento elegante os apanha; e por isso
-   que o journal existe **alem** do braco de sinais, e nao em vez dele.
+   que o journal existe **alem** do braco de sinais, e nao em vez dele. (§14 corta a outra metade:
+   o que o programa faz a SI PROPRIO — `panic`/`exit` — deixa de o matar em modo teste, e so esta
+   linha, a externa, sobra.)
 3. **O artefacto `bin/teko`.** Ele e escrito — pela build, como saida declarada (`<od>/<stem>`), nao
    como rascunho. Duas builds simultaneas para o mesmo `-o` atropelam-se, e isso continua verdade.
    C2 mitiga-o com um ferrolho na raiz da corrida que **recusa** a segunda com uma mensagem nomeada,
@@ -1005,8 +1019,324 @@ porque `summarize` e pura.
 ### 13.8 O que o sumario NAO cobre
 
 1. **Nao muda a politica de skip** (§13.4) — nomeia, nao decide.
-2. **Nao torna a fase unitaria tolerante a falhas.** O `panic` continua a matar a shard; o que muda e
-   que a morte passa a ser nomeada e os nao-corridos contados. Tornar cada `#test` isolado e
-   `teko::isolate` (S8), que nao existe — e §11.5 ja o diz.
+2. ~~**Nao torna a fase unitaria tolerante a falhas.** O `panic` continua a matar a shard.~~
+   **RISCADO PELO RULING DO DONO (§14).** Isto era o defeito, nao um limite. Com a captura o `panic`
+   deixa de matar a shard, o tally deixa de ser reconstrucao e `never-ran` passa a 0 por construcao no
+   caso auto-infligido. O que continua fora de alcance e apenas o **isolamento** entre testes
+   (`teko::isolate`, S8) — um limite estreito, nao uma desculpa para deixar a suite morrer.
 3. **Nao inclui a cobertura de uma shard cujo despejo falta.** Ela e reportada como `missing`, e a
    corrida falha (C4). Estimar o que falta seria inventar o numero que a fasquia julga.
+
+---
+
+## 14. A captura em modo teste — ruling do dono, 2026-07-30
+
+> *"E PARA CAPTURAR E SAIR ELEGANTE ANTES SEM ENVIAR SYSCALL DE SAIDA QUANDO COMPILAR TESTES... Uma
+> coisa e um aborto externo, de fora do programa, outra coisa e o proprio programa sair, e para sair
+> ele tem que ser deterministico."*
+
+**A critica e minha e e justa.** Escrevi em §11.2 que *"o `panic` continua a matar a shard"* e
+tratei o fail-fast como dado. Nao e dado: **e o defeito**. O meu `C4b` — journalizar `plan`/`begin`
+para poder calcular `never-ran` — existia inteiro para **reconstruir o que a morte levou**. A morte
+nao devia acontecer.
+
+### 14.1 A lei, e onde ela corta
+
+| | quem manda | o que se faz |
+|---|---|---|
+| o **proprio programa** sai (`panic`, `exit`, assercao falhada) | nos | **captura-se**, deterministico, **sem syscall de saida** em modo teste |
+| aborto **externo** (SIGKILL do OOM, SO, hardware, energia) | ninguem nosso | **convive-se** — o journal, o `--replay`, o varrimento |
+
+O journal **nao deixa de fazer falta**: a segunda linha continua a existir e foi ela que nos matou
+duas vezes hoje. O que muda e o **peso**: o journal deixa de ser a defesa principal e passa a ser a
+defesa do que nao controlamos.
+
+### 14.2 O mecanismo, e porque o salto vive no RUNTIME e nao no codigo emitido
+
+A captura e um `setjmp`/`longjmp` — e **inteiro dentro de `teko_rt.c`**. O codigo emitido nunca
+nomeia `setjmp`.
+
+Isso nao e estetica. `setjmp` tem exigencias que nenhum gerador de codigo geral quer honrar (a moldura
+que o chamou tem de continuar viva; locais modificados entre o `setjmp` e o `longjmp` tem de ser
+`volatile`). Metendo-o no runtime, **o que o backend proprio tem de saber fazer reduz-se a uma coisa:
+tomar o endereco de uma funcao de topo e passa-lo**. Isso e um `lea`/`adr` de um simbolo que o
+backend ja emite para chamar. Nomeio-o como requisito da escada da morte do C para nao ser surpresa.
+
+```c
+// teko_rt.h — como um #test terminou. TRES resultados, nenhum deles um estado do processo.
+#define TK_TEST_OK        0   /* o corpo retornou */
+#define TK_TEST_PANICKED  1   /* panic / assercao falhada / panic implicito (div0, oob, cast) */
+#define TK_TEST_EXITED    2   /* o corpo chamou exit(n); `code` traz o n */
+typedef struct { int32_t how; int32_t code; } tk_test_end;
+
+// tk_test_run — correr UM corpo de #test capturando a saida que ele proprio provoque.
+//
+// O SALTO VIVE AQUI, e e por isso que o codigo gerado nao precisa de saber que ele existe: o
+// backend proprio so tem de saber tomar o endereco de `body`. `body` e `volatile` porque um
+// parametro modificado (ou apenas mantido) entre o setjmp e o longjmp e indeterminado sem isso —
+// e a unica exigencia do setjmp que nao se pode delegar.
+tk_test_end tk_test_run(void (* volatile body)(void));
+```
+
+```c
+// teko_rt.c
+static jmp_buf tk_test_jb;
+static volatile sig_atomic_t tk_test_capturing = 0;
+static volatile int32_t tk_test_how = TK_TEST_OK, tk_test_code = 0;
+
+tk_test_end tk_test_run(void (* volatile body)(void)) {
+    tk_test_how = TK_TEST_OK; tk_test_code = 0;
+    tk_test_capturing = 1;
+    if (setjmp(tk_test_jb) == 0) { body(); }
+    tk_test_capturing = 0;
+    tk_test_end e; e.how = (int32_t)tk_test_how; e.code = (int32_t)tk_test_code; return e;
+}
+```
+
+E os **dois** pontos de estrangulamento, que ja existiam e nao ganham chamadores novos:
+
+```c
+_Noreturn void tk_panic_str(tk_str msg) {
+    if (tk_test_capturing) {                       // MODO TESTE: para o teste, nao para o processo
+        tk_test_note(TK_PANIC_MARKER, msg);        // no canal DESTE teste, nunca no fluxo partilhado
+        tk_test_how = TK_TEST_PANICKED;
+        tk_test_capturing = 0;
+        longjmp(tk_test_jb, 1);
+    }
+    fputs(TK_PANIC_MARKER, stderr); fwrite(msg.ptr, 1, msg.len, stderr); fputc('\n', stderr);
+    tk_backtrace();
+    tk_regions_free_all();                         // (W9.3b) abort() salta o atexit
+    abort();
+}
+
+_Noreturn void tk_exit(int32_t code) {
+    if (tk_test_capturing) {
+        tk_test_how = TK_TEST_EXITED; tk_test_code = code;
+        tk_test_capturing = 0;
+        longjmp(tk_test_jb, 1);
+    }
+    tk_regions_free_all(); exit(tk_exit_status(code));
+}
+```
+
+Cinco propriedades, e cada uma foi verificada na arvore antes de eu a escrever:
+
+1. **Nenhuma assinatura muda.** `_Noreturn` continua honesto: `longjmp` nao retorna. Zero chamadores
+   tocados, zero mudanca no codegen dos sitios de chamada.
+2. **Cobre os panics implicitos.** `tk_panic_div0`, `tk_panic_oob` e `tk_panic_cast`
+   (`teko_rt.c:1890-1900`) desaguam todos em `tk_panic`, e as assercoes desaguam em `tk_assert_fail`
+   -> `tk_panic` (`src/assert/assert.c:57,69`). Um so ponto, ja partilhado.
+3. **Nao muda a semantica de `defer`.** Medido, e ao contrario do que eu supunha: o replay dos
+   `defer` acontece **no sitio de chamada, ANTES** da chamada divergente — e o que o cenario
+   `defer_cascade_exit` prova (`regressor.tkr:228`: *"its own argument is read AFTER the replay, so
+   the exit code itself is the LIFO proof"*), e `defer_not_duplicated_on_diverging_call` guarda o
+   outro lado. Quando o controlo chega a `tk_exit`/`tk_panic_str`, os `defer` **ja correram**. O
+   `longjmp` nao salta nenhum. O limite residual documentado (um panic IMPLICITO nao tem sitio de
+   chamada, logo o seu `defer` nao corre — *contrato, nao lacuna*) mantem-se identico.
+4. **A arena passa a rebobinar de verdade.** `tk_arena_push`/`tk_arena_pop` envolvem cada teste
+   (`emit_test_call`); hoje um teste que panica **nunca chega ao pop** porque o processo morre. Com
+   a captura o pop e sempre alcancado.
+5. **A mensagem passa a ser atribuida ao teste certo.** O comentario de `tk_flush_out`
+   (`teko_rt.c:1610-1620`) narra uma investigacao inteira perdida por isto: *"an abort was attributed
+   to a spine test ~66 tests before the real one"*. Sob captura a mensagem entra no canal **deste**
+   teste. A ma atribuicao deixa de ser possivel.
+
+### 14.3 A superficie em Teko
+
+```teko
+/**
+ * TestHow — como um `#test` terminou. Um resultado do TESTE, nunca um estado do processo.
+ *
+ * @since 0.3.1
+ */
+pub type TestHow = enum { Ok; Panicked; Exited }
+
+/**
+ * TestEnd — o fim de um `#test`: como acabou e, quando `Exited`, com que valor.
+ *
+ * O VALOR VIVE AQUI E NAO NO PROCESSO, e e essa a diferenca inteira. `exit(7)` dentro de um `#test`
+ * e um FACTO SOBRE O TESTE que o arnes relata e continua; `exit(7)` num programa e o contrato do
+ * programa com quem o invocou, e esse fica intocado (§14.5).
+ *
+ * @since 0.3.1
+ */
+pub type TestEnd = struct {
+    /** como o corpo terminou. */
+    how: TestHow
+    /** o valor de `exit(n)` quando `how` e `Exited`; 0 nos outros casos. */
+    code: i32
+}
+
+/**
+ * run_capturing — correr `body` capturando qualquer saida que ele proprio provoque, e devolver o
+ * controlo ao arnes SEM syscall de saida.
+ *
+ * DETERMINISTICO NOS TRES EIXOS que o dono exigiu: quem captura sabe QUAL teste terminou (o arnes
+ * chamou-o e nao largou o rotulo), COMO terminou (`TestHow`) e, no caso de `exit`, COM QUE VALOR.
+ * Nao ha corrida, nao ha sinal, nao ha ordem por descobrir: e um retorno de funcao.
+ *
+ * @param body  o corpo do `#test`, passado por endereco
+ * @return      como o corpo terminou
+ * @since 0.3.1
+ */
+pub extern fn run_capturing(body: cabi fn()) -> TestEnd = "tk_test_run" from "teko_rt"
+```
+
+### 14.4 O arnes, e o que ele deixa de precisar
+
+`emit_test_call` (`src/codegen/codegen.tks:12079`) passa de
+
+```c
+tk_arena_push(); tk_print("test <label> ... "); tk_flush_out(); <fn>(); tk_println("ok"); tk_arena_pop();
+```
+
+para
+
+```c
+tk_arena_push(); tk_test_begin("<label>");
+tk_test_report(tk_test_run(&<fn>));      /* imprime o veredicto E soma o tally E journaliza */
+tk_test_end(); tk_arena_pop();
+```
+
+e `emit_test_main` (`:11990`) deixa de terminar em `return 0;` cego:
+
+```c
+tk_cov_branches_on(false); tk_cov_lines_on(false);
+{ const char *dp = getenv("TEKO_TKCOV"); if (dp) tk_cov_dump(dp); }
+tk_test_summary();                       /* o bloco de §13, agora natural */
+return tk_test_any_failed() ? 1 : 0;
+```
+
+**E aqui e que o adendo de §13 se reordena inteiro:**
+
+* o **tally deixa de ser reconstrucao e passa a ser um contador**. O arnes chega sempre ao fim, logo
+  `passed`/`failed`/`exited` sao somas triviais;
+* **`never-ran` passa a ser 0 por construcao** no caso auto-infligido. Continua a existir como coluna,
+  mas so a classe EXTERNA a pode tornar nao-zero — que e exactamente onde ela devia ter estado;
+* o **`.tkcov` passa a ser despejado sempre**. Hoje uma shard que panica nunca chega ao `tk_cov_dump`
+  no fim do `main`. Era metade do defeito que o C4 tinha de DETECTAR; com a captura, um despejo em
+  falta so pode vir de morte externa — e o C4 continua a detecta-lo, agora sobre um caso raro em vez
+  de sobre o caso comum;
+* o **`C4b` dissolve-se**. Ele existia para reconstruir o que a morte levou. Os registos por teste
+  continuam a ser escritos (valem para o `--replay` depois de morte externa), mas deixam de ser a
+  fonte do tally — passam a ser confirmacao, e o crumb encolhe para dentro do C4.
+
+### 14.5 O que NAO e capturado, e a fronteira e estrutural e nao um interruptor
+
+A captura e de **modo teste**, palavra do dono: *"quando compilar testes"*. E o modo ja existe:
+`CgMode = enum { Program; TestPlain; TestCov; TestAnalyze; ProgramCov }`
+(`src/codegen/codegen.tks:59`). `tk_test_run` e emitido **so** pelos tres perfis `Test*`; `Program` e
+`ProgramCov` nunca o emitem, logo **nunca poem `tk_test_capturing` a 1**, logo `tk_panic` e `tk_exit`
+comportam-se byte a byte como hoje.
+
+**A fronteira e estrutural: nao ha bandeira que a possa desligar por engano, porque a unica coisa que
+liga a captura e codigo que so o modo teste emite.**
+
+Por isso as filas cujo contrato **E** o codigo de saida continuam intactas: `Given source` +
+`When built and run` + `Then exit = N` compila em modo `Program`. Os alvos cruzados 42/210/7 e o par
+oraculo do degrau 30 (cinco filas, medidas pelo integrador linha a linha) medem o observavel que
+existem para medir, e capturar ali apagava-o. `defer_cascade_exit` (`Then exit = 235`,
+`regressor.tkr:228,234`) e o caso mais afiado disto — o codigo de saida **e** a prova LIFO — e
+continua a sair pela syscall.
+
+### 14.6 A guarda, e a inversao por reversao
+
+Tres bracos, e o segundo e o que o dono pediu por nome.
+
+```teko
+#test
+/**
+ * tc_a_test_that_exits_is_reported_and_the_suite_survives — o caso que hoje mata a suite.
+ *
+ * `exit(7)` no meio de um corpo tem de voltar como `Exited { code = 7 }`, sem syscall, e o arnes tem
+ * de continuar. Sem o mecanismo este `#test` nao FALHA: o processo desaparece e nenhum dos seguintes
+ * chega a ser reportado — que e a diferenca entre um teste vermelho e uma suite muda.
+ *
+ * @throws quando a saida nao volta capturada com o seu valor
+ */
+fn tc_a_test_that_exits_is_reported_and_the_suite_survives() {
+    let e = teko::test::run_capturing(tc_body_that_exits_7)
+    teko::assert::is_true(e.how == TestHow::Exited)
+    teko::assert::eq_i64(e.code to i64, 7)
+}
+
+#test
+/**
+ * tc_the_suite_reached_this_test — A PROVA DE QUE A SUITE SOBREVIVEU, e ela tem de ser um teste
+ * SEPARADO e POSTERIOR.
+ *
+ * Um teste nao pode afirmar credivelmente que a suite lhe sobreviveu; so o SEGUINTE o pode. Se a
+ * captura regredir, este nunca e reportado — e um teste que nao aparece no sumario e uma falha que o
+ * §13 nomeia (`never-ran`), nunca um verde.
+ */
+fn tc_the_suite_reached_this_test() {
+    teko::assert::is_true(tc_previous_test_was_recorded())
+}
+
+#test
+/**
+ * tc_a_panicking_body_comes_back_too — o outro estrangulamento, incluindo o panic IMPLICITO.
+ *
+ * @throws quando um panic explicito ou uma divisao por zero nao voltam como `Panicked`
+ */
+fn tc_a_panicking_body_comes_back_too() {
+    teko::assert::is_true(teko::test::run_capturing(tc_body_that_panics).how == TestHow::Panicked)
+    teko::assert::is_true(teko::test::run_capturing(tc_body_that_divides_by_zero).how == TestHow::Panicked)
+}
+```
+
+**A inversao e por REVERSAO, e sem interruptor** — o mesmo padrao que fechou o degrau 29. Um botao
+`TEKO_TEST_CAPTURE=0` seria uma maneira nova de partir a arvore; a reversao honesta ja existe na
+linguagem, e chama-se modo `Program`. Duas filas no canal **existente** `own_native`, sobre a **mesma
+fonte**:
+
+```
+  Scenario: capture_off_in_program_mode_still_exits_for_real
+    Given source = "cases/capture_exit_7.tks"
+    When built and run
+    Then exit = 7
+
+  Scenario: capture_on_in_test_mode_reports_and_continues
+    Given source = "cases/capture_exit_7.tks"
+    Given args = ["--as-test"]
+    When built and run
+    Then stdout pattern = "scenario capture_on_in_test_mode_reports_and_continues: ok"
+```
+
+A primeira fila **e** a inversao: prova que o mecanismo esta desligado fora do modo teste — logo, que
+ele esta LIGADO dentro dele por decisao e nao por acidente, e que a lei de §14.5 e observavel. A
+segunda prova o relato e a continuacao. **A guarda pode falhar nos dois sentidos**, que e a unica
+forma de nao ser decoracao.
+
+### 14.7 O crumb, e ele vai a frente
+
+**C0 — a captura.** `tk_test_run` + os dois estrangulamentos + `tk_test_report`/`tk_test_summary`/
+`tk_test_any_failed` em `teko_rt.{c,h}`; `emit_test_call`/`emit_test_main` em
+`src/codegen/codegen.tks`; `teko::test::run_capturing` em `src/test/test.tks`; a guarda e as duas
+filas de reversao.
+
+**Vai antes de tudo o resto**, e nao so porque o dono disse *"imediatamente, a dor e latente"*: vai
+antes porque **encolhe os crumbs que vem depois**. O C4b dissolve-se no C4, o `never-ran` deixa de
+precisar de reconstrucao, o `.tkcov` passa a ser despejado sempre e o C4 deixa de perseguir o caso
+comum. **Total: 10 -> 10 crumbs.** O adendo de §13 tinha custado um; o ruling do dono devolve-o.
+
+Ordem final: **C0** · C1 · C2 · C3 · C4 (com §13 e o antigo C4b dentro) · C5 · C6 · C7 · C8 · C9.
+
+**Ponto de ritual novo, e obrigatorio: depois do C0.** Ele muda o arnes de **todos** os 1167 `#test`.
+
+### 14.8 O que a captura NAO cobre
+
+1. **Aborto externo.** `SIGKILL`, o OOM killer, um ecra azul, falta de energia. Palavra do dono:
+   *"o software nao tem que lidar com isso, tem que conviver e fazer o melhor para se proteger"* — e
+   e para isso que o journal (C1–C9) continua a existir, agora no seu lugar certo.
+2. **Sinal de crash dentro de um teste** (SIGSEGV por memoria `unsafe`). `tk_rt_crash_handler` corre
+   em contexto de sinal e um `longjmp` de la e formalmente indefinido. Fica como aborto externo: o
+   manipulador journaliza (C5) e o processo morre. E a fronteira certa — um SIGSEGV nao e o programa
+   a sair, e o programa partido.
+3. **Recursos nao-memoria que um teste que panica tenha aberto** (descritores, ficheiros). A arena
+   rebobina (§14.2, ponto 4); descritores nao. Nomeado como limite conhecido, nao escondido.
+4. **Isolamento entre testes.** A captura faz a suite CONTINUAR; nao faz cada teste correr numa
+   moldura sua. Estado global que um teste corrompeu antes de panicar continua corrompido para o
+   seguinte — isso e `teko::isolate` (S8), e continua a nao existir. A diferenca em relacao ao que eu
+   escrevi antes e que agora isto e um limite estreito e nomeado, em vez da desculpa para deixar a
+   suite morrer.
