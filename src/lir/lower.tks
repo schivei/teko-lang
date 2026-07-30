@@ -589,12 +589,35 @@ fn lower_div_zero_guard(ctx: LowerCtx, divisor: u32, line: u32, col: u32) -> Low
  *                      proven true on every path that reaches it
  */
 fn lower_trap_unless(ctx: LowerCtx, cond: u32, panic_symbol: str, line: u32, col: u32) -> LowerCtx {
+    lower_trap_unless_with(ctx, cond, panic_symbol, teko::list::empty(), line, col)
+}
+
+/**
+ * lower_trap_unless_with — `lower_trap_unless` for a panic entry that takes ARGUMENTS: the same
+ * compare-then-trap skeleton, with `args` handed to the `_Noreturn` runtime call inside the trap
+ * block. The POSITIONED panics need it (`tk_panic_oob_at(line, col)`, the entry the C route's own
+ * index guard calls), and the argumentless ones (`tk_panic_div0`, `tk_panic_cast`) are the same
+ * function with an empty list — one skeleton, so a guard added later cannot be built a second way.
+ *
+ * The argument VRegs must be materialized by the CALLER, before `cond` is computed: they are read
+ * inside the trap block, which the branch reaches from this block, so a value produced after the
+ * branch would not dominate its use.
+ *
+ * @param ctx           the lowering context, positioned right after `cond` is computed
+ * @param cond          the VReg holding the "everything is fine" condition (nonzero = fine)
+ * @param panic_symbol  the `_Noreturn` runtime symbol the trap block calls
+ * @param args          the already-materialized argument VRegs, in the runtime entry's own order
+ * @param line          the source line of the guarded expression
+ * @param col           the source column of the guarded expression
+ * @return              the advanced context, now emitting into the "ok" block
+ */
+fn lower_trap_unless_with(ctx: LowerCtx, cond: u32, panic_symbol: str, args: []u32, line: u32, col: u32) -> LowerCtx {
     let okb = alloc_block(ctx.func)
     let trapb = alloc_block(okb.func)
     let br = branch_inst(cond, okb.block_id, teko::list::empty(), trapb.block_id, teko::list::empty(), line, col)
     let branched = ctx_append(ctx_with(ctx, trapb.func, ctx.block_id, ctx.env), br)
     let trap_ctx = ctx_goto(branched, trapb.block_id)
-    let called = ctx_append(trap_ctx, void_call_inst(panic_symbol, teko::list::empty(), false, line, col))
+    let called = ctx_append(trap_ctx, void_call_inst(panic_symbol, args, false, line, col))
     let trap_closed = ctx_append(called, jump_inst(trapb.block_id, teko::list::empty(), line, col))
     ctx_with(trap_closed, trap_closed.func, okb.block_id, branched.env)
 }
@@ -10461,10 +10484,29 @@ fn const_index_addr(ctx: LowerCtx, base: u32, idx_value: i64, stride: u32, line:
     VReg instead (the plan's §2.1 resolution). */
 fn dynamic_index_addr(ctx: LowerCtx, base: u32, index: checker::TExpr, stride: u32, line: u32, col: u32) -> Lowered | error {
     let io = match lower_expr(ctx, index) { Lowered as x => x; error as err => return err }
-    let sc = ctx_alloc(io.ctx)
+    element_addr_at(io.ctx, base, io.vreg, stride, line, col)
+}
+
+/**
+ * element_addr_at — `base + index * stride` for an index ALREADY in a VReg. The arithmetic half of
+ * `dynamic_index_addr`, extracted so the element WRITE — which must lower its index exactly once,
+ * because the bounds guard and the address both read it — computes the very same address the
+ * element READ does. Two open-coded copies of a stride multiply are two chances for a write to land
+ * one element away from where the read looks.
+ *
+ * @param ctx     the lowering context, positioned after `index` is lowered
+ * @param base    the buffer's base address VReg
+ * @param index   the already-lowered element index VReg
+ * @param stride  the element's byte stride inside the buffer (`elem_byte_stride`)
+ * @param line    the source line of the subscript
+ * @param col     the source column of the subscript
+ * @return        the element's address
+ */
+fn element_addr_at(ctx: LowerCtx, base: u32, index: u32, stride: u32, line: u32, col: u32) -> Lowered {
+    let sc = ctx_alloc(ctx)
     let with_stride = ctx_append(sc.ctx, const_int_inst(sc.vreg, stride to i64, line, col))
     let mr = ctx_alloc(with_stride)
-    let with_mul = ctx_append(mr.ctx, bin_inst(mr.vreg, LBinOp::IMul, io.vreg, sc.vreg, line, col))
+    let with_mul = ctx_append(mr.ctx, bin_inst(mr.vreg, LBinOp::IMul, index, sc.vreg, line, col))
     let ar = ctx_alloc(with_mul)
     Lowered { ctx = ctx_append(ar.ctx, bin_inst(ar.vreg, LBinOp::IAdd, base, mr.vreg, line, col)); vreg = ar.vreg }
 }
@@ -10758,14 +10800,22 @@ fn plain_op_of_compound(op: lexer::TokenKind) -> lexer::TokenKind | error {
     }
 }
 
-/** lower_assign — a TAssign: Simple (a local rebind), Field (a struct-field write via memory),
-    or RefDeref (write THROUGH a `Ref<T>` handle, `lower_assign_ref_deref`). */
+/**
+ * lower_assign — a TAssign, by target shape: Simple (a local rebind), Field (a struct-field write
+ * via memory), RefDeref (write THROUGH a `Ref<T>` handle) or Index (a slice ELEMENT write,
+ * `lower_assign_index`).
+ *
+ * @param ctx  the lowering context
+ * @param a    the typed assignment
+ * @return     the context with the assignment's instructions appended, or an honest stop
+ * @throws     propagated from the arm the target shape selects
+ */
 fn lower_assign(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
     match a.kind {
         parser::AssignKind::Simple => lower_assign_simple(ctx, a)
         parser::AssignKind::Field => lower_assign_field(ctx, a)
         parser::AssignKind::RefDeref => lower_assign_ref_deref(ctx, a)
-        parser::AssignKind::Index => error { message = "native backend N1: slice element index-assignment not yet lowered (N2)" }
+        parser::AssignKind::Index => lower_assign_index(ctx, a)
     }
 }
 
@@ -10777,8 +10827,7 @@ fn lower_assign(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
  * a struct field's OWN write does not need to (a field's aggregate half is a BOXED pointer slot;
  * a reference's is not):
  *
- * - a FAT (`str`/`[]T`) target writes both halves of its pair through `store_fat_slot`
- *   (`store_assign_fat_ref`);
+ * - a FAT (`str`/`[]T`) target writes both halves of its pair through `store_fat_through_addr`;
  * - a REGISTER-value `T` (`is_register_value_type` — every primitive, `byte`, an `enum`)
  *   delegates to the SAME `store_assign_value` a struct field write already uses;
  * - an AGGREGATE `T` (`struct`/`class`/a declared `Variant`) copies the new value's OWN bytes
@@ -10795,7 +10844,7 @@ fn lower_assign(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
 fn lower_assign_ref_deref(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
     let cur = lenv_lookup(ctx.env, a.name)
     if !cur.found { return error { message = teko::str::concat("native backend N1: unbound reference `", a.name, "` (internal)") } }
-    if is_fat_type(a.bound) { return store_assign_fat_ref(ctx, cur.vreg, a) }
+    if is_fat_type(a.bound) { return store_fat_through_addr(ctx, cur.vreg, a, "a str/slice reference") }
     if is_register_value_type(a.bound, ctx.enums) { return store_assign_value(ctx, cur.vreg, ltype_of(a.bound, ctx.enums), a) }
     store_assign_aggregate_ref(ctx, cur.vreg, a)
 }
@@ -10844,22 +10893,39 @@ fn unsized_aggregate_ref_stop(t: checker::Type) -> error {
 }
 
 /**
- * store_assign_fat_ref — the FAT arm of `lower_assign_ref_deref`: a plain `=` writes the RHS's
- * `{ptr, len}` pair through the handle's own address (`store_fat_slot`, the SAME memory shape a
- * mutable fat local's own frame slot holds); a compound `op=` is refused, mirroring
- * `store_assign_fat_field`'s SAME refusal for a fat struct FIELD (no arithmetic operator applies
- * to a `str`/`[]T`).
+ * fat_compound_stop — the NAMED refusal EVERY fat (`str`/`[]T`) assignment target shares: no
+ * arithmetic operator applies to a two-word `{ptr, len}` value, so a compound `op=` has no form to
+ * lower at all. ONE function, because the four fat targets — a `Ref<T>` handle, a struct/class
+ * field, a mutable local and a slice element — otherwise carry four independently-worded refusals,
+ * which is the shape that decays into three worded and one silent.
  *
- * @param ctx   the lowering context
- * @param addr  the `Ref<T>` handle's own value (the address to write through)
- * @param a     the typed assignment (kind `RefDeref`, a str/slice `bound`)
- * @return      the context with both halves stored
- * @throws      for a compound `op=` on a fat reference, or propagated from lowering the value
+ * @param target  the target's description, as the message spells it
+ * @return        the honest stop, always
  */
-fn store_assign_fat_ref(ctx: LowerCtx, addr: u32, a: checker::TAssign) -> LowerStmtOut | error {
-    if a.op != lexer::TokenKind::Assign {
-        return error { message = "native backend N1: compound assignment to a str/slice reference has no arithmetic form (internal)" }
-    }
+fn fat_compound_stop(target: str) -> error {
+    error { message = teko::str::concat("native backend N1: compound assignment to ", teko::str::concat(target, " has no arithmetic form (internal)")) }
+}
+
+/**
+ * store_fat_through_addr — write a `str`/`[]T` value's BOTH halves through an already-computed
+ * address (`store_fat_slot`, the SAME memory shape a mutable fat local's own frame slot holds).
+ *
+ * The single tail of every fat assignment whose target is reached BY ADDRESS: a `Ref<T>` handle
+ * (`lower_assign_ref_deref`), a struct/class field (`lower_assign_field`), a mutable fat local's
+ * frame slot (`lower_assign_fat`) and a slice element (`store_assign_elem`). Writing ONE machine
+ * word at such an address — which the plain `store_assign_value` does — stores the pointer half
+ * only and leaves every later reader taking whatever length the slot happened to hold already,
+ * silently (0.3.1.0 raiz-comum §5.2).
+ *
+ * @param ctx     the lowering context, positioned after the target's address is computed
+ * @param addr    the target slot's address VReg
+ * @param a       the typed assignment (a `str`/`[]T` `bound`)
+ * @param target  the target's description for the compound-op refusal (`fat_compound_stop`)
+ * @return        the context with both halves stored
+ * @throws        for a compound `op=`, or propagated from lowering the value as a fat producer
+ */
+fn store_fat_through_addr(ctx: LowerCtx, addr: u32, a: checker::TAssign, target: str) -> LowerStmtOut | error {
+    if a.op != lexer::TokenKind::Assign { return fat_compound_stop(target) }
     let fo = match lower_fat_expr(ctx, a.value) { LoweredFat as x => x; error as err => return err }
     LowerStmtOut { ctx = store_fat_slot(fo.ctx, addr, fo, a.value.line, a.value.col); terminated = false }
 }
@@ -10931,23 +10997,28 @@ fn lower_assign_simple(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | err
  *             a non-slot fat target, or propagated from lowering the value
  */
 fn lower_assign_fat(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
-    if a.op != lexer::TokenKind::Assign {
-        return error { message = teko::str::concat("native backend N1: compound assignment to the str/slice local `", a.name, "` has no arithmetic form (internal)") }
-    }
     let slot = lenv_lookup_fat_slot(ctx.env, a.name)
     if !slot.found {
         return error { message = teko::str::concat("native backend N1: `", a.name, "` is assigned but is not a mutable fat local (internal)") }
     }
-    let fo = match lower_fat_expr(ctx, a.value) { LoweredFat as x => x; error as err => return err }
-    LowerStmtOut { ctx = store_fat_slot(fo.ctx, slot.slot, fo, a.value.line, a.value.col); terminated = false }
+    store_fat_through_addr(ctx, slot.slot, a, teko::str::concat("the str/slice local `", a.name, "`"))
 }
 
-/** lower_assign_field — `recv.field = e` / `recv.field op= e`: lower the receiver to its
-    base address, compute the field's address via its registered layout offset, then store. A
-    FAT field (`a.bound`, 0.3.1.0 raiz A — R3) delegates to `store_assign_fat_field`, which
-    writes both halves of its `{ptr, len}` pair; every other field delegates to
-    `store_assign_value` (a compound op first loads the current value, applies it, then stores
-    the result). */
+/**
+ * lower_assign_field — `recv.field = e` / `recv.field op= e`: lower the receiver to its base
+ * address, compute the field's address via its registered layout offset, then store. A FAT field
+ * (`a.bound`, 0.3.1.0 raiz A — R3) delegates to `store_fat_through_addr`, which writes both halves
+ * of its `{ptr, len}` pair — writing the single word `store_assign_value` writes left `h.name.len`
+ * reading whatever the field's PREVIOUS length happened to be, silently (raiz-comum §5.2). Every
+ * other field delegates to `store_assign_value` (a compound op first loads the current value,
+ * applies it, then stores the result).
+ *
+ * @param ctx  the lowering context
+ * @param a    the typed assignment (kind `Field`; `a.target` is the typed field access)
+ * @return     the context with the field store appended, or an honest stop
+ * @throws     when the target is not a field access, the receiver's type is not a laid-out
+ *             nominal, the field is unknown, or propagated from lowering the value
+ */
 fn lower_assign_field(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
     let fa = match a.target.kind { checker::TFieldAccess as f => f; _ => return error { message = "native backend N1: field-assignment target is not a field access (internal)" } }
     let ro = match lower_expr(ctx, fa.receiver) { Lowered as x => x; error as err => return err }
@@ -10956,32 +11027,8 @@ fn lower_assign_field(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | erro
     let off = match field_offset_of(layout, fa.field) { u32 as o => o; error as err => return err }
     let addr = ctx_alloc(ro.ctx)
     let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, ro.vreg, off, a.target.line, a.target.col))
-    if is_fat_type(a.bound) { return store_assign_fat_field(with_addr, addr.vreg, a) }
+    if is_fat_type(a.bound) { return store_fat_through_addr(with_addr, addr.vreg, a, "a str/slice field") }
     store_assign_value(with_addr, addr.vreg, ltype_of(a.bound, ro.ctx.enums), a)
-}
-
-/**
- * store_assign_fat_field — the FAT arm of `lower_assign_field`: a plain `=` writes the RHS's
- * `{ptr, len}` pair through `store_fat_slot` — a compound `op=` is refused, mirroring
- * `lower_assign_fat`'s SAME refusal for a fat LOCAL (no arithmetic operator applies to a
- * `str`/`[]T`).
- *
- * Before this arm, `h.name = "xy"` reached the plain `store_assign_value` below, which writes
- * ONE machine word at the field's address — the pointer half only — and `h.name.len` read back
- * whatever the field's PREVIOUS length happened to be, silently (0.3.1.0 raiz-comum, §5.2).
- *
- * @param ctx   the lowering context, positioned after the field's address is computed
- * @param addr  the field's address VReg
- * @param a     the typed assignment (kind `Field`, a str/slice `bound`)
- * @return      the context with both halves stored
- * @throws      for a compound `op=` on a fat field, or propagated from lowering the value
- */
-fn store_assign_fat_field(ctx: LowerCtx, addr: u32, a: checker::TAssign) -> LowerStmtOut | error {
-    if a.op != lexer::TokenKind::Assign {
-        return error { message = "native backend N1: compound assignment to a str/slice field has no arithmetic form (internal)" }
-    }
-    let fo = match lower_fat_expr(ctx, a.value) { LoweredFat as x => x; error as err => return err }
-    LowerStmtOut { ctx = store_fat_slot(fo.ctx, addr, fo, a.value.line, a.value.col); terminated = false }
 }
 
 /**
@@ -11012,6 +11059,134 @@ fn store_assign_value(ctx: LowerCtx, addr: u32, field_ty: LType, a: checker::TAs
     let rr = ctx_alloc(guarded)
     let with_bin = ctx_append(rr.ctx, bin_inst(rr.vreg, op, cr.vreg, vo.vreg, a.value.line, a.value.col))
     LowerStmtOut { ctx = ctx_append(with_bin, store_inst(addr, rr.vreg, field_ty, a.value.line, a.value.col)); terminated = false }
+}
+
+/**
+ * lower_assign_index — `xs[i] = e` / `xs[i] op= e`: the slice element WRITE, the sibling of
+ * `lower_index_slice`/`lower_index_fat`'s element READ (0.3.1.0 degrau 28). Before it existed the
+ * whole statement honest-stopped ("slice element index-assignment not yet lowered"), which is the
+ * primitive `loop <name> in <slice>`'s own desugaring writes with (`parser::loop_head`) and the
+ * ordinary way Teko fills a buffer, so no program that writes an element could be built natively.
+ *
+ * The receiver is lowered as a FAT producer, not as a plain address: the LENGTH half is what the
+ * bounds guard needs. Then the index is lowered EXACTLY ONCE (`element_addr_at` takes the VReg, so
+ * the guard and the address read the same value — re-lowering it would evaluate a side-effecting
+ * index expression twice, and could even guard a different number than it wrote at), the guard traps
+ * through the SAME positioned `tk_panic_oob_at` the C route's own `emit_index_assign` calls, and the
+ * store splits by element shape (`store_assign_elem`).
+ *
+ * @param ctx  the lowering context
+ * @param a    the typed assignment (kind `Index`; `a.target` is the typed `TIndex` LHS and
+ *             `a.bound` the slice's element type)
+ * @return     the context with the element store appended, or an honest stop
+ * @throws     when the target is not a subscript or its receiver is not a slice, and propagated
+ *             from lowering the receiver, the index or the value
+ */
+fn lower_assign_index(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
+    let ix = match a.target.kind { checker::TIndex as ti => ti; _ => return error { message = "native backend N1: index-assignment target is not a subscript (internal)" } }
+    match slice_element_type(ix.receiver.type) { checker::Type => { }; error as err => return err }
+    let ro = match lower_fat_expr(ctx, ix.receiver) { LoweredFat as x => x; error as err => return err }
+    let io = match lower_expr(ro.ctx, ix.index) { Lowered as x => x; error as err => return err }
+    let checked = lower_index_bounds_guard(io.ctx, io.vreg, ro.len, a.target.line, a.target.col)
+    let stride = elem_byte_stride(a.bound, checked.enums)
+    let addr = element_addr_at(checked, ro.ptr, io.vreg, stride, a.target.line, a.target.col)
+    store_assign_elem(addr.ctx, addr.vreg, a)
+}
+
+/**
+ * lower_index_bounds_guard — trap unless `index < len`, the element write's bounds check. An
+ * UNSIGNED compare (`ICmpLtU`) so a negative index is the huge value it already is in the carrier
+ * and fails the same test, which is exactly what the C route's `(uint64_t)` cast of the index buys
+ * there. The trap calls the runtime's POSITIONED `tk_panic_oob_at(line, col)` — the same entry, the
+ * same message and the same status the C route's index guard produces, so the two routes locate an
+ * out-of-bounds write identically.
+ *
+ * @param ctx    the lowering context, positioned after the index is lowered
+ * @param index  the already-lowered index VReg
+ * @param len    the receiver slice's already-lowered length VReg
+ * @param line   the source line of the subscript
+ * @param col    the source column of the subscript
+ * @return       the advanced context, now emitting into the in-bounds block
+ */
+fn lower_index_bounds_guard(ctx: LowerCtx, index: u32, len: u32, line: u32, col: u32) -> LowerCtx {
+    let lr = ctx_alloc(ctx)
+    let with_line = ctx_append(lr.ctx, const_int_inst(lr.vreg, line to i64, line, col))
+    let cr = ctx_alloc(with_line)
+    let with_col = ctx_append(cr.ctx, const_int_inst(cr.vreg, col to i64, line, col))
+    let ok = ctx_alloc(with_col)
+    let with_cmp = ctx_append(ok.ctx, bin_inst(ok.vreg, LBinOp::ICmpLtU, index, len, line, col))
+    lower_trap_unless_with(with_cmp, ok.vreg, "tk_panic_oob_at", two_args(lr.vreg, cr.vreg), line, col)
+}
+
+/**
+ * store_assign_elem — the element store of `lower_assign_index`, split by what the slice HOLDS for
+ * an element of that type, which is the same three-way split every container placement in this
+ * backend makes:
+ *
+ * - a FAT element (`[]str`, `[][]T`) is a two-word `{ptr, len}` pair in the buffer, so both halves
+ *   are written (`store_fat_through_addr` — the very tail the field, the local and the reference
+ *   write through);
+ * - a REGISTER-VALUE element (`is_register_value_type`: a primitive, a `byte`, an `enum` carrier) is
+ *   the datum itself, and `store_assign_value` writes it at the element's machine width — the same
+ *   function a struct field's write ends in, so a compound `op=` reads the CURRENT element, applies
+ *   the arithmetic and stores the result, with the division guard included;
+ * - an AGGREGATE element is held BY ADDRESS (NATIVE-AGG-SLICE-BY-ADDRESS), so it is boxed into fresh
+ *   per-EXECUTION storage first (`store_assign_aggregate_elem`).
+ *
+ * @param ctx   the lowering context, positioned after the element's address is computed
+ * @param addr  the element's address VReg
+ * @param a     the typed assignment (kind `Index`, `a.bound` the element type)
+ * @return      the context with the element store appended, or an honest stop
+ * @throws      propagated from the arm the element shape selects
+ */
+fn store_assign_elem(ctx: LowerCtx, addr: u32, a: checker::TAssign) -> LowerStmtOut | error {
+    if is_fat_type(a.bound) { return store_fat_through_addr(ctx, addr, a, "a str/slice element") }
+    if is_register_value_type(a.bound, ctx.enums) { return store_assign_value(ctx, addr, ltype_of(a.bound, ctx.enums), a) }
+    store_assign_aggregate_elem(ctx, addr, a)
+}
+
+/**
+ * store_assign_aggregate_elem — the AGGREGATE arm of `store_assign_elem`: copy the new value into
+ * fresh per-EXECUTION runtime storage (`box_aggregate_value` / `tk_slice_elem_box`) and store THAT
+ * address into the element slot — byte for byte what `lower_scalar_element_push` already does for a
+ * pushed aggregate (degrau 4), asked of an element that already exists instead of one being
+ * appended.
+ *
+ * Storing the value's own lowered address instead would store an `alloca` — ONE frame slot per
+ * INSTRUCTION, not per EXECUTION — so a write inside a loop would leave every element pointing at
+ * the same slot, and a later mutation of the source binding would reach the element the C route
+ * copied away from it. A compound `op=` is refused: no arithmetic operator applies to an aggregate,
+ * the same refusal `store_assign_aggregate_ref` makes for a reference's aggregate pointee.
+ *
+ * @param ctx   the lowering context, positioned after the element's address is computed
+ * @param addr  the element's address VReg
+ * @param a     the typed assignment (kind `Index`, an aggregate `bound`)
+ * @return      the context with the boxed address stored
+ * @throws      for a compound `op=`, for an aggregate this backend pins no whole-type byte width
+ *              for (`unsized_aggregate_elem_stop`), or propagated from lowering the value
+ */
+fn store_assign_aggregate_elem(ctx: LowerCtx, addr: u32, a: checker::TAssign) -> LowerStmtOut | error {
+    if a.op != lexer::TokenKind::Assign {
+        return error { message = "native backend N1: compound assignment to an aggregate slice element has no arithmetic form (internal)" }
+    }
+    let width = match aggregate_box_bytes(a.bound, ctx) { u32 as n => n; null => return unsized_aggregate_elem_stop(a.bound) }
+    let vo = match lower_value_into_type(ctx, a.bound, a.value) { Lowered as x => x; error as err => return err }
+    let boxed = box_aggregate_value(vo, width, a.value)
+    let elem_lt = ltype_of(a.bound, ctx.enums)
+    LowerStmtOut { ctx = ctx_append(boxed.ctx, store_inst(addr, boxed.vreg, elem_lt, a.value.line, a.value.col)); terminated = false }
+}
+
+/**
+ * unsized_aggregate_elem_stop — the NAMED honest stop for `store_assign_aggregate_elem`: an element
+ * write whose element is an aggregate this backend cannot pin a WHOLE-TYPE byte width for
+ * (`aggregate_form_name`'s two still-open forms — an optional, a closure). The SAME two forms
+ * `unsized_aggregate_push_stop` names for a push, because it is the same missing number.
+ *
+ * @param t  the aggregate element type this backend assigns no whole-type byte width
+ * @return   the honest stop, always
+ */
+fn unsized_aggregate_elem_stop(t: checker::Type) -> error {
+    error { message = teko::str::concat("native backend N1: an element write whose element is ", aggregate_form_name(t), " — this backend holds aggregate slice elements BY ADDRESS and boxes the written value into fresh storage, which needs a byte width the element type alone fixes (N2)") }
 }
 
 /** texpr_kind_name — a short spelling of a typed expression's kind for the honest-stop
