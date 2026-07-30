@@ -5,7 +5,7 @@ perder o fio. **Este documento é a fonte única do estado.** Tudo aqui é medid
 hipótese, está dito.
 
 - **PR:** `schivei/teko-lang#99`
-- **Vagão:** `remodel/0.3.1.0-linux-native-2`, HEAD **`1bcbeaff`** (worktree `/home/user/wt-lin`)
+- **Vagão:** `remodel/0.3.1.0-linux-native-2`, HEAD **`8f94c0b1`** (worktree `/home/user/wt-lin`)
 - **Objetivo da lane:** as pernas Linux gerarem com o backend NATIVO (o `fixpoint_backend` por perna
   vive em `scripts/ci_producer_matrix.sh`)
 - **O repo é um FORK.** `schivei/teko-lang`; o upstream é `teko-org/teko-lang`. `release.yml` e
@@ -20,13 +20,40 @@ fechar, o ponto de fixo nativo não fecha e as duas pernas nativas ficam vermelh
 | --- | --- | --- |
 | 24 | `f64_bits`/`f64_from_bits` — alias do próprio VReg | **fechado**, confirmado no CI |
 | 25 | união-nula em colocações sem tipo declarado | **fechado**, confirmado no CI |
-| 26 | `append_fo` sem lowering, em `teko::codegen::cb` | **feito, POR DRENAR** (`cargo/0.3.1.0-degrau-26`) |
+| 26 | `append_fo` sem lowering, em `teko::codegen::cb` | **fechado e DRENADO** — aguarda confirmação de CI |
 
 **A SEGUNDA VAGA, e não a esqueça:** os degraus são só o que o SELF-BUILD encontra. O corpus, as
 regressões e os `.tkt` **nunca** foram compilados pelo backend nativo em CI, porque o ponto de fixo
 falha antes do job `test`. **Não prometa "faltam N degraus".**
 
-## 2. TRABALHO FEITO E EMPURRADO, À ESPERA DE DRENO
+## 2. AS CINCO BRANCHES — TODAS DRENADAS (2026-07-30, depois do segundo reinício)
+
+**Estado: DRENADAS.** O vagão está em `8f94c0b1` e as cinco entraram, nesta ordem: degrau 26,
+`b1-fp-x86`, `saida-equalizada`, `aridade-numerica`, `mingw-fora-da-rota-c`. O CI deste SHA é a
+primeira corrida em que o ponto de fixo nativo pode passar do degrau 26 **e** as três pernas que
+tinham `B1-args` podem ficar verdes de uma vez.
+
+**Depois do dreno, também feito:** mingw removido dos DOIS workflows (nenhuma invocação resta), com o
+ruling de 2026-07-27 registado como **superseded por medição** em vez de apagado.
+
+### TRÊS COISAS APRENDIDAS NO DRENO, que valem mais que ele
+
+1. **O conflito em `lower_cast` tinha as duas resoluções ingénuas ERRADAS.** `cast_unop_of` mudou de
+   assinatura numa das branches (passou a devolver `LUnOp | error`). "Ficar com o nosso" **não
+   compilaria** (o vagão chamava-o inline); "ficar com o deles" **perderia calada** a correção do
+   valor errado do `f32`. Eram duas guardas **disjuntas** de dois agentes no mesmo dispatch, e ambas
+   tinham de sobreviver. Só apareceu por ler as TRÊS versões da função (base, vagão, branch) em vez de
+   compor à vista.
+2. **A conferência de integridade deu um FALSO POSITIVO que quase apagou cobertura.** Acusou três
+   cenários duplicados no `.tkr`; eram os pares `own-native` + `C route`, que é o padrão do projeto, e
+   o detetor colapsava-os por apanhar só o primeiro token do `Scenario:`. **Chave correta é a LINHA
+   inteira do cenário.**
+3. **"Manter os dois lados" num conflito aditivo duplica o que o git já juntou FORA do hunk.** Foi o
+   que aconteceu, e foi a conferência de marcadores que apanhou (`main.tks` ainda tinha `<<<<<<<`
+   depois de eu ter dado o merge por resolvido, porque o `tail -6` do output do merge me escondeu dois
+   conflitos).
+
+### O QUE ENTROU EM CADA UMA (para o histórico)
 
 Cinco branches, **todas integralmente empurradas** (zero commits à frente do remoto — verificado após
 o reinício). Os agentes morreram com o container; o trabalho não.
@@ -66,13 +93,9 @@ Equaliza o código de saída ao byte baixo. **Eu mapeei três portas; ele achou 
 - Quando isto drenar, a regressão `defer_cascade_exit` passa a verde no Windows **sem tocar no
   harness**.
 
-### ORDEM DE DRENO RECOMENDADA
-`src/lir/lower.tks` é tocado por **quatro** delas — o conflito é ali. Ordem que minimiza:
-1. **degrau 26** (menor delta em `lower.tks`, e destranca o ponto de fixo)
-2. **`B1-args`/floats** (maior delta, e limpa três pernas)
-3. **saída equalizada**
-4. **aridade numérica**
-5. **mingw** (quase disjunto — `src/build/**`)
+### A ORDEM QUE FOI USADA, e funcionou
+`src/lir/lower.tks` é tocado por quatro delas. A ordem por delta crescente evitou conflito nos três
+primeiros; o quarto (aridade) deu quatro conflitos, todos resolvidos por composição de peças provadas.
 
 **Antes de cada dreno**, o ritual que evitou duas regressões hoje: conferir chaves `{`/`}` e
 `/**`/`*/` balanceadas, códigos de saída duplicados, chamadas sem definição no corpus, e correr os
@@ -83,7 +106,7 @@ gates estruturais (`objfile_gate_test.sh`, `wasm_known_stop_gate.sh`,
 
 | item | porquê | nota |
 | --- | --- | --- |
-| **`fmt --apply` explícito** | dono aprovou: *"Sim: fmt --apply explícito"* | o meu despacho foi **recusado na camada de permissão** logo depois; nunca chegou a correr. Contrato pinado em `scripts/fmt_cli_test.sh` |
+| **`fmt --apply` explícito** | dono aprovou: *"Sim: fmt --apply explícito"* | o meu despacho foi **recusado na camada de permissão** logo depois; nunca chegou a correr, e eu não o repeti (chamada recusada trata-se como decisão). **Precisa da palavra do dono para andar.** Contrato pinado em `scripts/fmt_cli_test.sh` |
 | **Híbrido do `main`** | desenho **fechado** no digesto de leis | precisa do arquiteto para ordenar crumbs |
 | **AArch64-ELF crumbs 2–5** | crumb 1 (relocação) fechado e provado em hardware | crumb 3 cria `Arm64Linux` em `NativeTarget` e destranca a perna arm64-Linux |
 | **`MRelocKind::None`** | `plain_word`/`branch_word` (`encode_arm64.tks:117,139`) põem `Call` como default inerte — o valor "branch" como default de um campo que toda instrução carrega. Foi a semente do bug de relocação | mata a classe na raiz |
@@ -100,6 +123,11 @@ Nenhuma bloqueante. A única que sobrou:
 O digesto é `docs/memory/teko-laws-digest.md`; a disciplina de trem é
 `docs/memory/teko-stacked-train-discipline.md`. **Leia os dois antes de despachar qualquer coisa.**
 O que segue é o que se usa em todo despacho:
+
+### Sobre o dreno
+- **`scripts/drain_guard.sh <ref>`** antes de todo merge: recusa um dreno que traga
+  `.github/workflows/**`. Já existe e provou-se por inversão contra a minha própria branch de sonda.
+  `--allow` para uma mudança de CI deliberada.
 
 ### Sobre agentes
 - **Máximo 4–5 em paralelo** (o dono subiu para 5; fui a 6 com um arquiteto, que só lê e escreve
