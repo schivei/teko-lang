@@ -904,3 +904,87 @@ execução em uma tarefa que não deveria passar de 5 min."* Exigir a prova pesa
 **PORQUE ISTO É LEI E NÃO CONSELHO.** A escada de degraus é encontrada **um degrau por rodada de CI**
 se ninguém tentar localmente. Cada degrau assim custa seis pernas de runner e uma volta ao integrador.
 A emissão nativa local custa um comando e encontra o degrau seguinte **antes** de gastar a rodada.
+
+### CORREÇÃO À LEI ACIMA, no mesmo dia, medida por um agente que a cumpriu
+
+Um agente cumpriu a lei e devolveu o facto que ela não previa: *"o pedido do dono de 'emitir um teko
+native a partir de um gen1' **não é satisfazível** nesta árvore até o degrau 27 cair — e isso é um
+facto medido, não uma desculpa."*
+
+**Ele está certo, e a lei precisa de ser lida com precisão.** O que se exige **não** é uma gen2 nativa
+com sucesso — isso é impossível hoje, e continuará impossível até o `ftoa` cair. O que se exige é:
+
+1. **a TENTATIVA**, e
+2. **a CITAÇÃO TEXTUAL da paragem que apareceu**, com a garantia de que não é a do agente e não é nova.
+
+**E a limitação honesta, que eu não disse quando escrevi a lei:** a paragem do `ftoa` acontece
+**cedo** — em `teko::codegen::cb_f64_literal`, durante a geração do próprio compilador. **Tudo o que
+um agente parta DEPOIS desse ponto é invisível a esta prova.** Portanto a lei apanha menos do que eu
+afirmei: apanha regressões que impedem chegar ao `ftoa`, não as que vivem além dele.
+
+**Consequência de prioridade, e é o argumento mais forte a favor do degrau 27:** enquanto o `ftoa` não
+cair, esta lei é uma rede de malha larga. Fechá-lo não destranca só o ponto de fixo — **torna a lei
+efectiva**.
+
+### O NÚMERO QUE MEDE A OUTRA CEGUEIRA, e é grande
+
+A fase de testes unitários faz **SIGABRT no primeiro `assert` falhado**. Medido em 2026-07-30: com o
+abort em `lwt_prim_kind_of_resolves_int_to_enum_cast_narrows`, **269 dos 1117 testes declarados nunca
+arrancam** — `lower_test.tkt` (83), `math/checked_test.tkt` (40), `parser_test.tkt` (38),
+`regex_test.tkt` (16), `time_test.tkt` (14), `math_test.tkt` (14), `sort/cmp_test.tkt` (11) e mais 12
+ficheiros.
+
+**A regra que sai daqui:** um agente que conserta o primeiro falhado tem de **medir e reportar quantos
+testes ficam cegos atrás do NOVO abort**. É esse número, e não a sensação de progresso, que diz ao
+integrador se vale despachar outro imediatamente.
+
+## DECISÃO — DEBUGGER PRÓPRIO (`tdb`), EM TEKO, COMPILADO NATIVO, FORA DE `src/` (dono, 2026-07-30)
+
+Verbatim: *"assim como uma LSP, precisaremos de um debugger próprio, mas o escreveria em native e não
+agora em C. O caso é, gastar energia marcando #line em C é desnecessário. E não colocaria o código
+dentro do src do teko, começaria por um diretório `/tdb` e dentro dele: `tdb.tkp` `main.tks` e
+`/tdb/src`, mas aqui entra o pulo do gato, pois embora executável, ele deveria ser um pacote de
+tooling, mas de início começaríamos como um projeto novo, depois poderia migrar para um repo próprio
+com um nome descente e apropriado."*
+
+**O QUE ISTO FECHA:**
+
+| ponto | estado |
+| --- | --- |
+| debugger próprio | **VAI SER FEITO.** Deixou de ser "orçar para decidir" |
+| `#line` na rota C (a Camada 0 do orçamento) | **MORTO.** *"desnecessário"* — não orçar, não discutir como opcional |
+| linguagem e backend | **Teko, compilado NATIVO.** Não em C |
+| quando | **"não agora"** — depois de a escada de degraus fechar |
+| onde | projeto próprio: `tdb.tkp`, `main.tks`, `tdb/src`. **Fora de `src/`** |
+| natureza | executável **e** pacote de tooling; projeto novo na árvore, **migra depois para repo próprio** |
+
+**A CONSEQUÊNCIA QUE REORDENA O ARCO TODO, e é a razão de esta decisão valer mais que o orçamento:**
+se `tdb` lê as NOSSAS tabelas, **o DWARF deixa de ser pré-requisito e passa a ser INTEROP**. Um
+debugger nosso não precisa de `.debug_info`/`.debug_abbrev`/`.debug_line` nem de CFI — precisa da
+tabela endereço→linha interna e do `.tsym`, que **já existe e já é emitido**. O DWARF passa a servir só
+quem não é nosso: gdb, lldb, `cppdbg`, CodeLLDB. E o item mais caro do orçamento anterior — CodeView no
+Windows — pode apagar-se por completo, porque `tdb` lê tabelas nossas em qualquer contentor.
+
+**O "PULO DO GATO" DELE JÁ EXISTE NA ÁRVORE, medido 2026-07-30.** `tooling/` já tem CINCO projetos
+irmãos, cada um com o seu `.tkp`, e a forma é literalmente "executável que é pacote de tooling":
+
+```
+name = "teko_grammar_gen_vscode"
+source = "src"
+
+[artifact]
+kind = "binary"
+```
+
+**E o achado que decide o desenho:** esses projetos **não dependem uns dos outros pelo sistema de
+pacotes**. `tooling/vscode` lê o **ficheiro JSON** que `tooling/shared` emite — acoplamento por
+**FORMATO DE FICHEIRO**, não por dependência de código, e nenhum deles alcança `../src`. É exactamente
+isso que torna barata a migração para repo próprio que o dono quer.
+
+**REGRA QUE SAI DAQUI:** `tdb` acopla-se ao compilador **por formato** (o `.tsym`, ou o que o suceda) e
+**nunca importando `src/`**. Um `tdb` que importa o checker nunca sai deste repo.
+
+**A GALINHA E O OVO, nomeada e não resolvida:** `tdb` é compilado pelo backend nativo e serve para
+depurar o próprio compilador. Se o nativo estiver quebrado, `tdb` está quebrado. E atenção: *"não
+escrever em C"* e *"não compilar pela rota C"* são coisas **diferentes** — a primeira é ordem do dono,
+a segunda não foi dita. Se a rota C for a rede de segurança do arranque, é decisão dele.

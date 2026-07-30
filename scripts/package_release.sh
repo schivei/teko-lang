@@ -111,7 +111,9 @@ if [ "${EMIT_SRC_BUNDLE:-0}" = "1" ]; then
 # Build the Teko bootstrap compiler from this portable snapshot with any C23 cc.
 # POSIX:   ./build.sh            (uses $CC or cc)
 # Windows: clang -std=c23 -Iruntime -Iassert teko.c runtime/teko_rt.c assert/assert.c -o teko.exe
-#          (MSVC is NOT supported — the runtime needs __int128 / GCC-Clang extensions.)
+#          (MSVC's own cl.exe is NOT supported — the runtime and the emitted C need GCC/Clang
+#          extensions: _Float16, __builtin_*_overflow, statement expressions. clang targeting the
+#          MSVC ABI IS supported; the 128-bit types that once forced libgcc are gone.)
 set -eu
 CC="${CC:-cc}"
 "$CC" -std=c23 -w -Iruntime -Iassert \
