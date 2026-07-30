@@ -904,3 +904,36 @@ execução em uma tarefa que não deveria passar de 5 min."* Exigir a prova pesa
 **PORQUE ISTO É LEI E NÃO CONSELHO.** A escada de degraus é encontrada **um degrau por rodada de CI**
 se ninguém tentar localmente. Cada degrau assim custa seis pernas de runner e uma volta ao integrador.
 A emissão nativa local custa um comando e encontra o degrau seguinte **antes** de gastar a rodada.
+
+### CORREÇÃO À LEI ACIMA, no mesmo dia, medida por um agente que a cumpriu
+
+Um agente cumpriu a lei e devolveu o facto que ela não previa: *"o pedido do dono de 'emitir um teko
+native a partir de um gen1' **não é satisfazível** nesta árvore até o degrau 27 cair — e isso é um
+facto medido, não uma desculpa."*
+
+**Ele está certo, e a lei precisa de ser lida com precisão.** O que se exige **não** é uma gen2 nativa
+com sucesso — isso é impossível hoje, e continuará impossível até o `ftoa` cair. O que se exige é:
+
+1. **a TENTATIVA**, e
+2. **a CITAÇÃO TEXTUAL da paragem que apareceu**, com a garantia de que não é a do agente e não é nova.
+
+**E a limitação honesta, que eu não disse quando escrevi a lei:** a paragem do `ftoa` acontece
+**cedo** — em `teko::codegen::cb_f64_literal`, durante a geração do próprio compilador. **Tudo o que
+um agente parta DEPOIS desse ponto é invisível a esta prova.** Portanto a lei apanha menos do que eu
+afirmei: apanha regressões que impedem chegar ao `ftoa`, não as que vivem além dele.
+
+**Consequência de prioridade, e é o argumento mais forte a favor do degrau 27:** enquanto o `ftoa` não
+cair, esta lei é uma rede de malha larga. Fechá-lo não destranca só o ponto de fixo — **torna a lei
+efectiva**.
+
+### O NÚMERO QUE MEDE A OUTRA CEGUEIRA, e é grande
+
+A fase de testes unitários faz **SIGABRT no primeiro `assert` falhado**. Medido em 2026-07-30: com o
+abort em `lwt_prim_kind_of_resolves_int_to_enum_cast_narrows`, **269 dos 1117 testes declarados nunca
+arrancam** — `lower_test.tkt` (83), `math/checked_test.tkt` (40), `parser_test.tkt` (38),
+`regex_test.tkt` (16), `time_test.tkt` (14), `math_test.tkt` (14), `sort/cmp_test.tkt` (11) e mais 12
+ficheiros.
+
+**A regra que sai daqui:** um agente que conserta o primeiro falhado tem de **medir e reportar quantos
+testes ficam cegos atrás do NOVO abort**. É esse número, e não a sensação de progresso, que diz ao
+integrador se vale despachar outro imediatamente.
