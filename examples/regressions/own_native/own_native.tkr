@@ -592,3 +592,32 @@ Feature: array-literal return escape — a `[]T` array literal returned directly
   Scenario: array_lit_return_escape (own-native — two array-literal-returning calls, first result read after the second call)
     When built and run
     Then exit = 42
+
+
+Feature: union placement — a value written into a union-typed slot is wrapped, whatever the slot is
+
+  # (0.3.1.0 degrau 25) every own-backend placement coerces its value into the slot's DECLARED type
+  # (`lower_value_into_type`) — except two, which had no declared type to coerce against: a
+  # struct-literal field (the layout table keeps machine classes, not checker types) and a call
+  # argument. A bare `null` in a struct field therefore stopped the whole build; a bare `T` in
+  # either placement compiled and wrote its own raw representation into a slot a later `match` reads
+  # as the wrapper's BASE ADDRESS, which SIGSEGV'd against a C route that answered correctly.
+  # `collect_field_decls` (the checker-typed companion of the layout table) and
+  # `callee_param_types` (off `TCall.callee_type`) are what those two placements now read.
+  #
+  # The first row exercises a scalar union field, a FAT (`str`) union field read back through both
+  # its length and its first byte, a class instance's union field through its factory, and both a
+  # bare `null` and a bare scalar at a call argument.
+  Scenario: union_placement_field_and_argument (own-native — a struct field, a class field and a call argument, each a union slot)
+    When built and run
+    Then exit = 42
+
+  # The second row is the twin degrau 23 left behind: `lower_variant_construct` got the
+  # DIRECT-vs-NESTED split and `lower_null_union_construct` did not, so a bare case placed into a
+  # `<variant> | null` slot stored the case's own raw address and the inner `match` read that value's
+  # FIRST FIELD as the inner union's tag — no arm taken, no diagnostic, execution falling through the
+  # whole `match`. Both inner cases (tags 0 and 1) carry distinct field values so a dropped inner
+  # wrapper cannot pass by coincidence.
+  Scenario: union_placement_nested_variant (own-native — a bare variant case placed into a `<variant> | null` slot, through both match levels)
+    When built and run
+    Then exit = 42

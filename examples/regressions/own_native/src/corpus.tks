@@ -3123,3 +3123,172 @@ fn f_f64_bits_roundtrip() -> i64 {
     if (ba & 0x8000000000000000) != 0 { return 5 }
     0
 }
+
+/**
+ * HolderD25 — a struct whose fields are null-bearing unions of DIFFERENT payload shapes: a SCALAR
+ * member and a FAT (`str`) one, so a wrapper written at the wrong offset shows up as the wrong
+ * field rather than as a coincidentally-right value (0.3.1.0 degrau 25).
+ */
+type HolderD25 = struct {
+    /** n — the SCALAR union member's slot. */
+    n: i64 | null
+    /** s — the FAT union member's slot (its wrapper carries both the ptr and the len half). */
+    s: str | null
+}
+
+/**
+ * ShapeD25 — a DECLARED variant, the inner union a `ShapeD25 | null` placement must wrap its bare
+ * case into before storing it as the outer union's payload (0.3.1.0 degrau 25).
+ */
+type ShapeD25 = variant CircD25 | SqD25
+
+/** CircD25 — `ShapeD25`'s first case (tag 0). */
+type CircD25 = struct {
+    /** r — the circle's radius, the value the round-trip reads back. */
+    r: i64
+}
+
+/** SqD25 — `ShapeD25`'s second case (tag 1) — a DIFFERENT tag, so a dropped inner wrapper cannot
+    coincide with the right answer. */
+type SqD25 = struct {
+    /** side — the square's side, the value the round-trip reads back. */
+    side: i64
+}
+
+/** CarrierD25 — a struct whose ONE field is a null-bearing union over a declared variant. */
+type CarrierD25 = struct {
+    /** sh — the nested-union slot. */
+    sh: ShapeD25 | null
+}
+
+/** BoxD25 — a class whose instance field is a null-bearing union: the EFFECTIVE-field half of the
+    declared-field-type table (`collect_field_decls`'s `ClassBody` arm). */
+type BoxD25 = class {
+    /** k — the null-bearing union instance field. */
+    pub k: i64 | null
+
+    /**
+     * make — the static factory a class literal is only constructible through.
+     *
+     * @param v  the value (or `null`) the instance's union field is built at
+     * @return   a fresh `BoxD25`
+     */
+    pub fn make(v: i64 | null) -> BoxD25 { BoxD25 { k = v } }
+}
+
+/**
+ * d25_scalar_of — the scalar union field's value, or `-1` when it is absent.
+ *
+ * @param h  the holder to read
+ * @return   `h.n`'s payload, or `-1` for the absent case
+ */
+fn d25_scalar_of(h: HolderD25) -> i64 { match h.n { null => 0 - 1; i64 as v => v } }
+
+/**
+ * d25_text_len_of — the FAT union field's LENGTH, or `-1` when it is absent. A wrapper whose length
+ * half was never written reads back as `0`, which is neither answer.
+ *
+ * @param h  the holder to read
+ * @return   `h.s`'s length, or `-1` for the absent case
+ */
+fn d25_text_len_of(h: HolderD25) -> i64 { match h.s { null => 0 - 1; str as t => t.len to i64 } }
+
+/**
+ * d25_text_head_of — the FAT union field's FIRST BYTE, or `-1` when it is absent: the pointer half
+ * has to point at the real bytes, not merely be non-zero.
+ *
+ * @param h  the holder to read
+ * @return   `h.s`'s first byte, or `-1` for the absent case
+ */
+fn d25_text_head_of(h: HolderD25) -> i64 { match h.s { null => 0 - 1; str as t => t[0] to i64 } }
+
+/**
+ * d25_arg_or — narrow a null-bearing union passed as a CALL ARGUMENT. Both a bare `null` and a bare
+ * `i64` reach this parameter unwrapped unless the caller coerces them into it.
+ *
+ * @param x         the argument to narrow
+ * @param fallback  the answer for the absent case
+ * @return          `x`'s payload, or `fallback`
+ */
+fn d25_arg_or(x: i64 | null, fallback: i64) -> i64 { match x { null => fallback; i64 as v => v } }
+
+/**
+ * d25_box_or — narrow a CLASS instance's null-bearing union field.
+ *
+ * @param b         the instance to read
+ * @param fallback  the answer for the absent case
+ * @return          `b.k`'s payload, or `fallback`
+ */
+fn d25_box_or(b: BoxD25, fallback: i64) -> i64 { match b.k { null => fallback; i64 as v => v } }
+
+/**
+ * d25_shape_side_of — narrow a `ShapeD25 | null` field through BOTH levels: the outer null-union's
+ * present case, then the inner declared variant's own case. A missing inner wrapper makes the inner
+ * `match` read the bare case struct's first field as `ShapeD25`'s tag, so NEITHER inner arm is
+ * taken and the value falls through.
+ *
+ * @param c  the carrier to read
+ * @return   the case's own measurement, or `-1` for the absent case, or `-2` when the inner `match`
+ *           selected no arm at all
+ */
+fn d25_shape_side_of(c: CarrierD25) -> i64 {
+    match c.sh {
+        null => 0 - 1
+        ShapeD25 as s => match s {
+            CircD25 as cc => cc.r
+            SqD25 as sq => sq.side
+            _ => 0 - 2
+        }
+    }
+}
+
+/**
+ * f_union_placement_field_and_argument — 0.3.1.0 degrau 25: a value placed into a UNION-typed struct
+ * field, class field or call argument is coerced into that union's tag+payload wrapper, whether the
+ * value is a bare `null`, a bare scalar, a bare `str`, or a bare case of a nested declared variant.
+ *
+ * Before the fix a bare `null` in a struct field honest-stopped the whole build (`native backend N1:
+ * a \`null\` in this position needs the null-union wrapper the placement does not declare a type
+ * for`) and every OTHER row here compiled and SIGSEGV'd or answered wrong — the raw value was
+ * written into a slot a later `match` reads as the wrapper's base address.
+ *
+ * @return 0 when every placement round-trips, else the number of the failing check
+ */
+fn f_union_placement_field_and_argument() -> i64 {
+    let absent = HolderD25 { n = null; s = null }
+    let present = HolderD25 { n = 41; s = "abcde" }
+    if d25_scalar_of(absent) != 0 - 1 { return 1 }
+    if d25_text_len_of(absent) != 0 - 1 { return 2 }
+    if d25_scalar_of(present) != 41 { return 3 }
+    if d25_text_len_of(present) != 5 { return 4 }
+    if d25_text_head_of(present) != 97 { return 5 }
+    if d25_arg_or(null, 7) != 7 { return 6 }
+    if d25_arg_or(13, 7) != 13 { return 7 }
+    if d25_box_or(BoxD25::make(null), 3) != 3 { return 8 }
+    if d25_box_or(BoxD25::make(19), 3) != 19 { return 9 }
+    0
+}
+
+/**
+ * f_union_placement_nested_variant — 0.3.1.0 degrau 25: a bare case placed into a `<variant> | null`
+ * slot gets its OWN inner wrapper built before the outer union stores it, so both `match` levels
+ * read a real tag. The twin `lower_variant_construct` was given in degrau 23 and
+ * `lower_null_union_construct` was not.
+ *
+ * The two cases carry DIFFERENT tags (0 and 1) and different field values, so a dropped inner
+ * wrapper cannot pass by coincidence; `-2` distinguishes "the inner match took no arm" from "the
+ * inner match took the wrong one".
+ *
+ * @return 0 when both cases round-trip through both levels, else the number of the failing check
+ */
+fn f_union_placement_nested_variant() -> i64 {
+    if d25_shape_side_of(CarrierD25 { sh = null }) != 0 - 1 { return 1 }
+    if d25_shape_side_of(CarrierD25 { sh = SqD25 { side = 23 } }) != 23 { return 2 }
+    if d25_shape_side_of(CarrierD25 { sh = CircD25 { r = 29 } }) != 29 { return 3 }
+    let bound: ShapeD25 | null = SqD25 { side = 31 }
+    match bound {
+        null => return 4
+        ShapeD25 as s => match s { CircD25 => return 5; SqD25 as sq => if sq.side != 31 { return 6 }; _ => return 7 }
+    }
+    0
+}
