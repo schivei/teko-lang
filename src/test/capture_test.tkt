@@ -1,0 +1,101 @@
+use teko::test
+
+/**
+ * probe_how — how the body that `which` selects ended, under the runtime's capture.
+ *
+ * @param which  one of the `teko::test::PROBE_*` selectors
+ * @return       the `HOW_*` value the capture recorded
+ */
+fn probe_how(which: i32) -> i32 { teko::test::capture_probe(which) }
+
+#test
+/**
+ * tc_a_body_that_returns_comes_back_ok — the control arm: capture must not turn a normal return into
+ * anything else. Without it the other three arms could pass on a mechanism that reports the same
+ * answer for everything.
+ *
+ * @throws when a body that returns is not reported as `HOW_OK`
+ */
+fn tc_a_body_that_returns_comes_back_ok() {
+    teko::assert::eq_i64(probe_how(teko::test::PROBE_RETURNS) to i64, teko::test::HOW_OK to i64)
+}
+
+#test
+/**
+ * tc_a_panicking_body_comes_back_and_the_caller_continues — the arm the owner asked for by name, in
+ * the order he asked for it.
+ *
+ * IT ASSERTS THE PANIC HAPPENED BEFORE IT ASSERTS SURVIVAL, because a guard that only checked "the
+ * process did not die" would pass trivially on a mechanism that never ran a body at all. First: the
+ * body RAN and its panic was CAPTURED (`HOW_PANICKED`). Only then: the caller kept going, which the
+ * second probe proves by returning at all.
+ *
+ * @throws when an explicit panic is not captured, or when the caller cannot continue afterwards
+ */
+fn tc_a_panicking_body_comes_back_and_the_caller_continues() {
+    teko::assert::eq_i64(probe_how(teko::test::PROBE_PANICS) to i64, teko::test::HOW_PANICKED to i64)
+    teko::assert::eq_i64(probe_how(teko::test::PROBE_RETURNS) to i64, teko::test::HOW_OK to i64)
+}
+
+#test
+/**
+ * tc_an_implicit_panic_comes_back_too — division by zero, which no `panic` call site names.
+ *
+ * The implicit panics (div0, out-of-bounds, impossible cast) all drain into the same chokepoint as
+ * the explicit one, so this arm is what proves the chokepoint is the shared one and not a second
+ * path that merely looks alike.
+ *
+ * @throws when a divide-by-zero is not captured as a panic
+ */
+fn tc_an_implicit_panic_comes_back_too() {
+    teko::assert::eq_i64(probe_how(teko::test::PROBE_DIV0) to i64, teko::test::HOW_PANICKED to i64)
+}
+
+#test
+/**
+ * tc_an_exiting_body_comes_back_with_its_value — the case that used to end the whole run.
+ *
+ * `exit(7)` inside a test body must come back as `HOW_EXITED` carrying 7, with no syscall sent. The
+ * VALUE is asserted and not merely the kind: a capture that reported `HOW_EXITED` with a lost code
+ * would be a capture that threw away the only thing the caller wanted.
+ *
+ * @throws when the exit is not captured, or comes back without its code
+ */
+fn tc_an_exiting_body_comes_back_with_its_value() {
+    teko::assert::eq_i64(probe_how(teko::test::PROBE_EXITS) to i64, teko::test::HOW_EXITED to i64)
+    teko::assert::eq_i64(teko::test::capture_probe_code() to i64, teko::test::PROBE_EXIT_CODE to i64)
+}
+
+#test
+/**
+ * tc_the_capture_is_intact_for_the_next_test — the SUITE-LEVEL survival claim, and it has to be a
+ * SEPARATE and LATER test.
+ *
+ * A test cannot credibly say the suite outlived it; only the next one can. If the capture regresses,
+ * the tests above take the process down with them and this one is never reported — and a test that
+ * does not appear in the summary is a failure the design names (`never-ran`), never a green. What it
+ * asserts positively is that no capture state leaked out of those tests: the mechanism still answers
+ * for a fresh body.
+ *
+ * @throws when the capture stack did not unwind cleanly after the tests above used it
+ */
+fn tc_the_capture_is_intact_for_the_next_test() {
+    teko::assert::eq_i64(probe_how(teko::test::PROBE_RETURNS) to i64, teko::test::HOW_OK to i64)
+    teko::assert::eq_i64(probe_how(teko::test::PROBE_PANICS) to i64, teko::test::HOW_PANICKED to i64)
+}
+
+#test
+/**
+ * tc_an_unknown_probe_is_not_a_silent_pass — the selector that names no body.
+ *
+ * A probe API whose out-of-range input answered `HOW_OK` would let a mistyped selector turn every arm
+ * above into decoration, so the runtime answers with a value that is none of the three real results.
+ *
+ * @throws when an unnamed selector is reported as one of the real endings
+ */
+fn tc_an_unknown_probe_is_not_a_silent_pass() {
+    let how = probe_how(teko::test::PROBE_DIV0 + 1)
+    teko::assert::is_true(how != teko::test::HOW_OK)
+    teko::assert::is_true(how != teko::test::HOW_PANICKED)
+    teko::assert::is_true(how != teko::test::HOW_EXITED)
+}
