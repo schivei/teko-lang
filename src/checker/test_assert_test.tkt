@@ -1,43 +1,87 @@
-// src/checker/test_assert_test.tkt   (namespace 'teko::checker')
-//
-// Unit tests for the 0.3.0.29 assertion-fold analyzer signal: `predicate_folds_const` (comptime_fold)
-// and `test_assert_stats` (test_assert). Fixtures build the typed AST directly — no parse/check needed.
-
 use teko::lexer
 use teko::parser
 
-/** taf_num — a typed i64 number-literal expression fixture. */
+/**
+ * A typed i64 number-literal expression fixture.
+ *
+ * @param v  the literal's magnitude
+ * @return   the typed number leaf
+ */
 fn taf_num(v: u64) -> TExpr {
     TExpr { kind = TNumber { is_float = false; value = parser::numint_of_u64(v); fval = 0.0 }; type = Prim { kind = PrimKind::I64 }; line = 0; col = 0 }
 }
 
-/** taf_bool — a typed bool-literal expression fixture. */
+/**
+ * A typed bool-literal expression fixture.
+ *
+ * @param b  the literal's value
+ * @return   the typed bool leaf
+ */
 fn taf_bool(b: bool) -> TExpr {
     TExpr { kind = TBoolLit { value = b }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
 }
 
-/** taf_var — a typed variable-reference expression fixture (a runtime leaf). */
+/**
+ * A typed string-literal expression fixture.
+ *
+ * @param s  the literal's decoded text
+ * @return   the typed string leaf
+ */
+fn taf_str(s: str) -> TExpr {
+    TExpr { kind = TStrLit { text = s }; type = Str { }; line = 0; col = 0 }
+}
+
+/**
+ * A typed variable-reference expression fixture (a runtime leaf).
+ *
+ * @param n  the variable's name
+ * @return   the typed variable reference
+ */
 fn taf_var(n: str) -> TExpr {
     TExpr { kind = TVar { name = n; is_func = false; func_ns = "" }; type = Prim { kind = PrimKind::I64 }; line = 0; col = 0 }
 }
 
-/** taf_cmp — a typed `a <op> b` comparison expression fixture. */
+/**
+ * A typed `a <op> b` comparison expression fixture.
+ *
+ * @param a   the first operand
+ * @param op  the comparison operator token
+ * @param b   the second operand
+ * @return    the typed comparison chain
+ */
 fn taf_cmp(a: TExpr, op: lexer::TokenKind, b: TExpr) -> TExpr {
     let term = TCmpTerm { op = op; operand = b }
     TExpr { kind = TCompare { first = a; rest = teko::list::push(teko::list::empty(), term) }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
 }
 
-/** taf_bin — a typed `a <op> b` binary expression fixture. */
+/**
+ * A typed `a <op> b` binary expression fixture.
+ *
+ * @param a   the left operand
+ * @param op  the binary operator token
+ * @param b   the right operand
+ * @return    the typed binary expression
+ */
 fn taf_bin(a: TExpr, op: lexer::TokenKind, b: TExpr) -> TExpr {
     TExpr { kind = TBinary { op = op; left = a; right = b }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
 }
 
-/** taf_not — a typed `!operand` unary expression fixture. */
+/**
+ * A typed `!operand` unary expression fixture.
+ *
+ * @param operand  the negated operand
+ * @return         the typed unary expression
+ */
 fn taf_not(operand: TExpr) -> TExpr {
     TExpr { kind = TUnary { op = lexer::TokenKind::Bang; operand = operand }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
 }
 
-/** taf_path — a `teko::assert::<name>` callee path fixture. */
+/**
+ * A `teko::assert::<name>` callee path fixture.
+ *
+ * @param name  the assertion's last path segment
+ * @return      the three-segment callee path
+ */
 fn taf_path(name: str) -> parser::Path {
     mut segs: []parser::Segment = teko::list::push(teko::list::empty(), parser::Segment { name = "teko" })
     segs = teko::list::push(segs, parser::Segment { name = "assert" })
@@ -45,28 +89,176 @@ fn taf_path(name: str) -> parser::Path {
     parser::Path { segments = segs }
 }
 
-/** taf_call — a typed call expression fixture to `path` with `args`. */
-fn taf_call(path: parser::Path, args: []TExpr) -> TExpr {
-    TExpr { kind = TCall { callee = path; args = args; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
+/**
+ * A single-segment callee path fixture (a bare local call).
+ *
+ * @param name  the called function's name
+ * @return      the one-segment callee path
+ */
+fn taf_local_path(name: str) -> parser::Path {
+    parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = name }) }
 }
 
-/** taf_assert — a typed `teko::assert::<name>(pred)` call-expression fixture. */
+/**
+ * A typed call expression fixture to `path` with `args`, at the origin position.
+ *
+ * @param path  the callee path
+ * @param args  the argument expressions
+ * @return      the typed call expression
+ */
+fn taf_call(path: parser::Path, args: []TExpr) -> TExpr {
+    taf_call_at(path, args, 0, 0)
+}
+
+/**
+ * A typed call expression fixture carrying a source position — the position the site table reads.
+ *
+ * @param path  the callee path
+ * @param args  the argument expressions
+ * @param line  the 1-based source line
+ * @param col   the 1-based source column
+ * @return      the positioned typed call expression
+ */
+fn taf_call_at(path: parser::Path, args: []TExpr, line: u32, col: u32) -> TExpr {
+    TExpr { kind = TCall { callee = path; args = args; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = Prim { kind = PrimKind::Bool }; line = line; col = col }
+}
+
+/**
+ * A typed `teko::assert::<name>(pred)` call-expression fixture.
+ *
+ * @param name  the assertion's last path segment
+ * @param pred  the single argument
+ * @return      the typed assertion call
+ */
 fn taf_assert(name: str, pred: TExpr) -> TExpr {
     taf_call(taf_path(name), teko::list::push(teko::list::empty(), pred))
 }
 
-/** taf_expr_stmt — wrap an expression as an expression statement. */
+/**
+ * A typed two-argument `teko::assert::<name>(a, b)` call-expression fixture.
+ *
+ * @param name  the assertion's last path segment
+ * @param a     the first argument
+ * @param b     the second argument
+ * @return      the typed assertion call
+ */
+fn taf_assert2(name: str, a: TExpr, b: TExpr) -> TExpr {
+    taf_call(taf_path(name), teko::list::push(teko::list::push(teko::list::empty(), a), b))
+}
+
+/**
+ * A typed zero-argument `teko::assert::<name>()` call-expression fixture (`scenario_ok`).
+ *
+ * @param name  the assertion's last path segment
+ * @return      the typed assertion call
+ */
+fn taf_assert0(name: str) -> TExpr {
+    taf_call(taf_path(name), teko::list::empty())
+}
+
+/**
+ * Wrap an expression as an expression statement.
+ *
+ * @param e  the expression
+ * @return   the expression statement
+ */
 fn taf_expr_stmt(e: TExpr) -> TStatement { TExprStmt { expr = e } }
 
-/** taf_fn — a `#test` TFunction fixture with the given body. */
+/**
+ * A one-statement block holding a `teko::assert::is_true(true)` assertion.
+ *
+ * @return  the single-assertion block
+ */
+fn taf_one_assert_blk() -> []TStatement {
+    teko::list::push(teko::list::empty(), taf_expr_stmt(taf_assert("is_true", taf_bool(true))))
+}
+
+/**
+ * A one-statement block holding a bare `return`.
+ *
+ * @return  the single-return block
+ */
+fn taf_return_blk() -> []TStatement {
+    teko::list::push(teko::list::empty(), TReturn { has_value = false; value = taf_num(0) })
+}
+
+/**
+ * An `if <cond> { <then> }` expression statement fixture (no else branch).
+ *
+ * @param then_blk  the then block
+ * @return          the `if` wrapped as a statement
+ */
+fn taf_if_stmt(then_blk: []TStatement) -> TStatement {
+    taf_expr_stmt(TExpr { kind = TIfExpr { cond = taf_var("c"); then_blk = then_blk; has_else = false; else_blk = teko::list::empty() }; type = Void { }; line = 0; col = 0 })
+}
+
+/**
+ * A `#test` TFunction fixture with the given body, declared in no file.
+ *
+ * @param body  the typed statement body
+ * @return      the `#test` function
+ */
 fn taf_fn(body: []TStatement) -> TFunction {
+    taf_named_fn("t", body, "", true)
+}
+
+/**
+ * A TFunction fixture with a chosen name, file and `#test` flag — the shape the helper hop needs,
+ * since the hop matches a call's name against the functions of the SAME file.
+ *
+ * @param name     the function's name
+ * @param body     the typed statement body
+ * @param file     the declaring source file
+ * @param is_test  whether the function carries `#test`
+ * @return         the typed function
+ */
+fn taf_named_fn(name: str, body: []TStatement, file: str, is_test: bool) -> TFunction {
     TFunction {
-        name = "t"; type_params = teko::list::empty(); type_constraints = teko::list::empty()
+        name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty()
         params = teko::list::empty(); return_type = Void { }; body = body
         vis = parser::Visibility::Private; has_doc = false; doc = ""; namespace = "probe"
-        file = ""; line = 0; col = 0; is_test = true; is_extern = false; c_symbol = ""; from_lib = ""
+        file = file; line = 0; col = 0; is_test = is_test; is_extern = false; c_symbol = ""; from_lib = ""
         has_arena_size = false; arena_size = 0 to u64
     }
+}
+
+/**
+ * The site list of a `#test` fixture walked with no helpers and the default hop budget.
+ *
+ * @param body  the typed statement body
+ * @return      the declared assertion sites
+ */
+fn taf_sites(body: []TStatement) -> []AssertSite {
+    test_assert_sites(taf_fn(body), teko::list::empty(), ASSERT_HOP_DEPTH)
+}
+
+/**
+ * The classification of the single site a fixture body declares.
+ *
+ * @param body  the typed statement body (must declare exactly one assertion)
+ * @return      that site's `Mandatory`/`Flow` classification
+ */
+fn taf_one_kind(body: []TStatement) -> AssertKind {
+    let sites = taf_sites(body)
+    teko::assert::is_true(sites.len == 1)
+    sites[0].kind
+}
+
+/**
+ * A checked-program fixture holding the given functions as its items.
+ *
+ * @param fns  the functions to place in the program
+ * @return     the program
+ */
+fn taf_prog(fns: []TFunction) -> TProgram {
+    mut items: []TItem = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= fns.len { break }
+        items = teko::list::push(items, fns[i])
+        i++
+    }
+    TProgram { items = items }
 }
 
 /** A `&&` of two constant predicates folds (the logical-connective leg). */
@@ -170,4 +362,265 @@ fn taf_stats_descends_into_adopt() {
     let body = teko::list::push(teko::list::empty(), TAdoptStmt { name = ""; body = inner })
     let stats = test_assert_stats(taf_fn(body))
     teko::assert::is_true(stats.total == 1)
+}
+
+/**
+ * The DECLARED axis sees an assertion the FOLD axis is blind to, and the two counts stay apart:
+ * `str_contains` takes two strings and no bool predicate, so it is one declared site and zero
+ * bool-predicate assertions.
+ */
+#test
+fn taf_sites_see_str_contains_while_the_fold_axis_does_not() {
+    mut body = teko::list::push(teko::list::empty(), taf_expr_stmt(taf_assert("is_true", taf_bool(true))))
+    body = teko::list::push(body, taf_expr_stmt(taf_assert2("str_contains", taf_str("hay"), taf_str("needle"))))
+    teko::assert::is_true(taf_sites(body).len == 2)
+    teko::assert::is_true(test_assert_stats(taf_fn(body)).total == 1)
+}
+
+/** A zero-argument assertion (`scenario_ok`) is a declared site — declaring it and never reaching it is the invisibility this axis exists to catch. */
+#test
+fn taf_sites_count_a_zero_argument_assertion() {
+    let body = teko::list::push(teko::list::empty(), taf_expr_stmt(taf_assert0("scenario_ok")))
+    teko::assert::is_true(taf_sites(body).len == 1)
+}
+
+/** A call that names no injected assertion and no same-file helper declares no site. */
+#test
+fn taf_sites_ignore_an_unrelated_call() {
+    let body = teko::list::push(teko::list::empty(), taf_expr_stmt(taf_call(taf_local_path("nothing"), teko::list::empty())))
+    teko::assert::is_true(taf_sites(body).len == 0)
+}
+
+/** An assertion at the root of the body, with nothing before it, is MANDATORY. */
+#test
+fn taf_sites_classify_a_root_assertion_as_mandatory() {
+    teko::assert::is_true(taf_one_kind(taf_one_assert_blk()) == AssertKind::Mandatory)
+}
+
+/** THE FIRST HARD CASE: an assertion inside a `loop` is FLOW — a `loop <cond>` may run zero times. */
+#test
+fn taf_sites_classify_an_assertion_in_a_loop_as_flow() {
+    let body = teko::list::push(teko::list::empty(), TLoopStmt { label = ""; init = teko::list::empty(); body = taf_one_assert_blk() })
+    teko::assert::is_true(taf_one_kind(body) == AssertKind::Flow)
+}
+
+/** A `loop`'s INIT block is flow too — the same statement, the same reason. */
+#test
+fn taf_sites_classify_an_assertion_in_a_loop_init_as_flow() {
+    let body = teko::list::push(teko::list::empty(), TLoopStmt { label = ""; init = taf_one_assert_blk(); body = teko::list::empty() })
+    teko::assert::is_true(taf_one_kind(body) == AssertKind::Flow)
+}
+
+/** THE SECOND HARD CASE: a `defer` is classified by the SITE OF THE DEFER — at the root it is MANDATORY. */
+#test
+fn taf_sites_classify_a_root_defer_as_mandatory() {
+    let body = teko::list::push(teko::list::empty(), TDeferStmt { body = taf_one_assert_blk() })
+    teko::assert::is_true(taf_one_kind(body) == AssertKind::Mandatory)
+}
+
+/** The same `defer`, written inside an `if`, is FLOW — the body did not move, the site did. */
+#test
+fn taf_sites_classify_a_defer_inside_an_if_as_flow() {
+    let inner = teko::list::push(teko::list::empty(), TDeferStmt { body = taf_one_assert_blk() })
+    let body = teko::list::push(teko::list::empty(), taf_if_stmt(inner))
+    teko::assert::is_true(taf_one_kind(body) == AssertKind::Flow)
+}
+
+/** THE THIRD HARD CASE: an assertion at the ROOT, after `if x { return }`, is at depth zero and still skippable — FLOW. */
+#test
+fn taf_sites_classify_a_root_assertion_after_a_conditional_return_as_flow() {
+    mut body = teko::list::push(teko::list::empty(), taf_if_stmt(taf_return_blk()))
+    body = teko::list::push(body, taf_expr_stmt(taf_assert("is_true", taf_bool(true))))
+    teko::assert::is_true(taf_one_kind(body) == AssertKind::Flow)
+}
+
+/** The inversion of the third case: the assertion written BEFORE the conditional return is still MANDATORY. */
+#test
+fn taf_sites_classify_a_root_assertion_before_a_conditional_return_as_mandatory() {
+    mut body = teko::list::push(teko::list::empty(), taf_expr_stmt(taf_assert("is_true", taf_bool(true))))
+    body = teko::list::push(body, taf_if_stmt(taf_return_blk()))
+    teko::assert::is_true(taf_one_kind(body) == AssertKind::Mandatory)
+}
+
+/** A `break` inside a preceding `loop` binds to that loop and does NOT make what follows skippable. */
+#test
+fn taf_sites_keep_an_assertion_after_a_breaking_loop_mandatory() {
+    let brk = teko::list::push(teko::list::empty(), TBreakStmt { label = "" })
+    mut body = teko::list::push(teko::list::empty(), TLoopStmt { label = ""; init = teko::list::empty(); body = brk })
+    body = teko::list::push(body, taf_expr_stmt(taf_assert("is_true", taf_bool(true))))
+    teko::assert::is_true(taf_one_kind(body) == AssertKind::Mandatory)
+}
+
+/** A `return` inside a preceding `loop` DOES make what follows skippable. */
+#test
+fn taf_sites_classify_an_assertion_after_a_returning_loop_as_flow() {
+    let inner = teko::list::push(teko::list::empty(), taf_if_stmt(taf_return_blk()))
+    mut body = teko::list::push(teko::list::empty(), TLoopStmt { label = ""; init = teko::list::empty(); body = inner })
+    body = teko::list::push(body, taf_expr_stmt(taf_assert("is_true", taf_bool(true))))
+    teko::assert::is_true(taf_one_kind(body) == AssertKind::Flow)
+}
+
+/** An assertion reached through ONE call into a same-file helper is found, marked hopped, and classified in the CALLER's context. */
+#test
+fn taf_sites_follow_one_hop_into_a_same_file_helper() {
+    let helper = taf_named_fn("h", taf_one_assert_blk(), "p.tks", false)
+    let test_fn = taf_named_fn("t", teko::list::push(teko::list::empty(), taf_expr_stmt(taf_call(taf_local_path("h"), teko::list::empty()))), "p.tks", true)
+    let sites = test_assert_sites(test_fn, teko::list::push(teko::list::empty(), helper), ASSERT_HOP_DEPTH)
+    teko::assert::is_true(sites.len == 1)
+    teko::assert::is_true(sites[0].hopped)
+    teko::assert::is_true(sites[0].kind == AssertKind::Mandatory)
+}
+
+/** The same helper called from inside an `if` yields a FLOW site — the hop inherits the caller's flow context. */
+#test
+fn taf_sites_classify_a_hopped_assertion_by_the_call_site() {
+    let helper = taf_named_fn("h", taf_one_assert_blk(), "p.tks", false)
+    let call_blk = teko::list::push(teko::list::empty(), taf_expr_stmt(taf_call(taf_local_path("h"), teko::list::empty())))
+    let test_fn = taf_named_fn("t", teko::list::push(teko::list::empty(), taf_if_stmt(call_blk)), "p.tks", true)
+    let sites = test_assert_sites(test_fn, teko::list::push(teko::list::empty(), helper), ASSERT_HOP_DEPTH)
+    teko::assert::is_true(sites.len == 1)
+    teko::assert::is_true(sites[0].kind == AssertKind::Flow)
+}
+
+/** A helper declared in ANOTHER file is not hopped into — the hop is same-file by construction. */
+#test
+fn taf_sites_do_not_hop_into_another_file() {
+    let helper = taf_named_fn("h", taf_one_assert_blk(), "other.tks", false)
+    let test_fn = taf_named_fn("t", teko::list::push(teko::list::empty(), taf_expr_stmt(taf_call(taf_local_path("h"), teko::list::empty()))), "p.tks", true)
+    teko::assert::is_true(test_assert_sites(test_fn, teko::list::push(teko::list::empty(), helper), ASSERT_HOP_DEPTH).len == 0)
+}
+
+/** A zero hop budget sees only what the body writes directly — the measurement of invisibility itself. */
+#test
+fn taf_sites_with_a_zero_hop_budget_see_nothing_indirect() {
+    let helper = taf_named_fn("h", taf_one_assert_blk(), "p.tks", false)
+    let test_fn = taf_named_fn("t", teko::list::push(teko::list::empty(), taf_expr_stmt(taf_call(taf_local_path("h"), teko::list::empty()))), "p.tks", true)
+    teko::assert::is_true(test_assert_sites(test_fn, teko::list::push(teko::list::empty(), helper), 0).len == 0)
+}
+
+/** The hop is one level deep: an assertion two calls away is not reached at the default budget. */
+#test
+fn taf_sites_stop_after_one_hop() {
+    let inner = taf_named_fn("h2", taf_one_assert_blk(), "p.tks", false)
+    let outer = taf_named_fn("h1", teko::list::push(teko::list::empty(), taf_expr_stmt(taf_call(taf_local_path("h2"), teko::list::empty()))), "p.tks", false)
+    let test_fn = taf_named_fn("t", teko::list::push(teko::list::empty(), taf_expr_stmt(taf_call(taf_local_path("h1"), teko::list::empty()))), "p.tks", true)
+    let helpers = teko::list::push(teko::list::push(teko::list::empty(), outer), inner)
+    teko::assert::is_true(test_assert_sites(test_fn, helpers, ASSERT_HOP_DEPTH).len == 0)
+    teko::assert::is_true(test_assert_sites(test_fn, helpers, 2).len == 1)
+}
+
+/** A site's identity is its POSITION: the same file/line/col hashes alike, a different line does not. */
+#test
+fn taf_site_id_is_stable_per_position() {
+    teko::assert::is_true(assert_site_id("p.tks", 12, 5) == assert_site_id("p.tks", 12, 5))
+    teko::assert::is_false(assert_site_id("p.tks", 12, 5) == assert_site_id("p.tks", 13, 5))
+    teko::assert::is_false(assert_site_id("p.tks", 12, 5) == assert_site_id("q.tks", 12, 5))
+}
+
+/** A site carries the compiler-injected position of its call. */
+#test
+fn taf_sites_carry_the_injected_position() {
+    let call = taf_call_at(taf_path("is_true"), teko::list::push(teko::list::empty(), taf_bool(true)), 12, 5)
+    let test_fn = taf_named_fn("t", teko::list::push(teko::list::empty(), taf_expr_stmt(call)), "p.tks", true)
+    let sites = test_assert_sites(test_fn, teko::list::empty(), ASSERT_HOP_DEPTH)
+    teko::assert::is_true(sites.len == 1)
+    teko::assert::is_true(sites[0].line == 12)
+    teko::assert::is_true(sites[0].col == 5)
+    teko::assert::is_true(sites[0].file == "p.tks")
+    teko::assert::is_true(sites[0].site_id == assert_site_id("p.tks", 12, 5))
+}
+
+/** The expected-assertion table names the position, the assertion, its written arguments and its classification. */
+#test
+fn taf_site_table_carries_position_argument_text_and_kind() {
+    let call = taf_call_at(taf_path("eq_str"), teko::list::push(teko::list::push(teko::list::empty(), taf_var("got")), taf_str("ok")), 12, 5)
+    let test_fn = taf_named_fn("t", teko::list::push(teko::list::empty(), taf_expr_stmt(call)), "p.tks", true)
+    let table = assert_site_table(taf_prog(teko::list::push(teko::list::empty(), test_fn)))
+    teko::assert::str_contains(table, "p.tks:12:5 eq_str(got, \"ok\") MANDATORY probe::t")
+}
+
+/** THE INVERSION, liveness first: the census classifies a non-zero number of BOTH kinds, and only then are the values worth reading. */
+#test
+fn taf_census_classifies_both_kinds_with_neither_at_zero() {
+    mut body = teko::list::push(teko::list::empty(), taf_expr_stmt(taf_assert("is_true", taf_bool(true))))
+    body = teko::list::push(body, TLoopStmt { label = ""; init = teko::list::empty(); body = taf_one_assert_blk() })
+    body = teko::list::push(body, taf_expr_stmt(taf_assert2("str_contains", taf_str("hay"), taf_str("needle"))))
+    let c = assert_census(taf_prog(teko::list::push(teko::list::empty(), taf_named_fn("t", body, "p.tks", true))))
+    teko::assert::is_true(c.mandatory > 0)
+    teko::assert::is_true(c.flow > 0)
+    teko::assert::is_true(c.mandatory == 2)
+    teko::assert::is_true(c.flow == 1)
+    teko::assert::is_true(c.declared == 3)
+    teko::assert::is_true(c.bool_predicate == 2)
+    teko::assert::is_true(c.tests == 1)
+}
+
+/** The residue guard: a test that asserts only through a helper is invisible to the direct walk and visible after the hop. */
+#test
+fn taf_census_reports_the_silent_residue_before_and_after_the_hop() {
+    let helper = taf_named_fn("h", taf_one_assert_blk(), "p.tks", false)
+    let test_fn = taf_named_fn("t", teko::list::push(teko::list::empty(), taf_expr_stmt(taf_call(taf_local_path("h"), teko::list::empty()))), "p.tks", true)
+    let c = assert_census(taf_prog(teko::list::push(teko::list::push(teko::list::empty(), helper), test_fn)))
+    teko::assert::is_true(c.silent_direct == 1)
+    teko::assert::is_true(c.silent_hopped == 0)
+    teko::assert::is_true(c.declared == 1)
+    teko::assert::is_true(c.hopped == 1)
+}
+
+/** The census line names both counts, the classification and the residue. */
+#test
+fn taf_census_line_names_both_counts_and_the_residue() {
+    let body = teko::list::push(teko::list::empty(), taf_expr_stmt(taf_assert2("str_contains", taf_str("hay"), taf_str("needle"))))
+    let line = assert_census_line(assert_census(taf_prog(teko::list::push(teko::list::empty(), taf_named_fn("t", body, "p.tks", true)))))
+    teko::assert::str_contains(line, "1 #test declare 1 assertions")
+    teko::assert::str_contains(line, "0 bool-predicate")
+    teko::assert::str_contains(line, "1 MANDATORY / 0 FLOW")
+    teko::assert::str_contains(line, "silent 0 -> 0")
+}
+
+/** The classification token is stable and greppable. */
+#test
+fn taf_assert_kind_text_is_greppable() {
+    teko::assert::eq_str(assert_kind_text(AssertKind::Mandatory), "MANDATORY")
+    teko::assert::eq_str(assert_kind_text(AssertKind::Flow), "FLOW")
+}
+
+/** The argument text reconstructs a comparison chain as written. */
+#test
+fn taf_arg_text_renders_a_comparison() {
+    teko::assert::eq_str(assert_arg_text(taf_cmp(taf_var("n"), lexer::TokenKind::EqEq, taf_num(3))), "n == 3")
+}
+
+/** The argument text reconstructs a logical connective and a negation as written. */
+#test
+fn taf_arg_text_renders_connectives() {
+    teko::assert::eq_str(assert_arg_text(taf_bin(taf_var("a"), lexer::TokenKind::AndAnd, taf_var("b"))), "a && b")
+    teko::assert::eq_str(assert_arg_text(taf_not(taf_var("a"))), "!a")
+}
+
+/** A string-literal argument comes back quoted, with an embedded quote escaped so one row stays one row. */
+#test
+fn taf_arg_text_quotes_and_escapes_a_string_literal() {
+    teko::assert::eq_str(assert_arg_text(taf_str("a\"b")), "\"a\\\"b\"")
+}
+
+/** A call argument comes back with its dotted callee path and its own arguments. */
+#test
+fn taf_arg_text_renders_a_nested_call() {
+    let inner = taf_call(taf_local_path("f"), teko::list::push(teko::list::push(teko::list::empty(), taf_var("x")), taf_num(1)))
+    teko::assert::eq_str(assert_arg_text(inner), "f(x, 1)")
+}
+
+/** A bool literal and a negative number literal render as written. */
+#test
+fn taf_arg_text_renders_literals() {
+    teko::assert::eq_str(assert_arg_text(taf_bool(false)), "false")
+    teko::assert::eq_str(assert_arg_text(TExpr { kind = TNumber { is_float = false; value = parser::numint_of_i64(-7); fval = 0.0 }; type = Prim { kind = PrimKind::I64 }; line = 0; col = 0 }), "-7")
+}
+
+/** A shape no assertion argument takes renders as an honest placeholder rather than an empty string. */
+#test
+fn taf_arg_text_falls_back_for_an_unwritten_shape() {
+    let lam = TExpr { kind = TLambda { params = teko::list::empty(); body = teko::list::empty(); captures = teko::list::empty(); ret = Void { }; lift_id = 0 }; type = Void { }; line = 0; col = 0 }
+    teko::assert::eq_str(assert_arg_text(lam), "<lambda>")
 }

@@ -1,0 +1,290 @@
+use teko::lexer
+use teko::parser
+
+/**
+ * The SOURCE-LEVEL spelling of one assertion argument, reconstructed from the typed node.
+ *
+ * The expected-assertion table has to name WHICH assertion a `#test` declared, and a bare
+ * `file:line:col` is not enough for a reader auditing a diff — two assertions on one line are
+ * indistinguishable. The typed AST keeps no source span, so the text is rebuilt from the node,
+ * which yields the written form for every shape the corpus actually asserts on (literals,
+ * variables, field/index reads, calls, comparisons, connectives) and an honest `<expr>` placeholder
+ * for the shapes no assertion argument takes.
+ *
+ * @param e  the typed argument expression
+ * @return   the reconstructed argument text, never empty
+ */
+pub fn assert_arg_text(e: TExpr) -> str {
+    match e.kind {
+        TNumber as n => atext_number(n)
+        TStrLit as s => atext_quoted(s.text)
+        TByteLit as b => $"{b.value to u64}"
+        TCharLit as c => $"c'{c.bytes}'"
+        TBoolLit as b => atext_bool(b.value)
+        TNullLit => "null"
+        TVar as v => v.name
+        TBinary as b => $"{assert_arg_text(b.left)} {atext_binop(b.op)} {assert_arg_text(b.right)}"
+        TUnary as u => $"{atext_unop(u.op)}{assert_arg_text(u.operand)}"
+        TCompare as c => atext_compare(c)
+        TCall as c => $"{assert_path_text(c.callee)}({assert_args_text(c.args)})"
+        TCast as c => $"{assert_arg_text(c.expr)} to {type_render(e.type)}"
+        TFieldAccess as f => $"{assert_arg_text(f.receiver)}.{f.field}"
+        TSafeFieldAccess as f => $"{assert_arg_text(f.receiver)}?.{f.field}"
+        TCoalesce as c => $"{assert_arg_text(c.left)} ?? {assert_arg_text(c.right)}"
+        TIndex as x => $"{assert_arg_text(x.receiver)}[{assert_arg_text(x.index)}]"
+        TInterp as i => atext_interp(i)
+        TInExpr as x => $"{assert_arg_text(x.lhs)} in [{assert_args_text(x.elems)}]"
+        TPathExpr as p => $"{p.enum_name}::{p.member}"
+        TArrayLit as a => $"[{atext_array(a)}]"
+        TStructInit => "<struct>"
+        TLambda => "<lambda>"
+        TBorrow as b => $"&{assert_arg_text(b.operand)}"
+        TIfExpr => "<if>"
+        TMatchExpr => "<match>"
+    }
+}
+
+/**
+ * The dotted source spelling of a call's callee path (`teko::assert::is_true`).
+ *
+ * @param p  the callee path
+ * @return   its segments joined by `::`, empty when the path carries no segment
+ */
+pub fn assert_path_text(p: parser::Path) -> str {
+    mut out = ""
+    mut i: u64 = 0
+    loop {
+        if i >= p.segments.len { break }
+        out = if i == 0 { p.segments[i].name } else { $"{out}::{p.segments[i].name}" }
+        i++
+    }
+    out
+}
+
+/**
+ * The written form of a numeric literal: the magnitude, sign-prefixed when negative, or the raw
+ * float value for a float literal.
+ *
+ * @param n  the typed number leaf
+ * @return   the literal's source spelling
+ */
+fn atext_number(n: TNumber) -> str {
+    if n.is_float { return $"{n.fval}" }
+    if n.value.neg { return $"-{n.value.mag}" }
+    $"{n.value.mag}"
+}
+
+/**
+ * The written form of a bool literal.
+ *
+ * @param b  the literal's value
+ * @return   `"true"` or `"false"`
+ */
+fn atext_bool(b: bool) -> str {
+    if b { return "true" }
+    "false"
+}
+
+/**
+ * A string literal re-quoted for the table, with the three characters that would break a one-line
+ * table row escaped back to their source spelling.
+ *
+ * @param s  the decoded literal text
+ * @return   the quoted, escaped source spelling
+ */
+fn atext_quoted(s: str) -> str {
+    let src = bytes_of_str(s)
+    mut out: []byte = teko::list::push(teko::list::empty(), b'"')
+    mut i: u64 = 0
+    loop {
+        if i >= src.len { break }
+        out = atext_push_escaped(out, src[i])
+        i++
+    }
+    str_of_bytes(teko::list::push(out, b'"'))
+}
+
+/**
+ * Append one string-literal byte to the accumulating quoted text, re-escaping the three characters
+ * that would otherwise break a one-line table row.
+ *
+ * @param out  the accumulated bytes
+ * @param b    the literal byte to append
+ * @return     `out` with the byte's source spelling appended
+ */
+fn atext_push_escaped(out: []byte, b: byte) -> []byte {
+    if b == b'"' { return atext_push_str(out, "\\\"") }
+    if b == b'\\' { return atext_push_str(out, "\\\\") }
+    if b == b'\n' { return atext_push_str(out, "\\n") }
+    teko::list::push(out, b)
+}
+
+/**
+ * Append every byte of `s` to the accumulating byte buffer.
+ *
+ * @param out  the accumulated bytes
+ * @param s    the text to append
+ * @return     `out` followed by `s`'s bytes
+ */
+fn atext_push_str(out: []byte, s: str) -> []byte {
+    let src = bytes_of_str(s)
+    mut acc = out
+    mut i: u64 = 0
+    loop {
+        if i >= src.len { break }
+        acc = teko::list::push(acc, src[i])
+        i++
+    }
+    acc
+}
+
+/**
+ * The written form of a comparison chain: the first operand followed by each ` <op> <operand>`.
+ *
+ * @param c  the typed comparison
+ * @return   the reconstructed chain text
+ */
+fn atext_compare(c: TCompare) -> str {
+    mut out = assert_arg_text(c.first)
+    mut i: u64 = 0
+    loop {
+        if i >= c.rest.len { break }
+        out = $"{out} {atext_cmpop(c.rest[i].op)} {assert_arg_text(c.rest[i].operand)}"
+        i++
+    }
+    out
+}
+
+/**
+ * The written form of an argument list: each argument's text, comma-separated.
+ *
+ * @param args  the typed argument expressions
+ * @return      the joined argument text (empty for no arguments)
+ */
+pub fn assert_args_text(args: []TExpr) -> str {
+    mut out = ""
+    mut i: u64 = 0
+    loop {
+        if i >= args.len { break }
+        out = if i == 0 { assert_arg_text(args[i]) } else { $"{out}, {assert_arg_text(args[i])}" }
+        i++
+    }
+    out
+}
+
+/**
+ * The written form of an array literal's elements, spread markers included.
+ *
+ * @param a  the typed array literal
+ * @return   the joined element text (empty for an empty literal)
+ */
+fn atext_array(a: TArrayLit) -> str {
+    mut out = ""
+    mut i: u64 = 0
+    loop {
+        if i >= a.elements.len { break }
+        let one = atext_array_elem(a.elements[i])
+        out = if i == 0 { one } else { $"{out}, {one}" }
+        i++
+    }
+    out
+}
+
+/**
+ * The written form of one array-literal element (`..x` for a spread).
+ *
+ * @param el  the typed element
+ * @return    the element's source spelling
+ */
+fn atext_array_elem(el: TArrayElem) -> str {
+    if el.is_spread { return $"..{assert_arg_text(el.expr)}" }
+    assert_arg_text(el.expr)
+}
+
+/**
+ * The written form of an interpolated string: the literal pieces with each hole re-spelled as
+ * `{<expr>}` between them.
+ *
+ * @param i  the typed interpolation
+ * @return   the reconstructed `$"…"` text
+ */
+fn atext_interp(i: TInterp) -> str {
+    mut out = "$\""
+    mut k: u64 = 0
+    loop {
+        if k >= i.pieces.len { break }
+        out = teko::str::concat(out, i.pieces[k], atext_interp_hole(i, k))
+        k++
+    }
+    teko::str::concat(out, "\"")
+}
+
+/**
+ * The `{…}` hole that follows piece `k` of an interpolation, or the empty string when the piece is
+ * the trailing one.
+ *
+ * @param i  the typed interpolation
+ * @param k  the piece index
+ * @return   the hole's source spelling, or `""` past the last hole
+ */
+fn atext_interp_hole(i: TInterp, k: u64) -> str {
+    if k >= i.holes.len { return "" }
+    $"{{{assert_arg_text(i.holes[k])}}}"
+}
+
+/**
+ * The source spelling of a binary operator token.
+ *
+ * @param op  the operator token kind
+ * @return    its Teko spelling, or `"?"` for a token that is no binary operator
+ */
+fn atext_binop(op: lexer::TokenKind) -> str {
+    match op {
+        lexer::TokenKind::Plus => "+"
+        lexer::TokenKind::Minus => "-"
+        lexer::TokenKind::Star => "*"
+        lexer::TokenKind::Slash => "/"
+        lexer::TokenKind::Percent => "%"
+        lexer::TokenKind::Amp => "&"
+        lexer::TokenKind::Pipe => "|"
+        lexer::TokenKind::Caret => "^"
+        lexer::TokenKind::Shl => "<<"
+        lexer::TokenKind::Shr => ">>"
+        lexer::TokenKind::AndAnd => "&&"
+        lexer::TokenKind::OrOr => "||"
+        _ => "?"
+    }
+}
+
+/**
+ * The source spelling of a prefix unary operator token.
+ *
+ * @param op  the operator token kind
+ * @return    its Teko spelling, or `"?"` for a token that is no unary operator
+ */
+fn atext_unop(op: lexer::TokenKind) -> str {
+    match op {
+        lexer::TokenKind::Minus => "-"
+        lexer::TokenKind::Tilde => "~"
+        lexer::TokenKind::Bang => "!"
+        _ => "?"
+    }
+}
+
+/**
+ * The source spelling of a comparison operator token.
+ *
+ * @param op  the operator token kind
+ * @return    its Teko spelling, or `"?"` for a token that is no comparison operator
+ */
+fn atext_cmpop(op: lexer::TokenKind) -> str {
+    match op {
+        lexer::TokenKind::EqEq => "=="
+        lexer::TokenKind::Ne => "!="
+        lexer::TokenKind::Lt => "<"
+        lexer::TokenKind::Le => "<="
+        lexer::TokenKind::Gt => ">"
+        lexer::TokenKind::Ge => ">="
+        _ => "?"
+    }
+}

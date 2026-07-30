@@ -1,0 +1,272 @@
+/**
+ * The whole-program STATIC assertion census: what the compiler can see a suite DECLARE, before a
+ * single test runs.
+ *
+ * The law it serves is "nothing passes the gate invisibly": a `#test` that declares three
+ * assertions and executes one is a failure. The execution half of that comparison needs a channel
+ * that does not exist yet; this half needs nothing but the typed program, and it is what turns the
+ * question from unanswerable into arithmetic.
+ */
+pub type AssertCensus = struct {
+    /** the number of `#test` functions in the program. */
+    tests: u64
+    /** the DECLARED assertions the walk sees — every injected `teko::assert::*`, hops included. */
+    declared: u64
+    /** the bool-predicate subset (`is_true`/`is_false`), the population the fold axis decides. */
+    bool_predicate: u64
+    /** declared assertions reached on EVERY run of their test. */
+    mandatory: u64
+    /** declared assertions reached only on some paths (conditional, in a `loop`, or after an exit). */
+    flow: u64
+    /** declared assertions found only by following one call into a same-file helper. */
+    hopped: u64
+    /** `#test` functions whose body declares no assertion DIRECTLY (the walk without the hop). */
+    silent_direct: u64
+    /** `#test` functions still declaring no assertion AFTER the hop — the residue the guard watches. */
+    silent_hopped: u64
+}
+
+/**
+ * The zero census (no test walked yet).
+ *
+ * @return  a census with every field at zero
+ */
+fn census_empty() -> AssertCensus {
+    AssertCensus { tests = 0; declared = 0; bool_predicate = 0; mandatory = 0; flow = 0; hopped = 0; silent_direct = 0; silent_hopped = 0 }
+}
+
+/**
+ * The static assertion census of a whole checked program.
+ *
+ * Each `#test` is walked TWICE on purpose — once with no hop and once with `ASSERT_HOP_DEPTH` — so
+ * the residue of assertion-invisible tests is reported before AND after, and a hop that bought
+ * nothing would be visible instead of assumed.
+ *
+ * @param prog  the checked program
+ * @return      the accumulated census over every `#test`
+ */
+pub fn assert_census(prog: TProgram) -> AssertCensus {
+    let helpers = census_helper_fns(prog)
+    let tests = census_test_fns(prog)
+    mut acc = census_empty()
+    mut i: u64 = 0
+    loop {
+        if i >= tests.len { break }
+        acc = census_add_test(acc, tests[i], helpers)
+        i++
+    }
+    acc
+}
+
+/**
+ * Fold one `#test` into the census.
+ *
+ * @param c        the accumulated census
+ * @param f        the `#test` function
+ * @param helpers  the candidate helper functions of the whole program
+ * @return         the census with `f`'s declared assertions folded in
+ */
+fn census_add_test(c: AssertCensus, f: TFunction, helpers: []TFunction) -> AssertCensus {
+    let direct = test_assert_sites(f, helpers, 0)
+    let full = test_assert_sites(f, helpers, ASSERT_HOP_DEPTH)
+    let stats = test_assert_stats(f)
+    AssertCensus {
+        tests = c.tests + 1
+        declared = c.declared + full.len
+        bool_predicate = c.bool_predicate + stats.total
+        mandatory = c.mandatory + census_count_kind(full, AssertKind::Mandatory)
+        flow = c.flow + census_count_kind(full, AssertKind::Flow)
+        hopped = c.hopped + census_count_hopped(full)
+        silent_direct = c.silent_direct + census_is_silent(direct)
+        silent_hopped = c.silent_hopped + census_is_silent(full)
+    }
+}
+
+/**
+ * One when a test's site list is empty, zero otherwise (the silent-test counter's summand).
+ *
+ * @param sites  the test's declared sites
+ * @return       1 for an empty list, else 0
+ */
+fn census_is_silent(sites: []AssertSite) -> u64 {
+    if sites.len == 0 { return 1 }
+    0
+}
+
+/**
+ * How many sites of a list carry the given classification.
+ *
+ * @param sites  the declared sites
+ * @param k      the classification to count
+ * @return       the number of matching sites
+ */
+fn census_count_kind(sites: []AssertSite, k: AssertKind) -> u64 {
+    mut n: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= sites.len { break }
+        if sites[i].kind == k { n++ }
+        i++
+    }
+    n
+}
+
+/**
+ * How many sites of a list were reached only through a helper hop.
+ *
+ * @param sites  the declared sites
+ * @return       the number of indirectly-reached sites
+ */
+fn census_count_hopped(sites: []AssertSite) -> u64 {
+    mut n: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= sites.len { break }
+        if sites[i].hopped { n++ }
+        i++
+    }
+    n
+}
+
+/**
+ * Every `#test` function of a checked program, in `items` order.
+ *
+ * @param prog  the checked program
+ * @return      the `#test` functions
+ */
+fn census_test_fns(prog: TProgram) -> []TFunction {
+    mut out: []TFunction = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            TFunction as f => { if f.is_test { out = teko::list::push(out, f) } }
+            _ => { }
+        }
+        i++
+    }
+    out
+}
+
+/**
+ * Every NON-`#test` function of a checked program — the pool the site walk may hop into (the file
+ * is matched at lookup, so one pool serves the whole census).
+ *
+ * @param prog  the checked program
+ * @return      the candidate helper functions
+ */
+fn census_helper_fns(prog: TProgram) -> []TFunction {
+    mut out: []TFunction = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            TFunction as f => { if !f.is_test { out = teko::list::push(out, f) } }
+            _ => { }
+        }
+        i++
+    }
+    out
+}
+
+/**
+ * The one-line census report: the two counts kept apart, the classification, and the
+ * assertion-invisible residue before and after the helper hop.
+ *
+ * @param c  the accumulated census
+ * @return   the formatted report line (no trailing newline)
+ */
+pub fn assert_census_line(c: AssertCensus) -> str {
+    let cls = $"{c.mandatory} MANDATORY / {c.flow} FLOW"
+    let silent = $"silent {c.silent_direct} -> {c.silent_hopped}"
+    $"teko: assert-census: {c.tests} #test declare {c.declared} assertions ({c.bool_predicate} bool-predicate, {c.hopped} via a {ASSERT_HOP_DEPTH}-hop helper), {cls}, {silent}"
+}
+
+/**
+ * The EXPECTED-ASSERTION TABLE of a whole program: one row per declared site, each carrying its
+ * stable id, its compiler-injected `file:line:col`, the call as written, and its classification.
+ *
+ * This is the static side of the measurement in the form the execution side will compare against —
+ * the rows are the set a passing `#test` must have executed.
+ *
+ * @param prog  the checked program
+ * @return      the newline-terminated table (empty when the program declares no test)
+ */
+pub fn assert_site_table(prog: TProgram) -> str {
+    let helpers = census_helper_fns(prog)
+    let tests = census_test_fns(prog)
+    mut out = ""
+    mut i: u64 = 0
+    loop {
+        if i >= tests.len { break }
+        out = teko::str::concat(out, assert_site_rows(tests[i], helpers))
+        i++
+    }
+    out
+}
+
+/**
+ * The table rows one `#test` contributes.
+ *
+ * @param f        the `#test` function
+ * @param helpers  the candidate helper functions
+ * @return         the newline-terminated rows for `f`'s declared sites
+ */
+fn assert_site_rows(f: TFunction, helpers: []TFunction) -> str {
+    let sites = test_assert_sites(f, helpers, ASSERT_HOP_DEPTH)
+    let label = census_test_label(f)
+    mut out = ""
+    mut i: u64 = 0
+    loop {
+        if i >= sites.len { break }
+        out = teko::str::concat(out, assert_site_row(sites[i], label), "\n")
+        i++
+    }
+    out
+}
+
+/**
+ * One expected-assertion table row.
+ *
+ * @param s      the declared site
+ * @param label  the owning `#test`'s label
+ * @return       the formatted row (no trailing newline)
+ */
+fn assert_site_row(s: AssertSite, label: str) -> str {
+    $"assert-site: {s.site_id} {s.file}:{s.line}:{s.col} {s.name}({s.arg_text}) {assert_kind_text(s.kind)}{census_hop_mark(s)} {label}"
+}
+
+/**
+ * The stable, greppable token for a site's classification.
+ *
+ * @param k  the classification
+ * @return   `"MANDATORY"` or `"FLOW"`
+ */
+pub fn assert_kind_text(k: AssertKind) -> str {
+    match k {
+        AssertKind::Mandatory => "MANDATORY"
+        AssertKind::Flow => "FLOW"
+    }
+}
+
+/**
+ * The row marker for a site reached through a helper hop, or the empty string for a direct one.
+ *
+ * @param s  the declared site
+ * @return   `"+HOP"` for an indirectly-reached site, else `""`
+ */
+fn census_hop_mark(s: AssertSite) -> str {
+    if s.hopped { return "+HOP" }
+    ""
+}
+
+/**
+ * The label of a `#test` — `namespace::name`, or the bare name when it has no namespace.
+ *
+ * @param f  the `#test` function
+ * @return   the label the native gate prints for the test
+ */
+fn census_test_label(f: TFunction) -> str {
+    if f.namespace.len == 0 { return f.name }
+    $"{f.namespace}::{f.name}"
+}

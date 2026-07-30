@@ -4482,6 +4482,10 @@ fn analyze_records_of(prog: checker::TProgram, adir: str) -> []TestRecord {
  * whole-suite question — no per-test recompile. Dev-time only, advisory: it prints and returns 0
  * (a passing gate already ran first); it never fails the build on a verdict.
  *
+ * The EXPECTED-ASSERTION TABLE (`checker::assert_site_table`) follows the verdict report, one row
+ * per declared assertion site. It is printed here rather than on every build because it is one row
+ * per assertion, not one line per run — the census summary is what a build prints.
+ *
  * @param dir  the project directory (diagnostics)
  * @param fe   the already-assembled front-end product (checked program + manifest)
  * @return     0 on success, else the failing status (emit/cc/run error)
@@ -4503,6 +4507,8 @@ fn run_analyzer(dir: str, fe: Frontend) -> i32 {
     let arc = teko::process::run(teko::list::push(teko::list::empty(), binp))
     if arc != 0 { return arc }
     teko::io::print(analyzer_report(analyze_records_of(fe.prog, adir)))
+    teko::io::print(checker::assert_site_table(fe.prog))
+    teko::io::println(checker::assert_census_line(checker::assert_census(fe.prog)))
     0
 }
 
@@ -4560,6 +4566,24 @@ fn report_arith_cast_rate(fe: Frontend) -> checker::ArithCastRateReport {
     let r = checker::arith_cast_rate_report(fe.prog)
     teko::io::println(arith_cast_rate_line(r))
     r
+}
+
+/**
+ * report_assert_census — compute the STATIC assertion census of the typed program and PRINT it.
+ *
+ * Reported in the same place, and for the same reason, as `report_arith_cast_rate`: it is a
+ * property of the typed SOURCE alone (`fe.prog`), so it needs no test to have passed and no binary
+ * to exist, and it must speak on a red tree too — a suite whose declared assertions are invisible
+ * to the gate is precisely the situation in which nobody gets to see the number.
+ *
+ * No verdict rides on it here. The comparison it feeds — declared versus EXECUTED — needs the
+ * execution channel, which does not exist yet; what this line pins is the half that does.
+ *
+ * @param fe  the already-assembled front-end product (checked program + manifest)
+ * @since 0.3.1.0
+ */
+fn report_assert_census(fe: Frontend) {
+    teko::io::println(checker::assert_census_line(checker::assert_census(fe.prog)))
 }
 
 /**
@@ -5370,6 +5394,7 @@ fn test_project(dir: str, gen_cov: bool, cov_validation: bool, per_test_cov: boo
     let exe = self_exe_path()
     let fe = match project_frontend_sel(dir, true) { Frontend as x => x; error as e => return fail(dir, e.message) }
     let acr = report_arith_cast_rate(fe)
+    report_assert_census(fe)
     let trc = run_native_gate(dir, "bin", fe.prog, fe.manifest, output_is_tty(false))
     let pre_regr_cob = coverage::cov_cobertura(fe.prog)
     let has_regr = fe.manifest.test_regression_files.len > 0

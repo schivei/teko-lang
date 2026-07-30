@@ -1,18 +1,17 @@
-// src/checker/test_assert.tks   (namespace 'teko::checker')
-//
-// Crumb 4 of the 0.3.0.29 test analyzer: the ASSERTION-FOLD signal. Coverage counting (the build
-// driver's TKCOV decode) says WHICH production a test touches, but is blind to whether the test's
-// ASSERTIONS actually discriminate. A `teko::assert::is_true(<expr that folds to a constant>)` can
-// never fail — a dead guard — even when the surrounding test DOES call production (the "misleading"
-// green test). This module walks a `#test` body, finds every `teko::assert::is_true`/`is_false` call,
-// and asks `predicate_folds_const` (comptime_fold.tks) whether the single predicate is comptime-decided.
-
 use teko::parser
 
 /**
- * AssertStats — a `#test`'s assertion tally: how many bool assertions it makes, and how many of those
- * have a predicate that folds to a compile-time constant (a dead guard). `folded == total` (with
- * `total >= 1`) ⇒ FOUNDATIONAL; `folded >= 1` while the test covers production ⇒ MISLEADING.
+ * A `#test`'s BOOL-PREDICATE assertion tally: how many single-predicate bool assertions it makes,
+ * and how many of those have a predicate that folds to a compile-time constant (a dead guard).
+ *
+ * This is the FOLD axis and it deliberately populates from two names only (`is_true`/`is_false`) —
+ * they are the only assertions whose argument IS a bool predicate, so they are the only ones
+ * `predicate_folds_const` can decide. The DECLARED-assertion axis (`AssertSite`, every
+ * `teko::assert::*` name) is a separate count on purpose: mixing them would let a `str_contains`
+ * with no foldable predicate move a FOUNDATIONAL/MISLEADING verdict that already works.
+ *
+ * `folded == total` (with `total >= 1`) ⇒ FOUNDATIONAL; `folded >= 1` while the test covers
+ * production ⇒ MISLEADING.
  */
 pub type AssertStats = struct {
     /** the number of `teko::assert::is_true`/`is_false` calls found in the test body. */
@@ -21,11 +20,82 @@ pub type AssertStats = struct {
     folded: u64
 }
 
-/** assert_stats_empty — the zero tally (no assertions seen yet). (0.3.0.29) */
+/**
+ * Whether a declared assertion is reached on EVERY run of its `#test`, or only on some paths.
+ *
+ * `Mandatory` is the exact rule, with no heuristic in it: conditional depth zero AND no conditional
+ * `return`/`break`/`continue` precedes the assertion in its own block. Everything else is `Flow`.
+ */
+pub type AssertKind = enum { Mandatory; Flow }
+
+/**
+ * One DECLARED assertion site: the expected-assertion table's row.
+ *
+ * The identity is the position, not the walk order, so inserting a test above this one does not
+ * renumber it. The position itself is INJECTED BY THE COMPILER off the typed node — exactly as
+ * `codegen::emit_cov_line` injects the line into its `tk_cov_line_at(<fn_idx>, <line>)` mark — so no
+ * call site in the corpus has to change to be measurable.
+ */
+pub type AssertSite = struct {
+    /** the stable identity: FNV-1a over `<file>:<line>:<col>` (`di_type_id`). */
+    site_id: u64
+    /** the source file the assertion is written in. */
+    file: str
+    /** the assertion call's 1-based source line. */
+    line: u32
+    /** the assertion call's 1-based source column. */
+    col: u32
+    /** the assertion's last path segment (`is_true`, `str_contains`, …). */
+    name: str
+    /** the argument list as written, reconstructed from the typed node. */
+    arg_text: str
+    /** whether every run of the owning `#test` reaches this site. */
+    kind: AssertKind
+    /** whether the site was found by following ONE call into a local helper. */
+    hopped: bool
+}
+
+/**
+ * ASSERT_HOP_DEPTH — how many call levels the site walk follows out of a `#test` body into helper
+ * functions declared in the SAME file.
+ *
+ * The depth is a parameter of the walk and this is only its default: 9.8% of the corpus's `#test`
+ * bodies contain no direct `teko::assert::` call and assert entirely through a local helper, so a
+ * walk that stops at the body measures those tests as asserting nothing. One level is what the
+ * measured corpus needs; `assert_census` reports the residue so a deeper need would be visible
+ * rather than assumed.
+ */
+pub const ASSERT_HOP_DEPTH: u64 = 1
+
+/**
+ * The walk state carried down a `#test` body: everything the `Mandatory`/`Flow` rule and the helper
+ * hop need, so neither is re-derived at a leaf.
+ */
+type SiteCtx = struct {
+    /** the enclosing conditional depth — `loop`, `if` and `match` bodies each add one. */
+    depth: u64
+    /** whether a conditional `return`/`break`/`continue` already precedes this point in the block. */
+    after_exit: bool
+    /** how many further helper hops are still allowed. */
+    hops: u64
+    /** whether the walk is already inside a helper (marks the sites it finds). */
+    hopped: bool
+    /** the file the sites found here belong to. */
+    file: str
+    /** the candidate (non-`#test`) functions a call may hop into; the file is matched at lookup. */
+    helpers: []TFunction
+}
+
+/**
+ * The zero bool-predicate tally (no assertions seen yet).
+ *
+ * @return  `{ total = 0; folded = 0 }`
+ * @since 0.3.0.29
+ */
 fn assert_stats_empty() -> AssertStats { AssertStats { total = 0; folded = 0 } }
 
 /**
- * assert_stats_add — the componentwise sum of two tallies (the fold over a statement block).
+ * The componentwise sum of two bool-predicate tallies (the fold over a statement block).
  *
  * @param a  the left tally
  * @param b  the right tally
@@ -37,7 +107,7 @@ fn assert_stats_add(a: AssertStats, b: AssertStats) -> AssertStats {
 }
 
 /**
- * test_assert_stats — the assertion tally for one `#test`: walk its body (descending into loop/defer/
+ * The bool-predicate assertion tally for one `#test`: walk its body (descending into loop/defer/
  * adopt bodies and into `if`/`match` blocks used as statements) and count every bool assertion and
  * how many fold to a constant.
  *
@@ -50,7 +120,7 @@ pub fn test_assert_stats(f: TFunction) -> AssertStats {
 }
 
 /**
- * assert_stats_block — the summed assertion tally over a statement block.
+ * The summed bool-predicate tally over a statement block.
  *
  * @param stmts  the typed statement block
  * @return       the tally accumulated over every statement
@@ -68,9 +138,9 @@ fn assert_stats_block(stmts: []TStatement) -> AssertStats {
 }
 
 /**
- * assert_stats_stmt — the assertion tally contributed by one statement: an expression statement
- * inspects its expression; a loop/defer/adopt descends into its block(s); every other statement form
- * carries no assertion.
+ * The bool-predicate tally contributed by one statement: an expression statement inspects its
+ * expression; a loop/defer/adopt descends into its block(s); every other statement form carries no
+ * assertion.
  *
  * @param s  the typed statement
  * @return   the assertion tally for `s`
@@ -87,9 +157,9 @@ fn assert_stats_stmt(s: TStatement) -> AssertStats {
 }
 
 /**
- * assert_stats_expr — the assertion tally for an expression in statement position: a direct call is
- * tested for the assertion shape; an `if`/`match` descends into its blocks; every other expression
- * carries no statement-level assertion (the corpus writes assertions as statements).
+ * The bool-predicate tally for an expression in statement position: a direct call is tested for the
+ * assertion shape; an `if`/`match` descends into its blocks; every other expression carries no
+ * statement-level assertion (the corpus writes assertions as statements).
  *
  * @param e  the typed expression
  * @return   the assertion tally for `e`
@@ -105,7 +175,7 @@ fn assert_stats_expr(e: TExpr) -> AssertStats {
 }
 
 /**
- * assert_stats_if — the assertion tally over an `if` expression's then/else blocks.
+ * The bool-predicate tally over an `if` expression's then/else blocks.
  *
  * @param f  the typed if expression
  * @return   the tally over the then block plus the else block (when present)
@@ -118,7 +188,7 @@ fn assert_stats_if(f: TIfExpr) -> AssertStats {
 }
 
 /**
- * assert_stats_match — the assertion tally over every arm body of a `match` expression.
+ * The bool-predicate tally over every arm body of a `match` expression.
  *
  * @param m  the typed match expression
  * @return   the summed tally over all arm bodies
@@ -136,8 +206,8 @@ fn assert_stats_match(m: TMatchExpr) -> AssertStats {
 }
 
 /**
- * assert_stats_call — the assertion tally for one call: 0 unless the callee is `teko::assert::is_true`
- * or `teko::assert::is_false`, in which case it counts as one assertion, folded iff its single
+ * The bool-predicate tally for one call: 0 unless the callee is `teko::assert::is_true` or
+ * `teko::assert::is_false`, in which case it counts as one assertion, folded iff its single
  * predicate argument is comptime-decided (`predicate_folds_const`).
  *
  * @param c  the typed call
@@ -152,10 +222,13 @@ fn assert_stats_call(c: TCall) -> AssertStats {
 }
 
 /**
- * is_bool_assert_call — is `c` a call to the single-predicate assertion `teko::assert::is_true` or
- * `teko::assert::is_false`? Mirrors the codegen/VM recognition (`segments[0] == "teko"`,
- * `segments[len-2] == "assert"`), and requires at least one argument (the predicate). `str_contains`
- * is deliberately excluded — it takes two string arguments, not a bool predicate.
+ * Is `c` a call to the single-predicate assertion `teko::assert::is_true` or
+ * `teko::assert::is_false`?
+ *
+ * Mirrors the codegen/VM recognition (`segments[0] == "teko"`, `segments[len-2] == "assert"`), and
+ * requires at least one argument (the predicate). Every OTHER assertion is deliberately excluded:
+ * this is the population `predicate_folds_const` can decide, not the population of declared
+ * assertions — `is_declared_assert_call` answers that one.
  *
  * @param c  the typed call
  * @return   true iff `c` is a bool `teko::assert::is_true`/`is_false` call with a predicate argument
@@ -163,10 +236,423 @@ fn assert_stats_call(c: TCall) -> AssertStats {
  */
 fn is_bool_assert_call(c: TCall) -> bool {
     if c.args.len == 0 { return false }
-    let segs = c.callee.segments
+    if !is_assert_path(c.callee) { return false }
+    let last = c.callee.segments[c.callee.segments.len - 1].name
+    last == "is_true" || last == "is_false"
+}
+
+/**
+ * Is `c` a call to ANY injected `teko::assert::*` assertion — the DECLARED-assertion population?
+ *
+ * The name list is not repeated here: `assert_builtin_name` is the one place the family is
+ * enumerated, so an assertion added there becomes measurable without a second edit. A zero-argument
+ * assertion (`scenario_ok`) counts — declaring it and not reaching it is exactly the invisibility
+ * this axis exists to catch.
+ *
+ * @param c  the typed call
+ * @return   true iff `c` calls an injected `teko::assert` assertion
+ */
+fn is_declared_assert_call(c: TCall) -> bool {
+    if !is_assert_path(c.callee) { return false }
+    assert_builtin_name(c.callee.segments[c.callee.segments.len - 1].name)
+}
+
+/**
+ * Does `p` have the shape of an assertion path — rooted at `teko`, with `assert` immediately before
+ * the last segment?
+ *
+ * @param p  the callee path
+ * @return   true iff the path is a `teko::…::assert::<name>` spelling
+ */
+fn is_assert_path(p: parser::Path) -> bool {
+    let segs = p.segments
     if segs.len < 2 { return false }
     if segs[0].name != "teko" { return false }
-    if segs[segs.len - 2].name != "assert" { return false }
-    let last = segs[segs.len - 1].name
-    last == "is_true" || last == "is_false"
+    segs[segs.len - 2].name == "assert"
+}
+
+/**
+ * Every DECLARED assertion site a `#test` is expected to execute, each classified `Mandatory` or
+ * `Flow`, following up to `hops` call levels into same-file helpers.
+ *
+ * @param f        the `#test` function
+ * @param helpers  the candidate (non-`#test`) functions a call may hop into
+ * @param hops     how many call levels to follow (`ASSERT_HOP_DEPTH` is the default)
+ * @return         one row per assertion the test declares, in source order
+ */
+pub fn test_assert_sites(f: TFunction, helpers: []TFunction, hops: u64) -> []AssertSite {
+    asite_block(f.body, SiteCtx { depth = 0; after_exit = false; hops = hops; hopped = false; file = f.file; helpers = helpers })
+}
+
+/**
+ * The context one level deeper inside a conditional (`if`/`match`/`loop`): every site below it is
+ * `Flow`.
+ *
+ * @param ctx  the enclosing walk state
+ * @return     the same state with the conditional depth raised
+ */
+fn asite_deeper(ctx: SiteCtx) -> SiteCtx {
+    SiteCtx { depth = ctx.depth + 1; after_exit = ctx.after_exit; hops = ctx.hops; hopped = ctx.hopped; file = ctx.file; helpers = ctx.helpers }
+}
+
+/**
+ * The context for the statements FOLLOWING a statement that can leave the block: every site after
+ * it is `Flow`, even at conditional depth zero.
+ *
+ * @param ctx  the walk state before the exiting statement
+ * @return     the same state with the preceding-exit flag raised
+ */
+fn asite_after_exit(ctx: SiteCtx) -> SiteCtx {
+    SiteCtx { depth = ctx.depth; after_exit = true; hops = ctx.hops; hopped = ctx.hopped; file = ctx.file; helpers = ctx.helpers }
+}
+
+/**
+ * The context for the body of a helper the walk hops into: one hop is spent, and the sites found
+ * there are marked as reached indirectly.
+ *
+ * @param ctx  the walk state at the call
+ * @param h    the helper being entered
+ * @return     the walk state for `h`'s body
+ */
+fn asite_into_helper(ctx: SiteCtx, h: TFunction) -> SiteCtx {
+    SiteCtx { depth = ctx.depth; after_exit = ctx.after_exit; hops = ctx.hops - 1; hopped = true; file = h.file; helpers = ctx.helpers }
+}
+
+/**
+ * The classification the exact rule yields for the current walk state.
+ *
+ * @param ctx  the walk state at the assertion
+ * @return     `Mandatory` at conditional depth zero with no preceding conditional exit, else `Flow`
+ */
+fn asite_kind(ctx: SiteCtx) -> AssertKind {
+    if ctx.depth == 0 && !ctx.after_exit { return AssertKind::Mandatory }
+    AssertKind::Flow
+}
+
+/**
+ * The concatenation of two site lists (the fold over a block).
+ *
+ * @param a  the sites found first
+ * @param b  the sites to append
+ * @return   `a` followed by `b`
+ */
+fn asite_concat(a: []AssertSite, b: []AssertSite) -> []AssertSite {
+    mut acc = a
+    mut i: u64 = 0
+    loop {
+        if i >= b.len { break }
+        acc = teko::list::push(acc, b[i])
+        i++
+    }
+    acc
+}
+
+/**
+ * The sites of a statement block, threading the preceding-exit flag from each statement to the ones
+ * after it.
+ *
+ * @param stmts  the typed statement block
+ * @param ctx    the walk state entering the block
+ * @return       every site the block declares, in source order
+ */
+fn asite_block(stmts: []TStatement, ctx: SiteCtx) -> []AssertSite {
+    mut acc: []AssertSite = teko::list::empty()
+    mut cur = ctx
+    mut i: u64 = 0
+    loop {
+        if i >= stmts.len { break }
+        acc = asite_concat(acc, asite_stmt(stmts[i], cur))
+        if stmt_can_exit_block(stmts[i]) { cur = asite_after_exit(cur) }
+        i++
+    }
+    acc
+}
+
+/**
+ * The sites one statement declares.
+ *
+ * A `loop` is ALWAYS flow — a `loop <cond>` may run zero times — so both its init and its body walk
+ * one level deeper. A `defer` is classified by the SITE OF THE DEFER, not by its body, so its block
+ * inherits the current state unchanged: at the root it is mandatory, inside an `if` it is flow.
+ *
+ * @param s    the typed statement
+ * @param ctx  the walk state at the statement
+ * @return     the sites `s` declares
+ */
+fn asite_stmt(s: TStatement, ctx: SiteCtx) -> []AssertSite {
+    match s {
+        TExprStmt as es => asite_expr(es.expr, ctx)
+        TLoopStmt as l => asite_concat(asite_block(l.init, asite_deeper(ctx)), asite_block(l.body, asite_deeper(ctx)))
+        TDeferStmt as d => asite_block(d.body, ctx)
+        TAdoptStmt as a => asite_block(a.body, ctx)
+        _ => teko::list::empty()
+    }
+}
+
+/**
+ * The sites an expression in statement position declares: a call is either an assertion or a hop
+ * candidate; an `if`/`match` descends one conditional level into its blocks.
+ *
+ * @param e    the typed expression
+ * @param ctx  the walk state at the expression
+ * @return     the sites `e` declares
+ */
+fn asite_expr(e: TExpr, ctx: SiteCtx) -> []AssertSite {
+    match e.kind {
+        TCall as c => asite_call(c, e, ctx)
+        TIfExpr as f => asite_if(f, ctx)
+        TMatchExpr as m => asite_match(m, ctx)
+        _ => teko::list::empty()
+    }
+}
+
+/**
+ * The sites of an `if` used as a statement — both branches, one conditional level deeper.
+ *
+ * @param f    the typed if expression
+ * @param ctx  the walk state at the `if`
+ * @return     the sites of the then block plus the else block (when present)
+ */
+fn asite_if(f: TIfExpr, ctx: SiteCtx) -> []AssertSite {
+    let then_sites = asite_block(f.then_blk, asite_deeper(ctx))
+    if !f.has_else { return then_sites }
+    asite_concat(then_sites, asite_block(f.else_blk, asite_deeper(ctx)))
+}
+
+/**
+ * The sites of a `match` used as a statement — every arm body, one conditional level deeper.
+ *
+ * @param m    the typed match expression
+ * @param ctx  the walk state at the `match`
+ * @return     the sites of every arm body, in arm order
+ */
+fn asite_match(m: TMatchExpr, ctx: SiteCtx) -> []AssertSite {
+    mut acc: []AssertSite = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= m.arms.len { break }
+        acc = asite_concat(acc, asite_block(m.arms[i].body, asite_deeper(ctx)))
+        i++
+    }
+    acc
+}
+
+/**
+ * The sites one call contributes: the assertion itself when the callee is an injected
+ * `teko::assert::*`, otherwise the sites of a same-file helper the walk may still hop into.
+ *
+ * @param c    the typed call
+ * @param e    the call's own expression node (it carries the source position)
+ * @param ctx  the walk state at the call
+ * @return     one site for an assertion, the helper's sites for a hop, else nothing
+ */
+fn asite_call(c: TCall, e: TExpr, ctx: SiteCtx) -> []AssertSite {
+    if is_declared_assert_call(c) { return teko::list::push(teko::list::empty(), asite_of(c, e, ctx)) }
+    asite_hop(c, ctx)
+}
+
+/**
+ * The site row for one declared assertion, with the compiler-injected position and the argument
+ * list as written.
+ *
+ * @param c    the typed assertion call
+ * @param e    the call's own expression node (it carries the source position)
+ * @param ctx  the walk state at the call
+ * @return     the assertion's table row
+ */
+fn asite_of(c: TCall, e: TExpr, ctx: SiteCtx) -> AssertSite {
+    AssertSite {
+        site_id = assert_site_id(ctx.file, e.line, e.col)
+        file = ctx.file; line = e.line; col = e.col
+        name = c.callee.segments[c.callee.segments.len - 1].name
+        arg_text = assert_args_text(c.args)
+        kind = asite_kind(ctx); hopped = ctx.hopped
+    }
+}
+
+/**
+ * The stable identity of an assertion site: FNV-1a over `<file>:<line>:<col>`.
+ *
+ * Hashing the POSITION rather than numbering the walk is what makes the id stable — adding a test
+ * above this one leaves every other site's id untouched.
+ *
+ * @param file  the source file
+ * @param line  the 1-based source line
+ * @param col   the 1-based source column
+ * @return      the site's 64-bit identity
+ */
+pub fn assert_site_id(file: str, line: u32, col: u32) -> u64 {
+    di_type_id($"{file}:{line}:{col}")
+}
+
+/**
+ * The sites reached by following ONE call into a helper declared in the same file, or nothing when
+ * the budget is spent or no such helper exists.
+ *
+ * @param c    the typed call
+ * @param ctx  the walk state at the call
+ * @return     the helper's sites, classified in the CALLER's flow context
+ */
+fn asite_hop(c: TCall, ctx: SiteCtx) -> []AssertSite {
+    if ctx.hops == 0 { return teko::list::empty() }
+    if c.is_closure_call { return teko::list::empty() }
+    if c.callee.segments.len == 0 { return teko::list::empty() }
+    match asite_helper_named(ctx.helpers, c.callee.segments[c.callee.segments.len - 1].name, ctx.file) {
+        TFunction as h => asite_block(h.body, asite_into_helper(ctx, h))
+        null => teko::list::empty()
+    }
+}
+
+/**
+ * The helper a call names in the file the walk is in, or `null` when that file declares none.
+ *
+ * The candidate list is the whole program's non-`#test` functions and the FILE is matched here, so
+ * the caller builds one list for the whole census instead of one per test.
+ *
+ * @param helpers  the candidate (non-`#test`) functions
+ * @param name     the call's last path segment
+ * @param file     the file the call is written in
+ * @return         the matching helper, or `null`
+ */
+fn asite_helper_named(helpers: []TFunction, name: str, file: str) -> TFunction | null {
+    mut i: u64 = 0
+    loop {
+        if i >= helpers.len { break }
+        if helpers[i].name == name && helpers[i].file == file { return helpers[i] }
+        i++
+    }
+    null
+}
+
+/**
+ * Can this statement transfer control out of the block it sits in — the third case of the exact
+ * rule, the one that makes a root assertion AFTER `if x { return }` skippable?
+ *
+ * A `loop`'s own `break`/`continue` bind to that loop and do not leave the enclosing block, so only
+ * a `return` inside it counts.
+ *
+ * @param s  the typed statement
+ * @return   true iff control can leave the enclosing block through `s`
+ */
+fn stmt_can_exit_block(s: TStatement) -> bool {
+    match s {
+        TReturn => true
+        TBreakStmt => true
+        TContinueStmt => true
+        TExprStmt as es => expr_can_exit_block(es.expr)
+        TLoopStmt as l => block_can_return(l.body)
+        TAdoptStmt as a => block_can_exit(a.body)
+        _ => false
+    }
+}
+
+/**
+ * Can control leave the enclosing block through any statement of this block?
+ *
+ * @param stmts  the typed statement block
+ * @return       true iff some statement can exit
+ */
+fn block_can_exit(stmts: []TStatement) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= stmts.len { break }
+        if stmt_can_exit_block(stmts[i]) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * Can control leave the enclosing block through this expression in statement position — an `if` or
+ * `match` whose branches exit?
+ *
+ * @param e  the typed expression
+ * @return   true iff some branch can exit
+ */
+fn expr_can_exit_block(e: TExpr) -> bool {
+    match e.kind {
+        TIfExpr as f => block_can_exit(f.then_blk) || (f.has_else && block_can_exit(f.else_blk))
+        TMatchExpr as m => match_can_exit(m)
+        _ => false
+    }
+}
+
+/**
+ * Can control leave the enclosing block through any arm of this `match`?
+ *
+ * @param m  the typed match expression
+ * @return   true iff some arm body can exit
+ */
+fn match_can_exit(m: TMatchExpr) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= m.arms.len { break }
+        if block_can_exit(m.arms[i].body) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * Can this block `return` from the enclosing function? The `loop`-body question: a `break` there
+ * belongs to the loop, but a `return` still skips everything after it.
+ *
+ * @param stmts  the typed statement block
+ * @return       true iff some statement can return
+ */
+fn block_can_return(stmts: []TStatement) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= stmts.len { break }
+        if stmt_can_return(stmts[i]) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * Can this statement `return` from the enclosing function?
+ *
+ * @param s  the typed statement
+ * @return   true iff control can return through `s`
+ */
+fn stmt_can_return(s: TStatement) -> bool {
+    match s {
+        TReturn => true
+        TExprStmt as es => expr_can_return(es.expr)
+        TLoopStmt as l => block_can_return(l.body)
+        TAdoptStmt as a => block_can_return(a.body)
+        TDeferStmt as d => block_can_return(d.body)
+        _ => false
+    }
+}
+
+/**
+ * Can this expression in statement position `return` from the enclosing function?
+ *
+ * @param e  the typed expression
+ * @return   true iff some branch can return
+ */
+fn expr_can_return(e: TExpr) -> bool {
+    match e.kind {
+        TIfExpr as f => block_can_return(f.then_blk) || (f.has_else && block_can_return(f.else_blk))
+        TMatchExpr as m => match_can_return(m)
+        _ => false
+    }
+}
+
+/**
+ * Can any arm of this `match` `return` from the enclosing function?
+ *
+ * @param m  the typed match expression
+ * @return   true iff some arm body can return
+ */
+fn match_can_return(m: TMatchExpr) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= m.arms.len { break }
+        if block_can_return(m.arms[i].body) { return true }
+        i++
+    }
+    false
 }
