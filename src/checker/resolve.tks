@@ -1443,10 +1443,12 @@ fn union_collect(acc: []Type, t: Type, table: TypeTable) -> []Type {
  *   `type_has_sentinel`-equal.
  * - a union BUILT here is canonicalized through `union_normalize_null`, exactly like one written
  *   out in source (`resolve_type`'s `UnionType` arm). Null-first is not cosmetic: the own backend
- *   classifies a two-member absence union by `members[0]` being `Null` (`lower.null_union_payload`),
+ *   classifies a two-member absence union by which member is `Null` (`lower.null_union_shape`),
  *   so an inferred `mut x = if c { 5 } else { null }` used to produce `Variant{i64, Null}` and be
  *   REJECTED with "null match pattern not yet lowered", while the identical annotated
- *   `: i64 | null` worked. One normalizer, every construction site (M.5/D39).
+ *   `: i64 | null` worked. One normalizer, every construction site (M.5/D39). Degrau 30 made the
+ *   own backend read the `Null` member's INDEX rather than assume it, so a non-canonical order can
+ *   no longer swap two arms; the normalization stays the single source of that order regardless.
  *
  * @param a      the first branch/arm type
  * @param b      the second branch/arm type
@@ -1598,7 +1600,7 @@ fn named_type_is_null(nt: parser::NamedType) -> bool {
  * function's old `Null`-only test never fired: the union normalizer's whole POINT (never emit an
  * un-normalized null-bearing union) silently failed for exactly the case a bare `null` arm
  * produces. Downstream, both the (now-retired) C backend's `cg_union_niche_member` and the own
- * backend's `null_union_payload` classify a null-union SOLELY by a literal `Null` member, so the
+ * backend's `null_union_shape` classify a null-union SOLELY by a literal `Null` member, so the
  * un-normalized union fell through their niche/tag detection entirely — the own backend's generic
  * BY-NAME variant lowering then bound the union's non-null case at the WRONG index (no `null`
  * pattern has a name to look up), and the write silently landed on the wrong payload slot instead

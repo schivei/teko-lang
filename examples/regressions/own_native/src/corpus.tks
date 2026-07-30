@@ -4311,3 +4311,553 @@ fn f_str_index_in_bounds() -> i64 {
     if u[1] to i64 != 169 { return 9 }
     0
 }
+
+/**
+ * D30Sq — a plain by-value struct used as a NAMED payload of a null-bearing union, so degrau 30's
+ * `null` arm is measured over a member that is neither a primitive nor a fat value. Its single field
+ * is the witness the present arm reads back.
+ */
+type D30Sq = struct {
+    /** side — the value the present case was constructed with. */
+    side: i64
+}
+
+/**
+ * D30Holder — a struct whose FIELD is a two-member null union, so the `null` arm is measured over a
+ * subject that came out of a field read rather than out of a call.
+ */
+type D30Holder = struct {
+    /** inner — the null-bearing field the `null` arm reads. */
+    inner: i64 | null
+}
+
+/**
+ * D30Nest — a struct whose field is a null union whose PAYLOAD is itself a struct, the shape degrau
+ * 25 closed on the construction side and degrau 30 re-measures from the match side.
+ */
+type D30Nest = struct {
+    /** deep — the null-bearing field whose payload is a by-value struct. */
+    deep: D30Sq | null
+}
+
+/**
+ * d30_three_i64 — the THREE-member null-bearing union at its simplest: an `i64` payload, an absence
+ * case and an error case, selected by the sign of `n`. The RETURN placement of a bare `null` into a
+ * three-member union is the construction half degrau 30 had to land together with the `null` arm.
+ *
+ * @param n  positive selects the payload, zero selects absence, negative selects the error
+ * @return   `n * 2` for a positive `n`, absent for zero
+ * @throws   for a negative `n`
+ */
+fn d30_three_i64(n: i64) -> i64 | null | error {
+    if n == 0 { return null }
+    if n < 0 { return error { message = "d30 negative" } }
+    n * 2
+}
+
+/**
+ * d30_three_str — the same three-member union with a FAT payload, so the present arm binds the
+ * (ptr, len) pair through `bind_fat_case_payload` rather than a single word.
+ *
+ * @param n  positive selects the payload, zero selects absence, negative selects the error
+ * @return   a three-byte string for a positive `n`, absent for zero
+ * @throws   for a negative `n`
+ */
+fn d30_three_str(n: i64) -> str | null | error {
+    if n == 0 { return null }
+    if n < 0 { return error { message = "d30 negative" } }
+    "abc"
+}
+
+/**
+ * d30_three_slice — the same three-member union with a `[]i64` payload, the OTHER fat shape, whose
+ * present arm must answer both a `.len` and an element read.
+ *
+ * @param n  positive selects the payload, zero selects absence, negative selects the error
+ * @return   a two-element buffer for a positive `n`, absent for zero
+ * @throws   for a negative `n`
+ */
+fn d30_three_slice(n: i64) -> []i64 | null | error {
+    if n == 0 { return null }
+    if n < 0 { return error { message = "d30 negative" } }
+    [n, n + 1]
+}
+
+/**
+ * d30_three_named — the same three-member union with a NAMED struct payload, so the present arm
+ * reads the payload back through the boxed address rather than out of the wrapper's own word.
+ *
+ * @param n  positive selects the payload, zero selects absence, negative selects the error
+ * @return   a `D30Sq` of side `n` for a positive `n`, absent for zero
+ * @throws   for a negative `n`
+ */
+fn d30_three_named(n: i64) -> D30Sq | null | error {
+    if n == 0 { return null }
+    if n < 0 { return error { message = "d30 negative" } }
+    D30Sq { side = n }
+}
+
+/**
+ * d30_two_i64 — the TWO-member null union, the arity that already worked, kept beside the three so a
+ * regression that fixed one by breaking the other cannot pass.
+ *
+ * @param n  non-zero selects the payload, zero selects absence
+ * @return   `n * 3` for a non-zero `n`, absent for zero
+ */
+fn d30_two_i64(n: i64) -> i64 | null {
+    if n == 0 { return null }
+    n * 3
+}
+
+/**
+ * d30_read_arg — the ARGUMENT placement of a null union: the caller passes either a bare `null` or a
+ * bare `i64` into a `i64 | null` parameter, so the wrapper is built at the CALL SITE
+ * (`lower_arg_into_param`) rather than at a return.
+ *
+ * @param x  the null-bearing argument
+ * @return   the payload when present, else 7
+ */
+fn d30_read_arg(x: i64 | null) -> i64 {
+    match x {
+        i64 as v => v
+        null => 7
+    }
+}
+
+/**
+ * f_d30_null_arm_three_member — 0.3.1.0 degrau 30, and the exact shape the native self-host stopped
+ * on: a `null` match arm over a THREE-member `i64 | null | error`. The pre-degrau-30 lowering tested
+ * the literal tag `0` under a two-member guard, so this arm honest-stopped with "`null` match pattern
+ * not yet lowered"; the `return null` that feeds it stopped one step earlier with "value's type is not
+ * a member of its declared variant". The compiler's own `codegen::emit_variant_wrap` is this shape
+ * over `[]byte | null | error`.
+ *
+ * All three arms are read back, and the two non-null arms are read back TOO: an arity fix that made
+ * the `null` arm fire for every tag would satisfy an absence-only test.
+ *
+ * @return 0 when every arm answers its own case, else the failing check
+ */
+fn f_d30_null_arm_three_member() -> i64 {
+    if d30_read_three(3) != 6 { return 1 }
+    if d30_read_three(0) != 7 { return 2 }
+    if d30_read_three(-1) != 9 { return 3 }
+    if d30_read_three(1) != 2 { return 4 }
+    if d30_read_two(3) != 9 { return 5 }
+    if d30_read_two(0) != 7 { return 6 }
+    0
+}
+
+/**
+ * d30_read_three — the payload/absent/error readback of `d30_three_i64`, payload arm FIRST.
+ *
+ * @param n  the selector handed to `d30_three_i64`
+ * @return   the doubled payload, 7 for absent, 9 for the error
+ */
+fn d30_read_three(n: i64) -> i64 {
+    match d30_three_i64(n) {
+        i64 as v => v
+        null => 7
+        error => 9
+    }
+}
+
+/**
+ * d30_read_two — the payload/absent readback of `d30_two_i64`, the arity-two control.
+ *
+ * @param n  the selector handed to `d30_two_i64`
+ * @return   the tripled payload, or 7 for absent
+ */
+fn d30_read_two(n: i64) -> i64 {
+    match d30_two_i64(n) {
+        i64 as v => v
+        null => 7
+    }
+}
+
+/**
+ * f_d30_null_arm_orders — 0.3.1.0 degrau 30: the ARM ORDER axis. The `null` arm written FIRST and
+ * written LAST must select the same case, at arity two and at arity three, because the tag it tests
+ * comes from the union's own member list and not from the arm's position. A lowering that read the
+ * arm order instead would answer one order right and the other wrong.
+ *
+ * @return 0 when both orders agree at both arities, else the failing check
+ */
+fn f_d30_null_arm_orders() -> i64 {
+    if d30_read_three_nullfirst(3) != 6 { return 1 }
+    if d30_read_three_nullfirst(0) != 7 { return 2 }
+    if d30_read_three_nullfirst(-1) != 9 { return 3 }
+    if d30_read_two_nullfirst(3) != 9 { return 4 }
+    if d30_read_two_nullfirst(0) != 7 { return 5 }
+    if d30_read_three_nullfirst(3) != d30_read_three(3) { return 6 }
+    if d30_read_three_nullfirst(0) != d30_read_three(0) { return 7 }
+    if d30_read_three_nullfirst(-1) != d30_read_three(-1) { return 8 }
+    0
+}
+
+/**
+ * d30_read_three_nullfirst — the arity-three readback with the `null` arm written FIRST.
+ *
+ * @param n  the selector handed to `d30_three_i64`
+ * @return   the doubled payload, 7 for absent, 9 for the error
+ */
+fn d30_read_three_nullfirst(n: i64) -> i64 {
+    match d30_three_i64(n) {
+        null => 7
+        i64 as v => v
+        error => 9
+    }
+}
+
+/**
+ * d30_read_two_nullfirst — the arity-two readback with the `null` arm written FIRST.
+ *
+ * @param n  the selector handed to `d30_two_i64`
+ * @return   the tripled payload, or 7 for absent
+ */
+fn d30_read_two_nullfirst(n: i64) -> i64 {
+    match d30_two_i64(n) {
+        null => 7
+        i64 as v => v
+    }
+}
+
+/**
+ * f_d30_null_arm_fat_payload — 0.3.1.0 degrau 30 over the two FAT payload shapes. A `str` and a
+ * `[]i64` payload each occupy the wrapper's (ptr@8, len@16) pair, so the present arm has to bind both
+ * halves while the absent arm must not read either. The `.len` and an element read are both asserted:
+ * a bind that took only the pointer half answers a garbage length with no diagnostic.
+ *
+ * @return 0 when both fat payloads read back whole, else the failing check
+ */
+fn f_d30_null_arm_fat_payload() -> i64 {
+    if d30_read_three_str(3) != 3 { return 1 }
+    if d30_read_three_str(0) != 7 { return 2 }
+    if d30_read_three_str(-1) != 9 { return 3 }
+    if d30_read_three_slice(3) != 7 { return 4 }
+    if d30_read_three_slice(0) != 7 { return 5 }
+    if d30_read_three_slice(-1) != 9 { return 6 }
+    if d30_read_three_slice_len(4) != 2 { return 7 }
+    0
+}
+
+/**
+ * d30_read_three_str — the `str`-payload readback: the present arm's own byte count, so a bind that
+ * lost the length half cannot pass.
+ *
+ * @param n  the selector handed to `d30_three_str`
+ * @return   the payload's byte length, 7 for absent, 9 for the error
+ */
+fn d30_read_three_str(n: i64) -> i64 {
+    match d30_three_str(n) {
+        str as s => s.len to i64
+        null => 7
+        error => 9
+    }
+}
+
+/**
+ * d30_read_three_slice — the `[]i64`-payload readback: the sum of the two elements, so both the
+ * pointer and the length halves have to be right.
+ *
+ * @param n  the selector handed to `d30_three_slice`
+ * @return   the two elements' sum, 7 for absent, 9 for the error
+ */
+fn d30_read_three_slice(n: i64) -> i64 {
+    match d30_three_slice(n) {
+        []i64 as xs => xs[0] + xs[1]
+        null => 7
+        error => 9
+    }
+}
+
+/**
+ * d30_read_three_slice_len — the `[]i64`-payload readback by LENGTH alone, the half a pointer-only
+ * bind silently corrupts.
+ *
+ * @param n  the selector handed to `d30_three_slice`
+ * @return   the payload's element count, 0 for absent or the error
+ */
+fn d30_read_three_slice_len(n: i64) -> i64 {
+    match d30_three_slice(n) {
+        []i64 as xs => xs.len to i64
+        null => 0
+        error => 0
+    }
+}
+
+/**
+ * f_d30_null_arm_named_payload — 0.3.1.0 degrau 30 over a NAMED struct payload at arity three, plus
+ * the NESTING axis degrau 25 opened: a null union whose payload is a struct, read out of a FIELD that
+ * is itself a null union (`D30Nest.deep`). A wrapper that stored the bare struct's own address where
+ * the tag belongs reads the struct's FIRST FIELD as the tag and matches no arm at all.
+ *
+ * @return 0 when every named payload reads back its own field, else the failing check
+ */
+fn f_d30_null_arm_named_payload() -> i64 {
+    if d30_read_three_named(3) != 3 { return 1 }
+    if d30_read_three_named(0) != 7 { return 2 }
+    if d30_read_three_named(-1) != 9 { return 3 }
+    if d30_read_nested(5) != 5 { return 4 }
+    if d30_read_nested(0) != 7 { return 5 }
+    0
+}
+
+/**
+ * d30_read_three_named — the named-struct-payload readback at arity three.
+ *
+ * @param n  the selector handed to `d30_three_named`
+ * @return   the payload's `side`, 7 for absent, 9 for the error
+ */
+fn d30_read_three_named(n: i64) -> i64 {
+    match d30_three_named(n) {
+        D30Sq as s => s.side
+        null => 7
+        error => 9
+    }
+}
+
+/**
+ * d30_read_nested — the NESTED shape: a `D30Sq | null` FIELD built from a bare `null` or a bare
+ * struct, then matched. Both the field's construction and the field's `null` arm are exercised.
+ *
+ * @param n  non-zero builds the present case, zero builds absence
+ * @return   the payload's `side`, or 7 for absent
+ */
+fn d30_read_nested(n: i64) -> i64 {
+    let nn = D30Nest { deep = if n == 0 { null } else { D30Sq { side = n } } }
+    match nn.deep {
+        D30Sq as s => s.side
+        null => 7
+    }
+}
+
+/**
+ * f_d30_null_placement_field_arg_local — 0.3.1.0 degrau 30 across the PLACEMENTS a bare `null` can
+ * reach: a struct FIELD, a call ARGUMENT, a `let` LOCAL and a RETURN. Each routes through
+ * `lower_value_into_type` and each used to need its own guard; the degrau-25 finding was that two of
+ * them (field and argument) walked past the honest stop into a raw `const 0` the callee then read as
+ * a wrapper address.
+ *
+ * @return 0 when every placement round-trips, else the failing check
+ */
+fn f_d30_null_placement_field_arg_local() -> i64 {
+    if d30_read_field(4) != 4 { return 1 }
+    if d30_read_field(0) != 7 { return 2 }
+    if d30_read_arg(4) != 4 { return 3 }
+    if d30_read_arg(null) != 7 { return 4 }
+    if d30_read_local(4) != 4 { return 5 }
+    if d30_read_local(0) != 7 { return 6 }
+    0
+}
+
+/**
+ * d30_read_field — the FIELD placement: a `i64 | null` struct field built from a bare `null` or a
+ * bare `i64`, then matched.
+ *
+ * @param n  non-zero builds the present case, zero builds absence
+ * @return   the field's payload, or 7 for absent
+ */
+fn d30_read_field(n: i64) -> i64 {
+    let h = D30Holder { inner = if n == 0 { null } else { n } }
+    match h.inner {
+        i64 as v => v
+        null => 7
+    }
+}
+
+/**
+ * d30_read_local — the LOCAL placement: an annotated `let` of null-union type bound from a bare
+ * `null` or a bare `i64`, then matched.
+ *
+ * @param n  non-zero binds the present case, zero binds absence
+ * @return   the local's payload, or 7 for absent
+ */
+fn d30_read_local(n: i64) -> i64 {
+    let l: i64 | null = if n == 0 { null } else { n }
+    match l {
+        i64 as v => v
+        null => 7
+    }
+}
+
+/**
+ * f_d30_null_placement_assign — 0.3.1.0 degrau 30 on the ASSIGN placement at arity three: a `mut`
+ * local of `i64 | null | error` initialized from a bare `null` and then RE-ASSIGNED a bare `i64` and
+ * a bare `error`. The initializer and each assignment build a wrapper independently, so a tag written
+ * at one index and read at another shows up here and nowhere else.
+ *
+ * @return 0 when every assignment lands on its own case, else the failing check
+ */
+fn f_d30_null_placement_assign() -> i64 {
+    if d30_assign_three(6) != 6 { return 1 }
+    if d30_assign_three(0) != 7 { return 2 }
+    if d30_assign_three(-1) != 9 { return 3 }
+    0
+}
+
+/**
+ * d30_assign_three — the assign placement: absence first, then the payload, then the error, each
+ * written into the SAME `mut` slot of a three-member null union.
+ *
+ * @param n  positive assigns the payload, zero leaves absence, negative assigns the error
+ * @return   the payload, 7 for absent, 9 for the error
+ */
+fn d30_assign_three(n: i64) -> i64 {
+    mut l: i64 | null | error = null
+    if n != 0 { l = n }
+    if n < 0 { l = error { message = "d30 negative" } }
+    match l {
+        i64 as v => v
+        null => 7
+        error => 9
+    }
+}
+
+/**
+ * f_d30_null_compare_eq — 0.3.1.0 degrau 30's already-generic sibling, certified rather than changed:
+ * `a == null` / `a != null` over a null-bearing union reads the `Null` member's INDEX
+ * (`variant_index_of_member_type`), so it was arity-blind before this degrau. Pinned here so a future
+ * change to the shared tag machinery cannot break the comparison while the match arms still pass.
+ *
+ * @return 0 when both operators agree with the match arms, else the failing check
+ */
+fn f_d30_null_compare_eq() -> i64 {
+    if d30_cmp_two(8) != 1 { return 1 }
+    if d30_cmp_two(0) != 7 { return 2 }
+    if d30_cmp_three(8) != 1 { return 3 }
+    if d30_cmp_three(0) != 7 { return 4 }
+    0
+}
+
+/**
+ * d30_cmp_two — `== null` and `!= null` over the arity-two union, both operators on the same value.
+ *
+ * @param n  non-zero selects the payload, zero selects absence
+ * @return   7 when absent, 1 when present, 9 when the two operators disagree
+ */
+fn d30_cmp_two(n: i64) -> i64 {
+    let a: i64 | null = if n == 0 { null } else { n }
+    if a == null { return 7 }
+    if a != null { return 1 }
+    9
+}
+
+/**
+ * d30_cmp_three — `== null` over the arity-THREE union, the axis the match arm had to be taught.
+ *
+ * @param n  positive selects the payload, zero selects absence
+ * @return   7 when absent, else 1
+ */
+fn d30_cmp_three(n: i64) -> i64 {
+    let a = d30_three_i64(n)
+    if a == null { return 7 }
+    1
+}
+
+/**
+ * f_d30_null_union_of_slice — 0.3.1.0 degrau 30 over a union whose payload is a `[]i64` reached
+ * through a LOCAL rather than a return, so the fat payload's construction and its `null` arm are
+ * measured on the binding path as well as the return path.
+ *
+ * @return 0 when the buffer reads back whole, else the failing check
+ */
+fn f_d30_null_union_of_slice() -> i64 {
+    if d30_local_slice(3) != 6 { return 1 }
+    if d30_local_slice(0) != 7 { return 2 }
+    if d30_local_slice_len(3) != 2 { return 3 }
+    if d30_local_slice_len(0) != 0 { return 4 }
+    0
+}
+
+/**
+ * d30_local_slice — a `[]i64 | null` LOCAL bound from a bare buffer or a bare `null`, read back by
+ * element sum.
+ *
+ * @param n  non-zero binds the buffer, zero binds absence
+ * @return   the two elements' sum, or 7 for absent
+ */
+fn d30_local_slice(n: i64) -> i64 {
+    let xs: []i64 | null = if n == 0 { null } else { [n, n] }
+    match xs {
+        []i64 as v => v[0] + v[1]
+        null => 7
+    }
+}
+
+/**
+ * d30_local_slice_len — the same local read back by LENGTH, the half a pointer-only bind corrupts.
+ *
+ * @param n  non-zero binds the buffer, zero binds absence
+ * @return   the buffer's element count, or 0 for absent
+ */
+fn d30_local_slice_len(n: i64) -> i64 {
+    let xs: []i64 | null = if n == 0 { null } else { [n, n] }
+    match xs {
+        []i64 as v => v.len to i64
+        null => 0
+    }
+}
+
+/**
+ * f_d30_null_arm_exhaustive_selection — 0.3.1.0 degrau 30 by INVERSION: instead of asking each arm
+ * for its own answer, walk every selector once and COUNT how many times each arm fired. A lowering
+ * whose `null` arm tested a tag nothing ever stores would leave the absent count at zero; one whose
+ * `null` arm matched every tag would drive it to three. Only a correct pairing of writer and reader
+ * gives one of each.
+ *
+ * @return 0 when each arm fires exactly once over the three selectors, else the failing check
+ */
+fn f_d30_null_arm_exhaustive_selection() -> i64 {
+    mut present = 0
+    mut absent = 0
+    mut failed = 0
+    mut i = -1
+    loop {
+        if i > 1 { break }
+        match d30_three_i64(i) {
+            i64 => present++
+            null => absent++
+            error => failed++
+        }
+        i++
+    }
+    if present != 1 { return 1 }
+    if absent != 1 { return 2 }
+    if failed != 1 { return 3 }
+    if present + absent + failed != 3 { return 4 }
+    0
+}
+
+/**
+ * f_d30_null_arm_wrong_arm_guard — 0.3.1.0 degrau 30's negative half: for EVERY selector, the two
+ * arms that must NOT fire are asserted not to have fired, by reading a value only the correct arm can
+ * produce. This is what separates "the `null` arm compiles" from "the `null` arm selects absence" —
+ * the distinction three silent wrong values in this lane were caught by.
+ *
+ * @return 0 when no arm answers another arm's case, else the failing check
+ */
+fn f_d30_null_arm_wrong_arm_guard() -> i64 {
+    if d30_arm_tag(2) != 1 { return 1 }
+    if d30_arm_tag(0) != 2 { return 2 }
+    if d30_arm_tag(-2) != 3 { return 3 }
+    if d30_arm_tag(2) == d30_arm_tag(0) { return 4 }
+    if d30_arm_tag(0) == d30_arm_tag(-2) { return 5 }
+    if d30_arm_tag(2) == d30_arm_tag(-2) { return 6 }
+    0
+}
+
+/**
+ * d30_arm_tag — which ARM fired, as a number independent of the payload's own value: 1 present,
+ * 2 absent, 3 error. Reading the arm identity rather than the payload is what makes the wrong-arm
+ * guard above unable to pass by coincidence.
+ *
+ * @param n  the selector handed to `d30_three_i64`
+ * @return   1 for the payload arm, 2 for the `null` arm, 3 for the error arm
+ */
+fn d30_arm_tag(n: i64) -> i64 {
+    match d30_three_i64(n) {
+        i64 => 1
+        null => 2
+        error => 3
+    }
+}
