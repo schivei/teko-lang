@@ -2804,3 +2804,144 @@ E deixo o dado a descoberto, porque e ele que fecha o arco: **este defeito so fo
 porque o C0 entrou.** O mecanismo que eu desenhei para nao perder o veredicto de uma corrida foi o que
 tornou visivel um defeito que tres pernas relatavam como plataforma. **A captura nao paga so a
 fiabilidade do relatorio — paga a capacidade de distinguir um defeito de um hospedeiro.**
+
+---
+
+## 23. `push -> error | null` — a lei do dono, e o buraco que ela abre no meu argumento
+
+> *"Ao fazer push em um canal, retorna um `error | null`, nulo se sucesso, error dizendo o pq foi
+> negado o push (o guarda do bounded)."*
+
+Duas formas (**bounded** / **unbounded**), **sem panico**, **sem predicado**. E o idioma nao alarga
+nada: `-> error | null` tem **78** usos em `src/` (mais 13 na ordem inversa) — contei.
+
+### 23.1 O argumento a favor e mais forte do que a simplicidade: o predicado do C# e TOCTOU
+
+Entre o *"esta livre?"* e o `push`, outro produtor ocupa a vaga — e num MPSC ha N produtores **por
+construcao**, logo a corrida nao e um azar, e o caso normal. **Um `push` que devolve o veredicto e
+atomico: a pergunta e a accao sao a mesma operacao.** A forma do dono nao e so mais leve; **elimina
+uma corrida que o modelo do predicado obriga o utilizador a gerir a mao.**
+
+**E esta propriedade e a que eu tenho de nao estragar em §23.2.** Qualquer coisa que eu acrescente
+tem de manter o `push` como **unica autoridade**.
+
+### 23.2 O buraco no meu argumento, admitido — e a reformulacao
+
+Eu escrevi que a contrapressao vinha de **quem escreve bloquear**, e que os handlers *"encheriam o
+canal limitado e parariam"*. **Com um `push` que devolve `error`, nao param.** O integrador tem razao:
+o meu argumento de ausencia-de-impasse assentava num bloqueio que a lei do dono remove.
+
+**Descartar esta fora de questao** — nao perder saida e a razao de ser do journaling inteiro. Logo o
+handler **repete**. E a reformulacao e esta, e ela **e mais forte do que a que substitui**:
+
+```teko
+/**
+ * drain_one — o ciclo de UM handler: ler o seu tubo e entregar cada bloco ao canal.
+ *
+ * A RECUSA NAO E UM ERRO DO HANDLER: e a contrapressao a falar. Um `Full` significa que o consumidor
+ * esta atrasado, e a resposta certa e NAO LER MAIS — o bloco fica na mao, o tubo enche, e o filho
+ * bloqueia no seu proprio `write`. A contrapressao chega ao produtor real na mesma, so que agora
+ * atravessa uma decisao VISIVEL em Teko em vez de morrer dentro de uma primitiva bloqueante.
+ *
+ * SO `Full` SE REPETE (§23.4). As outras quatro razoes sao terminais, e repetir uma delas era um ciclo
+ * infinito — e por isso que a razao tem de ser enumeravel e nao uma frase.
+ *
+ * @param fd  o descritor de leitura do tubo deste handler
+ * @param c   o id do canal
+ * @param w   a identidade com que os blocos deste handler sao rotulados
+ * @return    quantos blocos entregou
+ */
+fn drain_one(fd: i64, c: u64, w: str) -> u64 {
+    mut n: u64 = 0
+    loop {
+        let blk = teko::threads::read_block(fd)
+        if blk.len == 0 { break }
+        loop {
+            match teko::threads::chan_push(c, w, blk) {
+                null => break
+                error as e => {
+                    if !chan_refusal_is_full(e) { return n }
+                    match teko::threads::chan_await_space(c, AWAIT_MS) { error => { }; null => { } }
+                }
+            }
+        }
+        n = n + 1
+    }
+    n
+}
+```
+
+**A cadeia de ausencia-de-impasse, reformulada, e a conclusao MANTEM-SE:**
+
+| antes (bloqueio) | agora (recusa + repeticao) |
+|---|---|
+| canal cheio ⇒ `push` bloqueia | canal cheio ⇒ `push` devolve `Full` |
+| handler parado dentro do `push` | handler **nao le mais do tubo** |
+| — | tubo enche ⇒ **filho bloqueia no seu `write`** |
+| a invariante: o orquestrador nunca bloqueia fora do `recv` | **a mesma, sem uma virgula mudada** |
+
+A contrapressao chega ao mesmo sitio pela mesma razao; o que mudou foi **onde ela e decidida**. E o
+ganho e real: antes ela morria dentro de uma primitiva do SO, agora e uma linha de Teko que se pode
+ler, medir e interromper.
+
+**O `chan_await_space` NAO e o predicado do C#, e a distincao e a que salva a lei do dono:** ele nao
+responde *"posso escrever?"* — ele **dorme ate algo ter mudado**. O `push` que vem a seguir **pode ser
+recusado na mesma** (outro produtor ganhou a corrida) e o ciclo trata disso. **O `push` continua a ser
+a unica autoridade; o `await` e so uma dica que evita queimar CPU.** Sem ele, oito handlers em espera
+activa; com ele, oito adormecidos. Um `await` que fosse garantia seria o TOCTOU de volta.
+
+**O que NAO medi:** o custo da espera activa se o `await` nao existisse, e o valor certo de
+`AWAIT_MS`. Sao medicoes do crumb, nao adjectivos meus.
+
+### 23.3 `unbounded`: admissivel em que casos? — **em nenhum dos nossos**
+
+Escrevi que o ilimitado *"tem a memoria como unico travao"*, e nos morremos de OOM duas vezes no dia
+deste desenho.
+
+**O criterio, e nao e "porque sim":** o ilimitado e admissivel quando o **volume total e conhecido
+antes do primeiro push**. Se for, a memoria tem um tecto que nao depende do ritmo do consumidor.
+
+**Aplicado ao nosso uso: nenhum canal qualifica.** Todos transportam **saida de processo**, cujo
+volume nao e conhecivel a priori — a transcricao de uma shard depende de quantos testes falham. Logo
+**todos os nossos canais sao bounded**, e isso e decisao, nao omissao. As duas formas existem porque o
+dono as pediu e servem quem escreve programas em Teko; o **compilador** usa uma so.
+
+**O que faria mudar:** um canal que transportasse apenas os registos de sumario (§13 — um `plan` e um
+`end` por escritor, total `2 x jobs`, conhecido antes de comecar). Esse qualificaria — e e tao pequeno
+que nao precisa de canal nenhum. Deixo o criterio escrito para nao ser re-derivado.
+
+### 23.4 As razoes de recusa — fechadas por construcao, no espirito do `grep` e nao do julgamento
+
+O integrador pediu para eu guardar a forma da guarda de §22 (*"um `grep`, nao um julgamento"*). Aplico-a
+aqui: **as razoes nao sao prosa, sao um conjunto fechado, e cada uma corresponde a um estado que o
+`tk_chan` JA tem.**
+
+| razao | estado que a produz | repetivel? |
+|---|---|---|
+| **`Full`** | anel na capacidade (**so** possivel em bounded) | **SIM** — e a unica |
+| **`Closed`** | a `main` fechou o canal (§19) | nao — deliberado |
+| **`NoReader`** | o `Rx` nunca foi tomado, ou a tarefa leitora morreu | nao — e uma falha, e distinta de `Closed` de proposito |
+| **`Oversize`** | o registo excede a capacidade TOTAL do anel, logo **nunca** cabe | nao — e repeti-la era o ciclo infinito |
+| **`NotAProducer`** | o id nao nomeia um produtor registado (id obsoleto, §19/F3) | nao |
+
+**O `Oversize` e o que justifica a enumeracao inteira.** Sem ele, um handler com um bloco maior do que
+o anel repete `Full` para sempre — um impasse **novo**, criado pela propria lei que remove o bloqueio.
+Distinguir *"agora nao cabe"* de *"nunca cabe"* nao e requinte: e o que impede o ciclo de §23.2 de ser
+um ciclo infinito. **Um `error` que dissesse so "negado" produzia esse impasse**, e e por isso que a
+letra da lei do dono — *"error dizendo o **pq**"* — e carga util e nao cortesia.
+
+**A guarda, e ela e mecanica:** **toda a razao tem de ter um teste que a PRODUZA.** Uma razao que
+nenhum teste consegue construir esta morta ou e inalcancavel — e nos dois casos a enumeracao esta a
+mentir. Nao ha julgamento: conta-se um teste por variante.
+
+*Prova:* cinco testes, um por razao, cada um a construir o estado e a afirmar a razao devolvida ·
+**vivacidade**: um `push` normal devolve `null`, senao um canal que recusasse sempre passaria os cinco
+· **inversao**: um handler alimentado com `Oversize` **termina** (e nao repete), e o mesmo handler com
+`Full` **repete**.
+
+### 23.5 O custo
+
+**Nenhum crumb novo.** Isto e a superficie do `tk_chan`, que o **C1** ja constroi (F4 em §20.1). A
+lei do dono **retira** trabalho: sai o caminho de bloqueio dentro do `push`, entra um `enum` de cinco
+variantes e um ciclo de repeticao de sete linhas. **O `chan_await_space` e a unica adicao**, e existe
+para nao queimar CPU, nao para dar garantias.
