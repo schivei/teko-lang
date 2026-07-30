@@ -2310,23 +2310,18 @@ jobs:
         env:
           TEKO_MEM_PARANOID: '1'
         run: |
-          set -eu
-          if ./dl/linux-x86_64-glibc/teko . -o gen2-mp --no-verify --release > mp.log 2>&1; then
-            echo "KNOWN-STOP LIFTED: the native backend self-hosted."
-            echo "This step exists to assert that it CANNOT yet. Promote it:"
-            echo "  delete this step and restore"
-            echo "  'run: ./dl/linux-x86_64-glibc/teko . -o gen2-mp --no-verify --release'"
-            exit 1
-          fi
-          if ! grep -q 'native backend N1' mp.log; then
-            echo "the native self-host failed, but NOT by a named honest stop — this is the case"
-            echo "this step exists to catch: a crash or a silent wrong answer where a barulhenta"
-            echo "stop belongs. The tail below is the whole evidence:"
-            tail -n 20 mp.log
-            exit 1
-          fi
-          echo "KNOWN-STOP held — it stops, and it stops by name. Today's degrau, for the record:"
-          grep -m1 'native backend N1' mp.log
+          set -u
+          # `set +e` IS LOAD-BEARING. GitHub runs this step as `bash -e`, and this build is EXPECTED
+          # to fail — that failure is the whole assertion. Without it the step dies on the build's
+          # own non-zero status, `rc=$?` and the verdict below become dead code, and the step exits
+          # with teko's raw status while the log that explains it goes unread. That is exactly how
+          # the Windows asset self-test reported a bare `exit 127` with no output (fixed 2026-07-29,
+          # same file). A step that captures `$?` and does not clear `-e` first is always this bug.
+          set +e
+          ./dl/linux-x86_64-glibc/teko . -o gen2-mp --no-verify --release > mp.log 2>&1
+          rc=$?
+          set -e
+          sh scripts/native_selfhost_known_stop.sh "$rc" mp.log
 
       - name: Run the single regression executor (TEKO_MEM_PARANOID)
         env:
@@ -2464,6 +2459,16 @@ jobs:
       # against throwaway git fixtures, needing no compiler and no network.
       - name: Structural — the no-C-in-tests gate passes clean, fails dirty, never mistakes tracked C
         run: sh scripts/no_c_in_tests_gate_test.sh
+
+      # THE NATIVE SELF-HOST KNOWN-STOP'S OWN TEST. The gate it covers lives in `mem-paranoid`, a job
+      # that rides the NATIVE leg and is therefore SKIPPED on every run until the degrau ladder
+      # closes — so without this step its logic would ship on the strength of having been read, and
+      # "I read it and it looks right" is exactly the proof this lane refuses. It fabricates its own
+      # logs, needs no compiler, and proves all three verdicts BY INVERSION: an honest named stop
+      # holds, a DIFFERENT degrau still holds (the stale-pin defect, which is what the owner signed
+      # off on fixing), a successful self-host goes red, and a CRASH goes red.
+      - name: Structural — the native self-host KNOWN-STOP holds, lifts, and refuses a crash
+        run: bash scripts/native_selfhost_known_stop_test.sh
 
       # THE KNOWN-STOP ENVELOPE INTEGRITY GATE. Owner ruling: an envelope may absorb ONLY the
       # diagnostic it pins, never a family of them. Measured directly in run `30400712261` (job
