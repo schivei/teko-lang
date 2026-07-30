@@ -2246,3 +2246,47 @@ Ressalva honesta: com o modelo de **handles por id** que o dono acabou de fixar,
 `get_channel_reader(id)` pode devolver um *handle pequeno e copiável* que consulta o registo a cada
 chamada — e aí a cópia é inofensiva. **Isso é decisão de desenho e não é minha.** O que é meu é
 dizer que hoje a palavra `ref` não entrega o que promete e não avisa.
+
+## 0ac · CORRECÇÃO à 0ab: o `ref` aliasa. O que mente é a AUSÊNCIA DA ANOTAÇÃO
+
+O dono corrigiu-me o instrumento — *"a função Get precisa retornar ref e a atribuição da struct tem
+que ser mut"* — e voltei a medir. **A minha conclusão anterior estava errada e a correcção estreita
+o defeito em vez de o apagar.**
+
+Mesma fonte `mut`, mesma expressão, só muda a anotação:
+
+```
+ref r: Ch = c    →  exit 0   ALIASA CORRECTAMENTE
+ref r     = c    →  exit 1   CÓPIA SILENCIOSA
+```
+
+**A anotação é portante, e a sua ausência não avisa.** Zero diagnósticos, nas duas rotas. Não é que
+o `ref` não funcione — é que há **uma grafia dele que se degrada em silêncio**, e é a grafia mais
+natural de escrever. Isso é pior do que uma capacidade em falta: é uma capacidade que finge.
+
+## 0ad · As três rotas para o canal, medidas — e a que o dono apontou é a que anda
+
+O dono ofereceu uma terceira hipótese: *"usar classe para o canal, assim até pode passar o canal
+diretamente ao invés de usar referência, já que objeto é ponteiro"*. Fui medir as três.
+
+| rota | veredicto medido |
+|---|---|
+| **classe** — passa directa | **FUNCIONA HOJE.** `let c = Ch::of()`, passa a `fn shut(c: Ch)`, muta lá dentro, lê cá fora → **exit 0**. E `let b = a; b.open = false;` lê `a.open` → **exit 0**. Aliasa nas duas direcções, **sem `ref` e sem `mut`** |
+| **`ref` anotado** | funciona (acima), mas exige a anotação em toda a parte |
+| **`-> ref T` de um registo** | **BLOQUEADA DUAS VEZES** |
+
+E o duplo bloqueio da terceira merece ser dito com precisão, porque é o caminho que o esboço
+original pedia:
+
+1. **O portão de solidez recusa-o por desenho.** `check_ref_return_passdown` diz: *"a `-> ref T`
+   function may return only one of its own `ref` parameters (identity pass-down) — a reference to a
+   local, a `ref` local, or a stored field cannot escape **until the transitive-escape spine
+   lands**"*. Uma consulta a registo devolve exactamente "a stored field". Medido: o pass-down de um
+   parâmetro próprio compila; o resto é honest-stop.
+2. **E nem sequer se consegue escrever o registo.** Não há estado mutável ao nível do módulo: `mut
+   REG = …` fora de uma função dá *"expected a declaration"*. O registo teria de viver no runtime,
+   atrás de um `extern fn` — e aí o portão nem se aplica, porque já não é código Teko.
+
+**Conclusão que é do dono e não minha, mas que a medição sustenta:** a rota de classe entrega
+semântica de referência **hoje, sem esperar pela espinha de escape transitivo**, e sem depender da
+grafia que mente. `objecto é ponteiro` é literalmente verdade nesta linguagem, e foi medido.
