@@ -695,6 +695,51 @@ fn select_un_x86(ctx0: SelCtxX86, inst: lir::LInst, u: lir::LUn) -> SelCtxX86 {
 }
 
 /**
+ * arg_slot_size_x86 — the memory transfer width one stack-argument slot uses for
+ * a value of the given register file and recorded width (`B1-args`): the GPR
+ * widths `Q`/`D` and the float widths `F64`/`F32`, exactly mirroring what the
+ * REGISTER path would have moved for the same value (`mov`/`fmov` at `wide`), so
+ * a value that overflows the register window is transferred at the identical
+ * width it would have travelled in.
+ *
+ * @param MRegClass reg_class  the value's register file
+ * @param bool wide  the value's recorded width (true for the 64-bit form)
+ * @return MMemSizeX86  the stack-slot transfer width
+ */
+fn arg_slot_size_x86(reg_class: MRegClass, wide: bool) -> MMemSizeX86 {
+    if reg_class == MRegClass::FPR {
+        return if wide { MMemSizeX86::F64 } else { MMemSizeX86::F32 }
+    }
+    if wide { MMemSizeX86::Q } else { MMemSizeX86::D }
+}
+
+/**
+ * stack_index_before — how many of `param_types[0..index)` overflowed their
+ * class's argument-register window and therefore live in the caller's stack-arg
+ * area (`B1-args`). Both x86-64 ABIs assign in declaration order and place an
+ * overflowing argument in the next free stack slot regardless of its class, so
+ * ONE counter over both register files gives the slot index — which is why this
+ * is not simply `index - window`.
+ *
+ * @param AbiDescriptor abi  the target ABI register file (its two window sizes)
+ * @param []lir::LType param_types  the function's parameter machine classes
+ * @param u32 index  the parameter position to count up to (exclusive)
+ * @return u32  the stack-arg slot index this parameter would occupy
+ */
+fn stack_index_before(abi: AbiDescriptor, param_types: []lir::LType, index: u32) -> u32 {
+    mut count: u32 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= index { break }
+        let cls = mregclass_of_ltype(param_types[i])
+        let class_index = if cls == MRegClass::FPR { fpr_index_before(param_types, i to u32) } else { gpr_index_before(param_types, i to u32) }
+        if !arg_reg(abi, cls, class_index).ok { count++ }
+        i++
+    }
+    count
+}
+
+/**
  * select_param_x86 — the `LParam` selection (§4.5): move the target ABI's
  * argument register — GPR (SysV RDI/RSI/RDX/RCX/R8/R9; Win64 RCX/RDX/R8/R9)
  * or FPR (XMM0..7; XMM0..3 on Win64), classified INDEPENDENTLY per register
@@ -704,16 +749,16 @@ fn select_un_x86(ctx0: SelCtxX86, inst: lir::LInst, u: lir::LUn) -> SelCtxX86 {
  * `abi` descriptor is threaded from the emit driver, so the SAME isel code
  * receives arguments in SysV registers on x86-linux and in the Win64
  * registers on x86_64-windows (the byte-identical SysV path passes `SYSV64`,
- * exactly the descriptor the old hardcode named). A parameter past the ABI's
- * per-class argument-register window needs the stack-arg slot (the `B1-args`
- * stop).
+ * exactly the descriptor the old hardcode named). A parameter past its class's
+ * argument-register window arrives in the caller's stack-arg area instead and is
+ * loaded from there by `MInArgX86` (`B1-args`, closed 2026-07-29).
  *
  * @param AbiDescriptor abi  the target ABI register file (SysV or Win64)
  * @param SelCtxX86 ctx0  the context to extend
  * @param lir::LFunc f  the enclosing function (its `param_types`)
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
  * @param lir::LParam p  the parameter op
- * @return SelCtxX86 | error  the advanced context, or a `B1-args` honest-stop
+ * @return SelCtxX86 | error  the advanced context, or an internal-invariant error
  */
 fn select_param_x86(abi: AbiDescriptor, ctx0: SelCtxX86, f: lir::LFunc, inst: lir::LInst, p: lir::LParam) -> SelCtxX86 | error {
     if p.index >= f.param_types.len {
@@ -725,11 +770,12 @@ fn select_param_x86(abi: AbiDescriptor, ctx0: SelCtxX86, f: lir::LFunc, inst: li
     let is_fpr = reg_class == MRegClass::FPR
     let class_index = if is_fpr { fpr_index_before(f.param_types, p.index) } else { gpr_index_before(f.param_types, p.index) }
     let slot = arg_reg(abi, reg_class, class_index)
-    if !slot.ok {
-        return error { message = "isel x86-64: B1-args — a parameter past the ABI's argument-register window needs the stack-arg slot (0.3.1)" }
-    }
     let dst = vreg(inst.result, reg_class)
     let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, reg_class, wide)
+    if !slot.ok {
+        let stack_index = stack_index_before(abi, f.param_types, p.index)
+        return selctx_x86_emit(ctx1, in_arg_x86(arg_slot_size_x86(reg_class, wide), dst, stack_index))
+    }
     let mv = if is_fpr { fmov_x86(dst, slot.reg, wide) } else { mov_x86(dst, slot.reg, wide) }
     selctx_x86_emit(ctx1, mv)
 }
@@ -1149,10 +1195,17 @@ type PinnedArgsX86 = struct {
  * order, collecting the physregs as the call's `uses`. The `abi` descriptor is
  * threaded from the emit driver so the SAME isel places a call's outgoing
  * arguments in SysV registers on x86-linux and in the Win64 registers on
- * x86_64-windows. An argument past its class's argument-register window needs
- * the stack-arg slot (the `B1-args` stop), and a variadic call the
- * register/stack split + the AL vector count (also `B1-args`) — `LCall`
- * carries neither, so both honest-stop.
+ * x86_64-windows. An argument past its class's argument-register window is
+ * STORED into the caller-owned stack-arg area instead (`MOutArgX86`, `B1-args`,
+ * closed 2026-07-29) and contributes no `use` — it travels through memory, so no
+ * physical register has to be kept live across the call for it.
+ *
+ * A variadic call still honest-stops. That stop is a GUARD, not a deferral:
+ * measured 2026-07-29, all eighteen call-construction sites in `lir/lower.tks`
+ * pass `variadic = false`, so no lowering this compiler performs can reach it —
+ * the register/stack split above is already what a variadic SysV call needs, but
+ * the AL vector count it must also set (and Win64's rule that a float vararg
+ * travels in BOTH files) would be ABI code with no caller to exercise it.
  *
  * @param AbiDescriptor abi  the target ABI register file (SysV or Win64)
  * @param SelCtxX86 ctx0  the context to extend
@@ -1162,27 +1215,95 @@ type PinnedArgsX86 = struct {
  */
 fn pin_args_x86(abi: AbiDescriptor, ctx0: SelCtxX86, args: []u32, variadic: bool) -> PinnedArgsX86 | error {
     if variadic {
-        return error { message = "isel x86-64: B1-args — a variadic call needs the register/stack split and the AL vector count; LCall carries no arity (0.3.1)" }
+        return error { message = "isel x86-64: B1-args — a variadic call needs the AL vector count (SysV) and the dual-file float rule (Win64); LCall carries no arity (0.3.1)" }
     }
-    mut ctx = ctx0
-    mut uses: []MReg = teko::list::empty()
+    pin_reg_args_x86(abi, store_stack_args_x86(abi, ctx0, args), args)
+}
+
+/**
+ * arg_slot_x86 — where argument `i` of `args` travels: the `ArgReg` its class's
+ * window yields (`ok` false meaning "this one overflows to the stack"), reading
+ * each argument's class out of the recorded `vinfo` and counting the two register
+ * files independently (`B1-fp`/`B1-args`). One shared classifier so
+ * `store_stack_args_x86` and `pin_reg_args_x86` cannot disagree about which
+ * arguments went where.
+ *
+ * @param AbiDescriptor abi  the target ABI register file
+ * @param SelCtxX86 ctx  the context whose `vinfo` records each argument's class
+ * @param []u32 args  the argument VRegs, in declaration order
+ * @param u64 i  the argument position to classify
+ * @return ArgReg  the assigned argument register, or `ok = false` for a stack argument
+ */
+fn arg_slot_x86(abi: AbiDescriptor, ctx: SelCtxX86, args: []u32, i: u64) -> ArgReg {
+    let cls = vinfo_get(ctx.vinfo, args[i]).reg_class
     mut gpr_n: u32 = 0
     mut fpr_n: u32 = 0
+    mut j: u64 = 0
+    loop {
+        if j >= i { break }
+        if vinfo_get(ctx.vinfo, args[j]).reg_class == MRegClass::FPR { fpr_n++ } else { gpr_n++ }
+        j++
+    }
+    arg_reg(abi, cls, if cls == MRegClass::FPR { fpr_n } else { gpr_n })
+}
+
+/**
+ * store_stack_args_x86 — the FIRST of the two argument-lowering passes
+ * (`B1-args`): store every argument that overflowed its class's register window
+ * into the caller-owned stack-arg area, in declaration order, as `MOutArgX86`.
+ *
+ * Run BEFORE the register pins on purpose. A stack argument's own value still
+ * needs a register to be stored FROM, and every physical argument register the
+ * second pass pins is live from its pin to the call — doing the memory traffic
+ * first means the stores compete with as few fixed intervals as possible.
+ *
+ * @param AbiDescriptor abi  the target ABI register file
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param []u32 args  the argument VRegs, in declaration order
+ * @return SelCtxX86  the advanced context
+ */
+fn store_stack_args_x86(abi: AbiDescriptor, ctx0: SelCtxX86, args: []u32) -> SelCtxX86 {
+    mut ctx = ctx0
+    mut stack_n: u32 = 0
     mut i: u64 = 0
     loop {
         if i >= args.len { break }
-        let a = args[i]
-        let info = vinfo_get(ctx.vinfo, a)
-        let is_fpr = info.reg_class == MRegClass::FPR
-        let n = if is_fpr { fpr_n } else { gpr_n }
-        let slot = arg_reg(abi, info.reg_class, n)
-        if !slot.ok {
-            return error { message = "isel x86-64: B1-args — a call argument past its class's argument-register window needs the stack-arg slot (0.3.1)" }
+        if !arg_slot_x86(abi, ctx, args, i).ok {
+            let info = vinfo_get(ctx.vinfo, args[i])
+            ctx = selctx_x86_emit(ctx, out_arg_x86(arg_slot_size_x86(info.reg_class, info.wide), vreg(args[i], info.reg_class), stack_n))
+            stack_n++
         }
-        let mv = if is_fpr { fmov_x86(slot.reg, vreg(a, MRegClass::FPR), info.wide) } else { mov_x86(slot.reg, vreg(a, MRegClass::GPR), info.wide) }
-        ctx = selctx_x86_emit(ctx, mv)
-        uses = teko::list::push(uses, slot.reg)
-        if is_fpr { fpr_n++ } else { gpr_n++ }
+        i++
+    }
+    ctx
+}
+
+/**
+ * pin_reg_args_x86 — the SECOND argument-lowering pass: move every argument that
+ * DID fit its class's window into the physical register `arg_reg` named for it,
+ * collecting those physregs as the call's `uses` so the regalloc keeps them live
+ * to the call. A stack argument is skipped here — `store_stack_args_x86` already
+ * placed it, and it contributes no register use.
+ *
+ * @param AbiDescriptor abi  the target ABI register file
+ * @param SelCtxX86 ctx0  the context to extend (stack arguments already stored)
+ * @param []u32 args  the argument VRegs, in declaration order
+ * @return PinnedArgsX86  the advanced context and the pinned physregs
+ */
+fn pin_reg_args_x86(abi: AbiDescriptor, ctx0: SelCtxX86, args: []u32) -> PinnedArgsX86 {
+    mut ctx = ctx0
+    mut uses: []MReg = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= args.len { break }
+        let slot = arg_slot_x86(abi, ctx, args, i)
+        if slot.ok {
+            let info = vinfo_get(ctx.vinfo, args[i])
+            let is_fpr = info.reg_class == MRegClass::FPR
+            let mv = if is_fpr { fmov_x86(slot.reg, vreg(args[i], MRegClass::FPR), info.wide) } else { mov_x86(slot.reg, vreg(args[i], MRegClass::GPR), info.wide) }
+            ctx = selctx_x86_emit(ctx, mv)
+            uses = teko::list::push(uses, slot.reg)
+        }
         i++
     }
     PinnedArgsX86 { ctx = ctx; uses = uses }

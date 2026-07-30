@@ -380,6 +380,63 @@ pub type MStoreX86 = struct {
 }
 
 /**
+ * MOutArgX86 — store one OUTGOING call argument into the caller-owned stack-arg
+ * area (`mov [rsp + out_arg_base + 8*index], src`, resolved once the frame
+ * layout is known), the selection of an argument past its class's
+ * argument-register window (`B1-args`). Both x86-64 ABIs place such an argument
+ * at a fixed offset from the caller's RSP AT THE CALL — SysV from RSP itself,
+ * Win64 from just above the 32-byte shadow area — so the offset is a frame
+ * concern the machine IR carries only as an INDEX, exactly as `MFrameAddrX86`
+ * carries a slot index rather than a resolved displacement.
+ *
+ * @since #386 B1-args
+ */
+pub type MOutArgX86 = struct {
+    /**
+     * size — the transfer width of the stored argument (its own recorded
+     * machine width, matching what the register path would have moved).
+     */
+    size: MMemSizeX86
+    /**
+     * src — the register holding the argument value.
+     */
+    src: MReg
+    /**
+     * index — the argument's position in the stack-arg area, counting only the
+     * arguments that overflowed a register window (0 is the first such).
+     */
+    index: u32
+}
+
+/**
+ * MInArgX86 — load one INCOMING parameter out of the caller-owned stack-arg
+ * area (`mov dst, [rsp + in_arg_base + 8*index]`, resolved once the frame layout
+ * is known), the selection of an `LParam` past its class's argument-register
+ * window (`B1-args`). Addressed from RSP rather than RBP on purpose: the
+ * displacement the frame layout resolves already accounts for the return
+ * address, the saved RBP, the callee-saved pushes and the `sub rsp` region, so a
+ * function receiving stack parameters needs no frame pointer and is NOT forced
+ * to become framed.
+ *
+ * @since #386 B1-args
+ */
+pub type MInArgX86 = struct {
+    /**
+     * size — the transfer width of the loaded parameter.
+     */
+    size: MMemSizeX86
+    /**
+     * dst — the destination register the parameter is written to.
+     */
+    dst: MReg
+    /**
+     * index — the parameter's position in the stack-arg area, counting only the
+     * parameters that overflowed a register window (0 is the first such).
+     */
+    index: u32
+}
+
+/**
  * MFrameAddrX86 — the abstract address of a reserved frame slot
  * (`lea dst, [rsp+off]`, resolved once B1 finalizes the frame layout), the
  * selection of `LAlloca`. The base-RSP `lea` always emits a SIB byte at
@@ -643,11 +700,13 @@ pub type MCvtX86 = struct {
  * colors them) and physical-register pins (the SysV ABI); it holds no encoded
  * bytes. The SSE float family (`MFAluX86`/`MFMovX86`/`MFCmpX86`/`MSetPX86`/
  * `MCvtX86`) closed the `B1-fp` honest-stop (2026-07-29), mirroring arm64's
- * float cases over the parallel two-address x86 shape (§4.1/§4.2).
+ * float cases over the parallel two-address x86 shape (§4.1/§4.2), and
+ * `MOutArgX86`/`MInArgX86` closed `B1-args`, the stack half of both ABIs'
+ * argument passing.
  *
- * @since #386 B1-2, B1-fp
+ * @since #386 B1-2, B1-fp, B1-args
  */
-pub type MInstX86 = variant MMovImmX86 | MMovX86 | MAluRmX86 | MImulX86 | MDivSeqX86 | MShiftX86 | MCmpX86 | MSetccX86 | MJccX86 | MNegX86 | MNotX86 | MLoadX86 | MStoreX86 | MFrameAddrX86 | MLeaRipX86 | MJmpX86 | MCallX86 | MCallIndX86 | MRetX86 | MFAluX86 | MFMovX86 | MFCmpX86 | MSetPX86 | MCvtX86
+pub type MInstX86 = variant MMovImmX86 | MMovX86 | MAluRmX86 | MImulX86 | MDivSeqX86 | MShiftX86 | MCmpX86 | MSetccX86 | MJccX86 | MNegX86 | MNotX86 | MLoadX86 | MStoreX86 | MFrameAddrX86 | MLeaRipX86 | MJmpX86 | MCallX86 | MCallIndX86 | MRetX86 | MFAluX86 | MFMovX86 | MFCmpX86 | MSetPX86 | MCvtX86 | MOutArgX86 | MInArgX86
 
 /**
  * MBlockX86 — an x86-64 machine basic block: its id, its block-args (the
@@ -945,6 +1004,30 @@ pub fn load_x86(size: MMemSizeX86, sign: bool, dst: MReg, mem: MMem) -> MInstX86
  */
 pub fn store_x86(size: MMemSizeX86, src: MReg, mem: MMem) -> MInstX86 {
     MStoreX86 { size = size; src = src; mem = mem }
+}
+
+/**
+ * out_arg_x86 — an outgoing stack-argument store instruction (MOutArgX86).
+ *
+ * @param MMemSizeX86 size  the transfer width of the stored argument
+ * @param MReg src  the register holding the argument value
+ * @param u32 index  the argument's position in the stack-arg area
+ * @return MInstX86  the built instruction
+ */
+pub fn out_arg_x86(size: MMemSizeX86, src: MReg, index: u32) -> MInstX86 {
+    MOutArgX86 { size = size; src = src; index = index }
+}
+
+/**
+ * in_arg_x86 — an incoming stack-parameter load instruction (MInArgX86).
+ *
+ * @param MMemSizeX86 size  the transfer width of the loaded parameter
+ * @param MReg dst  the destination register
+ * @param u32 index  the parameter's position in the stack-arg area
+ * @return MInstX86  the built instruction
+ */
+pub fn in_arg_x86(size: MMemSizeX86, dst: MReg, index: u32) -> MInstX86 {
+    MInArgX86 { size = size; dst = dst; index = index }
 }
 
 /**
@@ -1516,6 +1599,26 @@ fn print_store_x86(i: MStoreX86) -> str {
 }
 
 /**
+ * print_out_arg_x86 — `mov.<size> [outarg #index], src`.
+ *
+ * @param MOutArgX86 i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_out_arg_x86(i: MOutArgX86) -> str {
+    teko::str::concat("mov.", mem_size_name_x86(i.size), " [outarg #", teko::u64_to_str(i.index to u64), "], ", reg_ref_x86(i.src))
+}
+
+/**
+ * print_in_arg_x86 — `mov.<size> dst, [inarg #index]`.
+ *
+ * @param MInArgX86 i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_in_arg_x86(i: MInArgX86) -> str {
+    teko::str::concat("mov.", mem_size_name_x86(i.size), " ", reg_ref_x86(i.dst), ", [inarg #", teko::u64_to_str(i.index to u64), "]")
+}
+
+/**
  * print_frame_addr_x86 — `lea dst, [frame #slot]`.
  *
  * @param MFrameAddrX86 i  the instruction to render
@@ -1616,6 +1719,8 @@ fn print_minst_x86(i: MInstX86) -> str {
         MFCmpX86 as x => print_fcmp_x86(x)
         MSetPX86 as x => print_setp_x86(x)
         MCvtX86 as x => print_cvt_x86(x)
+        MOutArgX86 as x => print_out_arg_x86(x)
+        MInArgX86 as x => print_in_arg_x86(x)
     }
 }
 

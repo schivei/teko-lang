@@ -93,6 +93,21 @@ pub type FrameLayoutX86 = struct {
      * callee-saved) is NOT frameless when this is true.
      */
     call_align: bool
+    /**
+     * out_arg_base — the RSP-relative byte offset of the FIRST outgoing
+     * stack-argument slot (`B1-args`): 0 under SysV, and `abi.shadow_space`
+     * (32) under Win64, whose stack arguments begin just above the
+     * caller-reserved shadow area. `MOutArgX86{index}` resolves to
+     * `mov [rsp + out_arg_base + 8*index], src`.
+     */
+    out_arg_base: u32
+    /**
+     * fpr_save_base — the RSP-relative byte offset of the FIRST callee-saved XMM
+     * save slot (`B3-xmm-callee-saved`); each `saved_fpr` entry takes 16 bytes
+     * from there, ascending. Sits just above the argument-passing region and
+     * below the local slots, and is 16-aligned so `movaps` is legal.
+     */
+    fpr_save_base: u32
 }
 
 /**
@@ -890,6 +905,63 @@ fn encode_store_x86(i: MStoreX86) -> EncInstX86 {
 }
 
 /**
+ * RSP_BASE_X86 — the physical RSP register as a memory-operand base, the one
+ * base every frame-relative access in this file addresses through (frame slots,
+ * the callee-saved XMM saves, and both halves of the stack-argument area). A
+ * flat-POD `MReg` aggregate const (#594 crumb 9b).
+ */
+const RSP_BASE_X86: MReg = preg(X86_REG_RSP_ID, MRegClass::GPR)
+
+/**
+ * in_arg_base_x86 — the RSP-relative byte offset of the FIRST incoming
+ * stack-argument slot (`B1-args`). The caller placed stack argument `j` at
+ * `entry_rsp + 8 + 8*j` (past the return address `call` pushed), and the prologue
+ * has since moved RSP down by `push rbp` (8) + one push per callee-saved GPR +
+ * the `sub rsp` region — so a FRAMED function reads it at
+ * `16 + 8*n_saved + size + 8*j` and a frameless one at `8 + 8*j`. Resolved here
+ * rather than at isel because only the finished layout knows those three numbers.
+ *
+ * @param FrameLayoutX86 layout  the enclosing function's resolved frame
+ * @return u32  the RSP-relative offset of incoming stack-argument slot 0
+ */
+fn in_arg_base_x86(layout: FrameLayoutX86) -> u32 {
+    if !frame_is_framed_x86(layout) { return X86_GPR_BYTES }
+    let n_saved = layout.saved_gpr.len to u32
+    (2 to u32) * X86_GPR_BYTES + (n_saved * X86_GPR_BYTES) + layout.size
+}
+
+/**
+ * encode_out_arg_x86 — resolve `MOutArgX86{size, src, index}` to
+ * `mov [rsp + out_arg_base + 8*index], src` at the argument's own transfer width
+ * (an SSE `movsd`/`movss` for a float argument), reusing `store_memop_x86` so a
+ * stack argument is encoded by exactly the code every other store goes through
+ * (`B1-args`).
+ *
+ * @param FrameLayoutX86 layout  the enclosing function's resolved frame
+ * @param MOutArgX86 i  the outgoing stack-argument store (source physical)
+ * @return EncInstX86  the encoded instruction
+ */
+fn encode_out_arg_x86(layout: FrameLayoutX86, i: MOutArgX86) -> EncInstX86 {
+    let off = layout.out_arg_base + (i.index * X86_GPR_BYTES)
+    emit_mem_op_x86(store_memop_x86(i.size), i.src, MMem { base = RSP_BASE_X86; offset = off to i32 })
+}
+
+/**
+ * encode_in_arg_x86 — resolve `MInArgX86{size, dst, index}` to
+ * `mov dst, [rsp + in_arg_base + 8*index]` at the parameter's own transfer width,
+ * reusing `load_memop_x86`'s zero-extending descriptor (`sign = false`, matching
+ * every other load this backend emits) (`B1-args`).
+ *
+ * @param FrameLayoutX86 layout  the enclosing function's resolved frame
+ * @param MInArgX86 i  the incoming stack-parameter load (destination physical)
+ * @return EncInstX86  the encoded instruction
+ */
+fn encode_in_arg_x86(layout: FrameLayoutX86, i: MInArgX86) -> EncInstX86 {
+    let off = in_arg_base_x86(layout) + (i.index * X86_GPR_BYTES)
+    emit_mem_op_x86(load_memop_x86(i.size, false), i.dst, MMem { base = RSP_BASE_X86; offset = off to i32 })
+}
+
+/**
  * encode_frame_addr_x86 — resolve `MFrameAddrX86{dst, slot}` to
  * `lea dst, [rsp + slot_offsets[slot]]` (`REX.W 8D /r`). The RSP base (id 4)
  * forces a SIB byte `0x24` (emitted by `push_mem_operand_x86`), the single most
@@ -901,7 +973,7 @@ fn encode_store_x86(i: MStoreX86) -> EncInstX86 {
  */
 fn encode_frame_addr_x86(layout: FrameLayoutX86, i: MFrameAddrX86) -> EncInstX86 {
     let off = layout.slot_offsets[i.slot]
-    let mem = MMem { base = preg(X86_REG_RSP_ID, MRegClass::GPR); offset = off to i32 }
+    let mem = MMem { base = RSP_BASE_X86; offset = off to i32 }
     mut b = push_rex_x86(teko::list::empty(), true, reg_ext_x86(i.dst), false, reg_ext_x86(mem.base))
     b = push_byte_x86(b, X86_OP_LEA)
     plain_inst_x86(push_mem_operand_x86(b, reg_low3_x86(i.dst), mem))
@@ -1033,6 +1105,8 @@ pub fn encode_inst_x86(layout: FrameLayoutX86, inst: MInstX86) -> EncInstX86 | e
         MFCmpX86 as x => encode_fcmp_x86(x)
         MSetPX86 as x => encode_setp_x86(x)
         MCvtX86 as x => encode_cvt_x86(x)
+        MOutArgX86 as x => encode_out_arg_x86(layout, x)
+        MInArgX86 as x => encode_in_arg_x86(layout, x)
     }
 }
 
@@ -1134,24 +1208,27 @@ fn shift_slot_offsets_x86(offsets: []u32, delta: u32) -> []u32 {
 }
 
 /**
- * frame_sub_size_x86 — the `sub rsp,#N` amount that reserves the local slot
- * region while keeping RSP 16-aligned at every call boundary. A frameless
- * function (no slots AND no callee-saved) reserves nothing (0). Otherwise the
- * amount rounds `slots_size + 8*n_saved` up to 16 and subtracts the
- * callee-saved push region back out, so `push rbp` (RSP ≡ 0 mod 16) followed by
- * `n_saved` pushes then `sub rsp,#N` lands RSP ≡ 0 mod 16 (the SysV rule that
- * `(rsp+8)` is 16-aligned at every callee entry). The result can legitimately be
- * 0 with an EVEN callee-saved count and no slots (the pushes alone realign) — a
- * framed function is still detected by `size>0 OR n_saved>0`, not by `size>0`.
+ * frame_sub_size_x86 — the `sub rsp,#N` amount that reserves everything sitting
+ * BELOW the callee-saved pushes — the local slot region, the callee-saved XMM save
+ * region and the argument-passing region — while keeping RSP 16-aligned at every
+ * call boundary. A frameless function (nothing to reserve AND no callee-saved
+ * push) reserves nothing (0). Otherwise the amount rounds
+ * `reserved + 8*n_pushed` up to 16 and subtracts the push region back out, so
+ * `push rbp` (RSP ≡ 0 mod 16) followed by `n_pushed` pushes then `sub rsp,#N`
+ * lands RSP ≡ 0 mod 16 (the rule that `(rsp+8)` is 16-aligned at every callee
+ * entry). The result can legitimately be 0 with an EVEN push count and nothing to
+ * reserve (the pushes alone realign) — a framed function is still detected by
+ * `size>0 OR n_saved>0`, not by `size>0`.
  *
- * @param u32 slots_size  the 16-rounded local slot-region size
- * @param u32 n_saved  the callee-saved register count (GPR + FPR)
+ * @param u32 reserved  the 16-rounded bytes to reserve below the push region
+ * @param u32 n_pushed  the PUSHED callee-saved register count (GPRs only — an XMM
+ *                      save lives inside `reserved` instead)
  * @return u32  the `sub rsp` amount (0 for a frameless function)
  */
-fn frame_sub_size_x86(slots_size: u32, n_saved: u32) -> u32 {
-    let framed = (slots_size > (0 to u32)) || (n_saved > (0 to u32))
+fn frame_sub_size_x86(reserved: u32, n_pushed: u32) -> u32 {
+    let framed = (reserved > (0 to u32)) || (n_pushed > (0 to u32))
     if !framed { return 0 to u32 }
-    align_up(slots_size + (n_saved * X86_GPR_BYTES), X86_STACK_ALIGN) - (n_saved * X86_GPR_BYTES)
+    align_up(reserved + (n_pushed * X86_GPR_BYTES), X86_STACK_ALIGN) - (n_pushed * X86_GPR_BYTES)
 }
 
 /**
@@ -1314,19 +1391,88 @@ fn shadow_bytes_x86(abi: AbiDescriptor, f: MFuncX86) -> u32 {
 }
 
 /**
+ * out_arg_bytes_x86 — the byte size of the outgoing stack-argument region a
+ * function's frame must reserve (`B1-args`): 8 bytes per slot up to the highest
+ * `MOutArgX86{index}` the block stream contains, rounded up to the 16-byte stack
+ * alignment, or 0 when the function passes every argument in a register. Derived
+ * by SCANNING the finished stream rather than carried on `MFuncX86`, exactly as
+ * the callee-saved set and the shadow reservation already are, so isel stays free
+ * of frame arithmetic.
+ *
+ * @param MFuncX86 f  the fully-physical function
+ * @return u32  the 16-aligned outgoing stack-argument region size in bytes
+ */
+fn out_arg_bytes_x86(f: MFuncX86) -> u32 {
+    let n = max_out_arg_slots_x86(f)
+    if n == (0 to u32) { return 0 to u32 }
+    align_up(n * X86_GPR_BYTES, X86_STACK_ALIGN)
+}
+
+/**
+ * max_out_arg_slots_x86 — how many outgoing stack-argument slots the function's
+ * widest call needs: one past the highest `MOutArgX86{index}` in the stream, or 0
+ * when there is none.
+ *
+ * @param MFuncX86 f  the fully-physical function
+ * @return u32  the outgoing stack-argument slot count
+ */
+fn max_out_arg_slots_x86(f: MFuncX86) -> u32 {
+    mut slots: u32 = 0
+    mut bi: u64 = 0
+    loop {
+        if bi >= f.blocks.len { break }
+        let b = f.blocks[bi]
+        mut ii: u64 = 0
+        loop {
+            if ii >= b.insts.len { break }
+            let need = out_arg_slots_of_inst_x86(b.insts[ii])
+            if need > slots { slots = need }
+            ii++
+        }
+        bi++
+    }
+    slots
+}
+
+/**
+ * out_arg_slots_of_inst_x86 — the outgoing stack-argument slot count one
+ * instruction implies: `index + 1` for an `MOutArgX86`, 0 for everything else.
+ *
+ * @param MInstX86 i  the instruction to inspect
+ * @return u32  the implied slot count
+ */
+fn out_arg_slots_of_inst_x86(i: MInstX86) -> u32 {
+    match i {
+        MOutArgX86 as x => x.index + (1 to u32)
+        _ => 0 to u32
+    }
+}
+
+/**
  * compute_frame_layout_x86 — build a function's `FrameLayoutX86`: re-derive the
  * callee-saved save-set by scanning the physical `MFuncX86`, lay out the frame
  * slots honoring each `LAlloca`'s alignment (the neutral `compute_slot_offsets`),
- * fold in the Win64 caller-reserved shadow space (`shadow_bytes_x86` — 32 for a
- * calling Win64 function, 0 for every other ABI so the frame bytes stay
- * byte-identical), size the `sub rsp` region for SysV 16-byte call-boundary
- * alignment, and shift every slot offset above the callee-saved push region AND
- * the shadow region so `MFrameAddrX86` resolves to `lea dst, [rsp+off]`. A pure
- * side-table pass — it never mutates the block stream, so the interp oracle stays
- * valid on the pre-encode function. The x86 mirror of arm64's
+ * reserve the ARGUMENT-PASSING region at the very bottom of the frame — the
+ * Win64 caller-reserved shadow space (`shadow_bytes_x86` — 32 for a calling Win64
+ * function, 0 for every other ABI) plus the outgoing stack arguments
+ * (`out_arg_bytes_x86`, `B1-args`) — size the `sub rsp` region for 16-byte
+ * call-boundary alignment, and shift every slot offset above that
+ * argument-passing region so `MFrameAddrX86` resolves to `lea dst, [rsp+off]`.
+ *
+ * The argument-passing region sits at RSP and NOTHING may sit below it: both
+ * ABIs define a stack argument's address relative to the caller's RSP at the
+ * call, and Win64 lets the callee write the 32 shadow bytes at that same RSP.
+ * That is why the callee-saved pushes now precede the `sub rsp` (they used to
+ * follow it, which put them at RSP and, under Win64, in the callee's way) — the
+ * displacement is identical either way, so a function reserving no argument
+ * region and saving no register keeps byte-identical bytes.
+ *
+ * A pure side-table pass — it never mutates the block stream, so the interp
+ * oracle stays valid on the pre-encode function. The x86 mirror of arm64's
  * `compute_frame_layout`; frames beyond the imm32 `sub` field are caught at
- * prologue emission (`B1-bigframe`, near-N/A), not here. 32 is 16-aligned, so the
- * shadow reservation never perturbs the SysV alignment residue (§4.2).
+ * prologue emission (`B1-bigframe`, near-N/A), not here. Both 32 and the
+ * 16-rounded outgoing region are 16-aligned, so neither reservation perturbs the
+ * alignment residue (§4.2).
  *
  * @param AbiDescriptor abi  the register file (callee-saved partition + shadow space)
  * @param MFuncX86 f  the fully-physical function
@@ -1335,16 +1481,19 @@ fn shadow_bytes_x86(abi: AbiDescriptor, f: MFuncX86) -> u32 {
 pub fn compute_frame_layout_x86(abi: AbiDescriptor, f: MFuncX86) -> FrameLayoutX86 {
     let saved = collect_callee_saved_x86(abi, f)
     let slots = compute_slot_offsets(f.frame)
-    let n_saved = (saved.gpr.len + saved.fpr.len) to u32
     let shadow = shadow_bytes_x86(abi, f)
-    let size = frame_sub_size_x86(slots.slots_size + shadow, n_saved)
-    let slot_offsets = shift_slot_offsets_x86(slots.offsets, (n_saved * X86_GPR_BYTES) + shadow)
+    let arg_region = shadow + out_arg_bytes_x86(f)
+    let fpr_region = (saved.fpr.len to u32) * X86_XMM_SAVE_BYTES
+    let size = frame_sub_size_x86(slots.slots_size + arg_region + fpr_region, (saved.gpr.len to u32))
+    let slot_offsets = shift_slot_offsets_x86(slots.offsets, arg_region + fpr_region)
     FrameLayoutX86 {
         size = size
         saved_gpr = saved.gpr
         saved_fpr = saved.fpr
         slot_offsets = slot_offsets
         call_align = needs_call_align_x86(f)
+        out_arg_base = shadow
+        fpr_save_base = arg_region
     }
 }
 
@@ -1440,10 +1589,89 @@ fn emit_sub_rsp_x86(buf: []byte, amount: u32) -> []byte | error {
 }
 
 /**
+ * emit_add_rsp_x86 — append the stack-release `add rsp, #amount`, the teardown
+ * counterpart of `emit_sub_rsp_x86` and its exact encoding mirror (same `48 83`/
+ * `48 81` group-1 opcodes, `/0` instead of `/5`): nothing for a zero amount, the
+ * short imm8 form under 128, else the wide imm32 form. It raises no
+ * `B1-bigframe` — an amount the prologue's `sub` already accepted fits here by
+ * construction, so this takes the imm32 form for anything larger rather than
+ * duplicating a guard that cannot fire (`B1-args`).
+ *
+ * @param []byte buf  the buffer to extend
+ * @param u32 amount  the byte amount to add back to RSP
+ * @return []byte  the extended buffer
+ */
+fn emit_add_rsp_x86(buf: []byte, amount: u32) -> []byte {
+    if amount == (0 to u32) { return buf }
+    if amount < X86_SUB_RSP_IMM8_MAX {
+        let b = push_byte_x86(push_byte_x86(push_byte_x86(buf, REX_W_PREFIX), X86_OP_GRP1_IMM8), X86_MODRM_ADD_RSP)
+        return push_byte_x86(b, amount)
+    }
+    let b = push_byte_x86(push_byte_x86(push_byte_x86(buf, REX_W_PREFIX), X86_OP_GRP1_IMM32), X86_MODRM_ADD_RSP)
+    emit_u32_le(b, amount)
+}
+
+/**
+ * emit_saved_fpr_stores_x86 — save (or, when `reload`, restore) every
+ * callee-saved XMM the frame lists, one `movaps [rsp+off], xmm` / `movaps xmm,
+ * [rsp+off]` per register at its own 16-byte slot in the frame's XMM-save region
+ * (`fpr_save_base + 16*k`, ascending id order). This is the whole content of the
+ * former `B3-xmm-callee-saved` honest-stop: Win64 declares XMM6..XMM15
+ * nonvolatile, so a float value the allocator parked in one of them across a call
+ * must be preserved by us, and `movaps` (not `movsd`) is the right instruction
+ * because the ABI's promise covers all 128 bits, not the scalar low lane our own
+ * code happens to use. SysV lists every XMM as caller-saved, so `saved_fpr` is
+ * empty there and this appends nothing — the SysV bytes stay identical.
+ *
+ * The XMM-save region is 16-aligned by construction: the frame's total
+ * displacement is a multiple of 16 (`frame_sub_size_x86`) and the region sits
+ * above the likewise 16-aligned argument-passing region, so `movaps`' alignment
+ * requirement is met without a runtime check.
+ *
+ * @param []byte buf  the buffer to extend
+ * @param FrameLayoutX86 layout  the resolved frame
+ * @param bool reload  true to emit the restoring loads, false the saving stores
+ * @return []byte  `buf` followed by the save/restore encodings
+ */
+fn emit_saved_fpr_stores_x86(buf: []byte, layout: FrameLayoutX86, reload: bool) -> []byte {
+    mut b = buf
+    mut i: u64 = 0
+    loop {
+        if i >= layout.saved_fpr.len { break }
+        let off = layout.fpr_save_base + ((i to u32) * X86_XMM_SAVE_BYTES)
+        b = append_bytes(b, emit_movaps_frame_x86(layout.saved_fpr[i], off, reload).bytes)
+        i++
+    }
+    b
+}
+
+/**
+ * emit_movaps_frame_x86 — one `movaps` between XMM register `id` and the frame
+ * byte offset `off` from RSP: the store form (`0F 29`) or, when `reload`, the load
+ * form (`0F 28`). Routed through `emit_mem_op_x86` so the RSP base's mandatory SIB
+ * byte and the disp8/disp32 choice are the SAME code every other frame access
+ * uses (`B3-xmm-callee-saved`).
+ *
+ * @param u32 id  the XMM register id to save or restore
+ * @param u32 off  the RSP-relative byte offset of its 16-byte slot
+ * @param bool reload  true for the load form, false for the store form
+ * @return EncInstX86  the encoded instruction
+ */
+fn emit_movaps_frame_x86(id: u32, off: u32, reload: bool) -> EncInstX86 {
+    let opcode = if reload { X86_OP_MOVAPS_LOAD } else { X86_OP_MOVAPS_STORE }
+    let form = X86MemOp { op66 = false; mandatory_prefix = X86_NO_PREFIX; rexw = false; two_byte = true; opcode = opcode; byte_reg = false }
+    emit_mem_op_x86(form, preg(id, MRegClass::FPR), MMem { base = RSP_BASE_X86; offset = off to i32 })
+}
+
+/**
  * emit_saved_pushes_x86 — append one `push r64` per callee-saved GPR in
- * ascending id order (SysV has no callee-saved FPRs, so `saved_fpr` is always
- * empty and only GPRs are pushed). The pushes follow `sub rsp,#N`, so RSP ends
- * below both the slot region and these saves.
+ * ascending id order. Only GPRs are PUSHED: a callee-saved XMM is 16 bytes wide
+ * and needs an aligned `movaps` into the frame's own XMM-save region instead
+ * (`emit_saved_fpr_stores_x86`), which the `push` family cannot express. The
+ * pushes PRECEDE `sub rsp,#N`, so RSP ends
+ * below both these saves and the slot region — leaving the frame's lowest bytes
+ * (at RSP) free for the argument-passing region both ABIs address from there
+ * (`B1-args`).
  *
  * @param []byte buf  the buffer to extend
  * @param FrameLayoutX86 layout  the resolved frame
@@ -1461,53 +1689,49 @@ fn emit_saved_pushes_x86(buf: []byte, layout: FrameLayoutX86) -> []byte {
 }
 
 /**
- * honest_xmm_callee_saved_x86 — the named `B3-xmm-callee-saved` honest-stop for a
- * frame that would push a callee-saved XMM. Win64 preserves XMM6-15 across a
- * call, so an FP value live across a call lands in `saved_fpr` and needs a
- * `movaps [rsp+off], xmm` spill/reload — UNIMPLEMENTED (`emit_saved_pushes_x86` is
- * GPR-only). The integer corpus allocates no XMM (FP is the `B3-fp` stop), so
- * `saved_fpr` is empty in practice; a non-empty `saved_fpr` stops here rather
- * than mis-emitting (§2.2, rides `B3-fp`).
- *
- * @return error  the `B3-xmm-callee-saved` named honest-stop
- */
-fn honest_xmm_callee_saved_x86() -> error {
-    error { message = "B3-xmm-callee-saved: callee-saved XMM6-15 save path (movaps) unimplemented (integer corpus allocates no XMM; rides B3-fp)" }
-}
-
-/**
  * emit_prologue_x86 — the SysV/Win64 function entry sequence, or an empty list for
- * a frameless function: `push rbp` ; `mov rbp,rsp` ; `sub rsp,#N` (elided when
- * `N==0`, and under Win64 `#N` folds in the 32-byte shadow space when the function
- * calls) ; one `push` per callee-saved GPR (ascending). The frame size is
- * pre-aligned so RSP is 16-aligned at every call boundary. A frame too large for
- * the imm32 `sub` field raises `B1-bigframe`; a callee-saved XMM (a non-empty
- * `saved_fpr`, Win64-only) raises `B3-xmm-callee-saved` rather than mis-emitting.
- * The x86 mirror of arm64's `emit_prologue`.
+ * a frameless function: `push rbp` ; `mov rbp,rsp` ; one `push` per callee-saved
+ * GPR (ascending) ; `sub rsp,#N` (elided when `N==0`; `#N` covers the local slot
+ * region plus the bottom argument-passing region — the Win64 shadow space and the
+ * outgoing stack arguments, `B1-args`). The frame size is pre-aligned so RSP is
+ * 16-aligned at every call boundary. A frame too large for the imm32 `sub` field
+ * raises `B1-bigframe`.
+ *
+ * The pushes precede the `sub` so the argument-passing region lands at RSP, which
+ * is where both ABIs define stack arguments to be and where a Win64 callee writes
+ * the shadow bytes; the total displacement is unchanged, so a function that
+ * reserves no argument region and saves no register emits byte-identical bytes.
+ *
+ * A callee-saved XMM (a non-empty `saved_fpr`, Win64-only) is saved into the slot
+ * region by `emit_saved_fpr_stores_x86` — the `B3-xmm-callee-saved` honest-stop
+ * closed 2026-07-29 alongside the float family it rode. The x86 mirror of arm64's
+ * `emit_prologue`.
  *
  * @param FrameLayoutX86 layout  the resolved frame
  * @return []byte | error  the prologue bytes, or a named honest-stop
- * @throws  `B1-bigframe` when the `sub rsp` amount overruns the imm32 field, or
- *          `B3-xmm-callee-saved` when a callee-saved XMM must be spilled
+ * @throws  `B1-bigframe` when the `sub rsp` amount overruns the imm32 field
  */
 pub fn emit_prologue_x86(layout: FrameLayoutX86) -> []byte | error {
     if !frame_is_framed_x86(layout) {
         let none: []byte = teko::list::empty()
         return none
     }
-    if layout.saved_fpr.len > (0 to u64) { return honest_xmm_callee_saved_x86() }
     let after_rbp = emit_mov_rbp_rsp_x86(emit_push_reg_x86(teko::list::empty(), X86_REG_RBP_ID))
-    let after_sub = match emit_sub_rsp_x86(after_rbp, layout.size) { []byte as w => w; error as e => return e }
-    emit_saved_pushes_x86(after_sub, layout)
+    let after_pushes = emit_saved_pushes_x86(after_rbp, layout)
+    let after_sub = match emit_sub_rsp_x86(after_pushes, layout.size) { []byte as w => w; error as e => return e }
+    emit_saved_fpr_stores_x86(after_sub, layout, false)
 }
 
 /**
- * emit_epilogue_x86 — the SysV frame-teardown sequence (LIFO), or an empty list
- * for a frameless function: `pop` each callee-saved GPR in REVERSE push order,
- * then `leave` (`C9`, i.e. `mov rsp,rbp ; pop rbp`), which discards the slot
- * region and restores RBP in one byte. The `ret` itself is appended by the
- * function encoder immediately after these bytes. `leave` handles every frame
- * size natively (no imm), so unlike the prologue this never raises
+ * emit_epilogue_x86 — the SysV/Win64 frame-teardown sequence (LIFO), or an empty
+ * list for a frameless function: reload each callee-saved XMM from its slot,
+ * `add rsp,#N` to discard the slot + argument-passing region (emitted ONLY when
+ * there is a `pop` after it that needs RSP back at the top of the pushed region —
+ * with no callee-saved GPR, the following `leave` discards that region by itself),
+ * `pop` each callee-saved GPR in REVERSE push order, then `leave` (`C9`, i.e.
+ * `mov rsp,rbp ; pop rbp`), which restores RBP in one byte. The `ret` itself is
+ * appended by the function encoder immediately after these bytes. `add`/`leave`
+ * handle every frame size natively, so unlike the prologue this never raises
  * `B1-bigframe`. The x86 mirror of arm64's `emit_epilogue`.
  *
  * @param FrameLayoutX86 layout  the resolved frame
@@ -1518,7 +1742,8 @@ fn emit_epilogue_x86(layout: FrameLayoutX86) -> []byte {
         let none: []byte = teko::list::empty()
         return none
     }
-    mut b: []byte = teko::list::empty()
+    let after_fpr = emit_saved_fpr_stores_x86(teko::list::empty(), layout, true)
+    mut b = if layout.saved_gpr.len > (0 to u64) { emit_add_rsp_x86(after_fpr, layout.size) } else { after_fpr }
     mut i: u64 = layout.saved_gpr.len
     loop {
         if i == (0 to u64) { break }

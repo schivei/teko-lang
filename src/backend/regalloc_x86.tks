@@ -35,7 +35,7 @@ const SHIFT_COUNT_REG_X86: MReg = preg(1, MRegClass::GPR)
 
 /**
  * inst_regs_x86 — decompose one `MInstX86` into its def/use registers, the x86
- * mirror of the neutral `inst_regs` over the 24-case `MInstX86` variant
+ * mirror of the neutral `inst_regs` over the 26-case `MInstX86` variant
  * (`minst_x86.tks:490`). Feeds the SAME register-abstract interval/scan core the
  * arm64 walk feeds, so the def/use table is the single source of truth both
  * `compute_intervals_x86` and `rewrite_inst_x86` read. Three x86-specific shapes
@@ -89,6 +89,8 @@ fn inst_regs_x86(inst: MInstX86) -> InstRegs {
         MFCmpX86 as x => ir_use(two_regs(x.a, x.b))
         MSetPX86 as x => ir_def(x.dst)
         MCvtX86 as x => ir_def_use(x.dst, one_reg(x.src))
+        MOutArgX86 as x => ir_use(one_reg(x.src))
+        MInArgX86 as x => ir_def(x.dst)
     }
 }
 
@@ -526,7 +528,7 @@ fn compute_intervals_x86(stream: []NumberedInstX86, order: []u32, reachable: []u
 
 /**
  * map_minst_x86 — a copy of `inst` with every `MReg` field replaced through
- * `table` (a flat per-case reconstruction over the 24-case variant, mirroring
+ * `table` (a flat per-case reconstruction over the 26-case variant, mirroring
  * `inst_regs_x86`'s dispatch, and the neutral `map_minst_regs`). `MCallX86`/
  * `MCallIndX86` map their `uses` element-wise, their `ret_reg`, and (indirect)
  * their `target`. This is the single point the x86 machine-IR's register-field
@@ -564,6 +566,8 @@ fn map_minst_x86(inst: MInstX86, table: []SubstEntry) -> MInstX86 {
         MFCmpX86 as x => fcmp_x86(subst_find(table, x.a), subst_find(table, x.b), x.dbl)
         MSetPX86 as x => setp_x86(subst_find(table, x.dst), x.is_np)
         MCvtX86 as x => cvt_x86(x.op, subst_find(table, x.dst), subst_find(table, x.src))
+        MOutArgX86 as x => out_arg_x86(x.size, subst_find(table, x.src), x.index)
+        MInArgX86 as x => in_arg_x86(x.size, subst_find(table, x.dst), x.index)
     }
 }
 
