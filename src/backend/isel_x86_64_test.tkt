@@ -876,13 +876,20 @@ fn xat_fconst(f0: lir::LFunc, bits: u64) -> lir::FreshVReg {
  * argument POSITION 1, so it belongs in RDX, and the per-file counter left it in
  * RCX while the MSVC-built callee wrote through whatever RDX happened to hold.
  *
+ * Every operand is spelled with its OWN register-file marker, the one
+ * `reg_ref_x86` prints: a virtual FPR is `%fN`, never `%N`. `pin_reg_args_x86`
+ * builds an argument move's destination AND its source from the one `is_fpr`
+ * decision, so an `fmov` whose source carried the GPR spelling was a text no
+ * selection could ever emit — a guard that failed on every host, not a
+ * platform difference.
+ *
  * @return void
  */
 fn xat_win64_call_args_number_both_files_by_shared_position() {
     let text = xat_dump_abi(WIN64, xat_mixed_class_call())
-    teko::assert::str_contains(text, "fmov.d %pf0, %0")
+    teko::assert::str_contains(text, "fmov.d %pf0, %f0")
     teko::assert::str_contains(text, "mov.q %p2, %1")
-    teko::assert::str_contains(text, "fmov.d %pf2, %2")
+    teko::assert::str_contains(text, "fmov.d %pf2, %f2")
     teko::assert::str_contains(text, "mov.q %p9, %3")
     teko::assert::str_contains(text, "mov.q [outarg #0], %4")
 }
@@ -893,13 +900,17 @@ fn xat_win64_call_args_number_both_files_by_shared_position() {
  * guardrail for the caller half: the same argument list keeps SysV's
  * XMM0/RDI/XMM1/RSI/RDX with no outgoing stack slot at all.
  *
+ * The float sources carry the `%fN` file marker for the same reason the Win64
+ * twin above does — the caller-side spelling is the printer's, not the
+ * fixture author's.
+ *
  * @return void
  */
 fn xat_sysv_call_args_keep_independent_per_file_counting() {
     let text = xat_dump_abi(SYSV64, xat_mixed_class_call())
-    teko::assert::str_contains(text, "fmov.d %pf0, %0")
+    teko::assert::str_contains(text, "fmov.d %pf0, %f0")
     teko::assert::str_contains(text, "mov.q %p7, %1")
-    teko::assert::str_contains(text, "fmov.d %pf1, %2")
+    teko::assert::str_contains(text, "fmov.d %pf1, %f2")
     teko::assert::str_contains(text, "mov.q %p6, %3")
     teko::assert::str_contains(text, "mov.q %p2, %4")
     teko::assert::is_false(teko::runtime::str_contains(text, "[outarg #"))
