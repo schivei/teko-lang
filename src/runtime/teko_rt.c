@@ -28,14 +28,15 @@
 #ifdef _WIN32
 #include "../win32_compat.h"  // chdir→_chdir, mkdir, getcwd, setenv, dirent shim, tk_win32_spawnvp
 #include <malloc.h>   // _aligned_malloc / _aligned_free — over-aligned arena chunks (tk_chunk_alloc)
-#include <io.h>        // _dup, _dup2, _close — fd-redirect around tk_rt_run_quiet's _spawnvp (issue #73)
+#include <io.h>        // _dup, _dup2, _close — fd-redirect around tk_rt_run_quiet's _spawnvp (issue #73); _pipe, _read, _get_osfhandle (F5)
 #else
 #include <unistd.h>   // chdir, fork, execvp, _exit (host FFI bottoms)
 #include <sys/wait.h> // waitpid — teko::process::run
 #include <sys/resource.h> // getrusage — teko::mem::peak_rss (#148: the compiler reports its own memory cost)
 #include <dirent.h>   // opendir/readdir — teko::fs::list_dir
 #include <sys/stat.h> // mkdir — teko::fs::mkdir (build output dir)
-#include <fcntl.h>    // O_WRONLY — /dev/null redirect for tk_rt_run_quiet (issue #73 cc probe)
+#include <fcntl.h>    // O_WRONLY — /dev/null redirect for tk_rt_run_quiet (issue #73 cc probe); FD_CLOEXEC on a pipe pair (F5)
+#include <poll.h>     // poll — tk_rt_fd_wait_readable's exact-deadline wait on a pipe end (F5)
 #include <sys/random.h> // getentropy (macOS) / getrandom (Linux glibc>=2.25, musl) — teko::crypto::rand (#194 C6)
 #endif
 #include <errno.h>    // errno/EEXIST — mkdir idempotence
@@ -2465,12 +2466,92 @@ static char **tk_rt_read_nul_vector(tk_str s, size_t *pos, uint64_t n) {
     return out;
 }
 
-// (0.3.1.2 — process-half regression harness) tk_rt_spawn_redirected(payload) — see teko_rt.h for
-// the contract and `payload`'s self-describing shape. POSIX opens the three redirection targets in
-// the PARENT (so a relative path resolves against the parent's cwd, not the child's `dir`), forks,
-// and has the CHILD dup2 them onto its own stdin/stdout/stderr before `chdir`+`execvp`; the
-// parent's own copies are closed right after the fork on every path, success or failure, so a
-// later reader of `.out`/`.err` sees EOF once the child is done with them.
+// (0.3.1.0 F5) tk_rt_token_fd — the DESCRIPTOR a payload's `<in_fd>`/`<out_fd>`/`<err_fd>` token
+// names, or TK_RT_FD_NONE when the token is empty (the slot names no descriptor) or holds anything
+// that is not a run of decimal digits. Deliberately NOT tk_rt_token_u64: that one reads an empty
+// token as 0, and 0 is a real descriptor (standard input) — the one value an "absent" token must
+// never decode to.
+static int tk_rt_token_fd(tk_str tok) {
+    if (tok.len == 0) return TK_RT_FD_NONE;
+    int v = 0;
+    for (size_t i = 0; i < tok.len; i += 1) {
+        if (tok.ptr[i] < '0' || tok.ptr[i] > '9') return TK_RT_FD_NONE;
+        v = (v * 10) + (int)(tok.ptr[i] - '0');
+    }
+    return v;
+}
+
+#ifndef _WIN32
+// (0.3.1.0 F5) tk_rt_redirect — one child stream's descriptor plus WHO OWNS IT. `owned` is true
+// only for a descriptor tk_rt_open_redirect opened from a path: the parent closes exactly those and
+// leaves a caller-supplied one alone, which is the whole ownership rule teko_rt.h states.
+typedef struct { int fd; bool owned; } tk_rt_redirect;
+
+// (0.3.1.0 F5) tk_rt_open_redirect — the descriptor one redirection slot resolves to. A descriptor
+// the caller passed (`given`) wins outright and is never opened, never closed here; otherwise a
+// non-empty `path` is opened HERE, in the parent, before the fork — so a relative path resolves
+// against the PARENT's working directory, never the child's `dir`. An empty slot yields
+// TK_RT_FD_NONE, i.e. "the child inherits the parent's own stream".
+static tk_rt_redirect tk_rt_open_redirect(tk_str path, int given, int flags) {
+    if (given >= 0) return (tk_rt_redirect){ given, false };
+    if (path.len == 0) return (tk_rt_redirect){ TK_RT_FD_NONE, false };
+    char *p = tk_cstr(path);
+    return (tk_rt_redirect){ open(p, flags, 0644), true };
+}
+
+// (0.3.1.0 F5) tk_rt_child_lift — the same descriptor, guaranteed to sit ABOVE the standard range.
+// A caller-supplied descriptor may legitimately BE 0/1/2, and binding the three slots in order
+// would then overwrite a later slot's source with an earlier slot's dup2 before it is ever read.
+// Lifting every source clear of 0..2 first makes the three binds independent of their order.
+static tk_rt_redirect tk_rt_child_lift(tk_rt_redirect r) {
+    if (r.fd < 0 || r.fd > STDERR_FILENO) return r;
+    int hi = fcntl(r.fd, F_DUPFD, STDERR_FILENO + 1);
+    if (hi < 0) return r;
+    return (tk_rt_redirect){ hi, true };
+}
+
+// (0.3.1.0 F5) tk_rt_child_drop — close one lifted source descriptor in the child, unless it is a
+// standard stream (which is the redirection's own result) or a descriptor an earlier drop already
+// closed. THE DUPLICATE GUARD IS NOT DEFENSIVE PADDING: one pipe write end bound to BOTH stdout and
+// stderr is the ordinary way to merge a child's two streams into one, and closing it after the
+// first bind would make the second `dup2` operate on a closed descriptor.
+static void tk_rt_child_drop(int fd, int already_a, int already_b) {
+    if (fd <= STDERR_FILENO) return;
+    if (fd == already_a || fd == already_b) return;
+    close(fd);
+}
+
+// (0.3.1.0 F5) tk_rt_child_bind_all — bind the three resolved descriptors onto the child's own
+// standard streams, in the child, after the fork: lift every source clear of 0..2, dup2 all three,
+// then drop each distinct source. Split from `tk_rt_spawn_redirected` so the ordering rules the two
+// helpers above encode live in one place instead of inline in the fork's child arm.
+static void tk_rt_child_bind_all(tk_rt_redirect in_r, tk_rt_redirect out_r, tk_rt_redirect err_r) {
+    tk_rt_redirect a = tk_rt_child_lift(in_r);
+    tk_rt_redirect b = tk_rt_child_lift(out_r);
+    tk_rt_redirect c = tk_rt_child_lift(err_r);
+    if (a.fd >= 0) dup2(a.fd, STDIN_FILENO);
+    if (b.fd >= 0) dup2(b.fd, STDOUT_FILENO);
+    if (c.fd >= 0) dup2(c.fd, STDERR_FILENO);
+    if (a.fd >= 0) tk_rt_child_drop(a.fd, TK_RT_FD_NONE, TK_RT_FD_NONE);
+    if (b.fd >= 0) tk_rt_child_drop(b.fd, a.fd, TK_RT_FD_NONE);
+    if (c.fd >= 0) tk_rt_child_drop(c.fd, a.fd, b.fd);
+}
+
+// (0.3.1.0 F5) tk_rt_parent_release — drop the PARENT's copy of a redirection descriptor, and only
+// when the parent opened it. A caller-supplied descriptor survives untouched; closing the caller's
+// write end is the caller's own `tk_rt_close_fd`, because that close is what makes the read end see
+// end-of-file and the caller may want to hand the same write end to a second child first.
+static void tk_rt_parent_release(tk_rt_redirect r) {
+    if (r.owned && r.fd >= 0) close(r.fd);
+}
+#endif
+
+// (0.3.1.2 — process-half regression harness; 0.3.1.0 F5 — descriptor slots) tk_rt_spawn_redirected
+// (payload) — see teko_rt.h for the contract and `payload`'s self-describing shape. POSIX resolves
+// the three redirection slots in the PARENT (a caller's descriptor as-is, else a path opened here),
+// forks, and has the CHILD dup2 them onto its own stdin/stdout/stderr before `chdir`+`execvp`; the
+// parent releases only the descriptors IT opened, on every path, success or failure, so a later
+// reader of `.out`/`.err` sees EOF once the child is done with them.
 int64_t tk_rt_spawn_redirected(tk_str payload) {
     size_t pos = 0;
     uint64_t argv_n = tk_rt_token_u64(tk_rt_next_nul_token(payload, &pos));
@@ -2482,29 +2563,30 @@ int64_t tk_rt_spawn_redirected(tk_str payload) {
     tk_str in_path  = tk_rt_next_nul_token(payload, &pos);
     tk_str out_path = tk_rt_next_nul_token(payload, &pos);
     tk_str err_path = tk_rt_next_nul_token(payload, &pos);
+    int in_given  = tk_rt_token_fd(tk_rt_next_nul_token(payload, &pos));
+    int out_given = tk_rt_token_fd(tk_rt_next_nul_token(payload, &pos));
+    int err_given = tk_rt_token_fd(tk_rt_next_nul_token(payload, &pos));
 #ifdef _WIN32
     char *cdir = dir.len ? tk_cstr(dir) : NULL;
     char *cin  = in_path.len  ? tk_cstr(in_path)  : NULL;
     char *cout = out_path.len ? tk_cstr(out_path) : NULL;
     char *cerr = err_path.len ? tk_cstr(err_path) : NULL;
-    return tk_win32_spawn_redirected(cargv, cdir, cenv, (size_t)env_n, cin, cout, cerr);
+    return tk_win32_spawn_redirected(cargv, cdir, cenv, (size_t)env_n, cin, cout, cerr,
+                                     in_given, out_given, err_given);
 #else
-    int in_fd = -1, out_fd = -1, err_fd = -1;
-    if (in_path.len)  { char *p = tk_cstr(in_path);  in_fd  = open(p, O_RDONLY); }
-    if (out_path.len) { char *p = tk_cstr(out_path); out_fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644); }
-    if (err_path.len) { char *p = tk_cstr(err_path); err_fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644); }
+    tk_rt_redirect in_r  = tk_rt_open_redirect(in_path,  in_given,  O_RDONLY);
+    tk_rt_redirect out_r = tk_rt_open_redirect(out_path, out_given, O_WRONLY | O_CREAT | O_TRUNC);
+    tk_rt_redirect err_r = tk_rt_open_redirect(err_path, err_given, O_WRONLY | O_CREAT | O_TRUNC);
     bool dir_is_here = dir.len == 0 || (dir.len == 1 && dir.ptr[0] == '.');
     pid_t pid = fork();
     if (pid < 0) {
-        if (in_fd >= 0) close(in_fd);
-        if (out_fd >= 0) close(out_fd);
-        if (err_fd >= 0) close(err_fd);
+        tk_rt_parent_release(in_r);
+        tk_rt_parent_release(out_r);
+        tk_rt_parent_release(err_r);
         return TK_RT_SPAWN_FAILED;
     }
     if (pid == 0) {
-        if (in_fd >= 0)  { dup2(in_fd, STDIN_FILENO); close(in_fd); }
-        if (out_fd >= 0) { dup2(out_fd, STDOUT_FILENO); close(out_fd); }
-        if (err_fd >= 0) { dup2(err_fd, STDERR_FILENO); close(err_fd); }
+        tk_rt_child_bind_all(in_r, out_r, err_r);
         for (uint64_t i = 0; i < env_n; i += 1) putenv(cenv[i]);
         if (!dir_is_here) {
             char *d = tk_cstr(dir);
@@ -2513,9 +2595,9 @@ int64_t tk_rt_spawn_redirected(tk_str payload) {
         execvp(cargv[0], cargv);
         _exit(127);
     }
-    if (in_fd >= 0) close(in_fd);
-    if (out_fd >= 0) close(out_fd);
-    if (err_fd >= 0) close(err_fd);
+    tk_rt_parent_release(in_r);
+    tk_rt_parent_release(out_r);
+    tk_rt_parent_release(err_r);
     return (int64_t)pid;
 #endif
 }
@@ -2534,6 +2616,134 @@ int32_t tk_rt_wait_one(int64_t raw) {
     return tk_rt_wait_status_code(status);
 #endif
 }
+
+// =========================================================================
+// (0.3.1.0 F5) ANONYMOUS PIPES. See teko_rt.h for the full contract of each entry point below —
+// the packing, the ownership rule, and the Windows asymmetry with its measured number.
+// =========================================================================
+
+// TK_RT_FD_HALF_BITS — how far the WRITE end is shifted in `tk_rt_pipe`'s packing. 32, because a
+// descriptor is an `int` on both hosts, so two of them fit an i64 exactly with no value lost and no
+// range to check.
+#define TK_RT_FD_HALF_BITS 32
+// TK_RT_FD_HALF_MASK — the low half a packed pair's READ end occupies.
+#define TK_RT_FD_HALF_MASK ((int64_t)0xFFFFFFFF)
+
+// tk_rt_pack_pipe — the two fresh descriptors as one non-negative i64 (see teko_rt.h for why one
+// register and not two out-parameters). Both halves are known >= 0 here: the caller only reaches
+// this after the host's pipe call reported success.
+static int64_t tk_rt_pack_pipe(int read_fd, int write_fd) {
+    return (((int64_t)write_fd) << TK_RT_FD_HALF_BITS) | (((int64_t)read_fd) & TK_RT_FD_HALF_MASK);
+}
+
+int64_t tk_rt_pipe(void) {
+    int fds[2];
+#ifdef _WIN32
+    // _pipe, not CreatePipe: this returns CRT DESCRIPTORS, the same currency the POSIX arm and the
+    // whole Teko surface speak, where CreatePipe would hand back HANDLEs that no other entry point
+    // here accepts. _O_NOINHERIT keeps an unrelated CreateProcess from cloning either end; the one
+    // child that IS meant to have it gets an explicitly inheritable duplicate
+    // (tk_win32_redirect_handle_of_fd). _O_BINARY so a byte written is the byte read — text mode
+    // would rewrite "\n" into "\r\n" mid-pipe and make a captured stream differ by host.
+    if (_pipe(fds, TK_RT_PIPE_CAPACITY, _O_BINARY | _O_NOINHERIT) != 0) return TK_RT_FD_NONE;
+#else
+    if (pipe(fds) != 0) return TK_RT_FD_NONE;
+    // FD_CLOEXEC rather than pipe2(O_CLOEXEC): pipe2 is a Linux extension macOS does not have, and
+    // this pair of fcntl calls is the portable spelling of the same guarantee. `dup2` clears the
+    // flag on its TARGET, so the child that is deliberately given an end through
+    // tk_rt_spawn_redirected still keeps it across the exec.
+    fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+    fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+#endif
+    return tk_rt_pack_pipe(fds[0], fds[1]);
+}
+
+int64_t tk_rt_pipe_read_fd(int64_t packed) {
+    if (packed < 0) return TK_RT_FD_NONE;
+    return packed & TK_RT_FD_HALF_MASK;
+}
+
+int64_t tk_rt_pipe_write_fd(int64_t packed) {
+    if (packed < 0) return TK_RT_FD_NONE;
+    return (packed >> TK_RT_FD_HALF_BITS) & TK_RT_FD_HALF_MASK;
+}
+
+int32_t tk_rt_close_fd(int64_t fd) {
+    if (fd < 0) return TK_RT_FD_NONE;
+#ifdef _WIN32
+    return (_close((int)fd) == 0) ? 0 : TK_RT_FD_NONE;
+#else
+    return (close((int)fd) == 0) ? 0 : TK_RT_FD_NONE;
+#endif
+}
+
+#ifdef _WIN32
+// tk_rt_win_peek_ready — one non-blocking reading of a Windows anonymous pipe: READY when bytes are
+// pending OR the write end is gone (ERROR_BROKEN_PIPE, which is end-of-file and must wake a reader
+// exactly as pending bytes do), TIMEOUT when neither yet, ERROR when the descriptor names no pipe.
+// The single step tk_rt_fd_wait_readable's polling loop repeats.
+static int32_t tk_rt_win_peek_ready(int64_t fd) {
+    HANDLE h = (HANDLE)_get_osfhandle((int)fd);
+    if (h == INVALID_HANDLE_VALUE) return TK_RT_FD_WAIT_ERROR;
+    DWORD avail = 0;
+    if (!PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL)) {
+        return (GetLastError() == ERROR_BROKEN_PIPE) ? TK_RT_FD_WAIT_READY : TK_RT_FD_WAIT_ERROR;
+    }
+    return (avail > 0) ? TK_RT_FD_WAIT_READY : TK_RT_FD_WAIT_TIMEOUT;
+}
+#endif
+
+int32_t tk_rt_fd_wait_readable(int64_t fd, int64_t timeout_ms) {
+    if (fd < 0) return TK_RT_FD_WAIT_ERROR;
+#ifdef _WIN32
+    // The POLLING arm, and its cost is stated in teko_rt.h rather than hidden: MSVC has no
+    // blocking-with-deadline wait for an anonymous pipe, so this asks every
+    // TK_RT_PIPE_POLL_INTERVAL_MS until the deadline. UNVERIFIED on a real Windows host.
+    int64_t waited = 0;
+    for (;;) {
+        int32_t peek = tk_rt_win_peek_ready(fd);
+        if (peek != TK_RT_FD_WAIT_TIMEOUT) return peek;
+        if (timeout_ms >= 0 && waited >= timeout_ms) return TK_RT_FD_WAIT_TIMEOUT;
+        Sleep(TK_RT_PIPE_POLL_INTERVAL_MS);
+        waited += TK_RT_PIPE_POLL_INTERVAL_MS;
+    }
+#else
+    struct pollfd pfd;
+    pfd.fd = (int)fd;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    int timeout = (timeout_ms < 0) ? -1 : (int)timeout_ms;
+    int r = poll(&pfd, 1, timeout);
+    if (r < 0) return TK_RT_FD_WAIT_ERROR;
+    if (r == 0) return TK_RT_FD_WAIT_TIMEOUT;
+    // POLLHUP counts as READY, not as an error: it is how `poll` announces that the last write end
+    // closed, i.e. the end-of-file the reader is waiting for. Reporting it as an error would turn a
+    // child's clean exit into a failure.
+    if ((pfd.revents & (POLLIN | POLLHUP)) != 0) return TK_RT_FD_WAIT_READY;
+    return TK_RT_FD_WAIT_ERROR;
+#endif
+}
+
+// tk_rt_fd_read_failed_flag — set by the LAST tk_rt_fd_read: true iff the host read call itself
+// failed, as opposed to reporting end-of-file. The same sticky-flag shape tk_rt_stdin_eof_flag uses
+// above, and for the same recorded reason — a plain `str` return needs no per-name codegen lift,
+// where a fresh `str | error` extern would need one the released seed cannot have.
+static bool tk_rt_fd_read_failed_flag = false;
+
+tk_str tk_rt_fd_read(int64_t fd, uint64_t cap) {
+    tk_rt_fd_read_failed_flag = (fd < 0);
+    if (fd < 0 || cap == 0) return (tk_str){ NULL, 0 };
+    tk_byte *buf = (tk_byte *)tk_alloc(cap);
+#ifdef _WIN32
+    int got = _read((int)fd, buf, (unsigned int)cap);
+#else
+    ssize_t got = read((int)fd, buf, (size_t)cap);
+#endif
+    if (got < 0) { tk_rt_fd_read_failed_flag = true; return (tk_str){ NULL, 0 }; }
+    return (tk_str){ buf, (size_t)got };
+}
+
+bool tk_rt_fd_read_failed(void) { return tk_rt_fd_read_failed_flag; }
 
 // Captured process argv (the generated `main` calls tk_set_args before the virtual-main body).
 // tk_g_argc / tk_g_argv are declared near the top (the stack-trace's .tsym loader uses them).

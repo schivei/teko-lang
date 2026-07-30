@@ -720,6 +720,20 @@ int32_t tk_rt_run_quiet(const tk_str *argv, uint64_t n);
 // (execvp, CreateProcess, open) is NUL-terminated already. `env` tokens are "K=V" and are ADDED to
 // the child's inherited environment; the parent's own environment is never touched.
 //
+// (0.3.1.0 F5) THREE MORE TOKENS AT THE END, AND THE PATH ROUTE IS UNCHANGED: `<in_fd>` NUL
+// `<out_fd>` NUL `<err_fd>`, each a decimal DESCRIPTOR the caller already owns (a `tk_rt_pipe` end)
+// or EMPTY for "this slot names no descriptor". A descriptor WINS over the path in the same slot.
+// Appending is safe for a payload written by an older producer — the splitter yields an empty token
+// past the payload's end, and an empty token reads as TK_RT_FD_NONE — which is what lets the frozen
+// bootstrap twin, which emits the seven-token shape, keep working against this parser unchanged.
+//
+// OWNERSHIP SPLITS ON WHO OPENED IT. A descriptor opened HERE from a path is closed here in the
+// parent right after the fork, as it always was. A descriptor the CALLER passed in is never closed
+// here — the caller's `tk_rt_close_fd` is the only thing that closes it, because the parent's copy
+// of a pipe's write end is precisely what has to go away for the read end to see end-of-file, and a
+// runtime that closed it behind the caller's back would break the caller sharing one write end
+// across several children.
+//
 // EVERY REDIRECTION TARGET IS OPENED BY THE PARENT, BEFORE THE CHILD'S WORKING DIRECTORY CHANGES —
 // a relative in/out/err path is therefore resolved against the PARENT's cwd, never the child's
 // `dir`, matching the "the parent NAMES the descriptor, the argv's own cwd is the child's separate
@@ -731,6 +745,97 @@ int64_t tk_rt_spawn_redirected(tk_str payload);
 // or the wait itself could not observe one). A handle may be waited on at most once — POSIX reaps
 // the pid and Windows closes the HANDLE, so a second wait on the same value is undefined on both.
 int32_t tk_rt_wait_one(int64_t raw);
+
+// =========================================================================
+// (0.3.1.0 F5) ANONYMOUS PIPES — the per-child descriptor pair the concurrency design wants where
+// `spawn_redirected` today can only name a FILE PATH. Counted before this block was written:
+// `pipe(` 0 occurrences in the tree, `fork(` 3, `dup2(` 7 — fork and dup2 were already here and the
+// pipe was the one missing piece, which is exactly why every capture in this repository goes
+// through a scratch file (`.regr-pool-*`, `.toolquery.{in,out,err}`) instead of a descriptor.
+//
+// TK_RT_FD_NONE — "this is not a descriptor". Serves both roles, and they are the same claim: a
+// redirection slot that names no descriptor, and a call that produced none (a failed `pipe`, a
+// failed `close`). NEGATIVE for the reason TK_RT_SPAWN_FAILED is: a real descriptor is >= 0 on both
+// hosts, so the failure can never be read as a descriptor.
+#define TK_RT_FD_NONE (-1)
+// The three readings of tk_rt_fd_wait_readable, on their own axis (they are not descriptors):
+// READY means "a read will not block" — which on a pipe covers BOTH pending bytes and end-of-file,
+// exactly as `poll` reports it; TIMEOUT means the deadline expired with neither; ERROR means the
+// descriptor could not be observed at all.
+#define TK_RT_FD_WAIT_ERROR   (-1)
+#define TK_RT_FD_WAIT_TIMEOUT (0)
+#define TK_RT_FD_WAIT_READY   (1)
+// TK_RT_PIPE_CAPACITY — the kernel buffer requested for a pipe. POSIX `pipe()` takes no size (the
+// host picks; Linux 64 KiB), so this number is only ever READ on Windows, whose `_pipe` demands
+// one; it is spelled to match the Linux default so a child that fills the buffer blocks at the same
+// point on both hosts rather than at two silently different ones.
+#define TK_RT_PIPE_CAPACITY (65536)
+// teko::process::pipe() — create an anonymous unidirectional pipe and return BOTH descriptors
+// PACKED into one i64: the read end in the low 32 bits, the write end in the high 32 bits.
+// TK_RT_FD_NONE when the host refused.
+//
+// PACKED AND NOT TWO OUT-PARAMETERS, for the reason `tk_rt_spawn_redirected` takes one flattened
+// `str` and not six: the native backend's `LCall` captures exactly ONE result register, and a pipe
+// is created ATOMICALLY — two calls could not return the two halves of the same pipe. Two 32-bit
+// halves fit one register with room to spare (a descriptor is a small non-negative `int` on both
+// hosts), and the packed value stays non-negative, so it never collides with TK_RT_FD_NONE.
+//
+// NEITHER END IS INHERITED BY ACCIDENT. POSIX sets FD_CLOEXEC on both and Windows opens the pair
+// `_O_NOINHERIT`, so an UNRELATED child launched between the pipe's creation and its use never gets
+// a copy — which is what keeps the end-of-file reading meaningful (one stray inherited write end in
+// any other process holds the pipe open forever). The child that IS meant to have it gets it
+// through `tk_rt_spawn_redirected`, whose POSIX arm `dup2`s it onto a standard stream (dup2 clears
+// FD_CLOEXEC on the target) and whose Windows arm duplicates it inheritable for CreateProcess.
+int64_t tk_rt_pipe(void);
+// tk_rt_pipe_read_fd / tk_rt_pipe_write_fd — the two halves of a `tk_rt_pipe` packing, unpacked.
+// TK_RT_FD_NONE in, TK_RT_FD_NONE out, so a failed `pipe` propagates through both accessors instead
+// of decoding into the descriptor pair (-1, -1) minus the sign.
+int64_t tk_rt_pipe_read_fd(int64_t packed);
+int64_t tk_rt_pipe_write_fd(int64_t packed);
+// teko::process::close_fd(fd) — close one descriptor. 0 on success, TK_RT_FD_NONE on failure or
+// when `fd` was never a descriptor.
+//
+// THE CALLER CLOSES, AND THAT IS THE WHOLE CONTRACT. `tk_rt_spawn_redirected` never closes a
+// descriptor the caller handed it (it closes only the ones IT opened from a path) — the parent owns
+// its copy of the write end and must close it, or the read end never reaches end-of-file. That is
+// the classic pipe defect, and it is named here rather than hidden because the alternative — the
+// runtime closing a descriptor it does not own — would break the caller that wants ONE write end
+// shared by several children.
+int32_t tk_rt_close_fd(int64_t fd);
+// teko::process::fd_wait_readable(fd, timeout_ms) — block until reading `fd` would not block, or
+// until `timeout_ms` elapses. TK_RT_FD_WAIT_READY / _TIMEOUT / _ERROR (above). A negative
+// `timeout_ms` waits without a deadline.
+//
+// A DEADLINE IS NOT A CONVENIENCE HERE. A read on a pipe whose write end is still open anywhere
+// blocks FOREVER, and a test that blocks forever does not go red — it hangs, and a hung suite never
+// reports at all. Every reader in this repository's tests goes through this call so the failure is
+// a value that can be asserted on.
+//
+// THE TWO HOSTS ARE NOT SYMMETRIC HERE, AND THE ASYMMETRY IS REAL. POSIX blocks inside `poll` with
+// the exact deadline: it wakes on the event, and the deadline is the kernel's. Windows anonymous
+// pipes (`_pipe`/`CreatePipe`) are NOT waitable objects and cannot be opened overlapped, so MSVC
+// offers no blocking-with-deadline call for them at all; the Windows arm therefore POLLS with
+// `PeekNamedPipe` every TK_RT_PIPE_POLL_INTERVAL_MS. Consequence, stated as a number rather than
+// hidden: on Windows a wakeup is late by up to one interval (2 ms) and a deadline can overshoot by
+// the same, where POSIX overshoots by the scheduler's granularity only. Closing that gap needs a
+// NAMED pipe opened with FILE_FLAG_OVERLAPPED — a different primitive with a different lifetime,
+// not a flag on this one. UNVERIFIED ON A REAL WINDOWS HOST: this repository has no Windows runner,
+// so the Windows arm is reasoned and compiled, never measured — same standing as the
+// `tk_win32_spawn_redirected` block it sits beside.
+#define TK_RT_PIPE_POLL_INTERVAL_MS (2)
+int32_t tk_rt_fd_wait_readable(int64_t fd, int64_t timeout_ms);
+// teko::process::fd_read(fd, cap) — read AT MOST `cap` bytes from `fd`, returning what one read
+// call yielded. An EMPTY result means end-of-file OR a failure, and `tk_rt_fd_read_failed()`
+// (below) is what tells them apart — the same sticky-flag shape `tk_rt_read_line`/
+// `tk_rt_stdin_eof` already use, and for the same reason: a brand-new `str | error`-shaped extern
+// needs a per-name lift in codegen that the released SEED cannot learn, while a plain `str` return
+// needs none.
+tk_str tk_rt_fd_read(int64_t fd, uint64_t cap);
+// tk_rt_fd_read_failed() — did the LAST tk_rt_fd_read fail (as opposed to reaching end-of-file)?
+// Read it immediately after an empty result; any later tk_rt_fd_read overwrites it.
+bool tk_rt_fd_read_failed(void);
+// =========================================================================
+
 // teko::env::args() — the captured process argv as owned tk_str's; *n receives the count.
 // tk_set_args must run first (the generated `main` calls it before the virtual-main body).
 void    tk_set_args(int argc, char **argv);

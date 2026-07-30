@@ -68,6 +68,110 @@ pub type ProcHandle = struct {
 }
 
 /**
+ * NO_FD — `TK_RT_FD_NONE` (src/runtime/teko_rt.h) at the Teko level: "this is not a descriptor".
+ * One constant for the two claims, because they are the same claim — a redirection slot that names
+ * no descriptor, and a call that produced none. Negative for the reason `SPAWN_FAILED` is: a real
+ * descriptor is `>= 0` on both hosts, so the absence can never be read as a descriptor.
+ */
+pub const NO_FD: i64 = -1
+
+/**
+ * Pipe — the two ends of one anonymous pipe: bytes written to `write_fd` are read from `read_fd`,
+ * in order, and nowhere else.
+ *
+ * BOTH ENDS ARE OWNED BY WHOEVER CALLED `pipe()`, and neither is closed by anything in this module.
+ * That matters for one specific reason, and it is the classic defect of pipes: the reader sees
+ * end-of-file only when the LAST write end anywhere in the system is closed. A parent that gives
+ * `write_fd` to a child and then forgets to `close_fd` its own copy keeps the pipe open by itself,
+ * and its read never ends — not with an error, with a hang.
+ *
+ * @since 0.3.1.0
+ */
+pub type Pipe = struct {
+    /** the reading end; `fd_read`/`read_to_eof` consume it. */
+    read_fd: i64
+    /** the writing end; hand it to a child through `spawn_redirected_fds`, then close this copy. */
+    write_fd: i64
+}
+
+/**
+ * pipe_raw — the runtime symbol `pipe` wraps: BOTH descriptors packed into one `i64` (the read end
+ * in the low 32 bits, the write end in the high 32). Kept private so every caller goes through the
+ * typed `Pipe`.
+ *
+ * PACKED AND NOT TWO CALLS, because a pipe is created ATOMICALLY: two calls could not return the two
+ * ends of the same pipe. Packed and not two out-parameters, because the native backend's call
+ * lowering captures exactly one result register — the same measurement that made
+ * `spawn_redirected_raw` take one flattened `str` instead of six.
+ *
+ * @return the packed pair, or `NO_FD` when the host refused to create a pipe
+ */
+extern fn pipe_raw() -> i64 = "tk_rt_pipe" from "teko_rt"
+
+/**
+ * pipe_read_fd_raw — the read end of a `pipe_raw` packing.
+ *
+ * @param packed  what `pipe_raw` returned
+ * @return        the reading descriptor, or `NO_FD` when `packed` held no pipe
+ */
+extern fn pipe_read_fd_raw(packed: i64) -> i64 = "tk_rt_pipe_read_fd" from "teko_rt"
+
+/**
+ * pipe_write_fd_raw — the write end of a `pipe_raw` packing.
+ *
+ * @param packed  what `pipe_raw` returned
+ * @return        the writing descriptor, or `NO_FD` when `packed` held no pipe
+ */
+extern fn pipe_write_fd_raw(packed: i64) -> i64 = "tk_rt_pipe_write_fd" from "teko_rt"
+
+/**
+ * pipe — create one anonymous pipe and return both of its ends.
+ *
+ * NEITHER END LEAKS INTO AN UNRELATED CHILD: POSIX marks both `FD_CLOEXEC` and Windows opens the
+ * pair `_O_NOINHERIT`, so a process spawned between this call and the pipe's use never receives a
+ * copy. That is not tidiness — one forgotten copy of the write end in any process holds the pipe
+ * open forever, and the reader's end-of-file never arrives. The child that is MEANT to have an end
+ * receives it explicitly, through `spawn_redirected_fds`.
+ *
+ * @return the two ends, or the host's refusal
+ * @throws when the host could not create a pipe (descriptor table exhausted)
+ * @since 0.3.1.0
+ */
+pub fn pipe() -> Pipe | error {
+    let packed = pipe_raw()
+    if packed < 0 { return error("teko::process::pipe: the host refused to create a pipe") }
+    Pipe { read_fd = pipe_read_fd_raw(packed); write_fd = pipe_write_fd_raw(packed) }
+}
+
+/**
+ * close_fd_raw — the runtime symbol `close_fd` wraps. Kept private so every caller goes through the
+ * typed wrapper.
+ *
+ * @param fd  the descriptor to close
+ * @return    0 on success, `NO_FD` on failure
+ */
+extern fn close_fd_raw(fd: i64) -> i32 = "tk_rt_close_fd" from "teko_rt"
+
+/**
+ * close_fd — close one descriptor, and mean it.
+ *
+ * THE CALL THAT TURNS A HANG INTO AN END-OF-FILE. After a child has been given a pipe's write end,
+ * the parent's own copy is the only thing still holding that end open; closing it is what makes the
+ * reader's `read_to_eof` terminate when the child exits. Nothing in this module closes a descriptor
+ * on the caller's behalf — a write end may legitimately be handed to several children before the
+ * parent lets go of it, and a runtime that guessed when to close would break that.
+ *
+ * @param fd  the descriptor to close
+ * @return    nothing on success, or the host's refusal
+ * @throws    when `fd` named no open descriptor, or the host's close failed
+ * @since 0.3.1.0
+ */
+pub fn close_fd(fd: i64) -> null | error {
+    if close_fd_raw(fd) == 0 { return null }
+    error("teko::process::close_fd: not an open descriptor")
+}
+
+/**
  * TOKEN_SEP — the byte every field of `spawn_redirected`'s payload joins on before it crosses the
  * `extern fn` boundary, and the runtime splits back on. Safe as a universal separator because NONE
  * of an argv element, an environment token, or a path may itself carry a NUL byte — the OS APIs
@@ -87,7 +191,13 @@ const TOKEN_SEP: str = "\0"
  * SELF-DESCRIBING (a decimal element count precedes each variable-length list) so the runtime can
  * split it back out without a second channel: `<argc>` TOKEN_SEP `argv[0]` … `argv[argc-1]`
  * TOKEN_SEP `<envc>` TOKEN_SEP `env[0]` … `env[envc-1]` TOKEN_SEP `dir` TOKEN_SEP `in_path`
- * TOKEN_SEP `out_path` TOKEN_SEP `err_path`.
+ * TOKEN_SEP `out_path` TOKEN_SEP `err_path` TOKEN_SEP `<in_fd>` TOKEN_SEP `<out_fd>` TOKEN_SEP
+ * `<err_fd>`.
+ *
+ * THE THREE DESCRIPTOR TOKENS ARE APPENDED, NOT INTERLEAVED, and that placement is what keeps the
+ * path route byte-identical for a caller that names no descriptor: the runtime's splitter reads an
+ * absent token as empty, and an empty descriptor token is `NO_FD`, so a payload written in the old
+ * seven-token shape decodes exactly as it always did.
  *
  * @param argv      the child's argument vector; `argv[0]` is the executable
  * @param dir       the child's working directory ("" = the parent's)
@@ -95,24 +205,50 @@ const TOKEN_SEP: str = "\0"
  * @param in_path   the file backing the child's stdin ("" = inherit)
  * @param out_path  the file backing the child's stdout ("" = inherit)
  * @param err_path  the file backing the child's stderr ("" = inherit)
+ * @param in_fd     the descriptor backing the child's stdin (`NO_FD` = use `in_path`)
+ * @param out_fd    the descriptor backing the child's stdout (`NO_FD` = use `out_path`)
+ * @param err_fd    the descriptor backing the child's stderr (`NO_FD` = use `err_path`)
  * @return          the flattened, self-describing payload
  */
-fn spawn_payload(argv: []str, dir: str, env: []str, in_path: str, out_path: str, err_path: str) -> str {
-    mut out = teko::str::u64_to_str(argv.len)
+fn spawn_payload(argv: []str, dir: str, env: []str, in_path: str, out_path: str, err_path: str, in_fd: i64, out_fd: i64, err_fd: i64) -> str {
+    count_prefixed_list(argv) ~ TOKEN_SEP ~ count_prefixed_list(env)
+        ~ TOKEN_SEP ~ dir ~ TOKEN_SEP ~ in_path ~ TOKEN_SEP ~ out_path ~ TOKEN_SEP ~ err_path
+        ~ TOKEN_SEP ~ fd_token(in_fd) ~ TOKEN_SEP ~ fd_token(out_fd) ~ TOKEN_SEP ~ fd_token(err_fd)
+}
+
+/**
+ * count_prefixed_list — one variable-length list of `spawn_payload`, flattened: its element count in
+ * decimal, then every element, all joined on `TOKEN_SEP`. The count prefix is what makes the payload
+ * self-describing, so the runtime knows where the list ends without a second channel.
+ *
+ * @param items  the list to flatten (`argv` or `env`)
+ * @return       `<count>` TOKEN_SEP `items[0]` … TOKEN_SEP `items[count-1]`
+ */
+fn count_prefixed_list(items: []str) -> str {
+    mut out = teko::str::u64_to_str(items.len)
     mut k: u64 = 0
     loop {
-        if k >= argv.len { break }
-        out = out ~ TOKEN_SEP ~ argv[k]
+        if k >= items.len { break }
+        out = out ~ TOKEN_SEP ~ items[k]
         k = k + 1
     }
-    out = out ~ TOKEN_SEP ~ teko::str::u64_to_str(env.len)
-    k = 0
-    loop {
-        if k >= env.len { break }
-        out = out ~ TOKEN_SEP ~ env[k]
-        k = k + 1
-    }
-    out ~ TOKEN_SEP ~ dir ~ TOKEN_SEP ~ in_path ~ TOKEN_SEP ~ out_path ~ TOKEN_SEP ~ err_path
+    out
+}
+
+/**
+ * fd_token — one descriptor slot of `spawn_payload`, as the runtime reads it: the decimal
+ * descriptor, or the EMPTY token for `NO_FD`.
+ *
+ * EMPTY AND NOT "-1", because the runtime's own reader treats any non-digit token as "no
+ * descriptor" and the empty token is the one an absent field already produces — one spelling for
+ * the absent slot, whether the payload omitted it or spelled it out.
+ *
+ * @param fd  the descriptor, or `NO_FD` for "this slot names no descriptor"
+ * @return    the decimal descriptor, or "" for `NO_FD`
+ */
+fn fd_token(fd: i64) -> str {
+    if fd < 0 { return "" }
+    teko::str::i64_to_str(fd)
 }
 
 /**
@@ -149,7 +285,40 @@ extern fn spawn_redirected_raw(payload: str) -> i64 = "tk_rt_spawn_redirected" f
  * @since 0.3.1.2
  */
 pub fn spawn_redirected(argv: []str, dir: str, env: []str, in_path: str, out_path: str, err_path: str) -> ProcHandle {
-    ProcHandle { raw = spawn_redirected_raw(spawn_payload(argv, dir, env, in_path, out_path, err_path)) }
+    ProcHandle { raw = spawn_redirected_raw(spawn_payload(argv, dir, env, in_path, out_path, err_path, NO_FD, NO_FD, NO_FD)) }
+}
+
+/**
+ * spawn_redirected_fds — `spawn_redirected`, with the child's three standard streams bound to
+ * DESCRIPTORS the caller already owns instead of to files the runtime opens.
+ *
+ * THIS IS THE CALL THAT MAKES A CAPTURE STOP BEING A FILE. Hand it a `pipe()`'s write end as
+ * `out_fd` and the child's stdout arrives in this process's memory, with no `.out` scratch file
+ * created, named, read back or deleted — which is where the `.regr-pool-*` and `.toolquery.{in,out,
+ * err}` families in the working tree come from today.
+ *
+ * OWNERSHIP DOES NOT TRANSFER, and forgetting that is the classic pipe defect. The runtime never
+ * closes a descriptor passed here; the parent keeps its own copy of the write end and MUST
+ * `close_fd` it, or the matching read end never reaches end-of-file and a reader blocks forever.
+ * That is deliberate, not an oversight: one write end may legitimately be handed to several
+ * children before the parent lets go of it.
+ *
+ * `NO_FD` in a slot means "this call names no descriptor for that stream", and the child inherits
+ * the parent's own — the same reading an empty path has in `spawn_redirected`. The two surfaces
+ * share one payload and one runtime entry point, so the path route is unchanged by this one
+ * existing.
+ *
+ * @param argv    the child's argument vector; `argv[0]` is the executable
+ * @param dir     the child's working directory ("" = the parent's)
+ * @param env     `K=V` tokens appended to the child's inherited environment ([] = inherit only)
+ * @param in_fd   the descriptor backing the child's stdin (`NO_FD` = inherit)
+ * @param out_fd  the descriptor backing the child's stdout (`NO_FD` = inherit)
+ * @param err_fd  the descriptor backing the child's stderr (`NO_FD` = inherit)
+ * @return        the child's handle, or a handle with `raw = SPAWN_FAILED` when none started
+ * @since 0.3.1.0
+ */
+pub fn spawn_redirected_fds(argv: []str, dir: str, env: []str, in_fd: i64, out_fd: i64, err_fd: i64) -> ProcHandle {
+    ProcHandle { raw = spawn_redirected_raw(spawn_payload(argv, dir, env, "", "", "", in_fd, out_fd, err_fd)) }
 }
 
 /**
@@ -217,4 +386,157 @@ pub fn verdict_emit(line: str) -> null | error {
     if path.len == 0 { teko::io::eprintln(line); return null }
     let prior = match teko::io::read_file(path) { str as s => s; error => "" }
     teko::io::write_file(path, prior ~ line ~ "\n")
+}
+
+/**
+ * READ_CHUNK — how many bytes one `fd_read` asks the host for. 64 KiB, which is
+ * `TK_RT_PIPE_CAPACITY` (src/runtime/teko_rt.h): a chunk smaller than the pipe's buffer would need
+ * several reads to drain a full buffer, and a chunk larger would allocate space the pipe can never
+ * hold at once.
+ */
+pub const READ_CHUNK: u64 = 65536
+
+/**
+ * fd_wait_readable_raw — the runtime symbol `fd_wait_readable` wraps: 1 ready, 0 timed out, -1
+ * error. Kept private so every caller goes through the typed wrapper.
+ *
+ * @param fd          the descriptor to watch
+ * @param timeout_ms  the deadline in milliseconds; negative waits without one
+ * @return            1 / 0 / -1
+ */
+extern fn fd_wait_readable_raw(fd: i64, timeout_ms: i64) -> i32 = "tk_rt_fd_wait_readable" from "teko_rt"
+
+/**
+ * fd_wait_readable — block until reading `fd` would not block, or until `timeout_ms` elapses.
+ *
+ * READY COVERS END-OF-FILE, exactly as the host's own `poll` reports it: "a read will not block" is
+ * true both when bytes are pending and when the last write end is gone. The caller tells the two
+ * apart by reading — end-of-file is the empty read, and nothing else is.
+ *
+ * A DEADLINE IS THE POINT OF THIS CALL. A read on a pipe whose write end is still open somewhere
+ * blocks forever, and a test that blocks forever does not go red — it HANGS, and a hung suite never
+ * reports at all. `false` is a value that can be asserted on; a hang is not.
+ *
+ * The two hosts are not symmetric: POSIX waits in the kernel with the exact deadline, while Windows
+ * anonymous pipes are not waitable objects and the runtime must poll them every 2 ms, so a Windows
+ * wakeup is late by up to that interval. The number is stated in `src/runtime/teko_rt.h`; the
+ * Windows arm is reasoned and compiled there, never measured, because this repository has no
+ * Windows runner.
+ *
+ * @param fd          the descriptor to watch
+ * @param timeout_ms  the deadline in milliseconds; negative waits without one
+ * @return            true when a read would not block, false when the deadline expired first
+ * @throws            when `fd` could not be observed at all
+ * @since 0.3.1.0
+ */
+pub fn fd_wait_readable(fd: i64, timeout_ms: i64) -> bool | error {
+    let r = fd_wait_readable_raw(fd, timeout_ms)
+    if r < 0 { return error("teko::process::fd_wait_readable: the descriptor could not be observed") }
+    r == 1
+}
+
+/**
+ * fd_read_raw — the runtime symbol `fd_read` wraps: at most `cap` bytes from one host read call, as
+ * a plain `str`. Kept private so every caller goes through the typed wrapper.
+ *
+ * A PLAIN `str` AND NOT `str | error`, which is a compiler constraint and not a preference: a
+ * brand-new `str | error`-shaped `extern fn` needs a per-name lift in codegen that the released
+ * bootstrap seed cannot have learned, while a plain `str` return needs none. The failure travels on
+ * `fd_read_failed_raw` instead — the same sticky-flag shape `teko::io::read_line`/`stdin_eof`
+ * already use, for the same reason.
+ *
+ * @param fd   the descriptor to read
+ * @param cap  the most bytes to ask for
+ * @return     what one read yielded; empty for end-of-file OR failure
+ */
+extern fn fd_read_raw(fd: i64, cap: u64) -> str = "tk_rt_fd_read" from "teko_rt"
+
+/**
+ * fd_read_failed_raw — did the LAST `fd_read_raw` fail, as opposed to reaching end-of-file? Read it
+ * immediately after an empty result; any later read overwrites it.
+ *
+ * @return true iff the last read call itself failed
+ */
+extern fn fd_read_failed_raw() -> bool = "tk_rt_fd_read_failed" from "teko_rt"
+
+/**
+ * fd_read — read at most `cap` bytes from `fd`, returning what ONE read yielded.
+ *
+ * THE EMPTY STRING IS END-OF-FILE, and only that: a genuine read failure comes back as the error
+ * arm, so a caller looping until empty terminates on the child's exit and not on a broken
+ * descriptor it never noticed.
+ *
+ * A short result is NOT end-of-file — a pipe delivers what is buffered at the moment of the read,
+ * which is routinely less than a writer sent. `read_to_eof` is the loop that accounts for that.
+ *
+ * @param fd   the descriptor to read
+ * @param cap  the most bytes to ask for
+ * @return     the bytes read, empty at end-of-file
+ * @throws     when the host's read call failed
+ * @since 0.3.1.0
+ */
+pub fn fd_read(fd: i64, cap: u64) -> str | error {
+    let got = fd_read_raw(fd, cap)
+    if got.len > 0 { return got }
+    if fd_read_failed_raw() { return error("teko::process::fd_read: the host read call failed") }
+    ""
+}
+
+/**
+ * read_to_eof — drain `fd` until end-of-file, under a TOTAL deadline.
+ *
+ * THE DEADLINE IS NOT OPTIONAL AND IT IS TOTAL, not per-read. Two failures of a pipe are silent
+ * without one: a writer that never writes, and a write end the parent forgot to close — the second
+ * being the classic defect, where the reader waits for an end-of-file that its own open descriptor
+ * is preventing. Neither produces an error from the host; both produce a wait that never returns.
+ * A test that hangs is worse than one that fails, because a hung suite reports nothing at all. So
+ * the budget shrinks across every wait, and running out is an ERROR the caller can assert on.
+ *
+ * @param fd           the reading end to drain
+ * @param deadline_ms  the TOTAL time this drain may take, across all of its reads
+ * @return             everything the writer sent, up to end-of-file
+ * @throws             when the deadline expired before end-of-file, or a read failed
+ * @since 0.3.1.0
+ */
+pub fn read_to_eof(fd: i64, deadline_ms: i64) -> str | error {
+    let started = now_ms()
+    mut acc = ""
+    loop {
+        let left = deadline_ms - (now_ms() - started)
+        if left <= 0 { return deadline_expired(acc.len) }
+        match fd_wait_readable(fd, left) {
+            error as e => return e
+            bool as ready => { if !ready { return deadline_expired(acc.len) } }
+        }
+        let chunk = match fd_read(fd, READ_CHUNK) { str as s => s; error as e => return e }
+        if chunk.len == 0 { return acc }
+        acc = acc ~ chunk
+    }
+    acc
+}
+
+/**
+ * now_ms — the monotonic clock in milliseconds, the unit `read_to_eof`'s budget is spelled in.
+ *
+ * MONOTONIC AND NOT WALL-CLOCK, because a deadline must survive the host's clock being adjusted
+ * underneath it — a wall-clock jump backwards would extend a drain's budget silently, which is the
+ * one thing a hang guard may not do.
+ *
+ * @return milliseconds on the host's monotonic clock, from an unspecified origin
+ */
+fn now_ms() -> i64 { teko::time::span_monotonic_now().ticks / 1000000 }
+
+/**
+ * deadline_expired — the error `read_to_eof` reports when its budget ran out, quoting how much it
+ * had already drained.
+ *
+ * THE COUNT IS IN THE MESSAGE ON PURPOSE: "0 bytes" and "N bytes" name two different defects — a
+ * writer that never wrote versus a write end still open in this very process — and a message that
+ * omitted it would send both to the same fruitless place.
+ *
+ * @param drained  how many bytes had been read before the deadline expired
+ * @return         the deadline error
+ */
+fn deadline_expired(drained: u64) -> error {
+    error("teko::process::read_to_eof: deadline expired after " ~ teko::str::u64_to_str(drained) ~ " bytes; a write end is still open somewhere")
 }
