@@ -103,6 +103,20 @@ primeiros; o quarto (aridade) deu quatro conflitos, todos resolvidos por composi
 gates estruturais (`objfile_gate_test.sh`, `wasm_known_stop_gate.sh`,
 `native_selfhost_known_stop_test.sh`, `ci_gate_coverage.sh`).
 
+**A LACUNA QUE ESTE DRENO EXPÔS, e o conserto — com uma correção do dono dentro.** Os gates acima
+conferem *que ficheiros* entram e a *forma* do CI; **nenhum confere se a soma ainda funciona.** Cinco
+branches verdes em separado não fazem um vagão verde: o dreno acendeu quatro pernas por **um** teste,
+e o `src/lir/lower_test.tkt` foi **auto-fundido pelo git sem conflito** produzindo expectativas que não
+batem com o `lower_cast` fundido — o git junta duas edições de teste e o resultado corresponde a
+nenhuma das duas.
+
+Eu propus como conserto "construir gen1 e correr a suíte". **O dono corrigiu: os testes correm na
+gen2/gen3, não na gen1.** A gen1 é construída pelo compilador LANÇADO; a gen2 é a primeira construída
+pelo compilador novo a partir do fonte novo, e é nela que a suíte tem sentido. O ritual correto é
+`scripts/fixpoint_gate.sh` (que produz gen2 e gen3 e prova gen2 == gen3) **e a suíte sobre a gen2** —
+não a gen1. A minha corrida local com gen1 achou a falha por acaso, porque era de tipagem de teste;
+com outra classe de defeito teria mentido.
+
 ## 2b. REGRESSÕES DO DRENO (2026-07-30) — duas, e uma NÃO está explicada
 
 O dreno das cinco branches ficou verde no ritual local mas **acendeu duas pernas que estavam verdes**.
@@ -166,6 +180,7 @@ assim que a sonda responder.
 
 | item | porquê | nota |
 | --- | --- | --- |
+| **Consertar `lwt_prim_kind_of_resolves_enum_to_int_cast_widens`** | **acende QUATRO pernas** (test+mem-paranoid em arm64-glibc e x86_64-musl). Único teste a falhar em 849 | expectativa desatualizada, não defeito: afirma `%1 = sext %0`, e a aridade decidiu que um alargamento sem perda **não emite conversão nem guarda** (`lower_cast_fit_guard` começa por `if cast_is_lossless_widen { return ctx }`, e o doc-comment de `lower_int_cast` di-lo). **Não apagar** — tem de passar a afirmar a AUSÊNCIA da conversão, senão troca-se expectativa velha por vazio. O sinal negativo já está provado por VALOR nas fixtures `f_cast_widen_keeps_value` (`-5 to i64`) e no alargamento implícito (`-2147483648`), nas duas rotas |
 | **`fmt --apply` explícito** | dono aprovou: *"Sim: fmt --apply explícito"* | o meu despacho foi **recusado na camada de permissão** logo depois; nunca chegou a correr, e eu não o repeti (chamada recusada trata-se como decisão). **Precisa da palavra do dono para andar.** Contrato pinado em `scripts/fmt_cli_test.sh` |
 | **Híbrido do `main`** | desenho **fechado** no digesto de leis | precisa do arquiteto para ordenar crumbs |
 | **AArch64-ELF crumbs 2–5** | crumb 1 (relocação) fechado e provado em hardware | crumb 3 cria `Arm64Linux` em `NativeTarget` e destranca a perna arm64-Linux |
