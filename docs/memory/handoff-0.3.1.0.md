@@ -17,6 +17,56 @@ hipótese, está dito.
 
 
 
+
+## 0d. `unknown function: f_*` É REAL NO CI — e eu descartei o relato do agente (2026-07-30)
+
+**Correcção a mim, e é a segunda vez hoje que dispenso um agente depressa demais.**
+
+O agente dos dourados reportou, como red-flag, que `own_native.tkr` falhava a **compilar** com dezenas de
+`main.tks:NN: unknown function: f_*`, e não pela `A4-fp` documentada. Eu atribuí-o à corrupção de
+ambiente que ele próprio tinha reportado (outro agente transformou o binário dele num directório) e
+escrevi que *"o CI não mostra `unknown function` em sítio nenhum"*.
+
+**Medi. Está no CI, na execução 30524751917 (`e317b44`), em todas as pernas:**
+
+```
+unknown function: f_append_fo_bulk_bytes   f_append_fo_grow_chain   f_append_fo_interleaved_buffers
+unknown function: f_arm64_bigframe_locals  f_cast_narrow_in_range_keeps_value   … (dezenas)
+```
+
+**Ele estava certo. Eu estava errado, e por um raciocínio errado:** a corrupção do ambiente dele
+explicava *um* sintoma, e eu usei-a para explicar *outro* sem o medir.
+
+### O QUE JÁ ESTÁ MEDIDO, e o que fica de fora
+
+| medição | resultado |
+| --- | --- |
+| chamadas no `main` sem definição no corpus | **zero** (119 chamadas, 120 definições; a sobra é `f_fat_field_len`) |
+| visibilidade | **todos os 120 são não-`pub`, e sempre foram** — o `main` chama-os nus e isso funcionou meses. **Não é regressão de visibilidade** |
+| `A4-fp: float-op` | **já NÃO aparece** nesta execução — a falha do `own_native` mudou de carácter |
+| fase unitária | **verde: 1131 `ok` nas três pernas, zero pânicos** (o conserto dos dourados funcionou) |
+
+**Logo a causa não está na árvore de fontes — está em COMO o build que falha é composto.** O suspeito
+principal, e é o que a investigação deve atacar primeiro: as linhas com **`Given source = "cases/X.tks"`**.
+Se o harness **acrescenta** o ficheiro de caso ao conjunto de fontes em vez de o **substituir**, então o
+`main.tks` do projeto — que chama os 120 `f_*` — entra no build junto com um único ficheiro de caso, e
+**todas** as chamadas ficam pendentes. Isso explicaria a cascata inteira e o facto de a mensagem citar
+`main.tks`.
+
+**Quatro linhas novas de `cases/` entraram hoje** (duas do degrau 28, duas da leitura fora de fronteira),
+o que é consistente com a falha ter mudado de carácter exactamente agora.
+
+### A LIÇÃO, e é a mesma nas duas vezes
+
+**Explicar um sintoma não explica os outros.** Quando um agente reporta duas anomalias e uma delas tem
+causa conhecida, a segunda **continua por medir**. E quando um agente contradiz o CI, o resultado é uma
+**discrepância a medir** — não um lado em que acreditar. Já escrevi esta lição hoje em §2b, e voltei a
+falhá-la.
+
+**NÃO OWNED. É o próximo despacho quando abrir vaga**, e tem prioridade sobre a fila anterior: uma
+falha de composição de build faz um canal inteiro reportar por uma razão que não é a sua, e isso engana
+todo agente que a leia.
+
 ## 0c. DUAS CONFERÊNCIAS QUE FALTAVAM, e um perigo do trabalho paralelo (2026-07-30)
 
 ### A minha lista de cinco conferências tinha um BURACO DE DIRECÇÃO
