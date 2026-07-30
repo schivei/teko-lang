@@ -902,3 +902,125 @@ Feature: float-to-text — `ftoa`/`f64_g17` lower to the runtime's own `%.17g` r
   Scenario: f32_text_is_its_own_value (own-native — an `f32` through all four text routes, direct, natural, static-spec and dynamic-spec)
     When built and run
     Then exit = 42
+
+Feature: slice/str element READ — `recv[i]` is bounds-checked on the native backend too (0.3.1.0 leitura-fora-de-fronteira)
+
+  # Degrau 28 closed the element WRITE and, in closing it, MEASURED that the element READ had no guard
+  # at all. Reproduced on this compiler before any change, same source, both routes:
+  #
+  #     xs[5] on a 3-element slice
+  #       own-native : prints `read=0` and exits 0        <- garbage, silently
+  #       C route    : 2:9: teko: deliberate panic: index out of bounds
+  #
+  # Under the oracle rule a native/C divergence is a NATIVE bug until proven otherwise, and the C route
+  # had bounds-checked both `str[i]` and `[]T[i]` from the start (`codegen::emit_index`, a stmt-expr that
+  # single-evaluates the index and compares it against `.len`). So the native read was a silent WRONG
+  # VALUE — the most dangerous class this lane hunts. The aggregate-element arm was worse than garbage:
+  # it SEGFAULTED (rc=139), because the load walked a stored element pointer out of the buffer.
+  #
+  # All four element shapes were measured to diverge and now agree: SCALAR, FAT (`[]str`, `[][]T`),
+  # AGGREGATE (held by address) and `str[i]` — plus CONSTANT, DYNAMIC and NEGATIVE indices. The guard is
+  # the very one the write uses (`lower_index_bounds_guard`), the index is lowered EXACTLY ONCE and
+  # shared by the guard and the address, and the trap calls the SAME positioned `tk_panic_oob_at` the C
+  # route's own read guard calls — measured identical, position included.
+  #
+  # The CONSTANT index still folds its whole byte offset into one `field_addr`: the guard needs the index
+  # in a register, not in the address. So the read pays a compare and a branch, and nothing else.
+  #
+  # Every row below is a MEMBER of this channel (one build, no extra cost) and asserts the VALUES an
+  # in-bounds read gives back, because that is what proves the guard did not break the good path — the
+  # LAST index of every container is read on purpose, since a guard written `<=` walks one element past
+  # the buffer and one written `< len - 1` rejects the last element of every correct program.
+  Scenario: slice_elem_read_boundaries (own-native — index 0, a middle index and the LAST, constant and dynamic, over an array literal's buffer and a push-grown one)
+    When built and run
+    Then exit = 42
+
+  Scenario: slice_elem_read_widths (own-native — i32/u8/byte/bool/f64 and an enum carrier, each read back at its own width with a neighbour re-checked)
+    When built and run
+    Then exit = 42
+
+  Scenario: slice_elem_read_fat (own-native — a `[]str` and a `[][]i64` element by LENGTH and CONTENT; the arm whose receiver is now lowered as a fat producer, for the length half the guard needs)
+    When built and run
+    Then exit = 42
+
+  Scenario: slice_elem_read_nested (own-native — `nn[i][j]`, the guarded fat read chained: the outer guard runs against a length the inner guarded read produced)
+    When built and run
+    Then exit = 42
+
+  Scenario: str_index_in_bounds (own-native — `str[i]` at 0, middle and last byte, over a literal, a concatenation and a multi-byte string; `lower_index_str`, the other guarded read path)
+    When built and run
+    Then exit = 42
+
+  # The BOUNDS side, and each scenario needs its OWN file for the reason the cast-guard and store-guard
+  # rows already record: a panic aborts the process and would take every later assertion of the channel's
+  # one program with it. `Then it traps` + `stderr pattern` rather than an exit code, because an abort's
+  # status is synthesised by whoever ran the child — no number distinguishes "the guard fired" from "the
+  # program crashed", while the pattern names WHICH guard killed it.
+  #
+  # Every row runs on BOTH routes, and that pairing IS the oracle. Measured, before and after, on the
+  # same compiler: the C route panicked at `2:9`/`3:9` in every one of them, and the own-native rows now
+  # print the identical line, column and message.
+  Scenario: slice_read_oob_panics (own-native — a constant read one past the last index)
+    Given source = "cases/slice_read_oob_panics.tks"
+    When built and run
+    Then it traps
+    And stderr pattern = "teko: deliberate panic: index out of bounds"
+
+  Scenario: slice_read_oob_panics (C route — the route that was already right)
+    Given source = "cases/slice_read_oob_panics.tks"
+    Given env = ["TEKO_BACKEND=c"]
+    When built and run
+    Then it traps
+    And stderr pattern = "teko: deliberate panic: index out of bounds"
+
+  Scenario: slice_read_negative_index_panics (own-native — a negative index is the huge unsigned value it already is in the carrier, so the SAME unsigned compare rejects it)
+    Given source = "cases/slice_read_negative_index_panics.tks"
+    When built and run
+    Then it traps
+    And stderr pattern = "teko: deliberate panic: index out of bounds"
+
+  Scenario: slice_read_negative_index_panics (C route)
+    Given source = "cases/slice_read_negative_index_panics.tks"
+    Given env = ["TEKO_BACKEND=c"]
+    When built and run
+    Then it traps
+    And stderr pattern = "teko: deliberate panic: index out of bounds"
+
+  Scenario: slice_read_fat_oob_panics (own-native — a `[]str` element read past the last index, the FAT arm)
+    Given source = "cases/slice_read_fat_oob_panics.tks"
+    When built and run
+    Then it traps
+    And stderr pattern = "teko: deliberate panic: index out of bounds"
+
+  Scenario: slice_read_fat_oob_panics (C route)
+    Given source = "cases/slice_read_fat_oob_panics.tks"
+    Given env = ["TEKO_BACKEND=c"]
+    When built and run
+    Then it traps
+    And stderr pattern = "teko: deliberate panic: index out of bounds"
+
+  Scenario: slice_read_aggregate_oob_panics (own-native — a struct element read past the last index; this is the shape that used to SEGFAULT instead of merely reading garbage)
+    Given source = "cases/slice_read_aggregate_oob_panics.tks"
+    When built and run
+    Then it traps
+    And stderr pattern = "teko: deliberate panic: index out of bounds"
+
+  Scenario: slice_read_aggregate_oob_panics (C route)
+    Given source = "cases/slice_read_aggregate_oob_panics.tks"
+    Given env = ["TEKO_BACKEND=c"]
+    When built and run
+    Then it traps
+    And stderr pattern = "teko: deliberate panic: index out of bounds"
+
+  Scenario: str_read_oob_panics (own-native — `str[i]` past the last byte, the path `lower_index_slice` does not cover)
+    Given source = "cases/str_read_oob_panics.tks"
+    When built and run
+    Then it traps
+    And stderr pattern = "teko: deliberate panic: index out of bounds"
+
+  Scenario: str_read_oob_panics (C route)
+    Given source = "cases/str_read_oob_panics.tks"
+    Given env = ["TEKO_BACKEND=c"]
+    When built and run
+    Then it traps
+    And stderr pattern = "teko: deliberate panic: index out of bounds"

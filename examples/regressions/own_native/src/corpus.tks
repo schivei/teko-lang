@@ -4099,6 +4099,151 @@ fn f_f32_text_is_its_own_value() -> i64 {
     if $"{halves:P1}" != "250.0%" { return 11 }
     if $"{halves:[d27_dynamic_spec()]}" != "2.500" { return 12 }
     if $"{tenth:[d27_dynamic_spec()]}" != "0.100" { return 13 }
+
+/**
+ * oobr_grown — a `teko::list::push`-GROWN buffer holding `1 … n`, so the element READ's bounds guard
+ * is measured against a length the RECEIVER carries at runtime rather than one an array literal fixed
+ * at compile time. The two are the same `[]i64` to the checker and different memory to the backend, and
+ * a guard that read the wrong length half would reject the last element of exactly one of them.
+ *
+ * @param n  how many elements to grow
+ * @return   the grown buffer, holding 1 through n in order
+ */
+fn oobr_grown(n: i64) -> []i64 {
+    mut ys: []i64 = teko::list::empty()
+    mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        ys = teko::list::push(ys, i + 1)
+        i++
+    }
+    ys
+}
+
+/**
+ * f_slice_elem_read_boundaries — the element READ `xs[i]` now carries a bounds guard (0.3.1.0
+ * leitura-fora-de-fronteira), and this pins that the guard did not break the GOOD path: the FIRST
+ * index (offset 0), a MIDDLE one and the LAST (the index an off-by-one guard rejects), over a
+ * CONSTANT index and over a DYNAMIC one, on an array literal's boxed buffer and on a `push`-grown one.
+ *
+ * The last index is the load-bearing half. A guard written `index <= len` would let the read walk one
+ * element past the buffer, and a guard written `index < len - 1` would panic on the last element of
+ * every well-formed program — both are invisible to a test that only reads element 0.
+ *
+ * @return 0 when every in-bounds index reads its own element, else the number of the failing check
+ */
+fn f_slice_elem_read_boundaries() -> i64 {
+    let xs: []i64 = [10, 20, 30, 40, 50]
+    if xs[0] != 10 { return 1 }
+    if xs[2] != 30 { return 2 }
+    if xs[4] != 50 { return 3 }
+    mut i: i64 = 0
+    loop {
+        if i >= 5 { break }
+        if xs[i] != (i + 1) * 10 { return 4 }
+        i++
+    }
+    let ys = oobr_grown(5)
+    if ys[0] != 1 { return 5 }
+    if ys[4] != 5 { return 6 }
+    i = 0
+    mut sum: i64 = 0
+    loop {
+        if i >= ys.len to i64 { break }
+        sum = sum + ys[i]
+        i++
+    }
+    if sum != 15 { return 7 }
+    0
+}
+
+/**
+ * f_slice_elem_read_widths — the guarded element READ at every ELEMENT CLASS whose load width can be
+ * picked wrong: a four-byte `i32`, a one-byte `u8` and `byte`, a `bool`, an `f64` (a different register
+ * file) and a declared `enum`'s integer carrier. The guard sits between the index and the address, so a
+ * guard that clobbered the index or the base would read the neighbouring element instead — each check
+ * therefore reads its own element AND a neighbour.
+ *
+ * @return 0 when every element class reads back at its own width, else the failing check
+ */
+fn f_slice_elem_read_widths() -> i64 {
+    let a: []i32 = [1 to i32, 2 to i32, 3 to i32]
+    if a[1] != 2 to i32 { return 1 }
+    if a[2] != 3 to i32 { return 2 }
+    let b: []u8 = [1 to u8, 250 to u8, 3 to u8]
+    if b[1] != 250 to u8 { return 3 }
+    if b[0] != 1 to u8 { return 4 }
+    let c: []byte = [0 to byte, 200 to byte, 7 to byte]
+    if c[1] != 200 to byte { return 5 }
+    if c[2] != 7 to byte { return 6 }
+    let d: []bool = [false, true, false]
+    if !d[1] { return 7 }
+    if d[2] { return 8 }
+    let e: []f64 = [1.5, 2.5, 3.5]
+    if e[1] != 2.5 { return 9 }
+    if e[2] != 3.5 { return 10 }
+    let g: []ElemShade = [ElemShade::Off, ElemShade::Hot, ElemShade::Warm]
+    if g[1] != ElemShade::Hot { return 11 }
+    if g[2] != ElemShade::Warm { return 12 }
+    0
+}
+
+/**
+ * f_slice_elem_read_fat — the FAT arm of the guarded element read (`lower_index_fat`): a `[]str` and a
+ * `[][]i64` element, each checked by LENGTH and by CONTENT. This arm changed shape as well as gaining a
+ * guard — its receiver is now lowered as a FAT producer, because the LENGTH half is what the guard
+ * needs — so a receiver whose two halves came apart would read a valid pointer with somebody else's
+ * length, which is the failure a length-only check would miss.
+ *
+ * @return 0 when every fat element reads back both halves, else the failing check
+ */
+fn f_slice_elem_read_fat() -> i64 {
+    let ss: []str = ["alpha", "be", "c"]
+    if ss[0] != "alpha" { return 1 }
+    if ss[0].len != 5 { return 2 }
+    if ss[2] != "c" { return 3 }
+    if ss[2].len != 1 { return 4 }
+    let nn: [][]i64 = [[1, 2, 3], [4], [5, 6]]
+    if nn[0].len != 3 { return 5 }
+    if nn[1].len != 1 { return 6 }
+    if nn[2].len != 2 { return 7 }
+    if nn[0][2] != 3 { return 8 }
+    if nn[2][1] != 6 { return 9 }
+    mut i: i64 = 0
+    mut total: i64 = 0
+    loop {
+        if i >= 3 { break }
+        total = total + ss[i].len to i64
+        i++
+    }
+    if total != 8 { return 10 }
+    0
+}
+
+/**
+ * f_slice_elem_read_nested — the guarded fat read CHAINED: `nn[i][j]` whose inner receiver is itself an
+ * index, so the outer subscript's guard runs against a length that the inner subscript's own guarded
+ * read produced. Both indices are dynamic, so neither address folds, and each row is walked to its own
+ * LAST element — the index an off-by-one guard rejects, now nested one level deeper.
+ *
+ * @return 0 when every element of every row is reached, else the failing check
+ */
+fn f_slice_elem_read_nested() -> i64 {
+    let nn: [][]i64 = [[1, 2, 3], [4], [5, 6]]
+    mut r: i64 = 0
+    mut total: i64 = 0
+    loop {
+        if r >= nn.len to i64 { break }
+        mut c: i64 = 0
+        loop {
+            if c >= nn[r].len to i64 { break }
+            total = total + nn[r][c]
+            c++
+        }
+        r++
+    }
+    if total != 21 { return 1 }
+    if nn[nn.len to i64 - 1][1] != 6 { return 2 }
     0
 }
 
@@ -4110,3 +4255,33 @@ fn f_f32_text_is_its_own_value() -> i64 {
  * @return  `"F3"`, three fixed decimal places
  */
 fn d27_dynamic_spec() -> str { "F3" }
+ * f_str_index_in_bounds — `str[i]`, the OTHER guarded read path (`lower_index_str`, distinct from
+ * `lower_index_slice` — the finding named both). Its receiver already arrived as a fat value, so only
+ * the guard is new here; what this pins is that the byte load still reads the byte the C route reads,
+ * at index 0, in the middle and at the LAST byte of a literal, of a concatenation and of a multi-byte
+ * string whose bytes are not its characters.
+ *
+ * @return 0 when every in-bounds byte matches, else the failing check
+ */
+fn f_str_index_in_bounds() -> i64 {
+    let s = "abc"
+    if s[0] to i64 != 97 { return 1 }
+    if s[1] to i64 != 98 { return 2 }
+    if s[2] to i64 != 99 { return 3 }
+    let t = "ab" ~ "cd"
+    if t.len != 4 { return 4 }
+    if t[3] to i64 != 100 { return 5 }
+    mut i: i64 = 0
+    mut sum: i64 = 0
+    loop {
+        if i >= t.len to i64 { break }
+        sum = sum + t[i] to i64
+        i++
+    }
+    if sum != 394 { return 6 }
+    let u = "é"
+    if u.len != 2 { return 7 }
+    if u[0] to i64 != 195 { return 8 }
+    if u[1] to i64 != 169 { return 9 }
+    0
+}
