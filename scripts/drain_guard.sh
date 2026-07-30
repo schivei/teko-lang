@@ -25,11 +25,56 @@
 # THE INTEGRATOR IS STILL ALLOWED TO CHANGE CI — from the wagon itself, or with `--allow` when a
 # branch is deliberately a CI change. What is refused is CI arriving as a PASSENGER on product work.
 #
+# ── A SEGUNDA CONFERÊNCIA: EM QUE BRANCH É QUE TU ESTÁS ────────────────────────────────────────
+#
+# ISTO TAMBÉM DEFENDE DE UM INCIDENTE REAL, E O INCIDENTE FOI MEU. 2026-07-30: um agente trocou a
+# branch do checkout PARTILHADO por baixo de mim (foi instruído a usar worktree própria e criou a
+# branch no repositório principal). Eu corri o `drain_guard`, li o OK, fiz `git merge` — e o merge
+# foi para `cargo/0.3.1.0-arq-concorrencia`, a branch do arquiteto, em vez do vagão. Só descobri
+# porque o `git push` respondeu "Everything up-to-date", o que não fazia sentido depois de um merge.
+#
+# Nada se perdeu (nada tinha sido empurrado), mas a conferência que o teria apanhado ANTES não existia:
+# o guard olhava para o que o merge TRAZ e nunca para ONDE o merge CAI.
+#
+# É a terceira vez no mesmo dia que um recurso partilhado sem identidade própria morde — o scratchpad
+# em que um agente transformou o binário de outro num directório, o `.tkcov` que as shards
+# entre-clobbavam, e agora o checkout de git. O dono nomeou a família: *"implementou-se o paralelismo
+# mas faltou o controle de concorrência"*. A resposta é sempre a mesma: identidade explícita.
+#
+# A REGRA: um dreno cai num VAGÃO (`remodel/**`) ou no tronco (`main`). Nunca numa `cargo/**` — essa é
+# branch de agente, e um merge que lá caia é sempre engano. `--into <branch>` afirma o destino em vez
+# de o presumir, e é o que eu passo a usar quando quero ser explícito.
+#
 # usage: scripts/drain_guard.sh <ref-to-drain> [<wagon-ref>]
-#        scripts/drain_guard.sh <ref-to-drain> --allow      # the branch IS a deliberate CI change
+#        scripts/drain_guard.sh <ref-to-drain> --allow        # the branch IS a deliberate CI change
+#        scripts/drain_guard.sh <ref-to-drain> --into <branch> # afirma o destino em vez de o presumir
 #
 #   ref-to-drain  the branch/SHA about to be merged
 #   wagon-ref     what to compare against (default: HEAD)
+
+
+# ── ONDE É QUE ESTE MERGE CAI ──────────────────────────────────────────────────────────────────
+into=""
+for a in "$@"; do
+    if [ "$prev_into" = "1" ]; then into="$a"; prev_into=""; continue; fi
+    if [ "$a" = "--into" ]; then prev_into=1; fi
+done
+here="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '(sem branch)')"
+if [ -n "$into" ] && [ "$here" != "$into" ]; then
+    echo "drain_guard: RECUSADO — pediste --into '$into' e o checkout está em '$here'." >&2
+    echo "drain_guard: um merge cai onde o HEAD está, não onde tu pensas que está." >&2
+    exit 1
+fi
+case "$here" in
+    cargo/*)
+        echo "drain_guard: RECUSADO — o checkout está em '$here', que é branch de AGENTE." >&2
+        echo "drain_guard: um dreno cai num vagão ('remodel/**') ou no tronco ('main')." >&2
+        echo "drain_guard: em 2026-07-30 um agente trocou a branch do checkout partilhado por baixo do" >&2
+        echo "drain_guard: integrador e o merge foi para a branch do arquiteto. Corrige o HEAD e repete." >&2
+        exit 1 ;;
+esac
+echo "drain_guard: destino = '$here'"
+
 
 set -u
 
