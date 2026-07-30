@@ -267,6 +267,15 @@ tk_slice_char tk_str_chars(tk_str s);
 // at the call site (codegen.c/.tks) by folding N pieces via tk_str_concat; no runtime symbol needed.
 // tk_ftoa — x rendered as %.17g float text (exact binary64 round-trip) in a fresh str.
 tk_str tk_ftoa(double x);
+// tk_ftoa_len / tk_f64_g17_len — the out-parameter-length twins of the two FLOAT-TO-TEXT renderers
+// (`ftoa` and `f64_g17`, both `%.17g`), mirroring tk_i64_to_str_len's own doc: the native backend's
+// LCall captures ONE result register, never the two-eightbyte SysV/AAPCS64 pair a tk_str return
+// occupies, so the pointer half rides the ordinary return value and the length rides *out_len. The
+// `double` argument needs no such detour — it rides XMM0/D0 like any other float argument (the same
+// shape tk_fmt_f_len already uses). Thin wrappers: each calls its own two-word twin and owns no
+// logic (0.3.1.0 degrau 27 — the stop that blocked the native self-host at cb_f64_literal).
+const tk_byte *tk_ftoa_len(double x, uint64_t *out_len);
+const tk_byte *tk_f64_g17_len(double x, uint64_t *out_len);
 
 // --- Format spec helpers ($"{x:F2}" / $"{x:[fmt]}") ---
 // All return fresh malloc'd str (tk_panic on OOM).  spec codes:
