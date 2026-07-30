@@ -1306,6 +1306,19 @@ fn lwt_index(recv: checker::TExpr, index: checker::TExpr, et: checker::Type) -> 
     checker::TExpr { kind = checker::TIndex { receiver = recv; index = index }; type = et; line = 0; col = 0 }
 }
 
+/**
+ * lwt_lowers_array_literal_and_constant_index — `[10, 20, 30][1]`: the literal allocas its buffer,
+ * stores each element at its constant offset, boxes the filled buffer into per-execution storage
+ * (`tk_slice_elem_box`), and the subscript then BOUNDS-CHECKS its index before folding the element's
+ * whole byte offset into ONE `field_addr`.
+ *
+ * The guard's shape is pinned here on purpose (0.3.1.0 leitura-fora-de-fronteira): the literal's
+ * length reaches the compare (`icmpltu`), the trap calls the POSITIONED `tk_panic_oob_at(line, col)`
+ * the C route's own `emit_index` calls, and the address is STILL a single `field_addr` — the constant
+ * fold survives the guard, because the guard wants the index in a REGISTER and the address does not.
+ *
+ * @return void
+ */
 #test
 fn lwt_lowers_array_literal_and_constant_index() {
     let elems = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), lwt_num_i64(10)), lwt_num_i64(20)), lwt_num_i64(30))
@@ -1317,8 +1330,12 @@ fn lwt_lowers_array_literal_and_constant_index() {
     teko::assert::str_contains(text, "store.i64 %4, %3")
     teko::assert::str_contains(text, "%7 = const 24")
     teko::assert::str_contains(text, "%8 = call @tk_slice_elem_box(%0, %7)")
-    teko::assert::str_contains(text, "%9 = field_addr %8, 8")
-    teko::assert::str_contains(text, "%10 = load.i64 %9")
+    teko::assert::str_contains(text, "%9 = const 3")
+    teko::assert::str_contains(text, "%10 = const 1")
+    teko::assert::str_contains(text, "%13 = icmpltu %10, %9")
+    teko::assert::str_contains(text, "call @tk_panic_oob_at(%11, %12)")
+    teko::assert::str_contains(text, "%14 = field_addr %8, 8")
+    teko::assert::str_contains(text, "%15 = load.i64 %14")
 }
 
 /** lwt_field_assign — `recv.field op= value`, a Field-kind TAssign whose target is the
