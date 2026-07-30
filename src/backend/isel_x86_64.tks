@@ -735,12 +735,39 @@ fn arg_slot_size_x86(reg_class: MRegClass, wide: bool) -> MMemSizeX86 {
 }
 
 /**
+ * param_class_index_x86 — the index parameter `index` occupies inside its own
+ * register file's argument window, under the target ABI's slot-numbering rule
+ * (`B3-argslot`).
+ *
+ * SysV counts the two files INDEPENDENTLY, so the answer is how many earlier
+ * parameters share this one's register class. Win64 numbers BOTH files by ONE
+ * shared argument POSITION — argument 1 is RDX *or* XMM1, never XMM0 — so the
+ * answer is the position itself. Reading the rule off the descriptor is what makes
+ * one isel correct on both, instead of writing SysV's numbering into a Win64
+ * object.
+ *
+ * @param AbiDescriptor abi  the target ABI register file (its slot-numbering rule)
+ * @param []lir::LType param_types  the function's parameter machine classes
+ * @param u32 index  the parameter position to resolve
+ * @return u32  the index to look up in that class's argument-register window
+ */
+fn param_class_index_x86(abi: AbiDescriptor, param_types: []lir::LType, index: u32) -> u32 {
+    if abi.arg_slots_shared { return index }
+    if mregclass_of_ltype(param_types[index to u64]) == MRegClass::FPR {
+        return fpr_index_before(param_types, index)
+    }
+    gpr_index_before(param_types, index)
+}
+
+/**
  * stack_index_before — how many of `param_types[0..index)` overflowed their
  * class's argument-register window and therefore live in the caller's stack-arg
  * area (`B1-args`). Both x86-64 ABIs assign in declaration order and place an
  * overflowing argument in the next free stack slot regardless of its class, so
  * ONE counter over both register files gives the slot index — which is why this
- * is not simply `index - window`.
+ * is not simply `index - window`. Each parameter's window index comes from
+ * `param_class_index_x86`, so this count agrees with the caller's own
+ * `store_stack_args_x86` under either slot-numbering rule.
  *
  * @param AbiDescriptor abi  the target ABI register file (its two window sizes)
  * @param []lir::LType param_types  the function's parameter machine classes
@@ -753,8 +780,7 @@ fn stack_index_before(abi: AbiDescriptor, param_types: []lir::LType, index: u32)
     loop {
         if i >= index { break }
         let cls = mregclass_of_ltype(param_types[i])
-        let class_index = if cls == MRegClass::FPR { fpr_index_before(param_types, i to u32) } else { gpr_index_before(param_types, i to u32) }
-        if !arg_reg(abi, cls, class_index).ok { count++ }
+        if !arg_reg(abi, cls, param_class_index_x86(abi, param_types, i to u32)).ok { count++ }
         i++
     }
     count
@@ -763,8 +789,10 @@ fn stack_index_before(abi: AbiDescriptor, param_types: []lir::LType, index: u32)
 /**
  * select_param_x86 — the `LParam` selection (§4.5): move the target ABI's
  * argument register — GPR (SysV RDI/RSI/RDX/RCX/R8/R9; Win64 RCX/RDX/R8/R9)
- * or FPR (XMM0..7; XMM0..3 on Win64), classified INDEPENDENTLY per register
- * file exactly like arm64's `select_param` (`B1-fp`) — read through
+ * or FPR (XMM0..7; XMM0..3 on Win64), classified by the descriptor's own
+ * slot-numbering rule (`param_class_index_x86` — independently per register file
+ * on SysV, exactly like arm64's `select_param`; by shared argument position on
+ * Win64, `B3-argslot`) (`B1-fp`) — read through
  * `arg_reg(abi, ...)` because neither argument sequence is the contiguous
  * encoding order, into the parameter's VReg via `MMovX86`/`MFMovX86`. The
  * `abi` descriptor is threaded from the emit driver, so the SAME isel code
@@ -789,8 +817,7 @@ fn select_param_x86(abi: AbiDescriptor, ctx0: SelCtxX86, f: lir::LFunc, inst: li
     let reg_class = mregclass_of_ltype(ty)
     let wide = ltype_is_wide(ty)
     let is_fpr = reg_class == MRegClass::FPR
-    let class_index = if is_fpr { fpr_index_before(f.param_types, p.index) } else { gpr_index_before(f.param_types, p.index) }
-    let slot = arg_reg(abi, reg_class, class_index)
+    let slot = arg_reg(abi, reg_class, param_class_index_x86(abi, f.param_types, p.index))
     let dst = vreg(inst.result, reg_class)
     let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, reg_class, wide)
     if !slot.ok {
@@ -1210,8 +1237,10 @@ type PinnedArgsX86 = struct {
 
 /**
  * pin_args_x86 — lower each argument into the target ABI's slot (§4.5),
- * classified INDEPENDENTLY per register file (GPR: SysV RDI/RSI/RDX/RCX/R8/R9,
- * Win64 RCX/RDX/R8/R9; FPR: XMM0..7, XMM0..3 on Win64 — `B1-fp`), read through
+ * classified by the descriptor's own slot-numbering rule (GPR: SysV
+ * RDI/RSI/RDX/RCX/R8/R9, Win64 RCX/RDX/R8/R9; FPR: XMM0..7, XMM0..3 on Win64 —
+ * `B1-fp`; per-file counters on SysV, one shared argument position on Win64 —
+ * `B3-argslot`), read through
  * the descriptor because neither argument order is the contiguous encoding
  * order, collecting the physregs as the call's `uses`. The `abi` descriptor is
  * threaded from the emit driver so the SAME isel places a call's outgoing
@@ -1242,10 +1271,37 @@ fn pin_args_x86(abi: AbiDescriptor, ctx0: SelCtxX86, args: []u32, variadic: bool
 }
 
 /**
+ * arg_class_index_x86 — the index argument `i` occupies inside its own register
+ * file's argument window at a CALL site, the caller-side twin of
+ * `param_class_index_x86`: the argument POSITION when the ABI numbers both files
+ * by one shared slot (Win64, `B3-argslot`), else how many earlier arguments share
+ * this one's class (SysV, `B1-fp`).
+ *
+ * @param AbiDescriptor abi  the target ABI register file (its slot-numbering rule)
+ * @param SelCtxX86 ctx  the context whose `vinfo` records each argument's class
+ * @param []u32 args  the argument VRegs, in declaration order
+ * @param u64 i  the argument position to resolve
+ * @return u32  the index to look up in that class's argument-register window
+ */
+fn arg_class_index_x86(abi: AbiDescriptor, ctx: SelCtxX86, args: []u32, i: u64) -> u32 {
+    if abi.arg_slots_shared { return i to u32 }
+    let is_fpr = vinfo_get(ctx.vinfo, args[i]).reg_class == MRegClass::FPR
+    mut n: u32 = 0
+    mut j: u64 = 0
+    loop {
+        if j >= i { break }
+        if (vinfo_get(ctx.vinfo, args[j]).reg_class == MRegClass::FPR) == is_fpr { n++ }
+        j++
+    }
+    n
+}
+
+/**
  * arg_slot_x86 — where argument `i` of `args` travels: the `ArgReg` its class's
  * window yields (`ok` false meaning "this one overflows to the stack"), reading
- * each argument's class out of the recorded `vinfo` and counting the two register
- * files independently (`B1-fp`/`B1-args`). One shared classifier so
+ * each argument's class out of the recorded `vinfo` and its window index out of
+ * the descriptor's slot-numbering rule (`arg_class_index_x86` —
+ * `B1-fp`/`B1-args`/`B3-argslot`). One shared classifier so
  * `store_stack_args_x86` and `pin_reg_args_x86` cannot disagree about which
  * arguments went where.
  *
@@ -1257,15 +1313,7 @@ fn pin_args_x86(abi: AbiDescriptor, ctx0: SelCtxX86, args: []u32, variadic: bool
  */
 fn arg_slot_x86(abi: AbiDescriptor, ctx: SelCtxX86, args: []u32, i: u64) -> ArgReg {
     let cls = vinfo_get(ctx.vinfo, args[i]).reg_class
-    mut gpr_n: u32 = 0
-    mut fpr_n: u32 = 0
-    mut j: u64 = 0
-    loop {
-        if j >= i { break }
-        if vinfo_get(ctx.vinfo, args[j]).reg_class == MRegClass::FPR { fpr_n++ } else { gpr_n++ }
-        j++
-    }
-    arg_reg(abi, cls, if cls == MRegClass::FPR { fpr_n } else { gpr_n })
+    arg_reg(abi, cls, arg_class_index_x86(abi, ctx, args, i))
 }
 
 /**
@@ -1481,17 +1529,21 @@ fn pin_fat_slot_addrs_x86(abi: AbiDescriptor, ctx0: SelCtxX86, addrs: []MReg) ->
 
 /**
  * pin_trailing_scalar_args_x86 — the args AFTER the by-reference pairs, pinned
- * into the integer argument registers that follow them: `tk_rt_last_index_of_ok`'s
+ * into the argument registers that follow them: `tk_rt_last_index_of_ok`'s
  * `uint64_t *out_index` is exactly this case (two references in RCX/RDX, the
  * out-slot address in R8).
  *
- * An FPR-class trailing argument honest-stops BY NAME rather than emitting a
- * guess: Win64 numbers its float argument registers in the SAME positional slots
- * as its integer ones (XMM2 for argument 2, not "the third float"), which
- * `arg_slot_x86`'s per-file counting does not model, and no fat-argument runtime
- * entry has such a parameter. A trailing argument past the register window
- * honest-stops too — with four integer argument registers and at most two pairs
- * plus one out-slot, no shipped entry reaches it.
+ * COLLAPSING THE PAIRS RENUMBERS THE SLOTS. Each by-reference pair took TWO
+ * flattened operands and travels in ONE register, so flattened operand `i` sits at
+ * argument POSITION `i - pairs` — and that position IS the window index here,
+ * because this path exists only on an ABI whose two register files share their
+ * slots by position (`by_ref_fat_pairs_x86` answers 0 on every ABI that carries a
+ * 16-byte aggregate in registers, so SysV never arrives). An FPR-class trailing
+ * argument therefore takes the XMM of that same position (`B3-argslot`, dispatched
+ * 2026-07-30 — it used to honest-stop for want of exactly this numbering). A
+ * trailing argument past the register window still honest-stops: with four
+ * argument slots and at most two pairs plus one out-slot, no shipped entry reaches
+ * it.
  *
  * @param AbiDescriptor abi  the target ABI register file
  * @param PinnedArgsX86 pinned  the pairs already pinned (its context + uses)
@@ -1506,14 +1558,13 @@ fn pin_trailing_scalar_args_x86(abi: AbiDescriptor, pinned: PinnedArgsX86, args:
     loop {
         if i >= args.len { break }
         let info = vinfo_get(ctx.vinfo, args[i])
-        if info.reg_class == MRegClass::FPR {
-            return error { message = "isel x86-64: B3-argslot — a FLOAT argument after a by-reference aggregate needs Win64's shared argument-slot numbering (0.3.1)" }
-        }
-        let slot = arg_reg(abi, MRegClass::GPR, (i - pairs) to u32)
+        let is_fpr = info.reg_class == MRegClass::FPR
+        let slot = arg_reg(abi, info.reg_class, (i - pairs) to u32)
         if !slot.ok {
-            return error { message = "isel x86-64: B1-args — an argument after a by-reference aggregate overflowed the integer argument window (0.3.1)" }
+            return error { message = "isel x86-64: B1-args — an argument after a by-reference aggregate overflowed the argument window (0.3.1)" }
         }
-        ctx = selctx_x86_emit(ctx, mov_x86(slot.reg, vreg(args[i], MRegClass::GPR), info.wide))
+        let mv = if is_fpr { fmov_x86(slot.reg, vreg(args[i], MRegClass::FPR), info.wide) } else { mov_x86(slot.reg, vreg(args[i], MRegClass::GPR), info.wide) }
+        ctx = selctx_x86_emit(ctx, mv)
         uses = teko::list::push(uses, slot.reg)
         i++
     }
