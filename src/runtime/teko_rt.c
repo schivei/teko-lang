@@ -1642,10 +1642,15 @@ _Noreturn void tk_panic_str(tk_str msg) {
     tk_regions_free_all();   // (W9.3b) abort() skips atexit — free the arena regions explicitly first
     abort();
 }
+// the platform-uniform process status for a raw Teko exit code (owner ruling 2026-07-30 — the
+// language equalizes the exit code, the programmer never writes the mask). See TK_EXIT_STATUS_MASK
+// in teko_rt.h for WHY the low byte is the portable observable. Signed `&` in C keeps the negative
+// convention POSIX already had: -1 & 0xFF == 255.
+int tk_exit_status(int32_t code) { return (int)(code & TK_EXIT_STATUS_MASK); }
 // the Teko-level `exit(<int>)` — end the program with a status code (no panic message).
 // (W9.3b) free every live arena region before exiting so a diverging exit() is leak-clean (the atexit
 // hook would also fire, but the explicit call keeps the contract local + obvious; free_all is idempotent).
-_Noreturn void tk_exit(int32_t code) { tk_regions_free_all(); exit(code); }
+_Noreturn void tk_exit(int32_t code) { tk_regions_free_all(); exit(tk_exit_status(code)); }
 
 _Noreturn void tk_panic_div0(void)     { tk_panic("division by zero"); }
 _Noreturn void tk_panic_oob(void)      { tk_panic("index out of bounds"); }

@@ -2036,7 +2036,45 @@ fn wasm_resolve_data(t: WasmSymbolTable, symbol: str) -> u32 | error {
 }
 
 /**
- * stackify_call — the `LCall` lowering: push every argument's local, `call
+ * WASM_EXIT_SYMBOL — the runtime symbol a Teko `exit(<int>)` lowers to
+ * (`lir::lower`'s own `tk_exit`). On wasm it does NOT reach the C runtime:
+ * `wasm_symtab_seed_wasi` resolves it DIRECTLY to the WASI `proc_exit`
+ * import, so the runtime's own `TK_EXIT_STATUS_MASK` never sees the value and
+ * this module has to normalize the exit code itself.
+ *
+ * @since cargo/0.3.1-saida-equalizada
+ */
+const WASM_EXIT_SYMBOL: str = "tk_exit"
+
+/**
+ * wasm_normalize_exit_operand — append `i32.const EXIT_STATUS_MASK; i32.and`
+ * when `symbol` is the exit builtin, leaving every other call untouched. THE
+ * WASM EXIT-CODE DOOR, half one: an `exit(n)` call reaches the host through
+ * `proc_exit` without ever passing the C runtime, so without this the host
+ * would report `n` whole — 235 wherever the OS truncates a status to its low
+ * byte and 20203 wherever it does not (owner ruling 2026-07-30: one program,
+ * one exit code, every platform).
+ *
+ * The operand is typed `i32` because `proc_exit`'s single parameter already
+ * is: a wider staged operand was an invalid module BEFORE this mask existed
+ * and stays exactly as invalid after it, so the mask neither introduces nor
+ * hides a typing gap.
+ *
+ * @param StackifyCtx ctx  the context whose operand stack holds the staged
+ *                         exit code
+ * @param str symbol  the callee symbol being lowered
+ * @return StackifyCtx  the context, with the mask appended only for the exit
+ *                      builtin
+ * @see lir::EXIT_STATUS_MASK
+ */
+fn wasm_normalize_exit_operand(ctx: StackifyCtx, symbol: str) -> StackifyCtx {
+    if symbol != WASM_EXIT_SYMBOL { return ctx }
+    sc_byte(sc_sleb(sc_byte(ctx, WASM_OP_I32_CONST), lir::EXIT_STATUS_MASK), WASM_OP_I32_AND)
+}
+
+/**
+ * stackify_call — the `LCall` lowering: push every argument's local, normalize
+ * an exit code (`wasm_normalize_exit_operand`), `call
  * $funcidx` (`wasm_resolve_call` names the target). When the callee returns
  * a value: captured into the result's local when `inst.has_result`, else
  * `drop`ped (`0x1A`) to keep the operand stack balanced for a
@@ -2059,7 +2097,7 @@ fn wasm_resolve_data(t: WasmSymbolTable, symbol: str) -> u32 | error {
  */
 fn stackify_call(ctx0: StackifyCtx, symbols: WasmSymbolTable, inst: lir::LInst, c: lir::LCall, ptr64: bool) -> StackifyCtx | error {
     let target = match wasm_resolve_call(symbols, c.symbol) { WasmCallTarget as t => t; error as e => return e }
-    let staged = sc_use_operands(ctx0, c.args)
+    let staged = wasm_normalize_exit_operand(sc_use_operands(ctx0, c.args), c.symbol)
     let ctx = sc_uleb(sc_byte(staged, WASM_OP_CALL), target.func_index to u64)
     if target.ret_type == lir::LType::Void {
         return ctx
@@ -4609,7 +4647,9 @@ fn wasm_program_func_index(import_count: u64, pos: u64) -> u32 {
  * (C1-5, the "link/dispatch" job C1-2's `wasm_resolve_call` doc deferred
  * here): `"tk_exit"` resolves DIRECTLY to the WASI `proc_exit` import
  * (§6.2 — their signatures match exactly, `(i32) -> ()`, so no separate
- * runtime-provided `tk_exit` symbol is needed for the MVP corpus), and
+ * runtime-provided `tk_exit` symbol is needed for the MVP corpus; the
+ * consequence is that the C runtime's own exit-code normalization is bypassed
+ * here, which is why `wasm_normalize_exit_operand` exists), and
  * every `LModule.funcs` entry resolves to its own assigned absolute index
  * (`wasm_program_func_index`) — so a future cross-function call (none in
  * the MVP corpus, `backend-c1-wasm.md` §12.2) already resolves correctly.
@@ -4773,11 +4813,13 @@ fn wasm_find_main_ret(funcs: []lir::LFunc) -> lir::LType | error {
  * own C1-5 invariant: a wasm COMMAND module — the `exit(n)` case this slice
  * targets — MUST export `_start`, the symbol `wasmtime`/every WASI host
  * looks up; the Teko front-end's own "virtual main" tail-exit convention
- * BECOMES this `_start`, §9): `call $main; call $proc_exit; end`. When
+ * BECOMES this `_start`, §9): `call $main; <mask>; call $proc_exit; end`. When
  * `main` returns `i32` (LIR's C-style "`main` returns the exit code" ABI,
  * `lir::lower_virtual_main`), its own result lands on the operand stack
  * right where `proc_exit`'s single `i32` parameter needs it, so NO local
- * staging is needed. When `main` returns `Void`, it leaves NOTHING on the
+ * staging is needed — only `wasm_mask_exit_status`, which normalizes the code
+ * to the one byte every platform reports identically. When `main` returns
+ * `Void`, it leaves NOTHING on the
  * stack, so a literal `i32.const 0` is pushed first — the standard WASI
  * `_start` "exit 0 on a clean fall-through" shape — keeping `proc_exit`'s
  * `i32` argument balanced instead of underflowing the operand stack
@@ -4793,7 +4835,8 @@ fn wasm_find_main_ret(funcs: []lir::LFunc) -> lir::LType | error {
  * @param u32 main_index  `"main"`'s own absolute function index
  * @param u32 proc_exit_index  the WASI `proc_exit` import's own index
  * @param LType main_ret  `main`'s own return type — `Void` triggers the
- *                        default `i32.const 0` exit-code push
+ *                        default `i32.const 0` exit-code push, `I32` the
+ *                        `wasm_mask_exit_status` normalization
  * @return WasmFunc | error  the `_start` code entry, or the NAMED
  *                           `C1-main-ret` honest-stop when `main_ret` is
  *                           neither `I32` nor `Void`
@@ -4808,11 +4851,31 @@ fn wasm_synth_start(type_index: u32, main_index: u32, proc_exit_index: u32, main
     if main_ret == lir::LType::Void {
         body = teko::list::push(body, WASM_OP_I32_CONST)
         body = emit_sleb128(body, 0)
+    } else {
+        body = wasm_mask_exit_status(body)
     }
     body = teko::list::push(body, WASM_OP_CALL)
     body = emit_uleb128(body, proc_exit_index to u64)
     body = teko::list::push(body, WASM_OP_END)
     WasmFunc { type_index = type_index; local_groups = teko::list::empty(); body = body }
+}
+
+/**
+ * wasm_mask_exit_status — append `i32.const EXIT_STATUS_MASK; i32.and` to a raw
+ * code buffer. THE WASM EXIT-CODE DOOR, half two: `_start` hands `main`'s
+ * `i32` result straight to `proc_exit`, so a program that FALLS THROUGH with a
+ * trailing exit-code value (rather than calling `exit`) leaves by this path and
+ * needs the same normalization `wasm_normalize_exit_operand` gives the call
+ * (owner ruling 2026-07-30). A `Void`-returning `main` needs none: its pushed
+ * literal `0` is already a byte.
+ *
+ * @param []byte buf  the buffer holding the code emitted so far, with the raw
+ *                    exit code on top of the operand stack
+ * @return []byte  `buf` followed by the two-instruction mask
+ * @see lir::EXIT_STATUS_MASK
+ */
+fn wasm_mask_exit_status(buf: []byte) -> []byte {
+    teko::list::push(wasm_op_i32_const(buf, lir::EXIT_STATUS_MASK), WASM_OP_I32_AND)
 }
 
 /**

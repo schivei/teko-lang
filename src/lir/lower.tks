@@ -12068,7 +12068,8 @@ const NATIVE_ENTRY_VMAIN_SYMBOL: str = "__teko_native_vmain"
  * `"main"`) to `NATIVE_ENTRY_VMAIN_SYMBOL`, then appends a tiny platform-ABI STUB `LFunc`, itself
  * named `"main"`, that receives the platform's own `argc`/`argv` entry registers, forwards them
  * to the runtime's `tk_set_args` BEFORE anything else runs, then calls the renamed virtual-main
- * and returns its result — mirroring the C emitter's own generated `main`
+ * and returns its result normalized to a platform-uniform exit code (`append_exit_status_mask`) —
+ * mirroring the C emitter's own generated `main`
  * (`codegen.tks`'s `emit_program_main_body`: `int main(int argc, char **argv) { tk_set_args(argc,
  * argv); … }`), so `teko::env::args()` (`tk_rt_args`) observes the real process argv under the
  * native backend too, instead of the runtime's zero-initialized globals (0.3.1 native-args fix).
@@ -12080,7 +12081,9 @@ const NATIVE_ENTRY_VMAIN_SYMBOL: str = "__teko_native_vmain"
  * `_start` does a zero-operand `call $main` sized off `main`'s OWN type-table entry — widening
  * `main`'s arity there would desync that call's operand count from its type. Splitting the entry
  * stub OFF as its own separate `LFunc` (rather than widening `lower_virtual_main`'s own
- * signature) is what keeps the wasm path byte-for-byte untouched.
+ * signature) is what keeps `main`'s wasm arity untouched. The wasm target therefore never inherits
+ * this stub's exit-code normalization either, and carries its OWN (`wasm_synth_start` and
+ * `stackify_call`'s `tk_exit` arm, `src/backend/stackify.tks`).
  *
  * THE ABI SHAPE IS PLATFORM-UNIFORM, deliberately: the stub is ordinary target-independent LIR
  * (an `I32`/`Ptr`-param, `I32`-returning function like any other), so the SAME EXISTING
@@ -12129,11 +12132,38 @@ fn native_entry_rename_vmain(funcs: []LFunc) -> []LFunc | error {
 }
 
 /**
+ * append_exit_status_mask — append `%m = const EXIT_STATUS_MASK; %s = %code and %m` to `f`'s entry
+ * block and return the masked VReg. This is the OWN-BACKEND process-exit door: the platform ABI
+ * hands `main`'s return value straight to the C runtime's `exit`, which is where POSIX truncates to
+ * a byte and Windows does not, so the entry stub normalizes the code ITSELF and both platforms
+ * report the same number (owner ruling 2026-07-30). Target-neutral by construction — one `IAnd`
+ * over the shared LIR, lowered by whichever backend consumes the module, exactly like the
+ * division-by-zero guard.
+ *
+ * @param f     the function whose entry block receives the two instructions
+ * @param code  the VReg holding the raw, unnormalized exit code
+ * @return      the advanced function plus the VReg holding `code & EXIT_STATUS_MASK`
+ * @see         EXIT_STATUS_MASK
+ */
+fn append_exit_status_mask(f: LFunc, code: u32) -> FreshVReg {
+    let maskreg = alloc_vreg(f)
+    let with_mask = append_inst(maskreg.func, 0, const_int_inst(maskreg.vreg, EXIT_STATUS_MASK, 0, 0))
+    let status = alloc_vreg(with_mask)
+    let with_and = append_inst(status.func, 0, bin_inst(status.vreg, LBinOp::IAnd, code, maskreg.vreg, 0, 0))
+    FreshVReg { func = with_and; vreg = status.vreg }
+}
+
+/**
  * native_entry_stub — the platform-ABI `"main"` `LFunc` itself: bind the two incoming
  * `argc`/`argv` registers, call `tk_set_args(argc, argv)`, call the renamed virtual-main with no
- * arguments, and return its result. Built directly over the raw `LFunc`/`append_inst`/
- * `alloc_vreg` primitives (no `LowerCtx` needed — there is no checker AST behind this
- * synthesized body, only four fixed instructions).
+ * arguments, NORMALIZE its result to a platform-uniform exit code (`append_exit_status_mask`), and
+ * return that. Built directly over the raw `LFunc`/`append_inst`/`alloc_vreg` primitives (no
+ * `LowerCtx` needed — there is no checker AST behind this synthesized body, only a fixed
+ * instruction sequence).
+ *
+ * The mask belongs HERE rather than at the virtual-main's own `ret`s because the stub is the single
+ * choke point: a loose top-level `return n`, the trailing-expression exit code and the fall-through
+ * `return 0` all reach the process through this one forwarded value.
  *
  * @return the entry stub `LFunc`
  */
@@ -12148,5 +12178,6 @@ fn native_entry_stub() -> LFunc {
     let with_set = append_inst(with_argv, 0, void_call_inst("tk_set_args", set_args_args, false, 0, 0))
     let called = alloc_vreg(with_set)
     let with_call = append_inst(called.func, 0, call_inst(called.vreg, NATIVE_ENTRY_VMAIN_SYMBOL, teko::list::empty(), false, 0, 0))
-    append_inst(with_call, 0, ret_inst(called.vreg, 0, 0))
+    let status = append_exit_status_mask(with_call, called.vreg)
+    append_inst(status.func, 0, ret_inst(status.vreg, 0, 0))
 }

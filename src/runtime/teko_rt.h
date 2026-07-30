@@ -762,6 +762,18 @@ _Noreturn void tk_panic(const char *msg);
 // the Teko-level globals `panic(str)` / `exit(<int>)` (legislator's ruling — no `never` type).
 // tk_panic_str takes a tk_str (ptr+len, tolerates embedded NUL); tk_exit ends with a status code.
 _Noreturn void tk_panic_str(tk_str msg);
+// TK_EXIT_STATUS_MASK — the low byte of a process status, the ONLY part of an exit code every
+// supported platform reports IDENTICALLY. POSIX exit(3)/wait(2) expose `status & 0377`; Windows
+// hands back all 32 bits of ExitProcess, so the same program reported 20203 there and 235 here.
+// Owner ruling 2026-07-30: the mask is the LANGUAGE's job ("pode fazer isso dentro do próprio
+// exit (para equalizar a saída)") — never asked of the programmer, never tolerated by a test
+// comparator. tk_exit_status is the single implementation on the C side; the own-backend and wasm
+// process entries carry their own (teko::lir::EXIT_STATUS_MASK) because they never link this file.
+#define TK_EXIT_STATUS_MASK 0xFF
+// tk_exit_status — the platform-uniform process status for a raw Teko exit code: its low byte,
+// which is also what a NEGATIVE code already yielded on POSIX (-1 -> 255). Called by tk_exit and
+// by the C route's `main` return (codegen emits `return tk_exit_status((int)(<expr>));`).
+int tk_exit_status(int32_t code);
 _Noreturn void tk_exit(int32_t code);
 _Noreturn void tk_panic_div0(void);       // "division by zero"
 _Noreturn void tk_panic_oob(void);        // "index out of bounds"
