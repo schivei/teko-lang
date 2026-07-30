@@ -139,7 +139,7 @@ extern fn pipe_write_fd_raw(packed: i64) -> i64 = "tk_rt_pipe_write_fd" from "te
  */
 pub fn pipe() -> Pipe | error {
     let packed = pipe_raw()
-    if packed < 0 { return error("teko::process::pipe: the host refused to create a pipe") }
+    if packed < 0 { return error { message = "teko::process::pipe: the host refused to create a pipe" } }
     Pipe { read_fd = pipe_read_fd_raw(packed); write_fd = pipe_write_fd_raw(packed) }
 }
 
@@ -168,7 +168,7 @@ extern fn close_fd_raw(fd: i64) -> i32 = "tk_rt_close_fd" from "teko_rt"
  */
 pub fn close_fd(fd: i64) -> null | error {
     if close_fd_raw(fd) == 0 { return null }
-    error("teko::process::close_fd: not an open descriptor")
+    error { message = "teko::process::close_fd: not an open descriptor" }
 }
 
 /**
@@ -211,9 +211,10 @@ const TOKEN_SEP: str = "\0"
  * @return          the flattened, self-describing payload
  */
 fn spawn_payload(argv: []str, dir: str, env: []str, in_path: str, out_path: str, err_path: str, in_fd: i64, out_fd: i64, err_fd: i64) -> str {
-    count_prefixed_list(argv) ~ TOKEN_SEP ~ count_prefixed_list(env)
-        ~ TOKEN_SEP ~ dir ~ TOKEN_SEP ~ in_path ~ TOKEN_SEP ~ out_path ~ TOKEN_SEP ~ err_path
-        ~ TOKEN_SEP ~ fd_token(in_fd) ~ TOKEN_SEP ~ fd_token(out_fd) ~ TOKEN_SEP ~ fd_token(err_fd)
+    let lists = count_prefixed_list(argv) ~ TOKEN_SEP ~ count_prefixed_list(env)
+    let paths = dir ~ TOKEN_SEP ~ in_path ~ TOKEN_SEP ~ out_path ~ TOKEN_SEP ~ err_path
+    let fds = fd_token(in_fd) ~ TOKEN_SEP ~ fd_token(out_fd) ~ TOKEN_SEP ~ fd_token(err_fd)
+    lists ~ TOKEN_SEP ~ paths ~ TOKEN_SEP ~ fds
 }
 
 /**
@@ -431,7 +432,7 @@ extern fn fd_wait_readable_raw(fd: i64, timeout_ms: i64) -> i32 = "tk_rt_fd_wait
  */
 pub fn fd_wait_readable(fd: i64, timeout_ms: i64) -> bool | error {
     let r = fd_wait_readable_raw(fd, timeout_ms)
-    if r < 0 { return error("teko::process::fd_wait_readable: the descriptor could not be observed") }
+    if r < 0 { return error { message = "teko::process::fd_wait_readable: the descriptor could not be observed" } }
     r == 1
 }
 
@@ -478,7 +479,7 @@ extern fn fd_read_failed_raw() -> bool = "tk_rt_fd_read_failed" from "teko_rt"
 pub fn fd_read(fd: i64, cap: u64) -> str | error {
     let got = fd_read_raw(fd, cap)
     if got.len > 0 { return got }
-    if fd_read_failed_raw() { return error("teko::process::fd_read: the host read call failed") }
+    if fd_read_failed_raw() { return error { message = "teko::process::fd_read: the host read call failed" } }
     ""
 }
 
@@ -538,5 +539,5 @@ fn now_ms() -> i64 { teko::time::span_monotonic_now().ticks / 1000000 }
  * @return         the deadline error
  */
 fn deadline_expired(drained: u64) -> error {
-    error("teko::process::read_to_eof: deadline expired after " ~ teko::str::u64_to_str(drained) ~ " bytes; a write end is still open somewhere")
+    error { message = "teko::process::read_to_eof: deadline expired after " ~ teko::str::u64_to_str(drained) ~ " bytes; a write end is still open somewhere" }
 }
