@@ -435,9 +435,16 @@ fn append_all(path: str, n: u64) -> bool {
  * rewrite_all — emit `n` records to `path` the way `verdict_emit` USED to: read the whole file back,
  * concatenate, rewrite.
  *
- * KEPT ALIVE DELIBERATELY, and only here. It is the control arm of the cost measurement — a claim
- * that the new shape is cheaper is worth nothing without the old one measured beside it on the same
- * host, in the same process, on the same records.
+ * KEPT ALIVE DELIBERATELY, and only here. It is the CONTROL ARM: it proves the two shapes produce
+ * the same file, which is what makes the cost comparison beside them meaningful — a cheaper arm that
+ * wrote less would be measuring output, not cost.
+ *
+ * THE COST COMPARISON ITSELF LIVES IN `examples/probes/append_cost_probe`, NOT HERE, and that is a
+ * property of the METER rather than a dodge. `teko::mem::peak_rss` is a HIGH-WATER MARK: by the time
+ * this file's tests run, the shared test process has already peaked far above anything either arm
+ * allocates, so both deltas read zero and the comparison cannot be taken at all — measured, as a
+ * FAILED assertion in one shard before the measurement was moved. A process that does nothing else
+ * is the only place that meter says anything, so that is where the two numbers are taken.
  *
  * @param path  the channel file
  * @param n     how many records
@@ -524,64 +531,3 @@ fn append_file_and_the_old_rewrite_agree_byte_for_byte() {
     match teko::fs::remove_file(by_append) { error => { }; null => { } }
     match teko::fs::remove_file(by_rewrite) { error => { }; null => { } }
 }
-
-#test
-/**
- * appending_allocates_far_less_than_rewriting — THE COST INVERSION, with both numbers taken on this
- * host, in this process, over the same records.
- *
- * ORDER MATTERS AND IS NOT ARBITRARY: `teko::mem::peak_rss` only ever grows, so the CHEAP arm runs
- * FIRST and its whole contribution is charged before the expensive one begins. Reading the peak at
- * three points then attributes each arm its own growth.
- *
- * THE RATIO IS THE ASSERTION, NOT A BYTE COUNT. An absolute threshold would be a claim about this
- * machine's allocator and page size; "the rewrite grew the process by many times what the append
- * did" is a claim about the two SHAPES, and it is the one that holds on every host. The margin is
- * deliberately loose — the arithmetic predicts roughly 800x at this record count, and demanding
- * only 8x leaves the test immune to allocator rounding while still failing outright if the
- * quadratic shape ever comes back.
- *
- * `peak_rss` answering 0 means the host cannot report it, and the comparison is then skipped rather
- * than faked — the liveness tests above stand on their own.
- *
- * MEASURED ON THIS HOST, four sizes, records of 50 bytes, both arms verified to produce identical
- * output first (a cheaper arm that wrote less would be measuring output, not cost):
- *
- *     N        append grows    rewrite grows    rewrite vs previous N
- *     200          0 bytes         1.2 MiB
- *     400          0 bytes        13.4 MiB           11.0x
- *     800          0 bytes        62.1 MiB            4.6x
- *    1600          0 bytes       256.5 MiB            4.1x
- *
- * DOUBLING N QUADRUPLES THE REWRITE, converging on 4 = 2 squared, which is the quadratic signature
- * itself and not an impression of one; the 11x at the low end is the arena's chunk quantization,
- * which stops mattering once the growth exceeds one chunk. The append grows the process by LITERALLY
- * ZERO bytes at every size — it allocates only the record, and the record is transient.
- *
- * @return void
- */
-fn appending_allocates_far_less_than_rewriting() {
-    let path = teko::test::scoped(".teko-append-cost.log")
-    let base = teko::mem::peak_rss()
-    if base == 0 { return }
-    match teko::fs::remove_file(path) { error => { }; null => { } }
-    teko::assert::is_true(append_all(path, APPEND_RECORDS))
-    let after_append = teko::mem::peak_rss()
-    match teko::fs::remove_file(path) { error => { }; null => { } }
-    teko::assert::is_true(rewrite_all(path, APPEND_RECORDS))
-    let after_rewrite = teko::mem::peak_rss()
-    match teko::fs::remove_file(path) { error => { }; null => { } }
-    let append_growth = after_append - base
-    let rewrite_growth = after_rewrite - after_append
-    teko::assert::gt_i64(rewrite_growth to i64, (append_growth * COST_MARGIN) to i64)
-}
-
-/**
- * COST_MARGIN — how many times the append's growth the rewrite's growth must exceed for the cost
- * inversion to count as measured.
- *
- * EIGHT, WHERE THE ARITHMETIC PREDICTS ABOUT EIGHT HUNDRED. The gap is the point: a margin near the
- * prediction would turn allocator rounding into a flaky failure, while eight is still two orders of
- * magnitude away from the quadratic shape ever passing.
- */
-const COST_MARGIN: u64 = 8
