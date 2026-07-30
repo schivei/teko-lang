@@ -1126,7 +1126,6 @@ concretos + symbol table à mão); `class`/`trait`/`interface`; DI/CQRS/convenç
 | P7 Linker `tld` | ELF/Mach-O/PE direto | **KEEP** — joia da coroa (cross-comp + zero-dep) |
 | P8 Runtime embarcado | Syscalls, arena, threads | **KEEP** — fundação do "usar o SO" e da arena |
 | P9 Tech debt | Hardening | **ABSORVIDO** — o reboot resolve o split-brain |
-| P10–11 WASM / Browser FFI | Backend e interop WASM | **DEFER** — fora do escopo nativo-v1 |
 | P12 Matriz de keywords | Tokens em massa | **DROP** — substituída pela §2.1 |
 | P13 Cripto nativa | Hashes/AEAD/asym (C, KAT) | **KEEP-AS-LIB (defer)** — import sobre o runtime C |
 | P14 Concorrência avançada | duplex/circuit/etc. | **REBUILD** — lib/superfície na evolução; nasce com threads |
@@ -1161,7 +1160,7 @@ expostas); `OP_ARENA_PUSH/POP`; control-flow (`OP_JMP`, `OP_JMP_IF_FALSE`, `OP_C
 `OP_HALT`); `OP_I2F`/`OP_F2I`; **a primitiva FFI/syscall** (§7.2); **discriminação de `variant`**
 (uma `tag` + acesso ao payload — o que o `match` consome).
 **DEFER:** `OP_OBJ_*`/`OP_VTABLE_*`; `OP_SPAWN_ASYNC`/`OP_CHAN_*`/`OP_AWAIT`; `OP_LIST_*`/`OP_SIMD_*`;
-`OP_CALL_RUNTIME`. **DROP:** opcodes de x32/AVR/MIPS e do caminho WASM.
+`OP_CALL_RUNTIME`. **DROP:** opcodes de x32/AVR/MIPS.
 
 ### 7.2 Primitiva de FFI/syscall
 Um opcode único (`OP_CALL_EXTERN` / `OP_SYSCALL`) que os emitters baixam para a convenção da

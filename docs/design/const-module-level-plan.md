@@ -320,9 +320,7 @@ A `const` declared inside a `struct`/`class` body, peer to fields and methods, i
 - **Enums are `PascalCase` type + `PascalCase` members**, per the repo's existing
   convention (`ast.tks:186` `Visibility { Private; Pub; Exp }`, `minst.tks:11`
   `MRegClass { GPR; FPR }` — acronyms uppercased). So the migrated families are
-  `enum BlockType { Stored; Fixed; Dynamic }`, `enum WasmScopeKind { Block; Loop; If }`,
-  `enum ElideKind { Normal; Drop; Tee }`, `enum EdgeResult { Stop; Branch; More }`,
-  `enum WasmVType { I32; I64; F32; F64 }`, `enum ZipMethod { Store; Deflate }` —
+  `enum BlockType { Stored; Fixed; Dynamic }`, `enum ZipMethod { Store; Deflate }` —
   members are PascalCase, NOT `UPPER_SNAKE`.
 - **Flags members** follow the external spec's own names, which for C-ABI flag sets
   are already `UPPER_SNAKE` (`flags ElfSectionFlags { SHF_ALLOC; SHF_EXECINSTR; … }`),
@@ -961,8 +959,8 @@ bumps are the mechanism for making each increment available to the corpus.
   merge tags a `-beta` (rolling BUMP #2).
 
 ### Crumb 10 — migrate enum families (6.2)
-- **Step:** introduce `enum BlockType/WasmScopeKind/ElideKind/EdgeResult/WasmVType/
-  ZipMethod`; replace the tag fns; route wire-byte emission through a single
+- **Step:** introduce `enum BlockType`/`enum ZipMethod`; replace the tag fns; route wire-byte
+  emission through a single
   `match`-driven `_wire` helper so emitted bytes are byte-identical.
 - **Fixtures:** the deflate/inflate golden byte tests are UNCHANGED and pass
   (proves wire compatibility); rota C e backend nativo.
