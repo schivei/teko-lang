@@ -782,3 +782,40 @@ O `main.tks` do próprio compilador é o único espécime grande, e vive na **ra
 E há uma disciplina a respeitar: o ficheiro declara-se par semântico do `main.c`
 (*"main.tks and main.c must therefore stay SEMANTICALLY EQUIVALENT"*), logo mexer na convenção de
 entrada toca a regra do par.
+
+## Buraco de portão — 16 ficheiros commitados sem `fmt`, e nada no CI verifica (medido 2026-07-30)
+
+Levantado por um agente como red-flag adjacente ao trabalho de relocações: `teko fmt --check`
+devolvia rc=1 em `src/backend/objfile_elf.tks` **sem alteração alguma**, já no vagão.
+
+### A medição, e uma hipótese minha refutada
+
+`teko fmt --check src/` → **rc=1, 16 ficheiros**. (Cuidado com o método: `rc=$?` depois de um
+`| head` dá o estado do `head`, não do comando — errei isso na primeira tentativa e li rc=0.)
+
+O que o `fmt` quer em `objfile_elf.tks` é re-indentar sete campos de um literal de struct aninhado
+de 8 para 12 espaços, **deixando o fecho `})` a 4**. Eu argumentei que corpo a 12 com fecho a 4 é
+inconsistência interna, logo bug do formatador.
+
+**Falso, e o teste que decide não depende de opinião: um formatador tem de ser PONTO FIXO.**
+Depois de um `fmt`, o `--check` devolve rc=0; a segunda passagem não muda nada. Ele **converge numa
+passagem**. Logo a forma estranha é a convenção tal como implementada, e os 16 ficheiros foram
+commitados sem `fmt`. Terceira hipótese minha refutada por medição neste dia.
+
+### O buraco
+
+**Nenhum passo do `pr.yml` corre `fmt --check`.** Um formatador com modo `--check` que ninguém
+consulta é lei sem fiscal — e cai exatamente na régua do tronco: *"sem erros, alertas ou mesmo erros
+escondidos (que não disparam)"*.
+
+### Porque NÃO foi corrigido no momento em que foi descoberto
+
+Reformatação é churn de ficheiro inteiro, e **cinco dos 16 estavam sob edição ativa** por cinco
+agentes em paralelo (`typer.tks`, `project.tks`, `lower_const.tks`, `codegen_test.tkt`,
+`linker.tks`). Fazê-la com as frentes abertas compra conflito sem ganho; no ponto calmo da lane
+custa quase nada.
+
+**A sequência, para quem pegar:** (1) drenar os agentes vivos; (2) `teko fmt src/` sobre os 16;
+(3) confirmar que o ponto de fixo continua a fechar — reformatar não muda bytes emitidos, mas é
+afirmação a verificar, não a assumir; (4) **só então** armar o passo `fmt --check` no CI, nos seis
+hosts, porque um portão que passa sem verificar é o defeito que esta lane fechou seis vezes hoje.
