@@ -1522,15 +1522,69 @@ fn trimmed_line(line: str) -> str {
 }
 
 /**
+ * MINGW_PATH_EVIDENCE_PHRASE — the words that identify the CHEAP reading in an evidence phrase, so a
+ * caller (or a test) can tell WHICH of the two readings convicted a compiler without re-deriving the
+ * whole sentence. Named rather than spelled twice because the test that proves "no probe ran" has
+ * nothing else to look at.
+ */
+const MINGW_PATH_EVIDENCE_PHRASE: str = "itself names a MinGW install"
+
+/**
+ * MINGW_TRIPLE_EVIDENCE_PHRASE — the words that identify the DEAR reading (the `-dumpmachine` probe)
+ * in an evidence phrase, the sibling of `MINGW_PATH_EVIDENCE_PHRASE`.
+ */
+const MINGW_TRIPLE_EVIDENCE_PHRASE: str = "with the MinGW target triple"
+
+/**
+ * mingw_path_evidence — the CHEAP reading: the evidence phrase for a compiler command whose own
+ * spelling names a MinGW install, or "" when the spelling is innocent.
+ *
+ * Split out of `mingw_cc_evidence` so the rule can be asserted for what it is — a decision about a
+ * STRING — with no process on either side of it. The test that used to pin this reading handed
+ * `mingw_cc_evidence` the build host's own `cc` and asserted the verdict, which made a claim about
+ * whichever toolchain happened to be on that host's PATH rather than about this function; on the
+ * Windows runner, whose `cc` really is MinGW, the claim was false and the suite failed there.
+ *
+ * @param cc  the resolved compiler command or path under consideration
+ * @return    the phrase naming how the SPELLING convicts it, or "" when it does not
+ * @since 0.3.1
+ */
+fn mingw_path_evidence(cc: str) -> str {
+    if !linker_is_mingw(cc) { return "" }
+    $"the command '{cc}' {MINGW_PATH_EVIDENCE_PHRASE}"
+}
+
+/**
+ * mingw_triple_evidence — the DEAR reading: the evidence phrase for a target triple that names a
+ * MinGW target, or "" when it does not.
+ *
+ * "" IN, "" OUT. An unmeasurable driver yields an empty triple (`cc_target_triple`), and an empty
+ * triple must read as "this host could not tell me" rather than as a conviction — `triple_is_mingw`
+ * already guarantees it, and pinning the same fact one level up is what lets the unknown-is-not-
+ * guilty rule be asserted without any compiler being run.
+ *
+ * @param triple  the triple a compiler driver reported, or "" when it could not say
+ * @return        the phrase naming how the TRIPLE convicts it, or "" when it does not
+ * @since 0.3.1
+ */
+fn mingw_triple_evidence(triple: str) -> str {
+    if !triple_is_mingw(triple) { return "" }
+    $"it answers {HOST_CC_MACHINE_FLAG} {MINGW_TRIPLE_EVIDENCE_PHRASE} '{triple}'"
+}
+
+/**
  * mingw_cc_evidence — the EVIDENCE that the resolved compiler `cc` is MinGW, or "" when there is
  * none.
  *
- * TWO READINGS, IN COST ORDER. The command itself is inspected first (`linker_is_mingw` — the same
- * recogniser the native route uses, so both routes convict on the same spelling), because it costs
- * nothing and it catches the measured case: on the project's Windows runner `cc` resolves to
- * `/c/mingw64/bin/cc`, whose PATH names MinGW outright. Only then is the compiler ASKED what it
- * targets, which catches the case a name cannot — a driver installed under an innocent path that
- * nonetheless emits `x86_64-w64-windows-gnu`.
+ * TWO READINGS, IN COST ORDER. The command itself is inspected first (`mingw_path_evidence`, over
+ * `linker_is_mingw` — the same recogniser the native route uses, so both routes convict on the same
+ * spelling), because it costs nothing and it catches the measured case: on the project's Windows
+ * runner `cc` resolves to `/c/mingw64/bin/cc`, whose PATH names MinGW outright. Only when that
+ * reading is silent is the compiler ASKED what it targets, which catches the case a name cannot — a
+ * driver installed under an innocent path that nonetheless emits `x86_64-w64-windows-gnu`.
+ *
+ * THE PHRASE SAYS WHICH READING FIRED, and that is load-bearing rather than cosmetic: it is how a
+ * test can prove no probe ran for a path-convicted compiler without observing the process table.
  *
  * @param cc      the resolved compiler command
  * @param binary  the build's output path (where the triple probe's scratch file goes)
@@ -1538,10 +1592,9 @@ fn trimmed_line(line: str) -> str {
  * @since 0.3.1
  */
 fn mingw_cc_evidence(cc: str, binary: str) -> str {
-    if linker_is_mingw(cc) { return $"the command '{cc}' itself names a MinGW install" }
-    let triple = cc_target_triple(cc, binary)
-    if triple_is_mingw(triple) { return $"it answers {HOST_CC_MACHINE_FLAG} with the MinGW target triple '{triple}'" }
-    ""
+    let by_name = mingw_path_evidence(cc)
+    if by_name.len > 0 { return by_name }
+    mingw_triple_evidence(cc_target_triple(cc, binary))
 }
 
 /**

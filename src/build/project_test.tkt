@@ -1151,18 +1151,67 @@ fn pt_the_c_route_refusal_teaches_the_same_law_as_the_native_one() {
 /**
  * pt_a_mingw_cc_is_convicted_by_its_path_without_any_probe — the cheap reading fires first and on
  * the MEASURED case: the Windows runner's `cc` resolves to `/c/mingw64/bin/cc`, whose path names
- * MinGW outright, so no process has to run for the ban to bite. A compiler that names no MinGW is
- * left for the triple probe to judge, and this host's own `cc` (whose triple this suite reads for
- * real) is not MinGW.
+ * MinGW outright, so no process has to run for the ban to bite. The evidence phrase is what proves
+ * no process ran — it names the PATH reading (`MINGW_PATH_EVIDENCE_PHRASE`) and not the probe.
+ *
+ * IT ASSERTS NOTHING ABOUT THIS HOST'S OWN `cc`, and that is the point of its present shape. The
+ * earlier version handed `mingw_cc_evidence` the host's `HOST_CC_NAME` and asserted the verdict was
+ * innocent, which is not a fact about this function but about whichever toolchain is on the runner's
+ * PATH — and on the Windows runner, whose `cc` really is `/c/mingw64/bin/cc`, it contradicted this
+ * very doc-comment and failed. What the build actually does on Windows is pinned where it belongs,
+ * on `host_cc_choice` (`pt_the_host_default_is_clang_with_msvc_only_on_windows`): the bare host `cc`
+ * is never the compiler there in the first place.
  *
  * @return void
  */
 #test
 fn pt_a_mingw_cc_is_convicted_by_its_path_without_any_probe() {
-    teko::assert::is_true(mingw_cc_evidence("/c/mingw64/bin/cc", "bin/pt-probe").len > 0)
-    teko::assert::is_true(mingw_cc_evidence("x86_64-w64-mingw32-gcc", "bin/pt-probe").len > 0)
-    teko::assert::is_true(mingw_cc_evidence(HOST_CC_NAME, "bin/pt-probe") == "")
-    teko::assert::is_false(triple_is_mingw(cc_target_triple(HOST_CC_NAME, "bin/pt-probe")))
+    let by_path = mingw_cc_evidence("/c/mingw64/bin/cc", "bin/pt-probe")
+    teko::assert::str_contains(by_path, "/c/mingw64/bin/cc")
+    teko::assert::str_contains(by_path, MINGW_PATH_EVIDENCE_PHRASE)
+    teko::assert::is_false(teko::str::contains(by_path, MINGW_TRIPLE_EVIDENCE_PHRASE))
+    teko::assert::str_contains(mingw_cc_evidence("x86_64-w64-mingw32-gcc", "bin/pt-probe"), MINGW_PATH_EVIDENCE_PHRASE)
+    teko::assert::str_contains(mingw_path_evidence("C:/msys64/mingw64/bin/clang.exe"), MINGW_PATH_EVIDENCE_PHRASE)
+}
+
+/**
+ * pt_an_innocent_spelling_is_left_for_the_triple_to_judge — the other half of the cost-ordered rule,
+ * proved on hand-written spellings so it holds identically on every self-test host: a command whose
+ * spelling names no MinGW is NOT convicted by the cheap reading, whatever it is called and wherever
+ * it lives. This is the rule the retired host-`cc` assertion was reaching for, stated about the
+ * FUNCTION instead of about the runner.
+ *
+ * @return void
+ */
+#test
+fn pt_an_innocent_spelling_is_left_for_the_triple_to_judge() {
+    teko::assert::is_true(mingw_path_evidence(HOST_CC_NAME) == "")
+    teko::assert::is_true(mingw_path_evidence(WINDOWS_CC_NAME) == "")
+    teko::assert::is_true(mingw_path_evidence("/usr/bin/cc") == "")
+    teko::assert::is_true(mingw_path_evidence("C:/Program Files/LLVM/bin/clang.exe") == "")
+    teko::assert::is_true(mingw_path_evidence("x86_64-w64-windows-gnu-gcc") == "")
+}
+
+/**
+ * pt_the_triple_reading_convicts_the_gnu_abi_and_acquits_the_unknown — the DEAR reading, pinned on
+ * triples written out by hand instead of on whatever the host's compiler answers: both MinGW
+ * spellings convict and the phrase quotes the triple it read plus the flag that read it, MSVC and
+ * the legitimate host triples are acquitted, and the empty triple — an absent compiler, or a driver
+ * with no `-dumpmachine` — is unknown rather than guilty.
+ *
+ * @return void
+ */
+#test
+fn pt_the_triple_reading_convicts_the_gnu_abi_and_acquits_the_unknown() {
+    let gnu = mingw_triple_evidence("x86_64-w64-windows-gnu")
+    teko::assert::str_contains(gnu, MINGW_TRIPLE_EVIDENCE_PHRASE)
+    teko::assert::str_contains(gnu, "x86_64-w64-windows-gnu")
+    teko::assert::str_contains(gnu, HOST_CC_MACHINE_FLAG)
+    teko::assert::str_contains(mingw_triple_evidence("x86_64-w64-mingw32"), MINGW_TRIPLE_EVIDENCE_PHRASE)
+    teko::assert::is_true(mingw_triple_evidence(WINDOWS_MSVC_TRIPLE) == "")
+    teko::assert::is_true(mingw_triple_evidence("x86_64-linux-gnu") == "")
+    teko::assert::is_true(mingw_triple_evidence("arm64-apple-darwin24") == "")
+    teko::assert::is_true(mingw_triple_evidence("") == "")
 }
 
 /**

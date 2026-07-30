@@ -1498,7 +1498,60 @@ fn lower_unary(ctx: LowerCtx, e: checker::TExpr, u: checker::TUnary) -> Lowered 
     let op = match lunop_of(u.op, k) { LUnOp as o => o; error as err => return err }
     let r = ctx_alloc(ao.ctx)
     let inst = un_inst(r.vreg, op, ao.vreg, e.line, e.col)
-    Lowered { ctx = ctx_append(r.ctx, inst); vreg = r.vreg }
+    let raw = Lowered { ctx = ctx_append(r.ctx, inst); vreg = r.vreg }
+    narrow_unary_float_to_result(ctx, e, k, raw)
+}
+
+/**
+ * narrow_unary_float_to_result — append the `FToF` narrowing a float unary owes when its
+ * OPERAND is an `f64` but its own resolved type is `f32`, and nothing otherwise.
+ *
+ * MEASURED DEFECT, and it is a silently WRONG VALUE (0.3.1.0 degrau 29). `mut n: f32 = -7.25`
+ * reaches here as a `TUnary` whose OPERAND literal is typed `f64` — the expected `f32` is not
+ * propagated through the minus — while the unary expression itself is the declared `f32`. Without
+ * this narrowing the `FNeg` result is an `f64` value that every later width-sensitive decision then
+ * read at single width: on x86-64 the following `n to f64` was selected as a NARROWING (its
+ * direction is read off the operand's recorded width, which said `f64`) and the value handed to
+ * `tk_ftoa` was the 64 bits `0xc01d0000c0e80000` — the f64 `-7.25`'s upper half with the f32
+ * `-7.25` merged into its lower half. Measured against the C route on the same program:
+ * `-7.2500028745271266` against `-7.25`, and `0` when the value crossed a call. The positive
+ * literal `mut n: f32 = 7.25` was already correct, because there the literal ITSELF resolves to
+ * `f32` and `lower_number` reads its width from its own type.
+ *
+ * The repair belongs here rather than at the cast site because the value is wrong BEFORE any cast:
+ * an `f32` variable was holding a double. `lower_int_to_f32` already owns the same narrowing for
+ * the integer-source direction and both now share `narrow_float_to_f32`.
+ *
+ * @param ctx  the lowering context (its declared-enum table, which `prim_kind_of` consults)
+ * @param e    the unary expression, carrying its own resolved type
+ * @param operand_kind  the operand's PrimKind (already resolved by the caller)
+ * @param done  the already-emitted unary result
+ * @return  the result narrowed to `f32`, or `done` unchanged when no narrowing is owed
+ */
+fn narrow_unary_float_to_result(ctx: LowerCtx, e: checker::TExpr, operand_kind: checker::PrimKind, done: Lowered) -> Lowered {
+    if !prim_is_float_kind(operand_kind) { return done }
+    if operand_kind == checker::PrimKind::F32 { return done }
+    match prim_kind_of(e.type, ctx.enums, "unary result") {
+        checker::PrimKind as p => if p == checker::PrimKind::F32 { narrow_float_to_f32(done, e) } else { done }
+        error => done
+    }
+}
+
+/**
+ * narrow_float_to_f32 — append one `FToF` that narrows an already-lowered `f64` value to `f32`.
+ *
+ * `FToF` carries no direction of its own: every backend reads it off the OPERAND's recorded width
+ * (`is_same_width_float_cast`'s own doc), so this is the narrowing form exactly when the operand is
+ * a double — which both callers guarantee.
+ *
+ * @param ao  the already-lowered `f64` value
+ * @param e   the expression the instruction takes its source position from
+ * @return    the narrowed `f32` value
+ */
+fn narrow_float_to_f32(ao: Lowered, e: checker::TExpr) -> Lowered {
+    let narrow = ctx_alloc(ao.ctx)
+    let to_f32 = un_inst(narrow.vreg, LUnOp::FToF, ao.vreg, e.line, e.col)
+    Lowered { ctx = ctx_append(narrow.ctx, to_f32); vreg = narrow.vreg }
 }
 
 /**
@@ -1602,9 +1655,7 @@ fn is_int_to_narrow_float_cast(src: checker::PrimKind, dst: checker::PrimKind) -
 fn lower_int_to_f32(ao: Lowered, e: checker::TExpr) -> Lowered {
     let wide = ctx_alloc(ao.ctx)
     let to_f64 = un_inst(wide.vreg, LUnOp::IToF, ao.vreg, e.line, e.col)
-    let narrow = ctx_alloc(ctx_append(wide.ctx, to_f64))
-    let to_f32 = un_inst(narrow.vreg, LUnOp::FToF, wide.vreg, e.line, e.col)
-    Lowered { ctx = ctx_append(narrow.ctx, to_f32); vreg = narrow.vreg }
+    narrow_float_to_f32(Lowered { ctx = ctx_append(wide.ctx, to_f64); vreg = wide.vreg }, e)
 }
 
 /**
@@ -12083,6 +12134,7 @@ fn append_param_ltypes(out: []LType, p: parser::Param, enums: []LEnumInfo, table
  */
 pub fn lower_program(prog: checker::TProgram, flat_symbols: bool = false) -> LModule | error {
     let table = checker::type_table_of(prog)
+    match fat_divergence_guard(prog, table, checker::type_table_rekeyed(table)) { error as e => return e; null => { } }
     let enums = collect_enums(prog)
     let layouts = match collect_struct_layouts(prog, enums, table) { []LStructLayout as ls => ls; error as e => return e }
     let externs = collect_externs(prog)
@@ -12103,6 +12155,213 @@ pub fn lower_program(prog: checker::TProgram, flat_symbols: bool = false) -> LMo
     }
     let vmain = match lower_virtual_main(loose, layouts, enums, m.rodata, lifted, externs, flat_symbols, variants, ref_fns, field_decls) { LoweredFunction as x => x; error as err => return err }
     fold_lifted_funcs(add_func(with_rodata(m, vmain.rodata), vmain.func), vmain.lifted)
+}
+
+/**
+ * FAT_DIVERGENCE_LIMIT — how many disagreeing annotations the guard's diagnostic NAMES before it
+ * summarizes the rest as a count. A guard whose message is unbounded is a guard whose message is
+ * unreadable; a guard that names only the first is the "one stop per self-build" treadmill this
+ * whole instrument exists to replace. Naming a block and counting the tail gives both.
+ */
+const FAT_DIVERGENCE_LIMIT: u64 = 20
+
+/**
+ * fat_divergence_guard — THE GUARD. For every type annotation in the program that a fat/scalar
+ * decision is taken from, assert that the SYNTACTIC predicate (`typeexpr_is_fat`) and the CHECKER's
+ * own resolver (`checker::resolve_type` + the semantic `is_fat_type`) give the SAME answer. Any
+ * disagreement is a defect, and it is reported as ONE block, BEFORE any lowering runs.
+ *
+ * WHY THIS EXISTS AND WHY IT IS THE INSTRUMENT, not a test (owner, 2026-07-30, on the degrau-31
+ * stop): *"não seria mais produtivo validar tudo que deveria ser e não é? E corrigir de uma vez ao
+ * invés de ficar teste a teste?"* He is right, and the treadmill was real: this backend has two
+ * predicates answering ONE question over two representations, they disagreed, and every disagreement
+ * surfaced one at a time — as a mysterious honest-stop several degraus downstream, or worse, as a
+ * silent wrong answer. Enumerating the disagreements up front turns an unbounded ladder into a
+ * finite list.
+ *
+ * WHY TWO PREDICATES EXIST AT ALL, which is the question that had to be answered before deciding the
+ * fix, and the answer is MEASURED, not assumed: `checker::TFunction.params` is `[]parser::Param`,
+ * documented in `src/checker/tast.tks` as "carried from the parser unchanged", and a `StructBody`'s
+ * fields likewise carry only `type_ann`. The checker resolves a function's RETURN type into the TAST
+ * (`return_type: Type`) but never its PARAMETER or FIELD types. So there is no recorded answer for
+ * this backend to read at those two sites, and a syntactic predicate is genuinely necessary — the
+ * hypothesis that it was merely redundant does not survive the tast. What it must NOT do is
+ * re-derive a second, weaker resolution: the checker's RESOLVER is a pure function of the type table
+ * and the referencing namespace, and both are available here.
+ *
+ * THE REFERENCING NAMESPACE is what makes the comparison honest, and it is available on both sides:
+ * a function carries `namespace` directly; a type declaration's `name` is CANONICAL, so
+ * `checker::name_qualifier` recovers it.
+ *
+ * THE ORACLE IS THE RE-KEYED TABLE, and that detail is the difference between a guard and a
+ * decoration. The first version of this guard asked `resolve_type` against `checker::type_table_of`'s
+ * table directly and reported ZERO disagreements over the compiler's own 143 files — while the SAME
+ * build still stopped on `vt_table`, an annotation the two predicates provably disagreed about. It
+ * was BLIND, not lenient: that table is keyed CANONICALLY (`"teko::checker::TypeTable"` with an empty
+ * namespace) and `resolve_type`'s qualified arm matches a bare name against a real namespace, so it
+ * answered "cannot resolve" for every namespaced type in the tree and the guard read that as
+ * agreement. `checker::type_table_rekeyed` converts the table into the shape the resolver reads, and
+ * only then does the oracle answer. A guard has to be proven by inversion like anything else — a
+ * guard that cannot fail is not evidence.
+ *
+ * A NON-ANSWER IS STILL NOT A DIVERGENCE. When the resolver cannot resolve an annotation even against
+ * the re-keyed table, this guard stays silent instead of guessing which side is right: a generic
+ * type-PARAMETER (`T`) is never registered as a type, and a still-unstamped generic instantiation
+ * resolves only after the monomorph pass. Those are legitimately unresolvable here, and reporting
+ * them would make the guard cry wolf on every generic in the tree.
+ *
+ * @param prog    the whole typed program
+ * @param table   the program's type table (`checker::type_table_of`) — what the SYNTACTIC predicate
+ *                is given, and therefore what it must be judged against
+ * @param rtable  the same table re-keyed for the checker's resolver (`checker::type_table_rekeyed`)
+ * @return        `null` when every annotation agrees, else a NAMED error listing the disagreements
+ * @since 0.3.1.0 degrau 31 (the qualified-alias family, closed as a family)
+ */
+fn fat_divergence_guard(prog: checker::TProgram, table: checker::TypeTable, rtable: checker::TypeTable) -> null | error {
+    let found = fat_divergences(prog, table, rtable)
+    if found.len == 0 { return null }
+    error { message = teko::str::concat("native backend N1: the syntactic fat-pointer predicate disagrees with the checker on ", teko::u64_to_str(found.len), " annotation(s) (internal) — ", fat_divergence_lines(found)) }
+}
+
+/**
+ * fat_divergences — one human-readable line per annotation the two predicates disagree on, over the
+ * WHOLE program: every top-level function's parameters, and every field-shaped type declaration's
+ * fields. These are exactly the two places this backend takes a fat/scalar decision from syntax
+ * (`bind_param`/`append_param_ltypes`, and `layout_of_fields` via `field_layout_size`/`_align`).
+ *
+ * @param prog   the whole typed program
+ * @param table  the program's type table
+ * @return       one line per disagreement, in program order (empty when they agree everywhere)
+ */
+fn fat_divergences(prog: checker::TProgram, table: checker::TypeTable, rtable: checker::TypeTable) -> []str {
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        out = fat_divergences_of_item(out, prog.items[i], table, rtable)
+        i++
+    }
+    out
+}
+
+/**
+ * fat_divergences_of_item — `acc` extended with `it`'s disagreements: a function contributes its
+ * parameter annotations, a field-shaped type declaration its field annotations, every other item
+ * kind nothing.
+ *
+ * @param acc    the lines accumulated so far
+ * @param it     the typed top-level item to inspect
+ * @param table  the program's type table
+ * @return       `acc`, extended with `it`'s disagreements
+ */
+fn fat_divergences_of_item(acc: []str, it: checker::TItem, table: checker::TypeTable, rtable: checker::TypeTable) -> []str {
+    match it {
+        checker::TFunction as f => fat_divergences_of_params(acc, f, table, rtable)
+        parser::TypeDecl as td => fat_divergences_of_decl(acc, td, table, rtable)
+        _ => acc
+    }
+}
+
+/**
+ * fat_divergences_of_params — `acc` extended with one line per parameter of `f` whose annotation the
+ * two predicates disagree on. The referencing namespace is the function's own.
+ *
+ * @param acc    the lines accumulated so far
+ * @param f      the typed function whose parameter annotations to check
+ * @param table  the program's type table
+ * @return       `acc`, extended with `f`'s disagreeing parameters
+ */
+fn fat_divergences_of_params(acc: []str, f: checker::TFunction, table: checker::TypeTable, rtable: checker::TypeTable) -> []str {
+    mut out = acc
+    mut i: u64 = 0
+    loop {
+        if i >= f.params.len { break }
+        out = fat_divergence_line_of(out, f.params[i].type_ann, table, rtable, f.namespace, "parameter", f.name, f.params[i].name)
+        i++
+    }
+    out
+}
+
+/**
+ * fat_divergences_of_decl — `acc` extended with one line per FIELD of `td` whose annotation the two
+ * predicates disagree on. `td.name` is canonical, so the fields' referencing namespace is its
+ * qualifier — a field annotation is written in the type's OWN namespace, not at any use site.
+ *
+ * A class body is walked through its DECLARED fields only, not its effective (base-inherited) ones:
+ * an inherited field's annotation is written in the BASE's namespace and is checked when the base's
+ * own declaration is visited, so walking the effective list here would re-check it against the wrong
+ * namespace and invent a divergence.
+ *
+ * @param acc    the lines accumulated so far
+ * @param td     the type declaration to inspect
+ * @param table  the program's type table
+ * @return       `acc`, extended with `td`'s disagreeing fields
+ */
+fn fat_divergences_of_decl(acc: []str, td: parser::TypeDecl, table: checker::TypeTable, rtable: checker::TypeTable) -> []str {
+    let fields = match td.body {
+        parser::StructBody as sb => sb.fields
+        parser::ClassBody as cb => cb.fields
+        _ => return acc
+    }
+    let ns = checker::name_qualifier(td.name)
+    mut out = acc
+    mut i: u64 = 0
+    loop {
+        if i >= fields.len { break }
+        out = fat_divergence_line_of(out, fields[i].type_ann, table, rtable, ns, "field", td.name, fields[i].name)
+        i++
+    }
+    out
+}
+
+/**
+ * fat_divergence_line_of — `acc` extended with ONE line when the two predicates disagree on `te`,
+ * unchanged when they agree or when the checker cannot resolve `te` at all.
+ *
+ * @param acc    the lines accumulated so far
+ * @param te     the annotation to check
+ * @param table  the program's type table
+ * @param ns     the namespace the annotation was WRITTEN in
+ * @param place  what the annotation annotates ("parameter" / "field") — for the diagnostic
+ * @param owner  the function or type the annotation belongs to — for the diagnostic
+ * @param name   the parameter's or field's own name — for the diagnostic
+ * @return       `acc`, extended when `te` disagrees
+ */
+fn fat_divergence_line_of(acc: []str, te: parser::TypeExpr, table: checker::TypeTable, rtable: checker::TypeTable, ns: str, place: str, owner: str, name: str) -> []str {
+    let truth = match checker::resolve_type(te, rtable, ns) { checker::Type as t => t; error => return acc }
+    let semantic = is_fat_type(truth)
+    if typeexpr_is_fat(te, table) == semantic { return acc }
+    teko::list::push(acc, teko::str::concat(place, " `", name, "` of `", owner, "`: syntax says ", fat_word(!semantic), ", the checker says ", fat_word(semantic)))
+}
+
+/**
+ * fat_word — "fat" or "scalar", the two words the guard's diagnostic uses for a fat/scalar verdict.
+ *
+ * @param fat  the verdict
+ * @return     its word
+ */
+fn fat_word(fat: bool) -> str {
+    if fat { return "fat" }
+    "scalar"
+}
+
+/**
+ * fat_divergence_lines — `found` rendered as one `; `-joined diagnostic, naming at most
+ * `FAT_DIVERGENCE_LIMIT` entries and summarizing any tail as a count.
+ *
+ * @param found  the disagreement lines, in program order
+ * @return       the joined diagnostic
+ */
+fn fat_divergence_lines(found: []str) -> str {
+    mut out = ""
+    mut i: u64 = 0
+    loop {
+        if i >= found.len { break }
+        if i >= FAT_DIVERGENCE_LIMIT { return teko::str::concat(out, "; and ", teko::u64_to_str(found.len - FAT_DIVERGENCE_LIMIT), " more") }
+        out = if i == 0 { found[i] } else { teko::str::concat(out, "; ", found[i]) }
+        i++
+    }
+    out
 }
 
 /**
@@ -12383,6 +12642,47 @@ fn single_segment_name(p: parser::Path) -> str | null {
 }
 
 /**
+ * path_last_segment_name — `p`'s LAST segment name, or `null` for the degenerate zero-segment path.
+ *
+ * The deliberate sibling of `single_segment_name`, NOT a widening of it. The two answer different
+ * questions and their callers need opposite answers: `named_type_name_of` (hence
+ * `is_ref_param_ann`) must keep rejecting a qualified path, because the `Ref<T>` wrapper it probes
+ * for is compiler-SYNTHESIZED single-segment (`src/parser/parse_type.tks`) and a user type
+ * legitimately named `Ref` in some namespace must never be mistaken for it and silently auto-ref'd.
+ * The fat-pointer walk, by contrast, must accept a qualified path — see `typeexpr_is_fat_named`.
+ *
+ * @param parser::Path p  the path to inspect
+ * @return str?  `p`'s last segment's name, or `null` for a segment-less path
+ * @since 0.3.1.0 degrau 31
+ */
+fn path_last_segment_name(p: parser::Path) -> str | null {
+    if p.segments.len == 0 { return null }
+    p.segments[p.segments.len - 1].name
+}
+
+/**
+ * path_qualifier_of — `p`'s QUALIFIER: the segments BEFORE the last, joined with `::` (`checker::
+ * TypeTable` → `"checker"`, `teko::checker::TypeTable` → `"teko::checker"`). A bare or segment-less
+ * path has no qualifier and answers `""`, the value `checker::type_table_find_path` reads as "this
+ * probe is bare".
+ *
+ * @param parser::Path p  the path to inspect
+ * @return str  the qualifier, or `""` when `p` carries at most one segment
+ * @since 0.3.1.0 degrau 31
+ */
+fn path_qualifier_of(p: parser::Path) -> str {
+    if p.segments.len < 2 { return "" }
+    mut out = p.segments[0].name
+    mut i: u64 = 1
+    loop {
+        if i + 1 >= p.segments.len { break }
+        out = teko::str::concat(out, "::", p.segments[i].name)
+        i++
+    }
+    out
+}
+
+/**
  * find_known_struct_layout — the entry of `layouts` named `name`, or `null`
  * when none matches (a NULLABLE sibling of `find_struct_layout`: a
  * forward-referenced or non-struct field type is a routine "not (yet)
@@ -12468,7 +12768,19 @@ fn visited_name_has(visited: []str, name: str) -> bool {
  * variant/extern/interface) answers `false` too — those are sized by their OWN layout or a plain
  * scalar word, never the `{ptr, len}` image.
  *
- * @param nt       the single-segment named annotation
+ * A QUALIFIED annotation is resolved too, and that is the whole of 0.3.1.0 degrau 31. Until then
+ * this asked `single_segment_name` and gave up on any multi-segment path, so a parameter annotated
+ * with a qualified alias of a fat type — `vt_table: checker::TypeTable`, where `TypeTable` is
+ * `[]TypeReg` — was bound as a SCALAR while every caller passed the two-word `{ptr, len}` image and
+ * every later read asked the SEMANTIC `is_fat_type`. Measured on the base compiler, that split cost
+ * two distinct failures and only one of them was loud: a fat PARAMETER honest-stopped (`native
+ * backend N1: \`vt_table\` is not a fat-pointer local`, the self-host's own stop), while a fat FIELD
+ * silently reserved 8 bytes for a 16-byte store and read the following field's bytes back as a
+ * length — the same live miscompilation this predicate was introduced to close for BARE aliases,
+ * still open for qualified ones. The lookup is `checker::type_table_find_path`, which resolves the
+ * qualifier against BOTH `TypeTable` shapes and falls back to the namespace-blind `type_table_find`.
+ *
+ * @param nt       the named annotation (bare or QUALIFIED)
  * @param table    the program's type table
  * @param visited  the alias names already entered on this chain (`visited_name_has`'s recursion
  *                 guard — the checker already rejects a cyclic alias before lowering ever runs, so
@@ -12477,10 +12789,10 @@ fn visited_name_has(visited: []str, name: str) -> bool {
  * @return         whether `nt`, resolved through any alias, denotes `str` or `[]T`
  */
 fn typeexpr_is_fat_named(nt: parser::NamedType, table: checker::TypeTable, visited: []str) -> bool {
-    let name = match single_segment_name(nt.path) { str as s => s; null => return false }
+    let name = match path_last_segment_name(nt.path) { str as s => s; null => return false }
     if name == "str" { return true }
     if visited_name_has(visited, name) { return false }
-    match checker::type_table_find(table, name, "") {
+    match checker::type_table_find_path(table, path_qualifier_of(nt.path), name) {
         parser::TypeDecl as td => typeexpr_is_fat_decl_body(td.body, table, teko::list::push(visited, name))
         error => false
     }
@@ -12507,9 +12819,13 @@ fn typeexpr_is_fat_decl_body(body: parser::TypeBody, table: checker::TypeTable, 
 /**
  * typeexpr_is_fat_walk — the annotation-shape dispatch shared by `typeexpr_is_fat` (fresh chain)
  * and `typeexpr_is_fat_decl_body` (continuing an alias chain): a `[]T` slice is fat regardless of
- * its element (the slice value itself is the `{ptr, len}` pair, never its elements); a single-
- * segment named annotation defers to `typeexpr_is_fat_named`; every other annotation shape
- * (optional, union, function type, multi-segment path, generic instantiation) is never fat.
+ * its element (the slice value itself is the `{ptr, len}` pair, never its elements); a named
+ * annotation — BARE OR QUALIFIED — defers to `typeexpr_is_fat_named`; every other annotation shape
+ * (optional, union, function type, generic instantiation) is never fat.
+ *
+ * This doc-comment used to end that list with "multi-segment path", and that sentence WAS the bug of
+ * 0.3.1.0 degrau 31: a qualified alias of a fat type is fat, and saying otherwise made the syntactic
+ * predicate disagree with the semantic `is_fat_type` on the very same annotation.
  *
  * @param te       the syntactic type annotation
  * @param table    the program's type table

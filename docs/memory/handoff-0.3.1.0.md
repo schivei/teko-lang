@@ -19,6 +19,268 @@ hipótese, está dito.
 
 
 
+## 0r. TRÊS PERNAS VERDES — a primeira vez neste arco (2026-07-30, `99a859a`)
+
+Log integral da execução `30545507942`. **O degrau 29 pegou no CI: `A4-fp: float-op` tem ZERO ocorrências** em todo o log, e as guardas de objecto passaram — **zero `check_coff: FAIL`, zero `check_elf: FAIL`** (o `llvm` + `lld` fecharam-nas).
+
+| perna | regressões | veredito |
+|---|---|---|
+| `regressor wasm` | **11 run, 0 skipped, 0 failed** | **VERDE** |
+| `test / linux-x86_64-musl` | 11 run, **1 skipped**, 0 failed | **VERDE** |
+| `Memory paranoid (musl)` | 11 run, **1 skipped**, 0 failed | **VERDE** |
+| `test / linux-arm64-glibc` | 11 run, 0 skipped, 1 failed | `exit 25` |
+| `Memory paranoid (arm64-glibc)` | 11 run, 0 skipped, 1 failed | `exit 25` |
+| `test / macos-arm64` | 11 run, 0 skipped, 1 failed | `exit 25` |
+| `test / windows-x86_64` | 11 run, 0 skipped, 2 failed | `0xC0000005` |
+
+**Confirmação por ausência, e é uma medição válida:** não chegou webhook de falha para as três primeiras. As pernas que falharam mandaram webhook; essas não.
+
+O `1 skipped` é a fila `wasm32-wasi` a **saltar honestamente** por falta de `wasmtime` nessas duas pernas. **Fica registado, não consertado:** o desenho já rota essa fila para a perna `regressor wasm` (que instala `wasmtime` e dá `0 skipped`), e o `no_skips_gate` corre lá. Instalar `wasmtime` em mais duas pernas é churn de CI para apagar um salto que já tem quem o prove. **Se o dono quiser zero saltos em todas as pernas, é uma palavra e dois `apt`.**
+
+### O `exit 25` DE arm64 E macOS: valor errado CALADO, e a fila diz qual
+
+```
+own_arith_exit[0]: exit 25, expected 42
+  captured stdout tail:  answer=42!
+```
+
+**O programa correu até ao fim** — imprimiu `answer=42!` — e saiu 25. `main.tks:26` → **`f_push_class_in_loop`** (`corpus.tks:555`), cujo doc diz: *"a class instance pushed once per iteration must read back as its own iteration's value, through a method as well as a field"*. É a família da **cópia de agregado**, e é **gémeo divergente por ARQUITECTURA**: as três pernas x86_64 passam a mesma fila.
+
+**Pista adjacente, medida pelo agente do degrau 31 e não consertada:** um campo de struct **por valor** de tipo nomeado **alia** a origem em vez de copiar na rota nativa (`h.p.a` dá 1 na rota C e 99 na nativa) — mas ele mediu em **linux-x86_64**, onde a fila 25 passa. **Pode ser a mesma raiz com dois sintomas, ou duas coisas.** Despachado com ordem de medir, não de assumir.
+
+### WINDOWS: a fase unitária subiu de 368 → 1112, e aborta MAIS ADIANTE
+
+```
+test teko::process::verdict_channel_path_reads_the_env_var ... ok
+test teko::process::verdict_emit_appends_to_the_named_channel ... assertion failed: is_true
+```
+
+As outras seis pernas arrancam **1167**. O conserto da asserção mingw pegou (era ali que abortava aos 368) e **descobriu a seguinte da mesma forma**: mais uma que fala do ambiente do host. O caminho lê-se bem (`..._reads_the_env_var` passa) e o que quebra é **acrescentar ao ficheiro**. Despachado junto com a ABI de Win64, que é da mesma perna.
+
+**`assertion failed` em todo o log: duas ocorrências, e são esta, na mesma perna.** Fora de Windows, zero.
+
+### O NÚMERO DA SUÍTE SUBIU: 1140 → 1167
+
+Os drenos de hoje trouxeram testes: **1167** em seis pernas. O self-build também cresceu — **144 ficheiros** (era 143), **checker 6525 itens** (era 6462), **consteval 599** (era 576).
+
+## 0q. **50 DIVERGÊNCIAS SEM O CONSERTO, 0 COM ELE** — a resposta à pergunta do dono (2026-07-30)
+
+`cargo/0.3.1.0-degrau-31` @ `4264f7d` drenado. O dono perguntou: *"não seria mais produtivo validar tudo que deveria ser e não é? E corrigir de uma vez ao invés de ficar teste a teste?"* **A resposta tem um número:**
+
+| `teko::lir::fat_divergence_guard` sobre o fonte do compilador (143 ficheiros, 6049 itens) | divergências |
+|---|---|
+| **sem** o conserto | **50** |
+| **com** o conserto | **0** |
+
+As 50 são todas da mesma classe e **nenhuma era visível antes**: o self-build mostrava UMA de cada vez, e mostrava-a num módulo sem relação com a causa. Perseguir a paragem teria fechado 1 de 50, e a maior parte das outras **nem faz ruído** (ver abaixo).
+
+### A MINHA HIPÓTESE ERA MEIA-VERDADE, e ele provou a outra metade
+
+Eu disse que o predicado sintáctico *"está a responder a uma pergunta que o checker já respondeu"* e que o conserto era **perguntar ao checker**. Metade errada:
+
+- **Não há resposta gravada para ler.** `checker::TFunction.params` é `[]parser::Param`, *"carried from the parser unchanged"* (`src/checker/tast.tks:159`), e um `StructBody` carrega só `type_ann`. O checker resolve o tipo de **RETORNO** (`return_type: Type`) e **nunca** os de parâmetro nem de campo.
+- **A razão profunda é a FORMA DA TABELA — e ele achou-a por INVERSÃO À SUA PRÓPRIA GUARDA.** A primeira versão da guarda reportou **zero** sobre os 143 ficheiros **enquanto a mesma build continuava a parar no `vt_table`**. Não era tolerante: era **CEGA**. `type_table_of` chaveia canonicamente (`name = "teko::checker::TypeTable"`, `namespace = ""`), e o braço qualificado do `resolve_type` compara o `name` da entrada com o último segmento e o `namespace` com o qualificador — contra chaves canónicas **os dois testes falham para todo o tipo com namespace**, e a guarda leu *"não resolve"* como *"concordam"*. **O resolvedor do checker não consegue consultar a tabela que o backend recebe** — e é por isso que o backend cresceu uma resolução própria e mais fraca. Entrou `checker::type_table_rekeyed` (idempotente) só para o oráculo poder responder.
+
+> **`Uma guarda que não pode falhar é decoração.`** Terceira vez hoje que a inversão apanha o instrumento e não o produto (o `native_dry_gate` deu `COMPLETED` a um `/bin/true`; o `ci_full_log` chamava sucesso a um objecto ausente; agora a guarda dava zero a uma árvore que parava). **A inversão não é opcional.**
+
+### AS DUAS METADES FALHAM DIFERENTE, e só uma é ruidosa
+
+| colocação do alias qualificado | sintoma |
+|---|---|
+| **parâmetro** | paragem honesta — a que o self-host e as duas pernas de fixpoint mediam |
+| **campo** | **SILÊNCIO**: 8 bytes para uma escrita de 16, e o campo seguinte relido como comprimento |
+
+Medido na base: um campo aliased a `str` devolvia o **`43`** do vizinho onde a rota C devolvia **`5`**. Regra do oráculo aplicada com as duas rotas medidas: a rota C aceita as duas formas (usa sempre o último segmento) → o alvo era a nativa. **Quem persegue a paragem fecha a metade ruidosa e deixa a calada.** É exactamente a crítica do dono, medida.
+
+### A FAMÍLIA: 12 sítios em `src/lir/`, mais 3 iguais noutros ficheiros
+
+A raiz é `single_segment_name` (`lower.tks:12376`), que devolve `null` para caminho qualificado. Defeitos: `typeexpr_is_fat_named`, `typeexpr_is_fat_walk` (cujo doc dizia *"multi-segment path … is never fat"*). Consumidores que **param**: `bind_param`, `append_param_ltypes`. Consumidores que **miscompilam calados**: `field_layout_size`, `field_layout_align`.
+
+**E o achado que mudou o desenho:** `is_ref_param_ann` (`lower.tks:2473`) decide auto-`ref` pelo mesmo `named_type_name_of`. Alargar a raiz faria um tipo de utilizador chamado `ns::Ref` **passar a auto-ref em silêncio**. Por isso o caminho gordo ganhou o **seu próprio** `path_last_segment_name` e `single_segment_name` ficou intacto. **Um conserto largo teria trocado um defeito calado por outro.**
+
+### DEGRAU 32 — a paragem seguinte, e é de outra classe
+
+```
+base:  native backend N1: `vt_table` is not a fat-pointer local (internal) [in cg_pair_is_iface_vtable]
+depois: native backend N1: builtin `one_byte` not yet lowered (N2) [in `teko::encoding::json::parse_string`]
+```
+
+**A assinatura da base fica OBSOLETA para os agentes seguintes.** Ritual: fixpoint **`gen2 == gen3` byte a byte** (binário e `.c`, sha256 `a6d7ba2c…`); unitários **1140, 0 falhas, 0 skips reais** (as 17 linhas com "skip" são nomes de teste); fixture nas duas rotas **`exit 42` / `exit 42`**. Semente `bootstrap/teko.c` (`fetch_teko.sh` dá 403), medido com a **gen1**; a tentativa com a gen2 foi morta pelo **OOM killer** (`rc=137`) — limite do contentor, não paragem.
+
+### AS FIXTURES DELE JÁ USAM O MOLDE NOVO, e o contraste está no mesmo ficheiro
+
+Dez cenários em `d31_qualfat/`, cada claim por `teko::assert::is_true` — **não** por código de saída. Inclui uma **inversão**: dois namespaces a declarar `Same`, um alias de fatia e um struct escalar no mesmo programa, que **só passa se o qualificador for lido**. E ele registou a limitação da superfície: `teko::assert` só expõe `is_true`/`is_false`/`str_contains`, **não há `equals`** (precisa de genéricos), logo cada igualdade escreve-se `is_true(actual == esperado)` — é precisamente o que o agente da suíte de asserções vai fechar.
+
+**O `main.tks` passa a ter os DOIS moldes lado a lado:** nove filas do degrau 29 por `exit(bad)` e dez claims do degrau 31 por asserção. É o antes-e-depois da migração, visível num ficheiro.
+
+### O CONFLITO, resolvido POR INSPECÇÃO
+
+`main.tks` e `own_native.tkr` colidiram (previsto em §0o). Os dois lados eram **puramente aditivos** e **ambos ficaram**, degrau 29 primeiro. **Nenhum `--union`.** Conferido: zero marcadores, chaves equilibradas, uma só cauda `println`/`exit`, `fn` do `lower.tks` **549 → 559** (subiu), `corpus.tks` **246 → 246** (intocado de propósito, para reduzir colisão), 138 chamadas `f_*` e 10 claims `d31_*` todas definidas.
+
+### O QUE ELE NÃO COBRIU, e vai para a fila
+
+- **`cg_niche_is_fat` (`codegen.tks:2065`) não foi varrido** — é o **terceiro** decisor da mesma pergunta, sobre o tipo resolvido. A guarda cobre o par sintáctico×checker, não este.
+- **Divergência adjacente, medida e NÃO consertada (degrau próprio):** um campo de struct **por valor** de tipo nomeado **alia** a origem em vez de copiar, na rota nativa — e medido com nome **nu** e **qualificado**, logo **não é desta família**: `mut t = Trio{…}; let h = HB{p=t; n=44}; t.a = 99` → `h.p.a` dá **1** na rota C e **99** na nativa.
+- Alias para **primitivo** ou **enum** não é resolvido por `ltype_of_named_path`, nem nu nem qualificado.
+- Nada de arm64 nem Windows: só `linux-x86_64` local.
+
+## 0p. A GUARDA DO DRENO EXISTE, o harness deixou de cegar — e a MINHA contagem estava mal rotulada (2026-07-30)
+
+`cargo/0.3.1-own-native-unknown-fn` @ `53cc553` drenado. Delta: **só quatro ficheiros do compilador**, zero fixtures — logo zero colisão com o degrau 29 e o 31. `drain_guard` OK.
+
+Conferências: `fn` do `regression.tks` **103 → 106**, `lower.tks` **549 → 549** (intocado), `fixture_guard.tks` novo com **14 `fn`**. E a conferência de direcção **dentro** do módulo novo: das 14, nenhuma é órfã — as que não são chamadas de fora são chamadas no ficheiro ou pelos 9 testes. (A minha primeira medição excluiu o próprio ficheiro e por isso *pareceu* dar oito não-chamadas: **excluir o ficheiro de si mesmo é a mesma falha de direcção que já registei em §0c**.)
+
+### A CAUSA REAL, e a hipótese do harness estava ERRADA
+
+Eu suspeitei que o harness `Given source` ACRESCENTASSE ao conjunto de fontes. **Medido e refutado:** `compile_snippet_text` escreve um projecto de raspadinha em `<prefix>.proj/` e nunca toca no projecto no disco — provado sem harness nenhum, `teko build examples/regressions/own_native` falha igual. A primeira linha do log, enterrada por 119 iguais:
+
+```
+teko: examples/regressions/own_native: src/corpus.tks:3710:18: unexpected character
+main.tks:2:4: unknown function: f_arith        ← e 118 iguais
+```
+
+**Um ficheiro que não lexa não contribui declaração nenhuma.** Foi isso — não um cap, não a árvore `src/` não carregada, não o harness.
+
+### A CONTAGEM FECHADA — e o mal rotulado era MEU
+
+`git diff cff49b4 7a2f49b` insere **+7 `/**`, +6 `}`, +6 `    0`**, em **7 sítios**. Portanto o agente do degrau 30 tinha razão (**sete aberturas, seis finais**) e o meu "sete caudas" era o número de **SÍTIOS** com o rótulo errado. Registo-o porque a lei de §0h manda contar o que se mediu — e um número certo com um nome errado é uma medição errada.
+
+**E uma segunda reconciliação, que ele fez bem:** o piso que ele pinou é **229** sob a regra *`fn`/`pub fn` na coluna 0*; a minha nota dizia 202→235 sob a regra *incluindo indentadas*. Medido agora no vagão: **coluna 0 = 246, com indentadas = 252**. Ele **escreveu a regra ao lado do número**, que é o que torna um piso comparável quando outro degrau o subir. É o padrão a exigir de qualquer número pinado.
+
+### O QUE PASSOU A EXISTIR
+
+1. **O harness deixou de cegar.** `compile_failure_message` citava só a cauda de 40 linhas — correcto para um `cc` (diagnósticos no fim), **cego para uma cascata** (causa no início). Passa a guardar **20 + marcador de elisão + 40**. Prova por reversão, mesmo splice fabricado, dois binários: revertido → 40 linhas, começa em `main.tks:91`, **zero** linhas nomeiam a causa; com conserto → **4** linhas nomeiam-na, nas posições 4–7. **Foi esta cegueira que me fez ler uma fronteira posicional que não existia.**
+2. **A guarda do dreno** (`src/build/fixture_guard.tks`, 9 testes): profundidade de chaves 0 e zero doc-comments órfãos em todo `.tks`/`.tkt` de `examples/regressions/` — **428 ficheiros varridos, zero suspeitos** —, zero `f_*` sem declaração, e o piso de declarações. Reusa `snippet_brace_delta` e `is_ident_byte` em vez de duplicar (colisão de nome apanhada e resolvida **por reuso, não por renomear**).
+3. **Revertido** o remap 260→235 e a metade da guarda que o policiava. A medição continua verdadeira (`exit(260)`→4, `exit(256)`→0) — **o nível estava errado, por ruling do dono**. O `main.tks` está byte a byte como o vagão.
+
+### DUAS MEDIÇÕES QUE VALEM POR SI
+
+- **`own_cross_x86_64_windows_emits_coff` é alcançado E passa** neste hospedeiro: `own_native.tkr` = **ok, 27 builds, 1 fila saltada** (wasmtime ausente). É a confirmação independente de que o que falta nas pernas musl é o parser, não a fixture.
+- `teko test .` na gen2: **1146 ok, 0 FAILED**; regressões **11 run, 1 skipped, 0 failed** — o `1 skipped` é o wasmtime ausente **na máquina local**, não no CI.
+
+**Nota sobre a geração medida, e está certa:** ele mediu o `native_dry_gate` com a **gen1 da semente** nos dois lados de propósito — para comparar a MESMA geradora sobre fontes diferentes — e por isso viu `… emit_u32_le` e não o `vt_table`. Duas geradoras param em sítios diferentes; o que importa é que os dois lados usem a mesma, e usou.
+
+## 0o. DEGRAU 29 DRENADO — o A4-fp morreu, e ele achou um valor errado CALADO no x86 (2026-07-30)
+
+`cargo/0.3.1.0-degrau-29` @ `1a1ed32` drenado. 15 ficheiros, +1686/−185. `drain_guard` OK, `.github/` intocado.
+
+**Conferências no merge, todas limpas:** `fn` do `corpus.tks` **235 → 252** (subiu), `fn` do `lower.tks` **547 → 549** (subiu); **zero** splices e zero desequilíbrio de chaves nos 14 `.tks`/`.tkt` tocados; correspondência da fixture nas duas direcções — 138 chamadas, todas definidas, e a única definida-e-nunca-chamada continua a ser a excepção legítima `f_fat_field_len`.
+
+### A PARAGEM MORREU, e as três pernas presas nela ficam livres
+
+`A4-fp: float-op / FPR encoding deferred to 0.3.1` era o que prendia `test / linux-arm64-glibc`, `Memory paranoid (arm64-glibc)` e `test / macos-arm64` na PRIMEIRA fila do `own_native`. O projecto passa a emitir para `arm64-linux` e `arm64-macos`.
+
+**Codificações cruzadas contra `llvm-mc -triple=aarch64 -show-encoding`, nunca derivadas do próprio codificador** — e a certificação é número-por-número: **205 formas FP distintas** extraídas do objecto emitido, reassembladas e comparadas palavra a palavra, **0 divergências**; desmontagem completa **33 100 instruções, 0 `<unknown>`**.
+
+### O DEFEITO NOVO, e é a MESMA FAMÍLIA do degrau 27
+
+`mut n: f32 = -7.25` dava **`-7.2500028745271266`** pela rota própria e `-7.25` pela rota C; **atravessando uma chamada dava `0`**. E é **no x86-64**, não no arm64 que o agente foi fechar. O checker não propaga o `f32` esperado através do **menos unário**, e a lowering negava em `f64` sem estreitar — um double num registo que tudo a jusante lia à largura simples. Corrigido em `narrow_unary_float_to_result`.
+
+**É o terceiro membro desta família num dia:** o renderizador `f32` do degrau 27 (`$"{f:F2}"` de `2.5` dava `0.10` no nativo), o buraco de largura do `MCvt` no arm64, e agora o menos unário no x86. **A lição é sobre onde procurar:** o valor errado calado aparece sempre onde uma largura é assumida em vez de propagada, e as fixtures que o apanham são as que afirmam TEXTOS DIFERENTES para os MESMOS decimais (`0.1f+2.5f` = `2.5999999046325684` contra `2.6000000000000001`) — comparar valores não apanha, comparar a RENDERIZAÇÃO apanha.
+
+Outro achado seu, também calado: `FCmpLt`/`FCmpLe` iam para o `lt`/`le` do inteiro, que leem VERDADE num `FCMP` não-ordenado — **`nan < x` dava true**. Passam a `lo`/`ls`, cruzado contra `clang --target=aarch64-linux-gnu`.
+
+### RITUAL, e a prova que vale mais que o verde
+
+`native_dry_gate` **verde com assinatura idêntica**, medida com a **gen2 da árvore** (e registado o contraste: com a **gen1 da semente** pára noutro sítio, `… emit_u32_le` — as gerações param em sítios diferentes, como está na lei); **fixpoint `VERDICT: PASSED — gen2 == gen3 byte for byte`**, mesmo sha256, 4 232 496 bytes; **unitários na gen2 1152/1152 `ok`**, zero pânicos, reconciliados um a um (1140 + 14 − 2); corpus `own_native` **`exit 42` nas duas rotas**; quatro alvos emitem.
+
+**Prova por reversão:** revertendo SÓ dois braços de `encode_inst_word`, a paragem volta com o texto exacto do CI nos dois alvos arm64. Revertendo a correcção de largura, a rota própria falha a fixture `f32` **e a rota C fica verde** — a divergência que a fixture existe para caçar. Isto é a asserção que eu não conseguia fazer de fora.
+
+### PARAGENS QUE FICAM NOMEADAS, não escondidas
+
+`pin_args`/`select_param` com >8 argumentos de uma classe (janela de arity, **simétrica** GPR/FPR — não é buraco de floats); `UCVTF` codifica e é testado mas é **inalcançável** porque `LUnOp` não declara `IToF` sem sinal; `minst_interp` sem a família float (espelha o gap do interp da LIR); `%` sobre floats é **recusado** pelo checker e `x / 0.0` **armadilha**.
+
+### O QUE FICOU POR MEDIR, e a razão é a máquina
+
+A fase de **regressões** dentro do `teko test .` foi **inanida por contenção** — três suítes de agentes em simultâneo, 15 GB/16 GB, a dele a **7 % de CPU**, um projecto em 40 minutos. Parou-a para libertar a máquina e mediu o **canal directo** em vez dela. A fase unitária está completa e verde. **Isto é resposta aceitável** e foi o que eu autorizei: dizer qual fase ficou por medir vale mais que repetir três vezes contra uma máquina saturada.
+
+**COLISÃO QUE FICA PARA O PRÓXIMO DRENO:** ele tocou **`src/lir/lower.tks`** em três sítios (`lower_unary`, `lower_int_to_f32` e duas funções novas) — o ficheiro que eu lhe pedira para evitar, e tocou-o com razão, porque o defeito era da sua família. **`cargo/0.3.1.0-degrau-31` está VIVO no mesmo ficheiro** (a guarda de divergência gordo/escalar). Esse merge resolve-se **por inspecção**, nunca com `--union`, e a contagem de `fn` do `lower.tks` (agora **549**) não pode descer.
+
+## 0n. A PERNA WINDOWS DRENADA, e o agente REFUTOU a minha inferência (2026-07-30)
+
+`cargo/0.3.1.0-windows-leg-2` @ `0c81989` drenado. `drain_guard` OK. Conferências no merge: `fn` do `corpus.tks` **235 → 235** (a branch não tocou a fixture), zero chamadas do teste sem definição, e a **terceira direcção** medida — as quatro novas (`mingw_path_evidence`, `mingw_triple_evidence`, `MINGW_PATH_EVIDENCE_PHRASE`, `MINGW_TRIPLE_EVIDENCE_PHRASE`) são **privadas**, e o teste vive na mesma namespace, logo a visibilidade chega. Os **três** testes onde havia um estão verificados por nome (`..._convicted_by_its_path_without_any_probe`, `..._innocent_spelling_is_left_for_the_triple_to_judge`, `..._triple_reading_convicts_the_gnu_abi_and_acquits_the_unknown`).
+
+### A asserção mingw: a cadeia completa, e a declaração que o meu grep não achou
+
+`const HOST_CC_NAME: str = "cc"` vive em **`src/build/regression.tks:645`**. A cadeia: `mingw_cc_evidence("cc")` → `linker_is_mingw("cc")` é falso (a grafia é inocente) → **executa** `cc_target_triple`, que faz `spawn_redirected(["cc","-dumpmachine"])` → no runner Windows o `cc` resolve para `/c/mingw64/bin/cc` e responde um triplo MinGW → evidência não vazia → `== ""` falso. A 1165 cairia a seguir pela mesma razão; a 1164 dispara primeiro, e é por isso que a mensagem dizia `is_true`.
+
+Ritual reportado: `native_dry_gate` **verde com paragem idêntica** (medida pelo agente na base, com gen1 própria); **fixpoint `gen2 == gen3` byte a byte E `gen2.c == gen3.c`**; unitários na gen2 **1142 iniciados, 0 falhas** — 1140 + 2, porque um teste virou três — e o agente confirma a armadilha: **1135 linhas terminam em `ok` e 7 empurram-no para a linha seguinte**. Semente: `bootstrap/teko.c` (o `fetch_teko.sh` dá 403 por token inválido), via degrau `1e441aa`.
+
+### A REFUTAÇÃO, e é minha
+
+Eu escrevi que a mesma assinatura `0xC0000005` em **duas fixturas independentes** *"promove a hipótese de causa única no arranque"* e mandei olhar primeiro para a entrada sintetizada e o alinhamento de pilha. **Errado nas duas metades, e o log desmente-me:**
+
+1. **Não são duas fixturas independentes — é UMA.** O `main.tks:43` do `own_native` chama `f_alias_fat_field()`, e `own_arith_exit` é a fila `[0]`: cai com o binário. Uma causa, dois sintomas na mesma cadeia.
+2. **`regressor.tkr (14 builds)` contra 16 filas no ficheiro: o regressor CORTA na primeira falha.** As quatro que nunca correram incluem **`alias_fat_field (C route)`**. Portanto **a rota C desta fixtura está POR MEDIR em Windows, não verde** — e eu invoquei a regra do oráculo (*"a divergência nativo × C é bug do nativo"*) **sem medição do lado C**. Invocar o oráculo sobre um lado que não correu não é aplicar a regra: é presumi-la. Contraprova do agente: em Linux dá **18 builds**, com as mesmas filas presentes.
+3. E `byte-view round-trip (own-native)` — a única outra fila que compara duas `str` — **não correu**, logo não era contra-exemplo de nada.
+
+### A CAUSA PROVADA: a ABI de Win64 contra o par gordo
+
+`tk_str` tem **16 bytes** (`teko_rt.h:45-48`). Em Win64 um agregado só viaja em registo com 1/2/4/8 bytes; **16 viajam por referência**. O LIR passa sempre um valor gordo como `(ptr, len)` — que é a ABI da **SysV**. A correcção que já existe, `str_pair_by_ref_x86` (`isel_x86_64.tks:1373`), está fechada a **sete símbolos** (`is_str_arg_builtin`, `lower.tks:3259`) **e a `args.len == 2`**: cobre a família de UM `tk_str` e é *estruturalmente* incapaz de cobrir a de DOIS. Sobram quatro entradas por valor que o nativo chama: **`tk_str_eq`, `tk_str_contains`, `tk_str_ends_with`, `tk_rt_last_index_of_ok`**. As outras foram achatadas de propósito, e em SysV as duas formas são a MESMA ABI — é por isso que isto é invisível em Linux e macOS.
+
+Explica os três observáveis sem sobras: *não escreveu nada* (estoura NA comparação, e a cadeia do `main.tks` são `if` silenciosos); *só em Windows* (é a única ABI da matriz com `max_reg_arg_bytes < 16`); *"duas" fixturas* (é uma). Bónus: as dez filas `defer_*` que PASSAM entram no runtime por `tk_panic_str`, que **está** na lista dos sete.
+
+**Excluído por medição:** arranque, entrada sintetizada, alinhamento de pilha (aritmética de `frame_sub_size_x86`/`compute_frame_layout_x86` verificada), secções/relocações PE, compilação (compilou 1301 s e correu; 13 filas own-native anteriores passaram com o mesmo emissor), e a família `executable_suffix`/`binary_output_path`/`sibling_object_path` — *"um binário obsoleto não escolheria justamente a fila que compara strings"*.
+
+**Não empurrado, e a recusa é correcta:** sem host Windows, mudar ABI por raciocínio numa perna já vermelha é o palpite que o brief proíbe. **E há prova host-independente disponível:** `isel_x86_64_test.tkt` já tem um descritor `WIN64` (linha 482) e pode afirmar a sequência emitida para `tk_str_eq` **sem runner**. O desenho: generalizar a materialização por referência para N pares gordos quando `max_reg_arg_bytes < 16`, com a aridade gorda por símbolo ao lado de `is_str_arg_builtin`; SysV intocado pela guarda, fixpoint imóvel.
+
+**Também por medir:** o arco C de `alias_fat_field` em Windows, e a fase de regressão completa em Linux até ao fim.
+
+## 0m. AS PERNAS x86_64 ANDARAM DUAS FILAS — e a guarda diz o que falta a seguir (2026-07-30)
+
+Execução `30539595001` (`8d781ea`, o conserto das sete pernas). **Medido, e é progresso limpo:**
+
+- **`check_coff: FAIL` desapareceu.** Zero ocorrências. A fila `own_cross_x86_64_windows_emits_coff` passa agora nas três pernas x86_64.
+- Elas avançaram para a fila **seguinte**: `own_cross_arm64_linux_emits_elf` (`test / linux-x86_64-musl`, `Memory paranoid (musl)`, `regressor wasm`).
+- `arm64-glibc`, `mem-paranoid arm64` e `macOS` continuam em `own_arith_exit` (A4-fp = degrau 29, em branch); Windows em `own_arith_exit` (`0xC0000005`).
+- Stop nativo, único: degrau 31. Zero `skipped`.
+
+### A GUARDA NOMEOU O CONSERTO SEGUINTE, seis vezes
+
+```
+check_elf: FAIL — no cross-capable LLVM disassembler/relinker for an arm64 object exists on
+Linux-x86_64 (looked for llvm-objdump / ld.lld) — install LLVM's lld+objdump on this host, or do
+not route a cross-ELF check here — a gate that passes with nothing to check is a hidden error
+```
+
+`llvm` deu o `llvm-readobj` que fechou o COFF; o ELF cruzado quer também o **`ld.lld`**, que vive no pacote **`lld`**, não no `llvm`. Aplicado nas oito instalações (as sete pernas da suíte + o `regressor-full`).
+
+**E é uma guarda bem escrita:** não disse só "falhei" — disse **o que procurou** (`llvm-objdump` / `ld.lld`), **o que instalar**, e a alternativa legítima (*"or do not route a cross-ELF check here"*). É o molde do que quero das asserções que o agente da suíte está a construir: uma falha que diz o que esperava, o que obteve, e o que fazer.
+
+## 0l. O `llvm` FUNCIONOU ONDE CHEGOU — e dois dos meus três sítios eram a perna errada (2026-07-30)
+
+Execução `30535419502` (`5e14c6e`), log integral. **Progresso medido em duas frentes** e um erro meu, o mesmo de sempre.
+
+### O QUE ANDOU
+
+- `unknown function`: **zero** em todo o log. Fechado.
+- Stop nativo, único: `vt_table is not a fat-pointer local (internal)` — degrau 31.
+- `assertion failed`: **duas** ocorrências, o MESMO teste na MESMA perna (Windows).
+- **Zero `skipped`**, e o `no_skips_gate` diz *"every declared row ran. No skips."*
+- **O `regressor wasm` passou a fila do COFF** e avançou para a seguinte: falha agora em `own_cross_arm64_linux_emits_elf`. O `llvm` que eu lá pus **funcionou**.
+
+### A FILA QUE FALHA, POR PERNA — e ler uma e generalizar mente
+
+| perna | `own_native` pára em | `regressor` |
+|---|---|---|
+| `test / linux-x86_64-musl` | `own_cross_x86_64_windows_emits_coff` | — |
+| `Memory paranoid (musl)` | `own_cross_x86_64_windows_emits_coff` | — |
+| `regressor wasm` | **`own_cross_arm64_linux_emits_elf`** (avançou) | — |
+| `test / linux-arm64-glibc` | `own_arith_exit` (A4-fp = degrau 29) | — |
+| `Memory paranoid (arm64-glibc)` | `own_arith_exit` (A4-fp) | — |
+| `test / macos-arm64` | `own_arith_exit` (A4-fp) | — |
+| `test / windows-x86_64` | `own_arith_exit` (`0xC0000005`) | `alias_fat_field` |
+
+### O ERRO, e é a QUARTA vez com a mesma forma
+
+Eu pus `llvm` em **três** sítios que instalavam `clang`. Medido no log, pelas linhas `##[group]Run` de cada perna: **só UM deles era uma perna que corre a suíte** (`regressor-full`). Os outros dois eram `cli-surface-linux-x86_64-glibc` e `seed-debut` — jobs que não correm o corpus. E as pernas que precisavam (`test-linux-*`, `mem-paranoid*`) **não instalam nada**: só correm uma sonda de diagnóstico (`for t in cc clang gcc file python3`) e vivem do que a imagem traz — e a imagem traz `clang` sem `llvm-readobj`.
+
+**Editei onde a string batia, não onde a necessidade estava.** É exactamente a lição do `.exe` (medi dois sítios, eram nove) e a do predicado de gordura (o dono apanhou-a hoje). A regra que eu escrevo para os agentes falhou em mim: **enumerar a família é enumerar quem NECESSITA, não quem casa com o `grep`.**
+
+**Conserto aplicado:** um passo próprio — *"Install the object-format parsers the cross gates read with"* — nas **sete** pernas que correm a suíte (`test-linux-arm64-glibc`, `test-linux-arm64-musl`, `test-linux-x86_64-glibc`, `test-linux-x86_64-musl` e as três `mem-paranoid`), e **revertidos** os dois sítios onde eu não tinha necessidade medida — o comentário que lá pus alegava uma razão que não era verdade naquele job, e um comentário falso no CI é pior que nenhum. Conferido: 7 passos novos, 1 `clang llvm` (o `regressor-full`, medido a funcionar), 2 `clang` sozinhos, YAML válido.
+
+**Não medido, e digo-o em vez de o presumir:** macOS e Windows param antes de chegar às filas de objecto, logo **não sei** se têm os parsers. Quando o degrau 29 e a violação de acesso de Windows fecharem, essas duas pernas dirão.
+
 ## 0k. TERCEIRO REINÍCIO DO CONTENTOR — restaurado de um INSTANTÂNEO ANTIGO (2026-07-30 ~10:19)
 
 Não foi um reinício limpo: a árvore local voltou a **`9bc292a`** (`merge(carga): cargo/20-extern-return-narrowing`), este ficheiro **não existia**, e as worktrees dos agentes de hoje (`wt-d30`, `wt-d31`, `wt-unkfn`, `wt-winleg`) tinham desaparecido — só restavam as de sessões anteriores. Recuperado com `git fetch` + `git checkout -B … origin/…`.
@@ -368,6 +630,118 @@ Eu tinha registado `regressions 11 run, 0 skipped, 1 failed` como o estado medid
 que **essa 1 é o `own_native` e faz a perna cair**. Não é uma falha tolerada por envelope nenhum em
 Linux/macOS: é vermelho a sério, em todas as pernas, e é o item de maior valor da fila depois dos
 degraus. Fica corrigido aqui.
+
+## 0f. A `ACCESS_VIOLATION` de Windows TEM CAUSA PROVADA — e o meu "duas fixturas independentes" era uma leitura errada do log (2026-07-30, `cargo/0.3.1.0-windows-leg-2`)
+
+Medido no log integral do job **90829251715** (run `30528940780`, SHA `954b2c9`).
+
+**A minha inferência estava errada, e o próprio log a desmente.** Eu li duas fixturas a estourar com
+`0xC0000005` e concluí "causa única do lado de Windows, provavelmente no arranque do processo". A parte
+"causa única" está certa; a parte "arranque" está errada, e o que a decide é uma linha que eu não somei:
+`regressor.tkr (14 builds)`. **O ficheiro tem 16 filas de build e só 14 correram** — o regressor para o
+ficheiro na PRIMEIRA fila que falha. As 14 que correram são exactamente as filas ATÉ `alias_fat_field
+(own-native)` inclusive (argv + 2 qualifier + 10 defer + ela). As quatro que ficaram por correr são
+`alias_fat_field (C route)`, `variant_member_compare (C route)` e o par `byte-view round-trip`.
+
+Consequências imediatas, e as duas doem:
+
+1. **A rota C desta fixtura NUNCA correu em Windows.** A "regra do oráculo" que eu invoquei (a
+   divergência nativo-vs-C é bug do nativo) não tem medição nenhuma deste lado — o arco C está por
+   medir, não verde.
+2. **`byte-view round-trip (own-native)` também nunca correu**, e é a única outra fila own-native de
+   `regressor.tkr` que compara duas `str`. Não é contra-exemplo de nada.
+
+**A CAUSA, provada por leitura do código.** `tk_str` é `{ const tk_byte *ptr; size_t len; }` — 16
+bytes (`src/runtime/teko_rt.h:45-48`). Na ABI Microsoft x64 um agregado só viaja em registo com
+tamanho 1/2/4/8; **16 bytes viajam POR REFERÊNCIA** (o chamador copia para um temporário e passa o
+ENDEREÇO). Na SysV o mesmo agregado viaja em DOIS registos inteiros. O LIR achata sempre um valor gordo
+em `(ptr, len)`, o que É a ABI da SysV e NÃO é a de Win64 — e a correcção que existe para isso,
+`str_pair_by_ref_x86` (`src/backend/isel_x86_64.tks:1373`), está fechada a **sete símbolos** e a
+`args.len == 2`:
+
+```teko
+fn str_pair_by_ref_x86(abi: AbiDescriptor, symbol: str, args: []u32) -> bool {
+    abi.max_reg_arg_bytes < X86_STR_ARG_BYTES && lir::is_str_arg_builtin(symbol) && args.len == (2 to u64)
+}
+```
+
+`is_str_arg_builtin` (`src/lir/lower.tks:3259`) lista `tk_print`, `tk_println`, `tk_eprint`,
+`tk_eprintln`, `tk_write`, `tk_ewrite`, `tk_panic_str`. **Toda a família de UM `tk_str` está coberta;
+a de DOIS não está, e a guarda `args.len == 2` torna-a estruturalmente incobrível** — dois pares
+achatam para quatro operandos.
+
+Cruzando os protótipos de `teko_rt.h` com os símbolos que `lower.tks` emite, sobram **quatro** entradas
+que ainda recebem `tk_str` POR VALOR e não têm a correcção:
+
+| símbolo | assinatura em C | pares gordos |
+|---|---|---|
+| `tk_str_eq` | `bool tk_str_eq(tk_str a, tk_str b)` | 2 |
+| `tk_str_contains` | `bool tk_str_contains(tk_str s, tk_str needle)` | 2 |
+| `tk_str_ends_with` | `bool tk_str_ends_with(tk_str s, tk_str suffix)` | 2 |
+| `tk_rt_last_index_of_ok` | `bool tk_rt_last_index_of_ok(tk_str hay, tk_str needle, uint64_t *out_index)` | 2 + 1 escalar |
+
+Todas as OUTRAS entradas do runtime que o backend nativo chama já foram reescritas ACHATADAS de
+propósito — `tk_str_concat_len(const tk_byte*, uint64_t, const tk_byte*, uint64_t, uint64_t*)`,
+`tk_str_slice_len`, `tk_str_of_bytes_len`, `tk_slice_str_eq(const tk_str*, uint64_t, …)`. Estas quatro
+ficaram com a assinatura de struct. **Em SysV as duas formas são a MESMA ABI, por isso são
+indistinguíveis em Linux e macOS**; em Win64 são ABIs diferentes e o achatamento é o errado.
+
+**O mecanismo exacto, e já está escrito no próprio código.** O doc-comment de
+`pin_str_pair_by_ref_x86` descreve o sintoma idêntico de quando isto foi apanhado para `tk_print`:
+*"emitting SysV's two-register form on Win64 makes the C-built callee … read the STRING'S OWN first 16
+bytes as `{ptr; len}` and `fwrite` through the resulting garbage pointer."* Para `h.s != "abcde"` o
+nativo pinha `RCX = a.ptr`, `RDX = a.len`, `R8 = b.ptr`, `R9 = b.len`; o `tk_str_eq` compilado por clang
+lê `RCX` como `tk_str*`, carrega os bytes de `"abcde"` como se fossem um ponteiro e faz `memcmp` nesse
+endereço → **`0xC0000005`**.
+
+**Isto explica os TRÊS observáveis, e nenhum sobra:**
+
+- *"não escreveu NADA"* — o estouro é NA comparação. `cases/alias_fat_field.tks` é
+  `exit(alias_field_probe())` e o probe não imprime; o `main.tks` do `own_native` é uma cadeia de `if`
+  silenciosos. Nenhum dos dois chega a escrever.
+- *"só em Windows"* — Win64 é a única ABI da matriz com `max_reg_arg_bytes < 16`. Em SysV/AAPCS64 o par
+  achatado é literalmente a convenção correcta.
+- *"duas fixturas"* — é UMA causa. `main.tks:43` do `own_native` chama `f_alias_fat_field()`, e a mesma
+  cadeia passa antes por `f_str_equality` (item 28) e por outros `==` de `str`; o `own_native.exe`
+  estoura no PRIMEIRO `tk_str_eq` que avalia, muito antes do item 44. `own_arith_exit` é a fila `[0]`
+  desse ficheiro e cai com o binário, não pela sua própria aritmética.
+- *bónus, e é a confirmação mais limpa*: as **dez** filas `defer_*` que PASSARAM em Windows entram no
+  runtime por `tk_panic_str` — que **está** na lista dos sete. As que passam são as cobertas; a que
+  falha é a primeira não coberta. `alias_fat_field (own-native)` é a primeira fila own-native de
+  `regressor.tkr` que compara duas `str`.
+
+**O que fica EXCLUÍDO por medição, e não é pouco:** não é o arranque do processo, não é a entrada
+sintetizada, não é o alinhamento de pilha do prólogo, não são secções/relocações do PE, e não é
+compilação — `own_native.exe` compilou 1301 s e correu, e as 13 filas own-native anteriores
+(argv, qualifier, defer) correram e passaram com o MESMO emissor, a MESMA entrada e o MESMO objecto
+COFF. Também não é a família `executable_suffix`/`binary_output_path`/`sibling_object_path` de
+`cff49b4`: um binário obsoleto não escolheria justamente a fila que compara strings.
+
+**A CORRECÇÃO, e porque NÃO a empurrei.** O desenho certo é generalizar a correcção em vez de a alargar
+por lista: em `isel_x86_64.tks`, quando `max_reg_arg_bytes < 16`, materializar CADA par gordo do
+argumento no seu próprio slot de 16 bytes e pinar só os endereços — o que cobre a forma de 1 par (o que
+já existe), a de 2 pares, e a de 2 pares + escalar do `tk_rt_last_index_of_ok`, com a lista de aridade
+gorda por símbolo em `lower.tks` ao lado de `is_str_arg_builtin` (fonte única, como hoje). O caminho
+SysV fica intocado pela guarda `max_reg_arg_bytes < 16`, logo o fixpoint não se move.
+
+Não a empurrei porque **não tenho host Windows para a validar**, e uma mudança de ABI por raciocínio
+numa perna já vermelha é exactamente o palpite empurrado que o brief proíbe. O que a decide numa
+corrida: implementar a generalização e ver `alias_fat_field (own-native)` passar em Windows **e** as
+quatro filas que hoje nunca correm (`alias_fat_field (C route)`, `variant_member_compare (C route)` e o
+par `byte-view round-trip`) passarem a correr. Prova host-independente disponível em Linux enquanto
+isso: `isel_x86_64_test.tkt` já tem um descritor `WIN64` (linha 482) e pode afirmar a sequência emitida
+para `tk_str_eq` sem runner nenhum.
+
+**A CONTRAPROVA, medida em Linux na gen2 desta branch:** `teko: regression ok regressor.tkr (18
+builds, 14.1s)` — **18**, com `alias_fat_field (own-native)` E `byte-view round-trip (own-native)` nas
+filas. Windows fez **14** e parou. O mesmo ficheiro, o mesmo compilador, dois números: a diferença não
+é o que cada perna tem para correr, é onde cada perna PARA. Nada em `regressor.tkr` é saltado em
+Windows por capacidade — é o corte da primeira falha.
+
+**E uma lição de instrumento, que é minha:** `(N builds)` no relatório do regressor é o número de filas
+que CORRERAM, não o número de filas do ficheiro. Comparar esse N entre pernas — ou com o `grep -c "When
+built and run"` do `.tkr` — diz de graça quantas filas ficaram por correr, e foi só essa subtracção que
+separou "duas features estouram por acaso" de "uma causa, e a segunda fixtura nem chegou a ser medida".
 
 ## 0e. O `.exe` FECHADO — e o brief que eu escrevi estava incompleto (2026-07-30, `cff49b4`)
 

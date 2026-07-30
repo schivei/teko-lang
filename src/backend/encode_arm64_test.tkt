@@ -285,7 +285,7 @@ fn assert_word(inst: MInst, expected: u32) {
 
 /**
  * assert_stop — assert that `inst` honest-stops with a message containing the
- * named token (`A4-fp`/`A4-bigimm`/`A4-ldur`/`A4-bigframe`).
+ * named token (`A4-bigimm`/`A4-ldur`/`A4-bigframe`) or internal-error text.
  *
  * @param MInst inst  the instruction to encode
  * @param str name  the named-stop token expected in the message
@@ -476,31 +476,181 @@ fn encodes_compare_and_branch_placeholder() {
 
 #test
 /**
- * float_family_honest_stops — every FP-family case raises the `A4-fp` named
- * honest-stop.
+ * encodes_the_float_alu_family — FADD/FSUB/FMUL/FDIV in BOTH widths, pinned by
+ * BYTE. Every expected word here was produced by `llvm-mc -triple=aarch64
+ * -show-encoding` on the matching mnemonic, not derived from this encoder — the
+ * same cross-check the x86 twin's SSE2 family got from GNU `as`. Both widths are
+ * asserted for every mnemonic because `ftype_bit` is the single bit separating
+ * them, and an operation that read it from the wrong place would compute an f32
+ * result for an f64 program and still "compile".
  *
  * @return void
  */
-fn float_family_honest_stops() {
-    assert_stop(falu_inst(MFAluOp::FAdd, true, fp(0), fp(1), fp(2)), "A4-fp")
-    assert_stop(fneg_inst(true, fp(0), fp(1)), "A4-fp")
-    assert_stop(fcmp_inst(true, fp(0), fp(1)), "A4-fp")
-    assert_stop(fmov_inst(true, fp(0), fp(1)), "A4-fp")
-    assert_stop(cvt_inst(MCvtOp::Scvtf, fp(0), p(1)), "A4-fp")
+fn encodes_the_float_alu_family() {
+    assert_word(falu_inst(MFAluOp::FAdd, true, fp(3), fp(1), fp(2)), 0x1E622823)
+    assert_word(falu_inst(MFAluOp::FSub, true, fp(3), fp(1), fp(2)), 0x1E623823)
+    assert_word(falu_inst(MFAluOp::FMul, true, fp(3), fp(1), fp(2)), 0x1E620823)
+    assert_word(falu_inst(MFAluOp::FDiv, true, fp(3), fp(1), fp(2)), 0x1E621823)
+    assert_word(falu_inst(MFAluOp::FAdd, false, fp(3), fp(1), fp(2)), 0x1E222823)
+    assert_word(falu_inst(MFAluOp::FSub, false, fp(3), fp(1), fp(2)), 0x1E223823)
+    assert_word(falu_inst(MFAluOp::FMul, false, fp(3), fp(1), fp(2)), 0x1E220823)
+    assert_word(falu_inst(MFAluOp::FDiv, false, fp(3), fp(1), fp(2)), 0x1E221823)
 }
 
 #test
 /**
- * fpr_memory_honest_stops — loads/stores of the `S`/`D` FPR widths raise the
- * `A4-fp` honest-stop.
+ * encodes_the_float_negate_and_compare — FNEG and FCMP in both widths, pinned
+ * against `llvm-mc`. FNEG is a REAL instruction here (the x86 twin has to XOR
+ * the sign bit through a GPR), so `-0.0` keeps its sign with no extra sequence.
  *
  * @return void
  */
-fn fpr_memory_honest_stops() {
-    assert_stop(load_inst(MMemSize::S, false, fp(0), m(p(1), 0)), "A4-fp")
-    assert_stop(load_inst(MMemSize::D, false, fp(0), m(p(1), 0)), "A4-fp")
-    assert_stop(store_inst(MMemSize::S, fp(0), m(p(1), 0)), "A4-fp")
-    assert_stop(store_inst(MMemSize::D, fp(0), m(p(1), 0)), "A4-fp")
+fn encodes_the_float_negate_and_compare() {
+    assert_word(fneg_inst(true, fp(7), fp(9)), 0x1E614127)
+    assert_word(fneg_inst(false, fp(7), fp(9)), 0x1E214127)
+    assert_word(fcmp_inst(true, fp(11), fp(12)), 0x1E6C2160)
+    assert_word(fcmp_inst(false, fp(11), fp(12)), 0x1E2C2160)
+}
+
+#test
+/**
+ * encodes_the_three_fmov_shapes — the FPR-to-FPR scalar move and BOTH
+ * GPR/FPR-crossing directions, in both widths, pinned against `llvm-mc`. The
+ * crossing forms set `sf` and `type` together (`cross_width_bits`), which is
+ * exactly what the `0x9E66...` / `0x1E26...` pair proves.
+ *
+ * @return void
+ */
+fn encodes_the_three_fmov_shapes() {
+    assert_word(fmov_inst(true, fp(13), fp(14)), 0x1E6041CD)
+    assert_word(fmov_inst(false, fp(13), fp(14)), 0x1E2041CD)
+    assert_word(fmov_inst(true, p(15), fp(16)), 0x9E66020F)
+    assert_word(fmov_inst(false, p(15), fp(16)), 0x1E26020F)
+    assert_word(fmov_inst(true, fp(17), p(18)), 0x9E670251)
+    assert_word(fmov_inst(false, fp(17), p(18)), 0x1E270251)
+}
+
+#test
+/**
+ * encodes_every_conversion_width_pair — the int/float conversions with each of
+ * their two width fields varied INDEPENDENTLY, pinned against `llvm-mc`. This is
+ * the test the whole degrau exists for: `SCVTF` routes `src_wide` to `sf` and
+ * `dst_wide` to `type`, `FCVTZS` routes them the other way round, and the four
+ * `scvtf` words below (`d,x` / `d,w` / `s,x` / `s,w`) differ in exactly the two
+ * bits that says so. A single-width `MCvt` could not express three of them.
+ *
+ * @return void
+ */
+fn encodes_every_conversion_width_pair() {
+    assert_word(cvt_inst(MCvtOp::Scvtf, fp(19), p(20), true, true), 0x9E620293)
+    assert_word(cvt_inst(MCvtOp::Scvtf, fp(19), p(20), false, true), 0x1E620293)
+    assert_word(cvt_inst(MCvtOp::Scvtf, fp(19), p(20), true, false), 0x9E220293)
+    assert_word(cvt_inst(MCvtOp::Scvtf, fp(19), p(20), false, false), 0x1E220293)
+    assert_word(cvt_inst(MCvtOp::Ucvtf, fp(21), p(22), true, true), 0x9E6302D5)
+    assert_word(cvt_inst(MCvtOp::Ucvtf, fp(21), p(22), false, false), 0x1E2302D5)
+    assert_word(cvt_inst(MCvtOp::Fcvtzs, p(23), fp(24), true, true), 0x9E780317)
+    assert_word(cvt_inst(MCvtOp::Fcvtzs, p(23), fp(24), true, false), 0x1E780317)
+    assert_word(cvt_inst(MCvtOp::Fcvtzs, p(23), fp(24), false, true), 0x9E380317)
+    assert_word(cvt_inst(MCvtOp::Fcvtzs, p(23), fp(24), false, false), 0x1E380317)
+    assert_word(cvt_inst(MCvtOp::Fcvtzu, p(25), fp(26), true, true), 0x9E790359)
+    assert_word(cvt_inst(MCvtOp::Fcvtzu, p(25), fp(26), false, false), 0x1E390359)
+}
+
+#test
+/**
+ * encodes_both_fcvt_directions — the float-to-float convert narrows and widens
+ * into two DIFFERENT words (`llvm-mc`: `fcvt s27,d28` = `0x1E62439B`,
+ * `fcvt d27,s28` = `0x1E22C39B`), neither derivable from the other by an OR. An
+ * identity convert has no encoding and is a named internal error, not a word.
+ *
+ * @return void
+ */
+fn encodes_both_fcvt_directions() {
+    assert_word(cvt_inst(MCvtOp::Fcvt, fp(27), fp(28), true, false), 0x1E62439B)
+    assert_word(cvt_inst(MCvtOp::Fcvt, fp(27), fp(28), false, true), 0x1E22C39B)
+    teko::assert::str_contains(stop_of(cvt_inst(MCvtOp::Fcvt, fp(27), fp(28), true, true)), "identity FCVT")
+    teko::assert::str_contains(stop_of(cvt_inst(MCvtOp::Fcvt, fp(27), fp(28), false, false)), "identity FCVT")
+}
+
+#test
+/**
+ * fmov_between_two_gprs_is_an_internal_error — the one `MFMov` shape with no
+ * float encoding (`MMov` owns a GPR-to-GPR move) reports itself instead of
+ * emitting a guessed word.
+ *
+ * @return void
+ */
+fn fmov_between_two_gprs_is_an_internal_error() {
+    teko::assert::str_contains(stop_of(fmov_inst(true, p(1), p(2))), "MFMov between two GPRs")
+}
+
+#test
+/**
+ * encodes_fpr_memory_widths — the FPR loads/stores at both widths, with the
+ * scaled immediate scaled by the FPR access size (4 for `S`, 8 for `D`) exactly
+ * as the GPR widths already were. Pinned against `llvm-mc`: `ldr s5,[x6,#12]` =
+ * `0xBD400CC5` and `ldr d5,[x6,#24]` = `0xFD400CC5` share the SAME `imm12` field
+ * value (3) for different byte offsets, which is what proves the scale is read
+ * per width rather than fixed.
+ *
+ * @return void
+ */
+fn encodes_fpr_memory_widths() {
+    assert_word(load_inst(MMemSize::S, false, fp(5), m(p(6), 12)), 0xBD400CC5)
+    assert_word(load_inst(MMemSize::D, false, fp(5), m(p(6), 24)), 0xFD400CC5)
+    assert_word(store_inst(MMemSize::S, fp(5), m(p(6), 4)), 0xBD0004C5)
+    assert_word(store_inst(MMemSize::D, fp(5), m(p(6), 8)), 0xFD0004C5)
+    assert_word(load_inst(MMemSize::S, false, fp(5), m(p(6), 0)), 0xBD4000C5)
+    assert_word(store_inst(MMemSize::D, fp(5), m(p(6), 0)), 0xFD0000C5)
+}
+
+#test
+/**
+ * encodes_the_fpr_spill_from_sp — an `MFSpill` resolves through the frame layout to
+ * `STR/LDR Dt, [sp, #slot_offset]`, ONE word and no address register: AArch64 reaches
+ * the slot straight from SP, which is why the GPR spill's `frame_addr`+`ldr` pair is
+ * not needed for a float. Pinned against `llvm-mc`: `str d9,[sp,#24]` = `0xFD000FE9`,
+ * `ldr d9,[sp,#24]` = `0xFD400FE9`, `str d9,[sp]` = `0xFD0003E9`.
+ *
+ * Always the `D` width, for `f32` and `f64` alike: the transfer is a bit-preserving
+ * save/restore, never a conversion, and a spill slot is 8 bytes wide either way.
+ *
+ * @return void
+ */
+fn encodes_the_fpr_spill_from_sp() {
+    let fl = layout_of(32 to u32, l0(), l0(), l2(24, 0))
+    assert_word_with(fl, fspill_inst(fp(9), 0, false), 0xFD000FE9)
+    assert_word_with(fl, fspill_inst(fp(9), 0, true), 0xFD400FE9)
+    assert_word_with(fl, fspill_inst(fp(9), 1, false), 0xFD0003E9)
+}
+
+/**
+ * assert_word_with — assert that `inst` encodes to the exact 32-bit `expected` word
+ * under an explicit `layout` (the frame-resolved forms: `MFrameAddr`, `MFSpill`).
+ *
+ * @param FrameLayout layout  the enclosing frame
+ * @param MInst inst  the instruction to encode
+ * @param u32 expected  the known-good arm64 instruction word
+ * @return void
+ */
+fn assert_word_with(layout: FrameLayout, inst: MInst, expected: u32) {
+    match encode_inst_word(layout, inst) {
+        EncWord as x => teko::assert::is_true(x.word == expected)
+        error => teko::assert::is_true(false)
+    }
+}
+
+#test
+/**
+ * fpr_memory_keeps_the_unscaled_stop — an FPR offset the scaled unsigned form
+ * cannot express still raises `A4-ldur`, the same stop the GPR widths raise: the
+ * float family closing did not widen the addressing surface, only the widths.
+ *
+ * @return void
+ */
+fn fpr_memory_keeps_the_unscaled_stop() {
+    assert_stop(load_inst(MMemSize::D, false, fp(0), m(p(1), 4)), "A4-ldur")
+    assert_stop(store_inst(MMemSize::S, fp(0), m(p(1), 2)), "A4-ldur")
 }
 
 #test
@@ -1200,14 +1350,16 @@ fn module_globals_honest_stops() {
 #test
 /**
  * module_propagates_function_honest_stop — a function that honest-stops during
- * encode (a float op → `A4-fp`) propagates the stop out of `encode_module`
- * unchanged.
+ * encode (a non-inline ALU immediate → `A4-bigimm`) propagates the stop out of
+ * `encode_module` unchanged. It USED to name a float op; the float family now
+ * encodes (0.3.1.0 degrau 29), so the propagation is proven through a stop that
+ * still lives.
  *
  * @return void
  */
 fn module_propagates_function_honest_stop() {
-    let f = one_block_func("main", i1(falu_inst(MFAluOp::FAdd, true, fp(0), fp(1), fp(2))))
-    teko::assert::str_contains(em_stop(add_mfunc(empty_mmodule(), f)), "A4-fp")
+    let f = one_block_func("main", i1(alu_imm_inst(MAluOp::Add, true, p(0), p(1), 5000)))
+    teko::assert::str_contains(em_stop(add_mfunc(empty_mmodule(), f)), "A4-bigimm")
 }
 
 /**
