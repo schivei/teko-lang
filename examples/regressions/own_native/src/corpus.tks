@@ -3707,6 +3707,87 @@ fn f_slice_elem_store_boundaries() -> i64 {
         i++
     }
     if ys.len != 5 { return 11 }
+ * D27_TENTH_F32 — `0.1` held as an `f32`, whose EXACT binary64 value (`0.10000000149011612`) is the
+ * one text a correct `f32`-to-text path must produce. A single-precision register read at double
+ * width produces something else entirely, which is what made this constant the sonda of the family
+ * (0.3.1.0 degrau 27).
+ */
+const D27_TENTH_F32: f32 = 0.1
+
+/**
+ * D27_HALVES_F32 — `2.5` held as an `f32`: exactly representable in BOTH widths, so its text is the
+ * same (`2.5`) whichever width the value physically has. It is the control against `D27_TENTH_F32`:
+ * a path that renders this one right and that one wrong is reading the register at the wrong width,
+ * not mis-rounding (0.3.1.0 degrau 27).
+ */
+const D27_HALVES_F32: f32 = 2.5
+
+/**
+ * d27_ftoa_of — one of FIVE runtime-selected `f64` values rendered through `teko::ftoa`, chosen by
+ * `tag` so the value reaching `ftoa` is a RUNTIME value and not a literal the front end could fold
+ * into the call's own result (0.3.1.0 degrau 27). `f_ftoa_literal_text` covers the literal direction
+ * separately, on purpose: the two travel by different roads (a `LConstFloat` bit pattern on the own
+ * backend, a spelled C constant on the C route) and only asserting both certifies the pair.
+ *
+ * @param tag  which value to render: 0 → `+0.0`, 1 → `-0.0`, 2 → `1.0`, 3 → `-2.5`, 4 → `1/3`
+ * @return     the value's `%.17g` text
+ */
+fn d27_ftoa_of(tag: i64) -> str {
+    mut zero: f64 = 0.0
+    mut minus_one: f64 = -1.0
+    mut one: f64 = 1.0
+    mut two_and_a_half: f64 = 2.5
+    mut three: f64 = 3.0
+    if tag == 0 { return teko::ftoa(zero) }
+    if tag == 1 { return teko::ftoa(minus_one * zero) }
+    if tag == 2 { return teko::ftoa(one) }
+    if tag == 3 { return teko::ftoa(minus_one * two_and_a_half) }
+    teko::ftoa(one / three)
+}
+
+/**
+ * d27_infinity — a POSITIVE infinity produced at RUNTIME by overflowing binary64 multiplication, so
+ * the value is not a literal any constant folder could have spelled (0.3.1.0 degrau 27).
+ *
+ * @return  `+inf`
+ */
+fn d27_infinity() -> f64 {
+    mut huge: f64 = 1.0e308
+    mut ten: f64 = 10.0
+    huge * ten
+}
+
+/**
+ * d27_not_a_number — a NaN produced at RUNTIME as `inf - inf`, the shortest arithmetic route to one
+ * that needs no NaN literal (which the language's surface has none of) (0.3.1.0 degrau 27).
+ *
+ * @return  a NaN
+ */
+fn d27_not_a_number() -> f64 {
+    d27_infinity() - d27_infinity()
+}
+
+/**
+ * f_ftoa_runtime_text — 0.3.1.0 degrau 27: `teko::ftoa(f64) -> str`, the `%.17g` host renderer, was
+ * the stop that blocked the native self-host (`teko::codegen::cb_f64_literal` renders every float
+ * literal the C route emits through it). Now lowered to `tk_ftoa_len` through the out-parameter-length
+ * convention.
+ *
+ * Asserted BY TEXT, never by "it compiled": each value is one a float formatter is known to get
+ * wrong, and each expected string is the one the C ROUTE prints for the same program (the oracle,
+ * measured). `+0.0` and `-0.0` differ ONLY in the sign bit and `%.17g` renders neither with a
+ * fractional part, so they are the pair that catches a renderer that lost the sign; `1.0` renders as
+ * `1` with no `.0`, which is the shape that reads back as a C INTEGER and is why the literal
+ * direction needed its own fix; `1/3` is the many-digit case that catches a short-cut renderer.
+ *
+ * @return 0 when every value renders exactly, else the number of the failing check
+ */
+fn f_ftoa_runtime_text() -> i64 {
+    if d27_ftoa_of(0) != "0" { return 1 }
+    if d27_ftoa_of(1) != "-0" { return 2 }
+    if d27_ftoa_of(2) != "1" { return 3 }
+    if d27_ftoa_of(3) != "-2.5" { return 4 }
+    if d27_ftoa_of(4) != "0.33333333333333331" { return 5 }
     0
 }
 
@@ -3748,6 +3829,31 @@ fn f_slice_elem_store_widths() -> i64 {
     if f[1] != ElemShade::Hot { return 14 }
     if f[0] != ElemShade::Off { return 15 }
     if f[2] != ElemShade::Off { return 16 }
+ * f_ftoa_literal_text — 0.3.1.0 degrau 27: the LITERAL direction of the same renderer. A float
+ * literal reaches the own backend as a `LConstFloat` BIT PATTERN and reaches the C route as a
+ * SPELLED C constant, so the two roads can disagree — and they did. Measured on the base of this
+ * degrau:
+ *
+ * - `-0.0` printed `-0` through the own backend and `0` through the C route: `%.17g` renders it as
+ *   `-0`, which C reads as the `int` zero and converts to `+0.0`, dropping the sign bit before any
+ *   conversion happens (`codegen.tks::cb_f64_literal`, fixed here with `c_double_spelling`);
+ * - `1.0e400` did not COMPILE through the C route at all (`error: 'inf' undeclared`) while the own
+ *   backend built and ran it, because `inf` is not a C constant (fixed here by emitting `<math.h>`'s
+ *   own `INFINITY`).
+ *
+ * The extreme magnitudes are here for the round trip itself: `%.17g` is exact for binary64, so a
+ * renderer or a re-parse that lost a digit changes these texts.
+ *
+ * @return 0 when every literal renders exactly, else the number of the failing check
+ */
+fn f_ftoa_literal_text() -> i64 {
+    if teko::ftoa(0.0) != "0" { return 1 }
+    if teko::ftoa(-0.0) != "-0" { return 2 }
+    if teko::ftoa(1.0) != "1" { return 3 }
+    if teko::ftoa(-2.5) != "-2.5" { return 4 }
+    if teko::ftoa(1.0e300) != "1.0000000000000001e+300" { return 5 }
+    if teko::ftoa(5.0e-324) != "4.9406564584124654e-324" { return 6 }
+    if teko::ftoa(1.0e400) != "inf" { return 7 }
     0
 }
 
@@ -3779,6 +3885,25 @@ fn f_slice_elem_compound_ops() -> i64 {
     if xs[2] != 100 { return 8 }
     if xs[1] != 14 { return 9 }
     if xs[3] != 10 { return 10 }
+ * f_ftoa_nonfinite_text — 0.3.1.0 degrau 27: the two non-finite classes ARE representable on this
+ * surface (an overflowing multiplication reaches `+inf`, `inf - inf` reaches a NaN) and so they are
+ * covered rather than skipped.
+ *
+ * The infinities are pinned to their exact texts (`inf`/`-inf`, what `%g` is required to print). The
+ * NaN is pinned only by its SUFFIX: a NaN's sign bit and payload are the host libc's business, and
+ * glibc prints `-nan` for `inf - inf` where another conforming libc may print `nan` — this corpus
+ * runs on glibc AND on musl, so asserting the exact spelling would pin a platform, not a behavior.
+ * The suffix still fails loudly for a renderer that printed a number, an empty string, or `0`.
+ *
+ * @return 0 when every non-finite value renders in its class, else the number of the failing check
+ */
+fn f_ftoa_nonfinite_text() -> i64 {
+    mut minus_one: f64 = -1.0
+    if teko::ftoa(d27_infinity()) != "inf" { return 1 }
+    if teko::ftoa(minus_one * d27_infinity()) != "-inf" { return 2 }
+    let nan_text = teko::ftoa(d27_not_a_number())
+    if !teko::str::ends_with(nan_text, "nan") { return 3 }
+    if nan_text.len < 3 { return 4 }
     0
 }
 
@@ -3812,6 +3937,26 @@ fn f_slice_elem_store_fat() -> i64 {
     if nested[0][2] != 9 { return 11 }
     if nested[1].len != 2 { return 12 }
     if nested[1][1] != 4 { return 13 }
+ * f_f64_g17_agrees_with_ftoa — 0.3.1.0 degrau 27: `teko::f64_g17` is the SECOND name the checker
+ * registers for the same `%.17g` host renderer, and it was stopping for exactly the same reason
+ * `ftoa` was. It is now lowered to its own runtime twin (`tk_f64_g17_len`), so the two reach
+ * DIFFERENT runtime symbols and can only agree when both lowerings are right.
+ *
+ * Each value is checked twice: against `ftoa`'s output on the same value (the cross-check, which no
+ * hand-written expectation can make vacuous) and against the pinned text (which catches the case
+ * where both renderers are wrong the same way).
+ *
+ * @return 0 when both renderers agree and match the pinned text, else the number of the failing check
+ */
+fn f_f64_g17_agrees_with_ftoa() -> i64 {
+    mut i: i64 = 0
+    loop {
+        if i > 4 { break }
+        if teko::f64_g17(d27_f64_case(i)) != d27_ftoa_of(i) { return 1 }
+        i++
+    }
+    if teko::f64_g17(d27_f64_case(1)) != "-0" { return 2 }
+    if teko::f64_g17(d27_f64_case(4)) != "0.33333333333333331" { return 3 }
     0
 }
 
@@ -3849,6 +3994,50 @@ fn f_slice_elem_store_aggregate() -> i64 {
     if ps[1].y != 90 { return 9 }
     if ps[0].x != 1 { return 10 }
     if ps[2].x != 3 { return 11 }
+ * d27_f64_case — the VALUE `d27_ftoa_of` renders for the same `tag`, so the two renderers can be
+ * compared on identical inputs without either one's text being the specification for the other
+ * (0.3.1.0 degrau 27).
+ *
+ * @param tag  which value: 0 → `+0.0`, 1 → `-0.0`, 2 → `1.0`, 3 → `-2.5`, 4 → `1/3`
+ * @return     the value
+ */
+fn d27_f64_case(tag: i64) -> f64 {
+    mut zero: f64 = 0.0
+    mut minus_one: f64 = -1.0
+    mut one: f64 = 1.0
+    mut two_and_a_half: f64 = 2.5
+    mut three: f64 = 3.0
+    if tag == 0 { return zero }
+    if tag == 1 { return minus_one * zero }
+    if tag == 2 { return one }
+    if tag == 3 { return minus_one * two_and_a_half }
+    one / three
+}
+
+/**
+ * f_float_hole_natural_form — 0.3.1.0 degrau 27: a NO-FORMAT-SPEC interpolation hole over a float
+ * (`$"{x}"`) used to be its own honest stop (`float interpolation hole not yet lowered`) even though
+ * the C route renders it through the very builtin this degrau lowered — `tk_ftoa((double)(x))`, its
+ * natural-form arm. The sibling is closed here through the SAME `tk_ftoa_len` twin.
+ *
+ * Each hole is compared against a DIRECT `teko::ftoa` call on the same value: the two travel
+ * different lowering paths (the interpolation hole builder versus the builtin call resolver) and meet
+ * at one runtime symbol, so agreement is evidence and not a restated expectation.
+ *
+ * @return 0 when every hole matches its direct-call twin and the pinned text, else the failing check
+ */
+fn f_float_hole_natural_form() -> i64 {
+    mut i: i64 = 0
+    loop {
+        if i > 4 { break }
+        let x = d27_f64_case(i)
+        if $"{x}" != teko::ftoa(x) { return 1 }
+        i++
+    }
+    let negative_zero = d27_f64_case(1)
+    if $"[{negative_zero}]" != "[-0]" { return 2 }
+    let a_third = d27_f64_case(4)
+    if $"{a_third}" != "0.33333333333333331" { return 3 }
     0
 }
 
@@ -3876,3 +4065,48 @@ fn f_slice_elem_foreach_writeback() -> i64 {
     if ss[1].len != 3 { return 8 }
     0
 }
+ * f_f32_text_is_its_own_value — 0.3.1.0 degrau 27, and the DEFECT this degrau's sibling search found:
+ * an `f32` rendered to text through ANY of the four routes must produce the exact binary64 value of
+ * the single-precision number, because every `tk_*` renderer declares a `double` parameter while an
+ * `f32` physically holds single precision.
+ *
+ * Measured on the base, against the C route on the same program: `$"{f:F2}"` over `f: f32 = 2.5`
+ * printed `2.50` through C and `0.10` through the own backend; `$"{f:G}"` printed `2.5` and
+ * `4.65274e-310`; `$"{f:F4}"` over `0.1` printed `0.1000` and `0.0000`. A wrong VALUE with no
+ * diagnostic, in code that had been green since degrau 19 — the widening the C route gets from `cc`'s
+ * implicit `(double)` conversion had no counterpart in the own backend's lowering
+ * (`widen_hole_to_f64`).
+ *
+ * The two constants are a matched pair: `2.5` is exactly representable in both widths (so its text is
+ * width-independent) and `0.1` is not (so its text names the width it was read at). A route that
+ * gets `2.5` right and `0.1` wrong read the register at the wrong width.
+ *
+ * @return 0 when every route renders the `f32`'s own value, else the number of the failing check
+ */
+fn f_f32_text_is_its_own_value() -> i64 {
+    let tenth = D27_TENTH_F32
+    let halves = D27_HALVES_F32
+    if teko::ftoa(tenth) != "0.10000000149011612" { return 1 }
+    if teko::f64_g17(tenth) != "0.10000000149011612" { return 2 }
+    if $"{tenth}" != "0.10000000149011612" { return 3 }
+    if teko::ftoa(halves) != "2.5" { return 4 }
+    if $"{halves}" != "2.5" { return 5 }
+    if $"{halves:F2}" != "2.50" { return 6 }
+    if $"{tenth:F4}" != "0.1000" { return 7 }
+    if $"{halves:G}" != "2.5" { return 8 }
+    if $"{halves:E3}" != "2.500e+00" { return 9 }
+    if $"{halves:N2}" != "2.50" { return 10 }
+    if $"{halves:P1}" != "250.0%" { return 11 }
+    if $"{halves:[d27_dynamic_spec()]}" != "2.500" { return 12 }
+    if $"{tenth:[d27_dynamic_spec()]}" != "0.100" { return 13 }
+    0
+}
+
+/**
+ * d27_dynamic_spec — the format spec of the DYNAMIC-spec rows, returned from a function so the spec
+ * text is a runtime value and the hole takes the `tk_fmt_dyn_f64_len` path rather than the static one
+ * (0.3.1.0 degrau 27).
+ *
+ * @return  `"F3"`, three fixed decimal places
+ */
+fn d27_dynamic_spec() -> str { "F3" }

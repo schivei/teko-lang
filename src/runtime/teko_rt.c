@@ -409,6 +409,16 @@ tk_str tk_ftoa(double x) {
     return (tk_str){ buf, len };
 }
 
+// tk_ftoa_len / tk_f64_g17_len — out-parameter-length twins of the two float-to-text renderers
+// (declared in teko_rt.h; see that comment for WHY). Thin wrappers over their own two-word twins:
+// call it, write the length out, return the pointer half. tk_f64_g17_len is defined beside
+// tk_f64_g17 itself, further down, so each twin sits next to the renderer it wraps.
+const tk_byte *tk_ftoa_len(double x, uint64_t *out_len) {
+    tk_str r = tk_ftoa(x);
+    *out_len = r.len;
+    return r.ptr;
+}
+
 // --- Format spec helpers ($"{x:F2}" / $"{x:[fmt]}") ---
 // All produce fresh malloc'd str; tk_panic on OOM. snprintf into a small stack buffer for the
 // common case (all everyday formatted numbers fit); a user-supplied width/precision (e.g.
@@ -921,6 +931,14 @@ tk_str tk_f64_g17(double x) {
     if (buf == NULL) tk_panic("out of memory (f64_g17)");
     if (len) memcpy(buf, tmp, len);
     return (tk_str){ buf, len };
+}
+
+// tk_f64_g17_len — the out-parameter-length twin of tk_f64_g17 (declared in teko_rt.h beside
+// tk_ftoa_len; see that comment for WHY).
+const tk_byte *tk_f64_g17_len(double x, uint64_t *out_len) {
+    tk_str r = tk_f64_g17(x);
+    *out_len = r.len;
+    return r.ptr;
 }
 
 // --- ROUND 0: UTF-8 codepoint operations ---

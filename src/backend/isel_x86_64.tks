@@ -1439,24 +1439,52 @@ fn pin_call_args_x86(abi: AbiDescriptor, ctx0: SelCtxX86, symbol: str, args: []u
 }
 
 /**
- * select_call_result_x86 — after a call, move its result out of the SysV result
- * register RAX into the result VReg (when the call produces one). The result
- * class is taken as GPR (RAX): `LInst` carries no result type, so a
- * float-returning call (XMM0) is a documented limitation until the LIR records
- * a call's result type.
+ * select_call_result_x86 — after a call, move its result out of the ABI result register into the
+ * result VReg (when the call produces one), in the REGISTER FILE the call's own `ret_type` names:
+ * RAX for every integer/pointer/`bool` result, XMM0 for an `f32`/`f64` one (`B1-fp`).
+ *
+ * This USED to take the class as GPR unconditionally, because `LInst` carries no result type —
+ * a limitation this function's own doc named. `lir::LCall`/`LCallIndirect` now record
+ * `ret_type` (0.3.1.0 degrau 27), and the limitation was not benign: `select_ret_x86` and
+ * `pin_args_x86` already split the two files, so a float-returning callee PUT its result in XMM0 and
+ * a later float argument had to travel in XMM — while this function read RAX and then recorded the
+ * value as a GPR, so the wrong bits went into the wrong register file twice over. Measured: a
+ * `$"{f():F2}"` over an `f64`-returning function CRASHED the generated program (the garbage GPR
+ * value was placed where `tk_fmt_f_len` expected its `uint64_t *out_len`) where the C route printed
+ * `2.50`.
  *
  * @param SelCtxX86 ctx0  the post-call context to extend
  * @param lir::LInst inst  the call instruction (its result VReg + `has_result`)
- * @param MReg ret_reg  the ABI result register the call wrote (RAX)
+ * @param MReg ret_reg  the ABI result register the call wrote (`call_result_reg_x86`)
+ * @param lir::LType ret_type  the call's own recorded result class
  * @return SelCtxX86  the advanced context
  */
-fn select_call_result_x86(ctx0: SelCtxX86, inst: lir::LInst, ret_reg: MReg) -> SelCtxX86 {
+fn select_call_result_x86(ctx0: SelCtxX86, inst: lir::LInst, ret_reg: MReg, ret_type: lir::LType) -> SelCtxX86 {
     if !inst.has_result {
         return ctx0
+    }
+    if mregclass_of_ltype(ret_type) == MRegClass::FPR {
+        let wide = ltype_is_wide(ret_type)
+        let fdst = vreg(inst.result, MRegClass::FPR)
+        let fctx = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::FPR, wide)
+        return selctx_x86_emit(fctx, fmov_x86(fdst, ret_reg, wide))
     }
     let dst = vreg(inst.result, MRegClass::GPR)
     let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::GPR, true)
     selctx_x86_emit(ctx1, mov_x86(dst, ret_reg, true))
+}
+
+/**
+ * call_result_reg_x86 — the physical register a call's result comes back in, by its recorded
+ * machine class: XMM0 for a float, RAX for everything else (decision D-A — RAX is the integer
+ * result register on both SysV and Win64, and XMM0 is the float one on both) (0.3.1.0 degrau 27).
+ *
+ * @param lir::LType ret_type  the call's own recorded result class
+ * @return MReg  the ABI result register
+ */
+fn call_result_reg_x86(ret_type: lir::LType) -> MReg {
+    if mregclass_of_ltype(ret_type) == MRegClass::FPR { return XMM0_X86 }
+    RAX_X86
 }
 
 /**
@@ -1476,9 +1504,9 @@ fn select_call_result_x86(ctx0: SelCtxX86, inst: lir::LInst, ret_reg: MReg) -> S
  */
 fn select_call_x86(abi: AbiDescriptor, ctx0: SelCtxX86, inst: lir::LInst, c: lir::LCall) -> SelCtxX86 | error {
     let pinned = match pin_call_args_x86(abi, ctx0, c.symbol, c.args, c.variadic) { PinnedArgsX86 as p => p; error as e => return e }
-    let ret_reg = RAX_X86
+    let ret_reg = call_result_reg_x86(c.ret_type)
     let ctx1 = selctx_x86_emit(pinned.ctx, call_x86(c.symbol, pinned.uses, ret_reg, inst.has_result, c.variadic))
-    select_call_result_x86(ctx1, inst, ret_reg)
+    select_call_result_x86(ctx1, inst, ret_reg, c.ret_type)
 }
 
 /**
@@ -1494,9 +1522,9 @@ fn select_call_x86(abi: AbiDescriptor, ctx0: SelCtxX86, inst: lir::LInst, c: lir
  */
 fn select_call_indirect_x86(abi: AbiDescriptor, ctx0: SelCtxX86, inst: lir::LInst, ci: lir::LCallIndirect) -> SelCtxX86 | error {
     let pinned = match pin_args_x86(abi, ctx0, ci.args, ci.variadic) { PinnedArgsX86 as p => p; error as e => return e }
-    let ret_reg = RAX_X86
+    let ret_reg = call_result_reg_x86(ci.ret_type)
     let ctx1 = selctx_x86_emit(pinned.ctx, call_ind_x86(vreg(ci.target, MRegClass::GPR), pinned.uses, ret_reg, inst.has_result))
-    select_call_result_x86(ctx1, inst, ret_reg)
+    select_call_result_x86(ctx1, inst, ret_reg, ci.ret_type)
 }
 
 /**

@@ -846,3 +846,59 @@ Feature: slice element write — `xs[i] op= v` has a native lowering (0.3.1.0 de
     When built and run
     Then it traps
     And stderr pattern = "teko: deliberate panic: index out of bounds"
+Feature: float-to-text — `ftoa`/`f64_g17` lower to the runtime's own `%.17g` renderer, by VALUE
+
+  # (0.3.1.0 degrau 27) `teko::ftoa(f64) -> str` had NO lowering in the own backend, and it is the
+  # renderer `teko::codegen::cb_f64_literal` spells every float literal of the C route's output
+  # through — so the native SELF-BUILD of the compiler stopped there and no native gen2 existed at
+  # all. Both float-to-text names (`ftoa` and `f64_g17` — one `%.17g` renderer, two spellings) now
+  # resolve to their own out-parameter-length twins, the same molde the integer half has used since
+  # degrau 9.
+  #
+  # Every row asserts TEXT, never "it compiled": a renderer that emitted garbage would pass a
+  # compilation fixture. The expected strings are the ones the C ROUTE prints for the same program.
+  Scenario: ftoa_runtime_text (own-native — five RUNTIME values, `+0.0`/`-0.0`/`1.0`/`-2.5`/`1/3`, each pinned to its `%.17g` text)
+    When built and run
+    Then exit = 42
+
+  # The LITERAL direction is a separate row because it travels a separate road: a float literal is a
+  # `LConstFloat` BIT PATTERN on the own backend and a SPELLED C constant on the C route. Two defects
+  # lived in that spelling and only a value comparison finds them — `-0.0` lost its sign (`%.17g`
+  # renders it `-0`, which C reads as the `int` zero) and a literal that overflows binary64
+  # (`1.0e400`) did not COMPILE at all (`error: 'inf' undeclared`).
+  Scenario: ftoa_literal_text (own-native — the literal road, including `-0.0` and the overflowing `1.0e400`)
+    When built and run
+    Then exit = 42
+
+  # `inf`/`-inf`/NaN ARE representable on this surface, so they are covered rather than skipped. The
+  # infinities are pinned exactly; the NaN is pinned by SUFFIX only, because its sign and payload are
+  # the host libc's business (glibc prints `-nan` for `inf - inf`) and this corpus runs on glibc AND
+  # on musl.
+  Scenario: ftoa_nonfinite_text (own-native — `inf`, `-inf` and a NaN, produced by runtime arithmetic)
+    When built and run
+    Then exit = 42
+
+  # `f64_g17` reaches a DIFFERENT runtime symbol (`tk_f64_g17_len`) than `ftoa` does, so comparing the
+  # two on identical values is evidence rather than a restated expectation.
+  Scenario: f64_g17_agrees_with_ftoa (own-native — the second `%.17g` spelling, cross-checked against the first)
+    When built and run
+    Then exit = 42
+
+  # A no-format-spec float hole (`$"{x}"`) used to be its own honest stop even though the C route
+  # renders it through this exact builtin. The sibling is closed through the same twin, and each hole
+  # is compared against a DIRECT `teko::ftoa` call on the same value — two lowering paths, one symbol.
+  Scenario: float_hole_natural_form (own-native — `$"{x}"` over a float, against its direct-call twin)
+    When built and run
+    Then exit = 42
+
+  # THE DEFECT THIS DEGRAU'S SIBLING SEARCH FOUND, green since degrau 19: every `tk_*` renderer
+  # declares a `double` parameter while an `f32` hole physically holds single precision, and nothing
+  # widened it — the C route gets the conversion from `cc`'s implicit `(double)` and the own backend
+  # got nothing. Measured against the C route on the same program: `$"{f:F2}"` over `f: f32 = 2.5`
+  # printed `2.50` through C and `0.10` through the own backend; `$"{f:G}"` printed `2.5` and
+  # `4.65274e-310`. A wrong VALUE with no diagnostic. The two constants are a matched pair — `2.5` is
+  # exactly representable in both widths, `0.1` is not — so a route that renders one right and the
+  # other wrong is reading the register at the wrong width.
+  Scenario: f32_text_is_its_own_value (own-native — an `f32` through all four text routes, direct, natural, static-spec and dynamic-spec)
+    When built and run
+    Then exit = 42

@@ -84,9 +84,41 @@ pub type LUn = struct { op: LUnOp; a: u32 }
     a VReg. */
 pub type LParam = struct { index: u32 }
 
-/** LCall — call a symbol (already mangled Teko-Teko, or a runtime `tk_*`) with the
-    given VReg arguments. `variadic` mirrors the callee's variadic marker. */
-pub type LCall = struct { symbol: str; args: []u32; variadic: bool }
+/**
+ * LCall — call a symbol (already mangled Teko-Teko, or a runtime `tk_*`) with the given VReg
+ * arguments.
+ *
+ * @since #382 A1-5
+ */
+pub type LCall = struct {
+    /**
+     * symbol — the callee's already-mangled symbol name.
+     */
+    symbol: str
+    /**
+     * args — the (already-lowered) argument VRegs, in ABI order.
+     */
+    args: []u32
+    /**
+     * variadic — mirrors the callee's own variadic marker.
+     */
+    variadic: bool
+    /**
+     * ret_type — the machine class the call's RESULT comes back in, and the one fact a backend
+     * cannot re-derive: the ABI splits results by register FILE, so `F32`/`F64` comes back in
+     * XMM0 / D0 while every integer, pointer and `bool` comes back in RAX / X0.
+     *
+     * Without it, `select_call_result_x86`/`select_call_result_arm64` took EVERY result out of the
+     * integer register and recorded it as a GPR value. `select_ret_*` and `pin_args_*` had already
+     * been taught the two files (`B1-fp`), so the callee PUT a float result in XMM0/D0 and a later
+     * float argument had to travel in XMM/D — and this one hole between them made
+     * `$"{f():F2}"` over an `f64`-returning function crash the generated program while the C route
+     * printed `2.50` (measured, 0.3.1.0 degrau 27). `Void` for a call with no result.
+     *
+     * @since 0.3.1.0 degrau 27
+     */
+    ret_type: LType
+}
 
 /** LRet — return (a terminator). `value` is the returned VReg; `has_value=false`
     is a void return. */
@@ -136,7 +168,27 @@ pub type LGlobalAddr = struct { symbol: str }
  *
  * @since #382 A1-6
  */
-pub type LCallIndirect = struct { target: u32; args: []u32; variadic: bool }
+pub type LCallIndirect = struct {
+    /**
+     * target — the VReg holding the callee's address.
+     */
+    target: u32
+    /**
+     * args — the (already-lowered) argument VRegs, in ABI order.
+     */
+    args: []u32
+    /**
+     * variadic — mirrors the callee's own variadic marker.
+     */
+    variadic: bool
+    /**
+     * ret_type — the machine class the call's RESULT comes back in, exactly as `LCall.ret_type`
+     * (see its doc for the register-file split and the defect its absence caused).
+     *
+     * @since 0.3.1.0 degrau 27
+     */
+    ret_type: LType
+}
 
 /**
  * LFuncAddr — the address of a named function (a Ptr VReg): a function used
@@ -328,15 +380,37 @@ pub fn param_inst(result: u32, index: u32, line: u32, col: u32) -> LInst {
     LInst { result = result; has_result = true; op = LParam { index = index }; line = line; col = col }
 }
 
-/** call_inst — a value-producing `%r = call @sym(args)` instruction. */
-pub fn call_inst(result: u32, symbol: str, args: []u32, variadic: bool, line: u32, col: u32) -> LInst {
-    LInst { result = result; has_result = true; op = LCall { symbol = symbol; args = args; variadic = variadic }; line = line; col = col }
+/**
+ * call_inst — a value-producing `%r = call @sym(args)` instruction.
+ *
+ * @param result    the VReg the call's return value is stored into
+ * @param symbol    the callee's already-mangled symbol name
+ * @param args      the (already-lowered) argument VRegs, in ABI order
+ * @param variadic  whether the callee's variadic marker is set
+ * @param line      the source line (propagated for the `.tsym` map)
+ * @param col       the source column (propagated for the `.tsym` map)
+ * @param ret_type  the machine class the RESULT comes back in (`LCall.ret_type`); defaults to
+ *                  `I64`, the integer-register class every pointer/integer/`bool` result shares,
+ *                  so ONLY a float-returning call has to name it (0.3.1.0 degrau 27)
+ * @return LInst  the built instruction
+ */
+pub fn call_inst(result: u32, symbol: str, args: []u32, variadic: bool, line: u32, col: u32, ret_type: LType = LType::I64) -> LInst {
+    LInst { result = result; has_result = true; op = LCall { symbol = symbol; args = args; variadic = variadic; ret_type = ret_type }; line = line; col = col }
 }
 
-/** void_call_inst — a `call @sym(args)` instruction that yields no value (a
-    statement-level call or a diverging builtin like tk_exit). */
+/**
+ * void_call_inst — a `call @sym(args)` instruction that yields no value (a statement-level call or
+ * a diverging builtin like `tk_exit`).
+ *
+ * @param symbol    the callee's already-mangled symbol name
+ * @param args      the (already-lowered) argument VRegs, in ABI order
+ * @param variadic  whether the callee's variadic marker is set
+ * @param line      the source line (propagated for the `.tsym` map)
+ * @param col       the source column (propagated for the `.tsym` map)
+ * @return LInst  the built instruction, with `ret_type = Void` (there is no result to place)
+ */
 pub fn void_call_inst(symbol: str, args: []u32, variadic: bool, line: u32, col: u32) -> LInst {
-    LInst { result = 0; has_result = false; op = LCall { symbol = symbol; args = args; variadic = variadic }; line = line; col = col }
+    LInst { result = 0; has_result = false; op = LCall { symbol = symbol; args = args; variadic = variadic; ret_type = LType::Void }; line = line; col = col }
 }
 
 /** ret_inst — a `ret %v` terminator. */
@@ -401,10 +475,12 @@ pub fn global_addr_inst(result: u32, symbol: str, line: u32, col: u32) -> LInst 
  * @param bool variadic whether the callee's variadic marker is set
  * @param u32 line      the source line (propagated for the `.tsym` map)
  * @param u32 col       the source column (propagated for the `.tsym` map)
+ * @param LType ret_type  the machine class the RESULT comes back in (`LCall.ret_type`); defaults
+ *                  to `I64` so only a float-returning indirect call has to name it
  * @return LInst  the built instruction
  */
-pub fn call_indirect_inst(result: u32, target: u32, args: []u32, variadic: bool, line: u32, col: u32) -> LInst {
-    LInst { result = result; has_result = true; op = LCallIndirect { target = target; args = args; variadic = variadic }; line = line; col = col }
+pub fn call_indirect_inst(result: u32, target: u32, args: []u32, variadic: bool, line: u32, col: u32, ret_type: LType = LType::I64) -> LInst {
+    LInst { result = result; has_result = true; op = LCallIndirect { target = target; args = args; variadic = variadic; ret_type = ret_type }; line = line; col = col }
 }
 
 /**
@@ -419,7 +495,7 @@ pub fn call_indirect_inst(result: u32, target: u32, args: []u32, variadic: bool,
  * @return LInst  the built instruction
  */
 pub fn void_call_indirect_inst(target: u32, args: []u32, variadic: bool, line: u32, col: u32) -> LInst {
-    LInst { result = 0; has_result = false; op = LCallIndirect { target = target; args = args; variadic = variadic }; line = line; col = col }
+    LInst { result = 0; has_result = false; op = LCallIndirect { target = target; args = args; variadic = variadic; ret_type = LType::Void }; line = line; col = col }
 }
 
 /**

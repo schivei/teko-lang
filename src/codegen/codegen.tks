@@ -256,10 +256,128 @@ fn cb_numint(buf: []byte, v: parser::NumInt) -> []byte {
     cb_u64_c_expr(buf, v.mag)
 }
 
-// cb_f64_literal — append a f64 as a round-trippable decimal literal. The C twin used
-// snprintf("%.17g"); Teko has no snprintf, so this defers to the runtime float renderer
-// (teko::ftoa) which guarantees an exact binary64 round-trip. (C: `cb_f64_literal`.)
-fn cb_f64_literal(buf: []byte, v: f64) -> []byte { cb(buf, teko::ftoa(v)) }
+/**
+ * F64_EXPONENT_SHIFT — the bit position of the IEEE-754 binary64 biased exponent field.
+ */
+const F64_EXPONENT_SHIFT: u64 = 52 to u64
+/**
+ * F64_EXPONENT_MASK — the IEEE-754 binary64 biased exponent field, once shifted down: all-ones
+ * denotes a non-finite value (infinity when the significand is zero, NaN otherwise).
+ */
+const F64_EXPONENT_MASK: u64 = 2047 to u64
+/**
+ * F64_SIGNIFICAND_MASK — the IEEE-754 binary64 significand field, the 52 low bits.
+ */
+const F64_SIGNIFICAND_MASK: u64 = 4503599627370495 to u64
+/**
+ * F64_SIGN_SHIFT — the bit position of the IEEE-754 binary64 sign bit.
+ */
+const F64_SIGN_SHIFT: u64 = 63 to u64
+
+/**
+ * cb_f64_literal — append `v` as a C expression of type `double` holding EXACTLY `v`'s bits.
+ *
+ * The `%.17g` text alone is NOT that expression, and believing it was cost two measured defects
+ * (0.3.1.0 degrau 27, found while lowering `ftoa` for the native backend — this function is the very
+ * site the native self-host stopped at):
+ *
+ * - a `%.17g` rendering with NO `.`, `e` or `E` in it is an INTEGER constant in C. `-0.0` renders as
+ *   `-0`, which C reads as the `int` zero and then converts to `+0.0` — the sign bit silently gone.
+ *   Measured: `mut a: f64 = -0.0` printed `-0` through the own backend (which carries the literal as
+ *   bits and never spells it) and `0` through this route.
+ * - `inf`/`-inf`/`nan` are not C constants at ALL. A source literal that overflows binary64
+ *   (`1.0e400`) emitted `tk_ftoa((inf))`, and the generated program did not COMPILE: *"error: 'inf'
+ *   undeclared"*. The own backend built and ran the same program.
+ *
+ * So the spelling is decided from the value's IEEE class, never from its text alone: a non-finite
+ * value takes `<math.h>`'s own `INFINITY`/`NAN` macros (already included by the prologue, and the
+ * portable C spelling — a NaN's PAYLOAD is not preserved, which no language guarantees and Teko does
+ * not expose), and a finite value takes the `%.17g` text forced into floating-point form
+ * (`c_double_spelling`). `%.17g` round-trips binary64 exactly, so the finite case is bit-exact.
+ *
+ * @param buf  the emission buffer
+ * @param v    the literal value to append
+ * @return     the buffer with a `double`-typed C expression for `v` appended
+ */
+fn cb_f64_literal(buf: []byte, v: f64) -> []byte {
+    let bits = teko::f64_bits(v)
+    if f64_bits_are_finite(bits) { return cb(buf, c_double_spelling(teko::ftoa(v))) }
+    if f64_bits_are_nan(bits) { return cb(buf, "NAN") }
+    if f64_bits_are_negative(bits) { return cb(buf, "(-INFINITY)") }
+    cb(buf, "INFINITY")
+}
+
+/**
+ * f64_bits_are_finite — is the binary64 value carried by `bits` finite (neither infinity nor NaN)?
+ * True exactly when the biased exponent field is not all-ones.
+ *
+ * @param bits  the value's IEEE-754 binary64 bit pattern (`teko::f64_bits`)
+ * @return      true iff the value is finite
+ */
+fn f64_bits_are_finite(bits: u64) -> bool {
+    ((bits >> F64_EXPONENT_SHIFT) & F64_EXPONENT_MASK) != F64_EXPONENT_MASK
+}
+
+/**
+ * f64_bits_are_nan — is the binary64 value carried by `bits` a NaN? True exactly when the biased
+ * exponent field is all-ones AND the significand is non-zero (an all-ones exponent with a zero
+ * significand is an infinity).
+ *
+ * @param bits  the value's IEEE-754 binary64 bit pattern (`teko::f64_bits`)
+ * @return      true iff the value is a NaN
+ */
+fn f64_bits_are_nan(bits: u64) -> bool {
+    !f64_bits_are_finite(bits) && (bits & F64_SIGNIFICAND_MASK) != 0 to u64
+}
+
+/**
+ * f64_bits_are_negative — is the binary64 value carried by `bits` signed negative? Read off the SIGN
+ * BIT alone, so it answers true for `-0.0` as well — which is the whole reason this family exists.
+ *
+ * @param bits  the value's IEEE-754 binary64 bit pattern (`teko::f64_bits`)
+ * @return      true iff the sign bit is set
+ */
+fn f64_bits_are_negative(bits: u64) -> bool {
+    (bits >> F64_SIGN_SHIFT) != 0 to u64
+}
+
+/**
+ * c_double_spelling — `text` (a `%.17g` rendering of a FINITE binary64 value) forced into a spelling
+ * C reads as a `double` rather than as an `int`: a `.0` is appended when the rendering carries no
+ * decimal point and no exponent marker.
+ *
+ * `%.17g` drops the fractional part of an integral value (`1.0` renders as `1`, `-0.0` as `-0`). For
+ * every value but zero that reads back as the same NUMBER anyway, since C converts the integer
+ * constant to `double` at the assignment; for `-0.0` it does not, because the `int` `-0` IS `0` and
+ * the sign is lost before any conversion happens. Appending `.0` fixes the sign case and changes no
+ * other value: an integral `%.17g` rendering plus `.0` denotes the same real number, and a binary64
+ * that `%.17g` renders integrally is exactly representable.
+ *
+ * @param text  the `%.17g` rendering of a finite value
+ * @return      the same value as a C floating-point constant
+ */
+fn c_double_spelling(text: str) -> str {
+    if has_c_float_marker(text) { return text }
+    teko::str::concat(text, ".0")
+}
+
+/**
+ * has_c_float_marker — does `text` already carry a character that makes a C numeric constant
+ * FLOATING-POINT rather than integer: a decimal point or an exponent marker?
+ *
+ * @param text  the numeric constant text
+ * @return      true iff `text` contains `.`, `e` or `E`
+ */
+fn has_c_float_marker(text: str) -> bool {
+    mut i: u64 = 0 to u64
+    loop {
+        if i >= text.len { break }
+        let ch = text[i]
+        if ch == b'.' || ch == b'e' || ch == b'E' { return true }
+        i++
+    }
+    false
+}
 
 // cb_cstr_escaped — append `s` C-escaped, INSIDE an already-open C string literal. The
 // bytes are raw (may contain NUL, quotes, newlines) — see TStrLit. We never rely on
