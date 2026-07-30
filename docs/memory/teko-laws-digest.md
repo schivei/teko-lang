@@ -802,20 +802,43 @@ Depois de um `fmt`, o `--check` devolve rc=0; a segunda passagem não muda nada.
 passagem**. Logo a forma estranha é a convenção tal como implementada, e os 16 ficheiros foram
 commitados sem `fmt`. Terceira hipótese minha refutada por medição neste dia.
 
-### O buraco
+### NÃO É BURACO DE PORTÃO — e o dono cortou a minha conclusão
 
-**Nenhum passo do `pr.yml` corre `fmt --check`.** Um formatador com modo `--check` que ninguém
-consulta é lei sem fiscal — e cai exatamente na régua do tronco: *"sem erros, alertas ou mesmo erros
-escondidos (que não disparam)"*.
+Eu concluí que "nenhum passo do `pr.yml` corre `fmt --check`" era um buraco, pela régua do tronco.
+**Errado.** O dono, 2026-07-30:
 
-### Porque NÃO foi corrigido no momento em que foi descoberto
+> fmt check é dev mode e ele não está assim tão bom. E pq dev mode, para ter convenção e não
+> imposição. Mais vale um `fmt --apply` que um `fmt --check`
 
-Reformatação é churn de ficheiro inteiro, e **cinco dos 16 estavam sob edição ativa** por cinco
-agentes em paralelo (`typer.tks`, `project.tks`, `lower_const.tks`, `codegen_test.tkt`,
-`linker.tks`). Fazê-la com as frentes abertas compra conflito sem ganho; no ponto calmo da lane
-custa quase nada.
+O formatador é **ferramenta de convenção, não regra de CI**. Não existe portão de `fmt` e não deve
+existir: um ficheiro fora de formato não é erro escondido, é estilo não convergido — e a régua do
+tronco fala de erros que não disparam, não de convenções não aplicadas. **Nunca armar `fmt --check`
+no CI.** Os 16 ficheiros são dívida de conveniência, opcional, sem portão a impô-la.
 
-**A sequência, para quem pegar:** (1) drenar os agentes vivos; (2) `teko fmt src/` sobre os 16;
-(3) confirmar que o ponto de fixo continua a fechar — reformatar não muda bytes emitidos, mas é
-afirmação a verificar, não a assumir; (4) **só então** armar o passo `fmt --check` no CI, nos seis
-hosts, porque um portão que passa sem verificar é o defeito que esta lane fechou seis vezes hoje.
+A lição de método, que é a minha e não do formatador: **invocar uma lei do projeto não dispensa
+verificar que ela se aplica.** Estiquei "sem erros escondidos" até cobrir estilo, o que ela não
+cobre. É a mesma forma do erro de hoje com o C# — invocar a referência sem medir se ela vale aqui.
+
+### A superfície do `fmt`, medida, e a armadilha nela
+
+```
+usage: teko fmt [--check] <path>...
+flags:  --check    report unformatted files without rewriting them
+```
+
+Uma flag só, e **aplicar já é o padrão** — `teko fmt <path>` reescreve no lugar. Logo o modo que o
+dono valoriza já existe; o `--check` é que é o opt-in.
+
+O que dá força ao `--apply` que ele sugeriu não é ter mais um nome: é que hoje **`teko fmt src/`
+reescreve 16 ficheiros sem flag e sem confirmação**. Para ferramenta em dev mode, o caminho
+destrutivo ser o mais curto é armadilha; um `--apply` explícito torna a reescrita deliberada. Fica
+como sugestão registada, não como trabalho despachado — a decisão é do dono.
+
+### Se algum dia se reformatar os 16, a ordem é esta
+
+Reformatação é churn de ficheiro inteiro, e no dia da medição **cinco dos 16 estavam sob edição
+ativa** por cinco agentes (`typer.tks`, `project.tks`, `lower_const.tks`, `codegen_test.tkt`,
+`linker.tks`). Fazê-la com frentes abertas compra conflito sem ganho. No ponto calmo: drenar os
+agentes, `teko fmt` sobre os 16, e **confirmar que o ponto de fixo continua a fechar** — reformatar
+não deve mudar bytes emitidos, mas isso é afirmação a verificar, não a assumir. **Sem portão no
+fim.**
