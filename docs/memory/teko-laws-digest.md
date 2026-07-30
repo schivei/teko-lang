@@ -648,3 +648,82 @@ fixture por um app real que exercite alloca, rodata e assinaturas `Ptr`**, e esp
 início. Esse vermelho É o item de trabalho da versão do wasm, e casa com o seguimento já nomeado:
 fiar `ptr64` pelo frame e pela rodata. Como WASI e Browser são só 64 bits por ordem do dono, o app
 cai em wasm64 — onde a paragem vive. As duas restrições encontram-se na mesma migalha.
+
+## Leis — sem `void`, sem sobrecarga, e o `main` híbrido (dono, 2026-07-30)
+
+### Duas leis em que EU escorreguei, registadas para não se repetir
+
+Propus ao dono `fn main() -> void` e `fn main() -> i32`, *"exatamente como o `Main` do C#"*. Ele
+cortou:
+
+> Não temos `void` eu os bani, do mesmo modo, não temos sobrecarga de função/metodo, também os bani
+
+Ambas estão no código como lei, e eu podia tê-las medido antes de propor:
+
+- **`void` não é valor.** `src/checker/resolve.tks:1741` — *"void is not a value, M.3"*; `Ref<void>`
+  é rejeitado; `src/checker/typer.tks:1661` tipa argumentos *"(void rejected)"*. A grafia de função
+  sem valor de retorno é simplesmente **sem seta**: `fn ensure_rt_dir_abs() {`.
+- **Sem sobrecarga.** `src/checker/collect.tks:1291` — *"W10b's no-overloading/override-only
+  ruling"*. O compilador trabalha em volta disso e **documenta** que trabalha: é a razão declarada
+  do `<src>_to_<dst>` em `src/casting/casting.tks:16` e de dois nomes distintos em
+  `src/lir/lower.tks:10565`.
+
+**A lição de método**, não de conteúdo: quando eu invoco uma das quatro referências de desenho, tenho
+de verificar que a *nossa* superfície suporta o que a referência oferece. O C# aceita `void` ou `int`
+no `Main` **porque tem sobrecarga**; nós temos nenhum dos dois. O espelho do C# aqui vale para a
+REGRA DE ENTRADA HÍBRIDA, não para o conjunto de assinaturas.
+
+### O `main` híbrido — as três decisões, fechadas
+
+> Creio que poderia ser híbrido, como no C#. Se existe funcao main, então usa ela e o main.tks é
+> livre, se não, o arquivo é como é hoje. Mas, a funcao main teria que residir dentro do main.tks
+> somente e haver somente um de cada (somente uma funcao e somente um arquivo main).
+
+1. **Assinatura: `fn main() -> i32`, e só.** Dono: *"Sai com i32 (sem saída não será aceito)"* — um
+   `fn main()` sem seta é **erro honesto**, nunca exit 0 implícito. Sem `void` para oferecer e sem
+   sobrecarga para permitir duas formas, há exatamente uma.
+2. **Misturar `fn main` com instruções no topo: REJEITAR.** Ambiguidade de ponto de entrada, e o C#
+   também rejeita.
+3. **Sem parâmetros** — e aqui a proibição de sobrecarga **responde sozinha**: o C# pode oferecer
+   `Main()` e `Main(string[] args)` justamente porque tem sobrecarga. Nós não podemos, logo há uma
+   forma, e os argumentos vêm de `args()`.
+
+### `args()` bare — o precedente é o `println`, não um conceito novo
+
+> Sem parâmetros, mas, `teko::env::args()` poderia ser global para reduzir o tamanho da escrita
+> `args()`
+
+A lista de builtins chamáveis sem qualificador é **fechada** e vive em `src/checker/scope.tks:525`:
+`print`, `println`, `write`, `ewrite`, `eprint`, `eprintln`, mais `panic` e `exit`
+(`src/checker/typer.tks:1613`/`:1621`). O `println` já existe nas DUAS grafias — bare e
+`teko::io::println` — logo `args()` bare ao lado de `teko::env::args()` segue precedente e não abre
+conceito.
+
+**Duas armadilhas, ambas com regressão a apontá-las:**
+
+- **Sequestro.** `src/checker/resolve.tks:782`: builtins R2 são casados **primeiro**, *"bare only — a
+  builtin is never namespaced"*. A regressão `builtin_name_not_hijacked` existe porque uma função de
+  utilizador com nome de builtin tem de correr o próprio corpo. Pôr `args` na lista bare exige a
+  mesma proteção, e essa regressão tem de crescer para cobrir `args`.
+- **A lei de 2026-07-29 do próprio dono** — *"a builtin call is resolved by NAME and QUALIFIER, not
+  name alone"*, com regressões que rejeitam builtin por namespace inventado e por alias de `use`. A
+  grafia bare nova não pode abrir buraco nisso.
+
+**E uma primeira vez:** `args` seria o primeiro builtin bare que **devolve dados**. Os oito atuais
+são todos I/O ou controlo de fluxo, nenhum produz valor. Não é impedimento, é onde esperar a
+surpresa.
+
+### O que a medição já garante que é barato
+
+A guarda que proíbe declarações no `main.tks` é **uma linha**, em
+`src/parser/parse_file.tks:149`, e é puramente sintática. E o ponto de entrada **já** se chama
+`main`: `src/build/project.tks:2255` identifica o main virtual *"by its exact, un-namespaced `main`
+symbol"*, `src/backend/stackify.tks:4739` procura `funcs[i].symbol == "main"`, e
+`src/checker/initanalysis.tks:281` já isenta `main` da análise de inicialização. O main virtual já é
+baixado como uma função literalmente chamada `main` — o híbrido deixa o utilizador **escrever** a
+função que hoje é sintetizada, em vez de acrescentar um conceito.
+
+**O risco real está noutro sítio:** `teko test .` e o harness de regressão SINTETIZAM mains
+(`src/build/regr_group.tks` dobra snippets num despachante; `project.tks` chega a descartar o
+`LFunc` do main virtual). A regra "só um `main`, e só no `main.tks`" tem de valer sem quebrar os
+mains sintetizados dos testes. É ali que o defeito vai aparecer.
