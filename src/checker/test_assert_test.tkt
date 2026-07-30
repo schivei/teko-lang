@@ -183,6 +183,26 @@ fn taf_return_blk() -> []TStatement {
 }
 
 /**
+ * A `loop` statement fixture, typed as a `TStatement` so it can head a mixed statement block.
+ *
+ * @param init  the loop's init block
+ * @param body  the loop's body block
+ * @return      the loop statement
+ */
+fn taf_loop_stmt(init: []TStatement, body: []TStatement) -> TStatement {
+    TLoopStmt { label = ""; init = init; body = body }
+}
+
+/**
+ * A one-statement block holding a bare `break`.
+ *
+ * @return  the single-break block
+ */
+fn taf_break_blk() -> []TStatement {
+    teko::list::push(teko::list::empty(), TBreakStmt { label = "" })
+}
+
+/**
  * An `if <cond> { <then> }` expression statement fixture (no else branch).
  *
  * @param then_blk  the then block
@@ -400,14 +420,14 @@ fn taf_sites_classify_a_root_assertion_as_mandatory() {
 /** THE FIRST HARD CASE: an assertion inside a `loop` is FLOW — a `loop <cond>` may run zero times. */
 #test
 fn taf_sites_classify_an_assertion_in_a_loop_as_flow() {
-    let body = teko::list::push(teko::list::empty(), TLoopStmt { label = ""; init = teko::list::empty(); body = taf_one_assert_blk() })
+    let body = teko::list::push(teko::list::empty(), taf_loop_stmt(teko::list::empty(), taf_one_assert_blk()))
     teko::assert::is_true(taf_one_kind(body) == AssertKind::Flow)
 }
 
 /** A `loop`'s INIT block is flow too — the same statement, the same reason. */
 #test
 fn taf_sites_classify_an_assertion_in_a_loop_init_as_flow() {
-    let body = teko::list::push(teko::list::empty(), TLoopStmt { label = ""; init = taf_one_assert_blk(); body = teko::list::empty() })
+    let body = teko::list::push(teko::list::empty(), taf_loop_stmt(taf_one_assert_blk(), teko::list::empty()))
     teko::assert::is_true(taf_one_kind(body) == AssertKind::Flow)
 }
 
@@ -445,8 +465,7 @@ fn taf_sites_classify_a_root_assertion_before_a_conditional_return_as_mandatory(
 /** A `break` inside a preceding `loop` binds to that loop and does NOT make what follows skippable. */
 #test
 fn taf_sites_keep_an_assertion_after_a_breaking_loop_mandatory() {
-    let brk = teko::list::push(teko::list::empty(), TBreakStmt { label = "" })
-    mut body = teko::list::push(teko::list::empty(), TLoopStmt { label = ""; init = teko::list::empty(); body = brk })
+    mut body = teko::list::push(teko::list::empty(), taf_loop_stmt(teko::list::empty(), taf_break_blk()))
     body = teko::list::push(body, taf_expr_stmt(taf_assert("is_true", taf_bool(true))))
     teko::assert::is_true(taf_one_kind(body) == AssertKind::Mandatory)
 }
@@ -455,7 +474,7 @@ fn taf_sites_keep_an_assertion_after_a_breaking_loop_mandatory() {
 #test
 fn taf_sites_classify_an_assertion_after_a_returning_loop_as_flow() {
     let inner = teko::list::push(teko::list::empty(), taf_if_stmt(taf_return_blk()))
-    mut body = teko::list::push(teko::list::empty(), TLoopStmt { label = ""; init = teko::list::empty(); body = inner })
+    mut body = teko::list::push(teko::list::empty(), taf_loop_stmt(teko::list::empty(), inner))
     body = teko::list::push(body, taf_expr_stmt(taf_assert("is_true", taf_bool(true))))
     teko::assert::is_true(taf_one_kind(body) == AssertKind::Flow)
 }
@@ -543,7 +562,7 @@ fn taf_site_table_carries_position_argument_text_and_kind() {
 #test
 fn taf_census_classifies_both_kinds_with_neither_at_zero() {
     mut body = teko::list::push(teko::list::empty(), taf_expr_stmt(taf_assert("is_true", taf_bool(true))))
-    body = teko::list::push(body, TLoopStmt { label = ""; init = teko::list::empty(); body = taf_one_assert_blk() })
+    body = teko::list::push(body, taf_loop_stmt(teko::list::empty(), taf_one_assert_blk()))
     body = teko::list::push(body, taf_expr_stmt(taf_assert2("str_contains", taf_str("hay"), taf_str("needle"))))
     let c = assert_census(taf_prog(teko::list::push(teko::list::empty(), taf_named_fn("t", body, "p.tks", true))))
     teko::assert::is_true(c.mandatory > 0)
