@@ -484,6 +484,60 @@ A terceira linha nao e uma estimativa da forma nova — e a **forma actual**:
 inteiro **por registo**. Com 3500 registos de ~80 bytes isso da ~490 MB de trafego. Trocar para
 append nao e so mais seguro; e a unica das tres que nao cresce em quadrado.
 
+### 5.2 O `.tkcov` NAO tem essa forma — e onde ele tem, e noutro sitio
+
+**Dito explicitamente para ninguem abrir o C1 a procura de um append de cobertura que nao existe, e
+"consertar" o que ja esta certo.** O `O(n^2)` de §5.1 e do **`verdict_emit`**, nao do `.tkcov`. O
+ficheiro de cobertura **acumula em memoria e despeja UMA vez**: `tk_cov_dump` e um
+`fopen(path, "wb")` que percorre as tabelas e escreve tres seccoes (`teko_rt.c:2698-2717`), e o
+`fread` esta do lado do **agregador** (`tk_cov_merge`, `:2731`) — exactamente onde deve estar. A
+conclusao do dono mantem-se e ja e o comportamento da cobertura: **ler so no fim, para agregar,
+sumarizar e gerar o XML.** O que o C1 traz de novo e pôr o CANAL DE VEREDICTO nessa mesma forma.
+
+Os tres defeitos que partiam a cobertura sao de outra natureza, e dois ja estao fechados hoje: shards
+a partilhar o caminho (identidade do escritor, C2/C3); uma shard que panica nunca chegar ao despejo
+(**C0**, a captura); e o ficheiro da corrida anterior a flutuar (**C4**).
+
+**MAS — e fui medir os TRES sumidouros e nao so o despejo — a intuicao do dono acerta noutro lugar, e
+acerta em cheio.** *"Ao invés de apenas apendar, está lendo para saber o que fazer"* descreve
+literalmente **dois dos tres sumidouros**, uma camada abaixo do ficheiro: eles releem o **vector em
+memoria** para decidir se inserem.
+
+| sumidouro | dedup por acerto | custo | fonte |
+|---|---|---|---|
+| **linhas** | conjunto de endereçamento aberto (`tk_line_insert_packed`) | **O(1)** amortizado | `teko_rt.c:2646-2652` |
+| **funcoes** | **varrimento linear do vector inteiro** (`tk_cov_mark`) | **O(distintas)** por acerto | `teko_rt.c:2541-2554` |
+| **ramos** | **varrimento linear do vector inteiro** (`tk_covb_add`) | **O(distintos)** por acerto | `teko_rt.c:2590-2599` |
+
+E a frequencia e o pior da historia: `tk_cov_mark(cov_idx)` e um **prologo de entrada de funcao**
+(`emit_function_cov`, `codegen.tks:9601`) e `tk_cov_branch_at` corre em **cada execucao de ramo**
+(`codegen.tks:8303`) — nao uma vez por linha distinta, mas uma vez por *passagem*. O lado da consulta
+tem a mesma forma: `tk_cov_branch_hit` (`teko_rt.c:2613`) tambem varre linearmente, e a caminhada das
+fasquias chama-o por ramo.
+
+**A remodelacao que o dono pede e real, e UMA so forma de funcao, e ela ja existe tres linhas acima no
+mesmo ficheiro** — `tk_line_insert_packed`. Funcoes e ramos passam a usar o mesmo conjunto de
+endereçamento aberto que as linhas ja usam; o despejo, o formato do ficheiro e o agregador **nao mudam
+uma linha**.
+
+**O que eu NAO medi, e digo-o em vez de estimar:** quantos acertos dinamicos uma corrida instrumentada
+faz. Sem esse numero o custo real e uma forma conhecida com magnitude desconhecida, e eu nao penduro
+um numero inventado num documento que o dono compara com o que ja tem. **A medicao e o primeiro passo
+do trabalho**, e se ela desmentir a forma, e a medicao que fica.
+
+**Achado adjacente: REPORTADO, nao convertido em issue por mim.** Nao pertence ao C1 (que e o canal de
+veredicto) e nao e pre-requisito de nenhum crumb C0–C9 — a cobertura fica CORRECTA com o C0/C2/C3/C4
+tal como estao. E uma questao de CUSTO, nao de correccao, e a decisao de a puxar e do dono.
+
+**O `TestAnalyze` foi verificado tambem** (era o caminho que faltava auditar): ele despeja **um
+ficheiro por teste** em `$TEKO_ANALYZE_DIR/<idx>.tkcov` (`emit_test_main_analyze`,
+`codegen.tks:12043`) — N escritas, mas cada uma continua a ser um despejo unico de um conjunto em
+memoria, sem reler nada para decidir. Ja e endereçado pela identidade do escritor (o indice do teste),
+o que confirma o modelo em vez de o contrariar. Herda porem o defeito 3: o directorio e partilhado
+entre corridas e um `<idx>.tkcov` obsoleto seria lido como desta corrida — o **C2** cobre-o pela raiz
+carimbada. O `ProgramCov` despeja por `atexit` para `$TEKO_TKCOV` (`codegen.tks:11955`), forma unica,
+sem releitura.
+
 **Decisao: `write(2)` sempre, `fsync` nunca por omissao, com o botao `TEKO_JOURNAL_FSYNC=1` para
 quem quiser durabilidade de queda de maquina.** O botao tem de trazer a sua medicao real no crumb
 que o aterra (o numero acima e um tipico de ext4, nao uma medicao desta arvore) — e se a medicao
