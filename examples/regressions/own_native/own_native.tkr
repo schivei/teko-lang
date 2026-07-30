@@ -718,3 +718,84 @@ Feature: no cast truncates — a narrowing `to` whose value does not fit its des
     When built and run
     Then it traps
     And stderr pattern = "teko: deliberate panic: impossible conversion"
+
+Feature: slice element write — `xs[i] op= v` has a native lowering (0.3.1.0 degrau 28)
+
+  # The native backend's `lower_assign` honest-stopped on `AssignKind::Index` outright ("slice element
+  # index-assignment not yet lowered"), which is what broke EVERY leg of this channel: the corpus's own
+  # `f_implicit_widen_targets` writes into a slice element because that is how one writes Teko, so the
+  # whole project failed to build and every row of this file — `own_arith_exit` first — failed with it.
+  # The stop also swallowed a whole loop spelling: the parser desugars `loop v in xs { v = … }` over a
+  # `mut` container into exactly this element write ("the ratified element-assignment primitive",
+  # `loop_slice_writeback`), so a mutable for-each was unbuildable natively too.
+  #
+  # The write is now the sibling of the element READ: the receiver lowered as a FAT producer (the
+  # LENGTH half is what the bounds guard needs), the index lowered EXACTLY ONCE and shared by the guard
+  # and the address, the guard trapping through the SAME positioned `tk_panic_oob_at` the C route's own
+  # `emit_index_assign` calls, and the store split by element shape — fat (both halves of the
+  # `{ptr, len}` pair), register value (`store_assign_value`, the struct field's own tail, so a
+  # compound `op=` loads-computes-stores) and aggregate (boxed into fresh per-execution storage, byte
+  # for byte what a pushed aggregate already gets).
+  #
+  # Every row below is a MEMBER of this channel (one build, no extra cost) and asserts VALUES read back
+  # through the element the write named, with the SIBLING elements re-checked: a store that landed one
+  # slot away fails here rather than passing on the element it corrupted.
+  Scenario: slice_elem_store_boundaries (own-native — index 0, a middle index and the last, over both an array literal's buffer and a push-grown one)
+    When built and run
+    Then exit = 42
+
+  Scenario: slice_elem_store_widths (own-native — i32/u8/byte/bool/f64 and an enum carrier, each written at its own width)
+    When built and run
+    Then exit = 42
+
+  Scenario: slice_elem_compound_ops (own-native — `+= -= *= /= %=` on an element, constant and dynamic index)
+    When built and run
+    Then exit = 42
+
+  Scenario: slice_elem_store_fat (own-native — a `[]str` and a `[][]i64` element, each by LENGTH and CONTENT)
+    When built and run
+    Then exit = 42
+
+  Scenario: slice_elem_store_aggregate (own-native — a struct element boxed per EXECUTION, distinct in a loop and isolated from its source)
+    When built and run
+    Then exit = 42
+
+  Scenario: slice_elem_foreach_writeback (own-native — `loop v in xs { v = … }`, the desugaring's own element write)
+    When built and run
+    Then exit = 42
+
+  # The BOUNDS side of the same write, and it needs its OWN files for the reason the cast-guard rows
+  # already record: a panic aborts the process and would take every later assertion of the channel's
+  # one program with it. `Then it traps` + `stderr pattern` rather than an exit code, because an abort's
+  # status is synthesised from the wait status by whoever ran the child — no number distinguishes "the
+  # guard fired" from "the program crashed", while the pattern names WHICH guard killed it.
+  #
+  # Both rows run on BOTH routes, and that pairing is the oracle: the C route bounds-checked its element
+  # write from the start (`emit_index_assign`), so a native write lowered WITHOUT the guard would
+  # silently scribble on the byte past the buffer where the C route panics — a divergence, which is a
+  # native bug until proven otherwise. Measured identical, position included ("2:1: …" / "3:1: …").
+  Scenario: slice_store_oob_panics (own-native — a write one past the last index)
+    Given source = "cases/slice_store_oob_panics.tks"
+    When built and run
+    Then it traps
+    And stderr pattern = "teko: deliberate panic: index out of bounds"
+
+  Scenario: slice_store_oob_panics (C route — the route that was already right)
+    Given source = "cases/slice_store_oob_panics.tks"
+    Given env = ["TEKO_BACKEND=c"]
+    When built and run
+    Then it traps
+    And stderr pattern = "teko: deliberate panic: index out of bounds"
+
+  Scenario: slice_store_negative_index_panics (own-native — a negative index is the huge unsigned value it already is in the carrier)
+    Given source = "cases/slice_store_negative_index_panics.tks"
+    When built and run
+    Then it traps
+    And stderr pattern = "teko: deliberate panic: index out of bounds"
+
+  Scenario: slice_store_negative_index_panics (C route)
+    Given source = "cases/slice_store_negative_index_panics.tks"
+    Given env = ["TEKO_BACKEND=c"]
+    When built and run
+    Then it traps
+    And stderr pattern = "teko: deliberate panic: index out of bounds"
