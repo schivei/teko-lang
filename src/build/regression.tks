@@ -648,13 +648,20 @@ const HOST_CC_NAME: str = "cc"
 
 /**
  * cross_cc_for_target — the CROSS-compiler a `Given target` build will actually link through, or ""
- * when `target` links with the host `cc`. Delegates to the very functions the build itself uses
- * (`target_from_name` + `default_cc_for_target`, the `TEKO_TARGET` arm of `resolve_cc`), so the
- * runner's pre-build capability probe can never drift from the linker the build then invokes. An
- * unrecognised target name yields "" — its honest R2 stop belongs to `emit_native`, not here.
+ * when `target` needs none. Delegates to the very function the build itself uses
+ * (`target_from_name` + `default_cc_for_target`), so the runner's pre-build capability probe can
+ * never drift from the toolchain the build then invokes. An unrecognised target name yields "" — its
+ * honest R2 stop belongs to `emit_native`, not here.
+ *
+ * IT ANSWERS "" FOR EVERY TARGET TODAY, and that is a fact about the toolchains rather than about
+ * this code: `default_cc_for_target` no longer names a cross driver for any target, because the only
+ * one it ever named was MinGW's and MinGW is banned — a cross build stops at the object instead
+ * (`links_with_cc`). The delegation stays because the answer must keep coming from the build's own
+ * resolution: the day a legitimate cross driver exists (the project's own linker, after the natives),
+ * this probe learns about it without being edited.
  *
  * @param target  the scenario's declared target ("" / "host" → the host toolchain)
- * @return        the cross-compiler command, or "" when the host `cc` links this target
+ * @return        the cross-compiler command, or "" when this target needs no cross driver
  * @since 0.3.1
  */
 fn cross_cc_for_target(target: str) -> str {
@@ -667,16 +674,23 @@ fn cross_cc_for_target(target: str) -> str {
 /**
  * host_cc_cannot_link_cross_reason — "" unless `target` is a CROSS target whose link step would run
  * through the build host's own `cc` with no cross toolchain pinned, in which case it names why the
- * row cannot be built here. `default_cc_for_target` returns the host `cc` for every target that has
- * no dedicated cross driver (`x86_64-linux`, `arm64-macos`), and the host `cc` cannot link an object
- * of a foreign format — so on an arm64-macos host a `Given target = "x86_64-linux"` row would die in
- * `ld` with a cross-format error indistinguishable from a real regression. Reuses the build's OWN
- * cross classification (`cross_note_for_name`) and its `TEKO_CC` seam (`teko_cc_env` — a pinned
- * cross driver lifts the skip), so the runner never invents a second idea of what "cross" means.
- * Wasm targets are exempt: they have no link step at all (`target_links_with_cc`).
+ * row cannot be built here. The host `cc` cannot link an object of a foreign format, so a row that
+ * reached it would die in `ld` with a cross-format error indistinguishable from a real regression.
+ * Reuses the build's OWN cross classification (`cross_note_for_name`), its link-step rule
+ * (`target_links_with_cc`) and its `TEKO_CC` seam (`teko_cc_env` — a pinned cross driver lifts the
+ * skip), so the runner never invents a second idea of what "cross" means.
+ *
+ * ITS PREMISE IS RETIRED, SO IT NOW ANSWERS "" FOR EVERY TARGET. A cross build no longer reaches the
+ * host `cc` at all: it stops at the OBJECT (`links_with_cc` → `finish_native_object`), which is the
+ * only artifact this host could honestly produce for a foreign target and exactly what those rows
+ * claim. Nothing is silently degraded — the RUN of a cross artifact is still skipped honestly, on the
+ * run side (`tkr_row_run_verdict`), and the object's format is still checked. The rule is kept, not
+ * deleted, because it is where the question belongs the moment a real cross LINK exists (the own
+ * linker, after the natives): it will fire again by itself when `target_links_with_cc` says a link
+ * step runs.
  *
  * @param target  the scenario's declared target ("" / "host" → never cross)
- * @return        "" when this host can link `target`, else the honest reason it cannot
+ * @return        "" when this host needs no cross linker for `target`, else the honest reason it cannot
  * @since 0.3.1
  */
 fn host_cc_cannot_link_cross_reason(target: str) -> str {

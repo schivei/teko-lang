@@ -171,40 +171,40 @@ fn exit_mismatch_message_names_the_origin_and_quotes_the_command() {
 
 #test
 /**
- * cross_cc_for_target_reuses_the_build_s_own_resolution — the pre-build capability probe must name
- * the SAME cross-linker the build then invokes (`resolve_cc`'s `TEKO_TARGET` arm), so the two can
- * never drift: a windows target resolves to the MinGW cross-gcc, and
- * every host-linked target (host sentinel, "", a wasm target, an unrecognised name) to "".
+ * cross_cc_for_target_demands_no_cross_driver_for_any_target — the pre-build capability probe must
+ * name the SAME toolchain the build then invokes, so the two can never drift. That is now "" for
+ * EVERY target, and the empty answer is the point: no target has a dedicated cross driver any more
+ * (`default_cc_for_target`), because the MinGW one was the only one and it is banned — a cross build
+ * stops at the object instead (`build_links_binary`), so it asks for no linker at all.
  *
  * @return void
  */
-fn cross_cc_for_target_reuses_the_build_s_own_resolution() {
-    teko::assert::is_true(cross_cc_for_target("x86_64-windows") == "x86_64-w64-mingw32-gcc")
+fn cross_cc_for_target_demands_no_cross_driver_for_any_target() {
+    teko::assert::is_true(cross_cc_for_target("x86_64-windows") == "")
     teko::assert::is_true(cross_cc_for_target("") == "")
     teko::assert::is_true(cross_cc_for_target(HOST_TARGET) == "")
     teko::assert::is_true(cross_cc_for_target("wasm32-wasi") == "")
     teko::assert::is_true(cross_cc_for_target("some-unknown-target") == "")
+    teko::assert::is_false(linker_is_mingw(cross_cc_for_target("x86_64-windows")))
 }
 
 #test
 /**
  * target_toolchain_skip_reason_is_empty_for_the_host — the host row of a backend x target `Examples`
- * table must never be pre-skipped, however it spells the host ("" or the `HOST_TARGET` sentinel),
- * and a cross target names its missing tool rather than being silently built with the wrong linker.
- * The windows assertion is host-conditional BY DESIGN: on a lane provisioned with the MinGW cross-cc
- * the reason is empty; anywhere else the reason must be non-empty and name a tool.
+ * table must never be pre-skipped, however it spells the host ("" or the `HOST_TARGET` sentinel).
+ *
+ * THE WINDOWS ROW IS NO LONGER PRE-SKIPPED EITHER, ON ANY HOST, AND NO LONGER DEPENDS ON MINGW BEING
+ * INSTALLED. It used to demand `x86_64-w64-mingw32-gcc` on the PATH and honest-skip without it, which
+ * is why a Linux lane had to install MinGW to keep `own_cross_x86_64_windows_emits_coff` green. That
+ * row's claim was always the OBJECT, and a cross build now emits the object and stops, so the tool it
+ * used to wait for is a tool nothing invokes.
  *
  * @return void
  */
 fn target_toolchain_skip_reason_is_empty_for_the_host() {
     teko::assert::is_true(target_toolchain_skip_reason("") == "")
     teko::assert::is_true(target_toolchain_skip_reason(HOST_TARGET) == "")
-    let win = target_toolchain_skip_reason("x86_64-windows")
-    if tool_on_path("x86_64-w64-mingw32-gcc") {
-        teko::assert::is_true(win == "")
-        return
-    }
-    teko::assert::is_true(win.len > 0)
+    teko::assert::is_true(target_toolchain_skip_reason("x86_64-windows") == "")
 }
 
 #test
@@ -505,9 +505,9 @@ fn split_snippet_decls_and_stmts_keeps_an_attribute_with_its_declaration() {
 }
 
 /**
- * rt_alien_target_name — a target name that is CROSS on this host AND links through the host `cc`
- * (no dedicated cross driver): `arm64-macos` everywhere but macOS, `x86_64-linux` there. The pair the
- * `host_cc_cannot_link_cross_reason` test needs to exercise its non-empty arm on every CI host.
+ * rt_alien_target_name — a target name that is CROSS on this host and links through no cross driver
+ * of its own: `arm64-macos` everywhere but macOS, `x86_64-linux` there. The pair the cross-linkability
+ * rule's tests need in order to name a genuinely foreign target on every CI host.
  *
  * @return the always-cross, host-cc-linked target name for this host
  */
@@ -518,25 +518,26 @@ fn rt_alien_target_name() -> str {
 
 #test
 /**
- * host_cc_cannot_link_cross_reason_names_the_unlinkable_cross — the capability the vagão-17 probe was
- * missing: a cross target with NO dedicated cross driver would reach the host `cc`, which cannot link
- * a foreign object format, so the row is honest-skipped BEFORE the build instead of dying in `ld`
- * with an error indistinguishable from a compiler regression. The host itself, a wasm target (no link
- * step at all) and a target WITH a cross driver are never skipped by this rule. A pinned `TEKO_CC`
- * lifts it, so the assertion is guarded on that seam being unset (as it is in the self-test lane).
+ * no_cross_row_is_pre_skipped_for_a_linker_it_never_invokes — the rule that used to convert "this host
+ * has no cross linker" into an honest pre-build skip now has nothing to convert, on any target.
+ *
+ * WHY THE ANSWER IS UNIFORMLY "": the rule's premise was that a cross build reaches the host `cc` and
+ * dies on the foreign object format. That premise is retired — a cross build now stops at the OBJECT
+ * (`links_with_cc` → `finish_native_object`), which is the only artifact it could honestly produce
+ * here and the one its rows claim. Nothing is silently degraded by the change: what the rows would
+ * have RUN is still skipped honestly, by the run-side cross check (`tkr_row_run_verdict`), and what
+ * they CLAIM (the object's format) is still checked.
  *
  * @return void
  */
-fn host_cc_cannot_link_cross_reason_names_the_unlinkable_cross() {
+fn no_cross_row_is_pre_skipped_for_a_linker_it_never_invokes() {
     teko::assert::is_true(host_cc_cannot_link_cross_reason("") == "")
     teko::assert::is_true(host_cc_cannot_link_cross_reason(HOST_TARGET) == "")
     teko::assert::is_true(host_cc_cannot_link_cross_reason("wasm32-wasi") == "")
     teko::assert::is_true(host_cc_cannot_link_cross_reason("x86_64-windows") == "")
     teko::assert::is_true(host_cc_cannot_link_cross_reason("some-unknown-target") == "")
-    if teko_cc_env().len > 0 { return }
-    let alien = host_cc_cannot_link_cross_reason(rt_alien_target_name())
-    teko::assert::is_true(alien.len > 0)
-    teko::assert::str_contains(alien, rt_alien_target_name())
+    teko::assert::is_true(host_cc_cannot_link_cross_reason(rt_alien_target_name()) == "")
+    teko::assert::is_true(target_toolchain_skip_reason(rt_alien_target_name()) == "")
 }
 
 /**
