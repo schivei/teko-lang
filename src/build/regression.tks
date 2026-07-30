@@ -1604,6 +1604,76 @@ fn first_line(s: str) -> str {
 const COMPILE_FAIL_TAIL_LINES: u64 = 40
 
 /**
+ * COMPILE_FAIL_HEAD_LINES — how many LEADING lines of a failed compile's captured output the
+ * scenario's failure message reproduces, alongside the trailing ones.
+ *
+ * THE TAIL ALONE IS A MEASURED TRAP, and this constant is the answer to it. A compiler diagnostic
+ * CASCADE runs the opposite way from a `cc` failure: the one line that names the cause comes FIRST
+ * and every line after it is a consequence. The own-backend corpus channel proved the cost — one
+ * unlexable fixture file (`unexpected character`) produced 119 consequent `unknown function` lines,
+ * the 40-line tail held nothing but consequences, and three readers of that CI log in a row
+ * diagnosed something the build had never said. Quoting BOTH ends costs sixty lines and makes the
+ * excerpt honest whichever direction the real cause lies in.
+ */
+const COMPILE_FAIL_HEAD_LINES: u64 = 20
+
+/**
+ * count_text_lines — how many lines `s` holds, ignoring trailing newlines (so `"a\n"` and `"a"`
+ * both count 1, and `""` counts 0). The measure `compile_fail_excerpt` needs to decide whether an
+ * excerpt would drop anything at all.
+ *
+ * @param s  the text to measure
+ * @return   the number of lines
+ * @since 0.3.1
+ */
+fn count_text_lines(s: str) -> u64 {
+    mut end = s.len
+    loop {
+        if end == 0 { return 0 }
+        if s[end - 1] != b'\n' { break }
+        end = end - 1
+    }
+    mut n: u64 = 1
+    mut i: u64 = 0
+    loop {
+        if i >= end { break }
+        if s[i] == b'\n' { n = n + 1 }
+        i = i + 1
+    }
+    n
+}
+
+/**
+ * head_lines — the first `n` lines of `s`, or all of `s` (trailing newlines trimmed) when it holds
+ * `n` lines or fewer. The mirror of `tail_lines`, walking forward from the start.
+ *
+ * @param s  the text
+ * @param n  how many leading lines to keep (0 → "")
+ * @return   the leading `n` lines, without a trailing newline
+ * @since 0.3.1
+ */
+fn head_lines(s: str, n: u64) -> str {
+    if n == 0 { return "" }
+    mut end = s.len
+    loop {
+        if end == 0 { break }
+        if s[end - 1] != b'\n' { break }
+        end = end - 1
+    }
+    mut stop: u64 = 0
+    mut seen: u64 = 0
+    loop {
+        if stop >= end { break }
+        if s[stop] == b'\n' {
+            seen = seen + 1
+            if seen == n { break }
+        }
+        stop = stop + 1
+    }
+    teko::str::slice(s, 0, stop)
+}
+
+/**
  * tail_lines — the last `n` lines of `s` (trailing newline tolerant), or all of `s` when it holds
  * `n` lines or fewer. Walks back from the end counting newlines, so nothing is copied twice.
  *
@@ -1634,23 +1704,49 @@ fn tail_lines(s: str, n: u64) -> str {
 }
 
 /**
+ * compile_fail_excerpt — the quotable excerpt of a failed compile's captured stream `s`: the whole
+ * text when it is short enough, else its FIRST `COMPILE_FAIL_HEAD_LINES` lines and its LAST
+ * `COMPILE_FAIL_TAIL_LINES` lines with a line naming how many were elided in between.
+ *
+ * BOTH ENDS, BECAUSE THE CAUSE LIVES AT WHICHEVER END THE FAILURE CLASS PUTS IT (see
+ * `COMPILE_FAIL_HEAD_LINES`): a host-`cc` failure ends with its diagnostics, a compiler diagnostic
+ * cascade BEGINS with the one line that caused it. An excerpt taken from one end is a report that
+ * silently lies about the other half of the failure space, and the elision line is what keeps it
+ * from reading as a complete transcript.
+ *
+ * @param s  the captured stream (stdout or stderr) of the failed build
+ * @return   the excerpt, without a trailing newline ("" when `s` holds no lines)
+ * @since 0.3.1
+ */
+fn compile_fail_excerpt(s: str) -> str {
+    let total = count_text_lines(s)
+    let kept = COMPILE_FAIL_HEAD_LINES + COMPILE_FAIL_TAIL_LINES
+    if total <= kept { return tail_lines(s, total) }
+    let elided = total - kept
+    let head = head_lines(s, COMPILE_FAIL_HEAD_LINES)
+    let tail = tail_lines(s, COMPILE_FAIL_TAIL_LINES)
+    $"{head}\n… {elided} line(s) elided; the excerpt keeps both ends …\n{tail}"
+}
+
+/**
  * compile_failure_message — the honest failure text for a scenario whose BUILD failed: the label
- * plus the TAIL of what the build actually wrote. The regression runner redirects the compiler
- * child's streams to capture files, and the host `cc` the compiler spawns inherits them — so the
- * `cc` diagnostics ARE captured; quoting only the compiler's own last line (which merely says the
- * `cc` failed) threw the real cause away and left a CI log with no way to tell WHY (M.3: an error
- * that will not say why is polite, not honest). `stderr` carries both streams' diagnostics; the
- * `stdout` tail is the fallback for a toolchain that reports on stdout only.
+ * plus an excerpt of what the build actually wrote, taken from BOTH ends of the stream
+ * (`compile_fail_excerpt`). The regression runner redirects the compiler child's streams to capture
+ * files, and the host `cc` the compiler spawns inherits them — so the `cc` diagnostics ARE captured;
+ * quoting only the compiler's own last line (which merely says the `cc` failed) threw the real cause
+ * away and left a CI log with no way to tell WHY (M.3: an error that will not say why is polite, not
+ * honest). `stderr` carries both streams' diagnostics; the `stdout` excerpt is the fallback for a
+ * toolchain that reports on stdout only.
  *
  * @param comp  the captured build outcome (non-zero `exit`)
- * @return      the failure message, carrying the captured output tail
+ * @return      the failure message, carrying the captured output excerpt
  * @since 0.3.1
  */
 fn compile_failure_message(comp: CapResult) -> str {
-    let err_tail = tail_lines(comp.stderr, COMPILE_FAIL_TAIL_LINES)
-    if err_tail.len > 0 { return $"compile failed (exit {comp.exit}); captured output tail:\n{err_tail}" }
-    let out_tail = tail_lines(comp.stdout, COMPILE_FAIL_TAIL_LINES)
-    if out_tail.len > 0 { return $"compile failed (exit {comp.exit}); captured stdout tail:\n{out_tail}" }
+    let err_part = compile_fail_excerpt(comp.stderr)
+    if err_part.len > 0 { return $"compile failed (exit {comp.exit}); captured output excerpt:\n{err_part}" }
+    let out_part = compile_fail_excerpt(comp.stdout)
+    if out_part.len > 0 { return $"compile failed (exit {comp.exit}); captured stdout excerpt:\n{out_part}" }
     $"compile failed (exit {comp.exit}); the build wrote nothing to stdout or stderr"
 }
 

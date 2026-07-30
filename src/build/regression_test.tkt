@@ -87,6 +87,79 @@ fn tail_lines_keeps_the_trailing_lines() {
 
 #test
 /**
+ * head_lines_keeps_the_leading_lines — the mirror primitive `compile_fail_excerpt` needs: the first
+ * `n` lines, trailing newline tolerant, the whole text when it is shorter than `n`, and "" for
+ * `n == 0`.
+ *
+ * @return void
+ */
+fn head_lines_keeps_the_leading_lines() {
+    let s = "one\ntwo\nthree\nfour\n"
+    teko::assert::is_true(head_lines(s, 2) == "one\ntwo")
+    teko::assert::is_true(head_lines(s, 1) == "one")
+    teko::assert::is_true(head_lines(s, 9) == "one\ntwo\nthree\nfour")
+    teko::assert::is_true(head_lines(s, 0) == "")
+    teko::assert::is_true(head_lines("", 3) == "")
+}
+
+#test
+/**
+ * count_text_lines_ignores_trailing_newlines — the measure that decides whether an excerpt elides
+ * anything: `"a\n"` and `"a"` are both one line, an empty text is zero lines, and a run of trailing
+ * newlines adds none.
+ *
+ * @return void
+ */
+fn count_text_lines_ignores_trailing_newlines() {
+    teko::assert::is_true(count_text_lines("") == 0)
+    teko::assert::is_true(count_text_lines("\n\n") == 0)
+    teko::assert::is_true(count_text_lines("a") == 1)
+    teko::assert::is_true(count_text_lines("a\n") == 1)
+    teko::assert::is_true(count_text_lines("a\nb\nc\n") == 3)
+    teko::assert::is_true(count_text_lines("a\n\nc") == 3)
+}
+
+#test
+/**
+ * compile_fail_excerpt_keeps_the_cause_of_a_cascade — THE MEASURED DEFECT this pins. A build whose
+ * first diagnostic is the cause and whose remaining hundred-plus lines are consequences (one
+ * unlexable fixture file → 119 `unknown function` lines in the own-backend corpus channel) used to
+ * be reported by its 40-line TAIL alone, so the report carried consequences only and every reader
+ * of it diagnosed something the build never said. The excerpt keeps BOTH ends and says how many
+ * lines it dropped.
+ *
+ * @return void
+ */
+fn compile_fail_excerpt_keeps_the_cause_of_a_cascade() {
+    mut text = "teko: src/corpus.tks:3710:18: unexpected character\n"
+    mut i: u64 = 0
+    loop {
+        if i >= 119 { break }
+        text = text ~ $"main.tks:{i}:4: unknown function: f_case_{i}\n"
+        i = i + 1
+    }
+    let excerpt = compile_fail_excerpt(text)
+    teko::assert::str_contains(excerpt, "unexpected character")
+    teko::assert::str_contains(excerpt, "line(s) elided")
+    teko::assert::str_contains(excerpt, "f_case_118")
+    teko::assert::is_false(teko::str::contains(excerpt, "f_case_60"))
+}
+
+#test
+/**
+ * compile_fail_excerpt_quotes_a_short_stream_whole — a stream that fits inside the two bounds is
+ * reproduced verbatim, with no elision line inventing a truncation that never happened.
+ *
+ * @return void
+ */
+fn compile_fail_excerpt_quotes_a_short_stream_whole() {
+    teko::assert::is_true(compile_fail_excerpt("one\ntwo\nthree\n") == "one\ntwo\nthree")
+    teko::assert::is_true(compile_fail_excerpt("") == "")
+    teko::assert::is_false(teko::str::contains(compile_fail_excerpt("one\ntwo\n"), "elided"))
+}
+
+#test
+/**
  * compile_failure_message_carries_the_cc_output — the M.3 fix behind item 5a: a scenario whose BUILD
  * failed must report WHY. The host `cc`'s diagnostics are captured (the compiler child's streams are
  * redirected and `cc` inherits them) but used to be discarded in favour of the compiler's own last
