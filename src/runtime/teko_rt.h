@@ -150,7 +150,29 @@ tk_region *tk_region_new(tk_region *parent);    // a fresh empty region (default
 void      *tk_region_alloc(tk_region *r, size_t n);  // bump-allocate n (n→1), aligned; OOM→panic
 void       tk_region_drop(tk_region *r);        // bulk-free every chunk + the region (NULL-tolerant; idempotent on a re-walk — head is cleared before free; callers MUST null their handle after, as the freed region must not be reused)
 void       tk_region_drop_subtree(tk_region *root);  // (#337) the `adopt` bulk-drop: drop `root` AND every live region whose ->parent chain reaches it, in one sweep (cycles among objects irrelevant); NULL-tolerant; callers MUST null their handle after
-tk_region *tk_region_root(void);                // the process root region (lazy; never dropped in S1; parent = NULL — the tree root)
+tk_region *tk_region_root(void);                // the CURRENT TASK's root region (lazy; parent = NULL — the tree root). Since F1 there is one per task, not one per process.
+
+// --- (F1) THE TASK — the seat of the memory discipline -------------------------------------
+// Before F1 the arena mark stack, the root region and the free list were process-global, so one
+// flow of control's tk_arena_pop rewound the root past allocations another flow was still using.
+// Each of those families now lives on a tk_task, and every allocator entry point above reads
+// tk_task_current() internally — the PROTOTYPES ARE UNCHANGED, so no call site moved.
+//
+// tk_task_current is the whole seam, and it has exactly two encarnations: a _Thread_local pointer
+// under the C seed (one %fs-relative load), or pthread_getspecific/TlsGetValue behind an
+// `extern fn` in the native Teko runtime — an ordinary call to an external C symbol, which asks
+// the own backend for no new capability. Swapping one for the other touches ONE function.
+typedef struct tk_task tk_task;
+tk_task   *tk_task_current(void);               // the task owning this flow's memory discipline; never NULL (defaults to the main task)
+tk_task   *tk_task_begin(void);                 // create + install a fresh task with an EMPTY discipline; returns the task that was current
+void       tk_task_end(tk_task *previous);      // free the current task's regions and reinstall `previous`
+
+// (F2) tk_region_program — the PROGRAM region: one per process, owned by NO task, so an object in
+// it survives both a task's tk_arena_pop and that task's exit. F1 leaves the runtime with N task
+// roots and nothing else, so the singletons the owner's ruling places "in the program arena"
+// (channels, and whatever else must outlive the task that created it) need this seat. Freed at
+// process termination by tk_regions_free_all, so the program stays leak-clean.
+tk_region *tk_region_program(void);
 // (#109 test-gate memory) checkpoint/rewind the ROOT region's bump position, bulk-freeing everything
 // it allocated in between. Balanced push/pop; used by the test-gate runner to bound per-test memory.
 void       tk_arena_push(void);                 // save the root region's current bump position
@@ -168,11 +190,13 @@ void       tk_region_register(tk_region *r, uint64_t type_id, void *instance);
 // tk_region_lookup — find `type_id`'s instance in `r`, else its parent, else its parent's parent,
 // … until found or the chain ends (NULL). The #scoped walk-up primitive.
 void      *tk_region_lookup(tk_region *r, uint64_t type_id);
-// (W9.3b) tk_regions_free_all — free EVERY still-live region (the root + every live scoped frame/block
-// region) and empty the registry. Called at the termination choke points (tk_panic*, tk_exit, and an
-// atexit hook lazily registered in tk_region_root) so that an abnormal exit/panic does not leak the
-// stack-local scoped regions that a diverging path skips dropping. Idempotent: after it runs the
-// registry is empty, so a second call (e.g. atexit after an explicit panic/exit call) is a no-op.
+// (W9.3b) tk_regions_free_all — free every still-live region of the CURRENT TASK (its root + its
+// live scoped frame/block regions) AND the (F2) program region, emptying both registries. Called at
+// the termination choke points (tk_panic*, tk_exit, and an atexit hook registered lazily by whichever
+// of tk_region_root / tk_region_program runs first) so that an abnormal exit/panic does not leak the
+// stack-local scoped regions that a diverging path skips dropping. Idempotent: after it runs both
+// registries are empty, so a second call (e.g. atexit after an explicit panic/exit call) is a no-op.
+// A task other than the caller's owns its own regions; tk_task_end is what frees those.
 void       tk_regions_free_all(void);
 
 // --- the PER-TEST CHANNEL (owner ruling: "para os que rodam em processo, passar um canal proprio
