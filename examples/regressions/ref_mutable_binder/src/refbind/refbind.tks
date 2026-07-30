@@ -1,0 +1,160 @@
+/**
+ * Ch — a two-field value struct, the referent of every reference in this regressor. Two fields, not
+ * one, so a write that lands in the WRONG cell of a copied struct cannot masquerade as a write that
+ * crossed the reference.
+ */
+type Ch = struct {
+    /** the flag every direction of this regressor writes and reads back. */
+    open: bool
+    /** a witness field, never written after construction: it pins the referent's identity. */
+    tag: i64
+}
+
+/**
+ * Reading — one BEFORE/AFTER pair of observations of the same cell, across one write. A regressor
+ * that only asserted the AFTER value would pass without the write ever happening (the field could
+ * have held the expected value all along), so every direction below records both readings and
+ * scores them TOGETHER: `before` must hold the pre-write value and `after` the post-write one.
+ */
+type Reading = struct {
+    /** the cell's value observed BEFORE the write under test. */
+    before: bool
+    /** the cell's value observed AFTER the write under test. */
+    after: bool
+}
+
+/**
+ * flipped — did this pair of readings prove a write actually crossed? True only when the cell read
+ * back `true` before the write and `false` after it: an inverted guard, failing on either end.
+ *
+ * @param r  the before/after pair to judge
+ * @return   true iff `r.before` and not `r.after`
+ */
+fn flipped(r: Reading) -> bool {
+    if !r.before { return false }
+    !r.after
+}
+
+/**
+ * raised — the mirror of `flipped` for a write that SETS the flag: `false` before, `true` after.
+ *
+ * @param r  the before/after pair to judge
+ * @return   true iff not `r.before` and `r.after`
+ */
+fn raised(r: Reading) -> bool {
+    if r.before { return false }
+    r.after
+}
+
+/**
+ * weigh — the numeric weight of one proven direction: its own bit when the reading proves the
+ * write crossed, `0` otherwise. Distinct bits per direction, so the failing exit code names WHICH
+ * direction regressed instead of merely being non-zero.
+ *
+ * @param proven  whether the direction's before/after pair proved the write
+ * @param bit     the direction's own bit weight
+ * @return        `bit` when `proven`, else `0`
+ */
+fn weigh(proven: bool, bit: i64) -> i64 {
+    if proven { return bit }
+    0
+}
+
+/**
+ * shut — write `false` through a `ref` PARAMETER and read it straight back through the SAME
+ * reference. The read-back is the parameter side of the liveness proof: it fails if the write were
+ * dropped, and it is deliberately NOT sufficient on its own (a write into a COPY would read back
+ * exactly the same) — the caller's own after-reading is what proves the write left the callee.
+ *
+ * @param ch  the referent to close, aliased write-through (a `ref` is mutable by definition)
+ * @return    the flag read back THROUGH the reference after the write, i.e. `false`
+ */
+fn shut(ref ch: Ch) -> bool {
+    ch.open = false
+    ch.open
+}
+
+/**
+ * param_write_crosses — direction 1: a write performed through a `ref` PARAMETER is seen by the
+ * CALLER's own variable. Returns the caller-side before/after pair; the callee's own read-back is
+ * scored separately by `param_write_lands`.
+ *
+ * @return the caller's readings of `c.open` around the call to `shut`
+ */
+fn param_write_crosses() -> Reading {
+    mut c = Ch { open = true; tag = 7 }
+    let before = c.open
+    _ = shut(c)
+    Reading { before = before; after = c.open }
+}
+
+/**
+ * param_write_lands — the callee half of direction 1: the value `shut` reads back through its own
+ * `ref` parameter immediately after writing it. `false` means the write landed in the reference's
+ * view rather than being discarded.
+ *
+ * @return true iff the write landed in the parameter's own view
+ */
+fn param_write_lands() -> bool {
+    mut c = Ch { open = true; tag = 7 }
+    !shut(c)
+}
+
+/**
+ * inferred_ref_sees_source — direction 2: an UN-ANNOTATED `ref r = d` ALIASES its source, so a
+ * write to the SOURCE is visible through the reference. A copy would leave `after` true, which is
+ * exactly the silent degradation this regressor exists to catch.
+ *
+ * @return the readings of `r.open` around a write to the source `d`
+ */
+fn inferred_ref_sees_source() -> Reading {
+    mut d = Ch { open = true; tag = 9 }
+    ref r = d
+    let before = r.open
+    d.open = false
+    Reading { before = before; after = r.open }
+}
+
+/**
+ * source_sees_inferred_ref_write — direction 3, the reverse of direction 2 and the identity axis
+ * proper: a write performed THROUGH the un-annotated reference is visible in the SOURCE. This is
+ * the direction that fails if the reference were treated as read-only rather than mutable.
+ *
+ * @return the readings of `d.open` around a write through the reference `r`
+ */
+fn source_sees_inferred_ref_write() -> Reading {
+    mut d = Ch { open = false; tag = 9 }
+    ref r = d
+    let before = d.open
+    r.open = true
+    Reading { before = before; after = d.open }
+}
+
+/**
+ * annotated_ref_sees_source — direction 4, the CONTROL: `ref r: Ch = d`, the annotated spelling
+ * that already aliased correctly. It is scored alongside the inferred spelling so the two are
+ * proven to agree; if only this bit survives, the inference path regressed and nothing else did.
+ *
+ * @return the readings of `r.open` around a write to the source `d`
+ */
+fn annotated_ref_sees_source() -> Reading {
+    mut d = Ch { open = true; tag = 9 }
+    ref r: Ch = d
+    let before = r.open
+    d.open = false
+    Reading { before = before; after = r.open }
+}
+
+/**
+ * ref_score — the whole regressor's bit-score: one bit per proven direction, `1 + 2 + 4 + 8 + 16`
+ * = `31` when every direction of the identity axis holds.
+ *
+ * @return `31` when the law holds; a score missing the bit of whichever direction regressed
+ */
+pub fn ref_score() -> i64 {
+    weigh(param_write_lands(), 1) +
+    weigh(flipped(param_write_crosses()), 2) +
+    weigh(flipped(inferred_ref_sees_source()), 4) +
+    weigh(raised(source_sees_inferred_ref_write()), 8) +
+    weigh(flipped(annotated_ref_sees_source()), 16)
+}
