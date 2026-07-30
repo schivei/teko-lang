@@ -258,6 +258,51 @@ tk_str tk_test_scope(void);
 // With no shard selected (`TEKO_TEST_SHARD` unset/malformed) every test is owned, so the emitted
 // harness is behaviourally identical to the unsharded one. See teko_rt.c for the `i/n` protocol.
 bool tk_test_shard_take(void);
+// --- the CAPTURE (owner ruling 2026-07-30, §14 of docs/design/journaling-de-corrida-0.3.1.md) ------
+//
+// "E PARA CAPTURAR E SAIR ELEGANTE ANTES SEM ENVIAR SYSCALL DE SAIDA QUANDO COMPILAR TESTES... Uma
+// coisa e um aborto externo, de fora do programa, outra coisa e o proprio programa sair, e para sair
+// ele tem que ser deterministico."
+//
+// A `#test` that panics or calls exit() used to END THE PROCESS, so every test after it was never
+// reported and the run's tally had to be RECONSTRUCTED from what the death left behind. The program
+// leaving on its own terms is OURS to control; only an EXTERNAL abort (SIGKILL, the OOM killer, a
+// power cut) is not. So the self-inflicted half is captured and the suite continues.
+//
+// THREE RESULTS, AND NONE OF THEM IS A STATE OF THE PROCESS. That is the whole distinction: `exit(7)`
+// inside a `#test` becomes a FACT ABOUT THAT TEST which the harness reports and moves past; `exit(7)`
+// in a program is still the program's contract with whoever invoked it, and stays a real syscall.
+#define TK_TEST_OK        0   /* the body returned */
+#define TK_TEST_PANICKED  1   /* panic / failed assertion / implicit panic (div0, oob, cast) */
+#define TK_TEST_EXITED    2   /* the body called exit(n); `code` carries the n */
+// tk_test_outcome — how one `#test` body ended, and with which value when it ended by exiting.
+//
+// NAMED `outcome` AND NOT `end`, and the reason is measured rather than stylistic: `tk_test_end` is
+// already a FUNCTION in this same header (the channel closer), and a typedef of that spelling would
+// collide with it in C's ordinary identifier namespace. The design text used `tk_test_end` for both.
+typedef struct { int32_t how; int32_t code; } tk_test_outcome;
+// tk_test_run — run ONE `#test` body, capturing any exit the body itself provokes.
+//
+// THE JUMP LIVES HERE, and that is why generated code never has to know it exists: the emitted C (and
+// any future own-backend harness) only has to take the ADDRESS of a top-level function and pass it.
+// setjmp has requirements no general code generator wants to honour — the frame that called it must
+// stay alive, and a local modified between the setjmp and the longjmp is indeterminate unless it is
+// `volatile`. `body` is `volatile` for exactly that reason: it is the one setjmp requirement that
+// cannot be delegated.
+tk_test_outcome tk_test_run(void (* volatile body)(void));
+// tk_test_report — write ONE test's verdict block and count it into the run's tally.
+//
+// Replaces the bare `tk_test_end()` of the passing path and the abort of the failing one: `ok` closes
+// the channel as before, a PANICKED body closes it with FAILED (its panic line already sits in THIS
+// test's captured stderr, never on the shared stream), and an EXITED body closes it with FAILED plus
+// the code it tried to leave with.
+void tk_test_report(tk_test_outcome e);
+// tk_test_summary — the run's one closing block: how many tests ran, passed, failed, and how many of
+// the failures were an `exit` rather than a panic. A COUNT, not a reconstruction — the harness now
+// always reaches the end, so the numbers are sums.
+void tk_test_summary(void);
+// tk_test_any_failed — did any `#test` of this run end other than `ok`? The gate binary's exit status.
+bool tk_test_any_failed(void);
 // tk_print — write exactly s.len bytes from s.ptr to stdout; no newline, no NUL.
 void tk_print(tk_str s);
 // tk_println — tk_print(s) then a single '\n' (0x0A).

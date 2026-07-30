@@ -18,6 +18,7 @@
 #include <inttypes.h> // PRId64, PRIx64, PRIX64 — format spec helpers
 #include <stdarg.h>   // va_list, va_start/va_copy/va_end — fmt_alloc_vsnprintf heap-overflow path (issue #48)
 #include <signal.h>   // signal — native crash backtraces (C1.9)
+#include <setjmp.h>   // setjmp/longjmp — the test-mode capture (§14). The ONLY user is tk_test_run.
 // execinfo (backtrace) exists on macOS + glibc, but NOT musl (the Alpine/Linux pipeline). Guard it
 // so the runtime is musl-portable (C7.1f); without it the backtrace degrades to a one-line notice.
 #if defined(__APPLE__) || defined(__GLIBC__)
@@ -1686,16 +1687,100 @@ void tk_test_end(void) {
     tk_chan_emit_body();
 }
 
-// tk_test_fail_report — the FAILING half of tk_test_end, called from the panic path before it
-// aborts: the same verdict line with FAILED, then this test's OWN captured bytes. Closing the
-// channel FIRST is what lets the panic message itself reach the real stderr.
-static void tk_test_fail_report(void) {
+// tk_test_close_failed — close the open channel with a FAILING verdict, then this test's OWN captured
+// bytes. Closing the channel FIRST is what lets anything written afterwards reach the real streams.
+static void tk_test_close_failed(const char *verdict) {
     if (!tk_chan_open) return;
     tk_chan_open = false;
-    tk_chan_verdict_line("FAILED");
+    tk_chan_verdict_line(verdict);
     tk_chan_emit_body();
     fflush(stdout);
 }
+
+// tk_test_fail_report — the FAILING half of tk_test_end, called from the UNCAPTURED panic path before
+// it aborts (a program, or a test binary whose panic escaped the capture).
+static void tk_test_fail_report(void) { tk_test_close_failed("FAILED"); }
+
+// --- the CAPTURE (see teko_rt.h for the ruling and the three results) -----------------------------
+//
+// The jump buffer and the three words describing the outcome are the whole mechanism. They are
+// process-wide singletons for the same reason the channel is: tests do not nest and do not share a
+// process with each other's threads.
+//
+// `tk_test_capturing` is what the two chokepoints below read. It is set ONLY by tk_test_run, which is
+// emitted ONLY by the test-mode profiles — so a program can never take the captured branch, and the
+// boundary is structural instead of a flag anyone can flip by mistake.
+static jmp_buf tk_test_jb;
+static volatile sig_atomic_t tk_test_capturing = 0;
+static volatile int32_t tk_test_how  = TK_TEST_OK;
+static volatile int32_t tk_test_code = 0;
+
+// TK_TEST_VERDICT_MAX — the failing verdict buffer, sized for "FAILED (exit -2147483648)" and slack.
+#define TK_TEST_VERDICT_MAX 64
+
+static long tk_test_ran    = 0;
+static long tk_test_passed = 0;
+static long tk_test_failed = 0;
+static long tk_test_exited = 0;
+
+// tk_test_capture_exit — the captured half of tk_exit: record the value the body tried to leave with
+// and return control to tk_test_run. No arena free here — the harness's own tk_arena_pop is now
+// always reached, and it is the checkpoint that owns the rewind.
+static void tk_test_capture_exit(int32_t code) {
+    tk_test_how = TK_TEST_EXITED;
+    tk_test_code = code;
+    tk_test_capturing = 0;
+    longjmp(tk_test_jb, 1);
+}
+
+// tk_test_capture_panic — the captured half of the panic chokepoints: the panic line goes into THIS
+// test's own captured stderr (never the shared stream, which is what used to attribute an abort to a
+// test ~66 tests before the real one), then control returns to tk_test_run.
+static void tk_test_capture_panic(const char *msg, size_t len) {
+    tk_chan_append(&tk_chan_err, TK_PANIC_MARKER, strlen(TK_PANIC_MARKER));
+    tk_chan_append(&tk_chan_err, msg, len);
+    tk_chan_append(&tk_chan_err, "\n", 1);
+    tk_test_how = TK_TEST_PANICKED;
+    tk_test_capturing = 0;
+    longjmp(tk_test_jb, 1);
+}
+
+tk_test_outcome tk_test_run(void (* volatile body)(void)) {
+    tk_test_how = TK_TEST_OK;
+    tk_test_code = 0;
+    tk_test_capturing = 1;
+    if (setjmp(tk_test_jb) == 0) body();
+    tk_test_capturing = 0;
+    tk_test_outcome e;
+    e.how = (int32_t)tk_test_how;
+    e.code = (int32_t)tk_test_code;
+    return e;
+}
+
+// tk_test_report_exited — the EXITED verdict, which carries the value: `FAILED (exit <n>)`. A test
+// that leaves by exiting is not a pass, and naming the code is what makes the report actionable.
+static void tk_test_report_exited(int32_t code) {
+    char verdict[TK_TEST_VERDICT_MAX];
+    snprintf(verdict, sizeof verdict, "FAILED (exit %" PRId32 ")", code);
+    tk_test_close_failed(verdict);
+}
+
+void tk_test_report(tk_test_outcome e) {
+    tk_test_ran += 1;
+    if (e.how == TK_TEST_OK) { tk_test_passed += 1; tk_test_end(); return; }
+    tk_test_failed += 1;
+    if (e.how != TK_TEST_EXITED) { tk_test_close_failed("FAILED"); return; }
+    tk_test_exited += 1;
+    tk_test_report_exited(e.code);
+}
+
+void tk_test_summary(void) {
+    fprintf(stdout, "test result: %s. %ld ran; %ld passed; %ld failed; %ld exited\n",
+            tk_test_failed ? "FAILED" : "ok", tk_test_ran, tk_test_passed, tk_test_failed, tk_test_exited);
+    fflush(stdout);
+}
+
+bool tk_test_any_failed(void) { return tk_test_failed != 0; }
 
 // --- the SHARD filter ---------------------------------------------------------------------------
 //
@@ -1850,6 +1935,10 @@ double tk_float_parse(tk_str s) {
 }
 
 _Noreturn void tk_panic(const char *msg) {
+    // Under CAPTURE (test mode only) this stops the TEST, not the process: the line lands in this
+    // test's own channel and control returns to tk_test_run. `_Noreturn` stays honest — longjmp
+    // does not return either.
+    if (tk_test_capturing) tk_test_capture_panic(msg, strlen(msg));
     // Loud + non-zero (M.1): the TK_PANIC_MARKER line first, then SIGABRT via abort().
     // The per-test channel is closed and REPORTED first, so the reader sees which test died and
     // what THAT test had written before the panic message rather than a neighbour's bytes.
@@ -1869,6 +1958,7 @@ _Noreturn void tk_panic(const char *msg) {
 // tolerating embedded NUL (exactly msg.len bytes to stderr). The error case `panic(error)` lowers
 // to its `.message` str at the call site.
 _Noreturn void tk_panic_str(tk_str msg) {
+    if (tk_test_capturing) tk_test_capture_panic((const char *)msg.ptr, msg.len);
     tk_test_fail_report();
     fputs(TK_PANIC_MARKER, stderr);
     fwrite(msg.ptr, 1, msg.len, stderr);
@@ -1885,7 +1975,13 @@ int tk_exit_status(int32_t code) { return (int)(code & TK_EXIT_STATUS_MASK); }
 // the Teko-level `exit(<int>)` — end the program with a status code (no panic message).
 // (W9.3b) free every live arena region before exiting so a diverging exit() is leak-clean (the atexit
 // hook would also fire, but the explicit call keeps the contract local + obvious; free_all is idempotent).
-_Noreturn void tk_exit(int32_t code) { tk_regions_free_all(); exit(tk_exit_status(code)); }
+// Under CAPTURE (test mode only) the value is recorded as a fact about the TEST and no syscall is
+// sent; outside it the exit stays the program's contract with whoever invoked it, byte for byte.
+_Noreturn void tk_exit(int32_t code) {
+    if (tk_test_capturing) tk_test_capture_exit(code);
+    tk_regions_free_all();
+    exit(tk_exit_status(code));
+}
 
 _Noreturn void tk_panic_div0(void)     { tk_panic("division by zero"); }
 _Noreturn void tk_panic_oob(void)      { tk_panic("index out of bounds"); }
