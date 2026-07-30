@@ -2061,3 +2061,32 @@ conhecimento do instrumento. O cabeçalho ficou corrigido contra mim.
 
 Achado de graça: os subagentes **não têm** o MCP do GitHub. Quem busca o URL assinado tem de ser eu;
 o que se delega é a ANÁLISE do ficheiro já em disco.
+
+### Adenda à 30563221738 — a sétima perna, e é a primeira sem log NENHUM
+
+`Memory paranoid (linux-arm64-glibc)` (job `90942752362`) fechou depois de eu ter lido a execução, e
+o veredicto é **infra**, mas por uma assinatura nova que vale registar:
+
+| facto | valor |
+|---|---|
+| `conclusion` | `failure` |
+| passo `Run the regression executor under TEKO_MEM_PARANOID` | **`in_progress`** — nunca concluiu |
+| passo `Post Checkout` | **`pending`** — nunca correu |
+| duração | 16:55:42 → 18:02:44 = **67 min** |
+| `timeout-minutes` do job | **120** — logo **não** foi o timeout do workflow |
+| log | `BlobNotFound` — **zero bytes escritos** |
+
+**Não há o que diagnosticar, e digo-o em vez de inventar uma causa.** Um passo que fica `in_progress`
+com o job `completed`, sem log nenhum, é o hospedeiro a morrer — a mesma família do `exit 143` +
+*shutdown signal* do `regressor` e dos dois `cancelled` da mesma execução. Quatro pernas desta
+execução caíram por causa de runner.
+
+**A hipótese que NÃO afirmo, mas que os números permitem:** o passo pode ter morrido ainda a
+compilar. Medido nas pernas irmãs da mesma execução — corpus `own_native` em **1174 s** no arm64
+simples, e **1946 s para UM build** em Windows. Sob `TEKO_MEM_PARANOID` o arm64 é mais lento ainda.
+67 min sem uma linha de saída é compatível com isso. **Compatível não é medido** — para o provar era
+preciso um log, e é precisamente o que não existe.
+
+**O que isto acrescenta ao instrumento:** o `BlobNotFound` é um sinal útil e não um erro meu. Log
+ausente + passo `in_progress` + job `completed` = **hospedeiro**, e distingue-se de um defeito sem
+gastar uma única leitura de conteúdo. Fica na caixa de ferramentas ao lado do `exit 143`.
