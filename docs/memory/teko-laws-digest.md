@@ -1152,3 +1152,46 @@ própria linguagem que ele nomeou como modelo adopta (a) onde (b) não é possí
 nenhuma compilação pela rota C**; `extern` para a biblioteca da plataforma é permitido, porque a
 alternativa não é mais pura — é inexequível em dois dos três alvos. **Se o dono quiser (b) em Linux por
 princípio, isso é uma primitiva de linguagem nova e um arco próprio, e tem de ser dito.**
+
+## LEI DE FORMA — UMA PROPOSTA PROPÕE; UM ALARME SÓ ENTRA SE FOR PROVADO (dono, 2026-07-30)
+
+Verbatim: *"O que quero do arquivo de proposta? Uma proposta, não contra argumentos para desencorajar
+(alarmes são válidos, mas só se puder prová-los que não são possíveis)."*
+
+**A CULPA É DO BRIEF, e o brief é meu.** Eu pedi ao arquiteto red-flags, o custo de cada coisa, "o que
+não vai funcionar", "a galinha e o ovo", "diz honestamente se ainda vale". Um brief que pede riscos
+recebe um **registo de riscos**. O documento ficou com sete correcções, cinco red-flags, três
+circularidades e um aviso de que o melhor argumento a favor era falso — tudo verdadeiro, e nada disso é
+uma proposta.
+
+**A FORMA CORRECTA:**
+
+| entra | não entra |
+| --- | --- |
+| o que se constrói, em que ordem, com que superfície | *"pode ser caro"*, *"pode falhar"*, *"não tenho a certeza"* |
+| o custo como **número**, dentro do plano | o custo como **argumento contra** |
+| um alarme **provado**, com a medição à vista | um alarme por precaução |
+| um passo de medição, quando algo é desconhecido | uma red-flag, quando algo é desconhecido |
+
+**A REGRA QUE FAZ ISTO FUNCIONAR SEM PERDER HONESTIDADE — e é a peça que faltava:**
+
+> **Um risco NÃO MEDIDO é um PASSO do plano, não um alarme.**
+
+Se não se sabe se os nomes de locais atravessam o alocador, isso não é uma red-flag: é o **crumb 1**,
+"medir se os nomes atravessam o alocador". Se não se sabe se o arm64 desenrola a pilha sem CFI, é um
+crumb de medição, não um aviso. O plano absorve a incerteza como trabalho; o alarme deixa-a como razão
+para não avançar.
+
+**E UM ALARME PROVADO CONTINUA A SER OBRIGATÓRIO.** O dono não pediu optimismo — pediu prova. *"alarmes
+são válidos, mas só se puder prová-los que não são possíveis."* Portanto:
+
+- a divergência da leitura fora de fronteira (nativo devolve lixo, rota C panica) **é** alarme válido:
+  medido, reproduzido, com texto das duas rotas;
+- a red-flag 3 (o `bt` heurístico) **não era**: foi levantada por raciocínio, e a medição refutou-a. Foi
+  exactamente o tipo de alarme que esta lei proíbe — e o dono rejeitou o documento por causa dela;
+- *"o argumento mais atraente é falso"* é honesto e **fica**, porque foi medido (a tabela é 2 crumbs em
+  18) — mas pertence ao plano, como orçamento, não ao topo, como desencorajamento.
+
+**A PROVA DE QUE A LEI É NECESSÁRIA está na própria história deste documento:** a red-flag 3 não medida
+fez o dono rejeitar um arco inteiro. Um alarme não provado não é prudência — **custa uma decisão
+errada**.
