@@ -1923,6 +1923,20 @@ fn cgt_prog_with_one_test() -> CgProg {
     cg_prog_of(checker::TProgram { items = items })
 }
 
+/**
+ * cgt_captured_invocation — the exact C line the harness must emit for `cgt_captured_body`.
+ *
+ * COMPOSED FROM `TEKO_USER_PREFIX` RATHER THAN SPELLED OUT, because a literal would pin the prefix
+ * ruling into an assertion that is not about it: the claim here is the SHAPE of the invocation (the
+ * address of a top-level function handed to the runtime), and a prefix change would then break this
+ * arm for a reason it does not measure.
+ *
+ * @return  `tk_test_report(tk_test_run(&<mangled symbol>));`
+ */
+fn cgt_captured_invocation() -> str {
+    teko::str::concat("tk_test_report(tk_test_run(&", TEKO_USER_PREFIX, "probe__guard__cgt_captured_body));")
+}
+
 #test
 /**
  * cgt_the_harness_runs_every_body_under_capture — the EMITTED half of the test-mode capture (§14).
@@ -1941,7 +1955,7 @@ fn cgt_prog_with_one_test() -> CgProg {
  */
 fn cgt_the_harness_runs_every_body_under_capture() {
     let one = str(emit_test_call(cgt_empty(), cgt_test_fn("cgt_captured_body", "probe::guard"), 0 to u64, false))
-    teko::assert::is_true(teko::str::contains(one, "tk_test_report(tk_test_run(&probe__guard__cgt_captured_body));"))
+    teko::assert::is_true(teko::str::contains(one, cgt_captured_invocation()))
     teko::assert::is_true(!teko::str::contains(one, "tk_test_end();"))
     teko::assert::is_true(teko::str::contains(one, "tk_arena_push();"))
     teko::assert::is_true(teko::str::contains(one, "tk_arena_pop();"))
@@ -1965,5 +1979,5 @@ fn cgt_the_harness_ends_on_the_tally_and_not_on_zero() {
     teko::assert::is_true(teko::str::contains(main_plain, "return tk_test_any_failed() ? 1 : 0;"))
     teko::assert::is_true(!teko::str::contains(main_plain, "return 0;"))
     let main_analyze = match emit_test_main(cgt_empty(), cgt_prog_with_one_test(), CgMode::TestAnalyze) { []byte as o => str(o); error => "" }
-    teko::assert::is_true(teko::str::contains(main_analyze, "tk_test_report(tk_test_run(&probe__guard__cgt_captured_body));"))
+    teko::assert::is_true(teko::str::contains(main_analyze, cgt_captured_invocation()))
 }
