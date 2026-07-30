@@ -1030,15 +1030,37 @@ fn lwt_prim_kind_of_resolves_enum_equality_comparison() {
 }
 
 /**
- * The E7 ordinal `to`-cast, enum -> int direction: an enum-typed operand widens through its
- * `I32` ordinal carrier, sign-extending into a wider integer exactly like any other signed
- * `I32` source (`cast_int_unop_of`) — measured on the compiler's own `.tkb` codec convention
- * (`(byte)k` / `(TokenKind)b` ordinal round-trips, `checker/typer.tks`'s own E7 doc-comment).
+ * The ENTIRE LIR text `lower_function` produces for an enum -> wider-int `to` cast whose operand
+ * is the function's sole parameter: the parameter read, then the return of that very VReg. Every
+ * line of it is load-bearing — `%0: i32` is the enum's ordinal carrier, `%0 = param 0` binds the
+ * operand, `ret %0` returns the operand's own VReg, and there is no fourth line because a
+ * lossless widen emits neither a conversion nor a fit guard.
+ */
+const LWT_ENUM_WIDEN_CAST_LIR: str = "func @teko_teko__demo__color_ordinal(%0: i32) -> i64 {\n  #B0:\n    %0 = param 0\n    ret %0\n}\n"
+
+/**
+ * The E7 ordinal `to`-cast, enum -> wider int direction: the enum-typed operand resolves through
+ * its `I32` ordinal carrier and the cast then emits NOTHING AT ALL — no conversion instruction
+ * and no fit guard — because the pair is a lossless widen (`lower_cast_fit_guard` answers
+ * `checker::cast_is_lossless_widen` and returns its context untouched, so `lower_int_cast` hands
+ * the operand's own VReg straight back). A value representable in both types carries the same
+ * two's-complement bit pattern under both, so an extend would have nothing to change.
  *
- * @return void
+ * WHY IDENTITY AND NOT ONLY ABSENCE. `LWT_ENUM_WIDEN_CAST_LIR` is the function's WHOLE printed
+ * text, so it pins the strong property positively: `%0` is the sole parameter, the operand read
+ * is that same `%0`, and `ret %0` returns it — the cast's result IS the operand's VReg. An
+ * absence-of-substring assertion cannot say that, and on its own it would even pass if the
+ * lowering stopped producing text at all. The whole text also pins the ABSENCE OF A GUARD (no
+ * `const`, no `icmp` line survives), which no conversion-name absence covers. The three
+ * `sext`/`zext`/`trunc` absences then state the widen-emits-no-conversion rule in its own words,
+ * so a reader sees the rule and not only a golden blob.
+ *
+ * That the widen PRESERVES a negative value is proved BY VALUE, on both routes, by
+ * `f_cast_widen_keeps_value` (`-5 to i64`) and the implicit-widen fixture (`-2147483648`); this
+ * fixture owns only the emitted-LIR shape.
  */
 #test
-fn lwt_prim_kind_of_resolves_enum_to_int_cast_widens() {
+fn lwt_prim_kind_of_resolves_enum_to_int_cast_emits_no_conversion() {
     let inner = lwt_typed_var("c", checker::Named { name = "Color" })
     let e = lwt_cast(inner, checker::PrimKind::I64)
     let params = teko::list::push(teko::list::empty(), lwt_param("c", "Color"))
@@ -1046,7 +1068,10 @@ fn lwt_prim_kind_of_resolves_enum_to_int_cast_widens() {
     let f = lwt_fn("color_ordinal", "teko::demo", params, checker::Prim { kind = checker::PrimKind::I64 }, body)
     let lf = match lower_function(f, teko::list::empty(), teko::list::empty(), lwt_color_enums()) { LoweredFunction as r => r.func; error as err => return }
     let text = print_lmodule(add_func(empty_module(), lf))
-    teko::assert::str_contains(text, "%1 = sext %0")
+    teko::assert::is_true(text == LWT_ENUM_WIDEN_CAST_LIR)
+    teko::assert::is_false(teko::str::contains(text, "sext"))
+    teko::assert::is_false(teko::str::contains(text, "zext"))
+    teko::assert::is_false(teko::str::contains(text, "trunc"))
 }
 
 /**
