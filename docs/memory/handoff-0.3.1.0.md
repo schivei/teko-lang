@@ -42,6 +42,33 @@ ao tronco, **não** faz bump de versão, **não** fecha a lane — isso é dele.
 4. **As duas regressões "expected a compile failure but the build succeeded"** (`native_iface_fat_known_stop.tkr`, `diagnostics.tkr`) — **atenção: é KNOWN-STOP a ficar vermelho, e pela lei do dono isso NÃO significa necessariamente que o defeito foi corrigido; pode significar que uma GUARDA se perdeu.** Não owned. Vale investigar.
 5. `own_native.tkr → own_cross_x86_64_windows_emits_coff` — o `cc` falha no C gerado. Não owned.
 
+
+### MEDIÇÕES DA PRIMEIRA EXECUÇÃO COM `Arm64Linux` (SHA `ebfb6be8`, perna macOS)
+
+Quatro coisas, e três são notícia boa:
+
+1. **Degrau 28 FECHADO no CI** — `slice element index-assignment` já não aparece. O 29 apareceu no seu lugar,
+   que é o comportamento esperado de uma escada.
+2. **`regressions 10 run, 0 skipped, 1 failed`** — **ZERO skips.** Os 21 skips da perna arm64 eram todos
+   `unsupported TEKO_TARGET "arm64-linux"` e desapareceram com o crumb 3, **sem tocar em CI**. Confirma a
+   decisão de não aplicar o crumb 5.
+3. **A pergunta do agente do AArch64-ELF está RESPONDIDA:** a linha nova `own_cross_arm64_linux_emits_elf`
+   **não saltou** em `test / macos-arm64`, logo o host macOS **tem** desmontador e religador LLVM
+   cross-capable. **Nenhum provisionamento é necessário.**
+4. **CORRECÇÃO À MINHA PRÓPRIA FILA, e importa:** as duas regressões que dois agentes reportaram como
+   *"expected a compile failure but the build succeeded"* — `native_iface_fat_known_stop.tkr` e
+   `diagnostics.tkr` — estão **`regression ok` no CI**. Não reproduzem. A causa provável é o compilador
+   que os agentes semearam à mão de `bootstrap/teko.c` (porque `fetch_teko.sh` falha nesta sessão) diferir
+   do que o CI usa. **Portanto NÃO despachar "guardas perdidas" — não há prova de que exista guarda
+   perdida.** O que existe é uma discrepância entre a escada local dos agentes e a do CI, e isso é o
+   achado a registar. Prioridade da fila baixa de 2 para o fim.
+
+**A LIÇÃO, e é geral:** um agente que semeia de `bootstrap/teko.c` está a construir a partir da SAÍDA
+desta árvore, não do release. As falhas que ele vê e o CI não vê podem ser artefactos dessa diferença —
+como já aconteceu hoje com "três erros de tipo" que eram do binário obsoleto. **Um relatório de agente
+que nomeia uma regressão tem de dizer com que semente correu**, e o integrador tem de a confrontar com
+o CI antes de a pôr na fila. Eu não o fiz, e quase despachei trabalho sobre um defeito inexistente.
+
 ### CRUMB 5 do AArch64-ELF — NÃO APLICADO, e a razão é medição, não preguiça
 
 O agente deixou-mo por ser workflow (só o integrador toca `.github/workflows/`). **Medi antes de aplicar, e
@@ -79,6 +106,7 @@ fechar, o ponto de fixo nativo não fecha e as duas pernas nativas ficam vermelh
 | 25 | união-nula em colocações sem tipo declarado | **fechado**, confirmado no CI |
 | 26 | `append_fo` sem lowering, em `teko::codegen::cb` | **fechado e DRENADO** — confirmado: já não aparece |
 | **27** | **builtin `ftoa` sem lowering**, em `teko::codegen::cb_f64_literal` | **ABERTO — é a paragem viva do self-host**, idêntica em `artifact/linux-x86_64-glibc` e `artifact/linux-arm64-musl` |
+| **29** | **`A4-fp`: codificação de operação de float / FPR em arm64**, em `own_arith_exit` | **ABERTO — descoberto ao drenar o 28.** É o **gémeo arm64** do arco `b1-fp-x86`, que fechou os floats só para x86-64 |
 | **28** | **atribuição a elemento de slice (`s[i] = v`) sem lowering**, em `own_native::f_implicit_widen_targets` | **ABERTO, e é REGRESSÃO DO MEU DRENO** — parte a linha `own_arith_exit` em **todas** as pernas |
 
 Texto exacto das duas, do log completo (§2c):
