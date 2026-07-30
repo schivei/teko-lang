@@ -12079,6 +12079,7 @@ fn append_param_ltypes(out: []LType, p: parser::Param, enums: []LEnumInfo, table
  */
 pub fn lower_program(prog: checker::TProgram, flat_symbols: bool = false) -> LModule | error {
     let table = checker::type_table_of(prog)
+    match fat_divergence_guard(prog, table) { error as e => return e; null => { } }
     let enums = collect_enums(prog)
     let layouts = match collect_struct_layouts(prog, enums, table) { []LStructLayout as ls => ls; error as e => return e }
     let externs = collect_externs(prog)
@@ -12099,6 +12100,200 @@ pub fn lower_program(prog: checker::TProgram, flat_symbols: bool = false) -> LMo
     }
     let vmain = match lower_virtual_main(loose, layouts, enums, m.rodata, lifted, externs, flat_symbols, variants, ref_fns, field_decls) { LoweredFunction as x => x; error as err => return err }
     fold_lifted_funcs(add_func(with_rodata(m, vmain.rodata), vmain.func), vmain.lifted)
+}
+
+/**
+ * FAT_DIVERGENCE_LIMIT — how many disagreeing annotations the guard's diagnostic NAMES before it
+ * summarizes the rest as a count. A guard whose message is unbounded is a guard whose message is
+ * unreadable; a guard that names only the first is the "one stop per self-build" treadmill this
+ * whole instrument exists to replace. Naming a block and counting the tail gives both.
+ */
+const FAT_DIVERGENCE_LIMIT: u64 = 20
+
+/**
+ * fat_divergence_guard — THE GUARD. For every type annotation in the program that a fat/scalar
+ * decision is taken from, assert that the SYNTACTIC predicate (`typeexpr_is_fat`) and the CHECKER's
+ * own resolver (`checker::resolve_type` + the semantic `is_fat_type`) give the SAME answer. Any
+ * disagreement is a defect, and it is reported as ONE block, BEFORE any lowering runs.
+ *
+ * WHY THIS EXISTS AND WHY IT IS THE INSTRUMENT, not a test (owner, 2026-07-30, on the degrau-31
+ * stop): *"não seria mais produtivo validar tudo que deveria ser e não é? E corrigir de uma vez ao
+ * invés de ficar teste a teste?"* He is right, and the treadmill was real: this backend has two
+ * predicates answering ONE question over two representations, they disagreed, and every disagreement
+ * surfaced one at a time — as a mysterious honest-stop several degraus downstream, or worse, as a
+ * silent wrong answer. Enumerating the disagreements up front turns an unbounded ladder into a
+ * finite list.
+ *
+ * WHY TWO PREDICATES EXIST AT ALL, which is the question that had to be answered before deciding the
+ * fix, and the answer is MEASURED, not assumed: `checker::TFunction.params` is `[]parser::Param`,
+ * documented in `src/checker/tast.tks` as "carried from the parser unchanged", and a `StructBody`'s
+ * fields likewise carry only `type_ann`. The checker resolves a function's RETURN type into the TAST
+ * (`return_type: Type`) but never its PARAMETER or FIELD types. So there is no recorded answer for
+ * this backend to read at those two sites, and a syntactic predicate is genuinely necessary — the
+ * hypothesis that it was merely redundant does not survive the tast. What it must NOT do is
+ * re-derive a second, weaker resolution: the checker's RESOLVER is a pure function of the type table
+ * and the referencing namespace, and both are available here.
+ *
+ * THE REFERENCING NAMESPACE is what makes the comparison honest, and it is available on both sides:
+ * a function carries `namespace` directly; a type declaration's `name` is CANONICAL, so
+ * `checker::name_qualifier` recovers it.
+ *
+ * A NON-ANSWER IS NOT A DIVERGENCE. When the checker's resolver cannot resolve an annotation at all,
+ * this guard stays silent instead of guessing which side is right: a generic type-PARAMETER (`T`) is
+ * never registered as a type, and a still-unstamped generic instantiation resolves only after the
+ * monomorph pass. Those are legitimately unresolvable here, and reporting them would make the guard
+ * cry wolf on every generic in the tree.
+ *
+ * @param prog   the whole typed program
+ * @param table  the program's type table (`checker::type_table_of`)
+ * @return       `null` when every annotation agrees, else a NAMED error listing the disagreements
+ * @since 0.3.1.0 degrau 31 (the qualified-alias family, closed as a family)
+ */
+fn fat_divergence_guard(prog: checker::TProgram, table: checker::TypeTable) -> null | error {
+    let found = fat_divergences(prog, table)
+    if found.len == 0 { return null }
+    error { message = teko::str::concat("native backend N1: the syntactic fat-pointer predicate disagrees with the checker on ", teko::u64_to_str(found.len), " annotation(s) (internal) — ", fat_divergence_lines(found)) }
+}
+
+/**
+ * fat_divergences — one human-readable line per annotation the two predicates disagree on, over the
+ * WHOLE program: every top-level function's parameters, and every field-shaped type declaration's
+ * fields. These are exactly the two places this backend takes a fat/scalar decision from syntax
+ * (`bind_param`/`append_param_ltypes`, and `layout_of_fields` via `field_layout_size`/`_align`).
+ *
+ * @param prog   the whole typed program
+ * @param table  the program's type table
+ * @return       one line per disagreement, in program order (empty when they agree everywhere)
+ */
+fn fat_divergences(prog: checker::TProgram, table: checker::TypeTable) -> []str {
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        out = fat_divergences_of_item(out, prog.items[i], table)
+        i++
+    }
+    out
+}
+
+/**
+ * fat_divergences_of_item — `acc` extended with `it`'s disagreements: a function contributes its
+ * parameter annotations, a field-shaped type declaration its field annotations, every other item
+ * kind nothing.
+ *
+ * @param acc    the lines accumulated so far
+ * @param it     the typed top-level item to inspect
+ * @param table  the program's type table
+ * @return       `acc`, extended with `it`'s disagreements
+ */
+fn fat_divergences_of_item(acc: []str, it: checker::TItem, table: checker::TypeTable) -> []str {
+    match it {
+        checker::TFunction as f => fat_divergences_of_params(acc, f, table)
+        parser::TypeDecl as td => fat_divergences_of_decl(acc, td, table)
+        _ => acc
+    }
+}
+
+/**
+ * fat_divergences_of_params — `acc` extended with one line per parameter of `f` whose annotation the
+ * two predicates disagree on. The referencing namespace is the function's own.
+ *
+ * @param acc    the lines accumulated so far
+ * @param f      the typed function whose parameter annotations to check
+ * @param table  the program's type table
+ * @return       `acc`, extended with `f`'s disagreeing parameters
+ */
+fn fat_divergences_of_params(acc: []str, f: checker::TFunction, table: checker::TypeTable) -> []str {
+    mut out = acc
+    mut i: u64 = 0
+    loop {
+        if i >= f.params.len { break }
+        out = fat_divergence_line_of(out, f.params[i].type_ann, table, f.namespace, "parameter", f.name, f.params[i].name)
+        i++
+    }
+    out
+}
+
+/**
+ * fat_divergences_of_decl — `acc` extended with one line per FIELD of `td` whose annotation the two
+ * predicates disagree on. `td.name` is canonical, so the fields' referencing namespace is its
+ * qualifier — a field annotation is written in the type's OWN namespace, not at any use site.
+ *
+ * A class body is walked through its DECLARED fields only, not its effective (base-inherited) ones:
+ * an inherited field's annotation is written in the BASE's namespace and is checked when the base's
+ * own declaration is visited, so walking the effective list here would re-check it against the wrong
+ * namespace and invent a divergence.
+ *
+ * @param acc    the lines accumulated so far
+ * @param td     the type declaration to inspect
+ * @param table  the program's type table
+ * @return       `acc`, extended with `td`'s disagreeing fields
+ */
+fn fat_divergences_of_decl(acc: []str, td: parser::TypeDecl, table: checker::TypeTable) -> []str {
+    let fields = match td.body {
+        parser::StructBody as sb => sb.fields
+        parser::ClassBody as cb => cb.fields
+        _ => return acc
+    }
+    let ns = checker::name_qualifier(td.name)
+    mut out = acc
+    mut i: u64 = 0
+    loop {
+        if i >= fields.len { break }
+        out = fat_divergence_line_of(out, fields[i].type_ann, table, ns, "field", td.name, fields[i].name)
+        i++
+    }
+    out
+}
+
+/**
+ * fat_divergence_line_of — `acc` extended with ONE line when the two predicates disagree on `te`,
+ * unchanged when they agree or when the checker cannot resolve `te` at all.
+ *
+ * @param acc    the lines accumulated so far
+ * @param te     the annotation to check
+ * @param table  the program's type table
+ * @param ns     the namespace the annotation was WRITTEN in
+ * @param place  what the annotation annotates ("parameter" / "field") — for the diagnostic
+ * @param owner  the function or type the annotation belongs to — for the diagnostic
+ * @param name   the parameter's or field's own name — for the diagnostic
+ * @return       `acc`, extended when `te` disagrees
+ */
+fn fat_divergence_line_of(acc: []str, te: parser::TypeExpr, table: checker::TypeTable, ns: str, place: str, owner: str, name: str) -> []str {
+    let truth = match checker::resolve_type(te, table, ns) { checker::Type as t => t; error => return acc }
+    let semantic = is_fat_type(truth)
+    if typeexpr_is_fat(te, table) == semantic { return acc }
+    teko::list::push(acc, teko::str::concat(place, " `", name, "` of `", owner, "`: syntax says ", fat_word(!semantic), ", the checker says ", fat_word(semantic)))
+}
+
+/**
+ * fat_word — "fat" or "scalar", the two words the guard's diagnostic uses for a fat/scalar verdict.
+ *
+ * @param fat  the verdict
+ * @return     its word
+ */
+fn fat_word(fat: bool) -> str {
+    if fat { return "fat" }
+    "scalar"
+}
+
+/**
+ * fat_divergence_lines — `found` rendered as one `; `-joined diagnostic, naming at most
+ * `FAT_DIVERGENCE_LIMIT` entries and summarizing any tail as a count.
+ *
+ * @param found  the disagreement lines, in program order
+ * @return       the joined diagnostic
+ */
+fn fat_divergence_lines(found: []str) -> str {
+    mut out = ""
+    mut i: u64 = 0
+    loop {
+        if i >= found.len { break }
+        if i >= FAT_DIVERGENCE_LIMIT { return teko::str::concat(out, "; and ", teko::u64_to_str(found.len - FAT_DIVERGENCE_LIMIT), " more") }
+        out = if i == 0 { found[i] } else { teko::str::concat(out, "; ", found[i]) }
+        i++
+    }
+    out
 }
 
 /**
