@@ -3537,3 +3537,136 @@ sumarizador recebe mais pronto e calcula menos) e acrescenta o subcomando `teko 
 ja era o `--replay` — **dois frontends, um leitor**. **Nao toca em F1–F6**: e superficie do que o F4 ja
 constroi. E **sai** trabalho: a variante `cont`, o embrulho de `out`/`err` no fundo de emissao, e a
 necessidade de `REC_MAX` acomodar texto arbitrario. **11 crumbs.**
+
+---
+
+## 27. Assercoes esperadas × executadas — e o terceiro modo de um teste ser verde sem afirmar nada
+
+> *"Hoje nao temos visibilidade de quantas assercoes deveriam ocorrer... nada passa pelo invisivel ao
+> gate... podem ser condicionais... ao menos o numero de assertividades executadas sao passiveis de
+> medicao."*
+
+### 27.1 Metade ja existe, e e a metade cara — confirmado na fonte
+
+`src/checker/test_assert.tks` (172 linhas) ja anda o corpo de um `#test` e devolve
+`AssertStats { total, folded }`. **E a descida ja ve os construtos condicionais todos** — medido em
+`assert_stats_stmt` e `assert_stats_expr`:
+
+| construto | ja descido |
+|---|---|
+| `TIfExpr` (then + else) | `assert_stats_if` |
+| `TMatchExpr` (todos os arcos) | `assert_stats_match` |
+| `TLoopStmt` (init + body) | `assert_stats_stmt:82` |
+| `TDeferStmt` | `:83` |
+| `TAdoptStmt` | `:84` |
+
+**A estrutura esta la; falta o PARAMETRO.** Distinguir obrigatoria de fluxo e passar uma profundidade
+condicional pela recursao que ja existe — **nao e analise nova, e um argumento a mais**.
+
+**E ha uma lacuna que tenho de nomear, medida:** `is_bool_assert_call` conta **so** `is_true` e
+`is_false` (`:164-172`), e exclui `str_contains` **de proposito** (*"takes two string arguments, not a
+bool predicate"*). Isso e correcto para o problema que o modulo resolve (dobra de predicado), e
+**errado para este**: as 574 chamadas de `str_contains` seriam invisiveis ao esperado. **Para esta lei,
+a contagem tem de ser das 24, nao das duas.**
+
+### 27.2 Obrigatoria vs fluxo — computavel SEM heuristica, e o terceiro caso existe
+
+**Confirmo a leitura do integrador**, e ela e exacta: *obrigatoria* = a assercao esta na raiz do corpo;
+*fluxo* = aninhada em qualquer construto condicional. Nao ha heuristica: e uma propriedade do caminho
+sintactico, e o `fold` ja o percorre.
+
+**Duas afinacoes e um caso que ele nao viu:**
+
+1. **`loop` e sempre fluxo.** Um `loop <cond>` pode correr zero vezes — o corpo nunca e garantido.
+2. **`defer` classifica-se pelo SITIO DO `defer`, nao pelo corpo dele.** Um `defer` na raiz dispara na
+   queda do fim do corpo (§14.2 — o replay acontece nos arcos de saida), logo **as suas assercoes sao
+   obrigatorias**; um `defer` dentro de um `if` e fluxo. E a mesma regra aplicada uma linha acima, e
+   isso e bom: a classificacao continua a ser uma so.
+3. **O TERCEIRO CASO, e e o que ele pediu para eu nomear: uma assercao na raiz DEPOIS de um `return`
+   condicional.** Sintacticamente esta na raiz — profundidade zero — e a minha regra chamar-lhe-ia
+   obrigatoria. Mas um `if x { return }` antes dela pode salta-la, e o portao acusaria um teste sadio.
+   **Tambem e computavel sem heuristica, mas nao por profundidade: e uma propriedade do BLOCO.**
+
+> **Regra completa: uma assercao e OBRIGATORIA quando esta a profundidade condicional zero E nenhum
+> `return`/`break`/`continue` condicional a precede no seu bloco. Todas as outras sao FLUXO.**
+
+### 27.3 A regra do portao — e melhoro-a, porque contar nao chega
+
+A proposta era *"toda a obrigatoria tem de executar; as de fluxo sao contadas e relatadas"*. **A
+direccao esta certa; a metrica e fraca.** Uma contagem bate com identidades trocadas: um teste com duas
+obrigatorias que executa uma delas duas vezes (num `loop`) da 2 = 2 e passa.
+
+**E o remedio ja esta pago pela §26.5:** cada `RecAssert` traz o seu `site_id`. Logo:
+
+> **O CONJUNTO dos `site_id` obrigatorios tem de estar CONTIDO no conjunto dos `site_id` que
+> chegaram. As de fluxo sao contadas e relatadas, nunca exigidas.**
+
+Contencao de conjuntos, nao cardinalidade. Custa o mesmo — o `site_id` ja viaja — e nao se deixa
+enganar por repeticao.
+
+*Prova:* um teste com duas obrigatorias, uma delas num ramo morto, **falha** nomeando o `site` que nao
+chegou · **vivacidade**: um teste com duas obrigatorias executadas passa · **inversao**: com a regra por
+cardinalidade, o teste que executa uma duas vezes **passa** — e e essa versao que tem de falhar o teste
+da guarda.
+
+### 27.4 O terceiro modo de ser verde sem afirmar nada — e ele e MEDIDO
+
+O integrador perguntou se as duas leis juntas fecham as duas maneiras. **Fecham duas, e ha uma
+terceira, e nao e a que se esperava.**
+
+| # | modo | quem apanha |
+|---:|---|---|
+| 1 | a assercao **nao pode falhar** (predicado dobra em constante) | `test_assert.tks` hoje — `MISLEADING`/`FOUNDATIONAL` |
+| 2 | a assercao **nunca foi tentada** (ramo morto) | **esta lei** |
+| 3 | a assercao **e invisivel a analise** | **ninguem** |
+
+**O terceiro, medido:** varri os 1042 `#test` do corpus. **102 (9,8 %) nao tem uma unica
+`teko::assert::` DIRECTA no corpo.**
+
+**E digo ja o que este numero NAO e, para nao repetir o erro da §22:** nao sao 102 testes que nao
+afirmam nada. Fui verificar um — `comptime_fold_test.tkt:131` — e ele chama `cf_int_is(...)` e
+`cf_bool_is(...)`, auxiliares locais que afirmam la dentro. **O numero mede INVISIBILIDADE A ANALISE,
+nao ausencia de assercoes.**
+
+**E e por isso que e um achado e nao um alarme:** `test_assert.tks` anda o corpo do `#test` e **nao
+segue chamadas**. Para esses 102, `total = 0` — logo a regra `FOUNDATIONAL` (que exige `total >= 1`) ja
+os ignora hoje, **e a lei nova acusaria zero obrigatorias onde ha tres**. Duas analises cegas ao mesmo
+sitio.
+
+> **Consequencia de desenho, e nao e opcional: a contagem estatica tem de seguir pelo menos UM salto
+> para auxiliares locais do proprio ficheiro de teste. Sem isso, a lei produz falsos negativos em
+> 9,8 % do corpus** — e um portao que nao ve um decimo dos testes e o *"invisivel ao gate"* que a lei
+> existe para acabar.
+
+Um salto chega para o corpus de hoje (o auxiliar afirma directamente); a profundidade e um parametro,
+e **se um dia um auxiliar chamar outro, a medicao dira** — o portao relata quantos testes ficaram com
+`total = 0` depois do salto, e esse numero e ele proprio a guarda.
+
+### 27.5 As regressoes — mesmo regime para as assercoes, outro para os passos
+
+O `.tkr` tem **duas camadas**, e so uma entra neste regime:
+
+* **as `teko::assert::*` DENTRO da fixture** — mesmo regime, sem excepcao. A fixture liga o mesmo
+  runtime e usa os mesmos builtins; o esperado calcula-se da fonte dela no momento em que o arnes a
+  compila, que e o momento em que o arnes ja a tem nas maos;
+* **os passos `Then` do `.tkr`** — sao expectativas da LINHA, de outra granularidade, e ja sao
+  contaveis por si. Ficam onde estao.
+
+**E a `ref_mutable_binder` de hoje e o caso trabalhado desta lei.** Sete assercoes em sete bits do
+codigo de saida; quando tres cairam, `exit 99, expected 127` nao dizia se elas **falharam** ou **nunca
+correram** — e a diferenca era o diagnostico inteiro. Sob esta lei: a fixture emite sete `RecAssert`
+com `site_id`; o arnes sabe quais sao obrigatorias; e as tres em falta sao relatadas como **NAO
+EXECUTADAS**, nomeadas pelo sitio, e distintas das falhadas. **O `expected`/`got` de §26.3 diz o resto,
+e ninguem descodifica bits a mao.**
+
+### 27.6 O custo
+
+**Nenhum crumb novo. Nao toca F1–F6.** Toca em:
+
+* `src/checker/test_assert.tks` — o parametro de contexto (obrigatoria/fluxo), o alargamento das 2
+  assercoes para as 24, e o salto de um nivel para auxiliares locais;
+* **C4** — o sumarizador passa a comparar dois conjuntos de `site_id` em vez de contar;
+* **C1** — nada: o `site_id` ja viaja por §26.5.
+
+**11 crumbs.** E o mais barato dos tres pedacos ja esta escrito: a descida por `if`/`match`/`loop`/
+`defer`/`adopt` existe e esta provada em producao.
