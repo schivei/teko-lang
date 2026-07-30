@@ -135,15 +135,6 @@ pub type Manifest = struct {
     backend: Backend
 }
 
-// parse_manifest — read a `.tkp` source into a Manifest, or fail honestly (M.3 — no
-// silent coercion). The recognized TOML subset:
-//   * top-level  `key = "value"`     → name / source (strings)
-//   * table head `[table]`           → [artifact] / [dependencies] / [aliases]
-//   * `[artifact] kind = "binary"|"static"|"shared"|"package"` → Artifact (default Binary)
-//   * keys under [dependencies]      → deps
-//   * keys under [aliases]           → aliases
-//   * arrays     `key = ["a", "b"]`  → recognized (a value form)
-// Missing required fields (name, source) or malformed lines → error.
 // --- line/byte cursor helpers (zero-copy views into the source bytes) --------
 
 // the byte at p, or 0 past the end (a safe peek, like the lexer's `at`).
@@ -453,9 +444,125 @@ fn mf_read_str_list(s: str, p: u64) -> []str | error {
 }
 
 /**
- * .tks mirror of manifest.c::tk_parse_manifest — the minimal TOML subset, one line at a
- * time; every malformed line is an honest error (M.3 — no coercion). `section` is tracked
- * as a tag string ("root"/"artifact"/"deps"/"aliases"/"coverage"/"tests"/"other").
+ * ARTIFACT_KIND_BINARY — the `[artifact] kind` spelling of `Artifact::Binary` (tkp_rule.tks): a
+ * native executable, the artifact a project gets when it declares no `[artifact]` section at all.
+ */
+const ARTIFACT_KIND_BINARY: str = "binary"
+
+/**
+ * ARTIFACT_KIND_STATIC — the `[artifact] kind` spelling of `Artifact::Static` (tkp_rule.tks): a
+ * native static library (`.a`/`.lib`).
+ */
+const ARTIFACT_KIND_STATIC: str = "static"
+
+/**
+ * ARTIFACT_KIND_SHARED — the `[artifact] kind` spelling of `Artifact::Shared` (tkp_rule.tks): a
+ * native shared library (`.dylib`/`.so`/`.dll`).
+ */
+const ARTIFACT_KIND_SHARED: str = "shared"
+
+/**
+ * ARTIFACT_KIND_PACKAGE — the `[artifact] kind` spelling of `Artifact::Package` (tkp_rule.tks): a
+ * Teko `.tkl` package, the dependency unit.
+ */
+const ARTIFACT_KIND_PACKAGE: str = "package"
+
+/**
+ * ArtifactKind — one row of the `[artifact] kind` table: a manifest spelling paired with the
+ * `Artifact` member (tkp_rule.tks) that spelling selects.
+ */
+type ArtifactKind = struct {
+    /**
+     * The literal `kind = "…"` text a `.tkp` writes, exactly as the reader compares it.
+     */
+    spelling: str
+    /**
+     * The `Artifact` member that `spelling` names.
+     */
+    artifact: Artifact
+}
+
+/**
+ * artifact_kind_table — the SINGLE list of accepted `[artifact] kind` spellings and the `Artifact`
+ * each one names, in the order the diagnostic enumerates them. Both the lookup
+ * (`artifact_from_kind`) and the rejection message (`artifact_kinds_quoted`) read this one table, so
+ * a new `Artifact` member is accepted and named by adding exactly one row here — a hand-written
+ * list inside a message cannot rot out of step with the enum, because there is none.
+ *
+ * @return  one row per accepted `kind` spelling
+ * @since   0.3.1
+ */
+fn artifact_kind_table() -> []ArtifactKind {
+    mut rows: []ArtifactKind = teko::list::push(teko::list::empty(), ArtifactKind { spelling = ARTIFACT_KIND_BINARY; artifact = Artifact::Binary })
+    rows = teko::list::push(rows, ArtifactKind { spelling = ARTIFACT_KIND_STATIC; artifact = Artifact::Static })
+    rows = teko::list::push(rows, ArtifactKind { spelling = ARTIFACT_KIND_SHARED; artifact = Artifact::Shared })
+    rows = teko::list::push(rows, ArtifactKind { spelling = ARTIFACT_KIND_PACKAGE; artifact = Artifact::Package })
+    rows
+}
+
+/**
+ * artifact_kinds_listed — the accepted `[artifact] kind` spellings, comma-separated, in
+ * `artifact_kind_table` order (`binary, static, shared, package`). Derived from the table so the
+ * rejection message names exactly what the reader accepts, and shaped like
+ * `unsupported_target_error`'s supported-set tail: the OFFENDING value is quoted, the accepted set
+ * is not.
+ *
+ * @return  the comma-separated accepted-spelling list
+ * @since   0.3.1
+ */
+fn artifact_kinds_listed() -> str {
+    let rows = artifact_kind_table()
+    mut out = ""
+    mut i: u64 = 0
+    loop {
+        if i >= rows.len { break }
+        if i > 0 { out = out ~ ", " }
+        out = out ~ rows[i].spelling
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * artifact_from_kind — the `Artifact` a `[artifact] kind = "…"` spelling names. An unrecognized
+ * spelling is a HARD error naming the offending text and enumerating the accepted set: it used to
+ * fall back to `Artifact::Binary`, so a typo (`kind = "binari"`) built an executable in silence and
+ * a kind nobody implemented built one too — a hidden error that never fired (M.3). An ABSENT
+ * `[artifact]` section is a different thing and still defaults to `Artifact::Binary`: declaring
+ * nothing is legitimate, declaring nonsense is not.
+ *
+ * The message carries NO `teko: ` prefix of its own — every path that surfaces it goes through the
+ * driver's `fail`, which prefixes `teko: <dir>: `.
+ *
+ * @param spelling  the `kind` value read off the manifest line, unquoted
+ * @return          the `Artifact` that spelling names
+ * @throws          when `spelling` is not one of `artifact_kind_table`'s rows
+ * @since           0.3.1
+ */
+fn artifact_from_kind(spelling: str) -> Artifact | error {
+    let rows = artifact_kind_table()
+    mut i: u64 = 0
+    loop {
+        if i >= rows.len { break }
+        if rows[i].spelling == spelling { return rows[i].artifact }
+        i = i + 1
+    }
+    error { message = "unknown [artifact] kind \"" ~ spelling ~ "\" — accepted kinds: " ~ artifact_kinds_listed() }
+}
+
+/**
+ * parse_manifest — read a `.tkp` source into a `Manifest`, or fail honestly (M.3 — no silent
+ * coercion), one line at a time. `sec` tracks the current table as a tag string
+ * ("root"/"artifact"/"deps"/"aliases"/"coverage"/"tests"/"extern"/"extern.libs"/"other"). The
+ * recognized TOML subset: top-level `key = "value"` (name/source/version/suffix/description), a
+ * `[table]` header, `[artifact] kind`/`abi`, keys under `[dependencies]`/`[aliases]`, unquoted
+ * integers under `[coverage]`, and `key = ["a", "b"]` arrays. A missing required field
+ * (name/source), a malformed line, or an unrecognized `[artifact] kind` is an error. An absent
+ * `[artifact]` section is NOT: the artifact defaults to `Artifact::Binary`.
+ *
+ * @param src  the whole `.tkp` text
+ * @return     the parsed manifest, with `backend` left at its `C` default
+ * @throws     when a required field is missing, a line is malformed, or a value is unrecognized
  */
 fn parse_manifest(src: str) -> Manifest | error {
     mut name = ""
@@ -556,13 +663,9 @@ fn parse_manifest(src: str) -> Manifest | error {
                     test_gate = mf_at(line, v) == b't'
                 }
             } else if sec == "artifact" {
-                // `kind = "binary" | "static" | "shared" | "package"` (C7.1m); unknown → Binary.
                 if key == "kind" {
                     let q = match mf_read_quoted(line, v) { MfQuoted as x => x; error as e => return e }
-                    if q.text == "static" { artifact = Artifact::Static }
-                    else if q.text == "shared" { artifact = Artifact::Shared }
-                    else if q.text == "package" { artifact = Artifact::Package }
-                    else { artifact = Artifact::Binary }
+                    artifact = match artifact_from_kind(q.text) { Artifact as a => a; error as e => return e }
                 }
                 if key == "abi" {
                     let q = match mf_read_quoted(line, v) { MfQuoted as x => x; error as e => return e }
