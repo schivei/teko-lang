@@ -14,7 +14,8 @@
 |---|---|---|
 | **R1** | *"assim como uma LSP, precisaremos de um debugger próprio, mas o escreveria em native e não agora em C"* | `tdb` **vai ser feito**, em Teko, depois da escada de degraus. A Peça 5 deixou de ser "orçar para decidir" e é **um plano** (§8). |
 | **R2** | *"gastar energia marcando `#line` em C é desnecessário"* | **A Camada 0 do orçamento anterior DEIXA DE EXISTIR.** Não há D0.2. Não é opcional, não é "se a rota C tiver semanas de vida". Sai. |
-| **R3** | *"não colocaria o código dentro do `src` do teko, começaria por um diretório `/tdb` … deveria ser um pacote de tooling … depois poderia migrar para um repo próprio"* | §9 — o sítio, a forma, e o acoplamento **por formato** que torna a migração barata. |
+| **R3** | *"não colocaria o código dentro do `src` do teko, começaria por um diretório `/tdb` … deveria ser um pacote de tooling … depois poderia migrar para um repo próprio"* | §11.2 — **`/tdb` na raiz**, a forma, e o acoplamento **por formato**. |
+| **R3b** | *"quando digo tooling de pacote, e um `tkp` que emite um `tkl` de um executavel sob um novo tipo no `tkp` `kind=tool` … compilado na maquina do dev … mas sem adicionar como dependencia de projeto"* | **§11.5 — feature de manifesto ORÇADA em 5 crumbs**, com a referência C# verificada e **dois defeitos medidos que a bloqueiam**. |
 | **R4** (anterior, em vigor) | *uma camada só clama o que garante* | §5 — cada clamação medida, e três red-flags resolvidas por medição. |
 
 ---
@@ -33,7 +34,9 @@ Tudo o que segue é a consequência disso, com número. Os dez veredictos:
 | 4 | **CFI DWARF: −4 crumbs. CodeView: −6 crumbs.** Ambos morrem. `tdb` não os precisa; o gdb, medido, não precisa de CFI; e Windows resolve-se com DWARF-em-PE (verificado no Go) para quem não é nosso. | §5.1, §7.4 |
 | 5 | **O DWARF AINDA VALE, e vale AGORA — por três razões, e a terceira é a que não se dispensa:** (a) `tdb` é *"não agora"* e o dono quer depurar antes disso; (b) interop com quem não é nosso, para sempre; (c) **é o único leitor INDEPENDENTE da nossa tabela de linha** — sem ele, `tdb` a mentir e o compilador a mentir são indistinguíveis. | §6 |
 | 6 | **`.tsym` é a semente, e a legislação já o disse.** `TEKO_LEGISLATION.md:350`: *"`.tsym` — Teko Symbols (debug symbols: file:line + names **for the debugger** + stack traces)"*. Estender `.tsym` é obedecer; inventar formato novo é abrir um segundo. E o cabeçalho **já leva versão** (`.tsym v1`). | §4 |
-| 7 | **O `tdb` como projeto próprio e o `teko lsp` como subcomando NÃO se contradizem** — e a regra que unifica os dois é medível: *quem precisa do FRONT-END vive em `src/`; quem precisa só de um FORMATO vive fora.* O LSP precisa do checker; `tdb` precisa de um ficheiro. **Sem tensão para o dono.** | §9.1 |
+| 7 | **O `tdb` como projeto próprio e o `teko lsp` como subcomando NÃO se contradizem** — e a regra que unifica os dois é medível: *quem precisa do FRONT-END vive em `src/`; quem precisa só de um FORMATO vive fora.* O LSP precisa do checker; `tdb` precisa de um ficheiro. **Sem tensão para o dono.** | §11.1 |
+| 7b | **`kind = "tool"` tem DOIS defeitos medidos a bloqueá-lo, e o segundo é pior que "não tratado":** um `kind` desconhecido é `Binary` **em silêncio** hoje (logo `kind = "tool"` já dá um verde falso), e `check_main_file_rule` **REJEITA activamente** um kind executável que não seja `Binary` — um `Tool` no enum sem tocar `tkp_rule.tks` faz toda ferramenta falhar, com uma mensagem que mente sobre porquê. | §11.5.2 |
+| 7c | **`Tool` não é um kind do zero: é `Binary` ∘ `Package`** — as duas metades já estão escritas em `backend()`. E o `.tkl` de um `tool` **não leva binário pré-construído**: leva o `.tkb` + a declaração do comando, e a máquina do dev compila — que é o que o dono descreveu, sem tensão. | §11.5.2 |
 | 8 | **A galinha e o ovo tem saída, e a ordem do dono não a fecha:** *"não escrever em C"* ≠ *"não compilar pela rota C"*. `teko build tooling/tdb` usa hoje `Backend::C` por omissão. | §10 |
 | 9 | **VSCode + DAP não é grátis como parece:** DAP sozinho não basta — o VSCode exige uma extensão que **registe o tipo de debugger**. É 1 crumb e **zero JavaScript** (o que também esquiva a decisão de segurança já ratificada sobre `cp.exec`). | §8.5 |
 | 10 | **O delve é o molde verificado:** `dlv dap` é **modo do próprio binário**, não adaptador separado. `tdb dap` copia isso. E o alcance do delve — 5 pares de plataforma, **sem `darwin/arm64`** — é o aviso de escopo que `tdb` tem de respeitar. | §8.6 |
@@ -229,7 +232,7 @@ Registar como decisão: **C99 é o código de transporte** até haver um atribu�
 
 ---
 
-# PEÇA — O que `tdb` precisa que exista no compilador
+# PEÇA NOVA (A) — O que `tdb` precisa que exista no compilador
 
 Esta secção é o eixo novo. É curta de propósito: **a maior parte já existe.**
 
@@ -267,7 +270,7 @@ quantitativo de §8.7.
 
 ---
 
-# PEÇA — `.tsym` v2: a semente, e o que lhe falta
+# PEÇA NOVA (B) — `.tsym` v2: a semente, e o que lhe falta
 
 ## 4.1 Porque é `.tsym` v2 e não um formato novo — law-first, com a lei citada
 
@@ -1203,6 +1206,8 @@ o mais errado do assunto.
 | **Variáveis** (D2.1…D2.6) | **6** (ou **4** se só no `tdb`) | nada — §5.4 tira `str` do caminho crítico |
 | **Windows interop** (W0…W2) | **3** | uma sondagem de um dia. **Ramo mau: 0**, não 6 (§9.4) |
 | **Legibilidade** (D3.1…D3.3) | **3** | `str` de três words |
+| **`kind = "tool"`** (K1…K4) | **4** | nada. **K1 começa hoje e vale por si** (§11.5) |
+| **`kind = "tool"`** instalação (K5) | **1**, mas abre uma família de subcomandos nova | desenho próprio; `tdb` não espera por ele |
 | **`tdb`** (T1…T5, Linux) | **18** | a escada de degraus (R1: *"não agora"*) + o shim em `teko_rt.c` |
 | **`tdb`** portes macOS + Windows | **+6** | + entitlement de assinatura em macOS |
 | ~~CFI DWARF~~ | **−4** | morto (§5.1, §5.2) |
@@ -1262,61 +1267,183 @@ O LSP **precisa** do checker — sem ele reimplementaria análise semântica, o 
 `tdb` **não precisa de nada do front-end**: precisa de um `.tsym` e de um processo. **A instrução do
 dono é law-consistent, e nomeio a regra para que o próximo caso não a redescubra.**
 
-## 11.2 O sítio — duas opções, o custo de cada, e uma recomendação
+## 11.2 O sítio: `/tdb` na raiz — DECIDIDO, e com o eixo corrigido
 
-**Medi o que existe.** `tooling/` já é exactamente o padrão que o dono descreve: cinco projetos
-irmãos, cada um com o seu `.tkp`, cada um `kind = "binary"`:
+**O dono decidiu: `/tdb` na raiz.** Não apresento alternativa.
 
-```
-tooling/shared/grammar_extractor.tkp      tooling/vim/teko_grammar_gen_vim.tkp
-tooling/emacs/teko_grammar_gen_emacs.tkp  tooling/nano/teko_grammar_gen_nano.tkp
-tooling/vscode/teko_grammar_gen_vscode.tkp
-```
+**E corrijo o registo, porque a razão enunciada não se mede.** O dono escreveu *"o que tem em
+`/tooling` nao e escrito em teko, e ainda precisam ser reescritos, do zero"*. Medi:
 
-```
-name = "teko_grammar_gen_vscode"
-source = "src"
+| projeto | ficheiros `.tks` |
+|---|---|
+| `tooling/shared` | **6** |
+| `tooling/vim` | **6** |
+| `tooling/nano` | **6** |
+| `tooling/emacs` | **6** |
+| `tooling/vscode` | **6** |
 
-[artifact]
-kind = "binary"
-```
+**Os cinco JÁ SÃO escritos em Teko** — 30 `.tks` no total, cada um com o seu `.tkp` e
+`kind = "binary"`. O que **não** é Teko é o que eles **produzem**: ficheiros de gramática
+(`teko.tmLanguage.json`, `syntax/teko.vim`, …) para vim, nano, emacs e vscode.
 
-**E o achado que resolve o "pulo do gato" dele:** `grep` por `../src`, `teko::checker`,
-`teko::lexer` em `tooling/` devolve **vazio**. `tooling/vscode` lê o **ficheiro JSON** que
-`tooling/shared` emite — **acoplamento por FORMATO, não por dependência de código**. Nenhum deles
-alcança `../src`. É precisamente isso que torna a migração para repo próprio barata, que é o
-objectivo declarado do dono.
+**A decisão dele fica de pé, e por um eixo mais forte do que o que ele enunciou — de PAPEL, não de
+linguagem:**
 
-| opção | custo | a favor |
-|---|---|---|
-| **`/tdb/` na raiz** (o que o dono escreveu) | abre uma **segunda convenção** para a mesma coisa ("projeto irmão que não toca `src/`"); um agente futuro tem de saber duas | `tdb` é um **produto que o utilizador corre**, par do `teko`, não plumbing de editor. A raiz diz isso. |
-| **`tooling/tdb/`** *(recomendado)* | nenhum novo | a convenção **já existe e já está escrita**: os breadcrumbs do roadmap dizem *"Eixos A, B, D e E vivem em `tooling/` (nunca tocam `src/`)"*. A migração para repo próprio é **idêntica** nas duas. |
+> `tooling/*` são **geradores de integração de editor** — utilitários de uma vez, cuja saída é um
+> ficheiro de configuração de terceiros e cujo consumidor é um editor. `tdb` é **componente da cadeia
+> de ferramentas Teko** — um executável que o utilizador corre, par do `teko`, e cuja saída é uma
+> sessão de depuração.
 
-**Recomendo `tooling/tdb/`** — o objectivo de migração é servido igualmente e não se abre uma segunda
-convenção. **Mas é decisão do dono**, e a favor de `/tdb/` há um argumento real: `tooling/` hoje é só
-geradores de gramática, e um debugger é um deliverable de outra classe. **Não decido por ele.**
+Essa distinção sobrevive ao facto de os cinco serem Teko, e é a que se deve escrever. `/tdb` na raiz
+diz "componente da cadeia"; `tooling/tdb/` diria "integração de editor", que é falso.
 
-Em qualquer dos dois, a forma é a que ele pediu e que a árvore já usa:
+**A forma, como o dono a pediu:**
 
 ```
-tooling/tdb/tdb.tkp        # name = "tdb"; source = "src"; [artifact] kind = "binary"
-tooling/tdb/main.tks       # o virtual-main (sem declarações), como main.tks do compilador
-tooling/tdb/src/…          # cli.tks, session.tks, breakpoints.tks, tsym.tks, unwind.tks, dap.tks
-tooling/tdb/tests/…        # fixtures: os .s escritos à mão (§10.3)
+/tdb/tdb.tkp          # name = "tdb"; source = "src"; [artifact] kind = "tool"; command = "tdb"
+/tdb/main.tks         # o virtual-main (sem declarações), como o main.tks do compilador
+/tdb/src/…            # cli.tks, session.tks, breakpoints.tks, tsym.tks, unwind.tks, dap.tks
+/tdb/tests/…          # fixtures: os .s escritos à mão (§10.3)
 ```
 
-## 11.3 A regra de acoplamento, e é ela que faz a migração acontecer
+## 11.3 O acoplamento deixa de ser disciplina e passa a ser CONSTRUÇÃO
+
+**Medi o padrão que `tooling/` já pratica, e ele é exactamente o que `tdb` precisa:** `grep` por
+`../src`, `teko::checker`, `teko::lexer` em `tooling/` devolve **vazio**. `tooling/vscode` lê o
+**ficheiro JSON** que `tooling/shared` emite — **acoplamento por FORMATO, não por dependência de
+código**. Nenhum deles alcança `../src`.
 
 > **`tdb` acopla-se ao compilador por FORMATO (`.tsym` v2), NUNCA por importar `src/`.** Um `tdb`
 > que importe o checker nunca sai deste repo.
 
-E o corolário que protege o formato: **`.tsym` v2 precisa de especificação escrita** — não "o que o
-emissor faz". O emissor e o leitor vivem em repos diferentes no futuro; um formato definido por
-implementação não sobrevive à separação. **Recomendo que o crumb D1.6 entregue a especificação do
-`.tsym` v2 em `docs/`, e que o leitor do `tdb` (T3) seja escrito contra a especificação, não contra o
-emissor.**
+**E o `kind = "tool"` que o dono pediu é exactamente o que torna essa regra estrutural em vez de
+voluntária.** Um `tool` **não declara o compilador em `[deps]`** — é a própria definição do tipo
+(§11.5). Logo o `tdb` **não tem por onde** importar `teko::checker`: não há dependência declarada
+que lhe dê acesso. **A migração para repo próprio deixa de ser opcional e passa a ser inevitável**,
+que é o objectivo do dono, obtido por construção e não por vigilância.
 
-## 11.4 `TEKO_ROADMAP_TOOLING.md` — sim, eixo novo
+**O corolário que protege o formato:** **`.tsym` v2 precisa de especificação escrita** — não "o que
+o emissor faz". Emissor e leitor viverão em repos diferentes; um formato definido por implementação
+não sobrevive à separação. **O crumb D1.6 entrega a especificação em `docs/`, e o leitor do `tdb`
+(T3) é escrito contra a especificação, não contra o emissor.** (RED-FLAG 6, §14.3.)
+
+## 11.5 `kind = "tool"` — a feature de manifesto, orçada, e o defeito que a bloqueia
+
+### 11.5.1 A referência é C#, e é a única dos quatro com um TIPO declarado — verificada
+
+`learn.microsoft.com/dotnet/core/tools/global-tools-how-to-create`, literal:
+
+```xml
+<PackAsTool>true</PackAsTool>
+<ToolCommandName>dotnet-env</ToolCommandName>
+<PackageOutputPath>./nupkg</PackageOutputPath>
+```
+
+> *"`<ToolCommandName>` is an optional element that specifies the command that invokes the tool
+> after installation. If this element isn't provided, the command name for the tool is the assembly
+> name…"*
+>
+> *"**Choose a unique value for `<ToolCommandName>`.** Avoid using file extensions (like `.exe` or
+> `.cmd`) because the tool is installed as an app host and the command shouldn't include an
+> extension. **This helps prevent conflicts with existing commands** and ensures a smooth
+> installation experience."*
+
+E: *".NET tools are NuGet packages that are installed from the .NET CLI"*, com `dotnet pack` a
+produzir o `.nupkg` e `dotnet tool install` a instalá-lo — **global ou local**, e **nunca** como
+`PackageReference`.
+
+**O que o modelo do C# resolve e que `cargo install`/`go install` deixam ambíguo** — as duas coisas
+que a pergunta do dono implica e que valem entrar no desenho:
+
+| ambiguidade | `cargo install` / `go install` | C# (`PackAsTool`) |
+|---|---|---|
+| **duas ferramentas com o mesmo nome de executável** | o nome do comando **é** o nome do binário do crate/módulo; um segundo `install` **sobrescreve em silêncio** | o comando é **declarado à parte** (`ToolCommandName`), e a doc **avisa explicitamente** para o escolher único |
+| **escopo global vs. local** | só global, de facto (`~/.cargo/bin`, `GOBIN`); um projeto **não consegue fixar** a versão de uma ferramenta | **os dois**, e o local tem manifesto próprio que fixa versão por repositório, reprodutível |
+| **a ferramenta é dependência?** | é um **efeito colateral** de instalar algo que por acaso tem binário — nada o proíbe de também ser dependência | o **tipo do pacote** proíbe: um pacote de ferramenta não é referenciável como dependência |
+
+**Portanto adoto do C#, nomeadamente:** (i) o **tipo declarado** (`kind = "tool"`, o que o dono
+pediu); (ii) **o nome do comando declarado à parte do nome do projeto** (`command = "tdb"`), porque é
+a única das três que evita a colisão silenciosa; (iii) a regra de que **o tipo, não a disciplina**,
+proíbe a entrada em `[deps]`.
+
+### 11.5.2 O DEFEITO que bloqueia a feature, e é PIOR do que "não tratado"
+
+**Medi dois sítios, e o segundo é o que mata.**
+
+**(a) O silêncio no parser.** `src/build/manifest.tks:558-566`:
+
+```teko
+// `kind = "binary" | "static" | "shared" | "package"` (C7.1m); unknown → Binary.
+if q.text == "static" { artifact = Artifact::Static }
+else if q.text == "shared" { artifact = Artifact::Shared }
+else if q.text == "package" { artifact = Artifact::Package }
+else { artifact = Artifact::Binary }
+```
+
+**Um `kind` desconhecido torna-se `Binary` EM SILÊNCIO**, e o doc-comment por cima até o admite.
+Duas consequências, ambas da classe que esta lane já pagou: `kind = "tool"` escrito **hoje** já é um
+binário comum (alguém pode adoptar a grafia antes de a feature existir e ter um verde que não
+significa nada), e `kind = "binari"` também é um binário — erro de escrita no manifesto **sem
+diagnóstico**.
+
+**(b) E o defeito que ninguém previu: `check_main_file_rule` REJEITA um `tool` activamente.**
+`src/build/tkp_rule.tks:16-22`:
+
+```teko
+if artifact == Artifact::Binary && !has_main {
+    return error { message = "a binary project requires a main.tks" }
+}
+if artifact != Artifact::Binary && has_main {
+    return error { message = "a library project (static/shared/package) may not have a main.tks" }
+}
+```
+
+**Um `tool` É um executável e TEM `main.tks`.** Acrescentar `Tool` ao enum **sem** tocar esta função
+faz **todo** projeto de ferramenta **falhar a construir**, com uma mensagem que enumera três kinds
+que não o incluem. Isso não é "um `Tool` que nenhum consumidor trata" — é **um `Tool` que um
+consumidor trata ERRADO, e o diagnóstico mente sobre porquê.** É o achado desta secção.
+
+**Terceiro sítio, menor mas real:** `project.tks:3094`,
+`artifact_path_for` → `if m.artifact != Artifact::Binary { return base }`. Um `tool` construído pelo
+backend nativo que não liga receberia o caminho sem o sufixo `.o`. `Tool` tem de ficar **do lado do
+`Binary`** aqui também.
+
+**E a forma do `Tool`, medida em `project.tks:1759-1800`:** `backend()` despacha `Static` → tail
+próprio, `Shared` → honest-stop, `Package` → o tail que monta o ZIP (`.tkh` + `.tkb` + `.tsym` via
+`compress::write_zip`), e **cai** no caminho `Binary` para tudo o mais. Logo:
+
+> **`Tool` = o caminho do `Binary` **e** o tail do `Package`.** Não é um kind novo do zero: é a
+> **composição de dois que já existem**, e as duas metades já estão escritas.
+
+**E isso resolve a tensão aparente no enunciado do dono** (*"emite um `.tkl`"* **e** *"sera compilado
+na maquina do dev"*): o `.tkl` de um `tool` **não leva binário pré-construído** — leva o `.tkb` (a
+árvore tipada serializada, que já é o payload do `Package`) **mais** a declaração do comando. A
+máquina do dev compila-o para o seu alvo, como o dono descreveu. Nada de binários não-portáveis num
+pacote.
+
+### 11.5.3 O orçamento — 5 crumbs, e a ordem não é negociável
+
+| crumb | conteúdo | prova |
+|---|---|---|
+| **K1 — FECHAR O SILÊNCIO. É PRIMEIRO, e vale por si.** | `manifest.tks` — um `kind` desconhecido passa a **ERRO DURO**, com a lista dos aceites na mensagem. O doc-comment perde o *"unknown → Binary"*. **Nenhum `Tool` ainda.** | `manifest_test.tkt`: `kind = "binari"` é **erro** (o ramo que hoje não existe e é metade do crumb); `kind = "tool"` é **erro** enquanto K2 não aterrar — que é exactamente o diagnóstico honesto de "a feature não existe"; e os quatro kinds válidos continuam a resolver como hoje |
+| **K2** | `tkp_rule.tks` — `Tool` no enum, `check_main_file_rule` a tratá-lo **como `Binary`** (exige `main.tks`), e as **duas** mensagens re-escritas para nomear os kinds certos. `manifest.tks` reconhece a grafia. | `tkp_rule_test.tkt`: um `tool` **com** main passa; um `tool` **sem** main erra com a mensagem de binário; e a mensagem de biblioteca deixa de dizer "static/shared/package" quando o kind é outro |
+| **K3** | `[artifact] command = "<nome>"` no `Manifest` (o `ToolCommandName` da referência), com a regra: ausente ⇒ o `name` do projeto; **e a recusa nomeada** de um comando que colida com um subcomando do `teko` | `manifest_test.tkt` + o teste de colisão |
+| **K4** | `project.tks` — `Tool` no despacho de `backend()` como **`Binary` + o tail do `Package`** (uma entrada a mais no ZIP: a declaração do comando); `artifact_path_for` trata `Tool` como `Binary` | `project_test.tkt` + golden da lista de entradas do `.tkl`; e o golden que afirma que um `.tkl` de `kind = "package"` fica **byte-idêntico** ao de hoje |
+| **K5 — SEPARÁVEL, e é o menos medido** | o lado do consumo: instalar um `.tkl` de ferramenta (compilar na máquina do dev, colocar o comando), e a regra de que **nunca entra em `[deps]`** | um fixture de ponta a ponta |
+
+**K5 é separável e digo porquê:** medi os subcomandos existentes — `build`, `run`, `test`, `fmt`,
+`init`. **Não há superfície de instalação nenhuma**, logo K5 abre uma **família de subcomandos nova**
+(`teko tool install` / `list` / `uninstall`, na forma do `dotnet tool`). **`tdb` constrói e corre sem
+K5** (`teko build tdb -o tdb/bin` e `tdb/bin/tdb`); K5 é o que o torna **distribuível**. Recomendo
+K1–K4 com o `tdb`, e K5 como carga própria, com o desenho da família de subcomandos feito antes.
+
+**Nota de risco sobre K1, e é a razão de ele vir primeiro:** K1 é o único crumb deste documento que
+pode **quebrar um `.tkp` existente** — qualquer manifesto na árvore com um `kind` mal escrito passa a
+falhar. **Isso é a feature, não o defeito.** Mas exige uma varredura: medi `teko.tkp`
+(`kind = "binary"`) e os cinco de `tooling/` (`kind = "binary"`) — **todos válidos**. Nenhuma quebra
+esperada, e o crumb deve afirmá-lo com um teste que varre a árvore.
+
+## 11.6 `TEKO_ROADMAP_TOOLING.md` — sim, eixo novo
 
 Medi a estrutura: Eixos **A** (fonte única de léxico), **B** (cores), **C** (LSP, DIFERIDO), **D**
 (clientes + build), **E** (empacotamento). `tdb` não cabe em nenhum: não é cor, não é intellisense,
@@ -1413,13 +1540,25 @@ uma thread de SO. **Reabrir nesta secção quando mudar.**
 ligar-se a `host:port`. **É um MODO DO PRÓPRIO BINÁRIO, não um adaptador separado.** `tdb dap`
 copia isso (§7.7, §8.6), e é o que evita um segundo executável para manter.
 
-## 12.5 C# → addins: **NÃO se aplica, e digo porquê em vez de o invocar**
+## 12.5 C# → addins: **aplica-se a UMA metade, e não à outra — e a metade que se aplica é `kind = "tool"`**
 
-O modelo de depuração do .NET é um **runtime gerido** com ICorDebug e um debugger *in-process*:
-pressupõe CLR, metadados, e um contrato de depuração dentro do runtime. Teko compila para nativo sem
-runtime gerido. **A referência não tem superfície onde encaixar aqui, e invocá-la seria o erro que
-esta lane já pagou.** Onde ela **se aplicará** é noutro assunto: o dia em que Teko tiver um modelo de
-plugins/addins de compilador, o analyzer do C# é o precedente. Não é este documento.
+**A metade que NÃO se aplica: o modelo de depuração.** O do .NET é um **runtime gerido** com
+ICorDebug e um debugger *in-process*: pressupõe CLR, metadados, e um contrato de depuração dentro do
+runtime. Teko compila para nativo sem runtime gerido. **Invocar o ICorDebug aqui seria o erro que
+esta lane já pagou**, e não o invoco.
+
+**A metade que SE aplica, e é a peça de empacotamento que o dono pediu: `dotnet tool`.** Verificada
+em §11.5.1 — `PackAsTool` + `ToolCommandName` + `dotnet pack` → `.nupkg` instalável global ou
+localmente, **nunca** como `PackageReference`. **É a única das quatro referências com um TIPO de
+pacote declarado** para "executável que se instala mas não é dependência"; `cargo install` e
+`go install` obtêm o mesmo efeito **sem tipo**, e é isso que os deixa ambíguos nos dois pontos de
+§11.5.1 (colisão de nome de comando, e escopo global vs. local fixável).
+
+**A nossa superfície suporta o que a referência oferece?** Medido, e a resposta é *quase*:
+`[artifact] kind` existe e já tem quatro valores; o escritor de `.tkl` existe (`compress::write_zip`,
+o tail do `Package`); o `.tkb` que a máquina do dev compilaria existe. **O que falta é o que §11.5.3
+orça — e um dos cinco crumbs é fechar um silêncio que já hoje aceita `kind = "tool"` como binário
+comum.** O que **não** copio do C# é o `PackageOutputPath`: já temos `-o`.
 
 ---
 
@@ -1528,7 +1667,9 @@ por medição**: a sondagem do regalloc está feita (§5.3, é um JOIN) e `str` 
 | **W0** (sondagem Windows) | **HOJE.** Sem produto; decide 3 crumbs vs. "Windows é do `tdb`". |
 | **D1.7** (sondagem arm64) | **HOJE**, na lane aarch64. Sem produto. |
 | **a especificação do `.tsym` v2** (§11.3) | **HOJE.** Doc-only, e é o contrato de que o `tdb` dependerá num repo diferente. |
-| **o Eixo F do `TEKO_ROADMAP_TOOLING.md`** (§11.4) | **HOJE.** Doc-only. |
+| **o Eixo F do `TEKO_ROADMAP_TOOLING.md`** (§11.6) | **HOJE.** Doc-only. |
+| **K1** — fechar o silêncio do `kind` (§11.5.3) | **HOJE, e independentemente de todo o resto.** É um defeito vivo (`kind = "binari"` constrói), não uma preparação. Não colide com nada nesta lane. |
+| K2…K4 (`kind = "tool"`) | depois de K1, e **antes** de o `tdb` precisar do seu `.tkp` |
 | D1.1, D1.2, D1.4, D1.5, D1.6 | assim que os agentes vivos saírem de `lower.tks`, `isel_x86_64`, `encode_x86_64`. O desenho **aditivo** (`MLineMark`) é o que mantém isto aplicável. |
 | D2.* | depois do Piso. **Não espera pelo `str`.** |
 | **D3.*** | **ESPERA** pelo `str` de três words. Único bloco bloqueado, e a lei (M.4) decide. |
@@ -1574,13 +1715,24 @@ regra front-end/formato de §11.1; `str` por M.4; `-g` vs. `--debug=lines` pelo 
 of the build, not a global"* do próprio `build_cc_argv`; o shim em C pela exceção mantida de
 `teko_rt.{c,h}`, que **não** contradiz R1.
 
-**As TRÊS coisas que são do dono, e são escolhas, não tensões:**
+* **RED-FLAG 7 (NOVA) — `kind` desconhecido é `Binary` em silêncio, HOJE** — §11.5.2. Não é um risco
+  do futuro: `kind = "binari"` já hoje constrói um binário sem diagnóstico, e `kind = "tool"` escrito
+  antes de K2 dá um verde que não significa nada. **K1 fecha-o e é o primeiro crumb da feature.**
+* **RED-FLAG 8 (NOVA) — `check_main_file_rule` REJEITA um `tool`** — §11.5.2. Acrescentar `Tool` ao
+  enum sem tocar `tkp_rule.tks:19` faz todo projeto de ferramenta falhar, com uma mensagem que
+  enumera três kinds que não o incluem. É o achado que ordena K1 antes de K2.
 
-1. **O sítio do `tdb`** — `/tdb/` (o que ele escreveu) ou `tooling/tdb/` (a convenção que já existe).
-   §11.2, com o custo de cada. **Recomendo `tooling/tdb/`; não decido.**
-2. **A rota de construção do `tdb`** — rota C como rede de segurança de arranque (prolonga um
+**As DUAS coisas que são do dono, e são escolhas, não tensões** (o **sítio já não está aqui** —
+`/tdb` na raiz está decidido, §11.2):
+
+1. **A rota de construção do `tdb`** — rota C como rede de segurança de arranque (prolonga um
    ficheiro cuja deleção está na fila) ou só rota nativa (um backend quebrado tira o debugger, e é
    aceitável **porque** o interop DWARF existe). §10(1). **Recomendo só-nativa.**
-3. **`print x` no gdb, ou só no `tdb`?** — 6 crumbs vs. 4. §9.2. Se `tdb` for o debugger de casa, os
+2. **`print x` no gdb, ou só no `tdb`?** — 6 crumbs vs. 4. §9.2. Se `tdb` for o debugger de casa, os
    D2.4/D2.5 (a metade DWARF) são interop, e o interop de variáveis é o mais caro e o menos usado.
    **Recomendo adiar a metade DWARF e reavaliar quando o `tdb` existir.**
+
+**E uma coisa que NÃO é escolha e que reporto:** K5 (instalar uma ferramenta) abre uma **família de
+subcomandos que não existe** (`teko tool install/list/uninstall`). Medi que os subcomandos hoje são
+`build`, `run`, `test`, `fmt`, `init` — zero superfície de instalação. **Isso é maior que um crumb de
+debugger e merece desenho próprio.** REPORTO; não abro issue.
