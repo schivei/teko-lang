@@ -125,11 +125,6 @@ if [[ -z "$MACHINE_PATTERN" ]]; then
     skip_or_fail "no expected ELF e_machine mapped for architecture '$EXPECTED_ARCH' (target '$EXPECTED_TARGET' on $(uname -s)-$(uname -m)) — teach elf_machine_pattern this architecture"
 fi
 
-# The header/section parser and the symbol lister are cross-capable in both
-# toolchains, so they are the same call on every path.
-READELF="readelf"
-NM="nm"
-
 # The first candidate on PATH, or "" when none is. Naming CANDIDATES rather than one
 # tool is what lets the cross path work on a host that spells its LLVM binaries
 # differently — macOS's `/usr/bin/objdump` IS llvm-objdump, and a host with LLVM
@@ -150,10 +145,27 @@ first_on_path() {
 # OBJECT's machine rather than on the host is what makes a cross check possible at
 # all — and what keeps the native check's proof exactly the one it has always been.
 if [[ "$EXPECTED_ARCH" == "$HOST_ARCH" && "$(uname -s)" == "Linux" ]]; then
+    READELF="readelf"
+    NM="nm"
     OBJDUMP="objdump"
     LD="ld"
     TOOLSET="host binutils"
 else
+    # THE PARSER AND THE SYMBOL LISTER ALSO GO THROUGH THE CANDIDATE LIST, and this is a
+    # correction. They used to be hardcoded `readelf`/`nm` above this block, under the comment
+    # *"cross-capable in both toolchains, so they are the same call on every path"*. The
+    # capability claim is true; the SPELLING claim was not. A Darwin host has no bare `readelf`
+    # at all — Homebrew's LLVM installs `llvm-readelf` — so the cross path died naming a tool
+    # that never exists there, 883 seconds into the corpus. Measured, run 30568806559:
+    #
+    #   check_elf: FAIL — the cross-capable LLVM tool 'readelf' — needed to inspect an arm64
+    #   object on Darwin-arm64 — is absent
+    #
+    # Apple's `/usr/bin/nm` is likewise Mach-O-shaped; `llvm-nm` is the one that reads a foreign
+    # ELF. The native-Linux arm keeps binutils verbatim, so the proof that path has always had
+    # does not move by a byte.
+    READELF="$(first_on_path "${LLVM_READELF:-}" llvm-readelf readelf)"
+    NM="$(first_on_path "${LLVM_NM:-}" llvm-nm nm)"
     OBJDUMP="$(first_on_path "${LLVM_OBJDUMP:-}" llvm-objdump)"
     LD="$(first_on_path "${LLVM_LD:-}" ld.lld ld64.lld)"
     TOOLSET="cross-capable LLVM"
