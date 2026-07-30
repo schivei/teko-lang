@@ -338,17 +338,59 @@ fn lwt_lowers_shift_ops_pick_signedness() {
     teko::assert::str_contains(lwt_lower_expr_text(lwt_bin(lexer::TokenKind::Shr, ua, uamt, checker::PrimKind::U64)), "%2 = ishru %0, %1")
 }
 
+/**
+ * lwt_lowers_cast_i64_to_i32_guards_the_fit — a NARROWING `to` lowers to a runtime FIT GUARD and to
+ * NO truncation (owner ruling 2026-07-29: *"Uma rule para cast [...] não pode truncar [...] deve ser
+ * feito em runtime (e panicar se overflow)"*).
+ *
+ * This test formerly asserted `%1 = trunc %0`, and that assertion was the defect wearing a green
+ * badge: `Trunc` selects a 32-BIT move on both isels, so it never reached the destination's real
+ * width. Measured, native route: `300 to u8` answered 300, `2^40 to i32` answered 0, `-5 to i8`
+ * answered 4294967291. The lowering now emits the destination's own bounds, an `icmp` against each,
+ * and a trap block calling `tk_panic_cast` — and then hands back the operand's OWN VReg, because a
+ * value proven to fit both types already carries one shared 64-bit two's-complement pattern.
+ */
 #test
-fn lwt_lowers_cast_i64_to_i32_truncates() {
+fn lwt_lowers_cast_i64_to_i32_guards_the_fit() {
     let e = lwt_cast(lwt_num_i64(42), checker::PrimKind::I32)
-    teko::assert::str_contains(lwt_lower_expr_text(e), "%1 = trunc %0")
+    let text = lwt_lower_expr_text(e)
+    teko::assert::is_true(!teko::str::contains(text, "trunc"))
+    teko::assert::str_contains(text, "const -2147483648")
+    teko::assert::str_contains(text, "const 2147483647")
+    teko::assert::str_contains(text, "icmpges")
+    teko::assert::str_contains(text, "icmples")
+    teko::assert::str_contains(text, "tk_panic_cast")
 }
 
+/**
+ * lwt_lowers_cast_u64_to_u8_guards_only_the_ceiling — an UNSIGNED source cannot go below zero, so its
+ * floor check is a tautology and is not emitted: a guard costs one compare and one branch, not two,
+ * for the pairs where one end is already proven by the type. The ceiling uses the UNSIGNED compare so
+ * a `u64` above `i64::MAX` is not read as a negative number.
+ */
 #test
-fn lwt_lowers_cast_i32_to_i64_sign_extends() {
+fn lwt_lowers_cast_u64_to_u8_guards_only_the_ceiling() {
+    let e = lwt_cast(lwt_num(300, checker::PrimKind::U64), checker::PrimKind::U8)
+    let text = lwt_lower_expr_text(e)
+    teko::assert::str_contains(text, "const 255")
+    teko::assert::str_contains(text, "icmpleu")
+    teko::assert::str_contains(text, "tk_panic_cast")
+    teko::assert::is_true(!teko::str::contains(text, "icmpges"))
+}
+
+/**
+ * lwt_lowers_cast_i32_to_i64_costs_nothing — a WIDENING `to` needs no guard (it cannot overflow) and
+ * no conversion instruction either: the operand's 64-bit register already holds the widened value, so
+ * the cast lowers to nothing at all. `checker::cast_is_lossless_widen` is the single width table this
+ * decision and the C route's `cast_may_lose` both ask.
+ */
+#test
+fn lwt_lowers_cast_i32_to_i64_costs_nothing() {
     let inner = lwt_num(5, checker::PrimKind::I32)
-    let e = lwt_cast(inner, checker::PrimKind::I64)
-    teko::assert::str_contains(lwt_lower_expr_text(e), "%1 = sext %0")
+    let text = lwt_lower_expr_text(lwt_cast(inner, checker::PrimKind::I64))
+    teko::assert::is_true(!teko::str::contains(text, "tk_panic_cast"))
+    teko::assert::is_true(!teko::str::contains(text, "sext"))
+    teko::assert::is_true(!teko::str::contains(text, "trunc"))
 }
 
 #test

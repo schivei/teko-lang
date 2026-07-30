@@ -1351,14 +1351,7 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable) -> TExpr
                             mut ba = match type_expr(bdargs[bii], env, table) { TExpr as te => te; error as e => return e }
                             if type_is_void(ba.type) { return error { message = "a `void` expression cannot be passed as an argument (M.1)" } }
                             let bpt = bf.params[bii]
-                            if !assignable_to(ba.type, bpt, table) {
-                                if !literal_adopts(ba, bpt) { return teko::error::err_typed(error { message = "argument type mismatch" }, type_render(bpt), type_render(ba.type)) }
-                                ba = TExpr { kind = ba.kind; type = bpt; line = ba.line; col = ba.col }
-                            } else {
-                                if !arg_keeps_narrow_type(bpt, ba.type, table) {
-                                    ba = TExpr { kind = ba.kind; type = bpt; line = ba.line; col = ba.col }
-                                }
-                            }
+                            ba = match coerce_argument_into(ba, bpt, table) { TExpr as x => x; error as e => return e }
                             biargs = teko::list::push(biargs, ba)
                             bii++
                         }
@@ -1443,15 +1436,7 @@ fn type_contract_dispatch(ib: parser::InterfaceBody, struct_name: str, mc: parse
         mut a = match type_expr(dargs[ii], env, table) { TExpr as te => te; error as e => return e }
         if type_is_void(a.type) { return error { message = "a `void` expression cannot be passed as an argument (M.1)" } }
         let pt = f.params[ii]
-        if !assignable_to(a.type, pt, table) {
-            match struct_iface_named_stop(a.type, pt, table) { error as se => return se; null => { } }
-            if !literal_adopts(a, pt) { return teko::error::err_typed(error { message = "argument type mismatch" }, type_render(pt), type_render(a.type)) }
-            a = TExpr { kind = a.kind; type = pt; line = a.line; col = a.col }
-        } else {
-            if !arg_keeps_narrow_type(pt, a.type, table) {
-                a = TExpr { kind = a.kind; type = pt; line = a.line; col = a.col }
-            }
-        }
+        a = match coerce_argument_into(a, pt, table) { TExpr as x => x; error as e => return e }
         iargs = teko::list::push(iargs, a)
         ii++
     }
@@ -1735,16 +1720,7 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable) -> TExpr | error {
                     _ => { }
                 }
                 if !auto_reffed {
-                    if !assignable_to(a.type, f.params[i], table) {
-                        // (C1.8/E2) attach expected/actual — THE user's reported mismatch (mirrors expr.c).
-                        match struct_iface_named_stop(a.type, f.params[i], table) { error as se => return se; null => { } }
-                        if !literal_adopts(a, f.params[i]) { return teko::error::err_typed(error { message = "argument type mismatch" }, type_render(f.params[i]), type_render(a.type)) }
-                        a = TExpr { kind = a.kind; type = f.params[i]; line = a.line; col = a.col }   // C6 literal adopts the param type
-                    } else {
-                        if !arg_keeps_narrow_type(f.params[i], a.type, table) {
-                            a = TExpr { kind = a.kind; type = f.params[i]; line = a.line; col = a.col }
-                        }
-                    }
+                    a = match coerce_argument_into(a, f.params[i], table) { TExpr as x => x; error as e => return e }
                 }
                 args = teko::list::push(args, a)
                 i++
@@ -4711,6 +4687,38 @@ fn coerce_value_into(v: TExpr, target: Type, table: TypeTable, what: str) -> TEx
     teko::error::err_typed(error { message = what }, type_render(target), type_render(v.type))
 }
 
+/**
+ * coerce_argument_into — the value-into-target ladder for a CALL ARGUMENT, whose rungs differ from
+ * `coerce_value_into`'s in two ways an assignment has no equivalent of: an ALREADY-admissible argument
+ * normally ADOPTS the parameter's type, except where the emit wraps the value at the use site and the
+ * argument must keep its narrow type (`arg_keeps_narrow_type`); and a fitting literal is retyped
+ * SHALLOW (its own `.type` replaced, leaves untouched), which is what the three argument sites have
+ * always done.
+ *
+ * One function because those three sites — the plain call, the interface dispatch, and the base-class
+ * dispatch — each carried their own copy of the whole ladder, and the copies had ALREADY drifted: only
+ * one of the three consulted `struct_iface_named_stop`, so a nominal struct/interface mismatch got a
+ * precise diagnostic through a direct call and a bare "argument type mismatch" through a dispatched
+ * one. Adding the implicit-widening rung to three copies would have been the next drift.
+ *
+ * @param a      the typed argument
+ * @param pt     the parameter's declared type
+ * @param table  the folded type table
+ * @return       the argument as a value of `pt`
+ * @throws       the nominal-mismatch stop, or "argument type mismatch" with expected/actual attached
+ * @since        0.3.1
+ */
+fn coerce_argument_into(a: TExpr, pt: Type, table: TypeTable) -> TExpr | error {
+    if assignable_to(a.type, pt, table) {
+        if arg_keeps_narrow_type(pt, a.type, table) { return a }
+        return TExpr { kind = a.kind; type = pt; line = a.line; col = a.col }
+    }
+    match struct_iface_named_stop(a.type, pt, table) { error as se => return se; null => { } }
+    match widen_value_into(a, pt) { TExpr as w => return w; null => { } }
+    if literal_adopts(a, pt) { return TExpr { kind = a.kind; type = pt; line = a.line; col = a.col } }
+    teko::error::err_typed(error { message = "argument type mismatch" }, type_render(pt), type_render(a.type))
+}
+
 /** arg_keeps_narrow_type — an argument that WIDENS into a parameter type `pt` normally ADOPTS `pt`
     (its TExpr.type is rewritten to `pt`); but where the EMIT wraps the value at the use site, the
     arg must KEEP its narrow `arg_type` so codegen/VM see the concrete value they must wrap. True for:
@@ -5140,11 +5148,35 @@ fn retype_returns_in_expr(e: TExpr, ret: Type, table: TypeTable) -> TExpr {
     }
 }
 
+/**
+ * yields_declared_return — may a value of type `from` be the value a function declaring `ret` yields?
+ * Admissible when it widens into `ret` (B.14 case→variant, `T`→`T?`, an upcast), when it IMPLICITLY
+ * widens as a number (`numeric_widens_implicitly` — the owner's 2026-07-29 rule, the same rung the
+ * assignment and argument ladders take), or when it is a fitting bare LITERAL adopting `ret` (C6).
+ *
+ * The return site is a VALIDATOR, not a rewriter — it reports whether the body is well-typed and never
+ * touches the typed tree — so the implicit widening needs no node inserted here, exactly as the
+ * literal rung needs none: a value that widens losslessly already IS the wider type's own bit pattern.
+ *
+ * Shared by the `return` statement and the trailing-expression checks, which are twins of each other
+ * and were each carrying their own spelling of the same disjunction.
+ *
+ * @param from   the yielded value's type
+ * @param value  the yielded value (the literal rung inspects its shape)
+ * @param ret    the function's declared return type
+ * @param table  the folded type table
+ * @return       whether the value is admissible as the declared return
+ * @since        0.3.1
+ */
+fn yields_declared_return(value: TExpr, ret: Type, table: TypeTable) -> bool {
+    assignable_to(value.type, ret, table) || numeric_widens_implicitly(value.type, ret) || literal_adopts(value, ret)
+}
+
 fn check_return_stmt(s: TStatement, ret: Type, table: TypeTable) -> error | null {
     match s {
         TReturn as r => {
             if r.has_value {
-                if assignable_to(r.value.type, ret, table) || literal_adopts(r.value, ret) { null }   // a fitting int/float/byte literal adopts the return type (C6)
+                if yields_declared_return(r.value, ret, table) { null }
                 // (C1.8/E2) attach expected=type_render(ret), actual=type_render(r.value.type) —
                 // mirrors typer.c check_return_stmt's tk_error_types wrap.
                 else { teko::error::err_typed(error { message = "return value does not match the function's declared return type" }, type_render(ret), type_render(r.value.type)) }
@@ -5371,7 +5403,7 @@ fn check_trailing_value(stmts: []TStatement, ret: Type, table: TypeTable) -> err
     match stmts[stmts.len - 1] {
         TExprStmt as es => {
             if texpr_diverges(es.expr) { null }   // a trailing panic/exit yields no value (M.3)
-            else { if assignable_to(es.expr.type, ret, table) || literal_adopts(es.expr, ret) { null }   // a fitting trailing literal adopts the return type (C6)
+            else { if yields_declared_return(es.expr, ret, table) { null }
                 // (C1.8/E2) attach expected=type_render(ret), actual=type_render(es.expr.type) — mirrors
                 // typer.c check_trailing_value's tk_error_types wrap.
                 else { teko::error::err_typed(error { message = "the function's final expression does not match its declared return type" }, type_render(ret), type_render(es.expr.type)) } }

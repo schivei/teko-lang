@@ -174,6 +174,46 @@ checker's new width rule synthesizes the *lossless* widen internally instead.
   a *superset* of both value ranges. Every genuinely-lossy or ambiguous case still stops and asks
   for an explicit `to` — casting stays "cautela, casos raríssimos."
 
+### 2.6 IMPLICIT WIDENING AND THE NARROWING GUARD (owner ruling 2026-07-29 — W-RULE §6/§7)
+
+The W-RULE above governs a binary OPERATOR's two operands. The 2026-07-29 ruling extends the same
+lossless set to every place a value meets a DECLARED type, and fixes what a narrowing costs.
+
+> Owner, literal: *"Tamanhos menores devem caber em tamanhos maiores e de mesma aridade [...] o mesmo
+> vale para floats e para bigint e decimal. Fazendo pânico somente se ocorrer (em runtime) overflow"*
+> and *"Uma rule para cast (implícito ou explícito), não pode truncar, no caso de explícito de tipo
+> maior que outro, deve ser feito em runtime (e panicar se overflow), por isso teremos na stdlib um
+> local apropriado para checked (casts seguros)"*.
+
+**§6 — implicit widening.** A value whose type widens LOSSLESSLY into its target reaches that target
+with no `to` written. The admitted set is exactly `numeric_widens_implicitly` (`checker/expr.tks`),
+which delegates the integer half to `cast_is_lossless_widen` — **the same predicate the arithmetic
+W-RULE already uses**, so an expression and an assignment can never disagree about which widths mix.
+`bigint`/`dec` receive every machine integer through their `of`/`of_u64` constructors. Widening cannot
+overflow, so this direction never panics. Targets served: annotated binding, plain/compound/field/
+index assignment, write-through-reference, call argument, and `return`/trailing value.
+
+**Language mirrored, and the divergence made on purpose.** This is the **C#** shape — implicit
+widening numeric conversions plus a checked narrowing that raises on overflow. It is a **deliberate
+divergence from Rust**, the project's surface reference, which has NO implicit numeric widening and
+demands `as` on every width change (§2's own precedent table records that Rust's strictness *"rejects
+the owner's ask"*). The divergence is the owner's call; it is named here and in the doc-comment rather
+than dressed up as parity.
+
+**§7 — no cast truncates, ever.** A narrowing `to` verifies the fit at run time and PANICS when the
+value does not fit (`tk_panic_cast`). There is no truncating path, documented or fallback. The
+recoverable form is `teko::casting::<src>_to_<dst>` (§10), which returns `T | error` instead.
+
+**Float narrowing (`f64 to f32`) — DECIDED here, and it is NOT guarded.** It follows IEEE-754
+round-to-nearest: exact when representable, correctly rounded when not, ±∞ on overflow, ±0 on
+underflow; it never panics. An integer narrow that overflows answers with a finite number bearing no
+relation to its input (300 becoming 44) and that is the wrong answer §7 outlaws; a float narrow never
+does — overflow yields ±∞, which IS an `f32` value and which nobody mistakes for the input. Guarding
+only the overflow end would also be incoherent, since the identical range argument covers ordinary
+precision loss and underflow (`1.0e-300 to f32` is `0.0`) and no language panics on those. C# agrees:
+its `checked` context covers integral types only and `(float)1e300` is `+∞`, not an exception. Pinned
+executably by `f64_to_f32_follows_ieee_and_never_panics` (`src/checker/checker_test.tkt`).
+
 ### Precedents (owner asked to cite Zig/Rust/Go and recommend ONE)
 
 | lang | mixed-width int arithmetic | mixed-sign | verdict for Teko |
@@ -333,10 +373,34 @@ silent truncation stays exactly the PHASE16 one — a *checked* cast that fails 
 which is **already fully implemented today** (see §4.1); there is **no implementation gap**, so
 nothing here becomes a crumb and nothing becomes new syntax.
 
-### 4.1 Where the checked-narrowing guard lives today (confirmed — no gap)
+### 4.1 Where the checked-narrowing guard lives today
 
-The PHASE16 "checked, fail-loud, no silent truncation" protection is **live end-to-end**; D2's
-rejection rests on it, so it is confirmed here against the source:
+> **CORRECTED 2026-07-30 — this section used to be headed "confirmed — no gap" and its own
+> "Gap assessment" below read *"the CHECK logic is complete and consistent across all execution
+> paths — no real implementation gap."* That was FALSE, and it was false in the worst available
+> way: a guard attributed to a ruling, asserted present, and absent from one of the two routes, so
+> nobody suspected it. Measured 2026-07-30 on `teko 0.3.0.31-beta`, native route:
+> `300 to u8` answered **300**, `2^40 to i32` answered **0**, `2^40 to u64` from an `i64` answered
+> **0**, `-5 to i8` answered **4294967291**, `-1 to u32` answered **4294967295**. Every one of those
+> five was a native-vs-C divergence — the C route panicked or kept the value correctly on all five —
+> so by the standing oracle rule each was a native bug.
+>
+> The cause: the audit below inspected the C emitter and the runtime, and read "all execution paths"
+> off a list that never contained the native backend. `lower_cast` (`src/lir/lower.tks`) emitted a
+> bare `Trunc`, and `Trunc` selects a 32-BIT move on both isels — so it did not even truncate to the
+> destination's width, let alone check the fit. Closed by `lower_cast_fit_guard` (0.3.1 aridade
+> numérica): the destination's bounds, an `icmp` per end that the source can actually leave, and a
+> trap block calling the SAME `tk_panic_cast` the C route's helpers call. After the guard proves the
+> fit, NO conversion instruction is emitted at all — a value representable in both types already
+> carries one shared 64-bit two's-complement pattern — which is why neither isel needed a new case.
+>
+> The one width table both routes now ask is `checker::cast_is_lossless_widen`;
+> `codegen::cast_may_lose` is its literal complement. It used to be a second, independent copy, and
+> the native route had no copy at all. **When auditing a guard, enumerate the EMITTERS, not the
+> helpers** — a helper that is never called is indistinguishable from a helper that does not exist.
+
+The PHASE16 "checked, fail-loud, no silent truncation" protection on the C route is live, and D2's
+rejection rests on it, so it is recorded here against the source:
 
 - **Runtime (source of truth):** `src/runtime/teko_rt.h:752-769` — `tk_to_u8_s`/`tk_to_u32_s`/
   `tk_to_u64_u`/`tk_to_i8_s`… range-check the value and call `tk_panic_cast()` when it doesn't fit;
@@ -348,7 +412,8 @@ rejection rests on it, so it is confirmed here against the source:
   `tk_to_<dst>_<carrier>` inside a statement-expression that sets the cast position. Widening /
   same-type casts emit a bare C cast (no guard needed).
 
-**Gap assessment:** the CHECK logic is complete and consistent across all execution paths — **no real
+**Gap assessment (SUPERSEDED, kept as written so the error is legible rather than tidied away —
+see the correction at the head of this section):** the CHECK logic is complete and consistent across all execution paths — **no real
 implementation gap.** One adjacent note (NOT a gap in this issue): the runtime helpers currently
 carry values in `__int128`/`unsigned __int128` (`teko_rt.h:752+`); **drop-128 R1** narrows those
 carriers to `u64`/`i64` as part of its own plan — this doc's C1–C5 run *after* that narrow and

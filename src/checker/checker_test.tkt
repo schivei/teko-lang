@@ -1697,3 +1697,127 @@ fn unshadowed_exit_still_diverges_and_skips_trailing_check() {
         error => teko::assert::is_true(false)
     }
 }
+
+/**
+ * widen_implicit_admits_same_sign_narrower — the implicit-widening rule (owner 2026-07-29) admits a
+ * narrower same-sign integer into a wider one, in BOTH signedness families. This is the direction the
+ * owner's own program needs (`mut b: i64 = 1; b = a` over an `i32` `a`), and all three of his lines
+ * were rejected before it existed.
+ */
+#test
+fn widen_implicit_admits_same_sign_narrower() {
+    teko::assert::is_true(numeric_widens_implicitly(i32t(), i64t()))
+    teko::assert::is_true(numeric_widens_implicitly(u32t(), u64t()))
+    teko::assert::is_true(numeric_widens_implicitly(u8t(), u64t()))
+}
+
+/**
+ * widen_implicit_admits_unsigned_into_strictly_wider_signed — the W-RULE's mixed-sign peer case
+ * (§2.2): lossless because every `u32` value fits an `i64`. Admitted implicitly for the SAME reason
+ * the arithmetic regime already admits it — the two regimes ask ONE predicate so they cannot drift.
+ */
+#test
+fn widen_implicit_admits_unsigned_into_strictly_wider_signed() {
+    teko::assert::is_true(numeric_widens_implicitly(u32t(), i64t()))
+}
+
+/**
+ * widen_implicit_refuses_narrowing_and_equal_width_sign_change — the implicit direction is widening
+ * ONLY. A narrowing has no implicit form at all: it must be written as a `to`, which then carries the
+ * fail-loud runtime fit guard. An equal-width sign change is not a widen either — neither type holds
+ * the whole of the other.
+ */
+#test
+fn widen_implicit_refuses_narrowing_and_equal_width_sign_change() {
+    teko::assert::is_true(!numeric_widens_implicitly(i64t(), i32t()))
+    teko::assert::is_true(!numeric_widens_implicitly(u64t(), u8t()))
+    teko::assert::is_true(!numeric_widens_implicitly(i64t(), u64t()))
+    teko::assert::is_true(!numeric_widens_implicitly(u64t(), i64t()))
+}
+
+/**
+ * widen_implicit_refuses_identity_and_crossing_the_float_boundary — an identity is not a conversion
+ * (nothing to insert), and int↔float stays explicit in both directions (B.38, unchanged).
+ */
+#test
+fn widen_implicit_refuses_identity_and_crossing_the_float_boundary() {
+    teko::assert::is_true(!numeric_widens_implicitly(i64t(), i64t()))
+    teko::assert::is_true(!numeric_widens_implicitly(i32t(), f64t()))
+    teko::assert::is_true(!numeric_widens_implicitly(f64t(), i64t()))
+}
+
+/**
+ * widen_implicit_admits_f32_into_f64_only — the float half: `f32` → `f64` is exact for every value,
+ * so it is implicit; `f64` → `f32` is not, so it stays an explicit `to`.
+ */
+#test
+fn widen_implicit_admits_f32_into_f64_only() {
+    teko::assert::is_true(numeric_widens_implicitly(f32t(), f64t()))
+    teko::assert::is_true(!numeric_widens_implicitly(f64t(), f32t()))
+}
+
+/**
+ * cast_lossless_widen_is_the_guard_decision — `cast_is_lossless_widen` is the ONE width table both
+ * emission routes ask about whether a `to` needs the runtime fit guard, so these are the exact pairs
+ * that decide it. The three that answer false are the three the native route used to get WRONG (300
+ * `to` u8 answered 300; 2^40 `to` i32 answered 0; -1 `to` u32 answered 4294967295).
+ */
+#test
+fn cast_lossless_widen_is_the_guard_decision() {
+    teko::assert::is_true(cast_is_lossless_widen(PrimKind::U8, PrimKind::U64))
+    teko::assert::is_true(cast_is_lossless_widen(PrimKind::I32, PrimKind::I64))
+    teko::assert::is_true(cast_is_lossless_widen(PrimKind::U32, PrimKind::I64))
+    teko::assert::is_true(!cast_is_lossless_widen(PrimKind::U64, PrimKind::U8))
+    teko::assert::is_true(!cast_is_lossless_widen(PrimKind::I64, PrimKind::I32))
+    teko::assert::is_true(!cast_is_lossless_widen(PrimKind::I64, PrimKind::U32))
+    teko::assert::is_true(!cast_is_lossless_widen(PrimKind::U64, PrimKind::I64))
+}
+
+/**
+ * f32_value_widens_implicitly_into_f64 — the float half of the rule, END TO END rather than as a
+ * predicate: an `f32` VALUE flows into an `f64` slot with no `to` written, and the value survives
+ * exactly (every `f32` is representable in `f64`, so the widening is exact for every input, never
+ * merely rounded).
+ *
+ * CORRECTING THE RECORD: the measurement that opened this lane reported `f32 to f64` as "rejected —
+ * the conversion between floats does not exist". It was never rejected. `cast_check` admits any
+ * numeric pair, and the observed rejection came from `print(y)` refusing a float ARGUMENT, one line
+ * past the cast. What was missing was only the IMPLICIT direction, which this test now pins.
+ */
+#test
+fn f32_value_widens_implicitly_into_f64() {
+    mut narrow: f32 = 1.5
+    mut wide: f64 = 0.0
+    wide = narrow
+    teko::assert::is_true(wide == 1.5)
+    let bound: f64 = narrow
+    teko::assert::is_true(bound == 1.5)
+}
+
+/**
+ * f64_to_f32_follows_ieee_and_never_panics — the DECIDED and DOCUMENTED policy for the narrowing
+ * float conversion (`docs/design/cast-width-hygiene-0.3.1.md` §2.6): `f64 to f32` is IEEE-754
+ * round-to-nearest — exact when the value is representable, correctly rounded when it is not, ±∞ on
+ * overflow, ±0 on underflow — and it never panics.
+ *
+ * WHY IT IS NOT GUARDED LIKE AN INTEGER NARROW, since the owner's rule says a cast may not truncate
+ * and must panic on overflow. An integer narrow that overflows answers with a finite number bearing
+ * NO relation to its input (300 becoming 44), and that is the wrong answer the rule outlaws. A float
+ * narrow never does: overflow yields ±∞, which IS an `f32` value and is loudly not a number anyone
+ * mistakes for the input. Guarding only the overflow end would also be incoherent, because the SAME
+ * range argument applies to ordinary precision loss and to underflow — `1.0e-300 to f32` is `0.0` —
+ * and no language panics on those. This mirrors **C#**, whose `checked` context covers integral types
+ * only and whose `(float)1e300` is `+∞`, not an exception.
+ */
+#test
+fn f64_to_f32_follows_ieee_and_never_panics() {
+    mut exact: f64 = 1.5
+    let kept: f32 = exact to f32
+    teko::assert::is_true(kept == 1.5)
+    mut over: f64 = 1.0e300
+    let saturated: f32 = over to f32
+    teko::assert::is_true(saturated > 1.0e38)
+    mut under: f64 = 1.0e-300
+    let flushed: f32 = under to f32
+    teko::assert::is_true(flushed == 0.0)
+}
