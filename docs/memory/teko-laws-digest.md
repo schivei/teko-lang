@@ -1749,3 +1749,48 @@ inventa um formato — reaproveita-se uma disciplina que já passou pelo fixpoin
    suposição, e não descobrir isso quando alguém puser o túnel entre máquinas.
 3. **Depurar o próprio túnel.** Um canal binário não se lê com `cat`. Se alguma vez fizer falta,
    faz falta uma ferramenta — e é melhor sabê-lo antes do que a meio de um incidente.
+
+## O `Rec` transporta ASSERÇÕES, COBERTURA e o veredicto MEIO-PRONTO (dono, 2026-07-30)
+
+> *"O journal (a mensagem vinda dos testes) precisa trafegar infos de asserção, o que muda algumas
+> funções de testes, isso faria então trafegar uma lista de asserções e a cobertura pelo `Rec`,
+> dizendo **o que tocou, o que era esperado e o que foi medido**, o veredito também pode caminhar
+> junto, chegar **'meio-pronto'**, uma vez que precisaremos sumarizar ao fim de tudo, não apenas ir
+> imprimindo as linhas que chegam (na ordem que chegarem)."*
+
+Quatro coisas, e a última é a que muda o orquestrador:
+
+1. **O `Rec` deixa de ser uma linha de saída.** Transporta **asserções** (o que tocou, o que era
+   esperado, o que foi medido), **cobertura**, e o **veredicto**.
+2. **As funções de asserção mudam** para emitir estrutura em vez de só panicar ou imprimir.
+3. **O veredicto chega meio-pronto** — o sumarizador **agrega**, não re-deriva.
+4. **O orquestrador NÃO é um `append` da ordem de chegada.** Há uma passagem de sumário no fim.
+
+### Isto é a máquina que faltava ao `.tkcov`, e fecha o arco do próprio dia
+
+O dono já tinha dito, horas antes: *"não precisa reler `.tkcov`, precisa apendar… se remodelar para
+cobertura linear (à medida que entra), só precisará ler no fim para agregar"*. **Esta lei é isso**: a
+cobertura viaja **como registo no canal**, o consumidor é **um só**, e a sobreposição de escrita por
+concorrência deixa de ter como acontecer. O `O(n²)` do `tk_covb_add` a re-varrer o vector deixa de
+ser o problema porque **deixa de haver releitura**.
+
+### E retira a razão de existir às fixtures que se afirmam por código de saída
+
+O dono também já tinha dito: *"um teste afirma o que deve FAZER, não o número com que sai"* e *"uma
+hora tu fica sem faixa mesmo"*. **Hoje mediu-se o custo disso na prática**: a fixture
+`ref_mutable_binder` pontua **sete asserções em sete bits do código de saída**, e quando falhou em CI
+o que se soube foi `exit 99, expected 127` — sete factos comprimidos num número, que só se leem
+descodificando bits à mão.
+
+**Com asserções a viajar no `Rec`, isso deixa de ser preciso**: cada asserção diz por si o que era
+esperado e o que foi medido. A lei não é uma melhoria de conforto — **é o que torna possível cumprir
+a lei anterior.**
+
+### O que fica por desenhar
+
+- **A forma do `Rec`** deixa de poder ser plana: precisa de variante por espécie (`out`, `err`,
+  `assert`, `cov`, `verdict`). O que reforça a decisão do **binário**: campos estruturados com
+  valores esperado/medido em texto de uma linha exigiriam escape e parsing nas duas pontas.
+- **A superfície de asserção**: medidas hoje, **24 funções distintas** em uso (3265 `is_true`, 575
+  `str_contains`, 311 `is_false`, e a cauda). Mudá-las é mexer no que a árvore inteira usa.
+- **Quem agrega o quê**: o que o sumarizador recebe pronto e o que ainda calcula.
