@@ -1370,3 +1370,42 @@ Portanto: o `llvm-readobj`/`llvm-objdump` **mantém-se** como oráculo externo �
 é nossa a dizer que o objecto está bem formado — e **ganhamos também um leitor nosso**, em Teko, que
 verifica o que sabemos verificar. Os dois correm; a divergência entre eles é sinal. Fica atrás do
 portão do 100% nativo, como o `tdb`.
+
+## PARALELISMO SEM CONTROLE DE CONCORRÊNCIA É SOBRESCRITA — ruling do dono (2026-07-30)
+
+O agente que construiu os testes em paralelo relatou, como achado lateral, que os shards partilhavam o
+`.tkcov` e se entre-clobbavam — *"as fasquias de cobertura julgavam a suíte pela última shard a
+acabar"*. Corrigiu-o dando um ficheiro por shard e fundindo. O dono leu e disse:
+
+> *"ou seja, implementou-se o paralelismo mas faltou o controle de concorrência, aí o arquivo acaba
+> sofrendo sobrescrita."*
+
+**A lei:** ao paralelizar, **todo o recurso com caminho FIXO passa a ser um defeito latente**. A
+disciplina é **isolamento** — o caminho deriva da identidade de quem escreve (teste ou shard) — e não
+tranca. Mas a correcção de UM recurso não é a correcção: **o que fecha é a AUDITORIA de todos.**
+
+**Medido no dia do ruling**, sobre os `.tkt` da árvore, contando só literais:
+
+| caminho fixo escrito durante a corrida | usos |
+|---|---|
+| **`bin/teko`** | **9** |
+| `bin/teko.wasm` | 3 |
+| `bin/teko.o` | 3 |
+| `out/x` / `bin/x` | 2 / 2 |
+| `bin/pt-probe` / `bin/pt-probe-sh` | 2 / 2 |
+
+E o agravante vem da escolha de sharding, que é a escolha certa por outra razão: **round-robin por
+ordinal** (porque o custo dos testes é desigual) põe testes **vizinhos** em shards **diferentes** — e
+vizinhos são precisamente os que partilham o caminho fixo, por viverem no mesmo ficheiro e na mesma
+família. **Nove testes a escrever `bin/teko` não é risco teórico: é o caso provável.** Que as 1155
+tenham passado em 4 shards não desmente nada — prova que naquela partição não colidiram, não que não
+possam.
+
+**É O MESMO DEFEITO, UMA CAMADA ACIMA, que já nos mordeu neste dia:** o scratchpad da sessão é
+partilhado entre agentes e um agente transformou o binário de outro num directório (`rc=126, Is a
+directory`). Recurso partilhado sem identidade própria, nos dois níveis. A disciplina de isolamento é a
+resposta em ambos.
+
+**Como se prova o conserto:** por **colisão forçada** — dois testes que partilhem o caminho, postos em
+shards diferentes de propósito, a atropelarem-se antes e não depois. É o que transforma *"corrigi"* em
+*"provei"*, e é o mesmo padrão da prova por reversão que fechou o degrau 29.

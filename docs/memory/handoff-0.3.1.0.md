@@ -19,6 +19,103 @@ hipótese, está dito.
 
 
 
+## 0t. A PERNA WINDOWS: a minha hipótese REFUTADA, e um erro ENGOLIDO (2026-07-30)
+
+`cargo/0.3.1.0-windows-leg-3` @ `8b8496d` drenado, com o `drain_guard` já a afirmar o destino. Conferências: `fn` do `lower.tks` **571 → 574**, `isel_x86_64.tks` **64 → 68**, zero splices.
+
+**Nota de método sobre a conferência de chaves:** ela acusou `+2` em `lower_test.tkt`. **Ruído do meu instrumento** — `+2` antes do merge, `+2` na branch e `+2` depois, e o ficheiro tem 4 interpolações `$"{…}"` cujas chavetas o contador lê como aberturas. **A invariante certa é o DELTA, não o zero absoluto.** Já me tinha registado que contar chaves é ruído em ficheiros com interpolação; a lição agora é a correcção do método, não a repetição do aviso.
+
+### A CAUSA: `/tmp` não existe em Windows, e o erro era ENGOLIDO
+
+Eu tinha-lhe mandado a hipótese de que o *read-modify-write* do `verdict_emit` fosse a causa. **Refutada, e estruturalmente, não por estatística:** `tk_rt_read_file` faz `fclose` **antes** de devolver, e só então `tk_rt_write_file` faz `fopen` — nunca coexistem dois handles, e no teste unitário não há segundo escritor. **O probe dele correu com o read-modify-write intacto e passou.**
+
+A cadeia real, sem saltos escondidos:
+
+```
+process_test.tkt:22  literal "/tmp/.regr-verdict-emit-test.chan"
+  → verdict_emit → teko::io::write_file → tk_rt_write_file
+  → fopen(p, "wb")  →  NULL em Windows, que nao tem /tmp
+  → erro ENGOLIDO por  match { error => { } }
+  → read_file erra → content = "" → a 3.ª assercao falha
+```
+
+**O defeito que interessa não é o `/tmp`: é o `match { error => { } }`.** A escrita falhava, ninguém era avisado, e a asserção que rebentava era **três passos a jusante** — a apontar para a semântica do acrescentar quando o que partira fora a abertura do ficheiro. Um erro engolido move o sintoma para longe da causa, que é exactamente o que nos custou meio dia com o `unknown function`.
+
+O conserto pina a mesma regra sem o host (canal relativo ao directório de trabalho, a convenção que o harness já usa), **sem retirar cobertura** — a asserção de conteúdo fica e entram duas que provam o passo que falhava em silêncio. E a **ordem** das asserções passa a diagnosticar: falha a 1.ª/2.ª = a escrita; falha a 3.ª = a semântica.
+
+### A ABI DO PAR GORDO: as quatro entradas, enumeradas e não amostradas
+
+`fat_arg_builtin_arity` passa a ser a **fonte única** — **1** para os sete, **2** para `tk_str_eq`, `tk_str_contains`, `tk_str_ends_with`, `tk_rt_last_index_of_ok`, **0** para a família que o runtime achatou de propósito — e `is_str_arg_builtin` **deriva** dela (`== 1`). Conferido no vagão: a função deriva mesmo, e os quatro símbolos estão lá.
+
+Goldens `WIN64` que **enumeram as quatro**, mais o espelho SysV e um que afirma que a família achatada **não** materializa nada. **Provado por inversão:** com a regra antiga (só aridade 1), `xat_win64_tk_str_eq_passes_both_pairs_by_reference` falha em `assertion failed: str_contains`.
+
+### RITUAL
+
+`native_dry_gate` **idêntica** (degrau 32) medida na **gen2 de cada árvore**, dito explicitamente; **fixpoint `gen2 == gen3` byte a byte e `gen2.c == gen3.c`**; unitários **1175** (1167 + 8), 0 falhas; regressões **11 corridas, 0 falhadas** — e desta vez `regressor.tkr` ok com **`alias_fat_field` nas duas rotas** (em Linux); `TEKO_MEM_PARANOID=1` exit 0.
+
+### A PREVISÃO QUE ELE DEIXOU, e vale mais que o conserto
+
+**`B3-argslot` vai morder a perna Windows LOGO A SEGUIR a esta correcção.** `arg_slot_x86`/`select_param_x86` contam os dois ficheiros de registos **independentemente** — a regra da **SysV**. O Win64 numera as ranhuras **partilhadas por posição** (XMM0 *e* RCX são ambos a ranhura 0). Logo toda a entrada de runtime com um `double` à cabeça e GPRs a seguir sai com os registos deslocados um lugar: `tk_ftoa_len`, `tk_f64_g17_len`, `tk_fmt_f_len`/`_e_`/`_g_`/`_p_`, `tk_fmt_n_f_len`, `tk_fmt_dyn_f64_len`. O `out_len` de `tk_ftoa_len(double, uint64_t*)` viaja em RCX e o chamado lê RDX → **escrita por ponteiro lixo**. O corpus toca-o em `f_static_format_spec` e `f_dynamic_format_spec`.
+
+**Teko↔Teko fica consistente** (as duas pontas usam a mesma contagem); **só as chamadas para C partem**. O próprio `abi_win64.tks:6` já nomeia isto como adiado. **Não corrigido de propósito:** exige campo novo no `AbiDescriptor`, com raio de explosão sobre os quatro descritores e os goldens do regalloc, e é classe de defeito distinta. **Fica na fila com causa já provada — não é para descobrir outra vez.**
+
+### POR MEDIR
+
+O arco C de `alias_fat_field` **em Windows** continua por medir (não há runner aqui; em Linux passa nas duas rotas). Nada nesta branch executa código Win64 — **a prova é de EMISSÃO, não de execução**. E uma função Teko com 3+ parâmetros `str` a transbordar a janela de 4 registos do Win64 não foi exercitada.
+
+## 0s. O `exit 25` NÃO ERA DE arm64 — era uso-depois-do-retorno em TODA a arquitectura (2026-07-30)
+
+`cargo/0.3.1.0-agregado-copia-arm64` @ `080c320` drenado. Conferências: `fn` do `lower.tks` **559 → 571**, `corpus.tks` **246 → 246** (intocado), guarda nova com 14 `fn` e **nenhuma órfã**, zero splices, 138 chamadas `f_*` todas definidas.
+
+### A PROVA É ASM, e desmente a hipótese com que eu o despachei
+
+Eu despachei isto como *"gémeo divergente por ARQUITECTURA"*. **É mais grave:** é um defeito de **todas** as arquitecturas que só o arm64 expõe. O asm da base, `BoxCounter::make` cruzado para `arm64-linux`, **sem uma única relocação**:
+
+```
+mov  x2, sp        <- o alloca do BoxCounter
+str  x1, [x0]
+mov  x0, x2        <- DEVOLVE o endereco da fenda de quadro
+add  sp, sp, #0x20 <- e larga-a
+ret
+```
+
+O chamador faz `bl make` e depois `bl tk_slice_elem_box`, cujo prólogo ocupa exactamente `caller_sp-0x20`. **Uso-depois-do-retorno.** Em x86-64 os bytes **calham** sobreviver; em arm64 o `stp x29, x30, [sp, #-N]` cai em cima.
+
+**E ele tornou-o determinista em x86_64**, com uma chamada interveniente: `let p = mk_pt(5); clob(1); p.a` → lixo na rota nativa, `5` na rota C. Sem host arm64 (não há `qemu-aarch64`, nem binutils cruzados, nem `gcc` arm64), esta foi a prova — e vale mais que o número da verificação, que ele **não** conseguiu ler e **disse** que não conseguiu.
+
+### A FAMÍLIA: 24 construções sondadas, **17 partidas**
+
+| grupo | nº | exemplos |
+|---|---|---|
+| **tempo de vida** (endereço de quadro morto a escapar) | 7 | `return` de literal, fábrica estática, método de instância, `if`-valor em cauda, `match`-valor em cauda, lambda, dentro de ciclo |
+| **aliasing** (falta de cópia) | 5 | `let u = t`, `u = t`, argumento religado a `mut`, campo aninhado, campo de literal |
+| **achadas pela GUARDA, que nenhuma sonda cobria** | 2 | **fecho devolvido** (env *e* valor no quadro), **literal de vector VAZIO** (o atalho *"0 = não copia"* devolvia o `alloca`) |
+
+E cinco que já passavam **continuam a passar, medidas e não presumidas** (`T|error`, `T|null`, leitura de elemento, push de literal, `takes(mk(...))`).
+
+**A que NÃO pode copiar, e é a fila de inversão:** posição de **ARGUMENTO**. A rota C passa parâmetro agregado por ponteiro, logo `self.seen = …` tem de chegar ao chamador nas duas rotas. **Uma regra de cópia que alcançasse os argumentos passava as outras 23 e quebrava esta.**
+
+### É A MESMA RAIZ DO DEGRAU 31 — e fecha as duas
+
+Uma só operação em falta (*"um agregado por valor nunca era copiado numa fronteira de valor"*), dois sintomas. A forma exacta que o agente do degrau 31 mediu e não consertou (`Nest { p = t }; t.a = 99` → `h.p.a` dava 99) é agora a fila `struct_field_from_a_named_local_copies`, e passa.
+
+### A GUARDA, e a inversão que a prova viva
+
+`src/lir/frame_escape.tks`: invariante sobre o módulo inteiro — **nenhum `LRet` leva um VReg que seja o endereço de um `alloca` da mesma função** —, com ponto fixo através dos argumentos de salto, logo não é cega a merges.
+
+**Inversão: 41 funções infractoras sem o conserto, 0 com ele.** E **não é a repetição do conserto**: corrida sobre a árvore que **já** tinha o conserto, achou as duas fugas que nenhuma sonda cobria. É o padrão que hoje já se provou três vezes.
+
+### RITUAL
+
+`native_dry_gate` **idêntica nos dois lados** (`builtin one_byte …`, degrau 32) → VERDE; **fixpoint `gen2 == gen3` byte a byte E `gen2.c == gen3.c`**; `teko test .` na gen2 **1167 unitários, 0 falhados** (com âncora no `ok` dava 1160 — a armadilha outra vez), regressões **11 corridas, 0 falhadas**; `TEKO_MEM_PARANOID=1` rc=0 e corpus `exit 42` sob paranóia; auditoria de `//` **vazia**.
+
+### DUAS COISAS QUE ELE REPORTOU E VALEM MAIS QUE O CONSERTO
+
+1. **O `main.tks` guarda SÓ A PRIMEIRA falha** (`if bad == 0 { bad = N }`). Portanto **qualquer perna que reporte `exit N` está a esconder tudo o que falhe depois de N** — foi por isso que a fuga do fecho `rd_tick_fn` nunca apareceu em fila nenhuma. **Isto liga-se à outra frente:** a migração para `scenario(...)` (branch `testes-paralelos-canais`) troca a cadeia de `exit` por uma linha por cenário — ou seja, **também remove esta máscara**. As duas obras encaixam.
+2. **O custo de alocação NÃO foi medido**, e ele di-lo: cada `return` de agregado, cada campo de contentor e cada fecho passam a alocar na arena raiz, **que nunca liberta**. No corpus é invisível; **num self-host nativo pode não ser**. O esquema correcto e barato tem nome — **`sret`**, a fenda de retorno dada pelo chamador — e é **mudança de ABI e decisão de produto**, que ele não puxou. **Fica para o dono.**
+
+**Também por medir:** nada correu em arm64 (só o CI pode dar isso); a guarda não passou sobre o fonte do compilador, porque o rebaixamento pára antes, no degrau 32.
+
 ## 0r. TRÊS PERNAS VERDES — a primeira vez neste arco (2026-07-30, `99a859a`)
 
 Log integral da execução `30545507942`. **O degrau 29 pegou no CI: `A4-fp: float-op` tem ZERO ocorrências** em todo o log, e as guardas de objecto passaram — **zero `check_coff: FAIL`, zero `check_elf: FAIL`** (o `llvm` + `lld` fecharam-nas).

@@ -1450,3 +1450,122 @@ Feature: 0.3.1.0 degrau 31 — o alias QUALIFICADO para um gordo, e a familia to
     When built and run
     Then stdout pattern = "scenario d31_bare_alias_still_fat: ok"
 
+
+
+Feature: 0.3.1.0 degrau agregado-copia — todo o agregado POR VALOR emite copia, e o que NAO pode emitir
+
+  # Cada cenario abaixo AFIRMA o que o programa tem de FAZER, e agora tambem se ENDERECA por isso.
+  # A conversao original ja tinha tirado o codigo de saida do lado da ASSERCAO (`teko::assert::is_true`
+  # em vez de `if bad`), mas a LINHA continuava a dizer `Then exit = 42` — o cenario afirmava-se por
+  # assercao e enderecava-se pelo sentinela partilhado do canal, que nao distingue nenhum dos 23.
+  # Passam por `scenario_true`, que os nomeia: a falha diz `<nome>: assertion failed: is_true` e a
+  # passagem escreve `scenario <nome>: ok`, que e a linha que a fila exige. Um bool nao tem mais nada
+  # para reportar que o seu nome — e por isso que estas usam `is_true` e nao `eq_i64`.
+  #
+  # O QUE ESTES FIXAM. O valor de um agregado no backend proprio E o endereco de um `alloca`
+  # (NATIVE-AGG-SLICE-BY-ADDRESS), e tres fronteiras nunca copiavam: o `return`, a ligacao
+  # `let`/`mut`/`=`, e a fenda de um CONTENTOR (campo de agregado, elemento de fatia). O `return`
+  # entregava ao chamador o endereco de uma fenda de quadro que o `ret` acabara de largar — nao ha
+  # paragem nem estouro, so bytes que ou ainda la estao ou nao. Estavam em todas as pernas x86-64 e
+  # NAO estavam em arm64, onde o prologo da chamada seguinte cai sobre eles: `own_arith_exit` deu
+  # `exit 25` em `linux-arm64-glibc`, `macos-arm64` e na perna arm64 de memoria paranoica, e
+  # `exit 42` em todas as x86-64 e wasm, da mesma fonte.
+  #
+  # MEDIDO NAS DUAS ROTAS, mesmo hospedeiro, antes de qualquer conserto: 22 sondas desta forma, 15
+  # erradas pela rota propria e 0 erradas pela rota C. Depois: 0 e 0.
+  #
+  # A INVERSAO faz parte da familia — `receiver_mutation_still_reaches_the_caller` afirma o que NAO
+  # pode ser copiado.
+
+  Scenario: agg_return_struct_survives_a_call (own-native — um struct devolvido POR VALOR, lido depois de uma chamada que reutiliza os bytes)
+    When built and run
+    Then stdout pattern = "scenario agg_return_struct_survives_a_call: ok"
+
+  Scenario: agg_return_tail_local_survives_a_call (own-native — o auto-retorno da CAUDA de um local nomeado, outro caminho de rebaixamento)
+    When built and run
+    Then stdout pattern = "scenario agg_return_tail_local_survives_a_call: ok"
+
+  Scenario: agg_return_class_factory_survives_a_call (own-native — a fabrica estatica de CLASSE: o produtor exacto da fila que deu exit 25 em arm64)
+    When built and run
+    Then stdout pattern = "scenario agg_return_class_factory_survives_a_call: ok"
+
+  Scenario: agg_return_method_result_survives_a_call (own-native — um metodo de INSTANCIA a devolver agregado fresco)
+    When built and run
+    Then stdout pattern = "scenario agg_return_method_result_survives_a_call: ok"
+
+  Scenario: agg_return_nested_survives_a_call (own-native — struct dentro de struct: copiar so o exterior deixa o campo interior no quadro morto)
+    When built and run
+    Then stdout pattern = "scenario agg_return_nested_survives_a_call: ok"
+
+  Scenario: agg_return_if_value_survives_a_call (own-native — agregado produzido por `if`-EXPRESSAO em cauda: atravessa um merge antes do `ret`)
+    When built and run
+    Then stdout pattern = "scenario agg_return_if_value_survives_a_call: ok"
+
+  Scenario: agg_return_match_value_survives_a_call (own-native — a outra forma de merge, o `match` VALOR em cauda)
+    When built and run
+    Then stdout pattern = "scenario agg_return_match_value_survives_a_call: ok"
+
+  Scenario: agg_return_from_lambda_survives_a_call (own-native — agregado devolvido de um corpo LEVANTADO de lambda)
+    When built and run
+    Then stdout pattern = "scenario agg_return_from_lambda_survives_a_call: ok"
+
+  Scenario: agg_return_error_union_survives_two_calls (own-native — o invólucro uniforme `T | error`, lido depois de DUAS chamadas)
+    When built and run
+    Then stdout pattern = "scenario agg_return_error_union_survives_two_calls: ok"
+
+  Scenario: agg_return_optional_survives_a_call (own-native — o invólucro `T | null`, a outra forma com etiqueta+carga)
+    When built and run
+    Then stdout pattern = "scenario agg_return_optional_survives_a_call: ok"
+
+  Scenario: agg_return_pushed_in_loop_keeps_each_iteration (own-native — o push cujo item E um RESULTADO DE CHAMADA: le o quadro do callee antes de caixar)
+    When built and run
+    Then stdout pattern = "scenario agg_return_pushed_in_loop_keeps_each_iteration: ok"
+
+  Scenario: agg_return_class_pushed_in_loop_keeps_each_iteration (own-native — o arco de CLASSE da mesma afirmacao, pela fabrica que falhou em arm64)
+    When built and run
+    Then stdout pattern = "scenario agg_return_class_pushed_in_loop_keeps_each_iteration: ok"
+
+  Scenario: agg_return_in_loop_accumulates (own-native — agregado devolvido DENTRO do corpo de um ciclo, com o quadro reutilizado a cada volta)
+    When built and run
+    Then stdout pattern = "scenario agg_return_in_loop_accumulates: ok"
+
+  Scenario: closure_returned_still_reads_its_captures (own-native — o FECHO devolvido: env e valor `{fn, env}` tinham ambos de sair do quadro)
+    When built and run
+    Then stdout pattern = "scenario closure_returned_still_reads_its_captures: ok"
+
+  Scenario: empty_array_literal_returned_is_usable (own-native — o literal de vector VAZIO, isento da copia pelo atalho `0 = nao copia`)
+    When built and run
+    Then stdout pattern = "scenario empty_array_literal_returned_is_usable: ok"
+
+  Scenario: struct_field_from_a_named_local_copies (own-native — campo de struct inicializado a partir de um local de tipo NOMEADO (o achado adjacente do degrau 31))
+    When built and run
+    Then stdout pattern = "scenario struct_field_from_a_named_local_copies: ok"
+
+  Scenario: let_binding_of_an_aggregate_copies (own-native — `let u = t`: uma ligacao nao pode ser um SEGUNDO NOME do mesmo armazenamento)
+    When built and run
+    Then stdout pattern = "scenario let_binding_of_an_aggregate_copies: ok"
+
+  Scenario: assignment_of_an_aggregate_copies (own-native — o arco de ATRIBUICAO da mesma afirmacao)
+    When built and run
+    Then stdout pattern = "scenario assignment_of_an_aggregate_copies: ok"
+
+  Scenario: argument_rebound_into_a_mut_local_copies (own-native — argumento agregado religado a um `mut` local que o callee escreve)
+    When built and run
+    Then stdout pattern = "scenario argument_rebound_into_a_mut_local_copies: ok"
+
+  Scenario: nested_field_read_copies (own-native — ler um CAMPO agregado por valor e depois escrever o pai)
+    When built and run
+    Then stdout pattern = "scenario nested_field_read_copies: ok"
+
+  Scenario: slice_element_read_copies (own-native — ler um ELEMENTO agregado por valor e depois sobrescrever esse elemento)
+    When built and run
+    Then stdout pattern = "scenario slice_element_read_copies: ok"
+
+  Scenario: field_assignment_from_a_place_copies (own-native — `h.p = t` escreve uma fenda de contentor a partir de um LUGAR)
+    When built and run
+    Then stdout pattern = "scenario field_assignment_from_a_place_copies: ok"
+
+  Scenario: receiver_mutation_still_reaches_the_caller (own-native — A INVERSAO: `self.seen = ...` TEM de chegar ao local do chamador; uma regra de copia que alcancasse os argumentos passaria tudo o resto e quebrava esta)
+    When built and run
+    Then stdout pattern = "scenario receiver_mutation_still_reaches_the_caller: ok"
+
