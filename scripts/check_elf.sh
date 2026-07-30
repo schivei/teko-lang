@@ -130,21 +130,44 @@ fi
 READELF="readelf"
 NM="nm"
 
-# The disassembler and the relinker are NOT: GNU's pair refuses a foreign
-# `e_machine`, LLVM's pair accepts it. Selecting on the OBJECT's machine rather than
-# on the host is what makes a cross check possible at all — and what keeps the native
-# check's proof exactly the one it has always been.
+# The first candidate on PATH, or "" when none is. Naming CANDIDATES rather than one
+# tool is what lets the cross path work on a host that spells its LLVM binaries
+# differently — macOS's `/usr/bin/objdump` IS llvm-objdump, and a host with LLVM
+# installed but not first on PATH still has `llvm-objdump`.
+first_on_path() {
+    for cand in "$@"; do
+        [[ -n "$cand" ]] || continue
+        if command -v "$cand" >/dev/null 2>&1; then
+            echo "$cand"
+            return 0
+        fi
+    done
+    echo ""
+}
+
+# The disassembler and the relinker do NOT share the parser's cross-capability: GNU's
+# pair refuses a foreign `e_machine`, LLVM's pair accepts it. Selecting on the
+# OBJECT's machine rather than on the host is what makes a cross check possible at
+# all — and what keeps the native check's proof exactly the one it has always been.
 if [[ "$EXPECTED_ARCH" == "$HOST_ARCH" && "$(uname -s)" == "Linux" ]]; then
     OBJDUMP="objdump"
     LD="ld"
     TOOLSET="host binutils"
 else
-    OBJDUMP="${LLVM_OBJDUMP:-llvm-objdump}"
-    LD="${LLVM_LD:-ld.lld}"
+    OBJDUMP="$(first_on_path "${LLVM_OBJDUMP:-}" llvm-objdump)"
+    LD="$(first_on_path "${LLVM_LD:-}" ld.lld ld64.lld)"
     TOOLSET="cross-capable LLVM"
 fi
 
+# A tool the FOREIGN path needs and this host does not have is a SCHEDULING defect,
+# not a property of the object: the caller asked a host without an ELF toolchain for
+# that machine to judge one. It fails loudly and names the tool, because the
+# alternative — reporting green over a disassembly and a relink that never ran — is
+# exactly the hidden error this gate was rewritten to remove.
 for tool in "$READELF" "$NM" "$OBJDUMP" "$LD"; do
+    if [[ -z "$tool" ]]; then
+        skip_or_fail "no $TOOLSET disassembler/relinker for an $EXPECTED_ARCH object exists on $(uname -s)-$(uname -m) (looked for llvm-objdump / ld.lld) — install LLVM's lld+objdump on this host, or do not route a cross-ELF check here"
+    fi
     command -v "$tool" >/dev/null 2>&1 || skip_or_fail "the $TOOLSET tool '$tool' — needed to inspect an $EXPECTED_ARCH object on $(uname -s)-$(uname -m) — is absent"
 done
 
