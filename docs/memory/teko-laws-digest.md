@@ -1925,3 +1925,43 @@ que afirma **emite `RecAssert` em execução**, veja a análise estática o que 
   ver o corpo**.
 
 **Uma é o esperado, a outra é a rede.** E a rede não tem furo onde a primeira tem.
+
+## O fold é COMBINATÓRIO com o resultado — e a contagem tem de ser impressa (dono, 2026-07-30)
+
+> *"o fold (no resultado de teste) é combinatório, quer dizer, é possível que todas as asserções
+> sejam verdadeiras e todas serem folded, o mesmo ao contrário (padrão TDD) onde coloca todas em
+> falha, mas são folded. Logo, a contagem de folded deve imprimir que algo como `n of x tests are
+> folded`."*
+
+**São dois eixos independentes, e hoje estão colapsados num rótulo só:**
+
+| | todas passam | todas falham |
+|---|---|---|
+| **nenhuma dobrada** | verde com sentido | vermelho com sentido |
+| **todas dobradas** | **verde sem sentido** | **TDD legítimo** (vermelho por motivo que não é defeito) |
+
+Uma suíte verde não diz se as asserções **podiam** ter falhado. Passar e dobrar são perguntas
+diferentes, e a resposta a uma não implica nada sobre a outra.
+
+### Medido: a contagem existe e é DESCARTADA
+
+`src/checker/test_assert.tks` calcula `AssertStats { total, folded }` — **um número**. E
+`src/build/project.tks:4129`, em `combined_status`, faz:
+
+```teko
+let has_folded = folded >= 1
+```
+
+**Colapsa o número num booleano** para escolher o rótulo. Consequência exata: **"1 de 40 dobradas" e
+"40 de 40 dobradas" classificam igual**. A regra `folded == total ⇒ FOUNDATIONAL` só pega o caso
+extremo quando é o teste inteiro; tudo no meio some.
+
+E o sumário da corrida (`N ran; N passed; 0 failed; 0 exited`) **não menciona fold de todo** — o
+número nunca chega a quem lê o resultado.
+
+### A regra
+
+**O sumário imprime a contagem, no seu próprio eixo**, ao lado de passou/falhou e nunca em vez dela.
+E combina com a lei irmã do mesmo dia — *o fold é categoria própria, não falha de teste; mas no
+portão de CI é erro, igual ao skip*: **na máquina de quem escreve, `n de x dobradas` é informação de
+TDD; no portão, é o que reprova.**
