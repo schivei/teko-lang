@@ -4184,30 +4184,80 @@ fn type_ref_binding_value(bv: parser::Expr, rf: Reference, env: Env, table: Type
     if !type_eq(v.type, rf.inner) {
         return teko::error::err_typed(error { message = "a `ref` binding's source must be the referent's own type (or another reference)" }, type_render(rf.inner), type_render(v.type))
     }
-    match bv.kind {
-        parser::Var as var => match lookup_binding(env, var.name) {
-            ValBinding as vb => {
-                if !vb.is_mut { return error { message = $"cannot take a reference to immutable `{var.name}` — a `ref` binding needs a mutable source (a `var`) or another reference" } }
-                v
-            }
-            error => return error { message = "a `ref` binding's source must be a mutable variable (a `var`) or another reference" }
-        }
-        _ => error { message = "a `ref` binding's source must be a mutable variable (a `var`) or another reference — not an expression" }
-    }
+    ref_source_mutable_var(bv, v, env)
+}
+
+/**
+ * ref_source_mutable_var — the ALIAS-path source rule, shared by the annotated (`ref r: T = c`) and
+ * the inferred (`ref r = c`) reference binding: the source must be a bare variable whose binding is
+ * writable. A `ref` aliases an existing cell, so a temporary or an immutable `let` has no cell to
+ * write through and the honest stop names the real fix rather than degrading into a copy.
+ *
+ * @param bv   the binding's source expression, untyped (the only place a bare `Var` is still visible)
+ * @param v    the same expression already typed (returned unchanged when the rule holds)
+ * @param env  the typing environment, consulted for the source binding's writability
+ * @return     `v` unchanged
+ * @throws     when the source is not a bare variable, is unbound, or names a non-writable binding
+ * @since      0.3.1
+ */
+fn ref_source_mutable_var(bv: parser::Expr, v: TExpr, env: Env) -> TExpr | error {
+    let var = match bv.kind { parser::Var as x => x; _ => return error { message = "a `ref` binding's source must be a mutable variable (a `var`) or another reference — not an expression" } }
+    let vb = match lookup_binding(env, var.name) { ValBinding as b => b; error => return error { message = "a `ref` binding's source must be a mutable variable (a `var`) or another reference" } }
+    if vb.is_mut { return v }
+    error { message = $"cannot take a reference to immutable `{var.name}` — a `ref` binding needs a mutable source (a `var`) or another reference" }
+}
+
+/**
+ * type_inferred_ref_value — type the source of an UN-ANNOTATED reference binding `ref r = c`, whose
+ * referent type is inferred from the source instead of read off a `Ref<>`-wrapped annotation (owner
+ * ruling 2026-07-30). Same two cases as the annotated path and no third one: an already-`Reference`
+ * value forwards unchanged, any other value must be a writable variable and keeps its BARE type on
+ * the alias path (codegen's `emit_as_r` sees the `Reference`-expected / bare-value mismatch and
+ * emits the `&`). There is deliberately NO copy fallback — the silent copy this replaces compiled
+ * `ref r = c` into an ordinary `mut` snapshot and let every later write to `c` go unseen by `r`.
+ *
+ * @param bv     the binding's source expression
+ * @param env    the typing environment
+ * @param table  the resolved type table
+ * @return       the typed source (bare-typed on the alias path, `Reference`-typed when forwarding)
+ * @throws       when the source is neither a writable variable nor an already-`Reference` value
+ * @since        0.3.1
+ */
+fn type_inferred_ref_value(bv: parser::Expr, env: Env, table: TypeTable) -> TExpr | error {
+    let v = match type_expr(bv, env, table) { TExpr as te => te; error as e => return e }
+    match v.type { Reference => return v; _ => { } }
+    ref_source_mutable_var(bv, v, env)
+}
+
+/**
+ * ref_bound_of — the BOUND type of a reference binding whose referent type came from the source
+ * rather than an annotation: a forwarded reference keeps its own `Reference` type (a reference to a
+ * reference is not a thing the surface can spell), any other referent type `T` binds as `Ref<T>`.
+ *
+ * @param t  the typed source's type
+ * @return   `t` when it is already a `Reference`, else `Reference { inner = t }`
+ * @since    0.3.1
+ */
+fn ref_bound_of(t: Type) -> Type {
+    match t { Reference => t; _ => Reference { inner = t } }
 }
 
 /**
  * Types a binding's value with the annotation as its expected type (so a generic constructor
- * targets the concrete instance from `: Box<i64>`) — or, when the annotation is a `Reference`
- * (a `ref` binding), routes through `type_ref_binding_value`'s mutable-source/forwarding rule
- * instead of the ordinary widening/literal-adoption path (0.3.1 — owner ruling 2026-07-24).
+ * targets the concrete instance from `: Box<i64>`) — or, when the binder was `ref`, routes through
+ * the mutable-source/forwarding rule instead of the ordinary widening/literal-adoption path
+ * (0.3.1 — owner rulings 2026-07-24 and 2026-07-30). The reference-ness is read from `b.is_ref`,
+ * the binder's own identity axis, so an UN-annotated `ref r = c` takes the same rule as `ref r: T =
+ * c` instead of falling through to the plain-value path that used to copy it.
  *
  * @param b      the binding whose value is typed
  * @param env    the typing environment
  * @param table  the resolved type table
  * @return       the typed initializer
+ * @throws       when a `ref` binder's source breaks the mutable-source/forwarding rule
  */
 fn type_binding_value(b: parser::Binding, env: Env, table: TypeTable) -> TExpr | error {
+    if b.is_ref && !b.has_type { return type_inferred_ref_value(b.value, env, table) }
     if b.has_type {
         let at = match resolve_type(b.type_ann, table, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the binding's enclosing namespace
         match at { Reference as rf => return type_ref_binding_value(b.value, rf, env, table); _ => { } }
@@ -4272,7 +4322,7 @@ fn bind_value_into_annotation(v: TExpr, raw: parser::Expr, ann: Type, table: Typ
 
 fn type_binding(b: parser::Binding, env: Env, table: TypeTable) -> TypedStmt | error {
     mut v = match type_binding_value(b, env, table) { TExpr as te => te; error as e => return e }
-    mut bound = v.type
+    mut bound = if b.is_ref && !b.has_type { ref_bound_of(v.type) } else { v.type }
     if type_is_void(bound) { return error { message = "cannot bind a `void` expression — it yields no value (M.1)" } }
     if b.has_type {
         let at = match resolve_type(b.type_ann, table, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the binding's enclosing namespace
@@ -4317,23 +4367,64 @@ fn lvalue_root(e: parser::Expr) -> LvalueRoot {
     }
 }
 
-// (#88) a FIELD-target assignment `recv.field op= value`. The parser routes EVERY `recv.field = …` here;
-// this branch decides Ref-deref (`r.value` on a `Ref<T>` — the legacy MEM-1b-ii path, preserved) vs a
-// struct/class field WRITE, enforcing write-visibility == read-visibility (the RULING). Mirrors
-// typer.c::type_field_assign.
+/**
+ * field_write_root_writable — the DIRECT-field-write guard: `recv.field = v` is admitted only when
+ * the ROOT variable of the receiver chain is a writable binding. It walks `a.b.c` to `a`, so the
+ * protection holds at EVERY depth, not just the first field.
+ *
+ * `let` forbids a direct write, full stop — for a CLASS exactly as for a struct (owner ruling
+ * 2026-07-30: `let` protects fields at every level, like a C# `{ public get; private set; }`).
+ * Until that ruling a class receiver skipped this guard entirely, on the reasoning that a class is
+ * a reference type and mutation flows through the handle; the effect was that `let` bit structs and
+ * was transparent to classes — half the type system ignoring the mode. Writing remains the
+ * privilege of the declaring type's own methods, which reach their fields through the RECEIVER
+ * binder — the receiver is the object AS a reference, so it is defined writable
+ * (`is_method_receiver`) and `self.name = n` stays legal, which is the `private set` half of the
+ * analogy.
+ *
+ * @param receiver  the untyped receiver expression of the field-access LHS
+ * @param env       the typing environment, consulted for the root binding's writability
+ * @return          null when the write is admitted
+ * @throws          when the receiver roots at a temporary, at an unbound name, or at a binding that
+ *                  is neither `mut` nor a `ref`
+ * @since           0.3.1
+ */
+fn field_write_root_writable(receiver: parser::Expr, env: Env) -> error | null {
+    let root = lvalue_root(receiver)
+    if !root.reachable { return error { message = "cannot assign to a field of a temporary value — the receiver is not a mutable variable" } }
+    let rb = match lookup_binding(env, root.name) { ValBinding as vb => vb; error as e => return e }
+    if rb.is_mut { return null }
+    error { message = $"cannot assign to a field of immutable `{root.name}` — declare it `mut`, or let the declaring type's own method write it (`let` protects fields at every level; there is no `ref mut`) (B.21)" }
+}
+
+/**
+ * type_field_assign — type a FIELD-target assignment `recv.field op= value` (#88). The parser routes
+ * EVERY `recv.field = …` here; this branch decides Ref-deref versus a struct/class field WRITE.
+ *
+ * Typing the LHS field-access EXPR first is load-bearing, not merely convenient: it resolves the
+ * receiver and field type AND enforces read-side visibility, so a private class field written from
+ * outside is rejected with the SAME "field is private to its declaring class" diagnostic a READ
+ * raises — write-permission == read-permission (the RULING).
+ *
+ * The Ref-deref branch is the legacy MEM-1b-ii path, preserved: `r.value op= x` on a `Ref<T>` writes
+ * THROUGH the reference, detected from the RECEIVER TYPE (a `Ref<T>` receiver plus the field name
+ * `value`), and emits the same deref-shaped `TAssign` (kind `RefDeref`, `name` = the ref handle) the
+ * old parser produced, so downstream and the TKB layout stay byte-identical for existing Ref writes.
+ * Every other receiver is a struct/class field write and passes `field_write_root_writable`, the
+ * `let`-protects-at-every-level guard.
+ *
+ * @param a      the raw assignment (`a.target` is the `FieldAccess` LHS)
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       the typed `TAssign` (kind `Field`, or `RefDeref` for a `Ref<T>.value` write)
+ * @throws       when the LHS is not a field access, the receiver's root is not writable, or the
+ *               value does not match the field type
+ */
 fn type_field_assign(a: parser::Assign, env: Env, table: TypeTable) -> TypedStmt | error {
-    // Type the LHS field-access EXPR — this resolves the receiver + field type AND enforces read-side
-    // visibility (a private class field written externally is rejected here with the SAME "field is
-    // private to its declaring class" diagnostic a read raises — write-permission == read-permission).
     let lhs = match type_expr(a.target, env, table) { TExpr as te => te; error as e => return e }
     let lhs_fa = match a.target.kind { parser::FieldAccess as fa => fa; _ => return error { message = "assignment target is not a field access (internal: parser guarantees a field LHS)" } }
     let recv = match type_expr(lhs_fa.receiver, env, table) { TExpr as te => te; error as e => return e }
     let field_t = lhs.type
-
-    // (MEM-1b-ii, preserved) `r.value op= x` on a `Ref<T>` — write THROUGH the reference. Detected from
-    // the RECEIVER TYPE: a `Ref<T>` receiver + field `value`. Emit the SAME deref-shaped TAssign
-    // (kind=RefDeref, name=the ref handle) the old parser produced, so downstream / the TKB layout stay
-    // byte-identical for existing Ref writes.
     let ref_inner = match recv.type { Reference as rf => rf.inner; _ => Void { } }
     let is_ref_deref = match recv.type { Reference => (lhs_fa.field == "value"); _ => false }
     if is_ref_deref {
@@ -4346,16 +4437,7 @@ fn type_field_assign(a: parser::Assign, env: Env, table: TypeTable) -> TypedStmt
         return TypedStmt { node = TAssign { kind = parser::AssignKind::RefDeref; name = ref_name; op = a.op; bound = ref_inner; value = dv; deref = true; target = no_texpr() }; env = env }
     }
 
-    // A struct/class FIELD write. Structs are VALUE types → the receiver must be a MUTABLE lvalue (its
-    // root variable a `mut` binding — the RULING). Classes are REFERENCE types (the value is a pointer;
-    // mutation flows through it — like a `Ref<T>`), so the handle need not be `mut`.
-    let recv_is_class = match recv.type { Named as nm => match find_class_body(nm.name, table) { parser::ClassBody => true; error => false }; _ => false }
-    if !recv_is_class {
-        let root = lvalue_root(lhs_fa.receiver)
-        if !root.reachable { return error { message = "cannot assign to a field of a temporary value — the receiver is not a mutable variable" } }
-        let rb = match lookup_binding(env, root.name) { ValBinding as vb => vb; error as e => return e }
-        if !rb.is_mut { return error { message = "cannot assign to a field of an immutable binding — declare it `mut` (B.21)" } }
-    }
+    match field_write_root_writable(lhs_fa.receiver, env) { error as e => return e; null => { } }
 
     let v = match type_expr(a.value, env, table) { TExpr as te => te; error as e => return e }
     if type_contains_ref(field_t) || type_contains_ref(v.type) { return error { message = "a reference cannot be stored in a field (parameter-only in this version)" } }
@@ -5787,6 +5869,43 @@ fn discard_param_type(gov: parser::Function | null, idx: u64, table: TypeTable, 
  *                           the method's own `is_unsafe` nor its owning type's is set — a method
  *                           inherits its OWNER type's unsafe-ness (`method_is_effective_unsafe`)
  */
+/**
+ * canonical_base_type — the CANONICAL type of the injected `base` handle a subclass method reaches
+ * its inherited members through (#109 W3 / #152). `base_name` arrives PRE-QUALIFIED from
+ * `canon_class_bases` (a cross-namespace base is already exact); a BARE name — unresolvable, or
+ * declared at the root — is qualified by the class's own namespace.
+ *
+ * @param base_name  the base class name, pre-qualified or bare
+ * @param cur_ns     the namespace of the class whose method is being typed
+ * @return           the base handle's canonical `Named` type
+ * @since            0.3.1
+ */
+fn canonical_base_type(base_name: str, cur_ns: str) -> Type {
+    if name_qualifier(base_name) != "" { return Named { name = base_name } }
+    Named { name = qualify(cur_ns, base_name) }
+}
+
+/**
+ * is_method_receiver — is parameter `i` the method's RECEIVER (the implicit `self`)? The receiver is
+ * the only parameter the parser leaves UNTYPED, and it can only be the first one; every other
+ * parameter carries its annotation from source.
+ *
+ * It matters to mutability because writing a field is the privilege of the declaring type's own
+ * methods (owner ruling 2026-07-30, the `private set` half of the `let` analogy) and a method
+ * reaches its fields through this binder. The receiver is the object AS a reference — the identity
+ * axis, born mutable — so it is defined writable while every other parameter stays immutable (B.21)
+ * unless it is declared `ref`.
+ *
+ * @param f  the method being typed
+ * @param i  the parameter index
+ * @return   true iff parameter `i` is the implicit receiver
+ * @since    0.3.1
+ */
+fn is_method_receiver(f: parser::Function, i: u64) -> bool {
+    if i != 0 { return false }
+    !f.params[0].has_type
+}
+
 fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable, has_base_binding: bool, base_binding_name: str, base_name: str, declaring_class: str) -> TFunction | error {
     // (W10b.CLASS residual — intern visibility) this body's OWN field/method accesses are
     // checked against `declaring_class` (see type_struct_methods's own comment on why this can
@@ -5840,10 +5959,10 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
                 }
             }
         }
-        local = define(local, f.params[i].name, pt, false)
+        local = define(local, f.params[i].name, pt, is_method_receiver(f, i))
         i++
     }
-    if inject_base_binding { local = define(local, base_binding_name, Named { name = if name_qualifier(base_name) != "" { base_name } else { qualify(env.cur_ns, base_name) } }, false) }   // (#109 W3 / #152) canonical: base_name arrives PRE-QUALIFIED from canon_class_bases (cross-ns exact); a bare (unresolvable/root) one qualifies by the class's own ns
+    if inject_base_binding { local = define(local, base_binding_name, canonical_base_type(base_name, env.cur_ns), true) }
     let ret = match function_return(f, tbl, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the fn's enclosing namespace
     if is_ref_null_variant(ret) { return error { message = "a function cannot return an optional reference (`Ref<T> | null`) — references are pass-down only (R3)" } }
     if f.is_extern {

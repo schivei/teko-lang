@@ -2759,19 +2759,42 @@ fn lower_args_ref_aware(ctx: LowerCtx, args: []checker::TExpr, rf: []bool, param
  *             well-typed source)
  */
 fn lower_addr_of_arg(ctx: LowerCtx, arg: checker::TExpr) -> LoweredArgs | error {
-    let v = match arg.kind { checker::TVar as vv => vv; _ => return error { message = "native backend N1: an auto-ref call argument must be a bound local (internal)" } }
-    if is_fat_type(arg.type) {
+    let lo = match lower_addr_of_place(ctx, arg) { Lowered as x => x; error as err => return err }
+    LoweredArgs { ctx = lo.ctx; vregs = single_arg(lo.vreg) }
+}
+
+/**
+ * lower_addr_of_place — the backend's ONE address-of primitive: the address of the storage the
+ * bound local `place` names, in whichever of the three memory shapes this backend gives that local
+ * (the three cases `lower_addr_of_arg`'s doc above enumerates one by one).
+ *
+ * It is shared by the TWO positions the surface can spell an address at — a `ref<T>` call ARGUMENT
+ * (`lower_addr_of_arg`) and a `Reference`-bound PLACEMENT (`lower_value_into_reference`) — because
+ * the two had drifted apart and only the argument was right: the argument position took the address
+ * while the binding position handed the place to `own_bound_value`, which COPIED it, so
+ * `ref r: Ch = d` bound a second 16-byte frame slot and a `tk_mem_copy` where the C route bound
+ * `&d`. One primitive, one rule, both positions.
+ *
+ * @param ctx    the lowering context
+ * @param place  the place expression (checker-proved: a bare `TVar` naming a `mut` local)
+ * @return       the advanced context + the place's address in a single VReg
+ * @throws       when `place` is not a bound local `TVar` (an internal invariant break — the checker
+ *               never admits any other shape here), or when a fat/register-value local is not found
+ *               in its expected memory shape (an internal invariant break, never in well-typed
+ *               source)
+ * @since        0.3.1 (own-backend `ref`-binding placement gap)
+ */
+fn lower_addr_of_place(ctx: LowerCtx, place: checker::TExpr) -> Lowered | error {
+    let v = match place.kind { checker::TVar as vv => vv; _ => return error { message = "native backend N1: an address-of place must be a bound local (internal)" } }
+    if is_fat_type(place.type) {
         let fslot = lenv_lookup_fat_slot(ctx.env, v.name)
-        if !fslot.found { return error { message = teko::str::concat("native backend N1: `", teko::str::concat(v.name, "` is a fat `ref` argument but is not a mutable fat local (internal)")) } }
-        return LoweredArgs { ctx = ctx; vregs = single_arg(fslot.slot) }
+        if !fslot.found { return error { message = teko::str::concat("native backend N1: `", teko::str::concat(v.name, "` is a fat `ref` target but is not a mutable fat local (internal)")) } }
+        return Lowered { ctx = ctx; vreg = fslot.slot }
     }
-    if !is_register_value_type(arg.type, ctx.enums) {
-        let lo = match lower_expr(ctx, arg) { Lowered as x => x; error as err => return err }
-        return LoweredArgs { ctx = lo.ctx; vregs = single_arg(lo.vreg) }
-    }
+    if !is_register_value_type(place.type, ctx.enums) { return lower_expr(ctx, place) }
     let slot = lenv_lookup_scalar_slot(ctx.env, v.name)
     if !slot.found { return error { message = teko::str::concat("native backend N1: `", teko::str::concat(v.name, "` is address-taken but was not reified to a slot (internal)")) } }
-    LoweredArgs { ctx = ctx; vregs = single_arg(slot.slot) }
+    Lowered { ctx = ctx; vreg = slot.slot }
 }
 
 /**
@@ -5081,6 +5104,10 @@ pub fn lower_stmt(ctx: LowerCtx, s: checker::TStatement) -> LowerStmtOut | error
  * degrau 18) binds a one-word FRAME SLOT the same way, for the same reason: only memory survives
  * a write made through the escaped handle.
  *
+ * A `Reference`-bound binding (`ref r [: T] = d`) takes NEITHER of those paths and is answered
+ * first, by `bind_reference_local`: it is the identity axis, not a value, and the ordinary path
+ * would copy it.
+ *
  * @param LowerCtx ctx  the lowering context to append the binding's instructions into
  * @param checker::TBinding b  the typed binding statement
  * @return LowerStmtOut | error  the context with the name bound, or an honest stop
@@ -5089,6 +5116,7 @@ pub fn lower_stmt(ctx: LowerCtx, s: checker::TStatement) -> LowerStmtOut | error
  */
 fn lower_binding(ctx: LowerCtx, b: checker::TBinding) -> LowerStmtOut | error {
     let name = match bind_target_name(b.target) { str as s => s; error as err => return err }
+    match b.bound { checker::Reference => return bind_reference_local(ctx, b, name); _ => { } }
     if is_fat_type(b.bound) {
         let fo = match lower_fat_expr(ctx, b.value) { LoweredFat as x => x; error as err => return err }
         if b.kind == parser::BindKind::Mut { return bind_mutable_fat(fo, name, b.value.line, b.value.col) }
@@ -5096,7 +5124,53 @@ fn lower_binding(ctx: LowerCtx, b: checker::TBinding) -> LowerStmtOut | error {
     }
     let raw = match lower_value_into_type(ctx, b.bound, b.value) { Lowered as x => x; error as err => return err }
     let lo = own_bound_value(raw, b.value)
-    if contains_str(lo.ctx.addr_taken, name) { return bind_addr_taken_scalar(lo, name, b.bound, b.value.line, b.value.col) }
+    if needs_scalar_slot(lo.ctx, name, b.bound) { return bind_addr_taken_scalar(lo, name, b.bound, b.value.line, b.value.col) }
+    LowerStmtOut { ctx = ctx_bind(lo.ctx, name, lo.vreg); terminated = false }
+}
+
+/**
+ * needs_scalar_slot — must the local `name`, of declared type `ty`, be reified into a one-word
+ * frame slot at its binding site? Only when its address is taken somewhere in this function AND it
+ * is a REGISTER value, which is the only shape that has no address without the slot.
+ *
+ * The register-value half of the question used to be implicit — `ctx.addr_taken` held register
+ * values and nothing else — and stopped being so when a `ref` binding over an AGGREGATE source
+ * started contributing to that same set (`addr_taken_ref_binding`): an aggregate is already its own
+ * address and must stay ordinarily bound, its debt being paid at the REASSIGNMENT instead
+ * (`aliased_aggregate_write_through`).
+ *
+ * @param ctx   the lowering context (its `addr_taken` set and declared-enum table)
+ * @param name  the local's name
+ * @param ty    the local's declared type
+ * @return      whether the binding site owes this local a scalar frame slot
+ * @since       0.3.1 (own-backend `ref`-binding placement gap)
+ */
+fn needs_scalar_slot(ctx: LowerCtx, name: str, ty: checker::Type) -> bool {
+    contains_str(ctx.addr_taken, name) && is_register_value_type(ty, ctx.enums)
+}
+
+/**
+ * bind_reference_local — bind a `ref r [: T] = d` reference local: the name takes the ADDRESS of its
+ * source and becomes a second name for that ONE cell (owner ruling 2026-07-30, `ref` is the
+ * IDENTITY axis and is born mutable), exactly as the C route's `tk_t_Ch * r = &d` does.
+ *
+ * It bypasses `own_bound_value` deliberately, and that bypass is the whole fix. That copy is the
+ * VALUE-binding rule — `let u = t` over an aggregate PLACE must not make `u` a second name for
+ * `t`'s storage — and a `ref` binding is the one binding for which making a second name IS the
+ * contract. Reaching it, a reference local bound a fresh frame slot and a 16-byte `tk_mem_copy`,
+ * so a write to `d` was invisible through `r` and a write through `r` invisible in `d`. It bypasses
+ * the `ctx.addr_taken` reification for the same reason: the handle holds a pointer VALUE, and
+ * nothing takes the address OF the handle.
+ *
+ * @param ctx   the lowering context
+ * @param b     the typed binding (its `bound` is `Reference`, its value the source place)
+ * @param name  the bound name
+ * @return      the context with `name` bound to the source's address
+ * @throws      propagated from `lower_value_into_reference`
+ * @since       0.3.1 (own-backend `ref`-binding placement gap)
+ */
+fn bind_reference_local(ctx: LowerCtx, b: checker::TBinding, name: str) -> LowerStmtOut | error {
+    let lo = match lower_value_into_reference(ctx, b.value) { Lowered as x => x; error as err => return err }
     LowerStmtOut { ctx = ctx_bind(lo.ctx, name, lo.vreg); terminated = false }
 }
 
@@ -5165,6 +5239,11 @@ fn bind_mutable_fat(fo: LoweredFat, name: str, line: u32, col: u32) -> LowerStmt
  * unwrapped and equally fatal. Neither placement guesses any more: each looks its declared type up
  * in a table built for exactly that (`collect_field_decls`, `TCall.callee_type`).
  *
+ * A `Reference` bound is the THIRD coercion, and it was missing for the same reason the other two
+ * were: the C route does it in `emit_as_r`'s very first arm (`expected` a `Reference` over a value
+ * that is not one → emit `&`), on EVERY placement, and this analog covered only the two variant
+ * shapes. Measured, `ref r: Ch = d` bound a COPY here and `&d` there.
+ *
  * @param LowerCtx ctx  the lowering context to append the value's instructions into
  * @param checker::Type bound  the DECLARED type of the slot the value is placed into
  * @param checker::TExpr value  the typed value expression
@@ -5173,6 +5252,7 @@ fn bind_mutable_fat(fo: LoweredFat, name: str, line: u32, col: u32) -> LowerStmt
  * @since 0.3.1 (null-union C7 own-backend gap)
  */
 fn lower_value_into_type(ctx: LowerCtx, bound: checker::Type, value: checker::TExpr) -> Lowered | error {
+    match bound { checker::Reference => return lower_value_into_reference(ctx, value); _ => { } }
     match expand_named_variant(bound, ctx.variants) {
         checker::Variant as v => match null_union_shape(v) {
             NullUnionShape as shape => lower_value_into_null_union(ctx, shape, value)
@@ -5180,6 +5260,24 @@ fn lower_value_into_type(ctx: LowerCtx, bound: checker::Type, value: checker::TE
         }
         _ => lower_expr(ctx, value)
     }
+}
+
+/**
+ * lower_value_into_reference — the `Reference` arm of `lower_value_into_type`: what a slot declared
+ * `Reference{T}` actually holds. A value ALREADY `Reference`-typed is the pointer itself and passes
+ * through (a `ref` forwarded into another `ref`, the shape `arg_needs_auto_ref` recognizes at the
+ * argument position); a bare `T` is the checker's alias path, which deliberately leaves the source
+ * at its OWN type and leaves the address-taking to the backend — so this takes it.
+ *
+ * @param ctx    the lowering context
+ * @param value  the typed value being placed into the reference slot
+ * @return       the pointer the slot holds
+ * @throws       propagated from lowering the value, or from `lower_addr_of_place`
+ * @since        0.3.1 (own-backend `ref`-binding placement gap)
+ */
+fn lower_value_into_reference(ctx: LowerCtx, value: checker::TExpr) -> Lowered | error {
+    match value.type { checker::Reference => return lower_expr(ctx, value); _ => { } }
+    lower_addr_of_place(ctx, value)
 }
 
 /**
@@ -5751,20 +5849,26 @@ fn collect_reassigned_match(m: checker::TMatchExpr, acc: []str) -> []str {
 }
 
 /**
- * collect_addr_taken_locals — every `mut` scalar local name, ANYWHERE in `body`, that is passed
- * as a `ref<T>` call argument (0.3.1.0 degrau 18) — the set `lower_binding` consults to decide
- * whether a binding needs a memory slot (`lenv_bind_scalar_slot`) instead of a plain VReg. Run
- * ONCE, over the WHOLE function body, BEFORE any of its statements lower: the escape can occur
- * anywhere after the local's own binding, so the binding site must already know its fate. An
- * AGGREGATE-typed argument is never collected (`arg_needs_addr_slot`): its own VReg already IS
- * its address (§ NATIVE-AGG-SLICE-BY-ADDRESS), so no reification is needed for it.
+ * collect_addr_taken_locals — every `mut` scalar local name, ANYWHERE in `body`, whose ADDRESS is
+ * taken — passed as a `ref<T>` call argument (0.3.1.0 degrau 18) or aliased by a `ref r = d`
+ * binding — the set `lower_binding` consults to decide whether a binding needs a memory slot
+ * (`lenv_bind_scalar_slot`) instead of a plain VReg. Run ONCE, over the WHOLE function body,
+ * BEFORE any of its statements lower: the address can be taken anywhere after the local's own
+ * binding, so the binding site must already know its fate. An AGGREGATE-typed source is never
+ * collected (`arg_needs_addr_slot`/`ref_binding_needs_addr_slot`): its own VReg already IS its
+ * address (§ NATIVE-AGG-SLICE-BY-ADDRESS), so no reification is needed for it.
  *
  * Over-approximates on purpose rather than resolving scope precisely (e.g. a name that is
  * actually a NESTED lambda's own local, shadowing an outer one of the same name, may be added to
  * an outer scope that never needed it): the cost of a false positive is one harmless memory
  * indirection on a local nothing ever addresses; the cost of a false negative would be a
- * dangling-address miscompile. `ref_fns` being EMPTY (no function in the program declares a
- * `ref` parameter) makes this a guaranteed-empty, zero-cost no-op.
+ * dangling-address miscompile.
+ *
+ * There is NO `ref_fns.len == 0` short-circuit any more, and its removal is part of the same fix.
+ * It read the whole scan as "about `ref` PARAMETERS", so a program that declares none — but binds
+ * `ref r = n` over a scalar — skipped the scan, left `n` in a VReg, and the binding aliased an
+ * address that never existed: measured as a SIGSEGV, not a wrong answer. The scan is about the
+ * ADDRESS, and a `ref` binding takes one.
  *
  * @param body     the function body (or lambda body) to scan
  * @param ref_fns  the whole-program `ref<T>` parameter-position table
@@ -5772,7 +5876,6 @@ fn collect_reassigned_match(m: checker::TMatchExpr, acc: []str) -> []str {
  * @return         the distinct address-taken local names found
  */
 fn collect_addr_taken_locals(body: []checker::TStatement, ref_fns: []LRefFnInfo, enums: []LEnumInfo) -> []str {
-    if ref_fns.len == 0 { return teko::list::empty() }
     addr_taken_stmts(body, ref_fns, enums, teko::list::empty())
 }
 
@@ -5828,7 +5931,7 @@ fn addr_taken_stmts(stmts: []checker::TStatement, ref_fns: []LRefFnInfo, enums: 
  */
 fn addr_taken_stmt(s: checker::TStatement, ref_fns: []LRefFnInfo, enums: []LEnumInfo, acc: []str) -> []str {
     match s {
-        checker::TBinding as b => addr_taken_expr(b.value, ref_fns, enums, acc)
+        checker::TBinding as b => addr_taken_expr(b.value, ref_fns, enums, addr_taken_ref_binding(b, acc))
         checker::TAssign as a => addr_taken_expr(a.value, ref_fns, enums, acc)
         checker::TReturn as r => if r.has_value { addr_taken_expr(r.value, ref_fns, enums, acc) } else { acc }
         checker::TExprStmt as es => addr_taken_expr(es.expr, ref_fns, enums, acc)
@@ -5931,6 +6034,51 @@ fn addr_taken_call_ref_args(args: []checker::TExpr, rf: []bool, enums: []LEnumIn
     let name = match args[i].kind { checker::TVar as v => v.name; _ => "" }
     let out = if name.len > 0 && !contains_str(acc, name) { teko::list::push(acc, name) } else { acc }
     addr_taken_call_ref_args(args, rf, enums, i + 1, out)
+}
+
+/**
+ * addr_taken_ref_binding — a `ref r [: T] = d` binding's OWN contribution to the address-taken
+ * scan: the SOURCE local `d`, whose address the binding takes (`bind_reference_local`). It is the
+ * SECOND position the surface can take an address at, the `ref<T>` call argument being the first,
+ * and both leave the same two debts at the source's binding site:
+ *
+ * - a REGISTER-value source has no address at all until it is reified into a frame slot
+ *   (`bind_addr_taken_scalar`);
+ * - an AGGREGATE source already has one, but a later WHOLE-VALUE reassignment `d = Ch { … }` must
+ *   then write THROUGH that storage instead of rebinding the name to fresh storage
+ *   (`lower_assign_simple`), or the alias keeps naming the bytes nobody writes any more.
+ *
+ * A FAT source owes neither: a `mut` `str`/`[]T` local is unconditionally frame-slot-bound
+ * (`bind_mutable_fat`) and `lower_assign_fat` already writes both halves through that slot.
+ *
+ * @param b    the binding to inspect
+ * @param acc  the names gathered so far
+ * @return     `acc` extended with the reference source's name when one is owed
+ * @since      0.3.1 (own-backend `ref`-binding placement gap)
+ */
+fn addr_taken_ref_binding(b: checker::TBinding, acc: []str) -> []str {
+    if !ref_binding_takes_address(b) { return acc }
+    let name = match b.value.kind { checker::TVar as v => v.name; _ => "" }
+    if name.len == 0 || contains_str(acc, name) { return acc }
+    teko::list::push(acc, name)
+}
+
+/**
+ * ref_binding_takes_address — does binding `b` take the address of a local whose binding site owes
+ * something for it? True for a `Reference`-bound binding over a bare, non-fat local `TVar` that is
+ * not ALREADY a reference (a forwarded `ref q = r` carries its pointer as a plain value and owes
+ * nothing) — the same shape `arg_needs_addr_slot` asks at the argument position, minus that one's
+ * register-value narrowing, which an aggregate source's reassignment debt does not share.
+ *
+ * @param b  the binding to classify
+ * @return   whether the binding's source name must be recorded as address-taken
+ * @since    0.3.1 (own-backend `ref`-binding placement gap)
+ */
+fn ref_binding_takes_address(b: checker::TBinding) -> bool {
+    match b.bound { checker::Reference => { }; _ => return false }
+    match b.value.type { checker::Reference => return false; _ => { } }
+    if is_fat_type(b.value.type) { return false }
+    match b.value.kind { checker::TVar => true; _ => false }
 }
 
 /**
@@ -11886,6 +12034,7 @@ fn lower_assign_simple(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | err
     if is_fat_type(a.bound) { return lower_assign_fat(ctx, a) }
     let slot = lenv_lookup_scalar_slot(ctx.env, a.name)
     if slot.found { return store_assign_value(ctx, slot.slot, slot.ty, a) }
+    if aggregate_local_is_aliased(ctx, a) { return aliased_aggregate_write_through(ctx, a) }
     if a.op == lexer::TokenKind::Assign {
         let raw = match lower_value_into_type(ctx, a.bound, a.value) { Lowered as x => x; error as err => return err }
         let vo = own_bound_value(raw, a.value)
@@ -11901,6 +12050,50 @@ fn lower_assign_simple(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | err
     let r = ctx_alloc(guarded)
     let inst = bin_inst(r.vreg, op, cur.vreg, vo.vreg, a.value.line, a.value.col)
     LowerStmtOut { ctx = ctx_reassign(ctx_append(r.ctx, inst), a.name, r.vreg); terminated = false }
+}
+
+/**
+ * aggregate_local_is_aliased — is `a`'s target an AGGREGATE local some `ref` binding in this
+ * function aliases (`ctx.addr_taken`, fed by `addr_taken_ref_binding`)? Only then does a plain
+ * `name = e` owe a write-through instead of the ordinary SSA-lite rebind.
+ *
+ * @param ctx  the lowering context (its `addr_taken` set and declared-enum table)
+ * @param a    the typed assignment (kind `Simple`)
+ * @return     whether this target must be written through rather than rebound
+ * @since      0.3.1 (own-backend `ref`-binding placement gap)
+ */
+fn aggregate_local_is_aliased(ctx: LowerCtx, a: checker::TAssign) -> bool {
+    contains_str(ctx.addr_taken, a.name) && !is_register_value_type(a.bound, ctx.enums)
+}
+
+/**
+ * aliased_aggregate_write_through — `name = e` on an AGGREGATE local a `ref` aliases: copy the new
+ * value's bytes INTO the local's existing storage and leave the env binding alone, so the name and
+ * every reference to it keep naming the SAME cell.
+ *
+ * The ordinary path rebinds the name to the new value's own fresh storage (an SSA-lite shadow),
+ * which is invisible through an alias by construction — `mut d = Ch { open = true }; ref r = d;
+ * d = Ch { open = false }` left `r` reading the bytes of the FIRST literal for ever, where the C
+ * route, which holds `d` inline and assigns it field for field, answered `false`. It is the SAME
+ * "only memory survives" rule a mutable fat local (`bind_mutable_fat`) and an address-taken scalar
+ * (`bind_addr_taken_scalar`) already obey, at the one shape that had no reason to obey it until a
+ * `ref` could name an aggregate local.
+ *
+ * `store_assign_aggregate_ref` is reused verbatim: writing the whole of an aggregate through an
+ * already-computed address is exactly what a `ref` DEREF-assignment does, and an aggregate local's
+ * own VReg IS that address (§ NATIVE-AGG-SLICE-BY-ADDRESS).
+ *
+ * @param ctx  the lowering context
+ * @param a    the typed assignment (kind `Simple`, an aggregate `bound`)
+ * @return     the context with the copy appended, the binding unchanged
+ * @throws     when the name is unbound (an internal invariant break), or propagated from
+ *             `store_assign_aggregate_ref`
+ * @since      0.3.1 (own-backend `ref`-binding placement gap)
+ */
+fn aliased_aggregate_write_through(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
+    let cur = lenv_lookup(ctx.env, a.name)
+    if !cur.found { return error { message = teko::str::concat("native backend N1: unbound aliased local `", a.name, "` (internal)") } }
+    store_assign_aggregate_ref(ctx, cur.vreg, a)
 }
 
 /**
