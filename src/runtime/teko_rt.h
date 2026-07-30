@@ -233,6 +233,27 @@ void tk_test_begin(tk_str label);
 // tk_test_end — close the open channel and emit the `ok` verdict block (verdict line, then the
 // captured stdout/stderr lines, prefixed). A no-op when no channel is open.
 void tk_test_end(void);
+// TK_TEST_SCOPE_MAX — the scope token buffer. A token is `<shard>-<sanitised label>`, so it is bounded
+// by the label bound plus the shard digits and a separator.
+#define TK_TEST_SCOPE_MAX (TK_TEST_LABEL_MAX + 24)
+// tk_test_scope — a filesystem-safe token identifying the test running RIGHT NOW, or "" when none is.
+//
+// WHY THIS EXISTS (owner, 2026-07-30, on the parallelism landed in this same change: "implementou-se
+// o paralelismo mas faltou o controle de concorrência, aí o arquivo acaba sofrendo sobrescrita").
+// The `.tkcov` dump was fixed by ISOLATION — one file per shard, then merged — and that is the right
+// answer, but it was applied to ONE resource. Every other fixed scratch path a test writes has the
+// same shape, and the round-robin shard split makes it WORSE: neighbouring tests, which are exactly
+// the ones sharing a path because they live in the same file and family, land in DIFFERENT shards.
+//
+// So the discipline is uniform instead of per-resource: a scratch path DERIVES from the identity of
+// the test that writes it. The identity is already here — the per-test channel records the label —
+// and the shard index disambiguates the (impossible today, cheap to exclude) case of one label being
+// run by two processes.
+//
+// EMPTY OUTSIDE A TEST, deliberately: the same composing code runs in PRODUCTION (the regression
+// runner asks the host toolchain the same questions the unit tests do), and there the path must stay
+// exactly what it was. Scoping applies only where the concurrency it guards against exists.
+tk_str tk_test_scope(void);
 // tk_test_shard_take — the SHARD filter: count this test and answer whether THIS process owns it.
 // With no shard selected (`TEKO_TEST_SHARD` unset/malformed) every test is owned, so the emitted
 // harness is behaviourally identical to the unsharded one. See teko_rt.c for the `i/n` protocol.

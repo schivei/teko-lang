@@ -482,8 +482,25 @@ fn tool_on_path(name: str) -> bool {
  * readings of the host toolchain, so the last one's capture files are the only ones worth keeping,
  * and a unique prefix per call would litter the work tree with a file per row for no diagnostic
  * gain.
+ *
+ * THAT ARGUMENT HOLDS FOR ONE PROCESS AND FAILS FOR MANY, which is why `tool_query_line` no longer
+ * uses this constant directly (see `tool_query_prefix`). Measured: an audit by MTIME of one whole
+ * unit-gate run shows `.toolquery.{in,out,err}` among the files it rewrites, and the answer read back
+ * out of `.out` decides SKIP versus FAIL for regression rows. Two concurrent readers do not merely
+ * lose a file — the first one reads the SECOND one's answer, and answers a different question with it.
  */
 const TOOL_QUERY_PREFIX: str = "bin/.regr-work/.toolquery"
+
+/**
+ * tool_query_prefix — `TOOL_QUERY_PREFIX`, scoped to the test that is asking when a test is asking.
+ *
+ * Outside a test `teko::test::scope()` is empty and this is byte-for-byte the old constant, so the
+ * production regression runner's paths are unchanged; inside a test it is that test's own, so two
+ * tests in two shards cannot answer each other's question.
+ *
+ * @return the capture prefix this caller may write
+ */
+fn tool_query_prefix() -> str { teko::test::scoped(TOOL_QUERY_PREFIX) }
 
 /**
  * tool_query_line — ASK a host tool a question and read its one-line answer: run `argv`, and on a
@@ -502,7 +519,7 @@ const TOOL_QUERY_PREFIX: str = "bin/.regr-work/.toolquery"
  * @since 0.3.1
  */
 fn tool_query_line(argv: []str) -> str {
-    let cap = run_captured(argv, "", TOOL_QUERY_PREFIX)
+    let cap = run_captured(argv, "", tool_query_prefix())
     if cap.exit != 0 { return "" }
     trimmed_line(first_line(cap.stdout))
 }

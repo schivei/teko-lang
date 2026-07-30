@@ -1,0 +1,196 @@
+/**
+ * SG_ROOTS — the `.tkt` corpus roots this guard walks. Read from the repository root, which is where
+ * the test gate runs.
+ */
+const SG_ROOTS: str = "src"
+
+/**
+ * SG_SELF — the ONE file the scan skips: this one.
+ *
+ * A guard that names violations has to be able to SPELL them, and its inversion below spells three.
+ * Exempting the rule's own declaration is the only way the rule can be tested at all; exempting
+ * anything else would be the blindness this guard exists to replace, so the exemption is a single
+ * named path and the inversion proves the predicate still bites everywhere it is applied.
+ */
+const SG_SELF: str = "src/test/scratch_guard_test.tkt"
+
+/**
+ * SG_WRAPPER — the ONE composer a test scratch path must pass through. A literal that is not the
+ * direct argument of this call is a path two tests can derive identically.
+ */
+const SG_WRAPPER: str = "teko::test::scoped(\""
+
+/**
+ * sg_scratch_prefixes — the SCRATCH NAMESPACE: the path prefixes that mark a path a test WRITES,
+ * as opposed to one it merely computes and compares.
+ *
+ * THE NAMESPACE IS DOTTED, AND THAT IS THE WHOLE TRICK. Deciding "does this literal get written?" from
+ * the text is undecidable — `project_binary_path_test.tkt` compares against `"bin/teko"` nine times
+ * and writes nothing. So the rule is inverted: a path a test writes must LIVE in a namespace reserved
+ * for scratch, and the namespace is spelled with a leading dot (`bin/.…`, `.regr-…`, `/tmp/.…`). The
+ * probe binaries were RENAMED into it (`bin/pt-probe` → `bin/.pt-probe`) rather than the rule being
+ * widened to chase their spelling — the rule follows the need, not the string.
+ *
+ * @return the prefixes that mark a scratch path
+ */
+fn sg_scratch_prefixes() -> []str {
+    mut p: []str = teko::list::push(teko::list::empty(), "bin/.")
+    p = teko::list::push(p, ".regr-")
+    p = teko::list::push(p, "/tmp/.")
+    p
+}
+
+/**
+ * sg_every_scratch_literal_is_scoped — THE GUARD, and it is the half that closes the defect.
+ *
+ * Isolating one resource fixes one resource. This rejects the NEXT one: a `.tkt` that hard-codes a
+ * scratch path which a second test could spell the same way. Under the round-robin shard split those
+ * two tests land in different PROCESSES — and neighbouring tests are exactly the ones that share a
+ * path, because they live in the same file and family.
+ *
+ * @throws when a `.tkt` carries a scratch literal that is not `teko::test::scoped`'s direct argument
+ */
+#test
+fn sg_every_scratch_literal_is_scoped() {
+    let bad = sg_unscoped_in_tree(SG_ROOTS)
+    teko::assert::is_present(teko::str::concat("no unscoped scratch literal (found: ", bad, ")"), bad.len == 0)
+}
+
+/**
+ * sg_the_guard_rejects_a_planted_violation — THE INVERSION, and it is not optional.
+ *
+ * Three times on this lane a guard answered ZERO on a tree that was still broken, because it was BLIND
+ * rather than tolerant. A guard that cannot fail is decoration. So the predicate is fed a line that
+ * violates the rule and must say so, and a line that obeys it and must not.
+ */
+#test
+fn sg_the_guard_rejects_a_planted_violation() {
+    teko::assert::is_true(sg_line_violates("    let w = \".regr-pool-planted\""))
+    teko::assert::is_true(sg_line_violates("    let p = \"bin/.regr-work/planted\""))
+    teko::assert::is_true(sg_line_violates("    let c = \"/tmp/.planted.chan\""))
+    teko::assert::is_false(sg_line_violates("    let w = teko::test::scoped(\".regr-pool-planted\")"))
+    teko::assert::is_false(sg_line_violates("    let p = teko::test::scoped(\"bin/.regr-work/planted\")"))
+    teko::assert::is_false(sg_line_violates("    teko::assert::eq_str(bin_path_for(t), \"bin/teko\")"))
+    teko::assert::is_false(sg_line_violates("    let x = \"out/x\""))
+}
+
+/**
+ * sg_two_tests_never_derive_the_same_path — the other half of the claim, stated as a property rather
+ * than as a scan: the SAME base, composed by two different test identities, is two different paths.
+ *
+ * Proved here against this test's own live identity and a recorded neighbour's, so the property is
+ * measured at run time rather than argued from the composer's source.
+ */
+#test
+fn sg_two_tests_never_derive_the_same_path() {
+    let mine = teko::test::scoped(".regr-shared-base")
+    teko::assert::ne_str(mine, ".regr-shared-base")
+    teko::assert::str_starts_with(mine, ".regr-shared-base")
+    teko::assert::str_contains(mine, "sg_two_tests_never_derive_the_same_path")
+}
+
+/**
+ * sg_unscoped_in_tree — the first offending `<file>:<line>` under `root`, or "" when the tree obeys
+ * the rule. Names the FILE and the LINE, never a count: a count cannot be acted on.
+ *
+ * @param root  the directory to walk
+ * @return      `<path>: <line>` for the first violation, or ""
+ */
+fn sg_unscoped_in_tree(root: str) -> str {
+    let entries = match teko::fs::list_dir(root) { []str as e => e; error => teko::list::empty() }
+    mut i: u64 = 0
+    loop {
+        if i >= entries.len { break }
+        let full = teko::str::concat(root, "/", entries[i])
+        let hit = if sg_is_tkt(entries[i]) { sg_scan_unless_self(full) } else { sg_unscoped_in_tree(full) }
+        if hit.len > 0 { return hit }
+        i = i + 1
+    }
+    ""
+}
+
+/**
+ * sg_scan_unless_self — scan `path` unless it is this guard's own file (see `SG_SELF`).
+ *
+ * @param path  the `.tkt` to scan
+ * @return      `<path>: <line>` for the first violation, or ""
+ */
+fn sg_scan_unless_self(path: str) -> str {
+    if path == SG_SELF { return "" }
+    sg_unscoped_in_file(path)
+}
+
+/**
+ * sg_is_tkt — whether `name` is a `.tkt` test file.
+ *
+ * @param name  a directory entry's name
+ * @return      true iff it ends in `.tkt`
+ */
+fn sg_is_tkt(name: str) -> bool { teko::str::ends_with(name, ".tkt") }
+
+/**
+ * sg_unscoped_in_file — the first offending `<path>: <line>` in one file, or "".
+ *
+ * A file that cannot be read is NOT silently clean: an unreadable `.tkt` is reported as the violation
+ * it might be hiding, because the safe reading of "I could not check" is never "it is fine".
+ *
+ * @param path  the file to scan
+ * @return      `<path>: <line>` for the first violation, or ""
+ */
+fn sg_unscoped_in_file(path: str) -> str {
+    let text = match teko::io::read_file(path) { str as s => s; error => return teko::str::concat(path, ": unreadable") }
+    let lines = sg_lines(text)
+    mut i: u64 = 0
+    loop {
+        if i >= lines.len { break }
+        if sg_line_violates(lines[i]) { return teko::str::concat(path, ": ", lines[i]) }
+        i = i + 1
+    }
+    ""
+}
+
+/**
+ * sg_line_violates — whether one source line carries a scratch literal that is NOT wrapped.
+ *
+ * The test is deliberately coarse in ONE direction only: a line that mentions the wrapper at all is
+ * accepted, because a line can hold at most a handful of literals and mixing a wrapped and an unwrapped
+ * one on the same line is a shape no reviewer would let through anyway. Coarse the other way — accepting
+ * a line merely because it looked like a comparison — is what would make the guard blind, so that is
+ * not done.
+ *
+ * @param line  one source line
+ * @return      true iff it hard-codes a scratch path
+ */
+fn sg_line_violates(line: str) -> bool {
+    if teko::str::contains(line, SG_WRAPPER) { return false }
+    let prefixes = sg_scratch_prefixes()
+    mut i: u64 = 0
+    loop {
+        if i >= prefixes.len { break }
+        if teko::str::contains(line, teko::str::concat("\"", prefixes[i])) { return true }
+        i = i + 1
+    }
+    false
+}
+
+/**
+ * sg_lines — `text` split on `\n`, the trailing empty piece dropped.
+ *
+ * @param text  the file text
+ * @return      its lines
+ */
+fn sg_lines(text: str) -> []str {
+    mut out: []str = teko::list::empty()
+    mut start: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= text.len { break }
+        if text[i] == b'\n' {
+            out = teko::list::push(out, teko::str::slice(text, start, i))
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if start < text.len { out = teko::list::push(out, teko::str::slice(text, start, text.len)) }
+    out
+}

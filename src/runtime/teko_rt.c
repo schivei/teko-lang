@@ -1738,6 +1738,37 @@ bool tk_test_shard_take(void) {
     return (ordinal % tk_shard_count) == tk_shard_index;
 }
 
+// --- the TEST SCOPE (see teko_rt.h for WHY the discipline is isolation, uniformly) ----------------
+//
+// tk_scope_byte_ok — the bytes a scope token may carry. Deliberately narrow: the token becomes part
+// of a FILE NAME, so anything a path, a shell or a Windows filesystem reads specially is out. Every
+// qualified test label carries `::`, which is therefore rewritten rather than passed through.
+static bool tk_scope_byte_ok(char c) {
+    if (c >= 'a' && c <= 'z') return true;
+    if (c >= 'A' && c <= 'Z') return true;
+    if (c >= '0' && c <= '9') return true;
+    return c == '_' || c == '-';
+}
+
+static char   tk_scope_buf[TK_TEST_SCOPE_MAX];
+static size_t tk_scope_len = 0;
+
+tk_str tk_test_scope(void) {
+    if (!tk_chan_open) return (tk_str){ (const tk_byte *)"", 0 };
+    if (tk_shard_index < 0) tk_shard_parse();
+    int head = snprintf(tk_scope_buf, sizeof tk_scope_buf, ".s%ld-", tk_shard_count > 1 ? tk_shard_index : 0L);
+    size_t n = head > 0 ? (size_t)head : 0;
+    size_t i = 0;
+    while (i < tk_chan_label_len && n + 1 < sizeof tk_scope_buf) {
+        char c = tk_chan_label[i];
+        tk_scope_buf[n] = tk_scope_byte_ok(c) ? c : '_';
+        n += 1;
+        i += 1;
+    }
+    tk_scope_len = n;
+    return (tk_str){ (const tk_byte *)tk_scope_buf, tk_scope_len };
+}
+
 // --- the SCENARIO NAME ---------------------------------------------------------------------------
 //
 // See teko_rt.h for WHY a case is addressed by name and not by the exit code its failure produces.
