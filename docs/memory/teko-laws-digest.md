@@ -1128,7 +1128,10 @@ necessidade.
 
 ### O FACTO DE PLATAFORMA QUE DECIDE COMO "SEM C LANG" SE APLICA — medido
 
-**Medido na árvore:** `grep syscall src/ --include=*.tks` → **zero**. Não há primitiva de chamada de
+**Medido na árvore:** `grep syscall src/ --include=*.tks` → **duas ocorrências, ambas COMENTÁRIOS** em
+`src/runtime/teko_rt.tks` (eu escrevi "zero" na primeira medição; corrigido por um arquiteto que voltou a
+medir — **a conclusão não muda**, não há primitiva de chamada de sistema na superfície, mas o número
+estava errado e o registo tem de estar certo). Não há primitiva de chamada de
 sistema crua na superfície. A única forma de alcançar o SO é o FFI, e ele liga a **símbolos de libc por
 nome**:
 

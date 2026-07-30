@@ -15,6 +15,172 @@ hipótese, está dito.
 
 
 
+
+
+
+
+## 0e. O `.exe` FECHADO — e o brief que eu escrevi estava incompleto (2026-07-30, `cff49b4`)
+
+Eu medi **dois** sítios que nomeavam o executável (`project.tks:1827` e `:2635`) e escrevi o brief sobre
+eles. **São NOVE.** O agente enumerou-os, e cinco dos sete que eu não vi **teriam ficado inlançáveis em
+Windows** pela mesma regra do loader: `run_native_gate`, `run_project`, `run_analyzer`,
+`run_one_test_cov`, `build_regression_cov_exe`. Consertar só os meus dois seria o defeito "um dos membros
+da família" — no brief onde eu próprio invoquei esse corolário.
+
+**A generalização que ele fez e eu não tinha visto:** a regra chaveia-se no **FORMATO DE IMAGEM**
+(`target_objfmt`), não no SO — *"`.exe` não é um hábito do Windows, é como um PE se nomeia para o loader
+o achar"*. Isso absorveu **de graça** um terceiro nome montado à mão, o `.wasm` de `emit_native_wasm`, e
+o próximo alvo que emita PE ou wasm herda o nome certo sem segunda decisão.
+
+**E apanhou o efeito de segunda ordem que eu não previ:** `tkr_run_one_row` fazia
+`check_object_wellformed(binp ~ ".o")` — com `.exe` isso pediria `bin/snippet.exe.o` e faria uma build
+**perfeita** reportar artefacto malformado. Resolvido com um `sibling_object_path` que **substitui** a
+extensão em vez de a concatenar.
+
+### CORRECÇÃO À MINHA FILA — `own_cross_x86_64_windows_emits_coff` NÃO é uma falha
+
+Eu listei-a como item da fila. **Não é:** a linha `own_arith_exit` é a primeira do canal, a feature pára
+na primeira falha, e **`own_cross_x86_64_windows_emits_coff` nunca é alcançada**. Não falha — **não
+corre**. Sai da fila; entra como consequência do §0d.
+
+**Isso torna o §0d mais sério do que o vermelho sugere:** um canal que reporta pela linha errada faz
+todo agente que o leia tirar a conclusão errada, e eu fi-lo duas vezes (atribuí à `A4-fp` do arm64 e à
+corrupção de ambiente de um agente). Despachado com mandato de **bissetar antes de consertar** e de
+**não tocar na cobertura** — o defeito é a composição do build, não as fixtures.
+
+### Um achado adjacente que fica registado, não corrigido
+
+`emitted-C identity: gen2.c != gen3.c` (10 719 554 vs 10 719 618 bytes) **com binários idênticos**, e
+presente **também na base**. A diferença medida é `double ceiling = 5;` contra `5.0` mais deslocamento de
+gensym: **gen1 (da semente) e gen2 (da árvore) diferem como GERADORES**, o que é a forma saudável sob
+esta cadeia. O veredito pinado — binário `gen2 == gen3` — passa. **Não é regressão**, e vale saber antes
+que alguém o descubra e assuste.
+
+## 0d. `unknown function: f_*` É REAL NO CI — e eu descartei o relato do agente (2026-07-30)
+
+**Correcção a mim, e é a segunda vez hoje que dispenso um agente depressa demais.**
+
+O agente dos dourados reportou, como red-flag, que `own_native.tkr` falhava a **compilar** com dezenas de
+`main.tks:NN: unknown function: f_*`, e não pela `A4-fp` documentada. Eu atribuí-o à corrupção de
+ambiente que ele próprio tinha reportado (outro agente transformou o binário dele num directório) e
+escrevi que *"o CI não mostra `unknown function` em sítio nenhum"*.
+
+**Medi. Está no CI, na execução 30524751917 (`e317b44`), em todas as pernas:**
+
+```
+unknown function: f_append_fo_bulk_bytes   f_append_fo_grow_chain   f_append_fo_interleaved_buffers
+unknown function: f_arm64_bigframe_locals  f_cast_narrow_in_range_keeps_value   … (dezenas)
+```
+
+**Ele estava certo. Eu estava errado, e por um raciocínio errado:** a corrupção do ambiente dele
+explicava *um* sintoma, e eu usei-a para explicar *outro* sem o medir.
+
+### O QUE JÁ ESTÁ MEDIDO, e o que fica de fora
+
+| medição | resultado |
+| --- | --- |
+| chamadas no `main` sem definição no corpus | **zero** (119 chamadas, 120 definições; a sobra é `f_fat_field_len`) |
+| visibilidade | **todos os 120 são não-`pub`, e sempre foram** — o `main` chama-os nus e isso funcionou meses. **Não é regressão de visibilidade** |
+| `A4-fp: float-op` | **já NÃO aparece** nesta execução — a falha do `own_native` mudou de carácter |
+| fase unitária | **verde: 1131 `ok` nas três pernas, zero pânicos** (o conserto dos dourados funcionou) |
+
+**Logo a causa não está na árvore de fontes — está em COMO o build que falha é composto.** O suspeito
+principal, e é o que a investigação deve atacar primeiro: as linhas com **`Given source = "cases/X.tks"`**.
+Se o harness **acrescenta** o ficheiro de caso ao conjunto de fontes em vez de o **substituir**, então o
+`main.tks` do projeto — que chama os 120 `f_*` — entra no build junto com um único ficheiro de caso, e
+**todas** as chamadas ficam pendentes. Isso explicaria a cascata inteira e o facto de a mensagem citar
+`main.tks`.
+
+**Quatro linhas novas de `cases/` entraram hoje** (duas do degrau 28, duas da leitura fora de fronteira),
+o que é consistente com a falha ter mudado de carácter exactamente agora.
+
+### A LIÇÃO, e é a mesma nas duas vezes
+
+**Explicar um sintoma não explica os outros.** Quando um agente reporta duas anomalias e uma delas tem
+causa conhecida, a segunda **continua por medir**. E quando um agente contradiz o CI, o resultado é uma
+**discrepância a medir** — não um lado em que acreditar. Já escrevi esta lição hoje em §2b, e voltei a
+falhá-la.
+
+**NÃO OWNED. É o próximo despacho quando abrir vaga**, e tem prioridade sobre a fila anterior: uma
+falha de composição de build faz um canal inteiro reportar por uma razão que não é a sua, e isso engana
+todo agente que a leia.
+
+## 0c. DUAS CONFERÊNCIAS QUE FALTAVAM, e um perigo do trabalho paralelo (2026-07-30)
+
+### A minha lista de cinco conferências tinha um BURACO DE DIRECÇÃO
+
+Eu verificava *"`fn f_*` definidas e NÃO chamadas"* — e **nunca o inverso**. Um agente reportou
+`main.tks:NN: unknown function: f_*` em cascata, que é **exactamente a direcção que eu não media**: o
+`main` a chamar o que o corpus não define. Se uma união tivesse perdido definições, a minha lista teria
+dito "tudo bem".
+
+**Medido depois de o levantar: 119 chamadas, 120 definições, zero chamadas sem definição** (a sobra é
+`f_fat_field_len`, a excepção conhecida). A árvore está consistente — mas **a conferência entra na lista
+de qualquer forma**, porque a ausência dela era sorte, não método:
+
+```
+comm -23 <(grep -oh 'f_[a-z0-9_]*' main.tks | sort -u) \
+         <(grep -oh '^fn f_[a-z0-9_]*\|^pub fn f_[a-z0-9_]*' src/corpus.tks | sed 's/^pub //;s/^fn //' | sort -u)
+```
+
+**A regra geral, que vale para além deste ficheiro:** uma conferência de correspondência entre dois
+conjuntos tem de correr **nas duas direcções**. Verificar só um lado é meia medição, e a metade que falta
+é sempre a que morde.
+
+### E O QUE EXPLICOU O RELATO DELE — o perigo do scratchpad partilhado
+
+O mesmo agente reportou, como red-flag 1, que **outro agente vivo transformou o binário dele num
+directório** a meio da corrida: construiu com `-o <scratchpad>/gen2/teko` e o `gen2/teko` que era
+FICHEIRO passou a ser DIRECTÓRIO (`rc=126, Is a directory`). Ele reconstruiu num sítio privado.
+
+**O `unknown function` dele é quase certamente consequência disso**, e não da árvore: o CI, sobre o mesmo
+SHA, não mostra `unknown function` em sítio nenhum — mostra `A4-fp` (arm64) e
+`own_cross_x86_64_windows_emits_coff` (x86-64).
+
+**REGRA NOVA PARA TODO BRIEF:** o scratchpad da sessão é **partilhado** entre agentes vivos. Cada agente
+constrói num **subdirectório próprio e nomeado por si** (`<scratchpad>/<nome-do-agente>/…`), nunca num
+caminho genérico como `gen2/`. E **um relatório de agente que descreve corrupção de ambiente tem de ser
+lido à luz dela** — o que ele viu depois pode ser sintoma, não causa. Eu quase tratei a red-flag 2 dele
+como defeito da árvore.
+
+## 0b. AS DUAS CONSEQUÊNCIAS DO DRENO SEM RELATÓRIOS — ambas previstas, ambas materializadas
+
+Eu drenei quatro branches sem relatório, **escrevi que o CI seria o árbitro**, e o CI cobrou as duas
+coisas que faltavam. Registadas porque cada uma tem uma lição que não é sobre estas branches.
+
+### CONSEQUÊNCIA 1 — um valor por omissão resolve-se no CHAMADOR (24 jobs vermelhos por um token)
+
+`call_inst` ganhou `ret_type: LType = LType::I64`. Dentro de `teko::lir` compila; mas o **valor** por
+omissão é materializado em **cada sítio de chamada**, e **dez ficheiros fora de `teko::lir`** chamam-na.
+Consertado em `fbbed32b` qualificando o default. A regra está no digesto.
+
+**E o diagnóstico apontou o ficheiro errado.** Dizia `isel_arm64_test.tkt:397:112`; esse ficheiro está
+**intacto** e a sua linha 397 tem **18 caracteres**. `397:112` é a posição do `LType::I64` em
+**`src/lir/lir.tks`** — a mensagem junta o **ficheiro do chamador** com a **linha:coluna da declaração**.
+Gastei várias medições a confirmar que o ficheiro acusado estava limpo. **Achado a corrigir** quando esta
+família for tocada.
+
+### CONSEQUÊNCIA 2 — dois agentes no mesmo comportamento, em direcções opostas, sem se verem
+
+- Um fixou de manhã um **texto dourado** do LIR para a leitura indexada de `str`, com **igualdade de
+  texto inteiro**, e escreveu no doc-comment que a forma forte foi escolhida para não passar se o
+  lowering deixasse de produzir texto.
+- O outro, à tarde, **acrescentou guarda de fronteira à LEITURA** de elemento (`icmp`/`branch`/
+  `tk_panic_oob_at` antes do load) — porque o nativo devolvia lixo onde a rota C panicava.
+
+**As duas mudanças estão certas. A expectativa envelheceu em horas**, e `lwt_lowers_str_index_loads_the_byte_off_rodata`
+aborta com SIGABRT — o que mata **todas** as pernas `test` e `Memory paranoid`, porque a fase unitária
+pára no primeiro `assert` falhado.
+
+**A lição que interessa, e não é "usem dourados mais fracos":** foi precisamente a **força** do dourado
+que apanhou isto em horas em vez de meses. Enfraquecê-lo seria trocar detecção por conforto. O que
+falta é **coordenação**: dois agentes cujo trabalho se cruza no mesmo comportamento têm de saber um do
+outro, e **é o integrador que o sabe** — a colisão declarada no brief cobria FICHEIROS
+(`src/lir/lower.tks`), e estes dois nem partilhavam ficheiro: um mexeu no lowering, o outro no `.tkt`.
+
+**Regra nova para os briefs: declarar a colisão por COMPORTAMENTO, não só por ficheiro.** "Alguém está a
+mudar o que a leitura indexada emite" é a informação que faltava, e nenhum dos dois a teve.
+
 ## 0a. REINÍCIO DO CONTENTOR — 2026-07-30 ~06:50 UTC, e o que se salvou
 
 **Os CINCO agentes morreram com o contentor, e todos os worktrees (`/home/user/wt-*`) desapareceram.**
