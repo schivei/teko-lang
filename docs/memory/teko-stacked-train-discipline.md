@@ -862,3 +862,55 @@ conteúdo, nada commitado só nela. Se nada existe apenas na theory, nada pode v
 
 **Corolário para o integrador:** a minha própria branch de sonda **nunca** é merjada em nada. Ela
 existe para ser lida e esquecida.
+
+
+### O agente que precisa de esperar CI está TERMINADO — e faz handoff (dono, 2026-07-30)
+
+> vamos manter o pace, 4 agentes no máximo, se algum precisar parar para executar uma teoria,
+> considere-o terminado, e ele precisará te fazer um Handoff, assim consegue liberar a vaga
+> (trabalhar assíncrono)
+
+Isto resolve o problema que o próprio dono nomeou antes — o agente que empurra a `theory/**` e fica
+**ocioso e cego** à espera do CI, porque não tem acesso à API do GitHub.
+
+**A regra: esperar não é um estado permitido.** Um agente que chegou a uma pergunta que só o CI
+responde está **terminado**. Ele:
+
+1. escreve um **handoff** no relatório final — o que fez, o que empurrou (branch + SHA), **qual
+   pergunta ficou pendente no CI**, e o que fazer com cada resposta possível;
+2. termina, **libertando a vaga**;
+3. o integrador lê o CI e, com o handoff na mão, **retoma** (por `SendMessage`, que preserva o
+   contexto) ou **despacha novo agente** a partir do handoff.
+
+O trabalho passa a ser **assíncrono por construção**: a vaga nunca fica presa a um agente que não está
+a produzir. Com teto de **4**, uma vaga ocupada por espera é 25% da capacidade parada.
+
+**Corolário:** o handoff do agente é um entregável, não um resumo de cortesia. Um relatório final que
+não diz qual pergunta ficou no CI e o que fazer com cada resposta **não liberta a vaga de verdade** —
+obriga o integrador a reconstruir o contexto.
+
+### Escreveu? Comita e empurra. Na branch onde estiver (dono, 2026-07-30)
+
+> Lição para os agentes: escreveu? Comitar e empurrar para a branch que estiver trabalhando
+> "cargo ou theory".
+
+Não é "empurre quando estiver pronto" nem "empurre ao fim do marco" — é **empurre ao escrever**. Vale
+para `cargo/**` e para `theory/**` igualmente.
+
+Custa ZERO: uma `cargo/**` não dispara CI, e uma `theory/**` dispara a fast-lane, que é precisamente o
+que se quer quando há algo para medir.
+
+**Já se pagou duas vezes num dia.** No primeiro reinício de container perderam-se sete commits meus
+mais trabalho de dois agentes, porque eu segurava commits para um "marco". No segundo reinício, com a
+regra em vigor, **as cinco branches de agente estavam integralmente empurradas e não se perdeu nada** —
+verificado uma por uma, zero commits à frente do remoto.
+
+### O handoff fica SEMPRE vivo (dono, 2026-07-30)
+
+> mantenha o Handoff vivo SEMPRE, se algo acontecer, tenho como recuperar a sessão
+
+`docs/memory/handoff-0.3.1.0.md` não é um documento de fim de sessão — é **estado corrente**.
+Atualizar depois de cada dreno, cada despacho, cada ruling novo, e empurrar. Um handoff desatualizado
+é pior que nenhum: ele parece autoridade e mente. (Aconteceu no mesmo dia em que foi escrito: listava
+cinco branches como "por drenar" depois de eu as ter drenado, e a secção "decisões do dono" dizia
+"nada" enquanto havia uma.)

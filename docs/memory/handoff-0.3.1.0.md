@@ -136,8 +136,14 @@ O que segue é o que se usa em todo despacho:
   `--allow` para uma mudança de CI deliberada.
 
 ### Sobre agentes
-- **Máximo 4–5 em paralelo** (o dono subiu para 5; fui a 6 com um arquiteto, que só lê e escreve
-  documento, e disse-lhe porquê). Seis implementadores derrubaram o sandbox uma vez.
+- **Máximo 4 em paralelo** (o dono subiu para 5 e voltou a 4 em 2026-07-30: *"vamos manter o pace, 4
+  agentes no máximo"*). Seis implementadores derrubaram o sandbox uma vez.
+- **Esperar CI não é estado permitido.** Um agente que chegou a uma pergunta que só o CI responde está
+  **TERMINADO**: escreve handoff (branch + SHA + qual pergunta ficou pendente + o que fazer com cada
+  resposta), termina, e **liberta a vaga**. Com teto de 4, uma vaga em espera é 25% da capacidade
+  parada.
+- **Escreveu? Comita e empurra**, na branch onde estiver — `cargo/**` ou `theory/**`. Não é "quando
+  estiver pronto", é ao escrever.
 - **Empurrar SEMPRE**, a cada avanço, mesmo trabalho feio. Numa `cargo/**` custa ZERO e não dispara
   CI. **É esta regra que fez o reinício de hoje custar nada.**
 - **NUNCA abrir PR.** O integrador dreno.
