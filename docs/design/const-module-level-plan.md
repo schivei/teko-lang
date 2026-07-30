@@ -111,8 +111,8 @@ Both eliminate the per-call arena. That is the win the owner is buying.
 | Lowering per item | `src/lir/lower.tks:4529` (`lower_program`), `:4828` (`lower_item`) | must handle a const item (mostly a no-op — see §5) |
 | LIR rodata (WORKS) | `src/lir/lir.tks:143` (`LRodata`), `:262` (`LGlobalAddr`), `lower.tks:3759` (`intern_rodata`) | string literals already intern rodata + reference it |
 | LIR global (STUB) | `src/lir/lir.tks:148` (`LGlobal`) | "top-level consts are a later construct" — we DO NOT use this |
-| Backend honest-stops | `encode_x86_64.tks:1489/1495`, `encode_arm64.tks:1858`, um backend encoder, `stackify.tks:4458` | ALL gate on `m.globals.len > 0`, **never** on `m.rodata` |
-| rodata emission (WORKS) | `encode_*.tks encode_rodata`, `objfile_{elf,macho,coff,wasm}.tks`, `lir_interp.tks:206/527` | `LRodata`→bytes+symbol+reloc already emitted on every backend and available at runtime |
+| Backend honest-stops | `encode_x86_64.tks:1489/1495`, `encode_arm64.tks:1858`, um backend encoder | ALL gate on `m.globals.len > 0`, **never** on `m.rodata` |
+| rodata emission (WORKS) | `encode_*.tks encode_rodata`, `objfile_{elf,macho,coff}.tks`, `lir_interp.tks:206/527` | `LRodata`→bytes+symbol+reloc already emitted on every backend and available at runtime |
 
 ### 2.1 The critical insight (validated)
 
@@ -616,11 +616,6 @@ in this compiler.** Evidence (verified this session):
 - **COFF (`objfile_coff.tks:387`):** `coff_apply_rodata_addends` folds each rodata
   reloc's `.rdata` target offset **into the `.text` patch site** — again text→rodata.
 - **Mach-O:** same text-section-relative reloc model.
-- **wasm (`objfile_wasm.tks:216/640`):** rodata is an **active data segment at a
-  fixed, emit-time-known linear-memory offset** — so an intra-data pointer would be
-  a compile-time i32 constant (no classic reloc), but the data emitter must
-  COMPUTE and WRITE it (a real, if reloc-free, change).
-
 **Consequence:** string literals work because the pointer into rodata is computed
 in CODE at the use site (a text→rodata reference) and the rodata blob is flat bytes
 with no internal pointer. Any const whose rodata image must itself contain a
@@ -633,7 +628,6 @@ pointer (a slice/pointer field) needs a reloc the toolchain cannot emit.
 | C backend (`--backend=c`) | — | none (INLINE-AT-USE: `inline_aggregate_consts` substitutes a clone of the checked initializer at every use; the decl stays a no-op residual — NOT a `static const`, since a runtime-allocated `[]T`/aggregate has no C static initializer, #607) | data-init pointer resolvable in C init, but see native backend — sequence with it |
 | x86_64 (`encode_x86_64.tks`) | `honest_globals_x86` (`:1495`) | none (text→rodata load exists) | **widen `RelocX86` with a patch-site SECTION tag + emit data-section relocs** |
 | arm64 (`encode_arm64.tks`) | `honest_globals`/`A4-globals` (`:1858`) | none | **same: data-section reloc emission** |
-| wasm (`stackify.tks`/`objfile_wasm.tks`) | `wasm_honest_globals`/`C1-globals` (`:4458`) | none | **compute+write intra-data i32 offsets in the data segment (no reloc, but new)** |
 | ELF writer | — | none | **new `.rela.rodata` section + rela emission** |
 | Mach-O writer | — | none | **new rodata-section (local) relocations** |
 | COFF writer | — | none | **new `.rdata` relocations (patch site in `.rdata`)** |
@@ -645,7 +639,7 @@ rodata-`LGlobalAddr` base across the 4 encoders — expected to already hold
 
 **Tier B: NOT zero-backend.** It is a dedicated phase touching the 3 native
 encoders (patch-site section tag), the ELF/Mach-O/COFF writers (a data-section
-relocation), and the wasm data emitter (emit-time offsets). Sequenced in §8 (crumbs T-B1..T-B6), gated by the same
+relocation). Sequenced in §8 (crumbs T-B1..T-B6), gated by the same
 fixpoint + golden bytes. **Only needed to convert pointer-bearing aggregate
 factories (ABI descriptors); the owner's ~50 do not require it.**
 
@@ -680,19 +674,11 @@ consts" becomes **N consts + M enums + K flags**.
   → `pub type BlockType = enum { Stored; Fixed; Dynamic }`. Update the `u32`
   comparisons at the deflate/inflate use sites to the enum. **This is the model
   case** — a closed set of tags used in a `match`/comparison.
-- `src/backend/stackify.tks:195/205/216` `wasm_scope_kind_block/loop/if` →
-  `enum WasmScopeKind`.
-- `src/backend/stackify.tks:562/574/587` `elide_kind_normal/drop/tee` →
-  `enum ElideKind`.
-- `src/backend/stackify.tks:3975/3986/3997` `edge_result_stop/branch/more` →
-  `enum EdgeResult`.
-- `src/backend/stackify.tks:10/19/28/37` `wasm_vt_i32/i64/f32/f64` → `enum WasmVType`
-  (the wasm value-type tag byte; keep a `to u8` at the single emit site).
 - `src/compress/compress.tks:177/184` `zip_method_store/deflate (0/8)` →
   `enum ZipMethod`.
 
 > Migration note for enums: the tag's **numeric wire value** must be preserved
-> where it is serialized to bytes (wasm value-type byte 0x7F.., ZIP method u16).
+> where it is serialized to bytes (the ZIP method u16).
 > Where Teko enums do not (yet) pin discriminant values, keep a small
 > `fn <enum>_wire(v) -> u8/u32` at the **single** emit site and drive it by `match`.
 > This keeps the wire bytes byte-identical (fixpoint-safe) while the *logic* uses
@@ -705,7 +691,7 @@ consts" becomes **N consts + M enums + K flags**.
   `flags ElfSymInfo` / `flags ElfSectionFlags` (`SHF_ALLOC | SHF_EXECINSTR`, …).
 - Mach-O section attributes (`objfile_macho.tks:426` `0x80000400`, ntype
   `0x0E/0x0F`) → `flags MachoSectionAttr` / an `enum MachoSymType`.
-- **File magic** (`0xFEEDFACF`, ELF `\x7fELF`, wasm `\0asm`, gzip `0x1F8B`) →
+- **File magic** (`0xFEEDFACF`, ELF `\x7fELF`, gzip `0x1F8B`) →
   named `const` (a magic number is a single named value, not a bitmask).
 
 > As with enums: the emitted bytes MUST stay identical. `flags` migration changes
@@ -785,12 +771,11 @@ number, section flag) MUST be named.
 
 Hex-literal-with-cast density (proxy for magic values), by file:
 
-- `src/backend/stackify.tks` — 109 hits (wasm opcodes, LEB masks, value-type
   bytes). Highest priority: opcode/section families → enum/flags/const table.
 - `src/backend/encode_x86_64.tks` — 90; `encode_arm64.tks` — 66;
   um backend encoder — 52 (ISA opcode/ModRM/immediate masks). Recurring masks
   (`0xFF`, `0x1F`, field shifts) → named `const`; opcode families → an enum/table.
-- `src/backend/objfile_{wasm,macho,elf,coff}.tks` — 24/20/14/9 (file magic,
+- `src/backend/objfile_{macho,elf,coff}.tks` — 20/14/9 (file magic,
   section flags, symbol info) → `const`/`flags`/`enum` per 6.3.
 - `src/compress/compress.tks` — 12 (ZIP/adler constants) → per 6.1/6.2.
 
@@ -799,7 +784,7 @@ in full** — "em meio ao código também, feito por inteiro aqui." So #594 deli
 in order: (1) the `const`/`enum`/`flags` feature; (2) the ~50 nullary-fn constants +
 the object-writer file-magic/section-flag families (6.3); (3) **a file-by-file sweep
 of the ISA encoders** `encode_x86_64.tks` (90 hits), `encode_arm64.tks` (66),
-um backend encoder (52), `stackify.tks` (109), plus the object writers, turning each
+um backend encoder (52), plus the object writers, turning each
 recurring opcode / mask / field constant into `const`/`enum`/`flags` per the W15
 rule. The sweep is sequenced AFTER the feature reaches the bootstrap seed (crumbs
 1–7) so the encoders may spell `const`/`enum`/`flags`, and each file is its own
@@ -859,7 +844,7 @@ corpus's OWN source — are:
 - **BUMP #3 — after Crumb T-B5 (🔑):** the data→data relocation capability is in the
   seed. This UNLOCKS Crumb T-B6 (migrating pointer-bearing aggregates — ABI
   descriptors — to rodata consts the compiler's own source then uses). Tier-B may
-  itself need >1 intermediate bump (T-B1 reloc model → T-B2/3 writers → T-B4 wasm)
+  itself need >1 intermediate bump (T-B1 reloc model → T-B2/3 writers)
   if a later T-B crumb's source uses an earlier one's capability.
 
 Lane→umbrella promotion stays "as early as possible" (owner); the internal seed
@@ -979,27 +964,25 @@ bumps are the mechanism for making each increment available to the corpus.
 - **Step:** introduce `enum BlockType/WasmScopeKind/ElideKind/EdgeResult/WasmVType/
   ZipMethod`; replace the tag fns; route wire-byte emission through a single
   `match`-driven `_wire` helper so emitted bytes are byte-identical.
-- **Fixtures:** the deflate/inflate/wasm golden byte tests are UNCHANGED and pass
+- **Fixtures:** the deflate/inflate golden byte tests are UNCHANGED and pass
   (proves wire compatibility); rota C e backend nativo.
 - **Ritual:** full gate. Wire-byte identity is the acceptance bar.
 
 ### Crumb 11 — migrate flags families + file magic (6.3)
 - **Step:** `flags ElfSectionFlags/ElfSymInfo/MachoSectionAttr`; named file-magic
   consts. Object-writer golden byte tests must be byte-identical.
-- **Fixtures:** ELF/Mach-O/COFF/wasm object golden tests unchanged; rota C e backend nativo.
+- **Fixtures:** ELF/Mach-O/COFF object golden tests unchanged; rota C e backend nativo.
 - **Ritual:** full gate.
 
 ### Crumbs S1–S6 — RULING-2 ISA-encoder + writer magic-value sweep (file-by-file)
 Sequenced AFTER crumb 8 (feature in seed). Each file is one crumb; the acceptance
 bar is **frozen machine/object bytes + fixpoint gen1==gen2** — not one emitted byte
 may change. Recurring opcode/mask/field literals → `const`/`enum`/`flags` per W15.
-- **S1** `src/backend/stackify.tks` (109 hits): wasm opcode `enum`, LEB masks →
-  `const`, value-type already via `WasmVType` (crumb 10).
 - **S2** `src/backend/encode_x86_64.tks` (90): ModRM/REX field masks → `const`,
   opcode families → an `enum`/named table.
 - **S3** `src/backend/encode_arm64.tks` (66): field masks/shifts → `const`.
 - **S4** ~~`` (52): funct/opcode fields → `enum`/`const`.~~ **VOID —
-- **S5** `src/backend/objfile_{elf,macho,coff,wasm}.tks` residual (header fields,
+- **S5** `src/backend/objfile_{elf,macho,coff}.tks` residual (header fields,
   alignments) → `const`/`flags` (the file-magic/section-flag families already done
   in crumb 10; S5 mops up the rest).
 - **S6** remaining `src/compress/*`, `src/crypto/*`, `src/encoding/*` magic literals.
@@ -1017,8 +1000,6 @@ relocation absent today (§5.1), then migrates the ABI descriptors.
   `objfile_elf.tks:455`) + its relas.
 - **T-B3** Mach-O + COFF writers: emit rodata-section (`.rdata`) local relocations
   whose patch site is inside the data section.
-- **T-B4** wasm: compute+write intra-data i32 offsets in the active data segment
-  (`objfile_wasm.tks:640`) — no reloc, but new emit-time resolution.
 - **T-B5** interpretador de LIR (`lir_interp.tks:527`): resolve a rodata-INTERNAL pointer field to its target rodata base at typed load. **🔑 SEED BUMP #3 after T-B5** — the data-reloc
   capability is now in the seed; later crumbs may use pointer-bearing aggregate
   consts. (T-B1..T-B6 may each tag an intermediate `-beta` if a later T-B crumb's
@@ -1055,9 +1036,9 @@ relocation absent today (§5.1), then migrates the ABI descriptors.
    emits one. *Resolution:* TIER the aggregates. Tier A (flat-POD / `[]byte`, the
    entire owner ~50) ships in the feature phase with **zero backend change**. Tier B
    (pointer-bearing) is a separate backend track (crumbs T-B1–T-B6) that first BUILDS
-   the data-reloc across ELF/Mach-O/COFF/wasm, then migrates. This is the honest
+   the data-reloc across ELF/Mach-O/COFF, then migrates. This is the honest
    answer to "backend fica intocado ou não": **intocado para Tier A / os ~50;
-   TOCADO (3 encoders + 3 writers + wasm emit) para Tier B.**
+   TOCADO (3 encoders + 3 writers) para Tier B.**
 5. **`*_empty()` factory misclassification.** Converting a fresh-mutable-seed
    factory to a shared const aliases state → NOT behavior-preserving. *Resolution:*
    6.5 explicitly excludes them; the W15 rule text names the trap.
@@ -1085,14 +1066,14 @@ No genuine unresolved tension → no HALT.
 - `src/checker/typer.tks` (crumb 7) — `find_member_const` + the `type_path_expr`
   two-segment arm for `TypeName::NAME`.
 - migration (crumbs 9–11), names `UPPER_SNAKE`: `src/math/*`, `src/compress/*`,
-  `src/backend/stackify.tks`, `src/backend/objfile_*.tks`, `src/backend/isel_*.tks`,
+  `src/backend/objfile_*.tks`, `src/backend/isel_*.tks`,
   `src/lir/lir_interp.tks`, `src/io/stream.tks`, `src/backend/minst.tks`,
   `src/compress/gzip.tks`.
 - RULING-2 sweep (crumbs S1–S6): `encode_x86_64.tks`, `encode_arm64.tks`,
-  um backend encoder, `stackify.tks`, `objfile_*.tks` — frozen bytes.
+  um backend encoder, `objfile_*.tks` — frozen bytes.
 - **Feature + Tier A: ZERO backend encoder/writer changes, ZERO C twins.**
 - **Tier B ONLY (crumbs T-B1–T-B6, pointer-bearing aggregates):** the 3 native
-  encoders (reloc section tag), ELF/Mach-O/COFF writers (data-section relocs), wasm
+  encoders (reloc section tag), ELF/Mach-O/COFF writers (data-section relocs)
   data emitter, and the removed interpreter crumb (T-B5).
 
 ## 11. Note on bootstrap ordering — MULTIPLE seed bumps (owner 2026-07-15)

@@ -8,7 +8,7 @@ source: docs/design/ref-transparent-model.md, docs/design/marshall-spec.md, DECI
 
 **Tripartite + class exception:** values (structs, primitives, inline variants) are cheap-to-copy; references (classes, slices, optionals) are capability-passing. Classes are reference types. Plain refs `T` carry referent into scope; optionals `T?` sink to value (? → unwrap → T).
 
-**Mandatory ref modifier everywhere:** functions receiving class args use `ref` (receiver implicit; params explicit at call); same for stored borrows in structs (ref fields = borrowed pointers). `Ref<T>` internal (no user surface); capability-import model for Wasm.
+**Mandatory ref modifier everywhere:** functions receiving class args use `ref` (receiver implicit; params explicit at call); same for stored borrows in structs (ref fields = borrowed pointers). `Ref<T>` internal (no user surface); capability-import model at the module boundary.
 
 **Ref grafia:** everywhere in surface (param + field decls); `Ref<>` in internal C (ROTA C / native codegen); cap-2 safety invariant (two owning refs max per heap allocation; spine infers, checker validates); unbounded unsafe (explicit `unsafe` type modifier breaks the cap).
 

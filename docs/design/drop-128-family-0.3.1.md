@@ -47,7 +47,7 @@ deletion** (§8), so it costs nothing to fold in.
 - **Wave A — CARRIER DETOX (A1–A7).** Rewrite the ~11 internal carriers so **no compiler-internal
   declaration is typed `i128`/`u128`**, while the **surface still accepts** i128/u128/f16. Immediate,
   bankable win the instant Wave A closes: **native self-host stops needing 128-bit isel** (the corpus it
-  compiles no longer contains an i128 value), so the isel/stackify honest-stops become unreachable.
+  compiles no longer contains an i128 value), so the isel honest-stops become unreachable.
 - **Wave B — SURFACE + TOPOLOGY REMOVAL (B1–B6).** Checker rejects `i128`/`u128`/`f16` with an honest
   diagnostic (pointing at `bigint`/`dec`/`f32`); rejection tests; delete the backend topology
   (isel routes, 128-bit ABI classification, interpreter width-128 arms, `lower`, `PrimKind::{I128,U128,
@@ -515,7 +515,7 @@ elapsed time).
 over `i64::MIN → bigint` guards it. **Ritual:** GATE-G.
 
 **End of Wave A — bankable result:** no compiler-internal declaration is `i128`/`u128`; the corpus the
-native backend self-compiles contains no i128 value; the isel/stackify 128 honest-stops are unreachable;
+native backend self-compiles contains no i128 value; the isel 128 honest-stops are unreachable;
 the surface still resolves i128/u128/f16 (Wave B removes that). f16 is untouched by Wave A (zero use).
 
 ---
@@ -588,7 +588,7 @@ now-dead arm in the SAME crumb (or the matches go non-exhaustive): `type.tks:11-
 #### B8(.32) — delete the backend register-pair / ABI-128 / interp-width-128 topology  — **L**
 The isel i128 routes + honest-stops — `isel_x86_64.tks` (~11 incl. `select_const_int_x86`'s register-pair
 stop, now unreachable), `isel_arm64.tks` (~35), um isel de backend (~29); the 128-bit ABI classification —
-literal `128`; key on the size-16/two-register path, not a grep); `lower.tks` residual; `stackify.tks`
+literal `128`; key on the size-16/two-register path, not a grep); `lower.tks` residual
 `C1-i128` stop; the `if width == 128` arms remaining in `lir_interp`/`minst_interp` (the carrier already
 went in A4); `lir_print` residual. Prune the isel `_test.tkt` i128/F16 cases. **Ritual:** GATE-G +
 own==C differential (`diff_c_own.sh`) with the i128 **KNOWN-STOP guards removed** (§6) — the differential

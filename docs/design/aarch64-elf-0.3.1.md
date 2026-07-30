@@ -3,7 +3,8 @@
 **ONE LINE:** **LANE, not wagon** — ~20 edited lines + 7 new declarations, **zero new codegen** (the
 ELF writer is already ISA-agnostic and takes `e_machine` + numeric reloc types as parameters), and
 **78 of the 80 skips unlock from it** — measured as a differential (80 skips on a simulated arm64
-host, 2 on the real x86-64 host, and those same 2 are `wasmtime`/`mingw` provisioning in both).
+host, 2 on the real x86-64 host, and those same 2 were toolchain-provisioning skips in both — one
+of which, the wasm engine, ceased to exist when wasm left the tree, 2026-07-30).
 
 **Status:** DESIGN (doc-only). Branch `cargo/0.3.1-aarch64-elf-desenho`, base
 `origin/remodel/0.3.1.0-linux-native-2` (`fab2a759`; `adccc12f` — `teko::arch()` — already drained).
@@ -336,7 +337,7 @@ one `target_name` call in `src/build/tkr.tks:1246`.
 | 8 | `target_os_name` | 1835 | `Arm64Linux => "linux"` |
 | 9 | `target_arch_name` | 1861 | `Arm64Linux => "arm64"` |
 | 10 | `emit_native` dispatch | 2070 | `Arm64Linux => emit_native_arm64_linux(...)` |
-| 11 | `emit_static_lib` dispatch | 2245 | `Arm64Linux => emit_static_lib_arm64_linux(...)` — **mandatory, not optional**: the current `_ =>` arm would hand an arm64 request the *wasm* diagnostic |
+| 11 | `emit_static_lib` dispatch | 2245 | `Arm64Linux => emit_static_lib_arm64_linux(...)` — **mandatory, not optional**: without it an arm64 `.a` request has no arm to land on |
 | 12 | new fn | — | `emit_native_arm64_linux` |
 | 13 | new fn | — | `emit_static_lib_arm64_linux` |
 
@@ -398,7 +399,7 @@ constant** (which also closes the same hole in the x86 direction). `check_object
 `target` as that second argument — a 1-line change there.
 
 `wellformed_script_for` (`regression.tks:926`) needs **no** change: `"arm64-linux"` contains neither
-`wasm` nor `windows` nor `macos`, so it already falls through to `check_elf.sh`.
+`windows` nor `macos`, so it already falls through to `check_elf.sh`.
 
 ### 4.5 The rest
 
@@ -489,9 +490,9 @@ unlock.** The `own_native.tkr` 60 unlock as a block because it is a project `.tk
 the whole file.
 
 The other 2 are **not an aarch64 problem**. They are the same two capability rows the x86_64
-`regressor-full` job resolves by *provisioning* (`pr.yml:37-54`: a wasmtime tarball and
-`gcc-mingw-w64-x86-64`) plus `REGRESSION_REQUIRE_TOOLS=1`. Reaching zero skips on the arm64 leg
-needs those two steps **there**, with the wasmtime tarball switched to the `aarch64-linux` asset.
+`regressor-full` job resolves by *provisioning* plus `REGRESSION_REQUIRE_TOOLS=1`. Reaching zero
+skips on the arm64 leg needs the same provisioning **there**. One of the two rows — the wasm one —
+disappeared outright when wasm left the tree (2026-07-30), so only the cross-linker row remains.
 
 ### 5.3 Second obstacle, and there is no third
 
@@ -502,11 +503,11 @@ previous estimate failed. Two things were found and both are in §4:
 2. `no_skips_gate.sh` is absent from the arm64 leg (§4.5) — sequencing.
 
 Explicitly checked and **clear**: no hardcoded `x86_64-linux` target anywhere in the corpus (the
-full `Given target` tally is 3× `x86_64-solaris`, 1× `x86_64-windows`, 1× `wasm32-wasi`, 1×
+full `Given target` tally is 3× `x86_64-solaris`, 1× `x86_64-windows`, 1×
 `host-os-arch` — the `host-os-arch` token, added by the 2026-07-27 ruling, already removed that
 family); `arch_token_canonical` already folds `aarch64`→`arm64` (`regression.tks:711`) so
 `host_cc_arch()` on an arm64 runner agrees with `target_arch_name(Arm64Linux)`;
-`resolve_run_wrapper("arm64-linux")` returns no wrapper; `cross_cc_for_target("arm64-linux")`
+`cross_cc_for_target("arm64-linux")`
 returns `""`; `wellformed_script_for` already routes to ELF.
 
 ---
@@ -538,7 +539,7 @@ unlocks the 78** and the first that changes the arm64 leg's behaviour.
 `scripts/check_elf.sh`'s own self-check to the `CI gate` alongside `no_c_in_tests_gate_test.sh`.
 
 **Crumb 5 — CI, last.** Add to `test-linux-arm64-glibc`: `tee teko-test.log`,
-`REGRESSION_REQUIRE_TOOLS=1`, wasmtime (`aarch64-linux` asset) + `gcc-mingw-w64-x86-64`, and
+`REGRESSION_REQUIRE_TOOLS=1`, `gcc-mingw-w64-x86-64`, and
 `sh scripts/no_skips_gate.sh teko-test.log`. **Strictly after crumb 3**, or the leg goes red on the
 78 (§4.5).
 
@@ -585,7 +586,7 @@ capability.
 | **Crumb 1 changes shipped Mach-O bytes** | medium | No existing byte golden covers the bad shape (measured, §2.3): only 3 printer/spelling assertions move. Ritual on `test-macos-arm64` immediately after. |
 | **Crumb 5 before crumb 3 turns the leg red** | medium | Sequencing is explicit; crumb 5 is last. |
 | **`Abs64` is untested by any real compile** | low | Live code (`rodata_relocs_arm64`), empty today. Mapped for correctness and covered by a hand-built unit module — exactly the discipline the x86 side already applies to its `Abs64`. |
-| **`emit_static_lib`'s `_` arm gives a wasm diagnostic for arm64** | low but dishonest (M.3) | Crumb 3 adds the arm; it is listed as mandatory, not optional. |
+| **`emit_static_lib`'s dispatch has no arm64 arm** | low but dishonest (M.3) | Crumb 3 adds the arm; it is listed as mandatory, not optional. |
 
 **Law tensions — resolved law-first, no HALT.**
 
