@@ -346,7 +346,6 @@ caminhos devolve; nao toca no disco. O mesmo vale para toda a familia:
 | literal | usos | escritas | onde |
 |---|---:|---:|---|
 | `bin/teko` | 9 | **0** | `project_binary_path_test.tkt:49,50,51,99,100,101,102,132,133` |
-| `bin/teko.wasm` | 3 | **0** | idem :67,68,69 |
 | `bin/teko.o` | 3 | **0** | idem :115,116,117 |
 | `bin/teko.exe` | 1 | **0** | idem :34 |
 | `out/x` | 2 | **0** | `project_test.tkt:1293,1295` |
@@ -392,7 +391,7 @@ podia estar completa — e e por isso que a guarda G2 (§7.2) existe.
 | 16 | `bin/.regr-work/.toolquery` + `.in/.out/.err/.chan` | `regression.tks:474` |
 | 17 | `<prefix>.proj/` + `teko.tkp`, `main.tks`, `src/regr_decls.tks`, `bin/<nome>` | `regression.tks:1408,1431` |
 | 18 | `<prefix>.compile` + `.in/.out/.err/.chan` | `regression.tks:1420` |
-| 19 | `<prefix>.run` `.dep_compile` `.depout` `.consumer` `.dep` `.cwd` `.wellformed` `.wasmvalid` | `regression.tks:2545,1563,1557,2350,2352,2424,974,998` |
+| 19 | `<prefix>.run` `.dep_compile` `.depout` `.consumer` `.dep` `.cwd` `.wellformed` | `regression.tks:2482,1505,1499,2292,2294,2347,941` |
 | 20 | `<prefixo absoluto>.tkcov` | `regression.tks:2017` |
 | 21 | `<binary>.ccprobe.c` | `project.tks:557` |
 | 22 | `<binary>.ccmachine` | `project.tks:1472` |
@@ -955,8 +954,8 @@ teko:   FAILED (1):
 teko:     regression  r0  own_native.tkr[own_defer_arm_write_propagates]: exit 1, expected stdout pattern absent
 teko:
 teko:   SKIPPED (2) — SKIPPED IS FAILURE IN THIS PROJECT'S OWN CI:
-teko:     regression  r0  own_native.tkr[wasm32-wasi row 3]: wasmtime not found on PATH for target wasm32-wasi
-teko:     regression  r0  own_native.tkr[wasm32-wasi row 7]: wasmtime not found on PATH for target wasm32-wasi
+teko:     regression  r0  own_native.tkr[x86_64-windows row 3]: x86_64-w64-mingw32-gcc (the cross-linker for target x86_64-windows) not found on PATH
+teko:     regression  r0  own_native.tkr[x86_64-windows row 7]: x86_64-w64-mingw32-gcc (the cross-linker for target x86_64-windows) not found on PATH
 teko:
 teko:   COVERAGE (4 shard dumps + 63 regression dumps merged, 0 missing):
 teko:     functions   92% (4811/5219)    floor 90   ok
@@ -968,7 +967,7 @@ teko: ===== 1 failed, 2 skipped — run FAILED =====
 Quatro coisas que este bloco faz e que hoje ninguem faz:
 
 1. **Soma as duas fases.** A linha `TOTAL` nao existe em lado nenhum da arvore.
-2. **Nomeia cada skip com a sua razao.** O `wasmtime not found on PATH for target wasm32-wasi` que
+2. **Nomeia cada skip com a sua razao.** O `... (the cross-linker for target ...) not found on PATH` que
    viaja pelas pernas do CI ja e produzido — `regression.tks:611` — e ja e impresso em linha
    (`regr_row_skip_line`, `regression.tks:2593`). O que faltava era ele **aparecer no fim**, junto,
    em vez de estar espalhado a 4000 linhas de transcricao do sitio onde o leitor olha.
@@ -1017,8 +1016,8 @@ isso o `summarize` puro tem inversao de tres bracos, e o terceiro e o que import
  */
 fn js_the_summary_names_every_finding() {
     let block = teko::journal::render_summary(teko::journal::summarize(js_planted_records()))
-    teko::assert::str_contains(block, "own_native.tkr[wasm32-wasi row 3]")
-    teko::assert::str_contains(block, "wasmtime not found on PATH")
+    teko::assert::str_contains(block, "own_native.tkr[x86_64-windows row 3]")
+    teko::assert::str_contains(block, "not found on PATH")
     teko::assert::str_contains(block, "js_planted_failure")
     teko::assert::str_contains(block, "never-ran")
 }
@@ -1394,3 +1393,239 @@ Ordem final: **C0** · C1 · C2 · C3 · C4 (com §13 e o antigo C4b dentro) · 
    seguinte — isso e `teko::isolate` (S8), e continua a nao existir. A diferenca em relacao ao que eu
    escrevi antes e que agora isto e um limite estreito e nomeado, em vez da desculpa para deixar a
    suite morrer.
+
+---
+
+## 15. O tunel e um TUBO, e o laco que o drena — directiva do dono, 2026-07-30
+
+> *"Para processos eu ja falei, e direcionar um stdout e stderr virtual para o processo, por isso um
+> orquestrador, para ler estes canais e apendar. Algo burro mas extremamente eficiente e eficaz."*
+>
+> *"Para o caso de 'espera' e `loop {}`, sempre lendo a saida enquanto ela estiver aberta... ha muita
+> coisa simples e ja ao nosso alcance que resolve o paradigma sem criar um monstro."*
+
+### 15.1 O tunel ja existe — e esta feito de FICHEIROS. Parte do §3 nao migra: DESAPARECE.
+
+`spawn_redirected(argv, dir, env, in_path, out_path, err_path)` recebe **caminhos**. Medido em
+`teko_rt.c:2336-2350`: o PAI abre os tres com `open(..., O_WRONLY|O_CREAT|O_TRUNC)`, faz `fork`, e o
+FILHO faz `dup2` deles sobre os seus proprios fluxos antes do `execvp`.
+
+Dai vem uma fatia inteira do inventario de §3: o trio `.in`/`.out`/`.err` **por filho lancado**. Ele
+nasce num sitio so — `spawn_spec` (`regression.tks:182-186`) — e por isso **morre num sitio so**.
+
+**Correccao ao §3, e e uma subtraccao e nao uma migracao:** com tubos, o par `.out`/`.err` de cada
+filho **deixa de existir**. Nao ganha carimbo, nao ganha raiz, nao ganha nada — o **descritor E o
+segmento**. Isso apaga o par em todas as familias de captura de §3.2/§3.3 de uma vez (as seis
+`.regr-pool-*` — as 56 entradas que o integrador contou —, as duas `pt-probe`, as duas
+`c4_test_probe`, `.toolquery`, `.compile`, `.run`, `.dep_compile`, `.wellformed`, e a base de shard).
+
+**O `.in` FICA, e e escolha e nao esquecimento.** Um tubo de stdin traz a segunda direccao do
+impasse de §15.3: o pai a escrever mais do que o buffer para um filho que ainda nao le. O
+`stdin_data` e conhecido de antemao e escreve-se uma vez; um ficheiro nunca bloqueia. Trocar dois
+ficheiros por filho e ficar com uma direccao de impasse em vez de duas e o negocio certo, e e
+exactamente o *"algo burro mas extremamente eficiente"*.
+
+O `.chan` tambem fica: e o TERCEIRO canal, e ha exactamente tres fluxos herdaveis em POSIX e em
+Windows. Ele e o segmento de journal (§2.2) e sempre foi essa a sua razao.
+
+### 15.2 A peca que falta e UMA: `pipe`
+
+Medido: `fork` e `dup2` estao la (`teko_rt.c:2344-2350`), `_dup2` do lado Windows (`:2253`).
+**`pipe` nao existe em lado nenhum do runtime.** E a unica peca nova, mais `CreatePipe` do outro lado.
+
+```c
+// tk_rt_spawn_piped — como tk_rt_spawn_redirected, mas para cada fluxo cujo caminho venha VAZIO
+// cria um tubo em vez de abrir um ficheiro. Devolve o pid; os descritores do lado do PAI ficam na
+// tabela de filhos vivos, lidos por tk_rt_child_fd.
+//
+// A TABELA E PROCESSO-LOCAL E E O ORQUESTRADOR QUE O DONO DESCREVE. Ela e o unico estado partilhado
+// que isto acrescenta, e quando as raias chegarem protege-se com UM mutex — exclusao DENTRO do
+// processo, segmento por escritor FORA dele, que e a regra que este documento ja segue.
+int64_t tk_rt_spawn_piped(tk_str payload);
+// tk_rt_child_fd — o descritor de leitura do fluxo `which` (1 = stdout, 2 = stderr) do filho `pid`.
+int64_t tk_rt_child_fd(int64_t pid, int32_t which);
+// tk_rt_wait_readable — bloquear ate que ALGUM dos `n` descritores tenha bytes ou EOF, ou ate
+// `timeout_ms`. Devolve o indice do primeiro pronto, -1 no timeout. poll(2) / WaitForMultipleObjects.
+//
+// ESTE E O `loop {}` DO DONO, e e o que torna a espera uma LEITURA em vez de uma paragem.
+int64_t tk_rt_wait_readable(tk_str fds_packed, int32_t n, int32_t timeout_ms);
+// tk_rt_read_fd — ler ate `cap` bytes de `fd`. 0 = EOF, negativo = erro.
+int64_t tk_rt_read_fd(int64_t fd, tk_str into, int64_t cap);
+```
+
+### 15.3 O PERIGO, e e o unico, e trocar ficheiros por tubos INTRODU-LO
+
+Um ficheiro nunca bloqueia quem escreve. **Um tubo bloqueia.** O buffer e finito (tipicamente 64 KiB
+no Linux), e os nossos filhos imprimem muito: um `teko test` de shard despeja a transcricao inteira.
+
+Portanto: **um filho que encha o tubo PARA. Um pai parado no `wait_one` nunca le. Impasse.**
+
+Isto **nao pode acontecer hoje** — os destinos sao ficheiros. **A troca para tubos e que o cria**, e
+digo-o assim em vez de vender o tubo como um ganho sem contrapartida: o tubo troca dois ficheiros por
+filho por uma **disciplina de drenagem obrigatoria**. A disciplina e uma linha de invariante:
+
+> **NUNCA `wait_one` antes de EOF nos dois tubos do filho.** Espera-se a LEITURA, nunca o processo.
+
+```teko
+/**
+ * pump — o laco do orquestrador: drenar TODOS os filhos vivos enquanto algum tubo estiver aberto, e
+ * so depois recolher os estados.
+ *
+ * A ORDEM E O INVARIANTE INTEIRO, e ela e ao contrario do que parece natural: NAO se espera o filho
+ * e depois se le o que ele deixou. Espera-se pela LEITURA. Um filho que encha o buffer do tubo fica
+ * bloqueado no seu `write`, e um pai parado em `wait_one` nunca chega a esvaziar o buffer que o
+ * desbloquearia — impasse dos dois lados, sem nada que o resolva.
+ *
+ * E O MESMO LACO QUE DA A AGREGACAO INCREMENTAL: cada bloco lido e apendado ao segmento do seu
+ * escritor no momento em que chega, logo uma morte externa do orquestrador deixa em disco tudo o que
+ * chegou ate ali. Uma peca, dois problemas.
+ *
+ * @param hs     os filhos em voo
+ * @param sinks  o segmento de journal de cada filho, na mesma ordem
+ * @param deadline_ms  quanto tempo o laco pode ficar sem progresso antes de desistir; 0 = sem limite
+ * @return       o estado de saida de cada filho, em ordem de indice (nunca de chegada)
+ */
+pub fn pump(hs: []ProcHandle, sinks: []Journal, deadline_ms: i32) -> []i32
+```
+
+### 15.4 O `ProcHandle` ganha os descritores e o evento de fecho
+
+*"Melhorar a estrutura do `Process` com evento de fecha"* e **estender uma struct**, nao inventar um
+paradigma:
+
+```teko
+/**
+ * ProcHandle — o filho em voo: a referencia do SO, os tubos por onde ele fala, e se ja se calou.
+ *
+ * @since 0.3.1.2
+ */
+pub type ProcHandle = struct {
+    /** a referencia opaca do host (pid em POSIX, um HANDLE em Windows). */
+    raw: i64
+    /** o descritor de leitura do stdout do filho; -1 quando esse fluxo foi para um ficheiro. */
+    out: i64
+    /** o descritor de leitura do stderr do filho; -1 quando foi para um ficheiro. */
+    err: i64
+    /**
+     * O EVENTO DE FECHO: verdadeiro quando os dois tubos deram EOF.
+     *
+     * E ESTA a condicao que autoriza o `wait_one`, e nao o inverso. Enquanto for falso, `wait_one`
+     * pode ficar a espera de um filho que esta ele proprio a espera do pai (§15.3).
+     */
+    closed: bool
+}
+```
+
+`wait_one` mantem a assinatura e ganha uma pre-condicao documentada. Nenhum chamador de hoje quebra:
+um `ProcHandle` com `out = -1` e `err = -1` e exactamente o comportamento actual.
+
+### 15.5 A prova por impasse forcado
+
+Nao provo com um filho que imprime pouco — isso passa nas duas ordens. Provo com um filho que
+**enche o buffer**, e o braco "antes" tem de bater no prazo.
+
+```teko
+#test
+/**
+ * pp_a_child_that_fills_the_pipe_is_drained — o filho escreve 200 000 bytes, mais do triplo do
+ * buffer tipico de 64 KiB, e o laco recupera-os INTEIROS.
+ *
+ * Um filho que imprima pouco passa nas duas ordens e nao prova nada; e por isso que este escreve mais
+ * do que o buffer. A afirmacao e sobre o TAMANHO recuperado: um impasse trunca, um laco correcto nao.
+ *
+ * @throws quando algum byte se perde ou o laco nao termina dentro do prazo
+ */
+fn pp_a_child_that_fills_the_pipe_is_drained() {
+    let seg = pp_segment_of(pp_run_drained(pp_child_writing(200000), 5000))
+    teko::assert::eq_u64(seg.len, 200000)
+}
+
+#test
+/**
+ * pp_waiting_before_draining_deadlocks — A INVERSAO, e ela tem de PODER falhar e nao pode PENDURAR.
+ *
+ * A ordem errada — `wait_one` primeiro, ler depois — nao "corre mais devagar": nao termina. Um teste
+ * que pendura nao e um teste, logo a inversao corre com PRAZO e afirma que o prazo foi atingido. Sem
+ * este braco a guarda nao prova nada, e tres guardas cegas ja nos deram ZERO hoje.
+ *
+ * @throws quando a ordem errada TERMINA — o que significaria que esta prova deixou de provar
+ */
+fn pp_waiting_before_draining_deadlocks() {
+    teko::assert::is_true(pp_run_wait_first(pp_child_writing(200000), 5000).timed_out)
+    teko::assert::is_false(pp_run_drained(pp_child_writing(200000), 5000).timed_out)
+}
+```
+
+### 15.6 O `verdict_emit`: o destino passa a PARAMETRO, e o desviante e o ficheiro
+
+O integrador tem razao na leitura: os dois destinos ja la estao, mas como um `or` — e **o ramo do
+`stderr` ja apenda** (`eprintln` escreve num fluxo). O desviante e o ramo do ficheiro, que le tudo e
+reescreve tudo (`process.tks:215-220`). A correccao nao e acrescentar um destino: e **pôr o ramo do
+ficheiro a apendar como o do `stderr` ja apenda**, e entao o destino deixa de ser um `or` e passa a
+ser um argumento.
+
+```teko
+/**
+ * Sink — para onde um registo vai. Um PARAMETRO, nunca um `or` decidido dentro do emissor.
+ *
+ * @since 0.3.1
+ */
+pub type Sink = enum { Stderr; Segment }
+
+/**
+ * emit_to — apendar UM registo ao destino nomeado.
+ *
+ * OS DOIS RAMOS APENDAM, que e o que o `or` de hoje ja fazia de um lado e nao do outro. O destino ser
+ * argumento e o que permite ao orquestrador escrever no segmento do FILHO que acabou de ler, em vez
+ * de cada processo adivinhar sozinho onde escreve.
+ *
+ * @param sink  para onde
+ * @param seg   o segmento, quando `sink` e `Segment`
+ * @param line  o registo, sem quebra de linha
+ * @throws      quando a escrita falha (§4, modo 5 — a falha e pegajosa)
+ */
+pub fn emit_to(sink: Sink, seg: Journal, line: str) -> null | error
+```
+
+### 15.7 `chan<T>`: o primeiro consumidor real, registado e NAO construido
+
+`docs/design/concorrencia-adiantada-s8.md` §3.3 reservou `chan<T>` e recusou congela-lo com uma razao
+explicita: *"Congelar `chan<T>` agora seria congelar a peca que os casos reais nao usam."*
+
+**Agora ha um caso real, e e o `pump`.** Construo-o com tubo e descritor, **nao** com `chan<T>` —
+usar `chan<T>` hoje obrigava a construir a primitiva primeiro, e isso e o monstro que o dono nao
+quer. Mas registo aqui **a forma que o uso mediu**, que e a evidencia que o S8 pediu antes de
+congelar:
+
+| requisito medido no `pump` | porque, e o que reprova |
+|---|---|
+| **espera multi-origem** | o laco espera em `2 x jobs` origens ao mesmo tempo. Um `recv` de UMA origem nao exprime isto: obriga a sondagem ciclica, que e ocupada ou lenta. **Um `chan<T>` sem espera multi-origem nao serve este caso** — e este e o caso real |
+| **fecho distinguivel de vazio** | `recv` tem de responder "fechado" diferente de "nada agora", porque e o fecho que autoriza o `wait_one` (§15.4). `-> T \| closed` |
+| **limitado, com contrapressao** | o tubo do SO da-a de graca: quem escreve bloqueia. Um `chan<T>` ilimitado tem a memoria como unico limite — e nos morremos de OOM duas vezes hoje. **Limitado, por omissao** |
+| **ordem por origem, nao global** | o relatorio e por indice de filho (§determinismo do `run_pool`). O canal so tem de preservar a ordem DENTRO de cada origem; uma ordem global seria uma promessa mais cara e inutil |
+
+Quatro requisitos vindos de necessidade, nenhum de antecipacao. **Nao construo nenhum aqui.**
+
+### 15.8 O custo, e o que isto muda nos crumbs
+
+**Nao acrescenta crumb.** O tubo e o laco sao a implementacao do **C1** (o sumidouro do escritor) e do
+**C4** (a releitura, que passa a ser drenagem incremental). O que muda e o CONTEUDO:
+
+* **C1** ganha `tk_rt_spawn_piped`/`tk_rt_child_fd`/`tk_rt_wait_readable`/`tk_rt_read_fd`, o
+  `ProcHandle` estendido e o `emit_to`;
+* **C3** ENCOLHE: o par `.out`/`.err` de cada familia de captura nao migra — some;
+* **C7** ganha a prova por impasse forcado de §15.5;
+* **C0** fica como esta.
+
+**Total: 10 crumbs, sem alteracao.**
+
+### 15.9 O que isto NAO cobre
+
+1. **O `stdin` continua ficheiro**, por decisao (§15.1) — uma direccao de impasse em vez de duas.
+2. **Um filho que feche stdout/stderr e continue a correr** da EOF sem ter saido. O laco entao espera
+   no `wait_one`, correctamente, e sem nada por ler. Nao e impasse; e um filho lento.
+3. **`chan<T>` nao e construido aqui**, so medido (§15.7).
+4. **Windows nao esta medido.** `CreatePipe` + `WaitForMultipleObjects` sao a forma equivalente e
+   estao declarados, mas eu nao os corri. A perna Windows tem de trazer a sua propria medicao — e
+   dizer que "deve funcionar igual" seria a suposicao que este documento inteiro existe para nao
+   fazer.
