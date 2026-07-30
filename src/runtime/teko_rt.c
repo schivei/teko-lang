@@ -1145,11 +1145,118 @@ static struct tk_chunk *tk_chunk_try(size_t payload) {
     return c;
 }
 
-// (W9.3b) the GLOBAL registry of live regions (single-threaded seed; S8 revisits concurrency). A
-// region is on this list from tk_region_new until tk_region_drop or tk_regions_free_all removes it.
-static tk_region *tk_g_regs = NULL;
-static tk_region *tk_g_root = NULL;   // single-threaded seed (S8 revisit); lazy + idempotent (the root is also on tk_g_regs)
-static uint64_t   tk_g_region_gen = 0;   // (S2 Level-1) monotonic region-generation counter; every tk_region_new stamps r->gen from it (never reused, so a recycled address always carries a fresh gen)
+// =========================================================================
+// (F1) THE TASK — the seat of the memory discipline, one per concurrent flow of control.
+//
+// Before F1 the discipline was PROCESS-GLOBAL: one root region, one arena mark stack, one free
+// list. That is unsound the moment two flows run at once, because the marks are a single LIFO —
+// task B's tk_arena_pop rewinds the root past allocations task A is still using, and A's live
+// objects become other people's fresh bytes. Each family below is therefore moved INTO the task.
+//
+// THE SIGNATURES DO NOT CHANGE. tk_alloc/tk_region_alloc/tk_arena_push/... keep their exact
+// prototypes and read tk_task_current() from the inside, so the ~262 call sites in the runtime
+// and the 80 emitted-C literals in src/codegen/codegen.tks are untouched by F1.
+//
+// WHAT DELIBERATELY STAYS PROCESS-GLOBAL, and why it MUST:
+//   * tk_g_region_gen — the region-generation counter. Per-task counters would each start at 0
+//     and hand the SAME (region-address, gen) pair to two tasks, so tk_push_cache would false-hit
+//     across tasks and an in-place append would write into a foreign live tail. The generation is
+//     what makes a recycled address distinguishable, so it must be unique BETWEEN tasks: one
+//     counter, bumped atomically (see tk_region_gen_next).
+//   * tk_obs_* — the arena lifetime map. It is a process-wide DIAGNOSTIC AGGREGATE (env-gated,
+//     off by default), not part of the memory discipline: nothing is freed on its say-so, so a
+//     race there costs a wrong histogram, never a wrong free. Splitting it per task would also
+//     put ~1.9 MB of tables (5 x TK_OBS_CAP x sizeof(tk_obs_site)) in EVERY task and turn one
+//     lifetime map into N partial ones. It needs a lock when tasks actually run concurrently.
+//
+// THE ACCESSOR IS THE WHOLE SEAM — one function, two encarnations. Today: a _Thread_local
+// pointer, which is a single %fs-relative load under the local-exec TLS model. In the native
+// Teko runtime: pthread_getspecific / TlsGetValue behind an `extern fn`, i.e. an ordinary C call
+// to an external symbol, which the own backend already emits. Neither encarnation asks the
+// backend for a new capability, and swapping one for the other touches ONE function.
+// =========================================================================
+typedef struct tk_freenode { struct tk_freenode *next; size_t bytes; } tk_freenode;
+#define TK_FREE_BINS 4096                           // (i+1)*16 bytes, i.e. 16..65536 — (#148 Level-2) the doubling-ladder steps of struct lists (esz ~100-300 B × cap 32-256) must BIN exactly (the bounded large-list scan barely reuses them); 4096 ptr slots = 32 KB per task
+#define TK_PUSH_HASH_SIZE (1u << 16)                // 65536 single-probe buckets
+#define TK_ARENA_MARK_MAX 64                        // depth of the per-task arena checkpoint stack (see tk_arena_push)
+// TK_TEST_CAPTURE_DEPTH_MAX — how deep the capture stack goes. Two is what exists (a harness run
+// and a guard's inner run); the slack costs a few hundred bytes and removes a cliff.
+#define TK_TEST_CAPTURE_DEPTH_MAX 4
+typedef struct { struct tk_chunk *chunk; size_t used; } tk_arena_mark;
+typedef struct { const void *ptr; uint64_t len, cap, esz; tk_region *region; uint64_t region_gen; } tk_push_slot_entry;
+
+typedef struct tk_task {
+    tk_region      *regs;                 // (W9.3b) registry of THIS task's live regions: on it from tk_region_new until drop
+    tk_region      *root;                 // this task's root region — lazy + idempotent (the root is also on `regs`)
+    tk_freenode    *free_bins[TK_FREE_BINS];   // mem::free overlay, ROOT-only: parked blocks live in THIS task's root chunks
+    tk_freenode    *free_large;           // > 4096 B parked blocks, bounded first-fit
+    unsigned long long free_parked_bytes, free_reused_bytes, free_reused_count;   // free-list accounting
+    tk_arena_mark   arena_marks[TK_ARENA_MARK_MAX];   // checkpoint stack: (head chunk, its used offset)
+    int             arena_msp;            // checkpoint stack pointer (may exceed the cap; see tk_arena_push)
+    tk_push_slot_entry push_cache[TK_PUSH_HASH_SIZE];   // (#148) live-tail witnesses for in-place slice append
+    jmp_buf         test_jb[TK_TEST_CAPTURE_DEPTH_MAX];   // (§14) test-mode capture — a longjmp NEVER crosses tasks
+    volatile sig_atomic_t test_depth;     // >0 = a captured body is running on THIS task
+    volatile int32_t test_how[TK_TEST_CAPTURE_DEPTH_MAX];    // per-level outcome kind
+    volatile int32_t test_code[TK_TEST_CAPTURE_DEPTH_MAX];   // per-level outcome code
+    uint64_t       *fn_stack;             // (D3-branch) coverage fn-attribution stack — a shadow of THIS task's call stack
+    uint64_t        fn_sp, fn_cap;        // its depth and capacity (libc heap: survives the arena rewind)
+} tk_task;
+
+// tk_g_main_task — the task every program starts on. Statically allocated (not malloc'd) so the
+// very first allocation, which happens long before any allocator is usable, already has a seat.
+static tk_task tk_g_main_task;
+
+// tk_g_current_task — the seam. _Thread_local under the C seed: one %fs-relative load, which the
+// measurement in docs/medicoes/bench_tk_task_current.c puts at +0.04 ns/alloc at -O2 and
+// +2.0 ns/alloc at -O0 versus the old plain global.
+static _Thread_local tk_task *tk_g_current_task = NULL;
+
+// tk_task_current — the task owning this flow of control's memory discipline. Never NULL: a flow
+// that has not been given a task explicitly runs on the main task, which is what keeps every
+// single-task program byte-for-byte the program it was before F1.
+tk_task *tk_task_current(void) {
+    tk_task *t = tk_g_current_task;
+    if (t == NULL) { t = &tk_g_main_task; tk_g_current_task = t; }
+    return t;
+}
+
+// The 11 families, now read through the seam. The names are unchanged ON PURPOSE: every existing
+// use site keeps its exact text, so F1 is a change of WHERE the state lives, not of who touches it.
+#define tk_g_regs             (tk_task_current()->regs)
+#define tk_g_root             (tk_task_current()->root)
+#define tk_free_bins          (tk_task_current()->free_bins)
+#define tk_free_large         (tk_task_current()->free_large)
+#define tk_free_parked_bytes  (tk_task_current()->free_parked_bytes)
+#define tk_free_reused_bytes  (tk_task_current()->free_reused_bytes)
+#define tk_free_reused_count  (tk_task_current()->free_reused_count)
+#define tk_arena_marks        (tk_task_current()->arena_marks)
+#define tk_arena_msp          (tk_task_current()->arena_msp)
+#define tk_push_cache         (tk_task_current()->push_cache)
+#define tk_test_jb            (tk_task_current()->test_jb)
+#define tk_test_depth         (tk_task_current()->test_depth)
+#define tk_test_how           (tk_task_current()->test_how)
+#define tk_test_code          (tk_task_current()->test_code)
+#define tk_fn_stack           (tk_task_current()->fn_stack)
+#define tk_fn_sp              (tk_task_current()->fn_sp)
+#define tk_fn_cap             (tk_task_current()->fn_cap)
+
+// tk_push_cache_purge — fwd; the cache lives beside tk_slice_push far below, but the task teardown
+// above it must be able to drop every live-tail witness before the memory they name is reclaimed.
+static void tk_push_cache_purge(void);
+
+// tk_g_region_gen — PROCESS-GLOBAL by necessity (see the ruling above). tk_region_gen_next hands
+// out the next stamp; it is the one counter that must never be per-task.
+static uint64_t tk_g_region_gen = 0;
+
+// tk_region_gen_next — the next never-reused region generation, unique ACROSS tasks. Atomic where
+// the compiler offers C11 atomics, so two tasks creating regions at once cannot collide on a stamp.
+static uint64_t tk_region_gen_next(void) {
+#if defined(__GNUC__) || defined(__clang__)
+    return __atomic_add_fetch(&tk_g_region_gen, 1, __ATOMIC_RELAXED);
+#else
+    return ++tk_g_region_gen;
+#endif
+}
 
 // =========================================================================
 // (mem::free ruling 2026-07-03) FREE-LIST OVERLAY over the ROOT region — the runtime seat of
@@ -1163,16 +1270,13 @@ static uint64_t   tk_g_region_gen = 0;   // (S2 Level-1) monotonic region-genera
 //     a block is never split; the cap avoids quadratic scans).
 // ROOT-ONLY by design: parked blocks live inside root chunks, which are never freed mid-run —
 // except by the test-gate rewind (tk_arena_pop), which PURGES the whole list first (its parked
-// blocks may sit inside the chunks the rewind frees). Single-threaded seed (S8 revisits).
-typedef struct tk_freenode { struct tk_freenode *next; size_t bytes; } tk_freenode;
-#define TK_FREE_BINS 4096                           // (i+1)*16 bytes, i.e. 16..65536 — (#148 Level-2) the doubling-ladder steps of struct lists (esz ~100-300 B × cap 32-256) must BIN exactly (the bounded large-list scan barely reuses them); 4096 ptr slots = 32 KB static
-static tk_freenode *tk_free_bins[TK_FREE_BINS];
-static tk_freenode *tk_free_large = NULL;
-static unsigned long long tk_free_parked_bytes = 0, tk_free_reused_bytes = 0, tk_free_reused_count = 0;
+// blocks may sit inside the chunks the rewind frees). PER TASK since F1: a parked block belongs to
+// the root region of the task that freed it, so another task must never be handed it.
 static void tk_free_purge(void) {                   // rewind/termination: parked blocks may now dangle
-    for (int i = 0; i < TK_FREE_BINS; i += 1) tk_free_bins[i] = NULL;
-    tk_free_large = NULL;
-    tk_free_parked_bytes = 0;
+    tk_task *t = tk_task_current();                 // one seam read, not TK_FREE_BINS of them
+    for (int i = 0; i < TK_FREE_BINS; i += 1) t->free_bins[i] = NULL;
+    t->free_large = NULL;
+    t->free_parked_bytes = 0;
 }
 static void *tk_free_take(size_t an) {
     // (#148 Level-2) TAKE = CEIL-16 — never UNDERSTATE the need. The bin granularity is 16 bytes
@@ -1332,17 +1436,24 @@ static void tk_obs_dump(void) {
     if (fp != stderr) fclose(fp);
 }
 
-tk_region *tk_region_new(tk_region *parent) {
+// tk_region_new_on — the region constructor, parameterised by the REGISTRY the new region joins.
+// (F2) The program region must be on NO task's registry, so which list a region joins is an
+// argument here instead of the assumption ("the current task's") it used to be.
+static tk_region *tk_region_new_on(tk_region **registry, tk_region *parent) {
     tk_region *r = malloc(sizeof *r);          // the region header is itself a libc block
     if (r == NULL) tk_panic("out of memory");  // (so tk_region_drop can free() it)
     if (tk_obs_enabled()) tk_obs_regions_new += 1;   // (S2 obs) lifecycle counter
     r->head = NULL;                            // lazy: the first alloc creates the head chunk
-    r->reg_next = tk_g_regs;                   // (W9.3b) prepend onto the live-region registry
-    tk_g_regs = r;
+    r->reg_next = *registry;                   // (W9.3b) prepend onto the live-region registry
+    *registry = r;
     r->parent = parent;                        // (S2) the arena tree edge
     r->entries = NULL; r->nentries = 0; r->entries_cap = 0;   // (S2) the per-region registry, lazy
-    r->gen = ++tk_g_region_gen;                 // (S2 Level-1) unique lifetime stamp (0 is never assigned, so a zeroed cache entry never matches a live region)
+    r->gen = tk_region_gen_next();              // (S2 Level-1) unique lifetime stamp (0 is never assigned, so a zeroed cache entry never matches a live region); (F1) unique ACROSS tasks
     return r;
+}
+
+tk_region *tk_region_new(tk_region *parent) {
+    return tk_region_new_on(&tk_task_current()->regs, parent);
 }
 
 // (S2) bind type_id → instance in r's OWN table. A second registration of the same type_id
@@ -1494,14 +1605,11 @@ void tk_region_drop_subtree(tk_region *root) {
 // directly (NOT via tk_region_drop) to avoid the O(n) per-region registry search on a list we already
 // own end-to-end. A second call is a no-op (the registry is empty). Hooked at the termination choke
 // points: tk_panic* (abort skips atexit), tk_exit, and the lazy atexit below (normal return / exit()).
-void tk_regions_free_all(void) {
-    // (S2 obs) FINAL lifetime-map dump — this is every termination edge's choke point (atexit /
-    // tk_exit / tk_panic), so an enabled run always ends with a complete map on disk.
-    { static int obs_dumped = 0; if (!obs_dumped && tk_obs_on == 1) { obs_dumped = 1; tk_obs_dump(); } }
-    tk_free_purge();                                 // (mem::free) parked blocks live inside chunks freed below
-    tk_region *r = tk_g_regs;
-    tk_g_regs = NULL;                                // empty the registry BEFORE freeing (re-entrancy)
-    tk_g_root = NULL;                                // the root is on the list; it is freed below too
+// tk_registry_free — free every region on one registry list and empty it. The list is emptied
+// BEFORE the walk so a re-entrant call (a panic during teardown) finds nothing left to free.
+static void tk_registry_free(tk_region **registry) {
+    tk_region *r = *registry;
+    *registry = NULL;
     while (r != NULL) {
         tk_region *rnext = r->reg_next;
         struct tk_chunk *c = r->head;
@@ -1512,16 +1620,89 @@ void tk_regions_free_all(void) {
     }
 }
 
+// (F2) tk_g_program_regs / tk_g_program — the PROGRAM region and its registry, process-wide and on
+// no task's list. See tk_region_program for why this exists.
+static tk_region *tk_g_program_regs = NULL;
+static tk_region *tk_g_program      = NULL;
+
+// tk_termination_hook_once — register the leak-clean atexit hook exactly once, whichever of the
+// root region or the program region is materialized first. atexit fires on normal main return AND
+// on libc exit() (tk_exit's path), so a NORMALLY-terminating program is leak-clean too;
+// tk_regions_free_all is idempotent, so the explicit tk_exit/tk_panic calls never double-free.
+static void tk_termination_hook_once(void) {
+    static int registered = 0;
+    if (registered) return;
+    registered = 1;
+    atexit(tk_regions_free_all);
+}
+
+void tk_regions_free_all(void) {
+    // (S2 obs) FINAL lifetime-map dump — this is every termination edge's choke point (atexit /
+    // tk_exit / tk_panic), so an enabled run always ends with a complete map on disk.
+    { static int obs_dumped = 0; if (!obs_dumped && tk_obs_on == 1) { obs_dumped = 1; tk_obs_dump(); } }
+    tk_free_purge();                                 // (mem::free) parked blocks live inside chunks freed below
+    tk_task *t = tk_task_current();
+    t->root = NULL;                                  // the root is on the registry; it is freed below too
+    tk_registry_free(&t->regs);
+    tk_registry_free(&tk_g_program_regs);            // (F2) the program region outlives tasks, but not the process
+    tk_g_program = NULL;
+}
+
 tk_region *tk_region_root(void) {
-    if (tk_g_root == NULL) {
-        tk_g_root = tk_region_new(NULL);   // (S2) the tree root — no parent
-        // (W9.3b) register the leak-clean termination hook ONCE (the root is created exactly once per
-        // process, lazily). atexit fires on normal main return AND on libc exit() (tk_exit's path), so
-        // a NORMALLY-terminating program is leak-clean too; tk_regions_free_all is idempotent, so the
-        // explicit tk_exit/tk_panic calls plus this hook never double-free.
-        atexit(tk_regions_free_all);
+    tk_task *t = tk_task_current();
+    if (t->root == NULL) {
+        t->root = tk_region_new_on(&t->regs, NULL);   // (S2) the tree root — no parent
+        tk_termination_hook_once();
     }
-    return tk_g_root;
+    return t->root;
+}
+
+// tk_region_program — the PROGRAM region: one per process, owned by no task.
+//
+// (F2) F1 left the runtime with N task roots and nothing else, and an object allocated in a task
+// root dies when that task's regions are freed. The owner's ruling that "every channel lives in
+// the program arena or on the spine, it is a singleton" therefore has no seat after F1 unless one
+// is built: a region that is NOT any task's root, so it survives both a task's tk_arena_pop (which
+// only rewinds that task's root) and the task's exit (which only frees that task's registry).
+// Freed at process termination by tk_regions_free_all, so it is still leak-clean.
+tk_region *tk_region_program(void) {
+    if (tk_g_program == NULL) {
+        tk_g_program = tk_region_new_on(&tk_g_program_regs, NULL);
+        tk_termination_hook_once();
+    }
+    return tk_g_program;
+}
+
+// tk_task_begin — create a fresh task and make it the one this flow of control runs on, returning
+// the task that was current so tk_task_end can restore it. The new task starts with an EMPTY
+// memory discipline: no root (the first allocation makes one), no marks, no parked blocks — which
+// is precisely what makes its tk_arena_pop unable to reach another task's allocations.
+tk_task *tk_task_begin(void) {
+    tk_task *previous = tk_task_current();
+    tk_task *fresh = calloc(1, sizeof *fresh);   // calloc: every family must start zeroed
+    if (fresh == NULL) tk_panic("out of memory");
+    tk_g_current_task = fresh;
+    return previous;
+}
+
+// tk_task_end — free everything the current task allocated and hand this flow of control back to
+// `previous`. The task's regions die with it; anything that must outlive the task belongs in the
+// program region (tk_region_program). The main task is statically allocated, so it is never freed.
+void tk_task_end(tk_task *previous) {
+    tk_task *ending = tk_task_current();
+    // Every witness the task holds names memory the registry free below is about to reclaim: parked
+    // free-list blocks and live-tail push-cache entries both live INSIDE those chunks, and the marks
+    // point at them. They are dropped FIRST, while `ending` is still the current task, so that a task
+    // which is reused rather than freed (the main task) cannot false-hit on a dead region afterwards.
+    tk_free_purge();
+    tk_push_cache_purge();
+    ending->arena_msp = 0;
+    tk_registry_free(&ending->regs);
+    ending->root = NULL;
+    free(ending->fn_stack);
+    ending->fn_stack = NULL; ending->fn_sp = 0; ending->fn_cap = 0;
+    tk_g_current_task = previous;
+    if (ending != &tk_g_main_task) free(ending);
 }
 
 void *tk_alloc(size_t n) {
@@ -1548,23 +1729,19 @@ void *tk_alloc(size_t n) {
 // coverage sinks are libc-heap (realloc/malloc above) — so nothing referenced after a test lives in
 // the rewound span. Balanced push/pop (depth ~1); a stack over the fixed cap is counted but not saved
 // (pop then no-ops), keeping push/pop balanced without ever rewinding past a recorded mark.
-typedef struct { struct tk_chunk *chunk; size_t used; } tk_arena_mark;
-static tk_arena_mark tk_arena_marks[64];
-static int tk_arena_msp = 0;
 void tk_arena_push(void) {
-    if (tk_arena_msp >= 0 && tk_arena_msp < 64) {
+    if (tk_arena_msp >= 0 && tk_arena_msp < TK_ARENA_MARK_MAX) {
         tk_region *r = tk_region_root();
         tk_arena_marks[tk_arena_msp].chunk = r->head;
         tk_arena_marks[tk_arena_msp].used  = r->head ? r->head->used : 0;
     }
     tk_arena_msp += 1;
 }
-static void tk_push_cache_purge(void);   // fwd — the cache lives beside tk_slice_push below
 
 void tk_arena_pop(void) {
     if (tk_arena_msp <= 0) return;
     tk_arena_msp -= 1;
-    if (tk_arena_msp >= 64) return;            // an over-deep push saved nothing — do not rewind
+    if (tk_arena_msp >= TK_ARENA_MARK_MAX) return;   // an over-deep push saved nothing — do not rewind
     tk_free_purge();   // (mem::free) parked blocks may live inside the chunks this rewind frees
     tk_push_cache_purge();   // (#148 safety) rewound ROOT addresses get recycled by later allocs with the SAME region+gen — a stale live-tail entry could false-hit and in-place-write into foreign memory; purge closes it
     tk_region *r = tk_region_root();
@@ -1714,13 +1891,8 @@ static void tk_test_fail_report(void) { tk_test_close_failed("FAILED"); }
 // emitted ONLY by the test-mode profiles — so a program can never take the captured branch, and the
 // boundary is structural instead of a flag anyone can flip by mistake.
 //
-// TK_TEST_CAPTURE_DEPTH_MAX — how deep the capture stack goes. Two is what exists (a harness run and
-// a guard's inner run); the slack costs a few hundred bytes of BSS and removes a cliff.
-#define TK_TEST_CAPTURE_DEPTH_MAX 4
-static jmp_buf tk_test_jb[TK_TEST_CAPTURE_DEPTH_MAX];
-static volatile sig_atomic_t tk_test_depth = 0;
-static volatile int32_t tk_test_how[TK_TEST_CAPTURE_DEPTH_MAX];
-static volatile int32_t tk_test_code[TK_TEST_CAPTURE_DEPTH_MAX];
+// (F1) The capture stack lives on the TASK — TK_TEST_CAPTURE_DEPTH_MAX and the buffers moved into
+// tk_task, because a longjmp must land in a frame of the SAME flow of control that set it up.
 
 // tk_test_capturing — is a captured body running right now? The one question the chokepoints ask.
 static bool tk_test_capturing(void) { return tk_test_depth > 0; }
@@ -2722,9 +2894,8 @@ static uint64_t *tk_covb_ids = NULL;
 static uint64_t  tk_covb_n   = 0;
 static uint64_t  tk_covb_cap = 0;
 static int       tk_covb_on  = 0;
-static uint64_t *tk_fn_stack = NULL;
-static uint64_t  tk_fn_sp    = 0;
-static uint64_t  tk_fn_cap   = 0;
+/* (F1) tk_fn_stack/sp/cap moved into tk_task — this stack shadows the CALL STACK, which is per
+   flow of control; two tasks sharing it would attribute one task's branches to the other's frame. */
 static uint64_t tk_branch_id(uint64_t fn, uint32_t line, uint32_t col, uint64_t outcome) {
     // [54]=base · [38..54)=fn(16b) · [14..38)=line(24b) · [6..14)=col(8b) · [0..6)=outcome(6b)
     return ((uint64_t)1 << 54) + (fn << 38) + ((uint64_t)line << 14)
@@ -2926,14 +3097,18 @@ bool tk_cov_merge(tk_str path) {
 // carries a fresh region and/or gen, so it can never be mistaken for a live tail. (The root free-list
 // reuse path is orthogonal — tk_free_block still EVICTS the slot on an explicit mem::free, since that
 // recycles an address WITHIN the same region/gen.)
-#define TK_PUSH_HASH_SIZE (1u << 16)   // 65536 single-probe buckets
-static struct { const void *ptr; uint64_t len, cap, esz; tk_region *region; uint64_t region_gen; } tk_push_cache[TK_PUSH_HASH_SIZE];
+// (F1) TK_PUSH_HASH_SIZE and the cache itself moved into tk_task — the witnesses name regions, and
+// a region belongs to exactly one task. The generation stays process-global so the (region, gen)
+// pair a witness records can never be minted twice across tasks.
 static inline unsigned tk_push_slot(const void *p) {
     return (unsigned)((((uintptr_t)p >> 4) * 11400714819323198485ull) >> 48) & (TK_PUSH_HASH_SIZE - 1);
 }
 // (#148 safety) drop EVERY live-tail witness — called by tk_arena_pop before a rewind recycles root
 // addresses (region+gen can't distinguish a recycled address WITHIN the same region).
-static void tk_push_cache_purge(void) { memset(tk_push_cache, 0, sizeof tk_push_cache); }
+static void tk_push_cache_purge(void) {
+    tk_task *t = tk_task_current();
+    memset(t->push_cache, 0, sizeof t->push_cache);
+}
 
 // (S2 Level-1) the region-aware core: the grown buffer is allocated in `region`. `tk_slice_push`
 // (below) is the unchanged default lowering target (root); codegen emits THIS variant only for a
