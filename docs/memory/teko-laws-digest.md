@@ -1676,3 +1676,37 @@ genérico e passa a ser o registo.
 Com registo limitado por contrato, um `Oversize` deixa de ser condição de execução a tratar em ciclo
 e passa a ser **violação de contrato** — quem escreveu não formatou no padrão. É um erro de
 programação, não de ritmo, e o tratamento é outro.
+
+## O `pop` é atómico como o `push` — devolve `T | error | null` (dono, 2026-07-30)
+
+> *"O pop do canal, assim como o push, deve ser atômico, logo `ch.pop()` deve retornar `T | error |
+> null`, onde o error é nosso checked e null quer dizer que **nada foi lido**."*
+
+| resultado | significado |
+|---|---|
+| `T` | leu-se um registo |
+| `null` | **nada foi lido** — não é fecho, não é erro |
+| `error` | o `error` checked da casa, a dizer porquê |
+
+### É o mesmo argumento do `push`, e é por isso que é lei e não gosto
+
+Um `is_empty()` seguido de um `pop` é **TOCTOU**, exactamente como um `pode_gravar?` seguido de um
+`push`: entre a pergunta e a leitura o estado muda. **Um `pop` que devolve o veredicto é atómico** —
+a pergunta e a acção são a mesma operação. A simetria não é estética: é a mesma correcção aplicada
+às duas pontas.
+
+### O que isto OBRIGA a mudar, e é a parte que se perde se não for dita
+
+**O `null` deixa de poder significar fecho.** Um desenho que fizesse
+
+```teko
+match chan_recv(c) { Rec as r => agrega(r); null => break }
+```
+
+está **errado sob esta lei**: `null` é *"agora não havia nada"*, e sair do laço aí é terminar uma
+corrida viva por o consumidor ter chegado à frente do produtor. A terminação tem de vir de outro
+sítio — e já vem: **`loop ch.is_open()`**, a condição que o dono fixou. O `null` mantém o laço a
+girar; o fecho tira-o de lá.
+
+Corolário: as razões de `error` do lado da leitura têm de ser enumeráveis como as do `push`, e a
+guarda é a mesma — **toda a razão tem de ter um teste que a produza**.
