@@ -832,6 +832,18 @@ onde eu aceitei "não pude verificar" como resposta em vez de ter mandado medir.
 **Nenhum agente cria ou edita ficheiro sob `.github/workflows/`, em NENHUMA branch, incluindo
 `theory/**`.**
 
+**ISTO NÃO É HIPÓTESE — JÁ ACONTECEU.** O dono, ao ler a regra: *"foi a falta dessa guarda que fez a
+fast-lane ir para a main na outra sessão"*. A `agent-fast-lane.yml` chegou à `main` exatamente por
+este caminho, numa sessão anterior. A regra tem cicatriz, não suposição, e deve ser lida assim.
+
+**E a ironia, registada honestamente:** o artefacto desse acidente é hoje **load-bearing**. Um
+workflow de `push` dispara da branch onde está, logo a fast-lane funcionaria vivendo só na theory —
+mas `workflow_dispatch` só existe se o ficheiro estiver no **branch default**. Ou seja: é por a
+fast-lane ter ido para a main por engano que o integrador consegue **escolher o runner** e pedir um
+host específico. O acidente produziu a capacidade que hoje se usa. Isso não absolve o mecanismo; diz
+apenas que o resultado de uma contaminação pode ser útil e continuar a ser contaminação — e que a
+próxima pode não ter a mesma sorte.
+
 O mecanismo do risco, que não é óbvio: se o workflow de theory estiver num commit **do agente**, ele
 entra no histórico dele. No momento em que o agente faz cherry-pick ou merge da theory de volta para
 a sua `cargo/**` — o movimento natural, e o que ele vai querer fazer — **o CI restrito viaja com o
