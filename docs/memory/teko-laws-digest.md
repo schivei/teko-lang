@@ -1710,3 +1710,42 @@ girar; o fecho tira-o de lá.
 
 Corolário: as razões de `error` do lado da leitura têm de ser enumeráveis como as do `push`, e a
 guarda é a mesma — **toda a razão tem de ter um teste que a produza**.
+
+## O `Rec` viaja BINÁRIO no túnel (dono, 2026-07-30)
+
+> *"por estar transacionando em um túnel seguro (o usuário não vê a saída até o orquestrador a
+> imprimir), não seria melhor a serialização e desserialização do `Rec` ser binária? Menos itens para
+> trafegar no túnel, canal otimizado, limpo e rápido."*
+
+A premissa é a que decide: **o túnel é interno.** O artefacto legível é o que o **orquestrador
+imprime**, não o que atravessa o canal — logo o canal não paga nada por ser ilegível a olho.
+
+### E há um argumento mais forte do que a velocidade: o ENQUADRAMENTO
+
+Um registo de **uma linha em texto** tem de responder a uma pergunta que não tem resposta boa:
+**e se a carga contiver uma quebra de linha?** E contém — o lado dos regressivos transporta
+**diagnósticos de compilador em texto livre** (é o que `COMPILE_FAIL_HEAD_LINES` existe para cortar,
+e o que *"the build's own output follows IN FULL"* imprime). Com texto:
+
+- ou se **escapa**, e paga-se custo e bugs em cada ponta;
+- ou se **quebra a invariante** de uma linha por registo, e o entrelaçamento volta.
+
+Com **quadro binário prefixado por comprimento**, a carga é **bytes opacos** e o conteúdo **não pode
+corromper o enquadramento**. É correcção, não desempenho. E o `REC_MAX` passa a ser exacto e
+verificável em vez de estimado.
+
+### Precedente na casa, e não é pequeno
+
+O compilador **já escreve um formato binário próprio**: `src/emit/tkb_{buf,frame,read,write}.tks`. O
+idioma existe, a máquina de escrita/leitura existe, e o `os_guard` já viaja lá dentro. **Não se
+inventa um formato — reaproveita-se uma disciplina que já passou pelo fixpoint.**
+
+### O que fica por decidir, e é do desenho
+
+1. **O journal em disco é binário também, ou é a fronteira onde se converte?** Se o orquestrador
+   desserializa e imprime, a conversão tem um sítio único — provavelmente o certo. Mas então o
+   `--replay` lê qual dos dois?
+2. **Ordem de bytes.** Mesma máquina, mesmo processo-pai: não é problema *hoje*. Dizer que é
+   suposição, e não descobrir isso quando alguém puser o túnel entre máquinas.
+3. **Depurar o próprio túnel.** Um canal binário não se lê com `cat`. Se alguma vez fizer falta,
+   faz falta uma ferramenta — e é melhor sabê-lo antes do que a meio de um incidente.
