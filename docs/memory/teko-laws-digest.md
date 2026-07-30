@@ -2047,3 +2047,36 @@ comprimento **continua a fazer falta**.
 **Nada se perde**: o desenho já o tem. O que muda é que ele deixa de ser invenção e passa a ser a
 camada fina que falta ao `STREAM` — e no Linux poderia até desaparecer, se se quisesse pagar
 divergência entre plataformas, que **não** se quer.
+
+## As razões de recusa são FLAGS DA MENSAGEM, não errno do SO (dono, 2026-07-30)
+
+> *"os enumerados que o arquiteto deu podem permanecer, seriam flags da mensagem transportada (um
+> signal aninhado em outro)."*
+
+**Duas camadas, não uma colapsada na outra.** O transporte do SO tem os erros dele (`EAGAIN`,
+`EPIPE`, `ECONNRESET`); as razões semânticas do canal continuam a ser **nossas**, viajando como
+flags no protocolo. Um sinal aninhado noutro.
+
+### E isto resolve uma portabilidade que eu não tinha levantado
+
+`EAGAIN`/`EPIPE` variam de grafia e de disponibilidade entre POSIX e Windows. **Uma flag na nossa
+mensagem é idêntica em toda parte** — a mesma lógica que tornou o `.tkj` inteiramente portátil ao
+tirar os ids de cobertura do canal.
+
+E preserva a guarda do arquiteto — *toda a razão tem de ter um teste que a produza* — porque a razão
+passa a ser **produzida pelo nosso código**, não pelo núcleo. Uma razão produzida pelo kernel é uma
+razão que só se testa provocando o kernel.
+
+### O detalhe que afia a regra, e é demonstrável
+
+Nem todas as razões podem viajar, e a fronteira é exata:
+
+| razão | onde vive |
+|---|---|
+| **`Full`** | **retorno LOCAL do `push`** — não pode ser flag transportada: se o canal está cheio, **não há espaço para a mensagem que diria "estou cheio"** |
+| `Closed` | **flag transportada** — o leitor anuncia o fecho, e a mensagem cabe porque o canal ainda funciona |
+| `NoReader` | **flag transportada** — mesma razão |
+| `NotAProducer` | **retorno local** — é um id inválido, verificável antes de qualquer envio |
+
+A forma do dono aplica-se às que **precisam de viajar**; as outras já são locais por natureza. A
+enumeração fica inteira, e cada razão passa a ter um lugar declarado em vez de um só balde.
