@@ -19,6 +19,40 @@ hipótese, está dito.
 
 
 
+## 0l. O `llvm` FUNCIONOU ONDE CHEGOU — e dois dos meus três sítios eram a perna errada (2026-07-30)
+
+Execução `30535419502` (`5e14c6e`), log integral. **Progresso medido em duas frentes** e um erro meu, o mesmo de sempre.
+
+### O QUE ANDOU
+
+- `unknown function`: **zero** em todo o log. Fechado.
+- Stop nativo, único: `vt_table is not a fat-pointer local (internal)` — degrau 31.
+- `assertion failed`: **duas** ocorrências, o MESMO teste na MESMA perna (Windows).
+- **Zero `skipped`**, e o `no_skips_gate` diz *"every declared row ran. No skips."*
+- **O `regressor wasm` passou a fila do COFF** e avançou para a seguinte: falha agora em `own_cross_arm64_linux_emits_elf`. O `llvm` que eu lá pus **funcionou**.
+
+### A FILA QUE FALHA, POR PERNA — e ler uma e generalizar mente
+
+| perna | `own_native` pára em | `regressor` |
+|---|---|---|
+| `test / linux-x86_64-musl` | `own_cross_x86_64_windows_emits_coff` | — |
+| `Memory paranoid (musl)` | `own_cross_x86_64_windows_emits_coff` | — |
+| `regressor wasm` | **`own_cross_arm64_linux_emits_elf`** (avançou) | — |
+| `test / linux-arm64-glibc` | `own_arith_exit` (A4-fp = degrau 29) | — |
+| `Memory paranoid (arm64-glibc)` | `own_arith_exit` (A4-fp) | — |
+| `test / macos-arm64` | `own_arith_exit` (A4-fp) | — |
+| `test / windows-x86_64` | `own_arith_exit` (`0xC0000005`) | `alias_fat_field` |
+
+### O ERRO, e é a QUARTA vez com a mesma forma
+
+Eu pus `llvm` em **três** sítios que instalavam `clang`. Medido no log, pelas linhas `##[group]Run` de cada perna: **só UM deles era uma perna que corre a suíte** (`regressor-full`). Os outros dois eram `cli-surface-linux-x86_64-glibc` e `seed-debut` — jobs que não correm o corpus. E as pernas que precisavam (`test-linux-*`, `mem-paranoid*`) **não instalam nada**: só correm uma sonda de diagnóstico (`for t in cc clang gcc file python3`) e vivem do que a imagem traz — e a imagem traz `clang` sem `llvm-readobj`.
+
+**Editei onde a string batia, não onde a necessidade estava.** É exactamente a lição do `.exe` (medi dois sítios, eram nove) e a do predicado de gordura (o dono apanhou-a hoje). A regra que eu escrevo para os agentes falhou em mim: **enumerar a família é enumerar quem NECESSITA, não quem casa com o `grep`.**
+
+**Conserto aplicado:** um passo próprio — *"Install the object-format parsers the cross gates read with"* — nas **sete** pernas que correm a suíte (`test-linux-arm64-glibc`, `test-linux-arm64-musl`, `test-linux-x86_64-glibc`, `test-linux-x86_64-musl` e as três `mem-paranoid`), e **revertidos** os dois sítios onde eu não tinha necessidade medida — o comentário que lá pus alegava uma razão que não era verdade naquele job, e um comentário falso no CI é pior que nenhum. Conferido: 7 passos novos, 1 `clang llvm` (o `regressor-full`, medido a funcionar), 2 `clang` sozinhos, YAML válido.
+
+**Não medido, e digo-o em vez de o presumir:** macOS e Windows param antes de chegar às filas de objecto, logo **não sei** se têm os parsers. Quando o degrau 29 e a violação de acesso de Windows fecharem, essas duas pernas dirão.
+
 ## 0k. TERCEIRO REINÍCIO DO CONTENTOR — restaurado de um INSTANTÂNEO ANTIGO (2026-07-30 ~10:19)
 
 Não foi um reinício limpo: a árvore local voltou a **`9bc292a`** (`merge(carga): cargo/20-extern-return-narrowing`), este ficheiro **não existia**, e as worktrees dos agentes de hoje (`wt-d30`, `wt-d31`, `wt-unkfn`, `wt-winleg`) tinham desaparecido — só restavam as de sessões anteriores. Recuperado com `git fetch` + `git checkout -B … origin/…`.
