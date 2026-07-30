@@ -1763,10 +1763,12 @@ tk_str tk_assert_scenario_prefix(void) {
 
 void tk_assert_scenario_ok(void) {
     if (tk_scen_len == 0) tk_panic("assertion failed: scenario_ok — no scenario is named (scenario_begin was never called)");
-    char line[TK_TEST_LABEL_MAX + 4];
-    memcpy(line, tk_scen_name, tk_scen_len);
-    memcpy(line + tk_scen_len, ": ok", 4);
-    tk_println((tk_str){ (const tk_byte *)line, tk_scen_len + 4 });
+    const size_t pre = sizeof TK_SCENARIO_OK_PREFIX - 1;
+    char line[TK_TEST_LABEL_MAX + sizeof TK_SCENARIO_OK_PREFIX + 4];
+    memcpy(line, TK_SCENARIO_OK_PREFIX, pre);
+    memcpy(line + pre, tk_scen_name, tk_scen_len);
+    memcpy(line + pre + tk_scen_len, ": ok", 4);
+    tk_println((tk_str){ (const tk_byte *)line, pre + tk_scen_len + 4 });
     tk_scen_len = 0;
 }
 

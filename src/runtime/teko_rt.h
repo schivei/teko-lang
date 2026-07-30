@@ -219,9 +219,14 @@ void tk_assert_scenario_set(tk_str name);
 // tk_assert_scenario_prefix — `"<name>: "`, or an empty str when no case is named (so an assertion
 // outside a scenario keeps its historic message byte-for-byte).
 tk_str tk_assert_scenario_prefix(void);
-// tk_assert_scenario_ok — announce `<name>: ok` on the CURRENT channel (a test's own channel when one
-// is open, the real stdout otherwise). Panics when no case is named: a silent "ok" for an unnamed
-// scenario is the reporting hole this whole mechanism exists to close.
+// TK_SCENARIO_OK_PREFIX — the fixed word that opens a passing case's announcement, so a `.tkr` row
+// can demand `scenario <name>: ok` and NOT be satisfied by a different case whose name merely ENDS
+// with this one's. Measured on the corpus: `loop_tail_no_break` is a suffix of
+// `fat_loop_tail_no_break`, so without the prefix the first row would pass on the second's line.
+#define TK_SCENARIO_OK_PREFIX "scenario "
+// tk_assert_scenario_ok — announce `scenario <name>: ok` on the CURRENT channel (a test's own channel
+// when one is open, the real stdout otherwise). Panics when no case is named: a silent "ok" for an
+// unnamed scenario is the reporting hole this whole mechanism exists to close.
 void tk_assert_scenario_ok(void);
 // tk_test_begin — open `label`'s channel; every subsequent print is captured, not written.
 void tk_test_begin(tk_str label);
