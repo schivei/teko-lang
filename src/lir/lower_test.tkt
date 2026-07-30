@@ -1424,14 +1424,53 @@ fn lwt_index_of(recv: checker::TExpr, index: checker::TExpr, et: checker::Type) 
     checker::TExpr { kind = checker::TIndex { receiver = recv; index = index }; type = et; line = 0; col = 0 }
 }
 
+/**
+ * The ENTIRE LIR text `lwt_lower_expr_text` produces for `"abc"[0] to i32`: the interned literal,
+ * then the four instructions the indexed byte read costs, and NOTHING for the cast. Every line is
+ * load-bearing — the `rodata` row proves the literal's bytes were interned rather than built at
+ * runtime, `%0` takes the address of that row, `%1` materializes the fat value's length, `%2`
+ * offsets to element 0, `%3` reads ONE byte with `load.i8`, and there is no fifth instruction
+ * because `byte -> i32` is a lossless widen that emits neither a conversion nor a fit guard.
+ *
+ * THERE IS NO `ret` BY CONSTRUCTION, AND THAT IS THE HARNESS AND NOT THE LOWERING.
+ * `lwt_lower_expr_text` frames a synthetic `func @t() -> i64` and then calls `lower_expr` — only
+ * the expression — so no fixture routed through that helper can ever contain a `ret`, whatever it
+ * lowers. The declared `-> i64` is the frame's fixed return type, unrelated to the expression's
+ * own `i32` result. Every sibling expression fixture in this file has the same shape.
+ */
+const LWT_STR_INDEX_BYTE_CAST_LIR: str = "rodata .Lstr0: [97, 98, 99]\nfunc @t() -> i64 {\n  #B0:\n    %0 = global_addr @.Lstr0\n    %1 = const 3\n    %2 = field_addr %0, 0\n    %3 = load.i8 %2\n}\n"
+
+/**
+ * Indexing a `str` reads ONE byte out of the interned literal, and widening that byte to `i32`
+ * emits NOTHING AT ALL — no conversion instruction and no fit guard — because the pair is a
+ * lossless widen (`lower_cast_fit_guard` answers `checker::cast_is_lossless_widen` and returns its
+ * context untouched, so `lower_int_cast` hands the operand's own VReg straight back). A `byte`
+ * value is representable in `i32` under the same bit pattern, so an extend would have nothing to
+ * change; the `load.i8` IS the cast's result.
+ *
+ * WHY IDENTITY AND NOT ONLY ABSENCE. `LWT_STR_INDEX_BYTE_CAST_LIR` is the whole printed text, so
+ * it pins the strong property positively: the literal is interned as three rodata bytes, the read
+ * is one `load.i8` off an offset-0 `field_addr`, and the instruction list STOPS there. An
+ * absence-of-substring assertion cannot say that, and on its own it would even pass if the
+ * lowering stopped producing text at all. The named presences then restate the byte-read route in
+ * its own words, and the `zext`/`sext`/`trunc` absences restate the widen-emits-no-conversion
+ * rule, so a reader sees the rules and not only a golden blob.
+ *
+ * That the loaded byte keeps its VALUE across the widen is proved by value elsewhere by the
+ * cast-width regression fixtures; this fixture owns only the emitted-LIR shape.
+ */
 #test
 fn lwt_lowers_str_index_loads_the_byte_off_rodata() {
     let ix = lwt_index_of(lwt_strlit("abc"), lwt_num_i64(0), checker::Byte { })
     let text = lwt_lower_expr_text(lwt_cast(ix, checker::PrimKind::I32))
+    teko::assert::is_true(text == LWT_STR_INDEX_BYTE_CAST_LIR)
     teko::assert::str_contains(text, "rodata .Lstr0: [97, 98, 99]")
+    teko::assert::str_contains(text, "global_addr @.Lstr0")
     teko::assert::str_contains(text, "field_addr %0, 0")
     teko::assert::str_contains(text, "load.i8")
-    teko::assert::str_contains(text, "zext")
+    teko::assert::is_false(teko::str::contains(text, "zext"))
+    teko::assert::is_false(teko::str::contains(text, "sext"))
+    teko::assert::is_false(teko::str::contains(text, "trunc"))
 }
 
 /** lwt_interp — a `$"…{…}…"` node over `pieces`/`holes`, always no-spec (A1-4, #382). */
