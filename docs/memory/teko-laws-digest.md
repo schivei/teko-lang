@@ -937,3 +937,54 @@ ficheiros.
 **A regra que sai daqui:** um agente que conserta o primeiro falhado tem de **medir e reportar quantos
 testes ficam cegos atrás do NOVO abort**. É esse número, e não a sensação de progresso, que diz ao
 integrador se vale despachar outro imediatamente.
+
+## DECISÃO — DEBUGGER PRÓPRIO (`tdb`), EM TEKO, COMPILADO NATIVO, FORA DE `src/` (dono, 2026-07-30)
+
+Verbatim: *"assim como uma LSP, precisaremos de um debugger próprio, mas o escreveria em native e não
+agora em C. O caso é, gastar energia marcando #line em C é desnecessário. E não colocaria o código
+dentro do src do teko, começaria por um diretório `/tdb` e dentro dele: `tdb.tkp` `main.tks` e
+`/tdb/src`, mas aqui entra o pulo do gato, pois embora executável, ele deveria ser um pacote de
+tooling, mas de início começaríamos como um projeto novo, depois poderia migrar para um repo próprio
+com um nome descente e apropriado."*
+
+**O QUE ISTO FECHA:**
+
+| ponto | estado |
+| --- | --- |
+| debugger próprio | **VAI SER FEITO.** Deixou de ser "orçar para decidir" |
+| `#line` na rota C (a Camada 0 do orçamento) | **MORTO.** *"desnecessário"* — não orçar, não discutir como opcional |
+| linguagem e backend | **Teko, compilado NATIVO.** Não em C |
+| quando | **"não agora"** — depois de a escada de degraus fechar |
+| onde | projeto próprio: `tdb.tkp`, `main.tks`, `tdb/src`. **Fora de `src/`** |
+| natureza | executável **e** pacote de tooling; projeto novo na árvore, **migra depois para repo próprio** |
+
+**A CONSEQUÊNCIA QUE REORDENA O ARCO TODO, e é a razão de esta decisão valer mais que o orçamento:**
+se `tdb` lê as NOSSAS tabelas, **o DWARF deixa de ser pré-requisito e passa a ser INTEROP**. Um
+debugger nosso não precisa de `.debug_info`/`.debug_abbrev`/`.debug_line` nem de CFI — precisa da
+tabela endereço→linha interna e do `.tsym`, que **já existe e já é emitido**. O DWARF passa a servir só
+quem não é nosso: gdb, lldb, `cppdbg`, CodeLLDB. E o item mais caro do orçamento anterior — CodeView no
+Windows — pode apagar-se por completo, porque `tdb` lê tabelas nossas em qualquer contentor.
+
+**O "PULO DO GATO" DELE JÁ EXISTE NA ÁRVORE, medido 2026-07-30.** `tooling/` já tem CINCO projetos
+irmãos, cada um com o seu `.tkp`, e a forma é literalmente "executável que é pacote de tooling":
+
+```
+name = "teko_grammar_gen_vscode"
+source = "src"
+
+[artifact]
+kind = "binary"
+```
+
+**E o achado que decide o desenho:** esses projetos **não dependem uns dos outros pelo sistema de
+pacotes**. `tooling/vscode` lê o **ficheiro JSON** que `tooling/shared` emite — acoplamento por
+**FORMATO DE FICHEIRO**, não por dependência de código, e nenhum deles alcança `../src`. É exactamente
+isso que torna barata a migração para repo próprio que o dono quer.
+
+**REGRA QUE SAI DAQUI:** `tdb` acopla-se ao compilador **por formato** (o `.tsym`, ou o que o suceda) e
+**nunca importando `src/`**. Um `tdb` que importa o checker nunca sai deste repo.
+
+**A GALINHA E O OVO, nomeada e não resolvida:** `tdb` é compilado pelo backend nativo e serve para
+depurar o próprio compilador. Se o nativo estiver quebrado, `tdb` está quebrado. E atenção: *"não
+escrever em C"* e *"não compilar pela rota C"* são coisas **diferentes** — a primeira é ordem do dono,
+a segunda não foi dita. Se a rota C for a rede de segurança do arranque, é decisão dele.
