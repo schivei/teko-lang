@@ -470,10 +470,16 @@ par `byte-view round-trip`) passarem a correr. Prova host-independente disponív
 isso: `isel_x86_64_test.tkt` já tem um descritor `WIN64` (linha 482) e pode afirmar a sequência emitida
 para `tk_str_eq` sem runner nenhum.
 
+**A CONTRAPROVA, medida em Linux na gen2 desta branch:** `teko: regression ok regressor.tkr (18
+builds, 14.1s)` — **18**, com `alias_fat_field (own-native)` E `byte-view round-trip (own-native)` nas
+filas. Windows fez **14** e parou. O mesmo ficheiro, o mesmo compilador, dois números: a diferença não
+é o que cada perna tem para correr, é onde cada perna PARA. Nada em `regressor.tkr` é saltado em
+Windows por capacidade — é o corte da primeira falha.
+
 **E uma lição de instrumento, que é minha:** `(N builds)` no relatório do regressor é o número de filas
-que CORRERAM, não o número de filas do ficheiro. Comparar esse N com o `grep -c "When built and run"`
-do `.tkr` diz de graça quantas filas ficaram por correr — e foi só essa subtracção que separou "duas
-features estouram por acaso" de "uma causa, e a segunda fixtura nem chegou a ser medida".
+que CORRERAM, não o número de filas do ficheiro. Comparar esse N entre pernas — ou com o `grep -c "When
+built and run"` do `.tkr` — diz de graça quantas filas ficaram por correr, e foi só essa subtracção que
+separou "duas features estouram por acaso" de "uma causa, e a segunda fixtura nem chegou a ser medida".
 
 ## 0e. O `.exe` FECHADO — e o brief que eu escrevi estava incompleto (2026-07-30, `cff49b4`)
 
