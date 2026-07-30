@@ -19,6 +19,42 @@ hipótese, está dito.
 
 
 
+## 0o. DEGRAU 29 DRENADO — o A4-fp morreu, e ele achou um valor errado CALADO no x86 (2026-07-30)
+
+`cargo/0.3.1.0-degrau-29` @ `1a1ed32` drenado. 15 ficheiros, +1686/−185. `drain_guard` OK, `.github/` intocado.
+
+**Conferências no merge, todas limpas:** `fn` do `corpus.tks` **235 → 252** (subiu), `fn` do `lower.tks` **547 → 549** (subiu); **zero** splices e zero desequilíbrio de chaves nos 14 `.tks`/`.tkt` tocados; correspondência da fixture nas duas direcções — 138 chamadas, todas definidas, e a única definida-e-nunca-chamada continua a ser a excepção legítima `f_fat_field_len`.
+
+### A PARAGEM MORREU, e as três pernas presas nela ficam livres
+
+`A4-fp: float-op / FPR encoding deferred to 0.3.1` era o que prendia `test / linux-arm64-glibc`, `Memory paranoid (arm64-glibc)` e `test / macos-arm64` na PRIMEIRA fila do `own_native`. O projecto passa a emitir para `arm64-linux` e `arm64-macos`.
+
+**Codificações cruzadas contra `llvm-mc -triple=aarch64 -show-encoding`, nunca derivadas do próprio codificador** — e a certificação é número-por-número: **205 formas FP distintas** extraídas do objecto emitido, reassembladas e comparadas palavra a palavra, **0 divergências**; desmontagem completa **33 100 instruções, 0 `<unknown>`**.
+
+### O DEFEITO NOVO, e é a MESMA FAMÍLIA do degrau 27
+
+`mut n: f32 = -7.25` dava **`-7.2500028745271266`** pela rota própria e `-7.25` pela rota C; **atravessando uma chamada dava `0`**. E é **no x86-64**, não no arm64 que o agente foi fechar. O checker não propaga o `f32` esperado através do **menos unário**, e a lowering negava em `f64` sem estreitar — um double num registo que tudo a jusante lia à largura simples. Corrigido em `narrow_unary_float_to_result`.
+
+**É o terceiro membro desta família num dia:** o renderizador `f32` do degrau 27 (`$"{f:F2}"` de `2.5` dava `0.10` no nativo), o buraco de largura do `MCvt` no arm64, e agora o menos unário no x86. **A lição é sobre onde procurar:** o valor errado calado aparece sempre onde uma largura é assumida em vez de propagada, e as fixtures que o apanham são as que afirmam TEXTOS DIFERENTES para os MESMOS decimais (`0.1f+2.5f` = `2.5999999046325684` contra `2.6000000000000001`) — comparar valores não apanha, comparar a RENDERIZAÇÃO apanha.
+
+Outro achado seu, também calado: `FCmpLt`/`FCmpLe` iam para o `lt`/`le` do inteiro, que leem VERDADE num `FCMP` não-ordenado — **`nan < x` dava true**. Passam a `lo`/`ls`, cruzado contra `clang --target=aarch64-linux-gnu`.
+
+### RITUAL, e a prova que vale mais que o verde
+
+`native_dry_gate` **verde com assinatura idêntica**, medida com a **gen2 da árvore** (e registado o contraste: com a **gen1 da semente** pára noutro sítio, `… emit_u32_le` — as gerações param em sítios diferentes, como está na lei); **fixpoint `VERDICT: PASSED — gen2 == gen3 byte for byte`**, mesmo sha256, 4 232 496 bytes; **unitários na gen2 1152/1152 `ok`**, zero pânicos, reconciliados um a um (1140 + 14 − 2); corpus `own_native` **`exit 42` nas duas rotas**; quatro alvos emitem.
+
+**Prova por reversão:** revertendo SÓ dois braços de `encode_inst_word`, a paragem volta com o texto exacto do CI nos dois alvos arm64. Revertendo a correcção de largura, a rota própria falha a fixture `f32` **e a rota C fica verde** — a divergência que a fixture existe para caçar. Isto é a asserção que eu não conseguia fazer de fora.
+
+### PARAGENS QUE FICAM NOMEADAS, não escondidas
+
+`pin_args`/`select_param` com >8 argumentos de uma classe (janela de arity, **simétrica** GPR/FPR — não é buraco de floats); `UCVTF` codifica e é testado mas é **inalcançável** porque `LUnOp` não declara `IToF` sem sinal; `minst_interp` sem a família float (espelha o gap do interp da LIR); `%` sobre floats é **recusado** pelo checker e `x / 0.0` **armadilha**.
+
+### O QUE FICOU POR MEDIR, e a razão é a máquina
+
+A fase de **regressões** dentro do `teko test .` foi **inanida por contenção** — três suítes de agentes em simultâneo, 15 GB/16 GB, a dele a **7 % de CPU**, um projecto em 40 minutos. Parou-a para libertar a máquina e mediu o **canal directo** em vez dela. A fase unitária está completa e verde. **Isto é resposta aceitável** e foi o que eu autorizei: dizer qual fase ficou por medir vale mais que repetir três vezes contra uma máquina saturada.
+
+**COLISÃO QUE FICA PARA O PRÓXIMO DRENO:** ele tocou **`src/lir/lower.tks`** em três sítios (`lower_unary`, `lower_int_to_f32` e duas funções novas) — o ficheiro que eu lhe pedira para evitar, e tocou-o com razão, porque o defeito era da sua família. **`cargo/0.3.1.0-degrau-31` está VIVO no mesmo ficheiro** (a guarda de divergência gordo/escalar). Esse merge resolve-se **por inspecção**, nunca com `--union`, e a contagem de `fn` do `lower.tks` (agora **549**) não pode descer.
+
 ## 0n. A PERNA WINDOWS DRENADA, e o agente REFUTOU a minha inferência (2026-07-30)
 
 `cargo/0.3.1.0-windows-leg-2` @ `0c81989` drenado. `drain_guard` OK. Conferências no merge: `fn` do `corpus.tks` **235 → 235** (a branch não tocou a fixture), zero chamadas do teste sem definição, e a **terceira direcção** medida — as quatro novas (`mingw_path_evidence`, `mingw_triple_evidence`, `MINGW_PATH_EVIDENCE_PHRASE`, `MINGW_TRIPLE_EVIDENCE_PHRASE`) são **privadas**, e o teste vive na mesma namespace, logo a visibilidade chega. Os **três** testes onde havia um estão verificados por nome (`..._convicted_by_its_path_without_any_probe`, `..._innocent_spelling_is_left_for_the_triple_to_judge`, `..._triple_reading_convicts_the_gnu_abi_and_acquits_the_unknown`).
