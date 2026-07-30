@@ -766,23 +766,47 @@ const WINDOWS_OS_NAME: str = "windows"
  * WINDOWS_CC_NAME — the compiler a Windows host compiles the emitted C with: `clang`, never the
  * `cc` on the PATH.
  *
- * MEASURED, on the project's own Windows runner: `cc` there IS MinGW (`cc → /c/mingw64/bin/cc`),
- * so "the host default" and "the banned toolchain" were the same file, and the LLVM already on the
- * image was never reached. Resolving `clang` by name is what makes the ban real on the C route
- * instead of only on the native one.
+ * THIS ONE TOKEN IS THE WHOLE FIX. Measured on the project's own Windows runner: `cc` there IS MinGW
+ * (`cc → /c/mingw64/bin/cc`), so "the host default" and "the banned toolchain" were the same file,
+ * while the LLVM already installed on the image was never reached. Naming `clang` reaches it.
  *
- * WHY NOT `cl.exe`: the emitted C uses GNU statement-expressions (`({ ... })`) plus `__builtin_`/
- * `__attribute__`, which C23 does not standardise and MSVC's own compiler rejects. clang accepts
- * them even while targeting MSVC, because the COMPILER is clang — MSVC contributes its headers,
- * libraries and linker, nothing more. Rewriting the emitter to drop those extensions is a cost the
- * owner declined for now.
+ * AND THAT clang ALREADY TARGETS MSVC BY ITSELF, measured on the same image:
+ *
+ *     clang version 20.1.8
+ *     Target: x86_64-pc-windows-msvc
+ *     InstalledDir: C:\Program Files\LLVM\bin
+ *
+ * and `clang -### probe.c` with NO target flag invokes
+ * `...\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\...\bin\Hostx64\x64\link.exe` with
+ * `-defaultlib:libcmt` and the MSVC `-libpath:`. So MSVC headers, MSVC libraries and the MSVC linker
+ * are what this compiler chooses on its own — the defect was never a missing flag, it was resolving
+ * the wrong compiler.
+ *
+ * WHY NOT `cl.exe`, MEASURED RATHER THAN ASSUMED, on that runner:
+ *
+ *     clang -std=c23                                  ACCEPTS a `({ ... })` statement-expression
+ *     clang --target=x86_64-pc-windows-msvc -std=c23  ACCEPTS
+ *     cl                                              REJECTS
+ *
+ * The emitted C uses statement-expressions plus `__builtin_`/`__attribute__`, which C23 does not
+ * standardise. clang accepts them while targeting MSVC because the COMPILER is clang; MSVC
+ * contributes headers, libraries and linker, nothing more. `cl.exe` is not even invokable on that
+ * image (it lives only inside a Visual Studio developer shell), so nothing here may depend on it.
  */
 const WINDOWS_CC_NAME: str = "clang"
 
 /**
- * WINDOWS_MSVC_TRIPLE — the target triple that pins the Windows compiler default to the MSVC ABI:
- * MSVC headers, MSVC libraries, and `lld-link`/`link.exe` as the linker. Its `-msvc` tail is
- * exactly what `triple_is_mingw` refuses to confuse with MinGW's `-gnu` one.
+ * WINDOWS_MSVC_TRIPLE — the ABI the Windows default DECLARES it wants: MSVC headers, MSVC libraries
+ * and `lld-link` as the linker. Its `-msvc` tail is exactly what `triple_is_mingw` refuses to
+ * confuse with MinGW's `-gnu` one.
+ *
+ * A BELT, NOT THE FIX, and the distinction is measured: on the project's own Windows runner the
+ * `-###` invocation clang produces WITH `--target=x86_64-pc-windows-msvc` is IDENTICAL to the one it
+ * produces without it — there, the flag is a no-op, because that clang's own default target is
+ * already this triple. It is carried anyway so the ABI is a DECLARED intention rather than an
+ * inherited accident: an image whose clang defaulted to `...-windows-gnu` would otherwise hand the C
+ * route straight back to MinGW, and the flag is what makes that image fail loudly (through
+ * `invoke_cc`'s ban) instead of quietly.
  */
 const WINDOWS_MSVC_TRIPLE: str = "x86_64-pc-windows-msvc"
 
@@ -817,8 +841,15 @@ type CcChoice = struct {
  *
  * THE WINDOWS ARM IS THE WHOLE POINT (owner: *"odeio, eu disse ODEIO o uso de mingw, deveria usar
  * MSVC em Windows"*). On that host the PATH's `cc` is MinGW, so the old bare-`cc` default handed
- * the C route to the banned toolchain silently. Naming clang and its MSVC target makes the honest
- * Windows toolchain the DEFAULT rather than something a lane has to remember to pass.
+ * the C route to the banned toolchain silently. The CHOICE OF COMPILER is what fixes it — that
+ * runner's clang already targets MSVC on its own (`WINDOWS_CC_NAME`) — and the target flag rides
+ * along to make the ABI a declared intention rather than an inherited default
+ * (`WINDOWS_MSVC_TRIPLE`).
+ *
+ * THE BAN DOES NOT FIRE ON THE HONEST PATH, and that is asserted, not hoped: the triple this default
+ * aims at is `...-windows-msvc`, and `triple_is_mingw` is false for it
+ * (`a_legitimate_toolchain_triple_is_not_mingw`). A guard zealous enough to refuse the correct
+ * toolchain would be worse than the hole it closes.
  *
  * EVERY OTHER HOST IS BYTE-UNCHANGED: `HOST_CC_NAME` with no flag, exactly what the line carried
  * before, which is the condition for the product fixpoint to keep closing on Linux and macOS.
