@@ -19,6 +19,50 @@ hipótese, está dito.
 
 
 
+## 0r. TRÊS PERNAS VERDES — a primeira vez neste arco (2026-07-30, `99a859a`)
+
+Log integral da execução `30545507942`. **O degrau 29 pegou no CI: `A4-fp: float-op` tem ZERO ocorrências** em todo o log, e as guardas de objecto passaram — **zero `check_coff: FAIL`, zero `check_elf: FAIL`** (o `llvm` + `lld` fecharam-nas).
+
+| perna | regressões | veredito |
+|---|---|---|
+| `regressor wasm` | **11 run, 0 skipped, 0 failed** | **VERDE** |
+| `test / linux-x86_64-musl` | 11 run, **1 skipped**, 0 failed | **VERDE** |
+| `Memory paranoid (musl)` | 11 run, **1 skipped**, 0 failed | **VERDE** |
+| `test / linux-arm64-glibc` | 11 run, 0 skipped, 1 failed | `exit 25` |
+| `Memory paranoid (arm64-glibc)` | 11 run, 0 skipped, 1 failed | `exit 25` |
+| `test / macos-arm64` | 11 run, 0 skipped, 1 failed | `exit 25` |
+| `test / windows-x86_64` | 11 run, 0 skipped, 2 failed | `0xC0000005` |
+
+**Confirmação por ausência, e é uma medição válida:** não chegou webhook de falha para as três primeiras. As pernas que falharam mandaram webhook; essas não.
+
+O `1 skipped` é a fila `wasm32-wasi` a **saltar honestamente** por falta de `wasmtime` nessas duas pernas. **Fica registado, não consertado:** o desenho já rota essa fila para a perna `regressor wasm` (que instala `wasmtime` e dá `0 skipped`), e o `no_skips_gate` corre lá. Instalar `wasmtime` em mais duas pernas é churn de CI para apagar um salto que já tem quem o prove. **Se o dono quiser zero saltos em todas as pernas, é uma palavra e dois `apt`.**
+
+### O `exit 25` DE arm64 E macOS: valor errado CALADO, e a fila diz qual
+
+```
+own_arith_exit[0]: exit 25, expected 42
+  captured stdout tail:  answer=42!
+```
+
+**O programa correu até ao fim** — imprimiu `answer=42!` — e saiu 25. `main.tks:26` → **`f_push_class_in_loop`** (`corpus.tks:555`), cujo doc diz: *"a class instance pushed once per iteration must read back as its own iteration's value, through a method as well as a field"*. É a família da **cópia de agregado**, e é **gémeo divergente por ARQUITECTURA**: as três pernas x86_64 passam a mesma fila.
+
+**Pista adjacente, medida pelo agente do degrau 31 e não consertada:** um campo de struct **por valor** de tipo nomeado **alia** a origem em vez de copiar na rota nativa (`h.p.a` dá 1 na rota C e 99 na nativa) — mas ele mediu em **linux-x86_64**, onde a fila 25 passa. **Pode ser a mesma raiz com dois sintomas, ou duas coisas.** Despachado com ordem de medir, não de assumir.
+
+### WINDOWS: a fase unitária subiu de 368 → 1112, e aborta MAIS ADIANTE
+
+```
+test teko::process::verdict_channel_path_reads_the_env_var ... ok
+test teko::process::verdict_emit_appends_to_the_named_channel ... assertion failed: is_true
+```
+
+As outras seis pernas arrancam **1167**. O conserto da asserção mingw pegou (era ali que abortava aos 368) e **descobriu a seguinte da mesma forma**: mais uma que fala do ambiente do host. O caminho lê-se bem (`..._reads_the_env_var` passa) e o que quebra é **acrescentar ao ficheiro**. Despachado junto com a ABI de Win64, que é da mesma perna.
+
+**`assertion failed` em todo o log: duas ocorrências, e são esta, na mesma perna.** Fora de Windows, zero.
+
+### O NÚMERO DA SUÍTE SUBIU: 1140 → 1167
+
+Os drenos de hoje trouxeram testes: **1167** em seis pernas. O self-build também cresceu — **144 ficheiros** (era 143), **checker 6525 itens** (era 6462), **consteval 599** (era 576).
+
 ## 0q. **50 DIVERGÊNCIAS SEM O CONSERTO, 0 COM ELE** — a resposta à pergunta do dono (2026-07-30)
 
 `cargo/0.3.1.0-degrau-31` @ `4264f7d` drenado. O dono perguntou: *"não seria mais produtivo validar tudo que deveria ser e não é? E corrigir de uma vez ao invés de ficar teste a teste?"* **A resposta tem um número:**
