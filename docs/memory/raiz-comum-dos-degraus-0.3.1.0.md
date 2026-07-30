@@ -1917,3 +1917,68 @@ Procurar deliberadamente **pares que deviam concordar e não concordam**:
 
 Cada par que divergir é um bug já presente, não um por vir. **Provavelmente rende mais que subir
 degraus às cegas** — mas não cabe na esteira a fechar; fica proposto para depois da promoção.
+
+## A varredura FOI feita, e rendeu 50 (medido 2026-07-30, degrau 31)
+
+A secção anterior fecha com *"a varredura que ainda não fizemos"* e propõe procurar deliberadamente
+pares que deviam concordar. Um desses pares foi varrido, com instrumento, e o número é o argumento:
+
+| par | instrumento | divergências no fonte do próprio compilador |
+|---|---|---|
+| predicado gordo SINTÁCTICO (`typeexpr_is_fat`) contra a verdade do checker (`resolve_type` + `is_fat_type`) | `teko::lir::fat_divergence_guard` | **50** antes do conserto, **0** depois |
+
+**Cinquenta**, todas da mesma classe — um parâmetro anotado com um alias QUALIFICADO de um gordo
+(`vt_table: checker::TypeTable`, `table: checker::TypeTable`, …) — e **nenhuma visível** antes de a
+guarda existir. O self-build só mostrava UMA de cada vez, e mostrava-a como paragem interna num
+módulo (`teko::codegen::cg_pair_is_iface_vtable`) que nada tinha a ver com a causa.
+
+### O que a varredura ensinou, e não estava previsto
+
+**1. O predicado sintáctico não nasceu por desleixo — nasceu por não ter a quem perguntar.**
+`checker::TFunction.params` é `[]parser::Param`, *"carried from the parser unchanged"*, e um
+`StructBody` carrega só `type_ann`. O checker resolve o tipo de RETORNO para a TAST e **nunca** os de
+PARÂMETRO nem de CAMPO. Não há resposta gravada para o backend ler nesses dois sítios. A hipótese
+"é redundante, apaga-se" não sobrevive à `tast.tks`.
+
+**2. A razão profunda é a FORMA DA TABELA, e é a segunda cara do mesmo padrão de gémeos.**
+`checker::type_table_of` chaveia CANONICAMENTE (`name = "teko::checker::TypeTable"`, `namespace = ""`);
+o braço qualificado do `resolve_type` compara o `name` da entrada com o ÚLTIMO SEGMENTO do caminho e
+o `namespace` com o qualificador. Contra chaves canónicas os dois testes falham para todo o tipo com
+namespace. **O resolvedor do checker não consegue consultar a tabela que o backend recebe** — e é por
+isso que o backend cresceu uma resolução própria e mais fraca. Duas formas da mesma tabela, uma
+protegida e uma esquecida: o padrão de §gémeos outra vez, agora numa estrutura de dados.
+
+**3. Uma guarda tem de ser provada por inversão como qualquer outra coisa.**
+A primeira versão desta guarda reportou **zero** sobre os 143 ficheiros — enquanto a MESMA build
+continuava a parar no `vt_table`. Não era tolerante: era **cega**, exactamente pelo ponto 2. Uma
+guarda que não pode falhar não é prova; é decoração. O `checker::type_table_rekeyed` existe só para o
+oráculo poder responder.
+
+**4. As duas metades da mesma divergência falham DIFERENTE, e só uma é ruidosa.**
+Mesmo alias qualificado, duas colocações:
+
+| colocação | consumidor | sintoma |
+|---|---|---|
+| PARÂMETRO | `bind_param` / `append_param_ltypes` | paragem honesta — `` `vt_table` is not a fat-pointer local `` |
+| CAMPO | `field_layout_size` / `field_layout_align` | **silêncio**: 8 bytes reservados para uma escrita de 16, e o campo seguinte relido como comprimento |
+
+Medido: um campo aliased a `str` devolvia o `43` do vizinho onde a rota C devolvia `5`. **Quem
+perseguisse só a paragem fechava metade do defeito e não saberia.**
+
+### O que fica para quem vier
+
+A guarda é o molde, não o fim. O mesmo instrumento aplica-se a cada par da lista de §gémeos, e o
+`cg_niche_is_fat` (`src/codegen/codegen.tks`) é um TERCEIRO decisor da mesma pergunta, sobre o tipo
+resolvido, que **não** foi varrido aqui.
+
+### Divergência ADJACENTE, medida e NÃO consertada (degrau próprio)
+
+Um campo de struct por VALOR de tipo nomeado **não copia** na rota nativa — alia a origem. Medido nas
+duas rotas com nome NU e com nome QUALIFICADO, logo **não** é da família do alias qualificado:
+
+```
+mut t = Trio { a = 1; b = 2; c = 3 }
+let h = HB { p = t; n = 44 }
+t.a = 99
+h.p.a   -->  rota C: 1 (correcto)   rota nativa: 99 (alias, não cópia)
+```
