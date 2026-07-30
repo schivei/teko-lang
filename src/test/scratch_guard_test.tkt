@@ -65,13 +65,13 @@ fn sg_every_scratch_literal_is_scoped() {
  */
 #test
 fn sg_the_guard_rejects_a_planted_violation() {
-    teko::assert::is_true(sg_line_violates("    let w = \".regr-pool-planted\""))
-    teko::assert::is_true(sg_line_violates("    let p = \"bin/.regr-work/planted\""))
-    teko::assert::is_true(sg_line_violates("    let c = \"/tmp/.planted.chan\""))
-    teko::assert::is_false(sg_line_violates("    let w = teko::test::scoped(\".regr-pool-planted\")"))
-    teko::assert::is_false(sg_line_violates("    let p = teko::test::scoped(\"bin/.regr-work/planted\")"))
-    teko::assert::is_false(sg_line_violates("    teko::assert::eq_str(bin_path_for(t), \"bin/teko\")"))
-    teko::assert::is_false(sg_line_violates("    let x = \"out/x\""))
+    teko::assert::is_true(sg_line_violates("    let w = \".regr-pool-planted\"", sg_scratch_needles()))
+    teko::assert::is_true(sg_line_violates("    let p = \"bin/.regr-work/planted\"", sg_scratch_needles()))
+    teko::assert::is_true(sg_line_violates("    let c = \"/tmp/.planted.chan\"", sg_scratch_needles()))
+    teko::assert::is_false(sg_line_violates("    let w = teko::test::scoped(\".regr-pool-planted\")", sg_scratch_needles()))
+    teko::assert::is_false(sg_line_violates("    let p = teko::test::scoped(\"bin/.regr-work/planted\")", sg_scratch_needles()))
+    teko::assert::is_false(sg_line_violates("    teko::assert::eq_str(bin_path_for(t), \"bin/teko\")", sg_scratch_needles()))
+    teko::assert::is_false(sg_line_violates("    let x = \"out/x\"", sg_scratch_needles()))
 }
 
 /**
@@ -140,7 +140,7 @@ fn sg_is_tkt(name: str) -> bool { teko::str::ends_with(name, ".tkt") }
 fn sg_unscoped_in_file(path: str) -> str {
     let text = match teko::io::read_file(path) { str as s => s; error => return teko::str::concat(path, ": unreadable") }
     if !sg_text_mentions_scratch(text) { return "" }
-    let bad = sg_first_violating_line(text)
+    let bad = sg_first_violating_line(text, sg_scratch_needles())
     if bad.len == 0 { return "" }
     teko::str::concat(path, ": ", bad)
 }
@@ -152,24 +152,25 @@ fn sg_unscoped_in_file(path: str) -> str {
  * That is not a micro-optimisation: `teko::list::push` copies, so a list of a 1400-line file is
  * quadratic in the file, and the five files that reach this point are the biggest `.tkt` in the tree.
  *
- * @param text  the file's whole text
- * @return      the offending line, or "" when there is none
+ * @param text     the file's whole text
+ * @param needles  the quote-prefixed scratch prefixes, built ONCE by the caller
+ * @return         the offending line, or "" when there is none
  */
-fn sg_first_violating_line(text: str) -> str {
+fn sg_first_violating_line(text: str, needles: []str) -> str {
     mut start: u64 = 0
     mut i: u64 = 0
     loop {
         if i >= text.len { break }
         if text[i] == b'\n' {
             let line = teko::str::slice(text, start, i)
-            if sg_line_violates(line) { return line }
+            if sg_line_violates(line, needles) { return line }
             start = i + 1
         }
         i = i + 1
     }
     if start >= text.len { return "" }
     let last = teko::str::slice(text, start, text.len)
-    if sg_line_violates(last) { return last }
+    if sg_line_violates(last, needles) { return last }
     ""
 }
 
@@ -206,12 +207,13 @@ fn sg_text_mentions_scratch(text: str) -> bool {
  * a line merely because it looked like a comparison — is what would make the guard blind, so that is
  * not done.
  *
- * @param line  one source line
- * @return      true iff it hard-codes a scratch path
+ * @param line     one source line
+ * @param needles  the quote-prefixed scratch prefixes, built ONCE by the caller
+ * @return         true iff it hard-codes a scratch path
  */
-fn sg_line_violates(line: str) -> bool {
+fn sg_line_violates(line: str, needles: []str) -> bool {
     if teko::str::contains(line, SG_WRAPPER) { return false }
-    sg_line_has_literal(line, sg_scratch_needles())
+    sg_line_has_literal(line, needles)
 }
 
 /**
