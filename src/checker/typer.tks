@@ -4399,9 +4399,19 @@ fn field_write_root_writable(receiver: parser::Expr, env: Env) -> error | null {
 
 /**
  * type_field_assign — type a FIELD-target assignment `recv.field op= value` (#88). The parser routes
- * EVERY `recv.field = …` here; this branch decides Ref-deref (`r.value` on a `Ref<T>` — the legacy
- * MEM-1b-ii path, preserved) versus a struct/class field WRITE, enforcing write-visibility ==
- * read-visibility (the RULING) and the `let`-protects-every-level guard above.
+ * EVERY `recv.field = …` here; this branch decides Ref-deref versus a struct/class field WRITE.
+ *
+ * Typing the LHS field-access EXPR first is load-bearing, not merely convenient: it resolves the
+ * receiver and field type AND enforces read-side visibility, so a private class field written from
+ * outside is rejected with the SAME "field is private to its declaring class" diagnostic a READ
+ * raises — write-permission == read-permission (the RULING).
+ *
+ * The Ref-deref branch is the legacy MEM-1b-ii path, preserved: `r.value op= x` on a `Ref<T>` writes
+ * THROUGH the reference, detected from the RECEIVER TYPE (a `Ref<T>` receiver plus the field name
+ * `value`), and emits the same deref-shaped `TAssign` (kind `RefDeref`, `name` = the ref handle) the
+ * old parser produced, so downstream and the TKB layout stay byte-identical for existing Ref writes.
+ * Every other receiver is a struct/class field write and passes `field_write_root_writable`, the
+ * `let`-protects-at-every-level guard.
  *
  * @param a      the raw assignment (`a.target` is the `FieldAccess` LHS)
  * @param env    the typing environment
@@ -4411,18 +4421,10 @@ fn field_write_root_writable(receiver: parser::Expr, env: Env) -> error | null {
  *               value does not match the field type
  */
 fn type_field_assign(a: parser::Assign, env: Env, table: TypeTable) -> TypedStmt | error {
-    // Type the LHS field-access EXPR — this resolves the receiver + field type AND enforces read-side
-    // visibility (a private class field written externally is rejected here with the SAME "field is
-    // private to its declaring class" diagnostic a read raises — write-permission == read-permission).
     let lhs = match type_expr(a.target, env, table) { TExpr as te => te; error as e => return e }
     let lhs_fa = match a.target.kind { parser::FieldAccess as fa => fa; _ => return error { message = "assignment target is not a field access (internal: parser guarantees a field LHS)" } }
     let recv = match type_expr(lhs_fa.receiver, env, table) { TExpr as te => te; error as e => return e }
     let field_t = lhs.type
-
-    // (MEM-1b-ii, preserved) `r.value op= x` on a `Ref<T>` — write THROUGH the reference. Detected from
-    // the RECEIVER TYPE: a `Ref<T>` receiver + field `value`. Emit the SAME deref-shaped TAssign
-    // (kind=RefDeref, name=the ref handle) the old parser produced, so downstream / the TKB layout stay
-    // byte-identical for existing Ref writes.
     let ref_inner = match recv.type { Reference as rf => rf.inner; _ => Void { } }
     let is_ref_deref = match recv.type { Reference => (lhs_fa.field == "value"); _ => false }
     if is_ref_deref {
@@ -4435,9 +4437,6 @@ fn type_field_assign(a: parser::Assign, env: Env, table: TypeTable) -> TypedStmt
         return TypedStmt { node = TAssign { kind = parser::AssignKind::RefDeref; name = ref_name; op = a.op; bound = ref_inner; value = dv; deref = true; target = no_texpr() }; env = env }
     }
 
-    // A struct/class FIELD write. Structs are VALUE types → the receiver must be a MUTABLE lvalue (its
-    // root variable a `mut` binding — the RULING). Classes are REFERENCE types (the value is a pointer;
-    // mutation flows through it — like a `Ref<T>`), so the handle need not be `mut`.
     match field_write_root_writable(lhs_fa.receiver, env) { error as e => return e; null => { } }
 
     let v = match type_expr(a.value, env, table) { TExpr as te => te; error as e => return e }
@@ -5871,6 +5870,22 @@ fn discard_param_type(gov: parser::Function | null, idx: u64, table: TypeTable, 
  *                           inherits its OWNER type's unsafe-ness (`method_is_effective_unsafe`)
  */
 /**
+ * canonical_base_type — the CANONICAL type of the injected `base` handle a subclass method reaches
+ * its inherited members through (#109 W3 / #152). `base_name` arrives PRE-QUALIFIED from
+ * `canon_class_bases` (a cross-namespace base is already exact); a BARE name — unresolvable, or
+ * declared at the root — is qualified by the class's own namespace.
+ *
+ * @param base_name  the base class name, pre-qualified or bare
+ * @param cur_ns     the namespace of the class whose method is being typed
+ * @return           the base handle's canonical `Named` type
+ * @since            0.3.1
+ */
+fn canonical_base_type(base_name: str, cur_ns: str) -> Type {
+    if name_qualifier(base_name) != "" { return Named { name = base_name } }
+    Named { name = qualify(cur_ns, base_name) }
+}
+
+/**
  * is_method_receiver — is parameter `i` the method's RECEIVER (the implicit `self`)? The receiver is
  * the only parameter the parser leaves UNTYPED, and it can only be the first one; every other
  * parameter carries its annotation from source.
@@ -5947,7 +5962,7 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
         local = define(local, f.params[i].name, pt, is_method_receiver(f, i))
         i++
     }
-    if inject_base_binding { local = define(local, base_binding_name, Named { name = if name_qualifier(base_name) != "" { base_name } else { qualify(env.cur_ns, base_name) } }, true) }   // (#109 W3 / #152) canonical: base_name arrives PRE-QUALIFIED from canon_class_bases (cross-ns exact); a bare (unresolvable/root) one qualifies by the class's own ns
+    if inject_base_binding { local = define(local, base_binding_name, canonical_base_type(base_name, env.cur_ns), true) }
     let ret = match function_return(f, tbl, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the fn's enclosing namespace
     if is_ref_null_variant(ret) { return error { message = "a function cannot return an optional reference (`Ref<T> | null`) — references are pass-down only (R3)" } }
     if f.is_extern {
