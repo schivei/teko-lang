@@ -823,3 +823,30 @@ tempo de parede sem forma nenhuma de ler o resultado.
 O corolário para o integrador: **ler o CI de theory é trabalho meu, não do agente.** Se eu não o
 fizer, o agente entrega sobre suposição — e foi exatamente o que aconteceu com a relocação arm64,
 onde eu aceitei "não pude verificar" como resposta em vez de ter mandado medir.
+
+### O CI de theory é do INTEGRADOR, nunca do agente — e a razão é contaminação (dono, 2026-07-30)
+
+> Logo, melhor tu mesmo criar o CI e não o agente, para evitar que ele faça um cherry-pick da theory
+> para a branch de trabalho e colha o CI restrito junto
+
+**Nenhum agente cria ou edita ficheiro sob `.github/workflows/`, em NENHUMA branch, incluindo
+`theory/**`.**
+
+O mecanismo do risco, que não é óbvio: se o workflow de theory estiver num commit **do agente**, ele
+entra no histórico dele. No momento em que o agente faz cherry-pick ou merge da theory de volta para
+a sua `cargo/**` — o movimento natural, e o que ele vai querer fazer — **o CI restrito viaja com o
+conteúdo** e chega ao vagão. O isolamento que o dono exige (*"desde que a theory não entre no
+vagão"*) quebra sem ninguém notar, porque nada no dreno olha para ficheiros de workflow vindos de
+uma `cargo/**`.
+
+**E não custa nada obedecer, porque o agente não precisa de autorar workflow nenhum:** a
+`agent-fast-lane.yml` já vive no **branch default** e dispara em todo push a `theory/**`. O agente
+ganha a validação completa sem escrever um ficheiro. Sonda específica que a fast-lane não dê é
+**pedida ao integrador**, que a monta na **sua própria** branch de theory (ex.:
+`theory/sonda-toolchain`), que nunca se cruza com a do agente.
+
+**Corolário para o agente:** a branch de theory dele é um **espelho** da `cargo/**` — mesmo
+conteúdo, nada commitado só nela. Se nada existe apenas na theory, nada pode viajar de volta.
+
+**Corolário para o integrador:** a minha própria branch de sonda **nunca** é merjada em nada. Ela
+existe para ser lida e esquecida.
