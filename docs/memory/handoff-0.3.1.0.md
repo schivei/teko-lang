@@ -263,6 +263,7 @@ pernas; (2) o teste do cast, que destranca quatro; (3) o gémeo de macOS; (4) de
 | **Gémeo divergido de macOS: `pt_target_name_and_objfmt_are_one_source`** | teste **sem dependência do host** que falha **só** em `macos-arm64` (`assertion failed: is_true`) → divergência de geração/runtime no arm64-macho, não expectativa errada. Não é novo (falha já em `8f94c0b1`) | mandato: **primeiro dividir o teste** para saber QUAL das 14 assertivas cai (o rasto só dá `+636` no símbolo), depois caçar a divergência de lowering. Instrumento certo: `agent-fast-lane.yml` com `runner: macos-latest`, que É despachável. Sob a regra do oráculo, divergência é bug do nativo até prova em contrário |
 | **SEGUNDA PASSAGEM DO DEBUGGER — brief pronto, ver §3b** | o dono leu o orçamento e reprovou: *"o trabalho do arquiteto foi pessimo, nao tem um exemplo de prova de conceito, de como seria a superficie para isso ou como utilizar em cada tipo de debugger mencionado"* | **a falha é do MEU brief**, não do arquiteto: pedi orçamento e não pedi PoC, superfície, nem contra-medida. Entra na próxima vaga |
 | **O Windows não põe `.exe` no executável** | **ACHADO NOVO, 2026-07-30, e é DEFEITO DE PRODUTO.** Descoberto porque o dreno dos 128 bits destrancou o `artifact / windows-x86_64`: ele passou a publicar, e a perna `test / windows-x86_64` — **que nunca tinha corrido em toda a lane** — falhou logo com `ERROR: the producer's upload has no dl/windows-x86_64/teko.exe`, tendo publicado `teko` | **medido: `src/build/` não acrescenta `.exe` em host nenhum.** O ficheiro É um PE válido (`assert_asset_arch` passou), mas o Windows resolve um nome sem extensão **acrescentando** `.exe`, logo `teko` não é lançável por nome. **O CI está correcto nos dois lados** — `produce_assets.sh` já trata `*.exe` e o consumidor espera `teko.exe`; é o produto que erra. Conserto: o nome do executável ganha `.exe` quando o alvo é Windows. Segunda vaga outra vez: consertar uma perna acendeu outra que nunca tinha corrido |
+| **`kind` desconhecido panica + o kind `tool` novo** | **RULING DO DONO 2026-07-30**, duas ordens: *"esse else não deveria fazer fallback mas causar panico, kind desconhecido é erro no compilador"* e *"Tem que adicionar o novo kind proposto"*. Pré-requisito de `tdb` | **MEDIDO, e não é um enum de uma linha.** Ver §3c abaixo: a árvore codifica a dicotomia "Binary ou não-Binary" em TRÊS sítios, e `Tool` quebra-a por ser executável (tem `main`) **e** empacotável |
 | **Degrau 27 — builtin `ftoa`** | é a paragem VIVA do self-host nas duas pernas nativas; a escada não avança sem ela | `native backend N1: builtin 'ftoa' not yet lowered (N2) [in teko::codegen::cb_f64_literal]`. O pin `scripts/native_selfhost_known_stop.sh` já a aceita como paragem honesta (deixou de nomear o degrau, de propósito) |
 | **`fmt --apply` explícito** | dono aprovou: *"Sim: fmt --apply explícito"* | o meu despacho foi **recusado na camada de permissão** logo depois; nunca chegou a correr, e eu não o repeti (chamada recusada trata-se como decisão). **Precisa da palavra do dono para andar.** Contrato pinado em `scripts/fmt_cli_test.sh` |
 | **Híbrido do `main`** | desenho **fechado** no digesto de leis | precisa do arquiteto para ordenar crumbs |
@@ -310,6 +311,58 @@ pedido é "orça X", perguntar antes se o dono quer também o custo de NÃO faze
 
 **RESTRIÇÕES:** o arquiteto **não implementa produto**; escreve em `docs/design/`. Não abre PR. Empurra
 para a branch em que trabalha assim que escreve. Nunca toca `.github/workflows/**`.
+
+
+## 3c. `kind = "tool"` — medido, e a armadilha que triplica o trabalho
+
+**Ordens do dono, 2026-07-30:** (1) *"esse else não deveria fazer fallback mas causar panico, kind
+desconhecido é erro no compilador"*; (2) *"Tem que adicionar o novo kind proposto"*.
+
+**Onde vive:** `src/build/tkp_rule.tks:9` — `type Artifact = enum { Binary; Static; Shared; Package }`.
+O fallback silencioso está em `src/build/manifest.tks:565`.
+
+**A ARMADILHA, e é o que faz isto não ser um enum de uma linha.** A árvore não codifica quatro kinds;
+codifica uma **DICOTOMIA** — `Binary` contra tudo o resto — e escreve-a por extenso:
+
+```teko
+// (C7.1m) The three non-Binary kinds are LIBRARY kinds — they forbid a main.tks.
+fn check_main_file_rule(artifact: Artifact, has_main: bool) -> Artifact | error {
+    if artifact == Artifact::Binary && !has_main { return error { … "requires a main.tks" } }
+    if artifact != Artifact::Binary && has_main  { return error { … "may not have a main.tks" } }
+```
+
+E outra vez em `src/build/project.tks:3094`: `if m.artifact != Artifact::Binary { return base }`.
+
+**`Tool` quebra a dicotomia**, porque é as duas coisas ao mesmo tempo: **é executável** (tem `main.tks`,
+compila como executável normal na máquina do dev) **e é empacotável** (emite um `.tkl`). Logo
+`artifact != Artifact::Binary && has_main` **rejeitaria** um `tool` legítimo, e a mensagem de erro
+mentiria dizendo *"a library project (static/shared/package)"*.
+
+**Portanto o conserto certo NÃO é acrescentar um membro e remendar os `if`.** É trocar os testes de
+VARIANTE por testes de PROPRIEDADE — algo como `artifact_requires_main(a)` e
+`artifact_is_packageable(a)` — de modo que acrescentar um kind futuro não obrigue a caçar dicotomias
+espalhadas. É o mesmo padrão que fechou o degrau da relocação: **tornar o estado errado
+inexpressável**, em vez de corrigir cada sítio que o expressa.
+
+**A ORDEM DOS CRUMBS, e ela importa:**
+
+1. **`kind` desconhecido passa a ERRO DURO**, com a lista dos aceites na mensagem. Sozinho, e primeiro
+   — porque enquanto o fallback existir, `kind = "tool"` escrito por alguém é silenciosamente um
+   binário comum, e um verde sobre isso não significa nada. A fixture é de compile-fail sobre um `.tkp`
+   com `kind = "binari"`.
+2. **A dicotomia vira predicado.** Refactor sem mudança de comportamento — os quatro kinds actuais têm
+   de dar exactamente as mesmas respostas. Prova: as fixtures existentes de `check_main_file_rule` sem
+   uma alteração.
+3. **`Tool` entra**, e entra num sítio onde a grafia errada grita e onde a dicotomia já não existe.
+   Fixtures: um `tool` **com** `main.tks` é aceite; a mensagem de erro do caso de biblioteca deixa de
+   mentir sobre quais são os kinds de biblioteca.
+4. **O `.tkl` de um `tool`** — o que o escritor de pacote põe lá dentro, e o que `[deps]` recusa. É aqui
+   que vive a parte que o dono nomeou: *"sem adicionar como dependência de projeto (não entra nas
+   dependências do tkp)"*.
+
+**Referência nomeada e aplicável: C#.** `dotnet tool` (`PackageType=DotnetTool`) é o único dos quatro
+com um TIPO de pacote declarado; `cargo install` e `go install` dão o mesmo efeito instalando algo que
+por acaso tem binário, **sem** tipo próprio. O dono atribuiu C# para addins, e aqui aplica-se de facto.
 
 ## 4. DECISÕES DO DONO EM ABERTO
 
