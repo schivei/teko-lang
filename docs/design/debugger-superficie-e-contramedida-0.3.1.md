@@ -1,58 +1,71 @@
-# A superfície do debugger, os quatro debuggers, a fronteira honesta, e a contra-medida (arquiteto, 2026-07-30)
+# `tdb`, a superfície, e o DWARF como interop — desenho 0.3.1
 
 > **Companheiro, não substituto.** `docs/design/debugger-orcamento-0.3.1.md` fica como está. Este
-> documento **não o reescreve**: acrescenta as cinco peças que o dono cobrou (prova que se corre,
-> superfície até ao texto, uso em cada debugger, camadas restantes com número, contra-medida
-> orçada), acrescenta a **sexta** que o ruling seguinte exigiu (a fronteira redesenhada por
-> honestidade), responde à pergunta sobre Rust/Zig/Go **verificada por fonte**, e aponta em §10 os
-> erros factuais que encontrei nele.
+> documento acrescenta o que o dono cobrou (prova que se corre, superfície até ao texto, uso em cada
+> debugger, camadas com número, contra-medida orçada), redesenha a fronteira por **honestidade**
+> (ruling de hoje), e reorganiza tudo em volta da **decisão** de hoje: **o debugger próprio vai ser
+> feito**. §11 aponta os erros factuais que encontrei no orçamento anterior — não o editei.
 >
 > **Prova executável:** `docs/design/debugger-poc/reproduce.sh` — corre e sai 0.
 
+## Os quatro rulings do dono que este documento obedece
+
+| # | Ruling | Consequência aqui |
+|---|---|---|
+| **R1** | *"assim como uma LSP, precisaremos de um debugger próprio, mas o escreveria em native e não agora em C"* | `tdb` **vai ser feito**, em Teko, depois da escada de degraus. A Peça 5 deixou de ser "orçar para decidir" e é **um plano** (§8). |
+| **R2** | *"gastar energia marcando `#line` em C é desnecessário"* | **A Camada 0 do orçamento anterior DEIXA DE EXISTIR.** Não há D0.2. Não é opcional, não é "se a rota C tiver semanas de vida". Sai. |
+| **R3** | *"não colocaria o código dentro do `src` do teko, começaria por um diretório `/tdb` … deveria ser um pacote de tooling … depois poderia migrar para um repo próprio"* | §9 — o sítio, a forma, e o acoplamento **por formato** que torna a migração barata. |
+| **R4** (anterior, em vigor) | *uma camada só clama o que garante* | §5 — cada clamação medida, e três red-flags resolvidas por medição. |
+
 ---
 
-## 0. Sumário — os oito veredictos, todos com medição
+## 0. O eixo novo, em uma frase
+
+> **Se `tdb` lê as NOSSAS tabelas, o DWARF deixa de ser pré-requisito e passa a ser INTEROP.**
+
+Tudo o que segue é a consequência disso, com número. Os dez veredictos:
 
 | # | Veredicto | Onde |
 |---|---|---|
-| 1 | **RED-FLAG 3 REFUTADA.** Cinco molduras de profundidade, **todas** as formas de frame do nosso encoder x86-64, **zero CFI** no objeto: gdb **e** lldb recuperam a cadeia inteira. O `bt` pode ficar na lista de entregas do Piso — em x86-64. | §4.1 |
-| 2 | **A razão é estrutural, não sorte:** `frame_is_framed_x86` garante que **RSP só se move dentro de uma função que pôs `rbp`**. Uma função sem prólogo devolve RSP intacto. Não há forma de frame que derrote a heurística. | §4.1 |
-| 3 | **arm64 fica por medir** — não há toolchain aarch64 nem qemu neste host. Vira crumb de sondagem próprio, com orçamento condicional nos dois ramos. | §4.2, §5.1 |
-| 4 | **RED-FLAG 2 REDIMENSIONADA:** o nome **não precisa de atravessar** o alocador. `assign_lookup(sr, vreg_id)` é **público** e a cadeia inteira é indexada por `vreg_id` — é um **JOIN**, não plumbing. O perigo real é outro e é pior: um vreg em registo físico só é válido no seu intervalo, logo `print x` **mentiria**. A resolução honesta já existe no código: `lenv_bind_scalar_slot`. | §4.3 |
-| 5 | **RED-FLAG 1 CONFINADA:** `str` não toca o Piso. Medido: a listagem de fonte é o debugger a ler o ficheiro do disco — zero envolvimento de `str`. Bloqueia o **tipo** `str` na Camada 2 e o pretty-printer na Camada 3, e a regra honesta é *emitir tipo DWARF só para layout CONGELADO*. | §4.4 |
-| 6 | **O Windows colapsa de "segundo formato do zero" para "o mesmo DWARF, noutro contentor"** — verificado no `cmd/link/internal/ld/pe.go` do Go. **3 crumbs**, um deles sondagem. | §7.3 |
-| 7 | **A contra-medida NÃO se paga: 13 crumbs para uma ferramenta, uma plataforma de cada vez, e ainda dependente das tabelas da Camada 2** — contra 14 crumbs que dão gdb + lldb + VSCode em três plataformas sem uma linha de servidor nosso. A recomendação de não fazer tem agora **prova**, não asserção. | §8 |
-| 8 | **A condição de reabertura está NOMEADA e medida como NÃO satisfeita:** o gatilho do Go é escalonador/pilhas próprias. `concorrencia-adiantada-s8.md` desenha **threads 1:1 (`pthread_create`)**, que é exactamente o que gdb/lldb modelam nativamente. | §8.5 |
-
-**A resposta directa à objeção do dono** (*"não faz sentido ter suporte de debugger sem as coisas
-das outras camadas"*) está em §4.6 e §6: das três red-flags que o levaram a rejeitar desde a
-Camada 0, **uma foi refutada por medição** (o `bt`), **duas nunca foram problemas do Piso** (`str`
-e nomes-no-regalloc pertencem às Camadas 2 e 3). O que a objeção corrige de verdade — e corrige
-bem — é que a Camada 1 antiga **vendia** o `bt` sem prova. Agora tem prova, fixture, e uma
-sondagem nomeada para a perna que não medi.
+| 1 | **O `MLineMark` sobrevive intacto, e agora é a peça mais valiosa do desenho:** é o **único produtor** que serve **os dois** consumidores (`tdb` e DWARF). A razão que o justificava — o alocador reescreve o fluxo 1→N — é **independente do consumidor**. | §3.1 |
+| 2 | **`tdb` mata a RED-FLAG 3 de vez, e não por a heurística funcionar:** nós **emitimos** o descritor de frame que já calculamos (`FrameLayoutX86`/`FrameLayout`). Verdade do compilador, não inferência do debugger. **~1 crumb, contra os 4 de CFI DWARF.** | §5.1 |
+| 3 | **E a heurística do gdb também funciona — medido.** Cinco molduras, **todas** as formas de frame do nosso encoder x86-64, **zero CFI**: gdb **e** lldb recuperam a cadeia inteira. Logo a red-flag 3 morre **duas vezes**, por caminhos independentes. | §5.2 |
+| 4 | **CFI DWARF: −4 crumbs. CodeView: −6 crumbs.** Ambos morrem. `tdb` não os precisa; o gdb, medido, não precisa de CFI; e Windows resolve-se com DWARF-em-PE (verificado no Go) para quem não é nosso. | §5.1, §7.4 |
+| 5 | **O DWARF AINDA VALE, e vale AGORA — por três razões, e a terceira é a que não se dispensa:** (a) `tdb` é *"não agora"* e o dono quer depurar antes disso; (b) interop com quem não é nosso, para sempre; (c) **é o único leitor INDEPENDENTE da nossa tabela de linha** — sem ele, `tdb` a mentir e o compilador a mentir são indistinguíveis. | §6 |
+| 6 | **`.tsym` é a semente, e a legislação já o disse.** `TEKO_LEGISLATION.md:350`: *"`.tsym` — Teko Symbols (debug symbols: file:line + names **for the debugger** + stack traces)"*. Estender `.tsym` é obedecer; inventar formato novo é abrir um segundo. E o cabeçalho **já leva versão** (`.tsym v1`). | §4 |
+| 7 | **O `tdb` como projeto próprio e o `teko lsp` como subcomando NÃO se contradizem** — e a regra que unifica os dois é medível: *quem precisa do FRONT-END vive em `src/`; quem precisa só de um FORMATO vive fora.* O LSP precisa do checker; `tdb` precisa de um ficheiro. **Sem tensão para o dono.** | §9.1 |
+| 8 | **A galinha e o ovo tem saída, e a ordem do dono não a fecha:** *"não escrever em C"* ≠ *"não compilar pela rota C"*. `teko build tooling/tdb` usa hoje `Backend::C` por omissão. | §10 |
+| 9 | **VSCode + DAP não é grátis como parece:** DAP sozinho não basta — o VSCode exige uma extensão que **registe o tipo de debugger**. É 1 crumb e **zero JavaScript** (o que também esquiva a decisão de segurança já ratificada sobre `cp.exec`). | §8.5 |
+| 10 | **O delve é o molde verificado:** `dlv dap` é **modo do próprio binário**, não adaptador separado. `tdb dap` copia isso. E o alcance do delve — 5 pares de plataforma, **sem `darwin/arm64`** — é o aviso de escopo que `tdb` tem de respeitar. | §8.6 |
 
 ---
 
 # PEÇA 1 — A prova de conceito, que se corre
 
-Tudo em `docs/design/debugger-poc/`. **Refiz o Experimento D do documento anterior de ponta a
-ponta** e confirmo o número 4 — com a razão que lá faltava (§10.1).
+**Entrego DUAS provas, e a segunda é a que o eixo novo exigiu.** Cabem as duas, e são
+complementares: uma prova o interop, a outra prova o caminho de `tdb`.
+
+| prova | o que estabelece | serve |
+|---|---|---|
+| **P1 — o DWARF-4 mínimo escrito à mão** (`mini.s`) | três seções, **4** relocações `Abs64`, breakpoint por linha de `.tks`, `bt` de duas molduras com nomes Teko, aceito por gdb **e** lldb sem alteração | o **interop** (§6) e o **golden** do escritor DWARF |
+| **P2 — cinco molduras através de TODAS as formas de frame, sem CFI** (`adv.s`) | que o desenrolar não depende de sorte, em nenhum dos dois caminhos | mata a **red-flag 3** (§5.2) e é o **fixture** do arnês |
+
+**Refiz o Experimento D do documento anterior de ponta a ponta** e confirmo o número 4 — com a razão
+que lá faltava (§11.1). Tudo em `docs/design/debugger-poc/`.
 
 ## 1.1 Os ficheiros
 
 | Ficheiro | O que é |
 |---|---|
-| `docs/design/debugger-poc/hello.tks` | o `.tks` de referência: `main` chama `add`, duas molduras para o `bt`. **Nunca é compilado** — é a fonte que o DWARF escrito à mão APONTA, e essa isolação é o ponto: o debugger lista texto Teko enquanto passa por código de máquina que nenhum compilador Teko produziu. Prova-se o DWARF, não o compilador. |
-| `docs/design/debugger-poc/mini.s` | o objeto mínimo: `.text` com `add`+`main`, e as três seções de depuração escritas **byte a byte com `.byte`** — não geradas por ferramenta nenhuma. É literalmente o golden. |
-| `docs/design/debugger-poc/adv.s` | a medição de desenrolar: cinco molduras através de **todas** as formas de frame do nosso encoder, sem CFI. |
-| `docs/design/debugger-poc/reproduce.sh` | corre as duas provas e sai 0. Vive em `docs/`, não em `scripts/`: é documentação que executa, não portão. |
+| `hello.tks` | o `.tks` de referência: `main` chama `add`, duas molduras para o `bt`. **Nunca é compilado** — é a fonte que o DWARF escrito à mão APONTA, e essa isolação é o ponto: o debugger lista texto Teko enquanto passa por código de máquina que nenhum compilador Teko produziu. Prova-se o DWARF, não o compilador. |
+| `mini.s` | o objeto mínimo: `.text` com `add`+`main`, e as três seções de depuração escritas **byte a byte com `.byte`** — não geradas por ferramenta nenhuma. É literalmente o golden. |
+| `adv.s` | P2: cinco molduras através de **todas** as formas de frame do nosso encoder, sem CFI. |
+| `reproduce.sh` | corre as duas provas e sai 0. Vive em `docs/`, não em `scripts/`: é documentação que executa, não portão. |
 
-## 1.2 As linhas do `.tks` que o resto do documento cita
+**Linhas do `.tks` que o resto do documento cita:** `add` declarada em **29**, primeiro statement em
+**30**, retorno em **31**. `main` declarada em **40**, chamada em **41**, retorno em **42**.
 
-`add` declarada em **29**, primeiro statement em **30**, expressão de retorno em **31**, `}` em 32.
-`main` declarada em **40**, chamada em **41**, retorno em **42**.
-
-## 1.3 `.debug_abbrev` — 37 bytes (0x25), anotado campo a campo
+## 1.2 `.debug_abbrev` — 37 bytes (0x25), anotado campo a campo
 
 ```
 01              ULEB  código de abreviatura 1
@@ -83,10 +96,9 @@ ponta** e confirmo o número 4 — com a razão que lá faltava (§10.1).
 `DW_AT_decl_line` é **`DW_FORM_data2`**, não `data1` — o próprio orçamento anterior deu como
 exemplo um breakpoint em `main.tks:410`, que **não cabe** em `data1`. E `DW_AT_decl_file` é
 **`DW_FORM_udata`** (ULEB) porque Teko emite **um objeto por programa** com funções vindas de
-**muitos** `.tks`, e a tabela de ficheiros do programa de linha passa de 255 entradas num corpus
-do tamanho do nosso.
+**muitos** `.tks`, e a tabela de ficheiros passa de 255 entradas num corpus do nosso tamanho.
 
-## 1.4 `.debug_info` — 107 bytes (0x6b), anotado campo a campo
+## 1.3 `.debug_info` — 107 bytes (0x6b), anotado campo a campo
 
 ```
 67 00 00 00                       unit_length = 0x67 (103) = tamanho da seção menos estes 4 bytes
@@ -96,9 +108,9 @@ do tamanho do nosso.
                                   --- DIE da unidade de compilação ---
 01                                código de abreviatura 1
 74 65 6b 6f 20 30 2e 33 2e 31 00  DW_AT_producer  = "teko 0.3.1\0"
-0c 00                             DW_AT_language  = 0x000c (DW_LANG_C99)  [ver §1.7]
+0c 00                             DW_AT_language  = 0x000c (DW_LANG_C99)  [ver §1.5]
 68 65 6c 6c 6f 2e 74 6b 73 00     DW_AT_name      = "hello.tks\0"
-2e 00                             DW_AT_comp_dir  = ".\0"                 [ver §1.7]
+2e 00                             DW_AT_comp_dir  = ".\0"                 [ver §1.5]
 00 00 00 00 00 00 00 00           DW_AT_low_pc    -> RELOCAÇÃO 1: Abs64 contra `add`
 3b 00 00 00 00 00 00 00           DW_AT_high_pc   = 0x3b (59) — um COMPRIMENTO (data8), sem reloc
 00 00 00 00                       DW_AT_stmt_list = 0
@@ -119,7 +131,7 @@ do tamanho do nosso.
 00                                fim dos filhos do DIE da CU
 ```
 
-## 1.5 `.debug_line` — 89 bytes (0x59), anotado campo a campo
+## 1.4 `.debug_line` — 89 bytes (0x59), anotado campo a campo
 
 ```
 55 00 00 00                       unit_length = 0x55 (85)
@@ -141,7 +153,7 @@ fb                                line_base  = -5
                                   --- o programa de números de linha ---
 00 09 02                          DW_LNE_set_address (op 0 estendido, ULEB comprimento 9, sub-op 2)
 00 00 00 00 00 00 00 00           o seu operando de 8 bytes -> RELOCAÇÃO 4: Abs64 contra `add`
-                                  (a ÚNICA relocação desta seção — ver §10.1)
+                                  (a ÚNICA relocação desta seção — ver §11.1)
 03 1c                             DW_LNS_advance_line, SLEB +28  -> linha 29
 05 01                             DW_LNS_set_column,   ULEB 1
 01                                DW_LNS_copy                    => LINHA (offset 0x00, linha 29)
@@ -164,24 +176,22 @@ fb                                line_base  = -5
 00 01 01                          DW_LNE_end_sequence
 ```
 
-**Estes três blocos são o golden do `dwarf_test.tkt` do crumb D1.3.** Não são uma leitura da
-especificação: são os bytes de um objeto que gdb 15.1 **e** lldb 18.1.3 aceitaram sem alteração.
+**Estes três blocos são o golden do `dwarf_test.tkt`.** Não são uma leitura da especificação: são
+os bytes de um objeto que gdb 15.1 **e** lldb 18.1.3 aceitaram sem alteração.
 
-## 1.6 O comando de ponta a ponta
+## 1.5 O comando de ponta a ponta, e a saída medida
 
 ```sh
-cd docs/design/debugger-poc && ./reproduce.sh
+cd docs/design/debugger-poc && ./reproduce.sh          # as duas provas, sai 0
 ```
 
-E, minimamente, o que o dono cola para ver o breakpoint parar:
+O mínimo que o dono cola para ver o breakpoint parar:
 
 ```sh
 cd docs/design/debugger-poc
 as -o mini.o mini.s && cc -o mini mini.o
 gdb -batch -nx -ex "break hello.tks:30" -ex run -ex bt ./mini
 ```
-
-Saída medida (gdb 15.1):
 
 ```
 Breakpoint 1 at 0x1133: file hello.tks, line 30.
@@ -191,12 +201,11 @@ Breakpoint 1, add () at hello.tks:30
 #1  0x0000555555555158 in main () at hello.tks:41
 ```
 
-E o **mesmo objeto**, sem uma alteração, no lldb 18.1.3:
+O **mesmo objeto**, sem uma alteração, no lldb 18.1.3:
 
 ```
 $ lldb -b -o "breakpoint set --file hello.tks --line 30" -o run -o bt ./mini
 Breakpoint 1: where = mini`add + 10 at hello.tks:30:1, address = 0x0000000000001133
-* thread #1, name = 'mini', stop reason = breakpoint 1.1
     frame #0: 0x0000555555555133 mini`add at hello.tks:30:1
    29  	fn add(a: i32, b: i32) -> i32 {
 -> 30  	    let s = a + b
@@ -209,53 +218,313 @@ Nos dois: `print a` / `frame variable` falham — `No symbol "a" in current cont
 `no variable information is available in debug info for this compile unit`. **É a fronteira, e é
 exactamente esse texto que a superfície tem de prometer e nada mais.**
 
-## 1.7 Duas anotações honestas sobre o golden
-
-**`DW_AT_comp_dir = "."`.** No PoC é `"."` de propósito, para que **todo** byte de `mini.s` seja
-literal e o golden não dependa do host. Medido: gdb e lldb resolvem `./hello.tks` a partir do cwd,
-logo o PoC funciona corrido de dentro do seu directório. **A produção tem de emitir a raiz de
-projeto ABSOLUTA**, porque é o que dispensa `sourceFileMap`/`sourceMap` no VSCode (§3.3, §3.4).
-Um `comp_dir` errado dá o meio-falho confuso: o breakpoint resolve e a **listagem** falha.
-
-**`DW_AT_language = DW_LANG_C99`.** Não existe código DWARF atribuído a Teko. Escolhi C99 e não um
-`lo_user`, e a razão é medível: com C99 o gdb diz `source language c` e o **seu analisador de
-expressões fica ligado** — o que é a pré-condição de `print x` na Camada 2. Um `lo_user` daria
-"linguagem desconhecida" e desligaria o analisador. Recomendo registar isto como decisão, não como
-acidente: **C99 é o código de transporte** até haver um atribuído.
+**Duas anotações honestas sobre o golden.** `DW_AT_comp_dir = "."` é assim de propósito, para que
+**todo** byte de `mini.s` seja literal e o golden não dependa do host (medido: gdb e lldb resolvem
+`./hello.tks` a partir do cwd). **A produção tem de emitir a raiz de projeto ABSOLUTA**, porque é o
+que dispensa `sourceFileMap`/`sourceMap` no VSCode (§7.2, §7.3); um `comp_dir` errado dá o
+meio-falho confuso — o breakpoint resolve e a **listagem** falha. E `DW_AT_language = DW_LANG_C99`
+não é acidente: não existe código DWARF atribuído a Teko, e com C99 o gdb diz `source language c` e
+**liga o seu analisador de expressões**, que é a pré-condição de `print x`. Um `lo_user` desligá-lo-ia.
+Registar como decisão: **C99 é o código de transporte** até haver um atribuído.
 
 ---
 
-# PEÇA 2 — A superfície, desenhada até ao texto que o dono escreve
+# PEÇA — O que `tdb` precisa que exista no compilador
 
-## 2.1 O que a CLI já aceita — medido, não suposto
+Esta secção é o eixo novo. É curta de propósito: **a maior parte já existe.**
 
-`src/build/help.tks` e `src/build/project.tks`:
+## 3.1 O `MLineMark` sobrevive, e é agora a peça central
 
-| forma | flags que a usam | onde |
+O orçamento anterior escolheu, entre duas formas de levar a posição até aos bytes, uma
+pseudo-instrução marcadora de zero bytes (`MLineMark`) em vez de envolver cada instrução. Reli a
+razão e ela **não depende do consumidor**:
+
+```teko
+pub fn rewrite_inst(abi: AbiDescriptor, sr: ScanResult, inst: MInst, frame_base: u64) -> []MInst
+```
+
+**Uma instrução vira N.** O alocador expande derramamentos e recargas, logo um array paralelo a
+`MBlock.insts` **dessincroniza no primeiro derramamento** e passa a mentir sobre posições em
+silêncio. Isso é verdade para `tdb` e para DWARF igualmente.
+
+**A conclusão que o eixo novo acrescenta:** `MLineMark` passa a ser **um produtor, dois consumidores**
+— exactamente o padrão que o roadmap já manda seguir para a tabela de símbolos. **Não há duplicação
+a temer, e a decisão do orçamento anterior fica confirmada, não revista.** Recomendo mantê-la
+verbatim (o `MLineMark`/`LineRow` de lá, com o Javadoc que lá está).
+
+## 3.2 As quatro tabelas, e o estado medido de cada uma
+
+| tabela | `tdb` precisa? | DWARF precisa? | estado medido |
+|---|---|---|---|
+| **endereço → linha** | **sim, é o coração** | sim | **não existe** — vem do `MLineMark` (D1.2). `LInst` já carrega `line`/`col` com valores reais; `MInst`/`MInstX86` não carregam nada |
+| **função → nome Teko, ficheiro, linha de declaração** | sim | sim | **JÁ EXISTE** — `codegen::tk_emit_tsym` emite `<símbolo-C>\t<nome-teko>\t<file>:<line>`, e `LFunc` ganha `file`/`decl_line` em D1.1 |
+| **descritor de frame** (framed?, tamanho, regra de CFA) | **sim — e é o que mata a red-flag 3** | não (§5.2) | **JÁ É CALCULADO** — `FrameLayoutX86` / `FrameLayout` são exactos. Falta **serializá-lo** |
+| **locais** (nome → slot → tipo) | sim, para `print x` | sim | **JÁ EXISTE em `LEnv`** (`names`/`vregs`/`is_scalar_slot`/`slot_ltype`) e é **descartado**. §5.3 |
+
+**Duas linhas desta tabela dizem "já existe" e uma diz "já é calculado".** É isso que separa
+"construir um debugger" de "construir um leitor sobre tabelas que já temos", e é o argumento
+quantitativo de §8.7.
+
+---
+
+# PEÇA — `.tsym` v2: a semente, e o que lhe falta
+
+## 4.1 Porque é `.tsym` v2 e não um formato novo — law-first, com a lei citada
+
+`TEKO_LEGISLATION.md:350`, literal:
+
+> **`.tsym`** — *Teko Symbols* (debug symbols: file:line + names **for the debugger** + stack traces
+> — Eixo E).
+
+**A legislação já designou `.tsym` como o artefacto de informação de depuração "for the debugger".**
+Inventar um `.tkd` seria abrir um segundo formato para um propósito já legislado. **Sem tensão para o
+dono: a lei já decidiu.**
+
+E medi que o formato **foi desenhado para evoluir**. `codegen.tks:12001`:
+
+```
+# teko symbol map (.tsym v1): <c-symbol>\t<teko-name>\t<file>:<line>
+```
+
+**A versão está no cabeçalho.** Um leitor v2 aceita v1 (degradando: sem linhas, sem frames, sem
+locais) e um leitor v1 vê um cabeçalho que não reconhece e para honestamente. Nada a inventar.
+
+## 4.2 O que v1 tem, o que lhe falta, e o custo
+
+| | v1 hoje | v2 para `tdb` |
 |---|---|---|
-| booleana longa | `--coverage`, `--no-verify`, `--cov-validation`, `--no-tty`, `--allow-undef`, `--release`, `--analyzer`, `--arith-cast-gate` | `coverage_of`, `no_verify_of`, … |
-| valor separado | `-o <dir>`, `--per-commit-test <base>` | `out_dir_of` |
-| **nivelada com `=`** | **`--opt=<0\|1\|2>`** | `opt_arg_has_prefix` (prefixo de 6 bytes) + `opt_level_of_value` |
-| curta | `-o`, `-h`, `-v` | — |
-| **rejeição honesta** | `--backend` / `--backend=…` — retirada, e **nomeada** em vez de silenciosamente ignorada | `is_backend_flag` + `has_backend_flag` |
+| por função: símbolo, nome Teko, ficheiro, linha de declaração | ✅ | mantém-se, **byte-idêntico** — v2 é aditivo |
+| **endereço → linha** | ❌ | `L <sym> <offset-hex> <linha> <coluna>`, uma linha por `LineRow` |
+| **descritor de frame** | ❌ | `F <sym> <framed 0\|1> <frame-size> <cfa-reg> <ra-offset>` |
+| **locais** | ❌ | `V <sym> <nome> <slot-offset> <tipo> <linha-de-declaração>` |
+| endereço/tamanho da função | ❌ | **não é preciso** — `tdb` resolve o símbolo pela tabela de símbolos ELF/Mach-O/COFF, que já emitimos |
 
-**A restrição que decide o desenho, e que é uma armadilha silenciosa:** `project_arg_of` devolve o
-**primeiro positional que não reconhece como flag**. Uma flag nova que não seja acrescentada à sua
-lista de saltos passa a ser lida como **o caminho do projeto**. Isso não dá erro de flag
-desconhecida — dá "projeto não encontrado", ou pior, constrói o projeto errado. **Qualquer crumb
-que acrescente flag TEM de tocar `project_arg_of`, e o teste que o prova é obrigatório.**
+**Texto, tab-separated, como v1.** Deliberado: legível, diffável, e o leitor não precisa de um
+decodificador binário — o que poupa um crumb. Medi que **não há `teko::str::split`** no corpus
+(`contains`, `ends_with`, `slice_to`, `slice_from`, `char_at`, `chars` existem), logo o leitor
+precisa de um separador feito à mão; o precedente é o parser TOML de `manifest.tks`, que faz
+exactamente isso. **Custo: 1 crumb no leitor, dentro do `tdb`, não no compilador.**
 
-**E há precedente vivo de que `-g` já é falado internamente:** `build_cc_argv(input, binary, m,
-prog, debug, opt)` acrescenta `-g` quando `debug` é verdadeiro, e `run_cc_debug` /
-`build_debug_binary` (o caminho de `teko run`) passam `true`. Ou seja **o perfil de depuração da
-rota C existe e está ligado a `teko run`** — só não tem superfície de utilizador em `teko build`.
-Isto muda o custo da Camada 0 para perto de zero **na rota C**: não é acrescentar `-g` ao `cc`, é
-**expor** o booleano que já lá está.
+**Ordem de grandeza, para não haver surpresa:** uma linha `L` por statement por função. No corpus do
+compilador, ~50 k linhas × ~24 bytes ≈ **1,2 MB** de `.tsym`. É opt-in (`--debug=lines`), fica fora
+do binário, e é um ficheiro de texto. Aceitável, e vale dizê-lo antes de alguém o descobrir.
 
-## 2.2 A flag — `--debug=lines`, e `-g` REJEITADO com mensagem
+## 4.3 O achado que se reporta para cima (não é issue minha)
 
-**A referência de superfície é Rust**, e verifiquei-a antes de a invocar
-(`doc.rust-lang.org/rustc/codegen-options/index.html`, citação literal):
+Depois de v2, o **stack trace nativo de produção** hoje servido por `.tsym` v1 (por-função) pode
+passar a resolver **linha exacta** — a mesma informação, melhor granularidade, mesmo ficheiro. É o
+padrão que o Zig segue (`lib/std/debug.zig` → `SelfInfo` → `Dwarf.zig`/`Pdb.zig`, §12.3). **Não orço
+isto aqui** e não abro issue: **REPORTO**, porque muda o valor do arco — o `MLineMark` não paga só
+depuração interactiva, paga também a qualidade dos stack traces de produção.
+
+---
+
+# PEÇA 6 — A fronteira redesenhada por HONESTIDADE
+
+**Regra em vigor (R4):** *uma camada só pode CLAMAR o que consegue GARANTIR; se a garantia depende
+de outra camada, ou a garantia sai da lista, ou a dependência entra na camada.* O dono está certo
+sobre a causa: as camadas antigas foram cortadas por custo. Abaixo, cada red-flag **medida**.
+
+## 5.1 RED-FLAG 3 — morta pelo caminho de `tdb`: nós temos a verdade, o gdb tem inferência
+
+A afirmação era: *"as nossas funções têm duas formas de frame e uma função sem `rbp` em pilha
+profunda pode derrotar a heurística de análise de prólogo"*.
+
+**Com `tdb`, a heurística deixa de existir.** Nós somos o compilador: `compute_frame_layout` produz
+`FrameLayoutX86 { size, saved_gpr, saved_fpr, slot_offsets, call_align, … }` — **exacto, não
+inferido**. Serializá-lo é uma linha `F` por função em `.tsym` v2 (§4.2), e `tdb` desenrola com
+verdade do produtor.
+
+| | CFI DWARF (F1…F4 de §5.4) | linha `F` do `.tsym` v2 |
+|---|---|---|
+| custo | **4 crumbs** (CIE/FDE + programa de CFA × 2 arquiteturas + routing em 2 escritores) | **~1 crumb** (uma linha de texto por função) |
+| relocações | **+1 `Abs64` por função** (cada FDE tem `initial_location`) | **zero** — o `tdb` resolve o símbolo pela tabela de símbolos |
+| correção | codifica a mesma verdade, com uma máquina de estados pelo meio | a verdade, sem codificação |
+
+**Veredicto: a CFI DWARF morre. −4 crumbs.** E `bt` deixa de ser uma clamação frágil: passa a ser a
+clamação **mais forte** do arco, porque é a única que não depende de inferência de ninguém.
+
+## 5.2 E a heurística do gdb TAMBÉM funciona — medido, o que mata a red-flag 3 uma segunda vez
+
+Isto importa porque o DWARF é interop (§6) e o interop tem de ser honesto sem CFI.
+
+**Primeiro, o argumento estrutural.** `encode_x86_64.tks:1532`:
+
+```teko
+fn frame_is_framed_x86(layout: FrameLayoutX86) -> bool {
+    let n_saved = (layout.saved_gpr.len + layout.saved_fpr.len) to u32
+    (layout.size > (0 to u32)) || (n_saved > (0 to u32)) || layout.call_align
+}
+```
+
+com `needs_call_align_x86(f) = func_makes_call_x86(f) && func_any_ret_x86(f)`. Logo: há slots ⇒
+framed; há callee-saved ⇒ framed; **faz uma chamada e retorna ⇒ framed**. E uma função frameless
+emite prólogo e epílogo **vazios**. **O invariante: RSP só se move dentro de uma função que já pôs
+`rbp`. Uma função frameless devolve RSP exactamente como o recebeu** — o caso mais fácil para um
+analisador de prólogo, não o mais difícil.
+
+**Segundo, a medição.** `adv.s` constrói cinco molduras através de **todas** as formas, **incluindo o
+único furo teórico** (a função frameless que *chama* e nunca retorna, `func_any_ret_x86` falso), e
+confirma que o objeto **não tem `.eh_frame`**:
+
+| moldura | forma | bytes |
+|---|---|---|
+| `#0 lvl4` | **frameless leaf** — zero bytes de prólogo | `mov $7,%eax; ret` |
+| `#1 lvl3` | **framed com callee-saved DEPOIS de `mov rbp,rsp`, e `sub rsp`** — a nossa ordem exacta | `push %rbp; mov %rsp,%rbp; push %rbx; push %r12; sub $0x20,%rsp` |
+| `#2 lvl2` | **frameless CALLER** — chama e nunca retorna, o furo | `call lvl3; …; hlt` |
+| `#3 lvl1` | **framed só por alinhamento** (`size` 0, zero callee-saved) | `push %rbp; mov %rsp,%rbp; sub $0,%rsp` |
+| `#4 main` | framed | — |
+
+gdb 15.1, sem uma linha de CFI:
+
+```
+Breakpoint 1, lvl4 () at hello.tks:30
+#0  lvl4 () at hello.tks:30
+#1  0x000055555555514f in lvl3 () at hello.tks:42
+#2  0x0000555555555163 in lvl2 () at hello.tks:20
+#3  0x0000555555555181 in lvl1 () at hello.tks:17
+#4  0x000055555555518c in main () at hello.tks:41
+```
+
+lldb 18.1.3, o mesmo objeto, as mesmas cinco molduras. E os **dois pontos de fronteira de prólogo**,
+que são o modo de falha real de um analisador: breakpoint no **primeiro byte** de `lvl3`, **antes**
+do `push %rbp` → 4 molduras corretas; breakpoint **entre** o `push %rbp` e o `mov %rsp,%rbp`
+(`lvl3+1`) → 4 molduras corretas.
+
+**Veredicto: o `bt` fica na lista de entregas do interop DWARF, com prova e fixture.** A red-flag 3
+estava errada, e o que a tornava plausível era não ter sido medida.
+
+**O que fica por medir, e é honesto dizê-lo: arm64.** Não há `aarch64-linux-gnu-as` nem
+`qemu-aarch64` neste host. O invariante, lido em `encode_arm64.tks:1514`, é
+`sub sp,sp,#size; stp x29,x30,[sp,#size-16]; add x29,sp,#size-16` — `x29` aponta **para** o par
+salvo, logo `[x29]` = `x29` do chamador e `[x29+8]` = endereço de retorno: **o invariante de cadeia
+do AAPCS64**, mesmo com o par no topo do frame em vez da base. **Isso é um argumento, e um argumento
+não é uma medição** → crumb **D1.7** (§7.6), com dois ramos orçados. **Note-se que `tdb` não depende
+deste ramo**: a linha `F` do `.tsym` v2 dá a verdade em qualquer arquitetura.
+
+## 5.3 RED-FLAG 2 — redimensionada, e o perigo verdadeiro é outro
+
+A red-flag dizia que a cadeia `LEnv(nome→vreg)` → `regalloc(vreg→registo|slot)` →
+`compute_frame_layout(slot→offset)` existe elo por elo mas nenhum elo carrega o nome. Verdade — e
+**irrelevante**, porque medi a chave:
+
+```teko
+pub fn assign_lookup(sr: ScanResult, vreg_id: u32) -> AssignLookup   // regalloc.tks:1475
+pub type InReg   = struct { vreg_id: u32; phys: u32 }
+pub type Spilled = struct { vreg_id: u32; slot: u64 }
+```
+
+`ScanResult` é **indexado por `vreg_id`** e `assign_lookup` é **pública**. O nome não tem de *viajar*
+por elo nenhum: uma tabela lateral `(nome, vreg_id)` capturada no lowering **junta-se** ao
+`ScanResult` depois do scan, pela chave que já existe. **É um JOIN, não plumbing** — e nenhum
+`match inst` do backend é tocado.
+
+**Mas há um perigo que a red-flag não nomeou e que é pior.** Uma alocação `InReg` só é válida
+**dentro do intervalo de vida do vreg**; fora dele o registo já tem outra coisa. Um `DW_AT_location`
+(ou uma linha `V`) que dissesse "`x` está em `rbx`" faria `print x` imprimir, **em silêncio e com
+confiança**, o valor de outra variável. Isso não é camada em falta — **é camada que ensina errado**,
+e é exactamente o defeito que o dono rejeitou.
+
+**A resolução honesta já está no código.** `src/lir/lower.tks:113`:
+
+```teko
+pub fn lenv_bind_scalar_slot(env: LEnv, name: str, slot: u32, ty: LType) -> LEnv
+```
+
+Um local nomeado **pode já ser ligado a um slot de frame** com o seu `LType`. Sob o perfil de
+depuração de variáveis, **todo local nomeado é fixado a um slot**, e a localização passa a ser um
+único offset válido em **todo** o escopo. É literalmente o que `cc -O0` faz. **A Camada de variáveis
+honesta é mais barata que a rápida, e mais correta.**
+
+## 5.4 RED-FLAG 1 (`str`) — confinada, e a regra que a torna inofensiva
+
+Estado medido: `src/runtime/teko_rt.h:44-48` define `tk_str` como **duas** words, comentário
+`length in BYTES`. `docs/memory/raiz-comum-dos-degraus-0.3.1.0.md:29` registra a decisão do dono de
+que `.len` conta **CARACTERES** e que `str` leva **os dois contadores** — terceira word.
+**Decidido, não aterrado.**
+
+1. **Afeta a listagem de fonte?** **NÃO.** Medido em §1.5: o lldb imprimiu as linhas 27–33 de
+   `hello.tks` num processo onde não existe um `str` Teko. A listagem é o debugger a ler o ficheiro.
+2. **Afeta a tabela de linha?** **NÃO.** É `(offset, linha, coluna)` — inteiros.
+3. **Afeta as variáveis?** **SIM, e só nos locais de tipo `str`.** Um tipo de duas words escrito hoje
+   erra **duas vezes** quando a terceira word aterrar: no tamanho e no significado de `len`.
+
+**A regra que resolve, generalizável em vez de remendo:**
+
+> **Só se descreve tipo cujo layout esteja CONGELADO.** Um local cujo tipo não está congelado **não
+> recebe descrição nenhuma** — o debugger diz `No symbol "s" in current context`, que é honesto, em
+> vez de mostrar lixo com confiança.
+
+Com essa regra, **`str` deixa de bloquear as variáveis**: bloqueia os locais de tipo `str`, e o
+resto avança. Só a legibilidade (pretty-printer / formatador de `tdb`) fica bloqueada, porque
+formatar um `str` **é** o layout de `str`. **Isto corrige o orçamento anterior**, que fazia `str`
+parecer pré-condição de mais do que é.
+
+## 5.5 A fronteira nova, camada por camada
+
+| Camada | Clama | Garante? | Veredicto |
+|---|---|---|---|
+| **Piso** | breakpoint por linha `.tks`, listagem, `step`/`next` | **sim** — §1.5 | fica |
+| **Piso** | `bt` com nomes Teko, x86-64, via gdb/lldb | **sim** — §5.2, 5 molduras, todas as formas, zero CFI | **fica, com prova** |
+| **Piso** | `bt`, arm64, via gdb/lldb | **por medir** | condicionado ao **D1.7**; até lá a doc diz "medido em x86-64" |
+| **Piso** | `bt` via **`tdb`**, qualquer arquitetura | **sim** — a linha `F` é verdade do compilador | fica, e é a clamação mais forte |
+| **Piso** | `print x` | **não** | **sai da lista, e a saída é NOMEADA** no `--help`, nos cinco `launch.json`, e em §7.7 |
+| **Variáveis** | `print x`, membros de struct | sim **se** locais fixados a slot | a fixação **entra na camada**; não é opcional |
+| **Variáveis** | tipos | sim **se** só layout congelado | a regra do congelamento **entra na camada**; `str` fica fora até aterrar |
+| **Legibilidade** | `str` legível, união pelo membro ativo | **não hoje** | bloqueada por `str`; e §11.6 — a via do `variant_part` **não se aplica** |
+| ~~**Camada 0** (`#line` em C)~~ | — | — | **ELIMINADA por R2.** Não existe neste desenho. |
+
+---
+
+# 6. O DWARF ainda vale? Sim — e a terceira razão é a que não se dispensa
+
+Pergunta honesta do brief: se `tdb` fala DAP, o VSCode está servido sem `cppdbg`; se `tdb` corre no
+terminal, o gdb está servido sem DWARF. **Então para quem é o DWARF?**
+
+| razão | força |
+|---|---|
+| **(a) `tdb` é "não agora".** O dono decidiu o `tdb` **e** decidiu que ele vem depois da escada de degraus. Entre hoje e esse dia, o DWARF é a **única** forma de depurar. | **forte, e temporária** |
+| **(b) Interop com quem não é nosso, para sempre.** gdb, lldb, `cppdbg`, CodeLLDB, e — medido, §12.1 — o alcance de um debugger próprio maduro é **5 pares de plataforma** (o delve não cobre `darwin/arm64`). Onde `tdb` não chegar, o DWARF chega. E há um caso que `tdb` não cobre sem custo próprio: **um programa Teko que chama uma biblioteca C** — o gdb entra no C com o DWARF do C; `tdb` mostraria endereços crus. | **forte, e permanente** |
+| **(c) É o único leitor INDEPENDENTE da nossa tabela de linha.** `tdb` lê `.tsym` v2, que sai do `MLineMark`. Se o `MLineMark` estiver errado, **`tdb` reporta o erro fielmente** e nada o contradiz. Com DWARF, gdb e lldb são leitores independentes da **mesma** origem: uma discordância entre gdb e `tdb` sobre o mesmo binário é um sinal de defeito que **nenhum dos dois produz sozinho**. | **é a que decide** |
+
+**Veredicto: o Piso de DWARF (as três seções) vale, e vale AGORA. O que NÃO vale mais é o que `tdb`
+torna redundante:**
+
+| item | veredicto novo | poupança |
+|---|---|---|
+| `.debug_line` + `.debug_info` + `.debug_abbrev` | **compra-se** | — |
+| **CFI DWARF** (`.debug_frame`) | **NÃO se compra** — §5.1 (o `tdb` tem a verdade) + §5.2 (o gdb, medido, não precisa) | **−4 crumbs** |
+| **CodeView** (`.debug$S`/`.debug$T`) | **NÃO se compra** — §7.4 | **−6 crumbs** (no ramo mau) |
+| `#line` na rota C | **NÃO se compra** — R2 | −1 crumb, e a energia |
+| tipos DWARF (variáveis) | compra-se **se** o dono quiser `print x` no gdb; se `tdb` bastar, `.tsym` v2 basta e é mais barato | decisão do dono, §7.5 |
+
+---
+
+# PEÇA 2 — A superfície: `teko build`, e a superfície do `tdb`
+
+## 7.1 O que a CLI já aceita — medido, não suposto
+
+| forma | flags que a usam |
+|---|---|
+| booleana longa | `--coverage`, `--no-verify`, `--cov-validation`, `--no-tty`, `--allow-undef`, `--release`, `--analyzer`, `--arith-cast-gate` |
+| valor separado | `-o <dir>`, `--per-commit-test <base>` |
+| **nivelada com `=`** | **`--opt=<0\|1\|2>`** (`opt_arg_has_prefix`, prefixo de 6 bytes + `opt_level_of_value`) |
+| **rejeição honesta** | `--backend` / `--backend=…` — retirada, e **nomeada** em vez de ignorada (`is_backend_flag`, `has_backend_flag`) |
+
+**A armadilha silenciosa que decide o desenho:** `project_arg_of` devolve o **primeiro positional que
+não reconhece como flag**. Uma flag nova que não entre na sua lista de saltos passa a ser lida como
+**o caminho do projeto** — sem erro de flag desconhecida. **Todo crumb que acrescente flag TEM de
+tocar `project_arg_of`, e o teste que o prova é obrigatório.** (RED-FLAG 5, §13.)
+
+**E `-g` já é falado internamente:** `build_cc_argv(…, debug: bool, opt: i32)` acrescenta `-g` quando
+`debug`, e `run_cc_debug`/`build_debug_binary` (o caminho de `teko run`) passam `true`. **O perfil de
+depuração da rota C existe e está ligado a `teko run`** — só não tem superfície em `teko build`.
+Registo-o como medição; **não o orço**, porque R2 mata a rota C como investimento.
+
+## 7.2 A flag — `--debug=lines`, e `-g` REJEITADO com mensagem
+
+**A referência de superfície é Rust**, verificada antes de invocada
+(`doc.rust-lang.org/rustc/codegen-options/index.html`, literal):
 
 > * `0` ou `none`: no debug info at all (the default).
 > * `line-tables-only`: line tables only. **Generates the minimal amount of debug info for
@@ -265,45 +534,78 @@ Isto muda o custo da Camada 0 para perto de zero **na rota C**: não é acrescen
 > * `2` ou `full`: full debug info.
 > * Note: The `-g` flag is an alias for `-C debuginfo=2`.
 
-**Isto é o achado de superfície do documento.** A fronteira que o Experimento C mediu — breakpoint
-e `bt` sim, variáveis não — **não é uma invenção nossa: é um nível de primeira classe, documentado
-e nomeado, da referência que o dono atribuiu.** O nosso Piso **é** `line-tables-only`. E a mesma
-citação diz que **`-g` significa `full`** em Rust, como em gcc e clang.
-
-**Decisão, e é law-first:** uma flag `-g` que prometesse `full` e entregasse `line-tables-only`
-seria exactamente o defeito que o dono acabou de rejeitar — uma superfície que promete demais. Logo:
+**É o achado de superfície do documento.** A fronteira que o Experimento C mediu — breakpoint e `bt`
+sim, variáveis não — **não é invenção nossa: é um nível de primeira classe, documentado e nomeado,
+da referência que o dono atribuiu.** O nosso Piso **é** `line-tables-only`. E a mesma citação diz
+que **`-g` significa `full`**, como em gcc e clang.
 
 | forma | efeito |
 |---|---|
-| **`--debug=lines`** | emite as três seções do Piso (tabela de linha + CU + um DIE por função). Nome tirado do vocabulário verificado do Rust. |
-| **`--debug=none`** | sem informação de depuração. **O DEFAULT**, incluindo sob `--release`. Grafia explícita aceita para scripts que querem ser inequívocos. |
-| **`-g`** | **REJEITADO, com mensagem que diz o que escrever.** O precedente é exacto e está no mesmo ficheiro: `has_backend_flag` rejeita `--backend` nomeando o motivo em vez de o ignorar. |
-| valor desconhecido em `--debug=` | **ERRO DURO**, nunca uma degradação silenciosa para `none` (M.3). Note-se que isto é o **oposto** de `opt_level_of_value`, que resolve o malformado para 2; ali um palpite errado custa velocidade, aqui custa uma sessão de depuração inteira a perseguir um breakpoint que nunca resolveu. |
+| **`--debug=lines`** | emite as três seções DWARF **e** o `.tsym` v2 (as duas saídas do mesmo `MLineMark`). Nome do vocabulário verificado do Rust. |
+| **`--debug=none`** | **O DEFAULT**, incluindo sob `--release`. Grafia explícita aceita para scripts. |
+| **`-g`** | **REJEITADO, com mensagem que diz o que escrever.** Precedente exacto no mesmo ficheiro: `has_backend_flag`. Uma flag que prometesse `full` e entregasse `lines` é o defeito que o dono acabou de rejeitar. |
+| valor desconhecido | **ERRO DURO**, nunca degradação silenciosa (M.3) — o **oposto** de `opt_level_of_value`, que resolve o malformado para 2. Ali um palpite errado custa velocidade; aqui custa uma sessão inteira a perseguir um breakpoint que nunca resolveu. |
 
-Quando a Camada 2 aterrar, acrescenta-se **`--debug=vars`** e **só então** `-g` passa a ser alias
-legal de `vars` — a promessa de `-g` cumprida no dia em que for verdade. **Não há duas formas da
-mesma operação**: `--debug=` é a única, com valores nomeados; `-g` é um alias que hoje não existe.
+Quando as variáveis aterrarem, acrescenta-se **`--debug=vars`** e **só então** `-g` passa a ser
+alias legal. **Não há duas formas da mesma operação:** `--debug=` é a única, com valores nomeados.
 
-## 2.3 Nada no `teko.tkp` — medido, com precedente exacto
+## 7.3 Nada no `teko.tkp` — medido, com precedente exacto
 
-Não há precedente de perfil de construção no manifesto. `Manifest` tem `[artifact]`,
-`[platforms]`, `[aliases]`, `[coverage]`, `[tests]`, `[extern]`, `[extern.libs.*]` — e
-**otimização, o eixo mais próximo, é exclusivamente de CLI**. O doc-comment de `build_cc_argv`
-legisla a razão em cinco palavras: *"Optimization is an AXIS of the build, not a global"*.
-Informação de depuração é da mesma classe: dois `teko build` da mesma árvore têm de poder diferir
-nela sem editar um ficheiro versionado. **Nenhuma chave nova no `.tkp`.**
+Não há precedente de perfil de construção no manifesto: `Manifest` tem `[artifact]`, `[platforms]`,
+`[aliases]`, `[coverage]`, `[tests]`, `[extern]`, `[extern.libs.*]` — e **otimização, o eixo mais
+próximo, é exclusivamente de CLI**. O doc-comment de `build_cc_argv` legisla a razão:
+*"Optimization is an AXIS of the build, not a global"*. Informação de depuração é da mesma classe:
+dois `teko build` da mesma árvore têm de poder diferir nela sem editar um ficheiro versionado.
+**Nenhuma chave nova no `.tkp`.**
 
-## 2.4 O texto exacto do `--help`
+## 7.4 Onde vivem os bytes — e Windows deixa de precisar de CodeView
 
-Em `print_help_general` (depois da linha do `--release`) e em `print_help_build`, verbatim:
+**No objeto/binário, e no `.tsym` ao lado.** Medido: o `.tkl` é um ZIP-STORE com **exactamente três**
+entradas (`<name>.tkh`, `<name>.tkb`, `<name>.tsym`) e **nenhum objeto** — não há lá nada a que
+agarrar DWARF. **O `.tkl` fica intocado por este desenho**, o que é boa notícia de reversibilidade;
+e o `.tsym` v2 entra por **a porta que o v1 já usa**, em ambos os sítios (solto ao lado do binário e
+dentro do `.tkl`).
+
+**Windows, e é aqui que o item mais caro do orçamento anterior morre — duas vezes:**
+
+1. **Para `tdb`: o contentor é irrelevante.** `tdb` lê `.tsym` v2, um ficheiro de texto ao lado do
+   `.exe`. **PE, COFF, CodeView e PDB não entram na conversa.** O item de §7 do orçamento anterior —
+   *"um segundo formato de informação de depuração, do zero, sem reaproveitar nada"* — **deixa de
+   existir para o nosso debugger.**
+2. **Para gdb/lldb em Windows: é o mesmo DWARF, noutro contentor** — verificado no
+   `cmd/link/internal/ld/pe.go` do Go, que põe DWARF dentro do PE: `pefile.addDWARF()`; *"DWARF
+   section names are longer than 8 characters. PE format requires such names to be stored in string
+   table"* → *"section names replaced with slash (/) followed by correspondent string table index"*;
+   `h.characteristics = IMAGE_SCN_ALIGN_1BYTES | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_DISCARDABLE |
+   IMAGE_SCN_CNT_INITIALIZED_DATA`; **nenhum CodeView, nenhum PDB.**
+
+Medi o nosso lado: `objfile_coff.tks` **tem** máquina de string table (`CoffStrtab`,
+`build_coff_strtab`, prefixo de 4 bytes) **mas só para nomes de SÍMBOLO**; nomes de **seção** usam
+`emit_coff_name8_str` — pad cru a 8 bytes, **sem** a forma `/N`. É exactamente o mecanismo que o Go
+teve de implementar. **Orçado em §7.6 (W0…W2, 3 crumbs, um deles sondagem).** CodeView só seria
+preciso para **WinDbg e Visual Studio**, e não é preciso para nada que o dono pediu.
+
+## 7.5 A regra escrita sobre `--release`
+
+1. **A informação de depuração nunca é imposta.** Default `--debug=none` em **todos** os comandos e
+   perfis, `--release` incluído.
+2. **`--release --debug=lines` é LEGAL e não é recusado.** É como se depura um crash de release, e
+   recusá-lo obrigaria a reconstruir com outro perfil — que muda o código e apaga o defeito. Os eixos
+   são ortogonais **por medição**: na rota nativa não há otimizador, logo nenhuma reordenação faz a
+   tabela mentir.
+3. **`teko run` mantém o seu perfil de depuração** e **não** passa a exigir a flag.
+
+## 7.6 O texto exacto do `--help`, e as formas em Teko
+
+Em `print_help_general` (após `--release`) e em `print_help_build`, verbatim:
 
 ```
-       --debug=lines          emit DWARF line info: breakpoint by .tks line, step, and backtrace
-                              in gdb/lldb/VSCode. Does NOT include variables (see BUILDING.md)
+       --debug=lines          emit debug info: breakpoint by .tks line, step, and backtrace in
+                              tdb, gdb, lldb and VSCode. Does NOT include variables
        --debug=none           no debug information (the default, including under --release)
 ```
 
-E a rejeição, em `main.tks`, antes de `project_arg_of` correr (o mesmo sítio onde `--backend` é
+E a rejeição, em `main.tks`, **antes** de `project_arg_of` correr (o sítio onde `--backend` é
 rejeitado hoje):
 
 ```
@@ -312,36 +614,6 @@ teko: `-g` is not a Teko flag.
       compiler cannot emit that yet — promising it would be a lie.
       Use `--debug=lines` for the line table (breakpoint by .tks line, step, backtrace).
 ```
-
-## 2.5 Onde vivem os bytes — medido, e a resposta é "não no `.tkl`"
-
-O `.tkl` é um ZIP-STORE com **exactamente três entradas**: `<name>.tkh`, `<name>.tkb`,
-`<name>.tsym` (`project.tks`, o bloco `C7.12`). **Não contém objeto nenhum.** O `.tsym` também é
-escrito solto ao lado do binário como `<binário>.tsym`, em quatro sítios distintos.
-
-Portanto: **DWARF vai dentro do objeto/binário e em mais lado nenhum.** Não entra no `.tkl`,
-porque não há lá objeto a que se agarrar; e não é um ficheiro ao lado, porque a nossa rota liga com
-`cc` que já traz as seções do `.o` para o executável (medido — foi assim que o PoC funcionou).
-**O `.tkl` fica intocado por este desenho**, o que é uma boa notícia de reversibilidade.
-
-`.tsym` e `.debug_line` **não são rivais**: `.tsym` é por-função (`file:line` da declaração),
-`.debug_line` é por-endereço. §9.3 diz o que o `.tsym` se torna depois do Piso.
-
-## 2.6 A regra escrita sobre `--release`
-
-Três frases, para entrarem em `docs/BUILDING.md` e no doc-comment da função de resolução:
-
-1. **A informação de depuração nunca é imposta.** O default é `--debug=none` em **todos** os
-   comandos e perfis, `--release` incluído. Ela cresce o objeto e um release não a paga sem pedido.
-2. **`--release --debug=lines` é LEGAL e não é recusado.** É exactamente como se depura um crash de
-   release, e recusá-lo obrigaria a reconstruir com outro perfil — que muda o código e apaga o
-   defeito. Os dois eixos são ortogonais **por medição**: na rota nativa não temos otimizador, logo
-   não há reordenação que faça a tabela de linha mentir; na rota C o `-g -O2` do host é o par que
-   toda a gente já usa.
-3. **`teko run` continua com o seu perfil de depuração** (é o que faz hoje via `run_cc_debug`), e
-   **não** passa a exigir a flag — a flag é para `build`/bare, onde hoje não há como pedir.
-
-## 2.7 As formas em Teko que o implementador acrescenta
 
 `void` é banido (nenhuma destas devolve nada sem valor) e não há sobrecarga (cada operação, um nome).
 
@@ -352,10 +624,13 @@ Três frases, para entrarem em `docs/BUILDING.md` e no doc-comment da função d
  * An ENUM and not a bool because the axis is LEVELLED at the reference this surface mirrors:
  * rustc documents `line-tables-only` ("the minimal amount of debug info for backtraces with
  * filename/line number info, but not anything else") as a first-class level distinct from
- * `full`. `Lines` IS that level. When variables land, a `Vars` member joins here and no
- * existing spelling changes meaning — which is the whole reason this is not a bool.
+ * `full`. `Lines` IS that level. When variables land, a `Vars` member joins here and no existing
+ * spelling changes meaning — which is the whole reason this is not a bool.
  *
- * @since 0.3.1 debugger camada 1
+ * One level drives TWO outputs from ONE origin: the DWARF sections (for gdb/lldb/VSCode) and the
+ * `.tsym` v2 map (for `tdb`). They are consumers, never rival formats.
+ *
+ * @since 0.3.1 debugger piso
  * @see opt_level_of  the sibling build AXIS, likewise CLI-only and absent from `teko.tkp`
  */
 pub type DebugInfo = enum { None; Lines }
@@ -364,9 +639,9 @@ pub type DebugInfo = enum { None; Lines }
  * debug_arg_has_prefix — does `a` begin with the `--debug=` selector prefix, so its remainder is
  * the requested level?
  *
- * An 8-byte prefix, guarded on length so the slice never runs past the string — the exact shape
- * of `opt_arg_has_prefix`, whose 6-byte guard this mirrors deliberately: two selector flags that
- * parse differently is how one of them ends up wrong.
+ * An 8-byte prefix, guarded on length so the slice never runs past the string — deliberately the
+ * exact shape of `opt_arg_has_prefix`'s 6-byte guard: two selector flags that parse differently
+ * is how one of them ends up wrong.
  *
  * @param a  a single CLI argument token
  * @return   true iff `a` is a `--debug=<value>` form
@@ -384,8 +659,8 @@ fn debug_arg_has_prefix(a: str) -> bool {
  * "teaches wrong" failure this surface exists to avoid. M.3: no silent coercion.
  *
  * @param v  the substring after `--debug=`
- * @return   the level for "none"/"lines", else an honest error naming both accepted values
- * @throws   when `v` is neither "none" nor "lines"
+ * @return   the level for "none"/"lines"
+ * @throws   when `v` is neither "none" nor "lines", naming both accepted values
  */
 fn debug_info_of_value(v: str) -> DebugInfo | error {
     if v == "none" { return DebugInfo::None }
@@ -396,17 +671,16 @@ fn debug_info_of_value(v: str) -> DebugInfo | error {
 /**
  * debug_info_of — resolve the requested debug level from the build flags.
  *
- * With no `--debug=` flag the level is `None` — the DEFAULT AT EVERY PROFILE, `--release`
- * included: debug information grows the object and is never imposed. The LAST matching flag on
- * the line wins, matching `opt_level_of`'s rule so the two axes behave the same way under
- * repetition.
+ * With no `--debug=` flag the level is `None` — THE DEFAULT AT EVERY PROFILE, `--release`
+ * included: debug information grows the artifacts and is never imposed. The LAST matching flag on
+ * the line wins, matching `opt_level_of`'s rule so the two axes behave the same under repetition.
  *
  * `--release --debug=lines` is a LEGAL, SUPPORTED pair and is not refused: it is how a release
  * crash gets debugged, and refusing it would force a rebuild at another profile — which changes
  * the code and erases the defect.
  *
  * @param args  the full CLI argument vector
- * @return      the resolved level (`None` by default), or the honest error from a bad value
+ * @return      the resolved level (`None` by default)
  * @throws      when a `--debug=` value is not a recognised level
  */
 fn debug_info_of(args: []str) -> DebugInfo | error {
@@ -428,11 +702,11 @@ fn debug_info_of(args: []str) -> DebugInfo | error {
 /**
  * has_bare_g_flag — does a bare `-g` appear anywhere in `args` from `start`?
  *
- * Consulted at CLI dispatch BEFORE `project_arg_of` runs, so a `-g` gets the honest rejection
- * that names `--debug=lines` instead of being read as the project path. `-g` is refused rather
- * than aliased because in gcc, clang and rustc it means FULL debug information (rustc documents
- * it as an alias for `-C debuginfo=2`), and this compiler cannot emit that yet — an alias would
- * promise types and variables and deliver a line table.
+ * Consulted at CLI dispatch BEFORE `project_arg_of` runs, so a `-g` gets the honest rejection that
+ * names `--debug=lines` instead of being read as the project path. `-g` is refused rather than
+ * aliased because in gcc, clang and rustc it means FULL debug information (rustc documents it as
+ * an alias for `-C debuginfo=2`), and this compiler cannot emit that yet — an alias would promise
+ * types and variables and deliver a line table.
  *
  * The precedent is exact and lives in this same file: `has_backend_flag` refuses the retired
  * `--backend` by NAMING the reason rather than silently ignoring it.
@@ -452,20 +726,67 @@ fn has_bare_g_flag(args: []str, start: u64) -> bool {
 }
 ```
 
-**E a linha que não pode faltar**, dentro de `project_arg_of`, sob pena da armadilha de §2.1:
+**E a linha que não pode faltar**, em `project_arg_of`, sob pena da armadilha de §7.1:
 
 ```teko
         else if debug_arg_has_prefix(args[i]) { i = i + 1 }
 ```
 
+## 7.7 A superfície do `tdb` — o que o dono escreve
+
+**O molde é o delve, verificado** (`Documentation/usage/dlv.md`): `debug` ("Compile and begin
+debugging main package"), `exec` ("Execute a precompiled binary, and begin a debug session"),
+`attach`, `test`, `dap` ("Starts a headless TCP server communicating via Debug Adaptor Protocol"),
+`connect`, `trace`, `core`, `version`. E a decisão de forma que copio: **`dlv dap` é um MODO DO
+PRÓPRIO BINÁRIO, não um adaptador separado** (§12.4).
+
+**Subcomandos do `tdb`, e o que deixo deliberadamente de fora:**
+
+| subcomando | efeito | fase |
+|---|---|---|
+| `tdb run <projdir> [-- args…]` | `teko build --debug=lines` + spawn traçado + sessão interativa. O irmão de `dlv debug`. | T3 |
+| `tdb exec <binário> [-- args…]` | spawn traçado de um binário já construído. **O primeiro a existir**, porque não depende do builder. | T1 |
+| `tdb attach <pid>` | anexa a um processo vivo | T2 |
+| `tdb dap [--port <n>]` | servidor DAP; sem `--port`, stdio | T4 |
+| `tdb version` | versão | T1 |
+| ~~`core`~~ | **fora, e nomeado:** ler core dumps é um leitor de ELF-core próprio. Onde é preciso, **o gdb com DWARF serve** — é o caso (b) de §6 a pagar-se. |
+| ~~`trace`~~, ~~`test`~~, ~~`connect`~~ | fora do arco inicial |
+
+**Comandos interativos.** Escolho a grafia do **gdb**, não a do lldb, e a razão é de lei —
+comportamentos → Go: o delve escolheu a grafia do gdb pelo mesmo motivo (memória muscular de quem
+depura). Aliases de CLI **não são sobrecarga de função**: são um nome com abreviatura, e é assim que
+todo debugger se escreve.
+
+```
+break <file.tks>:<line>      b     põe breakpoint
+delete <n>                   d     remove
+run                          r     arranca
+continue                     c     continua
+next                         n     próxima linha, sem entrar
+step                         s     próxima linha, entrando
+finish                             corre até ao retorno da moldura corrente
+bt                                 pilha, com nomes Teko
+frame <n>                    f     selecciona moldura
+list                         l     lista o .tks em volta da linha corrente
+info breakpoints                   estado dos breakpoints
+print <nome>                 p     (fase T5 — variáveis)
+locals                             (fase T5)
+quit                         q
+```
+
+**O que o `tdb` NÃO faz, dito antes de ser prometido:** avaliar expressões (só nomes simples, em
+T5); watchpoints; alterar valores; core dumps; e **passar por dentro de código C** — uma chamada a
+uma biblioteca C aparece como uma moldura com endereço cru, e é aí que o gdb com DWARF continua a
+ser a ferramenta certa.
+
 ---
 
-# PEÇA 3 — Uso em cada debugger: quatro, completos, coláveis
+# PEÇA 3 — Uso em cada debugger: cinco, completos, coláveis
 
-Pressuposto único: `teko build . --debug=lines -o bin`, com o `DW_AT_comp_dir` absoluto de §1.7.
-O exemplo assume um projeto cujo `main` vive em `src/main.tks` e cujo binário sai em `bin/hello`.
+Pressuposto: `teko build . --debug=lines -o bin`, com o `DW_AT_comp_dir` absoluto de §1.5.
+O exemplo assume `main` em `src/main.tks` e binário em `bin/hello`.
 
-## 3.1 gdb no terminal
+## 8.1 gdb no terminal
 
 ```sh
 teko build . --debug=lines -o bin
@@ -483,25 +804,21 @@ Breakpoint 1, add () at src/main.tks:41
 (gdb) bt
 #0  add () at src/main.tks:42
 #1  0x0000555555555158 in main () at src/main.tks:52
-(gdb) info line
-Line 42 of "src/main.tks" starts at address 0x555555555146 <add+19> ...
 (gdb) continue
 ```
 
-Numa linha só, para script ou para colar:
+Numa linha, para script:
 
 ```sh
 gdb -batch -ex "break src/main.tks:41" -ex run -ex bt ./bin/hello
 ```
 
-**O que NÃO funciona:** `print s` → `No symbol "s" in current context`. `info locals` → `No symbol
-table info available.` `ptype` de qualquer coisa nossa → nada. Isto é literal, medido em §1.6, e é
-a fronteira do Piso.
+**O que NÃO funciona:** `print s` → `No symbol "s" in current context`; `info locals` → `No symbol
+table info available.`; `ptype` de qualquer coisa nossa → nada. Literal, medido em §1.5.
 
-## 3.2 lldb no terminal — sintaxe diferente, mesmo objeto
+## 8.2 lldb no terminal — sintaxe diferente, mesmo objeto
 
 ```sh
-teko build . --debug=lines -o bin
 lldb ./bin/hello
 ```
 
@@ -514,25 +831,24 @@ Breakpoint 1: where = hello`add + 10 at src/main.tks:41:1, address = 0x000000000
 (lldb) continue
 ```
 
-A forma curta (`b src/main.tks:41`) também resolve. Numa linha:
+A forma curta `b src/main.tks:41` também resolve. Numa linha:
 
 ```sh
 lldb -b -o "breakpoint set --file src/main.tks --line 41" -o run -o bt ./bin/hello
 ```
 
 **O que NÃO funciona:** `frame variable` → `no variable information is available in debug info for
-this compile unit`. `expression s` falha. `v` (o alias) idem.
+this compile unit`; `expression s` falha.
 
-**Duas diferenças de forma face ao gdb, que valem entrar na documentação porque custam tempo a
-descobrir:** o lldb reporta `ficheiro:linha:coluna` (usa o `DW_LNS_set_column` que emitimos, o gdb
-ignora-o); e o lldb desenrola **para dentro da libc** por omissão, logo o `bt` do Piso tem 8
-molduras, não 2 — as 5 extra são da libc e do `_start` e são **corretas**, não ruído nosso.
+**Duas diferenças de forma que custam tempo a descobrir:** o lldb reporta `ficheiro:linha:coluna`
+(usa o `DW_LNS_set_column` que emitimos; o gdb ignora-o); e o lldb desenrola **para dentro da
+libc** por omissão, logo o `bt` tem 8 molduras, não 2 — as 5 extra são corretas, não ruído nosso.
 
-## 3.3 VSCode via `cppdbg` (Linux) — `launch.json` completo
+## 8.3 VSCode via `cppdbg` (Linux) — completo
 
 **A peça que falta em qualquer tutorial e sem a qual nada disto funciona:** o VSCode **recusa pôr
 breakpoint num ficheiro cuja linguagem não conhece**. `.tks` não tem extensão de linguagem
-registada, logo o gutter não aceita o clique. Sem a linha abaixo, o resto do ficheiro é inútil.
+registada, logo o gutter não aceita o clique. **Sem a primeira linha abaixo, o resto é inútil.**
 
 `.vscode/settings.json`
 
@@ -589,7 +905,7 @@ registada, logo o gutter não aceita o clique. Sem a linha abaixo, o resto do fi
           "ignoreFailures": true
         },
         {
-          "description": "nao parar no primeiro SIGTRAP do arranque dinamico",
+          "description": "aceitar breakpoint ainda nao resolvido no arranque",
           "text": "-gdb-set breakpoint pending on",
           "ignoreFailures": true
         }
@@ -599,17 +915,15 @@ registada, logo o gutter não aceita o clique. Sem a linha abaixo, o resto do fi
 }
 ```
 
-Requer a extensão `ms-vscode.cpptools`. `sourceFileMap` fica **vazio de propósito**: com o
-`DW_AT_comp_dir` absoluto de §1.7 não há nada para remapear — e é esse o argumento de fundo para a
-decisão de §1.7.
+Requer `ms-vscode.cpptools`. `sourceFileMap` fica **vazio de propósito**: com o `comp_dir` absoluto
+de §1.5 não há nada para remapear — e é esse o argumento de fundo daquela decisão.
 
-**O que NÃO funciona na Camada 1:** o painel **Variables** fica vazio (nem `Locals` nem `Registers`
-úteis); **Watch** responde `-var-create: unable to create variable object` a qualquer expressão;
-`Debug Console` com `-exec print x` dá o mesmo `No symbol` de §3.1; **hover** sobre um identificador
-não mostra valor. **Funciona:** breakpoints no gutter, Continue/StepOver/StepInto/StepOut, o painel
-**Call Stack** com nomes Teko, e clicar numa moldura para saltar para o `.tks`.
+**O que NÃO funciona:** painel **Variables** vazio; **Watch** responde `-var-create: unable to
+create variable object`; `-exec print x` dá o mesmo `No symbol`; **hover** não mostra valor.
+**Funciona:** breakpoints no gutter, Continue/StepOver/StepInto/StepOut, **Call Stack** com nomes
+Teko, e clicar numa moldura para saltar para o `.tks`.
 
-## 3.4 VSCode via CodeLLDB (macOS) — `launch.json` completo
+## 8.4 VSCode via CodeLLDB (macOS) — completo
 
 `.vscode/launch.json`
 
@@ -629,730 +943,644 @@ não mostra valor. **Funciona:** breakpoints no gutter, Continue/StepOver/StepIn
       "terminal": "integrated",
       "preLaunchTask": "teko: build --debug=lines",
       "sourceMap": {},
-      "initCommands": [
-        "settings set target.inline-breakpoint-strategy always"
-      ],
+      "initCommands": ["settings set target.inline-breakpoint-strategy always"],
       "sourceLanguages": ["c"]
     }
   ]
 }
 ```
 
-O `settings.json` de §3.3 (`debug.allowBreakpointsEverywhere`) é **igualmente obrigatório**.
-Requer a extensão `vadimcn.vscode-lldb`.
+O `settings.json` de §8.3 é **igualmente obrigatório**. Requer `vadimcn.vscode-lldb`.
 
 **Onde difere do `cppdbg`, campo a campo** — não é o mesmo ficheiro com o `type` trocado:
 
 | `cppdbg` | CodeLLDB | porquê |
 |---|---|---|
-| `"type": "cppdbg"` + `"MIMode": "gdb"` + `"miDebuggerPath"` | `"type": "lldb"`, **sem** `MIMode` nem caminho | o `cppdbg` **conduz** o gdb por MI; o CodeLLDB **embute** o lldb via API. Não há binário externo a apontar. |
+| `"type": "cppdbg"` + `"MIMode"` + `"miDebuggerPath"` | `"type": "lldb"`, **sem** MIMode nem caminho | o `cppdbg` **conduz** o gdb por MI; o CodeLLDB **embute** o lldb via API |
 | `"stopAtEntry"` | `"stopOnEntry"` | grafias diferentes; a errada é ignorada em silêncio |
 | `"environment": [{"name":…,"value":…}]` | `"env": { "K": "V" }` | array de registos vs. objeto |
 | `"sourceFileMap"` | `"sourceMap"` | mesma função, nome diferente |
-| `"setupCommands"` com `"text": "-gdb-set …"` (MI) | `"initCommands"` / `"preRunCommands"` com comandos **de lldb** | o vocabulário é outro: `-gdb-set` não existe no lldb |
-| — | **`"sourceLanguages": ["c"]`** | só o CodeLLDB tem isto, e **importa para nós**: casa com o `DW_AT_language = DW_LANG_C99` de §1.7 e é o que liga o realce e o analisador de expressões no painel |
-| — | `"terminal"` | `"externalConsole"` é do `cppdbg` |
+| `"setupCommands"` com `-gdb-set …` (MI) | `"initCommands"`/`"preRunCommands"` com comandos **de lldb** | `-gdb-set` não existe no lldb |
+| — | **`"sourceLanguages": ["c"]`** | só o CodeLLDB tem, e **importa para nós**: casa com o `DW_LANG_C99` de §1.5 |
+| `"externalConsole"` | `"terminal"` | — |
 
-**O que NÃO funciona na Camada 1:** o painel **Variables** mostra a mensagem
-`no variable information is available in debug info for this compile unit` — o CodeLLDB é mais
-honesto que o `cppdbg` aqui, que mostra vazio. **Watch** e **hover** falham igualmente. **Funciona:**
-o mesmo conjunto de §3.3.
+**O que NÃO funciona:** o painel **Variables** mostra `no variable information is available in debug
+info for this compile unit` — o CodeLLDB é mais honesto aqui que o `cppdbg`, que mostra vazio.
+**Funciona:** o mesmo conjunto de §8.3.
 
-## 3.5 A frase que os quatro têm de levar na documentação
+## 8.5 `tdb` no terminal — o quinto
+
+```sh
+teko build . --debug=lines -o bin
+tdb exec ./bin/hello
+```
+
+```
+tdb 0.3.1 — teko debugger
+loaded bin/hello.tsym (v2): 412 functions, 5108 line rows, 412 frame descriptors
+(tdb) break src/main.tks:41
+Breakpoint 1 at 0x1133: src/main.tks:41 (in teko::demo::add)
+(tdb) run
+Breakpoint 1, teko::demo::add at src/main.tks:41
+41	    let s = a + b
+(tdb) bt
+#0  teko::demo::add   at src/main.tks:41
+#1  teko::demo::main  at src/main.tks:52
+(tdb) next
+42	    s
+(tdb) continue
+process exited with status 5
+(tdb) quit
+```
+
+**Três coisas que o `tdb` faz melhor que o gdb, e é bom nomeá-las porque são a razão de ele existir:**
+o `bt` mostra **`teko::demo::add`**, o nome qualificado Teko, não o símbolo manglado (o `.tsym` já
+carrega os dois — medido em §3.2); o `bt` é construído do **descritor de frame** que o compilador
+emitiu, não de análise de prólogo (§5.1); e **não desenrola para dentro da libc** por omissão, logo
+não há 5 molduras de ruído.
+
+**O que NÃO funciona no `tdb` inicial:** `print s` (fase T5); entrar em código C; core dumps.
+
+## 8.6 `tdb` no VSCode via DAP — e a peça que não é grátis
+
+`tdb dap` fala DAP, **mas DAP sozinho não basta**: o VSCode só oferece um `"type"` de depuração se
+uma extensão o **registar** com `contributes.debuggers`. Isso é 1 crumb e **zero JavaScript** —
+apenas um `package.json` a apontar o executável do adaptador. **Zero JS é uma virtude de lei aqui:**
+o roadmap de tooling já ratificou que *"nenhuma invocação de processo externo a partir de um editor
+usa concatenação de string para shell"*, por causa de um achado real de injeção em
+`extensions/vscode/src/extension.js`. Um adaptador registado por `package.json` **não tem código
+onde essa falha caiba**.
+
+`tooling/vscode/package.json` (o fragmento que importa)
+
+```json
+{
+  "contributes": {
+    "debuggers": [
+      {
+        "type": "tdb",
+        "label": "Teko (tdb)",
+        "program": "./bin/tdb",
+        "args": ["dap"],
+        "languages": ["teko"],
+        "configurationAttributes": {
+          "launch": {
+            "required": ["program"],
+            "properties": {
+              "program": { "type": "string", "description": "o binario Teko a depurar" },
+              "args": { "type": "array", "items": { "type": "string" }, "default": [] },
+              "cwd": { "type": "string", "default": "${workspaceFolder}" },
+              "stopOnEntry": { "type": "boolean", "default": false }
+            }
+          },
+          "attach": {
+            "required": ["pid"],
+            "properties": { "pid": { "type": "number", "description": "o pid a anexar" } }
+          }
+        }
+      }
+    ]
+  }
+}
+```
+
+`.vscode/launch.json`
+
+```json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "teko: depurar (tdb / DAP)",
+      "type": "tdb",
+      "request": "launch",
+      "program": "${workspaceFolder}/bin/hello",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "stopOnEntry": false,
+      "preLaunchTask": "teko: build --debug=lines"
+    }
+  ]
+}
+```
+
+**Onde difere dos outros dois:** não há `MIMode`, `miDebuggerPath`, `sourceFileMap` nem
+`sourceMap` — o adaptador é nosso e resolve os caminhos com o **nosso** `.tsym`, logo não há
+remapeamento a configurar. E `"languages": ["teko"]` **dispensa
+`debug.allowBreakpointsEverywhere`**, porque a extensão registou a linguagem. **Isso é uma vantagem
+concreta e mensurável do `tdb` sobre `cppdbg`/CodeLLDB**, e vale registá-la: as duas vias de
+terceiros exigem que o utilizador ligue uma opção global do editor; a nossa não.
+
+## 8.7 A frase que os cinco levam na documentação
 
 > `--debug=lines` responde **"onde estou e como cheguei aqui"**. Não responde **"quanto vale `x`"**.
-> Se o painel Variables está vazio, não é defeito — é este nível. O nível que responde a isso ainda
-> não existe, e quando existir chamar-se-á `--debug=vars`.
+> Se o painel Variables está vazio, não é defeito — é este nível. O nível que responde a isso
+> chamar-se-á `--debug=vars`.
 
 Recusa nomeada, não omissão — a regra que o expurgo já fixou para o MinGW.
 
 ---
 
-# PEÇA 6 — A fronteira redesenhada por HONESTIDADE (o ruling do dono)
+# PEÇA 4 — As camadas, orçadas com número
 
-**Regra nova, aplicada a todas as camadas:** *uma camada só pode CLAMAR o que consegue GARANTIR;
-se a garantia depende de outra camada, ou a garantia sai da lista, ou a dependência entra na
-camada.* O dono está certo sobre a causa: as camadas antigas foram cortadas por custo. Abaixo,
-cada red-flag foi **medida**, e o corte refeito.
+Unidade: **crumb** (passo pequeno, prova própria, reversível). **A Camada 0 não existe (R2).**
 
-## 4.1 RED-FLAG 3 — REFUTADA, com medição, em x86-64
+## 9.1 O Piso do compilador — 8 crumbs
 
-A afirmação a derrubar era: *"as nossas funções têm duas formas de frame e uma função sem `rbp` em
-pilha profunda pode derrotar a heurística de análise de prólogo"*.
+Serve **os dois** consumidores. D1.1…D1.6 mantêm-se como no orçamento anterior (§5 de lá), com
+**três alterações** e **um crumb novo**:
 
-**Primeiro, o argumento estrutural, lido no código.** `encode_x86_64.tks:1532`:
-
-```teko
-fn frame_is_framed_x86(layout: FrameLayoutX86) -> bool {
-    let n_saved = (layout.saved_gpr.len + layout.saved_fpr.len) to u32
-    (layout.size > (0 to u32)) || (n_saved > (0 to u32)) || layout.call_align
-}
-```
-
-e `needs_call_align_x86(f) = func_makes_call_x86(f) && func_any_ret_x86(f)`. Logo:
-
-* `layout.size > 0` (há slots ou região de argumentos) ⇒ **framed** ⇒ `push rbp; mov rbp,rsp`.
-* há registo callee-saved ⇒ **framed**.
-* a função **faz uma chamada** e retorna ⇒ `call_align` ⇒ **framed**.
-* **uma função frameless emite prólogo e epílogo VAZIOS** (`emit_prologue_x86` /
-  `emit_epilogue_x86` devolvem lista vazia).
-
-**A consequência é um invariante, não uma esperança: RSP só se move dentro de uma função que já
-pôs `rbp`. Uma função frameless devolve RSP exactamente como o recebeu.** É o caso mais fácil que
-existe para um analisador de prólogo, não o mais difícil.
-
-**Segundo, a medição.** `docs/design/debugger-poc/adv.s` constrói uma cadeia de cinco molduras que
-percorre **todas** as formas, **incluindo o único furo teórico** (a função frameless que *chama* e
-nunca retorna — `func_any_ret_x86` falso), e confirma que o objeto **não tem `.eh_frame`**:
-
-| moldura | forma | bytes |
-|---|---|---|
-| `#0 lvl4` | **frameless leaf** — zero bytes de prólogo | `mov $7,%eax; ret` |
-| `#1 lvl3` | **framed com callee-saved DEPOIS de `mov rbp,rsp`, e `sub rsp`** — a nossa ordem exacta | `push %rbp; mov %rsp,%rbp; push %rbx; push %r12; sub $0x20,%rsp` |
-| `#2 lvl2` | **frameless CALLER** — chama e nunca retorna, o furo | `call lvl3; …; hlt` |
-| `#3 lvl1` | **framed só por alinhamento** (`size` 0, zero callee-saved) | `push %rbp; mov %rsp,%rbp; sub $0,%rsp` |
-| `#4 main` | framed | — |
-
-gdb 15.1, sem uma linha de CFI:
-
-```
-Breakpoint 1, lvl4 () at hello.tks:30
-#0  lvl4 () at hello.tks:30
-#1  0x000055555555514f in lvl3 () at hello.tks:42
-#2  0x0000555555555163 in lvl2 () at hello.tks:20
-#3  0x0000555555555181 in lvl1 () at hello.tks:17
-#4  0x000055555555518c in main () at hello.tks:41
-```
-
-lldb 18.1.3, **o mesmo objeto**, as mesmas cinco molduras (mais as 4 da libc). E os **dois pontos
-de fronteira de prólogo**, que são o modo de falha real de um analisador de prólogo:
-
-* breakpoint no **primeiro byte** de `lvl3`, **antes** do `push %rbp` — 4 molduras corretas;
-* breakpoint **entre** o `push %rbp` e o `mov %rsp,%rbp` (`lvl3+1`) — 4 molduras corretas.
-
-**Veredicto: o `bt` FICA na lista de entregas do Piso em x86-64, e agora com prova e fixture — não
-com asserção. A CFI NÃO desce.** A red-flag 3 estava errada, e o que a tornava plausível era não
-ter sido medida.
-
-## 4.2 O que sobra por medir, e é honesto dizê-lo: arm64
-
-**Não medi arm64 e não posso**: não há `aarch64-linux-gnu-as`, `qemu-aarch64` nem toolchain cruzado
-neste host. O que **posso** afirmar é o invariante, lido em `encode_arm64.tks:1514`:
-
-```
-sub sp, sp, #size
-stp x29, x30, [sp, #size-16]
-add x29, sp, #size-16
-```
-
-`x29` fica a apontar **para** o par salvo, logo `[x29]` = `x29` do chamador e `[x29+8]` = endereço
-de retorno — **exactamente o invariante de cadeia de molduras do AAPCS64**, mesmo que a nossa
-colocação do par (no topo do frame) difira do idiomático `stp …,[sp,#-16]!` (na base). O andar da
-cadeia é idêntico.
-
-**Isso é um argumento, e um argumento não é uma medição.** Vira o **crumb D1.7**, primeiro da
-perna arm64, com dois ramos orçados em §5.1.
-
-## 4.3 RED-FLAG 2 — redimensionada, e o perigo verdadeiro é outro
-
-A red-flag dizia: *"a cadeia é `LEnv(nome→vreg)` → `regalloc(vreg→registo ou slot)` →
-`compute_frame_layout(slot→deslocamento)`; cada elo existe, nenhum carrega o nome"*. Verdade — e
-**irrelevante**, porque medi a chave:
-
-```teko
-pub fn assign_lookup(sr: ScanResult, vreg_id: u32) -> AssignLookup   // regalloc.tks:1475
-pub type InReg   = struct { vreg_id: u32; phys: u32 }
-pub type Spilled = struct { vreg_id: u32; slot: u64 }
-```
-
-`ScanResult` é **indexado por `vreg_id`** e `assign_lookup` é **pública**. O nome não tem de
-*viajar* por nenhum elo: uma tabela lateral `(nome, vreg_id)` capturada no lowering **junta-se** ao
-`ScanResult` depois do scan, pela chave que já existe. **É um JOIN, não plumbing** — e nenhum
-`match inst` do backend é tocado. O orçamento da Camada 2 desce por causa disto.
-
-**Mas há um perigo que a red-flag não nomeou e que é pior.** Uma alocação `InReg` é válida **apenas
-dentro do intervalo de vida do vreg**. Fora dele o registo físico já tem outra coisa. Um
-`DW_AT_location` que dissesse "`x` está em `rbx`" faria `print x` imprimir, **em silêncio e com
-confiança**, o valor de outra variável. Isso não é uma camada em falta: **é uma camada que ensina
-errado**, e é precisamente o defeito que o dono rejeitou.
-
-**A resolução honesta já está no código.** `src/lir/lower.tks:113`:
-
-```teko
-pub fn lenv_bind_scalar_slot(env: LEnv, name: str, slot: u32, ty: LType) -> LEnv
-```
-
-Um local nomeado **pode já ser ligado a um slot de frame** com o seu `LType`. Sob
-`--debug=vars`, o perfil de depuração **fixa todo local nomeado a um slot**, e a localização
-DWARF passa a ser um único `DW_OP_fbreg <offset>` válido em **todo** o escopo. É literalmente o que
-`cc -O0` faz, e é por isso que `print a` funcionou no Experimento A do documento anterior. **A
-Camada 2 honesta é mais barata que a Camada 2 rápida, e mais correta.**
-
-## 4.4 RED-FLAG 1 — confinada, e a regra que a torna inofensiva
-
-Estado medido de `str`: `src/runtime/teko_rt.h:44-48` define `tk_str` como **duas** words, com o
-comentário `length in BYTES`. `docs/memory/raiz-comum-dos-degraus-0.3.1.0.md:29` registra a decisão
-do dono de que `.len` conta **CARACTERES** e que `str` leva **os dois contadores** — terceira word.
-**Decidido, não aterrado.**
-
-Três perguntas do ruling, três respostas medidas:
-
-1. **Afeta a listagem de fonte?** **NÃO.** A listagem é o debugger a ler o `.tks` do disco. Medido
-   em §1.6: o lldb imprimiu as linhas 27–33 de `hello.tks` num processo onde não existe um `str`
-   Teko. Zero acoplamento.
-2. **Afeta a tabela de linha?** **NÃO.** A tabela é `(offset, linha, coluna)` — inteiros.
-3. **Afeta o painel Variables da Camada 2?** **SIM, e só nos locais de tipo `str`.** Um
-   `DW_TAG_structure_type` de duas words escrito hoje erra **duas vezes** quando a terceira word
-   aterrar: no tamanho e no significado de `len`. Um local `u64` é indiferente.
-
-**A regra que resolve, e que é generalizável em vez de ser um remendo para `str`:**
-
-> **Só se emite tipo DWARF para tipo cujo layout esteja CONGELADO.** Um local cujo tipo não está
-> congelado **não recebe `DW_TAG_variable` nenhum** — o debugger diz `No symbol "s" in current
-> context`, que é honesto, em vez de mostrar lixo com confiança.
-
-Com essa regra, `str` **deixa de bloquear a Camada 2**: bloqueia os locais de tipo `str`, e o resto
-avança. A Camada 3 (pretty-printer) continua bloqueada, porque um pretty-printer de `str` **é** o
-layout de `str`. **Isto é uma correção ao orçamento anterior**, que fazia `str` parecer
-pré-condição de mais do que é.
-
-## 4.5 E a CFI, se algum dia for preciso — o número, porque o ruling pediu
-
-Se a medição de §4.2 correr mal em arm64, ou se algum dia se quiser desenrolar sem heurística:
-
-| crumb | conteúdo | prova |
-|---|---|---|
-| **F1** | `dwarf.tks` ganha o escritor de `.debug_frame`: uma CIE (fixa, ~32 bytes) + uma FDE por função | golden de bytes da CIE + de uma FDE de cada forma |
-| **F2** | `FrameLayoutX86` → programa de CFA: framed = `DW_CFA_advance_loc` + `DW_CFA_def_cfa_offset 16` + `DW_CFA_offset rbp,-16` + `DW_CFA_def_cfa_register rbp`; frameless = **nada além dos defaults da CIE** | `encode_x86_64_test.tkt` sobre as quatro formas de `adv.s` |
-| **F3** | `FrameLayout` (arm64) → o mesmo, com `x29`/`x30` | idem na perna arm64 |
-| **F4** | routing da seção nos escritores ELF e Mach-O | golden + `readelf --debug-dump=frames` |
-
-**4 crumbs. E muda um número do Experimento D:** cada FDE precisa de um `initial_location`, logo
-**+1 `Abs64` por função** — o total deixa de ser 4 e passa a **4 + N**. Continua a ser um único
-kind, o `Abs64` que já emitimos; nenhum kind novo.
-
-**Nota de escolha, para não a fazer por acidente:** `.debug_frame` (não alocada, formato simples)
-vs. `.eh_frame` (`SHF_ALLOC`, augmentation `zR`, codificações de ponteiro, e **consumida em tempo
-de execução**). Recomendo `.debug_frame` para depuração. `.eh_frame` é um item **maior e separado**,
-e compra outra coisa: **stack traces nativos corretos em produção**, hoje servidos pelo `.tsym`.
-Não os misturar.
-
-## 4.6 A fronteira nova
-
-| Camada | Clama | Garante? | Veredicto |
-|---|---|---|---|
-| **Piso** (Camada 1 redefinida) | breakpoint por linha `.tks`, listagem, `step`/`next` | **sim** — medido §1.6 | fica |
-| **Piso** | `bt` com nomes Teko, x86-64 | **sim** — medido §4.1, 5 molduras, todas as formas, zero CFI | **fica, agora com prova** |
-| **Piso** | `bt` com nomes Teko, arm64 | **por medir** | fica **condicionado ao D1.7**; até lá a documentação diz "medido em x86-64" |
-| **Piso** | `print x` | **não** | **sai da lista, e a saída é NOMEADA** no `--help`, nos quatro `launch.json` e em §3.5 |
-| **Camada 2** | `print x`, membros de struct | sim **se** locais fixados a slot (§4.3) | a fixação a slot **entra na camada**; não é opcional |
-| **Camada 2** | tipos | sim **se** só para layout congelado (§4.4) | a regra do congelamento **entra na camada**; `str` fica de fora até aterrar |
-| **Camada 3** | `str` legível, união pelo membro ativo | **não hoje** | bloqueada por `str`; e ver §9.4 — a via do `variant_part` **não se aplica** |
-
----
-
-# PEÇA 4 — As camadas restantes, orçadas com número
-
-Unidade: **crumb** (passo pequeno, prova própria, reversível). Cada linha tem ficheiro e prova.
-
-## 5.1 O Piso — 8 crumbs (era 6)
-
-D0.1…D1.6 mantêm-se como no orçamento anterior (§5 de lá) com **duas alterações** e **um crumb
-novo**:
-
-* **D0.1 (arnês) ganha uma afirmação a mais, e é a que defende §4.1:** o arnês afirma a
-  profundidade do `bt` **através de uma função frameless**, não só ">= N". O fixture é `adv.s`.
-  Sem isso a refutação de §4.1 é verdadeira hoje e indefesa amanhã.
-* **D1.3 (`src/backend/dwarf.tks`) tem o golden já fixado por este documento** — §1.3, §1.4, §1.5,
-  bytes, não prosa. Este crumb **não colide com nada** e **não está bloqueado por nada**: pode
-  começar hoje.
-* **D1.6 (superfície)** passa a ser o que a Peça 2 e a Peça 3 desenham: `DebugInfo`,
-  `debug_info_of`, a rejeição de `-g`, a linha em `project_arg_of`, os dois blocos de `--help`, e
-  os **quatro** `launch.json`/`settings.json`/`tasks.json` de §3.3 e §3.4 em `docs/`.
+* **D0.1 (arnês) ganha a afirmação que defende §5.2:** afirma a profundidade do `bt` **através de uma
+  função frameless**, não ">= N". Fixture: `adv.s`. Sem isso, a refutação é verdadeira hoje e
+  indefesa amanhã.
+* **D1.2 (`MLineMark`) passa a ter DOIS escoadouros declarados** — DWARF e `.tsym` v2. Mesma
+  produção, mesmos testes; um consumidor a mais, e é o que confirma a escolha de forma (§3.1).
+* **D1.3 (`src/backend/dwarf.tks`) tem o golden fixado por este documento** — §1.2, §1.3, §1.4,
+  bytes, não prosa. **Não colide com nada, não está bloqueado por nada: pode começar hoje.**
+* **D1.6 (superfície)** é o que a Peça 2 desenha, **mais** o emissor de `.tsym` v2 (as linhas `L`,
+  `F`, `V`), **mais** os cinco `launch.json` de §8 em `docs/`.
 
 **D1.7 — CRUMB NOVO: a sondagem de desenrolar em arm64**
 
-* **Mexe em:** nada em `src/`. É um `.s` de sondagem irmão de `adv.s`, corrido na perna aarch64
+* **Mexe em:** nada em `src/`. Um `.s` de sondagem irmão de `adv.s`, corrido na perna aarch64
   (`cargo/0.3.1-aarch64-elf` já tem lane).
-* **O que mede:** as cinco molduras de `adv.s` traduzidas para a nossa forma de prólogo arm64
+* **Mede:** as cinco molduras traduzidas para a nossa forma arm64
   (`sub sp; stp x29,x30,[sp,#top]; add x29,sp,#top`), com lldb e gdb, sem CFI.
-* **Ramos orçados:**
-  * **se a cadeia de `x29` recuperar (o esperado, §4.2): +0 crumbs**, e o Piso fica em 8.
-  * **se não recuperar: +4 crumbs** (F1…F4 de §4.5) **ou** — e esta é a alternativa honesta e
-    barata — **retirar a clamação de `bt` da perna arm64** na documentação até alguém comprar a CFI.
-    A escolha é do dono; as duas são honestas, a de hoje (clamar sem medir) não é.
-* **Porquê primeiro na perna arm64:** porque é a única clamação do Piso sem prova.
+* **Ramos:** se a cadeia de `x29` recuperar (o esperado, §5.2), **+0 crumbs**; se não,
+  **ou** retirar a clamação de `bt` da perna arm64 **para o interop DWARF** até alguém comprar CFI,
+  **ou** pagar CFI (+4). **`tdb` não depende deste ramo** — a linha `F` dá a verdade.
 
-## 5.2 Camada 2 — 6 crumbs, e a sondagem já foi feita (por leitura)
+## 9.2 Variáveis — 6 crumbs, e a sondagem já foi feita (por leitura)
 
-O orçamento anterior disse "5+ crumbs, um deles perigoso" e pôs a sondagem como primeiro crumb.
-**A sondagem está feita em §4.3**: a chave é `vreg_id`, `assign_lookup` é pública, é um JOIN. O que
-resta é orçável **directamente**, e o item perigoso mudou de identidade — não é o plumbing, é a
-**validade da localização**.
+O orçamento anterior disse "5+ crumbs, um deles perigoso" e pôs a sondagem primeiro. **A sondagem
+está feita em §5.3**: a chave é `vreg_id`, `assign_lookup` é pública, é um JOIN. O item perigoso
+mudou de identidade: não é plumbing, é **validade de localização**.
 
 | crumb | mexe em | prova |
 |---|---|---|
-| **D2.1** | `src/lir/lower.tks` — sob o perfil de depuração, todo `let` nomeado passa por `lenv_bind_scalar_slot` em vez de `lenv_bind`. O mecanismo **já existe**; o crumb é a bifurcação por perfil. | `lower_test.tkt`: sob o perfil, o `LEnv` de um `let` escalar tem `is_scalar_slot = true`; sem o perfil, o LIR é **byte-idêntico** ao de hoje. A segunda metade é o que torna o crumb seguro. |
-| **D2.2** | `src/lir/lir.tks` — `LFunc` ganha `local_names: []str`, `local_slots: []u32`, `local_types: []LType`, `local_decl_lines: []u32`, populados de `LEnv` no fim de `lower_function`. | `lower_test.tkt`: uma função com dois `let` e um shadow produz **três** entradas, na ordem de ligação. O shadow é o teste que importa. |
-| **D2.3** | `src/backend/dwarf.tks` — `DW_TAG_variable` / `DW_TAG_formal_parameter` com `DW_AT_location` = `DW_OP_fbreg <sleb>`, e `DW_TAG_lexical_block` a delimitar shadows. O offset vem de `compute_frame_layout`; a base é `DW_AT_frame_base` = `DW_OP_call_frame_cfa` (sem CFI, usa-se `DW_OP_reg6`/`rbp` — decisão do crumb, com a nota de §4.5). | golden de bytes + o arnês estendido: `gdb -ex "print s"` devolve o **valor**, não `No symbol`. |
-| **D2.4** | `src/backend/dwarf.tks` — o **registo de tipos congelados** e `DW_TAG_base_type` para os escalares (`i8…i64`, `u8…u64`, `f32`, `f64`, `bool`, `byte`). A lista de congelados é **explícita e enumerada**, nunca "tudo o que não sabemos que muda". | `dwarf_test.tkt`: um `LType` **não** congelado produz **nenhum** `DW_AT_type` e **nenhum** `DW_TAG_variable`; um congelado produz o DIE esperado. O ramo negativo é metade do crumb. |
-| **D2.5** | `src/backend/dwarf.tks` — `DW_TAG_structure_type` + `DW_TAG_member` para agregados **congelados**. `str` **excluído por regra** (§4.4), não por esquecimento. | golden; e `gdb -ex "print p.x"` sobre um struct de dois `i64`. |
-| **D2.6** | superfície: `--debug=vars`, e **só aqui** `-g` passa a ser alias legal (§2.2). `project_arg_of` já cobre `--debug=`. | `help_test.tkt` + o teste que prova que `-g` deixou de ser rejeitado. |
+| **D2.1** | `src/lir/lower.tks` — sob o perfil, todo `let` nomeado passa por `lenv_bind_scalar_slot` em vez de `lenv_bind`. O mecanismo **já existe**; o crumb é a bifurcação por perfil. | `lower_test.tkt`: sob o perfil, `is_scalar_slot = true`; **sem** o perfil, o LIR é **byte-idêntico** ao de hoje. A segunda metade é o que torna o crumb seguro. |
+| **D2.2** | `src/lir/lir.tks` — `LFunc` ganha `local_names`, `local_slots`, `local_types`, `local_decl_lines`, populados de `LEnv` no fim de `lower_function`. | `lower_test.tkt`: duas `let` + um shadow ⇒ **três** entradas, na ordem de ligação. O shadow é o teste que importa. |
+| **D2.3** | o emissor de `.tsym` v2 — as linhas `V`, com o offset de `compute_frame_layout`. **Só isto já dá `print x` no `tdb`.** | o arnês do `tdb`: `print s` devolve o **valor** |
+| **D2.4** | `src/backend/dwarf.tks` — `DW_TAG_variable`/`DW_TAG_formal_parameter` com `DW_AT_location = DW_OP_fbreg <sleb>` e `DW_TAG_lexical_block` para shadows. **Só é preciso se o dono quiser `print x` no gdb** (§6). | golden + `gdb -ex "print s"` devolve o valor |
+| **D2.5** | o **registo de tipos congelados** + `DW_TAG_base_type` dos escalares. A lista é **explícita e enumerada**, nunca "tudo o que não sabemos que muda". | `dwarf_test.tkt`: um tipo **não** congelado produz **nenhuma** descrição; um congelado produz a esperada. **O ramo negativo é metade do crumb.** |
+| **D2.6** | superfície `--debug=vars`, e **só aqui** `-g` passa a ser alias legal. | `help_test.tkt` + o teste que prova que `-g` deixou de ser rejeitado |
 
-**Total: 6 crumbs.** Nenhum deles é o penhasco que o orçamento anterior desenhou, e a razão é
-inteiramente §4.3 + §4.4: a fixação a slot mata os intervalos de vida, e o registo de congelados
-mata a re-tipificação do LIR.
+**Total: 6 crumbs, e 4 se o dono aceitar `print x` só no `tdb`** (D2.4 e D2.5 são a metade DWARF).
+Nenhum é o penhasco do orçamento anterior, e a razão é §5.3 + §5.4: a fixação a slot mata os
+intervalos de vida, e o registo de congelados mata a re-tipificação do LIR.
 
-**O que a Camada 2 ainda NÃO dá, dito antes de ser prometido:** genéricos monomorfizados (o DIE
-leva o nome resolvido, não o genérico), uniões (§9.4), e `str` (§4.4).
+## 9.3 Legibilidade — 3 crumbs (não 1), e bloqueada
 
-## 5.3 Camada 3 — 3 crumbs, e é 3, não 1
-
-**Bloqueio nomeado como pré-condição:** `str` de três words aterrado. M.4 resolve por sequenciamento
-— não é tensão para o dono, é ordem que a lei determina.
+**Pré-condição nomeada:** `str` de três words aterrado. M.4 decide por sequenciamento; não é tensão.
 
 | crumb | conteúdo |
 |---|---|
-| **D3.1** | o ficheiro de pretty-printers **do gdb** (Python) + a seção `.debug_gdb_scripts` que o auto-carrega do binário. O `cppdbg` carrega printers do gdb, logo o VSCode Linux vem de graça. |
-| **D3.2** | os **três** rails de união (§9.4): tagged inline, niche, box-em-arena. Um branch cada. |
-| **D3.3** | **o ficheiro de synthetic providers do lldb** — API **diferente**, ficheiro **diferente**. |
+| **D3.1** | o formatador do **`tdb`** para `str`, slices e uniões — **em Teko, dentro do `tdb`**, e é aqui que o `tdb` ganha a sua maior vantagem: **não é um ficheiro Python fora da árvore de tipos** |
+| **D3.2** | os pretty-printers Python **do gdb** + a seção `.debug_gdb_scripts` que os auto-carrega (o `cppdbg` carrega-os, logo o VSCode Linux vem de graça) |
+| **D3.3** | os synthetic providers **do lldb** — API **diferente**, ficheiro **diferente** |
 
-**D3.3 é uma correção ao orçamento anterior, e vem da referência verificada:** Rust ship**a os
-dois** — `gdb_load_rust_pretty_printers.py` **e** `lldb_lookup.py`/`lldb_providers.py`. Não há um
-ficheiro que sirva gdb e lldb. O "1 crumb" de lá subestimava a **paridade de plataforma**, que é
-exactamente onde o Piso tem a sua maior virtude (um escritor, dois debuggers) e a Camada 3 não tem.
+**D3.3 é uma correção ao orçamento anterior, e vem de referência verificada:** Rust ship**a os dois**
+— `gdb_load_rust_pretty_printers.py` **e** `lldb_lookup.py`/`lldb_providers.py`. Não há um ficheiro
+que sirva gdb e lldb. O "1 crumb" de lá subestimava a **paridade de plataforma**.
 
-**Custo depois de desbloqueado: 3 crumbs.** Antes: zero — e **o código escrito antes nasce errado**,
-não meio-certo.
+**E D3.1 vs. D3.2/D3.3 é a decisão que o `tdb` torna possível:** se o formatador vive no `tdb`, ele
+é **código Teko testado com o resto**, e a RED-FLAG 4 (§11.6 — um Python a replicar um invariante
+interno do codegen) **desaparece para o nosso caminho**. Continua a existir para o interop.
 
-## 5.4 Windows — 3 crumbs, e o formato é DWARF, não CodeView
+## 9.4 Windows — 3 crumbs, e só para o interop
 
-**Este é o número que mais mudou, e mudou por verificação de referência.** O `pe.go` do Go
-(`cmd/link/internal/ld/pe.go`, lido) põe **DWARF dentro do PE**:
-
-* `pefile.addDWARF()` é chamado na montagem do PE;
-* *"DWARF section names are longer than 8 characters. PE format requires such names to be stored
-  in string table"* → *"section names replaced with slash (/) followed by correspondent string
-  table index"*;
-* `h.characteristics = IMAGE_SCN_ALIGN_1BYTES | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_DISCARDABLE |
-  IMAGE_SCN_CNT_INITIALIZED_DATA`;
-* **nenhum CodeView, nenhum PDB.**
-
-**Portanto CodeView só é necessário para debuggers de TERCEIROS que não leem DWARF** — WinDbg e o
-depurador do Visual Studio. gdb e lldb em Windows leem DWARF-em-PE. Isto **corrige o §7 do
-orçamento anterior**: Windows deixa de ser "um segundo formato de informação de depuração, do zero,
-sem reaproveitar nada da Camada 1" e passa a ser **os mesmos bytes, noutro contentor**.
-
-Medi o nosso lado. `src/backend/objfile_coff.tks`:
-
-* **existe** máquina de string table: `CoffStrtab`, `build_coff_strtab`, com prefixo de 4 bytes —
-  **mas só para nomes de SÍMBOLO**;
-* nomes de **seção** usam `emit_coff_name8_str` — pad cru a 8 bytes, **sem** a forma `/N`. É
-  exactamente o mecanismo que o Go teve de implementar.
+Ver §7.4 para o mecanismo verificado. **`tdb` não precisa de nada disto.**
 
 | crumb | conteúdo | prova |
 |---|---|---|
-| **W0 — SONDAGEM, e é PRIMEIRO** | O nosso link em Windows é `clang --target=x86_64-pc-windows-msvc` (`resolve_cc_choice`). **A seção `.debug_*` do nosso `.obj` COFF sobrevive até ao `.exe`, ou o linker descarta-a?** `lld-link` preserva; `link.exe` é a incógnita. **Não posso medir aqui — não há host Windows.** | um `.obj` com as três seções, ligado na perna Windows do CI, e `llvm-dwarfdump` sobre o `.exe` |
-| **W1** | generalizar `build_coff_strtab` para colocar também nomes de **seção** longos e emitir a forma `/N` em `emit_coff_name8_str` | golden: um objeto sem seções de depuração fica **byte-idêntico** ao de hoje |
-| **W2** | routing das três seções + `.debug_*` relocações, com as características **exactas** do Go acima | golden + `llvm-dwarfdump` + o arnês na perna Windows |
+| **W0 — SONDAGEM, e é PRIMEIRO** | Ligamos com `clang --target=x86_64-pc-windows-msvc`. **A seção `.debug_*` do nosso `.obj` COFF sobrevive até ao `.exe`, ou o linker descarta-a?** `lld-link` preserva; `link.exe` é a incógnita. **Não posso medir aqui — não há host Windows.** | um `.obj` com as três seções, ligado na perna Windows do CI, e `llvm-dwarfdump` sobre o `.exe` |
+| **W1** | generalizar `build_coff_strtab` para colocar também nomes de **seção** longos, e emitir a forma `/N` | golden: um objeto **sem** seções de depuração fica **byte-idêntico** ao de hoje |
+| **W2** | routing das três seções + relocações, com as características **exactas** do Go (§7.4) | golden + `llvm-dwarfdump` + arnês na perna Windows |
 
-**Orçamento condicional, honesto:**
+**Se W0 disser que o linker descarta:** **não se paga CodeView.** Declara-se o interop DWARF
+indisponível em Windows, com **recusa nomeada** (a regra do MinGW), e **`tdb` é o debugger de
+Windows** — que é, de qualquer modo, o plano do dono. **Isto elimina os +6 crumbs de CodeView do
+orçamento anterior sem deixar o Windows sem debugger.**
 
-* **se W0 disser que o linker preserva: 3 crumbs**, e Windows fica depurável em gdb/lldb/VSCode com
-  **os mesmos bytes** do Piso. Contra "um segundo escritor completo" do orçamento anterior.
-* **se W0 disser que descarta: +6 crumbs** para CodeView de verdade — `.debug$S` com as
-  subseções `DEBUG_S_SYMBOLS` (`S_GPROC32_ID`, `S_OBJNAME`, `S_COMPILE3`) e `DEBUG_S_LINES`
-  (`CV_Line_t`/`CV_Column_t`), `.debug$T` com o *type stream* mínimo, e o `LF_FUNC_ID`/`LF_PROCEDURE`
-  que o `S_GPROC32_ID` referencia. Segundo formato, do zero, como o orçamento anterior temia — mas
-  **só neste ramo**, e o ramo é decidido por uma sondagem de um dia.
+## 9.5 `tdb` — 5 fases, e o número honesto
 
-**A recomendação muda:** o orçamento anterior recomendou **adiar** Windows citando o Zig. Recomendo
-agora **correr W0 já** — é uma sondagem sem produto, e o seu resultado positivo torna Windows a
-plataforma **mais barata** das três (W1+W2 = 2 crumbs sobre um escritor DWARF que já existe).
-Adiar uma decisão que uma sondagem de um dia resolve é o oposto de barato.
+Orçado pela via **Teko + shim no `teko_rt.c`**, e o porquê é medido. `teko::process` expõe `run`,
+`run_quiet`, `spawn_redirected`, `wait_one` — **nada de `ptrace`, nada de sinais, nada de memória de
+outro processo**. E a superfície de ponteiros que `PTRACE_GETREGS` exigiria: `uptr`/`ptr<byte>`
+existem no checker (`scope.tks:388`, `:393`), **`unsafe` NÃO é palavra reservada**
+(`parse_decl.tks:197` trata-a como `Ident`), e `c-types-and-marshalling-0.3.1.md` diz na primeira
+linha **"DESIGN-AHEAD, doc-only. NOT implemented."**
 
-## 5.5 O total
+**Logo: `tdb` em Teko puro está bloqueado em `unsafe`/`ptr<T>`/`c_types`. A via que o desbloqueia é
+`src/runtime/teko_rt.{c,h}` — a exceção MANTIDA à lei Teko-only**, onde C novo e deliberado é legal.
+Isso **não viola R1**: o dono disse *"não … em C"* sobre **o debugger**, e o debugger fica em Teko;
+o que vai para o `teko_rt.c` é a fachada de syscall, exactamente como `tk_rt_run` já é. **Medi que
+`ptrace` funciona neste ambiente**: `PTRACE_TRACEME` + `fork`/`execl` + `waitpid` + `PTRACE_CONT` →
+`stopped=1`, `rc=0`, filho continua e sai.
+
+| fase | conteúdo | crumbs |
+|---|---|---|
+| **T1 — o chão de controlo** | `tk_rt_dbg_spawn_traced(argv)`; `tk_rt_dbg_wait(pid)` com status **decodificado** (a regra 128+N que `tk_rt_run` já usa); `tk_rt_dbg_cont/step/detach`; `tk_rt_dbg_getregs -> []byte` + `setreg`; `tk_rt_dbg_peek/poke`. Mais o esqueleto `tdb exec` + `tdb version`. | **5** |
+| **T2 — breakpoints** | x86-64: `peek` 1 byte → guardar → `poke 0xCC`; no `SIGTRAP` **recuar `rip`**, restaurar, e re-armar **depois** de um single-step (esquecer o ciclo é o defeito clássico "o breakpoint dispara uma vez"). arm64: `BRK #0` = `0xD4200000`, palavra de 4 bytes, **e o PC NÃO recua**. Mais a tabela endereço→byte-original. Mais `tdb attach`. | **3** |
+| **T3 — posição** | o leitor de `.tsym` v2 (separador de linhas/campos à mão — não há `teko::str::split`; precedente: o parser TOML de `manifest.tks`); resolução `linha → endereço` e `endereço → linha`; o desenrolar pela linha `F`; `break`/`bt`/`next`/`step`/`finish`/`list`; `tdb run`. | **4** |
+| **T4 — DAP** | o enquadramento `Content-Length: <n>\r\n\r\n<json>` + laço de pedidos; `initialize`/`launch`/`attach`/`setBreakpoints`/`configurationDone`; os eventos `stopped`/`continued`/`exited`/`terminated` e `threads`/`stackTrace`/`continue`/`next`/`stepIn`/`stepOut`; a extensão de registo de §8.6. **A camada JSON é grátis** — `src/encoding/json/json.tks` já expõe `decode`/`encode`. | **4** |
+| **T5 — variáveis** | `scopes`/`variables`/`evaluate` + `print`/`locals`, sobre as linhas `V` de §9.2 | **2** |
+| **portes** | macOS: `mach_vm_read_overwrite`/`task_for_pid` — **e exige assinatura de código com o entitlement `com.apple.security.cs.debugger`**, um custo de *release engineering*, não de crumbs, e o mais desagradável do lote. Windows: `DebugActiveProcess` + `WaitForDebugEvent` + `ReadProcessMemory`/`WriteProcessMemory` + `GetThreadContext`. | **+3 cada** |
+
+**Total: 18 crumbs para Linux (T1…T5), 24 para as três plataformas.**
+
+**E aqui está a resposta à pergunta que o brief mandou fazer — "quanto é que ter a tabela muda o
+orçamento?":** **muda 2 crumbs em 18.** T3 custa 4 porque lê uma tabela que já temos; um leitor de
+DWARF de verdade custaria ~6. **A tabela não é o que faz o `tdb` caro — o controlo de processo é.**
+Vale dizê-lo alto, porque "já temos a tabela, logo o debugger é barato" é o argumento mais atraente e
+o mais errado do assunto.
+
+## 9.6 O total
 
 | bloco | crumbs | bloqueado por |
 |---|---|---|
-| **Piso** (D0.1 + D1.1…D1.7) | **8** | nada. D0.1 e D1.3 começam hoje. |
-| **Camada 2 honesta** (D2.1…D2.6) | **6** | nada (a regra de §4.4 tira `str` do caminho crítico) |
-| **Windows** (W0…W2) | **3** (ou 9 no ramo mau) | uma sondagem de um dia |
-| **Camada 3** (D3.1…D3.3) | **3** | `str` de três words |
-| **CFI**, se D1.7 correr mal | +4 | D1.7 |
+| **Piso do compilador** (D0.1 + D1.1…D1.7) | **8** | nada. **D0.1 e D1.3 começam hoje.** |
+| **Variáveis** (D2.1…D2.6) | **6** (ou **4** se só no `tdb`) | nada — §5.4 tira `str` do caminho crítico |
+| **Windows interop** (W0…W2) | **3** | uma sondagem de um dia. **Ramo mau: 0**, não 6 (§9.4) |
+| **Legibilidade** (D3.1…D3.3) | **3** | `str` de três words |
+| **`tdb`** (T1…T5, Linux) | **18** | a escada de degraus (R1: *"não agora"*) + o shim em `teko_rt.c` |
+| **`tdb`** portes macOS + Windows | **+6** | + entitlement de assinatura em macOS |
+| ~~CFI DWARF~~ | **−4** | morto (§5.1, §5.2) |
+| ~~CodeView~~ | **−6** | morto (§9.4) |
+| ~~`#line` em C~~ | **−1** | morto (R2) |
 
 ---
 
-# PEÇA 5 — A contra-medida: um debugger nosso, orçada
+# 10. A galinha e o ovo — nomeada, e com saída
 
-O dono não pediu um. **Mas uma recomendação de não fazer sem o custo do que se recusa não é
-decidível.** Aqui está o custo.
+`tdb` é escrito em Teko, compilado pelo backend nativo, e serve para depurar programas Teko —
+**incluindo o próprio compilador**. Se o backend nativo estiver quebrado, `tdb` está quebrado.
+**Três circularidades distintas, e não se resolvem da mesma maneira:**
 
-## 6.1 Como se para um processo — medido, e o número depende de uma escolha de lei
+**(1) A construção do `tdb`.** *"Não escrever em C"* ≠ *"não compilar pela rota C"*. Medi: `backend_of`
+lê `TEKO_BACKEND`, e o **default é `Backend::C`**. Logo `teko build tooling/tdb` hoje **passa pela
+rota C**, e isso é **a rede de segurança de arranque**: se o backend nativo se quebrar, `tdb`
+continua a construir. **Isto é decisão do dono, não minha** — apresento o custo: manter a rota C viva
+para construir o `tdb` **prolonga a vida de um ficheiro cuja deleção já está na fila** (fatia 6 do
+expurgo). A alternativa honesta é `tdb` construir só pela rota nativa e **aceitar** que um backend
+quebrado tira o debugger — o que é aceitável **precisamente porque o interop DWARF existe**: gdb com
+o binário anterior depura o compilador quebrado. **Recomendo a segunda, e ela só é recomendável por
+causa de §6(c).**
 
-**Funciona neste host:** escrevi um `PTRACE_TRACEME` + `fork`/`execl` + `waitpid` + `PTRACE_CONT` em
-C e corri: `stopped=1`, `PTRACE_CONT rc=0`, filho continua e sai. Não há Yama a bloquear. Portanto
-o mecanismo está disponível; a pergunta é se **Teko** o alcança.
+**(2) A correção das tabelas.** `tdb` lê `.tsym` v2, que sai do `MLineMark`. Se o `MLineMark`
+mentir, `tdb` reporta a mentira fielmente e **nada o contradiz**. **A saída é o DWARF** — gdb e lldb
+são leitores **independentes** da **mesma** origem. Uma discordância entre gdb e `tdb` sobre o mesmo
+binário é um sinal de defeito que nenhum dos dois produz sozinho. **É por isto que §6(c) é a razão
+que decide, e não um bónus.**
 
-**Medi o que a nossa stdlib tem:** `src/process/process.tks` expõe `run`, `run_quiet`,
-`spawn_redirected`, `wait_one` — todos por cima de `tk_rt_*`. **Não há** `ptrace`, **não há**
-`waitpid` com status cru, **não há** manipulação de sinais, **não há** leitura/escrita de memória de
-outro processo. E `extern fn` existe e é usado (`teko::crypto::rand::secure_bytes`).
-
-**O bloqueio real não é `ptrace`; é o que `ptrace` precisa de passar.** `PTRACE_GETREGS` quer um
-ponteiro para `struct user_regs_struct`; `waitpid` quer um `int*` de saída. Medi o estado da
-superfície de ponteiros:
-
-* `uptr` e `ptr<byte>` existem no checker (`scope.tks:388`, `:393`);
-* **`unsafe` NÃO é palavra reservada** — `parse_decl.tks:197` trata-a como `Ident` comum;
-* `docs/design/c-types-and-marshalling-0.3.1.md` está marcado, na sua primeira linha,
-  **"DESIGN-AHEAD, doc-only. NOT implemented."**
-
-Logo: **um debugger nosso escrito em Teko puro está BLOQUEADO em `unsafe`/`ptr<T>`/`c_types`, que
-não aterraram.** Não é orçável por essa via.
-
-**Há uma via legal que o desbloqueia, e é ela que dá o número:** `src/runtime/teko_rt.{c,h}` é a
-**exceção mantida** à lei Teko-only. Um `tk_rt_ptrace_*` — funções de fachada com assinaturas de
-palavras inteiras, o `struct user_regs_struct` copiado para um `[]byte` — cabe lá dentro **sem
-violar nada**. É C novo, deliberado, num ficheiro onde C novo é legal. Todo o orçamento abaixo
-pressupõe essa via.
-
-| crumb | conteúdo |
-|---|---|
-| **O1.1** | `tk_rt_dbg_spawn_traced(argv) -> i64` — `fork` + `PTRACE_TRACEME` + `execvp`, devolve o pid |
-| **O1.2** | `tk_rt_dbg_wait(pid) -> i64` — `waitpid` com o status **decodificado** num inteiro Teko (parado/saiu/sinalizado + qual), pela mesma regra 128+N que `tk_rt_run` já usa |
-| **O1.3** | `tk_rt_dbg_cont(pid, sig)`, `tk_rt_dbg_step(pid)`, `tk_rt_dbg_detach(pid)` |
-| **O1.4** | `tk_rt_dbg_getregs(pid) -> []byte` + `tk_rt_dbg_setreg(pid, idx, val)` — os registos como bytes, os offsets como constantes Teko por arquitetura |
-| **O1.5** | `tk_rt_dbg_peek(pid, addr, n) -> []byte` / `tk_rt_dbg_poke(pid, addr, bytes)` — `PTRACE_PEEKDATA`/`POKEDATA`, ou `process_vm_readv` para blocos |
-
-**5 crumbs**, e **três** portes de plataforma: macOS troca `PTRACE_*` por `mach_vm_read_overwrite` /
-`task_for_pid` (que exige **assinatura de código com o entitlement `com.apple.security.cs.debugger`**
-— um custo de *release engineering*, não de crumbs, e é o mais desagradável do lote); Windows troca
-tudo por `DebugActiveProcess` + `WaitForDebugEvent` + `ReadProcessMemory`/`WriteProcessMemory` +
-`GetThreadContext`. **+3 crumbs por plataforma extra** = **11 crumbs só para parar um processo nas
-três plataformas.**
-
-## 6.2 Breakpoints — 3 crumbs
-
-| crumb | conteúdo |
-|---|---|
-| **O2.1** | x86-64: `peek` de 1 byte → guardar → `poke` `0xCC`. No `SIGTRAP`: `rip` está **um byte depois** do `0xCC`, logo há que **recuar `rip`**, restaurar o byte, e re-armar **depois** de um single-step. O ciclo restaurar/step/re-armar é o crumb — esquecê-lo é o defeito clássico "o breakpoint dispara uma vez". |
-| **O2.2** | arm64: `BRK #0` = `0xD4200000`, palavra de 4 bytes, e **o PC NÃO recua** — a diferença de arquitetura que um `if` esconde e um teste separa. |
-| **O2.3** | a tabela de breakpoints: endereço → byte/palavra original, contagem, activo, e o re-arme na continuação |
-
-## 6.3 A tabela de linha — **e é aqui que o orçamento muda de verdade**
-
-**A pergunta que o dono fez, respondida com medição:** o Piso **já constrói** a tabela de linha
-interna (`LineRow{offset, line, col}`, §5 do orçamento anterior, tipo já desenhado). Um debugger
-nosso pode lê-la **sem DWARF nenhum**.
-
-| via | crumbs | o que dá |
-|---|---|---|
-| **um sidecar nosso** (`.tkdbg`: as `LineRow` + a tabela nome→slot, serializadas cruas) | **2** (1 escrever, 1 ler) | posição e nomes **só** em binários nossos, **só** com `--debug=lines`; nada em C ligado ao lado |
-| **um leitor de DWARF de verdade** | **4** (header + máquina de estados do programa de linha + abbrev + travessia de DIEs) | tudo o que acima, **mais** funcionar sobre o C do host, sobre `libc` com símbolos, e sobre binários que não são nossos |
-
-**Quanto muda o orçamento?** Muda **2 crumbs num total de 13** — o sidecar poupa 2 face ao leitor
-de DWARF. **Isso é ruído.** E a referência verificada diz para **não** fazer o sidecar: o Zig, que é
-o precedente exacto de "ler a própria informação de depuração no próprio runtime", lê **DWARF e PDB
-de verdade** — `lib/std/debug.zig` importa `debug/Dwarf.zig`, `debug/Pdb.zig`, `debug/ElfFile.zig`,
-`debug/MachOFile.zig` e escolhe por `ObjectFormat`. Não inventou formato privado.
-
-**Conclusão desta secção, e é a que desmonta o argumento mais atraente a favor da contra-medida:**
-"nós já temos a tabela, logo o debugger próprio é barato" **é falso**. A tabela é 2 dos 13 crumbs.
-Os outros 11 são controlo de processo em três plataformas, e nenhum deles é dispensado por termos a
-tabela.
-
-## 6.4 O adaptador DAP — 4 crumbs, e mais barato do que eu esperava
-
-**Medição que baixa o número:** `src/encoding/json/json.tks` (631 linhas) já expõe
-`decode(text) -> JsonValue | error` e `encode(value) -> str`. **A camada JSON do DAP é grátis.**
-
-| crumb | conteúdo |
-|---|---|
-| **O4.1** | o enquadramento `Content-Length: <n>\r\n\r\n<json>` sobre stdio + o laço de pedidos |
-| **O4.2** | `initialize` (com as *capabilities*), `launch`, `setBreakpoints`, `configurationDone` |
-| **O4.3** | os eventos `stopped`/`continued`/`exited`/`terminated`/`thread` e os pedidos `threads`/`stackTrace`/`continue`/`next`/`stepIn`/`stepOut` |
-| **O4.4** | `scopes`/`variables`/`evaluate` — **e este depende das tabelas da Camada 2**, não do adaptador |
-
-## 6.5 A pergunta que decide — e a resposta é NÃO, com o critério do Go aplicado
-
-O critério não é meu: é o do Go, e **verifiquei-o na fonte** (`go.dev/doc/gdb`, citação literal):
-
-> *"GDB does not understand Go programs well. The **stack management, threading, and runtime**
-> contain aspects that differ enough from the execution model GDB expects that they can confuse the
-> debugger and cause **incorrect results** even when the program is compiled with gccgo. As a
-> consequence, although GDB can be useful in some situations …, it is not a reliable debugger for Go
-> programs, **particularly heavily concurrent ones**."*
-
-**O critério, extraído:** constrói-se um debugger próprio quando o *runtime* torna o debugger geral
-**errado** — não quando o torna incompleto. Aplicado a Teko, candidato por candidato, medido:
-
-| propriedade do nosso runtime | torna gdb/lldb ERRADOS? | veredicto |
-|---|---|---|
-| **arena** (região raiz do processo, bump, `tk_arena_push`/`pop`) | **Não.** O gdb vê ponteiros crus e não sabe o que está vivo — isso é **incompleto**, não errado. E um pretty-printer resolve-o. | não dispara |
-| **erros como valores** (`T \| error`) | **Não.** O gdb vê a caixa e não o membro ativo — de novo incompleto. §9.4 diz **como** o printer o resolve e o que é preciso. | não dispara |
-| **monomorfização** | **Não**, e medi: `tk_emit_tsym` emite `<símbolo-C>\t<nome-teko>\t<file>:<line>`, e o Piso põe o **nome Teko qualificado** em `DW_AT_name`. O `bt` mostra `ns::fn`, não o mangled. O DIE de um genérico leva o nome **resolvido** — menos informativo que o genérico, mas **correto**. | não dispara |
-| **`defer`** (dispara em toda saída de escopo) | **Não, e é bom que não.** Um `next` sobre um `return` executa o código do `defer`. Com granularidade de statement (que é o que o `MLineMark` dá), o `step` **entra** nas linhas do `defer` — que é o comportamento **certo**: esse código corre. O que seria errado é esconder-se. | não dispara |
-| **concorrência** | **Não, e este é o que eu esperava que disparasse.** Medi `docs/design/concorrencia-adiantada-s8.md` na branch `cargo/20-concorrencia-adiantada`: o chão é `pthread_create`/`pthread_join`/`pthread_self` (`§3.1 teko::thread::sys`), **threads 1:1 do SO**. Não há escalonador nosso, não há pilhas geridas, não há crescimento de pilha. **Threads 1:1 são exactamente o que gdb e lldb modelam nativamente** (`info threads`, `thread apply all bt`). | **não dispara** |
-| **wasm** | **Não.** `objfile_wasm.tks` existe, mas o caminho de depuração de wasm da indústria é DWARF numa seção customizada + a extensão do DevTools/lldb — **outro contentor para os mesmos bytes**, não um debugger nosso. | não dispara |
-| **depurar comptime/monomorfização do próprio compilador** | **Não.** O compilador é um binário nativo; depura-se com o Piso, como qualquer outro. | não dispara |
-
-**Nenhum gatilho dispara. A resposta honesta à pergunta do dono é: um debugger nosso não daria nada
-que gdb/lldb não dão.** E agora isso é uma **prova**, não a asserção que estava no documento
-anterior.
-
-## 6.6 A conta, lado a lado
-
-| | um debugger nosso | o Piso + Camada 2 |
-|---|---|---|
-| crumbs | **13** (5 controlo + 3 breakpoints + 2 tabela + 4 DAP), **por plataforma** para o bloco de controlo (+3 por plataforma extra ⇒ **19** para as três) | **14** (8 + 6) |
-| C novo | **sim** — um bloco em `teko_rt.c` | **nenhum** |
-| plataformas | uma de cada vez; macOS exige assinatura com entitlement de debugger | **três**, com **os mesmos bytes** (medido: um objeto, gdb e lldb, §1.6) |
-| debuggers servidos | **um** — o nosso | **quatro** — gdb, lldb, cppdbg, CodeLLDB |
-| `print x` | **ainda precisa das tabelas da Camada 2** — não as dispensa | é a Camada 2 |
-| manutenção | nossa, para sempre, em três ABIs de depuração de SO | zero |
-
-**13–19 crumbs para uma ferramenta pior. A recomendação é NÃO FAZER, e o número é a prova.**
-
-## 6.7 A condição de reabertura — nomeada, e medida como não satisfeita
-
-> **A recomendação de não fazer vale enquanto Teko executar em threads 1:1 do SO.** No dia em que
-> Teko ganhar **escalonador próprio, tarefas verdes ou pilhas geridas/crescíveis**, o precedente do
-> Go morde: gdb passa a dar resultados **incorretos** (não meramente incompletos) sobre a nossa
-> pilha, e o debugger próprio deixa de ser luxo. **Reabrir neste documento, nesta secção.**
-
-**Estado medido hoje: a condição NÃO está satisfeita.** `concorrencia-adiantada-s8.md` — a peça que
-o dono mandou adiantar — desenha `pthread_create`. A palavra "corrotina" aparece lá como *unidade
-de isolamento por `#test`*, e o seu chão (`§3.1`) é uma thread de SO. **Enquanto o chão for
-`pthread`, a contra-medida continua a não se pagar.**
-
-**Segunda condição, menor, e vale registá-la:** se W0 (§5.4) disser que `link.exe` descarta as
-seções DWARF **e** o dono recusar CodeView, então Windows fica sem debugger nenhum, e aí um leitor
-nosso passa a ser a **única** via. Isso não é razão para o construir hoje; é razão para **correr W0
-já**.
+**(3) Os testes do `tdb`.** A suíte do `tdb` **não pode** depender do `tdb` nem de um binário Teko
+correto. As suas fixtures são **objetos escritos à mão com tabelas de correção conhecida** — que é
+exactamente o que `mini.s` e `adv.s` são. **Os dois ficheiros deste PoC são o primeiro fixture do
+`tdb`**, e essa é a segunda razão de os versionar.
 
 ---
 
-# 7. As quatro referências — nomeadas, verificadas por fonte, e a nossa superfície medida contra cada uma
+# 11. `tdb` como projeto: sítio, forma, e o "pulo do gato"
 
-A lei desta lane: nomear **qual** referência e verificar que a **nossa** superfície suporta o que
-ela oferece. As quatro atribuições do dono: superfície → Rust, controlo → Zig, addins → C#,
-comportamentos → Go.
+## 11.1 A regra que unifica `tdb`-projeto e `teko lsp`-subcomando — sem tensão para o dono
 
-## 7.1 A tabela que me foi passada, verificada linha a linha
+O dono invocou o LSP como analogia (*"assim como uma LSP"*) mas prescreveu a `tdb` uma **forma
+diferente** da que o LSP tem ratificada. Medi a decisão do LSP,
+`TEKO_ROADMAP_TOOLING.md` Eixo C, **RATIFICADO 2026-07-01**:
+
+> O LSP **não** é um binário/processo `tooling/teko-lsp/` externo … vai direto para dentro do
+> **próprio compilador**, como um **subcomando** `teko lsp` … escrito **nativamente em Teko**.
+> **Cânone:** o intellisense **reaproveita** o front-end real de Teko
+> (`teko::lexer`/`teko::parser`/`teko::checker`), nunca reimplementa.
+
+**Parecem contraditórios; não são.** A regra que os unifica, e que a própria ratificação enuncia:
+
+> **Quem precisa do FRONT-END vive em `src/` como subcomando. Quem precisa só de um FORMATO vive
+> fora, como projeto próprio.**
+
+O LSP **precisa** do checker — sem ele reimplementaria análise semântica, o que a lei DRY proíbe.
+`tdb` **não precisa de nada do front-end**: precisa de um `.tsym` e de um processo. **A instrução do
+dono é law-consistent, e nomeio a regra para que o próximo caso não a redescubra.**
+
+## 11.2 O sítio — duas opções, o custo de cada, e uma recomendação
+
+**Medi o que existe.** `tooling/` já é exactamente o padrão que o dono descreve: cinco projetos
+irmãos, cada um com o seu `.tkp`, cada um `kind = "binary"`:
+
+```
+tooling/shared/grammar_extractor.tkp      tooling/vim/teko_grammar_gen_vim.tkp
+tooling/emacs/teko_grammar_gen_emacs.tkp  tooling/nano/teko_grammar_gen_nano.tkp
+tooling/vscode/teko_grammar_gen_vscode.tkp
+```
+
+```
+name = "teko_grammar_gen_vscode"
+source = "src"
+
+[artifact]
+kind = "binary"
+```
+
+**E o achado que resolve o "pulo do gato" dele:** `grep` por `../src`, `teko::checker`,
+`teko::lexer` em `tooling/` devolve **vazio**. `tooling/vscode` lê o **ficheiro JSON** que
+`tooling/shared` emite — **acoplamento por FORMATO, não por dependência de código**. Nenhum deles
+alcança `../src`. É precisamente isso que torna a migração para repo próprio barata, que é o
+objectivo declarado do dono.
+
+| opção | custo | a favor |
+|---|---|---|
+| **`/tdb/` na raiz** (o que o dono escreveu) | abre uma **segunda convenção** para a mesma coisa ("projeto irmão que não toca `src/`"); um agente futuro tem de saber duas | `tdb` é um **produto que o utilizador corre**, par do `teko`, não plumbing de editor. A raiz diz isso. |
+| **`tooling/tdb/`** *(recomendado)* | nenhum novo | a convenção **já existe e já está escrita**: os breadcrumbs do roadmap dizem *"Eixos A, B, D e E vivem em `tooling/` (nunca tocam `src/`)"*. A migração para repo próprio é **idêntica** nas duas. |
+
+**Recomendo `tooling/tdb/`** — o objectivo de migração é servido igualmente e não se abre uma segunda
+convenção. **Mas é decisão do dono**, e a favor de `/tdb/` há um argumento real: `tooling/` hoje é só
+geradores de gramática, e um debugger é um deliverable de outra classe. **Não decido por ele.**
+
+Em qualquer dos dois, a forma é a que ele pediu e que a árvore já usa:
+
+```
+tooling/tdb/tdb.tkp        # name = "tdb"; source = "src"; [artifact] kind = "binary"
+tooling/tdb/main.tks       # o virtual-main (sem declarações), como main.tks do compilador
+tooling/tdb/src/…          # cli.tks, session.tks, breakpoints.tks, tsym.tks, unwind.tks, dap.tks
+tooling/tdb/tests/…        # fixtures: os .s escritos à mão (§10.3)
+```
+
+## 11.3 A regra de acoplamento, e é ela que faz a migração acontecer
+
+> **`tdb` acopla-se ao compilador por FORMATO (`.tsym` v2), NUNCA por importar `src/`.** Um `tdb`
+> que importe o checker nunca sai deste repo.
+
+E o corolário que protege o formato: **`.tsym` v2 precisa de especificação escrita** — não "o que o
+emissor faz". O emissor e o leitor vivem em repos diferentes no futuro; um formato definido por
+implementação não sobrevive à separação. **Recomendo que o crumb D1.6 entregue a especificação do
+`.tsym` v2 em `docs/`, e que o leitor do `tdb` (T3) seja escrito contra a especificação, não contra o
+emissor.**
+
+## 11.4 `TEKO_ROADMAP_TOOLING.md` — sim, eixo novo
+
+Medi a estrutura: Eixos **A** (fonte única de léxico), **B** (cores), **C** (LSP, DIFERIDO), **D**
+(clientes + build), **E** (empacotamento). `tdb` não cabe em nenhum: não é cor, não é intellisense,
+não é cliente de LSP, não é empacotamento.
+
+**Recomendo `Eixo F — Depuração (`tdb`)`**, e recomendo que ele **espelhe a forma do Eixo C**, porque
+o Eixo C é o único precedente de "peça grande, em Teko, DIFERIDA por marco de estabilização": tabela
+de entregas F1…Fn com estado `diferido`, o marco de liberação nomeado, e o cânone escrito (aqui: o
+acoplamento por formato de §11.3, que é o inverso exacto do cânone do C — reaproveitar o front-end).
+**É um crumb de documentação, e reporto-o; não abro issue.**
+
+---
+
+# 12. As quatro referências — nomeadas, verificadas por fonte, e a nossa superfície medida
+
+Atribuições do dono: superfície → Rust, controlo → Zig, addins → C#, comportamentos → Go.
+
+## 12.1 A tabela que me foi passada, verificada linha a linha
 
 | | Rust | Zig | Go |
 |---|---|---|---|
-| **formato** | ✅ **confirmado.** `split-debuginfo` documenta: `off` para ELF ("DWARF debug information can be found in the final artifact in sections"), `packed` **default em Windows MSVC** = `*.pdb`, e em macOS = `*.dSYM`. | ✅ **confirmado** para DWARF; **e mais forte no leitor** (ver linha abaixo) | ✅ **confirmado, e é o achado da §5.4.** `pe.go` chama `pefile.addDWARF()`; nomes longos pela string table na forma `/N`; **nenhum CodeView** |
-| **debugger próprio** | ✅ **nenhum**; `rust-gdb`/`rust-lldb` são wrappers que carregam printers | ✅ **nenhum**, **e o leitor de DWARF/PDB no runtime confirma-se**: `lib/std/debug.zig` importa `debug/Dwarf.zig`, `debug/Pdb.zig`, `debug/ElfFile.zig`, `debug/MachOFile.zig`, e escolhe `SelfInfo` por `ObjectFormat.default(...)` | ✅ **delve, próprio.** `go.dev/doc/gdb`: *"Delve is a better alternative to GDB … It understands the Go runtime, data structures, and expressions better than GDB"* |
-| **tipos** | ✅ printers; **e ver §9.4** sobre `DW_TAG_variant_part` | ✅ DWARF padrão | ✅ `runtime-gdb.py` existe, **e a doc avisa** — a citação de §6.5 |
-| **Windows** | ✅ PDB real, e `packed` é o **default** lá | ✅ fraco na emissão | ⚠️ **CORRIJO A NUANCE:** `go.dev/doc/gdb` diz DWARFv4 em *"Linux, macOS, FreeBSD or NetBSD"* e **não menciona Windows** — mas isso é sobre **usar o gdb**, não sobre **emitir**. O `pe.go` **emite** DWARF, e o delve suporta `windows/amd64` e lê-o. Emissão ✅, gdb-em-Windows não documentado. |
+| **formato** | ✅ `split-debuginfo`: `off` para ELF (*"DWARF debug information can be found in the final artifact in sections"*), `packed` **default em Windows MSVC** = `*.pdb`, macOS = `*.dSYM` | ✅ DWARF; **e mais forte no leitor** (linha abaixo) | ✅ **e é o achado de §7.4.** `pe.go` chama `pefile.addDWARF()`; nomes longos pela string table na forma `/N`; **nenhum CodeView** |
+| **debugger próprio** | ✅ **nenhum**; `rust-gdb`/`rust-lldb` são wrappers que carregam printers | ✅ **nenhum**, **e o leitor confirma-se**: `lib/std/debug.zig` importa `debug/Dwarf.zig`, `debug/Pdb.zig`, `debug/ElfFile.zig`, `debug/MachOFile.zig`, e escolhe `SelfInfo` por `ObjectFormat.default(...)` | ✅ **delve, próprio.** `go.dev/doc/gdb`: *"Delve is a better alternative to GDB … It understands the Go runtime, data structures, and expressions better than GDB"* |
+| **tipos** | ✅ printers; **e ver §11.6** sobre `DW_TAG_variant_part` | ✅ DWARF padrão | ✅ `runtime-gdb.py` existe, **e a doc avisa** — §12.4 |
+| **Windows** | ✅ PDB real, `packed` é o **default** lá | ✅ fraco na emissão | ⚠️ **CORRIJO A NUANCE:** `go.dev/doc/gdb` diz DWARFv4 em *"Linux, macOS, FreeBSD or NetBSD"* e **não menciona Windows** — mas isso é sobre **usar o gdb**, não sobre **emitir**. O `pe.go` **emite** DWARF, e o delve suporta `windows/amd64` e lê-o. Emissão ✅; gdb-em-Windows não documentado. |
 
-**Duas correções, e mais nada:** (a) a linha "Windows / Go: funciona" é verdade pelo **delve**, não
-pelo gdb — a doc do Go não lista Windows entre os alvos de DWARF-para-gdb; (b) a linha do Zig é
-**mais forte** do que estava: não é só um leitor "para stack traces", é uma abstração `SelfInfo`
-por formato de objeto, com leitor de **PDB** incluído.
+**Duas correções, e mais nada:** (a) "Windows / Go: funciona" é verdade pelo **delve**, não pelo gdb;
+(b) a linha do Zig é **mais forte** — não é um leitor "para stack traces", é uma abstração
+`SelfInfo` por formato de objeto, com leitor de **PDB** incluído.
 
 **Escopo do delve, medido** (FAQ oficial): `linux/amd64`, `linux/arm64`, `linux/386`,
 `windows/amd64`, `darwin/amd64`. **Nem `darwin/arm64`.** Um debugger próprio, com uma década de
-manutenção e patrocínio corporativo, cobre **cinco** pares — e não cobre o Mac de hoje. O nosso
-Piso cobre ELF+Mach-O × x86-64+arm64 **com os mesmos bytes**. Isto é, por si só, um argumento
-quantitativo contra a contra-medida.
+manutenção e patrocínio corporativo, cobre **cinco** pares — e não cobre o Mac de hoje. **Isto não é
+argumento contra o `tdb` (o dono decidiu); é o aviso de escopo do §9.5:** `tdb` cobrirá uma
+plataforma de cada vez, e é **por isso** que o interop DWARF de §6(b) não é dispensável.
 
-## 7.2 Rust → superfície: **aplica-se, e é a peça que eu adotei**
+## 12.2 Rust → superfície: **aplica-se, e é a peça que adotei**
 
-`line-tables-only` é o nosso Piso, nomeado por eles (citação em §2.2). Adotei o **vocabulário**
-(`--debug=lines`) e o **nível**. Não adotei `split-debuginfo`: `dsymutil`/`dwp`/`pdb` são
-otimizações de tamanho que só fazem sentido depois de haver DWARF que valha a pena separar.
-**A nossa superfície suporta:** sim — `--opt=<n>` é o precedente exacto de flag nivelada com `=`.
+`line-tables-only` é o nosso Piso, nomeado por eles (§7.2). Adotei o **vocabulário**
+(`--debug=lines`) e o **nível**. Não adotei `split-debuginfo`: `dsymutil`/`dwp`/`pdb` são otimizações
+de tamanho que só fazem sentido depois de haver DWARF que valha separar. **A nossa superfície
+suporta:** sim — `--opt=<n>` é o precedente exacto de flag nivelada com `=`.
 
-## 7.3 Zig → controlo: **aplica-se, e nós já o seguimos sem lhe dar o nome** (§9.3)
+## 12.3 Zig → controlo: **aplica-se, e nós já o seguimos sem lhe dar o nome**
 
-## 7.4 Go → comportamentos: **aplica-se em dois sítios, e num deles inverte a decisão anterior**
+O `.tsym` é o padrão do Zig: **informação de posição própria, lida pelo nosso runtime, para stack
+traces sem depender de terceiros**. Com a referência verificada ao lado, deixa de ser medição solta e
+passa a **precedente de desenho**.
 
-(a) o **critério** de quando um debugger próprio se justifica — §6.5; (b) o **mecanismo** de
-DWARF-em-PE — §5.4, que inverte a recomendação de adiar Windows.
+| | `.tsym` v1 hoje | `SelfInfo` do Zig |
+|---|---|---|
+| granularidade | **por função** | **por endereço** |
+| fonte | ficheiro de texto ao lado / no `.tkl` | **as seções de depuração do próprio binário** |
+| o que resolve | *que função* estava na pilha | *que linha* estava na pilha |
 
-## 7.5 C# → addins: **NÃO se aplica, e digo porquê em vez de o invocar**
+**A diferença de desenho que registo, e é uma escolha consciente:** o Zig lê **DWARF/PDB de verdade**,
+nós propomos `.tsym` v2, um formato nosso. A favor do nosso: é 4 crumbs mais barato de ler (§9.5) e é
+texto. A favor do Zig: um formato só, e funciona sobre binários que não são seus. **Recomendo o nosso
+para T3 e registo que, no dia em que `tdb` quiser entrar em código C, o leitor de DWARF entra** — e
+aí `.tsym` v2 fica como o caminho rápido, não como o único.
 
-A atribuição do dono era addins. O modelo de depuração do .NET é um **runtime gerido** com ICorDebug
-e um debugger *in-process*: pressupõe CLR, metadados, e um contrato de depuração dentro do runtime.
-Teko compila para código nativo sem runtime gerido. **A referência não tem superfície onde encaixar
-aqui, e invocá-la seria o erro que esta lane já pagou.** Onde ela **se aplicará** é noutro assunto:
-o dia em que Teko tiver um modelo de *plugins/addins de compilador*, o `IDbgAddin`/analyzer do C# é
-o precedente. Não é este documento.
+## 12.4 Go → comportamentos: **aplica-se em três sítios, e é o precedente directo do `tdb`**
+
+**(a) O critério.** Verificado (`go.dev/doc/gdb`, literal):
+
+> *"GDB does not understand Go programs well. The **stack management, threading, and runtime**
+> contain aspects that differ enough from the execution model GDB expects that they can confuse the
+> debugger and cause **incorrect results** … it is not a reliable debugger for Go programs,
+> **particularly heavily concurrent ones**."*
+
+Apliquei o critério a Teko, e o resultado importa **mesmo com o `tdb` já decidido**, porque diz **de
+onde vem o valor** do `tdb` e portanto **o que priorizar** nele:
+
+| propriedade do nosso runtime | torna gdb/lldb **ERRADOS**? | consequência para o `tdb` |
+|---|---|---|
+| **arena** (região raiz, bump, `tk_arena_push`/`pop`) | **não** — incompleto, não errado | o formatador de arena (D3.1) é **valor**, não correção |
+| **erros como valores** (`T \| error`) | **não** — o gdb vê a caixa, não o membro ativo | §11.6: e o `tdb` resolve-o **melhor** que um Python |
+| **monomorfização** | **não**, e medi: `tk_emit_tsym` já emite `<símbolo>\t<nome-teko>`, e o `bt` do `tdb` mostra `ns::fn` | vantagem já paga pelo `.tsym` |
+| **`defer`** | **não, e é bom que não** — com granularidade de statement, o `step` **entra** nas linhas do `defer`, que é o comportamento certo: esse código corre | nada a fazer; **não esconder** |
+| **concorrência** | **não hoje.** Medi `concorrencia-adiantada-s8.md` (`cargo/20-concorrencia-adiantada`): o chão é `pthread_create`/`pthread_join`/`pthread_self` — **threads 1:1 do SO**, sem escalonador nosso, sem pilhas geridas. É exactamente o que gdb/lldb modelam nativamente. | **`tdb` não precisa de modelo de tarefas na fase inicial** — e é isto que mantém T1…T5 em 18 crumbs em vez de o dobro |
+| **wasm** | **não** — o caminho da indústria é DWARF em seção customizada + extensão do DevTools | fora do arco |
+
+**O gatilho que MUDARIA o escopo do `tdb`, nomeado:** no dia em que Teko ganhar **escalonador
+próprio, tarefas verdes ou pilhas geridas/crescíveis**, `tdb` passa a precisar de um modelo de
+tarefas (listar, comutar, desenrolar pilhas segmentadas) — e o orçamento de §9.5 **sobe**. **Estado
+medido hoje: a condição NÃO está satisfeita**, e a palavra "corrotina" naquele desenho tem como chão
+uma thread de SO. **Reabrir nesta secção quando mudar.**
+
+**(b) O mecanismo de DWARF-em-PE** — §7.4, que apaga o item mais caro do orçamento anterior.
+
+**(c) A forma de empacotamento e de DAP** — verificado
+(`Documentation/api/dap/README.md`): `dlv dap` *"starts a single-use DAP-only server"*, e
+*"The primary user of this mode is VS Code Go"*, com o VSCode a **lançar ele mesmo o servidor** ou a
+ligar-se a `host:port`. **É um MODO DO PRÓPRIO BINÁRIO, não um adaptador separado.** `tdb dap`
+copia isso (§7.7, §8.6), e é o que evita um segundo executável para manter.
+
+## 12.5 C# → addins: **NÃO se aplica, e digo porquê em vez de o invocar**
+
+O modelo de depuração do .NET é um **runtime gerido** com ICorDebug e um debugger *in-process*:
+pressupõe CLR, metadados, e um contrato de depuração dentro do runtime. Teko compila para nativo sem
+runtime gerido. **A referência não tem superfície onde encaixar aqui, e invocá-la seria o erro que
+esta lane já pagou.** Onde ela **se aplicará** é noutro assunto: o dia em que Teko tiver um modelo de
+plugins/addins de compilador, o analyzer do C# é o precedente. Não é este documento.
 
 ---
 
-# 8. Correções e achados sobre o orçamento anterior
+# 13. Correções e achados sobre o orçamento anterior
 
-**Não editei `debugger-orcamento-0.3.1.md`.** O que segue são os pontos onde ele diverge do que
-medi.
+**Não editei `debugger-orcamento-0.3.1.md`.**
 
-## 8.1 As 4 relocações estão CERTAS — e a razão que faltava é o que torna o número reproduzível
+## 13.1 As 4 relocações estão CERTAS — e a razão que faltava é o que torna o número reproduzível
 
-O documento diz *"4 relocações, todas `Abs64`"* e não diz **de onde vem o 4**. Refiz e obtive 4,
-mas só depois de descobrir que **duas sequências de programa de linha — uma por função — dão 5**
-(dois `DW_LNE_set_address`). O 4 exige **UMA sequência por unidade de compilação**, atravessando as
-funções com `DW_LNS_advance_pc`:
+O documento diz *"4 relocações, todas `Abs64`"* e não diz **de onde vem o 4**. Refiz e obtive 4, mas
+só depois de descobrir que **duas sequências de programa de linha — uma por função — dão 5** (dois
+`DW_LNE_set_address`). O 4 exige **UMA sequência por unidade de compilação**, atravessando as funções
+com `DW_LNS_advance_pc`:
 
 ```
 .rela.debug_info  contains 3 entries:  R_X86_64_64 add, R_X86_64_64 add, R_X86_64_64 main
 .rela.debug_line  contains 1 entry:    R_X86_64_64 add
 ```
 
-Sem essa nota, um implementador que emita uma sequência por função obtém 5, 6, N+3 — e conclui, com
-razão, que o golden do documento está errado. **A regra a fixar no D1.3: uma sequência por CU, uma
-única `DW_LNE_set_address`, no primeiro endereço do módulo.** É o que o `gcc` faz e o que o Go faz.
+Sem essa nota, um implementador que emita uma sequência por função obtém N+3 e conclui, com razão,
+que o golden está errado. **Regra a fixar no D1.3: uma sequência por CU, uma única
+`DW_LNE_set_address`.** É o que o gcc faz e o que o Go faz.
 
-## 8.2 `DW_FORM_data1` para `decl_line` transborda no nosso próprio corpus
+## 13.2 `DW_FORM_data1` para `decl_line` transborda no nosso próprio corpus
 
-O orçamento não fixa formas. A escolha ingénua (`data1`, que é o que o `gcc -g1` usa em programas
-pequenos) **não serve**: o próprio documento anterior usa `main.tks:410` como exemplo de sessão.
-`data2` ou `udata`. §1.3 fixa `data2` para a linha e `udata` para o ficheiro.
+O orçamento não fixa formas. `data1` (o que o `gcc -g1` usa em programas pequenos) **não serve**: o
+próprio documento usa `main.tks:410` como exemplo. §1.2 fixa `data2` para a linha e `udata` para o
+ficheiro.
 
-## 8.3 RED-FLAG 3 estava errada — §4.1
+## 13.3 RED-FLAG 3 estava errada — §5.2
 
-E estava errada por não ter sido medida. Registo-o sem sarcasmo: **a red-flag foi a coisa certa a
-levantar**, e levantá-la é o que fez esta medição existir. O defeito não foi levantá-la; foi
-**vender o `bt` na tabela de camadas ao mesmo tempo**.
+E estava errada **por não ter sido medida**. Registo-o sem sarcasmo: **levantá-la foi a coisa certa**
+e é o que fez esta medição existir. O defeito não foi levantá-la; foi **vender o `bt` na tabela de
+camadas ao mesmo tempo**.
 
-## 8.4 "1 crumb" para pretty-printers subestima a paridade — §5.3
+## 13.4 "1 crumb" para pretty-printers subestima a paridade — §9.3
 
-Rust ship**a dois** ficheiros de printers (gdb e lldb), com APIs diferentes. São 3 crumbs, não 1.
+Rust ship**a dois** ficheiros (gdb e lldb), com APIs diferentes. São 3 crumbs, não 1 — e com o `tdb`,
+o terceiro (D3.1) é o **melhor** dos três.
 
-## 8.5 O §7 (Windows) parte de uma premissa que a fonte do Go desmente — §5.4
+## 13.5 O §7 (Windows) parte de uma premissa que a fonte do Go desmente — §7.4, §9.4
 
 *"nenhum dos crumbs D1.3–D1.5 rende um byte de valor no Windows"* é **falso**: rende **todos** os
-bytes, se o contentor os aceitar. E *"o Zig não resolveu a assimetria"* está **certo** e continua
-certo — mas o Zig deixou de ser a única referência: o **Go resolveu-a**, e resolveu-a **sem
-CodeView**. A recomendação passa de "adiar" para "correr a sondagem W0 já".
+bytes, se o contentor os aceitar. E *"o Zig não resolveu a assimetria"* continua **certo** — mas o
+Zig deixou de ser a única referência: o **Go resolveu-a, sem CodeView**. E com `tdb`, Windows nem
+precisa de contentor.
 
-## 8.6 A via do `variant_part` para as uniões **não se aplica** — a correção grande
+## 13.6 A via do `variant_part` para as uniões **não se aplica** — a correção grande
 
-O orçamento recomenda pretty-printers como a resposta certa à Camada 3, e a referência do Rust é
-invocada por trás disso. Medi duas coisas que o obrigam a mudar de forma:
+O orçamento recomenda pretty-printers como resposta à legibilidade, com a referência do Rust por
+trás. Medi duas coisas que obrigam a mudar de forma:
 
 1. **`DW_TAG_variant_part` é DWARF 5.** O nosso PoC, verificado, é DWARF **4**. A via do Rust exige
-   subir a versão do escritor — o que não é impossível, mas **é um custo que ninguém orçou**.
+   subir a versão do escritor — **um custo que ninguém orçou**.
 2. **As nossas uniões têm TRÊS rails, não um** (`codegen.tks:2048` e vizinhança):
    * **niche** — `T | null` de uma word: `{ptr = NULL}` **significa** `null`, e **não há palavra de
      tag nenhuma**. Um `variant_part` **exige** um discriminante; um rail sem tag não tem o membro
      que o `DW_AT_discr` aponta.
    * **InlineTag** — `{ uint8_t tag; payload }`, em frame.
-   * **box-em-arena** — o valor não tem `.tag`; o padrão do próprio ponteiro é a discriminação.
+   * **box-em-arena** — sem `.tag`; o padrão do próprio ponteiro discrimina.
 
-**A resolução, e é mais barata que subir para DWARF 5:** emitir a união pela sua **forma C literal**
-(`DW_TAG_structure_type` com um membro de tag quando existe, e um `DW_TAG_union_type` para o
-payload) e deixar o **pretty-printer** ler a tag e escolher. Isso funciona em DWARF 4 e é o D3.2.
+**Resolução, e é mais barata que subir para DWARF 5:** descrever a união pela sua **forma literal**
+(estrutura com membro de tag quando existe + união para o payload) e deixar o **formatador** ler a
+tag e escolher. Funciona em DWARF 4.
 
-**E é aqui que levanto a red-flag nova.**
+**E é aqui que a red-flag nova aparece, e é aqui que o `tdb` a resolve:**
 
-> **RED-FLAG 4 (nova) — o printer do rail *niche* codifica um invariante interno do codegen.**
-> Um printer Python que diga "se o ponteiro é NULL, o valor é `null`" está a replicar, num ficheiro
-> Python fora da árvore de tipos, uma decisão de `cg_union_niche_member`. Se a regra de niche
-> mudar — e ela é uma otimização, logo **vai** mudar — o printer passa a mentir, **em silêncio**,
-> e nenhum teste de compilador o apanha. **Mitigação a exigir do D3.2:** o printer não decide o
-> rail; o **DWARF** di-lo, num `DW_AT_producer` estendido ou num atributo `lo_user` por tipo, e o
-> printer **lê** o rail em vez de o adivinhar. Custa um atributo. Poupa uma mentira silenciosa.
+> **RED-FLAG 4 (nova) — o formatador do rail *niche* codifica um invariante interno do codegen.**
+> Um printer Python que diga "se o ponteiro é NULL, o valor é `null`" replica, num ficheiro fora da
+> árvore de tipos, uma decisão de `cg_union_niche_member`. Se a regra de niche mudar — e ela é uma
+> otimização, logo **vai** mudar — o printer mente **em silêncio**, e nenhum teste de compilador o
+> apanha.
+>
+> **Mitigação, e é dupla.** (i) Para o **interop**: o rail vai no **formato**, não no Python — um
+> campo por tipo no `.tsym` v2 (ou um atributo `lo_user` no DWARF), e o printer **lê** o rail em vez
+> de o adivinhar. Custa um campo; poupa uma mentira silenciosa. (ii) Para o **nosso** caminho: o
+> formatador do `tdb` é **código Teko, testado com o resto**, logo a red-flag **desaparece** — e isto
+> é uma vantagem concreta e nomeável do `tdb` sobre a via dos pretty-printers.
 
 ---
 
-# 9. O que fazer, e por onde começar
+# 14. O que fazer, por onde começar, e o que fica em risco
 
-## 9.1 O menor conjunto que não ensina mal
+## 14.1 O menor conjunto que não ensina mal
 
-Chamo-lhe **o Piso**, e é **8 crumbs**: D0.1, D1.1, D1.2, D1.3, D1.4, D1.5, D1.6, D1.7.
-
-Clama, e garante: **breakpoint por linha de `.tks`, listagem do texto Teko, `step`/`next`, e `bt`
-com nomes Teko** — no terminal (gdb **e** lldb) e no VSCode (`cppdbg` **e** CodeLLDB), **sem uma
-linha de servidor nosso**. Não clama `print x`, e a não-clamação está **escrita** no `--help`, nos
-quatro `launch.json` e em §3.5.
+**O Piso do compilador: 8 crumbs** (D0.1, D1.1…D1.7). Clama, e garante: **breakpoint por linha de
+`.tks`, listagem do texto Teko, `step`/`next`, e `bt` com nomes Teko** — no terminal (gdb **e** lldb)
+e no VSCode (`cppdbg` **e** CodeLLDB), **sem uma linha de servidor nosso**, e produzindo **de
+imediato** o `.tsym` v2 de que o `tdb` viverá. Não clama `print x`, e a não-clamação está **escrita**
+em três sítios.
 
 **Isto ensina mal?** Respondo de frente: **não, desde que diga o que não faz** — e o desenho força
-que diga, em três sítios. O que ensinaria mal é o que o dono rejeitou: vender `bt` sem prova (agora
-tem, §4.1), ou um painel Variables a mostrar um `str` com o comprimento errado (a regra de §4.4
-impede-o).
+que diga. O que ensinaria mal é o que o dono rejeitou: vender `bt` sem prova (agora tem, §5.2), ou
+mostrar um `str` com o comprimento errado (a regra de §5.4 impede-o).
 
-**"E se o dono quiser `print x`?"** Então o conjunto é **14 crumbs** (Piso + Camada 2 honesta), e as
-duas pré-condições que o orçamento anterior temia **caíram por medição**: a sondagem do regalloc
-está feita (§4.3, é um JOIN) e `str` saiu do caminho crítico (§4.4, a regra do congelamento). **14
-crumbs, sem bloqueio nenhum a montante.**
+**Com `print x`: 12 crumbs** (Piso + as 4 variáveis do lado `tdb`/`.tsym`), ou **14** se as
+variáveis também forem para o DWARF. As duas pré-condições que o orçamento anterior temia **caíram
+por medição**: a sondagem do regalloc está feita (§5.3, é um JOIN) e `str` saiu do caminho crítico
+(§5.4).
 
-## 9.2 Vale a pena começar agora? Sim — e nada precisa de esperar, excepto a Camada 3
+## 14.2 Vale começar agora? Sim — e só um bloco espera
 
 | bloco | pode começar? |
 |---|---|
-| **D0.1** (arnês) + **D1.3** (`dwarf.tks`) | **HOJE.** Zero colisão (`scripts/` novo e ficheiro novo), zero bloqueio, e o golden do D1.3 está **fixado em §1.3–§1.5 deste documento**. |
-| **W0** (sondagem Windows) | **HOJE.** Sem produto, e o resultado decide 3 vs. 9 crumbs. |
+| **D0.1** (arnês) + **D1.3** (`dwarf.tks`) | **HOJE.** Zero colisão (ficheiros novos), zero bloqueio, e o golden do D1.3 está **fixado em §1.2–§1.4 deste documento**. |
+| **W0** (sondagem Windows) | **HOJE.** Sem produto; decide 3 crumbs vs. "Windows é do `tdb`". |
 | **D1.7** (sondagem arm64) | **HOJE**, na lane aarch64. Sem produto. |
-| D1.1, D1.2, D1.4, D1.5 | assim que os agentes vivos saírem de `lower.tks`, `isel_x86_64`, `encode_x86_64`. O desenho aditivo do orçamento anterior (§3, `MLineMark`) é o que mantém isto aplicável — e **mantenho a recomendação (b) dele**, com a medição de §4.1 a reforçá-la. |
+| **a especificação do `.tsym` v2** (§11.3) | **HOJE.** Doc-only, e é o contrato de que o `tdb` dependerá num repo diferente. |
+| **o Eixo F do `TEKO_ROADMAP_TOOLING.md`** (§11.4) | **HOJE.** Doc-only. |
+| D1.1, D1.2, D1.4, D1.5, D1.6 | assim que os agentes vivos saírem de `lower.tks`, `isel_x86_64`, `encode_x86_64`. O desenho **aditivo** (`MLineMark`) é o que mantém isto aplicável. |
 | D2.* | depois do Piso. **Não espera pelo `str`.** |
-| **D3.*** | **ESPERA** pelo `str` de três words. É o único bloco bloqueado, e a lei (M.4) decide, não o dono. |
+| **D3.*** | **ESPERA** pelo `str` de três words. Único bloco bloqueado, e a lei (M.4) decide. |
+| **`tdb` T1…T5** | **ESPERA**, por R1 (*"não agora"*) — depois da escada de degraus. **Mas T1 não tem dependência técnica nenhuma além do shim**: é o único que poderia arrancar cedo se o dono quisesse. |
 
-**A peça que não expira, se o dono quiser gastar o mínimo:** **D0.1, o arnês.** É activo de teste,
-agnóstico de camada, e o seu fixture negativo (`adv.s` + `mini.s`) já existe neste commit. Se nada
-mais avançar, o arnês continua a valer.
+**A peça que não expira, se o dono quiser gastar o mínimo:** **D0.1, o arnês.** Activo de teste,
+agnóstico de camada e de debugger, e o seu fixture (`mini.s` + `adv.s`) **já existe neste commit** —
+e é, por §10.3, também o primeiro fixture do `tdb`.
 
-## 9.3 O `.tsym` com o nome do padrão: o precedente do Zig
+## 14.3 Riscos, red-flags, e a ausência de HALT
 
-O orçamento anterior mediu que *"`.tsym` já existe"* e tratou-o como achado solto. **Com a
-referência do Zig verificada ao lado, é precedente de desenho** — e um precedente que já
-adotámos: *informação de posição própria, lida pelo nosso runtime, para stack traces sem depender
-de DWARF*. É exactamente o que `lib/std/debug.zig` faz com `SelfInfo`.
+**Não cunho KNOWN-STOP.**
 
-| | `.tsym` hoje | o `SelfInfo` do Zig |
-|---|---|---|
-| granularidade | **por função** (`file:line` da declaração) | **por endereço** |
-| fonte | um ficheiro de texto ao lado / dentro do `.tkl` | **as seções de depuração do próprio binário** |
-| o que resolve | *que função* estava na pilha | *que linha* estava na pilha |
-| o que lhe falta | mapear **endereço → linha** | — |
-
-**O que isto diz, e é uma recomendação nova:** depois do Piso, `.tsym` fica **redundante e pior**.
-As `LineRow` que o Piso produz são a mesma informação com melhor granularidade, no binário. A
-evolução law-first é o próprio padrão que o roadmap manda seguir — *"mesma informação, dois
-consumidores"* — mas com **a origem certa**: o runtime passa a ler as **nossas** seções
-`.debug_line`/`.debug_info` para o stack trace nativo, como o Zig faz, e `.tsym` torna-se o
-*fallback* de um binário construído com `--debug=none`.
-
-**Isso não é um crumb deste arco** e não o orço aqui — é um **achado reportado para cima**, e a
-razão de o nomear é que ele muda o valor do Piso: o Piso não paga só depuração interactiva, paga
-também a qualidade dos stack traces de produção. Registo-o como REPORTE, não como issue nova.
-
----
-
-# 10. Riscos, red-flags, e a ausência de HALT
-
-**Não cunho KNOWN-STOP.** Levanto o que merece atenção.
-
-* **RED-FLAG 1 (`str`), CONFINADA** — §4.4. Não bloqueia o Piso nem a Camada 2 (com a regra do
-  congelamento). Bloqueia a Camada 3. Sequenciamento, não tensão.
-* **RED-FLAG 2 (nomes no regalloc), REDIMENSIONADA** — §4.3. É um JOIN. O perigo real é a validade
-  da localização, e a mitigação (`lenv_bind_scalar_slot`) já está no código.
-* **RED-FLAG 3 (desenrolar), REFUTADA em x86-64** — §4.1, medida. **Aberta em arm64** — §4.2, com
-  crumb de sondagem próprio (D1.7) e orçamento condicional nos dois ramos.
-* **RED-FLAG 4 (NOVA) — o printer do rail *niche* replica um invariante interno do codegen** —
-  §8.6. Mitigação: o rail vai no DWARF, não no Python.
-* **RED-FLAG 5 (NOVA) — a armadilha de `project_arg_of`** — §2.1. Uma flag nova que não entre na
-  sua lista de saltos torna-se **o caminho do projeto**, sem erro de flag desconhecida. Todo crumb
-  que acrescente flag paga um teste que o prova.
-* **Sondagem W0 é bloqueante para o número do Windows**, não para o Piso — §5.4. 3 vs. 9 crumbs.
-* **Semente de bootstrap:** reli o desenho à procura de funcionalidade nova. `struct`, `enum`,
-  `variant`, `[]T`, `match`, `teko::list::push`, `teko::str::slice_to`/`slice_from`,
-  `teko::encoding::json` — **tudo já na semente**. Nada a sequenciar por causa dela. O único bloco
-  que **precisaria** de funcionalidade não aterrada é a contra-medida escrita em Teko puro
-  (`unsafe`/`ptr<T>`/`c_types` — §6.1), e é por isso que ela é orçada pela via do `teko_rt.c`.
+* **RED-FLAG 1 (`str`), CONFINADA** — §5.4. Não bloqueia o Piso nem as variáveis (com a regra do
+  congelamento). Bloqueia a legibilidade. Sequenciamento, não tensão.
+* **RED-FLAG 2 (nomes no regalloc), REDIMENSIONADA** — §5.3. É um JOIN. O perigo real é a validade da
+  localização, e a mitigação (`lenv_bind_scalar_slot`) já está no código.
+* **RED-FLAG 3 (desenrolar), MORTA DUAS VEZES** — §5.1 (o `tdb` tem a verdade do compilador) e §5.2
+  (a heurística do gdb, medida, recupera todas as formas). **Aberta só em arm64 para o interop** —
+  crumb D1.7, dois ramos orçados.
+* **RED-FLAG 4 (NOVA) — o formatador do rail *niche* replica um invariante interno do codegen** —
+  §13.6. Mitigação dupla: o rail vai no formato para o interop; e o formatador do `tdb` é Teko
+  testado.
+* **RED-FLAG 5 (NOVA) — a armadilha de `project_arg_of`** — §7.1. Uma flag nova que não entre na sua
+  lista de saltos torna-se **o caminho do projeto**, sem erro de flag desconhecida. Todo crumb que
+  acrescente flag paga um teste que o prova.
+* **RED-FLAG 6 (NOVA) — `.tsym` v2 sem especificação escrita não sobrevive à separação de repos** —
+  §11.3. Se o formato for definido pelo emissor, o dia da migração encontra um leitor e um escritor a
+  divergir sem contrato. Mitigação: a especificação é entregável do D1.6, e o leitor do `tdb` é
+  escrito contra ela.
+* **Sondagem W0** é bloqueante para o número do Windows-interop, não para o Piso nem para o `tdb`.
+* **Semente de bootstrap:** reli o desenho. `struct`, `enum`, `variant`, `[]T`, `match`,
+  `teko::list::push`, `teko::str::slice_to`/`slice_from`/`concat`/`contains`, `teko::encoding::json`
+  — **tudo já na semente**. Nada a sequenciar por causa dela. O único bloco que precisaria de
+  funcionalidade não aterrada é o `tdb` em Teko **puro** (`unsafe`/`ptr<T>`/`c_types`) — e é por isso
+  que ele é orçado pela via do shim em `teko_rt.c` (§9.5).
 * **`wasm` fora**, por decisão do dono; `objfile_wasm.tks` intocado.
 
-**Sem HALT.** Todas as tensões deste documento resolveram-se por lei ou por medição:
-`.tsym` vs. DWARF por *"uma origem, dois consumidores"*; `str` por M.4 (sequenciamento);
-`-g` vs. `--debug=lines` pelo precedente `has_backend_flag` no mesmo ficheiro + a citação
-verificada do rustc; nada no `.tkp` pelo *"an AXIS of the build, not a global"* do próprio
-`build_cc_argv`; e a contra-medida pelo critério do Go aplicado com medição em vez de gosto.
+**Sem HALT.** As tensões resolveram-se por lei ou por medição: `.tsym` vs. formato novo pela
+legislação que já designou `.tsym` *"for the debugger"*; `tdb`-projeto vs. `teko lsp`-subcomando pela
+regra front-end/formato de §11.1; `str` por M.4; `-g` vs. `--debug=lines` pelo precedente
+`has_backend_flag` no mesmo ficheiro + a citação verificada do rustc; nada no `.tkp` pelo *"an AXIS
+of the build, not a global"* do próprio `build_cc_argv`; o shim em C pela exceção mantida de
+`teko_rt.{c,h}`, que **não** contradiz R1.
 
-**As duas coisas que são do dono, e são escolhas, não tensões:**
+**As TRÊS coisas que são do dono, e são escolhas, não tensões:**
 
-1. **Se o D1.7 correr mal em arm64:** pagar a CFI (+4 crumbs) ou retirar a clamação de `bt` da perna
-   arm64 até alguém a comprar. As duas são honestas.
-2. **Se o W0 disser que `link.exe` descarta as seções:** pagar CodeView (+6) ou declarar Windows
-   não-depurável, com recusa **nomeada** (a regra do MinGW).
+1. **O sítio do `tdb`** — `/tdb/` (o que ele escreveu) ou `tooling/tdb/` (a convenção que já existe).
+   §11.2, com o custo de cada. **Recomendo `tooling/tdb/`; não decido.**
+2. **A rota de construção do `tdb`** — rota C como rede de segurança de arranque (prolonga um
+   ficheiro cuja deleção está na fila) ou só rota nativa (um backend quebrado tira o debugger, e é
+   aceitável **porque** o interop DWARF existe). §10(1). **Recomendo só-nativa.**
+3. **`print x` no gdb, ou só no `tdb`?** — 6 crumbs vs. 4. §9.2. Se `tdb` for o debugger de casa, os
+   D2.4/D2.5 (a metade DWARF) são interop, e o interop de variáveis é o mais caro e o menos usado.
+   **Recomendo adiar a metade DWARF e reavaliar quando o `tdb` existir.**
