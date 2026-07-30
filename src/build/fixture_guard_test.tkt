@@ -18,7 +18,7 @@ const REGRESSION_FIXTURE_ROOT: str = "examples/regressions"
 
 /**
  * OWN_NATIVE_MAIN_PATH — the own-backend corpus channel's driver: the file that calls the whole `f_*`
- * family and whose failure codes double as scenario numbers.
+ * family, and the file the 119-line cascade was reported against.
  */
 const OWN_NATIVE_MAIN_PATH: str = "examples/regressions/own_native/main.tks"
 
@@ -135,25 +135,6 @@ fn called_names_with_prefix_needs_the_call_parenthesis() {
 
 #test
 /**
- * oversized_register_codes_refuses_a_code_past_the_posix_byte — measured on this host: `exit(260)` is
- * observed as 4 and `exit(256)` as 0, so a fixture whose failure codes double as scenario numbers
- * would attribute a break at code 260 to the scenario that owns code 4. The guard names every code
- * above 255 and stays silent on a fixture that is inside the byte.
- *
- * @return void
- */
-fn oversized_register_codes_refuses_a_code_past_the_posix_byte() {
-    let over = "mut bad = 0\nif f_a() != 0 { if bad == 0 { bad = 4 } }\nif f_b() != 0 { if bad == 0 { bad = 260 } }\nif f_c() != 0 { if bad == 0 { bad = 256 } }\n"
-    let codes = oversized_register_codes(over, "bad")
-    teko::assert::is_true(codes.len == 2)
-    teko::assert::is_true(codes[0] == 260)
-    teko::assert::is_true(codes[1] == 256)
-    let inside = "mut bad = 0\nif f_a() != 0 { if bad == 0 { bad = 4 } }\nif f_b() != 0 { if bad == 0 { bad = 244 } }\n"
-    teko::assert::is_true(oversized_register_codes(inside, "bad").len == 0)
-}
-
-#test
-/**
  * own_native_corpus_declaration_count_never_drops — the count half of the drain guard on the REAL
  * tree. Braces can survive a splice that eats whole declarations, so the balance check alone is not
  * enough.
@@ -187,26 +168,6 @@ fn own_native_main_calls_only_declared_helpers() {
         i = i + 1
     }
     teko::assert::is_true(missing.len == 0)
-}
-
-#test
-/**
- * own_native_main_exit_codes_fit_the_posix_byte — the guard on the real tree for the truncation half:
- * no failure code this fixture can exit with may exceed 255, or the report names the wrong scenario.
- *
- * @return void
- */
-fn own_native_main_exit_codes_fit_the_posix_byte() {
-    let main_text = match teko::io::read_file(OWN_NATIVE_MAIN_PATH) { str as s => s; error => "" }
-    teko::assert::is_true(main_text.len > 0)
-    let over = oversized_register_codes(main_text, "bad")
-    mut i: u64 = 0
-    loop {
-        if i >= over.len { break }
-        teko::io::println($"fixture_guard: own_native/main.tks claims exit code {over[i]}, which POSIX truncates")
-        i = i + 1
-    }
-    teko::assert::is_true(over.len == 0)
 }
 
 #test

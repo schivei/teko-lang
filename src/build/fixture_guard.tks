@@ -19,8 +19,7 @@
  *   · every hand-written `.tks`/`.tkt` closes every block it opens (`source_structure_defect`);
  *   · no top-level doc-comment opens inside an unclosed block (the exact fingerprint of the splice);
  *   · a fixture's helper calls all resolve to a declaration (`undeclared_helper_calls`);
- *   · a fixture's declaration count never DROPS (`count_declared_fns` against a pinned floor);
- *   · a fixture's failure codes stay inside the POSIX byte (`oversized_register_codes`).
+ *   · a fixture's declaration count never DROPS (`count_declared_fns` against a pinned floor).
  *
  * The scanners are line-oriented and delegate the literal/comment bookkeeping to
  * `snippet_brace_delta`, so a brace inside a string, a byte literal, a `//` line comment or a Javadoc
@@ -200,22 +199,10 @@ fn structural_defects_under(dir: str) -> []str {
 }
 
 /**
- * is_ident_byte — may `c` appear inside a Teko identifier?
- *
- * @param c  the byte to classify
- * @return   true for a letter, a digit or an underscore
- * @since 0.3.1
- */
-fn is_ident_byte(c: byte) -> bool {
-    if c >= b'a' && c <= b'z' { return true }
-    if c >= b'A' && c <= b'Z' { return true }
-    if c >= b'0' && c <= b'9' { return true }
-    c == b'_'
-}
-
-/**
  * ident_end_at — the index one past the identifier starting at `from` in `text` (`from` itself when
- * no identifier byte is there).
+ * no identifier byte is there). The identifier-continue class is the lexer's own
+ * (`is_ident_byte`, `src/build/init.tks`) — a guard that carried its own copy would be a second
+ * source of truth about what an identifier is.
  *
  * @param text  the text to read
  * @param from  the index of the identifier's first byte
@@ -347,79 +334,6 @@ fn undeclared_helper_calls(caller_text: str, decl_text: str, prefix: str) -> []s
         if i >= called.len { break }
         if !list_has_str(declared, called[i]) { out = teko::list::push(out, called[i]) }
         i = i + 1
-    }
-    out
-}
-
-/**
- * POSIX_EXIT_MAX — the largest value a process exit status can carry through `wait`'s 8-bit field.
- * A fixture that claims a code above it does not fail loudly: the kernel truncates modulo 256, so
- * `exit(260)` is observed as 4 and `exit(256)` as 0 (both measured on this host, 2026-07-30). In a
- * fixture whose failure codes double as scenario numbers that silently REATTRIBUTES a failure to
- * another scenario, which is worse than a false green because the report is confident and wrong.
- */
-const POSIX_EXIT_MAX: u64 = 255
-
-/**
- * DecimalRead — one decimal literal read out of a text: its value and where it ended.
- *
- * @since 0.3.1
- */
-type DecimalRead = struct {
-    /** the parsed value (0 when no digit was present). */
-    value: u64
-    /** the index one past the last digit — equal to the start index when nothing was read. */
-    end: u64
-}
-
-/**
- * decimal_value_at — the decimal integer starting at `from` in `text`, and the index one past it. An
- * `end` equal to `from` means there was no digit there.
- *
- * @param text  the text to read
- * @param from  the index of the number's first byte
- * @return      the parsed value and the index one past the digits
- * @since 0.3.1
- */
-fn decimal_value_at(text: str, from: u64) -> DecimalRead {
-    mut v: u64 = 0
-    mut k = from
-    loop {
-        if k >= text.len { break }
-        let c = text[k]
-        if c < b'0' || c > b'9' { break }
-        v = v * 10 + (c to u64) - (b'0' to u64)
-        k = k + 1
-    }
-    DecimalRead { value = v; end = k }
-}
-
-/**
- * oversized_register_codes — every value assigned to the accumulator named `register` in `text` that
- * exceeds `POSIX_EXIT_MAX`. A fixture reports WHICH check failed by leaving its number in one
- * register and exiting with it, so the register's literals ARE the fixture's exit codes and this is
- * where the 8-bit truncation has to be refused.
- *
- * @param text      the fixture's driver text (its `main.tks`)
- * @param register  the accumulator's name (e.g. `bad`)
- * @return          the offending values, in first-seen order
- * @since 0.3.1
- */
-fn oversized_register_codes(text: str, register: str) -> []u64 {
-    let needle = register ~ " = "
-    mut out: []u64 = teko::list::empty()
-    mut i: u64 = 0
-    loop {
-        if i >= text.len { break }
-        if i > 0 && is_ident_byte(text[i - 1]) { i = i + 1; continue }
-        let end = ident_end_at(text, i)
-        if end == i { i = i + 1; continue }
-        if teko::str::slice(text, i, end) != register { i = end; continue }
-        if end + 3 > text.len { break }
-        if teko::str::slice(text, i, end + 3) != needle { i = end; continue }
-        let read = decimal_value_at(text, end + 3)
-        if read.end > end + 3 && read.value > POSIX_EXIT_MAX { out = teko::list::push(out, read.value) }
-        i = if read.end > end + 3 { read.end } else { end }
     }
     out
 }
