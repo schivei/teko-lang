@@ -18,6 +18,7 @@
 #include <inttypes.h> // PRId64, PRIx64, PRIX64 — format spec helpers
 #include <stdarg.h>   // va_list, va_start/va_copy/va_end — fmt_alloc_vsnprintf heap-overflow path (issue #48)
 #include <signal.h>   // signal — native crash backtraces (C1.9)
+#include <setjmp.h>   // setjmp/longjmp — the test-mode capture (§14). The ONLY user is tk_test_run.
 // execinfo (backtrace) exists on macOS + glibc, but NOT musl (the Alpine/Linux pipeline). Guard it
 // so the runtime is musl-portable (C7.1f); without it the backtrace degrades to a one-line notice.
 #if defined(__APPLE__) || defined(__GLIBC__)
@@ -1686,16 +1687,161 @@ void tk_test_end(void) {
     tk_chan_emit_body();
 }
 
-// tk_test_fail_report — the FAILING half of tk_test_end, called from the panic path before it
-// aborts: the same verdict line with FAILED, then this test's OWN captured bytes. Closing the
-// channel FIRST is what lets the panic message itself reach the real stderr.
-static void tk_test_fail_report(void) {
+// tk_test_close_failed — close the open channel with a FAILING verdict, then this test's OWN captured
+// bytes. Closing the channel FIRST is what lets anything written afterwards reach the real streams.
+static void tk_test_close_failed(const char *verdict) {
     if (!tk_chan_open) return;
     tk_chan_open = false;
-    tk_chan_verdict_line("FAILED");
+    tk_chan_verdict_line(verdict);
     tk_chan_emit_body();
     fflush(stdout);
 }
+
+// tk_test_fail_report — the FAILING half of tk_test_end, called from the UNCAPTURED panic path before
+// it aborts (a program, or a test binary whose panic escaped the capture).
+static void tk_test_fail_report(void) { tk_test_close_failed("FAILED"); }
+
+// --- the CAPTURE (see teko_rt.h for the ruling and the three results) -----------------------------
+//
+// A STACK AND NOT A SINGLE BUFFER, and the reason is the guard. The channel is a singleton because
+// harness-level tests do not nest, and that is still true; but the ONLY way a `#test` written in
+// Teko can exercise this mechanism today is to run a captured body from INSIDE a captured body (the
+// language cannot yet hand a function's address to an extern — see tk_test_capture_probe). A single
+// buffer would have the inner run clear the outer's capture on the way out, so the outer test's own
+// later panic would jump into a frame that no longer exists.
+//
+// The depth is what the two chokepoints below read. It is raised ONLY by tk_test_run, which is
+// emitted ONLY by the test-mode profiles — so a program can never take the captured branch, and the
+// boundary is structural instead of a flag anyone can flip by mistake.
+//
+// TK_TEST_CAPTURE_DEPTH_MAX — how deep the capture stack goes. Two is what exists (a harness run and
+// a guard's inner run); the slack costs a few hundred bytes of BSS and removes a cliff.
+#define TK_TEST_CAPTURE_DEPTH_MAX 4
+static jmp_buf tk_test_jb[TK_TEST_CAPTURE_DEPTH_MAX];
+static volatile sig_atomic_t tk_test_depth = 0;
+static volatile int32_t tk_test_how[TK_TEST_CAPTURE_DEPTH_MAX];
+static volatile int32_t tk_test_code[TK_TEST_CAPTURE_DEPTH_MAX];
+
+// tk_test_capturing — is a captured body running right now? The one question the chokepoints ask.
+static bool tk_test_capturing(void) { return tk_test_depth > 0; }
+
+// TK_TEST_VERDICT_MAX — the failing verdict buffer, sized for "FAILED (exit -2147483648)" and slack.
+#define TK_TEST_VERDICT_MAX 64
+
+static long tk_test_ran    = 0;
+static long tk_test_passed = 0;
+static long tk_test_failed = 0;
+static long tk_test_exited = 0;
+
+// tk_test_capture_leave — record this level's outcome, pop the stack, and hand control back to the
+// tk_test_run that owns the innermost frame. Popping BEFORE the jump is what makes the outer level
+// (if any) the one a subsequent panic reaches.
+_Noreturn static void tk_test_capture_leave(int32_t how, int32_t code) {
+    int d = (int)tk_test_depth - 1;
+    tk_test_how[d] = how;
+    tk_test_code[d] = code;
+    tk_test_depth = d;
+    longjmp(tk_test_jb[d], 1);
+}
+
+// tk_test_capture_panic — the captured half of the panic chokepoints: the panic line goes into THIS
+// test's own captured stderr (never the shared stream, which is what used to attribute an abort to a
+// test ~66 tests before the real one), then control returns to tk_test_run.
+_Noreturn static void tk_test_capture_panic(const char *msg, size_t len) {
+    tk_chan_append(&tk_chan_err, TK_PANIC_MARKER, strlen(TK_PANIC_MARKER));
+    tk_chan_append(&tk_chan_err, msg, len);
+    tk_chan_append(&tk_chan_err, "\n", 1);
+    tk_test_capture_leave(TK_TEST_PANICKED, 0);
+}
+
+// tk_test_outcome_at — the outcome recorded at capture depth `d`, as a plain (non-volatile) value.
+static tk_test_outcome tk_test_outcome_at(int d) {
+    tk_test_outcome e;
+    e.how = (int32_t)tk_test_how[d];
+    e.code = (int32_t)tk_test_code[d];
+    return e;
+}
+
+tk_test_outcome tk_test_run(void (* volatile body)(void)) {
+    volatile int d = (int)tk_test_depth;
+    if (d >= TK_TEST_CAPTURE_DEPTH_MAX) { body(); return tk_test_outcome_at(d - 1); }
+    tk_test_how[d] = TK_TEST_OK;
+    tk_test_code[d] = 0;
+    tk_test_depth = d + 1;
+    if (setjmp(tk_test_jb[d]) == 0) body();
+    tk_test_depth = d;
+    return tk_test_outcome_at(d);
+}
+
+// --- the GUARD's way in (and why it is here rather than in Teko) ----------------------------------
+//
+// §14.3 of the design gives the guard a Teko surface, `run_capturing(body: cabi fn())`. MEASURED ON
+// THIS TREE, THAT SURFACE DOES NOT EXIST AND CANNOT BE WRITTEN: `cabi` is not a token the lexer mints
+// (zero occurrences outside docs) and `fn() -> T` in parameter position does not parse. It is crumb
+// C1 of concorrencia-adiantada-s8, a whole language feature, and C0 does not need it — the `#test`
+// harness is emitted C, where `&<symbol>` asks the language for nothing.
+//
+// The GUARD does need a way in, though, and a guard that cannot fail is decoration. So the bodies it
+// runs live here, next to the mechanism they exercise, and a `#test` reaches them through one
+// ordinary extern call. When `cabi fn` lands, `run_capturing` replaces this and the bodies move into
+// the test file where they belong.
+static void tk_test_probe_returns(void) { }
+static void tk_test_probe_panics(void)  { tk_panic("capture guard: the panic that must not kill the suite"); }
+static void tk_test_probe_exits(void)   { tk_exit(TK_TEST_PROBE_EXIT_CODE); }
+static void tk_test_probe_div0(void)    { tk_panic_div0(); }
+
+// tk_test_probe_body — the body `which` selects, or NULL when `which` names nothing. NULL is what
+// makes an out-of-range selector a reported failure instead of a silent pass.
+static void (*tk_test_probe_body(int32_t which))(void) {
+    if (which == TK_TEST_PROBE_RETURNS) return tk_test_probe_returns;
+    if (which == TK_TEST_PROBE_PANICS)  return tk_test_probe_panics;
+    if (which == TK_TEST_PROBE_EXITS)   return tk_test_probe_exits;
+    if (which == TK_TEST_PROBE_DIV0)    return tk_test_probe_div0;
+    return NULL;
+}
+
+// tk_test_probe_last_code — the `code` of the most recent probe. It is a SECOND READ rather than a
+// second field of a returned struct because a `from "teko_rt"` extern cannot return a user struct by
+// value on this tree: codegen emits no prototype for such an extern (it relies on teko_rt.h) and the
+// header's C struct is not the mangled Teko one, so the call site fails to compile. Measured, not
+// assumed — `tk_t_teko__test__TestOutcome e = tk_test_capture_probe(...)` is an `invalid initializer`.
+static int32_t tk_test_probe_last_code = 0;
+
+int32_t tk_test_capture_probe(int32_t which) {
+    void (*body)(void) = tk_test_probe_body(which);
+    tk_test_probe_last_code = 0;
+    if (!body) return TK_TEST_PROBE_UNKNOWN;
+    tk_test_outcome e = tk_test_run(body);
+    tk_test_probe_last_code = e.code;
+    return e.how;
+}
+
+int32_t tk_test_capture_last_code(void) { return tk_test_probe_last_code; }
+
+// tk_test_report_exited — the EXITED verdict, which carries the value: `FAILED (exit <n>)`. A test
+// that leaves by exiting is not a pass, and naming the code is what makes the report actionable.
+static void tk_test_report_exited(int32_t code) {
+    char verdict[TK_TEST_VERDICT_MAX];
+    snprintf(verdict, sizeof verdict, "FAILED (exit %" PRId32 ")", code);
+    tk_test_close_failed(verdict);
+}
+
+void tk_test_report(tk_test_outcome e) {
+    tk_test_ran += 1;
+    if (e.how == TK_TEST_OK) { tk_test_passed += 1; tk_test_end(); return; }
+    tk_test_failed += 1;
+    if (e.how != TK_TEST_EXITED) { tk_test_close_failed("FAILED"); return; }
+    tk_test_exited += 1;
+    tk_test_report_exited(e.code);
+}
+
+void tk_test_summary(void) {
+    fprintf(stdout, "test result: %s. %ld ran; %ld passed; %ld failed; %ld exited\n",
+            tk_test_failed ? "FAILED" : "ok", tk_test_ran, tk_test_passed, tk_test_failed, tk_test_exited);
+    fflush(stdout);
+}
+
+bool tk_test_any_failed(void) { return tk_test_failed != 0; }
 
 // --- the SHARD filter ---------------------------------------------------------------------------
 //
@@ -1850,6 +1996,10 @@ double tk_float_parse(tk_str s) {
 }
 
 _Noreturn void tk_panic(const char *msg) {
+    // Under CAPTURE (test mode only) this stops the TEST, not the process: the line lands in this
+    // test's own channel and control returns to tk_test_run. `_Noreturn` stays honest — longjmp
+    // does not return either.
+    if (tk_test_capturing()) tk_test_capture_panic(msg, strlen(msg));
     // Loud + non-zero (M.1): the TK_PANIC_MARKER line first, then SIGABRT via abort().
     // The per-test channel is closed and REPORTED first, so the reader sees which test died and
     // what THAT test had written before the panic message rather than a neighbour's bytes.
@@ -1869,6 +2019,7 @@ _Noreturn void tk_panic(const char *msg) {
 // tolerating embedded NUL (exactly msg.len bytes to stderr). The error case `panic(error)` lowers
 // to its `.message` str at the call site.
 _Noreturn void tk_panic_str(tk_str msg) {
+    if (tk_test_capturing()) tk_test_capture_panic((const char *)msg.ptr, msg.len);
     tk_test_fail_report();
     fputs(TK_PANIC_MARKER, stderr);
     fwrite(msg.ptr, 1, msg.len, stderr);
@@ -1885,7 +2036,13 @@ int tk_exit_status(int32_t code) { return (int)(code & TK_EXIT_STATUS_MASK); }
 // the Teko-level `exit(<int>)` — end the program with a status code (no panic message).
 // (W9.3b) free every live arena region before exiting so a diverging exit() is leak-clean (the atexit
 // hook would also fire, but the explicit call keeps the contract local + obvious; free_all is idempotent).
-_Noreturn void tk_exit(int32_t code) { tk_regions_free_all(); exit(tk_exit_status(code)); }
+// Under CAPTURE (test mode only) the value is recorded as a fact about the TEST and no syscall is
+// sent; outside it the exit stays the program's contract with whoever invoked it, byte for byte.
+_Noreturn void tk_exit(int32_t code) {
+    if (tk_test_capturing()) tk_test_capture_leave(TK_TEST_EXITED, code);
+    tk_regions_free_all();
+    exit(tk_exit_status(code));
+}
 
 _Noreturn void tk_panic_div0(void)     { tk_panic("division by zero"); }
 _Noreturn void tk_panic_oob(void)      { tk_panic("index out of bounds"); }
