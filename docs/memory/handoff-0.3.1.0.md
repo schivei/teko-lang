@@ -13,6 +13,183 @@ hipótese, está dito.
 - **O repo é um FORK.** `schivei/teko-lang`; o upstream é `teko-org/teko-lang`. `release.yml` e
   (desde hoje) `nightly.yml` só correm na org.
 
+
+## 0. MODO AUTÓNOMO — 2026-07-30, o dono foi dormir
+
+*"Vou dormir, te deixo no modo autônomo, tem bastante trabalho por aí."*
+
+**O que o integrador faz enquanto ele dorme:** drenar agentes que terminam, despachar da fila ao teto de
+4, verificar CI pelo log integral (`scripts/ci_full_log.sh`), e manter este documento vivo. **Não** promove
+ao tronco, **não** faz bump de versão, **não** fecha a lane — isso é dele.
+
+### CINCO AGENTES A CORRER (teto 4, um a mais por ordem explícita)
+
+| agente | branch | porquê |
+| --- | --- | --- |
+| **degrau 27 — `ftoa`** | `cargo/0.3.1.0-degrau-27` | a paragem viva do self-host; destranca o ponto de fixo **e** torna efectiva a lei da emissão nativa |
+| **último abort unitário (`zext`)** | `cargo/0.3.1-zext-expectativa` | provado por sonda que é o ÚLTIMO: sem ele, **1117** testes arrancam e a fase unitária fica verde |
+| **leitura fora de fronteira** | `cargo/0.3.1-leitura-fora-de-fronteira` | divergência medida: nativo devolve lixo, rota C panica. Valor errado calado |
+| **gémeo de macOS** | `cargo/0.3.1-gemeo-macos` | teste sem dependência do host que falha só em macOS |
+| **`kind` desconhecido panica** | `cargo/0.3.1-kind-desconhecido-panica` | **5º por ordem directa**: *"precisa de correção já, ou estaremos ferindo nossas leis"* |
+
+**Quando o do `kind` terminar, voltar ao teto de 4.**
+
+### FILA, por valor
+
+1. **`.exe` no Windows** — brief pronto e MEDIDO, ver §3d. Dois sítios de chamada, e o desenho certo já existe no mesmo ficheiro.
+2. **Terceira passagem do documento do `tdb`** — em forma de **PROPOSTA** (lei nova de forma), com interop fora, alvo *"a melhor experiência de dev"*, e "SEM C LANG".
+3. **`kind = "tool"`** — **BLOQUEADO** pelo portão do `tdb` (proposta, não entra nesta versão nem na seguinte).
+4. **As duas regressões "expected a compile failure but the build succeeded"** (`native_iface_fat_known_stop.tkr`, `diagnostics.tkr`) — **atenção: é KNOWN-STOP a ficar vermelho, e pela lei do dono isso NÃO significa necessariamente que o defeito foi corrigido; pode significar que uma GUARDA se perdeu.** Não owned. Vale investigar.
+5. `own_native.tkr → own_cross_x86_64_windows_emits_coff` — o `cc` falha no C gerado. Não owned.
+
+
+### MEDIÇÕES DA PRIMEIRA EXECUÇÃO COM `Arm64Linux` (SHA `ebfb6be8`, perna macOS)
+
+Quatro coisas, e três são notícia boa:
+
+1. **Degrau 28 FECHADO no CI** — `slice element index-assignment` já não aparece. O 29 apareceu no seu lugar,
+   que é o comportamento esperado de uma escada.
+2. **`regressions 10 run, 0 skipped, 1 failed`** — **ZERO skips.** Os 21 skips da perna arm64 eram todos
+   `unsupported TEKO_TARGET "arm64-linux"` e desapareceram com o crumb 3, **sem tocar em CI**. Confirma a
+   decisão de não aplicar o crumb 5.
+3. **A pergunta do agente do AArch64-ELF está RESPONDIDA:** a linha nova `own_cross_arm64_linux_emits_elf`
+   **não saltou** em `test / macos-arm64`, logo o host macOS **tem** desmontador e religador LLVM
+   cross-capable. **Nenhum provisionamento é necessário.**
+4. **CORRECÇÃO À MINHA PRÓPRIA FILA, e importa:** as duas regressões que dois agentes reportaram como
+   *"expected a compile failure but the build succeeded"* — `native_iface_fat_known_stop.tkr` e
+   `diagnostics.tkr` — estão **`regression ok` no CI**. Não reproduzem. A causa provável é o compilador
+   que os agentes semearam à mão de `bootstrap/teko.c` (porque `fetch_teko.sh` falha nesta sessão) diferir
+   do que o CI usa. **Portanto NÃO despachar "guardas perdidas" — não há prova de que exista guarda
+   perdida.** O que existe é uma discrepância entre a escada local dos agentes e a do CI, e isso é o
+   achado a registar. Prioridade da fila baixa de 2 para o fim.
+
+### CORRECÇÃO À CORRECÇÃO — três agentes contra uma leitura de CI, e eu dispensei depressa demais
+
+Escrevi acima *"NÃO despachar guardas perdidas — não há prova de que exista guarda perdida"*. **Isso foi
+prematuro.** Contagem actual: **três agentes independentes** (`zext`, `cast-narrow`, e o do degrau 28)
+reportam as mesmas duas linhas a falhar, com a mesma mensagem, em corridas separadas:
+
+```
+native_iface_fat_known_stop.tkr → "expected a compile failure but the build succeeded"
+diagnostics.tkr                 → "expected a compile failure but the build succeeded"
+```
+
+E o CI mostra `regression ok` para as duas. **Três observações concordantes não são ruído.** O que eu tenho
+não é "nenhuma prova de defeito" — é **uma discrepância reproduzível**, e essa é a coisa a investigar.
+
+### O EIXO PROVÁVEL, e é verificável com um comando
+
+**O CI e os agentes não correm a suíte com a MESMA geração.** As pernas `test` correm o **asset publicado**
+(que é a **gen1**, produzida por `produce_assets.sh`) sobre a árvore. Os agentes correm a **gen2** que
+construíram. E `scripts/fixpoint_gate.sh` **assere `gen2 == gen3`, nunca `gen1 == gen2`** — o próprio
+cabeçalho di-lo, e com razão: sob a cadeia 0.3.1.0 a gen1 vem de um gerador diferente, logo `gen1 != gen2`
+é a forma saudável.
+
+**Consequência que ninguém escreveu ainda:** se a gen1 e a gen2 divergirem em **comportamento** (não só em
+bytes), as pernas `test` medem a gen1 e ninguém mede a gen2 — e uma rejeição que só a gen2 perde é
+**invisível ao CI por construção**. Isso é um buraco de cobertura, não um defeito de fixture.
+
+**O PASSO que o fecha** (e é um passo, não um alarme — lei de forma do dono): correr as duas linhas com a
+**gen1** e com a **gen2** da MESMA árvore e comparar. Três resultados possíveis, e cada um diz o que fazer:
+
+| resultado | significado |
+| --- | --- |
+| gen1 rejeita, gen2 **não** | **a gen2 perdeu a guarda.** É defeito real e o CI não o vê. O mais grave dos três |
+| as duas rejeitam | o que os agentes viram vem da semente deles (`bootstrap/teko.c`), não da gen2 — e aí a lição da semente aplica-se |
+| nenhuma rejeita | o CI está a medir outra coisa, e a pergunta muda para *o que o asset publicado é de facto* |
+
+**Custo: uma escada, que o agente já constrói de qualquer maneira.** É o próximo despacho depois do `.exe`.
+
+**A LIÇÃO, e é geral:** um agente que semeia de `bootstrap/teko.c` está a construir a partir da SAÍDA
+desta árvore, não do release. As falhas que ele vê e o CI não vê podem ser artefactos dessa diferença —
+como já aconteceu hoje com "três erros de tipo" que eram do binário obsoleto. **Um relatório de agente
+que nomeia uma regressão tem de dizer com que semente correu**, e o integrador tem de a confrontar com
+o CI antes de a pôr na fila. **Mas confrontar não é dispensar:** quando o agente e o CI discordam, o
+resultado é uma DISCREPÂNCIA a medir, não um lado a acreditar. Eu fiz as duas coisas erradas em sequência —
+primeiro aceitei sem confrontar, depois dispensei sem medir.
+
+
+
+### ESTADO MEDIDO DO VAGÃO — topo `2d65bb87`, execução 30515067207 (log integral)
+
+**O que MELHOROU hoje, medido e não suposto:**
+
+| | antes | agora |
+| --- | --- | --- |
+| fase de testes unitários | abortava com SIGABRT; **269 dos 1117** nunca arrancavam | **1117/1117, zero pânicos** em todas as pernas Linux |
+| `assertion failed: str_contains` | em duas pernas | **desapareceu** |
+| degrau 28 (`s[i] = v`) | vermelho em **todas** as pernas | **fechado** |
+| `LNK1120`/`LNK2019` (Windows, 128 bits) | matava a perna `artifact` | **zero** |
+| skips | **21** na perna arm64-glibc | **`0 skipped` em TODAS as pernas** |
+| pernas do Windows | nunca corriam (sem asset) | correm — e destaparam o `.exe` |
+
+**OS TRÊS VERMELHOS QUE RESTAM, todos com dono:**
+
+| vermelho | onde | quem |
+| --- | --- | --- |
+| `assertion failed: is_true` | `pt_target_name_and_objfmt_are_one_source`, **só macOS** | agente vivo (gémeo) |
+| `native backend N1: builtin ftoa` | `teko::codegen::cb_f64_literal` — a paragem do self-host | agente vivo (degrau 27) |
+| `A4-fp: float-op / FPR encoding deferred to 0.3.1` | `own_arith_exit`, arm64 | **degrau 29, na fila** |
+| `ERROR: … no dl/windows-x86_64/teko.exe` | `src/build/project.tks:1827` e `:2635` | agente vivo (`.exe`) |
+
+**CINCO AGENTES VIVOS** (todos com escrita recente): degrau 27, leitura fora de fronteira, gémeo de macOS,
+`kind` desconhecido, `.exe`. **Teto é 4** — quando dois fecharem, repor só um.
+
+### DISCIPLINA DE PUSH — medida em 2026-07-30, e o defeito era meu
+
+**Medido:** das últimas oito execuções de `pr.yml` no vagão, **sete estavam `cancelled`**. A única com
+veredito era `ebfb6be8`, muito atrás do topo. Eu estava a ler CI de uma execução velha sem perceber porquê.
+
+**A CAUSA, e não é intermitência do GitHub.** `pr.yml:219-221`:
+
+```yaml
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+```
+
+Com `cancel-in-progress: false`, o grupo mantém **uma** execução a correr e **uma** pendente. Uma terceira
+que chegue **cancela a pendente**. Logo cada push meu deslocava a que estava à espera, e só a que já corria
+chegava a veredito.
+
+**A consequência é pior que atraso: é CEGUEIRA.** Um dreno de produto empurrado entre dois commits de
+documentação pode nunca ser medido, porque o push seguinte cancela a sua execução pendente. **Um dreno que
+ninguém correu é exactamente o "verde sobre linha não executada" que esta lane persegue** — na outra ponta.
+
+**REGRA ADOPTADA, e vale para qualquer sessão:**
+
+- **um push por ciclo**, não um por commit. Comitar localmente à vontade; empurrar uma vez.
+- **um dreno de produto empurra-se SOZINHO**, e espera-se pelo seu veredito antes de empurrar documentação
+  por cima. O que precisa de CI tem prioridade no canal.
+- **antes de ler CI, confirmar que a execução escolhida NÃO é `cancelled`** — uma `cancelled` não tem
+  veredito e ler-lhe as partes que correram é tirar conclusão de meia medição.
+
+### CRUMB 5 do AArch64-ELF — NÃO APLICADO, e a razão é medição, não preguiça
+
+O agente deixou-mo por ser workflow (só o integrador toca `.github/workflows/`). **Medi antes de aplicar, e
+ele ficou em grande parte OBSOLETO pelo próprio dreno do crumb 3:**
+
+- os **21 skips** da perna `linux-arm64-glibc` eram **todos** `unsupported TEKO_TARGET "arm64-linux"`. Com
+  `Arm64Linux` a existir, vão a **zero** sem tocar em CI. A metade valiosa do crumb 5 aconteceu sozinha.
+- o que sobraria era acrescentar `no_skips_gate.sh` + provisionar wasmtime aarch64. **E aí colide:**
+  `scripts/no_skips_gate.sh` rejeita **qualquer** skip, incluindo a linha wasm — logo, sem wasmtime, a perna
+  ficaria vermelha pela linha wasm. **Mas pôr wasmtime numa perna de teste faz `scripts/wasm_known_stop_gate.sh`
+  ficar VERMELHO por desenho** (ele assere que existe **exactamente um** provedor de motor wasm, o
+  `regressor-full`), e retirar esse pin é a *promoção* que o dono ruleou ser trabalho da versão dedicada do
+  wasm: *"KNOWN-STOP, wasm terá a própria versão para refinar."*
+
+**Portanto é uma colisão entre dois rulings do dono** (skip é falha × wasm refina na sua versão), e negociação
+de KNOWN-STOP é **dono↔integrador**, nunca de agente. **Fica para ele decidir, com o número na mão:** depois do
+crumb 3, quantos skips restam de facto na perna arm64? Se for **só a linha wasm**, o pin já cobre e não há nada
+a fazer. **A próxima execução do CI sobre `36b2ab45` ou posterior responde** — é a primeira com `Arm64Linux`.
+
+### O PATCH DO AGENTE **NÃO** DEVE SER APLICADO VERBATIM, se algum dia entrar
+
+Ele propôs `run: … teko test . 2>&1 | tee teko-test.log`. Isso **reintroduz** o defeito que custou a esta lane
+um `exit 127` opaco no Windows: os passos correm com `-e -o pipefail`, e sem `set +e` o teste que falha mata o
+passo antes do gate. E `rc=$?` depois de um pipe dá o estado do **último** comando do pipe. A forma correcta
+está no passo do Windows em `pr.yml`: `set +e` → comando → `rc=$?` → `set -e` → `cat` → gate.
+
 ## 1. A escada de degraus — onde está
 
 Cada paragem do backend nativo é um "degrau". A escada é o produto desta lane: enquanto ela não
@@ -24,7 +201,8 @@ fechar, o ponto de fixo nativo não fecha e as duas pernas nativas ficam vermelh
 | 25 | união-nula em colocações sem tipo declarado | **fechado**, confirmado no CI |
 | 26 | `append_fo` sem lowering, em `teko::codegen::cb` | **fechado e DRENADO** — confirmado: já não aparece |
 | **27** | **builtin `ftoa` sem lowering**, em `teko::codegen::cb_f64_literal` | **ABERTO — é a paragem viva do self-host**, idêntica em `artifact/linux-x86_64-glibc` e `artifact/linux-arm64-musl` |
-| **28** | **atribuição a elemento de slice (`s[i] = v`) sem lowering**, em `own_native::f_implicit_widen_targets` | **ABERTO, e é REGRESSÃO DO MEU DRENO** — parte a linha `own_arith_exit` em **todas** as pernas |
+| **29** | **`A4-fp`: codificação de operação de float / FPR em arm64**, em `own_arith_exit` | **ABERTO — descoberto ao drenar o 28.** É o **gémeo arm64** do arco `b1-fp-x86`, que fechou os floats só para x86-64 |
+| 28 | atribuição a elemento de slice (`s[i] = v`) sem lowering | **FECHADO e DRENADO** (`36b2ab45`) — confirmado no CI: já não aparece. Foi regressão do meu dreno |
 
 Texto exacto das duas, do log completo (§2c):
 
@@ -408,6 +586,51 @@ primeira passaria se o `tool` fosse carregado e por acaso não colidisse.
 **Referência nomeada e aplicável: C#.** `dotnet tool` (`PackageType=DotnetTool`) é o único dos quatro
 com um TIPO de pacote declarado; `cargo install` e `go install` dão o mesmo efeito instalando algo que
 por acaso tem binário, **sem** tipo próprio. O dono atribuiu C# para addins, e aqui aplica-se de facto.
+
+
+## 3d. O `.exe` do Windows — medido, e o brief está pronto
+
+**O sintoma:** `test / windows-x86_64` morre em `ERROR: the producer's upload has no dl/windows-x86_64/teko.exe`.
+O produtor publicou `teko`. O CI está correcto nos **dois** lados (`produce_assets.sh` já trata `*.exe`, o
+consumidor espera `teko.exe`); é o **produto** que nomeia a saída sem extensão em todos os hosts. Um ficheiro
+PE chamado `teko` **não é lançável por nome**, porque o Windows resolve um nome sem extensão acrescentando
+`.exe`.
+
+**OS DOIS SÍTIOS, medidos em `src/build/project.tks`** — e são dois, o que faz disto um caso de família:
+
+```
+1827:    let binp = teko::str::concat(od, "/", stem)     <- rota C
+2635:    let binp = teko::str::concat(od, "/", stem)     <- rota NATIVA
+```
+
+**Consertar só um é o defeito "um dos membros da família".** As duas rotas produzem executáveis e as duas
+nomeiam-nos igual.
+
+**E O DESENHO CERTO JÁ EXISTE, 800 linhas abaixo, no mesmo ficheiro** — não se inventa nada:
+
+```teko
+fn archive_output_path(od: str, stem: str, format: ArchiveFormat) -> str {
+    match format {
+        Coff => teko::str::concat(od, "/", teko::str::concat(stem, ".lib"))
+        _    => teko::str::concat(od, "/", teko::str::concat("lib", teko::str::concat(stem, ".a")))
+    }
+}
+```
+
+O arquivo **já** é nomeado por formato de alvo (`.lib` em COFF, `lib*.a` no resto). O executável não. **O
+conserto é um irmão desta função** — `binary_output_path(od, stem, target)` — chamado dos dois sítios, e
+**não** um `if` improvisado em cada um. Assim, o próximo alvo que precise de sufixo entra num só lugar.
+
+**O que o brief tem de exigir além disso:**
+- **quem CONSOME `binp`** nos dois sítios — se algum passa o caminho ao linker, ao `chmod`, ou o imprime,
+  todos têm de ver o mesmo nome. Um sítio que continue a montar o nome à mão é o defeito de volta.
+- **`teko test .` e o harness de regressão**: se algum invoca o binário construído por nome derivado, tem de
+  seguir o mesmo helper. Medir, não presumir.
+- **fixture**: construir para alvo Windows e afirmar que o ficheiro emitido termina em `.exe`; e que nos
+  outros alvos **não** termina em `.exe`. As duas metades — só a primeira passaria se o sufixo fosse posto
+  em todos os hosts, o que partiria Linux e macOS.
+- **não tocar** `produce_assets.sh` nem `pr.yml`: ambos já estão certos, e o segundo é do integrador.
+
 
 ## 4. DECISÕES DO DONO EM ABERTO
 
