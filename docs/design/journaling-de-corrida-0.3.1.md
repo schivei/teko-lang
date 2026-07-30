@@ -3137,3 +3137,157 @@ do consumidor, §16.4).
 **Nenhum crumb novo, e o C1 encolhe:** sai um ramo de recusa e o seu teste, entra um `Rec` de cinco
 campos, o embrulho no fundo de emissao e a divisao em `cont`. A §18.5 tinha registado *"registos, nao
 fluxo de bytes"* como requisito **sem forma**; esta seccao e a forma, e vem do dono.
+
+---
+
+## 25. `pop -> T | error | null` — a simetria que eu so tinha de um lado
+
+> *"O pop do canal, assim como o push, deve ser atomico, logo `ch.pop()` deve retornar
+> `T | error | null`, onde o error e nosso checked e **null quer dizer que nada foi lido**."*
+
+### 25.1 O que eu tinha, dito com exactidao
+
+Fui reler-me antes de responder. `docs/.../journaling` §16.4 e §18.1:
+
+```teko
+/** recv — tirar o proximo registo do canal, BLOQUEANDO ate haver um. */
+pub fn recv(c: Chan) -> ChanMsg | closed
+```
+
+**Duas saidas, e bloqueante.** Portanto: **nao tinha o defeito TOCTOU** — nunca houve um `is_empty()`
+seguido de um `pop`, e um `recv` bloqueante e atomico por construcao. **Mas tambem nao tinha a forma da
+lei**, e a razao nao e a atomicidade: e que **a lei do dono converte o `pop` de BLOQUEANTE em
+NAO-BLOQUEANTE**, e e isso que parte a forma de duas saidas.
+
+Um `recv` bloqueante nao precisa de dizer *"nada agora"* — ele espera. Um `pop` nao-bloqueante tem de o
+dizer, e `null` e a palavra. **A leitura do integrador (`null => break`) estava errada sob a lei nova, e
+estaria certa sob a minha antiga se `closed` se chamasse `null`** — que e exactamente a confusao que a
+lei elimina ao separar *"nada agora"* de *"acabou"*.
+
+E a lei e melhor do que o que eu tinha, por uma razao que nao e simetria estetica: **um `recv`
+bloqueante da ao consumidor uma maneira de parar que nao e o `recv`** — ele fica preso la dentro. A
+invariante de §16.4 dizia *"o orquestrador nunca bloqueia em nada que nao seja `recv`"*; com um `pop`
+nao-bloqueante, **o orquestrador nao bloqueia em nada, ponto**, e a invariante deixa de ter excepcao.
+
+### 25.2 A forma final
+
+```teko
+/**
+ * pop — tirar o proximo registo, ATOMICAMENTE e sem bloquear.
+ *
+ * TRES SAIDAS, E A DO MEIO E A QUE FALTAVA. Um `is_empty()` seguido de um `pop` e TOCTOU — a mesma
+ * corrida que o `push` de §23 elimina, na outra ponta. A pergunta e a accao sao a mesma operacao.
+ *
+ * `null` NAO E FECHO. E "agora nao havia nada", e o laco continua: um consumidor que chegue a frente
+ * do produtor ve `null` dezenas de vezes numa corrida saudavel. Quem decide a terminacao e
+ * `is_open` (§25.4), nunca esta funcao.
+ *
+ * @param c  o id do canal (§19 — o que atravessa a fronteira de tarefa e um nome)
+ * @return   o registo, `null` quando nada havia, ou o checked da casa
+ * @throws   quando o id nao nomeia um canal, ou quem chama nao e o leitor registado (§25.3)
+ * @since 0.3.1
+ */
+pub fn pop(c: u64) -> Rec | error | null
+```
+
+E o orquestrador, na forma final — **as duas pecas que ja existiam, agora usadas em conjunto**:
+
+```teko
+/**
+ * orchestrate — o consumidor: gira enquanto o canal estiver aberto, apenda o que vier.
+ *
+ * O `null` MANTEM O LACO A GIRAR; o fecho tira-o de la. Sair no `null` seria terminar uma corrida
+ * VIVA so porque o consumidor foi mais rapido do que o produtor — e o defeito que esta seccao
+ * corrige.
+ *
+ * @param c      o id do canal
+ * @param sinks  o segmento de journal de cada escritor
+ * @return       quantos registos foram apendados
+ */
+fn orchestrate(c: u64, sinks: []Journal) -> u64 {
+    mut n: u64 = 0
+    loop teko::threads::chan_is_open(c) {
+        match teko::threads::chan_pop(c) {
+            Rec as r => { append_to_segment(sinks, r); n = n + 1 }
+            null => { match teko::threads::chan_await_record(c, AWAIT_MS) { error => { }; null => { } } }
+            error as e => { report_reader_fault(e); break }
+        }
+    }
+    n
+}
+```
+
+### 25.3 As razoes de `error` na LEITURA — sao duas, e a assimetria com a escrita tem explicacao
+
+| razao | estado que a produz | repetivel? |
+|---|---|---|
+| **`NoSuchChannel`** | o id nao nomeia um canal vivo (id obsoleto, §19/F3) | nao — terminal |
+| **`NotAReader`** | quem chama nao e o leitor registado — a fronteira MPSC de §18 | nao — terminal |
+
+**Duas, contra quatro do lado da escrita, e a assimetria nao e descuido:** o escritor disputa um
+**recurso que flutua** (espaco), logo tem uma razao *repetivel* (`Full`). O leitor nao disputa nada —
+ou ha registo ou nao ha, e **"nao ha" ja e o `null`**. A condicao transitoria da leitura esta
+codificada na saida do meio, e por isso nao aparece como erro. **Nenhuma razao de leitura e
+repetivel**, e o `break` do laco em §25.2 e por isso correcto e nao pessimista.
+
+**E isto corrige a minha propria §18.2, por coerencia com a lei do §23.** La eu fiz o segundo leitor
+**panicar**. A lei do dono e *"sem panico: devolve o veredicto"*, e nao ha razao para o `push` a
+obedecer e o `pop` nao. **`NotAReader` passa a ser `error`, e o panico sai.** A garantia nao enfraquece
+— continua a ser de runtime, deterministica e nomeada; muda o mensageiro.
+
+*Guarda, a minha de §23.4 aplicada aqui:* **toda a razao tem de ter um teste que a PRODUZA** — dois
+testes, um por razao · **vivacidade**: um `pop` normal devolve `Rec` e um canal vazio devolve `null`,
+senao um canal que errasse sempre passaria os dois.
+
+### 25.4 A terminacao sem o `null` — e a definicao de `is_open` que a torna correcta
+
+O `closed` de §16 **desaparece do `pop`**. Nao vira `error`: *"todos os produtores acabaram"* e o fim
+NORMAL, e por o caminho feliz num ramo de erro seria mentir sobre o que aconteceu. Ele **vira uma
+propriedade do canal**, observada por `is_open` — que e onde o dono ja o tinha posto.
+
+**E ha aqui uma armadilha que a pergunta destapa, e ela e perda de dados.** Se `is_open` fosse
+simplesmente *"ha produtores vivos"*, o ultimo produtor a terminar poria a condicao a falso **com
+registos ainda no anel**, e o laco sairia deixando-os por ler. Portanto:
+
+> **`is_open(c)` = `produtores_vivos > 0` **OU** `registos_no_anel > 0`.**
+
+Assim ele fica falso **exactamente** quando o ultimo produtor acabou **e** tudo o que ele escreveu ja
+foi consumido — nem antes (perda), nem depois (impasse).
+
+**A terminacao prova-se, e a prova e curta:** os produtores sao finitos (2 por filho, §16.4); cada um
+decrementa a contagem **uma** vez, ao ver EOF no seu tubo; o EOF e garantido porque o filho ou sai ou e
+morto, e nos dois casos o tubo fecha; e o anel drena porque o consumidor so sai quando ele esta vazio.
+**Logo a condicao vai a falso e o laco termina.**
+
+*Prova:* um canal com registos por ler **e** zero produtores vivos ainda diz **aberto** · so depois do
+ultimo `pop` diz fechado · **inversao**: com `is_open` definido apenas por produtores, o mesmo cenario
+**perde** registos — e e essa a versao que tem de falhar o teste.
+
+### 25.5 A espera do lado da leitura — irma, e com a mesma disciplina
+
+Sim, precisa. Com `null` a significar *"nada agora"*, o laco gira em vazio e queima CPU. O irmao do
+`chan_await_space` e o `chan_await_record(c, timeout_ms)`, e **leva a mesma regra: e uma DICA, nunca uma
+garantia.**
+
+**E aqui tenho de ser honesto contra o meu proprio argumento.** Do lado da escrita, o `await` nao podia
+ser garantia porque ha N produtores e outro pode ganhar a vaga. **Do lado da leitura ha UM leitor**, e
+ninguem lhe tira o registo — tecnicamente o `await` **poderia** ser garantia. Nao deve ser, por duas
+razoes que consigo defender:
+
+1. **o `null` deixaria de ocorrer no caminho normal**, e uma saida que nunca ocorre e uma saida que
+   ninguem testa — e o dia em que ela ocorrer sera o dia em que ninguem sabe o que faz;
+2. **a garantia quebra em silencio no N:M.** A §18.4 ja regista a segunda estrutura com multiplos
+   consumidores; nesse dia, um `await` que fosse garantia passaria a mentir sem que uma linha mudasse.
+
+**Custo de a manter dica: um ramo.** Custo de a tornar garantia: uma promessa que o proprio documento
+ja preve quebrar. **O `pop` continua a ser a unica autoridade nas duas pontas.**
+
+**O que NAO medi:** o valor certo de `AWAIT_MS` e o custo da espera activa sem o `await`. Sao medicoes
+do crumb.
+
+### 25.6 O que muda no F4
+
+**Superficie, nao crumb.** O F4 (§20.1) ja constroi o `tk_chan`; isto fixa-lhe a forma das duas pontas.
+O saldo e negativo em trabalho: **sai** o caminho bloqueante do `recv` e **sai** o panico do segundo
+leitor; **entra** a saida `null`, o `chan_await_record` e a definicao de `is_open` com as duas parcelas.
+**11 crumbs, sem alteracao.**
