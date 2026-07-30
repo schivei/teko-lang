@@ -1097,3 +1097,58 @@ else { artifact = Artifact::Binary }
 desconhecido tem de ser **erro duro** com a lista dos aceites. Só depois `Tool` entra, e entra num sítio
 onde a grafia errada grita. É o padrão *"tornar o estado errado inexpressável"* que fechou o degrau da
 relocação, aplicado ao manifesto.
+
+### PRECISADO PELO DONO — `tdb` É O ÚNICO ALVO; INTEROP NÃO É OBJECTIVO; "SEM C LANG" (2026-07-30)
+
+Verbatim: *"o que estou propondo e um [depurador] proprio (como em Go), logo, quero que considere tudo
+que possa auxiliar o dev e dar a melhor experiencia, nao me importo (por ter ele) com os demais
+debuggers de mercado, logo, as perguntas feitas nem deveriam ter sido feitas. E sobre C, voce entendeu,
+nao escrever C quer dizer 'SEM C LANG', somente Teko nativo."*
+
+**O QUE ISTO FECHA, e as duas perguntas que eu não devia ter feito:**
+
+| pergunta que fiz | porque não devia ter sido feita |
+| --- | --- |
+| *"por que rota se constrói o `tdb`?"* | **"SEM C LANG, somente Teko nativo"** responde-a: nativa. A rota C não é rede de segurança de nada |
+| *"queres `print x` no gdb ou só no `tdb`?"* | **o gdb não é alvo.** *"não me importo com os demais debuggers de mercado"* |
+
+**A minha falha:** eu deixei de pé a premissa do **interop** depois de ele ter decidido *debugger
+próprio*. Uma decisão que substitui uma alternativa não é uma decisão que a mantém como eixo. As duas
+perguntas eram artefactos de um enquadramento que já tinha caído.
+
+**O ALVO É "A MELHOR EXPERIÊNCIA DE DEV", não o mínimo viável.** *"quero que considere tudo que possa
+auxiliar o dev"* — logo o orçamento não se corta pela fronteira `-g1`/`-g2`; variáveis, tipos,
+formatação legível e frames fiáveis entram todos, porque é isso que uma boa experiência exige.
+
+**O DWARF, portanto: fora do caminho crítico.** E a única razão que restava para o manter — ser um
+**leitor independente** que impede o `tdb` e o compilador de mentirem em conjunto — **é satisfeita sem
+ele**: as fixtures do `tdb` têm de ser, por construção, objetos escritos à mão com tabelas de correção
+conhecida (a terceira circularidade). Esse é o oráculo independente. O gdb era conveniência, não
+necessidade.
+
+### O FACTO DE PLATAFORMA QUE DECIDE COMO "SEM C LANG" SE APLICA — medido
+
+**Medido na árvore:** `grep syscall src/ --include=*.tks` → **zero**. Não há primitiva de chamada de
+sistema crua na superfície. A única forma de alcançar o SO é o FFI, e ele liga a **símbolos de libc por
+nome**:
+
+```teko
+pub extern fn c_aligned_alloc(alignment: u64, size: u64) -> u64 = "aligned_alloc"
+```
+
+`tdb` precisa de `ptrace` (Linux), `mach_vm`/`ptrace` (macOS), `DebugActiveProcess` (Windows). **Duas
+leituras de "SEM C LANG", e uma delas é impossível por facto de plataforma, não por preferência:**
+
+| leitura | consequência |
+| --- | --- |
+| **(a) sem C ESCRITO e sem BACKEND C**, mas `extern` para a biblioteca de ABI-C da plataforma | possível hoje. Nenhuma linha de C nossa. É como qualquer linguagem alcança o SO |
+| **(b) sem libc nenhuma — só chamadas de sistema cruas** | **impossível em macOS e Windows.** A Apple não garante a ABI de syscall (o caminho suportado é libSystem) e o Windows **não tem** interface de syscall estável (é obrigatório passar por `kernel32`/`ntdll`). E na nossa superfície a primitiva **não existe** |
+
+**E o precedente é o Go — a referência que o dono atribuiu para comportamentos:** o Go faz syscalls
+**cruas em Linux**, mas passa por **libSystem em Darwin** e por **`kernel32` em Windows**. Ou seja: a
+própria linguagem que ele nomeou como modelo adopta (a) onde (b) não é possível.
+
+**Assunção sob a qual se prossegue, declarada:** *"SEM C LANG"* = **nenhuma linha de C escrita por nós e
+nenhuma compilação pela rota C**; `extern` para a biblioteca da plataforma é permitido, porque a
+alternativa não é mais pura — é inexequível em dois dos três alvos. **Se o dono quiser (b) em Linux por
+princípio, isso é uma primitiva de linguagem nova e um arco próprio, e tem de ser dito.**
