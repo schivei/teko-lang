@@ -5,7 +5,7 @@ perder o fio. **Este documento é a fonte única do estado.** Tudo aqui é medid
 hipótese, está dito.
 
 - **PR:** `schivei/teko-lang#99`
-- **Vagão:** `remodel/0.3.1.0-linux-native-2`, HEAD **`b48227de`** (worktree `/home/user/wt-lin`)
+- **Vagão:** `remodel/0.3.1.0-linux-native-2`, HEAD **`757e575`** (worktree `/home/user/wt-lin`)
 - **Como ler o CI sem cegueira:** `scripts/ci_full_log.sh` (§2c). Foi o instrumento que faltava todo o
   dia, e a §2b existe porque eu não sabia que existia.
 - **Objetivo da lane:** as pernas Linux gerarem com o backend NATIVO (o `fixpoint_backend` por perna
@@ -17,6 +17,137 @@ hipótese, está dito.
 
 
 
+
+
+## 0f. A VAGA DE 12 JOBS VERMELHOS DE `757e575` — LIDA, e METADE NÃO É DEFEITO (2026-07-30)
+
+Doze jobs vermelhos chegaram por webhook em duas execuções seguidas (`30526044023` sobre `d3ab105`,
+`30526530472` sobre `757e575` — o topo actual). Os dois commits são de documentação, logo **o estado
+é o mesmo nas duas** e a vaga não foi causada por eles. Li o log INTEGRAL (§2c) e a vaga tem **três**
+causas, não doze. Quem recuperar a sessão não precisa de repetir a leitura.
+
+### CAUSA 1 — `artifact / linux-x86_64-glibc` e `artifact / linux-arm64-musl`: **VERMELHO POR DESENHO**
+
+```
+fixpoint: | teko: .: native backend N1: `null` match pattern not yet lowered (N2)
+          [in `teko::codegen::emit_variant_wrap`]
+fixpoint: VERDICT: FAILED — gen1 does not build the source it came from
+```
+
+Isto é o **degrau 30**, o degrau aberto que está a ser trabalhado. E não é regressão: está escrito no
+próprio `pr.yml`, no comentário do passo do fixpoint (linhas ~451-455):
+
+> *"A `native` LEG IS EXPECTED TO GO RED TODAY, and that is the deliverable, not a regression to patch
+> around — the native backend does not build the compiler yet and the stop it reaches is named by
+> address in `docs/memory/0.3.1.0-linux-native-first-stop.md`. The red measures the distance left. To
+> turn it back, one word per leg in `scripts/ci_producer_matrix.sh`."*
+
+**Não voltes a diagnosticar isto.** As pernas `native` do fixpoint só ficam verdes quando o backend
+nativo construir o compilador. Enquanto o degrau 30 estiver aberto, este vermelho é a régua.
+
+**E é por isto que outros três gates caem em cascata, sem terem defeito próprio:**
+
+| Gate | Porque cai |
+|---|---|
+| `CI gate` | a âncora `artifact-linux-x86_64-glibc` é a perna do fixpoint nativo |
+| `Sanitizer gate` | o `mem-paranoid` consome a saída dessa mesma âncora |
+| `Test suite gate` | a âncora falha e o `test-linux-x86_64-glibc` fica `skipped` por condição |
+
+Ou seja: **1 causa → 5 jobs vermelhos.** Contar jobs sobre-conta causas; foi por isso que a vaga
+pareceu um colapso e não é.
+
+### CAUSA 2 — `own_native` falha em TODAS as pernas, e a lista de erros é uma **CAUDA**
+
+`test / linux-x86_64-musl`, `test / linux-arm64-glibc`, `test / macos-arm64`,
+`test / windows-x86_64`, `Memory paranoid` (musl e arm64-glibc) e `regressor / wasm`: todas dão
+`regressions 11 run, 0 skipped, 1 failed` (Windows dá 2, ver Causa 3) e a fila é sempre a mesma —
+`examples/regressions/own_native/own_native.tkr — own_arith_exit[0]: compile failed (exit 1)` com
+`unknown function: f_*`. Universal, não é gémeo divergente.
+
+**A ARMADILHA, e eu quase caí nela:** o harness imprime *"captured output **tail**"*. Os
+`unknown function` que aparecem no log são as linhas **81..120** do `main.tks` — exactamente as
+**últimas 40** chamadas. Isso PARECE uma fronteira posicional que deixa as 79 primeiras resolver, e
+não é: é a cauda a cortar as anteriores.
+
+A medição que desfaz a ilusão, e é um contra-exemplo, não uma opinião:
+
+| chamada em `main.tks` | definição em `src/corpus.tks` | na cauda desconhecida? |
+|---|---|---|
+| linha 90 `f_arm64_bigframe_locals` | **2909** | **SIM** |
+| linha 80 `f_div_signed_i32_value` | **2935** (DEPOIS) | não |
+
+Se a fronteira fosse a ordem de DEFINIÇÃO, a de 2909 resolvia e a de 2935 não. É o contrário. O que
+separa as duas é a ordem de **CHAMADA** — o que é exactamente o que uma cauda truncada produz, e é
+incompatível com "cap de N funções por ficheiro". Primeira hipótese passa a ser: **a árvore `src/` do
+fixture não está a ser carregada de todo** e por isso *todo* o `f_*` é desconhecido. Medição que
+decide: correr o build do fixture **sem o harness** e ver se o PRIMEIRO erro é a linha 2 (`f_arith`).
+Isto foi enviado ao agente que possui o assunto (`cargo/0.3.1-own-native-unknown-fn`).
+
+### CAUSA 3 — Windows tem DUAS falhas próprias, e uma delas é um teste que assere sobre o host
+
+O envelope de known-stop rebentou honestamente — é a guarda a funcionar:
+`known-stop: more than the pinned row failed (or none did) — this envelope must not cover a second`.
+
+1. **`pt_a_mingw_cc_is_convicted_by_its_path_without_any_probe`** (`src/build/project_test.tkt:1160`)
+   → `teko: deliberate panic: assertion failed: is_true`. A mensagem diz `is_true`, logo a linha 1165
+   (`is_false`) está excluída. Candidata: a **1164**,
+   `is_true(mingw_cc_evidence(HOST_CC_NAME, …) == "")` — porque o próprio doc-comment do teste diz
+   *"the Windows runner's `cc` resolves to `/c/mingw64/bin/cc`"* e a seguir assere que o cc deste host
+   **não** é MinGW. Em Windows as duas frases contradizem-se. `mingw_cc_evidence`
+   (`src/build/project.tks:1540`) convicta por caminho **ou** por triplo, e o triplo **executa** o
+   compilador — duas dependências do host dentro de uma linha que se lê como literal.
+   **É a terceira vez nesta lane** que uma asserção aparentemente literal chega a estado do host por
+   saltos. Lição de novo: *segue o callee, não leias o call site como literal.*
+2. **`regressor.tkr` → `alias_fat_field (own-native)[0]: exit -1073741819`** = `0xC0000005`,
+   ACCESS_VIOLATION, e *"the program wrote nothing to stdout or stderr"*. A MESMA fila passa em Linux
+   e macOS: **gémeo divergente**, e vale a regra do oráculo (é bug do nativo até prova em contrário).
+
+Ambas foram despachadas juntas para `cargo/0.3.1.0-windows-leg-2` — a perna Windows é **both-tier**,
+logo bloqueia o `Test suite gate` em qualquer modo, e é por isso que as duas andam no mesmo brief.
+
+### O QUE ISTO MUDA NA MINHA CONTABILIDADE
+
+Eu tinha registado `regressions 11 run, 0 skipped, 1 failed` como o estado medido do vagão, sem dizer
+que **essa 1 é o `own_native` e faz a perna cair**. Não é uma falha tolerada por envelope nenhum em
+Linux/macOS: é vermelho a sério, em todas as pernas, e é o item de maior valor da fila depois dos
+degraus. Fica corrigido aqui.
+
+## 0e. O `.exe` FECHADO — e o brief que eu escrevi estava incompleto (2026-07-30, `cff49b4`)
+
+Eu medi **dois** sítios que nomeavam o executável (`project.tks:1827` e `:2635`) e escrevi o brief sobre
+eles. **São NOVE.** O agente enumerou-os, e cinco dos sete que eu não vi **teriam ficado inlançáveis em
+Windows** pela mesma regra do loader: `run_native_gate`, `run_project`, `run_analyzer`,
+`run_one_test_cov`, `build_regression_cov_exe`. Consertar só os meus dois seria o defeito "um dos membros
+da família" — no brief onde eu próprio invoquei esse corolário.
+
+**A generalização que ele fez e eu não tinha visto:** a regra chaveia-se no **FORMATO DE IMAGEM**
+(`target_objfmt`), não no SO — *"`.exe` não é um hábito do Windows, é como um PE se nomeia para o loader
+o achar"*. Isso absorveu **de graça** um terceiro nome montado à mão, o `.wasm` de `emit_native_wasm`, e
+o próximo alvo que emita PE ou wasm herda o nome certo sem segunda decisão.
+
+**E apanhou o efeito de segunda ordem que eu não previ:** `tkr_run_one_row` fazia
+`check_object_wellformed(binp ~ ".o")` — com `.exe` isso pediria `bin/snippet.exe.o` e faria uma build
+**perfeita** reportar artefacto malformado. Resolvido com um `sibling_object_path` que **substitui** a
+extensão em vez de a concatenar.
+
+### CORRECÇÃO À MINHA FILA — `own_cross_x86_64_windows_emits_coff` NÃO é uma falha
+
+Eu listei-a como item da fila. **Não é:** a linha `own_arith_exit` é a primeira do canal, a feature pára
+na primeira falha, e **`own_cross_x86_64_windows_emits_coff` nunca é alcançada**. Não falha — **não
+corre**. Sai da fila; entra como consequência do §0d.
+
+**Isso torna o §0d mais sério do que o vermelho sugere:** um canal que reporta pela linha errada faz
+todo agente que o leia tirar a conclusão errada, e eu fi-lo duas vezes (atribuí à `A4-fp` do arm64 e à
+corrupção de ambiente de um agente). Despachado com mandato de **bissetar antes de consertar** e de
+**não tocar na cobertura** — o defeito é a composição do build, não as fixtures.
+
+### Um achado adjacente que fica registado, não corrigido
+
+`emitted-C identity: gen2.c != gen3.c` (10 719 554 vs 10 719 618 bytes) **com binários idênticos**, e
+presente **também na base**. A diferença medida é `double ceiling = 5;` contra `5.0` mais deslocamento de
+gensym: **gen1 (da semente) e gen2 (da árvore) diferem como GERADORES**, o que é a forma saudável sob
+esta cadeia. O veredito pinado — binário `gen2 == gen3` — passa. **Não é regressão**, e vale saber antes
+que alguém o descubra e assuste.
 
 ## 0d. `unknown function: f_*` É REAL NO CI — e eu descartei o relato do agente (2026-07-30)
 
