@@ -19,6 +19,59 @@ hipótese, está dito.
 
 
 
+## 0s. O `exit 25` NÃO ERA DE arm64 — era uso-depois-do-retorno em TODA a arquitectura (2026-07-30)
+
+`cargo/0.3.1.0-agregado-copia-arm64` @ `080c320` drenado. Conferências: `fn` do `lower.tks` **559 → 571**, `corpus.tks` **246 → 246** (intocado), guarda nova com 14 `fn` e **nenhuma órfã**, zero splices, 138 chamadas `f_*` todas definidas.
+
+### A PROVA É ASM, e desmente a hipótese com que eu o despachei
+
+Eu despachei isto como *"gémeo divergente por ARQUITECTURA"*. **É mais grave:** é um defeito de **todas** as arquitecturas que só o arm64 expõe. O asm da base, `BoxCounter::make` cruzado para `arm64-linux`, **sem uma única relocação**:
+
+```
+mov  x2, sp        <- o alloca do BoxCounter
+str  x1, [x0]
+mov  x0, x2        <- DEVOLVE o endereco da fenda de quadro
+add  sp, sp, #0x20 <- e larga-a
+ret
+```
+
+O chamador faz `bl make` e depois `bl tk_slice_elem_box`, cujo prólogo ocupa exactamente `caller_sp-0x20`. **Uso-depois-do-retorno.** Em x86-64 os bytes **calham** sobreviver; em arm64 o `stp x29, x30, [sp, #-N]` cai em cima.
+
+**E ele tornou-o determinista em x86_64**, com uma chamada interveniente: `let p = mk_pt(5); clob(1); p.a` → lixo na rota nativa, `5` na rota C. Sem host arm64 (não há `qemu-aarch64`, nem binutils cruzados, nem `gcc` arm64), esta foi a prova — e vale mais que o número da verificação, que ele **não** conseguiu ler e **disse** que não conseguiu.
+
+### A FAMÍLIA: 24 construções sondadas, **17 partidas**
+
+| grupo | nº | exemplos |
+|---|---|---|
+| **tempo de vida** (endereço de quadro morto a escapar) | 7 | `return` de literal, fábrica estática, método de instância, `if`-valor em cauda, `match`-valor em cauda, lambda, dentro de ciclo |
+| **aliasing** (falta de cópia) | 5 | `let u = t`, `u = t`, argumento religado a `mut`, campo aninhado, campo de literal |
+| **achadas pela GUARDA, que nenhuma sonda cobria** | 2 | **fecho devolvido** (env *e* valor no quadro), **literal de vector VAZIO** (o atalho *"0 = não copia"* devolvia o `alloca`) |
+
+E cinco que já passavam **continuam a passar, medidas e não presumidas** (`T|error`, `T|null`, leitura de elemento, push de literal, `takes(mk(...))`).
+
+**A que NÃO pode copiar, e é a fila de inversão:** posição de **ARGUMENTO**. A rota C passa parâmetro agregado por ponteiro, logo `self.seen = …` tem de chegar ao chamador nas duas rotas. **Uma regra de cópia que alcançasse os argumentos passava as outras 23 e quebrava esta.**
+
+### É A MESMA RAIZ DO DEGRAU 31 — e fecha as duas
+
+Uma só operação em falta (*"um agregado por valor nunca era copiado numa fronteira de valor"*), dois sintomas. A forma exacta que o agente do degrau 31 mediu e não consertou (`Nest { p = t }; t.a = 99` → `h.p.a` dava 99) é agora a fila `struct_field_from_a_named_local_copies`, e passa.
+
+### A GUARDA, e a inversão que a prova viva
+
+`src/lir/frame_escape.tks`: invariante sobre o módulo inteiro — **nenhum `LRet` leva um VReg que seja o endereço de um `alloca` da mesma função** —, com ponto fixo através dos argumentos de salto, logo não é cega a merges.
+
+**Inversão: 41 funções infractoras sem o conserto, 0 com ele.** E **não é a repetição do conserto**: corrida sobre a árvore que **já** tinha o conserto, achou as duas fugas que nenhuma sonda cobria. É o padrão que hoje já se provou três vezes.
+
+### RITUAL
+
+`native_dry_gate` **idêntica nos dois lados** (`builtin one_byte …`, degrau 32) → VERDE; **fixpoint `gen2 == gen3` byte a byte E `gen2.c == gen3.c`**; `teko test .` na gen2 **1167 unitários, 0 falhados** (com âncora no `ok` dava 1160 — a armadilha outra vez), regressões **11 corridas, 0 falhadas**; `TEKO_MEM_PARANOID=1` rc=0 e corpus `exit 42` sob paranóia; auditoria de `//` **vazia**.
+
+### DUAS COISAS QUE ELE REPORTOU E VALEM MAIS QUE O CONSERTO
+
+1. **O `main.tks` guarda SÓ A PRIMEIRA falha** (`if bad == 0 { bad = N }`). Portanto **qualquer perna que reporte `exit N` está a esconder tudo o que falhe depois de N** — foi por isso que a fuga do fecho `rd_tick_fn` nunca apareceu em fila nenhuma. **Isto liga-se à outra frente:** a migração para `scenario(...)` (branch `testes-paralelos-canais`) troca a cadeia de `exit` por uma linha por cenário — ou seja, **também remove esta máscara**. As duas obras encaixam.
+2. **O custo de alocação NÃO foi medido**, e ele di-lo: cada `return` de agregado, cada campo de contentor e cada fecho passam a alocar na arena raiz, **que nunca liberta**. No corpus é invisível; **num self-host nativo pode não ser**. O esquema correcto e barato tem nome — **`sret`**, a fenda de retorno dada pelo chamador — e é **mudança de ABI e decisão de produto**, que ele não puxou. **Fica para o dono.**
+
+**Também por medir:** nada correu em arm64 (só o CI pode dar isso); a guarda não passou sobre o fonte do compilador, porque o rebaixamento pára antes, no degrau 32.
+
 ## 0r. TRÊS PERNAS VERDES — a primeira vez neste arco (2026-07-30, `99a859a`)
 
 Log integral da execução `30545507942`. **O degrau 29 pegou no CI: `A4-fp: float-op` tem ZERO ocorrências** em todo o log, e as guardas de objecto passaram — **zero `check_coff: FAIL`, zero `check_elf: FAIL`** (o `llvm` + `lld` fecharam-nas).
