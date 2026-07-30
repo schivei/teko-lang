@@ -460,6 +460,28 @@ const CG_TABLE_MIN_CAP: u64 = 16
 const CG_TABLE_LOAD_NUMERATOR: u64 = 2
 
 /**
+ * CG_MAIN_RETURN_OPEN — the C text that OPENS the virtual-main `return` carrying a process exit
+ * code (the C route's own exit-code door). It wraps the historical `(int)` cast in the runtime
+ * normalizer `tk_exit_status` (`TK_EXIT_STATUS_MASK`, `src/runtime/teko_rt.h`), so a `main` that
+ * returns 20203 leaves the process with 235 on EVERY platform instead of 235 on POSIX and 20203
+ * on Windows (owner ruling 2026-07-30). The libc `main`-to-`exit` handoff is the reason the mask
+ * cannot live in `tk_exit` alone: a `return` never calls it.
+ *
+ * @since cargo/0.3.1-saida-equalizada
+ */
+const CG_MAIN_RETURN_OPEN: str = "return tk_exit_status((int)("
+
+/**
+ * CG_MAIN_RETURN_CLOSE — the C text that CLOSES `CG_MAIN_RETURN_OPEN`: one paren for the `(int)`
+ * cast's operand group, one for the `tk_exit_status` call, then the statement terminator. Paired
+ * with the opener in a named const so the two never drift apart across the emission sites that
+ * use them (`emit_exprstmt_tail`'s W5a tail value and `emit_return`'s explicit `return n`).
+ *
+ * @since cargo/0.3.1-saida-equalizada
+ */
+const CG_MAIN_RETURN_CLOSE: str = "));\n"
+
+/**
  * CgNameTable — an open-addressed, linear-probed `str` -> item-index table: the DERIVED lookup
  * acceleration behind `cg_find_decl` / `cg_find_decl_exact` / `cg_find_function`.
  *
@@ -7759,12 +7781,6 @@ fn emit_lambda(buf: []byte, prog: CgProg, e: checker::TExpr, lam: checker::TLamb
     cb(out, ", (void*)_tke }; })")
 }
 
-// ---------------------------------------------------------------------------
-// Statements -> C. `in_main` selects the return lowering:
-//   * in main : `return n` -> `return (int)(n);`  (early process exit)
-//   * in a fn : `return n` -> `return n;`
-// ---------------------------------------------------------------------------
-
 // ── S2 — PER-BLOCK arena regions (codegen twin of codegen.c). Each scope-introducing LOOP body
 // opens its OWN region `_tkbr<len>` for its provably-block-local allocations, dropped at every exit
 // edge. `RegionFrame` is one active loop-body region on the stack (innermost LAST); `label` ties it
@@ -8077,9 +8093,9 @@ fn emit_exprstmt_tail(buf: []byte, x: checker::TExpr, in_main: bool, prog: CgPro
             if frame.len > 0 && !in_main { out = cb(out, indent); out = cb(out, "tk_region_drop("); out = cb(out, frame); out = cb(out, ");\n") }
             out = cb(out, indent)
             if in_main {
-                out = cb(out, "return (int)(")
+                out = cb(out, CG_MAIN_RETURN_OPEN)
                 out = match emit_expr_ctx(out, prog, checker::Void { }, x, escaping, teko::list::empty(), fn_body, dctx) { []byte as o => o; error as err => return err }
-                return cb(out, ");\n")
+                return cb(out, CG_MAIN_RETURN_CLOSE)
             }
             out = cb(out, "return ")
             out = match emit_as_r(out, prog, ret_type, ret_type, x, escaping, teko::list::empty(), fn_body, dctx) { []byte as o => o; error as err => return err }   // W5b — wrap a case value into a variant return slot (ret_type threaded for diverging arms)
@@ -8457,9 +8473,32 @@ fn emit_assign(buf: []byte, prog: CgProg, ret_type: checker::Type, a: checker::T
     cb(out, ";\n")
 }
 
-// emit_return — a TReturn. In main, `return n` -> `return (int)(n);` (early process
-// exit) and a bare `return` -> `return 0;`; in a fn, the plain `return [v];`.
-// (C: TK_TSTMT_RETURN branch.)
+/**
+ * emit_return — a `TReturn` statement, lowered to C. `in_main` selects the return shape, which is
+ * the whole reason this function takes the flag: inside the virtual-main a `return n` is an EARLY
+ * PROCESS EXIT, so it emits `CG_MAIN_RETURN_OPEN`/`CG_MAIN_RETURN_CLOSE` (the `tk_exit_status`-
+ * normalized exit code — one code on every platform, owner ruling 2026-07-30) and a bare `return`
+ * emits `return 0;`; inside an ordinary function it is the plain `return [v];`, with a case value
+ * wrapped into its variant return slot (W5b). Every exit edge first fires the in-scope defers
+ * (LIFO, innermost block first), then runs the class destruction hook, then drops the block
+ * regions innermost-first and finally the frame region.
+ *
+ * @param buf        the output byte buffer to append the emitted C to
+ * @param prog       the whole typed program
+ * @param r          the typed `return` node (whether it carries a value, and the value)
+ * @param in_main    whether this `return` sits in the virtual-main (an exit code) or in a function
+ * @param ret_type   the enclosing function's declared return type (the variant return slot)
+ * @param indent     the current indentation string
+ * @param frame      the enclosing region-frame expression, or `""` when the function opened none
+ * @param escaping   the names whose values escape the current frame
+ * @param regions    the active block-region stack, innermost last
+ * @param fn_body    the enclosing function's body, for the block-local escape query
+ * @param dctx       the defer context whose pending defers this edge must fire
+ * @return           the buffer with the `return` (and its cleanup prologue) appended
+ * @throws           when a defer body, the class-cleanup text or the returned expression fails to
+ *                   emit
+ * @see              CG_MAIN_RETURN_OPEN
+ */
 fn emit_return(buf: []byte, prog: CgProg, r: checker::TReturn, in_main: bool, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
     // (W9.3) A `return` leaves EVERY enclosing scope: fire ALL in-scope defers (base 0) LIFO — one
     // sweep, innermost-block-first across all nesting — BEFORE dropping any region, so a defer body can
@@ -8489,9 +8528,9 @@ fn emit_return(buf: []byte, prog: CgProg, r: checker::TReturn, in_main: bool, re
         return cb(out, "return;\n")
     }
     if in_main {
-        out = cb(out, "return (int)(")
+        out = cb(out, CG_MAIN_RETURN_OPEN)
         out = match emit_expr_ctx(out, prog, checker::Void { }, r.value, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
-        return cb(out, ");\n")
+        return cb(out, CG_MAIN_RETURN_CLOSE)
     }
     out = cb(out, "return ")
     // W5b — wrap a case value into a variant return slot.
@@ -11655,8 +11694,8 @@ fn emit_mode_main(buf: []byte, prog: CgProg, mode: CgMode) -> []byte | error {
  * emit_program_main — the VIRTUAL-MAIN: the loose top-level statements, in order, become the body
  * of C `main()`; falling off the end -> `return 0;` (default exit 0). W5a — the LAST loose
  * statement, if it is a value-carrying expr-statement, becomes the process exit code via
- * `return (int)(…)`. Delegates to `emit_program_main_body(buf, prog, false)` — BYTE-IDENTICAL to
- * the historical emission (extracted, #265); the fixpoint compares THIS output.
+ * `return tk_exit_status((int)(…));` (`CG_MAIN_RETURN_OPEN` — the platform-uniform exit code).
+ * Delegates to `emit_program_main_body(buf, prog, false)`; the fixpoint compares THIS output.
  *
  * @param buf   the output byte buffer to append the emitted C to
  * @param prog  the checked program whose loose top-level statements form the virtual-main body
@@ -11672,7 +11711,7 @@ fn emit_program_main(buf: []byte, prog: CgProg) -> []byte | error {
  * bracket (0.3.1 C-cov): a static `atexit`-registered dump helper, and the sink reset/enable calls
  * right after `tk_set_args`. `atexit` (rather than an explicit trailing call) is what makes this
  * correct regardless of HOW the virtual-main exits — a fall-through `return 0`, the W5a tail-expr
- * `return (int)(…)`, or an `exit(n)`/`tk_exit(n)` call — every one of those already runs the libc
+ * `return tk_exit_status((int)(…));`, or an `exit(n)`/`tk_exit(n)` call — each already runs the libc
  * `atexit` queue (only `abort`/`tk_panic*` skip it, mirroring the region-cleanup hook's own note in
  * `teko_rt.c`). Used ONLY to build the regression tier's coverage-feeding compiler
  * (`build_regression_cov_exe`, `src/build/project.tks`) — never the release binary, so the
