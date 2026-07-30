@@ -2238,3 +2238,160 @@ arena**, e so se torna respondivel **depois** do C-A, porque e o C-A que cria as
 **Nada.** Os 11 crumbs ficam como estao — o fan-in ja era MPSC (§18.3), e a fronteira do dono
 confirma-o em vez de o alterar. A unica adicao e dentro do C1: o `Tx`/`Rx` separados e o painel de
 segundo-leitor, que sao ~15 linhas do `tk_chan` que aquele crumb ja constroi.
+
+---
+
+## 19. O canal e um HANDLE, nao um valor — e o `ref` de hoje nao o afecta
+
+### 19.1 O modelo de posse do dono, e porque resolve mais do que parece
+
+> *"Abriu um canal? Tem que retornar a ref do canal... a main abre o canal e passa para a thread do
+> orquestrador um id pra ele buscar a ref do canal somente leitura e para os handlers passa o id pra
+> eles buscarem a ref de escrita."*
+
+**Concordo, e a razao e mais forte do que a conveniencia: o que atravessa a fronteira de tarefa passa
+a ser um `u64`, e um `u64` nao e um ponteiro — e um NOME.** Depois do C-A (§17) cada tarefa tem a sua
+raiz, e um ponteiro para a arena de outra tarefa pendura no instante em que ela rebobina. **Um nome
+nao pendura.** O modelo do dono nao contorna a fronteira de arena: nao a atravessa.
+
+O `Tx`/`Rx` da §18 nao desaparece — muda de estatuto. Deixa de ser um valor transportado e passa a ser
+**que ref o id devolve**: `get_channel_writer(id)` para os handlers, `get_channel_reader(id)` para o
+orquestrador. A separacao dos dois extremos (a lei MPSC de §18) e agora imposta pelo **acessor que se
+chama**, o que e mais forte do que impo-la pelo valor que se transporta.
+
+E o canal e singleton **por definicao**: um so registo, na arena do programa, com a `main` como dona.
+
+### 19.2 A pergunta do reticulado de DI — medida, e a resposta tem duas metades
+
+**Primeiro uma correccao de facto.** `di_singleton_holds_scoped_rejected` **nao existe no corpus**.
+Procurei-o na arvore inteira: aparece em `docs/design/safety-spine.md:493` e em
+`docs/design/wave-0.3.1-plan.md:332` — e este ultimo di-lo como **planeado**
+(*"→ EXPECT_COMPILE_FAIL"*). E `src/checker/di.tks` (383 linhas) **nao tem verificacao de
+profundidade**: `depth`, `cross-lifetime` e `monoton` nao ocorrem la. **O reticulado
+`singleton=0 ≤ scoped=1 ≤ transient=2` esta ESPECIFICADO, nao construido** — a mesma forma que a
+espinha de §18.2.
+
+**Agora a resposta, sobre o reticulado tal como esta especificado: a raiz por tarefa NAO cabe numa
+profundidade existente, e tambem NAO e uma profundidade nova. E um EIXO novo.**
+
+O reticulado ordena **quanto tempo** um valor vive: `singleton` no exterior, `transient` no interior.
+Duas raizes de tarefa nao se ordenam assim — sao **irmas**. Ambas estao a profundidade 0 na sua
+propria cadeia e nenhuma contem a outra. O reticulado e uma cadeia; as raizes por tarefa fazem dele
+uma **floresta**. A consequencia e exacta: o teste `d_holder >= d_provider` deixa de bastar, e passa a
+precisar de `mesma_tarefa(holder, provider) && d_holder >= d_provider` — porque **segurar entre
+tarefas e inseguro em TODA a profundidade**, inclusive 0 com 0.
+
+**E e por isso que a pergunta que estava aberta ao dono fecha-se — mas nao por caber:** fecha-se
+porque o modelo de handle **elimina o caso**. Nao ha `Ref` entre tarefas para classificar, porque o
+que atravessa e um `u64`. O canal e um `#singleton` de processo e as tarefas alcancam-no por NOME.
+
+**Fica REPORTADO, nao decidido por mim:** qualquer OUTRO `#singleton` que uma tarefa resolva e segure
+por `Ref` continua a ser a pergunta aberta que o S8 ja tinha reportado. O modelo de handle fecha-a
+para o canal; nao a fecha para a DI em geral.
+
+### 19.3 A medicao do `ref` — e a resposta e a primeira: handle pequeno que consulta sempre
+
+A medicao do integrador e o cerne: `ref x = <expr>` **compila e e uma COPIA**, nas duas rotas, sem um
+unico diagnostico. Se a condicao de paragem lesse estado guardado dentro do handle, o `defer` da
+`main` fecharia o canal e **o laco nao terminava**.
+
+**Resposta directa: e a primeira. O handle e pequeno, copiavel, e NAO GUARDA NADA.** Ja era a forma da
+§18 (`Rx = struct { raw: i64 }`), mas era um acaso — **passa a ser requisito**:
+
+> **REQUISITO DO HANDLE DE CANAL: ele carrega o id e mais nada. Zero observaveis em cache. Todo o
+> predicado e uma CHAMADA que consulta o registo pelo id.**
+>
+> Sob este requisito, uma copia do handle e inofensiva **por construcao**: copiar um nome nao envelhece
+> o nome. O desenho nao depende de `ref` ser um alias verdadeiro — e nao depende de `ref` de todo.
+
+E a forma que eu proponho para o laco vai um passo mais longe, e elimina o handle da condicao:
+
+```teko
+/**
+ * orchestrate — o consumidor: le e apenda enquanto o canal estiver aberto.
+ *
+ * A CONDICAO LE O `id`, NUNCA UM HANDLE. Medido nesta arvore: `ref x = <expr>` compila e produz uma
+ * COPIA, sem diagnostico, nas duas rotas. Um laco condicionado num campo de um handle copiado leria
+ * um retrato congelado e nunca terminaria. Um `u64` nao tem esse problema porque nao guarda estado:
+ * a pergunta vai ao registo, todas as voltas.
+ *
+ * @param c  o id do canal que a `main` abriu e de que e dona
+ * @return   quantos registos foram apendados
+ */
+fn orchestrate(c: u64) -> u64 {
+    mut n: u64 = 0
+    loop teko::threads::chan_is_open(c) {
+        match teko::threads::chan_recv(c) {
+            ChanMsg as m => { n = n + 1; append_to_segment(m) }
+            closed => break
+        }
+    }
+    n
+}
+```
+
+`loop <cond> { }` **existe e compila** (medido pelo integrador com a semente `0.3.0.31-beta`), logo a
+forma do esboco do dono e real. **Nao ha crumb novo**: isto e uma restricao sobre a superficie que o
+C1 ja constroi.
+
+**E o fecho tem uma ordem, dita para nao ser descoberta em producao:** o `closed` do `recv` (contagem
+de produtores a zero, §16.5) e a terminacao NORMAL; o `defer` da `main` a fechar o canal e o
+**backstop** para o caso de o orquestrador ter de ser mandado parar antes disso. Os dois existem e nao
+sao alternativos.
+
+### 19.4 A guarda, e ela e a medicao do integrador transformada em regressao permanente
+
+```teko
+#test
+/**
+ * hc_a_copied_handle_still_sees_the_close — o `exit 1` medido, virado do avesso: uma COPIA do handle
+ * tem de ver o fecho feito por outro caminho.
+ *
+ * E este teste que torna o requisito de §19.3 verificavel em vez de prometido.
+ *
+ * @throws quando a copia continua a dizer "aberto" depois de o canal fechar
+ */
+fn hc_a_copied_handle_still_sees_the_close() {
+    let c = hc_open()
+    let copy = teko::threads::get_channel_reader(c)
+    hc_close(c)
+    teko::assert::is_false(hc_reader_is_open(copy))
+}
+
+#test
+/**
+ * hc_a_caching_handle_fails_this — A INVERSAO, e e a medicao do integrador posta no corpus para
+ * sempre: um handle que GUARDE o estado nao ve o fecho.
+ *
+ * Sem este braco a guarda acima diz apenas "nao vi problema", que e o que uma guarda cega tambem diz.
+ *
+ * @throws quando o handle com cache VE o fecho — o que significaria que esta prova nao prova nada
+ */
+fn hc_a_caching_handle_fails_this() {
+    let c = hc_open()
+    let stale = hc_caching_reader_of(c)
+    hc_close(c)
+    teko::assert::is_true(hc_cached_open_flag(stale))
+}
+
+#test
+/**
+ * hc_the_guard_is_not_vacuous — vivacidade: antes do fecho, o handle copiado tem de dizer ABERTO.
+ * Um `is_open` que respondesse sempre false passaria os dois testes acima.
+ */
+fn hc_the_guard_is_not_vacuous() {
+    let c = hc_open()
+    teko::assert::is_true(hc_reader_is_open(teko::threads::get_channel_reader(c)))
+}
+```
+
+### 19.5 O que NAO medi
+
+1. **Nao corri a semente eu proprio.** As seis linhas da tabela do `ref` sao medicao do integrador, com
+   controlo e as duas rotas a concordarem; aceito-as como facto e nao as re-derivo, mas nao sao minhas.
+2. **`ref mut` / write-through nao existem** (medido por ele). O meu desenho **nao precisa deles** — e
+   e por isso que §19.3 tira o handle da condicao em vez de pedir a capacidade. Se um dia alguem
+   quiser o `ch.is_open()` do esboco literal, aí precisa de alias verdadeiro, e **isso** seria um crumb
+   novo. Com o `u64` na condicao, nao e.
+3. **O reticulado de DI nao esta construido** (§19.2), logo a analise de eixo que fiz e sobre a
+   especificacao. Quando ele for construido, a linha `mesma_tarefa(...)` tem de entrar com ele.
