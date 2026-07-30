@@ -2090,3 +2090,47 @@ preciso um log, e é precisamente o que não existe.
 **O que isto acrescenta ao instrumento:** o `BlobNotFound` é um sinal útil e não um erro meu. Log
 ausente + passo `in_progress` + job `completed` = **hospedeiro**, e distingue-se de um defeito sem
 gastar uma única leitura de conteúdo. Fica na caixa de ferramentas ao lado do `exit 143`.
+
+## 0z · O casador não estava avariado — o compilador de padrões andava a bytes
+
+O defeito da perna `test / linux-arm64-glibc` não era nenhuma das minhas quatro hipóteses (buffer
+casado ≠ buffer impresso, em-dash transformado no caminho, corrida na captura, normalização do
+`.tkr`). Era uma quinta, e está uma camada abaixo de tudo isso:
+
+> **`teko::regex::compile` percorria o padrão BYTE A BYTE, não por codepoint.**
+
+O padrão declarado traz `—` (U+2014, **3 bytes** em UTF-8: `E2 80 94`). O compilador de padrões
+fazia **três nós `RChar` de um byte cada**, e um byte de continuação isolado não é UTF-8 válido —
+nenhum dos três volta a descodificar para U+2014. Do outro lado, o `is_match` descodifica o **sujeito**
+correctamente por `chars()`, em codepoints reais. **Três pseudo-codepoints malformados nunca consomem
+um codepoint real.** Logo o padrão não podia ser encontrado — não "às vezes": **sempre**, em qualquer
+plataforma, para qualquer padrão com um carácter não-ASCII.
+
+**A inversão:** dois `#test` novos que afirmam exactamente o par padrão/texto do CI. Sobre a árvore
+sem o fixo, **os dois FALHAM**; com o fixo, **os dois passam**, e a suíte inteira fica em **1131
+testes, 0 falhados**. Reproduzido localmente em x86_64 — o que por si já desmente as hipóteses de
+corrida e de truncamento, que exigiriam a plataforma.
+
+### O alcance, medido antes de eu o contar
+
+| | n |
+|---|---|
+| padrões declarados no corpus `.tkr` | **275** |
+| com byte não-ASCII | **21** |
+| destes, `Then diagnostic` — **não afectados** | **17** |
+| destes, `stderr pattern` — **afectados** | **4**, todos em `own_native.tkr` |
+
+O `Then diagnostic` compara por **substring** (`teko::str::contains`, `regression.tks:1780`), não por
+regex — por isso os 17 estavam verdes e continuam. O `pattern` é que entra em
+`TkrMatchMode::Pattern` (`tkr.tks:1113`) e daí no compilador de padrões. **Medi, não inferi**: a
+diferença entre "21 linhas partidas" e "4" era exactamente esta, e eu ia a caminho de dizer 21.
+
+Fora do arnês, **zero** chamadas a `teko::regex` com literal não-ASCII — só três ficheiros usam a
+biblioteca. Não há varrimento a fazer, e poupei um despacho por ter medido primeiro.
+
+### O que este defeito ensina, e é maior do que ele
+
+**Consertar as 4 fixtures trocando o `—` por `-` teria funcionado e teria sido errado.** Escondia um
+defeito de BIBLIOTECA — `teko::regex` é linguagem, não arnês — que morderia o primeiro utilizador a
+escrever um padrão com acento. O agente foi à raiz e não ao sintoma, e é a diferença entre a perna
+ficar verde e o compilador ficar certo.
