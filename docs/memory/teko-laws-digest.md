@@ -1442,3 +1442,22 @@ como teste, e continua a sair como sai. Capturar ali seria apagar o observável 
 medir.
 
 **Prazo, palavra dele:** *"Quanto ao 'quando', imediatamente, a dor é latente."*
+
+## `chan<T>` é MPSC — o fan-out é OUTRA estrutura (dono, 2026-07-30)
+
+> *"chan<T> é fan-in, vários escritores, um leitor. Para ter um fan-out 'N:M', teria que ser outro
+> tipo de estrutura, que até pode operar sobre um 'chan<T>' mas que precisaria de uma segunda
+> estrutura capaz de broadcasting e múltiplas cópias."*
+
+A fronteira, escrita para não se dissolver:
+
+- **`chan<T>` = N escritores, UM leitor.** É exactamente a forma que o fan-in dos handlers de
+  processo precisa: cada processo escreve, o orquestrador é o único que lê e apenda.
+- **N:M não é uma opção do `chan<T>`** — é uma estrutura à parte, que *pode assentar sobre* um canal
+  mas exige **broadcasting** e **múltiplas cópias**.
+- A consequência que ninguém pode esquecer: com **região raiz por tarefa**, uma cópia difundida
+  **atravessa fronteiras de arena**. Quem é dono do valor difundido e quando morre são perguntas por
+  responder, e é dívida NOMEADA, não resolvida.
+- Corolário do estilo da casa: a garantia do único leitor tem de ser **imposta**, não convencionada.
+  Uma garantia que não pode falhar nem em compilação nem em execução é decoração — apanhámos três
+  dessas nesta lane.
