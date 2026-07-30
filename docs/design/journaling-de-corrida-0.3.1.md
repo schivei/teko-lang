@@ -2395,3 +2395,176 @@ fn hc_the_guard_is_not_vacuous() {
    novo. Com o `u64` na condicao, nao e.
 3. **O reticulado de DI nao esta construido** (§19.2), logo a analise de eixo que fiz e sobre a
    especificacao. Quando ele for construido, a linha `mesma_tarefa(...)` tem de entrar com ele.
+
+---
+
+## 20. A FUNDACAO — o que mais precisa haver, e o que as medicoes mudaram
+
+Verifiquei na arvore os dois achados que mais pesavam, porque um deles podia obrigar-me a reescrever:
+
+* **`lower.tks`, `lower_item_function`: `if f.is_test { return ... }`** — o corpo de um `#test` **nunca
+  chega ao LIR**, logo nunca chega ao backend proprio. E `project.tks` emite o portao por
+  `codegen::tk_emit_c_test` (`:3440`, `:4496`, `:4697`). **Confirmado: o arnes e os corpos de teste sao
+  C, nas duas rotas.**
+* **`cabi` nao e token deste lexer** (zero acertos em `src/lexer/` e `src/parser/`). **Confirmado: a
+  superficie que escrevi em §14.3 nao e escrevivel.**
+
+Nenhum dos dois me obriga a reescrever. **Os dois encolhem o C0** (§20.2).
+
+### 20.1 O que mais precisa haver na fundacao — lista ORDENADA
+
+Cada item: **o que e** · **porque e pre-requisito** (nao "seria bom") · **como se prova que ficou
+feito**. Um item so entra aqui se algo dos 11 crumbs ficar **incorrecto** sem ele.
+
+---
+
+**F1 · `tk_task` e `tk_task_current()` — a arena por tarefa** *(= o crumb C-A, §17)*
+
+*O que:* as 12 familias de variavel de §17.1 colapsam numa struct por tarefa; `tk_g_region_gen` fica
+global e atomica; um acessor com duas encarnacoes (`_Thread_local` em C, `pthread_getspecific`/
+`TlsGetValue` por `extern fn` no nativo).
+
+*Porque e pre-requisito:* todo o resto aloca. Sem isto, o `pop` de uma tarefa liberta o que outra usa
+— e o proprio `teko_rt.c:1150` ja o diz por escrito: *"single-threaded seed (S8 revisit)"*.
+
+*Prova:* duas tarefas com canarias; a rebobinagem de uma nao toca a outra · **vivacidade**: as duas
+raizes tem de ser DIFERENTES e as geracoes distintas · **reversao**: a mesma canaria sobre raiz
+partilhada tem de ser destruida.
+
+---
+
+**F2 · A REGIAO DO PROGRAMA, separada das raizes de tarefa** *(novo — sai de F1)*
+
+*O que:* uma regiao processo-inteira, imortal, distinta de qualquer raiz de tarefa. Hoje `tk_g_root`
+faz os dois papeis ao mesmo tempo; o F1 parte-o e **a metade partilhada tem de passar a existir com
+nome proprio**.
+
+*Porque e pre-requisito:* a anotacao 2 do dono diz *"todo canal reside na arena do programa ou na
+spine — e singleton"*. Depois do F1 **nao ha "arena do programa"** — ha N raizes de tarefa e mais
+nada. Um canal alojado numa delas morre quando essa tarefa sai. **Este item e o que impede o canal de
+nascer no sitio errado**, e nao existia em nenhum dos 11 crumbs porque so aparece quando o F1 parte a
+raiz.
+
+*Prova:* um valor alocado na regiao do programa sobrevive ao `tk_arena_pop` **e** a saida da tarefa que
+o alocou · **reversao**: o mesmo valor numa raiz de tarefa nao sobrevive.
+
+---
+
+**F3 · O registo de nomes no runtime: `u64` → recurso, atras de `extern fn`**
+
+*O que:* uma tabela processo-inteira que resolve um id para o recurso, com `open` a devolver o id e
+`lookup` a validar.
+
+*Porque e pre-requisito:* **medido, e por duas vias independentes** — nao ha estado mutavel ao nivel do
+modulo (`mut REG = ...` fora de funcao da *"expected a declaration"*), e `check_ref_return_passdown` so
+admite devolver um dos proprios parametros `ref`, com a nota de que *"a stored field cannot escape
+until the transitive-escape spine lands"*. **Nao ha onde por o registo em Teko hoje.** Ele tem de
+viver no runtime.
+
+*Prova:* dois `open` devolvem ids diferentes · um id obsoleto devolve **erro**, nunca comportamento
+indefinido · um handle COPIADO ve o fecho (§19.4, com o braco de reversao do handle que guarda estado).
+
+---
+
+**F4 · `tk_chan` MPSC: `Tx`/`Rx` por acessor, contagem de produtores, painel de segundo-leitor**
+
+*Porque e pre-requisito:* e o sumidouro que o fan-in escreve e o orquestrador le. A lei MPSC do dono
+so e imponivel se o segundo leitor **falhar**, e hoje o verificador nao o pode fazer (§18.2, medido: o
+reticulado da espinha existe e **nao e consultado em lado nenhum**).
+
+*Prova:* §18.2 — um segundo `recv` de outra tarefa panica com a fronteira nomeada · vivacidade: com um
+leitor, os registos dos dois escritores chegam.
+
+---
+
+**F5 · `pipe` + o handler de dreno**
+
+*Porque e pre-requisito:* `fork` e `dup2` existem; **`pipe` nao existe em lado nenhum do runtime**
+(medido, §15.2). Sem ele o tunel continua a ser ficheiros e o par `.out`/`.err` nao desaparece.
+
+*Prova:* §15.5 e §16.6 — um filho que escreve 200 000 bytes e drenado inteiro · **as duas inversoes
+com PRAZO**: esperar antes de drenar tem de atingir o prazo, e o consumidor que bloqueia a meio do
+laco tambem.
+
+---
+
+**F6 · A captura em modo teste** *(= C0, §14)* — **pode ir a frente de tudo, e agora custa menos**
+
+*Porque e pre-requisito:* sem ela o `panic` mata a shard, leva os que faltavam e salta o despejo de
+cobertura — e todo o §13 vira reconstrucao do que a morte levou.
+
+*Prova:* um `#test` que chama `exit(7)` e reportado como tal **e o `#test` seguinte corre** (a prova
+tem de ser um teste POSTERIOR e separado) · reversao: a mesma fonte em modo `Program` sai 7 a serio.
+
+---
+
+**NAO sao fundacao — nomeados para ninguem os ir procurar:**
+
+| peca | porque NAO e pre-requisito nosso |
+|---|---|
+| coercao de ponteiro-de-funcao no front-end + o token `cabi` | o arnes e **C emitido** (medido). `tk_test_run(&fn)` e uma chamada C escrita pelo emissor, nao por Teko. Isto e fundacao do `spawn` **geral**, nao da nossa |
+| `select_func_addr` / relocacao de simbolo | **ja existe nos dois backends** (medido) — nao era degrau nenhum |
+| ligar a espinha e o reticulado de DI | o painel de runtime do F4 cobre a lei MPSC hoje. Ligar a espinha e o **upgrade** de §18.2, e continua fora dos 11 crumbs |
+
+### 20.2 O que muda nos 11 crumbs
+
+**Nada cresce. O C0 encolhe duas vezes, e ambas por medicao.**
+
+1. **`cabi` nao existe ⇒ retiro a superficie Teko de §14.3.** `teko::test::run_capturing` e o
+   `cabi fn()` **saem do desenho**. Nao sao substituidos: **nao sao precisos**. O arnes e C emitido,
+   logo `tk_test_run(&<fn>)` e uma linha que `emit_test_call` escreve. E a prova tambem nao precisa
+   deles — o `#test` que prova a captura **chama `exit(7)` directamente**, e quem o captura e o arnes.
+2. **Os `#test` nao passam pelo backend proprio ⇒ o C0 nao toca no backend.** Toca em
+   `emit_test_call`/`emit_test_main` (`codegen.tks`) e em `teko_rt.{c,h}`. **Zero trabalho de
+   backend**, e a fronteira estrutural de §14.5 fica **mais** forte, nao menos: ha um emissor so.
+3. **A rota de classe funcionar hoje** nao muda crumb nenhum — muda a escolha de §20.3, e la a
+   justificacao.
+
+**Total: 11 crumbs, e o C0 e menor do que quando o escrevi.**
+
+**O alarme que isto cria, e posso prova-lo:** a captura passa a estar provada **na rota C apenas**,
+porque e a unica por onde um corpo de teste passa (`lower.tks`, `lower_item_function`). No dia em que
+os corpos de teste baixarem para LIR, um `longjmp` que atravesse molduras nativas **tem de ser
+reprovado** — o backend proprio nunca viu um. Nao e um problema hoje; e uma linha que tem de viajar
+com o degrau que mudar aquele `if f.is_test { return ... }`.
+
+### 20.3 Classe ou handle `u64`? — **handle**, e o criterio nao e preferencia
+
+Fico com **uma**, como pedido: **handle `u64` + acessor** (§19).
+
+**O criterio, e e uma propriedade e nao um gosto:** *um ponteiro obsoleto e comportamento indefinido;
+um id obsoleto e um erro verificavel.* Num desenho cujo assunto inteiro e sobreviver a morte abrupta e
+a concorrencia, o modo de falha que se pode **relatar** ganha ao que nao se pode.
+
+**E a vantagem da rota de classe — "funciona hoje, sem esperar pela espinha" — nao se aplica a ESTE
+objecto, e a razao sai do meu proprio F2.** *"Objecto e ponteiro"* esta medido e e verdade; mas o
+canal tem de viver na regiao do programa, e **depois do F1 essa regiao ainda nao existe** (e o F2 que
+a cria). Logo a rota de classe tambem nao esta pronta hoje para o canal — nao esta pronta por outro
+motivo, mais fundo, e que so aparece quando se olha para a arena por tarefa.
+
+**O que fica da rota de classe, porque a medicao do integrador nao se desperdica:** o **handle** pode
+ser uma classe. O estado vive no registo do runtime (F3); o handle carrega o id e mais nada
+(requisito de §19.3). Assim o aliasing medido — que e real — nao e preciso para a correccao, e o
+handle pode ganhar metodos (`c.close()`) por ergonomia sem que nada dependa disso.
+
+### 20.4 O que preciso do dono — e a resposta e "de nenhum lado"
+
+A escrita **directa** em campo de classe sob `let` esta com o dono e nao a decido.
+
+**O meu desenho nao depende dela, e digo de que lado precisaria se dependesse:** o handle **nao tem
+campos mutaveis** — carrega um id imutavel. Todo o efeito passa por chamada ao registo. Logo:
+
+* se o dono **proibir** a escrita directa: o desenho nao muda;
+* se o dono **permitir**: o desenho nao muda.
+
+E quando o handle for uma classe com metodos, a mutacao que ele usa e **por metodo** — exactamente a
+forma que a anotacao 6 do dono ja legitimou (*"quando o metodo de uma classe realiza mutacao na
+propria classe, e isso e desejado"*). **Nao encosto a decisao do dono a nenhuma parede.**
+
+**Duas coisas que ficam REPORTADAS e nao decididas por mim:**
+
+1. `ref p: T` como parametro **recusa escrita** (B.21, medido), e a lei 5 do dono diz que **`ref` e
+   mutavel por definicao**. As duas afirmacoes colidem. Nao e do meu desenho — ele nao usa `ref` —
+   mas e uma divergencia entre a lei e a arvore, e quem a resolver deve saber que existe.
+2. `ref r = c` sem anotacao **compila e copia, sem diagnostico** (medido). O meu desenho e imune por
+   construcao (§19.3), mas qualquer outro que use `ref` nao e.
