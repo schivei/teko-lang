@@ -3355,3 +3355,51 @@ fn lwt_fat_predicates_agree() {
     lwt_assert_fat_predicate_agrees(table, lwt_named_te("Point"), checker::Named { name = "Point" })
     lwt_assert_fat_predicate_agrees(table, parser::NamedType { path = lwt_path1("ptr"); args = teko::list::push(teko::list::empty(), lwt_named_te("i32")) }, checker::Ptr { inner = lwt_prim(checker::PrimKind::I32) })
 }
+
+#test
+/**
+ * lwt_fat_arg_arity_names_every_by_value_str_entry — the ABI-arity table
+ * (`fat_arg_builtin_arity`) answers 1 for the seven `(tk_str) -> void`/`_Noreturn`
+ * entries, 2 for the four whose first two parameters are by-value `tk_str`, and 0 for the
+ * family the RUNTIME declares flattened (`teko_rt.h`'s `(const tk_byte *ptr, uint64_t len, …)`
+ * shape) — the distinction the x86 isel turns into by-reference passing on Win64 and which is
+ * invisible on SysV, where both spellings are the same ABI.
+ *
+ * @return void
+ */
+fn lwt_fat_arg_arity_names_every_by_value_str_entry() {
+    teko::assert::is_true(fat_arg_builtin_arity("tk_println") == 1)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_print") == 1)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_eprint") == 1)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_eprintln") == 1)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_write") == 1)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_ewrite") == 1)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_panic_str") == 1)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_str_eq") == 2)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_str_contains") == 2)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_str_ends_with") == 2)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_rt_last_index_of_ok") == 2)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_str_concat_len") == 0)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_str_slice_len") == 0)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_str_of_bytes_len") == 0)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_slice_str_eq") == 0)
+    teko::assert::is_true(fat_arg_builtin_arity("tk_exit") == 0)
+}
+
+#test
+/**
+ * lwt_two_pair_entries_are_not_single_str_builtins — the dispatch guardrail: the four
+ * two-`tk_str` entries must NOT satisfy `is_str_arg_builtin`, whose truth routes a call into
+ * `lower_str_arg_call` (one argument, void result). A table that answered `true` for
+ * `tk_str_eq` would lower every string comparison as a one-argument void print.
+ *
+ * @return void
+ */
+fn lwt_two_pair_entries_are_not_single_str_builtins() {
+    teko::assert::is_false(is_str_arg_builtin("tk_str_eq"))
+    teko::assert::is_false(is_str_arg_builtin("tk_str_contains"))
+    teko::assert::is_false(is_str_arg_builtin("tk_str_ends_with"))
+    teko::assert::is_false(is_str_arg_builtin("tk_rt_last_index_of_ok"))
+    teko::assert::is_true(is_str_arg_builtin("tk_println"))
+    teko::assert::is_false(is_str_arg_builtin("tk_str_concat_len"))
+}

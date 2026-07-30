@@ -3298,17 +3298,86 @@ fn lower_f64_bitcast_call(ctx: LowerCtx, c: checker::TCall) -> Lowered | error {
  * decomposes into exactly two consecutive integer argument registers, so the
  * flat pair IS the true C ABI and no backend does anything. On Win64
  * (`max_reg_arg_bytes` 8) a 16-byte aggregate travels BY REFERENCE, so the flat
- * pair is NOT the ABI — the x86 isel re-materializes it into a frame slot and
- * passes that slot's address (`pin_str_pair_by_ref_x86`). This predicate is
+ * pair is NOT the ABI — the x86 isel re-materializes each pair into a frame slot
+ * and passes that slot's address (`pin_fat_pairs_by_ref_x86`). This predicate is
  * `pub` precisely so the backend reads the SAME closed list rather than
  * re-deriving it (a second copy could drift and would fault silently).
+ *
+ * DERIVED, NOT A SECOND LIST: it is exactly `fat_arg_builtin_arity(sym) == 1`, so
+ * the arity table below is the ONE place a runtime entry's by-value `tk_str`
+ * parameters are written down.
  *
  * @param str sym  the resolved runtime symbol (`call_symbol`'s result)
  * @return bool  true iff `sym` is one of the seven single-`tk_str`-arg
  *               runtime entries
  */
 pub fn is_str_arg_builtin(sym: str) -> bool {
+    fat_arg_builtin_arity(sym) == 1
+}
+
+/**
+ * fat_arg_builtin_arity — how many LEADING by-value `tk_str` parameters does the
+ * runtime entry `sym` declare (`teko_rt.h`)? The ABI-arity table the x86 isel
+ * reads to decide how many flattened `(ptr, len)` pairs it must re-materialize
+ * and pass BY REFERENCE on an ABI that carries no 16-byte aggregate in a register
+ * (`isel_x86_64.tks::by_ref_fat_pairs_x86`).
+ *
+ * ONE — the io group plus `tk_panic_str`, every `(tk_str) -> void`/`_Noreturn`
+ * entry the N1 builtin table resolves DIRECTLY (`call_symbol`).
+ *
+ * TWO — the four `(tk_str, tk_str)` entries this backend calls by a hardcoded
+ * symbol: `tk_str_eq` (`lower_str_compare`), `tk_str_contains`/
+ * `tk_str_ends_with` (`builtin_str_query_symbol`) and `tk_rt_last_index_of_ok`
+ * (`lower_last_index_of_call`, whose third parameter is an ordinary
+ * `uint64_t *` out-slot and rides the register AFTER the two references).
+ *
+ * ZERO — everything else, and the interesting half of "everything else" is the
+ * family that was FLATTENED IN THE RUNTIME on purpose (`tk_str_concat_len`,
+ * `tk_str_slice_len`, `tk_str_of_bytes_len`, `tk_slice_str_eq`, … — each
+ * declaring `(const tk_byte *ptr, uint64_t len, …)` rather than a `tk_str`). Those
+ * take no by-value aggregate at all, so the flat pair IS their C ABI on EVERY
+ * target and this function must keep answering 0 for them.
+ *
+ * WHY AN ARITY AND NOT A PREDICATE. On SysV/AAPCS64/LP64D the two spellings are
+ * the SAME ABI (a 2-eightbyte aggregate decomposes into two consecutive integer
+ * argument registers), which is exactly why passing `tk_str_eq` the flat
+ * four-operand form is invisible on Linux and macOS and faults with
+ * ACCESS_VIOLATION (0xC0000005) on Windows — measured, `own_native`'s
+ * `own_arith_exit` and `regressor`'s `alias_fat_field`, both without writing a
+ * byte. The former single-`tk_str` fix keyed on a two-operand argument list and
+ * was structurally unable to reach a call carrying TWO pairs.
+ *
+ * @param str sym  the resolved runtime symbol (`call_symbol`'s result, or one of
+ *                 the hardcoded symbols this module emits)
+ * @return u64  the count of leading by-value `tk_str` parameters (0, 1 or 2)
+ */
+pub fn fat_arg_builtin_arity(sym: str) -> u64 {
+    if takes_one_str_by_value(sym) { return 1 }
+    if takes_two_strs_by_value(sym) { return 2 }
+    0
+}
+
+/**
+ * takes_one_str_by_value — is `sym` one of the seven `(tk_str) -> void`/`_Noreturn`
+ * runtime entries (the io group plus `tk_panic_str`)?
+ *
+ * @param str sym  the resolved runtime symbol
+ * @return bool  true iff `sym` declares exactly one by-value `tk_str` parameter
+ */
+fn takes_one_str_by_value(sym: str) -> bool {
     sym == "tk_print" || sym == "tk_println" || sym == "tk_eprint" || sym == "tk_eprintln" || sym == "tk_write" || sym == "tk_ewrite" || sym == "tk_panic_str"
+}
+
+/**
+ * takes_two_strs_by_value — is `sym` one of the four runtime entries whose FIRST
+ * TWO parameters are both by-value `tk_str` (`tk_str_eq`, `tk_str_contains`,
+ * `tk_str_ends_with`, `tk_rt_last_index_of_ok`)?
+ *
+ * @param str sym  the resolved runtime symbol
+ * @return bool  true iff `sym` declares two leading by-value `tk_str` parameters
+ */
+fn takes_two_strs_by_value(sym: str) -> bool {
+    sym == "tk_str_eq" || sym == "tk_str_contains" || sym == "tk_str_ends_with" || sym == "tk_rt_last_index_of_ok"
 }
 
 /**
