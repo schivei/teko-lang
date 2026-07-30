@@ -49,6 +49,41 @@ fn linker_is_mingw(cmd: str) -> bool {
 }
 
 /**
+ * MINGW_TRIPLE_ABI_TOKEN — the substring that identifies MinGW in a compiler's own TARGET TRIPLE,
+ * for the spelling that carries no `mingw` at all.
+ *
+ * `MINGW_TOKEN` cannot answer the triple question by itself: clang names the same toolchain
+ * `x86_64-w64-windows-gnu`, and gcc names it `x86_64-w64-mingw32`. The first contains no `mingw`,
+ * so a token-only check reads it as clean. What both spellings DO share is the GNU ABI on Windows,
+ * which is the thing the ban is actually about — MSVC's own triple is `...-windows-msvc`, so the
+ * two never collide.
+ */
+const MINGW_TRIPLE_ABI_TOKEN: str = "windows-gnu"
+
+/**
+ * triple_is_mingw — does `triple` (what a compiler driver answers `-dumpmachine` with) name a
+ * MinGW target?
+ *
+ * Recognises every spelling MinGW reaches a host under: `x86_64-w64-mingw32` and any other
+ * `*mingw*` form by `MINGW_TOKEN`, and clang's `x86_64-w64-windows-gnu` by
+ * `MINGW_TRIPLE_ABI_TOKEN`. `x86_64-pc-windows-msvc`, `x86_64-linux-gnu` and
+ * `arm64-apple-darwin24` are NOT MinGW and must not be reported as such — a rule that refuses the
+ * host toolchain of a legitimate platform is worse than no rule.
+ *
+ * THE EMPTY TRIPLE IS NOT A VIOLATION. A driver with no `-dumpmachine` (or none on the PATH at all)
+ * yields "" from the probe, and "" means "this host could not tell me" — never "this host is
+ * MinGW". Convicting an unknown would break every toolchain that simply does not answer the
+ * question, so the unknown is let through and the ban is enforced only on evidence.
+ *
+ * @param triple  the target triple a compiler driver reported, or "" when it could not say
+ * @return        true iff `triple` names a MinGW target
+ * @since 0.3.1
+ */
+fn triple_is_mingw(triple: str) -> bool {
+    teko::str::contains(triple, MINGW_TOKEN) || teko::str::contains(triple, MINGW_TRIPLE_ABI_TOKEN)
+}
+
+/**
  * arch_name — the human spelling of a `LinkArch`, for diagnostics.
  *
  * @param a  the machine
@@ -161,6 +196,18 @@ fn no_linker_error(arch: LinkArch, fmt: LinkFormat) -> error {
 }
 
 /**
+ * MINGW_BAN_REASON — the one sentence every MinGW refusal in this compiler carries, wherever the
+ * MinGW toolchain was found.
+ *
+ * ONE reason, ONE spelling, because the ban is a PRODUCT law and not a property of a single code
+ * path. It is quoted verbatim by the linker refusal (`mingw_rejected_error`, the native route) and
+ * by the C route's compiler refusal (`mingw_cc_rejected_error`, `src/build/project.tks`); a reader
+ * who hits either one reads the same ruling and the same measured defect, and a future third route
+ * has a reason to reuse rather than paraphrase.
+ */
+const MINGW_BAN_REASON: str = "MinGW is forbidden on every Windows host (owner ruling 2026-07-26: \"E sobre mingw, proibido, tem que usar o linker nativo e não emulado\"): a published asset was once minted by an EMULATED MinGW whose machine was not the host's, and nobody noticed, because the toolchain was resolved from the PATH instead of chosen."
+
+/**
  * mingw_rejected_error — the M.3 refusal issued when a candidate resolves to a MinGW toolchain.
  *
  * The rejection TEACHES, deliberately. A silent skip would leave someone free to put MinGW back on
@@ -173,10 +220,8 @@ fn no_linker_error(arch: LinkArch, fmt: LinkFormat) -> error {
  */
 fn mingw_rejected_error(cmd: str, arch: LinkArch) -> error {
     error { message = teko::str::concat(
-        "refusing the MinGW linker '", cmd, "' for a ", arch_name(arch), " target.",
-        " MinGW is forbidden on every Windows host (owner ruling 2026-07-26): a published",
-        " asset was once minted by an EMULATED MinGW whose machine was not the host's, and",
-        " nobody noticed, because the toolchain was resolved from the PATH instead of chosen.",
+        "refusing the MinGW linker '", cmd, "' for a ", arch_name(arch), " target. ",
+        MINGW_BAN_REASON,
         " Use a linker native to the target (lld-link ships with LLVM).") }
 }
 

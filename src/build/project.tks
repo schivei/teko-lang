@@ -720,68 +720,152 @@ fn teko_cc_env() -> str {
 }
 
 /**
- * default_cc_for_target — the cross-compiler that links the own object for a
- * non-host `NativeTarget` when neither the manifest `cc` nor the `TEKO_CC` seam
- * pins one (#387 B2-8, D-D): `x86_64-w64-mingw32-gcc` for
- * `X8664Windows` (the MinGW cross-cc that links the own PE/COFF `.o` into a
- * Windows executable). The `Arm64Macho` and `X8664Linux` arms return the host
- * `"cc"`. Reached only for an EXPLICITLY-set `TEKO_TARGET` (`resolve_cc` never
- * calls this for an unset one — an unset `TEKO_TARGET` always links with the
- * host `"cc"` directly, so the default build's link line stays byte-unchanged
- * regardless of the host OS). `Wasm32Wasi`/`Wasm64Wasi`/`Wasm32Browser` also return the host
- * `"cc"`, but NEVER actually reach a `cc` invocation: `emit_native`'s own
- * dispatch routes a wasm target straight to `emit_native_wasm`, which writes
- * the finished, self-contained `.wasm` module directly (`backend-wasm.md`
- * §1.2 — no C compilation, no separate link step) — these arms exist only so
- * the match stays exhaustive over the whole `NativeTarget` enum. D1/#390's
- * real `--target` supersedes this env-derived default.
+ * default_cc_for_target — the compiler that links the own object for `t` when neither the manifest
+ * `cc` nor the `TEKO_CC` seam pins one: the HOST `cc`, for every target there is.
+ *
+ * IT USED TO NAME `x86_64-w64-mingw32-gcc` FOR `X8664Windows`, AND THAT ARM IS GONE. It was the
+ * last place in this compiler that ASKED for MinGW, and it asked BY DEFAULT — so a cross Windows
+ * build silently linked through the very toolchain the owner banned (2026-07-26, restated
+ * 2026-07-29: *"queremos sim Cross compiling quando todos os natives estiverem funcionando, mas não
+ * quero saber de mingw"*). No dedicated cross driver replaces it, because none is wanted here: a
+ * cross build whose claim is the OBJECT now stops at the object (`build_links_binary`, applied by
+ * `finish_native_object`) and needs no linker at all, and the full cross LINK arrives with the
+ * project's own linker AFTER the natives work — that order is the ruling, not an accident.
+ *
+ * EVERY ARM THEREFORE ANSWERS THE SAME, AND THE FUNCTION STAYS. It is the single place the question
+ * "does this target have a cross driver of its own?" is answered, and the regressor's pre-build
+ * capability probe reads it (`cross_cc_for_target`, `host_cc_cannot_link_cross_reason`) to conclude
+ * that a cross row needs NO cross toolchain on this host. Inlining the constant at those call sites
+ * would scatter the answer; keeping it named keeps the day a legitimate (non-MinGW) cross driver
+ * appears a one-arm change. The wasm arms never reach a `cc` invocation at all — `emit_native`
+ * routes a wasm target to `emit_native_wasm`, which writes the finished, self-contained module
+ * (`backend-wasm.md` §1.2) — and exist only so the match stays exhaustive.
  *
  * @param t  the resolved own-backend target
- * @return   the compiler command for `t`
+ * @return   the compiler command for `t` — the host `cc` for every target
  */
 fn default_cc_for_target(t: NativeTarget) -> str {
     match t {
-        NativeTarget::X8664Windows => "x86_64-w64-mingw32-gcc"
-        NativeTarget::X8664Linux => "cc"
-        NativeTarget::Arm64Macho => "cc"
-        NativeTarget::Wasm32Wasi => "cc"
-        NativeTarget::Wasm64Wasi => "cc"
-        NativeTarget::Wasm32Browser => "cc"
+        NativeTarget::X8664Windows => HOST_CC_NAME
+        NativeTarget::X8664Linux => HOST_CC_NAME
+        NativeTarget::Arm64Macho => HOST_CC_NAME
+        NativeTarget::Wasm32Wasi => HOST_CC_NAME
+        NativeTarget::Wasm64Wasi => HOST_CC_NAME
+        NativeTarget::Wasm32Browser => HOST_CC_NAME
     }
 }
 
 /**
- * resolve_cc — pick the compiler `build_cc_argv` invokes, in precedence order
- * (#387 B2-8, D-D): the manifest `[extern] cc` override wins; then the `TEKO_CC`
- * env seam; then, when `TEKO_TARGET` is EXPLICITLY set to a recognized value, its
- * cross-cc (`default_cc_for_target`); else the host `"cc"`. An UNSET `TEKO_TARGET`
- * always links with the host `"cc"`, regardless of what `native_target()`'s R1
- * host-derived default would resolve to (teko-target-crosslink-0.3.1.md §2.1): the
- * LINK step always runs ON the host, so `default_cc_for_target`'s cross-compiler
- * arm (`x86_64-w64-mingw32-gcc`) must stay reserved for an
- * explicit cross REQUEST, never fire just because the host itself happens to be
- * linux/windows — that would wrongly cross-link a same-host build (e.g. a native
- * windows build would try to invoke the absent MinGW cross-gcc instead of the host
- * `cc`). The default build (no manifest `cc`, no `TEKO_CC`, no `TEKO_TARGET`)
- * resolves to `"cc"` unchanged on every host, so the emitted link line — and the
- * product FIXPOINT — stay byte-identical. A SET-but-unrecognized `TEKO_TARGET` also
- * falls back to `"cc"` here: the honest R2 stop for that case is already surfaced by
- * `emit_native`'s own `native_target()` call before the native backend ever reaches
- * this link step, and the C backend (the only other caller) never touches
- * `TEKO_TARGET` at all.
+ * WINDOWS_OS_NAME — the `teko::os()` spelling of a Windows host, in the same vocabulary
+ * `target_os_name` and the `[extern.libs.<os>]` section keys use. Named because the host-OS
+ * comparison that picks the Windows compiler default is a DECISION, not a passing string.
+ */
+const WINDOWS_OS_NAME: str = "windows"
+
+/**
+ * WINDOWS_CC_NAME — the compiler a Windows host compiles the emitted C with: `clang`, never the
+ * `cc` on the PATH.
+ *
+ * MEASURED, on the project's own Windows runner: `cc` there IS MinGW (`cc → /c/mingw64/bin/cc`),
+ * so "the host default" and "the banned toolchain" were the same file, and the LLVM already on the
+ * image was never reached. Resolving `clang` by name is what makes the ban real on the C route
+ * instead of only on the native one.
+ *
+ * WHY NOT `cl.exe`: the emitted C uses GNU statement-expressions (`({ ... })`) plus `__builtin_`/
+ * `__attribute__`, which C23 does not standardise and MSVC's own compiler rejects. clang accepts
+ * them even while targeting MSVC, because the COMPILER is clang — MSVC contributes its headers,
+ * libraries and linker, nothing more. Rewriting the emitter to drop those extensions is a cost the
+ * owner declined for now.
+ */
+const WINDOWS_CC_NAME: str = "clang"
+
+/**
+ * WINDOWS_MSVC_TRIPLE — the target triple that pins the Windows compiler default to the MSVC ABI:
+ * MSVC headers, MSVC libraries, and `lld-link`/`link.exe` as the linker. Its `-msvc` tail is
+ * exactly what `triple_is_mingw` refuses to confuse with MinGW's `-gnu` one.
+ */
+const WINDOWS_MSVC_TRIPLE: str = "x86_64-pc-windows-msvc"
+
+/**
+ * CC_TARGET_FLAG_PREFIX — the clang spelling that pins a target triple on the command line. The
+ * `--target=<triple>` form (one token) and not `-target <triple>` (two), so a default the build adds
+ * for the host can never be mistaken for the manifest's own `[extern] target` pair.
+ */
+const CC_TARGET_FLAG_PREFIX: str = "--target="
+
+/**
+ * CcChoice — the compiler the link line runs, together with the target flag that choice implies.
+ *
+ * TWO FIELDS BECAUSE A COMPILER DEFAULT CAN BE A COMMAND *PLUS* AN ABI. The Windows default is not
+ * simply "clang": it is clang aimed at MSVC, and the aim is a separate argv token. Returning the
+ * pair keeps `resolve_cc`'s precedence law readable — a PINNED compiler (manifest `cc`, `TEKO_CC`)
+ * carries an empty `target_flag`, because a caller who names the compiler also owns its target and
+ * the build must not second-guess them.
+ *
+ * @since 0.3.1
+ */
+type CcChoice = struct {
+    /** the compiler command `build_cc_argv` puts at argv[0]. */
+    cmd: str
+    /** the target-pinning flag this choice implies ("" for a pinned compiler and for every non-Windows host). */
+    target_flag: str
+}
+
+/**
+ * host_cc_choice — the compiler default for a build that pinned none: `clang --target=<MSVC>` on a
+ * Windows host, the bare host `cc` everywhere else.
+ *
+ * THE WINDOWS ARM IS THE WHOLE POINT (owner: *"odeio, eu disse ODEIO o uso de mingw, deveria usar
+ * MSVC em Windows"*). On that host the PATH's `cc` is MinGW, so the old bare-`cc` default handed
+ * the C route to the banned toolchain silently. Naming clang and its MSVC target makes the honest
+ * Windows toolchain the DEFAULT rather than something a lane has to remember to pass.
+ *
+ * EVERY OTHER HOST IS BYTE-UNCHANGED: `HOST_CC_NAME` with no flag, exactly what the line carried
+ * before, which is the condition for the product fixpoint to keep closing on Linux and macOS.
+ *
+ * @return the default compiler choice for this host
+ * @since 0.3.1
+ */
+fn host_cc_choice() -> CcChoice {
+    if teko::os() == WINDOWS_OS_NAME {
+        return CcChoice { cmd = WINDOWS_CC_NAME; target_flag = CC_TARGET_FLAG_PREFIX ~ WINDOWS_MSVC_TRIPLE }
+    }
+    CcChoice { cmd = HOST_CC_NAME; target_flag = "" }
+}
+
+/**
+ * resolve_cc_choice — pick the compiler `build_cc_argv` invokes, in the precedence order that was
+ * already law (#387 B2-8, D-D) and is preserved here exactly: the manifest `[extern] cc` override
+ * wins; then the `TEKO_CC` env seam; then this host's default (`host_cc_choice`).
+ *
+ * THE `TEKO_TARGET` ARM IS GONE, and its removal is a simplification rather than a policy change:
+ * it existed only to reach `default_cc_for_target`'s MinGW cross driver, and now that every target
+ * answers with the host `cc` the arm could not say anything the default does not. A cross build no
+ * longer needs it either — it stops at the object (`build_links_binary`).
+ *
+ * A PINNED COMPILER IS OBEYED WITHOUT A TARGET FLAG. Whoever names the compiler owns its ABI, so
+ * neither override inherits the Windows default's `--target=`; and a pinned compiler is still
+ * subject to the MinGW ban — `invoke_cc` asks whatever was resolved what it targets and refuses a
+ * MinGW answer, which is what keeps `TEKO_CC=...mingw...` from being a way around the law.
+ *
+ * @param m  the resolved manifest (the `cc` override, if any)
+ * @return   the compiler command for the current build, plus the target flag it implies
+ */
+fn resolve_cc_choice(m: Manifest) -> CcChoice {
+    if m.cc.len > 0 { return CcChoice { cmd = m.cc; target_flag = "" } }
+    let env_cc = teko_cc_env()
+    if env_cc.len > 0 { return CcChoice { cmd = env_cc; target_flag = "" } }
+    host_cc_choice()
+}
+
+/**
+ * resolve_cc — the COMMAND half of `resolve_cc_choice`, for the callers that only need to name the
+ * compiler (diagnostics, the regressor's capability probes) and never assemble a command line.
  *
  * @param m  the resolved manifest (the `cc` override, if any)
  * @return   the compiler command for the current build
  */
-fn resolve_cc(m: Manifest) -> str {
-    if m.cc.len > 0 { return m.cc }
-    let env_cc = teko_cc_env()
-    if env_cc.len > 0 { return env_cc }
-    match teko::env::var("TEKO_TARGET") {
-        str as v => match target_from_name(v) { NativeTarget as t => default_cc_for_target(t); error => "cc" }
-        error => "cc"
-    }
-}
+fn resolve_cc(m: Manifest) -> str { resolve_cc_choice(m).cmd }
 
 /**
  * opt_cc_flag — the portable cc optimization flag for an optimization `level`, or
@@ -855,9 +939,10 @@ fn opt_level_of(args: []str) -> i32 {
  * (`input`, a generated `.c` for the C backend or an own-backend `.o`) into the
  * native `binary`, in full parity with `driver.c::run_cc` (M.5, reuse the host
  * toolchain in one invocation). The line carries: the compiler chosen by
- * `resolve_cc` (the `[extern] cc` override, else the `TEKO_CC` env seam, else the
- * `TEKO_TARGET`-derived cross-cc for a non-host target — `x86_64-w64-mingw32-gcc`
- * for `x86_64-windows`, #387 B2-8 — else the host `cc`); the portable
+ * `resolve_cc_choice` (the `[extern] cc` override, else the `TEKO_CC` env seam,
+ * else this host's default — `clang --target=x86_64-pc-windows-msvc` on Windows,
+ * the bare host `cc` elsewhere) followed by that choice's own target flag, if any
+ * (empty on every non-Windows host, so the line there is byte-unchanged); the portable
  * `-std`/error-limit spelling for the detected compiler
  * family (clang `-std=c23`/`-ferror-limit=0`, else GCC's `-std=c2x`/`-fmax-errors=0`);
  * `-w` to silence warnings on machine-generated C; the project version baked into
@@ -896,10 +981,11 @@ fn opt_level_of(args: []str) -> i32 {
 fn build_cc_argv(input: str, binary: str, m: Manifest, prog: checker::TProgram, debug: bool, opt: i32) -> []str {
     let rt = rt_dir()
     let asrt = assert_dir(rt)
-    let cc = resolve_cc(m)
-    let is_clang = cc_family_is_clang(cc, binary)
+    let choice = resolve_cc_choice(m)
+    let is_clang = cc_family_is_clang(choice.cmd, binary)
     mut argv: []str = teko::list::empty()
-    argv = teko::list::push(argv, cc)
+    argv = teko::list::push(argv, choice.cmd)
+    if choice.target_flag.len > 0 { argv = teko::list::push(argv, choice.target_flag) }
     argv = teko::list::push(argv, if is_clang { "-std=c23" } else { "-std=c2x" })
     argv = teko::list::push(argv, "-w")
     argv = teko::list::push(argv, if is_clang { "-ferror-limit=0" } else { "-fmax-errors=0" })
@@ -1313,9 +1399,196 @@ fn append_macos_plist_flag(argv: []str, binary: str, m: Manifest, tos: str) -> [
 }
 
 /**
+ * CC_TRIPLE_PROBE_SUFFIX — the scratch file the target-triple probe redirects the compiler's output
+ * into, appended to the build's own `binary` path so two concurrent builds never share one. Read
+ * back and deleted immediately, exactly as `cc_family_is_clang` does with its `.ccprobe.c`.
+ */
+const CC_TRIPLE_PROBE_SUFFIX: str = ".ccmachine"
+
+/**
+ * cc_target_triple — ASK the resolved compiler what it targets: run `<cc> -dumpmachine` and return
+ * the triple it prints, or "" when this host cannot say.
+ *
+ * ASKING BEATS INFERRING, which is the same argument the regressor's `host_cc_arch` already makes:
+ * a compiler's name and its path are conventions, its `-dumpmachine` answer is what it will
+ * actually do. That is why the measured Windows defect (`cc → /c/mingw64/bin/cc`) is caught here
+ * even when the command is spelled `cc` like anywhere else.
+ *
+ * "" IS "UNKNOWN", NEVER "GUILTY". A driver that does not understand `-dumpmachine` exits non-zero
+ * and yields "", and a compiler that cannot be measured is let through — `triple_is_mingw("")` is
+ * false by construction. Convicting silence would break every toolchain that merely declines to
+ * answer.
+ *
+ * ONE PROCESS PER `cc` LINE, NOT ONE PER COMPILED FILE: the probe runs from `invoke_cc`, which runs
+ * once per link, and its answer is reused for that whole line (the C backend emits ONE translation
+ * unit per program, so this is one probe per build — the same cost profile as the existing
+ * `cc_family_is_clang` flag probe).
+ *
+ * @param cc      the resolved compiler command
+ * @param binary  the build's output path, used to place the probe's scratch file
+ * @return        the compiler's target triple, or "" when it could not be read
+ * @since 0.3.1
+ */
+fn cc_target_triple(cc: str, binary: str) -> str {
+    let outp = binary ~ CC_TRIPLE_PROBE_SUFFIX
+    mut argv: []str = teko::list::push(teko::list::empty(), cc)
+    argv = teko::list::push(argv, HOST_CC_MACHINE_FLAG)
+    let h = teko::process::spawn_redirected(argv, "", teko::list::empty(), "", outp, outp ~ ".err")
+    let rc = teko::process::wait_one(h)
+    let out = match teko::io::read_file(outp) { str as s => s; error => "" }
+    match teko::fs::remove_file(outp) { error => { }; null => { } }
+    match teko::fs::remove_file(outp ~ ".err") { error => { }; null => { } }
+    if rc != 0 { return "" }
+    trimmed_line(first_line(out))
+}
+
+/**
+ * trimmed_line — `line` without a trailing carriage return, so a triple read on a Windows host
+ * compares equal to the same triple read anywhere else.
+ *
+ * @param line  one line of a captured stream
+ * @return      the line without its trailing `\r`, if it had one
+ * @since 0.3.1
+ */
+fn trimmed_line(line: str) -> str {
+    if line.len > 0 && line[line.len - 1] == b'\r' { return teko::str::slice_to(line, line.len - 1) }
+    line
+}
+
+/**
+ * mingw_cc_evidence — the EVIDENCE that the resolved compiler `cc` is MinGW, or "" when there is
+ * none.
+ *
+ * TWO READINGS, IN COST ORDER. The command itself is inspected first (`linker_is_mingw` — the same
+ * recogniser the native route uses, so both routes convict on the same spelling), because it costs
+ * nothing and it catches the measured case: on the project's Windows runner `cc` resolves to
+ * `/c/mingw64/bin/cc`, whose PATH names MinGW outright. Only then is the compiler ASKED what it
+ * targets, which catches the case a name cannot — a driver installed under an innocent path that
+ * nonetheless emits `x86_64-w64-windows-gnu`.
+ *
+ * @param cc      the resolved compiler command
+ * @param binary  the build's output path (where the triple probe's scratch file goes)
+ * @return        the phrase naming how MinGW was recognised, or "" when it was not
+ * @since 0.3.1
+ */
+fn mingw_cc_evidence(cc: str, binary: str) -> str {
+    if linker_is_mingw(cc) { return $"the command '{cc}' itself names a MinGW install" }
+    let triple = cc_target_triple(cc, binary)
+    if triple_is_mingw(triple) { return $"it answers {HOST_CC_MACHINE_FLAG} with the MinGW target triple '{triple}'" }
+    ""
+}
+
+/**
+ * mingw_cc_rejected_error — the C route's refusal, the sibling of the native route's
+ * `mingw_rejected_error`.
+ *
+ * THE ORDER IS TO MAKE NOISE (owner). The ban had been implemented on the native route only, so the
+ * C route — the route the Windows lane actually builds through — resolved `cc` from the PATH and got
+ * MinGW with no guard firing anywhere. Both messages now quote ONE reason (`MINGW_BAN_REASON`), so
+ * the refusal reads the same whichever route hit it, and each names the honest replacement for ITS
+ * own route: a native linker there, clang-with-an-MSVC-target here.
+ *
+ * @param cc        the compiler command that was refused
+ * @param evidence  how it was recognised as MinGW (`mingw_cc_evidence`)
+ * @return          the named error
+ * @since 0.3.1
+ */
+fn mingw_cc_rejected_error(cc: str, evidence: str) -> error {
+    error { message = teko::str::concat(
+        "refusing the MinGW C compiler '", cc, "': ", evidence, ". ",
+        MINGW_BAN_REASON,
+        " Use clang with an explicit MSVC target (", WINDOWS_CC_NAME, " ", CC_TARGET_FLAG_PREFIX,
+        WINDOWS_MSVC_TRIPLE, "), which is this build's own default on a Windows host — MSVC supplies",
+        " the headers, the libraries and the linker, and clang supplies the GNU C extensions the",
+        " emitted C uses.") }
+}
+
+/**
+ * CC_VERBOSE_FLAG — the flag that makes a gcc/clang driver print the sub-invocations it runs,
+ * including the full linker command line.
+ */
+const CC_VERBOSE_FLAG: str = "-v"
+
+/**
+ * cc_verbose_argv — `argv` with `CC_VERBOSE_FLAG` inserted right after the compiler, so the RE-RUN
+ * is the same line plus the one flag and nothing else.
+ *
+ * Inserted at the front rather than appended, so the flag is visibly part of the invocation and not
+ * mistaken for one more input at the end of a long line.
+ *
+ * @param argv  the link line that failed (argv[0] is the compiler)
+ * @return      the same line with `-v` after the compiler
+ * @since 0.3.1
+ */
+fn cc_verbose_argv(argv: []str) -> []str {
+    mut out: []str = teko::list::push(teko::list::empty(), argv[0])
+    out = teko::list::push(out, CC_VERBOSE_FLAG)
+    mut i: u64 = 1
+    loop {
+        if i >= argv.len { break }
+        out = teko::list::push(out, argv[i])
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * report_cc_failure — on a FAILED `cc` invocation, re-run the identical line with `-v` and let its
+ * output through, then hand back the ORIGINAL status.
+ *
+ * THE LOG LINE THAT ASKED FOR THIS, verbatim from a real run: `clang: error: linker command failed
+ * with exit code 1 (use -v to see invocation)`. The tool named the one thing that would explain it
+ * and nobody had asked; the project's own rule (`scripts/check_ar_elf.sh`) is that *"a silent 'exit
+ * 1, no output' gate is never acceptable"*, and a link failure whose invocation is unknown is that
+ * gate.
+ *
+ * ONLY ON FAILURE. A routine `-v` would bury every successful build's log in driver internals, so
+ * the happy path stays exactly as quiet as it was — the second invocation costs nothing on a build
+ * that works, because it never happens.
+ *
+ * A `-v` RE-RUN THAT SUCCEEDS IS ITSELF REPORTED, because it means the failure was not reproducible
+ * from the same inputs (a full disk, a killed child, a racing parallel build) and that is a
+ * different bug from a broken link line.
+ *
+ * @param argv  the link line that failed (argv[0] is the compiler)
+ * @param rc    the failing status the first invocation returned
+ * @return      `rc`, unchanged — the diagnostic never rewrites the verdict
+ * @since 0.3.1
+ */
+fn report_cc_failure(argv: []str, rc: i32) -> i32 {
+    teko::io::eprintln($"teko: cc failed (status {rc}) — re-running the same line with {CC_VERBOSE_FLAG} so the invocation is on the record:")
+    if teko::process::run(cc_verbose_argv(argv)) == 0 {
+        teko::io::eprintln($"teko: the {CC_VERBOSE_FLAG} re-run of the SAME line SUCCEEDED — the failure above is not reproducible from these inputs")
+    }
+    rc
+}
+
+/**
+ * invoke_cc — the ONE gate every `cc` invocation of this build passes through: refuse a MinGW
+ * compiler, run the line, and on failure re-run it verbosely.
+ *
+ * ONE FUNNEL, THREE CALLERS (`run_cc`, `run_cc_debug`, `link_object`), so the ban and the diagnostic
+ * cannot be present on one route and absent on another — which is exactly the drift that left the C
+ * route unguarded while the native route had a ban.
+ *
+ * @param argv    the assembled link line (`build_cc_argv`; argv[0] is the compiler)
+ * @param binary  the build's output path (where the triple probe's scratch file goes)
+ * @return        the compiler's exit status, or 1 when the compiler was refused
+ * @since 0.3.1
+ */
+fn invoke_cc(argv: []str, binary: str) -> i32 {
+    let evidence = mingw_cc_evidence(argv[0], binary)
+    if evidence.len > 0 { return fail("", mingw_cc_rejected_error(argv[0], evidence).message) }
+    let rc = teko::process::run(argv)
+    if rc == 0 { return 0 }
+    report_cc_failure(argv, rc)
+}
+
+/**
  * run_cc — compile the generated C `cfile` into the native `binary` via the host
  * `cc` (the C-backend link path). A thin wrapper over `build_cc_argv` (which
- * assembles the shared link line): pass the `.c` as the input and run it.
+ * assembles the shared link line) and `invoke_cc` (which gates and runs it): pass
+ * the `.c` as the input.
  *
  * @param cfile   the generated C translation unit
  * @param binary  the output native executable path
@@ -1325,7 +1598,7 @@ fn append_macos_plist_flag(argv: []str, binary: str, m: Manifest, tos: str) -> [
  * @return        the `cc` process exit code (0 on success)
  */
 fn run_cc(cfile: str, binary: str, m: Manifest, prog: checker::TProgram, opt: i32) -> i32 {
-    teko::process::run(build_cc_argv(cfile, binary, m, prog, false, opt))
+    invoke_cc(build_cc_argv(cfile, binary, m, prog, false, opt), binary)
 }
 
 /**
@@ -1342,7 +1615,7 @@ fn run_cc(cfile: str, binary: str, m: Manifest, prog: checker::TProgram, opt: i3
  * @return        the `cc` process exit code (0 on success)
  */
 fn run_cc_debug(cfile: str, binary: str, m: Manifest, prog: checker::TProgram) -> i32 {
-    teko::process::run(build_cc_argv(cfile, binary, m, prog, true, 0))
+    invoke_cc(build_cc_argv(cfile, binary, m, prog, true, 0), binary)
 }
 
 /**
@@ -1365,7 +1638,7 @@ fn run_cc_debug(cfile: str, binary: str, m: Manifest, prog: checker::TProgram) -
  * @return         the `cc` process exit code (0 on success)
  */
 fn link_object(objfile: str, binary: str, m: Manifest, prog: checker::TProgram) -> i32 {
-    teko::process::run(build_cc_argv(objfile, binary, m, prog, false, 0))
+    invoke_cc(build_cc_argv(objfile, binary, m, prog, false, 0), binary)
 }
 
 // (C7.1k) plist_xml — a minimal macOS Info.plist carrying the project's identity, embedded into the
@@ -1808,18 +2081,58 @@ fn target_objfmt(t: NativeTarget) -> str {
 }
 
 /**
- * target_links_with_cc — does building for `t` end in a `cc`/`ld` LINK step? True for every
- * relocatable-object target; false for the wasm targets, whose own-backend tail
- * (`emit_native_wasm`) writes a finished, self-contained module and never invokes a linker
- * (`backend-wasm.md` §1.2). Consulted wherever a rule is about the LINKER — the `--allow-undef`
- * translation, and the regressor's "can this host link that target" capability probe — so a wasm
- * target is never asked to justify a link step it does not have.
+ * links_with_cc — the ONE rule for "will this build actually run a `cc`/`ld` LINK step?", given
+ * whether a cross toolchain was explicitly pinned.
  *
- * @param t  the own-backend target
- * @return   true iff building for `t` runs a link step
+ * TWO REASONS A BUILD NEVER REACHES A LINKER, and they are different in kind. The wasm targets have
+ * no link step at all: their own-backend tail (`emit_native_wasm`) writes a finished, self-contained
+ * module (`backend-wasm.md` §1.2). A CROSS target has one in principle, but this host has no honest
+ * linker to run it with — so the build stops at the OBJECT, which is what the cross build's claim
+ * was all along.
+ *
+ * PINNING IS THE ESCAPE HATCH, and it is deliberate: somebody who names a cross compiler
+ * (`[extern] cc`, `TEKO_CC`) is asserting they have one, and the build obeys them — subject to the
+ * MinGW ban, which `invoke_cc` enforces on whatever they named.
+ *
+ * @param t       the own-backend target
+ * @param pinned  whether a cross compiler was explicitly named for this build
+ * @return        true iff a link step will run
  * @since 0.3.1
  */
-fn target_links_with_cc(t: NativeTarget) -> bool { target_objfmt(t) != OBJFMT_WASM }
+fn links_with_cc(t: NativeTarget, pinned: bool) -> bool {
+    if target_objfmt(t) == OBJFMT_WASM { return false }
+    !cross_note(t).is_cross || pinned
+}
+
+/**
+ * target_links_with_cc — `links_with_cc` for a build that pinned no compiler beyond the `TEKO_CC`
+ * seam: the form the regressor's pre-build capability probes ask, since they see the environment but
+ * not a project's manifest.
+ *
+ * WHY THE ANSWER CHANGED FOR A CROSS TARGET (it used to be "yes, every relocatable-object target
+ * links"): a cross build now stops at the object, so the probes that used to demand a cross linker
+ * on the PATH — and honest-skip the row without one — must stop demanding a tool the build no longer
+ * invokes. That is what lets `own_cross_x86_64_windows_emits_coff` run on a Linux host with NO MinGW
+ * installed while still checking the only thing it ever claimed: the emitted object's format.
+ *
+ * @param t  the own-backend target
+ * @return   true iff building for `t` on this host runs a link step
+ * @since 0.3.1
+ */
+fn target_links_with_cc(t: NativeTarget) -> bool { links_with_cc(t, teko_cc_env().len > 0) }
+
+/**
+ * build_links_binary — `links_with_cc` for THIS build, which also sees the manifest's own `[extern]
+ * cc` override — the form `finish_native_object` consults before it links.
+ *
+ * @param t  the own-backend target
+ * @param m  the resolved manifest (its `cc` override counts as a pin)
+ * @return   true iff this build links a binary, false when it stops at the object
+ * @since 0.3.1
+ */
+fn build_links_binary(t: NativeTarget, m: Manifest) -> bool {
+    links_with_cc(t, m.cc.len > 0 || teko_cc_env().len > 0)
+}
 
 /**
  * target_os_name — the OS half of a target's canonical os-arch name (`"linux"` / `"macos"` /
@@ -2163,16 +2476,43 @@ fn emit_native_win(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog:
 }
 
 /**
+ * report_object_only — the SUCCESS report of a cross build that stopped at the object: it names the
+ * object, the target it is for, and the host that emitted it.
+ *
+ * IT IS A SUCCESS AND IT SAYS SO, which is the difference between this and a skip. The build produced
+ * exactly the artifact a cross build can produce here and the artifact is checkable; nothing was left
+ * unverified, so nothing should read as outstanding. The line keeps the EXCLUSIVE `"(own backend)"`
+ * marker every own-backend report carries, so a harness keying on it sees the emission it expects.
+ *
+ * @param dir   the project directory (for diagnostics)
+ * @param objp  the emitted object path
+ * @param t     the cross target the object was emitted for
+ * @return      0 — the build succeeded
+ * @since 0.3.1
+ */
+fn report_object_only(dir: str, objp: str, t: NativeTarget) -> i32 {
+    teko::io::println($"teko: {dir}: emitted {objp} for {target_name(t)} (own backend) — not linked on host {target_name(host_default_target_guess())}: the object IS the artifact of a cross build here")
+    0
+}
+
+/**
  * finish_native_object — the object-format-agnostic tail shared by every own-backend
  * target: write the encoded object bytes to `<od>/<stem>.o`, link it into
  * `<od>/<stem>` via `cc`-as-linker (`link_object`) against the C-built runtime,
  * write the `.tsym` symbol map beside the binary (best-effort — a write error never
  * fails the build), and print the EXCLUSIVE `"(own backend)"` success marker the
  * differential harness keys on (F1(a)). Factoring it here keeps the arm64, x86 and
- * Windows tails identical past the encoder, so the link paths never drift. The `.o`
- * is written BEFORE the link, so a cross-host link that cannot proceed (e.g. a macOS
- * host asked for a Windows PE) still leaves the object on disk for the byte /
- * well-formedness cross-check.
+ * Windows tails identical past the encoder, so the link paths never drift.
+ *
+ * A CROSS BUILD STOPS AT THE OBJECT, and that is the artifact it was always claiming. The `.o` is
+ * written first, then `build_links_binary` decides: on this host's own target the link runs exactly
+ * as before, while for a foreign target with no pinned cross compiler the build reports the object
+ * and succeeds — no linker is invoked, because none on this host can honestly link a foreign format
+ * and the banned one is not an option (owner 2026-07-29: *"queremos sim Cross compiling quando todos
+ * os natives estiverem funcionando, mas não quero saber de mingw"*). Nothing is lost by stopping:
+ * a cross artifact could never be RUN here either (`cross_note`), so the object's format was the
+ * whole claim, and it stays checkable (`llvm-readobj` reads COFF on any host). The full cross LINK
+ * arrives with the project's own linker, after the natives work.
  *
  * @param dir   the project directory (for diagnostics)
  * @param od    the slash-stripped output directory (already created)
@@ -2180,12 +2520,14 @@ fn emit_native_win(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog:
  * @param obj   the encoded object-file bytes (Mach-O, ELF or PE/COFF)
  * @param prog  the checked program (`.tsym` emission)
  * @param m     the resolved manifest (link knobs)
- * @return      0 on a successful write+link, else the failing status
+ * @return      0 on a successful write+link (or write, for a cross target), else the failing status
  */
 fn finish_native_object(dir: str, od: str, stem: str, obj: []byte, prog: checker::TProgram, m: Manifest) -> i32 {
     let objp = teko::str::concat(od, "/", teko::str::concat(stem, ".o"))
     let binp = teko::str::concat(od, "/", stem)
     match teko::io::write_file_bytes(objp, obj) { error as e => return fail(dir, e.message); null => { } }
+    let target = resolved_target()
+    if !build_links_binary(target, m) { return report_object_only(dir, objp, target) }
     if link_object(objp, binp, m, prog) != 0 {
         return fail(dir, "cc failed to link the own-backend object")
     }
@@ -2665,6 +3007,43 @@ fn strip_tests(prog: checker::TProgram) -> checker::TProgram {
 }
 
 /**
+ * built_artifact_path — the path of the artifact a BINARY build actually produced: `<out>/<name>`
+ * when it linked, `<out>/<name>.o` when a cross build stopped at the object.
+ *
+ * WITHOUT THIS THE CLOSING LINE LIES. `report_build_done` names a path, and a reader takes that path
+ * to exist; a cross build that emits only the object would have it announce a binary nobody wrote.
+ * The rule is read from the SAME predicate the build itself decided with (`build_links_binary`), so
+ * the report cannot drift from the artifact.
+ *
+ * Only the BINARY artifact is answered here — a static/shared/package build reports the base path
+ * exactly as it always has, and changing those spellings is not this rule's business.
+ *
+ * @param out_dir  the output directory as given (a trailing slash is stripped)
+ * @param m        the resolved manifest (artifact kind, backend, `cc` pin, name)
+ * @param t        the target this build resolved
+ * @return         the path the build's own artifact lives at
+ * @since 0.3.1
+ */
+fn artifact_path_for(out_dir: str, m: Manifest, t: NativeTarget) -> str {
+    let base = teko::str::concat(strip_trailing_slash(out_dir), "/", m.name)
+    if m.artifact != Artifact::Binary { return base }
+    if m.backend != Backend::Native { return base }
+    if build_links_binary(t, m) { return base }
+    base ~ ".o"
+}
+
+/**
+ * built_artifact_path — `artifact_path_for` applied to the target THIS build resolved, the form the
+ * closing report calls.
+ *
+ * @param out_dir  the output directory as given (a trailing slash is stripped)
+ * @param m        the resolved manifest (artifact kind, backend, `cc` pin, name)
+ * @return         the path the build's own artifact lives at
+ * @since 0.3.1
+ */
+fn built_artifact_path(out_dir: str, m: Manifest) -> str { artifact_path_for(out_dir, m, resolved_target()) }
+
+/**
  * Print the BUILD-OUTPUT OBSERVABILITY closing line: the built artifact's path and
  * the TOTAL wall time since `start` (front-end + backend combined) — the summary
  * the phase list settles into.
@@ -2718,7 +3097,7 @@ fn ffi_write_c_header(od: str, stem: str, prog: checker::TProgram) -> error | nu
 fn codegen_and_report(dir: str, out_dir: str, prog: checker::TProgram, m: Manifest, opt: i32, tty: bool, start: i64) -> i32 {
     let rc = backend(dir, m.name, out_dir, prog, m, opt, tty)
     if rc == 0 {
-        report_build_done(teko::str::concat(strip_trailing_slash(out_dir), "/", m.name), start)
+        report_build_done(built_artifact_path(out_dir, m), start)
         report_peak()
     }
     rc

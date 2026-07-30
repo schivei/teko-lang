@@ -20,6 +20,69 @@ fn mingw_is_recognised_by_token_and_by_path() {
     teko::assert::is_false(linker_is_mingw("ld"))
 }
 
+/**
+ * mingw_is_recognised_in_every_triple_spelling — the TRIPLE recogniser convicts MinGW however the
+ * driver spells it: gcc's `x86_64-w64-mingw32`, clang's `x86_64-w64-windows-gnu` (which contains no
+ * `mingw` at all, and is the reason `MINGW_TRIPLE_ABI_TOKEN` exists), and the 32-bit / `pc`-vendor
+ * forms.
+ *
+ * @return void
+ */
+#test
+fn mingw_is_recognised_in_every_triple_spelling() {
+    teko::assert::is_true(triple_is_mingw("x86_64-w64-mingw32"))
+    teko::assert::is_true(triple_is_mingw("i686-w64-mingw32"))
+    teko::assert::is_true(triple_is_mingw("x86_64-w64-windows-gnu"))
+    teko::assert::is_true(triple_is_mingw("x86_64-pc-windows-gnu"))
+    teko::assert::is_true(triple_is_mingw("aarch64-w64-mingw32"))
+}
+
+/**
+ * a_legitimate_toolchain_triple_is_not_mingw — every triple the project actually builds through has
+ * to pass: the MSVC target the Windows default pins, both Linux ABIs, and macOS. A ban that
+ * convicted one of these would refuse the host toolchain of a supported platform, which is a worse
+ * failure than the one it guards against.
+ *
+ * @return void
+ */
+#test
+fn a_legitimate_toolchain_triple_is_not_mingw() {
+    teko::assert::is_false(triple_is_mingw("x86_64-pc-windows-msvc"))
+    teko::assert::is_false(triple_is_mingw("aarch64-pc-windows-msvc"))
+    teko::assert::is_false(triple_is_mingw("x86_64-linux-gnu"))
+    teko::assert::is_false(triple_is_mingw("x86_64-unknown-linux-musl"))
+    teko::assert::is_false(triple_is_mingw("aarch64-linux-gnu"))
+    teko::assert::is_false(triple_is_mingw("arm64-apple-darwin24"))
+}
+
+/**
+ * an_unreadable_triple_is_unknown_and_not_a_violation — a driver that does not understand
+ * `-dumpmachine` yields "" from the probe, and "" must read as "this host could not tell me", never
+ * as a conviction. Anything else would refuse every toolchain that merely declines to answer.
+ *
+ * @return void
+ */
+#test
+fn an_unreadable_triple_is_unknown_and_not_a_violation() {
+    teko::assert::is_false(triple_is_mingw(""))
+    teko::assert::is_false(triple_is_mingw("unknown"))
+}
+
+/**
+ * the_ban_reason_is_one_text_shared_by_both_routes — the native route's refusal quotes the same
+ * `MINGW_BAN_REASON` the C route's does, owner's words included, so whichever route a reader hits
+ * teaches the same law from the same sentence.
+ *
+ * @return void
+ */
+#test
+fn the_ban_reason_is_one_text_shared_by_both_routes() {
+    teko::assert::str_contains(MINGW_BAN_REASON, "forbidden")
+    teko::assert::str_contains(MINGW_BAN_REASON, "proibido")
+    teko::assert::str_contains(MINGW_BAN_REASON, "EMULATED")
+    teko::assert::str_contains(mingw_rejected_error("x86_64-w64-mingw32-ld", LinkArch::X8664).message, MINGW_BAN_REASON)
+}
+
 #test
 fn every_elf_pair_has_an_emulation_to_assert_with() {
     teko::assert::is_true(gnu_emulation_for(LinkArch::X8664, LinkFormat::Elf) == "elf_x86_64")

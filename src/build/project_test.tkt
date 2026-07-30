@@ -959,3 +959,197 @@ fn pt_target_arch_name_completes_the_os_arch_name() {
     teko::assert::is_true(target_arch_name(NativeTarget::Wasm64Wasi) == "")
     teko::assert::is_true(target_arch_name(NativeTarget::Wasm32Browser) == "")
 }
+
+/**
+ * pt_cc_manifest_of — a manifest whose `[extern] cc` names `cc_cmd`, for the resolution-precedence
+ * tests. Written as manifest TEXT rather than a struct literal so the test exercises the very parse
+ * path a real project's `.tkp` takes.
+ *
+ * @param cc_cmd  the compiler the manifest pins
+ * @return        the parsed manifest carrying that `cc` override
+ */
+fn pt_cc_manifest_of(cc_cmd: str) -> Manifest {
+    pt_manifest_of("name = \"x\"\nsource = \"src\"\n[extern]\ncc = \"" ~ cc_cmd ~ "\"\n")
+}
+
+/**
+ * pt_the_manifest_cc_override_wins_over_every_default — the top of the resolution precedence law:
+ * a manifest `[extern] cc` is obeyed verbatim on EVERY host, and it carries NO implied target flag,
+ * because whoever names the compiler owns its ABI.
+ *
+ * @return void
+ */
+#test
+fn pt_the_manifest_cc_override_wins_over_every_default() {
+    let choice = resolve_cc_choice(pt_cc_manifest_of("my-own-cc"))
+    teko::assert::is_true(choice.cmd == "my-own-cc")
+    teko::assert::is_true(choice.target_flag == "")
+    teko::assert::is_true(resolve_cc(pt_cc_manifest_of("my-own-cc")) == "my-own-cc")
+}
+
+/**
+ * pt_the_host_default_is_clang_with_msvc_only_on_windows — the Windows default is
+ * `clang --target=x86_64-pc-windows-msvc`, and it is a WINDOWS default: on this suite's own host the
+ * choice must still be the bare `cc` with no target flag, which is the condition for the Linux/macOS
+ * link line to stay byte-identical and the product fixpoint to keep closing.
+ *
+ * Both arms are asserted on every host — the one that matches this host by measurement
+ * (`teko::os()`), the other by the pieces the Windows arm is built from — so a Linux gate still
+ * proves what the Windows spelling will be.
+ *
+ * @return void
+ */
+#test
+fn pt_the_host_default_is_clang_with_msvc_only_on_windows() {
+    let choice = host_cc_choice()
+    if teko::os() == WINDOWS_OS_NAME {
+        teko::assert::is_true(choice.cmd == WINDOWS_CC_NAME)
+        teko::assert::is_true(choice.target_flag == "--target=x86_64-pc-windows-msvc")
+    } else {
+        teko::assert::is_true(choice.cmd == HOST_CC_NAME)
+        teko::assert::is_true(choice.target_flag == "")
+    }
+    teko::assert::is_true(WINDOWS_CC_NAME == "clang")
+    teko::assert::is_true(CC_TARGET_FLAG_PREFIX ~ WINDOWS_MSVC_TRIPLE == "--target=x86_64-pc-windows-msvc")
+    teko::assert::is_false(triple_is_mingw(WINDOWS_MSVC_TRIPLE))
+}
+
+/**
+ * pt_no_target_asks_for_a_cross_driver_any_more — the MinGW cross driver is gone from
+ * `default_cc_for_target`: every target answers with the host `cc`, which is what tells the
+ * regressor's pre-build probe that a cross row needs no cross toolchain on this host.
+ *
+ * @return void
+ */
+#test
+fn pt_no_target_asks_for_a_cross_driver_any_more() {
+    teko::assert::is_true(default_cc_for_target(NativeTarget::X8664Windows) == HOST_CC_NAME)
+    teko::assert::is_true(default_cc_for_target(NativeTarget::X8664Linux) == HOST_CC_NAME)
+    teko::assert::is_true(default_cc_for_target(NativeTarget::Arm64Macho) == HOST_CC_NAME)
+    teko::assert::is_false(linker_is_mingw(default_cc_for_target(NativeTarget::X8664Windows)))
+}
+
+/**
+ * pt_the_c_route_refusal_teaches_the_same_law_as_the_native_one — the C route's refusal names the
+ * compiler, names the EVIDENCE, quotes the shared ban reason (the owner's own words included), and
+ * points at the honest replacement for its own route: clang aimed at MSVC.
+ *
+ * @return void
+ */
+#test
+fn pt_the_c_route_refusal_teaches_the_same_law_as_the_native_one() {
+    let msg = mingw_cc_rejected_error("/c/mingw64/bin/cc", "the command names a MinGW install").message
+    teko::assert::str_contains(msg, "/c/mingw64/bin/cc")
+    teko::assert::str_contains(msg, "the command names a MinGW install")
+    teko::assert::str_contains(msg, MINGW_BAN_REASON)
+    teko::assert::str_contains(msg, WINDOWS_MSVC_TRIPLE)
+    teko::assert::str_contains(msg, WINDOWS_CC_NAME)
+}
+
+/**
+ * pt_a_mingw_cc_is_convicted_by_its_path_without_any_probe — the cheap reading fires first and on
+ * the MEASURED case: the Windows runner's `cc` resolves to `/c/mingw64/bin/cc`, whose path names
+ * MinGW outright, so no process has to run for the ban to bite. A compiler that names no MinGW is
+ * left for the triple probe to judge, and this host's own `cc` (whose triple this suite reads for
+ * real) is not MinGW.
+ *
+ * @return void
+ */
+#test
+fn pt_a_mingw_cc_is_convicted_by_its_path_without_any_probe() {
+    teko::assert::is_true(mingw_cc_evidence("/c/mingw64/bin/cc", "bin/pt-probe").len > 0)
+    teko::assert::is_true(mingw_cc_evidence("x86_64-w64-mingw32-gcc", "bin/pt-probe").len > 0)
+    teko::assert::is_true(mingw_cc_evidence(HOST_CC_NAME, "bin/pt-probe") == "")
+    teko::assert::is_false(triple_is_mingw(cc_target_triple(HOST_CC_NAME, "bin/pt-probe")))
+}
+
+/**
+ * pt_a_compiler_with_no_dumpmachine_is_unknown_not_guilty — an executable that exists but rejects
+ * `-dumpmachine` yields "" (unknown), and unknown must never be a conviction. `sh` stands in for
+ * such a driver: it is on every host this suite runs on and it exits non-zero for the flag.
+ *
+ * @return void
+ */
+#test
+fn pt_a_compiler_with_no_dumpmachine_is_unknown_not_guilty() {
+    teko::assert::is_true(cc_target_triple("sh", "bin/pt-probe-sh") == "")
+    teko::assert::is_true(mingw_cc_evidence("sh", "bin/pt-probe-sh") == "")
+}
+
+/**
+ * pt_the_verbose_rerun_is_the_same_line_plus_one_flag — the failure-path re-run adds `-v` directly
+ * after the compiler and changes NOTHING else: same compiler, same arguments, same order, one token
+ * longer.
+ *
+ * @return void
+ */
+#test
+fn pt_the_verbose_rerun_is_the_same_line_plus_one_flag() {
+    let line = args_of("cc", "-w", "-o")
+    let verbose = cc_verbose_argv(line)
+    teko::assert::is_true(verbose.len == line.len + 1)
+    teko::assert::is_true(verbose[0] == "cc")
+    teko::assert::is_true(verbose[1] == CC_VERBOSE_FLAG)
+    teko::assert::is_true(verbose[2] == "-w")
+    teko::assert::is_true(verbose[3] == "-o")
+    teko::assert::is_true(CC_VERBOSE_FLAG == "-v")
+}
+
+/**
+ * pt_a_cross_build_stops_at_the_object_and_a_host_build_links — the piece-4 rule, asserted from both
+ * sides of the pin: with nothing pinned, a target this host does not own runs NO link step (the
+ * object is the artifact) while the host's own target links exactly as before; with a compiler
+ * pinned, the cross link is obeyed again. A wasm target never links under either.
+ *
+ * @return void
+ */
+#test
+fn pt_a_cross_build_stops_at_the_object_and_a_host_build_links() {
+    let host = host_default_target_guess()
+    let plain = pt_empty_manifest()
+    teko::assert::is_true(links_with_cc(host, false))
+    teko::assert::is_false(links_with_cc(NativeTarget::Wasm32Wasi, false))
+    teko::assert::is_false(links_with_cc(NativeTarget::Wasm32Wasi, true))
+    teko::assert::is_true(build_links_binary(host, plain))
+    teko::assert::is_true(build_links_binary(host, pt_cc_manifest_of("my-own-cc")))
+    teko::assert::is_false(build_links_binary(pt_foreign_target_of(host), plain))
+    teko::assert::is_true(build_links_binary(pt_foreign_target_of(host), pt_cc_manifest_of("my-own-cc")))
+}
+
+/**
+ * pt_foreign_target_of — a relocatable-object target that is NOT `host`, so the cross rule can be
+ * asserted on any host this suite runs on.
+ *
+ * @param host  the host's own default target
+ * @return      a linking target different from `host`
+ */
+fn pt_foreign_target_of(host: NativeTarget) -> NativeTarget {
+    if host == NativeTarget::X8664Windows { return NativeTarget::X8664Linux }
+    NativeTarget::X8664Windows
+}
+
+/**
+ * pt_the_closing_line_names_the_artifact_that_exists — the reported path follows the artifact: a
+ * host binary build reports `<out>/<name>`, and a cross build that stopped at the object reports
+ * `<out>/<name>.o` instead of announcing a binary nobody wrote.
+ *
+ * @return void
+ */
+#test
+fn pt_the_closing_line_names_the_artifact_that_exists() {
+    let host = host_default_target_guess()
+    let native = pt_native_manifest()
+    teko::assert::is_true(artifact_path_for("out/", native, host) == "out/x")
+    teko::assert::is_true(artifact_path_for("out", native, pt_foreign_target_of(host)) == "out/x.o")
+    teko::assert::is_true(artifact_path_for("out", pt_empty_manifest(), pt_foreign_target_of(host)) == "out/x")
+}
+
+/**
+ * pt_native_manifest — the smallest BINARY manifest with the own backend stamped on, as the front-end
+ * stamps it (`with_backend`): the shape whose closing line must follow the artifact.
+ *
+ * @return the manifest, carrying `Backend::Native`
+ */
+fn pt_native_manifest() -> Manifest {
+    with_backend(pt_empty_manifest(), Backend::Native)
+}
