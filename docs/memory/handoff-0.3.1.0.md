@@ -19,6 +19,86 @@ hipótese, está dito.
 
 
 
+## 0h. O `unknown function` ERA DANO MEU — a `--union` comeu sete caudas de função (2026-07-30)
+
+**A causa está encontrada, e não era do compilador.** Nenhuma das minhas duas hipóteses (cap de
+declarações, árvore `src/` não carregada) estava certa. O `corpus.tks` da fixture `own_native` estava
+**com o fonte estragado**, e quem o estragou fui eu, ao resolver dois merges com `git merge-file
+--union`.
+
+### O QUE A `--union` DEIXOU
+
+Sete vezes, o corpo de uma função corria directamente para dentro do doc-comment da função seguinte —
+o `0`, o `}`, a linha vazia e o `/**` **todos ausentes**:
+
+```teko
+fn f_slice_elem_store_boundaries() -> i64 {
+    …
+    if ys.len != 5 { return 11 }
+ * D27_TENTH_F32 — `0.1` held as an `f32`, whose EXACT binary64 value …
+```
+
+Sítios (linhas na árvore reparada): **3707, 3833, 3893, 3949, 4010, 4085, 4121**.
+
+### A REPARAÇÃO É FIEL, e verifiquei-o em vez de acreditar
+
+`+ 0` / `+ }` podia ser um fecho arbitrário que enfraquecia a fixture em silêncio — uma função cuja
+cauda original devolvia outra coisa passaria a devolver `0` e o teste ficava verde por engano. Fui aos
+commits **anteriores** ao dano:
+
+| commit | cauda de `f_slice_elem_store_boundaries` |
+|---|---|
+| `e0a3491`, `0ddd4a6` (pré-dano) | `… if ys.len != 5 { return 11 }` / **`0`** |
+| `ffe7580` (pós-dano) | o corpo do `d27_ftoa_of` — o splice |
+
+A cauda restaurada é a original. O dano entrou em **`1103ffb`** e **`ffe7580`**, os dois merges que eu
+resolvi com `--union`.
+
+### A LEI, corrigida (era minha, e estava demasiado larga)
+
+Eu escrevera: *"`git merge-file --union` é a resolução correcta para conflitos puramente aditivos de
+fixture."* **Estreita-se:**
+
+> `--union` só é segura quando as hunks em conflito são **registos inteiros e auto-delimitados** (uma
+> linha por caso, um bloco fechado). **Um corpo de função `.tks` não é um registo auto-delimitado**: a
+> `--union` pode escolher uma fronteira de hunk que faz desaparecer o fecho de um lado e o abridor do
+> outro, e o resultado **compila-se como se fosse outra coisa** em vez de dar conflito.
+>
+> Depois de QUALQUER resolução automática num `.tks`, a conferência obrigatória é **contar as `fn`
+> declaradas antes e depois**: o número não pode DESCER. E no caso de uma fixture, todo o `f_*`
+> chamado no `main.tks` tem de resolver.
+
+Isto explica também porque é que o meu contra-exemplo de §0f (a chamada da linha 90 desconhecida e a
+da linha 80 conhecida) não era um cap: **o ficheiro inteiro perdia as declarações**, e o que se via
+era a cauda por ordem de CHAMADA. A leitura de §0f fica de pé; a causa é esta.
+
+### O QUE JÁ ESTÁ REPARADO, e a colisão que fica para o dreno
+
+- `cargo/0.3.1-own-native-unknown-fn` @ `7a2f49b` — as sete caudas; e `e8f76fb` acrescenta o que
+  faltava no instrumento: **o excerto de um build falhado passa a guardar os DOIS extremos** (foi a
+  cauda que me fez ler uma fronteira inexistente).
+- `cargo/0.3.1.0-degrau-29` @ `1601eb4` — **as MESMAS sete truncaturas**, reparadas em paralelo,
+  porque o agente precisava da fixture inteira para construir. **Colisão por comportamento, não por
+  ficheiro.** No dreno toma-se UMA das reparações; o resto de cada branch é aditivo.
+
+### DOIS DEGRAUS FECHADOS EM BRANCH (a aguardar o fim dos agentes, não drenados)
+
+- **Degrau 29** — `cargo/0.3.1.0-degrau-29` @ `5c5c4c4`: *"fechar A4-fp — a família float inteira
+  baixa em arm64, pinada por byte"*.
+- **Degrau 30** — `cargo/0.3.1.0-degrau-30` @ `d4d48e2`: *"o padrão `null` num match deixa de assumir
+  a aridade dois"*, + `643b688` (valor nas duas rotas, saídas 260-269).
+- **Perna Windows** — `cargo/0.3.1.0-windows-leg-2` @ `50d8307`: *"a asserção mingw deixa de falar do
+  cc do HOST"*.
+
+Nenhum agente reportou fim; **não se drena branch de agente vivo**. Empurram ao escrever, logo nada se
+perde se o contentor cair.
+
+### CONFIRMADO NESTE CICLO: o `.exe` resolveu o que tinha de resolver
+
+A perna `test / windows-x86_64` **deixou de morrer por falta de `teko.exe`**: agora arranca 368 testes
+unitários e constrói 26 projectos de regressão antes de parar. O que a mata hoje é outra coisa (§0f,
+causa 3), e está despachada.
+
 ## 0g. A FASE UNITÁRIA DEIXOU DE ABORTAR — em TODAS as pernas menos Windows (2026-07-30)
 
 Pergunta pendente do ciclo, respondida pelo log INTEGRAL da execução `30526530472` (topo `757e575`,
