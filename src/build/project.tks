@@ -1824,7 +1824,7 @@ fn backend(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manife
     let od = strip_trailing_slash(out_dir)
     match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the output directory"); null => { } }
     let cfile = teko::str::concat(od, "/", teko::str::concat(stem, ".c"))
-    let binp = teko::str::concat(od, "/", stem)
+    let binp = binary_output_path(od, stem, resolved_target())
     let emit_phase = phase_begin("emit C", cfile, mode)
     match teko::io::write_file(cfile, csrc) {
         error as e => { phase_end_fail(emit_phase, cfile, e.message); return fail(dir, e.message) }
@@ -2158,6 +2158,69 @@ fn target_objfmt(t: NativeTarget) -> str {
         NativeTarget::Wasm64Wasi => OBJFMT_WASM
         NativeTarget::Wasm32Browser => OBJFMT_WASM
     }
+}
+
+/**
+ * EXE_SUFFIX_PE — the extension a PE/COFF executable MUST carry. Windows resolves a program name
+ * WITHOUT an extension by APPENDING `.exe` to it, so a PE image written as a bare `<stem>` is not
+ * launchable by the name it was given: `CreateProcess`, `cmd`, and every consumer of a published
+ * asset all look for `<stem>.exe` and find nothing.
+ */
+const EXE_SUFFIX_PE: str = ".exe"
+
+/**
+ * EXE_SUFFIX_WASM — the extension a wasm module carries. The wasm tail writes a finished,
+ * self-contained module rather than linking one, and the runners that execute it (`wasmtime`) and
+ * the validators that read it (`wasm-validate`) key on this name.
+ */
+const EXE_SUFFIX_WASM: str = ".wasm"
+
+/**
+ * EXE_SUFFIX_NONE — the EMPTY extension of an ELF or Mach-O executable. Linux and macOS launch a
+ * program by its exact name, so a suffix on those targets would be a defect of the same shape as
+ * the missing one on Windows, in the other direction.
+ */
+const EXE_SUFFIX_NONE: str = ""
+
+/**
+ * executable_suffix — the extension the RUNNABLE artifact of `t` carries, keyed on the target's
+ * IMAGE FORMAT (`target_objfmt`) rather than on its OS.
+ *
+ * THE FORMAT IS THE REASON, WHICH IS WHY IT IS THE KEY: `.exe` is not a Windows habit, it is how a
+ * PE image is named so the loader can find it, and `.wasm` is how a wasm module is named so a
+ * runtime can. Keying on the format means the NEXT target that emits either container inherits the
+ * right name without a second decision, and the whole rule stays in one place.
+ *
+ * @param t  the own-backend target the build is emitting for
+ * @return   `EXE_SUFFIX_PE` for a PE/COFF target, `EXE_SUFFIX_WASM` for a wasm target, else
+ *           `EXE_SUFFIX_NONE`
+ * @since 0.3.1
+ */
+fn executable_suffix(t: NativeTarget) -> str {
+    let fmt = target_objfmt(t)
+    if fmt == OBJFMT_COFF { return EXE_SUFFIX_PE }
+    if fmt == OBJFMT_WASM { return EXE_SUFFIX_WASM }
+    EXE_SUFFIX_NONE
+}
+
+/**
+ * binary_output_path — the finished executable's on-disk path under `od`: the `kind = "binary"`
+ * sibling of `archive_output_path`, which has always named the ARCHIVE by its target's convention
+ * while the EXECUTABLE was named `<od>/<stem>` on every target alike.
+ *
+ * ONE PLACE, BECAUSE THE DEFECT WAS ONE RULE SPELLED IN NINE. Both artifact routes (the C route and
+ * the own-backend route), every gate binary this compiler builds and then RUNS, and the regressor's
+ * artifact resolution all name the same file; a route that keeps assembling the name by hand brings
+ * the missing suffix back through the side door.
+ *
+ * @param od    the slash-stripped output directory (already created)
+ * @param stem  the output artifact name (the manifest `name`)
+ * @param t     the own-backend target the build is emitting for
+ * @return      the executable's on-disk path, with its target's extension
+ * @since 0.3.1
+ */
+fn binary_output_path(od: str, stem: str, t: NativeTarget) -> str {
+    teko::str::concat(od, "/", teko::str::concat(stem, executable_suffix(t)))
 }
 
 /**
@@ -2605,8 +2668,10 @@ fn report_object_only(dir: str, objp: str, t: NativeTarget) -> i32 {
 
 /**
  * finish_native_object — the object-format-agnostic tail shared by every own-backend
- * target: write the encoded object bytes to `<od>/<stem>.o`, link it into
- * `<od>/<stem>` via `cc`-as-linker (`link_object`) against the C-built runtime,
+ * target: write the encoded object bytes to `<od>/<stem>.o`, link it into the target's
+ * own executable name (`binary_output_path` — `<od>/<stem>.exe` for a PE target, so the
+ * image is launchable by the name it was given) via `cc`-as-linker (`link_object`)
+ * against the C-built runtime,
  * write the `.tsym` symbol map beside the binary (best-effort — a write error never
  * fails the build), and print the EXCLUSIVE `"(own backend)"` success marker the
  * differential harness keys on (F1(a)). Factoring it here keeps the arm64, x86 and
@@ -2632,9 +2697,9 @@ fn report_object_only(dir: str, objp: str, t: NativeTarget) -> i32 {
  */
 fn finish_native_object(dir: str, od: str, stem: str, obj: []byte, prog: checker::TProgram, m: Manifest) -> i32 {
     let objp = teko::str::concat(od, "/", teko::str::concat(stem, ".o"))
-    let binp = teko::str::concat(od, "/", stem)
-    match teko::io::write_file_bytes(objp, obj) { error as e => return fail(dir, e.message); null => { } }
     let target = resolved_target()
+    let binp = binary_output_path(od, stem, target)
+    match teko::io::write_file_bytes(objp, obj) { error as e => return fail(dir, e.message); null => { } }
     if !build_links_binary(target, m) { return report_object_only(dir, objp, target) }
     if link_object(objp, binp, m, prog) != 0 {
         return fail(dir, "cc failed to link the own-backend object")
@@ -2927,7 +2992,7 @@ fn emit_native_wasm(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog
         return fail(dir, "wasm32-browser: the JS-import Browser variant is not wired yet (N6b territory, backend-c1-wasm.md §9)")
     }
     let wmod = match teko::backend::wasm_assemble_program(lmod, ptr64) { teko::backend::WasmModule as x => x; error as e => return fail(dir, e.message) }
-    let binp = teko::str::concat(od, "/", teko::str::concat(stem, ".wasm"))
+    let binp = binary_output_path(od, stem, resolved_target())
     match teko::io::write_file_bytes(binp, teko::backend::emit_wasm(wmod)) { error as e => return fail(dir, e.message); null => { } }
     match teko::io::write_file(teko::str::concat(binp, ".tsym"), codegen::tk_emit_tsym(prog)) { error => { }; null => { } }
     teko::io::println(teko::str::concat("teko: ", dir, teko::str::concat(": built ", binp, " (own backend)")))
@@ -3390,7 +3455,7 @@ fn run_native_gate(dir: str, out_dir: str, prog: checker::TProgram, m: Manifest,
     match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the output directory"); null => { } }
     let stem = teko::str::concat(m.name, "-tktest")
     let cfile = teko::str::concat(od, "/", teko::str::concat(stem, ".c"))
-    let binp = teko::str::concat(od, "/", stem)
+    let binp = binary_output_path(od, stem, resolved_target())
     let covfile = teko::str::concat(od, "/", teko::str::concat(stem, ".tkcov"))
     let emit_phase = phase_begin("emit test", cfile, mode)
     let emitted = match codegen::tk_emit_c_test(prog, true) {
@@ -3797,7 +3862,7 @@ fn build_debug_binary(dir: str, stem: str, out_dir: str, prog: checker::TProgram
     let csrc = teko::str::concat(emitted, codegen::tk_emit_meta(m.name, m.version, m.suffix, m.description))
     let od = strip_trailing_slash(out_dir)
     let cfile = teko::str::concat(od, "/", teko::str::concat(stem, ".c"))
-    let binp = teko::str::concat(od, "/", stem)
+    let binp = binary_output_path(od, stem, resolved_target())
     match teko::io::write_file(cfile, csrc) { error as e => return fail(dir, e.message); null => { } }
     if run_cc_debug(cfile, binp, m, prog) != 0 {
         return fail(dir, "cc failed to build the generated C")
@@ -3829,6 +3894,13 @@ fn build_debug_and_report(dir: str, stem: str, out_dir: str, prog: checker::TPro
 }
 
 /**
+ * DEBUG_SCRATCH_DIR — the scratch directory `teko run` builds its DEBUG binary into. Named once
+ * because the BUILD and the RUN must agree on it: the run used to re-spell the path (and the
+ * separator) by hand, which is how a build that renames its output loses its runner.
+ */
+const DEBUG_SCRATCH_DIR: str = "target/debug"
+
+/**
  * The `teko run <dir>` entry (post-VM): build the project with the DEBUG profile and EXECUTE the
  * resulting native binary — the `cargo run` / `go run` shape. Same front-end as `teko build` but
  * WITHOUT the `.tkt` tests (a run, not a gate) and WITHOUT the D4 coverage floors: this is the fast
@@ -3848,11 +3920,11 @@ fn run_project(dir: str, backend: Backend) -> i32 {
     ensure_rt_dir_abs()
     let fe = match project_frontend(dir) { Frontend as x => x; error as e => return fail(dir, e.message) }
     let stem = fe.manifest.name
-    let bc = build_debug_and_report(dir, stem, "target/debug", fe.prog, with_backend(fe.manifest, backend))
+    let bc = build_debug_and_report(dir, stem, DEBUG_SCRATCH_DIR, fe.prog, with_backend(fe.manifest, backend))
     if bc != 0 { return bc }
     let cross = resolved_cross_note()
     if cross.is_cross { teko::io::println(cross.note); return 0 }
-    let binp = teko::str::concat("target/debug/", stem)
+    let binp = binary_output_path(DEBUG_SCRATCH_DIR, stem, resolved_target())
     let argv = teko::list::push(teko::list::empty(), binp)
     teko::process::run(argv)
 }
@@ -4303,7 +4375,7 @@ fn run_analyzer(dir: str, fe: Frontend) -> i32 {
     match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the analyzer output directory"); null => { } }
     let stem = teko::str::concat(fe.manifest.name, "-tkanalyze")
     let cfile = teko::str::concat(od, "/", stem, ".c")
-    let binp = teko::str::concat(od, "/", stem)
+    let binp = binary_output_path(od, stem, resolved_target())
     let emitted = match codegen::tk_emit_c_test_analyze(fe.prog) { str as s => s; error as e => return fail(dir, e.message) }
     let csrc = teko::str::concat(emitted, codegen::tk_emit_meta(fe.manifest.name, fe.manifest.version, fe.manifest.suffix, fe.manifest.description))
     match teko::io::write_file(cfile, csrc) { error as e => return fail(dir, e.message); null => { } }
@@ -4503,7 +4575,7 @@ fn run_one_test_cov(dir: str, out_dir: str, filtered: checker::TProgram, m: Mani
     let od = strip_trailing_slash(out_dir)
     match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the output directory"); null => { } }
     let cfile = teko::str::concat(od, "/", stem, ".c")
-    let binp = teko::str::concat(od, "/", stem)
+    let binp = binary_output_path(od, stem, resolved_target())
     let covfile = teko::str::concat(od, "/", stem, ".tkcov")
     let emitted = match codegen::tk_emit_c_test(filtered, true) { str as s => s; error as e => return fail(dir, e.message) }
     let csrc = teko::str::concat(emitted, codegen::tk_emit_meta(m.name, m.version, m.suffix, m.description))
@@ -5104,7 +5176,7 @@ fn build_regression_cov_exe(m: Manifest, prog: checker::TProgram) -> str | error
     match teko::fs::mkdir(od) { error => { }; null => { } }
     let stem = teko::str::concat(m.name, "-regrcov")
     let cfile = teko::str::concat(od, "/", teko::str::concat(stem, ".c"))
-    let binp = teko::str::concat(od, "/", stem)
+    let binp = binary_output_path(od, stem, resolved_target())
     let emitted = match codegen::tk_emit_c_cov(prog) { str as s => s; error as e => return e }
     let csrc = teko::str::concat(emitted, codegen::tk_emit_meta(m.name, m.version, m.suffix, m.description))
     match teko::io::write_file(cfile, csrc) { error as e => return e; null => { } }

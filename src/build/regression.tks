@@ -1431,23 +1431,44 @@ fn compile_snippet_text(exe: str, src_text: str, env: []str, prefix: str) -> Cap
 fn snippet_project_binp(prefix: str) -> str { prefix ~ ".proj/bin/" ~ SNIPPET_PROJECT_NAME }
 
 /**
+ * row_artifact_target — the own-backend target whose artifact NAME a row must look for: the row's
+ * declared target resolved through the build's own resolver (`own_backend_target_of_row`), with the
+ * error arm folded onto the host guess.
+ *
+ * TOTAL ON PURPOSE, AND FOLDED EXACTLY THE WAY THE BUILD FOLDS IT (`resolved_target`): a row whose
+ * target name the resolver refuses gets its honest R2 stop from the COMPILE it runs, and the honest
+ * stop is worth nothing if the harness cannot even say which file the compile would have written.
+ * Answering the same guess the build answers keeps the two on one name in every arm, including a
+ * host whose own (os, arch) pair has no precise target.
+ *
+ * @param target  the scenario's declared target ("" / `HOST_TARGET` → the host default)
+ * @return        the target whose artifact naming convention applies to this row
+ * @since 0.3.1
+ */
+fn row_artifact_target(target: str) -> NativeTarget {
+    match own_backend_target_of_row(target) { NativeTarget as t => t; error => host_default_target_guess() }
+}
+
+/**
  * artifact_path_for_target — the ACTUAL on-disk artifact path for `target`, given the base binary
- * path `base_binp` a native build would produce: a wasm target's own-backend build writes a
- * self-contained `<base_binp>.wasm` module directly (no separate link step — `emit_native_wasm`),
- * never a bare `<base_binp>`; every other target (including the native host default) IS
- * `base_binp` unchanged. Applied wherever a scenario resolves its run/leaf-tool artifact, so
- * `Given target = "wasm32-wasi"` finds the module `wasmtime`/`wasm-validate` actually need.
+ * path `base_binp` a native build would produce: the target's own executable extension appended
+ * (`executable_suffix`) — `.wasm` for a wasm target's self-contained module, `.exe` for a Windows
+ * target's PE image, nothing for an ELF or Mach-O executable. Applied wherever a scenario resolves
+ * its run/leaf-tool artifact, so `Given target = "wasm32-wasi"` finds the module
+ * `wasmtime`/`wasm-validate` actually need and a Windows row finds the image Windows can launch.
+ *
+ * IT DELEGATES TO THE COMPILER'S OWN RULE INSTEAD OF LISTING NAMES, and that is the whole point: the
+ * previous body matched six wasm spellings by hand and therefore knew nothing about the Windows
+ * suffix the build now writes — a harness that derives the artifact name independently of the build
+ * is a second source of truth, and the second one is always the one that goes stale.
  *
  * @param base_binp  the native-shaped binary path (`<dir>/bin/<name>` or a snippet project's)
- * @param target     the scenario's declared target ("" → host default, no suffix)
- * @return           `base_binp` unchanged, or `<base_binp>.wasm` for a wasm target
+ * @param target     the scenario's declared target ("" → host default)
+ * @return           `base_binp` with the target's executable extension appended
  * @since 0.3.1
  */
 fn artifact_path_for_target(base_binp: str, target: str) -> str {
-    if target == "wasm32-wasi" || target == "wasm32" || target == "wasm" || target == "wasi" || target == "wasm64-wasi" || target == "wasm64" {
-        return base_binp ~ ".wasm"
-    }
-    base_binp
+    base_binp ~ executable_suffix(row_artifact_target(target))
 }
 
 /**
