@@ -19,6 +19,60 @@ hipótese, está dito.
 
 
 
+## 0g. A FASE UNITÁRIA DEIXOU DE ABORTAR — em TODAS as pernas menos Windows (2026-07-30)
+
+Pergunta pendente do ciclo, respondida pelo log INTEGRAL da execução `30526530472` (topo `757e575`,
+`scripts/ci_full_log.sh`, 12 jobs em falha, nada truncado).
+
+### A RESPOSTA
+
+| perna | `test … …` arrancados | pânicos |
+|---|---|---|
+| `test / linux-x86_64-musl` | **1140** | 0 |
+| `test / linux-arm64-glibc` | **1140** | 0 |
+| `test / macos-arm64` | **1140** | 0 |
+| `Memory paranoid (linux-x86_64-musl)` | **1140** | 0 |
+| `Memory paranoid (linux-arm64-glibc)` | **1140** | 0 |
+| `regressor / all capabilities (wasm)` | **1140** | 0 |
+| `test / windows-x86_64` | **368** e ABORTA | **1** |
+
+`grep -o 'assertion failed: [a-z_]*'` sobre o log inteiro dá **duas** ocorrências e **as duas são o
+mesmo teste na mesma perna** (o ficheiro do job e o ficheiro do passo repetem a linha):
+`pt_a_mingw_cc_is_convicted_by_its_path_without_any_probe … assertion failed: is_true`. O conserto dos
+dourados (`e317b44`) **aguentou**: fora de Windows não há pânico nenhum.
+
+E **zero `skip`** em toda a suíte, nas sete pernas — `grep -oiE 'test … \.\.\. skip[a-z]*'` não devolve
+nada, e o tally de regressões dá `0 skipped` em todas as 28 linhas.
+
+### DUAS CORRECÇÕES DE CONTAGEM, e a segunda é um erro meu de método
+
+1. O número real é **1140**, não 1133 nem 1117. A árvore cresceu.
+2. Eu primeiro anunciei **1138** e uma perna com **1133** — "cinco testes que não correm no
+   regressor wasm". **Era artefacto do meu `grep`.** Eu ancorava em `... ok` na MESMA linha, e um
+   teste que imprime saída própria empurra o `ok` para a linha seguinte:
+
+   ```
+   test teko::checker::same_type_cast_is_redundant_warning ... warning: redundant cast: …
+   ok
+   ```
+
+   Os cinco "ausentes" eram quatro testes de aviso de cast redundante e um de uso do `fmt`. O
+   regressor corre `teko test . --arith-cast-gate` (as outras pernas correm `teko test .` seco), e é
+   o gate que ARMA o aviso — daí a saída interleaved só ali. Contando `test … \.\.\.` sem ancorar no
+   `ok`, as seis pernas dão **1140 exactamente iguais**. **Lição: uma fronteira de `grep` não é um
+   facto.** É a mesma família do erro da cauda (§0f, causa 2), no mesmo dia.
+
+### DUAS COISAS QUE O TALLY MOSTRA E NÃO SÃO DEFEITO
+
+- `regressions 1 run, 0 skipped, 1 failed` × 12 → é o teste unitário
+  `run_regression_sources_missing_path_is_a_manifest_error` a provar por INVERSÃO que um regressor
+  listado e inexistente é erro de manifesto (`examples/regressions/__definitely_missing__.tkr`). A
+  falha é o entregável do teste.
+- **Não há `A4-fp: float-op` em nenhuma perna.** O único stop nativo no log integral é o do degrau 30
+  (`native backend N1: 'null' match pattern not yet lowered (N2)`). Ou seja: **o degrau 29 não está no
+  caminho crítico do CI hoje** — o fixpoint pára antes de o alcançar. Fecha-se por valor próprio, não
+  para desbloquear a lane.
+
 ## 0f. A VAGA DE 12 JOBS VERMELHOS DE `757e575` — LIDA, e METADE NÃO É DEFEITO (2026-07-30)
 
 Doze jobs vermelhos chegaram por webhook em duas execuções seguidas (`30526044023` sobre `d3ab105`,
