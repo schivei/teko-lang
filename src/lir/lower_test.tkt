@@ -1075,15 +1075,37 @@ fn lwt_prim_kind_of_resolves_enum_to_int_cast_emits_no_conversion() {
 }
 
 /**
- * The E7 ordinal `to`-cast, int -> enum direction: an integer operand narrows into the target
- * enum's `I32` ordinal carrier exactly like any other same-or-narrower-width int destination
- * (`cast_int_unop_of`) — the reverse of the widening fixture above, completing the pair E7
- * actually types both directions of.
+ * The ENTIRE LIR text `lower_function` produces for an `i64` -> enum-ordinal (`i32`) `to` cast
+ * whose operand is the function's sole parameter: the parameter read, then BOTH ends of the
+ * destination's fit interval checked, then the return of the operand's own VReg. Every line is
+ * load-bearing — `%1`/`%2` prove the `i32` floor, `%3`/`%4` prove its ceiling, each failing
+ * comparison lands in a `tk_panic_cast` trap block, and `#B3`'s `ret %0` returns the OPERAND's
+ * VReg because a value proven to fit carries no conversion instruction at all.
+ */
+const LWT_ENUM_NARROW_CAST_LIR: str = "func @teko_teko__demo__as_color(%0: i64) -> i32 {\n  #B0:\n    %0 = param 0\n    %1 = const -2147483648\n    %2 = icmpges %0, %1\n    branch %2, #B1(), #B2()\n  #B1:\n    %3 = const 2147483647\n    %4 = icmples %0, %3\n    branch %4, #B3(), #B4()\n  #B2:\n    call @tk_panic_cast()\n    jump #B2()\n  #B3:\n    ret %0\n  #B4:\n    call @tk_panic_cast()\n    jump #B4()\n}\n"
+
+/**
+ * The E7 ordinal `to`-cast, int -> enum direction: an `i64` operand reaching the target enum's
+ * `I32` ordinal carrier is a NARROWING, so it does NOT truncate — `lower_cast_fit_guard` emits
+ * the runtime fit guard instead (owner ruling 2026-07-29: a narrowing cast never truncates and
+ * panics at runtime only when the value does not fit). This completes the pair E7 types both
+ * directions of, and it is the OPPOSITE emission from `..._emits_no_conversion` above: the
+ * lossless widen emits nothing, this narrowing emits the whole guard.
  *
- * @return void
+ * WHY IDENTITY AND NOT ONLY ABSENCE. `LWT_ENUM_NARROW_CAST_LIR` is the function's WHOLE printed
+ * text, so it pins the strong property positively: both interval ends are materialized and
+ * compared, both failures reach `tk_panic_cast`, and the surviving path returns `%0` — the
+ * cast's result IS the operand's VReg, guarded. An absence-of-`trunc` assertion says none of
+ * that, and on its own it would even pass if the lowering emitted no guard at all, or stopped
+ * producing text entirely. The two `icmp` presences then restate the guard rule in its own
+ * words, and the `trunc`/`sext`/`zext` absences restate "no conversion instruction survives the
+ * guard", so a reader sees the rules and not only a golden blob.
+ *
+ * That a FITTING value keeps its number and a non-fitting one panics is proved BY VALUE, on both
+ * routes, by the cast-guard regression fixtures; this fixture owns only the emitted-LIR shape.
  */
 #test
-fn lwt_prim_kind_of_resolves_int_to_enum_cast_narrows() {
+fn lwt_prim_kind_of_resolves_int_to_enum_cast_guards_the_fit() {
     let inner = lwt_var("n", checker::PrimKind::I64)
     let e = checker::TExpr { kind = checker::TCast { expr = inner }; type = checker::Named { name = "Color" }; line = 0; col = 0 }
     let params = teko::list::push(teko::list::empty(), lwt_param("n", "i64"))
@@ -1091,7 +1113,13 @@ fn lwt_prim_kind_of_resolves_int_to_enum_cast_narrows() {
     let f = lwt_fn("as_color", "teko::demo", params, checker::Named { name = "Color" }, body)
     let lf = match lower_function(f, teko::list::empty(), teko::list::empty(), lwt_color_enums()) { LoweredFunction as r => r.func; error as err => return }
     let text = print_lmodule(add_func(empty_module(), lf))
-    teko::assert::str_contains(text, "%1 = trunc %0")
+    teko::assert::is_true(text == LWT_ENUM_NARROW_CAST_LIR)
+    teko::assert::is_true(teko::str::contains(text, "icmpges"))
+    teko::assert::is_true(teko::str::contains(text, "icmples"))
+    teko::assert::is_true(teko::str::contains(text, "call @tk_panic_cast()"))
+    teko::assert::is_false(teko::str::contains(text, "trunc"))
+    teko::assert::is_false(teko::str::contains(text, "sext"))
+    teko::assert::is_false(teko::str::contains(text, "zext"))
 }
 
 /**
