@@ -3840,3 +3840,356 @@ excepcoes.** A restricao nao desapareceu: **mudou para o ficheiro que sempre a t
 (`RecVerdict`), **sai** o `writer: str` (passa a `u32` com a tabela no cabecalho), **sai** a regra
 composta de portabilidade, e **sai** — antes de ter chegado a existir — a cobertura como trafego de
 canal. **Entra** uma constante reservada (`site == 0`). **11 crumbs.**
+
+---
+
+## 29. O transporte proprio — e a peca que falta e a mais fina de todas
+
+> *"encontramos o tunel para o trafego de dados binarios para o journal, tanto entre threads quanto
+> processos, sem redesignar um stdout / stderr"*
+>
+> *"ate canais `chan<T>` poderiam se beneficiar dessa arquitetura, ja existe, so precisa de um
+> 'acucar'."*
+
+### 29.1 A tensao e real, mas nao onde foi vista — e o conflito esta DENTRO do meu texto
+
+O integrador poe a tensao assim: o fan-in redirecciona o stdout do filho para um tubo, logo os `print`
+do filho nao chegam ao stdout real. **A forma estrita esta refutada pelo meu proprio texto**, e cito a
+§26.2, que e posterior ao fan-in e manda sobre ele:
+
+> | **texto livre** (prints, diagnosticos de build) | **stdout/stderr** do filho → o handler
+> **reencaminha para o stdout/stderr do orquestrador** | por **prefixo** `out|`/`err|` |
+
+Ha um reenvio nomeado. Os `print` chegam a um stdout de verdade — o do orquestrador.
+
+**Mas ha um conflito, e e meu, entre duas seccoes minhas.** O `orchestrate` de §16.4 nao reenvia nada:
+
+```
+match teko::journal::append(sink_of(sinks, m.writer), "out", m.bytes) { ... }
+```
+
+Ele **apenda o texto livre ao segmento** e nao escreve uma linha no stdout. Isso e exactamente o que
+a §26.2 proibiu dez seccoes depois (*"sai a variante `out`/`err` do `Rec`"*), e eu nunca voltei atras
+para corrigir o codigo de §16.4. **A §26.2 manda; o bloco de §16.4 fica superado e e corrigido aqui**
+(§29.9). O integrador viu um conflito verdadeiro; o que ele nao viu e que os dois lados do conflito
+sao meus.
+
+**E fui medir a perna que faltava, a do buffering, porque era a unica que o reenvio nao consertaria.**
+Um programa que escreve um byte sem quebra de linha e sai por `_exit` (sem descarga de stdio):
+
+| destino do stdout | o byte chegou? |
+|---|---|
+| tubo | **nao** (0 bytes) |
+| ficheiro | **nao** (0 bytes) |
+
+**Identicos.** O filho de hoje **ja nao e um terminal** — os destinos ja sao ficheiros —, logo o tubo
+**nao introduz** nenhuma diferenca de buffering que o ficheiro ja nao tivesse. **Essa perna da tensao
+nao existe, e nao a levanto.** Pela mesma disciplina nao levanto a perna do `isatty`: varri `src/` e
+ha **zero** ramos sobre `isatty` (o unico acerto e um doc-comment em `src/build/progress.tks:24` a
+dizer que a costura esta fora de ambito). **Um alarme que nao consigo produzir nao e um alarme.**
+
+O que a heranca muda e o **contrario**, e e ganho: com os tres fluxos herdados o filho passa a poder
+ser um terminal, o que hoje nunca e.
+
+### 29.2 O transporte, escolhido — e o criterio e uma lei que este documento ja tem
+
+**POSIX: `AF_UNIX` `SOCK_STREAM`. Windows: `\\.\pipe\` com `FILE_FLAG_OVERLAPPED`.** Uma so, e o
+criterio nao e preferencia:
+
+> **O transporte nao pode criar um artefacto no sistema de ficheiros.** E a §7.2 — *a raiz da corrida
+> e a UNICA coisa que a corrida cria* — e e a lei inteira pela qual o F4 existe.
+
+O `AF_UNIX` de Windows **falha esse criterio**: nao tem espaco de nomes abstracto e nao tem
+`socketpair`, logo exige um **caminho real** e devolve ao directorio de trabalho o ficheiro que
+acabamos de gastar um crumb a remover. O `\\.\pipe\` vive num espaco de nomes do kernel: **nao poe
+nada em disco.** O desempate (ser esperavel, §29.8) vem depois e concorda.
+
+Medido nesta caixa, Linux:
+
+| | medido |
+|---|---|
+| `AF_UNIX` abstracto (NUL inicial): `bind`+`listen`+`connect`+`accept` | **OK**, e `stat` do nome **nao acha nada em disco** |
+| `AF_UNIX` por caminho: `bind` | cria inode `S_ISSOCK`, **0 bytes** |
+| `unlink` depois do `listen`, e `connect` a seguir | **ENOENT** — o truque de apagar cedo **nao existe** |
+| capacidade de `sun_path` | **108 bytes** |
+
+**Correccao a conta dos 2 `.chan`, e nao repito adjectivo que nao medi.** Nao "somem" em todo o lado:
+
+| hospedeiro | o que sobra |
+|---|---|
+| Linux | **nada** — espaco de nomes abstracto, medido |
+| Windows | **nada** — `\\.\pipe\` e espaco de nomes do kernel |
+| macOS | **um inode de socket de 0 bytes** — nao ha abstracto la (**conhecimento, nao medido nesta caixa**) |
+
+E o de macOS nasce **dentro da raiz da corrida**, que e a unica coisa que a corrida cria e que morre
+inteira. **A guarda de §7.2 fica valida sem uma linha de alteracao.**
+
+**E o transporte e nomeado, nao passado — e e dai que vem a economia toda.** O `VERDICT_CHANNEL_ENV`
+ja carrega um **caminho** (`src/process/process.tks:358`) e o filho ja o le
+(`verdict_channel_path`, `:366`). O que muda e o que esta na ponta do nome, nao o mecanismo. Logo:
+
+* **`spawn_redirected_fds` nao ganha um quarto encaixe** — a assinatura de hoje fica intacta;
+* o `_O_NOINHERIT` / `FD_CLOEXEC` que o F5 poe de proposito (`teko_rt.c:2855-2858`) **fica como esta**;
+* nao ha heranca de descritor a desenhar, logo nao ha o que a §29.11 recusa.
+
+### 29.3 Threads e processos: um `chan<Rec>`, dois bracos — e o socket e ADAPTADOR
+
+**Nao e o mesmo transporte, e sao duas encarnacoes do mesmo `chan<Rec>`.** Entre raias do mesmo
+processo um socket serializa, entra no kernel, copia duas vezes e volta, para entregar um registo que
+ja estava no mesmo espaco de enderecamento. O `tk_chan` em memoria basta e continua a bastar.
+
+**O que faz dos dois uma peca so e o QUADRO, e ele ja esta desenhado.** O registo e embrulhado no
+**fundo de emissao** (§24.4), logo ja e o quadro prefixado por comprimento de §26.4 **antes** de
+chegar a qualquer dos bracos:
+
+```
+produtor-raia    ──────────────── quadro ─────────────────▶ tk_chan (anel) ──▶ orquestrador
+produtor-processo ── quadro ─▶ socket ─▶ leitor ─▶ quadro ─▶ tk_chan (anel) ──▶ orquestrador
+```
+
+**Um quadro, um leitor de quadros, um anel.** O braco de socket nao e um segundo canal: e um
+**adaptador** que enche o mesmo anel. Zero serializacao extra na raia, porque o quadro ja existia.
+
+**O custo da diferenca, medido e nao presumido** (nesta caixa, 6500 registos de 80 B, um produtor):
+
+| forma | total | por registo |
+|---|---:|---:|
+| `socketpair` `AF_UNIX` | **5,966 ms** | **0,92 us** |
+| anel com `pthread_mutex` + `cond` | **2,152 ms** | **0,33 us** |
+| **razao** | **2,77x** | **delta de 3,8 ms na corrida inteira** |
+
+**3,8 ms.** Contra os 36 % do gate que o `fsync` de §5.1 custa, e ruido — mas agora e um numero e nao
+uma suposicao. **O que NAO medi:** N produtores em disputa sobre o mesmo socket. Isto e 1:1.
+
+### 29.4 O acucar tem um limite, e e o enquadramento — o meu prefixo sobrevive
+
+Medido nesta caixa, duas escritas de 3 e 5 bytes:
+
+| forma | leituras |
+|---|---|
+| `SOCK_SEQPACKET` | **3 e 5** — fronteira preservada |
+| `SOCK_DGRAM` | **3 e 5** — fronteira preservada |
+| `SOCK_STREAM` | **8** — **colou** |
+
+O subconjunto portatil e `STREAM` (macOS sem `SEQPACKET` em `AF_UNIX`, `AF_UNIX` de Windows so
+`STREAM` — **as duas de conhecimento, nao medidas nesta caixa, e nao consegui desmentir nenhuma**).
+Logo **o prefixo de comprimento de §26.4 continua a fazer falta**, e o integrador tem razao no que
+isso significa: nao se perde trabalho, muda o **estatuto** — deixa de ser invencao minha e passa a ser
+a camada fina que falta ao `STREAM`.
+
+**E nao ramifico em `SEQPACKET` mesmo onde ele existe.** Dois enquadramentos sao dois leitores, e o
+segundo nunca corre no CI que temos. **Um enquadramento, em toda a parte** — a mesma razao pela qual
+a §28.6 recusou a regra composta de portabilidade.
+
+### 29.5 O que o SO da de graca, e o que ele nao da
+
+| requisito que desenhei a mao | o SO da | medido nesta caixa |
+|---|---|---|
+| **limitado** (`bounded`) | o buffer do socket **e** o tecto | `SO_SNDBUF` = **212992** por omissao |
+| **contrapressao** | escrita bloqueia ou devolve `EAGAIN` | escrita nao-bloqueante parou aos **180224** bytes com `EAGAIN` |
+| **espera com prazo exacto** | `poll` com deadline | `poll(50 ms)` num socket ocioso voltou aos **50,13 ms** |
+| **N escritores, um leitor** | varios descritores para o mesmo par | 4 `dup` da ponta de escrita: o leitor viu **os 8 bytes dos quatro** |
+| **fecho POR PRODUTOR** | **contagem de referencias do descritor** | o `read` so devolveu **0 depois de os QUATRO `dup` fecharem** |
+| **fronteira de mensagem** | **nao** no subconjunto portatil | §29.4 |
+| **ordem entre produtores** | nao — e §16.5 nunca a pediu | — |
+
+A linha do **fecho por produtor** e a mais valiosa: era o requisito mais afiado do F4 (*"e preciso que
+o canal conte os produtores e so diga `closed` quando o ultimo sair"*, §16.5) e **o kernel ja o faz**.
+
+**E ha uma armadilha medida no numero do tecto:** o `SO_SNDBUF` **relatado** e 212992 mas a escrita
+parou aos **180224** — o util e ~15 % menor do que o anunciado. Um pedido de 8 MiB **foi concedido**
+(`getsockopt` releu 8388608), e note-se que `/proc/sys/net/core/wmem_max` e 4194304, ou seja o
+`AF_UNIX` **nao foi limitado por ele** nesta caixa.
+
+### 29.6 As razoes de recusa — a enumeracao fica INTEIRA, e a fronteira do integrador esta metade certa
+
+O dono manda: *"os enumerados podem permanecer, seriam flags da mensagem transportada"*. **Cumpro-o
+inteiro, e os dois argumentos do integrador sao os certos** — a grafia de `EAGAIN`/`EPIPE` varia entre
+hospedeiros e uma flag nossa e identica em toda a parte (a mesma logica que tornou o `.tkj` portavel,
+§28.6); e a guarda *"toda a razao tem de ter um teste que a produza"* so sobrevive se quem produz a
+razao for **codigo nosso**, porque uma razao produzida pelo kernel nem sempre se consegue provocar.
+
+**Mas a tabela do integrador poe `Closed` e `NoReader` como flags transportadas, e ai ela quebra — por
+DIRECCAO.** Sao dois factos diferentes com o mesmo nome:
+
+| facto | sentido em que teria de viajar | veredicto |
+|---|---|---|
+| **o PRODUTOR acabou** ("nao ha mais registos") | produtor → consumidor | **flag transportada**, e e a **unica** |
+| **o CONSUMIDOR sumiu** (`Closed`/`NoReader` como recusa de `push`) | **consumidor → produtor** | **nao pode ser flag** neste canal |
+
+Uma flag no sentido produtor→consumidor **nunca** pode dizer ao produtor que o leitor morreu. Poe-la
+la exigia **um canal de volta** — e a pergunta do integrador (*"nao inventes um canal de volta sem o
+nomear como tal"*) e a pergunta certa. **A resposta e que nao invento nenhum, e nao preciso:**
+
+> **A razao que teria de viajar para tras e entregue pela FALHA DA PROPRIA ESCRITA.** Medido nesta
+> caixa: escrever num socket cujo leitor fechou devolve **`EPIPE`**. Isso nao e uma mensagem e nao e
+> um canal — e o `push` a falhar, no sitio onde o `push` ja devolve.
+
+Logo a tabela final, e cada razao ganha um lugar declarado em vez de um balde:
+
+| razao | onde vive | porque, e como se produz |
+|---|---|---|
+| **`Fin`** (o produtor acabou) | **FLAG TRANSPORTADA** — a unica | sentido certo. Redundante com a contagem de descritores (§29.5) **de proposito**: a flag e a grafia **portatil** do que o kernel ja sabe |
+| **`Full`** | **retorno LOCAL** | a razao do integrador e a melhor linha da tabela dele: *se o canal esta cheio, nao ha espaco para a mensagem que diria "estou cheio"*. Produz-se enchendo (medido: `EAGAIN` aos 180224 B) |
+| **`Closed`** | **retorno LOCAL** | o leitor registado saiu: `EPIPE` na escrita (medido). Produz-se fechando o leitor |
+| **`NoReader`** | **retorno LOCAL, e muda de FASE** | ninguem chegou a escutar: `ECONNREFUSED` **no `connect`**, nao no `push`. Distinguivel de `Closed` por construcao — outra chamada, outro momento. Produz-se nao abrindo o orquestrador |
+| **`NotAProducer`** | **retorno LOCAL** | id que o registo do F3 nao conhece, verificado **antes** de qualquer envio. Produz-se com um id obsoleto |
+| ~~`Oversize`~~ | — | **ja tinha morrido em §24.5**; nao ressuscita |
+
+**Cinco razoes, cinco testes, nenhuma perdida.** A forma do dono aplica-se onde a direccao a permite; e
+onde nao permite, a razao ja era local por natureza — que era a intuicao do integrador, so que o corte
+nao e `Full`/`NotAProducer` contra as outras duas: **e uma contra quatro.**
+
+### 29.7 O `pop` de tres saidas mapeia limpo — e o SO oferece a correccao de §25.4 de graca
+
+| saida de `pop` | o socket | medido |
+|---|---|---|
+| **`Rec`** | leitura devolveu bytes | — |
+| **`null`** ("nada agora") | leitura nao-bloqueante devolveu **`EAGAIN`** | **sim** |
+| **fechado** (que e `is_open`, nao saida de `pop`) | leitura devolveu **0** | **sim** |
+| **`error`** | qualquer outro `errno` | — |
+
+**Confirma, e ha um bonus que e a evidencia mais forte a favor do acucar.** A §25.4 nomeia uma
+armadilha de perda de dados: se `is_open` fosse so *"ha produtores vivos"*, o ultimo produtor a sair
+punha a condicao a falso **com registos ainda no anel**. **O socket ja resolve isso**: medido, o `read`
+so devolveu `0` **depois** de os quatro escritores fecharem **e** o buffer estar drenado. A definicao
+correcta de `is_open` que eu tive de construir a mao **e o comportamento por omissao do transporte.**
+
+### 29.8 A assimetria de 2 ms fecha — de um lado, e digo de qual
+
+**Fecha no caminho do journal.** `\\.\pipe\` com `FILE_FLAG_OVERLAPPED` e um objecto **esperavel**,
+com prazo exacto; do lado POSIX o prazo ja e exacto (medido: `poll(50 ms)` → 50,13 ms). O braco que
+sondeia **desaparece do transporte**.
+
+**Nao fecha no caminho da captura.** O tubo anonimo continua anonimo, e o ciclo de
+`Sleep(TK_RT_PIPE_POLL_INTERVAL_MS)` de `teko_rt.c:2907-2915` sobrevive exactamente enquanto a captura
+de texto livre sobreviver (§29.9). **E nao promovo nada:** o comentario na arvore diz *"UNVERIFIED on a
+real Windows host"* e continua a dizer, porque **este repositorio nao tem executor Windows** e o meu
+Windows continua por medir.
+
+### 29.9 O F5 NAO fica obsoleto — muda de papel, e digo a condicao exacta em que morreria
+
+Sem rodeios, porque foi pedido tres vezes: **o `pipe` do F5 nao fica sem utilizador, e tem dois.**
+
+**Medido, e sao consumidores reais:**
+
+| consumidor da saida livre capturada | medido |
+|---|---|
+| linhas `.tkr` que afirmam sobre `stdout`/`stderr` | **192** |
+| quem le os ficheiros de volta | `src/build/regression.tks:204-205` (`spec.prefix ~ ".out"` / `".err"`) |
+
+O que muda e a **obrigacao**, e e uma inversao de omissao:
+
+| | antes (§15/§16) | com transporte proprio |
+|---|---|---|
+| os tres fluxos do filho | **redireccionados**, sempre | **herdados e intactos**, por omissao |
+| o journal | pelo stdout redireccionado | **pelo transporte proprio** |
+| a saida livre | drenada e reenviada, sempre | vai **directa** ao terminal do orquestrador |
+| capturar a saida livre | obrigatorio | **opcional, por filho** — e e `spawn_redirected_fds` com uma ponta de `pipe()`, que **ja aterrou hoje** |
+
+**Nenhuma linha do F5 se apaga.** O que se apaga e um handler por fluxo por filho no caminho do
+journal, e o bloco `orchestrate` de §16.4 (§29.1), que deixa de apendar texto livre ao segmento porque
+o texto livre deixa de passar por ele.
+
+**E a condicao em que o F5 ficaria mesmo obsoleto, dita para o dono poder decidir depois:** no dia em
+que a atribuicao de texto livre a um filho deixar de ser exigida, o tubo anonimo perde o ultimo
+utilizador e sai inteiro. **Hoje ela e exigida 192 vezes**, logo hoje nao sai.
+
+### 29.10 O `tk_chan` (F4) ENCOLHE, nao desaparece — e a invariante muda de dono
+
+Nao desaparece porque o braco de raias continua a precisar de um anel em memoria (§29.3): o buffer do
+socket so e o anel na perna **entre processos**. O que sai do F4:
+
+| do F4 sai | para onde |
+|---|---|
+| a contagem de produtores | contagem de referencias do descritor (medido, §29.5) |
+| o limite e a contrapressao (perna de processo) | `SO_SNDBUF` + `EAGAIN` (medido) |
+| a espera com prazo | `poll` / objecto esperavel (medido) |
+| a definicao subtil de `is_open` (§25.4) | comportamento por omissao do `read` (medido, §29.7) |
+| o quadro | **nao sai** — §29.4 |
+
+**E a invariante de arranque `capacidade_do_anel >= REC_MAX` (§26.3) muda de forma, nao de existencia.**
+Na perna de socket ela passa a ser sobre o `SO_SNDBUF`, que e **configuravel e com tecto do sistema** —
+e a medicao de §29.5 diz exactamente como a afirmar sem mentir:
+
+> **Pedir, reler, e afirmar sobre o que foi CONCEDIDO, nunca sobre o que foi pedido** — e sobre o
+> **util**, nao sobre o **relatado**: o relatado foi 212992 e o util 180224, ~15 % abaixo.
+
+```teko
+/**
+ * ensure_capacity — garantir que o transporte aceita um registo do tamanho maximo, e falhar no
+ * ARRANQUE quando nao aceita.
+ *
+ * PEDIR NAO E TER, e essa e a diferenca inteira entre esta funcao e um `setsockopt` solto. O
+ * hospedeiro pode conceder menos do que se pediu, e o que ele relata depois ainda por cima
+ * sobrestima o utilizavel — medido: `SO_SNDBUF` relatado 212992, escrita a parar em 180224. Por isso
+ * esta funcao releva o concedido e afirma sobre a fraccao util, uma vez, na abertura.
+ *
+ * @param t        o transporte acabado de abrir
+ * @param rec_max  o maior registo que o protocolo admite (§26.3)
+ * @return         nada quando cabe
+ * @throws         quando o concedido nao acomoda `rec_max`, com o pedido e o concedido na mensagem
+ * @since 0.3.1
+ */
+pub fn ensure_capacity(t: Transport, rec_max: u64) -> null | error
+```
+
+### 29.11 O `SCM_RIGHTS` nao faz falta a este desenho — e sai do caminho
+
+**Nao faz falta, e a razao e estrutural e nao um contorno:** o transporte e **nomeado, nao passado**
+(§29.2). O filho **liga-se** a um nome que le do ambiente; ninguem entrega um descritor a ninguem.
+Sem entrega de descritor nao ha `SCM_RIGHTS`, nao ha `DuplicateHandle`, nao ha quarto encaixe no
+`spawn`, e nao ha o `CLOEXEC` a desligar.
+
+A unica coisa que passar descritores compraria e entregar um descritor vivo a um processo **que ja
+corre e que nao lancamos**. **Nao fazemos isso em lado nenhum**: todo o filho nosso e lancado por nos
+e recebe o ambiente. **Capacidade para outro dia, nao lacuna deste desenho** — e fica registada aqui
+para nao voltar a ser um pedido perdido, que e o que aconteceu ao pedido original de pipes e unix
+socks (varrido: **zero** ocorrencias em `src/` e `docs/` antes desta seccao).
+
+### 29.12 O custo — nenhum crumb novo, e o saldo e negativo
+
+| | efeito |
+|---|---|
+| **F4** | **encolhe** (§29.10) — quatro pecas passam ao SO |
+| **F5** | **muda de papel**, nao encolhe (§29.9) |
+| **F1, F2, F3, F6** | intactos |
+| **C1** | absorve o transporte: `tk_journal_open` passa a abrir um socket/pipe nomeado em vez de um ficheiro. E o mesmo sumidouro, com outra ponta |
+| **C3** | **encolhe outra vez**: o `.chan` junta-se ao `.out`/`.err` que ja tinham saido |
+| **§16.4** | o bloco `orchestrate` e **corrigido** (§29.1): deixa de apendar texto livre |
+| **total** | **11 crumbs** |
+
+**Ponto de ritual acrescentado: depois do C1** — o transporte muda o que **todo** o filho escreve, e
+uma regressao ai nao se ve num teste unitario.
+
+**Regressoes a acrescentar** (todas com saida nativa, todas falsificaveis):
+
+| fixture | entrada | esperado |
+|---|---|---|
+| `tr_inherited_streams_reach_the_terminal` | filho que so faz `print`, sem captura | **0**, e o byte aparece no stdout do pai |
+| `tr_journal_travels_with_streams_inherited` | filho que emite 3 registos e imprime | **0**, 3 quadros no `.tkj`, e o texto **fora** dele |
+| `tr_run_root_is_still_the_only_thing_created` | uma corrida inteira | **0**, e a §7.2 conta **zero** entradas novas fora da raiz |
+| `tr_frame_survives_stream_coalescing` | dois registos escritos em duas escritas | **0** — o prefixo separa o que o `STREAM` colou |
+| `tr_push_full_is_local` | encher o transporte | **0**, razao `Full`, **local** |
+| `tr_push_closed_is_local` | fechar o leitor e escrever | **0**, razao `Closed`, **local** |
+| `tr_open_with_no_reader_is_NoReader` | ligar sem orquestrador | **0**, razao `NoReader`, **no `connect`** |
+| `tr_fin_flag_travels` | produtor a fechar | **0** — a flag chega **e** a contagem de descritores concorda |
+| `tr_capacity_asserted_on_granted_not_requested` | pedir mais do que o hospedeiro concede | **1**, com pedido e concedido na mensagem |
+| `tr_free_text_capture_still_attributes` | filho capturado por `pipe` | **0** — as 192 afirmacoes `.tkr` continuam a poder ser feitas |
+
+### 29.13 O que isto NAO resolve
+
+1. **O transporte nao e durabilidade.** Um socket nao sobrevive ao processo. A §5 fica **inteira**: o
+   `.tkj` em disco continua a ser o que sobrevive ao OOM, e o socket e so como o registo la chega.
+2. **Windows continua por medir por mim**, e a §29.8 recusa-se a promover o que a arvore ja marca como
+   nao verificado.
+3. **macOS sem `SEQPACKET` e `AF_UNIX` de Windows so `STREAM`** sao **conhecimento, nao medicao desta
+   caixa** — e nao os desmenti. O desenho nao depende de nenhum dos dois estar certo, porque escolhe
+   o subconjunto `STREAM` de qualquer maneira (§29.4).
+4. **N produtores em disputa sobre um socket nao esta medido** (§29.3 e 1:1).
+5. **A atribuicao de texto livre entre RAIAS continua perdida**, exactamente como a §26.2 ja o
+   declarara. O transporte nao toca nisso: N raias a imprimir para um stdout partilhado entrelacam-se,
+   e o que precisa de atribuicao viaja pelo canal com o escritor dentro.
+6. **A ordem entre o texto livre e os registos deixa de ser observavel numa so leitura.** Sao dois
+   destinos de verdade, agora sem um ponto onde se cruzem — que e o preco de nao redesignar o
+   stdout/stderr, e o dono pediu-o por nome.
