@@ -2453,3 +2453,139 @@ patológico sem optimização nenhuma.
 3. Elemento `char` não exercitado — **o lexer rejeita `'a'`** (`unexpected character`), dito em vez de assumido.
 4. Dois erros de **documentação** no ramo (comentário de `const_slice_image` sobre `char`; braço `_` de
    `const_fat_target_image` hoje inalcançável).
+
+---
+
+# NOITE DE 2026-07-30/31 — o que os quatro agentes mediram, e o que o CI disse enquanto isso
+
+Registo do integrador, escrito em modo autónomo por ruling do dono:
+*"Eu vou dormir, deixo você em modo autônomo, os docs que produzir, versions e pela manhã eu
+requisito a ti os resultados em formato de relatório / artefato."*
+
+**NENHUM destes ramos foi drenado para a lane.** O que segue é medição, com o ramo nomeado, para
+que a decisão de drenar seja do dono e não minha.
+
+## 1. O isel quadrático — `cargo/0.3.1.0-isel-quadratico` (`7fe67987` código, `c36c7360` doc)
+
+O defeito nomeado ontem foi corrigido: `vinfo_set` (`src/backend/isel_arm64.tks:91`) reconstruía as
+três listas paralelas a cada escrita de VReg. Passa a escrever em O(1).
+
+**A curva foi remedida, e o resultado tem duas metades que não coincidem:**
+
+| sonda | antes | depois | delta |
+|---|---|---|---|
+| esparsa, N=4000, pico | 1736,5 MB | 1628,4 MB | **−108,1 MB** |
+| densa (13 ops/linha), N=250, tempo | 2,501 s | 1,397 s | **−44 %** |
+| densa, N=500, tempo | 7,653 s | 4,788 s | **−37 %** |
+| densa, pico | — | — | **−15 % apenas, e ainda cresce a N^1,94** |
+
+O termo previsto `12·V²/2` dava ≈111 MB; mediram-se 108,1. **O selector era 6 % do pico** naquela
+forma. **O tempo cai ~40 %; o pico quase não se move.**
+
+### Porquê: o irmão maior está uma fase à frente
+
+`TEKO_ARENA_OBS` sobre um binário simbolizado, **depois** da correcção:
+
+```
+3504,4 MB / 155 987 allocs   teko_teko__backend__sort_by_start     ← 98,9 % do que resta
+                              vinfo_set  DESAPARECEU do mapa
+```
+
+`src/backend/regalloc.tks:1113` — ordenação por inserção que **reconstrói a lista de saída inteira
+por intervalo**, O(V²). A mesma forma, uma fase adiante.
+
+**E há um facto que torna a substituição barata:** o comparador `interval_before` (`:1102`) é uma
+**ordem TOTAL** — não há empates. Logo a permutação ordenada é **única**, e uma ordenação por fusão
+é um substituto **byte-idêntico**, não "equivalente". É a maior alavanca disponível hoje e não pede
+decisão de desenho nenhuma.
+
+Sete irmãos da mesma família ficaram contados e nomeados (`rf_set`, `iv_set`, `mem_set`,
+`mreg_list_set`, `append_minst`, …), e no checker o `lp_remove` — 2310 MB de 2808 MB na sonda
+encadeada.
+
+## 2. O actuador de região — `cargo/0.3.1.0-atuador-regiao` (`5ee05c80`)
+
+As duas metades foram entregues (`tk_str_concat_r` no runtime; o selector de N níveis no codegen), o
+**FIXPOINT fechou byte-idêntico** (gen2 == gen3, `sha256 d15201b5…`), e o regressor da inversão
+(`examples/regressions/region_actuator`, quatro cenários) passa nas quatro configurações — nativo, C,
+nativo+PARANOID, C+PARANOID, todas a sair 42.
+
+**E a taxa de recuperação NÃO subiu: 0,0 % → 0,0 %.** Raiz 1946,3 → 1940,0 MB; 11 de 5007 → 11 de
+5013 regiões largadas.
+
+**O actuador actua** — está provado no C emitido de `examples/regressions/region_actuator`:
+`tk_slice_push(` passa de 3 para 1, `tk_slice_push_r(` de 0 para 2, com um push dentro de um ciclo
+aninhado a receber **a região do bloco EXTERIOR**.
+
+**Porque a taxa do compilador não se moveu — o número que fecha o assunto:**
+
+| | quantidade |
+|---|---|
+| nascimentos de acumulador (`= teko::list::empty()`) em `src/` | 936 |
+| chamadas a `teko::list::push(` em `src/` | 1587 |
+| regiões de MOLDURA distintas no `teko.c` gerado | **1** |
+| regiões de BLOCO distintas no `teko.c` gerado | **1** |
+| `tk_slice_push_r(` no `teko.c` gerado | **1** |
+
+**O selector tinha, no compilador inteiro, duas regiões para onde rotear.** O que fecha a porta não é
+o selector: é o **conjunto de escape**, por três regras escritas em `src/checker/escape.tks` —
+(1) todo o argumento de chamada escapa; (2) toda a inicialização de ligação escapa (*"we do not run a
+second fixpoint pass"*); (3) a cauda da função escapa. **Das 936 ligações, uma sobrevive às três.**
+
+E o alvo que o oráculo apontou — `resolve.tks:1752`, o `out` de `variant_siblings`, 930,7 MB e 48 %
+de toda a memória do build — **é devolvido pela função**. A regra 3 está CORRECTA ao marcá-lo.
+Nenhuma região daquela função o pode possuir. A região certa é a do ciclo do CHAMADOR
+(`resolve.tks:1838`), e chegar lá é **convenção de chamada com passagem de arena** ou a espinha
+transitiva — não é o selector, por mais níveis que ele saiba caminhar.
+
+**Registado porque é a tentação óbvia e o alarme do dono proíbe-a:** dar ao `tk_alloc` uma "região
+corrente" global que o bloco do chamador empurra e desempilha resolvia o `variant_siblings` num dia —
+e libertaria o valor que o chamado DEVOLVE. É trocar um vazamento por uma corrupção. Não foi feito.
+
+**A próxima alavanca da memória é a análise de escape, não o selector** — e é trabalho com alarme em
+cima, porque alargar o conjunto de escape na direcção errada é um *use-after-free*, não um vazamento.
+
+## 3. O CI desta noite — o que as quatro falhas de `ca19dedf` dizem, e o que não dizem
+
+Quatro *check runs* vermelhos no run 30603367135: `regressor / all capabilities`, `Memory paranoid
+(linux-x86_64-musl)`, `CI gate`, `Sanitizer gate`. **Os dois últimos são cascata pura** — o `CI gate`
+falha por `regressor-full = failure` e por três linhas `skipped` que dependem dela; o `Sanitizer
+gate` por `mem-paranoid-*`.
+
+Os dois primeiros morreram assim:
+
+```
+2026-07-31T05:00:10Z  ##[error]The runner has received a shutdown signal…
+2026-07-31T05:00:10Z  ##[error]Process completed with exit code 143.
+```
+
+**Mas o sinal do host não é a notícia.** A notícia é o silêncio antes dele, e ele repete-se:
+
+| run | último despejo de saída | morte | silêncio |
+|---|---|---|---|
+| 30601687772 (`51038d61`) | 03:55:15 | 04:06:57 | **11 min 42 s** |
+| 30603367135 (`ca19dedf`) | 04:37:36 | 05:00:10 | **22 min 34 s** |
+
+**Dois runs, duas máquinas diferentes, o mesmo ponto**: logo a seguir a
+`native_union_nested_known_stop`, que é a terceira entrada de `teko.tkp:57`. Nenhum run da janela
+observada chegou alguma vez a imprimir uma linha de resultado para o que vem a seguir
+(`native_iface_fat_known_stop`, depois `own_native`).
+
+**O que fica dito com honestidade, e o que fica por dizer:** a saída do executor é *block-buffered*
+por um cano, e a linha de temporização de `native_union_nested` só foi despejada no instante da
+morte — logo o ponto de paragem **não está provado ao ficheiro**, só à fronteira do despejo. O que
+ESTÁ provado é a forma: **o trabalho pesado do regressor (o corpus `own_native`) não produz saída
+durante 11 a 22 minutos e o host mata-o lá dentro**. É a mesma exaustão que já foi atribuída ao
+quadrático, agora com o carimbo do host por cima.
+
+**Acção: nenhuma sobre este run.** O `ca19dedf` já está superado pelo run 30605024103 (`3b8dd9bd`), e
+a causa a jusante — `sort_by_start`, 98,9 % do que resta do backend — está nomeada com
+`ficheiro:linha` e com substituto byte-idêntico na secção 1. **Corrigir o quadrático é o que tira o
+regressor da janela em que o host lhe pega.**
+
+### Uma disciplina que eu quebrei esta noite e corrijo aqui
+
+Cada `docs(…)` que empurrei cancelou o run anterior por grupo de concorrência: das 12 execuções mais
+recentes da lane, **8 estão `cancelled`**. **A lane não teve uma execução completa de CI a noite
+inteira, e a culpa é do ritmo dos meus commits, não do host.** Daqui em diante os documentos da noite
+vão num só empurrão.
