@@ -2347,3 +2347,59 @@ Com o `Rec` a 80 bytes e o tecto a 2048, **o chunk quase nunca dispara**. É uma
 caminho quente — e código que quase nunca corre é exactamente o código que apodrece sem ninguém
 reparar. **Tem de haver uma fixture que FORCE o chunk**, senão a junção do leitor é uma promessa e
 não um mecanismo. Não é um contra-argumento à decisão: é o teste que ela exige.
+
+### A superfície do waitgroup, e a prova (dono, 2026-07-31)
+
+> *"colocar em prova o waiter para que a main não termine e leve embora os canais (o wait group)
+> usando um `wg.wait()`, e os `wg.add(u64)` e `wg.done()`."*
+
+```teko
+type WaitGroup = class {
+    pub id: u64                                       // carrega o id e MAIS NADA (§19.3)
+    pub fn add(self, n: u64) -> error | null { … }
+    pub fn done(self)        -> error | null { … }
+    pub fn wait(self)        -> error | null { … }
+}
+
+fn main() {
+    let c  = teko::threads::chan_bounded(1024)
+    let wg = teko::threads::waitgroup()
+    defer teko::threads::chan_close(c)   // registado 1º  -> corre por ÚLTIMO
+    defer wg.wait()                      // registado 2º  -> corre PRIMEIRO
+    wg.add(1)
+    spawn orquestrar(c, wg)
+    wg.add(filhos.len)
+    loop mut i: u64 = 0; i < filhos.len; i++ { spawn drenar(c, filhos[i], wg) }
+}
+
+fn drenar(c: u64, filho: Filho, wg: WaitGroup) {
+    defer wg.done()
+    …
+}
+```
+
+**Quatro pontos que não são estilo:**
+
+1. **A ordem dos `defer` é a única correta, e o erro contrário é SILENCIOSO.** LIFO verificado no
+   corpus (`ast.tks:339`, `typer.tks:3514`, `lower.tks:5367`).
+2. **O `add` corre no fio que faz o `spawn`, ANTES do `spawn`.** Dentro do filho haveria corrida: o
+   `wait()` podia observar zero antes de ele arrancar. E `add(filhos.len)` numa chamada é **uma**
+   operação atómica em vez de N — sem janela onde a contagem mergulha.
+3. **O `done` vive num `defer`**, para disparar em `return`, `break` e **pânico**.
+4. **E ISTO DEPENDE DA CAPTURA (F6), o que ninguém tinha notado:** sem ela um handler que entra em
+   pânico mata a shard e **nunca corre o seu `defer wg.done()`** — a contagem nunca chega a zero e o
+   `wg.wait()` **fica preso para sempre**. A captura deixa de ser só *"o teste seguinte corre"*:
+   **é a condição de vivacidade da junção.**
+
+**E um modo de falha com nome:** um `done()` a mais do que os `add` passaria a contagem por baixo de
+zero. Não pode ser subfluxo silencioso — `done()` com a contagem já a zero devolve **`error`**, pela
+mesma lei que rege o `push`.
+
+**A prova, em três braços** (`spawn` **não é palavra deste lexer** — verificado; a superfície é
+proposta, não descrição):
+
+| braço | o que afirma |
+|---|---|
+| vivacidade | com o `wait`, os 8×100 registos estão **todos** no journal quando a `main` sai |
+| **inversão** | **sem** o `wait`, o mesmo programa **perde** registos — sem este braço o primeiro diz só *"não vi problema"* |
+| pânico | um handler que panica ainda decrementa (o `done` está em `defer`), logo o `wait` **não pendura** |
