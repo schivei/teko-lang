@@ -339,6 +339,17 @@ tk_str tk_one_byte(tk_byte c) {
     return (tk_str){ buf, 1 };
 }
 
+// tk_one_byte_len — the out-parameter-length twin of `tk_one_byte` (0.3.1.0 degrau 32): the same
+// fresh 1-byte buffer, handed back through the native backend's out-parameter convention. The
+// parameter is FULL WIDTH and masked here because SysV/AAPCS64 leave an argument's bits above its
+// declared width unspecified and this backend narrows RETURNS only
+// (`apply_native_c_return_narrow`), never arguments.
+const tk_byte *tk_one_byte_len(uint64_t c, uint64_t *out_len) {
+    tk_str r = tk_one_byte((tk_byte)(c & 0xFF));
+    *out_len = r.len;
+    return r.ptr;
+}
+
 // tk_char_to_u32 — decode a `char` (1–4 UTF-8 bytes) to its scalar codepoint. The bytes are valid
 // UTF-8 by construction (the lexer validated the `c'…'` literal), so a straight lead+continuation
 // decode is sufficient. A 0-length char is impossible (the lexer rejects it) — returns 0 if seen.

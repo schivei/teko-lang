@@ -1,0 +1,162 @@
+/**
+ * opaque_zero — zero SEM forma literal, produzido por uma variavel mutavel.
+ *
+ * Cada peso deste regressor recebe este valor como deslocamento dos seus bytes. Sem ele, todo o
+ * argumento de `teko::one_byte` teria forma literal e o dobrador de compilacao (`comptime_fold`)
+ * resolveria a chamada inteira antes de o baixamento nativo chegar a ver uma: o regressor passaria
+ * sem nunca exercitar o que mede. E o mesmo molde de opacidade que os cenarios `own_arith_exit`/
+ * `own_sub_exit` de `own_native.tkr` ja usam.
+ *
+ * @return  0, sem forma literal
+ */
+fn opaque_zero() -> u64 {
+    mut n: u64 = 1
+    n = n - 1
+    n
+}
+
+/**
+ * shift — o byte `b` deslocado de `off` posicoes, passando por `u64`.
+ *
+ * Com `off == 0` devolve `b`; o que interessa e que o resultado nasce de uma soma e nao de um
+ * literal, entao o argumento chega ao baixamento nativo como um valor calculado.
+ *
+ * @param b    o byte de partida
+ * @param off  o deslocamento a somar (sempre `opaque_zero()` aqui)
+ * @return     o byte deslocado
+ */
+fn shift(b: byte, off: u64) -> byte {
+    ((b to u64) + off) to byte
+}
+
+/**
+ * single_byte_weight — o caso minimo: UMA chamada a `teko::one_byte` cujo resultado e lido pelo
+ * comprimento e pelo conteudo.
+ *
+ * Prende as duas metades da convencao de retorno gordo do backend nativo ao mesmo tempo: o ponteiro
+ * vem no registo de resultado da chamada e o comprimento vem pela ranhura escondida que
+ * `lower_call_fat` reserva (`tk_one_byte_len`, `teko_rt.h`).
+ *
+ * @param off  o deslocamento fold-opaco
+ * @return     3 quando o `str` de um byte tem comprimento 1 e conteudo `A`, 0 caso contrario
+ */
+fn single_byte_weight(off: u64) -> i64 {
+    let s = teko::one_byte(shift(b'A', off))
+    if s.len != 1 { return 0 }
+    if s[0] != b'A' { return 0 }
+    3
+}
+
+/**
+ * escape_accum_weight — a forma EXACTA de `teko::encoding::json::parse_string`
+ * (`src/encoding/json/json.tks:218-225`), o sitio que disparava a paragem deste degrau: um `str`
+ * acumulado a que se junta um `teko::one_byte` de cada vez.
+ *
+ * @param off  o deslocamento fold-opaco
+ * @return     12 quando os tres bytes de escape saem pela ordem e pelos valores certos, 0 caso
+ *             contrario
+ */
+fn escape_accum_weight(off: u64) -> i64 {
+    mut out = ""
+    out = out ~ teko::one_byte(shift(b'"', off))
+    out = out ~ teko::one_byte(shift(b'\\', off))
+    out = out ~ teko::one_byte(shift(0x0C to byte, off))
+    if out.len != 3 { return 0 }
+    if out[0] != b'"' { return 0 }
+    if out[1] != b'\\' { return 0 }
+    if out[2] != (0x0C to byte) { return 0 }
+    12
+}
+
+/**
+ * utf8_pair_weight — a forma de `json.tks:296`: dois resultados de `teko::one_byte` juntos na MESMA
+ * expressao, o par de bytes de um ponto de codigo UTF-8 de dois bytes (U+00E9).
+ *
+ * @param off  o deslocamento fold-opaco
+ * @return     16 quando o par tem comprimento 2 e os dois bytes certos, 0 caso contrario
+ */
+fn utf8_pair_weight(off: u64) -> i64 {
+    let two = teko::one_byte(shift(0xC3 to byte, off)) ~ teko::one_byte(shift(0xA9 to byte, off))
+    if two.len != 2 { return 0 }
+    if two[0] != (0xC3 to byte) { return 0 }
+    if two[1] != (0xA9 to byte) { return 0 }
+    16
+}
+
+/**
+ * from_slice_weight — o argumento de `teko::one_byte` vem de um INDICE de slice dentro de um laco,
+ * nao de uma expressao de literal: prende o caminho em que o byte chega num registo carregado da
+ * memoria. E a forma de `json.tks:242` e `json.tks:412`.
+ *
+ * @param off  o deslocamento fold-opaco
+ * @return     32 quando os dois bytes do slice se reconstroem no `str` acumulado, 0 caso contrario
+ */
+fn from_slice_weight(off: u64) -> i64 {
+    mut src: []byte = teko::list::empty()
+    src = teko::list::push(src, shift(b'n', off))
+    src = teko::list::push(src, shift(b'l', off))
+    mut out = ""
+    mut i: u64 = 0
+    loop {
+        if i >= src.len { break }
+        out = out ~ teko::one_byte(src[i])
+        i++
+    }
+    if out.len != 2 { return 0 }
+    if out[0] != b'n' { return 0 }
+    if out[1] != b'l' { return 0 }
+    32
+}
+
+/**
+ * two_live_weight — DOIS `str` de um byte vivos ao mesmo tempo, cada um lido depois de o outro ter
+ * sido produzido.
+ *
+ * E a forma que apanhou o par `f64_bits`/`f64_from_bits` no degrau 24: se as duas chamadas
+ * partilhassem uma unica ranhura de comprimento ou um unico registo de resultado, a primeira leria
+ * o valor da segunda e este peso cairia sem que nenhum dos outros se mexesse.
+ *
+ * @param off  o deslocamento fold-opaco
+ * @return     64 quando os dois valores mantem cada um o seu proprio byte e comprimento, 0 caso
+ *             contrario
+ */
+fn two_live_weight(off: u64) -> i64 {
+    let a = teko::one_byte(shift(b'a', off))
+    let b = teko::one_byte(shift(b'z', off))
+    if a[0] != b'a' { return 0 }
+    if b[0] != b'z' { return 0 }
+    if a.len != 1 { return 0 }
+    if b.len != 1 { return 0 }
+    64
+}
+
+/**
+ * nul_byte_weight — `teko::one_byte(0)`: o `str` de um unico byte NUL.
+ *
+ * Nenhum comprimento derivado de `strlen` podia produzi-lo, entao este peso prende o comprimento
+ * ao 1 que o runtime devolve pela ranhura de saida e nao ao 0 que uma leitura terminada em NUL
+ * daria.
+ *
+ * @param off  o deslocamento fold-opaco
+ * @return     128 quando o `str` tem comprimento 1 e o byte 0, 0 caso contrario
+ */
+fn nul_byte_weight(off: u64) -> i64 {
+    let s = teko::one_byte(shift(0 to byte, off))
+    if s.len != 1 { return 0 }
+    if s[0] != (0 to byte) { return 0 }
+    128
+}
+
+/**
+ * score — a soma dos seis pesos disjuntos, 255 quando todos passam.
+ *
+ * Os pesos sao potencias de dois agrupadas (3, 12, 16, 32, 64, 128) para que a falha de qualquer
+ * subconjunto de medicoes se leia directamente no codigo de saida em vez de se confundir com a de
+ * outra: nenhuma soma parcial vale 255.
+ *
+ * @return  255 quando o baixamento de `one_byte` esta correcto em todas as seis formas
+ */
+exp fn score() -> i64 {
+    let off = opaque_zero()
+    single_byte_weight(off) + escape_accum_weight(off) + utf8_pair_weight(off) + from_slice_weight(off) + two_live_weight(off) + nul_byte_weight(off)
+}
