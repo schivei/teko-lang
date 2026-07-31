@@ -2761,3 +2761,59 @@ substituto byte-idêntico. Está lançado em `cargo/0.3.1.0-sort-by-start`.
 | *shutdown signal* / exit 143, 8 ondas | legs Linux | host **por cima** da nossa moagem |
 | `deliberate panic: ftoa_nonfinite_text` | `test/windows` | **sim** — agora cita o texto |
 | `CI gate`, `Sanitizer gate`, `Test suite gate` | agregadores | cascata |
+
+## 9. Uma assimetria no harness de regressão — latente hoje, e mordeu quem escreveu fixture nova
+
+Achado do ramo `cargo/0.3.1.0-atuador-regiao`, contra o **seu próprio** regressor, antes de o declarar
+verde. Verificado por mim na árvore.
+
+**Compilações de FONTE (`Given source = …`) têm o env na chave. Compilações de PROJECTO não têm.**
+
+| forma | chave | env separa? |
+|---|---|---|
+| fonte | `regr_src_key(srcp, env)` — `src/build/regression.tks:2059` | **sim** |
+| projecto | `regr_built_serves(built, want)` — `src/build/regression.tks:2196`, só `built.kind == want` | **NÃO** |
+
+`tkr_ensure_built` (`:2177`) devolve a fatia em cache assim que a *forma* bate, e a compilação foi
+feita com o env do **PRIMEIRO** cenário. Logo, num `.tkr` de projecto que misture rota nativa e rota
+C, os cenários de rota C correm o binário **nativo** com `TEKO_BACKEND=c` definido só à **execução** —
+e passam a afirmar sobre o artefacto errado, **em silêncio**.
+
+**E o comentário de doc promete a protecção que não existe** (`:2186-2189`): *"a `.tkr` mixing shapes
+pays one build per shape instead of silently asserting the wrong artifact"*. Verdade para **forma**;
+calado para **env**.
+
+**O lado da fonte já teve este bug e foi corrigido** — o próprio comentário do `regr_src_key`
+regista-o: *"a green row asserting an artifact it never built"*, quando a chave era só `done`. A
+correcção não foi levada ao lado do projecto.
+
+### Raio de alcance HOJE: nenhum ficheiro entregue é afectado — medido, não presumido
+
+* `own_native.tkr` — 223 cenários, 14 com `TEKO_BACKEND=c`, **todos por `Given source =`**, logo
+  cobertos pelo `regr_src_key`. **O oráculo C do corpus está são.**
+* `native_union_known_stop.tkr` — 1 env, 1 cenário; não há mistura possível.
+* nenhum outro `.tkr` da árvore declara env.
+
+**É defeito latente, não activo.** Mas é exactamente a classe que a barra recusa — *verde sobre
+trabalho não executado* — e o custo de fechar é levar o env à identidade da fatia de projecto,
+espelhando o `regr_src_key`.
+
+### E um número duro que veio de lado
+
+O mesmo agente correu `teko test .` com a lista completa: **a fase de regressão não acabou em 4500 s**
+e o `timeout` matou-a **dentro do `own_native`**. É o melhor limite inferior que temos para a moagem —
+melhor do que os meus 12,7 min, que estavam contaminados por eu ter corrido o portão ao lado do dele.
+
+## 10. Porque NÃO drenei o actuador
+
+O ramo `cargo/0.3.1.0-atuador-regiao` fechou com fixpoint byte-idêntico, as quatro faixas `.tkt`
+verdes (1161 testes, 0 falhas) e o regressor da inversão verde nas quatro configurações. **Está
+entregue e é bom trabalho.**
+
+**Não o drenei, e a razão é de caminho crítico, não de qualidade:** a lane está a ser bloqueada por
+duas coisas — o **fixpoint nativo** (degrau 32) e a **exaustão de memória** (o `sort_by_start`). O
+actuador não move nenhuma das duas: mede-se em `reclaim ratio`, que ficou em 0,0 %, e a sua própria
+medição explica porquê (duas regiões para onde rotear em toda a árvore). Entrar agora acrescenta
+mudanças de codegen e de escape a uma lane que ainda não fecha o fixpoint nativo.
+
+**Entra depois de o degrau 32 e o `sort_by_start` fecharem.** Fica dito para não parecer esquecimento.
