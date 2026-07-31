@@ -905,6 +905,13 @@ const tk_byte *tk_str_slice_from_len(const tk_byte *s_ptr, uint64_t s_len, uint6
     *out_len = r.len;
     return r.ptr;
 }
+// tk_str_slice_chars_len — out-parameter-length twin of tk_str_slice_chars (codepoint-index
+// slice). Thin wrapper: calls tk_str_slice_chars, writes r.len into *out_len and returns r.ptr.
+const tk_byte *tk_str_slice_chars_len(const tk_byte *s_ptr, uint64_t s_len, int64_t from, int64_t to, uint64_t *out_len) {
+    tk_str r = tk_str_slice_chars((tk_str){ s_ptr, s_len }, from, to);
+    *out_len = r.len;
+    return r.ptr;
+}
 
 // tk_str_len — the byte length (no allocation).
 uint64_t tk_str_len(tk_str s) {

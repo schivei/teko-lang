@@ -672,6 +672,12 @@ tk_str tk_str_slice_from(tk_str s, uint64_t start);
 const tk_byte *tk_str_slice_len(const tk_byte *s_ptr, uint64_t s_len, uint64_t start, uint64_t end, uint64_t *out_len);
 const tk_byte *tk_str_slice_to_len(const tk_byte *s_ptr, uint64_t s_len, uint64_t end, uint64_t *out_len);
 const tk_byte *tk_str_slice_from_len(const tk_byte *s_ptr, uint64_t s_len, uint64_t start, uint64_t *out_len);
+// tk_str_slice_chars_len — out-parameter-length twin of tk_str_slice_chars (codepoint-index
+// slice). Same hidden-out-param convention as tk_str_slice_len: the native backend's LCall result
+// capture is one register, one short of the two-eightbyte tk_str return; this wrapper hands the
+// length back through *out_len and returns the pointer half. Thin wrapper — calls tk_str_slice_chars
+// and owns no logic of its own.
+const tk_byte *tk_str_slice_chars_len(const tk_byte *s_ptr, uint64_t s_len, int64_t from, int64_t to, uint64_t *out_len);
 // tk_str_len — s.len (the byte length). No allocation.
 uint64_t tk_str_len(tk_str s);
 // tk_str_ends_with — true iff s ends with suffix (suffix.len <= s.len and the tail bytes
