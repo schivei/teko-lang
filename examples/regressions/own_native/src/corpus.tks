@@ -3904,18 +3904,42 @@ fn f_slice_elem_compound_ops() -> i64 {
  * The infinities are pinned to their exact texts (`inf`/`-inf`, what `%g` is required to print). The
  * NaN is pinned only by its SUFFIX: a NaN's sign bit and payload are the host libc's business, and
  * glibc prints `-nan` for `inf - inf` where another conforming libc may print `nan` — this corpus
- * runs on glibc AND on musl, so asserting the exact spelling would pin a platform, not a behavior.
- * The suffix still fails loudly for a renderer that printed a number, an empty string, or `0`.
+ * runs on glibc, on musl AND on the Microsoft CRT, so asserting the exact spelling would pin a
+ * platform, not a behavior. The suffix still fails loudly for a renderer that printed a number, an
+ * empty string, or `0`, and it forces three bytes of text ON ITS OWN — a three-byte suffix cannot
+ * match a shorter string — which is the claim the old numbered check 4 spelled a second time.
  *
- * @return 0 when every non-finite value renders in its class, else the number of the failing check
+ * WHY EVERY CLAIM IS AN ASSERTION AND NO LONGER A NUMBERED `return`. The suffix check FAILED on
+ * `windows-x86_64` in three independent samples, and everything this fixture could say was
+ * `expected 0, got 3` — the number of the check, never the text that failed it. TWO different faults
+ * produce that same number, and they belong to different owners: the Microsoft CRT spelling a NaN its
+ * own way (a libc fact, this fixture's business), or a value that is NOT the NaN built here reaching
+ * `teko::ftoa` (a compiler fact, the backend's business). The TEXT tells them apart — `-nan(ind)` is
+ * a spelling, `0` or `1.5e+300` is a wrong value — so every claim here is an assertion that QUOTES
+ * what it saw, and one CI run answers the question instead of a widened claim guessing at it.
+ *
+ * THE BITS ARE DELIBERATELY NOT REPORTED, and that is a measurement, not an omission. Building the
+ * report through `teko::f64_bits` was tried first and MEASURED WRONG on this very backend (2026-07-31,
+ * this box, Linux/x86-64): for a NaN whose C-route bits are `0xFFF8000000000000`, the own backend's
+ * `f64_bits` answered `exp=0 mant=0` inside a function body and garbage that changed between
+ * expressions elsewhere, while `teko::ftoa` of the SAME local answered `-nan` correctly. A fixture
+ * that printed those bits would accuse the value of a defect that belongs to the instrument.
+ *
+ * THE CASE NAMES ITSELF because these assertions run inside the probe, i.e. BEFORE `scenario()`
+ * evaluates its argument and names the case — without this line the panic would report an assertion
+ * with no case attached, which is the addressability hole `scenario()` exists to close. The spelling
+ * is the one `main.tks` and `own_native.tkr` both already use.
+ *
+ * @return 0 — every claim is an assertion now, so a failing one panics with what it SAW instead of
+ *         returning a number a reader has to look up
  */
 fn f_ftoa_nonfinite_text() -> i64 {
+    teko::assert::scenario_begin("ftoa_nonfinite_text")
     mut minus_one: f64 = -1.0
-    if teko::ftoa(d27_infinity()) != "inf" { return 1 }
-    if teko::ftoa(minus_one * d27_infinity()) != "-inf" { return 2 }
+    teko::assert::eq_str(teko::ftoa(d27_infinity()), "inf")
+    teko::assert::eq_str(teko::ftoa(minus_one * d27_infinity()), "-inf")
     let nan_text = teko::ftoa(d27_not_a_number())
-    if !teko::str::ends_with(nan_text, "nan") { return 3 }
-    if nan_text.len < 3 { return 4 }
+    teko::assert::str_ends_with(nan_text, "nan")
     0
 }
 
