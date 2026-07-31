@@ -106,3 +106,76 @@ E a fonte diz também o que ninguém a usa: *"additive by ruling — **`src/` do
    moldura da função. O mecanismo é o mesmo; muda o que se passa como argumento.
 3. **Sub-regiões por omissão** — hoje é opt-in duplo (predicado **ou** `#arena_size`).
 4. **`#arena_depth` (#476)** — não existe, e o plano tem a pergunta em aberto ao dono desde o SW12.
+
+---
+
+## O `#arena_depth` — a definição do dono, e o número que a justifica
+
+> *"cada escopo ou chamada de função abre uma arena, o depth seria o nível de achatamento que ela
+> comportaria, enquanto size define o chão inicial da arena para reduzir o realloc. As sub regiões,
+> arenas dentro de arenas, que popam em LIFO, como o defer faz."*
+
+### Primeiro: a pergunta que o plano tem em aberto NÃO é semântica
+
+O dono disse *"nem sei qual é a pergunta"*. É de **âmbito**, não de significado, e está em
+`docs/design/wave-0.3.1-plan.md`:
+
+> *"**REPORTED gap (not a new issue):** #479/#480 reference `#arena_depth` (**#476**), which is NOT in
+> this task's explicit scope list (it sits in the master-plan 0.3.2 bucket). Either (a) pull #476 into
+> SW12 as crumb 12.0 … or (b) ship #479/#480 size-only and honest-stop the depth suggestion until
+> #476 lands. **Recommend (a)** — the profiler is incoherent suggesting a directive that does not
+> exist."*
+
+**Pergunta: o `#476` entra no SW12 agora, ou o profiler sai sem a sugestão de profundidade?** Nada
+mais. E a definição que o dono acaba de dar torna (a) mais forte, porque o `depth` deixa de ser um
+número solto e passa a ser o controlo de um custo medido — o de baixo.
+
+### O número: abrir uma região custa 64 KiB, não 64 bytes
+
+`teko_rt.h:140`:
+
+```c
+#define TK_REGION_DEFAULT_CHUNK (64u * 1024u)   // default chunk payload (bytes)
+```
+
+A `struct tk_region` são sete campos (~56–64 bytes). **Mas a primeira alocação dentro dela puxa um
+chunk de 64 KiB.** Uma região vazia é barata; uma região *usada* custa 64 KiB de chão.
+
+**E é isto que o `#arena_depth` controla.** Medido no build real do compilador:
+
+```
+CHUNKS: 4996 regions, 21134 chunks, malloc'd cap 1485.8 MB, used 1459.3 MB, tail-waste 26.6 MB
+```
+
+* 21134 chunks / 4996 regiões ≈ **4,2 chunks por região**
+* 1485,8 MB / 21134 chunks ≈ **70,3 KB por chunk** — coerente com os 64 KiB de omissão mais os
+  sobredimensionados
+* **desperdício de cauda: 26,6 MB** para 4996 regiões ≈ **5,3 KB perdidos por região**
+
+**A aritmética que justifica o achatamento:** hoje são ~5000 regiões. Uma região *por escopo* num
+compilador com 5941 itens e laços aninhados não são 5000 — são centenas de milhares. **A 5,3 KB de
+cauda desperdiçada por região, 500 000 regiões dariam ~2,6 GB só de cauda** — antes de contar um único
+byte útil. O `depth` é o que impede a sub-região por omissão de trocar um problema de memória por
+outro maior.
+
+### E o achatamento já existe, sem nome e fixado a 64
+
+Duas ocorrências independentes, ambas com o mesmo tecto:
+
+| sítio | o que limita |
+|---|---|
+| `codegen.tks:5412, 7425, 8156, 8768` | `want_block = cg_block_has_block_local(…) && **regions.len < 64**` — a partir de 64 níveis a região **não abre**, e o comentário chama-lhe *"a safe leak"* |
+| `teko_rt.c:1184` | `#define TK_ARENA_MARK_MAX 64` — a profundidade da pilha de checkpoints por tarefa |
+
+**O achatamento por profundidade já está implementado como constante mágica, em dois sítios, com o
+mesmo valor 64 e sem ninguém lhe chamar `depth`.** O `#arena_depth` não introduz um conceito novo:
+**dá nome, e controlo por declaração, a um tecto que já existe fixado.**
+
+### O LIFO que ele descreve também já lá está
+
+`teko_rt.c:1724`: *"The root region is a **LIFO chunk-list** (`tk_region_alloc` PREPENDS new chunks),
+so a checkpoint = …"*. E o `tk_arena_push`/`tk_arena_pop` é exatamente a disciplina LIFO de marcas que
+ele compara ao `defer` — e o `defer` corre LIFO por ruling verificado (`ast.tks:339`).
+
+**As três peças do modelo dele — sub-regiões aninhadas, pop em LIFO, e um tecto de profundidade —
+existem no runtime. O que não existe é a superfície que as declara e a rota que as usa por omissão.**
