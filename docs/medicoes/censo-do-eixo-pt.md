@@ -174,25 +174,38 @@ compartilhado com a guarda, nada é cacheado.
 * **Duas linhas, sempre nesta ordem**: vivacidade primeiro, valores depois.
 * O eixo não foi alterado. Continua consultado só por `check_ref_storability_block`.
 
-### Custo
+### Custo — A/B limpo
 
-| execução | compilador | censo roda? | tempo | pico |
-|---|---|---|---|---|
-| árvore base | semente 0.3.0.31-beta | não | 91,6 s | 1711,0 MB |
-| árvore com o censo | semente 0.3.0.31-beta | não | 91,7 s | 1718,1 MB |
-| geração 2 | gen-1 (com o censo) | sim | 98,8 s | 1614,0 MB |
+Os dois binários comparados são **ambos geração 1 construídos pela MESMA semente**, a partir
+da mesma árvore; a única diferença é a chamada `report_pt_census(prog)` presente num e
+ausente no outro (`src/checker/pt_census.tks` é compilado nos dois casos, de modo que a
+quantidade de fonte compilada é idêntica). Ambos construíram o mesmo projeto, na mesma
+máquina, sem outra carga pesada minha.
 
-O custo do censo sobre este corpus é **da ordem de 7 s (~7 %)** no tempo de build. Veja §7:
-isso é uma estimativa, não um A/B limpo.
+| geração 1 | censo roda? | tempo | pico |
+|---|---|---|---|
+| com a chamada | sim | 84,7 s | 1612,5 MB |
+| sem a chamada | não | 85,3 s | 1596,5 MB |
+
+* **Tempo: sem custo mensurável.** A corrida com o censo saiu 0,6 s mais *rápida* que a sem
+  — ou seja, o delta está abaixo do ruído. A variância entre execuções desta mesma árvore
+  chegou a 14 s quando havia outros processos pesados na caixa (uma corrida contendida deu
+  98,8 s). Um custo de 0,7 % não é distinguível desse ruído.
+* **Memória: +16,0 MB de pico (+1,0 %)**, esse sim resolvido. É a alocação transiente de
+  4 925 `Spine` construídos e descartados um a um.
+
+Referência das outras corridas, para contexto: a semente construiu a árvore base em 91,6 s /
+1711,0 MB e a árvore com o censo em 91,7 s / 1718,1 MB (a semente não tem o censo, logo essas
+duas medem só o custo de compilar as ~340 linhas novas).
 
 ---
 
 ## 7. O que ficou por medir
 
-1. **O custo do censo não é um A/B limpo.** As linhas da tabela acima comparam binários
-   diferentes (a semente contra a geração 1). Um A/B de verdade exigiria construir a
-   geração 1 duas vezes, com e sem a chamada — duas execuções pesadas adicionais que não
-   foram feitas. Os ~7 s são uma estimativa com esse fator de confusão nomeado.
+1. **O custo em tempo não foi resolvido — foi limitado.** O A/B do §6 diz que o delta é menor
+   que o ruído entre execuções desta caixa, não que ele é zero. Separar um custo de ~1 % do
+   ruído exigiria dezenas de repetições, que não foram feitas. O delta de memória (+16,0 MB)
+   esse foi resolvido com um par de execuções.
 2. **Quantas funções chegam hoje a `fn_spine`, exatamente.** O §5 dá ~20 por `grep` sobre a
    fonte, não por contagem dentro do compilador: `fn_has_ref_param` e `stmts_have_free` são
    privadas de `typer.tks` e o censo não as replicou (replicá-las seria construir análise
@@ -223,3 +236,15 @@ isso é uma estimativa, não um A/B limpo.
 | D | `src/checker/spine.tks:246` (`add_cell`) | A unidade do eixo é o nome deduplicado por função, não o binding nem o local de alocação. Qualquer número derivado do eixo herda essa unidade. |
 
 Nenhum desses foi corrigido: o encargo é contar, não atuar.
+
+---
+
+## 9. Ritual desta medição
+
+* `TEKO_BACKEND=c teko . -o out --no-verify --release` — limpo, **zero avisos de qualquer
+  espécie** (nem do compilador, nem do `cc`); 91,7 s, pico 1718,1 MB pela semente.
+* `./out/teko test .` — **verde**: 292 testes rodados, 292 passaram, 0 falharam, 0 saíram;
+  tier de regressões incluído; 26 min 18 s.
+* **FIXPOINT byte-idêntico na rota C**: `gen2/teko.c` e `gen3/teko.c` têm o mesmo
+  `sha256 9b6f9032…cd0f`, 10 551 547 bytes cada. O censo é aditivo e não moveu um byte
+  emitido.
