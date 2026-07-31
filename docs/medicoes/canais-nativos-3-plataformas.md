@@ -82,7 +82,7 @@ como o `SO_SNDBUF` torna o `AF_UNIX`.
 
 | `nOutBufferSize` pedido | maior mensagem aceite |
 |---|---|
-| 0 (o sistema decide) | **0** ² |
+| 0 (o sistema decide) | **0** ³ |
 | 4096 | 4096 |
 | 65536 | 65536 |
 | 1048576 | 1048576 |
@@ -90,7 +90,7 @@ como o `SO_SNDBUF` torna o `AF_UNIX`.
 
 O teto **segue o `nOutBufferSize`** exatamente, apesar de a documentação lhe chamar *conselho*.
 
-² **A linha do `0` é um artefacto da MEDIÇÃO, não uma propriedade do pipe.** A sonda escreve em
+³ **A linha do `0` é um artefacto da MEDIÇÃO, não uma propriedade do pipe.** A sonda escreve em
 `PIPE_NOWAIT` — obrigatória, porque com escrita bloqueante e o leitor no mesmo fio uma mensagem maior
 do que o buffer pendura. Em `PIPE_NOWAIT` uma escrita só passa se **couber no buffer**, e com
 conselho 0 o buffer é 0. **Em modo bloqueante, com um leitor a drenar, um pipe de conselho 0 leva
