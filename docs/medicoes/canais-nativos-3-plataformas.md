@@ -55,11 +55,43 @@ registos não prova nada: dois registos rasgados a meio ainda contam dois. O que
 | **N threads, 1 descritor partilhado** | 0 rasgados/2000 | 0 | 0 | 0 (pipe nomeado) |
 | **cheio: queda silenciosa?** | **NÃO** (`EAGAIN`) | NÃO | **NÃO** (`ENOBUFS`) | **NÃO** |
 | aceite == entregue | 11 == 11 | — | 32 == 32 | 2000 == 2000 |
-| **teto de uma mensagem** | **131072** | 131072 | **2048** | ≥ 1 MiB ¹ |
+| **teto de uma mensagem** (buffer por omissão) | 212960 | 212960 | **2048** ² | ≥ 1 MiB ¹ |
+| **teto com `SO_SNDBUF` a 4 MiB** | 4194304 | — | **4194288** ² | — |
 
 ¹ A sonda parou por esgotar o **próprio buffer de 1 MiB**, não por recusa do sistema (o erro voltou
 0). O teto real do mailslot local é **≥ 1 MiB**; não foi refinado porque o `Rec` do desenho tem 80
 bytes e a diferença não decide nada.
+
+² **Os 2048 não eram teto — eram o valor por omissão, e a primeira versão desta tabela publicou-os
+como se fossem propriedade do sistema.** O dono desconfiou (*"algo me diz que conseguimos otimizar
+isso"*) e a desconfiança estava certa. Medido: **o teto segue o `SO_SNDBUF`**, menos ~16–32 bytes de
+sobrecarga por datagrama.
+
+| pedido | macOS: dado → maior datagrama | Linux: dado → maior datagrama |
+|---|---|---|
+| (omissão) | 2048 → 2048 | 212992 → 212960 |
+| 8 KiB | 8192 → 8176 | 16384 → 16352 |
+| 64 KiB | 65536 → 65520 | 131072 → 131040 |
+| 256 KiB | 262144 → 262128 | 524288 → 524256 |
+| 1 MiB | 1048576 → 1048560 | 2097152 → 2097120 |
+| 4 MiB | **4194304 → 4194288** | 8388608 → 4194304 |
+
+O **macOS concede exatamente o que se pede; o Linux duplica** — por isso o concedido é sempre relido
+com `getsockopt` em vez de assumido. A patologia do erro é a de sempre nesta lane: **medir um valor
+observado e publicá-lo como propriedade do sistema, sem testar se ele se move.**
+
+### E empacotar K registos por datagrama, no volume real (6500 × 80 B)
+
+| K | datagramas | linux-x86_64 | macos-arm64 |
+|---|---|---|---|
+| 1 | 6500 | 2,344 µs/registo | 4,676 µs/registo |
+| 4 | 1625 | 0,632 µs (3,71×) | 0,836 µs (5,59×) |
+| 8 | 813 | 0,300 µs (7,82×) | 0,326 µs (14,33×) |
+| 16 | 407 | 0,152 µs (15,38×) | 0,332 µs (14,11×) |
+| 25 | 260 | **0,106 µs (22,13×)** | **0,228 µs (20,47×)** |
+
+**Este é o TETO do ganho, não o ganho**: não inclui a descarga forçada no ponto de captura. Mas dá a
+ordem de grandeza — os 2,77× que o socket perdia para o anel viram vantagem já em K=4.
 
 **Conclusão: o açúcar é construível nas três plataformas, e por dois caminhos em cada uma.**
 
