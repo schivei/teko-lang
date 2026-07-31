@@ -4047,6 +4047,29 @@ fn builtin_bytes_of_str_symbol(last: str) -> str | null {
 }
 
 /**
+ * builtin_one_byte_symbol — the runtime twin of the ONE BYTE-TO-STRING builtin this N1 subset
+ * lowers directly: `one_byte` (`checker/scope.tks`'s `(byte) -> str`), a fresh 1-byte `str` holding
+ * its argument — resolves to the out-parameter-length twin (`tk_one_byte_len`, `teko_rt.h`), the
+ * SAME `lower_len_out_call` shape `builtin_str_of_bytes_symbol`/`builtin_bytes_of_str_symbol`
+ * already use for their own `[]byte`/`str` directions. No new lowering ARM is needed: the lone
+ * `byte` argument is a PLAIN SCALAR, so it flattens through `lower_args` as one word exactly like
+ * `builtin_int_to_str_symbol`'s own `i64`/`u64` argument, and `lower_call_fat` appends the length
+ * out-slot the twin writes through.
+ *
+ * The twin's parameter is FULL WIDTH (`uint64_t`, masked inside) rather than `tk_byte`, because
+ * SysV/AAPCS64 leave an argument's bits ABOVE its declared width unspecified and this backend
+ * narrows RETURNS only (`apply_native_c_return_narrow`) — the same full-width shape every other
+ * `_len` twin gives its scalar arguments (0.3.1.0 degrau 32).
+ *
+ * @param last  the call path's LAST segment (the bare builtin name)
+ * @return      `"tk_one_byte_len"`, or `null` when `last` names something else
+ */
+fn builtin_one_byte_symbol(last: str) -> str | null {
+    if last == "one_byte" { return "tk_one_byte_len" }
+    null
+}
+
+/**
  * builtin_host_info_symbol — the runtime twin of the three ZERO-ARGUMENT, COMPILE-TIME-CONSTANT
  * host-info strings this N1 subset lowers directly: `os`/`arch`/`version` (`checker/scope.tks`),
  * each `() -> str` (fat), resolving to the out-parameter-length twin (`tk_rt_os_len`/
@@ -4081,13 +4104,13 @@ fn builtin_peak_rss_symbol(last: str) -> str | null {
 
 /**
  * native_builtin_symbol — the runtime symbol an ADDRESSABLE bare builtin lowers to, across the
- * TWELVE families the N1 call path resolves DIRECTLY: io/process, coverage sinks, arena
+ * THIRTEEN families the N1 call path resolves DIRECTLY: io/process, coverage sinks, arena
  * checkpoints, the `str` predicate pair, the `str` slice trio, the integer-to-string pair, the
  * float-to-text pair (`ftoa`/`f64_g17`, 0.3.1.0 degrau 27), the `str`/`str_of_bytes` alias,
- * `bytes_of_str` (its reverse direction), the `os`/`arch`/`version` host-info trio, the
- * plain-scalar `peak_rss`, and the one `teko::env` host-surface primitive with a native lowering
- * (`builtin_env_symbol`). Split into one predicate per family so a family grows without
- * lengthening the others.
+ * `bytes_of_str` (its reverse direction), `one_byte` (the byte-to-`str` producer, 0.3.1.0 degrau
+ * 32), the `os`/`arch`/`version` host-info trio, the plain-scalar `peak_rss`, and the one
+ * `teko::env` host-surface primitive with a native lowering (`builtin_env_symbol`). Split into one
+ * predicate per family so a family grows without lengthening the others.
  *
  * The INVERSE direction of the float pair — `teko::float::parse(str) -> f64`, the language's own
  * `atof` — is deliberately NOT here, and its absence is a MEASURED refusal rather than an
@@ -4120,6 +4143,7 @@ fn native_builtin_symbol(last: str) -> str | null {
     match builtin_float_to_str_symbol(last) { str as s => return s; null => { } }
     match builtin_str_of_bytes_symbol(last) { str as s => return s; null => { } }
     match builtin_bytes_of_str_symbol(last) { str as s => return s; null => { } }
+    match builtin_one_byte_symbol(last) { str as s => return s; null => { } }
     match builtin_host_info_symbol(last) { str as s => return s; null => { } }
     match builtin_peak_rss_symbol(last) { str as s => return s; null => { } }
     builtin_env_symbol(last)

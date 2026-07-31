@@ -427,6 +427,16 @@ tk_str tk_str_of_bytes(tk_str bytes);
 const tk_byte *tk_str_of_bytes_len(const tk_byte *ptr, uint64_t len, uint64_t *out_len);
 // tk_one_byte — a fresh 1-byte str holding c.
 tk_str tk_one_byte(tk_byte c);
+// tk_one_byte_len — the out-parameter-length twin of `tk_one_byte` (mirrors `tk_str_of_bytes_len`'s
+// own doc): the native backend's `LCall` reads exactly one result register, never the true
+// 2-eightbyte SysV/AAPCS64 struct `tk_one_byte` returns by value, so the fresh buffer's pointer
+// rides the return register and its length (always 1) rides `*out_len`. The byte travels in a
+// FULL-WIDTH parameter — the same shape every other `_len` twin uses for its scalar arguments
+// (`tk_i64_to_str_len`, `tk_str_slice_len`) — because SysV/AAPCS64 leave the bits ABOVE a
+// sub-register-width argument unspecified, and this backend has no argument-narrowing pass
+// (`apply_native_c_return_narrow` narrows RETURNS only); the low 8 bits are taken here instead
+// (0.3.1.0 degrau 32).
+const tk_byte *tk_one_byte_len(uint64_t c, uint64_t *out_len);
 // tk_bytes_of_str — zero-copy view of a str's bytes as a []byte slice. Returns a tk_slice_byte
 // pointing into the same memory. The caller must not outlive the originating str allocation.
 tk_slice_byte tk_bytes_of_str(tk_str s);
