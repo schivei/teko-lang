@@ -557,3 +557,214 @@ fn rgt_rpo_defensive_paths() {
     teko::assert::is_true(ord2.len == (2 to u64))
     teko::assert::is_true(u32_in(ord2, 9 to u32))
 }
+
+/**
+ * sbs_reference — the RETIRED insertion sort, kept verbatim as the oracle the
+ * O(V log V) `sort_by_start` must agree with element for element. Its presence
+ * is the regression: if a future rewrite of `sort_by_start` ever permutes
+ * differently, `sbs_agrees_with_reference` fails instead of the machine code
+ * changing silently.
+ *
+ * @param []LiveInterval virt  the virtual intervals
+ * @return []LiveInterval  the start-sorted intervals, insertion order
+ */
+fn sbs_reference(virt: []LiveInterval) -> []LiveInterval {
+    mut out: []LiveInterval = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= virt.len { break }
+        let v = virt[i]
+        mut ins: []LiveInterval = teko::list::empty()
+        mut placed: bool = false
+        mut j: u64 = 0
+        loop {
+            if j >= out.len { break }
+            let o = out[j]
+            if !placed && interval_before(v, o) {
+                ins = teko::list::push(ins, v)
+                placed = true
+            }
+            ins = teko::list::push(ins, o)
+            j++
+        }
+        if !placed { ins = teko::list::push(ins, v) }
+        out = ins
+        i++
+    }
+    out
+}
+
+/**
+ * sbs_iv_eq — whether two live intervals agree in every field, so that a
+ * sequence comparison catches a permutation difference AND a payload
+ * difference.
+ *
+ * @param LiveInterval a  the first interval
+ * @param LiveInterval b  the second interval
+ * @return bool  true iff every field matches
+ */
+fn sbs_iv_eq(a: LiveInterval, b: LiveInterval) -> bool {
+    a.reg_id == b.reg_id && a.reg_class == b.reg_class && a.start == b.start
+        && a.end == b.end && a.is_fixed == b.is_fixed && a.crosses_call == b.crosses_call
+}
+
+/**
+ * sbs_seq_eq — whether two interval sequences are equal element for element.
+ *
+ * @param []LiveInterval a  the first sequence
+ * @param []LiveInterval b  the second sequence
+ * @return bool  true iff same length and every position agrees
+ */
+fn sbs_seq_eq(a: []LiveInterval, b: []LiveInterval) -> bool {
+    if a.len != b.len { return false }
+    mut i: u64 = 0
+    loop {
+        if i >= a.len { break }
+        if !sbs_iv_eq(a[i], b[i]) { return false }
+        i++
+    }
+    true
+}
+
+/**
+ * sbs_next_rand — one step of a deterministic 31-bit linear congruential
+ * generator, so the shuffled corpora below are reproducible on every host
+ * without a random source.
+ *
+ * @param u64 state  the current generator state
+ * @return u64  the next state, in `[0, 2^31)`
+ */
+fn sbs_next_rand(state: u64) -> u64 {
+    (state * 1103515245 + 12345) % 2147483648
+}
+
+/**
+ * sbs_pseudo_corpus — `n` intervals whose `start` points are drawn from
+ * `sbs_next_rand` modulo `spread` and whose `reg_id`s are the input positions,
+ * so a small `spread` forces many equal starts and exercises the `reg_id`
+ * tie-break at every merge level.
+ *
+ * @param u64 n  how many intervals to build
+ * @param u64 seed  the generator seed
+ * @param u32 spread  the modulus applied to each start point
+ * @return []LiveInterval  the generated intervals, in generation order
+ */
+fn sbs_pseudo_corpus(n: u64, seed: u64, spread: u32) -> []LiveInterval {
+    mut out: []LiveInterval = teko::list::empty()
+    mut state: u64 = seed
+    mut i: u64 = 0
+    loop {
+        if i >= n { break }
+        state = sbs_next_rand(state)
+        let start = (state % (spread to u64)) to u32
+        out = teko::list::push(out, ai_iv(i to u32, start, start + 3, false))
+        i++
+    }
+    out
+}
+
+/**
+ * sbs_is_sorted — whether no element of `xs` sorts strictly before its
+ * predecessor, i.e. the sequence respects `interval_before`.
+ *
+ * @param []LiveInterval xs  the sequence to check
+ * @return bool  true iff sorted
+ */
+fn sbs_is_sorted(xs: []LiveInterval) -> bool {
+    mut i: u64 = 1
+    loop {
+        if i >= xs.len { break }
+        if interval_before(xs[i], xs[i - 1]) { return false }
+        i++
+    }
+    true
+}
+
+#test
+fn sbs_agrees_with_reference_over_pseudo_corpora() {
+    mut n: u64 = 0
+    loop {
+        if n > 64 { break }
+        let wide = sbs_pseudo_corpus(n, 12345 + n, 4096)
+        teko::assert::is_true(sbs_seq_eq(sort_by_start(wide), sbs_reference(wide)))
+        let narrow = sbs_pseudo_corpus(n, 777 + n, 5)
+        teko::assert::is_true(sbs_seq_eq(sort_by_start(narrow), sbs_reference(narrow)))
+        n++
+    }
+}
+
+#test
+fn sbs_output_is_sorted_and_length_preserving() {
+    let xs = sbs_pseudo_corpus(97, 4242, 7)
+    let got = sort_by_start(xs)
+    teko::assert::is_true(got.len == xs.len)
+    teko::assert::is_true(sbs_is_sorted(got))
+}
+
+#test
+fn sbs_degenerate_sizes_match_reference() {
+    let empty: []LiveInterval = teko::list::empty()
+    teko::assert::is_true(sort_by_start(empty).len == (0 to u64))
+    let one = teko::list::push(teko::list::empty(), ai_iv(9, 4, 6, false))
+    teko::assert::is_true(sbs_seq_eq(sort_by_start(one), sbs_reference(one)))
+    let two = teko::list::push(teko::list::push(teko::list::empty(), ai_iv(1, 5, 6, false)), ai_iv(0, 5, 9, true))
+    teko::assert::is_true(sbs_seq_eq(sort_by_start(two), sbs_reference(two)))
+}
+
+#test
+fn sbs_already_sorted_and_reversed_match_reference() {
+    mut asc: []LiveInterval = teko::list::empty()
+    mut desc: []LiveInterval = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= 33 { break }
+        asc = teko::list::push(asc, ai_iv(i to u32, i to u32, (i to u32) + 2, false))
+        desc = teko::list::push(desc, ai_iv((32 - i) to u32, (32 - i) to u32, (34 - i) to u32, false))
+        i++
+    }
+    teko::assert::is_true(sbs_seq_eq(sort_by_start(asc), sbs_reference(asc)))
+    teko::assert::is_true(sbs_seq_eq(sort_by_start(desc), sbs_reference(desc)))
+}
+
+#test
+fn sbs_stable_on_a_key_the_comparator_cannot_separate() {
+    mut xs: []LiveInterval = teko::list::empty()
+    xs = teko::list::push(xs, ai_iv(7, 2, 40, false))
+    xs = teko::list::push(xs, ai_iv(7, 2, 10, true))
+    xs = teko::list::push(xs, ai_iv(3, 2, 99, false))
+    xs = teko::list::push(xs, ai_iv(7, 2, 20, false))
+    let got = sort_by_start(xs)
+    teko::assert::is_true(sbs_seq_eq(got, sbs_reference(xs)))
+    teko::assert::is_true(got[0].reg_id == (3 to u32))
+    teko::assert::is_true(got[1].end == (40 to u32))
+    teko::assert::is_true(got[2].end == (10 to u32))
+    teko::assert::is_true(got[3].end == (20 to u32))
+}
+
+/**
+ * sbs_assigned_vreg — the virtual register an assignment speaks about,
+ * whichever arm of `RegAssignment` it is.
+ *
+ * @param RegAssignment a  the assignment
+ * @return u32  its `vreg_id`
+ */
+fn sbs_assigned_vreg(a: RegAssignment) -> u32 {
+    match a {
+        InReg as r => r.vreg_id
+        Spilled as s => s.vreg_id
+    }
+}
+
+#test
+fn sbs_linear_scan_visits_vregs_in_start_order() {
+    let virt = sbs_pseudo_corpus(24, 31337, 6)
+    let scan = linear_scan(AAPCS64, ai_set(virt, teko::list::empty()))
+    let expected = sbs_reference(virt)
+    teko::assert::is_true(scan.assignments.len == expected.len)
+    mut i: u64 = 0
+    loop {
+        if i >= expected.len { break }
+        teko::assert::is_true(sbs_assigned_vreg(scan.assignments[i]) == expected[i].reg_id)
+        i++
+    }
+}
