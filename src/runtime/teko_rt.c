@@ -1650,6 +1650,11 @@ static void tk_termination_hook_once(void) {
     atexit(tk_regions_free_all);
 }
 
+// (F3) tk_names_forget — drop the name registry's view of the program region. Defined with the rest
+// of the registry below; declared here because tk_regions_free_all frees the very chunks that table
+// is bump-allocated in, and a table pointer that outlived them would be a dangling read.
+static void tk_names_forget(void);
+
 void tk_regions_free_all(void) {
     // (S2 obs) FINAL lifetime-map dump — this is every termination edge's choke point (atexit /
     // tk_exit / tk_panic), so an enabled run always ends with a complete map on disk.
@@ -1658,6 +1663,7 @@ void tk_regions_free_all(void) {
     tk_task *t = tk_task_current();
     t->root = NULL;                                  // the root is on the registry; it is freed below too
     tk_registry_free(&t->regs);
+    tk_names_forget();                               // (F3) the name table is bump-allocated in the program region
     tk_registry_free(&tk_g_program_regs);            // (F2) the program region outlives tasks, but not the process
     tk_g_program = NULL;
 }
@@ -1685,6 +1691,166 @@ tk_region *tk_region_program(void) {
         tk_termination_hook_once();
     }
     return tk_g_program;
+}
+
+// ── (F3) THE NAME REGISTRY ────────────────────────────────────────────────────────────────────
+// The contract, the packing and the reason a stale name is an error rather than undefined behaviour
+// are in teko_rt.h next to the prototypes. What follows is only how it is built.
+//
+// A slot keeps its `resource` across a close ON PURPOSE: a recycled slot whose previous tenant was a
+// cell reuses that cell's 16 bytes instead of abandoning them in the bump-allocated program region,
+// so an open/close loop costs storage once per SLOT rather than once per open. Liveness therefore
+// cannot be read off `resource`; `live` is the field that says it.
+#define TK_NAMES_GEN_SHIFT   32u                       // the name's low half is the slot, the high half the stamp
+#define TK_NAMES_SLOT_MASK   0xFFFFFFFFu               // …so a slot index is 32 bits wide
+#define TK_NAMES_NO_SLOT     0xFFFFFFFFu               // free-list terminator, and therefore not a usable index
+#define TK_NAMES_GEN_MAX     0xFFFFFFFFu               // a slot that would reach this stamp is RETIRED, never reissued
+#define TK_NAMES_INITIAL_CAP 16u                       // 16 slots = 384 bytes, one doubling step from there
+typedef struct {
+    void    *resource;    // what the name stands for; retained across a close so a recycled slot can reuse storage
+    uint32_t generation;  // the stamp a live name carries in its high half; bumped by every close
+    uint32_t kind;        // the LAST kind stored here (never cleared — that is what makes storage reuse safe)
+    uint32_t next_free;   // free-list link, or TK_NAMES_NO_SLOT
+    uint32_t live;        // 1 while a resource is registered under the current stamp
+} tk_name_slot;
+_Static_assert(sizeof(tk_name_slot) <= 32, "a registry slot must stay small — the table is per-process");
+
+static tk_name_slot *tk_g_names      = NULL;             // the slot array, bump-allocated in the program region
+static uint32_t      tk_g_names_cap  = 0;                // slots the array can hold
+static uint32_t      tk_g_names_used = 0;                // slots ever handed out (the array's high-water mark)
+static uint32_t      tk_g_names_live = 0;                // slots live right now
+static uint32_t      tk_g_names_free = TK_NAMES_NO_SLOT; // head of the LIFO free list of recyclable slots
+
+// tk_names_forget — the table dies with the program region that holds it (tk_regions_free_all).
+// Every previously issued name becomes UNKNOWN, which is a status and not a dangling pointer.
+static void tk_names_forget(void) {
+    tk_g_names = NULL; tk_g_names_cap = 0; tk_g_names_used = 0;
+    tk_g_names_live = 0; tk_g_names_free = TK_NAMES_NO_SLOT;
+}
+
+// tk_names_grow — double the slot array inside the program region and copy the live prefix over.
+// The bump allocator has no realloc, so the previous array is abandoned until process exit: the
+// steady-state cost of reaching capacity C is C * 24 bytes live plus (C - 16) * 24 abandoned.
+// 0 when the index space is exhausted (which is a refusal, never a wrap).
+static int tk_names_grow(void) {
+    uint64_t ncap = tk_g_names_cap == 0 ? (uint64_t)TK_NAMES_INITIAL_CAP : (uint64_t)tk_g_names_cap * 2u;
+    if (ncap > (uint64_t)TK_NAMES_NO_SLOT) ncap = (uint64_t)TK_NAMES_NO_SLOT;
+    if (ncap <= (uint64_t)tk_g_names_cap) return 0;
+    tk_name_slot *grown = (tk_name_slot *)tk_region_alloc(tk_region_program(), (size_t)ncap * sizeof *grown);
+    if (tk_g_names_used > 0) memcpy(grown, tk_g_names, (size_t)tk_g_names_used * sizeof *grown);
+    tk_g_names = grown;
+    tk_g_names_cap = (uint32_t)ncap;
+    return 1;
+}
+
+// tk_names_take — reserve a slot and mint its name, WITHOUT touching `kind` or `resource`: the
+// caller decides those, and the cell path needs the OLD kind to know whether the old storage is
+// reusable. NULL (and *out_name unchanged) when no slot can be issued.
+static tk_name_slot *tk_names_take(uint64_t *out_name) {
+    uint32_t index;
+    if (tk_g_names_free != TK_NAMES_NO_SLOT) {
+        index = tk_g_names_free;
+        tk_g_names_free = tk_g_names[index].next_free;
+    } else {
+        if (tk_g_names_used == tk_g_names_cap && !tk_names_grow()) return NULL;
+        index = tk_g_names_used;
+        tk_g_names_used += 1;
+        tk_g_names[index].resource = NULL;
+        tk_g_names[index].generation = 1;              // stamp 0 is never issued, so no valid name is ever 0
+        tk_g_names[index].kind = 0;
+    }
+    tk_name_slot *s = &tk_g_names[index];
+    s->next_free = TK_NAMES_NO_SLOT;
+    s->live = 1;
+    tk_g_names_live += 1;
+    *out_name = ((uint64_t)s->generation << TK_NAMES_GEN_SHIFT) | (uint64_t)index;
+    return s;
+}
+
+// tk_names_slot_at — the slot a name addresses, or NULL when the name does not address a live one.
+// The three comparisons ARE the guarantee: a stamp above the slot's was never issued, a stamp below
+// it belonged to a tenant that has been closed, and an equal stamp on a free slot is one that has
+// not been handed out yet.
+static tk_name_slot *tk_names_slot_at(uint64_t name, int64_t *status) {
+    uint32_t index = (uint32_t)(name & (uint64_t)TK_NAMES_SLOT_MASK);
+    uint32_t gen   = (uint32_t)(name >> TK_NAMES_GEN_SHIFT);
+    if (gen == 0 || index >= tk_g_names_used) { *status = TK_NAMES_ERR_UNKNOWN; return NULL; }
+    tk_name_slot *s = &tk_g_names[index];
+    if (gen > s->generation) { *status = TK_NAMES_ERR_UNKNOWN; return NULL; }
+    if (gen < s->generation) { *status = TK_NAMES_ERR_CLOSED;  return NULL; }
+    if (s->live == 0)        { *status = TK_NAMES_ERR_UNKNOWN; return NULL; }
+    *status = TK_NAMES_OK;
+    return s;
+}
+
+int64_t tk_names_status(uint64_t name) {
+    int64_t status = TK_NAMES_OK;
+    tk_names_slot_at(name, &status);
+    return status;
+}
+
+uint64_t tk_names_open(uint32_t kind, void *resource) {
+    uint64_t name = 0;
+    tk_name_slot *s = tk_names_take(&name);
+    if (s == NULL) return 0;
+    s->kind = kind;
+    s->resource = resource;
+    return name;
+}
+
+void *tk_names_lookup(uint64_t name, uint32_t kind) {
+    int64_t status = TK_NAMES_OK;
+    tk_name_slot *s = tk_names_slot_at(name, &status);
+    if (s == NULL || s->kind != kind) return NULL;
+    return s->resource;
+}
+
+int64_t tk_names_close(uint64_t name) {
+    int64_t status = TK_NAMES_OK;
+    tk_name_slot *s = tk_names_slot_at(name, &status);
+    if (s == NULL) return status;
+    s->live = 0;
+    s->generation += 1;                                // every name ever issued for this slot is now strictly older
+    tk_g_names_live -= 1;
+    if (s->generation >= TK_NAMES_GEN_MAX) return TK_NAMES_OK;   // RETIRED: the stamp may not wrap, so the slot goes
+    s->next_free = tk_g_names_free;
+    tk_g_names_free = (uint32_t)(name & (uint64_t)TK_NAMES_SLOT_MASK);
+    return TK_NAMES_OK;
+}
+
+uint64_t tk_names_live_count(void) { return (uint64_t)tk_g_names_live; }
+
+uint64_t tk_names_capacity(void) { return (uint64_t)tk_g_names_cap; }
+
+uint64_t tk_names_slot_of(uint64_t name) { return name & (uint64_t)TK_NAMES_SLOT_MASK; }
+
+uint64_t tk_names_generation_of(uint64_t name) { return name >> TK_NAMES_GEN_SHIFT; }
+
+uint64_t tk_names_cell_open(int64_t value) {
+    if (value == TK_NAMES_NO_VALUE) return 0;          // the one payload the read sentinel cannot represent
+    uint64_t name = 0;
+    tk_name_slot *s = tk_names_take(&name);
+    if (s == NULL) return 0;
+    if (s->kind != TK_NAMES_KIND_CELL || s->resource == NULL) {
+        s->resource = tk_region_alloc(tk_region_program(), sizeof(int64_t));
+        s->kind = TK_NAMES_KIND_CELL;
+    }
+    *(int64_t *)s->resource = value;
+    return name;
+}
+
+int64_t tk_names_cell_status(uint64_t name) {
+    int64_t status = TK_NAMES_OK;
+    tk_name_slot *s = tk_names_slot_at(name, &status);
+    if (s == NULL) return status;
+    if (s->kind != TK_NAMES_KIND_CELL) return TK_NAMES_ERR_KIND;
+    return TK_NAMES_OK;
+}
+
+int64_t tk_names_cell_read(uint64_t name) {
+    int64_t *cell = (int64_t *)tk_names_lookup(name, TK_NAMES_KIND_CELL);
+    if (cell == NULL) return TK_NAMES_NO_VALUE;
+    return *cell;
 }
 
 // tk_task_begin — create a fresh task and make it the one this flow of control runs on, returning

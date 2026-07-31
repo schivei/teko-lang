@@ -199,6 +199,78 @@ void      *tk_region_lookup(tk_region *r, uint64_t type_id);
 // A task other than the caller's owns its own regions; tk_task_end is what frees those.
 void       tk_regions_free_all(void);
 
+// --- (F3) THE NAME REGISTRY — a u64 NAME resolves to a resource, and a stale name is an ERROR ---
+//
+// WHY THIS IS RUNTIME AND NOT TEKO. Teko has no module-level mutable state (`mut REG = …` outside a
+// function does not parse — "expected a declaration") and check_ref_return_passdown only admits
+// returning one of a function's own `ref` parameters, so a stored field cannot escape. There is
+// nowhere in Teko to PUT a process-wide table today, so the table lives here and Teko reaches it
+// through `extern fn` (src/names/names.tks).
+//
+// WHY A NAME AND NOT A POINTER. A stale pointer is undefined behaviour; a stale NAME is a reportable
+// error. Every entry point below answers a dead name with a status code, never with another
+// resource's bytes. That is the whole reason this layer exists between a task and a shared resource.
+//
+// WHERE IT LIVES. In the (F2) PROGRAM region: the slot array must outlive both the tk_arena_pop of
+// whatever task grew it and the exit of that task, and the program region is the only seat with that
+// lifetime. tk_regions_free_all frees the program region, so it also forgets this table (a name
+// issued before termination is UNKNOWN after it, never a dangling read).
+//
+// THE PACKING, AND WHY RESURRECTION IS IMPOSSIBLE RATHER THAN MERELY UNLIKELY. A name is
+// `(generation << 32) | slot`: the low half indexes the slot array directly (O(1), no hashing), the
+// high half is that slot's lifetime stamp. tk_names_close bumps the stamp, so every name ever issued
+// for a slot is strictly older than the live one and compares unequal — a recycled slot cannot
+// answer to its predecessor's name. A slot whose stamp would reach TK_NAMES_GEN_MAX is RETIRED
+// (never returned to the free list), so the counter cannot wrap and hand a second resource the name
+// of a first: the guarantee is arithmetic, not statistical. Its price is one slot (24 bytes on LP64)
+// withheld per 4 294 967 293 open/close cycles of that same slot.
+//
+// NOT the per-region `tk_region_register`/`tk_region_lookup` pair above, deliberately: that one is
+// keyed by a compile-time type_id, is PER REGION with a parent walk, is a linear scan, and its
+// duplicate rule is OVERWRITE — i.e. exactly the silent-resurrection behaviour this table exists to
+// make impossible. Nothing here touches it and the DI surface is unchanged.
+#define TK_NAMES_KIND_CELL      1u          // the F3-owned resource kind: one int64_t in the program region
+#define TK_NAMES_OK             0           // the name is live (and, for a kinded query, of that kind)
+#define TK_NAMES_ERR_UNKNOWN  (-1)          // no such name was ever issued (includes the 0 name)
+#define TK_NAMES_ERR_CLOSED   (-2)          // the name WAS issued and has since been closed — the stale case
+#define TK_NAMES_ERR_KIND     (-3)          // the name is live, but names another kind of resource
+// The two codes below classify a REFUSED open — an open answers with the name 0 and the caller is
+// what tells the two apart, because only the caller's own argument distinguishes them.
+#define TK_NAMES_ERR_FULL     (-4)          // no slot could be issued (the index space is exhausted)
+#define TK_NAMES_ERR_RESERVED (-5)          // a cell was asked to hold TK_NAMES_NO_VALUE
+#define TK_NAMES_NO_VALUE     INT64_MIN     // the reserved payload tk_names_cell_read returns for a dead name
+// tk_names_open — register `resource` under a fresh name of `kind`. The registry never allocates,
+// frees or dereferences the resource: it only hands back a name for it. 0 on refusal (index space
+// exhausted). THIS IS THE F4 SEAM: a `tk_chan *` enters here under its own kind.
+uint64_t   tk_names_open(uint32_t kind, void *resource);
+// tk_names_lookup — the resource `name` stands for, or NULL when the name is dead, was never issued,
+// or names a resource of another kind. The kind argument is what stops one kind's name from ever
+// resolving to another kind's bytes.
+void      *tk_names_lookup(uint64_t name, uint32_t kind);
+// tk_names_status — TK_NAMES_OK, or which of the failure modes `name` is in (kind-agnostic).
+int64_t    tk_names_status(uint64_t name);
+// tk_names_close — retire `name`, bumping its slot's stamp so the name can never resolve again.
+// TK_NAMES_OK, or the same status a lookup would have failed with (closing twice is an ERROR).
+int64_t    tk_names_close(uint64_t name);
+// tk_names_live_count — how many names are live right now (the F3 leak probe: open+close returns it).
+uint64_t   tk_names_live_count(void);
+// tk_names_capacity — how many slots the array currently holds (its byte cost is capacity * 24).
+uint64_t   tk_names_capacity(void);
+// tk_names_slot_of — the slot half of a name. A PURE decode: defined for a dead name too, which is
+// what lets a test show that the slot really is recycled while the name is not.
+uint64_t   tk_names_slot_of(uint64_t name);
+// tk_names_generation_of — the stamp half of a name. Pure decode, same reason.
+uint64_t   tk_names_generation_of(uint64_t name);
+// tk_names_cell_open — the first resource kind, and the one Teko can hold today: a single int64_t
+// allocated in the program region. 0 on refusal (TK_NAMES_NO_VALUE is not storable).
+uint64_t   tk_names_cell_open(int64_t value);
+// tk_names_cell_read — the value the cell named by `name` holds, or TK_NAMES_NO_VALUE when the name
+// does not resolve to a live cell.
+int64_t    tk_names_cell_read(uint64_t name);
+// tk_names_cell_status — TK_NAMES_OK when `name` is a live cell, else the failure mode (so a caller
+// can report WHY the read failed instead of only that it did).
+int64_t    tk_names_cell_status(uint64_t name);
+
 // --- the PER-TEST CHANNEL (owner ruling: "para os que rodam em processo, passar um canal proprio
 // pra stdin, out e err"). ---------------------------------------------------------------------
 //
