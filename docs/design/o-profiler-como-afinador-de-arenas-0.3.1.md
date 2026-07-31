@@ -5,7 +5,7 @@
 > o controle da memória em regiões safe."*
 
 Isto fecha a pergunta que o plano deixou em aberto (`wave-0.3.1-plan.md:464`), e fecha-a por
-construção em vez de por escolha: **se o profiler é o afinador, a directiva que ele afina tem de
+construção em vez de por escolha: **se o profiler é o afinador, a diretiva que ele afina tem de
 existir.** O `#476` entra no SW12 como **crumb 12.0**. Não é a opção (a) do plano a ganhar a votação;
 é a opção (b) a deixar de ser coerente — um afinador sem um dos dois botões não afina, mede.
 
@@ -17,7 +17,7 @@ entrada é do integrador.
 
 ---
 
-## 0. Onde a árvore contradiz o que me foi dado — três correcções, todas para melhor
+## 0. Onde a árvore contradiz o que me foi dado — três correções, todas para melhor
 
 Foi-me pedido que dissesse. Digo, e as três **fortalecem** a proposta em vez de a enfraquecerem.
 
@@ -60,12 +60,12 @@ tempo é limitado pela **profundidade**, não pela contagem total.
 | regime | o que o `depth` limita |
 |---|---|
 | hoje (nada larga) | **bytes residentes** — cauda × regiões criadas, o cálculo do briefing |
-| com sub-regiões a largar | **bytes residentes** ≤ `depth × 64 KiB × cadeias activas` … |
+| com sub-regiões a largar | **bytes residentes** ≤ `depth × 64 KiB × cadeias ativas` … |
 | … e o resto migra para | **agitação do alocador** — um `posix_memalign` de 64 KiB por região USADA, e um `free` por drop |
 
 O `depth` deixa de ser *"o que impede um estouro de 2,6 GB"* e passa a ser **a taxa de câmbio entre
 bytes residentes e agitação do alocador**. Os dois lados são mensuráveis, e **o profiler tem de
-reportar os dois**, senão sugere um número optimizando metade de uma balança.
+reportar os dois**, senão sugere um número otimizando metade de uma balança.
 
 ---
 
@@ -88,11 +88,11 @@ O precedente existe e é literal: `src/coverage/coverage.tks` já é uma caminha
 | que sítios alocam `str` (hoje irroteável, §6) | **sim** |
 | **quantos bytes cada região vai realmente conter** | **NÃO** — depende da entrada |
 | **quantas vezes cada função é chamada** | **NÃO** |
-| **que profundidade é atingida em execução** | **NÃO** — recursão e chamadas indirectas não são léxicas |
+| **que profundidade é atingida em execução** | **NÃO** — recursão e chamadas indiretas não são léxicas |
 
 **O estático dá o DENOMINADOR, nunca o numerador.** Ele responde *"quantos sítios existem e quais
 poderiam ser afinados"*; nunca *"qual deles vale a pena"*. Um profiler que sugerisse `#arena_size` só
-com o estático estaria a inventar o número — exactamente o que a ruling de 2026-07-13 proíbe.
+com o estático estaria a inventar o número — exatamente o que a ruling de 2026-07-13 proíbe.
 
 ### 1.2 O modo DINÂMICO — por região, por sítio de abertura
 
@@ -148,7 +148,7 @@ corrida que fica** — o número é a minha proposta, não uma medição.
 
 **A pergunta "máximo? percentil?" tem resposta derivável, e ela não é nenhuma das duas por
 preferência.** É um problema de jornaleiro (*newsvendor*): há um custo de ficar aquém e um custo de
-passar além, eles são **assimétricos**, e o óptimo de uma distribuição sob custos assimétricos é
+passar além, eles são **assimétricos**, e o ótimo de uma distribuição sob custos assimétricos é
 **sempre um quantil**, cujo valor sai da razão dos custos:
 
 ```
@@ -172,7 +172,7 @@ q* = 1320 / (1320 + 1) = 0,99924
 
 **O quantil é p99,9 — praticamente o máximo, e é por isso que a intuição "usa o máximo" quase
 acerta.** Mas *"quase"* é o ponto: com 3,48 M alocações num só sítio, uma cauda pesada é certa, e é
-exactamente a última milésima que contém a invocação patológica cujo chão seria desastroso replicar em
+exatamente a última milésima que contém a invocação patológica cujo chão seria desastroso replicar em
 todas as outras. **A regra é "o máximo menos a cauda extrema", e o profiler diz qual foi o corte.**
 
 > **`size` = o balde `p99,9` do histograma de marca-d'água por abertura, arredondado para cima ao
@@ -182,7 +182,7 @@ E três guardas, cada uma com a razão:
 
 1. **`size < 64 KiB` não se sugere.** `TK_REGION_DEFAULT_CHUNK` já é 64 KiB (`teko_rt.h:140`) e
    `tk_region_alloc` dimensiona o primeiro chunk a `max(pedido, 64 KiB)`. Uma sugestão abaixo do chão
-   é uma directiva que não faz nada — pior que nenhuma, porque parece que faz.
+   é uma diretiva que não faz nada — pior que nenhuma, porque parece que faz.
 2. **Menos de `N` aberturas ⇒ `Confidence::Thin`, e a sugestão sai marcada.** Um quantil p99,9 sobre
    12 amostras é o máximo com outro nome.
 3. **Um sítio dominado por bytes irroteáveis ⇒ recusa nomeada, nunca sugestão** (§6).
@@ -191,7 +191,7 @@ E três guardas, cada uma com a razão:
 
 Definição do dono: *"o depth seria o nível de achatamento que ela comportaria"*. Além do nível `d`, o
 escopo **não abre região** — as suas alocações vão para a região envolvente mais próxima. É
-exactamente o que `regions.len < 64` já faz hoje em quatro sítios (`codegen.tks:5412`, `:7425`,
+exatamente o que `regions.len < 64` já faz hoje em quatro sítios (`codegen.tks:5412`, `:7425`,
 `:8156`, `:8768`), com o comentário a chamar-lhe *"a safe leak"*, e a que `TK_ARENA_MARK_MAX 64`
 (`teko_rt.c:1184`) faz eco no runtime. **`#arena_depth` não introduz conceito: dá nome, e controlo por
 declaração, a um tecto que já existe fixado a 64 em três sítios independentes.**
@@ -204,21 +204,21 @@ desenho:**
 > o seu chão.**
 
 Uma região de bloco que segure 200 bytes custa 64 KiB para segurar 200 bytes — **uma perda de 300×**.
-Isto diz uma coisa que precisa de ser dita alto: **sub-regiões por omissão em TODO o escopo é
+Isto diz uma coisa que precisa de ser dita alto: **sub-regiões por padrão em TODO o escopo é
 inacessível com o chão de hoje, e o `depth` é o que a torna acessível — não uma afinação fina.**
 
 > **`depth` = o nível `d` mais profundo tal que, em todo o nível ≤ `d`, a média de bytes recuperados
 > no drop excede o custo do chão daquele nível.**
 
-Isto é directamente calculável a partir de duas das sete grandezas do §1.2 (*bytes recuperados no
+Isto é diretamente calculável a partir de duas das sete grandezas do §1.2 (*bytes recuperados no
 drop*, *profundidade atingida*), e produz um número **por declaração**, que é a granularidade a que a
-directiva se aplica.
+diretiva se aplica.
 
 **E daqui sai o achado adjacente que REPORTO e não converto em issue:** o critério acima também
 dimensiona o *outro* botão que ninguém declarou — **`TK_REGION_DEFAULT_CHUNK` é uma constante única
 para regiões de todas as profundidades**, e uma região profunda quase nunca precisa de 64 KiB. Um chão
 que encolhesse com a profundidade baixaria o ponto de equilíbrio e deixaria o `depth` subir. **Isto é
-custo, não correcção, não pertence a nenhum dos quatro crumbs, e a decisão de o puxar é do dono.**
+custo, não correção, não pertence a nenhum dos quatro crumbs, e a decisão de o puxar é do dono.**
 
 ### 2.3 A precedência — `manual > PGO > omissão`, e ela resolve uma tensão de lei real
 
@@ -235,20 +235,20 @@ E o `#480` diz *"o pré-linker atribui automaticamente tamanho+profundidade a pa
 | camada | quem escreve | o que a lei diz |
 |---|---|---|
 | **manual** — `#arena_size(N)` / `#arena_depth(N)` na fonte | **só o humano** | intacta: o literal é sempre escrito por uma pessoa |
-| **PGO** — `.tkprof` passado ao build | o profiler, num artefacto **à parte** | não é a directiva; é o **valor por omissão** para quem não a tem |
+| **PGO** — `.tkprof` passado ao build | o profiler, num artefato **à parte** | não é a diretiva; é o **valor por padrão** para quem não a tem |
 | **omissão** | o compilador | `TK_REGION_DEFAULT_CHUNK` e o tecto de hoje |
 
-**O `#480` nunca escreve na fonte, e nunca produz uma directiva.** Ele substitui o *default*, e a
-directiva — quando existe — ganha-lhe. A ruling de 2026-07-13 fala do **número que a directiva
+**O `#480` nunca escreve na fonte, e nunca produz uma diretiva.** Ele substitui o *default*, e a
+diretiva — quando existe — ganha-lhe. A ruling de 2026-07-13 fala do **número que a diretiva
 carrega**; o PGO não toca nesse número. As duas leis compõem-se, e a precedência que o plano já
-escreveu (*"manual > PGO > omissão"*) é exactamente o enunciado dessa composição.
+escreveu (*"manual > PGO > omissão"*) é exatamente o enunciado dessa composição.
 
-**Consequência que fixo aqui:** o profiler **imprime a directiva como texto para o humano colar**, e o
+**Consequência que fixo aqui:** o profiler **imprime a diretiva como texto para o humano colar**, e o
 pré-linker **lê o `.tkprof`**. Nenhum dos dois reescreve `.tks`. Um profiler que reescrevesse fonte
 violaria a ruling e, pior, tornaria o corpus não reproduzível a partir do que está no git.
 
-**E o `.tkprof` entra por bandeira explícita, `--pgo <ficheiro>`, nunca por descoberta automática no
-directório do projecto.** A razão é um defeito já nomeado e já pago: um ficheiro de corrida anterior a
+**E o `.tkprof` entra por bandeira explícita, `--pgo <arquivo>`, nunca por descoberta automática no
+diretório do projeto.** A razão é um defeito já nomeado e já pago: um arquivo de corrida anterior a
 flutuar e a ser lido como se fosse desta corrida (`journaling-de-corrida-0.3.1.md` §5.2, defeito 3).
 Um build tem de dizer o que leu. **Descoberta automática é um portão que não gateia.**
 
@@ -264,7 +264,7 @@ ratificada e divergir dela seria inventar uma segunda gramática para o mesmo ti
  * MESMA FORMA de `parse_arena_size_arg`, e pela mesma razão: `N` é um literal inteiro nu, escrito
  * pelo programador, nunca uma expressão e nunca um número que o compilador calcule (ruling do dono,
  * 2026-07-13). O `0` é recusado — achatar até zero é não abrir região nenhuma, e isso já é o
- * comportamento de omissão de hoje, não uma directiva.
+ * comportamento padrão de hoje, não uma diretiva.
  *
  * @param tokens  o fluxo de tokens do módulo
  * @param pos     o índice do `#` que abre o atributo
@@ -289,7 +289,7 @@ desconhecido, que ganha `#arena_depth(N)` na enumeração.
 
 **E o consumo no emissor é substituição, não adição:** os quatro `regions.len < 64` passam a
 `regions.len < cg_arena_depth_of(f)`, uma função que devolve `f.arena_depth` quando declarado, o valor
-do `.tkprof` quando há PGO, e `64` por omissão. **A constante mágica de hoje torna-se o ramo de
+do `.tkprof` quando há PGO, e `64` por padrão. **A constante mágica de hoje torna-se o ramo de
 omissão da mesma expressão** — é a mesma linha, com um nome.
 
 ---
@@ -303,19 +303,19 @@ asserções**: registos pequenos, muitos, atribuíveis, em tempo real. **A afina
 forma, e a §28.2 já decidiu o caso irmão** — a cobertura **não vira tráfego de canal**, porque
 acumula em tabelas e despeja **uma vez**.
 
-**Os dados de arena são exactamente esse caso, e por um argumento que se pode produzir:**
+**Os dados de arena são exatamente esse caso, e por um argumento que se pode produzir:**
 `tk_alloc` tem **3 484 564** chamadas num build. Um registo por alocação seriam 3,48 M mensagens de
 80 bytes = **~265 MB de tráfego de canal** para medir 1926 MB de alocação. **A instrumentação custaria
-uma fracção significativa daquilo que mede** — e a §28.2 já apanhou esse desastre uma vez, na forma
+uma fração significativa daquilo que mede** — e a §28.2 já apanhou esse desastre uma vez, na forma
 "um registo por linha executada". Repetir seria repetir o erro que o dono já corrigiu.
 
-> **Logo: acumula em tabelas de tamanho fixo, despeja UMA vez, e o journal transporta o FACTO do
+> **Logo: acumula em tabelas de tamanho fixo, despeja UMA vez, e o journal transporta o FATO do
 > despejo.** É a forma da cobertura, aplicada a uma segunda medição — não uma segunda infraestrutura.
 
 ### 3.1 A emenda ao journal, e ela é de um campo
 
 A §28.3 tem `Cov` **vazio**, e o vazio é o ponto: ele transporta *"o despejo deste escritor está
-completo"*, o que torna um despejo em falta **detectável**. O profiler precisa exactamente da mesma
+completo"*, o que torna um despejo em falta **detectável**. O profiler precisa exatamente da mesma
 propriedade, para o seu despejo. A emenda mínima:
 
 ```teko
@@ -323,18 +323,18 @@ propriedade, para o seu despejo. A emenda mínima:
  * DumpMark — o marcador de que UM despejo de tabelas deste escritor está COMPLETO.
  *
  * ERA `Cov` (§28.3) E É A MESMA COISA COM O NOME HONESTO: passou a haver mais do que um despejo, e
- * o registo continua a não transportar identificadores — transporta o FACTO de o despejo existir,
+ * o registo continua a não transportar identificadores — transporta o FATO de o despejo existir,
  * UM por escritor e por espécie. O argumento de §28.3 fica intacto; só o nome deixou de ser estreito.
  *
  * RENOMEAR CUSTA ZERO E É POR ISSO QUE SE FAZ AGORA: `teko::journal` não existe na árvore (medido —
- * zero acertos de `teko::journal`/`tk_journal` em `src/`), logo o tipo ainda não tem um utilizador.
+ * zero acertos de `teko::journal`/`tk_journal` em `src/`), logo o tipo ainda não tem um usuário.
  *
  * @since 0.3.1
  */
 pub type DumpMark = struct {
     /** que despejo: `0` cobertura (`.tkcov`), `1` arena (`.tkprof`). Um `u8`, não uma espécie
-        nova — duplicar a maquinaria do marcador para um facto que difere num valor enumerado é
-        exactamente o que a §28 recusou quando eliminou o `RecVerdict`. */
+        nova — duplicar a maquinaria do marcador para um fato que difere num valor enumerado é
+        exatamente o que a §28 recusou quando eliminou o `RecVerdict`. */
     what: u8
 }
 
@@ -353,8 +353,8 @@ pub type RecBody = variant Assert | DumpMark
 | `Rec` binário, quadro prefixado por comprimento (§26.4) | **sim, sem alteração** — o `.tkprof` copia o enquadramento e a forma magic+versão+remédio do `.tkb` |
 | transporte (`AF_UNIX`/`\\.\pipe\`), tecto 2048, `chunk_n` (§29, adenda 07-31) | **sim** — para o marcador, que tem 1 byte de corpo; **e nunca dispara chunk**, o que é a resposta certa |
 | fan-in por `writer` (§16) | **sim, e é necessário** — um build paralelo tem N escritores e N `.tkprof` a fundir |
-| `sweep`/`run_root`/`scratch` (§2.2, §7.2) | **sim** — o `.tkprof` é um artefacto da corrida e obedece à mesma raiz |
-| `tk_rt_rename` (§2.3) | **sim** — o `.tkprof` é um artefacto INTEIRO, publica-se por `rename`, nunca meio-escrito |
+| `sweep`/`run_root`/`scratch` (§2.2, §7.2) | **sim** — o `.tkprof` é um artefato da corrida e obedece à mesma raiz |
+| `tk_rt_rename` (§2.3) | **sim** — o `.tkprof` é um artefato INTEIRO, publica-se por `rename`, nunca meio-escrito |
 | a detecção de despejo em falta (§28.3) | **sim, e é o que impede o defeito que a cobertura já teve**: um `.tkprof` da corrida anterior lido como desta |
 | ordenação global, carimbo de tempo | **não é preciso** — e a §24.2 já o recusou por bons motivos, que se mantêm |
 
@@ -372,15 +372,15 @@ conclusão é que o requisito, tal como está escrito, mede a grandeza errada �
 `tk_cov_dump` (`teko_rt.c:3285`) é um `fopen(path,"wb")` que percorre as tabelas e escreve três
 secções com o magic `TKCOV1`. O `fread` está do lado do agregador. **A forma "acumula, despeja uma
 vez, lê no fim" já é a que o dono descreve.** Quem abrir o 12.1 à procura de um append de cobertura
-para "consertar" está a consertar o que já está certo.
+para "consertar" está consertando o que já está certo.
 
 ### 4.2 "Zero alocação em corrida" é **falso hoje** — e o defeito é outro, e maior
 
 | sumidouro | dedup por acerto | aloca em corrida? | fonte |
 |---|---|---|---|
 | **linhas** | conjunto de endereçamento aberto | sim, no `rehash` (dobra) | `tk_line_insert_packed`, `:3233` |
-| **funções** | **varrimento LINEAR do vector inteiro** | sim, `realloc` a dobrar | `tk_cov_mark`, `:3127` |
-| **ramos** | **varrimento LINEAR do vector inteiro** | sim, `realloc` a dobrar | `tk_covb_add`, `:3178` |
+| **funções** | **varrimento LINEAR do vector inteiro** | sim, `realloc` dobrando | `tk_cov_mark`, `:3127` |
+| **ramos** | **varrimento LINEAR do vector inteiro** | sim, `realloc` dobrando | `tk_covb_add`, `:3178` |
 
 E a frequência é o pior: `tk_cov_mark` é **prólogo de entrada de função** e `tk_cov_branch_at` corre
 em **cada passagem por ramo**. **O custo dominante não é a alocação — é `O(distintos)` por acerto.**
@@ -389,8 +389,8 @@ em **cada passagem por ramo**. **O custo dominante não é a alocação — é `
 
 Três itens, e o terceiro é o que torna a frase do `#475` literalmente verdadeira pela primeira vez:
 
-1. **Funções e ramos adoptam o conjunto de endereçamento aberto que as linhas já usam.** A função
-   existe três dezenas de linhas acima, no mesmo ficheiro. O despejo, o formato e o agregador **não
+1. **Funções e ramos adotam o conjunto de endereçamento aberto que as linhas já usam.** A função
+   existe três dezenas de linhas acima, no mesmo arquivo. O despejo, o formato e o agregador **não
    mudam uma linha**.
 2. **O `DumpMark` no journal** (§3.1) — um despejo em falta passa a ser detectável em vez de ser
    silenciosamente substituído pelo da corrida anterior.
@@ -435,7 +435,7 @@ E as duas fronteiras, medidas:
 
 `tk_alloc` tem **18 sítios de chamada em toda a árvore**, e **todos** dentro de `src/runtime/teko_rt.c`.
 Simbolizar o topo devolveria algo como `tk_slice_push` — e `#arena_size` **não se pode escrever numa
-função do runtime**: a directiva liga-se a um `fn` de topo em Teko (`ast.tks:433-441`, e as
+função do runtime**: a diretiva liga-se a um `fn` de topo em Teko (`ast.tks:433-441`, e as
 `parse_decl_attributes` nem sequer correm sobre métodos). **O `ra` responde "onde no runtime". O
 afinador precisa de "qual declaração".** É precisamente por isso que a árvore já construiu o RA1/RA2
 (`tk_obs_push`, `tk_g_push_ra`, `#148`) para atravessar o salto do embrulho — e construiu-o **para um
@@ -451,7 +451,7 @@ que morre no dia em que a onda fecha.
 
 ### 5.3 A resposta, então — e ela é a "tabela de sítios emitida em compilação"
 
-**O precedente está no mesmo ficheiro que vai ser alterado:** `emit_cov_line` emite
+**O precedente está no mesmo arquivo que vai ser alterado:** `emit_cov_line` emite
 `tk_cov_line_at(<fn_idx>, <line>)` — **a posição é injectada pelo compilador, não descoberta em
 execução**. A mesma forma, aplicada às aberturas de região:
 
@@ -461,7 +461,7 @@ tk_region_new(parent)   ->   tk_region_new_at(parent, <site_id>)
 
 **Cinco sítios de emissão no `codegen.tks`, todos já localizados:** `:5441` (moldura de função),
 `:7431` (braço de valor), `:8165` (`emit_block_region`), `:8772` (corpo de `loop`), `:5159` (região
-por objecto de classe). Mais uma tabela estática que o emissor escreve com
+por objeto de classe). Mais uma tabela estática que o emissor escreve com
 `(fn_name, file, line, col, kind, depth_léxica)`.
 
 | propriedade | `ra` + `addr2line` | tabela de sítios |
@@ -481,7 +481,7 @@ por objecto de classe). Mais uma tabela estática que o emissor escreve com
 * **O `ra` + offset fica como canal RESIDUAL**, e ganha um trabalho preciso: **os bytes que chegam à
   raiz sem passar por região nenhuma.** Esses não têm sítio de abertura para lhes atribuir, e são hoje
   a maioria — 88 % num único posto. **O residual é a medida do que o actuador ainda não alcança**, o
-  que o liga directamente ao §7. Custa um `fprintf` e a linha de documentação que diz "não despojado,
+  que o liga diretamente ao §7. Custa um `fprintf` e a linha de documentação que diz "não despojado,
   `-g` para linha, rota C apenas".
 
 **E respondendo à parte dura da pergunta — "se o profiler não consegue responder a isto, não vale a
@@ -499,9 +499,9 @@ Verificado no cabeçalho: existem `tk_str_concat` (`teko_rt.h:386`) e `tk_str_co
 
 No build real: **66,4 MB em 2 165 811 buffers**, na linha `MALLOC str total` — **um contador
 separado, fora da árvore de regiões** (`tk_obs_mstr`). Nenhum drop de região os alcança. Não hoje, não
-com sub-regiões por omissão, não com o predicado alargado, não com `depth` nenhum.
+com sub-regiões por padrão, não com o predicado alargado, não com `depth` nenhum.
 
-**A consequência para o afinador é directa e não é opcional:**
+**A consequência para o afinador é direta e não é opcional:**
 
 > Um sítio cujos bytes são maioritariamente `str` **não pode ser afinado por `#arena_size`**. O chão
 > da região não toca em bytes que nunca entram na região.
@@ -528,10 +528,10 @@ honestidade — a minoria roteável, e **relata o tamanho da maioria que não po
 
 ## 7. O profiler como ORÁCULO DO ACTUADOR — a peça que ele hoje não tem
 
-A observação é do integrador e é a mais valiosa deste ficheiro: **a espinha classifica na perfeição e
+A observação é do integrador e é a mais valiosa deste arquivo: **a espinha classifica na perfeição e
 a memória não se mexe.** O eixo `PtFrame`/`PtRoot`/`PtParam`/`PtAdopter` (`spine.tks:98`) raciocina
 sobre *onde o armazenamento vive* — e está medido que nada é encaminhado para lá: recuperação
-**0,0 %**, dois alocadores com região, selector de dois níveis, `tk_str_concat_r` inexistente.
+**0,0 %**, dois alocadores com região, seletor de dois níveis, `tk_str_concat_r` inexistente.
 
 **Proposta: o profiler é o oráculo de que a mudança de arena fez alguma coisa.** As quatro medições já
 existem no despejo de hoje; o que falta é declará-las como afirmações que podem **falhar**.
@@ -547,9 +547,9 @@ existem no despejo de hoje; o que falta é declará-las como afirmações que po
 igual — bastaria abrir regiões a mais. **Só a quarta mede que o problema encolheu**, e é por isso que
 ela é a que vai ao portão.
 
-**A forma de portão** (`arena_reclaim_ratio_nonzero`, §9): depois do roteamento aterrar, uma corrida
+**A forma de portão** (`arena_reclaim_ratio_nonzero`, §9): depois de o roteamento entrar, uma corrida
 instrumentada do self-build cujo `.tkprof` tenha `reclaim ratio == 0,0 %` **reprova a corrida**. É a
-inversão que a lei do projecto exige — sem ela, "o actuador funciona" é prosa que substituiu prova.
+inversão que a lei do projeto exige — sem ela, "o actuador funciona" é prosa que substituiu prova.
 
 ---
 
@@ -580,7 +580,7 @@ pub type SiteKind = enum { Frame; Block; Arm; LoopBody; Object }
  *
  * CARREGAR A TABELA DENTRO DO FICHEIRO É O QUE O TORNA PORTÁVEL — é a mesma decisão da §28.6 do
  * journal, e pela mesma razão: um índice que aponta para uma tabela externa (o `TProgram` de outro
- * compilador) não atravessa versões; um índice que aponta para o cabeçalho do próprio ficheiro sim.
+ * compilador) não atravessa versões; um índice que aponta para o cabeçalho do próprio arquivo sim.
  *
  * @since 0.3.1
  */
@@ -589,9 +589,9 @@ pub type Site = struct {
     id: u32
     /** que construção o abriu. */
     kind: SiteKind
-    /** a declaração Teko a que uma directiva se aplicaria — é ISTO que o `ra` nunca dá (§5.2). */
+    /** a declaração Teko a que uma diretiva se aplicaria — é ISTO que o `ra` nunca dá (§5.2). */
     fn_name: str
-    /** o ficheiro da declaração. */
+    /** o arquivo da declaração. */
     file: str
     /** a linha da abertura. */
     line: u32
@@ -638,7 +638,7 @@ pub type SiteStat = struct {
  * Confidence — quanta massa de amostra sustenta uma sugestão.
  *
  * EXISTE PORQUE UM QUANTIL p99,9 SOBRE DOZE AMOSTRAS É O MÁXIMO COM OUTRO NOME, e uma sugestão que
- * não diz isso está a apresentar um palpite com a mesma cara de uma medição.
+ * não diz isso está apresentando um palpite com a mesma cara de uma medição.
  *
  * @since 0.3.1
  */
@@ -683,7 +683,7 @@ pub type Profile = struct {
         de outra árvore, porque um `Site.id` só significa alguma coisa contra as declarações que o
         emitiram (é a guarda que o `.tkcov` nunca teve). */
     decl_digest: u64
-    /** a tabela de sítios, escrita pelo emissor e carregada aqui — é o que torna o ficheiro portável. */
+    /** a tabela de sítios, escrita pelo emissor e carregada aqui — é o que torna o arquivo portável. */
     sites: []Site
     /** o que a corrida observou, paralelo a `sites` por `Site.id`. */
     stats: []SiteStat
@@ -701,7 +701,7 @@ pub type Profile = struct {
  * DENOMINADOR (que sítios existem), nunca o numerador (quais valem a pena) — §1.1.
  *
  * @param prog  o programa tipado
- * @return      a tabela de sítios, ordenada por ficheiro e linha
+ * @return      a tabela de sítios, ordenada por arquivo e linha
  * @since 0.3.1
  */
 pub fn walk(prog: checker::TProgram) -> []Site
@@ -709,7 +709,7 @@ pub fn walk(prog: checker::TProgram) -> []Site
 /**
  * read — ler um `.tkprof` produzido por uma corrida instrumentada.
  *
- * @param path  o ficheiro a ler
+ * @param path  o arquivo a ler
  * @return      o perfil lido
  * @throws      magic errado, `format` divergente (com o remédio na mensagem), ou quadro rasgado no fim
  * @since 0.3.1
@@ -720,8 +720,8 @@ pub fn read(path: str) -> Profile | error
  * suggest — derivar `#arena_size`/`#arena_depth` por declaração a partir de um perfil.
  *
  * NÃO ESCREVE NA FONTE, POR LEI: a ruling de 2026-07-13 (`ast.tks:439`) diz que o compilador nunca
- * INFERE o número da directiva; um `teko profile` pode SUGERIR, nunca atribuir. O que sai daqui é
- * texto para uma pessoa colar, ou entrada para o PGO — que substitui a OMISSÃO, não a directiva
+ * INFERE o número da diretiva; um `teko profile` pode SUGERIR, nunca atribuir. O que sai daqui é
+ * texto para uma pessoa colar, ou entrada para o PGO — que substitui a OMISSÃO, não a diretiva
  * (§2.3).
  *
  * Uma declaração dominada por bytes irroteáveis sai com `size = 0` e `reason` preenchida (§6).
@@ -733,7 +733,7 @@ pub fn read(path: str) -> Profile | error
 pub fn suggest(p: Profile) -> []Suggestion
 
 /**
- * render — o relatório humano: a distribuição, os dois custos, a directiva pronta a colar.
+ * render — o relatório humano: a distribuição, os dois custos, a diretiva pronta a colar.
  *
  * IMPRIME A DISTRIBUIÇÃO E NÃO SÓ O NÚMERO, porque a escolha do quantil (§2.1) é uma decisão de
  * custo que quem lê tem de poder contestar com os mesmos dados.
@@ -749,8 +749,8 @@ pub fn render(p: Profile, sug: []Suggestion) -> str
  * run_cli — o subcomando `teko profile`.
  *
  * DOIS FRONTENDS, UM LEITOR — a mesma disciplina da §26.7 do journal: `teko profile <projdir>`
- * corre e relata; `teko profile <ficheiro>.tkprof` só relata; e o pré-linker do `#480` lê o MESMO
- * ficheiro pelo MESMO `read`.
+ * corre e relata; `teko profile <arquivo>.tkprof` só relata; e o pré-linker do `#480` lê o MESMO
+ * arquivo pelo MESMO `read`.
  *
  * @param args  o `argv` completo (`args[1]` é `profile`)
  * @return      o código de saída do processo
@@ -772,7 +772,7 @@ tk_region *tk_region_new_at(tk_region *parent, uint32_t site);
 // linha pelo codegen, que é o único que sabe que a cópia existe e quanto ela mede.
 void tk_prof_note_copy(uint32_t site, uint64_t n);
 // tk_prof_dump — despejar as tabelas de sítios UMA vez, no molde do tk_cov_dump: magic, versão,
-// digest das declarações, secções. Publicado por tk_rt_rename: nenhum leitor vê meio ficheiro.
+// digest das declarações, secções. Publicado por tk_rt_rename: nenhum leitor vê meio arquivo.
 void tk_prof_dump(const char *path);
 ```
 
@@ -784,13 +784,13 @@ void tk_prof_dump(const char *path);
 
 | crumb | o quê | porque aqui |
 |---|---|---|
-| **12.0** | **#476 `#arena_depth(N)`** — parse, AST, checker, consumo no emissor (os quatro `regions.len < 64` viram `regions.len < cg_arena_depth_of(f)`) | o afinador não pode afinar um botão que não existe; e a constante mágica passa a ser o ramo de omissão da mesma expressão |
+| **12.0** | **#476 `#arena_depth(N)`** — parse, AST, checker, consumo no emissor (os quatro `regions.len < 64` viram `regions.len < cg_arena_depth_of(f)`) | o afinador não pode afinar um botão que não existe; e a constante mágica passa a ser o ramo padrão da mesma expressão |
 | **12.1a** | **tabela de sítios + `tk_region_new_at`** nos cinco sítios de emissão | é a peça de que 12.2, o R3 e o `depth` dependem todos (§5.3) |
-| **12.1b** | **#475** — funções/ramos adoptam o endereçamento aberto; três tabelas pré-dimensionadas pela caminhada estática; `DumpMark` | independente de 12.1a; fecha o requisito à letra (§4.3) |
+| **12.1b** | **#475** — funções/ramos adotam o endereçamento aberto; três tabelas pré-dimensionadas pela caminhada estática; `DumpMark` | independente de 12.1a; fecha o requisito à letra (§4.3) |
 | **12.2a** | `teko::profile` **estático** (`walk`) + o `.tkprof` (escrita, `tk_prof_dump`, `rename`) | o denominador antes do numerador |
 | **12.2b** | `teko::profile` **dinâmico** (`read`, `suggest`, `render`) + `teko profile` | **#479 fecha aqui** |
 | **12.2c** | o `ra` residual: imprimir `ra - dli_fbase` e `dli_fname` no despejo do `TEKO_ARENA_OBS` | um `fprintf`; mede o que o actuador ainda não alcança |
-| **12.3** | **#480** — `--pgo <ficheiro.tkprof>`, precedência `manual > PGO > omissão`, recusa por `decl_digest` divergente | consome 12.2b |
+| **12.3** | **#480** — `--pgo <arquivo.tkprof>`, precedência `manual > PGO > omissão`, recusa por `decl_digest` divergente | consome 12.2b |
 
 **Ritual — portão completo em três momentos, e cada um tem uma razão para não ser adiado:**
 
@@ -801,7 +801,7 @@ void tk_prof_dump(const char *path);
 3. **depois de 12.3**, o portão da onda.
 
 E **corte de semente** em `0.3.1.12-beta`, como o plano já fixa. **Regra de carga aditiva:** 12.0
-ensina uma directiva nova ao compilador, logo **`src/` não a adopta na mesma carga** — a semente
+ensina uma diretiva nova ao compilador, logo **`src/` não a adota na mesma carga** — a semente
 anterior tem de continuar a construir gen1. As fixtures exercitam-na através do gen1, que a tem.
 
 ### 9.1 Fixtures — entradas e códigos de saída nativos
@@ -813,9 +813,9 @@ anterior tem de continuar a construir gen1. As fixtures exercitam-na através do
 | `arena_depth_doubled_rejected` | duas `#arena_depth(…)` na mesma declaração | `EXPECT_COMPILE_FAIL` |
 | `arena_depth_on_extern_rejected` | `#arena_depth` antes de `extern` (gémeo da recusa de `#arena_size`, `parse_decl.tks:375`) | `EXPECT_COMPILE_FAIL` |
 | `arena_depth_flattens` | 5 escopos aninhados com `#arena_depth(2)`; o programa lê o próprio `.tkprof` e sai com a profundidade máxima observada | **exit 2** |
-| `arena_depth_default_is_64` | sem directiva, o achatamento continua no tecto de hoje — o ramo de omissão não regrediu | **exit 64** |
+| `arena_depth_default_is_64` | sem diretiva, o achatamento continua no tecto de hoje — o ramo padrão não regrediu | **exit 64** |
 | `arena_size_manual_beats_pgo` | `#arena_size(4096)` + `--pgo` cujo relatório diz 65536; o programa lê o `.tkprof` e sai com `chão/1024` | **exit 4** |
-| `pgo_applies_when_absent` | a MESMA fonte sem directiva, o mesmo `--pgo` | **exit 64** |
+| `pgo_applies_when_absent` | a MESMA fonte sem diretiva, o mesmo `--pgo` | **exit 64** |
 | `pgo_stale_report_rejected` | `.tkprof` com `decl_digest` de outra árvore | `EXPECT_COMPILE_FAIL` (mensagem nomeia o remédio) |
 | `profile_names_the_declaration` | **o teste de fogo**: um `fn` que aloca em ciclo; o relatório nomeia a declaração Teko, não um símbolo de runtime | **exit 0** |
 | `profile_refuses_on_unroutable_str` | um `fn` cujos bytes são `str`: sai `size = 0` com `reason` a nomear `tk_str_concat_r` | **exit 0** |
@@ -838,14 +838,14 @@ vi problema"*: `arena_reclaim_ratio_nonzero`, `pgo_stale_report_rejected` e
 
 | fora | motivo |
 |---|---|
-| **reescrever `.tks` com a directiva sugerida** | ruling de 2026-07-13 (`ast.tks:439`): sugerir sim, atribuir não. E um corpus que o build reescreve deixa de ser reproduzível do git |
-| **descoberta automática de um `.tkprof` no directório do projecto** | é o defeito "ficheiro da corrida anterior a flutuar" (`journaling` §5.2), e um portão que não gateia. `--pgo` explícito |
+| **reescrever `.tks` com a diretiva sugerida** | ruling de 2026-07-13 (`ast.tks:439`): sugerir sim, atribuir não. E um corpus que o build reescreve deixa de ser reproduzível do git |
+| **descoberta automática de um `.tkprof` no diretório do projeto** | é o defeito "arquivo da corrida anterior a flutuar" (`journaling` §5.2), e um portão que não gateia. `--pgo` explícito |
 | **profiler de TEMPO (amostragem, flamegraphs)** | é outro instrumento: precisa de sinal de temporizador e de caminhada de pilha, e a árvore já regista que `execinfo` não existe em musl (`TK_HAVE_BACKTRACE`). O `#479` pede afinação de arena |
 | **`#arena_depth` num bloco ou num método** | `parse_decl_attributes` só corre na posição de declaração de topo; um método nunca a atravessa (`ast.tks:438`). Alargar é gramática nova e nenhuma medição a exige |
 | **dimensionar a raiz / o processo** | desde o F1 a raiz é **por tarefa**, e o `isolate` dá a cada uma a sua (`teko-laws-digest`, ruling 2026-07-27). É matéria do SW2, não deste |
-| **`-rdynamic`** | **medido estritamente pior** (§5.1): dá um nome sem linha e custa uma religação, quando o offset dá ficheiro:linha sem nenhuma |
+| **`-rdynamic`** | **medido estritamente pior** (§5.1): dá um nome sem linha e custa uma religação, quando o offset dá arquivo:linha sem nenhuma |
 | **um segundo canal/transporte para dados de arena** | §3: seria a segunda infraestrutura para o mesmo problema, e a instrumentação por alocação custaria ~265 MB de tráfego para medir 1926 MB |
-| **encolher `TK_REGION_DEFAULT_CHUNK` com a profundidade** | é o achado adjacente do §2.2 — **REPORTADO**, não convertido em issue por mim. É custo, não correcção, e a decisão de o puxar é do dono |
+| **encolher `TK_REGION_DEFAULT_CHUNK` com a profundidade** | é o achado adjacente do §2.2 — **REPORTADO**, não convertido em issue por mim. É custo, não correção, e a decisão de o puxar é do dono |
 | **defender ou usar o `adopt`** | decisão do dono, tomada como dada (§11.2) |
 
 ---
@@ -854,9 +854,9 @@ vi problema"*: `arena_reclaim_ratio_nonzero`, `pgo_stale_report_rejected` e
 
 ### 11.1 Tensão de lei — RESOLVIDA law-first: "o compilador nunca infere" × "o PGO atribui"
 
-Resolvida em §2.3, e a resolução passa nas duas leis sem torcer nenhuma: a **directiva** continua
+Resolvida em §2.3, e a resolução passa nas duas leis sem torcer nenhuma: a **diretiva** continua
 100 % escrita por uma pessoa; o **PGO** substitui a **omissão**. A precedência que o plano já
-escreveu é o enunciado dessa composição, e o artefacto separado (`.tkprof` por `--pgo`) é o que a
+escreveu é o enunciado dessa composição, e o artefato separado (`.tkprof` por `--pgo`) é o que a
 torna verificável em vez de convencional. **Não HALTO nisto.**
 
 ### 11.2 A retirada do `adopt` TEM ordem obrigatória, e é esta
@@ -866,7 +866,7 @@ tem — e trocá-la abre um buraco silencioso.**
 
 `PtAdopterId` (`spine.tks:63`) carrega `region: u32` — o identificador da sub-região léxica — e a
 rede de segurança `top: bool`, o `PtAdopter(⊤)`, que a §5.1 da espinha define como *"qualquer
-alocação dentro de QUALQUER adoptante cuja região precisa exceda o orçamento de uma função"*, e que
+alocação dentro de QUALQUER adotante cuja região precisa exceda o orçamento de uma função"*, e que
 o reticulado trata como `PtTop`, isto é, **a fuga segura**.
 
 > **As sub-regiões léxicas têm de existir ANTES de o `adopt` sair.**
@@ -874,11 +874,11 @@ o reticulado trata como `PtTop`, isto é, **a fuga segura**.
 Se o `adopt` sair primeiro, o eixo fica sem sítio concreto para nomear e **tudo sobe para `PtTop`** —
 que é sólido (a fuga é segura) e por isso **não dá sinal nenhum**. O checker continua a aprovar, a
 memória continua a vazar para a raiz, e o profiler perde a atribuição de profundidade que é metade do
-seu trabalho. **É a família de defeito que este projecto já pagou várias vezes: correcto, silencioso,
+seu trabalho. **É a família de defeito que este projeto já pagou várias vezes: correto, silencioso,
 e invisível ao ASan.**
 
 Segunda nota de ordem: `emit_adopt` (`codegen.tks:9107`) é hoje **a única abertura de região
-incondicional**. Retirá-lo retira essa incondicionalidade — e é exactamente por isso que o `SiteKind`
+incondicional**. Retirá-lo retira essa incondicionalidade — e é exatamente por isso que o `SiteKind`
 proposto no §8 não tem membro para ele.
 
 ### 11.3 Riscos, cada um com a medição que o produz
@@ -913,7 +913,7 @@ proposto no §8 não tem membro para ele.
 ## 12. Nada aqui HALTA
 
 A pergunta que o plano tinha em aberto foi fechada pelo ruling do dono e pela sua consequência
-directa: **o `#476` entra como crumb 12.0.** A única tensão de lei que encontrei (§11.1) resolve-se
+direta: **o `#476` entra como crumb 12.0.** A única tensão de lei que encontrei (§11.1) resolve-se
 pela composição das duas leis, sem escolha de gosto. As decisões que já vinham dadas — a retirada do
 `adopt`, a espinha como quem decide — foram tomadas como dadas, e a única coisa que acrescento sobre
 elas é uma **ordem obrigatória** (§11.2), que é engenharia e não opinião.
