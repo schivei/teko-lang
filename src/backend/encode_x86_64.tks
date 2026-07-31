@@ -1,13 +1,49 @@
 /**
+ * EncRelocX86 — the symbol relocation ONE `EncInstX86` owes: which byte of the
+ * instruction the linker patches, the target symbol, and the relocation kind.
+ * Present only on an instruction that actually references a symbol (`call
+ * rel32`, `lea rip`-relative); every other instruction carries `null` instead of
+ * this record.
+ *
+ * THE ARM64 TWIN'S REASON APPLIES HERE UNCHANGED (`EncReloc`): the three fields
+ * used to sit beside a `has_reloc: bool` that every instruction carried, with
+ * `RelocKindX86::Plt32` — a *call* relocation — as the inert default on
+ * instructions that are not calls. x86-64 never suffered the mispairing arm64
+ * did (only two producers exist: `encode_call_x86` hardcodes `Plt32` on `E8`,
+ * and `encode_lea_rip_x86` forwards the isel-tagged kind), but the defaulted
+ * field is the same seed, and it is cheaper to remove than to keep documenting
+ * as harmless.
+ *
+ * @since 0.3.1.0
+ */
+pub type EncRelocX86 = struct {
+    /**
+     * field_off — the byte offset WITHIN the instruction's `bytes` of the field
+     * the relocation patches (the emit pass rebases it by the instruction's
+     * start offset in the function's `.text` image).
+     */
+    field_off: u32
+    /**
+     * sym — the relocation's target symbol, already in its final linker name.
+     */
+    sym: str
+    /**
+     * kind — which psABI relocation the writer emits (`Plt32` for a direct
+     * `call`, `Pc32` for a rip-relative `lea`, `Abs64` for a data pointer).
+     */
+    kind: RelocKindX86
+}
+
+/**
  * EncInstX86 — one x86-64 instruction's encoding outcome: its variable-length
  * byte string plus optional pending fixups. A position-independent instruction
- * resolves to just `bytes` (`has_branch`/`has_reloc` false). An intra-function
+ * resolves to just `bytes` (`has_branch` false, `reloc` null). An intra-function
  * branch carries a `rel32` fixup — the byte offset WITHIN `bytes` of the 4-byte
  * little-endian displacement field and the destination machine-block id —
  * patched once every block's byte offset is known (the B1-6 layout pass). A
- * symbol reference carries a relocation shape (the byte offset of its rel32
- * field + the target symbol + kind), materialized into an `Elf64_Rela` at B1-7.
- * Mirrors arm64's `EncWord`, byte-granular instead of fixed 32-bit words.
+ * symbol reference carries an `EncRelocX86`, materialized into an `Elf64_Rela`
+ * at B1-7. Mirrors arm64's `EncWord`, byte-granular instead of fixed 32-bit
+ * words.
  *
  * @since #386 B1-5
  */
@@ -31,21 +67,10 @@ pub type EncInstX86 = struct {
      */
     target: u32
     /**
-     * has_reloc — true iff this instruction owes a symbol relocation.
+     * reloc — the symbol relocation this instruction owes, or `null` when it
+     * owes none. There is no third state and no inert default.
      */
-    has_reloc: bool
-    /**
-     * reloc_field_off — the byte offset within `bytes` of the relocated field.
-     */
-    reloc_field_off: u32
-    /**
-     * reloc_sym — the relocation's target symbol (meaningful when `has_reloc`).
-     */
-    reloc_sym: str
-    /**
-     * reloc_kind — the relocation kind (meaningful when `has_reloc`).
-     */
-    reloc_kind: RelocKindX86
+    reloc: EncRelocX86 | null
 }
 
 /**
@@ -350,7 +375,7 @@ fn fits_i32_x86(x: i64) -> bool {
 /**
  * plain_inst_x86 — an `EncInstX86` for a position-independent instruction: just
  * the finished bytes, with no branch displacement and no symbol relocation
- * pending (the fixup fields carry inert defaults).
+ * pending (`reloc` is `null`, not a defaulted kind).
  *
  * @param []byte bytes  the finished instruction bytes
  * @return EncInstX86  the instruction with no pending fixup
@@ -361,10 +386,7 @@ fn plain_inst_x86(bytes: []byte) -> EncInstX86 {
         has_branch = false
         branch_field_off = 0 to u32
         target = 0 to u32
-        has_reloc = false
-        reloc_field_off = 0 to u32
-        reloc_sym = ""
-        reloc_kind = RelocKindX86::Plt32
+        reloc = null
     }
 }
 
@@ -384,10 +406,7 @@ fn branch_inst_x86(bytes: []byte, field_off: u32, target: u32) -> EncInstX86 {
         has_branch = true
         branch_field_off = field_off
         target = target
-        has_reloc = false
-        reloc_field_off = 0 to u32
-        reloc_sym = ""
-        reloc_kind = RelocKindX86::Plt32
+        reloc = null
     }
 }
 
@@ -409,10 +428,7 @@ fn reloc_inst_x86(bytes: []byte, field_off: u32, sym: str, kind: RelocKindX86) -
         has_branch = false
         branch_field_off = 0 to u32
         target = 0 to u32
-        has_reloc = true
-        reloc_field_off = field_off
-        reloc_sym = sym
-        reloc_kind = kind
+        reloc = EncRelocX86 { field_off = field_off; sym = sym; kind = kind }
     }
 }
 
@@ -2086,11 +2102,32 @@ fn lookup_block_offset_x86(offsets: []BlockOffsetX86, id: u32) -> u32 | error {
 }
 
 /**
+ * collect_inst_reloc_x86 — fold the relocation ONE `EncInstX86` owes into the
+ * function's `RelocX86` list: an instruction that owes none (`reloc` null)
+ * leaves the list untouched, and one that owes a relocation contributes exactly
+ * one record, its patch offset rebased from instruction-relative to
+ * function-relative and its addend derived from the kind. The nullable `reloc`
+ * is the only input, so there is no flag to read out of step with a kind.
+ *
+ * @param []RelocX86 acc  the relocations collected so far
+ * @param EncRelocX86 | null reloc  the relocation the instruction owes, if any
+ * @param u32 start  the instruction's byte offset within the function's `.text`
+ * @return []RelocX86  `acc`, extended when a relocation is owed
+ */
+fn collect_inst_reloc_x86(acc: []RelocX86, reloc: EncRelocX86 | null, start: u32) -> []RelocX86 {
+    match reloc {
+        null => acc
+        EncRelocX86 as r => teko::list::push(acc, RelocX86 { offset = start + r.field_off; sym = r.sym; kind = r.kind; addend = reloc_addend_x86(r.kind); sect = RelocSect::Text })
+    }
+}
+
+/**
  * append_enc_inst_x86 — fold one non-terminator `EncInstX86` into the emit
  * accumulator: append its bytes, and (rebased by the instruction's start offset)
  * record a `rel32` branch fixup for an intra-function jump or a `RelocX86` for a
- * symbol reference. The instruction's own `branch_field_off`/`reloc_field_off`
- * are relative to its bytes, so the recorded offsets add the stream start.
+ * symbol reference. The instruction's own `branch_field_off` and its `reloc`'s
+ * `field_off` are relative to its bytes, so the recorded offsets add the stream
+ * start.
  *
  * @param FuncEmitX86 acc  the emit accumulator
  * @param EncInstX86 ei  the encoded instruction to fold in
@@ -2104,11 +2141,7 @@ fn append_enc_inst_x86(acc: FuncEmitX86, ei: EncInstX86) -> FuncEmitX86 {
     } else {
         acc.branch_fixups
     }
-    let relocs2 = if ei.has_reloc {
-        teko::list::push(acc.relocs, RelocX86 { offset = start + ei.reloc_field_off; sym = ei.reloc_sym; kind = ei.reloc_kind; addend = reloc_addend_x86(ei.reloc_kind); sect = RelocSect::Text })
-    } else {
-        acc.relocs
-    }
+    let relocs2 = collect_inst_reloc_x86(acc.relocs, ei.reloc, start)
     FuncEmitX86 { bytes = bytes2; block_offsets = acc.block_offsets; branch_fixups = fixups2; relocs = relocs2 }
 }
 

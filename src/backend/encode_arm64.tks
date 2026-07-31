@@ -1,10 +1,40 @@
 /**
+ * EncReloc — the symbol relocation ONE `EncWord` owes: the target symbol and
+ * which instruction field the linker patches. Present only on a word that
+ * actually references a symbol (BL/ADRP/ADDLo); every other word carries `null`
+ * instead of this record.
+ *
+ * ITS EXISTENCE IS THE POINT. The reloc used to be a `has_reloc: bool` beside a
+ * `reloc_kind: MRelocKind` that a non-relocating word still had to fill, and the
+ * value it filled it with was `MRelocKind::Call` — a BRANCH26 default on words
+ * that are not branches. That inert lie is the same shape as the bug
+ * `select_addr_pair` was built to make unrepresentable (a `Call` relocation
+ * landing on an `ADRP`, which Apple's `ld` rejects outright). Two fields
+ * encoding one state is what let a meaningless kind sit in a real field;
+ * folding them into ONE nullable record leaves nothing to default, so
+ * "no relocation" can no longer be spelled as a relocation kind.
+ *
+ * @since 0.3.1.0
+ */
+pub type EncReloc = struct {
+    /**
+     * sym — the relocation's target symbol, already in its final linker name.
+     */
+    sym: str
+    /**
+     * kind — which instruction field the relocation patches (`PageHi` for the
+     * `ADRP`, `PageLo` for the completing `ADD`, `Call` for a `BL`).
+     */
+    kind: MRelocKind
+}
+
+/**
  * EncWord — one instruction's encoding outcome: its base word plus an optional
  * pending fixup. A position-independent instruction resolves to just `word`
- * (`has_branch`/`has_reloc` false). A branch carries `has_branch=true` +
+ * (`has_branch` false, `reloc` null). A branch carries `has_branch=true` +
  * `target` (the machine-block id, patched once block offsets are known in
- * A4-3). A symbol reference carries `has_reloc=true` + `reloc_sym`/`reloc_kind`
- * (the `Reloc` record is materialized in A4-3).
+ * A4-3). A symbol reference carries an `EncReloc` (the `Reloc` record is
+ * materialized in A4-3).
  *
  * @since #385 A4-1
  */
@@ -29,17 +59,10 @@ pub type EncWord = struct {
      */
     branch_form: u32
     /**
-     * has_reloc — true iff this word owes a symbol `Reloc` (BL/ADRP/ADDLo).
+     * reloc — the symbol relocation this word owes (BL/ADRP/ADDLo), or `null`
+     * when it owes none. There is no third state and no inert default.
      */
-    has_reloc: bool
-    /**
-     * reloc_sym — the relocation's target symbol (meaningful when `has_reloc`).
-     */
-    reloc_sym: str
-    /**
-     * reloc_kind — the relocation kind (meaningful when `has_reloc`).
-     */
-    reloc_kind: MRelocKind
+    reloc: EncReloc | null
 }
 
 /**
@@ -101,7 +124,7 @@ type MemForm = struct {
 /**
  * plain_word — an `EncWord` for a position-independent instruction: just the
  * finished 32-bit word, with no branch displacement and no symbol relocation
- * pending. The reloc/branch fields carry inert defaults.
+ * pending (`reloc` is `null`, not a defaulted kind).
  *
  * @param u32 w  the finished instruction word
  * @return EncWord  the word with no pending fixup
@@ -112,9 +135,7 @@ fn plain_word(w: u32) -> EncWord {
         has_branch = false
         target = 0 to u32
         branch_form = 0 to u32
-        has_reloc = false
-        reloc_sym = ""
-        reloc_kind = MRelocKind::Call
+        reloc = null
     }
 }
 
@@ -134,9 +155,7 @@ fn branch_word(w: u32, target: u32, form: u32) -> EncWord {
         has_branch = true
         target = target
         branch_form = form
-        has_reloc = false
-        reloc_sym = ""
-        reloc_kind = MRelocKind::Call
+        reloc = null
     }
 }
 
@@ -156,9 +175,7 @@ fn reloc_word(w: u32, sym: str, kind: MRelocKind) -> EncWord {
         has_branch = false
         target = 0 to u32
         branch_form = 0 to u32
-        has_reloc = true
-        reloc_sym = sym
-        reloc_kind = kind
+        reloc = EncReloc { sym = sym; kind = kind }
     }
 }
 
@@ -2256,6 +2273,25 @@ fn resolve_word(ew: EncWord, here: u32, offsets: []BlockOffset) -> u32 | error {
 }
 
 /**
+ * collect_word_reloc — fold the relocation ONE `EncWord` owes into the
+ * function's `Reloc` list: a word that owes none (`reloc` null) leaves the list
+ * untouched, and a word that owes one contributes exactly one `__text`-relative
+ * record at its word index times four. The nullable `reloc` is the only input,
+ * so there is no flag to read out of step with a kind.
+ *
+ * @param []Reloc acc  the relocations collected so far
+ * @param EncWord ew  the word whose relocation (if any) is folded in
+ * @param u64 word_index  the word's index in the function's word stream
+ * @return []Reloc  `acc`, extended when `ew` owes a relocation
+ */
+fn collect_word_reloc(acc: []Reloc, ew: EncWord, word_index: u64) -> []Reloc {
+    match ew.reloc {
+        null => acc
+        EncReloc as r => teko::list::push(acc, Reloc { offset = (word_index to u32) * ARM64_WORD_BYTES; sym = r.sym; kind = r.kind; sect = RelocSect::Text })
+    }
+}
+
+/**
  * finalize_func — the patch pass: resolve every emitted `EncWord` to its final
  * word (patching branch displacements from the recorded block offsets) and
  * collect one `Reloc` per symbol-reference word (its offset the word index times
@@ -2275,9 +2311,7 @@ fn finalize_func(symbol: str, words: []EncWord, offsets: []BlockOffset) -> Encod
         let ew = words[i]
         let w = match resolve_word(ew, i to u32, offsets) { u32 as v => v; error as e => return e }
         out_words = teko::list::push(out_words, w)
-        if ew.has_reloc {
-            relocs = teko::list::push(relocs, Reloc { offset = (i to u32) * ARM64_WORD_BYTES; sym = ew.reloc_sym; kind = ew.reloc_kind; sect = RelocSect::Text })
-        }
+        relocs = collect_word_reloc(relocs, ew, i)
         i++
     }
     EncodedFunc { symbol = symbol; words = out_words; relocs = relocs }
