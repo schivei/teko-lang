@@ -384,6 +384,14 @@ double tk_float_parse(tk_str s);
 //
 // tk_str_concat — a fresh str holding a's bytes then b's bytes; the result OWNS the buffer.
 tk_str tk_str_concat(tk_str a, tk_str b);
+// (0.3.1.0 actuator) tk_str_concat_r — the REGION-aware sibling of tk_str_concat, in the exact
+// relation tk_slice_push_r bears to tk_slice_push: the `_r` form takes the destination's region and
+// the plain form is its root wrapper (tk_str_concat(a, b) == tk_str_concat_r(a, b, tk_region_root())).
+// A non-root `region` bump-allocates the result buffer out of that region, so the str dies with that
+// region's drop instead of being a process-lifetime malloc; the root case keeps the historical malloc
+// path byte-for-byte (same ownership, same obs accounting, same OOM panic). Codegen emits the `_r`
+// form only where the escape analysis proves the str confined to the region's block.
+tk_str tk_str_concat_r(tk_str a, tk_str b, tk_region *region);
 // (C7.1a) FFI marshalling: the raw byte pointer of a str (teko::mem::as_ptr — borrows, ptr+len
 // use), a fresh NUL-terminated C copy of a str (teko::mem::as_cstr), and a copy of a
 // NUL-terminated foreign C string back into a fresh str (teko::mem::str_from_cstr).

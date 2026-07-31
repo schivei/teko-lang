@@ -137,17 +137,39 @@ __attribute__((constructor)) static void tk_rt_install_crash_handler(void) {
 static int tk_obs_enabled(void);
 static void tk_obs_mstr_note(size_t n, void *ra);
 
-// tk_str_concat — a fresh buffer = a.ptr[0..a.len] ++ b.ptr[0..b.len]; the result OWNS it.
-// Allocation failure PANICS (M.1 fail-loud, never silent corruption). Leak-tolerant (M.5 —
-// short-lived); a zero-length result uses a 1-byte buffer so ptr is never NULL+len mismatch.
-tk_str tk_str_concat(tk_str a, tk_str b) {
+// (0.3.1.0 actuator, RA1) the tk_str_concat wrapper parks ITS caller's return address here so the
+// region-aware core attributes a root-lifetime str to the generated fn, not to the wrapper hop.
+// Exactly the tk_g_push_ra discipline of tk_slice_push over tk_slice_push_r. Only written under obs.
+static void *tk_g_concat_ra = NULL;
+
+// tk_str_concat_r — a fresh buffer = a.ptr[0..a.len] ++ b.ptr[0..b.len]; the result OWNS it, and
+// the buffer comes from `region`. The ROOT case (region == the current task's root, or NULL) keeps
+// the historical malloc path byte-for-byte, so nothing about today's ownership, obs accounting or
+// OOM panic changes; a NON-root region bump-allocates instead, so the str dies with the region drop.
+// Allocation failure PANICS (M.1 fail-loud, never silent corruption); a zero-length result uses a
+// 1-byte buffer so ptr is never NULL with a stale len.
+tk_str tk_str_concat_r(tk_str a, tk_str b, tk_region *region) {
     size_t n = a.len + b.len;
-    if (tk_obs_enabled() == 1) tk_obs_mstr_note(n ? n : 1, __builtin_return_address(0));
-    tk_byte *buf = malloc(n ? n : 1);
-    if (buf == NULL) tk_panic("out of memory (str concat)");
+    void *ra = (tk_g_concat_ra != NULL) ? tk_g_concat_ra : __builtin_return_address(0);
+    tk_g_concat_ra = NULL;
+    tk_byte *buf;
+    if (region == NULL || region == tk_region_root()) {
+        if (tk_obs_enabled() == 1) tk_obs_mstr_note(n ? n : 1, ra);
+        buf = malloc(n ? n : 1);
+        if (buf == NULL) tk_panic("out of memory (str concat)");
+    } else {
+        buf = (tk_byte *)tk_region_alloc(region, n ? n : 1);
+    }
     if (a.len) memcpy(buf, a.ptr, a.len);
     if (b.len) memcpy(buf + a.len, b.ptr, b.len);
     return (tk_str){ buf, n };
+}
+
+// tk_str_concat — the default root-region lowering (unchanged contract), mirroring tk_slice_push
+// over tk_slice_push_r. Leak-tolerant (M.5 — short-lived process-lifetime buffers).
+tk_str tk_str_concat(tk_str a, tk_str b) {
+    if (tk_obs_enabled() == 1) tk_g_concat_ra = __builtin_return_address(0);
+    return tk_str_concat_r(a, b, tk_region_root());
 }
 
 // (C7.1a) marshalling — the raw byte pointer of a Teko str (NOT NUL-terminated), for ptr+len C
