@@ -221,8 +221,18 @@ apontar à função gerada. A superfície que faltava ao runtime existe.
 * **FIXPOINT fechado**: gen2 e gen3 construídos no MESMO caminho de saída, `teko.c` e binário
   **byte-idênticos** (`sha256 d15201b5ebad62c8605553ee4cb49cdb6a829517ab07b833891f893b5310f1b2`);
 * picos auto-reportados: gen1 1704,3 MB, gen2 1595,3 MB, gen3 1583,8 MB;
-* **`teko test .`**: as quatro faixas `.tkt` verdes (291 + 290 + 290 + 290 = 1161 testes, 0 falhas) e
-  os dois regressores novos verdes (2 corridos, 0 saltados, 0 falhados, 2 builds), `GATE_EXIT=0`.
+* **`teko test .`**: as quatro faixas `.tkt` verdes (291 + 290 + 290 + 290 = 1161 testes, 0 falhas),
+  o `regressor.tkr` verde (18 builds, 16,8 s) e os dois regressores novos verdes (2 corridos, 0
+  saltados, 0 falhados, 2 builds), `GATE_EXIT=0` na corrida com a lista estreitada.
+
+### E o tecto de tempo estourou, o que é resultado e não silêncio
+
+Com a lista COMPLETA, a fase de regressão não acabou em **4500 s** (75 min) — o `timeout` matou-a
+ainda dentro do `own_native`, o segundo regressor da lista. Não é uma falha: é o custo do corpus
+nesta caixa partilhada, e já estava reportado no `handoff-0.3.1.0.md` (*"o teko-regrcov é compilado a
+-O0 e é isso que pendura a camada — >7 min contra 1,02 s do release no mesmo projecto, ~400x"*).
+Reporto-o como tecto estourado. O que ficou por observar é `own_native` e os regressores a jusante
+dele; o que ficou observado está listado acima.
 
 ### O portão completo NÃO se declara verde, e a razão não é minha
 
