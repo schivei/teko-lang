@@ -58,9 +58,44 @@ registos não prova nada: dois registos rasgados a meio ainda contam dois. O que
 | **teto de uma mensagem** (buffer por omissão) | 212960 | 212960 | **2048** ² | ≥ 1 MiB ¹ |
 | **teto com `SO_SNDBUF` a 4 MiB** | 4194304 | — | **4194288** ² | — |
 
-¹ A sonda parou por esgotar o **próprio buffer de 1 MiB**, não por recusa do sistema (o erro voltou
-0). O teto real do mailslot local é **≥ 1 MiB**; não foi refinado porque o `Rec` do desenho tem 80
-bytes e a diferença não decide nada.
+¹ **Medido de novo, por bisseção com 16 MiB — e o sistema continuou a não recusar.** A primeira
+sonda parou por esgotar o próprio buffer de 1 MiB; a segunda subiu a busca para 16 MiB e o mailslot
+com `nMaxMessageSize = 0` aceitou **16777216 bytes**, com erro 0. **Isto é outra vez o teto da sonda,
+não o do sistema** — o teto real do mailslot local é **≥ 16 MiB** e continua por fechar. Registo o
+erro em vez de o esconder: subi o limite e não subi o suficiente.
+
+O que ficou **medido de verdade** é mais útil do que o teto: **um `nMaxMessageSize` declarado É
+RESPEITADO.**
+
+| `nMaxMessageSize` | maior aceite | erro na recusa |
+|---|---|---|
+| 0 (sem limite) | 16777216 (= o teto da sonda) | — |
+| 512 | **512** | 87 (`ERROR_INVALID_PARAMETER`) |
+| 4096 | **4096** | 87 |
+| 65536 | **65536** | 87 |
+| 1048576 | **1048576** | 87 |
+
+O parâmetro é um **limite**, não uma sugestão — o que torna o mailslot dimensionável na criação, tal
+como o `SO_SNDBUF` torna o `AF_UNIX`.
+
+### O pipe nomeado do Windows, e uma célula que eu quase publiquei errada
+
+| `nOutBufferSize` pedido | maior mensagem aceite |
+|---|---|
+| 0 (o sistema decide) | **0** ² |
+| 4096 | 4096 |
+| 65536 | 65536 |
+| 1048576 | 1048576 |
+| 8388608 | 8388608 |
+
+O teto **segue o `nOutBufferSize`** exatamente, apesar de a documentação lhe chamar *conselho*.
+
+² **A linha do `0` é um artefacto da MEDIÇÃO, não uma propriedade do pipe.** A sonda escreve em
+`PIPE_NOWAIT` — obrigatória, porque com escrita bloqueante e o leitor no mesmo fio uma mensagem maior
+do que o buffer pendura. Em `PIPE_NOWAIT` uma escrita só passa se **couber no buffer**, e com
+conselho 0 o buffer é 0. **Em modo bloqueante, com um leitor a drenar, um pipe de conselho 0 leva
+quantidade arbitrária.** Publicar "o pipe por omissão não leva nada" seria a mesma patologia dos 2048
+do macOS, uma casa adiante.
 
 ² **Os 2048 não eram teto — eram o valor por omissão, e a primeira versão desta tabela publicou-os
 como se fossem propriedade do sistema.** O dono desconfiou (*"algo me diz que conseguimos otimizar
@@ -82,13 +117,16 @@ observado e publicá-lo como propriedade do sistema, sem testar se ele se move.*
 
 ### E empacotar K registos por datagrama, no volume real (6500 × 80 B)
 
-| K | datagramas | linux-x86_64 | macos-arm64 |
-|---|---|---|---|
-| 1 | 6500 | 2,344 µs/registo | 4,676 µs/registo |
-| 4 | 1625 | 0,632 µs (3,71×) | 0,836 µs (5,59×) |
-| 8 | 813 | 0,300 µs (7,82×) | 0,326 µs (14,33×) |
-| 16 | 407 | 0,152 µs (15,38×) | 0,332 µs (14,11×) |
-| 25 | 260 | **0,106 µs (22,13×)** | **0,228 µs (20,47×)** |
+| K | mensagens | linux-x86_64 | macos-arm64 | windows-x86_64 |
+|---|---|---|---|---|
+| 1 | 6500 | 2,344 µs/registo | 4,676 µs/registo | 1,509 µs/registo |
+| 4 | 1625 | 0,632 µs (3,71×) | 0,836 µs (5,59×) | 0,266 µs (5,68×) |
+| 8 | 813 | 0,300 µs (7,82×) | 0,326 µs (14,33×) | 0,185 µs (8,15×) |
+| 16 | 407 | 0,152 µs (15,38×) | 0,332 µs (14,11×) | 0,122 µs (12,34×) |
+| 25 | 260 | **0,106 µs (22,13×)** | **0,228 µs (20,47×)** | **0,080 µs (18,78×)** |
+
+As três plataformas concordam na ordem de grandeza — **~19× a ~22× a K=25** — e o Windows é o mais
+rápido em absoluto no fim da tabela. O empacotamento não é uma optimização de uma plataforma.
 
 **Este é o TETO do ganho, não o ganho**: não inclui a descarga forçada no ponto de captura. Mas dá a
 ordem de grandeza — os 2,77× que o socket perdia para o anel viram vantagem já em K=4.
