@@ -289,8 +289,8 @@ desconhecido, que ganha `#arena_depth(N)` na enumeração.
 
 **E o consumo no emissor é substituição, não adição:** os quatro `regions.len < 64` passam a
 `regions.len < cg_arena_depth_of(f)`, uma função que devolve `f.arena_depth` quando declarado, o valor
-do `.tkprof` quando há PGO, e `64` por padrão. **A constante mágica de hoje torna-se o ramo de
-omissão da mesma expressão** — é a mesma linha, com um nome.
+do `.tkprof` quando há PGO, e `64` por padrão. **A constante mágica de hoje torna-se o ramo padrão da
+mesma expressão** — é a mesma linha, com um nome.
 
 ---
 
