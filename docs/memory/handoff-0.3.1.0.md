@@ -2975,3 +2975,86 @@ comportamento M.3 (prefixo `out|`), e o último é o total real — `0 skipped, 
 **O que este ritual NÃO diz:** o `zero-C: gen2=1 gen3=1` é a rota C. **Não prova nada sobre a
 auto-hospedagem nativa**, que continua bloqueada no degrau 32 (`one_byte`), com agente em cima.
 Escrevo-o outra vez porque já omiti esta qualificação uma vez esta noite e ela muda a conclusão.
+
+## 14. A drenagem partiu a construtibilidade pelo seed — e expôs um segundo defeito, latente
+
+*(Reescrito depois de o contentor ser reciclado. O commit original ficou por empurrar e perdeu-se —
+ver §16, que é a lição desse erro.)*
+
+Nove legs de artefacto vermelhas no run 30613192858 (`296079e0`). **Dois defeitos empilhados.**
+
+### 14.1 — o seed publicado recusa a lane (entrou por drenagem minha)
+
+```
+teko-ci: seed FAILED to build the tip directly — engaging the staged bootstrap ladder
+teko-ci:   | teko: .: src/build/project.tks:5873:4: the function's final expression does not
+             match its declared return type
+```
+
+```teko
+fn stage_rc_of_env(key: str) -> i32 {
+    match teko::env::var(key) { str as v => bp_parse_uint(v) to i32; error => 0 }
+}
+```
+
+Hipótese: o braço `error => 0` é literal nu; o seed publicado não propaga o tipo esperado para dentro
+dos braços e o `0` tipa `i64`, fazendo o `match` valer `i32 | i64`. **Das doze funções `-> i32` novas
+do delta, é a única com essa forma.**
+
+**E a razão de o ritual local não ter apanhado isto:** o `.teko/teko` da caixa é um **gen1 colhido de
+artefacto**, mais capaz do que o **0.3.0.31-beta publicado** que o `ci_provision_teko.sh` provisiona.
+**O ritual local NÃO é o mesmo portão que o CI corre**, e eu tratei-o como se fosse — construí, corri
+o portão inteiro, fechei o fixpoint e declarei verde contra um compilador que mais ninguém usa.
+A rede de *releases* não é alcançável da caixa (`cannot list releases … network/API error`), logo a
+**confirmação ficou por fazer**, dita em vez de assumida.
+
+### 14.2 — a escada de recurso está podre, e ninguém a via
+
+```
+teko-ci: FATAL: pinned ladder rung 71c763d0… FAILED to build — the pin in LADDER_RUNGS is obsolete.
+  src/lir/lir_interp.tks:126:4: type 'i128' was removed (0.3.1)
+  src/parser/parse_pattern.tks:7:4:  unknown type: Pattern
+```
+
+`scripts/build_with_seed_fallback.sh:539` fixa um degrau cujo fonte é **pré-0.3.1**. **Só engata
+quando o seed falha** — logo esteve podre todo este tempo, invisível. **A rede de segurança que só se
+testa quando falha nunca foi testada**, e a primeira vez que precisámos dela não serviu.
+
+**Não revertí a drenagem**, e considerei: ela trouxe o portão para verde (`rc=0`, 850 s, 13 regressões
+0 falhas), o casador de regex de 1,9 GB para 13,9 MB e o pai de 2,96 GiB para 40,3 MB. A quebra é
+*uma anotação de tipo num literal*.
+
+## 15. O relatório final do isel — e uma correcção que ele me faz
+
+**A prova de que os bytes não se movem, em DOIS níveis** — porque o primeiro mostrou que um caminho
+só-*append* **não chegava** (o corpus faz 1664 escritas dentro do alcance e **405 SOBRE-escritas**):
+tabela sombra com **zero divergências em 63 projectos**, e `cmp` do `.o` com **54 idênticos de 54**.
+
+**A correcção que ele me faz:** eu escrevi que o `vinfo_grow` (`isel_arm64.tks:66`) *"percorre tudo a
+cada chamada"*. **Está errado** — o `loop` só empurra a diferença `n − len` e a soma é O(V), já
+amortizadamente linear. O quadrático estava **só** no `vinfo_set`.
+
+**E rejeitou uma primitiva de propósito:** `teko::list::with_cap` era o idioma natural, mas
+`lower.tks:9265` devolve *"N1 — sem baixamento nativo"* — usá-la tornaria a fonte do compilador
+**incompilável pelo próprio backend**.
+
+**E um número que muda o desenho do portão:** `REGR_JOBS_DEFAULT = 4` (`regression.tks:242`) — a
+camada de regressão corre **quatro filhos ao mesmo tempo por omissão**. O `137` dele **reproduz-se com
+o compilador pré-conserto**, mesma caixa, mesmo sítio.
+
+## 16. LEI — a regra que dou aos agentes vale para mim, sem excepção
+
+O contentor foi reciclado a 2026-07-31. **Os sete ramos de agente sobreviveram todos com o trabalho
+empurrado.** O único trabalho perdido foi **meu**: um commit de documentação que eu segurei
+localmente.
+
+**E segurei-o por uma política que inventei nesta mesma noite:** como cada empurrão meu cancelava o
+run de CI em curso por grupo de concorrência, decidi guardar a documentação até haver uma drenagem que
+justificasse o cancelamento. Escrevi-a como disciplina e achei-a boa.
+
+**A conta estava ao contrário.** Um run de CI cancelado custa minutos de runner. Um commit não
+empurrado custa o trabalho inteiro quando o contentor morre — e os contentores morrem.
+
+**A regra é a mesma que vai em todos os briefs, e passa a valer para o integrador: commit e push A
+CADA ESCRITA, e o CI que se cancele.** Se o ruído de runs cancelados incomodar, o remédio é agrupar o
+TRABALHO num commit, nunca adiar o EMPURRÃO.
