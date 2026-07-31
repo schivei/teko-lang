@@ -278,17 +278,26 @@ pub type ConstImage = struct {
 }
 
 /**
- * FatFieldImage — the 16-byte image of one fat field (`[]T`/`str`) of an aggregate const, plus the
- * relocation and leaf its pointer slot needs (#594 T-B6): the slot bytes (8 zero + the element count
- * inline), the `LDataReloc` for the pointer slot, and the `LRodata` leaf of the target array. The
- * producer writes `slot_bytes` at the field's blob offset and accumulates `reloc`/`leaf` into the
- * owning `ConstImage`.
+ * FatMemberImage — the 16-byte image of one FAT MEMBER (`[]T`/`str`) of an aggregate const, plus the
+ * relocation and the leaf entries its pointer slot needs (#594 T-B6; 0.3.1.0 degrau const-slice): the
+ * slot bytes (8 zero + the element count inline), the `LDataReloc` for the pointer slot, and every
+ * `LRodata` leaf the member's target array pulls in. The producer writes `slot_bytes` at the member's
+ * blob offset and accumulates `reloc`/`leaves` into the owning `ConstImage`.
  *
- * @since #594 T-B6
+ * A MEMBER, not merely a field: the same image serves a fat STRUCT FIELD (`const D: Desc = Desc {
+ * name = "abcde"; … }`, its slot at the field's layout offset) and a fat SLICE ELEMENT (`const T:
+ * []str = ["a", "b"]`, its slot at `index * fat_slot_bytes()`), because the two shapes materialize
+ * identically — a zeroed pointer slot, a count, a relocation and a target leaf.
+ *
+ * `leaves` is a LIST rather than a single entry because a fat member's target can itself hold fat
+ * members (a `[][]str` element, a `[]str` field): the member's own leaf comes LAST, after the nested
+ * leaves it depends on, so the interning order stays a pure function of declaration order.
+ *
+ * @since #594 T-B6 (fields); 0.3.1.0 degrau const-slice (elements + nested leaves)
  */
-pub type FatFieldImage = struct {
+pub type FatMemberImage = struct {
     /**
-     * slot_bytes — the field's 16-byte image (8 zero pointer bytes + the element count as 8 LE bytes).
+     * slot_bytes — the member's 16-byte image (8 zero pointer bytes + the element count as 8 LE bytes).
      */
     slot_bytes: []byte
     /**
@@ -296,9 +305,9 @@ pub type FatFieldImage = struct {
      */
     reloc: LDataReloc
     /**
-     * leaf — the target array's rodata entry (its own symbol + flat-scalar bytes, empty relocs).
+     * leaves — the member's target-array rodata entries: every nested leaf first, its own leaf last.
      */
-    leaf: LRodata
+    leaves: []LRodata
 }
 
 /** LGlobal — one mutable/immutable top-level datum: its symbol, machine class, and

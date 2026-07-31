@@ -2454,6 +2454,314 @@ patológico sem optimização nenhuma.
 4. Dois erros de **documentação** no ramo (comentário de `const_slice_image` sobre `char`; braço `_` de
    `const_fat_target_image` hoje inalcançável).
 
+---
+
+# NOITE DE 2026-07-30/31 — o que os quatro agentes mediram, e o que o CI disse enquanto isso
+
+Registo do integrador, escrito em modo autónomo por ruling do dono:
+*"Eu vou dormir, deixo você em modo autônomo, os docs que produzir, versions e pela manhã eu
+requisito a ti os resultados em formato de relatório / artefato."*
+
+**NENHUM destes ramos foi drenado para a lane.** O que segue é medição, com o ramo nomeado, para
+que a decisão de drenar seja do dono e não minha.
+
+## 1. O isel quadrático — `cargo/0.3.1.0-isel-quadratico` (`7fe67987` código, `c36c7360` doc)
+
+O defeito nomeado ontem foi corrigido: `vinfo_set` (`src/backend/isel_arm64.tks:91`) reconstruía as
+três listas paralelas a cada escrita de VReg. Passa a escrever em O(1).
+
+**A curva foi remedida, e o resultado tem duas metades que não coincidem:**
+
+| sonda | antes | depois | delta |
+|---|---|---|---|
+| esparsa, N=4000, pico | 1736,5 MB | 1628,4 MB | **−108,1 MB** |
+| densa (13 ops/linha), N=250, tempo | 2,501 s | 1,397 s | **−44 %** |
+| densa, N=500, tempo | 7,653 s | 4,788 s | **−37 %** |
+| densa, pico | — | — | **−15 % apenas, e ainda cresce a N^1,94** |
+
+O termo previsto `12·V²/2` dava ≈111 MB; mediram-se 108,1. **O selector era 6 % do pico** naquela
+forma. **O tempo cai ~40 %; o pico quase não se move.**
+
+### Porquê: o irmão maior está uma fase à frente
+
+`TEKO_ARENA_OBS` sobre um binário simbolizado, **depois** da correcção:
+
+```
+3504,4 MB / 155 987 allocs   teko_teko__backend__sort_by_start     ← 98,9 % do que resta
+                              vinfo_set  DESAPARECEU do mapa
+```
+
+`src/backend/regalloc.tks:1113` — ordenação por inserção que **reconstrói a lista de saída inteira
+por intervalo**, O(V²). A mesma forma, uma fase adiante.
+
+**E há um facto que torna a substituição barata:** o comparador `interval_before` (`:1102`) é uma
+**ordem TOTAL** — não há empates. Logo a permutação ordenada é **única**, e uma ordenação por fusão
+é um substituto **byte-idêntico**, não "equivalente". É a maior alavanca disponível hoje e não pede
+decisão de desenho nenhuma.
+
+Sete irmãos da mesma família ficaram contados e nomeados (`rf_set`, `iv_set`, `mem_set`,
+`mreg_list_set`, `append_minst`, …), e no checker o `lp_remove` — 2310 MB de 2808 MB na sonda
+encadeada.
+
+## 2. O actuador de região — `cargo/0.3.1.0-atuador-regiao` (`5ee05c80`)
+
+As duas metades foram entregues (`tk_str_concat_r` no runtime; o selector de N níveis no codegen), o
+**FIXPOINT fechou byte-idêntico** (gen2 == gen3, `sha256 d15201b5…`), e o regressor da inversão
+(`examples/regressions/region_actuator`, quatro cenários) passa nas quatro configurações — nativo, C,
+nativo+PARANOID, C+PARANOID, todas a sair 42.
+
+**E a taxa de recuperação NÃO subiu: 0,0 % → 0,0 %.** Raiz 1946,3 → 1940,0 MB; 11 de 5007 → 11 de
+5013 regiões largadas.
+
+**O actuador actua** — está provado no C emitido de `examples/regressions/region_actuator`:
+`tk_slice_push(` passa de 3 para 1, `tk_slice_push_r(` de 0 para 2, com um push dentro de um ciclo
+aninhado a receber **a região do bloco EXTERIOR**.
+
+**Porque a taxa do compilador não se moveu — o número que fecha o assunto:**
+
+| | quantidade |
+|---|---|
+| nascimentos de acumulador (`= teko::list::empty()`) em `src/` | 936 |
+| chamadas a `teko::list::push(` em `src/` | 1587 |
+| regiões de MOLDURA distintas no `teko.c` gerado | **1** |
+| regiões de BLOCO distintas no `teko.c` gerado | **1** |
+| `tk_slice_push_r(` no `teko.c` gerado | **1** |
+
+**O selector tinha, no compilador inteiro, duas regiões para onde rotear.** O que fecha a porta não é
+o selector: é o **conjunto de escape**, por três regras escritas em `src/checker/escape.tks` —
+(1) todo o argumento de chamada escapa; (2) toda a inicialização de ligação escapa (*"we do not run a
+second fixpoint pass"*); (3) a cauda da função escapa. **Das 936 ligações, uma sobrevive às três.**
+
+E o alvo que o oráculo apontou — `resolve.tks:1752`, o `out` de `variant_siblings`, 930,7 MB e 48 %
+de toda a memória do build — **é devolvido pela função**. A regra 3 está CORRECTA ao marcá-lo.
+Nenhuma região daquela função o pode possuir. A região certa é a do ciclo do CHAMADOR
+(`resolve.tks:1838`), e chegar lá é **convenção de chamada com passagem de arena** ou a espinha
+transitiva — não é o selector, por mais níveis que ele saiba caminhar.
+
+**Registado porque é a tentação óbvia e o alarme do dono proíbe-a:** dar ao `tk_alloc` uma "região
+corrente" global que o bloco do chamador empurra e desempilha resolvia o `variant_siblings` num dia —
+e libertaria o valor que o chamado DEVOLVE. É trocar um vazamento por uma corrupção. Não foi feito.
+
+**A próxima alavanca da memória é a análise de escape, não o selector** — e é trabalho com alarme em
+cima, porque alargar o conjunto de escape na direcção errada é um *use-after-free*, não um vazamento.
+
+## 3. O CI desta noite — o que as quatro falhas de `ca19dedf` dizem, e o que não dizem
+
+Quatro *check runs* vermelhos no run 30603367135: `regressor / all capabilities`, `Memory paranoid
+(linux-x86_64-musl)`, `CI gate`, `Sanitizer gate`. **Os dois últimos são cascata pura** — o `CI gate`
+falha por `regressor-full = failure` e por três linhas `skipped` que dependem dela; o `Sanitizer
+gate` por `mem-paranoid-*`.
+
+Os dois primeiros morreram assim:
+
+```
+2026-07-31T05:00:10Z  ##[error]The runner has received a shutdown signal…
+2026-07-31T05:00:10Z  ##[error]Process completed with exit code 143.
+```
+
+**Mas o sinal do host não é a notícia.** A notícia é o silêncio antes dele, e ele repete-se:
+
+| run | último despejo de saída | morte | silêncio |
+|---|---|---|---|
+| 30601687772 (`51038d61`) | 03:55:15 | 04:06:57 | **11 min 42 s** |
+| 30603367135 (`ca19dedf`) | 04:37:36 | 05:00:10 | **22 min 34 s** |
+
+**Dois runs, duas máquinas diferentes, o mesmo ponto**: logo a seguir a
+`native_union_nested_known_stop`, que é a terceira entrada de `teko.tkp:57`. Nenhum run da janela
+observada chegou alguma vez a imprimir uma linha de resultado para o que vem a seguir
+(`native_iface_fat_known_stop`, depois `own_native`).
+
+**O que fica dito com honestidade, e o que fica por dizer:** a saída do executor é *block-buffered*
+por um cano, e a linha de temporização de `native_union_nested` só foi despejada no instante da
+morte — logo o ponto de paragem **não está provado ao ficheiro**, só à fronteira do despejo. O que
+ESTÁ provado é a forma: **o trabalho pesado do regressor (o corpus `own_native`) não produz saída
+durante 11 a 22 minutos e o host mata-o lá dentro**. É a mesma exaustão que já foi atribuída ao
+quadrático, agora com o carimbo do host por cima.
+
+**Acção: nenhuma sobre este run.** O `ca19dedf` já está superado pelo run 30605024103 (`3b8dd9bd`), e
+a causa a jusante — `sort_by_start`, 98,9 % do que resta do backend — está nomeada com
+`ficheiro:linha` e com substituto byte-idêntico na secção 1. **Corrigir o quadrático é o que tira o
+regressor da janela em que o host lhe pega.**
+
+### Uma disciplina que eu quebrei esta noite e corrijo aqui
+
+Cada `docs(…)` que empurrei cancelou o run anterior por grupo de concorrência: das 12 execuções mais
+recentes da lane, **8 estão `cancelled`**. **A lane não teve uma execução completa de CI a noite
+inteira, e a culpa é do ritmo dos meus commits, não do host.** Daqui em diante os documentos da noite
+vão num só empurrão.
+
+## 4. ACHADO NOVO E GRAVE — `teko::f64_bits` está ERRADO no backend próprio
+
+Veio como achado adjacente do ramo `cargo/0.3.1.0-ftoa-nonfinite`, não pedido. **Não é o `ftoa`: é o
+instrumento que lê os bits.** Repro mínima, medida com `teko 0.3.0.31-beta`:
+
+```teko
+fn p_inf() -> f64 { mut huge: f64 = 1.0e308; mut ten: f64 = 10.0; huge * ten }
+fn p_from_arith() -> u64 { let nan = p_inf() - p_inf(); teko::f64_bits(nan) }
+```
+
+| rota | resultado |
+|---|---|
+| C | `18444492273895866368` = `0xFFF8000000000000` ✔ |
+| backend próprio | `4621819117588971520` = **`0x4024000000000000` = 10.0** ✘ |
+
+**`0x4024000000000000` é a última constante `f64` que a função PRODUTORA tocou.** O `teko::ftoa` do
+mesmo local responde `-nan` correctamente nas duas rotas — **o valor está certo e o instrumento lê o
+registo errado**.
+
+E as variantes são piores do que um número errado:
+
+* formatar directamente (`$"{bits:X}"`) imprime **vazio**, corrompe a linha com lixo, e chegou a
+  `out of memory (str concat)` e a **SIGSEGV**;
+* um programa com várias dessas funções compilou, correu e **não imprimiu nada, com exit 0** —
+  **código errado em silêncio**, que é a classe exacta que a barra do tronco recusa.
+
+**Porque o corpus não apanha isto:** o `f_f64_bits_roundtrip` só alimenta `f64_from_bits`. O caminho
+*"`f64` vindo de chamada ou de aritmética"* **não está coberto**.
+
+Fica **por medir** se a CRT da Microsoft escreve `-nan(ind)` — continua inferência, e é exactamente o
+que a próxima corrida do `test / windows-x86_64` passa a responder, agora que a asserção cita o que
+obteve.
+
+## 5. O defeito que era meu, e a drenagem que ele forçou
+
+O `artifact / linux-arm64-musl` e o `artifact / linux-x86_64-glibc` do run 30605024103 morrem assim:
+
+```
+teko: .: const aggregate: slice element is pointer/slice-bearing -> Tier-B (T-B), not crumb 6 (#594)
+fixpoint: VERDICT: FAILED — gen1 does not build the source it came from
+```
+
+**A matriz inteira de artefactos estava bloqueada pelo degrau `const_slice`**, que já estava fechado
+em `cargo/0.3.1.0-degrau-const-slice` e por drenar.
+
+E havia um segundo defeito, **meu**, por cima: em `0947d543` eu registei
+`examples/regressions/const_slice_of_str/const_slice_of_str.tkr` em `teko.tkp:57` **na lane**, mas a
+fixture só existia naquele ramo. Auditoria de 11 directórios no disco contra 12 registados:
+**uma entrada registada sem ficheiro** — que dá `regression FAIL … listed regressor file does not
+exist (M.3)` em toda a corrida de `teko test .`, mascarado pelo esgotamento do `own_native` que mata
+o job antes de lá chegar.
+
+Corrigir o *registo* teria escondido o *degrau*. Drenei o ramo, que traz os dois: o fixture ao lado do
+ficheiro que o nomeia, e o degrau que desbloqueia a matriz.
+
+## 6. A exaustão reproduzida na minha caixa — e o meu erro de coordenação por cima dela
+
+Corri `./out/teko test .` na lane fundida. Cronologia, com carimbo:
+
+```
+05:24:39  testes unitários: 4 shards, 290–291 cada, 0 failed, 0 exited
+05:25:40  regression ok native_union_known_stop            948 ms
+05:25:41  regression ok native_union_nested_known_stop     1,4 s
+05:25:42  regression ok native_iface_fat_known_stop        313 ms
+          … silêncio …
+05:36:15  MORTO — SIGKILL, `EXIT=137`
+```
+
+O `137` fecha a atribuição: **foi o OOM-killer, não um erro do programa nem um sinal do host.** (O
+`elapsed=2726s` que o invólucro escreveu **não** é a duração da corrida — é o tempo até eu matar o
+shell órfão que ficou pendurado no cano depois de o `teko` morrer. A duração real é 05:23:30 →
+05:36:15, ~12,7 min, e mesmo essa está contaminada, ver abaixo.)
+
+**A mesma janela de silêncio do CI, sem host a quem culpar.** E o `dmesg` desta caixa regista
+**cinco** OOM-kills de `teko` esta noite:
+
+| hora | anon-rss do processo morto |
+|---|---|
+| 04:29:16 | 9,7 GB |
+| 04:35:36 | 12,5 GB |
+| 05:04:12 | 11,3 GB |
+| 05:17:03 | **14,9 GB** |
+| 05:36:15 | 3,7 GB |
+
+**O de 05:36:15 é o meu, e é o mais interessante justamente por ser o mais PEQUENO:** morreu com
+3,7 GB — não por ser grande, mas porque a caixa estava cheia. É colateral.
+
+### E aqui está o meu erro, que invalida esta corrida como medição limpa
+
+**O agente do isel estava a correr o SEU `./out/teko test .` em `/home/user/wt-isel` ao mesmo
+tempo**, com dois filhos a 3,0 GB cada. Eu lancei o meu por cima. Duas camadas de regressão a moer o
+`own_native` na mesma caixa de 15 GB, a esfomear-se uma à outra.
+
+**Logo esta corrida NÃO prova a duração do `own_native`** — prova só que ele passa dos 10 minutos e
+dos 3 GB por filho. O número limpo continua por medir, e fica dito assim em vez de ser arredondado
+para uma conclusão.
+
+**A lei que daqui sai:** a caixa é partilhada com os agentes, e o portão pesado é deles. *Se estou no
+tecto de agentes, também estou no tecto de portões* — o integrador não corre um `teko test .`
+completo enquanto um agente corre o dele.
+
+## 7. A escada andou — e uma correcção minha que muda a conclusão
+
+O `artifact / linux-arm64-musl` sobre `250c3727` (a lane já drenada) **deixou de morrer** em
+`const aggregate: slice element is pointer/slice-bearing`. Morre no degrau seguinte:
+
+```
+teko: .: native backend N1: builtin `one_byte` not yet lowered (N2)
+       [in `teko::encoding::json::parse_string`]
+fixpoint: VERDICT: FAILED — gen1 does not build the source it came from
+```
+
+**É o degrau 32** — o `one_byte`, aquele que eu reportei como fechado e que o verificador provou estar
+ATRÁS do `const_slice`. A drenagem fez exactamente o que devia: o `const_slice` saiu da frente e o
+`one_byte` ficou exposto. **É agora o único a bloquear a matriz nativa de artefactos.**
+
+### A correcção
+
+Eu escrevi *"FIXPOINT: PASSED"* sobre a fusão **sem qualificar o backend**. O fixpoint que corri
+localmente construiu gen2/gen3 pela **rota C**; este leg constrói em **nativo** (o
+`fixpoint_backend` é uma consulta por leg em `scripts/ci_producer_matrix.sh`). É por isso que um
+passa e o outro não.
+
+**Sem a qualificação, a minha frase faria concluir que a auto-hospedagem nativa fechou. Não fechou.**
+O que o meu fixpoint provou foi que o compilador reproduz-se a si próprio pela rota C — verdadeiro,
+e insuficiente para a barra nativa.
+
+### Sítios, para quem pegar no degrau 32
+
+* paragem: `src/lir/lower.tks:4239` (`unresolved_builtin_stop`)
+* sítio que a dispara: `src/encoding/json.tks:218`, em `teko::encoding::json::parse_string`
+* o builtin existe no checker (`src/checker/scope.tks:787`) com espelho de runtime
+  (`src/runtime/teko_rt.tks:169`) — **existir como builtin não é estar baixado**, que foi exactamente
+  o meu erro de leitura de ontem.
+
+## 8. A atribuição FECHA — o macOS matou-se sozinho na lane drenada
+
+`test / macos-arm64` sobre `250c3727`, run 30606645627:
+
+```
+05:52:58  última saída útil (tier F12 defer, 10 builds)
+          … 16 min 12 s de silêncio …
+06:09:10  Killed: 9   dl/macos-arm64/teko test .
+06:09:10  ##[error]Process completed with exit code 137
+```
+
+**`Killed: 9` / exit 137, e NENHUM sinal de host.** Sem *shutdown signal*, sem *The operation was
+canceled*. É o mesmo `137` que a minha caixa deu às 05:36:15 — **duas máquinas independentes, a mesma
+morte** — e esta **não tem o confundimento** que invalidou a minha corrida: um runner de CI corre um
+job de cada vez, sem agentes ao lado.
+
+**Isto fecha a atribuição que eu vinha a arrastar a noite inteira.** A exaustão é NOSSA. As ondas de
+*shutdown signal* nos legs Linux eram o host a apanhar um processo que **já estava a moer há 11 a 22
+minutos**; aqui, sem host nenhum a interferir, o processo morre sozinho por memória, e o sinal diz
+exactamente isso.
+
+**E confirma a ordem da fila.** O alvo é o `sort_by_start` (`src/backend/regalloc.tks:1113`), 98,9 %
+do que resta do backend depois da correcção do `vinfo_set`, com comparador de ordem total e portanto
+substituto byte-idêntico. Está lançado em `cargo/0.3.1.0-sort-by-start`.
+
+### O quadro completo das assinaturas, agora com atribuição fechada
+
+| assinatura | onde | nosso? |
+|---|---|---|
+| `const aggregate: slice element…` | legs de artefacto | **sim** — FECHADO, drenado em `250c3727` |
+| `builtin one_byte not yet lowered` | legs de artefacto | **sim** — degrau 32, o próximo |
+| `Killed: 9` / exit 137, **sem sinal de host** | `test/macos-arm64` | **sim** — a exaustão, provada |
+| `exit 137` local, 5 OOM-kills no `dmesg` | esta caixa | **sim** — mesma, confundida por mim |
+| *shutdown signal* / exit 143, 8 ondas | legs Linux | host **por cima** da nossa moagem |
+| `deliberate panic: ftoa_nonfinite_text` | `test/windows` | **sim** — agora cita o texto |
+| `CI gate`, `Sanitizer gate`, `Test suite gate` | agregadores | cascata |
+
 ## O custo do `teko test`, MEDIDO — o `-O2` do regrcov e a fronteira de processo do passo 1
 
 Ramo `cargo/0.3.1.0-teste-por-processo`. Caixa partilhada (4 CPUs, 16 GB, quatro agentes); onde a

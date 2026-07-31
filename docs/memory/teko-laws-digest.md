@@ -2569,3 +2569,138 @@ não existe é o reticulado de profundidade** — `depth`/`cross-lifetime`/`mono
 **5. `teko fmt --apply` — NÃO existe.** O dono lembrava-se de o ter feito *"ontem, aliás antes de
 ontem"*. **Zero ocorrências de `--apply` na árvore.** O `teko fmt <path>` continua a reescrever no
 lugar, sem flag e sem confirmação. Fica como estava: sugestão registada, não despachada.
+
+---
+
+## O censo do eixo `pt` — o número, e a PREMISSA MINHA que ele desmente (2026-07-31)
+
+```
+pt-census-liveness: NOT LIVE — PtFrame LIVE (21047), PtRoot DEAD (0)
+pt-census: 4925 fns, 21074 cells (4.28/fn, fattest 67), PtFrame 21047 (99.87%),
+           PtRoot 0 (0.00%), PtParam 27 (0.13%), PtAdopter 0, PtTop 0,
+           unit = cell (deduped name/field key per function)
+```
+
+**Ritual VERDE**: build limpo com zero avisos (91,7 s, pico 1718,1 MB); `./out/teko test .`
+**verde — 292/292, tier de regressões incluído, 26 min 18 s**; FIXPOINT byte-idêntico.
+**Custo do censo: tempo abaixo do ruído, +16,0 MB de pico (+1,0 %)** — medido A/B com duas gerações
+da MESMA semente, diferindo só na chamada.
+
+### CORRECÇÃO MINHA — a premissa que justificou o despacho era falsa
+
+Eu disse ao dono, e escrevi-o para justificar que a medição era barata:
+
+> *"o eixo `pt` já é calculado, hoje, em todas as funções"* — citando `typer.tks:6030`,
+> `check_ref_storability_block(tf.body, fn_spine(tf))`.
+
+**Li a linha 6030 e nunca li as 6027–6029, que são a guarda:**
+
+```teko
+fn check_ref_storability(tf: TFunction) -> error | null {
+    if !fn_has_ref_param(tf) {
+        if !stmts_have_free(tf.body) { return null }
+    }
+    check_ref_storability_block(tf.body, fn_spine(tf))
+}
+```
+
+**3 parâmetros `Ref<` e 17 `mem::free` no corpus ⇒ ~20 funções em 4 925 (~0,4 %) chegam ao
+`fn_spine`.** O censo teve de o **re-correr** para as 4 925 — **era trabalho novo, não contagem de
+graça.** Terceira vez hoje que leio a coisa e não a condição: os 2048 (default lido como tecto), o
+`one_byte` (builtin lido como baixado), e agora isto.
+
+### O que o número diz, e o que NÃO diz
+
+Como **tecto** é honesto: nenhuma limpeza por escopo recupera mais do que as células no chão do
+reticulado, e são ~100 %. **Como desempate é vazio**: `PtRoot { }` **não é construído por nenhum
+caminho de produção** — a única construção em toda a árvore está em `spine_test.tkt:291`. `seed_pt`
+(`:389`) só semeia `PtParam`/`PtFrame`; a única transferência só junta `PtAdopter`.
+
+**99,87 % lê-se "nunca foram levantadas do chão", não "são provadamente locais de moldura".** O eixo
+mede hoje **confinação em `adopt { }`** — e o corpus não tem um único `adopt`.
+
+### E o recuo `⊤` está documentado e NÃO EXISTE
+
+`spine.tks:55–63` promete que `top` marca o recuo quando o id de região excede *"o orçamento de uma
+função"*. **`join_pt_adopter_at` (`:562`) escreve `top = false` LITERAL**, e `next_region` (`:522`)
+incrementa sem tecto. **"0 em `⊤`" não significa "orçamento folgado" — significa que não há
+orçamento.** Eu tinha contado este como o terceiro `#arena_depth` implícito: **são dois, não três.**
+
+### A unidade, dita para ninguém a ler como outra coisa
+
+**Célula** = chave `(name, field)` **deduplicada por função**. Dois `let x` em blocos disjuntos são
+**uma** célula; **cada parâmetro é célula** e os parâmetros **dominam** (21 074 células contra 9 504
+linhas `let`/`mut`); `x.f` é célula, `a.b.c` não é; destructuring não nomeia nenhuma. **Não é por
+sítio de alocação, nem por binding, nem por definição SSA.**
+
+---
+
+## Não há maquinaria de DI — correcção do dono (2026-07-31)
+
+> *"o 'reticulado' não existe pq realmente não existe maquinário de DI, existe definições em código
+> que não foi finalizado e, `#singleton` e `#scoped` são partes do que falta, mas há toda a maquinaria
+> de threading, memória, assincronismo e outros antes de fazer algo para DI nativo via compilação."*
+
+Eu tinha escrito *"há maquinaria de DI, parcial"*, citando `di.tks` com 383 linhas, `DiKind` com
+quatro casos e `#inject` no parser. **Errado, e a distinção é a que interessa: superfície escrita não
+é maquinaria.** O `di.tks` é código **não terminado**; o `#singleton` e o `#scoped` estão entre o que
+**falta**, não entre o que existe.
+
+**E há uma ORDEM, que o dono nomeia e que nenhum documento desta lane tinha:** *threading, memória,
+assincronismo e outros* **vêm antes** de DI nativo por compilação. Logo toda a pergunta de DI que
+aparecer nesta lane — o `#singleton` em duas tarefas, a monotonia de lifetime, o reticulado
+`singleton ≤ scoped ≤ transient` — **é downstream e não bloqueia nada aqui.**
+
+## LEI DE MÉTODO — ler a coisa não é ler a CONDIÇÃO dela
+
+Quatro erros meus no mesmo dia, todos com a mesma forma. Fica escrito porque o custo de os repetir é
+o dono ter de me corrigir:
+
+| li | concluí | o que faltava ler |
+|---|---|---|
+| `SO_SNDBUF` = 2048 no macOS | *"é o tecto"* | ninguém testara se **sobe** — sobe até 4 MiB |
+| `one_byte` é builtin (`scope.tks:787`) com espelho de runtime | *"o degrau 32 fechou"* | **declarado ≠ baixado**; `lower.tks:4239` continua a parar |
+| `typer.tks:6030` chama `fn_spine` | *"o eixo é calculado em todas as funções"* | a **guarda em `:6027–6029`** — ~0,4 % chegam lá |
+| `di.tks` 383 linhas + `#inject` no parser | *"há maquinaria parcial"* | **código não terminado ≠ maquinaria** |
+
+**A regra: encontrar o símbolo não é encontrar o comportamento.** Antes de declarar que algo existe,
+ler (a) a guarda que decide se corre, (b) o consumidor que decide se serve para alguma coisa, e (c) se
+o valor observado é fixo ou apenas o valor por omissão.
+
+É a mesma patologia que a barra do tronco recusa noutro sítio — **verificar um proxy da condição em
+vez da condição** — aplicada à leitura de código em vez de à escrita de portões.
+
+## LEI DE MÉTODO (2) — corrigir o REGISTO pode ESCONDER o defeito
+
+Um quinto erro meu, da mesma noite, com forma diferente dos quatro acima e por isso escrito à parte.
+
+O verificador encontrou que `examples/regressions/const_slice_of_str/const_slice_of_str.tkr` **não
+constava** da lista `regression = [...]` de `teko.tkp:57` — um regressor morto, sem portão nenhum. Eu
+corrigi **o registo**, na lane, em `0947d543`.
+
+**A fixture só existia no ramo `cargo/0.3.1.0-degrau-const-slice`, que não estava drenado.** Logo o
+que eu escrevi foi uma entrada que nomeia um ficheiro que a árvore não tem — e isso dá, em toda a
+corrida de `teko test .`:
+
+```
+teko: regression FAIL … — listed regressor file does not exist (M.3)
+```
+
+**E ficou mascarado**, porque o esgotamento do `own_native` mata o job antes de chegar à última
+entrada da lista.
+
+**O que a auditoria custa, e porque devia ser rotina:** contar os directórios em
+`examples/regressions/` e cruzá-los com os caminhos citados em `teko.tkp` — 11 no disco contra 12
+registados. Dois comandos.
+
+**A regra: um registo que aponta para fora da árvore é pior do que registo nenhum** — o primeiro
+falha a corrida inteira, o segundo só não prova nada. E, mais importante: **corrigir o registo teria
+escondido o degrau**. A entrada por registar era o SINTOMA; a causa era um ramo fechado e por drenar
+que bloqueava a matriz inteira de artefactos com
+
+```
+teko: .: const aggregate: slice element is pointer/slice-bearing -> Tier-B (T-B), not crumb 6 (#594)
+fixpoint: VERDICT: FAILED — gen1 does not build the source it came from
+```
+
+Antes de escrever a linha que falta num manifesto, perguntar **porque é que ela falta**.

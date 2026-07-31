@@ -108,3 +108,44 @@ por isso que o defeito quadrático viveu invisível: **a fase onde ele mora não
    limite de 6,8 KB é sobre a parte estática.
 3. As eliminações do §2 valem para **`baacb08f`**, não necessariamente para o commit que produziu os
    logs do CI.
+
+---
+
+## 6. O `ftoa_nonfinite_text` — caracterizado, e o defeito é da FIXTURE
+
+Investigado depois, com o CI a dar `expected 0, got 3` em três amostras independentes.
+
+**A verificação 3 é a do NaN** (`examples/regressions/own_native/src/corpus.tks:3916-3917`):
+
+```teko
+let nan_text = teko::ftoa(d27_not_a_number())
+if !teko::str::ends_with(nan_text, "nan") { return 3 }
+```
+
+**E o doc-comment do próprio cenário previu isto — para as libcs erradas** (`:3905-3907`):
+
+> *"a NaN's sign bit and payload are the host libc's business, and glibc prints `-nan` for `inf - inf`
+> where another conforming libc may print `nan` — **this corpus runs on glibc AND on musl**, so
+> asserting the exact spelling would pin a platform, not a behavior."*
+
+**Ele enumerou duas libcs. A CRT da Microsoft é a terceira.** O `tk_ftoa` (`teko_rt.c:405-407`)
+delega ao `snprintf(tmp, sizeof tmp, "%.17g", x)` — logo **a grafia do não-finito é inteiramente do
+libc do hospedeiro**, e o MSVC imprime `-nan(ind)` para o NaN indefinido, que **não termina em
+`"nan"`**.
+
+### Porque isto NÃO é defeito do compilador
+
+O `%.17g` é o que o C exige; as três grafias são conformes. O cenário escolheu afirmar pelo
+**sufixo** precisamente para não pinar plataforma — e o sufixo escolhido pina duas de três.
+
+### O que NÃO medi, e é o que impede o conserto de ser óbvio
+
+**Não corri em Windows.** A cadeia é: falha na verificação 3 (a única cujo texto é do libc) + o
+`tk_ftoa` delega ao `%.17g` + o MSVC documenta `-nan(ind)`. **É inferência forte, não medição.**
+Quem pegar isto deve **imprimir o texto real** antes de alargar a asserção — porque alargar uma
+asserção com base numa suposição é trocar um vermelho por um verde que não prova nada.
+
+**E há uma segunda leitura possível que não posso excluir daqui:** se o valor que chega ao `ftoa`
+não for o NaN esperado (por defeito de codegen do não-finito no Windows), o texto seria outro por
+outra razão, e aí **seria** defeito do compilador. **A impressão do texto real separa as duas
+hipóteses numa corrida.**
