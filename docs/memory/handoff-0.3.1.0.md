@@ -2644,3 +2644,120 @@ o job antes de lá chegar.
 
 Corrigir o *registo* teria escondido o *degrau*. Drenei o ramo, que traz os dois: o fixture ao lado do
 ficheiro que o nomeia, e o degrau que desbloqueia a matriz.
+
+## 6. A exaustão reproduzida na minha caixa — e o meu erro de coordenação por cima dela
+
+Corri `./out/teko test .` na lane fundida. Cronologia, com carimbo:
+
+```
+05:24:39  testes unitários: 4 shards, 290–291 cada, 0 failed, 0 exited
+05:25:40  regression ok native_union_known_stop            948 ms
+05:25:41  regression ok native_union_nested_known_stop     1,4 s
+05:25:42  regression ok native_iface_fat_known_stop        313 ms
+          … silêncio …
+05:36:15  MORTO — SIGKILL, `EXIT=137`
+```
+
+O `137` fecha a atribuição: **foi o OOM-killer, não um erro do programa nem um sinal do host.** (O
+`elapsed=2726s` que o invólucro escreveu **não** é a duração da corrida — é o tempo até eu matar o
+shell órfão que ficou pendurado no cano depois de o `teko` morrer. A duração real é 05:23:30 →
+05:36:15, ~12,7 min, e mesmo essa está contaminada, ver abaixo.)
+
+**A mesma janela de silêncio do CI, sem host a quem culpar.** E o `dmesg` desta caixa regista
+**cinco** OOM-kills de `teko` esta noite:
+
+| hora | anon-rss do processo morto |
+|---|---|
+| 04:29:16 | 9,7 GB |
+| 04:35:36 | 12,5 GB |
+| 05:04:12 | 11,3 GB |
+| 05:17:03 | **14,9 GB** |
+| 05:36:15 | 3,7 GB |
+
+**O de 05:36:15 é o meu, e é o mais interessante justamente por ser o mais PEQUENO:** morreu com
+3,7 GB — não por ser grande, mas porque a caixa estava cheia. É colateral.
+
+### E aqui está o meu erro, que invalida esta corrida como medição limpa
+
+**O agente do isel estava a correr o SEU `./out/teko test .` em `/home/user/wt-isel` ao mesmo
+tempo**, com dois filhos a 3,0 GB cada. Eu lancei o meu por cima. Duas camadas de regressão a moer o
+`own_native` na mesma caixa de 15 GB, a esfomear-se uma à outra.
+
+**Logo esta corrida NÃO prova a duração do `own_native`** — prova só que ele passa dos 10 minutos e
+dos 3 GB por filho. O número limpo continua por medir, e fica dito assim em vez de ser arredondado
+para uma conclusão.
+
+**A lei que daqui sai:** a caixa é partilhada com os agentes, e o portão pesado é deles. *Se estou no
+tecto de agentes, também estou no tecto de portões* — o integrador não corre um `teko test .`
+completo enquanto um agente corre o dele.
+
+## 7. A escada andou — e uma correcção minha que muda a conclusão
+
+O `artifact / linux-arm64-musl` sobre `250c3727` (a lane já drenada) **deixou de morrer** em
+`const aggregate: slice element is pointer/slice-bearing`. Morre no degrau seguinte:
+
+```
+teko: .: native backend N1: builtin `one_byte` not yet lowered (N2)
+       [in `teko::encoding::json::parse_string`]
+fixpoint: VERDICT: FAILED — gen1 does not build the source it came from
+```
+
+**É o degrau 32** — o `one_byte`, aquele que eu reportei como fechado e que o verificador provou estar
+ATRÁS do `const_slice`. A drenagem fez exactamente o que devia: o `const_slice` saiu da frente e o
+`one_byte` ficou exposto. **É agora o único a bloquear a matriz nativa de artefactos.**
+
+### A correcção
+
+Eu escrevi *"FIXPOINT: PASSED"* sobre a fusão **sem qualificar o backend**. O fixpoint que corri
+localmente construiu gen2/gen3 pela **rota C**; este leg constrói em **nativo** (o
+`fixpoint_backend` é uma consulta por leg em `scripts/ci_producer_matrix.sh`). É por isso que um
+passa e o outro não.
+
+**Sem a qualificação, a minha frase faria concluir que a auto-hospedagem nativa fechou. Não fechou.**
+O que o meu fixpoint provou foi que o compilador reproduz-se a si próprio pela rota C — verdadeiro,
+e insuficiente para a barra nativa.
+
+### Sítios, para quem pegar no degrau 32
+
+* paragem: `src/lir/lower.tks:4239` (`unresolved_builtin_stop`)
+* sítio que a dispara: `src/encoding/json.tks:218`, em `teko::encoding::json::parse_string`
+* o builtin existe no checker (`src/checker/scope.tks:787`) com espelho de runtime
+  (`src/runtime/teko_rt.tks:169`) — **existir como builtin não é estar baixado**, que foi exactamente
+  o meu erro de leitura de ontem.
+
+## 8. A atribuição FECHA — o macOS matou-se sozinho na lane drenada
+
+`test / macos-arm64` sobre `250c3727`, run 30606645627:
+
+```
+05:52:58  última saída útil (tier F12 defer, 10 builds)
+          … 16 min 12 s de silêncio …
+06:09:10  Killed: 9   dl/macos-arm64/teko test .
+06:09:10  ##[error]Process completed with exit code 137
+```
+
+**`Killed: 9` / exit 137, e NENHUM sinal de host.** Sem *shutdown signal*, sem *The operation was
+canceled*. É o mesmo `137` que a minha caixa deu às 05:36:15 — **duas máquinas independentes, a mesma
+morte** — e esta **não tem o confundimento** que invalidou a minha corrida: um runner de CI corre um
+job de cada vez, sem agentes ao lado.
+
+**Isto fecha a atribuição que eu vinha a arrastar a noite inteira.** A exaustão é NOSSA. As ondas de
+*shutdown signal* nos legs Linux eram o host a apanhar um processo que **já estava a moer há 11 a 22
+minutos**; aqui, sem host nenhum a interferir, o processo morre sozinho por memória, e o sinal diz
+exactamente isso.
+
+**E confirma a ordem da fila.** O alvo é o `sort_by_start` (`src/backend/regalloc.tks:1113`), 98,9 %
+do que resta do backend depois da correcção do `vinfo_set`, com comparador de ordem total e portanto
+substituto byte-idêntico. Está lançado em `cargo/0.3.1.0-sort-by-start`.
+
+### O quadro completo das assinaturas, agora com atribuição fechada
+
+| assinatura | onde | nosso? |
+|---|---|---|
+| `const aggregate: slice element…` | legs de artefacto | **sim** — FECHADO, drenado em `250c3727` |
+| `builtin one_byte not yet lowered` | legs de artefacto | **sim** — degrau 32, o próximo |
+| `Killed: 9` / exit 137, **sem sinal de host** | `test/macos-arm64` | **sim** — a exaustão, provada |
+| `exit 137` local, 5 OOM-kills no `dmesg` | esta caixa | **sim** — mesma, confundida por mim |
+| *shutdown signal* / exit 143, 8 ondas | legs Linux | host **por cima** da nossa moagem |
+| `deliberate panic: ftoa_nonfinite_text` | `test/windows` | **sim** — agora cita o texto |
+| `CI gate`, `Sanitizer gate`, `Test suite gate` | agregadores | cascata |
