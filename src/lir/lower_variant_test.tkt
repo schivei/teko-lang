@@ -71,10 +71,11 @@ fn lvt_error_lit(msg: str) -> checker::TExpr {
 /**
  * lvt_lower_return_wraps_named_case_into_declared_variant — an EXPLICIT `return Box { v = 7 }`
  * out of a function declared `-> Box | error` is wrapped into the uniform tag+payload shape
- * (`lower_return_value`, via `ctx.ret_type`): the wrapper allocates 16 bytes (`i32` tag + `Ptr`
- * payload, both 8-byte aligned) distinct from `Box`'s OWN 8-byte alloca, and stores tag `0`
- * (`Box`'s member index in `[Box, error]`) before storing the `Box` payload at offset 8 (degrau
- * N2).
+ * (`lower_return_value`, via `ctx.ret_type`): the wrapper allocates the UNIFORM 24 bytes
+ * (`variant_wrapper_bytes` — `i32` tag@0, ptr@8, len@16, 8-byte aligned) distinct from `Box`'s OWN
+ * 8-byte alloca, and stores tag `0` (`Box`'s member index in `[Box, error]`) before storing the
+ * `Box` payload at offset 8. The width is the SAME 24 for this address-shaped case as for a fat
+ * one — one shape, one set of offsets (degrau N2; 0.3.1.0 degrau 6 for the width).
  */
 fn lvt_lower_return_wraps_named_case_into_declared_variant() {
     let ret_ty = lvt_variant_named_error("Box")
@@ -82,7 +83,7 @@ fn lvt_lower_return_wraps_named_case_into_declared_variant() {
     let f = lwt_fn("mk_ok", "teko::demo", teko::list::empty(), ret_ty, body)
     let lf = match lower_function(f, lvt_layouts()) { LoweredFunction as x => x.func; error as err => return }
     let text = print_lmodule(add_func(empty_module(), lf))
-    teko::assert::str_contains(text, "alloca 16, align 8")
+    teko::assert::str_contains(text, "alloca 24, align 8")
     teko::assert::str_contains(text, "alloca 8, align 8")
     teko::assert::str_contains(text, "= const 0")
     teko::assert::str_contains(text, "store.i32")
@@ -105,7 +106,7 @@ fn lvt_lower_fn_body_trailing_wraps_bare_error_into_declared_variant() {
     let f = lwt_fn("mk_err", "teko::demo", teko::list::empty(), ret_ty, body)
     let lf = match lower_function(f, lvt_layouts()) { LoweredFunction as x => x.func; error as err => return }
     let text = print_lmodule(add_func(empty_module(), lf))
-    teko::assert::str_contains(text, "alloca 16, align 8")
+    teko::assert::str_contains(text, "alloca 24, align 8")
     teko::assert::str_contains(text, "= const 1")
     teko::assert::str_contains(text, "store.i32")
     teko::assert::str_contains(text, "ret %")
@@ -142,4 +143,126 @@ fn lvt_named_type_name_still_honest_stops_on_non_struct_receiver() {
     let recv = checker::TExpr { kind = checker::TNumber { is_float = false; value = parser::numint_of_i64(0); fval = 0.0 }; type = checker::Slice { element = lwt_prim(checker::PrimKind::I64) }; line = 0; col = 0 }
     let fa = checker::TExpr { kind = checker::TFieldAccess { receiver = recv; field = "bogus" }; type = lwt_prim(checker::PrimKind::I64); line = 0; col = 0 }
     teko::assert::str_contains(lwt_lower_expr_text(fa), "native backend N1: field/index access on a non-struct receiver not yet lowered (N2)")
+}
+
+/**
+ * lvt_declared_shape_items — the program items of a DECLARED variant fixture: `struct Box { v: i64 }`,
+ * `struct Cup { w: i64 }` and `type Shape = variant Box | Cup`, in that order.
+ *
+ * The struct declarations are what makes this a REAL declared variant and not a name list: the
+ * variant body is expanded through the checker's own resolver over the program's own type table, so
+ * a member that is not itself a declaration would never resolve to its canonical type.
+ *
+ * @return the three type declarations, as program items
+ */
+fn lvt_declared_shape_items() -> []checker::TItem {
+    mut items: []checker::TItem = teko::list::push(teko::list::empty(), lwt_struct_decl("Box", teko::list::push(teko::list::empty(), lwt_field("v", "i64"))))
+    items = teko::list::push(items, lwt_struct_decl("Cup", teko::list::push(teko::list::empty(), lwt_field("w", "i64"))))
+    let members = teko::list::push(teko::list::push(teko::list::empty(), "Box"), "Cup")
+    teko::list::push(items, lwt_variant_decl("Shape", members))
+}
+
+/**
+ * lvt_program_text — the printed LIR of a whole program, or `"ERR: <message>"` when it fails to
+ * lower. Goes through `lower_program` and not `lower_function` on purpose: the declared-variant
+ * table is a WHOLE-PROGRAM fact, so a fixture that lowered one function in isolation would assert
+ * against an empty table and prove nothing.
+ *
+ * @param items  the program's items, in order
+ * @return       the printed module, or the honest stop's message
+ */
+fn lvt_program_text(items: []checker::TItem) -> str {
+    match lower_program(checker::TProgram { items = items }) {
+        LModule as m => print_lmodule(m)
+        error as e => teko::str::concat("ERR: ", e.message)
+    }
+}
+
+#test
+/**
+ * lvt_declared_variant_match_tests_the_tag_of_every_arm — THE SILENT-MISCOMPILATION GUARD: a `match`
+ * over a subject whose declared type is a DECLARED variant (`Named{"Shape"}`, the nominal shape
+ * `checker::resolve_named` keeps a user type in) tests each arm's TAG.
+ *
+ * It used to emit NO test at all: `lower_bind_pattern_test` matched `checker::Variant` — the shape an
+ * INLINE `A | B` arrives as — and a `Named` that is not a registered enum fell through to "always
+ * matches", so the first arm's jump was unconditional and every subject ran the FIRST arm. That is a
+ * wrong ANSWER, not a stop, and the assertion below is the one shape that separates the two: a
+ * comparison per arm, against a DIFFERENT constant per arm.
+ */
+fn lvt_declared_variant_match_tests_the_tag_of_every_arm() {
+    let subject = checker::TExpr { kind = checker::TVar { name = "s"; is_func = false; func_ns = "" }; type = checker::Named { name = "Shape" }; line = 0; col = 0 }
+    mut arms = teko::list::push(teko::list::empty(), lwt_arm(lwt_bind_pattern("Box", "b"), teko::list::push(teko::list::empty(), lwt_ret(lwt_num_i64(1)))))
+    arms = teko::list::push(arms, lwt_arm(lwt_bind_pattern("Cup", "c"), teko::list::push(teko::list::empty(), lwt_ret(lwt_num_i64(2)))))
+    let body = teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_match_value(subject, arms, checker::PrimKind::I64)))
+    let params = teko::list::push(teko::list::empty(), lwt_param("s", "Shape"))
+    let items = teko::list::push(lvt_declared_shape_items(), lwt_fn_item("arm_of", "teko::demo", params, lwt_prim(checker::PrimKind::I64), body))
+    let text = lvt_program_text(items)
+    teko::assert::str_contains(text, "icmpeq")
+    teko::assert::str_contains(text, "= const 0")
+    teko::assert::str_contains(text, "= const 1")
+    teko::assert::str_contains(text, "load.i32")
+}
+
+#test
+/**
+ * lvt_variant_member_named_matches_a_generic_instance_by_its_base — a bind pattern with no
+ * type-args (`Parsed as x`, mirroring `bind_pattern_case_name`'s bare-base read) selects the
+ * variant member whose canonical name is a GENERIC INSTANCE (`Parsed__g__MainFile`) by the base
+ * `generic_inst_name` built it from — the exact shape `teko::build::asm_parse`'s
+ * `parser::Parsed<parser::MainFile> as x => x.node` needed (0.3.1.0 degrau 14). The base alone is
+ * not the FULL identity, so it does NOT also answer to the instantiating argument's own name.
+ */
+fn lvt_variant_member_named_matches_a_generic_instance_by_its_base() {
+    teko::assert::is_true(variant_member_named(checker::Named { name = "Parsed__g__MainFile" }, "Parsed"))
+    teko::assert::is_true(!variant_member_named(checker::Named { name = "Parsed__g__MainFile" }, "MainFile"))
+}
+
+#test
+/**
+ * lvt_find_variant_member_resolves_a_generic_instance_case — `find_variant_member` over a
+ * `Parsed<MainFile> | error` subject resolves the pattern's bare base `Parsed` to the generic
+ * member at index 0, mirroring the union `teko::build::asm_parse` matches on.
+ */
+fn lvt_find_variant_member_resolves_a_generic_instance_case() {
+    mut members: []checker::Type = teko::list::empty()
+    members = teko::list::push(members, checker::Named { name = "Parsed__g__MainFile" })
+    members = teko::list::push(members, checker::Error { })
+    let vm = match find_variant_member(members, "Parsed") { VariantMember as x => x; error as err => return }
+    teko::assert::is_true(vm.index == 0)
+}
+
+#test
+/**
+ * lvt_find_variant_member_refuses_an_ambiguous_shared_generic_base — TWO members instantiated
+ * from the SAME generic base with DIFFERENT type-args (`Box<i64>` and `Box<str>`, a `variant
+ * Box<i64> | Box<str>` a user CAN write) both answer the pattern's bare base `Box`. Rather than
+ * silently binding the FIRST one — a wrong-arm miscompilation this backend has already produced
+ * once for a declared variant (the match-arm degrau) — `find_variant_member` refuses with a
+ * named, honest stop instead of guessing.
+ */
+fn lvt_find_variant_member_refuses_an_ambiguous_shared_generic_base() {
+    mut members: []checker::Type = teko::list::empty()
+    members = teko::list::push(members, checker::Named { name = "Box__g__i64" })
+    members = teko::list::push(members, checker::Named { name = "Box__g__str" })
+    teko::assert::is_true(match find_variant_member(members, "Box") { error => true; _ => false })
+}
+
+#test
+/**
+ * lvt_declared_variant_return_wraps_the_case_into_the_uniform_wrapper — the CONSTRUCTION half of the
+ * same defect: `return Box { v = 7 }` out of a function declared `-> Shape` (a DECLARED variant)
+ * builds the uniform 24-byte tag+payload wrapper, exactly as it does for an inline `Box | error`.
+ *
+ * Before the fix `lower_value_into_type` saw a `Named` and lowered the value PLAINLY: no wrapper, no
+ * tag — which is why the always-matching first arm read a payload at offset 0 and "worked". Both
+ * halves have to be asserted, because either one alone still produces a wrong answer.
+ */
+fn lvt_declared_variant_return_wraps_the_case_into_the_uniform_wrapper() {
+    let body = teko::list::push(teko::list::empty(), lwt_ret(lvt_box_init(7)))
+    let items = teko::list::push(lvt_declared_shape_items(), lwt_fn_item("mk", "teko::demo", teko::list::empty(), checker::Named { name = "Shape" }, body))
+    let text = lvt_program_text(items)
+    teko::assert::str_contains(text, "alloca 24, align 8")
+    teko::assert::str_contains(text, "store.i32")
+    teko::assert::str_contains(text, "store.ptr")
 }

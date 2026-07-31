@@ -90,8 +90,7 @@ the desugar bridge (C5) makes `T?` ≡ `T | null` before the corpus is rewritten
 - **[RITUAL: dual-engine]** — the fixture runs on BOTH engines: the LIR-interp
   oracle (`src/lir/lir_interp.tks`, the semantic oracle that replaced the retired
   VM — #524) AND native (the C backend; and, where in the differential corpus, the
-  own AOT backend via `scripts/diff_c_own.sh`). "VM and native" in this plan means
-  exactly this oracle + native pair.
+  own AOT backend via `scripts/diff_c_own.sh`).
 - **[RITUAL: full gate]** — the whole `teko test .` suite + all `scripts/*_regressions.sh`
   legs `completed + success`. Reserved for C7 (the ratified end-state).
 
@@ -456,7 +455,7 @@ fn require_narrowed(use_site: checker::TExpr, val_type: checker::Type, narrowed:
   BYTE-IDENTICAL C (the precondition for C6).
 - `examples/regressions/error_union_pivot/` — **[size probe]** a former `error?`
   site now `sizeof == 16` (niche), round-trips success (`null`) and failure
-  (`error`) on both engines. Exit 0.
+  (`error`) natively. Exit 0.
 
 ### Ritual gate
 
@@ -579,7 +578,7 @@ This is REMOVED code that OFFSETS the C1/C3 additions (base §7).
 ### Ritual gate
 
 Fixpoint (final ratified end-state; `gen1==gen2`) + FULL GATE (whole `teko test .`
-+ every `scripts/*_regressions.sh` leg `completed + success`, VM-oracle + native).
++ every `scripts/*_regressions.sh` leg `completed + success`, LIR-interp oracle + native).
 
 ---
 

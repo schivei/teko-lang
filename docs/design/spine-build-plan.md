@@ -346,7 +346,7 @@ inherited `BfParam` tag already proves param-rooted.
 (typer.tks:2900/:3006); (3) `check_ref_storability(tf)` post-pass wired in `type_function`/`type_method`,
 with amendment-2's chain-link skip; (4) the closure-capture ref-reject in `type_lambda` (amendment 1);
 (5) fixtures — `stored_borrow_sound` reshaped as a ref-to-local **BIND** (take `Ref<i64>`, `let r = p`,
-read AND write `r.value`, return a sentinel; VM==native) + a negative un-nameable-RHS EXPECT_COMPILE_FAIL
+read AND write `r.value`, return a sentinel) + a negative un-nameable-RHS EXPECT_COMPILE_FAIL
 (added to BOTH `diff_vm_native.sh` COMPILE_FAIL[] and the `sanitizers.yml` skip loop) + a
 closure-capture-of-ref-local EXPECT_COMPILE_FAIL + a fabricated-`Spine` unit test covering the
 `BfNone`/`BfTop`/`PtAdopter`/cell-not-found reject arms (100%-new-code) + a ref-to-local inside a match arm
@@ -483,7 +483,7 @@ independent review — the recon's `ADDITIVE-BUT-GATE-TOUCHING` classification):
    `BorrowedFrom`/`Unique`/`Spine`/`fn_spine`/`ref_target_outlives`/`is_unique_at`. **No gate site
    changes yet** — the query is computed but consulted nowhere. Because it emits no C and relaxes no
    gate, **FIXPOINT is preserved by construction** (a new pure query changes no generated output).
-   Gate: full gate confirms the new module compiles on both engines; fixpoint trivially holds. This
+   Gate: full gate confirms the new module compiles natively; fixpoint trivially holds. This
    PR is the safe landing of the whole lattice, reviewable in isolation. Ships `stored_borrow_sound`
    ACCEPT is NOT yet true here (the gate still rejects) — so no positive fixture lands in PR-1; only
    the negative KEEP-forever fixtures (`ref_returned_rejected`, `ref_in_collection_rejected`) land
@@ -533,10 +533,10 @@ the marker). **Keep the two in sync** (the `must_free_leak` marker file says so 
 | # | Fixture | Kind | Observable | Lands in | Guards |
 |---|---|---|---|---|---|
 | 1 | `stored_borrow_outlives_referent` | **COMPILE-REJECT** (`EXPECT_COMPILE_FAIL`) | `teko build` AND `teko run` both exit non-zero with the `typer.tks:2870` "stored in a field" diagnostic | PR-2 | spine's field-store relax did NOT over-accept a container-outlives-referent case |
-| 2 | `stored_borrow_sound` | **RUN** | VM exit == native exit == fixed sentinel (reads through the borrow, returns a known sum, mirror `mem_free`'s exit-code shape) | PR-2 | spine actually RELAXED R5/field-store for the unique frame-local one-hop shape |
-| 3 | `ref_returned_rejected` | **COMPILE-REJECT** (`EXPECT_COMPILE_FAIL`) | both engines reject with `typer.tks:3456`/`:3527` "cannot return a reference (pass-down only)" | PR-1 | R3 KEEP-FOREVER (§2c.4b) — the one-function bound must never relax this |
-| 4 | `free_aliased_rejected` | **COMPILE-REJECT** (`EXPECT_COMPILE_FAIL`) | both engines reject with the L2b "aliased … sole live handle" diagnostic | PR-3 | the `us = shared` affine guard — the one real native UAF gap (remodel §5) |
-| 5 | `ref_in_collection_rejected` | **COMPILE-REJECT** (`EXPECT_COMPILE_FAIL`) | both engines reject with `resolve.tks:1187`/`:1204` "stored in a struct/variant/collection" | PR-1 | the KEEP-forever collection/variant anchor — BUILD touched neither |
+| 2 | `stored_borrow_sound` | **RUN** | native exit == fixed sentinel (reads through the borrow, returns a known sum, mirror `mem_free`'s exit-code shape) | PR-2 | spine actually RELAXED R5/field-store for the unique frame-local one-hop shape |
+| 3 | `ref_returned_rejected` | **COMPILE-REJECT** (`EXPECT_COMPILE_FAIL`) | rejects with `typer.tks:3456`/`:3527` "cannot return a reference (pass-down only)" | PR-1 | R3 KEEP-FOREVER (§2c.4b) — the one-function bound must never relax this |
+| 4 | `free_aliased_rejected` | **COMPILE-REJECT** (`EXPECT_COMPILE_FAIL`) | rejects with the L2b "aliased … sole live handle" diagnostic | PR-3 | the `us = shared` affine guard — the one real native UAF gap (remodel §5) |
+| 5 | `ref_in_collection_rejected` | **COMPILE-REJECT** (`EXPECT_COMPILE_FAIL`) | rejects with `resolve.tks:1187`/`:1204` "stored in a struct/variant/collection" | PR-1 | the KEEP-forever collection/variant anchor — BUILD touched neither |
 
 Fixture 4 PAIRS with the existing `examples/regressions/mem_free/` (unique free → must keep PASSING
 at exit 67). Fixtures 3 + 5 land in **PR-1** as pre-existing-behavior guards (they already reject

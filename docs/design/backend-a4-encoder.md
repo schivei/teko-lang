@@ -98,8 +98,8 @@ verbatim. Instruction words are `u32`; the object's `__text` is their little-end
  * emit_u32_le — append `w` to `buf` as four little-endian bytes (the arm64
  * instruction-word / Mach-O little-endian-field emit primitive), the shared
  * `[]byte` idiom (`src/compress/compress.tks:117`). All bit-slicing stays in
- * u32 arithmetic; only the final `& 0xFF` narrows to `byte` (the VM byte-width
- * anchoring gotcha — never widen a `byte` mid-expression).
+ * u32 arithmetic; only the final `& 0xFF` narrows to `byte` (byte-width constraint:
+ * never widen a `byte` mid-expression).
  *
  * @param []byte buf  the buffer to extend
  * @param u32 w  the 32-bit word to append
@@ -640,7 +640,7 @@ the keystone corpus does not read argv; see §6 `A4-args`.)
 
 ### 5.3 The differential gate
 
-A new leg — `scripts/diff_c_own.sh` (or an own arm inside `diff_vm_native.sh`) — over an
+A new leg — `scripts/diff_c_own.sh` (or an own arm inside `diff_c_own.sh`) — over an
 **`exit(n)`-terminated** integer/control corpus (the subset the interp already runs, §1). Per fixture:
 
 1. **C-native** (trusted): `teko <fixture> -o <cbin>` (default path) → run → capture exit + stdout.
@@ -724,7 +724,7 @@ of line 8449:
   `emit_block_tail` → `emit_exprstmt_tail`, whose `in_main` branch emits `return (int)(<tail value>);`
   (`codegen.tks:5499-5502`). The `return 0;` at line 8449 is a FALL-THROUGH DEFAULT — dead code when a
   value-carrying tail already returned. So the C backend returns the trailing expression's value as the
-  exit code (verified empirically: `6 * 7` → C-native exit 42, VM exit 42).
+  exit code (verified empirically: `6 * 7` → C-native exit 42).
 - **LIR own backend.** `#423` (commit `87f81b6`, "virtual-main trailing exit") touched ONLY the LIR side
   (`lower.tks`/`lir.tks`) — it made `close_virtual_main` MIRROR `lower_fn_body`'s #421 trailing-expression
   auto-return, bringing LIR INTO PARITY with the already-existing C behavior. The C backend was not
@@ -769,30 +769,30 @@ framed-`main` fixture once A3-loop or an equivalent unblocks one), not a new des
 
 ### 9.2 End-to-end differential fixtures (`examples/regressions/`, driven by `diff_c_own.sh`)
 
-| fixture | program (shape) | expected exit | VM | C-native | own-native |
-|---|---|---|---|---|---|
-| `own_exit_zero` | `exit(0)` | 0 | ✓ (existing) | ✓ (existing) | **new** |
-| `own_exit_code` | `exit(42)` | 42 | ✓ | ✓ | **new** |
-| `own_arith_exit` | `exit(6 * 7)` | 42 | ✓ | ✓ | **new** |
-| `own_sub_exit` | `exit(100 - 58)` | 42 | ✓ | ✓ | **new** |
-| `own_if_exit` | `if 5 > 3 { exit(1) } else { exit(2) }` | 1 | ✓ | ✓ | **new** |
-| `own_match_exit` | `match k { 0 => exit(7); _ => exit(9) }` | (per k) | ✓ | ✓ | **new** |
+| fixture | program (shape) | expected exit | C-native | own-native |
+|---|---|---|---|---|
+| `own_exit_zero` | `exit(0)` | 0 | ✓ (existing) | **new** |
+| `own_exit_code` | `exit(42)` | 42 | ✓ | **new** |
+| `own_arith_exit` | `exit(6 * 7)` | 42 | ✓ | **new** |
+| `own_sub_exit` | `exit(100 - 58)` | 42 | ✓ | **new** |
+| `own_if_exit` | `if 5 > 3 { exit(1) } else { exit(2) }` | 1 | ✓ | **new** |
+| `own_match_exit` | `match k { 0 => exit(7); _ => exit(9) }` | (per k) | ✓ | **new** |
 
 All exit-code (no stdout) at first; a `print`-then-`exit` fixture is added once `MCall` to the string
-runtime is exercised (rides the same BL/reloc path). The VM + C-native legs are already covered by
-`diff_vm_native.sh`; A4-5 adds the own-native leg and asserts `own == C (== interp)`.
+runtime is exercised (rides the same BL/reloc path). The C-native leg is already covered by
+`diff_c_own.sh`; A4-5 adds the own-native leg and asserts `own == C`.
 
 ### 9.3 Ritual + coverage posture
 
-- **Every A4-N** owes the full ritual: **both-engine gate** (native `teko . -o bin` AND `teko test .`
-  VM), **paranoid**, **fixpoint**, and **100% coverage on its new code** (definition-of-done). The
+- **Every A4-N** owes the full ritual: **native gate** (native `teko . -o bin` via the backend),
+  **paranoid**, **fixpoint**, and **100% coverage on its new code** (definition-of-done). The
   encoder is highly branchy (per-`MInst`, per-width, per-cond) — cover every encoded case + every
   honest-stop arm via golden tests; a genuinely unreachable arm is justified in the PR.
-- **VM-gotcha watch** (the encoder is dense byte-work): (a) build buffers via `teko::list::push(buf,
-  (w & 0xFF) to byte)` — never widen a `byte` mid-expression (byte-width anchoring); (b) do all
-  bit-slicing in `u32`/`u64`, narrow to `byte` only at the last step; (c) no `x = match {…return}` —
-  use `let x = match {…}` then act (the isel/regalloc VM gotcha); (d) `u32` shifts for imm26/imm19
-  displacement math (watch sign masking on negative displacements).
+- **Encoder gotchas** (dense byte-work): (a) build buffers via `teko::list::push(buf, (w & 0xFF) to byte)` —
+  never widen a `byte` mid-expression (byte-width constraint); (b) do all bit-slicing in `u32`/`u64`,
+  narrow to `byte` only at the last step; (c) no inline match returns — use `let x = match {…}` then act
+  (avoids isel/regalloc issues); (d) `u32` shifts for imm26/imm19 displacement math (watch sign masking on
+  negative displacements).
 - **Fixpoint is trivially preserved** through A4-1..A4-4 (new files, no reachable call from the default
   path) and through A4-5 (the native path is behind the `TEKO_BACKEND=native` seam; default stays C).
 

@@ -201,16 +201,16 @@ stop-recomputing-a-throwaway. Nothing here HALTs; nothing deviates from a ratifi
 
 - **AL4a-1 (RITUAL — fixpoint):** self-build must emit BYTE-IDENTICAL C (`gen==gen`), because
   direct-write produces the same characters as build-then-append. Corpus of many repeated
-  inline variants / optionals / slices, golden `.c` compare, VM and native, exit 0.
+  inline variants / optionals / slices, golden `.c` compare, native engine, exit 0.
   Dark-matter probe: `cg_variant_typename_str` heap-string allocs drop from ~6.65M to ~1.03M
   (only the dedup-key harvest remains, addressed by crumb 3).
 - **AL4a-2:** unit fixtures asserting `cg_mangle_eq(a,c)` agrees with the OLD
   `cg_opt_key(a)==cg_opt_key(c)` across a type matrix INCLUDING two distinct types that mangle
-  equal (the #109 bare-key case) — must return true for those. VM and native, exit 0.
+  equal (the #109 bare-key case) — must return true for those. Native engine, exit 0.
   Probe: `cg_opt_key` allocs at the emit-narrowing sites → 0.
 - **AL4a-3 (RITUAL — fixpoint):** byte-identical C; dedup behavior unchanged (no duplicate or
   missing typedefs). Probe: `cg_opt_key`/`cg_variant_key` dedup-scan allocs → O(distinct
-  types) instead of O(scan steps). VM and native, exit 0.
+  types) instead of O(scan steps). Native engine, exit 0.
 - If any fixpoint fails, the direct-write / predicate diverged from the string form — HALT and
   reconcile the fold; do not force-land.
 

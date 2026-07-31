@@ -77,7 +77,7 @@ you for the rest). Everything in §5 is a corollary of that one picture.
 
 For the implementer, the meta-types (from `src/checker/type.tks`):
 
-- **`Reference { inner: Type }`** — surface `Ref<T>`. Never null (R2). C-repr = bare `T *`. The safe
+- **`Reference { inner: Type }`** — surface `ref` (user-written keyword); internal checker notation `Ref<T>`. Never null (R2). C-repr = bare `T *`. The safe
   side. Auto-deref is type-directed (§4 ref model). **Depends on the transparent redesign** (today it
   is `.value`-based; the redesign makes it transparent).
 - **`Ptr { inner: Type? }`** — surface `ptr<T>`. `inner = null` is the opaque `ptr` (≡ `ptr<void>` ≡
@@ -309,7 +309,7 @@ surface token; if the lexer lacks a distinct arrow, it desugars to `(*p).field` 
 
 Not Marshall proper (never touches `ptr`); the sole SAFE member of the namespace. Swaps the
 *pointed-at values* of two `ref T` via R4 write-through both ways — a target-rebind is structurally
-impossible (R4). Runs on the VM **and** native (it is safe), so its fixture is a *differential*
+impossible (R4). Runs natively (it is safe), so its fixture validates correctness
 oracle, unlike every unsafe fixture (native-only). Costs three `T`-copies (temp + two writes);
 acceptable, and honest about the copy (M.5 "you see the copy").
 
@@ -318,7 +318,7 @@ acceptable, and honest about the copy (M.5 "you see the copy").
  * Swaps the VALUES two references point at — write-through both (R4), never a target-rebind
  * (rebinding a reference is impossible outside `Ptr`/`unsafe`). The SAFE, sanctioned exchange
  * primitive: it stays entirely inside the safe reference world (it names no `ptr`), so it is a
- * plain `pub fn`, runs on the VM and native alike, and is subject to no unsafe gate. After the
+ * plain `pub fn`, runs natively and is subject to no unsafe gate. After the
  * call `a` holds `b`'s former value and vice-versa; the two references still alias the same two
  * storage slots they did before.
  *
@@ -539,7 +539,7 @@ convention as `arena_manual_ok`/`unsafe_rawbuf_roundtrip`). REJECT fixtures carr
 
 | fixture | oracle | exercises |
 |---|---|---|
-| `marshall_swap_values` | **VM + native** (swap is SAFE) | §5.6 write-through both ways; exit = f(swapped values) |
+| `marshall_swap_values` | **native** (swap is SAFE) | §5.6 write-through both ways; exit = f(swapped values) |
 | `marshall_wrap_unwrap_roundtrip` | native-only | `unwrap` then `wrap` an identity; exit = value read back through the round-tripped Ref |
 | `marshall_uptr_roundtrip` | native-only | §5.4 `to_uptr`→`from_uptr` identity; exit = deref of the rebuilt ptr |
 | `marshall_ptr_arith_index` | native-only | §5.5 `p + n`, `p[n]`, `*p`, `&x` inside `unsafe fn`; exit = summed elements |
@@ -628,7 +628,7 @@ Smallest safe steps, each independently gate-able. **UNBLOCKED** crumbs land aga
   `marshall_ptr_arith_index`, `marshall_ptr_arith_in_safe_rejected`.
 
 - **C3 — `swap` [UNBLOCKED].** Add `teko::marshall::swap<T>` (§5.6; compiles against today's Ref).
-  Fixtures: `marshall_swap_values` (VM+native differential), `marshall_swap_on_let_rejected`.
+  Fixtures: `marshall_swap_values` (native validation), `marshall_swap_on_let_rejected`.
   **Ritual: full gate** (first SAFE Marshall member; the safe surface is now complete).
 
 - **C4 — `wrap` [BLOCKED on transparent ref].** Add `teko::marshall::wrap<T>` (§5.1): static

@@ -47,7 +47,7 @@ deletion** (§8), so it costs nothing to fold in.
 - **Wave A — CARRIER DETOX (A1–A7).** Rewrite the ~11 internal carriers so **no compiler-internal
   declaration is typed `i128`/`u128`**, while the **surface still accepts** i128/u128/f16. Immediate,
   bankable win the instant Wave A closes: **native self-host stops needing 128-bit isel** (the corpus it
-  compiles no longer contains an i128 value), so the isel/stackify honest-stops become unreachable.
+  compiles no longer contains an i128 value), so the isel honest-stops become unreachable.
 - **Wave B — SURFACE + TOPOLOGY REMOVAL (B1–B6).** Checker rejects `i128`/`u128`/`f16` with an honest
   diagnostic (pointing at `bigint`/`dec`/`f32`); rejection tests; delete the backend topology
   (isel routes, 128-bit ABI classification, interpreter width-128 arms, `lower`, `PrimKind::{I128,U128,
@@ -308,10 +308,9 @@ correctness cost. But by design intent the owner's "maximum death now" is achiev
   member name** mirroring PrimKind's shape (issue #263) — that is an identifier, NOT the builtin `f16`
   type, and **must survive** the sweep. The f16 sweep keys on the builtin type `f16`, never the token.
 
-**`math/checked.tks:25-31`** — the 128-bit `checked_*` family is *deliberately not shipped* (the retired
-VM's `norm_int` trapping `raw to u128` PANICS on a high-bit u128). Wave B **formalizes** this: the
-"once the VM reinterpret is corrected, u128/i128 are a mechanical extension" prose is deleted (there is
-no longer any 128 to extend to).
+**`math/checked.tks:25-31`** — the 128-bit `checked_*` family is *deliberately not shipped*. Wave B
+**formalizes** this: the prose about conditional future extension of the 128-bit family is deleted
+(there is no longer any 128 to extend to).
 
 **`.tkb` wire (frozen codec).** `parser::Number.value` (an i128) is serialized as **two u64 halves —
 hi = `(value >> 64)`, lo = `(value & 0xFFFF…FFFF)`** at `src/emit/tkb_write.tks:100-101` (general
@@ -366,8 +365,8 @@ fn numint_fits(v: NumInt, k: PrimKind) -> bool
 The two differential interpreters (`lir_interp`, `minst_interp`) hold **`RegFile.values: []i128`** and
 `IResult.value: i128` as an *unmasked* carrier (`lir_interp.tks:11` "Values are the i128 carrier; a
 numeric `to` cast masks to the target"). After the drop, the carrier becomes a **64-bit two's-complement
-register value held in `i64`**, with per-op width/sign reinterpretation retained (mirroring the retired
-VM's `norm_int`). See §9-g for the **behavioral decision** this forces (unmasked-i128 → 64-bit-wrapping),
+register value held in `i64`**, with per-op width/sign reinterpretation retained (maintaining
+historical semantics). See §9-g for the **behavioral decision** this forces (unmasked-i128 → 64-bit-wrapping),
 which is a *ratification item*, not a default.
 
 ```teko
@@ -432,10 +431,19 @@ honest-stop; a comment-only touch). **`teko::time`'s `DateTime`/`TimeSpan`/`Date
 stdlib types** — narrowing their tick field is an observable stdlib change (a 292-year range instead of
 an astronomical one). Ratify with (c).
 
-> Note on `teko_rt.c`'s *arithmetic* helpers `tk_div`/`tk_rem`/`tk_int_to_float` (`teko_rt.c:2327+`,
-> `__int128` params): these are the runtime's INTERNAL wide-arith and are **out of scope** — the language
-> ceases to *expose* i128, but the runtime may keep a wider internal type. They are reachable only via
-> codegen for 64-bit division; nothing in Wave A/B requires touching them. Flagged, not changed.
+> Note on `teko_rt.c`'s *arithmetic* helpers `tk_div`/`tk_rem`/`tk_int_to_float` (`__int128` params):
+> this doc called them the runtime's INTERNAL wide-arith and put them **out of scope**, on the reasoning
+> that the language may stop *exposing* i128 while the runtime keeps a wider internal type.
+> **SUPERSEDED by the owner ruling of 2026-07-30** (*"é pra remover suporte de 128 bits como primitivas
+> (inteiros e flutuantes), para isto foram criados os arbitrários bigint e dec"*): they are REMOVED,
+> together with the whole `*_i128`/`*_u128` helper family, the `tk_to_{u,i}128*` casts and the 128-bit
+> cast CARRIER (now `int64_t`/`uint64_t`). Two facts closed it: (1) nothing ever called the trio —
+> integer `/` and `%` route through the per-width `tk_div_<tag>`/`tk_mod_<tag>` helpers and an int->float
+> cast is a plain C cast; (2) being the runtime's only NON-static `__int128` functions, they were the
+> sole reason `teko_rt.o` referenced the libgcc 128-bit builtins `__divti3`/`__udivti3`/`__modti3`/
+> `__umodti3`/`__floattidf`/`__floatuntidf`, which MSVC's `link.exe` cannot resolve — six LNK2019s that
+> reddened `artifact / windows-x86_64` the moment the Windows leg moved off mingw. "Internal wide-arith
+> the surface cannot reach" was still a cost, and it was being paid at the link.
 
 ---
 
@@ -507,7 +515,7 @@ elapsed time).
 over `i64::MIN → bigint` guards it. **Ritual:** GATE-G.
 
 **End of Wave A — bankable result:** no compiler-internal declaration is `i128`/`u128`; the corpus the
-native backend self-compiles contains no i128 value; the isel/stackify 128 honest-stops are unreachable;
+native backend self-compiles contains no i128 value; the isel 128 honest-stops are unreachable;
 the surface still resolves i128/u128/f16 (Wave B removes that). f16 is untouched by Wave A (zero use).
 
 ---
@@ -538,7 +546,7 @@ Precondition: **all of Wave A landed** (removing `scope.tks`'s `i128` arm also s
 use) — it can even ship as its own tiny crumb ahead of the i128/u128 arm if the detox slips (§10).
 
 #### B3(.31) — `math/checked.tks` — formalize the removal  — **S**
-Delete the `checked.tks:24-31` "128-bit deferred / mechanical extension once the VM is fixed" prose;
+Delete the `checked.tks:24-31` prose about conditional future extension of 128-bit support;
 restate the width scope as **"exactly u8..u64 / i8..i64 — the language's full integer set"**. No code
 change (the family was never shipped). **Ritual:** GATE-G.
 
@@ -580,7 +588,7 @@ now-dead arm in the SAME crumb (or the matches go non-exhaustive): `type.tks:11-
 #### B8(.32) — delete the backend register-pair / ABI-128 / interp-width-128 topology  — **L**
 The isel i128 routes + honest-stops — `isel_x86_64.tks` (~11 incl. `select_const_int_x86`'s register-pair
 stop, now unreachable), `isel_arm64.tks` (~35), um isel de backend (~29); the 128-bit ABI classification —
-literal `128`; key on the size-16/two-register path, not a grep); `lower.tks` residual; `stackify.tks`
+literal `128`; key on the size-16/two-register path, not a grep); `lower.tks` residual
 `C1-i128` stop; the `if width == 128` arms remaining in `lir_interp`/`minst_interp` (the carrier already
 went in A4); `lir_print` residual. Prune the isel `_test.tkt` i128/F16 cases. **Ritual:** GATE-G +
 own==C differential (`diff_c_own.sh`) with the i128 **KNOWN-STOP guards removed** (§6) — the differential
@@ -622,7 +630,7 @@ carries exactly ONE re-baseline).
 | `` | exercise i128 + F16 plumbing | removed | **PRUNE** the 128/F16 cases |
 | `enum_member_shadows_primkind/src/kinds.tks` | user enum member `F16` | unaffected | **KEEP** (identifier, not the builtin) |
 
-**Rejection fixtures born (native exit codes; VM is retired — native-only, cf. `vm-retirement.md`):**
+**Rejection fixtures born (native exit codes — updated for native-only, cf. `vm-retirement.md`):**
 
 | New fixture | Input | Expected |
 |---|---|---|
@@ -740,8 +748,8 @@ exceeded 64 bits used to be held wide and only masked at a `to` cast — it now 
 op**. RECOMMEND the wrapping carrier: it is **more faithful to the native backend** (real 64-bit
 registers wrap), and both interpreters change in lockstep so the interp-equiv oracle is preserved. *Risk:*
 a corpus test whose exit code depended on the unmasked-then-masked intermediate could shift; the A4
-ritual (isel differential) surfaces any such case. **This is the interpreters' analogue of the retired
-VM's `norm_int` — the same "reinterpret at the boundary" model the `checked.tks:22` note describes.**
+ritual (isel differential) surfaces any such case. **The interpreters follow the "reinterpret at the
+boundary" model the `checked.tks:22` note describes.**
 Ratify the wrapping model (or, alternatively, keep an unmasked model on a `{neg,mag}` pair — heavier, and
 it re-introduces a non-machine value model; not recommended).
 
@@ -765,11 +773,11 @@ R2; own==C without the 128 KNOWN-STOP = R2.
 - **Depends on / sequences after:** the null-union pivot (C6-C7), the corpus-wide `ref` adoption, and
   KP16 objfile — all in flight. This wave **engages after the ref lands** (it rewrites the corpus; every
   line:offset here shifts — re-grep the symbol). Cite offsets as *approximate*.
-- **Interaction with `vm-retirement.md` (#524):** that issue removes `src/vm/` but **NOT** `lir_interp`/
-  `minst_interp` (they live in `src/lir`/`src/backend`, not `src/vm`), so A4's interpreter detox is
-  **independent** of #524 and needed regardless. If #524 lands first, one fewer coverage/VM interaction
-  to reason about; no ordering hard-dependency either way. `checked.tks:26` references the *retired* VM's
-  `norm_int` — B3's prose cleanup should also drop the stale `src/vm/vm.tks` pointer if #524 already deleted it.
+- **Interaction with the interpreter detox:** the LIR interpreter (`lir_interp`) and machine-code
+  interpreter (`minst_interp`, in `src/lir`/`src/backend`) are orthogonal to the native backend (A4) and
+  needed regardless. If the interpreter detox (#524) lands first, one fewer coverage interaction to reason about;
+  no ordering hard-dependency either way. `checked.tks:26` references the `norm_int` constant — B3's prose
+  cleanup should also review this reference to ensure it aligns with the current integer model.
 - **Interaction with KP16 (objfile) + the float-slice work:** R2's ABI edits (size-16/eightbyte-pair
   classification) touch the same `abi_*.tks` files the float-slice work touches — sequence R2 to NOT
   overlap a float-slice re-baseline (one re-baseline in flight). The float isel family (f32/f64) is

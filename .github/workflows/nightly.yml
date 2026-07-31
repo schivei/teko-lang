@@ -78,7 +78,18 @@ jobs:
   # promote only part of a set, which is worse than not publishing at all: the release would look
   # successful and ship an incomplete platform matrix.
   plan:
-    if: github.repository == 'schivei/teko-lang' || github.repository == 'teko-org/teko-lang'
+    # ORG ONLY, MIRRORING release.yml (owner ruling 2026-07-30: *"release é da org, ponto. Só fazer o
+    # mesmo para o fork"*). This used to allow BOTH repos, and the mismatch is what produced the
+    # garbage the owner reported: the fork BUILT a full nightly on every push to main/remodel, then
+    # its `publish` job died with `HTTP 403: Resource not accessible by integration` because the
+    # release-publishing credentials live on the org — so the fork burned six legs of CI per push and
+    # published nothing, and a real promotion had to be done by hand.
+    #
+    # release.yml has carried the org-only guard since 2026-07-18 ("a fork has no nightly and no
+    # business publishing"). The nightly simply never got the same line, and a build whose only
+    # consumer refuses to run on this repo is waste by construction. Nothing is lost by stopping it
+    # here: the PR workflow already proves all six assets build, WITH gates, on this fork.
+    if: github.repository == 'teko-org/teko-lang'
     name: plan
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -238,7 +249,8 @@ jobs:
   #              head's. It does NOT when the base moved and the PR was not brought up to date —
   #              the PR's CI checks out `refs/pull/N/merge`, i.e. head merged into base, which is a
   #              third tree. Compared via the git trees, and a mismatch is REPORTED, never red.
-  #   SEED       gen1 is `seed(tree)`. ci_provision_teko.sh takes the NEWEST released seed, which
+  #   SEED       gen0 is `seed(tree)` and gen1 is `gen0(tree)`, so the assets descend from the seed
+  #              two links up. ci_provision_teko.sh takes the NEWEST released seed, which
   #              is a function of WHEN the lane ran. On a train that cuts a release per bump, a
   #              seed change between a PR's run and its merge is ORDINARY — and it is the single
   #              most likely honest explanation for two builds of one tree disagreeing.
@@ -250,10 +262,10 @@ jobs:
   # a fixed tree — and this job goes RED. That is the only condition under which it fails.
   #
   # ── AND THE DIAGNOSIS IS ALREADY BISECTED ─────────────────────────────────────────────────────
-  # Both sides carry `teko_c_sha256` in their provenance. teko.c is what the SEED emitted; each
-  # asset is that C compiled. So a disagreement is localised without further work: teko.c differing
-  # means the FRONT half moved (seed or ladder rung); teko.c matching while the bytes differ means
-  # the BACK half moved (the C toolchain).
+  # Both sides carry `teko_c_sha256` in their provenance. teko.c is what gen0 emitted while
+  # producing gen1; each asset is that C compiled. So a disagreement is localised without further
+  # work: teko.c differing means the FRONT half moved (seed, degrau or ladder rung); teko.c
+  # matching while the bytes differ means the BACK half moved (the C toolchain).
   #
   # ── WHAT IT CANNOT COMPARE, ENUMERATED RATHER THAN SHRUGGED AT ────────────────────────────────
   # A "could not compare" outcome is not allowed to be a shrug — that is the vacuous green this

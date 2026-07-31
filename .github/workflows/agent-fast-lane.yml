@@ -13,7 +13,7 @@
 #
 # WHY IT IS SO SHORT, and the shortness is the design rather than a corner cut. Three steps:
 #
-#   1. cc the committed `bootstrap/teko.c`          -> gen1     (~60s)
+#   1. release -> gen0 -> gen1, both links `TEKO_BACKEND=c`
 #   2. fixpoint: gen2 = gen1(src), gen3 = gen2(src) -> the verdict, with the degrau's address
 #   3. `teko test .`                                -> the suite, only if the fixpoint held
 #
@@ -55,13 +55,31 @@
 # HOW IT IS MEANT TO BE USED: push, read the address, close that degrau on a cargo branch, push
 # again. When step 2 finally reports PASSED and step 3 is green, the theory has done its job — and
 # the fix, already proven, is reapplied to the wagon (owner: *"validado isso, reaplica no vagão
-# 20"*). At that moment the `out/teko.c` this very run produced is ALREADY the `bootstrap/teko.c`
-# the wagon wants: harvest it before moving on, because the next state may regress.
+# 20"*). At that moment the `out/teko.c` this very run produced — gen1's own emitted C, uploaded by
+# the harvest step below — is ALREADY the `bootstrap/teko.c` the wagon wants: take it before moving
+# on, because the next state may regress. It is a payload, not a rung: committing it does NOT
+# re-route anyone's gen0 unless a `bootstrap/DEGRAU` says so (scripts/degrau.sh).
 #
 # DELETE THIS FILE when the wagon self-hosts. It has no reason to outlive that day.
 name: agent fast lane · self-host (one runner, one question)
 
-# FIRES ON PUSH TO `cargo/**` AND `theory/**`. Owner ruling 2026-07-28: *"já vimos que macOS no CI é
+# FIRES ON PUSH TO `theory/**` ONLY — owner ruling 2026-07-29: *"Trava na theory, melhor, lá sim
+# faz sentido"*. Isto REVOGA a extensão a `cargo/**` que vigorou entre 2026-07-28 e 2026-07-29, e a
+# revogação fica registada porque o raciocínio original continua a fazer sentido no seu contexto.
+#
+# PORQUE FOI REVOGADA. Em 2026-07-29 passou a valer uma segunda regra: **trabalho feito empurra-se
+# IMEDIATAMENTE para `cargo/**`**, depois de um reinício de container ter comido sete commits
+# retidos e o trabalho de dois agentes. As duas regras puxavam em sentidos opostos — cada push de
+# SEGURANÇA acendia um runner macOS. Separar os dois tipos de push (por prefixo `wip:`) foi proposto
+# e o dono preferiu a trava simples: `theory/**` é onde a medição exploratória vive, e é lá que ela
+# faz sentido.
+#
+# E há um facto que a decisão torna barato aceitar: na prática os agentes **não usavam esta lane**.
+# Todos constroem localmente pela escada (`scripts/build_gen1_from_c.sh` + `TEKO_BACKEND=c`), porque
+# `scripts/fetch_teko.sh` devolve 403 atrás do proxy. O custo dos runners estava a ser pago sem o
+# benefício ser colhido.
+#
+# O RACIOCÍNIO ORIGINAL, preservado — owner ruling 2026-07-28: *"já vimos que macOS no CI é
 # muito rápido, os agentes não são capazes de serem melhores que isso, sugiro que, se eles querem
 # testar, criem CI de push para Mac e executem o que querem lá, mais rápido que tentarem rodar toda
 # a cadeia por eles mesmos."*
@@ -79,7 +97,6 @@ name: agent fast lane · self-host (one runner, one question)
 on:
   push:
     branches:
-      - 'cargo/**'
       - 'theory/**'
   workflow_dispatch:
     inputs:
@@ -97,6 +114,25 @@ on:
           - ubuntu-latest
           - ubuntu-24.04-arm
           - windows-latest
+
+# A TRAVA. O dono apanhou a falta (2026-07-29): *"acredito que faltou uma trava nele"* — e faltava
+# mesmo, literalmente: este workflow não tinha bloco `concurrency` NENHUM. Cada push a `cargo/**`
+# levantava um runner macOS novo, sem nada a serializar nem a cancelar, enquanto os agentes estão
+# sob ordem de "empurrar cedo e empurrar sempre". Quatro agentes vivos multiplicam isso sozinhos.
+#
+# O âmbito (`cargo/**` + `theory/**`) FICA — o dono confirmou o seu ruling de 2026-07-28 quando lhe
+# mostrei que restringir a `theory/**` o reverteria. O desperdício não estava no âmbito; estava
+# nesta ausência.
+#
+# `cancel-in-progress: true` AQUI, e `false` no `pr.yml`, e a diferença é deliberada: no `pr.yml` o
+# dono mandou não cancelar porque um `cancelled` lhe chegou parecendo `failure` (uma corrida viva
+# morta por um push meu). Aqui o público é o AGENTE, não o dono, e uma medição de um commit já
+# ultrapassado não interessa a ninguém — a que interessa é sempre a última.
+#
+# Grupo por REF, não por workflow: dois agentes em branches diferentes não se cancelam um ao outro.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   self-host:
@@ -125,11 +161,40 @@ jobs:
           (free -m || vm_stat | head -n4) 2>/dev/null || true
           uname -srm || true
 
-      # NO SEED IS PROVISIONED AND NONE IS NEEDED. `build_with_seed_fallback.sh` enters through
-      # rung -1, which compiles the committed `bootstrap/teko.c` with the runner's own cc and
-      # builds the tip in ONE generation. No download, no ladder, no git history — the whole reason
-      # the committed C exists.
-      - name: gen1 — cc the committed C, then build the tip with it
+      # THE SEED IS PROVISIONED AGAIN, AND THAT IS A DIRECT CONSEQUENCE OF THE DEGRAU RULE.
+      #
+      # This step used to say "no seed is provisioned and none is needed", because
+      # `build_with_seed_fallback.sh` entered through rung -1 — the committed `bootstrap/teko.c`,
+      # cc'd by the runner. Owner ruling 2026-07-28 ends that automatism: *"só podemos usar teko.c
+      # se e somente se identificarmos degrau."* With no `bootstrap/DEGRAU` in the tree the chain
+      # starts where the owner's diagram starts, at the PUBLISHED RELEASE, so this lane has to hand
+      # the ladder its first link.
+      #
+      # THE LABEL IS DERIVED FROM THE RUNNER, not pinned, because the `runner` dispatch input can
+      # move this lane between four hosts and a pinned label would silently fetch a binary that
+      # cannot run here. An unknown host FAILS instead of guessing — a wrong seed is a wrong answer
+      # to the only question this lane exists to ask.
+      - name: Provision the published release (the chain's first link)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          case "${RUNNER_OS}/${RUNNER_ARCH}" in
+            Linux/X64)    LABEL=linux-x86_64-glibc ;;
+            Linux/ARM64)  LABEL=linux-arm64-glibc ;;
+            macOS/ARM64)  LABEL=macos-arm64 ;;
+            macOS/X64)    LABEL=macos-x86_64 ;;
+            Windows/X64)  LABEL=windows-x86_64 ;;
+            *)
+              echo "no released seed label is known for ${RUNNER_OS}/${RUNNER_ARCH}" >&2
+              exit 1 ;;
+          esac
+          echo "seed label: $LABEL"
+          sh scripts/ci_provision_teko.sh "$LABEL"
+          ls -la .seed/
+
+      - name: gen1 — release -> gen0 -> gen1 (both links down the C route)
         shell: bash
         run: |
           set -eu
@@ -143,20 +208,21 @@ jobs:
         shell: bash
         run: sh scripts/fixpoint_gate.sh out/teko . .fixpoint
 
-      # THE HARVEST. A passing fixpoint produces the freshest C known to rebuild this exact tree, and
-      # that file is the next `bootstrap/teko.c`. Until now the run DELETED it and kept only the word
-      # "PASSED" — the one artifact worth having was thrown away every time.
+      # THE HARVEST. A passing fixpoint leaves the freshest C known to rebuild this exact tree, and
+      # that file is the next `bootstrap/teko.c`. Until this step existed the run DELETED it and kept
+      # only the word "PASSED" — the one artifact worth having was thrown away every time.
       #
       # Owner ruling 2026-07-28: *"fechando tudo verde, coletou o teko.c emitido no vagão 20? Acredito
       # que seja importante a coleta, enviar o último teko.c estável da escada."*
       #
-      # `if: success()` ON PURPOSE — a C emitted by a chain that did NOT prove gen2 == gen3 is not a
-      # seed, it is a guess. The committed C is old (wagon 15) but PROVEN; replacing it with a fresher
-      # unproven one would trade a known-good rung for an unknown one, which is the exact move that
-      # cost this wagon a week. Only a green fixpoint earns the upload.
+      # THE CANDIDATE IS `gen1.c`, and that moved with the chain. gen2/gen3 emit C only while the
+      # `TEKO_FIXPOINT_BACKEND` lever is still `c`; once a leg flips it, they emit nothing and gen1 —
+      # the last generation built down the C route — is the only source of a harvest at all. Its
+      # descendants are what VOUCH for it: `if: success()` means gen2 == gen3 held over the binary
+      # that C encodes. A C from a chain that did not prove the fixpoint is not a seed, it is a guess.
       #
-      # Both generations go up, not just the candidate: when they are byte-identical that is evidence
-      # the C emission has reached its own fixpoint, and when they are not, the pair IS the bug report.
+      # gen2.c and gen3.c ride along while they exist: byte-identical, they are evidence the C
+      # emission reached its own fixpoint; different, the pair IS the bug report.
       # THE PROBE MATRIX — TEMPORARY, and it runs TWICE, under two different compiler generations.
       #
       # Owner ruling 2026-07-28: *"o que é a compilação do que um binário executando em runtime a
@@ -165,8 +231,8 @@ jobs:
       #
       # THE PARADOX, and why one run of the matrix would have been worthless. The compiler is a
       # binary executing: compiling a project IS `teko`'s own run time. The binary doing it is not
-      # the checker source anyone reads — gen1 came out of `cc` over wagon 15's committed `teko.c`,
-      # so its checker was lowered by an OLDER compiler. Reading `check_pattern` and `type_join` and
+      # the checker source anyone reads — gen1 was lowered by gen0, which the published release
+      # lowered before it. Reading `check_pattern` and `type_join` and
       # concluding "the source is correct" says nothing about what the RUNNING binary does, and this
       # wagon has already caught two defects of that exact family (the `byte` carrier width, `push`
       # returning the wrong length).
@@ -182,18 +248,19 @@ jobs:
       # Owner ruling 2026-07-28: *"comparar a versão .30, a versão do teko.c do vagão 15 e a gen2 …
       # vejamos onde há erro, entre .30 e vagão 15 ou vagão 15 e nativo."*
       #
-      # `gen1` is NOT wagon 15. `build_with_seed_fallback.sh` cc's the committed `bootstrap/teko.c`
-      # into wagon 15's compiler at `.rung-c/teko`, and THAT binary then builds the tip — so `gen1`
-      # and `gen2` are both TODAY'S SOURCE, one generation apart. Wagon 15's own compiler is an
-      # intermediate the pipeline throws away, and it is precisely the point the bisection needs:
-      # the last compiler proven to walk the whole ladder green.
+      # `gen1` is NOT the committed C's compiler. `.rung-c/teko` is that binary, and it now exists
+      # ONLY when a `bootstrap/DEGRAU` declares the committed C a rung — with no declaration the
+      # chain never cc's it and this point simply has no data, which the step says out loud instead
+      # of pretending. `gen0` is the point that always exists: the release's rendering of today's
+      # source, one generation behind `gen1`.
       #
-      #   .30 → wagon 15   : the released binary vs the last green ladder — did the train's own
-      #                      history break it?
-      #   wagon 15 → gen1  : wagon 15's compiler vs the tip it builds — did TODAY'S source break it?
+      #   .30 → the C's compiler : the released binary vs the last green ladder — did the train's
+      #                            own history break it?
+      #   gen0 → gen1            : the release's lowering of today's source vs today's own — did
+      #                            TODAY'S source break it?
       #
-      # Two adjacent pairs, and whichever pair flips a case is the half the defect lives in.
-      - name: Probe — the SAME shapes under WAGON 15's compiler (`.rung-c/teko`, never fails)
+      # Adjacent pairs, and whichever pair flips a case is the half the defect lives in.
+      - name: Probe — the SAME shapes under the DEGRAU's compiler (`.rung-c/teko`, never fails)
         if: ${{ always() }}
         continue-on-error: true
         shell: bash
@@ -201,9 +268,22 @@ jobs:
           set -u
           if [ -x .rung-c/teko ]; then
               .rung-c/teko --version || true
-              sh examples/probes/match_shapes/run.sh .rung-c/teko wagon15
+              sh examples/probes/match_shapes/run.sh .rung-c/teko degrau-c
           else
-              echo "match_shapes: no .rung-c/teko on this runner — wagon-15 point skipped"
+              echo "match_shapes: no .rung-c/teko — no degrau is declared, so this point has no data"
+          fi
+
+      - name: Probe — the SAME shapes under gen0 (the release's lowering, never fails)
+        if: ${{ always() }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -u
+          if [ -x .gen0/teko ]; then
+              .gen0/teko --version || true
+              sh examples/probes/match_shapes/run.sh .gen0/teko gen0
+          else
+              echo "match_shapes: no .gen0/teko on this runner — the gen0 point has no data"
           fi
 
       - name: Probe — the ten `match` shapes under gen1 (temporary, never fails)
@@ -232,9 +312,12 @@ jobs:
           # `if`, never `[ -f … ] && cp` — under `set -e` the && chain returns 1 for a missing file
           # and kills the step. That exact shape already cost this workflow two runs (the `nproc`
           # diagnostic that was named "never fails the job" and did).
-          for g in gen2 gen3; do
+          for g in gen1 gen2 gen3; do
               if [ -f ".fixpoint/$g.c" ]; then cp ".fixpoint/$g.c" "harvest/$g.c"; fi
           done
+          if [ ! -f harvest/gen1.c ]; then
+              echo "NOTE: no gen1.c — the chain emitted no C to harvest this run (see the gate's log)."
+          fi
           ls -la harvest/ || true
 
       - name: Harvest the emitted C (only from a fixpoint that HELD)
@@ -256,33 +339,24 @@ jobs:
       # deles."* Moving two steps down the file is the cheapest 26% that exists here — a red run drops
       # from ~150s to ~111s, and a green run pays exactly what it paid before, just later.
       #
-      # Mingw and not MSVC — owner ruling 2026-07-27: *"eu não gosto, discordo total de usar essa
-      # 'coisa', mas como MSVC exigiria adição de flags em C e não devemos mais emitir C, continue
-      # no mingw."* The kept choice is the one that asks nothing of the C seam we are removing.
-      # `brew`, not `apt-get` — this leg is macOS. clang ships with the Xcode CLT, so only the two
-      # cross capabilities need installing.
+      # MINGW IS GONE FROM HERE, AND A SUPERSEDED RULING IS RECORDED RATHER THAN DELETED. This block
+      # used to install `mingw-w64` on the strength of an owner ruling of 2026-07-27: *"eu não gosto,
+      # discordo total de usar essa 'coisa', mas como MSVC exigiria adição de flags em C e não devemos
+      # mais emitir C, continue no mingw."*
       #
-      # BOTH ARE PROVISIONED, never one: the suite would SKIP the missing one's rows and
-      # `no_skips_gate.sh` would fail the run for a reason that has nothing to do with the question
-      # being asked. A lane that reds on its own missing toolchain teaches nothing.
-      - name: Provision the two capabilities the SUITE needs (mingw cross-linker, wasmtime)
-        if: ${{ github.event.inputs.run_tests != 'false' }}
-        shell: bash
-        run: |
-          set -eu
-          brew install mingw-w64 wasmtime
+      # THAT RULING'S PREMISE WAS MEASURED FALSE on 2026-07-30, by a probe run on the real Windows
+      # runner (`theory/sonda-toolchain`): MSVC needs NO extra C flags there, because the image's clang
+      # ALREADY targets `x86_64-pc-windows-msvc` by default and already invokes MSVC's `link.exe`. The
+      # `-###` driver output is byte-identical with and without `--target=x86_64-pc-windows-msvc` — the
+      # flag is a no-op on that host. With the premise gone, the ruling that stood on it goes too, and
+      # the newer one governs: *"queremos sim Cross compiling quando todos os natives estiverem
+      # funcionando, mas não quero saber de mingw"* (2026-07-30).
+      #
+      # It is written out rather than removed because a quiet deletion invites the next reader to
+      # "restore" it from the older quote. A ruling superseded BY MEASUREMENT should say so.
+      #
+      # `brew`, not `apt-get` — this leg is macOS by default. clang ships with the Xcode CLT, so only
 
-      - name: Verify both are on PATH (fail loud before the suite, not inside it)
-        if: ${{ github.event.inputs.run_tests != 'false' }}
-        shell: bash
-        run: |
-          set -eu
-          x86_64-w64-mingw32-gcc --version | head -n1
-          wasmtime --version
-
-      # Only reached when the fixpoint HELD. A suite run before that point would be testing a
-      # compiler already known not to reproduce itself — the owner's own words: *"se nem consegue
-      # gerar gen2, nem tem que perder tempo com testes"*.
       - name: The suite (only reachable once the fixpoint holds)
         if: ${{ github.event.inputs.run_tests != 'false' }}   # vazio num push => roda
         shell: bash

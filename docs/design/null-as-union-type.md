@@ -64,7 +64,7 @@ Every claim below was read from the tree at authoring time.
   bytes** on the LP64 targets. This asymmetry (optional's 1-byte `bool` vs
   variant's 4-byte `enum`) is the crux of the representation analysis (§6).
 - **`null` literal lowering (LIR).** `lower.tks:4310-4314` `lower_null_lit`:
-  `null -> const_int 0` (a zero word). The VM/LIR path carries `null` as a zero
+  `null -> const_int 0` (a zero word). The LIR lowering carries `null` as a zero
   slot; the native C backend carries an optional as the `tk_opt` struct. There is
   **no** pointer niche-optimization in the C backend today (see §6).
 - **`error?` is the pervasive Result idiom.** 77 declarations in `src/` return
@@ -575,7 +575,7 @@ Partly, and the residual gap must be reported plainly:
 
 The reason is fundamental: a statically-compiled native frame reserves the space
 a binding might need over its lifetime. The mental model where "null costs 1
-byte" holds LITERALLY in the VM (uniform boxed word slots — `lower.tks:4310`
+byte" held in the LIR design (uniform boxed word slots — `lower.tks:4310`
 already carries `null` as a zero word), and holds in the HEAP dimension natively
 (box-in-arena: null allocates nothing). It cannot hold for a native inline slot
 without dynamic stack resizing. **Recommendation to the owner: adopt "pay for the
@@ -695,7 +695,7 @@ net addition, `−` = net deletion, `±` = both (offsetting).
 | Checker | `checker/borrow.tks`,`spine.tks`,`revalidate.tks`,`check_modules.tks` | DELETE Optional arms; they fold into existing Variant arms | ± M (total) |
 | LIR | `lir/lower.tks` | ADD `null` lit → `Null` value; DELETE `lower_coalesce`/`lower_safe_field_access`/`lower_safe_method_call` | ± M |
 | Codegen | `codegen/codegen.tks` | ADD `tk_null`, uint8 tag + niche-filling + box-in-arena (≥16B) + `#inline` attr; DELETE the `tk_opt_*` former paths (folded into the unified `Variant`) | ± **L** |
-| Backends | native LIR isel / VM value model | `Null` value (1-byte / zero slot); niche-aware loads; box-in-arena + `#inline` | + M |
+| Backends | native LIR isel value model | `Null` value (1-byte / zero slot); niche-aware loads; box-in-arena + `#inline` | + M |
 | Stdlib + corpus | 77 `-> error?` + all `T?`/`?.`/`??`/`?.m()` | REQUIRED mechanical rewrite → `null \| error` / `T \| null` + `match`/`if` (THE biggest churn) | + **L** |
 | Tests | `tests/`, corpus fixtures | new regression fixtures (§8); delete operator fixtures | + M |
 
@@ -725,7 +725,7 @@ function shapes are contracts the implementer copies verbatim (full Javadoc).
 **Crumb 1 — add the `Null` type case (inert). S. RITUAL: fixpoint.
 BEHAVIOR-PRESERVING (no bytes change).** Add the case to `Type` (`type.tks:93`)
 plus an arm in every exhaustive `match` over `checker::Type` (type_eq /
-subst_type / type_mangle / codegen / VM / backends). Nothing produces `Null` yet.
+subst_type / type_mangle / codegen / backends). Nothing produces `Null` yet.
 
 ```
 /**
@@ -868,7 +868,7 @@ so the rewrite changes source spelling only, not emitted bytes). RITUAL: fixpoin
 `match`/`if x != null`. After this crumb no source uses the legacy forms.
 
 Fixture: `t/error_union_migration.tks` — a representative `null | error` fn
-round-trips success (`null`) and failure (`error`) on both engines; and the whole
+round-trips success (`null`) and failure (`error`) natively; and the whole
 corpus rebuild is byte-identical to its C5 output.
 
 **Crumb 7 — DELETE the dead surface + the `Optional` former. M (net deletion).
@@ -888,7 +888,7 @@ RITUAL: full gate + fixpoint (final ratified end-state).** Confirm the
 `Optional{Void}` narrowing/inference sentinel is fully gone (its arms left with
 the case in C7) and that the SEPARATE empty-collection `Slice{Void}` sentinel is
 UNTOUCHED (`t/empty_slice_sentinel.tks` still infers). Full-Javadoc audit of every
-declaration touched across C1-C7 (W15 law). Whole-suite gate, VM + native.
+declaration touched across C1-C7 (W15 law). Whole-suite gate, native.
 
 ---
 
@@ -910,7 +910,7 @@ form physics allows (8-byte handle, zero heap when null). The two factual
 corrections the owner must accept: (1) §6.1 — `i32 | null` is `discriminant +
 i32`, not one byte; and (2) §6.6 — a mutable `u128 | null` inline slot can be
 8 bytes (boxed) or 32 (inline) but never 1 byte, because a native frame reserves
-lifetime-max space; "1 byte when null" holds literally only in the VM and, in
+lifetime-max space; "1 byte when null" held in the LIR design as a zero word, and, in
 spirit, as "zero heap when null" natively. R2 is now RELAXED (owner): bare
 `Ref<T>` stays never-null, `Ref<T> | null` is the explicit nullable form, and the
 mandatory NARROWING INVARIANT (§3d) keeps the bare-ref promise sound. The sentinel

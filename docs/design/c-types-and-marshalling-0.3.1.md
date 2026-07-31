@@ -93,8 +93,8 @@ Every row is a read measurement.
 | `unsafe #must_free type Arena { region: uptr }` — leaking the region is a **compile error** | shipped | `src/mem/unsafe/arena.tks` |
 | Teko has **NO macros**, and none are planned before 1.0 | confirmed | zero hits for `macro` in `src/lexer`, `src/parser`, `src/parser/ast.tks`; `docs/memory/teko-laws-digest.md` "Metaprogramming-out-of-LTS" |
 | `#os("…")` may precede **a function ONLY** — a `type` decl cannot be OS-guarded | yes | `parse_decl.tks:1239` |
-| native targets | `Arm64Macho`, `X8664Linux`, `X8664Windows`, `Wasm32Wasi`, `Wasm64Wasi`, `Wasm32Browser` | `src/build/project.tks:1421` |
-| the VM is **retired** — native AOT is the sole engine | ruled | `docs/memory/teko-laws-digest.md` ("Twins retired, 2026-07-13, #524") |
+| native targets | `Arm64Macho`, `Arm64Linux`, `X8664Linux`, `X8664Windows` | `src/build/project.tks` |
+| native AOT is the sole engine | ruled | `docs/memory/teko-laws-digest.md` ("Twins retired, 2026-07-13, #524") |
 | `Ptr` and `Uptr` are both **admissible union members** (they fall to the permissive arm) | yes | `resolve.tks:1642-1658` (`variant_member_admissible`) |
 | `ptr<T> \| null` lowers to a **bare `T *` with NULL meaning null** — zero overhead, C-identical | yes | `cg_type_is_niche_able`'s `Ptr => true` arm, `codegen.tks:1868-1877`; the emit path at `codegen.tks:1532-1534` |
 | `uptr \| null` is **NOT** niche-able — it falls to `_ => false` and lowers to a **tagged struct** | yes | `codegen.tks:1868-1877` (no `Uptr` arm) |
@@ -221,7 +221,7 @@ An entry enters `teko::c_types` only if **both** hold:
 1. **A named, real caller demands it** — an extern in this tree, an extern the sibling
    `cargo/20-concorrencia-adiantada` design names, or a `teko_rt` binding. No theoretical completeness.
 2. **Its Teko mapping is the SAME on every target the compiler can emit** (`project.tks:1421`:
-   `arm64-macos`, `x86_64-linux`, `x86_64-windows`, `wasm32-wasi`, `wasm64-wasi`, `wasm32-browser`).
+   `arm64-macos`, `arm64-linux`, `x86_64-linux`, `x86_64-windows`).
 
 Rule 2 is the operational form of the owner's *"não mente"*. A `c_types` name is ONE name used
 corpus-wide; if its width differs per target, a single alias would be a lie on some target, and
@@ -284,8 +284,8 @@ prototype. The owner's revised ruling avoids both.
 
 | C type | why it is OUT |
 |---|---|
-| **`long` / `unsigned long`** | **Fails rule 2, irreducibly.** 64-bit on LP64 (`x86_64-linux`, `arm64-macos`), 32-bit on LLP64 (`x86_64-windows`) and on `wasm32`. One alias would be a lie on half the targets, and `#os` **cannot guard a type declaration** (`parse_decl.tks:1239`). **The honest workaround, which costs nothing:** an FFI author binding a `long` API names the exact width for the target being bound (`c_int` or `c_longlong`) — which is precisely what the corpus already does with bare `u64`, so this is a zero-regression exclusion. **The unblocker, named:** OS/width-guarded type declarations. REPORTED UP, not turned into an issue here |
-| **`size_t` / `ssize_t` / `ptrdiff_t`** | **Fails rule 2.** 64-bit on all three native targets and `wasm64`; **32-bit on `wasm32`** (both `wasm32-wasi` and `wasm32-browser` are emittable, `project.tks:1421`). Teko has no target-width integer (`PrimKind` is fixed-width only: `type.tks:11-16`), and `uptr` is `uintptr_t`, which is an *address* word, not a *size* word — using it for a length is the same category error §5.3 rejects. **Workaround, already in use:** `c_ulonglong` (`u64`) for the 64-bit targets, which is exactly what `aligned_alloc`/`memset`/`memcmp` declare today. **The unblocker, named:** a `usize`/`isize` primitive. REPORTED UP |
+| **`long` / `unsigned long`** | **Fails rule 2, irreducibly.** 64-bit on LP64 (`x86_64-linux`, `arm64-macos`), 32-bit on LLP64 (`x86_64-windows`). One alias would be a lie on half the targets, and `#os` **cannot guard a type declaration** (`parse_decl.tks:1239`). **The honest workaround, which costs nothing:** an FFI author binding a `long` API names the exact width for the target being bound (`c_int` or `c_longlong`) — which is precisely what the corpus already does with bare `u64`, so this is a zero-regression exclusion. **The unblocker, named:** OS/width-guarded type declarations. REPORTED UP, not turned into an issue here |
+| **`size_t` / `ssize_t` / `ptrdiff_t`** | **Fails rule 2.** 64-bit on every native target the compiler emits, but Teko has no target-width integer (`PrimKind` is fixed-width only: `type.tks:11-16`), and `uptr` is `uintptr_t`, which is an *address* word, not a *size* word — using it for a length is the same category error §5.3 rejects. **Workaround, already in use:** `c_ulonglong` (`u64`) for the 64-bit targets, which is exactly what `aligned_alloc`/`memset`/`memcmp` declare today. **The unblocker, named:** a `usize`/`isize` primitive. REPORTED UP |
 | **`intptr_t` / `uintptr_t`** | Teko's `uptr` already IS `uintptr_t` (`codegen.tks:1553`) and spells it in one word. An alias would be a synonym (M.5: one name, one meaning) |
 | **`uptr \| null`** | **Not buildable, and the reason is representational, not stylistic** (§5.4.3): `Uptr` has no arm in `cg_type_is_niche_able` (`codegen.tks:1868-1877`) because an integer has no spare bit-pattern — `0` is data. It lowers to a two-word tagged struct, which is the wrong ABI, silently. Nullability at the boundary is `ptr<T> \| null`, always |
 | **`void`** | see §5.1 — a synonym for a thing that already has a one-word name [PIN-2] |
@@ -962,9 +962,7 @@ a width-insensitive value.
 
 ## 11. Regression fixtures
 
-The VM is retired (`teko-laws-digest.md`, #524), so **every oracle is native**. There is no
-VM/native differential to state; where the brief asks for "VM and native", the honest answer is that
-one engine remains and the fixtures say so.
+Every oracle is native (`teko-laws-digest.md`, #524). Prior briefs mentioned both engines; now only native remains and the fixtures validate accordingly.
 
 Fixture mechanics follow the house exactly: exit-code oracles are a namespace under
 `examples/regressions/bulk/src/qNNN_<name>/body.tks` plus a `Scenario` in `bulk.tkr`

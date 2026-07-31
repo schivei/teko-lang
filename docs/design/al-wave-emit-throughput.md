@@ -339,7 +339,7 @@ pub fn ew_write(w: &EmitWriter, s: str) -> void | error
 fase recebe uma `tk_region` própria, dropada em um passo no fim — remove a acumulação root
 process-lifetime. Primitivas já existem (`teko_rt.h:148-152`; reclaim observável
 `teko_rt.c:1078-1086`). Dona da região onde `[N]T` soft aloca (F3). Ritual: probe
-reclaim-ratio ↑ (de 0%), RSS ↓, zero regressão (diff VM==native + fixpoint).
+reclaim-ratio ↑ (de 0%), RSS ↓, zero regressão (native validation + fixpoint).
 
 ---
 
@@ -362,8 +362,7 @@ migra um módulo de value-thread → ref-push, roda o gate, segue. **Nenhum cuto
 compilador, **NÃO os bytes emitidos do programa-alvo** (o compilador compila o corpus de
 teste identicamente antes e depois). Marcação por crumb:
 - **Preserva-alvo, muda-C-do-compilador** (gen1==gen2 entre si; C emitido para o corpus-alvo
-  byte-idêntico): F1, F3, AL3, AL6 (níveis push/`[N]T`). Prova: golden do corpus-alvo + diff
-  VM==native + fixpoint.
+  byte-idêntico): F1, F3, AL3, AL6 (níveis push/`[N]T`). Prova: golden do corpus-alvo + native validation + fixpoint.
 - **Preserva tudo**: AL1, AL4a (string idêntica, só cacheia), F2 (≤7 sites), AL4b, AL5.
 - **Muda-bytes-com-justificativa**: **AL0** const-ificação (runtime→rodata, 5 sites — por
   honestidade/W15, não perf).
@@ -464,7 +463,7 @@ baseline de AL1 como régua.
 - **Blast radius (§7).** ~1383 push-sites. Resolução: PONTE (§6) → gradual, fixpoint por
   sub-lote. Nunca cutover duro.
 - **Fixpoint / byte-identidade.** F1/F3/AL3/AL6 mudam o C do compilador mas preservam o C
-  emitido para o corpus-alvo. Resolução: golden do alvo + diff VM==native + fixpoint
+  emitido para o corpus-alvo. Resolução: golden do alvo + native validation + fixpoint
   gen1==gen2; marcação por crumb em §6.
 - **`let`-profundo pode quebrar código que muta conteúdo de `let`.** Blast: 7 index-writes
   (§7). Resolução: migrar os ≤7 a `mut`, depois apertar; baixo risco.

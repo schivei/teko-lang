@@ -578,11 +578,13 @@ type BinOperands = struct {
 }
 
 /**
- * adopt_binop_operands — when a binary's operands differ only because one is an untyped numeric
- * LITERAL, retype that literal to the other (non-literal) operand's type so `line + 1` / `n % 10`
- * type-check (C6): the non-literal operand's type wins, and the literal node is rebuilt with it. The
- * left operand takes priority when both would adopt. Already-equal or non-adoptable operands pass
- * through unchanged.
+ * adopt_binop_operands — when a binary's operands differ only because one is an untyped LITERAL
+ * (numeric, `null`, or an `if`/`match`/array composite whose leaves are literals), retype that
+ * literal to the other (non-literal) operand's type through `retype_literal` so `line + 1` /
+ * `n % 10` type-check (C6) and `a != null` over an `i32 | null` `a` retypes the bare `null` to its
+ * matching `Null` member rather than the whole union (the union is a `Variant`, and codegen only
+ * ever accepts a bare `null` typed exactly `Null`). The left operand takes priority when both would
+ * adopt. Already-equal or non-adoptable operands pass through unchanged.
  *
  * @param l  the typed left operand
  * @param r  the typed right operand
@@ -590,8 +592,8 @@ type BinOperands = struct {
  */
 fn adopt_binop_operands(l: TExpr, r: TExpr) -> BinOperands {
     if type_eq(l.type, r.type) { return BinOperands { l = l; r = r } }
-    if literal_adopts(l, r.type) { return BinOperands { l = TExpr { kind = l.kind; type = r.type; line = l.line; col = l.col }; r = r } }
-    if literal_adopts(r, l.type) { return BinOperands { l = l; r = TExpr { kind = r.kind; type = l.type; line = r.line; col = r.col } } }
+    if literal_adopts(l, r.type) { return BinOperands { l = retype_literal(l, r.type); r = r } }
+    if literal_adopts(r, l.type) { return BinOperands { l = l; r = retype_literal(r, l.type) } }
     BinOperands { l = l; r = r }
 }
 
@@ -800,6 +802,10 @@ fn type_compare(c: parser::Compare, env: Env, table: TypeTable) -> TExpr | error
         if i == 0 { first = adopted.l }
         match redundant_widen_cast_of(adopted.l, adopted.r) { TExpr as bad => warn_redundant_cast(env, bad); null => { } }
         if !is_comparable(adopted.l.type, adopted.r.type) { return error { message = "operands are not comparable" } }
+        let is_variant_member_pair = variant_has_member(adopted.l.type, adopted.r.type) || variant_has_member(adopted.r.type, adopted.l.type)
+        if is_variant_member_pair && !op_is_eq_ne(c.rest[i].op) {
+            return error { message = "a union compares to one of its own members only with `==`/`!=` (ordering needs an explicit `to`)" }
+        }
         terms = teko::list::push(terms, TCmpTerm { op = c.rest[i].op; operand = adopted.r })
         prev = adopted.r
         i++
@@ -1345,14 +1351,7 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable) -> TExpr
                             mut ba = match type_expr(bdargs[bii], env, table) { TExpr as te => te; error as e => return e }
                             if type_is_void(ba.type) { return error { message = "a `void` expression cannot be passed as an argument (M.1)" } }
                             let bpt = bf.params[bii]
-                            if !assignable_to(ba.type, bpt, table) {
-                                if !literal_adopts(ba, bpt) { return teko::error::err_typed(error { message = "argument type mismatch" }, type_render(bpt), type_render(ba.type)) }
-                                ba = TExpr { kind = ba.kind; type = bpt; line = ba.line; col = ba.col }
-                            } else {
-                                if !arg_keeps_narrow_type(bpt, ba.type, table) {
-                                    ba = TExpr { kind = ba.kind; type = bpt; line = ba.line; col = ba.col }
-                                }
-                            }
+                            ba = match coerce_argument_into(ba, bpt, table) { TExpr as x => x; error as e => return e }
                             biargs = teko::list::push(biargs, ba)
                             bii++
                         }
@@ -1437,15 +1436,7 @@ fn type_contract_dispatch(ib: parser::InterfaceBody, struct_name: str, mc: parse
         mut a = match type_expr(dargs[ii], env, table) { TExpr as te => te; error as e => return e }
         if type_is_void(a.type) { return error { message = "a `void` expression cannot be passed as an argument (M.1)" } }
         let pt = f.params[ii]
-        if !assignable_to(a.type, pt, table) {
-            match struct_iface_named_stop(a.type, pt, table) { error as se => return se; null => { } }
-            if !literal_adopts(a, pt) { return teko::error::err_typed(error { message = "argument type mismatch" }, type_render(pt), type_render(a.type)) }
-            a = TExpr { kind = a.kind; type = pt; line = a.line; col = a.col }
-        } else {
-            if !arg_keeps_narrow_type(pt, a.type, table) {
-                a = TExpr { kind = a.kind; type = pt; line = a.line; col = a.col }
-            }
-        }
+        a = match coerce_argument_into(a, pt, table) { TExpr as x => x; error as e => return e }
         iargs = teko::list::push(iargs, a)
         ii++
     }
@@ -1517,6 +1508,43 @@ fn retarget_generic_static_callee(c: parser::Call, table: TypeTable, ref_ns: str
 }
 
 /**
+ * Does a call's callee carry a QUALIFIER the injected-builtin dispatch (`builtin_fn`) is entitled to
+ * resolve through (0.3.1.0 qualifier validation, `docs/memory/colisao-use-str-0.3.1.md`)? `builtin_fn`
+ * itself matches by LAST segment only, discarding everything before it; this predicate is the gate a
+ * caller applies AFTER a `builtin_fn` match succeeds, so the qualifier the user actually wrote gets a
+ * say. It mirrors the ONLY two forms `emit_call`/`emit_host_ffi` (`src/codegen/codegen.tks`) know how
+ * to lower a builtin call from — a BARE name (`concat(...)`, one segment) or a path literally ROOTED
+ * at `teko` (`teko::str::concat(...)`, `teko::env::var(...)`, any depth) — so the checker never signs
+ * off on a spelling the codegen cannot honour. Any OTHER qualifier is rejected by the caller: a real
+ * namespace missing its `teko::` root (`str::concat`, `env::var`), an invented one
+ * (`bogus_namespace::str`), or a `use`-declared alias (`tstr::concat` via `use teko::str as tstr` —
+ * `use` is a checker no-op for value-level references today, so an alias can never be a legal builtin
+ * qualifier; teaching it to resolve is a separate, larger increment, deliberately out of scope here).
+ *
+ * @param callee  the call's callee path
+ * @return        true iff `callee` is bare or `teko`-rooted — the two forms codegen can lower
+ */
+fn builtin_qualifier_ok(callee: parser::Path) -> bool {
+    callee.segments.len == 1 || callee.segments[0].name == "teko"
+}
+
+/**
+ * Builds the diagnostic for a call whose LAST segment names an injected builtin (`builtin_fn`
+ * matched) but whose qualifier `builtin_qualifier_ok` rejected. Names both what was written and what
+ * the two legal forms are, so a typo'd or invented namespace — or a `use`-declared alias, which does
+ * NOT make a builtin callable under its short name today — reads as a namespace problem rather than a
+ * mysterious "unknown function".
+ *
+ * @param callee  the offending call's callee path
+ * @param name    the callee's last segment (the builtin name that WOULD have matched)
+ * @return        the positioned diagnostic
+ */
+fn unresolved_builtin_qualifier_error(callee: parser::Path, name: str) -> error {
+    let qualifier = path_qualifier(callee, callee.segments.len - 1)
+    error { message = $"unknown function: {path_str(callee)} — `{qualifier}` is not a recognized namespace; the built-in `{name}` is called bare (`{name}(...)`) or fully qualified rooted at `teko::` (`teko::...::{name}(...)`)" }
+}
+
+/**
  * Types a call expression: resolves the callee (a builtin, a same/qualified-namespace function, or
  * a local closure value), types every argument against the resolved signature — widening (B.14),
  * literal-adoption (C6), generic type-param inference (S4), AUTO-REF (a `mut` lvalue passed where a
@@ -1584,12 +1612,16 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable) -> TExpr | error {
             return TExpr { kind = TCall { callee = c.callee; args = eargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = Void { }; line = 0; col = 0 }
         }
     }
-    // (#49) the resolved target's namespace drives the mangled C name. Only a USER function (found
-    // in the env) carries one; a builtin (fallback below) leaves it empty → codegen's call-map path.
     let resolved_ns = match lookup_call(env, c.callee) { Type => call_ns(env, c.callee); error => "" }
-    let ft = match lookup_call(env, c.callee) {   // (#41) namespace-aware: a local or
-        Type as t => t   // a same-namespace fn (unqualified) / the qualified ns;
-        error => match builtin_fn(name) { Type as t => t; error => return error { message = $"unknown function: {name}" } }   // …then the injected builtins; else name the symbol (M.3)
+    let ft = match lookup_call(env, c.callee) {
+        Type as t => t
+        error => match builtin_fn(name) {
+            Type as t => {
+                if !builtin_qualifier_ok(c.callee) { return unresolved_builtin_qualifier_error(c.callee, name) }
+                t
+            }
+            error => return error { message = $"unknown function: {name}" }
+        }
     }
     // (W10b.CLASS residual — intern visibility) a STATIC call (`ClassName::method(…)`) is
     // reachable under the SAME rule as an instance dot-call — check it here too, routed through
@@ -1688,16 +1720,7 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable) -> TExpr | error {
                     _ => { }
                 }
                 if !auto_reffed {
-                    if !assignable_to(a.type, f.params[i], table) {
-                        // (C1.8/E2) attach expected/actual — THE user's reported mismatch (mirrors expr.c).
-                        match struct_iface_named_stop(a.type, f.params[i], table) { error as se => return se; null => { } }
-                        if !literal_adopts(a, f.params[i]) { return teko::error::err_typed(error { message = "argument type mismatch" }, type_render(f.params[i]), type_render(a.type)) }
-                        a = TExpr { kind = a.kind; type = f.params[i]; line = a.line; col = a.col }   // C6 literal adopts the param type
-                    } else {
-                        if !arg_keeps_narrow_type(f.params[i], a.type, table) {
-                            a = TExpr { kind = a.kind; type = f.params[i]; line = a.line; col = a.col }
-                        }
-                    }
+                    a = match coerce_argument_into(a, f.params[i], table) { TExpr as x => x; error as e => return e }
                 }
                 args = teko::list::push(args, a)
                 i++
@@ -2823,35 +2846,131 @@ fn type_in(n: parser::InExpr, env: Env, table: TypeTable) -> TExpr | error {
     TExpr { kind = TInExpr { lhs = lhs; elems = elems }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
 }
 
-// `[ e0, e1, … ]` (Increment B+): type every element, UNIFY to a common element type T (widening —
-// a case joins into its variant; sibling cases → their union), result `[]T`. An empty `[]` yields
-// the SENTINEL `[]Void` — exactly like `teko::list::empty()` — so a binding annotation (`: []T`)
-// adopts it and a bare unannotated `[]` is rejected by type_binding (collections #4). Spread
-// elements (`..xs`) must type as `[]T`; their element type T is widened into the unified element.
-// C twin: type_array_lit in expr.c.
+/**
+ * array_elem_contrib_type — the type an array element CONTRIBUTES to the literal join: a spread
+ * element (`..xs`) contributes its slice's own element type (never itself, since the whole
+ * point of a spread is that `[]T` flattens into the unified `T`); any other element contributes
+ * its own type directly.
+ *
+ * @param ae  the typed array element
+ * @return    the type this element joins into the array's unified element type
+ */
+fn array_elem_contrib_type(ae: TArrayElem) -> Type {
+    if ae.is_spread {
+        match ae.expr.type { Slice as s => s.element; _ => ae.expr.type }
+    } else {
+        ae.expr.type
+    }
+}
+
+/**
+ * array_elem_bare_literal — a non-spread element's trailing bare numeric-literal leaf, or `null`
+ * when the element is a spread (never a literal candidate — its contribution is already a
+ * concrete, previously-typed `T`) or its own expression is not a bare number. The array-literal
+ * counterpart of `type_match`'s `match_arm_literal_leaf`: it gates which element is a LITERAL
+ * cross-adoption candidate rather than a genuinely concrete (pinned) type.
+ *
+ * @param ae  the typed array element
+ * @return    the element's `TNumber` leaf, or `null`
+ */
+fn array_elem_bare_literal(ae: TArrayElem) -> TExpr | null {
+    if ae.is_spread { return null }
+    match ae.expr.kind { TNumber => ae.expr; _ => null }
+}
+
+/**
+ * array_join_anchor — the first element's CONTRIBUTED type that is NOT a bare numeric literal, or
+ * `null` when every element is a bare literal (so there is no concrete type to adopt into). The
+ * array-literal counterpart of `type_match`'s `match_join_anchor`: scans every element up front,
+ * so a later concrete element still anchors an EARLIER literal one regardless of source order.
+ *
+ * @param elems  the typed array elements
+ * @return       the anchor type sibling literal elements should adopt, or `null`
+ */
+fn array_join_anchor(elems: []TArrayElem) -> Type | null {
+    mut i = 0
+    loop {
+        if i >= elems.len { break }
+        match array_elem_bare_literal(elems[i]) {
+            TExpr => { }
+            null => return array_elem_contrib_type(elems[i])
+        }
+        i++
+    }
+    null
+}
+
+/**
+ * adopt_array_elem_literals — rebuild every element whose value is a bare numeric literal that
+ * FITS `anchor` (`literal_adopts`) so its leaf is retyped at `anchor` instead of its bare default
+ * (`retype_literal`) — the array-literal counterpart of `type_match`'s `adopt_match_arm_literals`,
+ * so `[some_i32, 0]` joins to `[]i32`, not the accidental `[]<i32 | i64>` a bare-defaulted literal
+ * would otherwise force into the union. An element whose literal does not fit `anchor`, is a
+ * spread, or is not a bare literal at all, passes through unchanged.
+ *
+ * @param elems   the typed array elements
+ * @param anchor  the type sibling literal elements adopt into
+ * @return        the elements, with every fitting literal leaf retyped at `anchor`
+ */
+fn adopt_array_elem_literals(elems: []TArrayElem, anchor: Type) -> []TArrayElem {
+    mut out: []TArrayElem = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= elems.len { break }
+        let ae = elems[i]
+        let next = match array_elem_bare_literal(ae) {
+            TExpr as t => if literal_adopts(t, anchor) { TArrayElem { is_spread = false; expr = retype_literal(t, anchor) } } else { ae }
+            null => ae
+        }
+        out = teko::list::push(out, next)
+        i++
+    }
+    out
+}
+
+/**
+ * type_array_lit — `[ e0, e1, … ]` (Increment B+): types every element, cross-adopts a bare
+ * numeric-literal element into a sibling's CONCRETE (non-literal) type (`array_join_anchor` +
+ * `adopt_array_elem_literals`, mirroring `type_match`'s own literal cross-adoption) and then
+ * UNIFIES every element into a common element type T (widening — a case joins into its variant;
+ * sibling cases → their union), result `[]T`. An empty `[]` yields the SENTINEL `[]Void` —
+ * exactly like `teko::list::empty()` — so a binding annotation (`: []T`) adopts it and a bare
+ * unannotated `[]` is rejected by type_binding (collections #4). A spread element (`..xs`) must
+ * type as `[]T`; its own element type T contributes to (and widens into) the unified element,
+ * and is never itself a literal-adoption candidate. C twin: type_array_lit in expr.c.
+ *
+ * @param a      the parsed array literal
+ * @param env    the enclosing type environment
+ * @param table  the resolved type table
+ * @return       the typed array literal, or an error
+ */
 fn type_array_lit(a: parser::ArrayLit, env: Env, table: TypeTable) -> TExpr | error {
-    mut elems: []TArrayElem = teko::list::empty()
-    mut et: Type = Void { }   // sentinel for an empty `[]` (no inferable element)
+    mut typed: []TArrayElem = teko::list::empty()
     mut i = 0
     loop {
         if i >= a.elements.len { break }
         let ae = a.elements[i]
         let el = match type_expr(ae.expr, env, table) { TExpr as te => te; error as e => return e }
         if ae.is_spread {
-            // spread element: expr must be a `[]T` slice; contribute T as the element type
             let spread_elem = match el.type {
                 Slice as s => s.element
                 _ => return error { message = "a spread element (`..xs`) must be a slice (`[]T`)" }
             }
             if type_is_void(spread_elem) { return error { message = "a spread element cannot be an untyped empty slice" } }
-            if type_is_void(et) { et = spread_elem } else { et = type_join(et, spread_elem, table) }
         } else {
-            // plain element: original logic
             if type_is_void(el.type) { return error { message = "a `void` expression cannot be an array element (M.1)" } }
-            if type_is_void(et) { et = el.type } else { et = type_join(et, el.type, table) }
         }
-        elems = teko::list::push(elems, TArrayElem { is_spread = ae.is_spread; expr = el })
+        typed = teko::list::push(typed, TArrayElem { is_spread = ae.is_spread; expr = el })
         i++
+    }
+    let elems = match array_join_anchor(typed) { Type as anchor => adopt_array_elem_literals(typed, anchor); null => typed }
+    mut et: Type = Void { }
+    mut i2 = 0
+    loop {
+        if i2 >= elems.len { break }
+        let contrib = array_elem_contrib_type(elems[i2])
+        if type_is_void(et) { et = contrib } else { et = type_join(et, contrib, table) }
+        i2++
     }
     // (MEM Step 0, R4) ESCAPE GATE — an INFERRED element type may not carry a reference. The
     // annotated form `let xs: []Ref<T> = …` is already rejected in resolve, but the inferred
@@ -3223,18 +3342,48 @@ fn tblock_type(stmts: []TStatement) -> Type {
     }
 }
 
-// ---- does a TYPED block DIVERGE (exit via return/break/continue on every path)? ----
-// True when its trailing statement is a return/break/continue, OR a trailing `if`-with-else
-// / `match` whose every branch / arm diverges. Such a block yields NO trailing value, so
-// match-as-value unification (type_match) skips it (B.20).
-// A panic/exit call DIVERGES (terminates the program — legislator's ruling: no `never` type), so
-// its result may stand in for ANY type at a value position. Recognized structurally (the injected
-// global builtins panic/exit, unqualified).
-fn texpr_diverges(e: TExpr) -> bool {
+/**
+ * `tcall_is_diverging_builtin` — is `c` a call to the INJECTED global `panic`/`exit` builtin,
+ * as opposed to a same-named callee the resolver actually bound to something else? The bare
+ * callee name alone cannot answer this: a project may declare its own `pub fn exit(...)` or a
+ * local closure bound to `panic`, and the resolver then targets THAT binding instead of the
+ * injected global (`type_call`'s `in_scope` gate). Every non-builtin resolution the resolver can
+ * produce for a one-segment callee carries a tell the injected builtin never does: a REAL
+ * declared function always resolves to a non-empty `call_ns` (its declaring namespace), and a
+ * local closure variable resolves with `is_closure_call` set. The injected builtin alone is
+ * constructed with an empty `call_ns`, `is_closure_call = false`, and `is_iface_dispatch = false`
+ * (`type_call`'s two `panic`/`exit` injection sites), so checking those three fields — never the
+ * name alone — is the same fronteira the lowering/emission passes consume (a `defer` scope
+ * replay fires on exactly the calls this predicate names; never duplicate this name list
+ * elsewhere).
+ *
+ * @param c  the typed call
+ * @return   true iff `c` targets the injected `panic`/`exit` builtin (not a shadowing user
+ *           declaration or local closure of the same bare name)
+ */
+pub fn tcall_is_diverging_builtin(c: TCall) -> bool {
+    if c.callee.segments.len != 1 { return false }
+    if c.call_ns.len != 0 || c.is_closure_call || c.is_iface_dispatch { return false }
+    let name = c.callee.segments[0].name
+    name == "panic" || name == "exit"
+}
+
+/**
+ * texpr_diverges — does a TYPED expression DIVERGE (never fall through to a following
+ * statement)? True for a call the resolver actually bound to the injected global `panic`/`exit`
+ * builtins (`tcall_is_diverging_builtin` — never a same-named user function or closure the
+ * resolver bound instead), for a `match` whose EVERY arm diverges, or for an `if`/`else` where
+ * BOTH branches diverge. Such an expression yields no value and never falls through, so
+ * match-as-value unification (`type_match`) skips it (B.20), and it may stand in for ANY
+ * type at a value position (the legislator's ruling: no `never` type).
+ *
+ * @param e  the typed expression
+ * @return   true iff `e` unconditionally terminates the enclosing frame (a panic/exit call, or
+ *           a fully-diverging match/if)
+ */
+pub fn texpr_diverges(e: TExpr) -> bool {
     match e.kind {
-        TCall as c => c.callee.segments.len == 1 && (c.callee.segments[0].name == "panic" || c.callee.segments[0].name == "exit")
-        // a `match` whose EVERY arm diverges, or an `if`/`else` where both branches diverge, yields
-        // no value and never falls through — so a function ending in it satisfies any return type.
+        TCall as c => tcall_is_diverging_builtin(c)
         TMatchExpr as m => {
             if m.arms.len == 0 { return false }
             mut i = 0
@@ -3732,30 +3881,114 @@ fn type_arm(a: parser::Arm, subject: Type, env: Env, table: TypeTable) -> TArm |
     TArm { pattern = a.pattern; has_when = a.has_when; guard = guard; body = body.stmts }
 }
 
-// ---- match as a VALUE: the common trailing-value type of the NON-diverging arms; EXHAUSTIVE (B.15) ----
-// A diverging arm (`error as e => return e`) yields no value, so it is SKIPPED in unification
-// (B.20). If ALL arms diverge the match type is void.
+/**
+ * match_arm_literal_leaf — the trailing bare numeric-literal leaf of a NON-diverging arm body, or
+ * `null` when the arm diverges or its trailing value is not a bare number literal. The `match`
+ * counterpart of `type_if`'s `trailing_number`: it gates which arm is a LITERAL cross-adoption
+ * candidate rather than a genuinely concrete (pinned) type.
+ *
+ * @param a  the typed match arm
+ * @return   the trailing `TNumber` leaf, or `null`
+ */
+fn match_arm_literal_leaf(a: TArm) -> TExpr | null {
+    if tblock_diverges(a.body) { return null }
+    trailing_number(a.body)
+}
+
+/**
+ * match_join_anchor — the first non-diverging arm's type that is NOT a bare numeric literal, or
+ * `null` when every non-diverging arm trails a bare literal (so there is no concrete type to
+ * adopt into). Scans every arm up front, so a later concrete arm still anchors an EARLIER
+ * literal arm regardless of source order.
+ *
+ * @param arms  the typed match arms
+ * @return      the anchor type sibling literal arms should adopt, or `null`
+ */
+fn match_join_anchor(arms: []TArm) -> Type | null {
+    mut i = 0
+    loop {
+        if i >= arms.len { break }
+        let a = arms[i]
+        if !tblock_diverges(a.body) {
+            match match_arm_literal_leaf(a) {
+                TExpr => { }
+                null => return tblock_type(a.body)
+            }
+        }
+        i++
+    }
+    null
+}
+
+/**
+ * adopt_match_arm_literals — rebuild every arm whose trailing value is a bare numeric literal
+ * that FITS `anchor` (`literal_adopts`) so its leaf is retyped at `anchor` instead of its bare
+ * default (`retype_literal`) — the `match` counterpart of `type_if`'s literal cross-adoption
+ * (typer.tks `type_if`), so `match k { i32 as n => n; null => 0 }` joins to `i32`, not the
+ * accidental `i32 | i64` a bare-defaulted literal would otherwise force into the union. An arm
+ * whose literal does not fit `anchor`, or whose trailing value is not a bare literal, passes
+ * through unchanged.
+ *
+ * @param arms    the typed match arms
+ * @param anchor  the type sibling literal arms adopt into
+ * @return        the arms, with every fitting literal leaf retyped at `anchor`
+ */
+fn adopt_match_arm_literals(arms: []TArm, anchor: Type) -> []TArm {
+    mut out: []TArm = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= arms.len { break }
+        let a = arms[i]
+        let next = match match_arm_literal_leaf(a) {
+            TExpr as t => if literal_adopts(t, anchor) { TArm { pattern = a.pattern; has_when = a.has_when; guard = a.guard; body = retype_block_trailing(a.body, anchor) } } else { a }
+            null => a
+        }
+        out = teko::list::push(out, next)
+        i++
+    }
+    out
+}
+
+/**
+ * type_match — `match` as a VALUE (B.15/B.20): types every arm, then unifies the NON-diverging
+ * arms' trailing types into the match's own type. A diverging arm (`return`/`panic`/`exit`)
+ * yields no value and is skipped in unification; if EVERY arm diverges the match type is void.
+ * Before the join, a bare numeric-literal arm cross-adopts a sibling's CONCRETE (non-literal)
+ * type (`match_join_anchor` + `adopt_match_arm_literals`), mirroring `type_if`'s own literal
+ * cross-adoption.
+ *
+ * @param m      the parsed match expression
+ * @param env    the enclosing type environment
+ * @param table  the resolved type table
+ * @return       the typed match expression, or an error (non-exhaustive, or an arm's own error)
+ */
 fn type_match(m: parser::MatchExpr, env: Env, table: TypeTable) -> TExpr | error {
     let s = match type_expr(m.subject, env, table) { TExpr as te => te; error as e => return e }
     if m.arms.len == 0 { return error { message = "a `match` needs at least one arm" } }
-    mut arms: []TArm = teko::list::empty()
-    mut have_type = false
-    mut first: Type = Void { }   // Type-typed (so a case arm widens in); placeholder until first non-diverging arm
+    mut typed: []TArm = teko::list::empty()
     mut i = 0
     loop {
         if i >= m.arms.len { break }
         let ai = match type_match_arm(m.arms[i], s.type, env, table) { TArm as a => a; error as e => return e }
-        arms = teko::list::push(arms, ai)
-        if !tblock_diverges(ai.body) {
-            let t = tblock_type(ai.body)
-            if !have_type { first = t; have_type = true }
-            else { first = type_join(first, t, table) }   // widen (a case joins into its variant; siblings → their union)
-        }
+        typed = teko::list::push(typed, ai)
         i++
+    }
+    let arms = match match_join_anchor(typed) { Type as anchor => adopt_match_arm_literals(typed, anchor); null => typed }
+    mut have_type = false
+    mut first: Type = Void { }
+    mut j = 0
+    loop {
+        if j >= arms.len { break }
+        if !tblock_diverges(arms[j].body) {
+            let t = tblock_type(arms[j].body)
+            if !have_type { first = t; have_type = true }
+            else { first = type_join(first, t, table) }
+        }
+        j++
     }
     let rarms = match resolve_foreach_placeholders(m.arms, s.type) { []parser::Arm as a => a; error as e => return e }
     if !exhaustive(rarms, s.type, table, env.cur_ns) { return error { message = "non-exhaustive `match` (cover all cases or add `_`)" } }
-    let result = if have_type { first } else { Void { } }   // all arms diverge → void
+    let result = if have_type { first } else { Void { } }
     TExpr { kind = TMatchExpr { subject = s; arms = arms }; type = result; line = 0; col = 0 }
 }
 
@@ -3951,30 +4184,80 @@ fn type_ref_binding_value(bv: parser::Expr, rf: Reference, env: Env, table: Type
     if !type_eq(v.type, rf.inner) {
         return teko::error::err_typed(error { message = "a `ref` binding's source must be the referent's own type (or another reference)" }, type_render(rf.inner), type_render(v.type))
     }
-    match bv.kind {
-        parser::Var as var => match lookup_binding(env, var.name) {
-            ValBinding as vb => {
-                if !vb.is_mut { return error { message = $"cannot take a reference to immutable `{var.name}` — a `ref` binding needs a mutable source (a `var`) or another reference" } }
-                v
-            }
-            error => return error { message = "a `ref` binding's source must be a mutable variable (a `var`) or another reference" }
-        }
-        _ => error { message = "a `ref` binding's source must be a mutable variable (a `var`) or another reference — not an expression" }
-    }
+    ref_source_mutable_var(bv, v, env)
+}
+
+/**
+ * ref_source_mutable_var — the ALIAS-path source rule, shared by the annotated (`ref r: T = c`) and
+ * the inferred (`ref r = c`) reference binding: the source must be a bare variable whose binding is
+ * writable. A `ref` aliases an existing cell, so a temporary or an immutable `let` has no cell to
+ * write through and the honest stop names the real fix rather than degrading into a copy.
+ *
+ * @param bv   the binding's source expression, untyped (the only place a bare `Var` is still visible)
+ * @param v    the same expression already typed (returned unchanged when the rule holds)
+ * @param env  the typing environment, consulted for the source binding's writability
+ * @return     `v` unchanged
+ * @throws     when the source is not a bare variable, is unbound, or names a non-writable binding
+ * @since      0.3.1
+ */
+fn ref_source_mutable_var(bv: parser::Expr, v: TExpr, env: Env) -> TExpr | error {
+    let var = match bv.kind { parser::Var as x => x; _ => return error { message = "a `ref` binding's source must be a mutable variable (a `var`) or another reference — not an expression" } }
+    let vb = match lookup_binding(env, var.name) { ValBinding as b => b; error => return error { message = "a `ref` binding's source must be a mutable variable (a `var`) or another reference" } }
+    if vb.is_mut { return v }
+    error { message = $"cannot take a reference to immutable `{var.name}` — a `ref` binding needs a mutable source (a `var`) or another reference" }
+}
+
+/**
+ * type_inferred_ref_value — type the source of an UN-ANNOTATED reference binding `ref r = c`, whose
+ * referent type is inferred from the source instead of read off a `Ref<>`-wrapped annotation (owner
+ * ruling 2026-07-30). Same two cases as the annotated path and no third one: an already-`Reference`
+ * value forwards unchanged, any other value must be a writable variable and keeps its BARE type on
+ * the alias path (codegen's `emit_as_r` sees the `Reference`-expected / bare-value mismatch and
+ * emits the `&`). There is deliberately NO copy fallback — the silent copy this replaces compiled
+ * `ref r = c` into an ordinary `mut` snapshot and let every later write to `c` go unseen by `r`.
+ *
+ * @param bv     the binding's source expression
+ * @param env    the typing environment
+ * @param table  the resolved type table
+ * @return       the typed source (bare-typed on the alias path, `Reference`-typed when forwarding)
+ * @throws       when the source is neither a writable variable nor an already-`Reference` value
+ * @since        0.3.1
+ */
+fn type_inferred_ref_value(bv: parser::Expr, env: Env, table: TypeTable) -> TExpr | error {
+    let v = match type_expr(bv, env, table) { TExpr as te => te; error as e => return e }
+    match v.type { Reference => return v; _ => { } }
+    ref_source_mutable_var(bv, v, env)
+}
+
+/**
+ * ref_bound_of — the BOUND type of a reference binding whose referent type came from the source
+ * rather than an annotation: a forwarded reference keeps its own `Reference` type (a reference to a
+ * reference is not a thing the surface can spell), any other referent type `T` binds as `Ref<T>`.
+ *
+ * @param t  the typed source's type
+ * @return   `t` when it is already a `Reference`, else `Reference { inner = t }`
+ * @since    0.3.1
+ */
+fn ref_bound_of(t: Type) -> Type {
+    match t { Reference => t; _ => Reference { inner = t } }
 }
 
 /**
  * Types a binding's value with the annotation as its expected type (so a generic constructor
- * targets the concrete instance from `: Box<i64>`) — or, when the annotation is a `Reference`
- * (a `ref` binding), routes through `type_ref_binding_value`'s mutable-source/forwarding rule
- * instead of the ordinary widening/literal-adoption path (0.3.1 — owner ruling 2026-07-24).
+ * targets the concrete instance from `: Box<i64>`) — or, when the binder was `ref`, routes through
+ * the mutable-source/forwarding rule instead of the ordinary widening/literal-adoption path
+ * (0.3.1 — owner rulings 2026-07-24 and 2026-07-30). The reference-ness is read from `b.is_ref`,
+ * the binder's own identity axis, so an UN-annotated `ref r = c` takes the same rule as `ref r: T =
+ * c` instead of falling through to the plain-value path that used to copy it.
  *
  * @param b      the binding whose value is typed
  * @param env    the typing environment
  * @param table  the resolved type table
  * @return       the typed initializer
+ * @throws       when a `ref` binder's source breaks the mutable-source/forwarding rule
  */
 fn type_binding_value(b: parser::Binding, env: Env, table: TypeTable) -> TExpr | error {
+    if b.is_ref && !b.has_type { return type_inferred_ref_value(b.value, env, table) }
     if b.has_type {
         let at = match resolve_type(b.type_ann, table, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the binding's enclosing namespace
         match at { Reference as rf => return type_ref_binding_value(b.value, rf, env, table); _ => { } }
@@ -4005,42 +4288,50 @@ fn type_binding_value(b: parser::Binding, env: Env, table: TypeTable) -> TExpr |
  *               `env.fn_unsafe` was set once by `type_function`/`type_method` before this body's
  *               statements were typed
  */
+/**
+ * bind_value_into_annotation — the `let x: T = value` rung ladder for a value that does not already
+ * widen into its annotation `T`, in order: the struct/interface honest-stop that names a nominal
+ * mismatch precisely → the implicit numeric widening (`widen_value_into` — a narrower same-family
+ * value, or a machine integer into `bigint`/`dec`) → a fitting bare LITERAL adopting the declared
+ * narrow type (`annotated_literal_ok` proves the fit against the RAW initializer, then
+ * `retype_literal` rewrites the leaf so codegen sees the declared width, recursing into an array
+ * literal's elements) → the honest stop annotated with expected and actual.
+ *
+ * Separate from `coerce_value_into` on purpose, and not a twin of it: this rung ladder proves a
+ * literal's fit against the UNTYPED source expression (`raw`), which is the only place a negative
+ * literal's sign and an array literal's element-wise fit are still visible. Both ladders put the
+ * implicit widening at the same rung — after admissibility, before literal adoption — so an
+ * annotated binding and an assignment cannot disagree about a widening they both now accept.
+ *
+ * @param v      the typed initializer
+ * @param raw    the initializer's untyped source expression (the literal-fit proof reads this)
+ * @param ann    the resolved annotation type
+ * @param table  the folded type table
+ * @return       the initializer as a value of `ann`
+ * @throws       the nominal-mismatch stop, or the annotation mismatch with expected/actual attached
+ * @since        0.3.1
+ */
+fn bind_value_into_annotation(v: TExpr, raw: parser::Expr, ann: Type, table: TypeTable) -> TExpr | error {
+    match struct_iface_named_stop(v.type, ann, table) { error as se => return se; null => { } }
+    match widen_value_into(v, ann) { TExpr as w => return w; null => { } }
+    match annotated_literal_ok(raw, ann) {
+        null => retype_literal(v, ann)
+        error as e => teko::error::err_typed(e, type_render(ann), type_render(v.type))
+    }
+}
+
 fn type_binding(b: parser::Binding, env: Env, table: TypeTable) -> TypedStmt | error {
     mut v = match type_binding_value(b, env, table) { TExpr as te => te; error as e => return e }
-    mut bound = v.type
+    mut bound = if b.is_ref && !b.has_type { ref_bound_of(v.type) } else { v.type }
     if type_is_void(bound) { return error { message = "cannot bind a `void` expression — it yields no value (M.1)" } }
     if b.has_type {
         let at = match resolve_type(b.type_ann, table, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the binding's enclosing namespace
         let is_ref_binding = match at { Reference => true; _ => false }
         if !is_ref_binding && !assignable_to(v.type, at, table) {
-            // (C1.8/E2) wrap with expected=type_render(at), actual=type_render(v.type) — mirrors
-            // typer.c type_binding's tk_error_types wrap of annotated_literal_reason's message.
-            match struct_iface_named_stop(v.type, at, table) { error as se => return se; null => { } }
-            match annotated_literal_ok(b.value, at) {
-                null => {
-                    // a fitting bare-literal (plain-scalar) initializer ADOPTS the declared narrow
-                    // type — retype the leaf itself (same mechanism as the arg/struct-field/negative-
-                    // literal adoption sites), so codegen/VM see the narrow width (`mut y: u8 = 1`
-                    // stores/shifts at width 8, not the literal's native i64). Mirrors typer.c.
-                    // (#71) retype_literal RECURSES into an array literal's elements (`[]u8 = [1,2,3]`
-                    // narrows each leaf, not just the array's own type) — a plain leaf still takes
-                    // the annotation wholesale, unchanged from before.
-                    v = retype_literal(v, at)
-                }
-                error as e => return teko::error::err_typed(e, type_render(at), type_render(v.type))
-            }
+            v = match bind_value_into_annotation(v, b.value, at, table) { TExpr as x => x; error as e => return e }
         }
         bound = at
-        // (#4) annotation-directed element type: a sentinel empty list/array (`teko::list::empty()`
-        // / `[]`) ADOPTS the annotation's concrete slice type, so codegen sees the element WITHOUT
-        // back-inference. Mirrors type_assign's target-adopt and emit_as's wrap.
-        let v_is_sentinel_slice = match v.type { Slice as vs => match vs.element { Void => true; _ => false }; _ => false }
-        let bound_is_concrete_slice = match bound { Slice as bs => match bs.element { Void => false; _ => true }; _ => false }
-        if v_is_sentinel_slice {
-            if bound_is_concrete_slice {
-                v = TExpr { kind = v.kind; type = bound; line = v.line; col = v.col }
-            }
-        }
+        v = adopt_sentinel_slice_type(v, bound)
     }
     // (#4) REJECT an untyped empty collection. The element type MUST be fixed at the declaration —
     // by the binding annotation (`: []T`) or by typed initial elements (a non-empty literal / a
@@ -4076,23 +4367,64 @@ fn lvalue_root(e: parser::Expr) -> LvalueRoot {
     }
 }
 
-// (#88) a FIELD-target assignment `recv.field op= value`. The parser routes EVERY `recv.field = …` here;
-// this branch decides Ref-deref (`r.value` on a `Ref<T>` — the legacy MEM-1b-ii path, preserved) vs a
-// struct/class field WRITE, enforcing write-visibility == read-visibility (the RULING). Mirrors
-// typer.c::type_field_assign.
+/**
+ * field_write_root_writable — the DIRECT-field-write guard: `recv.field = v` is admitted only when
+ * the ROOT variable of the receiver chain is a writable binding. It walks `a.b.c` to `a`, so the
+ * protection holds at EVERY depth, not just the first field.
+ *
+ * `let` forbids a direct write, full stop — for a CLASS exactly as for a struct (owner ruling
+ * 2026-07-30: `let` protects fields at every level, like a C# `{ public get; private set; }`).
+ * Until that ruling a class receiver skipped this guard entirely, on the reasoning that a class is
+ * a reference type and mutation flows through the handle; the effect was that `let` bit structs and
+ * was transparent to classes — half the type system ignoring the mode. Writing remains the
+ * privilege of the declaring type's own methods, which reach their fields through the RECEIVER
+ * binder — the receiver is the object AS a reference, so it is defined writable
+ * (`is_method_receiver`) and `self.name = n` stays legal, which is the `private set` half of the
+ * analogy.
+ *
+ * @param receiver  the untyped receiver expression of the field-access LHS
+ * @param env       the typing environment, consulted for the root binding's writability
+ * @return          null when the write is admitted
+ * @throws          when the receiver roots at a temporary, at an unbound name, or at a binding that
+ *                  is neither `mut` nor a `ref`
+ * @since           0.3.1
+ */
+fn field_write_root_writable(receiver: parser::Expr, env: Env) -> error | null {
+    let root = lvalue_root(receiver)
+    if !root.reachable { return error { message = "cannot assign to a field of a temporary value — the receiver is not a mutable variable" } }
+    let rb = match lookup_binding(env, root.name) { ValBinding as vb => vb; error as e => return e }
+    if rb.is_mut { return null }
+    error { message = $"cannot assign to a field of immutable `{root.name}` — declare it `mut`, or let the declaring type's own method write it (`let` protects fields at every level; there is no `ref mut`) (B.21)" }
+}
+
+/**
+ * type_field_assign — type a FIELD-target assignment `recv.field op= value` (#88). The parser routes
+ * EVERY `recv.field = …` here; this branch decides Ref-deref versus a struct/class field WRITE.
+ *
+ * Typing the LHS field-access EXPR first is load-bearing, not merely convenient: it resolves the
+ * receiver and field type AND enforces read-side visibility, so a private class field written from
+ * outside is rejected with the SAME "field is private to its declaring class" diagnostic a READ
+ * raises — write-permission == read-permission (the RULING).
+ *
+ * The Ref-deref branch is the legacy MEM-1b-ii path, preserved: `r.value op= x` on a `Ref<T>` writes
+ * THROUGH the reference, detected from the RECEIVER TYPE (a `Ref<T>` receiver plus the field name
+ * `value`), and emits the same deref-shaped `TAssign` (kind `RefDeref`, `name` = the ref handle) the
+ * old parser produced, so downstream and the TKB layout stay byte-identical for existing Ref writes.
+ * Every other receiver is a struct/class field write and passes `field_write_root_writable`, the
+ * `let`-protects-at-every-level guard.
+ *
+ * @param a      the raw assignment (`a.target` is the `FieldAccess` LHS)
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       the typed `TAssign` (kind `Field`, or `RefDeref` for a `Ref<T>.value` write)
+ * @throws       when the LHS is not a field access, the receiver's root is not writable, or the
+ *               value does not match the field type
+ */
 fn type_field_assign(a: parser::Assign, env: Env, table: TypeTable) -> TypedStmt | error {
-    // Type the LHS field-access EXPR — this resolves the receiver + field type AND enforces read-side
-    // visibility (a private class field written externally is rejected here with the SAME "field is
-    // private to its declaring class" diagnostic a read raises — write-permission == read-permission).
     let lhs = match type_expr(a.target, env, table) { TExpr as te => te; error as e => return e }
     let lhs_fa = match a.target.kind { parser::FieldAccess as fa => fa; _ => return error { message = "assignment target is not a field access (internal: parser guarantees a field LHS)" } }
     let recv = match type_expr(lhs_fa.receiver, env, table) { TExpr as te => te; error as e => return e }
     let field_t = lhs.type
-
-    // (MEM-1b-ii, preserved) `r.value op= x` on a `Ref<T>` — write THROUGH the reference. Detected from
-    // the RECEIVER TYPE: a `Ref<T>` receiver + field `value`. Emit the SAME deref-shaped TAssign
-    // (kind=RefDeref, name=the ref handle) the old parser produced, so downstream / the TKB layout stay
-    // byte-identical for existing Ref writes.
     let ref_inner = match recv.type { Reference as rf => rf.inner; _ => Void { } }
     let is_ref_deref = match recv.type { Reference => (lhs_fa.field == "value"); _ => false }
     if is_ref_deref {
@@ -4105,32 +4437,12 @@ fn type_field_assign(a: parser::Assign, env: Env, table: TypeTable) -> TypedStmt
         return TypedStmt { node = TAssign { kind = parser::AssignKind::RefDeref; name = ref_name; op = a.op; bound = ref_inner; value = dv; deref = true; target = no_texpr() }; env = env }
     }
 
-    // A struct/class FIELD write. Structs are VALUE types → the receiver must be a MUTABLE lvalue (its
-    // root variable a `mut` binding — the RULING). Classes are REFERENCE types (the value is a pointer;
-    // mutation flows through it — like a `Ref<T>`), so the handle need not be `mut`.
-    let recv_is_class = match recv.type { Named as nm => match find_class_body(nm.name, table) { parser::ClassBody => true; error => false }; _ => false }
-    if !recv_is_class {
-        let root = lvalue_root(lhs_fa.receiver)
-        if !root.reachable { return error { message = "cannot assign to a field of a temporary value — the receiver is not a mutable variable" } }
-        let rb = match lookup_binding(env, root.name) { ValBinding as vb => vb; error as e => return e }
-        if !rb.is_mut { return error { message = "cannot assign to a field of an immutable binding — declare it `mut` (B.21)" } }
-    }
+    match field_write_root_writable(lhs_fa.receiver, env) { error as e => return e; null => { } }
 
-    // Type-check the RHS against the FIELD type (same widen/adopt rule as a simple assign / binding).
-    mut v = match type_expr(a.value, env, table) { TExpr as te => te; error as e => return e }
+    let v = match type_expr(a.value, env, table) { TExpr as te => te; error as e => return e }
     if type_contains_ref(field_t) || type_contains_ref(v.type) { return error { message = "a reference cannot be stored in a field (parameter-only in this version)" } }
-    if !assignable_to(v.type, field_t, table) {
-        if !literal_adopts(v, field_t) { return teko::error::err_typed(error { message = "assigned value does not match the field type" }, type_render(field_t), type_render(v.type)) }
-        v = retype_literal(v, field_t)
-    }
-    let v_is_sentinel_slice = match v.type { Slice as vs => match vs.element { Void => true; _ => false }; _ => false }
-    let field_is_concrete_slice = match field_t { Slice as bs => match bs.element { Void => false; _ => true }; _ => false }
-    if v_is_sentinel_slice {
-        if field_is_concrete_slice {
-            v = TExpr { kind = v.kind; type = field_t; line = v.line; col = v.col }
-        }
-    }
-    TypedStmt { node = TAssign { kind = parser::AssignKind::Field; name = ""; op = a.op; bound = field_t; value = v; deref = false; target = lhs }; env = env }
+    let coerced = match coerce_value_into(v, field_t, table, "assigned value does not match the field type") { TExpr as x => x; error as e => return e }
+    TypedStmt { node = TAssign { kind = parser::AssignKind::Field; name = ""; op = a.op; bound = field_t; value = adopt_sentinel_slice_type(coerced, field_t); deref = false; target = lhs }; env = env }
 }
 
 /**
@@ -4161,10 +4473,7 @@ fn type_index_assign(a: parser::Assign, env: Env, table: TypeTable) -> TypedStmt
     let lhs = match type_expr(a.target, env, table) { TExpr as te => te; error as e => return e }
     mut v = match type_expr(a.value, env, table) { TExpr as te => te; error as e => return e }
     if type_contains_ref(elem) || type_contains_ref(v.type) { return error { message = "a reference cannot be stored in a slice element (parameter-only in this version)" } }
-    if !assignable_to(v.type, elem, table) {
-        if !literal_adopts(v, elem) { return teko::error::err_typed(error { message = "assigned value does not match the slice element type" }, type_render(elem), type_render(v.type)) }
-        v = retype_literal(v, elem)
-    }
+    v = match coerce_value_into(v, elem, table, "assigned value does not match the slice element type") { TExpr as x => x; error as e => return e }
     TypedStmt { node = TAssign { kind = parser::AssignKind::Index; name = ""; op = a.op; bound = elem; value = v; deref = false; target = lhs }; env = env }
 }
 
@@ -4211,31 +4520,8 @@ fn type_assign(a: parser::Assign, env: Env, table: TypeTable) -> TypedStmt | err
     if !both_bare_ref {
         if type_contains_ref(tb.type) || type_contains_ref(v.type) { return error { message = "a reference cannot be bound to a local (parameter-only in this version)" } }
     }
-    // The value must WIDEN into the target's type (B.14 case→variant, T→T?) OR be a fitting literal
-    // that adopts it (C6) — same rule as an annotated binding (the single source of truth).
-    if !assignable_to(v.type, tb.type, table) {
-        // (C1.8/E2) attach expected=type_render(tb.type), actual=type_render(v.type) — mirrors
-        // typer.c type_assign's tk_error_types wrap.
-        if !literal_adopts(v, tb.type) { return teko::error::err_typed(error { message = "assigned value does not match the target type" }, type_render(tb.type), type_render(v.type)) }
-        // a fitting bare-literal (plain-scalar) RHS ADOPTS the target's narrow type — retype the leaf
-        // itself (mirrors type_binding's identical adoption above), so a plain `y = 200` on a `u8`
-        // slot stores/re-widths at 8 bits, not the literal's native i64.
-        // (#71) retype_literal recurses into an array literal's elements — see type_binding.
-        v = retype_literal(v, tb.type)
-    }
-    // (#4) a sentinel empty list/array ADOPTS the target's concrete slice type so codegen sees the
-    // element. OTHERWISE keep the value's NATURAL (case / T) type and store the target as `bound` —
-    // codegen's emit_as wraps the value into the target at the assign site (case→variant, T→T?, a
-    // fitting literal). Mirrors type_binding (clobbering the case type made `node = OptionalType{…}`
-    // emit the case's fields under the variant's C type → a field-designator error).
-    let v_is_sentinel_slice = match v.type { Slice as vs => match vs.element { Void => true; _ => false }; _ => false }
-    let bound_is_concrete_slice = match tb.type { Slice as bs => match bs.element { Void => false; _ => true }; _ => false }
-    if v_is_sentinel_slice {
-        if bound_is_concrete_slice {
-            v = TExpr { kind = v.kind; type = tb.type; line = v.line; col = v.col }
-        }
-    }
-    TypedStmt { node = TAssign { kind = parser::AssignKind::Simple; name = a.name; op = a.op; bound = tb.type; value = v; deref = false; target = no_texpr() }; env = env }   // mut rule enforced (B.21)
+    let coerced = match coerce_value_into(v, tb.type, table, "assigned value does not match the target type") { TExpr as x => x; error as e => return e }
+    TypedStmt { node = TAssign { kind = parser::AssignKind::Simple; name = a.name; op = a.op; bound = tb.type; value = adopt_sentinel_slice_type(coerced, tb.type); deref = false; target = no_texpr() }; env = env }
 }
 
 fn type_return(r: parser::Return, env: Env, table: TypeTable) -> TypedStmt | error {
@@ -4349,6 +4635,171 @@ fn function_return(f: parser::Function, table: TypeTable, ref_ns: str) -> Type |
 // never drift apart. A case widens into a named variant (`let s: Shape = Circle { … }`), a nested
 // case widens transitively, and `T` widens into `T?`.
 fn assignable_to(from: Type, to: Type, table: TypeTable) -> bool { widens_into(from, to, table) }
+
+/**
+ * bignum_ctor_of — which `bigint`/`dec` constructor receives a machine integer, and therefore what
+ * type the argument must arrive as. `u64` is the one source whose whole range the `i64`-taking `of`
+ * cannot accept, so it routes to `of_u64`; every other integer prim widens losslessly into `i64`
+ * and takes `of`.
+ *
+ * @param from  the machine integer type being widened into a bignum
+ * @return      `"of_u64"` for a `u64` source, `"of"` for every other integer
+ * @since       0.3.1
+ */
+fn bignum_ctor_of(from: Type) -> str {
+    if prim_kind_of(from) == PrimKind::U64 { return "of_u64" }
+    "of"
+}
+
+/**
+ * widen_int_into_bignum — the implicit widening of a machine INTEGER VALUE into `bigint`/`dec`, as a
+ * call to the library constructor that receives it. The owner's rule puts `bigint`/`dec` in the same
+ * sentence as the machine widths (*"o mesmo vale para floats e para bigint e decimal"*), and a
+ * bignum holds every machine integer, so this direction can never overflow and never panics.
+ *
+ * Distinct from `bignum_adopt_operand`, which handles the same target for a bare LITERAL operand of a
+ * bignum OPERATOR. That one could stay literal-only because `big + 1` is the only shape an operator
+ * meets; a declared target (`let b: bigint = some_i32`) meets real VALUES, which is precisely the
+ * case that used to be rejected with "no implicit conversion".
+ *
+ * @param v       the typed integer value
+ * @param target  the candidate target type
+ * @return        the constructor call yielding `v` as a bignum, or `null` when `target` is not a
+ *                bignum or `v` is not a machine integer
+ * @since         0.3.1
+ */
+fn widen_int_into_bignum(v: TExpr, target: Type) -> TExpr | null {
+    let kind = bignum_kind(target)
+    if kind == "" { return null }
+    if !is_integer(v.type) { return null }
+    let ctor = bignum_ctor_of(v.type)
+    let arg = bignum_ctor_argument(v, ctor)
+    bignum_call(kind, ctor, teko::list::push(teko::list::empty(), arg), bignum_named(kind))
+}
+
+/**
+ * bignum_ctor_argument — the value as the constructor's own parameter type: `of_u64` already receives
+ * the `u64` unchanged, while `of` receives an `i64`, so a narrower integer is first wrapped in the
+ * lossless widening `TCast` that both backends lower to nothing.
+ *
+ * @param v     the typed integer value
+ * @param ctor  the constructor name `bignum_ctor_of` chose
+ * @return      `v`, widened to the constructor's parameter type when it is not already that type
+ * @since       0.3.1
+ */
+fn bignum_ctor_argument(v: TExpr, ctor: str) -> TExpr {
+    if ctor == "of_u64" { return v }
+    let carrier = Prim { kind = PrimKind::I64 }
+    if type_eq(v.type, carrier) { return v }
+    TExpr { kind = TCast { expr = v }; type = carrier; line = v.line; col = v.col }
+}
+
+/**
+ * widen_value_into — the implicit WIDENING step of the value-into-target ladder: a lossless machine
+ * widening (`numeric_widens_implicitly` — the same predicate the arithmetic W-RULE uses) becomes a
+ * synthetic widening `TCast`, and a machine integer into `bigint`/`dec` becomes the library
+ * constructor call. Answers `null` when no implicit widening applies, leaving the caller's remaining
+ * rungs (literal adoption, then the honest stop) to decide.
+ *
+ * The synthetic `TCast` is deliberately a REAL node in the typed tree rather than a retyped leaf:
+ * the ARITH-CAST-RATE gate (D4) counts `TCast` nodes, so an implicit widening is COUNTED by the same
+ * meter that bounds hand-written casts instead of slipping past it.
+ *
+ * @param v       the typed value
+ * @param target  the declared target type
+ * @return        the value as a value of `target`, or `null` when it does not implicitly widen
+ * @see           numeric_widens_implicitly — the rule, its C# lineage, and its Rust divergence
+ * @since         0.3.1
+ */
+fn widen_value_into(v: TExpr, target: Type) -> TExpr | null {
+    if numeric_widens_implicitly(v.type, target) {
+        return TExpr { kind = TCast { expr = v }; type = target; line = v.line; col = v.col }
+    }
+    widen_int_into_bignum(v, target)
+}
+
+/**
+ * coerce_value_into — the ONE ladder a value climbs to reach a declared target type, in order:
+ * already admissible (`assignable_to` — B.14 case→variant, `T`→`T?`, upcasts) → implicit numeric
+ * widening (`widen_value_into`) → a fitting bare LITERAL adopting the target (`retype_literal`, C6)
+ * → the honest stop naming expected and actual.
+ *
+ * One function because the rungs used to be open-coded at every target site — assignment, field
+ * assignment, index assignment, write-through-reference — and a rung added to one was a rung missing
+ * from the others. The implicit widening is exactly the kind of rung that would have been added
+ * unevenly.
+ *
+ * @param v       the typed value
+ * @param target  the declared target type
+ * @param table   the folded type table
+ * @param what    the diagnostic message for the target kind ("assigned value does not match …")
+ * @return        the value as a value of `target`
+ * @throws        `what`, annotated with the rendered expected/actual types, when no rung applies
+ * @since         0.3.1
+ */
+/**
+ * adopt_sentinel_slice_type — an UNTYPED empty collection (`teko::list::empty()` / `[]`, whose
+ * element type is still the `Void` sentinel) ADOPTS the declared target's concrete slice type, so
+ * codegen sees the element with no back-inference (#4). Every other value KEEPS its own natural type
+ * and the target rides along as the statement's `bound`, because the emit wraps the value at the use
+ * site — clobbering a case type here made a variant member emit its own fields under the union's C
+ * type and cc reject the field designators.
+ *
+ * Extracted because the identical five lines stood in `type_binding`, `type_assign` and
+ * `type_field_assign` — three copies of one rule, the shape that decays into two of them being
+ * updated and the third not.
+ *
+ * @param v       the typed value
+ * @param target  the declared target type
+ * @return        `v` retyped to `target` when it is a sentinel empty collection and `target` is a
+ *                concrete slice, else `v` unchanged
+ */
+fn adopt_sentinel_slice_type(v: TExpr, target: Type) -> TExpr {
+    let v_is_sentinel = match v.type { Slice as vs => match vs.element { Void => true; _ => false }; _ => false }
+    if !v_is_sentinel { return v }
+    let target_is_concrete = match target { Slice as bs => match bs.element { Void => false; _ => true }; _ => false }
+    if !target_is_concrete { return v }
+    TExpr { kind = v.kind; type = target; line = v.line; col = v.col }
+}
+
+fn coerce_value_into(v: TExpr, target: Type, table: TypeTable, what: str) -> TExpr | error {
+    if assignable_to(v.type, target, table) { return v }
+    match widen_value_into(v, target) { TExpr as w => return w; null => { } }
+    if literal_adopts(v, target) { return retype_literal(v, target) }
+    teko::error::err_typed(error { message = what }, type_render(target), type_render(v.type))
+}
+
+/**
+ * coerce_argument_into — the value-into-target ladder for a CALL ARGUMENT, whose rungs differ from
+ * `coerce_value_into`'s in two ways an assignment has no equivalent of: an ALREADY-admissible argument
+ * normally ADOPTS the parameter's type, except where the emit wraps the value at the use site and the
+ * argument must keep its narrow type (`arg_keeps_narrow_type`); and a fitting literal is retyped
+ * SHALLOW (its own `.type` replaced, leaves untouched), which is what the three argument sites have
+ * always done.
+ *
+ * One function because those three sites — the plain call, the interface dispatch, and the base-class
+ * dispatch — each carried their own copy of the whole ladder, and the copies had ALREADY drifted: only
+ * one of the three consulted `struct_iface_named_stop`, so a nominal struct/interface mismatch got a
+ * precise diagnostic through a direct call and a bare "argument type mismatch" through a dispatched
+ * one. Adding the implicit-widening rung to three copies would have been the next drift.
+ *
+ * @param a      the typed argument
+ * @param pt     the parameter's declared type
+ * @param table  the folded type table
+ * @return       the argument as a value of `pt`
+ * @throws       the nominal-mismatch stop, or "argument type mismatch" with expected/actual attached
+ * @since        0.3.1
+ */
+fn coerce_argument_into(a: TExpr, pt: Type, table: TypeTable) -> TExpr | error {
+    if assignable_to(a.type, pt, table) {
+        if arg_keeps_narrow_type(pt, a.type, table) { return a }
+        return TExpr { kind = a.kind; type = pt; line = a.line; col = a.col }
+    }
+    match struct_iface_named_stop(a.type, pt, table) { error as se => return se; null => { } }
+    match widen_value_into(a, pt) { TExpr as w => return w; null => { } }
+    if literal_adopts(a, pt) { return TExpr { kind = a.kind; type = pt; line = a.line; col = a.col } }
+    teko::error::err_typed(error { message = "argument type mismatch" }, type_render(pt), type_render(a.type))
+}
 
 /** arg_keeps_narrow_type — an argument that WIDENS into a parameter type `pt` normally ADOPTS `pt`
     (its TExpr.type is rewritten to `pt`); but where the EMIT wraps the value at the use site, the
@@ -4779,11 +5230,35 @@ fn retype_returns_in_expr(e: TExpr, ret: Type, table: TypeTable) -> TExpr {
     }
 }
 
+/**
+ * yields_declared_return — may a value of type `from` be the value a function declaring `ret` yields?
+ * Admissible when it widens into `ret` (B.14 case→variant, `T`→`T?`, an upcast), when it IMPLICITLY
+ * widens as a number (`numeric_widens_implicitly` — the owner's 2026-07-29 rule, the same rung the
+ * assignment and argument ladders take), or when it is a fitting bare LITERAL adopting `ret` (C6).
+ *
+ * The return site is a VALIDATOR, not a rewriter — it reports whether the body is well-typed and never
+ * touches the typed tree — so the implicit widening needs no node inserted here, exactly as the
+ * literal rung needs none: a value that widens losslessly already IS the wider type's own bit pattern.
+ *
+ * Shared by the `return` statement and the trailing-expression checks, which are twins of each other
+ * and were each carrying their own spelling of the same disjunction.
+ *
+ * @param from   the yielded value's type
+ * @param value  the yielded value (the literal rung inspects its shape)
+ * @param ret    the function's declared return type
+ * @param table  the folded type table
+ * @return       whether the value is admissible as the declared return
+ * @since        0.3.1
+ */
+fn yields_declared_return(value: TExpr, ret: Type, table: TypeTable) -> bool {
+    assignable_to(value.type, ret, table) || numeric_widens_implicitly(value.type, ret) || literal_adopts(value, ret)
+}
+
 fn check_return_stmt(s: TStatement, ret: Type, table: TypeTable) -> error | null {
     match s {
         TReturn as r => {
             if r.has_value {
-                if assignable_to(r.value.type, ret, table) || literal_adopts(r.value, ret) { null }   // a fitting int/float/byte literal adopts the return type (C6)
+                if yields_declared_return(r.value, ret, table) { null }
                 // (C1.8/E2) attach expected=type_render(ret), actual=type_render(r.value.type) —
                 // mirrors typer.c check_return_stmt's tk_error_types wrap.
                 else { teko::error::err_typed(error { message = "return value does not match the function's declared return type" }, type_render(ret), type_render(r.value.type)) }
@@ -5010,7 +5485,7 @@ fn check_trailing_value(stmts: []TStatement, ret: Type, table: TypeTable) -> err
     match stmts[stmts.len - 1] {
         TExprStmt as es => {
             if texpr_diverges(es.expr) { null }   // a trailing panic/exit yields no value (M.3)
-            else { if assignable_to(es.expr.type, ret, table) || literal_adopts(es.expr, ret) { null }   // a fitting trailing literal adopts the return type (C6)
+            else { if yields_declared_return(es.expr, ret, table) { null }
                 // (C1.8/E2) attach expected=type_render(ret), actual=type_render(es.expr.type) — mirrors
                 // typer.c check_trailing_value's tk_error_types wrap.
                 else { teko::error::err_typed(error { message = "the function's final expression does not match its declared return type" }, type_render(ret), type_render(es.expr.type)) } }
@@ -5394,6 +5869,43 @@ fn discard_param_type(gov: parser::Function | null, idx: u64, table: TypeTable, 
  *                           the method's own `is_unsafe` nor its owning type's is set — a method
  *                           inherits its OWNER type's unsafe-ness (`method_is_effective_unsafe`)
  */
+/**
+ * canonical_base_type — the CANONICAL type of the injected `base` handle a subclass method reaches
+ * its inherited members through (#109 W3 / #152). `base_name` arrives PRE-QUALIFIED from
+ * `canon_class_bases` (a cross-namespace base is already exact); a BARE name — unresolvable, or
+ * declared at the root — is qualified by the class's own namespace.
+ *
+ * @param base_name  the base class name, pre-qualified or bare
+ * @param cur_ns     the namespace of the class whose method is being typed
+ * @return           the base handle's canonical `Named` type
+ * @since            0.3.1
+ */
+fn canonical_base_type(base_name: str, cur_ns: str) -> Type {
+    if name_qualifier(base_name) != "" { return Named { name = base_name } }
+    Named { name = qualify(cur_ns, base_name) }
+}
+
+/**
+ * is_method_receiver — is parameter `i` the method's RECEIVER (the implicit `self`)? The receiver is
+ * the only parameter the parser leaves UNTYPED, and it can only be the first one; every other
+ * parameter carries its annotation from source.
+ *
+ * It matters to mutability because writing a field is the privilege of the declaring type's own
+ * methods (owner ruling 2026-07-30, the `private set` half of the `let` analogy) and a method
+ * reaches its fields through this binder. The receiver is the object AS a reference — the identity
+ * axis, born mutable — so it is defined writable while every other parameter stays immutable (B.21)
+ * unless it is declared `ref`.
+ *
+ * @param f  the method being typed
+ * @param i  the parameter index
+ * @return   true iff parameter `i` is the implicit receiver
+ * @since    0.3.1
+ */
+fn is_method_receiver(f: parser::Function, i: u64) -> bool {
+    if i != 0 { return false }
+    !f.params[0].has_type
+}
+
 fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable, has_base_binding: bool, base_binding_name: str, base_name: str, declaring_class: str) -> TFunction | error {
     // (W10b.CLASS residual — intern visibility) this body's OWN field/method accesses are
     // checked against `declaring_class` (see type_struct_methods's own comment on why this can
@@ -5447,10 +5959,10 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
                 }
             }
         }
-        local = define(local, f.params[i].name, pt, false)
+        local = define(local, f.params[i].name, pt, is_method_receiver(f, i))
         i++
     }
-    if inject_base_binding { local = define(local, base_binding_name, Named { name = if name_qualifier(base_name) != "" { base_name } else { qualify(env.cur_ns, base_name) } }, false) }   // (#109 W3 / #152) canonical: base_name arrives PRE-QUALIFIED from canon_class_bases (cross-ns exact); a bare (unresolvable/root) one qualifies by the class's own ns
+    if inject_base_binding { local = define(local, base_binding_name, canonical_base_type(base_name, env.cur_ns), true) }
     let ret = match function_return(f, tbl, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the fn's enclosing namespace
     if is_ref_null_variant(ret) { return error { message = "a function cannot return an optional reference (`Ref<T> | null`) — references are pass-down only (R3)" } }
     if f.is_extern {

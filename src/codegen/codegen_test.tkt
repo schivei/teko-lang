@@ -1893,3 +1893,98 @@ fn cgt_user_declared_beats_a_bare_builtin_name() {
     teko::assert::is_true(!cg_call_is_user_declared(prog, cgt_call_ns("teko::mem", "free")))
     teko::assert::is_true(!cg_call_is_user_declared(prog, cgt_call_ns("", "println")))
 }
+
+/**
+ * cgt_test_fn — a `#test` item named `ns::name`, the one item shape the gate harness emits for.
+ *
+ * @param name  the test's own name (the mangled symbol's tail)
+ * @param ns    the test's namespace (the mangled symbol's head)
+ * @return      the `#test` function node
+ */
+fn cgt_test_fn(name: str, ns: str) -> checker::TFunction {
+    let base = cgt_fn0(name, ns, checker::Void { }, cgt_empty_stmts())
+    checker::TFunction {
+        name = base.name; type_params = base.type_params; type_constraints = base.type_constraints
+        namespace = base.namespace; params = base.params; return_type = base.return_type; body = base.body
+        vis = base.vis; has_doc = base.has_doc; doc = base.doc; file = base.file; line = base.line; col = base.col
+        is_test = true; is_extern = base.is_extern; c_symbol = base.c_symbol; from_lib = base.from_lib
+        has_arena_size = base.has_arena_size; arena_size = base.arena_size
+    }
+}
+
+/**
+ * cgt_prog_with_one_test — a program whose single item is one `#test`, so the emitted harness has
+ * exactly one invocation to inspect.
+ *
+ * @return the indexed emitter program
+ */
+fn cgt_prog_with_one_test() -> CgProg {
+    let items: []checker::TItem = teko::list::push(teko::list::empty(), cgt_test_fn("cgt_captured_body", "probe::guard"))
+    cg_prog_of(checker::TProgram { items = items })
+}
+
+/**
+ * cgt_captured_invocation — the exact C line the harness must emit for `cgt_captured_body`.
+ *
+ * COMPOSED FROM `TEKO_USER_PREFIX` RATHER THAN SPELLED OUT, because a literal would pin the prefix
+ * ruling into an assertion that is not about it: the claim here is the SHAPE of the invocation (the
+ * address of a top-level function handed to the runtime), and a prefix change would then break this
+ * arm for a reason it does not measure.
+ *
+ * @return  `tk_test_report(tk_test_run(&<mangled symbol>));`
+ */
+fn cgt_captured_invocation() -> str {
+    teko::str::concat("tk_test_report(tk_test_run(&", TEKO_USER_PREFIX, "probe__guard__cgt_captured_body));")
+}
+
+#test
+/**
+ * cgt_the_harness_runs_every_body_under_capture — the EMITTED half of the test-mode capture (§14).
+ *
+ * The runtime's own guard (`src/test/capture_test.tkt`) proves that a captured body's panic and exit
+ * come back instead of ending the process; this proves the harness ASKS for that — that the emitted
+ * invocation is `tk_test_report(tk_test_run(&<symbol>))` and not the bare call plus a blind
+ * `tk_test_end()` it replaced. Without this arm the two halves could drift and the suite would still
+ * be green, because the runtime half is exercised by an extern that the harness does not emit.
+ *
+ * The taking of the body's ADDRESS is the whole backend requirement the design names, and it is
+ * asserted literally: a `#test` is emitted as `void <symbol>(void)`, so `&<symbol>` is already the
+ * `void (*)(void)` the runtime takes — no cast, no thunk, no closure pair.
+ *
+ * @throws when the invocation is not the captured one, or the arena/channel brackets moved
+ */
+fn cgt_the_harness_runs_every_body_under_capture() {
+    let one = str(emit_test_call(cgt_empty(), cgt_test_fn("cgt_captured_body", "probe::guard"), 0 to u64, false))
+    teko::assert::is_true(teko::str::contains(one, cgt_captured_invocation()))
+    teko::assert::is_true(!teko::str::contains(one, "tk_test_end();"))
+    teko::assert::is_true(teko::str::contains(one, "tk_arena_push();"))
+    teko::assert::is_true(teko::str::contains(one, "tk_arena_pop();"))
+    teko::assert::is_true(teko::str::contains(one, "tk_test_begin("))
+}
+
+#test
+/**
+ * cgt_the_harness_ends_on_the_tally_and_not_on_zero — the gate's status is now COUNTED, not assumed.
+ *
+ * Before the capture the harness closed with a blind `return 0` and relied on a panicking test
+ * killing the process to report a failure; with the capture no test can do that, so a harness that
+ * kept `return 0` would report every failing suite as green. This arm is what makes that regression
+ * impossible to land silently.
+ *
+ * BOTH HARNESSES ARE ASSERTED, and the analyze one is the reason this arm grew: it kept the blind
+ * `return 0` after the plain one was taught to count, so a failing `#test` under `teko test .
+ * --analyzer` was captured, reported as FAILED, and then handed `run_analyzer` a status of 0.
+ *
+ * @throws when either harness does not close on the summary plus the tally-derived status
+ */
+fn cgt_the_harness_ends_on_the_tally_and_not_on_zero() {
+    let main_plain = match emit_test_main(cgt_empty(), cgt_prog_with_one_test(), CgMode::TestPlain) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(teko::str::contains(main_plain, "tk_test_summary();"))
+    teko::assert::is_true(teko::str::contains(main_plain, "return tk_test_any_failed() ? 1 : 0;"))
+    teko::assert::is_true(!teko::str::contains(main_plain, "return 0;"))
+    let main_analyze = match emit_test_main(cgt_empty(), cgt_prog_with_one_test(), CgMode::TestAnalyze) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(teko::str::contains(main_analyze, cgt_captured_invocation()))
+    teko::assert::is_true(teko::str::contains(main_analyze, "tk_test_summary();"))
+    teko::assert::is_true(teko::str::contains(main_analyze, "return tk_test_any_failed() ? 1 : 0;"))
+    teko::assert::is_true(!teko::str::contains(main_analyze, "return 0;"))
+}

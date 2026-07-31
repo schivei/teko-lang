@@ -169,3 +169,104 @@ fn global_extern_libs_carry_their_mode_column() {
     teko::assert::is_true(m.link_flags[1] == "-lkernel32")
     teko::assert::is_true(m.link_mode[1] == "")
 }
+
+/**
+ * mf_kind_manifest — the smallest manifest that declares `[artifact] kind = "<spelling>"`, so a
+ * kind assertion reads as one call instead of an escaped literal per case.
+ *
+ * @param spelling  the `kind` value to write into the manifest text
+ * @return          a two-field manifest plus an `[artifact]` section carrying `spelling`
+ * @since 0.3.1
+ */
+fn mf_kind_manifest(spelling: str) -> str {
+    "name = \"app\"\nsource = \"src\"\n[artifact]\nkind = \"" ~ spelling ~ "\"\n"
+}
+
+/**
+ * mf_kind_resolves — does a manifest declaring `kind = "<spelling>"` parse and select `want`?
+ *
+ * @param spelling  the `kind` value under test
+ * @param want      the `Artifact` member that spelling must select
+ * @return          true iff the manifest parses AND its artifact is `want`
+ * @since 0.3.1
+ */
+fn mf_kind_resolves(spelling: str, want: Artifact) -> bool {
+    match parse_manifest(mf_kind_manifest(spelling)) { Manifest as m => m.artifact == want; error => false }
+}
+
+/**
+ * mf_kind_rejection — the message `parse_manifest` fails with for `kind = "<spelling>"`, or `""`
+ * when that manifest parses (which every caller asserts as a defect: the spelling is not accepted).
+ *
+ * @param spelling  the `kind` value under test
+ * @return          the rejection message, or `""` when the manifest parsed instead
+ * @since 0.3.1
+ */
+fn mf_kind_rejection(spelling: str) -> str {
+    match parse_manifest(mf_kind_manifest(spelling)) { Manifest => ""; error as e => e.message }
+}
+
+#test
+/**
+ * mf_every_accepted_kind_resolves_to_its_own_member — the four accepted spellings still select the
+ * artifact they always did (the half of the unknown-kind fix that proves the GOOD path survived),
+ * and `artifact_kind_table` agrees with each of them row by row.
+ *
+ * @return void
+ */
+fn mf_every_accepted_kind_resolves_to_its_own_member() {
+    teko::assert::is_true(mf_kind_resolves("binary", Artifact::Binary))
+    teko::assert::is_true(mf_kind_resolves("static", Artifact::Static))
+    teko::assert::is_true(mf_kind_resolves("shared", Artifact::Shared))
+    teko::assert::is_true(mf_kind_resolves("package", Artifact::Package))
+    let rows = artifact_kind_table()
+    mut i: u64 = 0
+    loop {
+        if i >= rows.len { break }
+        teko::assert::is_true(mf_kind_resolves(rows[i].spelling, rows[i].artifact))
+        i = i + 1
+    }
+}
+
+#test
+/**
+ * mf_unknown_artifact_kind_is_a_hard_error — an unrecognized `[artifact] kind` FAILS the manifest
+ * read instead of falling back to `Artifact::Binary`. A typo (`"binari"`) used to build an
+ * executable in silence, and so did a kind nobody implemented (`"tool"`) — a hidden error that never
+ * fired (M.3). The message must name the offending spelling AND enumerate the accepted set, so the
+ * writer can see both what was read and what is allowed.
+ *
+ * @return void
+ */
+fn mf_unknown_artifact_kind_is_a_hard_error() {
+    let typo = mf_kind_rejection("binari")
+    teko::assert::is_true(typo.len > 0)
+    teko::assert::is_true(teko::str::contains(typo, "\"binari\""))
+    teko::assert::is_true(teko::str::contains(typo, artifact_kinds_listed()))
+    let unimplemented = mf_kind_rejection("tool")
+    teko::assert::is_true(unimplemented.len > 0)
+    teko::assert::is_true(teko::str::contains(unimplemented, "\"tool\""))
+    teko::assert::is_true(teko::str::contains(unimplemented, artifact_kinds_listed()))
+    teko::assert::is_true(mf_kind_rejection("").len > 0)
+    teko::assert::is_true(mf_kind_rejection("Binary").len > 0)
+}
+
+#test
+/**
+ * mf_absent_artifact_section_keeps_the_binary_default — an absent `[artifact]` section (and a present
+ * one that declares no `kind`) still yields `Artifact::Binary`. This is NOT the unknown-kind case:
+ * declaring nothing is legitimate and every such project must keep building, so the hard error
+ * belongs to an unrecognized spelling alone.
+ *
+ * @return void
+ */
+fn mf_absent_artifact_section_keeps_the_binary_default() {
+    match parse_manifest("name = \"app\"\nsource = \"src\"\n") {
+        Manifest as m => teko::assert::is_true(m.artifact == Artifact::Binary)
+        error => teko::assert::is_true(false)
+    }
+    match parse_manifest("name = \"app\"\nsource = \"src\"\n[artifact]\nabi = \"c\"\n") {
+        Manifest as m => teko::assert::is_true(m.artifact == Artifact::Binary)
+        error => teko::assert::is_true(false)
+    }
+}

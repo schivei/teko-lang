@@ -262,7 +262,7 @@ by the driver running twice.
 
 ## Crumb c8e — assert `EXPECT_COMPILE_FAIL` in CI (finding 4, issue #610) — HARNESS, PARALLEL
 
-`scripts/diff_vm_native.sh` (which once asserted rejection) was retired with the VM lane
+`scripts/diff_c_own.sh` (which once asserted rejection) was retired with the VM lane
 (#524/#395); `native_regressions.sh` only smokes ONE positive fixture;
 `sanitizers.yml:99,191` SKIPS every `EXPECT_COMPILE_FAIL` dir. ~30 negative fixtures
 (incl. crumb-7/8 `member_const_*_rejected` and the new c8c visibility fixture) pass

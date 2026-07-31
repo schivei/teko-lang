@@ -11,14 +11,14 @@
 /**
  * X86_BYTE_MASK — the low-8-bits mask every byte-narrowing cast in this file
  * runs through first (all bit-slicing stays in `u32`/`i64`; only this final
- * `& 0xFF` narrows to `byte`, the VM byte-width anchoring rule). The first of
- * this file's whole W15 sweep (crumb S2) of named ModRM/SIB/REX field
- * masks/bits and opcode-byte constants below: each is named `X86_<ROLE>` (a
- * bit mask/shift/field value) or `X86_OP_<mnemonic>`/`X86_EXT_<mnemonic>` (an
- * opcode byte or ModRM opcode-extension), and its value is EXACTLY the x86-64
- * encoding byte the corpus's golden hex vectors (`encode_x86_64_test.tkt`)
- * already pin — only the SOURCE SPELLING changes; every emitted byte stays
- * identical (those goldens + `diff_c_own.sh` prove it).
+ * `& 0xFF` narrows to `byte`). The first of this file's whole W15 sweep
+ * (crumb S2) of named ModRM/SIB/REX field masks/bits and opcode-byte constants
+ * below: each is named `X86_<ROLE>` (a bit mask/shift/field value) or
+ * `X86_OP_<mnemonic>`/`X86_EXT_<mnemonic>` (an opcode byte or ModRM
+ * opcode-extension), and its value is EXACTLY the x86-64 encoding byte the
+ * corpus's golden hex vectors (`encode_x86_64_test.tkt`) already pin — only
+ * the SOURCE SPELLING changes; every emitted byte stays identical (those
+ * goldens + `diff_c_own.sh` prove it).
  */
 const X86_BYTE_MASK: u32 = 0xFF to u32
 
@@ -215,6 +215,122 @@ const X86_CC_A: u32 = 0x7 to u32
  * X86_CC_AE — the x86 condition-code field for `MCond::HS` (unsigned).
  */
 const X86_CC_AE: u32 = 0x3 to u32
+
+/**
+ * X86_CC_P — the x86 condition-code field for the PARITY flag SET (the
+ * UCOMISD/UCOMISS "unordered" result — either compared operand is NaN). Not a
+ * `cond_cc_x86` case (the shared `MCond` has no parity member, `B1-fp`); read
+ * directly by `encode_setp_x86`'s raw-cc path.
+ */
+const X86_CC_P: u32 = 0xA to u32
+
+/**
+ * X86_CC_NP — the x86 condition-code field for the PARITY flag CLEAR (the
+ * UCOMISD/UCOMISS "ordered" result).
+ */
+const X86_CC_NP: u32 = 0xB to u32
+
+/**
+ * X86_PREFIX_66 — the `0x66` mandatory SSE prefix: UCOMISD (vs UCOMISS'
+ * no-prefix) and MOVQ/MOVD's GPR/FPR crossing (`B1-fp`). The same byte value
+ * as `X86_OPERAND_SIZE_PREFIX` (the 16-bit integer operand-size override) —
+ * a coincidence of the encoding space, not a shared MEANING, so the float
+ * family names its own constant rather than reusing the integer one.
+ */
+const X86_PREFIX_66: u32 = 0x66 to u32
+
+/**
+ * X86_PREFIX_F2 — the `0xF2` mandatory SSE prefix selecting the scalar
+ * DOUBLE-precision form of a MOVSD/ADDSD/SUBSD/MULSD/DIVSD/CVTSI2SD/
+ * CVTTSD2SI/CVTSD2SS opcode (`B1-fp`).
+ */
+const X86_PREFIX_F2: u32 = 0xF2 to u32
+
+/**
+ * X86_PREFIX_F3 — the `0xF3` mandatory SSE prefix selecting the scalar
+ * SINGLE-precision form of a MOVSS/ADDSS/SUBSS/MULSS/DIVSS/CVTSS2SD opcode
+ * (`B1-fp`).
+ */
+const X86_PREFIX_F3: u32 = 0xF3 to u32
+
+/**
+ * X86_NO_PREFIX — the sentinel `mandatory_prefix`/SSE-prefix value meaning
+ * "emit no prefix byte" (UCOMISS' single-precision form carries none). `0` is
+ * never itself a legal x86 prefix byte, so it is unambiguous as a sentinel.
+ */
+const X86_NO_PREFIX: u32 = 0 to u32
+
+/**
+ * X86_OP_SSE_MOV_LOAD — the `MOVSD`/`MOVSS` reg-from-rm opcode (`0F 10`),
+ * mandatory-prefixed `F2`/`F3`: a scalar float register-register copy or
+ * memory load, reg field is the destination.
+ */
+const X86_OP_SSE_MOV_LOAD: u32 = 0x10 to u32
+
+/**
+ * X86_OP_SSE_MOV_STORE — the `MOVSD`/`MOVSS` rm-from-reg opcode (`0F 11`),
+ * mandatory-prefixed `F2`/`F3`: a scalar float memory store, reg field is the
+ * source.
+ */
+const X86_OP_SSE_MOV_STORE: u32 = 0x11 to u32
+
+/**
+ * X86_OP_SSE_ADD — the `ADDSD`/`ADDSS` opcode (`0F 58`).
+ */
+const X86_OP_SSE_ADD: u32 = 0x58 to u32
+
+/**
+ * X86_OP_SSE_MUL — the `MULSD`/`MULSS` opcode (`0F 59`).
+ */
+const X86_OP_SSE_MUL: u32 = 0x59 to u32
+
+/**
+ * X86_OP_SSE_SUB — the `SUBSD`/`SUBSS` opcode (`0F 5C`).
+ */
+const X86_OP_SSE_SUB: u32 = 0x5C to u32
+
+/**
+ * X86_OP_SSE_DIV — the `DIVSD`/`DIVSS` opcode (`0F 5E`).
+ */
+const X86_OP_SSE_DIV: u32 = 0x5E to u32
+
+/**
+ * X86_OP_UCOMIS — the `UCOMISD`/`UCOMISS` opcode (`0F 2E`): sets flags from
+ * `a <=> b` (ModRM.reg is `a`), unordered (NaN) sets CF=PF=ZF=1.
+ */
+const X86_OP_UCOMIS: u32 = 0x2E to u32
+
+/**
+ * X86_OP_MOVQD_LOAD — the `MOVQ`/`MOVD` xmm-from-gpr opcode (`0F 6E`),
+ * mandatory-prefixed `66`, REX.W selecting the 64-/32-bit crossing.
+ */
+const X86_OP_MOVQD_LOAD: u32 = 0x6E to u32
+
+/**
+ * X86_OP_MOVQD_STORE — the `MOVQ`/`MOVD` gpr-from-xmm opcode (`0F 7E`),
+ * mandatory-prefixed `66`: ModRM.reg is the XMM (source), ModRM.rm the GPR
+ * (destination) — the store-direction convention, opposite of `MOVQD_LOAD`.
+ */
+const X86_OP_MOVQD_STORE: u32 = 0x7E to u32
+
+/**
+ * X86_OP_CVTSI2S — the `CVTSI2SD`/`CVTSI2SS` opcode (`0F 2A`): a signed GPR
+ * converted to a scalar float, mandatory-prefixed `F2`/`F3`.
+ */
+const X86_OP_CVTSI2S: u32 = 0x2A to u32
+
+/**
+ * X86_OP_CVTTS2SI — the `CVTTSD2SI`/`CVTTSS2SI` opcode (`0F 2C`): a scalar
+ * float TRUNCATED to a signed GPR, mandatory-prefixed `F2`/`F3`.
+ */
+const X86_OP_CVTTS2SI: u32 = 0x2C to u32
+
+/**
+ * X86_OP_CVTS2S — the `CVTSD2SS`/`CVTSS2SD` opcode (`0F 5A`): the
+ * double<->single width conversion, mandatory-prefixed `F2` (narrowing, from
+ * double) / `F3` (widening, from single).
+ */
+const X86_OP_CVTS2S: u32 = 0x5A to u32
 
 /**
  * X86_OP_ADD_RM_R — the `add r/m64, r64` opcode (two-address ALU, reg-into-rm
@@ -469,6 +585,35 @@ const X86_OP_GRP1_IMM32: u32 = 0x81 to u32
  * both the imm8 and imm32 `sub rsp` forms.
  */
 const X86_MODRM_SUB_RSP: u32 = 0xEC to u32
+
+/**
+ * X86_MODRM_ADD_RSP — the ModRM byte of `add rsp, #N` (`mod=11 reg=/0 rm=RSP`,
+ * i.e. `modrm_x86(MODRM_MOD_REGISTER, 0, X86_REG_RSP_ID)`), shared by both the
+ * imm8 and imm32 `add rsp` forms. The group-1 opcode byte is the same as `sub`'s
+ * (`83`/`81`); only this `/r` extension field distinguishes them (`B1-args`).
+ */
+const X86_MODRM_ADD_RSP: u32 = 0xC4 to u32
+
+/**
+ * X86_OP_MOVAPS_STORE — the `movaps m128, xmm` opcode (`0F 29`, no mandatory
+ * prefix): the 16-byte aligned store that saves a callee-saved XMM into the frame
+ * (`B3-xmm-callee-saved`). The FULL 128-bit register is preserved, not just the
+ * scalar low lane, because Win64 declares XMM6..XMM15 nonvolatile in their
+ * entirety and a caller may hold a packed value there.
+ */
+const X86_OP_MOVAPS_STORE: u32 = 0x29 to u32
+
+/**
+ * X86_OP_MOVAPS_LOAD — the `movaps xmm, m128` opcode (`0F 28`), the reload half
+ * of `X86_OP_MOVAPS_STORE`.
+ */
+const X86_OP_MOVAPS_LOAD: u32 = 0x28 to u32
+
+/**
+ * X86_XMM_SAVE_BYTES — the frame bytes one callee-saved XMM occupies (16: a full
+ * 128-bit register, which is also `movaps`' required alignment).
+ */
+const X86_XMM_SAVE_BYTES: u32 = 16 to u32
 
 /**
  * X86_OP_LEAVE — the `leave` opcode (`C9`): `mov rsp,rbp ; pop rbp` in one

@@ -15,7 +15,9 @@ fn ex_p(id: u32) -> MReg {
 
 /**
  * ex_fpr — a physical FPR (XMM) operand with the given ISA id, the fixture
- * shorthand for the SSE `B1-fp` honest-stop paths.
+ * shorthand for the scalar SSE float golden vectors (`B1-fp`). XMM ids share the
+ * GPR numbering space (XMM0..XMM15 = 0..15), so ids >= 8 exercise the REX.R/
+ * REX.B extension bits exactly as R8..R15 do.
  *
  * @param u32 id  the XMM register number
  * @return MReg  the physical FPR operand
@@ -46,7 +48,7 @@ fn ex_mem(base: MReg, off: i32) -> MMem {
  */
 fn ex_layout() -> FrameLayoutX86 {
     let slots = teko::list::push(teko::list::push(teko::list::empty(), 16 to u32), 24 to u32)
-    FrameLayoutX86 { size = 32 to u32; saved_gpr = teko::list::empty(); saved_fpr = teko::list::empty(); slot_offsets = slots }
+    FrameLayoutX86 { size = 32 to u32; saved_gpr = teko::list::empty(); saved_fpr = teko::list::empty(); slot_offsets = slots; call_align = false; out_arg_base = 0 to u32; fpr_save_base = 0 to u32; caller_shadow = 0 to u32 }
 }
 
 /**
@@ -387,15 +389,110 @@ fn ex_encodes_the_rip_relative_lea_reloc() {
 
 #test
 /**
- * ex_fpr_load_store_raise_the_b1_fp_stop — an `MLoadX86`/`MStoreX86` whose
- * register operand is FPR-class is an SSE memory move deferred to 0.3.1, so the
- * B1-5 core raises the named `B1-fp` honest-stop.
+ * ex_encodes_the_scalar_float_memory_moves — the SSE scalar float load/store
+ * widths (`B1-fp`): `MOVSD` is `F2 0F 10`(load)/`F2 0F 11`(store), `MOVSS` the
+ * `F3`-prefixed twin, with the mandatory prefix ahead of any REX (an XMM8..15
+ * operand sets REX.R) and the same SIB/disp8 addressing the integer forms use
+ * (RSP forces the SIB byte `0x24`, RBP forces a zero disp8). Every vector below
+ * was cross-checked against GNU `as`.
  *
  * @return void
  */
-fn ex_fpr_load_store_raise_the_b1_fp_stop() {
-    ex_assert_stop(load_x86(MMemSizeX86::Q, false, ex_fpr(0), ex_mem(ex_p(4), 0 to i32)), "B1-fp")
-    ex_assert_stop(store_x86(MMemSizeX86::Q, ex_fpr(0), ex_mem(ex_p(4), 0 to i32)), "B1-fp")
+fn ex_encodes_the_scalar_float_memory_moves() {
+    ex_assert_hex(load_x86(MMemSizeX86::F64, false, ex_fpr(0), ex_mem(ex_p(4), 0 to i32)), "f20f100424")
+    ex_assert_hex(load_x86(MMemSizeX86::F32, false, ex_fpr(0), ex_mem(ex_p(4), 0 to i32)), "f30f100424")
+    ex_assert_hex(store_x86(MMemSizeX86::F64, ex_fpr(0), ex_mem(ex_p(4), 0 to i32)), "f20f110424")
+    ex_assert_hex(store_x86(MMemSizeX86::F32, ex_fpr(0), ex_mem(ex_p(4), 0 to i32)), "f30f110424")
+    ex_assert_hex(load_x86(MMemSizeX86::F64, false, ex_fpr(10), ex_mem(ex_p(5), 0 to i32)), "f2440f105500")
+    ex_assert_hex(store_x86(MMemSizeX86::F64, ex_fpr(10), ex_mem(ex_p(5), 0 to i32)), "f2440f115500")
+}
+
+#test
+/**
+ * ex_encodes_the_float_register_moves — `MFMovX86`'s three shapes (`B1-fp`):
+ * FPR-to-FPR is `MOVSD`/`MOVSS` (`F2`/`F3 0F 10`, ModRM.reg is the
+ * destination); GPR-to-FPR is `MOVQ`/`MOVD` (`66 [REX.W] 0F 6E`); FPR-to-GPR is
+ * the opposite-direction `66 [REX.W] 0F 7E`, whose ModRM.reg field holds the XMM
+ * SOURCE. Every vector below was cross-checked against GNU `as`.
+ *
+ * @return void
+ */
+fn ex_encodes_the_float_register_moves() {
+    ex_assert_hex(fmov_x86(ex_fpr(0), ex_fpr(1), true), "f20f10c1")
+    ex_assert_hex(fmov_x86(ex_fpr(0), ex_fpr(1), false), "f30f10c1")
+    ex_assert_hex(fmov_x86(ex_fpr(10), ex_fpr(11), true), "f2450f10d3")
+    ex_assert_hex(fmov_x86(ex_fpr(10), ex_fpr(11), false), "f3450f10d3")
+    ex_assert_hex(fmov_x86(ex_fpr(0), ex_p(0), true), "66480f6ec0")
+    ex_assert_hex(fmov_x86(ex_fpr(0), ex_p(0), false), "660f6ec0")
+    ex_assert_hex(fmov_x86(ex_fpr(10), ex_p(11), true), "664d0f6ed3")
+    ex_assert_hex(fmov_x86(ex_fpr(10), ex_p(11), false), "66450f6ed3")
+    ex_assert_hex(fmov_x86(ex_p(0), ex_fpr(0), true), "66480f7ec0")
+    ex_assert_hex(fmov_x86(ex_p(0), ex_fpr(0), false), "660f7ec0")
+    ex_assert_hex(fmov_x86(ex_p(11), ex_fpr(10), true), "664d0f7ed3")
+    ex_assert_hex(fmov_x86(ex_p(11), ex_fpr(10), false), "66450f7ed3")
+}
+
+#test
+/**
+ * ex_encodes_the_float_alu_family — every `MFAluOpX86` in both widths
+ * (`B1-fp`): `ADDSD`/`SUBSD`/`MULSD`/`DIVSD` are `F2 0F 58`/`5C`/`59`/`5E`, and
+ * the `SS` twins swap the mandatory prefix to `F3`; the read-modify-write
+ * destination rides ModRM.reg. Every vector below was cross-checked against GNU
+ * `as`.
+ *
+ * @return void
+ */
+fn ex_encodes_the_float_alu_family() {
+    ex_assert_hex(falu_x86(MFAluOpX86::FAdd, ex_fpr(0), ex_fpr(1), true), "f20f58c1")
+    ex_assert_hex(falu_x86(MFAluOpX86::FSub, ex_fpr(0), ex_fpr(1), true), "f20f5cc1")
+    ex_assert_hex(falu_x86(MFAluOpX86::FMul, ex_fpr(0), ex_fpr(1), true), "f20f59c1")
+    ex_assert_hex(falu_x86(MFAluOpX86::FDiv, ex_fpr(0), ex_fpr(1), true), "f20f5ec1")
+    ex_assert_hex(falu_x86(MFAluOpX86::FAdd, ex_fpr(0), ex_fpr(1), false), "f30f58c1")
+    ex_assert_hex(falu_x86(MFAluOpX86::FSub, ex_fpr(0), ex_fpr(1), false), "f30f5cc1")
+    ex_assert_hex(falu_x86(MFAluOpX86::FMul, ex_fpr(0), ex_fpr(1), false), "f30f59c1")
+    ex_assert_hex(falu_x86(MFAluOpX86::FDiv, ex_fpr(0), ex_fpr(1), false), "f30f5ec1")
+    ex_assert_hex(falu_x86(MFAluOpX86::FAdd, ex_fpr(10), ex_fpr(11), true), "f2450f58d3")
+    ex_assert_hex(falu_x86(MFAluOpX86::FDiv, ex_fpr(10), ex_fpr(11), false), "f3450f5ed3")
+}
+
+#test
+/**
+ * ex_encodes_the_float_compare_and_parity — `UCOMISD` is `66 0F 2E` and
+ * `UCOMISS` the UNPREFIXED `0F 2E` (the one form in this family carrying no
+ * mandatory prefix), its first operand on ModRM.reg; `MSetPX86` is `setp`/
+ * `setnp` (`0F 9A`/`9B`) plus the `movzx dst32, dst8` widening every `setcc`
+ * here carries, with a forced REX for a byte register at id >= 4. Every vector
+ * below was cross-checked against GNU `as`.
+ *
+ * @return void
+ */
+fn ex_encodes_the_float_compare_and_parity() {
+    ex_assert_hex(fcmp_x86(ex_fpr(0), ex_fpr(1), true), "660f2ec1")
+    ex_assert_hex(fcmp_x86(ex_fpr(0), ex_fpr(1), false), "0f2ec1")
+    ex_assert_hex(fcmp_x86(ex_fpr(10), ex_fpr(11), true), "66450f2ed3")
+    ex_assert_hex(setp_x86(ex_p(0), false), "0f9ac00fb6c0")
+    ex_assert_hex(setp_x86(ex_p(0), true), "0f9bc00fb6c0")
+    ex_assert_hex(setp_x86(ex_p(6), false), "400f9ac6400fb6f6")
+    ex_assert_hex(setp_x86(ex_p(6), true), "400f9bc6400fb6f6")
+}
+
+#test
+/**
+ * ex_encodes_the_float_conversions — every `MCvtOpX86` (`B1-fp`): `CVTSI2SD` is
+ * `F2 REX.W 0F 2A` (its GPR side always the wide form), `CVTTSD2SI` is
+ * `F2 REX.W 0F 2C` with the GPR destination on ModRM.reg, `CVTSD2SS` is
+ * `F2 0F 5A` and `CVTSS2SD` is `F3 0F 5A` (both FPR-only, so neither sets
+ * REX.W). Every vector below was cross-checked against GNU `as`.
+ *
+ * @return void
+ */
+fn ex_encodes_the_float_conversions() {
+    ex_assert_hex(cvt_x86(MCvtOpX86::Cvtsi2sd, ex_fpr(0), ex_p(0)), "f2480f2ac0")
+    ex_assert_hex(cvt_x86(MCvtOpX86::Cvttsd2si, ex_p(0), ex_fpr(0)), "f2480f2cc0")
+    ex_assert_hex(cvt_x86(MCvtOpX86::Cvtsd2ss, ex_fpr(0), ex_fpr(1)), "f20f5ac1")
+    ex_assert_hex(cvt_x86(MCvtOpX86::Cvtss2sd, ex_fpr(0), ex_fpr(1)), "f30f5ac1")
+    ex_assert_hex(cvt_x86(MCvtOpX86::Cvtsi2sd, ex_fpr(10), ex_p(11)), "f24d0f2ad3")
+    ex_assert_hex(cvt_x86(MCvtOpX86::Cvttsd2si, ex_p(11), ex_fpr(10)), "f24d0f2cda")
 }
 
 /**
@@ -452,7 +549,7 @@ fn fx_none_u32() -> []u32 {
  * @return FrameLayoutX86  the fixture frame
  */
 fn fx_frame(size: u32, saved: []u32, slots: []u32) -> FrameLayoutX86 {
-    FrameLayoutX86 { size = size; saved_gpr = saved; saved_fpr = teko::list::empty(); slot_offsets = slots }
+    FrameLayoutX86 { size = size; saved_gpr = saved; saved_fpr = teko::list::empty(); slot_offsets = slots; call_align = false; out_arg_base = 0 to u32; fpr_save_base = 0 to u32; caller_shadow = 0 to u32 }
 }
 
 /**
@@ -497,15 +594,17 @@ fn fx_epilogue_hex(layout: FrameLayoutX86) -> str {
 #test
 /**
  * ex_multi_callee_saved_frame — three callee-saved GPRs (RBX, R12, R13, the
- * latter two REX.B-prefixed) with an 8-byte sub: pushed ascending, popped in
- * reverse before `leave`.
+ * latter two REX.B-prefixed) with an 8-byte sub: pushed ascending BEFORE the
+ * `sub rsp` (so the frame's lowest bytes stay free for the argument-passing
+ * region, `B1-args`), and on the way out `add rsp,#8` puts RSP back at the top of
+ * the pushed region before the reverse pops and the final `leave`.
  *
  * @return void
  */
 fn ex_multi_callee_saved_frame() {
     let fl = fx_frame(8 to u32, fx_u3(3 to u32, 12 to u32, 13 to u32), fx_none_u32())
-    teko::assert::is_true(fx_prologue_hex(fl) == "554889e54883ec085341544155")
-    teko::assert::is_true(fx_epilogue_hex(fl) == "415d415c5bc9")
+    teko::assert::is_true(fx_prologue_hex(fl) == "554889e553415441554883ec08")
+    teko::assert::is_true(fx_epilogue_hex(fl) == "4883c408415d415c5bc9")
 }
 
 #test
@@ -602,19 +701,39 @@ fn ex_func_makes_call_x86_detects_indirect() {
     teko::assert::is_true(func_makes_call_x86(f))
 }
 
+/**
+ * fx_xmm_frame — a `FrameLayoutX86` fixture carrying callee-saved XMMs (the
+ * Win64-only shape: XMM6..XMM15 are nonvolatile there), their 16-byte save slots
+ * starting at RSP+`fpr_save_base`.
+ *
+ * @param u32 size  the `sub rsp` amount
+ * @param []u32 saved_fpr  the callee-saved XMM ids, ascending
+ * @param u32 fpr_save_base  the RSP-relative offset of the first save slot
+ * @return FrameLayoutX86  the fixture frame
+ */
+fn fx_xmm_frame(size: u32, saved_fpr: []u32, fpr_save_base: u32) -> FrameLayoutX86 {
+    FrameLayoutX86 { size = size; saved_gpr = fx_none_u32(); saved_fpr = saved_fpr; slot_offsets = fx_none_u32(); call_align = false; out_arg_base = 0 to u32; fpr_save_base = fpr_save_base; caller_shadow = 0 to u32 }
+}
+
 #test
 /**
- * ex_win64_callee_saved_xmm_honest_stops — a frame carrying a callee-saved XMM in
- * `saved_fpr` (Win64 preserves XMM6-15) raises the named `B3-xmm-callee-saved`
- * honest-stop at prologue emission rather than mis-emitting a GPR `push` for an
- * XMM (the `movaps` spill path is unimplemented; the integer corpus allocates no
- * XMM, §2.2/§7).
+ * ex_win64_callee_saved_xmm_rides_movaps — a frame carrying callee-saved XMMs
+ * saves each one with an aligned `movaps [rsp+off], xmm` after the `sub rsp` and
+ * reloads it with `movaps xmm, [rsp+off]` on the way out, ascending id order, 16
+ * bytes apart (`B3-xmm-callee-saved`, closed 2026-07-29 — this used to be an
+ * honest-stop that refused to emit a prologue at all). `movaps`, not `movsd`:
+ * Win64's promise covers all 128 bits of XMM6..XMM15. A high XMM sets REX.R.
+ * Cross-checked against GNU `as`.
  *
  * @return void
  */
-fn ex_win64_callee_saved_xmm_honest_stops() {
-    let fl = FrameLayoutX86 { size = 16 to u32; saved_gpr = fx_none_u32(); saved_fpr = fx_u1(6 to u32); slot_offsets = fx_none_u32() }
-    teko::assert::str_contains(fx_prologue_stop(fl), "B3-xmm-callee-saved")
+fn ex_win64_callee_saved_xmm_rides_movaps() {
+    let one = fx_xmm_frame(16 to u32, fx_u1(6 to u32), 0 to u32)
+    teko::assert::is_true(fx_prologue_hex(one) == "554889e54883ec100f293424")
+    teko::assert::is_true(fx_epilogue_hex(one) == "0f283424c9")
+    let two = fx_xmm_frame(48 to u32, fx_u2(6 to u32, 15 to u32), 16 to u32)
+    teko::assert::is_true(fx_prologue_hex(two) == "554889e54883ec300f29742410440f297c2420")
+    teko::assert::is_true(fx_epilogue_hex(two) == "0f28742410440f287c2420c9")
 }
 
 /**
@@ -675,6 +794,45 @@ fn ex_func_frameless_call_reloc() {
     teko::assert::is_true(ef.relocs[0].sym == "tk_exit")
     teko::assert::is_true(fx_reloc_kind_name(ef.relocs[0].kind) == "plt32")
     teko::assert::is_true(ef.relocs[0].addend == ((0) - (4)))
+}
+
+#test
+/**
+ * ex_func_call_then_return_gets_a_minimal_align_only_frame — the sibling axis
+ * `ex_func_frameless_call_reloc` does NOT cover: a function with ZERO frame slots and ZERO
+ * callee-saved registers that calls `tk_something` AND THEN RETURNS (unlike that fixture's
+ * `tk_exit` call, which never returns) gets a minimal `push rbp`/`mov rbp,rsp` prologue
+ * (`554889e5`) and a bare `leave` epilogue (`c9`) ahead of its own `ret` (`c3`) —
+ * `needs_call_align_x86` restoring the SysV 16-byte call-boundary alignment a genuinely
+ * frameless encoding would leave off by 8 at the call this function itself issues (0.3.1.0
+ * degrau 19 — found live: the native entry stub `wrap_native_entry` appends is exactly this
+ * shape, and the missing 8 bytes went unnoticed until a callee's OWN call chain used a
+ * strictly-aligned SSE store several frames deep).
+ *
+ * @return void
+ */
+fn ex_func_call_then_return_gets_a_minimal_align_only_frame() {
+    let f = fx_1block_func("main", fx_i2(call_x86("tk_something", teko::list::empty(), ex_p(0), false, false), ret_x86()), fx_no_frame())
+    let ef = fx_encode_func(f)
+    teko::assert::is_true(teko::crypto::to_hex(ef.bytes) == "554889e5e800000000c9c3")
+    teko::assert::is_true(ef.relocs.len == 1)
+    teko::assert::is_true(ef.relocs[0].offset == (5 to u32))
+    teko::assert::is_true(ef.relocs[0].sym == "tk_something")
+}
+
+#test
+/**
+ * ex_func_call_with_no_return_stays_frameless_even_when_named_differently —
+ * `needs_call_align_x86` is NOT keyed on the symbol `"main"`: any function whose only call
+ * never returns stays byte-identical to the pre-degrau-19 frameless encoding, confirming the
+ * fix is scoped to the call-AND-return axis alone (0.3.1.0 degrau 19).
+ *
+ * @return void
+ */
+fn ex_func_call_with_no_return_stays_frameless_even_when_named_differently() {
+    let f = fx_1block_func("teko_main", fx_i1(call_x86("tk_exit", teko::list::empty(), ex_p(0), false, false)), fx_no_frame())
+    let ef = fx_encode_func(f)
+    teko::assert::is_true(teko::crypto::to_hex(ef.bytes) == "e800000000")
 }
 
 #test
@@ -811,13 +969,67 @@ fn ex_module_globals_honest_stops() {
 
 #test
 /**
- * ex_module_propagates_function_stop — a function reaching the `B1-fp` encoder
- * stop propagates it out of `encode_module_x86` unchanged.
+ * ex_module_propagates_function_stop — a function reaching a per-function
+ * encoder stop propagates it out of `encode_module_x86` unchanged: a frame whose
+ * sole `LAlloca` overruns the signed imm32 `sub rsp` field raises
+ * `B1-bigframe` at prologue emission, and the module driver surfaces that same
+ * message rather than swallowing it.
  *
  * @return void
  */
 fn ex_module_propagates_function_stop() {
-    let ld = load_x86(MMemSizeX86::Q, false, ex_fpr(0), ex_mem(ex_p(4), 0 to i32))
-    let f = fx_1block_func("main", fx_i1(ld), fx_no_frame())
-    teko::assert::str_contains(fx_module_stop(fx_module_of1(f)), "B1-fp")
+    let f = fx_1block_func("main", fx_i1(ret_x86()), fx_alloca_frame(0xFFFFFF00 to u32, 8 to u32))
+    teko::assert::str_contains(fx_module_stop(fx_module_of1(f)), "B1-bigframe")
+}
+
+/**
+ * fx_in_arg_hex — the hex of a one-block function encoded under `abi`, whose body
+ * is a single `MInArgX86{Q, RAX, 0}` load of incoming stack argument 0 followed by
+ * `ret`. The reader behind the caller-shadow goldens: the displacement inside
+ * those bytes IS `in_arg_base_x86`'s answer.
+ *
+ * @param AbiDescriptor abi  the register file to encode under
+ * @return str  the encoded bytes as hex, or `<err>` on an unexpected honest-stop
+ */
+fn fx_in_arg_hex(abi: AbiDescriptor) -> str {
+    let f = fx_1block_func("main", fx_i2(in_arg_x86(MMemSizeX86::Q, ex_p(0), 0 to u32), ret_x86()), fx_no_frame())
+    match encode_func_x86(abi, f) {
+        EncodedFuncX86 as ef => teko::crypto::to_hex(ef.bytes)
+        error as e => "<err>"
+    }
+}
+
+#test
+/**
+ * ex_win64_incoming_stack_arg_skips_the_callers_shadow — a Win64 callee reads its
+ * first INCOMING stack argument 32 bytes higher than a SysV one, because the Win64
+ * caller reserved the 32-byte home space between its own RSP and that argument.
+ *
+ * The two hex strings differ in exactly the displacement byte: SysV loads
+ * `[rsp+8]` (`488b442408`), Win64 `[rsp+40]` (`488b442428`). Before this term
+ * existed both read `[rsp+8]` while `encode_out_arg_x86` stored the argument at
+ * `[rsp+32]` of the caller — a 32-byte disagreement between the two halves of one
+ * ABI contract.
+ *
+ * @return void
+ */
+fn ex_win64_incoming_stack_arg_skips_the_callers_shadow() {
+    teko::assert::is_true(fx_in_arg_hex(SYSV64) == "488b442408c3")
+    teko::assert::is_true(fx_in_arg_hex(WIN64) == "488b442428c3")
+}
+
+#test
+/**
+ * ex_frame_layout_carries_the_callers_shadow_unconditionally — `caller_shadow`
+ * comes off the DESCRIPTOR, not off `shadow_bytes_x86`: a Win64 LEAF (which
+ * reserves no shadow of its own, so its `out_arg_base` is 0) still has 32 bytes of
+ * the CALLER's shadow below its incoming arguments.
+ *
+ * @return void
+ */
+fn ex_frame_layout_carries_the_callers_shadow_unconditionally() {
+    let leaf = fx_1block_func("main", fx_i1(ret_x86()), fx_no_frame())
+    teko::assert::is_true(compute_frame_layout_x86(WIN64, leaf).out_arg_base == (0 to u32))
+    teko::assert::is_true(compute_frame_layout_x86(WIN64, leaf).caller_shadow == (32 to u32))
+    teko::assert::is_true(compute_frame_layout_x86(SYSV64, leaf).caller_shadow == (0 to u32))
 }

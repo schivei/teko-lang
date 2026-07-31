@@ -364,23 +364,44 @@ fn elf_rodata_secsym_index(syms: []ElfSym) -> u32 {
 }
 
 /**
- * elf_reloc_type — the `R_X86_64_*` relocation type for a `RelocKindX86`:
- * `PLT32`(4) for a `Plt32` call (resolves to a plain PC-relative call under a
- * static link, the correct choice for both the `cc` bootstrap and the future E1
- * linker), `PC32`(2) for a `Pc32` rip-relative `lea`, `64`(1) for an `Abs64`
- * data-global address. `Abs64` is the FUTURE data path: `encode_module_x86`
- * raises the `B1-globals` honest-stop before any `Abs64` relocation is produced,
- * so a real B1 object never carries one, and a rip-relative `lea` only ever
- * carries `Pc32`/`Plt32`, never `Abs64` (asserted in the tests).
+ * R_X86_64_64 — the `Elf64_Rela` `r_info` relocation type for a 64-bit absolute
+ * address (the psABI's value 1).
+ */
+const R_X86_64_64: u32 = 1 to u32
+
+/**
+ * R_X86_64_PC32 — the `Elf64_Rela` `r_info` relocation type for a 32-bit
+ * PC-relative displacement (the psABI's value 2), which is what a
+ * `lea reg, [rip+disp32]` address materialization owes.
+ */
+const R_X86_64_PC32: u32 = 2 to u32
+
+/**
+ * R_X86_64_PLT32 — the `Elf64_Rela` `r_info` relocation type for a 32-bit
+ * PC-relative displacement to a symbol's PLT entry (the psABI's value 4), which
+ * a static link resolves to a plain PC-relative `call`.
+ */
+const R_X86_64_PLT32: u32 = 4 to u32
+
+/**
+ * elf_reloc_type — the `R_X86_64_*` relocation type for a `RelocKindX86`, one
+ * named psABI constant per kind: `PLT32` for a `Plt32` call (resolves to a plain
+ * PC-relative call under a static link, the correct choice for both the `cc`
+ * bootstrap and the future E1 linker), `PC32` for a `Pc32` rip-relative `lea`,
+ * `64` for an `Abs64` data-global address. `Abs64` is the FUTURE data path:
+ * `encode_module_x86` raises the `B1-globals` honest-stop before any `Abs64`
+ * relocation is produced, so a real B1 object never carries one, and a
+ * rip-relative `lea` only ever carries `Pc32`/`Plt32`, never `Abs64` (asserted
+ * in the tests).
  *
  * @param RelocKindX86 kind  the relocation kind
  * @return u32  the `Elf64_Rela` `r_info` type field
  */
 fn elf_reloc_type(kind: RelocKindX86) -> u32 {
     match kind {
-        Plt32 => 4 to u32
-        Pc32 => 2 to u32
-        Abs64 => 1 to u32
+        Plt32 => R_X86_64_PLT32
+        Pc32 => R_X86_64_PC32
+        Abs64 => R_X86_64_64
     }
 }
 
@@ -1140,5 +1161,167 @@ pub fn emit_elf(enc: EncodedModuleX86) -> []byte {
         symbols = enc.symbols
         relocs = x86_reloc_reqs(enc)
         rodata_relocs = x86_rodata_reloc_reqs(enc)
+    })
+}
+
+/**
+ * EM_AARCH64 — the `Elf64_Ehdr.e_machine` value identifying an AArch64 (arm64)
+ * object (`/usr/include/elf.h`, value 183). The AArch64 LP64 ABI defines no
+ * processor-specific `e_flags` for an `ET_REL`, so `emit_elf_arm64` passes `0`
+ * exactly as the x86-64 adapter does; both halves were measured against a
+ * `clang --target=aarch64-linux-gnu` reference object, whose header reads
+ * `Machine: AArch64  Flags: 0x0`.
+ *
+ * @since 0.3.1
+ */
+const EM_AARCH64: u32 = 183 to u32
+
+/**
+ * R_AARCH64_ADR_PREL_PG_HI21 — the `Elf64_Rela` `r_info` type for the 21-bit
+ * page displacement an `ADRP` immediate carries, bits 32:12 of `Page(S+A) -
+ * Page(P)` (`/usr/include/elf.h`, value 275). The high half of every AArch64
+ * address pair, whether the target is a `.rodata` datum or a function.
+ *
+ * @since 0.3.1
+ */
+const R_AARCH64_ADR_PREL_PG_HI21: u32 = 275 to u32
+
+/**
+ * R_AARCH64_ADD_ABS_LO12_NC — the `Elf64_Rela` `r_info` type for the low-12
+ * immediate of an `ADD` (`/usr/include/elf.h`, value 277): bits 11:0 of `S+A`,
+ * UNSCALED and unchecked. The `LDST*_ABS_LO12_NC` family patches the same 12
+ * bits but SCALED by the access size, so this constant belongs to an `ADD`
+ * alone — `elf_arm64_reloc_kinds_are_add_form_only` pins that.
+ *
+ * @since 0.3.1
+ */
+const R_AARCH64_ADD_ABS_LO12_NC: u32 = 277 to u32
+
+/**
+ * R_AARCH64_CALL26 — the `Elf64_Rela` `r_info` type for the 26-bit
+ * PC-relative displacement of a `BL` (`/usr/include/elf.h`, value 283), bits
+ * 27:2 of `S+A-P`. The AArch64-ELF counterpart of Mach-O's
+ * `ARM64_RELOC_BRANCH26`, and like it, legal on a branch word only.
+ *
+ * @since 0.3.1
+ */
+const R_AARCH64_CALL26: u32 = 283 to u32
+
+/**
+ * R_AARCH64_ABS64 — the `Elf64_Rela` `r_info` type for a plain absolute 64-bit
+ * pointer written into a data slot (`/usr/include/elf.h`, value 257): the
+ * `S+A` a `.rodata`-internal pointer owes. Emitted only from a `Rodata`-section
+ * relocation, of which a real compile produces none today.
+ *
+ * @since 0.3.1
+ */
+const R_AARCH64_ABS64: u32 = 257 to u32
+
+/**
+ * elf_reloc_type_arm64 — the `R_AARCH64_*` relocation type for an
+ * `MRelocKind`, the AArch64 sibling of `elf_reloc_type` and the ONLY AArch64
+ * knowledge the ELF adapter injects into the ISA-agnostic writer.
+ *
+ * Every value is pinned twice — against `/usr/include/elf.h` and against a real
+ * `clang --target=aarch64-linux-gnu` object — because a wrong number here
+ * yields an object that LINKS and then computes garbage, the failure class this
+ * whole path is arranged around. `PageHi`/`PageLo` are the address pair an
+ * `ADRP`+`ADD` owes, for a rodata datum and for a function address alike;
+ * `Call` is the `BL` displacement; `Abs64` is a data pointer slot.
+ *
+ * `PageLo` maps to the `ADD` form and NEVER to an `LDST*_ABS_LO12_NC`, because
+ * isel attaches a relocation to `MAdrp`/`MAddLo`/`MCall` only — `load_inst` and
+ * `store_inst` take no symbol. A future peephole folding an `add lo12` into an
+ * `ldr [x, #lo12]` would need its OWN kind: the load form scales the immediate
+ * by the access size, so reusing the `ADD` form there would mis-scale silently.
+ *
+ * @param MRelocKind kind  the relocation kind isel pre-tagged onto the word
+ * @return u32  the `Elf64_Rela` `r_info` relocation type field
+ * @since 0.3.1
+ */
+fn elf_reloc_type_arm64(kind: MRelocKind) -> u32 {
+    match kind {
+        PageHi => R_AARCH64_ADR_PREL_PG_HI21
+        PageLo => R_AARCH64_ADD_ABS_LO12_NC
+        Call => R_AARCH64_CALL26
+        Abs64 => R_AARCH64_ABS64
+    }
+}
+
+/**
+ * arm64_reloc_reqs — lower every arm64 `Reloc` of `enc` whose patch site lies
+ * in `.text` to a neutral `ElfRelocReq`, mapping the `MRelocKind` to its
+ * numeric `R_AARCH64_*` type via `elf_reloc_type_arm64`. The offset, target
+ * name, and addend ride through unchanged; the shared writer folds a rodata
+ * target's `.rodata` offset onto the addend and resolves the name to a symbol
+ * index. Structurally the twin of `x86_reloc_reqs`.
+ *
+ * @param EncodedModule enc  the arm64 module (relocations, `sect`-tagged)
+ * @return []ElfRelocReq  the `.text`-relative relocation requests, in order
+ * @since 0.3.1
+ */
+fn arm64_reloc_reqs(enc: EncodedModule) -> []ElfRelocReq {
+    mut out: []ElfRelocReq = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= enc.relocs.len { break }
+        let r = enc.relocs[i]
+        if r.sect == RelocSect::Text { out = teko::list::push(out, ElfRelocReq { offset = r.offset; sym = r.sym; rtype = elf_reloc_type_arm64(r.kind); addend = 0 }) }
+        i++
+    }
+    out
+}
+
+/**
+ * arm64_rodata_reloc_reqs — the `.rodata`-partition twin of `arm64_reloc_reqs`:
+ * lower every arm64 `Reloc` whose patch site lies INSIDE `.rodata`
+ * (`sect == Rodata`) to a neutral `ElfRelocReq` for `.rela.rodata`. Empty in
+ * every real compile today, exactly as the x86 twin is.
+ *
+ * @param EncodedModule enc  the arm64 module (relocations, `sect`-tagged)
+ * @return []ElfRelocReq  the `.rodata`-relative relocation requests, in order
+ * @since 0.3.1
+ */
+fn arm64_rodata_reloc_reqs(enc: EncodedModule) -> []ElfRelocReq {
+    mut out: []ElfRelocReq = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= enc.relocs.len { break }
+        let r = enc.relocs[i]
+        if r.sect == RelocSect::Rodata { out = teko::list::push(out, ElfRelocReq { offset = r.offset; sym = r.sym; rtype = elf_reloc_type_arm64(r.kind); addend = 0 }) }
+        i++
+    }
+    out
+}
+
+/**
+ * emit_elf_arm64 — the AArch64 ELF adapter, the exact sibling of `emit_elf`:
+ * map an arm64 `EncodedModule` to a neutral `ElfObject` (`e_machine` =
+ * `EM_AARCH64`, `e_flags` = 0, every `Reloc` lowered to an `ElfRelocReq` via
+ * `elf_reloc_type_arm64`) and hand it to the shared, ISA-agnostic
+ * `emit_elf_object`. The writer is untouched — its own contract already says no
+ * ISA knowledge lives past that boundary — so the x86-64 goldens stay
+ * byte-for-byte green and the `arm64-macos` Mach-O path is not on this route at
+ * all.
+ *
+ * The arm64 `Reloc` carries no addend field (a Mach-O `relocation_info` has no
+ * room for one and the encoder never needed it): every `r_addend` therefore
+ * starts at 0, and the shared writer folds a `.rodata` target's section offset
+ * onto that base, which is precisely the idiom
+ * `clang --target=aarch64-linux-gnu` emits for a string reference.
+ *
+ * @param EncodedModule enc  the section images + symbols + relocations
+ * @return []byte  the ELF64 `ET_REL` object file bytes
+ * @since 0.3.1
+ */
+pub fn emit_elf_arm64(enc: EncodedModule) -> []byte {
+    emit_elf_object(ElfObject {
+        e_machine = EM_AARCH64
+        e_flags = 0 to u32
+        text = enc.text
+        rodata = enc.rodata
+        symbols = enc.symbols
+        relocs = arm64_reloc_reqs(enc)
+        rodata_relocs = arm64_rodata_reloc_reqs(enc)
     })
 }

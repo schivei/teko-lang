@@ -20,11 +20,13 @@
 #      binary RUNS on its runner, so the caller states which released binary does. A
 #      derivation the caller can get wrong is a derivation that silently picks the wrong blob.
 #   2. THE DRY BUILD + THE LADDER (scripts/build_with_seed_fallback.sh): the newest RELEASED seed
-#      builds the tip directly; else the COMMITTED seed in bootstrap/seeds/; else the pinned SHA
-#      ladder. `--no-verify --release` — DRY, no test gate (the gate is the test layer's whole
-#      job) and `-O2` because every published asset is a release link.
-#      Leaves out/teko[.exe] AND out/teko.c — every asset this producer mints comes from that one
-#      C, so all of them are the same generation of the compiler by construction.
+#      builds gen0 and gen0 builds gen1 — the owner's 0.3.1.0 chain, both links down the C route.
+#      A DECLARED degrau, the COMMITTED seed in bootstrap/seeds/ or the pinned SHA ladder stand in
+#      for the release only when it cannot reach the tip. `--no-verify --release` — DRY, no test
+#      gate (the gate is the test layer's whole job) and `-O2` because every published asset is a
+#      release link. Leaves out/teko[.exe] AND out/teko.c — that C is GEN1's own emission. Every
+#      asset this producer mints comes from that one C, so all of them are the same generation by
+#      construction, and it is what pr.yml harvests over a green fixpoint.
 #   3. LINUX ONLY: one native build per label (scripts/native_linux_asset.sh) — glibc in a
 #      manylinux_2_28 container, musl with the runner's own musl-gcc, no container. When a
 #      producer promises MORE THAN ONE Linux label (glibc + musl), they run IN PARALLEL on this
@@ -208,9 +210,11 @@ command -v teko >/dev/null 2>&1 || {
 }
 teko --version
 
-# THE SEED VERSION IS RECORDED, and that is not decoration. gen1 is `seed(tree)`: the emitted
-# teko.c is produced BY the seed, so two runs of the SAME tree emit the same C only if they stood
-# on the SAME seed. ci_provision_teko.sh deliberately takes the NEWEST released seed ("SEED = the
+# THE SEED VERSION IS RECORDED, and that is not decoration. gen0 is `seed(tree)` and gen1 is
+# `gen0(tree)`, so the emitted teko.c descends from the seed two links up: two runs of the SAME
+# tree emit the same C only if they stood on the SAME seed. The doubling does not weaken that
+# dependency, it only lengthens it — a different seed still lowers a different gen0, which emits a
+# different C. ci_provision_teko.sh deliberately takes the NEWEST released seed ("SEED = the
 # NEWEST usable released seed, ALWAYS"), which is a function of WHEN the lane ran, not of the tree.
 # On a train that cuts a release per bump, a seed change between a PR's run and the merge push is
 # ordinary — and it is the single most likely honest explanation for two builds of one tree
@@ -295,7 +299,8 @@ done
 # with the runner image.
 #
 # `teko_c_sha256` is the discriminator that makes a failure DIAGNOSABLE rather than merely red.
-# teko.c is what the SEED emitted; each asset is that C compiled. So when two runs disagree:
+# teko.c is what gen0 emitted while producing gen1; each asset is that C compiled. So when two
+# runs disagree:
 #     teko.c differs                → the FRONT half moved (a different seed, or a different rung)
 #     teko.c matches, bytes differ  → the BACK half moved (the C toolchain)
 # One comparison and the cause is already bisected.

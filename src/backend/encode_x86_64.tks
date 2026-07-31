@@ -55,10 +55,12 @@ pub type EncInstX86 = struct {
  * and the RSP-relative byte offset of every `MFuncX86.frame` slot. Purely a
  * side-table the encoder reads to resolve `MFrameAddrX86` to a concrete
  * `lea dst, [rsp+off]`; the block stream is never rewritten. A `size` of 0
- * marks a frameless function (no prologue/epilogue). B1-5 defines the type and
- * resolves `MFrameAddrX86` through it (the §6.1 signature); B1-6 fills it via
- * `compute_frame_layout_x86` and emits the matching prologue/epilogue. Mirrors
- * arm64's `FrameLayout`.
+ * marks a frameless function (no prologue/epilogue) UNLESS `call_align` is
+ * true, in which case a minimal alignment-only `push rbp`/`mov rbp,rsp` is
+ * still emitted (`frame_is_framed_x86`, 0.3.1.0 degrau 19). B1-5 defines the
+ * type and resolves `MFrameAddrX86` through it (the §6.1 signature); B1-6
+ * fills it via `compute_frame_layout_x86` and emits the matching
+ * prologue/epilogue. Mirrors arm64's `FrameLayout`.
  *
  * @since #386 B1-5
  */
@@ -83,17 +85,55 @@ pub type FrameLayoutX86 = struct {
      * `lea dst, [rsp+slot_offsets[slot]]`.
      */
     slot_offsets: []u32
+    /**
+     * call_align — true iff the function needs a minimal alignment-only
+     * prologue/epilogue purely to restore 16-byte alignment at the calls it
+     * itself issues (`needs_call_align_x86`), independent of `size`/the saved
+     * lists — a function otherwise entitled to be frameless (zero slots, zero
+     * callee-saved) is NOT frameless when this is true.
+     */
+    call_align: bool
+    /**
+     * out_arg_base — the RSP-relative byte offset of the FIRST outgoing
+     * stack-argument slot (`B1-args`): 0 under SysV, and `abi.shadow_space`
+     * (32) under Win64, whose stack arguments begin just above the
+     * caller-reserved shadow area. `MOutArgX86{index}` resolves to
+     * `mov [rsp + out_arg_base + 8*index], src`.
+     */
+    out_arg_base: u32
+    /**
+     * fpr_save_base — the RSP-relative byte offset of the FIRST callee-saved XMM
+     * save slot (`B3-xmm-callee-saved`); each `saved_fpr` entry takes 16 bytes
+     * from there, ascending. Sits just above the argument-passing region and
+     * below the local slots, and is 16-aligned so `movaps` is legal.
+     */
+    fpr_save_base: u32
+    /**
+     * caller_shadow — the shadow space the CALLER reserved below the incoming
+     * stack arguments (`abi.shadow_space`: 32 under Win64, 0 everywhere else), the
+     * distance `in_arg_base_x86` must skip to reach incoming stack argument 0.
+     *
+     * NOT `shadow_bytes_x86`, and the difference is the defect it fixes: that one
+     * is 0 for a LEAF, because a leaf reserves no shadow of its OWN — but the
+     * shadow below THIS function's incoming arguments belongs to whoever called
+     * it, and every Win64 caller reserves it whether or not this callee goes on to
+     * call anything. Reading the caller-side number off the callee-side one made a
+     * Win64 callee load its fifth argument 32 bytes low, out of its own home-space
+     * area.
+     */
+    caller_shadow: u32
 }
 
 /**
- * X86MemOp — the encoding descriptor for a memory-operand `mov`/`movsx`-family
- * instruction: the operand-size prefix, the REX.W bit, whether the opcode is
+ * X86MemOp — the encoding descriptor for a memory-operand `mov`/`movsx`/SSE-
+ * family instruction: the operand-size prefix, the mandatory SSE prefix (for
+ * a float MOVSD/MOVSS transfer, `B1-fp`), the REX.W bit, whether the opcode is
  * `0F`-escaped, the primary opcode byte, and whether the register operand is
  * 8-bit (which forces a REX prefix when it is SIL/DIL/BPL/SPL or R8..R15, so
  * the low byte is addressable). `load_memop_x86`/`store_memop_x86` produce it;
  * `emit_mem_op_x86` consumes it for both loads and stores.
  *
- * @since #386 B1-5
+ * @since #386 B1-5, B1-fp
  */
 type X86MemOp = struct {
     /**
@@ -101,11 +141,18 @@ type X86MemOp = struct {
      */
     op66: bool
     /**
+     * mandatory_prefix — an SSE mandatory prefix byte (`X86_PREFIX_F2`/`F3`
+     * for a float MOVSD/MOVSS transfer), or `X86_NO_PREFIX` for every
+     * integer form (which carries its size distinction through `op66`/`rexw`
+     * instead).
+     */
+    mandatory_prefix: u32
+    /**
      * rexw — set the REX.W bit (the 64-bit quadword / sign-extending forms).
      */
     rexw: bool
     /**
-     * two_byte — the opcode is `0F`-escaped (`movsx`).
+     * two_byte — the opcode is `0F`-escaped (`movsx`, and every SSE form).
      */
     two_byte: bool
     /**
@@ -123,7 +170,7 @@ type X86MemOp = struct {
 /**
  * push_byte_x86 — append the low 8 bits of `v` to `buf` as one byte, the
  * variable-length x86 emit primitive (all bit-slicing stays in `u32`; only the
- * final `& 0xFF` narrows to `byte`, the VM byte-width anchoring rule).
+ * final `& 0xFF` narrows to `byte`).
  *
  * @param []byte buf  the buffer to extend
  * @param u32 v  the value whose low byte is appended
@@ -301,20 +348,6 @@ fn fits_i32_x86(x: i64) -> bool {
 }
 
 /**
- * honest_fp_x86 — the single named honest-stop the SSE float family raises when
- * it reaches the B1-5 encoder core: an `MLoadX86`/`MStoreX86` whose register
- * operand is FPR-class is an SSE memory move (MOVSD/MOVSS), deferred to 0.3.1
- * with the rest of the float family (`B1-fp`, mirroring arm64's `A4-fp`). A
- * float fixture stops IDENTICALLY on the own-native side and is compared at the
- * stop, never at a fabricated value.
- *
- * @return error  the `B1-fp` named honest-stop
- */
-fn honest_fp_x86() -> error {
-    error { message = "B1-fp: SSE float-op / FPR load-store encoding deferred to 0.3.1 (encodings in the B1 crumb-plan appendix)" }
-}
-
-/**
  * plain_inst_x86 — an `EncInstX86` for a position-independent instruction: just
  * the finished bytes, with no branch displacement and no symbol relocation
  * pending (the fixup fields carry inert defaults).
@@ -405,6 +438,28 @@ fn emit_rr_x86(buf: []byte, rexw: bool, two_byte: bool, opcode: u32, reg: MReg, 
 }
 
 /**
+ * emit_sse_rr_x86 — append a register-register SSE instruction: an optional
+ * mandatory prefix byte (`X86_PREFIX_F2`/`F3`/`66`, or none), then the same
+ * REX + `0F`-escape + opcode + ModRM shape as `emit_rr_x86` (every SSE opcode
+ * this file emits is `0F`-escaped). Shared by the scalar float ALU/compare/
+ * move/convert family (`B1-fp`): MOVSD/MOVSS, ADDSD/SUBSD/MULSD/DIVSD (and the
+ * `SS` forms), UCOMISD/UCOMISS, MOVQ/MOVD, CVTSI2SD/CVTTSD2SI/CVTSD2SS/
+ * CVTSS2SD.
+ *
+ * @param []byte buf  the buffer to extend
+ * @param u32 prefix  the mandatory SSE prefix byte, or `X86_NO_PREFIX`
+ * @param bool rexw  set REX.W (the 64-bit GPR-crossing forms)
+ * @param u32 opcode  the primary opcode byte (after the `0F` escape)
+ * @param MReg reg  the ModRM.reg-field register
+ * @param MReg rm  the ModRM.rm-field register
+ * @return []byte  `buf` followed by the encoded instruction
+ */
+fn emit_sse_rr_x86(buf: []byte, prefix: u32, rexw: bool, opcode: u32, reg: MReg, rm: MReg) -> []byte {
+    let b0 = if prefix != X86_NO_PREFIX { push_byte_x86(buf, prefix) } else { buf }
+    emit_rr_x86(b0, rexw, true, opcode, reg, rm)
+}
+
+/**
  * emit_rm_ext_x86 — append a single-register instruction whose ModRM.reg field
  * is an OPCODE EXTENSION (`/0../7`), not a register: the REX prefix (from `rm`),
  * the opcode, and the ModRM byte `mod=11 | (ext_field<<3) | rm`. Drives the
@@ -455,9 +510,10 @@ fn push_mem_operand_x86(buf: []byte, reg3: u32, mem: MMem) -> []byte {
 
 /**
  * emit_mem_op_x86 — encode a memory-operand instruction (a load's `dst` or a
- * store's `src` as the register operand): the optional `0x66` prefix, the REX
- * prefix (with a forced byte-register prefix when needed), the optional `0F`
- * escape, the opcode, and the ModRM/SIB/disp addressing `mem`.
+ * store's `src` as the register operand): the optional mandatory SSE prefix
+ * (`B1-fp`), the optional `0x66` operand-size prefix, the REX prefix (with a
+ * forced byte-register prefix when needed), the optional `0F` escape, the
+ * opcode, and the ModRM/SIB/disp addressing `mem`.
  *
  * @param X86MemOp form  the size/sign encoding descriptor
  * @param MReg regop  the register operand (load dst / store src)
@@ -466,6 +522,7 @@ fn push_mem_operand_x86(buf: []byte, reg3: u32, mem: MMem) -> []byte {
  */
 fn emit_mem_op_x86(form: X86MemOp, regop: MReg, mem: MMem) -> EncInstX86 {
     mut b: []byte = teko::list::empty()
+    if form.mandatory_prefix != X86_NO_PREFIX { b = push_byte_x86(b, form.mandatory_prefix) }
     if form.op66 { b = push_byte_x86(b, X86_OPERAND_SIZE_PREFIX) }
     let force = form.byte_reg && (regop.id >= X86_BYTE_REG_MIN_ID)
     let rr = reg_ext_x86(regop)
@@ -485,30 +542,35 @@ fn emit_mem_op_x86(form: X86MemOp, regop: MReg, mem: MMem) -> EncInstX86 {
  * `mov r8`/`mov r16` is REJECTED here — it leaves the destination's upper bits
  * stale, violating the zero-extend contract. Sign loads use `movsxd`(D,
  * `REX.W 63`) / `movsx`(W `REX.W 0F BF`, B `REX.W 0F BE`). The zero-extending
- * forms address memory (not an 8-bit register), so none sets `byte_reg`.
+ * forms address memory (not an 8-bit register), so none sets `byte_reg`. The
+ * float forms (`F32`/`F64`, `sign` ignored — a float access never sign-extends)
+ * are `MOVSS`/`MOVSD` (`0F 10`, mandatory-prefixed `F3`/`F2`, `B1-fp`).
  *
- * @param MMemSizeX86 size  the access width (byte/word/dword/qword)
- * @param bool sign  true for a sign-extending narrow load
+ * @param MMemSizeX86 size  the access width (byte/word/dword/qword/f32/f64)
+ * @param bool sign  true for a sign-extending narrow integer load (ignored
+ *                   for a float size)
  * @return X86MemOp  the load encoding descriptor
  */
 fn load_memop_x86(size: MMemSizeX86, sign: bool) -> X86MemOp {
     match size {
-        Q => X86MemOp { op66 = false; rexw = true; two_byte = false; opcode = X86_OP_MOV_R_RM; byte_reg = false }
+        Q => X86MemOp { op66 = false; mandatory_prefix = X86_NO_PREFIX; rexw = true; two_byte = false; opcode = X86_OP_MOV_R_RM; byte_reg = false }
         D => if sign {
-            X86MemOp { op66 = false; rexw = true; two_byte = false; opcode = X86_OP_MOVSXD; byte_reg = false }
+            X86MemOp { op66 = false; mandatory_prefix = X86_NO_PREFIX; rexw = true; two_byte = false; opcode = X86_OP_MOVSXD; byte_reg = false }
         } else {
-            X86MemOp { op66 = false; rexw = false; two_byte = false; opcode = X86_OP_MOV_R_RM; byte_reg = false }
+            X86MemOp { op66 = false; mandatory_prefix = X86_NO_PREFIX; rexw = false; two_byte = false; opcode = X86_OP_MOV_R_RM; byte_reg = false }
         }
         W => if sign {
-            X86MemOp { op66 = false; rexw = true; two_byte = true; opcode = X86_OP_MOVSX_R32_RM16; byte_reg = false }
+            X86MemOp { op66 = false; mandatory_prefix = X86_NO_PREFIX; rexw = true; two_byte = true; opcode = X86_OP_MOVSX_R32_RM16; byte_reg = false }
         } else {
-            X86MemOp { op66 = false; rexw = false; two_byte = true; opcode = X86_OP_MOVZX_R32_RM16; byte_reg = false }
+            X86MemOp { op66 = false; mandatory_prefix = X86_NO_PREFIX; rexw = false; two_byte = true; opcode = X86_OP_MOVZX_R32_RM16; byte_reg = false }
         }
         B => if sign {
-            X86MemOp { op66 = false; rexw = true; two_byte = true; opcode = X86_OP_MOVSX_R32_RM8; byte_reg = false }
+            X86MemOp { op66 = false; mandatory_prefix = X86_NO_PREFIX; rexw = true; two_byte = true; opcode = X86_OP_MOVSX_R32_RM8; byte_reg = false }
         } else {
-            X86MemOp { op66 = false; rexw = false; two_byte = true; opcode = X86_OP_MOVZX_R32_RM8; byte_reg = false }
+            X86MemOp { op66 = false; mandatory_prefix = X86_NO_PREFIX; rexw = false; two_byte = true; opcode = X86_OP_MOVZX_R32_RM8; byte_reg = false }
         }
+        F64 => X86MemOp { op66 = false; mandatory_prefix = X86_PREFIX_F2; rexw = false; two_byte = true; opcode = X86_OP_SSE_MOV_LOAD; byte_reg = false }
+        F32 => X86MemOp { op66 = false; mandatory_prefix = X86_PREFIX_F3; rexw = false; two_byte = true; opcode = X86_OP_SSE_MOV_LOAD; byte_reg = false }
     }
 }
 
@@ -516,17 +578,21 @@ fn load_memop_x86(size: MMemSizeX86, sign: bool) -> X86MemOp {
  * store_memop_x86 — the encoding descriptor for a store width: `mov`(Q/D), the
  * `0x66`-prefixed word store(W), and the byte store(B, whose register source is
  * 8-bit and so sets `byte_reg`). Stores never sign-extend, so there is no sign
- * parameter (mirroring `MStoreX86` carrying no `sign` field).
+ * parameter (mirroring `MStoreX86` carrying no `sign` field). The float forms
+ * (`F32`/`F64`) are `MOVSS`/`MOVSD` (`0F 11`, mandatory-prefixed `F3`/`F2`,
+ * `B1-fp`).
  *
- * @param MMemSizeX86 size  the access width (byte/word/dword/qword)
+ * @param MMemSizeX86 size  the access width (byte/word/dword/qword/f32/f64)
  * @return X86MemOp  the store encoding descriptor
  */
 fn store_memop_x86(size: MMemSizeX86) -> X86MemOp {
     match size {
-        Q => X86MemOp { op66 = false; rexw = true; two_byte = false; opcode = X86_OP_MOV_RM_R; byte_reg = false }
-        D => X86MemOp { op66 = false; rexw = false; two_byte = false; opcode = X86_OP_MOV_RM_R; byte_reg = false }
-        W => X86MemOp { op66 = true; rexw = false; two_byte = false; opcode = X86_OP_MOV_RM_R; byte_reg = false }
-        B => X86MemOp { op66 = false; rexw = false; two_byte = false; opcode = X86_OP_MOV_RM8_R8; byte_reg = true }
+        Q => X86MemOp { op66 = false; mandatory_prefix = X86_NO_PREFIX; rexw = true; two_byte = false; opcode = X86_OP_MOV_RM_R; byte_reg = false }
+        D => X86MemOp { op66 = false; mandatory_prefix = X86_NO_PREFIX; rexw = false; two_byte = false; opcode = X86_OP_MOV_RM_R; byte_reg = false }
+        W => X86MemOp { op66 = true; mandatory_prefix = X86_NO_PREFIX; rexw = false; two_byte = false; opcode = X86_OP_MOV_RM_R; byte_reg = false }
+        B => X86MemOp { op66 = false; mandatory_prefix = X86_NO_PREFIX; rexw = false; two_byte = false; opcode = X86_OP_MOV_RM8_R8; byte_reg = true }
+        F64 => X86MemOp { op66 = false; mandatory_prefix = X86_PREFIX_F2; rexw = false; two_byte = true; opcode = X86_OP_SSE_MOV_STORE; byte_reg = false }
+        F32 => X86MemOp { op66 = false; mandatory_prefix = X86_PREFIX_F3; rexw = false; two_byte = true; opcode = X86_OP_SSE_MOV_STORE; byte_reg = false }
     }
 }
 
@@ -675,19 +741,23 @@ fn encode_cmp_x86(i: MCmpX86) -> EncInstX86 {
 }
 
 /**
- * encode_setcc_x86 — materialize a preceding compare as a 0/1 value: `setcc
- * dst8` (`0F 90+cc /0`) then `movzx dst32, dst8` (`0F B6 /r`). A byte register
- * SIL/DIL/BPL/SPL or R8..R15 (id >= 4) forces a REX prefix on both halves so
- * the low byte is addressable (§6.3).
+ * encode_setcc_raw_x86 — materialize a raw x86 condition-code field as a 0/1
+ * value: `setcc dst8` (`0F 90+cc /0`) then `movzx dst32, dst8` (`0F B6 /r`). A
+ * byte register SIL/DIL/BPL/SPL or R8..R15 (id >= 4) forces a REX prefix on
+ * both halves so the low byte is addressable (§6.3). Shared by
+ * `encode_setcc_x86` (whose `cc` comes from the shared `MCond` via
+ * `cond_cc_x86`) and `encode_setp_x86` (whose `cc` is the PARITY field
+ * directly, `X86_CC_P`/`NP` — a condition the shared `MCond` has no member
+ * for, `B1-fp`).
  *
- * @param MSetccX86 i  the conditional-set instruction (operand physical)
+ * @param MReg dst  the destination register
+ * @param u32 cc  the raw 4-bit x86 condition-code field
  * @return EncInstX86  the encoded instruction sequence
  */
-fn encode_setcc_x86(i: MSetccX86) -> EncInstX86 {
-    let cc = cond_cc_x86(i.cond)
-    let force = i.dst.id >= X86_BYTE_REG_MIN_ID
-    let dst_ext = reg_ext_x86(i.dst)
-    let dst_low3 = reg_low3_x86(i.dst)
+fn encode_setcc_raw_x86(dst: MReg, cc: u32) -> EncInstX86 {
+    let force = dst.id >= X86_BYTE_REG_MIN_ID
+    let dst_ext = reg_ext_x86(dst)
+    let dst_low3 = reg_low3_x86(dst)
     mut b = if force { push_rex_forced_x86(teko::list::empty(), false, false, false, dst_ext) } else { teko::list::empty() }
     b = push_byte_x86(b, X86_OP_TWO_BYTE_ESCAPE)
     b = push_byte_x86(b, X86_OP_SETCC_BASE + cc)
@@ -696,6 +766,113 @@ fn encode_setcc_x86(i: MSetccX86) -> EncInstX86 {
     b = push_byte_x86(b, X86_OP_TWO_BYTE_ESCAPE)
     b = push_byte_x86(b, X86_OP_MOVZX_R32_RM8)
     plain_inst_x86(push_byte_x86(b, modrm_x86(MODRM_MOD_REGISTER, dst_low3, dst_low3)))
+}
+
+/**
+ * encode_setcc_x86 — materialize a preceding compare as a 0/1 value through
+ * `encode_setcc_raw_x86`, over the shared `MCond`'s x86 condition field.
+ *
+ * @param MSetccX86 i  the conditional-set instruction (operand physical)
+ * @return EncInstX86  the encoded instruction sequence
+ */
+fn encode_setcc_x86(i: MSetccX86) -> EncInstX86 {
+    encode_setcc_raw_x86(i.dst, cond_cc_x86(i.cond))
+}
+
+/**
+ * encode_setp_x86 — materialize a preceding `MFCmpX86`'s PARITY flag as a
+ * plain value through `encode_setcc_raw_x86`, over the raw `X86_CC_P`/`NP`
+ * condition field (`B1-fp` — the half of `select_fcmp_value_x86`'s ordered-
+ * equal / unordered-not-equal composite the shared `MCond` cannot express).
+ *
+ * @param MSetPX86 i  the parity-set instruction (operand physical)
+ * @return EncInstX86  the encoded instruction sequence
+ */
+fn encode_setp_x86(i: MSetPX86) -> EncInstX86 {
+    encode_setcc_raw_x86(i.dst, if i.is_np { X86_CC_NP } else { X86_CC_P })
+}
+
+/**
+ * encode_falu_x86 — a two-address scalar float ALU op (`ADDSD`/`SUBSD`/
+ * `MULSD`/`DIVSD` or the `SS` forms, `0F 58`/`5C`/`59`/`5E`, mandatory-
+ * prefixed `F2`/`F3`): the read-modify-write destination rides the ModRM.reg
+ * field, `src` the rm field — the SSE "xmm1, xmm2/m64" convention, where
+ * xmm1 is BOTH the destination and the reg-field operand (the same direction
+ * as `encode_imul_x86`'s `0F AF`, unlike the integer `OP r/m,r` ALU family).
+ * The preceding `MFMovX86` seeded `dst` with the left operand (§4.2).
+ *
+ * @param MFAluX86 i  the two-address float ALU instruction (operands physical)
+ * @return EncInstX86  the encoded instruction
+ */
+fn encode_falu_x86(i: MFAluX86) -> EncInstX86 {
+    let prefix = if i.dbl { X86_PREFIX_F2 } else { X86_PREFIX_F3 }
+    let opcode = match i.op { FAdd => X86_OP_SSE_ADD; FSub => X86_OP_SSE_SUB; FMul => X86_OP_SSE_MUL; FDiv => X86_OP_SSE_DIV }
+    plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), prefix, false, opcode, i.dst, i.src))
+}
+
+/**
+ * encode_fmov_x86 — a register-register move whose operands' `reg_class`
+ * fields pick the concrete SSE form (`B1-fp`): FPR-to-FPR is `MOVSD`/`MOVSS`
+ * (`0F 10`, mandatory-prefixed `F2`/`F3`, reg field is the destination);
+ * GPR-to-FPR is `MOVQ`/`MOVD` LOAD (`66 [REX.W] 0F 6E`, reg field is the FPR
+ * destination); FPR-to-GPR is `MOVQ`/`MOVD` STORE (`66 [REX.W] 0F 7E`, reg
+ * field is the FPR SOURCE — the store-direction convention, opposite of the
+ * load form). GPR-to-GPR (unreached by any selector, which always routes a
+ * same-class copy through `MMovX86`) falls back to the plain integer `mov`.
+ *
+ * @param MFMovX86 i  the move instruction (operands physical)
+ * @return EncInstX86  the encoded instruction
+ */
+fn encode_fmov_x86(i: MFMovX86) -> EncInstX86 {
+    let dst_fpr = i.dst.reg_class == MRegClass::FPR
+    let src_fpr = i.src.reg_class == MRegClass::FPR
+    if dst_fpr && src_fpr {
+        let prefix = if i.dbl { X86_PREFIX_F2 } else { X86_PREFIX_F3 }
+        return plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), prefix, false, X86_OP_SSE_MOV_LOAD, i.dst, i.src))
+    }
+    if dst_fpr && !src_fpr {
+        return plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), X86_PREFIX_66, i.dbl, X86_OP_MOVQD_LOAD, i.dst, i.src))
+    }
+    if !dst_fpr && src_fpr {
+        return plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), X86_PREFIX_66, i.dbl, X86_OP_MOVQD_STORE, i.src, i.dst))
+    }
+    plain_inst_x86(emit_rr_x86(teko::list::empty(), i.dbl, false, X86_OP_MOV_RM_R, i.src, i.dst))
+}
+
+/**
+ * encode_fcmp_x86 — a scalar float compare (`UCOMISD`/`UCOMISS`, `0F 2E`) that
+ * sets the flags from `a <=> b`: `a` rides the ModRM.reg field, `b` the rm
+ * field. `UCOMISD` is mandatory-prefixed `66`; `UCOMISS` carries no mandatory
+ * prefix (`B1-fp`).
+ *
+ * @param MFCmpX86 i  the compare instruction (operands physical)
+ * @return EncInstX86  the encoded instruction
+ */
+fn encode_fcmp_x86(i: MFCmpX86) -> EncInstX86 {
+    let prefix = if i.dbl { X86_PREFIX_66 } else { X86_NO_PREFIX }
+    plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), prefix, false, X86_OP_UCOMIS, i.a, i.b))
+}
+
+/**
+ * encode_cvt_x86 — an int/float conversion (`CVTSI2SD`/`CVTTSD2SI`/`CVTTSS2SI`/
+ * `CVTSD2SS`/`CVTSS2SD`, `0F 2A`/`2C`/`5A`): `Cvtsi2sd`/`Cvttsd2si` are
+ * mandatory-prefixed `F2` with `REX.W` (the GPR side is always the wide 64-bit
+ * form, `B1-fp`) and `Cvttss2si` is their `F3`-prefixed single-precision twin;
+ * `Cvtsd2ss` is mandatory-prefixed `F2` (narrowing FROM double), `Cvtss2sd`
+ * mandatory-prefixed `F3` (widening FROM single) — neither of those two sets
+ * `REX.W` (both their operands are FPR).
+ *
+ * @param MCvtX86 i  the conversion instruction (operands physical)
+ * @return EncInstX86  the encoded instruction
+ */
+fn encode_cvt_x86(i: MCvtX86) -> EncInstX86 {
+    match i.op {
+        Cvtsi2sd => plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), X86_PREFIX_F2, true, X86_OP_CVTSI2S, i.dst, i.src))
+        Cvttsd2si => plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), X86_PREFIX_F2, true, X86_OP_CVTTS2SI, i.dst, i.src))
+        Cvttss2si => plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), X86_PREFIX_F3, true, X86_OP_CVTTS2SI, i.dst, i.src))
+        Cvtsd2ss => plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), X86_PREFIX_F2, false, X86_OP_CVTS2S, i.dst, i.src))
+        Cvtss2sd => plain_inst_x86(emit_sse_rr_x86(teko::list::empty(), X86_PREFIX_F3, false, X86_OP_CVTS2S, i.dst, i.src))
+    }
 }
 
 /**
@@ -719,30 +896,110 @@ fn encode_not_x86(i: MNotX86) -> EncInstX86 {
 }
 
 /**
- * encode_load_x86 — a memory load (`mov`/`movsx dst, [base+disp]`) per
- * `load_memop_x86`'s size/sign descriptor, addressing `mem` (SIB `0x24` when
- * the base is RSP/R12, forced disp8 when RBP/R13). An FPR-class destination is
- * an SSE move and honest-stops (`B1-fp`).
+ * encode_load_x86 — a memory load (`mov`/`movsx`/`movsd`/`movss dst,
+ * [base+disp]`) per `load_memop_x86`'s size/sign descriptor, addressing `mem`
+ * (SIB `0x24` when the base is RSP/R12, forced disp8 when RBP/R13). An
+ * FPR-class destination (`F32`/`F64` size) is a scalar SSE move (`B1-fp`).
  *
  * @param MLoadX86 i  the load instruction (operands physical)
- * @return EncInstX86 | error  the encoded instruction, or the `B1-fp` honest-stop
+ * @return EncInstX86  the encoded instruction
  */
-fn encode_load_x86(i: MLoadX86) -> EncInstX86 | error {
-    if i.dst.reg_class == MRegClass::FPR { return honest_fp_x86() }
+fn encode_load_x86(i: MLoadX86) -> EncInstX86 {
     emit_mem_op_x86(load_memop_x86(i.size, i.sign), i.dst, i.mem)
 }
 
 /**
- * encode_store_x86 — a memory store (`mov [base+disp], src`) per
- * `store_memop_x86`'s size descriptor, addressing `mem`. An FPR-class source is
- * an SSE move and honest-stops (`B1-fp`).
+ * encode_store_x86 — a memory store (`mov`/`movsd`/`movss [base+disp], src`)
+ * per `store_memop_x86`'s size descriptor, addressing `mem`. An FPR-class
+ * source (`F32`/`F64` size) is a scalar SSE move (`B1-fp`).
  *
  * @param MStoreX86 i  the store instruction (operands physical)
- * @return EncInstX86 | error  the encoded instruction, or the `B1-fp` honest-stop
+ * @return EncInstX86  the encoded instruction
  */
-fn encode_store_x86(i: MStoreX86) -> EncInstX86 | error {
-    if i.src.reg_class == MRegClass::FPR { return honest_fp_x86() }
+fn encode_store_x86(i: MStoreX86) -> EncInstX86 {
     emit_mem_op_x86(store_memop_x86(i.size), i.src, i.mem)
+}
+
+/**
+ * RSP_BASE_X86 — the physical RSP register as a memory-operand base, the one
+ * base every frame-relative access in this file addresses through (frame slots,
+ * the callee-saved XMM saves, and both halves of the stack-argument area). A
+ * flat-POD `MReg` aggregate const (#594 crumb 9b).
+ */
+const RSP_BASE_X86: MReg = preg(X86_REG_RSP_ID, MRegClass::GPR)
+
+/**
+ * in_arg_base_x86 — the RSP-relative byte offset of the FIRST incoming
+ * stack-argument slot (`B1-args`). The caller placed stack argument `j` at
+ * `entry_rsp + 8 + caller_shadow + 8*j` (past the return address `call` pushed and
+ * past the shadow area it reserved at its own RSP), and the prologue has since
+ * moved RSP down by `push rbp` (8) + one push per callee-saved GPR + the
+ * `sub rsp` region — so a FRAMED function reads it at
+ * `16 + 8*n_saved + size + caller_shadow + 8*j` and a frameless one at
+ * `8 + caller_shadow + 8*j`. Resolved here rather than at isel because only the
+ * finished layout knows those numbers.
+ *
+ * THE `caller_shadow` TERM IS THE MIRROR OF `out_arg_base`, and its absence was a
+ * measured Win64 defect: the caller stores stack argument 0 at `rsp + 32`
+ * (`encode_out_arg_x86` through `out_arg_base`) while the callee read the same
+ * argument 32 bytes lower, inside the home space instead of the argument. SysV
+ * keeps `shadow_space` 0, so every SysV offset here is byte-identical.
+ *
+ * @param FrameLayoutX86 layout  the enclosing function's resolved frame
+ * @return u32  the RSP-relative offset of incoming stack-argument slot 0
+ */
+fn in_arg_base_x86(layout: FrameLayoutX86) -> u32 {
+    if !frame_is_framed_x86(layout) { return X86_GPR_BYTES + layout.caller_shadow }
+    let n_saved = layout.saved_gpr.len to u32
+    (2 to u32) * X86_GPR_BYTES + (n_saved * X86_GPR_BYTES) + layout.size + layout.caller_shadow
+}
+
+/**
+ * encode_fspill_x86 — resolve `MFSpillX86{reg, slot, is_load}` to
+ * `movsd [rsp + slot_offsets[slot]], xmm` (or the load direction), the scalar SSE
+ * memory move at the 8-byte width, reusing `store_memop_x86`/`load_memop_x86`
+ * so an FPR spill is encoded by exactly the code every other float memory access
+ * goes through (`B1-fp`).
+ *
+ * @param FrameLayoutX86 layout  the enclosing function's resolved frame
+ * @param MFSpillX86 i  the spill store or reload (operand physical)
+ * @return EncInstX86  the encoded instruction
+ */
+fn encode_fspill_x86(layout: FrameLayoutX86, i: MFSpillX86) -> EncInstX86 {
+    let mem = MMem { base = RSP_BASE_X86; offset = layout.slot_offsets[i.slot] to i32 }
+    let form = if i.is_load { load_memop_x86(MMemSizeX86::F64, false) } else { store_memop_x86(MMemSizeX86::F64) }
+    emit_mem_op_x86(form, i.reg, mem)
+}
+
+/**
+ * encode_out_arg_x86 — resolve `MOutArgX86{size, src, index}` to
+ * `mov [rsp + out_arg_base + 8*index], src` at the argument's own transfer width
+ * (an SSE `movsd`/`movss` for a float argument), reusing `store_memop_x86` so a
+ * stack argument is encoded by exactly the code every other store goes through
+ * (`B1-args`).
+ *
+ * @param FrameLayoutX86 layout  the enclosing function's resolved frame
+ * @param MOutArgX86 i  the outgoing stack-argument store (source physical)
+ * @return EncInstX86  the encoded instruction
+ */
+fn encode_out_arg_x86(layout: FrameLayoutX86, i: MOutArgX86) -> EncInstX86 {
+    let off = layout.out_arg_base + (i.index * X86_GPR_BYTES)
+    emit_mem_op_x86(store_memop_x86(i.size), i.src, MMem { base = RSP_BASE_X86; offset = off to i32 })
+}
+
+/**
+ * encode_in_arg_x86 — resolve `MInArgX86{size, dst, index}` to
+ * `mov dst, [rsp + in_arg_base + 8*index]` at the parameter's own transfer width,
+ * reusing `load_memop_x86`'s zero-extending descriptor (`sign = false`, matching
+ * every other load this backend emits) (`B1-args`).
+ *
+ * @param FrameLayoutX86 layout  the enclosing function's resolved frame
+ * @param MInArgX86 i  the incoming stack-parameter load (destination physical)
+ * @return EncInstX86  the encoded instruction
+ */
+fn encode_in_arg_x86(layout: FrameLayoutX86, i: MInArgX86) -> EncInstX86 {
+    let off = in_arg_base_x86(layout) + (i.index * X86_GPR_BYTES)
+    emit_mem_op_x86(load_memop_x86(i.size, false), i.dst, MMem { base = RSP_BASE_X86; offset = off to i32 })
 }
 
 /**
@@ -757,7 +1014,7 @@ fn encode_store_x86(i: MStoreX86) -> EncInstX86 | error {
  */
 fn encode_frame_addr_x86(layout: FrameLayoutX86, i: MFrameAddrX86) -> EncInstX86 {
     let off = layout.slot_offsets[i.slot]
-    let mem = MMem { base = preg(X86_REG_RSP_ID, MRegClass::GPR); offset = off to i32 }
+    let mem = MMem { base = RSP_BASE_X86; offset = off to i32 }
     mut b = push_rex_x86(teko::list::empty(), true, reg_ext_x86(i.dst), false, reg_ext_x86(mem.base))
     b = push_byte_x86(b, X86_OP_LEA)
     plain_inst_x86(push_mem_operand_x86(b, reg_low3_x86(i.dst), mem))
@@ -848,18 +1105,20 @@ fn encode_ret_x86() -> EncInstX86 {
 
 /**
  * encode_inst_x86 — encode one fully-physical `MInstX86` to its `EncInstX86`, a
- * TOTAL per-case match over the 19-case variant mirroring `print_minst_x86`'s
+ * TOTAL per-case match over the 24-case variant mirroring `print_minst_x86`'s
  * dispatch and arm64's `encode_inst_word`. The position-independent integer/
- * memory subset encodes fully; `MJmpX86`/`MJccX86` and `MCallX86`/`MLeaRipX86`
- * return placeholder bytes flagged for the B1-6 rel32 patch / B1-7 relocation;
+ * memory/float subset encodes fully (the `B1-fp` SSE family closed
+ * 2026-07-29); `MJmpX86`/`MJccX86` and `MCallX86`/`MLeaRipX86` return
+ * placeholder bytes flagged for the B1-6 rel32 patch / B1-7 relocation;
  * `MFrameAddrX86` resolves through `layout` to the real `lea dst, [rsp+off]`
- * (SIB-forced). An FPR-operand load/store returns the named `B1-fp` honest-stop
- * (0.3.1); the x86 forms are natively wide (imm32 / movabs imm64 / disp32), so
- * `B1-bigimm`/`B1-memindex` are unreachable in this core.
+ * (SIB-forced). The x86 forms are natively wide (imm32 / movabs imm64 /
+ * disp32), so `B1-bigimm`/`B1-memindex` are unreachable in this core — the
+ * declared `| error` is for the shared union shape every caller propagates
+ * through (`emit_one_x86`), not a case this function itself still raises.
  *
  * @param FrameLayoutX86 layout  the enclosing function's resolved frame (for `MFrameAddrX86`)
  * @param MInstX86 inst  the instruction to encode (all operands physical)
- * @return EncInstX86 | error  the encoding, or the `B1-fp` honest-stop
+ * @return EncInstX86 | error  the encoding (never actually an error today)
  */
 pub fn encode_inst_x86(layout: FrameLayoutX86, inst: MInstX86) -> EncInstX86 | error {
     match inst {
@@ -882,6 +1141,14 @@ pub fn encode_inst_x86(layout: FrameLayoutX86, inst: MInstX86) -> EncInstX86 | e
         MCallX86 as x => encode_call_x86(x)
         MCallIndX86 as x => encode_call_ind_x86(x)
         MRetX86 => encode_ret_x86()
+        MFAluX86 as x => encode_falu_x86(x)
+        MFMovX86 as x => encode_fmov_x86(x)
+        MFCmpX86 as x => encode_fcmp_x86(x)
+        MSetPX86 as x => encode_setp_x86(x)
+        MCvtX86 as x => encode_cvt_x86(x)
+        MOutArgX86 as x => encode_out_arg_x86(layout, x)
+        MInArgX86 as x => encode_in_arg_x86(layout, x)
+        MFSpillX86 as x => encode_fspill_x86(layout, x)
     }
 }
 
@@ -983,24 +1250,27 @@ fn shift_slot_offsets_x86(offsets: []u32, delta: u32) -> []u32 {
 }
 
 /**
- * frame_sub_size_x86 — the `sub rsp,#N` amount that reserves the local slot
- * region while keeping RSP 16-aligned at every call boundary. A frameless
- * function (no slots AND no callee-saved) reserves nothing (0). Otherwise the
- * amount rounds `slots_size + 8*n_saved` up to 16 and subtracts the
- * callee-saved push region back out, so `push rbp` (RSP ≡ 0 mod 16) followed by
- * `n_saved` pushes then `sub rsp,#N` lands RSP ≡ 0 mod 16 (the SysV rule that
- * `(rsp+8)` is 16-aligned at every callee entry). The result can legitimately be
- * 0 with an EVEN callee-saved count and no slots (the pushes alone realign) — a
- * framed function is still detected by `size>0 OR n_saved>0`, not by `size>0`.
+ * frame_sub_size_x86 — the `sub rsp,#N` amount that reserves everything sitting
+ * BELOW the callee-saved pushes — the local slot region, the callee-saved XMM save
+ * region and the argument-passing region — while keeping RSP 16-aligned at every
+ * call boundary. A frameless function (nothing to reserve AND no callee-saved
+ * push) reserves nothing (0). Otherwise the amount rounds
+ * `reserved + 8*n_pushed` up to 16 and subtracts the push region back out, so
+ * `push rbp` (RSP ≡ 0 mod 16) followed by `n_pushed` pushes then `sub rsp,#N`
+ * lands RSP ≡ 0 mod 16 (the rule that `(rsp+8)` is 16-aligned at every callee
+ * entry). The result can legitimately be 0 with an EVEN push count and nothing to
+ * reserve (the pushes alone realign) — a framed function is still detected by
+ * `size>0 OR n_saved>0`, not by `size>0`.
  *
- * @param u32 slots_size  the 16-rounded local slot-region size
- * @param u32 n_saved  the callee-saved register count (GPR + FPR)
+ * @param u32 reserved  the 16-rounded bytes to reserve below the push region
+ * @param u32 n_pushed  the PUSHED callee-saved register count (GPRs only — an XMM
+ *                      save lives inside `reserved` instead)
  * @return u32  the `sub rsp` amount (0 for a frameless function)
  */
-fn frame_sub_size_x86(slots_size: u32, n_saved: u32) -> u32 {
-    let framed = (slots_size > (0 to u32)) || (n_saved > (0 to u32))
+fn frame_sub_size_x86(reserved: u32, n_pushed: u32) -> u32 {
+    let framed = (reserved > (0 to u32)) || (n_pushed > (0 to u32))
     if !framed { return 0 to u32 }
-    align_up(slots_size + (n_saved * X86_GPR_BYTES), X86_STACK_ALIGN) - (n_saved * X86_GPR_BYTES)
+    align_up(reserved + (n_pushed * X86_GPR_BYTES), X86_STACK_ALIGN) - (n_pushed * X86_GPR_BYTES)
 }
 
 /**
@@ -1062,6 +1332,88 @@ fn func_makes_call_x86(f: MFuncX86) -> bool {
 }
 
 /**
+ * block_any_ret_x86 — whether one block contains a return terminator
+ * (`MRetX86`), the block-level fold `func_any_ret_x86` walks over every block
+ * (the x86 mirror of arm64's `block_any_ret`).
+ *
+ * @param MBlockX86 b  the block to scan
+ * @return bool  true iff `b` contains an `MRetX86`
+ */
+fn block_any_ret_x86(b: MBlockX86) -> bool {
+    mut found = false
+    mut i: u64 = 0
+    loop {
+        if i >= b.insts.len { break }
+        if is_ret_x86(b.insts[i]) { found = true; break }
+        i++
+    }
+    found
+}
+
+/**
+ * func_any_ret_x86 — whether the physical `MFuncX86` contains any `MRetX86`, so
+ * `needs_call_align_x86` can tell a function that CALLS AND RETURNS (whose own
+ * call sites need proper 16-byte alignment restored) from one that calls only
+ * as its own divergent tail (`ex_func_frameless_call_reloc`'s own `tk_exit`
+ * shape — a call with no `MRet` anywhere, whose alignment this backend has
+ * never needed to restore because nothing after it ever runs). The x86 mirror
+ * of arm64's `func_any_ret`.
+ *
+ * @param MFuncX86 f  the fully-physical function
+ * @return bool  true iff the function contains an `MRetX86`
+ */
+fn func_any_ret_x86(f: MFuncX86) -> bool {
+    mut found = false
+    mut i: u64 = 0
+    loop {
+        if i >= f.blocks.len { break }
+        if block_any_ret_x86(f.blocks[i]) { found = true; break }
+        i++
+    }
+    found
+}
+
+/**
+ * needs_call_align_x86 — whether a function that would otherwise be frameless
+ * (zero local slots, zero callee-saved registers) still needs a minimal
+ * `push rbp`/`mov rbp,rsp` prologue for ONE reason alone: restoring the
+ * SysV 16-byte call-boundary alignment before the calls IT ITSELF issues.
+ *
+ * SysV guarantees `rsp+8` is a multiple of 16 at every function's OWN entry
+ * (the caller's `call` having just pushed an 8-byte return address) — so a
+ * function that does ZERO stack adjustment before issuing a `call` of its own
+ * hands that callee a stack off by 8 from the alignment the ABI promises it.
+ * A single `push rbp` (no `sub rsp` needed) restores the missing 8 bytes at
+ * no extra cost, exactly as it would for any other framed function.
+ *
+ * Scoped to a function that ALSO RETURNS (`func_any_ret_x86`), mirroring
+ * arm64's own `needs_lr_save` reasoning exactly (`func_any_call(f) &&
+ * func_any_ret(f)`): a function whose only calls are its own divergent tail
+ * (`ex_func_frameless_call_reloc`'s `tk_exit` case) never returns to
+ * observe — or make — a misaligned call after that point, so the existing
+ * frameless encoding for THAT shape is untouched, byte for byte.
+ *
+ * Found live (0.3.1.0 degrau 19): the native entry stub `wrap_native_entry`
+ * appends (`argc`/`argv` -> `tk_set_args` -> the renamed virtual-main -> its
+ * own `ret`) has no local slots and clobbers no callee-saved register, so it
+ * was the ONE function in a self-built compiler with zero slots/saves that
+ * still calls AND returns — every other function either needs a slot/save of
+ * its own or (like a bare `exit(n)` program body) never returns. The
+ * resulting off-by-8 stack silently reached every call this stub makes
+ * without symptom until a callee's OWN call chain used a strictly
+ * 16-byte-aligned store deep inside (glibc's `vsnprintf` internals, first
+ * exercised natively by this degrau's `tk_fmt_d_len`/`tk_fmt_n_i_len` twins) —
+ * a SIGSEGV inside `__printf_buffer_init`, several frames below the actual
+ * misalignment.
+ *
+ * @param MFuncX86 f  the fully-physical function
+ * @return bool  true iff a minimal alignment-only prologue/epilogue is needed
+ */
+fn needs_call_align_x86(f: MFuncX86) -> bool {
+    func_makes_call_x86(f) && func_any_ret_x86(f)
+}
+
+/**
  * shadow_bytes_x86 — the Win64 caller-reserved shadow-space contribution to a
  * function's frame: `abi.shadow_space` when the register file reserves shadow
  * space (Win64: 32) AND the function makes a call (a callee expects 32 bytes to
@@ -1081,19 +1433,88 @@ fn shadow_bytes_x86(abi: AbiDescriptor, f: MFuncX86) -> u32 {
 }
 
 /**
+ * out_arg_bytes_x86 — the byte size of the outgoing stack-argument region a
+ * function's frame must reserve (`B1-args`): 8 bytes per slot up to the highest
+ * `MOutArgX86{index}` the block stream contains, rounded up to the 16-byte stack
+ * alignment, or 0 when the function passes every argument in a register. Derived
+ * by SCANNING the finished stream rather than carried on `MFuncX86`, exactly as
+ * the callee-saved set and the shadow reservation already are, so isel stays free
+ * of frame arithmetic.
+ *
+ * @param MFuncX86 f  the fully-physical function
+ * @return u32  the 16-aligned outgoing stack-argument region size in bytes
+ */
+fn out_arg_bytes_x86(f: MFuncX86) -> u32 {
+    let n = max_out_arg_slots_x86(f)
+    if n == (0 to u32) { return 0 to u32 }
+    align_up(n * X86_GPR_BYTES, X86_STACK_ALIGN)
+}
+
+/**
+ * max_out_arg_slots_x86 — how many outgoing stack-argument slots the function's
+ * widest call needs: one past the highest `MOutArgX86{index}` in the stream, or 0
+ * when there is none.
+ *
+ * @param MFuncX86 f  the fully-physical function
+ * @return u32  the outgoing stack-argument slot count
+ */
+fn max_out_arg_slots_x86(f: MFuncX86) -> u32 {
+    mut slots: u32 = 0
+    mut bi: u64 = 0
+    loop {
+        if bi >= f.blocks.len { break }
+        let b = f.blocks[bi]
+        mut ii: u64 = 0
+        loop {
+            if ii >= b.insts.len { break }
+            let need = out_arg_slots_of_inst_x86(b.insts[ii])
+            if need > slots { slots = need }
+            ii++
+        }
+        bi++
+    }
+    slots
+}
+
+/**
+ * out_arg_slots_of_inst_x86 — the outgoing stack-argument slot count one
+ * instruction implies: `index + 1` for an `MOutArgX86`, 0 for everything else.
+ *
+ * @param MInstX86 i  the instruction to inspect
+ * @return u32  the implied slot count
+ */
+fn out_arg_slots_of_inst_x86(i: MInstX86) -> u32 {
+    match i {
+        MOutArgX86 as x => x.index + (1 to u32)
+        _ => 0 to u32
+    }
+}
+
+/**
  * compute_frame_layout_x86 — build a function's `FrameLayoutX86`: re-derive the
  * callee-saved save-set by scanning the physical `MFuncX86`, lay out the frame
  * slots honoring each `LAlloca`'s alignment (the neutral `compute_slot_offsets`),
- * fold in the Win64 caller-reserved shadow space (`shadow_bytes_x86` — 32 for a
- * calling Win64 function, 0 for every other ABI so the frame bytes stay
- * byte-identical), size the `sub rsp` region for SysV 16-byte call-boundary
- * alignment, and shift every slot offset above the callee-saved push region AND
- * the shadow region so `MFrameAddrX86` resolves to `lea dst, [rsp+off]`. A pure
- * side-table pass — it never mutates the block stream, so the interp oracle stays
- * valid on the pre-encode function. The x86 mirror of arm64's
+ * reserve the ARGUMENT-PASSING region at the very bottom of the frame — the
+ * Win64 caller-reserved shadow space (`shadow_bytes_x86` — 32 for a calling Win64
+ * function, 0 for every other ABI) plus the outgoing stack arguments
+ * (`out_arg_bytes_x86`, `B1-args`) — size the `sub rsp` region for 16-byte
+ * call-boundary alignment, and shift every slot offset above that
+ * argument-passing region so `MFrameAddrX86` resolves to `lea dst, [rsp+off]`.
+ *
+ * The argument-passing region sits at RSP and NOTHING may sit below it: both
+ * ABIs define a stack argument's address relative to the caller's RSP at the
+ * call, and Win64 lets the callee write the 32 shadow bytes at that same RSP.
+ * That is why the callee-saved pushes now precede the `sub rsp` (they used to
+ * follow it, which put them at RSP and, under Win64, in the callee's way) — the
+ * displacement is identical either way, so a function reserving no argument
+ * region and saving no register keeps byte-identical bytes.
+ *
+ * A pure side-table pass — it never mutates the block stream, so the interp
+ * oracle stays valid on the pre-encode function. The x86 mirror of arm64's
  * `compute_frame_layout`; frames beyond the imm32 `sub` field are caught at
- * prologue emission (`B1-bigframe`, near-N/A), not here. 32 is 16-aligned, so the
- * shadow reservation never perturbs the SysV alignment residue (§4.2).
+ * prologue emission (`B1-bigframe`, near-N/A), not here. Both 32 and the
+ * 16-rounded outgoing region are 16-aligned, so neither reservation perturbs the
+ * alignment residue (§4.2).
  *
  * @param AbiDescriptor abi  the register file (callee-saved partition + shadow space)
  * @param MFuncX86 f  the fully-physical function
@@ -1102,31 +1523,38 @@ fn shadow_bytes_x86(abi: AbiDescriptor, f: MFuncX86) -> u32 {
 pub fn compute_frame_layout_x86(abi: AbiDescriptor, f: MFuncX86) -> FrameLayoutX86 {
     let saved = collect_callee_saved_x86(abi, f)
     let slots = compute_slot_offsets(f.frame)
-    let n_saved = (saved.gpr.len + saved.fpr.len) to u32
     let shadow = shadow_bytes_x86(abi, f)
-    let size = frame_sub_size_x86(slots.slots_size + shadow, n_saved)
-    let slot_offsets = shift_slot_offsets_x86(slots.offsets, (n_saved * X86_GPR_BYTES) + shadow)
+    let arg_region = shadow + out_arg_bytes_x86(f)
+    let fpr_region = (saved.fpr.len to u32) * X86_XMM_SAVE_BYTES
+    let size = frame_sub_size_x86(slots.slots_size + arg_region + fpr_region, (saved.gpr.len to u32))
+    let slot_offsets = shift_slot_offsets_x86(slots.offsets, arg_region + fpr_region)
     FrameLayoutX86 {
         size = size
         saved_gpr = saved.gpr
         saved_fpr = saved.fpr
         slot_offsets = slot_offsets
+        call_align = needs_call_align_x86(f)
+        out_arg_base = shadow
+        fpr_save_base = arg_region
+        caller_shadow = abi.shadow_space
     }
 }
 
 /**
- * frame_is_framed_x86 — whether a resolved frame needs a prologue/epilogue: true
- * when the `sub rsp` region is non-empty OR any callee-saved register is pushed.
- * A framed function with an even callee-saved count and no slots has a zero `sub`
- * amount yet is still framed (the pushes carry it), so this is NOT simply
- * `size>0`.
+ * frame_is_framed_x86 — whether a resolved frame needs a prologue/epilogue:
+ * true when the `sub rsp` region is non-empty, OR any callee-saved register is
+ * pushed, OR the frame is otherwise empty but still needs the minimal
+ * alignment-only prologue `needs_call_align_x86` names (`layout.call_align`).
+ * A framed function with an even callee-saved count and no slots has a zero
+ * `sub` amount yet is still framed (the pushes carry it), so this is NOT
+ * simply `size>0`.
  *
  * @param FrameLayoutX86 layout  the resolved frame
  * @return bool  true iff a prologue/epilogue must be emitted
  */
 fn frame_is_framed_x86(layout: FrameLayoutX86) -> bool {
     let n_saved = (layout.saved_gpr.len + layout.saved_fpr.len) to u32
-    (layout.size > (0 to u32)) || (n_saved > (0 to u32))
+    (layout.size > (0 to u32)) || (n_saved > (0 to u32)) || layout.call_align
 }
 
 /**
@@ -1204,10 +1632,89 @@ fn emit_sub_rsp_x86(buf: []byte, amount: u32) -> []byte | error {
 }
 
 /**
+ * emit_add_rsp_x86 — append the stack-release `add rsp, #amount`, the teardown
+ * counterpart of `emit_sub_rsp_x86` and its exact encoding mirror (same `48 83`/
+ * `48 81` group-1 opcodes, `/0` instead of `/5`): nothing for a zero amount, the
+ * short imm8 form under 128, else the wide imm32 form. It raises no
+ * `B1-bigframe` — an amount the prologue's `sub` already accepted fits here by
+ * construction, so this takes the imm32 form for anything larger rather than
+ * duplicating a guard that cannot fire (`B1-args`).
+ *
+ * @param []byte buf  the buffer to extend
+ * @param u32 amount  the byte amount to add back to RSP
+ * @return []byte  the extended buffer
+ */
+fn emit_add_rsp_x86(buf: []byte, amount: u32) -> []byte {
+    if amount == (0 to u32) { return buf }
+    if amount < X86_SUB_RSP_IMM8_MAX {
+        let b = push_byte_x86(push_byte_x86(push_byte_x86(buf, REX_W_PREFIX), X86_OP_GRP1_IMM8), X86_MODRM_ADD_RSP)
+        return push_byte_x86(b, amount)
+    }
+    let b = push_byte_x86(push_byte_x86(push_byte_x86(buf, REX_W_PREFIX), X86_OP_GRP1_IMM32), X86_MODRM_ADD_RSP)
+    emit_u32_le(b, amount)
+}
+
+/**
+ * emit_saved_fpr_stores_x86 — save (or, when `reload`, restore) every
+ * callee-saved XMM the frame lists, one `movaps [rsp+off], xmm` / `movaps xmm,
+ * [rsp+off]` per register at its own 16-byte slot in the frame's XMM-save region
+ * (`fpr_save_base + 16*k`, ascending id order). This is the whole content of the
+ * former `B3-xmm-callee-saved` honest-stop: Win64 declares XMM6..XMM15
+ * nonvolatile, so a float value the allocator parked in one of them across a call
+ * must be preserved by us, and `movaps` (not `movsd`) is the right instruction
+ * because the ABI's promise covers all 128 bits, not the scalar low lane our own
+ * code happens to use. SysV lists every XMM as caller-saved, so `saved_fpr` is
+ * empty there and this appends nothing — the SysV bytes stay identical.
+ *
+ * The XMM-save region is 16-aligned by construction: the frame's total
+ * displacement is a multiple of 16 (`frame_sub_size_x86`) and the region sits
+ * above the likewise 16-aligned argument-passing region, so `movaps`' alignment
+ * requirement is met without a runtime check.
+ *
+ * @param []byte buf  the buffer to extend
+ * @param FrameLayoutX86 layout  the resolved frame
+ * @param bool reload  true to emit the restoring loads, false the saving stores
+ * @return []byte  `buf` followed by the save/restore encodings
+ */
+fn emit_saved_fpr_stores_x86(buf: []byte, layout: FrameLayoutX86, reload: bool) -> []byte {
+    mut b = buf
+    mut i: u64 = 0
+    loop {
+        if i >= layout.saved_fpr.len { break }
+        let off = layout.fpr_save_base + ((i to u32) * X86_XMM_SAVE_BYTES)
+        b = append_bytes(b, emit_movaps_frame_x86(layout.saved_fpr[i], off, reload).bytes)
+        i++
+    }
+    b
+}
+
+/**
+ * emit_movaps_frame_x86 — one `movaps` between XMM register `id` and the frame
+ * byte offset `off` from RSP: the store form (`0F 29`) or, when `reload`, the load
+ * form (`0F 28`). Routed through `emit_mem_op_x86` so the RSP base's mandatory SIB
+ * byte and the disp8/disp32 choice are the SAME code every other frame access
+ * uses (`B3-xmm-callee-saved`).
+ *
+ * @param u32 id  the XMM register id to save or restore
+ * @param u32 off  the RSP-relative byte offset of its 16-byte slot
+ * @param bool reload  true for the load form, false for the store form
+ * @return EncInstX86  the encoded instruction
+ */
+fn emit_movaps_frame_x86(id: u32, off: u32, reload: bool) -> EncInstX86 {
+    let opcode = if reload { X86_OP_MOVAPS_LOAD } else { X86_OP_MOVAPS_STORE }
+    let form = X86MemOp { op66 = false; mandatory_prefix = X86_NO_PREFIX; rexw = false; two_byte = true; opcode = opcode; byte_reg = false }
+    emit_mem_op_x86(form, preg(id, MRegClass::FPR), MMem { base = RSP_BASE_X86; offset = off to i32 })
+}
+
+/**
  * emit_saved_pushes_x86 — append one `push r64` per callee-saved GPR in
- * ascending id order (SysV has no callee-saved FPRs, so `saved_fpr` is always
- * empty and only GPRs are pushed). The pushes follow `sub rsp,#N`, so RSP ends
- * below both the slot region and these saves.
+ * ascending id order. Only GPRs are PUSHED: a callee-saved XMM is 16 bytes wide
+ * and needs an aligned `movaps` into the frame's own XMM-save region instead
+ * (`emit_saved_fpr_stores_x86`), which the `push` family cannot express. The
+ * pushes PRECEDE `sub rsp,#N`, so RSP ends
+ * below both these saves and the slot region — leaving the frame's lowest bytes
+ * (at RSP) free for the argument-passing region both ABIs address from there
+ * (`B1-args`).
  *
  * @param []byte buf  the buffer to extend
  * @param FrameLayoutX86 layout  the resolved frame
@@ -1225,53 +1732,49 @@ fn emit_saved_pushes_x86(buf: []byte, layout: FrameLayoutX86) -> []byte {
 }
 
 /**
- * honest_xmm_callee_saved_x86 — the named `B3-xmm-callee-saved` honest-stop for a
- * frame that would push a callee-saved XMM. Win64 preserves XMM6-15 across a
- * call, so an FP value live across a call lands in `saved_fpr` and needs a
- * `movaps [rsp+off], xmm` spill/reload — UNIMPLEMENTED (`emit_saved_pushes_x86` is
- * GPR-only). The integer corpus allocates no XMM (FP is the `B3-fp` stop), so
- * `saved_fpr` is empty in practice; a non-empty `saved_fpr` stops here rather
- * than mis-emitting (§2.2, rides `B3-fp`).
- *
- * @return error  the `B3-xmm-callee-saved` named honest-stop
- */
-fn honest_xmm_callee_saved_x86() -> error {
-    error { message = "B3-xmm-callee-saved: callee-saved XMM6-15 save path (movaps) unimplemented (integer corpus allocates no XMM; rides B3-fp)" }
-}
-
-/**
  * emit_prologue_x86 — the SysV/Win64 function entry sequence, or an empty list for
- * a frameless function: `push rbp` ; `mov rbp,rsp` ; `sub rsp,#N` (elided when
- * `N==0`, and under Win64 `#N` folds in the 32-byte shadow space when the function
- * calls) ; one `push` per callee-saved GPR (ascending). The frame size is
- * pre-aligned so RSP is 16-aligned at every call boundary. A frame too large for
- * the imm32 `sub` field raises `B1-bigframe`; a callee-saved XMM (a non-empty
- * `saved_fpr`, Win64-only) raises `B3-xmm-callee-saved` rather than mis-emitting.
- * The x86 mirror of arm64's `emit_prologue`.
+ * a frameless function: `push rbp` ; `mov rbp,rsp` ; one `push` per callee-saved
+ * GPR (ascending) ; `sub rsp,#N` (elided when `N==0`; `#N` covers the local slot
+ * region plus the bottom argument-passing region — the Win64 shadow space and the
+ * outgoing stack arguments, `B1-args`). The frame size is pre-aligned so RSP is
+ * 16-aligned at every call boundary. A frame too large for the imm32 `sub` field
+ * raises `B1-bigframe`.
+ *
+ * The pushes precede the `sub` so the argument-passing region lands at RSP, which
+ * is where both ABIs define stack arguments to be and where a Win64 callee writes
+ * the shadow bytes; the total displacement is unchanged, so a function that
+ * reserves no argument region and saves no register emits byte-identical bytes.
+ *
+ * A callee-saved XMM (a non-empty `saved_fpr`, Win64-only) is saved into the slot
+ * region by `emit_saved_fpr_stores_x86` — the `B3-xmm-callee-saved` honest-stop
+ * closed 2026-07-29 alongside the float family it rode. The x86 mirror of arm64's
+ * `emit_prologue`.
  *
  * @param FrameLayoutX86 layout  the resolved frame
  * @return []byte | error  the prologue bytes, or a named honest-stop
- * @throws  `B1-bigframe` when the `sub rsp` amount overruns the imm32 field, or
- *          `B3-xmm-callee-saved` when a callee-saved XMM must be spilled
+ * @throws  `B1-bigframe` when the `sub rsp` amount overruns the imm32 field
  */
 pub fn emit_prologue_x86(layout: FrameLayoutX86) -> []byte | error {
     if !frame_is_framed_x86(layout) {
         let none: []byte = teko::list::empty()
         return none
     }
-    if layout.saved_fpr.len > (0 to u64) { return honest_xmm_callee_saved_x86() }
     let after_rbp = emit_mov_rbp_rsp_x86(emit_push_reg_x86(teko::list::empty(), X86_REG_RBP_ID))
-    let after_sub = match emit_sub_rsp_x86(after_rbp, layout.size) { []byte as w => w; error as e => return e }
-    emit_saved_pushes_x86(after_sub, layout)
+    let after_pushes = emit_saved_pushes_x86(after_rbp, layout)
+    let after_sub = match emit_sub_rsp_x86(after_pushes, layout.size) { []byte as w => w; error as e => return e }
+    emit_saved_fpr_stores_x86(after_sub, layout, false)
 }
 
 /**
- * emit_epilogue_x86 — the SysV frame-teardown sequence (LIFO), or an empty list
- * for a frameless function: `pop` each callee-saved GPR in REVERSE push order,
- * then `leave` (`C9`, i.e. `mov rsp,rbp ; pop rbp`), which discards the slot
- * region and restores RBP in one byte. The `ret` itself is appended by the
- * function encoder immediately after these bytes. `leave` handles every frame
- * size natively (no imm), so unlike the prologue this never raises
+ * emit_epilogue_x86 — the SysV/Win64 frame-teardown sequence (LIFO), or an empty
+ * list for a frameless function: reload each callee-saved XMM from its slot,
+ * `add rsp,#N` to discard the slot + argument-passing region (emitted ONLY when
+ * there is a `pop` after it that needs RSP back at the top of the pushed region —
+ * with no callee-saved GPR, the following `leave` discards that region by itself),
+ * `pop` each callee-saved GPR in REVERSE push order, then `leave` (`C9`, i.e.
+ * `mov rsp,rbp ; pop rbp`), which restores RBP in one byte. The `ret` itself is
+ * appended by the function encoder immediately after these bytes. `add`/`leave`
+ * handle every frame size natively, so unlike the prologue this never raises
  * `B1-bigframe`. The x86 mirror of arm64's `emit_epilogue`.
  *
  * @param FrameLayoutX86 layout  the resolved frame
@@ -1282,7 +1785,8 @@ fn emit_epilogue_x86(layout: FrameLayoutX86) -> []byte {
         let none: []byte = teko::list::empty()
         return none
     }
-    mut b: []byte = teko::list::empty()
+    let after_fpr = emit_saved_fpr_stores_x86(teko::list::empty(), layout, true)
+    mut b = if layout.saved_gpr.len > (0 to u64) { emit_add_rsp_x86(after_fpr, layout.size) } else { after_fpr }
     mut i: u64 = layout.saved_gpr.len
     loop {
         if i == (0 to u64) { break }

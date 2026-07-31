@@ -453,8 +453,7 @@ legitimate (a `.tkt` sees its module's internals).
 
 ## 6. The crumb sequence (ordered, each independently gate-able)
 
-Every crumb owes the full ritual — the **both-engine gate** (native `teko . -o bin` AND VM
-`teko test .`) · paranoid · fixpoint — and **100% coverage on its new code**. No machine bytes.
+Every crumb owes the full ritual — the **native gate** (native `teko . -o bin`) · paranoid · fixpoint — and **100% coverage on its new code**. No machine bytes.
 
 **CRITICAL SEQUENCING LAW (do not violate):** the numbering fix (Crumb 2) MUST land **before or
 with** the back-edge relaxation (Crumb 3). Relaxing `has_back_edge` first — while numbering is
@@ -583,16 +582,15 @@ proof that RPO fixed the numbering even independently of the back-edge test.
 
 ## 9. Ritual points
 
-- **Both-engine gate at every crumb:** native `teko . -o bin` **and** VM `teko test .`. The
-  diff-VM==native lane runs the VM; the recursion in `rpo_visit` and the `mut cur = RpoState{…}` /
-  `cur = rpo_visit(…)` reassignment must run on both.
-- **VM gotcha watch:**
-  - No `x = match { … return }` reassignment (VM can't do control flow inside a match used as an
+- **Native gate at every crumb:** native `teko . -o bin`. The recursion in `rpo_visit` and the `mut cur = RpoState{…}` /
+  `cur = rpo_visit(…)` reassignment must run correctly.
+- **Code pattern watch:**
+  - No `x = match { … return }` reassignment (control flow restrictions in certain contexts), so
     assignment RHS) — none is introduced; `regalloc_func` keeps the existing `let … = match { …
     error as e => return e }` **binding** shape (`regalloc.tks:1634`, the pattern isel documents at
     `isel_arm64.tks:1831-1835`).
   - Literal u32 anchoring: keep the `to u32` casts on literals (`i to u32`, `order.len to u32`) as
-    the surrounding code does; a bare integer literal can mis-infer width in the VM.
+    the surrounding code does; a bare integer literal can mis-infer width.
   - `mut i: u64 = list.len` then `i = i - 1` in `reverse_u32` guards the `i == 0` break BEFORE
     decrement (no u64 underflow).
 - **100% coverage on new code** (`teko . -o bin --coverage`, native path, never `test --coverage`):

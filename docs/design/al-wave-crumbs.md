@@ -95,9 +95,6 @@ Veredito por alvo:
   índice const-expr**; (ii) trocar `gzip_cm_deflate()` por um `const GZIP_CM_DEFLATE: byte = 8
   to byte` (ele já é `{ 8 to byte }`). Então `const GZIP_HEADER: []byte = [GZIP_MAGIC[0],
   GZIP_MAGIC[1], GZIP_CM_DEFLATE, 0 to byte, …]`.
-- **`wasm_preamble` (objfile_wasm.tks:172) → PRECISA ESTENDER const-eval** (mesmo Tier-6
-  `TIndex`-de-const para `WASM_MAGIC[0..3]`; `WASM_VERSION_1` já é Tier-3 OK).
-- **`wasm_narrow_msg_bytes` (stackify.tks:4503) → PRECISA ESTENDER const-eval** (str→[]byte em
   posição const) OU manter gerador. Um byte-array literal perde a string legível; a extensão
   limpa é permitir `const MSG: []byte = "…"` (coerção str→bytes const).
 
@@ -186,7 +183,7 @@ código morto (caminhos novos não exercitados pelo self-build) até AL3/AL6 mig
 | **F1.1** | Parser: prefixo `&x` como expr de borrow → AST | S | build verde + parser_test.tkt |
 | **F1.2** | Checker: tipar `&x` → `Reference<T>` (mut/shared inferido); rejeitar `&(let)` mutável | M | checker_test.tkt + fixpoint |
 | **F1.3** | Spine: autorizar borrow exclusivo (`is_unique_at`) + lifetime (`ref_target_outlives`); L2a `bf:=BfLocal`; relaxar escape-gate p/ o sink `mut y=&x` | M | spine_test.tkt + fixpoint verde |
-| **F1.4** | Codegen: lower `Borrow` → address-of `&` | S | codegen_test.tkt + diff VM==native |
+| **F1.4** | Codegen: lower `Borrow` → address-of `&` | S | codegen_test.tkt + native validation |
 | **F1.5** | Ponte: `teko::list::grow(&x, v)` (coexistência, sem migrar sites) | S | list_test.tkt + fixpoint |
 | **F1.6** | Fixtures de regressão + fixpoint verde (prova de aditividade) | S | **RITUAL: fixpoint gen1==gen2 INALTERADO** |
 
@@ -280,21 +277,20 @@ pub fn grow[T](x: &[]T, v: T) -> void
 ```
 
 **F1.6 — Fixtures + ritual.** `.tkt` colocados (o padrão do repo: `src/<mod>/<mod>_test.tkt`, testes
-Teko com assert), MAIS 1–2 programas end-to-end rodados VM e native pra paridade de exit code:
+Teko com assert), MAIS 1–2 programas end-to-end rodados natively pra validação de exit code:
 
-| Fixture | Onde | Entrada | Esperado (VM==native) |
+| Fixture | Onde | Entrada | Esperado (native) |
 |---|---|---|---|
 | borrow-parse | `src/parser/parser_test.tkt` | `&x` prefixo → `Borrow{Var}`; `a & b` → `Binary` | AST correta; exit 0 |
 | borrow-mut-ok | `src/checker/checker_test.tkt` | `mut x=…; grow(&x, v)` | tipa `Reference`; exit 0 |
 | borrow-let-reject | `src/checker/checker_test.tkt` | `let x=…; grow(&x, v)` | erro "immutable"; exit ≠0 (gate rejeita) |
 | borrow-alias-reject | `src/checker/spine_test.tkt` | dois borrows mut vivos de `x` | `is_unique_at`=false → erro exclusivo-XOR |
 | borrow-outlives | `src/checker/spine_test.tkt` | `mut y=&x` sink local | `ref_target_outlives`=true; escape-gate admite |
-| borrow-codegen | `src/codegen/codegen_test.tkt` | `grow(&x, v)` | emite `&x`; `<T> *`; diff VM==native byte-idêntico |
+| borrow-codegen | `src/codegen/codegen_test.tkt` | `grow(&x, v)` | emite `&x`; `<T> *`; native validation byte-idêntico |
 | e2e-noop | programa end-to-end | corpus que NÃO usa `&x` | **fixpoint gen1==gen2 INALTERADO** |
 
 **RITUAL de F1 (o que prova aditividade):** (1) fixpoint gen1==gen2 verde e INALTERADO — nada no
-corpus usa `&x`, então o C emitido pro alvo é byte-idêntico; (2) golden do corpus-alvo + diff
-VM==native; (3) suites `_test.tkt` novas verdes. NÃO deve haver mudança em bytes emitidos pro alvo
+corpus usa `&x`, então o C emitido pro alvo é byte-idêntico; (2) golden do corpus-alvo + native validation; (3) suites `_test.tkt` novas verdes. NÃO deve haver mudança em bytes emitidos pro alvo
 (F1 é aditivo); qualquer diff no golden do alvo é REGRESSÃO, não esperado.
 
 **Risco/tensão:** nenhuma tensão de lei (carve-out `ref` já legislado; `*` não tocado). Risco único

@@ -1,3 +1,5 @@
+> **[HISTÓRICO]** — documenta a auditoria de testes de consolidação (v0.3.0.28-beta), já executada. Não descreve o estado atual do projeto.
+
 # Test-suite consolidation audit — teko-lang (v0.3.0.28-beta)
 
 **Status:** AUDIT (design-only, read-only). No branch, no PR, no code change. Owner ruling
@@ -83,7 +85,6 @@ so we do not claim it.
 
 | File | Tests | Lines | What it pins |
 | --- | --- | --- | --- |
-| `stackify_test.tkt` | 168 | 3,628 | wasm stackification / valtype / mem-op lowering |
 | `encode_arm64_test.tkt` | 70 | 1,940 | AArch64 instruction encodings (hex golden) |
 | `encode_x86_64_test.tkt` | 65 | 1,519 | x86-64 encodings (hex golden) |
 | `isel_x86_64_test.tkt` | 62 | 1,005 | x86-64 instruction selection |
@@ -228,7 +229,7 @@ Only the surrounding syntactic context differs.
   `discard_param_plain_fn` (checker semantic), `underscore_as_x_rejected` (`_ as x` parser).
 - **Recommendation: consolidate 4 → 1**, net **−3 fixtures** — **but see the tension in §5.**
 
-No other fixture cluster is redundant: the per-backend matrices (`own_*` vs `wasm_*` vs
+No other fixture cluster is redundant: the per-backend matrices (`own_*` vs
 `native_lir_*`) exercise **different backends** (distinct code paths — not redundant with each
 other), and the `member_const_*` (8) / `trait_derive_*` (5) / `comptime_fold_*` (5) families
 each pin a distinct construct or an owner-ruled acceptance/rejection.

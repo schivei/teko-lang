@@ -258,12 +258,11 @@ que por sua vez destrava `driver.tks`/`main.tks` (self-hosting). F3-pânicos (BI
 - **[C2c] `teko::fs` (dir-list)** — deps: C1.1 · M.4 · par: `src/fs/fs.{tks,c,h}` + test → `list_dir` (par Teko de A2).
 - **[C2d] `teko::process` (exec)** — deps: C1.1 · M.4 · par: `src/process/process.{tks,c,h}` + test → invocar `cc`.
   > **Aceite (cada C2x):** roda sobre FFI; `.tkt` cobre feliz + erro.
-- **[C3] Backend nativo próprio** — deps: C1.1 · M.0 · **agendado** · par: `src/codegen/native/*` (lir/isel/regalloc/enc/obj + `stackify_wasm`/`obj_wasm` + `native_emit`, `src/runtime` inalterado como link target)
-  > Emite direto ao metal (+ Wasm), aposenta o `cc` (eventualmente). Plano completo (matriz de alvos, arquitetura de
-  > camadas, milestones N1–N8, linker próprio L1–L4 diferido, Wasm via `wasm-ld`) em `TEKO_ROADMAP_NATIVE_BACKEND.md`.
-  > **Aceite (M1):** os 6 alvos de CI (`.github/workflows/native.yml`) + Wasm/WASI + Wasm/Browser (2 jobs novos)
-  > rodam a suite via objeto nativo, todos os motores concordando (VM==native-C==native-obj, ambos Wasm inclusos;
-  > testes de `fs`/`process` no Browser verificam o honest-stop, não rodam de fato).
+- **[C3] Backend nativo próprio** — deps: C1.1 · M.0 · **agendado** · par: `src/codegen/native/*` (lir/isel/regalloc/enc/obj + `native_emit`, `src/runtime` inalterado como link target)
+  > Emite direto ao metal, aposenta o `cc` (eventualmente). Plano completo (matriz de alvos, arquitetura de
+  > camadas, milestones N1–N8, linker próprio L1–L4 diferido) em `TEKO_ROADMAP_NATIVE_BACKEND.md`.
+  > **Aceite (M1):** os alvos nativos de CI (`.github/workflows/native.yml`)
+  > rodam a suite via objeto nativo, todos os motores concordando (native-C==native-obj).
 - **[C4] Self-hosting** — deps: A5, B5, C2*, M1, M2 · M.4 · **diferido**
   > Ciclo 4 pontos (semente-C → Teko ger.1 → ger.2==ger.3 + corretude diferencial); aposenta C. **Aceite (futuro):** ger.2==ger.3 bit-a-bit.
 - **[C5] Capabilities/sandboxing** — deps: C1.1 · M.1 · **evolução** — auditoria de superfície `exp`/`extern`/syscall.

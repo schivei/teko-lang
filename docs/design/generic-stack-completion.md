@@ -4,7 +4,7 @@
 **Parents:** `docs/design/onda3-monomorphization-cluster.md`, `docs/design/drain-onda3-subcluster-A.md` (K-A: #290→#301→#254→#294, all landed). This is the K-A follow-on cluster — the same mono-pass + codegen machinery, one layer deeper.
 **Trigger:** #163 (collections) shipped `List<T>` + a `str`-keyed `Map<V>` (PR #321) by WORKING AROUND these gaps (each documented verbatim in `src/collections/{list,map,collections}.tks`). The generic stack under-delivers the collections ruling (`Map<K: Hashable & Eq, V>`, `teko::env = Map<str, str?>` generically, nested generics) until these land.
 **Seed:** `teko.tkp` current. **Rule:** every snippet is full-Javadoc, `.tks`-only. C twins FROZEN (only `teko_rt.{c,h}` maintained — none needed here). **Size:** **L** — a multi-PR round, the twin of onda-3 sub-cluster A.
-**Ritual (every crumb):** full gate — gen1 `teko . -o bin` (native `#test`) + `./bin/teko test .` (VM) + FIXPOINT gen1==gen2 byte-identical + `diff_vm_native.sh` + `TEKO_MEM_PARANOID=1` + `//`-audit. **The `any_generic` no-op guard (`monomorph.tks` PHASE-1/PHASE-2 gate) MUST hold — the compiler corpus has ZERO generic instances, so gen1==gen2 stays byte-identical; verify at EACH crumb, not only at the end.**
+**Ritual (every crumb):** full gate — gen1 `teko . -o bin` (native `#test`) + FIXPOINT gen1==gen2 byte-identical (both via native backend) + `TEKO_MEM_PARANOID=1` + `//`-audit. **The `any_generic` no-op guard (`monomorph.tks` PHASE-1/PHASE-2 gate) MUST hold — the compiler corpus has ZERO generic instances, so gen1==gen2 stays byte-identical; verify at EACH crumb, not only at the end.**
 
 ---
 
@@ -95,8 +95,8 @@ Wire in BOTH TCall result arms of `mono_texpr` (`monomorph.tks:568` and `:571`):
 
 > **GROUNDING GAP (implementer confirms FIRST):** verify the sibling call's `call_ns` is the CANONICAL owner (`typer.tks:691` `method_dispatch_callee` places the canonical `struct_name` as the qualifier). If typing instead keys the sibling call on the BARE owner, add the bare remap to the lookup (the Subst already carries the bare spelling too, `monomorph.tks:1006-1007`). Probe: `TEKO_TRACE` a 2-method generic class, read the pre-mono `call_ns` on the sibling TCall.
 
-**Fixtures (VM==native):**
-- `examples/regressions/generic_sibling_method/` — `type Ctr<T> = class { intern n: i64; pub fn make() -> Ctr<T> { Ctr { n = 0 } }; pub fn count(self) -> i64 { self.n }; pub fn twice(self) -> i64 { self.count() + self.count() } }`; `Ctr<i64>::make().twice()` → **exit 0** (or seed `n=3` via a setter for exit 6). Fails to LINK natively today (VM passes), passes both after.
+**Fixtures:**
+- `examples/regressions/generic_sibling_method/` — `type Ctr<T> = class { intern n: i64; pub fn make() -> Ctr<T> { Ctr { n = 0 } }; pub fn count(self) -> i64 { self.n }; pub fn twice(self) -> i64 { self.count() + self.count() } }`; `Ctr<i64>::make().twice()` → **exit 0** (or seed `n=3` via a setter for exit 6). Fails to link natively today, passes after this fix lands.
 - Fold-in note (report in PR body, do NOT silently rewrite): after #3, flip `src/collections/{list,collections}.tks`'s `arr_replace_at`/`arr_drop_at`/`arr_drop_last` from free functions back to private instance methods IF it keeps the corpus building — that IS the #163-workaround closure. Deferred to the #163-follow-up PR that adopts these fixes; keep the free-fn form until the fix is green (do not gate #3 on the collections rewrite).
 
 **Ritual:** full gate. `mono_rekey_call_ns` is a no-op for every `call_ns` the Subst does not remap (every existing call) → gen1==gen2 byte-identical.
@@ -211,7 +211,7 @@ fn rekey_structural_trait_dispatch(cl: TCall, args: []TExpr, table: TypeTable) -
 ```
 Call it in `rekey_iface_dispatch` alongside `rekey_struct_constraint_dispatch`. For a primitive `K`, map the (canonical trait, method) pair to its runtime builtin symbol; for a struct/class deriver, reuse the struct-direct path (the concrete `eq`/`hash` was synthesized onto the deriver by `synth.tks` and stamped by #254). **Depends on #3's `mono_rekey_call_ns` for the sibling case inside a chained structural method.**
 
-**Fixtures (VM==native):**
+**Fixtures:**
 - `examples/regressions/generic_key_map/` — the PAYOFF: `type Map<K: Hashable & Eq, V> = class { … pub fn insert(self, k: K, v: V) { let h = k.hash(); … if k.eq(existing) { … } } }`; a `Map<str, i64>` and a `Map<Point, i64>` (a struct deriving `Hashable & Eq`); insert/get round-trip → **exit** the summed values. Rejects/diverges today (map.tks's own workaround comment is the witness); passes both after.
 - `examples/regressions/type_param_eq/` — `fn same<K: Eq>(a: K, b: K) -> bool { a == b }`; `same(3, 3)` and `same("x", "x")` → exit 1; `same(3, 4)` → exit 0 (proves crumb 1.3 + 1.4 primitive path).
 - `examples/regressions/type_param_hash_struct/` — a struct `Point` deriving `Hashable & Eq`, `fn h<K: Hashable>(k: K) -> u64 { k.hash() }`, `h(Point{x=1;y=2})` (proves crumb 1.4 deriver path).
@@ -243,7 +243,7 @@ if nt.args.len > 0 {
 
 > **GROUNDING GAP (implementer confirms FIRST):** the stamped instance decl must be in `prog` BEFORE `emit_type_expr` runs (it is — mono appends it, `monomorph.tks:1233-1241`). Verify the `emit_type` SEMANTIC twin (`codegen.tks:926`) is already correct for the resolved `Named{Map__g__i64}` (it is — it goes straight to the class check); #4 is purely the SYNTACTIC path.
 
-**Fixtures (VM==native):**
+**Fixtures:**
 - `examples/regressions/generic_class_param/` — `type Bag<T> = class { intern xs: []T; pub fn make() -> Bag<T> { Bag { xs = teko::list::empty() } }; pub fn add(self, x: T) { self.xs = teko::list::push(self.xs, x) } }` + a FREE fn `fn size(b: Bag<i64>) -> u64 { b.xs.len }`; `let g = Bag<i64>::make(); g.add(5); size(g)` → **exit 1**. cc-rejects today (ptr/value mismatch), passes both after. Include a generic STRUCT param variant to prove structs stay by-value (no regression).
 
 **Ritual:** full gate. The compiler corpus has NO generic-instance params → the new class-pointer arm is a no-op there; gen1==gen2 byte-identical.
@@ -284,7 +284,7 @@ fn retarget_generic_static_callee(c: parser::Call, table: TypeTable, ref_ns: str
 ```
 `path_prefix_through(p, idx)` = a `parser::Path` of `p.segments[0..=idx]` (trivial slice-build; add if absent). `resolve_type` on the QUALIFIED `NamedType` resolves in the owner's ns via the existing `#109 W1` qualified path (`resolve.tks` resolve_named honors the qualifier), so `ref_ns` becomes a mere tie-breaker.
 
-**Fixtures (VM==native):**
+**Fixtures:**
 - `examples/regressions/cross_ns_generic_factory/` — namespace `coll` declares `type Stack<T> = class { … pub fn make() -> Stack<T> { … } }`; a DIFFERENT namespace calls `coll::Stack<i64>::make()` → **exit 0** (or push/len for a nonzero). Fails resolution today, passes both after.
 
 **Ritual:** full gate. Corpus factories are single-ns today → the qualified form is byte-identical for a bare-base call (the `len < 2` / qualifier-equals-ref_ns paths). gen1==gen2 preserved.
@@ -319,7 +319,7 @@ fn nested_phantom_inst_name(nested_base: str, owner_tparams: []str) -> str { /* 
 
 > **GROUNDING GAP (implementer probes FIRST):** confirm the mono phantom-remap covers the DISCOVERY side — the nested construct must enqueue `Cell__g__<concrete>` (its type-decl AND its methods) or the stamp is missing at emit. Reuse `collect_body_insts` (`resolve.tks:1424`, extended in #254 L2 to walk method bodies) so the nested construct inside a method body is discovered. If the nested type's ns differs from the owner's, the `resolve_named` ref_ns must be the NESTED type's own ns (via its qualifier), the #5 fix's sibling.
 
-**Fixtures (VM==native):**
+**Fixtures:**
 - `examples/regressions/nested_generic_construct/` — `type Cell<T> = class { intern v: T; pub fn make(x: T) -> Cell<T> { Cell { v = x } }; pub fn read(self) -> T { self.v } }` + `type Holder<T> = class { intern c: Cell<T>; pub fn make(x: T) -> Holder<T> { Holder { c = Cell<T>::make(x) } }; pub fn get(self) -> T { self.c.read() } }`; `Holder<i64>::make(9).get()` → **exit 9**. "not visible bare" today, passes both after.
 - Fold-in note (report in PR body): after #2, `Map<V>` MAY adopt a `[]Entry<V>` single-array store (map.tks's parallel-array workaround comment is the witness) — DO NOT rewrite Map here; report the unblock. Parallel arrays remain a valid representation, so this is a nicety, not required.
 
@@ -330,8 +330,8 @@ fn nested_phantom_inst_name(nested_base: str, owner_tparams: []str) -> str { /* 
 ## LAW / RISK NOTES
 
 - **D22 (constraint = monomorphization gate, NOT dynamic vtable) — the load-bearing law for #1.** The structural-trait synthetic interface (crumb 1.2, option A) must NEVER lower to a runtime `tk_vt_<K>_<Trait>` for a struct/primitive `K`; crumb 1.4 rewrites every `k.hash()`/`k.eq()` on a concrete-bound `K` to a DIRECT builtin/stamped-method call at mono. This is the SAME ruling D22 ratified for #294 structs, extended from user contracts to compiler-known structural traits — **no new owner HALT** (logged for LTS review as an extension of D22). Dynamic vtable dispatch stays class-only, unchanged.
-- **No-GC / native-authoritative (`teko-no-gc-vm-role`):** every fix is a compile-time stamp/re-key/emit change; no runtime metadata, no allocation-model change. Native is authoritative on divergence; every fixture is VM==native.
-- **OOP hard-cut interaction (D27-owner, RATIFIED 2026-07-06):** the `this`/`base`/`static` hard-cut is a PURE FRONT-END RENAME (receiver = `params[0]` positional; codegen/VM read positionally, never by name) → codegen/VM byte-identical → **orthogonal to and fixpoint-safe against every fix here** (#254/#294 needed zero change; so do these). BUT the hard-cut's mechanical codemod WILL rewrite generic-class method bodies (rename `self`→`this`). **Sequencing:** these five fixes are SEMANTIC (dispatch/emit/resolve); the hard-cut is SYNTACTIC (rename). Land the flagship chain (#3→#1) and #4/#5 on the OLD syntax (as #163 did), then let the hard-cut codemod rewrite the corpus atomically (D27-owner's plan). If the hard-cut lands FIRST, these snippets' `self` receivers become `this` — a trivial rename in the fixtures, no logic change. **No law tension.** Recommend: hard-cut BEFORE #2 (the widest, latest), so #2's new fixtures are written in the new syntax once.
+- **No-GC / native-authoritative:** every fix is a compile-time stamp/re-key/emit change; no runtime metadata, no allocation-model change. The native backend is authoritative; all fixtures are verified against it.
+- **OOP hard-cut interaction (D27-owner, RATIFIED 2026-07-06):** the `this`/`base`/`static` hard-cut is a PURE FRONT-END RENAME (receiver = `params[0]` positional; codegen reads it positionally, never by name) → encoding byte-identical → **orthogonal to and fixpoint-safe against every fix here** (#254/#294 needed zero change; so do these). BUT the hard-cut's mechanical codemod WILL rewrite generic-class method bodies (rename `self`→`this`). **Sequencing:** these five fixes are SEMANTIC (dispatch/emit/resolve); the hard-cut is SYNTACTIC (rename). Land the flagship chain (#3→#1) and #4/#5 on the OLD syntax (as #163 did), then let the hard-cut codemod rewrite the corpus atomically (D27-owner's plan). If the hard-cut lands FIRST, these snippets' `self` receivers become `this` — a trivial rename in the fixtures, no logic change. **No law tension.** Recommend: hard-cut BEFORE #2 (the widest, latest), so #2's new fixtures are written in the new syntax once.
 - **Risk — the structural-trait table registration (crumb 1.2) is the widest table change.** Mitigation: the five synthetic decls are INERT unless a constraint names one; the `any_generic` guard + gen1==gen2 is the loud tripwire (the compiler corpus derives structural traits from #177 but never CONSTRAINS a type param on one). Verify the no-op at crumb 1.2 in isolation before 1.3/1.4.
 - **Risk — `#254 L4 Env.expected_ret` churn** (DECISION_LOG.md:245, "alta rotatividade") is ADJACENT: #2's return-position nested construct may lean on the same expected-type thread. If L4's `Env` field is still open, #2's checker crumb must set `env.expected_ret` for the nested construct's return-typed field — sequence #2 AFTER L4 is confirmed stable. Reported, not turned into a new issue.
 - **Risk — the #296 lesson (count sites, do not trust "1 crumb").** Verified counts are in the root-cause table; every fix here is 1–4 sites, re-verified at file:line. The one to eyeball hardest is #1 crumb 1.2 (three interface-plumbing sites collapse to ZERO new arms under option A — confirm `is_interface_name`/`iface_methods_by_name`/`resolve_iface_dispatch` all light up for the registered synthetic decls).

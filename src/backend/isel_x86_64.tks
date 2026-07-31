@@ -162,6 +162,15 @@ const RAX_X86: MReg = preg(0, MRegClass::GPR)
 const RCX_X86: MReg = preg(1, MRegClass::GPR)
 
 /**
+ * XMM0_X86 — the physical XMM0 register (FPR id 0), the SysV/Win64 float
+ * RESULT register isel pins at a value return whose recorded `class_of` is
+ * FPR (`B1-fp`) — the float twin of `RAX_X86`, and (index 0) also the ABI's
+ * first float ARGUMENT register (`SYSV64.fpr_arg`/`WIN64.fpr_arg`), unlike
+ * RAX/RDI's split. A flat-POD `MReg` aggregate const (#594 crumb 9b).
+ */
+const XMM0_X86: MReg = preg(0, MRegClass::FPR)
+
+/**
  * select_const_int_x86 — the `LConstInt` selection: one `mov r64, imm` (the
  * encoder later narrows to `mov r32, imm32` / `movabs r64, imm64` from the
  * value). Defaults to the widest, no-information-loss 64-bit form, matching
@@ -180,18 +189,41 @@ fn select_const_int_x86(ctx0: SelCtxX86, inst: lir::LInst, c: lir::LConstInt) ->
 }
 
 /**
- * select_const_float_x86 — the `LConstFloat` selection: materializing an IEEE
- * bit pattern into an XMM register needs the SSE move family, the `B1-fp`
- * honest-stop (0.3.1). The integer/control/memory corpus never reaches it (the
- * exit(n) fixtures carry no float literal).
+ * select_const_float_x86 — the `LConstFloat` selection: materialize its IEEE
+ * bit pattern into a scratch GPR (`movabs`, exactly `select_const_int_x86`'s
+ * own materialization), then `MFMovX86` it across the GPR/FPR boundary into
+ * an FPR (a `MOVQ xmm, r64` at encode, `B1-fp`, mirroring arm64's
+ * `select_const_float`/`FMOV`).
  *
- * @param SelCtxX86 ctx0  the context (unused — the op honest-stops)
- * @param lir::LInst inst  the enclosing instruction (unused)
- * @param lir::LConstFloat c  the float constant op (unused)
- * @return SelCtxX86 | error  always the `B1-fp` honest-stop
+ * `LConstFloat.bits` is always the f64 pattern, so an `f32`-declared literal
+ * (`!c.wide`) needs one more step: the f64 value is NARROWED by `CVTSD2SS`
+ * (`select_ftof_x86`'s own narrowing instruction) into the result, which is the
+ * same correctly-rounded conversion a C compiler performs on
+ * `float f = <double literal>;`. Skipping it is the bug that made
+ * `let f: f32 = 2.5` compare unequal to `2.5` on this backend while the C route
+ * said equal — the value was an f64 pattern in a register everything downstream
+ * then read at single width.
+ *
+ * `c.bits` is decoded through `decode_signed64` FIRST (not widened directly) so
+ * the GPR staging value is the exact signed two's-complement i64 reading of the
+ * IEEE bit pattern.
+ *
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param lir::LConstFloat c  the float constant op
+ * @return SelCtxX86  the advanced context
  */
-fn select_const_float_x86(ctx0: SelCtxX86, inst: lir::LInst, c: lir::LConstFloat) -> SelCtxX86 | error {
-    error { message = "isel x86-64: B1-fp — a float literal materializes into an XMM register via the SSE move family, the float honest-stop (0.3.1)" }
+fn select_const_float_x86(ctx0: SelCtxX86, inst: lir::LInst, c: lir::LConstFloat) -> SelCtxX86 {
+    let dst = vreg(inst.result, MRegClass::FPR)
+    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::FPR, c.wide)
+    let scratch = selctx_x86_scratch(ctx1, MRegClass::GPR)
+    let ctx2 = selctx_x86_emit(scratch.ctx, movimm_x86(scratch.reg, decode_signed64(c.bits), true))
+    if c.wide {
+        return selctx_x86_emit(ctx2, fmov_x86(dst, scratch.reg, true))
+    }
+    let staged = selctx_x86_scratch(ctx2, MRegClass::FPR)
+    let ctx3 = selctx_x86_emit(staged.ctx, fmov_x86(staged.reg, scratch.reg, true))
+    selctx_x86_emit(ctx3, cvt_x86(MCvtOpX86::Cvtsd2ss, dst, staged.reg))
 }
 
 /**
@@ -311,31 +343,136 @@ fn select_icmp_x86(ctx0: SelCtxX86, inst: lir::LInst, cond: MCond, a: u32, b: u3
 }
 
 /**
- * bin_fp_stop_x86 — the shared `B1-fp` honest-stop every float `LBin` case
- * (float ALU + float compare used as a value) routes through: the SSE float
- * family is deferred to 0.3.1 (mirrors `A4-fp`).
+ * select_falu_x86 — the two-address `dst = dst <op> src` selection shared by
+ * every float `LBinOp` arithmetic case (`B1-fp`): a preceding `MFMovX86` seeds
+ * `dst` (fresh) with the left operand (x86's `ADDSD`/… is destructive, exactly
+ * `select_alu_x86`'s integer copy-first pattern, §4.2), then the two-address
+ * `MFAluX86`.
  *
- * @return SelCtxX86 | error  always the `B1-fp` honest-stop
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param MFAluOpX86 op  the SSE ALU mnemonic (FAdd/FSub/FMul/FDiv)
+ * @param a  the left-operand VReg (copied into dst)
+ * @param b  the right-operand VReg (the RMW source)
+ * @param bool dbl  true for the f64 form, false for the f32 form
+ * @return SelCtxX86  the advanced context
  */
-fn bin_fp_stop_x86() -> SelCtxX86 | error {
-    error { message = "isel x86-64: B1-fp — an SSE float ALU/compare op is the float-family honest-stop (0.3.1)" }
+fn select_falu_x86(ctx0: SelCtxX86, inst: lir::LInst, op: MFAluOpX86, a: u32, b: u32, dbl: bool) -> SelCtxX86 {
+    let dst = vreg(inst.result, MRegClass::FPR)
+    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::FPR, dbl)
+    let ctx2 = selctx_x86_emit(ctx1, fmov_x86(dst, vreg(a, MRegClass::FPR), dbl))
+    selctx_x86_emit(ctx2, falu_x86(op, dst, vreg(b, MRegClass::FPR), dbl))
+}
+
+/**
+ * select_fcmp_value_x86 — a float compare `LBinOp` used as a plain VALUE, into
+ * `dst` (`B1-fp`). `<`/`<=`/`>`/`>=` swap `a`/`b` into the compare and land on
+ * the CF-based `HI`/`HS` condition (`MFCmpX86`'s own doc explains why the
+ * unordered/NaN result is then uniformly false, matching the swap-free `>`/`>=`
+ * forms exactly). `==`/`!=` need the parity-aware composite `MSetccX86` alone
+ * cannot express — `UCOMISD` also sets ZF on an UNORDERED (NaN) compare, so a
+ * bare `sete` would call a NaN "equal to itself": `==` ANDs the ZF-based
+ * `sete` with `MSetPX86{is_np=true}` (ordered), `!=` ORs the ZF-based `setne`
+ * with `MSetPX86{is_np=false}` (unordered) — each writing `dst` a second time,
+ * the same two-address-destination idiom every RMW case in this file already
+ * uses.
+ *
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param MReg dst  the destination register (the enclosing instruction's result)
+ * @param MCond cond  the condition code the source opcode picks (EQ/NE/LT/LE/GT/GE)
+ * @param a  the first compared VReg
+ * @param b  the second compared VReg
+ * @param bool dbl  the compared operands' width (true for the f64 form)
+ * @return SelCtxX86  the advanced context
+ */
+fn select_fcmp_value_x86(ctx0: SelCtxX86, dst: MReg, cond: MCond, a: u32, b: u32, dbl: bool) -> SelCtxX86 {
+    let av = vreg(a, MRegClass::FPR)
+    let bv = vreg(b, MRegClass::FPR)
+    match cond {
+        EQ => {
+            let ctx1 = selctx_x86_emit(ctx0, fcmp_x86(av, bv, dbl))
+            let ctx2 = selctx_x86_emit(ctx1, setcc_x86(dst, MCond::EQ))
+            let ordered = selctx_x86_scratch(ctx2, MRegClass::GPR)
+            let ctx3 = selctx_x86_emit(ordered.ctx, setp_x86(ordered.reg, true))
+            selctx_x86_emit(ctx3, alu_rm_x86(MAluOpX86::And, dst, ordered.reg, false))
+        }
+        NE => {
+            let ctx1 = selctx_x86_emit(ctx0, fcmp_x86(av, bv, dbl))
+            let ctx2 = selctx_x86_emit(ctx1, setcc_x86(dst, MCond::NE))
+            let unordered = selctx_x86_scratch(ctx2, MRegClass::GPR)
+            let ctx3 = selctx_x86_emit(unordered.ctx, setp_x86(unordered.reg, false))
+            selctx_x86_emit(ctx3, alu_rm_x86(MAluOpX86::Or, dst, unordered.reg, false))
+        }
+        LT => {
+            let ctx1 = selctx_x86_emit(ctx0, fcmp_x86(bv, av, dbl))
+            selctx_x86_emit(ctx1, setcc_x86(dst, MCond::HI))
+        }
+        LE => {
+            let ctx1 = selctx_x86_emit(ctx0, fcmp_x86(bv, av, dbl))
+            selctx_x86_emit(ctx1, setcc_x86(dst, MCond::HS))
+        }
+        GT => {
+            let ctx1 = selctx_x86_emit(ctx0, fcmp_x86(av, bv, dbl))
+            selctx_x86_emit(ctx1, setcc_x86(dst, MCond::HI))
+        }
+        GE => {
+            let ctx1 = selctx_x86_emit(ctx0, fcmp_x86(av, bv, dbl))
+            selctx_x86_emit(ctx1, setcc_x86(dst, MCond::HS))
+        }
+        LO => {
+            let ctx1 = selctx_x86_emit(ctx0, fcmp_x86(bv, av, dbl))
+            selctx_x86_emit(ctx1, setcc_x86(dst, MCond::HI))
+        }
+        LS => {
+            let ctx1 = selctx_x86_emit(ctx0, fcmp_x86(bv, av, dbl))
+            selctx_x86_emit(ctx1, setcc_x86(dst, MCond::HS))
+        }
+        HI => {
+            let ctx1 = selctx_x86_emit(ctx0, fcmp_x86(av, bv, dbl))
+            selctx_x86_emit(ctx1, setcc_x86(dst, MCond::HI))
+        }
+        HS => {
+            let ctx1 = selctx_x86_emit(ctx0, fcmp_x86(av, bv, dbl))
+            selctx_x86_emit(ctx1, setcc_x86(dst, MCond::HS))
+        }
+    }
+}
+
+/**
+ * select_fcmp_x86 — a float compare `LBinOp` used as a plain VALUE (not fused
+ * into a branch): sets the destination's `class_of` to GPR (booleans are
+ * always GPR, matching `select_icmp_x86`) then delegates to
+ * `select_fcmp_value_x86` (`B1-fp`).
+ *
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param MCond cond  the condition code the source opcode picks
+ * @param a  the first compared VReg
+ * @param b  the second compared VReg
+ * @param bool dbl  the compared operands' width (true for the f64 form)
+ * @return SelCtxX86  the advanced context
+ */
+fn select_fcmp_x86(ctx0: SelCtxX86, inst: lir::LInst, cond: MCond, a: u32, b: u32, dbl: bool) -> SelCtxX86 {
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::GPR, false)
+    select_fcmp_value_x86(ctx1, dst, cond, a, b, dbl)
 }
 
 /**
  * select_bin_x86 — the `LBin` dispatch (§4.1/§4.2): the two-address integer
- * arithmetic/bitwise selection, the fixed-register div/rem, the CL-count shift,
- * and the value-producing compare — each float case honest-stops via the `_`
- * arm (`bin_fp_stop_x86`). A compare fused into a branch (its result read
- * exactly once, as that branch's condition) emits NOTHING here — the branch
- * re-emits the compare (`select_branch_x86`). `wide` is read from the first
- * operand's recorded `class_of` entry (an SSA guarantee: the operand was
- * selected before this use).
+ * arithmetic/bitwise selection, the fixed-register div/rem, the CL-count
+ * shift, the value-producing integer/float compare, and the two-address float
+ * ALU (`B1-fp`, closed 2026-07-29). A compare fused into a branch (its result
+ * read exactly once, as that branch's condition) emits NOTHING here — the
+ * branch re-emits the compare (`select_branch_x86`). `wide`/`dbl` is read
+ * from the first operand's recorded `class_of` entry (an SSA guarantee: the
+ * operand was selected before this use).
  *
  * @param SelCtxX86 ctx0  the context to extend
  * @param lir::LFunc f  the enclosing function (the fusion test reads its uses)
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
  * @param lir::LBin b  the binary op
- * @return SelCtxX86 | error  the advanced context, or a `B1-fp` honest-stop
+ * @return SelCtxX86 | error  the advanced context
  */
 fn select_bin_x86(ctx0: SelCtxX86, f: lir::LFunc, inst: lir::LInst, b: lir::LBin) -> SelCtxX86 | error {
     if cmp_kind_of(b.op).is_cmp && is_fused_compare(f, inst.result) {
@@ -366,7 +503,16 @@ fn select_bin_x86(ctx0: SelCtxX86, f: lir::LFunc, inst: lir::LInst, b: lir::LBin
         lir::LBinOp::ICmpGtU => select_icmp_x86(ctx0, inst, MCond::HI, b.a, b.b, a_info.wide)
         lir::LBinOp::ICmpGeS => select_icmp_x86(ctx0, inst, MCond::GE, b.a, b.b, a_info.wide)
         lir::LBinOp::ICmpGeU => select_icmp_x86(ctx0, inst, MCond::HS, b.a, b.b, a_info.wide)
-        _ => bin_fp_stop_x86()
+        lir::LBinOp::FAdd => select_falu_x86(ctx0, inst, MFAluOpX86::FAdd, b.a, b.b, a_info.wide)
+        lir::LBinOp::FSub => select_falu_x86(ctx0, inst, MFAluOpX86::FSub, b.a, b.b, a_info.wide)
+        lir::LBinOp::FMul => select_falu_x86(ctx0, inst, MFAluOpX86::FMul, b.a, b.b, a_info.wide)
+        lir::LBinOp::FDiv => select_falu_x86(ctx0, inst, MFAluOpX86::FDiv, b.a, b.b, a_info.wide)
+        lir::LBinOp::FCmpEq => select_fcmp_x86(ctx0, inst, MCond::EQ, b.a, b.b, a_info.wide)
+        lir::LBinOp::FCmpNe => select_fcmp_x86(ctx0, inst, MCond::NE, b.a, b.b, a_info.wide)
+        lir::LBinOp::FCmpLt => select_fcmp_x86(ctx0, inst, MCond::LT, b.a, b.b, a_info.wide)
+        lir::LBinOp::FCmpLe => select_fcmp_x86(ctx0, inst, MCond::LE, b.a, b.b, a_info.wide)
+        lir::LBinOp::FCmpGt => select_fcmp_x86(ctx0, inst, MCond::GT, b.a, b.b, a_info.wide)
+        lir::LBinOp::FCmpGe => select_fcmp_x86(ctx0, inst, MCond::GE, b.a, b.b, a_info.wide)
     }
 }
 
@@ -425,97 +571,283 @@ fn select_identity_mov_x86(ctx0: SelCtxX86, inst: lir::LInst, a: u32, wide: bool
 }
 
 /**
- * un_fp_stop_x86 — the shared `B1-fp` honest-stop every float `LUn` case
- * (`FNeg`/`IToF`/`FToI`/`FToF`) routes through: the SSE convert/negate family
- * is deferred to 0.3.1.
+ * f64_sign_bit_mask_x86 — the IEEE-754 f64 sign-bit pattern
+ * (`0x8000000000000000`, `i64::MIN`'s two's-complement image) `select_fneg_x86`
+ * XORs into an f64 value's raw bits to flip its sign — the true IEEE negate
+ * (unlike `0 - x`, which mis-signs a zero operand in round-to-nearest). Reuses
+ * `MINST_I64_MIN` (`minst_interp.tks`, the same GPR-staging constant
+ * `select_const_float_x86`'s sibling `decode_signed64` is built from) rather
+ * than a fresh literal — `i64::MIN`'s own magnitude has no positive `i64` form,
+ * so the two-step subtraction trick would only duplicate an already-named one.
  *
- * @return SelCtxX86 | error  always the `B1-fp` honest-stop
+ * @return i64  the f64 sign-bit mask
  */
-fn un_fp_stop_x86() -> SelCtxX86 | error {
-    error { message = "isel x86-64: B1-fp — an SSE float negate/convert op is the float-family honest-stop (0.3.1)" }
+fn f64_sign_bit_mask_x86() -> i64 {
+    MINST_I64_MIN
+}
+
+/**
+ * f32_sign_bit_mask_x86 — the IEEE-754 f32 sign-bit pattern (`0x80000000`)
+ * `select_fneg_x86` XORs into an f32 value's raw bits to flip its sign, at the
+ * 32-bit width `alu_rm_x86(..., wide=false)` operates over. Built the same way
+ * `fits_i32_x86` builds `INT32_MIN` — a positive magnitude const subtracted,
+ * since `-2147483648` has no positive `i64`-literal counterpart either — so the
+ * 32-bit XOR's low bits read exactly `0x80000000` regardless of the full `i64`
+ * carrier's own (irrelevant, since `wide=false` only ever reads the low 32
+ * bits) upper half.
+ *
+ * @return i64  the f32 sign-bit mask (low 32 bits are the f32 sign bit)
+ */
+fn f32_sign_bit_mask_x86() -> i64 {
+    (0) - X86_IMM32_MIN_MAGNITUDE
+}
+
+/**
+ * select_fneg_x86 — the `FNeg` selection (`B1-fp`): x86 has no scalar float
+ * negate instruction, so the sign bit is flipped by round-tripping through a
+ * GPR — extract the raw bits (`MFMovX86` FPR->GPR), XOR the sign-bit mask
+ * (the two-address `MAluRmX86`, exactly the integer `INeg`/`INot` shape), then
+ * write the flipped bits back into a fresh FPR result (`MFMovX86` GPR->FPR).
+ * Bit-XOR is the TRUE IEEE negate (correct at zero and NaN alike), unlike a
+ * `0 - a` subtraction.
+ *
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param a  the operand VReg
+ * @param bool dbl  true for the f64 form, false for the f32 form
+ * @return SelCtxX86  the advanced context
+ */
+fn select_fneg_x86(ctx0: SelCtxX86, inst: lir::LInst, a: u32, dbl: bool) -> SelCtxX86 {
+    let bits = selctx_x86_scratch(ctx0, MRegClass::GPR)
+    let ctx1 = selctx_x86_emit(bits.ctx, fmov_x86(bits.reg, vreg(a, MRegClass::FPR), dbl))
+    let mask = selctx_x86_scratch(ctx1, MRegClass::GPR)
+    let mask_val = if dbl { f64_sign_bit_mask_x86() } else { f32_sign_bit_mask_x86() }
+    let ctx2 = selctx_x86_emit(mask.ctx, movimm_x86(mask.reg, mask_val, dbl))
+    let ctx3 = selctx_x86_emit(ctx2, alu_rm_x86(MAluOpX86::Xor, bits.reg, mask.reg, dbl))
+    let dst = vreg(inst.result, MRegClass::FPR)
+    let ctx4 = selctx_x86_set_vinfo(ctx3, inst.result, MRegClass::FPR, dbl)
+    selctx_x86_emit(ctx4, fmov_x86(dst, bits.reg, dbl))
+}
+
+/**
+ * select_itof_x86 — the `IToF` selection (`B1-fp`): one `CVTSI2SD` (signed
+ * source — `LUnOp` declares no unsigned `IToF` variant, so signed is the total,
+ * documented default). Always the f64/wide result, and that is now exact rather
+ * than a default: an `int to f32` cast is decomposed by the lowering into this
+ * `IToF` followed by an `FToF` narrowing (`lower.tks`'s
+ * `int_to_narrow_float_cast`), so `IToF` alone never has to produce a single.
+ *
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param a  the GPR operand VReg
+ * @return SelCtxX86  the advanced context
+ */
+fn select_itof_x86(ctx0: SelCtxX86, inst: lir::LInst, a: u32) -> SelCtxX86 {
+    let dst = vreg(inst.result, MRegClass::FPR)
+    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::FPR, true)
+    selctx_x86_emit(ctx1, cvt_x86(MCvtOpX86::Cvtsi2sd, dst, vreg(a, MRegClass::GPR)))
+}
+
+/**
+ * select_ftoi_x86 — the `FToI` selection (`B1-fp`): one truncating, signed
+ * `CVTTSD2SI` or `CVTTSS2SI`, picked by the OPERAND's own recorded float width —
+ * reading an `f32` value with the double-precision form would decode its 32 live
+ * bits as the low half of a double and truncate to nonsense. The i64 destination
+ * is `select_itof_x86`'s documented widest default in the other direction.
+ *
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param a  the FPR operand VReg
+ * @param bool a_wide  the operand's own recorded float width (true f64, false f32)
+ * @return SelCtxX86  the advanced context
+ */
+fn select_ftoi_x86(ctx0: SelCtxX86, inst: lir::LInst, a: u32, a_wide: bool) -> SelCtxX86 {
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::GPR, true)
+    let op = if a_wide { MCvtOpX86::Cvttsd2si } else { MCvtOpX86::Cvttss2si }
+    selctx_x86_emit(ctx1, cvt_x86(op, dst, vreg(a, MRegClass::FPR)))
+}
+
+/**
+ * select_ftof_x86 — the `FToF` selection (`B1-fp`): one `CVTSD2SS`/`CVTSS2SD`,
+ * the direction picked from the OPERAND's own recorded width (`a_wide`). Sound
+ * because the lowering never emits an identity `FToF` (`lower.tks`'s
+ * `is_same_width_float_cast` returns the operand unchanged instead), so the two
+ * widths always differ and "not the operand's width" names exactly one target.
+ *
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param a  the FPR operand VReg
+ * @param bool a_wide  the operand's own recorded width (true narrows f64->f32,
+ *                     false widens f32->f64)
+ * @return SelCtxX86  the advanced context
+ */
+fn select_ftof_x86(ctx0: SelCtxX86, inst: lir::LInst, a: u32, a_wide: bool) -> SelCtxX86 {
+    let dst_wide = !a_wide
+    let op = if a_wide { MCvtOpX86::Cvtsd2ss } else { MCvtOpX86::Cvtss2sd }
+    let dst = vreg(inst.result, MRegClass::FPR)
+    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::FPR, dst_wide)
+    selctx_x86_emit(ctx1, cvt_x86(op, dst, vreg(a, MRegClass::FPR)))
 }
 
 /**
  * select_un_x86 — the `LUn` dispatch (§4.1): the two-address integer
  * negate/complement, the identity move for the extend/truncate ops, and the
- * `B1-fp` honest-stop for the float negate/convert family (the `_` arm).
+ * float negate/convert family (`B1-fp`, closed 2026-07-29).
  *
  * @param SelCtxX86 ctx0  the context to extend
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
  * @param lir::LUn u  the unary op
- * @return SelCtxX86 | error  the advanced context, or a `B1-fp` honest-stop
+ * @return SelCtxX86  the advanced context
  */
-fn select_un_x86(ctx0: SelCtxX86, inst: lir::LInst, u: lir::LUn) -> SelCtxX86 | error {
+fn select_un_x86(ctx0: SelCtxX86, inst: lir::LInst, u: lir::LUn) -> SelCtxX86 {
     let a_info = vinfo_get(ctx0.vinfo, u.a)
     match u.op {
         lir::LUnOp::INeg => select_ineg_x86(ctx0, inst, u.a, a_info.wide)
         lir::LUnOp::INot => select_inot_x86(ctx0, inst, u.a, a_info.wide)
+        lir::LUnOp::FNeg => select_fneg_x86(ctx0, inst, u.a, a_info.wide)
         lir::LUnOp::Trunc => select_identity_mov_x86(ctx0, inst, u.a, false)
         lir::LUnOp::ZExt => select_identity_mov_x86(ctx0, inst, u.a, a_info.wide)
         lir::LUnOp::SExt => select_identity_mov_x86(ctx0, inst, u.a, a_info.wide)
-        _ => un_fp_stop_x86()
+        lir::LUnOp::IToF => select_itof_x86(ctx0, inst, u.a)
+        lir::LUnOp::FToI => select_ftoi_x86(ctx0, inst, u.a, a_info.wide)
+        lir::LUnOp::FToF => select_ftof_x86(ctx0, inst, u.a, a_info.wide)
     }
 }
 
 /**
+ * arg_slot_size_x86 — the memory transfer width one stack-argument slot uses for
+ * a value of the given register file and recorded width (`B1-args`): the GPR
+ * widths `Q`/`D` and the float widths `F64`/`F32`, exactly mirroring what the
+ * REGISTER path would have moved for the same value (`mov`/`fmov` at `wide`), so
+ * a value that overflows the register window is transferred at the identical
+ * width it would have travelled in.
+ *
+ * @param MRegClass reg_class  the value's register file
+ * @param bool wide  the value's recorded width (true for the 64-bit form)
+ * @return MMemSizeX86  the stack-slot transfer width
+ */
+fn arg_slot_size_x86(reg_class: MRegClass, wide: bool) -> MMemSizeX86 {
+    if reg_class == MRegClass::FPR {
+        return if wide { MMemSizeX86::F64 } else { MMemSizeX86::F32 }
+    }
+    if wide { MMemSizeX86::Q } else { MMemSizeX86::D }
+}
+
+/**
+ * param_class_index_x86 — the index parameter `index` occupies inside its own
+ * register file's argument window, under the target ABI's slot-numbering rule
+ * (`B3-argslot`).
+ *
+ * SysV counts the two files INDEPENDENTLY, so the answer is how many earlier
+ * parameters share this one's register class. Win64 numbers BOTH files by ONE
+ * shared argument POSITION — argument 1 is RDX *or* XMM1, never XMM0 — so the
+ * answer is the position itself. Reading the rule off the descriptor is what makes
+ * one isel correct on both, instead of writing SysV's numbering into a Win64
+ * object.
+ *
+ * @param AbiDescriptor abi  the target ABI register file (its slot-numbering rule)
+ * @param []lir::LType param_types  the function's parameter machine classes
+ * @param u32 index  the parameter position to resolve
+ * @return u32  the index to look up in that class's argument-register window
+ */
+fn param_class_index_x86(abi: AbiDescriptor, param_types: []lir::LType, index: u32) -> u32 {
+    if abi.arg_slots_shared { return index }
+    if mregclass_of_ltype(param_types[index to u64]) == MRegClass::FPR {
+        return fpr_index_before(param_types, index)
+    }
+    gpr_index_before(param_types, index)
+}
+
+/**
+ * stack_index_before — how many of `param_types[0..index)` overflowed their
+ * class's argument-register window and therefore live in the caller's stack-arg
+ * area (`B1-args`). Both x86-64 ABIs assign in declaration order and place an
+ * overflowing argument in the next free stack slot regardless of its class, so
+ * ONE counter over both register files gives the slot index — which is why this
+ * is not simply `index - window`. Each parameter's window index comes from
+ * `param_class_index_x86`, so this count agrees with the caller's own
+ * `store_stack_args_x86` under either slot-numbering rule.
+ *
+ * @param AbiDescriptor abi  the target ABI register file (its two window sizes)
+ * @param []lir::LType param_types  the function's parameter machine classes
+ * @param u32 index  the parameter position to count up to (exclusive)
+ * @return u32  the stack-arg slot index this parameter would occupy
+ */
+fn stack_index_before(abi: AbiDescriptor, param_types: []lir::LType, index: u32) -> u32 {
+    mut count: u32 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= index { break }
+        let cls = mregclass_of_ltype(param_types[i])
+        if !arg_reg(abi, cls, param_class_index_x86(abi, param_types, i to u32)).ok { count++ }
+        i++
+    }
+    count
+}
+
+/**
  * select_param_x86 — the `LParam` selection (§4.5): move the target ABI's
- * integer argument register for the parameter's GPR-class index (SysV
- * RDI/RSI/RDX/RCX/R8/R9; Win64 RCX/RDX/R8/R9), read through `arg_reg(abi, ...)`
- * because neither argument sequence is the contiguous encoding order, into the
- * parameter's VReg. The `abi` descriptor is threaded from the emit driver, so
- * the SAME isel code receives arguments in SysV registers on x86-linux and in
- * the Win64 registers on x86_64-windows (the byte-identical SysV path passes
- * `SYSV64`, exactly the descriptor the old hardcode named). A float-class
- * parameter needs an XMM move (the `B1-fp` stop), and a parameter past the
- * ABI's integer-argument register window the stack-arg slot (the `B1-args`
- * stop).
+ * argument register — GPR (SysV RDI/RSI/RDX/RCX/R8/R9; Win64 RCX/RDX/R8/R9)
+ * or FPR (XMM0..7; XMM0..3 on Win64), classified by the descriptor's own
+ * slot-numbering rule (`param_class_index_x86` — independently per register file
+ * on SysV, exactly like arm64's `select_param`; by shared argument position on
+ * Win64, `B3-argslot`) (`B1-fp`) — read through
+ * `arg_reg(abi, ...)` because neither argument sequence is the contiguous
+ * encoding order, into the parameter's VReg via `MMovX86`/`MFMovX86`. The
+ * `abi` descriptor is threaded from the emit driver, so the SAME isel code
+ * receives arguments in SysV registers on x86-linux and in the Win64
+ * registers on x86_64-windows (the byte-identical SysV path passes `SYSV64`,
+ * exactly the descriptor the old hardcode named). A parameter past its class's
+ * argument-register window arrives in the caller's stack-arg area instead and is
+ * loaded from there by `MInArgX86` (`B1-args`, closed 2026-07-29).
  *
  * @param AbiDescriptor abi  the target ABI register file (SysV or Win64)
  * @param SelCtxX86 ctx0  the context to extend
  * @param lir::LFunc f  the enclosing function (its `param_types`)
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
  * @param lir::LParam p  the parameter op
- * @return SelCtxX86 | error  the advanced context, or a NAMED honest-stop
+ * @return SelCtxX86 | error  the advanced context, or an internal-invariant error
  */
 fn select_param_x86(abi: AbiDescriptor, ctx0: SelCtxX86, f: lir::LFunc, inst: lir::LInst, p: lir::LParam) -> SelCtxX86 | error {
     if p.index >= f.param_types.len {
         return error { message = "isel x86-64: param index out of range (internal)" }
     }
     let ty = f.param_types[p.index to u64]
-    if mregclass_of_ltype(ty) == MRegClass::FPR {
-        return error { message = "isel x86-64: B1-fp — a float parameter arrives in an XMM register via an SSE move, the float honest-stop (0.3.1)" }
-    }
-    let class_index = gpr_index_before(f.param_types, p.index)
-    let slot = arg_reg(abi, MRegClass::GPR, class_index)
-    if !slot.ok {
-        return error { message = "isel x86-64: B1-args — an integer parameter past the ABI's argument-register window needs the stack-arg slot (0.3.1)" }
-    }
+    let reg_class = mregclass_of_ltype(ty)
     let wide = ltype_is_wide(ty)
-    let dst = vreg(inst.result, MRegClass::GPR)
-    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::GPR, wide)
-    selctx_x86_emit(ctx1, mov_x86(dst, slot.reg, wide))
+    let is_fpr = reg_class == MRegClass::FPR
+    let slot = arg_reg(abi, reg_class, param_class_index_x86(abi, f.param_types, p.index))
+    let dst = vreg(inst.result, reg_class)
+    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, reg_class, wide)
+    if !slot.ok {
+        let stack_index = stack_index_before(abi, f.param_types, p.index)
+        return selctx_x86_emit(ctx1, in_arg_x86(arg_slot_size_x86(reg_class, wide), dst, stack_index))
+    }
+    let mv = if is_fpr { fmov_x86(dst, slot.reg, wide) } else { mov_x86(dst, slot.reg, wide) }
+    selctx_x86_emit(ctx1, mv)
 }
 
 /**
  * select_ret_x86 — the `LRet` selection (§4.5): for a value-carrying return,
- * pin the returned VReg into the SysV integer result register RAX (decision
- * D-A — the result register is NOT the first argument register) via `mov`, then
- * emit `ret`; a void return emits `ret` alone. A float return pins XMM0 via an
- * SSE move (the `B1-fp` stop).
+ * pin the returned VReg's current value into the ABI's result register — RAX
+ * (decision D-A — the result register is NOT the first argument register) or
+ * XMM0 (`B1-fp`), by its recorded `class_of` — via `MMovX86`/`MFMovX86`, then
+ * emit `ret`; a void return emits `ret` alone.
  *
  * @param SelCtxX86 ctx0  the context to extend
  * @param lir::LRet r  the return op
- * @return SelCtxX86 | error  the advanced context, or a `B1-fp` honest-stop
+ * @return SelCtxX86  the advanced context
  */
-fn select_ret_x86(ctx0: SelCtxX86, r: lir::LRet) -> SelCtxX86 | error {
+fn select_ret_x86(ctx0: SelCtxX86, r: lir::LRet) -> SelCtxX86 {
     if !r.has_value {
         return selctx_x86_emit(ctx0, ret_x86())
     }
     let info = vinfo_get(ctx0.vinfo, r.value)
-    if info.reg_class == MRegClass::FPR {
-        return error { message = "isel x86-64: B1-fp — a float return pins XMM0 via an SSE move, the float honest-stop (0.3.1)" }
-    }
-    let ctx1 = selctx_x86_emit(ctx0, mov_x86(RAX_X86, vreg(r.value, MRegClass::GPR), info.wide))
+    let is_fpr = info.reg_class == MRegClass::FPR
+    let pinned = if is_fpr { XMM0_X86 } else { RAX_X86 }
+    let mv = if is_fpr { fmov_x86(pinned, vreg(r.value, MRegClass::FPR), info.wide) } else { mov_x86(pinned, vreg(r.value, MRegClass::GPR), info.wide) }
+    let ctx1 = selctx_x86_emit(ctx0, mv)
     selctx_x86_emit(ctx1, ret_x86())
 }
 
@@ -540,8 +872,8 @@ fn selctx_x86_set_block_param(ctx: SelCtxX86, block_id: u32, index: u32, reg: MR
  * sequential copy is correct by construction: a block param is always a FRESH
  * VReg (from `add_block_param`), disjoint from every jump arg, so no source is
  * also a destination and no cycle can arise. Each move refines the target
- * param's register class and records the param's `class_of`. A float-class edge
- * value needs an XMM move (the `B1-fp` stop).
+ * param's register class and records the param's `class_of`; a float-class
+ * edge value moves via `MFMovX86` (`B1-fp`).
  *
  * @param SelCtxX86 ctx0  the context to extend
  * @param lir::LFunc f  the enclosing function (for the target's params)
@@ -560,13 +892,11 @@ fn emit_edge_moves_x86(ctx0: SelCtxX86, f: lir::LFunc, target: u32, args: []u32)
         if i >= args.len { break }
         let src = args[i]
         let src_info = vinfo_get(ctx.vinfo, src)
-        if src_info.reg_class == MRegClass::FPR {
-            return error { message = "isel x86-64: B1-fp — a float block-arg edge move needs an SSE move, the float honest-stop (0.3.1)" }
-        }
-        let dst = vreg(params[i], MRegClass::GPR)
-        let ctx_a = selctx_x86_emit(ctx, mov_x86(dst, vreg(src, MRegClass::GPR), src_info.wide))
+        let dst = vreg(params[i], src_info.reg_class)
+        let mv = if src_info.reg_class == MRegClass::FPR { fmov_x86(dst, vreg(src, MRegClass::FPR), src_info.wide) } else { mov_x86(dst, vreg(src, MRegClass::GPR), src_info.wide) }
+        let ctx_a = selctx_x86_emit(ctx, mv)
         let ctx_b = selctx_x86_set_block_param(ctx_a, target, i to u32, dst)
-        ctx = selctx_x86_set_vinfo(ctx_b, params[i], MRegClass::GPR, src_info.wide)
+        ctx = selctx_x86_set_vinfo(ctx_b, params[i], src_info.reg_class, src_info.wide)
         i++
     }
     ctx
@@ -633,23 +963,71 @@ fn resolve_edge_x86(ctx0: SelCtxX86, f: lir::LFunc, target: u32, args: []u32) ->
 }
 
 /**
+ * select_fused_float_branch_x86 — the taken-edge selection when the fused
+ * compare is a FLOAT compare (`B1-fp`): `LT`/`LE`/`GT`/`GE` need only the same
+ * swap-operand trick `select_fcmp_value_x86` already uses (a single `ucomisd`
+ * + `jcc HI`/`HS`, unordered/NaN uniformly NOT-taken, matching that helper's
+ * own doc); `EQ`/`NE` need the ordered/parity composite that helper builds as
+ * a VALUE (a bare fused `ucomisd`+`jcc` cannot express "ordered AND equal" in
+ * one jump) — so those two materialize the corrected 0/1 value into a scratch
+ * GPR first, then take the edge by testing that scratch against zero, exactly
+ * `select_boolean_branch_x86`'s own zero-compare-and-`jne` shape.
+ *
+ * @param SelCtxX86 ctx1  the context to extend (edges already resolved)
+ * @param MCond cond  the float condition (EQ/NE/LT/LE/GT/GE)
+ * @param a  the first compared VReg
+ * @param b  the second compared VReg
+ * @param bool dbl  the compared operands' width (true for the f64 form)
+ * @param u32 taken  the machine-block id taken when the compare holds
+ * @return SelCtxX86  the advanced context
+ */
+fn select_fused_float_branch_x86(ctx1: SelCtxX86, cond: MCond, a: u32, b: u32, dbl: bool, taken: u32) -> SelCtxX86 {
+    match cond {
+        LT => selctx_x86_emit(selctx_x86_emit(ctx1, fcmp_x86(vreg(b, MRegClass::FPR), vreg(a, MRegClass::FPR), dbl)), jcc_x86(MCond::HI, taken))
+        LE => selctx_x86_emit(selctx_x86_emit(ctx1, fcmp_x86(vreg(b, MRegClass::FPR), vreg(a, MRegClass::FPR), dbl)), jcc_x86(MCond::HS, taken))
+        GT => selctx_x86_emit(selctx_x86_emit(ctx1, fcmp_x86(vreg(a, MRegClass::FPR), vreg(b, MRegClass::FPR), dbl)), jcc_x86(MCond::HI, taken))
+        GE => selctx_x86_emit(selctx_x86_emit(ctx1, fcmp_x86(vreg(a, MRegClass::FPR), vreg(b, MRegClass::FPR), dbl)), jcc_x86(MCond::HS, taken))
+        LO => selctx_x86_emit(selctx_x86_emit(ctx1, fcmp_x86(vreg(b, MRegClass::FPR), vreg(a, MRegClass::FPR), dbl)), jcc_x86(MCond::HI, taken))
+        LS => selctx_x86_emit(selctx_x86_emit(ctx1, fcmp_x86(vreg(b, MRegClass::FPR), vreg(a, MRegClass::FPR), dbl)), jcc_x86(MCond::HS, taken))
+        HI => selctx_x86_emit(selctx_x86_emit(ctx1, fcmp_x86(vreg(a, MRegClass::FPR), vreg(b, MRegClass::FPR), dbl)), jcc_x86(MCond::HI, taken))
+        HS => selctx_x86_emit(selctx_x86_emit(ctx1, fcmp_x86(vreg(a, MRegClass::FPR), vreg(b, MRegClass::FPR), dbl)), jcc_x86(MCond::HS, taken))
+        EQ => {
+            let scratch = selctx_x86_scratch(ctx1, MRegClass::GPR)
+            let ctx2 = select_fcmp_value_x86(scratch.ctx, scratch.reg, MCond::EQ, a, b, dbl)
+            let zero = selctx_x86_scratch(ctx2, MRegClass::GPR)
+            let ctx3 = selctx_x86_emit(zero.ctx, movimm_x86(zero.reg, 0, false))
+            let ctx4 = selctx_x86_emit(ctx3, cmp_x86(scratch.reg, zero.reg, false))
+            selctx_x86_emit(ctx4, jcc_x86(MCond::NE, taken))
+        }
+        NE => {
+            let scratch = selctx_x86_scratch(ctx1, MRegClass::GPR)
+            let ctx2 = select_fcmp_value_x86(scratch.ctx, scratch.reg, MCond::NE, a, b, dbl)
+            let zero = selctx_x86_scratch(ctx2, MRegClass::GPR)
+            let ctx3 = selctx_x86_emit(zero.ctx, movimm_x86(zero.reg, 0, false))
+            let ctx4 = selctx_x86_emit(ctx3, cmp_x86(scratch.reg, zero.reg, false))
+            selctx_x86_emit(ctx4, jcc_x86(MCond::NE, taken))
+        }
+    }
+}
+
+/**
  * select_fused_branch_x86 — the taken-edge selection when the branch condition
- * is a compare fused into this branch: re-emit the `cmp` over its operands
+ * is a compare fused into this branch: re-emit the compare over its operands
  * (nothing was materialized at the compare site) then a `jcc` to the taken
- * block. A fused FLOAT compare needs SSE `ucomisd` + a parity-aware `jcc` (the
- * `B1-fp` stop).
+ * block — the integer path a single `cmp`+`jcc`; the float path
+ * `select_fused_float_branch_x86` (`B1-fp`).
  *
  * @param SelCtxX86 ctx1  the context to extend (edges already resolved)
  * @param DefCmp dc  the resolved compare definition (opcode + operands)
  * @param u32 taken  the machine-block id taken when the compare holds
- * @return SelCtxX86 | error  the advanced context, or a `B1-fp` honest-stop
+ * @return SelCtxX86  the advanced context
  */
-fn select_fused_branch_x86(ctx1: SelCtxX86, dc: DefCmp, taken: u32) -> SelCtxX86 | error {
+fn select_fused_branch_x86(ctx1: SelCtxX86, dc: DefCmp, taken: u32) -> SelCtxX86 {
     let ck = cmp_kind_of(dc.op)
-    if ck.is_float {
-        return error { message = "isel x86-64: B1-fp — a fused float compare needs an SSE ucomisd + parity-aware jcc, the float honest-stop (0.3.1)" }
-    }
     let a_info = vinfo_get(ctx1.vinfo, dc.a)
+    if ck.is_float {
+        return select_fused_float_branch_x86(ctx1, ck.cond, dc.a, dc.bb, a_info.wide, taken)
+    }
     let ca = selctx_x86_emit(ctx1, cmp_x86(vreg(dc.a, MRegClass::GPR), vreg(dc.bb, MRegClass::GPR), a_info.wide))
     selctx_x86_emit(ca, jcc_x86(ck.cond, taken))
 }
@@ -705,8 +1083,8 @@ fn select_branch_x86(ctx0: SelCtxX86, f: lir::LFunc, br: lir::LBranch) -> SelCtx
 
 /**
  * mem_size_of_x86 — the load/store transfer size for a machine class: B/W/D/Q
- * for the integer widths (and Ptr = Q). A float access (F32/F64) needs an SSE
- * move (the `B1-fp` stop), and a void-typed access is malformed.
+ * for the integer widths (and Ptr = Q), F32/F64 for the float widths (an SSE
+ * move, `B1-fp`). A void-typed access is malformed.
  *
  * @param lir::LType t  the accessed value's machine class
  * @return MMemSizeX86 | error  the transfer size, or a NAMED honest-stop
@@ -718,8 +1096,8 @@ fn mem_size_of_x86(t: lir::LType) -> MMemSizeX86 | error {
         lir::LType::I32 => MMemSizeX86::D
         lir::LType::I64 => MMemSizeX86::Q
         lir::LType::Ptr => MMemSizeX86::Q
-        lir::LType::F32 => error { message = "isel x86-64: B1-fp — an f32 memory access uses an SSE move, the float honest-stop (0.3.1)" }
-        lir::LType::F64 => error { message = "isel x86-64: B1-fp — an f64 memory access uses an SSE move, the float honest-stop (0.3.1)" }
+        lir::LType::F32 => MMemSizeX86::F32
+        lir::LType::F64 => MMemSizeX86::F64
         lir::LType::Void => error { message = "isel x86-64: a void-typed memory access is malformed (internal)" }
     }
 }
@@ -768,10 +1146,11 @@ fn select_field_addr_x86(ctx0: SelCtxX86, inst: lir::LInst, fa: lir::LFieldAddr)
 }
 
 /**
- * select_load_x86 — the `LLoad` selection: `mov dst, [addr + 0]` at the size +
- * register file the loaded `ty` picks. Loads zero-extend (`sign=false`): a
- * narrow value's own producing extend chain already fixed its class, so the
- * load itself does not re-sign.
+ * select_load_x86 — the `LLoad` selection: `mov`/`movsd`/`movss dst,
+ * [addr + 0]` at the size + register file the loaded `ty` picks (`B1-fp`).
+ * Loads zero-extend (`sign=false`): a narrow value's own producing extend
+ * chain already fixed its class, so the load itself does not re-sign (a
+ * float load carries no sign concept either way).
  *
  * @param SelCtxX86 ctx0  the context to extend
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
@@ -780,15 +1159,17 @@ fn select_field_addr_x86(ctx0: SelCtxX86, inst: lir::LInst, fa: lir::LFieldAddr)
  */
 fn select_load_x86(ctx0: SelCtxX86, inst: lir::LInst, l: lir::LLoad) -> SelCtxX86 | error {
     let size = match mem_size_of_x86(l.ty) { MMemSizeX86 as s => s; error as e => return e }
+    let reg_class = mregclass_of_ltype(l.ty)
     let wide = ltype_is_wide(l.ty)
-    let dst = vreg(inst.result, MRegClass::GPR)
-    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::GPR, wide)
+    let dst = vreg(inst.result, reg_class)
+    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, reg_class, wide)
     selctx_x86_emit(ctx1, load_x86(size, false, dst, MMem { base = vreg(l.addr, MRegClass::GPR); offset = 0 to i32 }))
 }
 
 /**
- * select_store_x86 — the `LStore` selection: `mov [addr + 0], src` at the size
- * the stored `ty` picks. No result VReg.
+ * select_store_x86 — the `LStore` selection: `mov`/`movsd`/`movss
+ * [addr + 0], src` at the size + register file the stored `ty` picks
+ * (`B1-fp`). No result VReg.
  *
  * @param SelCtxX86 ctx0  the context to extend
  * @param lir::LStore s  the store op
@@ -796,7 +1177,8 @@ fn select_load_x86(ctx0: SelCtxX86, inst: lir::LInst, l: lir::LLoad) -> SelCtxX8
  */
 fn select_store_x86(ctx0: SelCtxX86, s: lir::LStore) -> SelCtxX86 | error {
     let size = match mem_size_of_x86(s.ty) { MMemSizeX86 as sz => sz; error as e => return e }
-    selctx_x86_emit(ctx0, store_x86(size, vreg(s.value, MRegClass::GPR), MMem { base = vreg(s.addr, MRegClass::GPR); offset = 0 to i32 }))
+    let reg_class = mregclass_of_ltype(s.ty)
+    selctx_x86_emit(ctx0, store_x86(size, vreg(s.value, reg_class), MMem { base = vreg(s.addr, MRegClass::GPR); offset = 0 to i32 }))
 }
 
 /**
@@ -854,17 +1236,26 @@ type PinnedArgsX86 = struct {
 }
 
 /**
- * pin_args_x86 — lower each argument into the target ABI's integer slot (§4.5):
- * pin it with a `mov` into the physical register `arg_reg(abi, GPR, n)` names
- * (SysV RDI/RSI/RDX/RCX/R8/R9; Win64 RCX/RDX/R8/R9, read through the descriptor
- * because neither argument order is the contiguous encoding order), collecting
- * the physregs as the call's `uses`. The `abi` descriptor is threaded from the
- * emit driver so the SAME isel places a call's outgoing arguments in SysV
- * registers on x86-linux and in the Win64 registers on x86_64-windows. A
- * float-class argument needs an XMM move (the `B1-fp` stop), an argument past
- * the ABI's argument-register window the stack-arg slot (the `B1-args` stop),
- * and a variadic call the register/stack split + the AL vector count (also
- * `B1-args`) — `LCall` carries neither, so both honest-stop.
+ * pin_args_x86 — lower each argument into the target ABI's slot (§4.5),
+ * classified by the descriptor's own slot-numbering rule (GPR: SysV
+ * RDI/RSI/RDX/RCX/R8/R9, Win64 RCX/RDX/R8/R9; FPR: XMM0..7, XMM0..3 on Win64 —
+ * `B1-fp`; per-file counters on SysV, one shared argument position on Win64 —
+ * `B3-argslot`), read through
+ * the descriptor because neither argument order is the contiguous encoding
+ * order, collecting the physregs as the call's `uses`. The `abi` descriptor is
+ * threaded from the emit driver so the SAME isel places a call's outgoing
+ * arguments in SysV registers on x86-linux and in the Win64 registers on
+ * x86_64-windows. An argument past its class's argument-register window is
+ * STORED into the caller-owned stack-arg area instead (`MOutArgX86`, `B1-args`,
+ * closed 2026-07-29) and contributes no `use` — it travels through memory, so no
+ * physical register has to be kept live across the call for it.
+ *
+ * A variadic call still honest-stops. That stop is a GUARD, not a deferral:
+ * measured 2026-07-29, all eighteen call-construction sites in `lir/lower.tks`
+ * pass `variadic = false`, so no lowering this compiler performs can reach it —
+ * the register/stack split above is already what a variadic SysV call needs, but
+ * the AL vector count it must also set (and Win64's rule that a float vararg
+ * travels in BOTH files) would be ABI code with no caller to exercise it.
  *
  * @param AbiDescriptor abi  the target ABI register file (SysV or Win64)
  * @param SelCtxX86 ctx0  the context to extend
@@ -874,26 +1265,114 @@ type PinnedArgsX86 = struct {
  */
 fn pin_args_x86(abi: AbiDescriptor, ctx0: SelCtxX86, args: []u32, variadic: bool) -> PinnedArgsX86 | error {
     if variadic {
-        return error { message = "isel x86-64: B1-args — a variadic call needs the register/stack split and the AL vector count; LCall carries no arity (0.3.1)" }
+        return error { message = "isel x86-64: B1-args — a variadic call needs the AL vector count (SysV) and the dual-file float rule (Win64); LCall carries no arity (0.3.1)" }
     }
+    pin_reg_args_x86(abi, store_stack_args_x86(abi, ctx0, args), args)
+}
+
+/**
+ * arg_class_index_x86 — the index argument `i` occupies inside its own register
+ * file's argument window at a CALL site, the caller-side twin of
+ * `param_class_index_x86`: the argument POSITION when the ABI numbers both files
+ * by one shared slot (Win64, `B3-argslot`), else how many earlier arguments share
+ * this one's class (SysV, `B1-fp`).
+ *
+ * @param AbiDescriptor abi  the target ABI register file (its slot-numbering rule)
+ * @param SelCtxX86 ctx  the context whose `vinfo` records each argument's class
+ * @param []u32 args  the argument VRegs, in declaration order
+ * @param u64 i  the argument position to resolve
+ * @return u32  the index to look up in that class's argument-register window
+ */
+fn arg_class_index_x86(abi: AbiDescriptor, ctx: SelCtxX86, args: []u32, i: u64) -> u32 {
+    if abi.arg_slots_shared { return i to u32 }
+    let is_fpr = vinfo_get(ctx.vinfo, args[i]).reg_class == MRegClass::FPR
+    mut n: u32 = 0
+    mut j: u64 = 0
+    loop {
+        if j >= i { break }
+        if (vinfo_get(ctx.vinfo, args[j]).reg_class == MRegClass::FPR) == is_fpr { n++ }
+        j++
+    }
+    n
+}
+
+/**
+ * arg_slot_x86 — where argument `i` of `args` travels: the `ArgReg` its class's
+ * window yields (`ok` false meaning "this one overflows to the stack"), reading
+ * each argument's class out of the recorded `vinfo` and its window index out of
+ * the descriptor's slot-numbering rule (`arg_class_index_x86` —
+ * `B1-fp`/`B1-args`/`B3-argslot`). One shared classifier so
+ * `store_stack_args_x86` and `pin_reg_args_x86` cannot disagree about which
+ * arguments went where.
+ *
+ * @param AbiDescriptor abi  the target ABI register file
+ * @param SelCtxX86 ctx  the context whose `vinfo` records each argument's class
+ * @param []u32 args  the argument VRegs, in declaration order
+ * @param u64 i  the argument position to classify
+ * @return ArgReg  the assigned argument register, or `ok = false` for a stack argument
+ */
+fn arg_slot_x86(abi: AbiDescriptor, ctx: SelCtxX86, args: []u32, i: u64) -> ArgReg {
+    let cls = vinfo_get(ctx.vinfo, args[i]).reg_class
+    arg_reg(abi, cls, arg_class_index_x86(abi, ctx, args, i))
+}
+
+/**
+ * store_stack_args_x86 — the FIRST of the two argument-lowering passes
+ * (`B1-args`): store every argument that overflowed its class's register window
+ * into the caller-owned stack-arg area, in declaration order, as `MOutArgX86`.
+ *
+ * Run BEFORE the register pins on purpose. A stack argument's own value still
+ * needs a register to be stored FROM, and every physical argument register the
+ * second pass pins is live from its pin to the call — doing the memory traffic
+ * first means the stores compete with as few fixed intervals as possible.
+ *
+ * @param AbiDescriptor abi  the target ABI register file
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param []u32 args  the argument VRegs, in declaration order
+ * @return SelCtxX86  the advanced context
+ */
+fn store_stack_args_x86(abi: AbiDescriptor, ctx0: SelCtxX86, args: []u32) -> SelCtxX86 {
     mut ctx = ctx0
-    mut uses: []MReg = teko::list::empty()
-    mut gpr_n: u32 = 0
+    mut stack_n: u32 = 0
     mut i: u64 = 0
     loop {
         if i >= args.len { break }
-        let a = args[i]
-        let info = vinfo_get(ctx.vinfo, a)
-        if info.reg_class == MRegClass::FPR {
-            return error { message = "isel x86-64: B1-fp — a float call argument arrives in an XMM register via an SSE move, the float honest-stop (0.3.1)" }
+        if !arg_slot_x86(abi, ctx, args, i).ok {
+            let info = vinfo_get(ctx.vinfo, args[i])
+            ctx = selctx_x86_emit(ctx, out_arg_x86(arg_slot_size_x86(info.reg_class, info.wide), vreg(args[i], info.reg_class), stack_n))
+            stack_n++
         }
-        let slot = arg_reg(abi, MRegClass::GPR, gpr_n)
-        if !slot.ok {
-            return error { message = "isel x86-64: B1-args — an integer call argument past the ABI's argument-register window needs the stack-arg slot (0.3.1)" }
+        i++
+    }
+    ctx
+}
+
+/**
+ * pin_reg_args_x86 — the SECOND argument-lowering pass: move every argument that
+ * DID fit its class's window into the physical register `arg_reg` named for it,
+ * collecting those physregs as the call's `uses` so the regalloc keeps them live
+ * to the call. A stack argument is skipped here — `store_stack_args_x86` already
+ * placed it, and it contributes no register use.
+ *
+ * @param AbiDescriptor abi  the target ABI register file
+ * @param SelCtxX86 ctx0  the context to extend (stack arguments already stored)
+ * @param []u32 args  the argument VRegs, in declaration order
+ * @return PinnedArgsX86  the advanced context and the pinned physregs
+ */
+fn pin_reg_args_x86(abi: AbiDescriptor, ctx0: SelCtxX86, args: []u32) -> PinnedArgsX86 {
+    mut ctx = ctx0
+    mut uses: []MReg = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= args.len { break }
+        let slot = arg_slot_x86(abi, ctx, args, i)
+        if slot.ok {
+            let info = vinfo_get(ctx.vinfo, args[i])
+            let is_fpr = info.reg_class == MRegClass::FPR
+            let mv = if is_fpr { fmov_x86(slot.reg, vreg(args[i], MRegClass::FPR), info.wide) } else { mov_x86(slot.reg, vreg(args[i], MRegClass::GPR), info.wide) }
+            ctx = selctx_x86_emit(ctx, mv)
+            uses = teko::list::push(uses, slot.reg)
         }
-        ctx = selctx_x86_emit(ctx, mov_x86(slot.reg, vreg(a, MRegClass::GPR), info.wide))
-        uses = teko::list::push(uses, slot.reg)
-        gpr_n++
         i++
     }
     PinnedArgsX86 { ctx = ctx; uses = uses }
@@ -921,77 +1400,219 @@ const X86_STR_ARG_ALIGN: u32 = 8 to u32
 const X86_STR_LEN_OFFSET: i32 = 8 to i32
 
 /**
- * str_pair_by_ref_x86 — must this call's argument list, which the TARGET-NEUTRAL
- * LIR flattened from ONE by-value `tk_str` into the two scalar operands
- * `(ptr, len)` (`lower.tks::lower_str_arg_call`), be re-materialized and passed
- * BY REFERENCE instead?
+ * by_ref_fat_pairs_x86 — how many of this call's leading flattened `(ptr, len)`
+ * pairs, which the TARGET-NEUTRAL LIR produced from by-value `tk_str` parameters
+ * (`lower.tks::lower_str_arg_call`, `fat_eq_call_args`, `lower_last_index_of_call`),
+ * must be re-materialized and passed BY REFERENCE instead?
  *
- * True exactly when the ABI cannot carry a 16-byte aggregate in registers
- * (`max_reg_arg_bytes < 16` — Win64, which passes an aggregate in a register
- * ONLY at size 1/2/4/8) AND the callee is one of the closed set of
- * single-`tk_str`-argument runtime entries (`lir::is_str_arg_builtin`, read from
- * the LIR so the list is single-sourced) AND the flat pair is actually present.
- * On SysV/AAPCS64/LP64D (`max_reg_arg_bytes == 16`) it is always false, so those
- * targets keep the byte-identical two-register sequence (FIXPOINT).
+ * ZERO on an ABI that carries a 16-byte aggregate in registers
+ * (`max_reg_arg_bytes == 16` — SysV/AAPCS64/LP64D), where the flat pair IS the
+ * true C ABI, so those targets keep the byte-identical register sequence
+ * (FIXPOINT). Otherwise (Win64: an aggregate travels in a register ONLY at size
+ * 1/2/4/8) it is the callee's own fat arity, read from the LIR
+ * (`lir::fat_arg_builtin_arity`) so the table is single-sourced — one pair for the
+ * io group, TWO for `tk_str_eq`/`tk_str_contains`/`tk_str_ends_with`/
+ * `tk_rt_last_index_of_ok`.
  *
  * @param AbiDescriptor abi  the target ABI register file
  * @param str symbol  the call's already-final runtime symbol
- * @param []u32 args  the call's flattened argument VRegs
- * @return bool  true iff the pair must travel by reference
+ * @return u64  the number of leading pairs to pass by reference (0 on SysV)
  */
-fn str_pair_by_ref_x86(abi: AbiDescriptor, symbol: str, args: []u32) -> bool {
-    abi.max_reg_arg_bytes < X86_STR_ARG_BYTES && lir::is_str_arg_builtin(symbol) && args.len == (2 to u64)
+fn by_ref_fat_pairs_x86(abi: AbiDescriptor, symbol: str) -> u64 {
+    if abi.max_reg_arg_bytes >= X86_STR_ARG_BYTES { return 0 }
+    lir::fat_arg_builtin_arity(symbol)
 }
 
 /**
- * pin_str_pair_by_ref_x86 — pass a flattened `(ptr, len)` `tk_str` pair the
- * Win64 way: BY REFERENCE. Reserve a 16-byte frame slot, take its address
- * (`MFrameAddrX86` — the encoder resolves it to `lea scratch, [rsp+off]`, above
- * the shadow region `compute_frame_layout_x86` already reserves), store `ptr` at
- * +0 and `len` at +8, then pin that ADDRESS into the ABI's FIRST integer
- * argument register (RCX) as the call's single `use`.
+ * FatSlotsX86 — the frame-slot ADDRESSES of every re-materialized `tk_str`
+ * argument, in declaration order, plus the context that reserved and filled them.
  *
- * This is the whole content of the B3 Windows differential's `own_print_exit`
- * SIGSEGV: emitting SysV's two-register form on Win64 makes the C-built callee
- * (`void tk_print(tk_str s)`, which under Win64 compiles to `movq (%rcx), %rcx` /
- * `movl 0x8(%rcx), %r8d`) read the STRING'S OWN first 16 bytes as `{ptr; len}`
- * and `fwrite` through the resulting garbage pointer. `tk_exit(i32)` — a scalar —
- * was unaffected, which is why the `own_exit_code` fixture passed while
- * `own_print_exit` faulted.
+ * @since 0.3.1.0 (Win64 fat-pair generalization)
+ */
+type FatSlotsX86 = struct {
+    /**
+     * ctx — the context with each slot reserved and both halves stored.
+     */
+    ctx: SelCtxX86
+    /**
+     * addrs — one scratch register per pair, holding that pair's slot address.
+     */
+    addrs: []MReg
+}
+
+/**
+ * materialize_one_fat_pair_x86 — reserve a 16-byte frame slot, take its address
+ * (`MFrameAddrX86` — the encoder resolves it to `lea scratch, [rsp+off]`, above
+ * the shadow region `compute_frame_layout_x86` already reserves) and store the
+ * pair into it: `ptr` at +0 and `len` at +8, `tk_str`'s own field order.
  *
  * Both halves store at `Q` width. `len` is a `size_t`, and the SysV path already
- * relies on the same invariant (it moves the whole 64-bit register into RSI), so
- * a narrow producer's zero-extended upper half is not a new assumption. Neither
- * half can be float-class — `lower_str_arg_call` builds the pair from a fat
- * pointer's address and byte length — so there is no `B1-fp` arm here.
+ * relies on the same invariant (it moves the whole 64-bit register into its
+ * argument register), so a narrow producer's zero-extended upper half is not a new
+ * assumption. Neither half can be float-class — every producer of a flattened pair
+ * builds it from a fat pointer's address and byte length — so there is no `B1-fp`
+ * arm here.
  *
- * @param AbiDescriptor abi  the target ABI register file (its first GPR arg reg)
  * @param SelCtxX86 ctx0  the context to extend
- * @param []u32 args  the flattened pair — `args[0]` = ptr, `args[1]` = len
- * @return PinnedArgsX86 | error  the pinned address, or a NAMED honest-stop
+ * @param u32 ptr  the VReg holding the pair's pointer half
+ * @param u32 len  the VReg holding the pair's byte length
+ * @return FreshScratchX86  the advanced context + the register holding the slot's
+ *                          address
  */
-fn pin_str_pair_by_ref_x86(abi: AbiDescriptor, ctx0: SelCtxX86, args: []u32) -> PinnedArgsX86 | error {
-    let slot = arg_reg(abi, MRegClass::GPR, 0 to u32)
-    if !slot.ok {
-        return error { message = "isel x86-64: an ABI with no integer argument register cannot pass a by-reference aggregate (internal)" }
-    }
+fn materialize_one_fat_pair_x86(ctx0: SelCtxX86, ptr: u32, len: u32) -> FreshScratchX86 {
     let frame_slot = ctx0.func.frame.len
     let with_slot = append_frame_x86(ctx0.func, lir::LAlloca { bytes = X86_STR_ARG_BYTES; align = X86_STR_ARG_ALIGN })
     let ctx1 = SelCtxX86 { func = with_slot; vinfo = ctx0.vinfo; next_scratch = ctx0.next_scratch; cur_block = ctx0.cur_block; next_block = ctx0.next_block }
     let scratch = selctx_x86_scratch(ctx1, MRegClass::GPR)
     let ctx2 = selctx_x86_emit(scratch.ctx, frame_addr_x86(scratch.reg, frame_slot))
-    let ctx3 = selctx_x86_emit(ctx2, store_x86(MMemSizeX86::Q, vreg(args[0], MRegClass::GPR), MMem { base = scratch.reg; offset = 0 to i32 }))
-    let ctx4 = selctx_x86_emit(ctx3, store_x86(MMemSizeX86::Q, vreg(args[1], MRegClass::GPR), MMem { base = scratch.reg; offset = X86_STR_LEN_OFFSET }))
-    let ctx5 = selctx_x86_emit(ctx4, mov_x86(slot.reg, scratch.reg, true))
-    PinnedArgsX86 { ctx = ctx5; uses = teko::list::push(teko::list::empty(), slot.reg) }
+    let ctx3 = selctx_x86_emit(ctx2, store_x86(MMemSizeX86::Q, vreg(ptr, MRegClass::GPR), MMem { base = scratch.reg; offset = 0 to i32 }))
+    let ctx4 = selctx_x86_emit(ctx3, store_x86(MMemSizeX86::Q, vreg(len, MRegClass::GPR), MMem { base = scratch.reg; offset = X86_STR_LEN_OFFSET }))
+    FreshScratchX86 { ctx = ctx4; reg = scratch.reg }
+}
+
+/**
+ * materialize_fat_pairs_x86 — the FIRST of the two by-reference passes: one frame
+ * copy per leading pair (`materialize_one_fat_pair_x86`), in declaration order, so
+ * `args[2k]`/`args[2k+1]` land in the slot whose address becomes argument `k`.
+ *
+ * Run entirely BEFORE any physical argument register is pinned, for the same
+ * reason `store_stack_args_x86` runs before `pin_reg_args_x86`: the memory traffic
+ * of a later pair would otherwise sit BETWEEN an earlier pair's pin and the call,
+ * competing with a live fixed interval for no reason.
+ *
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param []u32 args  the call's flattened argument VRegs (the pairs lead)
+ * @param u64 pairs  how many leading pairs to copy
+ * @return FatSlotsX86  the advanced context + one slot address per pair
+ */
+fn materialize_fat_pairs_x86(ctx0: SelCtxX86, args: []u32, pairs: u64) -> FatSlotsX86 {
+    mut ctx = ctx0
+    mut addrs: []MReg = teko::list::empty()
+    mut k: u64 = 0
+    loop {
+        if k >= pairs { break }
+        let one = materialize_one_fat_pair_x86(ctx, args[k * 2], args[k * 2 + 1])
+        ctx = one.ctx
+        addrs = teko::list::push(addrs, one.reg)
+        k++
+    }
+    FatSlotsX86 { ctx = ctx; addrs = addrs }
+}
+
+/**
+ * pin_fat_slot_addrs_x86 — the SECOND pass over the pairs: move each slot ADDRESS
+ * into the integer argument register of its own position (`addrs[k]` → argument
+ * `k`: RCX, then RDX, …) and collect those physregs as the call's `uses`.
+ *
+ * @param AbiDescriptor abi  the target ABI register file
+ * @param SelCtxX86 ctx0  the context whose slots are already filled
+ * @param []MReg addrs  one slot address per pair, in declaration order
+ * @return PinnedArgsX86 | error  the pinned addresses, or a NAMED honest-stop when
+ *                                the ABI has no argument register at that position
+ */
+fn pin_fat_slot_addrs_x86(abi: AbiDescriptor, ctx0: SelCtxX86, addrs: []MReg) -> PinnedArgsX86 | error {
+    mut ctx = ctx0
+    mut uses: []MReg = teko::list::empty()
+    mut k: u64 = 0
+    loop {
+        if k >= addrs.len { break }
+        let slot = arg_reg(abi, MRegClass::GPR, k to u32)
+        if !slot.ok {
+            return error { message = "isel x86-64: an ABI with no integer argument register cannot pass a by-reference aggregate (internal)" }
+        }
+        ctx = selctx_x86_emit(ctx, mov_x86(slot.reg, addrs[k], true))
+        uses = teko::list::push(uses, slot.reg)
+        k++
+    }
+    PinnedArgsX86 { ctx = ctx; uses = uses }
+}
+
+/**
+ * pin_trailing_scalar_args_x86 — the args AFTER the by-reference pairs, pinned
+ * into the argument registers that follow them: `tk_rt_last_index_of_ok`'s
+ * `uint64_t *out_index` is exactly this case (two references in RCX/RDX, the
+ * out-slot address in R8).
+ *
+ * COLLAPSING THE PAIRS RENUMBERS THE SLOTS. Each by-reference pair took TWO
+ * flattened operands and travels in ONE register, so flattened operand `i` sits at
+ * argument POSITION `i - pairs` — and that position IS the window index here,
+ * because this path exists only on an ABI whose two register files share their
+ * slots by position (`by_ref_fat_pairs_x86` answers 0 on every ABI that carries a
+ * 16-byte aggregate in registers, so SysV never arrives). An FPR-class trailing
+ * argument therefore takes the XMM of that same position (`B3-argslot`, dispatched
+ * 2026-07-30 — it used to honest-stop for want of exactly this numbering). A
+ * trailing argument past the register window still honest-stops: with four
+ * argument slots and at most two pairs plus one out-slot, no shipped entry reaches
+ * it.
+ *
+ * @param AbiDescriptor abi  the target ABI register file
+ * @param PinnedArgsX86 pinned  the pairs already pinned (its context + uses)
+ * @param []u32 args  the call's flattened argument VRegs
+ * @param u64 pairs  how many leading pairs were passed by reference
+ * @return PinnedArgsX86 | error  every argument pinned, or a NAMED honest-stop
+ */
+fn pin_trailing_scalar_args_x86(abi: AbiDescriptor, pinned: PinnedArgsX86, args: []u32, pairs: u64) -> PinnedArgsX86 | error {
+    mut ctx = pinned.ctx
+    mut uses = pinned.uses
+    mut i: u64 = pairs * 2
+    loop {
+        if i >= args.len { break }
+        let info = vinfo_get(ctx.vinfo, args[i])
+        let is_fpr = info.reg_class == MRegClass::FPR
+        let slot = arg_reg(abi, info.reg_class, (i - pairs) to u32)
+        if !slot.ok {
+            return error { message = "isel x86-64: B1-args — an argument after a by-reference aggregate overflowed the argument window (0.3.1)" }
+        }
+        let mv = if is_fpr { fmov_x86(slot.reg, vreg(args[i], MRegClass::FPR), info.wide) } else { mov_x86(slot.reg, vreg(args[i], MRegClass::GPR), info.wide) }
+        ctx = selctx_x86_emit(ctx, mv)
+        uses = teko::list::push(uses, slot.reg)
+        i++
+    }
+    PinnedArgsX86 { ctx = ctx; uses = uses }
+}
+
+/**
+ * pin_fat_pairs_by_ref_x86 — pass the call's `pairs` leading flattened `tk_str`
+ * pairs the Win64 way: BY REFERENCE, one 16-byte frame copy each, their addresses
+ * in the first `pairs` integer argument registers, then any trailing scalar in the
+ * register after them.
+ *
+ * THIS IS THE 0xC0000005 THE WINDOWS LEG MEASURED, in both its shapes. Emitting
+ * SysV's register form on Win64 makes a C-built callee read the STRING'S OWN first
+ * 16 bytes as `{ptr; len}` and dereference the resulting garbage: with ONE
+ * `tk_str` that was `own_print_exit`'s SIGSEGV (`void tk_print(tk_str s)` compiles
+ * to `movq (%rcx), %rcx` / `movl 0x8(%rcx), %r8d` there), and with TWO it is
+ * `own_native`'s ACCESS_VIOLATION through `tk_str_eq(a, b)` — which reads RCX and
+ * RDX as POINTERS to the two structs while the flat form put `a.ptr` in RCX and
+ * `a.len` in RDX. `tk_exit(i32)` — a scalar — was unaffected either way, which is
+ * why `own_exit_code` passed while everything touching a string faulted.
+ *
+ * The former fix covered only the one-pair family: it keyed on a TWO-operand
+ * argument list, so a four- or five-operand call could not reach it at all.
+ *
+ * @param AbiDescriptor abi  the target ABI register file
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param []u32 args  the flattened arguments — pair `k` is `args[2k]`/`args[2k+1]`
+ * @param u64 pairs  how many leading pairs travel by reference
+ * @return PinnedArgsX86 | error  the pinned arguments, or a NAMED honest-stop
+ */
+fn pin_fat_pairs_by_ref_x86(abi: AbiDescriptor, ctx0: SelCtxX86, args: []u32, pairs: u64) -> PinnedArgsX86 | error {
+    let slots = materialize_fat_pairs_x86(ctx0, args, pairs)
+    let refs = match pin_fat_slot_addrs_x86(abi, slots.ctx, slots.addrs) { PinnedArgsX86 as p => p; error as e => return e }
+    pin_trailing_scalar_args_x86(abi, refs, args, pairs)
 }
 
 /**
  * pin_call_args_x86 — the argument-pinning entry a DIRECT call goes through: the
  * by-reference `tk_str` path when the target ABI demands it
- * (`str_pair_by_ref_x86`), else the plain per-argument register pinning
+ * (`by_ref_fat_pairs_x86`), else the plain per-argument register pinning
  * (`pin_args_x86`). An indirect call never reaches a `tk_str` runtime builtin (it
  * has no symbol), so it stays on `pin_args_x86` directly.
+ *
+ * A flattened argument list SHORTER than the symbol's fat arity is an internal
+ * inconsistency between this table and the lowering that built the call, and it
+ * stops by name: falling through to `pin_args_x86` would emit the very
+ * garbage-ABI call this whole path exists to prevent, silently.
  *
  * @param AbiDescriptor abi  the target ABI register file
  * @param SelCtxX86 ctx0  the context to extend
@@ -1001,27 +1622,44 @@ fn pin_str_pair_by_ref_x86(abi: AbiDescriptor, ctx0: SelCtxX86, args: []u32) -> 
  * @return PinnedArgsX86 | error  the pinned args, or a NAMED honest-stop
  */
 fn pin_call_args_x86(abi: AbiDescriptor, ctx0: SelCtxX86, symbol: str, args: []u32, variadic: bool) -> PinnedArgsX86 | error {
-    if !variadic && str_pair_by_ref_x86(abi, symbol, args) {
-        return pin_str_pair_by_ref_x86(abi, ctx0, args)
+    let pairs = by_ref_fat_pairs_x86(abi, symbol)
+    if variadic || pairs == 0 { return pin_args_x86(abi, ctx0, args, variadic) }
+    if args.len < pairs * 2 {
+        return error { message = teko::str::concat("isel x86-64: `", symbol, "` was lowered with fewer flattened operands than its by-value `tk_str` arity (internal)") }
     }
-    pin_args_x86(abi, ctx0, args, variadic)
+    pin_fat_pairs_by_ref_x86(abi, ctx0, args, pairs)
 }
 
 /**
- * select_call_result_x86 — after a call, move its result out of the SysV result
- * register RAX into the result VReg (when the call produces one). The result
- * class is taken as GPR (RAX): `LInst` carries no result type, so a
- * float-returning call (XMM0) is a documented limitation until the LIR records
- * a call's result type.
+ * select_call_result_x86 — after a call, move its result out of the ABI result register into the
+ * result VReg (when the call produces one), in the REGISTER FILE the call's own `ret_type` names:
+ * RAX for every integer/pointer/`bool` result, XMM0 for an `f32`/`f64` one (`B1-fp`).
+ *
+ * This USED to take the class as GPR unconditionally, because `LInst` carries no result type —
+ * a limitation this function's own doc named. `lir::LCall`/`LCallIndirect` now record
+ * `ret_type` (0.3.1.0 degrau 27), and the limitation was not benign: `select_ret_x86` and
+ * `pin_args_x86` already split the two files, so a float-returning callee PUT its result in XMM0 and
+ * a later float argument had to travel in XMM — while this function read RAX and then recorded the
+ * value as a GPR, so the wrong bits went into the wrong register file twice over. Measured: a
+ * `$"{f():F2}"` over an `f64`-returning function CRASHED the generated program (the garbage GPR
+ * value was placed where `tk_fmt_f_len` expected its `uint64_t *out_len`) where the C route printed
+ * `2.50`.
  *
  * @param SelCtxX86 ctx0  the post-call context to extend
  * @param lir::LInst inst  the call instruction (its result VReg + `has_result`)
- * @param MReg ret_reg  the ABI result register the call wrote (RAX)
+ * @param MReg ret_reg  the ABI result register the call wrote (`call_result_reg_x86`)
+ * @param lir::LType ret_type  the call's own recorded result class
  * @return SelCtxX86  the advanced context
  */
-fn select_call_result_x86(ctx0: SelCtxX86, inst: lir::LInst, ret_reg: MReg) -> SelCtxX86 {
+fn select_call_result_x86(ctx0: SelCtxX86, inst: lir::LInst, ret_reg: MReg, ret_type: lir::LType) -> SelCtxX86 {
     if !inst.has_result {
         return ctx0
+    }
+    if mregclass_of_ltype(ret_type) == MRegClass::FPR {
+        let wide = ltype_is_wide(ret_type)
+        let fdst = vreg(inst.result, MRegClass::FPR)
+        let fctx = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::FPR, wide)
+        return selctx_x86_emit(fctx, fmov_x86(fdst, ret_reg, wide))
     }
     let dst = vreg(inst.result, MRegClass::GPR)
     let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::GPR, true)
@@ -1029,8 +1667,21 @@ fn select_call_result_x86(ctx0: SelCtxX86, inst: lir::LInst, ret_reg: MReg) -> S
 }
 
 /**
+ * call_result_reg_x86 — the physical register a call's result comes back in, by its recorded
+ * machine class: XMM0 for a float, RAX for everything else (decision D-A — RAX is the integer
+ * result register on both SysV and Win64, and XMM0 is the float one on both) (0.3.1.0 degrau 27).
+ *
+ * @param lir::LType ret_type  the call's own recorded result class
+ * @return MReg  the ABI result register
+ */
+fn call_result_reg_x86(ret_type: lir::LType) -> MReg {
+    if mregclass_of_ltype(ret_type) == MRegClass::FPR { return XMM0_X86 }
+    RAX_X86
+}
+
+/**
  * select_call_x86 — the `LCall` selection (§4.5): lower the arguments into
- * the target ABI's registers (`pin_call_args_x86` — which routes a flattened
+ * the target ABI's registers (`pin_call_args_x86` — which routes EVERY flattened
  * `tk_str` pair through the by-reference path on an ABI that demands it), emit
  * `MCallX86{sym, uses, ret_reg, has_result, variadic}` with the result pinned to
  * RAX (decision D-A —
@@ -1045,9 +1696,9 @@ fn select_call_result_x86(ctx0: SelCtxX86, inst: lir::LInst, ret_reg: MReg) -> S
  */
 fn select_call_x86(abi: AbiDescriptor, ctx0: SelCtxX86, inst: lir::LInst, c: lir::LCall) -> SelCtxX86 | error {
     let pinned = match pin_call_args_x86(abi, ctx0, c.symbol, c.args, c.variadic) { PinnedArgsX86 as p => p; error as e => return e }
-    let ret_reg = RAX_X86
+    let ret_reg = call_result_reg_x86(c.ret_type)
     let ctx1 = selctx_x86_emit(pinned.ctx, call_x86(c.symbol, pinned.uses, ret_reg, inst.has_result, c.variadic))
-    select_call_result_x86(ctx1, inst, ret_reg)
+    select_call_result_x86(ctx1, inst, ret_reg, c.ret_type)
 }
 
 /**
@@ -1063,18 +1714,20 @@ fn select_call_x86(abi: AbiDescriptor, ctx0: SelCtxX86, inst: lir::LInst, c: lir
  */
 fn select_call_indirect_x86(abi: AbiDescriptor, ctx0: SelCtxX86, inst: lir::LInst, ci: lir::LCallIndirect) -> SelCtxX86 | error {
     let pinned = match pin_args_x86(abi, ctx0, ci.args, ci.variadic) { PinnedArgsX86 as p => p; error as e => return e }
-    let ret_reg = RAX_X86
+    let ret_reg = call_result_reg_x86(ci.ret_type)
     let ctx1 = selctx_x86_emit(pinned.ctx, call_ind_x86(vreg(ci.target, MRegClass::GPR), pinned.uses, ret_reg, inst.has_result))
-    select_call_result_x86(ctx1, inst, ret_reg)
+    select_call_result_x86(ctx1, inst, ret_reg, ci.ret_type)
 }
 
 /**
  * select_inst_x86 — the per-`LOp` dispatch: the whole `LOp` frontier selects
- * into `MInstX86` — constants, integer arithmetic/bitwise/shift/compare, unary
- * ops, parameters, returns, control flow (jumps/branches), memory
- * (alloca/field-addr/load/store), address materialization, and calls. The float
- * literal case honest-stops (`B1-fp`); every other float route stops inside its
- * own selection helper.
+ * into `MInstX86` — constants (int + float, `B1-fp`), integer/float
+ * arithmetic/bitwise/shift/compare, unary ops (integer + float
+ * negate/convert), parameters, returns, control flow (jumps/branches),
+ * memory (alloca/field-addr/load/store, int + float), address
+ * materialization, and calls (int + float arguments). `B1-args` (a variadic
+ * call, or an argument past its class's register window) is the remaining
+ * NAMED honest-stop this frontier still raises.
  *
  * @param AbiDescriptor abi  the target ABI register file (SysV or Win64), read
  *                           by the parameter-receipt and call-argument arms

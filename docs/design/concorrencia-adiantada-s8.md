@@ -183,7 +183,7 @@ alcança. O que impedia não era o mecanismo, era ninguém ter tentado.
 
 ## 3. A superfície proposta — três camadas, uma congelada agora
 
-O MASTER_PLAN reserva **cinco** primitivas (`scope{}`, `spawn`, `channel<T>`, `send`, `recv`) e
+O MASTER_PLAN reserva **cinco** primitivas (`scope{}`, `spawn`, `chan<T>`, `send`, `recv`) e
 proíbe congelá-las *"until parser + real duplication data exist"* (:262). O ruling do owner manda
 adiantar a concorrência. As duas coisas convivem quando se separa **capacidade** de **açúcar**:
 
@@ -346,18 +346,26 @@ pub fn hardware_parallelism() -> u64
 
 ### 3.3 L2 — as cinco palavras-chave, RESERVADAS
 
-`scope { }` / `spawn` / `channel<T>` / `send` / `recv` → `T | error` permanecem reservadas, com a
+> **GRAFIA ACTUALIZADA (ruling do dono, 2026-07-29):** a primitiva de canal escreve-se **`chan<T>`**
+> — a forma curta, por coerência com os outros tipos curtos da linguagem. Este documento foi escrito
+> com `channel<T>` e o token foi actualizado nesta secção; **a SUBSTÂNCIA não mudou uma vírgula.** A
+> objecção abaixo (o canal é a única das cinco que ameaça o determinismo) continua a valer como
+> argumento registado, e é respondida — não apagada — em
+> `docs/design/harness-de-testes-gerado.md` §6.10, onde a decisão do dono de a adoptar para o
+> harness convive com o perigo que esta secção nomeou.
+
+`scope { }` / `spawn` / `chan<T>` / `send` / `recv` → `T | error` permanecem reservadas, com a
 forma já registrada no MASTER_PLAN e a decisão de 1:1 OS threads primeiro **já honrada por L0/L1**
 (M:N vira um backing sob a mesma superfície, sem mudança de assinatura). O dado de duplicação que a
 lei exige para congelá-las é produzido pelas cargas C9–C13: quando o gate, o codegen e o regressor
 estiverem todos escritos contra L1, o padrão repetido entre eles É o dado, e a sintaxe se desenha
 sobre ele em vez de sobre suposição.
 
-**`channel<T>` merece nota própria, porque a análise mudou o desenho.** Nenhum dos três ganhos que
+**`chan<T>` merece nota própria, porque a análise mudou o desenho.** Nenhum dos três ganhos que
 o owner nomeou precisa de canal: gate, codegen e regressor são todos **fork-join sobre um intervalo
 de índices, com escrita disjunta e leitura após barreira**. Canal é a primitiva de comunicação
 *durante* a execução, e comunicação durante a execução é precisamente o que introduz ordem
-dependente de tempo. Congelar `channel<T>` agora seria congelar a peça que os casos reais não usam
+dependente de tempo. Congelar `chan<T>` agora seria congelar a peça que os casos reais não usam
 — e a única que ameaça o determinismo. Fica reservada com uma razão escrita, não por omissão.
 
 ---

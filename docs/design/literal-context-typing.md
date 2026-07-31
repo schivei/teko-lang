@@ -162,7 +162,7 @@ Concretely, `type_value_expected` gains arms so that it, not the caller, threads
 Backends are UNTOUCHED. The typed-tree *shape* is unchanged; (A) only causes more literals to be
 born at their narrow width — exactly the shape codegen already receives today from the adopt-after
 sites (empirically: narrow-typed literal leaves at args/fields/returns compile and run correctly on
-both backends now). So this is a checker-local change, primarily one file (`src/checker/typer.tks`).
+both backends (C and native) now). So this is a checker-local change, primarily one file (`src/checker/typer.tks`).
 
 ---
 
@@ -230,21 +230,21 @@ regression across the whole `.tkt` suite; the two sites now behave identically t
 Extend the fast-path guard at typer.tks:1131. Gate: `takesu32(if c {big} else {0})` round-trips.
 
 **Crumb A7 — ritual gate + regression fixtures (see §6).**
-Add the fixtures; run the FULL gate (`.tkt` + native + VM differential + fixpoint self-compile). This
+Add the fixtures; run the FULL gate (`.tkt` + native + fixpoint self-compile). This
 is the ritual point that ratifies (A) into 0.3.0.28.
 
 ### Ritual points (where the full gate must pass)
 - End of **A1** (correctness landing — no miscompile may ship).
 - End of **A5** (the capability is complete for declarations).
-- **A7** — the closing ritual: full `.tkt`, VM↔native differential, and a clean fixpoint
+- **A7** — the closing ritual: full `.tkt`, native validation, and a clean fixpoint
   self-compile (the seed at 0.3.0.28 must reproduce itself byte-for-byte). This is the gate that
   authorizes the seed bump and unblocks (B).
 
 ---
 
-## 6. Regression fixtures (inputs → expected exit, VM and native)
+## 6. Regression fixtures (inputs → expected exit, native)
 
-Add as `examples/regressions/*` (trailing top-level expr = exit code; must match on `teko run` (VM)
+Add as `examples/regressions/*` (trailing top-level expr = exit code; must match on `teko run`
 and `teko build` + execute (native)). Positive fixtures assert the literal compiles WITHOUT a cast
 AND yields the right value; negative fixtures assert the diagnostic still fires.
 

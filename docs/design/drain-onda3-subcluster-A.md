@@ -1,10 +1,12 @@
+> **[HISTÓRICO]** — documenta a re-verificação de crumbs de implementação da Onda-3, já completada. Não descreve o estado atual do projeto.
+
 # Drain — Onda-3 sub-cluster A (re-verified implementation crumbs)
 
 **Status:** DESIGN-AHEAD (architect). No product code changed. Re-verified at file:line against the current tree.
 **Parent design:** `docs/design/onda3-monomorphization-cluster.md`.
 **Order (A):** `#290` → `#301` → `#254` → `#294`. **Seed:** `teko.tkp` current (`.37-alpha`).
 **Rule:** every snippet is full-Javadoc, `.tks`-only. C twins FROZEN (only `teko_rt.{c,h}` is maintained — none needed here).
-**Ritual (all):** full gate — gen1 `teko . -o bin` (native #test) + `./bin/teko test .` (VM) + FIXPOINT gen1==gen2 byte-identical + `diff_vm_native.sh` + `TEKO_MEM_PARANOID=1` + `//`-audit.
+**Ritual (all):** full gate — gen1 `teko . -o bin` (native #test) + `./bin/teko test .` (VM) + FIXPOINT gen1==gen2 byte-identical + `diff_c_own.sh` + `TEKO_MEM_PARANOID=1` + `//`-audit.
 
 ## RE-VERIFICATION HEADLINE (the #296 lesson: count sites, do not trust "1 crumb")
 
@@ -124,7 +126,7 @@ Verified VM facts: `eval_lambda_call` (`vm.tks:2962`) DOES merge callee cells ba
 - `examples/regressions/closure_in_ref_roundtrip/` (VM==native) — the `reseat` repro; exit-code protocol.
 - `examples/regressions/closure_optional_field/` (native — `tk_opt_func` must cc-compile): a struct with a `Fn?` field and a `[]Fn` field, constructed + read.
 - `flat_map`-shaped `iter_test.tkt` once round-trip holds (unparks ITER0 #184).
-**Ritual:** ship BOTH engines in ONE PR (mangle=native, cell=VM) so `diff_vm_native.sh` never sees a half-fixed state. Corpus carries no `Fn?`/`[]Fn` today → gen1==gen2 trivially preserved (guard: the new arms are a no-op unless a Func inner appears).
+**Ritual:** ship BOTH engines in ONE PR (mangle=native, cell=VM) so `diff_c_own.sh` never sees a half-fixed state. Corpus carries no `Fn?`/`[]Fn` today → gen1==gen2 trivially preserved (guard: the new arms are a no-op unless a Func inner appears).
 
 ---
 

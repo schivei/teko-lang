@@ -1,3 +1,5 @@
+> **[HISTÓRICO]** — documenta o crumb T-B3 da onda const (Tier-B), já executado. Não descreve o estado atual do projeto.
+
 # T-B3 — writers Mach-O + COFF emitem relocations com patch site DENTRO da seção de dados (#594 Tier-B)
 
 Status: READY-TO-IMPLEMENT (architect, 2026-07-18). Track: Tier-B pointer-bearing

@@ -21,7 +21,7 @@ If a canonicalization would change emitted output, a test result, or the fixpoin
 ## Scope
 
 - The lane's **delta** (the files the lane's sub-PRs touched) plus any file you must split to canonicalize them. You may reach into an adjacent file ONLY to complete an extraction/split cleanly.
-- **Teko-only.** Never edit the frozen C twins (checker/codegen/vm/build `.c`); only `teko_rt.{c,h}`/assert seed may change, and only for a genuine runtime reason (almost never in a retrofit).
+- **Teko-only.** Never edit the frozen C bootstrap twins (checker/codegen/build `.c`); only `teko_rt.{c,h}`/assert seed may change, and only for a genuine runtime reason (almost never in a retrofit).
 
 ## What you canonicalize
 

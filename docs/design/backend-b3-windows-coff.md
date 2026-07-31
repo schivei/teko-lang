@@ -828,7 +828,7 @@ object format (COFF), so it hardens the shared pipeline against ABI/format coupl
 
 ### 9.3 Ritual posture — RIGHT-SIZED (dono ruling 2026-07-10; CI is the gate)
 
-- **CI is the gate.** The FULL gate (both engines + FIXPOINT + paranoid + the Windows differential) runs
+- **CI is the gate.** The FULL gate (native validation + FIXPOINT + paranoid + the Windows differential) runs
   in CI at the ritual points. Local per-slice verification is PROPORTIONATE — the
   default-path-unchanged proof + the slice's own goldens/tests + (for the frame slice) B1's x86 frame
   goldens re-green byte-identical + (for the writer slice) the `emit_coff` goldens + a `lld-link`
@@ -840,7 +840,7 @@ object format (COFF), so it hardens the shared pipeline against ABI/format coupl
 - **100% coverage on new code (definition-of-done).** The COFF writer is branchy (per-section,
   inline-vs-strtab name, per-reloc-kind, static-vs-external symbol) — cover every branch + every
   honest-stop arm via goldens; a genuinely unreachable arm is justified in the PR.
-- **VM-gotcha watch** (dense byte-work, the A4/B1/B2 list carries over): (a) build the COFF records in
+- **byte-work gotcha watch** (dense byte-work, the A4/B1/B2 list carries over): (a) build the COFF records in
   `u32`/`u64`, narrow to `byte` only at the last LE-emit step; (b) the 18-byte `IMAGE_SYMBOL` is
   UNALIGNED — do not `pad_to_mult` the symbol table (COFF packs it); (c) no `x = match {…return}` —
   use `let x = match {…}` then act; (d) a NEGATIVE `to u32`/`to u8` **panics** — the strtab 4-byte size
@@ -861,7 +861,7 @@ object format (COFF), so it hardens the shared pipeline against ABI/format coupl
 - After **B3-3** (COFF writer): full CI gate + the `emit_coff` header/section/symtab/reloc goldens
   green + `llvm-readobj --sections/--symbols/--relocations` / `lld-link` consumability on the emitted object (any host,
   machine-free).
-- The **KEYSTONE full CI ritual at B3-4**: the whole gate — both engines + fixpoint + the **windows-x86_64
+- The **KEYSTONE full CI ritual at B3-4**: the whole gate — native validation (C-native + own-x86_64) + fixpoint + the **windows-x86_64
   C-vs-own leg green** (executing the PE NATIVELY on the runner) + the macOS byte-test lane green.
 
 ---

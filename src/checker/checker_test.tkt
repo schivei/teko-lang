@@ -64,7 +64,7 @@ fn lam_collect_descends_loop_init() {
     mut refs: []str = teko::list::empty()
     mut bound: []str = teko::list::empty()
     mut writes: []str = teko::list::empty()
-    let ib: parser::Statement = parser::Binding { kind = parser::BindKind::Mut; target = parser::SimpleName { name = "_hi" }; has_type = false; type_ann = named_t("void"); value = e_var("n") }
+    let ib: parser::Statement = parser::Binding { kind = parser::BindKind::Mut; target = parser::SimpleName { name = "_hi" }; has_type = false; type_ann = named_t("void"); is_ref = false; value = e_var("n") }
     let init: []parser::Statement = teko::list::push(teko::list::empty(), ib)
     let brk: []parser::Statement = teko::list::push(teko::list::empty(), parser::BreakStmt { label = "" })
     let loopnode: parser::Statement = parser::LoopStmt { label = ""; init = init; body = brk }
@@ -375,6 +375,34 @@ fn resolves_generic_type_instantiation() {
     mut at: []Type = teko::list::push(teko::list::empty(), i64t())
     at = teko::list::push(at, Str { })
     teko::assert::is_true(generic_inst_name("Box", at) == "Box__g__i64__str")
+}
+
+#test
+/**
+ * splits_and_recovers_a_generic_instance_names_base — `split_generic_instance_name` finds the
+ * `__g__` stamp `generic_inst_name` writes and recovers the exact BASE it was built from, for one
+ * type-argument (`Box__g__i64`) and for two (`Pair__g__i64__str`); an ordinary nominal name (no
+ * stamp at all, and one that merely CONTAINS the marker's letters split across two segments) is
+ * reported as not-generic. `named_case_name` then delegates to the base for a generic instance and
+ * to the bare last `::`-segment otherwise — the read `variant_member_named`'s `Named` arm needs
+ * (0.3.1.0 degrau 14, #382: a generic instance's canonical name carries no `::` at all, so
+ * `name_last_segment` alone left it whole and unmatchable against a pattern's bare base).
+ */
+fn splits_and_recovers_a_generic_instance_names_base() {
+    let one = split_generic_instance_name("Box__g__i64")
+    teko::assert::is_true(one.is_generic)
+    teko::assert::is_true(one.base == "Box")
+
+    let two = split_generic_instance_name("Pair__g__i64__str")
+    teko::assert::is_true(two.is_generic)
+    teko::assert::is_true(two.base == "Pair")
+
+    let plain = split_generic_instance_name("teko::parser::MainFile")
+    teko::assert::is_true(!plain.is_generic)
+
+    teko::assert::is_true(named_case_name("Box__g__i64") == "Box")
+    teko::assert::is_true(named_case_name("teko::parser::MainFile") == "MainFile")
+    teko::assert::is_true(named_case_name("MainFile") == "MainFile")
 }
 
 // (S-mem) `ptr<T>` — typed pointer: resolves to Ptr{inner}, opaque ptr = Ptr{null}, equal-by-inner.
@@ -932,7 +960,7 @@ fn trait_is_not_instantiable() {
     // `Stamp { at = 1 }` — a trait literal is rejected (derive it instead).
     let tr = trait_item("Stamp", tr_fields1("at"), teko::list::empty())
     let lit = ek(parser::StructLit { type_path = path1("Stamp"); type_args = teko::list::empty(); field_names = teko::list::push(teko::list::empty(), "at"); field_vals = teko::list::push(teko::list::empty(), e_num(1)) })
-    let bind_v = parser::Binding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "v" }; has_type = false; type_ann = named_t("i64"); value = lit }
+    let bind_v = parser::Binding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "v" }; has_type = false; type_ann = named_t("i64"); is_ref = false; value = lit }
     teko::assert::is_true(!tr_program_ok(items2(tr, parser::Item { content = bind_v; namespace = ""; file = "" })))
 }
 
@@ -949,7 +977,7 @@ fn tr_generic_fn(name: str, trait_name: str, body: []parser::Statement) -> parse
     deriver value to feed a generic-fn call). */
 fn tr_let_struct(bind: str, type_name: str, field: str) -> parser::Item {
     let lit = ek(parser::StructLit { type_path = path1(type_name); type_args = teko::list::empty(); field_names = teko::list::push(teko::list::empty(), field); field_vals = teko::list::push(teko::list::empty(), e_num(0)) })
-    let b = parser::Binding { kind = parser::BindKind::Let; target = parser::SimpleName { name = bind }; has_type = false; type_ann = named_t("i64"); value = lit }
+    let b = parser::Binding { kind = parser::BindKind::Let; target = parser::SimpleName { name = bind }; has_type = false; type_ann = named_t("i64"); is_ref = false; value = lit }
     parser::Item { content = b; namespace = ""; file = "" }
 }
 
@@ -973,7 +1001,7 @@ fn trait_struct_as_dynamic_value_is_error() {
     let tr = trait_item("Need", teko::list::empty(), list1(iface_method("need")))
     let dv = deriver_struct_item("P", tr_fields1("own"), list1(impl_method("need", parser::Visibility::Private)), slist1("Need"))
     let mk = tr_let_struct("p", "P", "own")
-    let bind_s = parser::Binding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "s" }; has_type = true; type_ann = named_t("Need"); value = e_var("p") }
+    let bind_s = parser::Binding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "s" }; has_type = true; type_ann = named_t("Need"); is_ref = false; value = e_var("p") }
     let widen = parser::Item { content = bind_s; namespace = ""; file = "" }
     mut items: []parser::Item = teko::list::push(teko::list::empty(), tr)
     items = teko::list::push(items, dv)
@@ -1588,4 +1616,208 @@ fn d1_class1_same_type_cast_keeps_its_node() {
         TCast => teko::assert::is_true(true)
         _ => teko::assert::is_true(false)
     }
+}
+
+/**
+ * shadow_exit_func — a user-declared `pub fn exit(code: i32) -> str` signature — the exact shape
+ * D2's fixture shadows the injected `exit` builtin with (one required `i32` param, no defaults).
+ *
+ * @return  the `Func` type `type_call`'s in-scope lookup resolves for such a declaration
+ */
+fn shadow_exit_func() -> Type {
+    Func { params = teko::list::push(teko::list::empty(), i32t()); ret = strt(); variadic = false; param_names = teko::list::push(teko::list::empty(), "code"); n_required = 1; defaults = teko::list::empty() }
+}
+
+/**
+ * exit_call_expr — the untyped call node for `exit(3)`: an unqualified, single-segment callee —
+ * the exact shape the injected `panic`/`exit` builtins and a same-named user function share
+ * syntactically, and the shape `tcall_is_diverging_builtin` must tell apart by RESOLUTION.
+ *
+ * @return  the untyped `Call`
+ */
+fn exit_call_expr() -> parser::Call {
+    parser::Call { callee = path1("exit"); args = teko::list::push(teko::list::empty(), e_num(3)); arg_names = pos_names(1); type_args = teko::list::empty() }
+}
+
+/**
+ * D2 fixture (nf-n16, part 1) — a same-named user function IN SCOPE resolves over the injected
+ * `exit` builtin (`type_call`'s `in_scope` gate): the resulting call carries a real, non-empty
+ * `call_ns` and the user's OWN declared return type (`str`), never the builtin's `Void`, and
+ * `texpr_diverges`/`tcall_is_diverging_builtin` must recognize it as a NORMAL call — not a
+ * diverging one — precisely because the RESOLUTION says so, not because of its bare name.
+ */
+#test
+fn shadowed_exit_resolves_to_user_function_not_builtin() {
+    let env = with_ns(define_fn(empty_env(), "exit", shadow_exit_func(), "mymod"), "mymod")
+    let te = match type_call(exit_call_expr(), env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    match te.type { Str => teko::assert::is_true(true); _ => teko::assert::is_true(false) }
+    match te.kind {
+        TCall as c => {
+            teko::assert::is_true(c.call_ns == "mymod")
+            teko::assert::is_true(!tcall_is_diverging_builtin(c))
+        }
+        _ => teko::assert::is_true(false)
+    }
+    teko::assert::is_true(!texpr_diverges(te))
+}
+
+/**
+ * D2 fixture (nf-n16, part 2) — THE defect this closes: before the fix, `check_trailing_value`
+ * (the function-body trailing-expression check) skipped a shadowed `exit(...)` call entirely
+ * because `texpr_diverges` recognized it by BARE NAME alone, so a function declaring `-> i32`
+ * whose body trails a user `exit` that actually returns `str` type-checked — only `cc` caught the
+ * mismatch downstream, and the own-native backend has no `cc` at all (silent miscompilation). With
+ * the fix, `check_trailing_value` sees the call's TRUE type (`str`) and rejects it itself, exactly
+ * as it would any other trailing-value type mismatch.
+ */
+#test
+fn shadowed_exit_trailing_value_rejected_by_checker_not_cc() {
+    let env = with_ns(define_fn(empty_env(), "exit", shadow_exit_func(), "mymod"), "mymod")
+    let te = match type_call(exit_call_expr(), env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    let stmts: []TStatement = teko::list::push(teko::list::empty(), texpr_stmt(te))
+    match check_trailing_value(stmts, i32t(), empty_table()) {
+        error => teko::assert::is_true(true)
+        null => teko::assert::is_true(false)
+    }
+}
+
+/**
+ * D2 regression guard — an UNSHADOWED `exit(...)` (no user declaration in scope) must still
+ * resolve to the injected builtin and still diverge, so `check_trailing_value` still exempts it
+ * from the trailing-value type check exactly as before the fix. The fix narrows recognition to
+ * RESOLUTION, not name; it must never narrow which calls are STILL recognized as the true builtin.
+ */
+#test
+fn unshadowed_exit_still_diverges_and_skips_trailing_check() {
+    let te = match type_call(exit_call_expr(), empty_env(), empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(texpr_diverges(te))
+    let stmts: []TStatement = teko::list::push(teko::list::empty(), texpr_stmt(te))
+    match check_trailing_value(stmts, i32t(), empty_table()) {
+        null => teko::assert::is_true(true)
+        error => teko::assert::is_true(false)
+    }
+}
+
+/**
+ * widen_implicit_admits_same_sign_narrower — the implicit-widening rule (owner 2026-07-29) admits a
+ * narrower same-sign integer into a wider one, in BOTH signedness families. This is the direction the
+ * owner's own program needs (`mut b: i64 = 1; b = a` over an `i32` `a`), and all three of his lines
+ * were rejected before it existed.
+ */
+#test
+fn widen_implicit_admits_same_sign_narrower() {
+    teko::assert::is_true(numeric_widens_implicitly(i32t(), i64t()))
+    teko::assert::is_true(numeric_widens_implicitly(u32t(), u64t()))
+    teko::assert::is_true(numeric_widens_implicitly(u8t(), u64t()))
+}
+
+/**
+ * widen_implicit_admits_unsigned_into_strictly_wider_signed — the W-RULE's mixed-sign peer case
+ * (§2.2): lossless because every `u32` value fits an `i64`. Admitted implicitly for the SAME reason
+ * the arithmetic regime already admits it — the two regimes ask ONE predicate so they cannot drift.
+ */
+#test
+fn widen_implicit_admits_unsigned_into_strictly_wider_signed() {
+    teko::assert::is_true(numeric_widens_implicitly(u32t(), i64t()))
+}
+
+/**
+ * widen_implicit_refuses_narrowing_and_equal_width_sign_change — the implicit direction is widening
+ * ONLY. A narrowing has no implicit form at all: it must be written as a `to`, which then carries the
+ * fail-loud runtime fit guard. An equal-width sign change is not a widen either — neither type holds
+ * the whole of the other.
+ */
+#test
+fn widen_implicit_refuses_narrowing_and_equal_width_sign_change() {
+    teko::assert::is_true(!numeric_widens_implicitly(i64t(), i32t()))
+    teko::assert::is_true(!numeric_widens_implicitly(u64t(), u8t()))
+    teko::assert::is_true(!numeric_widens_implicitly(i64t(), u64t()))
+    teko::assert::is_true(!numeric_widens_implicitly(u64t(), i64t()))
+}
+
+/**
+ * widen_implicit_refuses_identity_and_crossing_the_float_boundary — an identity is not a conversion
+ * (nothing to insert), and int↔float stays explicit in both directions (B.38, unchanged).
+ */
+#test
+fn widen_implicit_refuses_identity_and_crossing_the_float_boundary() {
+    teko::assert::is_true(!numeric_widens_implicitly(i64t(), i64t()))
+    teko::assert::is_true(!numeric_widens_implicitly(i32t(), f64t()))
+    teko::assert::is_true(!numeric_widens_implicitly(f64t(), i64t()))
+}
+
+/**
+ * widen_implicit_admits_f32_into_f64_only — the float half: `f32` → `f64` is exact for every value,
+ * so it is implicit; `f64` → `f32` is not, so it stays an explicit `to`.
+ */
+#test
+fn widen_implicit_admits_f32_into_f64_only() {
+    teko::assert::is_true(numeric_widens_implicitly(f32t(), f64t()))
+    teko::assert::is_true(!numeric_widens_implicitly(f64t(), f32t()))
+}
+
+/**
+ * cast_lossless_widen_is_the_guard_decision — `cast_is_lossless_widen` is the ONE width table both
+ * emission routes ask about whether a `to` needs the runtime fit guard, so these are the exact pairs
+ * that decide it. The three that answer false are the three the native route used to get WRONG (300
+ * `to` u8 answered 300; 2^40 `to` i32 answered 0; -1 `to` u32 answered 4294967295).
+ */
+#test
+fn cast_lossless_widen_is_the_guard_decision() {
+    teko::assert::is_true(cast_is_lossless_widen(PrimKind::U8, PrimKind::U64))
+    teko::assert::is_true(cast_is_lossless_widen(PrimKind::I32, PrimKind::I64))
+    teko::assert::is_true(cast_is_lossless_widen(PrimKind::U32, PrimKind::I64))
+    teko::assert::is_true(!cast_is_lossless_widen(PrimKind::U64, PrimKind::U8))
+    teko::assert::is_true(!cast_is_lossless_widen(PrimKind::I64, PrimKind::I32))
+    teko::assert::is_true(!cast_is_lossless_widen(PrimKind::I64, PrimKind::U32))
+    teko::assert::is_true(!cast_is_lossless_widen(PrimKind::U64, PrimKind::I64))
+}
+
+/**
+ * f32_value_widens_implicitly_into_f64 — the float half of the rule, END TO END rather than as a
+ * predicate: an `f32` VALUE flows into an `f64` slot with no `to` written, and the value survives
+ * exactly (every `f32` is representable in `f64`, so the widening is exact for every input, never
+ * merely rounded).
+ *
+ * CORRECTING THE RECORD: the measurement that opened this lane reported `f32 to f64` as "rejected —
+ * the conversion between floats does not exist". It was never rejected. `cast_check` admits any
+ * numeric pair, and the observed rejection came from `print(y)` refusing a float ARGUMENT, one line
+ * past the cast. What was missing was only the IMPLICIT direction, which this test now pins.
+ */
+#test
+fn f32_value_widens_implicitly_into_f64() {
+    mut narrow: f32 = 1.5
+    mut wide: f64 = 0.0
+    wide = narrow
+    teko::assert::is_true(wide == 1.5)
+    let bound: f64 = narrow
+    teko::assert::is_true(bound == 1.5)
+}
+
+/**
+ * f64_to_f32_follows_ieee_and_never_panics — the DECIDED and DOCUMENTED policy for the narrowing
+ * float conversion (`docs/design/cast-width-hygiene-0.3.1.md` §2.6): `f64 to f32` is IEEE-754
+ * round-to-nearest — exact when the value is representable, correctly rounded when it is not, ±∞ on
+ * overflow, ±0 on underflow — and it never panics.
+ *
+ * WHY IT IS NOT GUARDED LIKE AN INTEGER NARROW, since the owner's rule says a cast may not truncate
+ * and must panic on overflow. An integer narrow that overflows answers with a finite number bearing
+ * NO relation to its input (300 becoming 44), and that is the wrong answer the rule outlaws. A float
+ * narrow never does: overflow yields ±∞, which IS an `f32` value and is loudly not a number anyone
+ * mistakes for the input. Guarding only the overflow end would also be incoherent, because the SAME
+ * range argument applies to ordinary precision loss and to underflow — `1.0e-300 to f32` is `0.0` —
+ * and no language panics on those. This mirrors **C#**, whose `checked` context covers integral types
+ * only and whose `(float)1e300` is `+∞`, not an exception.
+ */
+#test
+fn f64_to_f32_follows_ieee_and_never_panics() {
+    mut exact: f64 = 1.5
+    let kept: f32 = exact to f32
+    teko::assert::is_true(kept == 1.5)
+    mut over: f64 = 1.0e300
+    let saturated: f32 = over to f32
+    teko::assert::is_true(saturated > 1.0e38)
+    mut under: f64 = 1.0e-300
+    let flushed: f32 = under to f32
+    teko::assert::is_true(flushed == 0.0)
 }

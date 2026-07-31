@@ -264,11 +264,26 @@ pub type SimpleName = struct { name: str }
 pub type DestructurePattern = struct { names: []str }   // let { x; y } = … (B.13 partial)
 pub type BindTarget = variant SimpleName | DestructurePattern
 
-pub type Binding = struct {   // let/mut/const TARGET [: T] = value
+/**
+ * Binding — a local binding statement `let|mut|const|ref TARGET [: T] = value`.
+ *
+ * @field kind      the mutability mode the binder declared; a `ref` binding desugars to `Mut`
+ * @field target    the bound name, or a `{ x; y }` destructure
+ * @field has_type  true iff the source carried a `: T` annotation (A.8)
+ * @field type_ann  the parsed annotation, meaningful only when `has_type` (A.8)
+ * @field is_ref    true iff the binder was the `ref` modifier. INDEPENDENT of `kind`: `let`/`mut` is
+ *                  the mutability axis, `ref` is the IDENTITY axis (alias, not copy) and is born
+ *                  mutable. It is recorded here because an UN-annotated `ref r = c` has no
+ *                  `Ref<>`-wrapped annotation to carry its reference-ness — without the flag the
+ *                  checker saw a plain `mut` binding and silently COPIED (owner ruling 2026-07-30)
+ * @field value     the initializer expression
+ */
+pub type Binding = struct {
     kind: BindKind
     target: BindTarget
     has_type: bool
-    type_ann: TypeExpr   // the parsed annotation (A.8)
+    type_ann: TypeExpr
+    is_ref: bool
     value: Expr
 }
 /**
@@ -314,7 +329,7 @@ pub type Return = struct { has_value: bool; value: Expr }   // `return [expr]` �
  *
  * @field label the UPPER_SNAKE prefix label, or "" when unlabeled
  * @field init  the loop-scoped preamble, run once before the first iteration; it does NOT leak past
- *              the loop (checker scope / VM base-pop / codegen brace)
+ *              the loop (checker scope / codegen brace)
  * @field body  the iteration body (folded head + user statements)
  */
 pub type LoopStmt = struct { label: str; init: []Statement; body: []Statement }
@@ -516,13 +531,13 @@ pub type ClassBody = struct {
 // `Function`: 1st param untyped = the receiver; NO body, NO statics, NO default bodies; all members
 // public). A type conforms by providing every method (transitively through `extends`) with a matching
 // signature. An interface has NO runtime representation yet (dynamic dispatch = ROUND 3); it is a
-// compile-time contract only, so codegen/VM emit nothing for it and reject it as a value type.
+// compile-time contract only, so codegen emits nothing for it and rejects it as a value type.
 pub type InterfaceBody = struct { extends: []str; methods: []Function }
 /**
  * TraitBody — a `trait { fields; methods; consts }` body (TR0): a struct-shaped, NON-instantiable
  * bundle a struct/class DERIVES (`type Post = struct Timestamped { … }`, the `&`-list position).
- * The checker FOLDS derived traits into each deriver before typing (fold_traits), so codegen/VM
- * never see a trait in a value position; the decl itself emits nothing (like InterfaceBody).
+ * The checker FOLDS derived traits into each deriver before typing (fold_traits), so codegen
+ * never sees a trait in a value position; the decl itself emits nothing (like InterfaceBody).
  *
  * @param fields   the provided members, folded into the deriver (class field-flattening)
  * @param methods  a method WITH a body is PROVIDED (overridable); a bodyless one is a REQUIREMENT

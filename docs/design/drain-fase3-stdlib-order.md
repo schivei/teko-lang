@@ -1,3 +1,5 @@
+> **[HISTÓRICO]** — documenta o plano de drenagem da fase-3 de stdlib, com ordenação de issues já planejada. Não descreve o estado atual do projeto.
+
 # Drain plan — fase-3 stdlib (33 issues): ORDER + first crumbs
 
 Architect deliverable. Read-only design. NO builds were run producing this.
@@ -92,7 +94,7 @@ All snippets below are **already in full-Javadoc W15 style** — implementers co
 C twin (SUPREME RULE binds compiler C↔.tks pairs, not library code). New files therefore
 add a `.tks` + a `.tkt`; no `.c`/`.h`.
 
-Ritual points (where the FULL gate must pass — both engines · paranoid · diff_vm_native ·
+Ritual points (where the FULL gate must pass — both engines · paranoid · diff_c_own ·
 parity · fixpoint): at the END of EACH crumb that adds a new `.tks` to the corpus, because
 every new corpus file changes the self-build. Extern-touching crumbs additionally must run
 the **native** leg (VM rejects `extern fn` with `vm_unsupported` — see `time.tks` header),

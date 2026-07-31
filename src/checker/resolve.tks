@@ -75,21 +75,30 @@ pub fn name_qualifier(name: str) -> str {
     teko::str::slice_to(name, last_sep to u64)   // (#148) builtin slice — see name_last_segment
 }
 
-// find a user type by name; error if not registered.
-// (#109 W3) `name` may be a CANONICAL "ns::Name" (a resolved Named.name) OR a bare source name. The
-// table entry may carry (bare name + real ns) [the typing collect table] OR (canonical name + "")
-// [the codegen/vm type_table_of re-collection]. Match when the entry's name equals `name` directly
-// OR when its qualified form qualify(ns, name) equals `name` — covering every combination. ref_ns is
-// unused (a resolved-name probe is namespace-blind; the SOURCE-reference sites use resolve_type_ref).
-fn type_table_find(table: TypeTable, name: str, ref_ns: str) -> parser::TypeDecl | error {
-    // (#152) TWO PASSES: pass 1 = exact name OR the entry's qualified form (both UNIQUE post-W0's
-    // per-namespace dup ban) — so a canonical query can never be stolen by a same-bare cousin that
-    // merely appears earlier in the table (discovery order differs per platform). Pass 2 = the
-    // legacy bare last-segment fallback (bare probes of a CANONICAL-keyed type_table_of table).
+/**
+ * type_table_find — find a user type's declaration by name, tolerant of BOTH shapes a `TypeTable`
+ * in this compiler ever takes: `name` may be a CANONICAL `"ns::Name"` (a resolved `Named.name`) or
+ * a bare source name, and a table entry may carry (bare name + real namespace — the typing collect
+ * table) or (canonical name + `""` — `type_table_of`'s codegen/lowering re-collection).
+ *
+ * A resolved-name probe is namespace-blind by design (`ref_ns` is accepted for call-site symmetry
+ * with the source-reference resolvers, `resolve_type_ref` and friends, but never read): TWO PASSES
+ * cover every combination. Pass 1 matches the entry's name EXACTLY or through its qualified form
+ * (`qualify_eq`, allocation-free) — both unique post-W0's per-namespace duplicate ban, so a
+ * canonical query can never be stolen by a same-bare cousin that merely appears earlier in the
+ * table (discovery order differs per platform). Pass 2 is the legacy bare last-segment fallback,
+ * for a bare probe of a CANONICAL-keyed `type_table_of` table.
+ *
+ * @param table   the folded type table to search
+ * @param name    the type name to find (bare or canonical)
+ * @param ref_ns  accepted for symmetry with the source-reference resolvers; unused here
+ * @return        the matching declaration, or a named error when `name` registers nothing
+ */
+pub fn type_table_find(table: TypeTable, name: str, ref_ns: str) -> parser::TypeDecl | error {
     mut i = 0
     loop {
         if i >= table.len { break }
-        if table[i].name == name || qualify_eq(table[i].namespace, table[i].name, name) { return table[i].decl }   // (#148) allocation-free qualified compare
+        if table[i].name == name || qualify_eq(table[i].namespace, table[i].name, name) { return table[i].decl }
         i++
     }
     mut j = 0
@@ -99,6 +108,111 @@ fn type_table_find(table: TypeTable, name: str, ref_ns: str) -> parser::TypeDecl
         j++
     }
     error { message = "not a user type" }
+}
+
+/**
+ * type_table_find_path — find a user type's declaration from a WRITTEN reference path already split
+ * into its QUALIFIER (the segments before the last, joined with `::`; `""` for a bare reference) and
+ * its LAST segment. The qualifier-aware sibling of `type_table_find`, and the lookup a backend that
+ * holds a SYNTACTIC annotation — not a resolved `Named.name` — has to ask.
+ *
+ * WHY IT IS NOT `resolve_type_ref`, which is this compiler's namespace-aware source-reference
+ * resolver and would be the obvious choice. `resolve_type_ref` reads `TypeReg.name` as a BARE name
+ * and `TypeReg.namespace` as the real declaring namespace — true of the typing collect table, and
+ * false of `type_table_of`'s re-collection, which keys entries CANONICALLY (`"ns::Name"`) with an
+ * empty namespace. Against that second shape its qualified arm matches nothing and its bare arm
+ * (`resolve_bare_type_reg`, which demands `namespace == ref_ns`) matches nothing either. That is not
+ * a hypothesis: `typeexpr_is_fat`'s own doc-comment records a measured attempt to route through
+ * `resolve_type` failing on exactly that shape and falling back to a silently wrong answer.
+ *
+ * So this reads the DECLARING namespace through `reg_declaring_ns`, which reconciles both shapes,
+ * and matches the entry's own last segment — then falls back to `type_table_find` so a probe that
+ * the qualifier cannot place still gets the namespace-blind answer it gets today. A bare probe
+ * (`qual == ""`) is delegated to `type_table_find` unchanged.
+ *
+ * @param table  the folded type table to search
+ * @param qual   the reference's qualifier, or `""` for a bare reference
+ * @param last   the reference's last path segment (the type's bare name)
+ * @return       the matching declaration, or a named error when the path registers nothing
+ * @since 0.3.1.0 degrau 31 (the qualified-alias fat-pointer gap)
+ */
+pub fn type_table_find_path(table: TypeTable, qual: str, last: str) -> parser::TypeDecl | error {
+    if qual == "" { return type_table_find(table, last, "") }
+    mut i: u64 = 0
+    loop {
+        if i >= table.len { break }
+        if name_last_segment(table[i].name) == last && qualifier_selects_ns(reg_declaring_ns(table[i]), qual) { return table[i].decl }
+        i++
+    }
+    type_table_find(table, last, "")
+}
+
+/**
+ * type_table_rekeyed — `table` with every entry re-keyed from `type_table_of`'s CANONICAL shape
+ * (`name = "ns::Name"`, `namespace = ""`) into the shape the R0-R5 SOURCE-reference resolvers read
+ * (`name` bare, `namespace` the real declaring namespace). An entry already in that second shape —
+ * anything with a non-empty `namespace` — is carried through untouched, so this is idempotent and
+ * safe to apply to either table.
+ *
+ * WHY IT HAD TO EXIST, and it was found BY INVERSION rather than by reading (0.3.1.0 degrau 31). A
+ * divergence guard was built to assert that this backend's SYNTACTIC fat-pointer predicate agrees
+ * with `resolve_type`, the checker's own answer. Run over the compiler's own source it reported ZERO
+ * disagreements — while the very same build still stopped on `native backend N1: \`vt_table\` is not a
+ * fat-pointer local`, an annotation the two predicates provably disagreed about. The guard was not
+ * lenient; it was BLIND. `resolve_type` reaches a qualified reference through
+ * `resolve_qualified_type_reg`, which matches an entry's `name` against the path's LAST SEGMENT and
+ * its `namespace` against the qualifier. Against a canonical-keyed table BOTH tests fail for every
+ * namespaced type, so `resolve_type` answered `error` — "cannot resolve" — and a guard that treats a
+ * non-answer as agreement said nothing.
+ *
+ * That is the whole reason the lowering backend grew a second, weaker resolution of its own instead
+ * of asking the checker: not that the checker does not know, but that the TABLE it is handed is in a
+ * shape the checker's resolver cannot query. Re-keying is the smaller fix than changing
+ * `type_table_of`, whose canonical keys every existing probe already depends on.
+ *
+ * @param table  the folded type table, in either shape
+ * @return       the same registrations, keyed (bare name + declaring namespace)
+ * @since 0.3.1.0 degrau 31
+ */
+pub fn type_table_rekeyed(table: TypeTable) -> TypeTable {
+    mut out: []TypeReg = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= table.len { break }
+        out = teko::list::push(out, rekeyed_reg(table[i]))
+        i++
+    }
+    out
+}
+
+/**
+ * rekeyed_reg — `type_table_rekeyed`'s per-entry step: an entry that already carries a real
+ * `namespace` is returned unchanged; one keyed canonically has its name split into the bare last
+ * segment and the qualifier.
+ *
+ * @param r  the registration to re-key
+ * @return   the registration in (bare name + declaring namespace) form
+ * @since 0.3.1.0 degrau 31
+ */
+fn rekeyed_reg(r: TypeReg) -> TypeReg {
+    if r.namespace != "" { return r }
+    TypeReg { name = name_last_segment(r.name); namespace = name_qualifier(r.name); file = r.file; vis = r.vis; decl = r.decl }
+}
+
+/**
+ * reg_declaring_ns — a registration's DECLARING namespace, tolerant of BOTH `TypeTable` shapes: the
+ * typing collect table carries it in `namespace` directly, while `type_table_of`'s re-collection
+ * leaves `namespace` empty and folds it into the CANONICAL `name` instead, where `name_qualifier`
+ * recovers it. A genuinely root-level type answers `""` under both shapes, which is correct — no
+ * qualifier selects the root scope.
+ *
+ * @param r  the registration to inspect
+ * @return   the namespace `r`'s declaration was collected under
+ * @since 0.3.1.0 degrau 31
+ */
+fn reg_declaring_ns(r: TypeReg) -> str {
+    if r.namespace != "" { return r.namespace }
+    name_qualifier(r.name)
 }
 
 // (#109 W2) does the qualifier `qual` (a path's segments BEFORE the last, joined with "::") select
@@ -1434,10 +1548,12 @@ fn union_collect(acc: []Type, t: Type, table: TypeTable) -> []Type {
  *   `type_has_sentinel`-equal.
  * - a union BUILT here is canonicalized through `union_normalize_null`, exactly like one written
  *   out in source (`resolve_type`'s `UnionType` arm). Null-first is not cosmetic: the own backend
- *   classifies a two-member absence union by `members[0]` being `Null` (`lower.null_union_payload`),
+ *   classifies a two-member absence union by which member is `Null` (`lower.null_union_shape`),
  *   so an inferred `mut x = if c { 5 } else { null }` used to produce `Variant{i64, Null}` and be
  *   REJECTED with "null match pattern not yet lowered", while the identical annotated
- *   `: i64 | null` worked. One normalizer, every construction site (M.5/D39).
+ *   `: i64 | null` worked. One normalizer, every construction site (M.5/D39). Degrau 30 made the
+ *   own backend read the `Null` member's INDEX rather than assume it, so a non-canonical order can
+ *   no longer swap two arms; the normalization stays the single source of that order regardless.
  *
  * @param a      the first branch/arm type
  * @param b      the second branch/arm type
@@ -1589,7 +1705,7 @@ fn named_type_is_null(nt: parser::NamedType) -> bool {
  * function's old `Null`-only test never fired: the union normalizer's whole POINT (never emit an
  * un-normalized null-bearing union) silently failed for exactly the case a bare `null` arm
  * produces. Downstream, both the (now-retired) C backend's `cg_union_niche_member` and the own
- * backend's `null_union_payload` classify a null-union SOLELY by a literal `Null` member, so the
+ * backend's `null_union_shape` classify a null-union SOLELY by a literal `Null` member, so the
  * un-normalized union fell through their niche/tag detection entirely — the own backend's generic
  * BY-NAME variant lowering then bound the union's non-null case at the WRONG index (no `null`
  * pattern has a name to look up), and the write silently landed on the wrong payload slot instead
@@ -1782,6 +1898,43 @@ fn prim_name(k: PrimKind) -> str {
     }
 }
 
+/**
+ * builtin_case_name — the BARE surface spelling a non-nominal type is written under in a match
+ * arm, or `""` when the type has no such spelling. The exact INVERSE of `scope.builtin_type`'s
+ * keyword table, and it must stay that way: a match-arm pattern that is not a member name
+ * resolves through `builtin_type`, so a case a pattern can NAME is precisely a case this
+ * function can SPELL. Kept beside `prim_name` because it is the same question one level up —
+ * "how does the user write this type" — and it delegates the prim family to it rather than
+ * carrying a second copy of eleven spellings that could drift.
+ *
+ * A `Named` type deliberately returns `""`: a nominal case is selected by its canonical name's
+ * last segment (`name_last_segment`), never by a keyword, and answering here would give callers
+ * two different ways to identify the same case. So do `Slice`/`Optional`/`Variant`/`Func`/
+ * `Reference`/`Null`, which no bare keyword names.
+ *
+ * WHY IT EXISTS (0.3.1.0, degrau 2): the native backend resolved a variant case BY NAME and knew
+ * only `Named` + `error`, so `match add_sub_imm_base(…) { u32 as b => b; error as e => … }` — the
+ * compiler's OWN `backend::encode_alu_imm` — stopped with "unknown variant case `u32` (internal)".
+ * The checker had always accepted it (the pattern resolves through `builtin_type`); only the
+ * lowering could not name what the checker had already typed.
+ *
+ * @param t  the type to spell
+ * @return   its bare keyword spelling, or `""` when it has none
+ */
+pub fn builtin_case_name(t: Type) -> str {
+    match t {
+        Prim as p => prim_name(p.kind)
+        Byte => "byte"
+        Char => "char"
+        Str => "str"
+        Error => "error"
+        Void => "void"
+        Ptr => "ptr"
+        Uptr => "uptr"
+        _ => ""
+    }
+}
+
 // (S4) a concrete type → its symbol fragment for a mangled generic-instance name. Prim → its
 // surface spelling (i64/…), Str/Byte/Error/Void/Ptr/Uptr → fixed words, Named → the name, Slice →
 // "slice_"+elem, Optional → "opt_"+inner. Total — always yields a symbol-safe fragment. Shared by
@@ -1839,6 +1992,67 @@ pub fn generic_inst_name(base: str, args: []Type) -> str {
         i++
     }
     out
+}
+
+/**
+ * GenericInstanceSplit — the result of locating `generic_inst_name`'s `__g__` stamp inside a
+ * resolved `Named` canonical name: whether the name IS a generic instance, and — when it is — the
+ * BASE half before the stamp (`generic_inst_name`'s inverse). One shape serves both the membership
+ * test and the base extraction a single caller needs, so `split_generic_instance_name` scans the
+ * name once instead of twice.
+ */
+type GenericInstanceSplit = struct {
+    /** true when `name` carries the `__g__` stamp (it is a generic instance's canonical name). */
+    is_generic: bool
+    /** the base before the stamp (valid iff `is_generic`; `""` otherwise). */
+    base: str
+}
+
+/**
+ * split_generic_instance_name — locate `generic_inst_name`'s `__g__` stamp in a resolved `Named`
+ * canonical name. A generic-instance name is stamped bare (`resolve_generic_inst` takes the
+ * WRITTEN path's last segment as its base, never the namespace-qualified form — `qualify`'s own
+ * doc: "generic `__g__` instances stay bare"), so no `::` search can ever find it; the stamp
+ * itself is the only reliable marker.
+ *
+ * @param str name  a resolved `Named` type's canonical name
+ * @return GenericInstanceSplit  `is_generic=false, base=""` when `name` carries no stamp;
+ *                                otherwise `is_generic=true` and `base` = everything before it
+ */
+pub fn split_generic_instance_name(name: str) -> GenericInstanceSplit {
+    mut i: u64 = 0
+    loop {
+        if i + 5 > name.len { break }
+        if name[i] == b'_' && name[i + 1] == b'_' && name[i + 2] == b'g' && name[i + 3] == b'_' && name[i + 4] == b'_' {
+            return GenericInstanceSplit { is_generic = true; base = teko::str::slice_to(name, i) }
+        }
+        i++
+    }
+    GenericInstanceSplit { is_generic = false; base = "" }
+}
+
+/**
+ * named_case_name — the case name a bind/field pattern would spell to select the `Named` member
+ * whose resolved canonical name is `name`: the BASE before `generic_inst_name`'s `__g__` stamp for
+ * a generic instance (a pattern's type-args are carried separately from its case name —
+ * `bind_pattern_case_name`'s own doc — so the stamped suffix can never appear in a case name), or
+ * the canonical name's bare last `::`-segment for an ordinary nominal member.
+ *
+ * WHY IT EXISTS (0.3.1.0, degrau 14): `variant_member_named`'s `Named` arm compared only
+ * `name_last_segment(n.name)` against a pattern's case name. That is correct for an ordinary
+ * nominal member, but a generic-instance name carries no `::` at all, so `name_last_segment`
+ * returned the WHOLE mangled instance (`Parsed__g__MainFile`) unchanged — never equal to the
+ * pattern's bare base (`Parsed`). The compiler's OWN `teko::build::asm_parse` writes
+ * `match parser::parse_main_file(…) { parser::Parsed<parser::MainFile> as x => x.node; … }` and the
+ * native self-build stopped there with "unknown variant case `Parsed` (internal)".
+ *
+ * @param str name  a resolved `Named` type's canonical name
+ * @return str  the case name a pattern selecting this member would spell
+ */
+pub fn named_case_name(name: str) -> str {
+    let split = split_generic_instance_name(name)
+    if split.is_generic { return split.base }
+    name_last_segment(name)
 }
 
 /**

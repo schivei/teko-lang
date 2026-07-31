@@ -381,6 +381,7 @@ fn rx_spill_abi() -> AbiDescriptor {
         spill_slot_align = 8
         shadow_space = 0 to u32
         max_reg_arg_bytes = 16 to u32
+        arg_slots_shared = false
     }
 }
 
@@ -417,9 +418,8 @@ fn rx_regalloc_gpr_spill_all_physical_and_frame_grows() {
 }
 
 /**
- * rx_fpr_spill_abi — a register file with a single FPR (XMM0) so any function
- * with FPR pressure spills an FPR value (the inherited A3 honest-stop); ample
- * GPRs so only the FPRs spill.
+ * rx_fpr_spill_abi — a register file with a single FPR (XMM0) so any function with
+ * FPR pressure spills an FPR value; ample GPRs so only the FPRs spill.
  *
  * @return AbiDescriptor  the descriptor
  */
@@ -437,14 +437,15 @@ fn rx_fpr_spill_abi() -> AbiDescriptor {
         spill_slot_align = 8
         shadow_space = 0 to u32
         max_reg_arg_bytes = 16 to u32
+        arg_slots_shared = false
     }
 }
 
 /**
  * rx_fpr_spill_fixture — two FPR values live at once (loaded from `[rdi]`, then
- * both stored), forcing an FPR spill under `rx_fpr_spill_abi`. Constructed to
- * exercise the FPR honest-stop; isel never emits FPR values for B1 (the float
- * family is the `B1-fp` stop), so this is a hand-built pressure case.
+ * both stored), forcing an FPR spill under `rx_fpr_spill_abi`'s single allocatable
+ * XMM. Hand-built rather than selected from Teko source so the pressure is exactly
+ * two live floats and the spill is certain.
  *
  * @return []MInstX86  the fixture stream
  */
@@ -460,6 +461,12 @@ fn rx_fpr_spill_fixture() -> []MInstX86 {
 }
 
 #test
+/**
+ * rx_regalloc_module_carries_tables_and_propagates — allocating a module colors
+ * every function and carries the rodata table through untouched.
+ *
+ * @return void
+ */
 fn rx_regalloc_module_carries_tables_and_propagates() {
     let f1 = rx_named_func("a", rx_entry_param_add_fixture())
     let f2 = rx_named_func("b", rx_entry_param_add_fixture())
@@ -472,12 +479,38 @@ fn rx_regalloc_module_carries_tables_and_propagates() {
     }
     teko::assert::is_true(cm.funcs.len == 2 to u64)
     teko::assert::is_true(cm.rodata.len == 1 to u64)
-    let bad = rx_module_of(rx_named_func("main", rx_fpr_spill_fixture()))
-    let is_err = match regalloc_module_x86(rx_fpr_spill_abi(), bad) {
-        MModuleX86 => false
-        error => true
-    }
-    teko::assert::is_true(is_err)
+}
+
+/**
+ * rx_dump — the printed machine text of an already-colored function (the
+ * spill-shape reader).
+ *
+ * @param MFuncX86 f  the colored function
+ * @return str  its rendered machine text
+ */
+fn rx_dump(f: MFuncX86) -> str {
+    minst_print_x86(add_mfunc_x86(empty_mmodule_x86(), f))
+}
+
+#test
+/**
+ * rx_regalloc_fpr_spill_lowers_to_movsd — an FPR-value spill ALLOCATES (`B1-fp`,
+ * closed 2026-07-29 — this used to be a named honest-stop inherited from A3): the
+ * colored function is fully physical, its frame grew a spill slot, and the spilled
+ * float rides `MFSpillX86` in BOTH directions. The store/reload assertions are the
+ * point: without them a regression that dropped the spill traffic entirely would
+ * still leave the function "fully physical" and pass.
+ *
+ * @return void
+ */
+fn rx_regalloc_fpr_spill_lowers_to_movsd() {
+    let f = rx_named_func("main", rx_fpr_spill_fixture())
+    let cf = match regalloc_func_x86(rx_fpr_spill_abi(), f) { MFuncX86 as g => g; error => return }
+    teko::assert::is_true(all_physical_x86(cf))
+    teko::assert::is_true(cf.frame.len > 0 to u64)
+    let text = rx_dump(cf)
+    teko::assert::str_contains(text, "movsd [spill #0], %pf14")
+    teko::assert::str_contains(text, "movsd %pf14, [spill #0]")
 }
 
 /**

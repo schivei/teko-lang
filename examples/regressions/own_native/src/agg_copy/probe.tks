@@ -1,0 +1,548 @@
+use teko::list
+
+/**
+ * AGGREGATE COPY — 0.3.1.0 degrau agregado-copia, and every claim below is an ASSERTION about what
+ * the program must DO, never a number it exits with (owner ruling, 2026-07-30).
+ *
+ * THE DEFECT THESE FIXTURES PIN. An aggregate's value in the own backend IS the address of an
+ * `alloca` (NATIVE-AGG-SLICE-BY-ADDRESS), and three boundaries never copied:
+ *
+ *   · the `return`. `return P{…}` handed the caller the address of a frame slot the `ret` had just
+ *     popped. Nothing traps, nothing stops: the bytes are either still there or they are not. They
+ *     WERE on every x86-64 leg, and they were NOT on arm64, where the very next call's prologue
+ *     (`stp x29, x30, [sp, #-N]`) lands on them. `own_arith_exit` read back `exit 25` on
+ *     `linux-arm64-glibc`, `macos-arm64` and the arm64 memory-paranoid leg, and `exit 42` on every
+ *     x86-64 leg, from the same source;
+ *   · the `let`/`mut`/`=`. Binding an aggregate from a PLACE gave the binding a SECOND NAME for the
+ *     same storage, so a later write through the original was observable through the copy;
+ *   · a CONTAINER slot (an aggregate's field, a slice's element). The field holds an aggregate BY
+ *     ADDRESS and the container's own lifetime is unknown to whoever writes it, so a field aimed at
+ *     a frame `alloca` was wrong even when the value written was a fresh literal.
+ *
+ * MEASURED ON BOTH ROUTES, same host, before any fix: 22 probes of this shape, 15 wrong through the
+ * own backend and 0 wrong through the C route. After: 0 and 0.
+ *
+ * THE INVERSION IS PART OF THE FAMILY, not an afterthought — `receiver_mutation_still_reaches_the_caller`
+ * asserts what must NOT be copied. The C route passes an aggregate parameter by pointer, so a
+ * method's `self.n = …` is visible to its caller; a copy rule that reached argument positions would
+ * pass every other fixture here and silently break that one.
+ *
+ * WHY EACH PROBE CALLS `clob`. A use-after-return is only observable once something REUSES the
+ * popped bytes. `clob` is a function with ten live locals whose frame overlaps the one just
+ * released, so it makes the defect deterministic on EVERY architecture instead of leaving it to
+ * whichever prologue happens to be wide enough.
+ */
+
+/**
+ * Pt — the two-field aggregate the lifetime probes carry. Two independent fields, so a copy that
+ * took only the first machine word is visible without a second probe.
+ */
+type Pt = struct {
+    /** a — the seed value, straight. */
+    a: i64
+
+    /** b — the seed value times ten, so a half-width copy shows up here and not in `a`. */
+    b: i64
+}
+
+/**
+ * Nest — an aggregate holding another aggregate BY VALUE, the container-slot shape: `p` is a field
+ * whose own storage must outlive whatever `Nest` is stored into.
+ */
+type Nest = struct {
+    /** p — the embedded aggregate, by value. */
+    p: Pt
+
+    /** n — a scalar beside it, so a mis-sized field write shows as a wrong neighbour. */
+    n: i64
+}
+
+/**
+ * Ctr — the CLASS arm of the same claims: laid out by the same collector a struct is, and reached
+ * through a static factory and through an instance method.
+ */
+type Ctr = class {
+    /** seen — the value this instance was constructed with. */
+    pub seen: i64
+
+    /**
+     * make — the static factory, the exact shape `BoxCounter::make` has in the failing fixture.
+     *
+     * @param v  the value to record
+     * @return   a fresh instance holding `v`
+     */
+    pub fn make(v: i64) -> Ctr { Ctr { seen = v } }
+
+    /**
+     * twin — an INSTANCE method returning a fresh aggregate, so the receiver-carrying call shape is
+     * covered as well as the static one.
+     *
+     * @return  a fresh instance holding twice `self.seen`
+     */
+    pub fn twin(self) -> Ctr { Ctr { seen = self.seen * 2 } }
+
+    /**
+     * bump — an instance method that WRITES a field of its receiver. The inversion's subject: this
+     * write has to reach the caller's own local on both routes.
+     */
+    pub fn bump(self) -> void { self.seen = self.seen + 1 }
+}
+
+/**
+ * clob — reuse the stack bytes a just-returned frame occupied.
+ *
+ * Ten live locals, each written and then read, so the frame is both wide and genuinely used; a
+ * function whose locals the backend could fold away would clobber nothing and the probes built on
+ * it would be blind rather than lenient.
+ *
+ * @param s  a seed, so no local folds to a constant
+ * @return   a non-zero sum of every local, which every caller checks so the call cannot be dropped
+ */
+fn clob(s: i64) -> i64 {
+    mut v0: i64 = s + 111
+    mut v1: i64 = s + 222
+    mut v2: i64 = s + 333
+    mut v3: i64 = s + 444
+    mut v4: i64 = s + 555
+    mut v5: i64 = s + 666
+    mut v6: i64 = s + 777
+    mut v7: i64 = s + 888
+    mut v8: i64 = s + 999
+    mut v9: i64 = s + 1010
+    v0 = v0 + v1
+    v2 = v2 + v3
+    v4 = v4 + v5
+    v6 = v6 + v7
+    v8 = v8 + v9
+    v0 + v2 + v4 + v6 + v8
+}
+
+/**
+ * mk_pt — the plain aggregate producer: a struct literal returned directly.
+ *
+ * @param x  the seed
+ * @return   a fresh `Pt` carrying `x`
+ */
+fn mk_pt(x: i64) -> Pt { Pt { a = x; b = x * 10 } }
+
+/**
+ * mk_pt_tail — the same value produced through a NAMED LOCAL in tail position, so the trailing
+ * auto-return is covered separately from the explicit one.
+ *
+ * @param x  the seed
+ * @return   a fresh `Pt` carrying `x`
+ */
+fn mk_pt_tail(x: i64) -> Pt {
+    let q = Pt { a = x; b = x * 10 }
+    q
+}
+
+/**
+ * mk_pt_if — the aggregate produced by an `if`-EXPRESSION in tail position, whose value reaches the
+ * `ret` through a block parameter rather than straight from the literal.
+ *
+ * @param x  the seed
+ * @return   a fresh `Pt`, from whichever arm ran
+ */
+fn mk_pt_if(x: i64) -> Pt { if x > 0 { Pt { a = x; b = x * 10 } } else { Pt { a = 0; b = 0 } } }
+
+/**
+ * mk_pt_match — the aggregate produced by a `match` VALUE in tail position, the other merge shape.
+ *
+ * @param x  the subject
+ * @return   a fresh `Pt`, from whichever arm matched
+ */
+fn mk_pt_match(x: i64) -> Pt {
+    match x {
+        1 => Pt { a = 1; b = 11 }
+        _ => Pt { a = 2; b = 22 }
+    }
+}
+
+/**
+ * mk_nest — an aggregate whose FIELD is another aggregate, built from a fresh literal. The field's
+ * storage must outlive this frame even though nothing here is a place.
+ *
+ * @param x  the seed
+ * @return   a fresh `Nest` whose `p` carries `x`
+ */
+fn mk_nest(x: i64) -> Nest { Nest { p = Pt { a = x; b = x * 10 }; n = x + 1 } }
+
+/**
+ * mk_union — an aggregate inside an error UNION, so the uniform tag+payload wrapper is covered.
+ *
+ * @param x  the seed
+ * @return   a fresh `Pt` carrying `x`
+ * @throws   when `x` is negative
+ */
+fn mk_union(x: i64) -> Pt | error {
+    if x < 0 { return error { message = "negative" } }
+    Pt { a = x; b = x * 10 }
+}
+
+/**
+ * mk_optional — an aggregate inside a `T | null` union, the other wrapper-bearing return.
+ *
+ * @param x  the seed
+ * @return   a fresh `Pt` carrying `x`, or `null` for a negative seed
+ */
+fn mk_optional(x: i64) -> Pt | null {
+    if x < 0 { return null }
+    Pt { a = x; b = x * 10 }
+}
+
+/**
+ * mk_pt_lambda — a lambda whose own return type is an aggregate, so a LIFTED body's return is
+ * covered as well as a named function's.
+ *
+ * @param x  the seed
+ * @return   a fresh `Pt` carrying `x`
+ */
+fn mk_pt_lambda(x: i64) -> Pt {
+    let f: (i64) -> Pt = (v: i64) => { Pt { a = v; b = v * 10 } }
+    f(x)
+}
+
+/**
+ * tick_fn — a CLOSURE returned out of the frame that built it, the shape `frame_escape_guard` found
+ * on `rd_tick_fn` after the return-side copy was already in: the env aggregate AND the
+ * `{fn, env}` value both lived in this frame.
+ *
+ * @param base  the value the returned closure adds to its argument
+ * @return      a closure carrying `base`
+ */
+fn tick_fn(base: i64) -> (i64) -> i64 {
+    (n: i64) => { base + n }
+}
+
+/**
+ * empty_i64s — the ZERO-WIDTH array literal returned directly, whose backing bytes are 0 wide and
+ * whose pointer was therefore exempted from the copy by the "0 means no copy" shortcut.
+ *
+ * @return  an empty `[]i64`
+ */
+fn empty_i64s() -> []i64 { [] }
+
+/**
+ * takes_pt — an aggregate parameter re-bound into a `mut` local the callee then writes. The
+ * caller's own value must be untouched: the copy is owed by the BINDING, not by the call.
+ *
+ * @param q  the caller's aggregate
+ * @return   `q.a` as the callee still sees it after writing its own copy
+ */
+fn takes_pt(q: Pt) -> i64 {
+    mut r = q
+    r.a = 77
+    q.a
+}
+
+/**
+ * agg_return_struct_survives_a_call — a struct returned by value, read AFTER an intervening call.
+ *
+ * @return true when both fields read back as the callee produced them
+ */
+pub fn agg_return_struct_survives_a_call() -> bool {
+    let p = mk_pt(5)
+    if clob(1) == 0 { return false }
+    p.a == 5 && p.b == 50
+}
+
+/**
+ * agg_return_tail_local_survives_a_call — the same claim for the TRAILING auto-return of a named
+ * local, which reaches the `ret` by a different lowering path than an explicit `return`.
+ *
+ * @return true when both fields read back as the callee produced them
+ */
+pub fn agg_return_tail_local_survives_a_call() -> bool {
+    let p = mk_pt_tail(6)
+    if clob(2) == 0 { return false }
+    p.a == 6 && p.b == 60
+}
+
+/**
+ * agg_return_class_factory_survives_a_call — a CLASS instance returned from a static factory, the
+ * exact producer of the fixture that read back `exit 25` on the arm64 legs.
+ *
+ * @return true when the instance reads back as the factory built it
+ */
+pub fn agg_return_class_factory_survives_a_call() -> bool {
+    let c = Ctr::make(7)
+    if clob(3) == 0 { return false }
+    c.seen == 7
+}
+
+/**
+ * agg_return_method_result_survives_a_call — an INSTANCE method returning a fresh aggregate.
+ *
+ * @return true when the method's result reads back as it was built
+ */
+pub fn agg_return_method_result_survives_a_call() -> bool {
+    let c = Ctr::make(21)
+    let d = c.twin()
+    if clob(4) == 0 { return false }
+    d.seen == 42
+}
+
+/**
+ * agg_return_nested_survives_a_call — a struct holding a struct BY VALUE, returned by value: the
+ * outer copy is not enough on its own, since the inner field is reached by address.
+ *
+ * @return true when the inner aggregate and the scalar beside it both read back correctly
+ */
+pub fn agg_return_nested_survives_a_call() -> bool {
+    let n = mk_nest(9)
+    if clob(5) == 0 { return false }
+    n.p.a == 9 && n.p.b == 90 && n.n == 10
+}
+
+/**
+ * agg_return_if_value_survives_a_call — an aggregate produced by an `if`-EXPRESSION in tail
+ * position, so the value crosses a merge before it is returned.
+ *
+ * @return true when the taken arm's value reads back
+ */
+pub fn agg_return_if_value_survives_a_call() -> bool {
+    let p = mk_pt_if(4)
+    if clob(6) == 0 { return false }
+    p.a == 4 && p.b == 40
+}
+
+/**
+ * agg_return_match_value_survives_a_call — the same claim for a `match` VALUE in tail position.
+ *
+ * @return true when the matched arm's value reads back
+ */
+pub fn agg_return_match_value_survives_a_call() -> bool {
+    let p = mk_pt_match(1)
+    if clob(7) == 0 { return false }
+    p.a == 1 && p.b == 11
+}
+
+/**
+ * agg_return_from_lambda_survives_a_call — an aggregate returned out of a LIFTED lambda body.
+ *
+ * @return true when the lambda's value reads back
+ */
+pub fn agg_return_from_lambda_survives_a_call() -> bool {
+    let p = mk_pt_lambda(11)
+    if clob(8) == 0 { return false }
+    p.a == 11 && p.b == 110
+}
+
+/**
+ * agg_return_error_union_survives_two_calls — an aggregate inside a `T | error` wrapper, read after
+ * TWO intervening calls: the wrapper is 24 bytes, wider than any single probe frame.
+ *
+ * @return true when the payload reads back through the union's own `match`
+ */
+pub fn agg_return_error_union_survives_two_calls() -> bool {
+    let r = mk_union(8)
+    if clob(9) == 0 { return false }
+    if clob(10) == 0 { return false }
+    match r {
+        Pt as p => p.a == 8 && p.b == 80
+        error => false
+    }
+}
+
+/**
+ * agg_return_optional_survives_a_call — an aggregate inside a `T | null` wrapper, the other
+ * wrapper-bearing return shape.
+ *
+ * @return true when the present payload reads back through the union's own `match`
+ */
+pub fn agg_return_optional_survives_a_call() -> bool {
+    let r = mk_optional(12)
+    if clob(11) == 0 { return false }
+    match r {
+        Pt as p => p.a == 12 && p.b == 120
+        null => false
+    }
+}
+
+/**
+ * agg_return_pushed_in_loop_keeps_each_iteration — the failing fixture's own shape, one axis
+ * harsher: the pushed item is a CALL RESULT, so the push reads the callee's frame before boxing it.
+ *
+ * @return true when every element carries its own iteration's value
+ */
+pub fn agg_return_pushed_in_loop_keeps_each_iteration() -> bool {
+    mut ps: []Pt = teko::list::empty()
+    mut i: i64 = 0
+    loop {
+        if i >= 3 { break }
+        ps = teko::list::push(ps, mk_pt_if(i + 1))
+        i++
+    }
+    if ps.len != 3 { return false }
+    ps[0].a == 1 && ps[1].a == 2 && ps[2].a == 3
+}
+
+/**
+ * agg_return_class_pushed_in_loop_keeps_each_iteration — the CLASS arm of the same claim, through
+ * the static factory the arm64 legs failed on.
+ *
+ * @return true when every element carries its own iteration's value
+ */
+pub fn agg_return_class_pushed_in_loop_keeps_each_iteration() -> bool {
+    mut cs: []Ctr = teko::list::empty()
+    mut i: i64 = 0
+    loop {
+        if i >= 3 { break }
+        cs = teko::list::push(cs, Ctr::make(i * 7))
+        i++
+    }
+    if cs.len != 3 { return false }
+    cs[0].seen == 0 && cs[1].seen == 7 && cs[2].seen == 14
+}
+
+/**
+ * agg_return_in_loop_accumulates — an aggregate returned INSIDE a loop body and read after a call
+ * in the same iteration, so the frame is reused every turn rather than once.
+ *
+ * @return true when both iterations contribute their own value
+ */
+pub fn agg_return_in_loop_accumulates() -> bool {
+    mut acc: i64 = 0
+    mut i: i64 = 0
+    loop {
+        if i >= 2 { break }
+        let p = mk_pt(i + 1)
+        if clob(i) == 0 { return false }
+        acc = acc + p.a
+        i++
+    }
+    acc == 3
+}
+
+/**
+ * closure_returned_still_reads_its_captures — a CLOSURE returned out of the frame that built it,
+ * invoked after an intervening call. Both the env aggregate and the `{fn, env}` value have to have
+ * left that frame.
+ *
+ * @return true when the returned closure still sees the value it captured
+ */
+pub fn closure_returned_still_reads_its_captures() -> bool {
+    let add = tick_fn(100)
+    if clob(12) == 0 { return false }
+    add(5) == 105
+}
+
+/**
+ * empty_array_literal_returned_is_usable — the ZERO-WIDTH array literal returned directly. Its
+ * pointer is never dereferenced, so the claim it can carry is that its LENGTH reads back and a
+ * second one is distinct from it rather than the same frame slot.
+ *
+ * @return true when the empty literal reads back empty after an intervening call
+ */
+pub fn empty_array_literal_returned_is_usable() -> bool {
+    let xs = empty_i64s()
+    if clob(13) == 0 { return false }
+    xs.len == 0
+}
+
+/**
+ * struct_field_from_a_named_local_copies — a struct literal's field initialized from a NAMED-type
+ * local: writing through the local afterward must not be visible through the field.
+ *
+ * @return true when the field kept the value it was written with
+ */
+pub fn struct_field_from_a_named_local_copies() -> bool {
+    mut t = Pt { a = 1; b = 2 }
+    let h = Nest { p = t; n = 44 }
+    t.a = 99
+    h.p.a == 1 && h.n == 44
+}
+
+/**
+ * let_binding_of_an_aggregate_copies — `let u = t`: writing through `t` afterward must not be
+ * visible through `u`.
+ *
+ * @return true when the binding kept its own value
+ */
+pub fn let_binding_of_an_aggregate_copies() -> bool {
+    mut t = Pt { a = 1; b = 2 }
+    let u = t
+    t.a = 99
+    u.a == 1 && u.b == 2
+}
+
+/**
+ * assignment_of_an_aggregate_copies — `u = t` on an already-bound `mut` local, the assignment arm
+ * of the same claim.
+ *
+ * @return true when the assigned-to local kept its own value
+ */
+pub fn assignment_of_an_aggregate_copies() -> bool {
+    mut t = Pt { a = 1; b = 2 }
+    mut u = Pt { a = 3; b = 4 }
+    u = t
+    t.a = 99
+    u.a == 1 && u.b == 2
+}
+
+/**
+ * argument_rebound_into_a_mut_local_copies — an aggregate argument re-bound into a `mut` local the
+ * callee writes: the caller's value is untouched because the BINDING copies, not the call.
+ *
+ * @return true when the callee's own write did not reach the parameter it was copied from
+ */
+pub fn argument_rebound_into_a_mut_local_copies() -> bool {
+    takes_pt(Pt { a = 1; b = 2 }) == 1
+}
+
+/**
+ * nested_field_read_copies — reading an aggregate FIELD by value out of a parent, then writing the
+ * parent: the read value must be the one that was there.
+ *
+ * @return true when the read value kept its own contents
+ */
+pub fn nested_field_read_copies() -> bool {
+    mut n = Nest { p = Pt { a = 1; b = 2 }; n = 3 }
+    let inner = n.p
+    n.p.a = 99
+    inner.a == 1 && inner.b == 2
+}
+
+/**
+ * slice_element_read_copies — reading an aggregate ELEMENT by value out of a slice, then
+ * overwriting that element.
+ *
+ * @return true when the read element kept its own contents
+ */
+pub fn slice_element_read_copies() -> bool {
+    mut ps: []Pt = teko::list::empty()
+    ps = teko::list::push(ps, Pt { a = 1; b = 2 })
+    let e = ps[0]
+    ps[0] = Pt { a = 99; b = 98 }
+    e.a == 1 && ps[0].a == 99
+}
+
+/**
+ * field_assignment_from_a_place_copies — `h.p = t` writes a container slot from a PLACE, so the
+ * slot must receive a copy rather than a second name for `t`.
+ *
+ * @return true when a later write through `t` is invisible through the field
+ */
+pub fn field_assignment_from_a_place_copies() -> bool {
+    mut t = Pt { a = 1; b = 2 }
+    mut h = Nest { p = Pt { a = 7; b = 8 }; n = 5 }
+    h.p = t
+    t.a = 99
+    h.p.a == 1 && h.n == 5
+}
+
+/**
+ * receiver_mutation_still_reaches_the_caller — THE INVERSION. An aggregate ARGUMENT is passed by
+ * pointer on the C route, so a method writing `self.seen` is visible to the caller's own local. A
+ * copy rule that reached argument positions would pass every other fixture in this file and break
+ * exactly this one.
+ *
+ * @return true when both writes through the receiver reached the caller's local
+ */
+pub fn receiver_mutation_still_reaches_the_caller() -> bool {
+    let c = Ctr::make(0)
+    c.bump()
+    c.bump()
+    c.seen == 2
+}

@@ -62,7 +62,7 @@ fn parse_statement(tokens: []lexer::Token, pos: u64) -> Parsed<Statement> | erro
         return parse_assign(tokens, pos)
     }
     // `i++` / `i--` — postfix increment/decrement STATEMENT sugar: desugar to the compound
-    // assignment `i += 1` / `i -= 1` (reuses assign typing/codegen/VM; mut-guard included).
+    // assignment `i += 1` / `i -= 1` (reuses assign typing and codegen; mut-guard included).
     if is_kind_at(tokens, pos, lexer::TokenKind::Ident) &&
     (is_kind_at(tokens, pos + 1, lexer::TokenKind::PlusPlus) || is_kind_at(tokens, pos + 1, lexer::TokenKind::MinusMinus)) {
         let op = if is_kind_at(tokens, pos + 1, lexer::TokenKind::PlusPlus) { lexer::TokenKind::PlusEq } else { lexer::TokenKind::MinusEq }
@@ -216,7 +216,7 @@ fn parse_binding(tokens: []lexer::Token, pos: u64) -> Parsed<Statement> | error 
         return err_at(tokens, ann.next, "expected '=' in a binding")
     }
     let v = match parse_expr(tokens, ann.next + 1) { Parsed<Expr> as x => x; error as e => return e }
-    Parsed<Statement> { node = Binding { kind = kind; target = tgt.node; has_type = ann.has_type; type_ann = ann.type_ann; value = v.node }; next = v.next }
+    Parsed<Statement> { node = Binding { kind = kind; target = tgt.node; has_type = ann.has_type; type_ann = ann.type_ann; is_ref = false; value = v.node }; next = v.next }
 }
 
 /**
@@ -236,11 +236,15 @@ fn is_ref_binding_head(tokens: []lexer::Token, pos: u64) -> bool {
 }
 
 /**
- * parse_ref_binding — parse a `ref NAME : T = e` reference binding (0.3.0.30 Part A). `ref` is the
- * third binding modifier (after `let`/`mut`): the bound name aliases its target with write-through
- * semantics (R4). It desugars to a `mut` `Binding` whose annotation is wrapped in the internal
- * `Ref<>` (checker `Reference{T}`), so an annotated `ref x: T` binds a `Reference{T}`; an
- * un-annotated `ref x = &y` lets the checker infer the reference type from the RHS borrow.
+ * parse_ref_binding — parse a `ref NAME [: T] = e` reference binding (0.3.0.30 Part A). `ref` is the
+ * binding modifier of the IDENTITY axis (`let`/`mut` are the mutability axis): the bound name
+ * aliases its target with write-through semantics (R4) and is born mutable — there is no `ref mut`.
+ * It desugars to a `mut` `Binding` carrying `is_ref = true`; an ANNOTATED `ref x: T` additionally
+ * wraps the annotation in the internal `Ref<>` (checker `Reference{T}`), while an UN-annotated
+ * `ref x = y` leaves the checker to infer `Ref<>` from the source (owner ruling 2026-07-30). The
+ * `is_ref` flag is what makes the un-annotated form a reference at all: before it the modifier
+ * survived ONLY inside the annotation, so `ref x = y` reached the checker indistinguishable from
+ * `mut x = y` and was silently compiled into a COPY.
  *
  * @param tokens  the token stream
  * @param pos     the index of the leading `ref` token
@@ -255,7 +259,7 @@ fn parse_ref_binding(tokens: []lexer::Token, pos: u64) -> Parsed<Statement> | er
     }
     let v = match parse_expr(tokens, ann.next + 1) { Parsed<Expr> as x => x; error as e => return e }
     let ann_ty = if ann.has_type { wrap_ref_type(ann.type_ann) } else { ann.type_ann }
-    Parsed<Statement> { node = Binding { kind = BindKind::Mut; target = tgt.node; has_type = ann.has_type; type_ann = ann_ty; value = v.node }; next = v.next }
+    Parsed<Statement> { node = Binding { kind = BindKind::Mut; target = tgt.node; has_type = ann.has_type; type_ann = ann_ty; is_ref = true; value = v.node }; next = v.next }
 }
 
 // a binding target: a simple name or a destructure `{ x; y }` (B.13). `pos` after the kw.
@@ -288,7 +292,7 @@ fn parse_bind_target(tokens: []lexer::Token, pos: u64) -> Parsed<BindTarget> | e
  */
 fn parse_discard_assign(tokens: []lexer::Token, pos: u64) -> Parsed<Statement> | error {
     let dv = match parse_expr(tokens, pos + 2) { Parsed<Expr> as x => x; error as e => return e }
-    Parsed<Statement> { node = Binding { kind = BindKind::Let; target = SimpleName { name = "_" }; has_type = false; type_ann = no_type(); value = dv.node }; next = dv.next }
+    Parsed<Statement> { node = Binding { kind = BindKind::Let; target = SimpleName { name = "_" }; has_type = false; type_ann = no_type(); is_ref = false; value = dv.node }; next = dv.next }
 }
 
 // `name op= value` (B.4 — assignment is statement-only). Simple-name target; the op

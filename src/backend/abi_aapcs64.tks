@@ -99,6 +99,25 @@ pub type AbiDescriptor = struct {
      * register-id lists cannot express — the sibling of `shadow_space`.
      */
     max_reg_arg_bytes: u32
+    /**
+     * arg_slots_shared — whether the two argument register files are numbered by
+     * ONE shared argument POSITION (`true`) or counted INDEPENDENTLY per register
+     * file (`false`) — the third frame-convention fact the register-id lists
+     * cannot express, and the one `B3-argslot` names.
+     *
+     * AAPCS64/SysV/LP64D: `false`. Each file has its own counter, so
+     * `f(i64, f64, i64)` travels in x0/d0/x1 (AAPCS64) and RDI/XMM0/RSI (SysV) —
+     * a float argument consumes NO integer register and vice versa.
+     *
+     * Win64: `true`. Argument POSITION `k` owns BOTH the k-th integer register and
+     * the k-th XMM register and takes exactly one of them, so `f(i64, f64, i64)`
+     * travels in RCX/XMM1/R8, never RCX/XMM0/RDX. Counting per file there puts
+     * every argument after the first class mix in a register the callee never
+     * reads — measured on `tk_ftoa_len(double, uint64_t *out_len)`, whose
+     * out-pointer left in RCX while the MSVC-built callee took it from RDX and
+     * wrote through the garbage (0xC0000005).
+     */
+    arg_slots_shared: bool
 }
 
 /**
@@ -190,6 +209,7 @@ pub const AAPCS64: AbiDescriptor = AbiDescriptor {
     spill_slot_align = 8 to u32
     shadow_space = 0 to u32
     max_reg_arg_bytes = 16 to u32
+    arg_slots_shared = false
 }
 
 /**

@@ -256,10 +256,128 @@ fn cb_numint(buf: []byte, v: parser::NumInt) -> []byte {
     cb_u64_c_expr(buf, v.mag)
 }
 
-// cb_f64_literal — append a f64 as a round-trippable decimal literal. The C twin used
-// snprintf("%.17g"); Teko has no snprintf, so this defers to the runtime float renderer
-// (teko::ftoa) which guarantees an exact binary64 round-trip. (C: `cb_f64_literal`.)
-fn cb_f64_literal(buf: []byte, v: f64) -> []byte { cb(buf, teko::ftoa(v)) }
+/**
+ * F64_EXPONENT_SHIFT — the bit position of the IEEE-754 binary64 biased exponent field.
+ */
+const F64_EXPONENT_SHIFT: u64 = 52 to u64
+/**
+ * F64_EXPONENT_MASK — the IEEE-754 binary64 biased exponent field, once shifted down: all-ones
+ * denotes a non-finite value (infinity when the significand is zero, NaN otherwise).
+ */
+const F64_EXPONENT_MASK: u64 = 2047 to u64
+/**
+ * F64_SIGNIFICAND_MASK — the IEEE-754 binary64 significand field, the 52 low bits.
+ */
+const F64_SIGNIFICAND_MASK: u64 = 4503599627370495 to u64
+/**
+ * F64_SIGN_SHIFT — the bit position of the IEEE-754 binary64 sign bit.
+ */
+const F64_SIGN_SHIFT: u64 = 63 to u64
+
+/**
+ * cb_f64_literal — append `v` as a C expression of type `double` holding EXACTLY `v`'s bits.
+ *
+ * The `%.17g` text alone is NOT that expression, and believing it was cost two measured defects
+ * (0.3.1.0 degrau 27, found while lowering `ftoa` for the native backend — this function is the very
+ * site the native self-host stopped at):
+ *
+ * - a `%.17g` rendering with NO `.`, `e` or `E` in it is an INTEGER constant in C. `-0.0` renders as
+ *   `-0`, which C reads as the `int` zero and then converts to `+0.0` — the sign bit silently gone.
+ *   Measured: `mut a: f64 = -0.0` printed `-0` through the own backend (which carries the literal as
+ *   bits and never spells it) and `0` through this route.
+ * - `inf`/`-inf`/`nan` are not C constants at ALL. A source literal that overflows binary64
+ *   (`1.0e400`) emitted `tk_ftoa((inf))`, and the generated program did not COMPILE: *"error: 'inf'
+ *   undeclared"*. The own backend built and ran the same program.
+ *
+ * So the spelling is decided from the value's IEEE class, never from its text alone: a non-finite
+ * value takes `<math.h>`'s own `INFINITY`/`NAN` macros (already included by the prologue, and the
+ * portable C spelling — a NaN's PAYLOAD is not preserved, which no language guarantees and Teko does
+ * not expose), and a finite value takes the `%.17g` text forced into floating-point form
+ * (`c_double_spelling`). `%.17g` round-trips binary64 exactly, so the finite case is bit-exact.
+ *
+ * @param buf  the emission buffer
+ * @param v    the literal value to append
+ * @return     the buffer with a `double`-typed C expression for `v` appended
+ */
+fn cb_f64_literal(buf: []byte, v: f64) -> []byte {
+    let bits = teko::f64_bits(v)
+    if f64_bits_are_finite(bits) { return cb(buf, c_double_spelling(teko::ftoa(v))) }
+    if f64_bits_are_nan(bits) { return cb(buf, "NAN") }
+    if f64_bits_are_negative(bits) { return cb(buf, "(-INFINITY)") }
+    cb(buf, "INFINITY")
+}
+
+/**
+ * f64_bits_are_finite — is the binary64 value carried by `bits` finite (neither infinity nor NaN)?
+ * True exactly when the biased exponent field is not all-ones.
+ *
+ * @param bits  the value's IEEE-754 binary64 bit pattern (`teko::f64_bits`)
+ * @return      true iff the value is finite
+ */
+fn f64_bits_are_finite(bits: u64) -> bool {
+    ((bits >> F64_EXPONENT_SHIFT) & F64_EXPONENT_MASK) != F64_EXPONENT_MASK
+}
+
+/**
+ * f64_bits_are_nan — is the binary64 value carried by `bits` a NaN? True exactly when the biased
+ * exponent field is all-ones AND the significand is non-zero (an all-ones exponent with a zero
+ * significand is an infinity).
+ *
+ * @param bits  the value's IEEE-754 binary64 bit pattern (`teko::f64_bits`)
+ * @return      true iff the value is a NaN
+ */
+fn f64_bits_are_nan(bits: u64) -> bool {
+    !f64_bits_are_finite(bits) && (bits & F64_SIGNIFICAND_MASK) != 0 to u64
+}
+
+/**
+ * f64_bits_are_negative — is the binary64 value carried by `bits` signed negative? Read off the SIGN
+ * BIT alone, so it answers true for `-0.0` as well — which is the whole reason this family exists.
+ *
+ * @param bits  the value's IEEE-754 binary64 bit pattern (`teko::f64_bits`)
+ * @return      true iff the sign bit is set
+ */
+fn f64_bits_are_negative(bits: u64) -> bool {
+    (bits >> F64_SIGN_SHIFT) != 0 to u64
+}
+
+/**
+ * c_double_spelling — `text` (a `%.17g` rendering of a FINITE binary64 value) forced into a spelling
+ * C reads as a `double` rather than as an `int`: a `.0` is appended when the rendering carries no
+ * decimal point and no exponent marker.
+ *
+ * `%.17g` drops the fractional part of an integral value (`1.0` renders as `1`, `-0.0` as `-0`). For
+ * every value but zero that reads back as the same NUMBER anyway, since C converts the integer
+ * constant to `double` at the assignment; for `-0.0` it does not, because the `int` `-0` IS `0` and
+ * the sign is lost before any conversion happens. Appending `.0` fixes the sign case and changes no
+ * other value: an integral `%.17g` rendering plus `.0` denotes the same real number, and a binary64
+ * that `%.17g` renders integrally is exactly representable.
+ *
+ * @param text  the `%.17g` rendering of a finite value
+ * @return      the same value as a C floating-point constant
+ */
+fn c_double_spelling(text: str) -> str {
+    if has_c_float_marker(text) { return text }
+    teko::str::concat(text, ".0")
+}
+
+/**
+ * has_c_float_marker — does `text` already carry a character that makes a C numeric constant
+ * FLOATING-POINT rather than integer: a decimal point or an exponent marker?
+ *
+ * @param text  the numeric constant text
+ * @return      true iff `text` contains `.`, `e` or `E`
+ */
+fn has_c_float_marker(text: str) -> bool {
+    mut i: u64 = 0 to u64
+    loop {
+        if i >= text.len { break }
+        let ch = text[i]
+        if ch == b'.' || ch == b'e' || ch == b'E' { return true }
+        i++
+    }
+    false
+}
 
 // cb_cstr_escaped — append `s` C-escaped, INSIDE an already-open C string literal. The
 // bytes are raw (may contain NUL, quotes, newlines) — see TStrLit. We never rely on
@@ -458,6 +576,28 @@ const CG_TABLE_MIN_CAP: u64 = 16
  * @since cargo/20-codegen-perf
  */
 const CG_TABLE_LOAD_NUMERATOR: u64 = 2
+
+/**
+ * CG_MAIN_RETURN_OPEN — the C text that OPENS the virtual-main `return` carrying a process exit
+ * code (the C route's own exit-code door). It wraps the historical `(int)` cast in the runtime
+ * normalizer `tk_exit_status` (`TK_EXIT_STATUS_MASK`, `src/runtime/teko_rt.h`), so a `main` that
+ * returns 20203 leaves the process with 235 on EVERY platform instead of 235 on POSIX and 20203
+ * on Windows (owner ruling 2026-07-30). The libc `main`-to-`exit` handoff is the reason the mask
+ * cannot live in `tk_exit` alone: a `return` never calls it.
+ *
+ * @since cargo/0.3.1-saida-equalizada
+ */
+const CG_MAIN_RETURN_OPEN: str = "return tk_exit_status((int)("
+
+/**
+ * CG_MAIN_RETURN_CLOSE — the C text that CLOSES `CG_MAIN_RETURN_OPEN`: one paren for the `(int)`
+ * cast's operand group, one for the `tk_exit_status` call, then the statement terminator. Paired
+ * with the opener in a named const so the two never drift apart across the emission sites that
+ * use them (`emit_exprstmt_tail`'s W5a tail value and `emit_return`'s explicit `return n`).
+ *
+ * @since cargo/0.3.1-saida-equalizada
+ */
+const CG_MAIN_RETURN_CLOSE: str = "));\n"
 
 /**
  * CgNameTable — an open-addressed, linear-probed `str` -> item-index table: the DERIVED lookup
@@ -2036,8 +2176,8 @@ type UnionRepr = enum { Niche; InlineTag; BoxInArena }
 /**
  * cg_type_min_bytes — a conservative compile-time LOWER BOUND on the C storage size (in bytes) of a
  * resolved value type, used only to classify a union member as saturating-large (≥ 16 bytes → box)
- * versus small (< 16 → inline-tag). A `Prim` is its bit-width in bytes (`u128`/`i128` → 16); `byte`/
- * `char` are one byte; the fat `str`/`error`/slice values are two words (16); a pointer/handle/closure
+ * versus small (< 16 → inline-tag). A `Prim` is its bit-width in bytes (at most 8 — 64 bits is the
+ * language's widest scalar); `byte`/`char` are one byte; the fat `str`/`error`/slice values are two words (16); a pointer/handle/closure
  * is one word (8); a by-value struct is the sum of its field lower bounds (the walk stops at a class
  * handle / slice / pointer, one word, so a recursive back-edge never diverges); an unknown shape
  * defaults to one word. Over/under-approximation only shifts a borderline member between two valid
@@ -2054,7 +2194,8 @@ fn cg_type_min_bytes(prog: CgProg, x: checker::Type) -> u64 {
 
 /**
  * cg_prim_min_bytes — the byte size of a scalar `Prim`: its bit width divided by 8, floored at one
- * byte so a sub-byte `bool` still occupies a whole byte. `u128`/`i128` yield 16 (the box threshold).
+ * byte so a sub-byte `bool` still occupies a whole byte. No prim reaches the 16-byte box threshold:
+ * `u64`/`i64`/`f64` are the widest at 8 bytes.
  *
  * @param k  the primitive kind
  * @return   the primitive's C storage size in bytes (≥ 1)
@@ -2128,7 +2269,8 @@ fn cg_named_min_bytes(prog: CgProg, name: str, depth: u64) -> u64 {
  * BOX-IN-ARENA class: `X` carries NO spare NULL niche (so `cg_union_niche_member` declined it) AND
  * EITHER it is SELF-RECURSIVE (`X` embeds this very union by value, so an inline layout has no finite
  * size and MUST box — the finitizing indirection a recursive value type demands) OR its saturating
- * payload is ≥ 16 bytes (`u128`/`i128`, a large by-value struct). Such an `X` is stored as an 8-byte
+ * payload is ≥ 16 bytes (a fat `str`/slice, a large by-value struct — no PRIM reaches 16 since 64
+ * bits is the language's widest scalar). Such an `X` is stored as an 8-byte
  * handle into the arena (`NULL` = `null` = zero heap; a `tk_region_alloc` cell on a non-null
  * construct); return `null` for any smaller, non-recursive, niche-able member (those stay niche or
  * inline-tag). Mirrors `cg_union_niche_member`'s two-member/one-null shape gate, and closes the
@@ -2603,29 +2745,36 @@ fn cg_prim_is_float(k: checker::PrimKind) -> bool { checker::prim_is_float(k) }
  */
 fn cg_prim_is_int(k: checker::PrimKind) -> bool { checker::prim_is_int(k) }
 
-/** cg_assert_c_symbol — the C symbol for an INJECTED `teko::assert::<name>` call, or "" when the
- *  call is not a `teko::assert::*` builtin. The injected assertions (is_true/is_false/str_contains)
- *  are recognized by the checker as builtins WITHOUT a resolved namespace (empty call_ns), so a
- *  standalone project that does not itself define `teko::assert` would otherwise emit the BARE last
- *  segment (`is_true(...)`) — undeclared C, breaking the native test gate. This mirrors the VM's
- *  `teko::assert::*` recognition (segments[0]=="teko" && segments[len-2]=="assert") and emits the
- *  `teko__assert__<name>` symbol the assert seed (src/assert/assert.{c,h}) defines/declares, so the
- *  native gate compiles the same assertions the VM interprets. The caller only consults this when
- *  `call_ns` is empty; a project that DEFINES its own `teko::assert` resolves the call with a
- *  namespace and keeps the existing resolved-user-call lowering (cb_fn_name → the same mangled
- *  symbol), so the emitted C is byte-unchanged for the compiler's own corpus (the fixpoint is intact).
+/**
+ * cg_assert_c_symbol — the C symbol for an INJECTED `teko::assert::<name>` call, or "" when the call
+ * is not a `teko::assert::*` builtin.
  *
- *  @param callee  the call's callee path (parser::Path)
- *  @return        "teko__assert__<name>" for is_true/is_false/str_contains under teko::assert, else ""
- *  @since #168 */
+ * The injected assertions are recognized by the checker as builtins WITHOUT a resolved namespace
+ * (empty `call_ns`), so a standalone project that does not itself define `teko::assert` would
+ * otherwise emit the BARE last segment (`is_true(...)`) — undeclared C, breaking the native test
+ * gate. This keys on the same shape the lowering does (`segments[0] == "teko"` and
+ * `segments[len-2] == "assert"`) and emits the `teko__assert__<name>` symbol the assert seed
+ * (src/assert/assert.{c,h}) defines/declares.
+ *
+ * The caller only consults this when `call_ns` is empty; a project that DEFINES its own
+ * `teko::assert` resolves the call with a namespace and keeps the resolved-user-call lowering
+ * (`cb_fn_name` → the same mangled symbol), so the emitted C is byte-unchanged for the compiler's own
+ * corpus and the FIXPOINT is intact.
+ *
+ * WHICH names are assertions is asked of `checker::assert_builtin_name`, never re-listed here — see
+ * that function for the drift this collapse ends.
+ *
+ * @param callee  the call's callee path (parser::Path)
+ * @return        "teko__assert__<name>" for an injected assertion under `teko::assert`, else ""
+ * @since #168
+ */
 fn cg_assert_c_symbol(callee: parser::Path) -> str {
     let segs = callee.segments
     if segs.len < 2 { return "" }
     if segs[0].name != "teko" { return "" }
     if segs[segs.len - 2].name != "assert" { return "" }
-    let last = segs[segs.len - 1].name
-    if last == "is_true" || last == "is_false" || last == "str_contains" {
-        return teko::str::concat("teko__assert__", last)
+    if checker::assert_builtin_name(segs[segs.len - 1].name) {
+        return teko::str::concat("teko__assert__", segs[segs.len - 1].name)
     }
     ""
 }
@@ -2712,18 +2861,25 @@ fn prim_float_tag(k: checker::PrimKind) -> str | error {
     }
 }
 
-// cast_may_lose — an INT->INT cast src->dst may lose data (needs a runtime guard) when
-// SOME value of the source type falls outside the destination's representable range.
-// Conservative: if we cannot prove source range ⊆ dest range, guard. Floats are handled
-// separately (float->int always guards). (C: `cast_may_lose`.)
+/**
+ * cast_may_lose — may an INT->INT cast `src`->`dst` lose data, and therefore need a runtime fit
+ * guard? True when SOME value of the source type falls outside the destination's representable
+ * range: a true narrowing at equal signedness, an unsigned source into a signed destination of the
+ * same-or-smaller width (the destination spends one bit on the sign), or ANY signed source into an
+ * unsigned destination (a negative value never fits).
+ *
+ * Delegates to the checker's `cast_is_lossless_widen`, of which this is the exact complement, so
+ * the two EMISSION routes ask ONE width table. It used to carry its own copy, and the native route
+ * carried none — the divergence that let `300 to u8` answer 300 natively while the C route
+ * correctly panicked.
+ *
+ * @param src  the cast operand's PrimKind
+ * @param dst  the cast target's PrimKind
+ * @return     whether the pair needs the fail-loud runtime range check
+ * @see        checker::cast_is_lossless_widen — the single source of truth this negates
+ */
 pub fn cast_may_lose(src: checker::PrimKind, dst: checker::PrimKind) -> bool {
-    let ss = cg_prim_is_signed_int(src)
-    let ds = cg_prim_is_signed_int(dst)
-    let sw = cg_int_width(src)
-    let dw = cg_int_width(dst)
-    if ss == ds { return sw > dw }   // same signedness: only true narrowing loses
-    if !ss && ds { return sw >= dw }   // u->i: dest loses one bit of magnitude at equal width
-    true   // i->u: negatives never fit
+    !checker::cast_is_lossless_widen(src, dst)
 }
 
 // ---------------------------------------------------------------------------
@@ -2762,6 +2918,54 @@ fn emit_div_mod(buf: []byte, prog: CgProg, e: checker::TExpr, b: checker::TBinar
     out = cb(out, ", ")
     out = match emit_expr_ctx(out, prog, checker::Void { }, b.right, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
     cb(out, ")")
+}
+
+/**
+ * emit_div_mod_assign — F3 (M.1)'s compound-assignment twin of `emit_div_mod`: `/=`/`%=`
+ * rewritten as `lvalue = tk_div_<w>(lvalue, rhs)` / `tk_mod_<w>(lvalue, rhs)`, the SAME
+ * zero-divisor-panicking runtime helper the binary `/`/`%` operator already routes through.
+ * Without this rewrite the raw C `/=`/`%=` compound operator falls straight to hardware
+ * division — an x86-64 SIGFPE by ISA accident, never the deliberate panic the plain-operator
+ * form already guarantees — exactly the gap `emit_assign`'s `<<=`/`>>=` rewrite already closed
+ * for the UB-prone raw shift (#61). Safe to evaluate the lvalue twice: the assign-statement
+ * grammar (`parse_stmt`) admits only two lvalue shapes here — a bare identifier, or (when
+ * `a.deref`) a `Ref<T>` handle's `(*name)` dereference — both pure, side-effect-free symbol
+ * lookups (the same justification the `<<=`/`>>=` rewrite already relies on).
+ *
+ * @param buf       the output buffer to append into (already carries the statement's indent)
+ * @param prog      the whole checked+lowered program (threaded to `emit_assign_lvalue`)
+ * @param a         the typed compound assignment (`op` is `/=` or `%=`)
+ * @param escaping  the enclosing function's escaping-name set (threaded to `emit_expr_ctx`)
+ * @param regions   the enclosing region-frame stack (threaded to `emit_expr_ctx`)
+ * @param fn_body   the enclosing function's own statement list (threaded to `emit_expr_ctx`)
+ * @param dctx      the enclosing defer context (threaded to `emit_expr_ctx`)
+ * @return          `buf` with the rewritten statement appended, or a propagated error
+ * @throws          when the target's declared type is not primitive/numeric, or `%=` targets
+ *                  a float (no C float modulo operator)
+ */
+fn emit_div_mod_assign(buf: []byte, prog: CgProg, a: checker::TAssign, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    let prim = match a.bound {
+        checker::Prim as p => p
+        _ => return error { message = "codegen: division/modulo-assign on a non-primitive type not yet supported" }
+    }
+    if a.op == lexer::TokenKind::PercentEq && cg_prim_is_float(prim.kind) {
+        return error { message = "codegen: modulo-assign on a float type is not allowed" }
+    }
+    let tag = match prim_div_tag(prim.kind) {
+        str as t => t
+        error => return error { message = "codegen: division/modulo-assign on a non-numeric type not yet supported" }
+    }
+    let fn_prefix = if a.op == lexer::TokenKind::SlashEq { "tk_div_" } else { "tk_mod_" }
+    mut out = match emit_assign_lvalue(buf, prog, a) { []byte as o => o; error as err => return err }
+    out = cb(out, " = ")
+    out = cb(out, fn_prefix)
+    out = cb(out, tag)
+    out = cb(out, "(")
+    out = match emit_assign_lvalue(out, prog, a) { []byte as o => o; error as err => return err }
+    out = cb(out, ", ")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, a.value, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, ")")
+    cb(out, ";\n")
 }
 
 // emit_arith — C7.15: the `+`, `-`, `*` path for INTEGER prims.
@@ -2889,8 +3093,378 @@ fn cg_prim_is_subint(k: checker::PrimKind) -> bool {
     k == checker::PrimKind::U8 || k == checker::PrimKind::U16 || k == checker::PrimKind::I8 || k == checker::PrimKind::I16
 }
 
-// emit_compare — a TCompare -> chained `a<b<c` => `((a<b) && (b<c))` over ADJACENT
-// operands. A lone subject (no rest) is degenerate: emit it bare. (C: TK_TEXPR_COMPARE.)
+/**
+ * CgCmpRoute — which lowering an `==`/`!=` comparison TERM takes, chosen by an operand's
+ * resolved type (`cg_cmp_route_of`). `Plain` is the raw C operator (a scalar prim or an
+ * already-`==`-legal nominal); `StrEq`/`CharEq`/`SliceEq` are the three content-equality
+ * detours a `{ptr,len}`-shaped operand needs, because C's own `==` on a struct either refuses to
+ * compile (`str`/`[]T`) or silently compares the wrong thing (a `char`'s VIEW address, not its
+ * codepoint). A TAGGED-variant/member pairing (`a == null` / `a != 5` over `a: i32 | null`) is
+ * NOT one of these routes — it is recognized separately, by `cg_variant_member_cmp`, and takes
+ * priority over this dispatch entirely (see `emit_compare`'s doc for why).
+ */
+pub type CgCmpRoute = enum { Plain; StrEq; CharEq; SliceEq }
+
+/**
+ * cg_cmp_route_of — the `CgCmpRoute` a comparison operand's OWN type takes. `str`/`char`/`[]T`
+ * are the three `{ptr,len}`-shaped types (B.19/B.8): C's raw `==` either fails to compile on the
+ * struct (`str`/`[]T`) or silently compares the VIEW's address instead of its content (`char`),
+ * so each routes to its own runtime content-equality call. Every other type (a scalar prim, a
+ * `Variant`, or a nominal the checker already proved `==`-comparable) keeps the plain C operator —
+ * a `Variant` operand's tagged/member comparison is recognized and dispatched BEFORE this route
+ * ever runs (`cg_variant_member_cmp`, checked first in `emit_compare`).
+ *
+ * @param t  an operand's resolved type
+ * @return   the route that operand's type takes
+ */
+fn cg_cmp_route_of(t: checker::Type) -> CgCmpRoute {
+    match t {
+        checker::Str => CgCmpRoute::StrEq
+        checker::Char => CgCmpRoute::CharEq
+        checker::Slice => CgCmpRoute::SliceEq
+        _ => CgCmpRoute::Plain
+    }
+}
+
+/**
+ * A recognized TAGGED-variant/member operand pairing in an equality/inequality comparison term.
+ * `subj_expr` is the operand whose resolved type is a `Variant` with neither a null NICHE nor a
+ * BOX-in-arena representation (REBOOT_PLAN §202/C3/C4 — either of those stores the runtime value
+ * as a bare pointer/fat handle with no `.tag` word, so it already compares correctly through the
+ * plain `==`/`!=`/`tk_str_eq` fallback and never needs this path). `member` is its comparison
+ * partner, already narrowed by the checker (`adopt_binop_operands`/`retype_literal`, C6/C2b) to
+ * exactly one of `subj_expr`'s own union members — `null` itself, or a numeric literal's sole
+ * fitting member.
+ */
+type CgVariantMemberCmp = struct {
+    /** The operand whose type is the tagged `Variant`. */
+    subj_expr: checker::TExpr
+    /** The variant's resolved member list (for the tag-constant prefix). */
+    variant_type: checker::Variant
+    /** The comparison partner, already resolved to one of `variant_type`'s members. */
+    member: checker::TExpr
+}
+
+/**
+ * cg_tagged_variant_side — is `e`'s type a TAGGED `Variant` (REBOOT_PLAN §202/C3/C4)? A niche or
+ * box-in-arena union's runtime value has no `.tag` word (the null pattern IS the pointer's own
+ * zero, or a fat value's zeroed head field), so only the true tagged `{ uint8_t tag; union {…} as; }`
+ * shape needs the `.tag`/`.as.<key>` comparison this module builds.
+ *
+ * @param prog  the checked program (class/interface/size resolution `cg_union_niche_member` and
+ *              `cg_union_box_member` need)
+ * @param e     the candidate operand
+ * @return      `e.type`'s `Variant` payload when it is tagged, else `null`
+ */
+fn cg_tagged_variant_side(prog: CgProg, e: checker::TExpr) -> checker::Variant | null {
+    match e.type {
+        checker::Variant as v => {
+            match cg_union_niche_member(prog, v) { checker::Type => return null; null => { } }
+            match cg_union_box_member(prog, v) { checker::Type => return null; null => { } }
+            v
+        }
+        _ => null
+    }
+}
+
+/**
+ * cg_variant_member_cmp — recognize an equality/inequality comparison TERM as a tagged-variant-vs-
+ * member comparison (`a == null` / `a != 5` over `a: i32 | null`): exactly one of `prev`/`opnd`
+ * resolves to a tagged `Variant` (`cg_tagged_variant_side`); the other is its member partner.
+ * Neither side being a tagged variant answers `null` — the ordinary `==`/`!=`/`tk_str_eq` fallback
+ * already handles a niche/box variant and a plain non-variant pairing alike.
+ *
+ * @param prog  the checked program
+ * @param prev  the comparison term's left-hand (already-adopted) operand
+ * @param opnd  the comparison term's right-hand (already-adopted) operand
+ * @return      the recognized pairing, or `null` when neither/both sides are a tagged variant
+ */
+fn cg_variant_member_cmp(prog: CgProg, prev: checker::TExpr, opnd: checker::TExpr) -> CgVariantMemberCmp | null {
+    let opnd_is_variant = match opnd.type { checker::Variant => true; _ => false }
+    let prev_is_variant = match prev.type { checker::Variant => true; _ => false }
+    if opnd_is_variant && prev_is_variant { return null }
+    if !opnd_is_variant {
+        match cg_tagged_variant_side(prog, prev) {
+            checker::Variant as v => return CgVariantMemberCmp { subj_expr = prev; variant_type = v; member = opnd }
+            null => { }
+        }
+    }
+    if !prev_is_variant {
+        match cg_tagged_variant_side(prog, opnd) {
+            checker::Variant as v => return CgVariantMemberCmp { subj_expr = opnd; variant_type = v; member = prev }
+            null => { }
+        }
+    }
+    null
+}
+
+/**
+ * cg_variant_member_payload_comparable — may `t` (a tagged variant's resolved member) be compared
+ * with plain C `==`/`!=` once its `.tag` already matches? True for a numeric `Prim` (never `Bool`,
+ * which `cast_kind`/`number_fits_member` already exclude from literal adoption) and `Byte`
+ * (`uint8_t`) — the only member kinds a numeric-literal adoption (C2b's `union_sole_numeric_member`)
+ * ever produces. Any other member kind (a fat `Str`/`Error`, a by-value `Named` struct, `Slice`,
+ * `Char`, …) has NO defined C `==` and is not yet supported here.
+ *
+ * @param t  the tagged variant's resolved member type (never `Null` — the caller handles that
+ *           tag-only case before asking)
+ * @return   true iff `t`'s C representation is plain-`==`-comparable
+ */
+fn cg_variant_member_payload_comparable(t: checker::Type) -> bool {
+    match t {
+        checker::Prim as p => p.kind != checker::PrimKind::Bool
+        checker::Byte => true
+        _ => false
+    }
+}
+
+/**
+ * emit_content_eq — emit one `==`/`!=` TERM whose operand type took a non-`Plain` `CgCmpRoute`:
+ * dispatch to the runtime call that route's element shape needs.
+ *
+ * @param buf       the C source buffer to append to
+ * @param prog      the typed program (element-type lookups for the `[]T` route)
+ * @param route     the non-`Plain` route chosen for this term (`cg_cmp_route_of`)
+ * @param op        the comparison operator token (`==`/`!=` only — the caller already filtered)
+ * @param lhs       the left operand
+ * @param rhs       the right operand
+ * @return          the appended buffer
+ * @throws          propagated from emitting either operand, or from `emit_slice_eq` when the
+ *                  `[]T` element is a shape this codegen does not close (see its own doc)
+ */
+fn emit_content_eq(buf: []byte, prog: CgProg, route: CgCmpRoute, op: lexer::TokenKind, lhs: checker::TExpr, rhs: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    match route {
+        CgCmpRoute::StrEq => emit_runtime_eq_call(buf, prog, "tk_str_eq", op, lhs, rhs, escaping, regions, fn_body, dctx)
+        CgCmpRoute::CharEq => emit_runtime_eq_call(buf, prog, "tk_char_eq", op, lhs, rhs, escaping, regions, fn_body, dctx)
+        CgCmpRoute::SliceEq => emit_slice_eq(buf, prog, op, lhs, rhs, escaping, regions, fn_body, dctx)
+        CgCmpRoute::Plain => error { message = "codegen: emit_content_eq called with the Plain route (internal)" }
+    }
+}
+
+/**
+ * emit_runtime_eq_call — `a == b` / `a != b` as a direct call to a fixed-ABI runtime predicate
+ * that takes BOTH operands by value (`tk_str_eq`/`tk_char_eq` — a `str`/`char` is passed as an
+ * ordinary C struct argument in the C route, no ABI flattening needed; contrast the native
+ * route's `lower_str_compare`/`lower_char_compare`, which DO flatten, because that backend's
+ * calling convention has no struct-by-value argument).
+ *
+ * @param buf    the C source buffer to append to
+ * @param prog   the typed program
+ * @param rtfn   the runtime predicate's C symbol (`tk_str_eq` or `tk_char_eq`)
+ * @param op     the comparison operator token (`==`/`!=`)
+ * @param lhs    the left operand
+ * @param rhs    the right operand
+ * @return       the appended buffer
+ * @throws       propagated from emitting either operand
+ */
+fn emit_runtime_eq_call(buf: []byte, prog: CgProg, rtfn: str, op: lexer::TokenKind, lhs: checker::TExpr, rhs: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    mut out = cb(buf, "(")
+    if op == lexer::TokenKind::Ne { out = cb(out, "!") }
+    out = cb(out, rtfn)
+    out = cb(out, "(")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, lhs, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, ", ")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, rhs, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    cb(out, "))")
+}
+
+/**
+ * CgSliceEqPlan — the runtime call `[]T == []T` needs for one element shape: which fixed-ABI
+ * predicate to call, and whether that predicate ALSO needs a `sizeof(T)` argument (the
+ * POD/`memcmp` route, `tk_slice_eq_bytes`, is generic over element width; the float/char/str
+ * routes are each one dedicated, element-width-baked-in predicate).
+ */
+pub type CgSliceEqPlan = struct {
+    /** the runtime predicate's C symbol. */
+    rtfn: str
+    /** whether the call needs a trailing `sizeof(<elem>)` argument. */
+    needs_size: bool
+}
+
+/**
+ * cg_slice_eq_plan — the `CgSliceEqPlan` for a `[]T`'s element type `elem`, mirroring Go's
+ * slice-by-value comparison (owner ruling 2026-07-29, naming Go over Rust's derived
+ * `PartialEq` — Teko has no derived traits, and Go compares a slice by value with no ceremony):
+ * same length AND every element equal. An integer/`bool`/`byte` element is POD (no interior
+ * pointer, no padding in a packed array of it) so `tk_slice_eq_bytes` (`memcmp`) is exact; a
+ * float element needs `==` per element (`memcmp` would call `-0.0`/`0.0` distinct and `NaN`
+ * self-equal, both wrong); `char`/`str` elements are `{ptr,len}` views whose ADDRESS differs even
+ * for equal content, so each gets its own dedicated per-element predicate.
+ *
+ * EVERY OTHER ELEMENT SHAPE (a nested `[]T`, a `Named` struct/class, `T?`, a variant, a function
+ * value, `ptr`/`uptr`/`ref<T>`, `error`) is an HONEST STOP, not a silent wrong answer: this
+ * codegen does not (yet) know how to compare it by value, and the checker's own `is_comparable`
+ * admits it anyway (it only asks `type_eq`, not "and codegen can lower it") — this is where that
+ * gap surfaces, loudly, naming the element type.
+ *
+ * @param elem  the slice's resolved element type
+ * @return      the plan for that element shape
+ * @throws      when `elem` is a shape this codegen does not yet close (see above)
+ * @since 0.3.1.0 (igualdade-char-slice)
+ */
+fn cg_slice_eq_plan(elem: checker::Type) -> CgSliceEqPlan | error {
+    match elem {
+        checker::Char => CgSliceEqPlan { rtfn = "tk_slice_char_eq"; needs_size = false }
+        checker::Str => CgSliceEqPlan { rtfn = "tk_slice_str_eq"; needs_size = false }
+        checker::Byte => CgSliceEqPlan { rtfn = "tk_slice_eq_bytes"; needs_size = true }
+        checker::Prim as p => cg_slice_eq_plan_prim(p.kind)
+        _ => error { message = teko::str::concat("codegen: `[]T == []T` is not lowered yet for element type `", checker::type_render(elem), "` (only numeric/bool/byte/char/str elements compare by value)") }
+    }
+}
+
+/**
+ * cg_slice_eq_plan_prim — the `CgSliceEqPlan` for a `Prim`-typed element: the float kinds get
+ * their own per-element-`==` predicate, every integer/bool kind shares the generic `memcmp` route.
+ *
+ * @param k  the element's `PrimKind`
+ * @return   the plan for that kind
+ */
+fn cg_slice_eq_plan_prim(k: checker::PrimKind) -> CgSliceEqPlan {
+    if k == checker::PrimKind::F32 { return CgSliceEqPlan { rtfn = "tk_slice_f32_eq"; needs_size = false } }
+    if k == checker::PrimKind::F64 { return CgSliceEqPlan { rtfn = "tk_slice_f64_eq"; needs_size = false } }
+    CgSliceEqPlan { rtfn = "tk_slice_eq_bytes"; needs_size = true }
+}
+
+/**
+ * cg_slice_elem_of — the element type of a `[]T` operand about to take the `SliceEq` route.
+ * Reached ONLY after `cg_cmp_route_of` already matched `checker::Slice` on this same operand, so
+ * the fallback arm below is unreachable in practice; it is still written total (Teko `match`
+ * requires exhaustiveness) rather than assumed.
+ *
+ * @param t  the operand's resolved type (a `Slice` by the caller's own precondition)
+ * @return   `t`'s element type, or `Void` when `t` is not in fact a `Slice` (unreachable given
+ *           the precondition)
+ */
+fn cg_slice_elem_of(t: checker::Type) -> checker::Type {
+    match t { checker::Slice as sl => sl.element; _ => checker::Void { } }
+}
+
+/**
+ * emit_slice_eq — `a == b` / `a != b` over two `[]T` operands: bind both to locals (single-eval —
+ * each is otherwise emitted twice, once for the runtime call's `.ptr` and once for its `.len`),
+ * then call the runtime predicate `cg_slice_eq_plan` chose for `T`, passing the trailing
+ * `sizeof(T)` argument iff that plan needs it.
+ *
+ * @param buf       the C source buffer to append to
+ * @param prog      the typed program (element-type lookups, C type names)
+ * @param op        the comparison operator token (`==`/`!=`)
+ * @param lhs       the left `[]T` operand
+ * @param rhs       the right `[]T` operand
+ * @return          the appended buffer
+ * @throws          propagated from `cg_slice_eq_plan` (an unclosed element shape) or from
+ *                  emitting either operand
+ * @since 0.3.1.0 (igualdade-char-slice)
+ */
+fn emit_slice_eq(buf: []byte, prog: CgProg, op: lexer::TokenKind, lhs: checker::TExpr, rhs: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    let elem = cg_slice_elem_of(lhs.type)
+    let plan = match cg_slice_eq_plan(elem) { CgSliceEqPlan as p => p; error as err => return err }
+    let t = $"_teq{buf.len}"
+    mut out = cb(buf, "(")
+    if op == lexer::TokenKind::Ne { out = cb(out, "!") }
+    out = cb(out, "({ ")
+    out = match emit_type(out, prog, lhs.type) { []byte as o => o; error as err => return err }
+    out = cb(out, " ")
+    out = cb(out, t)
+    out = cb(out, "a = ")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, lhs, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, "; ")
+    out = match emit_type(out, prog, rhs.type) { []byte as o => o; error as err => return err }
+    out = cb(out, " ")
+    out = cb(out, t)
+    out = cb(out, "b = ")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, rhs, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, "; ")
+    out = cb(out, plan.rtfn)
+    out = cb(out, "(")
+    out = cb(out, t)
+    out = cb(out, "a.ptr, ")
+    out = cb(out, t)
+    out = cb(out, "a.len, ")
+    out = cb(out, t)
+    out = cb(out, "b.ptr, ")
+    out = cb(out, t)
+    out = cb(out, "b.len")
+    if plan.needs_size {
+        out = cb(out, ", sizeof(")
+        out = match emit_type(out, prog, elem) { []byte as o => o; error as err => return err }
+        out = cb(out, ")")
+    }
+    out = cb(out, "); })")
+    cb(out, ")")
+}
+
+/**
+ * cg_emit_variant_member_cmp — emit the boolean test for a recognized tagged-variant/member
+ * equality (`==`) or inequality (`!=`) comparison: single-evaluates the variant side into a fresh
+ * temp (a GNU statement-expression, mirroring `emit_coalesce`/`emit_safe_field_access`'s single-eval
+ * shape), then tests its `.tag` against the member's tag constant — and, when the member is a
+ * payload-comparable non-`null` member (`cg_variant_member_payload_comparable`), additionally
+ * compares the `.as.<key>` payload once the tag already matches (`null` carries no payload, so a
+ * `null` member stops at the tag test).
+ *
+ * @param buf       the emit buffer
+ * @param prog      the checked program (tag/member-key mangling)
+ * @param cmp       the recognized variant/member pairing
+ * @param eq        true for `==`, false for `!=`
+ * @param escaping  the region-escape set threaded to the variant/member emitters
+ * @param regions   the active region stack
+ * @param fn_body   the enclosing function's statements (defer resolution)
+ * @param dctx      the defer-lowering context
+ * @return          `buf` with the boolean test appended, or an error
+ * @throws          when the variant's C type or a member's key cannot be emitted, or the non-`null`
+ *                  member has no defined payload comparison (`cg_variant_member_payload_comparable`)
+ */
+fn cg_emit_variant_member_cmp(buf: []byte, prog: CgProg, cmp: CgVariantMemberCmp, eq: bool, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    let is_null_member = match cmp.member.type { checker::Null => true; _ => false }
+    if !is_null_member && !cg_variant_member_payload_comparable(cmp.member.type) {
+        return error { message = "codegen: comparing a tagged union to a non-null, non-numeric member is not yet supported" }
+    }
+    let tmp = fresh_named("_vm", buf.len to i64)
+    mut out = cb(buf, "({ ")
+    out = match emit_type(out, prog, cmp.subj_expr.type) { []byte as o => o; error as err => return err }
+    out = cb(out, " ")
+    out = cb(out, tmp)
+    out = cb(out, " = (")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, cmp.subj_expr, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, "); (")
+    out = cb(out, tmp)
+    out = cb(out, ".tag ")
+    out = cb(out, if eq { "== " } else { "!= " })
+    out = match cg_emit_tag_prefix(out, checker::Variant { members = cmp.variant_type.members }) { []byte as o => o; error as err => return err }
+    let mk = match cg_member_key_str(cmp.member.type) { str as s => s; error as err => return err }
+    out = cb_upper(out, mk)
+    if is_null_member { return cb(out, "); })") }
+    out = cb(out, if eq { " && " } else { " || " })
+    out = cb(out, tmp)
+    out = cb(out, ".as.")
+    out = match cg_member_key(out, cmp.member.type) { []byte as o => o; error as err => return err }
+    out = cb(out, if eq { " == (" } else { " != (" })
+    out = match emit_expr_ctx(out, prog, checker::Void { }, cmp.member, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    cb(out, ")); })")
+}
+
+/**
+ * emit_compare — a `TCompare` -> chained `a<b<c` => `((a<b) && (b<c))` over ADJACENT operands. A
+ * lone subject (no `rest`) is degenerate: emit it bare. An `==`/`!=` term is checked in TWO stages,
+ * in order: first, is one side a TAGGED variant and the other its own retyped member
+ * (`cg_variant_member_cmp`) — `a == null` / `a != 5` over `a: i32 | null` — which detours through
+ * `cg_emit_variant_member_cmp`'s `.tag`(+`.as.<key>`) test; only once that answers `null` does the
+ * term fall to the ordinary route dispatch, where an operand type of `str`/`char`/`[]T`
+ * (`cg_cmp_route_of`) detours through `emit_content_eq` instead of the raw C operator — see each
+ * function's own doc for why (C: `TK_TEXPR_COMPARE`).
+ *
+ * @param buf       the C source buffer to append to
+ * @param prog      the typed program
+ * @param c         the comparison node (its `first` operand plus the ADJACENT-term chain)
+ * @param escaping  the enclosing escape set (threaded through to operand emission)
+ * @param regions   the enclosing region-frame stack (threaded through to operand emission)
+ * @param fn_body   the enclosing function's body (threaded through to operand emission)
+ * @param dctx      the enclosing defer context (threaded through to operand emission)
+ * @return          the appended buffer
+ * @throws          propagated from emitting an operand, from `cmpop_c` on an unmapped operator,
+ *                  from `cg_emit_variant_member_cmp` on an unsupported member payload, or from
+ *                  `emit_content_eq`/`emit_slice_eq` on an unclosed element shape
+ */
 fn emit_compare(buf: []byte, prog: CgProg, c: checker::TCompare, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
     if c.rest.len == 0 { return emit_expr_ctx(buf, prog, checker::Void { }, c.first, escaping, regions, fn_body, dctx) }
     mut out = cb(buf, "(")
@@ -2901,31 +3475,54 @@ fn emit_compare(buf: []byte, prog: CgProg, c: checker::TCompare, escaping: []str
         let term = c.rest[i]
         let op = match cmpop_c(term.op) { str as s => s; error as err => return err }
         if i > 0 { out = cb(out, " && ") }
-        // str equality/inequality lowers to tk_str_eq (a tk_str is a {ptr,len} struct — C `==`
-        // is invalid on it). `a == b` → tk_str_eq(a,b); `a != b` → !tk_str_eq(a,b).
-        let prev_str = match prev.type { checker::Str => true; _ => false }
-        let opnd_str = match term.operand.type { checker::Str => true; _ => false }
-        let is_eq = term.op == lexer::TokenKind::EqEq || term.op == lexer::TokenKind::Ne
-        if (prev_str || opnd_str) && is_eq {
-            out = cb(out, "(")
-            if term.op == lexer::TokenKind::Ne { out = cb(out, "!") }
-            out = cb(out, "tk_str_eq(")
-            out = match emit_expr_ctx(out, prog, checker::Void { }, prev, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
-            out = cb(out, ", ")
-            out = match emit_expr_ctx(out, prog, checker::Void { }, term.operand, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
-            out = cb(out, "))")
-        } else {
-            out = cb(out, "(")
-            out = match emit_expr_ctx(out, prog, checker::Void { }, prev, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
-            out = cb(out, " ")
-            out = cb(out, op)
-            out = cb(out, " ")
-            out = match emit_expr_ctx(out, prog, checker::Void { }, term.operand, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
-            out = cb(out, ")")
-        }
+        out = match emit_compare_term(out, prog, prev, term, op, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
         prev = term.operand
         i++
     }
+    cb(out, ")")
+}
+
+/**
+ * emit_compare_term — `emit_compare`'s per-ADJACENT-TERM dispatch, pulled out to keep that loop
+ * flat. Checked in TWO stages, in order: first, is this an `==`/`!=` term where one side is a
+ * TAGGED variant and the other its own retyped member (`cg_variant_member_cmp`) — `a == null` /
+ * `a != 5` over `a: i32 | null` — which routes to `cg_emit_variant_member_cmp`'s `.tag`(+`.as.<key>`)
+ * test; only once that answers `null` does the term fall to the ordinary `CgCmpRoute` dispatch
+ * (`cg_cmp_route_of`), which detours a `str`/`char`/`[]T` operand through `emit_content_eq` instead
+ * of the raw C operator (see each function's own doc for why).
+ *
+ * @param buf       the C source buffer to append to
+ * @param prog      the typed program
+ * @param prev      the term's left-hand (already-adopted) operand
+ * @param term      the comparison term (operator + right-hand operand)
+ * @param op        `term.op` already mapped to its C operator text (`cmpop_c`)
+ * @param escaping  the enclosing escape set (threaded through to operand emission)
+ * @param regions   the enclosing region-frame stack (threaded through to operand emission)
+ * @param fn_body   the enclosing function's body (threaded through to operand emission)
+ * @param dctx      the enclosing defer context (threaded through to operand emission)
+ * @return          the appended buffer
+ * @throws          propagated from `cg_emit_variant_member_cmp`, from `emit_content_eq` on an
+ *                  unclosed `[]T` element shape, or from emitting either operand
+ */
+fn emit_compare_term(buf: []byte, prog: CgProg, prev: checker::TExpr, term: checker::TCmpTerm, op: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    let is_eq = term.op == lexer::TokenKind::EqEq || term.op == lexer::TokenKind::Ne
+    let vm_cmp = if is_eq { cg_variant_member_cmp(prog, prev, term.operand) } else { null }
+    match vm_cmp {
+        CgVariantMemberCmp as cmp => return cg_emit_variant_member_cmp(buf, prog, cmp, term.op == lexer::TokenKind::EqEq, escaping, regions, fn_body, dctx)
+        null => { }
+    }
+    let prev_route = cg_cmp_route_of(prev.type)
+    let opnd_route = cg_cmp_route_of(term.operand.type)
+    let route = if prev_route != CgCmpRoute::Plain { prev_route } else { opnd_route }
+    if route != CgCmpRoute::Plain && is_eq {
+        return emit_content_eq(buf, prog, route, term.op, prev, term.operand, escaping, regions, fn_body, dctx)
+    }
+    mut out = cb(buf, "(")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, prev, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, " ")
+    out = cb(out, op)
+    out = cb(out, " ")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, term.operand, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
     cb(out, ")")
 }
 
@@ -2949,12 +3546,34 @@ fn cg_cast_target_is_variant(prog: CgProg, t: checker::Type) -> bool {
     }
 }
 
-// emit_cast — a TCast. F3 (M.1): a narrowing `x to T` is range-checked at runtime via
-// tk_to_<dst>_<carrier> and PANICS if the value doesn't fit T. Widening / same-type
-// casts where no loss is possible emit the plain C cast (no needless guard). Single-eval:
-// the operand is emitted once. The carrier is picked by SOURCE signedness so it holds
-// the source losslessly: signed -> int64_t carrier ("_s"); unsigned -> uint64_t ("_u").
-// (C: TK_TEXPR_CAST branch.)
+/**
+ * emit_cast — a `TCast`. F3 (M.1): a narrowing `x to T` is range-checked at runtime via
+ * `tk_to_<dst>_<carrier>` and PANICS if the value does not fit `T`. Widening / same-type casts
+ * where no loss is possible emit the plain C cast (no needless guard). Single-eval: the operand is
+ * emitted once. Four routes, in order: a variant target defers to `emit_as`; a `char` source
+ * decodes through `tk_char_to_u32`; float->int is ALWAYS guarded (`tk_to_<dst>_from_<fsrc>`);
+ * int->int is guarded IFF `cast_may_lose`. Both guarded routes carry the (C1.7-CAST) positioned
+ * wrapper — a GNU statement-expression setting `_tk_cast_loc_line`/`_tk_cast_loc_col` so
+ * `tk_panic_cast` can print the source position — whenever the node has one.
+ *
+ * The int->int carrier is picked by SOURCE signedness so it holds the source losslessly: signed ->
+ * `int64_t` ("_s"), unsigned -> `uint64_t` ("_u"). Sixty-four bits suffice because that IS the
+ * language's widest integer (128-bit primitives, integer and float, are gone — owner ruling
+ * 2026-07-30; wider arithmetic is `teko::numeric::bigint`/`dec`).
+ *
+ * @param buf       the C output buffer to grow
+ * @param prog      the typed program (target-type and variant resolution)
+ * @param e         the cast expression node (its `.type` is the target; its line/col drive the
+ *                  positioned wrapper)
+ * @param c         the cast payload (its `expr` is the operand)
+ * @param escaping  the names whose values escape the current frame
+ * @param regions   the active region frames
+ * @param fn_body   the enclosing function's statements
+ * @param dctx      the pending-defer context
+ * @return          `buf` followed by the cast's C expression
+ * @throws          when the target is not an emittable cast destination (a non-integer guard
+ *                  target, a non-float source tag) or the operand fails to emit
+ */
 fn emit_cast(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::TCast, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
     let inner = c.expr
     if cg_cast_target_is_variant(prog, e.type) { return emit_as(buf, prog, e.type, inner, escaping, regions, fn_body, dctx) }
@@ -3010,10 +3629,6 @@ fn emit_cast(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::TCast, es
         out = match emit_expr_ctx(out, prog, checker::Void { }, inner, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
         return cb(out, ")")
     }
-    // int -> int: range-checked IFF it may narrow. The carrier is picked by SOURCE
-    // signedness so it holds the source losslessly: signed -> i128 carrier ("_s");
-    // unsigned -> u128 carrier ("_u"). Single-eval.
-    // (C1.7-CAST) Same positioned-wrapper pattern as float->int above.
     if prim_both && cg_prim_is_int(src) && cg_prim_is_int(dst) && cast_may_lose(src, dst) {
         let dtag = match prim_int_tag(dst) { str as t => t; error as err => return err }
         if e.line != 0 {
@@ -3977,19 +4592,46 @@ fn emit_safe_field_access(buf: []byte, prog: CgProg, e: checker::TExpr, sfa: che
     out
 }
 
-// emit_coalesce — `a ?? b` (REBOOT §203). ({ <optTy> _cN = (a); _cN.present ? <a.value as result>
-//   : <b as result>; }). Short-circuits b (only evaluated on NONE). The result type (node `.type`)
-// is `T` (unwrap) or `T?` (b itself optional); both arms wrapped to it. (C: TK_TEXPR_COALESCE.)
-// a diverging call (the global `panic`/`exit`) — unqualified; mirrors the checker's texpr_diverges.
-// In a VALUE position it lowers to `(<call>, (T){0})`: the call is _Noreturn (tk_panic_str/tk_exit),
-// so the zero-of-T is unreachable but keeps the C `?:`/expr well-typed.
+/**
+ * `cg_expr_diverges` — is a call-shaped sub-expression a diverging `panic`/`exit` call in a VALUE
+ * position (a `??` fallback's right side, or a `match` arm's tail)? Delegates the "is this
+ * actually the injected builtin, not a same-named user function/closure the resolver bound
+ * instead" test to `checker::tcall_is_diverging_builtin` — the single place that test is made —
+ * rather than re-deriving it from the bare callee name here. In a VALUE position a true positive
+ * lowers to `(<call>, (T){0})`: the call is `_Noreturn` (`tk_panic_str`/`tk_exit`), so the
+ * zero-of-T is unreachable but keeps the C `?:`/expr well-typed. Narrower than the checker's
+ * `texpr_diverges` on purpose — its two call sites only ever need to test a bare call, never a
+ * nested `match`/`if`.
+ *
+ * @param e  the typed sub-expression
+ * @return   true iff `e` is a call the resolver bound to the injected `panic`/`exit` builtin
+ */
 fn cg_expr_diverges(e: checker::TExpr) -> bool {
     match e.kind {
-        checker::TCall as c => c.callee.segments.len == 1 && (c.callee.segments[0].name == "panic" || c.callee.segments[0].name == "exit")
+        checker::TCall as c => checker::tcall_is_diverging_builtin(c)
         _ => false
     }
 }
 
+/**
+ * Emit `a ?? b` (REBOOT §203): `({ <optTy> _cN = (a); _cN.present ? <a.value as result> : <b as
+ * result>; })`. Short-circuits `b` — it is only evaluated when `a` is NONE. The result type
+ * (`e.type`) is `T` (unwrapped) or `T?` (when `b` itself is optional); both arms wrap to it. A `b`
+ * that is a diverging `panic`/`exit` call (`cg_expr_diverges`) lowers to `(<call>, (T){0})`
+ * instead: the call is `_Noreturn`, so the zero-of-`T` is unreachable but keeps the C `?:`
+ * well-typed.
+ *
+ * @param buf       the emit buffer
+ * @param prog      codegen's threaded program view
+ * @param e         the whole `??` expression (its `.type` is the wrapped result type)
+ * @param co        the coalesce node (`left` = the optional operand, `right` = the fallback)
+ * @param escaping  the names escaping the enclosing frame
+ * @param regions   the enclosing region frames
+ * @param fn_body   the enclosing function's statements
+ * @param dctx      the enclosing defer context
+ * @return          the buffer with the coalesce expression appended
+ * @throws          propagated from emitting either operand or the result type
+ */
 fn emit_coalesce(buf: []byte, prog: CgProg, e: checker::TExpr, co: checker::TCoalesce, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
     let tmp = fresh_named("_c", buf.len to i64)
     mut out = cb(buf, "({ ")
@@ -7291,12 +7933,6 @@ fn emit_lambda(buf: []byte, prog: CgProg, e: checker::TExpr, lam: checker::TLamb
     cb(out, ", (void*)_tke }; })")
 }
 
-// ---------------------------------------------------------------------------
-// Statements -> C. `in_main` selects the return lowering:
-//   * in main : `return n` -> `return (int)(n);`  (early process exit)
-//   * in a fn : `return n` -> `return n;`
-// ---------------------------------------------------------------------------
-
 // ── S2 — PER-BLOCK arena regions (codegen twin of codegen.c). Each scope-introducing LOOP body
 // opens its OWN region `_tkbr<len>` for its provably-block-local allocations, dropped at every exit
 // edge. `RegionFrame` is one active loop-body region on the stack (innermost LAST); `label` ties it
@@ -7609,9 +8245,9 @@ fn emit_exprstmt_tail(buf: []byte, x: checker::TExpr, in_main: bool, prog: CgPro
             if frame.len > 0 && !in_main { out = cb(out, indent); out = cb(out, "tk_region_drop("); out = cb(out, frame); out = cb(out, ");\n") }
             out = cb(out, indent)
             if in_main {
-                out = cb(out, "return (int)(")
+                out = cb(out, CG_MAIN_RETURN_OPEN)
                 out = match emit_expr_ctx(out, prog, checker::Void { }, x, escaping, teko::list::empty(), fn_body, dctx) { []byte as o => o; error as err => return err }
-                return cb(out, ");\n")
+                return cb(out, CG_MAIN_RETURN_CLOSE)
             }
             out = cb(out, "return ")
             out = match emit_as_r(out, prog, ret_type, ret_type, x, escaping, teko::list::empty(), fn_body, dctx) { []byte as o => o; error as err => return err }   // W5b — wrap a case value into a variant return slot (ret_type threaded for diverging arms)
@@ -7970,6 +8606,9 @@ fn emit_assign(buf: []byte, prog: CgProg, ret_type: checker::Type, a: checker::T
         out = cb(out, ")")
         return cb(out, ";\n")
     }
+    if a.op == lexer::TokenKind::SlashEq || a.op == lexer::TokenKind::PercentEq {
+        return emit_div_mod_assign(out, prog, a, escaping, regions, fn_body, dctx)
+    }
     // (MEM-1b-ii) `r.value op= v` — write THROUGH the reference: the handle `r` IS the pointer, so the
     // lvalue is `(*r)`. (`Ref<T>` lowers to a bare `<T> *`; deref-assign is a plain C pointer store.)
     // (#88) a FIELD target emits the typed LHS field-access (`(*recv).f` for a class — an in-place write
@@ -7986,9 +8625,32 @@ fn emit_assign(buf: []byte, prog: CgProg, ret_type: checker::Type, a: checker::T
     cb(out, ";\n")
 }
 
-// emit_return — a TReturn. In main, `return n` -> `return (int)(n);` (early process
-// exit) and a bare `return` -> `return 0;`; in a fn, the plain `return [v];`.
-// (C: TK_TSTMT_RETURN branch.)
+/**
+ * emit_return — a `TReturn` statement, lowered to C. `in_main` selects the return shape, which is
+ * the whole reason this function takes the flag: inside the virtual-main a `return n` is an EARLY
+ * PROCESS EXIT, so it emits `CG_MAIN_RETURN_OPEN`/`CG_MAIN_RETURN_CLOSE` (the `tk_exit_status`-
+ * normalized exit code — one code on every platform, owner ruling 2026-07-30) and a bare `return`
+ * emits `return 0;`; inside an ordinary function it is the plain `return [v];`, with a case value
+ * wrapped into its variant return slot (W5b). Every exit edge first fires the in-scope defers
+ * (LIFO, innermost block first), then runs the class destruction hook, then drops the block
+ * regions innermost-first and finally the frame region.
+ *
+ * @param buf        the output byte buffer to append the emitted C to
+ * @param prog       the whole typed program
+ * @param r          the typed `return` node (whether it carries a value, and the value)
+ * @param in_main    whether this `return` sits in the virtual-main (an exit code) or in a function
+ * @param ret_type   the enclosing function's declared return type (the variant return slot)
+ * @param indent     the current indentation string
+ * @param frame      the enclosing region-frame expression, or `""` when the function opened none
+ * @param escaping   the names whose values escape the current frame
+ * @param regions    the active block-region stack, innermost last
+ * @param fn_body    the enclosing function's body, for the block-local escape query
+ * @param dctx       the defer context whose pending defers this edge must fire
+ * @return           the buffer with the `return` (and its cleanup prologue) appended
+ * @throws           when a defer body, the class-cleanup text or the returned expression fails to
+ *                   emit
+ * @see              CG_MAIN_RETURN_OPEN
+ */
 fn emit_return(buf: []byte, prog: CgProg, r: checker::TReturn, in_main: bool, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
     // (W9.3) A `return` leaves EVERY enclosing scope: fire ALL in-scope defers (base 0) LIFO — one
     // sweep, innermost-block-first across all nesting — BEFORE dropping any region, so a defer body can
@@ -8018,9 +8680,9 @@ fn emit_return(buf: []byte, prog: CgProg, r: checker::TReturn, in_main: bool, re
         return cb(out, "return;\n")
     }
     if in_main {
-        out = cb(out, "return (int)(")
+        out = cb(out, CG_MAIN_RETURN_OPEN)
         out = match emit_expr_ctx(out, prog, checker::Void { }, r.value, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
-        return cb(out, ");\n")
+        return cb(out, CG_MAIN_RETURN_CLOSE)
     }
     out = cb(out, "return ")
     // W5b — wrap a case value into a variant return slot.
@@ -8295,6 +8957,32 @@ fn emit_cov_lines(buf: []byte, ctx: CovCtx, lines: []u32, indent: str) -> []byte
     out
 }
 
+/**
+ * emit_stmt — emit ONE statement's C text, dispatched on its checker kind. An `if`/`match` in
+ * statement position runs as direct CONTROL FLOW (`emit_if_stmt`/`emit_match_stmt`, so a nested
+ * `break`/`continue`/`return`/diverging call propagates through C's own semantics); any other
+ * expression statement (a bare call, most commonly) runs for effect via `emit_expr_stmt_default`,
+ * which is the ONE site an unqualified `panic`/`exit` STATEMENT call is recognized and replays
+ * the scope's pending defers before it (W15/#defer-nas-saidas — `lower_expr_stmt`'s own C twin).
+ * `break`/`continue` each fire their target's crossed-scope defers before their `goto`/keyword;
+ * `defer` registers onto `dctx` and emits nothing inline (fired at its scope's own exit edge).
+ *
+ * @param buf     the C output buffer
+ * @param s       the typed statement
+ * @param in_main bool  whether the enclosing function is the virtual-main entry
+ * @param prog    the whole-program codegen context (symbol/class/namespace tables)
+ * @param ret_type checker::Type  the enclosing function's own declared return type
+ * @param indent  the C indentation for this statement
+ * @param frame   the enclosing frame region's C identifier, or "" when the function opened none
+ * @param escaping []str  the enclosing function's escape-checked local names
+ * @param regions []RegionFrame  the active block-region stack (S2)
+ * @param fn_body []checker::TStatement  the enclosing function's full body (class-cleanup lookups)
+ * @param dctx    DeferCtx  the pending-defer stack + active loop targets + coverage context
+ * @param cur_block []checker::TStatement  the statement's own enclosing block (region-locality)
+ * @param cur_block_is_value bool  whether `cur_block` is a value-producing arm
+ * @return        the buffer with this statement's C text appended
+ * @throws        propagated from whichever branch lowers the statement's own sub-expressions
+ */
 fn emit_stmt(buf: []byte, s: checker::TStatement, in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx, cur_block: []checker::TStatement, cur_block_is_value: bool) -> []byte | error {
     let b0 = emit_cov_lines(buf, dctx.cov, stmt_cov_lines(s), indent)
     match s {
@@ -8308,11 +8996,7 @@ fn emit_stmt(buf: []byte, s: checker::TStatement, in_main: bool, prog: CgProg, r
             match es.expr.kind {
                 checker::TIfExpr as f => emit_if_stmt(b0, f, es.expr.line, es.expr.col, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx, cur_block, cur_block_is_value)
                 checker::TMatchExpr as m => emit_match_stmt(b0, prog, es.expr, m, in_main, ret_type, indent, frame, escaping, regions, fn_body, dctx, cur_block, cur_block_is_value)
-                _ => {
-                    mut out = cb(b0, indent)
-                    out = match emit_expr_ctx(out, prog, checker::Void { }, es.expr, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
-                    cb(out, ";\n")
-                }
+                _ => emit_expr_stmt_default(b0, es.expr, prog, escaping, regions, fn_body, dctx, indent)
             }
         }
         checker::TLoopStmt as l => emit_loop(b0, l, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx)
@@ -8347,6 +9031,36 @@ fn emit_stmt(buf: []byte, s: checker::TStatement, in_main: bool, prog: CgProg, r
         checker::TDeferStmt => b0
         checker::TAdoptStmt as a => emit_adopt(b0, a, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx)
     }
+}
+
+/**
+ * emit_expr_stmt_default — `emit_stmt`'s default expression-statement arm: a bare call run for
+ * effect, its VReg discarded. A DIVERGING call (`checker::texpr_diverges` — an unqualified
+ * `panic`/`exit`, the SAME fronteira `emit_return` leaves via) leaves EVERY enclosing scope
+ * exactly like a `return`, so its pending defers replay FIRST (`emit_return`'s own ordering,
+ * `codegen.tks` — fires before the call TEXT, so the defer body runs before the `_Noreturn`
+ * runtime call that follows it, instead of after it in UNREACHABLE text, W15/#defer-nas-saidas).
+ * Every OTHER call's own later fall-through/return/break/continue edge already fires this same
+ * scope's defers at its own exit — this site only closes the one edge those never reach.
+ *
+ * @param buf      the C output buffer
+ * @param expr     the typed statement expression (the call, run for effect)
+ * @param prog     the whole-program codegen context
+ * @param escaping []str  the enclosing function's escape-checked local names
+ * @param regions  []RegionFrame  the active block-region stack (S2)
+ * @param fn_body  []checker::TStatement  the enclosing function's full body
+ * @param dctx     DeferCtx  the pending-defer stack this statement may replay from
+ * @param indent   the C indentation for this statement
+ * @return         the buffer with this statement's C text appended
+ * @throws         propagated from replaying a pending defer or emitting `expr` itself
+ */
+fn emit_expr_stmt_default(buf: []byte, expr: checker::TExpr, prog: CgProg, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx, indent: str) -> []byte | error {
+    let b1 = if checker::texpr_diverges(expr) {
+        match emit_defers(buf, dctx.defers, 0, prog, indent, escaping, fn_body) { []byte as o => o; error as err => return err }
+    } else { buf }
+    mut out = cb(b1, indent)
+    out = match emit_expr_ctx(out, prog, checker::Void { }, expr, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    cb(out, ";\n")
 }
 
 /**
@@ -8999,9 +9713,90 @@ fn variant_member_name(m: parser::TypeExpr) -> str | error {
     }
 }
 
-// emit_type_decl — emit ONE type declaration. `d.name` is the bare name; the namespace is
-// empty (the typed item carries no provenance) so decl + ref mangle identically.
-// (C: `emit_type_decl`.)
+/**
+ * flags_carrier_ctype — the C unsigned integer type that carries a `flags` value, chosen by how
+ * many bits the declaration must hold: 1–8 members -> `uint8_t`, 9–16 -> `uint16_t`,
+ * 17–32 -> `uint32_t`, 33–64 -> `uint64_t`. There is no wider arm: `uint64_t` is the LAST carrier
+ * because 128-bit primitives are gone from the language (owner ruling 2026-07-30, integers AND
+ * floats), and the checker already caps a `flags` declaration at 64 members
+ * (`checker::check_flags_member_cap`), so a count above 64 never reaches codegen.
+ *
+ * @param n  the declared member count (already ≤ 64, enforced in the checker)
+ * @return   the C spelling of the carrier type
+ * @since    0.3.1 (128-bit removal)
+ */
+fn flags_carrier_ctype(n: u64) -> str {
+    if n <= 8 { return "uint8_t" }
+    if n <= 16 { return "uint16_t" }
+    if n <= 32 { return "uint32_t" }
+    "uint64_t"
+}
+
+/**
+ * emit_flags_member_const — emit ONE `flags` member's bit constant: `static const tk_t_<Name>
+ * tk_t_<Name>_<MEMBER> = (tk_t_<Name>)(((uint64_t)1) << <ordinal>);`. The shift is composed on a
+ * `uint64_t` one — the widest carrier a `flags` type can have — so the shifted bit is never
+ * truncated before the cast to the (possibly narrower) carrier.
+ *
+ * @param buf       the C output buffer to grow
+ * @param type_name the flags type's canonical name (mangled into its C typedef name)
+ * @param member    the member's declared name (upper-cased in the constant's name)
+ * @param ordinal   the member's declaration index, i.e. the bit it owns
+ * @return          `buf` followed by the member's `static const` line
+ * @since           0.3.1 (128-bit removal)
+ */
+fn emit_flags_member_const(buf: []byte, type_name: str, member: str, ordinal: u64) -> []byte {
+    mut out = cb(buf, "static const ")
+    out = mangle_type_name(out, "", type_name)
+    out = cb(out, " ")
+    out = mangle_type_name(out, "", type_name)
+    out = cb(out, "_")
+    out = cb_upper(out, member)
+    out = cb(out, " = (")
+    out = mangle_type_name(out, "", type_name)
+    out = cb(out, ")(((uint64_t)1) << ")
+    out = cb_i64(out, ordinal to i64)
+    cb(out, ");\n")
+}
+
+/**
+ * emit_flags_typedef — (C8.4) emit a whole `flags Name { A; B; C; }` declaration: the carrier
+ * `typedef <uint_type> tk_t_<Name>;` followed by one `static const` bit constant per member, in
+ * declaration order (member `i` owns bit `i`).
+ *
+ * @param buf  the C output buffer to grow
+ * @param d    the type declaration (its `name` names the emitted typedef)
+ * @param fb   the flags body (its `members` are the declared names, in order)
+ * @return     `buf` followed by the typedef, every member constant, and a blank separator line
+ * @since      0.3.1 (128-bit removal — extracted while the `unsigned __int128` carrier arm died)
+ */
+fn emit_flags_typedef(buf: []byte, d: parser::TypeDecl, fb: parser::FlagsBody) -> []byte {
+    mut out = cb(buf, "typedef ")
+    out = cb(out, flags_carrier_ctype(fb.members.len))
+    out = cb(out, " ")
+    out = mangle_type_name(out, "", d.name)
+    out = cb(out, ";\n")
+    mut mi: u64 = 0
+    loop {
+        if mi >= fb.members.len { break }
+        out = emit_flags_member_const(out, d.name, fb.members[mi], mi)
+        mi++
+    }
+    cb(out, "\n")
+}
+
+/**
+ * emit_type_decl — emit ONE type declaration. `d.name` is the bare name; the namespace is
+ * empty (the typed item carries no provenance) so decl + ref mangle identically.
+ *
+ * @param buf   the C output buffer to grow
+ * @param prog  the typed program (field/type resolution for the aggregate arms)
+ * @param d     the type declaration to emit
+ * @return      `buf` followed by `d`'s C declaration (empty for a compile-time-only body:
+ *              a transparent alias, an interface, a trait)
+ * @throws      when a body's shape is not emittable (a variant body that is not a union, a
+ *              member type codegen cannot name)
+ */
 fn emit_type_decl(buf: []byte, prog: CgProg, d: parser::TypeDecl) -> []byte | error {
     match d.body {
         parser::StructBody as sb => {
@@ -9139,38 +9934,7 @@ fn emit_type_decl(buf: []byte, prog: CgProg, d: parser::TypeDecl) -> []byte | er
             // type at the checker, and codegen emits that resolved type at every use site.
             buf
         }
-        parser::FlagsBody as fb => {
-            // (C8.4) A `flags Name { A; B; C; }` emits:
-            //   typedef <uint_type> tk_t_<Name>;
-            //   static const tk_t_<Name> tk_t_<Name>_<A> = (tk_t_<Name>)(((unsigned __int128)1) << 0);
-            //   …
-            // uint_type by member count: 1–8 → uint8_t, 9–16 → uint16_t,
-            //   17–32 → uint32_t, 33–64 → uint64_t, 65–128 → unsigned __int128.
-            let n = fb.members.len
-            let uint_type = if n <= 8 { "uint8_t" } else if n <= 16 { "uint16_t" } else if n <= 32 { "uint32_t" } else if n <= 64 { "uint64_t" } else { "unsigned __int128" }
-            mut out = cb(buf, "typedef ")
-            out = cb(out, uint_type)
-            out = cb(out, " ")
-            out = mangle_type_name(out, "", d.name)
-            out = cb(out, ";\n")
-            mut mi: u64 = 0
-            loop {
-                if mi >= n { break }
-                out = cb(out, "static const ")
-                out = mangle_type_name(out, "", d.name)
-                out = cb(out, " ")
-                out = mangle_type_name(out, "", d.name)
-                out = cb(out, "_")
-                out = cb_upper(out, fb.members[mi])
-                out = cb(out, " = (")
-                out = mangle_type_name(out, "", d.name)
-                out = cb(out, ")(((unsigned __int128)1) << ")
-                out = cb_i64(out, mi to i64)
-                out = cb(out, ");\n")
-                mi++
-            }
-            cb(out, "\n")
-        }
+        parser::FlagsBody as fb => emit_flags_typedef(buf, d, fb)
         parser::ExternBody => {
             // (C7.1a) an OPAQUE foreign handle → a C `void *` typedef, so the existing
             // Named → tk_t_<Name> mangle resolves to it (distinct in Teko, plain `void *` in C).
@@ -11132,8 +11896,8 @@ fn emit_mode_main(buf: []byte, prog: CgProg, mode: CgMode) -> []byte | error {
  * emit_program_main — the VIRTUAL-MAIN: the loose top-level statements, in order, become the body
  * of C `main()`; falling off the end -> `return 0;` (default exit 0). W5a — the LAST loose
  * statement, if it is a value-carrying expr-statement, becomes the process exit code via
- * `return (int)(…)`. Delegates to `emit_program_main_body(buf, prog, false)` — BYTE-IDENTICAL to
- * the historical emission (extracted, #265); the fixpoint compares THIS output.
+ * `return tk_exit_status((int)(…));` (`CG_MAIN_RETURN_OPEN` — the platform-uniform exit code).
+ * Delegates to `emit_program_main_body(buf, prog, false)`; the fixpoint compares THIS output.
  *
  * @param buf   the output byte buffer to append the emitted C to
  * @param prog  the checked program whose loose top-level statements form the virtual-main body
@@ -11149,7 +11913,7 @@ fn emit_program_main(buf: []byte, prog: CgProg) -> []byte | error {
  * bracket (0.3.1 C-cov): a static `atexit`-registered dump helper, and the sink reset/enable calls
  * right after `tk_set_args`. `atexit` (rather than an explicit trailing call) is what makes this
  * correct regardless of HOW the virtual-main exits — a fall-through `return 0`, the W5a tail-expr
- * `return (int)(…)`, or an `exit(n)`/`tk_exit(n)` call — every one of those already runs the libc
+ * `return tk_exit_status((int)(…));`, or an `exit(n)`/`tk_exit(n)` call — each already runs the libc
  * `atexit` queue (only `abort`/`tk_panic*` skip it, mirroring the region-cleanup hook's own note in
  * `teko_rt.c`). Used ONLY to build the regression tier's coverage-feeding compiler
  * (`build_regression_cov_exe`, `src/build/project.tks`) — never the release binary, so the
@@ -11225,11 +11989,26 @@ fn emit_program_main_body(buf: []byte, prog: CgProg, cov: bool) -> []byte | erro
     b
 }
 
-/** emit_test_main — the NATIVE TEST GATE main (#265): call each `#test` in `prog.items` order,
-    printing the same `test <label> ... ok` lines the VM runner prints; a failed assert `panic`s
-    (fail-fast, M.1) with a non-zero exit. Under `TestCov` the run is bracketed with the cov reset/on
-    calls and each test wrapped in `tk_cov_enter(idx)`/`tk_cov_leave`, then the sinks are dumped to a
-    `.tkcov` for the parent to merge; under `TestPlain` NO `tk_cov_*` is emitted (zero-cost off). */
+/**
+ * emit_test_main — the NATIVE TEST GATE main (#265): run each `#test` in `prog.items` order under the
+ * runtime's capture, then close with the run's summary and a status derived from the tally.
+ *
+ * IT NO LONGER ENDS IN A BLIND `return 0`, and that is the point of the capture (owner ruling
+ * 2026-07-30, §14). A failing test used to end the PROCESS at the first failure, so the status was
+ * whatever `abort` left and every later test was never reported; now the harness always reaches the
+ * end and the status is a fact it counted: `tk_test_any_failed() ? 1 : 0`.
+ *
+ * Under `TestCov` the run is bracketed with the cov reset/on calls and each test wrapped in
+ * `tk_cov_enter(idx)`/`tk_cov_leave`, then the sinks are dumped to a `.tkcov` for the parent to merge
+ * — a dump that is now ALWAYS reached, where before a single panicking test lost the whole file.
+ * Under `TestPlain` NO `tk_cov_*` is emitted (zero-cost off).
+ *
+ * @param buf   the output byte buffer to append the emitted C to
+ * @param prog  the checked program whose `#test` items the harness runs
+ * @param mode  the code-generation profile selecting the coverage brackets
+ * @return      the buffer with the gate `main` appended
+ * @throws      when the analyze profile's own harness fails to emit
+ */
 fn emit_test_main(buf: []byte, prog: CgProg, mode: CgMode) -> []byte | error {
     if mode == CgMode::TestAnalyze { return emit_test_main_analyze(buf, prog) }
     mut b = buf
@@ -11256,7 +12035,7 @@ fn emit_test_main(buf: []byte, prog: CgProg, mode: CgMode) -> []byte | error {
         b = cb(b, "    tk_cov_branches_on(false); tk_cov_lines_on(false);\n")
         b = cb(b, "    { const char *dp = getenv(\"TEKO_TKCOV\"); if (dp) tk_cov_dump(dp); }\n")
     }
-    b = cb(b, "    return 0;\n")
+    b = emit_test_main_close(b)
     b = cb(b, "}\n")
     b
 }
@@ -11293,25 +12072,46 @@ fn emit_test_main_analyze(buf: []byte, prog: CgProg) -> []byte | error {
         }
         i++
     }
-    b = cb(b, "    return 0;\n")
+    b = emit_test_main_close(b)
     b = cb(b, "}\n")
     b
 }
 
 /**
- * Emits one native-gate test invocation, mirroring the VM's `run_tests_cov` per-test body exactly:
- * `print("test <label> ... ")`, the mangled test symbol call, then `println("ok")`. The label is
- * `namespace::name` (or bare `name`), matching `run_tests_cov`'s label. Under `cov` the body's
- * lines/branches are attributed to this test via `tk_cov_enter(idx)`/`tk_cov_leave` (the same
- * brackets the VM runner uses).
+ * emit_test_main_close — the last two lines of EVERY test harness: the run's summary, then the
+ * status the tally earned.
+ *
+ * IT IS ONE FUNCTION BECAUSE THE ANALYZE HARNESS ALREADY DRIFTED ONCE, and the drift was silent.
+ * The capture (§14) makes a failing `#test` return instead of aborting, so a harness that still
+ * closed on a blind `return 0` reported a suite with failures as SUCCESS — and `run_analyzer`
+ * (`project.tks`) reads exactly that status (`if arc != 0 { return arc }`). The plain gate had been
+ * taught to count; the analyze gate had not, and nothing would have said so. Sharing the close is
+ * what makes "which harness reports the tally" un-askable.
+ *
+ * @param buf  the output byte buffer to append the emitted C to
+ * @return     the buffer with the summary call and the tally-derived `return` appended
+ */
+fn emit_test_main_close(buf: []byte) -> []byte {
+    let b = cb(buf, "    tk_test_summary();\n")
+    cb(b, "    return tk_test_any_failed() ? 1 : 0;\n")
+}
+
+/**
+ * emit_test_call — one native-gate `#test` invocation: the shard filter, the arena checkpoint, this
+ * test's own out/err channel, the optional coverage brackets, and the captured call that reports it.
+ *
+ * The label is `namespace::name` (or bare `name`). Under `cov` the body's lines/branches are
+ * attributed to this test via `tk_cov_enter(idx)`/`tk_cov_leave`.
  *
  * (#469) Each invocation is wrapped in a `tk_arena_push()` / `tk_arena_pop()` checkpoint — the port
- * of the #109 test-gate memory bound to native. The push precedes the print and the pop follows the
- * `println("ok")`, so the whole per-test span (label prints, the test's transient allocations) is
- * bulk-freed after each test instead of accumulating in the never-dropped root region across the
- * ~1500-test run. The coverage sinks (`tk_cov_*`) are libc-heap, so the marks recorded inside the
- * span survive the pop — the cov brackets nest strictly inside the arena brackets, exactly as the
- * VM runner orders them (arena_push … cov_enter … body … cov_leave … arena_pop).
+ * of the #109 test-gate memory bound to native — so the whole per-test span (the channel, the test's
+ * transient allocations) is bulk-freed after each test instead of accumulating in the never-dropped
+ * root region across the whole run. The coverage sinks (`tk_cov_*`) are libc-heap, so the marks
+ * recorded inside the span survive the pop, and the cov brackets nest strictly inside the arena ones
+ * (arena_push … cov_enter … body … cov_leave … arena_pop).
+ *
+ * THE POP IS NOW ALWAYS REACHED (§14): before the capture, a test that panicked died between the push
+ * and the pop, so the checkpoint this function exists to take was the one case it never completed.
  *
  * @param buf  the output byte buffer to append the emitted C to
  * @param f    the `#test` function being invoked (its namespace + name form the label and symbol)
@@ -11320,21 +12120,64 @@ fn emit_test_main_analyze(buf: []byte, prog: CgProg) -> []byte | error {
  * @return     the buffer with this test's invocation appended
  */
 fn emit_test_call(buf: []byte, f: checker::TFunction, idx: u64, cov: bool) -> []byte {
-    let label = if f.namespace.len != 0 { teko::str::concat(f.namespace, "::", f.name) } else { f.name }
-    let head = teko::str::concat("test ", label, " ... ")
-    mut b = cb(buf, "    tk_arena_push();\n")
-    b = cb(b, "    tk_print((tk_str){ (const tk_byte *)\"")
-    b = cb_cstr_escaped(b, head)
-    b = cb(b, "\", ")
-    b = cb_u64_digits(b, head.len)
-    b = cb(b, " });\n")
-    b = cb(b, "    tk_flush_out();\n")
+    mut b = cb(buf, "    if (tk_test_shard_take()) {\n")
+    b = cb(b, "    tk_arena_push();\n")
+    b = emit_test_channel_open(b, f)
     if cov { b = cb(cb_u64_digits(cb(b, "    tk_cov_enter("), idx), ");\n") }
-    b = cb_fn_name(cb(b, "    "), f.namespace, f.name)
-    b = cb(b, "();\n")
+    b = emit_test_captured_call(b, f)
     if cov { b = cb(b, "    tk_cov_leave();\n") }
-    b = cb(b, "    tk_println((tk_str){ (const tk_byte *)\"ok\", 2 });\n")
     b = cb(b, "    tk_arena_pop();\n")
+    b = cb(b, "    }\n")
+    b
+}
+
+/**
+ * emit_test_captured_call — the ONE invocation of a `#test` body, run under the runtime's capture and
+ * reported instead of merely called (owner ruling 2026-07-30, §14).
+ *
+ * WHAT REPLACED WHAT, and why it is one line. The harness used to call the body and then close the
+ * channel with `tk_test_end()`, so a body that panicked or called `exit` ENDED THE PROCESS: every
+ * later test went unreported, the tally had to be reconstructed from the wreckage, the `.tkcov` was
+ * never dumped and the arena checkpoint never rewound. `tk_test_run` returns instead — the setjmp
+ * lives entirely inside the runtime — and `tk_test_report` writes the verdict this test earned (`ok`,
+ * `FAILED`, or `FAILED (exit n)`) and counts it.
+ *
+ * THE ONLY THING THIS ASKS OF A CODE GENERATOR IS THE ADDRESS OF A TOP-LEVEL FUNCTION. A `#test` is
+ * emitted as `void <symbol>(void)`, so `&<symbol>` is exactly the `void (*)(void)` the runtime takes:
+ * no cast, no thunk, no closure pair.
+ *
+ * @param buf  the output byte buffer to append the emitted C to
+ * @param f    the `#test` whose namespace + name form the mangled symbol
+ * @return     the buffer with the captured invocation appended
+ */
+fn emit_test_captured_call(buf: []byte, f: checker::TFunction) -> []byte {
+    let b = cb_fn_name(cb(buf, "    tk_test_report(tk_test_run(&"), f.namespace, f.name)
+    cb(b, "));\n")
+}
+
+/**
+ * emit_test_channel_open — the `tk_test_begin("<label>")` call that gives ONE test its own out/err
+ * channel, replacing the old `tk_print("test <label> ... ")` + `tk_flush_out()` pair.
+ *
+ * WHY THE VERDICT LINE MOVED TO THE END (owner ruling: a test in process gets its own channel). The
+ * old harness printed the label BEFORE the body and `ok` AFTER it, on the shared stream — so a test
+ * that printed anything of its own split its own verdict line in two and pushed `ok` onto the next
+ * line. Measured on this tree, and it made a suite count anchored on `... ok` wrong. Now the label is
+ * only REMEMBERED here; `tk_test_end` (or the panic path, for a failure) writes the whole verdict
+ * line at once and then this test's captured bytes under it. The flush the old pair needed for
+ * crash-attribution moved into `tk_chan_verdict_line`, which flushes every verdict line.
+ *
+ * @param buf  the output byte buffer to append the emitted C to
+ * @param f    the `#test` whose namespace + name form the label
+ * @return     the buffer with the channel-open call appended
+ */
+fn emit_test_channel_open(buf: []byte, f: checker::TFunction) -> []byte {
+    let label = if f.namespace.len != 0 { teko::str::concat(f.namespace, "::", f.name) } else { f.name }
+    mut b = cb(buf, "    tk_test_begin((tk_str){ (const tk_byte *)\"")
+    b = cb_cstr_escaped(b, label)
+    b = cb(b, "\", ")
+    b = cb_u64_digits(b, label.len)
+    b = cb(b, " });\n")
     b
 }
 
@@ -11346,7 +12189,11 @@ fn emit_test_call(buf: []byte, f: checker::TFunction, idx: u64, cov: bool) -> []
  * dumps them to `$TEKO_ANALYZE_DIR/<idx>.tkcov` (the literal `idx` is baked in at emit time via the
  * digit helper, so no runtime idx bookkeeping is needed). If `$TEKO_ANALYZE_DIR` is unset the dump
  * is skipped (the binary still runs as a plain gate). The cov brackets nest strictly inside the
- * arena checkpoint, exactly as `emit_test_call` and the VM runner order them.
+ * arena checkpoint, exactly as `emit_test_call` orders them.
+ *
+ * IT CAPTURES TOO, and it has to: the analyzer's whole value is the per-test dump, and a body that
+ * panicked used to take the process down with every dump after it. All three `Test*` profiles emit
+ * `tk_test_run`; `Program` and `ProgramCov` never do, which is what keeps the boundary structural.
  *
  * @param buf  the output byte buffer to append the emitted C to
  * @param f    the `#test` function being invoked (its namespace + name form the label and symbol)
@@ -11355,24 +12202,15 @@ fn emit_test_call(buf: []byte, f: checker::TFunction, idx: u64, cov: bool) -> []
  * @since 0.3.0.29
  */
 fn emit_test_call_analyze(buf: []byte, f: checker::TFunction, idx: u64) -> []byte {
-    let label = if f.namespace.len != 0 { teko::str::concat(f.namespace, "::", f.name) } else { f.name }
-    let head = teko::str::concat("test ", label, " ... ")
     mut b = cb(buf, "    tk_arena_push();\n")
-    b = cb(b, "    tk_print((tk_str){ (const tk_byte *)\"")
-    b = cb_cstr_escaped(b, head)
-    b = cb(b, "\", ")
-    b = cb_u64_digits(b, head.len)
-    b = cb(b, " });\n")
-    b = cb(b, "    tk_flush_out();\n")
+    b = emit_test_channel_open(b, f)
     b = cb(b, "    tk_cov_reset(); tk_cov_branch_reset(); tk_cov_line_reset();\n")
     b = cb(cb_u64_digits(cb(b, "    tk_cov_enter("), idx), ");\n")
-    b = cb_fn_name(cb(b, "    "), f.namespace, f.name)
-    b = cb(b, "();\n")
+    b = emit_test_captured_call(b, f)
     b = cb(b, "    tk_cov_leave();\n")
     b = cb(b, "    { const char *d = getenv(\"TEKO_ANALYZE_DIR\"); if (d) { char p[1024]; snprintf(p, sizeof p, \"%s/")
     b = cb_u64_digits(b, idx)
     b = cb(b, ".tkcov\", d); tk_cov_dump(p); } }\n")
-    b = cb(b, "    tk_println((tk_str){ (const tk_byte *)\"ok\", 2 });\n")
     b = cb(b, "    tk_arena_pop();\n")
     b
 }

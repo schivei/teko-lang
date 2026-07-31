@@ -75,76 +75,146 @@ fn target_from_name_rejects_unsupported_values() {
     }
 }
 
-#test
 /**
- * host_target_for_os_maps_every_known_os — the R1 host default
- * (owner ruling 2026-07-24, teko-target-crosslink-0.3.1.md §2.1): `linux` and
- * `windows` pick their own-backend x86-64 pipeline, while `macos` and any other
- * (`unknown`) value keep the pre-existing `Arm64Macho` default — simulating all
- * three supported host OSes without depending on which one this test actually
- * runs on.
+ * host_target_matches — does `host_target_for_os(os, arch)` resolve to `want`? `false` on the
+ * honest R2 error, the shared assertion body every precise-pairing golden below reduces to
+ * (mirrors `target_matches`'s own idiom for `target_from_name`).
  *
- * @return void
+ * @param os    a `teko::os()` value
+ * @param arch  a `teko::arch()` value
+ * @param want  the expected mapped target
+ * @return      `true` iff `host_target_for_os(os, arch)` resolves to `want`
  */
-fn host_target_for_os_maps_every_known_os() {
-    teko::assert::is_true(host_target_for_os("linux") == NativeTarget::X8664Linux)
-    teko::assert::is_true(host_target_for_os("windows") == NativeTarget::X8664Windows)
-    teko::assert::is_true(host_target_for_os("macos") == NativeTarget::Arm64Macho)
-    teko::assert::is_true(host_target_for_os("unknown") == NativeTarget::Arm64Macho)
+fn host_target_matches(os: str, arch: str, want: NativeTarget) -> bool {
+    match host_target_for_os(os, arch) { NativeTarget as t => t == want; error => false }
+}
+
+/**
+ * host_target_is_unsupported — does `host_target_for_os(os, arch)` honestly refuse the pair
+ * (the R2 arm), naming both `os` and `arch` in its own message?
+ *
+ * @param os    a `teko::os()` value
+ * @param arch  a `teko::arch()` value
+ * @return      `true` iff the pair is refused, with `os`/`arch` both named in the message
+ */
+fn host_target_is_unsupported(os: str, arch: str) -> bool {
+    match host_target_for_os(os, arch) {
+        NativeTarget => false
+        error as e => teko::str::contains(e.message, os) && teko::str::contains(e.message, arch)
+    }
 }
 
 #test
 /**
- * host_default_target_matches_the_real_host — the LIVE seam: `host_default_target()`
- * (real `teko::os()`) resolves to exactly what `host_target_for_os` maps that same
- * OS string to — i.e. the two functions never disagree on the actual build host,
- * whichever of the three supported OSes it is.
+ * host_target_for_os_is_precise_for_every_supported_pair — Phase 2 of the two-phase host
+ * default (owner ruling 2026-07-24, teko-target-crosslink-0.3.1.md §2.1, now that
+ * `teko::arch()` is seed-recognized): `host_target_for_os` picks the ONE own-backend target
+ * this backend has a real codegen pipeline for, keyed on BOTH `os` AND `arch` — simulating
+ * every supported host without depending on which one this test actually runs on.
+ *
+ * `linux`+`arm64` is the FOURTH row, and it is the one that makes `linux` the first OS with
+ * two arches: refusing it (which this resolver honestly did, because `Arm64Linux` did not
+ * exist) is what left the arm64-Linux test leg green over rows it never ran.
+ *
+ * @return void
+ */
+fn host_target_for_os_is_precise_for_every_supported_pair() {
+    teko::assert::is_true(host_target_matches("linux", "x86_64", NativeTarget::X8664Linux))
+    teko::assert::is_true(host_target_matches("windows", "x86_64", NativeTarget::X8664Windows))
+    teko::assert::is_true(host_target_matches("macos", "arm64", NativeTarget::Arm64Macho))
+    teko::assert::is_true(host_target_matches("linux", "arm64", NativeTarget::Arm64Linux))
+}
+
+#test
+/**
+ * host_target_for_os_rejects_every_unsupported_pair — the R2 counterpart: teaching
+ * `host_target_for_os` the architecture means an `(os, arch)` pair with no own-backend target
+ * (an x86_64 macOS host, an arm64 windows host, or a wholly `unknown`
+ * arch) is now an honest COMPILE-time refusal naming BOTH the offending `os` and `arch` — never
+ * the pre-0.3.1-teko-arch silent mis-lower to the OS's dominant arch regardless of the host's
+ * REAL arch (the exact bug class R1 exists to close, one dimension over from the original
+ * linux-host-emits-arm64-Mach-O report).
+ *
+ * @return void
+ */
+fn host_target_for_os_rejects_every_unsupported_pair() {
+    teko::assert::is_true(host_target_is_unsupported("macos", "x86_64"))
+    teko::assert::is_true(host_target_is_unsupported("windows", "arm64"))
+    teko::assert::is_true(host_target_is_unsupported("linux", "unknown"))
+    teko::assert::is_true(host_target_is_unsupported("unknown", "unknown"))
+}
+
+#test
+/**
+ * host_target_for_os_guess_maps_every_known_os — the Phase-1 OS-only heuristic
+ * (teko-target-crosslink-0.3.1.md §2.1), kept as `host_target_for_os_guess`: `linux` and
+ * `windows` pick their own-backend x86-64 pipeline, while `macos` and any other (`unknown`)
+ * value keep the pre-existing `Arm64Macho` default. Still the ALWAYS-TOTAL fallback
+ * `host_default_target_guess`/`resolved_target`/`cross_note` fall back to on a host whose
+ * precise (os, arch) pair has no own-backend target.
+ *
+ * @return void
+ */
+fn host_target_for_os_guess_maps_every_known_os() {
+    teko::assert::is_true(host_target_for_os_guess("linux") == NativeTarget::X8664Linux)
+    teko::assert::is_true(host_target_for_os_guess("windows") == NativeTarget::X8664Windows)
+    teko::assert::is_true(host_target_for_os_guess("macos") == NativeTarget::Arm64Macho)
+    teko::assert::is_true(host_target_for_os_guess("unknown") == NativeTarget::Arm64Macho)
+}
+
+#test
+/**
+ * host_default_target_matches_the_real_host — the LIVE seam: `host_default_target()` (real
+ * `teko::os()`/`teko::arch()`) never disagrees with `host_target_for_os` applied to that same
+ * (os, arch) pair, in EITHER arm. A host whose own pair has no own-backend target (an aarch64
+ * linux host, an x86_64 macOS host, an arm64 windows host, …) is a LEGITIMATE live outcome, not a
+ * test failure — the R2 error `host_default_target()` returns there must be the SAME honest
+ * refusal `host_target_for_os` itself gives that exact pair, never a silent divergence between
+ * the two.
+ *
+ * THE BUG THIS REPLACES (measured live on CI's `test / linux-arm64-glibc`, job 90725227419, run
+ * 30495738831): the previous body asserted `false` on the error arm, on the unstated assumption
+ * that every host this suite runs on is one of the three supported pairs. On an aarch64 linux
+ * runner `host_target_for_os("linux", "arm64")` correctly refuses — that refusal IS this crumb's
+ * own R1/R2 design, not a defect — so the assertion fired and, because a failed
+ * `teko::assert::is_true` has no soft-fail path yet (SIGABRT, `cargo/0.3.1-envelope-e-assert`
+ * owns that separately), it aborted the WHOLE test binary, not just this one case. Asserting the
+ * EQUIVALENCE instead of a fixed arm is what makes this test host-agnostic: green on every host,
+ * supported or not, without ever discovering which one it is running on.
  *
  * @return void
  */
 fn host_default_target_matches_the_real_host() {
-    teko::assert::is_true(host_default_target() == host_target_for_os(teko::os()))
+    match host_default_target() {
+        NativeTarget as live => teko::assert::is_true(host_target_matches(teko::os(), teko::arch(), live))
+        error => teko::assert::is_true(host_target_is_unsupported(teko::os(), teko::arch()))
+    }
 }
 
 #test
 /**
- * target_from_name_maps_every_wasi_alias — `wasm32-wasi`/`wasm32`/`wasm`/
- * `wasi` all select `Wasm32Wasi` (#389 C1-5).
+ * host_default_target_guess_falls_back_when_the_precise_pair_is_unsupported —
+ * `host_default_target_guess` is ALWAYS total, and it PREFERS the precise resolver: on any host
+ * whose (os, arch) pair has an own-backend target it answers exactly that target, and only on an
+ * unsupported pair does it fall through to the OS-only Phase-1 guess. The assertion is on the
+ * equivalence, in both arms, so it never assumes which host it is running on.
+ *
+ * WHY THIS CANNOT BE PINNED AGAINST `host_target_for_os_guess` ALONE ANYMORE: the previous body
+ * asserted `host_default_target_guess() == host_target_for_os_guess(teko::os())` unconditionally,
+ * on the stated assumption that "each of the three supported pairs IS its own OS's dominant arch,
+ * by construction". `Arm64Linux` breaks that assumption — `linux` is now the first OS with TWO
+ * supported arches — so on an arm64 Linux host the precise resolver answers `Arm64Linux` while
+ * the OS-only guess still answers `X8664Linux`, and the two legitimately differ. Asserting the
+ * PREFERENCE instead of the equality keeps the property that actually matters: this function
+ * never crashes and never contradicts the precise resolver.
  *
  * @return void
  */
-fn target_from_name_maps_every_wasi_alias() {
-    teko::assert::is_true(target_matches("wasm32-wasi", NativeTarget::Wasm32Wasi))
-    teko::assert::is_true(target_matches("wasm32", NativeTarget::Wasm32Wasi))
-    teko::assert::is_true(target_matches("wasm", NativeTarget::Wasm32Wasi))
-    teko::assert::is_true(target_matches("wasi", NativeTarget::Wasm32Wasi))
-}
-
-#test
-/**
- * target_from_name_maps_every_wasm64_alias — `wasm64-wasi`/`wasm64` both
- * select `Wasm64Wasi` (#389 C1-7, the wasm64 switch, §6) — distinct from
- * every wasm32 alias above.
- *
- * @return void
- */
-fn target_from_name_maps_every_wasm64_alias() {
-    teko::assert::is_true(target_matches("wasm64-wasi", NativeTarget::Wasm64Wasi))
-    teko::assert::is_true(target_matches("wasm64", NativeTarget::Wasm64Wasi))
-}
-
-#test
-/**
- * target_from_name_maps_every_browser_alias — `wasm32-browser`/`wasm-
- * browser`/`browser` all select `Wasm32Browser` (#389 C1-5; its own JS-
- * import runtime binding is N6b territory, a later slice).
- *
- * @return void
- */
-fn target_from_name_maps_every_browser_alias() {
-    teko::assert::is_true(target_matches("wasm32-browser", NativeTarget::Wasm32Browser))
-    teko::assert::is_true(target_matches("wasm-browser", NativeTarget::Wasm32Browser))
-    teko::assert::is_true(target_matches("browser", NativeTarget::Wasm32Browser))
+fn host_default_target_guess_falls_back_when_the_precise_pair_is_unsupported() {
+    match host_default_target() {
+        NativeTarget as precise => teko::assert::is_true(host_default_target_guess() == precise)
+        error => teko::assert::is_true(host_default_target_guess() == host_target_for_os_guess(teko::os()))
+    }
 }
 
 /**
@@ -336,6 +406,23 @@ fn pt_combined_status_precedence() {
     teko::assert::is_true(status_text(combined_status(Verdict::Stale, 1, 0)) == "DEAD")
     teko::assert::is_true(status_text(combined_status(Verdict::Redundant, 1, 0)) == "REDUNDANT")
     teko::assert::is_true(status_text(combined_status(Verdict::Live, 1, 0)) == "LIVE")
+}
+
+/**
+ * test_gate_precedence — the gate's own status (`trc`) is STILL the highest-precedence failure,
+ * unchanged, no matter what the floor/per-commit/regression statuses are; a passing gate falls
+ * through to the floor status, then per-commit, then the regression tier (ignored entirely when
+ * `has_regr` is false, even if `regr_rc` carries a stray non-zero value); all-zero is 0.
+ */
+#test
+fn pt_test_gate_precedence_defers_to_the_gate_first() {
+    teko::assert::is_true(test_gate_precedence(7, 1, 1, true, 1) == 7)
+    teko::assert::is_true(test_gate_precedence(0, 3, 1, true, 1) == 3)
+    teko::assert::is_true(test_gate_precedence(0, 0, 5, true, 1) == 5)
+    teko::assert::is_true(test_gate_precedence(0, 0, 0, true, 9) == 9)
+    teko::assert::is_true(test_gate_precedence(0, 0, 0, false, 9) == 0)
+    teko::assert::is_true(test_gate_precedence(0, 0, 0, true, 0) == 0)
+    teko::assert::is_true(test_gate_precedence(0, 0, 0, false, 0) == 0)
 }
 
 /** analyzer_report renders header, per-test lines with asserts=, and a per-status summary. */
@@ -601,41 +688,104 @@ fn pt_error_text(v: null | error) -> str {
 }
 
 /**
- * pt_cross_target — a target that is NEVER a host default (`host_target_for_os` only ever answers
- * x86_64-linux, x86_64-windows or arm64-macos, so a wasm target can never be one), so `cross_note`
- * classifies it as cross on EVERY CI host and the R4/R5 cross assertions below hold
- * platform-independently.
+ * pt_cross_object_target — a target that `cross_note` classifies as CROSS on EVERY host: whichever
+ * of `x86_64-windows` / `x86_64-linux` this host does not default to (no host defaults to both, so
+ * one of the two is always cross). It is the SINGLE always-cross fixture the R4/R5 cross assertions
+ * below share, so they hold platform-independently.
  *
- * @return the always-cross fixture target
+ * @return a target that is cross on the host running the suite
  */
-fn pt_cross_target() -> NativeTarget { NativeTarget::Wasm32Wasi }
+fn pt_cross_object_target() -> NativeTarget {
+    if host_default_target_guess() == NativeTarget::X8664Windows { return NativeTarget::X8664Linux }
+    NativeTarget::X8664Windows
+}
 
 #test
 /**
- * pt_target_name_and_objfmt_are_one_source — the canonical os-arch name of each target round-trips
- * through `target_from_name` (the D39 single string space: what the reverse direction emits, the
- * forward direction accepts), and each name carries the object format the `--allow-undef`
- * translation and the COFF import-lib rule key on.
+ * pt_target_name_is_the_canonical_os_arch_name — the reverse (variant → name) direction of the D39
+ * single os-arch string space, for EVERY `NativeTarget` variant: the spelling the
+ * `[extern.libs.<os-arch>]` section key, the `on "<os-arch>"` regressor routing and the cross-emit
+ * note all share.
  *
- * @return void
+ * WHY THIS IS ONE OF FIVE TESTS AND NOT ONE OF FOURTEEN ASSERTIONS: the assert seed reports the line
+ * of the ENCLOSING DECLARATION, not of the failing assertion (measured: the arm64-macos SIGABRT
+ * named `project_test.tkt:738`, which was the `fn` line of the single test these five replace, so
+ * the trace located nothing). One test per FAMILY names the family that diverged — the fact that
+ * decides the next step — without inflating the suite count by thirteen.
  */
-fn pt_target_name_and_objfmt_are_one_source() {
+fn pt_target_name_is_the_canonical_os_arch_name() {
     teko::assert::is_true(target_name(NativeTarget::X8664Linux) == "x86_64-linux")
     teko::assert::is_true(target_name(NativeTarget::Arm64Macho) == "arm64-macos")
+    teko::assert::is_true(target_name(NativeTarget::Arm64Linux) == "arm64-linux")
     teko::assert::is_true(target_name(NativeTarget::X8664Windows) == "x86_64-windows")
-    teko::assert::is_true(target_name(NativeTarget::Wasm32Wasi) == "wasm32-wasi")
-    match target_from_name(target_name(NativeTarget::X8664Windows)) {
-        NativeTarget as t => teko::assert::is_true(t == NativeTarget::X8664Windows)
-        error => teko::assert::is_true(false)
-    }
+}
+
+#test
+/**
+ * pt_target_objfmt_keys_the_linker_rules — the object format each variant emits, as the token the
+ * `--allow-undef` translation (§5.2) and the COFF import-lib rule (R5) key on. Both ELF targets are
+ * asserted, so the `Arm64Linux` arm cannot go missing from the family the way it did while this was
+ * a single test.
+ */
+fn pt_target_objfmt_keys_the_linker_rules() {
     teko::assert::is_true(target_objfmt(NativeTarget::X8664Linux) == OBJFMT_ELF)
+    teko::assert::is_true(target_objfmt(NativeTarget::Arm64Linux) == OBJFMT_ELF)
     teko::assert::is_true(target_objfmt(NativeTarget::Arm64Macho) == OBJFMT_MACHO)
     teko::assert::is_true(target_objfmt(NativeTarget::X8664Windows) == OBJFMT_COFF)
-    teko::assert::is_true(target_objfmt(NativeTarget::Wasm64Wasi) == OBJFMT_WASM)
-    teko::assert::is_true(target_links_with_cc(NativeTarget::X8664Linux))
-    teko::assert::is_false(target_links_with_cc(NativeTarget::Wasm32Wasi))
+}
+
+#test
+/**
+ * pt_target_name_round_trips_through_target_from_name — the D39 closure claim: what the reverse
+ * direction EMITS, the forward direction ACCEPTS, for every variant. `aarch64-linux` is asserted
+ * alongside it because that is the spelling `cc -dumpmachine` reports for `Arm64Linux`, and an
+ * alias that stops resolving is the same outage as a canonical name that stops resolving.
+ */
+fn pt_target_name_round_trips_through_target_from_name() {
+    teko::assert::is_true(target_matches(target_name(NativeTarget::X8664Linux), NativeTarget::X8664Linux))
+    teko::assert::is_true(target_matches(target_name(NativeTarget::Arm64Macho), NativeTarget::Arm64Macho))
+    teko::assert::is_true(target_matches(target_name(NativeTarget::Arm64Linux), NativeTarget::Arm64Linux))
+    teko::assert::is_true(target_matches(target_name(NativeTarget::X8664Windows), NativeTarget::X8664Windows))
+    teko::assert::is_true(target_matches("aarch64-linux", NativeTarget::Arm64Linux))
+}
+
+#test
+/**
+ * pt_links_with_cc_is_relative_to_the_host — the "will a link step run?" rule, stated the only way
+ * it can be stated portably: `links_with_cc` is a function of the target AND of the host, so the
+ * host side must be NAMED, never assumed.
+ *
+ * THE BUG THIS ASSERTION REPLACES, and it is the whole reason for this split: the single test used
+ * to assert `target_links_with_cc(NativeTarget::X8664Linux)` outright. That reads "x86_64-linux
+ * links" — true only on a host whose own default IS x86_64-linux. On arm64-macos the host default
+ * is `Arm64Macho`, so `cross_note(X8664Linux).is_cross` holds, a cross build stops at the OBJECT,
+ * and the honest answer is FALSE — the assertion was the failure, not the platform. It survived
+ * because the OS-only Phase-1 host guess answered `X8664Linux` for every linux host; once
+ * `host_target_for_os` learned the arch, arm64-linux joined arm64-macos in refuting it.
+ *
+ * WHAT IS ASSERTED INSTEAD, all host-independent: the host's OWN target always links (never cross);
+ * a cross target does not link unpinned, whether asked through the environment-only probe or
+ * directly; and pinning is the escape hatch that makes it link.
+ */
+fn pt_links_with_cc_is_relative_to_the_host() {
+    teko::assert::is_true(target_links_with_cc(host_default_target_guess()))
+    teko::assert::is_false(target_links_with_cc(pt_cross_object_target()))
+    teko::assert::is_false(links_with_cc(pt_cross_object_target(), false))
+    teko::assert::is_true(links_with_cc(pt_cross_object_target(), true))
+}
+
+#test
+/**
+ * pt_target_os_name_is_the_os_half_of_the_name — the OS half of each canonical name, in the same
+ * vocabulary `teko::os()` and the bare-OS `[extern.libs.<os>]` key use. Both linux targets are
+ * asserted: they share one OS name across two archs, which is exactly what the bare-OS section key
+ * relies on.
+ */
+fn pt_target_os_name_is_the_os_half_of_the_name() {
+    teko::assert::is_true(target_os_name(NativeTarget::X8664Linux) == "linux")
+    teko::assert::is_true(target_os_name(NativeTarget::Arm64Linux) == "linux")
+    teko::assert::is_true(target_os_name(NativeTarget::Arm64Macho) == "macos")
     teko::assert::is_true(target_os_name(NativeTarget::X8664Windows) == "windows")
-    teko::assert::is_true(target_os_name(NativeTarget::Wasm32Wasi) == "")
 }
 
 #test
@@ -648,18 +798,18 @@ fn pt_target_name_and_objfmt_are_one_source() {
  * @return void
  */
 fn pt_cross_note_is_empty_for_the_host_target() {
-    let here = cross_note(host_default_target())
+    let here = cross_note(host_default_target_guess())
     teko::assert::is_false(here.is_cross)
     teko::assert::is_true(here.note == "")
-    let cross = cross_note(pt_cross_target())
+    let cross = cross_note(pt_cross_object_target())
     teko::assert::is_true(cross.is_cross)
-    teko::assert::str_contains(cross.note, "wasm32-wasi")
-    teko::assert::str_contains(cross.note, target_name(host_default_target()))
+    teko::assert::str_contains(cross.note, target_name(pt_cross_object_target()))
+    teko::assert::str_contains(cross.note, target_name(host_default_target_guess()))
     teko::assert::str_contains(cross.note, "not executed")
-    teko::assert::is_true(cross_note_for_name("wasm32-wasi").is_cross)
+    teko::assert::is_true(cross_note_for_name(target_name(pt_cross_object_target())).is_cross)
     teko::assert::is_false(cross_note_for_name("").is_cross)
     teko::assert::is_false(cross_note_for_name("some-unknown-target").is_cross)
-    teko::assert::is_false(cross_note_for_name(target_name(host_default_target())).is_cross)
+    teko::assert::is_false(cross_note_for_name(target_name(host_default_target_guess())).is_cross)
 }
 
 #test
@@ -702,17 +852,17 @@ fn pt_os_lib_key_matches_both_shapes() {
  */
 fn pt_static_lib_cross_must_be_pointed_at_and_present() {
     let bare = pt_manifest_of("name = \"app\"\nsource = \"src\"\n[extern.libs]\nfoo = [\"static:foo\"]\n")
-    let cross = validate_static_libs_for_target(bare, pt_cross_target())
+    let cross = validate_static_libs_for_target(bare, pt_cross_object_target())
     teko::assert::is_true(pt_is_error(cross))
     teko::assert::str_contains(pt_error_text(cross), "foo")
-    teko::assert::str_contains(pt_error_text(cross), "wasm32-wasi")
-    teko::assert::is_false(pt_is_error(validate_static_libs_for_target(bare, host_default_target())))
+    teko::assert::str_contains(pt_error_text(cross), target_name(pt_cross_object_target()))
+    teko::assert::is_false(pt_is_error(validate_static_libs_for_target(bare, host_default_target_guess())))
     let absent = pt_manifest_of("name = \"app\"\nsource = \"src\"\n[extern.libs]\nfoo = [\"static:__no_such_dir__/libfoo.a\"]\n")
-    let miss = validate_static_libs_for_target(absent, host_default_target())
+    let miss = validate_static_libs_for_target(absent, host_default_target_guess())
     teko::assert::is_true(pt_is_error(miss))
     teko::assert::str_contains(pt_error_text(miss), "__no_such_dir__/libfoo.a")
     let clean = pt_manifest_of("name = \"app\"\nsource = \"src\"\n[extern.libs]\nm = []\n")
-    teko::assert::is_false(pt_is_error(validate_static_libs_for_target(clean, pt_cross_target())))
+    teko::assert::is_false(pt_is_error(validate_static_libs_for_target(clean, pt_cross_object_target())))
 }
 
 #test
@@ -726,8 +876,8 @@ fn pt_static_lib_cross_must_be_pointed_at_and_present() {
 fn pt_static_validation_honours_the_section_key() {
     let m = pt_manifest_of("name = \"app\"\nsource = \"src\"\n[extern.libs.arm64-macos]\nfoo = [\"static:foo\"]\n")
     teko::assert::is_false(pt_is_error(validate_static_libs_for_target(m, NativeTarget::X8664Windows)))
-    let own = pt_manifest_of("name = \"app\"\nsource = \"src\"\n[extern.libs.wasm32-wasi]\nfoo = [\"static:foo\"]\n")
-    teko::assert::is_true(pt_is_error(validate_static_libs_for_target(own, pt_cross_target())))
+    let own = pt_manifest_of("name = \"app\"\nsource = \"src\"\n[extern.libs." ~ target_name(pt_cross_object_target()) ~ "]\nfoo = [\"static:foo\"]\n")
+    teko::assert::is_true(pt_is_error(validate_static_libs_for_target(own, pt_cross_object_target())))
 }
 
 #test
@@ -741,13 +891,13 @@ fn pt_static_validation_honours_the_section_key() {
  */
 fn pt_shared_lib_default_fails_and_allow_undef_opts_in() {
     let m = pt_manifest_of("name = \"app\"\nsource = \"src\"\n[extern.libs]\nbar = [\"shared:__no_such_dir__/libbar.so\"]\n")
-    let strict = validate_shared_libs_for_target(m, host_default_target(), false)
+    let strict = validate_shared_libs_for_target(m, host_default_target_guess(), false)
     teko::assert::is_true(pt_is_error(strict))
     teko::assert::str_contains(pt_error_text(strict), "__no_such_dir__/libbar.so")
     teko::assert::str_contains(pt_error_text(strict), ALLOW_UNDEF_FLAG)
-    teko::assert::is_false(pt_is_error(validate_shared_libs_for_target(m, host_default_target(), true)))
+    teko::assert::is_false(pt_is_error(validate_shared_libs_for_target(m, host_default_target_guess(), true)))
     let by_name = pt_manifest_of("name = \"app\"\nsource = \"src\"\n[extern.libs]\nbar = [\"shared:bar\"]\n")
-    teko::assert::is_false(pt_is_error(validate_shared_libs_for_target(by_name, host_default_target(), false)))
+    teko::assert::is_false(pt_is_error(validate_shared_libs_for_target(by_name, host_default_target_guess(), false)))
 }
 
 #test
@@ -776,7 +926,7 @@ fn pt_shared_cross_coff_needs_an_import_lib() {
 /**
  * pt_allow_undef_flag_surface — the opt-in is recognized only when spelled exactly, translates per
  * object format (Mach-O's `dynamic_lookup`; ELF's pair, since `--allow-shlib-undefined` alone does
- * not let an executable carry an undefined symbol), and has NO translation for PE/COFF or wasm — a
+ * not let an executable carry an undefined symbol), and has NO translation for PE/COFF — a
  * flag that would do nothing is not emitted, the honest stop covers that case instead.
  *
  * @return void
@@ -789,7 +939,6 @@ fn pt_allow_undef_flag_surface() {
     teko::assert::str_contains(allow_undef_cc_flag(OBJFMT_ELF), "--allow-shlib-undefined")
     teko::assert::is_true(allow_undef_cc_flag(OBJFMT_MACHO) == "-Wl,-undefined,dynamic_lookup")
     teko::assert::is_true(allow_undef_cc_flag(OBJFMT_COFF) == "")
-    teko::assert::is_true(allow_undef_cc_flag(OBJFMT_WASM) == "")
     teko::assert::is_true(project_arg_of(args_of("teko", ALLOW_UNDEF_FLAG, "proj"), 1) == "proj")
 }
 
@@ -831,7 +980,6 @@ fn pt_lib_file_present_reads_the_local_tree() {
  * name `target_name` produces. Asserted as that identity rather than as a table of literals, because
  * the identity is what the capability rules depend on: a new target whose arch half disagreed with
  * its canonical name would be caught here instead of silently mis-answering "can this host link it".
- * The wasm targets name a machine model, not a CPU, and answer "" on both halves.
  *
  * @return void
  */
@@ -839,7 +987,370 @@ fn pt_target_arch_name_completes_the_os_arch_name() {
     teko::assert::is_true((target_arch_name(NativeTarget::X8664Linux) ~ "-" ~ target_os_name(NativeTarget::X8664Linux)) == target_name(NativeTarget::X8664Linux))
     teko::assert::is_true((target_arch_name(NativeTarget::Arm64Macho) ~ "-" ~ target_os_name(NativeTarget::Arm64Macho)) == target_name(NativeTarget::Arm64Macho))
     teko::assert::is_true((target_arch_name(NativeTarget::X8664Windows) ~ "-" ~ target_os_name(NativeTarget::X8664Windows)) == target_name(NativeTarget::X8664Windows))
-    teko::assert::is_true(target_arch_name(NativeTarget::Wasm32Wasi) == "")
-    teko::assert::is_true(target_arch_name(NativeTarget::Wasm64Wasi) == "")
-    teko::assert::is_true(target_arch_name(NativeTarget::Wasm32Browser) == "")
+}
+
+/**
+ * pt_cc_manifest_of — a manifest whose `[extern] cc` names `cc_cmd`, for the resolution-precedence
+ * tests. Written as manifest TEXT rather than a struct literal so the test exercises the very parse
+ * path a real project's `.tkp` takes.
+ *
+ * @param cc_cmd  the compiler the manifest pins
+ * @return        the parsed manifest carrying that `cc` override
+ */
+fn pt_cc_manifest_of(cc_cmd: str) -> Manifest {
+    pt_manifest_of("name = \"x\"\nsource = \"src\"\n[extern]\ncc = \"" ~ cc_cmd ~ "\"\n")
+}
+
+/**
+ * pt_the_manifest_cc_override_wins_over_every_default — the top of the resolution precedence law:
+ * a manifest `[extern] cc` is obeyed verbatim on EVERY host, and it carries NO implied target flag,
+ * because whoever names the compiler owns its ABI.
+ *
+ * @return void
+ */
+#test
+fn pt_the_manifest_cc_override_wins_over_every_default() {
+    let choice = resolve_cc_choice(pt_cc_manifest_of("my-own-cc"))
+    teko::assert::is_true(choice.cmd == "my-own-cc")
+    teko::assert::is_true(choice.target_flag == "")
+    teko::assert::is_true(resolve_cc(pt_cc_manifest_of("my-own-cc")) == "my-own-cc")
+}
+
+/**
+ * pt_the_host_default_is_clang_with_msvc_only_on_windows — the Windows default is
+ * `clang --target=x86_64-pc-windows-msvc`, and it is a WINDOWS default: on this suite's own host the
+ * choice must still be the bare `cc` with no target flag, which is the condition for the Linux/macOS
+ * link line to stay byte-identical and the product fixpoint to keep closing.
+ *
+ * Both arms are asserted on every host — the one that matches this host by measurement
+ * (`teko::os()`), the other by the pieces the Windows arm is built from — so a Linux gate still
+ * proves what the Windows spelling will be.
+ *
+ * @return void
+ */
+#test
+fn pt_the_host_default_is_clang_with_msvc_only_on_windows() {
+    let choice = host_cc_choice()
+    if teko::os() == WINDOWS_OS_NAME {
+        teko::assert::is_true(choice.cmd == WINDOWS_CC_NAME)
+        teko::assert::is_true(choice.target_flag == "--target=x86_64-pc-windows-msvc")
+    } else {
+        teko::assert::is_true(choice.cmd == HOST_CC_NAME)
+        teko::assert::is_true(choice.target_flag == "")
+    }
+    teko::assert::is_true(WINDOWS_CC_NAME == "clang")
+    teko::assert::is_true(CC_TARGET_FLAG_PREFIX ~ WINDOWS_MSVC_TRIPLE == "--target=x86_64-pc-windows-msvc")
+    teko::assert::is_false(triple_is_mingw(WINDOWS_MSVC_TRIPLE))
+}
+
+/**
+ * pt_no_target_asks_for_a_cross_driver_any_more — the MinGW cross driver is gone from
+ * `default_cc_for_target`: every target answers with the host `cc`, which is what tells the
+ * regressor's pre-build probe that a cross row needs no cross toolchain on this host.
+ *
+ * @return void
+ */
+#test
+fn pt_no_target_asks_for_a_cross_driver_any_more() {
+    teko::assert::is_true(default_cc_for_target(NativeTarget::X8664Windows) == HOST_CC_NAME)
+    teko::assert::is_true(default_cc_for_target(NativeTarget::X8664Linux) == HOST_CC_NAME)
+    teko::assert::is_true(default_cc_for_target(NativeTarget::Arm64Macho) == HOST_CC_NAME)
+    teko::assert::is_false(linker_is_mingw(default_cc_for_target(NativeTarget::X8664Windows)))
+}
+
+/**
+ * pt_the_c_route_refusal_teaches_the_same_law_as_the_native_one — the C route's refusal names the
+ * compiler, names the EVIDENCE, quotes the shared ban reason (the owner's own words included), and
+ * points at the honest replacement for its own route: clang aimed at MSVC.
+ *
+ * @return void
+ */
+#test
+fn pt_the_c_route_refusal_teaches_the_same_law_as_the_native_one() {
+    let msg = mingw_cc_rejected_error("/c/mingw64/bin/cc", "the command names a MinGW install").message
+    teko::assert::str_contains(msg, "/c/mingw64/bin/cc")
+    teko::assert::str_contains(msg, "the command names a MinGW install")
+    teko::assert::str_contains(msg, MINGW_BAN_REASON)
+    teko::assert::str_contains(msg, WINDOWS_MSVC_TRIPLE)
+    teko::assert::str_contains(msg, WINDOWS_CC_NAME)
+}
+
+/**
+ * pt_a_mingw_cc_is_convicted_by_its_path_without_any_probe — the cheap reading fires first and on
+ * the MEASURED case: the Windows runner's `cc` resolves to `/c/mingw64/bin/cc`, whose path names
+ * MinGW outright, so no process has to run for the ban to bite. The evidence phrase is what proves
+ * no process ran — it names the PATH reading (`MINGW_PATH_EVIDENCE_PHRASE`) and not the probe.
+ *
+ * IT ASSERTS NOTHING ABOUT THIS HOST'S OWN `cc`, and that is the point of its present shape. The
+ * earlier version handed `mingw_cc_evidence` the host's `HOST_CC_NAME` and asserted the verdict was
+ * innocent, which is not a fact about this function but about whichever toolchain is on the runner's
+ * PATH — and on the Windows runner, whose `cc` really is `/c/mingw64/bin/cc`, it contradicted this
+ * very doc-comment and failed. What the build actually does on Windows is pinned where it belongs,
+ * on `host_cc_choice` (`pt_the_host_default_is_clang_with_msvc_only_on_windows`): the bare host `cc`
+ * is never the compiler there in the first place.
+ *
+ * @return void
+ */
+#test
+fn pt_a_mingw_cc_is_convicted_by_its_path_without_any_probe() {
+    let by_path = mingw_cc_evidence("/c/mingw64/bin/cc", teko::test::scoped("bin/.pt-probe"))
+    teko::assert::str_contains(by_path, "/c/mingw64/bin/cc")
+    teko::assert::str_contains(by_path, MINGW_PATH_EVIDENCE_PHRASE)
+    teko::assert::is_false(teko::str::contains(by_path, MINGW_TRIPLE_EVIDENCE_PHRASE))
+    teko::assert::str_contains(mingw_cc_evidence("x86_64-w64-mingw32-gcc", teko::test::scoped("bin/.pt-probe")), MINGW_PATH_EVIDENCE_PHRASE)
+    teko::assert::str_contains(mingw_path_evidence("C:/msys64/mingw64/bin/clang.exe"), MINGW_PATH_EVIDENCE_PHRASE)
+}
+
+/**
+ * pt_an_innocent_spelling_is_left_for_the_triple_to_judge — the other half of the cost-ordered rule,
+ * proved on hand-written spellings so it holds identically on every self-test host: a command whose
+ * spelling names no MinGW is NOT convicted by the cheap reading, whatever it is called and wherever
+ * it lives. This is the rule the retired host-`cc` assertion was reaching for, stated about the
+ * FUNCTION instead of about the runner.
+ *
+ * @return void
+ */
+#test
+fn pt_an_innocent_spelling_is_left_for_the_triple_to_judge() {
+    teko::assert::is_true(mingw_path_evidence(HOST_CC_NAME) == "")
+    teko::assert::is_true(mingw_path_evidence(WINDOWS_CC_NAME) == "")
+    teko::assert::is_true(mingw_path_evidence("/usr/bin/cc") == "")
+    teko::assert::is_true(mingw_path_evidence("C:/Program Files/LLVM/bin/clang.exe") == "")
+    teko::assert::is_true(mingw_path_evidence("x86_64-w64-windows-gnu-gcc") == "")
+}
+
+/**
+ * pt_the_triple_reading_convicts_the_gnu_abi_and_acquits_the_unknown — the DEAR reading, pinned on
+ * triples written out by hand instead of on whatever the host's compiler answers: both MinGW
+ * spellings convict and the phrase quotes the triple it read plus the flag that read it, MSVC and
+ * the legitimate host triples are acquitted, and the empty triple — an absent compiler, or a driver
+ * with no `-dumpmachine` — is unknown rather than guilty.
+ *
+ * @return void
+ */
+#test
+fn pt_the_triple_reading_convicts_the_gnu_abi_and_acquits_the_unknown() {
+    let gnu = mingw_triple_evidence("x86_64-w64-windows-gnu")
+    teko::assert::str_contains(gnu, MINGW_TRIPLE_EVIDENCE_PHRASE)
+    teko::assert::str_contains(gnu, "x86_64-w64-windows-gnu")
+    teko::assert::str_contains(gnu, HOST_CC_MACHINE_FLAG)
+    teko::assert::str_contains(mingw_triple_evidence("x86_64-w64-mingw32"), MINGW_TRIPLE_EVIDENCE_PHRASE)
+    teko::assert::is_true(mingw_triple_evidence(WINDOWS_MSVC_TRIPLE) == "")
+    teko::assert::is_true(mingw_triple_evidence("x86_64-linux-gnu") == "")
+    teko::assert::is_true(mingw_triple_evidence("arm64-apple-darwin24") == "")
+    teko::assert::is_true(mingw_triple_evidence("") == "")
+}
+
+/**
+ * pt_a_compiler_with_no_dumpmachine_is_unknown_not_guilty — an executable that exists but rejects
+ * `-dumpmachine` yields "" (unknown), and unknown must never be a conviction. `sh` stands in for
+ * such a driver: it is on every host this suite runs on and it exits non-zero for the flag.
+ *
+ * @return void
+ */
+#test
+fn pt_a_compiler_with_no_dumpmachine_is_unknown_not_guilty() {
+    teko::assert::is_true(cc_target_triple("sh", teko::test::scoped("bin/.pt-probe-sh")) == "")
+    teko::assert::is_true(mingw_cc_evidence("sh", teko::test::scoped("bin/.pt-probe-sh")) == "")
+}
+
+/**
+ * pt_the_verbose_rerun_is_the_same_line_plus_one_flag — the failure-path re-run adds `-v` directly
+ * after the compiler and changes NOTHING else: same compiler, same arguments, same order, one token
+ * longer.
+ *
+ * @return void
+ */
+#test
+fn pt_the_verbose_rerun_is_the_same_line_plus_one_flag() {
+    let line = args_of("cc", "-w", "-o")
+    let verbose = cc_verbose_argv(line)
+    teko::assert::is_true(verbose.len == line.len + 1)
+    teko::assert::is_true(verbose[0] == "cc")
+    teko::assert::is_true(verbose[1] == CC_VERBOSE_FLAG)
+    teko::assert::is_true(verbose[2] == "-w")
+    teko::assert::is_true(verbose[3] == "-o")
+    teko::assert::is_true(CC_VERBOSE_FLAG == "-v")
+}
+
+/**
+ * pt_a_cross_build_stops_at_the_object_and_a_host_build_links — the piece-4 rule, asserted from both
+ * sides of the pin: with nothing pinned, a target this host does not own runs NO link step (the
+ * object is the artifact) while the host's own target links exactly as before; with a compiler
+ * pinned, the cross link is obeyed again.
+ *
+ * @return void
+ */
+#test
+fn pt_a_cross_build_stops_at_the_object_and_a_host_build_links() {
+    let host = host_default_target_guess()
+    let plain = pt_empty_manifest()
+    teko::assert::is_true(links_with_cc(host, false))
+    teko::assert::is_true(build_links_binary(host, plain))
+    teko::assert::is_true(build_links_binary(host, pt_cc_manifest_of("my-own-cc")))
+    teko::assert::is_false(build_links_binary(pt_foreign_target_of(host), plain))
+    teko::assert::is_true(build_links_binary(pt_foreign_target_of(host), pt_cc_manifest_of("my-own-cc")))
+}
+
+/**
+ * pt_foreign_target_of — a relocatable-object target that is NOT `host`, so the cross rule can be
+ * asserted on any host this suite runs on.
+ *
+ * @param host  the host's own default target
+ * @return      a linking target different from `host`
+ */
+fn pt_foreign_target_of(host: NativeTarget) -> NativeTarget {
+    if host == NativeTarget::X8664Windows { return NativeTarget::X8664Linux }
+    NativeTarget::X8664Windows
+}
+
+/**
+ * pt_the_closing_line_names_the_artifact_that_exists — the reported path follows the artifact: a
+ * host binary build reports `<out>/<name>`, and a cross build that stopped at the object reports
+ * `<out>/<name>.o` instead of announcing a binary nobody wrote.
+ *
+ * @return void
+ */
+#test
+fn pt_the_closing_line_names_the_artifact_that_exists() {
+    let host = host_default_target_guess()
+    let native = pt_native_manifest()
+    teko::assert::is_true(artifact_path_for("out/", native, host) == "out/x")
+    teko::assert::is_true(artifact_path_for("out", native, pt_foreign_target_of(host)) == "out/x.o")
+    teko::assert::is_true(artifact_path_for("out", pt_empty_manifest(), pt_foreign_target_of(host)) == "out/x")
+}
+
+/**
+ * pt_native_manifest — the smallest BINARY manifest with the own backend stamped on, as the front-end
+ * stamps it (`with_backend`): the shape whose closing line must follow the artifact.
+ *
+ * @return the manifest, carrying `Backend::Native`
+ */
+fn pt_native_manifest() -> Manifest {
+    with_backend(pt_empty_manifest(), Backend::Native)
+}
+
+#test
+/**
+ * arm64_linux_target_row_set — the WHOLE row `Arm64Linux` adds to the target table, asserted
+ * column by column rather than trusting that one arm implies the rest: the canonical name
+ * `arm64-linux` (OS-based, ruling #390), the `aarch64-linux` spelling alias that
+ * `cc -dumpmachine` reports, the ELF object format, the `linux` OS half and the `arm64` arch
+ * half of the one os-arch string space (D39), the round trip
+ * `target_from_name(target_name(t)) == t`, and the fact that it LINKS with `cc` on its own
+ * host.
+ *
+ * A HALF-TAUGHT TARGET IS WORSE THAN NO TARGET: a variant that resolves but reports the wrong
+ * arch would make the regressor's own-backend capability probe compare `arm64` against the
+ * host `cc`'s `aarch64` and honest-skip the very rows this row exists to run.
+ *
+ * @return void
+ */
+fn arm64_linux_target_row_set() {
+    teko::assert::is_true(target_matches("arm64-linux", NativeTarget::Arm64Linux))
+    teko::assert::is_true(target_matches("aarch64-linux", NativeTarget::Arm64Linux))
+    teko::assert::is_true(target_name(NativeTarget::Arm64Linux) == "arm64-linux")
+    teko::assert::is_true(target_objfmt(NativeTarget::Arm64Linux) == OBJFMT_ELF)
+    teko::assert::is_true(target_os_name(NativeTarget::Arm64Linux) == "linux")
+    teko::assert::is_true(target_arch_name(NativeTarget::Arm64Linux) == "arm64")
+    teko::assert::is_true(target_matches(target_name(NativeTarget::Arm64Linux), NativeTarget::Arm64Linux))
+}
+
+#test
+/**
+ * arm64_linux_is_distinct_from_arm64_macos — the two arm64 targets share ISA, ABI, isel,
+ * regalloc and encoder, and differ in exactly ONE observable: the object container. Pinning
+ * the differences that MUST exist (name, object format) alongside the one that must NOT (the
+ * arch) is what stops a future refactor from folding them into one variant and silently
+ * emitting Mach-O on Linux — the original R1 bug, wearing the other arch's clothes.
+ *
+ * @return void
+ */
+fn arm64_linux_is_distinct_from_arm64_macos() {
+    teko::assert::is_true(NativeTarget::Arm64Linux != NativeTarget::Arm64Macho)
+    teko::assert::is_true(target_arch_name(NativeTarget::Arm64Linux) == target_arch_name(NativeTarget::Arm64Macho))
+    teko::assert::is_true(target_objfmt(NativeTarget::Arm64Linux) != target_objfmt(NativeTarget::Arm64Macho))
+    teko::assert::is_true(target_os_name(NativeTarget::Arm64Linux) != target_os_name(NativeTarget::Arm64Macho))
+}
+
+#test
+/**
+ * unsupported_target_error_lists_arm64_linux — D39's single-source rule: the R2 diagnostic
+ * that lists every accepted target must list the new one too, or a user typing
+ * `TEKO_TARGET=arm64-linu` is told, with authority, that the target they want does not exist.
+ *
+ * @return void
+ */
+fn unsupported_target_error_lists_arm64_linux() {
+    match target_from_name("arm64-linu") {
+        NativeTarget => teko::assert::is_true(false)
+        error as e => {
+            teko::assert::is_true(teko::str::contains(e.message, "arm64-linux"))
+            teko::assert::is_true(teko::str::contains(e.message, "aarch64-linux"))
+        }
+    }
+}
+
+/**
+ * pt_test_jobs_parses_its_env_and_falls_back_safely — the gate's concurrency knob reuses the
+ * regression pool's ONE decimal parser (`regr_jobs_of_default`), with the gate's own fallback.
+ *
+ * A malformed value must mean "the author did not mean zero shards", never zero: a run that silently
+ * launched no shard would report an EMPTY suite as a passing one, which is the class of silent
+ * success this whole change exists to remove.
+ */
+#test
+fn pt_test_jobs_parses_its_env_and_falls_back_safely() {
+    teko::assert::eq_u64(regr_jobs_of_default("8", TEST_JOBS_DEFAULT), 8)
+    teko::assert::eq_u64(regr_jobs_of_default("1", TEST_JOBS_DEFAULT), 1)
+    teko::assert::eq_u64(regr_jobs_of_default("", TEST_JOBS_DEFAULT), TEST_JOBS_DEFAULT)
+    teko::assert::eq_u64(regr_jobs_of_default("0", TEST_JOBS_DEFAULT), TEST_JOBS_DEFAULT)
+    teko::assert::eq_u64(regr_jobs_of_default("four", TEST_JOBS_DEFAULT), TEST_JOBS_DEFAULT)
+    teko::assert::eq_u64(regr_jobs_of_default("2x", TEST_JOBS_DEFAULT), TEST_JOBS_DEFAULT)
+}
+
+/**
+ * pt_a_gate_shard_names_itself_and_owns_its_dump — each shard of the in-process suite must carry BOTH
+ * env tokens: which shard it is, and where ITS coverage goes.
+ *
+ * The second is not decoration. Every shard runs the same binary, so a shared `TEKO_TKCOV` would have
+ * the shards clobber one another's dump and the coverage floors would then judge the suite on whatever
+ * shard finished last — a wrong number that looks like a right one.
+ */
+#test
+fn pt_a_gate_shard_names_itself_and_owns_its_dump() {
+    let spec = gate_shard_spec("bin/teko-tktest", teko::test::scoped("bin/.shard/"), 2, 4)
+    teko::assert::len_eq(spec.argv.len, 1)
+    teko::assert::eq_str(spec.argv[0], "bin/teko-tktest")
+    teko::assert::len_eq(spec.env.len, 2)
+    teko::assert::eq_str(spec.env[0], "TEKO_TEST_SHARD=2/4")
+    teko::assert::eq_str(spec.env[1], teko::str::concat("TEKO_TKCOV=", teko::test::scoped("bin/.shard/"), "2.tkcov"))
+    teko::assert::eq_str(spec.prefix, teko::str::concat(teko::test::scoped("bin/.shard/"), "2"))
+}
+
+/**
+ * pt_the_first_failing_shard_decides_in_shard_order — a sharded run's exit code must be a function of
+ * the SOURCE, never of which process finished first, so it is the first failure in SHARD order.
+ */
+#test
+fn pt_the_first_failing_shard_decides_in_shard_order() {
+    mut all_ok: []CapResult = teko::list::push(teko::list::empty(), pt_cap_exit(0))
+    all_ok = teko::list::push(all_ok, pt_cap_exit(0))
+    teko::assert::eq_i64(first_shard_failure(all_ok) to i64, 0)
+    mut mixed: []CapResult = teko::list::push(teko::list::empty(), pt_cap_exit(0))
+    mixed = teko::list::push(mixed, pt_cap_exit(134))
+    mixed = teko::list::push(mixed, pt_cap_exit(7))
+    teko::assert::eq_i64(first_shard_failure(mixed) to i64, 134)
+    let none: []CapResult = teko::list::empty()
+    teko::assert::eq_i64(first_shard_failure(none) to i64, 0)
+}
+
+/**
+ * pt_cap_exit — a `CapResult` carrying only an exit code, for the shard-verdict tests above.
+ *
+ * @param code  the exit code to carry
+ * @return      a capture whose every other field is empty
+ */
+fn pt_cap_exit(code: i32) -> CapResult {
+    CapResult { exit = code; stdout = ""; stderr = ""; harness_ns = 0; child_ns = 0; cmd = ""; chan_text = "" }
 }

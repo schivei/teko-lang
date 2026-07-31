@@ -1,3 +1,5 @@
+> **[HISTÓRICO]** — documenta o planejamento arquitetônico do backend próprio (onda fase-4/onda-6), já executado. Não descreve o estado atual do projeto.
+
 # Own AOT backend + M-linker — architecture, requirements, and phasing (recon)
 
 **Status:** RECON (doc-only). Sub-PR of the 0.2 wave umbrella (#374, branch
@@ -57,11 +59,9 @@ The parity set is anchored to the **current release matrix** (`.github/workflows
 | 2 | arm64 (AArch64) | AAPCS64 (Linux) | ELF | Linux arm64 glibc + musl |
 | 3 | x86-64 | SysV | ELF | Linux x86_64 glibc + musl |
 | 4 | x86-64 | Win64 | PE/COFF | `windows-x86_64` release |
-| 5 | wasm32 | WASI | Wasm | new (N6a) |
-| 6 | wasm32 | Browser (JS-import RT) | Wasm | new (N6b) |
 
 **Three object formats** the backend must emit: **ELF** (Linux), **Mach-O**
-(macOS/arm64), **PE/COFF** (Windows). Wasm is its own container. The Mach-O emitter must not
+(macOS/arm64), **PE/COFF** (Windows). The Mach-O emitter must not
 regress the `__TEXT,__info_plist` section `run_cc` writes today (`src/build/project.tks:429-437`,
 plist assembled at `:444` — Finder/`mdls`/`Get Info` metadata; plain text, no XML metacharacters).
 
@@ -162,8 +162,8 @@ honest-stop (their scope notes at `lir_interp.tks:9-13`, `lir_print.tks:1-7`).
 ### 3.3 Instruction selection (isel)
 
 Per-ISA modules, `LIR → MInst` (a thin machine-instruction IR keyed by target). N1's design note
-(`lir.tks:6-9`) fixes the strategy: **a register IR serves both register targets (linear-scan) and
-Wasm (its own stackify)**. isel is a per-block tree/peephole match over `LOp`; because signedness is
+(`lir.tks:6-9`) fixes the strategy: **a register IR serves the register targets (linear-scan)**.
+isel is a per-block tree/peephole match over `LOp`; because signedness is
 on the opcode (`IDivS`/`IDivU`) and widths are on `LType`, the selector reads the op+type and needs
 no re-analysis. Proposed home: `src/backend/isel_<isa>.tks` (`isel_arm64.tks` first). Fat-pointer
 ops (str/slice as `{ptr,len}`) are the first N2 additions that isel must lower to two-register
@@ -232,7 +232,7 @@ flipped.
 
 ## 4. Phasing — the issue-map
 
-This settles the fase-4/Onda-6 stubs (#222 N2, #223 N3–N5, #224 Wasm, #225 N7+N8, #226 M-linker)
+This settles the fase-4/Onda-6 stubs (#222 N2, #223 N3–N5, #225 N7+N8, #226 M-linker)
 into ordered, code-grounded implementation issues re-homed into the 0.2 wave. **These are a PLAN;
 the integrator spawns the GitHub issues.** Every compiler-touching issue owes the full ritual
 (gate both engines · paranoid · differential · parity · fixpoint). Verification names the gate leg
@@ -299,18 +299,6 @@ design doc are gone; the phase letter is kept so B1/B3 keep their names.
 - Depends on: B1 (x86_64 encoder), A4 (arm64 encoder).
 - Files: new `src/backend/abi_win64.tks`, `src/backend/objfile_coff.tks`.
 - Verifies via: C-native == own-native on the `windows-x86_64` release lane.
-
-### Phase C — Wasm (settles #224)
-
-**C1 · N6a + N6b — Wasm (WASI + Browser), the stackifier + JS-import runtime**
-- Scope: the register-IR → Wasm **stackify** pass (`lir.tks:6-9` reserves this route);
-  `objfile_wasm.tks` module/section writer; WASI RT binding (N6a) + the Browser JS-import variant of
-  `teko_rt` + JS glue (N6b). This is AOT (distinct from the interpreted `teko run` dev/WASM path).
-- Depends on: A1 (the target-independent LIR) — NOT A2/A3 (Wasm has its own selection/no regalloc),
-  so C1 can run in parallel with Phase B.
-- Files: new `src/backend/stackify.tks`, `src/backend/objfile_wasm.tks`, a Wasm variant of
-  `src/runtime/teko_rt.tks` + `extensions/`/`web` glue.
-- Verifies via: C-native (or VM) == own-wasm under a wasmtime/node harness over the corpus.
 
 ### Phase D — 3-way gate + backend flag (settles #225)
 

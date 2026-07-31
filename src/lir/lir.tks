@@ -1,12 +1,12 @@
-/** teko::lir — the LINEAR IR, the backend-agnostic contract that the native/Wasm
+/** teko::lir — the LINEAR IR, the backend-agnostic contract that the native
     targets (N2-N6) all consume. N1 (issue #221) delivers the TYPES + the lowering
     (TAST -> LIR) + a stable printer + an interpreter oracle. Machine code
     (isel/encoding/ELF) is N2+; the RULING freezes N1 at the LIR.
 
     Design (architect plan): SSA-lite with explicit block-args (NOT phi, NOT a
     stack machine) — each value is defined once, merges pass block-args on the
-    edge, and a register IR serves both register targets (linear-scan) and Wasm
-    (its own stackify). A VReg is a u32 id; every value is a VReg. Instructions are
+    edge, and a register IR serves the register targets (linear-scan).
+    A VReg is a u32 id; every value is a VReg. Instructions are
     3-address; the operator enums are closed. Symbols arrive ALREADY mangled (the
     lowering reuses the codegen mangler); the LIR never re-mangles.
 
@@ -47,9 +47,32 @@ pub type LUnOp = enum { INeg; INot; FNeg; ZExt; SExt; Trunc; IToF; FToI; FToF }
     language's post-drop range loses bits before machine lowering. */
 pub type LConstInt = struct { val: i64 }
 
-/** LConstFloat — materialize a float literal into a VReg. Carried as the IEEE bit
-    pattern (u64) so the printer/diff is bit-exact (no rounding drift). */
-pub type LConstFloat = struct { bits: u64 }
+/**
+ * LConstFloat — materialize a float literal into a VReg.
+ *
+ * `bits` is ALWAYS the f64 IEEE bit pattern of the literal, whatever `wide` says, so the
+ * printer/diff stays bit-exact with no rounding drift; a backend selecting the `f32` form
+ * narrows that exact pattern itself (the same correctly-rounded conversion C performs on a
+ * `float f = <double literal>;`).
+ *
+ * @since #386 B1-fp
+ */
+pub type LConstFloat = struct {
+    /**
+     * bits — the literal's exact f64 IEEE bit pattern.
+     */
+    bits: u64
+    /**
+     * wide — the literal's DECLARED machine width: true for `f64`, false for `f32`. Without it
+     * the whole float family loses the one fact it cannot re-derive: a backend that assumed
+     * every float literal was `f64` typed an `f32` value wide, and every later width-sensitive
+     * decision read from that value (`FToF`'s direction, a compare's scalar width, a stack
+     * argument's transfer size) then went the wrong way. Measured 2026-07-29 on x86-64:
+     * `let f: f32 = 2.5` followed by `(f to f64) != 2.5` computed TRUE on the own backend and
+     * FALSE down the C route, from exactly this loss.
+     */
+    wide: bool
+}
 
 /** LBin — `a op b`, a/b VRegs. */
 pub type LBin = struct { op: LBinOp; a: u32; b: u32 }
@@ -61,9 +84,41 @@ pub type LUn = struct { op: LUnOp; a: u32 }
     a VReg. */
 pub type LParam = struct { index: u32 }
 
-/** LCall — call a symbol (already mangled Teko-Teko, or a runtime `tk_*`) with the
-    given VReg arguments. `variadic` mirrors the callee's variadic marker. */
-pub type LCall = struct { symbol: str; args: []u32; variadic: bool }
+/**
+ * LCall — call a symbol (already mangled Teko-Teko, or a runtime `tk_*`) with the given VReg
+ * arguments.
+ *
+ * @since #382 A1-5
+ */
+pub type LCall = struct {
+    /**
+     * symbol — the callee's already-mangled symbol name.
+     */
+    symbol: str
+    /**
+     * args — the (already-lowered) argument VRegs, in ABI order.
+     */
+    args: []u32
+    /**
+     * variadic — mirrors the callee's own variadic marker.
+     */
+    variadic: bool
+    /**
+     * ret_type — the machine class the call's RESULT comes back in, and the one fact a backend
+     * cannot re-derive: the ABI splits results by register FILE, so `F32`/`F64` comes back in
+     * XMM0 / D0 while every integer, pointer and `bool` comes back in RAX / X0.
+     *
+     * Without it, `select_call_result_x86`/`select_call_result_arm64` took EVERY result out of the
+     * integer register and recorded it as a GPR value. `select_ret_*` and `pin_args_*` had already
+     * been taught the two files (`B1-fp`), so the callee PUT a float result in XMM0/D0 and a later
+     * float argument had to travel in XMM/D — and this one hole between them made
+     * `$"{f():F2}"` over an `f64`-returning function crash the generated program while the C route
+     * printed `2.50` (measured, 0.3.1.0 degrau 27). `Void` for a call with no result.
+     *
+     * @since 0.3.1.0 degrau 27
+     */
+    ret_type: LType
+}
 
 /** LRet — return (a terminator). `value` is the returned VReg; `has_value=false`
     is a void return. */
@@ -113,7 +168,27 @@ pub type LGlobalAddr = struct { symbol: str }
  *
  * @since #382 A1-6
  */
-pub type LCallIndirect = struct { target: u32; args: []u32; variadic: bool }
+pub type LCallIndirect = struct {
+    /**
+     * target — the VReg holding the callee's address.
+     */
+    target: u32
+    /**
+     * args — the (already-lowered) argument VRegs, in ABI order.
+     */
+    args: []u32
+    /**
+     * variadic — mirrors the callee's own variadic marker.
+     */
+    variadic: bool
+    /**
+     * ret_type — the machine class the call's RESULT comes back in, exactly as `LCall.ret_type`
+     * (see its doc for the register-file split and the defect its absence caused).
+     *
+     * @since 0.3.1.0 degrau 27
+     */
+    ret_type: LType
+}
 
 /**
  * LFuncAddr — the address of a named function (a Ptr VReg): a function used
@@ -173,7 +248,7 @@ pub fn data_reloc(offset: u32, target: str) -> LDataReloc {
     string literal's UTF-8, an interpolation piece, or a Tier-A aggregate const's
     serialized image), and its internal pointer relocations (#594 T-B1 — EMPTY for
     every entry the compiler produces today; a Tier-B aggregate const populates it
-    from T-B6, and T-B2..T-B5 teach the writers/VM to emit/resolve them). Referenced
+    from T-B6, and T-B2..T-B5 teach the writers to emit/resolve them). Referenced
     by `LGlobalAddr` (A1-4, #382). */
 pub type LRodata = struct { symbol: str; bytes: []byte; relocs: []LDataReloc }
 
@@ -203,17 +278,26 @@ pub type ConstImage = struct {
 }
 
 /**
- * FatFieldImage — the 16-byte image of one fat field (`[]T`/`str`) of an aggregate const, plus the
- * relocation and leaf its pointer slot needs (#594 T-B6): the slot bytes (8 zero + the element count
- * inline), the `LDataReloc` for the pointer slot, and the `LRodata` leaf of the target array. The
- * producer writes `slot_bytes` at the field's blob offset and accumulates `reloc`/`leaf` into the
- * owning `ConstImage`.
+ * FatMemberImage — the 16-byte image of one FAT MEMBER (`[]T`/`str`) of an aggregate const, plus the
+ * relocation and the leaf entries its pointer slot needs (#594 T-B6; 0.3.1.0 degrau const-slice): the
+ * slot bytes (8 zero + the element count inline), the `LDataReloc` for the pointer slot, and every
+ * `LRodata` leaf the member's target array pulls in. The producer writes `slot_bytes` at the member's
+ * blob offset and accumulates `reloc`/`leaves` into the owning `ConstImage`.
  *
- * @since #594 T-B6
+ * A MEMBER, not merely a field: the same image serves a fat STRUCT FIELD (`const D: Desc = Desc {
+ * name = "abcde"; … }`, its slot at the field's layout offset) and a fat SLICE ELEMENT (`const T:
+ * []str = ["a", "b"]`, its slot at `index * fat_slot_bytes()`), because the two shapes materialize
+ * identically — a zeroed pointer slot, a count, a relocation and a target leaf.
+ *
+ * `leaves` is a LIST rather than a single entry because a fat member's target can itself hold fat
+ * members (a `[][]str` element, a `[]str` field): the member's own leaf comes LAST, after the nested
+ * leaves it depends on, so the interning order stays a pure function of declaration order.
+ *
+ * @since #594 T-B6 (fields); 0.3.1.0 degrau const-slice (elements + nested leaves)
  */
-pub type FatFieldImage = struct {
+pub type FatMemberImage = struct {
     /**
-     * slot_bytes — the field's 16-byte image (8 zero pointer bytes + the element count as 8 LE bytes).
+     * slot_bytes — the member's 16-byte image (8 zero pointer bytes + the element count as 8 LE bytes).
      */
     slot_bytes: []byte
     /**
@@ -221,9 +305,9 @@ pub type FatFieldImage = struct {
      */
     reloc: LDataReloc
     /**
-     * leaf — the target array's rodata entry (its own symbol + flat-scalar bytes, empty relocs).
+     * leaves — the member's target-array rodata entries: every nested leaf first, its own leaf last.
      */
-    leaf: LRodata
+    leaves: []LRodata
 }
 
 /** LGlobal — one mutable/immutable top-level datum: its symbol, machine class, and
@@ -255,14 +339,39 @@ pub fn new_func(symbol: str, n_params: u32, param_types: []LType, ret_type: LTyp
     }
 }
 
+/**
+ * EXIT_STATUS_MASK — the low byte of a process status: the ONLY part of an exit code every
+ * supported platform reports IDENTICALLY. POSIX `exit(3)`/`wait(2)` expose `status & 0377`, while
+ * Windows hands back all 32 bits of `ExitProcess`, so the same program used to report 235 on Linux
+ * and 20203 on Windows. Owner ruling 2026-07-30 makes the normalization the LANGUAGE's job, never
+ * the programmer's, so every process-exit door masks with THIS constant.
+ *
+ * The C-route door masks in the runtime instead (`TK_EXIT_STATUS_MASK`, `src/runtime/teko_rt.h`)
+ * because a `main` that RETURNS never calls `tk_exit`; the two values are the same byte, and the
+ * own-backend spelling exists because a natively emitted process entry links no C runtime at all.
+ *
+ * @see append_exit_status_mask
+ * @since cargo/0.3.1-saida-equalizada
+ */
+pub const EXIT_STATUS_MASK: i64 = 0xFF
+
 /** const_int_inst — a `%r = const.<t> val` instruction. */
 pub fn const_int_inst(result: u32, val: i64, line: u32, col: u32) -> LInst {
     LInst { result = result; has_result = true; op = LConstInt { val = val }; line = line; col = col }
 }
 
-/** const_float_inst — a `%r = const.<t> 0x<bits>` instruction. */
-pub fn const_float_inst(result: u32, bits: u64, line: u32, col: u32) -> LInst {
-    LInst { result = result; has_result = true; op = LConstFloat { bits = bits }; line = line; col = col }
+/**
+ * const_float_inst — a `%r = const.<t> 0x<bits>` instruction.
+ *
+ * @param result  the VReg the literal materializes into
+ * @param bits    the literal's exact f64 IEEE bit pattern
+ * @param wide    the literal's declared machine width (true `f64`, false `f32`)
+ * @param line    the source line, for diagnostics
+ * @param col     the source column, for diagnostics
+ * @return        the built instruction
+ */
+pub fn const_float_inst(result: u32, bits: u64, wide: bool, line: u32, col: u32) -> LInst {
+    LInst { result = result; has_result = true; op = LConstFloat { bits = bits; wide = wide }; line = line; col = col }
 }
 
 /** bin_inst — a `%r = <op> a, b` instruction. */
@@ -280,15 +389,37 @@ pub fn param_inst(result: u32, index: u32, line: u32, col: u32) -> LInst {
     LInst { result = result; has_result = true; op = LParam { index = index }; line = line; col = col }
 }
 
-/** call_inst — a value-producing `%r = call @sym(args)` instruction. */
-pub fn call_inst(result: u32, symbol: str, args: []u32, variadic: bool, line: u32, col: u32) -> LInst {
-    LInst { result = result; has_result = true; op = LCall { symbol = symbol; args = args; variadic = variadic }; line = line; col = col }
+/**
+ * call_inst — a value-producing `%r = call @sym(args)` instruction.
+ *
+ * @param result    the VReg the call's return value is stored into
+ * @param symbol    the callee's already-mangled symbol name
+ * @param args      the (already-lowered) argument VRegs, in ABI order
+ * @param variadic  whether the callee's variadic marker is set
+ * @param line      the source line (propagated for the `.tsym` map)
+ * @param col       the source column (propagated for the `.tsym` map)
+ * @param ret_type  the machine class the RESULT comes back in (`LCall.ret_type`); defaults to
+ *                  `I64`, the integer-register class every pointer/integer/`bool` result shares,
+ *                  so ONLY a float-returning call has to name it (0.3.1.0 degrau 27)
+ * @return LInst  the built instruction
+ */
+pub fn call_inst(result: u32, symbol: str, args: []u32, variadic: bool, line: u32, col: u32, ret_type: LType = teko::lir::LType::I64) -> LInst {
+    LInst { result = result; has_result = true; op = LCall { symbol = symbol; args = args; variadic = variadic; ret_type = ret_type }; line = line; col = col }
 }
 
-/** void_call_inst — a `call @sym(args)` instruction that yields no value (a
-    statement-level call or a diverging builtin like tk_exit). */
+/**
+ * void_call_inst — a `call @sym(args)` instruction that yields no value (a statement-level call or
+ * a diverging builtin like `tk_exit`).
+ *
+ * @param symbol    the callee's already-mangled symbol name
+ * @param args      the (already-lowered) argument VRegs, in ABI order
+ * @param variadic  whether the callee's variadic marker is set
+ * @param line      the source line (propagated for the `.tsym` map)
+ * @param col       the source column (propagated for the `.tsym` map)
+ * @return LInst  the built instruction, with `ret_type = Void` (there is no result to place)
+ */
 pub fn void_call_inst(symbol: str, args: []u32, variadic: bool, line: u32, col: u32) -> LInst {
-    LInst { result = 0; has_result = false; op = LCall { symbol = symbol; args = args; variadic = variadic }; line = line; col = col }
+    LInst { result = 0; has_result = false; op = LCall { symbol = symbol; args = args; variadic = variadic; ret_type = LType::Void }; line = line; col = col }
 }
 
 /** ret_inst — a `ret %v` terminator. */
@@ -353,10 +484,12 @@ pub fn global_addr_inst(result: u32, symbol: str, line: u32, col: u32) -> LInst 
  * @param bool variadic whether the callee's variadic marker is set
  * @param u32 line      the source line (propagated for the `.tsym` map)
  * @param u32 col       the source column (propagated for the `.tsym` map)
+ * @param LType ret_type  the machine class the RESULT comes back in (`LCall.ret_type`); defaults
+ *                  to `I64` so only a float-returning indirect call has to name it
  * @return LInst  the built instruction
  */
-pub fn call_indirect_inst(result: u32, target: u32, args: []u32, variadic: bool, line: u32, col: u32) -> LInst {
-    LInst { result = result; has_result = true; op = LCallIndirect { target = target; args = args; variadic = variadic }; line = line; col = col }
+pub fn call_indirect_inst(result: u32, target: u32, args: []u32, variadic: bool, line: u32, col: u32, ret_type: LType = teko::lir::LType::I64) -> LInst {
+    LInst { result = result; has_result = true; op = LCallIndirect { target = target; args = args; variadic = variadic; ret_type = ret_type }; line = line; col = col }
 }
 
 /**
@@ -371,7 +504,7 @@ pub fn call_indirect_inst(result: u32, target: u32, args: []u32, variadic: bool,
  * @return LInst  the built instruction
  */
 pub fn void_call_indirect_inst(target: u32, args: []u32, variadic: bool, line: u32, col: u32) -> LInst {
-    LInst { result = 0; has_result = false; op = LCallIndirect { target = target; args = args; variadic = variadic }; line = line; col = col }
+    LInst { result = 0; has_result = false; op = LCallIndirect { target = target; args = args; variadic = variadic; ret_type = LType::Void }; line = line; col = col }
 }
 
 /**
