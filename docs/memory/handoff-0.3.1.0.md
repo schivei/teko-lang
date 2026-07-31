@@ -2834,3 +2834,12 @@ só vez para todos os deslocamentos, um padrão literal deixa de alocar por desl
 
 Isto explica os OOM-kills que dois verificadores já tinham relatado sem os conseguir atribuir: o
 custo estava no PAI, no julgamento da saída, não no compilador nem no cenário.
+
+### Fecho: a corrida verde, depois do merge da lane
+
+`./outB/teko test .` na árvore fundida com `origin/remodel/0.3.1.0-linux-native-2`: **rc=0, 432 s** —
+1161 testes unitários verdes, **13 regressores, 0 falhas** (64 builds, 211,4 s), pai a **41 316 KB**.
+A falha de manifesto (M.3) do `const_slice_of_str.tkr` era o registo em `teko.tkp:57` sem a fixture na
+árvore; o merge trouxe-a e ela passa. FIXPOINT **da rota C** fechado sobre a árvore fundida (gen2 ==
+gen3, 10 572 426 bytes), três builds sem um aviso. Os números completos, com método e antes/depois,
+em `docs/medicoes/custo-do-teko-test-antes-e-depois.md`.
