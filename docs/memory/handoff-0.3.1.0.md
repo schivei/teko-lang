@@ -2453,3 +2453,76 @@ patológico sem optimização nenhuma.
 3. Elemento `char` não exercitado — **o lexer rejeita `'a'`** (`unexpected character`), dito em vez de assumido.
 4. Dois erros de **documentação** no ramo (comentário de `const_slice_image` sobre `char`; braço `_` de
    `const_fat_target_image` hoje inalcançável).
+
+## O custo do `teko test`, MEDIDO — o `-O2` do regrcov e a fronteira de processo do passo 1
+
+Ramo `cargo/0.3.1.0-teste-por-processo`. Caixa partilhada (4 CPUs, 16 GB, quatro agentes); onde a
+carga importa, está dito.
+
+### MUDANÇA A — `teko-regrcov` a `-O2` (ruling do dono, 2026-07-31)
+
+Os dois lados da troca, no `:5300` (`build_regression_cov_exe`), medidos na caixa **livre**:
+
+| lado | `-O0` (antes) | `-O2` (depois) |
+|---|---|---|
+| `cc` do regrcov (TU de 17,95 MB) | **28,0 s** | **102,9 s** (+74,9 s) |
+| compilar o `own_native` com ele | **1163 s** (19m23) | **180,5 s** (−982 s) |
+
+**Saldo positivo por larga margem**: paga-se +74,9 s de `cc` uma vez por corrida e recupera-se
+~982 s num único cenário — e o tier compila treze regressores, não um. O `-O0` já tinha sido
+abortado uma vez no tecto de 10 min antes de se conseguir o número completo.
+
+**O que a medição também mostrou, e é maior do que o nível de optimização:** o mesmo `own_native`
+compilado pelo binário de **release** (sem instrumentação) leva **1,0 s de CPU** (4,0 s de relógio).
+Ou seja **a instrumentação de cobertura custa ~180× ao próprio compilador**, e o `-O2` só lhe tira
+um factor ~6. O gargalo do tier não é o nível de `cc` — é o `CgMode::ProgramCov`. Fica REPORTADO,
+não corrigido aqui.
+
+### O portão de testes (`:3451`) NÃO foi mexido
+
+Por ordem expressa: medir antes de estender. O binário do portão é a forma oposta do regrcov — 1195
+testes CURTOS sobre uma TU do tamanho do compilador — e o `cc` a `-O2` sobre 18,37 MB é o lado caro.
+A constante existe agora com nome (`GATE_CC_OPT`) ao lado do `REGRCOV_CC_OPT`, ambas documentadas,
+mas o valor do portão fica em 0. O mesmo vale para o `:4499` (analisador) e o `:4700` (cobertura por
+teste), que só correm sob bandeira de dev.
+
+### MUDANÇA B — o passo 1 do `teko test` em processo próprio
+
+Dos cinco passos, quatro já corriam em filhos. O passo 1 (front-end + emissão + `cc`) corria no
+próprio processo e, como o alocador de regiões só liberta na terminação, ficava residente através de
+tudo o resto. O `teko test` passa a três passos — `build` / driver / `report` — com o pai a
+re-invocar-se a si próprio (o padrão já provado do `compile_regressive`).
+
+**RSS do processo PAI (`/proc/<pid>/status:VmHWM`, só o pai, amostrado a 1 Hz):**
+
+| momento | antes | depois |
+|---|---|---|
+| durante o tier de regressão, antes do `own_native` | **3 105 140 KB (2,96 GiB)**, plano | **9 132 KB (8,9 MB)**, plano |
+| pico da corrida | **12 472 332 KB** → **OOM-kill (137)** | ver abaixo |
+
+**340× menos** no patamar do tier. O passo `report` existe porque a cobertura só se lê contra o
+programa TIPADO e só existe depois das execuções: o passo 1 já saiu quando os despejos aparecem, pelo
+que o relatório re-verifica a fonte (uma passagem de front-end, num processo que sai a seguir).
+
+### O balão de 12 GB não era o passo 1 — era o motor de regex
+
+A corrida base morreu por OOM com o pai a **12,4 GB**; a faseada, com o pai já em 8,9 MB, **também**
+subiu — 9 MB → 3,7 GB em ~300 s — ao chegar ao `own_native.tkr`. Reprodução sintética (130 cenários
+de projecto, `Then stdout pattern` contra um fluxo de 2,7 KB), com o pai medido isoladamente:
+
+| forma | HWM do pai |
+|---|---|
+| 130 cenários, saída de 130 linhas, `Then stdout pattern` | **1 987 456 KB (1,9 GB)** |
+| 130 cenários, saída de 1 linha, `Then stdout pattern` | 9 236 KB |
+| 130 cenários, saída de 130 linhas, `Then exit = 0` | 7 876 KB |
+| 10 cenários, saída de 130 linhas, `Then stdout pattern` | 3 136 KB |
+| **depois do arranjo** (130 / 130 / pattern) | **14 260 KB** |
+
+A continuação do matcher era um `[]RegexNode` reconstruído a cada passo — o `m_cont` copiava a cauda
+para deixar cair a cabeça e a concatenação copiava a corrida de irmãos inteira, **em cada
+deslocamento inicial da busca**. Com célula cons (cauda partilhada) e a cadeia de topo construída uma
+só vez para todos os deslocamentos, um padrão literal deixa de alocar por deslocamento: **1,9 GB →
+13,9 MB, 139×**.
+
+Isto explica os OOM-kills que dois verificadores já tinham relatado sem os conseguir atribuir: o
+custo estava no PAI, no julgamento da saída, não no compilador nem no cenário.
