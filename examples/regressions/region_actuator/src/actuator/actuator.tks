@@ -1,0 +1,180 @@
+/**
+ * ROUNDS — how many times the outer block runs when a value is built to ESCAPE it. The escaped
+ * buffer therefore carries the LAST round's contents, and every earlier round's buffer is dead.
+ */
+const ROUNDS: u64 = 64
+
+/**
+ * WIDTH — how many elements each round's accumulator collects. Small on purpose: the point is the
+ * number of region open/drop cycles, not the size of any one buffer.
+ */
+const WIDTH: u64 = 8
+
+/**
+ * NOISE — how many block-local rounds run AFTER the escaping value has been captured. Each round
+ * opens a block region, fills it and drops it, so the allocator recycles the freed storage many
+ * times over. This is the amplifier: a buffer wrongly routed to a block region would be handed back
+ * to a later round long before the escaped value is read.
+ */
+const NOISE: u64 = 2048
+
+/**
+ * LABEL_WIDTH — the element count of the small accumulator that guards the escaping `str` round.
+ */
+const LABEL_WIDTH: u64 = 4
+
+/**
+ * OK — the exit code when every arm of the verdict holds.
+ */
+const OK: i32 = 42
+
+/**
+ * FAIL_BLOCK_LOCAL — the exit code when a block-owned accumulator did not read back correctly
+ * inside its own block, i.e. the routing freed storage that was still growing.
+ */
+const FAIL_BLOCK_LOCAL: i32 = 11
+
+/**
+ * FAIL_ESCAPED_LEN — the exit code when a buffer that ESCAPED its block came back with the wrong
+ * length after the amplifier, i.e. it was silently freed.
+ */
+const FAIL_ESCAPED_LEN: i32 = 12
+
+/**
+ * FAIL_ESCAPED_VALUES — the exit code when the escaped buffer kept its length but lost its bytes.
+ */
+const FAIL_ESCAPED_VALUES: i32 = 13
+
+/**
+ * FAIL_ESCAPED_LABEL — the exit code when a `str` built inside a block and handed out of it did not
+ * survive the amplifier.
+ */
+const FAIL_ESCAPED_LABEL: i32 = 14
+
+/**
+ * Count the rounds whose BLOCK-OWNED accumulator read back exactly right.
+ *
+ * `acc` is born at the top of the outer block, grown by a self-append buried in a nested loop, and
+ * read only inside that same block through a non-escaping test. That is the shape the routing
+ * selector owns: the push is emitted against the region of the block that DECLARES `acc`, not the
+ * region of the nested loop the push sits in. Freeing at the wrong level would corrupt the very
+ * comparison this function makes, so a wrong route cannot pass silently.
+ *
+ * @param rounds  how many outer rounds to run
+ * @param width   how many elements each round appends
+ * @return        the number of rounds whose accumulator held exactly the expected elements
+ */
+pub fn block_local_rounds(rounds: u64, width: u64) -> u64 {
+    mut hits: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= rounds { break }
+        mut acc: []u64 = teko::list::empty()
+        mut j: u64 = 0
+        loop {
+            if j >= width { break }
+            acc = teko::list::push(acc, i * width + j)
+            j++
+        }
+        if acc.len == width && acc[0] == i * width && acc[width - 1] == i * width + width - 1 { hits = hits + 1 }
+        i++
+    }
+    hits
+}
+
+/**
+ * Build an accumulator INSIDE the outer block and hand it OUT to an enclosing binding.
+ *
+ * This is the inversion of `block_local_rounds`: the write `kept = acc` is not a self-append, so the
+ * escape analysis marks `acc` as escaping and the routing selector must REFUSE the block region and
+ * leave the buffer in the enclosing region. The caller then reads it back after the amplifier — if
+ * the refusal ever stops working, those bytes come back wrong instead of coming back at all.
+ *
+ * @param rounds  how many outer rounds to run
+ * @param width   how many elements each round appends
+ * @return        the LAST round's buffer, having outlived its block
+ */
+pub fn escaped_tail(rounds: u64, width: u64) -> []u64 {
+    mut kept: []u64 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= rounds { break }
+        mut acc: []u64 = teko::list::empty()
+        mut j: u64 = 0
+        loop {
+            if j >= width { break }
+            acc = teko::list::push(acc, i * width + j)
+            j++
+        }
+        kept = acc
+        i++
+    }
+    kept
+}
+
+/**
+ * Build a `str` inside the outer block and hand it OUT to an enclosing binding.
+ *
+ * The `str` half of the same inversion, kept honest for the day the region-aware concatenation is
+ * wired into the emitter: today the buffer is a process-lifetime allocation and survives trivially,
+ * and this scenario is what will notice if it ever stops surviving. The round is guarded by a
+ * block-owned accumulator so the escaping `str` shares its block with storage that IS reclaimed.
+ *
+ * @param rounds  how many outer rounds to run
+ * @return        the LAST round's label, having outlived its block
+ */
+pub fn escaped_label(rounds: u64) -> str {
+    mut kept = ""
+    mut i: u64 = 0
+    loop {
+        if i >= rounds { break }
+        mut acc: []u64 = teko::list::empty()
+        mut j: u64 = 0
+        loop {
+            if j >= LABEL_WIDTH { break }
+            acc = teko::list::push(acc, i + j)
+            j++
+        }
+        if acc.len == LABEL_WIDTH { kept = $"round-{i}" }
+        i++
+    }
+    kept
+}
+
+/**
+ * Is every element of the escaped buffer the value its round wrote?
+ *
+ * @param xs      the buffer that escaped its block
+ * @param rounds  how many rounds ran (the survivor belongs to the last one)
+ * @param width   how many elements a round appends
+ * @return        true iff `xs` holds exactly the last round's elements, in order
+ */
+fn tail_values_intact(xs: []u64, rounds: u64, width: u64) -> bool {
+    let base = (rounds - 1) * width
+    mut k: u64 = 0
+    loop {
+        if k >= width { break }
+        if xs[k] != base + k { return false }
+        k++
+    }
+    true
+}
+
+/**
+ * The whole verdict, as one exit code.
+ *
+ * The order is the proof: the escaping values are captured FIRST, the amplifier runs SECOND, and the
+ * escaped values are read LAST. A block-routed buffer that leaked out of its block would have been
+ * handed to one of the amplifier's rounds before it is read here.
+ *
+ * @return  `OK` when every arm holds, else the code of the arm that failed
+ */
+pub fn verdict() -> i32 {
+    let escaped = escaped_tail(ROUNDS, WIDTH)
+    let label = escaped_label(ROUNDS)
+    if block_local_rounds(NOISE, WIDTH) != NOISE { return FAIL_BLOCK_LOCAL }
+    if escaped.len != WIDTH { return FAIL_ESCAPED_LEN }
+    if !tail_values_intact(escaped, ROUNDS, WIDTH) { return FAIL_ESCAPED_VALUES }
+    if !teko::str::ends_with(label, "round-63") { return FAIL_ESCAPED_LABEL }
+    OK
+}

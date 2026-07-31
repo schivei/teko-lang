@@ -5439,7 +5439,7 @@ fn emit_branch_value(buf: []byte, prog: CgProg, ret_type: checker::Type, body: [
     let fall = cg_append_direct_defers(dctx.defers, body)
     let region = fresh_named("_tkbr", buf.len to i64)
     mut out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = tk_region_new("); out = cb(out, cg_enclosing_region_expr(regions)); out = cb(out, ");\n")
-    let regs2 = teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = base })
+    let regs2 = teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = base; body = body; is_value = true })
     mut cur = dctx
     mut i = 0
     loop {
@@ -7424,7 +7424,7 @@ fn emit_arm_value(buf: []byte, prog: CgProg, ret_type: checker::Type, match_e: c
     let base = dctx.defers.len   // (W9.3) defer scope base for this value-arm
     let want_block = cg_block_has_block_local(escaping, fn_body, body, true) && regions.len < 64
     let region = if want_block { fresh_named("_tkbr", buf.len to i64) } else { "" }
-    let regs2 = if want_block { teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = base }) } else { regions }
+    let regs2 = if want_block { teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = base; body = body; is_value = true }) } else { regions }
     let cur_blk = if want_block { body } else { teko::list::empty() }
     mut out = buf
     if want_block {
@@ -7933,19 +7933,33 @@ fn emit_lambda(buf: []byte, prog: CgProg, e: checker::TExpr, lam: checker::TLamb
     cb(out, ", (void*)_tke }; })")
 }
 
-// ── S2 — PER-BLOCK arena regions (codegen twin of codegen.c). Each scope-introducing LOOP body
-// opens its OWN region `_tkbr<len>` for its provably-block-local allocations, dropped at every exit
-// edge. `RegionFrame` is one active loop-body region on the stack (innermost LAST); `label` ties it
-// to its loop so a labeled break/continue drops exactly the regions it crosses. The per-block escape
-// query is checker::binding_is_block_local. SAFETY IS ABSOLUTE — a binding is block-routed ONLY when
-// proven block-local; otherwise it falls back to the frame/root (W8 = a leak, never a UAF).
-// `is_loop` distinguishes a LOOP-body region (a valid break/continue target) from an ARM-body region
-// (an if-then/if-else/match-arm block region — S2 arms): a break/continue CROSSES an arm region (drops
-// it) but STOPS only AT the innermost matching loop region, never at an arm region.
-// (W9.3) `defer_base` is the count of in-scope defers (dctx.defers.len) at this scope-block's entry —
-// the boundary below which defers belong to ENCLOSING scopes. Kept on the frame for structural parity
-// with the C twin (cg_block_region.defer_base); the Teko twin tracks the live count via `dctx.defers`.
-type RegionFrame = struct { name: str; label: str; is_loop: bool; defer_base: u64 }
+/**
+ * One active per-block arena region on the stack, innermost LAST.
+ *
+ * Each scope-introducing block that has a provably block-local binding opens its OWN region for that
+ * binding's storage, dropped at every exit edge. SAFETY IS ABSOLUTE — storage is block-routed ONLY
+ * when the escape analysis proves it block-local; otherwise it falls back to the frame or the root
+ * (a leak is safe, a use-after-free is never).
+ *
+ * `body`/`is_value` are what make the routing selector N-level: a push is routed to the region of
+ * the block that OWNS its destination, so the selector walks this stack outward looking for the
+ * block that declares the name. Without them the stack knows only region NAMES, and the routing can
+ * see no further than the block the statement itself sits in.
+ */
+type RegionFrame = struct {
+    /** the C variable holding this region (`_tkbr<len>` / `_tkad<len>`). */
+    name: str
+    /** the loop label this region belongs to, or `""` for an arm/adopt region. */
+    label: str
+    /** true for a LOOP-body region (a valid break/continue target), false for an arm/adopt region. */
+    is_loop: bool
+    /** the count of in-scope defers at this scope-block's entry. */
+    defer_base: u64
+    /** the statements of the block this region serves (the ownership universe for routing). */
+    body: []checker::TStatement
+    /** true iff that block yields a value (its tail read escapes the block). */
+    is_value: bool
+}
 
 // (S2 — arena parent-ptr tree, 2026-07-01) the C EXPRESSION TEXT for the region a NEW
 // `tk_region_new(...)` call should name as its parent: the innermost open block region if any,
@@ -8094,9 +8108,22 @@ fn cg_drop_all_regions(buf: []byte, indent: str, regions: []RegionFrame) -> []by
     out
 }
 
-// cg_block_has_block_local — does loop body B have any TOP-LEVEL binding proven BLOCK-local (no-wrap,
-// block-routable)? Drives whether emit_loop opens a region — none ⇒ no region ⇒ byte-identical to
-// the pre-S2 output for that loop. `is_value` = whether B yields a value (loop bodies do NOT).
+/**
+ * Does block B have any TOP-LEVEL binding proven BLOCK-local, and therefore need its own region?
+ *
+ * This is the DOOR: a block that answers no opens no region at all, and its contents stay byte-
+ * identical to the pre-S2 output. Two shapes qualify. A struct binding whose declared type is the
+ * same named struct as its initializer routes its auto-box to the block region. A SLICE accumulator
+ * declared here and never read outside B owns its whole buffer history in the block region — without
+ * this second shape the routing selector would have a destination with no region to route to, which
+ * is precisely why the compiler's own arena reclaimed nothing.
+ *
+ * @param escaping  the enclosing function's escape set
+ * @param fn_body   the enclosing function's statements
+ * @param block     the statements of block B
+ * @param is_value  true iff B yields a value (loop bodies do NOT)
+ * @return          true iff B must open its own region
+ */
 fn cg_block_has_block_local(escaping: []str, fn_body: []checker::TStatement, block: []checker::TStatement, is_value: bool) -> bool {
     mut i: u64 = 0
     loop {
@@ -8104,6 +8131,7 @@ fn cg_block_has_block_local(escaping: []str, fn_body: []checker::TStatement, blo
         match block[i] {
             checker::TBinding as b => {
                 if cg_same_named_struct(b.bound, b.value.type) && checker::binding_is_block_local(escaping, fn_body, block, is_value, b) { return true }
+                if checker::binding_is_block_local_slice(escaping, fn_body, block, is_value, b) { return true }
             }
             _ => { }
         }
@@ -8163,7 +8191,7 @@ fn emit_block_region(buf: []byte, body: []checker::TStatement, in_main: bool, pr
     // `_tkbr<len>` uniquifier — matches the C twin's b->len read without a counter).
     let region = fresh_named("_tkbr", buf.len to i64)
     mut out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = tk_region_new("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
-    let regs2 = teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = base })
+    let regs2 = teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = base; body = body; is_value = false })
     // Emit the body with THIS block as the current block context (so block-local bindings route to
     // `region`) and the augmented region stack.
     out = match emit_block(out, body, in_main, prog, ret_type, indent, escaping, regs2, fn_body, dctx, body, false) { []byte as o => o; error as err => return err }
@@ -8538,40 +8566,102 @@ fn emit_index_slot(buf: []byte, wstmp: str, witmp: str) -> []byte {
     cb(out, "]")
 }
 
+/**
+ * The routing selector for a self-append `xs = teko::list::push(xs, …)`, in N levels.
+ *
+ * It answers ONE question — which region owns the buffer this grow produces — and the answer is
+ * always read off the DESTINATION, never off the position the statement occupies. The levels, in
+ * precedence order:
+ *
+ *   1. the region of the BLOCK that declares and owns `xs` (`assign_routes_to_block`) — the tightest
+ *      owner, and the only one that also reclaims the FINAL buffer, since the whole history dies when
+ *      that block's region drops;
+ *   2. `"@fo"`, the free-old-on-grow lowering, for a chain the checker proved linear — it parks the
+ *      superseded buffers on the root free-list but can never reclaim the survivor;
+ *   3. the function FRAME region, for a non-escaping accumulator declared at the function's top level;
+ *   4. `""`, the process root — the historical default, and the answer whenever nothing is proven.
+ *
+ * Level 1 outranks level 2 because its proof is strictly stronger: every read of the name in the
+ * whole function must already be a safe read inside that block. Anything that escapes the block is
+ * refused here and PRESERVED by the enclosing region.
+ *
+ * @param a         the assignment being emitted
+ * @param frame     the enclosing frame region variable, or `""` when none was opened
+ * @param escaping  the enclosing function's escape set
+ * @param regions   the open block-region stack (innermost last)
+ * @param fn_body   the enclosing function's statements (the read universe)
+ * @return          the region argument `emit_list_push` must ride: `""`, `"@fo"`, or a region
+ *                  variable name
+ */
+fn cg_push_route(a: checker::TAssign, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> str {
+    let owner = cg_owning_block_region(a, escaping, regions, fn_body)
+    if owner.len > 0 { return owner }
+    if checker::assign_frees_old(fn_body, a) { return "@fo" }
+    if frame.len > 0 && checker::assign_routes_to_frame(escaping, a) { return frame }
+    ""
+}
+
+/**
+ * The region of the open block that OWNS this assignment's destination, or `""` when none does.
+ *
+ * This walk is what turns two levels into N: the stack is searched from the INNERMOST region
+ * outward, and the first block that both declares the destination and proves it block-local wins.
+ * A push written deep inside nested loops therefore still lands in the region of the block where its
+ * accumulator was BORN — never in the region of the block the statement happens to occupy, which
+ * would free the buffer while the accumulator is still growing.
+ *
+ * @param a         the assignment being emitted
+ * @param escaping  the enclosing function's escape set
+ * @param regions   the open block-region stack (innermost last)
+ * @param fn_body   the enclosing function's statements
+ * @return          the owning region's variable name, or `""` when no open block owns the destination
+ */
+fn cg_owning_block_region(a: checker::TAssign, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement) -> str {
+    mut k = regions.len
+    loop {
+        if k == 0 { break }
+        let r = regions[k - 1]
+        if checker::assign_routes_to_block(escaping, fn_body, r.body, r.is_value, a) { return r.name }
+        k = k - 1
+    }
+    ""
+}
+
+/**
+ * Emit one assignment statement.
+ *
+ * A self-append whose grown buffer has a proven owner is emitted here as a DIRECT routed push
+ * (`cg_push_route` picks the owner); every other assignment falls through to the ordinary lvalue-op-
+ * value lowering, including the shift-assign and div/mod-assign rewrites below.
+ *
+ * @param buf                the output buffer to append to
+ * @param prog               the typed program
+ * @param ret_type           the enclosing function's return type (for value wrapping)
+ * @param a                  the typed assignment
+ * @param indent             the C indentation
+ * @param frame              the enclosing frame region variable, or `""` when none was opened
+ * @param escaping           the enclosing function's escape set
+ * @param regions            the open block-region stack
+ * @param fn_body            the enclosing function's statements
+ * @param dctx      the threaded defer/coverage context
+ * @return          the buffer with the assignment emitted, or a codegen error
+ * @throws          error on an unsupported shift-assign operand type
+ */
 fn emit_assign(buf: []byte, prog: CgProg, ret_type: checker::Type, a: checker::TAssign, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
     let is_index = match a.kind { parser::AssignKind::Index => true; _ => false }
     if is_index { return emit_index_assign(buf, prog, ret_type, a, indent, escaping, regions, fn_body, dctx) }
     let op = match assignop_c(a.op) { str as s => s; error as err => return err }
     mut out = cb(buf, indent)
-    // (S2 Level-1) SELF-APPEND to a non-escaping slice → route the grown buffer to the frame region
-    // `_tkfr` (bulk-freed at every fn-exit edge). Emit the push directly with the frame threaded, so the
-    // whole buffer history (geometric doublings + in-place tail) dies with the frame. Guarded by
-    // frame.len (the region exists only when fn_body_has_frame_local opened it) and the SHARED predicate
-    // checker::assign_routes_to_frame, which mirrors the escape carve-out so the two never disagree.
-    // (#148 S2 Level-2) a PROVEN-LINEAR self-append (born from empty(), self-append-only writes,
-    // no capture before the fn-final statement) may FREE the old buffer on every copy-grow —
-    // realloc parity with the hand-written C twin. Takes precedence over Level-1 frame routing
-    // (the free-list is root-only; the proof admits ESCAPING chains too, which Level-1 cannot).
-    if checker::assign_frees_old(fn_body, a) {
+    let route = cg_push_route(a, frame, escaping, regions, fn_body)
+    if route.len > 0 {
         match a.value.kind {
             checker::TCall as c => {
                 out = match emit_assign_lvalue(out, prog, a) { []byte as o => o; error as err => return err }
                 out = cb(out, " = ")
-                out = match emit_list_push(out, prog, a.value, c, escaping, regions, fn_body, dctx, "@fo") { []byte as o => o; error as err => return err }
+                out = match emit_list_push(out, prog, a.value, c, escaping, regions, fn_body, dctx, route) { []byte as o => o; error as err => return err }
                 return cb(out, ";\n")
             }
             _ => { }
-        }
-    }
-    if frame.len > 0 && checker::assign_routes_to_frame(escaping, a) {
-        match a.value.kind {
-            checker::TCall as c => {
-                out = match emit_assign_lvalue(out, prog, a) { []byte as o => o; error as err => return err }
-                out = cb(out, " = ")
-                out = match emit_list_push(out, prog, a.value, c, escaping, regions, fn_body, dctx, frame) { []byte as o => o; error as err => return err }
-                return cb(out, ";\n")
-            }
-            _ => { }   // not a call (unreachable when the predicate held) → fall through to the root path
         }
     }
     // #61 — `<<=`/`>>=` must NOT emit the raw C compound operator: an out-of-range shift count
@@ -8770,7 +8860,7 @@ fn emit_loop_while(buf: []byte, l: checker::TLoopStmt, in_main: bool, prog: CgPr
     mut regs2 = regions
     if want_block {
         out = cb(out, inner); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = tk_region_new("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
-        regs2 = teko::list::push(regions, RegionFrame { name = region; label = l.label; is_loop = true; defer_base = base })
+        regs2 = teko::list::push(regions, RegionFrame { name = region; label = l.label; is_loop = true; defer_base = base; body = l.body; is_value = false })
     }
     // emit the body with THIS block as the current block context (so a block-local binding routes to
     // `region`) and the augmented region stack (so break/continue/return drop the right regions).
@@ -9104,7 +9194,7 @@ fn emit_adopt(buf: []byte, a: checker::TAdoptStmt, in_main: bool, prog: CgProg, 
     let fall = cg_append_direct_defers(dctx.defers, a.body)
     let region = fresh_named("_tkad", buf.len to i64)
     mut out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = tk_region_new("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
-    let regs2 = teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = base })
+    let regs2 = teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = base; body = a.body; is_value = false })
     out = match emit_block(out, a.body, in_main, prog, ret_type, indent, escaping, regs2, fn_body, dctx, a.body, false) { []byte as o => o; error as err => return err }
     out = match emit_defers(out, fall, base, prog, indent, escaping, fn_body) { []byte as o => o; error as err => return err }
     out = cb(out, indent); out = cb(out, "tk_region_drop_subtree("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n")

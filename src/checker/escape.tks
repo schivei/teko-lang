@@ -819,3 +819,130 @@ pub fn binding_is_block_local(escaping: []str, fn_body: []TStatement, block_body
     let inside = count_block_local_reads(block_body, name, is_value)
     total == inside
 }
+
+/**
+ * Reads of `name` inside block B that are SAFE to free past, for a SLICE ACCUMULATOR.
+ *
+ * The struct twin (`count_block_local_reads`) zeroes EVERY top-level assignment, because a struct
+ * binding has no legitimate write-back shape. A slice accumulator has exactly one: the self-append
+ * `xs = teko::list::push(xs, item)`, whose base read is CONSUMED by the write-back (the same
+ * carve-out `mark_stmt` already grants it). So a top-level self-append OF THIS NAME contributes its
+ * reads; every OTHER top-level assignment contributes zero, which makes the equation fail and routes
+ * the buffer to the enclosing region (the leak-safe default). Nested statements recurse through
+ * `count_reads_stmt`, so a self-append buried in an inner loop is counted there.
+ *
+ * @param body      the statements of block B
+ * @param name      the accumulator's name
+ * @param is_value  true iff B yields a value (its tail read then ESCAPES B and is excluded)
+ * @return          the count of reads of `name` in B that stay inside B
+ */
+fn count_block_local_reads_slice(body: []TStatement, name: str, is_value: bool) -> i64 {
+    mut n: i64 = 0
+    mut i = 0
+    loop {
+        if i >= body.len { break }
+        let is_last = i + 1 == body.len
+        match body[i] {
+            TAssign as a => {
+                if assign_is_self_append(a) && a.name == name { n = n + count_reads_stmt(body[i], name) }
+            }
+            TExprStmt as es => {
+                if is_value && is_last { } else { n = n + count_reads_expr(es.expr, name) }
+            }
+            _ => { n = n + count_reads_stmt(body[i], name) }
+        }
+        i++
+    }
+    n
+}
+
+/**
+ * May the slice binding `b`, declared at the TOP LEVEL of block B, own its buffer history in B's
+ * OWN region — i.e. be bulk-freed at B's exit edges?
+ *
+ * The slice twin of `binding_is_block_local`, and the DOOR the actuator needs: a block only opens a
+ * region when some binding answers yes here, and only then can a push be routed to it. True iff the
+ * name is a non-escaping, non-const, simple-named slice (`binding_is_frame_local_slice`) AND every
+ * textual read of the name in the WHOLE function is a safe read strictly inside B. CONSERVATIVE by
+ * construction: a read outside B, in B's tail value, or through any non-self-append assignment makes
+ * the counts differ, and the buffer stays in the enclosing region (a leak is safe, a use-after-free
+ * is never). PUBLIC — the codegen reads it.
+ *
+ * @param escaping    the enclosing function's escape set
+ * @param fn_body     the enclosing function's statements (the read universe)
+ * @param block_body  the statements of block B
+ * @param is_value    true iff B yields a value
+ * @param b           the candidate binding
+ * @return            true iff B's region may own every buffer this accumulator grows
+ */
+pub fn binding_is_block_local_slice(escaping: []str, fn_body: []TStatement, block_body: []TStatement, is_value: bool, b: TBinding) -> bool {
+    if !binding_is_frame_local_slice(escaping, b) { return false }
+    let name = match b.target {
+        parser::SimpleName as sn => sn.name
+        parser::DestructurePattern => return false
+    }
+    count_reads_block(fn_body, name) == count_block_local_reads_slice(block_body, name, is_value)
+}
+
+/**
+ * Is `name` BORN in block B as an accumulator B's own region may own?
+ *
+ * Ownership is what makes the routing N-level instead of two-level: the push is routed to the region
+ * of the block that DECLARES the destination, never to the block the push happens to sit in. A name
+ * bound in an enclosing scope is therefore not owned here, and its pushes fall back to the frame or
+ * the root exactly as before.
+ *
+ * @param escaping    the enclosing function's escape set
+ * @param fn_body     the enclosing function's statements
+ * @param block_body  the statements of block B
+ * @param is_value    true iff B yields a value
+ * @param name        the destination name
+ * @return            true iff a top-level binding of `name` in B satisfies binding_is_block_local_slice
+ */
+fn block_owns_slice(escaping: []str, fn_body: []TStatement, block_body: []TStatement, is_value: bool, name: str) -> bool {
+    mut i = 0
+    loop {
+        if i >= block_body.len { break }
+        match block_body[i] {
+            TBinding as b => {
+                match b.target {
+                    parser::SimpleName as sn => {
+                        if sn.name == name && binding_is_block_local_slice(escaping, fn_body, block_body, is_value, b) { return true }
+                    }
+                    parser::DestructurePattern => { }
+                }
+            }
+            _ => { }
+        }
+        i++
+    }
+    false
+}
+
+/**
+ * THE N-level routing predicate: should this assignment's grown slice buffer be allocated in the
+ * region of block B rather than in the function frame or the process root?
+ *
+ * True iff the assignment is a self-append `xs = teko::list::push(xs, …)` to a non-escaping slice
+ * whose binding B itself declares and owns (`block_owns_slice`). B's region is tighter than the
+ * frame, so the whole buffer history — including the FINAL buffer, which the free-old-on-grow path
+ * can never reclaim — dies at B's exit edges. The escape set already refuses any name that is
+ * returned, captured, passed on, or written into an enclosing location, so a value that ESCAPES B is
+ * PRESERVED in the enclosing region and never silently freed.
+ *
+ * @param escaping    the enclosing function's escape set
+ * @param fn_body     the enclosing function's statements
+ * @param block_body  the statements of block B (the innermost block with an open region)
+ * @param is_value    true iff B yields a value
+ * @param a           the assignment being emitted
+ * @return            true iff the grown buffer belongs to B's region
+ */
+pub fn assign_routes_to_block(escaping: []str, fn_body: []TStatement, block_body: []TStatement, is_value: bool, a: TAssign) -> bool {
+    if !assign_is_self_append(a) { return false }
+    if str_set_has(escaping, a.name) { return false }
+    match a.bound {
+        Slice => { }
+        _ => return false
+    }
+    block_owns_slice(escaping, fn_body, block_body, is_value, a.name)
+}
