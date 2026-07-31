@@ -82,6 +82,15 @@ type SiteCtx = struct {
     hopped: bool
     /** the file the sites found here belong to. */
     file: str
+    /**
+     * Whether to reconstruct each site's argument text.
+     *
+     * Rebuilding the written form of every argument is by far the walk's most expensive step — a
+     * nested predicate or an interpolated string rebuilds a string per sub-expression — and the
+     * CENSUS only counts sites. It asks for shapes; only the table, which prints the text, asks for
+     * text.
+     */
+    with_text: bool
     /** the candidate (non-`#test`) functions a call may hop into; the file is matched at lookup. */
     helpers: []TFunction
 }
@@ -281,7 +290,36 @@ fn is_assert_path(p: parser::Path) -> bool {
  * @return         one row per assertion the test declares, in source order
  */
 pub fn test_assert_sites(f: TFunction, helpers: []TFunction, hops: u64) -> []AssertSite {
-    asite_block(f.body, SiteCtx { depth = 0; after_exit = false; hops = hops; hopped = false; file = f.file; helpers = helpers })
+    asite_walk(f, helpers, hops, true)
+}
+
+/**
+ * The same sites, with each row's argument text left empty — the form a COUNTER wants.
+ *
+ * Identical in every field the classification and the identity depend on; only the written argument
+ * text is skipped, because reconstructing it for every site of every test is the walk's dominant
+ * cost and a count never reads it.
+ *
+ * @param f        the `#test` function
+ * @param helpers  the candidate (non-`#test`) functions a call may hop into
+ * @param hops     how many call levels to follow (`ASSERT_HOP_DEPTH` is the default)
+ * @return         one row per assertion the test declares, in source order, without argument text
+ */
+pub fn test_assert_site_shapes(f: TFunction, helpers: []TFunction, hops: u64) -> []AssertSite {
+    asite_walk(f, helpers, hops, false)
+}
+
+/**
+ * The site walk over a `#test` body, shared by the texted and untexted entries.
+ *
+ * @param f          the `#test` function
+ * @param helpers    the candidate (non-`#test`) functions a call may hop into
+ * @param hops       how many call levels to follow
+ * @param with_text  whether to reconstruct each site's argument text
+ * @return           one row per assertion the test declares, in source order
+ */
+fn asite_walk(f: TFunction, helpers: []TFunction, hops: u64, with_text: bool) -> []AssertSite {
+    asite_block(f.body, SiteCtx { depth = 0; after_exit = false; hops = hops; hopped = false; file = f.file; helpers = helpers; with_text = with_text })
 }
 
 /**
@@ -292,7 +330,7 @@ pub fn test_assert_sites(f: TFunction, helpers: []TFunction, hops: u64) -> []Ass
  * @return     the same state with the conditional depth raised
  */
 fn asite_deeper(ctx: SiteCtx) -> SiteCtx {
-    SiteCtx { depth = ctx.depth + 1; after_exit = ctx.after_exit; hops = ctx.hops; hopped = ctx.hopped; file = ctx.file; helpers = ctx.helpers }
+    SiteCtx { depth = ctx.depth + 1; after_exit = ctx.after_exit; hops = ctx.hops; hopped = ctx.hopped; file = ctx.file; helpers = ctx.helpers; with_text = ctx.with_text }
 }
 
 /**
@@ -303,7 +341,7 @@ fn asite_deeper(ctx: SiteCtx) -> SiteCtx {
  * @return     the same state with the preceding-exit flag raised
  */
 fn asite_after_exit(ctx: SiteCtx) -> SiteCtx {
-    SiteCtx { depth = ctx.depth; after_exit = true; hops = ctx.hops; hopped = ctx.hopped; file = ctx.file; helpers = ctx.helpers }
+    SiteCtx { depth = ctx.depth; after_exit = true; hops = ctx.hops; hopped = ctx.hopped; file = ctx.file; helpers = ctx.helpers; with_text = ctx.with_text }
 }
 
 /**
@@ -315,7 +353,7 @@ fn asite_after_exit(ctx: SiteCtx) -> SiteCtx {
  * @return     the walk state for `h`'s body
  */
 fn asite_into_helper(ctx: SiteCtx, h: TFunction) -> SiteCtx {
-    SiteCtx { depth = ctx.depth; after_exit = ctx.after_exit; hops = ctx.hops - 1; hopped = true; file = h.file; helpers = ctx.helpers }
+    SiteCtx { depth = ctx.depth; after_exit = ctx.after_exit; hops = ctx.hops - 1; hopped = true; file = h.file; helpers = ctx.helpers; with_text = ctx.with_text }
 }
 
 /**
@@ -465,9 +503,21 @@ fn asite_of(c: TCall, e: TExpr, ctx: SiteCtx) -> AssertSite {
         site_id = assert_site_id(ctx.file, e.line, e.col)
         file = ctx.file; line = e.line; col = e.col
         name = c.callee.segments[c.callee.segments.len - 1].name
-        arg_text = assert_args_text(c.args)
+        arg_text = asite_arg_text(c, ctx)
         kind = asite_kind(ctx); hopped = ctx.hopped
     }
+}
+
+/**
+ * The argument list of an assertion as written, or the empty string when the walk is only counting.
+ *
+ * @param c    the typed assertion call
+ * @param ctx  the walk state at the call
+ * @return     the reconstructed argument text, or `""` under a counting walk
+ */
+fn asite_arg_text(c: TCall, ctx: SiteCtx) -> str {
+    if !ctx.with_text { return "" }
+    assert_args_text(c.args)
 }
 
 /**
