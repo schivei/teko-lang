@@ -81,3 +81,77 @@ com um bloco nu, nem com o predicado alargado.
    mesmo tempo. Não medi o custo de lhe dar uma região corrente.
 
 Sondas em `/tmp/.../esc` — reprodutíveis com `TEKO_ARENA_OBS=<path> ./out/esc`.
+
+
+---
+
+## Adenda: a evidência em CÓDIGO EXISTENTE, não em sonda minha
+
+Correcção do dono: *"E por real, quero dizer código existente, e não sintetizado."* Justo — as sondas
+acima são minhas. Isto é o que o corpus diz.
+
+### 1. O `adopt { }` NÃO TEM UM ÚNICO UTILIZADOR em código de produção
+
+```
+grep -rn 'adopt {' src/ --include=*.tks | (excluindo linhas de comentário)   ->  VAZIO
+```
+
+As 19 ocorrências de `adopt` em `src/` são **todas doc-comments** (15 só em `spine.tks`, a descrever
+o eixo `PtAdopter`). E as três ocorrências no corpus de fixtures são **todas de REJEIÇÃO**:
+
+| fixture | o que afirma |
+|---|---|
+| `c17_adopt_break_outside_loop` | `EXPECT_COMPILE_FAIL` |
+| `c18_adopt_break_unknown_label` | `EXPECT_COMPILE_FAIL` |
+| `c19_adopt_return_type_mismatch` | `EXPECT_COMPILE_FAIL` |
+
+**Não há um único teste de que o `adopt` FUNCIONA — só de que o `adopt` mal escrito é recusado.**
+Parser, checker, eixo da espinha, codegen e diagnósticos foram construídos para uma construção que
+ninguém escreve.
+
+### 2. Só DOIS alocadores do runtime inteiro aceitam uma região
+
+```
+tk_slice_push_r
+tk_slice_with_cap_r
+```
+
+São estes dois, na árvore toda. Todo o resto é raiz por construção — e a própria fonte diz por
+escrito, em `tk_slice_with_cap` (`teko_rt.c:3571`): *"the **default root-region lowering**"*.
+
+### 3. E o codegen só emite a forma com região quando há uma MOLDURA — nunca por bloco
+
+`codegen.tks:3730`, a linha que decide, em código de produção:
+
+```teko
+out = cb(out, if is_fo { " *)tk_slice_push_fo(" }
+              else if frame.len > 0 { " *)tk_slice_push_r(" }
+              else { " *)tk_slice_push(" })
+```
+
+A condição é **`frame.len > 0`** — a região de MOLDURA (o caminho `fn_body_has_frame_local`, que já
+passa pelo predicado `Named`). **Não há um ramo que consulte a região de bloco.** Um `adopt`, um braço
+de `match`, um corpo de `loop` podem ter aberto região — esta linha não olha para ela.
+
+### 4. E a `str` não tem sequer uma forma com região para chamar
+
+```
+tk_str_concat        <- existe
+tk_str_concat_len    <- existe
+tk_str_concat_r      <- NÃO EXISTE
+```
+
+**Não é o codegen que não chama: é que não há o que chamar.** Os 66,4 MB de `MALLOC str` do build do
+compilador são inalcançáveis por qualquer desenho de região, hoje, por ausência de superfície no
+runtime.
+
+### O que a evidência de código existente diz, junta
+
+O `adopt` foi construído até ao fim — gramática, checker, espinha, codegen, diagnósticos — e:
+
+* **ninguém o usa** (zero sítios de produção, três fixtures e as três de rejeição);
+* **não pode libertar listas por bloco**, porque a única linha que escolhe a forma com região olha
+  para a moldura e não para o bloco;
+* **não pode libertar `str` de todo**, porque a variante com região não existe no runtime.
+
+**Uma construção sem utilizadores, cujo mecanismo de baixo não a alcança.**
