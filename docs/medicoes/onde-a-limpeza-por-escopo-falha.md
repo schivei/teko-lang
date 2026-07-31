@@ -1,4 +1,4 @@
-# Onde a limpeza automática por escopo falha — em código existente
+# A limpeza automática por escopo — o meu contra-exemplo caiu, e o que ficou no lugar
 
 Pedido do dono, 2026-07-31: *"E eu sigo esperando um exemplo real de onde o que eu propus falha."*
 
@@ -20,71 +20,89 @@ E a região do corpo do laço é *"a fresh region every iteration … and **drop
 **Defers primeiro, limpeza depois, por aresta de saída.** A regra dele não é uma proposta nova: é o
 que o emissor já faz — para as ligações que passam o predicado.
 
-## O contra-exemplo, e é o emissor inteiro
+## O contra-exemplo que eu trouxe — E QUE NÃO SE SUSTENTA
 
-`src/codegen/codegen.tks:8120`, `emit_block` — a função por onde passa **todo** o C que o compilador
-emite:
+Eu apontei o `emit_block` (`codegen.tks:8120`): `mut out = buf` fora do laço, e dentro
+`out = emit_stmt(out, …)` a devolver um `[]byte` novo a cada iteração. Argumentei que o drop da
+região do corpo do laço libertaria o acumulador.
+
+**O dono refutou: *"out pertence à arena da função e não do laço"*. Ele tem razão, e a linha que o
+prova é `codegen.tks:3726`:**
+
+> *"the routing selector rides **`frame`**: `""` → root `tk_slice_push`; `"@fo"` → the free-old-on-grow
+> `tk_slice_push_fo`; anything else → `tk_slice_push_r` **growing into that frame region variable**"*
+
+E a emissão confirma: `if frame.len > 0 && !is_fo { cb(out, ", "); cb(out, frame) }`. **O que se passa
+ao alocador é a região de MOLDURA — nunca a do bloco.** O crescimento do `out` vai para a arena da
+função. O drop da região do laço não lhe toca.
+
+E o caso simétrico que eu levantei — um nome que nasce dentro do laço e cujo armazenamento sai por
+`push` para uma lista de fora — **falha pela mesma razão**: o alvo é a lista exterior, e o
+`tk_slice_push_r` roteia para a moldura dela.
+
+## O que a refutação REVELA, e é melhor do que o que eu tinha escrito
+
+**O roteamento já é POR DESTINO, não por posição léxica.** Eu vinha a dizer que a pergunta certa era
+*"onde o armazenamento foi alojado e para onde flui, não onde o nome foi ligado"* — e o emissor **já
+responde assim**. Ele não olha para onde a instrução executa; olha para de quem é o destino.
+
+O que existe hoje é esse roteamento com **dois níveis**: moldura da função, ou raiz. O modelo do dono
+é o **mesmo seletor com N níveis** — a região do bloco dono do destino. Não é mecanismo novo nem
+análise nova.
+
+Isso reposiciona três coisas que eu tinha colado como se fossem uma:
+
+| o que eu disse | o que a refutação corrige |
+|---|---|
+| a espinha transitiva é pré-requisito | **para o acumulador, não é** — o destino é sintaticamente conhecido no sítio da atribuição. Continua necessária para destino que é campo guardado ou retorno (`typer.tks:5404`) |
+| o predicado `cg_same_named_struct` bloqueia | ele trava a **abertura** da região, não o **roteamento**. São duas portas e eu colei-as |
+| `tk_str_concat_r` não existe | **este mantém-se, e sobe para primeiro** — sem ele, `str` não tem como ser roteada para região nenhuma |
+
+
+
+---
+
+## O modelo completo do dono, e o estado medido de cada peça
+
+> *"Era para existir sub-regions (por padrão) e aí entrariam as tags `#arena_size` e `#arena_depth`,
+> que adotariam com tamanho e profundidade."*
+
+| peça | estado medido |
+|---|---|
+| **árvore de regiões com profundidade** | **EXISTE** — `tk_region_new(parent)` cria filha de `parent`, e `tk_region_drop_subtree` varre a cadeia `->parent` (`teko_rt.h:149`, `:152`) |
+| **`#arena_size(N)`** | **EXISTE, parseado E consumido** — `ParsedAttributes.has_arena_size`/`arena_size` (`parser/result.tks:34`), rejeitado a 0 no parse |
+| **`#arena_depth`** | **NÃO EXISTE** — zero ocorrências na árvore. É o **#476**, fora do âmbito do SW12, com pergunta ao dono em aberto no plano |
+| **sub-regiões POR OMISSÃO** | **NÃO** — a região só abre se o predicado disparar **ou** se houver `#arena_size` |
+
+### E o `#arena_size` faz mais do que dimensionar
+
+`cg_frame_region_parent_expr` (`codegen.tks:9569`):
 
 ```teko
-fn emit_block(buf: []byte, body: []checker::TStatement, …) -> []byte | error {
-    mut out = buf
-    …
-    loop {
-        if i >= body.len { break }
-        …
-        out = match emit_stmt(out, s, …) { []byte as o => o; error as err => return err }
-        …
-        i++
-    }
+if f.has_arena_size { "NULL" } else { "tk_region_root()" }
 ```
 
-**`out` é re-ligado DENTRO do corpo do laço, a cada iteração, a um `[]byte` NOVO** que o `emit_stmt`
-devolve. Esse buffer foi alojado durante *esta* iteração — lá no fundo, em `cb` → `append_fo` →
-crescimento — e **tem de sobreviver à iteração seguinte e à saída do laço**.
+Uma função com `#arena_size` ganha uma **raiz de árvore INDEPENDENTE**, não filha da raiz do
+processo. O comentário chama-lhe contrato e liga-o ao modelo de isolados: *"a function that declares
+its own arena is its OWN isolation boundary"*.
 
-**Se a região do corpo do laço admitisse `[]byte`, ela libertaria o acumulador debaixo dos próprios
-pés, a cada volta.** E não é um caso de canto: `codegen.tks` tem **1371 chamadas a `cb(`**, e o
-emissor inteiro tem esta forma. O mesmo padrão está no `checker`, no `lower` e no `assemble`.
-
-## E aqui está a parte subtil, que é o que torna o exemplo útil
-
-**A ligação `mut out = buf` está FORA do laço.** O nome é exterior; **o armazenamento é interior**.
-
-Logo uma regra puramente sintáctica — *"foi ligado dentro do bloco?"* — **responde bem por acidente**
-neste caso, e responde **mal** no caso simétrico:
+E — o ponto que mais interessa a este debate — `:9625`:
 
 ```teko
-loop {
-    mut pedaco = teko::list::empty()   // o NOME nasce dentro
-    …
-    fora = teko::list::push(fora, pedaco)   // e o ARMAZENAMENTO sai
-}
+let want_frame = fn_body_has_frame_local(escaping, fbody) || f.has_arena_size
 ```
 
-Aqui o nome é interior e o armazenamento escapa. **A pergunta certa nunca foi onde o NOME foi
-ligado — é onde o ARMAZENAMENTO foi alojado e para onde ele flui.**
+**`#arena_size` já FORÇA a abertura da região, contornando o predicado `Named`.** A porta que eu
+descrevi como fechada tem uma chave, e ela está construída.
 
-E é exatamente por isso que:
+E a fonte diz também o que ninguém a usa: *"additive by ruling — **`src/` does not adopt
+`#arena_size`**"*. Mesma história do `adopt`: construído, consumido pelo emissor, zero utilizadores.
 
-* **`escape.tks` não chega.** Ele calcula um **conjunto de NOMES** (`fn_escaping_vars` devolve
-  `[]str`). Nomes não respondem a esta pergunta.
-* **a espinha de escape transitivo é o pré-requisito nomeado**, e não uma preferência de desenho: é
-  uma análise de *points-to*, sobre armazenamento, não sobre nomes.
-* **o predicado `cg_same_named_struct` não é conservadorismo arbitrário.** Uma struct nomeada ligada
-  por valor é a forma que **não flui**; `str` e `[]T` fluem **por construção** — são precisamente os
-  acumuladores.
+### O que falta, então, na ordem que a medição sugere
 
-## O veredicto honesto sobre a proposta
-
-**A proposta está certa como semântica e é insuficiente como regra de decisão.** O que falta não é a
-limpeza (existe), nem a ordem (existe, e é a dele), nem os construtos (braços de valor, corpos de
-laço e regiões de bloco já abrem região). **Falta o critério que diz quais alocações morrem ali** — e
-esse critério não pode ser sintáctico, porque o exemplo acima o derrota nas duas direcções.
-
-## O que isto NÃO diz
-
-* Não diz que a proposta é impraticável — diz que ela **depende da espinha**, que já está nomeada
-  como dívida em `typer.tks:5404`.
-* Não medi a rota nativa; tudo isto é leitura da rota C e do emissor.
-* Não medi quantos dos 1371 sítios de `cb(` estão dentro de laços com região aberta — o que daria o
-  tamanho do estrago se o predicado fosse alargado sem a espinha.
+1. **`tk_str_concat_r`** — sem ele, `str` é irrotável para qualquer região. É o único item que
+   nenhuma das outras peças contorna.
+2. **O seletor `frame` passar de dois níveis a N** — a região do bloco dono do destino, em vez da
+   moldura da função. O mecanismo é o mesmo; muda o que se passa como argumento.
+3. **Sub-regiões por omissão** — hoje é opt-in duplo (predicado **ou** `#arena_size`).
+4. **`#arena_depth` (#476)** — não existe, e o plano tem a pergunta em aberto ao dono desde o SW12.
