@@ -2951,3 +2951,27 @@ A falha de manifesto (M.3) do `const_slice_of_str.tkr` era o registo em `teko.tk
 árvore; o merge trouxe-a e ela passa. FIXPOINT **da rota C** fechado sobre a árvore fundida (gen2 ==
 gen3, 10 572 426 bytes), três builds sem um aviso. Os números completos, com método e antes/depois,
 em `docs/medicoes/custo-do-teko-test-antes-e-depois.md`.
+
+## 13. RITUAL DA DRENAGEM — o primeiro portão VERDE da noite na lane
+
+Árvore fundida (`76e127da`), medida por mim nesta caixa, com dois agentes a correr ao lado:
+
+```
+build rota C      81 s · ZERO avisos · pico 1720,3 MB
+PORTAO COMPLETO   EXIT=0 · 850 s
+                  1161 unitarios (291+290+290+290) — 0 failed, 0 exited
+                  13 regressoes, 0 SKIPPED, 0 failed, 64 builds, 630,8 s
+                  arith-cast-rate 3,03 % (tecto 5 %)
+FIXPOINT rota C   VERDICT: PASSED — gen2 == gen3 byte a byte
+                  gen2.c == gen3.c (10 572 426 bytes) · 172 s
+```
+
+**Os cinco acertos de `FAIL|skipped` no log foram verificados um a um** em vez de confiados à
+contagem: dois são **nomes** de testes unitários
+(`no_cross_row_is_pre_skipped_for_a_linker_it_never_invokes`,
+`regr_timing_row_line_marks_a_skipped_row`), dois são saída **capturada** de um teste que afirma o
+comportamento M.3 (prefixo `out|`), e o último é o total real — `0 skipped, 0 failed`.
+
+**O que este ritual NÃO diz:** o `zero-C: gen2=1 gen3=1` é a rota C. **Não prova nada sobre a
+auto-hospedagem nativa**, que continua bloqueada no degrau 32 (`one_byte`), com agente em cima.
+Escrevo-o outra vez porque já omiti esta qualificação uma vez esta noite e ela muda a conclusão.
