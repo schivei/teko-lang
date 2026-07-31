@@ -2403,3 +2403,62 @@ proposta, não descrição):
 | vivacidade | com o `wait`, os 8×100 registos estão **todos** no journal quando a `main` sai |
 | **inversão** | **sem** o `wait`, o mesmo programa **perde** registos — sem este braço o primeiro diz só *"não vi problema"* |
 | pânico | um handler que panica ainda decrementa (o `done` está em `defer`), logo o `wait` **não pendura** |
+
+---
+
+## O profiler é o AFINADOR das arenas — e a pergunta do plano é dele, não do dono (2026-07-31)
+
+> *"a pergunta é uma nota para ser respondida não por mim, mas pelo profiler (que mandamos ao
+> arquiteto) e o trabalho dele seria fazer tunning usando `arena_size` e `arena_depth`, para melhorar
+> o controle da memória em regiões safe."*
+
+**A pergunta que o plano tinha em aberto fecha-se sozinha.** `wave-0.3.1-plan.md` perguntava se o
+`#476` (`#arena_depth`) entra no SW12 como crumb 12.0 ou se o profiler sai sem a sugestão de
+profundidade. **A resposta é (a), e não por preferência: a directiva tem de existir porque é a SAÍDA
+do profiler.** Um afinador que não pode escrever o parâmetro que afina não é um afinador.
+
+**E isto muda o que o profiler É.** Deixa de ser um relatório que sugere números soltos e passa a ser
+**o afinador do modelo de arenas**: mede por região, e atribui `#arena_size` (o chão que evita
+realloc) e `#arena_depth` (o nível de achatamento). A precedência já estava escrita no plano —
+**manual > PGO > omissão**.
+
+## O `adopt` é desnecessário (dono, 2026-07-31)
+
+> *"Por isso que (com tuuuudo isso) `adopt` é desnecessário. Já a `spine` viria para botar ordem
+> nessas LIFOs de arenas."*
+
+**A evidência que sustenta, medida em código existente:**
+
+* **zero utilizadores em produção** — as 19 ocorrências em `src/` são doc-comments; as 3 do corpus de
+  fixtures são **todas `EXPECT_COMPILE_FAIL`**. Não há um único teste de que o `adopt` FUNCIONA;
+* **a região que ele abre recupera 0,0 MB** — 238,4 MB de `str` e 8,0 MB de lista, medidos, ambos
+  para a raiz;
+* **o único eixo que dependia dele RE-BASEIA sem mudar de forma.** O `PtAdopterId` da spine é
+  *"WHICH lexical `adopt { }` region"* — mas o que ele precisa é de **um id de região léxica
+  nomeável**, não do `adopt`. Com sub-regiões por omissão vira `PtRegionId`, e fica **mais geral**.
+
+**A ordem obrigatória, e é a única condição:** a retirada vem **depois ou junto** das sub-regiões,
+nunca antes — porque hoje o `adopt` é a única construção que abre região **incondicionalmente**, e
+tirá-lo sozinho deixaria o predicado `Named` como única porta.
+
+**O preço da remoção, nomeado:** parser (`is_adopt_head`, `parse_adopt`), AST (`Statement = variant …
+| AdoptStmt`), typer, `emit_adopt`, o eixo da spine, e 3 fixtures. É remoção real, não um `grep -v`.
+
+## A spine é a ATRIBUIÇÃO DE NÍVEL sobre a pilha de arenas (dono, 2026-07-31)
+
+O eixo já é um reticulado de *onde o armazenamento vive*:
+
+| caso | significado |
+|---|---|
+| `PtFrame` | morre com a moldura — o fundo, o *climb-floor* |
+| `PtRoot` | sobrevive à moldura (a fuga segura) |
+| `PtParam` | pertence a um parâmetro — o chamador é dono |
+| `PtAdopterId` | **qual** região léxica, com `⊤` de recuo |
+
+**Isto não é "uma análise que valida" — é a atribuição de profundidade sobre a pilha LIFO de arenas.**
+E a divisão de trabalho fica limpa: **o profiler MEDE, a spine DECIDE, as tags AFINAM.**
+
+E o `⊤` já é o `#arena_depth` do checker: *"any allocation inside ANY adopter whose precise region id
+exceeds the **one-function budget**, rejected on escape"* — um orçamento de profundidade com recuo
+seguro quando estoura. **Terceiro tecto sem nome**, ao lado do `regions.len < 64` do codegen e do
+`TK_ARENA_MARK_MAX 64` do runtime.
