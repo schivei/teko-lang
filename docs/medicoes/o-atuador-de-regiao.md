@@ -82,10 +82,20 @@ cima do mesmo armazenamento, e volta com o comprimento certo e os bytes certos. 
 | rota nativa + `TEKO_MEM_PARANOID=1` | **42** |
 | rota C + `TEKO_MEM_PARANOID=1` | **42** |
 
-Os quatro cenários estão no `.tkr` e o projecto está registado no `teko.tkp`. Um valor que escapa o
-bloco é **preservado**; nunca libertado em silêncio. Os códigos de falha são distintos por braço
-(11 = o acumulador do bloco corrompeu-se; 12/13 = o `[]u64` escapado foi libertado; 14 = a `str`
-escapada foi libertada), logo uma regressão diz qual das metades cedeu.
+Um valor que escapa o bloco é **preservado**; nunca libertado em silêncio. Os códigos de falha são
+distintos por braço (11 = o acumulador do bloco corrompeu-se; 12/13 = o `[]u64` escapado foi
+libertado; 14 = a `str` escapada foi libertada), logo uma regressão diz qual das metades cedeu.
+
+**E os quatro cenários vivem em DOIS ficheiros `.tkr`, por uma razão que descobri contra o meu
+próprio ficheiro antes de o declarar verde:** `tkr_ensure_built` compila um projecto **no máximo uma
+vez por ficheiro `.tkr`**, com o `Given env` do PRIMEIRO cenário que o alcança. Com os quatro
+cenários no mesmo ficheiro, os dois da rota C corriam o binário **nativo** com `TEKO_BACKEND=c`
+definido à execução — onde a variável não faz nada. O ficheiro afirmava uma configuração de build que
+nunca tinha construído. Corrigido para o idioma que o `own_native` já documenta (*"one `.tkr` per
+configuration that needs its own build"*): `region_actuator.tkr` (rota nativa) e
+`region_actuator_c.tkr` (rota C). O `TEKO_MEM_PARANOID` continua a partilhar a compilação do cenário
+de cima porque é uma variável de EXECUÇÃO. Medido depois da correcção: **duas** compilações
+distintas, 4,0 s a nativa e 760 ms a C, em vez de uma.
 
 ---
 
@@ -179,8 +189,8 @@ apontar à função gerada. A superfície que faltava ao runtime existe.
 * `binding_is_block_local_slice` / `assign_routes_to_block` / `count_block_local_reads_slice` são os
   predicados novos, conservadores por construção.
 
-**O regressor da inversão** — `examples/regressions/region_actuator`, quatro cenários, registado no
-`teko.tkp`.
+**O regressor da inversão** — `examples/regressions/region_actuator`, quatro cenários em dois `.tkr`
+(uma configuração de build por ficheiro), ambos registados no `teko.tkp`.
 
 ---
 
@@ -210,4 +220,18 @@ apontar à função gerada. A superfície que faltava ao runtime existe.
 * build da rota C limpo, sem avisos;
 * **FIXPOINT fechado**: gen2 e gen3 construídos no MESMO caminho de saída, `teko.c` e binário
   **byte-idênticos** (`sha256 d15201b5ebad62c8605553ee4cb49cdb6a829517ab07b833891f893b5310f1b2`);
-* picos auto-reportados: gen1 1704,3 MB, gen2 1595,3 MB, gen3 1583,8 MB.
+* picos auto-reportados: gen1 1704,3 MB, gen2 1595,3 MB, gen3 1583,8 MB;
+* **`teko test .`**: as quatro faixas `.tkt` verdes (291 + 290 + 290 + 290 = 1161 testes, 0 falhas) e
+  os dois regressores novos verdes (2 corridos, 0 saltados, 0 falhados, 2 builds), `GATE_EXIT=0`.
+
+### O portão completo NÃO se declara verde, e a razão não é minha
+
+O `teko.tkp:57` lista `examples/regressions/const_slice_of_str/const_slice_of_str.tkr` e **esse
+caminho não existe nesta árvore**. O registo entrou no `0947d543` (*"registar a const_slice_of_str"*);
+os ficheiros da fixture vivem no `4a539cac`, que **não é antepassado** deste ramo. E o comportamento
+não é uma omissão silenciosa — é o que o próprio compilador testa
+(`run_regression_sources_missing_path_is_a_manifest_error`): *"teko: regression FAIL … listed
+regressor file does not exist (M.3)"*. Logo a fase de regressão do topo da lane está **vermelha por
+uma entrada pendurada de outro agente**, antes de qualquer alteração minha. Não lhe toquei — é do
+integrador. Foi por isso que a verificação acima correu com a lista estreitada aos dois regressores
+novos, e é por isso que ela é reportada assim, e não como um verde por omissão.
