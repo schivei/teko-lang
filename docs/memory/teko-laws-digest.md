@@ -2305,9 +2305,35 @@ ele já ia percorrer o ficheiro de qualquer maneira.
 2. **Uma corrida que morra a meio de uma mensagem deixa uma sequência incompleta.** Isso **não é um
    defeito, é informação**: o leitor relata *"registo truncado, o escritor morreu no chunk k"*. E é
    coerente com a lei do próprio dono — **a morte de um buffer aceita-se**.
-3. **A bandeira de EOF no último chunk é o que torna a completude decidível SEM saber `n` de antemão**
-   — logo o escritor nunca precisa de conhecer o comprimento total antes de começar, e a escrita fica
-   verdadeiramente em fluxo dos dois lados.
+3. ~~**A bandeira de EOF no último chunk…**~~ — **substituída pelo adendo abaixo, e o adendo é mais
+   forte.**
+
+### O adendo do dono: o chunk diz TAMBÉM quantos são (2026-07-31)
+
+> *"como teremos chunk, precisamos dizer não apenas quem ele é na ordem, mas quantos há
+> (determinismo), assim é possível validar uma corrupção, peça faltante e transformar em gate."*
+
+**Isto SUBSTITUI a bandeira de EOF em vez de a acompanhar, e o resultado é mais simples E mais
+forte.** O chunk passa a carregar `(writer, seq, chunk_ix, chunk_n)`, e daí sai tudo:
+
+| propriedade | como se decide |
+|---|---|
+| é o último? | `chunk_ix == chunk_n - 1` — **derivado, não um campo à parte** |
+| está completo? | recebi todos os `0..chunk_n-1` para aquele `(writer, seq)` |
+| **falta uma peça** | há um buraco no intervalo, e o relatório **NOMEIA qual**: *"registo (w=3, seq=812) tem 4 de 5 chunks; falta o 2"* |
+| **está corrompido** | dois chunks do mesmo `(writer, seq)` declaram `chunk_n` **diferente** |
+| **é portão** | qualquer registo incompleto ao fim da leitura **falha a corrida** |
+
+**E fecha uma distinção que a bandeira de EOF não conseguia fazer:** um escritor que morreu a meio
+deixa um **prefixo** `0..k` com `chunk_n` coerente e a cauda em falta — o que, pela lei da morte do
+buffer, é **aceite e relatado**. Uma corrupção deixa `chunk_n` incoerente ou um **buraco no meio**.
+Com a bandeira sozinha as duas eram indistinguíveis: em ambos os casos o último chunk nunca chegava.
+
+**O custo que isto tem, e é o único:** o escritor passa a precisar de saber o comprimento total
+**antes de emitir o primeiro chunk** — logo não pode emitir em fluxo. **Para nós isso não custa
+nada**: o `Rec` é uma struct em memória e o seu comprimento serializado é conhecido antes da escrita.
+A tensão só existiria para um produtor verdadeiramente em fluxo, que este desenho não tem. Fica
+registada por ser real, não por ser um obstáculo.
 
 ### A interacção que ninguém levantou ainda, e é real
 
