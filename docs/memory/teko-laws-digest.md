@@ -2462,3 +2462,63 @@ E o `⊤` já é o `#arena_depth` do checker: *"any allocation inside ANY adopte
 exceeds the **one-function budget**, rejected on escape"* — um orçamento de profundidade com recuo
 seguro quando estoura. **Terceiro tecto sem nome**, ao lado do `regions.len < 64` do codegen e do
 `TK_ARENA_MARK_MAX 64` do runtime.
+
+---
+
+## O `.tkcov` é SUBSTITUÍDO pelo `.tkj` (dono, 2026-07-31)
+
+> *"sobre o tkcov, pela minha visão, será inteiramente substituído pelo tkj, que é mais detalhado e
+> resolve diversas frentes de uma única vez."*
+
+**Substituição, não coexistência.** E isto **retira** trabalho em vez de o acrescentar: o arquiteto
+tinha acabado de medir que o `.tkcov` de hoje **não é** *"zero alocação em corrida"*, e que o defeito
+é maior do que o requisito — `tk_cov_mark` (`teko_rt.c:3127`) e `tk_covb_add` (`:3178`) fazem
+**varrimento linear do vector inteiro por acerto**, e o primeiro é **prólogo de entrada de função**,
+logo é custo em TODO programa instrumentado.
+
+**Com a substituição, esse defeito não se corrige — retira-se.** O crumb 12.1 do SW12 (*"cobertura
+como sinal de disco apenas, zero alocação em corrida"*) passa a ser satisfeito pelo journal, que já
+foi desenhado para isso.
+
+## A arquitectura do `teko test`: cada passo é um PROCESSO (dono, 2026-07-31)
+
+> *"1. Fazer o build dos tkts em conjunto com os tkss e emitir um único executável. Ao fim, libera
+> memória. 2. Cada projeto que detém tkr passa pelo mesmo processo… um por vez… 3. Gera um executável
+> que paraleliza processos que chamam os projetos de tkr… 4. Roda o binário dos testes unitários…
+> 5. Roda o binário do regressor… **cada passo deve rodar independente, sem alocação de memória
+> acumulativa.**"*
+
+### O que JÁ é assim, medido
+
+| passo | onde corre hoje | liberta no fim? |
+|---|---|---|
+| 1. compilar projecto + `.tkt` → C | **no próprio processo** (`project.tks:3450`, `run_gate`) | **NÃO** |
+| 2. `cc` do gate | filho | sim |
+| 3. correr o gate | filhos (`run_gate_sharded`, `jobs`) | sim |
+| 4. compilar cada `.tkr` | **filho** — `compile_regressive` (`regression.tks:961`) chama `run_captured_env` com **o próprio compilador no argv** | sim |
+| 5. correr cada `.tkr` | filho | sim |
+
+**Os passos 4 e 5 já SÃO a arquitectura do dono.** A fronteira de processo já é o mecanismo de
+libertação — e funciona, porque o SO devolve tudo quando o filho sai.
+
+### O buraco é o passo 1, e é exactamente onde ele disse
+
+O passo 1 corre no **processo pai**. Como `tk_regions_free_all` só corre na terminação, **os ~1,7 GB
+do passo 1 ficam residentes durante os passos 2 a 5 inteiros** — através dos 11 builds e das 11
+execuções. **Não há outro momento em que a arena possa largar.**
+
+### E compõe-se com o quadrático, o que explica os números todos
+
+O pai segura 1,7 GB · cada filho pode picar em **4,4 GB** sob o `vinfo_set` quadrático
+(`isel_arm64.tks:91`) · o padrão são **4 jobs** concorrentes. Daí os **6709 MB de árvore** medidos, e
+daí o macOS de 7 GB levar `Killed: 9`.
+
+**Não é uma causa — são duas a multiplicar-se**, e a frase do dono é exacta: *"enquanto a desalocação
+de memória e o paralelismo não chegarem, vai estourar."*
+
+### Nota de facto: não há Gherkin
+
+O dono suspeitou de *"vazamento no backend do Gherkin"*. **Não existe Gherkin nesta árvore.** O
+formato de cenários é próprio (`docs/design/tkr-regression-format.md`) e o seu parser é
+`src/build/tkr.tks` — **já em Teko, já dentro do mesmo projecto**. A conversão que ele propôs já está
+feita; o vazamento não está no parser.
