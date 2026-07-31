@@ -1104,36 +1104,108 @@ fn interval_before(a: LiveInterval, b: LiveInterval) -> bool {
 }
 
 /**
- * sort_by_start — the virtual intervals in start order (an insertion sort;
- * deterministic tie-break by `reg_id`).
+ * run_end — the exclusive end of a merge run starting at `lo` with width
+ * `width`, clamped to `len` so a pass's final short run is handled by the same
+ * code as a full one.
+ *
+ * @param u64 lo  the run's inclusive start
+ * @param u64 width  the pass's run width
+ * @param u64 len  the sequence length
+ * @return u64  `min(lo + width, len)`
+ */
+fn run_end(lo: u64, width: u64, len: u64) -> u64 {
+    let raw = lo + width
+    if raw > len { return len }
+    raw
+}
+
+/**
+ * merge_runs — stably merge the two adjacent sorted runs `src[lo..mid)` and
+ * `src[mid..hi)` onto the tail of `out0`. The left run is taken unless the
+ * right head sorts STRICTLY before the left head, so a pair `interval_before`
+ * orders in neither direction keeps its input order. That left-bias is what
+ * makes the whole sort stable, and stability is what makes the output the
+ * same permutation the retired insertion sort produced.
+ *
+ * @param []LiveInterval src  the sequence holding both runs
+ * @param u64 lo  the left run's inclusive start
+ * @param u64 mid  the left run's exclusive end and the right run's start
+ * @param u64 hi  the right run's exclusive end
+ * @param []LiveInterval out0  the pass output built so far
+ * @return []LiveInterval  `out0` with both runs appended in sorted order
+ */
+fn merge_runs(src: []LiveInterval, lo: u64, mid: u64, hi: u64, out0: []LiveInterval) -> []LiveInterval {
+    mut out = out0
+    mut i: u64 = lo
+    mut j: u64 = mid
+    loop {
+        if i >= mid { break }
+        if j >= hi { break }
+        if interval_before(src[j], src[i]) {
+            out = teko::list::push(out, src[j])
+            j++
+            continue
+        }
+        out = teko::list::push(out, src[i])
+        i++
+    }
+    loop { if i >= mid { break }; out = teko::list::push(out, src[i]); i++ }
+    loop { if j >= hi { break }; out = teko::list::push(out, src[j]); j++ }
+    out
+}
+
+/**
+ * merge_pass — one bottom-up pass of the merge sort: every adjacent pair of
+ * `width`-wide sorted runs of `src` is merged, doubling the sorted-run length.
+ * ONE output list is built per PASS, never one per element — that is the whole
+ * point. A pass allocates O(V) and there are `ceil(log2 V)` passes, against
+ * the V allocations of O(V) bytes each the insertion sort paid.
+ *
+ * @param []LiveInterval src  the sequence, already sorted in `width`-wide runs
+ * @param u64 width  the current run width
+ * @return []LiveInterval  the same elements, sorted in `2*width`-wide runs
+ */
+fn merge_pass(src: []LiveInterval, width: u64) -> []LiveInterval {
+    mut out: []LiveInterval = teko::list::empty()
+    mut lo: u64 = 0
+    loop {
+        if lo >= src.len { break }
+        let mid = run_end(lo, width, src.len)
+        let hi = run_end(mid, width, src.len)
+        out = merge_runs(src, lo, mid, hi, out)
+        lo = hi
+    }
+    out
+}
+
+/**
+ * sort_by_start — the virtual intervals in start order (a bottom-up STABLE
+ * merge sort; deterministic tie-break by `reg_id`). O(V log V) in time and in
+ * allocated bytes, replacing an insertion sort that rebuilt the entire output
+ * list once per interval — O(V^2) on both axes, and 98.9% of the backend's
+ * copy-grow bytes as measured under `TEKO_ARENA_OBS`.
+ *
+ * The output is the SAME permutation the insertion sort produced, not merely
+ * an equivalent one, and that identity does not rest on the absence of ties.
+ * `interval_before` is a lexicographic order on the pair `(start, reg_id)`,
+ * hence a strict weak ordering; the retired insertion sort placed each
+ * interval after every already-placed interval it did not sort strictly
+ * before, which is a STABLE insertion; and `merge_runs` is a stable merge. Two
+ * stable sorts under one strict weak ordering agree element for element, so
+ * `linear_scan` walks the identical sequence and emits identical code.
  *
  * @param []LiveInterval virt  the virtual intervals
  * @return []LiveInterval  the start-sorted intervals
  */
 fn sort_by_start(virt: []LiveInterval) -> []LiveInterval {
-    mut out: []LiveInterval = teko::list::empty()
-    mut i: u64 = 0
+    mut sorted: []LiveInterval = virt
+    mut width: u64 = 1
     loop {
-        if i >= virt.len { break }
-        let v = virt[i]
-        mut ins: []LiveInterval = teko::list::empty()
-        mut placed: bool = false
-        mut j: u64 = 0
-        loop {
-            if j >= out.len { break }
-            let o = out[j]
-            if !placed && interval_before(v, o) {
-                ins = teko::list::push(ins, v)
-                placed = true
-            }
-            ins = teko::list::push(ins, o)
-            j++
-        }
-        if !placed { ins = teko::list::push(ins, v) }
-        out = ins
-        i++
+        if width >= sorted.len { break }
+        sorted = merge_pass(sorted, width)
+        width = width * 2
     }
-    out
+    sorted
 }
 
 /**
