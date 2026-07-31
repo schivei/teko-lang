@@ -559,6 +559,10 @@ Escrita já em Javadoc completo, para ser copiada tal como está. Verificada con
 (`enum { A; B }`, `variant` de tipos nomeados, `pub type X = struct { }`, `-> T | error`).
 
 ```teko
+// src/profile/profile.tks   (namespace 'teko::profile')
+
+use teko::checker
+
 /**
  * SiteKind — que construção abriu a região que este sítio nomeia.
  *
