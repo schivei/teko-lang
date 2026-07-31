@@ -2080,3 +2080,81 @@ Nem todas as razões podem viajar, e a fronteira é exata:
 
 A forma do dono aplica-se às que **precisam de viajar**; as outras já são locais por natureza. A
 enumeração fica inteira, e cada razão passa a ter um lugar declarado em vez de um só balde.
+
+---
+
+## A morte de um buffer ACEITA-SE — não há bala de prata (dono, 2026-07-31)
+
+> *"O ponto da morte de um buffer, é aceitar, não existe bala de prata. Assim como uma interrupção
+> externa, a morte de um buffer se dá de duas formas, interrupção externa ou deliberadamente pelo
+> programa. Só lembrar que muitos sistemas rodam em cima desse constructo nativo dos sistemas
+> operacionais."*
+
+Eu tinha levantado a perda de um buffer em voo como objeção ao empacotamento: um escritor que morre
+com o buffer meio cheio perde o que lá está, e isso choca com a captura (C0), que existe para o teste
+que morre ainda reportar.
+
+**A objeção estava mal posta, e a razão sai da própria formulação do dono: a janela nunca foi zero.**
+Mesmo sem empacotar, um escritor pode morrer entre PRODUZIR um registo e chamar `push`. Empacotar
+alarga a janela de 1 registo para K; **não a cria**. Defender contra a perda seria defender contra
+uma coisa que já era verdade — e ao preço de recusar um ganho medido de 20× a 22×.
+
+### As duas formas, e só uma delas é ganhável
+
+| forma | ganhável? | o que se faz |
+|---|---|---|
+| **deliberada pelo programa** (pânico, `exit`, fim de teste) | **SIM** — é um ponto do nosso código | descarrega-se o buffer ali, e custa nada porque o ponto já existe |
+| **interrupção externa** (`SIGKILL`, OOM, o runner a ser reclamado) | **NÃO** | aceita-se |
+
+A captura já **é** um ponto deliberado: o `longjmp` do `tk_test_run` é código nosso. Descarregar aí
+cobre o caso ganhável inteiro sem inventar mecanismo nenhum. O caso não ganhável fica aceite, por
+decisão, e não escondido atrás de uma defesa que não defende.
+
+E o argumento de terreno provado — *"muitos sistemas rodam em cima desse constructo nativo"* — é o
+que fecha: a resposta a um transporte com perdas conhecidas não é substituí-lo por um inventado.
+
+## Os mnemónicos do `Cov`: DESCARTADOS (dono, 2026-07-31)
+
+> *"Sobre mnemonicos, entendido e pode descartar."*
+
+Eu tinha proposto que o `Cov` carregasse ids curtos em vez de texto, e nomeei o preço: **um id só
+resolve contra o build que o emitiu**, logo o `.tkj` deixaria de se ler numa máquina que não
+compilou o projeto — a menos que a tabela id→nome viajasse no cabeçalho.
+
+Descartado. **O `Cov` fica como está: carrega o FACTO de que o despejo existe, um por escritor.** E a
+propriedade que o arquiteto tinha ganho fica intacta: **o `.tkj` é inteiramente portátil** — baixa-se
+o journal de um CI vermelho e lê-se noutra máquina. Nenhum mecanismo novo entra.
+
+## O chunk de datagrama: FORA (dono, 2026-07-31)
+
+> *"quanto ao tamanho do datagrama, usar chunk seria demais para o tamanho da nossa mensagem, vamos
+> deixar de fora, se um dia distante ocorrer OOM nisso, revisitamos. Aliás, cabe até no outro caso
+> de 240K de datagrama que falou."*
+
+**Isto é sobre o DATAGRAMA, não sobre o `cont`.** As duas coisas partilham a palavra "chunk" e são
+mecanismos distintos:
+
+* **partir um `Rec` por vários datagramas** — o que eu propus para o tecto de 2048 do macOS.
+  **FORA.** O `Rec` tem 80 bytes e cabe com folga em qualquer tecto medido, incluindo o pior.
+* **partir uma LINHA longa em registos `cont`** — o mecanismo do arquiteto que dissolveu o
+  `Oversize`. **Não é tocado**, porque é sobre `REC_MAX` e não sobre o tecto do transporte.
+
+E a medição que confirma a decisão dele desmente uma célula minha: **o tecto do datagrama não era um
+tecto, era o valor por omissão.**
+
+| pedido | macOS: SNDBUF dado → maior datagrama | Linux: SNDBUF dado → maior datagrama |
+|---|---|---|
+| (omissão) | 2048 → **2048** | 212992 → 212960 |
+| 8 KiB | 8192 → 8176 | 16384 → 16352 |
+| 64 KiB | 65536 → 65520 | 131072 → 131040 |
+| 256 KiB | 262144 → 262128 | 524288 → 524256 |
+| 1 MiB | 1048576 → 1048560 | 2097152 → 2097120 |
+| 4 MiB | **4194304 → 4194288** | 8388608 → 4194304 |
+
+**O tecto segue o `SO_SNDBUF`** (menos ~16–32 bytes de sobrecarga). O macOS concede exatamente o que
+se pede; o Linux duplica. Os 2048 que eu publiquei como limitação do macOS eram o default — e o
+sistema sobe até 4 MiB sem reclamar.
+
+**Correcção nomeada, porque o erro é o mesmo de sempre:** medi um valor observado e publiquei-o como
+propriedade do sistema, sem testar se ele se movia. É a mesma patologia da guarda de PATH e da
+detecção de semente — verificar um proxy da condição em vez da condição.
