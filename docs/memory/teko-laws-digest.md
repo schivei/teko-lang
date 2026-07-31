@@ -2522,3 +2522,50 @@ O dono suspeitou de *"vazamento no backend do Gherkin"*. **Não existe Gherkin n
 formato de cenários é próprio (`docs/design/tkr-regression-format.md`) e o seu parser é
 `src/build/tkr.tks` — **já em Teko, já dentro do mesmo projecto**. A conversão que ele propôs já está
 feita; o vazamento não está no parser.
+
+---
+
+## As cinco pendências fechadas (dono, 2026-07-31)
+
+**1. `TK_REGION_DEFAULT_CHUNK` por profundidade — ADIADO.** *"Deixemos de fora até decidirmos melhor
+sobre PGO e Spine."* Fica reportado, não despachado.
+
+**2. O bloco nu `{ }` ENTRA na gramática — e a limpeza da arena do escopo/bloco COM ELE.** *"Sim,
+entra, assim como a limpeza da arena do escopo/bloco."*
+
+**A ordem importa, e a medição diz porquê:** o bloco nu que reutilizasse o `emit_adopt` daria
+**sintaxe e zero memória** — está medido que o `adopt` abre região e recupera **0,0 MB** (238,4 MB de
+`str` e 8,0 MB de lista, ambos para a raiz). A metade que carrega é o **actuador**:
+
+* **`tk_str_concat_r` não existe** — só `tk_slice_push_r` e `tk_slice_with_cap_r` aceitam região em
+  todo o runtime, e `str` fica irroteável (66,4 MB em 2 165 811 buffers no build real);
+* **o selector de roteamento tem dois níveis** — `codegen.tks:3726` *"rides `frame`"*, a moldura da
+  função ou a raiz. Nunca a região do bloco.
+
+**Sem esses dois, o bloco nu é decorativo.** A gramática é a parte barata.
+
+**3. UM chunk, não dois — e a fixture tem tamanho.** *"Não precisamos de dois chunk, já tem o do
+próprio `Rec`, só precisamos de uma fixture que gere um dado dinâmico e grande o suficiente (uns 4MB)
+para ver o chunk em ação."*
+
+Isto fecha o alarme que eu tinha levantado: com `Rec` a 80 bytes e tecto a 2048, o chunk quase nunca
+dispara, e código que quase nunca corre apodrece. **A resposta é a fixture, e ela tem número: ~4 MB de
+dado dinâmico.** A 2048 por mensagem, são ~2000 chunks — o mecanismo corre a sério, não em teoria.
+
+**4. Escrita directa em campo de serviço injectado — DISSOLVIDO no caso que importa.** *"tudo que for
+parâmetro de função/método, quando não definido como `ref`, é `let` por definição."*
+
+**Verificado, e tem número: B.21.** `scope.tks:148` (*"params are immutable — B.21"*),
+`typer.tks:3457`, e `typer.tks:6344`, onde `define(local, f.params[i].name, pt, false)` põe
+`is_mut = false` literal. Um serviço que chega por parâmetro **já é `let`**, e a R10 já recusa a
+escrita directa. **O resíduo** é um serviço guardado numa ligação que não seja parâmetro — esse
+continua a depender do modo da ligação.
+
+E sobre *"ainda nem temos maquinaria de DI, temos?"*: **há**, parcial. `di.tks` tem 383 linhas,
+`DiKind = enum { None; Singleton; Scoped; Transient }` (`ast.tks:384`), `#inject` no parser. **O que
+não existe é o reticulado de profundidade** — `depth`/`cross-lifetime`/`monoton` não ocorrem em
+`di.tks`.
+
+**5. `teko fmt --apply` — NÃO existe.** O dono lembrava-se de o ter feito *"ontem, aliás antes de
+ontem"*. **Zero ocorrências de `--apply` na árvore.** O `teko fmt <path>` continua a reescrever no
+lugar, sem flag e sem confirmação. Fica como estava: sugestão registada, não despachada.
