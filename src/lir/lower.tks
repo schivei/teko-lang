@@ -4880,9 +4880,23 @@ fn store_lambda_captures(ctx: LowerCtx, base: u32, layout: LStructLayout, captur
             return error { message = teko::str::concat("native backend N1: capturing the MUTABLE str/slice local `", captures[i].name, "` needs the env slot to carry both halves of its pair, not the address of its frame slot (N2)") }
         }
         let off = match field_offset_of(layout, captures[i].name) { u32 as o => o; error as err => return err }
-        let addr = ctx_alloc(cur)
-        let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, off, line, col))
-        cur = ctx_append(with_addr, store_inst(addr.vreg, hit.vreg, ltype_of(captures[i].type, cur.enums), line, col))
+        let ty = match field_type_of(layout, captures[i].name) { LType as t => t; error as err => return err }
+        if ty == LType::Ptr && is_fat_type(captures[i].type) {
+            // fat type capture (str/slice): store ptr half and len half separately
+            let ptr_addr = ctx_alloc(cur)
+            let ptr_addr_inst = ctx_append(ptr_addr.ctx, field_addr_inst(ptr_addr.vreg, base, off, line, col))
+            let len_hit = lenv_lookup_fat(cur.env, captures[i].name)
+            if !len_hit.found { return error { message = teko::str::concat("native backend N1: fat capture `", captures[i].name, "` not a fat binding (internal)") } }
+            let ptr_store = ctx_append(ptr_addr_inst, store_inst(ptr_addr.vreg, len_hit.ptr, LType::Ptr, line, col))
+            let len_addr = ctx_alloc(ptr_store)
+            let len_addr_inst = ctx_append(len_addr.ctx, field_addr_inst(len_addr.vreg, base, off + ltype_size(LType::Ptr), line, col))
+            cur = ctx_append(len_addr_inst, store_inst(len_addr.vreg, len_hit.len, LType::I64, line, col))
+        } else {
+            // scalar type capture
+            let addr = ctx_alloc(cur)
+            let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, off, line, col))
+            cur = ctx_append(with_addr, store_inst(addr.vreg, hit.vreg, ltype_of(captures[i].type, cur.enums), line, col))
+        }
         i++
     }
     Lowered { ctx = cur; vreg = base }
@@ -4994,9 +5008,21 @@ fn bind_lambda_captures(ctx: LowerCtx, layout: LStructLayout, captures: []checke
         let ty = match field_type_of(layout, captures[i].name) { LType as t => t; error as err => return err }
         let addr = ctx_alloc(cur)
         let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, 0, off, line, col))
-        let val = ctx_alloc(with_addr)
-        let with_val = ctx_append(val.ctx, load_inst(val.vreg, addr.vreg, ty, line, col))
-        cur = ctx_bind(with_val, captures[i].name, val.vreg)
+        if ty == LType::Ptr && is_fat_type(captures[i].type) {
+            // fat type (str/slice): load two words (ptr + len) and bind as fat
+            let ptr_val = ctx_alloc(with_addr)
+            let ptr_with_val = ctx_append(ptr_val.ctx, load_inst(ptr_val.vreg, addr.vreg, LType::Ptr, line, col))
+            let len_addr_vreg = ctx_alloc(ptr_with_val)
+            let len_addr = ctx_append(len_addr_vreg.ctx, field_addr_inst(len_addr_vreg.vreg, 0, off + ltype_size(LType::Ptr), line, col))
+            let len_val = ctx_alloc(len_addr)
+            let len_with_val = ctx_append(len_val.ctx, load_inst(len_val.vreg, len_addr_vreg.vreg, LType::I64, line, col))
+            cur = ctx_bind_fat(len_with_val, captures[i].name, ptr_val.vreg, len_val.vreg)
+        } else {
+            // scalar type
+            let val = ctx_alloc(with_addr)
+            let with_val = ctx_append(val.ctx, load_inst(val.vreg, addr.vreg, ty, line, col))
+            cur = ctx_bind(with_val, captures[i].name, val.vreg)
+        }
         i++
     }
     cur

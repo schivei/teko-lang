@@ -2608,6 +2608,30 @@ fn append_bytes(buf: []byte, src: []byte) -> []byte {
 }
 
 /**
+ * rodata_has_internal_relocs — check if any LRodata entry has non-empty internal relocations.
+ * (#594 T-B1): the presence of data→data relocations indicates a Tier-B aggregate const
+ * (pointer-bearing fields) whose relocations the current writers cannot emit.
+ */
+fn rodata_has_internal_relocs(rodata: []lir::LRodata) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= rodata.len { break }
+        if rodata[i].relocs.len > (0 to u64) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * honest_data_reloc — honest-stop for rodata-internal pointer relocation (#594 T-B1).
+ * Tier-B aggregate consts (with pointer-bearing fields) produce LDataReloc entries that
+ * need writer support in T-B2 (ELF), T-B3 (Mach-O/COFF), or T-B4 (WASM).
+ */
+fn honest_data_reloc() -> error {
+    error { message = "rodata-internal pointer relocation: emission lands in T-B2..T-B5 (#594 Tier-B)" }
+}
+
+/**
  * encode_rodata — build the `__const` image and its defined symbols: each
  * `LRodata` entry is placed at the running byte offset with a defined, FILE-
  * LOCAL section-2 symbol (the ADRP/ADD-lo relocations in `__text` resolve to it
@@ -2615,10 +2639,13 @@ fn append_bytes(buf: []byte, src: []byte) -> []byte {
  * same-named rodata in two objects never collides at Phase E multi-object
  * link).
  *
+ * (#594 T-B1): honest-stops if rodata contains internal pointer relocations.
+ *
  * @param []lir::LRodata rodata  the module's interned rodata table
- * @return ModuleRodata  the `__const` image + its defined symbols
+ * @return ModuleRodata | error  the `__const` image + its defined symbols, or Tier-B honest-stop
  */
-fn encode_rodata(rodata: []lir::LRodata) -> ModuleRodata {
+fn encode_rodata(rodata: []lir::LRodata) -> ModuleRodata | error {
+    if rodata_has_internal_relocs(rodata) { return honest_data_reloc() }
     mut bytes: []byte = teko::list::empty()
     mut syms: []Symbol = teko::list::empty()
     mut relocs: []lir::LDataReloc = teko::list::empty()
@@ -2764,7 +2791,7 @@ fn append_relocs_arm64(a: []Reloc, b: []Reloc) -> []Reloc {
 pub fn encode_module(abi: AbiDescriptor, m: MModule) -> EncodedModule | error {
     if m.globals.len > (0 to u64) { return honest_globals() }
     let mt = match encode_functions(abi, m.funcs) { ModuleText as x => x; error as e => return e }
-    let rod = encode_rodata(m.rodata)
+    let rod = match encode_rodata(m.rodata) { ModuleRodata as x => x; error as e => return e }
     let defined = concat_symbols(rod.syms, mt.syms)
     let undef = collect_undefined(defined, mt.relocs)
     let symbols = concat_symbols(defined, undef)
