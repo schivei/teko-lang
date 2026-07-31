@@ -1,0 +1,353 @@
+/**
+ * opened — one name for a fresh cell, or a failure loud enough to name itself.
+ *
+ * @param value  the payload the cell holds
+ * @return       the name the registry issued
+ */
+fn opened(value: i64) -> u64 {
+    match open_cell(value) {
+        u64 as name => name
+        error => { teko::assert::is_true(false); 0 }
+    }
+}
+
+/**
+ * closed — retire a name that is expected to be live, failing the test if it was not.
+ *
+ * @param name  the name to retire
+ * @return      void
+ */
+fn closed(name: u64) {
+    match close(name) {
+        null => { }
+        error => { teko::assert::is_true(false) }
+    }
+}
+
+/**
+ * payload_of — the value the cell named by `name` holds, failing the test if it does not resolve.
+ *
+ * @param name  the name to resolve
+ * @return      the payload
+ */
+fn payload_of(name: u64) -> i64 {
+    match read_cell(name) {
+        i64 as value => value
+        error => { teko::assert::is_true(false); 0 }
+    }
+}
+
+/**
+ * read_refused — did a read of `name` come back as an error rather than as somebody's bytes?
+ *
+ * @param name  the name to resolve
+ * @return      true iff `read_cell` refused
+ */
+fn read_refused(name: u64) -> bool {
+    match read_cell(name) {
+        i64 => false
+        error => true
+    }
+}
+
+/**
+ * close_refused — did closing `name` come back as an error?
+ *
+ * @param name  the name to retire
+ * @return      true iff `close` refused
+ */
+fn close_refused(name: u64) -> bool {
+    match close(name) {
+        null => false
+        error => true
+    }
+}
+
+/**
+ * open_refused — did opening a cell with `value` come back as an error?
+ *
+ * @param value  the payload to attempt
+ * @return       true iff `open_cell` refused
+ */
+fn open_refused(value: i64) -> bool {
+    match open_cell(value) {
+        u64 as name => { closed(name); false }
+        error => true
+    }
+}
+
+/**
+ * NameHandle — the handle the design requires: it carries the NAME and nothing else, and every
+ * predicate on it is a call that consults the registry.
+ *
+ * A copy of this struct is a copy of a `u64`. Copying a name does not age the name, which is why a
+ * copy sees a close made through any other copy — the property `a_copied_handle_still_sees_the_close`
+ * pins down.
+ */
+type NameHandle = struct {
+    /** The registry name this handle stands for; the handle's entire state. */
+    name: u64
+
+    /**
+     * is_open — ask the registry, right now, whether this handle's name still stands for something.
+     *
+     * @return true iff the name is live
+     */
+    pub fn is_open(self) -> bool { is_live(self.name) }
+}
+
+/**
+ * CachingHandle — THE REVERSAL, and it exists only inside this file: a handle that answers from a
+ * flag captured when it was made instead of from the registry.
+ *
+ * Nothing in the shipped surface has this shape. It is here so the guard above can be shown to be
+ * capable of failing: an instrument that cannot show the defect cannot certify its absence.
+ */
+type CachingHandle = struct {
+    /** The registry name this handle stands for. */
+    name: u64
+
+    /** Whether the name was live AT THE MOMENT THIS HANDLE WAS MADE — a snapshot, never re-asked. */
+    open_flag: bool
+}
+
+/**
+ * caching_handle_of — a `CachingHandle` that snapshots the name's liveness once, at birth.
+ *
+ * @param name  the name to snapshot
+ * @return      the handle carrying that snapshot
+ */
+fn caching_handle_of(name: u64) -> CachingHandle {
+    CachingHandle { name = name; open_flag = is_live(name) }
+}
+
+#test
+/**
+ * two_opens_yield_two_different_names — the first arm of the proof: two opens are two names.
+ *
+ * DIFFERENT IS PART OF THE CONTRACT, not an accident of the packing. A registry that handed the same
+ * name to two resources would make every other guarantee here meaningless, and it would do so
+ * silently: both reads would succeed, and one of them would be wrong.
+ *
+ * @return void
+ */
+fn two_opens_yield_two_different_names() {
+    let first = opened(101)
+    let second = opened(202)
+    teko::assert::is_true(first != second)
+    teko::assert::eq_i64(payload_of(first), 101)
+    teko::assert::eq_i64(payload_of(second), 202)
+    closed(first)
+    closed(second)
+}
+
+#test
+/**
+ * a_live_name_really_resolves — VIVACITY, and it comes first on purpose: a registry whose answer to
+ * everything was "error" would pass every stale-name arm below while being useless.
+ *
+ * @return void
+ */
+fn a_live_name_really_resolves() {
+    let name = opened(4242)
+    teko::assert::is_true(is_live(name))
+    teko::assert::eq_i64(status_of(name), STATUS_OK)
+    teko::assert::eq_i64(payload_of(name), 4242)
+    closed(name)
+}
+
+#test
+/**
+ * a_stale_name_is_an_error_and_never_another_resource — the second arm, and the reason the whole
+ * layer exists: after the close, the name answers with a reported failure, and it goes on doing so
+ * once its SLOT has been handed to somebody else.
+ *
+ * The second half is the part that matters. A stale pointer would by then be reading the new
+ * tenant's bytes and calling them its own; the stale NAME reads nothing and says why.
+ *
+ * @return void
+ */
+fn a_stale_name_is_an_error_and_never_another_resource() {
+    let stale = opened(7)
+    closed(stale)
+    teko::assert::is_true(read_refused(stale))
+    teko::assert::eq_i64(status_of(stale), STATUS_CLOSED)
+    let tenant = opened(9)
+    teko::assert::is_true(read_refused(stale))
+    teko::assert::eq_i64(status_of(stale), STATUS_CLOSED)
+    teko::assert::eq_i64(payload_of(tenant), 9)
+    closed(tenant)
+}
+
+#test
+/**
+ * the_slot_is_recycled_and_the_name_is_not — THE INVERSION, measured in the corpus instead of
+ * promised in a comment: the successor really does take the dead name's slot.
+ *
+ * Without the stamp, a name would be a slot index, and `slot_of(stale) == slot_of(tenant)` — asserted
+ * here — would mean the stale name resolving to the tenant's cell. What keeps them apart is the other
+ * half of the name, and this test pins that the two halves behave exactly so: same slot, different
+ * stamp, and a strictly newer stamp on the successor.
+ *
+ * @return void
+ */
+fn the_slot_is_recycled_and_the_name_is_not() {
+    let stale = opened(11)
+    closed(stale)
+    let tenant = opened(22)
+    teko::assert::eq_u64(slot_of(tenant), slot_of(stale))
+    teko::assert::is_true(generation_of(tenant) > generation_of(stale))
+    teko::assert::is_true(tenant != stale)
+    teko::assert::eq_i64(payload_of(tenant), 22)
+    teko::assert::is_true(read_refused(stale))
+    closed(tenant)
+}
+
+#test
+/**
+ * a_name_never_issued_is_unknown_not_stale — the registry tells the two dead modes apart, because a
+ * caller that gets a name it never opened has a different bug from one that kept a name too long.
+ *
+ * The name 0 is included on purpose: it is what a refused open answers with, so it must never be
+ * mistakable for a live name.
+ *
+ * @return void
+ */
+fn a_name_never_issued_is_unknown_not_stale() {
+    teko::assert::eq_i64(status_of(0), STATUS_UNKNOWN)
+    teko::assert::is_true(read_refused(0))
+    teko::assert::is_false(is_live(0))
+    let live = opened(5)
+    let never = live + 4294967296
+    teko::assert::eq_i64(status_of(never), STATUS_UNKNOWN)
+    teko::assert::is_true(read_refused(never))
+    closed(live)
+}
+
+#test
+/**
+ * closing_the_same_name_twice_is_reported — the second close is an error, for the same reason the
+ * second close of a descriptor is: a close that silently succeeded would hide the case where the
+ * slot has already been handed to somebody else.
+ *
+ * @return void
+ */
+fn closing_the_same_name_twice_is_reported() {
+    let name = opened(1)
+    closed(name)
+    teko::assert::is_true(close_refused(name))
+    teko::assert::is_true(close_refused(0))
+}
+
+#test
+/**
+ * the_reserved_payload_is_refused — `NO_VALUE` is the one `i64` a cell may not hold, and the refusal
+ * is reported rather than stored.
+ *
+ * THIS TEST IS THE TWIN CHECK between the Teko constant and the runtime's `TK_NAMES_NO_VALUE`: if
+ * the two ever drifted apart, the open would succeed here and the assertion would fail.
+ *
+ * @return void
+ */
+fn the_reserved_payload_is_refused() {
+    teko::assert::is_true(open_refused(NO_VALUE))
+    teko::assert::is_false(open_refused(NO_VALUE + 1))
+}
+
+#test
+/**
+ * a_copied_handle_still_sees_the_close — the §19.4 requirement, made permanent: a COPY of a handle
+ * sees a close performed through another path.
+ *
+ * This is the measurement that a `ref` binding in this tree is a COPY, turned from a hazard into a
+ * property. The handle carries only the name, so the copy has nothing stale to read: its predicate is
+ * a call, and the call is answered by the registry, not by the copy.
+ *
+ * @return void
+ */
+fn a_copied_handle_still_sees_the_close() {
+    let name = opened(31)
+    let handle = NameHandle { name = name }
+    let copy = handle
+    teko::assert::is_true(copy.is_open())
+    closed(name)
+    teko::assert::is_false(copy.is_open())
+    teko::assert::is_false(handle.is_open())
+}
+
+#test
+/**
+ * a_caching_handle_fails_this — the reversal of the arm above: a handle that stores the answer does
+ * NOT see the close, and this test asserts exactly that stale `true`.
+ *
+ * Without this arm the guard above says only "I saw no problem", which is what a blind guard also
+ * says. With it, the guard is known to be capable of failing.
+ *
+ * @return void
+ */
+fn a_caching_handle_fails_this() {
+    let name = opened(32)
+    let stale_handle = caching_handle_of(name)
+    closed(name)
+    teko::assert::is_true(stale_handle.open_flag)
+    teko::assert::is_false(is_live(stale_handle.name))
+}
+
+#test
+/**
+ * an_open_and_its_close_leave_no_slot_behind — the leak probe: the live count comes back to exactly
+ * where it started, whatever else the run has open.
+ *
+ * Relative and never absolute, because these tests share one process-wide registry with each other.
+ *
+ * @return void
+ */
+fn an_open_and_its_close_leave_no_slot_behind() {
+    let before = live_count()
+    let name = opened(77)
+    teko::assert::eq_u64(live_count(), before + 1)
+    closed(name)
+    teko::assert::eq_u64(live_count(), before)
+}
+
+#test
+/**
+ * the_slot_array_grows_and_then_recycles — the memory arm: capacity follows the peak live count, and
+ * a second round of the same size costs nothing more.
+ *
+ * The second round is the point. Slots are recycled through a free list, so a workload that opens and
+ * closes N names forever holds N slots — never one per open. Capacity is measured in slots; the byte
+ * cost is 24 per slot on a 64-bit host.
+ *
+ * @return void
+ */
+fn the_slot_array_grows_and_then_recycles() {
+    let before = live_count()
+    mut names: []u64 = teko::list::empty()
+    loop mut i: u64 = 0; i < 64; i++ { names = teko::list::push(names, opened(1000)) }
+    teko::assert::eq_u64(live_count(), before + 64)
+    teko::assert::is_true(capacity() >= live_count())
+    let grown = capacity()
+    loop mut i: u64 = 0; i < names.len; i++ { closed(names[i]) }
+    teko::assert::eq_u64(live_count(), before)
+    mut again: []u64 = teko::list::empty()
+    loop mut i: u64 = 0; i < 64; i++ { again = teko::list::push(again, opened(2000)) }
+    teko::assert::eq_u64(capacity(), grown)
+    loop mut i: u64 = 0; i < again.len; i++ { closed(again[i]) }
+    teko::assert::eq_u64(live_count(), before)
+}
+
+#test
+/**
+ * every_status_code_has_a_sentence — a failure mode with no words is a failure mode nobody diagnoses.
+ *
+ * @return void
+ */
+fn every_status_code_has_a_sentence() {
+    teko::assert::str_contains(status_text(STATUS_UNKNOWN), "never issued")
+    teko::assert::str_contains(status_text(STATUS_CLOSED), "stale")
+    teko::assert::str_contains(status_text(STATUS_KIND), "another kind")
+    teko::assert::str_contains(status_text(STATUS_FULL), "no name left")
+    teko::assert::str_contains(status_text(STATUS_RESERVED), "reserved payload")
+    teko::assert::str_contains(status_text(STATUS_OK), "live")
+}
