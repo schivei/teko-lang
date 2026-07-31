@@ -2589,3 +2589,58 @@ Cada `docs(…)` que empurrei cancelou o run anterior por grupo de concorrência
 recentes da lane, **8 estão `cancelled`**. **A lane não teve uma execução completa de CI a noite
 inteira, e a culpa é do ritmo dos meus commits, não do host.** Daqui em diante os documentos da noite
 vão num só empurrão.
+
+## 4. ACHADO NOVO E GRAVE — `teko::f64_bits` está ERRADO no backend próprio
+
+Veio como achado adjacente do ramo `cargo/0.3.1.0-ftoa-nonfinite`, não pedido. **Não é o `ftoa`: é o
+instrumento que lê os bits.** Repro mínima, medida com `teko 0.3.0.31-beta`:
+
+```teko
+fn p_inf() -> f64 { mut huge: f64 = 1.0e308; mut ten: f64 = 10.0; huge * ten }
+fn p_from_arith() -> u64 { let nan = p_inf() - p_inf(); teko::f64_bits(nan) }
+```
+
+| rota | resultado |
+|---|---|
+| C | `18444492273895866368` = `0xFFF8000000000000` ✔ |
+| backend próprio | `4621819117588971520` = **`0x4024000000000000` = 10.0** ✘ |
+
+**`0x4024000000000000` é a última constante `f64` que a função PRODUTORA tocou.** O `teko::ftoa` do
+mesmo local responde `-nan` correctamente nas duas rotas — **o valor está certo e o instrumento lê o
+registo errado**.
+
+E as variantes são piores do que um número errado:
+
+* formatar directamente (`$"{bits:X}"`) imprime **vazio**, corrompe a linha com lixo, e chegou a
+  `out of memory (str concat)` e a **SIGSEGV**;
+* um programa com várias dessas funções compilou, correu e **não imprimiu nada, com exit 0** —
+  **código errado em silêncio**, que é a classe exacta que a barra do tronco recusa.
+
+**Porque o corpus não apanha isto:** o `f_f64_bits_roundtrip` só alimenta `f64_from_bits`. O caminho
+*"`f64` vindo de chamada ou de aritmética"* **não está coberto**.
+
+Fica **por medir** se a CRT da Microsoft escreve `-nan(ind)` — continua inferência, e é exactamente o
+que a próxima corrida do `test / windows-x86_64` passa a responder, agora que a asserção cita o que
+obteve.
+
+## 5. O defeito que era meu, e a drenagem que ele forçou
+
+O `artifact / linux-arm64-musl` e o `artifact / linux-x86_64-glibc` do run 30605024103 morrem assim:
+
+```
+teko: .: const aggregate: slice element is pointer/slice-bearing -> Tier-B (T-B), not crumb 6 (#594)
+fixpoint: VERDICT: FAILED — gen1 does not build the source it came from
+```
+
+**A matriz inteira de artefactos estava bloqueada pelo degrau `const_slice`**, que já estava fechado
+em `cargo/0.3.1.0-degrau-const-slice` e por drenar.
+
+E havia um segundo defeito, **meu**, por cima: em `0947d543` eu registei
+`examples/regressions/const_slice_of_str/const_slice_of_str.tkr` em `teko.tkp:57` **na lane**, mas a
+fixture só existia naquele ramo. Auditoria de 11 directórios no disco contra 12 registados:
+**uma entrada registada sem ficheiro** — que dá `regression FAIL … listed regressor file does not
+exist (M.3)` em toda a corrida de `teko test .`, mascarado pelo esgotamento do `own_native` que mata
+o job antes de lá chegar.
+
+Corrigir o *registo* teria escondido o *degrau*. Drenei o ramo, que traz os dois: o fixture ao lado do
+ficheiro que o nomeia, e o degrau que desbloqueia a matriz.
