@@ -2704,3 +2704,47 @@ fixpoint: VERDICT: FAILED — gen1 does not build the source it came from
 ```
 
 Antes de escrever a linha que falta num manifesto, perguntar **porque é que ela falta**.
+
+## RULING — o `adopt { }` sai da linguagem; o bloco nu toma o lugar dele
+
+Dono, 2026-07-31:
+
+> *"Esquece o `adopt` como construto `adopt {}`. Usaremos blocos nus."*
+
+Fecha uma linha que ele vinha puxando há dias, e que já tinha duas peças registradas:
+
+> *"O `adopt` deveria ser para pegar para si uma ref, ao invés de manter a arena de quem a retornou
+> com ela, parecido com Rust. Não gosto da ideia."*
+
+> *"Por isso que (com tuuuudo isso) o `adopt` é desnecessário."*
+
+### A ORDEM, que é dele e não negocia
+
+> *"A remoção deve vir DEPOIS OU JUNTO das sub-regiões, NUNCA ANTES."*
+
+Logo: o bloco nu entrega a capacidade equivalente **primeiro**; a remoção é do integrador, depois que
+as sub-regiões fecharem. Nenhum agente remove o `adopt`.
+
+### O campo, verificado antes de registrar
+
+| fato | evidência |
+|---|---|
+| a única coisa que o `adopt` faz | `codegen.tks:9067` — *"ALWAYS opens an adopter region"* |
+| usuários de produção | **zero** |
+| usos reais na árvore | 3 casos em `examples/regressions/diagnostics/src/` — `c17_adopt_break_outside_loop`, `c18_adopt_break_unknown_label`, `c19_adopt_return_type_mismatch`, **todos `EXPECT_COMPILE_FAIL`** |
+| as demais ocorrências de "adopt" | **prosa** — nome de ramo `null-adopt`, "cross-adoption" da inferência de tipo, "adopted subtree" em comentário |
+| `#arena_size` / `#arena_depth` dependem do `adopt`? | **não** — são atributos de declaração de função (`parse_decl.tks:283`, `ast.tks:433-448`) |
+| outros caminhos a cobrir | `codegen.tks:9223` (`cg_block_calls_self`), `:10187` (`cg_collect_block_opts`) |
+
+### A consequência que o bloco nu tem de absorver
+
+O `adopt` abre região **incondicionalmente**. O mecanismo de bloco do ramo `atuador-regiao` abre
+região só quando `cg_block_has_block_local` prova localidade — e é exatamente essa condição que faz a
+limpeza por escopo disparar **1 vez no compilador inteiro**. **Para substituir o `adopt`, o bloco nu
+precisa da mesma incondicionalidade.** Está no briefing do agente.
+
+### O que NÃO se perde, dito porque a troca parece uma perda e não é
+
+O `adopt` carregava semântica de **tomar posse de uma ref** — a parte que o dono nomeou e recusou. O
+bloco nu **não** transfere posse: ele escopa e limpa. Essa diferença é o objetivo da troca, não um
+efeito colateral dela.
