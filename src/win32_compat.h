@@ -30,6 +30,13 @@
 #include <stdlib.h>    // malloc, free, _putenv_s
 #include <string.h>    // strlen, memcpy
 #include <errno.h>     // EEXIST (available on Windows CRT)
+// ESTE INCLUDE FALTAVA, e a forma da falha diz porque um cabecalho tem de carregar as SUAS
+// proprias dependencias em vez de as pedir emprestadas a quem o inclui: o `teko_rt.c` inclui
+// `<io.h>` DUAS LINHAS DEPOIS de incluir este ficheiro (`:29` contra `:31`) — e duas linhas tarde
+// e tarde na mesma. A perna `artifact / windows-x86_64` morreu com `win32_compat.h:236: use of
+// undeclared identifier '_get_osfhandle'` ao fim de 75,5 s de `cc`, e nao morreu em mais lado
+// nenhum porque o bloco e so do Windows: nem o Linux nem o macOS o compilam.
+#include <io.h>        // _get_osfhandle — descritor CRT → HANDLE, em tk_win32_redirect_handle_of_fd (F5)
 
 // --- directory change / creation -----------------------------------------
 #define chdir(p)           _chdir(p)

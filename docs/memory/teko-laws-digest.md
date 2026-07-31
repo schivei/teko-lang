@@ -2009,3 +2009,244 @@ os 2 `.chan` também somem.** Os 46 `.tkcov` ficam, e é coerente: pela lei mais
 O dono lembrou ter pedido antes suporte a pipe e unix socks. **Varri `src/` e `docs/`: zero
 ocorrências** de `AF_UNIX`, `sockaddr_un`, `socketpair`, "unix socket" ou "named pipe". O pedido
 não foi perdido pela memória dele — **nunca foi registrado**.
+
+## O `chan<T>` pode ser AÇÚCAR sobre o transporte do SO (dono, 2026-07-30)
+
+> *"até canais `chan<T>` poderiam se beneficiar dessa arquitetura, já existe, só precisa de um
+> 'açúcar'."*
+
+Em vez de construir o `tk_chan` como maquinaria própria, o `chan<T>` assenta sobre o transporte que
+o sistema **já dá**. E o que vem junto não é pouco — é literalmente a lista de requisitos do desenho:
+
+| requisito desenhado à mão | o SO já dá |
+|---|---|
+| capacidade limitada | o buffer do socket **é** o limite |
+| contrapressão | escrita bloqueia ou devolve `EAGAIN` quando enche |
+| espera com prazo | `poll` com deadline exato |
+| N escritores, um leitor | vários descritores para o mesmo par |
+| entre threads **e** entre processos | o mesmo objeto serve os dois |
+
+### O enquadramento: medido, e é onde o açúcar tem limite
+
+Testado nesta caixa (Linux):
+
+```
+SOCK_SEQPACKET socketpair: OK
+duas escritas de 3 e 5  ->  duas leituras de 3 e 5   fronteira PRESERVADA
+o mesmo em SOCK_STREAM  ->  uma leitura de 8 bytes   fronteira PERDIDA — colou
+```
+
+**`SOCK_SEQPACKET` sobre `AF_UNIX` preserva fronteira de mensagem** — exatamente o enquadramento que
+o desenho fez à mão com prefixo de comprimento.
+
+**Mas só no Linux.** macOS não tem `SEQPACKET` em `AF_UNIX` (só `STREAM` e `DGRAM`), e o `AF_UNIX`
+de Windows é **só `STREAM`**. *(Estas duas de conhecimento, NÃO medidas nesta caixa — e a diferença
+importa.)* Logo o subconjunto portátil é `STREAM`, que **cola as mensagens**, e o prefixo de
+comprimento **continua a fazer falta**.
+
+**Nada se perde**: o desenho já o tem. O que muda é que ele deixa de ser invenção e passa a ser a
+camada fina que falta ao `STREAM` — e no Linux poderia até desaparecer, se se quisesse pagar
+divergência entre plataformas, que **não** se quer.
+
+## As razões de recusa são FLAGS DA MENSAGEM, não errno do SO (dono, 2026-07-30)
+
+> *"os enumerados que o arquiteto deu podem permanecer, seriam flags da mensagem transportada (um
+> signal aninhado em outro)."*
+
+**Duas camadas, não uma colapsada na outra.** O transporte do SO tem os erros dele (`EAGAIN`,
+`EPIPE`, `ECONNRESET`); as razões semânticas do canal continuam a ser **nossas**, viajando como
+flags no protocolo. Um sinal aninhado noutro.
+
+### E isto resolve uma portabilidade que eu não tinha levantado
+
+`EAGAIN`/`EPIPE` variam de grafia e de disponibilidade entre POSIX e Windows. **Uma flag na nossa
+mensagem é idêntica em toda parte** — a mesma lógica que tornou o `.tkj` inteiramente portátil ao
+tirar os ids de cobertura do canal.
+
+E preserva a guarda do arquiteto — *toda a razão tem de ter um teste que a produza* — porque a razão
+passa a ser **produzida pelo nosso código**, não pelo núcleo. Uma razão produzida pelo kernel é uma
+razão que só se testa provocando o kernel.
+
+### O detalhe que afia a regra, e é demonstrável
+
+Nem todas as razões podem viajar, e a fronteira é exata:
+
+| razão | onde vive |
+|---|---|
+| **`Full`** | **retorno LOCAL do `push`** — não pode ser flag transportada: se o canal está cheio, **não há espaço para a mensagem que diria "estou cheio"** |
+| `Closed` | **flag transportada** — o leitor anuncia o fecho, e a mensagem cabe porque o canal ainda funciona |
+| `NoReader` | **flag transportada** — mesma razão |
+| `NotAProducer` | **retorno local** — é um id inválido, verificável antes de qualquer envio |
+
+A forma do dono aplica-se às que **precisam de viajar**; as outras já são locais por natureza. A
+enumeração fica inteira, e cada razão passa a ter um lugar declarado em vez de um só balde.
+
+---
+
+## A morte de um buffer ACEITA-SE — não há bala de prata (dono, 2026-07-31)
+
+> *"O ponto da morte de um buffer, é aceitar, não existe bala de prata. Assim como uma interrupção
+> externa, a morte de um buffer se dá de duas formas, interrupção externa ou deliberadamente pelo
+> programa. Só lembrar que muitos sistemas rodam em cima desse constructo nativo dos sistemas
+> operacionais."*
+
+Eu tinha levantado a perda de um buffer em voo como objeção ao empacotamento: um escritor que morre
+com o buffer meio cheio perde o que lá está, e isso choca com a captura (C0), que existe para o teste
+que morre ainda reportar.
+
+**A objeção estava mal posta, e a razão sai da própria formulação do dono: a janela nunca foi zero.**
+Mesmo sem empacotar, um escritor pode morrer entre PRODUZIR um registo e chamar `push`. Empacotar
+alarga a janela de 1 registo para K; **não a cria**. Defender contra a perda seria defender contra
+uma coisa que já era verdade — e ao preço de recusar um ganho medido de 20× a 22×.
+
+### As duas formas, e só uma delas é ganhável
+
+| forma | ganhável? | o que se faz |
+|---|---|---|
+| **deliberada pelo programa** (pânico, `exit`, fim de teste) | **SIM** — é um ponto do nosso código | descarrega-se o buffer ali, e custa nada porque o ponto já existe |
+| **interrupção externa** (`SIGKILL`, OOM, o runner a ser reclamado) | **NÃO** | aceita-se |
+
+A captura já **é** um ponto deliberado: o `longjmp` do `tk_test_run` é código nosso. Descarregar aí
+cobre o caso ganhável inteiro sem inventar mecanismo nenhum. O caso não ganhável fica aceite, por
+decisão, e não escondido atrás de uma defesa que não defende.
+
+E o argumento de terreno provado — *"muitos sistemas rodam em cima desse constructo nativo"* — é o
+que fecha: a resposta a um transporte com perdas conhecidas não é substituí-lo por um inventado.
+
+## Os mnemónicos do `Cov`: DESCARTADOS (dono, 2026-07-31)
+
+> *"Sobre mnemonicos, entendido e pode descartar."*
+
+Eu tinha proposto que o `Cov` carregasse ids curtos em vez de texto, e nomeei o preço: **um id só
+resolve contra o build que o emitiu**, logo o `.tkj` deixaria de se ler numa máquina que não
+compilou o projeto — a menos que a tabela id→nome viajasse no cabeçalho.
+
+Descartado. **O `Cov` fica como está: carrega o FACTO de que o despejo existe, um por escritor.** E a
+propriedade que o arquiteto tinha ganho fica intacta: **o `.tkj` é inteiramente portátil** — baixa-se
+o journal de um CI vermelho e lê-se noutra máquina. Nenhum mecanismo novo entra.
+
+## O chunk de datagrama: FORA (dono, 2026-07-31)
+
+> *"quanto ao tamanho do datagrama, usar chunk seria demais para o tamanho da nossa mensagem, vamos
+> deixar de fora, se um dia distante ocorrer OOM nisso, revisitamos. Aliás, cabe até no outro caso
+> de 240K de datagrama que falou."*
+
+**Isto é sobre o DATAGRAMA, não sobre o `cont`.** As duas coisas partilham a palavra "chunk" e são
+mecanismos distintos:
+
+* **partir um `Rec` por vários datagramas** — o que eu propus para o tecto de 2048 do macOS.
+  **FORA.** O `Rec` tem 80 bytes e cabe com folga em qualquer tecto medido, incluindo o pior.
+* **partir uma LINHA longa em registos `cont`** — o mecanismo do arquiteto que dissolveu o
+  `Oversize`. **Não é tocado**, porque é sobre `REC_MAX` e não sobre o tecto do transporte.
+
+E a medição que confirma a decisão dele desmente uma célula minha: **o tecto do datagrama não era um
+tecto, era o valor por omissão.**
+
+| pedido | macOS: SNDBUF dado → maior datagrama | Linux: SNDBUF dado → maior datagrama |
+|---|---|---|
+| (omissão) | 2048 → **2048** | 212992 → 212960 |
+| 8 KiB | 8192 → 8176 | 16384 → 16352 |
+| 64 KiB | 65536 → 65520 | 131072 → 131040 |
+| 256 KiB | 262144 → 262128 | 524288 → 524256 |
+| 1 MiB | 1048576 → 1048560 | 2097152 → 2097120 |
+| 4 MiB | **4194304 → 4194288** | 8388608 → 4194304 |
+
+**O tecto segue o `SO_SNDBUF`** (menos ~16–32 bytes de sobrecarga). O macOS concede exatamente o que
+se pede; o Linux duplica. Os 2048 que eu publiquei como limitação do macOS eram o default — e o
+sistema sobe até 4 MiB sem reclamar.
+
+**Correcção nomeada, porque o erro é o mesmo de sempre:** medi um valor observado e publiquei-o como
+propriedade do sistema, sem testar se ele se movia. É a mesma patologia da guarda de PATH e da
+detecção de semente — verificar um proxy da condição em vez da condição.
+
+---
+
+## O paralelismo: o SO decide por omissão, o DESENVOLVEDOR pode fixar (dono, 2026-07-31)
+
+> *"Vamos executar, por default, no numero de threads e processos que o SO concede, mas é importante
+> que o desenvolvedor possa definir quantas alocações deseja (número de threads)."*
+
+**Duas metades, e a segunda não é uma opção de conveniência.** Por omissão a corrida usa o que o
+sistema concede; mas o número tem de ser **fixável por quem escreve**, porque uma caixa partilhada
+(um agente ao lado, um CI com quatro trabalhos no mesmo runner) não tem como o sistema saber quanto
+é que ESTA corrida pode tomar. As três falhas de hoje — `Killed: 9` no macOS, duas ondas de
+*shutdown signal* no Linux — são exatamente esse caso.
+
+**O precedente já existe e é o molde**: `test_jobs()` (`src/build/project.tks:3491`) lê
+`TEST_JOBS_ENV` com um valor por omissão, e `run_gate_sharded` reparte a suíte por esse número. A
+lei estende ao paralelismo do canal a forma que a suíte já tem — **não inventa mecanismo, generaliza
+o que está construído.**
+
+## O `spawn` sem junção: BURACO REAL no esboço que publiquei (dono, 2026-07-31)
+
+> *"Como garante que os spawns terminaram? Não deveria ter um waitgroup? E na main um
+> `defer wg.wait()`?"*
+
+**Está certo, e o defeito é meu.** O esboço publicado era:
+
+```teko
+fn main() {
+    let c = teko::threads::chan_bounded(1024)
+    defer teko::threads::chan_close(c)
+    spawn orquestrar(c)
+    loop mut i: u64 = 0; i < filhos.len; i++ { spawn drenar(c, filhos[i]) }
+}
+```
+
+**Nada faz a `main` esperar.** Ela regressa, o processo sai, e os fios morrem com ele. E há um
+segundo buraco por baixo do primeiro: mesmo que o processo não saísse, o `defer chan_close(c)`
+dispara à saída do escopo da `main` — **possivelmente enquanto os handlers ainda estão a escrever**,
+e eles receberiam `Closed` num `push` legítimo.
+
+### Porque a defesa que o desenho já tinha NÃO cobre isto
+
+O arquiteto respondeu à terminação com a **contagem de produtores**: o `recv` devolve `closed` quando
+ela chega a zero, e o `defer` da `main` é o *backstop*. Isso governa **o laço do orquestrador**, não
+**o tempo de vida da `main`**. Um mecanismo responde "quando é que o consumidor pára"; o outro tem de
+responder "quando é que a `main` pode sair" — e esse não existia.
+
+### A forma, e a ordem não é acidente
+
+```teko
+let c = teko::threads::chan_bounded(1024)
+let wg = teko::threads::waitgroup()
+defer teko::threads::chan_close(c)   // registado 1º  -> corre por ÚLTIMO
+defer wg.wait()                      // registado 2º  -> corre PRIMEIRO
+```
+
+**`defer` corre LIFO** — verificado no corpus, não de cabeça: `src/parser/ast.tks:339`
+(*"executes LIFO at ANY scope exit"*), `src/checker/typer.tks:3514`, `src/lir/lower.tks:5367`. Logo
+esta ordem de escrita dá a ordem certa de execução: **espera, depois fecha.** Escrita ao contrário,
+fecha antes de esperar — e é um erro silencioso, porque o `Closed` chega a um `push` que estava certo.
+
+**Isto é um FOOTGUN e tem de ser nomeado no desenho**, não descoberto por quem escrever o segundo
+programa que use canais.
+
+### E o orquestrador entra no waitgroup, não só os handlers
+
+Se o `wg` contasse só os handlers: `wait` volta quando eles acabam, a contagem de produtores chega a
+zero, o orquestrador vê `closed` — **mas a `main` já saiu e pode fechar o canal antes de ele drenar o
+que sobrou.** Com o orquestrador dentro do `wg` não há impasse, porque ele termina sozinho assim que
+os produtores acabam: a espera é finita **por construção**, não por convenção.
+
+## O profiler: a especulação ESTÁ registada — SW12, `#479`/`#480` (dono, 2026-07-31)
+
+> *"há uma 'especulação' que não sei se tem registrado, que é o desenvolvimento de um profiler, para
+> otimizar o binário final… sei que tkcov e journal serão de grande valia."*
+
+**Está registada**, em `docs/design/wave-0.3.1-plan.md`, secção **SW12 — Profiling, Coverage & PGO**:
+
+| crumb | issue | o quê |
+|---|---|---|
+| 12.1 | **#475** | cobertura como sinal de disco apenas (zero alocação em memória durante a corrida); transformação XML/Cobertura **depois** |
+| 12.2 | **#479** | `teko profile` (estático + dinâmico) a sugerir `#arena_size`/`#arena_depth` |
+| 12.3 | **#480** | PGO de pré-dimensionamento de arena — o pré-linker atribui tamanho+profundidade a partir do relatório; **manual > PGO > omissão** |
+
+E o plano já traz **uma pergunta em aberto endereçada ao dono**, que continua por responder: o
+`#479`/`#480` referem `#arena_depth` (**#476**), que **não está no âmbito**. A recomendação escrita é
+puxar o `#476` para o SW12 como crumb 12.0, *"porque o profiler é incoerente a sugerir uma directiva
+que não existe"*.
+
+**A ligação que o dono viu é a que o plano ainda não tem:** o 12.1 já diz *"cobertura como sinal de
+disco, zero alocação em corrida"* — que é **exatamente** o que o journal constrói. O plano escreveu
+o requisito antes de existir o mecanismo que o satisfaz.
