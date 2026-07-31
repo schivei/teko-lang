@@ -1,44 +1,39 @@
-# region_actuator.tkr — o regressor do actuador de regiao, e sobretudo da sua INVERSAO.
+# region_actuator.tkr — o actuador de regiao na ROTA NATIVA, e a sua inversao.
 #
-# O que ele fixa, e porque tem de correr nas quatro configuracoes:
+# PORQUE HA DOIS FICHEIROS PARA UM SO PROJECTO, e a razao e de mecanica do arnes, nao de gosto: um
+# `.tkr` com forma de PROJECTO compila-o UMA vez, com o `Given env` do PRIMEIRO cenario que o alcanca
+# (`tkr_ensure_built` — "the project is compiled at most once per `.tkr` file"). Logo uma configuracao
+# de BUILD que precise de ser outra precisa do seu proprio ficheiro, exactamente como o `own_native`
+# faz com os seus alvos. Este ficheiro compila na rota nativa; o `region_actuator_c.tkr` compila na
+# rota C, que e a que emite o roteamento por regiao. Um `TEKO_MEM_PARANOID` a mais num destes
+# ficheiros NAO reconstroi nada — e uma variavel de EXECUCAO, e e por isso que ela pode partilhar a
+# compilacao do cenario de cima sem mentir.
+#
+# O QUE OS DOIS FICHEIROS FIXAM, e e a mesma coisa das duas maneiras:
 #
 #   * o braco POSITIVO — um acumulador cujo dono e o bloco cresce por um `push` escrito dentro de um
 #     ciclo ANINHADO e mesmo assim e roteado para a regiao do bloco que o DECLARA. Se fosse roteado
-#     para a regiao do bloco onde a instrucao esta, o buffer seria libertado a cada iteracao do
-#     ciclo interno e a comparacao do proprio braco falharia (codigo 11);
+#     para a regiao do bloco onde a instrucao esta, o buffer seria libertado a cada iteracao do ciclo
+#     interno e a comparacao do proprio braco falharia (codigo 11);
 #
 #   * o braco da INVERSAO — o mesmo acumulador, mas entregue a uma ligacao de FORA do bloco. Hoje o
 #     escape e seguro porque nada e libertado; a partir do momento em que o roteamento funciona, este
 #     e exactamente o caso que passaria a ser libertacao de armazenamento vivo. O valor tem de voltar
-#     PRESERVADO (codigos 12/13 quando nao volta), e o mesmo para uma `str` construida dentro do
-#     bloco (codigo 14);
+#     PRESERVADO (codigos 12/13 quando nao volta), e o mesmo para uma `str` construida dentro do bloco
+#     (codigo 14);
 #
 #   * `TEKO_MEM_PARANOID=1` — sob esta variavel o runtime envenena com 0xDD todo o bloco que estaciona
 #     e nunca o reutiliza, logo uma leitura de armazenamento morto devolve lixo em vez de devolver o
 #     valor certo por acidente. Um cenario que passa sem a variavel e falha com ela e precisamente o
-#     erro escondido que a barra do dono proibe;
-#
-#   * as DUAS rotas — o roteamento por regiao e emitido pela rota C; a rota nativa nao o emite. As
-#     duas tem de dar a MESMA resposta, senao o roteamento mudou a semantica em vez de mudar so onde
-#     a memoria vive.
+#     erro escondido que a barra do dono proibe.
 
-Feature: actuador de regiao — o selector consulta a regiao do bloco dono do destino
+Feature: actuador de regiao (rota nativa) — o selector consulta a regiao do bloco dono do destino
 
-  Scenario: rota nativa — o acumulador do bloco fecha e o valor escapado sobrevive
+  Scenario: o acumulador do bloco fecha e o valor escapado sobrevive
     When built and run
     Then exit = 42
 
-  Scenario: rota C — o acumulador do bloco fecha e o valor escapado sobrevive
-    Given env = ["TEKO_BACKEND=c"]
-    When built and run
-    Then exit = 42
-
-  Scenario: rota nativa com TEKO_MEM_PARANOID — nada libertado em silencio
+  Scenario: com TEKO_MEM_PARANOID — nada libertado em silencio
     Given env = ["TEKO_MEM_PARANOID=1"]
-    When built and run
-    Then exit = 42
-
-  Scenario: rota C com TEKO_MEM_PARANOID — a inversao, na rota que emite o roteamento
-    Given env = ["TEKO_BACKEND=c", "TEKO_MEM_PARANOID=1"]
     When built and run
     Then exit = 42
