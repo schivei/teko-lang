@@ -4,9 +4,10 @@ use teko::parser
 
 /** teko::lir (lower_const) — aggregate-const serialization: the #594 T-B6 const-image
     producer for lower. Const-folding of scalar initializer trees, the little-endian byte
-    writers, struct/array/variant blob serialization (fat fields + leaf symbols into a
-    ConstImage), variant-table collection, and the rodata interning entry points
-    (`serialize_const` / `intern_aggregate_consts`) that `lower_program` drives. */
+    writers, struct/array/variant blob serialization (fat MEMBERS — struct fields AND slice
+    elements — plus leaf symbols into a ConstImage), variant-table collection, and the rodata
+    interning entry points (`serialize_const` / `intern_aggregate_consts`) that `lower_program`
+    drives. */
 
 /**
  * const_rodata_symbol — the deterministic rodata symbol a module-level AGGREGATE const materializes
@@ -312,24 +313,24 @@ fn const_str_bytes(init: checker::TExpr) -> []byte | error {
 }
 
 /**
- * const_array_bytes — the rodata image of a `[]T` flat-scalar array literal: each element folded to
- * its i64 value and serialized at the SAME element stride the indexer uses (`ltype_of(element)`), so
+ * const_array_bytes — the rodata image of a `[]T` FLAT-SCALAR array literal: each element folded to
+ * its i64 value and serialized at the SAME element stride the indexer uses (`elem_byte_stride`), so
  * a later `[i]`/`.len` read agrees byte-for-byte on both engines (#594 crumb 6). A spread element is
  * not statically materializable and honest-stops.
  *
- * @param element  the slice's element type
+ * @param element  the slice's element type (a flat scalar — a fat element goes to `const_fat_array_image`)
  * @param a        the typed array literal
  * @param enums    the program's declared-enum table (an enum element strides at its integer width)
  * @return         the concatenated element images
  * @throws         when an element is a spread or is not a foldable flat scalar
  */
 fn const_array_bytes(element: checker::Type, a: checker::TArrayLit, enums: []LEnumInfo) -> []byte | error {
-    let stride = ltype_size(ltype_of(element, enums))
+    let stride = elem_byte_stride(element, enums)
     mut out: []byte = teko::list::empty()
     mut i: u64 = 0
     loop {
         if i >= a.elements.len { break }
-        if a.elements[i].is_spread { return error { message = "const slice: spread element not statically materializable (#594)" } }
+        match const_reject_spread(a, i) { error as e => return e; null => { } }
         let v = match const_fold_int(a.elements[i].expr) { i64 as x => x; error as e => return e }
         out = append_bytes(out, serialize_le(v, stride))
         i++
@@ -338,21 +339,158 @@ fn const_array_bytes(element: checker::Type, a: checker::TArrayLit, enums: []LEn
 }
 
 /**
- * const_slice_bytes — the rodata image of a `[]T` aggregate const (#594 crumb 6): reject a
- * pointer-bearing element (Tier-B, T-B), else materialize the array literal via `const_array_bytes`.
+ * const_reject_spread — the spread guard both array serializers share: a `..xs` element carries no
+ * statically known length, so it is not materializable into rodata and honest-stops.
  *
- * @param element  the slice's element type
- * @param init     the const's checked initializer
- * @param enums    the program's declared-enum table (an enum element strides at its integer width)
- * @return         the slice's byte image
- * @throws         when the element is pointer-bearing (Tier-B) or the initializer is not an array literal
+ * @param a  the typed array literal
+ * @param i  the element index being serialized
+ * @return   `null` when the element is an ordinary value
+ * @throws   when the element at `i` is a spread
  */
-fn const_slice_bytes(element: checker::Type, init: checker::TExpr, enums: []LEnumInfo) -> []byte | error {
-    if !const_is_flat_scalar(element) { return error { message = "const aggregate: slice element is pointer/slice-bearing -> Tier-B (T-B), not crumb 6 (#594)" } }
+fn const_reject_spread(a: checker::TArrayLit, i: u64) -> null | error {
+    if a.elements[i].is_spread { return error { message = "const slice: spread element not statically materializable (#594)" } }
+    null
+}
+
+/**
+ * const_elem_key — the leaf-symbol key of the slice element at `index`: its decimal index (0.3.1.0
+ * degrau const-slice). A PURE function of the index, so `const_leaf_symbol(const_name,
+ * const_elem_key(i))` names the same symbol on every generation — the fixpoint requirement every
+ * other leaf symbol already meets.
+ *
+ * @param index  the element's position in the array literal
+ * @return       the key to build the element's leaf symbol from
+ * @since 0.3.1.0 degrau const-slice
+ */
+fn const_elem_key(index: u64) -> str {
+    teko::u64_to_str(index)
+}
+
+/**
+ * const_nested_owner — the owner name a fat member's NESTED leaves are keyed under: the owner's own
+ * name joined to the member's key (0.3.1.0 degrau const-slice). A `[][]str` const `T` names its outer
+ * element leaves `.Lconst_T.0`, `.Lconst_T.1`, … and the inner leaves of element 0 `.Lconst_T.0.0`,
+ * `.Lconst_T.0.1`, … — every symbol a pure function of the declaration path, never of a counter.
+ *
+ * @param owner       the owning aggregate's name (as `const_leaf_symbol` keys it)
+ * @param member_key  the member's own key (a field name or an element index)
+ * @return            the owner name to key the member's nested leaves under
+ * @since 0.3.1.0 degrau const-slice
+ */
+fn const_nested_owner(owner: str, member_key: str) -> str {
+    teko::str::concat(owner, teko::str::concat(".", member_key))
+}
+
+/**
+ * const_array_literal — the array literal an aggregate `[]T` const is initialized by (#594 crumb 6).
+ * The only const-legal `[]T` producer; anything else honest-stops.
+ *
+ * @param init  the const's checked initializer
+ * @return      the typed array-literal node
+ * @throws      when the initializer is not an array literal
+ */
+fn const_array_literal(init: checker::TExpr) -> checker::TArrayLit | error {
     match init.kind {
-        checker::TArrayLit as a => const_array_bytes(element, a, enums)
+        checker::TArrayLit as a => a
         _ => error { message = "const slice: initializer is not an array literal (Tier-A follow-up) (#594)" }
     }
+}
+
+/**
+ * const_fat_array_image — the rodata image of a `[]T` array literal whose ELEMENTS are themselves FAT
+ * (`[]str`, `[][]T`) (0.3.1.0 degrau const-slice): a blob of `n * fat_slot_bytes()` bytes holding one
+ * zeroed pointer slot + inline element count per element, one `LDataReloc` per slot, and each
+ * element's target leaf (plus any leaf that target itself pulls in).
+ *
+ * The slot stride is `fat_slot_bytes()`, the SAME 16 bytes `elem_byte_stride` hands the runtime
+ * indexer for a fat element (`lower_index_fat`) and `const_slice_len` divides the blob by — so the
+ * const's `.len` and its `[i]` reads land on the identical bytes the C route's inlined literal builds.
+ *
+ * @param const_name  the owning const's name (for each element's deterministic leaf symbol)
+ * @param element     the slice's (fat) element type
+ * @param a           the typed array literal
+ * @param enums       the program's declared-enum table
+ * @return            the slot blob + one reloc per element + every leaf
+ * @throws            when an element is a spread, or its own target is not materializable
+ * @since 0.3.1.0 degrau const-slice
+ */
+fn const_fat_array_image(const_name: str, element: checker::Type, a: checker::TArrayLit, enums: []LEnumInfo) -> ConstImage | error {
+    mut img = const_image_flat(teko::list::empty())
+    mut i: u64 = 0
+    loop {
+        if i >= a.elements.len { break }
+        match const_reject_spread(a, i) { error as e => return e; null => { } }
+        let slot_off = (i to u32) * fat_slot_bytes()
+        let member = match const_fat_member(const_name, const_elem_key(i), slot_off, element, a.elements[i].expr, enums) { FatMemberImage as x => x; error as e => return e }
+        img = const_image_absorb(img, member)
+        i++
+    }
+    img
+}
+
+/**
+ * const_image_absorb — append one fat member's slot bytes, relocation and leaves to the array image
+ * accumulated so far (0.3.1.0 degrau const-slice). The slot bytes go at the END of the blob, which is
+ * exactly the member's own `slot_off` because every fat slot is `fat_slot_bytes()` wide.
+ *
+ * @param img     the image accumulated over the preceding elements
+ * @param member  the element's slot image, relocation and leaves
+ * @return        the image grown by that element
+ * @since 0.3.1.0 degrau const-slice
+ */
+fn const_image_absorb(img: ConstImage, member: FatMemberImage) -> ConstImage {
+    ConstImage {
+        bytes = append_bytes(img.bytes, member.slot_bytes)
+        relocs = teko::list::push(img.relocs, member.reloc)
+        leaves = append_rodata(img.leaves, member.leaves)
+    }
+}
+
+/**
+ * append_rodata — the concatenation of two rodata-entry lists, order preserved (0.3.1.0 degrau
+ * const-slice): the leaf accumulator every aggregate image grows through.
+ *
+ * @param a  the entries accumulated so far
+ * @param b  the entries to append
+ * @return   `a` followed by `b`
+ * @since 0.3.1.0 degrau const-slice
+ */
+fn append_rodata(a: []LRodata, b: []LRodata) -> []LRodata {
+    mut out = a
+    mut i: u64 = 0
+    loop {
+        if i >= b.len { break }
+        out = teko::list::push(out, b[i])
+        i++
+    }
+    out
+}
+
+/**
+ * const_slice_image — the complete rodata image of a `[]T` aggregate const (#594 crumb 6; 0.3.1.0
+ * degrau const-slice): a FLAT-SCALAR element array is the crumb-6 byte image with empty
+ * relocs/leaves; a FAT element array (`[]str`, `[][]T`) is a blob of `{ptr = 0, len = count}` slots
+ * with one relocation and one leaf per element (`const_fat_array_image`).
+ *
+ * The remaining element families — a `char` (fat but not `str`/`[]T`), a named struct/class/variant,
+ * a `ptr<T>` — still honest-stop: their elements are held BY ADDRESS in a slice buffer
+ * (NATIVE-AGG-SLICE-BY-ADDRESS), and rodata carries no address a per-execution box could be given.
+ *
+ * @param const_name  the owning const's name (for each fat element's deterministic leaf symbol)
+ * @param element     the slice's element type
+ * @param init        the const's checked initializer
+ * @param enums       the program's declared-enum table (an enum element strides at its integer width)
+ * @return            the slice's blob + its relocations + its leaves
+ * @throws            when the initializer is not an array literal, an element is a spread, or the
+ *                    element type is neither a flat scalar nor a fat `str`/`[]T`
+ */
+fn const_slice_image(const_name: str, element: checker::Type, init: checker::TExpr, enums: []LEnumInfo) -> ConstImage | error {
+    let a = match const_array_literal(init) { checker::TArrayLit as x => x; error as e => return e }
+    if const_is_flat_scalar(element) {
+        return match const_array_bytes(element, a, enums) { []byte as b => const_image_flat(b); error as e => return e }
+    }
+    if is_fat_type(element) { return const_fat_array_image(const_name, element, a, enums) }
+    error { message = "const aggregate: slice element is pointer/slice-bearing -> Tier-B (T-B), not crumb 6 (#594)" }
 }
 
 /**
@@ -396,55 +534,62 @@ fn const_struct_field_bytes(layout: LStructLayout, si: checker::TStructInit, j: 
 }
 
 /**
- * const_fat_array_bytes — the flat-scalar rodata bytes of a fat field's target array (#594 T-B6): a
- * `str` field's raw UTF-8 (`const_str_bytes`), a `[]T` field's element images at the indexer's stride
- * (`const_slice_bytes`). The SAME stride a later `[i]` folds against and the same bytes a standalone
- * slice const would intern, so the leaf and any read agree byte-for-byte.
+ * const_fat_target_image — the complete rodata image of a fat member's TARGET array (#594 T-B6;
+ * 0.3.1.0 degrau const-slice): a `str` member's raw UTF-8 (`const_str_bytes`, always flat), a `[]T`
+ * member's element images at the indexer's stride (`const_slice_image`, itself flat or slot-bearing
+ * depending on the element). The SAME stride a later `[i]` folds against and the same bytes a
+ * standalone const of that type would intern, so the leaf and any read agree byte-for-byte.
  *
- * @param field_ty  the field's checked type (`Str`/`Slice`)
- * @param vexpr     the field's initializer (a string/array literal)
- * @param enums     the program's declared-enum table (an enum element strides at its integer width)
- * @return          the target array's flat-scalar byte image
- * @throws          when the field is not a str/slice (internal), or the initializer is not materializable
- * @since #594 T-B6
+ * @param owner      the name the target's OWN nested leaves are keyed under (`const_nested_owner`)
+ * @param member_ty  the member's checked type (`Str`/`Slice`)
+ * @param vexpr      the member's initializer (a string/array literal)
+ * @param enums      the program's declared-enum table (an enum element strides at its integer width)
+ * @return           the target array's bytes + its own relocations + its own nested leaves
+ * @throws           when the member is not a str/slice (internal), or the initializer is not materializable
+ * @since #594 T-B6; 0.3.1.0 degrau const-slice (nested leaves)
  */
-fn const_fat_array_bytes(field_ty: checker::Type, vexpr: checker::TExpr, enums: []LEnumInfo) -> []byte | error {
-    match field_ty {
-        checker::Str => const_str_bytes(vexpr)
-        checker::Slice as s => const_slice_bytes(s.element, vexpr, enums)
-        _ => error { message = "const aggregate: fat field is neither str nor slice (internal) (#594)" }
+fn const_fat_target_image(owner: str, member_ty: checker::Type, vexpr: checker::TExpr, enums: []LEnumInfo) -> ConstImage | error {
+    match member_ty {
+        checker::Str => match const_str_bytes(vexpr) { []byte as b => const_image_flat(b); error as e => return e }
+        checker::Slice as s => const_slice_image(owner, s.element, vexpr, enums)
+        _ => error { message = "const aggregate: fat member is neither str nor slice (internal) (#594)" }
     }
 }
 
 /**
- * const_fat_field — the 16-byte image of a fat field (`[]T`/`str`) of an aggregate const, with the
- * pointer slot zero and the element count inline in the high slot (#594 T-B6): `{ slot_bytes = <8
- * zero> ++ serialize_le(count, POINTER_SIZE), reloc = data_reloc(fieldoff, leaf_sym), leaf = LRodata{
- * leaf_sym, array_bytes, relocs=[] } }`. `array_bytes` reuses `const_fat_array_bytes` (the SAME stride
- * the indexer folds) and `count` is the element count (`const_fat_len`) — the SAME value
- * `lower_len_field` returns, so a `.len` read agrees. The leaf symbol is `const_leaf_symbol(const_name,
- * field_name)` (a pure function -> deterministic).
+ * const_fat_member — the 16-byte image of a FAT MEMBER (`[]T`/`str`) of an aggregate const, with the
+ * pointer slot zero and the element count inline in the high slot (#594 T-B6; 0.3.1.0 degrau
+ * const-slice): `{ slot_bytes = <8 zero> ++ serialize_le(count, POINTER_SIZE), reloc =
+ * data_reloc(slot_off, leaf_sym), leaves = <nested leaves> ++ [LRodata{ leaf_sym, target bytes,
+ * target relocs }] }`.
  *
- * @param const_name  the owning const's name (for the leaf symbol)
- * @param field_name  the field's name (for the leaf symbol)
- * @param fieldoff    the field's byte offset in the struct blob (the pointer slot's offset)
- * @param field_ty    the field's checked type (`Slice`/`Str`)
- * @param vexpr       the field's initializer (a string/array literal)
+ * ONE producer for both member families: a fat struct FIELD (`slot_off` = the field's layout offset,
+ * `member_key` = the field name) and a fat slice ELEMENT (`slot_off` = `index * fat_slot_bytes()`,
+ * `member_key` = the decimal index). `count` is the element count (`const_fat_len`) — the SAME value
+ * `lower_len_field`/`lower_const_fat` compute, so a `.len` read agrees. The leaf symbol is
+ * `const_leaf_symbol(owner, member_key)`, a pure function of the declaration path, so every
+ * generation emits the identical symbol (fixpoint-safe).
+ *
+ * @param owner       the owning aggregate's name (for the leaf symbol)
+ * @param member_key  the member's key — a field name, or an element index (`const_elem_key`)
+ * @param slot_off    the member's byte offset in the owning blob (the pointer slot's offset)
+ * @param member_ty   the member's checked type (`Slice`/`Str`)
+ * @param vexpr       the member's initializer (a string/array literal)
  * @param enums       the program's declared-enum table (an enum element strides at its integer width)
- * @return            the 16-byte slot image, the relocation, and the leaf
+ * @return            the 16-byte slot image, the relocation, and every leaf it pulls in
  * @throws            when the initializer is not materializable (non-literal, spread, or ptr element)
- * @since #594 T-B6
+ * @since #594 T-B6; 0.3.1.0 degrau const-slice (elements + nested leaves)
  */
-fn const_fat_field(const_name: str, field_name: str, fieldoff: u32, field_ty: checker::Type, vexpr: checker::TExpr, enums: []LEnumInfo) -> FatFieldImage | error {
-    let array_bytes = match const_fat_array_bytes(field_ty, vexpr, enums) { []byte as x => x; error as e => return e }
-    let count = match const_fat_len(field_ty, array_bytes.len to u32, enums) { u32 as c => c; error as e => return e }
-    let leaf_sym = const_leaf_symbol(const_name, field_name)
+fn const_fat_member(owner: str, member_key: str, slot_off: u32, member_ty: checker::Type, vexpr: checker::TExpr, enums: []LEnumInfo) -> FatMemberImage | error {
+    let target = match const_fat_target_image(const_nested_owner(owner, member_key), member_ty, vexpr, enums) { ConstImage as x => x; error as e => return e }
+    let count = match const_fat_len(member_ty, target.bytes.len to u32, enums) { u32 as c => c; error as e => return e }
+    let leaf_sym = const_leaf_symbol(owner, member_key)
     let ptr_size = ltype_size(LType::Ptr)
     let slot = append_bytes(zeros_bytes(ptr_size to u64), serialize_le(count to i64, ptr_size))
-    FatFieldImage {
+    FatMemberImage {
         slot_bytes = slot
-        reloc = data_reloc(fieldoff, leaf_sym)
-        leaf = LRodata { symbol = leaf_sym; bytes = array_bytes; relocs = teko::list::empty() }
+        reloc = data_reloc(slot_off, leaf_sym)
+        leaves = teko::list::push(target.leaves, LRodata { symbol = leaf_sym; bytes = target.bytes; relocs = target.relocs })
     }
 }
 
@@ -452,10 +597,10 @@ fn const_fat_field(const_name: str, field_name: str, fieldoff: u32, field_ty: ch
  * const_struct_blob — the complete rodata image of a struct aggregate const (#594 crumb 6 + T-B6): a
  * zero-filled buffer of the struct's size with each SCALAR field's little-endian value written at its
  * layout offset (declared order, natural alignment) and each FAT field (`[]T`/`str`) written as its
- * 16-byte `{ptr=0, len=count}` slot plus a `LDataReloc` + a leaf `LRodata` (`const_fat_field`). Padding
+ * 16-byte `{ptr=0, len=count}` slot plus a `LDataReloc` + its leaves (`const_fat_member`). Padding
  * stays zero, so a later `.field`/`.len`/`[i]` read recovers the exact value on both engines. A flat
  * Tier-A struct yields empty `relocs`/`leaves` (byte-identical to crumb 6); an ABI descriptor yields
- * one reloc + one leaf per slice field.
+ * one reloc per slice field, plus that field's leaf and any leaf the leaf itself pulls in.
  *
  * @param const_name  the owning const's name (for each fat field's deterministic leaf symbol)
  * @param layout      the struct's resolved layout (size + per-field offset/class)
@@ -466,28 +611,46 @@ fn const_fat_field(const_name: str, field_name: str, fieldoff: u32, field_ty: ch
  * @since #594 crumb 6 + T-B6
  */
 fn const_struct_blob(const_name: str, layout: LStructLayout, si: checker::TStructInit, enums: []LEnumInfo) -> ConstImage | error {
-    mut buf = zeros_bytes(layout.size to u64)
-    mut relocs: []LDataReloc = teko::list::empty()
-    mut leaves: []LRodata = teko::list::empty()
+    mut img = ConstImage { bytes = zeros_bytes(layout.size to u64); relocs = teko::list::empty(); leaves = teko::list::empty() }
     mut j: u64 = 0
     loop {
         if j >= layout.field_names.len { break }
-        let field_name = layout.field_names[j]
-        let fieldoff = layout.field_offsets[j]
-        let vexpr = match struct_init_value(si, field_name) { checker::TExpr as x => x; error as e => return e }
-        if is_fat_type(vexpr.type) {
-            let ffi = match const_fat_field(const_name, field_name, fieldoff, vexpr.type, vexpr, enums) { FatFieldImage as x => x; error as e => return e }
-            buf = write_bytes_at(buf, fieldoff to u64, ffi.slot_bytes)
-            relocs = teko::list::push(relocs, ffi.reloc)
-            leaves = teko::list::push(leaves, ffi.leaf)
-        }
-        if !is_fat_type(vexpr.type) {
-            let fb = match const_struct_field_bytes(layout, si, j) { []byte as x => x; error as e => return e }
-            buf = write_bytes_at(buf, fieldoff to u64, fb)
-        }
+        img = match const_struct_field_into(img, const_name, layout, si, j, enums) { ConstImage as x => x; error as e => return e }
         j++
     }
-    ConstImage { bytes = buf; relocs = relocs; leaves = leaves }
+    img
+}
+
+/**
+ * const_struct_field_into — write ONE struct field into the blob accumulated so far: a FAT field
+ * (`[]T`/`str`) contributes its 16-byte slot at the field's layout offset plus a relocation and its
+ * leaves (`const_fat_member`); every other field contributes its little-endian scalar image
+ * (`const_struct_field_bytes`).
+ *
+ * @param img         the blob + relocations + leaves accumulated over the preceding fields
+ * @param const_name  the owning const's name (for the field's deterministic leaf symbol)
+ * @param layout      the struct's resolved layout (size + per-field offset/class)
+ * @param si          the typed struct-literal initializer
+ * @param j           the layout field index being written
+ * @param enums       the program's declared-enum table (a fat field's enum element stride)
+ * @return            the image grown by that field
+ * @throws            when the field is Tier-B, a float, or its value is not materializable
+ * @since 0.3.1.0 degrau const-slice (the per-field extraction)
+ */
+fn const_struct_field_into(img: ConstImage, const_name: str, layout: LStructLayout, si: checker::TStructInit, j: u64, enums: []LEnumInfo) -> ConstImage | error {
+    let field_name = layout.field_names[j]
+    let fieldoff = layout.field_offsets[j]
+    let vexpr = match struct_init_value(si, field_name) { checker::TExpr as x => x; error as e => return e }
+    if !is_fat_type(vexpr.type) {
+        let fb = match const_struct_field_bytes(layout, si, j) { []byte as x => x; error as e => return e }
+        return ConstImage { bytes = write_bytes_at(img.bytes, fieldoff to u64, fb); relocs = img.relocs; leaves = img.leaves }
+    }
+    let member = match const_fat_member(const_name, field_name, fieldoff, vexpr.type, vexpr, enums) { FatMemberImage as x => x; error as e => return e }
+    ConstImage {
+        bytes = write_bytes_at(img.bytes, fieldoff to u64, member.slot_bytes)
+        relocs = teko::list::push(img.relocs, member.reloc)
+        leaves = append_rodata(img.leaves, member.leaves)
+    }
 }
 
 /**
@@ -643,12 +806,14 @@ fn const_named_bytes(const_name: str, name: str, init: checker::TExpr, layouts: 
 
 /**
  * serialize_const — the complete rodata image of an aggregate const, dispatched on its resolved value
- * type (#594 crumb 6 + T-B6): a `str` (raw UTF-8), a flat-scalar `[]T`, a flat-POD or pointer-bearing
- * struct, or an empty-case `variant` (its tag image, #594 crumb 9b). A `str`/flat-`[]T`/flat-struct/
- * variant returns its bytes with EMPTY `relocs`/`leaves` (byte-identical to crumb 6); a pointer-bearing
- * struct (a slice/`str` field — the ABI descriptors) returns the blob with zeroed pointer slots, one
- * `LDataReloc` per fat field, and each target array's leaf. The `_` arm (neither Str/Slice/Named) still
- * honest-stops (no const in the corpus reaches it).
+ * type (#594 crumb 6 + T-B6; 0.3.1.0 degrau const-slice): a `str` (raw UTF-8), a `[]T` (flat-scalar
+ * bytes, or fat `{ptr, len}` slots), a flat-POD or pointer-bearing struct, or an empty-case `variant`
+ * (its tag image, #594 crumb 9b). A `str`/flat-`[]T`/flat-struct/variant returns its bytes with EMPTY
+ * `relocs`/`leaves` (byte-identical to crumb 6); a pointer-bearing aggregate — a struct with a
+ * slice/`str` FIELD (the ABI descriptors) or a slice with a `str`/`[]T` ELEMENT (the runtime-symbol
+ * tables) — returns the blob with zeroed pointer slots, one `LDataReloc` per fat member, and each
+ * target array's leaf. The `_` arm (neither Str/Slice/Named) still honest-stops (no const in the corpus
+ * reaches it).
  *
  * @param cd       the residual typed const declaration (its name, type + checked initializer)
  * @param layouts  the program's struct-layout table
@@ -661,7 +826,7 @@ fn const_named_bytes(const_name: str, name: str, init: checker::TExpr, layouts: 
 fn serialize_const(cd: checker::TConstDecl, layouts: []LStructLayout, variants: []LVariantDef, enums: []LEnumInfo) -> ConstImage | error {
     match cd.ty {
         checker::Str => match const_str_bytes(cd.init) { []byte as b => const_image_flat(b); error as e => return e }
-        checker::Slice as s => match const_slice_bytes(s.element, cd.init, enums) { []byte as b => const_image_flat(b); error as e => return e }
+        checker::Slice as s => const_slice_image(cd.name, s.element, cd.init, enums)
         checker::Named as n => const_named_bytes(cd.name, n.name, cd.init, layouts, variants, enums)
         _ => error { message = "const aggregate: pointer/slice-bearing value is Tier-B (T-B), not crumb 6 (#594)" }
     }

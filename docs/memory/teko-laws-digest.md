@@ -2669,3 +2669,38 @@ o valor observado é fixo ou apenas o valor por omissão.
 
 É a mesma patologia que a barra do tronco recusa noutro sítio — **verificar um proxy da condição em
 vez da condição** — aplicada à leitura de código em vez de à escrita de portões.
+
+## LEI DE MÉTODO (2) — corrigir o REGISTO pode ESCONDER o defeito
+
+Um quinto erro meu, da mesma noite, com forma diferente dos quatro acima e por isso escrito à parte.
+
+O verificador encontrou que `examples/regressions/const_slice_of_str/const_slice_of_str.tkr` **não
+constava** da lista `regression = [...]` de `teko.tkp:57` — um regressor morto, sem portão nenhum. Eu
+corrigi **o registo**, na lane, em `0947d543`.
+
+**A fixture só existia no ramo `cargo/0.3.1.0-degrau-const-slice`, que não estava drenado.** Logo o
+que eu escrevi foi uma entrada que nomeia um ficheiro que a árvore não tem — e isso dá, em toda a
+corrida de `teko test .`:
+
+```
+teko: regression FAIL … — listed regressor file does not exist (M.3)
+```
+
+**E ficou mascarado**, porque o esgotamento do `own_native` mata o job antes de chegar à última
+entrada da lista.
+
+**O que a auditoria custa, e porque devia ser rotina:** contar os directórios em
+`examples/regressions/` e cruzá-los com os caminhos citados em `teko.tkp` — 11 no disco contra 12
+registados. Dois comandos.
+
+**A regra: um registo que aponta para fora da árvore é pior do que registo nenhum** — o primeiro
+falha a corrida inteira, o segundo só não prova nada. E, mais importante: **corrigir o registo teria
+escondido o degrau**. A entrada por registar era o SINTOMA; a causa era um ramo fechado e por drenar
+que bloqueava a matriz inteira de artefactos com
+
+```
+teko: .: const aggregate: slice element is pointer/slice-bearing -> Tier-B (T-B), not crumb 6 (#594)
+fixpoint: VERDICT: FAILED — gen1 does not build the source it came from
+```
+
+Antes de escrever a linha que falta num manifesto, perguntar **porque é que ela falta**.

@@ -1945,7 +1945,7 @@ pub const REGR_WORK_DIR: str = "bin/.regr-work"
  * new cwd instead of the runner's own by the time the dump fires, landing nowhere
  * `merge_regression_coverage` looks. Harmless when the compiler under test is NOT
  * coverage-instrumented — a plain (`CgMode::Program`) build never reads `TEKO_TKCOV`, so no file
- * is produced; when it IS (`regression_coverage_exe`'s `CgMode::ProgramCov` build, the compiler's
+ * is produced; when it IS (`build_regression_feed_exe`'s `CgMode::ProgramCov` build, the compiler's
  * own project), the file this compile's child process dumps is exactly what gets merged back into
  * `fe.prog`.
  *
@@ -1996,7 +1996,7 @@ fn collect_tkcov_files(dir: str) -> []str {
  * `teko::coverage::cov_merge`, so a subsequent `coverage_floor_misses` read of `fe.prog` counts the
  * compiler-source lines those compiles exercised. A no-op (0 merged) when the regression tier's exe
  * was not coverage-instrumented — every project except the compiler's own
- * (`regression_coverage_exe`, `src/build/project.tks`).
+ * (`build_regression_feed_exe`, `src/build/project.tks`).
  *
  * @return how many `.tkcov` files were merged
  * @since 0.3.1
@@ -2983,8 +2983,16 @@ fn run_regression_phase(exe: str, m: Manifest) -> i32 {
 
 /**
  * self_exe_path — this compiler binary's absolute path, resolved from `argv[0]` against the launch
- * cwd (BEFORE the front-end chdir's into the project). Falls back to the raw `argv[0]` when it is
- * not filesystem-resolvable (a bare PATH launch), or "teko" when there is no `argv[0]`.
+ * cwd (BEFORE the front-end chdir's into the project). An absolute path is what a child needs,
+ * because the child may be launched with a different working directory than this process's.
+ *
+ * THE RESOLVED PATH IS PROBED, and the raw `argv[0]` wins when it does not exist. A PATH launch
+ * (`teko test .`, with the binary on `PATH` and no separator in `argv[0]`) resolves to
+ * `<cwd>/teko`, which is a file that is usually NOT there; handing that to a spawn produces an
+ * exec failure (127) instead of a compiler, and since `teko test` now re-invokes this binary for
+ * its own build stage, that would break the command for every PATH-installed user rather than
+ * only for a project with regressors. The raw name has no separator, so the spawn's `execvp`
+ * resolves it through `PATH` exactly as the user's shell did.
  *
  * @return the compiler's executable path
  * @since 0.3.0.29
@@ -2994,5 +3002,6 @@ fn self_exe_path() -> str {
     if argv.len == 0 { return "teko" }
     let cwd = match teko::env::cwd() { str as c => c; error => "" }
     let a = abs_path_of(argv[0], cwd)
-    if a.len > 0 { a } else { argv[0] }
+    if a.len > 0 && path_exists(a) { return a }
+    argv[0]
 }

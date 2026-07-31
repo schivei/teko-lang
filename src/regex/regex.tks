@@ -291,15 +291,96 @@ pub fn compile(pattern: str) -> Regex | error {
     Regex { pattern = pattern; ast = parsed.node }
 }
 
-// --- the matcher: recursive backtracking over input CODEPOINTS ---
-//
-// `m_node(node, input, i, cont)` tries to match `node` starting at codepoint index `i`
-// of `input` (an `[]char`, ROUND 0 codepoint-ops), then matches the CONTINUATION `cont`
-// — the sibling nodes still to match, in order — starting at the index just past this
-// match. Returns true iff `node` then `cont` succeeds somewhere. This is first-order
-// CPS: `cont` stands in for "the rest of the pattern", letting `*`/`+`/`?`/alternation
-// backtrack (retry a shorter/alternate match of `node`) when `cont` fails to follow.
+/**
+ * The matcher: recursive backtracking over input CODEPOINTS.
+ *
+ * `m_node(node, input, i, cont)` tries to match `node` starting at codepoint index `i` of `input`
+ * (an `[]char`, ROUND 0 codepoint-ops), then matches the CONTINUATION `cont` — the sibling nodes
+ * still to match, in order — starting at the index just past this match. It answers true iff
+ * `node` then `cont` succeeds somewhere. This is first-order CPS: `cont` stands in for "the rest
+ * of the pattern", letting `*`/`+`/`?`/alternation backtrack (retry a shorter or alternate match
+ * of `node`) when `cont` fails to follow.
+ *
+ * THE CONTINUATION IS A CONS CHAIN, NOT A LIST, and that is a memory ruling rather than a taste.
+ * It used to be a `[]RegexNode` that every step REBUILT: `m_cont` copied the tail to drop one
+ * head, and a concatenation copied the whole sibling run onto the caller's continuation — at
+ * EVERY start offset of the search. Nothing frees inside a run (the region allocator releases at
+ * termination), so a search over a few kilobytes allocated tens of megabytes, and the regression
+ * runner — which judges every scenario's output through `is_match` — turned that into gigabytes
+ * of resident parent and an OOM kill of `teko test` (measured 2026-07-31: 130 scenarios matching
+ * against a 2.7 KB stream took the runner's parent process to 1.9 GB). A cons cell shares its
+ * tail instead of copying it, and the search's top-level chain is built ONCE for all offsets, so
+ * a literal pattern now allocates NOTHING per offset. Same language, same backtracking order,
+ * same verdicts.
+ */
+type MCont = struct {
+    /** the node to match next. */
+    head: RegexNode
+    /** the rest of the continuation: a ONE-element slice, or empty at the end of the chain. */
+    tail: []MCont
+}
 
+/**
+ * mc_end — the empty continuation: nothing left to match, so reaching it is a match.
+ *
+ * @return the end-of-chain continuation
+ */
+fn mc_end() -> []MCont { teko::list::empty() }
+
+/**
+ * mc_push — `cont` with `node` to be matched FIRST. O(1): the tail is shared, never copied.
+ *
+ * @param node  the node to match before `cont`
+ * @param cont  the continuation to match after it
+ * @return      the extended continuation
+ */
+fn mc_push(node: RegexNode, cont: []MCont) -> []MCont {
+    teko::list::push(teko::list::empty(), MCont { head = node; tail = cont })
+}
+
+/**
+ * mc_push_all — `cont` with every node of `parts` to be matched first, IN ORDER. Built from the
+ * end backwards so each cell can share the one after it.
+ *
+ * @param parts  the sibling nodes to match, in order
+ * @param cont   the continuation to match after them
+ * @return       the extended continuation
+ */
+fn mc_push_all(parts: []RegexNode, cont: []MCont) -> []MCont {
+    mut out = cont
+    mut j = parts.len
+    loop {
+        if j == 0 { break }
+        j = j - 1
+        out = mc_push(parts[j], out)
+    }
+    out
+}
+
+/**
+ * mc_of_node — the continuation that matches `node` and then `cont`. A concatenation is FLATTENED
+ * into the chain here rather than re-flattened on every visit, which is what lets a search hoist
+ * its whole top-level pattern out of the start-offset loop.
+ *
+ * @param node  the node to match
+ * @param cont  what to match after it
+ * @return      the continuation
+ */
+fn mc_of_node(node: RegexNode, cont: []MCont) -> []MCont {
+    match node {
+        RConcat as c => mc_push_all(c.parts, cont)
+        _ => mc_push(node, cont)
+    }
+}
+
+/**
+ * class_matches — is `cp` a member of the character class `cls`? A negated class answers the
+ * opposite of the membership test, which is the whole of `[^…]`.
+ *
+ * @param cls  the class to test against
+ * @param cp   the candidate codepoint
+ * @return     true iff the class accepts `cp`
+ */
 fn class_matches(cls: RClass, cp: u32) -> bool {
     mut i: u64 = 0
     mut hit = false
@@ -312,143 +393,171 @@ fn class_matches(cls: RClass, cp: u32) -> bool {
     if cls.negate { !hit } else { hit }
 }
 
-// match the continuation list in order: cont[0] then cont[1..] as ITS continuation.
-fn m_cont(cont: []RegexNode, input: []char, i: u64) -> bool {
+/**
+ * m_cont — match a continuation chain from index `i`: its head, with the rest as ITS continuation.
+ * An empty chain is a match — there is nothing left to demand.
+ *
+ * @param cont   the continuation chain
+ * @param input  the input codepoints
+ * @param i      the codepoint index to match from
+ * @return       true iff the whole chain matches from `i`
+ */
+fn m_cont(cont: []MCont, input: []char, i: u64) -> bool {
     if cont.len == 0 { return true }
-    let head = cont[0]
-    let tail = cont_tail(cont)
-    m_node(head, input, i, tail)
+    m_node(cont[0].head, input, i, cont[0].tail)
 }
 
-fn cont_tail(cont: []RegexNode) -> []RegexNode {
-    mut out: []RegexNode = teko::list::empty()
-    mut i: u64 = 1
-    loop {
-        if i >= cont.len { break }
-        out = teko::list::push(out, cont[i])
-        i++
-    }
-    out
-}
-
-// prepend `node` to `cont` (a fresh list; Teko has no in-place splice).
-fn cont_push_front(node: RegexNode, cont: []RegexNode) -> []RegexNode {
-    mut out: []RegexNode = teko::list::push(teko::list::empty(), node)
-    mut i: u64 = 0
-    loop {
-        if i >= cont.len { break }
-        out = teko::list::push(out, cont[i])
-        i++
-    }
-    out
-}
-
-fn m_node(node: RegexNode, input: []char, i: u64, cont: []RegexNode) -> bool {
+/**
+ * m_node — match one node from index `i`, then its continuation from just past the match.
+ *
+ * @param node   the node to match
+ * @param input  the input codepoints
+ * @param i      the codepoint index to match from
+ * @param cont   what must match after `node`
+ * @return       true iff `node` and then `cont` match
+ */
+fn m_node(node: RegexNode, input: []char, i: u64, cont: []MCont) -> bool {
     match node {
         REmpty => m_cont(cont, input, i)
-        RChar as c => {
-            if i >= input.len { false }
-            else if (input[i] to u32) == c.cp { m_cont(cont, input, i + 1) }
-            else { false }
-        }
-        RAny => {
-            if i >= input.len { false } else { m_cont(cont, input, i + 1) }
-        }
-        RClass as cls => {
-            if i >= input.len { false }
-            else if class_matches(cls, input[i] to u32) { m_cont(cont, input, i + 1) }
-            else { false }
-        }
-        RStart => {
-            if i == 0 { m_cont(cont, input, i) } else { false }
-        }
-        REnd => {
-            if i == input.len { m_cont(cont, input, i) } else { false }
-        }
+        RChar as c => m_one(i < input.len && (input[i] to u32) == c.cp, input, i, cont)
+        RAny => m_one(i < input.len, input, i, cont)
+        RClass as cls => m_one(i < input.len && class_matches(cls, input[i] to u32), input, i, cont)
+        RStart => i == 0 && m_cont(cont, input, i)
+        REnd => i == input.len && m_cont(cont, input, i)
         RGroup as g => m_node(one_of(g.inner), input, i, cont)
-        RConcat as c => m_concat(c.parts, input, i, cont)
+        RConcat as c => m_cont(mc_push_all(c.parts, cont), input, i)
         RAlt as a => m_alt(a.branches, 0, input, i, cont)
         RStar as s => m_star(one_of(s.inner), input, i, cont)
-        // `x+` = one copy of x, then `x*` — reuse m_star's own backtracking by making
-        // the FIRST match's continuation "star again, then whatever cont already held".
-        RPlus as pl => {
-            let x = one_of(pl.inner)
-            m_node(x, input, i, cont_push_front(RStar { inner = one(x) }, cont))
-        }
-        // `x?` — greedy: try matching x (then cont); if that fails, skip x (match cont
-        // as-is at the SAME position).
-        ROpt as o => {
-            let x = one_of(o.inner)
-            if m_node(x, input, i, cont) { true } else { m_cont(cont, input, i) }
-        }
+        RPlus as pl => m_plus(one_of(pl.inner), input, i, cont)
+        ROpt as o => m_opt(one_of(o.inner), input, i, cont)
     }
 }
 
-// a concat's parts are just prepended (in order) onto `cont` — matching `parts[0]`
-// with continuation `parts[1..] ++ cont` naturally recurses through the rest.
-fn m_concat(parts: []RegexNode, input: []char, i: u64, cont: []RegexNode) -> bool {
-    if parts.len == 0 { return m_cont(cont, input, i) }
-    let combined = concat_onto(parts, cont)
-    m_cont(combined, input, i)
+/**
+ * m_one — the shared tail of every SINGLE-CODEPOINT node (`RChar`/`RAny`/`RClass`): when the node
+ * accepted the codepoint at `i`, the continuation must match from `i + 1`; otherwise there is no
+ * match. Named once because three arms differing only in their acceptance test are three chances
+ * for one of them to advance by the wrong amount.
+ *
+ * @param accepted  whether the node accepted the codepoint at `i` (false also when `i` is past the end)
+ * @param input     the input codepoints
+ * @param i         the codepoint index the node consumed
+ * @param cont      what must match after it
+ * @return          true iff the node accepted and the continuation matches from `i + 1`
+ */
+fn m_one(accepted: bool, input: []char, i: u64, cont: []MCont) -> bool {
+    accepted && m_cont(cont, input, i + 1)
 }
 
-// parts ++ cont, as a fresh list (no in-place append in Teko).
-fn concat_onto(parts: []RegexNode, cont: []RegexNode) -> []RegexNode {
-    mut out: []RegexNode = teko::list::empty()
-    mut i: u64 = 0
-    loop {
-        if i >= parts.len { break }
-        out = teko::list::push(out, parts[i])
-        i++
-    }
-    mut j: u64 = 0
-    loop {
-        if j >= cont.len { break }
-        out = teko::list::push(out, cont[j])
-        j++
-    }
-    out
-}
-
-fn m_alt(branches: []RegexNode, idx: u64, input: []char, i: u64, cont: []RegexNode) -> bool {
+/**
+ * m_alt — match the first branch of an alternation that succeeds, in declaration order.
+ *
+ * @param branches  the alternation's branches
+ * @param idx       the branch to try now
+ * @param input     the input codepoints
+ * @param i         the codepoint index to match from
+ * @param cont      what must match after the branch
+ * @return          true iff some branch from `idx` on matches, followed by `cont`
+ */
+fn m_alt(branches: []RegexNode, idx: u64, input: []char, i: u64, cont: []MCont) -> bool {
     if idx >= branches.len { return false }
     if m_node(branches[idx], input, i, cont) { return true }
     m_alt(branches, idx + 1, input, i, cont)
 }
 
-// `x*` — greedy: try "one more copy of x, then star again" before "stop here"
-// (longest-first backtracking star, the classic shape).
-fn m_star(inner: RegexNode, input: []char, i: u64, cont: []RegexNode) -> bool {
-    if m_node(inner, input, i, cont_push_front(RStar { inner = one(inner) }, cont)) { return true }
+/**
+ * m_star — `x*`, GREEDY: try "one more copy of `x`, then star again" before "stop here" (the
+ * classic longest-first backtracking star).
+ *
+ * @param inner  the repeated node
+ * @param input  the input codepoints
+ * @param i      the codepoint index to match from
+ * @param cont   what must match after the repetition
+ * @return       true iff some number of copies of `inner` followed by `cont` matches
+ */
+fn m_star(inner: RegexNode, input: []char, i: u64, cont: []MCont) -> bool {
+    if m_node(inner, input, i, mc_push(RStar { inner = one(inner) }, cont)) { return true }
     m_cont(cont, input, i)
 }
 
-// is_match(re, input) — true iff `re`'s pattern matches SOMEWHERE in `input` (the
-// conventional "search", not "fullmatch"): tries every start offset in turn, which for
-// this backtracking engine is observably the same as prepending an implicit `.*?`.
-// `^`/`$` inside the pattern still anchor to the TRUE start/end of `input` (not to
-// whichever start offset is currently being tried).
+/**
+ * m_plus — `x+` = one copy of `x`, then `x*`: reuse `m_star`'s own backtracking by making the
+ * first match's continuation "star again, then whatever `cont` already held".
+ *
+ * @param inner  the repeated node
+ * @param input  the input codepoints
+ * @param i      the codepoint index to match from
+ * @param cont   what must match after the repetition
+ * @return       true iff one or more copies of `inner` followed by `cont` matches
+ */
+fn m_plus(inner: RegexNode, input: []char, i: u64, cont: []MCont) -> bool {
+    m_node(inner, input, i, mc_push(RStar { inner = one(inner) }, cont))
+}
+
+/**
+ * m_opt — `x?`, GREEDY: try matching `x` (then `cont`); if that fails, skip `x` and match `cont`
+ * at the SAME position.
+ *
+ * @param inner  the optional node
+ * @param input  the input codepoints
+ * @param i      the codepoint index to match from
+ * @param cont   what must match after it
+ * @return       true iff `inner` then `cont`, or `cont` alone, matches from `i`
+ */
+fn m_opt(inner: RegexNode, input: []char, i: u64, cont: []MCont) -> bool {
+    if m_node(inner, input, i, cont) { return true }
+    m_cont(cont, input, i)
+}
+
+/**
+ * is_match — does `re`'s pattern match SOMEWHERE in `input` (the conventional "search", not
+ * "fullmatch")? Tries every start offset in turn, which for this backtracking engine is
+ * observably the same as prepending an implicit `.*?`. A `^`/`$` inside the pattern still anchors
+ * to the TRUE start/end of `input`, never to whichever offset is being tried.
+ *
+ * The pattern's continuation chain is built ONCE, before the offset loop, and every offset shares
+ * it — the whole reason the continuation is a cons chain (see `MCont`). A literal pattern
+ * therefore allocates nothing at all per offset, which is what keeps a search over a captured
+ * test stream from costing megabytes in a process that cannot free them.
+ *
+ * @param re     the compiled pattern
+ * @param input  the string to search
+ * @return       true iff the pattern matches at some offset
+ */
 pub fn is_match(re: Regex, input: str) -> bool {
     let cps = chars(input)
+    let cont = mc_of_node(re.ast, mc_end())
     mut start: u64 = 0
     loop {
-        if m_node(re.ast, cps, start, teko::list::empty()) { return true }
+        if m_cont(cont, cps, start) { return true }
         if start >= cps.len { break }
         start++
     }
     false
 }
 
-// is_match_pattern(pattern, input) — one-shot convenience: compile then match.
-// Propagates a bad pattern as `error` (fallible-builtin convention, e.g. str_from_utf8).
+/**
+ * is_match_pattern — compile `pattern` and search `input` with it, in one call.
+ *
+ * @param pattern  the regex source
+ * @param input    the string to search
+ * @return         true iff the pattern matches at some offset
+ * @throws         the compile error of a malformed pattern (the fallible-builtin convention)
+ */
 pub fn is_match_pattern(pattern: str, input: str) -> bool | error {
     let re = match compile(pattern) { Regex as r => r; error as e => return e }
     is_match(re, input)
 }
 
-// full_match(re, input) — true iff the ENTIRE input matches (start to end), i.e. the
-// pattern is implicitly anchored on both sides regardless of any literal `^`/`$` in it.
+/**
+ * full_match — does the ENTIRE input match, start to end? The pattern is implicitly anchored on
+ * both sides regardless of any literal `^`/`$` in it.
+ *
+ * @param re     the compiled pattern
+ * @param input  the string to match
+ * @return       true iff the whole of `input` is matched by the pattern
+ */
 pub fn full_match(re: Regex, input: str) -> bool {
     let cps = chars(input)
-    m_node(re.ast, cps, 0, teko::list::push(teko::list::empty(), REnd { }))
+    m_cont(mc_of_node(re.ast, mc_push(REnd { }, mc_end())), cps, 0)
 }
