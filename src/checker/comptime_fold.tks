@@ -2037,6 +2037,13 @@ fn fold_op_node(e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExpr
  * fold_splice — splice a folded value `v` into the AST as a literal at `e`'s type/position, or (when
  * `v` has no literal form) rebuild `e` around its folded children so foldable sub-trees still fold.
  *
+ * ONLY `fold_op_node` may use this fallback. `fold_children`'s arm for a unary/binary/cast node
+ * (`fold_unary`/`fold_binary`/`fold_cast`) rebuilds children UNCONDITIONALLY — it never re-asks
+ * whether the whole node folds — so the round trip terminates. A gated node (`fold_index`,
+ * `fold_field`) must NOT come back through here: its `fold_children` arm re-consults the very gate
+ * that sent it, which is a non-terminating loop (0.3.1.0 degrau const-slice). Those two call
+ * `fold_index_children`/`fold_field_children` directly instead.
+ *
  * @param v      the folded comptime value
  * @param e      the original expression (its type/position for the reconstructed literal)
  * @param table  the type table (forwarded to the child rebuild)
@@ -2184,12 +2191,29 @@ fn fold_cast(c: TCast, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -
  * @since #comptime-fold
  */
 fn fold_field(fa: TFieldAccess, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExpr | error {
-    if cf_can_fold_field(fa, agg) {
-        match eval_const(e, table, env, agg) {
-            error as x => return x
-            ConstValue as v => return fold_splice(v, e, table, env, agg)
-        }
+    if !cf_can_fold_field(fa, agg) { return fold_field_children(fa, e, table, env, agg) }
+    let v = match eval_const(e, table, env, agg) { error as x => return x; ConstValue as cv => cv }
+    match literal_of(v, e.type, e.line, e.col) {
+        TExpr as lit => lit
+        null => fold_field_children(fa, e, table, env, agg)
     }
+}
+
+/**
+ * fold_field_children — rebuild a field access around its folded receiver, WITHOUT re-asking
+ * `cf_can_fold_field` whether the whole access folds. The gate-free half of `fold_field`, so the
+ * "the value has no literal form" fallback cannot re-enter the gate that sent it (0.3.1.0 degrau
+ * const-slice — the `fold_index` sibling of this split is where the non-termination was measured).
+ *
+ * @param fa     the typed field-access expression
+ * @param e      the enclosing expression (its type/position)
+ * @param table  the type table (forwarded to the receiver fold)
+ * @param env    the environment (forwarded to the receiver fold)
+ * @param agg    the module-aggregate resolution table (forwarded to the receiver fold)
+ * @return       the access rebuilt with a folded receiver, or a located error
+ * @since 0.3.1.0 degrau const-slice
+ */
+fn fold_field_children(fa: TFieldAccess, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExpr | error {
     let r = match fold_expr(fa.receiver, table, env, agg) { error as x => return x; TExpr as v => v }
     TExpr { kind = TFieldAccess { receiver = r; field = fa.field }; type = e.type; line = e.line; col = e.col }
 }
@@ -2235,6 +2259,16 @@ fn fold_coalesce(co: TCoalesce, e: TExpr, table: TypeTable, env: Env, agg: AggCo
  * identical to today). An out-of-range or negative const index surfaces as a located compile error
  * (M.1), propagated from `eval_const`.
  *
+ * THE FALLBACK IS `fold_index_children`, NOT `fold_splice`, and that is the whole of a measured
+ * non-termination fix (0.3.1.0 degrau const-slice). `cf_can_index` admits a `TVar` receiver naming
+ * ANY module aggregate const — it does not look at that const's ELEMENTS — while `literal_of`
+ * reconstructs an INTEGER literal only. So `G[0]` over a `const G: []str`/`[]bool`/`[]f64`/`[][]T`
+ * evaluated fine, produced a value with no literal form, and went to `fold_splice`'s `null` arm ->
+ * `fold_children` -> `fold_index` -> `cf_can_index` again: a loop with no fixpoint. Measured as a
+ * SEGFAULT of the compiler itself (stack exhaustion; an OOM kill under `ulimit -s unlimited`) on
+ * BOTH backends and on the released seed — the fold runs before either backend is chosen. Rebuilding
+ * this node's children directly leaves the read runtime, which is exactly what a fat element must be.
+ *
  * @param ix     the typed index expression
  * @param e      the enclosing expression (its type/position)
  * @param table  the type table (forwarded to each child fold)
@@ -2244,12 +2278,28 @@ fn fold_coalesce(co: TCoalesce, e: TExpr, table: TypeTable, env: Env, agg: AggCo
  * @since #comptime-fold
  */
 fn fold_index(ix: TIndex, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExpr | error {
-    if cf_can_index(ix, agg) {
-        match eval_const(e, table, env, agg) {
-            error as x => return x
-            ConstValue as v => return fold_splice(v, e, table, env, agg)
-        }
+    if !cf_can_index(ix, agg) { return fold_index_children(ix, e, table, env, agg) }
+    let v = match eval_const(e, table, env, agg) { error as x => return x; ConstValue as cv => cv }
+    match literal_of(v, e.type, e.line, e.col) {
+        TExpr as lit => lit
+        null => fold_index_children(ix, e, table, env, agg)
     }
+}
+
+/**
+ * fold_index_children — rebuild an index around its folded receiver and index, WITHOUT re-asking
+ * `cf_can_index` whether the whole node folds. The gate-free half of `fold_index`, so the "the value
+ * has no literal form" fallback cannot re-enter the gate that sent it.
+ *
+ * @param ix     the typed index expression
+ * @param e      the enclosing expression (its type/position)
+ * @param table  the type table (forwarded to each child fold)
+ * @param env    the environment (forwarded to each child fold)
+ * @param agg    the module-aggregate resolution table (forwarded to each child fold)
+ * @return       the index rebuilt with folded children, or a located error
+ * @since 0.3.1.0 degrau const-slice
+ */
+fn fold_index_children(ix: TIndex, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExpr | error {
     let r = match fold_expr(ix.receiver, table, env, agg) { error as x => return x; TExpr as v => v }
     let n = match fold_expr(ix.index, table, env, agg) { error as x => return x; TExpr as v => v }
     TExpr { kind = TIndex { receiver = r; index = n }; type = e.type; line = e.line; col = e.col }
