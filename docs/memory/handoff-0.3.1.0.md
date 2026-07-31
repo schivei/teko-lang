@@ -2370,3 +2370,109 @@ resultado medido, e falta pouco para ter sido pior:
 
 **A lei que fica: não retomar um agente sem confirmar que parou de facto.** O sinal "no active task"
 não é prova. E worktree por agente não chega se o mesmo agente for instanciado duas vezes.
+
+## 0ag · O `vinfo_set` quadrático, consertado — e o irmão maior que ficou a descoberto
+
+Ramo `cargo/0.3.1.0-isel-quadratico`. O defeito de `src/backend/isel_arm64.tks:91` está fechado: a
+tabela `class_of` do selector deixou de ser reconstruída inteira a cada VReg. **E a remedição da
+curva mostrou que o selector nunca foi o maior alocador quadrático do backend.**
+
+### O conserto
+
+`vinfo_set` reconstruía as três listas paralelas por escrita — O(V) de cópia e O(V) de bytes novos
+por VReg, logo **O(V²) nos dois eixos, por função**, nas duas ISAs (a definição é partilhada com
+`isel_x86_64.tks:110`). Passou a **preencher até `id` (append amortizado O(1))** e a **escrever a
+posição alvo no sítio**, por atribuição indexada (`classes[at] = …`).
+
+`vinfo_grow` NÃO foi tocado: o seu `loop` só empurra a diferença `n - len`, e a soma de todas as
+chamadas é O(V) — já era amortizadamente linear. O relatório de custo que lhe chamava «percorre tudo
+a cada chamada» estava enganado nesse ponto.
+
+**A peça que a linguagem deu:** a atribuição indexada `xs[i] = v` (`AssignKind::Index`,
+`typer.tks:type_index_assign`) existe, escreve no buffer partilhado e está lá nas duas rotas. Não
+faltou primitiva nenhuma. `teko::list::with_cap` foi **rejeitado de propósito**: não tem baixamento
+nativo (`lower.tks:9265` devolve «N1»), e usá-lo no compilador tornaria a fonte incompilável pelo
+próprio backend.
+
+### A prova de que os bytes não se movem
+
+A escrita no sítio é visível através de qualquer alias — logo, só é legítima se a tabela for enfiada
+LINEARMENTE. Provado em dois níveis:
+
+1. **Sombra.** Um compilador instrumentado carregou as DUAS tabelas ao mesmo tempo (a funcional e a
+   escrita-no-sítio) e comparou-as em cada `vinfo_get`. **Zero divergências** em 63 projectos de
+   exemplo + as sondas sintéticas. (Antes disso, um contador provou porque a sombra era necessária:
+   o corpus `own_native` faz 11011 appends, 1284 preenchimentos, **1664 escrituras dentro do
+   alcance e 405 sobre-escritas** — um caminho rápido só-append teria ficado quadrático na mesma.)
+2. **`cmp` do `.o`.** 54 projectos que emitem objecto (todo o `examples/`, o `tooling/`, o corpus
+   `own_native` e as 5 sondas): **54 idênticos, 0 diferentes.** Os 14 restantes não emitem objecto
+   (fixtures de diagnóstico, known-stops, projectos de biblioteca).
+
+### A curva, nos mesmos N — sonda em CADEIA (`let vN = vN-1 + k`, ~1,08 VReg por linha)
+
+| N | antes tempo | antes pico | depois tempo | depois pico | Δ pico |
+|---|---|---|---|---|---|
+| 250 | 0,466 s | 16,2 MB | 0,479 s | 15,9 MB | −0,3 MB |
+| 500 | 0,501 s | 35,7 MB | 0,509 s | 34,5 MB | −1,2 MB |
+| 1000 | 0,748 s | 106,5 MB | 0,867 s | 101,6 MB | −4,9 MB |
+| 2000 | 2,164 s | 377,3 MB | 2,374 s | 356,3 MB | −21,0 MB |
+| 4000 | 9,414 s | 1736,5 MB | 9,797 s | 1628,4 MB | **−108,1 MB** |
+
+O ganho é exactamente o termo do selector (`12·V²/2` bytes, V≈4300 em N=4000 → ≈111 MB previstos,
+108,1 MB medidos). Nesta forma de sonda o selector valia **6 %** do pico. Os tempos estão dentro do
+ruído de uma caixa com três agentes.
+
+### A curva, sonda DENSA (13 operações por linha — a forma em que o selector manda)
+
+| N | antes tempo | antes pico | depois tempo | depois pico | Δ tempo | Δ pico |
+|---|---|---|---|---|---|---|
+| 250 | 2,501 s | 941,0 MB | 1,397 s | 800,7 MB | **−44 %** | −14,9 % |
+| 500 | 7,653 s | 3674,6 MB | 4,788 s | 3079,4 MB | **−37 %** | −16,2 % |
+| 1000 | não medida (≈14,6 GB projectados) | | 41,883 s | 12274,8 MB | | |
+
+**O tempo cai ~40 %. O pico cai só ~15 % — e continua a crescer a N^1,94.**
+
+### Porquê: o irmão maior é o `sort_by_start` do alocador de registos
+
+`TEKO_ARENA_OBS` sobre um binário simbolizado, na sonda densa N=500, DEPOIS do conserto:
+
+```
+=== PUSH copy-grow bytes by CALLING fn: 3533.89 MB total ===
+   0     3504.4 MB   155987 allocs  teko_teko__backend__sort_by_start
+   1        4.7 MB    17585 allocs  teko_teko__backend__minst_x86_cat
+   ...
+```
+
+**`vinfo_set` desapareceu do mapa. `sort_by_start` é 98,9 % do que sobra.**
+
+**`src/backend/regalloc.tks:1113`** — ordenação por inserção que **reconstrói a lista de saída
+inteira a cada um dos V intervalos**: O(V²) em tempo E em bytes, exactamente a mesma forma do defeito
+consertado, uma fase mais à frente. O comparador `interval_before` (`:1102`, `start` e depois
+`reg_id`) é uma **ordem TOTAL** — não há empates — pelo que a permutação ordenada é ÚNICA e qualquer
+ordenação correcta dá o mesmo resultado byte-a-byte. Uma fusão ascendente (`merge sort`) é
+substituição directa, O(V log V), com garantia de saída idêntica pela unicidade.
+
+### A varredura da família — sete irmãos, contados e nomeados
+
+| # | sítio | forma | custo | tocado |
+|---|---|---|---|---|
+| 1 | `backend/isel_arm64.tks:91` `vinfo_set` | 3 listas paralelas reconstruídas por escrita | O(V²) | **CONSERTADO** |
+| 2 | `backend/regalloc.tks:1113` `sort_by_start` | lista inteira reconstruída por inserção | O(V²) — **98,9 % do pico do backend** | não |
+| 3 | `lir/lir_interp.tks:73` `rf_set` | 2 listas paralelas reconstruídas por escrita | O(V) por instrução interpretada | não |
+| 4 | `backend/minst_interp.tks:156` `iv_set` | 2 listas paralelas reconstruídas por escrita | idem, no interpretador de máquina | não |
+| 5 | `backend/minst_interp.tks:246` `mem_set` | lista esparsa varrida e reconstruída por store | O(células) por store | não |
+| 6 | `backend/minst.tks:1451` `mreg_list_set` (+ `minst_x86.tks:1246` `mreg_list_set_x86`) | lista reconstruída por escrita | O(params) — limitado, inofensivo | não |
+| 7 | `backend/minst.tks:1404` `append_minst` (+ o gémeo x86) | lista de BLOCOS reconstruída por instrução | O(B) por instrução | não |
+
+**O `rf_set` que o doc-comment do `vinfo_set` citava como espelho TEM mesmo a mesma forma** (#3), e
+`new_regfile` dimensiona a `next_vreg` de antemão — logo toda a escrita é dentro do alcance e paga
+O(V) cada. É o mesmo defeito noutro sítio.
+
+### O que ficou por fazer
+
+- **#2 `sort_by_start`** é agora o defeito que mata a memória do backend. Fica NOMEADO, não
+  consertado — a instrução era «conta-os e nomeia-os, mesmo que só consertes este».
+- **`lp_remove` do checker** (`teko_teko__checker__lp_remove`) é o dominante na sonda em CADEIA:
+  2310 MB de 2808 MB em N=4000. Não é backend, e não é desta lane, mas está no mesmo mapa.
+- A sonda densa N=1000 «antes» não foi medida: os ≈14,6 GB projectados punham em risco os outros
+  agentes da caixa.
