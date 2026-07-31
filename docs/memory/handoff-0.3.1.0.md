@@ -2370,3 +2370,86 @@ resultado medido, e falta pouco para ter sido pior:
 
 **A lei que fica: não retomar um agente sem confirmar que parou de facto.** O sinal "no active task"
 não é prova. E worktree por agente não chega se o mesmo agente for instanciado duas vezes.
+
+---
+
+## O degrau `const_slice` — veredicto do verificador (2026-07-31)
+
+Ramo `cargo/0.3.1.0-degrau-const-slice`, topo `4a539cac`. **O degrau fechou**, e a inversão foi
+provada **nos dois braços, separadamente**, sobre uma cópia limpa do commit-pai (`git archive`, sem
+`git stash` e sem tocar no worktree do implementador):
+
+| braço | compilador do PAI | compilador do TOPO |
+|---|---|---|
+| **LIR** (sonda que lê `const TABLE: []str` só por índice VARIÁVEL, sem tocar no fold) | `EXIT=1`, a paragem literal do CI | constrói, corre, `exit 23` |
+| **fold** (a fixture completa) | **SIGSEGV (139) nas DUAS rotas** | `exit 96` nativo, `exit 96` rota C |
+
+O `8d9e9637` era mesmo um **segundo defeito**: o ramo `null` de `literal_of` só podia entrar em laço,
+nunca produzia resultado — daí o SIGSEGV nas duas rotas (o fold corre antes da escolha de backend).
+
+**A pergunta adversarial teve resposta boa:** o `const_is_flat_scalar` está **inalterado**; a correcção
+**contornou-o honestamente** com um `const_slice_image` de três ramos, e o terceiro **mantém a mesma
+paragem com a mesma mensagem**. O verificador provocou cada ramo e **todos dispararam**.
+
+### CORRECÇÃO MINHA: o degrau 32 NUNCA fechou
+
+Eu reportei ao dono que o `one_byte` tinha fechado, porque grepei a mensagem literal (não existe — é
+*construída* por `unresolved_builtin_stop`) e encontrei o `one_byte` como builtin do checker
+(`scope.tks:787`) com espelho de runtime (`teko_rt.tks:169`). **Existir como builtin não é estar
+baixado.** Com o `const_slice` fechado, o portão nativo avança 24 s e cai em:
+
+```
+teko: .: native backend N1: builtin `one_byte` not yet lowered (N2) [in `teko::encoding::json::parse_string`]
+```
+
+`lower.tks:4239` (`unresolved_builtin_stop`), sítio em `json.tks:218`. **A escada tem dois degraus e
+eu troquei a ordem**: o `const_slice` estava À FRENTE do `one_byte`, não no lugar dele.
+
+### Achado nº1 — a fixture não estava ligada a portão nenhum
+
+`examples/regressions/const_slice_of_str/const_slice_of_str.tkr` **não constava** da lista
+`regression = [...]` de `teko.tkp:57`, e `manifest.tks:109-111` é explícito: *"There is NO directory
+discovery and NO glob: each entry names ONE `.tkr` file"*. Confirmado a correr:
+`./out/teko test examples/regressions/const_slice_of_str` → **0 cenários, 0 testes**.
+
+**O commit escreveu um regressor morto.** Os dois defeitos entrariam no tronco sem prova automatizada
+— a classe de erro escondido que a barra recusa. **Registada agora pelo integrador.**
+
+### Achado nº2 — o nativo passa a linkar COM AVISOS, e isto morde a barra
+
+```
+/usr/bin/ld: warning: relocation in read-only section `.rodata'
+/usr/bin/ld: warning: creating DT_TEXTREL in a PIE
+```
+
+**Atribuição medida: pré-existente do #594 T-B6, não deste ramo** — o verificador provou-o
+construindo, com o compilador do PAI, um const de struct com campo `[]i64`, que dá os mesmos dois
+avisos. **Mas este ramo alarga enormemente a classe de programas que os produzem**, e as tabelas de
+símbolos do próprio compilador são `[]str` — logo **o gen2 nativo, quando lá chegar, vai linkar com
+estes avisos**. Contra *"sem erros, alertas ou mesmo erros escondidos"*, isto morde a perna nativa.
+
+Medido no objecto: 12 relocações `R_X86_64_64` em `.rela.rodata`, nos deslocamentos `0x0e, 0x1e,
+0x2e, …` — **não alinhados a 8**, porque `encode_rodata` (`encode_arm64.tks:2587`) concatena sem
+enchimento. Em x86-64 lê bem; é dívida para alvos estritos.
+
+### Achado nº3 — o `teko-regrcov` é compilado a `-O0`, e é ISSO que pendura a camada
+
+O `./out/teko test .` foi **OOM-killed (137) duas vezes**. O culpado **não é o ramo**, e foi medido:
+`bin/teko-regrcov` — o compilador emitido com cobertura, **compilado a `-O0`** — gira a 100 % de CPU a
+baixar o `own_native`:
+
+| binário | mesmo projecto |
+|---|---|
+| `teko-regrcov` (`-O0`) | **> 7 min** (topo), 6m17 (pai), 15 min noutro worktree |
+| release | **1,02 s** (topo), 1,23 s (pai) |
+
+**~400×.** E multiplica-se com o `vinfo_set` quadrático: o instrumento de cobertura corre o selector
+patológico sem optimização nenhuma.
+
+### O que ficou por verificar
+
+1. `./out/teko test .` **nunca completou** — o portão de testes **não é declarado verde**.
+2. `TEKO_MEM_PARANOID=1` não corrido (caixa disputada, 5 OOM-kills no `dmesg`).
+3. Elemento `char` não exercitado — **o lexer rejeita `'a'`** (`unexpected character`), dito em vez de assumido.
+4. Dois erros de **documentação** no ramo (comentário de `const_slice_image` sobre `char`; braço `_` de
+   `const_fat_target_image` hoje inalcançável).
