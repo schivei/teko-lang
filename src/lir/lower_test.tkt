@@ -2365,18 +2365,28 @@ fn lwt_lowers_str_call_result_allocates_out_slot_and_loads_the_length_back() {
 }
 
 /**
- * lwt_honest_stop_on_fat_closure_call_result — a closure-call whose result is fat honest-stops
- * by NAME (`lower_call_fat`'s own narrower stop) rather than silently under-passing the hidden
- * out-slot argument the callee-side convention (`bind_ret_len_slot`) now expects — a closure's
- * own thunk calling convention does not yet reserve it (call-gordo degrau, #382 N2).
+ * lwt_lowers_fat_closure_call_result_with_hidden_out_slot — a closure-call whose result is fat
+ * now lowers through the same hidden out-slot caller contract as direct fat calls: the call site
+ * allocates an 8-byte slot, passes it as the trailing argument to `call.indirect`, then loads
+ * the length back (`load.i64`) for the surrounding `.len` read.
  *
  * @return void
  */
 #test
-fn lwt_honest_stop_on_fat_closure_call_result() {
+fn lwt_lowers_fat_closure_call_result_with_hidden_out_slot() {
     let fty = lwt_func_type(teko::list::empty(), checker::Str { })
+    mut items: []checker::TItem = teko::list::empty()
+    items = teko::list::push(items, lwt_item(lwt_bind_typed("f", lwt_fn_value("make_str", "teko::demo", fty), fty)))
     let call = lwt_closure_call("f", teko::list::empty(), fty, checker::Str { })
-    teko::assert::str_contains(lwt_lower_expr_text(call), "fat-pointer closure-call result not yet lowered")
+    items = teko::list::push(items, lwt_item(lwt_exprstmt(lwt_len_field(call))))
+    let prog = checker::TProgram { items = items }
+    let m = match lower_program(prog) { LModule as x => x; error as err => { teko::assert::is_true(false); return } }
+    let text = print_lmodule(m)
+    teko::assert::str_contains(text, "func @.Lclofn0(%0: ptr, %1: ptr) -> ptr {")
+    teko::assert::str_contains(text, "call @teko_teko__demo__make_str(%1)")
+    teko::assert::str_contains(text, "alloca 8, align 8")
+    teko::assert::str_contains(text, "call.indirect")
+    teko::assert::str_contains(text, "load.i64")
 }
 
 /**

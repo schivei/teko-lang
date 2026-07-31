@@ -2608,30 +2608,6 @@ fn append_bytes(buf: []byte, src: []byte) -> []byte {
 }
 
 /**
- * rodata_has_internal_relocs — check if any LRodata entry has non-empty internal relocations.
- * (#594 T-B1): the presence of data→data relocations indicates a Tier-B aggregate const
- * (pointer-bearing fields) whose relocations the current writers cannot emit.
- */
-fn rodata_has_internal_relocs(rodata: []lir::LRodata) -> bool {
-    mut i: u64 = 0
-    loop {
-        if i >= rodata.len { break }
-        if rodata[i].relocs.len > (0 to u64) { return true }
-        i++
-    }
-    false
-}
-
-/**
- * honest_data_reloc — honest-stop for rodata-internal pointer relocation (#594 T-B1).
- * Tier-B aggregate consts (with pointer-bearing fields) produce LDataReloc entries that
- * need writer support in T-B2 (ELF), T-B3 (Mach-O/COFF), or T-B4 (WASM).
- */
-fn honest_data_reloc() -> error {
-    error { message = "rodata-internal pointer relocation: emission lands in T-B2..T-B5 (#594 Tier-B)" }
-}
-
-/**
  * encode_rodata — build the `__const` image and its defined symbols: each
  * `LRodata` entry is placed at the running byte offset with a defined, FILE-
  * LOCAL section-2 symbol (the ADRP/ADD-lo relocations in `__text` resolve to it
@@ -2639,13 +2615,10 @@ fn honest_data_reloc() -> error {
  * same-named rodata in two objects never collides at Phase E multi-object
  * link).
  *
- * (#594 T-B1): honest-stops if rodata contains internal pointer relocations.
- *
  * @param []lir::LRodata rodata  the module's interned rodata table
- * @return ModuleRodata | error  the `__const` image + its defined symbols, or Tier-B honest-stop
+ * @return ModuleRodata | error  the `__const` image + its defined symbols
  */
 fn encode_rodata(rodata: []lir::LRodata) -> ModuleRodata | error {
-    if rodata_has_internal_relocs(rodata) { return honest_data_reloc() }
     mut bytes: []byte = teko::list::empty()
     mut syms: []Symbol = teko::list::empty()
     mut relocs: []lir::LDataReloc = teko::list::empty()

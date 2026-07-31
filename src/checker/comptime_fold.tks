@@ -5,7 +5,7 @@ use teko::parser
  * ConstValue — the comptime value domain: the result of evaluating a provably-const
  * expression subtree. An integer is stored as its raw two's-complement bit pattern in
  * a `u64` PLUS its declared type (drop-128, 2026-07-24 — the fold's internal carrier is
- * detoxed off i128/u128; every width it EVALUATES is u8..u64/i8..i64, since that is now
+ * detoxed off i64/u64; every width it EVALUATES is u8..u64/i8..i64, since that is now
  * the whole of the language's non-bignum integer surface), so every integer family
  * re-emits and re-wraps exactly as the metal would; a float keeps its raw bits so
  * formatting is byte-exact; a string/bytes keeps its bytes; an aggregate holds child
@@ -77,7 +77,7 @@ pub type CVAgg = struct { elems: []ConstValue }
  * IntInfo — the width/signedness a comptime integer op runs at: the number of value
  * bits and whether the top bit is a sign bit. Derived from a `CVInt.ty` (a `Prim`
  * integer or `byte`) by `int_info`; every wrap/overflow/re-emission decision reads it.
- * `width` never exceeds 64 — the language's widest integer IS 64-bit (`u128`/`i128` were
+ * `width` never exceeds 64 — the language's widest integer IS 64-bit (`u64`/`i64` were
  * removed from the surface, drop-128, 2026-07-24), so `int_info`'s width gate is now a
  * defensive invariant rather than a live not-evaluated-width path.
  *
@@ -264,7 +264,7 @@ fn is_all_ones(bits: u64, w: u32) -> bool { mask_to_width(bits, w) == width_mask
  * int_info — classify a type as an integer width/signedness, or error when it is not an
  * integer (a `Prim` integer drives its width/signedness; `byte` is 8-bit unsigned), or when
  * it is WIDER than the fold's u64 carrier. The surface no longer HAS a type wider than 64 bits
- * (`u128`/`i128` were removed, drop-128, 2026-07-24) so this width gate is a defensive
+ * (`u64`/`i64` were removed, drop-128, 2026-07-24) so this width gate is a defensive
  * invariant, not a live path — but it is the ONE gate every `IntInfo` passes through, so it
  * protects every width/shift computation downstream from ever seeing an out-of-range width.
  *
@@ -447,7 +447,7 @@ fn eval_int_literal(value: parser::NumInt, t: Type, e: TExpr) -> ConstValue | er
  * encode_int_literal — range-check `value` against the type `t` of width/signedness
  * `info` and produce its two's-complement bits, erroring (M.1; LEGISLATION:148) when the
  * literal is out of range for its type. Sign-magnitude (drop-128, 2026-07-24) makes the
- * negative path direct — no `i128`-MIN-avoidance trick needed (the magnitude is already at
+ * negative path direct — no `i64`-MIN-avoidance trick needed (the magnitude is already at
  * hand): a negative value fits iff its magnitude is at most `2^(w-1)` (`i8::MIN`'s magnitude
  * 128 fits `i8`); the two's-complement bits are `width_mask(w) - mag + 1`.
  *
@@ -1640,7 +1640,7 @@ fn float_div(x: f64, y: f64, e: TExpr) -> ConstValue | error {
 
 /**
  * cf_is_int_type — true iff `t` is an integer type the fold re-emits as a `TNumber` literal (a
- * `Prim` integer i8..i64 / u8..u64, or `byte` — the removed `u128`/`i128` family has no surface
+ * `Prim` integer i8..i64 / u8..u64, or `byte` — the removed `u64`/`i64` family has no surface
  * type to classify, drop-128 2026-07-24). The evaluability predicate and `literal_of` both gate
  * on this so the CF2 fold stays within the integer scalar subset (floats, chars, strings and
  * aggregates are left unfolded for a later crumb).
@@ -1920,9 +1920,9 @@ fn cf_fold_cast_operand(e: TExpr, agg: AggConstMap) -> bool {
  * cv_int_to_numint — reconstruct the sign-magnitude literal carrier a `CVInt` of
  * width/signedness `info` re-emits as, in the SAME representation the parser/typer use (an
  * unsigned value as its non-negative magnitude, a signed value as its signed magnitude).
- * Replaces `cv_int_to_i128` (drop-128, 2026-07-24): with `info.width <= 64` guaranteed
+ * Replaces `cv_int_to_i64` (drop-128, 2026-07-24): with `info.width <= 64` guaranteed
  * (`int_info`'s gate), every value this returns is provably `<= u64::MAX` in magnitude, so —
- * unlike the old i128 carrier, which had no literal form for a u128 whose top bit was set —
+ * unlike the old i64 carrier, which had no literal form for a u64 whose top bit was set —
  * this NEVER returns null; the return type stays `| null` for the caller's shape (a future
  * fold form may reintroduce an unrepresentable case). Every returned carrier round-trips:
  * fed back to the pipeline as a `TNumber` of the same type, it lowers to exactly the folded

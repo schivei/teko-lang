@@ -4610,13 +4610,16 @@ fn materialize_thunk_params(f0: LFunc, line: u32, col: u32) -> LFunc {
  * @param u64 n  the wrapped function's own arity
  * @return []u32  the VRegs `1..n`, in order
  */
-fn thunk_forward_args(n: u64) -> []u32 {
+fn thunk_forward_args(n: u64, has_ret_len_slot: bool) -> []u32 {
     mut out: []u32 = teko::list::empty()
     mut i: u64 = 0
     loop {
         if i >= n { break }
-        out = teko::list::push(out, (i + 1) to u32)
+        out = teko::list::push(out, i + 1)
         i++
+    }
+    if has_ret_len_slot {
+        out = teko::list::push(out, n + 1)
     }
     out
 }
@@ -4638,11 +4641,12 @@ fn thunk_forward_args(n: u64) -> []u32 {
  * @param u32 col  the source column to propagate onto every emitted inst
  * @return LFunc  the built thunk
  */
-fn build_closure_thunk(symbol: str, target_sym: str, ptypes: []LType, ret_ty: LType, line: u32, col: u32) -> LFunc {
-    let all_ptypes = env_first_param_types(ptypes)
-    let f0 = new_func(symbol, (ptypes.len + 1) to u32, all_ptypes, ret_ty)
+fn build_closure_thunk(symbol: str, target_sym: str, ptypes: []LType, ret_ty: LType, fat_ret: bool, line: u32, col: u32) -> LFunc {
+    let env_first = env_first_param_types(ptypes)
+    let all_ptypes = if fat_ret { teko::list::push(env_first, LType::Ptr) } else { env_first }
+    let f0 = new_func(symbol, all_ptypes.len to u32, all_ptypes, ret_ty)
     let f1 = materialize_thunk_params(f0, line, col)
-    let args = thunk_forward_args(ptypes.len)
+    let args = thunk_forward_args(ptypes.len, fat_ret)
     if ltype_is_void(ret_ty) {
         let f2 = append_inst(f1, 0, void_call_inst(target_sym, args, false, line, col))
         return append_inst(f2, 0, ret_void_inst(line, col))
@@ -4709,9 +4713,10 @@ fn lower_fn_value(ctx: LowerCtx, e: checker::TExpr, v: checker::TVar) -> Lowered
     let target_sym = mangle_fn_symbol(v.func_ns, v.name, ctx.flat_symbols)
     let ptypes = types_to_ltypes(sig.params, ctx.enums)
     let ret_ty = ltype_of(sig.ret, ctx.enums)
+    let fat_ret = is_fat_type(sig.ret)
     let id = ctx.lifted.len
     let thunk_sym = lift_thunk_symbol(id)
-    let thunk = build_closure_thunk(thunk_sym, target_sym, ptypes, ret_ty, e.line, e.col)
+    let thunk = build_closure_thunk(thunk_sym, target_sym, ptypes, ret_ty, fat_ret, e.line, e.col)
     let ctx2 = ctx_with_lifted(ctx, teko::list::push(ctx.lifted, thunk))
     let nullo = ctx_alloc(ctx2)
     let with_null = ctx_append(nullo.ctx, const_int_inst(nullo.vreg, 0, e.line, e.col))
@@ -4793,6 +4798,22 @@ fn lower_closure_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lo
     let fp = lower_closure_fatptr(ctx, hit.vreg, e.line, e.col)
     let rest = match lower_args(fp.ctx, c.args, callee_param_types(c)) { LoweredArgs as x => x; error as err => return err }
     lower_call_indirect(rest.ctx, e, fp.target, closure_call_args(fp.env, rest.vregs))
+}
+
+/**
+ * lower_closure_call_fat — the fat-result (`str`/`[]T`) closure-call sibling of
+ * `lower_closure_call`: resolve the local closure, prepend its env to the lowered
+ * explicit args, append one hidden length-out slot address, call indirectly through
+ * the closure target, then load the returned length back out of the slot.
+ */
+fn lower_closure_call_fat(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> LoweredFat | error {
+    if c.callee.segments.len == 0 { return error { message = "native backend N1: empty closure-call path (internal)" } }
+    let name = c.callee.segments[c.callee.segments.len - 1].name
+    let hit = lenv_lookup(ctx.env, name)
+    if !hit.found { return error { message = teko::str::concat("native backend N1: unbound closure local `", name, "` (internal)") } }
+    let fp = lower_closure_fatptr(ctx, hit.vreg, e.line, e.col)
+    let rest = match lower_args(fp.ctx, c.args, callee_param_types(c)) { LoweredArgs as x => x; error as err => return err }
+    lower_len_out_call_indirect(rest.ctx, fp.target, closure_call_args(fp.env, rest.vregs), e)
 }
 
 /**
@@ -5081,17 +5102,25 @@ pub type LoweredLambda = struct { func: LFunc; rodata: []LRodata; lifted: []LFun
  *                                when the body fails to lower
  */
 fn build_lambda_lfunc(lam: checker::TLambda, env_layout: LStructLayout, ctx: LowerCtx, line: u32, col: u32) -> LoweredLambda | error {
+    let fat_ret = is_fat_type(lam.ret)
     let ptypes = lambda_param_ltypes(lam.params, ctx.enums)
-    let all_ptypes = env_first_param_types(ptypes)
-    let seed0 = new_func("", (lam.params.len + 1) to u32, all_ptypes, ltype_of(lam.ret, ctx.enums))
+    let env_first = env_first_param_types(ptypes)
+    let all_ptypes = if fat_ret { teko::list::push(env_first, LType::Ptr) } else { env_first }
+    let seed0 = new_func("", all_ptypes.len to u32, all_ptypes, ltype_of(lam.ret, ctx.enums))
     let seed = materialize_lambda_params(seed0, lam, line, col)
+    let slot_reg = (lam.params.len + 1) to u32
+    let seeded = if fat_ret {
+        ParamSeed { func = append_inst(seed.func, 0, param_inst(slot_reg, slot_reg, line, col)); env = seed.env }
+    } else {
+        seed
+    }
     let ctx0 = LowerCtx {
-        func = seed.func; block_id = 0; env = seed.env
+        func = seeded.func; block_id = 0; env = seeded.env
         layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
         variants = ctx.variants
         defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = ctx.externs
         flat_symbols = ctx.flat_symbols; ret_type = lam.ret
-        has_ret_len_slot = false; ret_len_slot = 0
+        has_ret_len_slot = fat_ret; ret_len_slot = if fat_ret { slot_reg } else { 0 }
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = collect_addr_taken_locals(lam.body, ctx.ref_fns, ctx.enums)
     }
     let with_captures = match bind_lambda_captures(ctx0, env_layout, lam.captures, line, col) { LowerCtx as c => c; error as err => return err }
@@ -9156,7 +9185,7 @@ pub fn lower_fat_expr(ctx: LowerCtx, e: checker::TExpr) -> LoweredFat | error {
  *             than `lower_fat_expr`'s generic one), or propagated from resolving/lowering
  */
 fn lower_call_fat(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall) -> LoweredFat | error {
-    if cl.is_closure_call { return error { message = "native backend N1: fat-pointer closure-call result not yet lowered (N2)" } }
+    if cl.is_closure_call { return lower_closure_call_fat(ctx, e, cl) }
     if cl.is_iface_dispatch { return error { message = "native backend N1: fat-pointer interface-dispatch result not yet lowered (N2)" } }
     if cl.call_ns.len == 0 && is_list_builtin_call(cl.callee) { return lower_list_builtin(ctx, e, cl) }
     if cl.call_ns.len == 0 && is_concat_builtin_call(cl.callee) { return lower_concat_call(ctx, e, cl) }
@@ -10549,6 +10578,22 @@ fn lower_len_out_call(ctx: LowerCtx, sym: str, args: []u32, e: checker::TExpr) -
     let all_args = teko::list::push(args, slot.vreg)
     let called = ctx_alloc(with_slot)
     let with_call = ctx_append(called.ctx, call_inst(called.vreg, sym, all_args, false, e.line, e.col))
+    let lenr = ctx_alloc(with_call)
+    let with_len = ctx_append(lenr.ctx, load_inst(lenr.vreg, slot.vreg, LType::I64, e.line, e.col))
+    LoweredFat { ctx = with_len; ptr = called.vreg; len = lenr.vreg }
+}
+
+/**
+ * lower_len_out_call_indirect — `lower_len_out_call` for an INDIRECT target:
+ * reserve an 8-byte out-slot, append its address to `args`, call via
+ * `call.indirect`, then load the length half back from the slot.
+ */
+fn lower_len_out_call_indirect(ctx: LowerCtx, target: u32, args: []u32, e: checker::TExpr) -> LoweredFat {
+    let slot = ctx_alloc(ctx)
+    let with_slot = ctx_append(slot.ctx, alloca_inst(slot.vreg, ltype_size(LType::I64), ltype_align(LType::I64), e.line, e.col))
+    let all_args = teko::list::push(args, slot.vreg)
+    let called = ctx_alloc(with_slot)
+    let with_call = ctx_append(called.ctx, call_indirect_inst(called.vreg, target, all_args, false, e.line, e.col, ltype_of(e.type, ctx.enums)))
     let lenr = ctx_alloc(with_call)
     let with_len = ctx_append(lenr.ctx, load_inst(lenr.vreg, slot.vreg, LType::I64, e.line, e.col))
     LoweredFat { ctx = with_len; ptr = called.vreg; len = lenr.vreg }
