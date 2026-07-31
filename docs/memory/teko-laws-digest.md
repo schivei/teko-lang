@@ -2250,3 +2250,74 @@ que não existe"*.
 **A ligação que o dono viu é a que o plano ainda não tem:** o 12.1 já diz *"cobertura como sinal de
 disco, zero alocação em corrida"* — que é **exatamente** o que o journal constrói. O plano escreveu
 o requisito antes de existir o mecanismo que o satisfaz.
+
+---
+
+## O buffer é NOSSO e vale 2048 — e o chunk resolve-se na LEITURA (dono, 2026-07-31)
+
+> *"Podemos então ficar um buffer máximo nosso, garante que nenhum dos 3 estourem e ainda cabe tudo
+> de uma mensagem Rec… Logo, 2048 bytes devem satisfazer… como resolver a linearidade de um chunk
+> para ele ficar completo sem precisar reler o arquivo e perder o O(1)? … Ou faria gravar diretamente
+> o chunk como foi recebido, deixando a resolução para o journal resolver quando for solicitado?
+> Prefiro minha última pergunta."*
+
+### Porque 2048 é o número certo, e não é arbitrário
+
+**É o valor por omissão do macOS, medido — o mais apertado dos três.** Fixar o nosso tecto ali tem uma
+propriedade que nenhum outro valor tem: **não é preciso chamar `setsockopt` em plataforma nenhuma.**
+
+| plataforma | por omissão | 2048 cabe sem afinar? |
+|---|---|---|
+| Linux | `SO_SNDBUF` 212992 → 212960 úteis | sim, com 100× de folga |
+| macOS | `SO_SNDBUF` 2048 → **2048 úteis** | **sim, exatamente** |
+| Windows | mailslot com `nMaxMessageSize` declarado **é respeitado** | sim, declara-se 2048 |
+
+Escolher qualquer valor maior obriga a afinar o macOS; escolher 2048 **elimina a afinação do
+desenho**. Menos uma chamada, menos um modo de falha, menos uma célula que pode estar errada.
+
+E cabe: o `Rec` tem 80 bytes. 2048 comporta **25 registos**, ou uma linha única com 25× a folga —
+incluindo o caso que o dono nomeia, *"uma linha profunda de cobertura com um nome gigantesco que o dev
+tenha escrito com centenas de namespaces de profundidade"*.
+
+### A resposta à pergunta do chunk, e a preferência dele é a certa
+
+**Grava-se o chunk COMO CHEGOU; a junção é do leitor.** As alternativas e porque perdem:
+
+| via | porque não |
+|---|---|
+| reler o ficheiro para juntar | destrói o O(1) da escrita — é o defeito do `verdict_emit` outra vez |
+| encenar num sítio auxiliar (outros ficheiros) | **reintroduz o túnel feito de ficheiros** que a §15.1 apagou |
+| **gravar como chegou, resolver na leitura** | **a escrita fica append-only e O(1); a junção acontece uma vez, a pedido** |
+
+**E há uma razão estrutural que só aparece sob MPSC: os chunks de escritores diferentes INTERCALAM-SE
+por construção.** Qualquer esquema que exija contiguidade no ficheiro precisa de um trinco ou de uma
+área de encenação por escritor. **Gravar como chegou e resolver por `(writer, seq, chunk_ix)` não
+precisa de nenhum dos dois** — o mesmo triplo que a idempotência já exige.
+
+E o leitor já existe: o `teko journal <path>.tkj -o <saida.log>` é o sítio onde a resolução vive, e
+ele já ia percorrer o ficheiro de qualquer maneira.
+
+### O que isto CUSTA, nomeado
+
+1. **O leitor tem de reter mensagens parciais até o último chunk chegar.** Limitado por
+   *(escritores concorrentes × tecto da mensagem)*, **não pela dimensão da corrida** — logo é
+   limitado e pequeno. Não é a memória do `verdict_emit` disfarçada.
+2. **Uma corrida que morra a meio de uma mensagem deixa uma sequência incompleta.** Isso **não é um
+   defeito, é informação**: o leitor relata *"registo truncado, o escritor morreu no chunk k"*. E é
+   coerente com a lei do próprio dono — **a morte de um buffer aceita-se**.
+3. **A bandeira de EOF no último chunk é o que torna a completude decidível SEM saber `n` de antemão**
+   — logo o escritor nunca precisa de conhecer o comprimento total antes de começar, e a escrita fica
+   verdadeiramente em fluxo dos dois lados.
+
+### A interacção que ninguém levantou ainda, e é real
+
+**O empacotamento e o chunk partilham o MESMO orçamento de 2048.** Um registo que precise de chunk
+**não pode viajar empacotado com outros** — ele ocupa a mensagem inteira, por definição. Logo o
+empacotador tem de ter dois modos, e a fronteira entre eles é `tamanho > 2048 - cabeçalho`.
+
+### E o alarme que a raridade cria
+
+Com o `Rec` a 80 bytes e o tecto a 2048, **o chunk quase nunca dispara**. É uma válvula, não um
+caminho quente — e código que quase nunca corre é exactamente o código que apodrece sem ninguém
+reparar. **Tem de haver uma fixture que FORCE o chunk**, senão a junção do leitor é uma promessa e
+não um mecanismo. Não é um contra-argumento à decisão: é o teste que ela exige.
