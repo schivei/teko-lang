@@ -1,0 +1,209 @@
+use teko::parser
+
+/**
+ * The unit suite for the POINTS-TO CENSUS (`src/checker/pt_census.tks`, namespace `teko::checker`).
+ *
+ * Its whole job is the VIVACITY brace the report leans on: the census line reports a zero for any
+ * arm the corpus never produces, and a reader must be able to tell that zero apart from a counter
+ * that cannot count. Every arm — `PtFrame`, `PtRoot`, `PtParam`, `PtAdopter` (concrete AND the `⊤`
+ * fallback) and `PtTop` — is therefore driven from a HAND-BUILT `pt` axis and asserted, including
+ * the arms `fn_spine` is not able to reach today.
+ *
+ * @param pt  the points-to axis the census will read
+ * @return Spine  a spine whose only meaningful field is the given points-to axis
+ */
+fn ptc_spine_of(pt: []PointsTo) -> Spine {
+    Spine { cells = teko::list::empty(); pt = pt; bf = teko::list::empty(); us = teko::list::empty() }
+}
+
+/**
+ * A points-to axis holding exactly one cell of every lattice arm, in lattice order, with BOTH
+ * `PtAdopter` shapes present (a concrete region and the `⊤` budget fallback).
+ *
+ * @return []PointsTo  a six-cell axis covering every arm
+ */
+fn ptc_one_of_each() -> []PointsTo {
+    mut pt: []PointsTo = teko::list::empty()
+    pt = teko::list::push(pt, PtFrame { })
+    pt = teko::list::push(pt, PtRoot { })
+    pt = teko::list::push(pt, PtParam { id = PtParamId { index = 0 } })
+    pt = teko::list::push(pt, PtAdopter { id = PtAdopterId { region = 0; top = false } })
+    pt = teko::list::push(pt, PtAdopter { id = PtAdopterId { region = 0; top = true } })
+    pt = teko::list::push(pt, PtTop { })
+    pt
+}
+
+/**
+ * A single-cell points-to axis holding the given value.
+ *
+ * @param p  the one cell's points-to value
+ * @return []PointsTo  a one-element axis
+ */
+fn ptc_only(p: PointsTo) -> []PointsTo {
+    teko::list::push(teko::list::empty(), p)
+}
+
+/**
+ * The census of one hand-built axis (the shorthand every arm assertion below uses).
+ *
+ * @param pt  the points-to axis to count
+ * @return PtCensus  the census of a single function carrying that axis
+ */
+fn ptc_census_of(pt: []PointsTo) -> PtCensus {
+    pt_census_add_spine(pt_census_empty(), ptc_spine_of(pt))
+}
+
+/**
+ * THE VIVACITY PROOF: every arm of the points-to lattice is counted, and counted into its OWN
+ * bucket. `PtAdopter(⊤)` is a SUBSET of `PtAdopter` (both rise together, the total stays six), so a
+ * `⊤` cell is never double-counted against the distribution.
+ */
+#test fn pt_census_counts_every_lattice_arm() {
+    let c = ptc_census_of(ptc_one_of_each())
+    teko::assert::is_true(c.fns == 1)
+    teko::assert::is_true(c.cells == 6)
+    teko::assert::is_true(c.frame == 1)
+    teko::assert::is_true(c.root == 1)
+    teko::assert::is_true(c.param == 1)
+    teko::assert::is_true(c.adopter == 2)
+    teko::assert::is_true(c.adopter_top == 1)
+    teko::assert::is_true(c.top == 1)
+}
+
+/**
+ * The `PtRoot` counter is LIVE in isolation — an axis of nothing but `PtRoot` is counted as
+ * `PtRoot`, so a zero in the corpus report is a statement about the axis and not about this count.
+ */
+#test fn pt_census_counts_a_root_only_axis() {
+    let c = ptc_census_of(ptc_only(PtRoot { }))
+    teko::assert::is_true(c.root == 1)
+    teko::assert::is_true(c.frame == 0)
+    teko::assert::is_true(c.cells == 1)
+}
+
+/**
+ * The LIVENESS brace fails whenever either braced arm is unobserved, and holds only when both are.
+ */
+#test fn pt_census_liveness_needs_both_braced_arms() {
+    teko::assert::is_false(pt_census_live(pt_census_empty()))
+    teko::assert::is_false(pt_census_live(ptc_census_of(ptc_only(PtFrame { }))))
+    teko::assert::is_false(pt_census_live(ptc_census_of(ptc_only(PtRoot { }))))
+    teko::assert::is_true(pt_census_live(ptc_census_of(ptc_one_of_each())))
+}
+
+/**
+ * The liveness line names each braced arm's state, so a `DEAD` arm cannot be read past.
+ */
+#test fn pt_census_liveness_line_names_the_dead_arm() {
+    let dead = pt_census_liveness_line(ptc_census_of(ptc_only(PtFrame { })))
+    teko::assert::str_contains(dead, "NOT LIVE")
+    teko::assert::str_contains(dead, "PtFrame LIVE (1)")
+    teko::assert::str_contains(dead, "PtRoot DEAD (0)")
+    let live = pt_census_liveness_line(ptc_census_of(ptc_one_of_each()))
+    teko::assert::str_contains(live, "PtRoot LIVE (1)")
+}
+
+/**
+ * The report line carries the distribution, the `⊤` subset, the per-function shape and the UNIT the
+ * numbers are in — the four things a reader needs before quoting the fraction.
+ */
+#test fn pt_census_line_carries_distribution_shape_and_unit() {
+    let line = pt_census_line(ptc_census_of(ptc_one_of_each()))
+    teko::assert::str_contains(line, "teko: pt-census: 1 fns, 6 cells")
+    teko::assert::str_contains(line, "PtFrame 1 (16.67%)")
+    teko::assert::str_contains(line, "PtRoot 1 (16.67%)")
+    teko::assert::str_contains(line, "PtParam 1 (16.67%)")
+    teko::assert::str_contains(line, "PtAdopter 2 (33.33%, 1 at top)")
+    teko::assert::str_contains(line, "PtTop 1 (16.67%)")
+    teko::assert::str_contains(line, PT_CENSUS_UNIT)
+}
+
+/**
+ * The per-function shape: the mean is cells over functions, and the fat-tail probe keeps the
+ * LARGEST single-function universe, not the last one seen.
+ */
+#test fn pt_census_reports_mean_and_fattest_function() {
+    let one = pt_census_add_spine(pt_census_empty(), ptc_spine_of(ptc_one_of_each()))
+    let two = pt_census_add_spine(one, ptc_spine_of(ptc_only(PtFrame { })))
+    teko::assert::is_true(two.fns == 2)
+    teko::assert::is_true(two.cells == 7)
+    teko::assert::is_true(two.max_cells == 6)
+    teko::assert::is_true(pt_census_cells_per_fn(two) == 3.5)
+}
+
+/**
+ * A degenerate census divides by nothing: no function walked means a zero mean and a zero share,
+ * never a fault.
+ */
+#test fn pt_census_percentages_are_zero_on_an_empty_census() {
+    teko::assert::is_true(pt_census_pct(0, 0) == 0.0)
+    teko::assert::is_true(pt_census_cells_per_fn(pt_census_empty()) == 0.0)
+    teko::assert::is_true(pt_census_pct(1, 4) == 25.0)
+}
+
+/**
+ * A minimal `TFunction` with the given params and body — the fields the spine never reads carry
+ * inert defaults.
+ *
+ * @param params  the function's parameters
+ * @param body    the function's typed statement block
+ * @return TFunction  a `TFunction` ready for `fn_spine`
+ */
+fn ptc_fn(params: []parser::Param, body: []TStatement) -> TFunction {
+    TFunction { name = "g"; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = params; return_type = Void { }; body = body; vis = parser::Visibility::Private; has_doc = false; doc = ""; namespace = "t"; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64 }
+}
+
+/**
+ * A `let name = 1` binding of an `i64` literal — the plainest frame-local cell there is.
+ *
+ * @param name  the bound name
+ * @return TStatement  a `TBinding` statement
+ */
+fn ptc_let_int(name: str) -> TStatement {
+    let lit = TExpr { kind = TNumber { is_float = false; value = parser::numint_of_u64(1); fval = 0.0 }; type = Prim { kind = PrimKind::I64 }; line = 0; col = 0 }
+    TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = name }; bound = lit.type; value = lit }
+}
+
+/**
+ * A one-function program built around the given body.
+ *
+ * @param body  the single function's typed statement block
+ * @return TProgram  a program holding exactly one `TFunction` item
+ */
+fn ptc_prog(body: []TStatement) -> TProgram {
+    TProgram { items = teko::list::push(teko::list::empty(), ptc_fn(teko::list::empty(), body)) }
+}
+
+/**
+ * END TO END through `fn_spine`: two plain `let` bindings in a real function are two cells, both
+ * `PtFrame` — the census walks a `TProgram`, not just a hand-built axis.
+ */
+#test fn pt_census_walks_a_real_program_through_fn_spine() {
+    let body = teko::list::push(teko::list::push(teko::list::empty(), ptc_let_int("a")), ptc_let_int("b"))
+    let c = pt_census(ptc_prog(body))
+    teko::assert::is_true(c.fns == 1)
+    teko::assert::is_true(c.cells == 2)
+    teko::assert::is_true(c.frame == 2)
+    teko::assert::is_true(c.root == 0)
+}
+
+/**
+ * The DEDUPE the unit doc-comment declares, proven: the SAME name bound twice in one function is
+ * ONE cell, so the census counts names-per-function and not binding occurrences.
+ */
+#test fn pt_census_counts_a_rebound_name_once() {
+    let body = teko::list::push(teko::list::push(teko::list::empty(), ptc_let_int("a")), ptc_let_int("a"))
+    let c = pt_census(ptc_prog(body))
+    teko::assert::is_true(c.cells == 1)
+    teko::assert::is_true(c.frame == 1)
+}
+
+/**
+ * A program with no function item contributes nothing — the census is vacuous, not broken.
+ */
+#test fn pt_census_ignores_non_function_items() {
+    let c = pt_census(TProgram { items = teko::list::empty() })
+    teko::assert::is_true(c.fns == 0)
+    teko::assert::is_true(c.cells == 0)
+    teko::assert::is_false(pt_census_live(c))
+}
