@@ -2632,3 +2632,40 @@ orçamento.** Eu tinha contado este como o terceiro `#arena_depth` implícito: *
 **uma** célula; **cada parâmetro é célula** e os parâmetros **dominam** (21 074 células contra 9 504
 linhas `let`/`mut`); `x.f` é célula, `a.b.c` não é; destructuring não nomeia nenhuma. **Não é por
 sítio de alocação, nem por binding, nem por definição SSA.**
+
+---
+
+## Não há maquinaria de DI — correcção do dono (2026-07-31)
+
+> *"o 'reticulado' não existe pq realmente não existe maquinário de DI, existe definições em código
+> que não foi finalizado e, `#singleton` e `#scoped` são partes do que falta, mas há toda a maquinaria
+> de threading, memória, assincronismo e outros antes de fazer algo para DI nativo via compilação."*
+
+Eu tinha escrito *"há maquinaria de DI, parcial"*, citando `di.tks` com 383 linhas, `DiKind` com
+quatro casos e `#inject` no parser. **Errado, e a distinção é a que interessa: superfície escrita não
+é maquinaria.** O `di.tks` é código **não terminado**; o `#singleton` e o `#scoped` estão entre o que
+**falta**, não entre o que existe.
+
+**E há uma ORDEM, que o dono nomeia e que nenhum documento desta lane tinha:** *threading, memória,
+assincronismo e outros* **vêm antes** de DI nativo por compilação. Logo toda a pergunta de DI que
+aparecer nesta lane — o `#singleton` em duas tarefas, a monotonia de lifetime, o reticulado
+`singleton ≤ scoped ≤ transient` — **é downstream e não bloqueia nada aqui.**
+
+## LEI DE MÉTODO — ler a coisa não é ler a CONDIÇÃO dela
+
+Quatro erros meus no mesmo dia, todos com a mesma forma. Fica escrito porque o custo de os repetir é
+o dono ter de me corrigir:
+
+| li | concluí | o que faltava ler |
+|---|---|---|
+| `SO_SNDBUF` = 2048 no macOS | *"é o tecto"* | ninguém testara se **sobe** — sobe até 4 MiB |
+| `one_byte` é builtin (`scope.tks:787`) com espelho de runtime | *"o degrau 32 fechou"* | **declarado ≠ baixado**; `lower.tks:4239` continua a parar |
+| `typer.tks:6030` chama `fn_spine` | *"o eixo é calculado em todas as funções"* | a **guarda em `:6027–6029`** — ~0,4 % chegam lá |
+| `di.tks` 383 linhas + `#inject` no parser | *"há maquinaria parcial"* | **código não terminado ≠ maquinaria** |
+
+**A regra: encontrar o símbolo não é encontrar o comportamento.** Antes de declarar que algo existe,
+ler (a) a guarda que decide se corre, (b) o consumidor que decide se serve para alguma coisa, e (c) se
+o valor observado é fixo ou apenas o valor por omissão.
+
+É a mesma patologia que a barra do tronco recusa noutro sítio — **verificar um proxy da condição em
+vez da condição** — aplicada à leitura de código em vez de à escrita de portões.
