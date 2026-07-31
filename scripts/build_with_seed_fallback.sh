@@ -536,6 +536,23 @@ TIP_LOG="$(mktemp)"
 # compiler can build. BOTH are needed — that run shows the seed probing and rejecting rung 2 — so
 # do not "optimize" the first one away. Refresh with TEKO_LADDER_DISCOVER=1 (by hand, never in CI)
 # when a pin goes stale, and paste the rungs the discovery log names back into this line.
+#
+# THE INVARIANT THAT WAS MISSING, and the measurement that found it (2026-07-31, run 30613192858 —
+# nine artifact legs, docs/medicoes/2026-07-31-seed-compat-e-escada.md). A RUNG OLDER THAN THE SEED'S
+# OWN RELEASE COMMIT IS POISON. These two are 0.3.0.30-era (2026-07-24) and were discovered for the
+# 0.3.0.30 seed; the released seed is now 0.3.0.31-beta (tag v0.3.0.31-beta = 4e6c4e4b), and 0.3.1
+# REMOVED `i128`/`u128`/`f16` and the `T?` sugar. Building rung 1 with that seed was measured here:
+# 124 removed-type diagnostics across ~40 files. The ladder walks BACKWARDS across a language
+# removal, so it cannot climb — and it says so only when the seed itself fails, which is why the
+# defect stayed latent until a tip stopped being seed-buildable.
+#
+# THESE PINS ARE KNOWINGLY LEFT AS THEY ARE, and that is a report, not an oversight. Discovery cannot
+# replace them from this era: `git merge-base HEAD origin/main` IS 4e6c4e4b, the seed's own release
+# commit, so every candidate the probe can reach (newest first-parent ancestor at-or-before the
+# merge-base) is the seed or older than it — a rung with zero capability gain, or the pre-0.3.1 wall.
+# The ladder has nothing left to climb until a NEWER seed is released (from a commit >= c64178e9);
+# until then the invariant that keeps CI green is the one the unit tier now guards, that the tip
+# stays buildable by the published seed (`compiler_sources_carry_no_seed_hostile_match_arm`).
 LADDER_RUNGS="71c763d0ccec64df9fcd6c285a6782c642254e38 071c9c172f70c4fec5ff495e285cfc9cdef97fcb"
 
 # build_rung SHA STAGE — check the ladder worktree out at SHA and build it with $CURRENT_BIN into a
@@ -558,7 +575,14 @@ build_rung() {
 # the determinism the owner asked for would quietly evaporate.
 stale_pin_fatal() {
   log "FATAL: pinned ladder rung $1 FAILED to build — the pin in LADDER_RUNGS is obsolete."
-  log "This script does NOT fall back to probing (that is what the pins removed). To refresh:"
+  log "This script does NOT fall back to probing (that is what the pins removed)."
+  log "READ THE RUNG LOG BELOW FIRST. If it names REMOVED types or syntax ('type i128 was removed',"
+  log "'the \`T?\` nullable sugar has been removed'), the rung PREDATES the released seed and no"
+  log "refresh can help: discovery only walks BACK from the merge-base with $BASE_BRANCH, and when"
+  log "that merge-base is at-or-before the seed's own release commit every candidate is the seed or"
+  log "older. The fix is then to keep the TIP buildable by the published seed, or to release a newer"
+  log "seed — never to re-pin. (Measured 2026-07-31: docs/medicoes/2026-07-31-seed-compat-e-escada.md)"
+  log "Otherwise, when the rung failed on a capability the seed genuinely lacks, refresh by hand:"
   log "  TEKO_LADDER_DISCOVER=1 sh scripts/build_with_seed_fallback.sh   # run by hand, not in CI"
   log "then paste the rung SHAs it reports into LADDER_RUNGS in this file."
   log "----- pinned rung build log ($1) -----"
