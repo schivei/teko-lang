@@ -2158,3 +2158,95 @@ sistema sobe até 4 MiB sem reclamar.
 **Correcção nomeada, porque o erro é o mesmo de sempre:** medi um valor observado e publiquei-o como
 propriedade do sistema, sem testar se ele se movia. É a mesma patologia da guarda de PATH e da
 detecção de semente — verificar um proxy da condição em vez da condição.
+
+---
+
+## O paralelismo: o SO decide por omissão, o DESENVOLVEDOR pode fixar (dono, 2026-07-31)
+
+> *"Vamos executar, por default, no numero de threads e processos que o SO concede, mas é importante
+> que o desenvolvedor possa definir quantas alocações deseja (número de threads)."*
+
+**Duas metades, e a segunda não é uma opção de conveniência.** Por omissão a corrida usa o que o
+sistema concede; mas o número tem de ser **fixável por quem escreve**, porque uma caixa partilhada
+(um agente ao lado, um CI com quatro trabalhos no mesmo runner) não tem como o sistema saber quanto
+é que ESTA corrida pode tomar. As três falhas de hoje — `Killed: 9` no macOS, duas ondas de
+*shutdown signal* no Linux — são exatamente esse caso.
+
+**O precedente já existe e é o molde**: `test_jobs()` (`src/build/project.tks:3491`) lê
+`TEST_JOBS_ENV` com um valor por omissão, e `run_gate_sharded` reparte a suíte por esse número. A
+lei estende ao paralelismo do canal a forma que a suíte já tem — **não inventa mecanismo, generaliza
+o que está construído.**
+
+## O `spawn` sem junção: BURACO REAL no esboço que publiquei (dono, 2026-07-31)
+
+> *"Como garante que os spawns terminaram? Não deveria ter um waitgroup? E na main um
+> `defer wg.wait()`?"*
+
+**Está certo, e o defeito é meu.** O esboço publicado era:
+
+```teko
+fn main() {
+    let c = teko::threads::chan_bounded(1024)
+    defer teko::threads::chan_close(c)
+    spawn orquestrar(c)
+    loop mut i: u64 = 0; i < filhos.len; i++ { spawn drenar(c, filhos[i]) }
+}
+```
+
+**Nada faz a `main` esperar.** Ela regressa, o processo sai, e os fios morrem com ele. E há um
+segundo buraco por baixo do primeiro: mesmo que o processo não saísse, o `defer chan_close(c)`
+dispara à saída do escopo da `main` — **possivelmente enquanto os handlers ainda estão a escrever**,
+e eles receberiam `Closed` num `push` legítimo.
+
+### Porque a defesa que o desenho já tinha NÃO cobre isto
+
+O arquiteto respondeu à terminação com a **contagem de produtores**: o `recv` devolve `closed` quando
+ela chega a zero, e o `defer` da `main` é o *backstop*. Isso governa **o laço do orquestrador**, não
+**o tempo de vida da `main`**. Um mecanismo responde "quando é que o consumidor pára"; o outro tem de
+responder "quando é que a `main` pode sair" — e esse não existia.
+
+### A forma, e a ordem não é acidente
+
+```teko
+let c = teko::threads::chan_bounded(1024)
+let wg = teko::threads::waitgroup()
+defer teko::threads::chan_close(c)   // registado 1º  -> corre por ÚLTIMO
+defer wg.wait()                      // registado 2º  -> corre PRIMEIRO
+```
+
+**`defer` corre LIFO** — verificado no corpus, não de cabeça: `src/parser/ast.tks:339`
+(*"executes LIFO at ANY scope exit"*), `src/checker/typer.tks:3514`, `src/lir/lower.tks:5367`. Logo
+esta ordem de escrita dá a ordem certa de execução: **espera, depois fecha.** Escrita ao contrário,
+fecha antes de esperar — e é um erro silencioso, porque o `Closed` chega a um `push` que estava certo.
+
+**Isto é um FOOTGUN e tem de ser nomeado no desenho**, não descoberto por quem escrever o segundo
+programa que use canais.
+
+### E o orquestrador entra no waitgroup, não só os handlers
+
+Se o `wg` contasse só os handlers: `wait` volta quando eles acabam, a contagem de produtores chega a
+zero, o orquestrador vê `closed` — **mas a `main` já saiu e pode fechar o canal antes de ele drenar o
+que sobrou.** Com o orquestrador dentro do `wg` não há impasse, porque ele termina sozinho assim que
+os produtores acabam: a espera é finita **por construção**, não por convenção.
+
+## O profiler: a especulação ESTÁ registada — SW12, `#479`/`#480` (dono, 2026-07-31)
+
+> *"há uma 'especulação' que não sei se tem registrado, que é o desenvolvimento de um profiler, para
+> otimizar o binário final… sei que tkcov e journal serão de grande valia."*
+
+**Está registada**, em `docs/design/wave-0.3.1-plan.md`, secção **SW12 — Profiling, Coverage & PGO**:
+
+| crumb | issue | o quê |
+|---|---|---|
+| 12.1 | **#475** | cobertura como sinal de disco apenas (zero alocação em memória durante a corrida); transformação XML/Cobertura **depois** |
+| 12.2 | **#479** | `teko profile` (estático + dinâmico) a sugerir `#arena_size`/`#arena_depth` |
+| 12.3 | **#480** | PGO de pré-dimensionamento de arena — o pré-linker atribui tamanho+profundidade a partir do relatório; **manual > PGO > omissão** |
+
+E o plano já traz **uma pergunta em aberto endereçada ao dono**, que continua por responder: o
+`#479`/`#480` referem `#arena_depth` (**#476**), que **não está no âmbito**. A recomendação escrita é
+puxar o `#476` para o SW12 como crumb 12.0, *"porque o profiler é incoerente a sugerir uma directiva
+que não existe"*.
+
+**A ligação que o dono viu é a que o plano ainda não tem:** o 12.1 já diz *"cobertura como sinal de
+disco, zero alocação em corrida"* — que é **exatamente** o que o journal constrói. O plano escreveu
+o requisito antes de existir o mecanismo que o satisfaz.
