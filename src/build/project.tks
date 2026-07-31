@@ -3265,18 +3265,56 @@ fn ffi_write_c_header(od: str, stem: str, prog: checker::TProgram) -> error | nu
     null
 }
 
-/** Hand `prog` to the backend at optimization level `opt` and, on success, report the closing
- *  `built <path> <elapsed>` line (measured since `start`) and the build's peak memory cost
- *  (#148). The shared tail of every build path once its program is final: no tests present,
- *  the `--no-verify` escape hatch, and the gate's own release rebuild. `tty` selects the
- *  backend's in-place `\r` phase updates (BUILD-OUTPUT OBSERVABILITY). */
+/**
+ * Hand `prog` to the backend at optimization level `opt` and, on success, report the closing
+ * `built <path> <elapsed>` line (measured since `start`) and the build's peak memory cost (#148).
+ *
+ * The shared tail of every build path once its program is final: no tests present, the
+ * `--no-verify` escape hatch, and the gate's own release rebuild. `tty` selects the backend's
+ * in-place `\r` phase updates (BUILD-OUTPUT OBSERVABILITY).
+ *
+ * The POINTS-TO CENSUS (`report_pt_census`) is printed here, BEFORE codegen, for the same reason
+ * `report_arith_cast_rate` prints before the gate's verdict: it is a property of the typed program
+ * alone, so it must speak even on a tree whose emission or link later fails.
+ *
+ * @param dir      the project directory (diagnostics)
+ * @param out_dir  the build output directory
+ * @param prog     the final checked program (tests already stripped where applicable)
+ * @param m        the manifest, with the resolved backend already stamped on
+ * @param opt      the cc optimization level
+ * @param tty      render the backend's in-place `\r` phase updates
+ * @param start    when the build began (the closing `built <path> <elapsed>` line's baseline)
+ * @return         0 on success, else the backend's failing status
+ */
 fn codegen_and_report(dir: str, out_dir: str, prog: checker::TProgram, m: Manifest, opt: i32, tty: bool, start: i64) -> i32 {
+    report_pt_census(prog)
     let rc = backend(dir, m.name, out_dir, prog, m, opt, tty)
     if rc == 0 {
         report_build_done(built_artifact_path(out_dir, m), start)
         report_peak()
     }
     rc
+}
+
+/**
+ * report_pt_census — compute the whole-program POINTS-TO CENSUS of the spine's `pt` axis and PRINT
+ * it: the LIVENESS brace first, the distribution second.
+ *
+ * Two lines, never one, and always in that order. The census is read for a single number — the
+ * `PtFrame` fraction, the ceiling on what any scope-directed reclamation could recover — and a
+ * counter broken to zero would hand back "0%" as if it were that fact. The liveness line states,
+ * before any value is shown, whether the two arms that pin the scale were observed at all.
+ *
+ * Nothing rides on it. The `pt` axis stays consulted by `check_ref_storability_block` alone; this
+ * re-derives the fact per function, counts, and drops it.
+ *
+ * @param prog  the final checked program
+ * @since 0.3.1.0
+ */
+fn report_pt_census(prog: checker::TProgram) {
+    let c = checker::pt_census(prog)
+    teko::io::println(checker::pt_census_liveness_line(c))
+    teko::io::println(checker::pt_census_line(c))
 }
 
 /** Assemble WITHOUT the `.tkt` tests and codegen straight away at optimization level `opt`, skipping
