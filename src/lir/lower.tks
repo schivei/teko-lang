@@ -10326,7 +10326,7 @@ fn load_fat_slot_ptr(ctx: LowerCtx, slot: u32, line: u32, col: u32) -> Lowered {
  * the ptr is the address of its interned rodata symbol (`LGlobalAddr`) and the len is its element
  * count, derived from the interned byte count and the value's own type — a `str` counts its raw UTF-8
  * bytes (stride 1), a `[]T` counts elements at the SAME element stride the indexer uses
- * (`ltype_of(element)`), so a `.len` read and a `[i]` read agree.
+ * (`elem_byte_stride`), so a `.len` read and a `[i]` read agree.
  *
  * @param ctx  the lowering context to append into
  * @param e    the fat-valued reference expression (its str/slice type + source position)
@@ -10346,9 +10346,9 @@ fn lower_const_fat(ctx: LowerCtx, e: checker::TExpr, r: LRodata) -> LoweredFat |
 /**
  * const_fat_len — the element count of a materialized str/slice aggregate const from its interned
  * byte length and its type (#594 crumb 6): a `str` is `byte_len` raw bytes (stride 1); a `[]T` is
- * `byte_len / stride` where `stride = ltype_size(ltype_of(element))`, the EXACT stride
- * `lower_index_slice` folds an index against — so the length and the indexing agree byte-for-byte on
- * both engines.
+ * `byte_len / stride` where `stride = elem_byte_stride(element)`, the EXACT stride
+ * `lower_index_slice`/`lower_index_fat` fold an index against — so the length and the indexing agree
+ * byte-for-byte on both engines.
  *
  * @param t         the const's resolved value type (`Str` or `Slice`)
  * @param byte_len  the interned rodata blob's byte length
@@ -10366,9 +10366,13 @@ fn const_fat_len(t: checker::Type, byte_len: u32, enums: []LEnumInfo) -> u32 | e
 
 /**
  * const_slice_len — a materialized `[]T` const's element count: `byte_len / stride`, with the element
- * stride taken from `ltype_of(element)` so it matches `lower_index_slice` (#594 crumb 6). A
- * zero-stride element (a `void`-classed type) never reaches here — the serializer rejects it — so the
- * division is always exact.
+ * stride taken from `elem_byte_stride` so it matches BOTH slice-element readers (#594 crumb 6;
+ * 0.3.1.0 degrau const-slice): `lower_index_slice`'s scalar load AND `lower_index_fat`'s two-word
+ * `{ptr, len}` load. It used to read `ltype_size(ltype_of(element))`, which answers 8 for a FAT
+ * element instead of 16 — a stale number the serializer's own honest stop kept unreachable by
+ * rejecting every fat element; interning a `[]str` const without correcting it here would have
+ * reported twice the true length. A zero-stride element (a `void`-classed type) never reaches here —
+ * the serializer rejects it — so the division is always exact.
  *
  * @param element   the slice's element type
  * @param byte_len  the interned rodata blob's byte length
@@ -10377,7 +10381,7 @@ fn const_fat_len(t: checker::Type, byte_len: u32, enums: []LEnumInfo) -> u32 | e
  * @throws          when the element's machine stride is zero (unreachable — rejected at serialize)
  */
 fn const_slice_len(element: checker::Type, byte_len: u32, enums: []LEnumInfo) -> u32 | error {
-    let stride = ltype_size(ltype_of(element, enums))
+    let stride = elem_byte_stride(element, enums)
     if stride == 0 { return error { message = "native backend N1: aggregate const slice has a zero-stride element (internal)" } }
     byte_len / stride
 }
