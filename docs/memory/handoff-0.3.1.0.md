@@ -3058,3 +3058,44 @@ empurrado custa o trabalho inteiro quando o contentor morre — e os contentores
 **A regra é a mesma que vai em todos os briefs, e passa a valer para o integrador: commit e push A
 CADA ESCRITA, e o CI que se cancele.** Se o ruído de runs cancelados incomodar, o remédio é agrupar o
 TRABALHO num commit, nunca adiar o EMPURRÃO.
+
+## 17. A quebra do seed FECHOU — e o controlo local não serviu para o provar
+
+Drenado `cargo/0.3.1.0-seed-compat-escada` (merge `b1cdb42`). O CI confirma, e é o único juiz que
+tinha o seed certo. Leg `artifact/linux-x86_64-glibc` sobre `b1cdb42`:
+
+```
+ci_provision_teko: teko v0.3.0.31-beta ready at .seed
+teko-ci: gen1 ready at out                      <- construiu DIRECTAMENTE, sem escada
+fixpoint: native backend N1: builtin `one_byte` not yet lowered (N2)
+```
+
+**Nada de `seed FAILED`, nada de `LADDER`, nada de `FATAL`.** A lane volta a ter **um só bloqueio**: o
+degrau 32.
+
+### A ressalva, que é o oposto de uma vitória
+
+Consegui finalmente um seed publicado (nightly `v0.3.0.31-nightly_fab2a759` de `schivei/teko-lang`,
+`sha256 2e282a22…`, a bater com o digest da release) e corri o **controlo**: construir o commit
+**anterior** à correcção com ele.
+
+**O controlo NÃO reproduziu a falha** — `b8cf3de` constrói com exit 0, sem erro em
+`project.tks:5873`. Logo esse seed **não é, em comportamento, o seed que o CI provisiona**: o CI vai
+buscar *newest-first* a **`teko-org/teko-lang`** e eu fui buscar uma nightly de **`schivei`**. Ambos
+se dizem `0.3.0.31-beta` e **não são a mesma coisa**.
+
+**O que isto significa, dito com precisão:** a correcção está confirmada **pelo CI**, não por mim. O
+meu controlo foi **inconclusivo** — falhou em reproduzir, o que não é o mesmo que contradizer.
+
+### A lei que daqui sai, e que é a versão forte da lição da noite
+
+**Há TRÊS compiladores diferentes a chamarem-se `0.3.0.31-beta`:**
+
+| origem | onde vive | serve para |
+|---|---|---|
+| gen1 colhido de artefacto de CI | era o `~/.teko-seed` da noite | construir depressa; **mais capaz que os outros dois** |
+| nightly de `schivei/teko-lang` | descarregável daqui | construir a lane; **NÃO julga compatibilidade de seed** |
+| *newest-first* de `teko-org/teko-lang` | só o CI alcança | **é o único que julga a barra** |
+
+**Um ritual local verde não é o portão.** Só o CI corre o portão. Quando eu disser «verde», tenho de
+dizer **com que compilador** — e se for o meu, a afirmação é sobre a minha caixa, não sobre a barra.
