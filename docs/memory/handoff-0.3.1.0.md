@@ -3099,3 +3099,52 @@ meu controlo foi **inconclusivo** — falhou em reproduzir, o que não é o mesm
 
 **Um ritual local verde não é o portão.** Só o CI corre o portão. Quando eu disser «verde», tenho de
 dizer **com que compilador** — e se for o meu, a afirmação é sobre a minha caixa, não sobre a barra.
+
+## 18. CORREÇÃO DO DONO — "a rota C é linear nos dois eixos" é falso como eu escrevi
+
+O dono, 2026-07-31:
+
+> *"Ou seja, mesmo em C, a memória está vazando, e a afirmação de que em C é linear (está no seu
+> documento) é falsa."*
+
+**Ele tem razão.** A frase está no relatório da noite, na tabela da curva do isel.
+
+### O que a sonda mediu, e o que ela NÃO mediu
+
+A sonda era um programa **sintético** com N instruções numa função, compilado pelo backend nativo
+contra a rota C. Na rota C **o seletor de instruções nativo não roda**, logo não paga o `vinfo_set`
+nem o `sort_by_start`. A tabela é honesta sobre **o eixo do backend** — e só sobre ele. O pico C
+naquela sonda era **56,5 MB**, de um projeto sintético.
+
+**Eu escrevi a conclusão sem escopo, encostada na narrativa do OOM.** Lida assim, ela diz *"C está
+bem, o problema é o nativo"*, e isso é falso.
+
+### Os números que eu mesmo publiquei e que a desmentem
+
+| medida | rota | valor |
+|---|---|---|
+| raiz nunca liberada, `reclaim ratio` | **C** (`TEKO_BACKEND=c`) | **1940,0 MB · 0,0%** |
+| pico do build do compilador | **C** | 1601–1720 MB |
+| balão do casador de regex | independente de rota | **1,9 GB** |
+| `test/macos-arm64` → `Killed: 9`, exit 137 | **C** (`fixpoint_backend: c`) | morreu por memória |
+
+O `macos-arm64` é perna **C**, e foi ele que eu usei como prova de que *"a exaustão é nossa"*.
+Continua sendo — mas ela prova que **o vazamento está na rota C**, não que o nativo seja o culpado.
+
+### E a razão estrutural, que eu já tinha citado sem tirar a conclusão
+
+`src/runtime/teko_rt.c:1711` — `tk_alloc` roteia **tudo** para a região raiz do processo:
+
+> *"(S1) Route through the process root region: bump-allocated, never dropped = today's
+> malloc-everywhere leak (M.5)"* → `return tk_region_alloc(tk_region_root(), n);`
+
+**Isso não é do backend. É de toda alocação, em qualquer rota.** É por isso que a `reclaim ratio` é
+0,0% num build **C**. O backend quadrático era um consumidor a mais dentro de um regime onde nada é
+liberado — não a causa do regime.
+
+### A forma do erro, que é a mesma da noite inteira
+
+Extrapolei de uma sonda pequena para o programa grande, e de um eixo (o backend) para o todo (a
+memória do processo). **Uma medição correta com escopo apagado vira uma afirmação falsa.** A regra:
+toda tabela publicada diz **o que foi medido e sobre o quê** — e a conclusão não pode ser mais larga
+que a sonda.
