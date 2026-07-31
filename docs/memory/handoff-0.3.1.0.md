@@ -2817,3 +2817,53 @@ medição explica porquê (duas regiões para onde rotear em toda a árvore). En
 mudanças de codegen e de escape a uma lane que ainda não fecha o fixpoint nativo.
 
 **Entra depois de o degrau 32 e o `sort_by_start` fecharem.** Fica dito para não parecer esquecimento.
+
+## 11. O Windows RESPONDEU — e o defeito muda de sítio
+
+Primeira corrida do `test / windows-x86_64` com a asserção que cita o texto (`250c3727`):
+
+```
+teko: deliberate panic: ftoa_nonfinite_text: assertion failed: str_ends_with —
+  expected to end with "nan", got "-nan(ind)"
+```
+
+**A CRT da Microsoft escreve `-nan(ind)`.** Não é número errado, não é corrupção de pilha, e as duas
+hipóteses separaram-se **numa só corrida** — que foi exactamente o que o instrumento foi feito para
+fazer.
+
+### E isto RECLASSIFICA o defeito
+
+`tk_ftoa` (`src/runtime/teko_rt.c:405-407`) faz `snprintf(tmp, sizeof tmp, "%.17g", x)` — ou seja
+**delega a grafia do não-finito à CRT da plataforma**. Consequência: o **mesmo programa Teko imprime
+texto diferente conforme o sistema** — `nan`/`-nan` em glibc e musl, `-nan(ind)` na CRT da Microsoft.
+
+**Isso é defeito de portabilidade no RUNTIME, não na fixture.** A fixture estava certa e o comentário
+dela já o dizia sem o saber: *"this corpus runs on glibc AND on musl"* — enumerou duas libcs; a CRT
+da Microsoft é a terceira, e nenhuma delas concorda com as outras por acaso.
+
+**A correcção é pequena e do lado certo:** o `tk_ftoa` deve tratar o não-finito ele próprio e emitir
+grafia canónica, em vez de delegar. `teko_rt.{c,h}` é semente escrita à mão e PODE ser editado.
+**A escolha de grafia canónica é a única decisão**, e o corpus já a fixa de facto: o sufixo que ele
+exige é `nan`, com sinal opcional à frente.
+
+## 12. A exaustão também parte o HARNESS DE AGENTES
+
+Dois agentes morreram esta noite com *"stalled: no progress for 600s"* — **os dois enquanto corriam o
+portão completo**. A fase de regressão não emite uma linha durante 45+ minutos, e o vigia do harness
+mata quem não escreve.
+
+**É a mesma exaustão, a bater num terceiro sítio:** parte o CI (exit 137 no macOS, exit 143 no Linux
+depois de 11–22 min de silêncio), parte a minha caixa (5 OOM-kills), e parte os agentes.
+
+**A regra operacional que daqui sai, e que passou a ir em todos os briefs:** um agente nunca espera
+por comando longo em primeiro plano — lança em fundo a escrever para ficheiro e sonda com comandos
+curtos, para emitir uma linha de poucos em poucos minutos.
+
+E os dois deram resultado **antes** de cair, o que é a prova de que a regra de *commit e push a cada
+escrita* vale:
+
+* `cargo/0.3.1.0-sort-by-start` → `4edcc508 perf(backend): sort_by_start em O(V log V) — fusao
+  ascendente estavel`, com teste. Falta o ritual.
+* `cargo/0.3.1.0-...-teko-test` → portão completo: **1161 testes verdes, tier 227,4 s, pai a
+  39,4 MB**. Os **39,4 MB** são a prova da fronteira de processo — o pai carregava ~1,7 GB residentes
+  através dos passos 2 a 5, e deixou de carregar.
