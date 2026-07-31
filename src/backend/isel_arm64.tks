@@ -26,6 +26,15 @@ type VInfo = struct {
  * the LIR's own SSA allocator, so a growable positional array suffices —
  * §3 of the isel plan, the `class_of` mechanism).
  *
+ * THREADED LINEARLY, MUTATED IN PLACE. The table is seeded once per function
+ * (`select_func`/`select_func_x86`) and threaded through `SelCtx` so that
+ * exactly one version is ever live: `vinfo_set` therefore APPENDS placeholder
+ * positions and then OVERWRITES the one target slot through the parallel
+ * arrays' shared buffers, instead of rebuilding all three arrays per write.
+ * The rebuild made a single function's selection cost O(V²) in time AND in
+ * allocated bytes (V = the function's VReg count), which is what drove the
+ * backend's peak into the gigabytes on a function with a few thousand VRegs.
+ *
  * @since #383 A2-2
  */
 type VInfoTable = struct {
@@ -77,10 +86,15 @@ fn vinfo_grow(t: VInfoTable, n: u64) -> VInfoTable {
 }
 
 /**
- * vinfo_set — record `reg_class`/`wide` for VReg `id`, growing the table
- * first when `id` is past its current length (a fresh rebuild of the
- * parallel arrays with the one position rewritten, mirroring the LIR
- * interpreter's `rf_set`).
+ * vinfo_set — record `reg_class`/`wide` for VReg `id`, padding the table
+ * first when `id` is past its current length and then writing the one target
+ * position IN PLACE (an amortized-O(1) write: the padding is a bounded number
+ * of amortized-O(1) appends, and the write itself is three positional stores).
+ *
+ * The in-place store is sound because the table is threaded linearly — one
+ * live version per function selection (see `VInfoTable`). It replaces a full
+ * rebuild of all three parallel arrays, which cost O(V) time and O(V) fresh
+ * bytes on EVERY recorded VReg and made selection quadratic on both axes.
  *
  * @param VInfoTable t0  the table to update
  * @param u32 id  the VReg id being recorded
@@ -89,19 +103,14 @@ fn vinfo_grow(t: VInfoTable, n: u64) -> VInfoTable {
  * @return VInfoTable  the updated table
  */
 fn vinfo_set(t0: VInfoTable, id: u32, reg_class: MRegClass, wide: bool) -> VInfoTable {
-    let grown = vinfo_grow(t0, (id to u64) + 1)
-    mut classes: []MRegClass = teko::list::empty()
-    mut wides: []bool = teko::list::empty()
-    mut set: []bool = teko::list::empty()
-    mut i: u64 = 0
-    loop {
-        if i >= grown.classes.len { break }
-        let is_target = (i to u32) == id
-        classes = teko::list::push(classes, if is_target { reg_class } else { grown.classes[i] })
-        wides = teko::list::push(wides, if is_target { wide } else { grown.wides[i] })
-        set = teko::list::push(set, if is_target { true } else { grown.set[i] })
-        i++
-    }
+    let at = id to u64
+    let grown = vinfo_grow(t0, at + 1)
+    mut classes = grown.classes
+    mut wides = grown.wides
+    mut set = grown.set
+    classes[at] = reg_class
+    wides[at] = wide
+    set[at] = true
     VInfoTable { classes = classes; wides = wides; set = set }
 }
 
