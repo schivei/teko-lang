@@ -2569,3 +2569,66 @@ não existe é o reticulado de profundidade** — `depth`/`cross-lifetime`/`mono
 **5. `teko fmt --apply` — NÃO existe.** O dono lembrava-se de o ter feito *"ontem, aliás antes de
 ontem"*. **Zero ocorrências de `--apply` na árvore.** O `teko fmt <path>` continua a reescrever no
 lugar, sem flag e sem confirmação. Fica como estava: sugestão registada, não despachada.
+
+---
+
+## O censo do eixo `pt` — o número, e a PREMISSA MINHA que ele desmente (2026-07-31)
+
+```
+pt-census-liveness: NOT LIVE — PtFrame LIVE (21047), PtRoot DEAD (0)
+pt-census: 4925 fns, 21074 cells (4.28/fn, fattest 67), PtFrame 21047 (99.87%),
+           PtRoot 0 (0.00%), PtParam 27 (0.13%), PtAdopter 0, PtTop 0,
+           unit = cell (deduped name/field key per function)
+```
+
+**Ritual VERDE**: build limpo com zero avisos (91,7 s, pico 1718,1 MB); `./out/teko test .`
+**verde — 292/292, tier de regressões incluído, 26 min 18 s**; FIXPOINT byte-idêntico.
+**Custo do censo: tempo abaixo do ruído, +16,0 MB de pico (+1,0 %)** — medido A/B com duas gerações
+da MESMA semente, diferindo só na chamada.
+
+### CORRECÇÃO MINHA — a premissa que justificou o despacho era falsa
+
+Eu disse ao dono, e escrevi-o para justificar que a medição era barata:
+
+> *"o eixo `pt` já é calculado, hoje, em todas as funções"* — citando `typer.tks:6030`,
+> `check_ref_storability_block(tf.body, fn_spine(tf))`.
+
+**Li a linha 6030 e nunca li as 6027–6029, que são a guarda:**
+
+```teko
+fn check_ref_storability(tf: TFunction) -> error | null {
+    if !fn_has_ref_param(tf) {
+        if !stmts_have_free(tf.body) { return null }
+    }
+    check_ref_storability_block(tf.body, fn_spine(tf))
+}
+```
+
+**3 parâmetros `Ref<` e 17 `mem::free` no corpus ⇒ ~20 funções em 4 925 (~0,4 %) chegam ao
+`fn_spine`.** O censo teve de o **re-correr** para as 4 925 — **era trabalho novo, não contagem de
+graça.** Terceira vez hoje que leio a coisa e não a condição: os 2048 (default lido como tecto), o
+`one_byte` (builtin lido como baixado), e agora isto.
+
+### O que o número diz, e o que NÃO diz
+
+Como **tecto** é honesto: nenhuma limpeza por escopo recupera mais do que as células no chão do
+reticulado, e são ~100 %. **Como desempate é vazio**: `PtRoot { }` **não é construído por nenhum
+caminho de produção** — a única construção em toda a árvore está em `spine_test.tkt:291`. `seed_pt`
+(`:389`) só semeia `PtParam`/`PtFrame`; a única transferência só junta `PtAdopter`.
+
+**99,87 % lê-se "nunca foram levantadas do chão", não "são provadamente locais de moldura".** O eixo
+mede hoje **confinação em `adopt { }`** — e o corpus não tem um único `adopt`.
+
+### E o recuo `⊤` está documentado e NÃO EXISTE
+
+`spine.tks:55–63` promete que `top` marca o recuo quando o id de região excede *"o orçamento de uma
+função"*. **`join_pt_adopter_at` (`:562`) escreve `top = false` LITERAL**, e `next_region` (`:522`)
+incrementa sem tecto. **"0 em `⊤`" não significa "orçamento folgado" — significa que não há
+orçamento.** Eu tinha contado este como o terceiro `#arena_depth` implícito: **são dois, não três.**
+
+### A unidade, dita para ninguém a ler como outra coisa
+
+**Célula** = chave `(name, field)` **deduplicada por função**. Dois `let x` em blocos disjuntos são
+**uma** célula; **cada parâmetro é célula** e os parâmetros **dominam** (21 074 células contra 9 504
+linhas `let`/`mut`); `x.f` é célula, `a.b.c` não é; destructuring não nomeia nenhuma. **Não é por
+sítio de alocação, nem por binding, nem por definição SSA.**
