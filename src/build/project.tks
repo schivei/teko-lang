@@ -3410,59 +3410,204 @@ fn report_native_coverage(prog: checker::TProgram) {
     teko::io::println($"teko: coverage {bcov}% branches")
 }
 
-/** run_native_gate — (#265, lever D of #249) the D4 test gate run NATIVELY: emit a test-profile C
- *  translation unit whose `main()` calls each `#test` in order, compile it with `run_cc` at opt 0
- *  (the gate binary is a throwaway — kept fast to PRODUCE regardless of the release build's opt level),
- *  run the resulting binary (a failed assert panics → non-zero exit, fail-fast M.1),
- *  and — cov ALWAYS on for the gate, to feed the floors — merge the child's dumped `.tkcov` into
- *  this process's coverage sinks. Under TestCov each PRODUCTION fn body carries `tk_cov_line_at`/
- *  `tk_cov_branch_at` interior marks (#265 Track A), so the merged sinks populate ALL THREE metrics —
- *  the engine-independent static walk (coverage::*_coverage_pct) reads them exactly as it read the
- *  VM's in-process marks. Replaces the 15.6 s VM interpret of the test bodies with a sub-second native run.
- *  BUILD-OUTPUT OBSERVABILITY: the gate's emit and cc steps used to be the silent gap between the
- *  front-end and the test run; both now report as visible phases (`emit test` for the first silent step,
- *  `cc test` for the slow one). The gate always reports — `tty` only selects the rendering (Tty on a
- *  terminal, Plain on a CI/log), never silence.
- *  CROSS (0.3.1 C5): when the resolved target is not this host's, the gate TU is still emitted and
- *  linked (proving the cross link line works) but the RUN — and with it the coverage merge — is
- *  honestly skipped with the emitted-not-run line. Before this, a cross `teko build` died at the gate
- *  on an exec failure of a foreign-format binary; a fabricated pass is not the alternative, an honest
- *  "not executed" is. */
+/**
+ * run_native_gate — (#265, lever D of #249) the D4 test gate run NATIVELY, BOTH halves in this
+ * process: emit a test-profile C translation unit whose `main()` calls each `#test` in order and
+ * compile it at `GATE_CC_OPT` (`native_gate_build`), then run the resulting binary and merge what
+ * it dumped (`native_gate_run`). A failed assert panics with a non-zero exit (fail-fast, M.1).
+ *
+ * This is the `teko build` gate, which needs the merged coverage in the SAME process that holds
+ * the checked program (its floors and its release rebuild both read it). `teko test` runs the two
+ * halves in different processes instead — see `test_project`.
+ *
+ * Cov is ALWAYS on for the gate, to feed the floors. Under TestCov each PRODUCTION fn body carries
+ * `tk_cov_line_at`/`tk_cov_branch_at` interior marks (#265 Track A), so the merged sinks populate
+ * ALL THREE metrics — the engine-independent static walk (`coverage::*_coverage_pct`) reads them
+ * exactly as it read the retired in-process marks. Replaces a 15.6 s interpreted run of the test
+ * bodies with a sub-second native one.
+ *
+ * @param dir      the project directory (for the diagnostic prefix)
+ * @param out_dir  the output directory the gate binary and its dumps land under
+ * @param prog     the checked program, emitted WITH its `#test` functions
+ * @param m        the resolved manifest
+ * @param tty      render the emit/cc phases in place rather than as start/settle pairs
+ * @return         0 when every test passed, else the failing status
+ * @throws         the emit or `cc` failure, already reported on its phase line
+ */
 fn run_native_gate(dir: str, out_dir: str, prog: checker::TProgram, m: Manifest, tty: bool) -> i32 {
-    let mode = report_mode(false, tty)
-    let od = if out_dir.len > 0 && out_dir[out_dir.len - 1] == b'/' { teko::str::slice_to(out_dir, out_dir.len - 1) } else { out_dir }
-    match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the output directory"); null => { } }
+    let od = gate_out_dir(out_dir)
+    let gp = gate_paths(od, m)
+    let brc = native_gate_build(dir, od, gp, prog, m, tty)
+    if brc != 0 { return brc }
+    native_gate_run(od, gp, true)
+}
+
+/**
+ * GatePaths — the four paths of ONE gate binary, derived from the output directory and the
+ * manifest name. Named as a group because the BUILD half (which emits and compiles) and the RUN
+ * half (which executes and merges) live in different PROCESSES since the staged `teko test`
+ * driver landed: a second spelling of `<name>-tktest` in the runner would be a second thing that
+ * can drift from the emitter.
+ *
+ * @since 0.3.1.0
+ */
+type GatePaths = struct {
+    /** the binary's stem (`<name>-tktest`), also the shard scratch prefix's stem. */
+    stem: str
+    /** the emitted test-profile translation unit (`<od>/<stem>.c`). */
+    cfile: str
+    /** the compiled gate binary (`binary_output_path`, target-suffixed). */
+    binp: str
+    /** the coverage dump a single-process gate run writes (`<od>/<stem>.tkcov`). */
+    covfile: str
+}
+
+/**
+ * gate_out_dir — the output directory with any trailing `/` removed, so `<od>/<stem>` never
+ * doubles the separator.
+ *
+ * @param out_dir  the requested output directory (`-o`, default "bin")
+ * @return         the same directory without a trailing separator
+ */
+fn gate_out_dir(out_dir: str) -> str {
+    if out_dir.len > 0 && out_dir[out_dir.len - 1] == b'/' { return teko::str::slice_to(out_dir, out_dir.len - 1) }
+    out_dir
+}
+
+/**
+ * gate_paths — the `GatePaths` of the `<name>-tktest` gate binary under `od`.
+ *
+ * @param od  the output directory (no trailing separator — see `gate_out_dir`)
+ * @param m   the resolved manifest (its `name` is the stem's root)
+ * @return    the gate's stem, C file, binary and coverage-dump paths
+ * @since 0.3.1.0
+ */
+fn gate_paths(od: str, m: Manifest) -> GatePaths {
     let stem = teko::str::concat(m.name, "-tktest")
-    let cfile = teko::str::concat(od, "/", teko::str::concat(stem, ".c"))
-    let binp = binary_output_path(od, stem, resolved_target())
-    let covfile = teko::str::concat(od, "/", teko::str::concat(stem, ".tkcov"))
-    let emit_phase = phase_begin("emit test", cfile, mode)
+    GatePaths {
+        stem = stem
+        cfile = teko::str::concat(od, "/", teko::str::concat(stem, ".c"))
+        binp = binary_output_path(od, stem, resolved_target())
+        covfile = teko::str::concat(od, "/", teko::str::concat(stem, ".tkcov"))
+    }
+}
+
+/**
+ * native_gate_build — the BUILD half of the native gate: emit the test-profile translation unit
+ * and compile it into the gate binary, each as a visible phase. Extracted from `run_native_gate`
+ * so the staged `teko test` driver can run this half — the whole memory cost of a `teko test` —
+ * in a CHILD process and get the memory back at its exit (owner ruling 2026-07-31).
+ *
+ * @param dir   the project directory (for the diagnostic prefix)
+ * @param od    the output directory (already separator-normalized)
+ * @param gp    the gate's paths
+ * @param prog  the checked program (emitted WITH its `#test` functions)
+ * @param m     the resolved manifest (metadata + link line)
+ * @param tty   render the phases in place (a terminal) rather than as start/settle pairs (a log)
+ * @return      0 when the gate binary is built, else the failing status
+ * @throws      the emit's own message, or the `cc` failure, both already reported on the phase line
+ * @since 0.3.1.0
+ */
+fn native_gate_build(dir: str, od: str, gp: GatePaths, prog: checker::TProgram, m: Manifest, tty: bool) -> i32 {
+    let mode = report_mode(false, tty)
+    match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the output directory"); null => { } }
+    let emit_phase = phase_begin("emit test", gp.cfile, mode)
     let emitted = match codegen::tk_emit_c_test(prog, true) {
         str as s => s
-        error as e => { phase_end_fail(emit_phase, cfile, e.message); return fail(dir, e.message) }
+        error as e => { phase_end_fail(emit_phase, gp.cfile, e.message); return fail(dir, e.message) }
     }
     let csrc = teko::str::concat(emitted, codegen::tk_emit_meta(m.name, m.version, m.suffix, m.description))
-    match teko::io::write_file(cfile, csrc) {
-        error as e => { phase_end_fail(emit_phase, cfile, e.message); return fail(dir, e.message) }
+    match teko::io::write_file(gp.cfile, csrc) {
+        error as e => { phase_end_fail(emit_phase, gp.cfile, e.message); return fail(dir, e.message) }
         null => { }
     }
-    phase_end_ok(emit_phase, teko::str::concat(cfile, teko::str::concat(" ", size_text(csrc.len))))
-    let cc_phase = phase_begin("cc test", binp, mode)
-    if run_cc(cfile, binp, m, prog, 0) != 0 {
-        phase_end_fail(cc_phase, binp, "cc failed to build the native test gate")
-        return fail(dir, "cc failed to build the native test gate")
+    phase_end_ok(emit_phase, teko::str::concat(gp.cfile, teko::str::concat(" ", size_text(csrc.len))))
+    let cc_phase = phase_begin("cc test", gp.binp, mode)
+    if run_cc(gp.cfile, gp.binp, m, prog, GATE_CC_OPT) != 0 {
+        phase_end_fail(cc_phase, gp.binp, GATE_CC_FAIL)
+        return fail(dir, GATE_CC_FAIL)
     }
-    phase_end_ok(cc_phase, binp)
+    phase_end_ok(cc_phase, gp.binp)
+    0
+}
+
+/**
+ * GATE_CC_OPT — the cc optimization level the `<name>-tktest` gate binary is built at (the historic
+ * level, named rather than spelled as a literal so it sits beside `REGRCOV_CC_OPT` and the two
+ * levels can be compared at a glance).
+ */
+const GATE_CC_OPT: i32 = 0
+
+/**
+ * GATE_CC_FAIL — the diagnostic for a failed `cc` of the gate binary, named so the phase line and
+ * the returned failure carry the SAME words.
+ */
+const GATE_CC_FAIL: str = "cc failed to build the native test gate"
+
+/**
+ * native_gate_run — the RUN half of the native gate: execute the ALREADY-BUILT gate binary (one
+ * process, or `TEKO_TEST_JOBS` concurrent shards of it) and fold its coverage dumps into this
+ * process's sinks. Cross-compiled targets run nothing and say so (the binary is a foreign format;
+ * a fabricated pass is not the alternative, an honest "emitted, not executed" is).
+ *
+ * @param od         the output directory the gate binary and its dumps live under
+ * @param gp         the gate's paths
+ * @param merge_cov  fold the dumps into THIS process's sinks — false in the staged driver, whose
+ *                   sinks nothing reads (the report stage merges the same files itself)
+ * @return           0 when every test passed, else the gate's failing status
+ * @since 0.3.1.0
+ */
+fn native_gate_run(od: str, gp: GatePaths, merge_cov: bool) -> i32 {
     let cross = resolved_cross_note()
     if cross.is_cross { teko::io::println(cross.note); return 0 }
     let jobs = test_jobs()
-    if jobs > 1 { return run_gate_sharded(od, stem, binp, jobs) }
-    match teko::env::set_var("TEKO_TKCOV", covfile) { error => { }; null => { } }
-    mut argv: []str = teko::list::push(teko::list::empty(), binp)
-    let trc = teko::process::run(argv)
-    if trc != 0 { return trc }
-    coverage::cov_merge(covfile)
-    0
+    let rc = if jobs > 1 { run_gate_sharded(od, gp.stem, gp.binp, jobs) } else { run_gate_single(gp) }
+    if merge_cov { merge_gate_coverage(od, gp, jobs, rc) }
+    rc
+}
+
+/**
+ * run_gate_single — run the whole suite in ONE child process (`TEKO_TEST_JOBS=1`), dumping its
+ * coverage to the gate's own `.tkcov` path.
+ *
+ * @param gp  the gate's paths
+ * @return    the gate binary's exit status (non-zero = a failed assert, fail-fast M.1)
+ * @since 0.3.1.0
+ */
+fn run_gate_single(gp: GatePaths) -> i32 {
+    match teko::env::set_var("TEKO_TKCOV", gp.covfile) { error => { }; null => { } }
+    mut argv: []str = teko::list::push(teko::list::empty(), gp.binp)
+    teko::process::run(argv)
+}
+
+/**
+ * merge_gate_coverage — fold the coverage the gate run dumped into THIS process's sinks: every
+ * shard's dump for a sharded run (the union is what the floors must see), or the single run's own
+ * dump. A single run that FAILED merges nothing — its dump is a partial suite, and the historic
+ * single-process path returned before merging it.
+ *
+ * @param od    the output directory the dumps live under
+ * @param gp    the gate's paths
+ * @param jobs  how many shards ran (1 = the single-process path)
+ * @param trc   the gate run's exit status
+ * @since 0.3.1.0
+ */
+fn merge_gate_coverage(od: str, gp: GatePaths, jobs: u64, trc: i32) -> void {
+    if jobs > 1 { merge_shard_coverage(gate_shard_base(od, gp.stem), jobs); return }
+    if trc == 0 { coverage::cov_merge(gp.covfile) }
+}
+
+/**
+ * gate_shard_base — the scratch prefix directory a sharded gate run hangs its per-shard capture
+ * and coverage files off.
+ *
+ * @param od    the output directory
+ * @param stem  the gate binary's stem
+ * @return      the shard scratch prefix (with its trailing separator)
+ * @since 0.3.1.0
+ */
+fn gate_shard_base(od: str, stem: str) -> str {
+    teko::str::concat(od, "/.", stem, "-shard/")
 }
 
 /**
@@ -3528,6 +3673,9 @@ fn gate_shard_spec(binp: str, base: str, i: u64, jobs: u64) -> ProcSpec {
  * names and test output onto one stream would interleave mid-line; with it, each shard's capture file
  * holds whole verdict lines with each test's own bytes attributed under its own.
  *
+ * WHO MERGES THE COVERAGE: not this function — its caller (`native_gate_run`), because the staged
+ * `teko test` driver runs the shards in a process whose sinks nothing reads.
+ *
  * @param od    the output directory (the shards' scratch lives under it)
  * @param stem  the gate binary's stem (names the scratch directory)
  * @param binp  the gate binary
@@ -3535,7 +3683,7 @@ fn gate_shard_spec(binp: str, base: str, i: u64, jobs: u64) -> ProcSpec {
  * @return      0 when every shard exited 0, else the FIRST non-zero shard exit (in shard order)
  */
 fn run_gate_sharded(od: str, stem: str, binp: str, jobs: u64) -> i32 {
-    let base = teko::str::concat(od, "/.", stem, "-shard/")
+    let base = gate_shard_base(od, stem)
     mut specs: []ProcSpec = teko::list::empty()
     mut i: u64 = 0
     loop {
@@ -3546,7 +3694,6 @@ fn run_gate_sharded(od: str, stem: str, binp: str, jobs: u64) -> i32 {
     teko::io::println($"teko: test gate sharded {jobs} ways (TEKO_TEST_JOBS)")
     let caps = run_pool(specs, jobs)
     report_shard_captures(caps)
-    merge_shard_coverage(base, jobs)
     first_shard_failure(caps)
 }
 
@@ -5242,32 +5389,76 @@ fn run_per_commit_test(dir: str, fe: Frontend, base: str, cov_validation: bool, 
 }
 
 /**
- * regression_coverage_exe — the compiler binary the regression tier uses to compile its scenarios
- * (0.3.1 C-cov, `regressor-principal-0.3.1.md` §5.1 Cov-A): for the compiler's OWN project
- * (`fe.manifest.name == "teko"` — the reserved root name no other project may claim), build a
- * COVERAGE-INSTRUMENTED copy of `fe.prog` (`codegen::tk_emit_c_cov`) and return ITS path, so every
- * scenario compile marks the exact compiler-source lines it exercises — folded back via
- * `merge_regression_coverage` BEFORE the floor read. For any OTHER project `exe` (this running
- * binary) is returned UNCHANGED: its regressions compile UNRELATED snippets with a plain compiler,
- * and there is nothing of THAT project's own source to attribute coverage to. A failed
- * instrumented build honest-warns and falls back to `exe` un-instrumented — the regression tier's
- * pass/fail verdict never depends on the coverage feed succeeding.
- *
- * @param dir  the project directory (the instrumented binary's build directory anchor)
- * @param exe  this compiler binary's own path (the fallback, and every other project's exe)
- * @param fe   the resolved front-end product (its `prog`/`manifest` build the instrumented copy)
- * @return     the exe the regression tier should compile scenarios with
- * @since 0.3.1
+ * REGRESSION_FEED_PROJECT — the ONE project name whose regression tier compiles its scenarios with
+ * a coverage-instrumented copy of itself: the compiler's own (the reserved root name no other
+ * project may claim). Every other project's regressions compile UNRELATED snippets, and there is
+ * nothing of THAT project's own source for the marks to attribute to.
  */
-fn regression_coverage_exe(dir: str, exe: str, fe: Frontend) -> str {
-    if fe.manifest.name != "teko" { return exe }
-    match build_regression_cov_exe(fe.manifest, fe.prog) {
-        str as p => p
-        error as e => {
-            teko::io::println(teko::str::concat("teko: regression coverage-feed build failed (", teko::str::concat(e.message, ") — running regressions without coverage attribution")))
-            exe
-        }
+const REGRESSION_FEED_PROJECT: str = "teko"
+
+/**
+ * build_regression_feed_exe — build the COVERAGE-INSTRUMENTED compiler the regression tier will
+ * compile its scenarios with (0.3.1 C-cov, `regressor-principal-0.3.1.md` §5.1 Cov-A), so every
+ * scenario compile marks the exact compiler-source lines it exercises. Built in the BUILD STAGE,
+ * beside the gate binary, because both are emitted from the SAME checked program and that program
+ * is exactly the memory this staging exists to hand back before the runs begin.
+ *
+ * A failed instrumented build honest-warns and leaves no binary behind (`build_regression_cov_exe`
+ * removes the stale one first), so the driver falls back to this compiler un-instrumented — the
+ * regression tier's pass/fail verdict never depends on the coverage feed succeeding.
+ *
+ * @param m     the resolved manifest (only the compiler's own project feeds coverage)
+ * @param prog  the checked program the instrumented copy is emitted from
+ * @since 0.3.1.0
+ */
+fn build_regression_feed_exe(m: Manifest, prog: checker::TProgram) -> void {
+    if m.test_regression_files.len == 0 { return }
+    if m.name != REGRESSION_FEED_PROJECT { return }
+    match build_regression_cov_exe(m, prog) {
+        str => { }
+        error as e => teko::io::println(teko::str::concat("teko: regression coverage-feed build failed (", e.message, ") — running regressions without coverage attribution"))
     }
+}
+
+/**
+ * regression_feed_exe — the compiler binary the regression tier compiles its scenarios with: the
+ * instrumented copy the build stage produced when it exists, else `exe` (this running binary)
+ * un-instrumented. Resolved ABSOLUTE, never `bin/…`-relative: a `When built in place` scenario
+ * `cd`s into its own project directory before invoking this exe (`compile_in_place`), so a
+ * relative path would resolve against the WRONG directory.
+ *
+ * @param exe  this compiler binary's own path (the fallback, and every other project's exe)
+ * @param m    the resolved manifest
+ * @return     the exe the regression tier should compile scenarios with
+ * @since 0.3.1.0
+ */
+fn regression_feed_exe(exe: str, m: Manifest) -> str {
+    if m.name != REGRESSION_FEED_PROJECT { return exe }
+    let binp = binary_output_path(GATE_OUT_DIR, teko::str::concat(m.name, "-regrcov"), resolved_target())
+    if !path_exists(binp) { return exe }
+    let cwd = match teko::env::cwd() { str as c => c; error => "" }
+    abs_path_of(binp, cwd)
+}
+
+/**
+ * path_exists — is there an entry named `p` in its parent directory? The existence probe the
+ * driver needs for a BINARY (reading the file to test for it would pull megabytes into the arena
+ * of the one process this staging keeps small).
+ *
+ * @param p  the path to probe
+ * @return   true iff `p`'s parent directory lists `p`'s basename
+ * @since 0.3.1.0
+ */
+fn path_exists(p: str) -> bool {
+    let entries = match teko::fs::list_dir(dirname_of(p)) { []str as e => e; error => return false }
+    let name = basename_of(p)
+    mut i: u64 = 0
+    loop {
+        if i >= entries.len { break }
+        if entries[i] == name { return true }
+        i = i + 1
+    }
+    false
 }
 
 /**
@@ -5275,7 +5466,7 @@ fn regression_coverage_exe(dir: str, exe: str, fe: Frontend) -> str {
  * C-cov): emit it under `CgMode::ProgramCov` (`codegen::tk_emit_c_cov` — the SAME production-fn
  * line/branch prologues `TestCov` carries, but the ORDINARY virtual-main body, so the binary is a
  * fully functional `teko` CLI that ALSO dumps its coverage sinks to `$TEKO_TKCOV` at exit), then
- * compile it with `run_cc` at opt 0 (a throwaway gate-shaped binary, built fast). Distinct from the
+ * compile it with `run_cc` at `REGRCOV_CC_OPT`. Distinct from the
  * `<name>-tktest` gate binary (`run_native_gate`) — that one's `main()` calls `#test`s; this one's
  * `main()` is the real CLI, so IT (not the release binary) can compile regression SNIPPETS while
  * marking the compiler-source lines those compiles exercise. The returned path is resolved
@@ -5283,78 +5474,133 @@ fn regression_coverage_exe(dir: str, exe: str, fe: Frontend) -> str {
  * directory before invoking this exe (`compile_in_place`), so a relative path would resolve
  * against the WRONG directory once the regression phase reaches that scenario.
  *
+ * The previous run's binary is REMOVED before the `cc`, so a failed compile leaves no stale
+ * instrumented compiler behind for the driver to pick up and drive a whole regression tier with.
+ *
  * @param m     the resolved manifest (names the output stem)
  * @param prog  the checked program to emit (the SAME `fe.prog` this `teko test` run already checked)
  * @return      the built instrumented binary's ABSOLUTE path, or an error
  * @since 0.3.1
  */
 fn build_regression_cov_exe(m: Manifest, prog: checker::TProgram) -> str | error {
-    let od = "bin"
+    let od = GATE_OUT_DIR
     match teko::fs::mkdir(od) { error => { }; null => { } }
     let stem = teko::str::concat(m.name, "-regrcov")
     let cfile = teko::str::concat(od, "/", teko::str::concat(stem, ".c"))
     let binp = binary_output_path(od, stem, resolved_target())
-    let emitted = match codegen::tk_emit_c_cov(prog) { str as s => s; error as e => return e }
+    let mode = report_mode(false, output_is_tty(false))
+    let emit_phase = phase_begin("emit regrcov", cfile, mode)
+    let emitted = match codegen::tk_emit_c_cov(prog) {
+        str as s => s
+        error as e => { phase_end_fail(emit_phase, cfile, e.message); return e }
+    }
     let csrc = teko::str::concat(emitted, codegen::tk_emit_meta(m.name, m.version, m.suffix, m.description))
-    match teko::io::write_file(cfile, csrc) { error as e => return e; null => { } }
-    if run_cc(cfile, binp, m, prog, 0) != 0 { return error { message = "cc failed to build the coverage-instrumented regression compiler" } }
+    match teko::io::write_file(cfile, csrc) {
+        error as e => { phase_end_fail(emit_phase, cfile, e.message); return e }
+        null => { }
+    }
+    phase_end_ok(emit_phase, teko::str::concat(cfile, teko::str::concat(" ", size_text(csrc.len))))
+    match teko::fs::remove_file(binp) { error => { }; null => { } }
+    let cc_phase = phase_begin("cc regrcov", binp, mode)
+    if run_cc(cfile, binp, m, prog, REGRCOV_CC_OPT) != 0 {
+        phase_end_fail(cc_phase, binp, REGRCOV_CC_FAIL)
+        return error { message = REGRCOV_CC_FAIL }
+    }
+    phase_end_ok(cc_phase, binp)
     let cwd = match teko::env::cwd() { str as c => c; error => "" }
     abs_path_of(binp, cwd)
 }
 
 /**
- * run_regression_tier — run the `[tests] regression` phase, feeding its coverage back into this
- * process's sinks BEFORE any floor read (0.3.1 C-cov, D9): resolve the coverage-feeding exe
- * (`regression_coverage_exe`), run every listed `.tkr` (`run_regression_phase`), then merge every
- * covfile the compiles produced (`merge_regression_coverage`) — a no-op merge when the exe was not
- * instrumented (every project except the compiler's own). Coverage is merged REGARDLESS of the
- * phase's verdict — a rejected (compile-fail) scenario exercises real compiler code too.
+ * REGRCOV_CC_OPT — the cc optimization level the coverage-instrumented regression compiler
+ * (`teko-regrcov`) is built at (owner ruling 2026-07-31: "se `-O0` está com gargalo, use `-O2`
+ * então, assim como o release").
  *
- * @param dir  the project directory
- * @param exe  this compiler binary's own path
- * @param fe   the resolved front-end product
- * @return     0 when every regressor passed (or the tier is advisory), 1 on a gated failure
- * @since 0.3.1
+ * This binary is NOT a throwaway that only has to exist: every `.tkr` scenario COMPILES a whole
+ * project through it, so the regression tier pays its execution speed once per scenario. Built
+ * without a `-O` flag it took minutes on the heaviest scenario against seconds for the same
+ * compile driven by the `-O2` release binary; the extra `cc` seconds this level costs are paid
+ * ONCE per `teko test` run, and the tier gets them back many times over. The gate binary
+ * (`<name>-tktest`) deliberately stays at 0 — it is measured separately, and its 1195 short
+ * tests do not repay an optimizing `cc` over a 10 MB translation unit.
  */
-fn run_regression_tier(dir: str, exe: str, fe: Frontend) -> i32 {
-    let regr_exe = regression_coverage_exe(dir, exe, fe)
-    let rc = run_regression_phase(regr_exe, fe.manifest)
-    merge_regression_coverage()
-    rc
-}
+const REGRCOV_CC_OPT: i32 = 2
 
 /**
- * The `teko test <dir>` entry (D2, post-VM): assemble WITH the `.tkt` tests, then run every
- * `#test` NATIVELY via the #265 native gate (emit a test-profile C TU, compile with `run_cc`,
- * run the child fail-fast — a failed assert panics with a non-zero exit, M.1). The regression tier
- * (`run_regression_tier`) runs NEXT REGARDLESS of the gate's own verdict — never skipped just
- * because the gate failed. Before this, a single crashed `#test` returned the gate's status
- * immediately and the regression tier NEVER RAN, so a lane whose unit gate happened to fail
- * reported nothing at all about its regression corpus — the exact hidden-failure shape M.1 exists
- * to forbid, just one phase up from where M.1 itself already guards. The gate's own failure is
- * still the highest-precedence verdict (a `trc != 0` still fails the whole command, unchanged),
- * only DEFERRED past the regression tier's run so its report — pass or fail — is never swallowed.
- * With no `[tests] regression` files declared (`test_regression_files` empty, 0.3.1 C0) the tier
- * is a zero-cost no-op either way (the 0.3.0.29 inert base).
+ * REGRCOV_CC_FAIL — the diagnostic for a failed `cc` of the coverage-instrumented regression
+ * compiler, named so the phase line and the returned error carry the SAME words.
+ */
+const REGRCOV_CC_FAIL: str = "cc failed to build the coverage-instrumented regression compiler"
+
+/**
+ * GATE_OUT_DIR — the output directory `teko test` builds its gate binary, its instrumented
+ * regression compiler and their coverage dumps under. `teko test` has no `-o`, so this is a
+ * constant rather than a parameter, and the three stages of a staged run each derive the SAME
+ * paths from it without passing anything to each other.
+ */
+const GATE_OUT_DIR: str = "bin"
+
+/**
+ * TEST_STAGE_ENV — the environment key that tells a re-invoked `teko test` WHICH stage of the run
+ * it is (absent/empty = the driver itself). The `TEKO_IN_REGRESSION` sentinel's pattern: an
+ * environment selector rather than a CLI flag, so the argv the driver hands its own binary is the
+ * argv the user typed, verbatim — no flag list to keep in sync, and nothing a spawned scenario
+ * compile can inherit and misread.
+ */
+const TEST_STAGE_ENV: str = "TEKO_TEST_STAGE"
+
+/**
+ * TEST_STAGE_BUILD — the stage that COMPILES: the front-end over the project plus its `.tkt`
+ * tests, the gate binary, and the instrumented regression compiler. The whole memory cost of a
+ * `teko test` run lives here, and the operating system takes all of it back when this stage's
+ * process exits (owner ruling 2026-07-31: "ao fim, libera memória … cada passo deve rodar
+ * independente, sem alocação de memória acumulativa").
+ */
+const TEST_STAGE_BUILD: str = "build"
+
+/**
+ * TEST_STAGE_REPORT — the stage that JUDGES: it re-checks the source (the only way to read
+ * coverage back, which is a walk of the TYPED program), folds in every dump the gate and the
+ * regression tier left on disk, and applies the floor/delta/arith-cast/analyzer policies.
+ */
+const TEST_STAGE_REPORT: str = "report"
+
+/**
+ * TEST_GATE_RC_ENV — the key the driver hands the unit gate's exit status to the report stage
+ * through. Passed explicitly because the report stage runs in a DIFFERENT process and the floor
+ * policy is only consulted when the gate itself passed.
+ */
+const TEST_GATE_RC_ENV: str = "TEKO_TEST_GATE_RC"
+
+/**
+ * TEST_REGR_RC_ENV — the key the driver hands the regression tier's exit status to the report
+ * stage through (the tier's verdict gates after the floor and delta policies).
+ */
+const TEST_REGR_RC_ENV: str = "TEKO_TEST_REGR_RC"
+
+/**
+ * STAGE_SELECT_FAILED — the status a `teko test` run exits with when the stage selector cannot be
+ * made visible to a child process. Not a test failure and not a pass: the driver refuses to run.
+ */
+const STAGE_SELECT_FAILED: i32 = 2
+
+/**
+ * test_project — the `teko test <dir>` entry (D2, post-VM), STAGED ACROSS PROCESSES since 0.3.1.0.
  *
- * When the gate passes, its coverage feed folds into `fe.prog` (C-cov, D9) BEFORE
- * `--coverage`/the floor policy read it, so neither ever undercounts what the regressives
- * exercised, and the D4 coverage-floor policy applies next (`--cov-validation` enforces;
- * otherwise warns — owner ruling 0.3.0.29). Unlike `teko build`, it emits NO release binary.
- * `--coverage` writes a Cobertura report to `<cwd>/cobertura.xml` (the project root — `teko test`
- * has no `-o`). `--per-test-cov` additionally emits the dev-time per-test attribution report
- * (`run_per_test_cov`) AFTER the floor policy. `--per-commit-test <base>` runs the delta-coverage
- * enforcer (`run_per_commit_test`) AFTER the floor policy — measuring coverage attributed to the
- * lines changed since `<base>` and (under `--cov-validation`) failing when that delta is below
- * floor; absent, it is a zero-cost no-op. The regression tier's OWN verdict gates last among the
- * pass-path policies (after the floor + delta policies), matching the pre-C-cov ordering.
+ * A `teko test` run has five steps: compile the project with its `.tkt` tests into a gate binary,
+ * `cc` it, run it, compile each `.tkr` regressor, run each regressor. Four of the five already ran
+ * in child processes and gave their memory back at exit; the FIRST did not — it ran in this
+ * process, and since the region allocator only releases at termination, its ~3 GB stayed resident
+ * through every later step, across eleven builds and eleven runs. The owner's ruling (2026-07-31)
+ * is that each step runs independently with no accumulated allocation, and that the parent
+ * RE-INVOKES ITSELF to get there — the shape `compile_regressive` has been proving for a release.
  *
- * The D4 arith-cast-rate NUMBER is reported here, unconditionally, before the gate even runs —
- * see `report_arith_cast_rate` — because it is a property of the TYPED SOURCE alone, so it prints
- * even on a tree whose suite fails; only its PASS/FAIL verdict (`arith_cast_gate`) waits until the
- * end, alongside every other gate.
+ * So this entry is a THREE-WAY dispatch on `TEST_STAGE_ENV`:
+ *   - `build`  → `test_stage_build`: front-end + gate binary + instrumented regression compiler.
+ *   - `report` → `test_stage_report`: re-check, merge the dumps, apply the policies, verdict.
+ *   - absent   → `test_drive`: spawn the two above, and between them run the gate and the tier.
  *
- * @param dir              the project directory (already the cwd; the front-end chdir'd in)
+ * @param dir              the project directory
  * @param gen_cov          `--coverage` — write the Cobertura report next to the project root
  * @param cov_validation   `--cov-validation` — enforce (fail) the coverage floors instead of warning
  * @param per_test_cov     `--per-test-cov` — also print the dev-time per-test attribution report
@@ -5366,14 +5612,142 @@ fn run_regression_tier(dir: str, exe: str, fe: Frontend) -> i32 {
  *                         arith-cast-rate policies hold, else the highest-precedence failing status
  */
 fn test_project(dir: str, gen_cov: bool, cov_validation: bool, per_test_cov: bool, per_commit_base: str, analyzer: bool, arith_cast_gate: bool) -> i32 {
+    let stage = selected_test_stage()
+    if stage == TEST_STAGE_BUILD { return test_stage_build(dir) }
+    if stage == TEST_STAGE_REPORT {
+        return test_stage_report(dir, gen_cov, cov_validation, per_test_cov, per_commit_base, analyzer, arith_cast_gate)
+    }
+    test_drive(dir)
+}
+
+/**
+ * selected_test_stage — the stage this process was invoked as, "" when it is the driver. An empty
+ * value reads as absent: `set_var` has no unset, so the driver CLEARS the selector by setting it
+ * empty after each spawn and nothing downstream may read that as a stage.
+ *
+ * @return `TEST_STAGE_BUILD`, `TEST_STAGE_REPORT`, or "" for the driver
+ * @since 0.3.1.0
+ */
+fn selected_test_stage() -> str {
+    match teko::env::var(TEST_STAGE_ENV) { str as v => v; error => "" }
+}
+
+/**
+ * test_drive — the `teko test` DRIVER: the process the user launched, which from here on compiles
+ * nothing and therefore holds nothing. It spawns the build stage, runs the gate binary and the
+ * regression tier that stage produced, and spawns the report stage for the verdict.
+ *
+ * The gate run and the tier are the long part of a `teko test`, and this is the process that sits
+ * through all of it — which is exactly why the compile was moved out of it.
+ *
+ * @param dir  the project directory
+ * @return     the report stage's verdict, or the first failing stage's status
+ * @throws     the manifest's own message when the project directory has no readable single `.tkp`
+ * @since 0.3.1.0
+ */
+fn test_drive(dir: str) -> i32 {
     ensure_rt_dir_abs()
     let exe = self_exe_path()
+    let launch = match teko::env::cwd() { str as c => c; error => "" }
+    let brc = run_test_stage(TEST_STAGE_BUILD, exe)
+    if brc != 0 { return brc }
+    let m = match enter_project_manifest(dir) { Manifest as x => x; error as e => return fail(dir, e.message) }
+    let trc = native_gate_run(GATE_OUT_DIR, gate_paths(GATE_OUT_DIR, m), false)
+    let regr_rc = drive_regression_tier(exe, m)
+    match teko::env::chdir(launch) { error => return fail(dir, "cannot return to the launch directory"); null => { } }
+    run_test_report_stage(exe, trc, regr_rc)
+}
+
+/**
+ * drive_regression_tier — run the `[tests] regression` phase with the compiler the build stage
+ * left for it. A project that declares no regressors is a zero-cost no-op (the 0.3.0.29 inert
+ * base). The tier's coverage is NOT merged here — the report stage merges the same files itself,
+ * and this process is the one that must stay small.
+ *
+ * @param exe  this compiler binary's own path (the un-instrumented fallback)
+ * @param m    the resolved manifest
+ * @return     0 when every regressor passed (or the tier is advisory), 1 on a gated failure
+ * @since 0.3.1.0
+ */
+fn drive_regression_tier(exe: str, m: Manifest) -> i32 {
+    if m.test_regression_files.len == 0 { return 0 }
+    run_regression_phase(regression_feed_exe(exe, m), m)
+}
+
+/**
+ * enter_project_manifest — chdir into the project and read ITS MANIFEST ALONE. The driver needs
+ * the project's name, its regressor list and its gate flag; it must NOT need the checked program,
+ * which is the whole point of the staging.
+ *
+ * @param dir  the project directory
+ * @return     the parsed manifest
+ * @throws     "cannot enter project directory", the missing/ambiguous `.tkp` message, or the
+ *             manifest parse error
+ * @since 0.3.1.0
+ */
+fn enter_project_manifest(dir: str) -> Manifest | error {
+    match teko::env::chdir(dir) { error => return error { message = "cannot enter project directory" }; null => { } }
+    let mname = match find_manifest() { str as n => n; error as e => return e }
+    let mtext = match teko::io::read_file(mname) { str as s => s; error => return error { message = "cannot read .tkp manifest" } }
+    parse_manifest(mtext)
+}
+
+/**
+ * test_stage_build — STAGE 1: assemble the project WITH its `.tkt` tests, report the D4
+ * arith-cast-rate number (a property of the typed source alone, so it prints before anything can
+ * fail), emit and `cc` the gate binary, and build the instrumented regression compiler from the
+ * same program. Then RETURN — the caller is `main`, the process exits, and the operating system
+ * takes the arena back.
+ *
+ * @param dir  the project directory
+ * @return     0 when both binaries are built, else the failing status
+ * @throws     the front-end's first error, or the emit/`cc` failure (already reported)
+ * @since 0.3.1.0
+ */
+fn test_stage_build(dir: str) -> i32 {
+    ensure_rt_dir_abs()
     let fe = match project_frontend_sel(dir, true) { Frontend as x => x; error as e => return fail(dir, e.message) }
-    let acr = report_arith_cast_rate(fe)
-    let trc = run_native_gate(dir, "bin", fe.prog, fe.manifest, output_is_tty(false))
+    report_arith_cast_rate(fe)
+    let brc = native_gate_build(dir, GATE_OUT_DIR, gate_paths(GATE_OUT_DIR, fe.manifest), fe.prog, fe.manifest, output_is_tty(false))
+    if brc != 0 { return brc }
+    build_regression_feed_exe(fe.manifest, fe.prog)
+    0
+}
+
+/**
+ * test_stage_report — STAGE 3: the verdict. Re-check the source (coverage is a walk of the TYPED
+ * program — there is no other way to read the dumps back), fold in the gate's dumps and then the
+ * regression tier's, and apply the policies in their historic precedence.
+ *
+ * WHY THE SOURCE IS CHECKED TWICE. Stage 1 held the checked program, but the coverage it must be
+ * read against does not exist until the gate and the regressors have RUN — which is after stage 1
+ * has exited, by design. The alternative is to keep stage 1's process alive through both runs,
+ * which is the ~3 GB this staging exists to remove. The re-check costs one front-end pass and
+ * peaks in a process that exits immediately after.
+ *
+ * The Cobertura snapshot taken between the two merges is the PRE-REGRESSION picture the
+ * `--per-commit-test` delta gate compares against, exactly as the single-process driver took it
+ * between the gate and the tier.
+ *
+ * @param dir              the project directory
+ * @param gen_cov          `--coverage` — write the Cobertura report next to the project root
+ * @param cov_validation   `--cov-validation` — enforce (fail) the coverage floors instead of warning
+ * @param per_test_cov     `--per-test-cov` — also print the dev-time per-test attribution report
+ * @param per_commit_base  `--per-commit-test <base>` — the git base for the delta gate ("" = no-op)
+ * @param analyzer         `--analyzer` — run the dev-time stale/redundant analyzer
+ * @param arith_cast_gate  `--arith-cast-gate` — enforce the D4 ARITH-CAST-RATE ceiling
+ * @return                 the run's final status, in the historic precedence order
+ * @throws                 the re-check's first error, or the Cobertura write failure
+ * @since 0.3.1.0
+ */
+fn test_stage_report(dir: str, gen_cov: bool, cov_validation: bool, per_test_cov: bool, per_commit_base: str, analyzer: bool, arith_cast_gate: bool) -> i32 {
+    let trc = stage_rc_of_env(TEST_GATE_RC_ENV)
+    let regr_rc = stage_rc_of_env(TEST_REGR_RC_ENV)
+    let fe = match recheck_frontend(dir) { Frontend as x => x; error as e => return fail(dir, e.message) }
+    let acr = checker::arith_cast_rate_report(fe.prog)
+    merge_gate_coverage(GATE_OUT_DIR, gate_paths(GATE_OUT_DIR, fe.manifest), test_jobs(), trc)
     let pre_regr_cob = coverage::cov_cobertura(fe.prog)
-    let has_regr = fe.manifest.test_regression_files.len > 0
-    let regr_rc = if has_regr { run_regression_tier(dir, exe, fe) } else { 0 }
+    merge_regression_coverage()
     if gen_cov {
         let xml = coverage::cov_cobertura(fe.prog)
         match teko::io::write_file("cobertura.xml", xml) { error as e => return fail(dir, e.message); null => { } }
@@ -5384,6 +5758,7 @@ fn test_project(dir: str, gen_cov: bool, cov_validation: bool, per_test_cov: boo
     if trc == 0 && floor_rc == 0 && per_commit_base.len > 0 {
         per_commit_rc = run_per_commit_test(dir, fe, per_commit_base, cov_validation, pre_regr_cob)
     }
+    let has_regr = fe.manifest.test_regression_files.len > 0
     let gate_rc = test_gate_precedence(trc, floor_rc, per_commit_rc, has_regr, regr_rc)
     if gate_rc != 0 { return gate_rc }
     if arith_cast_gate {
@@ -5393,6 +5768,131 @@ fn test_project(dir: str, gen_cov: bool, cov_validation: bool, per_test_cov: boo
     if per_test_cov { return run_per_test_cov(dir, fe) }
     if analyzer { return run_analyzer(dir, fe) }
     0
+}
+
+/**
+ * recheck_frontend — the report stage's front-end: the SAME assembly stage 1 did (project plus its
+ * `.tkt` tests), run QUIETLY under one named phase. Quiet because the file→namespace map and the
+ * per-file counters were already printed by stage 1 and a second copy would read as a second
+ * build; under a phase because a silent twenty-second gap is exactly the shape this codebase
+ * refuses to leave in a log.
+ *
+ * @param dir  the project directory
+ * @return     the re-checked front-end product
+ * @throws     the front-end's first error, already settled onto the phase line
+ * @since 0.3.1.0
+ */
+fn recheck_frontend(dir: str) -> Frontend | error {
+    match teko::env::chdir(dir) { error => return error { message = "cannot enter project directory" }; null => { } }
+    let phase = phase_begin("cov recheck", dir, report_mode(false, output_is_tty(false)))
+    match frontend_body(true, true, false) {
+        Frontend as fe => { phase_end_ok(phase, dir); fe }
+        error as e => { phase_end_fail(phase, dir, e.message); e }
+    }
+}
+
+/**
+ * run_test_stage — re-invoke THIS binary for `stage`, with the argv the user typed. Everything the
+ * child needs beyond that is the stage selector and the two statuses, all in the environment.
+ *
+ * stdout is flushed FIRST: it is block-buffered whenever it is not a terminal, and the child
+ * writes to the same file description, so an unflushed line would land after the child's output
+ * and the log would read out of order.
+ *
+ * @param stage  `TEST_STAGE_BUILD` or `TEST_STAGE_REPORT`
+ * @param exe    this compiler binary's absolute path
+ * @return       the child's exit status, or `STAGE_SELECT_FAILED` when the selector cannot be set
+ * @since 0.3.1.0
+ */
+fn run_test_stage(stage: str, exe: str) -> i32 {
+    if !env_visible_to_children(TEST_STAGE_ENV, stage) { return report_stage_select_failure(stage) }
+    teko::io::flush()
+    let rc = teko::process::run(self_stage_argv(exe))
+    match teko::env::set_var(TEST_STAGE_ENV, "") { error => { }; null => { } }
+    rc
+}
+
+/**
+ * run_test_report_stage — spawn the report stage with the gate's and the tier's statuses in the
+ * environment. When those statuses cannot be made visible the run STOPS instead of reporting: a
+ * report stage that read a missing status as 0 would turn a failed gate into a green run, and a
+ * silent false pass is the one outcome M.1 forbids outright.
+ *
+ * @param exe      this compiler binary's absolute path
+ * @param trc      the unit gate's exit status
+ * @param regr_rc  the regression tier's exit status
+ * @return         the report stage's verdict, or a non-zero status that never masks `trc`
+ * @since 0.3.1.0
+ */
+fn run_test_report_stage(exe: str, trc: i32, regr_rc: i32) -> i32 {
+    let ready = env_visible_to_children(TEST_GATE_RC_ENV, $"{trc}") && env_visible_to_children(TEST_REGR_RC_ENV, $"{regr_rc}")
+    if !ready {
+        report_stage_select_failure(TEST_STAGE_REPORT)
+        if trc != 0 { return trc }
+        return STAGE_SELECT_FAILED
+    }
+    run_test_stage(TEST_STAGE_REPORT, exe)
+}
+
+/**
+ * report_stage_select_failure — the honest stop when the environment refuses to carry a stage's
+ * selector or status to a child (M.3: name what could not be done, do not proceed as if it had).
+ *
+ * @param stage  the stage that could not be selected
+ * @return       `STAGE_SELECT_FAILED`
+ * @since 0.3.1.0
+ */
+fn report_stage_select_failure(stage: str) -> i32 {
+    teko::io::eprintln(teko::str::concat("teko: cannot hand the `", stage, "` stage its ", TEST_STAGE_ENV, " selector — refusing to run `teko test` unstaged"))
+    STAGE_SELECT_FAILED
+}
+
+/**
+ * env_visible_to_children — set `key` to `value` AND read it back, because a value a child cannot
+ * see is worse than one that was never set: the child would run the wrong stage, or read a failed
+ * gate as a passing one.
+ *
+ * @param key    the environment key
+ * @param value  the value the child must see
+ * @return       true iff the value is set and reads back identical
+ * @since 0.3.1.0
+ */
+fn env_visible_to_children(key: str, value: str) -> bool {
+    match teko::env::set_var(key, value) { error => return false; null => { } }
+    match teko::env::var(key) { str as v => v == value; error => false }
+}
+
+/**
+ * stage_rc_of_env — the exit status a driver handed this stage through `key` (0 when absent, which
+ * is also what a stage run by hand should assume).
+ *
+ * @param key  `TEST_GATE_RC_ENV` or `TEST_REGR_RC_ENV`
+ * @return     the parsed status
+ * @since 0.3.1.0
+ */
+fn stage_rc_of_env(key: str) -> i32 {
+    match teko::env::var(key) { str as v => bp_parse_uint(v) to i32; error => 0 }
+}
+
+/**
+ * self_stage_argv — the argv to re-invoke this binary with: the user's own argv with `argv[0]`
+ * replaced by this binary's RESOLVED absolute path (the launch spelling may be `./out/teko`, and
+ * a stage must not depend on the child's PATH lookup finding the same file).
+ *
+ * @param exe  this compiler binary's absolute path
+ * @return     the argv for `teko::process::run`
+ * @since 0.3.1.0
+ */
+fn self_stage_argv(exe: str) -> []str {
+    let args = teko::env::args()
+    mut out: []str = teko::list::push(teko::list::empty(), exe)
+    mut i: u64 = 1
+    loop {
+        if i >= args.len { break }
+        out = teko::list::push(out, args[i])
+        i = i + 1
+    }
+    out
 }
 
 /**
