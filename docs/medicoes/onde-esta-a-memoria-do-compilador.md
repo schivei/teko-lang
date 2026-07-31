@@ -105,66 +105,82 @@ estrutura — 0,0 % de recuperação, 88 % num sítio — não o nome do sítio.
 
 ---
 
-## 7. A limpeza por escopo que o dono lembra — EXISTE, e é opt-in
+## 7. A limpeza por escopo — R11, e EU ERREI ao chamar-lhe `adopt`
 
-Adendo do dono, 2026-07-31:
+Adendo do dono, 2026-07-31, e a correção dele à minha primeira resposta:
 
-> *"havia já uma definição para que, quando um escopo terminasse, tudo que não for compartilhado com
-> outro escopo fosse limpo da arena imediatamente"* — com o exemplo do `args` dentro de um `if`, que
-> *"não há mais motivos para ela continuar na memória"* depois da chaveta.
+> *"não é adopt, é bem mais antigo, era um pré requisito que eu havia descrito em detalhes sobre a
+> arena e pq ela em modo safe é automática. E um dos requisitos é que, sempre que um bloco finaliza,
+> executa-se os defers ali pendentes e depois limpa a memória para os itens órfãos naquela região."*
 
-**A definição existe, está construída, e faz exatamente isso — chama-se `adopt { }`.**
-`emit_adopt` (`src/codegen/codegen.tks:9067`) *"ALWAYS opens an adopter region… since its purpose IS
-to own every allocation inside"*, e à saída faz `tk_region_drop_subtree(<adopter>)`: liberta o
-adotante **e todas as regiões dos objetos alocados lá dentro**, numa varredura. É a semântica que ele
-descreve, palavra por palavra.
+**Ele tem razão, e o documento existe.** Eu apontei o `adopt` porque foi o que encontrei primeiro no
+codegen; o `adopt` é a camada **L4**, a do *bulk-drop de ciclos*, opt-in. O que ele descreve é a
+camada **L0**, a base — e ela é anterior, é automática, e tem regra numerada.
 
-**O que NÃO existe é isso acontecer sozinho em cada bloco.** Um `if { }` normal não abre região
-nenhuma: `cg_enclosing_region_expr` devolve *"a região de bloco aberta mais interna, se houver, senão
-a raiz do processo"* — e se ninguém abriu uma, **tudo cai na raiz**, que só liberta à saída.
+### A fonte: R11, no modelo de referências
 
-### E é isto que a medição confirma, número a número
+`docs/design/ref-transparent-model.md` (PR #499, commit `959ad7c9`) consolida as regras R1–R11:
+
+> **R11. Sem GC; arenas lexicais.** *Uma `ref` é válida só enquanto viva a arena que segura o seu
+> alvo.*
+
+E é citada como o modelo em vigor noutro sítio, com o nome que o dono usa:
+`const-module-level-plan.md:78` — *"model is arena-per-scope (ref-transparent model, R11: 'sem GC;
+arenas lexicais')"*.
+
+`memory-unsafe-backend-remodel.md` põe-na como camada zero da tabela do modelo híbrido:
+
+| camada | papel | estado |
+|---|---|---|
+| **L0 — bump-arena region tree** | *"the invisible default for ~95% of code; **per-scope**, per-request region"* | **BUILT** — custo *"none (leak-to-root is sound)"* |
+| L4 — `adopt` | bulk-reclaim de um nó cíclico, opt-in | SCAFFOLDING |
+
+**Eu li a L4 e respondi a L0.** São camadas diferentes com propósitos diferentes.
+
+### E a ordem que ele nomeia está escrita, e é essa
+
+*"executa-se os defers ali pendentes e depois limpa a memória"* — `backend-a1-lir-lowering.md:210`:
+
+> *"**defer** lowers by **replaying the deferred body (LIFO) at every scope exit** — before each
+> `return`, `break`, `continue`, and at normal fall-off"*
+
+Os `defer` correm **à saída do bloco, antes de qualquer aresta de saída**. A limpeza da região vem
+**depois** — que é exatamente a ordem que ele descreve, e a única que pode funcionar: um `defer` que
+toque em algo alocado no bloco tem de correr **enquanto** esse algo ainda existe.
+
+### Então porque é que não acontece? A resposta está medida, e tem uma linha de estado
+
+`docs/design/concorrencia-adiantada-s8.md`:
+
+| estágio | estado |
+|---|---|
+| **S1** arena primitive + root region | ✅ |
+| **S2** scope regions + escape check | 🔶 **per-fn ✅ · block-arm ⬜** |
+| **S3** `ref` (mutable-target only) | ✅ |
+
+**`block-arm ⬜`.** A granularidade que o exemplo do dono precisa — a região do braço de um `if` — é a
+metade que não foi construída. E a L0 diz-se **BUILT** com o custo *"none (**leak-to-root is
+sound**)"*: **é essa cláusula que torna a implementação de hoje "correta" enquanto não recupera
+nada.** Vazar para a raiz não produz um dangling, logo é sólido — e é por isso que ninguém tropeça
+nele. Custa memória, não correção.
+
+E é exatamente o que o número diz:
 
 ```
-11 of 5007 regions dropped        <- os poucos `adopt` do corpus
+11 of 5007 regions dropped
 scoped (freed at region drop):  0.0 MB
 root (never freed):          1926.3 MB
+reclaim ratio:                  0.0 %
 ```
 
-5007 regiões são criadas (uma por objeto, `codegen.tks:5142`), **11** são largadas. O corpus do
-compilador quase não usa `adopt`, logo quase nada é recuperado. **A funcionalidade não falhou — ela
-não foi chamada.**
+**A semântica está especificada (R11), a ordem está especificada (defers, depois limpeza), a camada
+diz-se construída — e a metade por bloco está por fazer, com estado registado desde antes desta
+lane.** O compilador não está a desobedecer ao desenho: está a usar a válvula de escape que o desenho
+lhe deu.
 
-### Porque não é automático hoje, e o bloqueio já é dívida nomeada
+### O que isto muda no que eu tinha escrito
 
-`escape.tks` responde a uma pergunta de **função**, não de **bloco**: `fn_escaping_vars` /
-`binding_is_frame_local` decidem se um local sobrevive à MOLDURA. O exemplo do dono precisa de uma
-pergunta mais fina — *"este `args` sobrevive a ESTE bloco?"* — e essa é a **espinha de escape
-transitivo**, que `typer.tks:5404` diz por escrito que ainda não aterrou:
-
-> *"a stored field cannot escape until the transitive-escape spine lands"*
-
-### O instrumento certo é mais barato do que regiões, e tem ZERO chamadores
-
-Para um bloco cujas alocações provadamente não escapam, o par certo não é abrir uma região — é
-**marcar e rebobinar**: `tk_arena_push()` à entrada, `tk_arena_pop()` à saída. Duas chamadas, sem
-contabilidade por região. E o caso que escapa tem o seu par: `tk_arena_commit()`, que **dobra as
-alocações do bloco no nível de baixo em vez de as perder**.
-
-**Os três existem, são builtins, e o pipeline de compilação não chama nenhum** — os únicos chamadores
-são o portão de teste (`#109`, `#469`). O `tk_arena_commit` está marcado no cabeçalho como
-*"enabling primitive — staged off; no compiler source calls this yet"*.
-
-**Resumo da situação: a semântica está desenhada, o mecanismo está construído em duas formas
-diferentes, e o que falta é a ANÁLISE que decide, por bloco, qual das duas usar.**
-
-### O subconjunto que talvez não precise da espinha inteira — e o risco dele
-
-O exemplo do dono tem uma propriedade que a análise geral não exige: `args` é ligado **dentro** do
-bloco e nunca sai dele. Um binding cujo nome não está em `fn_escaping_vars` **e** não é referido
-depois do bloco é bloco-local por um critério puramente sintáctico.
-
-**Mas isto é exatamente a classe de erro escondido que a barra do tronco recusa**: libertar algo ainda
-referido não dá erro — dá leitura de memória reciclada. Qualquer atalho aqui precisa do
-`TEKO_MEM_PARANOID` como oráculo e de uma inversão que prove que o atalho REJEITA o caso que escapa.
-Fica **nomeado, não recomendado**, até alguém o medir.
+O instrumento continua a ser o mesmo — `tk_arena_push`/`pop` para o bloco que não escapa,
+`tk_arena_commit` para o que escapa, e nenhum tem chamador no pipeline. O que muda é **de quem é a
+dívida**: não é uma funcionalidade opt-in que ninguém usou, é a **metade por bloco do S2**, com
+estado `⬜` registado, e o bloqueio nomeado no `typer.tks:5404` (a espinha de escape transitivo).
