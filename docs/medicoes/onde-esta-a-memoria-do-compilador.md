@@ -102,3 +102,69 @@ Fechar isso precisa de uma de duas coisas — e nenhuma foi feita:
 
 **Até lá, qualquer atribuição de causa a uma fase concreta é palpite.** O que está provado é a
 estrutura — 0,0 % de recuperação, 88 % num sítio — não o nome do sítio.
+
+---
+
+## 7. A limpeza por escopo que o dono lembra — EXISTE, e é opt-in
+
+Adendo do dono, 2026-07-31:
+
+> *"havia já uma definição para que, quando um escopo terminasse, tudo que não for compartilhado com
+> outro escopo fosse limpo da arena imediatamente"* — com o exemplo do `args` dentro de um `if`, que
+> *"não há mais motivos para ela continuar na memória"* depois da chaveta.
+
+**A definição existe, está construída, e faz exatamente isso — chama-se `adopt { }`.**
+`emit_adopt` (`src/codegen/codegen.tks:9067`) *"ALWAYS opens an adopter region… since its purpose IS
+to own every allocation inside"*, e à saída faz `tk_region_drop_subtree(<adopter>)`: liberta o
+adotante **e todas as regiões dos objetos alocados lá dentro**, numa varredura. É a semântica que ele
+descreve, palavra por palavra.
+
+**O que NÃO existe é isso acontecer sozinho em cada bloco.** Um `if { }` normal não abre região
+nenhuma: `cg_enclosing_region_expr` devolve *"a região de bloco aberta mais interna, se houver, senão
+a raiz do processo"* — e se ninguém abriu uma, **tudo cai na raiz**, que só liberta à saída.
+
+### E é isto que a medição confirma, número a número
+
+```
+11 of 5007 regions dropped        <- os poucos `adopt` do corpus
+scoped (freed at region drop):  0.0 MB
+root (never freed):          1926.3 MB
+```
+
+5007 regiões são criadas (uma por objeto, `codegen.tks:5142`), **11** são largadas. O corpus do
+compilador quase não usa `adopt`, logo quase nada é recuperado. **A funcionalidade não falhou — ela
+não foi chamada.**
+
+### Porque não é automático hoje, e o bloqueio já é dívida nomeada
+
+`escape.tks` responde a uma pergunta de **função**, não de **bloco**: `fn_escaping_vars` /
+`binding_is_frame_local` decidem se um local sobrevive à MOLDURA. O exemplo do dono precisa de uma
+pergunta mais fina — *"este `args` sobrevive a ESTE bloco?"* — e essa é a **espinha de escape
+transitivo**, que `typer.tks:5404` diz por escrito que ainda não aterrou:
+
+> *"a stored field cannot escape until the transitive-escape spine lands"*
+
+### O instrumento certo é mais barato do que regiões, e tem ZERO chamadores
+
+Para um bloco cujas alocações provadamente não escapam, o par certo não é abrir uma região — é
+**marcar e rebobinar**: `tk_arena_push()` à entrada, `tk_arena_pop()` à saída. Duas chamadas, sem
+contabilidade por região. E o caso que escapa tem o seu par: `tk_arena_commit()`, que **dobra as
+alocações do bloco no nível de baixo em vez de as perder**.
+
+**Os três existem, são builtins, e o pipeline de compilação não chama nenhum** — os únicos chamadores
+são o portão de teste (`#109`, `#469`). O `tk_arena_commit` está marcado no cabeçalho como
+*"enabling primitive — staged off; no compiler source calls this yet"*.
+
+**Resumo da situação: a semântica está desenhada, o mecanismo está construído em duas formas
+diferentes, e o que falta é a ANÁLISE que decide, por bloco, qual das duas usar.**
+
+### O subconjunto que talvez não precise da espinha inteira — e o risco dele
+
+O exemplo do dono tem uma propriedade que a análise geral não exige: `args` é ligado **dentro** do
+bloco e nunca sai dele. Um binding cujo nome não está em `fn_escaping_vars` **e** não é referido
+depois do bloco é bloco-local por um critério puramente sintáctico.
+
+**Mas isto é exatamente a classe de erro escondido que a barra do tronco recusa**: libertar algo ainda
+referido não dá erro — dá leitura de memória reciclada. Qualquer atalho aqui precisa do
+`TEKO_MEM_PARANOID` como oráculo e de uma inversão que prove que o atalho REJEITA o caso que escapa.
+Fica **nomeado, não recomendado**, até alguém o medir.
