@@ -2476,3 +2476,30 @@ O(V) cada. É o mesmo defeito noutro sítio.
   2310 MB de 2808 MB em N=4000. Não é backend, e não é desta lane, mas está no mesmo mapa.
 - A sonda densa N=1000 «antes» não foi medida: os ≈14,6 GB projectados punham em risco os outros
   agentes da caixa.
+
+### O ritual, e o vermelho que NÃO é meu
+
+| passo | resultado |
+|---|---|
+| build limpo `TEKO_BACKEND=c … --release` | **0**, sem um único aviso; pico 1720,5 MB; repetido byte-a-byte (`out5` == `out`) |
+| FIXPOINT gen2 vs gen3 | **byte-idênticos**, tanto o `teko.c` emitido como o binário ligado; picos 1609,5 / 1592,6 MB (contra 1707,5 MB antes do conserto) |
+| `.o` do backend próprio, antes vs depois | **54 projectos idênticos, 0 diferentes** |
+| `./out/teko test .` — suíte `.tkt` | **1161 correram, 1161 passaram, 0 falharam** |
+| `./out/teko test .` — camada de regressão | **morto (137) na camada `examples/regressions/*`** |
+
+**O 137 não é do conserto, e há controlo.** A MESMA corrida com o compilador PRÉ-conserto
+(`out-before/teko test .`, mesmas variáveis `TEKO_REGR_JOBS=1 TEKO_TEST_JOBS=1`, mesma caixa) morre
+com **137 no mesmo sítio**, depois do mesmo `regressor.tkr` verde e da mesma suíte 1161/1161. O
+`dmesg` mostra processos `teko` mortos com **9 a 15 GB de RSS** ao longo da sessão.
+
+Duas causas somam-se, e nenhuma é o `vinfo_set`:
+
+1. **A camada de regressão corre 4 filhos ao mesmo tempo por omissão** (`REGR_JOBS_DEFAULT = 4`,
+   `src/build/regression.tks:242`), e o `teko test .` ainda se auto-invoca em sub-portões
+   (`--arith-cast-gate`). Numa caixa de 16 GB com três agentes, isso é OOM garantido. Com
+   `TEKO_REGR_JOBS=1 TEKO_TEST_JOBS=1` o processo ainda chega a **5,5 GB sozinho**.
+2. **O backend continua quadrático** — ver `sort_by_start` acima.
+
+O conserto **melhora** todos os números que alimentam esse portão: o build de
+`examples/regressions/own_native` pelo backend próprio passou de **304,1 MB para 275,6 MB**, e o
+auto-build do compilador de **1707,5 MB para 1609,5 MB**. Nenhum caminho ficou mais caro.
