@@ -102,3 +102,163 @@ Fechar isso precisa de uma de duas coisas — e nenhuma foi feita:
 
 **Até lá, qualquer atribuição de causa a uma fase concreta é palpite.** O que está provado é a
 estrutura — 0,0 % de recuperação, 88 % num sítio — não o nome do sítio.
+
+---
+
+## 7. A limpeza por escopo — R11, e EU ERREI ao chamar-lhe `adopt`
+
+Adendo do dono, 2026-07-31, e a correção dele à minha primeira resposta:
+
+> *"não é adopt, é bem mais antigo, era um pré requisito que eu havia descrito em detalhes sobre a
+> arena e pq ela em modo safe é automática. E um dos requisitos é que, sempre que um bloco finaliza,
+> executa-se os defers ali pendentes e depois limpa a memória para os itens órfãos naquela região."*
+
+**Ele tem razão, e o documento existe.** Eu apontei o `adopt` porque foi o que encontrei primeiro no
+codegen; o `adopt` é a camada **L4**, a do *bulk-drop de ciclos*, opt-in. O que ele descreve é a
+camada **L0**, a base — e ela é anterior, é automática, e tem regra numerada.
+
+### A fonte: R11, no modelo de referências
+
+`docs/design/ref-transparent-model.md` (PR #499, commit `959ad7c9`) consolida as regras R1–R11:
+
+> **R11. Sem GC; arenas lexicais.** *Uma `ref` é válida só enquanto viva a arena que segura o seu
+> alvo.*
+
+E é citada como o modelo em vigor noutro sítio, com o nome que o dono usa:
+`const-module-level-plan.md:78` — *"model is arena-per-scope (ref-transparent model, R11: 'sem GC;
+arenas lexicais')"*.
+
+`memory-unsafe-backend-remodel.md` põe-na como camada zero da tabela do modelo híbrido:
+
+| camada | papel | estado |
+|---|---|---|
+| **L0 — bump-arena region tree** | *"the invisible default for ~95% of code; **per-scope**, per-request region"* | **BUILT** — custo *"none (leak-to-root is sound)"* |
+| L4 — `adopt` | bulk-reclaim de um nó cíclico, opt-in | SCAFFOLDING |
+
+**Eu li a L4 e respondi a L0.** São camadas diferentes com propósitos diferentes.
+
+### E a ordem que ele nomeia está escrita, e é essa
+
+*"executa-se os defers ali pendentes e depois limpa a memória"* — `backend-a1-lir-lowering.md:210`:
+
+> *"**defer** lowers by **replaying the deferred body (LIFO) at every scope exit** — before each
+> `return`, `break`, `continue`, and at normal fall-off"*
+
+Os `defer` correm **à saída do bloco, antes de qualquer aresta de saída**. A limpeza da região vem
+**depois** — que é exatamente a ordem que ele descreve, e a única que pode funcionar: um `defer` que
+toque em algo alocado no bloco tem de correr **enquanto** esse algo ainda existe.
+
+### Então porque é que não acontece? A resposta está medida, e tem uma linha de estado
+
+`docs/design/concorrencia-adiantada-s8.md`:
+
+| estágio | estado |
+|---|---|
+| **S1** arena primitive + root region | ✅ |
+| **S2** scope regions + escape check | 🔶 **per-fn ✅ · block-arm ⬜** |
+| **S3** `ref` (mutable-target only) | ✅ |
+
+**`block-arm ⬜`.** A granularidade que o exemplo do dono precisa — a região do braço de um `if` — é a
+metade que não foi construída. E a L0 diz-se **BUILT** com o custo *"none (**leak-to-root is
+sound**)"*: **é essa cláusula que torna a implementação de hoje "correta" enquanto não recupera
+nada.** Vazar para a raiz não produz um dangling, logo é sólido — e é por isso que ninguém tropeça
+nele. Custa memória, não correção.
+
+E é exatamente o que o número diz:
+
+```
+11 of 5007 regions dropped
+scoped (freed at region drop):  0.0 MB
+root (never freed):          1926.3 MB
+reclaim ratio:                  0.0 %
+```
+
+**A semântica está especificada (R11), a ordem está especificada (defers, depois limpeza), a camada
+diz-se construída — e a metade por bloco está por fazer, com estado registado desde antes desta
+lane.** O compilador não está a desobedecer ao desenho: está a usar a válvula de escape que o desenho
+lhe deu.
+
+### O que isto muda no que eu tinha escrito
+
+O instrumento continua a ser o mesmo — `tk_arena_push`/`pop` para o bloco que não escapa,
+`tk_arena_commit` para o que escapa, e nenhum tem chamador no pipeline. O que muda é **de quem é a
+dívida**: não é uma funcionalidade opt-in que ninguém usou, é a **metade por bloco do S2**, com
+estado `⬜` registado, e o bloqueio nomeado no `typer.tks:5404` (a espinha de escape transitivo).
+
+
+---
+
+## 8. Porque a região por bloco quase nunca abre — a porta é `Named`, e só
+
+Ampliação do dono, 2026-07-31:
+
+> *"Não apenas `if`s, mas os braços de match, loop, bloco escopado, etc. … em teko, [o bloco escopado]
+> permite controlar a memória sem precisar de `unsafe`."*
+
+Fui medir quantos construtos abrem região hoje, e **é mais do que eu tinha dito na secção 7.** Cinco
+sítios do `codegen.tks` empurram um `RegionFrame`:
+
+| sítio | construto | condição |
+|---|---|---|
+| `:7427` | **braço de valor** (`if`/`match` em posição de valor) | `cg_block_has_block_local(…)` **e** `regions.len < 64` |
+| `:8166` | `emit_block_region` | idem |
+| `:8773` | **corpo de `loop`** (`is_loop = true`) | idem |
+| `:9107` | `emit_adopt` | **incondicional** — é o seu propósito |
+| `:5442` | função com local de moldura | `fn_body_has_frame_local` |
+
+**Ou seja: os braços de `match`, os braços de valor do `if` e os corpos de `loop` JÁ estão ligados.**
+A máquina está lá. O que decide se ela abre é um predicado — e é aí que está a resposta.
+
+### A porta, e ela admite uma forma de tipo só
+
+`cg_block_has_block_local` (`:8100`) percorre as ligações do bloco e devolve `true` na primeira que
+satisfaça **duas** condições:
+
+```teko
+if cg_same_named_struct(b.bound, b.value.type) && checker::binding_is_block_local(escaping, fn_body, block, is_value, b) { return true }
+```
+
+E `cg_same_named_struct` (`:9340`) é:
+
+```teko
+match a { checker::Named as na => match b { checker::Named as nb => str_eq(na.name, nb.name); _ => false }; _ => false }
+```
+
+**Só passa uma ligação cujos dois lados sejam `Named` com o MESMO nome.** Um `str`, um `[]T`, uma
+lista, um inteiro — **nada disso é `Named`**, logo nada disso abre região, e tudo cai na raiz.
+
+### E é exatamente isso que o número de 0,0 % significa
+
+O compilador aloca, de longe, `str` e `[]T`: **66,4 MB de buffers de `str` em 2 165 811 alocações**, e
+o sítio de topo com **3 484 564 alocações**. **Nenhuma dessas formas passa a porta.** As 11 regiões
+largadas de 5007 são as poucas ligações de struct nomeada que qualificaram.
+
+**A correcção à secção 7 é esta:** não é *"a granularidade por bloco não foi construída"* nem *"é
+opt-in e ninguém usou"*. É **construída, ligada aos construtos certos, e fechada por um predicado que
+admite uma forma de tipo só**. O comentário do próprio código diz o alcance por escrito
+(`:9351`): *"MEM Step 1 routes only top-level bindings; sub-scope bindings stay on root in this first
+cut"* — **primeiro corte**, escrito como tal.
+
+### O bloco nu `{ }` NÃO existe hoje, e é a parte nova da proposta
+
+```teko
+pub type Statement = variant Binding | Assign | Return | LoopStmt | BreakStmt | ContinueStmt | ExprStmt | DeferStmt | AdoptStmt
+```
+
+`src/parser/ast.tks:358`. **Não há forma de statement para um bloco nu.** O único bloco com escopo
+próprio que é um statement é o `AdoptStmt`. Logo a proposta do dono tem duas metades com custos muito
+diferentes:
+
+* **alargar o predicado** — os construtos já lá estão; muda-se quem passa a porta;
+* **acrescentar o bloco nu** — é gramática nova (lexer não muda, parser e AST mudam).
+
+### E o argumento do dono sobre o que o bloco nu VALE aqui
+
+> *"em outras linguagens, apenas limita ou permite a reescrita de variáveis dentro de um constructo com
+> o mesmo nome de outra fora, mas em teko, permite controlar a memória sem precisar de `unsafe`."*
+
+**Está certo, e a tabela do modelo híbrido dá-lhe a razão pelo contrário:** hoje quem quer controlo
+explícito de libertação desce a `#must_free`/`mem::free` (L2c) ou a `unsafe` (L5). Um bloco nu com
+região própria dá **a mesma capacidade na camada L0** — sem anotação, sem `unsafe`, e com a garantia
+que a R11 já enuncia. É a diferença entre *"o dev pede para libertar"* e *"o dev diz onde acaba o
+tempo de vida"*.

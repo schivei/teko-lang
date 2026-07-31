@@ -2250,3 +2250,156 @@ que não existe"*.
 **A ligação que o dono viu é a que o plano ainda não tem:** o 12.1 já diz *"cobertura como sinal de
 disco, zero alocação em corrida"* — que é **exatamente** o que o journal constrói. O plano escreveu
 o requisito antes de existir o mecanismo que o satisfaz.
+
+---
+
+## O buffer é NOSSO e vale 2048 — e o chunk resolve-se na LEITURA (dono, 2026-07-31)
+
+> *"Podemos então ficar um buffer máximo nosso, garante que nenhum dos 3 estourem e ainda cabe tudo
+> de uma mensagem Rec… Logo, 2048 bytes devem satisfazer… como resolver a linearidade de um chunk
+> para ele ficar completo sem precisar reler o arquivo e perder o O(1)? … Ou faria gravar diretamente
+> o chunk como foi recebido, deixando a resolução para o journal resolver quando for solicitado?
+> Prefiro minha última pergunta."*
+
+### Porque 2048 é o número certo, e não é arbitrário
+
+**É o valor por omissão do macOS, medido — o mais apertado dos três.** Fixar o nosso tecto ali tem uma
+propriedade que nenhum outro valor tem: **não é preciso chamar `setsockopt` em plataforma nenhuma.**
+
+| plataforma | por omissão | 2048 cabe sem afinar? |
+|---|---|---|
+| Linux | `SO_SNDBUF` 212992 → 212960 úteis | sim, com 100× de folga |
+| macOS | `SO_SNDBUF` 2048 → **2048 úteis** | **sim, exatamente** |
+| Windows | mailslot com `nMaxMessageSize` declarado **é respeitado** | sim, declara-se 2048 |
+
+Escolher qualquer valor maior obriga a afinar o macOS; escolher 2048 **elimina a afinação do
+desenho**. Menos uma chamada, menos um modo de falha, menos uma célula que pode estar errada.
+
+E cabe: o `Rec` tem 80 bytes. 2048 comporta **25 registos**, ou uma linha única com 25× a folga —
+incluindo o caso que o dono nomeia, *"uma linha profunda de cobertura com um nome gigantesco que o dev
+tenha escrito com centenas de namespaces de profundidade"*.
+
+### A resposta à pergunta do chunk, e a preferência dele é a certa
+
+**Grava-se o chunk COMO CHEGOU; a junção é do leitor.** As alternativas e porque perdem:
+
+| via | porque não |
+|---|---|
+| reler o ficheiro para juntar | destrói o O(1) da escrita — é o defeito do `verdict_emit` outra vez |
+| encenar num sítio auxiliar (outros ficheiros) | **reintroduz o túnel feito de ficheiros** que a §15.1 apagou |
+| **gravar como chegou, resolver na leitura** | **a escrita fica append-only e O(1); a junção acontece uma vez, a pedido** |
+
+**E há uma razão estrutural que só aparece sob MPSC: os chunks de escritores diferentes INTERCALAM-SE
+por construção.** Qualquer esquema que exija contiguidade no ficheiro precisa de um trinco ou de uma
+área de encenação por escritor. **Gravar como chegou e resolver por `(writer, seq, chunk_ix)` não
+precisa de nenhum dos dois** — o mesmo triplo que a idempotência já exige.
+
+E o leitor já existe: o `teko journal <path>.tkj -o <saida.log>` é o sítio onde a resolução vive, e
+ele já ia percorrer o ficheiro de qualquer maneira.
+
+### O que isto CUSTA, nomeado
+
+1. **O leitor tem de reter mensagens parciais até o último chunk chegar.** Limitado por
+   *(escritores concorrentes × tecto da mensagem)*, **não pela dimensão da corrida** — logo é
+   limitado e pequeno. Não é a memória do `verdict_emit` disfarçada.
+2. **Uma corrida que morra a meio de uma mensagem deixa uma sequência incompleta.** Isso **não é um
+   defeito, é informação**: o leitor relata *"registo truncado, o escritor morreu no chunk k"*. E é
+   coerente com a lei do próprio dono — **a morte de um buffer aceita-se**.
+3. ~~**A bandeira de EOF no último chunk…**~~ — **substituída pelo adendo abaixo, e o adendo é mais
+   forte.**
+
+### O adendo do dono: o chunk diz TAMBÉM quantos são (2026-07-31)
+
+> *"como teremos chunk, precisamos dizer não apenas quem ele é na ordem, mas quantos há
+> (determinismo), assim é possível validar uma corrupção, peça faltante e transformar em gate."*
+
+**Isto SUBSTITUI a bandeira de EOF em vez de a acompanhar, e o resultado é mais simples E mais
+forte.** O chunk passa a carregar `(writer, seq, chunk_ix, chunk_n)`, e daí sai tudo:
+
+| propriedade | como se decide |
+|---|---|
+| é o último? | `chunk_ix == chunk_n - 1` — **derivado, não um campo à parte** |
+| está completo? | recebi todos os `0..chunk_n-1` para aquele `(writer, seq)` |
+| **falta uma peça** | há um buraco no intervalo, e o relatório **NOMEIA qual**: *"registo (w=3, seq=812) tem 4 de 5 chunks; falta o 2"* |
+| **está corrompido** | dois chunks do mesmo `(writer, seq)` declaram `chunk_n` **diferente** |
+| **é portão** | qualquer registo incompleto ao fim da leitura **falha a corrida** |
+
+**E fecha uma distinção que a bandeira de EOF não conseguia fazer:** um escritor que morreu a meio
+deixa um **prefixo** `0..k` com `chunk_n` coerente e a cauda em falta — o que, pela lei da morte do
+buffer, é **aceite e relatado**. Uma corrupção deixa `chunk_n` incoerente ou um **buraco no meio**.
+Com a bandeira sozinha as duas eram indistinguíveis: em ambos os casos o último chunk nunca chegava.
+
+**O custo que isto tem, e é o único:** o escritor passa a precisar de saber o comprimento total
+**antes de emitir o primeiro chunk** — logo não pode emitir em fluxo. **Para nós isso não custa
+nada**: o `Rec` é uma struct em memória e o seu comprimento serializado é conhecido antes da escrita.
+A tensão só existiria para um produtor verdadeiramente em fluxo, que este desenho não tem. Fica
+registada por ser real, não por ser um obstáculo.
+
+### A interacção que ninguém levantou ainda, e é real
+
+**O empacotamento e o chunk partilham o MESMO orçamento de 2048.** Um registo que precise de chunk
+**não pode viajar empacotado com outros** — ele ocupa a mensagem inteira, por definição. Logo o
+empacotador tem de ter dois modos, e a fronteira entre eles é `tamanho > 2048 - cabeçalho`.
+
+### E o alarme que a raridade cria
+
+Com o `Rec` a 80 bytes e o tecto a 2048, **o chunk quase nunca dispara**. É uma válvula, não um
+caminho quente — e código que quase nunca corre é exactamente o código que apodrece sem ninguém
+reparar. **Tem de haver uma fixture que FORCE o chunk**, senão a junção do leitor é uma promessa e
+não um mecanismo. Não é um contra-argumento à decisão: é o teste que ela exige.
+
+### A superfície do waitgroup, e a prova (dono, 2026-07-31)
+
+> *"colocar em prova o waiter para que a main não termine e leve embora os canais (o wait group)
+> usando um `wg.wait()`, e os `wg.add(u64)` e `wg.done()`."*
+
+```teko
+type WaitGroup = class {
+    pub id: u64                                       // carrega o id e MAIS NADA (§19.3)
+    pub fn add(self, n: u64) -> error | null { … }
+    pub fn done(self)        -> error | null { … }
+    pub fn wait(self)        -> error | null { … }
+}
+
+fn main() {
+    let c  = teko::threads::chan_bounded(1024)
+    let wg = teko::threads::waitgroup()
+    defer teko::threads::chan_close(c)   // registado 1º  -> corre por ÚLTIMO
+    defer wg.wait()                      // registado 2º  -> corre PRIMEIRO
+    wg.add(1)
+    spawn orquestrar(c, wg)
+    wg.add(filhos.len)
+    loop mut i: u64 = 0; i < filhos.len; i++ { spawn drenar(c, filhos[i], wg) }
+}
+
+fn drenar(c: u64, filho: Filho, wg: WaitGroup) {
+    defer wg.done()
+    …
+}
+```
+
+**Quatro pontos que não são estilo:**
+
+1. **A ordem dos `defer` é a única correta, e o erro contrário é SILENCIOSO.** LIFO verificado no
+   corpus (`ast.tks:339`, `typer.tks:3514`, `lower.tks:5367`).
+2. **O `add` corre no fio que faz o `spawn`, ANTES do `spawn`.** Dentro do filho haveria corrida: o
+   `wait()` podia observar zero antes de ele arrancar. E `add(filhos.len)` numa chamada é **uma**
+   operação atómica em vez de N — sem janela onde a contagem mergulha.
+3. **O `done` vive num `defer`**, para disparar em `return`, `break` e **pânico**.
+4. **E ISTO DEPENDE DA CAPTURA (F6), o que ninguém tinha notado:** sem ela um handler que entra em
+   pânico mata a shard e **nunca corre o seu `defer wg.done()`** — a contagem nunca chega a zero e o
+   `wg.wait()` **fica preso para sempre**. A captura deixa de ser só *"o teste seguinte corre"*:
+   **é a condição de vivacidade da junção.**
+
+**E um modo de falha com nome:** um `done()` a mais do que os `add` passaria a contagem por baixo de
+zero. Não pode ser subfluxo silencioso — `done()` com a contagem já a zero devolve **`error`**, pela
+mesma lei que rege o `push`.
+
+**A prova, em três braços** (`spawn` **não é palavra deste lexer** — verificado; a superfície é
+proposta, não descrição):
+
+| braço | o que afirma |
+|---|---|
+| vivacidade | com o `wait`, os 8×100 registos estão **todos** no journal quando a `main` sai |
+| **inversão** | **sem** o `wait`, o mesmo programa **perde** registos — sem este braço o primeiro diz só *"não vi problema"* |
+| pânico | um handler que panica ainda decrementa (o `done` está em `defer`), logo o `wait` **não pendura** |
