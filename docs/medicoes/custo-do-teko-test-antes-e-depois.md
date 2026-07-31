@@ -138,18 +138,30 @@ custo estava no PAI, no julgamento da saída, não no compilador nem no cenário
 
 ---
 
-## 5. A corrida completa, depois (rota C, `out5/teko`)
+## 5. A corrida completa, depois (rota C, árvore fundida com a lane)
+
+`./outB/teko test .` — **rc=0, 432 s (7m12)**, caixa livre:
 
 ```
-lexer      224/224 files    0.3s     checker    8585/8585 items  21.4s
-monomorph  43/43 instances  11.7s    consteval  543/543 consts    0.4s
-emit test  17.5 MB           8.7s    cc test    bin/teko-tktest  34.6s
-emit rcov  17.1 MB           8.4s    cc rcov    bin/teko-regrcov 400.8s  (caixa carregada)
+lexer      224/224 files    0.3s     checker    8595/8595 items  18.7s
+monomorph  43/43 instances 11.4s     consteval  543/543 consts    0.4s
+emit test  17.5 MB          7.9s     cc test    bin/teko-tktest  28.3s
+emit rcov  17.1 MB          7.5s     cc rcov    bin/teko-regrcov 102.1s
 portão     1161 testes, 0 falhas, 4 shards
-tier       13 regressores, 63 builds, 227,4 s
-recheck    35,0 s
-total      767 s;  HWM do pai 40 336 KB
+tier       13 regressores, 0 falhas, 64 builds, 211,4 s
+recheck    31,4 s
+total      432 s;  HWM do processo PAI 41 316 KB (40,3 MB)
 ```
 
-FIXPOINT verificado **na rota C** (`TEKO_BACKEND=c`): gen2 e gen3 byte-idênticos, 10 559 240 bytes.
-Não prova nada sobre a rota nativa, que não foi exercitada aqui.
+Contra a corrida de referência da mesma árvore sem as mudanças: **morreu por OOM aos ~25 min sem
+chegar ao fim do tier, com o pai a 12,4 GB**.
+
+Uma corrida anterior, na mesma árvore mas **antes** de trazer a lane e com três outros agentes a
+compilar em simultâneo, deu 767 s com o mesmo veredicto de portão (1161 verdes) e uma falha de
+manifesto (M.3) que não era do código: o `teko.tkp:57` listava o `const_slice_of_str.tkr` que ainda
+vivia noutro ramo. Depois do merge da lane, essa falha desapareceu — 13 regressores, 0 falhas. A
+diferença de 767 s para 432 s é quase toda o `cc` do regrcov sob carga (400,8 s contra 102,1 s).
+
+FIXPOINT verificado **na rota C** (`TEKO_BACKEND=c`), cadeia de três gerações sobre a árvore
+fundida: `outB/teko.c` e `outC/teko.c` byte-idênticos, **10 572 426 bytes**. Os três builds da cadeia
+saíram sem um único aviso. **Não prova nada sobre a rota nativa**, que não foi exercitada aqui.
