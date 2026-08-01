@@ -2495,6 +2495,7 @@ fn lower_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | 
     if c.call_ns.len == 0 && is_err_loc_call(c.callee) { return lower_err_loc_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_err_typed_call(c.callee) { return lower_err_typed_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_f64_bitcast_call(c.callee) { return lower_f64_bitcast_call(ctx, c) }
+    if c.call_ns.len == 0 && is_buf_ptr_call(c.callee) { return lower_buf_ptr_call(ctx, e, c) }
     let sym = match call_symbol(c, ctx.externs, ctx.flat_symbols) { str as s => s; error as err => return err }
     if is_str_arg_builtin(sym) { return lower_str_arg_call(ctx, e, sym, c) }
     let lo = match lower_call_args(ctx, c) { LoweredArgs as x => x; error as err => return err }
@@ -3301,6 +3302,63 @@ fn lower_f64_bitcast_call(ctx: LowerCtx, c: checker::TCall) -> Lowered | error {
         return error { message = "native backend N1: `f64_bits`/`f64_from_bits` expects exactly one argument (internal)" }
     }
     lower_expr(ctx, c.args[0])
+}
+
+/**
+ * is_buf_ptr_call — recognizes `teko::mem::buf_ptr`'s bare last segment: the arena bump-allocate
+ * builtin that allocates `len` bytes into the enclosing region (0.3.1.0 degrau 26).
+ *
+ * `teko::mem::buf_ptr(len: u64) -> ptr<byte>` is intercepted BEFORE the plain `call_symbol`
+ * resolver table because the enclosing region may not be directly accessible at lowering time
+ * for the native backend (unlike C codegen, where `cg_enclosing_region_expr` tracks the open
+ * region frame stack). The native backend routes `buf_ptr` through `tk_region_alloc` with
+ * `tk_region_root()` as the allocation context.
+ *
+ * @param callee  the call's callee path
+ * @return        true iff `callee`'s bare last segment names `buf_ptr`
+ */
+fn is_buf_ptr_call(callee: parser::Path) -> bool {
+    let segs = callee.segments
+    segs.len > 0 && segs[segs.len - 1].name == "buf_ptr"
+}
+
+/**
+ * lower_buf_ptr_call — `teko::mem::buf_ptr(len: u64) -> ptr<byte>`: allocate `len` bytes into
+ * the current region (via `tk_region_root()`) and return the pointer. This is the enclosing-
+ * region twin of C codegen's `emit_buf_ptr`.
+ *
+ * The runtime call is:
+ *   `ptr<byte> result = tk_region_alloc(tk_region_root(), (size_t)(len))`
+ *
+ * We lower this to two `LCall` instructions:
+ *   1. Call `tk_region_root()` to get the current region handle
+ *   2. Call `tk_region_alloc(region, len)` to allocate within that region
+ *
+ * @param ctx  the lowering context
+ * @param e    the call expression (its type is `ptr<byte>`, its source position stamps the
+ *             emitted instructions)
+ * @param c    the call node (its one `u64` argument: the allocation size)
+ * @return Lowered | error  the advanced context plus the allocated pointer's VReg
+ * @throws  when the call's arity is not 1 (an invariant break — `checker::scope.tks`'s `buf_ptr`
+ *          signature already fixed it), or propagated from lowering the argument
+ */
+fn lower_buf_ptr_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | error {
+    if c.args.len != 1 {
+        return error { message = "native backend N1: `buf_ptr` expects exactly one u64 argument (internal)" }
+    }
+    // Lower the length argument
+    let len_lowered = match lower_expr(ctx, c.args[0]) { Lowered as x => x; error as err => return err }
+    
+    // Call tk_region_root() to get the current region
+    let region_vreg = ctx_alloc(len_lowered.ctx)
+    let with_region_call = ctx_append(region_vreg.ctx, call_inst(region_vreg.vreg, "tk_region_root", teko::list::empty(), false, e.line, e.col))
+    
+    // Call tk_region_alloc(region, len) to allocate
+    let result_vreg = ctx_alloc(with_region_call)
+    let alloc_args = two_args(region_vreg.vreg, len_lowered.vreg)
+    let with_alloc_call = ctx_append(result_vreg.ctx, call_inst(result_vreg.vreg, "tk_region_alloc", alloc_args, false, e.line, e.col))
+    
+    Lowered { ctx = with_alloc_call; vreg = result_vreg.vreg }
 }
 
 /**
