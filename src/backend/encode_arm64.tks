@@ -2636,6 +2636,22 @@ fn encode_rodata(rodata: []lir::LRodata) -> ModuleRodata | error {
         }
         bytes = append_bytes(bytes, rd.bytes)
         off = off + (rd.bytes.len to u32)
+        // Pad to 8-byte alignment between entries so pointer-bearing entries
+        // (fat slots with ptr+len pairs) always start at an 8-byte-aligned offset
+        // within __const.  Without this, string leaf bytes (e.g. "alpha" = 5
+        // bytes) push the next symbol to a non-8-aligned offset, and the Apple
+        // ARM64 linker rejects the unaligned pointer relocation
+        // (ld: pointer not aligned).  Skip padding after the last entry.
+        if i + 1 < rodata.len {
+            let aligned = align_up(off, 8)
+            mut pad: u32 = aligned - off
+            loop {
+                if pad == 0 { break }
+                bytes = teko::list::push(bytes, 0)
+                pad = pad - 1
+            }
+            off = aligned
+        }
         i++
     }
     ModuleRodata { bytes = bytes; syms = syms; relocs = relocs }
