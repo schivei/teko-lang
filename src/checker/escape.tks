@@ -350,11 +350,10 @@ pub fn fn_escaping_vars(f: TFunction) -> []str {
     acc
 }
 
-// binding_is_frame_local — does this binding's value allocate into the frame region? True iff
-// it is a `let`/`mut` to a SIMPLE name that is NOT in the escaping set AND whose value is a
-// struct-init (the only codegen allocation site that can be frame-routed — the auto-boxed
-// recursive back-edge). A `const`, a destructure, a discard (`_`), an escaping name, or any
-// non-struct-init value is NOT frame-local (→ allocates in root, the safe default). PUBLIC.
+// binding_is_frame_local — is this binding a SIMPLE non-escaping local whose storage may ride a
+// tighter-than-root region? A `const`, a destructure, a discard (`_`), or an escaping name is NOT
+// frame-local. Codegen still decides which concrete representations actually allocate in that
+// region (struct auto-box, boxed union payload, routed slice growth, ...). PUBLIC.
 pub fn binding_is_frame_local(escaping: []str, b: TBinding) -> bool {
     let name = match b.target {
         parser::SimpleName as sn => sn.name
@@ -363,10 +362,7 @@ pub fn binding_is_frame_local(escaping: []str, b: TBinding) -> bool {
     if name == "_" { return false }
     if b.kind == parser::BindKind::Const { return false }
     if str_set_has(escaping, name) { return false }
-    match b.value.kind {
-        TStructInit => true
-        _ => false
-    }
+    true
 }
 
 // (S2 Level-1) tcall_is_list_push — is this call `…::list::push(base, item)`, the one true grow
@@ -805,7 +801,7 @@ fn count_block_local_reads(body: []TStatement, name: str, is_value: bool) -> i64
 
 // binding_is_block_local — may binding `b` (declared at the TOP LEVEL of block B, whose enclosing
 // function body is `fn_body`, and which yields a value iff `is_value`) be freed at B's exit edges?
-// True iff binding_is_frame_local holds (struct-init, simple non-escaping name) AND every textual
+// True iff binding_is_frame_local holds (simple non-escaping name) AND every textual
 // read of the name in the WHOLE function is a SAFE non-tail/non-assign read strictly inside B.
 // CONSERVATIVE: any read outside B, in B's tail value, or as an assignment RHS ⇒ false ⇒ route to
 // the enclosing region (the W8/leak-safe default). PUBLIC — both codegen engines read it.

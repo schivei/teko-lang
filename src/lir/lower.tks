@@ -446,6 +446,8 @@ fn lbinop_int(op: lexer::TokenKind, signed: bool) -> LBinOp | error {
         lexer::TokenKind::Percent => if signed { LBinOp::IRemS } else { LBinOp::IRemU }
         lexer::TokenKind::Amp => LBinOp::IAnd
         lexer::TokenKind::Pipe => LBinOp::IOr
+        lexer::TokenKind::AndAnd => LBinOp::IAnd
+        lexer::TokenKind::OrOr => LBinOp::IOr
         lexer::TokenKind::Caret => LBinOp::IXor
         lexer::TokenKind::Shl => LBinOp::IShl
         lexer::TokenKind::Shr => if signed { LBinOp::IShrS } else { LBinOp::IShrU }
@@ -1613,6 +1615,17 @@ fn builtin_arena_symbol(last: str) -> str | null {
     null
 }
 
+fn builtin_str_symbol(last: str) -> str | null {
+    if last == "char_at" { return "tk_char_at" }
+    if last == "str_slice_chars" { return "tk_str_slice_chars" }
+    if last == "is_alpha" { return "tk_is_alpha" }
+    if last == "is_digit" { return "tk_is_digit" }
+    if last == "is_space" { return "tk_is_space" }
+    if last == "to_lower" { return "tk_to_lower" }
+    if last == "to_upper" { return "tk_to_upper" }
+    null
+}
+
 /**
  * assert_seed_symbol — the C ASSERT SEED symbol a `teko::assert::<name>` call lowers to when the
  * program does not declare `teko::assert` itself (`src/assert/assert.c` realizes the trio as
@@ -1642,9 +1655,9 @@ fn assert_seed_symbol(callee: parser::Path) -> str | null {
 
 /**
  * native_builtin_symbol — the runtime symbol an ADDRESSABLE bare builtin lowers to, across the
- * three families the N1 call path resolves DIRECTLY: io/process, coverage sinks and arena
- * checkpoints. Split into one predicate per family so a family grows without lengthening the
- * others.
+ * four families the N1 call path resolves DIRECTLY: io/process, coverage sinks, arena
+ * checkpoints, and the runtime-backed string/char helpers. Split into one predicate per family so
+ * a family grows without lengthening the others.
  *
  * @param last  the call path's LAST segment (the bare builtin name)
  * @return      the `tk_*` runtime symbol, or `null` when `last` names no directly-lowered builtin
@@ -1652,7 +1665,8 @@ fn assert_seed_symbol(callee: parser::Path) -> str | null {
 fn native_builtin_symbol(last: str) -> str | null {
     match builtin_io_symbol(last) { str as s => return s; null => { } }
     match builtin_cov_symbol(last) { str as s => return s; null => { } }
-    builtin_arena_symbol(last)
+    match builtin_arena_symbol(last) { str as s => return s; null => { } }
+    builtin_str_symbol(last)
 }
 
 /**
@@ -3928,7 +3942,7 @@ fn variant_member_named(member: checker::Type, case_name: str) -> bool {
     match member {
         checker::Named as n => checker::name_last_segment(n.name) == case_name
         checker::Error => case_name == error_struct_name()
-        _ => false
+        _ => checker::type_mangle(member) == case_name
     }
 }
 
@@ -5264,12 +5278,25 @@ fn lower_list_push(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall, sym: st
     if cl.args.len != 2 { return error { message = "native backend N1: `teko::list::push` expects (slice, item) (internal)" } }
     let elem = match push_elem_type(e, cl) { checker::Type as t => t; error as err => return err }
     if is_fat_type(elem) { return fat_element_push_stop() }
-    if !is_register_value_type(elem, ctx.enums) { return aggregate_element_push_stop() }
+    let aggregate = !is_register_value_type(elem, ctx.enums)
+    if aggregate {
+        match push_aggregate_size(elem, ctx.layouts) {
+            u32 => { }
+            error as err => return err
+        }
+    }
     let elem_lt = ltype_of(elem, ctx.enums)
     if ltype_size(elem_lt) == 0 { return error { message = "native backend N1: `teko::list::push` of a `void`-sized element (internal)" } }
     let base = match lower_fat_expr(ctx, cl.args[0]) { LoweredFat as x => x; error as err => return err }
     let item = match lower_expr(base.ctx, cl.args[1]) { Lowered as x => x; error as err => return err }
-    let slots = reserve_push_slots(item.ctx, item.vreg, elem_lt, e)
+    let slots = if aggregate {
+        match push_aggregate_size(elem, item.ctx.layouts) {
+            u32 as size => reserve_push_addr_slots(item.ctx, item.vreg, size, e)
+            error as err => return err
+        }
+    } else {
+        reserve_push_slots(item.ctx, item.vreg, elem_lt, e)
+    }
     let args = push_call_args(base.ptr, base.len, slots.item_slot, slots.esz, slots.len_slot)
     let called = ctx_alloc(slots.ctx)
     let with_call = ctx_append(called.ctx, call_inst(called.vreg, sym, args, false, e.line, e.col))
@@ -5309,6 +5336,20 @@ fn aggregate_element_push_stop() -> error {
     error { message = "native backend N1: a push whose element is an AGGREGATE (`struct`/`class`/variant/optional/closure) needs slice elements held BY VALUE — this backend's aggregate value is the address of a per-INSTRUCTION frame slot, so a push in a loop would store the same address every iteration (N2)" }
 }
 
+fn push_aggregate_size(t: checker::Type, layouts: []LStructLayout) -> u32 | error {
+    match t {
+        checker::Named as n => match find_known_struct_layout(layouts, n.name) {
+            LStructLayout as l => l.size
+            null => aggregate_element_push_stop()
+        }
+        checker::Error => match find_known_struct_layout(layouts, error_struct_name()) {
+            LStructLayout as l => l.size
+            null => aggregate_element_push_stop()
+        }
+        _ => aggregate_element_push_stop()
+    }
+}
+
 /**
  * is_register_value_type — is a value of type `t` a SELF-CONTAINED register value, as opposed to
  * the address of a frame slot this backend may reuse? True for the primitives (every integer,
@@ -5325,6 +5366,7 @@ fn aggregate_element_push_stop() -> error {
 fn is_register_value_type(t: checker::Type, enums: []LEnumInfo) -> bool {
     match t {
         checker::Prim => true
+        checker::Byte => true
         checker::Named as n => match find_enum_info(enums, n.name) { LEnumInfo => true; null => false }
         _ => false
     }
@@ -5410,6 +5452,14 @@ fn reserve_push_slots(ctx: LowerCtx, item: u32, elem_lt: LType, e: checker::TExp
     let lslot = ctx_alloc(with_esz)
     let with_lslot = ctx_append(lslot.ctx, alloca_inst(lslot.vreg, ltype_size(LType::I64), ltype_align(LType::I64), e.line, e.col))
     PushSlots { ctx = with_lslot; item_slot = islot.vreg; esz = esz.vreg; len_slot = lslot.vreg }
+}
+
+fn reserve_push_addr_slots(ctx: LowerCtx, item_addr: u32, elem_size: u32, e: checker::TExpr) -> PushSlots {
+    let esz = ctx_alloc(ctx)
+    let with_esz = ctx_append(esz.ctx, const_int_inst(esz.vreg, elem_size to i64, e.line, e.col))
+    let lslot = ctx_alloc(with_esz)
+    let with_lslot = ctx_append(lslot.ctx, alloca_inst(lslot.vreg, ltype_size(LType::I64), ltype_align(LType::I64), e.line, e.col))
+    PushSlots { ctx = with_lslot; item_slot = item_addr; esz = esz.vreg; len_slot = lslot.vreg }
 }
 
 /**

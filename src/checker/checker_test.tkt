@@ -786,6 +786,29 @@ fn block_local_read_only_inside_block_is_block_local() {
     teko::assert::is_true(binding_is_block_local(esc, f.body, loopbody, false, binding))
 }
 
+#test
+fn block_local_boxed_union_binding_is_block_local() {
+    mut members: []Type = teko::list::push(teko::list::empty(), Null { })
+    members = teko::list::push(members, Named { name = "Node" })
+    let union_t: Type = Variant { members = members }
+    let binding = TBinding {
+        kind = parser::BindKind::Let
+        target = parser::SimpleName { name = "n" }
+        bound = union_t
+        value = t_node_init(tnum(5))
+    }
+    mut loopbody: []TStatement = teko::list::push(teko::list::empty(), binding)
+    loopbody = teko::list::push(loopbody, t_let("g", t_field_i64("n", "val")))
+    loopbody = teko::list::push(loopbody, TBreakStmt { label = "" })
+    let loopstmt = TLoopStmt { label = ""; init = teko::list::empty(); body = loopbody }
+    mut body: []TStatement = teko::list::push(teko::list::empty(), t_let("t", t_node_init(tnum(0))))
+    body = teko::list::push(body, loopstmt)
+    body = teko::list::push(body, treturn(t_field_i64("t", "val")))
+    let f = plainfn("f", i64t(), body)
+    let esc = fn_escaping_vars(f)
+    teko::assert::is_true(binding_is_block_local(esc, f.body, loopbody, false, binding))
+}
+
 // --- MEM Step 1 UAF FIX #2 regression: a SCALAR read through a BOXED HOP (`a.b.y`) escapes ---
 // The scalar non-escaping refinement is SOUND ONLY for a scalar field of a BARE local (a stack
 // member). `a.b.y` reads a scalar `.y` but THROUGH `a.b` — a boxed (recursive) field that is a

@@ -4767,7 +4767,7 @@ fn emit_stmt_value(buf: []byte, prog: CgProg, ret_type: checker::Type, s: checke
 // enclosing region before its non-tail siblings are freed (never a UAF). No block-local binding ⇒ no
 // region ⇒ byte-identical to the pre-W9 value-branch output. (C: `emit_branch_value`.)
 fn emit_branch_value(buf: []byte, prog: CgProg, ret_type: checker::Type, body: []checker::TStatement, slot: checker::Type, sink: str, indent: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
-    let want_block = cg_block_has_block_local(escaping, fn_body, body, true) && regions.len < 64
+    let want_block = cg_block_has_block_local(prog, escaping, fn_body, body, true) && regions.len < 64
     if !want_block {
         // No block-local binding: emit exactly as the pre-W9 path (no region), but with live context.
         // (W9.3) If the branch has its OWN top-level `defer`, register it and fire it AFTER the tail is
@@ -5107,7 +5107,7 @@ fn emit_variant_wrap(buf: []byte, prog: CgProg, ret_type: checker::Type, expecte
                     checker::TNullLit => return cb(buf, "0")
                     _ => {
                         if cg_mangle_eq(expected, value.type) { return emit_expr_ret(buf, prog, ret_type, value) }
-                        return cg_emit_box_construct(buf, prog, ret_type, bx, value, escaping, regions, fn_body, dctx)
+                        return cg_emit_box_construct(buf, prog, ret_type, bx, value, "", escaping, regions, fn_body, dctx)
                     }
                 }
             }
@@ -5868,15 +5868,16 @@ fn cg_slice_param_type(prog: CgProg, slt: parser::SliceType, arg_type: checker::
 /**
  * cg_emit_box_construct — emit the BOX-IN-ARENA construction of a non-null union payload: bump-alloc
  * one arena cell for `inner`, copy the coerced value into it, and yield the cell handle, as a GNU
- * statement-expression `({ <inner> *_ubxN = tk_region_alloc(tk_region_root(), sizeof(<inner>)); *_ubxN
- * = (<value>); _ubxN; })`. The result is the 8-byte handle stored in a boxed `T | null` slot; the
- * `null` case never calls this (it emits a bare `0`, zero heap). The cell rides the root region
- * (leak-to-root, batch-safe — mem-model-empirical), matching the closure-env arena idiom.
+ * statement-expression `({ <inner> *_ubxN = tk_region_alloc(<region>, sizeof(<inner>)); *_ubxN =
+ * (<value>); _ubxN; })`. The result is the 8-byte handle stored in a boxed `T | null` slot; the
+ * `null` case never calls this (it emits a bare `0`, zero heap). When `box_region` is empty the
+ * cell rides the root region; otherwise it rides the caller-selected local region.
  *
  * @param prog      the typed program
  * @param ret_type  the enclosing return type (threaded for a diverging value-form inside `value`)
  * @param inner     the resolved boxed payload type `X` of the `X | null` union
  * @param value     the resolved payload expression being boxed
+ * @param box_region the chosen region name, or `""` for the root region
  * @param escaping  the escaping-binding set (region model)
  * @param regions   the active region frames
  * @param fn_body   the enclosing function body (defer/region resolution)
@@ -5904,18 +5905,20 @@ fn cg_emit_inline_null(buf: []byte, expected: checker::Type) -> []byte | error {
     cb(o, "0 }")
 }
 
-fn cg_emit_box_construct(buf: []byte, prog: CgProg, ret_type: checker::Type, inner: checker::Type, value: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+fn cg_emit_box_construct(buf: []byte, prog: CgProg, ret_type: checker::Type, inner: checker::Type, value: checker::TExpr, box_region: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
     let bxN = fresh_named("_ubx", buf.len to i64)
     mut out = cb(buf, "({ ")
     out = match emit_type(out, prog, inner) { []byte as o => o; error as e => return e }
     out = cb(out, " *")
     out = cb(out, bxN)
-    out = cb(out, " = tk_region_alloc(tk_region_root(), sizeof(")
+    out = cb(out, " = tk_region_alloc(")
+    out = cb(out, if box_region.len > 0 { box_region } else { "tk_region_root()" })
+    out = cb(out, ", sizeof(")
     out = match emit_type(out, prog, inner) { []byte as o => o; error as e => return e }
     out = cb(out, ")); *")
     out = cb(out, bxN)
     out = cb(out, " = ")
-    out = match emit_as_r(out, prog, ret_type, inner, value, escaping, regions, fn_body, dctx) { []byte as o => o; error as e => return e }
+    out = match emit_as_r_in(out, prog, ret_type, inner, value, box_region, escaping, regions, fn_body, dctx) { []byte as o => o; error as e => return e }
     out = cb(out, "; ")
     out = cb(out, bxN)
     cb(out, "; })")
@@ -5941,6 +5944,10 @@ fn cg_emit_box_construct(buf: []byte, prog: CgProg, ret_type: checker::Type, inn
  * @return          the buffer with the representation-correct wrapped value appended
  */
 fn emit_as_r(buf: []byte, prog: CgProg, ret_type: checker::Type, expected: checker::Type, value: checker::TExpr, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    emit_as_r_in(buf, prog, ret_type, expected, value, "", escaping, regions, fn_body, dctx)
+}
+
+fn emit_as_r_in(buf: []byte, prog: CgProg, ret_type: checker::Type, expected: checker::Type, value: checker::TExpr, box_region: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
     match expected {
         checker::Reference => {
             match value.type {
@@ -5972,7 +5979,7 @@ fn emit_as_r(buf: []byte, prog: CgProg, ret_type: checker::Type, expected: check
                     checker::TNullLit => return cb(buf, "0")
                     _ => {
                         if cg_mangle_eq(expected, value.type) { return emit_expr_ctx(buf, prog, ret_type, value, escaping, regions, fn_body, dctx) }
-                        return cg_emit_box_construct(buf, prog, ret_type, bx, value, escaping, regions, fn_body, dctx)
+                        return cg_emit_box_construct(buf, prog, ret_type, bx, value, box_region, escaping, regions, fn_body, dctx)
                     }
                 }
             }
@@ -6010,7 +6017,7 @@ fn emit_as_r(buf: []byte, prog: CgProg, ret_type: checker::Type, expected: check
                             mut o1 = cb(buf, "(")
                             o1 = match cg_opt_typename(o1, opt.inner) { []byte as o => o; error as err => return err }
                             o1 = cb(o1, "){ .present = true, .value = ")
-                            o1 = match emit_as_r(o1, prog, ret_type, opt.inner, value, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+                            o1 = match emit_as_r_in(o1, prog, ret_type, opt.inner, value, box_region, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
                             return cb(o1, " }")
                         }
                     }
@@ -6780,7 +6787,7 @@ fn emit_arm_value(buf: []byte, prog: CgProg, ret_type: checker::Type, match_e: c
     // `sink` (enclosing) FIRST, then the region drops BEFORE the `break`. No block-local ⇒ no region ⇒
     // byte-identical to the pre-W9 value-arm output. (C: emit_arm_value.)
     let base = dctx.defers.len   // (W9.3) defer scope base for this value-arm
-    let want_block = cg_block_has_block_local(escaping, fn_body, body, true) && regions.len < 64
+    let want_block = cg_block_has_block_local(prog, escaping, fn_body, body, true) && regions.len < 64
     let region = if want_block { fresh_named("_tkbr", buf.len to i64) } else { "" }
     let regs2 = if want_block { teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = base }) } else { regions }
     let cur_blk = if want_block { body } else { teko::list::empty() }
@@ -7458,16 +7465,31 @@ fn cg_drop_all_regions(buf: []byte, indent: str, regions: []RegionFrame) -> []by
     out
 }
 
-// cg_block_has_block_local — does loop body B have any TOP-LEVEL binding proven BLOCK-local (no-wrap,
-// block-routable)? Drives whether emit_loop opens a region — none ⇒ no region ⇒ byte-identical to
+fn cg_binding_routes_box_to_local_region(prog: CgProg, b: checker::TBinding) -> bool {
+    match b.bound {
+        checker::Variant as va => match cg_union_box_member(prog, va) {
+            checker::Type => match b.value.kind {
+                checker::TNullLit => false
+                _ => !cg_mangle_eq(b.bound, b.value.type)
+            }
+            null => false
+        }
+        _ => false
+    }
+}
+
+// cg_block_has_block_local — does loop body B have any TOP-LEVEL binding proven BLOCK-local and
+// region-routable? Drives whether emit_loop opens a region — none ⇒ no region ⇒ byte-identical to
 // the pre-S2 output for that loop. `is_value` = whether B yields a value (loop bodies do NOT).
-fn cg_block_has_block_local(escaping: []str, fn_body: []checker::TStatement, block: []checker::TStatement, is_value: bool) -> bool {
+fn cg_block_has_block_local(prog: CgProg, escaping: []str, fn_body: []checker::TStatement, block: []checker::TStatement, is_value: bool) -> bool {
     mut i: u64 = 0
     loop {
         if i >= block.len { break }
         match block[i] {
             checker::TBinding as b => {
-                if cg_same_named_struct(b.bound, b.value.type) && checker::binding_is_block_local(escaping, fn_body, block, is_value, b) { return true }
+                if checker::binding_is_block_local(escaping, fn_body, block, is_value, b) {
+                    if cg_same_named_struct(b.bound, b.value.type) || cg_binding_routes_box_to_local_region(prog, b) { return true }
+                }
             }
             _ => { }
         }
@@ -7517,7 +7539,7 @@ fn emit_block_region(buf: []byte, body: []checker::TStatement, in_main: bool, pr
     // defer count at arm entry; the fall-through fires `[base, base+direct)` LIFO.
     let base = dctx.defers.len
     let fall = cg_append_direct_defers(dctx.defers, body)   // all of THIS arm's direct defers, in scope at fall-through
-    let want_block = cg_block_has_block_local(escaping, fn_body, body, false) && regions.len < 64
+    let want_block = cg_block_has_block_local(prog, escaping, fn_body, body, false) && regions.len < 64
     if !want_block {
         // No S2 region — region-less defer-only scope: emit the body, then fire the arm's defers at fall-through.
         mut out = match emit_block(buf, body, in_main, prog, ret_type, indent, escaping, regions, fn_body, dctx, teko::list::empty(), false) { []byte as o => o; error as err => return err }
@@ -7742,7 +7764,8 @@ fn emit_binding(buf: []byte, prog: CgProg, ret_type: checker::Type, b: checker::
     // bypassing emit_as_r. We take this bypass ONLY when NO variant/optional wrapping is needed —
     // the declared type `b.bound` is the SAME named STRUCT as the value's type (e.g. `let n = Node{…}`,
     // not `let p: Pattern = LiteralPattern{…}`). When a wrap is needed we fall through to the generic
-    // emit_as_r path (root alloc — a SAFE leak), so a variant-typed binding is never mis-emitted.
+    // wrapping path, which now also routes boxed-union payloads into the same local region when the
+    // binding is proven local.
     // The value never escapes, so freeing it at function exit is safe.
     // S2 — BLOCK-LOCAL routing TAKES PRECEDENCE: when this binding sits in a loop body that opened
     // its own region AND the per-block escape check proved it block-local, route its auto-box to the
@@ -7766,10 +7789,17 @@ fn emit_binding(buf: []byte, prog: CgProg, ret_type: checker::Type, b: checker::
             _ => { }
         }
     }
+    let box_region = if regions.len > 0 && cur_block.len > 0 && checker::binding_is_block_local(escaping, fn_body, cur_block, cur_block_is_value, b) && cg_binding_routes_box_to_local_region(prog, b) {
+        regions[regions.len - 1].name
+    } else if frame.len > 0 && checker::binding_is_frame_local(escaping, b) && cg_binding_routes_box_to_local_region(prog, b) {
+        frame
+    } else {
+        ""
+    }
     // W5b — if the binding's declared type is a variant and the value is a case member, WRAP it into
     // the variant repr (`let s: Shape = Circle { … }`). emit_as_r threads ret_type so a value-form
     // `match`/`if` value with a diverging `return` arm wraps that return into the FUNCTION's slot.
-    out = match emit_as_r(out, prog, ret_type, b.bound, b.value, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = match emit_as_r_in(out, prog, ret_type, b.bound, b.value, box_region, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
     cb(out, ";\n")
 }
 
@@ -8103,7 +8133,7 @@ fn emit_loop_while(buf: []byte, l: checker::TLoopStmt, in_main: bool, prog: CgPr
     let base = dctx.defers.len
     let fall = cg_append_direct_defers(dctx.defers, l.body)   // all of this iteration's direct defers
     let dctx2 = DeferCtx { defers = dctx.defers; loops = teko::list::push(dctx.loops, LoopDeferFrame { label = l.label; defer_base = base }); cov = dctx.cov }
-    let want_block = cg_block_has_block_local(escaping, fn_body, l.body, false) && regions.len < 64
+    let want_block = cg_block_has_block_local(prog, escaping, fn_body, l.body, false) && regions.len < 64
     let region = if want_block { fresh_named("_tkbr", out.len to i64) } else { "" }
     mut regs2 = regions
     if want_block {
@@ -8634,16 +8664,16 @@ fn cg_same_named_struct(a: checker::Type, b: checker::Type) -> bool {
 }
 
 // fn_body_has_frame_local — does this body have any TOP-LEVEL binding the escape check proved
-// frame-local AND routable (no-wrap, same-named-struct)? (MEM Step 1 routes only top-level
+// frame-local AND routable? (MEM Step 1 routes only top-level
 // bindings; sub-scope bindings stay on root in this first cut.) Drives whether emit_function opens
 // a frame region at all — none ⇒ no region ⇒ zero output change (the fixpoint-preserving default).
-fn fn_body_has_frame_local(escaping: []str, body: []checker::TStatement) -> bool {
+fn fn_body_has_frame_local(prog: CgProg, escaping: []str, body: []checker::TStatement) -> bool {
     mut i: u64 = 0
     loop {
         if i >= body.len { break }
         match body[i] {
             checker::TBinding as b => {
-                if checker::binding_is_frame_local(escaping, b) && cg_same_named_struct(b.bound, b.value.type) { return true }
+                if checker::binding_is_frame_local(escaping, b) && (cg_same_named_struct(b.bound, b.value.type) || cg_binding_routes_box_to_local_region(prog, b)) { return true }
                 // (S2 Level-1) a NON-escaping slice binding: its buffer is built by later self-append
                 // pushes (`xs = push(xs, …)`), each routed to `_tkfr` and bulk-freed on the frame drop.
                 if checker::binding_is_frame_local_slice(escaping, b) { return true }
@@ -8908,7 +8938,7 @@ fn emit_function_cov(buf: []byte, prog: CgProg, f: checker::TFunction, cov_idx: 
     // return edges (emit_return / emit_exprstmt_tail) and at the fall-through end. A function with NO
     // frame-local binding gets NO region — zero bytes, byte-identical to the pre-Step-1 output.
     let escaping = checker::fn_escaping_vars(f)
-    let want_frame = fn_body_has_frame_local(escaping, fbody) || f.has_arena_size
+    let want_frame = fn_body_has_frame_local(prog, escaping, fbody) || f.has_arena_size
     let frame: str = if want_frame { "_tkfr" } else { "" }
     if want_frame {
         out = cb(out, "    tk_region *_tkfr = tk_region_new(")

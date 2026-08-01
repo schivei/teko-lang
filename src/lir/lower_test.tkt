@@ -212,6 +212,25 @@ fn lwt_ltype_of_maps_prims_to_machine_classes() {
     teko::assert::is_true(match ltype_of(lwt_prim(checker::PrimKind::Bool), teko::list::empty()) { I8 => true; _ => false })
 }
 
+#test
+fn lwt_is_register_value_type_treats_byte_as_scalar() {
+    teko::assert::is_true(is_register_value_type(checker::Byte { }, teko::list::empty()))
+}
+
+#test
+fn lwt_variant_member_named_accepts_primitive_case_names() {
+    teko::assert::is_true(variant_member_named(checker::Prim { kind = checker::PrimKind::U32 }, "u32"))
+    teko::assert::is_true(variant_member_named(checker::Byte { }, "byte"))
+    teko::assert::is_true(variant_member_named(checker::Char { }, "char"))
+}
+
+#test
+fn lwt_push_aggregate_size_accepts_registered_named_structs() {
+    let layout = LStructLayout { name = "Pair16"; size = 16 to u32; align = 8 to u32; field_names = teko::list::empty(); field_offsets = teko::list::empty(); field_types = teko::list::empty() }
+    let layouts = teko::list::push(teko::list::empty(), layout)
+    teko::assert::is_true(match push_aggregate_size(checker::Named { name = "Pair16" }, layouts) { u32 as n => n == (16 to u32); error => false })
+}
+
 /** lwt_binop_is — did lbinop_of return exactly `want` (not an error)? */
 fn lwt_binop_is(op: lexer::TokenKind, k: checker::PrimKind, want: LBinOp) -> bool {
     match lbinop_of(op, k) { LBinOp as o => o == want; error => false }
@@ -229,6 +248,8 @@ fn lwt_lbinop_of_picks_signedness_and_family() {
     teko::assert::is_true(lwt_binop_is(lexer::TokenKind::Slash, checker::PrimKind::U32, LBinOp::IDivU))
     teko::assert::is_true(lwt_binop_is(lexer::TokenKind::Percent, checker::PrimKind::I64, LBinOp::IRemS))
     teko::assert::is_true(lwt_binop_is(lexer::TokenKind::Plus, checker::PrimKind::F64, LBinOp::FAdd))
+    teko::assert::is_true(lwt_binop_is(lexer::TokenKind::AndAnd, checker::PrimKind::Bool, LBinOp::IAnd))
+    teko::assert::is_true(lwt_binop_is(lexer::TokenKind::OrOr, checker::PrimKind::Bool, LBinOp::IOr))
 }
 
 /**
@@ -2477,6 +2498,14 @@ fn lwt_call_symbol_resolves_the_assert_seed() {
     names = teko::list::push(names, "is_true")
     let no_ext: []LExternFn = teko::list::empty()
     teko::assert::is_true(match call_symbol(lwt_bare_call(names, ""), no_ext) { str as s => s == "teko__assert__is_true"; error => false })
+}
+
+#test
+fn lwt_call_symbol_resolves_runtime_string_builtins() {
+    let no_ext: []LExternFn = teko::list::empty()
+    teko::assert::is_true(match call_symbol(lwt_bare_call(teko::list::push(teko::list::empty(), "char_at"), ""), no_ext) { str as s => s == "tk_char_at"; error => false })
+    teko::assert::is_true(match call_symbol(lwt_bare_call(teko::list::push(teko::list::empty(), "str_slice_chars"), ""), no_ext) { str as s => s == "tk_str_slice_chars"; error => false })
+    teko::assert::is_true(match call_symbol(lwt_bare_call(teko::list::push(teko::list::empty(), "to_lower"), ""), no_ext) { str as s => s == "tk_to_lower"; error => false })
 }
 
 /**
