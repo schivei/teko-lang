@@ -448,6 +448,10 @@ void tk_eprint(tk_str s);
 void tk_eprintln(tk_str s);
 // teko::float::parse(str) -> f64 (strtod over a NUL-terminated copy; non-numeric → 0.0).
 double tk_float_parse(tk_str s);
+// Native backend bridge: tk_float_parse returning IEEE-754 bits as u64 (to work around LCall
+// result-class limitation). The native lowering intercepts teko::float::parse and routes through
+// this, then bitcasts the u64 back to f64 on the assignment side.
+uint64_t tk_rt_float_parse_bits(tk_str s);
 
 // --- string interpolation `$"…{expr}…"` builders (self-host parity) ---
 // These are EXTERN (linked from teko_rt.c), NOT static inline — both the generated C and

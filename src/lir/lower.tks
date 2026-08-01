@@ -2495,6 +2495,7 @@ fn lower_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | 
     if c.call_ns.len == 0 && is_err_loc_call(c.callee) { return lower_err_loc_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_err_typed_call(c.callee) { return lower_err_typed_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_f64_bitcast_call(c.callee) { return lower_f64_bitcast_call(ctx, c) }
+    if c.call_ns.len == 0 && is_float_parse_call(c.callee) { return lower_float_parse_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_buf_ptr_call(c.callee) { return lower_buf_ptr_call(ctx, e, c) }
     let sym = match call_symbol(c, ctx.externs, ctx.flat_symbols) { str as s => s; error as err => return err }
     if is_str_arg_builtin(sym) { return lower_str_arg_call(ctx, e, sym, c) }
@@ -3302,6 +3303,47 @@ fn lower_f64_bitcast_call(ctx: LowerCtx, c: checker::TCall) -> Lowered | error {
         return error { message = "native backend N1: `f64_bits`/`f64_from_bits` expects exactly one argument (internal)" }
     }
     lower_expr(ctx, c.args[0])
+}
+
+/**
+ * is_float_parse_call — recognizes `teko::float::parse`'s bare last segment:
+ * the IEEE-754 string-to-double parser builtin.
+ *
+ * `teko::float::parse(str) -> f64` is intercepted in `lower_call` BEFORE
+ * `call_symbol` because the result comes back in XMM0/D0 and LCall records no
+ * result class, so the native backend's result-register selector would
+ * silently corrupt the float value by reading from the integer register. The
+ * lowering routes through `tk_rt_float_parse_bits` which returns the IEEE-754
+ * payload as a u64 (general-purpose register), and the u64 is bitcasted back.
+ *
+ * @param callee  the call's callee path
+ * @return        true iff `callee`'s bare last segment names `parse`
+ */
+fn is_float_parse_call(callee: parser::Path) -> bool {
+    let segs = callee.segments
+    segs.len > 0 && segs[segs.len - 1].name == "parse"
+}
+
+/**
+ * lower_float_parse_call — `teko::float::parse(str) -> f64`: intercept the
+ * call and route through `tk_rt_float_parse_bits`, which wraps the standard
+ * float parser and returns IEEE-754 bits as a u64. The u64 result is then
+ * bitcasted back to f64 on the assignment side.
+ *
+ * @param ctx  the lowering context
+ * @param e    the call expression (its type is f64)
+ * @param c    the call node (one argument: a str)
+ * @return Lowered | error  the advanced context plus the call result VReg, or
+ *                          a NAMED internal error when the call's arity is not 1
+ */
+fn lower_float_parse_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | error {
+    if c.args.len != 1 {
+        return error { message = "native backend N1: `float::parse` expects exactly one argument (internal)" }
+    }
+    let fo = match lower_fat_expr(ctx, c.args[0]) { LoweredFat as x => x; error as err => return err }
+    let rr = ctx_alloc(fo.ctx)
+    let with_call = ctx_append(rr.ctx, call_inst(rr.vreg, "tk_rt_float_parse_bits", two_args(fo.ptr, fo.len), false, e.line, e.col))
+    Lowered { ctx = with_call; vreg = rr.vreg }
 }
 
 /**

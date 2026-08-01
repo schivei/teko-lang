@@ -2354,6 +2354,12 @@ double tk_float_parse(tk_str s) {
     return v;
 }
 
+uint64_t tk_rt_float_parse_bits(tk_str s) {
+    union { double f; uint64_t u; } bits;
+    bits.f = tk_float_parse(s);
+    return bits.u;
+}
+
 _Noreturn void tk_panic(const char *msg) {
     // Under CAPTURE (test mode only) this stops the TEST, not the process: the line lands in this
     // test's own channel and control returns to tk_test_run. `_Noreturn` stays honest — longjmp
