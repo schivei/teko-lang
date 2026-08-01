@@ -3347,6 +3347,42 @@ fn lower_float_parse_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -
 }
 
 /**
+ * is_bytes_from_ptr_call — recognizes `teko::mem::bytes_from_ptr`'s bare last segment: the
+ * slice-lift builtin that constructs a `[]byte` fat value from a raw pointer and a byte count.
+ *
+ * `bytes_from_ptr(ptr<byte>, u64) -> []byte` is intercepted in `lower_call_fat` BEFORE
+ * `call_symbol` because no runtime call is needed — the fat result is simply the two already-
+ * lowered arguments bound together as a `(ptr, len)` pair.
+ *
+ * @param callee  the call's callee path
+ * @return        true iff `callee`'s bare last segment names `bytes_from_ptr`
+ */
+fn is_bytes_from_ptr_call(callee: parser::Path) -> bool {
+    let segs = callee.segments
+    segs.len > 0 && segs[segs.len - 1].name == "bytes_from_ptr"
+}
+
+/**
+ * lower_bytes_from_ptr_call — `teko::mem::bytes_from_ptr(ptr, len) -> []byte`: identity fat-
+ * lift. Constructs the fat slice directly from the two already-lowered scalar arguments, with no
+ * runtime call at all (mirrors `lower_f64_bitcast_call`'s no-instruction identity philosophy).
+ *
+ * @param ctx  the lowering context
+ * @param c    the call node (two arguments: ptr<byte> and u64 len)
+ * @return LoweredFat | error  the advanced context plus the (ptr, len) pair, or a NAMED
+ *                             internal error when the call's arity is not 2
+ */
+fn lower_bytes_from_ptr_call(ctx: LowerCtx, c: checker::TCall) -> LoweredFat | error {
+    if c.args.len != 2 {
+        return error { message = "native backend N1: `bytes_from_ptr` expects exactly two arguments (internal)" }
+    }
+    let ptr_lowered = match lower_expr(ctx, c.args[0]) { Lowered as x => x; error as err => return err }
+    let len_lowered = match lower_expr(ptr_lowered.ctx, c.args[1]) { Lowered as x => x; error as err => return err }
+    LoweredFat { ctx = len_lowered.ctx; ptr = ptr_lowered.vreg; len = len_lowered.vreg }
+}
+}
+
+/**
  * is_buf_ptr_call — recognizes `teko::mem::buf_ptr`'s bare last segment: the arena bump-allocate
  * builtin that allocates `len` bytes into the enclosing region (0.3.1.0 degrau 26).
  *
@@ -9290,6 +9326,7 @@ fn lower_call_fat(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall) -> Lower
     if cl.call_ns.len == 0 && is_list_builtin_call(cl.callee) { return lower_list_builtin(ctx, e, cl) }
     if cl.call_ns.len == 0 && is_concat_builtin_call(cl.callee) { return lower_concat_call(ctx, e, cl) }
     if cl.call_ns.len == 0 && is_append_fo_call(cl.callee) { return lower_append_fo_call(ctx, e, cl) }
+    if cl.call_ns.len == 0 && is_bytes_from_ptr_call(cl.callee) { return lower_bytes_from_ptr_call(ctx, cl) }
     let sym = match call_symbol(cl, ctx.externs, ctx.flat_symbols) { str as s => s; error as err => return err }
     let lo = match lower_args(ctx, cl.args, callee_param_types(cl)) { LoweredArgs as x => x; error as err => return err }
     lower_len_out_call(lo.ctx, sym, lo.vregs, e)
