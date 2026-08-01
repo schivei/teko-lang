@@ -1700,6 +1700,16 @@ fn cgt_pair16_null() -> checker::Variant {
     cgt_var2(checker::Null { }, checker::Named { name = "Pair16" })
 }
 
+fn cgt_pair16_expr() -> checker::TExpr {
+    let names: []str = teko::list::push(teko::list::push(teko::list::empty(), "x"), "y")
+    let vals: []checker::TExpr = teko::list::push(teko::list::push(teko::list::empty(), cgt_num_i64(1)), cgt_num_i64(2))
+    checker::TExpr {
+        kind = checker::TStructInit { field_names = names; field_vals = vals }
+        type = checker::Named { name = "Pair16" }
+        line = 0; col = 0
+    }
+}
+
 /**
  * The `i32 | null` union — a saturating scalar < 16 bytes (the inline-tag class).
  *
@@ -1731,6 +1741,22 @@ fn cgt_union_repr_class_dial() {
     teko::assert::is_true(match union_repr_class(p, cgt_i32_null(), false) { UnionRepr::InlineTag => true; _ => false })
     teko::assert::is_true(match union_repr_class(p, cgt_ptr_null(), false) { UnionRepr::Niche => true; _ => false })
     teko::assert::is_true(match union_repr_class(p, cgt_ptr_null(), true) { UnionRepr::Niche => true; _ => false })
+}
+
+#test
+fn cgt_boxed_union_wrap_uses_requested_local_region() {
+    let p = cgt_prog_with_pair16()
+    let expected: checker::Type = cgt_pair16_null()
+    let wrapped = match emit_as_r_in(cgt_empty(), p, checker::Void { }, expected, cgt_pair16_expr(), "_tkbr0", teko::list::empty(), teko::list::empty(), teko::list::empty(), dctx_empty()) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(teko::str::contains(wrapped, "tk_region_alloc(_tkbr0, sizeof("))
+}
+
+#test
+fn cgt_boxed_union_wrap_defaults_to_root_region() {
+    let p = cgt_prog_with_pair16()
+    let expected: checker::Type = cgt_pair16_null()
+    let wrapped = match emit_as_r(cgt_empty(), p, checker::Void { }, expected, cgt_pair16_expr(), teko::list::empty(), teko::list::empty(), teko::list::empty(), dctx_empty()) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(teko::str::contains(wrapped, "tk_region_alloc(tk_region_root(), sizeof("))
 }
 
 /**
