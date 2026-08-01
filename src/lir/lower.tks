@@ -4070,6 +4070,21 @@ fn bind_payload_at8(ctx: LowerCtx, base: u32, ty: LType, binding: str) -> LowerC
     ctx_bind(with_load, binding, r.vreg)
 }
 
+fn bind_payload_at8_type(ctx: LowerCtx, base: u32, payload: checker::Type, binding: str) -> LowerCtx {
+    if is_fat_type(payload) {
+        let paddr = ctx_alloc(ctx)
+        let with_paddr = ctx_append(paddr.ctx, field_addr_inst(paddr.vreg, base, 8, 0, 0))
+        let pr = ctx_alloc(with_paddr)
+        let with_ptr = ctx_append(pr.ctx, load_inst(pr.vreg, paddr.vreg, LType::Ptr, 0, 0))
+        let laddr = ctx_alloc(with_ptr)
+        let with_laddr = ctx_append(laddr.ctx, field_addr_inst(laddr.vreg, base, 8 + ltype_size(LType::Ptr), 0, 0))
+        let lr = ctx_alloc(with_laddr)
+        let with_len = ctx_append(lr.ctx, load_inst(lr.vreg, laddr.vreg, LType::I64, 0, 0))
+        return ctx_bind_fat(with_len, binding, pr.vreg, lr.vreg)
+    }
+    bind_payload_at8(ctx, base, ltype_of(payload, ctx.enums), binding)
+}
+
 /**
  * bind_null_union_payload — `X as x` over a null-bearing two-member union subject: `x` binds
  * the payload loaded at the fixed offset 8, of the payload type's own machine class. Needs no
@@ -4084,7 +4099,7 @@ fn bind_payload_at8(ctx: LowerCtx, base: u32, ty: LType, binding: str) -> LowerC
  * @since 0.3.1 (null-union C7 own-backend gap — wasm_panic_hook)
  */
 fn bind_null_union_payload(ctx: LowerCtx, subj: MatchSubj, payload: checker::Type, binding: str) -> LowerCtx {
-    bind_payload_at8(ctx, subj.vreg, ltype_of(payload, ctx.enums), binding)
+    bind_payload_at8_type(ctx, subj.vreg, payload, binding)
 }
 
 /**
@@ -4128,14 +4143,13 @@ fn lower_null_pattern_test(ctx: LowerCtx, subj: MatchSubj, line: u32, col: u32) 
  * @since 0.3.1 (null-union C7 own-backend gap — wasm_panic_hook)
  */
 fn lower_null_union_construct(ctx: LowerCtx, payload: checker::Type, e: checker::TExpr) -> Lowered | error {
-    let pty = ltype_of(payload, ctx.enums)
-    let align = variant_wrapper_align(pty)
-    let size = (8 to u32) + ltype_size(pty)
+    let align = variant_wrapper_align_type(payload, ctx.enums)
+    let size = (8 to u32) + variant_payload_size(payload, ctx.enums)
     let base = ctx_alloc(ctx)
     let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, size, align, e.line, e.col))
     match e.kind {
         checker::TNullLit => store_variant_tag(with_alloca, base.vreg, 0, e.line, e.col)
-        _ => store_variant_payload(with_alloca, base.vreg, 1, pty, e)
+        _ => store_variant_payload_type(with_alloca, base.vreg, 1, payload, e)
     }
 }
 
@@ -4159,12 +4173,11 @@ fn lower_null_union_construct(ctx: LowerCtx, payload: checker::Type, e: checker:
  */
 fn lower_variant_construct(ctx: LowerCtx, v: checker::Variant, value: checker::TExpr) -> Lowered | error {
     let index = match variant_member_index_of(v.members, value.type) { u32 as x => x; error as e => return e }
-    let pty = ltype_of(value.type, ctx.enums)
-    let align = variant_wrapper_align(pty)
-    let size = (8 to u32) + ltype_size(pty)
+    let align = variant_wrapper_align_type(value.type, ctx.enums)
+    let size = (8 to u32) + variant_payload_size(value.type, ctx.enums)
     let base = ctx_alloc(ctx)
     let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, size, align, value.line, value.col))
-    store_variant_payload(with_alloca, base.vreg, index to i64, pty, value)
+    store_variant_payload_type(with_alloca, base.vreg, index to i64, value.type, value)
 }
 
 /**
@@ -4179,6 +4192,16 @@ fn lower_variant_construct(ctx: LowerCtx, v: checker::Variant, value: checker::T
 fn variant_wrapper_align(pty: LType) -> u32 {
     let pa = ltype_align(pty)
     if pa > (4 to u32) { pa } else { 4 to u32 }
+}
+
+fn variant_wrapper_align_type(payload: checker::Type, enums: []LEnumInfo) -> u32 {
+    let pa = if is_fat_type(payload) { ltype_align(LType::Ptr) } else { ltype_align(ltype_of(payload, enums)) }
+    if pa > (4 to u32) { pa } else { 4 to u32 }
+}
+
+fn variant_payload_size(payload: checker::Type, enums: []LEnumInfo) -> u32 {
+    if is_fat_type(payload) { return fat_slot_bytes() }
+    ltype_size(ltype_of(payload, enums))
 }
 
 /**
@@ -4223,6 +4246,19 @@ fn store_variant_payload(ctx: LowerCtx, base: u32, index: i64, pty: LType, e: ch
     let with_paddr = ctx_append(paddr.ctx, field_addr_inst(paddr.vreg, base, 8, e.line, e.col))
     let with_pstore = ctx_append(with_paddr, store_inst(paddr.vreg, vo.vreg, pty, e.line, e.col))
     Lowered { ctx = with_pstore; vreg = base }
+}
+
+fn store_variant_payload_type(ctx: LowerCtx, base: u32, index: i64, payload: checker::Type, e: checker::TExpr) -> Lowered | error {
+    if !is_fat_type(payload) { return store_variant_payload(ctx, base, index, ltype_of(payload, ctx.enums), e) }
+    let tagged = store_variant_tag(ctx, base, index, e.line, e.col)
+    let fo = match lower_fat_expr(tagged.ctx, e) { LoweredFat as x => x; error as err => return err }
+    let paddr = ctx_alloc(fo.ctx)
+    let with_paddr = ctx_append(paddr.ctx, field_addr_inst(paddr.vreg, base, 8, e.line, e.col))
+    let with_pstore = ctx_append(with_paddr, store_inst(paddr.vreg, fo.ptr, LType::Ptr, e.line, e.col))
+    let laddr = ctx_alloc(with_pstore)
+    let with_laddr = ctx_append(laddr.ctx, field_addr_inst(laddr.vreg, base, 8 + ltype_size(LType::Ptr), e.line, e.col))
+    let with_lstore = ctx_append(with_laddr, store_inst(laddr.vreg, fo.len, LType::I64, e.line, e.col))
+    Lowered { ctx = with_lstore; vreg = base }
 }
 
 /**
@@ -4284,7 +4320,38 @@ fn enum_member_ordinal(ei: LEnumInfo, member: str) -> u32 | error {
  * @param parser::BindPattern bp  the pattern to read the case name from
  * @return str  the type path's last segment name
  */
+fn texpr_case_mangle(te: parser::TypeExpr) -> str {
+    match te {
+        parser::NamedType as nt => {
+            let base = nt.path.segments[nt.path.segments.len - 1].name
+            if nt.args.len == 0 { return base }
+            mut out = teko::str::concat(base, "__g__")
+            mut i: u64 = 0
+            loop {
+                if i >= nt.args.len { break }
+                if i > 0 { out = teko::str::concat(out, "__") }
+                out = teko::str::concat(out, texpr_case_mangle(nt.args[i]))
+                i++
+            }
+            out
+        }
+        parser::SliceType as st => teko::str::concat("slice_", texpr_case_mangle(st.element))
+        parser::OptionalType as ot => teko::str::concat("opt_", texpr_case_mangle(ot.inner))
+        parser::UnionType => "variant"
+        parser::FunctionType => "func"
+    }
+}
+
 fn bind_pattern_case_name(bp: parser::BindPattern) -> str {
+    if bp.is_slice {
+        match bp.slice_type {
+            parser::TypeExpr as st => return texpr_case_mangle(st)
+            null => return "variant"
+        }
+    }
+    if bp.type_args.len > 0 {
+        return texpr_case_mangle(parser::NamedType { path = bp.type_name; args = bp.type_args })
+    }
     let segs = bp.type_name.segments
     segs[segs.len - 1].name
 }
@@ -4503,7 +4570,6 @@ fn str_pattern_byte_eq(ctx: LowerCtx, subj: MatchSubj, want: byte, index: u32, l
  * @throws  for a slice pattern, or an unresolvable variant case name
  */
 fn lower_bind_pattern_test(ctx: LowerCtx, subj: MatchSubj, bp: parser::BindPattern, line: u32, col: u32) -> PatternTest | error {
-    if bp.is_slice { return error { message = "native backend N1: slice match pattern not yet lowered (N2)" } }
     match subj.ty {
         checker::Variant as v => lower_variant_bind_pattern_test(ctx, subj, v, bp, line, col)
         checker::Named as n => lower_named_bind_pattern_test(ctx, subj, n, bp, line, col)
@@ -4698,7 +4764,7 @@ fn bind_whole_subject(ctx: LowerCtx, subj: MatchSubj, name: str) -> LowerCtx {
  */
 fn lower_variant_case_bind(ctx: LowerCtx, subj: MatchSubj, members: []checker::Type, case_name: str, binding: str) -> LowerCtx | error {
     let vm = match find_variant_member(members, case_name) { VariantMember as x => x; error as err => return err }
-    bind_payload_at8(ctx, subj.vreg, ltype_of(vm.ty, ctx.enums), binding)
+    bind_payload_at8_type(ctx, subj.vreg, vm.ty, binding)
 }
 
 /**
@@ -4959,6 +5025,44 @@ fn lower_match_value(ctx: LowerCtx, e: checker::TExpr, m: checker::TMatchExpr, s
     Lowered { ctx = ctx_with(with_zero, closed, mergeb.block_id, merged.env); vreg = mp.vreg }
 }
 
+fn lower_match_arm_fat(ctx: LowerCtx, e: checker::TExpr, arm: checker::TArm, subj: MatchSubj, merge_id: u32, names: []str) -> LowerCtx | error {
+    let indices = merge_scalar_indices(ctx.env, names)
+    let step = match lower_match_arm_entry(ctx, e, arm, subj) { MatchArmEntry as x => x; error as err => return err }
+    let bv = match lower_block_value_fat(step.ctx, arm.body) { LowerBlockValueFat as x => x; error as err => return err }
+    let closed = match close_arm_replaying_defers(bv.ctx, ctx.defers, merge_id, merge_fat_value_args(bv.ptr, bv.len), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    ctx_with(closed.ctx, closed.func, step.next_block, ctx.env)
+}
+
+fn lower_match_arms_fat(ctx: LowerCtx, e: checker::TExpr, arms: []checker::TArm, subj: MatchSubj, merge_id: u32, names: []str) -> LowerCtx | error {
+    mut cur = ctx
+    mut i: u64 = 0
+    loop {
+        if i >= arms.len { break }
+        cur = match lower_match_arm_fat(cur, e, arms[i], subj, merge_id, names) { LowerCtx as c => c; error as err => return err }
+        i++
+    }
+    cur
+}
+
+fn lower_match_fat(ctx: LowerCtx, e: checker::TExpr, m: checker::TMatchExpr) -> LoweredFat | error {
+    let so = match lower_match_subject(ctx, m.subject) { MatchSubjOut as x => x; error as err => return err }
+    let names = reassigned_scalars_for_match(m.arms, so.ctx.env)
+    let indices = merge_scalar_indices(so.ctx.env, names)
+    let mergeb = alloc_block(so.ctx.func)
+    let mpp = add_block_param(mergeb.func, mergeb.block_id)
+    let mpl = add_block_param(mpp.func, mergeb.block_id)
+    let merged = add_merge_scalar_params(mpl.func, mergeb.block_id, so.ctx.env, names)
+    let base_ctx = ctx_with(so.ctx, merged.func, so.ctx.block_id, so.ctx.env)
+    let chain = match lower_match_arms_fat(base_ctx, e, m.arms, so.subj, mergeb.block_id, names) { LowerCtx as c => c; error as err => return err }
+    let fb = ctx_alloc(chain)
+    let with_ptr = ctx_append(fb.ctx, const_int_inst(fb.vreg, 0, e.line, e.col))
+    let fl = ctx_alloc(with_ptr)
+    let with_len = ctx_append(fl.ctx, const_int_inst(fl.vreg, 0, e.line, e.col))
+    let fallback_args = append_all_u32(merge_fat_value_args(fb.vreg, fl.vreg), arm_scalar_args(with_len.env, indices))
+    let closed = append_inst(with_len.func, with_len.block_id, jump_inst(mergeb.block_id, fallback_args, e.line, e.col))
+    LoweredFat { ctx = ctx_with(with_len, closed, mergeb.block_id, merged.env); ptr = mpp.vreg; len = mpl.vreg }
+}
+
 /**
  * lfallback_const — a dead-code fallback VALUE at machine class `rt`, for a merge edge that is
  * PROVABLY never taken (`lower_match_value`'s exhaustiveness-guaranteed dead arm-test fallback;
@@ -5140,6 +5244,7 @@ pub fn lower_fat_expr(ctx: LowerCtx, e: checker::TExpr) -> LoweredFat | error {
         checker::TVar as v => lower_var_fat(ctx, e, v)
         checker::TFieldAccess as fa => lower_fat_field(ctx, fa)
         checker::TIfExpr as f => lower_if_fat(ctx, e, f)
+        checker::TMatchExpr as m => lower_match_fat(ctx, e, m)
         checker::TCall as cl => lower_call_fat(ctx, e, cl)
         _ => error { message = teko::str::concat("native backend N1: fat-pointer receiver `", texpr_kind_name(e), "` not yet lowered (N2)") }
     }
