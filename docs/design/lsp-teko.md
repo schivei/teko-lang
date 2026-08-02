@@ -520,7 +520,10 @@ exatamente a forma que D1.2 ja fixou (`debugger-superficie...:1099-1100`: *"D1.2
 ### 8.5 Crumbs do debugger (substrato + motor + superficie)
 
 Os 6 crumbs de substrato ficam como no relatorio (nomes preservados para nao divergir do
-artefato do dono); os crumbs de MOTOR e SUPERFICIE sao a parte nova que N2 exige.
+artefato do dono). Os crumbs `DE.*` sao **UM so trilho de um so binario Teko** (motor +
+DAP + CLI sao o mesmo programa, §8.2) — nao os leia como camadas empilhaveis por processos
+distintos. O **unico ponto C** do trilho inteiro e **DE.1** (o piso de syscall); todo o
+resto (`DE.2`-`DE.6`) e Teko puro baixado pelo backend nativo.
 
 | Crumb | Titulo | Toca | Tipo | Colisao |
 |---|---|---|---|---|
@@ -531,16 +534,17 @@ artefato do dono); os crumbs de MOTOR e SUPERFICIE sao a parte nova que N2 exige
 | **D1.4** | Escoadouro ELF | `src/backend/objfile_elf.tks` | substrato/interop | baixa |
 | **D1.5** | Escoadouro Mach-O | `src/backend/objfile_macho.tks` | substrato/interop | baixa |
 | **D1.6** | `.tsym` v2 (linhas L/F/V, **+ tipos Teko / tags / arena**) — o que o motor le | `src/codegen/codegen.tks` (`tk_emit_tsym`) | substrato Teko-aware | **AGENTE em codegen** |
-| **DE.1** | Piso de syscall: `dbg_ptrace`/`dbg_waitpid`/`dbg_spawn_traced` (+ twin mach) | `teko_rt.{c,h}` (C mantida) | motor | nenhuma (C do piso, isolada) |
-| **DE.2** | Motor: insercao int3 / continue / single-step / leitura de registradores+memoria | `src/debugger/engine.tks` | motor | depende DE.1 |
-| **DE.3** | Desenrolar de pilha (usa `FrameLayout`/`FrameLayoutX86` ja calculados — `debugger-superficie...:264`) | `src/debugger/unwind.tks` | motor | depende DE.2, D1.1 |
-| **DE.4** | Leitor `.tsym` v2 + **renderer Teko-aware** (fat-str/lista, tag de variante, erro-valor, arena) | `src/debugger/render.tks` | motor Teko-aware | depende D1.6, DE.2 |
-| **DE.5** | CLI de terminal `teko debug` (break/step/bt/print) | `src/debugger/cli.tks` + `main.tks` | superficie | `main.tks` pequeno |
-| **DE.6** | Servidor DAP `teko debug --dap` (reusa transporte §4) | `src/debugger/dap.tks` | superficie (agnostico) | reusa L1 |
-| **DE.7** | Cliente VSCode: `contributes.debuggers` apontando nosso adaptador (forma ja em `debugger-superficie...:1017-1034`) | `tooling/vscode/package.json` | cliente VSCode (glue) | so cliente |
+| **DE.1** | **UNICO ponto C:** piso de syscall `dbg_ptrace`/`dbg_waitpid`/`dbg_spawn_traced` (+ twin mach) | `teko_rt.{c,h}` (C do piso, mantida) | motor/DAP (piso) | **colide `teko_rt` — coordenar** |
+| **DE.2** | int3 / continue / single-step / leitura de registradores+memoria (Teko sobre DE.1) | `src/debugger/engine.tks` | motor/DAP (Teko) | depende DE.1 |
+| **DE.3** | Desenrolar de pilha (usa `FrameLayout`/`FrameLayoutX86` ja calculados — `debugger-superficie...:264`) | `src/debugger/unwind.tks` | motor/DAP (Teko) | depende DE.2, D1.1 |
+| **DE.4** | Leitor `.tsym` v2 + **renderer Teko-aware** (fat-str/lista, tag de variante, erro-valor, arena) | `src/debugger/render.tks` | motor/DAP (Teko) | depende D1.6, DE.2 |
+| **DE.5** | Fronteira: parsear/emitir DAP (reusa transporte §4) + laco de comandos — **o mesmo binario**, modo `--dap` e CLI `teko debug` | `src/debugger/dap.tks` + `main.tks` | motor/DAP (Teko, agnostico) | reusa L1; `main.tks` pequeno |
+| **DE.6** | Cliente VSCode: `contributes.debuggers` apontando nosso binario (forma ja em `debugger-superficie...:1017-1034`) | `tooling/vscode/package.json` | cliente VSCode (glue) | so cliente |
 
-Camada 1 (breakpoint/step/bt com nomes Teko) = D0.1 + D1.1-D1.3 + DE.1-DE.3 + DE.5.
-Renderer Teko-aware de valores (Camada 2) = DE.4. Windows adiado (§8.3).
+Um binario (`teko debug`): DE.1 e o unico C; DE.2-DE.5 sao Teko puro no mesmo programa — o
+motor **e** o servidor DAP (§8.2). Camada 1 (breakpoint/step/bt com nomes Teko) = D0.1 +
+D1.1-D1.3 + DE.1-DE.3 + a fronteira DE.5. Renderer Teko-aware de valores (Camada 2) = DE.4.
+Windows adiado (§8.3).
 
 ---
 
@@ -568,14 +572,14 @@ Colisoes de agente **provadas por sitio** (voce so escreve docs; os agentes vivo
 | | apos agente codegen | **D1.2** MLineMark (`.text` byte-identico) | substrato | **colide codegen — gate estrito** |
 | | apos D1.3 | **D1.4** ELF ∥ **D1.5** Mach-O | interop | baixa |
 | | apos agente codegen | **D1.6** `.tsym` v2 Teko-aware | substrato | **colide codegen** |
-| **P3 (motor)** | apos agente `teko_rt` | **DE.1** externs syscall | motor | **colide `teko_rt` — coordenar** |
-| | apos DE.1 | **DE.2** motor int3/step ⟶ **DE.3** unwind (usa D1.1) | motor | interno |
+| **P3 (motor+DAP, um binario)** | apos agente `teko_rt` | **DE.1** externs syscall (**unico C**) | motor/DAP (piso) | **colide `teko_rt` — coordenar** |
+| | apos DE.1 | **DE.2** int3/step ⟶ **DE.3** unwind (usa D1.1) | motor/DAP (Teko) | interno |
 | **P4** | apos L3 | **L8** diagnostics ∥ **L9** executeCommand build/run | servidor | nenhum |
-| | apos D1.6+DE.2 | **DE.4** renderer Teko-aware | motor | interno |
+| | apos D1.6+DE.2 | **DE.4** renderer Teko-aware | motor/DAP (Teko) | interno |
 | **P5 (superficie)** | apos L2 | **L10** `teko lsp` no dispatch | servidor | `main.tks` pequeno |
-| | apos DE.3 | **DE.5** `teko debug` CLI ∥ **DE.6** `teko debug --dap` (reusa L1) | superficie | `main.tks` pequeno |
+| | apos DE.3 | **DE.5** fronteira DAP + CLI `teko debug` (mesmo binario, reusa L1) | motor/DAP (Teko) | `main.tks` pequeno |
 | **P6 (cliente, VSCode primeiro)** | apos L10 | **L11** cliente LSP VSCode ∥ **L12** notas Neovim/Emacs/Helix | cliente | so cliente |
-| | apos DE.6 | **DE.7** `contributes.debuggers` VSCode | cliente | so cliente |
+| | apos DE.5 | **DE.6** `contributes.debuggers` VSCode | cliente | so cliente |
 | **P7 (cores + release)** | apos P6 | vsix (empacotar `tooling/vscode`), tag/release do tooling | cores/release | ritual final |
 
 **Ritual (gate cheio):** fim de P2 (a triade de navegacao — nucleo de N3), apos D1.2 (o
