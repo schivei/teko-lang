@@ -1079,6 +1079,17 @@ tk_str tk_rt_version(void);
 const tk_byte *tk_rt_os_len(uint64_t *out_len);
 const tk_byte *tk_rt_arch_len(uint64_t *out_len);
 const tk_byte *tk_rt_version_len(uint64_t *out_len);
+// tk_rt_read_line_len / tk_rt_read_stdin_len / tk_assert_scenario_prefix_len / tk_test_scope_len —
+// the out-parameter-length twins of the remaining plain-`tk_str`-returning host primitives the
+// self-host reaches through an `extern fn` declaration (io::read_line/read_stdin, assert's scenario
+// prefix, the test scope). SAME reason as the host-info trio above: the native backend's `LCall`
+// captures ONE result register, so a `tk_str`-by-value return has its length (the second eightbyte)
+// dropped — the length rides `*out_len` here instead (0.3.1.0 degrau 35). Thin wrappers; no logic
+// is duplicated.
+const tk_byte *tk_rt_read_line_len(uint64_t *out_len);
+const tk_byte *tk_rt_read_stdin_len(uint64_t *out_len);
+const tk_byte *tk_assert_scenario_prefix_len(uint64_t *out_len);
+const tk_byte *tk_test_scope_len(uint64_t *out_len);
 // (#148) the process peak RSS in bytes (0 = unavailable) — teko::mem::peak_rss.
 uint64_t tk_peak_rss(void);
 // (E1-C6) the OS-granted online processor count (>= 1) — the default and cap for the test/regression

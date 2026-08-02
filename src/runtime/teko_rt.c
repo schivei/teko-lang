@@ -3599,6 +3599,35 @@ const tk_byte *tk_rt_version_len(uint64_t *out_len) {
     return r.ptr;
 }
 
+// tk_rt_read_line_len / tk_rt_read_stdin_len / tk_assert_scenario_prefix_len / tk_test_scope_len —
+// the out-parameter-length twins for the remaining plain-tk_str-returning host primitives reached
+// through an `extern fn` on the native backend (0.3.1.0 degrau 35). Each defers to its by-value
+// primitive and re-shapes the fat return into (return ptr, *out_len) so the length survives the
+// backend's single-result-register call convention. No logic is duplicated.
+const tk_byte *tk_rt_read_line_len(uint64_t *out_len) {
+    tk_str r = tk_rt_read_line();
+    *out_len = r.len;
+    return r.ptr;
+}
+
+const tk_byte *tk_rt_read_stdin_len(uint64_t *out_len) {
+    tk_str r = tk_rt_read_stdin();
+    *out_len = r.len;
+    return r.ptr;
+}
+
+const tk_byte *tk_assert_scenario_prefix_len(uint64_t *out_len) {
+    tk_str r = tk_assert_scenario_prefix();
+    *out_len = r.len;
+    return r.ptr;
+}
+
+const tk_byte *tk_test_scope_len(uint64_t *out_len) {
+    tk_str r = tk_test_scope();
+    *out_len = r.len;
+    return r.ptr;
+}
+
 // D3 — test-coverage sink (host side-channel; see teko_rt.h). A growable array of distinct ids,
 // deduped on insert (the id count is bounded by the project's function count, so linear dedup is
 // fine). tk_cov_reset starts a fresh run; tk_cov_mark records a function-entry id; tk_cov_distinct

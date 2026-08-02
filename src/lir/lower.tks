@@ -9840,8 +9840,41 @@ fn lower_call_fat(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall) -> Lower
     if cl.call_ns.len == 0 && is_append_fo_call(cl.callee) { return lower_append_fo_call(ctx, e, cl) }
     if cl.call_ns.len == 0 && is_bytes_from_ptr_call(cl.callee) { return lower_bytes_from_ptr_call(ctx, cl) }
     let sym = match call_symbol(cl, ctx.externs, ctx.flat_symbols) { str as s => s; error as err => return err }
+    let effective = match fat_extern_len_twin(sym) { str as t => t; null => sym }
     let lo = match lower_args(ctx, cl.args, callee_param_types(cl)) { LoweredArgs as x => x; error as err => return err }
-    lower_len_out_call(lo.ctx, sym, lo.vregs, e)
+    lower_len_out_call(lo.ctx, effective, lo.vregs, e)
+}
+
+/**
+ * fat_extern_len_twin — the out-parameter-length twin symbol for a host primitive that returns a
+ * plain fat `tk_str` BY VALUE, reached through an `extern fn` declaration (`find_extern_symbol`
+ * resolves the RAW C symbol, e.g. `tk_rt_version`). `lower_len_out_call` reserves a length out-slot
+ * and appends its address as the call's last argument, then reads the length back — the exact
+ * convention the `_len` twins honour (they write `*out_len` and return the pointer), but a
+ * by-value-returning primitive IGNORES that extra argument and never writes the slot, so the
+ * length comes back as garbage and a downstream `str::concat` allocates a wild size and OOMs
+ * (measured: gen2's `str::concat("teko ", version())` startup banner, 0.3.1.0 degrau 35).
+ *
+ * Keyed on the BY-VALUE symbol name, so the BUILTIN resolution path is untouched: it already hands
+ * back the `_len` spelling (`builtin_host_info_symbol` → `tk_rt_version_len`), which is not a key
+ * here and passes through unchanged. Only the extern path, which resolves the by-value name, is
+ * remapped. The three host-info strings already ship their twins (`tk_rt_{os,arch,version}_len`);
+ * degrau 35 adds the remaining self-host-reached ones (`tk_rt_read_line_len`/`tk_rt_read_stdin_len`/
+ * `tk_assert_scenario_prefix_len`/`tk_test_scope_len`, `teko_rt.{c,h}`).
+ *
+ * @param str sym  the resolved C symbol (`call_symbol`'s result)
+ * @return str | null  the `_len` twin to call instead, or `null` when `sym` needs no remap
+ * @since 0.3.1.0 degrau 35
+ */
+fn fat_extern_len_twin(sym: str) -> str | null {
+    if sym == "tk_rt_version" { return "tk_rt_version_len" }
+    if sym == "tk_rt_os" { return "tk_rt_os_len" }
+    if sym == "tk_rt_arch" { return "tk_rt_arch_len" }
+    if sym == "tk_rt_read_line" { return "tk_rt_read_line_len" }
+    if sym == "tk_rt_read_stdin" { return "tk_rt_read_stdin_len" }
+    if sym == "tk_assert_scenario_prefix" { return "tk_assert_scenario_prefix_len" }
+    if sym == "tk_test_scope" { return "tk_test_scope_len" }
+    null
 }
 
 /**
