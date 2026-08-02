@@ -194,6 +194,54 @@ fn elf_abs64_emits_r_x86_64_64() {
     teko::assert::is_true(el_u32_at(obj, 232 to u64) == (0 to u32))
 }
 
+/**
+ * el_drr_module — a hand-built `EncodedModuleX86` shaped like the self-host's
+ * `const []T`: a 16-byte `.rodata` whose first 8 bytes are a fat-slot pointer
+ * (offset 0, carrying an `Abs64`/`Rodata` relocation at the target leaf) and
+ * whose last 8 bytes are the leaf (`0x41` at offset 8), plus a `.text` `lea` that
+ * takes the fat slot's address (a `Pc32`/`Text` relocation at the slot symbol).
+ * The partition must move the fat slot to `.data.rel.ro` and leave the leaf in
+ * `.rodata`, re-pointing the `.text` reference at the `.data.rel.ro` section
+ * symbol and the data pointer at the `.rodata` one.
+ *
+ * @return EncodedModuleX86  the hand-built pointer-bearing-const module
+ */
+fn el_drr_module() -> EncodedModuleX86 {
+    let text = [0x48 to byte, 0x8D to byte, 0x05 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0xC3 to byte]
+    let rodata = [0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0x41 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte]
+    let slot = Symbol { name = "slot"; defined = true; sect = 2 to u8; offset = 0 to u32; local = true }
+    let leaf = Symbol { name = "leaf"; defined = true; sect = 2 to u8; offset = 8 to u32; local = true }
+    let main = Symbol { name = "main"; defined = true; sect = 1 to u8; offset = 0 to u32; local = false }
+    let text_ref = RelocX86 { offset = 3 to u32; sym = "slot"; kind = RelocKindX86::Pc32; addend = (0) - (4); sect = RelocSect::Text }
+    let data_ptr = RelocX86 { offset = 0 to u32; sym = "leaf"; kind = RelocKindX86::Abs64; addend = 0; sect = RelocSect::Rodata }
+    EncodedModuleX86 { text = text; rodata = rodata; symbols = [slot, leaf, main]; relocs = [text_ref, data_ptr] }
+}
+
+#test
+/**
+ * elf_partition_moves_pointer_const_to_data_rel_ro — the pointer-bearing-const
+ * module emits a `.data.rel.ro` section (index 7, non-empty) holding the moved
+ * fat slot; its `.rela.data.rel.ro` row is `R_X86_64_64`(1) against the `.rodata`
+ * section symbol (index 1) with addend 0 (the leaf rebased to `.rodata` offset 0);
+ * the `.text` `lea` relocation re-points at the `.data.rel.ro` section symbol
+ * (index 2) as `R_X86_64_PC32`(2) with the base addend −4; and the leaf byte
+ * `0x41` now sits at `.rodata` offset 0. This is the exact shape that made the
+ * self-host object refuse to link under PIE, proven fixed on emitted BYTES.
+ *
+ * @return void
+ */
+fn elf_partition_moves_pointer_const_to_data_rel_ro() {
+    let obj = emit_elf(el_drr_module())
+    teko::assert::is_true(el_section_offset(obj, EL_SHNDX_DATA_REL_RO) > (0 to u64))
+    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_DATA_REL_RO, 0 to u64, EL_RELA_TYPE_FIELD) == (1 to u32))
+    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_DATA_REL_RO, 0 to u64, EL_RELA_SYM_FIELD) == (1 to u32))
+    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_DATA_REL_RO, 0 to u64, EL_RELA_ADDEND_FIELD) == (0 to u32))
+    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_TEXT, 0 to u64, EL_RELA_TYPE_FIELD) == (2 to u32))
+    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_TEXT, 0 to u64, EL_RELA_SYM_FIELD) == (2 to u32))
+    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_TEXT, 0 to u64, EL_RELA_ADDEND_FIELD) == (0xFFFFFFFC to u32))
+    teko::assert::is_true(obj[el_section_offset(obj, 2 to u64)] == (0x41 to byte))
+}
+
 #test
 /**
  * elf_symbol_index_finds_and_sentinels — `elf_symbol_index` returns a present
@@ -246,13 +294,20 @@ const EL_SHDR_OFFSET_FIELD: u64 = 24 to u64
 const EL_SHNDX_RELA_TEXT: u64 = 6 to u64
 
 /**
- * EL_SHNDX_RELA_RODATA — `.rela.rodata`'s fixed section-header index: the
- * optional eighth header the writer appends only when a relocation's patch site
- * lies inside `.rodata`. Naming the index rather than scanning for the first
- * `SHT_RELA` keeps the two relocation tables distinguishable even when
- * `.rela.text` is empty and the two share a file offset.
+ * EL_SHNDX_DATA_REL_RO — `.data.rel.ro`'s fixed section-header index: the
+ * seventh header the writer appends when a const carries a pointer relocation,
+ * holding the moved fat-slot bytes (`SHF_ALLOC|SHF_WRITE`).
  */
-const EL_SHNDX_RELA_RODATA: u64 = 7 to u64
+const EL_SHNDX_DATA_REL_RO: u64 = 7 to u64
+
+/**
+ * EL_SHNDX_RELA_DATA_REL_RO — `.rela.data.rel.ro`'s fixed section-header index:
+ * the eighth header the writer appends, carrying the moved consts' relocations.
+ * Naming the index rather than scanning for the first `SHT_RELA` keeps the two
+ * relocation tables distinguishable even when `.rela.text` is empty and the two
+ * share a file offset.
+ */
+const EL_SHNDX_RELA_DATA_REL_RO: u64 = 8 to u64
 
 /**
  * EL_RELA_SIZE — the `Elf64_Rela` stride (`r_offset`, `r_info`, `r_addend`).
@@ -388,11 +443,13 @@ fn elf_arm64_object_header_and_relas_are_golden() {
 
 /**
  * el_arm64_abs64_enc — a hand-built arm64 `EncodedModule` with no functions and
- * a 16-byte `.rodata` = an 8-byte pointer slot at offset 0 then the target datum
- * at offset 8, plus one `Abs64`/`Rodata` relocation. `encode_module` never
- * produces this (its rodata-pointer honest-stop fires first), so feeding
- * `emit_elf_arm64` directly is the only way to pin the `R_AARCH64_ABS64` number
- * the `.rela.rodata` row will carry the day that stop opens.
+ * a 16-byte `.rodata` = an 8-byte pointer slot at offset 0 (which carries the
+ * relocation, so it moves to `.data.rel.ro`) then the target datum at offset 8
+ * (a pure leaf that stays in `.rodata`), plus one `Abs64`/`Rodata` relocation.
+ * `encode_module` never produces this (its rodata-pointer honest-stop fires
+ * first), so feeding `emit_elf_arm64` directly is the only way to pin the
+ * `R_AARCH64_ABS64` number the `.rela.data.rel.ro` row carries once the module
+ * that produces a pointer-bearing const arrives.
  *
  * @return EncodedModule  the hand-built rodata-internal-pointer arm64 module
  */
@@ -406,18 +463,22 @@ fn el_arm64_abs64_enc() -> EncodedModule {
 
 #test
 /**
- * an `Abs64` arm64 relocation whose patch site is INSIDE `.rodata` lands in
- * `.rela.rodata` as `R_AARCH64_ABS64`(257) against the `.rodata` section symbol,
- * with the target datum's offset (8) folded onto the addend, and NOT in
- * `.rela.text`: the `sect` partition `arm64_rodata_reloc_reqs` performs is the
- * same one the x86 adapter performs, so the two cannot drift.
+ * an `Abs64` arm64 relocation whose patch site is inside a pointer-bearing const
+ * lands in `.rela.data.rel.ro` as `R_AARCH64_ABS64`(257) against the `.rodata`
+ * section symbol (the target leaf stays read-only), and NOT in `.rela.text`: the
+ * data-rel-ro partition moves the fat-slot bytes to `.data.rel.ro` so the
+ * absolute relocation no longer sits in a read-only section (PIE-safe). The pure
+ * leaf is the only `.rodata` datum left, so it rebases to offset 0 and the folded
+ * addend is 0. The partition `emit_elf_object` performs is ISA-agnostic, so the
+ * arm64 and x86 adapters cannot drift.
  *
  * @return void
  */
-fn elf_arm64_abs64_lands_in_rela_rodata() {
+fn elf_arm64_abs64_lands_in_rela_data_rel_ro() {
     let obj = emit_elf_arm64(el_arm64_abs64_enc())
-    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_RODATA, 0 to u64, EL_RELA_TYPE_FIELD) == (257 to u32))
-    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_RODATA, 0 to u64, EL_RELA_ADDEND_FIELD) == (8 to u32))
+    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_DATA_REL_RO, 0 to u64, EL_RELA_TYPE_FIELD) == (257 to u32))
+    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_DATA_REL_RO, 0 to u64, EL_RELA_ADDEND_FIELD) == (0 to u32))
+    teko::assert::is_true(el_section_offset(obj, EL_SHNDX_DATA_REL_RO) > (0 to u64))
 }
 
 /**
