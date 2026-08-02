@@ -5129,22 +5129,41 @@ fn emit_struct_init(buf: []byte, prog: CgProg, e: checker::TExpr, si: checker::T
     return emit_struct_init_framed(buf, prog, e, si, "", escaping, regions, fn_body, dctx)
 }
 
-// emit_struct_init_framed — emit_struct_init with the auto-box ALLOCATOR parameterized (MEM Step
-// 1). `frame` is the per-function frame-region variable name, or "" for the process root. When
-// `frame` is "" the DIRECT box of a recursive back-edge rides `tk_alloc` (root → leaked, the safe
-// default, byte-identical to the pre-MEM-Step-1 output). When `frame` is a region var the direct
-// box rides `tk_region_alloc(<frame>, …)` so it is BULK-FREED when the frame region drops at the
-// function's exit edge — used ONLY for a binding the escape check PROVED frame-local (escape.tks).
-// NESTED struct-inits (field values via emit_expr) stay on root: mixing frame + root in one value
-// is SAFE (root cells just leak), so soundness holds while the frame frees the provable subset.
-//
-// (W10b.CLASS increment 3) a CLASS instance is ARENA-PER-OBJECT: construction allocates a FRESH
-// child region (`tk_region_new`, parented to the enclosing region) and the object itself
-// (`tk_region_alloc`), then copies the ordinary compound-literal value into it — the whole
-// expression's VALUE is the resulting POINTER (reference semantics: shared identity, no copy on
-// bind/pass/return — matches emit_type_expr's unconditional class → pointer lowering). The
-// object's region is a genuine per-object arena; nothing yet drops it independently of whatever
-// ancestor region eventually drops (an honest, scoped-down deferral — see the PR notes).
+/**
+ * emit_struct_init with the auto-box ALLOCATOR parameterized (MEM Step 1). `frame` is the region a
+ * proven-local binding chose (its per-function frame region, or an open block region), or "" for
+ * the process root.
+ *
+ * When `frame` is "" the DIRECT box of a recursive back-edge rides `tk_alloc` (root → leaked, the
+ * safe default, byte-identical to the pre-MEM-Step-1 output). When `frame` is a region var the
+ * direct box rides `tk_region_alloc(<frame>, …)` so it is BULK-FREED when that region drops at the
+ * function's / block's exit edge — used ONLY for a binding the escape check PROVED local
+ * (escape.tks). A field value's OWN union-box payload (an `X | null` field) also rides `frame`
+ * (emit_struct_init_literal threads it into emit_as_r_in), so a recursive node's `.next`/child box
+ * dies with the node it lives in. A NESTED struct-init field VALUE (`Outer { inner = Inner {…} }`)
+ * still resets to root (emit_struct_init passes ""): mixing frame + root in one value is SAFE (root
+ * cells just leak), so soundness holds while the frame frees the provable subset.
+ *
+ * (W10b.CLASS increment 3) a CLASS instance is ARENA-PER-OBJECT: construction allocates a FRESH
+ * child region (`tk_region_new`, parented to the enclosing region) and the object itself
+ * (`tk_region_alloc`), then copies the ordinary compound-literal value into it — the whole
+ * expression's VALUE is the resulting POINTER (reference semantics: shared identity, no copy on
+ * bind/pass/return — matches emit_type_expr's unconditional class → pointer lowering). The object's
+ * region is a genuine per-object arena; nothing yet drops it independently of whatever ancestor
+ * region eventually drops (an honest, scoped-down deferral — see the PR notes).
+ *
+ * @param buf       the output byte buffer
+ * @param prog      the typed program (representation / field-type lookups)
+ * @param e         the struct-init expression node (carries the resolved named/class type)
+ * @param si        the typed struct-init (ordered field names + values)
+ * @param frame     the region interior boxes ride, or "" for the process root
+ * @param escaping  the enclosing function's escaping-name set (frame routing)
+ * @param regions   the active block/frame region stack
+ * @param fn_body   the enclosing function body (defer / frame-locality queries)
+ * @param dctx      the enclosing defer context
+ * @return          the buffer with the compound literal (or per-object class construct) appended
+ * @throws          error propagated from emitting a field type or a field value
+ */
 fn emit_struct_init_framed(buf: []byte, prog: CgProg, e: checker::TExpr, si: checker::TStructInit, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
     let is_class = match e.type {
         checker::Named as nm => cg_is_class_named(prog, nm.name)
@@ -5181,8 +5200,30 @@ fn emit_struct_init_framed(buf: []byte, prog: CgProg, e: checker::TExpr, si: che
     emit_struct_init_literal(buf, prog, e, si, frame, escaping, regions, fn_body, dctx)
 }
 
-// emit_struct_init_literal — the RAW `(tk_t_<Name>){ .f = v, … }` compound literal (unwrapped;
-// used directly for a struct, and as the inner value copied into a class's arena-allocated box).
+/**
+ * Emit the RAW `(tk_t_<Name>){ .f = v, … }` compound literal (unwrapped) — used directly for a
+ * struct value, and as the inner value copied into a class's arena-allocated box.
+ *
+ * Each field value is auto-boxed into `frame` when its declared type is a recursive by-value
+ * back-edge (the `_bx` path) OR when a wrap routes it through `emit_as_r_in` and that wrap boxes a
+ * union payload (the `_ubx` path). BOTH ride `frame` — the region the enclosing frame-local /
+ * block-local binding chose — so a linked-list / tree node's interior box dies with the node it
+ * lives in (a struct value's interior heap dies exactly when the struct value dies). `frame == ""`
+ * (a struct-init that was NOT proven local) keeps every interior box on the process root (the safe
+ * default; a leak, never a UAF).
+ *
+ * @param buf       the output byte buffer
+ * @param prog      the typed program (field-type / representation lookups)
+ * @param e         the struct-init expression node (carries the resolved named type)
+ * @param si        the typed struct-init (ordered field names + values)
+ * @param frame     the region name interior boxes ride, or `""` for the process root
+ * @param escaping  the enclosing function's escaping-name set (frame routing)
+ * @param regions   the active block/frame region stack
+ * @param fn_body   the enclosing function body (defer / frame-locality queries)
+ * @param dctx      the enclosing defer context
+ * @return          the buffer with the compound literal appended
+ * @throws          error propagated from emitting a field type or a field value
+ */
 fn emit_struct_init_literal(buf: []byte, prog: CgProg, e: checker::TExpr, si: checker::TStructInit, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
     let name = match e.type {
         checker::Named as nm => nm.name
@@ -5310,7 +5351,7 @@ fn emit_struct_init_literal(buf: []byte, prog: CgProg, e: checker::TExpr, si: ch
             }
             match exp_t {
                 checker::Void => { out = match emit_expr_ctx(out, prog, checker::Void { }, fv, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err } }
-                _ => { out = match emit_as(out, prog, exp_t, fv, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err } }
+                _ => { out = match emit_as_r_in(out, prog, checker::Void { }, exp_t, fv, frame, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err } }
             }
         }
         if boxed { out = cb(out, "; "); out = cb(out, bxN); out = cb(out, "; })") }
