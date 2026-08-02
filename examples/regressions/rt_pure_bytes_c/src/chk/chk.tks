@@ -1,29 +1,44 @@
 /**
- * chk — the Degrau-0 pure-byte-logic checks: `str ==`/`!=` (str_eq), `ends_with`, `contains`, plus
- * the neighbouring ALLOCATING builtins (`concat`/`u64_to_str`/`i64_to_str`) that Degrau 0 deliberately
- * does NOT reroute yet. Every check drives one bare `teko::str::…` builtin and returns a DISTINCT
- * non-zero code the moment its answer is wrong, so a failure names which builtin moved; `0` means all
- * agreed. The C route (`rt_pure_bytes_c`) runs the SAME source, so the two routes' exit codes must match.
+ * chk — the Degrau-0 pure-byte-logic evidence: `str ==` (str_eq), `ends_with`, `contains`, plus the
+ * neighbouring ALLOCATING builtins (`concat`/`u64_to_str`/`i64_to_str`) that Degrau 0 deliberately
+ * does NOT reroute yet. `result` builds ONE line carrying each builtin's ACTUAL answer/output so the
+ * fixture matches the printed VALUES on STDOUT — never an exit code (a weak signal: it cannot tell a
+ * crash from a pass, and wraps at 256). The C route (`rt_pure_bytes_c`) prints the SAME line from the
+ * SAME source, so the two routes' stdout must be byte-identical.
  */
 
 /**
- * run — every pure-byte and neighbouring builtin check, in order. Each `if` inverts a KNOWN answer so
- * only a wrong result returns; the trailing `0` is reached only when all twelve agreed.
+ * bit — the ASCII digit for a boolean answer, so a predicate's ACTUAL result travels on stdout as a
+ * matchable character rather than collapsing into a pass/fail exit code.
  *
- * @return  `0` when every builtin answered correctly, else the code of the first that did not (1-12)
+ * @param b  the boolean to render
+ * @return   "1" when `b`, else "0"
  */
-exp fn run() -> i64 {
-    if !teko::str::ends_with("hello world", "world") { return 1 }
-    if teko::str::ends_with("hello world", "worldx") { return 2 }
-    if !teko::str::ends_with("hello", "") { return 3 }
-    if teko::str::ends_with("hi", "hello") { return 4 }
-    if !teko::str::contains("hello world", "lo wo") { return 5 }
-    if teko::str::contains("hello world", "xyz") { return 6 }
-    if !teko::str::contains("hello", "") { return 7 }
-    if "abc" != teko::str::concat("ab", "c") { return 8 }
-    if "abc" == teko::str::concat("ab", "d") { return 9 }
-    if "" != teko::str::concat("", "") { return 10 }
-    if teko::str::u64_to_str(42) != "42" { return 11 }
-    if teko::str::i64_to_str(-7) != "-7" { return 12 }
-    0
+fn bit(b: bool) -> str {
+    if b { "1" } else { "0" }
+}
+
+/**
+ * result — the printable evidence line: each Degrau-0 pure-byte builtin's ACTUAL answer and each
+ * neighbouring allocating builtin's ACTUAL output, joined by "_" (regex-safe) so a wrong result shows
+ * as a changed field on stdout. Fields, in order: str_eq true, str_eq false, ends_with hit, ends_with
+ * empty-suffix, ends_with miss, contains hit, contains empty-needle, contains miss, concat, u64_to_str,
+ * i64_to_str.
+ *
+ * @return  the "_"-joined evidence, "1_0_1_1_0_1_1_0_abc_42_-7" when every builtin agrees
+ */
+exp fn result() -> str {
+    teko::str::concat(
+        bit(teko::str::concat("ab", "c") == "abc"), "_",
+        bit(teko::str::concat("ab", "d") == "abc"), "_",
+        bit(teko::str::ends_with("hello world", "world")), "_",
+        bit(teko::str::ends_with("hello", "")), "_",
+        bit(teko::str::ends_with("hi", "hello")), "_",
+        bit(teko::str::contains("hello world", "lo wo")), "_",
+        bit(teko::str::contains("hello", "")), "_",
+        bit(teko::str::contains("hello world", "xyz")), "_",
+        teko::str::concat("ab", "", "c"), "_",
+        teko::str::u64_to_str(42), "_",
+        teko::str::i64_to_str(-7)
+    )
 }
