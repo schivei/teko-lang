@@ -150,6 +150,20 @@ tk_str tk_str_concat(tk_str a, tk_str b) {
     return (tk_str){ buf, n };
 }
 
+// (0.3.1 modelo-de-memoria §9) tk_str_concat_r — like tk_str_concat, but the fresh result buffer is
+// bump-allocated in `r` (tk_region_alloc) instead of malloc'd. The result lives in `r` and DIES when
+// `r` is dropped. `r == tk_region_root()`/program reproduces the leak-tolerant tk_str_concat; `r` = a
+// scope region makes the concatenated str die with the scope. Allocation failure PANICS (M.1);
+// zero-length uses a 1-byte buffer so ptr is never NULL.
+tk_str tk_str_concat_r(tk_region *r, tk_str a, tk_str b) {
+    if (r == NULL) return tk_str_concat(a, b);
+    size_t n = a.len + b.len;
+    tk_byte *buf = tk_region_alloc(r, n ? n : 1);
+    if (a.len) memcpy(buf, a.ptr, a.len);
+    if (b.len) memcpy(buf + a.len, b.ptr, b.len);
+    return (tk_str){ buf, n };
+}
+
 // (C7.1a) marshalling — the raw byte pointer of a Teko str (NOT NUL-terminated), for ptr+len C
 // APIs like write(fd,buf,len). Borrows the str's buffer — valid only while the str is alive; the
 // FFI boundary is unsafe by contract (cast away const). [teko::mem::as_ptr]
