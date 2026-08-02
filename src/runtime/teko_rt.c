@@ -3792,7 +3792,13 @@ void *tk_slice_push_fo(const void *ptr, uint64_t len, const void *elem, uint64_t
         if (tk_push_cache[h].ptr == ptr && tk_push_cache[h].esz == esz && tk_push_cache[h].cap > len)
             old_bytes = tk_push_cache[h].cap * esz;   // the live tail — its full capacity is reusable
     }
-    void *buf = tk_slice_push_r(ptr, len, elem, esz, out_len, tk_region_current());
+    // (0.3.1 move-on-return A4/M1) FREE-OLD grows into the ROOT, never the current region. The
+    // free-list this path parks the old buffer on is root-only (tk_cur_rsp != 0 leaves it alone), so
+    // the new buffer must match — else a `tk_region_enter(_tkfr)` in the caller (the M2 conveyance)
+    // would silently redirect an escaping free-old buffer (e.g. every `cb`/`append_fo` byte-buffer the
+    // codegen returns) into a frame region that dies at the return edge (UAF). Root is behavior-
+    // identical to the pre-enter world (current == root until a region is entered).
+    void *buf = tk_slice_push_r(ptr, len, elem, esz, out_len, tk_region_root());
     if (buf != old && old != NULL) {
         // (#148 Level-2 BISECT) TEKO_FO_MAX=N limits parking to the first N grows (binary-search
         // the guilty park); TEKO_FO_TRACE at the boundary dumps the parking site's backtrace.

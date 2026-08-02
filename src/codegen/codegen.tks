@@ -5316,7 +5316,7 @@ fn emit_struct_init_literal(buf: []byte, prog: CgProg, e: checker::TExpr, si: ch
             if frame.len > 0 {
                 out = cb(out, " = tk_region_alloc("); out = cb(out, frame); out = cb(out, ", sizeof *"); out = cb(out, bxN); out = cb(out, "); *"); out = cb(out, bxN); out = cb(out, " = ")
             } else {
-                out = cb(out, " = tk_alloc(sizeof *"); out = cb(out, bxN); out = cb(out, "); *"); out = cb(out, bxN); out = cb(out, " = ")
+                out = cb(out, " = tk_region_alloc(tk_region_root(), sizeof *"); out = cb(out, bxN); out = cb(out, "); *"); out = cb(out, bxN); out = cb(out, " = ")
             }
         }
         // Sentinel fields emit a concrete literal directly (emit_expr can't, the type being unknown):
@@ -8086,6 +8086,82 @@ fn scope_region_of(regions: []RegionFrame, name: str) -> str {
 }
 
 /**
+ * cg_bound_is_slice — whether a declared/assigned type is a `Slice` (`[]T`), the shape whose grown
+ * buffer the move-on-return routing tracks.
+ *
+ * @param t  the type to test
+ * @return   true iff `t` is a `Slice`
+ * @since 0.3.1
+ */
+fn cg_bound_is_slice(t: checker::Type) -> bool {
+    match t { checker::Slice => true; _ => false }
+}
+
+/**
+ * cg_self_append_escapes — whether assign `a` is an ESCAPING slice self-append that must route its
+ * grown buffer to the return region `_tkrr` (0.3.1 move-on-return A4/M1). True iff a `_tkrr` is open
+ * (`dctx.rr`), `a` is a self-append `xs = list::push(xs, e)`, `xs` ESCAPES the frame, and `xs` is a
+ * slice. The non-escaping twin routes to the frame/block region (`assign_routes_to_frame`); this arm
+ * catches the escaping accumulator that must OUTLIVE the frame — in M1 `_tkrr == root` (leak-safe), in
+ * M2 `_tkrr == the caller's region` (the move). A `_tkfr`-entered function would otherwise land this
+ * buffer in the frame region and free it at the return edge (UAF).
+ *
+ * @param escaping  the function's escaping-name set
+ * @param dctx      the defer context (carries `rr`, the `_tkrr` name or "")
+ * @param a         the assign
+ * @return          true iff `a` routes to `_tkrr`
+ * @since 0.3.1
+ */
+fn cg_self_append_escapes(escaping: []str, dctx: DeferCtx, a: checker::TAssign) -> bool {
+    if dctx.rr.len == 0 { return false }
+    if !checker::assign_is_self_append(a) { return false }
+    if !str_list_has(escaping, a.name) { return false }
+    cg_bound_is_slice(a.bound)
+}
+
+/**
+ * cg_binding_grows_escaping_slice — whether binding `b` builds an escaping slice via a `list::push` /
+ * `list::with_cap` / `mem::push_fo` call whose result OUTLIVES the frame (0.3.1 move-on-return A4/M1).
+ * Such a bare slice grow follows the current region and, once M2 enters `_tkfr`, would die at the
+ * return edge; routing it to `_tkrr` names it as escaping (M1: root; M2: the caller's region — the move).
+ *
+ * @param escaping  the function's escaping-name set
+ * @param dctx      the defer context (carries `rr`)
+ * @param b         the binding
+ * @return          true iff `b`'s slice-grow value routes to `_tkrr`
+ * @since 0.3.1
+ */
+fn cg_binding_grows_escaping_slice(escaping: []str, dctx: DeferCtx, b: checker::TBinding) -> bool {
+    if dctx.rr.len == 0 { return false }
+    let name = match b.target {
+        parser::SimpleName as sn => sn.name
+        parser::DestructurePattern => return false
+    }
+    if !str_list_has(escaping, name) { return false }
+    if !cg_bound_is_slice(b.bound) { return false }
+    match b.value.kind {
+        checker::TCall as c => cg_call_is_slice_grow(c)
+        _ => false
+    }
+}
+
+/**
+ * cg_call_is_slice_grow — whether call `c` is a slice-growing intrinsic: `teko::list::push`,
+ * `teko::list::with_cap`, or `teko::mem::push_fo` (the calls that bump-allocate a fresh slice buffer).
+ *
+ * @param c  the call
+ * @return   true iff `c` grows a slice
+ * @since 0.3.1
+ */
+fn cg_call_is_slice_grow(c: checker::TCall) -> bool {
+    let segs = c.callee.segments
+    if segs.len < 2 { return false }
+    let last = segs[segs.len - 1].name
+    let prev = segs[segs.len - 2].name
+    (prev == "list" && (last == "push" || last == "with_cap")) || (prev == "mem" && last == "push_fo")
+}
+
+/**
  * str_list_has — linear membership test over a `[]str` (the A3 decls list is short, one entry per
  * block-local accumulator).
  *
@@ -8215,11 +8291,17 @@ type DeferCtx = struct {
     loops: []LoopDeferFrame
     /** the coverage-instrumentation context; `cov.on == false` (the default) emits zero `tk_cov_*`. */
     cov: CovCtx
+    /** (0.3.1 move-on-return A4/M1) the return-region C variable name (`_tkrr`, else "") — the region
+     *  an ESCAPING allocation routes to so it survives the frame drop. Rides DeferCtx BECAUSE it must
+     *  reach a self-append/binding deep inside a sub-scope UNSTRIPPED (unlike `frame`, which emit_block
+     *  clears to "" for sub-scopes): an escaping accumulator grown in a loop of a framed function must
+     *  still route to `_tkrr`, never the entered `_tkfr` it would fall into via the current region. */
+    rr: str
 }
 
 // dctx_empty — the no-defers context (function entry / frameless sub-expression with no enclosing defers).
 fn dctx_empty() -> DeferCtx {
-    DeferCtx { defers = teko::list::empty(); loops = teko::list::empty(); cov = cov_off() }
+    DeferCtx { defers = teko::list::empty(); loops = teko::list::empty(); cov = cov_off(); rr = "" }
 }
 
 // (W9.3) emit_defers — emit the deferred blocks at index ≥ `base` in LIFO order (innermost / most-recent
@@ -8251,7 +8333,7 @@ fn emit_defers(buf: []byte, defers: []checker::TStatement, base: u64, prog: CgPr
 // (W9.3) dctx_register — return `dctx` with statement `s` pushed onto the defer stack (used when a
 // TDeferStmt is reached). Mirrors the C `g_cg_defers[g_cg_ndefers++] = s` registration (emits nothing).
 fn dctx_register(dctx: DeferCtx, s: checker::TStatement) -> DeferCtx {
-    DeferCtx { defers = teko::list::push(dctx.defers, s); loops = dctx.loops; cov = dctx.cov }
+    DeferCtx { defers = teko::list::push(dctx.defers, s); loops = dctx.loops; cov = dctx.cov; rr = dctx.rr }
 }
 
 // (W9.3) cg_append_direct_defers — append every TOP-LEVEL TDeferStmt in `body` (source order) onto
@@ -8675,6 +8757,20 @@ fn emit_binding(buf: []byte, prog: CgProg, ret_type: checker::Type, b: checker::
     out = cb(out, " ")
     out = cb_ident(out, name)
     out = cb(out, " = ")
+    if cg_binding_grows_escaping_slice(escaping, dctx, b) {
+        match b.value.kind {
+            checker::TCall as c => {
+                let last = c.callee.segments[c.callee.segments.len - 1].name
+                if last == "with_cap" {
+                    out = match emit_list_with_cap(out, prog, b.value, c, escaping, regions, fn_body, dctx, dctx.rr) { []byte as o => o; error as err => return err }
+                } else {
+                    out = match emit_list_push(out, prog, b.value, c, escaping, regions, fn_body, dctx, dctx.rr) { []byte as o => o; error as err => return err }
+                }
+                return cb(out, ";\n")
+            }
+            _ => { }
+        }
+    }
     // MEM Step 1 — FRAME-LOCAL routing. When a frame region is active AND the escape check proved
     // this binding frame-local (a `let`/`mut` SimpleName, NOT escaping, value = a struct-init), emit
     // the struct-init with its DIRECT auto-box routed to the frame region (freed at the exit edge),
@@ -8905,6 +9001,17 @@ fn emit_assign(buf: []byte, prog: CgProg, ret_type: checker::Type, a: checker::T
             }
         }
     }
+    if cg_self_append_escapes(escaping, dctx, a) {
+        match a.value.kind {
+            checker::TCall as c => {
+                out = match emit_assign_lvalue(out, prog, a) { []byte as o => o; error as err => return err }
+                out = cb(out, " = ")
+                out = match emit_list_push(out, prog, a.value, c, escaping, regions, fn_body, dctx, dctx.rr) { []byte as o => o; error as err => return err }
+                return cb(out, ";\n")
+            }
+            _ => { }
+        }
+    }
     // #61 — `<<=`/`>>=` must NOT emit the raw C compound operator: an out-of-range shift count
     // is C UB natively, while the VM (#49, compound_apply) computes a DEFINED width-masked
     // result. Rewrite as `lvalue = tk_shl_<w>(lvalue, rhs)` / tk_shr_<w>, routing through the
@@ -9096,7 +9203,7 @@ fn emit_loop_while(buf: []byte, l: checker::TLoopStmt, in_main: bool, prog: CgPr
     // LoopDeferFrame so break/continue can fire `[this loop's base, …)` for the scopes they cross.
     let base = dctx.defers.len
     let fall = cg_append_direct_defers(dctx.defers, l.body)   // all of this iteration's direct defers
-    let dctx2 = DeferCtx { defers = dctx.defers; loops = teko::list::push(dctx.loops, LoopDeferFrame { label = l.label; defer_base = base; region_base = regions.len }); cov = dctx.cov }
+    let dctx2 = DeferCtx { defers = dctx.defers; loops = teko::list::push(dctx.loops, LoopDeferFrame { label = l.label; defer_base = base; region_base = regions.len }); cov = dctx.cov; rr = dctx.rr }
     let want_block = cg_block_has_block_local(prog, escaping, fn_body, l.body, false) && regions.len < 64
     let region = if want_block { fresh_named("_tkbr", out.len to i64) } else { "" }
     mut regs2 = regions
@@ -9947,7 +10054,6 @@ fn emit_function_cov(buf: []byte, prog: CgProg, f: checker::TFunction, cov_idx: 
     // No defers ⇒ dctx stays empty ⇒ byte-identical to the pre-W9.3 output. (C: emit_function / emit_defers.)
     let fbody = f.body
     let cov = if cov_idx >= 0 { CovCtx { on = true; fn_idx = cov_idx to u64 } } else { cov_off() }
-    let dctx = DeferCtx { defers = teko::list::empty(); loops = teko::list::empty(); cov = cov }
     // MEM Step 1 — THE FRAME REGION. Run the escape check (escape.tks). When a TOP-LEVEL binding is
     // provably frame-local, open a per-function frame region `_tkfr` (a deterministic, per-fn-constant
     // name → fixpoint-safe, NOT buf.len) at entry; its frame-local allocations are bulk-freed on the
@@ -9956,9 +10062,13 @@ fn emit_function_cov(buf: []byte, prog: CgProg, f: checker::TFunction, cov_idx: 
     let escaping = checker::fn_escaping_vars(f)
     let want_frame = fn_body_has_frame_local(prog, escaping, fbody) || f.has_arena_size
     let frame: str = if want_frame { "_tkfr" } else { "" }
+    let use_rr = want_frame && !f.has_arena_size
+    let rr: str = if use_rr { "_tkrr" } else { "" }
+    let dctx = DeferCtx { defers = teko::list::empty(); loops = teko::list::empty(); cov = cov; rr = rr }
+    if use_rr { out = cb(out, "    tk_region *_tkrr = tk_region_root();\n") }
     if want_frame {
         out = cb(out, "    tk_region *_tkfr = tk_region_new(")
-        out = cb(out, cg_frame_region_parent_expr(f))
+        out = cb(out, if use_rr { rr } else { cg_frame_region_parent_expr(f) })
         out = cb(out, ");\n")
         if f.has_arena_size { out = cg_emit_arena_presize(out, f.arena_size) }
     }
