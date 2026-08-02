@@ -1,0 +1,241 @@
+/**
+ * teko::journal — the append-only segment ONE writer owns and nobody else shares.
+ *
+ * THE MODEL, IN ONE SENTENCE. Every write a run makes goes to a journal: an append-only record,
+ * stamped with the run's identity, segmented per writer. Summarisation does not merge anything at
+ * the end — it RE-READS. Three properties, each killing one defect: a per-writer segment removes the
+ * overlap (no shared destination, so no lock); a run stamp removes the previous run's garbage passing
+ * for valid; append-only plus read-back summarisation removes the loss on abrupt death (there is
+ * nothing to merge that could be lost — it was already written).
+ *
+ * WHY THE `seg` IS OPAQUE. Today it is a descriptor opened in `O_APPEND`; when the lanes of a future
+ * `teko::isolate` arrive it will be a per-lane slab index. The record format, `append` and the
+ * summariser do not change with the swap — and that invariance is why the field carries no concrete
+ * meaning on the surface. The substrate swap is ONE function.
+ *
+ * @since 0.3.1
+ */
+
+/**
+ * open_seg_rt — the runtime symbol `tk_journal_open` wraps: open/create `path` in O_APPEND and return
+ * the RAW descriptor (>= 0), or -1 when it could not be created. Kept private so every caller goes
+ * through the typed `open_at`.
+ *
+ * A SCALAR RETURN AND NOT `Journal | error`, which is a compiler constraint the whole runtime surface
+ * records (`teko::io::append_file`): a brand-new `error`-shaped `extern fn` needs a per-name lift in
+ * codegen the released bootstrap seed's frozen codegen cannot learn, and a `from "teko_rt"` extern
+ * cannot return a user struct by value at all. The Teko wrapper builds the `Journal` and the `error`.
+ *
+ * @param path  the segment file to open, created when absent
+ * @return      the raw descriptor (>= 0), or -1 on failure
+ * @since 0.3.1
+ */
+extern fn open_seg_rt(path: str) -> i64 = "tk_journal_open" from "teko_rt"
+
+/**
+ * append_seg_rt — the runtime symbol `tk_journal_append` wraps: write the record whole to descriptor
+ * `seg` and return 0, or the errno. Kept private so every caller goes through `append`/`append_line`.
+ *
+ * @param seg  the raw descriptor a segment was opened on
+ * @param rec  the record bytes, already terminated by a newline
+ * @return     0 on success, or the errno the write failed with
+ * @since 0.3.1
+ */
+extern fn append_seg_rt(seg: i64, rec: str) -> i32 = "tk_journal_append" from "teko_rt"
+
+/**
+ * close_seg_rt — the runtime symbol `tk_journal_close` wraps: close descriptor `seg`, returning 0 or
+ * the errno. Kept private so every caller goes through `close`.
+ *
+ * @param seg  the raw descriptor to close
+ * @return     0 on success, or the errno
+ * @since 0.3.1
+ */
+extern fn close_seg_rt(seg: i64) -> i32 = "tk_journal_close" from "teko_rt"
+
+/**
+ * rename_rt — the runtime symbol `tk_rt_rename` wraps: rename `from` to `to` atomically within the
+ * same directory, returning 0 or the errno. Kept private so every caller goes through `rename`.
+ *
+ * @param from  the existing path
+ * @param to    the path to publish it as, replacing any file already there
+ * @return      0 on success, or the errno
+ * @since 0.3.1
+ */
+extern fn rename_rt(from: str, to: str) -> i32 = "tk_rt_rename" from "teko_rt"
+
+/**
+ * BAD_DESCRIPTOR — what `open_seg_rt` answers when the segment could not be created.
+ */
+const BAD_DESCRIPTOR: i64 = -1
+
+/**
+ * FIELD_SEP — the byte that separates a record's fields on disk. A tab, because it never appears in a
+ * run id, a writer id or a `kind`, and a payload that carried one would be the emitter's bug to keep
+ * out (payloads are single-line by contract).
+ */
+const FIELD_SEP: str = "\t"
+
+/**
+ * Journal — the append-only segment ONE writer owns and no more.
+ *
+ * @since 0.3.1
+ */
+pub type Journal = struct {
+    /** the identifier of the run this segment belongs to (`run_id`), stamped into every record. */
+    run: str
+    /** the writer's identity — `s<i>` for a gate shard, `p<i>` for a pool child, `m` for the orchestrator. */
+    writer: str
+    /**
+     * the open sink: a raw descriptor today, a per-lane slab index when lanes arrive.
+     *
+     * AN `i64` AND NOT THE DESIGN'S `u64`, for a reason the runtime surface forces: the descriptor is
+     * what `open_seg_rt` answers, and it answers `-1` on failure — a signed field takes that value
+     * with no cast, and this project's cast law admits no `i64`-from-`u64` narrowing to launder it.
+     */
+    seg: i64
+}
+
+/**
+ * Record — a record read back by the summariser.
+ *
+ * @since 0.3.1
+ */
+pub type Record = struct {
+    /** the run that wrote it; a record of another run is DISCARDED by `fold`. */
+    run: str
+    /** who wrote it. */
+    writer: str
+    /** the record's kind (`begin`, `ok`, `fail`, `cov`, `end`, `stop`, `crash`). */
+    kind: str
+    /** the record body, without newlines (the emitter keeps them out). */
+    payload: str
+}
+
+/**
+ * open_at — open the segment file `path` for `run`/`writer`, returning the `Journal` that owns it.
+ *
+ * THE IDENTITY IS PASSED IN, NOT COMPOSED HERE. `run` and `writer` are the stamp every record built
+ * on this segment carries; the caller (or `teko::journal::open`, once run identity lands) supplies
+ * them so this function stays the single place a descriptor becomes a typed segment.
+ *
+ * @param path    the segment file to open, created when absent
+ * @param run     the run stamp records on this segment carry
+ * @param writer  the writer identity records on this segment carry
+ * @return        the opened segment
+ * @throws        when the segment could not be created (permission, disk full)
+ * @since 0.3.1
+ */
+pub fn open_at(path: str, run: str, writer: str) -> Journal | error {
+    let fd = open_seg_rt(path)
+    if fd == BAD_DESCRIPTOR {
+        return error { message = teko::str::concat("teko::journal::open_at: could not open segment ", path) }
+    }
+    Journal { run = run; writer = writer; seg = fd }
+}
+
+/**
+ * append — append ONE record to `j`'s segment.
+ *
+ * THE DURABILITY POINT IS THIS, and it is named: a single `write(2)` on a descriptor opened in
+ * `O_APPEND`, with no user-space buffer. The record is in the kernel when `append` returns, so a
+ * `SIGKILL` of the process does not lose it — only a crash of the machine would, and that boundary is
+ * the design's §5.
+ *
+ * @param j        the segment to append to
+ * @param kind     the record's kind
+ * @param payload  the body, without newlines
+ * @return         nothing on success, or the write failure
+ * @throws         when the write fails (ENOSPC, EIO)
+ * @since 0.3.1
+ */
+pub fn append(j: Journal, kind: str, payload: str) -> null | error {
+    let rec = teko::str::concat(record_line(j.run, j.writer, kind, payload), "\n")
+    if append_seg_rt(j.seg, rec) != 0 {
+        return error { message = teko::str::concat("teko::journal::append: write failed on writer ", j.writer) }
+    }
+    null
+}
+
+/**
+ * record_line — the on-disk shape of one record, WITHOUT its trailing newline: the four fields joined
+ * by `FIELD_SEP`, in the order `fold` reads them back.
+ *
+ * @param run      the run stamp
+ * @param writer   the writer identity
+ * @param kind     the record kind
+ * @param payload  the single-line body
+ * @return         `run \t writer \t kind \t payload`
+ * @since 0.3.1
+ */
+fn record_line(run: str, writer: str, kind: str, payload: str) -> str {
+    mut line: str = teko::str::concat(run, FIELD_SEP)
+    line = teko::str::concat(line, writer)
+    line = teko::str::concat(line, FIELD_SEP)
+    line = teko::str::concat(line, kind)
+    line = teko::str::concat(line, FIELD_SEP)
+    teko::str::concat(line, payload)
+}
+
+/**
+ * close — close `j`'s segment. A segment that is never closed is flushed at process exit anyway (the
+ * writes are unbuffered), so this exists for the writer that is DONE and wants the descriptor back.
+ *
+ * @param j  the segment to close
+ * @return   nothing on success, or the close failure
+ * @throws   when the descriptor could not be closed
+ * @since 0.3.1
+ */
+pub fn close(j: Journal) -> null | error {
+    if close_seg_rt(j.seg) != 0 {
+        return error { message = teko::str::concat("teko::journal::close: could not close writer ", j.writer) }
+    }
+    null
+}
+
+/**
+ * append_line — append `line` and a newline to the segment file at `path`, as ONE durable write.
+ *
+ * THIS IS THE RAW-LINE ARM `teko::process::verdict_emit` delegates to, and it is the SAME durability
+ * primitive `append` uses — an `O_APPEND` open, one `write(2)`, a close — with no field stamping, so
+ * the third channel's byte format is exactly what its readers already expect. Structured records go
+ * through `append`; a free-form verdict line goes through here, and both are one unbuffered write.
+ *
+ * @param path  the segment file to append to, created when absent
+ * @param line  the record, WITHOUT a trailing newline (one is added)
+ * @return      nothing on success, or the failure
+ * @throws      when the segment could not be opened or the bytes could not all be written
+ * @since 0.3.1
+ */
+pub fn append_line(path: str, line: str) -> null | error {
+    let fd = open_seg_rt(path)
+    if fd == BAD_DESCRIPTOR {
+        return error { message = teko::str::concat("teko::journal::append_line: could not open segment ", path) }
+    }
+    let wrote = append_seg_rt(fd, teko::str::concat(line, "\n"))
+    let closed = close_seg_rt(fd)
+    if wrote != 0 {
+        return error { message = teko::str::concat("teko::journal::append_line: write failed on ", path) }
+    }
+    if closed != 0 {
+        return error { message = teko::str::concat("teko::journal::append_line: close failed on ", path) }
+    }
+    null
+}
+
+/**
+ * rename — publish `from` as `to` atomically within one directory, so no reader sees a half-written
+ * file: what is a whole artefact writes to the writer's own temporary and lands here.
+ *
+ * @param from  the existing (complete) file
+ * @param to    the path to publish it as, replacing any file already there
+ * @return      nothing on success, or the failure
+ * @throws      when the rename failed (cross-device, permission)
+ * @since 0.3.1
+ */
+pub fn rename(from: str, to: str) -> null | error {
+    if rename_rt(from, to) != 0 {
+        return error { message = teko::str::concat(teko::str::concat("teko::journal::rename: could not publish ", from), teko::str::concat(" as ", to)) }
+    }
+    null
+}

@@ -374,13 +374,14 @@ pub fn verdict_channel_path() -> str {
  * THE FALLBACK IS THE POINT (R0): a binary run by hand, with no `VERDICT_CHANNEL_ENV` in its
  * environment, still shows every record it emits — the protocol is observable without a flag.
  *
- * ONE APPEND PER RECORD, AND THE SHAPE IT REPLACED WAS QUADRATIC. This used to read the WHOLE
+ * ONE APPEND PER RECORD, AND IT IS THE JOURNAL'S OWN DURABLE WRITE. This used to read the WHOLE
  * channel file back, concatenate the new record onto it, and rewrite the lot. Two arena allocations
  * the size of the file per record — and Teko's arena frees ONCE, at process exit
  * (`tk_regions_free_all`: "free EVERY still-live region") — so N records allocated the SUM of 1..N
  * file sizes and never returned a byte. That is what flooded the regression tier: 8.4 GB anon-rss
- * measured on the base. `teko::io::append_file` writes only the new record, so the cost is linear
- * and the file is never read at all.
+ * measured on the base. `teko::journal::append_line` writes only the new record through one
+ * `O_APPEND` `write(2)`, so the cost is linear and the file is never read at all — the third channel
+ * is a journal segment (`teko::journal`), and this is that journal's raw-line append.
  *
  * THE CROSS-PROCESS RACE NARROWS WITH IT, which is a correctness gain and not only a speed one: a
  * read-modify-write lets a second process clobber a record the first had already written, while a
@@ -396,7 +397,7 @@ pub fn verdict_channel_path() -> str {
 pub fn verdict_emit(line: str) -> null | error {
     let path = verdict_channel_path()
     if path.len == 0 { teko::io::eprintln(line); return null }
-    teko::io::append_file(path, line ~ "\n")
+    teko::journal::append_line(path, line)
 }
 
 /**

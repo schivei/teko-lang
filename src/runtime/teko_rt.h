@@ -800,6 +800,32 @@ tk_ffi_ures tk_rt_write_file(tk_str path, tk_str content);
 // always had; naming it is the honest move, hiding it behind the POSIX guarantee is not.
 #define TK_RT_APPEND_FAILED (-1)
 int32_t tk_rt_append_file(tk_str path, tk_str content);
+// (0.3.1) tk_journal_open — open/create `path` in O_WRONLY|O_APPEND|O_CREAT and return the RAW
+// descriptor (>= 0), or -1 when it could not be created. NO stdio: a FILE* carries a user-space
+// buffer, and a user-space buffer dies with the process — which is the one moment this segment had
+// value. The descriptor is what a signal handler can legally write to (tk_journal_note), and that
+// is why a journal is OPENED once at run start rather than at the first record.
+int64_t tk_journal_open(tk_str path);
+// (0.3.1) tk_journal_append — write `rec` whole to the descriptor `seg`, finishing a short write in
+// a loop. Returns 0, or the errno the write failed with. The record durability point is HERE: one
+// `write(2)` on an O_APPEND descriptor with no user-space buffer, so a SIGKILL of the process cannot
+// lose a record `tk_journal_append` already returned for.
+int32_t tk_journal_append(int64_t seg, tk_str rec);
+// (0.3.1) tk_journal_close — close a segment descriptor. Returns 0, or the errno.
+int32_t tk_journal_close(int64_t seg);
+// (0.3.1) tk_journal_arm — remember `seg` as the descriptor a later tk_journal_note writes to from
+// inside a signal handler. Kept separate from tk_journal_open because the polite-signal arm (C5)
+// arms the ALREADY-open run segment, and arming is the only step that may run before a signal.
+void tk_journal_arm(int64_t seg);
+// (0.3.1) tk_journal_note — the ASYNC-SIGNAL-SAFE arm: write a pre-shaped `stop <sig>\n` record to
+// the armed descriptor without allocating and without formatting through stdio. A no-op when no
+// descriptor is armed. This is the only journal write a signal handler may make.
+void tk_journal_note(int sig);
+// (0.3.1) tk_rt_rename — rename `from` to `to` atomically within the same directory (rename(2) /
+// MoveFileExW with MOVEFILE_REPLACE_EXISTING). The one primitive missing to publish a WHOLE artefact
+// or none: what is append goes by append, what is a whole artefact writes to the writer's own
+// temporary and publishes by rename, so no reader ever sees a half-written file. Returns 0, or errno.
+int32_t tk_rt_rename(tk_str from, tk_str to);
 // teko::io::write_file_bytes(path, data) — write a raw []byte slice to the file; error on failure.
 // Takes the byte list as a ptr+len pair (the C7.14 tk_byte_list ABI). Shares the same
 // write-path as tk_rt_write_file; accepts binary data (not UTF-8-restricted).

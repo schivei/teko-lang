@@ -2591,6 +2591,94 @@ int32_t tk_rt_append_file(tk_str path, tk_str content) {
     return status;
 }
 
+// (0.3.1) tk_journal_open — see teko_rt.h. RAW open in O_APPEND, no stdio, so a signal handler can
+// write the descriptor and no user-space buffer can be lost with the process.
+int64_t tk_journal_open(tk_str path) {
+    char *p = tk_cstr(path);
+#ifdef _WIN32
+    int fd = _open(p, _O_WRONLY | _O_CREAT | _O_APPEND | _O_BINARY, _S_IREAD | _S_IWRITE);
+#else
+    int fd = open(p, O_WRONLY | O_CREAT | O_APPEND, 0644);
+#endif
+    if (fd < 0) return -1;
+    return (int64_t)fd;
+}
+
+// (0.3.1) tk_journal_append — see teko_rt.h. One write(2), retried only to finish a short write, so
+// the record is in the kernel when this returns. Returns 0 or the errno.
+int32_t tk_journal_append(int64_t seg, tk_str rec) {
+    int fd = (int)seg;
+    if (fd < 0) return EBADF;
+    size_t done = 0;
+    while (done < rec.len) {
+#ifdef _WIN32
+        int put = _write(fd, rec.ptr + done, (unsigned int)(rec.len - done));
+#else
+        ssize_t put = write(fd, rec.ptr + done, rec.len - done);
+#endif
+        if (put <= 0) { int e = errno; return e != 0 ? e : (int32_t)TK_RT_APPEND_FAILED; }
+        done += (size_t)put;
+    }
+    return 0;
+}
+
+// (0.3.1) tk_journal_close — close a segment descriptor. Returns 0 or the errno.
+int32_t tk_journal_close(int64_t seg) {
+    int fd = (int)seg;
+    if (fd < 0) return EBADF;
+#ifdef _WIN32
+    if (_close(fd) != 0) { int e = errno; return e != 0 ? e : (int32_t)TK_RT_APPEND_FAILED; }
+#else
+    if (close(fd) != 0) { int e = errno; return e != 0 ? e : (int32_t)TK_RT_APPEND_FAILED; }
+#endif
+    return 0;
+}
+
+// tk_journal_note_fd — the descriptor a signal handler writes to. `volatile sig_atomic_t` because it
+// is read inside a signal handler, and set by tk_journal_arm before any signal can arrive.
+static volatile sig_atomic_t tk_journal_note_fd = -1;
+
+// (0.3.1) tk_journal_arm — see teko_rt.h. Records the descriptor tk_journal_note will write to.
+void tk_journal_arm(int64_t seg) { tk_journal_note_fd = (sig_atomic_t)seg; }
+
+// (0.3.1) tk_journal_note — see teko_rt.h. ASYNC-SIGNAL-SAFE: it formats `stop <sig>\n` into a stack
+// buffer by hand and makes a single write(2), touching no allocator and no stdio, so it is legal
+// from inside a signal handler. A no-op when nothing is armed.
+void tk_journal_note(int sig) {
+    int fd = (int)tk_journal_note_fd;
+    if (fd < 0) return;
+    char buf[32];
+    int n = 0;
+    buf[n++] = 's'; buf[n++] = 't'; buf[n++] = 'o'; buf[n++] = 'p'; buf[n++] = ' ';
+    int s = sig < 0 ? 0 : sig;
+    char digits[10];
+    int d = 0;
+    if (s == 0) { digits[d++] = '0'; }
+    while (s > 0 && d < 10) { digits[d++] = (char)('0' + (s % 10)); s /= 10; }
+    while (d > 0) { buf[n++] = digits[--d]; }
+    buf[n++] = '\n';
+#ifdef _WIN32
+    int put = _write(fd, buf, (unsigned int)n); (void)put;
+#else
+    ssize_t put = write(fd, buf, (size_t)n); (void)put;
+#endif
+}
+
+// (0.3.1) tk_rt_rename — see teko_rt.h. Atomic publish of a whole artefact. Returns 0 or errno.
+int32_t tk_rt_rename(tk_str from, tk_str to) {
+    char *f = tk_cstr(from);
+    char *t = tk_cstr(to);
+#ifdef _WIN32
+    if (MoveFileExA(f, t, MOVEFILE_REPLACE_EXISTING) == 0) {
+        return (int32_t)GetLastError();
+    }
+    return 0;
+#else
+    if (rename(f, t) != 0) { int e = errno; return e != 0 ? e : (int32_t)TK_RT_APPEND_FAILED; }
+    return 0;
+#endif
+}
+
 // C7.12 — write raw bytes to a file (the .tkl package output path; binary, not UTF-8).
 // Mirrors tk_rt_write_file but accepts a []byte ptr+len pair instead of a tk_str.
 tk_ffi_ures tk_rt_write_file_bytes(tk_str path, const tk_byte *ptr, uint64_t len) {
