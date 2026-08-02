@@ -522,8 +522,9 @@ exatamente a forma que D1.2 ja fixou (`debugger-superficie...:1099-1100`: *"D1.2
 Os 6 crumbs de substrato ficam como no relatorio (nomes preservados para nao divergir do
 artefato do dono). Os crumbs `DE.*` sao **UM so trilho de um so binario Teko** (motor +
 DAP + CLI sao o mesmo programa, §8.2) — nao os leia como camadas empilhaveis por processos
-distintos. O **unico ponto C** do trilho inteiro e **DE.1** (o piso de syscall); todo o
-resto (`DE.2`-`DE.6`) e Teko puro baixado pelo backend nativo.
+distintos. O **unico ponto C** do trilho inteiro e **DE.1** (o piso de syscall); o corpo do
+binario (`DE.2`-`DE.5`) e Teko puro baixado pelo backend nativo. `DE.6` e o cliente VSCode
+(glue), fora do binario.
 
 | Crumb | Titulo | Toca | Tipo | Colisao |
 |---|---|---|---|---|
