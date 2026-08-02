@@ -4150,6 +4150,33 @@ fn f_f32_text_is_its_own_value() -> i64 {
 }
 
 /**
+ * f_float_hole_bare_literal_stays_runtime — the OWNER invariant for numeric interpolation
+ * (2026-08-02): the render of an `f32`/`f64` (and of `dec`/`bigint`) hole to text is deferred to the
+ * RUNTIME renderer and is NEVER folded to a string literal at compile time, because a compile-time
+ * fold of a float would diverge from the runtime's own result (rounding, precision, FPU mode) and so
+ * break both correctness and the fixpoint.
+ *
+ * A BARE float LITERAL sitting directly in the hole (`$"{2.5}"`) is the PUREST fold target the layer
+ * can face — the hole expression is itself the constant a fold would render — and the sibling
+ * `f_f32_text_is_its_own_value` only ever interpolates a `let`-bound const, never a raw literal. The
+ * fold declines every float family (`cf_is_const_literal` excludes a float number literal), so the
+ * value travels the same `tk_ftoa_len`/`tk_fmt_f_len` runtime path a runtime float does. Proven two
+ * ways per value: agreement with a DIRECT `teko::ftoa` call on the same literal (the interpolation
+ * hole builder and the builtin call resolver are different lowerings meeting at one runtime symbol,
+ * so agreement is evidence and not a restated expectation) and, for the exactly-representable `2.5`
+ * whose text is unambiguous, agreement with the pinned form.
+ *
+ * @return 0 when every bare-literal hole matches its runtime twin and pinned text, else the failing check
+ */
+fn f_float_hole_bare_literal_stays_runtime() -> i64 {
+    if $"{2.5}" != teko::ftoa(2.5) { return 1 }
+    if $"{0.1}" != teko::ftoa(0.1) { return 2 }
+    if $"{2.5}" != "2.5" { return 3 }
+    if $"{2.5:F2}" != "2.50" { return 4 }
+    0
+}
+
+/**
  * oobr_grown — a `teko::list::push`-GROWN buffer holding `1 … n`, so the element READ's bounds guard
  * is measured against a length the RECEIVER carries at runtime rather than one an array literal fixed
  * at compile time. The two are the same `[]i64` to the checker and different memory to the backend, and
