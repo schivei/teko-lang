@@ -182,6 +182,11 @@ void       tk_arena_pop(void);                  // free every root-region chunk 
 // folded permanently into the (now-current) mark below it. The Boundary-A counterpart to
 // tk_arena_pop: a scope that turned out to ESCAPE commits its allocations instead of losing them.
 void       tk_arena_commit(void);               // discard the top mark, keeping its allocations
+// (E1-C2) tk_task_reset — return the current task to the ephemeral-clean state of "before any test":
+// the ONE place that clears every per-task singleton a `#test` can dirty (intern table, coverage
+// counts, cast positions, tally, scope/scenario labels, capture channels, stdin/fd staging), buffers
+// preserved. The `task_reset` builtin lowers to it; resolves the task through tk_task_current().
+void       tk_task_reset(void);                 // clear the current task's ephemeral per-test state
 // (0.3.1 backend-memoria C1) tk_region_enter / tk_region_leave — the SWAPPABLE CURRENT REGION. A
 // per-task stack of "current region": tk_alloc bump-allocates from the stack TOP instead of a fixed
 // tk_region_root(). An EMPTY stack ⇒ the root, so a program that never enters is byte-for-byte the
@@ -1076,6 +1081,11 @@ const tk_byte *tk_rt_arch_len(uint64_t *out_len);
 const tk_byte *tk_rt_version_len(uint64_t *out_len);
 // (#148) the process peak RSS in bytes (0 = unavailable) — teko::mem::peak_rss.
 uint64_t tk_peak_rss(void);
+// (E1-C6) the OS-granted online processor count (>= 1) — the default and cap for the test/regression
+// job pools, so a run never hard-codes how parallel a machine may be. Bound in the build source
+// through an `extern fn ... from "teko_rt"` (regression.tks `os_max`), the seed-lowerable route the
+// name registry's `tk_names_live_count` uses; a new injected builtin would need a release to seed it.
+uint64_t tk_rt_nproc(void);
 
 // (#194 C6) teko::crypto::rand::secure_bytes(n) — n cryptographically-secure random bytes
 // from the host CSPRNG (getrandom(2)/getentropy(3) on POSIX, rand_s (ucrt) on Windows).

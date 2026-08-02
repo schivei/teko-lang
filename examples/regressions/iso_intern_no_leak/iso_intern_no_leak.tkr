@@ -1,0 +1,22 @@
+# iso_intern_no_leak.tkr — the NATIVE-route regressor of E1-C3 hermeticity (0.3.1
+# paralelizacao-eixo1-isolamento-por-task §5).
+#
+# WHAT IT PINS. The string-intern table is now a per-task member (E1-C1) and `task_reset()` clears it
+# (E1-C2), and the gate runs each `#test` under that reset (E1-C3, via `tk_test_begin`). This fixture
+# simulates the reshuffle the owner named: a writer test interns "x", a reader test reads it back, and
+# the two run in BOTH orders. Because each test enters under `task_reset()`, the reader sees MISS in
+# EITHER order — the verdict does not depend on which test ran first, which is the whole property.
+#
+# TEST = STDOUT, NEVER EXIT (the axis law): the verdict is the token on stdout, not the exit code.
+#
+# C ROUTE by declaration (`Given env = ["TEKO_BACKEND=c"]`): the intern builtins are staged off in the
+# native backend (`intern_put not yet lowered (N2)`), so the table they touch is exercised down the C
+# route, where `tk_intern_get`/`tk_intern_put` resolve. The per-task-ification and reset the fixture
+# pins live in the SHARED runtime (`teko_rt.c`), identical on both routes.
+
+Feature: iso_intern_no_leak — a reset at each #test boundary makes the intern reader hermetic
+
+  Scenario: the intern reader sees MISS in both orders, so the reshuffle exposes no residue
+    Given env = ["TEKO_BACKEND=c"]
+    When built and run
+    Then stdout pattern = "iso-intern-no-leak MISS MISS"

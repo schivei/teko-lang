@@ -815,67 +815,10 @@ typedef struct tk_intern_entry {
     struct tk_intern_entry *next;
 } tk_intern_entry;
 #define TK_INTERN_BUCKETS 1024   // power of two — bucket = hash & (N-1)
-static tk_intern_entry *tk_intern_table[TK_INTERN_BUCKETS];
-
-// tk_intern_find — the bucket chain entry whose key equals `key`, or NULL. Shared by get/put so
-// the equal-key scan (hash bucket + length + memcmp) has exactly one definition.
-static tk_intern_entry *tk_intern_find(size_t bucket, tk_str key) {
-    for (tk_intern_entry *e = tk_intern_table[bucket]; e != NULL; e = e->next) {
-        if (e->key_len == key.len && (key.len == 0 || memcmp(e->key, key.ptr, key.len) == 0)) return e;
-    }
-    return NULL;
-}
-
-// tk_intern_dup — a fresh heap copy of `s` (>=1 byte, so an empty value never shares tk_alloc's
-// NULL-for-zero convention with a real miss). OOM panics (M.1).
-static tk_byte *tk_intern_dup(tk_str s) {
-    tk_byte *b = malloc(s.len ? s.len : 1);
-    if (b == NULL) tk_panic("out of memory (intern)");
-    if (s.len) memcpy(b, s.ptr, s.len);
-    return b;
-}
-
-// tk_intern_get returns a FRESH, INDEPENDENT copy of the cached value — never a view into the
-// table's own entry. A view would dangle the instant a LATER tk_intern_put overwrites (or
-// tk_intern_reset frees) that same entry, breaking Teko's str value-semantics contract (a
-// returned str's lifetime is never tied to some other call's future). The copy costs one hash
-// lookup + one memcpy, still far cheaper than the caller's original rebuild-from-scratch loop.
-tk_str tk_intern_get(tk_str key) {
-    size_t h = (size_t)(tk_str_hash(key) & (TK_INTERN_BUCKETS - 1));
-    tk_intern_entry *e = tk_intern_find(h, key);
-    if (e == NULL) return (tk_str){ NULL, 0 };
-    tk_str cached = { e->val, e->val_len };
-    return (tk_str){ tk_intern_dup(cached), e->val_len };
-}
-
-tk_str tk_intern_put(tk_str key, tk_str value) {
-    size_t h = (size_t)(tk_str_hash(key) & (TK_INTERN_BUCKETS - 1));
-    tk_intern_entry *e = tk_intern_find(h, key);
-    if (e != NULL) {
-        free(e->val);
-        e->val = tk_intern_dup(value); e->val_len = value.len;
-        return value;
-    }
-    tk_intern_entry *ne = malloc(sizeof *ne);
-    if (ne == NULL) tk_panic("out of memory (intern)");
-    ne->key = tk_intern_dup(key); ne->key_len = key.len;
-    ne->val = tk_intern_dup(value); ne->val_len = value.len;
-    ne->next = tk_intern_table[h];
-    tk_intern_table[h] = ne;
-    return value;
-}
-
-void tk_intern_reset(void) {
-    for (int i = 0; i < TK_INTERN_BUCKETS; i += 1) {
-        tk_intern_entry *e = tk_intern_table[i];
-        while (e != NULL) {
-            tk_intern_entry *next = e->next;
-            free(e->key); free(e->val); free(e);
-            e = next;
-        }
-        tk_intern_table[i] = NULL;
-    }
-}
+// (E1-C1) tk_intern_table is now a per-task member (see the seam beside the F1 families); the bucket
+// array travels with the task and tk_intern_reset frees its entries without touching another task's.
+// (E1-C1) The intern accessors themselves live BELOW `struct tk_task` (search tk_intern_find): they
+// dereference the per-task seam, so they must follow the struct's definition, not precede it.
 
 // tk_str_slice — the bytes [start, end) as a ZERO-COPY VIEW into the parent str (#148). SAFE
 // because a Teko `str` is IMMUTABLE and its buffer is never individually freed (arena/root or
@@ -1221,6 +1164,11 @@ typedef struct tk_freenode { struct tk_freenode *next; size_t bytes; } tk_freeno
 typedef struct { struct tk_chunk *chunk; size_t used; } tk_arena_mark;
 typedef struct { const void *ptr; uint64_t len, cap, esz; tk_region *region; uint64_t region_gen; } tk_push_slot_entry;
 
+/** tk_chan — one captured output stream of a running `#test` (the per-test channel; see the
+    PER-TEST CHANNEL section). Defined here, ahead of `struct tk_task`, so the task can hold its
+    stdout/stderr capture by value (E1-C1: the channel is per-task, not a process singleton). */
+typedef struct { char *buf; size_t len; size_t cap; } tk_chan;
+
 typedef struct tk_task {
     tk_region      *regs;                 // (W9.3b) registry of THIS task's live regions: on it from tk_region_new until drop
     tk_region      *root;                 // this task's root region — lazy + idempotent (the root is also on `regs`)
@@ -1238,6 +1186,20 @@ typedef struct tk_task {
     volatile int32_t test_code[TK_TEST_CAPTURE_DEPTH_MAX];   // per-level outcome code
     uint64_t       *fn_stack;             // (D3-branch) coverage fn-attribution stack — a shadow of THIS task's call stack
     uint64_t        fn_sp, fn_cap;        // its depth and capacity (libc heap: survives the arena rewind)
+    // (E1-C1) Category C — the singletons a `#test` body or the gate touches. Process-global before
+    // this axis, now per-task so a reshuffled test cannot read another test's residue. Large tables
+    // (intern, coverage sinks) keep their malloc'd BUFFER across a reset; only the counts/marks zero.
+    tk_intern_entry *intern_table[TK_INTERN_BUCKETS];        // C-1 codegen string-intern cache
+    uint64_t       *cov_ids;  uint64_t cov_n, cov_cap;       // C-2 function-coverage sink
+    uint64_t       *covb_ids; uint64_t covb_n, covb_cap; int covb_on;   // C-3 branch-coverage sink
+    uint64_t       *line_ids; uint64_t line_cap, line_n; int lines_on;  // C-4 line-coverage sink
+    long            test_ran, test_passed, test_failed, test_exited;    // C-6 test tally
+    int32_t         test_probe_last_code;                    // C-7 last probe's outcome code
+    char            scope_buf[TK_TEST_SCOPE_MAX]; size_t scope_len;     // C-8 running test's scope label
+    char            scen_name[TK_TEST_LABEL_MAX]; size_t scen_len; char scen_prefix[TK_TEST_LABEL_MAX + 2];   // C-9 current scenario
+    tk_chan         chan_out, chan_err; char chan_label[TK_TEST_LABEL_MAX]; size_t chan_label_len; bool chan_open;   // C-10 stdout/stderr capture
+    bool            rt_stdin_eof_flag;                       // C-11 stdin EOF sticky flag
+    tk_byte         rt_fd_stage[TK_RT_PIPE_CAPACITY]; size_t rt_fd_staged, rt_fd_taken;   // C-12 fd staging (pipe)
 } tk_task;
 
 // tk_g_main_task — the task every program starts on. Statically allocated (not malloc'd) so the
@@ -1280,6 +1242,147 @@ tk_task *tk_task_current(void) {
 #define tk_fn_sp              (tk_task_current()->fn_sp)
 #define tk_fn_cap             (tk_task_current()->fn_cap)
 
+// (E1-C1) The Category C families, read through the SAME seam. As with the 11 F1 families the names
+// are unchanged on purpose: every existing use site in this file keeps its exact text, so this axis
+// is a change of WHERE the state lives, not of who touches it.
+#define tk_intern_table       (tk_task_current()->intern_table)
+#define tk_cov_ids            (tk_task_current()->cov_ids)
+#define tk_cov_n              (tk_task_current()->cov_n)
+#define tk_cov_cap            (tk_task_current()->cov_cap)
+#define tk_covb_ids           (tk_task_current()->covb_ids)
+#define tk_covb_n             (tk_task_current()->covb_n)
+#define tk_covb_cap           (tk_task_current()->covb_cap)
+#define tk_covb_on            (tk_task_current()->covb_on)
+#define tk_line_ids           (tk_task_current()->line_ids)
+#define tk_line_cap           (tk_task_current()->line_cap)
+#define tk_line_n             (tk_task_current()->line_n)
+#define tk_lines_on           (tk_task_current()->lines_on)
+#define tk_test_ran           (tk_task_current()->test_ran)
+#define tk_test_passed        (tk_task_current()->test_passed)
+#define tk_test_failed        (tk_task_current()->test_failed)
+#define tk_test_exited        (tk_task_current()->test_exited)
+#define tk_test_probe_last_code (tk_task_current()->test_probe_last_code)
+#define tk_scope_buf          (tk_task_current()->scope_buf)
+#define tk_scope_len          (tk_task_current()->scope_len)
+#define tk_scen_name          (tk_task_current()->scen_name)
+#define tk_scen_len           (tk_task_current()->scen_len)
+#define tk_scen_prefix        (tk_task_current()->scen_prefix)
+#define tk_chan_out           (tk_task_current()->chan_out)
+#define tk_chan_err           (tk_task_current()->chan_err)
+#define tk_chan_label         (tk_task_current()->chan_label)
+#define tk_chan_label_len     (tk_task_current()->chan_label_len)
+#define tk_chan_open          (tk_task_current()->chan_open)
+#define tk_rt_stdin_eof_flag  (tk_task_current()->rt_stdin_eof_flag)
+#define tk_rt_fd_stage        (tk_task_current()->rt_fd_stage)
+#define tk_rt_fd_staged       (tk_task_current()->rt_fd_staged)
+#define tk_rt_fd_taken        (tk_task_current()->rt_fd_taken)
+
+// (E1-C1) The string-intern accessors, moved down from beside their typedef so they can read the
+// per-task seam above (`tk_intern_table` now dereferences `struct tk_task`, complete only here).
+
+// tk_intern_find — the bucket chain entry whose key equals `key`, or NULL. Shared by get/put so
+// the equal-key scan (hash bucket + length + memcmp) has exactly one definition.
+static tk_intern_entry *tk_intern_find(size_t bucket, tk_str key) {
+    for (tk_intern_entry *e = tk_intern_table[bucket]; e != NULL; e = e->next) {
+        if (e->key_len == key.len && (key.len == 0 || memcmp(e->key, key.ptr, key.len) == 0)) return e;
+    }
+    return NULL;
+}
+
+// tk_intern_dup — a fresh heap copy of `s` (>=1 byte, so an empty value never shares tk_alloc's
+// NULL-for-zero convention with a real miss). OOM panics (M.1).
+static tk_byte *tk_intern_dup(tk_str s) {
+    tk_byte *b = malloc(s.len ? s.len : 1);
+    if (b == NULL) tk_panic("out of memory (intern)");
+    if (s.len) memcpy(b, s.ptr, s.len);
+    return b;
+}
+
+// tk_intern_get returns a FRESH, INDEPENDENT copy of the cached value — never a view into the
+// table's own entry. A view would dangle the instant a LATER tk_intern_put overwrites (or
+// tk_intern_reset frees) that same entry, breaking Teko's str value-semantics contract (a
+// returned str's lifetime is never tied to some other call's future). The copy costs one hash
+// lookup + one memcpy, still far cheaper than the caller's original rebuild-from-scratch loop.
+tk_str tk_intern_get(tk_str key) {
+    size_t h = (size_t)(tk_str_hash(key) & (TK_INTERN_BUCKETS - 1));
+    tk_intern_entry *e = tk_intern_find(h, key);
+    if (e == NULL) return (tk_str){ NULL, 0 };
+    tk_str cached = { e->val, e->val_len };
+    return (tk_str){ tk_intern_dup(cached), e->val_len };
+}
+
+tk_str tk_intern_put(tk_str key, tk_str value) {
+    size_t h = (size_t)(tk_str_hash(key) & (TK_INTERN_BUCKETS - 1));
+    tk_intern_entry *e = tk_intern_find(h, key);
+    if (e != NULL) {
+        free(e->val);
+        e->val = tk_intern_dup(value); e->val_len = value.len;
+        return value;
+    }
+    tk_intern_entry *ne = malloc(sizeof *ne);
+    if (ne == NULL) tk_panic("out of memory (intern)");
+    ne->key = tk_intern_dup(key); ne->key_len = key.len;
+    ne->val = tk_intern_dup(value); ne->val_len = value.len;
+    ne->next = tk_intern_table[h];
+    tk_intern_table[h] = ne;
+    return value;
+}
+
+void tk_intern_reset(void) {
+    for (int i = 0; i < TK_INTERN_BUCKETS; i += 1) {
+        tk_intern_entry *e = tk_intern_table[i];
+        while (e != NULL) {
+            tk_intern_entry *next = e->next;
+            free(e->key); free(e->val); free(e);
+            e = next;
+        }
+        tk_intern_table[i] = NULL;
+    }
+}
+
+// (E1-C2/C3) THE CENTRALISED PER-TASK RESET. The leak the reshuffle exposes is a forgotten reset;
+// the cure is to make forgetting impossible by giving the current task's ephemeral state exactly ONE
+// place that clears it. A new per-task singleton added in the future is cleared here and nowhere
+// else, so no call site can omit it — the invariant, by construction rather than by vigilance.
+
+// tk_task_reset_transient — the leak-prone, NON-accumulator slice of the current task's ephemeral
+// state: everything a `#test` can dirty that neither a later test nor the run summary is meant to
+// read back. Run at the entry of every `#test` (tk_test_begin) so a reshuffled order can expose no
+// residue, and folded into the full tk_task_reset so the two can never drift apart. It clears the
+// string-intern table, the two cast-diagnostic positions, the scope and scenario labels, the probe
+// code and the stdin/fd staging; it deliberately leaves the coverage sinks and the tally alone —
+// those ACCUMULATE across a lane's tests and are read AFTER the run, never between tests.
+static void tk_task_reset_transient(void) {
+    tk_task *t = tk_task_current();
+    tk_intern_reset();                                   // frees this task's cached entries; buckets stay
+    _tk_cast_loc_line = 0; _tk_cast_loc_col = 0;         // C-5 (process-global; written by emitted casts)
+    t->scope_len = 0;                                    // C-8
+    t->scen_len = 0;                                     // C-9
+    t->test_probe_last_code = 0;                         // C-7
+    t->rt_stdin_eof_flag = false;                        // C-11
+    t->rt_fd_staged = 0; t->rt_fd_taken = 0;             // C-12
+}
+
+// tk_task_reset — the FULL single-site reset: the transient slice PLUS the accumulators, returning
+// the current task to the ephemeral-clean state of "before any test". The coverage sinks and the
+// capture channels keep their malloc'd BUFFER (only the counts/marks zero), so the reset is never a
+// reallocation. Every table is cleared through its own existing reset (one definition apiece), so the
+// buffer-preservation contract lives in one place per family. The exported symbol takes no argument
+// and resolves the task through the same `tk_task_current()` seam as tk_arena_push — the wrapper the
+// `task_reset` builtin lowers to; the full-rewind-of-a-foreign-lane variant belongs with the lane
+// pool of the thread mode (S8), where a parent resets a lane whose flow of control has ended.
+void tk_task_reset(void) {
+    tk_task *t = tk_task_current();
+    tk_task_reset_transient();
+    tk_cov_reset();                                      // C-2 count -> 0, buffer kept
+    tk_cov_branch_reset();                               // C-3 count + fn stack -> 0, buffer kept
+    tk_cov_line_reset();                                 // C-4 count -> 0, slots cleared, buffer kept
+    t->test_ran = 0; t->test_passed = 0; t->test_failed = 0; t->test_exited = 0;   // C-6 tally
+    t->chan_out.len = 0; t->chan_err.len = 0;            // C-10 capture buffers kept, contents forgotten
+    t->chan_label_len = 0; t->chan_open = false;
+    t->arena_msp = 0;                                    // forget arena checkpoints; root chunks untouched
+}
+
 // tk_push_cache_purge — fwd; the cache lives beside tk_slice_push far below, but the task teardown
 // above it must be able to drop every live-tail witness before the memory they name is reclaimed.
 static void tk_push_cache_purge(void);
@@ -1295,6 +1398,31 @@ static uint64_t tk_region_gen_next(void) {
     return __atomic_add_fetch(&tk_g_region_gen, 1, __ATOMIC_RELAXED);
 #else
     return ++tk_g_region_gen;
+#endif
+}
+
+// (E1-C4) A dependency-free test-and-set SPINLOCK, in the same __atomic idiom as tk_region_gen_next
+// so it needs no <pthread.h> and no extra link. It guards the two Category-B singletons that must
+// stay process-global (§1b of the axis design): the arena-lifetime observability map and the lazy
+// PROGRAM region init. Both are engaged only where a race is actually possible — the obs funnel only
+// under TEKO_ARENA_OBS, the program-region guard only on the first touch — so a single-threaded run
+// (every process-shard leg today) pays a predicted, uncontended acquire and nothing more. On a
+// compiler without the GNU atomics the lock degrades to a no-op, exactly as the generation counter
+// does: correct for the single-threaded reality, and the thread mode that needs the real thing (S8)
+// is not landed.
+static volatile int tk_g_spin_obs = 0;
+static void tk_spin_lock(volatile int *lock) {
+#if defined(__GNUC__) || defined(__clang__)
+    while (__atomic_exchange_n(lock, 1, __ATOMIC_ACQUIRE)) { }
+#else
+    (void)lock;
+#endif
+}
+static void tk_spin_unlock(volatile int *lock) {
+#if defined(__GNUC__) || defined(__clang__)
+    __atomic_store_n(lock, 0, __ATOMIC_RELEASE);
+#else
+    (void)lock;
 #endif
 }
 
@@ -1408,9 +1536,17 @@ static int tk_obs_enabled(void) {
     return tk_obs_on;
 }
 static void tk_obs_add(tk_obs_site *tab, void *ra, size_t n) {
+    // (E1-C4) The ONE funnel every histogram write passes through, so one lock here serialises the
+    // whole open-addressed insert against concurrent lanes. A race would corrupt a probe count, never
+    // a free — the map is a diagnostic — so the guard is scoped to the funnel and to obs being on.
+    tk_spin_lock(&tk_g_spin_obs);
     size_t h = ((uintptr_t)ra >> 4) & (TK_OBS_CAP - 1);
     for (;;) {
-        if (tab[h].ra == ra || tab[h].ra == NULL) { tab[h].ra = ra; tab[h].bytes += n; tab[h].count += 1; return; }
+        if (tab[h].ra == ra || tab[h].ra == NULL) {
+            tab[h].ra = ra; tab[h].bytes += n; tab[h].count += 1;
+            tk_spin_unlock(&tk_g_spin_obs);
+            return;
+        }
         h = (h + 1) & (TK_OBS_CAP - 1);
     }
 }
@@ -1753,11 +1889,20 @@ void tk_region_enter_u(uint64_t child) {
 // is built: a region that is NOT any task's root, so it survives both a task's tk_arena_pop (which
 // only rewinds that task's root) and the task's exit (which only frees that task's registry).
 // Freed at process termination by tk_regions_free_all, so it is still leak-clean.
+// (E1-C4) The lazy init is double-checked under the obs spinlock so two lanes touching the program
+// region for the first time at once cannot both create it (which would leak one region and hand the
+// two lanes different "singletons"). The fast path — an already-built region — takes no lock at all,
+// so the single-threaded reality of a process-shard leg pays one predicted pointer compare. Reusing
+// the obs lock (never held across a program-region touch) keeps this to one process-wide primitive.
 tk_region *tk_region_program(void) {
+    if (tk_g_program != NULL) return tk_g_program;
+    tk_spin_lock(&tk_g_spin_obs);
     if (tk_g_program == NULL) {
-        tk_g_program = tk_region_new_on(&tk_g_program_regs, NULL);
+        tk_region *r = tk_region_new_on(&tk_g_program_regs, NULL);
         tk_termination_hook_once();
+        tk_g_program = r;
     }
+    tk_spin_unlock(&tk_g_spin_obs);
     return tk_g_program;
 }
 
@@ -2044,14 +2189,9 @@ void tk_arena_commit(void) {
 // line whose shape no test body can perturb, and the captured bytes that follow are unambiguously
 // that test's because nothing else can come between them.
 //
-// The channel is a process-wide singleton, not a stack: tests do not nest.
-typedef struct { char *buf; size_t len; size_t cap; } tk_chan;
-
-static tk_chan tk_chan_out = { NULL, 0, 0 };
-static tk_chan tk_chan_err = { NULL, 0, 0 };
-static char    tk_chan_label[TK_TEST_LABEL_MAX];
-static size_t  tk_chan_label_len = 0;
-static bool    tk_chan_open      = false;
+// The channel is per-task (E1-C1: `tk_chan` and the capture members moved into `tk_task`), not a
+// stack: tests do not nest, and a captured print must reach the running test's OWN channel, never a
+// neighbour's — which per-task storage guarantees even when lanes run concurrently.
 
 // tk_chan_append — append n bytes to a channel, growing geometrically. A failed growth DROPS the
 // bytes instead of aborting: losing a diagnostic line is bad, killing the run that would have
@@ -2104,6 +2244,7 @@ static void tk_chan_verdict_line(const char *verdict) {
 }
 
 void tk_test_begin(tk_str label) {
+    tk_task_reset_transient();   // (E1-C3) each `#test` enters on a clean transient slate — the reshuffle can expose no residue
     tk_chan_out.len = 0;
     tk_chan_err.len = 0;
     tk_chan_label_len = label.len < sizeof tk_chan_label ? label.len : sizeof tk_chan_label - 1;
@@ -2154,10 +2295,8 @@ static bool tk_test_capturing(void) { return tk_test_depth > 0; }
 // TK_TEST_VERDICT_MAX — the failing verdict buffer, sized for "FAILED (exit -2147483648)" and slack.
 #define TK_TEST_VERDICT_MAX 64
 
-static long tk_test_ran    = 0;
-static long tk_test_passed = 0;
-static long tk_test_failed = 0;
-static long tk_test_exited = 0;
+// (E1-C1) tk_test_ran/passed/failed/exited are per-task members (see the seam): the tally a lane
+// accumulates is its own, and the parent sums lanes after the barrier (§3 of the axis design).
 
 // tk_test_capture_leave — record this level's outcome, pop the stack, and hand control back to the
 // tk_test_run that owns the innermost frame. Popping BEFORE the jump is what makes the outer level
@@ -2231,7 +2370,7 @@ static void (*tk_test_probe_body(int32_t which))(void) {
 // value on this tree: codegen emits no prototype for such an extern (it relies on teko_rt.h) and the
 // header's C struct is not the mangled Teko one, so the call site fails to compile. Measured, not
 // assumed — `tk_t_teko__test__TestOutcome e = tk_test_capture_probe(...)` is an `invalid initializer`.
-static int32_t tk_test_probe_last_code = 0;
+// (E1-C1) Per-task member (see the seam beside the F1 families).
 
 int32_t tk_test_capture_probe(int32_t which) {
     void (*body)(void) = tk_test_probe_body(which);
@@ -2322,8 +2461,8 @@ static bool tk_scope_byte_ok(char c) {
     return c == '_' || c == '-';
 }
 
-static char   tk_scope_buf[TK_TEST_SCOPE_MAX];
-static size_t tk_scope_len = 0;
+// (E1-C1) tk_scope_buf/tk_scope_len are per-task members (see the seam): each test's derived scope
+// token is its own, so two lanes deriving paths at once never share the buffer.
 
 tk_str tk_test_scope(void) {
     if (!tk_chan_open) return (tk_str){ (const tk_byte *)"", 0 };
@@ -2347,9 +2486,8 @@ tk_str tk_test_scope(void) {
 // The name lives HERE rather than in the assert seed because the thing it is written onto is the
 // per-test channel above: `<name>: ok` has to land on the running test's own channel, and the panic
 // prefix has to survive the seed being replaced by the corpus's own strong definitions.
-static char   tk_scen_name[TK_TEST_LABEL_MAX];
-static size_t tk_scen_len = 0;
-static char   tk_scen_prefix[TK_TEST_LABEL_MAX + 2];
+// (E1-C1) tk_scen_name/len/prefix are per-task members (see the seam): the scenario a lane names is
+// written onto that lane's channel, so the label must travel with the task, not a shared singleton.
 
 void tk_assert_scenario_set(tk_str name) {
     tk_scen_len = name.len < sizeof tk_scen_name ? name.len : sizeof tk_scen_name - 1;
@@ -2546,7 +2684,7 @@ tk_ffi_sres tk_rt_read_file(tk_str path) {
 // generation — new/unrecognized `str | error`-shaped externs need a per-name lift the SEED's
 // frozen codegen.c cannot learn post-release (the bootstrap-seed constraint); a direct `bool`/
 // `str` return needs no lift at all (mirrors tk_rt_os/tk_rt_version's already-working shape).
-static bool tk_rt_stdin_eof_flag = false;
+// (E1-C1) Per-task member (see the seam beside the F1 families).
 
 // (DT3) tk_rt_stdin_eof() — teko::io::stdin_eof(): did the LAST read_line() hit real EOF (no
 // more input at all)? Read this AFTER an empty read_line() result to tell "EOF" from "a blank
@@ -3269,11 +3407,8 @@ int32_t tk_rt_fd_wait_readable(int64_t fd, int64_t timeout_ms) {
 // left, so one drain must finish before the next begins. Static rather than arena-allocated so a
 // fill costs no allocation at all — the whole point of staging is that the per-byte call underneath
 // it never touches the host.
-static tk_byte tk_rt_fd_stage[TK_RT_PIPE_CAPACITY];
-// tk_rt_fd_staged — how many bytes of tk_rt_fd_stage the last fill left, and how many of those have
-// already been taken.
-static size_t tk_rt_fd_staged = 0;
-static size_t tk_rt_fd_taken = 0;
+// (E1-C1) tk_rt_fd_stage/staged/taken are per-task members (see the seam): the staging slot is one
+// per task, so a lane draining a pipe never sees bytes a different lane's fill left.
 
 int64_t tk_rt_fd_fill(int64_t fd, int64_t timeout_ms) {
     tk_rt_fd_staged = 0;
@@ -3389,6 +3524,21 @@ uint64_t tk_peak_rss(void) {
 #endif
 }
 
+// (E1-C6) tk_rt_nproc — the number of processors the OS grants THIS process right now (online CPUs),
+// at least 1. The OS-granted count is what the test/regression job pools default to and clamp their
+// env override against, so the parallelism a machine may use is the machine's business and never a
+// source literal. POSIX reads sysconf; Windows reads NUMBER_OF_PROCESSORS (no extra header, unlike
+// GetSystemInfo). An unavailable or nonsensical count degrades to 1 — a serial run is always valid.
+uint64_t tk_rt_nproc(void) {
+#if defined(_WIN32)
+    const char *e = getenv("NUMBER_OF_PROCESSORS");
+    long n = e != NULL ? strtol(e, NULL, 10) : 0;
+#else
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+    return n > 0 ? (uint64_t)n : 1;
+}
+
 // (#194 C6) teko::crypto::rand::secure_bytes(n) — n bytes from the host CSPRNG. Every
 // platform bottom fills a caller-owned buffer in fixed-size (or single) chunks and PANICS
 // (M.1) on a genuine host entropy failure — a CSPRNG that silently degrades to weak/short
@@ -3453,9 +3603,8 @@ const tk_byte *tk_rt_version_len(uint64_t *out_len) {
 // deduped on insert (the id count is bounded by the project's function count, so linear dedup is
 // fine). tk_cov_reset starts a fresh run; tk_cov_mark records a function-entry id; tk_cov_distinct
 // reports how many distinct functions executed.
-static uint64_t *tk_cov_ids = NULL;
-static uint64_t  tk_cov_n   = 0;
-static uint64_t  tk_cov_cap = 0;
+// (E1-C1) tk_cov_ids/n/cap are per-task members (see the seam): each lane's coverage sink is its
+// own, dumped to that lane's `.tkcov`, and the parent merges the dumps by re-reading (§3).
 void tk_cov_reset(void) { tk_cov_n = 0; }   // keep the buffer; just forget the marks
 void tk_cov_mark(uint64_t id) {
     for (uint64_t i = 0; i < tk_cov_n; i += 1) if (tk_cov_ids[i] == id) return;   // dedup
@@ -3482,10 +3631,7 @@ bool tk_cov_is_marked(uint64_t id) {
 // outcome): the current fn is the TOP of a small enter/leave stack the VM pushes around each call,
 // which makes (line,col) unique per FILE globally unique (two files may share a line:col). The
 // report queries tk_cov_branch_hit(fn, line, col, outcome) walking the typed program.
-static uint64_t *tk_covb_ids = NULL;
-static uint64_t  tk_covb_n   = 0;
-static uint64_t  tk_covb_cap = 0;
-static int       tk_covb_on  = 0;
+// (E1-C1) tk_covb_ids/n/cap/on are per-task members (see the seam), mirroring the function sink.
 /* (F1) tk_fn_stack/sp/cap moved into tk_task — this stack shadows the CALL STACK, which is per
    flow of control; two tasks sharing it would attribute one task's branches to the other's frame. */
 static uint64_t tk_branch_id(uint64_t fn, uint32_t line, uint32_t col, uint64_t outcome) {
@@ -3539,10 +3685,7 @@ bool tk_cov_branch_hit(uint64_t fn, uint32_t line, uint32_t col, uint64_t outcom
 // D3-line — LINE-coverage sink. Lines are marked on EVERY evaluated expression (far more often than
 // fns/branches), so this is an open-addressing HASH SET (O(1) insert/lookup) instead of the linear
 // dedup above. A line id packs (current-fn idx, line) via the same enter/leave fn stack; 0 = empty.
-static uint64_t *tk_line_ids = NULL;
-static uint64_t  tk_line_cap = 0;   // power of two
-static uint64_t  tk_line_n   = 0;
-static int       tk_lines_on = 0;
+// (E1-C1) tk_line_ids/cap/n/lines_on are per-task members (see the seam), mirroring the other sinks.
 static uint64_t tk_line_id(uint64_t fn, uint32_t line) { return ((fn << 24) | (uint64_t)line) + 1; }   // ≥1 (0 = empty slot)
 static void tk_line_rehash(uint64_t ncap) {
     // (#109 test-gate memory) malloc (libc heap), NOT the arena — this hash table must SURVIVE the
