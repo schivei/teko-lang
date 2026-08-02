@@ -283,20 +283,24 @@ gate-able isolado. Dois eixos independentes (LA = gap a, LB = gap b) que converg
 
 ### Eixo A — a relocation PIE
 
-**LA1 — MEDIR (dump de relocations do objeto que já emite).** `readelf -r obj.o` + `readelf -d`
-(ou `-r` do `.o`, que não tem `.dynamic` — usar `readelf -r`/`objdump -r` no `.o` e depois tentar o
-link e capturar a mensagem exata do `ld`). PINA a causa: (B) `R_X86_64_PC32 against <fn> ...` ou (A)
-`DT_TEXTREL`/`R_X86_64_64` numa rodata viva. **Sem produto** (é medição). **Gate:** a mensagem do
-`ld` gravada como âncora. Ritual: NÃO.
+**LA1 — MEDIR (confirmação + completude).** A causa (A) já está PROVADA estaticamente (§1.2); esta
+medição CONFIRMA a assinatura e verifica se (B) TAMBÉM arma. `readelf -r obj.o` (o `.o` não tem
+`.dynamic`; ver os `R_X86_64_64` contra `.rodata`) + tentar o link e capturar a mensagem exata do
+`ld` (`DT_TEXTREL` / `can not be used when making a PIE`). Esperado: `R_X86_64_64` em `.rela.rodata`
+apontando aos leaves de `ELF_MAGIC`/`AR_GLOBAL_HEADER`/etc. Se aparecer também `R_X86_64_PC32 against
+<fn>`, (B) arma e LA2 aplica as duas correções. **Sem produto** (é medição). **Gate:** a mensagem do
+`ld` gravada como âncora base. Ritual: NÃO.
 
-**LA2 — CORRIGIR a relocation.** Conforme LA1:
-- se (B): `select_func_addr_x86` (`isel_x86_64.tks:1217`) `RelocKindX86::Pc32` → `RelocKindX86::Plt32`
-  (uma linha). **Colisão:** `isel_x86_64.tks` (agentes de isel) — edição mínima, uma constante.
-- se (A): `elf_build_rodata_relas`/`elf_section_names` (`objfile_elf.tks:544-574`) emitem os
-  ponteiros-com-reloc em `.data.rel.ro` em vez de `.rodata`. **Colisão:** `objfile_elf.tks`.
-Atualizar o teste de unidade do encode que fixa o kind (`encode_x86_64_test.tkt:87` usa
-`Plt32`/`Pc32`/`Abs64` — o teste de `func_addr` que hoje espera `Pc32` passa a esperar `Plt32`).
-**Gate — RITUAL:** `native_dry_gate` base-vs-mudança (assinatura ≥); FIXPOINT objeto; diff C-vs-own.
+**LA2 — CORRIGIR a relocation.** Correção PRIMÁRIA (causa A, sempre): particionar a rodata por
+presença-de-reloc — entradas com ≥1 `LDataReloc` → `.data.rel.ro` (`SHF_ALLOC|SHF_WRITE`), as puras →
+`.rodata`. Sítios: `elf_section_names` (`objfile_elf.tks:567-574`, ganha `.data.rel.ro`), os
+section-headers (flags), `elf_resolve_rela` (`:524-528`, `secidx` da nova secção), e o `RelocSect` de
+`rodata_relocs_x86` (`encode_x86_64.tks:2449-2454`). **Colisão:** `objfile_elf.tks` +
+`encode_x86_64.tks` (agentes de objfile/encode). Correção SECUNDÁRIA (higiene, causa B se LA1 a
+mostrar): `select_func_addr_x86` (`isel_x86_64.tks:1217`) `RelocKindX86::Pc32` → `RelocKindX86::Plt32`
+(uma linha) — atualiza o teste `encode_x86_64_test.tkt:87` (func_addr passa de `Pc32` p/ `Plt32`).
+**Gate — RITUAL:** `native_dry_gate` base-vs-mudança (assinatura ≥, ou o link fecha = progresso);
+FIXPOINT objeto; diff C-vs-own.
 
 ### Eixo B — o lowering de `mem::*`
 
