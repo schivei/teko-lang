@@ -232,29 +232,58 @@ fn run_captured_spec(spec: ProcSpec) -> CapResult {
 }
 
 /**
- * REGR_JOBS_DEFAULT — how many captured children run CONCURRENTLY when the run names no number.
+ * nproc_rt — the runtime bottom of E1-C6: the OS-granted online processor count. Bound as an
+ * `extern fn` (not an injected builtin) because the build SOURCE calls it, and a fresh builtin would
+ * not be recognised by the released seed that must still compile this tree — the same seed-lowerable
+ * FFI route `src/names/names.tks` binds `tk_names_live_count` through.
  *
- * Four, and the number is deliberately modest. Each child is a full `teko` build holding its own
- * arena — the wagon's own self-host peaked at 1.3 GB — so a job count tuned to core count would
- * trade a runner's memory for wall clock and lose. A CI leg that knows its machine raises it
- * through the env; the default only has to be safe on the smallest runner in the matrix.
+ * @return the OS-granted online CPU count, at least 1
+ * @since 0.3.1.0
  */
-const REGR_JOBS_DEFAULT: u64 = 4
+extern fn nproc_rt() -> u64 = "tk_rt_nproc" from "teko_rt"
 
-/** REGR_JOBS_ENV — the env key a run overrides `REGR_JOBS_DEFAULT` through (12-Factor: the
-    concurrency of the machine is the machine's business, not the source's). */
+/**
+ * os_max — the OS-granted online processor count (>= 1): BOTH the default job count when a run names
+ * no number AND the cap an explicit `TEKO_*_JOBS` is clamped to (E1-C6). The count the OS grants a
+ * process is the machine's business, never a source literal — so the pools follow the hardware rather
+ * than the old fixed `4`, and no override can ask for more parallelism than the OS is offering.
+ *
+ * @return the OS-granted online CPU count, at least 1
+ * @since 0.3.1.0
+ */
+fn os_max() -> u64 { nproc_rt() }
+
+/**
+ * clamp_jobs — a requested job count confined to `[1, os_max()]`: the low bound keeps a run from
+ * asking for zero children, the high bound keeps an env override from exceeding the OS-granted
+ * parallelism (E1-C6). The default path never needs it (`os_max()` is already in range); it guards
+ * the ONE untrusted input, the `TEKO_*_JOBS` value a run wrote.
+ *
+ * @param v  the requested count (already parsed)
+ * @return   `v` clamped into `[1, os_max()]`
+ * @since 0.3.1.0
+ */
+fn clamp_jobs(v: u64) -> u64 {
+    let m = os_max()
+    if v < 1 { return 1 }
+    if v > m { return m }
+    v
+}
+
+/** REGR_JOBS_ENV — the env key a run overrides the OS-granted default through (12-Factor: the
+    concurrency of the machine is the machine's business, not the source's), clamped to `[1, os_max()]`. */
 const REGR_JOBS_ENV: str = "TEKO_REGR_JOBS"
 
 /**
- * regr_jobs_of — parse a `TEKO_REGR_JOBS` value into a job count, falling back to the default for
- * anything that is not a positive decimal number. A malformed value is a CONFIGURATION mistake, and
- * the safe reading of one is "the author did not mean zero children".
+ * regr_jobs_of — parse a `TEKO_REGR_JOBS` value into a job count, falling back to the OS-granted
+ * default for anything that is not a positive decimal number. A malformed value is a CONFIGURATION
+ * mistake, and the safe reading of one is "the author did not mean zero children".
  *
  * @param raw  the env value as written
- * @return     the parsed count, or `REGR_JOBS_DEFAULT` when it is empty, non-numeric or zero
+ * @return     the parsed count, or `os_max()` when it is empty, non-numeric or zero
  * @since 0.3.1
  */
-fn regr_jobs_of(raw: str) -> u64 { regr_jobs_of_default(raw, REGR_JOBS_DEFAULT) }
+fn regr_jobs_of(raw: str) -> u64 { regr_jobs_of_default(raw, os_max()) }
 
 /**
  * regr_jobs_of_default — the job-count parser with the FALLBACK named by the caller, so the test
@@ -288,7 +317,7 @@ fn regr_jobs_of_default(raw: str, fallback: u64) -> u64 {
  * @since 0.3.1
  */
 fn regr_jobs() -> u64 {
-    match teko::env::var(REGR_JOBS_ENV) { str as v => regr_jobs_of(v); error => REGR_JOBS_DEFAULT }
+    match teko::env::var(REGR_JOBS_ENV) { str as v => clamp_jobs(regr_jobs_of(v)); error => os_max() }
 }
 
 /**
