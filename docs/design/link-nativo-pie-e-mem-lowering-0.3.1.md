@@ -553,4 +553,3 @@ fixture é o seu próprio projeto e não pode `use` a stdlib do compilador), low
 **Nenhuma tensão de lei genuína permanece. Não há HALT.** O único ponto que precisa do DONO é uma
 DECISÃO de sequência que reporto abaixo (não um bloqueio): se `push_fo`/família-list-genérica (R2)
 for alcançada no self-host, é um terceiro gap adjacente — reportado, não convertido em issue por mim.
-```
