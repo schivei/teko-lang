@@ -1850,10 +1850,10 @@ fn backend(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manife
         teko::io::println(teko::str::concat("teko: ", dir, teko::str::concat(": packaged ", tkl_path, "")))
         return 0
     }
-    if m.backend == Backend::Native {
-        return emit_native(dir, stem, out_dir, prog, m)
-    }
     let mode = report_mode(false, tty)
+    if m.backend == Backend::Native {
+        return emit_native(dir, stem, out_dir, prog, m, mode)
+    }
     if m.abi == "c" {
         match codegen::check_ffi_export(prog) { null => { }; error as e => return fail(dir, e.message) }
     }
@@ -2554,16 +2554,21 @@ fn mkdir_p(dir: str) -> error | null {
  * @param m        the resolved manifest (link knobs)
  * @return         0 on a successful build+link, else the failing status
  */
-fn emit_native(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest) -> i32 {
+fn emit_native(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest, mode: Report) -> i32 {
     let od = strip_trailing_slash(out_dir)
     match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the output directory"); null => { } }
-    let lmod = match teko::lir::lower_program(prog) { teko::lir::LModule as x => x; error as e => return fail(dir, e.message) }
+    let lower_phase = phase_begin("lower", count_unit_text(0, prog.items.len, "items"), mode)
+    let lmod = match teko::lir::lower_program(prog) {
+        teko::lir::LModule as x => x
+        error as e => { phase_end_fail(lower_phase, count_unit_text(0, prog.items.len, "items"), e.message); return fail(dir, e.message) }
+    }
+    phase_end_ok(lower_phase, count_unit_text(prog.items.len, prog.items.len, "items"))
     let target = match native_target() { NativeTarget as t => t; error as e => return fail(dir, e.message) }
     match target {
-        NativeTarget::X8664Linux => emit_native_x86(dir, od, stem, lmod, prog, m)
-        NativeTarget::X8664Windows => emit_native_win(dir, od, stem, lmod, prog, m)
-        NativeTarget::Arm64Macho => emit_native_arm64(dir, od, stem, lmod, prog, m)
-        NativeTarget::Arm64Linux => emit_native_arm64_linux(dir, od, stem, lmod, prog, m)
+        NativeTarget::X8664Linux => emit_native_x86(dir, od, stem, lmod, prog, m, mode)
+        NativeTarget::X8664Windows => emit_native_win(dir, od, stem, lmod, prog, m, mode)
+        NativeTarget::Arm64Macho => emit_native_arm64(dir, od, stem, lmod, prog, m, mode)
+        NativeTarget::Arm64Linux => emit_native_arm64_linux(dir, od, stem, lmod, prog, m, mode)
     }
 }
 
@@ -2584,12 +2589,18 @@ fn emit_native(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Ma
  * @param m     the resolved manifest (link knobs)
  * @return      0 on a successful build+link, else the failing status
  */
-fn emit_native_arm64(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog: checker::TProgram, m: Manifest) -> i32 {
-    let entry = match teko::lir::wrap_native_entry(lmod) { teko::lir::LModule as x => x; error as e => return fail(dir, e.message) }
-    let sel = match teko::backend::select_module(entry) { teko::backend::MModule as x => x; error as e => return fail(dir, e.message) }
-    let col = match teko::backend::regalloc_module(teko::backend::AAPCS64, sel) { teko::backend::MModule as x => x; error as e => return fail(dir, e.message) }
-    let enc = match teko::backend::encode_module(teko::backend::AAPCS64, col) { teko::backend::EncodedModule as x => x; error as e => return fail(dir, e.message) }
-    finish_native_object(dir, od, stem, teko::backend::emit_macho(enc), prog, m)
+fn emit_native_arm64(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog: checker::TProgram, m: Manifest, mode: Report) -> i32 {
+    let isel_phase = phase_begin("isel", "", mode)
+    let entry = match teko::lir::wrap_native_entry(lmod) { teko::lir::LModule as x => x; error as e => { phase_end_fail(isel_phase, "", e.message); return fail(dir, e.message) } }
+    let sel = match teko::backend::select_module(entry) { teko::backend::MModule as x => x; error as e => { phase_end_fail(isel_phase, "", e.message); return fail(dir, e.message) } }
+    phase_end_ok(isel_phase, "")
+    let regalloc_phase = phase_begin("regalloc", "", mode)
+    let col = match teko::backend::regalloc_module(teko::backend::AAPCS64, sel) { teko::backend::MModule as x => x; error as e => { phase_end_fail(regalloc_phase, "", e.message); return fail(dir, e.message) } }
+    phase_end_ok(regalloc_phase, "")
+    let encode_phase = phase_begin("encode", "", mode)
+    let enc = match teko::backend::encode_module(teko::backend::AAPCS64, col) { teko::backend::EncodedModule as x => x; error as e => { phase_end_fail(encode_phase, "", e.message); return fail(dir, e.message) } }
+    phase_end_ok(encode_phase, "")
+    finish_native_object(dir, od, stem, teko::backend::emit_macho(enc), prog, m, mode)
 }
 
 /**
@@ -2609,12 +2620,18 @@ fn emit_native_arm64(dir: str, od: str, stem: str, lmod: teko::lir::LModule, pro
  * @return      0 on a successful build+link, else the failing status
  * @since 0.3.1
  */
-fn emit_native_arm64_linux(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog: checker::TProgram, m: Manifest) -> i32 {
-    let entry = match teko::lir::wrap_native_entry(lmod) { teko::lir::LModule as x => x; error as e => return fail(dir, e.message) }
-    let sel = match teko::backend::select_module(entry) { teko::backend::MModule as x => x; error as e => return fail(dir, e.message) }
-    let col = match teko::backend::regalloc_module(teko::backend::AAPCS64, sel) { teko::backend::MModule as x => x; error as e => return fail(dir, e.message) }
-    let enc = match teko::backend::encode_module(teko::backend::AAPCS64, col) { teko::backend::EncodedModule as x => x; error as e => return fail(dir, e.message) }
-    finish_native_object(dir, od, stem, teko::backend::emit_elf_arm64(enc), prog, m)
+fn emit_native_arm64_linux(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog: checker::TProgram, m: Manifest, mode: Report) -> i32 {
+    let isel_phase = phase_begin("isel", "", mode)
+    let entry = match teko::lir::wrap_native_entry(lmod) { teko::lir::LModule as x => x; error as e => { phase_end_fail(isel_phase, "", e.message); return fail(dir, e.message) } }
+    let sel = match teko::backend::select_module(entry) { teko::backend::MModule as x => x; error as e => { phase_end_fail(isel_phase, "", e.message); return fail(dir, e.message) } }
+    phase_end_ok(isel_phase, "")
+    let regalloc_phase = phase_begin("regalloc", "", mode)
+    let col = match teko::backend::regalloc_module(teko::backend::AAPCS64, sel) { teko::backend::MModule as x => x; error as e => { phase_end_fail(regalloc_phase, "", e.message); return fail(dir, e.message) } }
+    phase_end_ok(regalloc_phase, "")
+    let encode_phase = phase_begin("encode", "", mode)
+    let enc = match teko::backend::encode_module(teko::backend::AAPCS64, col) { teko::backend::EncodedModule as x => x; error as e => { phase_end_fail(encode_phase, "", e.message); return fail(dir, e.message) } }
+    phase_end_ok(encode_phase, "")
+    finish_native_object(dir, od, stem, teko::backend::emit_elf_arm64(enc), prog, m, mode)
 }
 
 /**
@@ -2637,12 +2654,18 @@ fn emit_native_arm64_linux(dir: str, od: str, stem: str, lmod: teko::lir::LModul
  * @param m     the resolved manifest (link knobs)
  * @return      0 on a successful build+link, else the failing status
  */
-fn emit_native_x86(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog: checker::TProgram, m: Manifest) -> i32 {
-    let entry = match teko::lir::wrap_native_entry(lmod) { teko::lir::LModule as x => x; error as e => return fail(dir, e.message) }
-    let sel = match teko::backend::select_module_x86(teko::backend::SYSV64, entry) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
-    let col = match teko::backend::regalloc_module_x86(teko::backend::SYSV64, sel) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
-    let enc = match teko::backend::encode_module_x86(teko::backend::SYSV64, col) { teko::backend::EncodedModuleX86 as x => x; error as e => return fail(dir, e.message) }
-    finish_native_object(dir, od, stem, teko::backend::emit_elf(enc), prog, m)
+fn emit_native_x86(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog: checker::TProgram, m: Manifest, mode: Report) -> i32 {
+    let isel_phase = phase_begin("isel", "", mode)
+    let entry = match teko::lir::wrap_native_entry(lmod) { teko::lir::LModule as x => x; error as e => { phase_end_fail(isel_phase, "", e.message); return fail(dir, e.message) } }
+    let sel = match teko::backend::select_module_x86(teko::backend::SYSV64, entry) { teko::backend::MModuleX86 as x => x; error as e => { phase_end_fail(isel_phase, "", e.message); return fail(dir, e.message) } }
+    phase_end_ok(isel_phase, "")
+    let regalloc_phase = phase_begin("regalloc", "", mode)
+    let col = match teko::backend::regalloc_module_x86(teko::backend::SYSV64, sel) { teko::backend::MModuleX86 as x => x; error as e => { phase_end_fail(regalloc_phase, "", e.message); return fail(dir, e.message) } }
+    phase_end_ok(regalloc_phase, "")
+    let encode_phase = phase_begin("encode", "", mode)
+    let enc = match teko::backend::encode_module_x86(teko::backend::SYSV64, col) { teko::backend::EncodedModuleX86 as x => x; error as e => { phase_end_fail(encode_phase, "", e.message); return fail(dir, e.message) } }
+    phase_end_ok(encode_phase, "")
+    finish_native_object(dir, od, stem, teko::backend::emit_elf(enc), prog, m, mode)
 }
 
 /**
@@ -2669,12 +2692,18 @@ fn emit_native_x86(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog:
  * @param m     the resolved manifest (link knobs)
  * @return      0 on a successful build+link, else the failing status
  */
-fn emit_native_win(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog: checker::TProgram, m: Manifest) -> i32 {
-    let entry = match teko::lir::wrap_native_entry(lmod) { teko::lir::LModule as x => x; error as e => return fail(dir, e.message) }
-    let sel = match teko::backend::select_module_x86(teko::backend::WIN64, entry) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
-    let col = match teko::backend::regalloc_module_x86(teko::backend::WIN64, sel) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
-    let enc = match teko::backend::encode_module_x86(teko::backend::WIN64, col) { teko::backend::EncodedModuleX86 as x => x; error as e => return fail(dir, e.message) }
-    finish_native_object(dir, od, stem, teko::backend::emit_coff(enc), prog, m)
+fn emit_native_win(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog: checker::TProgram, m: Manifest, mode: Report) -> i32 {
+    let isel_phase = phase_begin("isel", "", mode)
+    let entry = match teko::lir::wrap_native_entry(lmod) { teko::lir::LModule as x => x; error as e => { phase_end_fail(isel_phase, "", e.message); return fail(dir, e.message) } }
+    let sel = match teko::backend::select_module_x86(teko::backend::WIN64, entry) { teko::backend::MModuleX86 as x => x; error as e => { phase_end_fail(isel_phase, "", e.message); return fail(dir, e.message) } }
+    phase_end_ok(isel_phase, "")
+    let regalloc_phase = phase_begin("regalloc", "", mode)
+    let col = match teko::backend::regalloc_module_x86(teko::backend::WIN64, sel) { teko::backend::MModuleX86 as x => x; error as e => { phase_end_fail(regalloc_phase, "", e.message); return fail(dir, e.message) } }
+    phase_end_ok(regalloc_phase, "")
+    let encode_phase = phase_begin("encode", "", mode)
+    let enc = match teko::backend::encode_module_x86(teko::backend::WIN64, col) { teko::backend::EncodedModuleX86 as x => x; error as e => { phase_end_fail(encode_phase, "", e.message); return fail(dir, e.message) } }
+    phase_end_ok(encode_phase, "")
+    finish_native_object(dir, od, stem, teko::backend::emit_coff(enc), prog, m, mode)
 }
 
 /**
@@ -2726,15 +2755,20 @@ fn report_object_only(dir: str, objp: str, t: NativeTarget) -> i32 {
  * @param m     the resolved manifest (link knobs)
  * @return      0 on a successful write+link (or write, for a cross target), else the failing status
  */
-fn finish_native_object(dir: str, od: str, stem: str, obj: []byte, prog: checker::TProgram, m: Manifest) -> i32 {
+fn finish_native_object(dir: str, od: str, stem: str, obj: []byte, prog: checker::TProgram, m: Manifest, mode: Report) -> i32 {
     let objp = object_output_path(od, stem)
     let target = resolved_target()
     let binp = binary_output_path(od, stem, target)
-    match teko::io::write_file_bytes(objp, obj) { error as e => return fail(dir, e.message); null => { } }
+    let objfile_phase = phase_begin("objfile", objp, mode)
+    match teko::io::write_file_bytes(objp, obj) { error as e => { phase_end_fail(objfile_phase, objp, e.message); return fail(dir, e.message) }; null => { } }
+    phase_end_ok(objfile_phase, teko::str::concat(objp, teko::str::concat(" ", size_text(obj.len))))
     if !build_links_binary(target, m) { return report_object_only(dir, objp, target) }
+    let link_phase = phase_begin("link", binp, mode)
     if link_object(objp, binp, m, prog) != 0 {
+        phase_end_fail(link_phase, binp, "cc failed to link the own-backend object")
         return fail(dir, "cc failed to link the own-backend object")
     }
+    phase_end_ok(link_phase, binp)
     match teko::io::write_file(teko::str::concat(binp, ".tsym"), codegen::tk_emit_tsym(prog)) { error => { }; null => { } }
     teko::io::println(teko::str::concat("teko: ", dir, teko::str::concat(": built ", binp, " (own backend)")))
     0
@@ -3229,6 +3263,26 @@ fn built_artifact_path(out_dir: str, m: Manifest) -> str { artifact_path_for(out
  */
 fn report_build_done(binp: str, start: i64) {
     teko::io::eprintln(teko::str::concat("built ", binp, teko::str::concat("   ", teko::str::concat(elapsed_str(start), "s"))))
+}
+
+/**
+ * report_command_wall — print the EXTERNAL command wall the top `BuildClock` measured: the whole
+ * `teko build` command, the `exec`-observable startup and the flag/dispatch parse included, which the
+ * internal `built <path> <elapsed>` line (measured only from the front-end onward) cannot see. The
+ * owner's precision was exactly this — the wall between the START and END of the COMMAND is larger
+ * than the time the compiler reports of itself — so this line makes that external wall VISIBLE
+ * instead of inferred. It returns `status` unchanged, so a caller closes with
+ * `teko::exit(teko::build::report_command_wall(clock, status))`.
+ *
+ * @param clock   the top clock opened at main's first instruction (`build_clock_start`)
+ * @param status  the build's own exit status, passed straight through
+ * @return        `status`, unchanged
+ * @since 0.3.1
+ */
+pub fn report_command_wall(clock: BuildClock, status: i32) -> i32 {
+    let ns = build_clock_wall_ns(clock)
+    teko::io::eprintln(teko::str::concat("teko: command wall ", teko::str::concat(duration_str(ns), "s")))
+    status
 }
 
 /**
@@ -4233,7 +4287,7 @@ fn project_arg_of(args: []str, start: u64) -> str {
 fn build_debug_binary(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest) -> i32 {
     match validate_extern_libs_for_target(m) { error as e => return fail(dir, e.message); null => { } }
     if m.backend == Backend::Native {
-        return emit_native(dir, stem, out_dir, prog, m)
+        return emit_native(dir, stem, out_dir, prog, m, report_mode(false, output_is_tty(false)))
     }
     let emitted = match codegen::tk_emit_c(prog) { str as s => s; error as e => return fail(dir, e.message) }
     let csrc = teko::str::concat(emitted, codegen::tk_emit_meta(m.name, m.version, m.suffix, m.description))

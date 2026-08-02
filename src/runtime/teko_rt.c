@@ -2541,6 +2541,27 @@ tk_str tk_rt_read_stdin(void) {
     return (tk_str){ buf, len };
 }
 
+// (0.3.1.0 LSP crumb 0) tk_rt_read_stdin_n — read EXACTLY `n` bytes from stdin into an
+// arena-owned []byte slice. Loops fread until `n` bytes have been consumed or stdin hits EOF
+// (fread returns 0). The returned slice length is what was actually read: `n` on a full body,
+// fewer on EOF mid-body — the transport layer (src/lsp/jsonrpc.tks) compares that length to `n`
+// and raises "truncated body" rather than accepting a short frame, so a truncated JSON-RPC frame
+// is never silently taken. Uses fread on the same stdin FILE* the header line reader (fgetc via
+// tk_rt_read_line) uses, so headers and body share one buffered stream with no over-read: the
+// line reader stops at the '\n' after the blank separator, and this reads the exact body that
+// follows. A genuine read fault (ferror) panics (M.1 fail-loud), mirroring tk_rt_read_stdin.
+tk_slice_byte tk_rt_read_stdin_n(uint64_t n) {
+    tk_byte *out = (tk_byte *)tk_alloc(n == 0 ? 1 : n);
+    uint64_t filled = 0;
+    while (filled < n) {
+        size_t got = fread(out + filled, 1, (size_t)(n - filled), stdin);
+        if (got == 0) break;
+        filled += (uint64_t)got;
+    }
+    if (ferror(stdin)) tk_panic("cannot read stdin");
+    return (tk_slice_byte){ out, filled };
+}
+
 tk_ffi_sres tk_rt_getenv(tk_str name) {
     char *n = tk_cstr(name);
     const char *v = getenv(n);
