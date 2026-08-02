@@ -1,3 +1,6 @@
+/** Wrapped — a struct that RETAINS a slice built by a call (the parse_function AST shape). */
+type Wrapped = struct { items: []i64; tag: i64 }
+
 /**
  * build — grow a slice accumulator by self-appends and RETURN it. The return makes the accumulator
  * ESCAPE its frame, so the self-append-aware block-local proof (A2) must keep it EXCLUDED from Scope
@@ -16,6 +19,38 @@ fn build(n: i64) -> []i64 {
         i++
     }
     xs
+}
+
+/**
+ * make — build a one-element slice by a call, or error on a negative count (the error-propagation
+ * source that retain_wrap threads into a retained local).
+ *
+ * @param n  the element value
+ * @return   the slice [n*3], or error when n < 0
+ */
+fn make(n: i64) -> []i64 | error {
+    if n < 0 { return error { message = "neg" } }
+    mut xs: []i64 = teko::list::empty()
+    xs = teko::list::push(xs, n * 3)
+    xs
+}
+
+/**
+ * retain_wrap — the parse_function move-on-return pattern (mem_move_retain_struct, M2a): build a slice
+ * via a CALL, RETAIN it in a local via error-propagation, and wrap that field in a RETURNED struct
+ * used after the call. A scratch struct forces this function to open a frame region and enter it, so
+ * WITHOUT the conveyance bracket the retained `blk` materializes in the frame `_tkfr` and the returned
+ * struct's `items` pointer dangles after the frame drop (UAF/corruption). The bracket routes `blk` to
+ * `_tkrr`, so the returned struct reads back exactly.
+ *
+ * @param n  the element count to build
+ * @return   a Wrapped whose `items` is the retained, moved slice, or error on a negative count
+ */
+fn retain_wrap(n: i64) -> Wrapped | error {
+    let scratch = Wrapped { items = teko::list::empty(); tag = 0 }
+    let blk = match make(n) { []i64 as x => x; error as e => return e }
+    if scratch.tag > 99 { return error { message = "never" } }
+    Wrapped { items = blk; tag = n }
 }
 
 /**
@@ -39,9 +74,9 @@ fn churn(n: i64) -> i64 {
 }
 
 /**
- * run — capture the returned accumulator, churn recycling scopes, then fingerprint the captured
- * slice. `15` (5 buffer fingerprint + 10 churn hits, weighted) proves the returned accumulator was
- * NOT freed at the callee's block exit.
+ * run — capture the returned accumulator AND the retain-wrap struct, churn recycling scopes, then
+ * fingerprint the captured slices. `25` (1 + 4 accumulator + 10 churn + 10 retain-wrap read) proves
+ * the returned accumulator AND the retained-then-wrapped slice were NOT freed at the callee's exit.
  *
  * @param n  the accumulator element count
  * @return   the decimal fingerprint
@@ -52,5 +87,9 @@ exp fn run(n: i64) -> i64 {
     mut fp: i64 = 0
     if xs[0 to u64] == 0 { fp = fp + 1 }
     if xs[(n - 1) to u64] == (n - 1) * 3 { fp = fp + 4 }
+    match retain_wrap(n) {
+        Wrapped as w => { if w.items[0 to u64] == n * 3 { fp = fp + 10 } }
+        error => { }
+    }
     fp + hits
 }

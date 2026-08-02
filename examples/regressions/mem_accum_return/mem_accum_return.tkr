@@ -1,23 +1,27 @@
-# mem_accum_return.tkr — the detector that the self-append predicate does NOT over-classify a slice
-# that ESCAPES via return (0.3.1 transicao-move-on-return-e-seletor-n-niveis §1b, port 2/4).
+# mem_accum_return.tkr — the detector that (a) the self-append predicate does NOT over-classify a
+# slice that ESCAPES via return (0.3.1 §1b, port 2/4), AND (b) the move-on-return conveyance moves a
+# RETAINED call-result wrapped in a returned struct — the parse_function pattern (M2a,
+# mem_move_retain_struct), the repro that stopped the C route.
 #
-# WHAT IT PINS. `build` grows `xs` by self-appends and returns it. The return is an escaping position,
-# so `mark_stmt` marks `xs` escaping and `binding_is_block_local` (even with the A2 self-append base
-# carve-out) returns false — the accumulator stays a `Caller`-tier value that outlives the callee's
-# block, never routed to a block region. The A2 change admits the self-append BASE read as an inside
-# read ONLY when the WHOLE read equation balances; a tail/return read tips it back to escaping, so the
-# accumulator is not wrongly proven block-local.
+# WHAT IT PINS. `build` grows `xs` by self-appends and returns it: the return marks `xs` escaping so
+# `binding_is_block_local` (even with the A2 base carve-out) keeps it a `Caller`-tier value, never
+# freed at the callee's block exit. `retain_wrap` is the move-on-return repro: it opens a frame region
+# (a scratch struct forces `_tkfr` + `tk_region_enter`), builds a slice by a CALL, RETAINS it in `blk`
+# via error-propagation, and wraps `blk.items` in a RETURNED struct used after the call. WITHOUT the
+# M2 conveyance bracket (`tk_region_enter(_tkrr) … leave()` around the escaping binding's RHS) `blk`
+# materializes in `_tkfr` and the returned struct's `items` pointer dangles after `tk_region_drop(_tkfr)`.
 #
-# WHAT IT PROVES. `run` captures the returned slice, then `churn` recycles ten scopes' worth of region
-# memory, and finally fingerprints `xs[0] == 0` and `xs[n-1] == 3*(n-1)`. `15` (1 + 4 buffer weight +
-# 10 churn hits) witnesses the returned buffer survived the callee's exit and the churn — a slice
-# wrongly proven block-local would have died at `build`'s block exit and read back corrupt.
+# WHAT IT PROVES. `run` captures both the returned accumulator and the retain-wrap struct, then `churn`
+# recycles ten scopes' worth of region memory, and finally fingerprints `xs[0]`, `xs[n-1]`, and the
+# wrapped `w.items[0]`. `25` (1 + 4 accumulator + 10 churn + 10 retain-wrap) witnesses that both moved
+# values survived the callee exits and the churn — a wrongly-scoped or unbracketed value reads corrupt.
+# The definitive UAF oracle for this pattern is the full self-host under ASan / TEKO_MEM_PARANOID.
 #
 # C ROUTE by construction: `Given env = ["TEKO_BACKEND=c"]` pins the shared build to the C backend.
 
-Feature: mem_accum_return — a returned self-append accumulator escapes its frame and is not freed early
+Feature: mem_accum_return — a returned accumulator and a retained-then-wrapped call-result both move, not freed early
 
-  Scenario: a returned accumulator fingerprints to 15 after the caller's recycling churn
+  Scenario: the accumulator and the retain-wrap struct fingerprint to 25 after the caller's recycling churn
     Given env = ["TEKO_BACKEND=c"]
     When built and run
-    Then stdout pattern = "15"
+    Then stdout pattern = "25"

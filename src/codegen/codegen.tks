@@ -8638,9 +8638,9 @@ fn emit_exprstmt_tail(buf: []byte, x: checker::TExpr, in_main: bool, prog: CgPro
                 let cleanup = match cg_class_cleanup_text(prog, escaping, fn_body, true, x) { str as c => c; error as e => return e }
                 if cleanup.len > 0 { out = cb(out, indent); out = cb(out, cleanup); out = cb(out, "\n") }
             }
-            if frame.len > 0 && !in_main {
+            if !in_main {
                 out = cg_emit_bracket_unwind(out, indent, dctx.bracket_depth)
-                out = cg_frame_exit(out, indent, frame, dctx.rr.len > 0)
+                out = cg_return_frame_exit(out, indent, frame, dctx)
             }
             out = cb(out, indent)
             if in_main {
@@ -9126,7 +9126,7 @@ fn emit_return(buf: []byte, prog: CgProg, r: checker::TReturn, in_main: bool, re
     }
     if cleanup.len > 0 { out = cb(out, indent); out = cb(out, cleanup); out = cb(out, "\n") }
     out = cg_emit_bracket_unwind(out, indent, dctx.bracket_depth)
-    if frame.len > 0 { out = cg_frame_exit(out, indent, frame, dctx.rr.len > 0) }
+    out = cg_return_frame_exit(out, indent, frame, dctx)
     out = cb(out, indent)
     if !r.has_value {
         if in_main { return cb(out, "return 0;\n") }
@@ -9439,18 +9439,26 @@ fn emit_cov_lines(buf: []byte, ctx: CovCtx, lines: []u32, indent: str) -> []byte
  */
 fn emit_stmt(buf: []byte, s: checker::TStatement, in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx, cur_block: []checker::TStatement, cur_block_is_value: bool) -> []byte | error {
     let b0 = emit_cov_lines(buf, dctx.cov, stmt_cov_lines(s), indent)
-    if dctx.rr.len > 0 && cg_stmt_conveys_escape(escaping, s) {
+    if dctx.rr.len > 0 && dctx.bracket_depth == 0 && cg_conveys_escape_deep(escaping, s) {
         mut ob = cb(b0, indent); ob = cb(ob, "tk_region_enter("); ob = cb(ob, dctx.rr); ob = cb(ob, ");\n")
         let d2 = cg_dctx_bracket(dctx)
-        let inner = match s {
-            checker::TBinding as b => emit_binding(ob, prog, ret_type, b, indent, frame, escaping, regions, fn_body, d2, cur_block, cur_block_is_value)
-            checker::TAssign as a => emit_assign(ob, prog, ret_type, a, indent, frame, escaping, regions, fn_body, d2)
-            _ => ob
-        }
-        mut ob2 = match inner { []byte as o => o; error as err => return err }
+        mut ob2 = match emit_stmt_dispatch(ob, s, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, d2, cur_block, cur_block_is_value) { []byte as o => o; error as err => return err }
         ob2 = cb(ob2, indent); ob2 = cb(ob2, "tk_region_leave();\n")
         return ob2
     }
+    emit_stmt_dispatch(b0, s, in_main, prog, ret_type, indent, frame, escaping, regions, fn_body, dctx, cur_block, cur_block_is_value)
+}
+
+/**
+ * emit_stmt_dispatch — the statement-kind dispatch of emit_stmt, factored out so a conveyance bracket
+ * (M2, Mechanism 1) can wrap ANY statement kind uniformly. `b0` already carries the coverage-line
+ * prologue. All parameters mirror emit_stmt.
+ *
+ * @param b0  the buffer with the statement's coverage prologue already appended
+ * @return    the buffer with the statement's C text appended
+ * @since 0.3.1
+ */
+fn emit_stmt_dispatch(b0: []byte, s: checker::TStatement, in_main: bool, prog: CgProg, ret_type: checker::Type, indent: str, frame: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx, cur_block: []checker::TStatement, cur_block_is_value: bool) -> []byte | error {
     match s {
         checker::TBinding as b => emit_binding(b0, prog, ret_type, b, indent, frame, escaping, regions, fn_body, dctx, cur_block, cur_block_is_value)
         checker::TAssign as a => emit_assign(b0, prog, ret_type, a, indent, frame, escaping, regions, fn_body, dctx)
@@ -10063,7 +10071,7 @@ fn cg_rr_init_expr() -> str { "tk_region_root()" }
  */
 fn cg_tkfr_init_expr(f: checker::TFunction, use_rr: bool) -> str {
     if !use_rr { return teko::str::concat("tk_region_new(", cg_frame_region_parent_expr(f), ")") }
-    "tk_region_root()"
+    "tk_region_new(tk_region_root())"
 }
 
 /**
@@ -10076,7 +10084,7 @@ fn cg_tkfr_init_expr(f: checker::TFunction, use_rr: bool) -> str {
  * @return        true iff the exit edges emit `tk_region_drop(_tkfr)`
  * @since 0.3.1
  */
-fn cg_tkfr_drop_active(entered: bool) -> bool { !entered }
+fn cg_tkfr_drop_active(entered: bool) -> bool { true }
 
 /**
  * binding_conveys_escape — the BLIND rule (0.3.1 move-on-return M2, Mechanism 1): the RHS of a
@@ -10124,21 +10132,93 @@ fn cg_dctx_bracket(dctx: DeferCtx) -> DeferCtx {
 }
 
 /**
- * cg_stmt_conveys_escape — whether statement `s` is a binding/assign whose LHS name escapes and must
- * have its RHS conveyance-bracketed (0.3.1 move-on-return M2, Mechanism 1). Only relevant when a
- * `_tkrr` is open (a framed non-arena function); the caller gates on `dctx.rr.len > 0`.
+ * cg_conveys_escape_deep — whether statement `s`, evaluated, could leave an escaping value in the
+ * current region and must therefore be wrapped in a conveyance bracket so it lands in `_tkrr` (0.3.1
+ * move-on-return M2, Mechanism 1). True for:
+ *   - a binding/assign whose LHS name escapes (the direct case), and
+ *   - a statement-form `if`/`match` an arm/branch of which DIRECTLY (not across a nested loop)
+ *     contains an escaping binding/assign: the subject/cond call-result is RETAINED via an arm binding
+ *     that flows to that escaping write (`match parse_type_args(…) { ta => { esc = ta.args } }`), so
+ *     the WHOLE statement — subject first — must run with `current == _tkrr`, else the subject
+ *     materializes in `_tkfr` and the escaping write copies a pointer the frame drop frees (UAF).
+ * A loop is NEVER bracketed as a whole (its `break`/`continue` leave sits AFTER the loop; the loop's
+ * inner statements are bracketed individually as emit_stmt reaches them). Over-bracketing a pure
+ * statement is inert and leak-safe (`_tkrr ⊒` every use); the only residual UAF is escape sub-marking.
  *
  * @param escaping  the function's `fn_escaping_vars` set
  * @param s         the statement
- * @return          true iff `s` is an escaping binding/assign to bracket
+ * @return          true iff `s` must be conveyance-bracketed
  * @since 0.3.1
  */
-fn cg_stmt_conveys_escape(escaping: []str, s: checker::TStatement) -> bool {
+fn cg_conveys_escape_deep(escaping: []str, s: checker::TStatement) -> bool {
     match s {
         checker::TBinding as b => binding_conveys_escape(escaping, cg_target_name(b.target))
         checker::TAssign as a => binding_conveys_escape(escaping, a.name)
+        checker::TExprStmt as es => cg_expr_arm_has_escaping_write(escaping, es.expr)
         _ => false
     }
+}
+
+/**
+ * cg_expr_arm_has_escaping_write — whether a statement-form `if`/`match` expression `e` has an
+ * arm/branch that DIRECTLY (not across a nested loop) contains an escaping binding/assign — the signal
+ * that its subject/cond call-result is retained-and-escaping and the whole statement must be bracketed.
+ *
+ * @param escaping  the function's `fn_escaping_vars` set
+ * @param e         the statement expression (an `if`/`match`, else no arms)
+ * @return          true iff an arm directly contains an escaping write
+ * @since 0.3.1
+ */
+fn cg_expr_arm_has_escaping_write(escaping: []str, e: checker::TExpr) -> bool {
+    match e.kind {
+        checker::TIfExpr as f => cg_block_has_escaping_write(escaping, f.then_blk) || (f.has_else && cg_block_has_escaping_write(escaping, f.else_blk))
+        checker::TMatchExpr as m => cg_arms_have_escaping_write(escaping, m.arms)
+        _ => false
+    }
+}
+
+/**
+ * cg_arms_have_escaping_write — whether any match arm body DIRECTLY contains an escaping write.
+ *
+ * @param escaping  the function's escaping-name set
+ * @param arms      the match arms
+ * @return          true iff some arm body has a direct escaping write
+ * @since 0.3.1
+ */
+fn cg_arms_have_escaping_write(escaping: []str, arms: []checker::TArm) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= arms.len { break }
+        if cg_block_has_escaping_write(escaping, arms[i].body) { return true }
+        i = i + 1
+    }
+    false
+}
+
+/**
+ * cg_block_has_escaping_write — whether block `body` DIRECTLY (not descending into nested loops, whose
+ * inner statements bracket themselves) contains an escaping binding/assign, or a nested statement-form
+ * `if`/`match` that itself does. Used to decide whether an enclosing statement-form `if`/`match` must
+ * be conveyance-bracketed to move its subject's retained result to `_tkrr`.
+ *
+ * @param escaping  the function's escaping-name set
+ * @param body      the block statements
+ * @return          true iff `body` directly contains an escaping write
+ * @since 0.3.1
+ */
+fn cg_block_has_escaping_write(escaping: []str, body: []checker::TStatement) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= body.len { break }
+        match body[i] {
+            checker::TBinding as b => { if binding_conveys_escape(escaping, cg_target_name(b.target)) { return true } }
+            checker::TAssign as a => { if binding_conveys_escape(escaping, a.name) { return true } }
+            checker::TExprStmt as es => { if cg_expr_arm_has_escaping_write(escaping, es.expr) { return true } }
+            _ => { }
+        }
+        i = i + 1
+    }
+    false
 }
 
 /**
@@ -10183,6 +10263,29 @@ fn cg_frame_exit(buf: []byte, indent: str, frame: str, entered: bool) -> []byte 
     if entered { out = cb(out, indent); out = cb(out, "tk_region_leave();\n") }
     if cg_tkfr_drop_active(entered) { out = cb(out, indent); out = cb(out, "tk_region_drop("); out = cb(out, frame); out = cb(out, ");\n") }
     out
+}
+
+/**
+ * cg_return_frame_exit — the frame region's exit on a RETURN edge, keyed on whether `_tkfr` was
+ * ENTERED (`dctx.rr.len > 0`) rather than on the passed `frame` (which emit_block STRIPS to "" for
+ * sub-scopes). This is load-bearing under M2: an ENTERED function's `tk_region_enter(_tkfr)` must be
+ * balanced by a `tk_region_leave()` on EVERY return edge — including a nested `error => return e`
+ * whose `frame` is stripped — else the entered `_tkfr` stays on the current-region stack, dangling
+ * after it is dropped (the parse_function imbalance). The `_tkfr` name is a per-function constant, so
+ * it is used literally here regardless of the stripped `frame`. A non-entered arena isolate drops its
+ * own `frame` tree (no leave); a frameless function does nothing.
+ *
+ * @param buf     the output buffer
+ * @param indent  the current indentation
+ * @param frame   the (possibly stripped) frame name — used only for the arena drop path
+ * @param dctx    the defer context (`rr` non-empty iff `_tkfr` was entered)
+ * @return        the buffer with the correct leave/drop for this return edge
+ * @since 0.3.1
+ */
+fn cg_return_frame_exit(buf: []byte, indent: str, frame: str, dctx: DeferCtx) -> []byte {
+    if dctx.rr.len > 0 { return cg_frame_exit(buf, indent, "_tkfr", true) }
+    if frame.len > 0 { return cg_frame_exit(buf, indent, frame, false) }
+    buf
 }
 
 /**
