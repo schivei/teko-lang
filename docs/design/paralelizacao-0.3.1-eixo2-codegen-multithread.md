@@ -312,19 +312,28 @@ Funções existentes TOCADAS (chamadas, não editadas): `encode_lfunc_in_region_
 
 ---
 
-## 8. Fixtures de regressão (input → exit-code native; gen2 NATIVE)
+## 8. Fixtures de regressão (verdito por STDOUT; NUNCA exit) — gen2 NATIVE
 
-| fixture | forma | exit esperado | o que prova |
+**A lei que o dono mais bate: está PROIBIDO olhar para o exit — olha-se para o STDOUT.** Espelhando o
+§5 do Eixo 1, nenhuma fixture aqui asserta sobre exit-code. Há dois modos de verdito, e ambos são
+comparação de BYTES, nunca de código de saída de um processo:
+
+- **fixtures de CORREÇÃO DE EXECUÇÃO** — o programa gerado IMPRIME o valor (a soma / o valor
+  propagado / a igualdade) em stdout, e o teste compara o **stdout** contra o esperado;
+- **fixtures de FIXPOINT** — comparam os **bytes do OBJETO** emitido com `cmp` do artefato (`.o`),
+  não o exit-code de um processo de teste; a igualdade é do ficheiro, e o verdito dela vai por stdout.
+
+| fixture | forma | verdito (o que se compara) | o que prova |
 |---|---|---|---|
-| `par_map_reduce_serial` | módulo de N funções, `lanes=1`, objeto comparado ao caminho fundido de hoje | idênticos (exit 0) | a refatoração MAP/REDUCE é byte-idêntica ao serial (E2-C1, HOJE) |
-| `fixpoint_lanes_invariant` | mesmo projeto com `lanes=1` e `lanes=8`, objetos comparados byte-a-byte | 0 só se idênticos | a prova §3 na prática (BLOQUEADO em S8 para N>1) |
-| `par_call_chain` | `main`→`f`→`g` (relocs de call cruzam funções), `lanes=4` | valor propagado | re-base ordenado no reduce; `RelocX86.sym` (E1) sobrevive à barreira |
-| `par_rodata_shared` | duas funções que usam o MESMO literal (rodata Grupo B), `lanes=4` | 0 | E2: rodata lida só no `finish`, não cai na região-de-raia; partilha preservada |
-| `par_many_small` | 64+ funções pequenas somadas, `lanes=nproc` | soma conhecida | `lanes` regiões-de-raia; pico per-raia = 1 scratch + encoded acumulados |
-| `par_fixpoint_selfbuild` | o próprio `src/` (self-build), gen2 vs gen3 sob `lanes>1` | gen2==gen3 byte-idêntico | ritual: paralelizar não altera um byte (BLOQUEADO em S8) |
+| `par_map_reduce_serial` | módulo de N funções, `lanes=1` | **`cmp` dos BYTES do `.o`** contra o objeto do caminho fundido de hoje (comparação de artefato, NÃO exit) | a refatoração MAP/REDUCE é byte-idêntica ao serial (E2-C1, HOJE) |
+| `fixpoint_lanes_invariant` | mesmo projeto com `lanes=1` e `lanes=8` | **`cmp` dos BYTES do `.o`** entre as duas execuções (comparação de artefato, NÃO exit) | a prova §3 na prática (BLOQUEADO em S8 para N>1) |
+| `par_call_chain` | `main`→`f`→`g` (relocs de call cruzam funções), `lanes=4`; o programa **imprime o valor propagado** | **stdout** = o valor propagado esperado (diff de stdout) | re-base ordenado no reduce; `RelocX86.sym` (E1) sobrevive à barreira |
+| `par_rodata_shared` | duas funções que usam o MESMO literal (rodata Grupo B), `lanes=4`; o programa **imprime a igualdade** dos dois usos | **stdout** = a igualdade/valor esperado (diff de stdout) | E2: rodata lida só no `finish`, não cai na região-de-raia; partilha preservada |
+| `par_many_small` | 64+ funções pequenas somadas, `lanes=nproc`; o programa **imprime a soma** | **stdout** = a soma conhecida (diff de stdout) | `lanes` regiões-de-raia; pico per-raia = 1 scratch + encoded acumulados |
+| `par_fixpoint_selfbuild` | o próprio `src/` (self-build), gen2 vs gen3 sob `lanes>1` | **`cmp` dos BYTES** de gen2 vs gen3 (comparação de artefato, NÃO exit) | ritual: paralelizar não altera um byte (BLOQUEADO em S8) |
 
 `par_map_reduce_serial` é a prova MAIS BARATA e a primeira — corre HOJE, sem uma única thread, e é o
-que fecha o crumb E2-C1.
+que fecha o crumb E2-C1; o seu verdito é o `cmp` de bytes do `.o`, não um exit-code.
 
 ---
 
