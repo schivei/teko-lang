@@ -821,6 +821,21 @@ void tk_journal_arm(int64_t seg);
 // the armed descriptor without allocating and without formatting through stdio. A no-op when no
 // descriptor is armed. This is the only journal write a signal handler may make.
 void tk_journal_note(int sig);
+// (0.3.1) tk_rt_rmtree — remove `path` and everything under it (a run root the NEXT run sweeps).
+// Best-effort: a level that cannot be removed leaves the rest untouched. Returns 0 on full success,
+// or -1 when something under `path` survived. NOT an append artefact — it is the sweep half of the
+// journal, and it runs on the PREVIOUS run's root, never the current one.
+int32_t tk_rt_rmtree(tk_str path);
+// (0.3.1) tk_rt_pid_alive — whether a process with id `pid` is currently alive (kill(pid,0) /
+// OpenProcess). The root lock records the locking run's pid; a sweep leaves a root whose locker is
+// still alive and reclaims one whose locker is gone, so a SIGKILL leaves the root DELIBERATELY for
+// the next run to report before it reclaims it.
+bool tk_rt_pid_alive(int64_t pid);
+// (0.3.1) tk_rt_pid — this process's id (getpid / _getpid). One half of a run's identity stamp
+// (`<wall-ns>-<pid>`): it disambiguates two runs that started in the same nanosecond on one host,
+// and it is what a child does NOT share with its parent, so a child that inherits `TEKO_RUN` keeps
+// the parent's stamp rather than minting its own.
+int64_t tk_rt_pid(void);
 // (0.3.1) tk_rt_rename — rename `from` to `to` atomically within the same directory (rename(2) /
 // MoveFileExW with MOVEFILE_REPLACE_EXISTING). The one primitive missing to publish a WHOLE artefact
 // or none: what is append goes by append, what is a whole artefact writes to the writer's own

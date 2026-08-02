@@ -239,3 +239,273 @@ pub fn rename(from: str, to: str) -> null | error {
     }
     null
 }
+
+/**
+ * mono_ns_rt — the runtime symbol `tk_rt_monotonic_ns` wraps: monotonic nanoseconds, the time half of
+ * a run stamp. Kept private so `run_id` is the one composer of the stamp.
+ *
+ * @return  a monotonically non-decreasing nanosecond reading
+ * @since 0.3.1
+ */
+extern fn mono_ns_rt() -> i64 = "tk_rt_monotonic_ns" from "teko_rt"
+
+/**
+ * pid_rt — the runtime symbol `tk_rt_pid` wraps: this process's id, the disambiguating half of a run
+ * stamp. Kept private so `run_id` is the one composer of the stamp.
+ *
+ * @return  this process's id
+ * @since 0.3.1
+ */
+extern fn pid_rt() -> i64 = "tk_rt_pid" from "teko_rt"
+
+/**
+ * rmtree_rt — the runtime symbol `tk_rt_rmtree` wraps: best-effort recursive remove of a PREVIOUS
+ * run's root, 0 on full success. Kept private so `sweep` is the one caller.
+ *
+ * @param path  the run root to remove
+ * @return      0 when the whole tree went, -1 when something survived
+ * @since 0.3.1
+ */
+extern fn rmtree_rt(path: str) -> i32 = "tk_rt_rmtree" from "teko_rt"
+
+/**
+ * pid_alive_rt — the runtime symbol `tk_rt_pid_alive` wraps: whether `pid` is a live process. Kept
+ * private so `sweep` is the one caller of the liveness test.
+ *
+ * @param pid  the process id the root lock recorded
+ * @return     true iff a process with that id is currently alive
+ * @since 0.3.1
+ */
+extern fn pid_alive_rt(pid: i64) -> bool = "tk_rt_pid_alive" from "teko_rt"
+
+/**
+ * RUN_ENV — the environment key that carries a run's identity to its children, and CACHES it within a
+ * process. `run_id` reads it (so every call in one process, and every child `spawn_spec` launches,
+ * answers the same stamp) and writes it on first miss.
+ *
+ * NAMING THE RUN IS WHAT KILLS THE SILENT GARBAGE. An orphan segment from yesterday lives under
+ * another root and carries another stamp, so it is IDENTIFIABLE rather than silently merged — the one
+ * failure mode on the list that gave no signal at all.
+ */
+pub const RUN_ENV: str = "TEKO_RUN"
+
+/**
+ * TKRUN_DIR — the directory that holds every run's root. A dotted scratch namespace under `bin/` so
+ * the scratch guard (G1) already recognises it and `sweep` has one place to walk.
+ */
+pub const TKRUN_DIR: str = "bin/.tkrun"
+
+/**
+ * run_id — the identifier of THIS run, inherited from the orchestrator or minted now.
+ *
+ * STABLE WITHIN THE PROCESS AND INHERITED BY CHILDREN, through one mechanism: `RUN_ENV`. The first
+ * call with no `TEKO_RUN` set mints `<monotonic-ns>-<pid>` and writes it back, so every later call and
+ * every child reads the same stamp instead of minting a fresh one per process.
+ *
+ * @return  the run's identifier, stable within the process
+ * @since 0.3.1
+ */
+pub fn run_id() -> str {
+    match teko::env::var(RUN_ENV) {
+        str as v => { if v.len > 0 { return v } }
+        error => { }
+    }
+    let id = teko::str::concat(teko::str::i64_to_str(mono_ns_rt()), teko::str::concat("-", teko::str::i64_to_str(pid_rt())))
+    match teko::env::set_var(RUN_ENV, id) { error => { }; null => { } }
+    id
+}
+
+/**
+ * run_root — the directory THIS run owns, and the only one it may create.
+ *
+ * @return  `bin/.tkrun/<run_id()>`
+ * @since 0.3.1
+ */
+pub fn run_root() -> str { teko::str::concat(teko::str::concat(TKRUN_DIR, "/"), run_id()) }
+
+/**
+ * mkdir_p — create `dir` and every missing parent, since `teko::fs::mkdir` is a single `mkdir(2)`.
+ * A local copy of `project.tks`'s helper so the journal module carries no cross-module dependency for
+ * a three-line walk; an already-existing level is a no-op (`tk_rt_mkdir` treats EEXIST as success).
+ *
+ * @param dir  the directory to create, with any parents it needs
+ * @return     an `error` when a level cannot be created, else `null`
+ * @since 0.3.1
+ */
+fn mkdir_p(dir: str) -> error | null {
+    mut i: u64 = 0
+    loop {
+        if i >= dir.len { break }
+        if dir[i] == b'/' && i > 0 {
+            match teko::fs::mkdir(teko::str::slice_to(dir, i)) { error as e => return e; null => { } }
+        }
+        i = i + 1
+    }
+    teko::fs::mkdir(dir)
+}
+
+/**
+ * dir_of — the directory part of `path` (everything before its last `/`), or "" when it names no
+ * directory. Used to create a scratch file's parents without creating the file itself.
+ *
+ * @param path  a composed path
+ * @return      the parent directory, or ""
+ * @since 0.3.1
+ */
+fn dir_of(path: str) -> str {
+    mut i: u64 = path.len
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        if path[i] == b'/' { return teko::str::slice_to(path, i) }
+    }
+    ""
+}
+
+/**
+ * writer_dir — the per-writer sub-directory a scope token names under the run root: the token with its
+ * leading `.` removed (`.s0-label` becomes `s0-label`), so the run root holds one directory per test
+ * identity rather than a flat pile of sibling files.
+ *
+ * @param scope  the running test's scope token (`.s<shard>-<label>`), never ""
+ * @return       the sub-directory name
+ * @since 0.3.1
+ */
+fn writer_dir(scope: str) -> str {
+    if scope.len > 0 && scope[0] == b'.' { return teko::str::slice_from(scope, 1) }
+    scope
+}
+
+/**
+ * scratch — the path `base` has IN THIS RUN and for the CURRENTLY RUNNING test.
+ *
+ * THIS IS THE ONE COMPOSER. "Which paths are isolated" is answered by reading this function's callers,
+ * not by grepping literals — which is exactly how the fixed paths went unnoticed.
+ *
+ * BYTE-FOR-BYTE `base` OUTSIDE A TEST, and that is the point rather than a fallback: the same
+ * path-composing code runs in PRODUCTION (the regression runner), and there the path must stay what it
+ * was. Rooting applies exactly where the concurrency it guards against exists — inside the test gate,
+ * where `teko::test::scope()` is non-empty.
+ *
+ * @param base  the path a caller would otherwise hard-code
+ * @return      `<run_root()>/<writer>/<base>` inside a test (parents created), `base` outside one
+ * @since 0.3.1
+ */
+pub fn scratch(base: str) -> str {
+    let scope = teko::test::scope()
+    if scope.len == 0 { return base }
+    let root = run_root()
+    let composed = teko::str::concat(teko::str::concat(root, "/"), teko::str::concat(writer_dir(scope), teko::str::concat("/", base)))
+    let parent = dir_of(composed)
+    if parent.len > 0 { match mkdir_p(parent) { error => { }; null => { } } }
+    composed
+}
+
+/**
+ * ensure_root — create this run's root and stamp it with a lock naming this process, so a concurrent
+ * `sweep` from another run leaves it alone while this run is alive.
+ *
+ * @return  the run root, created and locked
+ * @since 0.3.1
+ */
+pub fn ensure_root() -> str {
+    let root = run_root()
+    match mkdir_p(root) { error => { }; null => { } }
+    match teko::io::write_file(lock_path(root), teko::str::i64_to_str(pid_rt())) { error => { }; null => { } }
+    root
+}
+
+/**
+ * lock_path — the lock file inside a run root, whose body is the locking process's pid.
+ *
+ * @param root  a run root
+ * @return      `<root>/.lock`
+ * @since 0.3.1
+ */
+fn lock_path(root: str) -> str { teko::str::concat(root, "/.lock") }
+
+/**
+ * sweep — remove the run roots under `bin/.tkrun/` that are neither `keep` nor still locked by a live
+ * process.
+ *
+ * THE CLEANUP IS THE NEXT RUN'S, NEVER ITS OWN. A run that cleaned on exit would lose the cleanup in
+ * the one case it matters (abrupt death) and lose with it the proof that it died. Sweeping on OPEN has
+ * the opposite property: a SIGKILL leaves the root ON PURPOSE, and the next run reclaims it only after
+ * it could have reported it — and only once its locker is gone.
+ *
+ * @param keep  the run root to preserve (this run's own)
+ * @return      how many roots were removed
+ * @since 0.3.1
+ */
+pub fn sweep(keep: str) -> u64 {
+    let keep_id = last_segment(keep)
+    let entries = match teko::fs::list_dir(TKRUN_DIR) { []str as e => e; error => teko::list::empty() }
+    mut removed: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= entries.len { break }
+        let name = entries[i]
+        if name != keep_id && !root_is_live(teko::str::concat(teko::str::concat(TKRUN_DIR, "/"), name)) {
+            if rmtree_rt(teko::str::concat(teko::str::concat(TKRUN_DIR, "/"), name)) == 0 { removed = removed + 1 }
+        }
+        i = i + 1
+    }
+    removed
+}
+
+/**
+ * root_is_live — whether the run root at `root` is still held by a live process, read from its lock.
+ *
+ * @param root  a sibling run root
+ * @return      true iff its lock names a pid that is currently alive
+ * @since 0.3.1
+ */
+fn root_is_live(root: str) -> bool {
+    let body = match teko::io::read_file(lock_path(root)) { str as s => s; error => return false }
+    let pid = parse_pid(body)
+    if pid <= 0 { return false }
+    pid_alive_rt(pid)
+}
+
+/**
+ * parse_pid — the decimal pid a lock file holds, read digit by digit (the corpus has no string→int
+ * intrinsic, and the body is exactly `i64_to_str(pid)` so leading digits are all there is). A body
+ * with no digit answers 0, which `root_is_live` reads as "not live".
+ *
+ * @param body  the lock file's contents
+ * @return      the pid, or 0 when the body carries none
+ * @since 0.3.1
+ */
+fn parse_pid(body: str) -> i64 {
+    mut v: i64 = 0
+    mut i: u64 = 0
+    mut seen: bool = false
+    loop {
+        if i >= body.len { break }
+        let c = body[i]
+        if c >= b'0' && c <= b'9' {
+            v = (v * 10) + ((c to i64) - (b'0' to i64))
+            seen = true
+        }
+        if seen && (c < b'0' || c > b'9') { break }
+        i = i + 1
+    }
+    v
+}
+
+/**
+ * last_segment — the last `/`-separated segment of `path` (its basename), or `path` when it has none.
+ *
+ * @param path  a path
+ * @return      its final segment
+ * @since 0.3.1
+ */
+fn last_segment(path: str) -> str {
+    mut i: u64 = path.len
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        if path[i] == b'/' { return teko::str::slice_from(path, i + 1) }
+    }
+    path
+}

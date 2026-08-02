@@ -2664,6 +2664,70 @@ void tk_journal_note(int sig) {
 #endif
 }
 
+// (0.3.1) tk_rt_pid — see teko_rt.h. This process's id, one half of the run identity stamp.
+int64_t tk_rt_pid(void) {
+#ifdef _WIN32
+    return (int64_t)_getpid();
+#else
+    return (int64_t)getpid();
+#endif
+}
+
+// tk_rmtree_cstr — remove the tree rooted at NUL-terminated `path`. Returns 0 on full success, -1
+// when anything survived. Recurses directories depth-first; a plain file is one unlink.
+static int tk_rmtree_cstr(const char *path) {
+    struct stat st;
+#ifdef _WIN32
+    if (stat(path, &st) != 0) return 0;
+    if (!(st.st_mode & _S_IFDIR)) { return _unlink(path) == 0 ? 0 : -1; }
+#else
+    if (lstat(path, &st) != 0) return 0;
+    if (!S_ISDIR(st.st_mode)) { return unlink(path) == 0 ? 0 : -1; }
+#endif
+    int rc = 0;
+    DIR *d = opendir(path);
+    if (d != NULL) {
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+            size_t need = strlen(path) + 1 + strlen(e->d_name) + 1;
+            char *child = (char *)malloc(need);
+            if (child == NULL) { rc = -1; continue; }
+            snprintf(child, need, "%s/%s", path, e->d_name);
+            if (tk_rmtree_cstr(child) != 0) rc = -1;
+            free(child);
+        }
+        closedir(d);
+    }
+#ifdef _WIN32
+    if (_rmdir(path) != 0) rc = -1;
+#else
+    if (rmdir(path) != 0) rc = -1;
+#endif
+    return rc;
+}
+
+// (0.3.1) tk_rt_rmtree — see teko_rt.h. Best-effort recursive remove of a PREVIOUS run's root.
+int32_t tk_rt_rmtree(tk_str path) {
+    char *p = tk_cstr(path);
+    return (int32_t)tk_rmtree_cstr(p);
+}
+
+// (0.3.1) tk_rt_pid_alive — see teko_rt.h. Whether a process with id `pid` is currently alive.
+bool tk_rt_pid_alive(int64_t pid) {
+    if (pid <= 0) return false;
+#ifdef _WIN32
+    HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid);
+    if (h == NULL) return false;
+    DWORD w = WaitForSingleObject(h, 0);
+    CloseHandle(h);
+    return w == WAIT_TIMEOUT;
+#else
+    if (kill((pid_t)pid, 0) == 0) return true;
+    return errno == EPERM;
+#endif
+}
+
 // (0.3.1) tk_rt_rename — see teko_rt.h. Atomic publish of a whole artefact. Returns 0 or errno.
 int32_t tk_rt_rename(tk_str from, tk_str to) {
     char *f = tk_cstr(from);
