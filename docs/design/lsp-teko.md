@@ -347,8 +347,11 @@ entrada `teko::build::init_run` em `main.tks:66`). O LSP **nunca reimplementa** 
 1. **Servidor (agnostico) — `workspace/executeCommand`.** Comandos `teko.build` e
    `teko.run` registrados nas capabilities. O servidor executa `teko build <proj>` /
    `teko run <proj>` via `src/process/process.tks` (`spawn_redirected` :288,
-   `read_to_eof` :555), transmite stdout/stderr como `$/progress` + `window/logMessage`, e
-   devolve o codigo de saida. **Todo cliente LSP ganha isso de graca** (N5).
+   `read_to_eof` :555), e **transmite o TEXTO da compilacao** (diagnosticos + a linha final
+   `build ok`/`build failed`) como `$/progress` + `window/logMessage` — **esse texto E o
+   resultado**. O codigo do filho e apenas um sinal interno que o servidor MAPEIA para essa
+   linha de status; **a prova (§10) casa o texto, nunca o exit** (lei do dono). **Todo
+   cliente LSP ganha isso de graca** (N5).
 2. **Cliente VSCode (glue, primeiro) — `tasks.json`.** Para quem quer o botao de build
    nativo do editor, uma task declarativa. A forma ja esta esbocada em
    `debugger-superficie...:865-882` (`type: "shell"`, `command: "teko"`,
@@ -369,17 +372,21 @@ o desenho so a torna obrigatoria.
 /**
  * Runs `teko build`/`teko run` on behalf of an LSP `workspace/executeCommand`, spawning the
  * existing CLI with an ARGV VECTOR (never a shell string — see the ratified anti-injection
- * rule, docs/design/debugger-superficie-e-contramedida-0.3.1.md:1012). Streams child output
- * back as progress/log notifications and returns the child's exit code.
+ * rule, docs/design/debugger-superficie-e-contramedida-0.3.1.md:1012). The RESULT surfaced
+ * to the client is the streamed compiler TEXT (diagnostics + a final `build ok`/`build
+ * failed` status line), emitted as progress/log notifications — that text is what proofs
+ * assert (owner's rule: never key on exit). The child's raw code is an INTERNAL signal the
+ * server maps onto that status line, not a client-facing return.
  *
  * @param subcmd "build" or "run"
  * @param projdir the project directory the client sent as the command argument
- * @return the child process exit code, or `error` when the child could not be spawned
- * @throws error when spawning fails (never on a nonzero child exit — that is returned)
+ * @return the final status TEXT (`"build ok"` / `"build failed: <first diagnostic>"`), or
+ *         `error` when the child could not be spawned at all
+ * @throws error when spawning fails (never on a nonzero build — that surfaces as `build failed` text)
  * @see teko::process::spawn_redirected
  * @since 0.3.1.0
  */
-pub fn execute_build_command(subcmd: str, projdir: str) -> i32 | error { /* crumb L9 */ }
+pub fn execute_build_command(subcmd: str, projdir: str) -> str | error { /* crumb L9 */ }
 ```
 
 Nota de estado (nao um alarme, so honestidade): `teko run` hoje aponta para a VM
