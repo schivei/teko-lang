@@ -1,0 +1,61 @@
+# .github/workflows/theory-win-tests.yml — LOCALIZAR o travamento de ~1h do Windows nos testes.
+#
+# Enquadramento do dono (2026-08-02): "O Windows fica quase 1h em execucao sem log algum nos testes.
+# Para o Windows, use uma theory/** com um CI personalizado e um agente para corrigir."
+#
+# A invisibilidade e do redirecionamento no pr.yml (`teko.exe test . > log 2>&1; cat log`): o cat so
+# roda DEPOIS que o processo termina, entao um travamento nao imprime nada e o timeout-minutes: 60
+# mata sem uma linha. Este workflow roda o teste em ESTAGIOS (theory/win-tests/run-staged.sh) com
+# marcadores impressos pelo bash e watchdog por estagio, com um teto TOTAL curto para nunca queimar
+# uma hora. O ultimo marcador impresso nomeia o estagio que travou.
+#
+# Isto e theory/**: sandbox, sem promocao. O CI aqui e do integrador; o agente corrige com base no
+# que o integrador coleta e repassa (o agente nao ve o CI).
+name: theory / win-tests (localizar o travamento)
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches:
+      - 'theory/win-tests**'
+      - 'cargo/0.3.1.0-win**'
+    paths:
+      - 'theory/win-tests/**'
+      - '.github/workflows/theory-win-tests.yml'
+      - 'src/**'
+
+concurrency:
+  group: theory-win-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  win-staged:
+    name: theory win-tests / staged
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Report host toolchain (diagnostic)
+        shell: bash
+        run: for t in cc gcc cl clang file 7z curl; do printf '%s: ' "$t"; command -v "$t" || echo '(none)'; done
+
+      - name: Build this branch's teko (seed -> ladder -> dry build)
+        shell: bash
+        env:
+          TEKO_CI: '1'
+        run: sh scripts/produce_assets.sh native windows-x86_64 windows-x86_64
+
+      - name: Locate the built teko
+        id: loc
+        shell: bash
+        run: |
+          for c in out/teko.exe out/teko dl/windows-x86_64/teko.exe; do
+            if [ -x "$c" ]; then echo "teko=$c" >> "$GITHUB_OUTPUT"; echo "found $c"; exit 0; fi
+          done
+          echo "no teko found"; ls -lR out dl 2>/dev/null | head -60; exit 1
+
+      - name: Staged test run (markers + per-stage watchdog)
+        shell: bash
+        run: sh theory/win-tests/run-staged.sh "${{ steps.loc.outputs.teko }}"
