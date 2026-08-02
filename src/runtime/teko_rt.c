@@ -3692,10 +3692,15 @@ void *tk_slice_push_r(const void *ptr, uint64_t len, const void *elem, uint64_t 
 // realloc-parity ladders (memory win).
 void *tk_append_bytes_fo(const void *ptr, uint64_t len, const void *src, uint64_t n, uint64_t *out_len) {
     if (n == 0) { *out_len = len; return (void *)ptr; }
+    // (C1 hardening) follow the CURRENT region like tk_alloc does, so a buffer grown inside a scratch
+    // window is cache-tagged with the CHILD's (region, gen) — not root — and tk_region_drop retires it
+    // via the same generation guard the whole fix relies on. cur == root when no window is open, so
+    // this is byte-for-byte the old behaviour for every existing caller (cb runs only at root scope).
+    tk_region *cur = tk_region_current();
     if (ptr != NULL) {   // in-place: the live tail with enough spare capacity
         unsigned h = tk_push_slot(ptr);
         if (tk_push_cache[h].ptr == ptr && tk_push_cache[h].len == len && tk_push_cache[h].esz == 1
-            && tk_push_cache[h].region == tk_g_root && tk_push_cache[h].region_gen == tk_g_root->gen
+            && tk_push_cache[h].region == cur && tk_push_cache[h].region_gen == cur->gen
             && len + n <= tk_push_cache[h].cap) {
             memcpy((char *)ptr + len, src, n);
             tk_push_cache[h].len = len + n;
@@ -3720,7 +3725,7 @@ void *tk_append_bytes_fo(const void *ptr, uint64_t len, const void *src, uint64_
     if (tk_push_cache[hb].ptr == NULL || tk_push_cache[hb].cap * tk_push_cache[hb].esz <= cap) {
         tk_push_cache[hb].ptr = buf; tk_push_cache[hb].len = len + n;
         tk_push_cache[hb].cap = cap; tk_push_cache[hb].esz = 1;
-        tk_push_cache[hb].region = tk_g_root; tk_push_cache[hb].region_gen = tk_g_root->gen;
+        tk_push_cache[hb].region = cur; tk_push_cache[hb].region_gen = cur->gen;
     }
     if (ptr != NULL) tk_free_block((void *)ptr, old_bytes);   // the DECREE: the old buffer is dead
     *out_len = len + n;
@@ -3741,10 +3746,11 @@ void *tk_slice_push(const void *ptr, uint64_t len, const void *elem, uint64_t es
 }
 
 // (0.3.1.0 degrau 4 — NATIVE-AGG-SLICE-BY-ADDRESS) tk_slice_elem_box — copy one aggregate element
-// into FRESH root-arena storage and hand back its address, so a push inside a loop stores a distinct
-// address per ITERATION instead of the one frame slot the native backend allocates per instruction.
-// tk_alloc already maps n == 0 to a unique block, so a zero-sized aggregate still yields a distinct
-// address; the copy's lifetime is the root region's, matching the buffer tk_slice_push grows.
+// into the CURRENT region's storage and hand back its address, so a push inside a loop stores a
+// distinct address per ITERATION instead of the one frame slot the native backend allocates per
+// instruction. tk_alloc already maps n == 0 to a unique block, so a zero-sized aggregate still yields
+// a distinct address; the copy follows tk_region_current() (root until a tk_region_enter), matching
+// the buffer tk_slice_push grows.
 void *tk_slice_elem_box(const void *elem, uint64_t esz) {
     void *p = tk_alloc((size_t)esz);
     if (esz != 0) memcpy(p, elem, (size_t)esz);
