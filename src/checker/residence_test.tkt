@@ -1,0 +1,257 @@
+use teko::parser
+
+/**
+ * The residence-oracle unit suite (`src/checker/residence_test.tkt`, namespace `teko::checker`).
+ * It lives beside the module so it reaches the oracle's PUBLIC surface (`residence_tier` /
+ * `residence_plan`) and proves each tier of the lattice — Scope / Frame / Caller / Root /
+ * Unresolved — is produced on hand-built typed inputs, both through the pure decision core and
+ * end-to-end through `residence_plan`.
+ *
+ * @return Type  the `i64` primitive type (a scalar copy source)
+ */
+fn rt_i64() -> Type { Prim { kind = PrimKind::I64 } }
+
+/**
+ * An `i64` literal typed expression.
+ *
+ * @param v  the literal value
+ * @return   a `TNumber` typed expression
+ */
+fn rt_i64_lit(v: u64) -> TExpr {
+    TExpr { kind = TNumber { is_float = false; value = parser::numint_of_u64(v); fval = 0.0 }; type = rt_i64(); line = 0; col = 0 }
+}
+
+/**
+ * A bare `i64` variable read.
+ *
+ * @param name  the variable name
+ * @return      a `TVar` typed expression
+ */
+fn rt_var(name: str) -> TExpr {
+    TExpr { kind = TVar { name = name; is_func = false; func_ns = "" }; type = rt_i64(); line = 0; col = 0 }
+}
+
+/**
+ * A `let name = value` binding stamped with the given residence lifetime.
+ *
+ * @param name   the bound name
+ * @param value  the binding's typed RHS
+ * @param di     the residence lifetime to stamp
+ * @return       a `TBinding` statement
+ */
+fn rt_let_di(name: str, value: TExpr, di: parser::DiKind) -> TStatement {
+    TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = name }; bound = value.type; value = value; di_kind = di }
+}
+
+/**
+ * A `let name = value` binding with no residence lifetime (the ordinary case).
+ *
+ * @param name   the bound name
+ * @param value  the binding's typed RHS
+ * @return       a `TBinding` statement
+ */
+fn rt_let(name: str, value: TExpr) -> TStatement { rt_let_di(name, value, parser::DiKind::None) }
+
+/**
+ * A `let { a; b } = value` destructure binding (a nameless target the oracle leaves Unresolved).
+ *
+ * @param a      the first destructured name
+ * @param b      the second destructured name
+ * @param value  the binding's typed RHS
+ * @return       a `TBinding` statement with a destructure target
+ */
+fn rt_destructure(a: str, b: str, value: TExpr) -> TStatement {
+    TBinding { kind = parser::BindKind::Let; target = parser::DestructurePattern { names = teko::list::push(teko::list::push(teko::list::empty(), a), b) }; bound = value.type; value = value; di_kind = parser::DiKind::None }
+}
+
+/**
+ * A `return value` statement.
+ *
+ * @param value  the returned typed expression
+ * @return       a `TReturn` statement
+ */
+fn rt_return(value: TExpr) -> TStatement { TReturn { has_value = true; value = value } }
+
+/**
+ * A one-statement `loop { body }`.
+ *
+ * @param body  the loop body statements
+ * @return      a `TLoopStmt` statement
+ */
+fn rt_loop(body: []TStatement) -> TStatement { TLoopStmt { label = ""; init = teko::list::empty(); body = body } }
+
+/**
+ * A minimal `TFunction` with the given body and no params (the fields the oracle never reads carry
+ * inert defaults).
+ *
+ * @param body  the function's typed statement block
+ * @return      a `TFunction` ready for `residence_plan`
+ */
+fn rt_fn(body: []TStatement) -> TFunction {
+    TFunction { name = "f"; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = teko::list::empty(); return_type = Void { }; body = body; vis = parser::Visibility::Private; has_doc = false; doc = ""; namespace = "t"; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64 }
+}
+
+/**
+ * Is the tier `Scope`?
+ *
+ * @param t  the residence tier
+ * @return   true iff `t` is `Scope`
+ */
+fn rt_is_scope(t: ResidenceTier) -> bool { match t { Scope => true; _ => false } }
+
+/**
+ * Is the tier `Frame`?
+ *
+ * @param t  the residence tier
+ * @return   true iff `t` is `Frame`
+ */
+fn rt_is_frame(t: ResidenceTier) -> bool { match t { Frame => true; _ => false } }
+
+/**
+ * Is the tier `Caller`?
+ *
+ * @param t  the residence tier
+ * @return   true iff `t` is `Caller`
+ */
+fn rt_is_caller(t: ResidenceTier) -> bool { match t { Caller => true; _ => false } }
+
+/**
+ * Is the tier `Root`?
+ *
+ * @param t  the residence tier
+ * @return   true iff `t` is `Root`
+ */
+fn rt_is_root(t: ResidenceTier) -> bool { match t { Root => true; _ => false } }
+
+/**
+ * Is the tier `Unresolved`?
+ *
+ * @param t  the residence tier
+ * @return   true iff `t` is `Unresolved`
+ */
+fn rt_is_unresolved(t: ResidenceTier) -> bool { match t { Unresolved => true; _ => false } }
+
+/**
+ * A `PtParam` points-to value naming slot 0 (a value the caller owns).
+ *
+ * @return  a `PtParam` points-to value
+ */
+fn rt_pt_param() -> PointsTo { PtParam { id = PtParamId { index = 0 to u32 } } }
+
+/**
+ * A `PtAdopter` points-to value (a value confined to an adopter region).
+ *
+ * @return  a `PtAdopter` points-to value
+ */
+fn rt_pt_adopter() -> PointsTo { PtAdopter { id = PtAdopterId { region = 0 to u32; top = false } } }
+
+/**
+ * residence_tier forces a `#singleton` binding to `Root`, short-circuiting the points-to (even a
+ * frame-born value is root when singleton-declared).
+ */
+#test fn residence_tier_singleton_is_root() {
+    teko::assert::is_true(rt_is_root(residence_tier(true, PtFrame { }, false, false)))
+    teko::assert::is_true(rt_is_root(residence_tier(true, PtTop { }, true, true)))
+}
+
+/**
+ * residence_tier maps `PtRoot` to `Root` for a non-singleton binding.
+ */
+#test fn residence_tier_ptroot_is_root() {
+    teko::assert::is_true(rt_is_root(residence_tier(false, PtRoot { }, false, false)))
+}
+
+/**
+ * residence_tier maps `PtParam` (caller-owned storage) to `Caller`.
+ */
+#test fn residence_tier_ptparam_is_caller() {
+    teko::assert::is_true(rt_is_caller(residence_tier(false, rt_pt_param(), false, false)))
+}
+
+/**
+ * residence_tier maps `PtTop` (an indeterminate join) to the measured `Unresolved` defect.
+ */
+#test fn residence_tier_pttop_is_unresolved() {
+    teko::assert::is_true(rt_is_unresolved(residence_tier(false, PtTop { }, false, false)))
+}
+
+/**
+ * residence_tier moves a frame-born value that ESCAPES the frame to `Caller` (both `PtFrame` and
+ * `PtAdopter` refine through the escape fast-path).
+ */
+#test fn residence_tier_frame_escaping_is_caller() {
+    teko::assert::is_true(rt_is_caller(residence_tier(false, PtFrame { }, true, false)))
+    teko::assert::is_true(rt_is_caller(residence_tier(false, rt_pt_adopter(), true, false)))
+}
+
+/**
+ * residence_tier resides a frame-born BLOCK-LOCAL value in `Scope`.
+ */
+#test fn residence_tier_frame_block_local_is_scope() {
+    teko::assert::is_true(rt_is_scope(residence_tier(false, PtFrame { }, false, true)))
+}
+
+/**
+ * residence_tier resides a frame-born non-escaping, non-block-local value in `Frame`.
+ */
+#test fn residence_tier_frame_local_is_frame() {
+    teko::assert::is_true(rt_is_frame(residence_tier(false, PtFrame { }, false, false)))
+    teko::assert::is_true(rt_is_frame(residence_tier(false, rt_pt_adopter(), false, false)))
+}
+
+/**
+ * residence_plan resides a `#singleton` binding in `Root`.
+ */
+#test fn residence_plan_singleton_binding_is_root() {
+    let body = teko::list::push(teko::list::empty(), rt_let_di("cfg", rt_i64_lit(7), parser::DiKind::Singleton))
+    let plan = residence_plan(rt_fn(body))
+    teko::assert::is_true(plan.bindings.len == 1)
+    teko::assert::is_true(plan.bindings[0].name == "cfg")
+    teko::assert::is_true(rt_is_root(plan.bindings[0].tier))
+}
+
+/**
+ * residence_plan moves a returned local to `Caller`, and records the return as a move.
+ */
+#test fn residence_plan_returned_local_moves_to_caller() {
+    mut body: []TStatement = teko::list::push(teko::list::empty(), rt_let("out", rt_i64_lit(3)))
+    body = teko::list::push(body, rt_return(rt_var("out")))
+    let plan = residence_plan(rt_fn(body))
+    teko::assert::is_true(rt_is_caller(plan.bindings[0].tier))
+    teko::assert::is_true(plan.returns.len == 1)
+    teko::assert::is_true(plan.returns[0].is_move)
+    teko::assert::is_true(rt_is_caller(plan.returns[0].tier))
+}
+
+/**
+ * residence_plan resides an UNUSED loop-body local in `Scope` (block-local — every read, of which
+ * there are none, is inside the loop body).
+ */
+#test fn residence_plan_loop_body_local_is_scope() {
+    let inner = teko::list::push(teko::list::empty(), rt_let("tmp", rt_i64_lit(9)))
+    let body = teko::list::push(teko::list::empty(), rt_loop(inner))
+    let plan = residence_plan(rt_fn(body))
+    teko::assert::is_true(plan.bindings.len == 1)
+    teko::assert::is_true(plan.bindings[0].name == "tmp")
+    teko::assert::is_true(rt_is_scope(plan.bindings[0].tier))
+}
+
+/**
+ * residence_plan leaves a nameless DESTRUCTURE binding `Unresolved` (the oracle cannot key it into a
+ * single residence).
+ */
+#test fn residence_plan_destructure_is_unresolved() {
+    let body = teko::list::push(teko::list::empty(), rt_destructure("a", "b", rt_i64_lit(1)))
+    let plan = residence_plan(rt_fn(body))
+    teko::assert::is_true(rt_is_unresolved(plan.bindings[0].tier))
+}
+
+/**
+ * residence_plan records a bare `return` (no value) as a non-move.
+ */
+#test fn residence_plan_bare_return_is_not_move() {
+    let body = teko::list::push(teko::list::empty(), TReturn { has_value = false; value = rt_i64_lit(0) })
+    let plan = residence_plan(rt_fn(body))
+    teko::assert::is_true(plan.returns.len == 1)
+    teko::assert::is_false(plan.returns[0].is_move)
+}

@@ -64,7 +64,7 @@ fn lam_collect_descends_loop_init() {
     mut refs: []str = teko::list::empty()
     mut bound: []str = teko::list::empty()
     mut writes: []str = teko::list::empty()
-    let ib: parser::Statement = parser::Binding { kind = parser::BindKind::Mut; target = parser::SimpleName { name = "_hi" }; has_type = false; type_ann = named_t("void"); is_ref = false; value = e_var("n") }
+    let ib: parser::Statement = parser::Binding { kind = parser::BindKind::Mut; target = parser::SimpleName { name = "_hi" }; has_type = false; type_ann = named_t("void"); is_ref = false; value = e_var("n"); di_kind = parser::DiKind::None }
     let init: []parser::Statement = teko::list::push(teko::list::empty(), ib)
     let brk: []parser::Statement = teko::list::push(teko::list::empty(), parser::BreakStmt { label = "" })
     let loopnode: parser::Statement = parser::LoopStmt { label = ""; init = init; body = brk }
@@ -669,7 +669,7 @@ fn mono_walk_covers_node_kinds() {
     let genstamp = tcall1("idg", tnum(5), i64t())   // drives stamping from within the walk
 
     // statements: binding, assign, expr, loop (with break/continue), defer, return.
-    mut body: []TStatement = teko::list::push(teko::list::empty(), TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "a" }; bound = i64t(); value = bin })
+    mut body: []TStatement = teko::list::push(teko::list::empty(), TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "a" }; bound = i64t(); value = bin; di_kind = parser::DiKind::None })
     body = teko::list::push(body, TAssign { kind = parser::AssignKind::Simple; name = "a"; op = lexer::TokenKind::Assign; bound = i64t(); value = un; deref = false; target = no_texpr() })
     body = teko::list::push(body, texpr_stmt(cast))
     body = teko::list::push(body, texpr_stmt(cor))
@@ -707,7 +707,7 @@ fn t_node_init(val: TExpr) -> TExpr {
 // a `let n = <value>` binding (not const, not discard) to a SimpleName — returned as the raw
 // TBinding (the codegen's emit_binding receives this same destructured node).
 fn t_let(name: str, value: TExpr) -> TBinding {
-    TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = name }; bound = value.type; value = value }
+    TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = name }; bound = value.type; value = value ; di_kind = parser::DiKind::None }
 }
 // `n.val` typed as i64 (a SCALAR field read — a pure copy, so the receiver does not escape).
 fn t_field_i64(recv_name: str, field: str) -> TExpr {
@@ -823,7 +823,7 @@ fn block_local_boxed_union_binding_is_block_local() {
         kind = parser::BindKind::Let
         target = parser::SimpleName { name = "n" }
         bound = union_t
-        value = t_node_init(tnum(5))
+        value = t_node_init(tnum(5)); di_kind = parser::DiKind::None
     }
     mut loopbody: []TStatement = teko::list::push(teko::list::empty(), binding)
     loopbody = teko::list::push(loopbody, t_let("g", t_field_i64("n", "val")))
@@ -983,7 +983,7 @@ fn trait_is_not_instantiable() {
     // `Stamp { at = 1 }` — a trait literal is rejected (derive it instead).
     let tr = trait_item("Stamp", tr_fields1("at"), teko::list::empty())
     let lit = ek(parser::StructLit { type_path = path1("Stamp"); type_args = teko::list::empty(); field_names = teko::list::push(teko::list::empty(), "at"); field_vals = teko::list::push(teko::list::empty(), e_num(1)) })
-    let bind_v = parser::Binding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "v" }; has_type = false; type_ann = named_t("i64"); is_ref = false; value = lit }
+    let bind_v = parser::Binding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "v" }; has_type = false; type_ann = named_t("i64"); is_ref = false; value = lit; di_kind = parser::DiKind::None }
     teko::assert::is_true(!tr_program_ok(items2(tr, parser::Item { content = bind_v; namespace = ""; file = "" })))
 }
 
@@ -1000,7 +1000,7 @@ fn tr_generic_fn(name: str, trait_name: str, body: []parser::Statement) -> parse
     deriver value to feed a generic-fn call). */
 fn tr_let_struct(bind: str, type_name: str, field: str) -> parser::Item {
     let lit = ek(parser::StructLit { type_path = path1(type_name); type_args = teko::list::empty(); field_names = teko::list::push(teko::list::empty(), field); field_vals = teko::list::push(teko::list::empty(), e_num(0)) })
-    let b = parser::Binding { kind = parser::BindKind::Let; target = parser::SimpleName { name = bind }; has_type = false; type_ann = named_t("i64"); is_ref = false; value = lit }
+    let b = parser::Binding { kind = parser::BindKind::Let; target = parser::SimpleName { name = bind }; has_type = false; type_ann = named_t("i64"); is_ref = false; value = lit; di_kind = parser::DiKind::None }
     parser::Item { content = b; namespace = ""; file = "" }
 }
 
@@ -1024,7 +1024,7 @@ fn trait_struct_as_dynamic_value_is_error() {
     let tr = trait_item("Need", teko::list::empty(), list1(iface_method("need")))
     let dv = deriver_struct_item("P", tr_fields1("own"), list1(impl_method("need", parser::Visibility::Private)), slist1("Need"))
     let mk = tr_let_struct("p", "P", "own")
-    let bind_s = parser::Binding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "s" }; has_type = true; type_ann = named_t("Need"); is_ref = false; value = e_var("p") }
+    let bind_s = parser::Binding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "s" }; has_type = true; type_ann = named_t("Need"); is_ref = false; value = e_var("p"); di_kind = parser::DiKind::None }
     let widen = parser::Item { content = bind_s; namespace = ""; file = "" }
     mut items: []parser::Item = teko::list::push(teko::list::empty(), tr)
     items = teko::list::push(items, dv)

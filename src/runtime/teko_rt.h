@@ -479,6 +479,11 @@ uint64_t tk_rt_float_parse_bits(tk_str s);
 //
 // tk_str_concat — a fresh str holding a's bytes then b's bytes; the result OWNS the buffer.
 tk_str tk_str_concat(tk_str a, tk_str b);
+// (0.3.1 modelo-de-memoria §9) tk_str_concat_r — tk_str_concat with the result buffer bump-allocated
+// in `r` (tk_region_alloc) instead of malloc'd: the str lives in `r` and dies when `r` is dropped, so
+// a str produced inside a `{}` can participate in death-by-scope. `r == tk_region_root()`/program (or
+// NULL) reproduces the leak-tolerant malloc behaviour of tk_str_concat.
+tk_str tk_str_concat_r(tk_region *r, tk_str a, tk_str b);
 // (C7.1a) FFI marshalling: the raw byte pointer of a str (teko::mem::as_ptr — borrows, ptr+len
 // use), a fresh NUL-terminated C copy of a str (teko::mem::as_cstr), and a copy of a
 // NUL-terminated foreign C string back into a fresh str (teko::mem::str_from_cstr).
