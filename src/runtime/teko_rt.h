@@ -1035,10 +1035,6 @@ const tk_byte *tk_rt_version_len(uint64_t *out_len);
 // (#148) the process peak RSS in bytes (0 = unavailable) — teko::mem::peak_rss.
 uint64_t tk_peak_rss(void);
 
-// tk_nproc — logical processors the OS grants this process (POSIX: sysconf(_SC_NPROCESSORS_ONLN);
-// Windows: GetSystemInfo dwNumberOfProcessors). Floor 1 (never 0). No allocation — teko::env::nproc.
-uint64_t tk_nproc(void);
-
 // (#194 C6) teko::crypto::rand::secure_bytes(n) — n cryptographically-secure random bytes
 // from the host CSPRNG (getrandom(2)/getentropy(3) on POSIX, rand_s (ucrt) on Windows).
 // Returns a fresh owned buffer of EXACTLY n bytes (n == 0 -> a valid empty slice, ptr may be

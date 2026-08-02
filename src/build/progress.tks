@@ -3,9 +3,8 @@
  *
  * BUILD-OUTPUT OBSERVABILITY — the per-phase progress reporter `teko build` (and the
  * bare-project invocation) uses in place of the historical one-line-per-file wall.
- * Every phase (parse, checker, monomorph, codegen, emit C, cc — plus the native backend's
- * lower/isel/regalloc/encode/objfile/link, the test gate's `emit test`/`cc test`, and the
- * release `rebuild`) ANNOUNCES itself at its START
+ * Every phase (lexer, parser, checker, monomorph, codegen, emit C, cc — plus the test
+ * gate's `emit test`/`cc test` and the release `rebuild`) ANNOUNCES itself at its START
  * and settles with the elapsed time and a `✓`/`✗` mark. The `Report` mode decides the
  * shape: `Tty` overwrites a single in-place line with a `\r`-updating counter WHILE the
  * phase works; `Plain` (CI/pipe/redirect) prints a full START line AND a full settle
@@ -75,7 +74,7 @@ pub fn report_mode(quiet: bool, tty: bool) -> Report {
 /**
  * One in-flight build phase: its label, start time, and how it renders (`mode`).
  *
- * @field label  the fixed-width-padded phase name ("parse", "checker", "cc", ...)
+ * @field label  the fixed-width-padded phase name ("lexer", "checker", "cc", ...)
  * @field start  when the phase began, as a monotonic-clock ns reading (see `now_ns` —
  *               plain `i64` rather than `teko::time::span`; a build phase's duration is a
  *               MONOTONIC measurement per the drop-128 A6 type table, and threading the raw
@@ -103,181 +102,6 @@ pub type Phase = struct {
  */
 fn now_ns() -> i64 {
     teko::time::span_monotonic_now().ticks
-}
-
-/**
- * now_ns_pub — a monotonic-clock ns reading exposed to the command entry point (`main`), so the
- * top-level `BuildClock` measures the SAME clock the phases do. It is the one public door onto the
- * private `now_ns` reader; keeping the reader private preserves the module's rule that only this file
- * touches `teko::time`, while `main` still reads a comparable instant for the external wall.
- *
- * @return a monotonic-clock ns reading
- * @since 0.3.1
- */
-pub fn now_ns_pub() -> i64 {
-    now_ns()
-}
-
-/**
- * BuildClock — the TOP clock of the command, the only one that sees the real external wall.
- *
- * The `start` is marked at the first instruction of `main` (the earliest Teko can observe; the
- * `exec`+loader cost BEFORE that is unreachable from inside the process and belongs to the CI that
- * runs `time`). The top wall (`now_ns_pub()` at close minus `start`) is the `wall_externo` of the
- * LAW: it must be covered ENTIRELY by phases (`dark == 0`), with the `process` bucket naming the
- * slice that is not work. Under parallelism the sum of phases EXCEEDS this wall (`overlap`), which is
- * expected, so the LAW is a DESIGUALDADE `wall <= Σfases`, never an equality.
- *
- * @field start  the monotonic ns reading taken at the first instruction of `main`
- * @since 0.3.1
- */
-pub type BuildClock = struct {
-    start: i64
-}
-
-/**
- * build_clock_start — open the top clock. Called as the FIRST useful instruction of `main`, before
- * the flag parse and subcommand dispatch, so that setup work falls INSIDE the observable window
- * instead of escaping into the dark.
- *
- * @return the opened clock
- * @since 0.3.1
- */
-pub fn build_clock_start() -> BuildClock {
-    BuildClock { start = now_ns() }
-}
-
-/**
- * build_clock_wall_ns — the external wall so far: the monotonic ns elapsed since the clock opened.
- * Floors at zero (a monotonic clock cannot run backwards, so a negative delta is impossible in
- * practice and renders as no time rather than a negative one).
- *
- * @param clock  the top clock opened by `build_clock_start`
- * @return       the external wall in ns (>= 0)
- * @since 0.3.1
- */
-pub fn build_clock_wall_ns(clock: BuildClock) -> i64 {
-    let d = now_ns() - clock.start
-    if d < 0 { 0 } else { d }
-}
-
-/**
- * PhaseLedger — the razão of the phases of ONE build run: (label, ns) pairs in settle order.
- *
- * THE INVARIANT IS THE LAW (a DESIGUALDADE): `wall_externo <= ledger_total_ns(l)`, with the
- * `process` bucket already in the razão. The ONLY defeito is `dark = max(0, wall − Σfases) > 0` —
- * wall that no phase names (the dark time). The folga `overlap = max(0, Σfases − wall)` is NOT a
- * defeito: it is the parallelism gain, `>= 0` and informative. `ledger_reconcile` asserts
- * `dark == 0` and returns `overlap`.
- *
- * @field labels  the name of each phase, in settle order
- * @field ns      the duration of each phase (parallel to `labels`), in monotonic ns
- * @since 0.3.1
- */
-pub type PhaseLedger = struct {
-    labels: []str
-    ns: []i64
-}
-
-/**
- * ledger_empty — the empty razão, before any phase has settled.
- *
- * @return a razão with no phases
- * @since 0.3.1
- */
-pub fn ledger_empty() -> PhaseLedger {
-    PhaseLedger { labels = teko::list::empty(); ns = teko::list::empty() }
-}
-
-/**
- * ledger_record — append a settled phase to the razão. A ledger is a value, so the caller threads the
- * returned razão forward; recording and instrumenting a phase are meant to be ONE action at each
- * phase's settle point.
- *
- * @param l      the current razão
- * @param label  the name of the phase that just settled
- * @param ns     its measured duration (`now_ns() - phase.start`)
- * @return       the razão with the phase appended
- * @since 0.3.1
- */
-pub fn ledger_record(l: PhaseLedger, label: str, ns: i64) -> PhaseLedger {
-    PhaseLedger {
-        labels = teko::list::push(l.labels, label)
-        ns = teko::list::push(l.ns, ns)
-    }
-}
-
-/**
- * ledger_labels_joined — the razão's labels in settle order, joined by `sep`. The deterministic view
- * a fixture asserts against (the ns are non-deterministic and never asserted; the label sequence is).
- *
- * @param l    the razão
- * @param sep  the separator to place between labels
- * @return     the labels joined in settle order, or "" for an empty razão
- * @since 0.3.1
- */
-pub fn ledger_labels_joined(l: PhaseLedger, sep: str) -> str {
-    mut out = ""
-    mut i: u64 = 0
-    loop {
-        if i >= l.labels.len { break }
-        if i > 0 { out = teko::str::concat(out, sep) }
-        out = teko::str::concat(out, l.labels[i])
-        i = i + 1
-    }
-    out
-}
-
-/**
- * ledger_total_ns — the sum of every phase in the razão.
- *
- * @param l  the razão
- * @return   the sum of the durations, in ns
- * @since 0.3.1
- */
-pub fn ledger_total_ns(l: PhaseLedger) -> i64 {
-    mut acc: i64 = 0
-    mut i: u64 = 0
-    loop {
-        if i >= l.ns.len { break }
-        acc = acc + l.ns[i]
-        i = i + 1
-    }
-    acc
-}
-
-/**
- * Reconciliation — the verdict of the LAW decomposed into its two fixed-sign quantities: `dark` (wall
- * no one named, which MUST be 0) and `overlap` (the parallelism gain, `>= 0`, informative).
- *
- * @field dark     `max(0, wall − Σfases)` — dark time; the defeito to eliminate.
- * @field overlap  `max(0, Σfases − wall)` — overlap of concurrent phases; the measured speedup.
- * @since 0.3.1
- */
-pub type Reconciliation = struct {
-    dark: i64
-    overlap: i64
-}
-
-/**
- * ledger_reconcile — the verdict of the LAW (§2.1), which is a DESIGUALDADE and not an equality.
- * Returns the `dark`/`overlap` decomposition of the top wall against the sum of the phases. Fails
- * ONLY when there is dark time (`dark > 0` — wall that no phase names); NEVER when the sum of the
- * phases exceeds the wall (`Σfases > wall`), because that is the PARALLELISM GAIN and trapping on it
- * would break the day threads land. Sequential: `dark == 0` and `overlap == 0`. Parallel:
- * `dark == 0` and `overlap > 0`.
- *
- * @param l     the razão of phases (the lifecycle `process` phase already included)
- * @param wall  the external wall (`build_clock_wall_ns` at close)
- * @return      the decomposition with `dark == 0`, or an error when there is dark time (`dark > 0`)
- * @throws      when `wall > Σfases`: the wall carries `dark` ns that no phase accounts for
- * @since 0.3.1
- */
-pub fn ledger_reconcile(l: PhaseLedger, wall: i64) -> Reconciliation | error {
-    let total = ledger_total_ns(l)
-    let dark = if wall > total { wall - total } else { 0 }
-    if dark > 0 { return error { message = $"teko: {dark}ns of wall belongs to no phase (dark time)" } }
-    Reconciliation { dark = 0; overlap = total - wall }
 }
 
 /**
@@ -331,20 +155,7 @@ fn pad_left(s: str, width: u64) -> str {
  * @return       the elapsed seconds, one decimal place, as decimal text
  */
 fn elapsed_str(start: i64) -> str {
-    duration_str(now_ns() - start)
-}
-
-/**
- * duration_str — a nanosecond duration rendered to one decimal place of seconds ("42.1", no unit
- * suffix — the caller appends "s"). A negative delta — which a monotonic clock cannot produce —
- * floors to zero rather than rendering a negative time. The one place phase-elapsed and the
- * top-level command wall share, so both read the same way.
- *
- * @param ns  the duration in nanoseconds (a monotonic-clock difference)
- * @return    the seconds, one decimal place, as decimal text
- * @since 0.3.1
- */
-pub fn duration_str(ns: i64) -> str {
+    let ns = now_ns() - start
     let ns_u = if ns < 0 { 0 to u64 } else { ns to u64 }
     let tenths = ns_u / 100000000
     $"{tenths / 10}.{tenths % 10}"
@@ -424,7 +235,7 @@ fn settle_line(label: str, text: str, start: i64, mark: str, message: str) -> st
  * a long silent phase into a visible "started … / settled …" pair. `Quiet` prints
  * nothing (a retry/already-reported pass).
  *
- * @param label    the phase name ("parse", "checker", "cc", ...)
+ * @param label    the phase name ("lexer", "checker", "cc", ...)
  * @param initial  the starting counter/detail text (typically the zero count)
  * @param mode     how this phase renders (`Tty`/`Plain`/`Quiet`)
  * @return         the `Phase` handle for `phase_tick`/`phase_end_ok`/`phase_end_fail`

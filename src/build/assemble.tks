@@ -213,7 +213,9 @@ fn assemble_sel(files: []SourceFile, include_tests: bool, report: bool, tty: boo
     mut diags: []str = teko::list::empty()
     let total = eligible_file_count(files, include_tests)
     let mode = report_mode(!report, tty)
-    let parse_phase = phase_begin("parse", count_unit_text(0, total, "files"), mode)
+    let lex_phase = phase_begin("lexer", count_unit_text(0, total, "files"), mode)
+    let parse_phase = phase_begin("parser", count_unit_text(0, total, "files"), mode)
+    mut lexed: u64 = 0
     mut parsed: u64 = 0
     mut i: u64 = 0
     loop {
@@ -241,7 +243,9 @@ fn assemble_sel(files: []SourceFile, include_tests: bool, report: bool, tty: boo
             i = i + 1
             continue
         }
+        lexed = lexed + 1
         parsed = parsed + 1
+        phase_tick(lex_phase, count_unit_text(lexed, total, "files"))
         phase_tick(parse_phase, count_unit_text(parsed, total, "files"))
         mut k: u64 = 0
         loop {
@@ -252,9 +256,11 @@ fn assemble_sel(files: []SourceFile, include_tests: bool, report: bool, tty: boo
         i = i + 1
     }
     if diags.len > 0 {
+        phase_end_fail(lex_phase, count_unit_text(lexed, total, "files"), diags[0])
         phase_end_fail(parse_phase, count_unit_text(parsed, total, "files"), diags[0])
         return Assembled { program = parser::Program { items = merged }; diags = diags }
     }
+    phase_end_ok(lex_phase, count_unit_text(lexed, total, "files"))
     phase_end_ok(parse_phase, count_unit_text(parsed, total, "files"))
     Assembled { program = parser::Program { items = merged }; diags = diags }
 }
