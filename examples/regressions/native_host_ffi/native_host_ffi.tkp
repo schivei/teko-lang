@@ -1,0 +1,23 @@
+# examples/regressions/native_host_ffi — the regressor for the NATIVE lowering of the
+# aggregate-returning host FFI (0.3.1.0 degrau 34).
+#
+# WHAT IT PINS. `teko::env::var`/`env::cwd`/`io::read_file`/`fs::list_dir` each return a struct
+# wider than one register (`tk_ffi_sres` is 40 bytes → SysV MEMORY class → SRET; `tk_ffi_slres`
+# likewise), and the native backend's `LCall` captures ONE result register — so the generic call
+# path handed the callee no SRET pointer and it wrote its result over garbage, crashing the caller
+# (measured: gen2 SIGSEGV'd in `tk_rt_getenv` at startup, the TEKO_BACKEND check). The fix routes
+# each to an own-register `tk_rt_*_ok` twin (`teko_rt.{c,h}`) that carries the ok/err flag as a
+# single-register `bool` and the active case's `(ptr, len)` through two out-parameters, exactly the
+# convention `tk_rt_str_from_utf8_ok`/`tk_rt_last_index_of_ok` already used.
+#
+# NATIVE ROUTE BY CONSTRUCTION: no `TEKO_BACKEND` env is declared, so the default (native) backend
+# builds it — the C route always resolved these through its recognized-name host-FFI lift and never
+# stopped, so the native lowering is the thing under test. `tkr_ensure_built` compiles a `.tkr`
+# project ONCE with the FIRST scenario's env, so a C-route pair would need its own file (as
+# `one_byte_native`/`one_byte_c` are split); the own==C agreement of these shapes is proven by the
+# self-host differential, not by a second scenario here.
+name = "native_host_ffi"
+source = "src"
+
+[artifact]
+kind = "binary"

@@ -2791,6 +2791,82 @@ bool tk_rt_last_index_of_ok(tk_str hay, tk_str needle, uint64_t *out_index) {
     return r.ok;
 }
 
+// --- native-backend own-register twins for the aggregate-returning host FFI (0.3.1.0 degrau 34) ---
+// Each wraps the real (struct-returning) primitive above and re-shapes its result into the
+// single-register `bool` + shared (ptr, len) out-parameter convention the native backend's `LCall`
+// can capture — no host logic is duplicated (the SUPREME RULE seam: signature/wiring only). See
+// teko_rt.h for why the direct SRET/rax:rdx path faults on that backend.
+
+// tk_ffi_sres_into_out — unpack an sres into the shared (ptr, len) out-slots: the value on success,
+// the error message on failure, the caller's `bool` deciding which meaning it wrote.
+static bool tk_ffi_sres_into_out(tk_ffi_sres r, const tk_byte **out_ptr, uint64_t *out_len) {
+    if (r.ok) {
+        *out_ptr = r.value.ptr;
+        *out_len = r.value.len;
+        return true;
+    }
+    *out_ptr = r.err.ptr;
+    *out_len = r.err.len;
+    return false;
+}
+
+// tk_ffi_ures_into_out — the `error | null` twin's shared tail: `true` (no error) leaves the
+// out-slots untouched; on failure the error message's (ptr, len) travel through them.
+static bool tk_ffi_ures_into_out(tk_ffi_ures r, const tk_byte **out_err_ptr, uint64_t *out_err_len) {
+    if (r.ok) return true;
+    *out_err_ptr = r.err.ptr;
+    *out_err_len = r.err.len;
+    return false;
+}
+
+bool tk_rt_getenv_ok(const tk_byte *name_ptr, uint64_t name_len, const tk_byte **out_ptr, uint64_t *out_len) {
+    return tk_ffi_sres_into_out(tk_rt_getenv((tk_str){ name_ptr, (size_t)name_len }), out_ptr, out_len);
+}
+
+bool tk_rt_getcwd_ok(const tk_byte **out_ptr, uint64_t *out_len) {
+    return tk_ffi_sres_into_out(tk_rt_getcwd(), out_ptr, out_len);
+}
+
+bool tk_rt_read_file_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_ptr, uint64_t *out_len) {
+    return tk_ffi_sres_into_out(tk_rt_read_file((tk_str){ path_ptr, (size_t)path_len }), out_ptr, out_len);
+}
+
+bool tk_rt_list_dir_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_ptr, uint64_t *out_len) {
+    tk_ffi_slres r = tk_rt_list_dir((tk_str){ path_ptr, (size_t)path_len });
+    if (r.ok) {
+        *out_ptr = (const tk_byte *)r.ptr;
+        *out_len = r.len;
+        return true;
+    }
+    *out_ptr = r.err.ptr;
+    *out_len = r.err.len;
+    return false;
+}
+
+bool tk_rt_setenv_ok(const tk_byte *name_ptr, uint64_t name_len, const tk_byte *value_ptr, uint64_t value_len, const tk_byte **out_err_ptr, uint64_t *out_err_len) {
+    return tk_ffi_ures_into_out(tk_rt_setenv((tk_str){ name_ptr, (size_t)name_len }, (tk_str){ value_ptr, (size_t)value_len }), out_err_ptr, out_err_len);
+}
+
+bool tk_rt_chdir_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_err_ptr, uint64_t *out_err_len) {
+    return tk_ffi_ures_into_out(tk_rt_chdir((tk_str){ path_ptr, (size_t)path_len }), out_err_ptr, out_err_len);
+}
+
+bool tk_rt_mkdir_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_err_ptr, uint64_t *out_err_len) {
+    return tk_ffi_ures_into_out(tk_rt_mkdir((tk_str){ path_ptr, (size_t)path_len }), out_err_ptr, out_err_len);
+}
+
+bool tk_rt_remove_file_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_err_ptr, uint64_t *out_err_len) {
+    return tk_ffi_ures_into_out(tk_rt_remove_file((tk_str){ path_ptr, (size_t)path_len }), out_err_ptr, out_err_len);
+}
+
+bool tk_rt_write_file_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte *content_ptr, uint64_t content_len, const tk_byte **out_err_ptr, uint64_t *out_err_len) {
+    return tk_ffi_ures_into_out(tk_rt_write_file((tk_str){ path_ptr, (size_t)path_len }, (tk_str){ content_ptr, (size_t)content_len }), out_err_ptr, out_err_len);
+}
+
+bool tk_rt_write_file_bytes_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte *data_ptr, uint64_t data_len, const tk_byte **out_err_ptr, uint64_t *out_err_len) {
+    return tk_ffi_ures_into_out(tk_rt_write_file_bytes((tk_str){ path_ptr, (size_t)path_len }, data_ptr, data_len), out_err_ptr, out_err_len);
+}
+
 // (romaneio .31) TK_RT_SIGNAL_EXIT_BASE — the shell convention for "died by signal N": 128 + N.
 // A child killed by SIGABRT (6) therefore reports 134, exactly what `sh -c` reports for the same
 // child, so an expected exit code is the same whether the program is run directly through
