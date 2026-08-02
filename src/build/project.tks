@@ -3649,30 +3649,105 @@ fn gate_shard_base(od: str, stem: str) -> str {
 }
 
 /**
- * TEST_JOBS_DEFAULT — how many SHARDS of the in-process suite run concurrently by default.
- *
- * Four, matching `REGR_JOBS_DEFAULT` and for the same reason: each shard is a whole test binary with
- * its own arena, so a job count tuned to core count trades the runner's memory for wall clock. A leg
- * that knows its machine raises it through `TEST_JOBS_ENV`.
+ * TEST_JOBS_ENV — the env key a run overrides the shard count through (12-Factor: how parallel the
+ * machine may be is the machine's business, not the source's). `1` restores a single process; a value
+ * above `nproc()` is REBAIXED to `nproc()` with a warning, never honored.
  */
-const TEST_JOBS_DEFAULT: u64 = 4
-
-/** TEST_JOBS_ENV — the env key a run overrides `TEST_JOBS_DEFAULT` through (12-Factor: how parallel
-    the machine may be is the machine's business, not the source's). `1` restores a single process. */
 const TEST_JOBS_ENV: str = "TEKO_TEST_JOBS"
 
 /**
+ * TEKO_JOBS_ENV — the env key that pins the general degree of build parallelism (`build_jobs`). Same
+ * grammar as `TEST_JOBS_ENV`: a decimal count wins over the OS default, an empty/non-numeric/zero
+ * value falls back to `nproc()`, and a value above `nproc()` is capped to it with a warning.
+ */
+const TEKO_JOBS_ENV: str = "TEKO_JOBS"
+
+/**
+ * cap_jobs — the SO ceiling on a requested lane count: never more than the CPUs the OS grants. This
+ * is the pure half of the owner's rule "the dev MAY pin, but MAY NOT ask for more than the OS
+ * supports"; the warning that accompanies a rebaixe lives in `resolve_jobs_capped`, so this stays a
+ * side-effect-free `min` a fixture can assert directly.
+ *
+ * @param want  the requested lane count
+ * @param cpus  the OS ceiling (`nproc()`, always >= 1)
+ * @return      `want` when it fits under `cpus`, else `cpus`
+ * @since 0.3.1
+ */
+fn cap_jobs(want: u64, cpus: u64) -> u64 {
+    if want > cpus { cpus } else { want }
+}
+
+/**
+ * warn_jobs_capped — announce that a pinned job count exceeded the OS ceiling and was rebaixed. The
+ * owner's rule forbids honoring a request above `nproc()`; it must be VISIBLE that the pin did not
+ * take effect as written, so the rebaixe is never silent.
+ *
+ * @param env_key  the env variable that carried the over-large pin
+ * @param want     the value the pin asked for
+ * @param cpus     the OS ceiling it was lowered to
+ * @since 0.3.1
+ */
+fn warn_jobs_capped(env_key: str, want: u64, cpus: u64) -> void {
+    teko::io::eprintln($"teko: {env_key}={want} exceeds the {cpus} CPU(s) the OS grants — using {cpus}")
+}
+
+/**
+ * resolve_jobs_capped — the effective lane count for one env knob: the OS grants `cpus` by default,
+ * an explicit numeric pin wins (empty/non-numeric/zero → `default_val`), and any request above `cpus`
+ * is REBAIXED to `cpus` with a warning. This is the whole of the owner's rule "default = what the OS
+ * grants; the dev MAY pin; the user may NOT ask for more than the OS supports" in one place.
+ *
+ * @param env_key      the env variable carrying the pin
+ * @param default_val  the count for an unset/malformed value (always <= `cpus`)
+ * @param cpus         the OS ceiling (`nproc()`, always >= 1)
+ * @return             the effective lane count (>= 1, <= `cpus`)
+ * @since 0.3.1
+ */
+fn resolve_jobs_capped(env_key: str, default_val: u64, cpus: u64) -> u64 {
+    match teko::env::var(env_key) {
+        str as v => {
+            let want = regr_jobs_of_default(v, default_val)
+            if want > cpus {
+                warn_jobs_capped(env_key, want, cpus)
+                return cpus
+            }
+            want
+        }
+        error => cap_jobs(default_val, cpus)
+    }
+}
+
+/**
+ * build_jobs — how many lanes of parallel work this build may have in flight. The DEFAULT IS WHAT THE
+ * OS GRANTS (`teko::env::nproc()`), not a cravado number — the owner fixed "the OS grants by default,
+ * the dev MAY pin". A `TEKO_JOBS` pin wins, but is capped at `nproc()`: asking for more than the OS
+ * supports is rebaixed to the maximum, never accepted. A 1-CPU host, or an OS that cannot count,
+ * floors at 1 — never 0, which would be a barrier disguised as parallelism.
+ *
+ * @return the effective number of lanes (>= 1, <= `nproc()`)
+ * @since 0.3.1
+ */
+fn build_jobs() -> u64 {
+    let cpus = teko::env::nproc()
+    resolve_jobs_capped(TEKO_JOBS_ENV, cpus, cpus)
+}
+
+/**
  * test_jobs — how many shards of the in-process suite this run may have in flight at once.
+ *
+ * THE DEFAULT IS `build_jobs()` (the OS grant), not the old hardcoded `4` — that constant violated the
+ * owner's rule "default = what the OS grants" even before the parallel build landed. An explicit
+ * `TEKO_TEST_JOBS` still wins, but is capped at `nproc()` like every pin.
  *
  * FORCED TO 1 UNDER COVERAGE, and that is not a limitation of the sharding — it is that the merge
  * would be a second mechanism. A sharded run dumps one `.tkcov` per shard and the floors need their
  * union; that union is exactly what `run_gate_sharded` merges. So coverage does NOT force serial
  * here; what forces serial is an explicit `TEKO_TEST_JOBS=1`.
  *
- * @return the effective shard count (>= 1)
+ * @return the effective shard count (>= 1, <= `nproc()`)
  */
 fn test_jobs() -> u64 {
-    match teko::env::var(TEST_JOBS_ENV) { str as v => regr_jobs_of_default(v, TEST_JOBS_DEFAULT); error => TEST_JOBS_DEFAULT }
+    resolve_jobs_capped(TEST_JOBS_ENV, build_jobs(), teko::env::nproc())
 }
 
 /**

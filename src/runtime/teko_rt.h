@@ -770,6 +770,17 @@ bool tk_rt_stdin_eof(void);
 // A bare tk_str (no error union — see tk_rt_read_stdin's definition for why); panics on a
 // genuine read failure.
 tk_str tk_rt_read_stdin(void);
+// (0.3.1.0 LSP crumb 0) read EXACTLY `n` bytes from stdin into an arena-owned []byte slice,
+// blocking until `n` bytes have arrived or stdin hits EOF. The RETURNED slice's length is the
+// count actually read: `len == n` on a full body, `len < n` on EOF mid-body (a truncated frame,
+// which the LSP transport surfaces as an honest error rather than a silent accept). Needed
+// because the JSON-RPC / LSP base-protocol body is `Content-Length`-framed with NO trailing
+// newline, so the line reader (`tk_rt_read_line`) cannot bound it — the caller knows the exact
+// byte count from the header and reads precisely that many. A `tk_slice_byte` return (the same
+// {ptr,len} ABI `tk_rt_secure_bytes` already uses) so a brand-new primitive stays lowerable by
+// the released bootstrap seed's frozen codegen (the generic user-`extern` path emits the raw C
+// symbol directly — no per-name lift, which only `str | error`-shaped externs would need).
+tk_slice_byte tk_rt_read_stdin_n(uint64_t n);
 // teko::env::var(name) — the environment value, or error when unset.
 tk_ffi_sres tk_rt_getenv(tk_str name);
 // teko::io::write_file(path, content) — (over)write the file; error on failure.
@@ -1023,6 +1034,10 @@ const tk_byte *tk_rt_arch_len(uint64_t *out_len);
 const tk_byte *tk_rt_version_len(uint64_t *out_len);
 // (#148) the process peak RSS in bytes (0 = unavailable) — teko::mem::peak_rss.
 uint64_t tk_peak_rss(void);
+
+// tk_nproc — logical processors the OS grants this process (POSIX: sysconf(_SC_NPROCESSORS_ONLN);
+// Windows: GetSystemInfo dwNumberOfProcessors). Floor 1 (never 0). No allocation — teko::env::nproc.
+uint64_t tk_nproc(void);
 
 // (#194 C6) teko::crypto::rand::secure_bytes(n) — n cryptographically-secure random bytes
 // from the host CSPRNG (getrandom(2)/getentropy(3) on POSIX, rand_s (ucrt) on Windows).

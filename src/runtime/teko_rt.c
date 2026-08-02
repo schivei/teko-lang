@@ -3246,6 +3246,23 @@ uint64_t tk_peak_rss(void) {
 #endif
 }
 
+// tk_nproc — the number of logical processors the OS grants THIS process right now, the default
+// degree of parallelism (`teko::env::nproc()` / `build_jobs`). POSIX reads
+// sysconf(_SC_NPROCESSORS_ONLN); Windows reads GetSystemInfo's dwNumberOfProcessors. The floor is
+// 1 and never 0: a run always has at least the lane executing it, so a host that reports 0 or fails
+// is treated as a single CPU. No allocation — it is a bare syscall.
+uint64_t tk_nproc(void) {
+#if defined(_WIN32)
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    uint64_t n = (uint64_t)si.dwNumberOfProcessors;
+    return n >= 1u ? n : 1u;
+#else
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    return n >= 1 ? (uint64_t)n : 1u;
+#endif
+}
+
 // (#194 C6) teko::crypto::rand::secure_bytes(n) — n bytes from the host CSPRNG. Every
 // platform bottom fills a caller-owned buffer in fixed-size (or single) chunks and PANICS
 // (M.1) on a genuine host entropy failure — a CSPRNG that silently degrades to weak/short

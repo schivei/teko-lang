@@ -1293,20 +1293,49 @@ fn unsupported_target_error_lists_arm64_linux() {
 
 /**
  * pt_test_jobs_parses_its_env_and_falls_back_safely — the gate's concurrency knob reuses the
- * regression pool's ONE decimal parser (`regr_jobs_of_default`), with the gate's own fallback.
+ * regression pool's ONE decimal parser (`regr_jobs_of_default`), with a caller-supplied fallback.
  *
  * A malformed value must mean "the author did not mean zero shards", never zero: a run that silently
  * launched no shard would report an EMPTY suite as a passing one, which is the class of silent
- * success this whole change exists to remove.
+ * success this whole change exists to remove. The fallback is now the OS grant (`build_jobs`), so a
+ * concrete literal stands in here for the machine-dependent default.
  */
 #test
 fn pt_test_jobs_parses_its_env_and_falls_back_safely() {
-    teko::assert::eq_u64(regr_jobs_of_default("8", TEST_JOBS_DEFAULT), 8)
-    teko::assert::eq_u64(regr_jobs_of_default("1", TEST_JOBS_DEFAULT), 1)
-    teko::assert::eq_u64(regr_jobs_of_default("", TEST_JOBS_DEFAULT), TEST_JOBS_DEFAULT)
-    teko::assert::eq_u64(regr_jobs_of_default("0", TEST_JOBS_DEFAULT), TEST_JOBS_DEFAULT)
-    teko::assert::eq_u64(regr_jobs_of_default("four", TEST_JOBS_DEFAULT), TEST_JOBS_DEFAULT)
-    teko::assert::eq_u64(regr_jobs_of_default("2x", TEST_JOBS_DEFAULT), TEST_JOBS_DEFAULT)
+    teko::assert::eq_u64(regr_jobs_of_default("8", 4), 8)
+    teko::assert::eq_u64(regr_jobs_of_default("1", 4), 1)
+    teko::assert::eq_u64(regr_jobs_of_default("", 4), 4)
+    teko::assert::eq_u64(regr_jobs_of_default("0", 4), 4)
+    teko::assert::eq_u64(regr_jobs_of_default("four", 4), 4)
+    teko::assert::eq_u64(regr_jobs_of_default("2x", 4), 4)
+}
+
+/**
+ * pt_cap_jobs_never_exceeds_the_os_ceiling — the owner's rule "the dev MAY pin, but MAY NOT ask for
+ * more than the OS supports" as a pure invariant: a request at or below the ceiling passes through
+ * unchanged, and any request above it is rebaixed to exactly the ceiling. The floor comes from the
+ * ceiling itself (`nproc()` is always >= 1), so a capped result is never 0.
+ */
+#test
+fn pt_cap_jobs_never_exceeds_the_os_ceiling() {
+    teko::assert::eq_u64(cap_jobs(3, 8), 3)
+    teko::assert::eq_u64(cap_jobs(8, 8), 8)
+    teko::assert::eq_u64(cap_jobs(100, 8), 8)
+    teko::assert::eq_u64(cap_jobs(2, 2), 2)
+    teko::assert::eq_u64(cap_jobs(9, 1), 1)
+}
+
+/**
+ * pt_build_jobs_is_at_least_one_and_within_the_os_grant — `build_jobs()` reads the live host, so its
+ * exact value is machine-dependent and cannot be asserted; its INVARIANTS can. It is always at least
+ * one lane (never a disguised barrier) and never more than the CPUs the OS grants.
+ */
+#test
+fn pt_build_jobs_is_at_least_one_and_within_the_os_grant() {
+    let cpus = teko::env::nproc()
+    teko::assert::is_true(teko::env::nproc() >= 1)
+    teko::assert::is_true(build_jobs() >= 1)
+    teko::assert::is_true(build_jobs() <= cpus)
 }
 
 /**
