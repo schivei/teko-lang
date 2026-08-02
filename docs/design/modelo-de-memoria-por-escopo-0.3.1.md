@@ -656,5 +656,3 @@ cross-thread); `codegen.tks` `cg_enclosing_region_expr`/`emit_list_push`/`emit_s
 `lower.tks` `lower_buf_ptr_call` e o lowering de entrada/saída de bloco (ganha o ciclo de vida
 ausente); `parse_decl.tks:1263` + `ast.tks:384,560` (abrir `#singleton` para bindings, threading
 `di_kind`); `typer.tks:5404` (o honest-stop da espinha transitiva relaxa quando o move aterra).
-</content>
-</invoke>
