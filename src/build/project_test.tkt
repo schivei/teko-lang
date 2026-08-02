@@ -1301,12 +1301,52 @@ fn unsupported_target_error_lists_arm64_linux() {
  */
 #test
 fn pt_test_jobs_parses_its_env_and_falls_back_safely() {
-    teko::assert::eq_u64(regr_jobs_of_default("8", TEST_JOBS_DEFAULT), 8)
-    teko::assert::eq_u64(regr_jobs_of_default("1", TEST_JOBS_DEFAULT), 1)
-    teko::assert::eq_u64(regr_jobs_of_default("", TEST_JOBS_DEFAULT), TEST_JOBS_DEFAULT)
-    teko::assert::eq_u64(regr_jobs_of_default("0", TEST_JOBS_DEFAULT), TEST_JOBS_DEFAULT)
-    teko::assert::eq_u64(regr_jobs_of_default("four", TEST_JOBS_DEFAULT), TEST_JOBS_DEFAULT)
-    teko::assert::eq_u64(regr_jobs_of_default("2x", TEST_JOBS_DEFAULT), TEST_JOBS_DEFAULT)
+    teko::assert::eq_u64(regr_jobs_of_default("8", 4), 8)
+    teko::assert::eq_u64(regr_jobs_of_default("1", 4), 1)
+    teko::assert::eq_u64(regr_jobs_of_default("", 4), 4)
+    teko::assert::eq_u64(regr_jobs_of_default("0", 4), 4)
+    teko::assert::eq_u64(regr_jobs_of_default("four", 4), 4)
+    teko::assert::eq_u64(regr_jobs_of_default("2x", 4), 4)
+}
+
+/**
+ * pt_nproc_floors_at_one — F7: `teko::env::nproc()` never answers 0. A run always has at least the lane
+ * executing it, so an OS that reports 0 or fails is read as one CPU (the runtime `tk_nproc` floor).
+ */
+#test
+fn pt_nproc_floors_at_one() {
+    teko::assert::is_true(teko::env::nproc() >= 1)
+}
+
+/**
+ * pt_jobs_cap_demotes_a_pin_above_the_core_count — the ceiling is `min(requested, cap)`: a pin at or
+ * below the CPUs is honoured, a pin above them is DEMOTED to the maximum. Lanes past the core count
+ * only contend, so the OS lowers the pin rather than keeping it.
+ */
+#test
+fn pt_jobs_cap_demotes_a_pin_above_the_core_count() {
+    teko::assert::eq_u64(jobs_cap(3, 8), 3)
+    teko::assert::eq_u64(jobs_cap(8, 4), 4)
+    teko::assert::eq_u64(jobs_cap(4, 4), 4)
+    teko::assert::eq_u64(jobs_cap(1, 8), 1)
+}
+
+/**
+ * pt_build_jobs_pins_and_defaults_to_the_os_grant — F6: `TEKO_JOBS` pins the lane count (12-Factor),
+ * capped at `nproc()`; empty or zero falls back to the OS grant. A pin of 1 is honoured on any host
+ * (a 1-CPU host floors there anyway); a pin far above the core count is demoted to exactly `nproc()`.
+ */
+#test
+fn pt_build_jobs_pins_and_defaults_to_the_os_grant() {
+    let cap = teko::env::nproc()
+    match teko::env::set_var("TEKO_JOBS", "1") { error => teko::assert::is_true(false); null => { } }
+    teko::assert::eq_u64(build_jobs(), 1)
+    match teko::env::set_var("TEKO_JOBS", "999999") { error => teko::assert::is_true(false); null => { } }
+    teko::assert::eq_u64(build_jobs(), cap)
+    match teko::env::set_var("TEKO_JOBS", "0") { error => teko::assert::is_true(false); null => { } }
+    teko::assert::eq_u64(build_jobs(), cap)
+    match teko::env::set_var("TEKO_JOBS", "") { error => teko::assert::is_true(false); null => { } }
+    teko::assert::eq_u64(build_jobs(), cap)
 }
 
 /**

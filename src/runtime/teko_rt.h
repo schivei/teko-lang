@@ -1067,6 +1067,11 @@ uint64_t tk_rt_wall_ns_of_day(void);       // ns since midnight, UTC, host wall 
 int16_t  tk_rt_wall_offset_minutes(void);  // host local UTC offset, in minutes
 int64_t  tk_rt_monotonic_ns(void);         // ns from an unspecified monotonic origin
 
+// tk_nproc — logical processors the OS grants this process now. POSIX: sysconf(_SC_NPROCESSORS_ONLN).
+// Windows: GetActiveProcessorCount(ALL_PROCESSOR_GROUPS). Floor 1 (never 0). No allocation. The
+// default degree of build parallelism (teko::env::nproc → build_jobs, TEST_JOBS default).
+uint64_t tk_nproc(void);
+
 // D3 — TEST-COVERAGE SINK. A host side-channel (like print's buffer / args), so the VM can
 // record which production functions executed during a `teko test` run WITHOUT a Teko
 // module-mutable (M.0). The VM marks a function's id (its source line) on entry; the runner

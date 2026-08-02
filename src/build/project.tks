@@ -1851,7 +1851,7 @@ fn backend(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manife
         return 0
     }
     if m.backend == Backend::Native {
-        return emit_native(dir, stem, out_dir, prog, m)
+        return emit_native(dir, stem, out_dir, prog, m, tty)
     }
     let mode = report_mode(false, tty)
     if m.abi == "c" {
@@ -2554,17 +2554,37 @@ fn mkdir_p(dir: str) -> error | null {
  * @param m        the resolved manifest (link knobs)
  * @return         0 on a successful build+link, else the failing status
  */
-fn emit_native(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest) -> i32 {
+fn emit_native(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest, tty: bool) -> i32 {
     let od = strip_trailing_slash(out_dir)
     match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the output directory"); null => { } }
-    let lmod = match teko::lir::lower_program(prog) { teko::lir::LModule as x => x; error as e => return fail(dir, e.message) }
+    let mode = report_mode(false, tty)
+    let lower_phase = phase_begin("lower", count_only_text(0, "fns"), mode)
+    let lmod = match teko::lir::lower_program(prog) {
+        teko::lir::LModule as x => x
+        error as e => { phase_end_fail(lower_phase, count_only_text(0, "fns"), e.message); return fail(dir, e.message) }
+    }
+    phase_end_ok(lower_phase, count_only_text(lmod.funcs.len, "fns"))
     let target = match native_target() { NativeTarget as t => t; error as e => return fail(dir, e.message) }
     match target {
-        NativeTarget::X8664Linux => emit_native_x86(dir, od, stem, lmod, prog, m)
-        NativeTarget::X8664Windows => emit_native_win(dir, od, stem, lmod, prog, m)
-        NativeTarget::Arm64Macho => emit_native_arm64(dir, od, stem, lmod, prog, m)
-        NativeTarget::Arm64Linux => emit_native_arm64_linux(dir, od, stem, lmod, prog, m)
+        NativeTarget::X8664Linux => emit_native_x86(dir, od, stem, lmod, prog, m, mode)
+        NativeTarget::X8664Windows => emit_native_win(dir, od, stem, lmod, prog, m, mode)
+        NativeTarget::Arm64Macho => emit_native_arm64(dir, od, stem, lmod, prog, m, mode)
+        NativeTarget::Arm64Linux => emit_native_arm64_linux(dir, od, stem, lmod, prog, m, mode)
     }
+}
+
+/**
+ * native_fns_text — the shared per-phase detail text for the native backend tails: the function count
+ * of the wrapped module, rendered as `"<n> fns"`. Every native phase (`isel`/`regalloc`/`encode`)
+ * reports against the SAME module, so the count is computed once and threaded, keeping the four tails'
+ * phase lines identical in shape.
+ *
+ * @param entry  the platform-ABI-wrapped lowered module
+ * @return       the `"<n> fns"` counter text
+ * @since 0.3.1
+ */
+fn native_fns_text(entry: teko::lir::LModule) -> str {
+    count_only_text(entry.funcs.len, "fns")
 }
 
 /**
@@ -2584,12 +2604,20 @@ fn emit_native(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Ma
  * @param m     the resolved manifest (link knobs)
  * @return      0 on a successful build+link, else the failing status
  */
-fn emit_native_arm64(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog: checker::TProgram, m: Manifest) -> i32 {
+fn emit_native_arm64(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog: checker::TProgram, m: Manifest, mode: Report) -> i32 {
     let entry = match teko::lir::wrap_native_entry(lmod) { teko::lir::LModule as x => x; error as e => return fail(dir, e.message) }
-    let sel = match teko::backend::select_module(entry) { teko::backend::MModule as x => x; error as e => return fail(dir, e.message) }
-    let col = match teko::backend::regalloc_module(teko::backend::AAPCS64, sel) { teko::backend::MModule as x => x; error as e => return fail(dir, e.message) }
-    let enc = match teko::backend::encode_module(teko::backend::AAPCS64, col) { teko::backend::EncodedModule as x => x; error as e => return fail(dir, e.message) }
-    finish_native_object(dir, od, stem, teko::backend::emit_macho(enc), prog, m)
+    let fns = native_fns_text(entry)
+    let isel_phase = phase_begin("isel", fns, mode)
+    let sel = match teko::backend::select_module(entry) { teko::backend::MModule as x => x; error as e => { phase_end_fail(isel_phase, fns, e.message); return fail(dir, e.message) } }
+    phase_end_ok(isel_phase, fns)
+    let ra_phase = phase_begin("regalloc", fns, mode)
+    let col = match teko::backend::regalloc_module(teko::backend::AAPCS64, sel) { teko::backend::MModule as x => x; error as e => { phase_end_fail(ra_phase, fns, e.message); return fail(dir, e.message) } }
+    phase_end_ok(ra_phase, fns)
+    let enc_phase = phase_begin("encode", fns, mode)
+    let enc = match teko::backend::encode_module(teko::backend::AAPCS64, col) { teko::backend::EncodedModule as x => x; error as e => { phase_end_fail(enc_phase, fns, e.message); return fail(dir, e.message) } }
+    let obj = teko::backend::emit_macho(enc)
+    phase_end_ok(enc_phase, fns)
+    finish_native_object(dir, od, stem, obj, prog, m, mode)
 }
 
 /**
@@ -2609,12 +2637,20 @@ fn emit_native_arm64(dir: str, od: str, stem: str, lmod: teko::lir::LModule, pro
  * @return      0 on a successful build+link, else the failing status
  * @since 0.3.1
  */
-fn emit_native_arm64_linux(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog: checker::TProgram, m: Manifest) -> i32 {
+fn emit_native_arm64_linux(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog: checker::TProgram, m: Manifest, mode: Report) -> i32 {
     let entry = match teko::lir::wrap_native_entry(lmod) { teko::lir::LModule as x => x; error as e => return fail(dir, e.message) }
-    let sel = match teko::backend::select_module(entry) { teko::backend::MModule as x => x; error as e => return fail(dir, e.message) }
-    let col = match teko::backend::regalloc_module(teko::backend::AAPCS64, sel) { teko::backend::MModule as x => x; error as e => return fail(dir, e.message) }
-    let enc = match teko::backend::encode_module(teko::backend::AAPCS64, col) { teko::backend::EncodedModule as x => x; error as e => return fail(dir, e.message) }
-    finish_native_object(dir, od, stem, teko::backend::emit_elf_arm64(enc), prog, m)
+    let fns = native_fns_text(entry)
+    let isel_phase = phase_begin("isel", fns, mode)
+    let sel = match teko::backend::select_module(entry) { teko::backend::MModule as x => x; error as e => { phase_end_fail(isel_phase, fns, e.message); return fail(dir, e.message) } }
+    phase_end_ok(isel_phase, fns)
+    let ra_phase = phase_begin("regalloc", fns, mode)
+    let col = match teko::backend::regalloc_module(teko::backend::AAPCS64, sel) { teko::backend::MModule as x => x; error as e => { phase_end_fail(ra_phase, fns, e.message); return fail(dir, e.message) } }
+    phase_end_ok(ra_phase, fns)
+    let enc_phase = phase_begin("encode", fns, mode)
+    let enc = match teko::backend::encode_module(teko::backend::AAPCS64, col) { teko::backend::EncodedModule as x => x; error as e => { phase_end_fail(enc_phase, fns, e.message); return fail(dir, e.message) } }
+    let obj = teko::backend::emit_elf_arm64(enc)
+    phase_end_ok(enc_phase, fns)
+    finish_native_object(dir, od, stem, obj, prog, m, mode)
 }
 
 /**
@@ -2637,12 +2673,20 @@ fn emit_native_arm64_linux(dir: str, od: str, stem: str, lmod: teko::lir::LModul
  * @param m     the resolved manifest (link knobs)
  * @return      0 on a successful build+link, else the failing status
  */
-fn emit_native_x86(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog: checker::TProgram, m: Manifest) -> i32 {
+fn emit_native_x86(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog: checker::TProgram, m: Manifest, mode: Report) -> i32 {
     let entry = match teko::lir::wrap_native_entry(lmod) { teko::lir::LModule as x => x; error as e => return fail(dir, e.message) }
-    let sel = match teko::backend::select_module_x86(teko::backend::SYSV64, entry) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
-    let col = match teko::backend::regalloc_module_x86(teko::backend::SYSV64, sel) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
-    let enc = match teko::backend::encode_module_x86(teko::backend::SYSV64, col) { teko::backend::EncodedModuleX86 as x => x; error as e => return fail(dir, e.message) }
-    finish_native_object(dir, od, stem, teko::backend::emit_elf(enc), prog, m)
+    let fns = native_fns_text(entry)
+    let isel_phase = phase_begin("isel", fns, mode)
+    let sel = match teko::backend::select_module_x86(teko::backend::SYSV64, entry) { teko::backend::MModuleX86 as x => x; error as e => { phase_end_fail(isel_phase, fns, e.message); return fail(dir, e.message) } }
+    phase_end_ok(isel_phase, fns)
+    let ra_phase = phase_begin("regalloc", fns, mode)
+    let col = match teko::backend::regalloc_module_x86(teko::backend::SYSV64, sel) { teko::backend::MModuleX86 as x => x; error as e => { phase_end_fail(ra_phase, fns, e.message); return fail(dir, e.message) } }
+    phase_end_ok(ra_phase, fns)
+    let enc_phase = phase_begin("encode", fns, mode)
+    let enc = match teko::backend::encode_module_x86(teko::backend::SYSV64, col) { teko::backend::EncodedModuleX86 as x => x; error as e => { phase_end_fail(enc_phase, fns, e.message); return fail(dir, e.message) } }
+    let obj = teko::backend::emit_elf(enc)
+    phase_end_ok(enc_phase, fns)
+    finish_native_object(dir, od, stem, obj, prog, m, mode)
 }
 
 /**
@@ -2669,12 +2713,20 @@ fn emit_native_x86(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog:
  * @param m     the resolved manifest (link knobs)
  * @return      0 on a successful build+link, else the failing status
  */
-fn emit_native_win(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog: checker::TProgram, m: Manifest) -> i32 {
+fn emit_native_win(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog: checker::TProgram, m: Manifest, mode: Report) -> i32 {
     let entry = match teko::lir::wrap_native_entry(lmod) { teko::lir::LModule as x => x; error as e => return fail(dir, e.message) }
-    let sel = match teko::backend::select_module_x86(teko::backend::WIN64, entry) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
-    let col = match teko::backend::regalloc_module_x86(teko::backend::WIN64, sel) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
-    let enc = match teko::backend::encode_module_x86(teko::backend::WIN64, col) { teko::backend::EncodedModuleX86 as x => x; error as e => return fail(dir, e.message) }
-    finish_native_object(dir, od, stem, teko::backend::emit_coff(enc), prog, m)
+    let fns = native_fns_text(entry)
+    let isel_phase = phase_begin("isel", fns, mode)
+    let sel = match teko::backend::select_module_x86(teko::backend::WIN64, entry) { teko::backend::MModuleX86 as x => x; error as e => { phase_end_fail(isel_phase, fns, e.message); return fail(dir, e.message) } }
+    phase_end_ok(isel_phase, fns)
+    let ra_phase = phase_begin("regalloc", fns, mode)
+    let col = match teko::backend::regalloc_module_x86(teko::backend::WIN64, sel) { teko::backend::MModuleX86 as x => x; error as e => { phase_end_fail(ra_phase, fns, e.message); return fail(dir, e.message) } }
+    phase_end_ok(ra_phase, fns)
+    let enc_phase = phase_begin("encode", fns, mode)
+    let enc = match teko::backend::encode_module_x86(teko::backend::WIN64, col) { teko::backend::EncodedModuleX86 as x => x; error as e => { phase_end_fail(enc_phase, fns, e.message); return fail(dir, e.message) } }
+    let obj = teko::backend::emit_coff(enc)
+    phase_end_ok(enc_phase, fns)
+    finish_native_object(dir, od, stem, obj, prog, m, mode)
 }
 
 /**
@@ -2726,15 +2778,23 @@ fn report_object_only(dir: str, objp: str, t: NativeTarget) -> i32 {
  * @param m     the resolved manifest (link knobs)
  * @return      0 on a successful write+link (or write, for a cross target), else the failing status
  */
-fn finish_native_object(dir: str, od: str, stem: str, obj: []byte, prog: checker::TProgram, m: Manifest) -> i32 {
+fn finish_native_object(dir: str, od: str, stem: str, obj: []byte, prog: checker::TProgram, m: Manifest, mode: Report) -> i32 {
     let objp = object_output_path(od, stem)
     let target = resolved_target()
     let binp = binary_output_path(od, stem, target)
-    match teko::io::write_file_bytes(objp, obj) { error as e => return fail(dir, e.message); null => { } }
+    let obj_phase = phase_begin("objfile", objp, mode)
+    match teko::io::write_file_bytes(objp, obj) {
+        error as e => { phase_end_fail(obj_phase, objp, e.message); return fail(dir, e.message) }
+        null => { }
+    }
+    phase_end_ok(obj_phase, teko::str::concat(objp, teko::str::concat(" ", size_text(obj.len))))
     if !build_links_binary(target, m) { return report_object_only(dir, objp, target) }
+    let link_phase = phase_begin("link", binp, mode)
     if link_object(objp, binp, m, prog) != 0 {
+        phase_end_fail(link_phase, binp, "cc failed to link the own-backend object")
         return fail(dir, "cc failed to link the own-backend object")
     }
+    phase_end_ok(link_phase, binp)
     match teko::io::write_file(teko::str::concat(binp, ".tsym"), codegen::tk_emit_tsym(prog)) { error => { }; null => { } }
     teko::io::println(teko::str::concat("teko: ", dir, teko::str::concat(": built ", binp, " (own backend)")))
     0
@@ -3648,21 +3708,55 @@ fn gate_shard_base(od: str, stem: str) -> str {
     teko::str::concat(od, "/.", stem, "-shard/")
 }
 
-/**
- * TEST_JOBS_DEFAULT — how many SHARDS of the in-process suite run concurrently by default.
- *
- * Four, matching `REGR_JOBS_DEFAULT` and for the same reason: each shard is a whole test binary with
- * its own arena, so a job count tuned to core count trades the runner's memory for wall clock. A leg
- * that knows its machine raises it through `TEST_JOBS_ENV`.
- */
-const TEST_JOBS_DEFAULT: u64 = 4
-
-/** TEST_JOBS_ENV — the env key a run overrides `TEST_JOBS_DEFAULT` through (12-Factor: how parallel
-    the machine may be is the machine's business, not the source's). `1` restores a single process. */
+/** TEST_JOBS_ENV — the env key a run overrides the OS-granted shard default through (12-Factor: how
+    parallel the machine may be is the machine's business, not the source's). `1` restores a single
+    process; a value above `nproc()` is demoted to it, never honoured (`jobs_cap`). */
 const TEST_JOBS_ENV: str = "TEKO_TEST_JOBS"
+
+/** BUILD_JOBS_ENV — the env key the dev pins the build's parallel-lane count through. Empty, non-numeric
+    or zero falls back to the OS-granted default (`nproc()`); a value above `nproc()` is demoted to it. */
+const BUILD_JOBS_ENV: str = "TEKO_JOBS"
+
+/**
+ * jobs_cap — clamp a requested lane count to what the OS actually grants (`nproc()`). Asking for MORE
+ * lanes than there are CPUs is DEMOTED to the maximum, never honoured: lanes past the core count only
+ * add scheduling contention without adding parallelism, so the pin is a ceiling the OS lowers, not a
+ * promise it keeps. With both operands `>= 1` (the parser floors to a positive fallback, `nproc()`
+ * floors to 1) the result is always `>= 1`.
+ *
+ * @param requested  the lane count asked for (an env pin, or the OS default itself)
+ * @param cap        the ceiling — the logical CPUs the OS grants (`teko::env::nproc()`)
+ * @return           `min(requested, cap)`, always `>= 1`
+ */
+fn jobs_cap(requested: u64, cap: u64) -> u64 {
+    if requested < cap { requested } else { cap }
+}
+
+/**
+ * build_jobs — how many parallel work lanes this run may have in flight at once.
+ *
+ * THE DEFAULT IS WHAT THE OS GRANTS (`teko::env::nproc()`), not a number cast into the source — the
+ * owner fixed "the OS grants by default, the dev MAY pin". An explicit `TEKO_JOBS` wins (12-Factor),
+ * with the same grammar as the shard/regression knobs (empty/non-numeric/zero → the OS default), but
+ * it is CAPPED at `nproc()` (`jobs_cap`): a pin above the core count is demoted to the maximum, never
+ * accepted, because lanes past the CPUs only contend. A 1-CPU host, or an OS that cannot count, floors
+ * at 1 — never 0, which would be a barrier disguised as parallelism.
+ *
+ * @return the effective lane count (`>= 1`, never above `nproc()`)
+ * @since 0.3.1
+ */
+fn build_jobs() -> u64 {
+    let cap = teko::env::nproc()
+    match teko::env::var(BUILD_JOBS_ENV) { str as v => jobs_cap(regr_jobs_of_default(v, cap), cap); error => cap }
+}
 
 /**
  * test_jobs — how many shards of the in-process suite this run may have in flight at once.
+ *
+ * THE DEFAULT IS THE OS-GRANTED lane count via `build_jobs()`, not a hardcoded four — the owner fixed
+ * "the OS grants by default". A gate-specific `TEKO_TEST_JOBS` still wins and is capped at `nproc()`
+ * exactly like the general knob, so a shard pin above the core count is demoted, never honoured; when
+ * it is unset the general `build_jobs()` default (`TEKO_JOBS` else `nproc()`) governs the gate too.
  *
  * FORCED TO 1 UNDER COVERAGE, and that is not a limitation of the sharding — it is that the merge
  * would be a second mechanism. A sharded run dumps one `.tkcov` per shard and the floors need their
@@ -3672,7 +3766,8 @@ const TEST_JOBS_ENV: str = "TEKO_TEST_JOBS"
  * @return the effective shard count (>= 1)
  */
 fn test_jobs() -> u64 {
-    match teko::env::var(TEST_JOBS_ENV) { str as v => regr_jobs_of_default(v, TEST_JOBS_DEFAULT); error => TEST_JOBS_DEFAULT }
+    let cap = teko::env::nproc()
+    match teko::env::var(TEST_JOBS_ENV) { str as v => jobs_cap(regr_jobs_of_default(v, cap), cap); error => build_jobs() }
 }
 
 /**
@@ -4158,7 +4253,7 @@ fn project_arg_of(args: []str, start: u64) -> str {
 fn build_debug_binary(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest) -> i32 {
     match validate_extern_libs_for_target(m) { error as e => return fail(dir, e.message); null => { } }
     if m.backend == Backend::Native {
-        return emit_native(dir, stem, out_dir, prog, m)
+        return emit_native(dir, stem, out_dir, prog, m, output_is_tty(false))
     }
     let emitted = match codegen::tk_emit_c(prog) { str as s => s; error as e => return fail(dir, e.message) }
     let csrc = teko::str::concat(emitted, codegen::tk_emit_meta(m.name, m.version, m.suffix, m.description))
