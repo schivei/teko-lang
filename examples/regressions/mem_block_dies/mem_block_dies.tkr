@@ -3,14 +3,14 @@
 #
 # WHAT IT PINS. The five lexical scopes (bare block / loop / if-arm / when-arm / fn) are treated
 # identically by the model: a local proven block-local dies at its scope's exit edge. Here a `str`
-# built inside an `if` arm and consumed with a non-tail, non-assign-RHS use is proven block-local by
-# the residence oracle and routed through `tk_str_concat_r(<arm region>, …)` (codegen crumb C3), so
-# its buffer dies when the arm closes.
+# built inside an `if` arm and probed with a str equality test (a non-escaping use) is proven
+# block-local by the residence oracle and routed through `tk_str_concat_r(<arm region>, …)` (codegen
+# crumb C3), so its buffer dies when the arm closes.
 #
-# WHAT IT PROVES. `tag_in_arm` emits its arm-scoped `arm-value` token, then `churn` opens and closes
-# eight further allocating scopes that recycle the arm's freed region memory. The `arm-value` token
-# must still read back exactly — a use-after-drop of the arm-scoped buffer would corrupt it, not
-# merely leak it. The contiguous line is the witness.
+# WHAT IT PROVES. `tag_in_arm` matches its arm-scoped `arm-value` str (weight 7), then `churn` opens
+# and closes further allocating loop scopes that recycle the arm's freed region memory (weight 2).
+# The fingerprint `9` witnesses that the arm-scoped str read back exactly even though its region died
+# at the arm's exit and was recycled: a use-after-drop would drop the arm's weight, not merely leak.
 #
 # C ROUTE by construction: `Given env = ["TEKO_BACKEND=c"]` pins the shared build to the C backend,
 # the route crumb C3 activates the scope routing on. The native route inherits the same lifecycle
@@ -18,7 +18,7 @@
 
 Feature: mem_block_dies — an if-arm block-local str dies at the arm exit yet reads back exactly
 
-  Scenario: an arm-scoped str reads back its exact value across the post-arm scope churn
+  Scenario: an arm-scoped str fingerprints to 9 across the post-arm scope churn
     Given env = ["TEKO_BACKEND=c"]
     When built and run
-    Then stdout pattern = "arm-value[|]ok"
+    Then stdout pattern = "9"

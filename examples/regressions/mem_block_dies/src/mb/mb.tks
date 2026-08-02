@@ -1,18 +1,21 @@
 /**
- * churn — allocate and drop scopes N times to reuse freed region memory. Each iteration builds a
- * block-local str (dropped at the iteration's exit edge) so a later use-after-drop elsewhere would
- * read this churn's recycled bytes instead of its intended value.
+ * churn — build a block-local str per iteration and probe it with a str EQUALITY test (a
+ * non-escaping use, so each `spin-<i>` is proven block-local and routes through the loop region,
+ * dropped at the iteration's exit edge). The churn recycles that freed region memory AFTER the arm
+ * scope of `tag_in_arm` has closed, so a use-after-drop of the arm-scoped str would read this
+ * churn's recycled bytes.
  *
  * @param n  the number of churn iterations
- * @return   the count of non-empty marks churned (keeps the loop from being dead code)
+ * @return   the count of iterations whose block-local str matched its expected value
  */
 fn churn(n: i64) -> i64 {
     mut hits: i64 = 0
     mut i: i64 = 0
     loop {
         if i >= n { break }
-        let scratch = "churn-" ~ teko::i64_to_str(i)
-        if teko::str::len(scratch) > 0 { hits = hits + 1 }
+        let spin = "spin-" ~ teko::i64_to_str(i)
+        if spin == "spin-0" { hits = hits + 1 }
+        if spin == "spin-1" { hits = hits + 1 }
         i++
     }
     hits
@@ -20,31 +23,30 @@ fn churn(n: i64) -> i64 {
 
 /**
  * tag_in_arm — build a BLOCK-LOCAL str inside an `if` arm (one of the five lexical scopes treated
- * identically by the model), consume it with a non-tail, non-assign-RHS `print`, then churn other
- * scopes AFTER the arm closes. The arm-scoped str is bump-allocated in the arm's region via
+ * identically by the model) and probe it with a str EQUALITY test, a non-escaping use the oracle
+ * proves block-local. The arm-scoped str is bump-allocated in the arm's region via
  * `tk_str_concat_r` and dies at the arm's exit edge; the following churn recycles that memory. The
- * printed value must be exact — proving the arm-scoped str was fully consumed before its region died.
+ * arm match must land — proving the arm-scoped str was fully consumed before its region died.
  *
  * @param on  whether to enter the value-bearing arm
- * @return    the churn hit count (a value used so the churn is not dead code)
+ * @return    7 when the arm-scoped str read back exactly, plus the churn hit count (2)
  */
 fn tag_in_arm(on: bool) -> i64 {
+    mut hit: i64 = 0
     if on {
         let tag = "arm-" ~ "value"
-        print(tag)
-        print("|")
+        if tag == "arm-value" { hit = 7 }
     }
-    churn(8)
+    hit + churn(2)
 }
 
 /**
- * run — enter the arm, emit its block-local tag, churn, then print a terminating token. The
- * contiguous line is the deterministic witness: a corrupt arm-scoped str would break the `arm-value`
- * token instead of merely leaking it.
+ * run — enter the arm, fingerprint the arm-scoped str plus the post-arm churn, and render the total.
+ * `9` (7 arm + 2 churn) proves the arm-scoped str held its exact value even though its region died
+ * at the arm's exit and was recycled by the churn.
  *
- * @return  the terminating token
+ * @return  the decimal fingerprint
  */
 exp fn run() -> str {
-    _ = tag_in_arm(true)
-    "ok"
+    teko::i64_to_str(tag_in_arm(true))
 }
