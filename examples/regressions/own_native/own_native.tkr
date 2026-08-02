@@ -38,9 +38,13 @@
 # THE TWO FILES MOVE TOGETHER, and that is enforced, not hoped for:
 # `src/build/own_native_pairing_test.tkt` reads both and fails when a name lives on only one side.
 #
-# THE FIVE REMAINING `Then exit` ROWS ARE NOT A LEFTOVER. Each is a `Given source` program whose whole
-# contract IS its exit code (the cross targets and the C-route oracle) — that is a program's observable,
-# not a case addressed by a number.
+# THE EXIT CODE IS NO LONGER A DATA CHANNEL (owner ruling 2026-08-02 — "removi dos testes os exit; os
+# regressivos que esperam um exit devem olhar para o stdout, e os codigos que faziam exit agora fazem
+# println"). Every case whose exit code merely CARRIED a value — the cross-target verticals and the
+# null-arm C-route oracle — now `println`s that value and its row asserts it on stdout. The exit code
+# stays the observable of ONLY two kinds of program: a deliberate PANIC (`Then it traps`, non-zero via
+# stderr) and the lone KNOWN-STOP whose whole subject IS the exit syscall firing in program mode
+# (`capture_off_in_program_mode_still_exits_for_real`) — neither of which a stdout line can express.
 Feature: F2 language corpus — folded EXPECT_EXIT single-file fixtures (dobrado, dir removido)
 
   Scenario: own_arith_exit (own-native — `n` is a `mut` local, so the MUL/ADD are fold-opaque)
@@ -124,9 +128,9 @@ Feature: F5 own-native corpus — os cenarios que o backend nativo tem de fechar
   # keep is what makes it honest, not louder.
   #
   # `Then object well-formed` still runs, and it is the whole point of a cross build: the emitted
-  # artefact IS the requested format. PROMOTE BACK to `When built and run` + `Then exit = 42` the
-  # day this lane gains an emulator — at which point the exit becomes checkable and the row should
-  # go back to checking it.
+  # artefact IS the requested format. PROMOTE BACK to `When built and run` + `Then stdout pattern =
+  # "42"` the day this lane gains an emulator — at which point the printed value becomes checkable and
+  # the row should go back to checking it (the source `println`s 42; owner ruling 2026-08-02).
   Scenario: own_cross_x86_64_windows_emits_coff (0.3.1 C5 — the object is the claim)
     Given target = "x86_64-windows"
     Given source = "cases/cross_exit42.tks"
@@ -140,7 +144,7 @@ Feature: F5 own-native corpus — os cenarios que o backend nativo tem de fechar
   # did not exist; the fix was to make the target exist.
   #
   # `When built`, not `When built and run`, for the SAME reason the COFF row above gives: on an
-  # x86_64 host `arm64-linux` is CROSS, the run is honest-skipped, and a declared `Then exit` would
+  # x86_64 host `arm64-linux` is CROSS, the run is honest-skipped, and a declared stdout claim would
   # be a claim no host here can keep — which is a skip, and `no_skips_gate.sh` is right to fail a
   # lane over it. The claim this row makes is the OBJECT: a well-formed, linker-consumable AArch64
   # `ET_REL` carrying e_machine 183.
@@ -152,7 +156,8 @@ Feature: F5 own-native corpus — os cenarios que o backend nativo tem de fechar
   # directions: with the argument, an AArch64 object passes as `arm64-linux` and FAILS as
   # `x86_64-linux`; the mirror case (x86_64 bytes claimed as `arm64-linux`) fails too.
   #
-  # The exit code lives on `own_host_os_arch_exit210_runs` below, where a host can actually check it.
+  # The value 210 lives on `own_host_os_arch_exit210_runs` below, printed to stdout where a host can
+  # actually check it.
   Scenario: own_cross_arm64_linux_emits_elf (AArch64-ELF — the object is the claim)
     Given target = "arm64-linux"
     Given source = "cases/cross_exit210.tks"
@@ -175,14 +180,14 @@ Feature: F5 own-native corpus — os cenarios que o backend nativo tem de fechar
     Given target = "host-os-arch"
     Given source = "cases/cross_exit42.tks"
     When built and run
-    Then exit = 42
+    Then stdout pattern = "42"
     Then object well-formed
 
   # (AArch64-ELF crumb 3) THE VALUE THE arm64-Linux LANE OWES, and the only row that can collect it:
   # `host-os-arch` resolves to whatever os-arch this host natively builds, so this row RUNS on every
   # host — and on an arm64 Linux runner that name is now `arm64-linux`, which means the whole
   # vertical is exercised end to end and JUDGED BY ITS VALUE: arm64 isel → AAPCS64 regalloc → arm64
-  # encode → `emit_elf_arm64` → the host `cc` links the ELF → the binary runs → exit 210. Before
+  # encode → `emit_elf_arm64` → the host `cc` links the ELF → the binary runs → prints 210. Before
   # `Arm64Linux` existed, `tkr_resolve_target_name` degraded `host-os-arch` to the plain `host`
   # sentinel there (the resolver had no name to spell out) and the row honest-skipped.
   #
@@ -190,13 +195,13 @@ Feature: F5 own-native corpus — os cenarios que o backend nativo tem de fechar
   # `e_machine` must be the one the RESOLVED os-arch names — AArch64 on the arm64 leg, X86-64 on the
   # x86_64 leg — which is the assertion check_elf.sh's second argument makes possible.
   #
-  # 210 is this lane's own exit value, distinct from the corpus-wide 42, so a row asserting it can
+  # 210 is this lane's own value, distinct from the corpus-wide 42, so a row asserting it can
   # never be satisfied by another fixture's binary being run by mistake.
   Scenario: own_host_os_arch_exit210_runs (AArch64-ELF — the host vertical, judged by its value)
     Given target = "host-os-arch"
     Given source = "cases/cross_exit210.tks"
     When built and run
-    Then exit = 210
+    Then stdout pattern = "210"
     Then object well-formed
 
 
@@ -1087,13 +1092,13 @@ Feature: 0.3.1.0 degrau 30 — o padrao `null` num match sobre uniao de QUALQUER
   Scenario: null_arm_three_member_union (own-native — o MESMO programa nas duas rotas; esta e a rota propria)
     Given source = "cases/null_arm_three_member_union.tks"
     When built and run
-    Then exit = 42
+    Then stdout pattern = "42"
 
   Scenario: null_arm_three_member_union (C route — o ORACULO: a rota que ja respondia, contra a qual o valor da rota propria se mede)
     Given source = "cases/null_arm_three_member_union.tks"
     Given env = ["TEKO_BACKEND=c"]
     When built and run
-    Then exit = 42
+    Then stdout pattern = "42"
 
   # A INVERSAO DA CAPTURA, e ela e por REVERSAO e nao por interruptor (§14.6 do desenho de journaling).
   # A captura de `#test` (§14) faz um `exit(n)` dentro de um corpo de teste voltar como um FACTO SOBRE
@@ -1106,8 +1111,9 @@ Feature: 0.3.1.0 degrau 30 — o padrao `null` num match sobre uniao de QUALQUER
   # esta LIGADA dentro do modo teste — e a guarda de `src/test/capture_test.tkt`. A guarda so nao e
   # decoracao porque pode falhar nos DOIS sentidos.
   #
-  # As filas cujo contrato E o codigo de saida (os alvos cruzados 42/210, o `defer_cascade_exit` cujo
-  # codigo de saida E a prova LIFO) dependem todas desta mesma lei; estas duas nomeiam-na.
+  # Desde que o dono tirou o exit dos canais de dado (2026-08-02), a UNICA fila cujo contrato ainda E
+  # mesmo o codigo de saida e este known-stop — o `exit(7)` num PROGRAMA tem de sair pela syscall com o
+  # seu valor; nao ha stdout que o exprima. Estas duas rotas dependem desta lei e nomeiam-na.
 
   Scenario: capture_off_in_program_mode_still_exits_for_real (own-native — a rota propria)
     Given source = "cases/capture_exit_7.tks"
