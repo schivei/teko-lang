@@ -4,6 +4,7 @@ created: 2026-08-02
 branch: cargo/0.3.1.0-modelo-build-arq (de origin/fix/union)
 owner-diagnostic: 2026-08-02 ("o build e SEQUENCIAL; ha tempo escuro; o delivery e MAIOR que a soma dos lead times")
 owner-precision: 2026-08-02 ("o wall entre INICIO e FIM do COMANDO e MAIOR que o tempo que o compilador registra de si mesmo")
+owner-correction: 2026-08-02 ("nao e wall == soma das fases, e sim wall <= soma das fases, porque queremos PARALELIZAR; travar em igualdade agora falhara depois")
 status: DESENHO (arquiteto so escreve docs). Nenhuma linha de produto nesta carga.
 depende-de: docs/design/journaling-de-corrida-0.3.1.md (JOURNAL, outro agente), docs/design/build-observability-plan.md (fases stderr), docs/design/al-wave-emit-throughput.md (throughput do emissor)
 ---
@@ -33,15 +34,38 @@ A precisao do dono move a linha de base: **a verdade e o wall EXTERNO do comando
 build <dir>`), nao o start-to-finish interno do compilador. Tudo abaixo compara esse wall externo
 com o que o compilador reporta de si.
 
-**A LEI (forma forte, item 2 do brief):**
+**A LEI (forma correta — uma DESIGUALDADE, correcao do dono 2026-08-02):**
 
 ```
-wall_externo(comando)  ==  Σ fases_nomeadas  +  balde("process")
+wall_externo(comando)  <=  Σ fases_nomeadas          (incluindo a fase "process" de ciclo de vida)
 ```
 
-onde `balde("process")` e uma fase NOMEADA de ciclo de vida (startup + teardown), nao um buraco.
-Zero tempo sem nome. Quando o dono ou o CI marcam `time`, o numero tem de bater com a soma reportada,
-dentro do erro de resolucao do relogio monotonico.
+Nao e igualdade, e **`<=`**, porque queremos PARALELIZAR — travar em `==` agora falha no dia das
+threads. Leia a lei nos dois regimes:
+
+- **SEQUENCIAL (sem sobreposicao):** vale com IGUALDADE. Cada fase acontece em seu proprio pedaco do
+  relogio; a soma dos lead times E o wall. E o regime de HOJE.
+- **PARALELO (fases sobrepostas):** vale com `<` ESTRITO. Trabalho concorrente conta uma vez na SOMA
+  (dois lead times) mas acontece no MESMO relogio (um so wall), logo `Σfases > wall`. A soma exceder o
+  wall e o **sinal de que houve paralelismo** — e sucesso, nao defeito.
+
+Duas quantidades derivam da lei, e cada uma tem um significado fixo:
+
+```
+dark    = max(0, wall − Σfases)     -- tempo NAO-ATRIBUIDO (wall fora de toda fase). DEVE ser 0.
+overlap = max(0, Σfases − wall)     -- GANHO DE PARALELISMO (lead times concorrentes). >= 0, informativo.
+```
+
+- **`dark` e o unico defeito.** `dark > 0` significa que existe wall que nenhuma fase nomeia — o tempo
+  escuro do dono. A lei exige `dark == 0`: zero tempo sem nome, inclusive o ciclo de vida (que vira a
+  fase NOMEADA `process`, nao um buraco).
+- **`overlap` NAO e defeito — e a metrica de speedup.** Sob threads ele cresce; isso e o que estamos a
+  perseguir. Um `ledger_reconcile` que falhasse quando `Σfases > wall` (a antiga regra "balde negativo
+  = defeito") e PRECISAMENTE o que quebraria no dia da paralelizacao — por isso foi removido.
+
+Quando o dono ou o CI marcam `time`, o veredicto e: **`dark == 0`** (todo o wall externo esta coberto
+por alguma fase, dentro do erro de resolucao do relogio monotonico) e **`overlap`** reportado como o
+ganho medido — nunca `wall == Σ`.
 
 ---
 
@@ -145,9 +169,12 @@ native mudo, o link externo e o balde de ciclo de vida. Dai `delivery > Σ lead_
 `assemble.tks:216-217` abre `lex_phase` E `parse_phase` no MESMO instante, antes de qualquer trabalho;
 `asm_lex_and_parse` (`assemble.tks:235`) faz lex+parse JUNTOS por arquivo; ambas assentam no mesmo
 ponto (`assemble.tks:263-264`). Consequencia: a linha "lexer" e a linha "parser" reportam o MESMO
-intervalo (lex+parse+merge). **Somar as duas conta o front-parse em DOBRO**, e o split real lexer-vs-
-parser e escuro (estao fundidos numa funcao). A LEI proibe: ou uma fase `parse` unica, ou dois relogios
-sequenciais reais.
+intervalo (lex+parse+merge). **Somar as duas conta o front-parse em DOBRO** — e cria um `overlap`
+FANTASMA (§0): `Σfases − wall` cresce sem que exista concorrencia nenhuma, apenas trabalho sequencial
+instrumentado por dois relogios sobrepostos. Isso CORROMPE a metrica de speedup — `overlap` deve medir
+paralelismo REAL, nao dupla-instrumentacao. A LEI corrigida exige que `overlap` so venha de concorrencia
+verdadeira: aqui a cura e uma fase `parse` UNICA (ou dois relogios sequenciais reais), para que
+sequencial de `overlap == 0` como manda o regime sem sobreposicao.
 
 ### 1.7 A atribuicao mentirosa por `.tkr`: a primeira fila paga tudo
 
@@ -183,18 +210,21 @@ compartilhado, nao escondê-lo no cenario 0.
 
 ---
 
-## 2. A LEI em codigo: o razao de fases que fecha com o wall externo
+## 2. A LEI em codigo: o razao de fases e a desigualdade que sobrevive ao paralelismo
 
-### 2.1 A equacao, e o balde nomeado
+### 2.1 A equacao (uma desigualdade), e o balde nomeado
 
 ```
-wall_externo == fase(process.startup)
-              + Σ fases_de_trabalho   (lexer, parse, load-deps, checker, monomorph, consteval,
-                                       lower, isel, regalloc, encode, objfile, link, ...)
-              + fase(process.teardown)
+wall_externo  <=  fase(process.startup)
+                + Σ fases_de_trabalho   (parse, load-deps, checker, monomorph, consteval,
+                                         lower, isel, regalloc, encode, objfile, link, ...)
+                + fase(process.teardown)
 ```
 
-`process.startup` e `process.teardown` sao o balde de ciclo de vida NOMEADO. Nao ha residuo anonimo.
+`process.startup` e `process.teardown` sao o balde de ciclo de vida NOMEADO — a fase `process`. Nao ha
+residuo anonimo: todo o wall externo esta coberto por ALGUMA fase, logo `dark == 0`. A folga
+`overlap = Σfases − wall` e `>= 0` e cresce com o paralelismo (§0); HOJE, sequencial, ela e ~0 e a
+desigualdade colapsa em igualdade. O implementador NAO deve travar em `==`.
 
 ### 2.2 O relogio de topo: cercar o comando inteiro em `main.tks`
 
@@ -208,9 +238,10 @@ ele passa a ser IMPRESSO, nao inferido.
  *
  * O `start` e marcado na primeira instrucao de `main` (o mais cedo que Teko pode observar; o custo de
  * `exec`+loader ANTES disso e inatingivel de dentro do processo e fica na conta do CI que roda `time`,
- * nomeado como `process.exec` na tabela de reconciliacao). O `wall` de fecho, menos a soma das fases de
- * trabalho que o razao acumulou, E o balde `process` (startup Teko-observavel + teardown) — impresso,
- * nunca inferido.
+ * nomeado como `process.exec` na tabela de reconciliacao). O wall de topo (`now_ns()` de fecho − `start`)
+ * e o `wall_externo` da LEI (§2.1): ele tem de estar INTEIRAMENTE coberto por fases (`dark == 0`), com
+ * o balde `process` (startup Teko-observavel + teardown) nomeando a fatia que nao e trabalho — impresso,
+ * nunca inferido. Sob paralelismo a soma das fases EXCEDE este wall (`overlap`), e isso e esperado.
  *
  * @field start  leitura monotonica na primeira instrucao de main (ns)
  * @since 0.3.1
@@ -243,9 +274,10 @@ duravel; timing de fase e mais uma especie de registro.
 /**
  * PhaseLedger — o razao das fases de UMA corrida de build: pares (label, ns) em ordem de assentamento.
  *
- * A INVARIANTE E A LEI: `wall_externo == ledger_total_ns(l) + lifecycle_ns`, onde `lifecycle_ns` e o
- * que sobra do wall de topo depois de subtrair a soma do razao. Um razao cujo total mais o balde nao
- * bate com o wall de topo e um DEFEITO reportado, nao arredondado — e essa checagem e a fixture F1.
+ * A INVARIANTE E A LEI (DESIGUALDADE, §2.1): `wall_externo <= ledger_total_ns(l)`, com a fase `process`
+ * ja no razao. O UNICO defeito e `dark = max(0, wall − Σfases) > 0` — wall que nenhuma fase nomeia (o
+ * tempo escuro). A folga `overlap = max(0, Σfases − wall)` NAO e defeito: e o ganho de paralelismo, `>= 0`
+ * e informativo. `ledger_reconcile` afirma `dark == 0` e devolve `overlap`; as fixtures F1/F2 o forcam.
  *
  * @field labels  o nome de cada fase, em ordem de assentamento
  * @field ns      a duracao de cada fase (paralela a `labels`), em ns monotonicos
@@ -293,20 +325,36 @@ pub fn ledger_total_ns(l: PhaseLedger) -> i64 {
 }
 
 /**
- * ledger_reconcile — o veredicto da LEI: dado o wall de topo `wall`, devolver o balde de ciclo de vida
- * (`wall - Σfases`) e afirmar que ele e NAO-NEGATIVO. Um balde negativo significaria uma fase medindo
- * fora do wall de topo (relogios sobrepostos, como o lexer/parser de §1.6) — e um defeito, e a fixture
- * F2 o forca.
+ * Reconciliation — o veredicto da LEI decomposto nas suas duas quantidades de sinal fixo (§0):
+ * `dark` (wall nao-atribuido, DEVE ser 0) e `overlap` (ganho de paralelismo, `>= 0`, informativo).
  *
- * @param l     o razao das fases
- * @param wall  o wall externo (`now_ns() de fecho - BuildClock.start`)
- * @return      o balde de ciclo de vida em ns (>= 0), ou um error quando as fases excedem o wall
+ * @field dark     `max(0, wall − Σfases)` — tempo escuro; o defeito a eliminar.
+ * @field overlap  `max(0, Σfases − wall)` — sobreposicao de fases concorrentes; o speedup medido.
  * @since 0.3.1
  */
-pub fn ledger_reconcile(l: PhaseLedger, wall: i64) -> i64 | error {
-    let bucket = wall - ledger_total_ns(l)
-    if bucket < 0 { return error { message = $"teko: phase ledger exceeds wall by {0 - bucket}ns (overlapping clocks)" } }
-    bucket
+pub type Reconciliation = struct {
+    dark: i64
+    overlap: i64
+}
+
+/**
+ * ledger_reconcile — o veredicto da LEI (§2.1), que e uma DESIGUALDADE e nao uma igualdade. Devolve a
+ * decomposicao `dark`/`overlap` do wall de topo contra a soma das fases. Falha SOMENTE quando ha tempo
+ * escuro (`dark > 0` — wall que nenhuma fase nomeia); NUNCA falha quando a soma das fases excede o wall
+ * (`Σfases > wall`), porque isso e o GANHO DE PARALELISMO e travar nele quebraria no dia das threads —
+ * era exatamente a regra "balde negativo = defeito" da versao anterior, agora REMOVIDA. Sequencial:
+ * `dark == 0` e `overlap == 0`. Paralelo: `dark == 0` e `overlap > 0`.
+ *
+ * @param l     o razao das fases (a fase `process` de ciclo de vida ja incluida)
+ * @param wall  o wall externo (`now_ns() de fecho − BuildClock.start`)
+ * @return      a decomposicao com `dark == 0`, ou um error quando ha tempo escuro (`dark > 0`)
+ * @since 0.3.1
+ */
+pub fn ledger_reconcile(l: PhaseLedger, wall: i64) -> Reconciliation | error {
+    let total = ledger_total_ns(l)
+    let dark = if wall > total { wall - total } else { 0 }
+    if dark > 0 { return error { message = $"teko: {dark}ns of wall belongs to no phase (dark time)" } }
+    Reconciliation { dark = 0; overlap = total - wall }
 }
 ```
 
@@ -326,9 +374,11 @@ DESIGN-AHEAD: nao depende da API bloqueada.
 
 ### 3.1 Medir antes de paralelizar — o item 2 e pre-requisito DURO
 
-Nao se paraleliza o que nao se mede. Enquanto o razao (§2) nao fechar `wall == Σfases + balde`, nao se
-sabe se o gargalo e codegen (paralelizavel por-funcao), o `cc`/link externo (barreira serial), ou o
-ciclo de vida (nao-paralelizavel). O `regressor.tkr` ja impoe essa disciplina ao numero de builds
+Nao se paraleliza o que nao se mede. Enquanto o razao (§2) nao fechar `dark == 0` (todo o wall
+atribuido a alguma fase), nao se sabe se o gargalo e codegen (paralelizavel por-funcao), o `cc`/link
+externo (barreira serial), ou o ciclo de vida (nao-paralelizavel). E `overlap` so vira metrica de
+speedup confiavel DEPOIS que a dupla-contagem fantasma (§1.6) e curada — senao ele mede
+instrumentacao, nao concorrencia. O `regressor.tkr` ja impoe essa disciplina ao numero de builds
 (*"numero de build se MEDE na lane fail-closed, nao se deriva por adicao"*). Aplica-se identica aqui.
 
 ### 3.2 O que E paralelizavel (por camada)
@@ -436,7 +486,7 @@ de PARALELIZAR** — M1..M4 (a lei) vem antes de P1..P3 (o paralelismo).
 |---:|---|---|---|---|
 | **M1** | Fase native: `phase_begin`/`end` em `lower`/`isel`/`regalloc`/`encode`/`objfile`/`link`, cercando `link_object` (o `cc` externo) | `project.tks` (`emit_native*`, `finish_native_object`) | `codegen.tks`/`lower.tks`/`regalloc.tks` **tem/tiveram agentes vivos** — M1 so ADICIONA chamadas em `project.tks`, nao toca a logica desses modulos | o backend deixa de ser mudo; o `cc`/link native passa a ter numero |
 | **M2** | `BuildClock` de topo em `main.tks` + total no `exit`; balde `process.startup`/`teardown` | `main.tks`, `progress.tks`, `project.tks` | `main.tks` e raiz, sem agente de produto; baixo risco | o wall externo passa a ser impresso; o balde de ciclo de vida deixa de ser escuro |
-| **M3** | `PhaseLedger` + `ledger_reconcile` (a LEI checavel); `phase_end_*` deposita no razao | `progress.tks`, `project.tks` | isolado em `progress.tks` | `wall == Σfases + balde` vira afirmavel |
+| **M3** | `PhaseLedger` + `ledger_reconcile` (a LEI-desigualdade checavel: `dark==0`/`overlap>=0`); `phase_end_*` deposita no razao | `progress.tks`, `project.tks` | isolado em `progress.tks` | `wall <= Σfases` com `dark==0` vira afirmavel; `overlap` vira metrica de speedup |
 | **M4** | Consertar as distorcoes: lexer/parser em UMA fase `parse` (fim da dupla contagem); atribuicao `.tkr` distribui o build compartilhado (nomeia, nao esconde) | `assemble.tks:216-264`, `regr_timing.tks`, `regression.tks:2474-2478` | `regression.tks` — o **pool tem o fix do Windows** (`regr_group.tks`/pool). M4 mexe SO na aritmetica de `RowTiming`/`PhaseTimes`, nao no `run_pool`/spawn — coordenar rebase, nao sobrepor | soma para de dobrar e de mentir |
 | **M5** | Ligar timing ao JOURNAL: `phase_end_*` emite `append(j,"phase",...)`; sumario le por `fold` | `progress.tks`, `src/journal/*` (do outro agente) | **depende do JOURNAL** (agente vivo) — contra a forma DECLARADA; fiacao de 1 linha quando fechar | timing sobrevive a morte da corrida; sumario unico |
 | **P0** | `tk_nproc`/`teko::env::nproc()` (seed C mantido) + `build_jobs()` (default = SO concede) | `teko_rt.{c,h}`, `src/env/*`, `project.tks` | seed C e excecao ao congelamento; sem colisao de agente | o default de paralelismo passa a ser real, e o pin do dev existe |
@@ -459,7 +509,7 @@ do razao, que sao deterministas.
 | # | fixture | afirma | crumb |
 |---:|---|---|---|
 | **F1** | um build com N fases conhecidas deposita N labels no razao, na ordem de assentamento | `l.labels == ["parse","checker",...,"link"]` (conjunto/ordem), nao os ns | M3 |
-| **F2** | `ledger_reconcile(l, wall)` com `wall = Σns + k` (k>0) devolve `k`; com `wall < Σns` devolve error (relogios sobrepostos) | o sinal do balde e o erro de sobreposicao | M3 |
+| **F2** | `ledger_reconcile(l, wall)`: com `wall > Σns` (tempo escuro) devolve ERROR (`dark>0`); com `wall == Σns` devolve `dark=0,overlap=0` (sequencial); com `wall < Σns` (fases concorrentes) devolve `dark=0,overlap=Σns−wall` SEM error (paralelismo NAO e defeito) | `dark==0` obrigatorio; `overlap>=0` aceito | M3 |
 | **F3** | uma fase native e nomeada no razao (o backend deixou de ser mudo): build native minusculo → `labels` contem `"link"` com ns cercando o `cc` | presenca da fase, nao o ns | M1 |
 | **F4** | lexer+parser: apos M4, existe UMA fase `parse`, nao duas com o mesmo intervalo | `labels` tem `"parse"` e NAO `"lexer"`+`"parser"` sobrepostos | M4 |
 | **F5** | `.tkr`: dois cenarios reusando um build compartilhado NAO atribuem `compile_ns` inteiro ao cenario 0 — a soma dos `compile_ns` das filas == 1 build, distribuido/nomeado, nao concentrado | a distribuicao, via `PhaseTimes` agregado | M4 |
@@ -493,7 +543,8 @@ preservado por construcao; o ritual e a rede, nao a expectativa de quebra.
 
 | risco | resolucao (law-first) |
 |---|---|
-| fixture de timing afirmaria um ns (proibido pelo dono: "afirma o que FAZ, nao o numero") | TODAS as fixtures (§5) afirmam INVARIANTES estruturais (presenca/ordem de label, sinal do balde, igualdade de veredicto), nunca um valor de ns. Tensao RESOLVIDA. |
+| fixture de timing afirmaria um ns (proibido pelo dono: "afirma o que FAZ, nao o numero") | TODAS as fixtures (§5) afirmam INVARIANTES estruturais (presenca/ordem de label, `dark==0`, `overlap>=0`, igualdade de veredicto), nunca um valor de ns. Tensao RESOLVIDA. |
+| a LEI travar em `wall == Σfases` quebraria no dia do paralelismo (correcao do dono 2026-08-02) | a LEI e uma DESIGUALDADE `wall <= Σfases` (§0/§2.1); `ledger_reconcile` falha SO em `dark>0`, nunca em `overlap>0`. A regra "balde negativo = defeito" foi REMOVIDA — era precisamente o que falharia depois. Tensao RESOLVIDA. |
 | M1/M4/P3 tocam modulos com agentes vivos (`codegen`,`lower`,`regalloc`,`isel_*`,`encode_*`,`regr_group`/pool) | M1 so ADICIONA `phase_begin` em `project.tks` (nao a logica dos modulos); M4 mexe so na aritmetica de `RowTiming` (nao no `run_pool`); P3 e so desenho (bloqueado). Coordenar rebase, nao sobrepor. |
 | balde de ciclo de vida absorve tempo que DEVIA ser fase (esconde um buraco novo dentro de "process") | `ledger_reconcile` torna o balde VISIVEL e impresso; se ele crescer, e um sinal de fase faltante a nomear, nao um lixao — a lei "zero tempo sem nome" aplica ao proprio balde (quando uma fatia do balde for identificada, vira fase). |
 | paralelismo quebra o fixpoint por ordem | barreira preserva a ordem de item antes de emitir (§3.3); paralelismo vive so ANTES da montagem do objeto. O mesmo cuidado de ordem que refutou (b) do Gap 2. |

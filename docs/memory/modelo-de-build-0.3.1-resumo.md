@@ -29,11 +29,15 @@ domina (AL-wave, 88 KB/s), dentro de encode/objfile que tambem sao mudos no nati
   `phase_zero()`); `child_ns=t_waited-t_spawn` em `regression.tks:211`; reuso `fresh=false` em 2121/2178.
 - Neto `cc` da regressao dentro de `compile`: `regr_timing.tks:21-23` (ja documentado).
 
-## A LEI (item 2, forma forte)
-`wall_externo == Σ fases_nomeadas + balde("process")`. Zero tempo sem nome. Codigo: `BuildClock`
-(topo em main.tks), `PhaseLedger`+`ledger_record`+`ledger_total_ns`+`ledger_reconcile` (o balde =
-wall - Σfases; negativo = relogios sobrepostos = defeito). Alimenta o JOURNAL: fase = `Record{kind=
-"phase"}`, via `append`/`fold` — contrato contra a forma DECLARADA (dep bloqueado, fiacao de 1 linha).
+## A LEI (item 2 — DESIGUALDADE, correcao do dono 2026-08-02)
+`wall_externo <= Σ fases_nomeadas` (a fase `process` de ciclo de vida incluida). NAO e igualdade:
+travar em `==` quebraria no dia do paralelismo. Duas quantidades de sinal fixo:
+`dark = max(0, wall−Σfases)` = tempo escuro, DEVE ser 0 (unico defeito); `overlap = max(0, Σfases−wall)`
+= ganho de paralelismo, `>=0`, informativo (NAO e defeito). Sequencial: dark=0, overlap=0. Paralelo:
+dark=0, overlap>0. Codigo: `BuildClock` (topo em main.tks), `PhaseLedger`+`ledger_record`+
+`ledger_total_ns`+`ledger_reconcile` (falha SO em `dark>0`, devolve `Reconciliation{dark,overlap}`; a
+regra antiga "balde negativo = defeito" foi REMOVIDA — era o que falharia depois). Alimenta o JOURNAL:
+fase = `Record{kind="phase"}`, via `append`/`fold` — contrato contra a forma DECLARADA (dep bloqueado).
 
 ## Paralelizacao (item 3)
 - Paralelizavel HOJE (por PROCESSO, sem threads): `.tkr`/projetos e shards do gate via `run_pool`
@@ -58,7 +62,7 @@ P1 (regressao por run_pool) · P2 (gate sob build_jobs) · P3 (map por-funcao, B
 
 ## Tensao de lei resolvida
 Fixtures NAO afirmam ns (proibido: "afirma o que FAZ, nao o numero"). Afirmam invariantes estruturais
-(presenca/ordem de label, sinal do balde, igualdade de veredicto serial-vs-paralelo). Sem HALT.
+(presenca/ordem de label, `dark==0`, `overlap>=0`, igualdade de veredicto serial-vs-paralelo). Sem HALT.
 
 ## Ritual
 Apos M1 (stderr de todo build native), M2 (main.tks), M4 (aritmetica da regressao), P0 (seed C novo →
