@@ -415,21 +415,31 @@ O relatorio original media que "um DAP proprio nao da nada que o cppdbg nao de".
 Isso justifica o custo com **valor real**, nao pureza. E o eixo que o roteiro tem de
 proteger.
 
-### 8.2 A forma escolhida (o dono ja decidiu — desenhar o CAMINHO)
+### 8.2 A forma escolhida — UM programa, 100% Teko nativo (o dono ja decidiu)
 
-Motor **proprio**, nao "dirigir gdb por baixo". A variante-adaptador (nosso processo
-falando gdb-mi) foi **descartada** por N2: seria usar o gdb, nao ter o nosso. O que fica:
+**O motor E o servidor DAP sao UMA coisa, nao duas camadas** (dono, reforco 2026-08-02:
+*"O motor E o servidor DAP, tambem precisa ser 100% teko nativo"*). Nao ha um "motor"
+separado de um "adaptador DAP" por cima; o **mesmo binario Teko** faz o ptrace/mach
+(int3, registradores, memoria, unwind, single-step) **E** fala DAP na fronteira. Um
+binario, uma logica. A variante-adaptador (nosso processo dirigindo gdb-mi por baixo) foi
+**descartada** por N2: seria usar o gdb, nao ter o nosso.
 
-- **Escrito em Teko** — `src/debugger/` (ou `tooling/debugger/`; recomendo `src/debugger/`
-  pela mesma regra `:37` — ele precisa do front-end para os nomes/tipos Teko-aware).
-  Compilado pelo backend nativo.
-- **Motor via piso de syscall** — ptrace (Linux) / mach exceptions (macOS): insercao de
-  breakpoint (int3), leitura/escrita de registradores e memoria, single-step, desenrolar de
-  pilha. **Toda a logica acima da syscall e Teko.**
-- **Duas frentes de consumo:** `teko debug <proj>` (CLI de terminal) e `teko debug --dap`
-  (servidor DAP sobre stdio, o VSCode e todo cliente DAP conecta). O DAP e so o protocolo
-  de fronteira; o motor e Teko. Transporte = o **mesmo** modulo do §4 (LSP e DAP sao
-  irmaos).
+O debugger **nao e uma excecao** a diretriz nativa — ele e **mais uma prova dela**. A MESMA
+regra da rota nativa vale:
+
+- **Escrito em Teko, compilado pelo backend NATIVO** — `src/debugger/` (pela regra `:37`,
+  ele precisa do front-end para os nomes/tipos Teko-aware).
+- **NAO depende de `teko_rt.c` alem do piso de syscall irredutivel.** ptrace (Linux) / mach
+  exceptions (macOS) sao syscalls — `extern` em `teko_rt.{c,h}`, a excecao mantida por
+  design, **exatamente como `write`/`abort`/`mmap`**. Esse e o **unico** C que ele toca.
+- **NAO emite C.** Toda a logica — parsear DAP, gerir breakpoints, decodificar valores Teko
+  (`str`/`[]T`/variantes/arena), montar respostas, desenrolar a pilha — e **Teko puro**,
+  baixada pelo backend nativo. O unico C sao as syscalls que **nenhum** programa nativo
+  evita.
+- **Duas frentes de consumo do MESMO binario:** `teko debug <proj>` (CLI de terminal) e
+  `teko debug --dap` (fala DAP sobre stdio; VSCode e todo cliente DAP conecta). O DAP e so
+  o **modo de fronteira** do mesmo programa, nao um segundo processo. Transporte = o
+  **mesmo** modulo do §4 (LSP e DAP sao irmaos).
 
 ### 8.3 O piso de syscall — os externs novos (a excecao C mantida)
 
