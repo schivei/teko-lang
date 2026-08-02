@@ -4110,6 +4110,78 @@ fn cg_call_is_user_declared(prog: CgProg, c: checker::TCall) -> bool {
  * @return          the buffer with the call appended
  * @throws          when a part of the call has no lowering (an unknown builtin, a bad signature)
  */
+/**
+ * emit_concat_fold — lower the variadic `teko::string::concat(pieces: []str)` bridge to the inline
+ * C fold that reduces the packed `[]str` via the 2-arg `tk_str_concat` primitive (a slice-taking
+ * runtime signature is impossible — `teko_rt.h` cannot name the per-program `tk_slice_str` typedef).
+ * Extracted from `emit_call` so BOTH the general call path and the block-local binding path share one
+ * emitter, differing only in the residence of the result (0.3.1 modelo-de-memoria §9, crumb C3).
+ *
+ * When `str_region` is empty the fold uses the root builder `tk_str_concat` — byte-identical to the
+ * pre-C3 emission (the leak-until-process output). When `str_region` names an open scope region, each
+ * accumulator is bump-allocated in that region via `tk_str_concat_r` and dies at the region's exit
+ * edge, so a str concatenated inside a `{}` participates in death-by-scope. Routing to a scope is
+ * UAF-free by construction: the caller gates it on `binding_is_block_local`, which proves every use
+ * of the result lands inside the region's lifetime.
+ *
+ * @param buf         the output byte buffer to append to
+ * @param prog        the typed program (for the slice-element type of the packed `[]str` arg)
+ * @param arg         the single packed `[]str` argument the checker desugared the pieces into
+ * @param str_region  the C expression of the region the result resides in, or "" for the root builder
+ * @param escaping    the frame's escaping-name set, threaded into the argument emission
+ * @param regions     the active block-region stack, threaded into the argument emission
+ * @param fn_body     the enclosing function body (escape context for the argument)
+ * @param dctx        the defer/coverage context threaded into the argument emission
+ * @return            the buffer with the concat fold appended
+ * @throws            when the argument type or expression fails to emit
+ */
+fn emit_concat_fold(buf: []byte, prog: CgProg, arg: checker::TExpr, str_region: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    let cs = $"_cs{buf.len}"
+    let ci = $"_ci{buf.len}"
+    let ca = $"_ca{buf.len}"
+    let step = if str_region.len > 0 { $"{ca} = tk_str_concat_r({str_region}, {ca}, {cs}.ptr[{ci}]);" } else { $"{ca} = tk_str_concat({ca}, {cs}.ptr[{ci}]);" }
+    mut o = cb(buf, "({ ")
+    o = match emit_type(o, prog, arg.type) { []byte as r => r; error as err => return err }
+    o = cb(o, $" {cs} = ")
+    o = match emit_expr_ctx(o, prog, checker::Void { }, arg, escaping, regions, fn_body, dctx) { []byte as r => r; error as err => return err }
+    o = cb(o, $"; tk_str {ca} = (tk_str){{0,0}}; for (uint64_t {ci} = 0; {ci} < {cs}.len; {ci}++) {{ {step} }} {ca}; }})")
+    o
+}
+
+/**
+ * cg_is_concat_bridge — whether a call is the variadic `teko::string::concat(pieces: []str)` bridge
+ * (the desugar of a `~` chain). Mirrors the `emit_call` guard EXACTLY (not user-declared, addressed
+ * from `teko` or a single bare segment, last segment `concat`, exactly one packed `[]str` argument),
+ * so the block-local str routing in `emit_binding` intercepts precisely the calls the general path
+ * would otherwise fold with the root builder.
+ *
+ * @param prog  the typed program (for the user-declared query)
+ * @param c     the call node
+ * @return      true iff `c` is the variadic concat bridge
+ * @since 0.3.1
+ */
+fn cg_is_concat_bridge(prog: CgProg, c: checker::TCall) -> bool {
+    if cg_call_is_user_declared(prog, c) { return false }
+    let p = c.callee
+    if p.segments.len == 0 { return false }
+    if c.args.len != 1 { return false }
+    if p.segments[p.segments.len - 1].name != "concat" { return false }
+    (p.segments.len == 1) || (p.segments[0].name == "teko")
+}
+
+/**
+ * cg_bound_is_str — whether a binding's declared type is the primitive `str` (the only heap-str tier
+ * whose block-local residence the C3 str-scope routing tightens). A `str?`/variant-wrapped str is NOT
+ * matched — that value needs a wrap through `emit_as_r_in`, so it stays on the general path.
+ *
+ * @param t  the binding's declared type
+ * @return   true iff `t` is exactly `str`
+ * @since 0.3.1
+ */
+fn cg_bound_is_str(t: checker::Type) -> bool {
+    match t { checker::Str => true; _ => false }
+}
+
 fn emit_call(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker::TExpr, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
     // (W10b.D3) a DYNAMIC contract-method call dispatches through the receiver's vtable —
     // FIRST, before any builtin name-sniffing below could collide with a method name.
@@ -4239,15 +4311,7 @@ fn emit_call(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker::TEx
         // in an inline C loop (avoids needing a slice-taking runtime C signature — teko_rt.h
         // can't reference tk_slice_str, a per-program generated typedef). Mirrors codegen.c.
         if addr && pe == "concat" && c.args.len == 1 {
-            let cs = $"_cs{buf.len}"
-            let ci = $"_ci{buf.len}"
-            let ca = $"_ca{buf.len}"
-            mut o = cb(buf, "({ ")
-            o = match emit_type(o, prog, c.args[0].type) { []byte as r => r; error as err => return err }
-            o = cb(o, $" {cs} = ")
-            o = match emit_expr_ctx(o, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { []byte as r => r; error as err => return err }
-            o = cb(o, $"; tk_str {ca} = (tk_str){{0,0}}; for (uint64_t {ci} = 0; {ci} < {cs}.len; {ci}++) {{ {ca} = tk_str_concat({ca}, {cs}.ptr[{ci}]); }} {ca}; }})")
-            return o
+            return emit_concat_fold(buf, prog, c.args[0], "", escaping, regions, fn_body, dctx)
         }
     }
     if p.segments.len >= 1 {
@@ -4928,11 +4992,35 @@ fn fmt_family_takes_prec(fc_low: byte, is_flt: bool) -> bool {
     if fc_low == 110 && !is_flt { return false }
     true
 }
-fn emit_interp(buf: []byte, prog: CgProg, in: checker::TInterp, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+/**
+ * emit_interp — lower a `$"…{expr}…"` interpolation to the nested-`tk_str_concat` fold over its
+ * piece literals and holes (VM==codegen byte-for-byte), optionally routing the fold through the
+ * scope-region builder `tk_str_concat_r(str_region, …)` (0.3.1 modelo-de-memoria §9, crumb C3).
+ *
+ * When `str_region` is empty the fold uses the root builder `tk_str_concat` (the historical,
+ * leak-until-process output) — byte-identical to the pre-C3 emission. When `str_region` names an
+ * open scope region (the block that OWNS a provably block-local str binding), each accumulator is
+ * bump-allocated in that region and dies at the region's exit edge, so an interpolated str produced
+ * inside a `{}` participates in death-by-scope. Routing to a scope is UAF-free by construction:
+ * `binding_is_block_local` proves every use of the result lands inside the region's lifetime.
+ *
+ * @param buf         the output byte buffer to append to
+ * @param prog        the typed program (type/name lowering for the holes)
+ * @param in          the typed interpolation (pieces, holes and their format specs)
+ * @param str_region  the C expression of the region the result resides in, or "" for the root builder
+ * @param escaping    the frame's escaping-name set, threaded into hole emission
+ * @param regions     the active block-region stack, threaded into hole emission
+ * @param fn_body     the enclosing function body (escape context for the holes)
+ * @param dctx        the defer/coverage context threaded into hole emission
+ * @return            the buffer with the interpolation fold appended
+ * @throws            when a hole expression or an unrecognized format spec fails to emit
+ */
+fn emit_interp(buf: []byte, prog: CgProg, in: checker::TInterp, str_region: str, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
     let nsegs = in.pieces.len + in.holes.len
     mut out = buf
+    let concat_open = if str_region.len > 0 { teko::str::concat("tk_str_concat_r(", str_region, ", ") } else { "tk_str_concat(" }
     mut s = 1
-    loop { if s >= nsegs { break }; out = cb(out, "tk_str_concat("); s++ }
+    loop { if s >= nsegs { break }; out = cb(out, concat_open); s++ }
     mut k = 0
     loop {
         if k >= nsegs { break }
@@ -7854,7 +7942,7 @@ fn emit_expr_ctx(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker:
         checker::TSafeFieldAccess as sfa => emit_safe_field_access(buf, prog, e, sfa, escaping, regions, fn_body, dctx)
         checker::TCoalesce as co => emit_coalesce(buf, prog, e, co, escaping, regions, fn_body, dctx)
         checker::TIndex as ix => emit_index(buf, prog, e, ix, escaping, regions, fn_body, dctx)   // W5-idx — subscript recv[index] (str + slice, bounds-checked)
-        checker::TInterp as in => emit_interp(buf, prog, in, escaping, regions, fn_body, dctx)   // $"…{expr}…" — nested tk_str_concat over pieces + holes
+        checker::TInterp as in => emit_interp(buf, prog, in, "", escaping, regions, fn_body, dctx)
         checker::TInExpr as ie => emit_in(buf, prog, ie, escaping, regions, fn_body, dctx)   // Phase 2 — `<lhs> in [ … ]` membership (single-eval, OR of `==`)
         checker::TArrayLit as a => emit_array_lit(buf, prog, e, a, escaping, regions, fn_body, dctx)   // [ e0, e1, … ] (Increment B+) — build a tk_slice_<elem>
         checker::TPathExpr as pe => {
@@ -8114,6 +8202,33 @@ fn cg_binding_routes_box_to_local_region(prog: CgProg, b: checker::TBinding) -> 
     }
 }
 
+/**
+ * cg_binding_routes_str_to_local_region — whether binding `b` is a scope-routable str: a non-
+ * `#singleton` `str` binding whose value is a `~` concat bridge or an interpolation (0.3.1
+ * modelo-de-memoria §9, crumb C3). This is the SINGLE predicate that both opens the owning scope's
+ * region (via `cg_block_has_block_local`) and drives the `tk_str_concat_r` routing (in
+ * `emit_binding`), so the region is opened exactly when — and only when — a str binding will fill
+ * it. `#singleton` is excluded: the residence oracle forces it to the Root tier.
+ *
+ * The block-locality proof (`binding_is_block_local`) is applied by the callers, not here; this
+ * predicate answers only "is the SHAPE a scope-routable str", the str twin of
+ * `cg_binding_routes_box_to_local_region`.
+ *
+ * @param prog  the typed program (for the concat-bridge query)
+ * @param b     the typed binding
+ * @return      true iff `b` is a non-`#singleton` str binding with a concat/interp value
+ * @since 0.3.1
+ */
+fn cg_binding_routes_str_to_local_region(prog: CgProg, b: checker::TBinding) -> bool {
+    if b.di_kind == parser::DiKind::Singleton { return false }
+    if !cg_bound_is_str(b.bound) { return false }
+    match b.value.kind {
+        checker::TInterp => true
+        checker::TCall as bc => cg_is_concat_bridge(prog, bc)
+        _ => false
+    }
+}
+
 // cg_block_has_block_local — does loop body B have any TOP-LEVEL binding proven BLOCK-local and
 // region-routable? Drives whether emit_loop opens a region — none ⇒ no region ⇒ byte-identical to
 // the pre-S2 output for that loop. `is_value` = whether B yields a value (loop bodies do NOT).
@@ -8124,7 +8239,7 @@ fn cg_block_has_block_local(prog: CgProg, escaping: []str, fn_body: []checker::T
         match block[i] {
             checker::TBinding as b => {
                 if checker::binding_is_block_local(escaping, fn_body, block, is_value, b) {
-                    if cg_same_named_struct(b.bound, b.value.type) || cg_binding_routes_box_to_local_region(prog, b) { return true }
+                    if cg_same_named_struct(b.bound, b.value.type) || cg_binding_routes_box_to_local_region(prog, b) || cg_binding_routes_str_to_local_region(prog, b) { return true }
                 }
             }
             _ => { }
@@ -8412,6 +8527,22 @@ fn emit_binding(buf: []byte, prog: CgProg, ret_type: checker::Type, b: checker::
             checker::TStructInit as si => {
                 out = match emit_struct_init_framed(out, prog, b.value, si, regions[regions.len - 1].name, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
                 return cb(out, ";\n")
+            }
+            _ => { }
+        }
+    }
+    if regions.len > 0 && cur_block.len > 0 && cg_binding_routes_str_to_local_region(prog, b) && checker::binding_is_block_local(escaping, fn_body, cur_block, cur_block_is_value, b) {
+        let str_region = regions[regions.len - 1].name
+        match b.value.kind {
+            checker::TInterp as bin => {
+                out = match emit_interp(out, prog, bin, str_region, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+                return cb(out, ";\n")
+            }
+            checker::TCall as bc => {
+                if cg_is_concat_bridge(prog, bc) {
+                    out = match emit_concat_fold(out, prog, bc.args[0], str_region, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+                    return cb(out, ";\n")
+                }
             }
             _ => { }
         }

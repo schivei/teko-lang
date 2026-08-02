@@ -1,0 +1,33 @@
+/**
+ * scope_marks — build, inside a per-iteration loop scope, a BLOCK-LOCAL str by concatenation and
+ * consume it with a non-tail, non-assign-RHS use (a bare `print`), so the residence oracle proves it
+ * block-local. Under the scope memory model (crumb C3, §9) such a str routes through
+ * `tk_str_concat_r(<loop region>, …)` and its buffer dies at the iteration's exit edge — reclaimed
+ * and reused by the next iteration. Each printed mark must still read back its exact value: a broken
+ * `_r` routing (a buffer freed before the print) would show corruption here, not merely a leak.
+ *
+ * @param n  the number of iterations (each emits one `mark-<i>` token)
+ * @return   void — the marks are written straight to stdout, one contiguous line
+ */
+fn scope_marks(n: i64) -> void {
+    mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        let mark = "mark-" ~ teko::i64_to_str(i)
+        print(mark)
+        print("|")
+        i++
+    }
+}
+
+/**
+ * run — emit three block-local concatenated marks on one line, then a terminating token. The whole
+ * line is the deterministic witness the regressor asserts: every `mark-<i>` present and in order
+ * proves the scope-routed concatenation produced correct values across the region churn.
+ *
+ * @return  the terminating token printed after the marks
+ */
+exp fn run() -> str {
+    scope_marks(3)
+    "end"
+}

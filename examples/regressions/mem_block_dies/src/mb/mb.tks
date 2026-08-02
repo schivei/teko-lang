@@ -1,0 +1,50 @@
+/**
+ * churn — allocate and drop scopes N times to reuse freed region memory. Each iteration builds a
+ * block-local str (dropped at the iteration's exit edge) so a later use-after-drop elsewhere would
+ * read this churn's recycled bytes instead of its intended value.
+ *
+ * @param n  the number of churn iterations
+ * @return   the count of non-empty marks churned (keeps the loop from being dead code)
+ */
+fn churn(n: i64) -> i64 {
+    mut hits: i64 = 0
+    mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        let scratch = "churn-" ~ teko::i64_to_str(i)
+        if teko::str::len(scratch) > 0 { hits = hits + 1 }
+        i++
+    }
+    hits
+}
+
+/**
+ * tag_in_arm — build a BLOCK-LOCAL str inside an `if` arm (one of the five lexical scopes treated
+ * identically by the model), consume it with a non-tail, non-assign-RHS `print`, then churn other
+ * scopes AFTER the arm closes. The arm-scoped str is bump-allocated in the arm's region via
+ * `tk_str_concat_r` and dies at the arm's exit edge; the following churn recycles that memory. The
+ * printed value must be exact — proving the arm-scoped str was fully consumed before its region died.
+ *
+ * @param on  whether to enter the value-bearing arm
+ * @return    the churn hit count (a value used so the churn is not dead code)
+ */
+fn tag_in_arm(on: bool) -> i64 {
+    if on {
+        let tag = "arm-" ~ "value"
+        print(tag)
+        print("|")
+    }
+    churn(8)
+}
+
+/**
+ * run — enter the arm, emit its block-local tag, churn, then print a terminating token. The
+ * contiguous line is the deterministic witness: a corrupt arm-scoped str would break the `arm-value`
+ * token instead of merely leaking it.
+ *
+ * @return  the terminating token
+ */
+exp fn run() -> str {
+    _ = tag_in_arm(true)
+    "ok"
+}
