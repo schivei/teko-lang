@@ -3777,21 +3777,17 @@ fn gate_shard_base(od: str, stem: str) -> str {
     teko::str::concat(od, "/.", stem, "-shard/")
 }
 
-/**
- * TEST_JOBS_DEFAULT — how many SHARDS of the in-process suite run concurrently by default.
- *
- * Four, matching `REGR_JOBS_DEFAULT` and for the same reason: each shard is a whole test binary with
- * its own arena, so a job count tuned to core count trades the runner's memory for wall clock. A leg
- * that knows its machine raises it through `TEST_JOBS_ENV`.
- */
-const TEST_JOBS_DEFAULT: u64 = 4
-
-/** TEST_JOBS_ENV — the env key a run overrides `TEST_JOBS_DEFAULT` through (12-Factor: how parallel
-    the machine may be is the machine's business, not the source's). `1` restores a single process. */
+/** TEST_JOBS_ENV — the env key a run overrides the OS-granted default through (12-Factor: how parallel
+    the machine may be is the machine's business, not the source's), clamped to `[1, os_max()]`. `1`
+    restores a single process. */
 const TEST_JOBS_ENV: str = "TEKO_TEST_JOBS"
 
 /**
  * test_jobs — how many shards of the in-process suite this run may have in flight at once.
+ *
+ * DEFAULTS TO THE OS-GRANTED PROCESSOR COUNT and clamps an explicit `TEKO_TEST_JOBS` to `[1, os_max()]`
+ * (E1-C6): the machine's parallelism follows the hardware rather than a fixed `4`, and no override can
+ * ask for more shards than the OS is granting. `1` restores a single process.
  *
  * FORCED TO 1 UNDER COVERAGE, and that is not a limitation of the sharding — it is that the merge
  * would be a second mechanism. A sharded run dumps one `.tkcov` per shard and the floors need their
@@ -3801,7 +3797,7 @@ const TEST_JOBS_ENV: str = "TEKO_TEST_JOBS"
  * @return the effective shard count (>= 1)
  */
 fn test_jobs() -> u64 {
-    match teko::env::var(TEST_JOBS_ENV) { str as v => regr_jobs_of_default(v, TEST_JOBS_DEFAULT); error => TEST_JOBS_DEFAULT }
+    match teko::env::var(TEST_JOBS_ENV) { str as v => clamp_jobs(regr_jobs_of_default(v, os_max())); error => os_max() }
 }
 
 /**
