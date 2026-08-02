@@ -44,69 +44,77 @@ O `.text` nativo carrega EXATAMENTE três formas de relocation, todas em
 | `select_global_addr_x86` (`isel_x86_64.tks:1195-1198`) → `encode_lea_rip_x86` (`encode_x86_64.tks:1048-1053`) | `lea dst,[rip+disp32]` | `Pc32` | `R_X86_64_PC32` | OK **se** o alvo for DEFINIDO-local (rodata do módulo) |
 | `select_func_addr_x86` (`isel_x86_64.tks:1214-1217`) → `encode_lea_rip_x86` | `lea dst,[rip+disp32]` | `Pc32` | `R_X86_64_PC32` | **suspeito** p/ símbolo de FUNÇÃO externo (ver 1.3) |
 
-O `Abs64` (`R_X86_64_64`) existe SÓ para relocations rodata-internas (`rodata_relocs_x86`,
-`encode_x86_64.tks:2449-2454`; `elf_build_rodata_relas`, `objfile_elf.tks:544-553`) e está
-honest-stopped em todo compile real (`encode_module_x86:2499` recusa `m.globals.len > 0`; o
-doc-comment de `elf_build_rodata_relas` diz "Empty today ... never emitted in a real compile"). O
-`movabs r64,imm64` (`push_imm64_x86`, `encode_x86_64.tks:222-230`) carrega inteiros SEM relocation.
+O `Abs64` (`R_X86_64_64`) é a relocation rodata-interna (`rodata_relocs_x86`,
+`encode_x86_64.tks:2449-2454`; `elf_build_rodata_relas`, `objfile_elf.tks:544-553`). O doc-comment de
+`elf_build_rodata_relas`/`rodata_relocs_x86` afirma "Empty today ... never emitted in a real compile"
+— **essa afirmação está STALE e é o eixo do gap (a)** (ver 1.2). O `movabs r64,imm64`
+(`push_imm64_x86`, `encode_x86_64.tks:222-230`) carrega inteiros SEM relocation.
 
-### 1.2 As duas causas-raiz candidatas — e por que ambas apontam para RIP-relative-a-externo
+### 1.2 A causa-raiz — PROVADA estaticamente: rodata-Abs64 de `const []T` no `.rodata` read-only
 
-O `ld` recusa uma relocation sob PIE por UM de dois motivos, e a mensagem distingue-os:
+O doc-comment que diz "rodata-relocs empty today" está errado: `encode_rodata`
+(`encode_arm64.tks:2763-2778`) COLHE `rd.relocs[j]` de cada entrada rodata para `ModuleRodata.relocs`
+SEM honest-stop nenhum (linha 2776); daí fluem para `rodata_relocs_x86`→`Abs64`→`.rela.rodata`. E o
+PRODUTOR dessas relocs é o const module-level: `lower_const.tks` emite um `LDataReloc` por slot-de-
+ponteiro de todo `const` agregado/fat (`const_fat_member`, `:591`, `:600`; `:862`). Um `const []T`
+lowera para um slot fat `{ptr, len}` cujo `ptr` aponta para o leaf de bytes — e esse slot leva um
+`LDataReloc` → `R_X86_64_64`.
 
-- **(A) Relocation ABSOLUTA (`R_X86_64_64/32/32S`) numa secção alocável não-gravável.** Precisa de
-  fixup em load-time; sob PIE vira `DT_TEXTREL` (ou o `ld` recusa `R_X86_64_32` de todo). `-no-pie`
-  fixa porque o endereço de carga passa a ser fixo. **No corpus atual não há absoluta em `.text`**
-  (só as rodata-Abs64 honest-stopped), então (A) só arma se o self-host começou a EMITIR
-  rodata-relocs — o que o emit byte-idêntico permite verificar (crumb LA1).
-- **(B) `R_X86_64_PC32` contra símbolo que o `ld` não resolve estaticamente sob PIE.** Para um
-  símbolo de DADOS externo/preemptível, o `ld` erra `relocation R_X86_64_PC32 against undefined
-  symbol ... can not be used when making a PIE object; recompile with -fPIC`. `-no-pie` fixa porque o
-  símbolo passa a ter endereço fixo alcançável. Para um símbolo de FUNÇÃO, o `ld` moderno (binutils
-  ≥2.26) trata `R_X86_64_PC32` a função como `PLT32` e resolve — mas versões/caminhos há em que uma
-  função tomada por ENDEREÇO (não chamada) via `PC32` ainda cai no mesmo erro.
+**A prova de que isto é VIVO no self-host nativo** (não hipotético): o próprio backend define
+`const []byte`/`[]u32`/`[]u64` module-level que a compilação nativa DE CERTEZA alcança —
 
-**Correção de enquadramento honesta:** o enunciado nomeia "DT_TEXTREL", que é a assinatura de (A). A
-análise estática diz que (A) exige uma rodata-reloc que o honest-stop deveria barrar — logo há um de
-dois factos a MEDIR, e é barato: `readelf -r` + `readelf -d` do objeto que o self-host já emite. O
-crumb **LA1** faz esse dump e PINA qual causa arma. O desenho abaixo dá a correção law-first para
-CADA uma, para o implementador não esperar pela medição: a que a LA1 confirmar é a que se aplica; a
-outra fica como scaffolding documentado.
+| const | arquivo:linha | usado por |
+|---|---|---|
+| `ELF_MAGIC: []byte` | `src/backend/objfile_elf.tks:759` | o emissor ELF — o self-host chama-o para escrever o próprio `.o` |
+| `AR_GLOBAL_HEADER: []byte` | `src/backend/objfile_ar.tks:40` | o emissor de `.a` |
+| `SHA256_IV/K`, `SHA512_IV/K: []u32/[]u64` | `src/crypto/hash.tks:81,92,397,408` | hashing |
+| `GZIP_MAGIC: []byte` | `src/compress/gzip.tks:16` | compressão |
 
-### 1.3 A correção law-first — emitir PIE-compatível, NUNCA marcar o objeto non-PIE
+Cada um vira um slot fat com um ponteiro-reloc `R_X86_64_64` em `.rodata`. O `.rodata` é
+`SHF_ALLOC`-only (read-only). Sob o link PIE default (`build_cc_argv` sem `-no-pie`), uma reloc
+absoluta numa secção read-only precisa de fixup em load-time → o `ld` marca **`DT_TEXTREL`** (ou
+recusa) — exatamente a assinatura que o enunciado reporta, e exatamente o que `-no-pie` contorna (com
+endereço de carga fixo, a reloc absoluta resolve estaticamente). **Causa (a) = rodata-Abs64 de
+`const []T`.**
+
+### 1.3 A correção law-first — `.data.rel.ro` para rodata COM relocs, NUNCA marcar non-PIE
 
 O dono decretou o caminho nativo como o futuro toolchain-independente (Fase E, `own-backend-
 architecture.md`) e a segurança-norte (`docs/memory/teko-security-north.md`) valoriza ASLR. Marcar o
 objeto/binário non-PIE (passar `-no-pie` no `build_cc_argv`) **desliga ASLR de todo binário que o
-compilador produz** — uma regressão de segurança global para contornar um bug de emissão localizado.
-Além disso divergiria a linha de link entre a rota C (PIE) e a nativa (non-PIE), tornando o binário
-nativo estruturalmente diferente do C num eixo que não é código. **Rejeitado.** A resposta é emitir
-relocations que o PIE aceita — o que o backend já faz para calls (`PLT32`) e para rodata local
-(`PC32`), estendido ao sítio que falta.
+compilador produz** — regressão de segurança global para contornar um bug de emissão localizado, e
+divergiria a linha de link C-vs-nativa num eixo não-código. **Rejeitado.**
 
-**Correção para causa (B) — a recomendada pela análise estática:**
+**A resposta é o que o compilador C já faz** para um `static const` com inicializador-ponteiro: pô-lo
+em `.data.rel.ro` (`SHF_ALLOC|SHF_WRITE`), a secção que o linker mapeia read-only DEPOIS de aplicar as
+relocations (RELRO). Sob PIE o `ld` converte a `R_X86_64_64`-a-símbolo-local numa
+`R_X86_64_RELATIVE` (base-relativa, load-time) nessa secção e depois protege a página — PIE-safe, sem
+`DT_TEXTREL`. A rota C herda isto de graça do `cc`; a nativa tem de o replicar.
+
+**Sítios a editar (todos em `src/backend/objfile_elf.tks`, o writer ELF — FORA de `lower.tks`):**
+particionar a rodata em DUAS secções por presença-de-reloc — as entradas SEM reloc (leaves de bytes,
+string-literais) ficam em `.rodata` (`SHF_ALLOC`); as entradas COM ≥1 `LDataReloc` (os slots fat de
+`const []T`) vão para uma nova secção `.data.rel.ro` (`SHF_ALLOC|SHF_WRITE`). Concretamente:
+- `elf_section_names` (`:567-574`) ganha `.data.rel.ro` quando há rodata-relocs (hoje já condiciona
+  `.rela.rodata` a `has_rodata_relocs`);
+- a construção de section-headers emite o header `.data.rel.ro` com flags `SHF_ALLOC|SHF_WRITE` e a
+  `.rela.<nome>` correspondente aponta para ela (o `secidx` de `elf_resolve_rela`/`:524-528` passa a
+  ser o da nova secção para os alvos locais);
+- `rodata_relocs_x86`/`RelocSect` (`encode_x86_64.tks:2449-2454`) ganha o alvo-secção correto (hoje
+  `RelocSect::Rodata`) para as entradas movidas.
+
+Isto é maior que uma linha, mas é LOCALIZADO no writer ELF e espelha o comportamento canónico do
+toolchain C. É o mesmo problema que `encode_rodata`'s comentário de alinhamento-de-ponteiro
+(`encode_arm64.tks:2781-2786`) já reconhece existir (ponteiros em rodata) — só faltava a secção certa.
+
+**Correção secundária (defesa-em-profundidade) — o `func_addr` PC32:**
 `select_func_addr_x86` (`isel_x86_64.tks:1214-1217`) materializa o ENDEREÇO de uma função com
-`RelocKindX86::Pc32`. Trocar para `RelocKindX86::Plt32` — a MESMA escolha que `encode_call_x86` já
-faz para a chamada direta. Justificação psABI: `R_X86_64_PLT32` a um símbolo de função é a forma
-canónica PIE-safe de referenciar uma função por PC-relative; o `ld` resolve-a direto quando a função
-é local (sem stub PLT, endereço real) e via PLT quando é externa/preemptível — exatamente o
-comportamento que os CALLS já provam funcionar neste mesmo objeto. É uma mudança de UMA linha, no
-sítio que o enunciado nomeou. `select_global_addr_x86` (dados, `:1198`) fica em `Pc32`: rodata local
-é definida-no-módulo e `PC32` a ela é PIE-safe.
-
-**Correção para causa (A) — se a LA1 revelar uma rodata-Abs64 viva:**
-Uma relocation `R_X86_64_64` numa secção rodata read-only é o que gera `DT_TEXTREL` sob PIE. A forma
-PIE-correta de um ponteiro rodata→rodata (ou rodata→símbolo) é `R_X86_64_RELATIVE` (o loader soma a
-base) — mas o `.o` NÃO emite dynamic relocs; num `.o` a escolha é: (i) manter `R_X86_64_64` e deixar
-o `ld` convertê-la em `R_X86_64_RELATIVE` na secção `.data.rel.ro` (o `ld` re-secciona rodata com
-relocs para um segmento gravável-após-relro — PIE-safe, sem `DT_TEXTREL`), o que exige que a secção
-que HOSPEDA o ponteiro seja marcada `SHF_WRITE`-elegível (`.data.rel.ro`), NÃO `.rodata` pura; ou
-(ii) materializar o ponteiro em runtime (um `lea rip`/`Pc32` no `.text` de init) em vez de o gravar
-absoluto em rodata. Sítio a editar se (A) armar: `elf_build_rodata_relas`/`elf_section_names`
-(`objfile_elf.tks:544-553`, `:567-574`) para emitir os ponteiros-com-reloc numa secção
-`.data.rel.ro` em vez de `.rodata`. **Mas** o caminho honesto primeiro é confirmar que o honest-stop
-de `encode_module_x86:2499`/`rodata_relocs` está mesmo a segurar; se está, causa (A) não arma e (B)
-é a única — nesse caso esta sub-secção é scaffolding para o dia que rodata-relocs vivam.
+`RelocKindX86::Pc32`. Para uma função DEFINIDA-local (o caso do self-host, closures sobre as próprias
+fns) `PC32` é PIE-safe e resolve estaticamente — logo NÃO é a causa do `DT_TEXTREL` medido. Mas se
+alguma função tomada por endereço for externa/preemptível, `PC32` a ela erra sob PIE; a forma
+canónica é `RelocKindX86::Plt32` (o que `encode_call_x86:1095` já faz). Trocar é uma linha e alinha
+`func_addr` com `call`. **Aplicar como higiene** junto com a correção primária; a LA1 confirma se
+ARMA de facto (provavelmente não no corpus atual, mas fecha a classe).
 
 ### 1.4 A prova de que (a) não é dos CALLS nem da rodata-string comum
 
