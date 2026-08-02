@@ -68,14 +68,18 @@ eviccao e o proximo `push` vira um miss "other-ptr" → copy-grow. As razoes de 
 **2,19 M misses "other-ptr" + 415 K "cap-full"** — a esmagadora maioria copy-grow que abandona
 um buffer que, no caso do loop-uma-lista, ainda e o topo do bump.
 
-## O conserto (seguro por construcao)
+## A hipotese do conserto (grow-in-place seguro) — e por que a MEDICAO a rejeitou
 
-Uma prova de "topo do bump" INDEPENDENTE do cache, dentro de `tk_slice_push_r`, antes de
-alocar fresco: se `off(ptr) + round_up(len*esz, 16) == head->used` da regiao, entao o bloco de
-`ptr` termina exatamente no topo do bump — nada foi alocado depois dele — e ha capacidade no
-chunk para o `cap` dobrado. Nesse caso, **estende `head->used` no lugar** e escreve o elemento
-novo, sem copia e sem abandonar nada. `[0, len*esz)` nunca e tocado, logo qualquer alias vivo
-do buffer antigo sobrevive intacto (mesma seguranca do append in-place ja existente). Nao ha
-analise de escape: a prova e puramente aritmetica sobre o estado do chunk.
+A hipotese era uma prova de "topo do bump" INDEPENDENTE do cache, dentro de `tk_slice_push_r`,
+antes de alocar fresco: se `off(ptr) + round_up(len*esz, 16) == head->used` da regiao, entao o
+bloco de `ptr` termina exatamente no topo do bump — nada foi alocado depois — e da para
+**estender `head->used` no lugar**, sem copia e sem abandonar nada. `[0, len*esz)` nunca e
+tocado, logo qualquer alias vivo sobrevive (mesma seguranca do append in-place). Prova puramente
+aritmetica, sem analise de escape.
 
-O resultado medido (depois) esta em `arena-copy-grow-grow-in-place-resultado.md`.
+O conserto e SEGURO. Mas a medicao (pico RSS do self-build, rota C) mostrou que ele **REGRIDE**
+a memoria, nao reduz. O motivo esta em `arena-copy-grow-ja-e-reclamado-pelo-fo.md`: o copy-grow
+dominante NAO e um vazamento — `variant_siblings` e os outros ofensores lowerizam para
+`tk_slice_push_fo` (free-old provado por escape), que ja PARKEIA o buffer antigo na free-list.
+O grow-in-place COMPETE com esse mecanismo e o faz passar fome. O "reclaim ratio: 0,0%" e um
+ARTEFATO da metrica (ela nao contava o reuso da free-list), nao a ausencia de reclamacao.

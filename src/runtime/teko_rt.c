@@ -1420,13 +1420,21 @@ static void tk_obs_dump(void) {
     FILE *fp = fopen(tk_obs_path, "w");
     if (fp == NULL) fp = stderr;
     unsigned long long live = tk_obs_root_bytes + tk_obs_scoped_bytes;
-    unsigned long long reclaimed = tk_obs_drop_bytes + tk_obs_rewind_bytes;
+    // (reclaim ratio honesty) the free-list REUSE is genuine reclamation — a same-size allocation
+    // served from a parked block costs no new arena bytes — but the ratio historically counted only
+    // region drops + test-gate rewinds, so a corpus whose reclamation is almost entirely the
+    // escape-proven tk_slice_push_fo free-old parking read as "0.0% reclaimed" while the free-list
+    // was in fact recycling hundreds of MB (measured: disabling it via TEKO_FO_MAX=0 raises the
+    // self-build peak by ~0.6 GB). Counting reused bytes makes the headline number tell that truth.
+    unsigned long long reclaimed = tk_obs_drop_bytes + tk_obs_rewind_bytes + tk_free_reused_bytes;
     fprintf(fp, "=== ARENA LIFETIME MAP (TEKO_ARENA_OBS) ===\n");
     fprintf(fp, "root (process-lifetime, never freed): %10.1f MB\n", tk_obs_root_bytes / 1048576.0);
     fprintf(fp, "scoped (freed at region drop):        %10.1f MB\n", tk_obs_scoped_bytes / 1048576.0);
     fprintf(fp, "reclaimed by region drops:            %10.1f MB   (%llu of %llu regions dropped)\n",
             tk_obs_drop_bytes / 1048576.0, tk_obs_regions_dropped, tk_obs_regions_new);
     fprintf(fp, "reclaimed by test-gate rewinds:       %10.1f MB\n", tk_obs_rewind_bytes / 1048576.0);
+    fprintf(fp, "reclaimed by free-list reuse (fo):    %10.1f MB   (%llu takes)\n",
+            tk_free_reused_bytes / 1048576.0, tk_free_reused_count);
     fprintf(fp, "mem::free — parked now / reused:      %10.1f MB / %.1f MB (%llu reuses)\n",
             tk_free_parked_bytes / 1048576.0, tk_free_reused_bytes / 1048576.0, tk_free_reused_count);
     fprintf(fp, "reclaim ratio: %.1f%%  (reclaimed / allocated)\n\n",
