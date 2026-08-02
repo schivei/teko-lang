@@ -28,10 +28,12 @@ E o reticulado de residência confirma-o na letra (`spine.tks:88`):
 residência é DETERMINÍSTICA e MÍNIMA — UMA regra estrutural + UMA anotação (correção do dono,
 2026-08-02):
 
-> **Toda variável morre no fim do seu escopo `{}`.** Para cruzar escopos: DESCENDO (para um
-> callee/cadeia inferior) o caller REPASSA por argumento — nenhuma anotação; SUBINDO (`return`)
-> MOVE-se para a arena do caller — nenhuma anotação. Para escapar de TODO escopo há exatamente duas
-> origens: `#singleton` (declarado) OU ser cross-thread por natureza (`chan`/`wait_group`).
+> **Toda variável morre no fim do seu escopo LÉXICO.** "Escopo" aqui são os CINCO: bloco nu `{}`,
+> corpo de `loop` (por iteração), braço de `if`/`else`, braço de `when`/match, corpo de `fn` (§4) —
+> tratados idênticos. Para cruzar escopos: DESCENDO (para um callee/cadeia inferior) o caller REPASSA
+> por argumento — nenhuma anotação; SUBINDO (`return`) MOVE-se para a arena do caller — nenhuma
+> anotação. Para escapar de TODO escopo há exatamente duas origens: `#singleton` (declarado) OU ser
+> cross-thread por natureza (`chan`/`wait_group`).
 
 Reticulado interno que realiza a regra (granularidade da análise; o utilizador só vê "morre no
 escopo | move no return | root"):
@@ -249,7 +251,27 @@ Cada motor lowera o mesmo plano à sua maneira. É o padrão já usado por `bind
 
 ---
 
-## 4. P1 — o escopo `{}`: o seletor de N NÍVEIS
+## 4. P1 — o escopo léxico: o seletor de N NÍVEIS
+
+**"Escopo `{}`" é TODO escopo léxico, não o bloco nu** (correção do dono, 2026-08-02): *"quando disse
+bloco {} não me referi apenas a bloco nu, mas também a loop, if, when, fn."* A regra "toda variável
+morre no fim do seu escopo" aplica-se UNIFORMEMENTE aos CINCO tipos:
+
+| escopo léxico | região hoje (rota C) | larga em |
+|---|---|---|
+| bloco nu `{ }` | `_tkbr` (`codegen.tks:8178-8187`) | aresta de saída do bloco |
+| corpo de `loop` | `_tkbr` por iteração (`codegen.tks:8799-8803`) | **aresta de saída de CADA iteração** (`:8810`, *"drop the loop body's region"*) |
+| braço de `if`/`else` | `_tkbr` value-arm (`codegen.tks:5440-5462`) | aresta de saída do braço |
+| braço de `when`/match | `_tkbr` value-arm (mesma via `emit_branch_value`) | aresta de saída do braço |
+| corpo de `fn` | `_tkfr` frame (`codegen.tks:9658-9662`) | aresta de retorno |
+
+**Confirmação da generalização (não são casos à parte):** os cinco já usam o MESMO mecanismo —
+`tk_region_new(<corrente>)` na entrada, `tk_region_drop` na aresta de saída, com defers-antes-do-drop.
+O `ResidencePlan` associa cada binding ao seu escopo-dono QUALQUER que seja o tipo (o índice do
+escopo, não o seu sabor sintático); o lowering trata os cinco idênticos. O loop NÃO é exceção — a
+sua "aresta de saída" é per-iteração, então a disciplina região-por-iteração (`emit_loop_while`) É a
+regra geral de morte-no-escopo aplicada a um escopo cuja saída ocorre a cada volta. Onde o texto
+abaixo diz "bloco", leia "escopo léxico" (os cinco).
 
 **O estado:** o roteamento tem hoje DOIS níveis (`onde-a-limpeza…:49`): moldura da função OU raiz. O
 seletor `frame` (`codegen.tks:3726-3733`) escolhe `tk_slice_push` (root) / `tk_slice_push_r(…,frame)`
@@ -356,35 +378,62 @@ Nenhum caso precisa da task-root. O cross-thread vai para programa por design; o
 
 ---
 
-## 7. #arena_depth (P4) — o tecto de achatamento NOMEADO
+## 7. #arena_depth (P4) — DEFAULT = 1 (a granularidade fina), NÃO o tecto-64
 
-**O estado:** o achatamento existe como constante mágica 64 em DOIS sítios com o mesmo valor e sem
-nome (`onde-a-limpeza…:162-171`): `codegen.tks:5412,7432,8178,8799` (`regions.len < 64`, a partir de
-64 níveis a região NÃO abre — *"a safe leak"*) e `teko_rt.c:1184` (`TK_ARENA_MARK_MAX 64`). O custo
-que ele controla é medido: abrir uma região puxa um chunk de 64 KiB
-(`TK_REGION_DEFAULT_CHUNK`, `teko_rt.h:140`), ~5,3 KB de cauda desperdiçada por região; **500k
-regiões (uma por escopo num compilador com laços aninhados) dariam ~2,6 GB só de cauda**
-(`onde-a-limpeza…:144-159`). Sub-regiões por omissão SEM tecto trocam o leak-root por um bloat de
-cauda maior.
+**Correção do dono (2026-08-02): `#arena_depth`, por padrão, deve ser 1.** Isto corrige a
+recomendação anterior de igualá-lo ao 64. **São DOIS conceitos separados, e o design não os
+equipara:**
 
-**O design:** `#arena_depth` NÃO introduz conceito novo — dá NOME e controlo-por-declaração ao tecto
-que já existe fixado a 64. Recomendação de sequência (resolve a pergunta em aberto do dono sem
-HALT):
+- **tecto-de-segurança-da-pilha (constante à parte, hoje 64):** `codegen.tks:5412,7432,8178,8799`
+  (`regions.len < 64`) + `teko_rt.c:1184` (`TK_ARENA_MARK_MAX 64`). É um LIMITE DE SEGURANÇA da pilha
+  de regiões ativas (espelha a pilha fixa de marcas do gémeo C) — para de abrir regiões novas além de
+  64 níveis de aninhamento simultâneo, um guarda anti-estouro. Recomendo NOMEÁ-LO
+  `TK_REGION_STACK_CAP` (uma fonte), mas ele **não tem nada a ver com `#arena_depth`**.
+- **`#arena_depth` (default = 1):** o NÍVEL DE ACHATAMENTO de sub-arenas, na definição do dono
+  (`onde-a-limpeza…:112-117`): *"cada escopo ou chamada de função abre uma arena, o depth seria o
+  nível de achatamento que ela comportaria … as sub-regiões, arenas dentro de arenas, que popam em
+  LIFO, como o defer faz."*
 
-1. **NOMEAR a constante AGORA, dentro deste modelo** — uma única fonte,
-   `TK_REGION_FLATTEN_DEFAULT = 64`, substituindo os quatro `< 64` do `codegen.tks` e alinhando o
-   `TK_ARENA_MARK_MAX`. Custo zero de comportamento (mesmo valor), remove a magia, dá o gancho.
-2. **Sub-regiões por omissão (§8) respeitam o default-depth 64** — o tecto JÁ opera; o modelo entra
-   com ele. Não troca um problema de memória por outro porque o tecto já limita a 64 níveis.
-3. **`#arena_depth(N)` como OVERRIDE declarável é o #476 — um follow-on, NÃO um bloqueador.** O
-   modelo NÃO depende de #476 porque 64 já é o tecto operante; #476 só deixa uma declaração AFINAR.
+**A semântica de depth=1 (a leitura que bate com a Correção 1):** depth=1 = "cada escopo abre a SUA
+própria arena e NÃO achata filhos" = **granularidade MÁXIMA**. Cada um dos cinco escopos léxicos (§4)
+materializa a sua sub-arena e morre na sua aresta de saída — exatamente a regra "toda variável morre
+no fim do seu escopo". depth=1 É o default fino que a Correção 1 exige. `#arena_depth(N>1)` é o
+OVERRIDE que ACHATA N níveis de escopos aninhados numa ÚNICA arena (os N-1 escopos interiores deixam
+de materializar arena própria; bumpeiam na do ancestral e morrem todos juntos quando ela popa, LIFO)
+— uma otimização opt-in para cortar overhead onde o perfil mostra muitas sub-arenas minúsculas e
+curtas.
 
-**Recomendação vs a pergunta do plano ("#476 agora ou honest-stop"):** o argumento do plano
-(`wave-0.3.1-plan.md`, *"the profiler is incoherent suggesting a directive that does not exist"*) é
-mais fraco que este: nomear a constante DESCOLA o modelo de #476. Entregar o modelo com
-default-depth=64 nomeado; puxar a DIRETIVA `#arena_depth` como fast-follow, mas não bloquear. É a
-pergunta binária que reencaminho ao dono (§13) — mas a recomendação técnica torna-a não-bloqueante
-em qualquer resposta.
+**Prova de que depth=1 preserva a disciplina região-por-iteração do `emit_loop_while` (pedido do
+dono):** sob depth=1, o corpo do loop é um escopo que abre a sua arena e a larga na sua aresta de
+saída — que para um loop é a saída de CADA iteração (`codegen.tks:8810`, *"THEN drop the loop body's
+region"*). Logo a arena da iteração N é largada antes de a da iteração N+1 abrir: recuperação por
+iteração, sem acumular. depth=1 NÃO achata o loop para o fim da função — o achatamento só existe com
+N>1. **Carve-out obrigatório:** `#arena_depth(N>1)` NUNCA achata através de uma aresta de retrocesso
+de loop — um corpo de loop é SEMPRE uma fronteira de materialização, senão a alocação por iteração
+acumularia até ao fim do escopo achatado (o pico que o dono teme). O achatamento coalesce apenas
+escopos em linha reta (blocos/if/when aninhados sem back-edge).
+
+**O custo sob depth=1 — barato E fino (o número corrigido):** o que importa para a cauda é o número de
+arenas VIVAS SIMULTANEAMENTE, não o total de escopos EXECUTADOS. Sob depth=1 com drop-por-escopo
+(Correção 1), as arenas vivas num instante = a profundidade de aninhamento léxico ATIVA nesse ponto
+(um punhado, ≤ `TK_REGION_STACK_CAP`), porque cada escopo larga a sua arena na saída ANTES de o
+seguinte abrir. **Um loop de 1M iterações tem UMA arena de iteração viva a cada instante, não 1M.**
+O número de 2,6 GB de cauda (`onde-a-limpeza…:144-159`) assumia 500k regiões vivas ao mesmo tempo —
+o que só acontece se elas NÃO forem largadas (o bug de acumulação atual). Com drop-por-escopo a
+cauda cai para `profundidade_de_aninhamento × 5,3 KB` ≈ centenas de KB, não GB. **Portanto depth=1 é
+simultaneamente a granularidade fina (Correção 1) E barato** — o custo escala com o aninhamento, não
+com a contagem de execuções. `#arena_depth(N>1)` existe para o caso oposto: quando o overhead de
+abrir/largar uma arena por escopo (cada primeira alocação puxa um chunk de 64 KiB,
+`TK_REGION_DEFAULT_CHUNK`, `teko_rt.h:140`) supera o ganho — aí achatar N níveis reduz mallocs de
+chunk, ao custo de adiar a morte dos interiores. `#arena_size(N)` continua a ser o chão-inicial
+(realloc), ortogonal ao depth.
+
+**Recomendação de sequência:** default-depth=1 entra COM o modelo (é a granularidade que §4/§8
+exigem — não é opcional nem #476). `TK_REGION_STACK_CAP` (o 64) nomeado à parte, sem semântica de
+depth. A DIRETIVA declarável `#arena_depth(N>1)` (o achatamento opt-in, #476) é um follow-on de
+otimização — NÃO bloqueia o modelo, porque o default 1 já é o comportamento correto e fino. A
+pergunta ao dono (§13) deixa de ser "que default" (é 1) e passa a ser só "puxar a diretiva de
+override #476 agora ou como fast-follow".
 
 ---
 
@@ -392,12 +441,13 @@ em qualquer resposta.
 
 **O estado:** hoje uma região só abre se o predicado dispara (`fn_body_has_frame_local` /
 `cg_block_has_block_local`) OU se há `#arena_size` (`codegen.tks:9656`). Opt-in duplo
-(`onde-a-limpeza…:107`). Com root-como-refúgio banido, o default INVERTE: **todo escopo `{}` com pelo
-menos um local não-escapante abre a sua região** (respeitando o tecto-depth do §7). O predicado
-`binding_is_block_local` deixa de ser um opt-in e passa a ser a norma; o que NÃO abre região é só o
-escopo sem local nenhum (byte-idêntico, zero custo) ou acima do tecto-depth (o achatamento, agora
-nomeado). O `#arena_size`/`#arena_depth` deixam de FORÇAR a abertura e passam a AFINAR
-(tamanho-de-chão / profundidade) uma abertura que já é por omissão.
+(`onde-a-limpeza…:107`). Com root-como-refúgio banido e default-depth=1 (§7), o default INVERTE:
+**cada um dos cinco escopos léxicos (§4) com pelo menos um local não-escapante abre a sua região**
+(depth=1 = cada escopo a sua sub-arena, sem achatar). O predicado `binding_is_block_local` deixa de
+ser um opt-in e passa a ser a norma; o que NÃO abre região é só o escopo sem local nenhum
+(byte-idêntico, zero custo) ou além do `TK_REGION_STACK_CAP` (o guarda de segurança da pilha, NÃO o
+depth). O `#arena_size(N)` passa a AFINAR só o chão-inicial; o `#arena_depth(N>1)` a ACHATAR
+sub-arenas — ambos deixam de FORÇAR a abertura (que já é por omissão a depth=1).
 
 ---
 
@@ -442,11 +492,13 @@ Builtins Teko em `scope.tks` (espelhar `:740-742`) + mapeamento em `lower.tks` (
 
 **C2 — Checker: o oráculo de residência `ResidencePlan`.** Novo `src/checker/residence.tks` (ou
 extensão de `spine.tks`): `pub fn residence_plan(f: TFunction) -> ResidencePlan` que, por binding,
-devolve o tier (escopo `{}` / frame / caller / root) usando `pt_join` (`spine.tks:495`) como oráculo
-transitivo e `escape.tks` como fast-path; por `return`, se é move. Nomear
-`TK_REGION_FLATTEN_DEFAULT` (§7). **Colisão:** `spine.tks` (agentes de spine) — preferir ficheiro
-NOVO `residence.tks` que IMPORTA `spine`, minimizando a colisão. **Gate:** ninguém consome o plano
-ainda ⇒ FIXPOINT trivial. Ritual: NÃO.
+devolve o tier (escopo léxico / frame / caller / root) associando cada binding ao seu escopo-dono
+qualquer que seja o sabor (bloco/loop/if/when/fn, §4), usando `pt_join` (`spine.tks:495`) como oráculo
+transitivo e `escape.tks` como fast-path; por `return`, se é move. Fixar o default de materialização
+`arena_depth = 1` (cada escopo a sua sub-arena; §7) e nomear à parte o guarda de pilha
+`TK_REGION_STACK_CAP = 64` (NÃO é depth). **Colisão:** `spine.tks` (agentes de spine) — preferir
+ficheiro NOVO `residence.tks` que IMPORTA `spine`, minimizando a colisão. **Gate:** ninguém consome o
+plano ainda ⇒ FIXPOINT trivial. Ritual: NÃO.
 
 **C2b — `#singleton` para bindings (abrir o atributo, §2a).** Relaxar a rejeição
 lifetime-antes-de-fn/binding: `parse_decl.tks:1263`, threading `di_kind` para o `TBinding` (`ast.tks`),
@@ -455,10 +507,12 @@ tk_region_root()`, `codegen.tks:9564`). `#scoped`/`#transient` num binding conti
 de classes NÃO muda. **Colisão:** `parse_decl.tks`, `ast.tks` (aditivos). **Gate:** um `#singleton`
 binding aloca em root (fixture `mem_singleton_root`). Ritual: NÃO (atrás de anotação opt-in).
 
-**C3 — Rota C: seletor N-níveis + move-on-return + sub-região por omissão.** `codegen.tks` passa a
-ler o `ResidencePlan`: o `frame` de crescimento de slice/str usa a região do bloco dono (não a
+**C3 — Rota C: seletor N-níveis + move-on-return + sub-região por omissão (os 5 escopos).** `codegen.tks`
+passa a ler o `ResidencePlan` uniformemente para os cinco escopos léxicos (§4 — bloco/loop/if/when/fn,
+já com `_tkbr`/`_tkfr`): o `frame` de crescimento de slice/str usa a região do escopo dono (não a
 moldura); `return` de um valor `PtFrame` aloca na região-corrente (caller); `str` concat/interp rota
-por `tk_str_concat_r`; sub-região abre por omissão respeitando o depth. **Colisão:** `codegen.tks`
+por `tk_str_concat_r`; sub-região abre por omissão (depth=1) respeitando o `TK_REGION_STACK_CAP`.
+**Colisão:** `codegen.tks`
 (quente — coordenar com `arena-escopo-local`, que já mexe em `emit_struct_init_framed`/`emit_as_r_in`,
 diff em `origin/cargo/0.3.1.0-arena-escopo-local`). **Gate — RITUAL COMPLETO:** gen2 native? NÃO — a
 rota C valida-se por `teko test .` verde + FIXPOINT gen2==gen3 (a rota C não altera um byte para os
@@ -466,12 +520,14 @@ casos já cobertos; os novos casos têm fixtures novas). Ritual: SIM.
 
 **C4 — Rota NATIVA: herdar o ciclo de vida via `lower.tks`.** `lower.tks` ganha o lowering ausente:
 lê o MESMO `ResidencePlan`; na entrada de escopo `{}` com locais emite
-`region_enter(tk_region_new(<corrente>))`, na saída `region_leave` + `tk_region_drop`; `buf_ptr` e o
-`tk_alloc` default passam a mirar a região-corrente em vez de `tk_region_root()` fixo
+`region_enter(tk_region_new(<corrente>))`, na saída `region_leave` + `tk_region_drop`; para o loop, o
+enter/leave por iteração (a arena da iteração larga na saída de cada volta, §4/§7 — nunca achatada);
+`buf_ptr` e o `tk_alloc` default passam a mirar a região-corrente em vez de `tk_region_root()` fixo
 (`lower.tks:3390-3437`); `return` move para a corrente-do-caller. **Colisão:** `lower.tks` (muito
 quente — coordenar com `backend-memoria`, `theory/all-legs-native-map`). **Gate — RITUAL COMPLETO:**
 buildar gen2 `TEKO_BACKEND=native`; `teko test .` verde; **FIXPOINT gen2==gen3 byte-idêntico**;
-`TEKO_ARENA_OBS`: "scoped > 0", regiões largadas ≈ nº de escopos. Ritual: SIM.
+`TEKO_ARENA_OBS`: "scoped > 0", regiões largadas ≈ nº de escopos executados, arenas VIVAS ≈
+profundidade de aninhamento (não o total executado, §7). Ritual: SIM.
 
 **C5 — Cross-thread → programa (quando `chan`/`wait_group` chegarem).** Rotear o payload de
 `chan.send`/`wait_group` para `tk_region_program()`; ligar o gate `is_unique_at` (`spine.tks:1562`)
@@ -479,8 +535,10 @@ ao sítio de consumo (contrato L2c, `spine.tks:1553`). Hoje SEM superfície ⇒ 
 scaffolding/honest-stop até a feature existir. **Gate:** o gate de uniqueness rejeita send de
 `UsShared`. Ritual: SIM quando a superfície existir.
 
-**C6 — [follow-on] `#arena_depth` (#476) como override.** A diretiva declarável que afina o
-`TK_REGION_FLATTEN_DEFAULT`. Não bloqueia C1–C4. Ritual: SIM.
+**C6 — [follow-on] `#arena_depth(N>1)` (#476) como override de ACHATAMENTO.** A diretiva declarável
+que ACHATA N níveis de escopos em linha reta numa arena (o default É 1 — cada escopo a sua sub-arena,
+entra em C2/C3, NÃO aqui). Carve-out: nunca achata através de back-edge de loop (§7). Não bloqueia
+C1–C4. Ritual: SIM.
 
 ---
 
@@ -503,6 +561,8 @@ o critério do §1: **contagem de `residence = unresolved` (fallback-programa) t
 | fixture | o que prova | stdout |
 |---|---|---|
 | `mem_block_dies` | um local só usado dentro de um `{}` reside na região do bloco e morre na saída (churn N ciclos que nete a zero; corrupção = valor errado, não só leak) | valor conhecido |
+| `mem_scope_kinds` | os CINCO escopos (bloco/loop/if/when/fn) tratados idênticos — um local em cada tipo morre na sua aresta de saída (Correção 1) | valor conhecido |
+| `mem_loop_per_iter` | loop que aloca por iteração sob depth=1: as arenas VIVAS mantêm-se ≈ 1 (não N); `TEKO_ARENA_OBS` mostra pico plano ao longo de 1M iterações (prova a recuperação por iteração, não achatada) | linha de pico |
 | `mem_move_return` | um valor construído no callee e retornado é MOVIDO para o caller (usado após a chamada; se ficasse na região do callee seria UAF/valor-corrompido) | valor conhecido |
 | `mem_move_transitive` | valor retornado por N frames aninhados (move N vezes; o join é o frame de topo) | valor conhecido |
 | `mem_str_scope` | um `str` concatenado num `{}` rota por `tk_str_concat_r` e morre com o escopo | string conhecida |
@@ -558,6 +618,8 @@ O fix pontual (`docs/design/backend-memoria-por-funcao-0.3.1.md`, ramo
 | **R6 — cross-thread ainda não tem superfície** | `chan`/`wait_group` não existem hoje (`spine.tks:1555`). Oportunidade: o modelo entra ANTES, então nascem com residência-programa correta. C5 é scaffolding até lá. |
 | **R7 — FIXPOINT quebra (bytes mudam)** | Impossível por estrutura se os casos existentes mantêm residência; os novos trazem fixtures. O FIXPOINT byte-idêntico é o detector. Se quebrar, algo mudou de residência indevidamente — parar e reexaminar. |
 | **R8 — `#singleton` para binding refatora o DI de classes** | NÃO: extensão ADITIVA e cirúrgica — só a superfície `#singleton` ganha o alvo binding, reusando `DiKind::Singleton` + `di_scope_expr:9564`. O DI de classes (`di.tks`) fica intocado; `#scoped`/`#transient` de binding rejeitados. Sem tensão. |
+| **R9 — depth=1 abre nova tensão?** | NÃO. depth=1 = granularidade máxima = a regra "morre no escopo" (Correção 1) — são a MESMA coisa, não competem. O único risco seria custo (muitas arenas), refutado em §7: as arenas VIVAS = profundidade de aninhamento (pequena), não o total executado; o loop recupera por iteração. A ÚNICA subtileza a implementar corretamente é o carve-out do achatamento N>1 nunca cruzar back-edge de loop — se violado, um loop achatado acumula (o pico do dono). Fixture `mem_loop_per_iter` é o detector. |
+| **R10 — confundir `#arena_depth` com o tecto-64** | O erro que a Correção 2 apanhou: são conceitos separados. `TK_REGION_STACK_CAP` (64) = guarda de segurança da pilha de regiões; `#arena_depth` (default 1) = nível de achatamento de sub-arenas. Nomeados à parte no design; nunca a mesma constante. |
 
 **Tensão de lei residual: NENHUMA que force HALT.** Tudo resolve via Constituição/Leis (R11 arenas
 lexicais; M.1 nunca-UAF preservado; exceção de runtime C mantida; Teko-only; issue-100%). O modelo é
@@ -565,11 +627,12 @@ implementável ADIANTANDO tudo o que não depende de `chan`/`wait_group` (que n�
 residência-escopo e o move-on-return fecham as perguntas 1, 2 e 3 do dono sem a superfície
 cross-thread.
 
-**A ÚNICA pergunta ao dono (não-bloqueante — a recomendação torna-a assim em qualquer resposta):**
-`#arena_depth` (#476) — entra AGORA como diretiva declarável, ou honest-stop até #476 aterrar? A
-recomendação técnica (§7) descola o modelo de #476 nomeando `TK_REGION_FLATTEN_DEFAULT = 64` já: o
-modelo entrega-se com o tecto operante, e #476 vira um follow-on de AFINAÇÃO, não um pré-requisito.
-Confirmar a preferência do dono sobre pull-#476-agora vs follow-on.
+**A ÚNICA pergunta ao dono (não-bloqueante).** O default está resolvido pela Correção 2:
+`#arena_depth = 1` entra COM o modelo (é a granularidade fina que §4/§8 exigem — não é opcional). A
+pergunta que resta é só de âmbito da DIRETIVA de OVERRIDE `#arena_depth(N>1)` (o achatamento opt-in,
+#476): entra AGORA ou como fast-follow de otimização? O modelo NÃO depende dela (o default 1 já é o
+comportamento correto). Recomendação: fast-follow — a otimização de achatamento só se justifica
+depois de o perfil mostrar overhead de sub-arenas, e o carve-out de loop (§7) tem de vir com ela.
 
 ---
 
