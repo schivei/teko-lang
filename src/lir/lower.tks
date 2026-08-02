@@ -1070,6 +1070,16 @@ pub type LowerCtx = struct {
      * see `lower_binding`.
      */
     addr_taken: []str
+    /**
+     * runtime_twins — the bare names of every function this program declares under `RUNTIME_NS`
+     * (`src/runtime/teko_rt.tks`'s `teko::runtime` twins, present only when that file is part of the
+     * compiled corpus — the compiler's OWN build), threaded read-only exactly like `ref_fns`. The
+     * Degrau-0 reroute (`runtime_twin_symbol`/`str_eq_symbol`) consults it so a PURE-BYTE bare
+     * builtin (`ends_with`/`contains`/`str ==`) resolves to the Teko twin's body INSTEAD of the C
+     * `tk_*` symbol when the twin is present, retiring that `tk_*` from the native link; an EMPTY
+     * set (a standalone program with no `teko_rt.tks`) keeps the C symbol so the program still links.
+     */
+    runtime_twins: []str
 }
 
 /** Lowered — the result of lowering an expression: the updated context + the VReg the
@@ -1105,6 +1115,7 @@ fn ctx_with(ctx: LowerCtx, func: LFunc, block_id: u32, env: LEnv) -> LowerCtx {
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken
+        runtime_twins = ctx.runtime_twins
     }
 }
 
@@ -1126,6 +1137,7 @@ fn ctx_with_rodata(ctx: LowerCtx, rodata: []LRodata) -> LowerCtx {
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken
+        runtime_twins = ctx.runtime_twins
     }
 }
 
@@ -1147,6 +1159,7 @@ fn ctx_with_lifted(ctx: LowerCtx, lifted: []LFunc) -> LowerCtx {
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken
+        runtime_twins = ctx.runtime_twins
     }
 }
 
@@ -1168,6 +1181,7 @@ fn ctx_with_defers(ctx: LowerCtx, defers: []checker::TDeferStmt) -> LowerCtx {
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken
+        runtime_twins = ctx.runtime_twins
     }
 }
 
@@ -1189,6 +1203,7 @@ fn ctx_with_loops(ctx: LowerCtx, loop_targets: []LoopTargets) -> LowerCtx {
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken
+        runtime_twins = ctx.runtime_twins
     }
 }
 
@@ -1889,14 +1904,16 @@ fn is_char_type(t: checker::Type) -> bool {
 
 /**
  * lower_str_compare — `a == b` / `a != b` over two `str` operands, lowered to the runtime's own
- * `tk_str_eq`. A string is TWO words, so it has no single `PrimKind` and no single machine
- * comparison: `lower_compare`'s ICmp chain would have compared the POINTERS, answering "equal" only
- * for two operands that are literally the same buffer.
+ * string-equality entry (`str_eq_symbol`). A string is TWO words, so it has no single `PrimKind` and
+ * no single machine comparison: `lower_compare`'s ICmp chain would have compared the POINTERS,
+ * answering "equal" only for two operands that are literally the same buffer.
  *
  * The call passes the ABI-FLATTENED pair of each side — `(a.ptr, a.len, b.ptr, b.len)` — which is
  * exactly how a `tk_str` travels by value in the C ABI this backend's calls already follow (the same
- * flattening `bind_fat_param` performs on the callee side). The runtime is not being EXTENDED: this
- * is the existing `tk_str_eq` entry, called by symbol like `tk_slice_push` and `tk_alloc` are.
+ * flattening `bind_fat_param` performs on the callee side). The symbol is `str_eq_symbol`'s choice:
+ * the Degrau-0 Teko twin (`teko::runtime::str_eq`) when the program carries `teko_rt.tks`, else the C
+ * `tk_str_eq` — the SAME flattened four-word ABI serves both, since a Teko `fn str_eq(a: str, b: str)`
+ * binds its two `str` params from the identical `(ptr, len)` register pairs this call site emits.
  *
  * The result is normalized through a compare against zero rather than used raw: a C `bool` return
  * only defines its low byte, and `!=` is then the SAME instruction with the opposite predicate.
@@ -1918,7 +1935,7 @@ fn lower_str_compare(ctx: LowerCtx, e: checker::TExpr, cmp: checker::TCompare) -
     let b = match lower_fat_expr(a.ctx, cmp.rest[0].operand) { LoweredFat as x => x; error as err => return err }
     let args = fat_eq_call_args(a, b)
     let called = ctx_alloc(b.ctx)
-    let with_call = ctx_append(called.ctx, call_inst(called.vreg, "tk_str_eq", args, false, e.line, e.col))
+    let with_call = ctx_append(called.ctx, call_inst(called.vreg, str_eq_symbol(ctx.runtime_twins), args, false, e.line, e.col))
     let clean = runtime_eq_narrow(Lowered { ctx = with_call; vreg = called.vreg }, e.line, e.col)
     let zero = ctx_alloc(clean.ctx)
     let with_zero = ctx_append(zero.ctx, const_int_inst(zero.vreg, 0, e.line, e.col))
@@ -2498,7 +2515,7 @@ fn lower_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | 
     if c.call_ns.len == 0 && is_f64_bitcast_call(c.callee) { return lower_f64_bitcast_call(ctx, c) }
     if c.call_ns.len == 0 && is_float_parse_call(c.callee) { return lower_float_parse_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_buf_ptr_call(c.callee) { return lower_buf_ptr_call(ctx, e, c) }
-    let sym = match call_symbol(c, ctx.externs, ctx.flat_symbols) { str as s => s; error as err => return err }
+    let sym = match call_symbol(c, ctx.externs, ctx.flat_symbols, ctx.runtime_twins) { str as s => s; error as err => return err }
     if is_str_arg_builtin(sym) { return lower_str_arg_call(ctx, e, sym, c) }
     let lo = match lower_call_args(ctx, c) { LoweredArgs as x => x; error as err => return err }
     let called = match lower_call_symbol(lo.ctx, e, sym, lo.vregs) { Lowered as x => x; error as err => return err }
@@ -4271,6 +4288,96 @@ fn builtin_env_symbol(last: str) -> str | null {
 }
 
 /**
+ * RUNTIME_NS — the namespace `src/runtime/teko_rt.tks` declares its runtime under (`teko::runtime`).
+ * The Degrau-0 reroute spells its target with `mangle_fn_symbol(RUNTIME_NS, name)` — byte-identical
+ * to how each twin's OWN definition is emitted (`lower_function`'s `mangle_fn_symbol(f.namespace,
+ * …)`), so the rerouted call and the emitted body name the same symbol.
+ */
+const RUNTIME_NS: str = "teko::runtime"
+
+/**
+ * collect_runtime_twins — the bare names of every function this program declares under `RUNTIME_NS`
+ * (`src/runtime/teko_rt.tks`'s `teko::runtime` twins). Present ONLY when that file is part of the
+ * compiled corpus — the compiler's OWN build carries it; a STANDALONE program does not, yielding an
+ * empty set. Built ONCE before any function lowers and threaded read-only exactly like
+ * `collect_ref_fns`, so the Degrau-0 reroute can ask "is this twin's body in the program?" without
+ * re-scanning per call site. Keyed on the exact namespace so a same-named function elsewhere
+ * (`teko::encoding::json::str_eq`) never masquerades as the runtime twin.
+ *
+ * @param prog  the whole typed program
+ * @return      one bare name per `teko::runtime` function declared in the program
+ */
+fn collect_runtime_twins(prog: checker::TProgram) -> []str {
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            checker::TFunction as f => if f.namespace == RUNTIME_NS { out = teko::list::push(out, f.name) }
+            _ => { }
+        }
+        i++
+    }
+    out
+}
+
+/**
+ * has_runtime_twin — is `name` one of the `teko::runtime` twin bare names `collect_runtime_twins`
+ * found in this program? The membership test the Degrau-0 reroute gates on: true only when the
+ * Teko body is actually present to link against.
+ *
+ * @param twins  the program's `teko::runtime` twin names (`collect_runtime_twins`)
+ * @param name   the twin's bare name to look for
+ * @return       whether `name` is declared under `RUNTIME_NS` in this program
+ */
+fn has_runtime_twin(twins: []str, name: str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= twins.len { break }
+        if twins[i] == name { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * runtime_twin_symbol — the Degrau-0 reroute of a PURE-BYTE bare builtin. When the program carries
+ * the Teko twin (`has_runtime_twin`), a `str` predicate builtin resolves to the mangled
+ * `teko::runtime::<twin>` symbol so the native call lands in `src/runtime/teko_rt.tks`'s OWN body
+ * (a byte-reading `bool` loop that allocates NOTHING) instead of the C `tk_str_*` runtime — retiring
+ * that `tk_*` symbol from the native link. Only the twins that touch NO arena are here: `ends_with`/
+ * `contains` read bytes and return `bool`. The ALLOCATING family (`concat`/`u64_to_str`/`fmt_*`,
+ * whose twins bottom out in `teko::list::push` → the arena) stays on `tk_*` until the arena model
+ * lands (Degrau 1, blocked). `null` when `last` is no rerouteable pure-byte builtin, OR when its
+ * twin is absent (a standalone program with no `teko_rt.tks`), leaving `native_builtin_symbol`'s C
+ * resolution in place so the program still links against `teko_rt.c` unchanged.
+ *
+ * @param last   the call path's LAST segment (the bare builtin name)
+ * @param twins  the program's `teko::runtime` twin names (`collect_runtime_twins`)
+ * @return       the mangled Teko twin symbol, or `null` to keep the C `tk_*` resolution
+ */
+fn runtime_twin_symbol(last: str, twins: []str) -> str | null {
+    if last == "ends_with" && has_runtime_twin(twins, "str_ends_with") { return mangle_fn_symbol(RUNTIME_NS, "str_ends_with") }
+    if last == "contains" && has_runtime_twin(twins, "str_contains") { return mangle_fn_symbol(RUNTIME_NS, "str_contains") }
+    null
+}
+
+/**
+ * str_eq_symbol — the runtime symbol a `str == str` / `str != str` equality lowers its call to: the
+ * Degrau-0 Teko twin (`teko::runtime::str_eq`) when the program carries it, else the C `tk_str_eq`.
+ * The SAME reroute rule as `runtime_twin_symbol`, applied at the `==` lowering seam (`lower_str_compare`)
+ * where the symbol is emitted DIRECTLY rather than through the bare-name builtin table. `str_eq`'s twin
+ * (`teko_rt.tks:496`) allocates nothing — it walks the two byte pairs and returns `bool`.
+ *
+ * @param twins  the program's `teko::runtime` twin names (`collect_runtime_twins`)
+ * @return       `teko::runtime::str_eq`'s mangled symbol, or `"tk_str_eq"`
+ */
+fn str_eq_symbol(twins: []str) -> str {
+    if has_runtime_twin(twins, "str_eq") { return mangle_fn_symbol(RUNTIME_NS, "str_eq") }
+    "tk_str_eq"
+}
+
+/**
  * call_symbol — the LIR symbol a direct call targets, decided by the callee's ORIGIN NAMESPACE and
  * never by its bare name. An UNRESOLVED callee (`call_ns` empty — the checker found no declaration
  * and fell through to `builtin_fn`) is the only one that may mean a builtin, and lowers to its
@@ -4289,6 +4396,10 @@ fn builtin_env_symbol(last: str) -> str | null {
  *                 `false`; a `flat` module's Teko-Teko call must resolve the SAME flat spelling
  *                 the callee's own declaration uses (`LowerCtx.flat_symbols`, threaded in by the
  *                 caller)
+ * @param twins    the program's `teko::runtime` twin names (`collect_runtime_twins`, Degrau 0):
+ *                 a pure-byte bare builtin (`ends_with`/`contains`) whose twin is present reroutes
+ *                 to the Teko body (`runtime_twin_symbol`) instead of its C `tk_*` symbol; default
+ *                 empty (keep the C resolution)
  * @return         the symbol the LCall targets
  * @throws         on an empty callee path, on a bare builtin the N1 subset does not lower yet, or
  *                 on the generic `teko::list::*`/`teko::mem::push_fo` growth-builtin family
@@ -4301,12 +4412,13 @@ fn builtin_env_symbol(last: str) -> str | null {
  *                 future caller that reaches the symbol resolver with one of them directly
  *                 (list-builtin degrau; call-gordo degrau, #382 N2)
  */
-fn call_symbol(c: checker::TCall, externs: []LExternFn, flat: bool = false) -> str | error {
+fn call_symbol(c: checker::TCall, externs: []LExternFn, flat: bool = false, twins: []str = teko::list::empty()) -> str | error {
     let segs = c.callee.segments
     if segs.len == 0 { return error { message = "native backend N1: empty call path (internal)" } }
     let last = segs[segs.len - 1].name
     if c.call_ns.len == 0 {
         match assert_seed_symbol(c.callee) { str as s => return s; null => { } }
+        match runtime_twin_symbol(last, twins) { str as s => return s; null => { } }
         match native_builtin_symbol(last) { str as s => return s; null => { } }
         if is_list_builtin_call(c.callee) {
             return error { message = "native backend N1: the generic `teko::list::*`/`teko::mem::push_fo` growth builtin has no native runtime backing yet (N2)" }
@@ -5218,6 +5330,7 @@ fn build_lambda_lfunc(lam: checker::TLambda, env_layout: LStructLayout, ctx: Low
         flat_symbols = ctx.flat_symbols; ret_type = lam.ret
         has_ret_len_slot = fat_ret; ret_len_slot = if fat_ret { slot_reg } else { 0 }
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = collect_addr_taken_locals(lam.body, ctx.ref_fns, ctx.enums)
+        runtime_twins = ctx.runtime_twins
     }
     let with_captures = match bind_lambda_captures(ctx0, env_layout, lam.captures, line, col) { LowerCtx as c => c; error as err => return err }
     let done = match lower_fn_body(with_captures, lam.body, ltype_of(lam.ret, ctx.enums), line, col) { LowerCtx as c => c; error as err => return err }
@@ -6723,6 +6836,7 @@ fn close_loop(outer: LowerCtx, body_done: LowerCtx, exit_block: u32, exit_env: L
         flat_symbols = body_done.flat_symbols; ret_type = body_done.ret_type
         has_ret_len_slot = body_done.has_ret_len_slot; ret_len_slot = body_done.ret_len_slot
         ref_fns = body_done.ref_fns; field_decls = body_done.field_decls; addr_taken = body_done.addr_taken
+        runtime_twins = body_done.runtime_twins
     }
 }
 
@@ -9287,7 +9401,7 @@ fn lower_call_fat(ctx: LowerCtx, e: checker::TExpr, cl: checker::TCall) -> Lower
     if cl.call_ns.len == 0 && is_concat_builtin_call(cl.callee) { return lower_concat_call(ctx, e, cl) }
     if cl.call_ns.len == 0 && is_append_fo_call(cl.callee) { return lower_append_fo_call(ctx, e, cl) }
     if cl.call_ns.len == 0 && is_bytes_from_ptr_call(cl.callee) { return lower_bytes_from_ptr_call(ctx, cl) }
-    let sym = match call_symbol(cl, ctx.externs, ctx.flat_symbols) { str as s => s; error as err => return err }
+    let sym = match call_symbol(cl, ctx.externs, ctx.flat_symbols, ctx.runtime_twins) { str as s => s; error as err => return err }
     let lo = match lower_args(ctx, cl.args, callee_param_types(cl)) { LoweredArgs as x => x; error as err => return err }
     lower_len_out_call(lo.ctx, sym, lo.vregs, e)
 }
@@ -12805,6 +12919,8 @@ fn bind_ret_len_slot(bound: ParamBind, line: u32, col: u32) -> ParamBind {
  *               `checker::resolve_type`'s builtin-name path regardless, needing no table entry
  * @param field_decls  the program's declared-field-type table (`collect_field_decls`, degrau 25),
  *                     for the coercion a struct-literal field store and a call argument take
+ * @param runtime_twins  the program's `teko::runtime` twin names (`collect_runtime_twins`, Degrau 0),
+ *                       so a pure-byte bare builtin reroutes to the Teko body when its twin is present
  * @return LoweredFunction | error  the built `LFunc` + its grown rodata/
  *                                  lifted tables; the `error` arm for a
  *                                  generic/extern function, or when its body
@@ -12816,7 +12932,7 @@ fn bind_ret_len_slot(bound: ParamBind, line: u32, col: u32) -> ParamBind {
  *           through, mirroring `lower_call_fat`'s own allocation on the calling side (call-gordo
  *           degrau, #382 N2).
  */
-pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::list::empty(), rodata: []LRodata = teko::list::empty(), enums: []LEnumInfo = teko::list::empty(), lifted: []LFunc = teko::list::empty(), externs: []LExternFn = teko::list::empty(), flat_symbols: bool = false, variants: []LVariantDef = teko::list::empty(), table: checker::TypeTable = teko::list::empty(), ref_fns: []LRefFnInfo = teko::list::empty(), field_decls: []LFieldDecls = teko::list::empty()) -> LoweredFunction | error {
+pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::list::empty(), rodata: []LRodata = teko::list::empty(), enums: []LEnumInfo = teko::list::empty(), lifted: []LFunc = teko::list::empty(), externs: []LExternFn = teko::list::empty(), flat_symbols: bool = false, variants: []LVariantDef = teko::list::empty(), table: checker::TypeTable = teko::list::empty(), ref_fns: []LRefFnInfo = teko::list::empty(), field_decls: []LFieldDecls = teko::list::empty(), runtime_twins: []str = teko::list::empty()) -> LoweredFunction | error {
     if f.type_params.len != 0 { return error { message = "native backend N1: generic function not yet lowered (N2)" } }
     if f.is_extern { return error { message = "native backend N1: extern function has no body to lower" } }
     let fat_ret = is_fat_type(f.return_type)
@@ -12834,6 +12950,7 @@ pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::li
         flat_symbols = flat_symbols; ret_type = f.return_type
         has_ret_len_slot = fat_ret; ret_len_slot = if fat_ret { slot_reg } else { 0 }
         ref_fns = ref_fns; field_decls = field_decls; addr_taken = collect_addr_taken_locals(f.body, ref_fns, enums)
+        runtime_twins = runtime_twins
     }
     let done = match lower_fn_body(ctx0, f.body, ltype_of(f.return_type, enums), f.line, f.col) { LowerCtx as c => c; error as err => return stop_in_function(err, f) }
     let closed = match close_function(done, f) { LowerCtx as c => c; error as err => return stop_in_function(err, f) }
@@ -13002,6 +13119,7 @@ pub fn lower_program(prog: checker::TProgram, flat_symbols: bool = false) -> LMo
     let externs = collect_externs(prog)
     let variants = collect_variant_defs(prog)
     let ref_fns = collect_ref_fns(prog)
+    let runtime_twins = collect_runtime_twins(prog)
     let field_decls = match collect_field_decls(prog) { []LFieldDecls as fd => fd; error as e => return e }
     mut m = match intern_aggregate_consts(register_layouts(empty_module(), layouts), prog.items, layouts, variants, enums) { LModule as x => x; error as e => return e }
     mut loose: []checker::TStatement = teko::list::empty()
@@ -13009,13 +13127,13 @@ pub fn lower_program(prog: checker::TProgram, flat_symbols: bool = false) -> LMo
     mut i: u64 = 0
     loop {
         if i >= prog.items.len { break }
-        let step = match lower_item(m, loose, prog.items[i], layouts, enums, lifted, externs, flat_symbols, variants, table, ref_fns, field_decls) { LowerItemOut as x => x; error as err => return err }
+        let step = match lower_item(m, loose, prog.items[i], layouts, enums, lifted, externs, flat_symbols, variants, table, ref_fns, field_decls, runtime_twins) { LowerItemOut as x => x; error as err => return err }
         m = step.module
         loose = step.loose
         lifted = step.lifted
         i++
     }
-    let vmain = match lower_virtual_main(loose, layouts, enums, m.rodata, lifted, externs, flat_symbols, variants, ref_fns, field_decls) { LoweredFunction as x => x; error as err => return err }
+    let vmain = match lower_virtual_main(loose, layouts, enums, m.rodata, lifted, externs, flat_symbols, variants, ref_fns, field_decls, runtime_twins) { LoweredFunction as x => x; error as err => return err }
     let whole = fold_lifted_funcs(add_func(with_rodata(m, vmain.rodata), vmain.func), vmain.lifted)
     match frame_escape_guard(whole) { error as e => return e; null => { } }
     whole
@@ -13905,13 +14023,15 @@ pub type LowerItemOut = struct { module: LModule; loose: []checker::TStatement; 
  *               (`typeexpr_is_fat`'s alias resolver, 0.3.1.0 raiz A, crumb R0)
  * @param field_decls  the program's declared-field-type table (`collect_field_decls`, degrau 25),
  *                     for the coercion a struct-literal field store and a call argument take
+ * @param runtime_twins  the program's `teko::runtime` twin names (`collect_runtime_twins`, Degrau 0),
+ *                       threaded down to a function item's own bare-builtin call reroute
  * @return LowerItemOut | error  the advanced module + loose-statement/lifted
  *                               lists; the `error` arm when a function item
  *                               fails to lower
  */
-fn lower_item(m: LModule, loose: []checker::TStatement, it: checker::TItem, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, table: checker::TypeTable, ref_fns: []LRefFnInfo, field_decls: []LFieldDecls) -> LowerItemOut | error {
+fn lower_item(m: LModule, loose: []checker::TStatement, it: checker::TItem, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, table: checker::TypeTable, ref_fns: []LRefFnInfo, field_decls: []LFieldDecls, runtime_twins: []str) -> LowerItemOut | error {
     match it {
-        checker::TFunction as f => lower_item_function(m, loose, f, layouts, enums, lifted, externs, flat_symbols, variants, table, ref_fns, field_decls)
+        checker::TFunction as f => lower_item_function(m, loose, f, layouts, enums, lifted, externs, flat_symbols, variants, table, ref_fns, field_decls, runtime_twins)
         checker::TStatement as s => LowerItemOut { module = m; loose = teko::list::push(loose, s); lifted = lifted }
         checker::TConstDecl as cd => lower_const_item(m, loose, cd, lifted)
         _ => LowerItemOut { module = m; loose = loose; lifted = lifted }
@@ -13985,14 +14105,16 @@ fn lower_const_item(m: LModule, loose: []checker::TStatement, cd: checker::TCons
  * @param table  the program's type table (`lower_function`'s own param, 0.3.1.0 raiz A, crumb R0)
  * @param field_decls  the program's declared-field-type table (`collect_field_decls`, degrau 25),
  *                     for the coercion a struct-literal field store and a call argument take
+ * @param runtime_twins  the program's `teko::runtime` twin names (`collect_runtime_twins`, Degrau 0),
+ *                       passed to `lower_function` for the pure-byte bare-builtin call reroute
  * @return LowerItemOut | error  the advanced module (unchanged `loose`) + the
  *                               grown lifted table; the `error` arm when
  *                               `f`'s body fails to lower
  */
-fn lower_item_function(m: LModule, loose: []checker::TStatement, f: checker::TFunction, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, table: checker::TypeTable, ref_fns: []LRefFnInfo, field_decls: []LFieldDecls) -> LowerItemOut | error {
+fn lower_item_function(m: LModule, loose: []checker::TStatement, f: checker::TFunction, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, table: checker::TypeTable, ref_fns: []LRefFnInfo, field_decls: []LFieldDecls, runtime_twins: []str) -> LowerItemOut | error {
     if f.is_test { return LowerItemOut { module = m; loose = loose; lifted = lifted } }
     if f.is_extern { return LowerItemOut { module = m; loose = loose; lifted = lifted } }
-    let lf = match lower_function(f, layouts, m.rodata, enums, lifted, externs, flat_symbols, variants, table, ref_fns, field_decls) { LoweredFunction as x => x; error as err => return err }
+    let lf = match lower_function(f, layouts, m.rodata, enums, lifted, externs, flat_symbols, variants, table, ref_fns, field_decls, runtime_twins) { LoweredFunction as x => x; error as err => return err }
     LowerItemOut { module = add_func(with_rodata(m, lf.rodata), lf.func); loose = loose; lifted = lf.lifted }
 }
 
@@ -14020,11 +14142,13 @@ fn lower_item_function(m: LModule, loose: []checker::TStatement, f: checker::TFu
  *                           SAME way that function's own symbol was declared
  * @param field_decls  the program's declared-field-type table (`collect_field_decls`, degrau 25),
  *                     for the coercion a struct-literal field store and a call argument take
+ * @param runtime_twins  the program's `teko::runtime` twin names (`collect_runtime_twins`, Degrau 0),
+ *                       so a pure-byte bare builtin reroutes to the Teko body when its twin is present
  * @return LoweredFunction | error  the built virtual-main `LFunc` + its grown
  *                                  rodata/lifted tables; the `error` arm when
  *                                  any loose statement fails to lower
  */
-fn lower_virtual_main(loose: []checker::TStatement, layouts: []LStructLayout, enums: []LEnumInfo, rodata: []LRodata, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, ref_fns: []LRefFnInfo = teko::list::empty(), field_decls: []LFieldDecls = teko::list::empty()) -> LoweredFunction | error {
+fn lower_virtual_main(loose: []checker::TStatement, layouts: []LStructLayout, enums: []LEnumInfo, rodata: []LRodata, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, ref_fns: []LRefFnInfo = teko::list::empty(), field_decls: []LFieldDecls = teko::list::empty(), runtime_twins: []str = teko::list::empty()) -> LoweredFunction | error {
     let fn0 = new_func("main", 0, teko::list::empty(), LType::I32)
     let ctx0 = LowerCtx {
         func = fn0; block_id = 0; env = empty_lenv()
@@ -14034,6 +14158,7 @@ fn lower_virtual_main(loose: []checker::TStatement, layouts: []LStructLayout, en
         flat_symbols = flat_symbols; ret_type = checker::Prim { kind = checker::PrimKind::I32 }
         has_ret_len_slot = false; ret_len_slot = 0
         ref_fns = ref_fns; field_decls = field_decls; addr_taken = collect_addr_taken_locals(loose, ref_fns, enums)
+        runtime_twins = runtime_twins
     }
     let tail = match lower_main_tail(ctx0, loose) { LowerMainTail as x => x; error as err => return err }
     let closed = match close_virtual_main(tail) { LowerCtx as c => c; error as err => return err }
