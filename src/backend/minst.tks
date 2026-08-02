@@ -866,6 +866,54 @@ pub type MCallIndirect = struct {
 pub type MRet = struct { }
 
 /**
+ * MOutArg — store one OUTGOING call argument into the caller-owned stack-arg
+ * area (AAPCS64 §6.4.2): `STR src, [sp, #index * ARM64_REG_BYTES]`. Each
+ * slot is 8 bytes wide; the actual transfer uses `size` so a 32-bit value is
+ * stored with the correct STR width. Emitted by `pin_args` for every argument
+ * that overflows the 8-register window of its register class.
+ *
+ * @since #383 A2-5
+ */
+pub type MOutArg = struct {
+    /**
+     * size — the access width (X/W for GPR, D/S for FPR).
+     */
+    size: MMemSize
+    /**
+     * src — the source register (holds the overflow argument value).
+     */
+    src: MReg
+    /**
+     * index — the stack slot index (byte offset = index * 8).
+     */
+    index: u32
+}
+
+/**
+ * MInArg — load one INCOMING parameter out of the caller-owned stack-arg
+ * area (AAPCS64 §6.4.2): `LDR dst, [sp, #frame_size + index * ARM64_REG_BYTES]`.
+ * Emitted by `select_param` for every parameter past the 8-register window
+ * of its register class. The frame_size displacement is resolved at encoding
+ * time from `FrameLayout.size`.
+ *
+ * @since #383 A2-5
+ */
+pub type MInArg = struct {
+    /**
+     * size — the access width (X/W for GPR, D/S for FPR).
+     */
+    size: MMemSize
+    /**
+     * dst — the destination virtual register.
+     */
+    dst: MReg
+    /**
+     * index — the stack slot index (byte offset from incoming-arg base = index * 8).
+     */
+    index: u32
+}
+
+/**
  * MInst — the machine-instruction payload: one of the AArch64-keyed cases
  * above. A `MInst` carries virtual registers (A3 colors them) and physical-
  * register pins (the ABI); it holds no encoded bytes (§2.2 of the isel
@@ -873,7 +921,7 @@ pub type MRet = struct { }
  *
  * @since #383 A2-1
  */
-pub type MInst = variant MAlu | MAluImm | MMSub | MNeg | MMvn | MFAlu | MFNeg | MCmp | MCmpImm | MFCmp | MCSet | MMovZ | MMovK | MMovN | MFMov | MMov | MExt | MCvt | MLoad | MStore | MFSpill | MFrameAddr | MAdrp | MAddLo | MBranch | MBranchCond | MCbz | MCall | MCallIndirect | MRet
+pub type MInst = variant MAlu | MAluImm | MMSub | MNeg | MMvn | MFAlu | MFNeg | MCmp | MCmpImm | MFCmp | MCSet | MMovZ | MMovK | MMovN | MFMov | MMov | MExt | MCvt | MLoad | MStore | MFSpill | MFrameAddr | MAdrp | MAddLo | MBranch | MBranchCond | MCbz | MCall | MCallIndirect | MRet | MOutArg | MInArg
 
 /**
  * MBlock — a machine basic block: its id, its block-args (the SSA-lite
@@ -1357,6 +1405,30 @@ pub fn call_indirect_inst(target: MReg, uses: []MReg, ret_reg: MReg, has_result:
  * const (#594 crumb 9b): a single tag-only rodata image, shared by every use.
  */
 pub const RET_INST: MInst = MRet { }
+
+/**
+ * out_arg — an outgoing stack-argument store instruction (MOutArg).
+ *
+ * @param MMemSize size  the transfer width (X/W for GPR, D/S for FPR)
+ * @param MReg src  the source register (holds the argument value)
+ * @param u32 index  the stack slot index (byte offset = index * 8)
+ * @return MInst  the built instruction
+ */
+pub fn out_arg(size: MMemSize, src: MReg, index: u32) -> MInst {
+    MOutArg { size = size; src = src; index = index }
+}
+
+/**
+ * in_arg — an incoming stack-parameter load instruction (MInArg).
+ *
+ * @param MMemSize size  the transfer width (X/W for GPR, D/S for FPR)
+ * @param MReg dst  the destination register
+ * @param u32 index  the stack slot index (byte offset from frame top = index * 8)
+ * @return MInst  the built instruction
+ */
+pub fn in_arg(size: MMemSize, dst: MReg, index: u32) -> MInst {
+    MInArg { size = size; dst = dst; index = index }
+}
 
 /**
  * empty_mmodule — a module with no functions/rodata/globals/layouts (the
@@ -1992,6 +2064,26 @@ fn print_ret(i: MRet) -> str {
 }
 
 /**
+ * print_out_arg — `outarg.<size> src, #index`.
+ *
+ * @param MOutArg i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_out_arg(i: MOutArg) -> str {
+    teko::str::concat("outarg.", mem_size_name(i.size), " ", reg_ref(i.src), ", #", teko::u64_to_str(i.index to u64))
+}
+
+/**
+ * print_in_arg — `inarg.<size> dst, #index`.
+ *
+ * @param MInArg i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_in_arg(i: MInArg) -> str {
+    teko::str::concat("inarg.", mem_size_name(i.size), " ", reg_ref(i.dst), ", #", teko::u64_to_str(i.index to u64))
+}
+
+/**
  * print_minst — the instruction text for one `MInst` (no result prefix —
  * a case's own destination operand, when it has one, already renders it).
  *
@@ -2030,6 +2122,8 @@ fn print_minst(i: MInst) -> str {
         MCall as x => print_call(x)
         MCallIndirect as x => print_call_indirect(x)
         MRet as x => print_ret(x)
+        MOutArg as x => print_out_arg(x)
+        MInArg as x => print_in_arg(x)
     }
 }
 

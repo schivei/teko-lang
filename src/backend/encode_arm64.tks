@@ -98,6 +98,13 @@ pub type FrameLayout = struct {
      * mixed-size/mixed-align frames (structs/arrays/spills) map correctly.
      */
     slot_offsets: []u32
+    /**
+     * out_arg_base — the SP-relative byte offset of the outgoing stack-arg
+     * area (always 0: the area sits at the very bottom of the frame,
+     * [sp + 0 .. sp + out_arg_bytes)). Present as a named field so the
+     * encoder can reference it symbolically without hard-coding 0.
+     */
+    out_arg_base: u32
 }
 
 /**
@@ -1256,12 +1263,108 @@ fn frame_total_size(slots_size: u32, saved: Saved, lr_save: bool) -> u32 {
 }
 
 /**
+ * out_arg_slots_of_inst — the number of outgoing stack-arg slots this
+ * instruction contributes: `index + 1` for an `MOutArg` (one-past the highest
+ * slot index used), 0 for every other instruction.
+ *
+ * @param MInst i  the instruction to inspect
+ * @return u32  the contribution to the max-slot scan
+ */
+fn out_arg_slots_of_inst(i: MInst) -> u32 {
+    match i {
+        MOutArg as x => x.index + (1 to u32)
+        _ => 0 to u32
+    }
+}
+
+/**
+ * max_out_arg_slots_of_block — the maximum one-past-index among all `MOutArg`
+ * instructions in a single block.
+ *
+ * @param MBlock b  the block to scan
+ * @return u32  the maximum slot count for this block
+ */
+fn max_out_arg_slots_of_block(b: MBlock) -> u32 {
+    mut max: u32 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= b.insts.len { break }
+        let slots = out_arg_slots_of_inst(b.insts[i])
+        if slots > max { max = slots }
+        i++
+    }
+    max
+}
+
+/**
+ * max_out_arg_slots — the maximum one-past-index among all `MOutArg`
+ * instructions in the whole function: how many 8-byte slots the outgoing
+ * stack-arg area must hold.
+ *
+ * @param MFunc f  the fully-physical function
+ * @return u32  the maximum slot count (0 if no stack args are passed)
+ */
+fn max_out_arg_slots(f: MFunc) -> u32 {
+    mut max: u32 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= f.blocks.len { break }
+        let b_max = max_out_arg_slots_of_block(f.blocks[i])
+        if b_max > max { max = b_max }
+        i++
+    }
+    max
+}
+
+/**
+ * out_arg_bytes — the size of the outgoing stack-arg area in bytes: the number
+ * of 8-byte slots, aligned up to 16 for SP alignment, or 0 when there are no
+ * stack args.
+ *
+ * @param MFunc f  the fully-physical function
+ * @return u32  the byte size of the outgoing stack-arg area (0 or ≥ 16)
+ */
+fn out_arg_bytes(f: MFunc) -> u32 {
+    let slots = max_out_arg_slots(f)
+    if slots == (0 to u32) { return 0 to u32 }
+    align_up(slots * ARM64_REG_BYTES, ARM64_STACK_ALIGN)
+}
+
+/**
+ * shift_slot_offsets — add `delta` to every element of `offsets`, returning
+ * the shifted slice. Used to push local-variable slots up past the outgoing
+ * stack-arg area when the frame includes `MOutArg` instructions.
+ *
+ * @param []u32 offsets  the original per-slot SP-relative byte offsets
+ * @param u32 delta  the byte amount to add to each offset
+ * @return []u32  the shifted offsets
+ */
+fn shift_slot_offsets(offsets: []u32, delta: u32) -> []u32 {
+    if delta == (0 to u32) { return offsets }
+    mut result: []u32 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= offsets.len { break }
+        result = teko::list::push(result, offsets[i] + delta)
+        i++
+    }
+    result
+}
+
+/**
  * compute_frame_layout — build a function's `FrameLayout`: re-derive the
  * callee-saved save-set (§3.1), lay out the frame slots honoring each
- * `LAlloca`'s alignment, and size the whole frame (0 when frameless). A pure
- * side-table pass — it does NOT mutate the block stream, so the A3 interp
- * oracle stays valid on the pre-encode `MFunc`. Offsets that outrun their
- * encodable fields are caught at emission time (`A4-bigframe`), not here.
+ * `LAlloca`'s alignment, size the whole frame (0 when frameless), and compute
+ * the outgoing stack-arg area at the bottom of the frame. A pure side-table
+ * pass — it does NOT mutate the block stream, so the A3 interp oracle stays
+ * valid on the pre-encode `MFunc`. Offsets that outrun their encodable fields
+ * are caught at emission time (`A4-bigframe`), not here.
+ *
+ * Frame layout (SP-relative, bottom to top):
+ *   [sp + 0 .. sp + out_bytes)            outgoing stack-arg area (MOutArg slots)
+ *   [sp + out_bytes .. sp + out_bytes + slots_size)  local variable slots
+ *   [sp + callee_base]                    callee-saved registers
+ *   [sp + size - 16]                      FP/LR pair
  *
  * @param AbiDescriptor abi  the register file (callee-saved partition)
  * @param MFunc f  the fully-physical function
@@ -1270,12 +1373,16 @@ fn frame_total_size(slots_size: u32, saved: Saved, lr_save: bool) -> u32 {
 pub fn compute_frame_layout(abi: AbiDescriptor, f: MFunc) -> FrameLayout {
     let saved = collect_callee_saved(abi, f)
     let slots = compute_slot_offsets(f.frame)
-    let size = frame_total_size(slots.slots_size, saved, needs_lr_save(f))
+    let out_bytes = out_arg_bytes(f)
+    let effective_slots_size = slots.slots_size + out_bytes
+    let size = frame_total_size(effective_slots_size, saved, needs_lr_save(f))
+    let shifted_offsets = shift_slot_offsets(slots.offsets, out_bytes)
     FrameLayout {
         size = size
         saved_gpr = saved.gpr
         saved_fpr = saved.fpr
-        slot_offsets = slots.offsets
+        slot_offsets = shifted_offsets
+        out_arg_base = 0
     }
 }
 
@@ -1871,17 +1978,46 @@ fn encode_frame_addr(layout: FrameLayout, i: MFrameAddr) -> EncWord | error {
 }
 
 /**
+ * encode_out_arg — encode an `MOutArg{size, src, index}` as `STR src, [sp, #(index * 8)]`:
+ * a store to the outgoing stack-arg area at the bottom of the frame. The slot
+ * byte offset is always a multiple of 8 (AAPCS64 §6.4.2), so `encode_store`'s
+ * scaled-immediate check always passes for the slot counts seen in practice.
+ *
+ * @param MOutArg i  the outgoing stack-argument store instruction
+ * @return EncWord | error  the encoded STR, or a named honest-stop
+ */
+fn encode_out_arg(i: MOutArg) -> EncWord | error {
+    let mem = MMem { base = preg(ARM64_SP_ID, MRegClass::GPR); offset = (i.index * ARM64_REG_BYTES) to i32 }
+    encode_store(MStore { size = i.size; src = i.src; mem = mem })
+}
+
+/**
+ * encode_in_arg — encode an `MInArg{size, dst, index}` as `LDR dst, [sp, #(layout.size + index * 8)]`:
+ * a load from the caller's outgoing stack-arg area, which is above the current
+ * function's frame top (SP points to the bottom of this callee's frame, so the
+ * caller's stack-arg area is at `SP + layout.size + index * 8`).
+ *
+ * @param FrameLayout layout  the function's resolved frame (for the frame size)
+ * @param MInArg i  the incoming stack-parameter load instruction
+ * @return EncWord | error  the encoded LDR, or a named honest-stop
+ */
+fn encode_in_arg(layout: FrameLayout, i: MInArg) -> EncWord | error {
+    let mem = MMem { base = preg(ARM64_SP_ID, MRegClass::GPR); offset = (layout.size + i.index * ARM64_REG_BYTES) to i32 }
+    encode_load(MLoad { size = i.size; sign = false; dst = i.dst; mem = mem })
+}
+
+/**
  * encode_inst_word — encode one fully-physical `MInst` to its `EncWord`, a
- * TOTAL per-case match over the 29-case variant mirroring `print_minst`'s
+ * TOTAL per-case match over the 31-case variant mirroring `print_minst`'s
  * dispatch. The position-independent integer/control/memory subset encodes
  * fully; branches and symbol references return placeholder words flagged for
  * A4-3 patching; `MFrameAddr` resolves through `layout` to the real `ADD dst,
  * sp, #off` (A4-2); the float family encodes fully too (0.3.1.0 degrau 29
- * closed the `A4-fp` stop, the arm64 twin of the x86 `B1-fp` arc); big
- * immediates, unscaled offsets, and big-frame offsets return their NAMED
- * honest-stops.
+ * closed the `A4-fp` stop, the arm64 twin of the x86 `B1-fp` arc); `MOutArg`
+ * and `MInArg` handle AAPCS64 stack argument passing; big immediates,
+ * unscaled offsets, and big-frame offsets return their NAMED honest-stops.
  *
- * @param FrameLayout layout  the enclosing function's resolved frame (for `MFrameAddr`)
+ * @param FrameLayout layout  the enclosing function's resolved frame (for `MFrameAddr`, `MInArg`)
  * @param MInst inst  the instruction to encode (all operands physical)
  * @return EncWord | error  the encoding, or a named honest-stop
  */
@@ -1917,6 +2053,8 @@ pub fn encode_inst_word(layout: FrameLayout, inst: MInst) -> EncWord | error {
         MCall as x => encode_call(x)
         MCallIndirect as x => encode_call_indirect(x)
         MRet => encode_ret()
+        MOutArg as x => encode_out_arg(x)
+        MInArg as x => encode_in_arg(layout, x)
     }
 }
 
@@ -2217,9 +2355,13 @@ fn encode_frame_addr_words(layout: FrameLayout, i: MFrameAddr) -> []EncWord | er
  */
 fn encode_one(layout: FrameLayout, words0: []EncWord, inst: MInst) -> []EncWord | error {
     if inst_is_ret(inst) {
-        let epi = match emit_epilogue(layout) { []u32 as w => w; error as e => return e }
-        let after = wrap_plain_words(words0, epi)
-        return teko::list::push(after, encode_ret())
+        match emit_epilogue(layout) {
+            []u32 as epi => {
+                let after = wrap_plain_words(words0, epi)
+                return teko::list::push(after, encode_ret())
+            }
+            error as e => return e
+        }
     }
     if inst_is_frame_addr(inst) {
         let fa = as_frame_addr(inst)
@@ -2636,6 +2778,22 @@ fn encode_rodata(rodata: []lir::LRodata) -> ModuleRodata | error {
         }
         bytes = append_bytes(bytes, rd.bytes)
         off = off + (rd.bytes.len to u32)
+        // Pad to 8-byte alignment between entries so pointer-bearing entries
+        // (fat slots with ptr+len pairs) always start at an 8-byte-aligned offset
+        // within __const.  Without this, string leaf bytes (e.g. "alpha" = 5
+        // bytes) push the next symbol to a non-8-aligned offset, and the Apple
+        // ARM64 linker rejects the unaligned pointer relocation
+        // (ld: pointer not aligned).  Skip padding after the last entry.
+        if i + 1 < rodata.len {
+            let aligned = align_up(off, 8)
+            mut pad: u32 = aligned - off
+            loop {
+                if pad == 0 { break }
+                bytes = teko::list::push(bytes, 0)
+                pad = pad - 1
+            }
+            off = aligned
+        }
         i++
     }
     ModuleRodata { bytes = bytes; syms = syms; relocs = relocs }

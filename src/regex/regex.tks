@@ -143,14 +143,36 @@ fn utf8_width(b0: byte) -> u64 {
  */
 fn decode_codepoint(p: []byte, pos: u64) -> CPScan {
     let width = utf8_width(p[pos])
-    mut bytes: []byte = teko::list::empty()
-    mut i: u64 = 0
-    loop {
-        if i >= width { break }
-        bytes = teko::list::push(bytes, p[pos + i])
-        i++
+    if width == 1 { return CPScan { cp = p[pos] to u32; width = width } }
+    if width == 2 {
+        let b0 = p[pos] to u32
+        let b1 = p[pos + 1] to u32
+        return CPScan { cp = ((b0 & 0x1F) << 6) | (b1 & 0x3F); width = width }
     }
-    CPScan { cp = char_at(str_of_bytes(bytes), 0) to u32; width = width }
+    if width == 3 {
+        let b0 = p[pos] to u32
+        let b1 = p[pos + 1] to u32
+        let b2 = p[pos + 2] to u32
+        return CPScan { cp = ((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F); width = width }
+    }
+    let b0 = p[pos] to u32
+    let b1 = p[pos + 1] to u32
+    let b2 = p[pos + 2] to u32
+    let b3 = p[pos + 3] to u32
+    CPScan { cp = ((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F); width = width }
+}
+
+fn codepoints_of(input: str) -> []u32 {
+    let bytes = bytes_of_str(input)
+    mut out: []u32 = teko::list::empty()
+    mut pos: u64 = 0
+    loop {
+        if pos >= bytes.len { break }
+        let scan = decode_codepoint(bytes, pos)
+        out = teko::list::push(out, scan.cp)
+        pos = pos + scan.width
+    }
+    out
 }
 
 // --- the parser: recursive descent, `[]byte` pattern -> RegexNode | error ---
@@ -402,7 +424,7 @@ fn class_matches(cls: RClass, cp: u32) -> bool {
  * @param i      the codepoint index to match from
  * @return       true iff the whole chain matches from `i`
  */
-fn m_cont(cont: []MCont, input: []char, i: u64) -> bool {
+fn m_cont(cont: []MCont, input: []u32, i: u64) -> bool {
     if cont.len == 0 { return true }
     m_node(cont[0].head, input, i, cont[0].tail)
 }
@@ -416,12 +438,12 @@ fn m_cont(cont: []MCont, input: []char, i: u64) -> bool {
  * @param cont   what must match after `node`
  * @return       true iff `node` and then `cont` match
  */
-fn m_node(node: RegexNode, input: []char, i: u64, cont: []MCont) -> bool {
+fn m_node(node: RegexNode, input: []u32, i: u64, cont: []MCont) -> bool {
     match node {
         REmpty => m_cont(cont, input, i)
-        RChar as c => m_one(i < input.len && (input[i] to u32) == c.cp, input, i, cont)
+        RChar as c => m_one(i < input.len && input[i] == c.cp, input, i, cont)
         RAny => m_one(i < input.len, input, i, cont)
-        RClass as cls => m_one(i < input.len && class_matches(cls, input[i] to u32), input, i, cont)
+        RClass as cls => m_one(i < input.len && class_matches(cls, input[i]), input, i, cont)
         RStart => i == 0 && m_cont(cont, input, i)
         REnd => i == input.len && m_cont(cont, input, i)
         RGroup as g => m_node(one_of(g.inner), input, i, cont)
@@ -445,7 +467,7 @@ fn m_node(node: RegexNode, input: []char, i: u64, cont: []MCont) -> bool {
  * @param cont      what must match after it
  * @return          true iff the node accepted and the continuation matches from `i + 1`
  */
-fn m_one(accepted: bool, input: []char, i: u64, cont: []MCont) -> bool {
+fn m_one(accepted: bool, input: []u32, i: u64, cont: []MCont) -> bool {
     accepted && m_cont(cont, input, i + 1)
 }
 
@@ -459,7 +481,7 @@ fn m_one(accepted: bool, input: []char, i: u64, cont: []MCont) -> bool {
  * @param cont      what must match after the branch
  * @return          true iff some branch from `idx` on matches, followed by `cont`
  */
-fn m_alt(branches: []RegexNode, idx: u64, input: []char, i: u64, cont: []MCont) -> bool {
+fn m_alt(branches: []RegexNode, idx: u64, input: []u32, i: u64, cont: []MCont) -> bool {
     if idx >= branches.len { return false }
     if m_node(branches[idx], input, i, cont) { return true }
     m_alt(branches, idx + 1, input, i, cont)
@@ -475,7 +497,7 @@ fn m_alt(branches: []RegexNode, idx: u64, input: []char, i: u64, cont: []MCont) 
  * @param cont   what must match after the repetition
  * @return       true iff some number of copies of `inner` followed by `cont` matches
  */
-fn m_star(inner: RegexNode, input: []char, i: u64, cont: []MCont) -> bool {
+fn m_star(inner: RegexNode, input: []u32, i: u64, cont: []MCont) -> bool {
     if m_node(inner, input, i, mc_push(RStar { inner = one(inner) }, cont)) { return true }
     m_cont(cont, input, i)
 }
@@ -490,7 +512,7 @@ fn m_star(inner: RegexNode, input: []char, i: u64, cont: []MCont) -> bool {
  * @param cont   what must match after the repetition
  * @return       true iff one or more copies of `inner` followed by `cont` matches
  */
-fn m_plus(inner: RegexNode, input: []char, i: u64, cont: []MCont) -> bool {
+fn m_plus(inner: RegexNode, input: []u32, i: u64, cont: []MCont) -> bool {
     m_node(inner, input, i, mc_push(RStar { inner = one(inner) }, cont))
 }
 
@@ -504,7 +526,7 @@ fn m_plus(inner: RegexNode, input: []char, i: u64, cont: []MCont) -> bool {
  * @param cont   what must match after it
  * @return       true iff `inner` then `cont`, or `cont` alone, matches from `i`
  */
-fn m_opt(inner: RegexNode, input: []char, i: u64, cont: []MCont) -> bool {
+fn m_opt(inner: RegexNode, input: []u32, i: u64, cont: []MCont) -> bool {
     if m_node(inner, input, i, cont) { return true }
     m_cont(cont, input, i)
 }
@@ -525,7 +547,7 @@ fn m_opt(inner: RegexNode, input: []char, i: u64, cont: []MCont) -> bool {
  * @return       true iff the pattern matches at some offset
  */
 pub fn is_match(re: Regex, input: str) -> bool {
-    let cps = chars(input)
+    let cps = codepoints_of(input)
     let cont = mc_of_node(re.ast, mc_end())
     mut start: u64 = 0
     loop {
@@ -558,6 +580,6 @@ pub fn is_match_pattern(pattern: str, input: str) -> bool | error {
  * @return       true iff the whole of `input` is matched by the pattern
  */
 pub fn full_match(re: Regex, input: str) -> bool {
-    let cps = chars(input)
+    let cps = codepoints_of(input)
     m_cont(mc_of_node(re.ast, mc_push(REnd { }, mc_end())), cps, 0)
 }
