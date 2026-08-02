@@ -243,10 +243,21 @@ fn lwt_push_aggregate_size_accepts_registered_named_structs() {
     teko::assert::is_true(match aggregate_box_bytes(checker::Named { name = "Pair16" }, ctx0) { u32 as n => n == (16 to u32); null => false })
 }
 
+/**
+ * lwt_variant_case_of_bind_pattern_resolves_slice_by_kind — a `[]T` bind pattern carries NO type
+ * path (`type_name` empty, `is_slice` set), so `variant_case_of_bind_pattern` resolves it by KIND
+ * through `find_variant_slice_member` (lower.tks:9057) — selecting the variant's slice member and
+ * skipping the non-slice member ahead of it — never through `bind_pattern_case_name`, which reads a
+ * type path's last segment and would have none to read here. A slice pattern has no case-name at
+ * all; it matches on being a slice, so this pins the by-kind routing, not any `"slice_<elem>"` name.
+ */
 #test
-fn lwt_bind_pattern_case_name_supports_slice_patterns() {
+fn lwt_variant_case_of_bind_pattern_resolves_slice_by_kind() {
+    mut members: []checker::Type = teko::list::empty()
+    members = teko::list::push(members, lwt_prim(checker::PrimKind::U32))
+    members = teko::list::push(members, checker::Slice { element = lwt_prim(checker::PrimKind::U32) })
     let pat = parser::BindPattern { type_name = parser::Path { segments = teko::list::empty() }; has_binding = true; binding = "xs"; is_slice = true; slice_type = parser::SliceType { element = parser::NamedType { path = lwt_path1("u32"); args = teko::list::empty() } }; type_args = teko::list::empty() }
-    teko::assert::is_true(bind_pattern_case_name(pat) == "slice_u32")
+    teko::assert::is_true(match variant_case_of_bind_pattern(members, pat) { VariantMember as vm => vm.index == (1 to u32); error => false })
 }
 
 /** lwt_binop_is — did lbinop_of return exactly `want` (not an error)? */
