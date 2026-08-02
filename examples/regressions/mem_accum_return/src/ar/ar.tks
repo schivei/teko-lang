@@ -1,0 +1,56 @@
+/**
+ * build — grow a slice accumulator by self-appends and RETURN it. The return makes the accumulator
+ * ESCAPE its frame, so the self-append-aware block-local proof (A2) must keep it EXCLUDED from Scope
+ * residence — the buffer survives past this function's exit rather than dying at the building block's
+ * edge. A predicate that wrongly proved it block-local would free it here (UAF at the caller's read).
+ *
+ * @param n  the number of elements to grow
+ * @return   the freshly built slice [0, 3, 6, …, 3*(n-1)], escaping to the caller
+ */
+fn build(n: i64) -> []i64 {
+    mut xs: []i64 = teko::list::empty()
+    mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        xs = teko::list::push(xs, i * 3)
+        i++
+    }
+    xs
+}
+
+/**
+ * churn — allocate and free scopes AFTER capturing the returned slice, recycling any region memory
+ * a wrongly-scoped accumulator would have been freed into. A use-after-free would read these bytes.
+ *
+ * @param n  the number of churn iterations
+ * @return   the count of churn iterations whose scratch fingerprinted exactly
+ */
+fn churn(n: i64) -> i64 {
+    mut hits: i64 = 0
+    mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        mut zs: []i64 = teko::list::empty()
+        zs = teko::list::push(zs, i)
+        if zs[0 to u64] == i { hits = hits + 1 }
+        i++
+    }
+    hits
+}
+
+/**
+ * run — capture the returned accumulator, churn recycling scopes, then fingerprint the captured
+ * slice. `15` (5 buffer fingerprint + 10 churn hits, weighted) proves the returned accumulator was
+ * NOT freed at the callee's block exit.
+ *
+ * @param n  the accumulator element count
+ * @return   the decimal fingerprint
+ */
+exp fn run(n: i64) -> i64 {
+    let xs = build(n)
+    let hits = churn(10)
+    mut fp: i64 = 0
+    if xs[0 to u64] == 0 { fp = fp + 1 }
+    if xs[(n - 1) to u64] == (n - 1) * 3 { fp = fp + 4 }
+    fp + hits
+}

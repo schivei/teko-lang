@@ -5527,7 +5527,7 @@ fn emit_branch_value(buf: []byte, prog: CgProg, ret_type: checker::Type, body: [
     let fall = cg_append_direct_defers(dctx.defers, body)
     let region = fresh_named("_tkbr", buf.len to i64)
     mut out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = tk_region_new("); out = cb(out, cg_enclosing_region_expr(regions)); out = cb(out, ");\n")
-    let regs2 = teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = base })
+    let regs2 = teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = base; decls = cg_block_slice_accums(prog, escaping, fn_body, body, true) })
     mut cur = dctx
     mut i = 0
     loop {
@@ -7519,7 +7519,7 @@ fn emit_arm_value(buf: []byte, prog: CgProg, ret_type: checker::Type, match_e: c
     let base = dctx.defers.len   // (W9.3) defer scope base for this value-arm
     let want_block = cg_block_has_block_local(prog, escaping, fn_body, body, true) && regions.len < 64
     let region = if want_block { fresh_named("_tkbr", buf.len to i64) } else { "" }
-    let regs2 = if want_block { teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = base }) } else { regions }
+    let regs2 = if want_block { teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = base; decls = cg_block_slice_accums(prog, escaping, fn_body, body, true) }) } else { regions }
     let cur_blk = if want_block { body } else { teko::list::empty() }
     mut out = buf
     if want_block {
@@ -8028,19 +8028,138 @@ fn emit_lambda(buf: []byte, prog: CgProg, e: checker::TExpr, lam: checker::TLamb
     cb(out, ", (void*)_tke }; })")
 }
 
-// ── S2 — PER-BLOCK arena regions (codegen twin of codegen.c). Each scope-introducing LOOP body
-// opens its OWN region `_tkbr<len>` for its provably-block-local allocations, dropped at every exit
-// edge. `RegionFrame` is one active loop-body region on the stack (innermost LAST); `label` ties it
-// to its loop so a labeled break/continue drops exactly the regions it crosses. The per-block escape
-// query is checker::binding_is_block_local. SAFETY IS ABSOLUTE — a binding is block-routed ONLY when
-// proven block-local; otherwise it falls back to the frame/root (W8 = a leak, never a UAF).
-// `is_loop` distinguishes a LOOP-body region (a valid break/continue target) from an ARM-body region
-// (an if-then/if-else/match-arm block region — S2 arms): a break/continue CROSSES an arm region (drops
-// it) but STOPS only AT the innermost matching loop region, never at an arm region.
-// (W9.3) `defer_base` is the count of in-scope defers (dctx.defers.len) at this scope-block's entry —
-// the boundary below which defers belong to ENCLOSING scopes. Kept on the frame for structural parity
-// with the C twin (cg_block_region.defer_base); the Teko twin tracks the live count via `dctx.defers`.
-type RegionFrame = struct { name: str; label: str; is_loop: bool; defer_base: u64 }
+/**
+ * RegionFrame — one active per-block arena region on the codegen stack (innermost LAST), the codegen
+ * twin of codegen.c's cg_block_region. Each scope-introducing block (loop body / if-arm / match-arm /
+ * bare block) opens its OWN region `_tkbr<len>` for its provably-block-local allocations, dropped at
+ * every exit edge. SAFETY IS ABSOLUTE — a binding is block-routed ONLY when `binding_is_block_local`
+ * proves it; otherwise it falls back to the frame/root (W8 = a leak, never a UAF).
+ *
+ * @since 0.3.1 (A3) `decls` realizes the N-level slice selector: the names of the block-local slice
+ *              accumulators DECLARED in this region's block. A self-append `xs = push(xs, item)`
+ *              consults `scope_region_of` to route its grown buffer to the region of `xs`'s DECLARING
+ *              scope (R_decl), never an inner loop's region — the buffer of an accumulator grown in an
+ *              inner loop must live in the outer declaring block, else it dies per-iteration (UAF).
+ */
+type RegionFrame = struct {
+    /** the C variable name of this region (`_tkbr<len>`). */
+    name: str
+    /** the loop label this region ties to (""  when unlabeled / not a loop), for labeled break/continue. */
+    label: str
+    /** true for a LOOP-body region (a valid break/continue target); false for an arm/bare-block region
+     *  (a break/continue CROSSES it but never STOPS at it). */
+    is_loop: bool
+    /** the in-scope defer count (dctx.defers.len) at this block's entry — the boundary below which
+     *  defers belong to ENCLOSING scopes (structural parity with the C twin's cg_block_region.defer_base). */
+    defer_base: u64
+    /** (A3) the block-local slice accumulator names declared at the TOP of this region's block; a
+     *  self-append of one routes its grown buffer HERE (R_decl), matched by name in `scope_region_of`. */
+    decls: []str
+}
+
+/**
+ * scope_region_of — the name→declaring-region map that realizes the A3 N-level slice selector (§2).
+ * Walks the open region stack INNERMOST→OUTERMOST and returns the C variable name of the FIRST region
+ * whose block declared `name` as a block-local slice accumulator; returns "" when none does (the
+ * caller then falls back to the frame `_tkfr`, a leak-safe default since frame ⊒ block ⊒ uses).
+ *
+ * The innermost→outermost walk is load-bearing: an accumulator declared in an OUTER block but grown in
+ * an INNER loop is matched at the OUTER frame (the inner loop's region does not carry `name` in its
+ * `decls`), so the grown buffer lives across every iteration and dies at the outer block's exit — never
+ * per-iteration (the UAF the naive innermost-region routing would open). Determinism over the region
+ * stack means the C and native engines agree by construction (the C-vs-native unification).
+ *
+ * @param regions  the open region-frame stack (innermost last)
+ * @param name     the self-append accumulator's name
+ * @return         the declaring region's C variable name, or "" when unresolved (frame fallback)
+ * @since 0.3.1
+ */
+fn scope_region_of(regions: []RegionFrame, name: str) -> str {
+    mut k = regions.len
+    loop {
+        if k == 0 { break }
+        let r = regions[k - 1]
+        if str_list_has(r.decls, name) { return r.name }
+        k = k - 1
+    }
+    ""
+}
+
+/**
+ * str_list_has — linear membership test over a `[]str` (the A3 decls list is short, one entry per
+ * block-local accumulator).
+ *
+ * @param xs     the list to search
+ * @param name   the sought name
+ * @return       true iff `name` occurs in `xs`
+ * @since 0.3.1
+ */
+fn str_list_has(xs: []str, name: str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if xs[i] == name { return true }
+        i = i + 1
+    }
+    false
+}
+
+/**
+ * cg_block_slice_accums — the names of the TOP-LEVEL block-local slice accumulators declared in block
+ * `body` (A3). A binding qualifies iff it binds a `Slice`-typed SimpleName that `binding_is_block_local`
+ * proves stays inside the block: its grown buffer is then routed to this block's region (R_decl) and
+ * reclaimed at the block's exit edge. A slice that ESCAPES (return / capture) fails the proof and is
+ * excluded — it stays on the leak-safe frame/root path, never region-scoped.
+ *
+ * @param prog       the typed program (unused today; kept for signature parity with the region helpers)
+ * @param escaping   the function's escaping-name set
+ * @param fn_body    the whole enclosing function body (the block-local proof's total-reads denominator)
+ * @param body       the block whose top-level slice accumulators are collected
+ * @param is_value   does `body` yield a value (its tail escapes)?
+ * @return           the declared block-local slice accumulator names
+ * @since 0.3.1
+ */
+fn cg_block_slice_accums(prog: CgProg, escaping: []str, fn_body: []checker::TStatement, body: []checker::TStatement, is_value: bool) -> []str {
+    mut acc: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= body.len { break }
+        match body[i] {
+            checker::TBinding as b => {
+                if cg_binding_is_block_local_slice(escaping, fn_body, body, is_value, b) {
+                    match b.target {
+                        parser::SimpleName as sn => { acc = teko::list::push(acc, sn.name) }
+                        parser::DestructurePattern => { }
+                    }
+                }
+            }
+            _ => { }
+        }
+        i = i + 1
+    }
+    acc
+}
+
+/**
+ * cg_binding_is_block_local_slice — whether binding `b` is a `Slice`-typed block-local (A3): the shape
+ * that earns a per-block region for its self-append accumulator buffer. Both the region-opening
+ * decision (`cg_block_has_block_local`) and the decls map (`cg_block_slice_accums`) consult this ONE
+ * predicate, so a region is opened exactly when — and only when — an accumulator will route into it.
+ *
+ * @param escaping   the function's escaping-name set
+ * @param fn_body    the whole enclosing function body
+ * @param body       the block `b` is declared at the top of
+ * @param is_value   does `body` yield a value?
+ * @param b          the typed binding
+ * @return           true iff `b` is a block-local slice binding
+ * @since 0.3.1
+ */
+fn cg_binding_is_block_local_slice(escaping: []str, fn_body: []checker::TStatement, body: []checker::TStatement, is_value: bool, b: checker::TBinding) -> bool {
+    match b.bound {
+        checker::Slice => checker::binding_is_block_local(escaping, fn_body, body, is_value, b)
+        _ => false
+    }
+}
 
 // (S2 — arena parent-ptr tree, 2026-07-01) the C EXPRESSION TEXT for the region a NEW
 // `tk_region_new(...)` call should name as its parent: the innermost open block region if any,
@@ -8058,12 +8177,28 @@ fn cg_enclosing_region_expr_framed(regions: []RegionFrame, frame: str) -> str {
     if regions.len > 0 { regions[regions.len - 1].name } else if frame != "" { frame } else { "tk_region_root()" }
 }
 
-// (W9.3) LoopDeferFrame — one active LOOP scope's defer base (dctx.defers.len at the loop's body entry).
-// A break/continue fires every defer registered at index ≥ the TARGET loop's base (the scopes it
-// crosses), LIFO. The Teko twin opens a RegionFrame only when a loop has a block-local, so loop defer
-// bases ride this SEPARATE stack (the C twin records defer_base on EVERY block-stack entry, incl.
-// region-less ones; this parallel stack is the region-less-aware twin). `label` ties it to its loop.
-type LoopDeferFrame = struct { label: str; defer_base: u64 }
+/**
+ * LoopDeferFrame — one active LOOP scope's defer + region boundary, captured at the loop's body entry.
+ * A break/continue fires every defer registered at index ≥ the TARGET loop's `defer_base` (the scopes
+ * it crosses) LIFO, and drops every region opened at index ≥ the TARGET loop's `region_base` (the
+ * regions opened INSIDE the loop body). A loop opens a RegionFrame only when it has a block-local, so
+ * loop boundaries ride this SEPARATE stack rather than the RegionFrame stack (the region-less-aware
+ * twin). `label` ties the frame to its loop.
+ *
+ * @since 0.3.1 `region_base` is the RegionFrame-stack depth (regions.len) at the loop's body entry —
+ *              the boundary above which regions were opened INSIDE this loop. break/continue drop
+ *              exactly `regions[region_base..]`, so an ENCLOSING arm region (opened OUTSIDE the loop,
+ *              below `region_base`) is never wrongly dropped by a region-less inner loop's break — the
+ *              UAF an accumulator declared in an outer arm and grown in an inner loop would otherwise hit.
+ */
+type LoopDeferFrame = struct {
+    /** the loop label ("" when unlabeled), matched by `break LABEL` / `continue LABEL`. */
+    label: str
+    /** the in-scope defer count (dctx.defers.len) at the loop's body entry. */
+    defer_base: u64
+    /** the RegionFrame-stack depth (regions.len) at the loop's body entry — the drop boundary. */
+    region_base: u64
+}
 
 /**
  * DeferCtx — the threaded defer + coverage state (W9.3; the functional twin of the C's
@@ -8155,21 +8290,51 @@ fn cg_target_defer_base(loops: []LoopDeferFrame, label: str) -> u64 {
     0
 }
 
-// cg_drop_regions_to — drop (innermost-first) every loop-body region from the top of the stack DOWN
-// TO & INCLUDING the loop whose label matches `label` (empty = innermost loop). For break/continue:
-// the jump exits/continues that loop, so every region it crosses must drop. Each handle is nulled
-// after the drop so an overlapping edge re-drop is a no-op (tk_region_drop is NULL-tolerant).
-fn cg_drop_regions_to(buf: []byte, indent: str, regions: []RegionFrame, label: str) -> []byte {
+/**
+ * cg_target_region_base — the RegionFrame-stack depth at the entry of the break/continue TARGET loop
+ * (the innermost loop for a bare jump, or the labeled loop for `break LABEL`). Regions at index ≥ this
+ * base were opened INSIDE the target loop body and must drop on the jump; regions below it ENCLOSE the
+ * loop and must NOT (the sibling of `cg_target_defer_base`).
+ *
+ * @param loops  the active loop-scope frame stack
+ * @param label  the jump's target label ("" = innermost loop)
+ * @return       the target loop's `region_base` (0 when no matching frame — drop nothing)
+ * @since 0.3.1
+ */
+fn cg_target_region_base(loops: []LoopDeferFrame, label: str) -> u64 {
+    mut k = loops.len
+    loop {
+        if k == 0 { break }
+        let lf = loops[k - 1]
+        let is_target = if label.len == 0 { true } else { lf.label == label }
+        if is_target { return lf.region_base }
+        k = k - 1
+    }
+    0
+}
+
+/**
+ * cg_drop_regions_from — drop (innermost-first) every region opened INSIDE the target loop body: the
+ * frames at index ≥ `base` (the target loop's `region_base`). For break/continue the jump exits/
+ * continues that loop, so every region opened inside it — the loop's own per-iteration region plus any
+ * nested arm/loop regions — must drop; an ENCLOSING region below `base` is left intact (never the
+ * accumulator's outer declaring region). Each handle is nulled so an overlapping edge re-drop is a
+ * no-op (tk_region_drop is NULL-tolerant).
+ *
+ * @param buf      the output buffer
+ * @param indent   the current indentation
+ * @param regions  the open region-frame stack
+ * @param base     the target loop's `region_base` (regions at index ≥ this drop)
+ * @return         the buffer with the drops appended
+ * @since 0.3.1
+ */
+fn cg_drop_regions_from(buf: []byte, indent: str, regions: []RegionFrame, base: u64) -> []byte {
     mut out = buf
     mut k = regions.len
     loop {
-        if k == 0 { break }
+        if k <= base { break }
         let r = regions[k - 1]
         out = cb(out, indent); out = cb(out, "tk_region_drop("); out = cb(out, r.name); out = cb(out, "); "); out = cb(out, r.name); out = cb(out, " = NULL;\n")
-        // Stop only AT a LOOP region (arm regions are always crossed): bare label → the innermost
-        // loop; a named label → that loop. An arm region is dropped but never the break/continue target.
-        let is_target = r.is_loop && (if label.len == 0 { true } else { r.label == label })
-        if is_target { return out }
         k = k - 1
     }
     out
@@ -8238,6 +8403,7 @@ fn cg_block_has_block_local(prog: CgProg, escaping: []str, fn_body: []checker::T
         if i >= block.len { break }
         match block[i] {
             checker::TBinding as b => {
+                if cg_binding_is_block_local_slice(escaping, fn_body, block, is_value, b) { return true }
                 if checker::binding_is_block_local(escaping, fn_body, block, is_value, b) {
                     if cg_same_named_struct(b.bound, b.value.type) || cg_binding_routes_box_to_local_region(prog, b) || cg_binding_routes_str_to_local_region(prog, b) { return true }
                 }
@@ -8300,7 +8466,7 @@ fn emit_block_region(buf: []byte, body: []checker::TStatement, in_main: bool, pr
     // `_tkbr<len>` uniquifier — matches the C twin's b->len read without a counter).
     let region = fresh_named("_tkbr", buf.len to i64)
     mut out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = tk_region_new("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
-    let regs2 = teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = base })
+    let regs2 = teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = base; decls = cg_block_slice_accums(prog, escaping, fn_body, body, false) })
     // Emit the body with THIS block as the current block context (so block-local bindings route to
     // `region`) and the augmented region stack.
     out = match emit_block(out, body, in_main, prog, ret_type, indent, escaping, regs2, fn_body, dctx, body, false) { []byte as o => o; error as err => return err }
@@ -8724,15 +8890,19 @@ fn emit_assign(buf: []byte, prog: CgProg, ret_type: checker::Type, a: checker::T
             _ => { }
         }
     }
-    if frame.len > 0 && checker::assign_routes_to_frame(escaping, a) {
-        match a.value.kind {
-            checker::TCall as c => {
-                out = match emit_assign_lvalue(out, prog, a) { []byte as o => o; error as err => return err }
-                out = cb(out, " = ")
-                out = match emit_list_push(out, prog, a.value, c, escaping, regions, fn_body, dctx, frame) { []byte as o => o; error as err => return err }
-                return cb(out, ";\n")
+    if checker::assign_routes_to_frame(escaping, a) {
+        let accum_region = scope_region_of(regions, a.name)
+        let target = if accum_region.len > 0 { accum_region } else { frame }
+        if target.len > 0 {
+            match a.value.kind {
+                checker::TCall as c => {
+                    out = match emit_assign_lvalue(out, prog, a) { []byte as o => o; error as err => return err }
+                    out = cb(out, " = ")
+                    out = match emit_list_push(out, prog, a.value, c, escaping, regions, fn_body, dctx, target) { []byte as o => o; error as err => return err }
+                    return cb(out, ";\n")
+                }
+                _ => { }
             }
-            _ => { }   // not a call (unreachable when the predicate held) → fall through to the root path
         }
     }
     // #61 — `<<=`/`>>=` must NOT emit the raw C compound operator: an out-of-range shift count
@@ -8926,13 +9096,13 @@ fn emit_loop_while(buf: []byte, l: checker::TLoopStmt, in_main: bool, prog: CgPr
     // LoopDeferFrame so break/continue can fire `[this loop's base, …)` for the scopes they cross.
     let base = dctx.defers.len
     let fall = cg_append_direct_defers(dctx.defers, l.body)   // all of this iteration's direct defers
-    let dctx2 = DeferCtx { defers = dctx.defers; loops = teko::list::push(dctx.loops, LoopDeferFrame { label = l.label; defer_base = base }); cov = dctx.cov }
+    let dctx2 = DeferCtx { defers = dctx.defers; loops = teko::list::push(dctx.loops, LoopDeferFrame { label = l.label; defer_base = base; region_base = regions.len }); cov = dctx.cov }
     let want_block = cg_block_has_block_local(prog, escaping, fn_body, l.body, false) && regions.len < 64
     let region = if want_block { fresh_named("_tkbr", out.len to i64) } else { "" }
     mut regs2 = regions
     if want_block {
         out = cb(out, inner); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = tk_region_new("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
-        regs2 = teko::list::push(regions, RegionFrame { name = region; label = l.label; is_loop = true; defer_base = base })
+        regs2 = teko::list::push(regions, RegionFrame { name = region; label = l.label; is_loop = true; defer_base = base; decls = cg_block_slice_accums(prog, escaping, fn_body, l.body, false) })
     }
     // emit the body with THIS block as the current block context (so a block-local binding routes to
     // `region`) and the augmented region stack (so break/continue/return drop the right regions).
@@ -9169,7 +9339,7 @@ fn emit_stmt(buf: []byte, s: checker::TStatement, in_main: bool, prog: CgProg, r
             // from the top down to & including that loop's region. NOT the frame, NOT outer regions.
             // `break NAME` -> `goto tk_lbl_<NAME>_break;`; bare `break` -> `break;` (M.5).
             mut out = match emit_defers(b0, dctx.defers, cg_target_defer_base(dctx.loops, b.label), prog, indent, escaping, fn_body) { []byte as o => o; error as err => return err }
-            out = cg_drop_regions_to(out, indent, regions, b.label)
+            out = cg_drop_regions_from(out, indent, regions, cg_target_region_base(dctx.loops, b.label))
             out = cb(out, indent)
             if b.label.len > 0 { out = cb(out, "goto tk_lbl_"); out = cb_str(out, b.label); cb(out, "_break;\n") }
             else { cb(out, "break;\n") }
@@ -9181,7 +9351,7 @@ fn emit_stmt(buf: []byte, s: checker::TStatement, in_main: bool, prog: CgProg, r
             // block region from the top down to & including that loop's region (next iter opens fresh).
             // `continue NAME` -> `goto tk_lbl_<NAME>_cont;`; bare `continue` -> `continue;` (M.5).
             mut out = match emit_defers(b0, dctx.defers, cg_target_defer_base(dctx.loops, c.label), prog, indent, escaping, fn_body) { []byte as o => o; error as err => return err }
-            out = cg_drop_regions_to(out, indent, regions, c.label)
+            out = cg_drop_regions_from(out, indent, regions, cg_target_region_base(dctx.loops, c.label))
             out = cb(out, indent)
             if c.label.len > 0 { out = cb(out, "goto tk_lbl_"); out = cb_str(out, c.label); cb(out, "_cont;\n") }
             else { cb(out, "continue;\n") }
@@ -9266,7 +9436,7 @@ fn emit_adopt(buf: []byte, a: checker::TAdoptStmt, in_main: bool, prog: CgProg, 
     let fall = cg_append_direct_defers(dctx.defers, a.body)
     let region = fresh_named("_tkad", buf.len to i64)
     mut out = cb(buf, indent); out = cb(out, "tk_region *"); out = cb(out, region); out = cb(out, " = tk_region_new("); out = cb(out, cg_enclosing_region_expr_framed(regions, frame)); out = cb(out, ");\n")
-    let regs2 = teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = base })
+    let regs2 = teko::list::push(regions, RegionFrame { name = region; label = ""; is_loop = false; defer_base = base; decls = teko::list::empty() })
     out = match emit_block(out, a.body, in_main, prog, ret_type, indent, escaping, regs2, fn_body, dctx, a.body, false) { []byte as o => o; error as err => return err }
     out = match emit_defers(out, fall, base, prog, indent, escaping, fn_body) { []byte as o => o; error as err => return err }
     out = cb(out, indent); out = cb(out, "tk_region_drop_subtree("); out = cb(out, region); out = cb(out, "); "); out = cb(out, region); out = cb(out, " = NULL;\n")

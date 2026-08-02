@@ -192,6 +192,11 @@ void       tk_arena_commit(void);               // discard the top mark, keeping
 // (leave then no-ops), keeping enter/leave balanced without ever reading past the fixed stack.
 void       tk_region_enter(tk_region *child);   // push `child` as the current region for tk_alloc
 void       tk_region_leave(void);               // pop the current region (back to the enclosing one, else root)
+// (0.3.1 move-on-return A1) tk_region_current — the region tk_alloc bump-allocates from RIGHT NOW: the
+// current-region stack TOP, else the root (empty/over-deep degrades to root, never garbage). Made
+// PUBLIC (was static) so the C and native codegens can emit the accessor to capture R_ret — the
+// caller's chosen result region — at function entry (the move-on-return conveyance channel).
+tk_region *tk_region_current(void);             // the current region for tk_alloc (root when the stack is empty)
 // (0.3.1 backend-memoria C1) the u64-HANDLE ABI the Teko `extern fn` surface binds to: a tk_region*
 // travels through Teko as a `u64` (uintptr_t), so these thin twins take/return that width and cast
 // at the boundary, matching the extern prototypes byte-for-byte (no int↔pointer conversion warning

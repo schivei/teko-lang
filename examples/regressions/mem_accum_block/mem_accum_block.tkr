@@ -1,0 +1,25 @@
+# mem_accum_block.tkr — the C-route regressor of an if-arm block-local SLICE accumulator (0.3.1
+# transicao-move-on-return-e-seletor-n-niveis §1/§2, crumbs A2 + A3).
+#
+# WHAT IT PINS. A `mut xs = list::empty()` grown by top-of-block self-appends inside an `if` arm is
+# EXCLUDED from block-local today (the C3 finding: the total read count sees the self-append base but
+# the inside count skips the top-of-block assign). Crumb A2 makes `count_block_local_reads` count a
+# self-append of the SAME name, so the accumulator is proven block-local; crumb A3's N-level selector
+# then routes each `list::push` grow to the arm's OWN region via `tk_slice_push_r(<arm region>, …)`,
+# and the region dies at the arm's exit edge.
+#
+# WHAT IT PROVES. `accumulate` fingerprints its arm-scoped accumulator to 7 (elements 10/20/30 read
+# back via non-escaping index comparisons), then `churn` opens and closes four further if-arm-scoped
+# accumulators that recycle the freed region memory (8 hits). The fingerprint `15` witnesses that the
+# arm-scoped buffer read back exactly even though its region died and was recycled: a use-after-drop
+# would drop the arm's weight, not merely leak.
+#
+# C ROUTE by construction: `Given env = ["TEKO_BACKEND=c"]` pins the shared build to the C backend,
+# the route crumbs A2/A3 activate the scope routing on.
+
+Feature: mem_accum_block — an if-arm block-local slice accumulator dies at the arm exit yet reads back exactly
+
+  Scenario: an arm-scoped accumulator fingerprints to 15 across the post-arm scope churn
+    Given env = ["TEKO_BACKEND=c"]
+    When built and run
+    Then stdout pattern = "15"

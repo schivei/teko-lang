@@ -1,0 +1,25 @@
+# mem_loop_per_iter.tkr — the C-route regressor of an accumulator declared in an OUTER block and
+# grown in an INNER loop (0.3.1 transicao-move-on-return-e-seletor-n-niveis §2, crumb A3).
+#
+# WHAT IT PINS. The A3 N-level selector (`scope_region_of`) routes a self-append grow to the region
+# of the accumulator's DECLARING scope (the outer `if` arm), walking PAST the inner loop's frame —
+# so the grown buffer lives across every iteration and is READ after the loop breaks. Two failure
+# modes are pinned closed: (1) routing to the inner loop's per-iteration region would free the buffer
+# each iteration; (2) the inner loop's `break` dropping the ENCLOSING arm region (a region-less loop
+# has no frame to bound the drop) would free the buffer at the break, before the post-loop read.
+# `cg_drop_regions_from` bounds the break's drop at the loop's `region_base`, so the outer region is
+# left intact.
+#
+# WHAT IT PROVES. `grow_in_loop(6)` grows `xs` to six elements in the inner loop, then reads element
+# 5 (== 10) and the length (== 6) AFTER the loop for a fingerprint of 11; `churn` then recycles the
+# reclaimed outer region. `17` (11 + 6 churn hits) witnesses the buffer survived every iteration and
+# the post-loop read — a per-iteration or break-time free would corrupt it.
+#
+# C ROUTE by construction: `Given env = ["TEKO_BACKEND=c"]` pins the shared build to the C backend.
+
+Feature: mem_loop_per_iter — an outer-declared accumulator grown in an inner loop survives every iteration
+
+  Scenario: a loop-grown accumulator fingerprints to 17 read after the loop, then recycled
+    Given env = ["TEKO_BACKEND=c"]
+    When built and run
+    Then stdout pattern = "17"

@@ -1707,7 +1707,7 @@ tk_region *tk_region_root(void) {
 // current-region stack, or the root when the stack is empty (the behaviour-identical default). A NULL
 // slot or an over-deep pointer also falls through to the root, so an unbalanced/over-deep enter can
 // never hand back garbage — it degrades to the root.
-static tk_region *tk_region_current(void) {
+tk_region *tk_region_current(void) {
     tk_task *t = tk_task_current();
     if (t->cur_rsp > 0 && t->cur_rsp <= TK_REGION_STACK_MAX) {
         tk_region *r = t->cur_regions[t->cur_rsp - 1];
