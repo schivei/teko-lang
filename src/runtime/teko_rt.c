@@ -1200,6 +1200,7 @@ typedef struct tk_freenode { struct tk_freenode *next; size_t bytes; } tk_freeno
 #define TK_FREE_BINS 4096                           // (i+1)*16 bytes, i.e. 16..65536 — (#148 Level-2) the doubling-ladder steps of struct lists (esz ~100-300 B × cap 32-256) must BIN exactly (the bounded large-list scan barely reuses them); 4096 ptr slots = 32 KB per task
 #define TK_PUSH_HASH_SIZE (1u << 16)                // 65536 single-probe buckets
 #define TK_ARENA_MARK_MAX 64                        // depth of the per-task arena checkpoint stack (see tk_arena_push)
+#define TK_REGION_STACK_MAX 64                       // (C1) depth of the per-task current-region stack (see tk_region_enter)
 // TK_TEST_CAPTURE_DEPTH_MAX — how deep the capture stack goes. Two is what exists (a harness run
 // and a guard's inner run); the slack costs a few hundred bytes and removes a cliff.
 #define TK_TEST_CAPTURE_DEPTH_MAX 4
@@ -1214,6 +1215,8 @@ typedef struct tk_task {
     unsigned long long free_parked_bytes, free_reused_bytes, free_reused_count;   // free-list accounting
     tk_arena_mark   arena_marks[TK_ARENA_MARK_MAX];   // checkpoint stack: (head chunk, its used offset)
     int             arena_msp;            // checkpoint stack pointer (may exceed the cap; see tk_arena_push)
+    tk_region      *cur_regions[TK_REGION_STACK_MAX];   // (C1) current-region stack: tk_alloc bumps from the TOP
+    int             cur_rsp;              // (C1) current-region stack pointer (may exceed the cap; see tk_region_enter)
     tk_push_slot_entry push_cache[TK_PUSH_HASH_SIZE];   // (#148) live-tail witnesses for in-place slice append
     jmp_buf         test_jb[TK_TEST_CAPTURE_DEPTH_MAX];   // (§14) test-mode capture — a longjmp NEVER crosses tasks
     volatile sig_atomic_t test_depth;     // >0 = a captured body is running on THIS task
@@ -1252,6 +1255,8 @@ tk_task *tk_task_current(void) {
 #define tk_free_reused_count  (tk_task_current()->free_reused_count)
 #define tk_arena_marks        (tk_task_current()->arena_marks)
 #define tk_arena_msp          (tk_task_current()->arena_msp)
+#define tk_cur_regions        (tk_task_current()->cur_regions)
+#define tk_cur_rsp            (tk_task_current()->cur_rsp)
 #define tk_push_cache         (tk_task_current()->push_cache)
 #define tk_test_jb            (tk_task_current()->test_jb)
 #define tk_test_depth         (tk_task_current()->test_depth)
@@ -1684,6 +1689,48 @@ tk_region *tk_region_root(void) {
     return t->root;
 }
 
+// (C1) tk_region_current — the region tk_alloc bump-allocates from RIGHT NOW: the top of this task's
+// current-region stack, or the root when the stack is empty (the behaviour-identical default). A NULL
+// slot or an over-deep pointer also falls through to the root, so an unbalanced/over-deep enter can
+// never hand back garbage — it degrades to the root.
+static tk_region *tk_region_current(void) {
+    tk_task *t = tk_task_current();
+    if (t->cur_rsp > 0 && t->cur_rsp <= TK_REGION_STACK_MAX) {
+        tk_region *r = t->cur_regions[t->cur_rsp - 1];
+        if (r != NULL) return r;
+    }
+    return tk_region_root();
+}
+
+void tk_region_enter(tk_region *child) {
+    if (tk_cur_rsp >= 0 && tk_cur_rsp < TK_REGION_STACK_MAX) tk_cur_regions[tk_cur_rsp] = child;
+    tk_cur_rsp += 1;
+}
+
+void tk_region_leave(void) {
+    if (tk_cur_rsp <= 0) return;
+    tk_cur_rsp -= 1;
+}
+
+// (C1) the u64-handle ABI twins the Teko `extern fn` region surface binds to — see teko_rt.h. A
+// tk_region* rides through Teko as a uintptr_t-wide u64; these cast at the boundary so the extern
+// prototypes match without an int↔pointer conversion.
+uint64_t tk_region_new_u(uint64_t parent) {
+    return (uint64_t)(uintptr_t)tk_region_new((tk_region *)(uintptr_t)parent);
+}
+
+uint64_t tk_region_root_u(void) {
+    return (uint64_t)(uintptr_t)tk_region_root();
+}
+
+void tk_region_drop_u(uint64_t region) {
+    tk_region_drop((tk_region *)(uintptr_t)region);
+}
+
+void tk_region_enter_u(uint64_t child) {
+    tk_region_enter((tk_region *)(uintptr_t)child);
+}
+
 // tk_region_program — the PROGRAM region: one per process, owned by no task.
 //
 // (F2) F1 left the runtime with N task roots and nothing else, and an object allocated in a task
@@ -1896,12 +1943,18 @@ void *tk_alloc(size_t n) {
     // (S1) Route through the process root region: bump-allocated, never dropped = today's
     // malloc-everywhere leak (M.5). OOM still panics (M.1, never NULL). Same contract as the
     // S0 malloc(n?n:1), only the bytes now come from a region chunk instead of libc directly.
-    if (tk_obs_enabled()) {                       // (S2 obs) ROOT-lifetime side of the map, keyed by the REAL caller
+    // (C1) The default allocation now bumps from the CURRENT region (the top of the per-task
+    // current-region stack), which is the root when nothing was entered — behaviour-identical for a
+    // program that never calls tk_region_enter. When a child is current, tk_region_alloc records the
+    // SCOPED-lifetime obs; recording the ROOT obs here too would double-count, so the root-lifetime
+    // histogram is only fed when the current region actually IS the root.
+    tk_region *cur = tk_region_current();
+    if (tk_obs_enabled() && cur == tk_task_current()->root) {   // (S2 obs) ROOT-lifetime side of the map, keyed by the REAL caller
         tk_obs_root_bytes += (n ? n : 1);
         tk_obs_add(tk_obs_root, __builtin_return_address(0), n ? n : 1);
         if (tk_obs_root_bytes > tk_obs_next_dump) { tk_obs_next_dump += 512ull * 1024 * 1024; tk_obs_dump(); }   // periodic (survives SIGKILL)
     }
-    return tk_region_alloc(tk_region_root(), n);
+    return tk_region_alloc(cur, n);
 }
 
 // (#109 test-gate memory) A per-scope CHECKPOINT/REWIND of the process root region's bump position.
@@ -3674,12 +3727,17 @@ void *tk_append_bytes_fo(const void *ptr, uint64_t len, const void *src, uint64_
     return buf;
 }
 
-// the default root-region lowering (unchanged contract) — a thin wrapper over the region-aware core.
+// the default CURRENT-region lowering (unchanged contract) — a thin wrapper over the region-aware
+// core. (C1) The target is tk_region_current(), which is the root until a tk_region_enter, so a
+// program that never enters a region is byte-for-byte and cache-for-cache what it was. Inside the
+// native backend's per-function scratch window the buffer lands in the entered child AND the
+// push-cache tags it with the CHILD's generation, so tk_region_drop retires that generation and a
+// later root append can never false-hit the freed address (the gen mechanism is the drop guard).
 void *tk_slice_push(const void *ptr, uint64_t len, const void *elem, uint64_t esz, uint64_t *out_len) {
     // (#148 RA1) park THIS caller's return address so the core attributes the grow to the generated
     // fn, not to this wrapper hop. Only under obs (zero writes when off).
     if (tk_obs_enabled() == 1) tk_g_push_ra = __builtin_return_address(0);
-    return tk_slice_push_r(ptr, len, elem, esz, out_len, tk_region_root());
+    return tk_slice_push_r(ptr, len, elem, esz, out_len, tk_region_current());
 }
 
 // (0.3.1.0 degrau 4 — NATIVE-AGG-SLICE-BY-ADDRESS) tk_slice_elem_box — copy one aggregate element
@@ -3714,7 +3772,7 @@ void *tk_slice_push_fo(const void *ptr, uint64_t len, const void *elem, uint64_t
         if (tk_push_cache[h].ptr == ptr && tk_push_cache[h].esz == esz && tk_push_cache[h].cap > len)
             old_bytes = tk_push_cache[h].cap * esz;   // the live tail — its full capacity is reusable
     }
-    void *buf = tk_slice_push_r(ptr, len, elem, esz, out_len, tk_region_root());
+    void *buf = tk_slice_push_r(ptr, len, elem, esz, out_len, tk_region_current());
     if (buf != old && old != NULL) {
         // (#148 Level-2 BISECT) TEKO_FO_MAX=N limits parking to the first N grows (binary-search
         // the guilty park); TEKO_FO_TRACE at the boundary dumps the parking site's backtrace.
@@ -3756,10 +3814,10 @@ void *tk_slice_with_cap_r(uint64_t esz, uint64_t cap, tk_region *region) {
     return buf;
 }
 
-// tk_slice_with_cap — the default root-region lowering, mirroring tk_slice_push over
-// tk_slice_push_r.
+// tk_slice_with_cap — the default CURRENT-region lowering, mirroring tk_slice_push over
+// tk_slice_push_r. (C1) Targets tk_region_current() — the root until a tk_region_enter.
 void *tk_slice_with_cap(uint64_t esz, uint64_t cap) {
-    return tk_slice_with_cap_r(esz, cap, tk_region_root());
+    return tk_slice_with_cap_r(esz, cap, tk_region_current());
 }
 
 // (mem::free ruling 2026-07-03) tk_free_block — PARK an explicitly freed root-arena block on the
@@ -3777,6 +3835,11 @@ void tk_free_block(void *p, uint64_t bytes) {
       if (dbg) fprintf(stderr, "PARK %p bytes=%llu\n", p, (unsigned long long)bytes); }
     unsigned h = tk_push_slot(p);
     if (tk_push_cache[h].ptr == p) tk_push_cache[h].ptr = NULL;   // evict the live-tail record
+    // (C1) Inside a scoped-region window (cur_rsp != 0) the block belongs to a child region that
+    // tk_region_drop bulk-frees; parking it on the ROOT free-list would dangle after the drop and be
+    // handed back to a root allocation (a UAF the gen check cannot see, since the free-list has no
+    // generation). At root scope this is a no-op guard, so root-only frees park exactly as before.
+    if (tk_cur_rsp != 0) return;
     // (#148 Level-2) PARK = FLOOR-16 — never LIE about the block's size. The caller's `bytes` is a
     // true LOWER bound (len*esz) that need not be a 16-multiple: flooring to the 16-byte bin
     // granularity keeps the parked size ≤ the block's real usable extent, so serving it never

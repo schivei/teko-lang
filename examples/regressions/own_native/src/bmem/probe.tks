@@ -1,0 +1,721 @@
+/**
+ * bmem — the 0.3.1 backend-memoria regression probes: programs whose CORRECT run proves the fused
+ * per-function native emit (`encode_module_fused_x86`, project.tks) emits every function correctly
+ * while scoping each function's isel/regalloc/encode scratch to its own region and dropping it after
+ * folding. Each probe returns `true` on success; `main.tks` names it through `scenario_true`, and
+ * `own_native.tkr` demands the matching `scenario <name>: ok` line on STDOUT.
+ *
+ * The whole own-native corpus is compiled through the fused loop, so these probes ride the SAME
+ * per-function scoping as every other function here; they add the SHAPES §8 of the design names —
+ * two functions, a call chain, 64+ small functions, shared rodata, a loop-carried value — each with
+ * a known result no partial fold can reach by accident.
+ *
+ * @since 0.3.1
+ */
+
+/**
+ * opaque_zero — zero with NO literal form, so a probe's arithmetic is not comptime-folded away
+ * before the native lowering sees the call (the same fold-opacity mould `own_arith_exit` uses).
+ *
+ * @return  0, produced through a mutable local
+ */
+fn opaque_zero() -> i64 {
+    mut n: i64 = 1
+    n = n - 1
+    n
+}
+
+/**
+ * bm_a — the first of two trivial functions bmem_two_fns sums, offset by the fold-opaque `o` so the
+ * call survives to the native backend as a real function call.
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   3 + o
+ */
+fn bm_a(o: i64) -> i64 { 3 + o }
+
+/**
+ * bm_b — the second of the two functions bmem_two_fns sums.
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   4 + o
+ */
+fn bm_b(o: i64) -> i64 { 4 + o }
+
+/**
+ * bmem_two_fns — TWO functions each emitted through their own scratch region, summed. Proves the
+ * fused loop folds both functions' bytes and per-function symbols into the root accumulators
+ * correctly (§8 bmem_two_fns).
+ *
+ * @return  true when bm_a + bm_b totals the known 7
+ */
+pub fn bmem_two_fns() -> bool {
+    let o = opaque_zero()
+    bm_a(o) + bm_b(o) == 7
+}
+
+/**
+ * bm_g — the callee at the bottom of the call chain (bmem_call_chain): a `call` relocation from
+ * bm_f targets this function's symbol, so its `str` name must survive the caller's region drop (E1).
+ *
+ * @param x  the incoming value
+ * @return   x + 1
+ */
+fn bm_g(x: i64) -> i64 { x + 1 }
+
+/**
+ * bm_f — the middle of the call chain: calls bm_g, so bm_f's encoded relocs reference bm_g across a
+ * function boundary, and the module reloc rebase by `.text` base must stay correct between functions.
+ *
+ * @param x  the incoming value
+ * @return   bm_g(x) + 10
+ */
+fn bm_f(x: i64) -> i64 { bm_g(x) + 10 }
+
+/**
+ * bmem_call_chain — `bmem_call_chain` → bm_f → bm_g, a call reloc that crosses functions. Proves
+ * `RelocX86.sym` (E1) survives the per-function region drop and the `.text` rebase is correct
+ * between functions (§8 bmem_call_chain).
+ *
+ * @return  true when the chained result is the known 11
+ */
+pub fn bmem_call_chain() -> bool {
+    bm_f(opaque_zero()) == 11
+}
+
+/**
+ * bm_s00 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   0 + o
+ */
+fn bm_s00(o: i64) -> i64 { 0 + o }
+
+/**
+ * bm_s01 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   1 + o
+ */
+fn bm_s01(o: i64) -> i64 { 1 + o }
+
+/**
+ * bm_s02 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   2 + o
+ */
+fn bm_s02(o: i64) -> i64 { 2 + o }
+
+/**
+ * bm_s03 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   3 + o
+ */
+fn bm_s03(o: i64) -> i64 { 3 + o }
+
+/**
+ * bm_s04 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   4 + o
+ */
+fn bm_s04(o: i64) -> i64 { 4 + o }
+
+/**
+ * bm_s05 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   5 + o
+ */
+fn bm_s05(o: i64) -> i64 { 5 + o }
+
+/**
+ * bm_s06 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   6 + o
+ */
+fn bm_s06(o: i64) -> i64 { 6 + o }
+
+/**
+ * bm_s07 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   7 + o
+ */
+fn bm_s07(o: i64) -> i64 { 7 + o }
+
+/**
+ * bm_s08 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   8 + o
+ */
+fn bm_s08(o: i64) -> i64 { 8 + o }
+
+/**
+ * bm_s09 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   9 + o
+ */
+fn bm_s09(o: i64) -> i64 { 9 + o }
+
+/**
+ * bm_s10 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   10 + o
+ */
+fn bm_s10(o: i64) -> i64 { 10 + o }
+
+/**
+ * bm_s11 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   11 + o
+ */
+fn bm_s11(o: i64) -> i64 { 11 + o }
+
+/**
+ * bm_s12 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   12 + o
+ */
+fn bm_s12(o: i64) -> i64 { 12 + o }
+
+/**
+ * bm_s13 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   13 + o
+ */
+fn bm_s13(o: i64) -> i64 { 13 + o }
+
+/**
+ * bm_s14 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   14 + o
+ */
+fn bm_s14(o: i64) -> i64 { 14 + o }
+
+/**
+ * bm_s15 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   15 + o
+ */
+fn bm_s15(o: i64) -> i64 { 15 + o }
+
+/**
+ * bm_s16 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   16 + o
+ */
+fn bm_s16(o: i64) -> i64 { 16 + o }
+
+/**
+ * bm_s17 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   17 + o
+ */
+fn bm_s17(o: i64) -> i64 { 17 + o }
+
+/**
+ * bm_s18 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   18 + o
+ */
+fn bm_s18(o: i64) -> i64 { 18 + o }
+
+/**
+ * bm_s19 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   19 + o
+ */
+fn bm_s19(o: i64) -> i64 { 19 + o }
+
+/**
+ * bm_s20 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   20 + o
+ */
+fn bm_s20(o: i64) -> i64 { 20 + o }
+
+/**
+ * bm_s21 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   21 + o
+ */
+fn bm_s21(o: i64) -> i64 { 21 + o }
+
+/**
+ * bm_s22 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   22 + o
+ */
+fn bm_s22(o: i64) -> i64 { 22 + o }
+
+/**
+ * bm_s23 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   23 + o
+ */
+fn bm_s23(o: i64) -> i64 { 23 + o }
+
+/**
+ * bm_s24 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   24 + o
+ */
+fn bm_s24(o: i64) -> i64 { 24 + o }
+
+/**
+ * bm_s25 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   25 + o
+ */
+fn bm_s25(o: i64) -> i64 { 25 + o }
+
+/**
+ * bm_s26 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   26 + o
+ */
+fn bm_s26(o: i64) -> i64 { 26 + o }
+
+/**
+ * bm_s27 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   27 + o
+ */
+fn bm_s27(o: i64) -> i64 { 27 + o }
+
+/**
+ * bm_s28 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   28 + o
+ */
+fn bm_s28(o: i64) -> i64 { 28 + o }
+
+/**
+ * bm_s29 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   29 + o
+ */
+fn bm_s29(o: i64) -> i64 { 29 + o }
+
+/**
+ * bm_s30 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   30 + o
+ */
+fn bm_s30(o: i64) -> i64 { 30 + o }
+
+/**
+ * bm_s31 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   31 + o
+ */
+fn bm_s31(o: i64) -> i64 { 31 + o }
+
+/**
+ * bm_s32 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   32 + o
+ */
+fn bm_s32(o: i64) -> i64 { 32 + o }
+
+/**
+ * bm_s33 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   33 + o
+ */
+fn bm_s33(o: i64) -> i64 { 33 + o }
+
+/**
+ * bm_s34 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   34 + o
+ */
+fn bm_s34(o: i64) -> i64 { 34 + o }
+
+/**
+ * bm_s35 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   35 + o
+ */
+fn bm_s35(o: i64) -> i64 { 35 + o }
+
+/**
+ * bm_s36 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   36 + o
+ */
+fn bm_s36(o: i64) -> i64 { 36 + o }
+
+/**
+ * bm_s37 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   37 + o
+ */
+fn bm_s37(o: i64) -> i64 { 37 + o }
+
+/**
+ * bm_s38 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   38 + o
+ */
+fn bm_s38(o: i64) -> i64 { 38 + o }
+
+/**
+ * bm_s39 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   39 + o
+ */
+fn bm_s39(o: i64) -> i64 { 39 + o }
+
+/**
+ * bm_s40 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   40 + o
+ */
+fn bm_s40(o: i64) -> i64 { 40 + o }
+
+/**
+ * bm_s41 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   41 + o
+ */
+fn bm_s41(o: i64) -> i64 { 41 + o }
+
+/**
+ * bm_s42 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   42 + o
+ */
+fn bm_s42(o: i64) -> i64 { 42 + o }
+
+/**
+ * bm_s43 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   43 + o
+ */
+fn bm_s43(o: i64) -> i64 { 43 + o }
+
+/**
+ * bm_s44 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   44 + o
+ */
+fn bm_s44(o: i64) -> i64 { 44 + o }
+
+/**
+ * bm_s45 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   45 + o
+ */
+fn bm_s45(o: i64) -> i64 { 45 + o }
+
+/**
+ * bm_s46 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   46 + o
+ */
+fn bm_s46(o: i64) -> i64 { 46 + o }
+
+/**
+ * bm_s47 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   47 + o
+ */
+fn bm_s47(o: i64) -> i64 { 47 + o }
+
+/**
+ * bm_s48 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   48 + o
+ */
+fn bm_s48(o: i64) -> i64 { 48 + o }
+
+/**
+ * bm_s49 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   49 + o
+ */
+fn bm_s49(o: i64) -> i64 { 49 + o }
+
+/**
+ * bm_s50 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   50 + o
+ */
+fn bm_s50(o: i64) -> i64 { 50 + o }
+
+/**
+ * bm_s51 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   51 + o
+ */
+fn bm_s51(o: i64) -> i64 { 51 + o }
+
+/**
+ * bm_s52 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   52 + o
+ */
+fn bm_s52(o: i64) -> i64 { 52 + o }
+
+/**
+ * bm_s53 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   53 + o
+ */
+fn bm_s53(o: i64) -> i64 { 53 + o }
+
+/**
+ * bm_s54 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   54 + o
+ */
+fn bm_s54(o: i64) -> i64 { 54 + o }
+
+/**
+ * bm_s55 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   55 + o
+ */
+fn bm_s55(o: i64) -> i64 { 55 + o }
+
+/**
+ * bm_s56 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   56 + o
+ */
+fn bm_s56(o: i64) -> i64 { 56 + o }
+
+/**
+ * bm_s57 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   57 + o
+ */
+fn bm_s57(o: i64) -> i64 { 57 + o }
+
+/**
+ * bm_s58 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   58 + o
+ */
+fn bm_s58(o: i64) -> i64 { 58 + o }
+
+/**
+ * bm_s59 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   59 + o
+ */
+fn bm_s59(o: i64) -> i64 { 59 + o }
+
+/**
+ * bm_s60 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   60 + o
+ */
+fn bm_s60(o: i64) -> i64 { 60 + o }
+
+/**
+ * bm_s61 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   61 + o
+ */
+fn bm_s61(o: i64) -> i64 { 61 + o }
+
+/**
+ * bm_s62 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   62 + o
+ */
+fn bm_s62(o: i64) -> i64 { 62 + o }
+
+/**
+ * bm_s63 — one of the 64 small functions bmem_many_small sums, each emitted through its own scratch
+ * region so the fused loop drops ~64 regions for this family alone (obs "regions ≈ functions").
+ *
+ * @param o  the fold-opaque zero offset
+ * @return   63 + o
+ */
+fn bm_s63(o: i64) -> i64 { 63 + o }
+
+/**
+ * bmem_many_small — sum 64 small functions (bm_s00..bm_s63), each of which the fused loop encodes in
+ * its OWN scratch region. Proves no cross-function name/byte leak across 64+ region drops and that
+ * the count of dropped regions tracks the count of functions (§8 bmem_many_small).
+ *
+ * @return  true when the 64 functions total the known 2016
+ */
+pub fn bmem_many_small() -> bool {
+    let o = opaque_zero()
+    bm_s00(o) + bm_s01(o) + bm_s02(o) + bm_s03(o) + bm_s04(o) + bm_s05(o) + bm_s06(o) + bm_s07(o) + bm_s08(o) + bm_s09(o) + bm_s10(o) + bm_s11(o) + bm_s12(o) + bm_s13(o) + bm_s14(o) + bm_s15(o) + bm_s16(o) + bm_s17(o) + bm_s18(o) + bm_s19(o) + bm_s20(o) + bm_s21(o) + bm_s22(o) + bm_s23(o) + bm_s24(o) + bm_s25(o) + bm_s26(o) + bm_s27(o) + bm_s28(o) + bm_s29(o) + bm_s30(o) + bm_s31(o) + bm_s32(o) + bm_s33(o) + bm_s34(o) + bm_s35(o) + bm_s36(o) + bm_s37(o) + bm_s38(o) + bm_s39(o) + bm_s40(o) + bm_s41(o) + bm_s42(o) + bm_s43(o) + bm_s44(o) + bm_s45(o) + bm_s46(o) + bm_s47(o) + bm_s48(o) + bm_s49(o) + bm_s50(o) + bm_s51(o) + bm_s52(o) + bm_s53(o) + bm_s54(o) + bm_s55(o) + bm_s56(o) + bm_s57(o) + bm_s58(o) + bm_s59(o) + bm_s60(o) + bm_s61(o) + bm_s62(o) + bm_s63(o) == 2016
+}
+
+/**
+ * bm_lit_a — a function returning a string LITERAL that lives in `.rodata` (Group B), shared with
+ * bm_lit_b. The rodata is carried by-reference through the whole pipeline and NEVER enters a scratch
+ * region (§2 exception E2).
+ *
+ * @return  the shared rodata literal
+ */
+fn bm_lit_a() -> str { "bmem_shared_rodata_literal" }
+
+/**
+ * bm_lit_b — a second function returning the SAME string literal as bm_lit_a, so both reference the
+ * shared rodata datum.
+ *
+ * @return  the shared rodata literal
+ */
+fn bm_lit_b() -> str { "bmem_shared_rodata_literal" }
+
+/**
+ * bmem_rodata_shared — two functions returning the SAME string literal. Proves rodata stays in
+ * Group B (loaded by-reference, never in a scratch region) and its sharing survives the per-function
+ * scoping (§8 bmem_rodata_shared).
+ *
+ * @return  true when both functions yield equal, correctly-sized rodata
+ */
+pub fn bmem_rodata_shared() -> bool {
+    let a = bm_lit_a()
+    let b = bm_lit_b()
+    a == b && a.len == (26 to u64)
+}
+
+/**
+ * bmem_loop_fn — a function with a `loop` and a loop-carried accumulator, whose regalloc builds the
+ * largest per-function scratch (the interval set across the back-edge). Proves that scratch is
+ * scoped-and-dropped without altering the emitted bytes or the computed value (§8 bmem_loop_fn).
+ *
+ * @return  true when the loop sums 0..9 to the known 45
+ */
+pub fn bmem_loop_fn() -> bool {
+    let o = opaque_zero()
+    mut acc: i64 = 0
+    mut i: i64 = 0
+    loop {
+        if i >= 10 { break }
+        acc = acc + i + o
+        i = i + 1
+    }
+    acc == 45
+}

@@ -2618,12 +2618,141 @@ fn emit_native_arm64_linux(dir: str, od: str, stem: str, lmod: teko::lir::LModul
 }
 
 /**
+ * region_root — the CURRENT TASK's root region as a `u64` handle (`tk_region_root_u`). The parent
+ * of every per-function scratch region the fused native emit driver opens; the accumulators the
+ * driver copies its per-function outputs into live here (Group B, §2).
+ *
+ * @return  the root region handle
+ * @since 0.3.1
+ */
+extern fn region_root() -> u64 = "tk_region_root_u" from "teko_rt"
+
+/**
+ * region_new — a fresh empty child region of `parent`, as a `u64` handle (`tk_region_new_u`). Reuses
+ * the runtime's child-region tree (separate chunk lists — none of `arena_push`'s interleaved-bump
+ * trap); the per-function scratch region the fused emit driver bump-allocates its isel/regalloc/
+ * encode scratch into, then drops whole.
+ *
+ * @param parent  the enclosing region handle (`region_root()`)
+ * @return        the new child region handle
+ * @since 0.3.1
+ */
+extern fn region_new(parent: u64) -> u64 = "tk_region_new_u" from "teko_rt"
+
+/**
+ * region_drop — bulk-free every chunk of `region` (`tk_region_drop_u`). Called AFTER the function's
+ * outputs have been copied to the root accumulators, so the freed span holds only dead scratch
+ * (LIR mirror, MInst, interval sets, encode buffers).
+ *
+ * @param region  the child region handle to drop
+ * @return        void
+ * @since 0.3.1
+ */
+extern fn region_drop(region: u64) -> void = "tk_region_drop_u" from "teko_rt"
+
+/**
+ * region_enter — push `child` as the current region of the task: every default allocation
+ * (`list::push` and friends) subsequently bump-allocates in `child` until the matching
+ * `region_leave` (`tk_region_enter_u`). The per-scope pair of the native backend for its
+ * per-function scratch.
+ *
+ * @param child  the child region that receives the scratch
+ * @return       void
+ * @since 0.3.1
+ */
+extern fn region_enter(child: u64) -> void = "tk_region_enter_u" from "teko_rt"
+
+/**
+ * region_leave — pop the current region: default allocation returns to its prior destination (the
+ * root, at the top of the loop) (`tk_region_leave`). Called BEFORE copying the function's outputs
+ * to the object accumulators and BEFORE the child's `region_drop`.
+ *
+ * @return  void
+ * @since 0.3.1
+ */
+extern fn region_leave() -> void = "tk_region_leave" from "teko_rt"
+
+/**
+ * encode_lfunc_in_region_x86 — the per-function isel → regalloc → encode pipeline for ONE `LFunc`,
+ * meant to run with a scratch region entered: `select_lfunc_x86` (LIR → virtual `MFuncX86`),
+ * `regalloc_func_x86` (SysV coloring, the largest scratch — interval sets), then `encode_func_x86`
+ * (final `.text` bytes + function-relative relocs + the defined symbol name). Every intermediate is
+ * Group-A scratch derived from THIS function's LIR; the only output that outlives the region is the
+ * returned `EncodedFuncX86`, copied out by `fold_encoded_func_x86` before the region drops (§2).
+ *
+ * @param f  the lowered function to encode
+ * @return   the encoded function, or a propagated native honest-stop
+ * @since 0.3.1
+ */
+fn encode_lfunc_in_region_x86(f: teko::lir::LFunc) -> teko::backend::EncodedFuncX86 | error {
+    let sel = match teko::backend::select_lfunc_x86(teko::backend::SYSV64, f) { teko::backend::MFuncX86 as x => x; error as e => return e }
+    let col = match teko::backend::regalloc_func_x86(teko::backend::SYSV64, sel) { teko::backend::MFuncX86 as x => x; error as e => return e }
+    teko::backend::encode_func_x86(teko::backend::SYSV64, col)
+}
+
+/**
+ * fold_lfunc_scoped_x86 — encode ONE function inside its OWN scratch region and fold its bytes into
+ * the root-resident `.text` accumulator `mt` (the PROOF of the fix, §2). Opens a child region, enters
+ * it so all isel/regalloc/encode scratch bump-allocates there, LEAVES it (default allocation back to
+ * the root), then folds the still-live child's outputs into `mt` — `fold_encoded_func_x86`'s appends
+ * land in the ROOT (Group B), COPYING the bytes and the symbol/reloc `str` names (which originate in
+ * `prog`, not the child) — and finally DROPS the child, reclaiming the whole per-function scratch. On
+ * a native honest-stop the child is LEFT for `tk_regions_free_all` (leak-tolerant, M.5) rather than
+ * dropped, because the error's message may have been interned inside the window and is read by the
+ * caller after this returns.
+ *
+ * @param mt  the root-resident running `.text` accumulator
+ * @param f   the lowered function to encode and fold
+ * @return    the extended accumulator, or the propagated honest-stop
+ * @since 0.3.1
+ */
+fn fold_lfunc_scoped_x86(mt: teko::backend::ModuleTextX86, f: teko::lir::LFunc) -> teko::backend::ModuleTextX86 | error {
+    let child = region_new(region_root())
+    region_enter(child)
+    let encoded = encode_lfunc_in_region_x86(f)
+    region_leave()
+    match encoded {
+        teko::backend::EncodedFuncX86 as ef => {
+            let out = teko::backend::fold_encoded_func_x86(mt, ef)
+            region_drop(child)
+            out
+        }
+        error as e => e
+    }
+}
+
+/**
+ * encode_module_fused_x86 — the FUSED per-function native encode of a whole module: instead of three
+ * module-wide passes (`select_module_x86` → `regalloc_module_x86` → `encode_module_x86`), which keep
+ * every function's MInst live at once, loop over `entry.funcs` folding each function through its own
+ * scratch region (`fold_lfunc_scoped_x86`), then assemble the final `EncodedModuleX86` from the
+ * root-resident accumulator plus the module's persistent rodata/globals (Group B, by-reference —
+ * §2 exception E2). The emitted bytes are byte-identical to the module-at-a-time path: the scratch
+ * region only changes WHERE the intermediates are bump-allocated, never their computed values.
+ *
+ * @param entry  the platform-ABI-wrapped lowered module
+ * @return       the encoded module (section images + ordered symbols + relocs), or a honest-stop
+ * @since 0.3.1
+ */
+fn encode_module_fused_x86(entry: teko::lir::LModule) -> teko::backend::EncodedModuleX86 | error {
+    mut mt = teko::backend::empty_module_text_x86()
+    mut i: u64 = 0
+    loop {
+        if i >= entry.funcs.len { break }
+        mt = match fold_lfunc_scoped_x86(mt, entry.funcs[i]) { teko::backend::ModuleTextX86 as x => x; error as e => return e }
+        i++
+    }
+    teko::backend::finish_encoded_module_x86(mt, entry.rodata, entry.globals)
+}
+
+/**
  * emit_native_x86 — the x86-64/ELF own-backend tail (#386 B1): give `lmod` the platform-ABI entry
  * point (`teko::lir::wrap_native_entry` — `argc`/`argv` + `tk_set_args`, 0.3.1 native-args fix),
- * select x86-64 `MInstX86` from the wrapped module, allocate registers under the SysV AMD64
- * register file (`sysv64`), encode to variable-length x86 machine bytes, wrap them
- * in an `ET_REL` ELF64 object (`emit_elf`), and hand the bytes to
- * `finish_native_object` (write `.o` + `cc`-link + `.tsym` + success marker).
+ * then encode it through the FUSED per-function driver (`encode_module_fused_x86`, 0.3.1
+ * backend-memoria) that scopes each function's isel/regalloc/encode scratch to a child region and
+ * drops it after folding — bounding the native peak to `LIR + one live MFunc` instead of the whole
+ * module's MInst held at once. The result is wrapped in an `ET_REL` ELF64 object (`emit_elf`) and
+ * handed to `finish_native_object` (write `.o` + `cc`-link + `.tsym` + success marker).
  * Reached only via `TEKO_TARGET=x86_64-linux`; the emitted `.o` is a linux x86-64
  * object, so the executing C-vs-own differential runs on a linux-x86_64 host
  * (`scripts/diff_c_own.sh`), while a macOS host still writes the `.o` for the
@@ -2639,10 +2768,10 @@ fn emit_native_arm64_linux(dir: str, od: str, stem: str, lmod: teko::lir::LModul
  */
 fn emit_native_x86(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog: checker::TProgram, m: Manifest) -> i32 {
     let entry = match teko::lir::wrap_native_entry(lmod) { teko::lir::LModule as x => x; error as e => return fail(dir, e.message) }
-    let sel = match teko::backend::select_module_x86(teko::backend::SYSV64, entry) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
-    let col = match teko::backend::regalloc_module_x86(teko::backend::SYSV64, sel) { teko::backend::MModuleX86 as x => x; error as e => return fail(dir, e.message) }
-    let enc = match teko::backend::encode_module_x86(teko::backend::SYSV64, col) { teko::backend::EncodedModuleX86 as x => x; error as e => return fail(dir, e.message) }
-    finish_native_object(dir, od, stem, teko::backend::emit_elf(enc), prog, m)
+    match encode_module_fused_x86(entry) {
+        teko::backend::EncodedModuleX86 as enc => finish_native_object(dir, od, stem, teko::backend::emit_elf(enc), prog, m)
+        error as e => fail(dir, e.message)
+    }
 }
 
 /**

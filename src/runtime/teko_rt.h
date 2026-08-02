@@ -182,6 +182,25 @@ void       tk_arena_pop(void);                  // free every root-region chunk 
 // folded permanently into the (now-current) mark below it. The Boundary-A counterpart to
 // tk_arena_pop: a scope that turned out to ESCAPE commits its allocations instead of losing them.
 void       tk_arena_commit(void);               // discard the top mark, keeping its allocations
+// (0.3.1 backend-memoria C1) tk_region_enter / tk_region_leave — the SWAPPABLE CURRENT REGION. A
+// per-task stack of "current region": tk_alloc bump-allocates from the stack TOP instead of a fixed
+// tk_region_root(). An EMPTY stack ⇒ the root, so a program that never enters is byte-for-byte the
+// program it was (behaviour-identical). Reuses the tk_region_new/tk_region_drop child tree (separate
+// chunk lists — NONE of tk_arena_push's interleaved-bump trap), letting the native backend route its
+// per-function scratch into a child region and drop it wholesale after copying the emitted bytes to
+// the root object accumulators. Balanced enter/leave; an over-deep enter is counted but not stored
+// (leave then no-ops), keeping enter/leave balanced without ever reading past the fixed stack.
+void       tk_region_enter(tk_region *child);   // push `child` as the current region for tk_alloc
+void       tk_region_leave(void);               // pop the current region (back to the enclosing one, else root)
+// (0.3.1 backend-memoria C1) the u64-HANDLE ABI the Teko `extern fn` surface binds to: a tk_region*
+// travels through Teko as a `u64` (uintptr_t), so these thin twins take/return that width and cast
+// at the boundary, matching the extern prototypes byte-for-byte (no int↔pointer conversion warning
+// in the C route). The native backend passes the same 64-bit word untouched. tk_region_leave has no
+// pointer in its signature, so the Teko surface binds it directly (no twin needed).
+uint64_t   tk_region_new_u(uint64_t parent);    // tk_region_new((tk_region*)parent) as a handle
+uint64_t   tk_region_root_u(void);              // tk_region_root() as a handle
+void       tk_region_drop_u(uint64_t region);   // tk_region_drop((tk_region*)region)
+void       tk_region_enter_u(uint64_t child);   // tk_region_enter((tk_region*)child)
 // tk_region_register — bind `type_id` → `instance` in `r`'s OWN table (never an ancestor's; a
 // second registration of the same type_id in the same region OVERWRITES — the compiler is
 // expected to enforce true duplicate-registration errors at a higher DI layer; this is just the
