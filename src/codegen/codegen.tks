@@ -8222,15 +8222,20 @@ fn cg_block_slice_accums(prog: CgProg, escaping: []str, fn_body: []checker::TSta
  * decision (`cg_block_has_block_local`) and the decls map (`cg_block_slice_accums`) consult this ONE
  * predicate, so a region is opened exactly when — and only when — an accumulator will route into it.
  *
+ * A `#singleton` binding is EXCLUDED (A6): the residence oracle forces it to the Root tier, so the
+ * codegen routes it to `tk_region_root()` (emit_binding) and it must never earn a per-block region
+ * that would reclaim it at the block's exit — it outlives every enclosing scope.
+ *
  * @param escaping   the function's escaping-name set
  * @param fn_body    the whole enclosing function body
  * @param body       the block `b` is declared at the top of
  * @param is_value   does `body` yield a value?
  * @param b          the typed binding
- * @return           true iff `b` is a block-local slice binding
+ * @return           true iff `b` is a non-`#singleton` block-local slice binding
  * @since 0.3.1
  */
 fn cg_binding_is_block_local_slice(escaping: []str, fn_body: []checker::TStatement, body: []checker::TStatement, is_value: bool, b: checker::TBinding) -> bool {
+    if b.di_kind == parser::DiKind::Singleton { return false }
     match b.bound {
         checker::Slice => checker::binding_is_block_local(escaping, fn_body, body, is_value, b)
         _ => false
@@ -8757,6 +8762,10 @@ fn emit_binding(buf: []byte, prog: CgProg, ret_type: checker::Type, b: checker::
     out = cb(out, " ")
     out = cb_ident(out, name)
     out = cb(out, " = ")
+    if b.di_kind == parser::DiKind::Singleton {
+        out = match emit_as_r_in(out, prog, ret_type, b.bound, b.value, "", escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+        return cb(out, ";\n")
+    }
     if cg_binding_grows_escaping_slice(escaping, dctx, b) {
         match b.value.kind {
             checker::TCall as c => {
