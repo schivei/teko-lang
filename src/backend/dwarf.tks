@@ -27,6 +27,23 @@ const LEB_MORE: u64 = 0x80
 const SLEB_SIGN: i64 = 0x40
 
 /**
+ * SLEB_LOW7 — the signed low-7-bit mask for one SLEB128 group. The signed twin of `LEB_LOW7`, kept
+ * `i64` so the mask against the signed accumulator has a lossless common type (a same-width
+ * signed/unsigned mix has none).
+ *
+ * @since 0.3.1.0
+ */
+const SLEB_LOW7: i64 = 0x7F
+
+/**
+ * SLEB_MORE — the signed SLEB128 continuation bit. The signed twin of `LEB_MORE`, kept `i64` so it
+ * ors cleanly into a signed group.
+ *
+ * @since 0.3.1.0
+ */
+const SLEB_MORE: i64 = 0x80
+
+/**
  * emit_byte — append the low byte of `v` to `buf`.
  *
  * @param buf  the buffer to extend
@@ -52,14 +69,14 @@ fn emit_u16_le(buf: []byte, v: u64) -> []byte {
 }
 
 /**
- * emit_u32_le — append `v`'s low 32 bits to `buf`, little-endian (DWARF `sec_offset` / `data4`).
+ * emit_u32_le_dw — append `v`'s low 32 bits to `buf`, little-endian (DWARF `sec_offset` / `data4`).
  *
  * @param buf  the buffer to extend
  * @param v    the value whose low 32 bits are appended
  * @return     `buf` followed by four little-endian bytes
  * @since 0.3.1.0
  */
-fn emit_u32_le(buf: []byte, v: u64) -> []byte {
+fn emit_u32_le_dw(buf: []byte, v: u64) -> []byte {
     mut b = emit_byte(buf, v)
     b = emit_byte(b, v >> 8)
     b = emit_byte(b, v >> 16)
@@ -67,7 +84,7 @@ fn emit_u32_le(buf: []byte, v: u64) -> []byte {
 }
 
 /**
- * emit_u64_le — append `v`'s 64 bits to `buf`, little-endian (DWARF `data8`, used for the
+ * emit_u64_le_dw — append `v`'s 64 bits to `buf`, little-endian (DWARF `data8`, used for the
  * function high_pc which is a size constant, not an address).
  *
  * @param buf  the buffer to extend
@@ -75,7 +92,7 @@ fn emit_u32_le(buf: []byte, v: u64) -> []byte {
  * @return     `buf` followed by eight little-endian bytes
  * @since 0.3.1.0
  */
-fn emit_u64_le(buf: []byte, v: u64) -> []byte {
+fn emit_u64_le_dw(buf: []byte, v: u64) -> []byte {
     mut b = buf
     mut shift: u64 = 0
     loop {
@@ -95,7 +112,7 @@ fn emit_u64_le(buf: []byte, v: u64) -> []byte {
  * @since 0.3.1.0
  */
 fn emit_addr_slot(buf: []byte) -> []byte {
-    emit_u64_le(buf, 0 to u64)
+    emit_u64_le_dw(buf, 0 to u64)
 }
 
 /**
@@ -157,15 +174,15 @@ pub fn sleb128(buf: []byte, v: i64) -> []byte {
     mut b = buf
     mut val = v
     loop {
-        let group = val & LEB_LOW7
+        let group = val & SLEB_LOW7
         val = val >> 7
         let sign_set = (group & SLEB_SIGN) != 0
-        let done = (val == 0 && !sign_set) || (val == (-1 to i64) && sign_set)
+        let done = (val == 0 && !sign_set) || (val == -1 && sign_set)
         if done {
             b = teko::list::push(b, group to byte)
             break
         }
-        b = teko::list::push(b, (group | LEB_MORE) to byte)
+        b = teko::list::push(b, (group | SLEB_MORE) to byte)
     }
     b
 }
@@ -342,7 +359,7 @@ fn emit_subprogram_die(body: []byte, relocs: []DwReloc, base: u64, sub: DwSubpro
     let low_pc_off = base + b.len
     b = emit_addr_slot(b)
     let r = teko::list::push(relocs, DwReloc { offset = low_pc_off; symbol = sub.symbol })
-    b = emit_u64_le(b, sub.code_size)
+    b = emit_u64_le_dw(b, sub.code_size)
     DwSection { bytes = b; relocs = r }
 }
 
@@ -367,8 +384,8 @@ pub fn debug_info(cu: DwCompileUnit) -> DwSection {
     let cu_low_pc_off = header_len_prefix() + body.len
     body = emit_addr_slot(body)
     relocs = teko::list::push(relocs, DwReloc { offset = cu_low_pc_off; symbol = cu.text_symbol })
-    body = emit_u64_le(body, cu.text_size)
-    body = emit_u32_le(body, 0 to u64)
+    body = emit_u64_le_dw(body, cu.text_size)
+    body = emit_u32_le_dw(body, 0 to u64)
     mut i: u64 = 0
     loop {
         if i >= cu.subprograms.len { break }
@@ -378,13 +395,13 @@ pub fn debug_info(cu: DwCompileUnit) -> DwSection {
         i = i + 1
     }
     body = teko::list::push(body, 0x00 to byte)
-    let unit_length = (2 + 4 + 1 + body.len) to u64
+    let unit_length = body.len + 2 + 4 + 1
     mut out: []byte = teko::list::empty()
-    out = emit_u32_le(out, unit_length)
+    out = emit_u32_le_dw(out, unit_length)
     out = emit_u16_le(out, 4 to u64)
-    out = emit_u32_le(out, 0 to u64)
+    out = emit_u32_le_dw(out, 0 to u64)
     out = teko::list::push(out, 0x08 to byte)
-    out = append_bytes(out, body)
+    out = append_bytes_dw(out, body)
     DwSection { bytes = out; relocs = relocs }
 }
 
@@ -401,7 +418,7 @@ fn header_len_prefix() -> u64 {
 }
 
 /**
- * append_bytes — `dst` with every byte of `src` appended, in order (no slice-concat builtin over
+ * append_bytes_dw — `dst` with every byte of `src` appended, in order (no slice-concat builtin over
  * `[]byte` here).
  *
  * @param dst  the buffer to extend
@@ -409,7 +426,7 @@ fn header_len_prefix() -> u64 {
  * @return     `dst` followed by `src`
  * @since 0.3.1.0
  */
-fn append_bytes(dst: []byte, src: []byte) -> []byte {
+fn append_bytes_dw(dst: []byte, src: []byte) -> []byte {
     mut b = dst
     mut i: u64 = 0
     loop {
@@ -556,14 +573,14 @@ pub fn debug_line(file: str, start_symbol: str, rows: []DwLineRow, final_pc_adva
     prog = teko::list::push(prog, 0x00 to byte)
     prog = teko::list::push(prog, 0x01 to byte)
     prog = teko::list::push(prog, 0x01 to byte)
-    let header_length = header.len to u64
-    let unit_length = (2 + 4 + header.len + prog.len) to u64
+    let header_length = header.len
+    let unit_length = header.len + prog.len + 2 + 4
     mut out: []byte = teko::list::empty()
-    out = emit_u32_le(out, unit_length)
+    out = emit_u32_le_dw(out, unit_length)
     out = emit_u16_le(out, 4 to u64)
-    out = emit_u32_le(out, header_length)
-    out = append_bytes(out, header)
-    out = append_bytes(out, prog)
+    out = emit_u32_le_dw(out, header_length)
+    out = append_bytes_dw(out, header)
+    out = append_bytes_dw(out, prog)
     let relocs = teko::list::push(teko::list::empty(), DwReloc { offset = set_addr_slot; symbol = start_symbol })
     DwSection { bytes = out; relocs = relocs }
 }

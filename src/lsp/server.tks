@@ -190,7 +190,7 @@ pub fn handle_request(req: json::JsonValue) -> json::JsonValue | null {
     if method == "shutdown" { return response(id, jnull()) }
     if method == "initialized" { return null }
     if method == "exit" { return null }
-    if has_id(req) { return error_response(id, -32601 to i64, teko::str::concat("method not found: ", method)) }
+    if has_id(req) { return error_response(id, -32601, teko::str::concat("method not found: ", method)) }
     null
 }
 
@@ -206,16 +206,17 @@ pub fn handle_request(req: json::JsonValue) -> json::JsonValue | null {
 pub fn run_lsp() -> i32 {
     mut shutdown_seen = false
     loop {
-        let msg = match read_message() {
-            RpcMessage as m => m
+        match read_message() {
+            RpcMessage as msg => {
+                let method = method_of(msg.body)
+                if method == "exit" { break }
+                if method == "shutdown" { shutdown_seen = true }
+                match handle_request(msg.body) {
+                    json::JsonValue as resp => write_message(resp)
+                    null => { }
+                }
+            }
             error => break
-        }
-        let method = method_of(msg.body)
-        if method == "exit" { break }
-        if method == "shutdown" { shutdown_seen = true }
-        match handle_request(msg.body) {
-            json::JsonValue as resp => write_message(resp)
-            null => { }
         }
     }
     if shutdown_seen { 0 } else { 1 }
