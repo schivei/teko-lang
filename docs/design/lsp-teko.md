@@ -594,31 +594,40 @@ release, vsix, tags) fecham em P7, depois dos dois trilhos entregarem superficie
 
 ---
 
-## 10. Regressoes — fixtures (entrada -> codigo de saida nativo esperado)
+## 10. Regressoes — fixtures (entrada -> TEXTO de stdout esperado)
 
-Estilo de arnes: um harness `.tkt`/`.tkr` que **repete** um roteiro de requisicoes
-JSON-RPC contra o binario e compara as respostas; saida `0` = match, `!=0` = divergencia.
-Isto e o mesmo padrao de arnes que o debugger ja fixou como "o ativo e o teste, o codigo e
-descartavel".
+**LEI DESTA LANE (dono 2026-08-02):** *"Esta PROIBIDO olhar para o exit, tem que olhar para
+STDOUT."* Exit code e sinal fraco — o wraparound `exit 256` -> `0` nao distingue "morreu" de
+"passou 0", e por isso o corpus inteiro migrou de exit para stdout. Portanto **nenhuma prova
+desta lane afirma exit code; toda prova afirma o TEXTO impresso** (stdout, ou o canal de
+texto do arnes). A unica excecao ja ratificada e um teste cujo ASSUNTO E o proprio
+trap/exit (ex.: provar que uma syscall de exit dispara em modo programa) — e mesmo esse
+casa o TEXTO do panico, nao o codigo.
 
-| Fixture | Entrada | Saida esperada |
+Estilo de arnes: o harness `.tkt`/`.tkr` **repete** um roteiro de requisicoes JSON-RPC
+contra o binario, e o programa/fixture **IMPRIME** o resultado (a resposta JSON-RPC, a
+lista de referencias, o diagnostico, o valor renderizado). A fixture **casa a STRING de
+stdout** — nunca o codigo de saida. Erro honesto continua valendo, provado pelo texto do
+diagnostico impresso, nao por um exit != 0.
+
+| Fixture | Entrada | Stdout esperado (a asercao e o TEXTO) |
 |---|---|---|
-| `lsp_initialize.tkr` | `initialize` -> capabilities anunciam SO definition/references/implementation/hover que existem | exit 0 |
-| `lsp_framing_truncated.tkr` | frame com `Content-Length` maior que o corpo (EOF no meio) | exit != 0 (erro honesto, nunca aceite silenciosa) |
-| `lsp_goto_def.tkr` | cursor sobre um uso de tipo em ns A -> Location da decl em ns A | exit 0 |
-| `lsp_goto_def_ns_collision.tkr` | dois `push` homonimos em ns A/B; cursor no de A -> so a decl de A (prova `canon`, nao texto) | exit 0 |
-| `lsp_references.tkr` | um metodo com 3 usos em corpos + 1 decl; `includeDeclaration=true` -> 4 locais | exit 0 |
-| `lsp_references_bodies.tkr` | uso dentro de um corpo de funcao (nao so assinatura) aparece | exit 0 (prova a metade cara de L3) |
-| `lsp_goto_impl.tkr` | cursor num metodo de interface -> os N tipos concretos que implementam | exit 0 |
-| `lsp_goto_impl_inverse.tkr` | cursor num metodo concreto -> o contrato que ele satisfaz | exit 0 |
-| `lsp_hover_sig.tkr` | cursor numa fn -> assinatura renderizada | exit 0 |
-| `lsp_execcmd_build.tkr` | `workspace/executeCommand teko.build <proj-ok>` -> exit 0 do filho | exit 0 |
-| `lsp_execcmd_build_fail.tkr` | idem sobre projeto com erro de tipo -> codigo != 0 do filho propagado, sem panico do servidor | exit 0 (o teste verifica a PROPAGACAO) |
-| `lsp_execcmd_no_shell.tkr` | projdir com metacaracteres de shell (`; rm -rf`) -> argv-vector, nenhum efeito de shell | exit 0 (prova a lei anti-injecao) |
-| `dbg_break_line.tkr` | breakpoint numa linha `.tks` -> para com nome Teko da funcao e file:line | exit 0 |
-| `dbg_bt_frameless.tkr` | `bt` atraves de uma funcao frameless mantem a profundidade (fixture `adv.s` do D0.1) | exit 0 |
-| `dbg_render_str.tkr` | `print` de um `str` -> texto, nao ptr+len crus | exit 0 (prova Teko-aware, DE.4) |
-| `dbg_render_variant.tkr` | `print` de `T | null` = `null` e de `T | error` -> tag/valor por nome Teko | exit 0 |
+| `lsp_initialize.tkr` | `initialize` | stdout casa a resposta JSON com `capabilities` anunciando SO `definitionProvider`/`referencesProvider`/`implementationProvider`/`hoverProvider` que existem (nada a mais) |
+| `lsp_framing_truncated.tkr` | frame com `Content-Length` maior que o corpo (EOF no meio) | stdout/stderr casa o TEXTO do diagnostico `malformed frame: truncated body` (erro honesto impresso — nunca aceite silenciosa, provado pelo texto) |
+| `lsp_goto_def.tkr` | cursor sobre um uso de tipo em ns A | stdout casa o `Location` da decl em ns A (uri + `range` file:line:col impressos) |
+| `lsp_goto_def_ns_collision.tkr` | dois `push` homonimos em ns A/B; cursor no de A | stdout casa SO a `Location` da decl de A (prova `canon`, nao texto) |
+| `lsp_references.tkr` | um metodo com 3 usos em corpos + 1 decl; `includeDeclaration=true` | stdout lista os 4 `Location` (as 4 posicoes file:line:col impressas) |
+| `lsp_references_bodies.tkr` | uso dentro de um corpo de funcao (nao so assinatura) | stdout inclui a `Location` do uso no corpo (prova a metade cara de L3) |
+| `lsp_goto_impl.tkr` | cursor num metodo de interface | stdout lista os N tipos concretos que implementam (N `Location` impressos) |
+| `lsp_goto_impl_inverse.tkr` | cursor num metodo concreto | stdout casa a `Location` do contrato que ele satisfaz |
+| `lsp_hover_sig.tkr` | cursor numa fn | stdout casa a assinatura renderizada em Markdown (a string exata) |
+| `lsp_execcmd_build.tkr` | `workspace/executeCommand teko.build <proj-ok>` | stdout casa a saida de compilacao transmitida + a linha final `build ok` (o TEXTO do resultado, nao o codigo do filho) |
+| `lsp_execcmd_build_fail.tkr` | idem sobre projeto com erro de tipo | stdout casa o TEXTO do diagnostico do compilador (ex.: `E<n>: type mismatch ... file:line`) transmitido ao cliente, sem panico do servidor (prova a PROPAGACAO pelo texto) |
+| `lsp_execcmd_no_shell.tkr` | projdir com metacaracteres de shell (`; rm -rf`) | stdout casa o TEXTO que trata o projdir como UM argumento literal (ex.: `no such project: '; rm -rf'`) e o ficheiro-sentinela NAO existe (prova argv-vector / anti-injecao pelo texto) |
+| `dbg_break_line.tkr` | breakpoint numa linha `.tks` | stdout casa `stopped at <fn-teko> (<file>:<line>)` — o nome Teko e a posicao impressos |
+| `dbg_bt_frameless.tkr` | `bt` atraves de uma funcao frameless (fixture `adv.s` do D0.1) | stdout casa a pilha impressa com a profundidade correta atraves da moldura frameless (as N molduras nomeadas) |
+| `dbg_render_str.tkr` | `print` de um `str` | stdout casa o TEXTO do conteudo da string (nao `ptr=... len=...` crus) — prova Teko-aware DE.4 |
+| `dbg_render_variant.tkr` | `print` de `T | null` = `null` e de `T | error` | stdout casa `null` e `error { message = "..." }` por NOME Teko (nao bytes de tag) |
 
 ---
 
