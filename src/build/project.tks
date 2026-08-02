@@ -3600,7 +3600,7 @@ fn native_gate_run(od: str, gp: GatePaths, merge_cov: bool) -> i32 {
     if cross.is_cross { teko::io::println(cross.note); return 0 }
     let jobs = test_jobs()
     let rc = if jobs > 1 { run_gate_sharded(od, gp.stem, gp.binp, jobs) } else { run_gate_single(gp) }
-    if merge_cov { merge_gate_coverage(od, gp, jobs, rc) }
+    if merge_cov { return merge_gate_coverage(od, gp, jobs, rc) }
     rc
 }
 
@@ -3628,12 +3628,59 @@ fn run_gate_single(gp: GatePaths) -> i32 {
  * @param gp    the gate's paths
  * @param jobs  how many shards ran (1 = the single-process path)
  * @param trc   the gate run's exit status
+ * @return      `trc` when every expected dump was present, else a non-zero status naming the shard
+ *              whose dump was missing (a run whose coverage cannot be measured is not a pass)
  * @since 0.3.1.0
  */
-fn merge_gate_coverage(od: str, gp: GatePaths, jobs: u64, trc: i32) -> void {
-    if jobs > 1 { merge_shard_coverage(gate_shard_base(od, gp.stem), jobs); return }
+fn merge_gate_coverage(od: str, gp: GatePaths, jobs: u64, trc: i32) -> i32 {
+    if jobs > 1 { return merge_sharded_coverage(gate_shard_base(od, gp.stem), jobs, trc) }
     if trc == 0 { coverage::cov_merge(gp.covfile) }
+    trc
 }
+
+/**
+ * merge_sharded_coverage — fold the shards' dumps, and REQUIRE every one only on an otherwise-green
+ * run. A run that already failed has no floors to enforce (`enforce_coverage_floors` runs only when
+ * `trc == 0`), and a failing shard legitimately may not have dumped — so there the merge is
+ * best-effort and silent. A GREEN run is the one whose floors are computed, and a missing dump there
+ * is the measured defect (§2.4): it names the shard and fails, rather than floating on a stale file.
+ *
+ * @param base  the shards' scratch prefix directory
+ * @param jobs  how many shards ran
+ * @param trc   the gate run's exit status
+ * @return      `trc` when complete (or already failing), else `COVERAGE_MISSING_STATUS`
+ * @since 0.3.1.0
+ */
+fn merge_sharded_coverage(base: str, jobs: u64, trc: i32) -> i32 {
+    if trc != 0 { merge_shard_coverage_lenient(base, jobs); return trc }
+    match merge_shard_coverage(base, jobs) {
+        error as e => { teko::io::eprintln(e.message); return COVERAGE_MISSING_STATUS }
+        null => trc
+    }
+}
+
+/**
+ * merge_shard_coverage_lenient — fold every shard's dump best-effort, ignoring a missing one. The
+ * failing-run path: coverage is moot when the run already fails, so a missing dump is not surfaced.
+ *
+ * @param base  the shards' scratch prefix directory
+ * @param jobs  how many shards ran
+ * @since 0.3.1.0
+ */
+fn merge_shard_coverage_lenient(base: str, jobs: u64) -> void {
+    mut i: u64 = 0
+    loop {
+        if i >= jobs { break }
+        coverage::cov_merge(teko::str::concat(base, $"{i}", ".tkcov"))
+        i = i + 1
+    }
+}
+
+/**
+ * COVERAGE_MISSING_STATUS — the exit status a GREEN run takes when a shard left no coverage dump.
+ * Non-zero, because the floors cannot be measured over a missing file.
+ */
+const COVERAGE_MISSING_STATUS: i32 = 1
 
 /**
  * gate_shard_base — the scratch prefix directory a sharded gate run hangs its per-shard capture
@@ -3753,19 +3800,27 @@ fn report_shard_captures(caps: []CapResult) {
 
 /**
  * merge_shard_coverage — fold every shard's own `.tkcov` dump into this process's coverage sinks, so
- * the floors see the UNION of the shards. A shard that produced no dump merges nothing, which is what
- * `cov_merge` already does for a missing file.
+ * the floors see the UNION of the shards, and STOP the moment one is missing.
+ *
+ * THE DEFECT THIS CLOSES IS MEASURED IN TODAY'S TREE. `cov_merge` returns a `bool` the old version
+ * DISCARDED, and nothing removed `<base><i>.tkcov` between runs — so a shard that died before
+ * dumping left the PREVIOUS run's file in place and the floors were computed over it. A missing dump
+ * is a fact about the run, not a zero: this names the shard and fails.
  *
  * @param base  the shards' scratch prefix directory
  * @param jobs  how many shards ran
+ * @throws      when a shard left no coverage dump — the run stops, with the shard named
+ * @since 0.3.1.0
  */
-fn merge_shard_coverage(base: str, jobs: u64) {
+fn merge_shard_coverage(base: str, jobs: u64) -> null | error {
     mut i: u64 = 0
     loop {
         if i >= jobs { break }
-        coverage::cov_merge(teko::str::concat(base, $"{i}", ".tkcov"))
+        let p = teko::str::concat(base, $"{i}", ".tkcov")
+        if !coverage::cov_merge(p) { return error { message = teko::str::concat("teko: shard ", teko::str::u64_to_str(i), " left no coverage dump (", p, ")") } }
         i = i + 1
     }
+    null
 }
 
 /**
@@ -5783,7 +5838,8 @@ fn test_stage_report(dir: str, gen_cov: bool, cov_validation: bool, per_test_cov
     let regr_rc = stage_rc_of_env(TEST_REGR_RC_ENV)
     let fe = match recheck_frontend(dir) { Frontend as x => x; error as e => return fail(dir, e.message) }
     let acr = checker::arith_cast_rate_report(fe.prog)
-    merge_gate_coverage(GATE_OUT_DIR, gate_paths(GATE_OUT_DIR, fe.manifest), test_jobs(), trc)
+    let cov_rc = merge_gate_coverage(GATE_OUT_DIR, gate_paths(GATE_OUT_DIR, fe.manifest), test_jobs(), trc)
+    if trc == 0 && cov_rc != 0 { return cov_rc }
     let pre_regr_cob = coverage::cov_cobertura(fe.prog)
     merge_regression_coverage()
     if gen_cov {

@@ -1,0 +1,774 @@
+/**
+ * teko::journal::summary — the whole-run verdict, RE-READ from the journal (§13).
+ *
+ * THE SUMMARY IS A FOLD, NOT AN ACCUMULATOR. Both phases (unit and regression) write to the same
+ * run root, so there is nothing to merge at the end: the summary of both is a `fold` over one root,
+ * and the phase of each record derives from its writer prefix (`s<i>` unit, `r<i>` regression, `m`
+ * orchestrator). That is why it survives the death of the run that produced it — a killed
+ * orchestrator left the segments on disk, and `teko test --replay <run>` re-reads them into the
+ * same block.
+ *
+ * NAMED, NEVER MERELY COUNTED. "1 skipped" cannot be acted on; a skip in this project's own CI IS a
+ * failure (`scripts/no_skips_gate.sh`), and a law without an instrument is a law nobody applies. So
+ * every failure, every skip and every dead writer is carried by NAME, with the honest reason its
+ * producer already wrote.
+ *
+ * @since 0.3.1
+ */
+
+/**
+ * PhaseTally — a count split across the two phases and their total, for one outcome (passed,
+ * failed, skipped, or never-ran).
+ *
+ * @since 0.3.1
+ */
+pub type PhaseTally = struct {
+    /** the count from unit shards (`s<i>` writers). */
+    unit: u64
+    /** the count from regression children (`r<i>` writers). */
+    regression: u64
+    /** the sum of both phases. */
+    total: u64
+}
+
+/**
+ * CovTriple — the coverage measured across a run's dumps: covered/valid for functions, lines and
+ * branches, summed from the `cov` records the folds carry.
+ *
+ * @since 0.3.1
+ */
+pub type CovTriple = struct {
+    /** functions covered. */
+    fn_cov: u64
+    /** functions valid (total). */
+    fn_val: u64
+    /** lines covered. */
+    line_cov: u64
+    /** lines valid (total). */
+    line_val: u64
+    /** branches covered. */
+    br_cov: u64
+    /** branches valid (total). */
+    br_val: u64
+}
+
+/**
+ * Finding — ONE named result of the summary: a failure, a skip, or a writer that died.
+ *
+ * NAMED, NEVER COUNTED. A number cannot be acted on; a name can. This is the instrument the skip law
+ * needs.
+ *
+ * @since 0.3.1
+ */
+pub type Finding = struct {
+    /** `unit` or `regression`, derived from the writer prefix. */
+    phase: str
+    /** the writer that produced it (`s2`, `r0`, `m`). */
+    writer: str
+    /** what it names: the `#test`, or `<file>.tkr[<scenario> line <n>]`. */
+    label: str
+    /** why — the honest reason the producer already writes, carried rather than summarised. */
+    reason: str
+}
+
+/**
+ * RunSummary — the WHOLE verdict of a run: both phases, the named findings, the coverage.
+ *
+ * @since 0.3.1
+ */
+pub type RunSummary = struct {
+    /** the stamp of the run this summary describes. */
+    run: str
+    /** tests/lines that passed, per phase and in total. */
+    passed: PhaseTally
+    /** those that failed. */
+    failed: PhaseTally
+    /** those skipped for an absent capability. */
+    skipped: PhaseTally
+    /** those that NEVER ran because the writer died before reaching them (`plan` minus the rest). */
+    never_ran: PhaseTally
+    /** every failure, named. */
+    fails: []Finding
+    /** every skip, named WITH its reason. */
+    skips: []Finding
+    /** every writer with no terminal record, with the last test it began. */
+    dead: []Finding
+    /** functions/lines/branches measured, from the fold of this run's dumps. */
+    cov: CovTriple
+    /** how many coverage dumps were expected and did not appear (§2.4). */
+    cov_missing: u64
+}
+
+/**
+ * WriterStat — the per-writer aggregate `summarize` derives from the records of ONE writer: its
+ * plan, its verdict counts, whether it closed, and the coverage it dumped. Private: it is the shape
+ * `summarize` folds writers into before it fills the `RunSummary`.
+ *
+ * @since 0.3.1
+ */
+type WriterStat = struct {
+    /** the writer this stat is of. */
+    writer: str
+    /** `unit`, `regression`, or "" for the orchestrator. */
+    phase: str
+    /** how many tests this writer declared it would run (0 when it declared no plan). */
+    plan: u64
+    /** whether the writer declared a plan at all. */
+    has_plan: bool
+    /** tests that passed. */
+    ok: u64
+    /** tests that failed. */
+    fail: u64
+    /** tests that were skipped. */
+    skip: u64
+    /** whether the writer wrote a terminal (`end`/`stop`) record. */
+    has_end: bool
+    /** the last test this writer began (the one it died in, when dead). */
+    last_begin: str
+    /** whether the writer dumped a `cov` record. */
+    has_cov: bool
+    /** the coverage this writer dumped. */
+    cov: CovTriple
+}
+
+/**
+ * LabelReason — a `label`/`reason` pair split from a `fail`/`skip` record's payload (`label` then a
+ * `FIELD_SEP` then the reason). Private helper shape for `split_first_tab`.
+ *
+ * @since 0.3.1
+ */
+type LabelReason = struct {
+    /** the test/scenario name, the part before the first tab. */
+    label: str
+    /** the honest reason, the remainder. */
+    reason: str
+}
+
+/**
+ * phase_of — the phase a writer belongs to, from its first byte: `s` is a unit shard, `r` a
+ * regression child, anything else the orchestrator (which contributes to no phase tally).
+ *
+ * @param writer  a writer identity
+ * @return        `unit`, `regression`, or ""
+ * @since 0.3.1
+ */
+fn phase_of(writer: str) -> str {
+    if writer.len == 0 { return "" }
+    if writer[0] == b's' { return "unit" }
+    if writer[0] == b'r' { return "regression" }
+    ""
+}
+
+/**
+ * split_first_tab — split a payload at its FIRST `TAB` into a label and the reason remainder. A
+ * payload with no tab is all label and an empty reason.
+ *
+ * @param payload  a `fail`/`skip` record's payload
+ * @return         the label and the reason
+ * @since 0.3.1
+ */
+fn split_first_tab(payload: str) -> LabelReason {
+    let tab = b'\t'
+    mut i: u64 = 0
+    loop {
+        if i >= payload.len { break }
+        if payload[i] == tab {
+            return LabelReason { label = teko::str::slice_to(payload, i); reason = teko::str::slice_from(payload, i + 1) }
+        }
+        i = i + 1
+    }
+    LabelReason { label = payload; reason = "" }
+}
+
+/**
+ * parse_u64 — the leading decimal `u64` in `s`, read digit by digit (the corpus has no string→int
+ * intrinsic). A string with no leading digit answers 0.
+ *
+ * @param s  a decimal string
+ * @return   its value, or 0
+ * @since 0.3.1
+ */
+fn parse_u64(s: str) -> u64 {
+    mut v: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= s.len { break }
+        let c = s[i]
+        if c < b'0' || c > b'9' { break }
+        v = (v * 10) + ((c to u64) - (b'0' to u64))
+        i = i + 1
+    }
+    v
+}
+
+/**
+ * nth_field — the `n`-th (0-based) `TAB`-separated field of `s`, or "" when `s` has fewer fields.
+ *
+ * @param s  a tab-separated payload
+ * @param n  the field index
+ * @return   the field, or ""
+ * @since 0.3.1
+ */
+fn nth_field(s: str, n: u64) -> str {
+    let tab = b'\t'
+    mut start: u64 = 0
+    mut field: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= s.len {
+            if field == n { return teko::str::slice_from(s, start) }
+            return ""
+        }
+        if s[i] == tab {
+            if field == n { return teko::str::slice(s, start, i) }
+            field = field + 1
+            start = i + 1
+        }
+        i = i + 1
+    }
+}
+
+/**
+ * cov_of_payload — decode a `cov` record's six `TAB`-separated `u64` fields (functions cov/val,
+ * lines cov/val, branches cov/val) into a `CovTriple`.
+ *
+ * @param payload  a `cov` record's payload
+ * @return         the decoded triple
+ * @since 0.3.1
+ */
+fn cov_of_payload(payload: str) -> CovTriple {
+    CovTriple {
+        fn_cov = parse_u64(nth_field(payload, 0))
+        fn_val = parse_u64(nth_field(payload, 1))
+        line_cov = parse_u64(nth_field(payload, 2))
+        line_val = parse_u64(nth_field(payload, 3))
+        br_cov = parse_u64(nth_field(payload, 4))
+        br_val = parse_u64(nth_field(payload, 5))
+    }
+}
+
+/**
+ * cov_add — the field-wise sum of two coverage triples, folding one writer's dump into the running
+ * total.
+ *
+ * @param a  the running total
+ * @param b  a writer's dump
+ * @return   their sum
+ * @since 0.3.1
+ */
+fn cov_add(a: CovTriple, b: CovTriple) -> CovTriple {
+    CovTriple {
+        fn_cov = a.fn_cov + b.fn_cov
+        fn_val = a.fn_val + b.fn_val
+        line_cov = a.line_cov + b.line_cov
+        line_val = a.line_val + b.line_val
+        br_cov = a.br_cov + b.br_cov
+        br_val = a.br_val + b.br_val
+    }
+}
+
+/**
+ * zero_cov — an all-zero coverage triple, the identity `cov_add` folds onto.
+ *
+ * @return  the zero triple
+ * @since 0.3.1
+ */
+fn zero_cov() -> CovTriple {
+    CovTriple { fn_cov = 0; fn_val = 0; line_cov = 0; line_val = 0; br_cov = 0; br_val = 0 }
+}
+
+/**
+ * zero_tally — an all-zero phase tally, the identity `tally_add` folds onto.
+ *
+ * @return  the zero tally
+ * @since 0.3.1
+ */
+fn zero_tally() -> PhaseTally { PhaseTally { unit = 0; regression = 0; total = 0 } }
+
+/**
+ * tally_add — add `n` to the tally's `phase` column and its total.
+ *
+ * @param t      the tally so far
+ * @param phase  `unit`, `regression`, or "" (the last adds to the total only)
+ * @param n      the count to add
+ * @return       the tally with `n` folded in
+ * @since 0.3.1
+ */
+fn tally_add(t: PhaseTally, phase: str, n: u64) -> PhaseTally {
+    if n == 0 { return t }
+    mut u: u64 = t.unit
+    mut r: u64 = t.regression
+    if phase == "unit" { u = u + n }
+    if phase == "regression" { r = r + n }
+    PhaseTally { unit = u; regression = r; total = t.total + n }
+}
+
+/**
+ * writers_of — the distinct writers appearing in `recs`, in first-seen order, so `summarize` folds
+ * each writer once and the report is deterministic.
+ *
+ * @param recs  the folded records
+ * @return      the distinct writers, first-seen order
+ * @since 0.3.1
+ */
+fn writers_of(recs: []teko::journal::Record) -> []str {
+    mut names: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= recs.len { break }
+        if !contains_name(names, recs[i].writer) { names = teko::list::push(names, recs[i].writer) }
+        i = i + 1
+    }
+    names
+}
+
+/**
+ * contains_name — whether `names` already holds `name`.
+ *
+ * @param names  the names collected so far
+ * @param name   the candidate
+ * @return       true iff present
+ * @since 0.3.1
+ */
+fn contains_name(names: []str, name: str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= names.len { break }
+        if names[i] == name { return true }
+        i = i + 1
+    }
+    false
+}
+
+/**
+ * stat_of — fold every record of `writer` into its `WriterStat`: its plan, its verdict counts,
+ * whether it closed, the test it last began, and the coverage it dumped.
+ *
+ * @param recs    the folded records (of every writer)
+ * @param writer  the writer to aggregate
+ * @return        the writer's aggregate
+ * @since 0.3.1
+ */
+fn stat_of(recs: []teko::journal::Record, writer: str) -> WriterStat {
+    mut st = WriterStat {
+        writer = writer; phase = phase_of(writer); plan = 0; has_plan = false
+        ok = 0; fail = 0; skip = 0; has_end = false; last_begin = ""; has_cov = false; cov = zero_cov()
+    }
+    mut i: u64 = 0
+    loop {
+        if i >= recs.len { break }
+        let r = recs[i]
+        if r.writer == writer { st = fold_writer_record(st, r) }
+        i = i + 1
+    }
+    st
+}
+
+/**
+ * fold_writer_record — fold ONE of a writer's records into its running stat.
+ *
+ * @param st  the stat so far
+ * @param r   a record of this writer
+ * @return    the stat with `r` applied
+ * @since 0.3.1
+ */
+fn fold_writer_record(st: WriterStat, r: teko::journal::Record) -> WriterStat {
+    if r.kind == "plan" {
+        return WriterStat {
+            writer = st.writer; phase = st.phase; plan = parse_u64(r.payload); has_plan = true
+            ok = st.ok; fail = st.fail; skip = st.skip; has_end = st.has_end; last_begin = st.last_begin
+            has_cov = st.has_cov; cov = st.cov
+        }
+    }
+    if r.kind == teko::journal::KIND_BEGIN { return with_last_begin(st, r.payload) }
+    if r.kind == "ok" { return bump_ok(st) }
+    if r.kind == "fail" { return bump_fail(st) }
+    if r.kind == "skip" { return bump_skip(st) }
+    if r.kind == "cov" { return with_cov(st, cov_of_payload(r.payload)) }
+    if r.kind == teko::journal::KIND_END || r.kind == teko::journal::KIND_STOP { return with_end(st) }
+    st
+}
+
+/**
+ * with_last_begin — the stat with its last-begun test set to `label`.
+ *
+ * @param st     the stat so far
+ * @param label  the test that began
+ * @return       the updated stat
+ * @since 0.3.1
+ */
+fn with_last_begin(st: WriterStat, label: str) -> WriterStat {
+    WriterStat {
+        writer = st.writer; phase = st.phase; plan = st.plan; has_plan = st.has_plan
+        ok = st.ok; fail = st.fail; skip = st.skip; has_end = st.has_end; last_begin = label
+        has_cov = st.has_cov; cov = st.cov
+    }
+}
+
+/**
+ * bump_ok — the stat with one more passing test.
+ *
+ * @param st  the stat so far
+ * @return    the updated stat
+ * @since 0.3.1
+ */
+fn bump_ok(st: WriterStat) -> WriterStat {
+    WriterStat {
+        writer = st.writer; phase = st.phase; plan = st.plan; has_plan = st.has_plan
+        ok = st.ok + 1; fail = st.fail; skip = st.skip; has_end = st.has_end; last_begin = st.last_begin
+        has_cov = st.has_cov; cov = st.cov
+    }
+}
+
+/**
+ * bump_fail — the stat with one more failing test.
+ *
+ * @param st  the stat so far
+ * @return    the updated stat
+ * @since 0.3.1
+ */
+fn bump_fail(st: WriterStat) -> WriterStat {
+    WriterStat {
+        writer = st.writer; phase = st.phase; plan = st.plan; has_plan = st.has_plan
+        ok = st.ok; fail = st.fail + 1; skip = st.skip; has_end = st.has_end; last_begin = st.last_begin
+        has_cov = st.has_cov; cov = st.cov
+    }
+}
+
+/**
+ * bump_skip — the stat with one more skipped test.
+ *
+ * @param st  the stat so far
+ * @return    the updated stat
+ * @since 0.3.1
+ */
+fn bump_skip(st: WriterStat) -> WriterStat {
+    WriterStat {
+        writer = st.writer; phase = st.phase; plan = st.plan; has_plan = st.has_plan
+        ok = st.ok; fail = st.fail; skip = st.skip + 1; has_end = st.has_end; last_begin = st.last_begin
+        has_cov = st.has_cov; cov = st.cov
+    }
+}
+
+/**
+ * with_end — the stat marked as terminated (an `end` or `stop` was seen), so it is not read as dead.
+ *
+ * @param st  the stat so far
+ * @return    the updated stat
+ * @since 0.3.1
+ */
+fn with_end(st: WriterStat) -> WriterStat {
+    WriterStat {
+        writer = st.writer; phase = st.phase; plan = st.plan; has_plan = st.has_plan
+        ok = st.ok; fail = st.fail; skip = st.skip; has_end = true; last_begin = st.last_begin
+        has_cov = st.has_cov; cov = st.cov
+    }
+}
+
+/**
+ * with_cov — the stat with its coverage dump recorded.
+ *
+ * @param st  the stat so far
+ * @param c   the coverage the writer dumped
+ * @return    the updated stat
+ * @since 0.3.1
+ */
+fn with_cov(st: WriterStat, c: CovTriple) -> WriterStat {
+    WriterStat {
+        writer = st.writer; phase = st.phase; plan = st.plan; has_plan = st.has_plan
+        ok = st.ok; fail = st.fail; skip = st.skip; has_end = st.has_end; last_begin = st.last_begin
+        has_cov = true; cov = c
+    }
+}
+
+/**
+ * is_dead — whether a writer died: it declared a plan but never wrote a terminal record. The
+ * never-ran count and the `dead` finding both hang off this predicate.
+ *
+ * @param st  a writer's aggregate
+ * @return    true iff the writer declared a plan and did not close
+ * @since 0.3.1
+ */
+fn is_dead(st: WriterStat) -> bool { st.has_plan && !st.has_end }
+
+/**
+ * ran_of — how many tests a writer actually reached a verdict on (passed + failed + skipped).
+ *
+ * @param st  a writer's aggregate
+ * @return    the verdict count
+ * @since 0.3.1
+ */
+fn ran_of(st: WriterStat) -> u64 { st.ok + st.fail + st.skip }
+
+/**
+ * collect_findings — the `fail` (or `skip`) findings across `recs`, in record order, so a failure
+ * and a skip are named exactly once and in a deterministic sequence.
+ *
+ * @param recs  the folded records
+ * @param kind  `fail` or `skip`
+ * @return      the findings of that kind, record order
+ * @since 0.3.1
+ */
+fn collect_findings(recs: []teko::journal::Record, kind: str) -> []Finding {
+    mut out: []Finding = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= recs.len { break }
+        let r = recs[i]
+        if r.kind == kind {
+            let lr = split_first_tab(r.payload)
+            out = teko::list::push(out, Finding { phase = phase_of(r.writer); writer = r.writer; label = lr.label; reason = lr.reason })
+        }
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * summarize — the summary of BOTH phases, as a PURE function over the records `fold` returned.
+ *
+ * PURE ON PURPOSE: it is what lets the guard test it over synthetic records (§13.6) without running
+ * a suite, and what lets `--replay` produce the same block byte for byte after the fact.
+ *
+ * @param recs  the records `fold` returned
+ * @return      the aggregated verdict
+ * @since 0.3.1
+ */
+pub fn summarize(recs: []teko::journal::Record) -> RunSummary {
+    let writers = writers_of(recs)
+    mut passed: PhaseTally = zero_tally()
+    mut failed: PhaseTally = zero_tally()
+    mut skipped: PhaseTally = zero_tally()
+    mut never_ran: PhaseTally = zero_tally()
+    mut dead: []Finding = teko::list::empty()
+    mut cov: CovTriple = zero_cov()
+    mut cov_missing: u64 = 0
+    mut w: u64 = 0
+    loop {
+        if w >= writers.len { break }
+        let st = stat_of(recs, writers[w])
+        passed = tally_add(passed, st.phase, st.ok)
+        failed = tally_add(failed, st.phase, st.fail)
+        skipped = tally_add(skipped, st.phase, st.skip)
+        cov = cov_add(cov, st.cov)
+        if st.has_plan && !st.has_cov { cov_missing = cov_missing + 1 }
+        if is_dead(st) {
+            let ran = ran_of(st)
+            let nr = if st.plan > ran { st.plan - ran } else { 0 }
+            never_ran = tally_add(never_ran, st.phase, nr)
+            dead = teko::list::push(dead, Finding { phase = st.phase; writer = st.writer; label = st.last_begin; reason = "writer died before its run ended" })
+        }
+        w = w + 1
+    }
+    RunSummary {
+        run = run_of(recs); passed = passed; failed = failed; skipped = skipped; never_ran = never_ran
+        fails = collect_findings(recs, "fail"); skips = collect_findings(recs, "skip"); dead = dead
+        cov = cov; cov_missing = cov_missing
+    }
+}
+
+/**
+ * run_of — the run stamp the records carry (the first record's), or "" when there are none.
+ *
+ * @param recs  the folded records
+ * @return      the run stamp, or ""
+ * @since 0.3.1
+ */
+fn run_of(recs: []teko::journal::Record) -> str {
+    if recs.len == 0 { return "" }
+    recs[0].run
+}
+
+/**
+ * pct — the integer percentage `cov` is of `val`, rounding DOWN. An empty denominator is vacuously
+ * 100% (no code, nothing to cover).
+ *
+ * @param cov  the covered count
+ * @param val  the valid/total count
+ * @return     the percentage, 0..100
+ * @since 0.3.1
+ */
+fn pct(cov: u64, val: u64) -> u64 {
+    if val == 0 { return 100 }
+    (cov * 100) / val
+}
+
+/**
+ * is_empty_run — whether the summary describes a run that produced NOTHING: no verdicts, no
+ * findings, no dead writer. The vivacity check: a summary that renders "0 failed" as green over
+ * zero records is the blind guard this whole design exists to kill.
+ *
+ * @param s  the summary
+ * @return   true iff nothing was recorded
+ * @since 0.3.1
+ */
+fn is_empty_run(s: RunSummary) -> bool {
+    s.passed.total == 0 && s.failed.total == 0 && s.skipped.total == 0 && s.never_ran.total == 0 && s.dead.len == 0 && s.fails.len == 0 && s.skips.len == 0
+}
+
+/**
+ * is_clean_run — whether the run is a green: it recorded something and nothing failed, skipped, was
+ * never-run, or died. Only a clean run closes with `run PASSED`.
+ *
+ * @param s  the summary
+ * @return   true iff the run is a green
+ * @since 0.3.1
+ */
+fn is_clean_run(s: RunSummary) -> bool {
+    !is_empty_run(s) && s.failed.total == 0 && s.skipped.total == 0 && s.never_ran.total == 0 && s.dead.len == 0
+}
+
+/**
+ * tally_line — one phase (or the total) as a rendered line: `<name> <p> passed <f> failed <s>
+ * skipped <n> never-ran`.
+ *
+ * @param name  the row label (`unit`, `regression`, `TOTAL`)
+ * @param p     passed
+ * @param f     failed
+ * @param sk    skipped
+ * @param nr    never-ran
+ * @return      the rendered line, newline-terminated
+ * @since 0.3.1
+ */
+fn tally_line(name: str, p: u64, f: u64, sk: u64, nr: u64) -> str {
+    teko::str::concat(
+        "teko:   ", name, "  ",
+        teko::str::u64_to_str(p), " passed  ",
+        teko::str::u64_to_str(f), " failed  ",
+        teko::str::u64_to_str(sk), " skipped  ",
+        teko::str::u64_to_str(nr), " never-ran\n"
+    )
+}
+
+/**
+ * finding_line — one finding as a rendered line: `<phase>  <writer>  <label>: <reason>`.
+ *
+ * @param f  the finding
+ * @return   the rendered line, newline-terminated
+ * @since 0.3.1
+ */
+fn finding_line(f: Finding) -> str {
+    teko::str::concat("teko:     ", f.phase, "  ", f.writer, "  ", f.label, ": ", f.reason, "\n")
+}
+
+/**
+ * dead_line — one dead writer as a rendered line: `<phase>  <writer>  died in <label>`.
+ *
+ * @param f  the dead finding
+ * @return   the rendered line, newline-terminated
+ * @since 0.3.1
+ */
+fn dead_line(f: Finding) -> str {
+    teko::str::concat("teko:     ", f.phase, "  ", f.writer, "  died in ", f.label, "\n")
+}
+
+/**
+ * render_findings — a titled section listing `findings`, one line each, or "" when there are none
+ * so an absent class prints nothing.
+ *
+ * @param title     the section header (`FAILED`, `SKIPPED ...`)
+ * @param findings  the findings to list
+ * @return          the rendered section, or ""
+ * @since 0.3.1
+ */
+fn render_findings(title: str, findings: []Finding) -> str {
+    if findings.len == 0 { return "" }
+    mut out: str = teko::str::concat("teko:\n", "teko:   ", title, " (", teko::str::u64_to_str(findings.len), "):\n")
+    mut i: u64 = 0
+    loop {
+        if i >= findings.len { break }
+        out = teko::str::concat(out, finding_line(findings[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * render_dead — the DEAD section listing every writer that did not close, or "" when none did.
+ *
+ * @param dead  the dead findings
+ * @return      the rendered section, or ""
+ * @since 0.3.1
+ */
+fn render_dead(dead: []Finding) -> str {
+    if dead.len == 0 { return "" }
+    mut out: str = teko::str::concat("teko:\n", "teko:   DEAD (", teko::str::u64_to_str(dead.len), ") — a writer died before its run ended:\n")
+    mut i: u64 = 0
+    loop {
+        if i >= dead.len { break }
+        out = teko::str::concat(out, dead_line(dead[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * cov_row — one coverage metric as a rendered line: `<name> <pct>% (<cov>/<val>)`.
+ *
+ * @param name  the metric name (`functions`, `lines`, `branches`)
+ * @param cov   the covered count
+ * @param val   the valid count
+ * @return      the rendered line, newline-terminated
+ * @since 0.3.1
+ */
+fn cov_row(name: str, cov: u64, val: u64) -> str {
+    teko::str::concat("teko:     ", name, "  ", teko::str::u64_to_str(pct(cov, val)), "% (", teko::str::u64_to_str(cov), "/", teko::str::u64_to_str(val), ")\n")
+}
+
+/**
+ * render_coverage — the COVERAGE section: the three metrics and how many dumps were missing, or ""
+ * when the run measured no coverage AND missed none (nothing to say).
+ *
+ * @param s  the summary
+ * @return   the rendered section, or ""
+ * @since 0.3.1
+ */
+fn render_coverage(s: RunSummary) -> str {
+    if s.cov.fn_val == 0 && s.cov.line_val == 0 && s.cov.br_val == 0 && s.cov_missing == 0 { return "" }
+    mut out: str = teko::str::concat("teko:\n", "teko:   COVERAGE (", teko::str::u64_to_str(s.cov_missing), " missing):\n")
+    out = teko::str::concat(out, cov_row("functions", s.cov.fn_cov, s.cov.fn_val))
+    out = teko::str::concat(out, cov_row("lines", s.cov.line_cov, s.cov.line_val))
+    teko::str::concat(out, cov_row("branches", s.cov.br_cov, s.cov.br_val))
+}
+
+/**
+ * closing_line — the summary's last line, a `grep`-able marker. The empty run declares "no records
+ * — run produced nothing" and NEVER "run PASSED"; a green closes PASSED; anything else closes
+ * FAILED naming the counts.
+ *
+ * @param s  the summary
+ * @return   the closing line, newline-terminated
+ * @since 0.3.1
+ */
+fn closing_line(s: RunSummary) -> str {
+    if is_empty_run(s) { return "teko: ===== no records — run produced nothing — run FAILED =====\n" }
+    if is_clean_run(s) { return "teko: ===== run PASSED =====\n" }
+    teko::str::concat(
+        "teko: ===== ", teko::str::u64_to_str(s.failed.total), " failed, ",
+        teko::str::u64_to_str(s.skipped.total), " skipped, ",
+        teko::str::u64_to_str(s.never_ran.total), " never-ran — run FAILED =====\n"
+    )
+}
+
+/**
+ * render_summary — the block a human reads, in STABLE text.
+ *
+ * STABLE BECAUSE A SCRIPT READS IT TOO. `scripts/no_skips_gate.sh` reconstitutes skips today from
+ * three `grep` patterns; a named `SKIPPED` section collapses that to one, and a skip never hides
+ * behind an `ok`.
+ *
+ * @param s  the verdict to render
+ * @return   the block, with newlines, closed by the marker line
+ * @since 0.3.1
+ */
+pub fn render_summary(s: RunSummary) -> str {
+    mut out: str = teko::str::concat("teko: ===== summary (run ", s.run, ") =====\n")
+    out = teko::str::concat(out, tally_line("unit        ", s.passed.unit, s.failed.unit, s.skipped.unit, s.never_ran.unit))
+    out = teko::str::concat(out, tally_line("regression  ", s.passed.regression, s.failed.regression, s.skipped.regression, s.never_ran.regression))
+    out = teko::str::concat(out, tally_line("TOTAL       ", s.passed.total, s.failed.total, s.skipped.total, s.never_ran.total))
+    out = teko::str::concat(out, render_findings("FAILED", s.fails))
+    out = teko::str::concat(out, render_findings("SKIPPED — SKIPPED IS FAILURE IN THIS PROJECT'S OWN CI", s.skips))
+    out = teko::str::concat(out, render_dead(s.dead))
+    out = teko::str::concat(out, render_coverage(s))
+    teko::str::concat(out, closing_line(s))
+}

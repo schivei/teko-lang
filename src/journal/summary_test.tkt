@@ -1,0 +1,152 @@
+/**
+ * JS_RUN — the run stamp every synthetic record in this file carries. One value, so a planted
+ * record is never discarded by `fold`'s run filter and `summarize` reads them all as one run.
+ */
+const JS_RUN: str = "1753891200123456789-48213"
+
+/**
+ * js_rec — one synthetic `Record` of `JS_RUN`, the building block the planted-record helpers use.
+ *
+ * @param writer   the writer identity (`s<i>`, `r<i>`, `m`)
+ * @param kind     the record kind (`plan`, `begin`, `ok`, `fail`, `skip`, `cov`, `end`)
+ * @param payload  the record body
+ * @return         the record
+ */
+fn js_rec(writer: str, kind: str, payload: str) -> teko::journal::Record {
+    teko::journal::Record { run = JS_RUN; writer = writer; kind = kind; payload = payload }
+}
+
+/**
+ * js_skip_payload — a `skip` record's payload: the named scenario, a `\t`, then the honest reason
+ * the regression tier already writes.
+ *
+ * @param label   the named scenario (`own_native.tkr[x86_64-windows row 3]`)
+ * @param reason  the reason the producer wrote
+ * @return        the tab-joined payload
+ */
+fn js_skip_payload(label: str, reason: str) -> str {
+    teko::str::concat(label, "\t", reason)
+}
+
+/**
+ * js_planted_records — a corpus with one FAILURE, two SKIPS and one DEAD writer, so the summary has
+ * a named finding of every class to render.
+ *
+ * @return  the planted records
+ */
+fn js_planted_records() -> []teko::journal::Record {
+    let miss = "x86_64-w64-mingw32-gcc (the cross-linker for target x86_64-windows) not found on PATH"
+    mut r: []teko::journal::Record = teko::list::push(teko::list::empty(), js_rec("r0", "plan", "3"))
+    r = teko::list::push(r, js_rec("r0", "begin", "own_defer_arm_write_propagates"))
+    r = teko::list::push(r, js_rec("r0", "fail", js_skip_payload("js_planted_failure", "exit 1, expected stdout pattern absent")))
+    r = teko::list::push(r, js_rec("r0", "skip", js_skip_payload("own_native.tkr[x86_64-windows row 3]", miss)))
+    r = teko::list::push(r, js_rec("r0", "skip", js_skip_payload("own_native.tkr[x86_64-windows row 7]", miss)))
+    r = teko::list::push(r, js_rec("r0", "end", ""))
+    r = teko::list::push(r, js_rec("s2", "plan", "5"))
+    r = teko::list::push(r, js_rec("s2", "begin", "a_unit_test_that_started"))
+    r = teko::list::push(r, js_rec("s2", "ok", "a_unit_test_that_started"))
+    r
+}
+
+/**
+ * js_records_of_a_dead_shard — a single unit shard that declared it would run `plan` tests, reached
+ * a verdict on `ran` of them, and then DIED — no `end`, no `stop`. The proof that a dead writer
+ * cannot round up to green without any process being killed, because `summarize` is pure.
+ *
+ * @param plan  the tests the shard declared
+ * @param ran   the tests it reached a verdict on before dying
+ * @return      the shard's records, with no terminal
+ */
+fn js_records_of_a_dead_shard(plan: u64, ran: u64) -> []teko::journal::Record {
+    mut r: []teko::journal::Record = teko::list::push(teko::list::empty(), js_rec("s0", "plan", teko::str::u64_to_str(plan)))
+    mut i: u64 = 0
+    loop {
+        if i >= ran { break }
+        let label = teko::str::concat("dead_shard_test_", teko::str::u64_to_str(i))
+        r = teko::list::push(r, js_rec("s0", "begin", label))
+        r = teko::list::push(r, js_rec("s0", "ok", label))
+        i = i + 1
+    }
+    r
+}
+
+/**
+ * js_records_of_a_clean_run — two shards that each declared a plan, reached a verdict on every test
+ * (all passing), and closed with `end`. The green the closing line reads as `run PASSED`.
+ *
+ * @return  the records of a fully clean run
+ */
+fn js_records_of_a_clean_run() -> []teko::journal::Record {
+    mut r: []teko::journal::Record = teko::list::push(teko::list::empty(), js_rec("s0", "plan", "2"))
+    r = teko::list::push(r, js_rec("s0", "begin", "unit_one"))
+    r = teko::list::push(r, js_rec("s0", "ok", "unit_one"))
+    r = teko::list::push(r, js_rec("s0", "begin", "unit_two"))
+    r = teko::list::push(r, js_rec("s0", "ok", "unit_two"))
+    r = teko::list::push(r, js_rec("s0", "end", ""))
+    r = teko::list::push(r, js_rec("r0", "plan", "1"))
+    r = teko::list::push(r, js_rec("r0", "begin", "regr_one"))
+    r = teko::list::push(r, js_rec("r0", "ok", "regr_one"))
+    r = teko::list::push(r, js_rec("r0", "end", ""))
+    r
+}
+
+#test
+/**
+ * js_a_clean_run_reads_as_passed — the positive of the vivacity arm: a run where every writer
+ * declared a plan, reached every verdict, and closed cleanly is the ONLY shape that reads `run
+ * PASSED`. Without this, nothing proves the green path renders green — only that the failing paths do
+ * not.
+ *
+ * @throws when a fully clean run does not close `run PASSED`, or leaks a `FAILED` marker
+ */
+fn js_a_clean_run_reads_as_passed() {
+    let block = teko::journal::render_summary(teko::journal::summarize(js_records_of_a_clean_run()))
+    teko::assert::str_contains(block, "run PASSED")
+    teko::assert::str_absent(block, "run FAILED")
+}
+
+#test
+/**
+ * js_the_summary_names_every_finding — the inversion: fed a failure, two skips and a dead writer,
+ * the summary must NAME the four. A summary that counted them without naming them would pass a test
+ * that asserted numbers; this asserts NAMES.
+ *
+ * @throws when a planted finding does not appear in the rendered block
+ */
+fn js_the_summary_names_every_finding() {
+    let block = teko::journal::render_summary(teko::journal::summarize(js_planted_records()))
+    teko::assert::str_contains(block, "own_native.tkr[x86_64-windows row 3]")
+    teko::assert::str_contains(block, "not found on PATH")
+    teko::assert::str_contains(block, "js_planted_failure")
+    teko::assert::str_contains(block, "never-ran")
+}
+
+#test
+/**
+ * js_an_empty_run_is_a_FAILURE_not_a_green — THE VIVACITY ARM, and the one that is indispensable.
+ *
+ * Zero records means the run produced nothing, and a summary that renders "0 failed" as a green over
+ * zero records is exactly the blind guard that read ZERO three times over a tree that kept stopping.
+ * An instrument that cannot fail is decoration — this one included.
+ *
+ * @throws when an empty summary does not declare itself failed
+ */
+fn js_an_empty_run_is_a_FAILURE_not_a_green() {
+    let block = teko::journal::render_summary(teko::journal::summarize(teko::list::empty()))
+    teko::assert::str_contains(block, "no records — run produced nothing")
+    teko::assert::str_absent(block, "run PASSED")
+}
+
+#test
+/**
+ * js_a_dead_writer_cannot_read_as_passed — a shard that dies mid-run cannot round up to green, and
+ * the never-ran count must be the difference to the `plan` it declared.
+ *
+ * @throws when a plan of 300 with 9 verdicts does not yield 291 never-ran
+ */
+fn js_a_dead_writer_cannot_read_as_passed() {
+    let s = teko::journal::summarize(js_records_of_a_dead_shard(300, 9))
+    teko::assert::eq_u64(s.never_ran.total, 291)
+    teko::assert::eq_u64(s.dead.len, 1)
+    teko::assert::str_absent(teko::journal::render_summary(s), "run PASSED")
+}
