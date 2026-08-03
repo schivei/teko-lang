@@ -7750,28 +7750,60 @@ fn close_arm_replaying_defers(ctx: LowerCtx, pre_arm_defers: []checker::TDeferSt
     closed the block (terminated=true, `vreg` unused). */
 pub type LowerBlockValue = struct { ctx: LowerCtx; terminated: bool; vreg: u32 }
 
-/** lower_block_value — lower an if-expression arm's statement block: every statement but
-    the last lowers as an ordinary effect-only statement; the last is the arm's TAIL VALUE
-    (an expression-statement) unless it already terminated the block on its own. `result_ty`
-    is the enclosing if/match/function's own result machine class — threaded through to
-    `lower_tail_expr_stmt`'s diverging-tail fallback (C7). `target_ty` is that SAME enclosing
-    construct's own CHECKER type — threaded through to `lower_tail_expr_stmt`'s value coercion,
-    so a bare case flowing into a declared `T | error` slot (whether the slot is an if/match's
-    own result or, via `lower_fn_body`, the enclosing FUNCTION's return type) gets wrapped into
-    the uniform tag+payload shape (#382, degrau N2). Mirrors emit_branch_value's "last statement
-    is the value" shape (codegen.tks). */
-fn lower_block_value(ctx: LowerCtx, body: []checker::TStatement, result_ty: LType, target_ty: checker::Type) -> LowerBlockValue | error {
-    if body.len == 0 { return error { message = "native backend N1: empty if-expression arm (internal)" } }
+/**
+ * lower_block_prefix — every statement of a value-producing block EXCEPT the last
+ * (`lower_block_value`'s own "all but the tail" walk, extracted so `lower_fn_body` can insert
+ * the NP4 conveyance bracket BETWEEN the prefix and the tail statement without duplicating this
+ * loop — the scalar twin of `lower_block_prefix_fat`, one axis over, fat instead of scalar).
+ *
+ * @param ctx   the lowering context positioned at the block's first statement
+ * @param body  the block's statement list (checker-guaranteed non-empty)
+ * @return      the context after every statement but the last, and whether one of them already
+ *              terminated the block (a `return`/`break`/`continue` before reaching the tail)
+ * @throws      propagated from lowering any of the prefix statements
+ * @since 0.3.1.0
+ */
+fn lower_block_prefix(ctx: LowerCtx, body: []checker::TStatement) -> LowerStmtOut | error {
     mut cur = ctx
     mut i: u64 = 0
     loop {
         if i + 1 >= body.len { break }
         let out = match lower_stmt(cur, body[i]) { LowerStmtOut as x => x; error as err => return err }
         cur = out.ctx
-        if out.terminated { return LowerBlockValue { ctx = cur; terminated = true; vreg = 0 } }
+        if out.terminated { return LowerStmtOut { ctx = cur; terminated = true } }
         i++
     }
-    lower_tail_stmt(cur, body[body.len - 1], result_ty, target_ty)
+    LowerStmtOut { ctx = cur; terminated = false }
+}
+
+/**
+ * lower_block_value — lower an if-expression arm's statement block: every statement but the
+ * last lowers as an ordinary effect-only statement (`lower_block_prefix`); the last is the
+ * arm's TAIL VALUE (an expression-statement) unless it already terminated the block on its own
+ * (`lower_tail_stmt`, UNBRACKETED — an arm's tail value merges into a shared block-arg the
+ * enclosing `if`/`match` expression goes on to use, so it must NOT convey out of the frame/block
+ * region here; only a FUNCTION body's own top-level trailing tail does that, via `lower_fn_body`'s
+ * own `lower_fn_tail`, NP4).
+ *
+ * @param ctx        the lowering context positioned at the arm's first statement
+ * @param body       the arm's statement block (checker-guaranteed non-empty)
+ * @param result_ty  the enclosing if/match/function's own result machine class — threaded
+ *                    through to `lower_tail_expr_stmt`'s diverging-tail fallback (C7)
+ * @param target_ty  that SAME enclosing construct's own CHECKER type — threaded through to
+ *                    `lower_tail_expr_stmt`'s value coercion, so a bare case flowing into a
+ *                    declared `T | error` slot (whether the slot is an if/match's own result or,
+ *                    via `lower_fn_body`, the enclosing FUNCTION's return type) gets wrapped into
+ *                    the uniform tag+payload shape (#382, degrau N2)
+ * @return           the arm's value outcome
+ * @throws           when the block is empty, or propagated from lowering any statement
+ * @implNote         mirrors `emit_branch_value`'s "last statement is the value" shape
+ *                   (`codegen.tks`)
+ */
+fn lower_block_value(ctx: LowerCtx, body: []checker::TStatement, result_ty: LType, target_ty: checker::Type) -> LowerBlockValue | error {
+    if body.len == 0 { return error { message = "native backend N1: empty if-expression arm (internal)" } }
+    let pre = match lower_block_prefix(ctx, body) { LowerStmtOut as x => x; error as err => return err }
+    if pre.terminated { return LowerBlockValue { ctx = pre.ctx; terminated = true; vreg = 0 } }
+    lower_tail_stmt(pre.ctx, body[body.len - 1], result_ty, target_ty)
 }
 
 /**
@@ -7792,6 +7824,73 @@ fn lower_tail_stmt(ctx: LowerCtx, s: checker::TStatement, result_ty: LType, targ
         checker::TExprStmt as es => lower_tail_expr_stmt(ctx, es, result_ty, target_ty)
         _ => lower_tail_non_expr(ctx, s, result_ty)
     }
+}
+
+/**
+ * lower_fn_tail — a SCALAR-returning function/lambda body's OWN trailing-tail statement (NP4,
+ * fixing the CONFIRMED use-after-free the shallow post-hoc box left open): when it is a
+ * value-producing expression-statement (the auto-return case), its construction runs inside a
+ * conveyance BRACKET (`lower_conveyed_tail_expr_stmt` — leave-before/enter-after, Mechanism 1),
+ * so any `tk_alloc` the tail's own aggregate/array-literal construction performs (a struct field's
+ * `[]T`/`str`/nested boxed aggregate) materializes at `rr` (the conveyance anchor) INSTEAD of the
+ * frame region `lower_fn_body`'s own `emit_region_drops` later reclaims — mirroring
+ * `lower_fn_tail_fat` exactly, one axis over (scalar instead of fat). This is load-bearing exactly
+ * where `own_returned_value`'s post-hoc box is NOT: `tk_slice_elem_box` only memcpy's the OUTER
+ * aggregate's OWN bytes, so a POINTER field it copies stays a pointer into whatever region the
+ * field's OWN backing was allocated into — right only when that allocation already happened under
+ * `rr`, which this bracket now guarantees.
+ *
+ * Any OTHER tail shape (`return`/`break`/`continue`, `lower_tail_non_expr`) already performs its
+ * OWN leave through `lower_stmt` (`lower_return`) and is left BARE — bracketing it too would
+ * double-leave and desync the region stack, so this dispatches on the SAME statement-kind split
+ * `lower_tail_stmt` already makes, and only brackets the expression-statement arm.
+ *
+ * @param ctx        the lowering context, positioned after every non-tail statement
+ * @param s          the tail statement
+ * @param result_ty  the enclosing function's own expected result machine class
+ * @param target_ty  the enclosing function's own DECLARED checker type
+ * @param line       the source line to stamp the bracket's own calls with
+ * @param col        the source column to stamp
+ * @return           the value outcome
+ * @throws           propagated from lowering the tail statement
+ * @since 0.3.1.0
+ */
+fn lower_fn_tail(ctx: LowerCtx, s: checker::TStatement, result_ty: LType, target_ty: checker::Type, line: u32, col: u32) -> LowerBlockValue | error {
+    match s {
+        checker::TExprStmt as es => lower_conveyed_tail_expr_stmt(ctx, es, result_ty, target_ty, line, col)
+        _ => lower_tail_non_expr(ctx, s, result_ty)
+    }
+}
+
+/**
+ * lower_conveyed_tail_expr_stmt — `lower_fn_tail`'s expression-statement arm: bracket
+ * `lower_tail_expr_stmt` in `emit_region_leaves` … `emit_region_enters` (NP4), mirroring
+ * `lower_binding_conveyed`/`lower_assign_conveyed` (NP3b) and `lower_conveyed_tail_expr_stmt_fat`
+ * exactly, one axis over (a function body's own auto-returned SCALAR tail vs a named binding/
+ * assign vs the FAT tail) — INCLUDING marking `ctx.bracket_depth = 1` for the tail's own
+ * evaluation, so a NESTED escaping binding inside the tail expression (e.g. a struct literal field
+ * initialized from a `match` arm's own `let`) sees `bracket_depth > 0` and skips its own
+ * leave/enter rather than re-entering the frame region mid-span. The re-enter restores the frame
+ * region so `lower_fn_body`'s OWN subsequent defer replay and final leave/`own_returned_value`/drop
+ * run under the SAME region-stack shape every other exit edge sees them under.
+ *
+ * @param ctx        the lowering context, positioned at the tail expression-statement
+ * @param es         the tail expression-statement
+ * @param result_ty  the enclosing function's own expected result machine class
+ * @param target_ty  the enclosing function's own DECLARED checker type
+ * @param line       the source line to stamp the bracket's own calls with
+ * @param col        the source column to stamp
+ * @return           the value outcome, its `ctx` back under the frame region
+ * @throws           propagated from `lower_tail_expr_stmt`
+ * @since 0.3.1.0
+ */
+fn lower_conveyed_tail_expr_stmt(ctx: LowerCtx, es: checker::TExprStmt, result_ty: LType, target_ty: checker::Type, line: u32, col: u32) -> LowerBlockValue | error {
+    if ctx.bracket_depth > 0 { return lower_tail_expr_stmt(ctx, es, result_ty, target_ty) }
+    let left = emit_region_leaves(ctx, line, col)
+    let marked = ctx_with_bracket_depth(left, 1)
+    let out = match lower_tail_expr_stmt(marked, es, result_ty, target_ty) { LowerBlockValue as x => x; error as err => return err }
+    let entered = emit_region_enters(out.ctx, line, col)
+    LowerBlockValue { ctx = ctx_with_bracket_depth(entered, ctx.bracket_depth); terminated = out.terminated; vreg = out.vreg }
 }
 
 /**
@@ -13662,16 +13761,24 @@ fn lower_block(ctx: LowerCtx, body: []checker::TStatement) -> LowerCtx | error {
  * @implNote a fat (`str`/`[]T`) `ctx.ret_type` routes the whole body through `lower_fn_body_fat`
  *           instead — the trailing tail's length half stores through the hidden out-slot exactly
  *           like an explicit fat `return` (call-gordo degrau, #382 N2).
- * @implNote NP4: `emit_region_drops` runs AFTER `own_returned_value`'s box (or, for a self-
- *           contained register value, after the tail itself) and BEFORE the `LRet` — the box
- *           already re-materializes an aggregate at `current == rr` (post-`emit_region_leaves`)
- *           REGARDLESS of where `tail.vreg`'s own raw bits were computed, so the drop below it
- *           never touches the value the `LRet` carries.
+ * @implNote NP4 (UAF fix): the prefix statements lower under the frame region UNCHANGED
+ *           (`lower_block_prefix`); the tail statement lowers through `lower_fn_tail`, which
+ *           BRACKETS its own construction in leave/enter when it is an expression-statement — so
+ *           any `tk_alloc` the tail's aggregate/array-literal construction performs (a struct
+ *           field's `[]T`/`str`/nested boxed aggregate) lands at `rr` DIRECTLY, before
+ *           `own_returned_value`'s box ever runs. `own_returned_value`'s box only memcpy's the
+ *           OUTER aggregate's OWN bytes (`tk_slice_elem_box` is shallow) — it is right ONLY
+ *           because every POINTER field it copies already points at `rr`-resident storage by the
+ *           time it runs; relying on it alone to re-home a FRAME-resident nested allocation
+ *           (the pre-fix shape) was the confirmed UAF. `emit_region_drops`, run AFTER
+ *           `own_returned_value`'s box, then never touches the value the `LRet` carries.
  */
 fn lower_fn_body(ctx: LowerCtx, body: []checker::TStatement, ret_ty: LType, line: u32, col: u32) -> LowerCtx | error {
     if body.len == 0 || ltype_is_void(ret_ty) { return lower_block(ctx, body) }
     if is_fat_type(ctx.ret_type) { return lower_fn_body_fat(ctx, body, line, col) }
-    let tail = match lower_block_value(ctx, body, ret_ty, ctx.ret_type) { LowerBlockValue as x => x; error as err => return err }
+    let pre = match lower_block_prefix(ctx, body) { LowerStmtOut as x => x; error as err => return err }
+    if pre.terminated { return pre.ctx }
+    let tail = match lower_fn_tail(pre.ctx, body[body.len - 1], ret_ty, ctx.ret_type, line, col) { LowerBlockValue as x => x; error as err => return err }
     if tail.terminated { return tail.ctx }
     let replayed = match replay_defers(tail.ctx, 0) { LowerCtx as c => c; error as err => return err }
     let left = emit_region_leaves(replayed, line, col)
