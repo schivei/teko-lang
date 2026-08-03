@@ -228,6 +228,12 @@ build_gen() {
     bg_bin="$1"; bg_log="$2"
     rm -rf "$W/out"
     bg_backend="$FIXPOINT_BACKEND"
+    # DIAGNOSTIC (2026-08-03, native-codegen-layer3): with the OOM cured (C6), the native self-build
+    # now reaches a codegen SIGSEGV (M.1). TEKO_NATIVE_TRACE_ITEMS names the last per-item scoped
+    # region entered before the crash, so the streamed log pins the exact function/const/type it
+    # died on. Native-only (the trace is emitted solely by emit_native_x86); remove once pinned.
+    bg_trace=""
+    if [ "$bg_backend" = "native" ]; then bg_trace="1"; fi
     scan_project_c "$W/project-c.before"
     # Stream the build LIVE (prefixed) to the lane log AND capture to $bg_log. Owner ruling
     # 2026-08-03: "expor tudo que ele faz e não ocultar nenhuma saída". Before, the build was
@@ -237,9 +243,9 @@ build_gen() {
     # `set +e`/`set -e` brackets keep the pipe's own failure from tripping the caller early.
     set +e
     if [ -n "$RT_DIR" ]; then
-        { ( cd "$PROJ" && TK_RT_DIR="$RT_DIR" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
+        { ( cd "$PROJ" && TK_RT_DIR="$RT_DIR" TEKO_NATIVE_TRACE_ITEMS="$bg_trace" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
     else
-        { ( cd "$PROJ" && TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
+        { ( cd "$PROJ" && TEKO_NATIVE_TRACE_ITEMS="$bg_trace" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
     fi
     set -e
     return "$(cat "$W/bg_status")"
