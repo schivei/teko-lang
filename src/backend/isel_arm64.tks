@@ -128,6 +128,51 @@ fn vinfo_get(t: VInfoTable, id: u32) -> VInfo {
 }
 
 /**
+ * MINST_I64_SIGN_BIT_U — `2^63` as a `u64`: the smallest pattern whose SIGNED
+ * reading is negative, and exactly the distance between the unsigned and the
+ * signed reading of any pattern at or above it. The twin of
+ * `parser::I64_SIGN_BIT_U` (this unit may not import the parser's private
+ * consts). Formerly defined in the now-retired VM interpreter oracle
+ * (`minst_interp.tks`, owner ruling: the VM is retired) — relocated here,
+ * beside `decode_signed64`, its one surviving consumer's dependency.
+ */
+const MINST_I64_SIGN_BIT_U: u64 = 9223372036854775808
+
+/**
+ * MINST_I64_MIN — the most negative `i64` (`-2^63`), spelled as a subtraction
+ * because `2^63` has no positive `i64` literal form. Formerly defined
+ * alongside `MINST_I64_SIGN_BIT_U` in the now-retired VM interpreter oracle
+ * (`minst_interp.tks`, owner ruling: the VM is retired) — relocated here,
+ * beside its sibling constant; `isel_x86_64.tks`'s `f64_sign_bit_mask_x86`
+ * reuses it unqualified, the same intra-package visibility
+ * `VInfoTable`/`vinfo_set` already rely on the other way around.
+ */
+const MINST_I64_MIN: i64 = -9223372036854775807 - 1
+
+/**
+ * decode_signed64 — the signed i64 value a 64-bit two's-complement bit
+ * pattern represents: a straight bit-reinterpret, shared by BOTH isel
+ * backends (`select_const_float`/`select_const_float_x86` stage an
+ * `LConstFloat`'s raw IEEE bits through it before materializing). `bits: u64
+ * -> i64` is a CHECKED same-width cross-signedness cast (M.1) that panics
+ * past `i64::MAX`, so this never casts the full pattern directly.
+ *
+ * PROOF THAT NO STEP CAN TRAP OR OVERFLOW (the twin of
+ * `parser::numint_to_i64`'s): a pattern below `2^63` casts straight across
+ * (inside `i64`'s positive range, so the checked cast passes), and a pattern
+ * at or above it casts `bits - 2^63` (in `[0, 2^63)`, again inside that
+ * range) and adds `i64::MIN` (`MINST_I64_MIN`, in `f64_sign_bit_mask_x86`'s
+ * own file), a sum in `[i64::MIN, -1]` that cannot overflow.
+ *
+ * @param u64 bits  the 64-bit bit pattern to decode
+ * @return i64  its signed value
+ */
+fn decode_signed64(bits: u64) -> i64 {
+    if bits < MINST_I64_SIGN_BIT_U { return bits to i64 }
+    ((bits - MINST_I64_SIGN_BIT_U) to i64) + MINST_I64_MIN
+}
+
+/**
  * SelCtx — the instruction selector's threaded state: the in-progress
  * `MFunc` (a single block, #M0, for A2-2's straight-line scope), the
  * `class_of` side-table, and the next fresh scratch VReg id (past the

@@ -302,15 +302,6 @@ fn rgt_named_func(sym: str, insts: []MInst) -> MFunc {
 }
 
 /**
- * rgt_no_args — the empty argument list for `minst_interp`.
- *
- * @return []i64  no arguments
- */
-fn rgt_no_args() -> []i64 {
-    teko::list::empty()
-}
-
-/**
  * rgt_inst_all_phys — whether every operand of one instruction is physical.
  *
  * @param MInst inst  the instruction
@@ -463,17 +454,16 @@ fn rgt_spill_fixture() -> []MInst {
     insts
 }
 
+/**
+ * rgt_regalloc_gpr_spill_allocates — the GPR-spill fixture allocates to all-physical
+ * and actually grows the frame (a spill slot reserved). The pre/post `minst_interp`
+ * semantic-equivalence check this test used to make is RETIRED along with the VM
+ * interpreter oracle itself (owner ruling: the VM is retired) — A4's C-vs-own byte
+ * differential is the equivalence oracle now, not a per-fixture interpreter run.
+ */
 #test
-fn rgt_regalloc_gpr_spill_interp_equivalence() {
+fn rgt_regalloc_gpr_spill_allocates() {
     let f = rgt_named_func("main", rgt_spill_fixture())
-    let pre = minst_interp(rgt_module_of(f), "main", rgt_no_args())
-    teko::assert::is_true(pre == (15))
-    let colored = match regalloc_module(rgt_spill_abi(), rgt_module_of(f)) {
-        MModule as mm => mm
-        error => return
-    }
-    let post = minst_interp(colored, "main", rgt_no_args())
-    teko::assert::is_true(post == pre)
     let cf = match regalloc_func(rgt_spill_abi(), f) {
         MFunc as g => g
         error => return
@@ -595,17 +585,21 @@ fn rgt_movk_fixture() -> []MInst {
     insts
 }
 
+/**
+ * rgt_regalloc_movk_rmw_allocates — the RMW `MMovK` (def==use) fixture allocates to
+ * all-physical through regalloc. The pre/post `minst_interp` semantic-equivalence
+ * check this test used to make is RETIRED along with the VM interpreter oracle
+ * itself (owner ruling: the VM is retired) — A4's C-vs-own byte differential is the
+ * equivalence oracle now, not a per-fixture interpreter run.
+ */
 #test
-fn rgt_regalloc_movk_rmw_interp_equivalence() {
+fn rgt_regalloc_movk_rmw_allocates() {
     let f = rgt_named_func("main", rgt_movk_fixture())
-    let pre = minst_interp(rgt_module_of(f), "main", rgt_no_args())
-    teko::assert::is_true(pre == (327683))
     let colored = match regalloc_module(AAPCS64, rgt_module_of(f)) {
         MModule as mm => mm
         error => return
     }
-    let post = minst_interp(colored, "main", rgt_no_args())
-    teko::assert::is_true(post == pre)
+    teko::assert::is_true(all_physical(colored.funcs[0]))
 }
 
 #test
