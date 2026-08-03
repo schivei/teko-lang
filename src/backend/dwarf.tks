@@ -746,6 +746,73 @@ fn line_prefix_len() -> u64 {
 }
 
 /**
+ * DwarfSink — the three PRODUCED section images (D1.3's output) an object writer sinks into a
+ * native ELF or Mach-O object (D1.4/D1.5): the fixed `.debug_abbrev` bytes (never relocated) plus
+ * the `.debug_info` and `.debug_line` sections with their absolute-address relocations. `present`
+ * gates emission everywhere a writer consumes this type: false — the `DebugInfo::None` default —
+ * means the object writer places NOTHING, so the object stays byte-for-byte identical to a build
+ * with no debug axis at all (the FIXPOINT the sink must never disturb).
+ *
+ * @since 0.3.1.0
+ */
+pub type DwarfSink = struct {
+    /** true iff the three sections below carry real content to place. */
+    present: bool
+    /** the `.debug_abbrev` section bytes (valid iff `present`). */
+    abbrev: []byte
+    /** the `.debug_info` section bytes + relocations (valid iff `present`). */
+    info: DwSection
+    /** the `.debug_line` section bytes + relocations (valid iff `present`). */
+    line: DwSection
+}
+
+/**
+ * empty_dw_section — a `DwSection` with no bytes and no relocations, the filler `no_dwarf_sink`
+ * gives its `info`/`line` fields.
+ *
+ * @return  the empty section
+ * @since 0.3.1.0
+ */
+fn empty_dw_section() -> DwSection {
+    DwSection { bytes = teko::list::empty(); relocs = teko::list::empty() }
+}
+
+/**
+ * no_dwarf_sink — the absent `DwarfSink` (`present = false`): the value every ELF/Mach-O writer
+ * entry point defaults to, so a build that never requests `--debug=lines` (`DebugInfo::None`)
+ * places no DWARF bytes and stays byte-for-byte identical to today's object.
+ *
+ * @return  the absent sink
+ * @since 0.3.1.0
+ */
+pub fn no_dwarf_sink() -> DwarfSink {
+    DwarfSink { present = false; abbrev = teko::list::empty(); info = empty_dw_section(); line = empty_dw_section() }
+}
+
+/**
+ * build_dwarf_sink — assemble the D1.3 producers (`debug_abbrev`/`debug_info`/`debug_line`) into a
+ * `present = true` `DwarfSink`, the shape D1.4/D1.5's object writers consume. The single call site
+ * a `--debug=lines` native build reaches once it has assembled `cu`/`files`/`rows` from the checked
+ * program and the encoded module (`project.tks`'s build glue — the checker/LIR side of the D1.4/
+ * D1.5 wiring); this function owns no knowledge of either.
+ *
+ * @param cu                the compile unit (`.debug_info`'s content)
+ * @param files             the source file names, in file-table order (`.debug_line`'s header)
+ * @param rows              the whole-unit address→line rows, in ascending address order
+ * @param final_pc_advance  the code advance from the last row to the end of `.text`
+ * @return                  the assembled, `present = true` sink
+ * @since 0.3.1.0
+ */
+pub fn build_dwarf_sink(cu: DwCompileUnit, files: []str, rows: []DwLineRow, final_pc_advance: u64) -> DwarfSink {
+    DwarfSink {
+        present = true
+        abbrev = debug_abbrev()
+        info = debug_info(cu)
+        line = debug_line(files, cu.text_symbol, rows, final_pc_advance)
+    }
+}
+
+/**
  * DwBaseType — one scalar base type the compile unit describes (a DW_TAG_base_type DIE): its Teko
  * name, its size in bytes, and its DWARF `DW_AT_encoding` (one of the frozen `DW_ATE_*`). The DIE a
  * variable's `DW_AT_type` points at.
