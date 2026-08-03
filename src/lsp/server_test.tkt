@@ -68,7 +68,7 @@ fn diagnose_document_clean_is_empty() {
  * document's uri that carries the error text, a severity, and a range.
  */
 fn didopen_dispatch_publishes_diagnostics() {
-    let out = handle_request(didopen_request(DOC_URI, BUGGY_DOC))
+    let out = handle_request(store_empty(), didopen_request(DOC_URI, BUGGY_DOC)).out
     teko::assert::eq_u64(out.len, 1)
     let wire = json::encode(out[0])
     teko::assert::str_contains(wire, "textDocument/publishDiagnostics")
@@ -84,7 +84,7 @@ fn didopen_dispatch_publishes_diagnostics() {
  * diagnostics array (the protocol's "now clean" signal).
  */
 fn didopen_clean_publishes_empty() {
-    let out = handle_request(didopen_request(DOC_URI, CLEAN_DOC))
+    let out = handle_request(store_empty(), didopen_request(DOC_URI, CLEAN_DOC)).out
     teko::assert::eq_u64(out.len, 1)
     let wire = json::encode(out[0])
     teko::assert::str_contains(wire, "textDocument/publishDiagnostics")
@@ -104,9 +104,67 @@ fn jsonrpc_loop_open_to_publish() {
         RpcMessage as m => m
         error as e => { teko::assert::eq_str(e.message, "no error expected"); return }
     }
-    let out = handle_request(msg.body)
+    let out = handle_request(store_empty(), msg.body).out
     teko::assert::eq_u64(out.len, 1)
     let reply = encode_frame(out[0])
     teko::assert::str_contains(reply, "textDocument/publishDiagnostics")
     teko::assert::str_contains(reply, TYPE_MISSING)
+}
+
+/**
+ * formatting_request — a `textDocument/formatting` request DOM for document `uri` with request id
+ * `id`, built with the server's JSON constructors so the test drives the exact client shape.
+ *
+ * @param uri  the document URI
+ * @param id   the request id
+ * @return     the `textDocument/formatting` request DOM
+ */
+fn formatting_request(uri: str, id: f64) -> json::JsonValue {
+    let td = jobj(["uri"], [jstr(uri)])
+    let options = jobj(["tabSize", "insertSpaces"], [jnum(4.0), jbool(true)])
+    let params = jobj(["textDocument", "options"], [td, options])
+    jobj(["jsonrpc", "id", "method", "params"], [jstr("2.0"), jnum(id), jstr("textDocument/formatting"), params])
+}
+
+#test
+/**
+ * formatting_returns_full_range_edit — after a document is opened into the store, a formatting
+ * request answers with a one-element `TextEdit[]` that carries the formatted text (`newText`) over a
+ * `range`, echoing the request id. Proves the in-process `fmt::format_source` wiring end to end.
+ */
+fn formatting_returns_full_range_edit() {
+    let opened = handle_request(store_empty(), didopen_request(DOC_URI, CLEAN_DOC))
+    let out = handle_request(opened.store, formatting_request(DOC_URI, 7.0)).out
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "\"id\":7")
+    teko::assert::str_contains(wire, "newText")
+    teko::assert::str_contains(wire, "range")
+    teko::assert::str_contains(wire, "fn f")
+}
+
+#test
+/**
+ * formatting_unopened_is_null — formatting a document the server never saw opened yields a `null`
+ * result (the protocol's "no edits"), never a corrupt edit.
+ */
+fn formatting_unopened_is_null() {
+    let out = handle_request(store_empty(), formatting_request(DOC_URI, 9.0)).out
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "\"result\":null")
+    teko::assert::str_absent(wire, "newText")
+}
+
+#test
+/**
+ * initialize_advertises_formatting — the `initialize` result announces the formatting provider, so a
+ * client knows the server answers `textDocument/formatting`.
+ */
+fn initialize_advertises_formatting() {
+    let req = jobj(["jsonrpc", "id", "method"], [jstr("2.0"), jnum(1.0), jstr("initialize")])
+    let out = handle_request(store_empty(), req).out
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "documentFormattingProvider")
 }
