@@ -3817,9 +3817,26 @@ fn copy_relocs_to_current_region_arm64(relocs: []teko::backend::Reloc) -> []teko
  * @param ef  the encoded function to copy
  * @return    `ef` with every `str` field resident in the current region
  * @since 0.3.1 C6.4
+ *
+ * (0.3.1 native-region-crash) The macOS-arm64 native fixpoint gate's symbolized backtrace (head
+ * 284c91c, item 550/6691) traced a SIGSEGV inside `tk_region_alloc`, reached through this
+ * function's `relocs` copy (`tk_slice_push_fo` → `tk_slice_push_r` → `tk_region_alloc`) while the
+ * struct literal below built its `symbol` and `relocs` fields inline as sibling initializers —
+ * the ONE copy-helper on the arm64 commit path left inline while every sibling
+ * (`copy_reloc_to_current_region_arm64`, and the x86 twin `copy_encoded_func_to_current_region_x86`
+ * plus its own siblings) had already received the C6.3-fix defensive let-binding, and precisely the
+ * frame the backtrace names. The x86 twin, already hardened, runs all ~6680 items; this arm64 twin,
+ * still inline, dies mid-loop. This edit brings it to the SAME shape: each field is computed into
+ * its OWN `let` BEFORE the struct literal, instead of two allocating calls evaluated inline as
+ * sibling field initializers. Behaviorally identical (same values, same region, same order of the
+ * copies actually needed) — a pure reshaping of the emitted call sequence, matching the sibling
+ * helpers exactly; if the crash persists after this, the region-state itself is corrupt before this
+ * point (the `TEKO_NATIVE_REGION_CHECK` diagnostic added alongside this fix names that case).
  */
 fn copy_encoded_func_to_current_region_arm64(ef: teko::backend::EncodedFunc) -> teko::backend::EncodedFunc {
-    teko::backend::EncodedFunc { symbol = copy_str_to_current_region(ef.symbol); words = ef.words; relocs = copy_relocs_to_current_region_arm64(ef.relocs) }
+    let symbol = copy_str_to_current_region(ef.symbol)
+    let relocs = copy_relocs_to_current_region_arm64(ef.relocs)
+    teko::backend::EncodedFunc { symbol = symbol; words = ef.words; relocs = relocs }
 }
 
 /**
