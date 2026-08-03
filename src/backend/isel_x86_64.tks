@@ -603,6 +603,41 @@ fn f32_sign_bit_mask_x86() -> i64 {
 }
 
 /**
+ * select_i_to_f_bits_x86 — the `IToFBits` selection (`teko::f64_from_bits`, degrau 27): one
+ * `MFMovX86` GPR->FPR (x86-64's `MOVQ xmm, r64`), a RAW bit crossing into a fresh FPR result —
+ * NOT `CVTSI2SD` (`select_itof_x86`'s numeric conversion), which would compute the nearest float
+ * to the integer's VALUE instead of reinterpreting its bits. `dbl` is always true: the checker's
+ * `f64_from_bits` signature (`checker/scope.tks`) is fixed to `u64 -> f64`, no `f32` form exists.
+ *
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param a  the operand VReg (a GPR holding the `u64` bit pattern)
+ * @return SelCtxX86  the advanced context
+ */
+fn select_i_to_f_bits_x86(ctx0: SelCtxX86, inst: lir::LInst, a: u32) -> SelCtxX86 {
+    let dst = vreg(inst.result, MRegClass::FPR)
+    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::FPR, true)
+    selctx_x86_emit(ctx1, fmov_x86(dst, vreg(a, MRegClass::GPR), true))
+}
+
+/**
+ * select_f_to_i_bits_x86 — the `FToIBits` selection (`teko::f64_bits`, degrau 27): one
+ * `MFMovX86` FPR->GPR (x86-64's `MOVQ r64, xmm`), `select_i_to_f_bits_x86`'s mirror image — a RAW
+ * bit crossing, NOT `CVTTSD2SI` (`select_ftoi_x86`'s numeric conversion). `dbl` is always true, the
+ * same `f64`-only reason `select_i_to_f_bits_x86` names.
+ *
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param a  the operand VReg (an FPR holding the `f64` value)
+ * @return SelCtxX86  the advanced context
+ */
+fn select_f_to_i_bits_x86(ctx0: SelCtxX86, inst: lir::LInst, a: u32) -> SelCtxX86 {
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::GPR, true)
+    selctx_x86_emit(ctx1, fmov_x86(dst, vreg(a, MRegClass::FPR), true))
+}
+
+/**
  * select_fneg_x86 — the `FNeg` selection (`B1-fp`): x86 has no scalar float
  * negate instruction, so the sign bit is flipped by round-tripping through a
  * GPR — extract the raw bits (`MFMovX86` FPR->GPR), XOR the sign-bit mask
@@ -692,8 +727,9 @@ fn select_ftof_x86(ctx0: SelCtxX86, inst: lir::LInst, a: u32, a_wide: bool) -> S
 
 /**
  * select_un_x86 — the `LUn` dispatch (§4.1): the two-address integer
- * negate/complement, the identity move for the extend/truncate ops, and the
- * float negate/convert family (`B1-fp`, closed 2026-07-29).
+ * negate/complement, the identity move for the extend/truncate ops, the
+ * float negate/convert family (`B1-fp`, closed 2026-07-29), and the raw
+ * IEEE-754 bit-reinterpretation pair (`IToFBits`/`FToIBits`, degrau 27).
  *
  * @param SelCtxX86 ctx0  the context to extend
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
@@ -712,6 +748,8 @@ fn select_un_x86(ctx0: SelCtxX86, inst: lir::LInst, u: lir::LUn) -> SelCtxX86 {
         lir::LUnOp::IToF => select_itof_x86(ctx0, inst, u.a)
         lir::LUnOp::FToI => select_ftoi_x86(ctx0, inst, u.a, a_info.wide)
         lir::LUnOp::FToF => select_ftof_x86(ctx0, inst, u.a, a_info.wide)
+        lir::LUnOp::IToFBits => select_i_to_f_bits_x86(ctx0, inst, u.a)
+        lir::LUnOp::FToIBits => select_f_to_i_bits_x86(ctx0, inst, u.a)
     }
 }
 
