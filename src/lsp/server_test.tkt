@@ -204,6 +204,97 @@ fn initialize_advertises_formatting() {
 
 #test
 /**
+ * initialize_advertises_hover_and_definition — crumb F's regression: the `initialize` result also
+ * announces `hoverProvider` and `definitionProvider`, so a client knows the server now answers
+ * `textDocument/hover` and `textDocument/definition`.
+ */
+fn initialize_advertises_hover_and_definition() {
+    let req = jobj(["jsonrpc", "id", "method"], [jstr("2.0"), jnum(1.0), jstr("initialize")])
+    let out = handle_request(store_empty(), req).out
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "hoverProvider")
+    teko::assert::str_contains(wire, "definitionProvider")
+}
+
+/**
+ * position_request — a `method` request DOM at document `uri`, request id `id`, targeting the
+ * 0-based cursor (`line`, `character`) — the shared builder the hover/definition fixture requests
+ * use, mirroring `formatting_request`'s client-shape fidelity.
+ *
+ * @param method     the LSP method name (`textDocument/hover` or `textDocument/definition`)
+ * @param uri        the document URI
+ * @param id         the request id
+ * @param line       the 0-based cursor line
+ * @param character  the 0-based cursor character
+ * @return           the request DOM
+ */
+fn position_request(method: str, uri: str, id: f64, line: f64, character: f64) -> json::JsonValue {
+    let td = jobj(["uri"], [jstr(uri)])
+    let position = jobj(["line", "character"], [jnum(line), jnum(character)])
+    let params = jobj(["textDocument", "position"], [td, position])
+    jobj(["jsonrpc", "id", "method", "params"], [jstr("2.0"), jnum(id), jstr(method), params])
+}
+
+#test
+/**
+ * hover_returns_signature_and_doc_for_symbol_under_cursor — after `CLEAN_DOC` is opened, a hover at
+ * its `f` function name (line 0, char 7 — `pub fn f() -> i64 { … }`) answers a `Hover` whose markdown
+ * carries the rendered signature, echoing the request id.
+ */
+fn hover_returns_signature_and_doc_for_symbol_under_cursor() {
+    let opened = handle_request(store_empty(), didopen_request(DOC_URI, CLEAN_DOC))
+    let out = handle_request(opened.store, position_request("textDocument/hover", DOC_URI, 11.0, 0.0, 7.0)).out
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "\"id\":11")
+    teko::assert::str_contains(wire, "contents")
+    teko::assert::str_contains(wire, "fn f() -> i64")
+}
+
+#test
+/**
+ * hover_on_no_symbol_is_null — a cursor far past the document's last line covers no token, so the
+ * hover answers a `null` result rather than a stale/guessed symbol.
+ */
+fn hover_on_no_symbol_is_null() {
+    let opened = handle_request(store_empty(), didopen_request(DOC_URI, CLEAN_DOC))
+    let out = handle_request(opened.store, position_request("textDocument/hover", DOC_URI, 12.0, 100.0, 0.0)).out
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "\"result\":null")
+}
+
+#test
+/**
+ * hover_unopened_is_null — hovering in a document the server never saw opened yields a `null`
+ * result: there is no buffer to resolve the cursor against.
+ */
+fn hover_unopened_is_null() {
+    let out = handle_request(store_empty(), position_request("textDocument/hover", DOC_URI, 14.0, 0.0, 7.0)).out
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "\"result\":null")
+}
+
+#test
+/**
+ * definition_returns_location_of_symbol_under_cursor — the same cursor over `CLEAN_DOC`'s `f`
+ * answers a `Location` naming the document's own uri and a range starting at line 0, echoing the
+ * request id.
+ */
+fn definition_returns_location_of_symbol_under_cursor() {
+    let opened = handle_request(store_empty(), didopen_request(DOC_URI, CLEAN_DOC))
+    let out = handle_request(opened.store, position_request("textDocument/definition", DOC_URI, 13.0, 0.0, 7.0)).out
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "\"id\":13")
+    teko::assert::str_contains(wire, DOC_URI)
+    teko::assert::str_contains(wire, "\"line\":0")
+}
+
+#test
+/**
  * checker_severity_maps_every_checker_severity_to_its_lsp_twin — crumb D's structural re-tag between
  * `checker::DiagLevel` and the LSP's own `DiagSeverity`: each of the four members round-trips to the
  * identically-named LSP member.

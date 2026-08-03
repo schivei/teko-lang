@@ -129,3 +129,56 @@ fn build_symbol_index_finds_exactly_the_expected_symbols() {
     let syms = build_symbol_index(sym_program())
     teko::assert::eq_u64(syms.len, 6)
 }
+
+#test
+/**
+ * word_at_position_finds_the_identifier_under_the_cursor — crumb F's cursor→token mapping: the
+ * 0-based position inside `double`'s name (line 3, char 9 — `SYM_SRC`'s 4th source line, 1-based
+ * col 10, squarely inside the 6-byte word starting at col 8) resolves to the exact identifier text.
+ */
+fn word_at_position_finds_the_identifier_under_the_cursor() {
+    let word = match word_at_position(SYM_SRC, 3, 9) {
+        str as w => w
+        null => { teko::assert::is_true(false); return }
+    }
+    teko::assert::eq_str(word, "double")
+}
+
+#test
+/**
+ * word_at_position_outside_any_token_is_null — a cursor far past the fixture's last line covers no
+ * token, so the lookup answers `null` rather than an out-of-range guess.
+ */
+fn word_at_position_outside_any_token_is_null() {
+    match word_at_position(SYM_SRC, 100, 0) {
+        str as w => teko::assert::eq_str(w, "<expected null>")
+        null => { }
+    }
+}
+
+#test
+/**
+ * resolve_symbol_at_finds_the_function_symbol_under_the_cursor — the same cursor position resolves,
+ * end to end (word lookup + symbol-index lookup), to the `double` `Function` symbol itself — the
+ * engine `hover_response`/`definition_response` both call.
+ */
+fn resolve_symbol_at_finds_the_function_symbol_under_the_cursor() {
+    let sym = match resolve_symbol_at(SYM_PATH, SYM_SRC, 3, 9) {
+        Symbol as s => s
+        null => { teko::assert::is_true(false); return }
+    }
+    teko::assert::eq_str(sym.name, "double")
+    teko::assert::is_true(sym.kind == SymKind::Function)
+}
+
+#test
+/**
+ * resolve_symbol_at_on_a_keyword_is_null — a cursor over the `pub` keyword (a `Pub` token, never an
+ * `Ident`) resolves to no symbol: the keyword position names no declaration.
+ */
+fn resolve_symbol_at_on_a_keyword_is_null() {
+    match resolve_symbol_at(SYM_PATH, SYM_SRC, 3, 0) {
+        Symbol as s => teko::assert::eq_str(s.name, "<expected null>")
+        null => { }
+    }
+}
