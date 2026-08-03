@@ -1844,3 +1844,161 @@ fn f64_to_f32_follows_ieee_and_never_panics() {
     let flushed: f32 = under to f32
     teko::assert::is_true(flushed == 0.0)
 }
+
+#test
+/**
+ * collect_unused_fn_warnings_flags_a_dead_private_function — a private function never called
+ * anywhere in the program is reported, by name, exactly like `initanalysis.tks`'s stderr line.
+ */
+fn collect_unused_fn_warnings_flags_a_dead_private_function() {
+    let body: []TStatement = teko::list::push(teko::list::empty(), treturn(tnum(1)))
+    let prog = TProgram { items = teko::list::push(teko::list::empty(), plainfn("dead_fn", i64t(), body)) }
+    let warnings = collect_unused_fn_warnings(prog)
+    teko::assert::eq_u64(warnings.len, 1)
+    teko::assert::str_contains(warnings[0], "unused private function")
+    teko::assert::str_contains(warnings[0], "dead_fn")
+}
+
+#test
+/**
+ * collect_unused_fn_warnings_spares_a_called_function — a private function CALLED from another
+ * function's body is not flagged (mirrors `used_in_program`'s own predicate): `main` calls
+ * `caller`, `caller` calls `callee`, so all three are either exempt (`main`) or used, leaving zero
+ * findings.
+ */
+fn collect_unused_fn_warnings_spares_a_called_function() {
+    let callee_body: []TStatement = teko::list::push(teko::list::empty(), treturn(tnum(1)))
+    let caller_body: []TStatement = teko::list::push(teko::list::empty(), texpr_stmt(tcall1("callee", tnum(0), i64t())))
+    let main_body: []TStatement = teko::list::push(teko::list::empty(), texpr_stmt(tcall1("caller", tnum(0), i64t())))
+    mut items: []TItem = teko::list::empty()
+    items = teko::list::push(items, plainfn("callee", i64t(), callee_body))
+    items = teko::list::push(items, plainfn("caller", i64t(), caller_body))
+    items = teko::list::push(items, plainfn("main", i64t(), main_body))
+    let warnings = collect_unused_fn_warnings(TProgram { items = items })
+    teko::assert::eq_u64(warnings.len, 0)
+}
+
+#test
+/**
+ * collect_redundant_cast_warnings_flags_a_same_type_cast — the D1 class-1 finding: a cast whose
+ * target equals its own operand's type, buried inside an expression statement.
+ */
+fn collect_redundant_cast_warnings_flags_a_same_type_cast() {
+    let cast = TExpr { kind = TCast { expr = tvar("x", u32t()) }; type = u32t(); line = 5; col = 3 }
+    let body: []TStatement = teko::list::push(teko::list::empty(), texpr_stmt(cast))
+    let prog = TProgram { items = teko::list::push(teko::list::empty(), plainfn("f1", i64t(), body)) }
+    let warnings = collect_redundant_cast_warnings(prog)
+    teko::assert::eq_u64(warnings.len, 1)
+    teko::assert::str_contains(warnings[0], "redundant cast")
+    teko::assert::str_contains(warnings[0], "provable no-op")
+}
+
+#test
+/**
+ * collect_redundant_cast_warnings_flags_a_redundant_widen_in_a_binary — the D1 class-3 finding: an
+ * arithmetic `+` whose left operand is a `to u32` cast on a `u8` value while the right operand is
+ * already `u32` — the W-RULE joins to `u32` either way, so the cast is provably a no-op.
+ */
+fn collect_redundant_cast_warnings_flags_a_redundant_widen_in_a_binary() {
+    let cast = TExpr { kind = TCast { expr = tvar("x", u8t()) }; type = u32t(); line = 8; col = 4 }
+    let bin = TExpr { kind = TBinary { op = lexer::TokenKind::Plus; left = cast; right = tvar("y", u32t()) }; type = u32t(); line = 8; col = 1 }
+    let body: []TStatement = teko::list::push(teko::list::empty(), texpr_stmt(bin))
+    let prog = TProgram { items = teko::list::push(teko::list::empty(), plainfn("f2", u32t(), body)) }
+    let warnings = collect_redundant_cast_warnings(prog)
+    teko::assert::eq_u64(warnings.len, 1)
+    teko::assert::str_contains(warnings[0], "redundant cast")
+}
+
+#test
+/**
+ * collect_redundant_cast_warnings_renders_the_innermost_type_through_a_synthetic_wrap — the
+ * `innermost_cast_type` regression: a `to u16` cast on a `u8` value, next to a `u32` sibling,
+ * WIDENS a second time (the arithmetic join is `u32`, wider than the cast's own `u16` target), so
+ * the typed tree carries a SYNTHETIC outer `to u32` wrap around the programmer's own `to u16`. The
+ * reported message must still name `u16` (what the source spells), never the synthetic `u32`.
+ */
+fn collect_redundant_cast_warnings_renders_the_innermost_type_through_a_synthetic_wrap() {
+    let inner_cast = TExpr { kind = TCast { expr = tvar("x", u8t()) }; type = u16t(); line = 12; col = 4 }
+    let outer_wrap = TExpr { kind = TCast { expr = inner_cast }; type = u32t(); line = 12; col = 4 }
+    let bin = TExpr { kind = TBinary { op = lexer::TokenKind::Plus; left = outer_wrap; right = tvar("y", u32t()) }; type = u32t(); line = 12; col = 1 }
+    let body: []TStatement = teko::list::push(teko::list::empty(), texpr_stmt(bin))
+    let prog = TProgram { items = teko::list::push(teko::list::empty(), plainfn("f3", u32t(), body)) }
+    let warnings = collect_redundant_cast_warnings(prog)
+    teko::assert::eq_u64(warnings.len, 1)
+    teko::assert::str_contains(warnings[0], "to u16")
+    teko::assert::str_absent(warnings[0], "to u32")
+}
+
+#test
+/**
+ * collect_redundant_cast_warnings_spares_a_genuine_narrowing_cast — a `to u8` cast on a `u32` value
+ * is a NARROWING (checked) conversion, never a D1 finding regardless of the sibling operand.
+ */
+fn collect_redundant_cast_warnings_spares_a_genuine_narrowing_cast() {
+    let cast = TExpr { kind = TCast { expr = tvar("x", u32t()) }; type = u8t(); line = 20; col = 4 }
+    let bin = TExpr { kind = TBinary { op = lexer::TokenKind::Plus; left = cast; right = tvar("y", u8t()) }; type = u8t(); line = 20; col = 1 }
+    let body: []TStatement = teko::list::push(teko::list::empty(), texpr_stmt(bin))
+    let prog = TProgram { items = teko::list::push(teko::list::empty(), plainfn("f4", u8t(), body)) }
+    teko::assert::eq_u64(collect_redundant_cast_warnings(prog).len, 0)
+}
+
+#test
+/**
+ * collect_warnings_combines_both_finding_kinds — a function that is ITSELF unused AND carries a
+ * redundant cast in its body reports BOTH findings, unused-fn first (`collect_warnings`'s own
+ * ordering contract).
+ */
+fn collect_warnings_combines_both_finding_kinds() {
+    let cast = TExpr { kind = TCast { expr = tvar("x", u32t()) }; type = u32t(); line = 1; col = 1 }
+    let body: []TStatement = teko::list::push(teko::list::empty(), texpr_stmt(cast))
+    let prog = TProgram { items = teko::list::push(teko::list::empty(), plainfn("noisy", i64t(), body)) }
+    let warnings = collect_warnings(prog)
+    teko::assert::eq_u64(warnings.len, 2)
+    teko::assert::str_contains(warnings[0], "unused private function")
+    teko::assert::str_contains(warnings[1], "redundant cast")
+}
+
+/**
+ * prog_from_module_src — lex + parse `src` as a MODULE (no loose statements) and flatten its
+ * declarations into a `parser::Program`, every item stamped `path` — the same shape
+ * `src/lsp/diagnostics.tks::module_items` builds for an open document, reused here so
+ * `collect_diagnostics_appends_a_collected_warning_after_an_error` drives the REAL end-to-end
+ * seam (lex → parse → `collect_diagnostics`) instead of a hand-built `TProgram`.
+ *
+ * @param src   the module source text
+ * @param path  the file path stamped onto every item
+ * @return      the flat program (empty items on a lex/parse fault — the caller expects clean text)
+ */
+fn prog_from_module_src(src: str, path: str) -> parser::Program {
+    let toks = match lexer::tokenize(src) { []lexer::Token as t => t; error => teko::list::empty() }
+    let m = match parser::parse_module(toks, 0) { parser::Parsed<parser::Module> as x => x.node; error => parser::Module { uses = teko::list::empty(); decls = teko::list::empty() } }
+    mut items: []parser::Item = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= m.decls.len { break }
+        items = match m.decls[i] {
+            parser::Function as f => teko::list::push(items, parser::Item { content = f; namespace = ""; file = path })
+            parser::TypeDecl as t => teko::list::push(items, parser::Item { content = t; namespace = ""; file = path })
+            parser::ConstDecl as c => teko::list::push(items, parser::Item { content = c; namespace = ""; file = path })
+        }
+        i = i + 1
+    }
+    parser::Program { items = items }
+}
+
+#test
+/**
+ * collect_diagnostics_appends_a_collected_warning_after_an_error — the crumb C regression named by
+ * the design doc (`docs/design/lsp-teko.md` §9.1): a program with ONE type error (an unknown
+ * parameter type) and ONE unused private function yields TWO diagnostics from `collect_diagnostics`
+ * — the error, THEN the warning — proving the checker's real declaration-boundary walk (not just
+ * the hand-built-tree unit tests above) actually wires `collect_warnings` in.
+ */
+fn collect_diagnostics_appends_a_collected_warning_after_an_error() {
+    let src = "pub fn bad(x: Bogus) -> i64 { return 0 }\nfn dead_leaf() -> i64 { return 1 }\n"
+    let diags = collect_diagnostics(prog_from_module_src(src, "warn.tks"))
+    teko::assert::eq_u64(diags.len, 2)
+    teko::assert::str_contains(diags[0], "Bogus")
+    teko::assert::str_contains(diags[1], "unused private function")
+    teko::assert::str_contains(diags[1], "dead_leaf")
+}

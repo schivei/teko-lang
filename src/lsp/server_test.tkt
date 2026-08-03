@@ -27,6 +27,20 @@ const CLEAN_DOC: str = "pub fn f() -> i64 { return 0 }"
 const TYPE_MISSING: str = "unknown type: Bogus"
 
 /**
+ * WARN_DOC — a well-typed module whose ONLY defect is a dead private function: no `pub`, never
+ * called, not `main`, not `#test`. Before crumb C this produced ZERO diagnostics (the finding only
+ * ever reached stderr); it now exercises `warnings.tks::collect_warnings` end to end through the
+ * SAME `didOpen` -> `publishDiagnostics` pipeline crumb A already wired for errors.
+ */
+const WARN_DOC: str = "fn dead() -> i64 { return 0 }"
+
+/**
+ * UNUSED_FN_MISSING — the stable substring of the collected unused-private-function warning for
+ * `WARN_DOC`.
+ */
+const UNUSED_FN_MISSING: str = "unused private function `dead`"
+
+/**
  * didopen_request — a `textDocument/didOpen` notification DOM for document `uri` carrying `text`,
  * built with the server's own JSON constructors so the test drives the exact shape a client sends.
  *
@@ -89,6 +103,24 @@ fn didopen_clean_publishes_empty() {
     let wire = json::encode(out[0])
     teko::assert::str_contains(wire, "textDocument/publishDiagnostics")
     teko::assert::str_contains(wire, "\"diagnostics\":[]")
+}
+
+#test
+/**
+ * didopen_dispatch_publishes_a_collected_warning — crumb C's own regression: a document whose
+ * ONLY defect is a dead private function (a WARNING, `warnings.tks::collect_unused_fn_warnings`,
+ * never a hard error) still publishes one diagnostic, at `severity` 2 (`DiagSeverity::Warning`),
+ * carrying the finding's text — proving the crumb A pipeline now surfaces what used to reach only
+ * stderr.
+ */
+fn didopen_dispatch_publishes_a_collected_warning() {
+    let out = handle_request(store_empty(), didopen_request(DOC_URI, WARN_DOC)).out
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "textDocument/publishDiagnostics")
+    teko::assert::str_contains(wire, DOC_URI)
+    teko::assert::str_contains(wire, UNUSED_FN_MISSING)
+    teko::assert::str_contains(wire, "\"severity\":2")
 }
 
 #test
