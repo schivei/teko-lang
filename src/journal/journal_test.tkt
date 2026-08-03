@@ -165,6 +165,66 @@ fn j_sweep_reclaims_a_dead_root_but_spares_keep_and_live() {
 }
 
 /**
+ * j2_claim_root_refuses_a_fresh_collision_with_a_live_root — the ferrolho of design §11.3: a FRESH
+ * run id (never inherited via `TEKO_RUN`) landing on a root some OTHER live process already holds is
+ * a NAMED refusal, never a silent share.
+ */
+#test
+fn j2_claim_root_refuses_a_fresh_collision_with_a_live_root() {
+    let dir = tdir("ferrolho-fresh")
+    match teko::io::write_file(lock_path(dir), teko::str::concat(teko::str::i64_to_str(pid_rt()), "\n")) { error => { }; null => { } }
+    match claim_root(dir, true) {
+        str => teko::assert::is_true(false)
+        error as e => teko::assert::str_contains(e.message, dir)
+    }
+}
+
+/**
+ * j2_claim_root_allows_an_inherited_run_to_share_a_live_root — the inversion: the SAME live root and
+ * the SAME lock, but `fresh = false` (a `TEKO_RUN` this process inherited) is never refused — that is
+ * the deliberate multi-writer sharing §1.1 describes, not a conflict.
+ */
+#test
+fn j2_claim_root_allows_an_inherited_run_to_share_a_live_root() {
+    let dir = tdir("ferrolho-inherited")
+    match teko::io::write_file(lock_path(dir), teko::str::concat(teko::str::i64_to_str(pid_rt()), "\n")) { error => { }; null => { } }
+    match claim_root(dir, false) {
+        str as r => teko::assert::eq_str(r, dir)
+        error => teko::assert::is_true(false)
+    }
+}
+
+/**
+ * j2_record_self_pid_never_erases_an_earlier_writers_pid — the multi-writer fix itself: a second
+ * writer claiming an already-locked root APPENDS its pid instead of overwriting the first one's, so
+ * the lock still names every sibling that ever claimed the root.
+ */
+#test
+fn j2_record_self_pid_never_erases_an_earlier_writers_pid() {
+    let dir = tdir("multi-pid")
+    match teko::io::write_file(lock_path(dir), "1\n") { error => { }; null => { } }
+    record_self_pid(dir)
+    let pids = lock_pids(dir)
+    teko::assert::eq_u64(pids.len, 2)
+    teko::assert::eq_i64(pids[0], 1)
+    teko::assert::eq_i64(pids[1], pid_rt())
+}
+
+/**
+ * j2_root_is_live_when_any_recorded_pid_is_alive — `root_is_live`'s multi-writer reading: a root
+ * whose lock names one dead-looking pid AND one truly live one (this process's own) still reads live,
+ * because ANY sibling still running is enough (§1.1: a root outlives the FIRST writer to finish, not
+ * only the last).
+ */
+#test
+fn j2_root_is_live_when_any_recorded_pid_is_alive() {
+    let dir = tdir("multi-live")
+    let body = teko::str::concat("999999999\n", teko::str::i64_to_str(pid_rt()), "\n")
+    match teko::io::write_file(lock_path(dir), body) { error => { }; null => { } }
+    teko::assert::is_true(root_is_live(dir))
+}
+
+/**
  * j_scratch_ends_with_its_base — `scratch` keeps the caller's base as the tail of the composed path,
  * whether a test scope is active (a rooted path ending in `base`) or not (`base` unchanged).
  */
