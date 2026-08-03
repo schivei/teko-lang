@@ -120,6 +120,17 @@ static void tk_backtrace(void) { fputs("teko: stack trace unavailable on this pl
 static void tk_rt_crash_handler(int sig) {
     fputs("\nteko: FATAL signal — a generated program crashed (M.1).\n", stderr);
     tk_backtrace();
+    // (2026-08-03, native-region-crash, chunk-canary) TEKO_NATIVE_CRASH_CORE=1 — a CI-narrowing aid,
+    // same env-gated pattern as the other TEKO_NATIVE_* diagnostics: byte-identical when unset. The
+    // ordinary handler always _Exit()s (async-signal-safe, no core), which is right for CI but
+    // leaves no postmortem artifact to inspect registers/memory with gdb. When armed, restore the
+    // signal's default disposition and re-raise instead, so (with `ulimit -c unlimited`) the OS
+    // produces a real core dump alongside the symbolized backtrace above.
+    if (getenv("TEKO_NATIVE_CRASH_CORE") != NULL) {
+        signal(sig, SIG_DFL);
+        raise(sig);
+        return;   // unreachable once the default handler re-delivers, kept for clarity
+    }
     _Exit(128 + sig);   // async-signal-safe
 }
 __attribute__((constructor)) static void tk_rt_install_crash_handler(void) {
