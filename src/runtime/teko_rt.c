@@ -1106,9 +1106,18 @@ static void *tk_chunk_alloc(size_t bytes) {
 #endif
 }
 
+// tk_canary_forget — fwd (2026-08-03, native-region-crash, chunk-canary); defined beside the rest
+// of the diagnostic near tk_region_alloc. tk_chunk_free is the SOLE deallocator for a tk_chunk (a
+// legitimate tk_region_drop / tk_arena_pop rewind frees chunks all the time), so every release MUST
+// scrub any matching ring entry — otherwise the diagnostic would read a freed-and-reused address on
+// its next check and report a "corruption" that is really just a false positive over memory the
+// allocator legitimately handed to someone else.
+static void tk_canary_forget(struct tk_chunk *c);
+
 // Release a chunk block obtained from tk_chunk_alloc. Windows _aligned_malloc blocks MUST NOT be
 // passed to plain free(); every chunk-release site routes through here to stay heap-correct.
 static void tk_chunk_free(struct tk_chunk *c) {
+    tk_canary_forget(c);
 #if defined(_WIN32)
     _aligned_free(c);
 #else
@@ -1712,7 +1721,7 @@ void *tk_region_lookup(tk_region *r, uint64_t type_id) {
 // that overruns one bump-allocated block lands on whatever the allocator placed NEXT to it in the
 // process address space — overwhelmingly a recently `posix_memalign`'d neighbor, not an old one.
 #define TK_CANARY_RING 512
-typedef struct { struct tk_chunk *chunk; size_t cap; struct tk_chunk *next_snapshot; } tk_canary_entry;
+typedef struct { struct tk_chunk *chunk; size_t cap; struct tk_chunk *next_snapshot; int live; } tk_canary_entry;
 static tk_canary_entry tk_canary_ring[TK_CANARY_RING];
 static int tk_canary_head = 0;      // next ring slot to overwrite
 static int tk_canary_count = 0;     // how many slots are populated (<= TK_CANARY_RING)
@@ -1728,9 +1737,20 @@ static int tk_canary_enabled(void) {
 // ONLY from tk_region_alloc's new-chunk branch (the sole birthplace of a tk_chunk), and only when
 // the diagnostic is on.
 static void tk_canary_record(struct tk_chunk *c) {
-    tk_canary_ring[tk_canary_head] = (tk_canary_entry){ .chunk = c, .cap = c->cap, .next_snapshot = c->next };
+    tk_canary_ring[tk_canary_head] = (tk_canary_entry){ .chunk = c, .cap = c->cap, .next_snapshot = c->next, .live = 1 };
     tk_canary_head = (tk_canary_head + 1) % TK_CANARY_RING;
     if (tk_canary_count < TK_CANARY_RING) tk_canary_count += 1;
+}
+
+// tk_canary_forget — mark every ring entry naming `c` dead (called from tk_chunk_free, the sole
+// deallocator): a LEGITIMATE tk_region_drop / tk_arena_pop rewind frees chunks constantly, and
+// without this the diagnostic would read a freed-and-reused address on its next check and report a
+// false "corruption" over memory the allocator has since handed to someone else entirely.
+static void tk_canary_forget(struct tk_chunk *c) {
+    if (!tk_canary_enabled()) return;
+    for (int i = 0; i < tk_canary_count; i += 1) {
+        if (tk_canary_ring[i].live && tk_canary_ring[i].chunk == c) tk_canary_ring[i].live = 0;
+    }
 }
 
 // tk_canary_check — re-verify every ringed chunk's {cap, next} against its birth-time snapshot.
@@ -1742,6 +1762,7 @@ static void tk_canary_check(const char *where) {
     if (!tk_canary_enabled() || tk_canary_tripped) return;
     for (int i = 0; i < tk_canary_count; i += 1) {
         tk_canary_entry *e = &tk_canary_ring[i];
+        if (!e->live) continue;   // legitimately freed (tk_canary_forget) — not a live chunk to check
         if (e->chunk->cap != e->cap || e->chunk->next != e->next_snapshot) {
             tk_canary_tripped = 1;
             fprintf(stderr,
