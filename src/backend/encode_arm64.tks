@@ -2875,7 +2875,140 @@ fn encode_rodata(rodata: []lir::LRodata) -> ModuleRodata | error {
         off = placed.off
         i++
     }
+    report_rodata_align_violations(syms, relocs)
     ModuleRodata { bytes = bytes; syms = syms; relocs = relocs }
+}
+
+/**
+ * RodataAlignViolation — one pointer-bearing rodata relocation whose absolute `__const`/`.rodata`
+ * offset is NOT `RODATA_ENTRY_ALIGN`-aligned: the diagnostic `TEKO_NATIVE_RODATA_ALIGN_CHECK=1`
+ * names to pin the exact culprit const behind a macOS `ld: pointer not aligned` link failure, or
+ * the equivalent silent const-corruption crash on a target whose linker tolerates the
+ * misalignment (an x86_64 `.rodata` reloc still lands on the wrong byte position even though the
+ * CPU itself tolerates the unaligned read).
+ */
+type RodataAlignViolation = struct {
+    /**
+     * owner — the nearest-preceding rodata symbol's name (the entry the misaligned reloc's own
+     * bytes actually live in — a linker names the SAME symbol in its own diagnostic when no
+     * symbol sits exactly at the violating offset).
+     */
+    owner: str
+    /** target — the misaligned pointer's own target symbol (what it was meant to point at). */
+    target: str
+    /** offset — the misaligned relocation's absolute offset within the concatenated rodata image. */
+    offset: u32
+    /**
+     * expected — the next `RODATA_ENTRY_ALIGN`-aligned offset the relocation should have landed
+     * on.
+     */
+    expected: u32
+}
+
+/**
+ * rodata_owning_symbol_name — the rodata-local symbol whose own entry contains absolute offset
+ * `off`: the nearest symbol at or before `off`, in ascending-offset (append) order — the same
+ * "symbol+displacement" rule a linker's own alignment diagnostic applies (`syms` is exactly the
+ * per-entry symbol table `encode_rodata` builds, so this walk mirrors what `ld` itself would
+ * report for the identical offset).
+ *
+ * @param []Symbol syms  the module's rodata-local symbol table, in ascending-offset order
+ * @param u32 off  the absolute offset to attribute
+ * @return str  the owning symbol's name, or `<unknown>` when `syms` is empty or every symbol
+ *              starts past `off`
+ */
+fn rodata_owning_symbol_name(syms: []Symbol, off: u32) -> str {
+    mut best = "<unknown>"
+    mut i: u64 = 0
+    loop {
+        if i >= syms.len { break }
+        if syms[i].offset <= off { best = syms[i].name }
+        i++
+    }
+    best
+}
+
+/**
+ * find_rodata_align_violations — every rodata-internal pointer relocation in `relocs` whose
+ * absolute offset is not `RODATA_ENTRY_ALIGN`-aligned, attributed to its owning entry via `syms`.
+ * A pure, unit-testable core (`enc_rodata_test.tkt` exercises it directly, with no environment
+ * variable involved); `report_rodata_align_violations` is its env-gated stderr sink.
+ *
+ * @param []Symbol syms  the module's rodata-local symbol table, in ascending-offset order
+ * @param []lir::LDataReloc relocs  the module's rebased rodata-internal relocations
+ * @return []RodataAlignViolation  every misaligned relocation, in `relocs`' own order
+ */
+fn find_rodata_align_violations(syms: []Symbol, relocs: []lir::LDataReloc) -> []RodataAlignViolation {
+    mut out: []RodataAlignViolation = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= relocs.len { break }
+        out = push_rodata_align_violation(out, syms, relocs[i])
+        i++
+    }
+    out
+}
+
+/**
+ * push_rodata_align_violation — `out` extended with `r`'s violation record when its absolute
+ * offset is not `RODATA_ENTRY_ALIGN`-aligned, unchanged otherwise.
+ *
+ * @param []RodataAlignViolation out  the violations accumulated so far
+ * @param []Symbol syms  the module's rodata-local symbol table, in ascending-offset order
+ * @param lir::LDataReloc r  the relocation to check
+ * @return []RodataAlignViolation  `out`, with `r`'s violation appended when applicable
+ */
+fn push_rodata_align_violation(out: []RodataAlignViolation, syms: []Symbol, r: lir::LDataReloc) -> []RodataAlignViolation {
+    if r.offset % RODATA_ENTRY_ALIGN == 0 { return out }
+    teko::list::push(out, RodataAlignViolation {
+        owner = rodata_owning_symbol_name(syms, r.offset)
+        target = r.target
+        offset = r.offset
+        expected = align_up(r.offset, RODATA_ENTRY_ALIGN)
+    })
+}
+
+/**
+ * rodata_align_check_enabled — whether the native rodata/reloc alignment diagnostic
+ * (`TEKO_NATIVE_RODATA_ALIGN_CHECK=1`) is requested: a CI-narrowing aid (mirrors
+ * `native_trace_items_enabled` in `project.tks`), NOT part of the ritual's normal output — it
+ * exists to name the exact const behind a macOS `ld: pointer not aligned` link failure, or the
+ * equivalent silent const-corruption crash on a target whose linker tolerates the misalignment.
+ *
+ * @return bool  true iff `TEKO_NATIVE_RODATA_ALIGN_CHECK` is set to `"1"`
+ */
+fn rodata_align_check_enabled() -> bool {
+    match teko::env::var("TEKO_NATIVE_RODATA_ALIGN_CHECK") { str as v => v == "1"; error => false }
+}
+
+/**
+ * report_rodata_align_violation — print one misaligned-reloc diagnostic line to stderr.
+ *
+ * @param RodataAlignViolation v  the violation to report
+ * @return void
+ */
+fn report_rodata_align_violation(v: RodataAlignViolation) -> void {
+    teko::io::eprintln($"teko: TEKO_NATIVE_RODATA_ALIGN_CHECK: unaligned rodata pointer reloc — owner={v.owner} target={v.target} offset={v.offset} expected>={v.expected}")
+}
+
+/**
+ * report_rodata_align_violations — print one diagnostic line per misaligned rodata-internal
+ * pointer relocation, when `rodata_align_check_enabled`; a no-op otherwise, so the ordinary
+ * build's output is byte-identical to before this diagnostic existed.
+ *
+ * @param []Symbol syms  the module's rodata-local symbol table, in ascending-offset order
+ * @param []lir::LDataReloc relocs  the module's rebased rodata-internal relocations
+ * @return void
+ */
+fn report_rodata_align_violations(syms: []Symbol, relocs: []lir::LDataReloc) -> void {
+    if !rodata_align_check_enabled() { return }
+    let violations = find_rodata_align_violations(syms, relocs)
+    mut i: u64 = 0
+    loop {
+        if i >= violations.len { break }
+        report_rodata_align_violation(violations[i])
+        i++
+    }
 }
 
 /**
