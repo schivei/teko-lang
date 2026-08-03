@@ -35,6 +35,23 @@ retomada não redescubra por acidente.
    Não existe; criar precisa de fixture nova (hoje a lei proíbe novos `.tkp` de
    regressão) ou infraestrutura ainda a criar.
 
+## Como VALIDAR o cliente de editor (ideia do dono, 2026-08-03)
+
+Teste unitário `.tkt` não cobre uma integração de editor — o certo é rodar o VS Code
+de verdade e conferir a UI. Abordagem viável NESTE ambiente (Chromium + Playwright já
+pré-instalados; `PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers`, não rodar `playwright install`):
+
+1. Subir o VS Code em **versão web-server** — `openvscode-server` ou `code-server`
+   (VS Code no browser, extensões funcionam).
+2. Carregar a extensão `teko` e apontar o `LanguageClient` para o `teko lsp` (rota C,
+   que compila e roda; não depende do backend nativo).
+3. Abrir um `.tks` e **dirigir com Playwright** (Chromium headless) para ASSERTAR que
+   hover, completion, diagnósticos ao vivo e formatação aparecem de fato na UI.
+
+Isso é o end-to-end visual do lado cliente que os `.tkt` não cobrem — a versão UI do
+smoke `.tkr` que o §9.2 do design pede. **Ressalva:** instalar `openvscode-server`
+pode esbarrar na política de rede do ambiente — verificar no momento de fazer.
+
 ## Dívida de doc a corrigir junto
 
 `TEKO_ROADMAP_TOOLING.md` está **desatualizado**: ainda lista C1 (esqueleto `teko lsp`)
