@@ -10,6 +10,16 @@
  * two functions, a call chain, 64+ small functions, shared rodata, a loop-carried value — each with
  * a known result no partial fold can reach by accident.
  *
+ * (0.3.1 C6.3, `docs/design/native-lowering-oom-por-funcao-0.3.1.md`) `bmem_lambda`/
+ * `bmem_lambdas_many` extend this family to the LOWERING fusion: every `fn` in this project is now
+ * lowered AND encoded inside its OWN scoped region (not just encoded, Tier 1's scope), so a lifted
+ * closure's thunk id has to be reserved from the RUNNING whole-program count threaded across item
+ * windows (E5) rather than reset per item — and `bmem_rodata_shared` above already exercises E4 the
+ * same way, since `bm_lit_a`/`bm_lit_b` are two DIFFERENT items whose shared literal must dedup
+ * across their two region drops. Volume (hundreds of items, at self-host scale) is the FIXPOINT
+ * ritual's job (§7/§8 `lmem_fixpoint`), not this project's — these probes prove the invariant holds
+ * ACROSS item boundaries, which is the part a single-item program cannot exercise at all.
+ *
  * @since 0.3.1
  */
 
@@ -718,4 +728,131 @@ pub fn bmem_loop_fn() -> bool {
         i = i + 1
     }
     acc == 45
+}
+
+/**
+ * bm_close_a — a closure over `base`, created and lifted inside its OWN item (function). Its
+ * lifted thunk's id is reserved from the whole-program running count (E5), not from a per-item
+ * count reset to zero — `bmem_lambda` calls the returned closure from a DIFFERENT item than this
+ * one, so a wrong id would either call the wrong thunk (a wrong result) or collide with another
+ * item's thunk symbol (a duplicate-symbol link failure).
+ *
+ * @param base  the value the returned closure adds to its argument
+ * @return      a closure carrying `base`
+ */
+fn bm_close_a(base: i64) -> (i64) -> i64 {
+    (n: i64) => { base + n }
+}
+
+/**
+ * bmem_lambda — ONE lifted closure, created in `bm_close_a`'s own scoped region and called from a
+ * different item's. Proves the lifted thunk's symbol survives its OWNING item's region drop and the
+ * caller's `LCallIndirect` resolves it correctly (E5, §8 `lmem_lambda`).
+ *
+ * @return  true when the closure applied to 4 yields the known 7
+ */
+pub fn bmem_lambda() -> bool {
+    let f = bm_close_a(3)
+    f(4) == 7
+}
+
+/**
+ * bm_close_b — one of several closure-creating functions `bmem_lambdas_many` calls, each its OWN
+ * item, so their lifted thunks' ids are reserved from DIFFERENT points of the running whole-program
+ * count. Preceded in this file by `bmem_lambda` above and `bm_close_a`, both of which already
+ * contributed lifted functions, so this family's ids start mid-count rather than at zero — the id
+ * threading has to survive items that came before it, not just count its own siblings.
+ *
+ * @param base  the value the returned closure adds to its argument
+ * @return      a closure carrying `base`
+ */
+fn bm_close_b(base: i64) -> (i64) -> i64 {
+    (n: i64) => { base + n }
+}
+
+/**
+ * bm_close_c — see `bm_close_b`; a second closure-creating item, its own lifted thunk id one past
+ * `bm_close_b`'s in the running whole-program count.
+ *
+ * @param base  the value the returned closure adds to `n` times 2
+ * @return      a closure carrying `base`
+ */
+fn bm_close_c(base: i64) -> (i64) -> i64 {
+    (n: i64) => { base + n * 2 }
+}
+
+/**
+ * bm_close_d — see `bm_close_b`; a third closure-creating item, its own lifted thunk id one past
+ * `bm_close_c`'s in the running whole-program count.
+ *
+ * @param base  the value the returned closure adds to `n` times 3
+ * @return      a closure carrying `base`
+ */
+fn bm_close_d(base: i64) -> (i64) -> i64 {
+    (n: i64) => { base + n * 3 }
+}
+
+/**
+ * bm_close_e — see `bm_close_b`; a fourth closure-creating item, its own lifted thunk id one past
+ * `bm_close_d`'s in the running whole-program count.
+ *
+ * @param base  the value the returned closure adds to `n` times 4
+ * @return      a closure carrying `base`
+ */
+fn bm_close_e(base: i64) -> (i64) -> i64 {
+    (n: i64) => { base + n * 4 }
+}
+
+/**
+ * bm_close_f — see `bm_close_b`; a fifth closure-creating item, its own lifted thunk id one past
+ * `bm_close_e`'s in the running whole-program count.
+ *
+ * @param base  the value the returned closure adds to `n` times 5
+ * @return      a closure carrying `base`
+ */
+fn bm_close_f(base: i64) -> (i64) -> i64 {
+    (n: i64) => { base + n * 5 }
+}
+
+/**
+ * bm_close_g — see `bm_close_b`; a sixth closure-creating item, its own lifted thunk id one past
+ * `bm_close_f`'s in the running whole-program count.
+ *
+ * @param base  the value the returned closure adds to `n` times 6
+ * @return      a closure carrying `base`
+ */
+fn bm_close_g(base: i64) -> (i64) -> i64 {
+    (n: i64) => { base + n * 6 }
+}
+
+/**
+ * bm_close_h — see `bm_close_b`; a seventh closure-creating item, its own lifted thunk id one past
+ * `bm_close_g`'s in the running whole-program count.
+ *
+ * @param base  the value the returned closure adds to `n` times 7
+ * @return      a closure carrying `base`
+ */
+fn bm_close_h(base: i64) -> (i64) -> i64 {
+    (n: i64) => { base + n * 7 }
+}
+
+/**
+ * bmem_lambdas_many — SEVEN lifted closures, each created inside a DIFFERENT item's own scoped
+ * region, applied and summed. Proves no two items' lifted thunks collide on the same id (E5) across
+ * several region drops — the volume-at-self-host-scale case (hundreds of items) is the FIXPOINT
+ * ritual's job (§7/§8 `lmem_fixpoint`); this proves the invariant that makes it safe (§8
+ * `lmem_lambdas_many`).
+ *
+ * @return  true when the seven closures sum to the known total, 308
+ */
+pub fn bmem_lambdas_many() -> bool {
+    let o = opaque_zero()
+    let a = bm_close_b(1 + o)
+    let b = bm_close_c(2 + o)
+    let c = bm_close_d(3 + o)
+    let d = bm_close_e(4 + o)
+    let e = bm_close_f(5 + o)
+    let f = bm_close_g(6 + o)
+    let g = bm_close_h(7 + o)
+    a(10) + b(10) + c(10) + d(10) + e(10) + f(10) + g(10) == 308
 }

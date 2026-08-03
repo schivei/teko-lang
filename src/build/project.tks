@@ -2708,17 +2708,44 @@ fn mkdir_p(dir: str) -> error | null {
  * @param prog     the checked, typed program
  * @param m        the resolved manifest (link knobs)
  * @return         0 on a successful build+link, else the failing status
+ *
+ * (0.3.1 C6.3) The x86-64/linux tail no longer lowers the WHOLE program up front: `emit_native_x86`
+ * is the FUSED lower+encode driver (`docs/design/native-lowering-oom-por-funcao-0.3.1.md`) and
+ * lowers each item inside its own scoped region, so `prog` is handed to it directly instead of a
+ * pre-built `LModule`. The other three tails are unchanged (C6.4 fuses them next).
  */
 fn emit_native(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest) -> i32 {
     let od = strip_trailing_slash(out_dir)
     match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the output directory"); null => { } }
-    let lmod = match teko::lir::lower_program(prog) { teko::lir::LModule as x => x; error as e => return fail(dir, e.message) }
     let target = match native_target() { NativeTarget as t => t; error as e => return fail(dir, e.message) }
     match target {
-        NativeTarget::X8664Linux => emit_native_x86(dir, od, stem, lmod, prog, m)
+        NativeTarget::X8664Linux => emit_native_x86(dir, od, stem, prog, m)
+        _ => emit_native_lowered_whole(dir, od, stem, prog, m, target)
+    }
+}
+
+/**
+ * emit_native_lowered_whole — the three own-backend tails C6.3 has not yet fused
+ * (`emit_native_win`/`emit_native_arm64`/`emit_native_arm64_linux`, C6.4): lower the whole program
+ * once, as every native tail did before this crumb, then dispatch to the target's own tail.
+ * Unreachable for `X8664Linux`, which `emit_native` routes to the fused driver directly.
+ *
+ * @param dir     the project directory (for diagnostics)
+ * @param od      the slash-stripped output directory (already created)
+ * @param stem    the output artifact name (the manifest `name`)
+ * @param prog    the checked, typed program
+ * @param m       the resolved manifest (link knobs)
+ * @param target  the resolved own-backend target
+ * @return        0 on a successful build+link, else the failing status
+ * @since 0.3.1 C6.3
+ */
+fn emit_native_lowered_whole(dir: str, od: str, stem: str, prog: checker::TProgram, m: Manifest, target: NativeTarget) -> i32 {
+    let lmod = match teko::lir::lower_program(prog) { teko::lir::LModule as x => x; error as e => return fail(dir, e.message) }
+    match target {
         NativeTarget::X8664Windows => emit_native_win(dir, od, stem, lmod, prog, m)
         NativeTarget::Arm64Macho => emit_native_arm64(dir, od, stem, lmod, prog, m)
         NativeTarget::Arm64Linux => emit_native_arm64_linux(dir, od, stem, lmod, prog, m)
+        NativeTarget::X8664Linux => fail(dir, "native backend: unreachable — x86-64/linux dispatches through the fused lowering driver (internal)")
     }
 }
 
@@ -3129,13 +3156,177 @@ fn commit_loose(acc: []checker::TStatement, delta: []checker::TStatement) -> []c
 }
 
 /**
- * emit_native_x86 — the x86-64/ELF own-backend tail (#386 B1): give `lmod` the platform-ABI entry
- * point (`teko::lir::wrap_native_entry` — `argc`/`argv` + `tk_set_args`, 0.3.1 native-args fix),
- * then encode it through the FUSED per-function driver (`encode_module_fused_x86`, 0.3.1
- * backend-memoria) that scopes each function's isel/regalloc/encode scratch to a child region and
- * drops it after folding — bounding the native peak to `LIR + one live MFunc` instead of the whole
- * module's MInst held at once. The result is wrapped in an `ET_REL` ELF64 object (`emit_elf`) and
- * handed to `finish_native_object` (write `.o` + `cc`-link + `.tsym` + success marker).
+ * FusedItemOut — one item's (or the virtual-main's) contribution from inside its own scoped
+ * region: the ENCODED functions (its own top-level `LFunc` plus any newly lifted closures/thunks,
+ * still possibly referencing the region's memory), the grown rodata table (seed prefix + this
+ * item's interned delta), the grown loose-statement list, and how many NEW lifted functions this
+ * item added (E5 — only the COUNT crosses the window; the caller extends the root placeholder list
+ * by it). The caller commits every field to the root BEFORE the region drops
+ * (`docs/design/native-lowering-oom-por-funcao-0.3.1.md` §3).
+ *
+ * @since 0.3.1 C6.3
+ */
+type FusedItemOut = struct {
+    /** encoded — this item's own function plus its newly lifted functions, already encoded. */
+    encoded: []teko::backend::EncodedFuncX86
+    /** rodata — the rodata table this item's lowering grew (seed prefix + its own delta). */
+    rodata: []teko::lir::LRodata
+    /** loose — the loose top-level statement list this item grew (seed prefix + its own delta). */
+    loose: []checker::TStatement
+    /** new_lifted_count — how many NEW lifted closures/thunks this item's lowering created. */
+    new_lifted_count: u64
+}
+
+/**
+ * lifted_suffix — the entries of `all` from index `from` onward: the NEW lifted functions an
+ * item's (or the virtual-main's) lowering created, once the root placeholder prefix
+ * (`docs/design/native-lowering-oom-por-funcao-0.3.1.md` §4b's E5-wiring) is excluded.
+ *
+ * @param all   the lowering step's full lifted-function list (placeholder prefix + real suffix)
+ * @param from  the placeholder prefix's length (the running lifted count BEFORE this step)
+ * @return      the real, newly lifted functions only
+ * @since 0.3.1 C6.3
+ */
+fn lifted_suffix(all: []teko::lir::LFunc, from: u64) -> []teko::lir::LFunc {
+    mut out: []teko::lir::LFunc = teko::list::empty()
+    mut i: u64 = from
+    loop {
+        if i >= all.len { break }
+        out = teko::list::push(out, all[i])
+        i++
+    }
+    out
+}
+
+/**
+ * concat_lfuncs — `a` followed by every entry of `b`, in order.
+ *
+ * @param a  the first function list
+ * @param b  the function list to append
+ * @return   `a` followed by `b`
+ * @since 0.3.1 C6.3
+ */
+fn concat_lfuncs(a: []teko::lir::LFunc, b: []teko::lir::LFunc) -> []teko::lir::LFunc {
+    mut out = a
+    mut i: u64 = 0
+    loop {
+        if i >= b.len { break }
+        out = teko::list::push(out, b[i])
+        i++
+    }
+    out
+}
+
+/**
+ * frame_escape_window_x86 — `teko::lir::frame_escape_guard`'s WHOLE-MODULE check applied to just
+ * `fs` (one item's own function plus its newly lifted ones), wrapped in a throwaway `LModule` —
+ * the per-function guts of the check are already independent per function
+ * (`func_returns_frame_address`, `frame_escape.tks:69-77`), so checking `fs` alone here verifies
+ * exactly the same functions the whole-module call would, just inside the item's own window
+ * instead of after every item has lowered (§2c's R4).
+ *
+ * @param fs  the functions to check (this item's own plus its new lifted)
+ * @return    `null` when none returns a frame address, else the propagated NAMED error
+ * @since 0.3.1 C6.3
+ */
+fn frame_escape_window_x86(fs: []teko::lir::LFunc) -> null | error {
+    teko::lir::frame_escape_guard(teko::lir::LModule { funcs = fs; rodata = teko::list::empty(); globals = teko::list::empty(); layouts = teko::list::empty() })
+}
+
+/**
+ * extend_lifted_placeholders — `ph` extended by `count` symbol-only placeholder `LFunc`s (E5's
+ * root-resident id reservation, §4b/§6): the fused driver never holds the LIR of a PAST item's
+ * lifted functions (they were encoded and dropped with that item's region), but `lower_item` still
+ * needs a `lifted` list whose LENGTH equals the running total, since only `.len` is ever read when
+ * reserving a new thunk/lambda's id (`lower.tks:5620`/`6057` — never dereferenced). The placeholder
+ * bodies are never encoded, so their content is irrelevant; only the count matters.
+ *
+ * @param ph     the root-resident placeholder list so far
+ * @param count  how many new placeholders to append
+ * @return       `ph` extended by `count` placeholders
+ * @since 0.3.1 C6.3
+ */
+fn extend_lifted_placeholders(ph: []teko::lir::LFunc, count: u64) -> []teko::lir::LFunc {
+    mut out = ph
+    mut i: u64 = 0
+    loop {
+        if i >= count { break }
+        out = teko::list::push(out, teko::lir::new_func("", 0, teko::list::empty(), teko::lir::LType::Void))
+        i++
+    }
+    out
+}
+
+/**
+ * fuse_lower_item_x86 — lower ONE program item and encode its output, ENTIRELY inside the
+ * caller's already-entered scratch region (the fused driver's per-item window,
+ * `docs/design/native-lowering-oom-por-funcao-0.3.1.md` §4): seed a throwaway `LModule` with EMPTY
+ * `funcs` (so `lower_item`'s `add_func` yields only THIS item's own `LFunc`, §4b), lower the item,
+ * isolate its newly lifted functions (`lifted_suffix`), run the frame-escape guard over the item's
+ * own function plus those (moved per-item, §2c), then encode all of them. Every native honest-stop
+ * (from lowering, the guard, or encoding) propagates out unchanged.
+ *
+ * @param robase    the root-resident rodata accumulator (read-only seed for this item's dedup)
+ * @param prelude   the whole-program lowering context (`teko::lir::lower_prelude`)
+ * @param loose     the root-resident loose-statement accumulator (read-only seed)
+ * @param it        the program item to lower
+ * @param lifted_ph  the root-resident lifted-count placeholder list (length = the running total)
+ * @return          this item's encoded output + grown rodata/loose + new-lifted count, or a
+ *                  propagated honest-stop
+ * @since 0.3.1 C6.3
+ */
+fn fuse_lower_item_x86(robase: []teko::lir::LRodata, prelude: teko::lir::LowerPrelude, loose: []checker::TStatement, it: checker::TItem, lifted_ph: []teko::lir::LFunc) -> FusedItemOut | error {
+    let seed = teko::lir::LModule { funcs = teko::list::empty(); rodata = robase; globals = prelude.module.globals; layouts = prelude.module.layouts }
+    let step = match teko::lir::lower_item(seed, loose, it, prelude.layouts, prelude.enums, lifted_ph, prelude.externs, false, prelude.variants, prelude.table, prelude.ref_fns, prelude.field_decls) { teko::lir::LowerItemOut as x => x; error as e => return e }
+    let new_lifted = lifted_suffix(step.lifted, lifted_ph.len)
+    let item_funcs = concat_lfuncs(step.module.funcs, new_lifted)
+    match frame_escape_window_x86(item_funcs) { error as e => return e; null => { } }
+    let encoded = match encode_lfuncs_in_region_x86(item_funcs) { []teko::backend::EncodedFuncX86 as x => x; error as e => return e }
+    FusedItemOut { encoded = encoded; rodata = step.module.rodata; loose = step.loose; new_lifted_count = new_lifted.len }
+}
+
+/**
+ * fuse_virtual_main_x86 — lower the synthesized virtual-main and encode it, ENTIRELY inside the
+ * caller's already-entered scratch region: `lower_virtual_main` over every item's collected loose
+ * statement (continuing the SAME lifted-id numbering via `lifted_ph`, §4b), the platform-ABI entry
+ * wrap (`teko::lir::wrap_native_entry` — renames `main` to the internal symbol and appends the
+ * `argc`/`argv` stub, §4a) applied to a throwaway one-function `LModule` so no whole-module table
+ * is materialized, the frame-escape guard, then encoding — mirroring `fuse_lower_item_x86` for the
+ * one synthesized "item" that runs after every real one has already dropped its region.
+ *
+ * @param loose     every item's collected loose top-level statement, in program order
+ * @param prelude   the whole-program lowering context
+ * @param robase    the root-resident rodata accumulator (read-only seed)
+ * @param lifted_ph  the root-resident lifted-count placeholder list (length = the running total)
+ * @return          the entry's encoded output (renamed vmain + stub + any new lifted) + grown
+ *                  rodata, or a propagated honest-stop
+ * @since 0.3.1 C6.3
+ */
+fn fuse_virtual_main_x86(loose: []checker::TStatement, prelude: teko::lir::LowerPrelude, robase: []teko::lir::LRodata, lifted_ph: []teko::lir::LFunc) -> FusedItemOut | error {
+    let vmain = match teko::lir::lower_virtual_main(loose, prelude.layouts, prelude.enums, robase, lifted_ph, prelude.externs, false, prelude.variants, prelude.ref_fns, prelude.field_decls, prelude.table) { teko::lir::LoweredFunction as x => x; error as e => return e }
+    let new_lifted = lifted_suffix(vmain.lifted, lifted_ph.len)
+    let seed = teko::lir::LModule { funcs = teko::list::push(teko::list::empty(), vmain.func); rodata = vmain.rodata; globals = prelude.module.globals; layouts = prelude.module.layouts }
+    let wrapped = match teko::lir::wrap_native_entry(seed) { teko::lir::LModule as x => x; error as e => return e }
+    let all_funcs = concat_lfuncs(wrapped.funcs, new_lifted)
+    match frame_escape_window_x86(all_funcs) { error as e => return e; null => { } }
+    let encoded = match encode_lfuncs_in_region_x86(all_funcs) { []teko::backend::EncodedFuncX86 as x => x; error as e => return e }
+    FusedItemOut { encoded = encoded; rodata = vmain.rodata; loose = teko::list::empty(); new_lifted_count = new_lifted.len }
+}
+
+/**
+ * emit_native_x86 — the x86-64/ELF own-backend tail (#386 B1), FUSED lower+encode per item (0.3.1
+ * C6.3, `docs/design/native-lowering-oom-por-funcao-0.3.1.md`): compute the whole-program lowering
+ * context ONCE (`teko::lir::lower_prelude`), then for every program item — a scratch child region,
+ * lower AND encode that ONE item inside it (`fuse_lower_item_x86`), leave the region, commit its
+ * outputs to the root accumulators (`.text` bytes E1, the rodata delta E4, the loose-statement
+ * delta E6, the new-lifted count E5), THEN drop the region — bounding the native peak to
+ * `Σ(bytes) + rodata + ONE item's LIR/scratch` instead of the old `Σ(LIR + scratch of every item)`
+ * that OOM'd the native self-host. The virtual-main lowers and encodes the same way, in its own
+ * final window, once every item's region has already dropped. The assembled `.text`/rodata/symbols
+ * are wrapped in an `ET_REL` ELF64 object (`emit_elf`) and handed to `finish_native_object` (write
+ * `.o` + `cc`-link + `.tsym` + success marker) — unchanged past the encoder, so the emitted bytes
+ * are byte-identical to the pre-fusion module-at-a-time path (only WHERE the compiler's own
+ * intermediates bump-allocate changes, never their computed values).
  * Reached only via `TEKO_TARGET=x86_64-linux`; the emitted `.o` is a linux x86-64
  * object, so the executing C-vs-own differential runs on a linux-x86_64 host
  * (`scripts/diff_c_own.sh`), while a macOS host still writes the `.o` for the
@@ -3144,15 +3335,49 @@ fn commit_loose(acc: []checker::TStatement, delta: []checker::TStatement) -> []c
  * @param dir   the project directory (for diagnostics)
  * @param od    the slash-stripped output directory (already created)
  * @param stem  the output artifact name (the manifest `name`)
- * @param lmod  the target-independent lowered module
- * @param prog  the checked program (extern-reachability, `.tsym`)
+ * @param prog  the checked, typed program (lowered item-by-item, not up front — C6.3)
  * @param m     the resolved manifest (link knobs)
  * @return      0 on a successful build+link, else the failing status
  */
-fn emit_native_x86(dir: str, od: str, stem: str, lmod: teko::lir::LModule, prog: checker::TProgram, m: Manifest) -> i32 {
-    let entry = match teko::lir::wrap_native_entry(lmod) { teko::lir::LModule as x => x; error as e => return fail(dir, e.message) }
-    match encode_module_fused_x86(entry) {
-        teko::backend::EncodedModuleX86 as enc => finish_native_object(dir, od, stem, teko::backend::emit_elf(enc), prog, m)
+fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Manifest) -> i32 {
+    let prelude = match teko::lir::lower_prelude(prog, false) { teko::lir::LowerPrelude as x => x; error as e => return fail(dir, e.message) }
+    mut robase = prelude.module.rodata
+    mut loose: []checker::TStatement = teko::list::empty()
+    mut lifted_ph: []teko::lir::LFunc = teko::list::empty()
+    mut mt = teko::backend::empty_module_text_x86()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        let child = region_new(region_root())
+        region_enter(child)
+        let outcome = fuse_lower_item_x86(robase, prelude, loose, prog.items[i], lifted_ph)
+        region_leave()
+        match outcome {
+            FusedItemOut as out => {
+                mt = fold_encoded_funcs_x86(mt, out.encoded)
+                robase = commit_rodata_delta(robase, out.rodata)
+                loose = commit_loose(loose, out.loose)
+                lifted_ph = extend_lifted_placeholders(lifted_ph, out.new_lifted_count)
+                region_drop(child)
+            }
+            error as e => return fail(dir, e.message)
+        }
+        i++
+    }
+    let vchild = region_new(region_root())
+    region_enter(vchild)
+    let vmain_outcome = fuse_virtual_main_x86(loose, prelude, robase, lifted_ph)
+    region_leave()
+    match vmain_outcome {
+        FusedItemOut as out => {
+            mt = fold_encoded_funcs_x86(mt, out.encoded)
+            robase = commit_rodata_delta(robase, out.rodata)
+            region_drop(vchild)
+            match teko::backend::finish_encoded_module_x86(mt, robase, prelude.module.globals) {
+                teko::backend::EncodedModuleX86 as enc => finish_native_object(dir, od, stem, teko::backend::emit_elf(enc), prog, m)
+                error as e => fail(dir, e.message)
+            }
+        }
         error as e => fail(dir, e.message)
     }
 }
