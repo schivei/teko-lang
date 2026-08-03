@@ -1,0 +1,131 @@
+// src/doc/json_out_test.tkt — tests for teko::doc::render_doc_json. One byte-exact snapshot
+// (the empty-items case — small enough to trust by inspection) plus round-trip checks (decode
+// the produced JSON back through `teko::encoding::json` and read the fields) for the richer
+// shapes, since a full multi-field object's exact byte layout is not worth hand-tracing.
+
+use teko::encoding::json
+
+fn jfield(v: json::JsonValue, key: str) -> json::JsonValue | null {
+    match v {
+        json::JsonObject as o => json::object_get(o, key)
+        _ => null
+    }
+}
+
+fn jstr_of(v: json::JsonValue) -> str {
+    match v { json::JsonString as s => s.value; _ => "<not-a-string>" }
+}
+
+fn jnum_of(v: json::JsonValue) -> f64 {
+    match v { json::JsonNumber as n => n.value; _ => -999.0 }
+}
+
+fn jarr_of(v: json::JsonValue) -> []json::JsonValue {
+    match v { json::JsonArray as a => a.items; _ => teko::list::empty() }
+}
+
+fn jstr_field(v: json::JsonValue, key: str) -> str {
+    match jfield(v, key) { json::JsonValue as x => jstr_of(x); null => "<missing>" }
+}
+
+fn jnum_field(v: json::JsonValue, key: str) -> f64 {
+    match jfield(v, key) { json::JsonValue as x => jnum_of(x); null => -999.0 }
+}
+
+fn jarr_field(v: json::JsonValue, key: str) -> []json::JsonValue {
+    match jfield(v, key) { json::JsonValue as x => jarr_of(x); null => teko::list::empty() }
+}
+
+fn decode_or_fail(text: str) -> json::JsonValue {
+    match json::decode(text) {
+        json::JsonValue as v => v
+        error => { teko::assert::is_true(false); json::JsonNull { } }
+    }
+}
+
+#test
+fn render_doc_json_of_no_items_is_the_exact_empty_document() {
+    teko::assert::eq_str(render_doc_json("empty", teko::list::empty()), "{\"project\":\"empty\",\"items\":[]}")
+}
+
+#test
+fn render_doc_json_round_trips_the_project_name() {
+    let dom = decode_or_fail(render_doc_json("proj", teko::list::empty()))
+    teko::assert::eq_str(jstr_field(dom, "project"), "proj")
+    teko::assert::len_eq(jarr_field(dom, "items").len, 0 to u64)
+}
+
+#test
+fn render_doc_json_round_trips_an_items_own_fields() {
+    let item = DocItem {
+        name = "add"; namespace = "m"; file = "f.tks"; line = 3 to u32; col = 5 to u32
+        kind = DocKind::Function; signature = "fn add(a: i64) -> i64"
+        block = DocBlock { summary = "Adds one."; tags = teko::list::empty() }
+        members = teko::list::empty()
+    }
+    let dom = decode_or_fail(render_doc_json("proj", [item]))
+    let items = jarr_field(dom, "items")
+    teko::assert::len_eq(items.len, 1 to u64)
+    let it = items[0]
+    teko::assert::eq_str(jstr_field(it, "name"), "add")
+    teko::assert::eq_str(jstr_field(it, "namespace"), "m")
+    teko::assert::eq_str(jstr_field(it, "qualified"), "m::add")
+    teko::assert::eq_str(jstr_field(it, "file"), "f.tks")
+    teko::assert::eq_f64(jnum_field(it, "line"), 3.0, 0.0001)
+    teko::assert::eq_f64(jnum_field(it, "col"), 5.0, 0.0001)
+    teko::assert::eq_str(jstr_field(it, "kind"), "Function")
+    teko::assert::eq_str(jstr_field(it, "signature"), "fn add(a: i64) -> i64")
+    teko::assert::eq_str(jstr_field(it, "summary"), "Adds one.")
+}
+
+#test
+fn render_doc_json_round_trips_tags_and_members() {
+    let item = DocItem {
+        name = "Pair"; namespace = ""; file = "f.tks"; line = 1 to u32; col = 1 to u32
+        kind = DocKind::Type; signature = "type Pair"
+        block = DocBlock { summary = ""; tags = [DocTag { tag = "since"; arg = ""; text = "0.3.1" }] }
+        members = [DocMember { name = "x"; kind = MemberKind::Field; signature = "x: i64"; block = DocBlock { summary = "the x"; tags = teko::list::empty() } }]
+    }
+    let dom = decode_or_fail(render_doc_json("proj", [item]))
+    let it = jarr_field(dom, "items")[0]
+    teko::assert::eq_str(jstr_field(it, "qualified"), "Pair")
+    let tags = jarr_field(it, "tags")
+    teko::assert::len_eq(tags.len, 1 to u64)
+    teko::assert::eq_str(jstr_field(tags[0], "tag"), "since")
+    teko::assert::eq_str(jstr_field(tags[0], "text"), "0.3.1")
+    let members = jarr_field(it, "members")
+    teko::assert::len_eq(members.len, 1 to u64)
+    teko::assert::eq_str(jstr_field(members[0], "name"), "x")
+    teko::assert::eq_str(jstr_field(members[0], "kind"), "Field")
+    teko::assert::eq_str(jstr_field(members[0], "signature"), "x: i64")
+    teko::assert::eq_str(jstr_field(members[0], "summary"), "the x")
+}
+
+#test
+fn json_of_kind_covers_every_dockind() {
+    let f = DocItem { name = "f"; namespace = ""; file = ""; line = 0 to u32; col = 0 to u32; kind = DocKind::Function; signature = ""; block = DocBlock { summary = ""; tags = teko::list::empty() }; members = teko::list::empty() }
+    let t = DocItem { name = "t"; namespace = ""; file = ""; line = 0 to u32; col = 0 to u32; kind = DocKind::Type; signature = ""; block = DocBlock { summary = ""; tags = teko::list::empty() }; members = teko::list::empty() }
+    let c = DocItem { name = "c"; namespace = ""; file = ""; line = 0 to u32; col = 0 to u32; kind = DocKind::Const; signature = ""; block = DocBlock { summary = ""; tags = teko::list::empty() }; members = teko::list::empty() }
+    let dom = decode_or_fail(render_doc_json("proj", [f, t, c]))
+    let items = jarr_field(dom, "items")
+    teko::assert::eq_str(jstr_field(items[0], "kind"), "Function")
+    teko::assert::eq_str(jstr_field(items[1], "kind"), "Type")
+    teko::assert::eq_str(jstr_field(items[2], "kind"), "Const")
+}
+
+#test
+fn json_of_member_kind_covers_both_shapes() {
+    let item = DocItem {
+        name = "T"; namespace = ""; file = ""; line = 0 to u32; col = 0 to u32
+        kind = DocKind::Type; signature = "type T"
+        block = DocBlock { summary = ""; tags = teko::list::empty() }
+        members = [
+            DocMember { name = "f"; kind = MemberKind::Field; signature = "f: i64"; block = DocBlock { summary = ""; tags = teko::list::empty() } }
+            DocMember { name = "m"; kind = MemberKind::Method; signature = "fn m()"; block = DocBlock { summary = ""; tags = teko::list::empty() } }
+        ]
+    }
+    let dom = decode_or_fail(render_doc_json("proj", [item]))
+    let members = jarr_field(jarr_field(dom, "items")[0], "members")
+    teko::assert::eq_str(jstr_field(members[0], "kind"), "Field")
+    teko::assert::eq_str(jstr_field(members[1], "kind"), "Method")
+}

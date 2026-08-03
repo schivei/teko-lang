@@ -1,0 +1,125 @@
+// src/doc/render.tks   (namespace 'teko::doc') — DT1: render a parsed AST signature back to
+// surface syntax, e.g. `fn f(x: i64) -> str` / `type Point<T>` / `const PI: f64`.
+//
+// PORTED, NOT SHARED, from `teko::lsp::symbols`'s own `render_*` family (same problem, same
+// answer — a signature rendered purely off the parsed AST, no typing involved): `teko::doc`
+// stays a self-contained DT1 unit per TEKO_ROADMAP_DEVTOOLS.md §1 ("Files: src/doc/*.tks"),
+// so it does not reach into `teko::lsp`'s namespace for a handful of private helpers. Should
+// the two ever drift, `teko::lsp::symbols`'s doc comment is the place a fix lands first — this
+// file mirrors it, it does not own the design.
+
+use teko::parser
+
+fn render_path(path: parser::Path) -> str {
+    mut out = ""
+    mut i: u64 = 0
+    loop {
+        if i >= path.segments.len { break }
+        if i > 0 { out = teko::str::concat(out, "::") }
+        out = teko::str::concat(out, path.segments[i].name)
+        i = i + 1
+    }
+    out
+}
+
+fn render_type_args(args: []parser::TypeExpr) -> str {
+    if args.len == 0 { return "" }
+    mut inner = ""
+    mut i: u64 = 0
+    loop {
+        if i >= args.len { break }
+        if i > 0 { inner = teko::str::concat(inner, ", ") }
+        inner = teko::str::concat(inner, render_type_expr(args[i]))
+        i = i + 1
+    }
+    teko::str::concat("<", inner, ">")
+}
+
+fn render_union_members(members: []parser::TypeExpr) -> str {
+    mut out = ""
+    mut i: u64 = 0
+    loop {
+        if i >= members.len { break }
+        if i > 0 { out = teko::str::concat(out, " | ") }
+        out = teko::str::concat(out, render_type_expr(members[i]))
+        i = i + 1
+    }
+    out
+}
+
+fn render_function_type(ft: parser::FunctionType) -> str {
+    mut params = ""
+    mut i: u64 = 0
+    loop {
+        if i >= ft.params.len { break }
+        if i > 0 { params = teko::str::concat(params, ", ") }
+        params = teko::str::concat(params, render_type_expr(ft.params[i]))
+        i = i + 1
+    }
+    teko::str::concat("(", params, ") -> ", render_type_expr(ft.ret))
+}
+
+// render_type_expr — a `TypeExpr` rendered back to the surface syntax: a plain or generic
+// name, `[]T`, `A | B`, `T?`, or `(A, B) -> R`. Purely syntactic (no resolution).
+fn render_type_expr(te: parser::TypeExpr) -> str {
+    match te {
+        parser::NamedType as nt => teko::str::concat(render_path(nt.path), render_type_args(nt.args))
+        parser::SliceType as st => teko::str::concat("[]", render_type_expr(st.element))
+        parser::UnionType as ut => render_union_members(ut.members)
+        parser::OptionalType as ot => teko::str::concat(render_type_expr(ot.inner), "?")
+        parser::FunctionType as ft => render_function_type(ft)
+    }
+}
+
+fn render_param(p: parser::Param) -> str {
+    if !p.has_type { return p.name }
+    teko::str::concat(p.name, ": ", render_type_expr(p.type_ann))
+}
+
+fn render_params(params: []parser::Param) -> str {
+    mut out = ""
+    mut i: u64 = 0
+    loop {
+        if i >= params.len { break }
+        if i > 0 { out = teko::str::concat(out, ", ") }
+        out = teko::str::concat(out, render_param(params[i]))
+        i = i + 1
+    }
+    out
+}
+
+// render_function_signature — `fn name(params) -> ret`, or `fn name(params)` when the
+// declaration has no `-> ret` clause (P5a — an absent return type is `void`).
+fn render_function_signature(f: parser::Function) -> str {
+    let params = render_params(f.params)
+    if !f.has_return { return teko::str::concat("fn ", f.name, "(", params, ")") }
+    teko::str::concat("fn ", f.name, "(", params, ") -> ", render_type_expr(f.return_type))
+}
+
+fn render_type_params(params: []str) -> str {
+    if params.len == 0 { return "" }
+    mut inner = ""
+    mut i: u64 = 0
+    loop {
+        if i >= params.len { break }
+        if i > 0 { inner = teko::str::concat(inner, ", ") }
+        inner = teko::str::concat(inner, params[i])
+        i = i + 1
+    }
+    teko::str::concat("<", inner, ">")
+}
+
+// render_type_signature — `type Name` (plus `<T, U>` when generic). The body's own shape
+// (struct/class/enum/…) is not spelled out here — its members surface as their own `DocMember`
+// entries (`append_type_members`).
+fn render_type_signature(t: parser::TypeDecl) -> str {
+    teko::str::concat("type ", t.name, render_type_params(t.type_params))
+}
+
+fn render_const_signature(c: parser::ConstDecl) -> str {
+    teko::str::concat("const ", c.name, ": ", render_type_expr(c.ty))
+}
+
+fn render_field_signature(f: parser::Field) -> str {
+    teko::str::concat(f.name, ": ", render_type_expr(f.type_ann))
+}

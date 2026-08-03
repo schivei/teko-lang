@@ -1,0 +1,220 @@
+// src/doc/index.tks   (namespace 'teko::doc') — DT1: the DOCUMENTATION MODEL.
+//
+// Walks a merged `parser::Program` (the same shape `teko::build::assemble` / `teko::lsp`'s
+// `document_program` produce) into a flat `[]DocItem` — one entry per top-level `pub`/`exp`
+// `fn`/`type`/`const`, each carrying its rendered signature, its parsed doc-comment
+// (`teko::doc::comment`), and — for a `type` — its own documented members. A `private`
+// top-level item is DROPPED here (TEKO_ROADMAP_DEVTOOLS.md §1 DT1: "extract `pub`/`exp` items"
+// — a doc site publishes the project's API, not its internals).
+//
+// MEMBER VISIBILITY IS BODY-SHAPE-DEPENDENT, not a uniform `vis != Private` filter, because the
+// AST's own `vis` field is not: a plain `struct`'s fields are parsed with `vis` FORCED to `Pub`
+// (parse_decl.tks:483) but its METHODS are not — an instance method written with no `pub`
+// keyword (the common case; struct members are all-public by design, ast.tks:456) still parses
+// `vis = Private`. Filtering struct methods by `vis` would therefore hide nearly every one of
+// them. So: a struct/trait body's fields+methods are ALWAYS included (the design already made
+// them all-public); a class body's are filtered (`vis != Private`, real reach there); an
+// interface's method SIGNATURES are always included (a pure contract has no private member).
+
+use teko::parser
+
+/**
+ * DocKind — which top-level declaration shape a `DocItem` names.
+ *
+ * @since 0.3.1 (DT1)
+ */
+pub type DocKind = enum { Function; Type; Const }
+
+/**
+ * MemberKind — which struct/class/trait/interface member shape a `DocMember` names.
+ *
+ * @since 0.3.1 (DT1)
+ */
+pub type MemberKind = enum { Field; Method }
+
+/**
+ * DocMember — one documented member of a `DocItem` of kind `Type`: a field or a method.
+ *
+ * @field name       the member's name
+ * @field kind       Field or Method
+ * @field signature  the rendered signature (`name: Type` for a field, `fn name(…) -> …` for a method)
+ * @field block      the member's parsed doc-comment (empty block when it carries none)
+ * @since 0.3.1 (DT1)
+ */
+pub type DocMember = struct {
+    name: str
+    kind: MemberKind
+    signature: str
+    block: DocBlock
+}
+
+/**
+ * DocItem — one documented top-level declaration: its qualifying position (namespace/file/
+ * line/col), its kind, its rendered signature, its own parsed doc-comment, and — for a `Type`
+ * — every documented member (`members` is empty for `Function`/`Const`).
+ *
+ * @field name       the declaration's name, as written
+ * @field namespace  the declaring namespace (`parser::Item.namespace`; cross-links by
+ *                    qualified name read `namespace ~ "::" ~ name` — see `qualified_name`)
+ * @field file       the declaring source file
+ * @field line       the 1-based definition line (the name's own recorded position)
+ * @field col        the 1-based definition column
+ * @field kind       Function, Type, or Const
+ * @field signature  the rendered signature
+ * @field block      the parsed doc-comment (empty block when the declaration carries none)
+ * @field members    the type's own documented fields/methods (empty for Function/Const)
+ * @since 0.3.1 (DT1)
+ */
+pub type DocItem = struct {
+    name: str
+    namespace: str
+    file: str
+    line: u32
+    col: u32
+    kind: DocKind
+    signature: str
+    block: DocBlock
+    members: []DocMember
+}
+
+/**
+ * qualified_name — `namespace::name`, the cross-link form TEKO_ROADMAP_DEVTOOLS.md §1 DT1 asks
+ * for ("cross-links by qualified name, e.g. `teko::net::tcp::connect`"). A `namespace`-less item
+ * (the empty string — a single-file/no-namespace fixture) renders as the bare `name`.
+ *
+ * @param namespace  the declaring namespace (`""` for none)
+ * @param name       the declaration's own name
+ * @return           `namespace ~ "::" ~ name`, or bare `name` when `namespace` is empty
+ * @since 0.3.1 (DT1)
+ */
+pub fn qualified_name(namespace: str, name: str) -> str {
+    if namespace.len == 0 { return name }
+    teko::str::concat(namespace, "::", name)
+}
+
+// is_public — does `v` clear the DT1 bar ("extract `pub`/`exp` items")? Only a top-level
+// `Private` declaration is dropped.
+fn is_public(v: parser::Visibility) -> bool {
+    v == parser::Visibility::Pub || v == parser::Visibility::Exp
+}
+
+fn doc_member_of_field(f: parser::Field) -> DocMember {
+    DocMember { name = f.name; kind = MemberKind::Field; signature = render_field_signature(f); block = parse_doc(doc_text_of(f.has_doc, f.doc)) }
+}
+
+fn doc_member_of_method(m: parser::Function) -> DocMember {
+    DocMember { name = m.name; kind = MemberKind::Method; signature = render_function_signature(m); block = parse_doc(doc_text_of(m.has_doc, m.doc)) }
+}
+
+// append every field of `fields` unconditionally (struct/trait fields are all-public by design —
+// see this file's own header doc).
+fn append_all_fields(out: []DocMember, fields: []parser::Field) -> []DocMember {
+    mut acc = out
+    mut i: u64 = 0
+    loop {
+        if i >= fields.len { break }
+        acc = teko::list::push(acc, doc_member_of_field(fields[i]))
+        i = i + 1
+    }
+    acc
+}
+
+// append every method of `methods` unconditionally (struct/trait/interface methods).
+fn append_all_methods(out: []DocMember, methods: []parser::Function) -> []DocMember {
+    mut acc = out
+    mut i: u64 = 0
+    loop {
+        if i >= methods.len { break }
+        acc = teko::list::push(acc, doc_member_of_method(methods[i]))
+        i = i + 1
+    }
+    acc
+}
+
+// append only the PUBLIC fields of `fields` (a class body — real per-field reach).
+fn append_public_fields(out: []DocMember, fields: []parser::Field) -> []DocMember {
+    mut acc = out
+    mut i: u64 = 0
+    loop {
+        if i >= fields.len { break }
+        if is_public(fields[i].vis) { acc = teko::list::push(acc, doc_member_of_field(fields[i])) }
+        i = i + 1
+    }
+    acc
+}
+
+// append only the PUBLIC methods of `methods` (a class body — real per-method reach).
+fn append_public_methods(out: []DocMember, methods: []parser::Function) -> []DocMember {
+    mut acc = out
+    mut i: u64 = 0
+    loop {
+        if i >= methods.len { break }
+        if is_public(methods[i].vis) { acc = teko::list::push(acc, doc_member_of_method(methods[i])) }
+        i = i + 1
+    }
+    acc
+}
+
+// members_of_body — `owner`'s own member list, by body shape (this file's own header doc
+// explains why struct/trait/interface bodies are unfiltered and a class body is filtered).
+fn members_of_body(body: parser::TypeBody) -> []DocMember {
+    match body {
+        parser::StructBody as sb => append_all_methods(append_all_fields(teko::list::empty(), sb.fields), sb.methods)
+        parser::TraitBody as tb => append_all_methods(append_all_fields(teko::list::empty(), tb.fields), tb.methods)
+        parser::InterfaceBody as ib => append_all_methods(teko::list::empty(), ib.methods)
+        parser::ClassBody as cb => append_public_methods(append_public_fields(teko::list::empty(), cb.fields), cb.methods)
+        _ => teko::list::empty()
+    }
+}
+
+fn doc_item_of_function(f: parser::Function, ns: str, file: str) -> DocItem {
+    DocItem {
+        name = f.name; namespace = ns; file = file; line = f.line; col = f.col
+        kind = DocKind::Function; signature = render_function_signature(f)
+        block = parse_doc(doc_text_of(f.has_doc, f.doc)); members = teko::list::empty()
+    }
+}
+
+fn doc_item_of_type(t: parser::TypeDecl, ns: str, file: str) -> DocItem {
+    DocItem {
+        name = t.name; namespace = ns; file = file; line = t.line; col = t.col
+        kind = DocKind::Type; signature = render_type_signature(t)
+        block = parse_doc(doc_text_of(t.has_doc, t.doc)); members = members_of_body(t.body)
+    }
+}
+
+fn doc_item_of_const(c: parser::ConstDecl, ns: str, file: str) -> DocItem {
+    DocItem {
+        name = c.name; namespace = ns; file = file; line = c.line; col = c.col
+        kind = DocKind::Const; signature = render_const_signature(c)
+        block = parse_doc(doc_text_of(c.has_doc, c.doc)); members = teko::list::empty()
+    }
+}
+
+/**
+ * build_doc_index — every `DocItem` of `program`: one per top-level `pub`/`exp` `fn`/`type`/
+ * `const`, in file/declaration order, each carrying its parsed doc-comment and — for a `type`
+ * — its own documented members. A `private` top-level declaration contributes nothing. No
+ * typing is involved (mirrors `teko::lsp::symbols::build_symbol_index`) — a project that
+ * parses but does not yet type-check still documents.
+ *
+ * @param program  the merged program (from `teko::build`'s assembly, or a single-file parse)
+ * @return         every public item, in source order
+ * @since 0.3.1 (DT1)
+ */
+pub fn build_doc_index(program: parser::Program) -> []DocItem {
+    mut out: []DocItem = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= program.items.len { break }
+        let item = program.items[i]
+        out = match item.content {
+            parser::Function as f => { if is_public(f.vis) { teko::list::push(out, doc_item_of_function(f, item.namespace, item.file)) } else { out } }
+            parser::TypeDecl as t => { if is_public(t.vis) { teko::list::push(out, doc_item_of_type(t, item.namespace, item.file)) } else { out } }
+            parser::ConstDecl as c => { if is_public(c.vis) { teko::list::push(out, doc_item_of_const(c, item.namespace, item.file)) } else { out } }
+            _ => out
+        }
+        i = i + 1
+    }
+    out
+}

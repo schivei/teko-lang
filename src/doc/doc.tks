@@ -1,0 +1,97 @@
+// src/doc/doc.tks   (namespace 'teko::doc') — DT1: the `teko doc` CLI (TEKO_ROADMAP_DEVTOOLS.md
+// §1). Wires the doc-comment reader (`comment.tks`), the extraction model (`index.tks`), and
+// the three renderers (`markdown.tks`, `json_out.tks`, `html.tks`) to a project: parse the
+// project (no type-check — `teko::build::doc_frontend`), extract every `pub`/`exp` item, and
+// either print the JSON index to stdout (`--json`, for piping) or write the whole site
+// (`doc/index.md`, `doc/index.json`, `doc/index.html`) under the project root.
+//
+// PURE-TEKO, NO C TWIN (the `teko::fmt` / `teko::regex` precedent): this namespace is corpus
+// source, so both engines get it automatically — the VM tree-walks it (the `.tkt` gate) and
+// every self-hosted binary compiles it natively. The C seed (main.c) only RECOGNIZES the
+// subcommand and stops honestly (M.3) — the seed exists to bootstrap, not to document.
+//
+// DEFERRED (honest — M.3): `teko doc --serve` (a local preview server, TEKO_ROADMAP_DEVTOOLS.md
+// §1 DT1's "optionally `teko::web`") has no home yet — there is no `teko::web` namespace in this
+// tree. `teko doc` writes the static site; serving it is a separate, later unit.
+
+// doc_args — the parsed `teko doc` command line: `--json` (print the index to stdout, write no
+// files) and the first non-flag positional (the project argument; `""` when none was given —
+// the caller defaults it to the current directory, mirroring `main.tks`'s bare-build default).
+type DocArgs = struct {
+    json_mode: bool
+    project_arg: str
+}
+
+fn parse_doc_args(args: []str) -> DocArgs {
+    mut json_mode = false
+    mut project_arg = ""
+    mut i: u64 = 2
+    loop {
+        if i >= args.len { break }
+        let a = args[i]
+        if a == "--json" {
+            json_mode = true
+        } else if project_arg.len == 0 {
+            project_arg = a
+        }
+        i = i + 1
+    }
+    DocArgs { json_mode = json_mode; project_arg = project_arg }
+}
+
+fn doc_fail(message: str) -> i32 {
+    teko::io::eprintln(teko::str::concat("teko doc: ", message))
+    2
+}
+
+// write_doc_file — write `content` to `path`, reporting an honest failure (never a silent one)
+// on an I/O fault. Returns `true` on success.
+fn write_doc_file(path: str, content: str) -> bool {
+    match teko::io::write_file(path, content) {
+        error as e => { doc_fail(teko::str::concat(path, ": ", e.message)); false }
+        null => true
+    }
+}
+
+// write_doc_site — the site under `doc/`: `index.md`, `index.json`, `index.html`. `mkdir` is
+// idempotent (teko::fs::mkdir — succeeds when the directory already exists), so a re-run
+// simply overwrites the three files. Returns the run's exit code.
+fn write_doc_site(project_name: str, items: []DocItem) -> i32 {
+    match teko::fs::mkdir("doc") {
+        error as e => return doc_fail(teko::str::concat("doc: ", e.message))
+        null => { }
+    }
+    if !write_doc_file("doc/index.md", render_markdown(project_name, items)) { return 2 }
+    if !write_doc_file("doc/index.json", render_doc_json(project_name, items)) { return 2 }
+    if !write_doc_file("doc/index.html", render_html(project_name, items)) { return 2 }
+    teko::io::println("wrote doc/index.md, doc/index.json, doc/index.html")
+    0
+}
+
+/**
+ * run_cli — argv is the FULL args (args[0]=program, args[1]="doc"). `teko doc [--json]
+ * [<project>]`: `<project>` defaults to the current directory (mirrors the bare-build default
+ * in `main.tks`); `--json` prints the JSON index to stdout and writes no files (for piping,
+ * `teko doc --json . | jq …`); otherwise the whole site (`doc/index.md`, `doc/index.json`,
+ * `doc/index.html`) is written under the project root.
+ *
+ * @param args  the FULL argv (args[0] the program, args[1] "doc")
+ * @return      0 ok; 2 on a front-end error (bad/missing manifest, lex/parse defect) or an I/O
+ *              fault writing the site
+ * @since 0.3.1 (DT1)
+ */
+pub fn run_cli(args: []str) -> i32 {
+    let parsed = parse_doc_args(args)
+    let project_arg = if parsed.project_arg.len == 0 { "." } else { parsed.project_arg }
+    let dir = teko::build::project_dir_of(project_arg)
+    let fe = match teko::build::doc_frontend(dir) {
+        teko::build::DocFrontend as f => f
+        error as e => return doc_fail(e.message)
+    }
+    let items = build_doc_index(fe.program)
+    if parsed.json_mode {
+        teko::io::println(render_doc_json(fe.project_name, items))
+        return 0
+    }
+    write_doc_site(fe.project_name, items)
+}

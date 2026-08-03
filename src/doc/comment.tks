@@ -1,0 +1,260 @@
+// src/doc/comment.tks   (namespace 'teko::doc') — DT1: the doc-comment MINI-FORMAT reader.
+//
+// CONTRACT (TEKO_ROADMAP_DEVTOOLS.md §1 DT1). A `/** … */` doc-comment (already lexed as ONE
+// `Doc` token — src/lexer/lexer.tks:read_doc_comment — and carried verbatim on `has_doc`/`doc`
+// by every documentable AST node, ast.tks) is a rustdoc/godoc-style mini-format: a leading
+// SUMMARY (free text, no leading `@`), then zero or more `@tag …` lines. This module turns that
+// raw span into a structured `DocBlock` — the ONE place every renderer (markdown/json/html)
+// reads doc text from, so a mini-format change touches this file alone.
+//
+// RECOGNIZED TAGS (surveyed off the corpus's own doc-comments, 0.3.1): `@param name text`,
+// `@field name text`, `@return text`, `@since text`, `@throws text`, `@see text`, `@example
+// text`. `@param`/`@field` are the only two tags with a NAME before their text (the corpus
+// convention — the name is the documented parameter/field, "arg" below); every other tag's
+// whole remainder is free text. An unrecognized `@word` is kept as its own tag verbatim (a
+// renderer that does not special-case it can still print "tag: text") — the format is meant to
+// grow without this reader rejecting an unknown line (M.5).
+//
+// LINE CONTINUATION. A non-`@` line following a tag EXTENDS that tag's text (space-joined); one
+// following no tag yet extends the summary. A blank line is dropped (v1 has no paragraph
+// structure — README.md-worthy prose lives in the summary as one run-on paragraph, matching
+// the corpus's own style of wrapping a doc-comment's prose across lines for the 100-column
+// convention, not for paragraph breaks).
+
+use teko::iter
+
+/**
+ * DocTag — one `@tag …` line (plus any continuation lines folded in), reduced to its three
+ * parts: the tag word itself, the leading NAME for a `@param`/`@field` tag (`""` for every
+ * other tag), and the remaining free text.
+ *
+ * @field tag   the tag word, without its leading `@` (e.g. "param", "return", "since")
+ * @field arg   the tag's leading name (valid only for "param"/"field"; `""` otherwise)
+ * @field text  the tag's free-text body (the name already stripped off, for "param"/"field")
+ * @since 0.3.1 (DT1)
+ */
+pub type DocTag = struct {
+    tag: str
+    arg: str
+    text: str
+}
+
+/**
+ * DocBlock — a doc-comment reduced to its structured form: the leading summary prose, plus
+ * every `@tag` entry in source order. `parse_doc("")` (no doc-comment attached) yields the
+ * empty block (`summary = ""`, `tags = []`) — a documentable item that carries none still
+ * indexes cleanly, just with nothing to show.
+ *
+ * @field summary  the leading free-text prose, one run-on paragraph (`""` when absent)
+ * @field tags     every `@tag` entry, in source order (empty when the doc has none)
+ * @since 0.3.1 (DT1)
+ */
+pub type DocBlock = struct {
+    summary: str
+    tags: []DocTag
+}
+
+// --- byte-level string helpers (no `trim`/`starts_with` builtin exists yet — src/lexer's own
+//     byte-cursor style, mirrored here rather than duplicated as a shared micro-utility: DT1 is
+//     the one caller today). ---
+
+fn is_doc_ws(b: byte) -> bool {
+    b == b' ' || b == b'\t' || b == b'\r'
+}
+
+fn doc_trim(s: str) -> str {
+    mut start: u64 = 0
+    mut end: u64 = s.len
+    loop {
+        if start >= end { break }
+        if !is_doc_ws(s[start]) { break }
+        start = start + 1
+    }
+    loop {
+        if end <= start { break }
+        if !is_doc_ws(s[end - 1]) { break }
+        end = end - 1
+    }
+    slice(s, start, end)
+}
+
+fn doc_starts_with(s: str, prefix: str) -> bool {
+    if prefix.len > s.len { return false }
+    slice(s, 0, prefix.len) == prefix
+}
+
+// FirstWord — the split of a trimmed line at its first run of whitespace: `first` (everything
+// before it) and `rest` (everything after, itself trimmed).
+type FirstWord = struct {
+    first: str
+    rest: str
+}
+
+fn split_first_word(s: str) -> FirstWord {
+    let t = doc_trim(s)
+    mut i: u64 = 0
+    loop {
+        if i >= t.len { break }
+        if is_doc_ws(t[i]) { break }
+        i = i + 1
+    }
+    FirstWord { first = slice(t, 0, i); rest = doc_trim(slice(t, i, t.len)) }
+}
+
+// join every entry of `parts` with a single space — the summary/tag-text accumulator's
+// finisher (mirrors assemble.tks's `join_diags`, " " instead of "\n").
+fn join_words(parts: []str) -> str {
+    mut out = ""
+    mut i: u64 = 0
+    loop {
+        if i >= parts.len { break }
+        if i > 0 { out = out ~ " " }
+        out = out ~ parts[i]
+        i = i + 1
+    }
+    out
+}
+
+// strip the doc-comment's own `/**`/`*/` markers, leaving the inner text (empty when `raw` is
+// too short to carry both — never expected from a real `Doc` token, an honest no-op guard).
+fn strip_doc_markers(raw: str) -> str {
+    let opened = if doc_starts_with(raw, "/**") { slice(raw, 3, raw.len) } else { raw }
+    let n = opened.len
+    if n >= 2 && opened[n - 2] == b'*' && opened[n - 1] == b'/' {
+        return slice(opened, 0, n - 2)
+    }
+    opened
+}
+
+// one physical line of the doc-comment's inner text, with its leading `*` (the block-comment
+// continuation marker every corpus doc-comment writes) and surrounding whitespace stripped.
+// A line that carries no leading `*` (the opening line, same-line as `/**`) is merely trimmed.
+fn clean_doc_line(line: str) -> str {
+    let t = doc_trim(line)
+    if doc_starts_with(t, "*") {
+        return doc_trim(slice(t, 1, t.len))
+    }
+    t
+}
+
+// TagLine — one parsed `@tag …` line: the tag word, its name (for "param"/"field"; ""
+// otherwise), and the remaining free text.
+type TagLine = struct {
+    tag: str
+    arg: str
+    rest: str
+}
+
+// `line` is known to start with `@` (the caller's own check). Split off the tag word, then —
+// for the two name-bearing tags — split off the leading name too.
+fn split_tag_line(line: str) -> TagLine {
+    let after_at = slice(line, 1, line.len)
+    let fw = split_first_word(after_at)
+    if fw.first == "param" || fw.first == "field" {
+        let fw2 = split_first_word(fw.rest)
+        return TagLine { tag = fw.first; arg = fw2.first; rest = fw2.rest }
+    }
+    TagLine { tag = fw.first; arg = ""; rest = fw.rest }
+}
+
+/**
+ * parse_doc — the raw `/** … */` span (a documentable item's `.doc` field, valid iff
+ * `.has_doc`) reduced to a structured `DocBlock`. `raw = ""` (no doc-comment attached) yields
+ * the empty block — callers pass `doc_text_of(has_doc, doc)`-shaped values without a branch of
+ * their own (mirrors `teko::lsp::symbols`'s `doc_of`).
+ *
+ * @param raw  the doc-comment's raw span (including its `/** … */` markers), or `""` for none
+ * @return     the structured summary + tag list
+ * @since 0.3.1 (DT1)
+ */
+pub fn parse_doc(raw: str) -> DocBlock {
+    if raw.len == 0 { return DocBlock { summary = ""; tags = teko::list::empty() } }
+    let body = strip_doc_markers(raw)
+    let lines = iter::split_lines(body)
+    mut summary_parts: []str = teko::list::empty()
+    mut tags: []DocTag = teko::list::empty()
+    mut in_tag = false
+    mut cur_tag = ""
+    mut cur_arg = ""
+    mut cur_parts: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= lines.len { break }
+        let cl = clean_doc_line(lines[i])
+        i = i + 1
+        if cl.len == 0 { continue }
+        if cl[0] == b'@' {
+            if in_tag {
+                tags = teko::list::push(tags, DocTag { tag = cur_tag; arg = cur_arg; text = join_words(cur_parts) })
+            }
+            let parsed = split_tag_line(cl)
+            in_tag = true
+            cur_tag = parsed.tag
+            cur_arg = parsed.arg
+            cur_parts = if parsed.rest.len > 0 { teko::list::push(teko::list::empty(), parsed.rest) } else { teko::list::empty() }
+        } else if in_tag {
+            cur_parts = teko::list::push(cur_parts, cl)
+        } else {
+            summary_parts = teko::list::push(summary_parts, cl)
+        }
+    }
+    if in_tag {
+        tags = teko::list::push(tags, DocTag { tag = cur_tag; arg = cur_arg; text = join_words(cur_parts) })
+    }
+    DocBlock { summary = join_words(summary_parts); tags = tags }
+}
+
+/**
+ * doc_text_of — the raw doc-comment span for a `has_doc`/`doc` pair, or `""` when the
+ * declaration carries none. The one place that turns the pair every documentable AST shape
+ * repeats into a single always-valid string (mirrors `teko::lsp::symbols::doc_of`).
+ *
+ * @param has_doc  does the declaration carry a doc-comment?
+ * @param doc      the doc-comment span (meaningful iff `has_doc`)
+ * @return         `doc` when `has_doc`, else `""`
+ * @since 0.3.1 (DT1)
+ */
+pub fn doc_text_of(has_doc: bool, doc: str) -> str {
+    if has_doc { return doc }
+    ""
+}
+
+/**
+ * find_tag — the first entry of `tags` whose `tag` equals `name`, or `null` when none matches.
+ * The lookup a renderer uses for a single-valued tag (`@return`, `@since`) that has at most one
+ * meaningful occurrence.
+ *
+ * @param tags  the doc block's tag list
+ * @param name  the tag word to find (without its leading `@`)
+ * @return      the first matching tag, or `null`
+ * @since 0.3.1 (DT1)
+ */
+pub fn find_tag(tags: []DocTag, name: str) -> DocTag | null {
+    mut i: u64 = 0
+    loop {
+        if i >= tags.len { break }
+        if tags[i].tag == name { return tags[i] }
+        i = i + 1
+    }
+    null
+}
+
+/**
+ * tags_named — every entry of `tags` whose `tag` equals `name`, in source order. The lookup a
+ * renderer uses for a repeatable tag (`@param`, `@throws`, `@see`).
+ *
+ * @param tags  the doc block's tag list
+ * @param name  the tag word to collect (without its leading `@`)
+ * @return      every matching tag, in source order (empty when none match)
+ * @since 0.3.1 (DT1)
+ */
+pub fn tags_named(tags: []DocTag, name: str) -> []DocTag {
+    mut out: []DocTag = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= tags.len { break }
+        if tags[i].tag == name { out = teko::list::push(out, tags[i]) }
+        i = i + 1
+    }
+    out
+}

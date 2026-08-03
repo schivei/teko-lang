@@ -25,7 +25,7 @@ use teko::coverage
 // directory: a `.tkp` path resolves to its CONTAINING directory ("." when it has no path
 // separator); anything else is taken as the directory as-is.
 // =========================================================================
-fn project_dir_of(arg: str) -> str {
+pub fn project_dir_of(arg: str) -> str {
     if !teko::str::ends_with(arg, ".tkp") {
         return arg
     }
@@ -486,6 +486,43 @@ fn frontend_check(pf: ParsedFront, quiet: bool, tty: bool) -> Frontend | error {
 fn frontend_body(include_tests: bool, quiet: bool, tty: bool) -> Frontend | error {
     let pf = match frontend_parse(include_tests, quiet, tty) { ParsedFront as x => x; error as e => return e }
     frontend_check(pf, quiet, tty)
+}
+
+/**
+ * DocFrontend — the parse-only result `doc_frontend` hands to `teko::doc` (DT1,
+ * TEKO_ROADMAP_DEVTOOLS.md §1): the merged, UNCHECKED program (production files only — no
+ * `.tkt` tests, a doc site documents the shipped API, not the test suite) plus the project's
+ * canonical name. Deliberately NOT `Frontend`/`ParsedFront` (both `teko::build`-internal, and
+ * `Frontend` carries the type-CHECKED `TProgram` — a cost and a possible failure `teko doc` has
+ * no use for: doc-comments live on the parser AST, so a project that parses but does not yet
+ * type-check still documents, the same posture `teko::lsp`'s `document_program` already takes).
+ *
+ * @field program       the merged, unchecked program (production items only)
+ * @field project_name  the manifest's canonical root name
+ * @since 0.3.1 (DT1)
+ */
+pub type DocFrontend = struct {
+    program: parser::Program
+    project_name: str
+}
+
+/**
+ * doc_frontend — the front end `teko doc` (DT1) drives: enter `dir`, parse the manifest,
+ * discover the source tree, and assemble every production file into ONE merged program — no
+ * type-checking. A per-file lex/parse defect (`ParsedFront.diags`, collected rather than raised
+ * so a partially-broken tree still reports every bad file — owner ruling 2026-07-26) is turned
+ * into the returned error here, since `teko doc` has no later check phase to surface it the way
+ * `frontend_check` does.
+ *
+ * @param dir  the project directory (already resolved, e.g. by `project_dir_of`)
+ * @return     the merged program + project name, or the first front-end/parse error
+ * @since 0.3.1 (DT1)
+ */
+pub fn doc_frontend(dir: str) -> DocFrontend | error {
+    match teko::env::chdir(dir) { error => return error { message = "cannot enter project directory" }; null => { } }
+    let pf = match frontend_parse(false, true, false) { ParsedFront as x => x; error as e => return e }
+    if pf.diags.len > 0 { return error { message = join_diags(pf.diags) } }
+    DocFrontend { program = pf.parsed; project_name = pf.manifest.name }
 }
 
 /**

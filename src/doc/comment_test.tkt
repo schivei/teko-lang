@@ -1,0 +1,99 @@
+// src/doc/comment_test.tkt — tests for teko::doc's doc-comment mini-format reader (parse_doc).
+
+#test
+fn parse_doc_of_empty_string_is_the_empty_block() {
+    let b = parse_doc("")
+    teko::assert::eq_str(b.summary, "")
+    teko::assert::len_eq(b.tags.len, 0 to u64)
+}
+
+#test
+fn parse_doc_reads_a_single_line_summary() {
+    let b = parse_doc("/** a short doc */")
+    teko::assert::eq_str(b.summary, "a short doc")
+    teko::assert::len_eq(b.tags.len, 0 to u64)
+}
+
+#test
+fn parse_doc_joins_a_multiline_summary_with_spaces() {
+    let b = parse_doc("/**\n * first line\n * second line\n */")
+    teko::assert::eq_str(b.summary, "first line second line")
+}
+
+#test
+fn parse_doc_reads_a_param_tag_with_its_name_split_off() {
+    let b = parse_doc("/**\n * Doubles a number.\n *\n * @param x the value to double\n * @return   the doubled value\n */")
+    teko::assert::eq_str(b.summary, "Doubles a number.")
+    let p = match find_tag(b.tags, "param") { DocTag as t => t; null => { teko::assert::is_true(false); return } }
+    teko::assert::eq_str(p.arg, "x")
+    teko::assert::eq_str(p.text, "the value to double")
+    let r = match find_tag(b.tags, "return") { DocTag as t => t; null => { teko::assert::is_true(false); return } }
+    teko::assert::eq_str(r.arg, "")
+    teko::assert::eq_str(r.text, "the doubled value")
+}
+
+#test
+fn parse_doc_folds_a_tag_continuation_line_into_its_text() {
+    let b = parse_doc("/**\n * @param x the value\n *   to double, wrapped\n */")
+    let p = match find_tag(b.tags, "param") { DocTag as t => t; null => { teko::assert::is_true(false); return } }
+    teko::assert::eq_str(p.arg, "x")
+    teko::assert::eq_str(p.text, "the value to double, wrapped")
+}
+
+#test
+fn parse_doc_collects_repeated_tags_in_source_order() {
+    let b = parse_doc("/**\n * @param a first\n * @param b second\n * @throws e1\n * @throws e2\n */")
+    let params = tags_named(b.tags, "param")
+    teko::assert::len_eq(params.len, 2 to u64)
+    teko::assert::eq_str(params[0].arg, "a")
+    teko::assert::eq_str(params[0].text, "first")
+    teko::assert::eq_str(params[1].arg, "b")
+    teko::assert::eq_str(params[1].text, "second")
+    let throws = tags_named(b.tags, "throws")
+    teko::assert::len_eq(throws.len, 2 to u64)
+    teko::assert::eq_str(throws[0].text, "e1")
+    teko::assert::eq_str(throws[1].text, "e2")
+}
+
+#test
+fn parse_doc_reads_a_field_tag_the_same_as_param() {
+    let b = parse_doc("/**\n * @field name  the field's name\n */")
+    let f = match find_tag(b.tags, "field") { DocTag as t => t; null => { teko::assert::is_true(false); return } }
+    teko::assert::eq_str(f.arg, "name")
+    teko::assert::eq_str(f.text, "the field's name")
+}
+
+#test
+fn parse_doc_keeps_an_unrecognized_tag_verbatim() {
+    let b = parse_doc("/**\n * @weird whatever text\n */")
+    let t = match find_tag(b.tags, "weird") { DocTag as x => x; null => { teko::assert::is_true(false); return } }
+    teko::assert::eq_str(t.arg, "")
+    teko::assert::eq_str(t.text, "whatever text")
+}
+
+#test
+fn parse_doc_drops_blank_lines() {
+    let b = parse_doc("/**\n * first\n *\n * second\n */")
+    teko::assert::eq_str(b.summary, "first second")
+}
+
+#test
+fn find_tag_returns_null_when_absent() {
+    let b = parse_doc("/** just a summary */")
+    match find_tag(b.tags, "return") {
+        DocTag => teko::assert::is_true(false)
+        null => teko::assert::is_true(true)
+    }
+}
+
+#test
+fn tags_named_returns_empty_when_none_match() {
+    let b = parse_doc("/** just a summary */")
+    teko::assert::len_eq(tags_named(b.tags, "param").len, 0 to u64)
+}
+
+#test
+fn doc_text_of_reads_the_pair() {
+    teko::assert::eq_str(doc_text_of(false, "whatever"), "")
+    teko::assert::eq_str(doc_text_of(true, "/** x */"), "/** x */")
+}

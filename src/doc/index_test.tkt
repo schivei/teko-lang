@@ -1,0 +1,231 @@
+// src/doc/index_test.tkt — tests for teko::doc::build_doc_index (the extraction model) and,
+// indirectly, every `render_*` signature renderer it drives (teko::doc's own `render.tks`).
+
+use teko::lexer
+use teko::parser
+
+// ix_src — a fixture module carrying one of every shape `build_doc_index` (and its visibility
+// filter) has to tell apart: a documented public fn, a private fn (excluded), a generic fn with
+// no return / slice params, a fn using union/optional/generic/function-value param types, a
+// struct (all members public regardless of the AST's own `vis`), a class (real per-member
+// visibility), an interface, a private (excluded) type, a member-less enum, and a public/private
+// const pair. A function (not a module-level `const`) because `~` string concatenation is not an
+// accepted const-expr form (consteval_form.tks:194 — only the arithmetic/bitwise operators are).
+fn ix_src() -> str {
+    "" ~
+    "/**\n" ~
+    " * Doubles a number.\n" ~
+    " *\n" ~
+    " * @param x the value\n" ~
+    " * @return the doubled value\n" ~
+    " */\n" ~
+    "pub fn double(x: i64) -> i64 { return x * 2 }\n" ~
+    "\n" ~
+    "fn private_helper_is_excluded() -> i64 { return 1 }\n" ~
+    "\n" ~
+    "pub fn generic_no_return<T>(xs: []T) { }\n" ~
+    "\n" ~
+    "pub fn wide_shapes(a: A | B, o: i64?, b: Box<i64>, cb: (i64) -> str) -> i64 { return 0 }\n" ~
+    "\n" ~
+    "exp fn exported_fn() -> i64 { return 1 }\n" ~
+    "\n" ~
+    "/**\n" ~
+    " * A point in 2D space.\n" ~
+    " */\n" ~
+    "pub type Point = struct {\n" ~
+    "    /** the x coordinate. */\n" ~
+    "    x: i64\n" ~
+    "    y: i64\n" ~
+    "    fn len(self) -> i64 { return self.x }\n" ~
+    "    fn helper() -> i64 { return 0 }\n" ~
+    "}\n" ~
+    "\n" ~
+    "pub type Account = class {\n" ~
+    "    pub balance: i64\n" ~
+    "    secret: i64\n" ~
+    "    pub fn deposit(self, amt: i64) { }\n" ~
+    "    fn internal_helper(self) { }\n" ~
+    "}\n" ~
+    "\n" ~
+    "pub type Shape = interface {\n" ~
+    "    fn area(self) -> i64\n" ~
+    "}\n" ~
+    "\n" ~
+    "type PrivateType = struct { x: i64 }\n" ~
+    "\n" ~
+    "pub type Status = enum { Active; Inactive }\n" ~
+    "\n" ~
+    "/** the ceiling. */\n" ~
+    "pub const MAX: i64 = 10\n" ~
+    "\n" ~
+    "const HIDDEN: i64 = 1\n"
+}
+
+// fixture_program — lex + parse `src` as a MODULE (never a main file — a doc fixture is a
+// library), stamping every item with `ns`/path`. Mirrors `teko::build`'s own `asm_module_items`
+// / `teko::lsp`'s `document_program` (neither is `pub`, so this stays a self-contained copy).
+fn fixture_program(ns: str, path: str, src: str) -> parser::Program {
+    let tokens = match lexer::tokenize(src) { []lexer::Token as t => t; error => return parser::Program { items = teko::list::empty() } }
+    match parser::parse_module(tokens, 0) {
+        parser::Parsed<parser::Module> as x => {
+            let m = x.node
+            mut items: []parser::Item = teko::list::empty()
+            mut ui: u64 = 0
+            loop {
+                if ui >= m.uses.len { break }
+                items = teko::list::push(items, parser::Item { content = m.uses[ui]; namespace = ns; file = path })
+                ui = ui + 1
+            }
+            mut di: u64 = 0
+            loop {
+                if di >= m.decls.len { break }
+                items = match m.decls[di] {
+                    parser::Function as f => teko::list::push(items, parser::Item { content = f; namespace = ns; file = path })
+                    parser::TypeDecl as t => teko::list::push(items, parser::Item { content = t; namespace = ns; file = path })
+                    parser::ConstDecl as c => teko::list::push(items, parser::Item { content = c; namespace = ns; file = path })
+                }
+                di = di + 1
+            }
+            parser::Program { items = items }
+        }
+        error => parser::Program { items = teko::list::empty() }
+    }
+}
+
+fn ix_program() -> parser::Program {
+    fixture_program("fx", "/fx/mod.tks", ix_src())
+}
+
+fn ix_find(items: []DocItem, name: str) -> DocItem | null {
+    mut i: u64 = 0
+    loop {
+        if i >= items.len { break }
+        if items[i].name == name { return items[i] }
+        i = i + 1
+    }
+    null
+}
+
+fn ix_find_member(members: []DocMember, name: str) -> DocMember | null {
+    mut i: u64 = 0
+    loop {
+        if i >= members.len { break }
+        if members[i].name == name { return members[i] }
+        i = i + 1
+    }
+    null
+}
+
+#test
+fn a_documented_public_fn_is_indexed_with_its_doc_and_signature() {
+    let items = build_doc_index(ix_program())
+    let it = match ix_find(items, "double") { DocItem as x => x; null => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(it.kind == DocKind::Function)
+    teko::assert::eq_str(it.signature, "fn double(x: i64) -> i64")
+    teko::assert::str_contains(it.block.summary, "Doubles a number")
+    let p = match find_tag(it.block.tags, "param") { DocTag as t => t; null => { teko::assert::is_true(false); return } }
+    teko::assert::eq_str(p.arg, "x")
+    teko::assert::eq_str(qualified_name(it.namespace, it.name), "fx::double")
+}
+
+#test
+fn a_private_fn_is_excluded() {
+    let items = build_doc_index(ix_program())
+    match ix_find(items, "private_helper_is_excluded") {
+        DocItem => teko::assert::is_true(false)
+        null => teko::assert::is_true(true)
+    }
+}
+
+#test
+fn a_generic_fn_with_no_return_renders_without_an_arrow() {
+    let items = build_doc_index(ix_program())
+    let it = match ix_find(items, "generic_no_return") { DocItem as x => x; null => { teko::assert::is_true(false); return } }
+    teko::assert::eq_str(it.signature, "fn generic_no_return(xs: []T)")
+}
+
+#test
+fn union_optional_generic_and_function_param_types_all_render() {
+    let items = build_doc_index(ix_program())
+    let it = match ix_find(items, "wide_shapes") { DocItem as x => x; null => { teko::assert::is_true(false); return } }
+    teko::assert::eq_str(it.signature, "fn wide_shapes(a: A | B, o: i64?, b: Box<i64>, cb: (i64) -> str) -> i64")
+}
+
+#test
+fn an_exp_fn_is_indexed_too() {
+    let items = build_doc_index(ix_program())
+    match ix_find(items, "exported_fn") {
+        DocItem => teko::assert::is_true(true)
+        null => teko::assert::is_true(false)
+    }
+}
+
+#test
+fn a_struct_includes_every_field_and_method_regardless_of_their_own_vis() {
+    let items = build_doc_index(ix_program())
+    let it = match ix_find(items, "Point") { DocItem as x => x; null => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(it.kind == DocKind::Type)
+    teko::assert::eq_str(it.signature, "type Point")
+    teko::assert::str_contains(it.block.summary, "A point in 2D space")
+    let x = match ix_find_member(it.members, "x") { DocMember as m => m; null => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(x.kind == MemberKind::Field)
+    teko::assert::eq_str(x.signature, "x: i64")
+    teko::assert::str_contains(x.block.summary, "the x coordinate")
+    let y = match ix_find_member(it.members, "y") { DocMember as m => m; null => { teko::assert::is_true(false); return } }
+    teko::assert::eq_str(y.signature, "y: i64")
+    let len_m = match ix_find_member(it.members, "len") { DocMember as m => m; null => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(len_m.kind == MemberKind::Method)
+    teko::assert::eq_str(len_m.signature, "fn len(self) -> i64")
+    match ix_find_member(it.members, "helper") { DocMember => teko::assert::is_true(true); null => teko::assert::is_true(false) }
+}
+
+#test
+fn a_class_filters_members_by_their_own_visibility() {
+    let items = build_doc_index(ix_program())
+    let it = match ix_find(items, "Account") { DocItem as x => x; null => { teko::assert::is_true(false); return } }
+    match ix_find_member(it.members, "balance") { DocMember => teko::assert::is_true(true); null => teko::assert::is_true(false) }
+    match ix_find_member(it.members, "secret") { DocMember => teko::assert::is_true(false); null => teko::assert::is_true(true) }
+    match ix_find_member(it.members, "deposit") { DocMember => teko::assert::is_true(true); null => teko::assert::is_true(false) }
+    match ix_find_member(it.members, "internal_helper") { DocMember => teko::assert::is_true(false); null => teko::assert::is_true(true) }
+}
+
+#test
+fn an_interface_includes_its_method_signatures() {
+    let items = build_doc_index(ix_program())
+    let it = match ix_find(items, "Shape") { DocItem as x => x; null => { teko::assert::is_true(false); return } }
+    match ix_find_member(it.members, "area") { DocMember => teko::assert::is_true(true); null => teko::assert::is_true(false) }
+}
+
+#test
+fn a_private_type_is_excluded() {
+    let items = build_doc_index(ix_program())
+    match ix_find(items, "PrivateType") { DocItem => teko::assert::is_true(false); null => teko::assert::is_true(true) }
+}
+
+#test
+fn a_member_less_body_shape_yields_no_members() {
+    let items = build_doc_index(ix_program())
+    let it = match ix_find(items, "Status") { DocItem as x => x; null => { teko::assert::is_true(false); return } }
+    teko::assert::len_eq(it.members.len, 0 to u64)
+}
+
+#test
+fn a_documented_public_const_is_indexed() {
+    let items = build_doc_index(ix_program())
+    let it = match ix_find(items, "MAX") { DocItem as x => x; null => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(it.kind == DocKind::Const)
+    teko::assert::eq_str(it.signature, "const MAX: i64")
+    teko::assert::str_contains(it.block.summary, "the ceiling")
+}
+
+#test
+fn a_private_const_is_excluded() {
+    let items = build_doc_index(ix_program())
+    match ix_find(items, "HIDDEN") { DocItem => teko::assert::is_true(false); null => teko::assert::is_true(true) }
+}
+
+#test
+fn qualified_name_falls_back_to_the_bare_name_with_no_namespace() {
+    teko::assert::eq_str(qualified_name("", "double"), "double")
+    teko::assert::eq_str(qualified_name("fx", "double"), "fx::double")
+}

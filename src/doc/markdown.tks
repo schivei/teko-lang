@@ -1,0 +1,140 @@
+// src/doc/markdown.tks   (namespace 'teko::doc') — DT1: the Markdown renderer.
+//
+// `[]DocItem` (teko::doc::index) -> one Markdown document, grouped by NAMESPACE (a `##`
+// heading per namespace, first-seen order), each item a `###` heading naming its rendered
+// signature, its summary prose, then its structured tag sections (Parameters/Returns/Since/
+// Throws/See/Example — only the sections a doc-comment actually used), and — for a `type` —
+// its own Fields/Methods bullet lists. Deterministic in `items`' order: same input, same
+// bytes, every render (the DT1 "snapshot of the generated Markdown" verification property,
+// TEKO_ROADMAP_DEVTOOLS.md §1).
+
+fn contains_str(xs: []str, v: str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if xs[i] == v { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn distinct_namespaces(items: []DocItem) -> []str {
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= items.len { break }
+        let ns = items[i].namespace
+        if !contains_str(out, ns) { out = teko::list::push(out, ns) }
+        i = i + 1
+    }
+    out
+}
+
+fn items_in_namespace(items: []DocItem, ns: str) -> []DocItem {
+    mut out: []DocItem = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= items.len { break }
+        if items[i].namespace == ns { out = teko::list::push(out, items[i]) }
+        i = i + 1
+    }
+    out
+}
+
+// a single-line bullet, "- `sig`" or "- `sig` — summary" when `summary` is non-empty.
+fn md_bullet(sig: str, summary: str) -> str {
+    if summary.len == 0 { return teko::str::concat("- `", sig, "`\n") }
+    teko::str::concat("- `", sig, "` — ", summary, "\n")
+}
+
+fn md_member_list(heading: str, members: []DocMember, kind: MemberKind) -> str {
+    mut body = ""
+    mut i: u64 = 0
+    loop {
+        if i >= members.len { break }
+        if members[i].kind == kind { body = teko::str::concat(body, md_bullet(members[i].signature, members[i].block.summary)) }
+        i = i + 1
+    }
+    if body.len == 0 { return "" }
+    teko::str::concat("**", heading, ":**\n\n", body, "\n")
+}
+
+// one `@param`/`@throws`/`@see` bulleted section (repeatable tags); `""` when `tags` names
+// nothing under `name`. A `@param`/`@field` entry shows its `arg` name; every other tag shows
+// its bare text.
+fn md_tag_list(heading: str, tags: []DocTag, name: str) -> str {
+    let found = tags_named(tags, name)
+    if found.len == 0 { return "" }
+    mut body = ""
+    mut i: u64 = 0
+    loop {
+        if i >= found.len { break }
+        if found[i].arg.len > 0 {
+            body = teko::str::concat(body, "- `", found[i].arg, "` — ", found[i].text, "\n")
+        } else {
+            body = teko::str::concat(body, "- ", found[i].text, "\n")
+        }
+        i = i + 1
+    }
+    teko::str::concat("**", heading, ":**\n\n", body, "\n")
+}
+
+// one single-valued `**Heading:** text` line (`@return`/`@since`); `""` when absent.
+fn md_tag_line(heading: str, tags: []DocTag, name: str) -> str {
+    match find_tag(tags, name) {
+        DocTag as t => teko::str::concat("**", heading, ":** ", t.text, "\n\n")
+        null => ""
+    }
+}
+
+fn md_summary(block: DocBlock) -> str {
+    if block.summary.len == 0 { return "" }
+    teko::str::concat(block.summary, "\n\n")
+}
+
+fn md_item(item: DocItem) -> str {
+    mut out = teko::str::concat("### `", item.signature, "`\n\n")
+    out = teko::str::concat(out, md_summary(item.block))
+    out = teko::str::concat(out, md_tag_list("Parameters", item.block.tags, "param"))
+    out = teko::str::concat(out, md_tag_line("Returns", item.block.tags, "return"))
+    out = teko::str::concat(out, md_tag_list("Throws", item.block.tags, "throws"))
+    out = teko::str::concat(out, md_tag_line("Since", item.block.tags, "since"))
+    out = teko::str::concat(out, md_tag_list("See also", item.block.tags, "see"))
+    out = teko::str::concat(out, md_member_list("Fields", item.members, MemberKind::Field))
+    out = teko::str::concat(out, md_member_list("Methods", item.members, MemberKind::Method))
+    out
+}
+
+fn md_namespace_section(ns: str, items: []DocItem) -> str {
+    let heading = if ns.len == 0 { "(root)" } else { ns }
+    mut out = teko::str::concat("## ", heading, "\n\n")
+    mut i: u64 = 0
+    loop {
+        if i >= items.len { break }
+        out = teko::str::concat(out, md_item(items[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * render_markdown — the whole Markdown document for `items`: a title naming `project_name`,
+ * then one `## namespace` section per distinct namespace (first-seen order), each holding its
+ * items' `### signature` entries.
+ *
+ * @param project_name  the project's canonical name (the manifest's `name`)
+ * @param items         every documented item (`teko::doc::index::build_doc_index`'s output)
+ * @return               the complete Markdown document
+ * @since 0.3.1 (DT1)
+ */
+pub fn render_markdown(project_name: str, items: []DocItem) -> str {
+    mut out = teko::str::concat("# ", project_name, " — API Reference\n\n_Generated by `teko doc`._\n\n")
+    let namespaces = distinct_namespaces(items)
+    mut i: u64 = 0
+    loop {
+        if i >= namespaces.len { break }
+        out = teko::str::concat(out, md_namespace_section(namespaces[i], items_in_namespace(items, namespaces[i])))
+        i = i + 1
+    }
+    out
+}

@@ -1,0 +1,156 @@
+// src/doc/html.tks   (namespace 'teko::doc') — DT1: the static HTML site renderer.
+//
+// `[]DocItem` (teko::doc::index) -> ONE self-contained HTML page (no external stylesheet/script
+// — every renderer this module owns is a pure string builder, matching `teko::fmt`'s "no host
+// edge" posture): a per-namespace section, one entry per item naming its signature, summary,
+// and structured doc sections, plus — for a `type` — its own fields/methods. Every piece of
+// text that came off the SOURCE (names, signatures, doc prose) is HTML-escaped (`html_escape`)
+// before it is spliced in — none of it is trusted markup.
+
+// html_escape — the five ENTITIES an attribute-free text/pre context needs escaped (`&`, `<`,
+// `>`, `"`, `'`); `&` FIRST, or a later entity's own `&` would be double-escaped.
+fn html_escape(s: str) -> str {
+    mut out = ""
+    mut i: u64 = 0
+    loop {
+        if i >= s.len { break }
+        let b = s[i]
+        if b == b'&' { out = teko::str::concat(out, "&amp;") }
+        else if b == b'<' { out = teko::str::concat(out, "&lt;") }
+        else if b == b'>' { out = teko::str::concat(out, "&gt;") }
+        else if b == b'"' { out = teko::str::concat(out, "&quot;") }
+        else if b == b'\'' { out = teko::str::concat(out, "&#39;") }
+        else { out = teko::str::concat(out, one_byte(b)) }
+        i = i + 1
+    }
+    out
+}
+
+fn html_contains_str(xs: []str, v: str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if xs[i] == v { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn html_distinct_namespaces(items: []DocItem) -> []str {
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= items.len { break }
+        let ns = items[i].namespace
+        if !html_contains_str(out, ns) { out = teko::list::push(out, ns) }
+        i = i + 1
+    }
+    out
+}
+
+fn html_items_in_namespace(items: []DocItem, ns: str) -> []DocItem {
+    mut out: []DocItem = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= items.len { break }
+        if items[i].namespace == ns { out = teko::list::push(out, items[i]) }
+        i = i + 1
+    }
+    out
+}
+
+fn html_bullet(sig: str, summary: str) -> str {
+    if summary.len == 0 { return teko::str::concat("<li><code>", html_escape(sig), "</code></li>\n") }
+    teko::str::concat("<li><code>", html_escape(sig), "</code> — ", html_escape(summary), "</li>\n")
+}
+
+fn html_member_list(heading: str, members: []DocMember, kind: MemberKind) -> str {
+    mut body = ""
+    mut i: u64 = 0
+    loop {
+        if i >= members.len { break }
+        if members[i].kind == kind { body = teko::str::concat(body, html_bullet(members[i].signature, members[i].block.summary)) }
+        i = i + 1
+    }
+    if body.len == 0 { return "" }
+    teko::str::concat("<h4>", heading, "</h4>\n<ul>\n", body, "</ul>\n")
+}
+
+fn html_tag_list(heading: str, tags: []DocTag, name: str) -> str {
+    let found = tags_named(tags, name)
+    if found.len == 0 { return "" }
+    mut body = ""
+    mut i: u64 = 0
+    loop {
+        if i >= found.len { break }
+        if found[i].arg.len > 0 {
+            body = teko::str::concat(body, "<li><code>", html_escape(found[i].arg), "</code> — ", html_escape(found[i].text), "</li>\n")
+        } else {
+            body = teko::str::concat(body, "<li>", html_escape(found[i].text), "</li>\n")
+        }
+        i = i + 1
+    }
+    teko::str::concat("<h4>", heading, "</h4>\n<ul>\n", body, "</ul>\n")
+}
+
+fn html_tag_line(heading: str, tags: []DocTag, name: str) -> str {
+    match find_tag(tags, name) {
+        DocTag as t => teko::str::concat("<p><strong>", heading, ":</strong> ", html_escape(t.text), "</p>\n")
+        null => ""
+    }
+}
+
+fn html_summary(block: DocBlock) -> str {
+    if block.summary.len == 0 { return "" }
+    teko::str::concat("<p>", html_escape(block.summary), "</p>\n")
+}
+
+fn html_item(item: DocItem) -> str {
+    mut out = teko::str::concat("<section>\n<h3><code>", html_escape(item.signature), "</code></h3>\n")
+    out = teko::str::concat(out, html_summary(item.block))
+    out = teko::str::concat(out, html_tag_list("Parameters", item.block.tags, "param"))
+    out = teko::str::concat(out, html_tag_line("Returns", item.block.tags, "return"))
+    out = teko::str::concat(out, html_tag_list("Throws", item.block.tags, "throws"))
+    out = teko::str::concat(out, html_tag_line("Since", item.block.tags, "since"))
+    out = teko::str::concat(out, html_tag_list("See also", item.block.tags, "see"))
+    out = teko::str::concat(out, html_member_list("Fields", item.members, MemberKind::Field))
+    out = teko::str::concat(out, html_member_list("Methods", item.members, MemberKind::Method))
+    teko::str::concat(out, "</section>\n")
+}
+
+fn html_namespace_section(ns: str, items: []DocItem) -> str {
+    let heading = if ns.len == 0 { "(root)" } else { ns }
+    mut out = teko::str::concat("<h2>", html_escape(heading), "</h2>\n")
+    mut i: u64 = 0
+    loop {
+        if i >= items.len { break }
+        out = teko::str::concat(out, html_item(items[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * render_html — the whole static HTML page for `items`: a minimal, self-contained document
+ * (title + a per-namespace `<h2>` section, first-seen order, each item's rendered signature,
+ * summary, and structured doc sections) — no external stylesheet or script, every splice
+ * point HTML-escaped.
+ *
+ * @param project_name  the project's canonical name (the manifest's `name`)
+ * @param items         every documented item (`teko::doc::index::build_doc_index`'s output)
+ * @return              the complete HTML document
+ * @since 0.3.1 (DT1)
+ */
+pub fn render_html(project_name: str, items: []DocItem) -> str {
+    let esc_name = html_escape(project_name)
+    mut out = teko::str::concat("<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>", esc_name, " — API Reference</title></head><body>\n")
+    out = teko::str::concat(out, "<h1>", esc_name, " — API Reference</h1>\n<p><em>Generated by <code>teko doc</code>.</em></p>\n")
+    let namespaces = html_distinct_namespaces(items)
+    mut i: u64 = 0
+    loop {
+        if i >= namespaces.len { break }
+        out = teko::str::concat(out, html_namespace_section(namespaces[i], html_items_in_namespace(items, namespaces[i])))
+        i = i + 1
+    }
+    teko::str::concat(out, "</body></html>\n")
+}

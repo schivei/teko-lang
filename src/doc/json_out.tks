@@ -1,0 +1,111 @@
+// src/doc/json_out.tks   (namespace 'teko::doc') — DT1: the machine-readable JSON index.
+//
+// `[]DocItem` (teko::doc::index) -> one JSON document: `{ "project": "...", "items": [...] }`,
+// every item carrying its qualified name, position, kind, rendered signature, parsed
+// doc-comment (summary + tags), and — for a `type` — its own member list. THE index a future
+// `teko lsp` hover / editor search could feed from (open decision #3, TEKO_ROADMAP_DEVTOOLS.md
+// §3) without re-parsing Markdown — the same `DocItem`/`DocBlock` model the Markdown and HTML
+// renderers read, just JSON-encoded (`teko::encoding::json`) instead of prose-rendered.
+
+use teko::encoding::json
+
+fn jstr(s: str) -> json::JsonValue { json::JsonString { value = s } }
+fn jnum(v: f64) -> json::JsonValue { json::JsonNumber { value = v } }
+fn jarr(items: []json::JsonValue) -> json::JsonValue { json::JsonArray { items = items } }
+fn jobj(keys: []str, values: []json::JsonValue) -> json::JsonValue { json::JsonObject { keys = keys; values = values } }
+
+fn json_of_kind(k: DocKind) -> str {
+    match k {
+        DocKind::Function => "Function"
+        DocKind::Type => "Type"
+        DocKind::Const => "Const"
+    }
+}
+
+fn json_of_member_kind(k: MemberKind) -> str {
+    match k {
+        MemberKind::Field => "Field"
+        MemberKind::Method => "Method"
+    }
+}
+
+fn json_of_tag(t: DocTag) -> json::JsonValue {
+    jobj(["tag", "arg", "text"], [jstr(t.tag), jstr(t.arg), jstr(t.text)])
+}
+
+fn json_of_tags(tags: []DocTag) -> json::JsonValue {
+    mut vs: []json::JsonValue = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= tags.len { break }
+        vs = teko::list::push(vs, json_of_tag(tags[i]))
+        i = i + 1
+    }
+    jarr(vs)
+}
+
+fn json_of_member(m: DocMember) -> json::JsonValue {
+    jobj(
+        ["name", "kind", "signature", "summary", "tags"],
+        [jstr(m.name), jstr(json_of_member_kind(m.kind)), jstr(m.signature), jstr(m.block.summary), json_of_tags(m.block.tags)]
+    )
+}
+
+fn json_of_members(members: []DocMember) -> json::JsonValue {
+    mut vs: []json::JsonValue = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= members.len { break }
+        vs = teko::list::push(vs, json_of_member(members[i]))
+        i = i + 1
+    }
+    jarr(vs)
+}
+
+fn json_of_item(item: DocItem) -> json::JsonValue {
+    jobj(
+        ["name", "namespace", "qualified", "file", "line", "col", "kind", "signature", "summary", "tags", "members"],
+        [
+            jstr(item.name), jstr(item.namespace), jstr(qualified_name(item.namespace, item.name)), jstr(item.file),
+            jnum(item.line to f64), jnum(item.col to f64), jstr(json_of_kind(item.kind)), jstr(item.signature),
+            jstr(item.block.summary), json_of_tags(item.block.tags), json_of_members(item.members)
+        ]
+    )
+}
+
+/**
+ * doc_index_json_value — `items` (plus `project_name`) as the `teko::encoding::json` DOM value
+ * `render_doc_json` encodes to text. Exposed separately so a caller that wants the DOM (to
+ * merge into a larger JSON document, say) does not have to re-decode `render_doc_json`'s
+ * output.
+ *
+ * @param project_name  the project's canonical name
+ * @param items         every documented item
+ * @return              the `{ "project": ..., "items": [...] }` DOM value
+ * @since 0.3.1 (DT1)
+ */
+pub fn doc_index_json_value(project_name: str, items: []DocItem) -> json::JsonValue {
+    mut vs: []json::JsonValue = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= items.len { break }
+        vs = teko::list::push(vs, json_of_item(items[i]))
+        i = i + 1
+    }
+    jobj(["project", "items"], [jstr(project_name), jarr(vs)])
+}
+
+/**
+ * render_doc_json — `items` (plus `project_name`) encoded as ONE compact JSON document: `{
+ * "project": "...", "items": [ { name, namespace, qualified, file, line, col, kind, signature,
+ * summary, tags, members }, ... ] }`. The machine-readable index TEKO_ROADMAP_DEVTOOLS.md §1
+ * DT1 asks for (`--json`).
+ *
+ * @param project_name  the project's canonical name (the manifest's `name`)
+ * @param items         every documented item (`teko::doc::index::build_doc_index`'s output)
+ * @return              the encoded JSON document (no trailing newline)
+ * @since 0.3.1 (DT1)
+ */
+pub fn render_doc_json(project_name: str, items: []DocItem) -> str {
+    json::encode(doc_index_json_value(project_name, items))
+}
