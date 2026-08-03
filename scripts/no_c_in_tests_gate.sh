@@ -6,24 +6,29 @@
 # nativo, pode até instruir o agente a adicionar uma validação para verificar, se ao final de uma
 # sessão de testes houver um C gerado, tem que fechar vermelha a lane."
 #
-# ── THE LIE THIS CLOSES ────────────────────────────────────────────────────────────────────────
-# `teko test .`'s unit half (`run_native_gate`, src/build/project.tks) emits the `#test` corpus as
-# a C translation unit and compiles it with `cc` UNCONDITIONALLY — it never reads `TEKO_BACKEND`.
-# On the "teko" project itself the regression tier emits a SECOND C translation unit
-# (`build_regression_cov_exe`: a coverage-instrumented copy of the compiler the regressor runs
-# against). Measured directly (2026-07-29, a from-scratch `teko test .`): a passing run leaves
+# ── THE LIE THIS CLOSED (owner ruling 2026-07-29) — AND WHAT REMAINS OPEN (0.3.1.0 tests-native-no-c) ──
+# `teko test .`'s unit half (`run_native_gate`/`native_gate_build`, src/build/project.tks) USED TO
+# emit the `#test` corpus as a C translation unit and compile it with `cc` UNCONDITIONALLY — it
+# never read `TEKO_BACKEND`. As of 0.3.1.0 (tests-native-no-c) that emission site is GONE: the gate
+# binary (`bin/<name>-tktest`) is built through the own-AOT-backend driver (`emit_native`, the same
+# one `TEKO_BACKEND=native` uses for a normal program) — no `.c` translation unit is written for the
+# test program at all any more. `cc` still runs, but only as the LINKER (`link_object`, exactly as
+# every native build already used it to resolve `teko_rt`/`assert`) — never as a compiler of a
+# `teko`-generated `.c`.
 #
-#     bin/<name>-tktest.c    always            (run_native_gate)
-#     bin/teko-regrcov.c     name == "teko"    (build_regression_cov_exe)
+# WHAT STILL EMITS C, AND WHY THIS GATE STILL HAS WORK TO DO. On the "teko" project itself the
+# regression tier emits a SEPARATE C translation unit (`build_regression_cov_exe`: a
+# coverage-instrumented copy of the compiler the regressor runs against, `bin/teko-regrcov.c`) —
+# UNTOUCHED by the 0.3.1.0 fix, because it depends on the C emitter's `ProgramCov` coverage
+# instrumentation, which the native backend does not have yet (a distinct, larger gap — native
+# per-line/per-branch coverage marks). So this script still correctly fails RED on the "teko"
+# project's own `teko test .` today, for `bin/teko-regrcov.c` alone; a project with no
+# `[tests] regression` files (`m.test_regression_files.len == 0`) now passes this gate cleanly.
 #
-# on the filesystem, no matter what `TEKO_BACKEND` was set to. So a GREEN `teko test .` on a leg
-# that is supposed to be all-native proves NOTHING about the native backend: the suite that
-# "passed" never went near it. That silence is how a real native-backend miscompilation survived
-# every test run before this gate existed.
-#
-# THIS SCRIPT DOES NOT FIX `run_native_gate` — that is a separately-scoped change. It makes the
-# deception IMPOSSIBLE to pass unnoticed: run it right after a native-backend `teko test .`, and
-# any `.c`/`.h` that session left behind fails the lane, loud, by name.
+# THIS SCRIPT DOES NOT FIX EITHER EMISSION SITE ITSELF — that is (part) done, (part) separately
+# scoped. It makes any surviving `.c`/`.h` IMPOSSIBLE to pass unnoticed: run it right after a
+# native-backend `teko test .`, and any `.c`/`.h` that session left behind fails the lane, loud, by
+# name.
 #
 # ── WHAT COUNTS AS "GENERATED" ────────────────────────────────────────────────────────────────
 # Every `.c`/`.h` under PROJECT_DIR that git does NOT track. The versioned C twins this project
