@@ -71,18 +71,23 @@ fn severity_code(s: DiagSeverity) -> f64 {
 }
 
 /**
- * severity_of — the severity a checker diagnostic message implies: Warning when the text carries the
- * `warning:` marker (the shape the checker's warning producers use), else Error. Once the warnings
- * that escape to stderr are collected into the list (crumb C), this reads them as Warning without a
- * further change here.
+ * checker_severity — the LSP's own `DiagSeverity` for the checker's `checker::DiagSeverity` (crumb D):
+ * a structural re-tag between the two packages' nominally distinct twin enums (`teko::checker` must not
+ * depend on `teko::lsp`, so they cannot share one type — `checker::Diagnostic`'s own doc). Severity is
+ * now known at each finding's SOURCE (`checker::collect_diagnostics_structured`), never sniffed from the
+ * rendered message text — the fragile v1 heuristic this function replaces.
  *
- * @param message  the diagnostic text
- * @return         Warning for a `warning:`-marked message, else Error
- * @since 0.3.1.0 (LSP crumb A)
+ * @param s  the checker's severity
+ * @return   the equivalent LSP severity
+ * @since 0.3.1.0 (LSP crumb D)
  */
-fn severity_of(message: str) -> DiagSeverity {
-    if teko::str::contains(message, "warning:") { return DiagSeverity::Warning }
-    DiagSeverity::Error
+fn checker_severity(s: checker::DiagSeverity) -> DiagSeverity {
+    match s {
+        checker::DiagSeverity::Error => DiagSeverity::Error
+        checker::DiagSeverity::Warning => DiagSeverity::Warning
+        checker::DiagSeverity::Info => DiagSeverity::Info
+        checker::DiagSeverity::Hint => DiagSeverity::Hint
+    }
 }
 
 /**
@@ -152,19 +157,21 @@ fn word_end_col(text: str, line1: u32, col1: u32) -> u32 {
 }
 
 /**
- * make_diag — build an `LspDiagnostic` from a 1-based (`line1`, `col1`) checker position and a
- * message, converting to the protocol's 0-based range and extending the end over the token under the
- * start. A `line1` of 0 (an unpositioned diagnostic) collapses to a zero range at the document top.
+ * make_diag — build an `LspDiagnostic` from a 1-based (`line1`, `col1`) checker position, an EXPLICIT
+ * severity, and a message, converting to the protocol's 0-based range and extending the end over the
+ * token under the start. A `line1` of 0 (an unpositioned diagnostic) collapses to a zero range at the
+ * document top. `severity` is always the CALLER's own — this function never sniffs it from `message`
+ * (crumb D removed that heuristic; see `checker_severity`).
  *
  * @param text     the whole document (read to extend the range over the token)
  * @param line1    the 1-based line (0 when unknown)
  * @param col1     the 1-based column (0 when unknown)
+ * @param sev      the diagnostic's severity
  * @param message  the diagnostic text
  * @return         the structured, ranged diagnostic
- * @since 0.3.1.0 (LSP crumb A)
+ * @since 0.3.1.0 (LSP crumb A; severity parameterized crumb D)
  */
-fn make_diag(text: str, line1: u32, col1: u32, message: str) -> LspDiagnostic {
-    let sev = severity_of(message)
+fn make_diag(text: str, line1: u32, col1: u32, sev: DiagSeverity, message: str) -> LspDiagnostic {
     if line1 == 0 {
         return LspDiagnostic { start_line = 0; start_col = 0; end_line = 0; end_col = 0; severity = sev; message = message }
     }
@@ -174,6 +181,22 @@ fn make_diag(text: str, line1: u32, col1: u32, message: str) -> LspDiagnostic {
     let end1 = word_end_col(text, line1, start_c1)
     let ec = if end1 > 0 { end1 - 1 } else { sc + 1 }
     LspDiagnostic { start_line = sl; start_col = sc; end_line = sl; end_col = ec; severity = sev; message = message }
+}
+
+/**
+ * to_lsp_diagnostic — the LSP's `LspDiagnostic` for one checker `Diagnostic` (crumb D): the SAME
+ * position-to-range widening `make_diag` always did (the checker has no source buffer to widen a range
+ * over the flagged token — only the open document's `text`, which the LSP holds, can), but the
+ * severity now flows straight from `d.severity` through `checker_severity` instead of being re-derived
+ * from `d.message`'s own text.
+ *
+ * @param text  the document buffer (read to extend the range over the token)
+ * @param d     the checker's structured diagnostic
+ * @return      the ranged, severity-tagged `LspDiagnostic`
+ * @since 0.3.1.0 (LSP crumb D)
+ */
+fn to_lsp_diagnostic(text: str, d: checker::Diagnostic) -> LspDiagnostic {
+    make_diag(text, d.line, d.col, checker_severity(d.severity), d.message)
 }
 
 /**
@@ -216,33 +239,6 @@ fn has_prefix(s: str, prefix: str) -> bool {
         i = i + 1
     }
     true
-}
-
-/**
- * parse_located — turn one checker diagnostic line (`file:line:col: msg`, `file` being `path`) into a
- * structured `LspDiagnostic` with a real range. When the line does not carry `path`'s `line:col`
- * prefix (an unpositioned diagnostic such as a label-check message), the whole line becomes the
- * message at the document top rather than being dropped.
- *
- * @param path  the document path the diagnostic belongs to (its `file` prefix)
- * @param text  the document text (read to extend the range over the token)
- * @param diag  one `file:line:col: msg` diagnostic line
- * @return      the structured, ranged diagnostic
- * @since 0.3.1.0 (LSP crumb A)
- */
-fn parse_located(path: str, text: str, diag: str) -> LspDiagnostic {
-    if !has_prefix(diag, path) || diag.len <= path.len || diag[path.len] != b':' {
-        return make_diag(text, 0, 0, diag)
-    }
-    let rest = teko::str::slice_from(diag, path.len + 1)
-    let p1 = read_u32(rest, 0)
-    if !p1.ok || p1.next >= rest.len || rest[p1.next] != b':' { return make_diag(text, 0, 0, diag) }
-    let p2 = read_u32(rest, p1.next + 1)
-    if !p2.ok || p2.next >= rest.len || rest[p2.next] != b':' { return make_diag(text, 0, 0, diag) }
-    mut j = p2.next + 1
-    if j < rest.len && rest[j] == b' ' { j = j + 1 }
-    let msg = teko::str::slice_from(rest, j)
-    make_diag(text, p1.value, p2.value, msg)
 }
 
 /**
@@ -359,10 +355,11 @@ fn document_program(path: str, text: str) -> parser::Program | error {
 
 /**
  * diagnose_document — the LSP's front-end pass over ONE open document: lex + parse + type-check the
- * buffer and return every diagnostic as a structured, ranged `LspDiagnostic`. A lex/parse fault
- * yields the single located diagnostic that stopped the parse; a clean parse runs the checker's
- * `collect_diagnostics` (the whole-program, non-fail-fast seam) and maps each `file:line:col: msg`
- * line to a range. A clean document yields an empty list — the client then clears its squiggles.
+ * buffer and return every diagnostic as a structured, ranged `LspDiagnostic`. A lex/parse fault yields
+ * the single located diagnostic that stopped the parse; a clean parse runs the checker's
+ * `collect_diagnostics_structured` (crumb D: the whole-program, non-fail-fast, SEVERITY-KNOWN seam)
+ * and maps each `checker::Diagnostic` to a range. A clean document yields an empty list — the client
+ * then clears its squiggles.
  *
  * v1 checks the document in ISOLATION (no cross-file dependency resolution), so a reference to a
  * symbol defined in another project file surfaces as unresolved; whole-project checking with an
@@ -371,22 +368,22 @@ fn document_program(path: str, text: str) -> parser::Program | error {
  * @param path  the document path (its diagnostics' `file`)
  * @param text  the document buffer
  * @return      every diagnostic of the buffer, ranged and severity-tagged (empty ⇒ clean)
- * @since 0.3.1.0 (LSP crumb A)
+ * @since 0.3.1.0 (LSP crumb A; re-wired onto the structured seam crumb D)
  */
 pub fn diagnose_document(path: str, text: str) -> []LspDiagnostic {
     match document_program(path, text) {
         parser::Program as prog => {
-            let raw = checker::collect_diagnostics(prog)
+            let raw = checker::collect_diagnostics_structured(prog)
             mut out: []LspDiagnostic = teko::list::empty()
             mut i: u64 = 0
             loop {
                 if i >= raw.len { break }
-                out = teko::list::push(out, parse_located(path, text, raw[i]))
+                out = teko::list::push(out, to_lsp_diagnostic(text, raw[i]))
                 i = i + 1
             }
             out
         }
-        error as e => teko::list::push(teko::list::empty(), make_diag(text, e.line, e.col, strip_leading_location(e.message)))
+        error as e => teko::list::push(teko::list::empty(), make_diag(text, e.line, e.col, DiagSeverity::Error, strip_leading_location(e.message)))
     }
 }
 
