@@ -1096,9 +1096,23 @@ pub type LowerCtx = struct {
      * escape the frame; consumed by `binding_conveys_escape` to decide which RHS to bracket
      * (`enter(rr)…leave()`, the move-on-return conveyance) and by `own_returned_value` (the
      * `leave`-before-the-box). Reads the SAME oracle the C route reads — no native-only analysis, no
-     * possible divergence. Unconsumed until NP3.
+     * possible divergence.
      */
     escaping: []str
+    /**
+     * bracket_depth — how many conveyance brackets (`lower_binding_conveyed`/`lower_assign_conveyed`/
+     * `lower_conveyed_tail_expr_stmt_fat`, NP3b/NP4) are CURRENTLY open around the statement being
+     * lowered. `0` outside any bracket. A bracket that finds `bracket_depth > 0` is ALREADY nested
+     * inside an outer one — the outer bracket's own `emit_region_leaves` already moved `current` down
+     * to the conveyance anchor for this WHOLE subtree, so the inner bracket does NOT leave/enter again
+     * (that would incorrectly `tk_region_enter_u` the FRAME region back in the middle of the outer
+     * bracket's still-open span, corrupting the outer bracket's own resume state — the twin of the C
+     * route's `dctx.bracket_depth == 0` re-bracket guard, `codegen.tks`, `emit_stmt`). Threaded like
+     * `region_stack`/`escaping` rather than as a bare boolean because it is the SAME "how many opens
+     * are outstanding" shape those two already establish.
+     * @since 0.3.1
+     */
+    bracket_depth: u32
 }
 
 /**
@@ -1148,7 +1162,7 @@ fn ctx_with(ctx: LowerCtx, func: LFunc, block_id: u32, env: LEnv) -> LowerCtx {
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
-        region_stack = ctx.region_stack; escaping = ctx.escaping
+        region_stack = ctx.region_stack; escaping = ctx.escaping; bracket_depth = ctx.bracket_depth
     }
 }
 
@@ -1170,7 +1184,7 @@ fn ctx_with_rodata(ctx: LowerCtx, rodata: []LRodata) -> LowerCtx {
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
-        region_stack = ctx.region_stack; escaping = ctx.escaping
+        region_stack = ctx.region_stack; escaping = ctx.escaping; bracket_depth = ctx.bracket_depth
     }
 }
 
@@ -1192,7 +1206,7 @@ fn ctx_with_lifted(ctx: LowerCtx, lifted: []LFunc) -> LowerCtx {
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
-        region_stack = ctx.region_stack; escaping = ctx.escaping
+        region_stack = ctx.region_stack; escaping = ctx.escaping; bracket_depth = ctx.bracket_depth
     }
 }
 
@@ -1214,7 +1228,7 @@ fn ctx_with_defers(ctx: LowerCtx, defers: []checker::TDeferStmt) -> LowerCtx {
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
-        region_stack = ctx.region_stack; escaping = ctx.escaping
+        region_stack = ctx.region_stack; escaping = ctx.escaping; bracket_depth = ctx.bracket_depth
     }
 }
 
@@ -1236,7 +1250,7 @@ fn ctx_with_loops(ctx: LowerCtx, loop_targets: []LoopTargets) -> LowerCtx {
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
-        region_stack = ctx.region_stack; escaping = ctx.escaping
+        region_stack = ctx.region_stack; escaping = ctx.escaping; bracket_depth = ctx.bracket_depth
     }
 }
 
@@ -1305,7 +1319,33 @@ fn ctx_with_regions(ctx: LowerCtx, region_stack: []NativeRegionFrame) -> LowerCt
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
-        region_stack = region_stack; escaping = ctx.escaping
+        region_stack = region_stack; escaping = ctx.escaping; bracket_depth = ctx.bracket_depth
+    }
+}
+
+/**
+ * ctx_with_bracket_depth — a copy of `ctx` with its `bracket_depth` replaced (everything else
+ * unchanged) — the ONE site a conveyance bracket (`lower_binding_conveyed`/`lower_assign_conveyed`/
+ * `lower_conveyed_tail_expr_stmt_fat`, NP3b/NP4) marks itself open before lowering its bracketed RHS,
+ * so a NESTED escaping binding/assign inside that RHS can see `bracket_depth > 0` and skip
+ * re-bracketing (`binding_conveys_escape`'s callers guard on this) rather than re-entering the frame
+ * region in the middle of an already-open outer bracket.
+ *
+ * @param ctx             the context to rebuild
+ * @param bracket_depth   the new bracket-nesting depth
+ * @return                the rebuilt context
+ * @since 0.3.1
+ */
+fn ctx_with_bracket_depth(ctx: LowerCtx, bracket_depth: u32) -> LowerCtx {
+    LowerCtx {
+        func = ctx.func; block_id = ctx.block_id; env = ctx.env
+        layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
+        variants = ctx.variants
+        defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
+        flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
+        has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
+        ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
+        region_stack = ctx.region_stack; escaping = ctx.escaping; bracket_depth = bracket_depth
     }
 }
 
@@ -1327,9 +1367,10 @@ fn one_region_arg(vreg: u32) -> []u32 {
  * `tk_region_current_u()` at the move, NP6), `fr = tk_region_new_u(rr)` (a fresh child of it), and
  * `tk_region_enter_u(fr)` (make `fr` the current region), then push its `NativeRegionFrame` onto
  * `ctx.region_stack`. Every `tk_alloc`/slice-grow/box the body emits now bump-allocates from `fr`.
- * The matching `tk_region_leave()` on every normal-return edge is `emit_region_leaves`; the
- * `tk_region_drop_u(fr)` is SUPPRESSED in NP3 (the region leaks as a never-dropped child of root —
- * leak-safe, no early free) and reactivated in NP4.
+ * The matching `tk_region_leave()` on every normal-return edge is `emit_region_leaves`; the matching
+ * `tk_region_drop_u(fr)` is `emit_region_drops` — REACTIVATED as of NP4 (a real reclaim: `fr`'s
+ * non-escaping scratch dies with the frame; an escaping value was already conveyed to `rr` by NP3b's
+ * brackets before this drop runs, so the drop never touches it).
  *
  * @param ctx   the lowering context at function entry (empty `region_stack`)
  * @param line  the source line to stamp the emitted calls with
@@ -1402,6 +1443,39 @@ fn emit_region_enters(ctx: LowerCtx, line: u32, col: u32) -> LowerCtx {
         if i >= ctx.region_stack.len { break }
         cur = ctx_append(cur, void_call_inst("tk_region_enter_u", one_region_arg(ctx.region_stack[i].region_vreg), false, line, col))
         i++
+    }
+    cur
+}
+
+/**
+ * emit_region_drops — emit a `tk_region_drop_u(<region_vreg>)` for EVERY region open on
+ * `ctx.region_stack`, innermost (top) to outermost (the frame) — the FREE half of the pair
+ * `open_frame_region`'s `tk_region_enter_u` opened, reactivated at NP4 (suppressed at NP3). Emitted
+ * SEPARATELY from, and strictly AFTER, `emit_region_leaves` on the SAME exit edge, and after the
+ * return value is fully computed/boxed (`own_returned_value`/the fat ptr's own construction) — a
+ * region is only dropped once nothing that still needs it is about to be read. By NP3b's own
+ * completeness (`binding_conveys_escape`, blind on `ctx.escaping`) every ESCAPING value was already
+ * conveyed OUT of this region (into `rr`, the conveyance anchor) at the site it was produced, so the
+ * drop only ever reclaims scratch that never left the frame — the residence-rule split (owner law,
+ * `modelo-de-memoria-por-escopo-0.3.1.md:§0`): escaping → the caller's region (untouched here);
+ * non-escaping → dies at scope end (THIS call). Innermost-first mirrors `emit_region_leaves`' own
+ * order and the C route's own `cg_drop_all_regions` (`codegen.tks`) — a would-be parent-before-child
+ * drop is avoided by construction (only one entry — the frame — exists on `ctx.region_stack` until
+ * NP5 adds block/loop/arm regions, which will push more before this ever runs).
+ *
+ * @param ctx   the lowering context at the return edge, AFTER the return value's own construction
+ * @param line  the source line to stamp the emitted calls with
+ * @param col   the source column to stamp
+ * @return      the context with the `drop` calls appended
+ * @since 0.3.1
+ */
+fn emit_region_drops(ctx: LowerCtx, line: u32, col: u32) -> LowerCtx {
+    mut cur = ctx
+    mut i = ctx.region_stack.len
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        cur = ctx_append(cur, void_call_inst("tk_region_drop_u", one_region_arg(ctx.region_stack[i].region_vreg), false, line, col))
     }
     cur
 }
@@ -5951,7 +6025,7 @@ fn build_lambda_lfunc(lam: checker::TLambda, env_layout: LStructLayout, ctx: Low
         flat_symbols = ctx.flat_symbols; ret_type = lam.ret
         has_ret_len_slot = fat_ret; ret_len_slot = if fat_ret { slot_reg } else { 0 }
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = collect_addr_taken_locals(lam.body, ctx.ref_fns, ctx.enums); table = ctx.table
-        region_stack = teko::list::empty(); escaping = teko::list::empty()
+        region_stack = teko::list::empty(); escaping = teko::list::empty(); bracket_depth = 0
     }
     let with_captures = match bind_lambda_captures(ctx0, env_layout, lam.captures, line, col) { LowerCtx as c => c; error as err => return err }
     let done = match lower_fn_body(with_captures, lam.body, ltype_of(lam.ret, ctx.enums), line, col) { LowerCtx as c => c; error as err => return err }
@@ -6048,6 +6122,16 @@ fn lower_binding(ctx: LowerCtx, b: checker::TBinding) -> LowerStmtOut | error {
  * (the region-axis twin of a bare defer replay, §2d) — `out.ctx.region_stack` is the SAME list
  * `ctx.region_stack` was, so the restore is exact.
  *
+ * NESTED escaping binding (`ctx.bracket_depth > 0`, e.g. an escaping `let` INSIDE a match/if arm
+ * that is itself part of an OUTER escaping binding's RHS): skips the leave/enter entirely and just
+ * runs `lower_binding_direct` on `ctx` UNCHANGED. The outer bracket already moved `current` down to
+ * the SAME conveyance anchor for this whole subtree; re-leaving/re-entering here would
+ * `tk_region_enter_u` the FRAME region back in mid-span, so anything the OUTER bracket's RHS still
+ * has left to lower after this nested binding would wrongly land back in the frame — exactly the
+ * shape `tk_region_drop_u` would free out from under the outer binding's own escaping value (the C
+ * route's `dctx.bracket_depth == 0` re-bracket guard, mirrored via `ctx.bracket_depth` here since the
+ * native backend has no `dctx` — see the field's own doc on `LowerCtx`).
+ *
  * @param ctx   the lowering context, positioned to lower `b`'s RHS
  * @param b     the typed binding statement (its LHS name already known to escape)
  * @param name  the bound name (`bind_target_name(b.target)`, computed once by the caller)
@@ -6056,9 +6140,12 @@ fn lower_binding(ctx: LowerCtx, b: checker::TBinding) -> LowerStmtOut | error {
  * @since 0.3.1
  */
 fn lower_binding_conveyed(ctx: LowerCtx, b: checker::TBinding, name: str) -> LowerStmtOut | error {
+    if ctx.bracket_depth > 0 { return lower_binding_direct(ctx, b, name) }
     let left = emit_region_leaves(ctx, b.value.line, b.value.col)
-    let out = match lower_binding_direct(left, b, name) { LowerStmtOut as x => x; error as err => return err }
-    LowerStmtOut { ctx = emit_region_enters(out.ctx, b.value.line, b.value.col); terminated = out.terminated }
+    let marked = ctx_with_bracket_depth(left, 1)
+    let out = match lower_binding_direct(marked, b, name) { LowerStmtOut as x => x; error as err => return err }
+    let entered = emit_region_enters(out.ctx, b.value.line, b.value.col)
+    LowerStmtOut { ctx = ctx_with_bracket_depth(entered, ctx.bracket_depth); terminated = out.terminated }
 }
 
 /**
@@ -6345,19 +6432,25 @@ fn bind_target_name(t: parser::BindTarget) -> str | error {
  *           lowers through `lower_return_fat` instead — its length half is stored through the
  *           hidden out-slot (`bind_ret_len_slot`) before the single-VReg `LRet` carries the ptr
  *           half (call-gordo degrau, #382 N2).
+ * @implNote NP4: `emit_region_drops` runs AFTER the return value is fully computed/boxed (`own_returned_value`
+ *           for a plain return, the store for a fat one) and BEFORE the `LRet` itself — reclaiming the
+ *           frame region's non-escaping scratch on the way out, never the value the `LRet` carries
+ *           (already conveyed to `rr` by the NP3b brackets, or self-contained if a register value).
  */
 fn lower_return(ctx: LowerCtx, r: checker::TReturn) -> LowerStmtOut | error {
     let replayed = match replay_defers(ctx, 0) { LowerCtx as c => c; error as err => return err }
     let left = emit_region_leaves(replayed, r.value.line, r.value.col)
     if !r.has_value {
+        let dropped = emit_region_drops(left, r.value.line, r.value.col)
         let vinst = ret_void_inst(r.value.line, r.value.col)
-        return LowerStmtOut { ctx = ctx_append(left, vinst); terminated = true }
+        return LowerStmtOut { ctx = ctx_append(dropped, vinst); terminated = true }
     }
     if is_fat_type(left.ret_type) { return lower_return_fat(left, r) }
     let lo = match lower_return_value(left, r.value) { Lowered as x => x; error as err => return err }
     let owned = own_returned_value(lo, r.value.line, r.value.col)
+    let dropped = emit_region_drops(owned.ctx, r.value.line, r.value.col)
     let inst = ret_inst(owned.vreg, r.value.line, r.value.col)
-    LowerStmtOut { ctx = ctx_append(owned.ctx, inst); terminated = true }
+    LowerStmtOut { ctx = ctx_append(dropped, inst); terminated = true }
 }
 
 /**
@@ -6369,7 +6462,10 @@ fn lower_return(ctx: LowerCtx, r: checker::TReturn) -> LowerStmtOut | error {
  * an unset slot) when the enclosing body never reserved one (`!ctx.has_ret_len_slot` — a fat-
  * returning LAMBDA, which this degrau does not wire the hidden parameter for).
  *
- * @param ctx  the lowering context (already past the pending-defer replay)
+ * @param ctx  the lowering context (already past the pending-defer replay AND `emit_region_leaves` —
+ *             `lower_fat_expr` therefore runs with `current == rr`, so its builder call's own fresh
+ *             buffer already lands at the conveyance anchor; no separate box exists for the fat axis,
+ *             unlike `own_returned_value`'s aggregate one, so this ordering is load-bearing for NP4)
  * @param r    the return node (`r.has_value` already true)
  * @return     the terminated context
  * @throws     when the enclosing body has no reserved out-slot, or propagated from lowering `e`
@@ -6378,7 +6474,8 @@ fn lower_return_fat(ctx: LowerCtx, r: checker::TReturn) -> LowerStmtOut | error 
     if !ctx.has_ret_len_slot { return error { message = "native backend N1: a fat-typed lambda return is not yet lowered (N2)" } }
     let fo = match lower_fat_expr(ctx, r.value) { LoweredFat as x => x; error as err => return err }
     let stored = ctx_append(fo.ctx, store_inst(fo.ctx.ret_len_slot, fo.len, LType::I64, r.value.line, r.value.col))
-    LowerStmtOut { ctx = ctx_append(stored, ret_inst(fo.ptr, r.value.line, r.value.col)); terminated = true }
+    let dropped = emit_region_drops(stored, r.value.line, r.value.col)
+    LowerStmtOut { ctx = ctx_append(dropped, ret_inst(fo.ptr, r.value.line, r.value.col)); terminated = true }
 }
 
 /**
@@ -7511,7 +7608,7 @@ fn close_loop(outer: LowerCtx, body_done: LowerCtx, exit_block: u32, exit_env: L
         flat_symbols = body_done.flat_symbols; ret_type = body_done.ret_type
         has_ret_len_slot = body_done.has_ret_len_slot; ret_len_slot = body_done.ret_len_slot
         ref_fns = body_done.ref_fns; field_decls = body_done.field_decls; addr_taken = body_done.addr_taken; table = body_done.table
-        region_stack = body_done.region_stack; escaping = body_done.escaping
+        region_stack = body_done.region_stack; escaping = body_done.escaping; bracket_depth = body_done.bracket_depth
     }
 }
 
@@ -10931,16 +11028,95 @@ pub type LowerBlockValueFat = struct { ctx: LowerCtx; terminated: bool; ptr: u32
  */
 fn lower_block_value_fat(ctx: LowerCtx, body: []checker::TStatement) -> LowerBlockValueFat | error {
     if body.len == 0 { return error { message = "native backend N1: empty if-expression arm (internal)" } }
+    let pre = match lower_block_prefix_fat(ctx, body) { LowerStmtOut as x => x; error as err => return err }
+    if pre.terminated { return LowerBlockValueFat { ctx = pre.ctx; terminated = true; ptr = 0; len = 0 } }
+    lower_tail_stmt_fat(pre.ctx, body[body.len - 1])
+}
+
+/**
+ * lower_block_prefix_fat — every statement of a FAT-value block EXCEPT the last (`lower_block_value_fat`'s
+ * own "all but the tail" walk, extracted so `lower_fn_body_fat` can insert the NP4 conveyance leave
+ * BETWEEN the prefix and the tail statement without duplicating this loop).
+ *
+ * @param ctx   the lowering context positioned at the block's first statement
+ * @param body  the block's statement list (checker-guaranteed non-empty)
+ * @return      the context after every statement but the last, and whether one of them already
+ *              terminated the block (a `return`/`break`/`continue` before reaching the tail)
+ * @throws      propagated from lowering any of the prefix statements
+ * @since 0.3.1
+ */
+fn lower_block_prefix_fat(ctx: LowerCtx, body: []checker::TStatement) -> LowerStmtOut | error {
     mut cur = ctx
     mut i: u64 = 0
     loop {
         if i + 1 >= body.len { break }
         let out = match lower_stmt(cur, body[i]) { LowerStmtOut as x => x; error as err => return err }
         cur = out.ctx
-        if out.terminated { return LowerBlockValueFat { ctx = cur; terminated = true; ptr = 0; len = 0 } }
+        if out.terminated { return LowerStmtOut { ctx = cur; terminated = true } }
         i++
     }
-    lower_tail_stmt_fat(cur, body[body.len - 1])
+    LowerStmtOut { ctx = cur; terminated = false }
+}
+
+/**
+ * lower_fn_tail_fat — a fat-returning function/lambda body's OWN trailing-tail statement (NP4): when
+ * it is a value-producing expression-statement (the auto-return case), its construction runs inside a
+ * conveyance BRACKET (`lower_conveyed_tail_expr_stmt_fat` — leave-before/enter-after, Mechanism 1),
+ * so the tail's own fat-producer builder call materializes its fresh buffer at `rr` (the conveyance
+ * anchor) instead of the frame region `lower_fn_body_fat`'s own `emit_region_drops` later reclaims,
+ * while restoring the frame region afterward so the UNCHANGED defer-replay-then-leave-then-drop tail
+ * of `lower_fn_body_fat` keeps running exactly where every other exit edge runs it. This is
+ * load-bearing exactly where `own_returned_value`'s aggregate axis is NOT: the fat axis has no
+ * post-hoc box (`returned_aggregate_box_bytes` answers 0 for it — its ptr "already points at owned
+ * storage" precisely BECAUSE the builder that made it ran under the right region), so the region must
+ * be right BEFORE the value is built, not fixed up after.
+ *
+ * Any OTHER tail shape (`return`/`break`/`continue`, `lower_tail_non_expr_fat`) already performs its
+ * OWN leave through `lower_stmt` (`lower_return`/`lower_return_fat`) and is left BARE — bracketing it
+ * too would double-leave and desync the region stack, so this dispatches on the SAME statement-kind
+ * split `lower_tail_stmt_fat` already makes, and only brackets the expression-statement arm.
+ *
+ * @param ctx   the lowering context, positioned after every non-tail statement
+ * @param s     the tail statement
+ * @param line  the source line to stamp the bracket's own calls with
+ * @param col   the source column to stamp
+ * @return      the fat value outcome
+ * @throws      propagated from lowering the tail statement
+ * @since 0.3.1
+ */
+fn lower_fn_tail_fat(ctx: LowerCtx, s: checker::TStatement, line: u32, col: u32) -> LowerBlockValueFat | error {
+    match s {
+        checker::TExprStmt as es => lower_conveyed_tail_expr_stmt_fat(ctx, es, line, col)
+        _ => lower_tail_non_expr_fat(ctx, s)
+    }
+}
+
+/**
+ * lower_conveyed_tail_expr_stmt_fat — `lower_fn_tail_fat`'s expression-statement arm: bracket
+ * `lower_tail_expr_stmt_fat` in `emit_region_leaves` … `emit_region_enters` (NP4), mirroring
+ * `lower_binding_conveyed`/`lower_assign_conveyed` (NP3b) exactly, one axis over (a function body's
+ * own auto-returned tail vs a named binding/assign) — INCLUDING marking `ctx.bracket_depth = 1` for
+ * the tail's own evaluation, so a NESTED escaping binding inside the tail expression (e.g. a `match`
+ * arm's own `let`) sees `bracket_depth > 0` and skips its own leave/enter rather than re-entering the
+ * frame region mid-span. The re-enter restores the frame region so `lower_fn_body_fat`'s OWN
+ * subsequent defer replay and final leave/drop run under the SAME region-stack shape every other
+ * exit edge sees them under.
+ *
+ * @param ctx  the lowering context, positioned at the tail expression-statement
+ * @param es   the tail expression-statement
+ * @param line the source line to stamp the bracket's own calls with
+ * @param col  the source column to stamp
+ * @return     the fat value outcome, its `ctx` back under the frame region
+ * @throws     propagated from `lower_tail_expr_stmt_fat`
+ * @since 0.3.1
+ */
+fn lower_conveyed_tail_expr_stmt_fat(ctx: LowerCtx, es: checker::TExprStmt, line: u32, col: u32) -> LowerBlockValueFat | error {
+    if ctx.bracket_depth > 0 { return lower_tail_expr_stmt_fat(ctx, es) }
+    let left = emit_region_leaves(ctx, line, col)
+    let marked = ctx_with_bracket_depth(left, 1)
+    let out = match lower_tail_expr_stmt_fat(marked, es) { LowerBlockValueFat as x => x; error as err => return err }
+    let entered = emit_region_enters(out.ctx, line, col)
+    LowerBlockValueFat { ctx = ctx_with_bracket_depth(entered, ctx.bracket_depth); terminated = out.terminated; ptr = out.ptr; len = out.len }
 }
 
 /**
@@ -12930,7 +13106,8 @@ fn lower_assign(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
  * runtime's current region to the conveyance anchor `rr`), run `lower_assign_dispatch` unchanged so
  * its written value materializes at `rr`, then `emit_region_enters` (restore the frame/block region
  * for every statement that follows). Mirrors `lower_binding_conveyed` exactly, one axis over
- * (reassignment vs a fresh binding).
+ * (reassignment vs a fresh binding), INCLUDING its `ctx.bracket_depth > 0` nested-skip guard (see
+ * that function's own doc for why re-bracketing inside an already-open outer bracket is unsound).
  *
  * @param ctx  the lowering context, positioned to lower `a`
  * @param a    the typed assignment (its `a.name` already known to escape)
@@ -12939,9 +13116,12 @@ fn lower_assign(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
  * @since 0.3.1
  */
 fn lower_assign_conveyed(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
+    if ctx.bracket_depth > 0 { return lower_assign_dispatch(ctx, a) }
     let left = emit_region_leaves(ctx, a.value.line, a.value.col)
-    let out = match lower_assign_dispatch(left, a) { LowerStmtOut as x => x; error as err => return err }
-    LowerStmtOut { ctx = emit_region_enters(out.ctx, a.value.line, a.value.col); terminated = out.terminated }
+    let marked = ctx_with_bracket_depth(left, 1)
+    let out = match lower_assign_dispatch(marked, a) { LowerStmtOut as x => x; error as err => return err }
+    let entered = emit_region_enters(out.ctx, a.value.line, a.value.col)
+    LowerStmtOut { ctx = ctx_with_bracket_depth(entered, ctx.bracket_depth); terminated = out.terminated }
 }
 
 /**
@@ -13482,6 +13662,11 @@ fn lower_block(ctx: LowerCtx, body: []checker::TStatement) -> LowerCtx | error {
  * @implNote a fat (`str`/`[]T`) `ctx.ret_type` routes the whole body through `lower_fn_body_fat`
  *           instead — the trailing tail's length half stores through the hidden out-slot exactly
  *           like an explicit fat `return` (call-gordo degrau, #382 N2).
+ * @implNote NP4: `emit_region_drops` runs AFTER `own_returned_value`'s box (or, for a self-
+ *           contained register value, after the tail itself) and BEFORE the `LRet` — the box
+ *           already re-materializes an aggregate at `current == rr` (post-`emit_region_leaves`)
+ *           REGARDLESS of where `tail.vreg`'s own raw bits were computed, so the drop below it
+ *           never touches the value the `LRet` carries.
  */
 fn lower_fn_body(ctx: LowerCtx, body: []checker::TStatement, ret_ty: LType, line: u32, col: u32) -> LowerCtx | error {
     if body.len == 0 || ltype_is_void(ret_ty) { return lower_block(ctx, body) }
@@ -13491,7 +13676,8 @@ fn lower_fn_body(ctx: LowerCtx, body: []checker::TStatement, ret_ty: LType, line
     let replayed = match replay_defers(tail.ctx, 0) { LowerCtx as c => c; error as err => return err }
     let left = emit_region_leaves(replayed, line, col)
     let owned = own_returned_value(Lowered { ctx = left; vreg = tail.vreg }, line, col)
-    ctx_append(owned.ctx, ret_inst(owned.vreg, line, col))
+    let dropped = emit_region_drops(owned.ctx, line, col)
+    ctx_append(dropped, ret_inst(owned.vreg, line, col))
 }
 
 /**
@@ -13510,15 +13696,27 @@ fn lower_fn_body(ctx: LowerCtx, body: []checker::TStatement, ret_ty: LType, line
  *              `LRet`
  * @throws      when the enclosing body has no reserved out-slot, or propagated from lowering the
  *              trailing tail
+ * @implNote NP4: the prefix statements lower under the frame region UNCHANGED
+ *           (`lower_block_prefix_fat`); the tail statement lowers through `lower_fn_tail_fat`, which
+ *           BRACKETS its own construction in leave/enter when it is an expression-statement (there
+ *           is no post-hoc box on the fat axis to fix this up afterward, unlike
+ *           `own_returned_value`'s aggregate one, so the conveyance leave must precede construction),
+ *           then restores the frame region so defer replay below runs under it exactly like every
+ *           other exit edge. The FINAL `emit_region_leaves` + `emit_region_drops`, after the length is
+ *           stored and before the `LRet`, then reclaims the frame's own non-escaping scratch — the
+ *           SAME shape `lower_return`/`lower_fn_body`/`close_function` each end on.
  */
 fn lower_fn_body_fat(ctx: LowerCtx, body: []checker::TStatement, line: u32, col: u32) -> LowerCtx | error {
     if !ctx.has_ret_len_slot { return error { message = "native backend N1: a fat-typed lambda return is not yet lowered (N2)" } }
-    let tail = match lower_block_value_fat(ctx, body) { LowerBlockValueFat as x => x; error as err => return err }
+    let pre = match lower_block_prefix_fat(ctx, body) { LowerStmtOut as x => x; error as err => return err }
+    if pre.terminated { return pre.ctx }
+    let tail = match lower_fn_tail_fat(pre.ctx, body[body.len - 1], line, col) { LowerBlockValueFat as x => x; error as err => return err }
     if tail.terminated { return tail.ctx }
     let replayed = match replay_defers(tail.ctx, 0) { LowerCtx as c => c; error as err => return err }
     let left = emit_region_leaves(replayed, line, col)
     let stored = ctx_append(left, store_inst(left.ret_len_slot, tail.len, LType::I64, line, col))
-    ctx_append(stored, ret_inst(tail.ptr, line, col))
+    let dropped = emit_region_drops(stored, line, col)
+    ctx_append(dropped, ret_inst(tail.ptr, line, col))
 }
 
 /**
@@ -13709,7 +13907,7 @@ pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::li
         flat_symbols = flat_symbols; ret_type = f.return_type
         has_ret_len_slot = fat_ret; ret_len_slot = if fat_ret { slot_reg } else { 0 }
         ref_fns = ref_fns; field_decls = field_decls; addr_taken = collect_addr_taken_locals(f.body, ref_fns, enums); table = table
-        region_stack = teko::list::empty(); escaping = checker::fn_escaping_vars(f)
+        region_stack = teko::list::empty(); escaping = checker::fn_escaping_vars(f); bracket_depth = 0
     }
     let framed = open_frame_region(ctx0, f.line, f.col)
     let done = match lower_fn_body(framed, f.body, ltype_of(f.return_type, enums), f.line, f.col) { LowerCtx as c => c; error as err => return stop_in_function(err, f) }
@@ -13762,12 +13960,16 @@ pub type LoweredFunction = struct { func: LFunc; rodata: []LRodata; lifted: []LF
  *                           any growth the fall-through defer replay made),
  *                           or a NAMED internal error when a pending defer
  *                           fails to lower
+ * @implNote NP4: `emit_region_drops` runs right after `emit_region_leaves`, before the implicit
+ *           `ret_void` — a `void` fall-through carries no return value to protect, so the drop needs
+ *           no ordering relative to a box/store the way the value-returning edges do.
  */
 fn close_function(ctx: LowerCtx, f: checker::TFunction) -> LowerCtx | error {
     if block_terminated(ctx.func, ctx.block_id) { return ctx }
     let replayed = match replay_defers(ctx, 0) { LowerCtx as c => c; error as err => return err }
     let left = emit_region_leaves(replayed, f.line, f.col)
-    ctx_append(left, ret_void_inst(f.line, f.col))
+    let dropped = emit_region_drops(left, f.line, f.col)
+    ctx_append(dropped, ret_void_inst(f.line, f.col))
 }
 
 /** block_terminated — does the block whose id is `block_id` end in a terminator (LRet/
@@ -14912,7 +15114,7 @@ fn lower_virtual_main(loose: []checker::TStatement, layouts: []LStructLayout, en
         flat_symbols = flat_symbols; ret_type = checker::Prim { kind = checker::PrimKind::I32 }
         has_ret_len_slot = false; ret_len_slot = 0
         ref_fns = ref_fns; field_decls = field_decls; addr_taken = collect_addr_taken_locals(loose, ref_fns, enums); table = table
-        region_stack = teko::list::empty(); escaping = teko::list::empty()
+        region_stack = teko::list::empty(); escaping = teko::list::empty(); bracket_depth = 0
     }
     let tail = match lower_main_tail(ctx0, loose) { LowerMainTail as x => x; error as err => return err }
     let closed = match close_virtual_main(tail) { LowerCtx as c => c; error as err => return err }
