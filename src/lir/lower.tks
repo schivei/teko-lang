@@ -10181,9 +10181,75 @@ fn lower_match_stmt(ctx: LowerCtx, e: checker::TExpr, m: checker::TMatchExpr, su
  * @throws  when the subject, any pattern test, or any arm body fails to lower
  */
 fn lower_match(ctx: LowerCtx, e: checker::TExpr, m: checker::TMatchExpr) -> Lowered | error {
-    let so = match lower_match_subject(ctx, m.subject) { MatchSubjOut as x => x; error as err => return err }
+    let so = match lower_match_subject_conveyed(ctx, m) { MatchSubjOut as x => x; error as err => return err }
     if type_is_void(e.type) { return lower_match_stmt(so.ctx, e, m, so.subj) }
     lower_match_value(so.ctx, e, m, so.subj)
+}
+
+/**
+ * match_arm_binds_escaping — does any arm of this match bind (`as x`, or a field-destructure
+ * `Ty { f; g }`) a name that the enclosing function's escape analysis (`ctx.escaping`) proved
+ * OUTLIVES the frame? A bind pattern's `x` ALIASES the subject's payload, and a field pattern's
+ * `f`/`g` alias interior boxed pointers OF that payload — so when any such alias escapes (is stored
+ * into an outer accumulator, returned, or captured), the SUBJECT'S OWN construction must be
+ * conveyed to `rr` too, exactly as an escaping `let x = <subject>` would be. Without this the
+ * subject (a `match CALL { … }` result) materializes in the FRAME region and the arm's escaping
+ * alias dangles the instant `emit_region_drops` reclaims it — the confirmed `assemble_sel` /
+ * `parse_type_body` merged-program UAF (`match asm_lex_and_parse(…) { []Item as items => { one =
+ * items } }`, the parser→checker boundary).
+ *
+ * @param arms      the match's typed arms
+ * @param escaping  the enclosing function's `ctx.escaping` set (`checker::fn_escaping_vars`)
+ * @return          true iff at least one arm binds a name that escapes
+ * @since 0.3.1.0 (native-region-lifetime)
+ */
+fn match_arm_binds_escaping(arms: []checker::TArm, escaping: []str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= arms.len { break }
+        match arms[i].pattern {
+            parser::BindPattern as bp => { if bp.has_binding && contains_str(escaping, bp.binding) { return true } }
+            parser::FieldPattern as fp => {
+                mut j: u64 = 0
+                loop { if j >= fp.fields.len { break }; if contains_str(escaping, fp.fields[j]) { return true }; j++ }
+            }
+            _ => { }
+        }
+        i++
+    }
+    false
+}
+
+/**
+ * lower_match_subject_conveyed — lower the match subject, wrapping it in a conveyance BRACKET
+ * (`emit_region_leaves` … `emit_region_enters`, NP3b) exactly when an arm binds an escaping alias
+ * of it (`match_arm_binds_escaping`) and we are not already inside an outer bracket
+ * (`ctx.bracket_depth == 0`). The bracket detours the runtime's current region down to the
+ * conveyance anchor `rr` for the subject's evaluation ONLY, so a subject that ALLOCATES (a call
+ * result, an aggregate construction) materializes at `rr` and survives the frame drop; the re-enter
+ * restores the frame/block region so the arm bodies keep bump-allocating their own scratch there.
+ * The mirror of `lower_binding_conveyed` for the anonymous "binding" a `match … { X as x => … }`
+ * arm makes of the subject. A subject with no escaping arm alias, or one already under an outer
+ * bracket, is lowered bare (the outer bracket already moved `current` to the same anchor —
+ * re-leaving would wrongly re-enter the frame mid-span). Inert (a leave/enter around a
+ * non-allocating bare-var subject copies nothing) and leak-safe when over-applied, matching the
+ * BLIND discipline `binding_conveys_escape` already uses.
+ *
+ * @param ctx  the lowering context positioned at the match
+ * @param m    the typed match (its `subject` and `arms`)
+ * @return     the advanced context + the subject descriptor, its `ctx` back under the frame region
+ * @throws     propagated from `lower_match_subject`
+ * @since 0.3.1.0 (native-region-lifetime)
+ */
+fn lower_match_subject_conveyed(ctx: LowerCtx, m: checker::TMatchExpr) -> MatchSubjOut | error {
+    if ctx.bracket_depth > 0 || !match_arm_binds_escaping(m.arms, ctx.escaping) {
+        return lower_match_subject(ctx, m.subject)
+    }
+    let left = emit_region_leaves(ctx, m.subject.line, m.subject.col)
+    let marked = ctx_with_bracket_depth(left, 1)
+    let s = match lower_match_subject(marked, m.subject) { MatchSubjOut as x => x; error as err => return err }
+    let entered = emit_region_enters(s.ctx, m.subject.line, m.subject.col)
+    MatchSubjOut { ctx = ctx_with_bracket_depth(entered, ctx.bracket_depth); subj = s.subj }
 }
 
 /** is_fat_type — is `t` a fat-pointer-VALUED type (`str` or `[]T`)? Selects the
@@ -11370,7 +11436,7 @@ fn lower_if_fat(ctx: LowerCtx, e: checker::TExpr, f: checker::TIfExpr) -> Lowere
  * @since 0.3.1.0 (native backend N2 — the match-expression fat producer, degrau 5)
  */
 fn lower_match_fat(ctx: LowerCtx, e: checker::TExpr, m: checker::TMatchExpr) -> LoweredFat | error {
-    let so = match lower_match_subject(ctx, m.subject) { MatchSubjOut as x => x; error as err => return err }
+    let so = match lower_match_subject_conveyed(ctx, m) { MatchSubjOut as x => x; error as err => return err }
     let names = reassigned_scalars_for_match(m.arms, so.ctx.env)
     let indices = merge_scalar_indices(so.ctx.env, names)
     let mergeb = alloc_block(so.ctx.func)
