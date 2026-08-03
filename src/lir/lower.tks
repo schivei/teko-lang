@@ -1079,7 +1079,41 @@ pub type LowerCtx = struct {
      * C route does.
      */
     table: checker::TypeTable
+    /**
+     * region_stack — the stack of OPEN lexical regions (the frame + blocks/loops/arms), outermost
+     * (index 0, the frame) to innermost (the top). `tk_alloc`'s current is the TOP's handle;
+     * `region_current_vreg` reads it, and a `Scope`-tier accumulator's self-append consults this
+     * stack by `decl_name` to route its growth to the DECLARING region (the N-level selector) rather
+     * than the innermost current — else the buffer would die per-iteration in an inner loop (UAF).
+     * Twin of the C route's `regions: []RegionFrame` threaded by parameter (`codegen.tks`); here it
+     * lives on `LowerCtx` because the native backend threads one context. Empty until the frame
+     * opens; unconsumed until NP3.
+     */
+    region_stack: []NativeRegionFrame
+    /**
+     * escaping — the CURRENT function's `checker::fn_escaping_vars(f)` set (`escape.tks`), computed
+     * ONCE in `lower_function` exactly like `addr_taken`. The conservative superset of the names that
+     * escape the frame; consumed by `binding_conveys_escape` to decide which RHS to bracket
+     * (`enter(rr)…leave()`, the move-on-return conveyance) and by `own_returned_value` (the
+     * `leave`-before-the-box). Reads the SAME oracle the C route reads — no native-only analysis, no
+     * possible divergence. Unconsumed until NP3.
+     */
+    escaping: []str
 }
+
+/**
+ * NativeRegionFrame — one lexical region OPEN on the native lowering's scope stack: the VReg holding
+ * the region's u64 handle (returned by `tk_region_new_u`) and, for the N-level selector, the name of
+ * the `Scope`-tier binding declared at the top of this scope whose self-append must grow HERE (not in
+ * the innermost current). Functional twin of the C route's `RegionFrame` (`codegen.tks`), with the
+ * VReg in place of the textual `_tkbr<n>` name — the C-vs-native difference of the port's §2a.
+ *
+ * @param region_vreg  the VReg holding this region's u64 handle (from `tk_region_new_u`)
+ * @param decl_name    the name of the `Scope`-tier accumulator declared in this scope, or "" if none
+ * @param is_loop      is this region a `loop` body (dropped PER ITERATION, not once)?
+ * @since 0.3.1
+ */
+pub type NativeRegionFrame = struct { region_vreg: u32; decl_name: str; is_loop: bool }
 
 /** Lowered — the result of lowering an expression: the updated context + the VReg the
     value lives in. */
@@ -1114,6 +1148,7 @@ fn ctx_with(ctx: LowerCtx, func: LFunc, block_id: u32, env: LEnv) -> LowerCtx {
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
+        region_stack = ctx.region_stack; escaping = ctx.escaping
     }
 }
 
@@ -1135,6 +1170,7 @@ fn ctx_with_rodata(ctx: LowerCtx, rodata: []LRodata) -> LowerCtx {
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
+        region_stack = ctx.region_stack; escaping = ctx.escaping
     }
 }
 
@@ -1156,6 +1192,7 @@ fn ctx_with_lifted(ctx: LowerCtx, lifted: []LFunc) -> LowerCtx {
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
+        region_stack = ctx.region_stack; escaping = ctx.escaping
     }
 }
 
@@ -1177,6 +1214,7 @@ fn ctx_with_defers(ctx: LowerCtx, defers: []checker::TDeferStmt) -> LowerCtx {
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
+        region_stack = ctx.region_stack; escaping = ctx.escaping
     }
 }
 
@@ -1198,6 +1236,7 @@ fn ctx_with_loops(ctx: LowerCtx, loop_targets: []LoopTargets) -> LowerCtx {
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
+        region_stack = ctx.region_stack; escaping = ctx.escaping
     }
 }
 
@@ -5771,6 +5810,7 @@ fn build_lambda_lfunc(lam: checker::TLambda, env_layout: LStructLayout, ctx: Low
         flat_symbols = ctx.flat_symbols; ret_type = lam.ret
         has_ret_len_slot = fat_ret; ret_len_slot = if fat_ret { slot_reg } else { 0 }
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = collect_addr_taken_locals(lam.body, ctx.ref_fns, ctx.enums); table = ctx.table
+        region_stack = teko::list::empty(); escaping = teko::list::empty()
     }
     let with_captures = match bind_lambda_captures(ctx0, env_layout, lam.captures, line, col) { LowerCtx as c => c; error as err => return err }
     let done = match lower_fn_body(with_captures, lam.body, ltype_of(lam.ret, ctx.enums), line, col) { LowerCtx as c => c; error as err => return err }
@@ -7276,6 +7316,7 @@ fn close_loop(outer: LowerCtx, body_done: LowerCtx, exit_block: u32, exit_env: L
         flat_symbols = body_done.flat_symbols; ret_type = body_done.ret_type
         has_ret_len_slot = body_done.has_ret_len_slot; ret_len_slot = body_done.ret_len_slot
         ref_fns = body_done.ref_fns; field_decls = body_done.field_decls; addr_taken = body_done.addr_taken; table = body_done.table
+        region_stack = body_done.region_stack; escaping = body_done.escaping
     }
 }
 
@@ -13432,6 +13473,7 @@ pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::li
         flat_symbols = flat_symbols; ret_type = f.return_type
         has_ret_len_slot = fat_ret; ret_len_slot = if fat_ret { slot_reg } else { 0 }
         ref_fns = ref_fns; field_decls = field_decls; addr_taken = collect_addr_taken_locals(f.body, ref_fns, enums); table = table
+        region_stack = teko::list::empty(); escaping = checker::fn_escaping_vars(f)
     }
     let done = match lower_fn_body(ctx0, f.body, ltype_of(f.return_type, enums), f.line, f.col) { LowerCtx as c => c; error as err => return stop_in_function(err, f) }
     let closed = match close_function(done, f) { LowerCtx as c => c; error as err => return stop_in_function(err, f) }
@@ -14632,6 +14674,7 @@ fn lower_virtual_main(loose: []checker::TStatement, layouts: []LStructLayout, en
         flat_symbols = flat_symbols; ret_type = checker::Prim { kind = checker::PrimKind::I32 }
         has_ret_len_slot = false; ret_len_slot = 0
         ref_fns = ref_fns; field_decls = field_decls; addr_taken = collect_addr_taken_locals(loose, ref_fns, enums); table = table
+        region_stack = teko::list::empty(); escaping = teko::list::empty()
     }
     let tail = match lower_main_tail(ctx0, loose) { LowerMainTail as x => x; error as err => return err }
     let closed = match close_virtual_main(tail) { LowerCtx as c => c; error as err => return err }
