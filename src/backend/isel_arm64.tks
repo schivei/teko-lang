@@ -757,38 +757,24 @@ fn select_inot(ctx0: SelCtx, inst: lir::LInst, a: u32, wide: bool) -> SelCtx {
 }
 
 /**
- * select_i_to_f_bits — the `IToFBits` selection (`teko::f64_from_bits`, degrau 27): one
- * `MFMov` GPR->FPR (arm64's `FMOV Dd, Xn`), a RAW bit crossing into a fresh FPR result — NOT
- * `SCVTF` (`select_itof`'s numeric conversion), which would compute the nearest float to the
- * integer's VALUE instead of reinterpreting its bits. `dbl` is always true: the checker's
- * `f64_from_bits` signature (`checker/scope.tks`) is fixed to `u64 -> f64`, no `f32` form exists.
+ * select_bits_cross — the `IToFBits`/`FToIBits` selection (degrau 27): one `MFMov` raw
+ * GPR/FPR-crossing move (arm64's `FMOV`) into a fresh result VReg — NOT `SCVTF`/`FCVTZS`
+ * (numeric conversion, a different value). `dbl` is always true: `f64_from_bits`/`f64_bits`
+ * (`checker/scope.tks`) are fixed to `u64 <-> f64`, no `f32` form exists.
  *
  * @param SelCtx ctx0  the context to extend
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
- * @param u32 a  the operand VReg (a GPR holding the `u64` bit pattern)
+ * @param u32 a  the operand VReg
+ * @param bool to_float  true for `IToFBits` (GPR operand, fresh FPR result), false for
+ *                       `FToIBits` (FPR operand, fresh GPR result)
  * @return SelCtx  the advanced context
  */
-fn select_i_to_f_bits(ctx0: SelCtx, inst: lir::LInst, a: u32) -> SelCtx {
-    let dst = vreg(inst.result, MRegClass::FPR)
-    let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::FPR, true)
-    selctx_emit(ctx1, fmov_inst(true, dst, vreg(a, MRegClass::GPR)))
-}
-
-/**
- * select_f_to_i_bits — the `FToIBits` selection (`teko::f64_bits`, degrau 27): one `MFMov`
- * FPR->GPR (arm64's `FMOV Xd, Dn`), `select_i_to_f_bits`'s mirror image — a RAW bit crossing, NOT
- * `FCVTZS` (`select_ftoi`'s numeric conversion). `dbl` is always true, the same `f64`-only reason
- * `select_i_to_f_bits` names.
- *
- * @param SelCtx ctx0  the context to extend
- * @param lir::LInst inst  the enclosing instruction (its result VReg)
- * @param u32 a  the operand VReg (an FPR holding the `f64` value)
- * @return SelCtx  the advanced context
- */
-fn select_f_to_i_bits(ctx0: SelCtx, inst: lir::LInst, a: u32) -> SelCtx {
-    let dst = vreg(inst.result, MRegClass::GPR)
-    let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::GPR, true)
-    selctx_emit(ctx1, fmov_inst(true, dst, vreg(a, MRegClass::FPR)))
+fn select_bits_cross(ctx0: SelCtx, inst: lir::LInst, a: u32, to_float: bool) -> SelCtx {
+    let dst_class = if to_float { MRegClass::FPR } else { MRegClass::GPR }
+    let src_class = if to_float { MRegClass::GPR } else { MRegClass::FPR }
+    let dst = vreg(inst.result, dst_class)
+    let ctx1 = selctx_set_vinfo(ctx0, inst.result, dst_class, true)
+    selctx_emit(ctx1, fmov_inst(true, dst, vreg(a, src_class)))
 }
 
 /**
@@ -917,8 +903,8 @@ fn select_un(ctx0: SelCtx, inst: lir::LInst, u: lir::LUn) -> SelCtx {
         lir::LUnOp::IToF => select_itof(ctx0, inst, u.a)
         lir::LUnOp::FToI => select_ftoi(ctx0, inst, u.a, a_info.wide)
         lir::LUnOp::FToF => select_ftof(ctx0, inst, u.a, a_info.wide)
-        lir::LUnOp::IToFBits => select_i_to_f_bits(ctx0, inst, u.a)
-        lir::LUnOp::FToIBits => select_f_to_i_bits(ctx0, inst, u.a)
+        lir::LUnOp::IToFBits => select_bits_cross(ctx0, inst, u.a, true)
+        lir::LUnOp::FToIBits => select_bits_cross(ctx0, inst, u.a, false)
     }
 }
 
