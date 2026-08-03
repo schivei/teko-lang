@@ -1,0 +1,412 @@
+// src/repl/repl.tks   (namespace 'teko::repl') — DT3: `teko repl`.
+//
+// THE ENGINE THIS RUNS ON, STATED UP FRONT (owner ruling — no VM, no C-emission fallback,
+// EITHER). Two execution paths are BANNED for this file, not just deprecated: (1) the
+// tree-walking VM (`src/vm/vm.tks`) — retired outright, owner-ratified issue #524
+// ("100% VM removal", 2026-07-12; `docs/design/vm-retirement.md` M1 names the old REPL as
+// retired WITH it); (2) the C emitter (`codegen::tk_emit_c` + `cc`) as a REPL fallback —
+// also off the table, even though `teko run` still supports it for other callers. This file
+// drives the OWN NATIVE backend exclusively (`TEKO_BACKEND=native`, `Backend::Native` in
+// `src/build/project.tks` — `build_debug_binary`'s `emit_native` branch), and forces that
+// selection itself (`force_native_backend`) rather than trusting the ambient environment.
+// Neither the old VM front-end nor the C-emitting `Value`/`Venv`/`eval_expr` shape from
+// before #524 comes back here — there is no interpreter and no generated-`.c` intermediate
+// in this file, only a spawned `teko run` whose manifest resolves to the own backend.
+//
+// STATUS OF THAT ENGINE (say so plainly — do not paper over it). The own native backend is,
+// as of this writing, being repaired by a separate, parallel effort (a crash fix, in
+// validation) — `src/backend/*`, `src/lir/lower*.tks`, `isel_*`, `regalloc*`, `minst*` are
+// therefore OUT OF SCOPE for this file and untouched by it. Until that fix lands, a `teko
+// run` on the scratch project this file drives may itself fail for reasons that have
+// nothing to do with the REPL's own logic — that is a native-backend gap, not a defect in
+// this design, and this file must not paper over it by falling back to the VM or to C: see
+// this PR's own report for whether an end-to-end session was actually provable at the time
+// of writing, or only the wiring was.
+//
+// THE SHAPE (a "compile-per-line loop", not an interpreter). Each line the user types
+// becomes the tail statement of a real, tiny, on-disk Teko PROJECT (a genuine `<name>.tkp` +
+// `main.tks` — the only compilation-unit shape the language has, "MONOLITH, PROJECTS ONLY",
+// main.tks §2.6), built and run by invoking `teko run` on it as a CHILD PROCESS.
+// `teko::io::read_line` / `teko::io::stdin_eof` (src/runtime/teko_rt.c, tagged "(DT3)" in a
+// comment already there) exist for exactly this read loop.
+//
+// STATE MODEL (no interpreter, no long-lived environment — so "persisting bindings" is an
+// ILLUSION reconstructed by REPLAY). Only two statement shapes are "state": a `let`/`mut`
+// declaration, and an assignment (`x = …`, `x += …`, `x++`, …). Every line the user enters
+// that is ACCEPTED (compiles and runs to a natural, zero exit) AND looks like one of those two
+// shapes is appended to a growing PRELUDE string; every future turn silently rebuilds and
+// reruns prelude + the new line from scratch, which is what makes earlier bindings still be
+// there. A bare expression or a void-returning call (`println(...)`, …) is a ONE-SHOT ACTION:
+// it runs once, right now, and is deliberately NOT added to the prelude — replaying it on
+// every later turn would print it again, and again, forever.
+//
+// AUTO-DISPLAY, WITHOUT A FORMATTER OF ITS OWN. A bare expression is shown automatically by
+// asking the LANGUAGE'S OWN interpolation to do it: the tail is first tried as
+// `teko::io::write_file(<out>, $"{(<line>)}")`, run with output SUPPRESSED
+// (`teko::process::run_quiet` — so a `let`/`mut`/action line's inevitable rejection of this
+// wrapping, e.g. `$"{(let x = 5)}"` is not an expression, never shows a scary diagnostic for
+// perfectly valid input). `$"{…}"` only accepts str/char/bool/byte/error/int/float holes
+// (checker/typer.tks `is_interp_formattable`) — anything else (a struct, a list, …) makes the
+// wrapped attempt fail, and this file falls back to running the RAW line instead (visibly, not
+// quiet) — the value still isn't shown (no reflection exists to print an arbitrary type), but
+// the statement still executes, exactly like a bare `ExprStmt` anywhere else in Teko.
+//
+// KNOWN LIMITATIONS (honest — a v0 prototype, not a ratified DT3 redesign):
+//   - one physical LINE is one statement — no multi-line block statement in a single line;
+//   - the persist/one-shot classifier (`is_state_stmt`) is a TEXTUAL heuristic, not a parser
+//     query — it can misfire on a `=` sitting inside a string literal;
+//   - every turn rebuilds the WHOLE accumulated prelude through the own native backend —
+//     correct, but not fast; this is a debugging tool, not a hot path;
+//   - a compile diagnostic or a runtime panic is shown exactly as `teko run` would show it
+//     (inherited stderr) — this file does not re-parse or prettify it;
+//   - see "STATUS OF THAT ENGINE" above: this file cannot itself fix, or route around, a
+//     native-backend gap.
+
+/**
+ * default_scratch_dir — where the REPL keeps its throwaway project (manifest + generated
+ * `main.tks` + the native debug build `teko run` produces). Lives under `target/`, which is
+ * already gitignored (never a checked-in `.tkp`, per the DT3 rule against new fixtures) —
+ * mirrors `run_project`'s own `target/debug` scratch convention.
+ *
+ * @return  the scratch project's directory, relative to the CURRENT working directory
+ */
+pub fn default_scratch_dir() -> str {
+    "target/repl-session"
+}
+
+/**
+ * repl_manifest_text — the scratch project's whole `.tkp` manifest. `name` is fixed (the REPL
+ * never publishes an artifact anyone runs by that name) and `[artifact]` is omitted — the
+ * default kind is `binary` (manifest.tks `parse_manifest`), which is exactly what `teko run`
+ * needs.
+ *
+ * @return  the manifest file's full text, ready to write verbatim
+ */
+pub fn repl_manifest_text() -> str {
+    "name = \"replsession\"\nsource = \"src\"\n"
+}
+
+/**
+ * ensure_scratch_project — create `dir` (and its empty `src/` — required so `discover` can
+ * list it, even though the REPL never puts a file there; every line lives in the
+ * project-root `main.tks` instead, per "MONOLITH, PROJECTS ONLY") and write the manifest.
+ * Idempotent: `teko::fs::mkdir` treats "already exists" as success, so calling this again in
+ * a later session reuses the same scratch project cleanly.
+ *
+ * @param dir  the scratch project directory to prepare
+ * @return     `null` on success, or the first filesystem error
+ */
+pub fn ensure_scratch_project(dir: str) -> error | null {
+    match teko::fs::mkdir(dir) { error as e => return e; null => { } }
+    match teko::fs::mkdir(teko::str::concat(dir, "/src")) { error as e => return e; null => { } }
+    teko::io::write_file(teko::str::concat(dir, "/repl.tkp"), repl_manifest_text())
+}
+
+/**
+ * display_out_path — the fixed scratch file the auto-display wrapper writes its result to,
+ * and the REPL reads it back from. Cleared before every attempt (`clear_display_out`) so a
+ * stale value from an earlier turn is never mistaken for this turn's.
+ *
+ * @param dir  the scratch project directory
+ * @return     the path of the display-result file inside it
+ */
+pub fn display_out_path(dir: str) -> str {
+    teko::str::concat(dir, "/.repl_out")
+}
+
+/**
+ * clear_display_out — remove the display-result file before an auto-display attempt.
+ * `teko::fs::remove_file` treats "already absent" as success (teko_rt.c), so this is safe to
+ * call unconditionally.
+ *
+ * @param dir  the scratch project directory
+ * @return     `null` on success, or the removal error
+ */
+pub fn clear_display_out(dir: str) -> error | null {
+    teko::fs::remove_file(display_out_path(dir))
+}
+
+/**
+ * candidate_body — assemble the scratch `main.tks` BODY: the persisted prelude (every
+ * earlier accepted `let`/`mut`/assignment, already newline-joined) followed by this turn's
+ * tail statement. An empty prelude yields the tail alone (no leading blank line).
+ *
+ * @param prelude  the accumulated state so far ("" on the very first turn)
+ * @param tail     this turn's trailing statement (the raw line, or a display-wrapped form)
+ * @return         the full `main.tks` source to write
+ */
+pub fn candidate_body(prelude: str, tail: str) -> str {
+    if prelude == "" { tail } else { teko::str::concat(prelude, "\n", tail) }
+}
+
+/**
+ * display_tail — wrap a bare expression so its VALUE is written to `out_path` via the
+ * language's own string interpolation (`$"{…}"`, `checker/typer.tks::is_interp_formattable`)
+ * rather than a bespoke formatter this file would have to maintain. Only str/char/bool/byte/
+ * error/int/float expressions type-check through this wrapper; anything else fails at the
+ * front end and the caller falls back to `line` unwrapped (see the module doc's AUTO-DISPLAY
+ * section).
+ *
+ * @param line      the raw expression text the user typed
+ * @param out_path  the scratch file the write lands in
+ * @return          the generated `teko::io::write_file(…)` statement text
+ */
+pub fn display_tail(line: str, out_path: str) -> str {
+    teko::str::concat("teko::io::write_file(\"", out_path, "\", $\"{(", line, ")}\")")
+}
+
+/**
+ * trim — strip leading/trailing whitespace (`teko::str::is_space`) from `s`. Teko's str
+ * surface has no `trim` builtin (scope.tks stops at slice/contains/ends_with), so the REPL —
+ * the one place that reads free-form human input — grows its own, byte-index based like the
+ * rest of that surface.
+ *
+ * @param s  the string to trim
+ * @return   `s` with its outer whitespace removed (or "" if `s` is all whitespace)
+ */
+pub fn trim(s: str) -> str {
+    let n = teko::str::len(s)
+    mut start: u64 = 0
+    loop {
+        if start >= n { break }
+        if !teko::str::is_space(teko::str::char_at(s, (start to i64))) { break }
+        start = start + 1
+    }
+    mut end = n
+    loop {
+        if end <= start { break }
+        if !teko::str::is_space(teko::str::char_at(s, ((end - 1) to i64))) { break }
+        end = end - 1
+    }
+    teko::str::slice_to(teko::str::slice_from(s, start), end - start)
+}
+
+/**
+ * starts_with — does `s` begin with `prefix`, byte-for-byte? Teko's str surface has
+ * `ends_with` but no `starts_with` (scope.tks); this is that missing counterpart, needed to
+ * recognize `let `/`mut ` at the head of a line.
+ *
+ * @param s       the string to test
+ * @param prefix  the prefix to look for
+ * @return        whether `s` starts with `prefix`
+ */
+pub fn starts_with(s: str, prefix: str) -> bool {
+    let n = teko::str::len(s)
+    let m = teko::str::len(prefix)
+    if n < m { return false }
+    teko::str::slice_to(s, m) == prefix
+}
+
+/**
+ * is_assign_neighbor — is `c` a character that, sitting directly BEFORE a bare `=`, turns it
+ * into a two-character operator (`==`, `!=`, `<=`, `>=`, `+=`, `-=`, `*=`, `/=`, `%=`) rather
+ * than a genuine assignment? Used by `find_bare_equals` to skip those.
+ *
+ * @param c  the character immediately preceding a `=`
+ * @return   whether that pairing is a KNOWN two-char comparison/compound-assign operator
+ */
+fn is_assign_neighbor(c: char) -> bool {
+    c == c'=' || c == c'!' || c == c'<' || c == c'>' || c == c'+' || c == c'-' || c == c'*' || c == c'/' || c == c'%'
+}
+
+/**
+ * find_bare_equals — the index of the first `=` in `s` that is a genuine ASSIGNMENT (not
+ * part of `==`/`!=`/`<=`/`>=`/`+=`/`-=`/`*=`/`/=`/`%=`), or `-1` when there is none. A
+ * TEXTUAL heuristic (module doc "KNOWN LIMITATIONS") feeding `is_state_stmt` — it does not
+ * parse, so a `=` inside a string literal can still fool it.
+ *
+ * @param s  the line to scan
+ * @return   the bare `=`'s index, or `-1`
+ */
+pub fn find_bare_equals(s: str) -> i64 {
+    let n: i64 = (teko::str::len(s) to i64)
+    mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        let c = teko::str::char_at(s, i)
+        if c == c'=' {
+            let prev_pairs = i > 0 && is_assign_neighbor(teko::str::char_at(s, i - 1))
+            let next_is_eq = (i + 1) < n && teko::str::char_at(s, i + 1) == c'='
+            if !prev_pairs && !next_is_eq { return i }
+        }
+        i = i + 1
+    }
+    -1
+}
+
+/**
+ * is_state_stmt — does `line` establish or mutate STATE (so it belongs in the persisted
+ * prelude), as opposed to being a one-shot expression/action? True for a `let `/`mut `
+ * declaration, a compound assignment (`+=`/`-=`/`*=`/`/=`/`%=`), a `++`/`--`, or a bare
+ * assignment (`x = …`, caught by `find_bare_equals`). See the module doc's STATE MODEL.
+ *
+ * @param line  the trimmed line the user entered
+ * @return      whether it should be appended to the prelude on success
+ */
+pub fn is_state_stmt(line: str) -> bool {
+    if starts_with(line, "let ") { return true }
+    if starts_with(line, "mut ") { return true }
+    if teko::str::contains(line, "++") { return true }
+    if teko::str::contains(line, "--") { return true }
+    if teko::str::contains(line, "+=") { return true }
+    if teko::str::contains(line, "-=") { return true }
+    if teko::str::contains(line, "*=") { return true }
+    if teko::str::contains(line, "/=") { return true }
+    if teko::str::contains(line, "%=") { return true }
+    find_bare_equals(line) >= 0
+}
+
+/**
+ * is_quit_command — the REPL's own commands to end the session (`:q`, `:quit`, `:exit`, bare
+ * `quit`/`exit`), checked BEFORE `line` is ever handed to the compiler — none of these are
+ * legal Teko statements, so treating them specially is the only way they'd ever do anything
+ * but fail to parse.
+ *
+ * @param line  the trimmed line the user entered
+ * @return      whether the session should end
+ */
+pub fn is_quit_command(line: str) -> bool {
+    line == ":q" || line == ":quit" || line == ":exit" || line == "quit" || line == "exit"
+}
+
+/**
+ * run_argv — the child argument vector for `<exe> run <dir>`, the native "compile-per-line"
+ * step every turn drives (see the module doc). A tiny pure function so the plumbing is
+ * assertable without actually spawning anything.
+ *
+ * @param exe  the `teko` executable to re-invoke (this process's own `args()[0]`)
+ * @param dir  the scratch project directory
+ * @return     the argv `teko::process::run`/`run_quiet` expects
+ */
+pub fn run_argv(exe: str, dir: str) -> []str {
+    mut argv: []str = teko::list::empty()
+    argv = teko::list::push(argv, exe)
+    argv = teko::list::push(argv, "run")
+    argv = teko::list::push(argv, dir)
+    argv
+}
+
+/** TEKO_BACKEND_ENV_NAME — the environment variable `src/build/project.tks::backend_of` reads
+    to pick a backend; `TEKO_BACKEND_NATIVE_VALUE` is the ONLY value this file ever asks for. */
+const TEKO_BACKEND_ENV_NAME: str = "TEKO_BACKEND"
+
+/** TEKO_BACKEND_NATIVE_VALUE — the own-AOT backend selection (`Backend::Native`,
+    `build_debug_binary`'s `emit_native` branch) — never `"c"` (the retiring C emitter). */
+const TEKO_BACKEND_NATIVE_VALUE: str = "native"
+
+/**
+ * force_native_backend — set `TEKO_BACKEND=native` in THIS process's environment so every
+ * `teko run` child this file spawns (which inherits it via `execvp`, `teko_rt.c::tk_rt_run`)
+ * resolves to the own native backend, never the retiring C emitter — regardless of what the
+ * ambient environment happened to carry. See the module doc's "THE ENGINE THIS RUNS ON".
+ *
+ * @return  `null` on success, or the `setenv` failure (`teko::env::set_var`)
+ */
+pub fn force_native_backend() -> error | null {
+    teko::env::set_var(TEKO_BACKEND_ENV_NAME, TEKO_BACKEND_NATIVE_VALUE)
+}
+
+/**
+ * try_auto_display — attempt the auto-display path for a bare expression: write the
+ * display-wrapped candidate, run it QUIETLY (no terminal noise for the common case where
+ * `line` is not a bare expression at all — a `let`/`mut`/action line just fails this
+ * silently), and on success read back the value it wrote. Returns `null` for anything short
+ * of a clean success (compile/type error, a non-zero exit, or a missing/unreadable result
+ * file) — the caller then falls back to running `line` unwrapped.
+ *
+ * @param exe      the `teko` executable to re-invoke
+ * @param dir      the scratch project directory
+ * @param prelude  the accumulated state so far
+ * @param line     the trimmed line the user entered
+ * @return         the displayed value's text, or `null` when the wrapped attempt did not
+ *                 cleanly succeed
+ */
+pub fn try_auto_display(exe: str, dir: str, prelude: str, line: str) -> str | null {
+    match force_native_backend() { error => return null; null => { } }
+    match clear_display_out(dir) { error => return null; null => { } }
+    let out_path = display_out_path(dir)
+    let body = candidate_body(prelude, display_tail(line, out_path))
+    match teko::io::write_file(teko::str::concat(dir, "/main.tks"), body) { error => return null; null => { } }
+    if teko::process::run_quiet(run_argv(exe, dir)) != 0 { return null }
+    match teko::io::read_file(out_path) {
+        str as s => s
+        error => null
+    }
+}
+
+/**
+ * eval_line — one REPL turn: try the auto-display path first (`try_auto_display`); if that
+ * does not cleanly succeed, run `line` as a plain statement (VISIBLY — its own stdout/stderr,
+ * a compile diagnostic, or a panic all show exactly as a real `teko run` would show them).
+ * On a successful plain run, `is_state_stmt` decides whether `line` joins the prelude for
+ * future turns. See the module doc's STATE MODEL.
+ *
+ * @param exe      the `teko` executable to re-invoke
+ * @param dir      the scratch project directory
+ * @param prelude  the accumulated state so far
+ * @param line     the trimmed line the user entered
+ * @return         the prelude to use for the NEXT turn (unchanged unless this turn both
+ *                 succeeded and looked like state)
+ */
+pub fn eval_line(exe: str, dir: str, prelude: str, line: str) -> str {
+    match try_auto_display(exe, dir, prelude, line) {
+        str as shown => { teko::io::println(shown); return prelude }
+        null => { }
+    }
+    match force_native_backend() {
+        error as e => { teko::io::eprintln(teko::str::concat("teko repl: ", e.message)); return prelude }
+        null => { }
+    }
+    let body = candidate_body(prelude, line)
+    match teko::io::write_file(teko::str::concat(dir, "/main.tks"), body) {
+        error as e => { teko::io::eprintln(teko::str::concat("teko repl: ", e.message)); return prelude }
+        null => { }
+    }
+    if teko::process::run(run_argv(exe, dir)) != 0 { return prelude }
+    if is_state_stmt(line) { return body }
+    prelude
+}
+
+/**
+ * run_cli — the `teko repl` entry (DT3). Forces the own native backend
+ * (`force_native_backend` — never the VM, never the C emitter, see the module doc's "THE
+ * ENGINE THIS RUNS ON"), prepares the scratch project (`ensure_scratch_project` on
+ * `default_scratch_dir()`), prints a one-line banner, then loops: prompt, read one line
+ * (`teko::io::read_line`), stop at real EOF or `is_quit_command`, otherwise hand the line to
+ * `eval_line` and keep whatever prelude it returns for the next turn.
+ *
+ * @param args  the full argv (`args[0]` = the `teko` executable this session re-invokes as a
+ *              child for every turn; `args[1]` = "repl")
+ * @return      0 — a REPL session ending (EOF or `:quit`) is not itself a failure; 1 when the
+ *              scratch project or the backend selection could not be prepared at all
+ */
+pub fn run_cli(args: []str) -> i32 {
+    let exe = args[0]
+    let dir = default_scratch_dir()
+    match force_native_backend() {
+        error as e => {
+            teko::io::eprintln(teko::str::concat("teko repl: cannot select the native backend: ", e.message))
+            return 1
+        }
+        null => { }
+    }
+    match ensure_scratch_project(dir) {
+        error as e => {
+            teko::io::eprintln(teko::str::concat("teko repl: cannot prepare the scratch project: ", e.message))
+            return 1
+        }
+        null => { }
+    }
+    teko::io::println("teko repl — Ctrl+D or :quit to end. let/mut/assignment persist across lines; everything else runs once.")
+    mut prelude = ""
+    loop {
+        teko::io::print("teko> ")
+        let raw = teko::io::read_line()
+        if teko::io::stdin_eof() && raw == "" { break }
+        let line = trim(raw)
+        if line == "" { continue }
+        if is_quit_command(line) { break }
+        prelude = eval_line(exe, dir, prelude, line)
+    }
+    0
+}
