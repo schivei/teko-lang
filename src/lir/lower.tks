@@ -1375,6 +1375,57 @@ fn emit_region_leaves(ctx: LowerCtx, line: u32, col: u32) -> LowerCtx {
     cur
 }
 
+/**
+ * emit_region_enters — the RE-ENTRY mirror of `emit_region_leaves`: re-push EVERY region open on
+ * `ctx.region_stack`, OUTERMOST (the frame, index 0) to INNERMOST (the top) — the same order each
+ * was originally entered in — by re-emitting `tk_region_enter_u(<region_vreg>)` for each. This is
+ * the CLOSE half of a conveyance bracket (`bracket_escaping_binding`/`bracket_escaping_assign`,
+ * NP3b): after `emit_region_leaves` detours the runtime's current-region stack away (down to the
+ * conveyance anchor `rr` — the depth *below* every entry on `ctx.region_stack`) so one RHS's
+ * escaping result materializes at `rr`, this call restores the stack to exactly the depth/contents
+ * `ctx.region_stack` already records, so every SUBSEQUENT statement keeps bump-allocating from the
+ * frame/block it was in. `ctx.region_stack` itself is UNCHANGED by either half — a bracket is a
+ * runtime-only detour around one RHS's evaluation, invisible to the compiler's own open-region
+ * bookkeeping (every entry stays logically open before, during and after the bracket). A no-op
+ * when the stack is empty, symmetric with `emit_region_leaves`.
+ *
+ * @param ctx   the lowering context (its `region_stack`, read but not modified)
+ * @param line  the source line to stamp the emitted calls with
+ * @param col   the source column to stamp
+ * @return      the context with the `enter` calls appended
+ * @since 0.3.1
+ */
+fn emit_region_enters(ctx: LowerCtx, line: u32, col: u32) -> LowerCtx {
+    mut cur = ctx
+    mut i: u64 = 0
+    loop {
+        if i >= ctx.region_stack.len { break }
+        cur = ctx_append(cur, void_call_inst("tk_region_enter_u", one_region_arg(ctx.region_stack[i].region_vreg), false, line, col))
+        i++
+    }
+    cur
+}
+
+/**
+ * binding_conveys_escape — the BLIND rule (0.3.1 move-on-return M2, Mechanism 1 — native dialect,
+ * twin of the C route's homonymous predicate, `codegen.tks`): the RHS of a binding/assign of name
+ * `name` must be wrapped in a conveyance bracket (`emit_region_leaves` … `emit_region_enters`) iff
+ * `name` is in the enclosing function's `fn_escaping_vars` set. It does NOT detect "contains a
+ * call" — bracketing a pure RHS is inert, and sub-detecting would be UAF (a retained call-result
+ * that materializes in the frame/block region a later `tk_region_drop_u` frees before the escaping
+ * use — the `parse_function` pattern, `fechamento-…:29-48`). Over-bracketing is leak-safe (`rr` — the
+ * conveyance anchor — dominates every use). The only residual UAF path is escape-analysis
+ * SUB-marking, the load-bearing precondition M2 already assumes (`escape.tks`: doubt → escaping).
+ *
+ * @param escaping  the function's `ctx.escaping` set (a superset of the truly-escaping names)
+ * @param name      the binding/assign LHS name
+ * @return          true iff the RHS must be bracketed to convey a retained result to `rr`
+ * @since 0.3.1
+ */
+fn binding_conveys_escape(escaping: []str, name: str) -> bool {
+    contains_str(escaping, name)
+}
+
 /** lower_expr — lower a typed expression to LIR, returning the VReg carrying its value.
     Mirrors emit_expr_ctx's dispatch over the subset; every out-of-subset node honest-stops
     with a NAMED error. */
@@ -5969,6 +6020,13 @@ pub fn lower_stmt(ctx: LowerCtx, s: checker::TStatement) -> LowerStmtOut | error
  * first, by `bind_reference_local`: it is the identity axis, not a value, and the ordinary path
  * would copy it.
  *
+ * A binding whose name ESCAPES this function (`binding_conveys_escape`, NP3b) runs its whole RHS
+ * lowering (whichever of the three branches below it takes) inside a conveyance bracket
+ * (`lower_binding_conveyed`): a retained call-result must land at `rr` — the conveyance anchor, root
+ * through NP5, the caller's own region at the NP6 move — not the frame/block region a later
+ * `tk_region_drop_u` reclaims. This is delegated AFTER `bind_target_name`/the `Reference` check, so
+ * a destructuring target's own honest-stop and an identity `ref` binding are unaffected.
+ *
  * @param LowerCtx ctx  the lowering context to append the binding's instructions into
  * @param checker::TBinding b  the typed binding statement
  * @return LowerStmtOut | error  the context with the name bound, or an honest stop
@@ -5978,6 +6036,52 @@ pub fn lower_stmt(ctx: LowerCtx, s: checker::TStatement) -> LowerStmtOut | error
 fn lower_binding(ctx: LowerCtx, b: checker::TBinding) -> LowerStmtOut | error {
     let name = match bind_target_name(b.target) { str as s => s; error as err => return err }
     match b.bound { checker::Reference => return bind_reference_local(ctx, b, name); _ => { } }
+    if binding_conveys_escape(ctx.escaping, name) { return lower_binding_conveyed(ctx, b, name) }
+    lower_binding_direct(ctx, b, name)
+}
+
+/**
+ * lower_binding_conveyed — `lower_binding`'s escaping arm (NP3b): `emit_region_leaves` (detour the
+ * runtime's current region to the conveyance anchor `rr`), run `lower_binding_direct` unchanged so
+ * ITS call-result(s) materialize at `rr`, then `emit_region_enters` (restore the frame/block region
+ * for every statement that follows). `ctx.region_stack` is read but never rewritten by either half
+ * (the region-axis twin of a bare defer replay, §2d) — `out.ctx.region_stack` is the SAME list
+ * `ctx.region_stack` was, so the restore is exact.
+ *
+ * @param ctx   the lowering context, positioned to lower `b`'s RHS
+ * @param b     the typed binding statement (its LHS name already known to escape)
+ * @param name  the bound name (`bind_target_name(b.target)`, computed once by the caller)
+ * @return      the context with the name bound through the bracket, or an honest stop
+ * @throws      propagated from `lower_binding_direct`
+ * @since 0.3.1
+ */
+fn lower_binding_conveyed(ctx: LowerCtx, b: checker::TBinding, name: str) -> LowerStmtOut | error {
+    let left = emit_region_leaves(ctx, b.value.line, b.value.col)
+    let out = match lower_binding_direct(left, b, name) { LowerStmtOut as x => x; error as err => return err }
+    LowerStmtOut { ctx = emit_region_enters(out.ctx, b.value.line, b.value.col); terminated = out.terminated }
+}
+
+/**
+ * lower_binding_direct — `lower_binding`'s own body, minus the `Reference`/conveyance dispatch
+ * (extracted so the bracket in `lower_binding_conveyed` can run it unchanged, NP3b): a str/slice-
+ * typed binding (A1-4, #382) lowers `e` through the FAT path and binds (ptr, len); every other
+ * binding lowers `e` through `lower_value_into_type` (coercion-aware, C6/C7 null-union) and binds
+ * the single result VReg plainly.
+ *
+ * A MUTABLE fat binding (`mut xs: []T = …`) binds a 16-byte FRAME SLOT instead of the VReg pair
+ * (`lenv_bind_fat_slot`): only memory survives the merge a later reassignment sits behind
+ * (list-builtin degrau). A `mut` SCALAR binding whose ADDRESS escapes into a `ref<T>` call
+ * argument SOMEWHERE in this function (`ctx.addr_taken`, `collect_addr_taken_locals` — 0.3.1.0
+ * degrau 18) binds a one-word FRAME SLOT the same way, for the same reason: only memory survives
+ * a write made through the escaped handle.
+ *
+ * @param LowerCtx ctx  the lowering context to append the binding's instructions into
+ * @param checker::TBinding b  the typed binding statement (its `bound` never `Reference`)
+ * @param name  the bound name (`bind_target_name(b.target)`, computed once by the caller)
+ * @return LowerStmtOut | error  the context with the name bound, or an honest stop
+ * @throws  propagated from lowering the value
+ */
+fn lower_binding_direct(ctx: LowerCtx, b: checker::TBinding, name: str) -> LowerStmtOut | error {
     if is_fat_type(b.bound) {
         let fo = match lower_fat_expr(ctx, b.value) { LoweredFat as x => x; error as err => return err }
         if b.kind == parser::BindKind::Mut { return bind_mutable_fat(fo, name, b.value.line, b.value.col) }
@@ -12803,7 +12907,13 @@ fn plain_op_of_compound(op: lexer::TokenKind) -> lexer::TokenKind | error {
 /**
  * lower_assign — a TAssign, by target shape: Simple (a local rebind), Field (a struct-field write
  * via memory), RefDeref (write THROUGH a `Ref<T>` handle) or Index (a slice ELEMENT write,
- * `lower_assign_index`).
+ * `lower_assign_index`). An assignment whose `a.name` ESCAPES this function (`binding_conveys_escape`,
+ * NP3b — the C route's `cg_conveys_escape_deep` twin) runs the whole dispatch inside a conveyance
+ * bracket (`lower_assign_conveyed`): a Field/Index/RefDeref write's OWN receiver address needs no
+ * bracket (it is a plain STORE through an already-computed address), but the VALUE it writes may be a
+ * freshly built str/slice/struct whose backing bytes must land at `rr`, not the frame/block region a
+ * later `tk_region_drop_u` reclaims — exactly the same hazard a `Simple` rebind has. Bracketing the
+ * WHOLE dispatch (uniformly, like the C route) covers every kind with one rule.
  *
  * @param ctx  the lowering context
  * @param a    the typed assignment
@@ -12811,6 +12921,39 @@ fn plain_op_of_compound(op: lexer::TokenKind) -> lexer::TokenKind | error {
  * @throws     propagated from the arm the target shape selects
  */
 fn lower_assign(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
+    if binding_conveys_escape(ctx.escaping, a.name) { return lower_assign_conveyed(ctx, a) }
+    lower_assign_dispatch(ctx, a)
+}
+
+/**
+ * lower_assign_conveyed — `lower_assign`'s escaping arm (NP3b): `emit_region_leaves` (detour the
+ * runtime's current region to the conveyance anchor `rr`), run `lower_assign_dispatch` unchanged so
+ * its written value materializes at `rr`, then `emit_region_enters` (restore the frame/block region
+ * for every statement that follows). Mirrors `lower_binding_conveyed` exactly, one axis over
+ * (reassignment vs a fresh binding).
+ *
+ * @param ctx  the lowering context, positioned to lower `a`
+ * @param a    the typed assignment (its `a.name` already known to escape)
+ * @return     the context with the assignment applied through the bracket, or an honest stop
+ * @throws     propagated from `lower_assign_dispatch`
+ * @since 0.3.1
+ */
+fn lower_assign_conveyed(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
+    let left = emit_region_leaves(ctx, a.value.line, a.value.col)
+    let out = match lower_assign_dispatch(left, a) { LowerStmtOut as x => x; error as err => return err }
+    LowerStmtOut { ctx = emit_region_enters(out.ctx, a.value.line, a.value.col); terminated = out.terminated }
+}
+
+/**
+ * lower_assign_dispatch — `lower_assign`'s own by-target-shape dispatch, extracted so the bracket
+ * in `lower_assign_conveyed` can run it unchanged (NP3b).
+ *
+ * @param ctx  the lowering context
+ * @param a    the typed assignment
+ * @return     the context with the assignment's instructions appended, or an honest stop
+ * @throws     propagated from the arm the target shape selects
+ */
+fn lower_assign_dispatch(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
     match a.kind {
         parser::AssignKind::Simple => lower_assign_simple(ctx, a)
         parser::AssignKind::Field => lower_assign_field(ctx, a)
