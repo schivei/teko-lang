@@ -76,6 +76,10 @@ if cmd == "build" || cmd == "run" || cmd == "test" {
         teko::io::eprintln("teko: --backend was removed; select the backend with the TEKO_BACKEND environment variable instead (e.g. TEKO_BACKEND=native)")
         teko::exit(2)
     }
+    if teko::build::has_bare_g_flag(args, 2) {
+        teko::io::eprintln(teko::build::bare_g_rejected_message())
+        teko::exit(2)
+    }
     // the project + optional `-o <dir>` (default "bin") — scanned from arg index 2.
     let out_dir = teko::build::out_dir_of(args, 2)
     mut arg = teko::build::project_arg_of(args, 2)
@@ -94,9 +98,17 @@ if cmd == "build" || cmd == "run" || cmd == "test" {
         let no_verify = teko::build::no_verify_of(args)
         let opt = teko::build::opt_level_of(args)
         let no_tty = teko::build::no_tty_of(args)
-        let code = teko::build::compile_project_g(dir, out_dir, cov, no_verify, opt, no_tty, bk, cov_val)
-        teko::build::build_clock_report(build_clock)
-        teko::exit(code)
+        match teko::build::debug_info_of(args) {
+            teko::build::DebugInfo as debug => {
+                let code = teko::build::compile_project_g(dir, out_dir, cov, no_verify, opt, no_tty, bk, cov_val, debug)
+                teko::build::build_clock_report(build_clock)
+                teko::exit(code)
+            }
+            error as e => {
+                teko::io::eprintln(e.message)
+                teko::exit(2)
+            }
+        }
     }
     if cmd == "run" {
         teko::exit(teko::build::run_project(dir, bk))
@@ -110,6 +122,10 @@ if teko::build::has_backend_flag(args, 1) {
     teko::io::eprintln("teko: --backend was removed; select the backend with the TEKO_BACKEND environment variable instead (e.g. TEKO_BACKEND=native)")
     teko::exit(2)
 }
+if teko::build::has_bare_g_flag(args, 1) {
+    teko::io::eprintln(teko::build::bare_g_rejected_message())
+    teko::exit(2)
+}
 if teko::strings::ends_with(cmd, ".tks") {
     teko::io::eprintln("teko: teko compiles projects: pass a project directory or .tkp (a lone .tks is not a unit)")
     teko::exit(2)
@@ -120,6 +136,14 @@ if bare_proj == "" {
     teko::io::eprintln("teko compiles projects: pass a project directory or .tkp")
     teko::exit(2)
 }
-let bare_code = teko::build::compile_project_g(teko::build::project_dir_of(bare_proj), bare_out, teko::build::coverage_of(args), teko::build::no_verify_of(args), teko::build::opt_level_of(args), teko::build::no_tty_of(args), teko::build::backend_of(), teko::build::cov_validation_of(args))
-teko::build::build_clock_report(build_clock)
-teko::exit(bare_code)
+match teko::build::debug_info_of(args) {
+    teko::build::DebugInfo as bare_debug => {
+        let bare_code = teko::build::compile_project_g(teko::build::project_dir_of(bare_proj), bare_out, teko::build::coverage_of(args), teko::build::no_verify_of(args), teko::build::opt_level_of(args), teko::build::no_tty_of(args), teko::build::backend_of(), teko::build::cov_validation_of(args), bare_debug)
+        teko::build::build_clock_report(build_clock)
+        teko::exit(bare_code)
+    }
+    error as e => {
+        teko::io::eprintln(e.message)
+        teko::exit(2)
+    }
+}
