@@ -23,12 +23,12 @@ fn mini_unit() -> DwCompileUnit {
  */
 fn mini_line_rows() -> []DwLineRow {
     [
-        DwLineRow { pc_advance = 0 to u64; line = 29 to u32 },
-        DwLineRow { pc_advance = 10 to u64; line = 30 to u32 },
-        DwLineRow { pc_advance = 9 to u64; line = 31 to u32 },
-        DwLineRow { pc_advance = 5 to u64; line = 40 to u32 },
-        DwLineRow { pc_advance = 8 to u64; line = 41 to u32 },
-        DwLineRow { pc_advance = 18 to u64; line = 42 to u32 }
+        DwLineRow { pc_advance = 0 to u64; line = 29 to u32; file = 1 },
+        DwLineRow { pc_advance = 10 to u64; line = 30 to u32; file = 1 },
+        DwLineRow { pc_advance = 9 to u64; line = 31 to u32; file = 1 },
+        DwLineRow { pc_advance = 5 to u64; line = 40 to u32; file = 1 },
+        DwLineRow { pc_advance = 8 to u64; line = 41 to u32; file = 1 },
+        DwLineRow { pc_advance = 18 to u64; line = 42 to u32; file = 1 }
     ]
 }
 
@@ -56,6 +56,26 @@ fn first_mismatch(got: []byte, want: []u64) -> i64 {
         i = i + 1
     }
     -1
+}
+
+/**
+ * contains_pair — whether the two-byte sequence `a` then `b` appears anywhere in `hay`. Used to
+ * detect a specific line opcode + operand (e.g. DW_LNS_set_file 0x04 followed by file index 0x02)
+ * without pinning a whole golden.
+ *
+ * @param hay  the bytes to scan
+ * @param a    the first byte of the pair
+ * @param b    the second byte of the pair
+ * @return     true when some index i has hay[i] == a and hay[i+1] == b
+ */
+fn contains_pair(hay: []byte, a: u64, b: u64) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i + 1 >= hay.len { break }
+        if (hay[i] to u64) == a && (hay[i + 1] to u64) == b { return true }
+        i = i + 1
+    }
+    false
 }
 
 /**
@@ -139,11 +159,54 @@ fn dwarf_info_matches_golden() {
  * exactly, and records the single set_address relocation at 0x2e.
  */
 fn dwarf_line_matches_golden() {
-    let sec = debug_line("hello.tks", "add", mini_line_rows(), 9 to u64)
+    let sec = debug_line(["hello.tks"], "add", mini_line_rows(), 9 to u64)
     teko::assert::eq_i64(first_mismatch(sec.bytes, golden_line()), -1)
     teko::assert::len_eq(sec.relocs.len, 1 to u64)
     teko::assert::eq_u64(sec.relocs[0].offset, 0x2e to u64)
     teko::assert::eq_str(sec.relocs[0].symbol, "add")
+}
+
+/**
+ * two_file_rows — two rows across two files: line 5 in file 1 at address 0, then line 8 in file 2
+ * after a 4-byte advance. The second row's file differs, forcing a set_file opcode.
+ *
+ * @return  the two-file line rows
+ */
+fn two_file_rows() -> []DwLineRow {
+    [
+        DwLineRow { pc_advance = 0 to u64; line = 5 to u32; file = 1 },
+        DwLineRow { pc_advance = 4 to u64; line = 8 to u32; file = 2 }
+    ]
+}
+
+/**
+ * one_file_rows — the same two rows as `two_file_rows` but with both in file 1, so no set_file is
+ * emitted. The structural twin that isolates the set_file opcode and the extra file entry.
+ *
+ * @return  the single-file line rows
+ */
+fn one_file_rows() -> []DwLineRow {
+    [
+        DwLineRow { pc_advance = 0 to u64; line = 5 to u32; file = 1 },
+        DwLineRow { pc_advance = 4 to u64; line = 8 to u32; file = 1 }
+    ]
+}
+
+#test
+/**
+ * dwarf_line_multifile_emits_set_file — a row whose file differs from the running file register
+ * emits DW_LNS_set_file (0x04) with the ULEB file index (0x02), and the header gains a second
+ * file_names entry. Proved structurally against the single-file twin: the two-file section is
+ * exactly 11 bytes longer (a 9-byte second file entry "b.tks\0" + three 0-ULEBs, plus the 2-byte
+ * set_file opcode), and only the two-file program carries the set_file pair. The single-file twin
+ * carrying no set_file is the negative half that makes this a real proof, not a coincidence.
+ */
+fn dwarf_line_multifile_emits_set_file() {
+    let multi = debug_line(["a.tks", "b.tks"], "f", two_file_rows(), 4 to u64)
+    let single = debug_line(["a.tks"], "f", one_file_rows(), 4 to u64)
+    teko::assert::eq_u64(multi.bytes.len, single.bytes.len + 11 to u64)
+    teko::assert::is_true(contains_pair(multi.bytes, 0x04 to u64, 0x02 to u64))
+    teko::assert::is_true(!contains_pair(single.bytes, 0x04 to u64, 0x02 to u64))
 }
 
 #test
