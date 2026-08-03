@@ -5434,3 +5434,95 @@ fn f_d29_float_memory_widths() -> i64 {
     if teko::ftoa(ds[1] + ss[2] to f64) != "0.20000000149011612" { return 13 }
     0
 }
+
+/**
+ * GvfFn — the first case of the `GvfDecl` variant: a struct payload WIDER than a variant wrapper's
+ * inline area, so a slot holding it is held BY ADDRESS. Its own first field is a `str`, whose
+ * pointer word is exactly what a mis-wrapped variant read reports as a (garbage) tag.
+ */
+type GvfFn = struct {
+    /** an identifying name, wide enough to make the payload by-address. */
+    name: str
+    /** a payload word. */
+    a: i64
+}
+
+/**
+ * GvfTy — the second `GvfDecl` case, structurally distinct from `GvfFn` so a `match` that read the
+ * wrong tag would answer the wrong arm.
+ */
+type GvfTy = struct {
+    /** an identifying name. */
+    name: str
+    /** a payload word. */
+    b: i64
+}
+
+/**
+ * GvfCo — the third `GvfDecl` case, completing a three-arm exhaustive `match`.
+ */
+type GvfCo = struct {
+    /** an identifying name. */
+    name: str
+    /** a payload word. */
+    c: i64
+}
+
+/**
+ * GvfDecl — a declared variant whose cases are aggregates held BY ADDRESS
+ * (`NATIVE-AGG-SLICE-BY-ADDRESS`): a slot holding a `GvfDecl` carries the address of a `{tag,
+ * payload}` wrapper, and a `match` reads the tag through that address.
+ */
+type GvfDecl = variant GvfFn | GvfTy | GvfCo
+
+/**
+ * GvfParsed — a GENERIC container whose payload field `node` is a type PARAMETER. Instantiated at
+ * `GvfDecl` (a variant), the stamped instance `GvfParsed__g__GvfDecl` loses the field's declaring
+ * namespace, so the native backend's field-type resolution used to answer "no declared type" and
+ * store `node` UNWRAPPED — the exact `parser::Parsed<parser::Decl>` shape the self-host parser
+ * builds, whose corrupted tag drove `build::assemble_sel` into the dead exhaustiveness edge.
+ */
+type GvfParsed<T> = struct {
+    /** the parsed node — a type-parameter field, a variant at this instantiation. */
+    node: T
+    /** a resume cursor, the non-variant field proving the struct itself is well-formed. */
+    next: u64
+}
+
+/**
+ * gvf_make — a `GvfDecl` case selected by `k`, returned inside a generic `GvfParsed<GvfDecl>`. The
+ * variant value flows through the generic field `node`, the placement the native backend must WRAP
+ * into a tag+payload image.
+ *
+ * @param k  1 for `GvfFn`, 2 for `GvfTy`, anything else for `GvfCo`
+ * @return   a `GvfParsed<GvfDecl>` whose `node` holds the selected case
+ */
+fn gvf_make(k: i64) -> GvfParsed<GvfDecl> {
+    if k == 1 { return GvfParsed<GvfDecl> { node = GvfFn { name = "fn"; a = 1 }; next = 1 } }
+    if k == 2 { return GvfParsed<GvfDecl> { node = GvfTy { name = "ty"; b = 2 }; next = 2 } }
+    GvfParsed<GvfDecl> { node = GvfCo { name = "co"; c = 3 }; next = 3 }
+}
+
+/**
+ * f_generic_variant_field — reads the variant `node` back out of a generic `GvfParsed<GvfDecl>` and
+ * `match`es it, folding one digit per case into a base-10 accumulator. A native backend that stored
+ * `node` unwrapped reads a garbage (pointer) tag, takes no arm, and crashes on the dead edge; the
+ * correct answer is the digits `1`, `2`, `3` in order.
+ *
+ * @return 123 — `GvfFn`→1, `GvfTy`→2, `GvfCo`→3, in construction order
+ */
+fn f_generic_variant_field() -> i64 {
+    mut acc: i64 = 0
+    mut k: i64 = 1
+    loop {
+        if k > 3 { break }
+        let p = gvf_make(k)
+        acc = acc * 10 + match p.node {
+            GvfFn as f => 1
+            GvfTy as t => 2
+            GvfCo as c => 3
+        }
+        k = k + 1
+    }
+    acc
+}
