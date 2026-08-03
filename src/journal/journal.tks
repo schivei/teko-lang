@@ -482,7 +482,7 @@ pub fn append_raw(path: str, line: str) -> null | error {
         return error { message = teko::str::concat("teko::journal::append_raw: could not open ", path) }
     }
     let rc = append_seg_rt(teko::str::concat(line, "\n"), fd)
-    let _ = close_fd_rt(fd)
+    _ = close_fd_rt(fd)
     if rc != 0 {
         return error { message = teko::str::concat("teko::journal::append_raw: write failed on ", path) }
     }
@@ -955,15 +955,17 @@ fn sweep_under(base: str, keep: str) -> u64 {
 pub fn sweep(keep: str) -> u64 { sweep_under(TKRUN_DIR, keep) }
 
 /**
- * ===== WIRING (owner order, 0.3.1): the per-test/per-row hooks the emitters and runners call =====
+ * close_fd_rt — the runtime symbol `tk_rt_close_fd` wraps (already bound once for
+ * `teko::process`'s own pipes, `close_fd_raw`; rebinding the same existing symbol here needs no new
+ * C). Kept private so every hook below goes through it the same way.
  *
- * Everything above this line is the library — correct, unit-tested, and (until this section) never
- * called by anything but its own tests. What follows are the CALL SITES: `codegen.tks`'s emitted
- * per-`#test` C hooks (`note_test_begin`/`note_test_ok`/`note_test_panicked`/`note_test_exited`,
- * writer `s<shard>`) and the regression runner's per-row hooks (`note_row_begin`/`_ok`/`_fail`/
- * `_skip`, writer `r0` — the regression tier is not itself sharded into multiple journal writers
- * today, so one writer covers the whole tier; `run_pool`'s OWN process-per-row parallelism is
- * orthogonal and unaffected).
+ * ===== WIRING STARTS HERE (owner order, 0.3.1) ===== Everything ABOVE this point is the library —
+ * correct, unit-tested, and (until this section) never called by anything but its own tests. What
+ * follows are the CALL SITES: `codegen.tks`'s emitted per-`#test` C hooks (`note_test_begin`/
+ * `note_test_ok`/`note_test_panicked`/`note_test_exited`, writer `s<shard>`) and the regression
+ * runner's per-row hooks (`note_row_begin`/`_ok`/`_fail`/`_skip`, writer `r0` — the regression tier
+ * is not itself sharded into multiple journal writers today, so one writer covers the whole tier;
+ * `run_pool`'s OWN process-per-row parallelism is orthogonal and unaffected).
  *
  * EACH HOOK OPENS ITS OWN SEGMENT FD, APPENDS ONE RECORD, AND CLOSES IT — never a cached handle
  * across calls. Teko carries no top-level mutable state (grep this whole corpus for a top-level
@@ -971,9 +973,9 @@ pub fn sweep(keep: str) -> u64 { sweep_under(TKRUN_DIR, keep) }
  * per-test facility in this corpus relies on (the capture channel `tk_test_begin` opens, the
  * per-task coverage sinks) lives in the C runtime's per-task fields — exactly the door this wiring
  * may not walk through (`teko_rt.c` is the frozen twin here). Opening and closing per call is the
- * honest cost of doing this in pure Teko instead: `tk_rt_close_fd` already exists for another
- * caller's pipes (`teko::process::close_fd_raw`), so binding it again here adds no new C, and it is
- * what keeps a 1000-plus-test suite from leaking a file descriptor per test.
+ * honest cost of doing this in pure Teko instead: THIS function already exists for another caller's
+ * pipes (`teko::process::close_fd_raw`), so binding it again here adds no new C, and it is what
+ * keeps a 1000-plus-test suite from leaking a file descriptor per test.
  *
  * BEST-EFFORT, ON PURPOSE. §4's "pegajosa" failure (a journal that cannot be written fails the
  * PROCESS) is the right law for `journal::append`'s OWN unit tests, which exist to exercise that
@@ -981,12 +983,6 @@ pub fn sweep(keep: str) -> u64 { sweep_under(TKRUN_DIR, keep) }
  * in every Teko program: a full disk must not turn "the suite failed" into "the suite could not even
  * observe itself," so every hook below swallows a `journal::open`/`append` failure in silence and
  * lets the test/row run exactly as it would have before this wiring existed.
- */
-
-/**
- * close_fd_rt — the runtime symbol `tk_rt_close_fd` wraps (already bound once for
- * `teko::process`'s own pipes, `close_fd_raw`; rebinding the same existing symbol here needs no new
- * C). Kept private so every hook below goes through it the same way.
  *
  * @param fd  the descriptor a hook's own `open_seg_rt` opened
  * @return    0 on success, or the errno
@@ -1053,7 +1049,7 @@ fn note_open_append_close(writer: str, kind: str, payload: str) {
     match open(writer) {
         Journal as j => {
             match append(j, kind, payload) { error => { }; null => { } }
-            let _ = close_fd_rt(j.seg)
+            _ = close_fd_rt(j.seg)
         }
         error => { }
     }
