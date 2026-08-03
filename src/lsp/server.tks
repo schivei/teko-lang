@@ -154,10 +154,12 @@ fn error_response(id: json::JsonValue, code: i64, message: str) -> json::JsonVal
 }
 
 /**
- * initialize_result — the `initialize` response. Capabilities are HONEST: crumbs L1-L2 deliver
- * only the lifecycle (transport + `initialize`), so NO navigation provider is announced yet —
- * advertising a `definitionProvider` the server cannot answer would mislead every client. The
- * providers join `capabilities` as L4-L7 land. `serverInfo` names the server and its build.
+ * initialize_result — the `initialize` response. Capabilities are HONEST: crumb A delivers the
+ * lifecycle PLUS live diagnostics, so `textDocumentSync` is announced as FULL (1) — the client then
+ * pushes the whole buffer on every `didOpen`/`didChange`, which is exactly what `diagnose_document`
+ * re-checks. NO navigation provider is announced yet — advertising a `definitionProvider` the server
+ * cannot answer would mislead every client; those join `capabilities` as hover/definition land.
+ * `serverInfo` names the server and its build.
  *
  * @param id  the request id echoed back
  * @return    the `initialize` response DOM
@@ -165,40 +167,227 @@ fn error_response(id: json::JsonValue, code: i64, message: str) -> json::JsonVal
  */
 fn initialize_result(id: json::JsonValue) -> json::JsonValue {
     let server_info = jobj(["name", "version"], [jstr("teko"), jstr(teko::env::version())])
-    let capabilities = jobj(teko::list::empty(), teko::list::empty())
+    let capabilities = jobj(["textDocumentSync"], [jnum(1.0)])
     let result = jobj(["capabilities", "serverInfo"], [capabilities, server_info])
     response(id, result)
 }
 
 /**
- * handle_request — dispatch ONE LSP message to its response, or `null` when the message needs no
- * answer (a notification, or an unknown notification). Covers the lifecycle: `initialize` →
- * capabilities; `shutdown` → a null result; `initialized` / `exit` → no response. An unknown
+ * DocRef — a document identity paired with its current buffer, as read off a `didOpen`/`didChange`
+ * notification: the `uri` the diagnostics are published against and the `text` the front-end checks.
+ * Under FULL text sync (the announced capability) both notifications carry the whole buffer, so the
+ * server never reconstructs it from deltas.
+ *
+ * @since 0.3.1.0 (LSP crumb A)
+ */
+type DocRef = struct {
+    /** the document URI the diagnostics are published against. */
+    uri: str
+    /** the document's full current text. */
+    text: str
+}
+
+/**
+ * str_field — the string value of `key` in `v` when `v` is a JSON object holding a string there,
+ * else `null`. The one accessor the document-notification readers use to pull `uri`/`text` fields.
+ *
+ * @param v    the JSON value (expected to be an object)
+ * @param key  the field name
+ * @return     the field's string, or `null` when absent / not a string / `v` not an object
+ * @since 0.3.1.0 (LSP crumb A)
+ */
+fn str_field(v: json::JsonValue, key: str) -> str | null {
+    match object_field(v, key) {
+        json::JsonValue as fv => as_str(fv)
+        null => null
+    }
+}
+
+/**
+ * text_document_of — the `params.textDocument` object of a notification, or `null` when the message
+ * carries no such object. The shared first hop of every document-notification reader.
+ *
+ * @param req  the notification DOM
+ * @return     the `textDocument` object, or `null`
+ * @since 0.3.1.0 (LSP crumb A)
+ */
+fn text_document_of(req: json::JsonValue) -> json::JsonValue | null {
+    let params = match object_field(req, "params") { json::JsonValue as v => v; null => return null }
+    object_field(params, "textDocument")
+}
+
+/**
+ * open_doc — the `DocRef` of a `textDocument/didOpen` notification: `params.textDocument.uri` and
+ * `params.textDocument.text`. Returns `null` when either field is missing (a malformed open, which
+ * the dispatcher then simply does not answer).
+ *
+ * @param req  the `didOpen` DOM
+ * @return     the opened document, or `null`
+ * @since 0.3.1.0 (LSP crumb A)
+ */
+fn open_doc(req: json::JsonValue) -> DocRef | null {
+    let td = match text_document_of(req) { json::JsonValue as v => v; null => return null }
+    let uri = match str_field(td, "uri") { str as s => s; null => return null }
+    let text = match str_field(td, "text") { str as s => s; null => return null }
+    DocRef { uri = uri; text = text }
+}
+
+/**
+ * change_doc — the `DocRef` of a `textDocument/didChange` notification under FULL sync: the `uri`
+ * from `params.textDocument` and the whole buffer from the LAST entry of `params.contentChanges`
+ * (full sync sends one change carrying the complete text; the last entry is the newest). Returns
+ * `null` when the uri or a change text is missing.
+ *
+ * @param req  the `didChange` DOM
+ * @return     the changed document, or `null`
+ * @since 0.3.1.0 (LSP crumb A)
+ */
+fn change_doc(req: json::JsonValue) -> DocRef | null {
+    let td = match text_document_of(req) { json::JsonValue as v => v; null => return null }
+    let uri = match str_field(td, "uri") { str as s => s; null => return null }
+    let params = match object_field(req, "params") { json::JsonValue as v => v; null => return null }
+    let changes = match object_field(params, "contentChanges") { json::JsonValue as v => v; null => return null }
+    match changes {
+        json::JsonArray as arr => {
+            if arr.items.len == 0 { return null }
+            let last = arr.items[arr.items.len - 1]
+            match str_field(last, "text") { str as s => DocRef { uri = uri; text = s }; null => null }
+        }
+        _ => null
+    }
+}
+
+/**
+ * close_uri — the `uri` of a `textDocument/didClose` notification, or `null` when absent. On close
+ * the server publishes an EMPTY diagnostics list for that uri to clear the client's squiggles.
+ *
+ * @param req  the `didClose` DOM
+ * @return     the closed document's uri, or `null`
+ * @since 0.3.1.0 (LSP crumb A)
+ */
+fn close_uri(req: json::JsonValue) -> str | null {
+    let td = match text_document_of(req) { json::JsonValue as v => v; null => return null }
+    str_field(td, "uri")
+}
+
+/**
+ * one_message — a one-element outgoing list holding `v`. The dispatcher returns a LIST of messages
+ * (a response plus any pushed notification), so the single-response cases spell their list once here.
+ *
+ * @param v  the single message to send
+ * @return   a one-element outgoing list
+ * @since 0.3.1.0 (LSP crumb A)
+ */
+fn one_message(v: json::JsonValue) -> []json::JsonValue {
+    teko::list::push(teko::list::empty(), v)
+}
+
+/**
+ * no_messages — the empty outgoing list, for a notification the server answers with nothing.
+ *
+ * @return  an empty outgoing list
+ * @since 0.3.1.0 (LSP crumb A)
+ */
+fn no_messages() -> []json::JsonValue {
+    teko::list::empty()
+}
+
+/**
+ * diagnostics_of_open — the `publishDiagnostics` notification(s) a `didOpen` produces: the front-end
+ * runs over the opened buffer and the result is pushed to the client. A malformed open (no `DocRef`)
+ * yields nothing.
+ *
+ * @param req  the `didOpen` DOM
+ * @return     the outgoing `publishDiagnostics` notification, or nothing
+ * @since 0.3.1.0 (LSP crumb A)
+ */
+fn diagnostics_of_open(req: json::JsonValue) -> []json::JsonValue {
+    match open_doc(req) {
+        DocRef as d => one_message(diagnostics_notification(d.uri, d.text))
+        null => no_messages()
+    }
+}
+
+/**
+ * diagnostics_of_change — the `publishDiagnostics` notification(s) a `didChange` produces, mirroring
+ * `diagnostics_of_open` for the changed buffer.
+ *
+ * @param req  the `didChange` DOM
+ * @return     the outgoing `publishDiagnostics` notification, or nothing
+ * @since 0.3.1.0 (LSP crumb A)
+ */
+fn diagnostics_of_change(req: json::JsonValue) -> []json::JsonValue {
+    match change_doc(req) {
+        DocRef as d => one_message(diagnostics_notification(d.uri, d.text))
+        null => no_messages()
+    }
+}
+
+/**
+ * diagnostics_of_close — the `publishDiagnostics` notification a `didClose` produces: an EMPTY list
+ * for the closed uri, which clears the client's squiggles for that document.
+ *
+ * @param req  the `didClose` DOM
+ * @return     the outgoing clearing notification, or nothing
+ * @since 0.3.1.0 (LSP crumb A)
+ */
+fn diagnostics_of_close(req: json::JsonValue) -> []json::JsonValue {
+    match close_uri(req) {
+        str as uri => one_message(publish_diagnostics(uri, teko::list::empty()))
+        null => no_messages()
+    }
+}
+
+/**
+ * handle_request — dispatch ONE LSP message to the LIST of messages the server sends in return
+ * (empty when nothing is sent). Covers the lifecycle — `initialize` → capabilities; `shutdown` → a
+ * null result; `initialized` / `exit` → nothing — AND live diagnostics: `didOpen`/`didChange` run
+ * the front-end over the buffer and push `publishDiagnostics`, `didClose` clears them. An unknown
  * REQUEST (one carrying an `id`) gets a MethodNotFound error; an unknown notification is ignored.
  *
  * @param req  the decoded request DOM
- * @return     the response DOM to send, or `null` when nothing is sent
+ * @return     the outgoing messages (a response and/or a notification; empty for silence)
  * @since 0.3.1.0
  */
-pub fn handle_request(req: json::JsonValue) -> json::JsonValue | null {
+pub fn handle_request(req: json::JsonValue) -> []json::JsonValue {
     let method = match object_field(req, "method") {
-        json::JsonValue as v => match as_str(v) { str as s => s; null => return null }
-        null => return null
+        json::JsonValue as v => match as_str(v) { str as s => s; null => return no_messages() }
+        null => return no_messages()
     }
     let id = request_id(req)
-    if method == "initialize" { return initialize_result(id) }
-    if method == "shutdown" { return response(id, jnull()) }
-    if method == "initialized" { return null }
-    if method == "exit" { return null }
-    if has_id(req) { return error_response(id, -32601, teko::str::concat("method not found: ", method)) }
-    null
+    if method == "initialize" { return one_message(initialize_result(id)) }
+    if method == "shutdown" { return one_message(response(id, jnull())) }
+    if method == "initialized" { return no_messages() }
+    if method == "exit" { return no_messages() }
+    if method == "textDocument/didOpen" { return diagnostics_of_open(req) }
+    if method == "textDocument/didChange" { return diagnostics_of_change(req) }
+    if method == "textDocument/didClose" { return diagnostics_of_close(req) }
+    if has_id(req) { return one_message(error_response(id, -32601, teko::str::concat("method not found: ", method))) }
+    no_messages()
+}
+
+/**
+ * write_all — frame and write every message of `msgs` to stdout, in order. The dispatcher returns a
+ * response plus any pushed notification as one list; this drains it to the wire.
+ *
+ * @param msgs  the outgoing messages, in send order
+ * @since 0.3.1.0 (LSP crumb A)
+ */
+fn write_all(msgs: []json::JsonValue) -> void {
+    mut i: u64 = 0
+    loop {
+        if i >= msgs.len { break }
+        write_message(msgs[i])
+        i = i + 1
+    }
 }
 
 /**
  * run_lsp — the LSP server's stdio loop: read one `Content-Length`-framed message, dispatch it,
- * and write any response back framed on stdout. Terminates on `exit` or on end of input. The exit
- * status follows the LSP lifecycle (0 when a `shutdown` preceded the exit, else 1) — but the
- * lane's proofs assert the framed STDOUT text, never this code.
+ * and write every produced message (a response and/or `publishDiagnostics`) back framed on stdout.
+ * Terminates on `exit` or on end of input. The exit status follows the LSP lifecycle (0 when a
+ * `shutdown` preceded the exit, else 1) — but the lane's proofs assert the framed STDOUT text,
+ * never this code.
  *
  * @return  0 when a `shutdown` was received before exit, else 1
  * @since 0.3.1.0
@@ -211,10 +400,7 @@ pub fn run_lsp() -> i32 {
                 let method = method_of(msg.body)
                 if method == "exit" { break }
                 if method == "shutdown" { shutdown_seen = true }
-                match handle_request(msg.body) {
-                    json::JsonValue as resp => write_message(resp)
-                    null => { }
-                }
+                write_all(handle_request(msg.body))
             }
             error => break
         }
