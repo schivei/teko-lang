@@ -1,0 +1,758 @@
+/**
+ * teko::journal — the append-only segment ONE writer owns and nobody else shares (design
+ * journaling-de-corrida-0.3.1 §2.2).
+ *
+ * THE MODEL, IN ONE SENTENCE. Every write a run makes goes to a journal: an append-only record,
+ * stamped with the run's identity, segmented per writer. Summarisation does not merge at the end —
+ * it RE-READS (`fold`). Three properties, each killing one named failure mode: a per-writer segment
+ * removes the shared destination (no lock, no overlap); a run stamp removes a previous run's garbage
+ * passing for valid; append-only plus read-back removes the loss on abrupt death — there is nothing
+ * to merge that could be lost, because it was already written.
+ *
+ * WHY `seg` IS OPAQUE. Today it is a descriptor opened in O_APPEND; when the lanes of a future
+ * `teko::isolate` arrive it will be a per-lane slab index. The record format, `append`, and `fold`
+ * do not change with the swap, and that invariance is why the field carries no concrete meaning.
+ *
+ * @since 0.3.1
+ */
+
+/**
+ * open_seg_rt — the runtime symbol `tk_journal_open` wraps: open/create `path` in O_WRONLY|O_APPEND|
+ * O_CREAT and return the RAW descriptor. Kept private so every caller goes through the typed `open`.
+ *
+ * A SCALAR RETURN AND NOT `Journal | error`, which the whole runtime surface records
+ * (`teko::io::append_file_raw`): a brand-new `error`-shaped `extern fn` needs a per-name lift the
+ * released bootstrap seed's frozen codegen cannot learn, and a `from "teko_rt"` extern cannot return
+ * a user struct by value at all. The Teko wrapper builds the `Journal` and the `error`.
+ *
+ * @param path  the segment file to open, created when absent
+ * @return      the raw descriptor (>= 0), or -1 on a failure to open
+ * @since 0.3.1
+ */
+extern fn open_seg_rt(path: str) -> i64 = "tk_journal_open" from "teko_rt"
+
+/**
+ * append_seg_rt — the runtime symbol `tk_journal_append` wraps: write `rec` whole to descriptor
+ * `seg`, finishing a short write in a loop. Kept private so every caller goes through `append`.
+ *
+ * `rec` LEADS `seg`, and that order is deliberate: a by-value `str` is only ABI-describable when it
+ * is a leading parameter (see `lir/lower.tks::takes_one_str_by_value`), so putting the record first
+ * keeps the call correct on every target rather than only on the ones where a fat pair happens to
+ * decompose into the same registers.
+ *
+ * @param rec  the record bytes, already terminated by a newline
+ * @param seg  the raw descriptor a segment was opened on
+ * @return     0 on success, or the errno the write failed with
+ * @since 0.3.1
+ */
+extern fn append_seg_rt(rec: str, seg: i64) -> i32 = "tk_journal_append" from "teko_rt"
+
+/**
+ * arm_note_rt — the runtime symbol `tk_journal_arm` wraps: remember `prefix` (a pre-shaped
+ * `run\twriter\tstop\t` record head) as the bytes a later async-signal-safe `tk_journal_note`
+ * prepends before the signal number. Kept private so `open` is the one arm point.
+ *
+ * @param prefix  the stop-record head, formatted here at open time (never inside a handler)
+ * @since 0.3.1
+ */
+extern fn arm_note_rt(prefix: str) -> void = "tk_journal_arm" from "teko_rt"
+
+/**
+ * rename_rt — the runtime symbol `tk_rt_rename` wraps: rename `from` to `to` atomically within one
+ * directory. Kept private so every caller goes through `rename`.
+ *
+ * @param from  the existing (complete) file
+ * @param to    the path to publish it as, replacing any file already there
+ * @return      0 on success, or the errno
+ * @since 0.3.1
+ */
+extern fn rename_rt(from: str, to: str) -> i32 = "tk_rt_rename" from "teko_rt"
+
+/**
+ * mono_ns_rt — the runtime symbol `tk_rt_monotonic_ns` wraps: monotonic nanoseconds, the time half
+ * of a run stamp. Binds an EXISTING runtime symbol (no new C); kept private so `run_id` is the one
+ * composer of the stamp.
+ *
+ * @return  a monotonically non-decreasing nanosecond reading
+ * @since 0.3.1
+ */
+extern fn mono_ns_rt() -> i64 = "tk_rt_monotonic_ns" from "teko_rt"
+
+/**
+ * pid_rt — the runtime symbol `tk_rt_pid` wraps: this process's id, the disambiguating half of a run
+ * stamp. Kept private so `run_id` is the one composer of the stamp.
+ *
+ * @return  this process's id
+ * @since 0.3.1
+ */
+extern fn pid_rt() -> i64 = "tk_rt_pid" from "teko_rt"
+
+/**
+ * pid_alive_rt — the runtime symbol `tk_rt_pid_alive` wraps: whether `pid` is a live process. Kept
+ * private so `sweep` is the one caller of the liveness test.
+ *
+ * @param pid  the process id a root's lock recorded
+ * @return     true iff a process with that id is currently alive
+ * @since 0.3.1
+ */
+extern fn pid_alive_rt(pid: i64) -> bool = "tk_rt_pid_alive" from "teko_rt"
+
+/**
+ * BAD_DESCRIPTOR — what `open_seg_rt` answers when the segment could not be created.
+ */
+const BAD_DESCRIPTOR: i64 = -1
+
+/**
+ * FIELD_SEP — the byte that separates a record's fields on disk. A tab, because it never appears in
+ * a run id, a writer id, or a `kind`, and a payload carrying one would be the emitter's bug to keep
+ * out (payloads are single-line by contract).
+ */
+const FIELD_SEP: str = "\t"
+
+/**
+ * RUN_ENV — the environment key that carries a run's identity to its children and CACHES it within a
+ * process. `run_id` reads it (so every call in one process, and every child a `spawn_spec` launches,
+ * answers the same stamp) and writes it on the first miss.
+ */
+pub const RUN_ENV: str = "TEKO_RUN"
+
+/**
+ * TKRUN_DIR — the directory that holds every run's root. A dotted scratch namespace under `bin/` so
+ * the scratch guard already recognises it and `sweep` has one place to walk.
+ */
+pub const TKRUN_DIR: str = "bin/.tkrun"
+
+/**
+ * LOCK_NAME — the basename of a run root's lock file, which `fold` must NOT read as a segment (it
+ * carries a pid, not records) and whose live-owner `sweep` spares.
+ */
+const LOCK_NAME: str = ".lock"
+
+/**
+ * KIND_BEGIN — the kind a writer appends when a test STARTS; its payload names the test. The last
+ * `begin` with no matching verdict is the test a dead writer died in, which `fold` carries into the
+ * synthetic `incomplete`'s payload.
+ */
+pub const KIND_BEGIN: str = "begin"
+
+/**
+ * KIND_END — the kind a writer appends when it has run everything it planned. Its presence is what
+ * distinguishes a finished segment from a dead one.
+ */
+pub const KIND_END: str = "end"
+
+/**
+ * KIND_STOP — the kind the signal arm appends when a polite signal ends the run (§6). A terminal
+ * kind like `end`: a segment carrying one is not synthesised `incomplete`.
+ */
+pub const KIND_STOP: str = "stop"
+
+/**
+ * KIND_INCOMPLETE — the kind `fold` stamps on the synthetic `end` it appends for a segment that
+ * never wrote one: the writer died, and the run must SEE it rather than round it up (§4).
+ */
+pub const KIND_INCOMPLETE: str = "incomplete"
+
+/**
+ * Journal — the append-only segment ONE writer owns and no more.
+ *
+ * @since 0.3.1
+ */
+pub type Journal = struct {
+    /** the identifier of the run this segment belongs to (`run_id`), stamped into every record. */
+    run: str
+    /** the writer's identity — `s<i>` for a gate shard, `p<i>` for a pool child, `m` for the orchestrator. */
+    writer: str
+    /**
+     * the open sink: a raw descriptor today, a per-lane slab index when lanes arrive.
+     *
+     * AN `i64` AND NOT THE DESIGN'S `u64`: the descriptor is what `open_seg_rt` answers, and it
+     * answers `-1` on failure — a signed field takes that value with no cast, and this project's cast
+     * law admits no `i64`-from-`u64` narrowing to launder it.
+     */
+    seg: i64
+}
+
+/**
+ * Record — a record read back by the summariser.
+ *
+ * @since 0.3.1
+ */
+pub type Record = struct {
+    /** the run that wrote it; a record of another run is DISCARDED by `fold`. */
+    run: str
+    /** who wrote it. */
+    writer: str
+    /** the record's kind (`begin`, `ok`, `fail`, `cov`, `end`, `stop`, `crash`, `incomplete`). */
+    kind: str
+    /** the record body, without newlines (the emitter keeps them out). */
+    payload: str
+}
+
+/**
+ * run_id — the identifier of THIS run, inherited from the orchestrator or minted now.
+ *
+ * NAMING THE RUN IS WHAT KILLS THE SILENT GARBAGE. An orphan segment from yesterday lives under
+ * another root and carries another stamp, so it is IDENTIFIABLE rather than silently merged — the
+ * one failure mode on the list that gave no signal at all. Stable within the process and inherited
+ * by children through `RUN_ENV`: the first call with no `TEKO_RUN` mints `<monotonic-ns>-<pid>` and
+ * writes it back, so every later call and every child reads the same stamp.
+ *
+ * @return  the run's identifier, stable within the process
+ * @since 0.3.1
+ */
+pub fn run_id() -> str {
+    match teko::env::var(RUN_ENV) {
+        str as v => { if v.len > 0 { return v } }
+        error => { }
+    }
+    let id = teko::str::concat(teko::str::i64_to_str(mono_ns_rt()), "-", teko::str::i64_to_str(pid_rt()))
+    match teko::env::set_var(RUN_ENV, id) { error => { }; null => { } }
+    id
+}
+
+/**
+ * run_root — the directory THIS run owns, and the only one it may create.
+ *
+ * @return  `bin/.tkrun/<run_id()>`
+ * @since 0.3.1
+ */
+pub fn run_root() -> str { teko::str::concat(TKRUN_DIR, "/", run_id()) }
+
+/**
+ * lock_path — the lock file inside a run root, whose body is the locking process's pid.
+ *
+ * @param root  a run root
+ * @return      `<root>/.lock`
+ * @since 0.3.1
+ */
+fn lock_path(root: str) -> str { teko::str::concat(root, "/", LOCK_NAME) }
+
+/**
+ * seg_path — the segment file writer `writer` owns under run root `root`.
+ *
+ * @param root    the run root the segment lives in
+ * @param writer  the writer identity
+ * @return        `<root>/<writer>`
+ * @since 0.3.1
+ */
+fn seg_path(root: str, writer: str) -> str { teko::str::concat(root, "/", writer) }
+
+/**
+ * mkdir_p — create `dir` and every missing parent, since `teko::fs::mkdir` is a single `mkdir(2)`.
+ * An already-existing level is a no-op (mkdir treats EEXIST as success).
+ *
+ * @param dir  the directory to create, with any parents it needs
+ * @return     an `error` when a level cannot be created, else `null`
+ * @since 0.3.1
+ */
+fn mkdir_p(dir: str) -> error | null {
+    mut i: u64 = 0
+    loop {
+        if i >= dir.len { break }
+        if dir[i] == b'/' && i > 0 {
+            match teko::fs::mkdir(teko::str::slice_to(dir, i)) { error as e => return e; null => { } }
+        }
+        i = i + 1
+    }
+    teko::fs::mkdir(dir)
+}
+
+/**
+ * ensure_root — create this run's root and stamp it with a lock naming this process, so a concurrent
+ * `sweep` from another run spares it while this run is alive.
+ *
+ * @return  the run root, created and locked
+ * @since 0.3.1
+ */
+fn ensure_root() -> str {
+    let root = run_root()
+    match mkdir_p(root) { error => { }; null => { } }
+    match teko::io::write_file(lock_path(root), teko::str::i64_to_str(pid_rt())) { error => { }; null => { } }
+    root
+}
+
+/**
+ * record_line — the on-disk shape of one record, WITHOUT its trailing newline: the four fields
+ * joined by `FIELD_SEP`, in the order `fold` reads them back.
+ *
+ * @param run      the run stamp
+ * @param writer   the writer identity
+ * @param kind     the record kind
+ * @param payload  the single-line body
+ * @return         `run \t writer \t kind \t payload`
+ * @since 0.3.1
+ */
+fn record_line(run: str, writer: str, kind: str, payload: str) -> str {
+    teko::str::concat(run, FIELD_SEP, writer, FIELD_SEP, kind, FIELD_SEP, payload)
+}
+
+/**
+ * open_seg — open the segment file `path` for `run`/`writer`, returning the `Journal` that owns it
+ * and arming the polite-signal note with this run/writer's stop-record head.
+ *
+ * THE IDENTITY IS PASSED IN, NOT COMPOSED HERE, so this stays the single place a descriptor becomes
+ * a typed segment — the seam the public `open` and the unit tests both go through.
+ *
+ * @param path    the segment file to open, created when absent
+ * @param run     the run stamp records on this segment carry
+ * @param writer  the writer identity records on this segment carry
+ * @return        the opened segment
+ * @throws        when the segment could not be created (permission, disk full)
+ * @since 0.3.1
+ */
+fn open_seg(path: str, run: str, writer: str) -> Journal | error {
+    let fd = open_seg_rt(path)
+    if fd == BAD_DESCRIPTOR {
+        return error { message = teko::str::concat("teko::journal: could not open segment ", path) }
+    }
+    arm_note_rt(record_line(run, writer, KIND_STOP, ""))
+    Journal { run = run; writer = writer; seg = fd }
+}
+
+/**
+ * open — open the segment of `writer` in THIS run (§2.2), creating and locking the run root first.
+ *
+ * @param writer  the writer identity; two live writers never repeat it (`s<i>`/`p<i>`/`m`)
+ * @return        the opened segment
+ * @throws        when the segment could not be created (permission, disk full)
+ * @since 0.3.1
+ */
+pub fn open(writer: str) -> Journal | error {
+    let run = run_id()
+    let root = ensure_root()
+    open_seg(seg_path(root, writer), run, writer)
+}
+
+/**
+ * append — append ONE record to `j`'s segment.
+ *
+ * THE DURABILITY POINT IS THIS, and it is named: a single `write(2)` on a descriptor opened in
+ * O_APPEND, with no user-space buffer. The record is in the kernel when `append` returns, so a
+ * `SIGKILL` of the process does not lose it — only a crash of the machine would, and that boundary
+ * is §5.
+ *
+ * @param j        the segment to append to
+ * @param kind     the record's kind
+ * @param payload  the body, without newlines
+ * @return         nothing on success, or the write failure
+ * @throws         when the write fails (ENOSPC, EIO) — the failure is PEGAJOSA in the caller (§4)
+ * @since 0.3.1
+ */
+pub fn append(j: Journal, kind: str, payload: str) -> null | error {
+    let rec = teko::str::concat(record_line(j.run, j.writer, kind, payload), "\n")
+    if append_seg_rt(rec, j.seg) != 0 {
+        return error { message = teko::str::concat("teko::journal::append: write failed on writer ", j.writer) }
+    }
+    null
+}
+
+/**
+ * rename — publish `from` as `to` atomically within one directory, so no reader sees a half-written
+ * file: what is a whole artefact writes to the writer's own temporary and lands here (§2.3).
+ *
+ * @param from  the existing (complete) file
+ * @param to    the path to publish it as, replacing any file already there
+ * @return      nothing on success, or the failure
+ * @throws      when the rename failed (cross-device, permission)
+ * @since 0.3.1
+ */
+pub fn rename(from: str, to: str) -> null | error {
+    if rename_rt(from, to) != 0 {
+        return error { message = teko::str::concat("teko::journal::rename: could not publish ", from) }
+    }
+    null
+}
+
+/**
+ * writer_dir — the per-writer sub-directory a scope token names under the run root: the token with
+ * its leading `.` removed (`.s0-label` becomes `s0-label`), so the run root holds one directory per
+ * test identity rather than a flat pile of sibling files.
+ *
+ * @param scope  the running test's scope token (`.s<shard>-<label>`), never ""
+ * @return       the sub-directory name
+ * @since 0.3.1
+ */
+fn writer_dir(scope: str) -> str {
+    if scope.len > 0 && scope[0] == b'.' { return teko::str::slice_from(scope, 1) }
+    scope
+}
+
+/**
+ * dir_of — the directory part of `path` (everything before its last `/`), or "" when it names no
+ * directory. Used to create a scratch file's parents without creating the file itself.
+ *
+ * @param path  a composed path
+ * @return      the parent directory, or ""
+ * @since 0.3.1
+ */
+fn dir_of(path: str) -> str {
+    mut i: u64 = path.len
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        if path[i] == b'/' { return teko::str::slice_to(path, i) }
+    }
+    ""
+}
+
+/**
+ * scratch — the path `base` has IN THIS RUN and for the CURRENTLY RUNNING test (§2.2).
+ *
+ * THIS IS THE ONE COMPOSER. "Which paths are isolated" is answered by reading this function's
+ * callers, not by grepping literals — which is exactly how the fixed paths went unnoticed.
+ *
+ * BYTE-FOR-BYTE `base` OUTSIDE A TEST, and that is the point rather than a fallback: the same
+ * path-composing code runs in PRODUCTION (the regression runner), and there the path must stay what
+ * it was. Rooting applies exactly where the concurrency it guards against exists — inside the test
+ * gate, where `teko::test::scope()` is non-empty.
+ *
+ * @param base  the path a caller would otherwise hard-code
+ * @return      `<run_root()>/<writer>/<base>` inside a test (parents created), `base` outside one
+ * @since 0.3.1
+ */
+pub fn scratch(base: str) -> str {
+    let scope = teko::test::scope()
+    if scope.len == 0 { return base }
+    let composed = teko::str::concat(run_root(), "/", writer_dir(scope), "/", base)
+    let parent = dir_of(composed)
+    if parent.len > 0 { match mkdir_p(parent) { error => { }; null => { } } }
+    composed
+}
+
+/**
+ * is_terminal_kind — whether `kind` closes a segment, so `fold` need not synthesise an `incomplete`
+ * for it: a clean `end`, a signalled `stop`, or an already-synthesised `incomplete`.
+ *
+ * @param kind  a record's kind
+ * @return      true iff the kind marks the segment as closed
+ * @since 0.3.1
+ */
+fn is_terminal_kind(kind: str) -> bool {
+    if kind == KIND_END { return true }
+    if kind == KIND_STOP { return true }
+    kind == KIND_INCOMPLETE
+}
+
+/**
+ * parse_record — decode ONE journal line into a `Record`, or `null` when it belongs to another run
+ * or is malformed (fewer than the three `FIELD_SEP` bytes a record carries before its payload).
+ *
+ * THE RUN FILTER IS HYGIENE RULE 1 (§4). A line whose first field is not `want_run` is a previous
+ * run's garbage under a shared directory, and it is DISCARDED here rather than counted.
+ *
+ * @param want_run  the run stamp a record must carry to count
+ * @param line      one journal line, WITHOUT its trailing newline
+ * @return          the decoded record, or `null` when it is another run's or malformed
+ * @since 0.3.1
+ */
+fn parse_record(want_run: str, line: str) -> Record | null {
+    mut i: u64 = 0
+    mut t1: u64 = 0
+    mut t2: u64 = 0
+    mut t3: u64 = 0
+    mut n: u64 = 0
+    loop {
+        if i >= line.len { break }
+        if line[i] == b'\t' {
+            n = n + 1
+            if n == 1 { t1 = i }
+            if n == 2 { t2 = i }
+            if n == 3 { t3 = i; break }
+        }
+        i = i + 1
+    }
+    if n < 3 { return null }
+    let run = teko::str::slice_to(line, t1)
+    if run != want_run { return null }
+    Record {
+        run = run
+        writer = teko::str::slice(line, t1 + 1, t2)
+        kind = teko::str::slice(line, t2 + 1, t3)
+        payload = teko::str::slice_from(line, t3 + 1)
+    }
+}
+
+/**
+ * is_dir — whether `path` names a listable directory. Used to keep `fold_segment` from reading a
+ * run root's writer/scratch SUB-directory as if it were a segment file: a run root holds both segment
+ * files AND the per-writer scratch trees, and `read_file` on a directory sizes to a garbage-large
+ * value that would allocate until OOM. No stat primitive is surfaced, so the listability of a path
+ * is the available directory test.
+ *
+ * @param path  a path under a run root
+ * @return      true iff `path` is a directory
+ * @since 0.3.1
+ */
+fn is_dir(path: str) -> bool {
+    match teko::fs::list_dir(path) { []str => true; error => false }
+}
+
+/**
+ * fold_segment — read ONE segment file and append its records (of `run`) to `acc`, applying the two
+ * per-segment hygiene rules of §4: a line without a trailing newline is a torn write and is dropped
+ * (rule 2, satisfied by only emitting a line at each `\n`); a segment carrying no terminal kind gets
+ * a synthetic `incomplete` naming its writer and the test it died in (rule 3). A directory entry (a
+ * writer's scratch tree, sibling to the segments) is not a segment and is skipped.
+ *
+ * @param acc   the records folded so far
+ * @param root  the run root the segment lives under
+ * @param name  the segment file's basename
+ * @param run   the run stamp a record must carry to count
+ * @return      `acc` with this segment's records (and any synthetic `incomplete`) appended
+ * @since 0.3.1
+ */
+fn fold_segment(acc: []Record, root: str, name: str, run: str) -> []Record {
+    if name == LOCK_NAME { return acc }
+    let path = teko::str::concat(root, "/", name)
+    if is_dir(path) { return acc }
+    let content = match teko::io::read_file(path) { str as s => s; error => return acc }
+    mut out: []Record = acc
+    mut writer: str = ""
+    mut last_begin: str = ""
+    mut saw_terminal: bool = false
+    mut saw_any: bool = false
+    mut start: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= content.len { break }
+        if content[i] == b'\n' {
+            match parse_record(run, teko::str::slice(content, start, i)) {
+                Record as r => {
+                    out = teko::list::push(out, r)
+                    writer = r.writer
+                    saw_any = true
+                    if r.kind == KIND_BEGIN { last_begin = r.payload }
+                    if is_terminal_kind(r.kind) { saw_terminal = true }
+                }
+                null => { }
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if saw_any && !saw_terminal {
+        out = teko::list::push(out, Record { run = run; writer = writer; kind = KIND_INCOMPLETE; payload = last_begin })
+    }
+    out
+}
+
+/**
+ * str_less — whether `a` sorts before `b` byte-lexicographically, so `fold` returns segments in a
+ * stable name order (the corpus surfaces no `str` comparator under a `teko::str::` name here).
+ *
+ * @param a  the left string
+ * @param b  the right string
+ * @return   true iff `a` is strictly less than `b`
+ * @since 0.3.1
+ */
+fn str_less(a: str, b: str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= a.len { return b.len > a.len }
+        if i >= b.len { return false }
+        if a[i] < b[i] { return true }
+        if a[i] > b[i] { return false }
+        i = i + 1
+    }
+}
+
+/**
+ * remove_at — a copy of `xs` without the element at `idx`, the shrink `sort_names`'s selection pass
+ * needs (a `[]str` is push-only, value-semantics).
+ *
+ * @param xs   the list to copy
+ * @param idx  the index to drop
+ * @return     `xs` without element `idx`
+ * @since 0.3.1
+ */
+fn remove_at(xs: []str, idx: u64) -> []str {
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if i != idx { out = teko::list::push(out, xs[i]) }
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * sort_names — `names` in ascending byte order, by selection. Directory listings arrive in no
+ * guaranteed order, and `fold`'s `@return` promises segment-name order.
+ *
+ * @param names  the directory entries to sort
+ * @return       the same entries, ascending
+ * @since 0.3.1
+ */
+fn sort_names(names: []str) -> []str {
+    mut remaining: []str = names
+    mut ordered: []str = teko::list::empty()
+    loop {
+        if remaining.len == 0 { break }
+        mut min_idx: u64 = 0
+        mut j: u64 = 1
+        loop {
+            if j >= remaining.len { break }
+            if str_less(remaining[j], remaining[min_idx]) { min_idx = j }
+            j = j + 1
+        }
+        ordered = teko::list::push(ordered, remaining[min_idx])
+        remaining = remove_at(remaining, min_idx)
+    }
+    ordered
+}
+
+/**
+ * fold — re-read EVERY segment of `run` under `root` and return the records in segment order.
+ *
+ * THREE HYGIENE RULES, one per named failure mode of §4: a record of another run is discarded
+ * (`parse_record`, rule 1); a torn last line is dropped (`fold_segment`, rule 2); a segment with no
+ * terminal kind yields a synthetic `incomplete` naming its writer (`fold_segment`, rule 3). A pure
+ * query over bytes already on disk, so a replay yields the same records after the orchestrator was
+ * killed.
+ *
+ * @param root  the run root (`run_root()`, or an old root on a replay)
+ * @param run   the stamp a record must carry to count
+ * @return      the records, ordered by segment name then by write order
+ * @since 0.3.1
+ */
+pub fn fold(root: str, run: str) -> []Record {
+    let entries = match teko::fs::list_dir(root) { []str as e => e; error => teko::list::empty() }
+    let names = sort_names(entries)
+    mut out: []Record = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= names.len { break }
+        out = fold_segment(out, root, names[i], run)
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * last_segment — the last `/`-separated segment of `path` (its basename), or `path` when it has none.
+ *
+ * @param path  a path
+ * @return      its final segment
+ * @since 0.3.1
+ */
+fn last_segment(path: str) -> str {
+    mut i: u64 = path.len
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        if path[i] == b'/' { return teko::str::slice_from(path, i + 1) }
+    }
+    path
+}
+
+/**
+ * parse_pid — the decimal pid a lock file holds, read digit by digit (the body is exactly
+ * `i64_to_str(pid)`, so leading digits are all there is). A body with no digit answers 0, which
+ * `root_is_live` reads as "not live".
+ *
+ * @param body  the lock file's contents
+ * @return      the pid, or 0 when the body carries none
+ * @since 0.3.1
+ */
+fn parse_pid(body: str) -> i64 {
+    mut v: i64 = 0
+    mut i: u64 = 0
+    mut seen: bool = false
+    loop {
+        if i >= body.len { break }
+        let c = body[i]
+        if c >= b'0' && c <= b'9' {
+            v = (v * 10) + ((c to i64) - (b'0' to i64))
+            seen = true
+        }
+        if seen && (c < b'0' || c > b'9') { break }
+        i = i + 1
+    }
+    v
+}
+
+/**
+ * root_is_live — whether the run root at `root` is still held by a live process, read from its lock.
+ *
+ * @param root  a sibling run root
+ * @return      true iff its lock names a pid that is currently alive
+ * @since 0.3.1
+ */
+fn root_is_live(root: str) -> bool {
+    let body = match teko::io::read_file(lock_path(root)) { str as s => s; error => return false }
+    let pid = parse_pid(body)
+    if pid <= 0 { return false }
+    pid_alive_rt(pid)
+}
+
+/**
+ * rmtree — best-effort recursive removal of `path` and everything under it, in pure Teko over
+ * `list_dir` + `remove_file` (libc `remove` rmdir's an empty directory, so children go first and the
+ * now-empty directory follows). No runtime primitive is added for a walk this file can own.
+ *
+ * @param path  the tree root to remove
+ * @return      true when the whole tree went, false when something survived
+ * @since 0.3.1
+ */
+fn rmtree(path: str) -> bool {
+    match teko::fs::list_dir(path) {
+        []str as entries => {
+            mut ok: bool = true
+            mut i: u64 = 0
+            loop {
+                if i >= entries.len { break }
+                if !rmtree(teko::str::concat(path, "/", entries[i])) { ok = false }
+                i = i + 1
+            }
+            if !ok { return false }
+            match teko::fs::remove_file(path) { error => false; null => true }
+        }
+        error => {
+            match teko::fs::remove_file(path) { error => false; null => true }
+        }
+    }
+}
+
+/**
+ * sweep_under — remove the run roots under `base` that are neither `keep` nor still locked by a live
+ * process, returning how many were removed. The directory is a PARAMETER so a hermetic unit test can
+ * exercise the reclaim-versus-spare logic on its own scratch tree without touching `bin/.tkrun`.
+ *
+ * @param base  the directory that holds the run roots
+ * @param keep  the run root to preserve (this run's own)
+ * @return      how many roots were removed
+ * @since 0.3.1
+ */
+fn sweep_under(base: str, keep: str) -> u64 {
+    let keep_id = last_segment(keep)
+    let entries = match teko::fs::list_dir(base) { []str as e => e; error => teko::list::empty() }
+    mut removed: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= entries.len { break }
+        let name = entries[i]
+        let path = teko::str::concat(base, "/", name)
+        if name != keep_id && !root_is_live(path) {
+            if rmtree(path) { removed = removed + 1 }
+        }
+        i = i + 1
+    }
+    removed
+}
+
+/**
+ * sweep — remove the run roots under `bin/.tkrun/` that are neither `keep` nor still held by a live
+ * process (§2.2).
+ *
+ * THE CLEANUP IS THE NEXT RUN'S, NEVER ITS OWN. A run that cleaned on exit would lose the cleanup in
+ * the one case it matters (abrupt death) and lose with it the proof that it died. Sweeping on OPEN
+ * has the opposite property: a `SIGKILL` leaves the root ON PURPOSE, and the next run reclaims it
+ * only after it could have reported it — and only once its locker is gone.
+ *
+ * @param keep  the run root to preserve (this run's own)
+ * @return      how many roots were removed
+ * @since 0.3.1
+ */
+pub fn sweep(keep: str) -> u64 { sweep_under(TKRUN_DIR, keep) }
