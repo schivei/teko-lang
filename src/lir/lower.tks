@@ -1100,6 +1100,14 @@ pub type LowerCtx = struct {
      */
     escaping: []str
     /**
+     * frees_old_names — computed ONCE in `lower_function` exactly like `escaping`/`addr_taken`. The
+     * set of accumulator names whose linear-chain proof holds (`checker::fn_frees_old_vars`), so a
+     * self-append to one may FREE-OLD on grow. The C emitter re-derives this per-assign from the
+     * enclosing body; the native push site has no body, so it reads this precomputed oracle — the
+     * SAME `assign_frees_old` proof the C route trusts, no native-only analysis, no divergence.
+     */
+    frees_old_names: []str
+    /**
      * bracket_depth — how many conveyance brackets (`lower_binding_conveyed`/`lower_assign_conveyed`/
      * `lower_conveyed_tail_expr_stmt_fat`, NP3b/NP4) are CURRENTLY open around the statement being
      * lowered. `0` outside any bracket. A bracket that finds `bracket_depth > 0` is ALREADY nested
@@ -1162,7 +1170,7 @@ fn ctx_with(ctx: LowerCtx, func: LFunc, block_id: u32, env: LEnv) -> LowerCtx {
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
-        region_stack = ctx.region_stack; escaping = ctx.escaping; bracket_depth = ctx.bracket_depth
+        region_stack = ctx.region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
     }
 }
 
@@ -1184,7 +1192,7 @@ fn ctx_with_rodata(ctx: LowerCtx, rodata: []LRodata) -> LowerCtx {
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
-        region_stack = ctx.region_stack; escaping = ctx.escaping; bracket_depth = ctx.bracket_depth
+        region_stack = ctx.region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
     }
 }
 
@@ -1206,7 +1214,7 @@ fn ctx_with_lifted(ctx: LowerCtx, lifted: []LFunc) -> LowerCtx {
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
-        region_stack = ctx.region_stack; escaping = ctx.escaping; bracket_depth = ctx.bracket_depth
+        region_stack = ctx.region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
     }
 }
 
@@ -1228,7 +1236,7 @@ fn ctx_with_defers(ctx: LowerCtx, defers: []checker::TDeferStmt) -> LowerCtx {
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
-        region_stack = ctx.region_stack; escaping = ctx.escaping; bracket_depth = ctx.bracket_depth
+        region_stack = ctx.region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
     }
 }
 
@@ -1250,7 +1258,7 @@ fn ctx_with_loops(ctx: LowerCtx, loop_targets: []LoopTargets) -> LowerCtx {
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
-        region_stack = ctx.region_stack; escaping = ctx.escaping; bracket_depth = ctx.bracket_depth
+        region_stack = ctx.region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
     }
 }
 
@@ -1319,7 +1327,7 @@ fn ctx_with_regions(ctx: LowerCtx, region_stack: []NativeRegionFrame) -> LowerCt
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
-        region_stack = region_stack; escaping = ctx.escaping; bracket_depth = ctx.bracket_depth
+        region_stack = region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
     }
 }
 
@@ -1345,7 +1353,7 @@ fn ctx_with_bracket_depth(ctx: LowerCtx, bracket_depth: u32) -> LowerCtx {
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
-        region_stack = ctx.region_stack; escaping = ctx.escaping; bracket_depth = bracket_depth
+        region_stack = ctx.region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = bracket_depth
     }
 }
 
@@ -6023,7 +6031,7 @@ fn build_lambda_lfunc(lam: checker::TLambda, env_layout: LStructLayout, ctx: Low
         flat_symbols = ctx.flat_symbols; ret_type = lam.ret
         has_ret_len_slot = fat_ret; ret_len_slot = if fat_ret { slot_reg } else { 0 }
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = collect_addr_taken_locals(lam.body, ctx.ref_fns, ctx.enums); table = ctx.table
-        region_stack = teko::list::empty(); escaping = teko::list::empty(); bracket_depth = 0
+        region_stack = teko::list::empty(); escaping = teko::list::empty(); frees_old_names = teko::list::empty(); bracket_depth = 0
     }
     let with_captures = match bind_lambda_captures(ctx0, env_layout, lam.captures, line, col) { LowerCtx as c => c; error as err => return err }
     let done = match lower_fn_body(with_captures, lam.body, ltype_of(lam.ret, ctx.enums), line, col) { LowerCtx as c => c; error as err => return err }
@@ -7606,7 +7614,7 @@ fn close_loop(outer: LowerCtx, body_done: LowerCtx, exit_block: u32, exit_env: L
         flat_symbols = body_done.flat_symbols; ret_type = body_done.ret_type
         has_ret_len_slot = body_done.has_ret_len_slot; ret_len_slot = body_done.ret_len_slot
         ref_fns = body_done.ref_fns; field_decls = body_done.field_decls; addr_taken = body_done.addr_taken; table = body_done.table
-        region_stack = body_done.region_stack; escaping = body_done.escaping; bracket_depth = body_done.bracket_depth
+        region_stack = body_done.region_stack; escaping = body_done.escaping; frees_old_names = body_done.frees_old_names; bracket_depth = body_done.bracket_depth
     }
 }
 
@@ -13467,7 +13475,49 @@ fn lower_assign_fat(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error 
     if !slot.found {
         return error { message = teko::str::concat("native backend N1: `", a.name, "` is assigned but is not a mutable fat local (internal)") }
     }
+    if is_frees_old_self_append(ctx, a) { return lower_assign_frees_old(ctx, slot.slot, a) }
     store_fat_through_addr(ctx, slot.slot, a, teko::str::concat("the str/slice local `", a.name, "`"))
+}
+
+/**
+ * is_frees_old_self_append — is `a` a self-append `xs = teko::list::push(xs, …)` whose accumulator
+ * `xs` the checker PROVED a linear chain (`ctx.frees_old_names`, from `checker::fn_frees_old_vars`)?
+ * When so, the copy-grow may park the superseded buffer for reuse — the exact upgrade the C emitter
+ * makes at `codegen.tks:9068`. The native backend, unlike the C emitter, has no per-assign body at
+ * the push site, so it consults the precomputed set instead of re-deriving the proof.
+ *
+ * @param ctx  the lowering context (its precomputed `frees_old_names` oracle)
+ * @param a    the typed assignment
+ * @return     whether this self-append may free-old on grow
+ * @since 0.3.1 (native free-old parity, #148)
+ */
+fn is_frees_old_self_append(ctx: LowerCtx, a: checker::TAssign) -> bool {
+    checker::assign_is_self_append(a) && contains_str(ctx.frees_old_names, a.name)
+}
+
+/**
+ * lower_assign_frees_old — lower a PROVEN-LINEAR self-append `xs = teko::list::push(xs, item)` with
+ * the free-old grow symbol (`tk_slice_push_fo`) instead of the plain `tk_slice_push`, then store the
+ * grown pair back through the accumulator's frame slot. Behaviour is IDENTICAL to the plain push
+ * (same returned buffer + length); the only difference is the runtime parks the superseded buffer on
+ * a copy-grow, which the `assign_frees_old` proof makes safe. Mirrors `emit_assign`'s `@fo` arm
+ * (`codegen.tks:9068`) one axis over (a slot store vs a C lvalue assign).
+ *
+ * @param ctx   the lowering context
+ * @param slot  the accumulator's fat frame slot (the store target)
+ * @param a     the typed self-append assignment (its `a.value` is the `list::push` call)
+ * @return      the context with the free-old grow + store appended, or an honest stop
+ * @throws      when `a.value` is not the expected push call (internal), or propagated from lowering
+ * @since 0.3.1 (native free-old parity, #148)
+ */
+fn lower_assign_frees_old(ctx: LowerCtx, slot: u32, a: checker::TAssign) -> LowerStmtOut | error {
+    match a.value.kind {
+        checker::TCall as c => {
+            let fo = match lower_list_push(ctx, a.value, c, "tk_slice_push_fo") { LoweredFat as x => x; error as err => return err }
+            LowerStmtOut { ctx = store_fat_slot(fo.ctx, slot, fo, a.value.line, a.value.col); terminated = false }
+        }
+        _ => store_fat_through_addr(ctx, slot, a, teko::str::concat("the str/slice local `", a.name, "`"))
+    }
 }
 
 /**
@@ -14012,7 +14062,7 @@ pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::li
         flat_symbols = flat_symbols; ret_type = f.return_type
         has_ret_len_slot = fat_ret; ret_len_slot = if fat_ret { slot_reg } else { 0 }
         ref_fns = ref_fns; field_decls = field_decls; addr_taken = collect_addr_taken_locals(f.body, ref_fns, enums); table = table
-        region_stack = teko::list::empty(); escaping = checker::fn_escaping_vars(f); bracket_depth = 0
+        region_stack = teko::list::empty(); escaping = checker::fn_escaping_vars(f); frees_old_names = checker::fn_frees_old_vars(f); bracket_depth = 0
     }
     let framed = open_frame_region(ctx0, f.line, f.col)
     let done = match lower_fn_body(framed, f.body, ltype_of(f.return_type, enums), f.line, f.col) { LowerCtx as c => c; error as err => return stop_in_function(err, f) }
@@ -15281,7 +15331,7 @@ pub fn lower_virtual_main(loose: []checker::TStatement, layouts: []LStructLayout
         flat_symbols = flat_symbols; ret_type = checker::Prim { kind = checker::PrimKind::I32 }
         has_ret_len_slot = false; ret_len_slot = 0
         ref_fns = ref_fns; field_decls = field_decls; addr_taken = collect_addr_taken_locals(loose, ref_fns, enums); table = table
-        region_stack = teko::list::empty(); escaping = teko::list::empty(); bracket_depth = 0
+        region_stack = teko::list::empty(); escaping = teko::list::empty(); frees_old_names = teko::list::empty(); bracket_depth = 0
     }
     let tail = match lower_main_tail(ctx0, loose) { LowerMainTail as x => x; error as err => return err }
     let closed = match close_virtual_main(tail) { LowerCtx as c => c; error as err => return err }
