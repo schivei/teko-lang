@@ -78,30 +78,37 @@ fn vinfo_grow(t: VInfoTable, n: u64) -> VInfoTable {
 
 /**
  * vinfo_set — record `reg_class`/`wide` for VReg `id`, growing the table
- * first when `id` is past its current length (a fresh rebuild of the
- * parallel arrays with the one position rewritten, mirroring the LIR
- * interpreter's `rf_set`).
+ * first when `id` is past its current length.
+ *
+ * MUTATES position `id` of each of the three PARALLEL arrays IN PLACE (an
+ * index-assign — slice value semantics alias the same underlying buffer as
+ * `grown.classes`/`.wides`/`.set`) INSTEAD OF rebuilding all three from
+ * scratch. `vinfo_set` is called once per recorded VReg — every isel result —
+ * so the old rebuild was O(VRegs²) over a whole function's selection, one
+ * more instance of the same shape `append_minst`/`append_inst` had (see
+ * their own doc-comments): every untouched position was re-pushed as a
+ * shallow copy across every rebuild generation, and the outer `classes`/
+ * `wides`/`set` self-appends are each checker-proven free-old-safe, so a
+ * stale generation's buffer could be parked as dead while still being the
+ * live tail a LATER generation's push-cache witness authorized an in-place
+ * grow into.
  *
  * @param VInfoTable t0  the table to update
  * @param u32 id  the VReg id being recorded
  * @param MRegClass reg_class  its register file
  * @param bool wide  its width flag
  * @return VInfoTable  the updated table
+ * @since 0.3.1 (native-region-crash, wild-write fix)
  */
 fn vinfo_set(t0: VInfoTable, id: u32, reg_class: MRegClass, wide: bool) -> VInfoTable {
     let grown = vinfo_grow(t0, (id to u64) + 1)
-    mut classes: []MRegClass = teko::list::empty()
-    mut wides: []bool = teko::list::empty()
-    mut set: []bool = teko::list::empty()
-    mut i: u64 = 0
-    loop {
-        if i >= grown.classes.len { break }
-        let is_target = (i to u32) == id
-        classes = teko::list::push(classes, if is_target { reg_class } else { grown.classes[i] })
-        wides = teko::list::push(wides, if is_target { wide } else { grown.wides[i] })
-        set = teko::list::push(set, if is_target { true } else { grown.set[i] })
-        i++
-    }
+    mut classes = grown.classes
+    mut wides = grown.wides
+    mut set = grown.set
+    let i = id to u64
+    classes[i] = reg_class
+    wides[i] = wide
+    set[i] = true
     VInfoTable { classes = classes; wides = wides; set = set }
 }
 
