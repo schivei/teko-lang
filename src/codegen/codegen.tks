@@ -8162,10 +8162,40 @@ fn cg_self_append_escapes(escaping: []str, dctx: DeferCtx, a: checker::TAssign) 
 }
 
 /**
+ * cg_slice_grow_elem_matches — does a slice-growing binding's NATURAL push element (the concrete
+ * element `type_list_builtin` fixed the push call's own `.type` to, taken from the pushed ITEM's
+ * type when the base was the sentinel `empty()`) mangle-equal the binding's DECLARED slice element?
+ * True for the ordinary case (`let xs: []T = push(empty(), <a T>)`); false when the declared slot
+ * is a WIDER variant than the pushed case (`let xs: []Variant = push(empty(), <a case of Variant>)`,
+ * 0.3.1 covariant-slice-push) — `cg_binding_grows_escaping_slice`'s fast path must not fire there:
+ * `emit_list_push` grows a buffer typed by the NATURAL (narrow) element, which mismatches the WIDER
+ * declared slot's `tk_slice_` struct as a `let` initializer ("invalid initializer"); the caller must
+ * fall through to `emit_as_r_in`'s element-wise covariant rebuild instead, which wraps each pushed
+ * case into the wider variant.
+ *
+ * @param bound  the binding's declared type (a `Slice`, already proven by the caller)
+ * @param vtype  the push call's own resolved type (always a `Slice`, by `type_list_builtin`)
+ * @return       true iff both slices' elements mangle to the identical C element type
+ * @since 0.3.1
+ */
+fn cg_slice_grow_elem_matches(bound: checker::Type, vtype: checker::Type) -> bool {
+    match bound {
+        checker::Slice as bs => match vtype {
+            checker::Slice as vs => cg_mangle_eq(bs.element, vs.element)
+            _ => false
+        }
+        _ => false
+    }
+}
+
+/**
  * cg_binding_grows_escaping_slice — whether binding `b` builds an escaping slice via a `list::push` /
  * `list::with_cap` / `mem::push_fo` call whose result OUTLIVES the frame (0.3.1 move-on-return A4/M1).
  * Such a bare slice grow follows the current region and, once M2 enters `_tkfr`, would die at the
  * return edge; routing it to `_tkrr` names it as escaping (M1: root; M2: the caller's region — the move).
+ * Guarded by `cg_slice_grow_elem_matches`: a push whose NATURAL element is NARROWER than `b`'s declared
+ * (wider-variant) slot needs the element-wise covariant rebuild `emit_as_r_in` provides, not this
+ * bare-grow fast path — see that helper's doc for the "invalid initializer" defect it closes.
  *
  * @param escaping  the function's escaping-name set
  * @param dctx      the defer context (carries `rr`)
@@ -8181,6 +8211,7 @@ fn cg_binding_grows_escaping_slice(escaping: []str, dctx: DeferCtx, b: checker::
     }
     if !str_list_has(escaping, name) { return false }
     if !cg_bound_is_slice(b.bound) { return false }
+    if !cg_slice_grow_elem_matches(b.bound, b.value.type) { return false }
     match b.value.kind {
         checker::TCall as c => cg_call_is_slice_grow(c)
         _ => false
@@ -10237,14 +10268,21 @@ fn cg_arms_have_escaping_write(escaping: []str, arms: []checker::TArm) -> bool {
 }
 
 /**
- * cg_block_has_escaping_write — whether block `body` DIRECTLY (not descending into nested loops, whose
- * inner statements bracket themselves) contains an escaping binding/assign, or a nested statement-form
- * `if`/`match` that itself does. Used to decide whether an enclosing statement-form `if`/`match` must
- * be conveyance-bracketed to move its subject's retained result to `_tkrr`.
+ * cg_block_has_escaping_write — whether block `body` (recursing into a nested `TLoopStmt`'s `init`/
+ * `body`, since a loop is never bracketed AS A WHOLE — see `cg_conveys_escape_deep` — but an escaping
+ * write underneath it still signals the ENCLOSING arm/branch) contains an escaping binding/assign, or
+ * a nested statement-form `if`/`match` that itself does. Used to decide whether an enclosing
+ * statement-form `if`/`match` must be conveyance-bracketed to move its subject's retained result to
+ * `_tkrr` — a write nested inside a `loop { }` that sits directly in an arm/branch is JUST AS retaining
+ * as one written directly in the arm's own top-level statements, so it must not be missed (0.3.1,
+ * dangling-`_tkfr`-alias fix: a match/if subject built in the frame region, retained only through a
+ * loop-nested escaping write, was previously left un-bracketed and freed by `tk_region_drop` while
+ * still aliased).
  *
  * @param escaping  the function's escaping-name set
  * @param body      the block statements
- * @return          true iff `body` directly contains an escaping write
+ * @return          true iff `body` (including through a nested loop's `init`/`body`) directly
+ *                  contains an escaping write
  * @since 0.3.1
  */
 fn cg_block_has_escaping_write(escaping: []str, body: []checker::TStatement) -> bool {
@@ -10255,6 +10293,7 @@ fn cg_block_has_escaping_write(escaping: []str, body: []checker::TStatement) -> 
             checker::TBinding as b => { if binding_conveys_escape(escaping, cg_target_name(b.target)) { return true } }
             checker::TAssign as a => { if binding_conveys_escape(escaping, a.name) { return true } }
             checker::TExprStmt as es => { if cg_expr_arm_has_escaping_write(escaping, es.expr) { return true } }
+            checker::TLoopStmt as l => { if cg_block_has_escaping_write(escaping, l.init) || cg_block_has_escaping_write(escaping, l.body) { return true } }
             _ => { }
         }
         i = i + 1
