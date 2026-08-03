@@ -928,6 +928,49 @@ fn lwt_tb6_deref_exit(use_expr: checker::TExpr) -> i64 {
 }
 
 /**
+ * lwt_agg_struct_fat_field_slot_is_8byte_aligned — the native-rodata-const-align regression
+ * (macOS-arm64 fixpoint `ld: pointer not aligned` on `AAPCS64.gpr_arg`): a struct whose
+ * declared FIRST field is a single ODD-sized scalar (`flag: byte`, 1 byte) and whose SECOND
+ * field is a fat slice (`xs: []i64`, the 16-byte `{ptr, len}` image) places that fat field's
+ * pointer/len slot at BYTE OFFSET 8 within the struct's OWN `ConstImage` — never at offset 1,
+ * which a byte-packed (non-natural-alignment) layout would place it at.
+ *
+ * C's own struct layout inserts 7 padding bytes after a 1-byte field before an 8-byte-aligned
+ * pointer member; `layout_of_sized` (`lir.tks`) mirrors that rule exactly, so `AbiDescriptor`'s
+ * `gpr_arg`/`fpr_arg`/… fat fields (each preceded only by OTHER 16-byte fat fields, hence
+ * already 8-aligned) and a struct like this one's `xs` (preceded by a 1-byte field) both land
+ * their pointer slot on an 8-byte boundary, matching the `cc`-compiled layout of `struct {
+ * unsigned char flag; int64_t *ptr; uint64_t len; }` bit-for-bit. This is the LOCUS-1 half of
+ * the fix; the LOCUS-2 half (every rodata ENTRY's own start staying 8-aligned once several
+ * odd-length entries precede it) is proven separately by
+ * `enc_rodata_reloc_offset_survives_odd_length_neighbors` (`encode_arm64_test.tkt`).
+ *
+ * @return void
+ */
+#test
+fn lwt_agg_struct_fat_field_slot_is_8byte_aligned() {
+    let decl = lwt_struct_decl("M3", lwt_two_fields(lwt_field("flag", "byte"), lwt_slice_field("xs", "i64")))
+    let elems = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), lwt_num_i64(10)), lwt_num_i64(20)), lwt_num_i64(30))
+    let xs_lit = lwt_array_lit(elems, checker::PrimKind::I64)
+    let fnames = teko::list::push(teko::list::push(teko::list::empty(), "flag"), "xs")
+    let fvals = teko::list::push(teko::list::push(teko::list::empty(), lwt_num_i64(7)), xs_lit)
+    let si = lwt_struct_init("M3", fnames, fvals)
+    let cd: checker::TItem = checker::TConstDecl { name = "K3"; namespace = ""; ty = checker::Named { name = "M3" }; init = si; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0 }
+    mut items: []checker::TItem = teko::list::push(teko::list::empty(), decl)
+    items = teko::list::push(items, cd)
+    let m = match lower_program(checker::TProgram { items = items }) { LModule as x => x; error as err => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(m.rodata.len == 2)
+    teko::assert::is_true(m.rodata[0].symbol == ".Lconst_K3.xs")
+    teko::assert::is_true(m.rodata[1].symbol == ".Lconst_K3")
+    teko::assert::is_true(m.rodata[1].bytes.len == 24)
+    teko::assert::is_true(m.rodata[1].bytes[0] == (7 to byte))
+    teko::assert::is_true(m.rodata[1].relocs.len == 1)
+    teko::assert::is_true(m.rodata[1].relocs[0].offset == 8)
+    teko::assert::is_true(m.rodata[1].relocs[0].offset % 8 == 0)
+    teko::assert::is_true(m.rodata[1].relocs[0].target == ".Lconst_K3.xs")
+}
+
+/**
  * lwt_typed_var — a `TVar` of an ARBITRARY resolved type `ty` (A1-5, #382 — a
  * `match` subject is not always a scalar/Named/Optional the other `lwt_*_var`
  * helpers cover; a `Variant`-typed subject needs this general form).
