@@ -2627,9 +2627,13 @@ fn rebase_relocs(acc: []Reloc, relocs: []Reloc, base: u32) -> []Reloc {
  * byte image, the module-rebased relocations, the defined function symbols, and
  * the current base (the next function's `__text` byte offset).
  *
+ * (0.3.1 C6.4) Made `pub` so the per-item fused native emit driver in `project.tks`
+ * (`emit_native_arm64`/`emit_native_arm64_linux`) can hold it as the ROOT-resident
+ * accumulator (Group B) across the scoped per-item lowering-and-encode windows.
+ *
  * @since #385 A4-4
  */
-type ModuleText = struct {
+pub type ModuleText = struct {
     /**
      * text — the concatenated `__text` bytes so far.
      */
@@ -2651,11 +2655,12 @@ type ModuleText = struct {
 
 /**
  * empty_module_text — the seed `ModuleText`: empty image, no relocations, no
- * symbols, base 0.
+ * symbols, base 0. (0.3.1 C6.4) `pub` so the fused emit driver seeds its
+ * root-resident accumulator with it.
  *
  * @return ModuleText  the seed accumulator
  */
-fn empty_module_text() -> ModuleText {
+pub fn empty_module_text() -> ModuleText {
     ModuleText { text = teko::list::empty(); relocs = teko::list::empty(); syms = teko::list::empty(); base = 0 to u32 }
 }
 
@@ -2675,6 +2680,26 @@ fn empty_module_text() -> ModuleText {
  */
 fn fold_func_into_text(abi: AbiDescriptor, acc: ModuleText, f: MFunc) -> ModuleText | error {
     let ef = match encode_func(abi, f) { EncodedFunc as x => x; error as e => return e }
+    fold_encoded_func(acc, ef)
+}
+
+/**
+ * fold_encoded_func — fold ONE already-encoded function's `EncodedFunc` into the running module
+ * `__text` accumulator: record its GLOBAL defined symbol at the current base (section 1, `__text`),
+ * flatten its words as little-endian bytes, and rebase its function-relative relocations by the
+ * base; the base then advances by the function's byte length. The encode of `f` and this fold are
+ * SEPARATE so the fused per-item native emit driver (0.3.1 C6.4) can encode inside a scoped scratch
+ * region and fold AFTER leaving it — the fold's appends land in the ROOT-resident accumulator
+ * (Group B), flattening the words and rebasing the relocs into freshly bump-allocated lists at the
+ * CURRENT (root) region, out of the still-live child before it is dropped (§2/§3 non-escape proof).
+ * `fold_func_into_text` is the non-scoped composition of `encode_func` and this fold.
+ *
+ * @param ModuleText acc  the running root-resident `__text` accumulator
+ * @param EncodedFunc ef  one function's encoded words, symbol name and function-relative relocs
+ * @return ModuleText  the extended accumulator
+ * @since 0.3.1 C6.4
+ */
+pub fn fold_encoded_func(acc: ModuleText, ef: EncodedFunc) -> ModuleText {
     let sym = Symbol { name = ef.symbol; defined = true; sect = 1 to u8; offset = acc.base; local = false }
     let text = append_words_le(acc.text, ef.words)
     let relocs = rebase_relocs(acc.relocs, ef.relocs, acc.base)
@@ -2922,7 +2947,29 @@ fn append_relocs_arm64(a: []Reloc, b: []Reloc) -> []Reloc {
 pub fn encode_module(abi: AbiDescriptor, m: MModule) -> EncodedModule | error {
     if m.globals.len > (0 to u64) { return honest_globals() }
     let mt = match encode_functions(abi, m.funcs) { ModuleText as x => x; error as e => return e }
-    let rod = match encode_rodata(m.rodata) { ModuleRodata as x => x; error as e => return e }
+    finish_encoded_module(mt, m.rodata, m.globals)
+}
+
+/**
+ * finish_encoded_module — assemble the final `EncodedModule` from an already-accumulated `__text`
+ * (`mt`, one defined symbol + rebased relocs per function) plus the module's PERSISTENT
+ * rodata/globals tables (Group B, carried by-reference the whole way — never in a scratch region):
+ * intern the rodata bytes, build the symbol table in the Mach-O-required
+ * LOCAL-then-GLOBAL-then-UNDEFINED order (file-local per rodata entry, global per function, then one
+ * undefined per externally-referenced symbol), and partition the relocations. A module carrying data
+ * globals raises `A4-globals` (the N2 subset lowers none). This is the module-finalize tail of
+ * `encode_module` factored out so the fused per-item native emit driver (0.3.1 C6.4) reaches the SAME
+ * assembly incrementally, after its per-item windows have folded into `mt`.
+ *
+ * @param ModuleText mt  the accumulated `__text` image, symbols and rebased relocs
+ * @param []lir::LRodata rodata  the module's rodata table (Group B, by-reference)
+ * @param []lir::LGlobal globals  the module's data globals (empty in the N2 subset)
+ * @return EncodedModule | error  the section images + ordered symbols + relocs, or `A4-globals`
+ * @since 0.3.1 C6.4
+ */
+pub fn finish_encoded_module(mt: ModuleText, rodata: []lir::LRodata, globals: []lir::LGlobal) -> EncodedModule | error {
+    if globals.len > (0 to u64) { return honest_globals() }
+    let rod = match encode_rodata(rodata) { ModuleRodata as x => x; error as e => return e }
     let defined = concat_symbols(rod.syms, mt.syms)
     let undef = collect_undefined(defined, mt.relocs)
     let symbols = concat_symbols(defined, undef)
