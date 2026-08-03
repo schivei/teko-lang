@@ -10237,14 +10237,21 @@ fn cg_arms_have_escaping_write(escaping: []str, arms: []checker::TArm) -> bool {
 }
 
 /**
- * cg_block_has_escaping_write — whether block `body` DIRECTLY (not descending into nested loops, whose
- * inner statements bracket themselves) contains an escaping binding/assign, or a nested statement-form
- * `if`/`match` that itself does. Used to decide whether an enclosing statement-form `if`/`match` must
- * be conveyance-bracketed to move its subject's retained result to `_tkrr`.
+ * cg_block_has_escaping_write — whether block `body` (recursing into a nested `TLoopStmt`'s `init`/
+ * `body`, since a loop is never bracketed AS A WHOLE — see `cg_conveys_escape_deep` — but an escaping
+ * write underneath it still signals the ENCLOSING arm/branch) contains an escaping binding/assign, or
+ * a nested statement-form `if`/`match` that itself does. Used to decide whether an enclosing
+ * statement-form `if`/`match` must be conveyance-bracketed to move its subject's retained result to
+ * `_tkrr` — a write nested inside a `loop { }` that sits directly in an arm/branch is JUST AS retaining
+ * as one written directly in the arm's own top-level statements, so it must not be missed (0.3.1,
+ * dangling-`_tkfr`-alias fix: a match/if subject built in the frame region, retained only through a
+ * loop-nested escaping write, was previously left un-bracketed and freed by `tk_region_drop` while
+ * still aliased).
  *
  * @param escaping  the function's escaping-name set
  * @param body      the block statements
- * @return          true iff `body` directly contains an escaping write
+ * @return          true iff `body` (including through a nested loop's `init`/`body`) directly
+ *                  contains an escaping write
  * @since 0.3.1
  */
 fn cg_block_has_escaping_write(escaping: []str, body: []checker::TStatement) -> bool {
@@ -10255,6 +10262,7 @@ fn cg_block_has_escaping_write(escaping: []str, body: []checker::TStatement) -> 
             checker::TBinding as b => { if binding_conveys_escape(escaping, cg_target_name(b.target)) { return true } }
             checker::TAssign as a => { if binding_conveys_escape(escaping, a.name) { return true } }
             checker::TExprStmt as es => { if cg_expr_arm_has_escaping_write(escaping, es.expr) { return true } }
+            checker::TLoopStmt as l => { if cg_block_has_escaping_write(escaping, l.init) || cg_block_has_escaping_write(escaping, l.body) { return true } }
             _ => { }
         }
         i = i + 1
