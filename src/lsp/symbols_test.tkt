@@ -1,0 +1,131 @@
+use teko::parser
+
+/**
+ * SYM_PATH — the fixture document's path, stamped onto every symbol `build_symbol_index` reads
+ * out of it (its `file`).
+ */
+const SYM_PATH: str = "/proj/sym.tks"
+
+/**
+ * SYM_SRC — a module carrying one of each declaration `build_symbol_index` indexes: a documented
+ * `fn`, a documented `type` with a field and an instance method, and a documented `const`.
+ */
+const SYM_SRC: str = "/**\n * Doubles a number.\n */\npub fn double(x: i64) -> i64 { return x * 2 }\n\n/**\n * A point in 2D space.\n */\npub type Point = struct { x: i64; y: i64; fn len(self) -> i64 { return self.x } }\n\n/**\n * The circle constant, approximated.\n */\npub const PI: f64 = 3.14\n"
+
+/**
+ * sym_program — `SYM_SRC` lexed and parsed into a `parser::Program`, the input `build_symbol_index`
+ * consumes. A lex/parse fault degrades to an empty program rather than aborting the test — the
+ * assertions below would then simply fail to find any symbol, naming the real defect.
+ *
+ * @return  the fixture module as a merged program
+ */
+fn sym_program() -> parser::Program {
+    match document_program(SYM_PATH, SYM_SRC) {
+        parser::Program as p => p
+        error => parser::Program { items = teko::list::empty() }
+    }
+}
+
+/**
+ * find_symbol — the first entry of `syms` named `name`, or `null` when none matches. The lookup
+ * every fixture test below uses instead of assuming a fixed index.
+ *
+ * @param syms  the symbol list to search
+ * @param name  the symbol name to find
+ * @return      the matching symbol, or `null`
+ */
+fn find_symbol(syms: []Symbol, name: str) -> Symbol | null {
+    mut i: u64 = 0
+    loop {
+        if i >= syms.len { break }
+        if syms[i].name == name { return syms[i] }
+        i = i + 1
+    }
+    null
+}
+
+#test
+/**
+ * build_symbol_index_indexes_a_documented_function — the top-level `double` fn surfaces as a
+ * `Function` symbol carrying its doc-comment and a rendered `fn name(params) -> ret` signature.
+ */
+fn build_symbol_index_indexes_a_documented_function() {
+    let syms = build_symbol_index(sym_program())
+    let s = match find_symbol(syms, "double") {
+        Symbol as s => s
+        null => { teko::assert::is_true(false); return }
+    }
+    teko::assert::is_true(s.kind == SymKind::Function)
+    teko::assert::str_contains(s.doc, "Doubles a number")
+    teko::assert::eq_str(s.signature, "fn double(x: i64) -> i64")
+}
+
+#test
+/**
+ * build_symbol_index_indexes_a_documented_type — the top-level `Point` type surfaces as a `Type`
+ * symbol carrying its own doc-comment and a `type Name` signature.
+ */
+fn build_symbol_index_indexes_a_documented_type() {
+    let syms = build_symbol_index(sym_program())
+    let s = match find_symbol(syms, "Point") {
+        Symbol as s => s
+        null => { teko::assert::is_true(false); return }
+    }
+    teko::assert::is_true(s.kind == SymKind::Type)
+    teko::assert::str_contains(s.doc, "A point in 2D space")
+    teko::assert::eq_str(s.signature, "type Point")
+}
+
+#test
+/**
+ * build_symbol_index_indexes_struct_fields — `Point`'s two fields each surface as their own
+ * `Field` symbol with a `name: Type` signature.
+ */
+fn build_symbol_index_indexes_struct_fields() {
+    let syms = build_symbol_index(sym_program())
+    let x = match find_symbol(syms, "x") { Symbol as s => s; null => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(x.kind == SymKind::Field)
+    teko::assert::eq_str(x.signature, "x: i64")
+    let y = match find_symbol(syms, "y") { Symbol as s => s; null => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(y.kind == SymKind::Field)
+    teko::assert::eq_str(y.signature, "y: i64")
+}
+
+#test
+/**
+ * build_symbol_index_indexes_a_struct_method — `Point::len`, an instance method (untyped receiver
+ * `self`), surfaces as a `Method` symbol with its OWN recorded position (unlike a field) and an
+ * un-typed `self` in the rendered signature.
+ */
+fn build_symbol_index_indexes_a_struct_method() {
+    let syms = build_symbol_index(sym_program())
+    let m = match find_symbol(syms, "len") { Symbol as s => s; null => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(m.kind == SymKind::Method)
+    teko::assert::eq_str(m.signature, "fn len(self) -> i64")
+}
+
+#test
+/**
+ * build_symbol_index_indexes_a_documented_const — the module-level `PI` const surfaces as a
+ * `Const` symbol with a `const NAME: Type` signature.
+ */
+fn build_symbol_index_indexes_a_documented_const() {
+    let syms = build_symbol_index(sym_program())
+    let s = match find_symbol(syms, "PI") {
+        Symbol as s => s
+        null => { teko::assert::is_true(false); return }
+    }
+    teko::assert::is_true(s.kind == SymKind::Const)
+    teko::assert::str_contains(s.doc, "circle constant")
+    teko::assert::eq_str(s.signature, "const PI: f64")
+}
+
+#test
+/**
+ * build_symbol_index_finds_exactly_the_expected_symbols — the fixture yields exactly six symbols
+ * (double, Point, x, y, len, PI) — no duplicates, nothing dropped.
+ */
+fn build_symbol_index_finds_exactly_the_expected_symbols() {
+    let syms = build_symbol_index(sym_program())
+    teko::assert::eq_u64(syms.len, 6)
+}
