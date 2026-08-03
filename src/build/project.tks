@@ -2901,6 +2901,234 @@ fn encode_module_fused_x86(entry: teko::lir::LModule) -> teko::backend::EncodedM
 }
 
 /**
+ * copy_str_to_current_region — a byte-for-byte copy of `s`, freshly allocated in whichever region
+ * is CURRENT at the call site (`tk_str_concat` always mallocs a NEW buffer regardless of operand
+ * length, `teko_rt.c:143`). The fused native lowering driver (C6.3) calls this AFTER
+ * `region_leave()`, so the copy lands in the ROOT its accumulators reside in — the tool a `str`
+ * synthesized INSIDE a scratch region (a mangled function symbol, a reloc target, a synthesized
+ * rodata symbol) needs to outlive that region's drop.
+ *
+ * @param s  the string to copy
+ * @return   a fresh copy of `s`, resident in the current region
+ * @since 0.3.1 C6.2
+ */
+fn copy_str_to_current_region(s: str) -> str { teko::str::concat("", s) }
+
+/**
+ * copy_bytes_to_current_region — `src` copied byte-by-byte into a freshly built list, so a
+ * `[]byte` slice possibly referencing a scratch region's memory is safe to hold onto in the
+ * CURRENT region. Mirrors `append_bytes`'s elementwise copy (`encode_arm64.tks:2741`) without
+ * calling it, so this crumb's edits stay concentrated in `project.tks` — no encode/isel file is
+ * touched (§5 of the design).
+ *
+ * @param src  the bytes to copy
+ * @return     a fresh `[]byte`, resident in the current region
+ * @since 0.3.1 C6.2
+ */
+fn copy_bytes_to_current_region(src: []byte) -> []byte {
+    mut out: []byte = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= src.len { break }
+        out = teko::list::push(out, src[i])
+        i++
+    }
+    out
+}
+
+/**
+ * copy_reloc_to_current_region_x86 — `r` with its `sym` name force-copied to the current region
+ * (E1, extended for the fused lowering driver). Under Tier 1 (encode-only fusion) every symbol
+ * name already originated in `prog`, lowered whole-program on the root before any scratch region
+ * opened, so the encode-side fold never needed to copy it. The C6.3 lowering fusion moves
+ * `mangle_fn_symbol`'s `str::concat` calls INSIDE the item's own scratch region, so this driver
+ * can no longer assume `r.sym` survives the region's drop without an explicit copy.
+ *
+ * @param r  the function-relative relocation to copy
+ * @return   `r` with `sym` resident in the current region
+ * @since 0.3.1 C6.2
+ */
+fn copy_reloc_to_current_region_x86(r: teko::backend::RelocX86) -> teko::backend::RelocX86 {
+    teko::backend::RelocX86 { offset = r.offset; sym = copy_str_to_current_region(r.sym); kind = r.kind; addend = r.addend; sect = r.sect }
+}
+
+/**
+ * copy_relocs_to_current_region_x86 — `copy_reloc_to_current_region_x86` applied to every entry of
+ * `relocs`, in order.
+ *
+ * @param relocs  the function-relative relocations to copy
+ * @return        `relocs`, each entry resident in the current region
+ * @since 0.3.1 C6.2
+ */
+fn copy_relocs_to_current_region_x86(relocs: []teko::backend::RelocX86) -> []teko::backend::RelocX86 {
+    mut out: []teko::backend::RelocX86 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= relocs.len { break }
+        out = teko::list::push(out, copy_reloc_to_current_region_x86(relocs[i]))
+        i++
+    }
+    out
+}
+
+/**
+ * copy_encoded_func_to_current_region_x86 — `ef` with its `symbol` and every reloc's `sym` force-
+ * copied to the current region (E1, extended); `bytes` is left as-is, because
+ * `fold_encoded_func_x86`'s own `append_bytes` already copies it byte-by-byte into the root
+ * accumulator (Tier 1, unchanged).
+ *
+ * @param ef  the encoded function to copy
+ * @return    `ef` with every `str` field resident in the current region
+ * @since 0.3.1 C6.2
+ */
+fn copy_encoded_func_to_current_region_x86(ef: teko::backend::EncodedFuncX86) -> teko::backend::EncodedFuncX86 {
+    teko::backend::EncodedFuncX86 { symbol = copy_str_to_current_region(ef.symbol); bytes = ef.bytes; relocs = copy_relocs_to_current_region_x86(ef.relocs) }
+}
+
+/**
+ * encode_lfuncs_in_region_x86 — encode a LIST of `LFunc` (an item's own top-level function plus
+ * its newly lifted closures/thunks) inside the scratch region the caller has already entered, each
+ * one through the proved `encode_lfunc_in_region_x86` pipeline (isel → regalloc → encode). The
+ * fused native lowering driver (C6.3) calls this BEFORE `region_leave()`; every returned
+ * `EncodedFuncX86`'s `str` fields may still reference this region's memory — the caller commits
+ * through `fold_encoded_funcs_x86` (which copies) AFTER leaving, before the region drops.
+ *
+ * @param fs  the item's lowered functions, in emission order
+ * @return    one `EncodedFuncX86` per function, or the first propagated honest-stop
+ * @since 0.3.1 C6.2
+ */
+pub fn encode_lfuncs_in_region_x86(fs: []teko::lir::LFunc) -> []teko::backend::EncodedFuncX86 | error {
+    mut out: []teko::backend::EncodedFuncX86 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= fs.len { break }
+        let ef = match encode_lfunc_in_region_x86(fs[i]) { teko::backend::EncodedFuncX86 as x => x; error as e => return e }
+        out = teko::list::push(out, ef)
+        i++
+    }
+    out
+}
+
+/**
+ * fold_encoded_funcs_x86 — fold a LIST of already-encoded functions into the root-resident `.text`
+ * accumulator `mt`, copying each one to the current region first (E1, extended;
+ * `copy_encoded_func_to_current_region_x86`) so the fold's appends never retain a `str` pointing
+ * into a region the caller is about to drop. Called AFTER `region_leave()` (so the copies and the
+ * fold itself land in the ROOT) and BEFORE `region_drop` (the item's region is still alive, so the
+ * strings it may have synthesized are still readable to copy FROM).
+ *
+ * @param mt   the running root-resident `.text` accumulator
+ * @param efs  the item's encoded functions, in emission order
+ * @return     the extended accumulator
+ * @since 0.3.1 C6.2
+ */
+fn fold_encoded_funcs_x86(mt: teko::backend::ModuleTextX86, efs: []teko::backend::EncodedFuncX86) -> teko::backend::ModuleTextX86 {
+    mut acc = mt
+    mut i: u64 = 0
+    loop {
+        if i >= efs.len { break }
+        acc = teko::backend::fold_encoded_func_x86(acc, copy_encoded_func_to_current_region_x86(efs[i]))
+        i++
+    }
+    acc
+}
+
+/**
+ * copy_ldata_reloc_to_current_region — one `LDataReloc` with its `target` name force-copied to the
+ * current region (E4's relocation sibling — empty in every real compile today, T-B6, but handled
+ * generically so `commit_rodata_delta` stays correct if a future rodata-internal pointer is ever
+ * synthesized inside an item's scratch region).
+ *
+ * @param r  the rodata-internal relocation to copy
+ * @return   `r` with `target` resident in the current region
+ * @since 0.3.1 C6.2
+ */
+fn copy_ldata_reloc_to_current_region(r: teko::lir::LDataReloc) -> teko::lir::LDataReloc {
+    teko::lir::LDataReloc { offset = r.offset; target = copy_str_to_current_region(r.target) }
+}
+
+/**
+ * copy_ldata_relocs_to_current_region — `copy_ldata_reloc_to_current_region` applied to every
+ * entry of `relocs`, in order.
+ *
+ * @param relocs  the rodata-internal relocations to copy
+ * @return        `relocs`, each entry resident in the current region
+ * @since 0.3.1 C6.2
+ */
+fn copy_ldata_relocs_to_current_region(relocs: []teko::lir::LDataReloc) -> []teko::lir::LDataReloc {
+    mut out: []teko::lir::LDataReloc = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= relocs.len { break }
+        out = teko::list::push(out, copy_ldata_reloc_to_current_region(relocs[i]))
+        i++
+    }
+    out
+}
+
+/**
+ * copy_lrodata_to_current_region — one `LRodata` entry with `symbol`, `bytes` and `relocs` all
+ * force-copied to the current region (E4): a literal's symbol may have been SYNTHESIZED inside the
+ * item's own scratch region (`str::concat`/`rodata_symbol`), so — like a reloc's `sym` (E1,
+ * extended) — it cannot be assumed to already reside in `prog`/the root the way Tier 1's
+ * whole-program-lowered-first symbols could.
+ *
+ * @param r  the rodata entry to copy
+ * @return   `r` with every field resident in the current region
+ * @since 0.3.1 C6.2
+ */
+fn copy_lrodata_to_current_region(r: teko::lir::LRodata) -> teko::lir::LRodata {
+    teko::lir::LRodata { symbol = copy_str_to_current_region(r.symbol); bytes = copy_bytes_to_current_region(r.bytes); relocs = copy_ldata_relocs_to_current_region(r.relocs) }
+}
+
+/**
+ * commit_rodata_delta — copy to the root-resident rodata accumulator `robase` the entries an
+ * item's lowering interned beyond `robase`'s own length (the item's delta), each one copied
+ * field-by-field into the current region (E4). Called with the item's scratch region still alive
+ * (after `region_leave()`, before `region_drop`), so the next item's dedup and the final
+ * `.rodata` section see entries resident in the root, never inside a region about to be dropped.
+ *
+ * @param robase  the root-resident rodata accumulator (the prefix already committed)
+ * @param grown   the rodata table the item's lowering returned (the SAME prefix plus its delta)
+ * @return        `robase` extended with the delta, resident in the current region
+ * @since 0.3.1 C6.2
+ */
+fn commit_rodata_delta(robase: []teko::lir::LRodata, grown: []teko::lir::LRodata) -> []teko::lir::LRodata {
+    mut out = robase
+    mut i: u64 = robase.len
+    loop {
+        if i >= grown.len { break }
+        out = teko::list::push(out, copy_lrodata_to_current_region(grown[i]))
+        i++
+    }
+    out
+}
+
+/**
+ * commit_loose — append to the root-resident `loose` accumulator `acc` the loose top-level
+ * statements an item contributed beyond `acc`'s own length (E6). Every element is a
+ * `checker::TStatement` residing in `prog` (root) since long before any scratch region opened, so
+ * only the list SPINE needs rebuilding here — no field of an individual statement needs copying.
+ * Called after `region_leave()` so the new spine nodes land in the root, for the virtual-main to
+ * read once every item's region has dropped.
+ *
+ * @param acc    the root-resident loose accumulator
+ * @param delta  the loose statements the item's lowering returned (the SAME prefix plus its delta)
+ * @return       `acc` extended with the delta, resident in the current region
+ * @since 0.3.1 C6.2
+ */
+fn commit_loose(acc: []checker::TStatement, delta: []checker::TStatement) -> []checker::TStatement {
+    mut out = acc
+    mut i: u64 = acc.len
+    loop {
+        if i >= delta.len { break }
+        out = teko::list::push(out, delta[i])
+        i++
+    }
+    out
+}
+
+/**
  * emit_native_x86 — the x86-64/ELF own-backend tail (#386 B1): give `lmod` the platform-ABI entry
  * point (`teko::lir::wrap_native_entry` — `argc`/`argv` + `tk_set_args`, 0.3.1 native-args fix),
  * then encode it through the FUSED per-function driver (`encode_module_fused_x86`, 0.3.1
