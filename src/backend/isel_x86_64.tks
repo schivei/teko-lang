@@ -603,38 +603,24 @@ fn f32_sign_bit_mask_x86() -> i64 {
 }
 
 /**
- * select_i_to_f_bits_x86 — the `IToFBits` selection (`teko::f64_from_bits`, degrau 27): one
- * `MFMovX86` GPR->FPR (x86-64's `MOVQ xmm, r64`), a RAW bit crossing into a fresh FPR result —
- * NOT `CVTSI2SD` (`select_itof_x86`'s numeric conversion), which would compute the nearest float
- * to the integer's VALUE instead of reinterpreting its bits. `dbl` is always true: the checker's
- * `f64_from_bits` signature (`checker/scope.tks`) is fixed to `u64 -> f64`, no `f32` form exists.
+ * select_bits_cross_x86 — the `IToFBits`/`FToIBits` selection (degrau 27): one `MFMovX86` raw
+ * GPR/FPR-crossing move (x86-64's `MOVQ`) into a fresh result VReg — NOT `CVTSI2SD`/`CVTTSD2SI`
+ * (numeric conversion, a different value). `dbl` is always true: `f64_from_bits`/`f64_bits`
+ * (`checker/scope.tks`) are fixed to `u64 <-> f64`, no `f32` form exists.
  *
  * @param SelCtxX86 ctx0  the context to extend
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
- * @param a  the operand VReg (a GPR holding the `u64` bit pattern)
+ * @param a  the operand VReg
+ * @param bool to_float  true for `IToFBits` (GPR operand, fresh FPR result), false for
+ *                       `FToIBits` (FPR operand, fresh GPR result)
  * @return SelCtxX86  the advanced context
  */
-fn select_i_to_f_bits_x86(ctx0: SelCtxX86, inst: lir::LInst, a: u32) -> SelCtxX86 {
-    let dst = vreg(inst.result, MRegClass::FPR)
-    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::FPR, true)
-    selctx_x86_emit(ctx1, fmov_x86(dst, vreg(a, MRegClass::GPR), true))
-}
-
-/**
- * select_f_to_i_bits_x86 — the `FToIBits` selection (`teko::f64_bits`, degrau 27): one
- * `MFMovX86` FPR->GPR (x86-64's `MOVQ r64, xmm`), `select_i_to_f_bits_x86`'s mirror image — a RAW
- * bit crossing, NOT `CVTTSD2SI` (`select_ftoi_x86`'s numeric conversion). `dbl` is always true, the
- * same `f64`-only reason `select_i_to_f_bits_x86` names.
- *
- * @param SelCtxX86 ctx0  the context to extend
- * @param lir::LInst inst  the enclosing instruction (its result VReg)
- * @param a  the operand VReg (an FPR holding the `f64` value)
- * @return SelCtxX86  the advanced context
- */
-fn select_f_to_i_bits_x86(ctx0: SelCtxX86, inst: lir::LInst, a: u32) -> SelCtxX86 {
-    let dst = vreg(inst.result, MRegClass::GPR)
-    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::GPR, true)
-    selctx_x86_emit(ctx1, fmov_x86(dst, vreg(a, MRegClass::FPR), true))
+fn select_bits_cross_x86(ctx0: SelCtxX86, inst: lir::LInst, a: u32, to_float: bool) -> SelCtxX86 {
+    let dst_class = if to_float { MRegClass::FPR } else { MRegClass::GPR }
+    let src_class = if to_float { MRegClass::GPR } else { MRegClass::FPR }
+    let dst = vreg(inst.result, dst_class)
+    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, dst_class, true)
+    selctx_x86_emit(ctx1, fmov_x86(dst, vreg(a, src_class), true))
 }
 
 /**
@@ -748,8 +734,8 @@ fn select_un_x86(ctx0: SelCtxX86, inst: lir::LInst, u: lir::LUn) -> SelCtxX86 {
         lir::LUnOp::IToF => select_itof_x86(ctx0, inst, u.a)
         lir::LUnOp::FToI => select_ftoi_x86(ctx0, inst, u.a, a_info.wide)
         lir::LUnOp::FToF => select_ftof_x86(ctx0, inst, u.a, a_info.wide)
-        lir::LUnOp::IToFBits => select_i_to_f_bits_x86(ctx0, inst, u.a)
-        lir::LUnOp::FToIBits => select_f_to_i_bits_x86(ctx0, inst, u.a)
+        lir::LUnOp::IToFBits => select_bits_cross_x86(ctx0, inst, u.a, true)
+        lir::LUnOp::FToIBits => select_bits_cross_x86(ctx0, inst, u.a, false)
     }
 }
 
