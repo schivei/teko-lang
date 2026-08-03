@@ -1700,3 +1700,68 @@ Feature: 0.3.1 backend-memoria — o emit nativo fundido por-funcao escopa o scr
     When built and run
     Then stdout pattern = "scenario bmem_loop_fn: ok"
 
+
+Feature: promoted native known-stops and the one_byte oracle — folded from the retired native_union / one_byte projects (0.3.1 consolidation)
+
+  # (native_union_scalar) THE NATIVE BACKEND'S NULL-UNION STOP, PROMOTED. Owner ruling 2026-07-28:
+  # "trocar a asserção para esperar por falha honesta". CLOSED (cargo/0.3.1.0-null-adopt): `probe()`
+  # returns 42 on BOTH routes. What closed it is narrow — `lower_cast` unconditionally asked
+  # `prim_kind_of` for its cast's own type, which has no single machine class for a `Variant`; a
+  # `Variant`-targeted cast (the synthetic widening node the const inliner wraps a scalar-const
+  # reference in) now routes through `lower_value_into_type`. The general `.32` UnionRepr porting is
+  # NOT claimed done — only this shape (a numeric null-union reached through the const-inliner's widen)
+  # is verified. It is a MEMBER now that it lowers: one build, asserting the value the C route always
+  # produced (40 present + 2 absent-fallback = 42).
+  Scenario: native_union_scalar (own-native — a numeric null-union reached through the const-inliner's widen now lowers)
+    When built and run
+    Then stdout pattern = "scenario native_union_scalar: ok"
+
+  # (native_union_nested) CLOSED — 0.3.1.0 degrau 25. A null-union struct nested INSIDE another
+  # null-union field, the shape the native placement-coercion stop was first measured on. Every
+  # own-backend placement coerces its value into the slot's DECLARED type (`lower_value_into_type`)
+  # except two that had no declared type — a struct-literal field and a call argument;
+  # `collect_field_decls` and `callee_param_types` are what those placements now read. Both levels
+  # present (30), inner `null` (fallback 5), outer `null` (fallback 7) sum to 42, so a wrapper written
+  # at either level with the wrong tag shows up as a WRONG SUM, not a stop.
+  Scenario: native_union_nested (own-native — a null-union field nested inside a null-union field round-trips both levels)
+    When built and run
+    Then stdout pattern = "scenario native_union_nested: ok"
+
+  # (one_byte_native) `teko::one_byte(byte) -> str` existed in the checker and the runtime mirror but
+  # was NOT lowered natively: `call_symbol` found no symbol and returned `unresolved_builtin_stop`.
+  # The exit sums SIX disjoint weights (3, 12, 16, 32, 64, 128 = 255), one per call shape: the minimal
+  # call, the escape-accumulation of `json.tks:218-225`, the UTF-8 pair of `json.tks:296`, a byte from
+  # a slice index, two live results at once, and the NUL byte. No partial sum reaches 255, so a shape
+  # that falls moves the number and names itself. The C-route oracle for the same 255 rides as
+  # `cases/one_byte_c.tks` (env C — the shared project build's config is fixed by the first scenario's
+  # env, so the two routes cannot share one build).
+  Scenario: one_byte_native (own-native — the six call shapes of `one_byte` each produce their own byte and length)
+    When built and run
+    Then stdout pattern = "scenario one_byte_native: ok"
+
+  # (one_byte_c) the C route of the `one_byte` regressor, the ORACLE of the value the native side
+  # asserts. `Given env = ["TEKO_BACKEND=c"]` fixes a STANDALONE build (its own synthesized manifest),
+  # so it never shares the native member build above. The same program, the same 255: the C route
+  # reaches it by `tk_one_byte` (a `tk_str` struct return by value) and the native route by
+  # `tk_one_byte_len` (pointer in the result register, length through the hidden out-slot) — two
+  # independent realizations that must agree on the number.
+  Scenario: one_byte_c (C route — the same 255 the native member asserts, through tk_one_byte)
+    Given source = "cases/one_byte_c.tks"
+    Given env = ["TEKO_BACKEND=c"]
+    When built and run
+    Then stdout pattern = "255"
+
+  # (native_iface_fat) A KNOWN-STOP still open: a fat (`str`) result arriving through INTERFACE
+  # DISPATCH. The arm calls `v.speak()` — a VIRTUAL dispatch whose result is `str` — and
+  # `lower_call_fat`'s own narrower stop refuses a fat result through a vtable. Nothing declares a loose
+  # `null`; both bindings are annotated `Animal_sbmd | null` and receive what that type accepts, so the
+  # stop is the backend's, not a bad fixture. It rides as a `Given source` compile-fail (it aborts the
+  # build and cannot be a member of the successful shared build). PROMOTE to a member (`When built and
+  # run` / value 42) the day the fat interface-dispatch result lands. (Four bulk scenarios hit this
+  # exact stop while being triaged — `class_base_binding`, `class_inheritance`,
+  # `class_invariant_construction`, `class_upcast` — reported, not re-pinned: identical diagnostic.)
+  Scenario: native_iface_fat (own-native — a str-returning virtual method called through its base stops honestly)
+    Given source = "cases/native_iface_fat.tks"
+    When compilation fails
+    Then diagnostic = "fat-pointer interface-dispatch result not yet lowered"
+
