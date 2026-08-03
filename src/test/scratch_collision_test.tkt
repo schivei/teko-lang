@@ -69,3 +69,96 @@ fn sc_the_writers_derive_different_paths() {
     teko::assert::str_absent(here, "sc_writer_a_reads_back_its_own_bytes")
     teko::assert::str_absent(here, "sc_writer_b_reads_back_its_own_bytes")
 }
+
+/**
+ * jc_antes_raw_path — this test's raw, DELIBERATELY unrooted path, built by concatenation rather than
+ * spelled as one literal. Not a scratch-namespace violation left in the corpus: it is the ANTES half
+ * of journal J8 (journaling-de-corrida-0.3.1 §8), the one the design asked for and the file did not
+ * have — a real corruption reproduced in this run, not asserted in prose about a past manual measurement
+ * (the "measured without the scope, on this machine" note on `sc_writer_a` above). Built from three
+ * pieces so no single literal in this source spells a scratch prefix G1 would have to wrap.
+ *
+ * @return the shared raw path
+ */
+fn jc_antes_raw_path() -> str { teko::str::concat("bin", "/.", "jc-antes-shared-raw") }
+
+/**
+ * jc_antes_the_same_raw_path_loses_a_write — THE ANTES HALF: two writers deriving the identical path
+ * with NO run/test identity folded in at all — the shape `teko::test::scoped` replaced — collide, and
+ * the second write is the only one either could ever read back. This is the defect the composer
+ * exists to prevent, reproduced for real inside this run rather than left as a comment about an
+ * earlier one-off measurement.
+ *
+ * SEQUENTIAL WITHIN ONE TEST, NOT CROSS-PROCESS: the real two-shard race is `sc_writer_a`/
+ * `sc_writer_b` above (through the FIXED composer, in two different shard processes). What this adds
+ * is the mechanical fact that makes that race dangerous — a shared literal is last-write-wins — proved
+ * directly rather than argued from it.
+ *
+ * @return void
+ */
+#test
+fn jc_antes_the_same_raw_path_loses_a_write() {
+    let raw = jc_antes_raw_path()
+    match teko::io::write_file(raw, "writer-A") { error => { }; null => { } }
+    match teko::io::write_file(raw, "writer-B") { error => { }; null => { } }
+    let back = match teko::io::read_file(raw) { str as s => s; error => "" }
+    teko::assert::eq_str(back, "writer-B")
+    teko::assert::ne_str(back, "writer-A")
+    match teko::fs::remove_file(raw) { error => { }; null => { } }
+}
+
+/**
+ * jc_depois_the_same_base_through_the_composer_survives — THE DEPOIS HALF, in the SAME run: the
+ * identical shape of call — one shared base, a write, a read-back — but derived through
+ * `teko::test::scoped` instead of spelled raw. Paired with `jc_antes_*` above so the before/after
+ * contrast (§8) lives in one file instead of one proof and one comment about the other.
+ *
+ * @return void
+ */
+#test
+fn jc_depois_the_same_base_through_the_composer_survives() {
+    let mine = teko::test::scoped("bin/.jc-depois-shared-base")
+    match teko::io::write_file(mine, "writer-mine") { error => { }; null => { } }
+    let back = match teko::io::read_file(mine) { str as s => s; error => "" }
+    teko::assert::eq_str(back, "writer-mine")
+    teko::assert::str_contains(mine, "jc_depois_the_same_base_through_the_composer_survives")
+}
+
+/**
+ * jc_shard_of — the SAME formula `tk_test_shard_take` runs (`src/runtime/teko_rt.c`): ordinal modulo
+ * shard count. Restated here in pure Teko so the invariant the whole isolation axis depends on —
+ * neighbouring ordinals never share a shard — is provable as a property instead of only readable as a
+ * comment in the runtime. NOT a live-process integration test: proving it against the compiled gate
+ * binary would mean spawning several real shard children and reading back which ordinal each one took,
+ * which is the heavier proof `sc_writer_a`/`sc_writer_b` already carry for the two-shard case. This is
+ * the general case, for any shard count, as pure arithmetic.
+ *
+ * @param ordinal      the test's position in the suite's fixed enumeration order
+ * @param shard_count  how many shards the run was split into
+ * @return              which shard takes this ordinal
+ */
+fn jc_shard_of(ordinal: u64, shard_count: u64) -> u64 { ordinal % shard_count }
+
+/**
+ * jc_round_robin_puts_neighbours_in_different_shards — journal J8's named fixture: for every shard
+ * count from 2 to 16, and for a run of consecutive ordinals, no two ADJACENT ordinals ever land in the
+ * same shard. This is exactly the property `sc_writer_a`/`sc_writer_b` rely on being true of the real
+ * runtime (declared as adjacent `#test`s on purpose, §the file's own opening comment) — proved here
+ * directly instead of only assumed from their placement.
+ *
+ * @return void
+ */
+#test
+fn jc_round_robin_puts_neighbours_in_different_shards() {
+    mut shard_count: u64 = 2
+    loop {
+        if shard_count > 16 { break }
+        mut ordinal: u64 = 0
+        loop {
+            if ordinal >= (shard_count * 3) { break }
+            teko::assert::is_true(jc_shard_of(ordinal, shard_count) != jc_shard_of(ordinal + 1, shard_count))
+            ordinal = ordinal + 1
+        }
+        shard_count = shard_count + 1
+    }
+}

@@ -913,6 +913,129 @@ fn regr_jobs_of_reads_a_count_and_refuses_nonsense() {
     teko::assert::is_true(regr_jobs_of("4x") == os_max())
 }
 
+#test
+/**
+ * mem_available_kib_reads_the_labeled_kb_value — the ordinary line, with the shape
+ * `/proc/meminfo` actually uses (label, run of spaces, digits, unit, more lines around it).
+ *
+ * @return void
+ */
+fn mem_available_kib_reads_the_labeled_kb_value() {
+    let content = "MemTotal:       16384000 kB\nMemAvailable:    2048576 kB\nBuffers:            1024 kB\n"
+    teko::assert::is_true(mem_available_kib(content) == 2048576)
+}
+
+#test
+/**
+ * mem_available_kib_is_zero_when_label_absent — a meminfo-shaped file that never names
+ * `MemAvailable:` (an unexpected kernel format) answers 0, never a stale/garbage number.
+ *
+ * @return void
+ */
+fn mem_available_kib_is_zero_when_label_absent() {
+    teko::assert::is_true(mem_available_kib("MemTotal:       16384000 kB\n") == 0)
+    teko::assert::is_true(mem_available_kib("") == 0)
+}
+
+#test
+/**
+ * mem_available_kib_is_zero_when_no_digit_follows — the label present but with nothing
+ * numeric after it (truncated read, or a kernel that changed the line's shape) answers 0
+ * rather than a digit-by-digit misparse of whatever text follows.
+ *
+ * @return void
+ */
+fn mem_available_kib_is_zero_when_no_digit_follows() {
+    teko::assert::is_true(mem_available_kib("MemAvailable:") == 0)
+    teko::assert::is_true(mem_available_kib("MemAvailable:    kB\n") == 0)
+}
+
+#test
+/**
+ * mem_label_end_the_two_never_found_guards — `mem_label_end`'s own edge cases, each reached
+ * by no caller today but real for a general substring search: an empty label, and a label
+ * longer than the content it is sought in. Both answer `content.len` (not found), the same
+ * sentinel a genuinely absent label answers.
+ *
+ * @return void
+ */
+fn mem_label_end_the_two_never_found_guards() {
+    teko::assert::is_true(mem_label_end("abc", "") == 3)
+    teko::assert::is_true(mem_label_end("ab", "abcdef") == 2)
+}
+
+/**
+ * memtest_low_path — this test's own scratch path for a synthetic `/proc/meminfo`-shaped
+ * file naming an availability BELOW `MEM_PER_JOB_KIB`, so the division floors at 0 and
+ * `mem_job_cap_at` must clamp it to 1 rather than answer a job count of zero.
+ *
+ * @return this test's own scratch path for the file
+ */
+fn memtest_low_path() -> str { teko::test::scoped("bin/.memtest-low.meminfo") }
+
+/**
+ * memtest_high_path — this test's own scratch path for a synthetic file naming an
+ * availability well above `MEM_PER_JOB_KIB`, so the division answers a real multi-job cap
+ * with nothing to floor.
+ *
+ * @return this test's own scratch path for the file
+ */
+fn memtest_high_path() -> str { teko::test::scoped("bin/.memtest-high.meminfo") }
+
+#test
+/**
+ * mem_job_cap_at_unreadable_path_is_no_cap — a path that does not exist (no platform
+ * detection needed to exercise this: any host can be handed a bogus path) answers
+ * `NO_MEM_CAP`, the abstain value `os_max_of` never lets win against a real CPU count.
+ *
+ * @return void
+ */
+fn mem_job_cap_at_unreadable_path_is_no_cap() {
+    teko::assert::is_true(mem_job_cap_at("/definitely/not/a/real/meminfo/path") == NO_MEM_CAP)
+}
+
+#test
+/**
+ * mem_job_cap_at_low_availability_floors_at_one — an available figure smaller than one
+ * job's budget still answers a cap of (at least) 1, never 0 — a memory-starved host may
+ * run its ONE job serially, but the governor may not ask a caller to run none at all.
+ *
+ * @return void
+ */
+fn mem_job_cap_at_low_availability_floors_at_one() {
+    let path = memtest_low_path()
+    match teko::io::write_file(path, "MemAvailable:      512 kB\n") { error => { }; null => { } }
+    teko::assert::is_true(mem_job_cap_at(path) == 1)
+}
+
+#test
+/**
+ * mem_job_cap_at_high_availability_divides_cleanly — plenty of memory answers the exact
+ * `avail / MEM_PER_JOB_KIB` quotient, unfloored, so a well-provisioned host is never capped
+ * below what it can really afford.
+ *
+ * @return void
+ */
+fn mem_job_cap_at_high_availability_divides_cleanly() {
+    let path = memtest_high_path()
+    match teko::io::write_file(path, "MemAvailable: 12582912 kB\n") { error => { }; null => { } }
+    teko::assert::is_true(mem_job_cap_at(path) == 6)
+}
+
+#test
+/**
+ * os_max_of_picks_the_smaller — the composition law: whichever governor names the LOWER
+ * ceiling wins, in every ordering (memory tighter, CPU tighter, or the two tied).
+ *
+ * @return void
+ */
+fn os_max_of_picks_the_smaller() {
+    teko::assert::is_true(os_max_of(4, 2) == 2)
+    teko::assert::is_true(os_max_of(2, 4) == 2)
+    teko::assert::is_true(os_max_of(8, 8) == 8)
+    teko::assert::is_true(os_max_of(1, NO_MEM_CAP) == 1)
+}
+
 /**
  * spec_of — a `ProcSpec` running `argv` with no stdin/env, dir "", under `prefix` — the shared
  * fixture builder every `run_pool` test below uses.

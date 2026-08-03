@@ -243,15 +243,164 @@ fn run_captured_spec(spec: ProcSpec) -> CapResult {
 extern fn nproc_rt() -> u64 = "tk_rt_nproc" from "teko_rt"
 
 /**
- * os_max — the OS-granted online processor count (>= 1): BOTH the default job count when a run names
- * no number AND the cap an explicit `TEKO_*_JOBS` is clamped to (E1-C6). The count the OS grants a
- * process is the machine's business, never a source literal — so the pools follow the hardware rather
- * than the old fixed `4`, and no override can ask for more parallelism than the OS is offering.
+ * MEMINFO_PATH — where Linux publishes live memory accounting, one fact per line
+ * (`MemAvailable: NNNN kB` among others). Absent on macOS/Windows: `mem_job_cap_at` reads
+ * that absence as "no memory-based cap", which is exactly today's CPU-only behaviour on
+ * those hosts — this governor is additive, never a regression on a host it cannot read.
+ */
+const MEMINFO_PATH: str = "/proc/meminfo"
+
+/**
+ * MEM_AVAILABLE_LABEL — the line prefix `mem_available_kib` scans for. Not `MemFree:`:
+ * `MemFree` excludes reclaimable cache/buffers a new child can still be granted, and would
+ * undercount by exactly the memory Linux hands back on demand. `MemAvailable` is the
+ * kernel's own estimate of what a fresh allocation could actually get.
+ */
+const MEM_AVAILABLE_LABEL: str = "MemAvailable:"
+
+/**
+ * MEM_PER_JOB_KIB — the memory this governor budgets per concurrent heavy child (2 GiB).
  *
- * @return the OS-granted online CPU count, at least 1
+ * CONSERVATIVE ON PURPOSE, AND NOT A MEASURED PER-SHARD FOOTPRINT. A job count that is too
+ * low only costs wall-clock; one that is too high OOMs the runner — and OOM is strictly
+ * worse, because a run that is killed before finishing proves nothing, while a slow one
+ * still proves everything a fast one would. Sizing this to a REAL measured per-shard/
+ * per-regression-child RSS is the honest follow-up; instrumenting that measurement here
+ * would itself risk the exact OOM this constant exists to avoid, so it is not attempted in
+ * this change. Until that measurement lands, this constant only ever LOWERS the default
+ * below `nproc` — a host whose `MemAvailable` comfortably covers `nproc` jobs at this
+ * budget sees no change at all (§`os_max_of`).
+ */
+const MEM_PER_JOB_KIB: u64 = 2097152
+
+/**
+ * NO_MEM_CAP — the job count `mem_job_cap_at` answers when memory cannot be measured
+ * (unreadable path, or a `MemAvailable:` line this parser does not recognise): a value no
+ * real `nproc_rt()` will ever reach, so `os_max_of` picks the CPU count untouched — the
+ * governor abstains rather than guesses.
+ */
+const NO_MEM_CAP: u64 = 1000000
+
+/**
+ * mem_available_kib — the kB value `content`'s `MemAvailable:` line names, or 0 when the
+ * line is absent or carries no digit after it.
+ *
+ * PURE: takes the file's text rather than reading it itself, so the parser is testable
+ * against a synthetic string with no filesystem and no platform dependency.
+ *
+ * @param content  the whole text of `/proc/meminfo` (or any string to probe the parser)
+ * @return         the kB `MemAvailable:` names, or 0
+ * @since 0.3.1
+ */
+fn mem_available_kib(content: str) -> u64 {
+    let at = mem_label_end(content, MEM_AVAILABLE_LABEL)
+    if at >= content.len { return 0 }
+    mut i = at
+    loop {
+        if i >= content.len { break }
+        if content[i] != b' ' { break }
+        i = i + 1
+    }
+    mut v: u64 = 0
+    mut seen = false
+    loop {
+        if i >= content.len { break }
+        let c = content[i]
+        if c < b'0' || c > b'9' { break }
+        v = (v * 10) + ((c to u64) - (b'0' to u64))
+        seen = true
+        i = i + 1
+    }
+    if !seen { return 0 }
+    v
+}
+
+/**
+ * mem_label_end — the index right after the first occurrence of `label` in `content`, or
+ * `content.len` when `label` does not occur (the "not found" sentinel `mem_available_kib`
+ * checks for).
+ *
+ * @param content  the text to scan
+ * @param label    the literal substring to find
+ * @return         the index just past `label`'s first occurrence, or `content.len`
+ * @since 0.3.1
+ */
+fn mem_label_end(content: str, label: str) -> u64 {
+    if label.len == 0 || label.len > content.len { return content.len }
+    mut i: u64 = 0
+    let last = content.len - label.len
+    loop {
+        if i > last { return content.len }
+        if teko::str::slice(content, i, i + label.len) == label { return i + label.len }
+        i = i + 1
+    }
+}
+
+/**
+ * mem_job_cap_at — how many concurrent `MEM_PER_JOB_KIB`-sized children `path`'s available
+ * memory can budget for, or `NO_MEM_CAP` when `path` cannot be read or its content names no
+ * usable `MemAvailable:` figure.
+ *
+ * PARAMETERISED BY PATH so the whole governor is testable with a real scratch file the test
+ * writes (a synthetic `/proc/meminfo`) and with a path that does not exist at all — no
+ * platform detection is needed to exercise every branch.
+ *
+ * @param path  the meminfo-shaped file to read (`MEMINFO_PATH` in production)
+ * @return      the memory-budgeted job count (>= 1), or `NO_MEM_CAP`
+ * @since 0.3.1
+ */
+fn mem_job_cap_at(path: str) -> u64 {
+    let content = match teko::io::read_file(path) { str as s => s; error => return NO_MEM_CAP }
+    let avail = mem_available_kib(content)
+    if avail == 0 { return NO_MEM_CAP }
+    let cap = avail / MEM_PER_JOB_KIB
+    if cap < 1 { return 1 }
+    cap
+}
+
+/**
+ * mem_job_cap — `mem_job_cap_at(MEMINFO_PATH)`, the production reading of this host's
+ * memory-budgeted job count.
+ *
+ * @return  the memory-budgeted job count (>= 1), or `NO_MEM_CAP` when unmeasurable
+ * @since 0.3.1
+ */
+fn mem_job_cap() -> u64 { mem_job_cap_at(MEMINFO_PATH) }
+
+/**
+ * os_max_of — the effective job count for a machine reporting `cpu` processors and a
+ * memory budget for `mem` concurrent children: whichever is SMALLER, because either one
+ * alone is a real ceiling this run must not cross.
+ *
+ * PURE, so the two governors (CPU count, memory budget) are each tested through their own
+ * seam and this composition is tested directly against synthetic numbers, with no
+ * dependency on the host's real hardware.
+ *
+ * @param cpu  the OS-granted processor count (`nproc_rt()`)
+ * @param mem  the memory-budgeted job count (`mem_job_cap()`), or `NO_MEM_CAP` to abstain
+ * @return     `min(cpu, mem)`
+ * @since 0.3.1
+ */
+fn os_max_of(cpu: u64, mem: u64) -> u64 { if mem < cpu { mem } else { cpu } }
+
+/**
+ * os_max — the effective default/cap job count (>= 1): BOTH the default job count when a
+ * run names no number AND the cap an explicit `TEKO_*_JOBS` is clamped to (E1-C6). The
+ * SMALLER of what the OS grants in processors (`nproc_rt`) and what this host's AVAILABLE
+ * memory budgets at `MEM_PER_JOB_KIB` per child (`mem_job_cap`) — added because the
+ * CPU-only default let a test/regression job pool size itself past the runner's real
+ * memory ceiling: `TEKO_TEST_JOBS`'s default sharded every run 4-way on a 4-core CI runner
+ * with no regard for how much memory four concurrent heavy children actually had to share,
+ * and that is precisely the shape that was observed OOMing (SIGTERM/exit 143 mid-run) under
+ * the native self-host lane. Neither governor alone decided the old behaviour; the pair
+ * does now. On a host `/proc/meminfo` cannot answer (non-Linux), this is byte-for-byte the
+ * old CPU-only value — the governor never raises concurrency, only lowers it under real
+ * pressure, and abstains rather than guesses when it cannot measure that pressure at all.
+ *
+ * @return the effective job count, at least 1
  * @since 0.3.1.0
  */
-fn os_max() -> u64 { nproc_rt() }
+fn os_max() -> u64 { os_max_of(nproc_rt(), mem_job_cap()) }
 
 /**
  * clamp_jobs — a requested job count confined to `[1, os_max()]`: the low bound keeps a run from
