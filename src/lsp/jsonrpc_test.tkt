@@ -1,24 +1,6 @@
 use teko::encoding::json
 
 /**
- * bytes_of — the bytes of `s` as a fresh `[]byte`, for feeding the stdin-free framing decoder a
- * literal frame.
- *
- * @param s  the source string
- * @return   its bytes
- */
-fn bytes_of(s: str) -> []byte {
-    mut b: []byte = teko::list::empty()
-    mut i: u64 = 0
-    loop {
-        if i >= s.len { break }
-        b = teko::list::push(b, s[i])
-        i = i + 1
-    }
-    b
-}
-
-/**
  * body_field_str — the string value of `key` in a decoded message body, or "" when absent / not a
  * string. Used to read a round-tripped `method` back out.
  *
@@ -54,7 +36,7 @@ fn encode_frame_prepends_content_length() {
  */
 fn decode_frame_round_trips() {
     let frame = "Content-Length: 34\r\n\r\n{\"method\":\"initialize\",\"id\":1}"
-    let msg = match decode_frame_bytes(bytes_of(frame)) { RpcMessage as m => m; error as e => { teko::assert::eq_str(e.message, "no error expected"); return } }
+    let msg = match decode_frame_bytes(teko::text::bytes_of_str(frame)) { RpcMessage as m => m; error as e => { teko::assert::eq_str(e.message, "no error expected"); return } }
     teko::assert::eq_str(body_field_str(msg, "method"), "initialize")
 }
 
@@ -66,7 +48,7 @@ fn decode_frame_round_trips() {
  */
 fn decode_frame_rejects_truncated_body() {
     let frame = "Content-Length: 50\r\n\r\n{\"method\":\"x\"}"
-    match decode_frame_bytes(bytes_of(frame)) {
+    match decode_frame_bytes(teko::text::bytes_of_str(frame)) {
         RpcMessage => teko::assert::eq_str("accepted a truncated frame", "should have been rejected")
         error as e => teko::assert::eq_str(e.message, "malformed frame: truncated body")
     }
@@ -78,7 +60,7 @@ fn decode_frame_rejects_truncated_body() {
  * malformed frame, rejected by its own honest error.
  */
 fn decode_frame_rejects_missing_separator() {
-    match decode_frame_bytes(bytes_of("Content-Length: 2\r\n{}")) {
+    match decode_frame_bytes(teko::text::bytes_of_str("Content-Length: 2\r\n{}")) {
         RpcMessage => teko::assert::eq_str("accepted a frame with no separator", "should have been rejected")
         error as e => teko::assert::eq_str(e.message, "malformed frame: no header/body separator")
     }
