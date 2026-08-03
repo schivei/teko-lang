@@ -295,6 +295,57 @@ fn definition_returns_location_of_symbol_under_cursor() {
 
 #test
 /**
+ * completion_returns_symbol_and_keyword_items_for_open_document — after `CLEAN_DOC` is opened, a
+ * completion request answers a `CompletionItem[]` that carries BOTH halves of crumb G's candidate
+ * list: the document's own symbol `f` (label, `kind` 3 — Function, and `detail` echoing its rendered
+ * signature, reusing crumb E's index) and a reserved keyword (`fn`, `kind` 14 — Keyword, reusing the
+ * lexer's own reserved table).
+ */
+fn completion_returns_symbol_and_keyword_items_for_open_document() {
+    let opened = handle_request(store_empty(), didopen_request(DOC_URI, CLEAN_DOC))
+    let out = handle_request(opened.store, position_request("textDocument/completion", DOC_URI, 15.0, 0.0, 0.0)).out
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "\"id\":15")
+    teko::assert::str_contains(wire, "\"label\":\"f\"")
+    teko::assert::str_contains(wire, "\"detail\":\"fn f() -> i64\"")
+    teko::assert::str_contains(wire, "\"kind\":3")
+    teko::assert::str_contains(wire, "\"label\":\"fn\"")
+    teko::assert::str_contains(wire, "\"kind\":14")
+}
+
+#test
+/**
+ * completion_unopened_document_still_returns_keywords — a completion request for a document the
+ * server never saw opened has no symbol index to draw from, so the response carries the KEYWORD list
+ * alone (`document_completion_items`'s own contract): the reserved word `fn` is present, but no
+ * `f`-named symbol item is (there is no buffer to have indexed it from).
+ */
+fn completion_unopened_document_still_returns_keywords() {
+    let out = handle_request(store_empty(), position_request("textDocument/completion", DOC_URI, 16.0, 0.0, 0.0)).out
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "\"label\":\"fn\"")
+    teko::assert::str_absent(wire, "\"label\":\"f\"")
+}
+
+#test
+/**
+ * initialize_advertises_completion — the `initialize` result also announces `completionProvider` (an
+ * OBJECT, per protocol) naming its trigger characters, so a client knows the server now answers
+ * `textDocument/completion`.
+ */
+fn initialize_advertises_completion() {
+    let req = jobj(["jsonrpc", "id", "method"], [jstr("2.0"), jnum(1.0), jstr("initialize")])
+    let out = handle_request(store_empty(), req).out
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "completionProvider")
+    teko::assert::str_contains(wire, "triggerCharacters")
+}
+
+#test
+/**
  * checker_severity_maps_every_checker_severity_to_its_lsp_twin — crumb D's structural re-tag between
  * `checker::DiagLevel` and the LSP's own `DiagSeverity`: each of the four members round-trips to the
  * identically-named LSP member.
