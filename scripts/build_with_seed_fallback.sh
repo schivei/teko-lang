@@ -115,9 +115,50 @@ log() { printf '%s\n' "teko-ci: $*" >&2; }
 # removing it reclaims all of them.
 cleanup() {
   [ -n "$WORKTREE_DIR" ] && [ -d "$WORKTREE_DIR" ] && git worktree remove --force "$WORKTREE_DIR" >/dev/null 2>&1
+  [ -n "${CC_SHIM_DIR:-}" ] && [ -d "${CC_SHIM_DIR:-}" ] && rm -rf "$CC_SHIM_DIR"
   return 0
 }
 trap cleanup EXIT
+
+# ── GCC-14 / clang -Werror TOLERANCE SHIM (owner ruling 2026-08-03) ───────────────────────────
+# GCC 14 promoted -Wincompatible-pointer-types (and its siblings -Wint-conversion,
+# -Wimplicit-function-declaration, -Wimplicit-int) from WARNING to hard ERROR by default; recent
+# clang escalates the same class. The machine-generated C this ladder compiles — both the pinned
+# historical rungs and the tip's own emitted teko.c — has always contained pointer assignments
+# across distinct-but-layout-identical named types (e.g. teko::backend::Symbol vs
+# teko::lsp::Symbol), which every prior toolchain accepted and which run correctly (this exact
+# ladder was green through PR #92). The published seed bakes its own `cc`/`clang` invocation in and
+# cannot be re-released this version, so that C cannot be regenerated. This shim intercepts every
+# `cc`/`gcc`/`clang` the seed (and this script) resolves from PATH and re-appends
+# -Wno-error=<the four escalated diagnostics>, downgrading them back to warnings — restoring the
+# pre-escalation behavior WITHOUT masking any other error class. It changes NOTHING about the
+# compiler that is built; it only lets the historical (and structurally-identical tip) C compile
+# again. NOT a re-pin (docs/medicoes/2026-07-31-seed-compat-e-escada.md): the pins are untouched.
+CC_SHIM_DIR=""
+setup_cc_shim() {
+  shim_dir="$(mktemp -d 2>/dev/null)" || return 0
+  made_any=0
+  for tool in cc gcc clang; do
+    real="$(command -v "$tool" 2>/dev/null)" || continue
+    [ -n "$real" ] || continue
+    case "$real" in "$shim_dir"/*) continue ;; esac
+    {
+      printf '%s\n' '#!/bin/sh'
+      printf 'exec "%s" -Wno-error=incompatible-pointer-types -Wno-error=int-conversion -Wno-error=implicit-function-declaration -Wno-error=implicit-int "$@"\n' "$real"
+    } > "$shim_dir/$tool" || continue
+    chmod +x "$shim_dir/$tool"
+    made_any=1
+  done
+  if [ "$made_any" = "1" ]; then
+    CC_SHIM_DIR="$shim_dir"
+    PATH="$shim_dir:$PATH"
+    export PATH
+    log "cc/gcc/clang -Werror tolerance shim active (GCC-14 escalation): $shim_dir"
+  else
+    rmdir "$shim_dir" 2>/dev/null || true
+  fi
+}
+setup_cc_shim
 
 # ── THE CHAIN'S FIRST QUESTION, ASKED ONCE ────────────────────────────────────────────────────
 # Whether `bootstrap/teko.c` is a rung or a payload is decided HERE, from a versioned human claim,
