@@ -1161,6 +1161,41 @@ int64_t  tk_rt_monotonic_ns(void);         // ns from an unspecified monotonic o
 // Windows: GetActiveProcessorCount(ALL_PROCESSOR_GROUPS). Floor 1 (never 0). No allocation. The
 // default degree of build parallelism (teko::env::nproc → build_jobs, TEST_JOBS default).
 uint64_t tk_nproc(void);
+// ===== journal runtime funds (design journaling-de-corrida-0.3.1 §2.3 / §6) — BEGIN =====
+// A DELIMITED, DISJOINT BLOCK of NEW symbols (the J1 crumb). Kept apart from tk_region_enter/leave
+// (the M2 territory) and tk_slice_push* (the 5th-gap territory) so a drain rebase is trivial: nothing
+// here edits a function either of those touches. The str-taking entries are ALSO transcribed into
+// lir/lower.tks's by-value-tk_str arity tables, per that file's "the table mirrors the header" law.
+//
+// tk_journal_open — open/create `path` in O_WRONLY|O_APPEND|O_CREAT and return the RAW descriptor
+// (>= 0), or -1 on failure. NO stdio: a FILE*'s user-space buffer dies with the process, which is the
+// one moment this file had value. Also STASHES the descriptor as the target a later async-signal-safe
+// tk_journal_note writes to (the polite-signal arm, §6).
+int64_t tk_journal_open(tk_str path);
+// tk_journal_append — write `rec` whole to descriptor `seg`, finishing a short write in a loop.
+// Returns 0, or the errno. `rec` leads (a by-value tk_str is only ABI-describable when leading; see
+// lir/lower.tks::takes_one_str_by_value) so the whole record lands in the kernel as one O_APPEND write.
+int32_t tk_journal_append(tk_str rec, int64_t seg);
+// tk_journal_arm — remember `prefix` (a pre-shaped "run\twriter\tstop\t" record head) as the bytes a
+// later tk_journal_note prepends before the signal number. Formatting the stamp HERE, at open time,
+// is what lets the note itself allocate and format nothing — the async-signal-safety requirement (§6).
+void tk_journal_arm(tk_str prefix);
+// tk_journal_note — the ASYNC-SIGNAL-SAFE arm (§6): write the armed prefix, the decimal `sig`, and a
+// newline to the stashed descriptor, using only write(2) over pre-built bytes (no malloc, no stdio).
+// A no-op when no segment was opened. WIRED into the signal handlers by the J5 crumb; defined here so
+// J5 is pure handler installation.
+void tk_journal_note(int sig);
+// tk_rt_rename — rename `from` to `to` atomically within one directory (rename(2) / MoveFileExW with
+// MOVEFILE_REPLACE_EXISTING). The second half of the discipline (§2.3): what is append goes by append,
+// what is a whole artefact writes to a temporary and publishes here, so no reader sees a half file.
+int32_t tk_rt_rename(tk_str from, tk_str to);
+// tk_rt_pid — this process's id (getpid / GetCurrentProcessId). One half of a run's identity stamp,
+// disambiguating two runs that mint the same monotonic nanosecond.
+int64_t tk_rt_pid(void);
+// tk_rt_pid_alive — whether a process with id `pid` is currently alive (kill(pid,0) / OpenProcess).
+// The liveness `sweep` reads from a run root's lock before reclaiming it: a live sibling is spared.
+bool tk_rt_pid_alive(int64_t pid);
+// ===== journal runtime funds — END =====
 
 // D3 — TEST-COVERAGE SINK. A host side-channel (like print's buffer / args), so the VM can
 // record which production functions executed during a `teko test` run WITHOUT a Teko

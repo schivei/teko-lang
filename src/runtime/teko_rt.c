@@ -4300,3 +4300,103 @@ uint64_t tk_nproc(void) {
     return n < 1 ? (uint64_t)1 : (uint64_t)n;
 #endif
 }
+// ===== journal runtime funds (design journaling-de-corrida-0.3.1 §2.3 / §6) — BEGIN =====
+// See teko_rt.h for the per-symbol contract. NEW symbols only; no function above is edited, so a drain
+// rebase against the M2 (tk_region_enter/leave, ~:1855) and 5th-gap (tk_slice_push*, ~:3762) edits
+// elsewhere in this file is mechanical. The str-taking entries are transcribed into lir/lower.tks's
+// by-value-tk_str arity tables, per that file's "the table mirrors the header" law.
+
+#define TK_JOURNAL_NOTE_PREFIX_MAX 512
+
+// The async-signal-safe note target: the last descriptor tk_journal_open handed out, plus the
+// pre-shaped record head tk_journal_arm stored. `volatile sig_atomic_t` for the fd because a signal
+// handler reads it. The prefix bytes are written only OUTSIDE a handler (tk_journal_arm, at run open)
+// and read inside one — safe because arming completes long before a polite signal can arrive.
+static volatile sig_atomic_t tk_journal_note_fd = -1;
+static char tk_journal_note_prefix[TK_JOURNAL_NOTE_PREFIX_MAX];
+static volatile size_t tk_journal_note_prefix_len = 0;
+
+// tk_journal_write_raw — one blocking, loop-completed write of `n` bytes to `fd`. Shared by the
+// buffered append and the async-signal-safe note; uses only write(2)/_write, so it is legal in a
+// signal handler.
+static int tk_journal_write_raw(int fd, const char *buf, size_t n) {
+    size_t done = 0;
+    while (done < n) {
+#ifdef _WIN32
+        int put = _write(fd, buf + done, (unsigned int)(n - done));
+#else
+        ssize_t put = write(fd, buf + done, n - done);
+#endif
+        if (put <= 0) return -1;
+        done += (size_t)put;
+    }
+    return 0;
+}
+
+int64_t tk_journal_open(tk_str path) {
+    char *p = tk_cstr(path);
+#ifdef _WIN32
+    int fd = _open(p, _O_WRONLY | _O_CREAT | _O_APPEND | _O_BINARY, _S_IREAD | _S_IWRITE);
+#else
+    int fd = open(p, O_WRONLY | O_CREAT | O_APPEND, 0644);
+#endif
+    if (fd < 0) return -1;
+    tk_journal_note_fd = fd;   // the segment a polite signal will note into (§6)
+    return (int64_t)fd;
+}
+
+int32_t tk_journal_append(tk_str rec, int64_t seg) {
+    if (tk_journal_write_raw((int)seg, (const char *)rec.ptr, rec.len) != 0)
+        return (int32_t)(errno ? errno : -1);
+    return 0;
+}
+
+void tk_journal_arm(tk_str prefix) {
+    size_t n = prefix.len < (size_t)(TK_JOURNAL_NOTE_PREFIX_MAX - 1) ? prefix.len : (size_t)(TK_JOURNAL_NOTE_PREFIX_MAX - 1);
+    if (n) memcpy(tk_journal_note_prefix, prefix.ptr, n);
+    tk_journal_note_prefix_len = n;
+}
+
+void tk_journal_note(int sig) {
+    int fd = (int)tk_journal_note_fd;
+    if (fd < 0) return;
+    if (tk_journal_note_prefix_len)
+        (void)tk_journal_write_raw(fd, tk_journal_note_prefix, tk_journal_note_prefix_len);
+    char num[16];
+    size_t i = sizeof num;
+    unsigned int v = (sig < 0) ? 0u : (unsigned int)sig;
+    if (v == 0u) num[--i] = '0';
+    while (v > 0u) { num[--i] = (char)('0' + (v % 10u)); v /= 10u; }
+    (void)tk_journal_write_raw(fd, num + i, sizeof num - i);
+    (void)tk_journal_write_raw(fd, "\n", 1);
+}
+
+int32_t tk_rt_rename(tk_str from, tk_str to) {
+    char *f = tk_cstr(from);
+    char *t = tk_cstr(to);
+    if (rename(f, t) != 0) return (int32_t)(errno ? errno : -1);
+    return 0;
+}
+
+int64_t tk_rt_pid(void) {
+#ifdef _WIN32
+    return (int64_t)GetCurrentProcessId();
+#else
+    return (int64_t)getpid();
+#endif
+}
+
+bool tk_rt_pid_alive(int64_t pid) {
+    if (pid <= 0) return false;
+#ifdef _WIN32
+    HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid);
+    if (h == NULL) return false;
+    DWORD w = WaitForSingleObject(h, 0);
+    CloseHandle(h);
+    return w == WAIT_TIMEOUT;
+#else
+    if (kill((pid_t)pid, 0) == 0) return true;
+    return errno == EPERM;
+#endif
+}
+// ===== journal runtime funds — END =====
