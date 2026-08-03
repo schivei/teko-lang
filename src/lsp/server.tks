@@ -1,0 +1,223 @@
+use teko::encoding::json
+
+/**
+ * jstr — a JSON string value wrapping `s`. A tiny constructor so the response builders read as
+ * data, not boilerplate.
+ *
+ * @param s  the decoded string
+ * @return   the JSON string value
+ * @since 0.3.1.0
+ */
+fn jstr(s: str) -> json::JsonValue {
+    json::JsonString { value = s }
+}
+
+/**
+ * jnum — a JSON number value wrapping `v`. JSON has one numeric grammar (f64); integral values
+ * re-encode without a fractional part (src/encoding/json/json.tks).
+ *
+ * @param v  the numeric value
+ * @return   the JSON number value
+ * @since 0.3.1.0
+ */
+fn jnum(v: f64) -> json::JsonValue {
+    json::JsonNumber { value = v }
+}
+
+/**
+ * jnull — the JSON `null` value. Used for a request `id` that was absent (a notification) and for
+ * the `shutdown` result.
+ *
+ * @return  the JSON null value
+ * @since 0.3.1.0
+ */
+fn jnull() -> json::JsonValue {
+    json::JsonNull { }
+}
+
+/**
+ * jobj — a JSON object from parallel `keys`/`values` slices, in the given order (the encoder
+ * preserves source order, so responses are byte-deterministic and the fixtures can match exact
+ * STDOUT).
+ *
+ * @param keys    the field names, in order
+ * @param values  the field values, parallel to `keys`
+ * @return        the JSON object value
+ * @since 0.3.1.0
+ */
+fn jobj(keys: []str, values: []json::JsonValue) -> json::JsonValue {
+    json::JsonObject { keys = keys; values = values }
+}
+
+/**
+ * object_field — the value of `key` in `req` when `req` is a JSON object, else `null`. The one
+ * accessor the dispatcher uses to read `method`/`id` off an incoming request.
+ *
+ * @param req  the request DOM
+ * @param key  the field name
+ * @return     the field value, or `null` when absent / `req` is not an object
+ * @since 0.3.1.0
+ */
+fn object_field(req: json::JsonValue, key: str) -> json::JsonValue | null {
+    match req {
+        json::JsonObject as o => json::object_get(o, key)
+        _ => null
+    }
+}
+
+/**
+ * as_str — the decoded string of a JSON string value, else `null`. Used to read the `method` name.
+ *
+ * @param v  the JSON value
+ * @return   the string, or `null` when `v` is not a JSON string
+ * @since 0.3.1.0
+ */
+fn as_str(v: json::JsonValue) -> str | null {
+    match v {
+        json::JsonString as s => s.value
+        _ => null
+    }
+}
+
+/**
+ * request_id — the request's `id` value echoed back on a response, or JSON `null` when the message
+ * carried none (a notification). LSP requires the response `id` to equal the request `id`.
+ *
+ * @param req  the request DOM
+ * @return     the `id` value, or JSON `null`
+ * @since 0.3.1.0
+ */
+fn request_id(req: json::JsonValue) -> json::JsonValue {
+    match object_field(req, "id") {
+        json::JsonValue as v => v
+        null => jnull()
+    }
+}
+
+/**
+ * has_id — did the request carry an `id`? A JSON-RPC message with an `id` is a REQUEST (it expects
+ * a response); one without is a NOTIFICATION (it must not be answered). The dispatcher answers an
+ * unknown method only when it is a request.
+ *
+ * @param req  the request DOM
+ * @return     true when an `id` field is present
+ * @since 0.3.1.0
+ */
+fn has_id(req: json::JsonValue) -> bool {
+    match object_field(req, "id") {
+        json::JsonValue => true
+        null => false
+    }
+}
+
+/**
+ * method_of — the `method` name of a message DOM, or "" when absent / not a string. Drives the
+ * lifecycle decisions in `run_lsp` (exit / shutdown) without going through the full dispatcher.
+ *
+ * @param body  the message DOM
+ * @return      the method name, or ""
+ * @since 0.3.1.0
+ */
+pub fn method_of(body: json::JsonValue) -> str {
+    match object_field(body, "method") {
+        json::JsonValue as v => match as_str(v) { str as s => s; null => "" }
+        null => ""
+    }
+}
+
+/**
+ * response — a JSON-RPC success response `{ "jsonrpc": "2.0", "id": <id>, "result": <result> }`.
+ *
+ * @param id      the request id echoed back
+ * @param result  the result payload
+ * @return        the response DOM
+ * @since 0.3.1.0
+ */
+fn response(id: json::JsonValue, result: json::JsonValue) -> json::JsonValue {
+    jobj(["jsonrpc", "id", "result"], [jstr("2.0"), id, result])
+}
+
+/**
+ * error_response — a JSON-RPC error response `{ "jsonrpc": "2.0", "id": <id>, "error": { "code":
+ * <code>, "message": <message> } }`. Used for an unknown method on a request (code -32601,
+ * MethodNotFound).
+ *
+ * @param id       the request id echoed back
+ * @param code     the JSON-RPC error code
+ * @param message  the human-readable error text
+ * @return         the error response DOM
+ * @since 0.3.1.0
+ */
+fn error_response(id: json::JsonValue, code: i64, message: str) -> json::JsonValue {
+    let err = jobj(["code", "message"], [jnum(code to f64), jstr(message)])
+    jobj(["jsonrpc", "id", "error"], [jstr("2.0"), id, err])
+}
+
+/**
+ * initialize_result — the `initialize` response. Capabilities are HONEST: crumbs L1-L2 deliver
+ * only the lifecycle (transport + `initialize`), so NO navigation provider is announced yet —
+ * advertising a `definitionProvider` the server cannot answer would mislead every client. The
+ * providers join `capabilities` as L4-L7 land. `serverInfo` names the server and its build.
+ *
+ * @param id  the request id echoed back
+ * @return    the `initialize` response DOM
+ * @since 0.3.1.0
+ */
+fn initialize_result(id: json::JsonValue) -> json::JsonValue {
+    let server_info = jobj(["name", "version"], [jstr("teko"), jstr(teko::env::version())])
+    let capabilities = jobj(teko::list::empty(), teko::list::empty())
+    let result = jobj(["capabilities", "serverInfo"], [capabilities, server_info])
+    response(id, result)
+}
+
+/**
+ * handle_request — dispatch ONE LSP message to its response, or `null` when the message needs no
+ * answer (a notification, or an unknown notification). Covers the lifecycle: `initialize` →
+ * capabilities; `shutdown` → a null result; `initialized` / `exit` → no response. An unknown
+ * REQUEST (one carrying an `id`) gets a MethodNotFound error; an unknown notification is ignored.
+ *
+ * @param req  the decoded request DOM
+ * @return     the response DOM to send, or `null` when nothing is sent
+ * @since 0.3.1.0
+ */
+pub fn handle_request(req: json::JsonValue) -> json::JsonValue | null {
+    let method = match object_field(req, "method") {
+        json::JsonValue as v => match as_str(v) { str as s => s; null => return null }
+        null => return null
+    }
+    let id = request_id(req)
+    if method == "initialize" { return initialize_result(id) }
+    if method == "shutdown" { return response(id, jnull()) }
+    if method == "initialized" { return null }
+    if method == "exit" { return null }
+    if has_id(req) { return error_response(id, -32601, teko::str::concat("method not found: ", method)) }
+    null
+}
+
+/**
+ * run_lsp — the LSP server's stdio loop: read one `Content-Length`-framed message, dispatch it,
+ * and write any response back framed on stdout. Terminates on `exit` or on end of input. The exit
+ * status follows the LSP lifecycle (0 when a `shutdown` preceded the exit, else 1) — but the
+ * lane's proofs assert the framed STDOUT text, never this code.
+ *
+ * @return  0 when a `shutdown` was received before exit, else 1
+ * @since 0.3.1.0
+ */
+pub fn run_lsp() -> i32 {
+    mut shutdown_seen = false
+    loop {
+        match read_message() {
+            RpcMessage as msg => {
+                let method = method_of(msg.body)
+                if method == "exit" { break }
+                if method == "shutdown" { shutdown_seen = true }
+                match handle_request(msg.body) {
+                    json::JsonValue as resp => write_message(resp)
+                    null => { }
+                }
+            }
+            error => break
+        }
+    }
+    if shutdown_seen { 0 } else { 1 }
+}

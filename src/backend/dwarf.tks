@@ -1,0 +1,598 @@
+/**
+ * BYTE_MASK — the low-8-bit mask for narrowing a wider value to one emitted byte.
+ *
+ * @since 0.3.1.0
+ */
+const BYTE_MASK: u64 = 0xFF
+
+/**
+ * LEB_LOW7 — the low-7-bit mask for one LEB128 group.
+ *
+ * @since 0.3.1.0
+ */
+const LEB_LOW7: u64 = 0x7F
+
+/**
+ * LEB_MORE — the LEB128 continuation bit (set on every non-final group).
+ *
+ * @since 0.3.1.0
+ */
+const LEB_MORE: u64 = 0x80
+
+/**
+ * SLEB_SIGN — the sign bit of a 7-bit SLEB128 group, tested to decide termination.
+ *
+ * @since 0.3.1.0
+ */
+const SLEB_SIGN: i64 = 0x40
+
+/**
+ * SLEB_LOW7 — the signed low-7-bit mask for one SLEB128 group. The signed twin of `LEB_LOW7`, kept
+ * `i64` so the mask against the signed accumulator has a lossless common type (a same-width
+ * signed/unsigned mix has none).
+ *
+ * @since 0.3.1.0
+ */
+const SLEB_LOW7: i64 = 0x7F
+
+/**
+ * SLEB_MORE — the signed SLEB128 continuation bit. The signed twin of `LEB_MORE`, kept `i64` so it
+ * ors cleanly into a signed group.
+ *
+ * @since 0.3.1.0
+ */
+const SLEB_MORE: i64 = 0x80
+
+/**
+ * emit_byte — append the low byte of `v` to `buf`.
+ *
+ * @param buf  the buffer to extend
+ * @param v    the value whose low 8 bits are appended
+ * @return     `buf` with one byte appended
+ * @since 0.3.1.0
+ */
+fn emit_byte(buf: []byte, v: u64) -> []byte {
+    teko::list::push(buf, (v & BYTE_MASK) to byte)
+}
+
+/**
+ * emit_u16_le — append `v`'s low 16 bits to `buf`, little-endian (DWARF `data2`).
+ *
+ * @param buf  the buffer to extend
+ * @param v    the value whose low 16 bits are appended
+ * @return     `buf` followed by two little-endian bytes
+ * @since 0.3.1.0
+ */
+fn emit_u16_le(buf: []byte, v: u64) -> []byte {
+    let b0 = emit_byte(buf, v)
+    emit_byte(b0, v >> 8)
+}
+
+/**
+ * emit_u32_le_dw — append `v`'s low 32 bits to `buf`, little-endian (DWARF `sec_offset` / `data4`).
+ *
+ * @param buf  the buffer to extend
+ * @param v    the value whose low 32 bits are appended
+ * @return     `buf` followed by four little-endian bytes
+ * @since 0.3.1.0
+ */
+fn emit_u32_le_dw(buf: []byte, v: u64) -> []byte {
+    mut b = emit_byte(buf, v)
+    b = emit_byte(b, v >> 8)
+    b = emit_byte(b, v >> 16)
+    emit_byte(b, v >> 24)
+}
+
+/**
+ * emit_u64_le_dw — append `v`'s 64 bits to `buf`, little-endian (DWARF `data8`, used for the
+ * function high_pc which is a size constant, not an address).
+ *
+ * @param buf  the buffer to extend
+ * @param v    the value appended
+ * @return     `buf` followed by eight little-endian bytes
+ * @since 0.3.1.0
+ */
+fn emit_u64_le_dw(buf: []byte, v: u64) -> []byte {
+    mut b = buf
+    mut shift: u64 = 0
+    loop {
+        if shift >= 64 { break }
+        b = emit_byte(b, v >> shift)
+        shift = shift + 8
+    }
+    b
+}
+
+/**
+ * emit_addr_slot — append the 8-byte placeholder for a relocated address (DWARF `addr` form). The
+ * bytes are zero; a `DwReloc` recorded by the caller points the linker at the target symbol.
+ *
+ * @param buf  the buffer to extend
+ * @return     `buf` followed by eight zero bytes
+ * @since 0.3.1.0
+ */
+fn emit_addr_slot(buf: []byte) -> []byte {
+    emit_u64_le_dw(buf, 0 to u64)
+}
+
+/**
+ * emit_cstr — append the bytes of `s` followed by a NUL terminator (DWARF `string` form: an
+ * inline, NUL-terminated string).
+ *
+ * @param buf  the buffer to extend
+ * @param s    the string to inline
+ * @return     `buf` followed by `s`'s bytes and a NUL
+ * @since 0.3.1.0
+ */
+fn emit_cstr(buf: []byte, s: str) -> []byte {
+    mut b = buf
+    mut i: u64 = 0
+    loop {
+        if i >= s.len { break }
+        b = teko::list::push(b, s[i])
+        i = i + 1
+    }
+    teko::list::push(b, 0 to byte)
+}
+
+/**
+ * uleb128 — append the unsigned LEB128 encoding of `v` to `buf` (DWARF's variable-length unsigned
+ * integer: seven value bits per byte, low group first, the high bit set on every non-final byte).
+ *
+ * @param buf  the buffer to extend
+ * @param v    the unsigned value to encode
+ * @return     `buf` followed by the ULEB128 bytes
+ * @since 0.3.1.0
+ */
+pub fn uleb128(buf: []byte, v: u64) -> []byte {
+    mut b = buf
+    mut val = v
+    loop {
+        let group = val & LEB_LOW7
+        val = val >> 7
+        if val != 0 {
+            b = teko::list::push(b, (group | LEB_MORE) to byte)
+        } else {
+            b = teko::list::push(b, group to byte)
+            break
+        }
+    }
+    b
+}
+
+/**
+ * sleb128 — append the signed LEB128 encoding of `v` to `buf` (DWARF's variable-length signed
+ * integer: seven value bits per byte, sign-extended, terminating when the remaining value and the
+ * group's sign bit agree).
+ *
+ * @param buf  the buffer to extend
+ * @param v    the signed value to encode
+ * @return     `buf` followed by the SLEB128 bytes
+ * @since 0.3.1.0
+ */
+pub fn sleb128(buf: []byte, v: i64) -> []byte {
+    mut b = buf
+    mut val = v
+    loop {
+        let group = val & SLEB_LOW7
+        val = val >> 7
+        let sign_set = (group & SLEB_SIGN) != 0
+        let done = (val == 0 && !sign_set) || (val == -1 && sign_set)
+        if done {
+            b = teko::list::push(b, group to byte)
+            break
+        }
+        b = teko::list::push(b, (group | SLEB_MORE) to byte)
+    }
+    b
+}
+
+/**
+ * DwReloc — one 8-byte address slot in an emitted DWARF section that needs an absolute
+ * (`R_X86_64_64` / `ARM64_RELOC_UNSIGNED`) relocation to `symbol` with a zero addend. The address
+ * a debugger reads is filled by the linker, not the writer.
+ *
+ * @since 0.3.1.0
+ */
+pub type DwReloc = struct {
+    /** the byte offset of the 8-byte address slot within the section. */
+    offset: u64
+    /** the target symbol name the relocation resolves against. */
+    symbol: str
+}
+
+/**
+ * DwSection — one emitted DWARF section: its raw bytes and the absolute-address relocations the
+ * object writer must attach to it.
+ *
+ * @since 0.3.1.0
+ */
+pub type DwSection = struct {
+    /** the section's raw bytes (address slots zeroed, filled by the relocations). */
+    bytes: []byte
+    /** the absolute address relocations against the section. */
+    relocs: []DwReloc
+}
+
+/**
+ * DwSubprogram — one function to describe in the compile unit: its Teko name, its 1-based
+ * declaration file index and line, the code symbol its low_pc relocates to, and its code size (the
+ * high_pc, encoded as a `data8` offset from low_pc).
+ *
+ * @since 0.3.1.0
+ */
+pub type DwSubprogram = struct {
+    /** the function's (Teko) name, inlined as the DIE's DW_AT_name. */
+    name: str
+    /** the 1-based file-table index for DW_AT_decl_file. */
+    decl_file: i64
+    /** the 1-based source line for DW_AT_decl_line. */
+    decl_line: u32
+    /** the code symbol the function's low_pc relocates against. */
+    symbol: str
+    /** the function's code size, the DW_AT_high_pc data8 offset from low_pc. */
+    code_size: u64
+}
+
+/**
+ * DwCompileUnit — the minimal DWARF-4 compile unit: the producer/language/name/comp_dir strings,
+ * the text symbol the unit's low_pc relocates to, the total text size (the unit high_pc), and the
+ * subprograms it contains.
+ *
+ * @since 0.3.1.0
+ */
+pub type DwCompileUnit = struct {
+    /** DW_AT_producer, the compiler identification string. */
+    producer: str
+    /** DW_AT_language, a DWARF language code (e.g. 0x0c = DW_LANG_C99), emitted as data2. */
+    language: u32
+    /** DW_AT_name, the primary source file name. */
+    name: str
+    /** DW_AT_comp_dir, the compilation directory. */
+    comp_dir: str
+    /** the symbol the unit's low_pc relocates against (the first text symbol). */
+    text_symbol: str
+    /** the total text size, the DW_AT_high_pc data8 offset from low_pc. */
+    text_size: u64
+    /** the functions the unit describes, in address order. */
+    subprograms: []DwSubprogram
+}
+
+/**
+ * DwLineRow — one row of the DWARF-4 line-number program: the code-address advance since the
+ * previous row and the source line at this address. The first row's `pc_advance` is 0 (it sits at
+ * the unit's set_address) and it establishes column 1.
+ *
+ * @since 0.3.1.0
+ */
+pub type DwLineRow = struct {
+    /** the code-address advance (bytes) since the previous row. */
+    pc_advance: u64
+    /** the 1-based source line at this address. */
+    line: u32
+}
+
+/**
+ * DW_TAG_COMPILE_UNIT — the DWARF tag for a compilation unit DIE.
+ *
+ * @since 0.3.1.0
+ */
+const DW_TAG_COMPILE_UNIT: u64 = 0x11
+
+/**
+ * DW_TAG_SUBPROGRAM — the DWARF tag for a subprogram (function) DIE.
+ *
+ * @since 0.3.1.0
+ */
+const DW_TAG_SUBPROGRAM: u64 = 0x2e
+
+/**
+ * debug_abbrev — the fixed `.debug_abbrev` table for the minimal unit: two abbreviations, a
+ * compile_unit (with children) and a subprogram (leaf). The attribute/form pairs match the
+ * gdb-and-lldb-verified golden (docs/design/debugger-poc/mini.s): the CU carries
+ * producer/language/name/comp_dir/low_pc/high_pc/stmt_list; the subprogram carries
+ * name/decl_file/decl_line/low_pc/high_pc/external.
+ *
+ * @return  the `.debug_abbrev` section bytes
+ * @since 0.3.1.0
+ */
+pub fn debug_abbrev() -> []byte {
+    mut b: []byte = teko::list::empty()
+    b = uleb128(b, 1 to u64)
+    b = uleb128(b, DW_TAG_COMPILE_UNIT)
+    b = teko::list::push(b, 0x01 to byte)
+    b = emit_pair(b, 0x25, 0x08)
+    b = emit_pair(b, 0x13, 0x05)
+    b = emit_pair(b, 0x03, 0x08)
+    b = emit_pair(b, 0x1b, 0x08)
+    b = emit_pair(b, 0x11, 0x01)
+    b = emit_pair(b, 0x12, 0x07)
+    b = emit_pair(b, 0x10, 0x17)
+    b = emit_pair(b, 0x00, 0x00)
+    b = uleb128(b, 2 to u64)
+    b = uleb128(b, DW_TAG_SUBPROGRAM)
+    b = teko::list::push(b, 0x00 to byte)
+    b = emit_pair(b, 0x03, 0x08)
+    b = emit_pair(b, 0x3a, 0x0d)
+    b = emit_pair(b, 0x3b, 0x05)
+    b = emit_pair(b, 0x11, 0x01)
+    b = emit_pair(b, 0x12, 0x07)
+    b = emit_pair(b, 0x3f, 0x19)
+    b = emit_pair(b, 0x00, 0x00)
+    teko::list::push(b, 0x00 to byte)
+}
+
+/**
+ * emit_pair — append one abbreviation attribute/form pair (or the `0x00 0x00` terminator) as two
+ * bytes.
+ *
+ * @param buf   the buffer to extend
+ * @param attr  the DW_AT attribute code
+ * @param form  the DW_FORM form code
+ * @return      `buf` followed by the two bytes
+ * @since 0.3.1.0
+ */
+fn emit_pair(buf: []byte, attr: u64, form: u64) -> []byte {
+    let b0 = teko::list::push(buf, attr to byte)
+    teko::list::push(b0, form to byte)
+}
+
+/**
+ * emit_subprogram_die — append one subprogram DIE (abbrev 2) to `body`, recording the low_pc
+ * relocation. Layout: abbrev code, name (string), decl_file (sdata), decl_line (data2), low_pc
+ * (addr, relocated), high_pc (data8 code size). The `external` flag is `flag_present` and emits no
+ * bytes.
+ *
+ * @param body    the DIE body accumulated so far
+ * @param relocs  the relocations accumulated so far
+ * @param base    the byte count of the section header preceding the body (for section-relative
+ *                relocation offsets)
+ * @param sub     the subprogram to describe
+ * @return        the extended body and relocation list
+ * @since 0.3.1.0
+ */
+fn emit_subprogram_die(body: []byte, relocs: []DwReloc, base: u64, sub: DwSubprogram) -> DwSection {
+    mut b = teko::list::push(body, 0x02 to byte)
+    b = emit_cstr(b, sub.name)
+    b = sleb128(b, sub.decl_file)
+    b = emit_u16_le(b, sub.decl_line to u64)
+    let low_pc_off = base + b.len
+    b = emit_addr_slot(b)
+    let r = teko::list::push(relocs, DwReloc { offset = low_pc_off; symbol = sub.symbol })
+    b = emit_u64_le_dw(b, sub.code_size)
+    DwSection { bytes = b; relocs = r }
+}
+
+/**
+ * debug_info — the minimal `.debug_info` compile unit for `cu`: the DWARF-4 unit header, the
+ * compile_unit DIE (with inline producer/name/comp_dir strings, relocated low_pc, high_pc, and a
+ * stmt_list offset of 0), then one subprogram DIE per function, then the null-DIE terminator. The
+ * emitted bytes and the absolute-address relocations reproduce the gdb-and-lldb-verified golden.
+ *
+ * @param cu  the compile unit to describe
+ * @return    the `.debug_info` section bytes and its relocations
+ * @since 0.3.1.0
+ */
+pub fn debug_info(cu: DwCompileUnit) -> DwSection {
+    mut relocs: []DwReloc = teko::list::empty()
+    mut body: []byte = teko::list::empty()
+    body = teko::list::push(body, 0x01 to byte)
+    body = emit_cstr(body, cu.producer)
+    body = emit_u16_le(body, cu.language to u64)
+    body = emit_cstr(body, cu.name)
+    body = emit_cstr(body, cu.comp_dir)
+    let cu_low_pc_off = header_len_prefix() + body.len
+    body = emit_addr_slot(body)
+    relocs = teko::list::push(relocs, DwReloc { offset = cu_low_pc_off; symbol = cu.text_symbol })
+    body = emit_u64_le_dw(body, cu.text_size)
+    body = emit_u32_le_dw(body, 0 to u64)
+    mut i: u64 = 0
+    loop {
+        if i >= cu.subprograms.len { break }
+        let child = emit_subprogram_die(body, relocs, header_len_prefix(), cu.subprograms[i])
+        body = child.bytes
+        relocs = child.relocs
+        i = i + 1
+    }
+    body = teko::list::push(body, 0x00 to byte)
+    let unit_length = body.len + 2 + 4 + 1
+    mut out: []byte = teko::list::empty()
+    out = emit_u32_le_dw(out, unit_length)
+    out = emit_u16_le(out, 4 to u64)
+    out = emit_u32_le_dw(out, 0 to u64)
+    out = teko::list::push(out, 0x08 to byte)
+    out = append_bytes_dw(out, body)
+    DwSection { bytes = out; relocs = relocs }
+}
+
+/**
+ * header_len_prefix — the byte count of the `.debug_info` unit header that precedes the DIE body
+ * (unit_length 4 + version 2 + abbrev_offset 4 + address_size 1), so a low_pc slot's offset inside
+ * the body maps to its offset inside the whole section.
+ *
+ * @return  the header prefix length (11)
+ * @since 0.3.1.0
+ */
+fn header_len_prefix() -> u64 {
+    11 to u64
+}
+
+/**
+ * append_bytes_dw — `dst` with every byte of `src` appended, in order (no slice-concat builtin over
+ * `[]byte` here).
+ *
+ * @param dst  the buffer to extend
+ * @param src  the bytes to append
+ * @return     `dst` followed by `src`
+ * @since 0.3.1.0
+ */
+fn append_bytes_dw(dst: []byte, src: []byte) -> []byte {
+    mut b = dst
+    mut i: u64 = 0
+    loop {
+        if i >= src.len { break }
+        b = teko::list::push(b, src[i])
+        i = i + 1
+    }
+    b
+}
+
+/**
+ * line_header_body — the DWARF-4 line-program header body (everything the `header_length` field
+ * counts: the instruction/statement parameters, the standard opcode-length table, the empty
+ * include-directory list, and the single file-table entry naming `file`). Fixed except for the
+ * inlined file name, matching the verified golden.
+ *
+ * @param file  the primary source file name
+ * @return      the header body bytes
+ * @since 0.3.1.0
+ */
+fn line_header_body(file: str) -> []byte {
+    mut b: []byte = teko::list::empty()
+    b = teko::list::push(b, 0x01 to byte)
+    b = teko::list::push(b, 0x01 to byte)
+    b = teko::list::push(b, 0x01 to byte)
+    b = teko::list::push(b, 0xfb to byte)
+    b = teko::list::push(b, 0x0e to byte)
+    b = teko::list::push(b, 0x0d to byte)
+    b = append_std_opcode_lengths(b)
+    b = teko::list::push(b, 0x00 to byte)
+    b = emit_cstr(b, file)
+    b = uleb128(b, 0 to u64)
+    b = uleb128(b, 0 to u64)
+    b = uleb128(b, 0 to u64)
+    teko::list::push(b, 0x00 to byte)
+}
+
+/**
+ * append_std_opcode_lengths — the twelve standard-opcode operand-count bytes for opcode_base 13
+ * (`00 01 01 01 01 00 00 00 01 00 00 01`), the DWARF-4 default set the golden uses.
+ *
+ * @param buf  the buffer to extend
+ * @return     `buf` followed by the twelve bytes
+ * @since 0.3.1.0
+ */
+fn append_std_opcode_lengths(buf: []byte) -> []byte {
+    let lens: []u64 = [0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1]
+    mut b = buf
+    mut i: u64 = 0
+    loop {
+        if i >= lens.len { break }
+        b = teko::list::push(b, lens[i] to byte)
+        i = i + 1
+    }
+    b
+}
+
+/**
+ * DW_LNS_COPY — the standard line opcode that appends the current row to the matrix.
+ *
+ * @since 0.3.1.0
+ */
+const DW_LNS_COPY: u64 = 0x01
+
+/**
+ * DW_LNS_ADVANCE_PC — the standard line opcode that advances the code address by a ULEB operand.
+ *
+ * @since 0.3.1.0
+ */
+const DW_LNS_ADVANCE_PC: u64 = 0x02
+
+/**
+ * DW_LNS_ADVANCE_LINE — the standard line opcode that advances the source line by an SLEB operand.
+ *
+ * @since 0.3.1.0
+ */
+const DW_LNS_ADVANCE_LINE: u64 = 0x03
+
+/**
+ * DW_LNS_SET_COLUMN — the standard line opcode that sets the column to a ULEB operand.
+ *
+ * @since 0.3.1.0
+ */
+const DW_LNS_SET_COLUMN: u64 = 0x05
+
+/**
+ * emit_line_row — append one line-program row to `prog`. The first row (`first` true, `prev` the
+ * initial line 1) advances the line and sets column 1 with no address advance; every later row
+ * advances the code address then the line. Each row ends with a copy.
+ *
+ * @param prog   the program bytes so far
+ * @param row    the row to emit
+ * @param prev   the source line of the previous row (1 before the first row)
+ * @param first  true for the first row (sets column 1, no pc advance)
+ * @return       the extended program bytes
+ * @since 0.3.1.0
+ */
+fn emit_line_row(prog: []byte, row: DwLineRow, prev: u32, first: bool) -> []byte {
+    mut b = prog
+    if !first {
+        b = teko::list::push(b, DW_LNS_ADVANCE_PC to byte)
+        b = uleb128(b, row.pc_advance)
+    }
+    b = teko::list::push(b, DW_LNS_ADVANCE_LINE to byte)
+    b = sleb128(b, (row.line to i64) - (prev to i64))
+    if first {
+        b = teko::list::push(b, DW_LNS_SET_COLUMN to byte)
+        b = uleb128(b, 1 to u64)
+    }
+    teko::list::push(b, DW_LNS_COPY to byte)
+}
+
+/**
+ * debug_line — the minimal `.debug_line` program for a single compile unit: the DWARF-4 header, a
+ * `set_address` extended opcode (relocated to `start_symbol`), one row per `rows` entry, a final
+ * address advance, and `end_sequence`. The emitted bytes and the single set_address relocation
+ * reproduce the gdb-and-lldb-verified golden.
+ *
+ * @param file              the primary source file name (the file-table entry)
+ * @param start_symbol      the code symbol the initial set_address relocates against
+ * @param rows              the address→line rows (the first row sits at set_address)
+ * @param final_pc_advance  the code advance emitted before end_sequence (past the last row)
+ * @return                  the `.debug_line` section bytes and its single relocation
+ * @since 0.3.1.0
+ */
+pub fn debug_line(file: str, start_symbol: str, rows: []DwLineRow, final_pc_advance: u64) -> DwSection {
+    let header = line_header_body(file)
+    mut prog: []byte = teko::list::empty()
+    prog = teko::list::push(prog, 0x00 to byte)
+    prog = teko::list::push(prog, 0x09 to byte)
+    prog = teko::list::push(prog, 0x02 to byte)
+    let set_addr_slot = line_prefix_len() + header.len + prog.len
+    prog = emit_addr_slot(prog)
+    mut prev: u32 = 1
+    mut i: u64 = 0
+    loop {
+        if i >= rows.len { break }
+        prog = emit_line_row(prog, rows[i], prev, i == 0)
+        prev = rows[i].line
+        i = i + 1
+    }
+    prog = teko::list::push(prog, DW_LNS_ADVANCE_PC to byte)
+    prog = uleb128(prog, final_pc_advance)
+    prog = teko::list::push(prog, 0x00 to byte)
+    prog = teko::list::push(prog, 0x01 to byte)
+    prog = teko::list::push(prog, 0x01 to byte)
+    let header_length = header.len
+    let unit_length = header.len + prog.len + 2 + 4
+    mut out: []byte = teko::list::empty()
+    out = emit_u32_le_dw(out, unit_length)
+    out = emit_u16_le(out, 4 to u64)
+    out = emit_u32_le_dw(out, header_length)
+    out = append_bytes_dw(out, header)
+    out = append_bytes_dw(out, prog)
+    let relocs = teko::list::push(teko::list::empty(), DwReloc { offset = set_addr_slot; symbol = start_symbol })
+    DwSection { bytes = out; relocs = relocs }
+}
+
+/**
+ * line_prefix_len — the byte count of the `.debug_line` unit header fields that precede the header
+ * body (unit_length 4 + version 2 + header_length 4), so the set_address slot's offset inside the
+ * program maps to its offset inside the whole section.
+ *
+ * @return  the prefix length (10)
+ * @since 0.3.1.0
+ */
+fn line_prefix_len() -> u64 {
+    10 to u64
+}
