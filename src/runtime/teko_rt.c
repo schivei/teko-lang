@@ -1843,7 +1843,7 @@ tk_region *tk_region_root(void) {
 // current-region stack, or the root when the stack is empty (the behaviour-identical default). A NULL
 // slot or an over-deep pointer also falls through to the root, so an unbalanced/over-deep enter can
 // never hand back garbage — it degrades to the root.
-static tk_region *tk_region_current(void) {
+tk_region *tk_region_current(void) {
     tk_task *t = tk_task_current();
     if (t->cur_rsp > 0 && t->cur_rsp <= TK_REGION_STACK_MAX) {
         tk_region *r = t->cur_regions[t->cur_rsp - 1];
@@ -4040,6 +4040,13 @@ void *tk_slice_push_fo(const void *ptr, uint64_t len, const void *elem, uint64_t
         if (tk_push_cache[h].ptr == ptr && tk_push_cache[h].esz == esz && tk_push_cache[h].cap > len)
             old_bytes = tk_push_cache[h].cap * esz;   // the live tail — its full capacity is reusable
     }
+    // (0.3.1 move-on-return M2, Mechanism 1) FREE-OLD grows into the CURRENT region. Under the
+    // per-escaping-RHS bracket discipline the current region IS `_tkrr` (the caller's region) while an
+    // escaping cb/append_fo buffer is built, so it materializes there and MOVES with the return — while
+    // a non-escaping scratch buffer (current == `_tkfr`) is reclaimed at the frame drop. The old buffer
+    // is parked on the root-only free-list only at root scope (`tk_free_block` returns when
+    // `tk_cur_rsp != 0`), so a scoped grow never dangles it. Following the current region is the whole
+    // point of Mechanism 1: zero new runtime symbols, the bracket does the conveyance.
     void *buf = tk_slice_push_r(ptr, len, elem, esz, out_len, tk_region_current());
     if (buf != old && old != NULL) {
         // (#148 Level-2 BISECT) TEKO_FO_MAX=N limits parking to the first N grows (binary-search
