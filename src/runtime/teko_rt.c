@@ -1733,6 +1733,15 @@ static int tk_canary_enabled(void) {
     return v;
 }
 
+// tk_canary_check_region — fwd (defined further down, once tk_g_program is in scope): does `r`
+// (the region a caller is about to allocate FROM) still appear on a live region registry at all? A
+// `tk_region` is itself a small plain-malloc'd struct (`tk_region_new_on`), NOT part of any chunk
+// arena — a wild write that lands on ONE OF THOSE instead of a chunk header would corrupt fields the
+// chunk ring above never inspects (head/reg_next/parent/gen), and the very FIRST symptom would be
+// exactly what the mission's repro shows: no chunk-ring trip, yet `tk_region_alloc` still dies deref-
+// encing `r->head`. Complements, does not replace, the chunk-header ring.
+static void tk_canary_check_region(tk_region *r, const char *where);
+
 // tk_canary_record — snapshot a just-born chunk's immutable header fields into the ring. Called
 // ONLY from tk_region_alloc's new-chunk branch (the sole birthplace of a tk_chunk), and only when
 // the diagnostic is on.
@@ -1787,6 +1796,7 @@ static void tk_canary_check(const char *where) {
 
 void *tk_region_alloc(tk_region *r, size_t n) {
     tk_canary_check("tk_region_alloc:entry");
+    tk_canary_check_region(r, "tk_region_alloc:entry");
     if (n == 0) n = 1;                              // n→1: a zero-size alloc yields a distinct pointer
     // (S2 obs) SCOPED-lifetime side of the map — a direct allocation into a non-root region (class
     // objects, frame regions). The ROOT side is recorded in tk_alloc (whose RA0 is the REAL site;
@@ -1928,6 +1938,31 @@ static void tk_registry_free(tk_region **registry) {
 // no task's list. See tk_region_program for why this exists.
 static tk_region *tk_g_program_regs = NULL;
 static tk_region *tk_g_program      = NULL;
+
+// tk_canary_check_region — definition (prototype declared beside the chunk-canary ring, above).
+// `r` is genuinely live iff it is on THIS task's region registry (`tk_g_regs`, walked via
+// `reg_next` — the same list `tk_regions_free_all` trusts) OR it is the one process-wide PROGRAM
+// region/registry (`tk_g_program_regs`, F2 — a separate list by design, never on any task's own).
+// Anything else is a region handle this runtime never handed out as still alive: a dangling
+// pointer left over after a drop, or outright garbage from a wild write that clobbered the
+// variable HOLDING the handle (a LowerCtx's region_stack entry, a saved u64 region handle, …).
+static void tk_canary_check_region(tk_region *r, const char *where) {
+    if (!tk_canary_enabled() || tk_canary_tripped || r == NULL) return;
+    for (tk_region *p = tk_g_regs; p != NULL; p = p->reg_next) { if (p == r) return; }
+    for (tk_region *p = tk_g_program_regs; p != NULL; p = p->reg_next) { if (p == r) return; }
+    tk_canary_tripped = 1;
+    fprintf(stderr,
+        "TEKO_NATIVE_CHUNK_CANARY: region %p passed to %s is NOT on any live region registry "
+        "(dangling/garbage region handle)\n",
+        (void *)r, where);
+#ifdef TK_HAVE_BACKTRACE
+    void *fr[24]; int nf = backtrace(fr, 24);
+    fprintf(stderr, "  backtrace at detection:\n");
+    backtrace_symbols_fd(fr, nf, 2);
+#endif
+    fflush(stderr);
+    abort();
+}
 
 // tk_termination_hook_once — register the leak-clean atexit hook exactly once, whichever of the
 // root region or the program region is materialized first. atexit fires on normal main return AND
