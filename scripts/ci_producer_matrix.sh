@@ -139,8 +139,8 @@ MODE="${1:?usage: ci_producer_matrix.sh <light|full>}"
 A_AG='{"producer":"linux-arm64-glibc","os":"ubuntu-24.04-arm","timeout":90,"kind":"linux","seed":"linux-arm64-glibc","produces":"linux-arm64-glibc","fixpoint_backend":"c"}'
 A_AM='{"producer":"linux-arm64-musl","os":"ubuntu-24.04-arm","timeout":90,"kind":"linux","seed":"linux-arm64-glibc","produces":"linux-arm64-musl","fixpoint_backend":"native"}'
 A_XM='{"producer":"linux-x86_64-musl","os":"ubuntu-latest","timeout":90,"kind":"linux","seed":"linux-x86_64-glibc","produces":"linux-x86_64-musl","fixpoint_backend":"c"}'
-A_WX='{"producer":"windows-x86_64","os":"windows-latest","timeout":90,"kind":"native","seed":"windows-x86_64","produces":"windows-x86_64","fixpoint_backend":"c"}'
-A_MAC='{"producer":"macos-arm64","os":"macos-latest","timeout":60,"kind":"native","seed":"macos-arm64","produces":"macos-arm64","fixpoint_backend":"c"}'
+A_WX='{"producer":"windows-x86_64","os":"windows-latest","timeout":90,"kind":"native","seed":"windows-x86_64","produces":"windows-x86_64","fixpoint_backend":"native"}'
+A_MAC='{"producer":"macos-arm64","os":"macos-latest","timeout":60,"kind":"native","seed":"macos-arm64","produces":"macos-arm64","fixpoint_backend":"native"}'
 
 # linux-x86_64-glibc is declared in both tiers and is the ONLY Linux leg on light: it is the asset
 # every fixed-name consumer downloads (the fail-closed regressor, mem-paranoid), so a light run without
