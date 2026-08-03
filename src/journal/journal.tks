@@ -464,6 +464,32 @@ pub fn rename(from: str, to: str) -> null | error {
 }
 
 /**
+ * append_raw — append `line` + a newline to `path` VERBATIM: no run stamp, no writer field, no
+ * kind. The RAW half of the durability point (§2.3's single `write(2)` on an O_APPEND descriptor),
+ * for a caller whose channel is not a journal SEGMENT at all — `teko::process::verdict_emit`'s third
+ * channel writes whatever line ITS OWN caller composed, unstructured, and must keep doing so; this
+ * is what lets it reuse the one durable-append mechanism this module already owns without adopting
+ * the four-field record shape `append` imposes.
+ *
+ * @param path  the file to append to (created if absent)
+ * @param line  the line to append, WITHOUT its own trailing newline (one is added)
+ * @return      nothing on success, or the failure to open or write
+ * @since 0.3.1
+ */
+pub fn append_raw(path: str, line: str) -> null | error {
+    let fd = open_seg_rt(path)
+    if fd == BAD_DESCRIPTOR {
+        return error { message = teko::str::concat("teko::journal::append_raw: could not open ", path) }
+    }
+    let rc = append_seg_rt(teko::str::concat(line, "\n"), fd)
+    let _ = close_fd_rt(fd)
+    if rc != 0 {
+        return error { message = teko::str::concat("teko::journal::append_raw: write failed on ", path) }
+    }
+    null
+}
+
+/**
  * writer_dir — the per-writer sub-directory a scope token names under the run root: the token with
  * its leading `.` removed (`.s0-label` becomes `s0-label`), so the run root holds one directory per
  * test identity rather than a flat pile of sibling files.

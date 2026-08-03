@@ -389,6 +389,13 @@ pub fn verdict_channel_path() -> str {
  * which that begins IS NOT MEASURED HERE; the MSVC CRT implements `_O_APPEND` as a seek followed by
  * a write, so Windows keeps the race it always had.
  *
+ * RE-ROOTED THROUGH `teko::journal::append_raw` (journal J1 wiring): the durability point above —
+ * one `write(2)` on an O_APPEND descriptor, no user-space buffer — is EXACTLY what the journal
+ * module already owns for its own segments, so this channel reuses that one mechanism instead of
+ * `teko::io::append_file` composing the same thing a second way. `append_raw` writes the line
+ * VERBATIM, no run stamp, no writer field, no kind — the observable channel content is byte-for-byte
+ * unchanged (still one line per call, still no header this reader has to skip).
+ *
  * @param line  one record, WITHOUT a trailing newline (one is added)
  * @return      nothing on success, or the write failure
  * @since 0.3.1.2
@@ -396,7 +403,7 @@ pub fn verdict_channel_path() -> str {
 pub fn verdict_emit(line: str) -> null | error {
     let path = verdict_channel_path()
     if path.len == 0 { teko::io::eprintln(line); return null }
-    teko::io::append_file(path, line ~ "\n")
+    teko::journal::append_raw(path, line)
 }
 
 /**
