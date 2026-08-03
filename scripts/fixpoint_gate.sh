@@ -254,6 +254,17 @@ build_gen() {
     # Remove once pinned.
     bg_call_safety_check=""
     if [ "$bg_backend" = "native" ]; then bg_call_safety_check="1"; fi
+    # DIAGNOSTIC (2026-08-03, native-region-crash, ROUND 2): the symbolized macOS-arm64 backtrace
+    # (head 284c91c) localized the SIGSEGV precisely to copy_encoded_func_to_current_region_arm64
+    # (project.tks) doing tk_slice_push into a CORRUPT current region — region-STATE corruption, not
+    # pointer alignment (the align check above returned null). This gate asserts, per item AND for the
+    # virtual-main, that the current region really returned to the ROOT after each region_leave() in
+    # the fused loop, BEFORE the copy-out commits — converting the distant tk_region_alloc SIGSEGV into
+    # a named honest-stop naming the exact item ("item N/M") and both region handles, so the streamed
+    # log pins whether the region stack is imbalanced there. Native-only; byte-identical when off.
+    # Remove once pinned.
+    bg_region_check=""
+    if [ "$bg_backend" = "native" ]; then bg_region_check="1"; fi
     scan_project_c "$W/project-c.before"
     # Stream the build LIVE (prefixed) to the lane log AND capture to $bg_log. Owner ruling
     # 2026-08-03: "expor tudo que ele faz e não ocultar nenhuma saída". Before, the build was
@@ -263,9 +274,9 @@ build_gen() {
     # `set +e`/`set -e` brackets keep the pipe's own failure from tripping the caller early.
     set +e
     if [ -n "$RT_DIR" ]; then
-        { ( cd "$PROJ" && TK_RT_DIR="$RT_DIR" TEKO_NATIVE_TRACE_ITEMS="$bg_trace" TEKO_NATIVE_RODATA_ALIGN_CHECK="$bg_align_check" TEKO_NATIVE_CALL_SAFETY_CHECK="$bg_call_safety_check" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
+        { ( cd "$PROJ" && TK_RT_DIR="$RT_DIR" TEKO_NATIVE_TRACE_ITEMS="$bg_trace" TEKO_NATIVE_RODATA_ALIGN_CHECK="$bg_align_check" TEKO_NATIVE_CALL_SAFETY_CHECK="$bg_call_safety_check" TEKO_NATIVE_REGION_CHECK="$bg_region_check" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
     else
-        { ( cd "$PROJ" && TEKO_NATIVE_TRACE_ITEMS="$bg_trace" TEKO_NATIVE_RODATA_ALIGN_CHECK="$bg_align_check" TEKO_NATIVE_CALL_SAFETY_CHECK="$bg_call_safety_check" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
+        { ( cd "$PROJ" && TEKO_NATIVE_TRACE_ITEMS="$bg_trace" TEKO_NATIVE_RODATA_ALIGN_CHECK="$bg_align_check" TEKO_NATIVE_CALL_SAFETY_CHECK="$bg_call_safety_check" TEKO_NATIVE_REGION_CHECK="$bg_region_check" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
     fi
     set -e
     return "$(cat "$W/bg_status")"
