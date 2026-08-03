@@ -3268,9 +3268,17 @@ fn copy_bytes_to_current_region(src: []byte) -> []byte {
  * @param r  the function-relative relocation to copy
  * @return   `r` with `sym` resident in the current region
  * @since 0.3.1 C6.2
+ *
+ * (0.3.1 C6.3-fix, arm64 native-fixpoint SIGSEGV) Every copied field is bound to its OWN `let`
+ * BEFORE the struct literal is built, instead of calling `copy_str_to_current_region` inline as a
+ * field initializer alongside the other (non-allocating) field reads. Behaviorally identical —
+ * this is a defensive sequencing change, not a logic change — narrowing the struct-literal-with-
+ * an-allocating-call shape this crumb's helpers share with `copy_lrodata_to_current_region`
+ * (§ the macOS-arm64 native fixpoint crash the coordinator traced there).
  */
 fn copy_reloc_to_current_region_x86(r: teko::backend::RelocX86) -> teko::backend::RelocX86 {
-    teko::backend::RelocX86 { offset = r.offset; sym = copy_str_to_current_region(r.sym); kind = r.kind; addend = r.addend; sect = r.sect }
+    let sym = copy_str_to_current_region(r.sym)
+    teko::backend::RelocX86 { offset = r.offset; sym = sym; kind = r.kind; addend = r.addend; sect = r.sect }
 }
 
 /**
@@ -3301,9 +3309,14 @@ fn copy_relocs_to_current_region_x86(relocs: []teko::backend::RelocX86) -> []tek
  * @param ef  the encoded function to copy
  * @return    `ef` with every `str` field resident in the current region
  * @since 0.3.1 C6.2
+ *
+ * (0.3.1 C6.3-fix) Each field bound to its own `let` before the struct literal, same defensive
+ * sequencing as `copy_reloc_to_current_region_x86` — see its note.
  */
 fn copy_encoded_func_to_current_region_x86(ef: teko::backend::EncodedFuncX86) -> teko::backend::EncodedFuncX86 {
-    teko::backend::EncodedFuncX86 { symbol = copy_str_to_current_region(ef.symbol); bytes = ef.bytes; relocs = copy_relocs_to_current_region_x86(ef.relocs) }
+    let symbol = copy_str_to_current_region(ef.symbol)
+    let relocs = copy_relocs_to_current_region_x86(ef.relocs)
+    teko::backend::EncodedFuncX86 { symbol = symbol; bytes = ef.bytes; relocs = relocs }
 }
 
 /**
@@ -3363,9 +3376,13 @@ fn fold_encoded_funcs_x86(mt: teko::backend::ModuleTextX86, efs: []teko::backend
  * @param r  the rodata-internal relocation to copy
  * @return   `r` with `target` resident in the current region
  * @since 0.3.1 C6.2
+ *
+ * (0.3.1 C6.3-fix) `target` bound to its own `let` before the struct literal, same defensive
+ * sequencing as `copy_reloc_to_current_region_x86` — see its note.
  */
 fn copy_ldata_reloc_to_current_region(r: teko::lir::LDataReloc) -> teko::lir::LDataReloc {
-    teko::lir::LDataReloc { offset = r.offset; target = copy_str_to_current_region(r.target) }
+    let target = copy_str_to_current_region(r.target)
+    teko::lir::LDataReloc { offset = r.offset; target = target }
 }
 
 /**
@@ -3397,9 +3414,29 @@ fn copy_ldata_relocs_to_current_region(relocs: []teko::lir::LDataReloc) -> []tek
  * @param r  the rodata entry to copy
  * @return   `r` with every field resident in the current region
  * @since 0.3.1 C6.2
+ *
+ * (0.3.1 C6.3-fix, arm64 native-fixpoint SIGSEGV) The macOS-arm64 native fixpoint gate's symbolized
+ * backtrace traced a SIGSEGV inside `tk_region_alloc`, reached through this function's `bytes` copy
+ * (`copy_bytes_to_current_region`) while the struct literal below built all THREE fields inline —
+ * the one call site among this crumb's copy-helpers with three sibling allocating calls, one of
+ * them (`bytes`) itself looping. The enter/leave/commit/drop region lifecycle around every caller
+ * of this function was re-verified by reading (`emit_native_x86`/`fuse_lower_item_x86` and the
+ * arm64/win twins): `commit_rodata_delta` — hence this function — always runs strictly AFTER
+ * `region_leave()` (current region = root) and strictly BEFORE the matching `region_drop` (the
+ * item's region, holding `r`'s bytes, is still alive to copy FROM), matching the Tier-1-proven
+ * `fold_lfunc_scoped_x86` window exactly; no ordering defect was found there. This edit is the
+ * defensive counterpart: each field is computed into its OWN `let` BEFORE the struct literal is
+ * built, instead of three allocating calls evaluated inline as sibling field initializers — the one
+ * structural difference from every OTHER copy-helper here that did NOT appear in the trace.
+ * Behaviorally identical (same values, same region, same order of the copies actually needed); if
+ * the crash persists after this, the next suspect is native codegen for this call shape on arm64
+ * (`src/backend/isel_arm64.tks`/`regalloc.tks`), outside this crumb's declared scope.
  */
 fn copy_lrodata_to_current_region(r: teko::lir::LRodata) -> teko::lir::LRodata {
-    teko::lir::LRodata { symbol = copy_str_to_current_region(r.symbol); bytes = copy_bytes_to_current_region(r.bytes); relocs = copy_ldata_relocs_to_current_region(r.relocs) }
+    let symbol = copy_str_to_current_region(r.symbol)
+    let bytes = copy_bytes_to_current_region(r.bytes)
+    let relocs = copy_ldata_relocs_to_current_region(r.relocs)
+    teko::lir::LRodata { symbol = symbol; bytes = bytes; relocs = relocs }
 }
 
 /**
