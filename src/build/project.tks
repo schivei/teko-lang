@@ -14,6 +14,7 @@
 // backend (codegen→cc) vs the VM.
 
 use teko::parser
+use teko::lexer
 use teko::checker
 use teko::codegen
 use teko::emit
@@ -5140,35 +5141,36 @@ fn report_native_coverage(prog: checker::TProgram) {
 }
 
 /**
- * run_native_gate — (#265, lever D of #249) the D4 test gate run NATIVELY, BOTH halves in this
- * process: emit a test-profile C translation unit whose `main()` calls each `#test` in order and
- * compile it at `GATE_CC_OPT` (`native_gate_build`), then run the resulting binary and merge what
- * it dumped (`native_gate_run`). A failed assert panics with a non-zero exit (fail-fast, M.1).
+ * run_native_gate — (#265, lever D of #249; own-AOT-backend since 0.3.1.0 tests-native-no-c) the D4
+ * test gate run NATIVELY, BOTH halves in this process: build the gate binary through the own
+ * backend (`native_gate_build` — no `.c`, no `cc`-COMPILE of the test program; see its own doc for
+ * what "native" now means here), then run the resulting binary (`native_gate_run`). A failed assert
+ * panics with a non-zero exit (fail-fast, M.1).
  *
- * This is the `teko build` gate, which needs the merged coverage in the SAME process that holds
- * the checked program (its floors and its release rebuild both read it). `teko test` runs the two
- * halves in different processes instead — see `test_project`.
+ * This is the `teko build` gate, which needs the SAME process the checked program lives in (the
+ * release rebuild reads it right after). `teko test` runs the two halves in different processes
+ * instead — see `test_project`.
  *
- * Cov is ALWAYS on for the gate, to feed the floors. Under TestCov each PRODUCTION fn body carries
- * `tk_cov_line_at`/`tk_cov_branch_at` interior marks (#265 Track A), so the merged sinks populate
- * ALL THREE metrics — the engine-independent static walk (`coverage::*_coverage_pct`) reads them
- * exactly as it read the retired in-process marks. Replaces a 15.6 s interpreted run of the test
- * bodies with a sub-second native one.
+ * COVERAGE IS NOT YET MEASURED ON THIS PATH (v1 gap — see `native_gate_harness_src`'s doc): the
+ * historic C gate's `TestCov` profile wove `tk_cov_line_at`/`tk_cov_branch_at` marks into every
+ * production function body; the native backend has no such instrumentation pass yet. `native_gate_run`
+ * merges nothing and `run_gate_native` skips the floor verdict rather than compute one over
+ * coverage that was never measured — an honest gap, not a silent zero.
  *
  * @param dir      the project directory (for the diagnostic prefix)
- * @param out_dir  the output directory the gate binary and its dumps land under
- * @param prog     the checked program, emitted WITH its `#test` functions
+ * @param out_dir  the output directory the gate binary lands under
+ * @param pf       the gate's PARSED tree (`native_gate_build` re-checks it with the harness spliced in)
  * @param m        the resolved manifest
- * @param tty      render the emit/cc phases in place rather than as start/settle pairs
+ * @param tty      render the checker/monomorph phases' in-place `\r` updates
  * @return         0 when every test passed, else the failing status
- * @throws         the emit or `cc` failure, already reported on its phase line
+ * @throws         the parse/check error, or `emit_native`'s own (already reported)
  */
-fn run_native_gate(dir: str, out_dir: str, prog: checker::TProgram, m: Manifest, tty: bool) -> i32 {
+fn run_native_gate(dir: str, out_dir: str, pf: ParsedFront, m: Manifest, tty: bool) -> i32 {
     let od = gate_out_dir(out_dir)
     let gp = gate_paths(od, m)
-    let brc = native_gate_build(dir, od, gp, prog, m, tty)
+    let brc = native_gate_build(dir, od, gp, pf, m, tty)
     if brc != 0 { return brc }
-    native_gate_run(od, gp, true)
+    native_gate_run(od, gp, false)
 }
 
 /**
@@ -5222,79 +5224,245 @@ fn gate_paths(od: str, m: Manifest) -> GatePaths {
 }
 
 /**
- * native_gate_build — the BUILD half of the native gate: emit the test-profile translation unit
- * and compile it into the gate binary, each as a visible phase. Extracted from `run_native_gate`
- * so the staged `teko test` driver can run this half — the whole memory cost of a `teko test` —
- * in a CHILD process and get the memory back at its exit (owner ruling 2026-07-31).
+ * TestRef — one `#test` function's call address: the namespace it was declared in (its
+ * `SourceFile.namespace`, "::"-joined — see `discover`) and its bare name. The native gate harness
+ * (`native_gate_harness_src`) turns each `TestRef` into a plain, fully-qualified top-level CALL
+ * statement — `<namespace>::<name>()` — exactly the syntax any other cross-namespace call already
+ * uses, so no new grammar or lowering is needed to invoke it.
  *
- * @param dir   the project directory (for the diagnostic prefix)
- * @param od    the output directory (already separator-normalized)
- * @param gp    the gate's paths
- * @param prog  the checked program (emitted WITH its `#test` functions)
- * @param m     the resolved manifest (metadata + link line)
- * @param tty   render the phases in place (a terminal) rather than as start/settle pairs (a log)
- * @return      0 when the gate binary is built, else the failing status
- * @throws      the emit's own message, or the `cc` failure, both already reported on the phase line
- * @since 0.3.1.0
+ * @since 0.3.1.0 (tests-native-no-c)
  */
-fn native_gate_build(dir: str, od: str, gp: GatePaths, prog: checker::TProgram, m: Manifest, tty: bool) -> i32 {
-    let mode = report_mode(false, tty)
-    match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the output directory"); null => { } }
-    let emit_phase = phase_begin("emit test", gp.cfile, mode)
-    let emitted = match codegen::tk_emit_c_test(prog, true) {
-        str as s => s
-        error as e => { phase_end_fail(emit_phase, gp.cfile, e.message); return fail(dir, e.message) }
+type TestRef = struct { namespace: str; name: str }
+
+/**
+ * native_gate_test_refs — every `#test` function among `items`, in file order: the SAME predicate
+ * (`parser::Function.is_test`) `emit_test_main`'s C harness reads at the CHECKED level, read here at
+ * the PARSED level (before `frontend_check`) — one `#test` attribute, one flag, two readers.
+ *
+ * @param items  the merged, un-typed project items (`pf.parsed.items`, WITH `.tkt` tests assembled)
+ * @return       one `TestRef` per `#test` function, in the order they appear in `items`
+ * @since 0.3.1.0 (tests-native-no-c)
+ */
+fn native_gate_test_refs(items: []parser::Item) -> []TestRef {
+    mut out: []TestRef = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= items.len { break }
+        match items[i].content {
+            parser::Function as f => { if f.is_test { out = teko::list::push(out, TestRef { namespace = items[i].namespace; name = f.name }) } }
+            _ => { }
+        }
+        i = i + 1
     }
-    let csrc = teko::str::concat(emitted, codegen::tk_emit_meta(m.name, m.version, m.suffix, m.description))
-    match teko::io::write_file(gp.cfile, csrc) {
-        error as e => { phase_end_fail(emit_phase, gp.cfile, e.message); return fail(dir, e.message) }
-        null => { }
-    }
-    phase_end_ok(emit_phase, teko::str::concat(gp.cfile, teko::str::concat(" ", size_text(csrc.len))))
-    let cc_phase = phase_begin("cc test", gp.binp, mode)
-    if run_cc(gp.cfile, gp.binp, m, prog, GATE_CC_OPT) != 0 {
-        phase_end_fail(cc_phase, gp.binp, GATE_CC_FAIL)
-        return fail(dir, GATE_CC_FAIL)
-    }
-    phase_end_ok(cc_phase, gp.binp)
-    0
+    out
 }
 
 /**
- * GATE_CC_OPT — the cc optimization level the `<name>-tktest` gate binary is built at (the historic
- * level, named rather than spelled as a literal so it sits beside `REGRCOV_CC_OPT` and the two
- * levels can be compared at a glance).
+ * native_gate_drop_statements — `items` with every BARE top-level statement (`ItemKind::Statement` —
+ * `main.tks`'s own loose top-level code) removed; every `UseDecl`/`Function`/`TypeDecl`/`ConstDecl`
+ * passes through untouched, in order.
+ *
+ * WHY: the native gate's virtual main must be ONLY the test-call sequence
+ * `native_gate_harness_src` synthesizes — the project's OWN `main.tks` logic must not also run
+ * during a test gate (it would run BEFORE the appended test calls, since a project's loose
+ * statements and the harness's would otherwise both land in `prog.items` in file order). The C
+ * gate's `emit_test_main` gets the same effect for free by never reading `checker::TStatement`
+ * items at all; this native path instead drops them before the virtual main is even lowered, since
+ * `lower_virtual_main`/`emit_native_x86` (unlike the C emitter) has no test-aware mode to skip them
+ * in.
+ *
+ * @param items  the merged, un-typed project items
+ * @return       `items` with every bare top-level statement removed
+ * @since 0.3.1.0 (tests-native-no-c)
  */
-const GATE_CC_OPT: i32 = 0
+fn native_gate_drop_statements(items: []parser::Item) -> []parser::Item {
+    mut out: []parser::Item = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= items.len { break }
+        match items[i].content {
+            parser::Statement => { }   // dropped — the harness's own calls replace the virtual main
+            _ => { out = teko::list::push(out, items[i]) }
+        }
+        i = i + 1
+    }
+    out
+}
 
 /**
- * GATE_CC_FAIL — the diagnostic for a failed `cc` of the gate binary, named so the phase line and
- * the returned failure carry the SAME words.
+ * native_gate_test_label — `<namespace>::<name>`, or the bare `<name>` when `t` has no namespace
+ * (never observed in practice — `discover` always seeds a non-empty root namespace — kept for
+ * defensive symmetry with `emit_test_channel_open`'s own C-side label rule).
+ *
+ * @param t  the test reference
+ * @return   the fully-qualified label/call-path text
+ * @since 0.3.1.0 (tests-native-no-c)
  */
-const GATE_CC_FAIL: str = "cc failed to build the native test gate"
+fn native_gate_test_label(t: TestRef) -> str {
+    if t.namespace.len > 0 { teko::str::concat(t.namespace, "::", t.name) } else { t.name }
+}
 
 /**
- * native_gate_run — the RUN half of the native gate: execute the ALREADY-BUILT gate binary (one
- * process, or `TEKO_TEST_JOBS` concurrent shards of it) and fold its coverage dumps into this
- * process's sinks. Cross-compiled targets run nothing and say so (the binary is a foreign format;
- * a fabricated pass is not the alternative, an honest "emitted, not executed" is).
+ * native_gate_harness_src — the synthetic `main.tks` TEXT for the native test gate: one bare
+ * top-level call statement per `#test`, in order — `ns::name()\n` — nothing else.
+ *
+ * THIS IS THE NATIVE GATE'S v1 CONTRACT, and it is deliberately narrower than the C gate's
+ * `emit_test_main`: FAIL-FAST (a failing `assert` panics the whole process, exactly as
+ * `run_native_gate`'s own historic doc describes — M.1), no per-test isolation/tally (the C gate's
+ * `tk_test_run` capture, owner ruling 2026-07-30 §14, needs a function-POINTER value passed to a
+ * runtime call; teko's native backend has no such calling convention to lower yet), and NO coverage
+ * instrumentation (the C gate's `tk_cov_*` marks are woven into every production function body by
+ * the C emitter's `TestCov` profile — the native backend has no per-statement instrumentation pass).
+ * `native_gate_run`/`run_gate_native` are adjusted alongside this to not fabricate a floor verdict
+ * over coverage that was never measured (see their own docs).
+ *
+ * @param refs  the ordered `#test` references (`native_gate_test_refs`)
+ * @return      the harness source text, ready to lex + `parser::parse_main_file`
+ * @since 0.3.1.0 (tests-native-no-c)
+ */
+fn native_gate_harness_src(refs: []TestRef) -> str {
+    mut b = ""
+    mut i: u64 = 0
+    loop {
+        if i >= refs.len { break }
+        b = teko::str::concat(b, teko::str::concat(native_gate_test_label(refs[i]), "()\n"))
+        i = i + 1
+    }
+    b
+}
+
+/**
+ * native_gate_harness_items — lex + parse `src` (`native_gate_harness_src`'s output) as a MAIN-FILE
+ * fragment (its grammar is `use`s + loose statements — exactly what the harness needs, nothing a
+ * `Module` grammar would even accept) and reconcile it into tagged `parser::Item`s the same way
+ * `assemble_sel` tags every real file's items: `namespace = proj_ns` (the project's own root — the
+ * harness IS a second, synthetic virtual-main body) and a `file` that can never collide with a real
+ * path, so a diagnostic pointing at it reads as what it is.
+ *
+ * @param proj_ns  the project's root namespace (`Manifest.name`) — matches how `main.tks` itself is tagged
+ * @param src      the harness source text
+ * @return         the harness's `use`/statement items, tagged, or the (should-never-happen) parse error
+ * @since 0.3.1.0 (tests-native-no-c)
+ */
+fn native_gate_harness_items(proj_ns: str, src: str) -> []parser::Item | error {
+    let tokens = match lexer::tokenize(src) { []lexer::Token as t => t; error as e => return e }
+    let mf = match parser::parse_main_file(tokens, 0) { parser::Parsed<parser::MainFile> as x => x.node; error as e => return e }
+    let raw = asm_main_items(mf)
+    mut out: []parser::Item = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= raw.len { break }
+        out = teko::list::push(out, parser::Item { content = raw[i].content; namespace = proj_ns; file = "<native-test-gate>" })
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * append_items — `a` with every entry of `b` appended, in order (the one small helper this file
+ * needs that `teko::list` does not expose generically — see `list::grow`'s own single-push shape).
+ *
+ * @param a  the base list
+ * @param b  the list to append
+ * @return   `a ++ b`
+ * @since 0.3.1.0 (tests-native-no-c)
+ */
+fn append_items(a: []parser::Item, b: []parser::Item) -> []parser::Item {
+    mut out = a
+    mut i: u64 = 0
+    loop {
+        if i >= b.len { break }
+        out = teko::list::push(out, b[i])
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * native_gate_program — the checked program the native test gate emits FROM: `pf.parsed`'s items
+ * with the project's own loose top-level statements REPLACED by the test-call harness
+ * (`native_gate_drop_statements` + `native_gate_harness_items`), then re-checked
+ * (`frontend_check` — the SAME check stage every build/gate already runs, so `#os` pruning, dep
+ * loading and monomorphization all apply identically; reported as real, distinct work — this is a
+ * second check pass, not a silent retry, exactly as `release_build_of`'s own re-check is).
+ *
+ * @param pf   the gate's PARSED tree (`frontend_parse(true, …)` — WITH `.tkt` tests assembled)
+ * @param tty  render the checker/monomorph phases' in-place `\r` updates
+ * @return     the checked program whose virtual main is ONLY the test-call sequence, or the first
+ *             parse/check error
+ * @since 0.3.1.0 (tests-native-no-c)
+ */
+fn native_gate_program(pf: ParsedFront, tty: bool) -> checker::TProgram | error {
+    let refs = native_gate_test_refs(pf.parsed.items)
+    let kept = native_gate_drop_statements(pf.parsed.items)
+    let harness_items = match native_gate_harness_items(pf.manifest.name, native_gate_harness_src(refs)) {
+        []parser::Item as items => items
+        error as e => return e
+    }
+    let pf2 = ParsedFront { parsed = parser::Program { items = append_items(kept, harness_items) }; manifest = pf.manifest; diags = pf.diags }
+    match frontend_check(pf2, false, tty) { Frontend as fe => fe.prog; error as e => e }
+}
+
+/**
+ * native_gate_build — the BUILD half of the native gate (0.3.1.0 tests-native-no-c): route the
+ * gate binary through the SAME own-AOT-backend driver (`emit_native`) a normal
+ * `TEKO_BACKEND=native` program build reaches — no `.c` translation unit is written for the test
+ * program and no `cc` COMPILE of one ever runs (`emit_native`'s own `link_object` still shells out
+ * to `cc` as the LINKER, exactly as every native build already does to resolve `teko_rt`/`assert` —
+ * that is the sanctioned native path, not the retiring one).
+ *
+ * Superseded by this: the `codegen::tk_emit_c_test` + `run_cc` pair (retired from the gate path —
+ * `run_cc`/`REGRCOV_CC_OPT` stay in use elsewhere, for `teko-regrcov`, an unrelated caller).
+ *
+ * KNOWN GAPS (v1, honestly not yet closed — see `native_gate_harness_src`'s own doc): fail-fast
+ * (no per-test isolation/tally), no coverage instrumentation, no shard cooperation
+ * (`native_gate_run` forces a single process for this path). `run_gate_native` skips the coverage
+ * floor verdict rather than fabricate one over unmeasured coverage.
+ *
+ * @param dir  the project directory (for the diagnostic prefix)
+ * @param od   the output directory (already separator-normalized)
+ * @param gp   the gate's paths (`gp.binp` is where `emit_native` itself will write the binary)
+ * @param pf   the gate's PARSED tree (`native_gate_program` re-checks it with the harness spliced in)
+ * @param m    the resolved manifest (metadata + link line)
+ * @param tty  render the checker/monomorph phases' in-place `\r` updates
+ * @return     0 when the gate binary is built (+linked), else the failing status
+ * @throws     the parse/check error, or `emit_native`'s own (already reported)
+ * @since 0.3.1.0 (tests-native-no-c)
+ */
+fn native_gate_build(dir: str, od: str, gp: GatePaths, pf: ParsedFront, m: Manifest, tty: bool) -> i32 {
+    match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the output directory"); null => { } }
+    let test_prog = match native_gate_program(pf, tty) { checker::TProgram as p => p; error as e => return fail(dir, e.message) }
+    emit_native(dir, gp.stem, od, test_prog, m, DebugInfo::None)
+}
+
+/**
+ * native_gate_run — the RUN half of the native gate: execute the ALREADY-BUILT gate binary and fold
+ * its coverage dumps into this process's sinks. Cross-compiled targets run nothing and say so (the
+ * binary is a foreign format; a fabricated pass is not the alternative, an honest "emitted, not
+ * executed" is).
+ *
+ * FORCED SINGLE-PROCESS since 0.3.1.0 (tests-native-no-c) — a v1 GAP, not a design choice:
+ * `TEKO_TEST_JOBS` sharding partitions the suite via the runtime's `tk_test_shard_take()`, which the
+ * native harness (`native_gate_harness_src`) never calls (it has no per-test isolation machinery at
+ * all yet — see that doc). Sharding this path anyway would not partition anything — every shard
+ * would run the WHOLE suite redundantly (still correct, since fail-fast still fails the run, just
+ * wasteful) — so it is switched off here rather than shipped silently slow.
  *
  * @param od         the output directory the gate binary and its dumps live under
  * @param gp         the gate's paths
  * @param merge_cov  fold the dumps into THIS process's sinks — false in the staged driver, whose
- *                   sinks nothing reads (the report stage merges the same files itself)
- * @return           0 when every test passed, else the gate's failing status; a shard that left no
- *                   coverage dump fails the run even when every test it ran passed (§2.4 — a missing
- *                   dump is a fact about the run, not a zero the floors may silently compute over)
+ *                   sinks nothing reads (the report stage merges the same files itself), and false
+ *                   from `run_native_gate` too now (0.3.1.0): the native harness dumps no coverage
+ *                   at all yet, so there is nothing to merge — an honest no-op, not a missing file
+ * @return           0 when every test passed, else the gate's failing status
  * @since 0.3.1.0
  */
 fn native_gate_run(od: str, gp: GatePaths, merge_cov: bool) -> i32 {
     let cross = resolved_cross_note()
     if cross.is_cross { teko::io::println(cross.note); return 0 }
-    let jobs = test_jobs()
-    let rc = if jobs > 1 { run_gate_sharded(od, gp.stem, gp.binp, jobs) } else { run_gate_single(gp) }
+    let rc = run_gate_single(gp)
     if merge_cov {
-        match merge_gate_coverage(od, gp, jobs, rc) {
+        match merge_gate_coverage(od, gp, 1, rc) {
             error as e => { let printed = fail("", e.message); return if rc != 0 { rc } else { printed } }
             null => { }
         }
@@ -5517,41 +5685,38 @@ fn release_build_of(dir: str, out_dir: str, opt: i32, tty: bool, start: i64, bac
     codegen_and_report(dir, out_dir, strip_tests(rel.prog), with_backend(rel.manifest, backend), opt, tty, start, debug)
 }
 
-/** run_gate_native — the D4 test-gate body run NATIVELY (the DEFAULT since #168): run every `#test`
- *  compiled-native (run_native_gate, fail-fast), then enforce ALL THREE coverage floors
- *  (function/line/branch) via coverage_gate_result — the SAME floor fn the VM lane uses. Track A's
- *  per-fn line/branch instrumentation (tk_cov_line_at/tk_cov_branch_at) makes the native run populate
- *  the line and branch sinks too, so coverage_gate_result works VERBATIM on the merged native sinks.
- *  Because run_native_gate runs the compiled tests in a CHILD process, this compiler's own peak stays
- *  codegen-only (~366 MB) instead of the retired VM gate's in-process functional-env balloon (~1.5 GB)
- *  — the #168 memory-debt fix. Since #524 (VM retirement) this is the SOLE gate engine.
+/** run_gate_native — the D4 test-gate body run NATIVELY (the DEFAULT since #168; the own-AOT-backend
+ *  gate binary since 0.3.1.0 tests-native-no-c): run every `#test` compiled-native (`run_native_gate`,
+ *  fail-fast), then rebuild the release program. Because `run_native_gate` runs the compiled tests in
+ *  a CHILD process, this compiler's own peak stays codegen-only (~366 MB) instead of the retired VM
+ *  gate's in-process functional-env balloon (~1.5 GB) — the #168 memory-debt fix. Since #524 (VM
+ *  retirement) this is the SOLE gate engine.
+ *
+ *  COVERAGE FLOORS ARE SKIPPED HERE (v1 gap, 0.3.1.0 tests-native-no-c — see `native_gate_run`'s doc):
+ *  the native gate has no coverage instrumentation yet, so `report_native_coverage`/
+ *  `enforce_coverage_floors`/`--coverage` would all be computing over sinks the harness never touched
+ *  — a fabricated 0% (or worse, a stale prior run's numbers), not a fact about this run. An honest
+ *  one-line advisory replaces them; `--cov-validation`/`--coverage` are no-ops on this path until the
+ *  native backend grows the instrumentation the historic C `TestCov` profile had.
  *
  *  @param dir      the project directory (for diagnostics)
- *  @param out_dir  the build output directory (the test TU + binary + .tkcov land under it)
- *  @param gen_cov  write a Cobertura report (`--coverage`) from the merged native sinks
+ *  @param out_dir  the build output directory (the gate binary lands under it)
+ *  @param gen_cov  `--coverage` — see the doc above (currently a no-op past the advisory)
  *  @param fe       the already-assembled front-end product (checked program + manifest)
- *  @param pf       the gate's PARSED tree (release derives from it via `filter_tkt` —
- *                  no re-parse)
+ *  @param pf       the gate's PARSED tree (`run_native_gate` re-checks it with the harness spliced in;
+ *                  release derives from the SAME tree via `filter_tkt` — no re-parse either way)
  *  @param opt      the cc optimization level for the RELEASE rebuild (the gate binary stays opt 0)
  *  @param tty      render the release rebuild's backend phases' in-place `\r` updates
  *  @param start    when the build began (the closing `built <path> <elapsed>` line's baseline)
  *  @param backend  the resolved code-generation backend (`TEKO_BACKEND=native`, default `Backend::C`)
- *  @param cov_validation  `--cov-validation` — enforce (fail) the coverage floors instead of warning
+ *  @param cov_validation  `--cov-validation` — currently a no-op on this path (see above)
  *  @param debug    the requested `--debug=` level (D1.6), forwarded to `release_build_of`
- *  @return         0 when every test passes, the floor policy is satisfied, and the release build succeeds
+ *  @return         0 when every test passes and the release build succeeds
  *  @since #265 */
 fn run_gate_native(dir: str, out_dir: str, gen_cov: bool, fe: Frontend, pf: ParsedFront, opt: i32, tty: bool, start: i64, backend: Backend, cov_validation: bool, debug: DebugInfo) -> i32 {
-    let trc = run_native_gate(dir, out_dir, fe.prog, fe.manifest, tty)
+    let trc = run_native_gate(dir, out_dir, pf, fe.manifest, tty)
     if trc != 0 { return trc }
-    report_native_coverage(fe.prog)
-    let gate_rc = enforce_coverage_floors(dir, fe, cov_validation)
-    if gate_rc != 0 { return gate_rc }
-    if gen_cov {
-        let xml = coverage::cov_cobertura(fe.prog)
-        let cov_path = cobertura_path_of(out_dir, gen_cov)
-        match teko::io::write_file(cov_path, xml) { error => { }; null => { } }
-        teko::io::println(teko::str::concat("teko: wrote coverage report ", cov_path))
-    }
+    teko::io::println("teko: native test gate v1 — coverage not yet instrumented; floors and --coverage are advisory no-ops (tests-native-no-c)")
     release_build_of(dir, out_dir, opt, tty, start, backend, pf, debug)
 }
 
@@ -7520,22 +7685,33 @@ fn enter_project_manifest(dir: str) -> Manifest | error {
 /**
  * test_stage_build — STAGE 1: assemble the project WITH its `.tkt` tests, report the D4
  * arith-cast-rate number (a property of the typed source alone, so it prints before anything can
- * fail), emit and `cc` the gate binary, and build the instrumented regression compiler from the
- * same program. Then RETURN — the caller is `main`, the process exits, and the operating system
- * takes the arena back.
+ * fail), build the gate binary through the own-AOT-backend native test gate (0.3.1.0
+ * tests-native-no-c — no `.c` translation unit, no `cc`-COMPILE of the test program; see
+ * `native_gate_build`'s doc), and build the instrumented regression compiler from the same program.
+ * Then RETURN — the caller is `main`, the process exits, and the operating system takes the arena
+ * back.
+ *
+ * Parses + checks EXPLICITLY (`frontend_parse` + `frontend_check`, rather than the
+ * `project_frontend_sel` convenience) so `pf` — the gate's UN-typed parse — survives to
+ * `native_gate_build`, which needs it to splice the harness in and re-check
+ * (`native_gate_program`). Mirrors the exact two-call shape `compile_project_g` already uses for
+ * the same reason.
  *
  * @param dir  the project directory
  * @return     0 when both binaries are built, else the failing status
- * @throws     the front-end's first error, or the emit/`cc` failure (already reported)
+ * @throws     the front-end's first error, or the parse/check/`emit_native` failure (already reported)
  * @since 0.3.1.0
  */
 fn test_stage_build(dir: str) -> i32 {
     ensure_rt_dir_abs()
-    let fe = match project_frontend_sel(dir, true) { Frontend as x => x; error as e => return fail(dir, e.message) }
+    match teko::env::chdir(dir) { error => return fail(dir, "cannot enter project directory"); null => { } }
+    let tty = output_is_tty(false)
+    let pf = match frontend_parse(true, false, tty) { ParsedFront as x => x; error as e => return fail(dir, e.message) }
+    let fe = match frontend_check(pf, false, tty) { Frontend as x => x; error as e => return fail(dir, e.message) }
     report_arith_cast_rate(fe)
     let smrc = emit_sitemap_file(dir, GATE_OUT_DIR, fe.manifest, fe.prog)
     if smrc != 0 { return smrc }
-    let brc = native_gate_build(dir, GATE_OUT_DIR, gate_paths(GATE_OUT_DIR, fe.manifest), fe.prog, fe.manifest, output_is_tty(false))
+    let brc = native_gate_build(dir, GATE_OUT_DIR, gate_paths(GATE_OUT_DIR, fe.manifest), pf, fe.manifest, tty)
     if brc != 0 { return brc }
     build_regression_feed_exe(fe.manifest, fe.prog)
     0
