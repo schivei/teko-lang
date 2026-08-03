@@ -66,23 +66,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: sh scripts/produce_assets.sh linux linux-x86_64-glibc linux-x86_64-glibc
 
+      # THE RUPTURE POINT. The fixpoint (gen1 rebuilds itself, gen2 == gen3) is the one signal this
+      # harness exists for: it is where the native path breaks (a guard refusal or a crash) while the
+      # C path holds — or, on a branch that closed the gap, where native finally holds too. Nothing
+      # heavier runs here (owner 2026-08-03: "não precisa, em theory, executar o mem paranoid,
+      # queremos apenas encontrar pontos de ruptura"); the CI-hygiene fixtures pr.yml runs after the
+      # fixpoint are not rupture detectors and are deliberately absent.
       - name: Fixpoint — gen2 == gen3 over the same source (backend = ${{ matrix.backend }})
         shell: bash
         env:
           TEKO_FIXPOINT_BACKEND: ${{ matrix.backend }}
         run: sh scripts/fixpoint_gate.sh out/teko . .fixpoint
-
-      - name: Structural — the object/archive gates fail closed with nothing to check
-        shell: bash
-        run: bash scripts/objfile_gate_test.sh
-
-      - name: Asset self-test (the staged asset runs its own gate, backend = ${{ matrix.backend }})
-        shell: bash
-        env:
-          TEKO_BACKEND: ${{ matrix.backend }}
-        run: stage/linux-x86_64-glibc/teko test .
-
-      - name: No generated C after a native-backend test session
-        if: matrix.backend == 'native'
-        shell: bash
-        run: sh scripts/no_c_in_tests_gate.sh .
