@@ -1022,6 +1022,57 @@ fn lwt_agg_fat_array_slot_offsets_are_ptr_aligned() {
 }
 
 /**
+ * lwt_one_field_fat_layout — a single-fat-field struct layout `struct <name> { s: <fat> }` whose
+ * ONLY field `s` is Ptr-classed and allotted `size` bytes (native-rodata-const-align size-check
+ * fixtures). A `size` of 8 models the mis-sized layout the size check must flag (a fat field needs
+ * `fat_slot_bytes()` = 16); a `size` of 16 models the correct layout.
+ *
+ * @param name  the struct type's name
+ * @param size  the byte size the layout allots (8 = under-sized, 16 = correct)
+ * @return      the one-field layout
+ */
+fn lwt_one_field_fat_layout(name: str, size: u32) -> LStructLayout {
+    LStructLayout {
+        name = name; size = size; align = 8 to u32
+        field_names = teko::list::push(teko::list::empty(), "s")
+        field_offsets = teko::list::push(teko::list::empty(), 0 to u32)
+        field_types = teko::list::push(teko::list::empty(), LType::Ptr)
+    }
+}
+
+/**
+ * lwt_one_str_field_init — the struct-literal initializer `{ s = "x" }`, whose sole field's VALUE
+ * is a `str` (fat — `is_fat_type` true), for the size-check fixtures.
+ *
+ * @return the one-field struct-literal initializer
+ */
+fn lwt_one_str_field_init() -> checker::TStructInit {
+    checker::TStructInit {
+        field_names = teko::list::push(teko::list::empty(), "s")
+        field_vals = teko::list::push(teko::list::empty(), lwt_strlit("x"))
+    }
+}
+
+/**
+ * lwt_const_size_check_flags_undersized_fat_field — the native-rodata-const-align size diagnostic
+ * (`check_struct_fat_spans`, the pure core `TEKO_NATIVE_CONST_SIZE_CHECK` gates): a struct whose fat
+ * field is allotted only 8 bytes FIRES (a fat `{ptr, len}` slot needs 16 — the exact "fat field
+ * sized 8 instead of 16" mismatch that shifts every following field and misaligns a later pointer),
+ * while the same field allotted 16 bytes passes clean. The check is env-INDEPENDENT here — this
+ * exercises the detection core directly, no environment variable involved.
+ *
+ * @return void
+ */
+#test
+fn lwt_const_size_check_flags_undersized_fat_field() {
+    let si = lwt_one_str_field_init()
+    let fired = match check_struct_fat_spans("KBAD", lwt_one_field_fat_layout("Bad", 8 to u32), si) { error => true; null => false }
+    teko::assert::is_true(fired)
+    let clean = match check_struct_fat_spans("KGOOD", lwt_one_field_fat_layout("Good", 16 to u32), si) { error => false; null => true }
+    teko::assert::is_true(clean)
+}
+
+/**
  * lwt_typed_var — a `TVar` of an ARBITRARY resolved type `ty` (A1-5, #382 — a
  * `match` subject is not always a scalar/Named/Optional the other `lwt_*_var`
  * helpers cover; a `Variant`-typed subject needs this general form).
