@@ -933,8 +933,11 @@ jobs:
   # untouched, because they each name only their OWN producer.
   #
   # A C TOOLCHAIN IS STILL REQUIRED HERE, and that is not a build sneaking back in: `teko test .`
-  # IS a native gate — it emits the #test corpus as C, compiles it and runs it out-of-process
-  # (#168). The compiler under test is the downloaded asset; `cc` is the suite's engine.
+  # IS a native gate — the gate binary (`bin/<name>-tktest`) is built through the own-AOT backend
+  # (0.3.1.0 tests-native-no-c: no `.c` translation unit for the test program any more), and `cc`
+  # is still the LINKER that resolves it against `teko_rt`/`assert`, then runs it out-of-process
+  # (#168). The compiler under test is the downloaded asset; `cc` never compiles teko-generated C
+  # here — it only links the own-backend object.
   #
   # NO "asset self-test must have run" GUARD ANY MORE, and its removal is deliberate, not an
   # omission. The matrix version needed it because ONE shared job carried both a POSIX and a
@@ -1040,11 +1043,16 @@ jobs:
 
       # THE NO-C-IN-TESTS GATE (owner ruling 2026-07-29, literal): "esse é outro que não pode
       # emitir C quando for compilar nativo [...] se ao final de uma sessão de testes houver um C
-      # gerado, tem que fechar vermelha a lane." `teko test .`'s unit half emits the `#test` corpus
-      # as C and compiles it with `cc` UNCONDITIONALLY — it never reads `TEKO_BACKEND` — so a green
-      # suite on a leg that claims to run native proves nothing about the native backend unless
-      # something checks that no C survived the session. `scripts/no_c_in_tests_gate.sh` is that
-      # check; `scripts/no_c_in_tests_gate_test.sh` (run in `CI gate`) proves the check itself.
+      # gerado, tem que fechar vermelha a lane." `scripts/no_c_in_tests_gate.sh` is that check;
+      # `scripts/no_c_in_tests_gate_test.sh` (run in `CI gate`) proves the check itself.
+      #
+      # STILL HONESTLY RED ON THIS PROJECT'S OWN `teko test .` (0.3.1.0 tests-native-no-c). The
+      # gate's UNIT half (`run_native_gate`/`native_gate_build`) no longer emits a `.c` for the
+      # test program — that emission site is CLOSED. The REGRESSION tier's
+      # `build_regression_cov_exe` (`bin/teko-regrcov.c`) still does — it needs the C emitter's
+      # coverage instrumentation the native backend does not have yet — so this step still fails
+      # here, naming exactly that ONE file, until that separate gap closes. See
+      # `scripts/no_c_in_tests_gate.sh`'s own header for the full accounting.
       #
       # SCOPED TO A NATIVE LEG ONLY, via the SAME lookup the producer's fixpoint step uses. RUNS
       # ON THE CHECKED-OUT SOURCE TREE (`.`), NOT ON `dl/`: `teko test .` compiled ITS OWN
