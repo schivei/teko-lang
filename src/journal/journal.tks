@@ -223,6 +223,25 @@ pub fn run_id() -> str {
 }
 
 /**
+ * run_id_is_fresh — whether the NEXT call to `run_id` would MINT a stamp rather than read one
+ * already inherited through `TEKO_RUN`.
+ *
+ * THIS IS THE SIGNAL `claim_root`'s ferrolho NEEDS AND `run_id` ALONE CANNOT GIVE IT: once `run_id`
+ * runs it sets `TEKO_RUN`, so asking afterwards can no longer tell "I minted this" from "my parent
+ * handed it to me" — the two cases must be told apart BEFORE that call, which is why this reads the
+ * environment directly instead of delegating.
+ *
+ * @return  true iff no `TEKO_RUN` is set yet in this process's environment
+ * @since 0.3.1
+ */
+fn run_id_is_fresh() -> bool {
+    match teko::env::var(RUN_ENV) {
+        str as v => v.len == 0
+        error => true
+    }
+}
+
+/**
  * run_root — the directory THIS run owns, and the only one it may create.
  *
  * @return  `bin/.tkrun/<run_id()>`
@@ -231,7 +250,10 @@ pub fn run_id() -> str {
 pub fn run_root() -> str { teko::str::concat(TKRUN_DIR, "/", run_id()) }
 
 /**
- * lock_path — the lock file inside a run root, whose body is the locking process's pid.
+ * lock_path — the lock file inside a run root, whose body is ONE pid per line — one line per writer
+ * that has ever claimed this root, never overwritten (§1.1: a run root is shared on purpose by every
+ * writer `TEKO_RUN` was inherited into, and each one's pid has to stay recorded for the root to read
+ * as live for as long as ANY of them still is).
  *
  * @param root  a run root
  * @return      `<root>/.lock`
@@ -270,17 +292,43 @@ fn mkdir_p(dir: str) -> error | null {
 }
 
 /**
- * ensure_root — create this run's root and stamp it with a lock naming this process, so a concurrent
- * `sweep` from another run spares it while this run is alive.
+ * claim_root — create `root` (if absent) and record this process among its lock's writers, refusing
+ * when `fresh` names a real conflict (§11.3's ferrolho).
  *
- * @return  the run root, created and locked
+ * A FRESH ID COLLIDING WITH A LIVE ROOT IS THE ONE CASE THIS REFUSES. `fresh` is true exactly when
+ * THIS call's `run_id` was just minted rather than inherited: a minted id landing on a directory some
+ * OTHER live process already holds means the naming scheme's own uniqueness assumption (timestamp +
+ * pid) broke, or `TEKO_RUN` was set by hand to a value that collides — either way it is a real
+ * conflict and MUST be named, never silently shared. An INHERITED id (`fresh = false`) sharing a live
+ * root is not a conflict at all — it is every sibling writer `TEKO_RUN` was deliberately propagated to
+ * (§1.1) — so it is never refused, no matter how many live pids the lock already names.
+ *
+ * @param root   the run root to claim
+ * @param fresh  whether this call's run id was just minted rather than inherited via `TEKO_RUN`
+ * @return       `root`, created and recording this process, or the named refusal
+ * @throws       when `fresh` is true and `root` is already held by a live process
  * @since 0.3.1
  */
-fn ensure_root() -> str {
-    let root = run_root()
+fn claim_root(root: str, fresh: bool) -> str | error {
+    if fresh && root_is_live(root) {
+        return error { message = teko::str::concat("teko::journal: run root already in use by a live process (", root, ")") }
+    }
     match mkdir_p(root) { error => { }; null => { } }
-    match teko::io::write_file(lock_path(root), teko::str::i64_to_str(pid_rt())) { error => { }; null => { } }
+    record_self_pid(root)
     root
+}
+
+/**
+ * ensure_root — create THIS run's root and record this process among its lock's writers, so a
+ * concurrent `sweep` from another run spares it while any of this run's writers is alive.
+ *
+ * @return  the run root, created and locked
+ * @throws  when this run's id was just minted and collides with a live root (§11.3)
+ * @since 0.3.1
+ */
+fn ensure_root() -> str | error {
+    let fresh = run_id_is_fresh()
+    claim_root(run_root(), fresh)
 }
 
 /**
@@ -326,12 +374,13 @@ fn open_seg(path: str, run: str, writer: str) -> Journal | error {
  *
  * @param writer  the writer identity; two live writers never repeat it (`s<i>`/`p<i>`/`m`)
  * @return        the opened segment
- * @throws        when the segment could not be created (permission, disk full)
+ * @throws        when the segment could not be created (permission, disk full), or when this run's id
+ *                was just minted and collides with a live root (§11.3's ferrolho)
  * @since 0.3.1
  */
 pub fn open(writer: str) -> Journal | error {
     let run = run_id()
-    let root = ensure_root()
+    let root = match ensure_root() { str as r => r; error as e => return e }
     open_seg(seg_path(root, writer), run, writer)
 }
 
@@ -673,21 +722,20 @@ fn last_segment(path: str) -> str {
 }
 
 /**
- * parse_pid — the decimal pid a lock file holds, read digit by digit (the body is exactly
- * `i64_to_str(pid)`, so leading digits are all there is). A body with no digit answers 0, which
- * `root_is_live` reads as "not live".
+ * parse_pid — the decimal pid ONE lock line holds, read digit by digit. A line with no digit answers
+ * 0, which `lock_pids` skips rather than recording as a real pid.
  *
- * @param body  the lock file's contents
- * @return      the pid, or 0 when the body carries none
+ * @param line  one line of a lock file's contents, without its newline
+ * @return      the pid, or 0 when the line carries none
  * @since 0.3.1
  */
-fn parse_pid(body: str) -> i64 {
+fn parse_pid(line: str) -> i64 {
     mut v: i64 = 0
     mut i: u64 = 0
     mut seen: bool = false
     loop {
-        if i >= body.len { break }
-        let c = body[i]
+        if i >= line.len { break }
+        let c = line[i]
         if c >= b'0' && c <= b'9' {
             v = (v * 10) + ((c to i64) - (b'0' to i64))
             seen = true
@@ -699,17 +747,90 @@ fn parse_pid(body: str) -> i64 {
 }
 
 /**
- * root_is_live — whether the run root at `root` is still held by a live process, read from its lock.
+ * lock_pids — every pid `root`'s lock file names, one per line (§1.1: a root is a shared destination
+ * for every writer `TEKO_RUN` inherited it into, so its lock is a SET of pids, not one). A body with
+ * no trailing newline on its last line is still read (`sweep`'s existing single-pid fixtures write
+ * exactly that shape).
+ *
+ * @param root  a run root
+ * @return      the pids its lock names, in the order they were recorded
+ * @since 0.3.1
+ */
+fn lock_pids(root: str) -> []i64 {
+    let body = match teko::io::read_file(lock_path(root)) { str as s => s; error => return teko::list::empty() }
+    mut out: []i64 = teko::list::empty()
+    mut start: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= body.len { break }
+        if body[i] == b'\n' {
+            let p = parse_pid(teko::str::slice(body, start, i))
+            if p > 0 { out = teko::list::push(out, p) }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if start < body.len {
+        let p = parse_pid(teko::str::slice_from(body, start))
+        if p > 0 { out = teko::list::push(out, p) }
+    }
+    out
+}
+
+/**
+ * root_is_live — whether the run root at `root` is still held by AT LEAST ONE live process among
+ * every writer its lock ever recorded. A shared root (§1.1) stays live as long as ANY sibling writer
+ * does, not only the one that happened to claim it first.
  *
  * @param root  a sibling run root
  * @return      true iff its lock names a pid that is currently alive
  * @since 0.3.1
  */
 fn root_is_live(root: str) -> bool {
-    let body = match teko::io::read_file(lock_path(root)) { str as s => s; error => return false }
-    let pid = parse_pid(body)
-    if pid <= 0 { return false }
-    pid_alive_rt(pid)
+    let pids = lock_pids(root)
+    mut i: u64 = 0
+    loop {
+        if i >= pids.len { break }
+        if pid_alive_rt(pids[i]) { return true }
+        i = i + 1
+    }
+    false
+}
+
+/**
+ * pid_in_lock — whether `pid` is already one of the pids `root`'s lock names, so `record_self_pid`
+ * appends a writer's pid AT MOST ONCE even across repeated `open` calls in the same process.
+ *
+ * @param root  a run root
+ * @param pid   the pid to look for
+ * @return      true iff `root`'s lock already names `pid`
+ * @since 0.3.1
+ */
+fn pid_in_lock(root: str, pid: i64) -> bool {
+    let pids = lock_pids(root)
+    mut i: u64 = 0
+    loop {
+        if i >= pids.len { break }
+        if pids[i] == pid { return true }
+        i = i + 1
+    }
+    false
+}
+
+/**
+ * record_self_pid — append this process's pid as one more line of `root`'s lock, unless it is there
+ * already. NEVER OVERWRITES: the earlier shape (one `write_file` per claim) let the LAST writer to
+ * open erase every EARLIER writer's pid, so a `sweep` running between two sibling writers' exits could
+ * read a still-running root as dead the instant the writer that happened to open last was the first to
+ * finish. Appending keeps every sibling's pid on record for as long as the file exists.
+ *
+ * @param root  the run root this process is claiming a share of
+ * @since 0.3.1
+ */
+fn record_self_pid(root: str) {
+    let pid = pid_rt()
+    if pid_in_lock(root, pid) { return }
+    match teko::io::append_file(lock_path(root), teko::str::concat(teko::str::i64_to_str(pid), "\n")) { error => { }; null => { } }
 }
 
 /**
