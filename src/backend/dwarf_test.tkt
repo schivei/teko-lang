@@ -79,6 +79,27 @@ fn contains_pair(hay: []byte, a: u64, b: u64) -> bool {
 }
 
 /**
+ * contains_triple — whether the three-byte sequence `a`, `b`, `c` appears anywhere in `hay`. Used
+ * to detect a location opcode and its multi-byte operand (DW_OP_fbreg 0x91 followed by a two-group
+ * SLEB128) without pinning a whole golden.
+ *
+ * @param hay  the bytes to scan
+ * @param a    the first byte of the triple
+ * @param b    the second byte of the triple
+ * @param c    the third byte of the triple
+ * @return     true when some index i has hay[i] == a, hay[i+1] == b, and hay[i+2] == c
+ */
+fn contains_triple(hay: []byte, a: u64, b: u64, c: u64) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i + 2 >= hay.len { break }
+        if (hay[i] to u64) == a && (hay[i + 1] to u64) == b && (hay[i + 2] to u64) == c { return true }
+        i = i + 1
+    }
+    false
+}
+
+/**
  * golden_abbrev — the 37 `.debug_abbrev` bytes of mini.s (two abbreviations: compile_unit with
  * children, subprogram leaf).
  *
@@ -230,4 +251,130 @@ fn sleb128_encodes_negative() {
     let got = sleb128(teko::list::empty(), -2)
     teko::assert::len_eq(got.len, 1 to u64)
     teko::assert::is_true(got[0] == (0x7e to byte))
+}
+
+/**
+ * mini_locals_unit — the locals compile unit of the readelf-verified golden
+ * (docs/design/debugger-poc/locals.s): one base type `i32` (signed, 4 bytes), and one function
+ * `add` (decl line 29, size 24, frame base DW_OP_reg6) with two parameters `a`/`b` at fbreg
+ * -20/-24, a local `s` at -4, and a lexical block re-binding `s` at -8. The fbreg offsets are the
+ * placeholders the writer carries until the real frame layout is wired in.
+ *
+ * @return  the locals compile unit
+ */
+fn mini_locals_unit() -> DwLocalsUnit {
+    let i32t = DwBaseType { name = "i32"; byte_size = 4 to u64; encoding = DW_ATE_SIGNED }
+    let pa = DwLocal { name = "a"; is_param = true; type_index = 0 to u64; fbreg_offset = -20 }
+    let pb = DwLocal { name = "b"; is_param = true; type_index = 0 to u64; fbreg_offset = -24 }
+    let s = DwLocal { name = "s"; is_param = false; type_index = 0 to u64; fbreg_offset = -4 }
+    let s_shadow = DwLocal { name = "s"; is_param = false; type_index = 0 to u64; fbreg_offset = -8 }
+    let block = DwScope { locals = [s_shadow] }
+    let add = DwSubprogramLocals {
+        name = "add"; decl_file = 1; decl_line = 29 to u32; symbol = "add"; code_size = 24 to u64
+        frame_base_op = DW_OP_REG6_RBP_PLACEHOLDER; params = [pa, pb]; locals = [s]; blocks = [block]
+    }
+    DwLocalsUnit {
+        producer = "teko 0.3.1"; language = 0x0c to u32; name = "hello.tks"; comp_dir = "."
+        text_symbol = "add"; text_size = 24 to u64; base_types = [i32t]; subprograms = [add]
+    }
+}
+
+/**
+ * golden_abbrev_locals — the 77 `.debug_abbrev` bytes of locals.s (six abbreviations: compile_unit,
+ * base_type, subprogram-with-children, formal_parameter, variable, lexical_block).
+ *
+ * @return  the golden locals abbrev bytes
+ */
+fn golden_abbrev_locals() -> []u64 {
+    [
+        0x01, 0x11, 0x01, 0x25, 0x08, 0x13, 0x05, 0x03, 0x08, 0x1b, 0x08, 0x11, 0x01, 0x12, 0x07, 0x10,
+        0x17, 0x00, 0x00, 0x02, 0x24, 0x00, 0x03, 0x08, 0x3e, 0x0b, 0x0b, 0x0b, 0x00, 0x00, 0x03, 0x2e,
+        0x01, 0x03, 0x08, 0x3a, 0x0d, 0x3b, 0x05, 0x11, 0x01, 0x12, 0x07, 0x40, 0x18, 0x3f, 0x19, 0x00,
+        0x00, 0x04, 0x05, 0x00, 0x03, 0x08, 0x49, 0x13, 0x02, 0x18, 0x00, 0x00, 0x05, 0x34, 0x00, 0x03,
+        0x08, 0x49, 0x13, 0x02, 0x18, 0x00, 0x00, 0x06, 0x0b, 0x01, 0x00, 0x00, 0x00
+    ]
+}
+
+/**
+ * golden_info_locals — the 134 `.debug_info` bytes of locals.s (address slots zeroed, filled by the
+ * two low_pc relocations at 0x25/0x48; every DW_AT_type ref4 is 0x39, the base_type DIE offset).
+ *
+ * @return  the golden locals info bytes
+ */
+fn golden_info_locals() -> []u64 {
+    [
+        0x82, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x01, 0x74, 0x65, 0x6b, 0x6f,
+        0x20, 0x30, 0x2e, 0x33, 0x2e, 0x31, 0x00, 0x0c, 0x00, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x2e, 0x74,
+        0x6b, 0x73, 0x00, 0x2e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x69, 0x33, 0x32, 0x00, 0x05, 0x04,
+        0x03, 0x61, 0x64, 0x64, 0x00, 0x01, 0x1d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x56, 0x04, 0x61, 0x00, 0x39, 0x00, 0x00,
+        0x00, 0x02, 0x91, 0x6c, 0x04, 0x62, 0x00, 0x39, 0x00, 0x00, 0x00, 0x02, 0x91, 0x68, 0x05, 0x73,
+        0x00, 0x39, 0x00, 0x00, 0x00, 0x02, 0x91, 0x7c, 0x06, 0x05, 0x73, 0x00, 0x39, 0x00, 0x00, 0x00,
+        0x02, 0x91, 0x78, 0x00, 0x00, 0x00
+    ]
+}
+
+#test
+/**
+ * dwarf_abbrev_locals_matches_golden — the `.debug_abbrev` locals producer reproduces the verified
+ * 77-byte golden exactly (the six abbreviations that let a debugger name and locate variables).
+ */
+fn dwarf_abbrev_locals_matches_golden() {
+    teko::assert::eq_i64(first_mismatch(debug_abbrev_locals(), golden_abbrev_locals()), -1)
+}
+
+#test
+/**
+ * dwarf_info_locals_matches_golden — the `.debug_info` locals producer reproduces the verified
+ * 134-byte golden exactly: base_type, subprogram with frame_base, formal_parameters/variable with
+ * DW_OP_fbreg locations, and a lexical_block shadow. It records the two low_pc relocations at 0x25
+ * (unit) and 0x48 (add), and reports the base_type DIE at CU offset 0x39 — the offset every
+ * DW_AT_type ref4 resolves to.
+ */
+fn dwarf_info_locals_matches_golden() {
+    let info = debug_info_locals(mini_locals_unit())
+    teko::assert::eq_i64(first_mismatch(info.section.bytes, golden_info_locals()), -1)
+    teko::assert::len_eq(info.section.relocs.len, 2 to u64)
+    teko::assert::eq_u64(info.section.relocs[0].offset, 0x25 to u64)
+    teko::assert::eq_str(info.section.relocs[0].symbol, "add")
+    teko::assert::eq_u64(info.section.relocs[1].offset, 0x48 to u64)
+    teko::assert::eq_str(info.section.relocs[1].symbol, "add")
+    teko::assert::len_eq(info.base_type_offsets.len, 1 to u64)
+    teko::assert::eq_u64(info.base_type_offsets[0], 0x39 to u64)
+}
+
+#test
+/**
+ * dwarf_base_type_encodings_frozen — the enumerated frozen scalar encodings (D2.5) hold their DWARF
+ * DW_ATE_* values: boolean 0x02, signed 0x05, unsigned 0x07. The list is explicit, never "whatever
+ * a type happens to be", so a new base type is a deliberate addition here.
+ */
+fn dwarf_base_type_encodings_frozen() {
+    teko::assert::eq_u64(DW_ATE_BOOLEAN, 0x02 to u64)
+    teko::assert::eq_u64(DW_ATE_SIGNED, 0x05 to u64)
+    teko::assert::eq_u64(DW_ATE_UNSIGNED, 0x07 to u64)
+}
+
+#test
+/**
+ * dwarf_fbreg_offset_is_placeholder_sleb — the DW_OP_fbreg offset is carried verbatim as an SLEB128,
+ * so when the real frame layout replaces the placeholder the location tracks it with no re-encoding.
+ * A parameter at fbreg +300 (a two-group SLEB, 0xac 0x02) proves the general path the small negative
+ * golden offsets never reach.
+ */
+fn dwarf_fbreg_offset_is_placeholder_sleb() {
+    let p = DwLocal { name = "p"; is_param = true; type_index = 0 to u64; fbreg_offset = 300 }
+    let f = DwSubprogramLocals {
+        name = "f"; decl_file = 1; decl_line = 1 to u32; symbol = "f"; code_size = 1 to u64
+        frame_base_op = DW_OP_REG6_RBP_PLACEHOLDER; params = [p]; locals = []; blocks = []
+    }
+    let cu = DwLocalsUnit {
+        producer = "t"; language = 0x0c to u32; name = "f.tks"; comp_dir = "."
+        text_symbol = "f"; text_size = 1 to u64
+        base_types = [DwBaseType { name = "i32"; byte_size = 4 to u64; encoding = DW_ATE_SIGNED }]
+        subprograms = [f]
+    }
+    let info = debug_info_locals(cu)
+    teko::assert::is_true(contains_triple(info.section.bytes, 0x91 to u64, 0xac to u64, 0x02 to u64))
 }
