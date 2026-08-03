@@ -501,7 +501,7 @@ fn compute_macho_layout(enc: EncodedModule, strtab_size: u32, nreloc_text: u32, 
     let has_dwarf = dwarf.present
     let nsects: u32 = if enc.rodata.len > 0 { 2 } else { 1 }
     let seg_cmdsize = 72 + nsects * 80
-    let dwarf_seg_cmdsize: u32 = if has_dwarf { 72 + 3 * 80 } else { 0 }
+    let dwarf_seg_cmdsize: u32 = if has_dwarf { (72 + 3 * 80) to u32 } else { 0 }
     let sizeofcmds = seg_cmdsize + dwarf_seg_cmdsize + 24 + 24 + 80
     let ncmds: u32 = if has_dwarf { 5 } else { 4 }
     let text_offset = 32 + sizeofcmds
@@ -525,7 +525,8 @@ fn compute_macho_layout(enc: EncodedModule, strtab_size: u32, nreloc_text: u32, 
     let debug_info_reloc_offset = align_up(debug_line_offset + debug_line_size, 4)
     let debug_line_reloc_offset = debug_info_reloc_offset + (nreloc_debug_info * MACHO_RELOC_ENTRY_SIZE)
     let dwarf_reloc_end = debug_line_reloc_offset + (nreloc_debug_line * MACHO_RELOC_ENTRY_SIZE)
-    let symtab_offset = align_up(if has_dwarf { dwarf_reloc_end } else { reloc_end }, 8)
+    let symtab_base: u32 = if has_dwarf { dwarf_reloc_end } else { reloc_end }
+    let symtab_offset = align_up(symtab_base, 8)
     let nsyms = enc.symbols.len to u32
     let symtab_end = symtab_offset + nsyms * 16
     let ndef = count_defined(enc.symbols)
@@ -1084,7 +1085,7 @@ fn emit_symtab(buf: []byte, symbols: []Symbol, strtab: StrTab, text_size: u32) -
  * @param DwarfSink dwarf  the D1.3 producer output to sink (default absent)
  * @return []byte  the Mach-O object file bytes
  */
-pub fn emit_macho(enc: EncodedModule, dwarf: DwarfSink = no_dwarf_sink()) -> []byte {
+pub fn emit_macho(enc: EncodedModule, dwarf: DwarfSink) -> []byte {
     let parts = macho_partition_relocs(enc.relocs)
     let strtab = build_strtab(enc.symbols)
     let lay = compute_macho_layout(enc, strtab.bytes.len to u32, parts.text.len to u32, parts.rodata.len to u32, dwarf)
