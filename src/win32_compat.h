@@ -24,14 +24,6 @@
 #define _CRT_SECURE_NO_WARNINGS
 #endif
 
-// PROC_THREAD_ATTRIBUTE_HANDLE_LIST (used by tk_win32_spawn_redirected to inherit ONLY the three
-// redirected handles) is a Vista+ API. MinGW-w64 hides it behind _WIN32_WINNT, whose default drifts
-// per toolchain, so pin the floor to Vista (0x0600) here — BEFORE <windows.h> — without clobbering a
-// higher value a build already set.
-#ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0600
-#endif
-
 #include <windows.h>   // FindFirstFileA / FindNextFileA / FindClose
 #include <direct.h>    // _chdir, _mkdir, _getcwd
 #include <process.h>   // _spawnvp, _P_WAIT
@@ -292,73 +284,12 @@ static inline char *tk_win32_build_envblock(char *const *extra, size_t extra_n) 
     return block;
 }
 
-// tk_win32_collect_inherit — the deduplicated list of the child's three redirected handles that are
-// real (non-NULL, non-INVALID) and so belong in an explicit inheritance list. `out[0..return)` holds
-// them; duplicates are dropped because a PROC_THREAD_ATTRIBUTE_HANDLE_LIST with a repeated handle
-// makes CreateProcess fail with ERROR_INVALID_PARAMETER (two of the three CAN coincide, e.g. one
-// descriptor passed for both stdout and stderr).
-static inline DWORD tk_win32_collect_inherit(HANDLE in, HANDLE out, HANDLE err, HANDLE out3[3]) {
-    HANDLE all[3] = { in, out, err };
-    DWORD n = 0;
-    for (int i = 0; i < 3; i++) {
-        HANDLE h = all[i];
-        if (!h || h == INVALID_HANDLE_VALUE) continue;
-        bool seen = false;
-        for (DWORD j = 0; j < n; j++) if (out3[j] == h) { seen = true; break; }
-        if (!seen) out3[n++] = h;
-    }
-    return n;
-}
-
-// tk_win32_create_scoped — CreateProcess with inheritance SCOPED to exactly `handles[0..nh)` via a
-// STARTUPINFOEX PROC_THREAD_ATTRIBUTE_HANDLE_LIST, so a concurrently-spawned sibling can inherit
-// NOTHING ELSE the parent happens to hold inheritable (a pipe end feeding a log reader, another
-// child's scratch handle, a coverage sink). That unrestricted inheritance is the Windows
-// concurrent-spawn deadlock the sharded test gate hit: `bInheritHandles=TRUE` clones EVERY
-// inheritable handle open at the call, and a child keeping one alive blocks whoever waits on its
-// end reaching EOF — "alive, but no progress". With an empty list (nothing to redirect) inheritance
-// is turned OFF outright. Returns the CreateProcess boolean; fills `*pi` on success.
-static inline BOOL tk_win32_create_scoped(char *cmdline, char *envblock, const char *dir,
-                                          HANDLE hin, HANDLE hout, HANDLE herr,
-                                          HANDLE *handles, DWORD nh, PROCESS_INFORMATION *pi) {
-    const char *cwd = (dir && dir[0]) ? dir : NULL;
-    if (nh == 0) {
-        STARTUPINFOA si;
-        ZeroMemory(&si, sizeof si);
-        si.cb = sizeof si;
-        return CreateProcessA(NULL, cmdline, NULL, NULL, FALSE, 0, envblock, cwd, &si, pi);
-    }
-    SIZE_T asize = 0;
-    InitializeProcThreadAttributeList(NULL, 1, 0, &asize);
-    LPPROC_THREAD_ATTRIBUTE_LIST attr = (LPPROC_THREAD_ATTRIBUTE_LIST)malloc(asize);
-    if (!attr || !InitializeProcThreadAttributeList(attr, 1, 0, &asize)) { free(attr); return FALSE; }
-    STARTUPINFOEXA six;
-    ZeroMemory(&six, sizeof six);
-    six.StartupInfo.cb = sizeof six;
-    six.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-    six.StartupInfo.hStdInput  = hin;
-    six.StartupInfo.hStdOutput = hout;
-    six.StartupInfo.hStdError  = herr;
-    six.lpAttributeList = attr;
-    BOOL ok = UpdateProcThreadAttribute(attr, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-                                        handles, nh * sizeof(HANDLE), NULL, NULL)
-              && CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, EXTENDED_STARTUPINFO_PRESENT,
-                                envblock, cwd, &six.StartupInfo, pi);
-    DeleteProcThreadAttributeList(attr);
-    free(attr);
-    return ok;
-}
-
 // tk_win32_spawn_redirected — CreateProcess `argv` without waiting, its three standard streams
 // redirected per `in_fd`/`out_fd`/`err_fd` (a CRT descriptor the caller owns, else < 0) falling
 // back to `in_path`/`out_path`/`err_path` (NULL/"" = inherit), and its working directory set to
 // `dir` (NULL/"" = inherit), with `extra` environment tokens appended to the inherited block.
 // Returns the child's HANDLE cast to an opaque i64 (closed once, by `tk_win32_wait_one`), or -1 on
 // failure.
-//
-// Inheritance is SCOPED to exactly the three redirected handles (tk_win32_create_scoped) so the
-// sharded test gate's concurrent children cannot inherit each other's — or the parent's — stray
-// handles and deadlock on an EOF that never comes.
 //
 // (0.3.1.0 F5) THE DESCRIPTOR SLOTS ARE WHY THE CAPTURE NEED NOT BE A FILE. A caller passing a
 // `tk_rt_pipe` write end here gets the child's stream on the pipe instead of on a scratch file, and
@@ -370,19 +301,22 @@ static inline int64_t tk_win32_spawn_redirected(char *const *argv, const char *d
                                                  int in_fd, int out_fd, int err_fd) {
     char *cmdline = tk_win32_join_cmdline(argv);
     char *envblock = tk_win32_build_envblock(extra, extra_n);
-    HANDLE hin  = tk_win32_child_handle(in_fd,  in_path,  STD_INPUT_HANDLE,  false);
-    HANDLE hout = tk_win32_child_handle(out_fd, out_path, STD_OUTPUT_HANDLE, true);
-    HANDLE herr = tk_win32_child_handle(err_fd, err_path, STD_ERROR_HANDLE,  true);
-    HANDLE inherit[3];
-    DWORD nh = tk_win32_collect_inherit(hin, hout, herr, inherit);
+    STARTUPINFOA si;
+    ZeroMemory(&si, sizeof si);
+    si.cb = sizeof si;
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput  = tk_win32_child_handle(in_fd,  in_path,  STD_INPUT_HANDLE,  false);
+    si.hStdOutput = tk_win32_child_handle(out_fd, out_path, STD_OUTPUT_HANDLE, true);
+    si.hStdError  = tk_win32_child_handle(err_fd, err_path, STD_ERROR_HANDLE,  true);
     PROCESS_INFORMATION pi;
     ZeroMemory(&pi, sizeof pi);
-    BOOL ok = tk_win32_create_scoped(cmdline, envblock, dir, hin, hout, herr, inherit, nh, &pi);
+    BOOL ok = CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, 0,
+                              envblock, (dir && dir[0]) ? dir : NULL, &si, &pi);
     free(cmdline);
     free(envblock);
-    if (hin  && hin  != INVALID_HANDLE_VALUE) CloseHandle(hin);
-    if (hout && hout != INVALID_HANDLE_VALUE) CloseHandle(hout);
-    if (herr && herr != INVALID_HANDLE_VALUE) CloseHandle(herr);
+    if (si.hStdInput  && si.hStdInput  != INVALID_HANDLE_VALUE) CloseHandle(si.hStdInput);
+    if (si.hStdOutput && si.hStdOutput != INVALID_HANDLE_VALUE) CloseHandle(si.hStdOutput);
+    if (si.hStdError  && si.hStdError  != INVALID_HANDLE_VALUE) CloseHandle(si.hStdError);
     if (!ok) return -1;
     CloseHandle(pi.hThread);
     return (int64_t)(intptr_t)pi.hProcess;
