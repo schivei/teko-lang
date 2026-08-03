@@ -350,6 +350,74 @@ pub fn fn_escaping_vars(f: TFunction) -> []str {
     acc
 }
 
+/**
+ * fn_frees_old_vars — the per-function set of accumulator names whose whole-fn linear-chain proof
+ * (`assign_frees_old`) holds, so any self-append `xs = push(xs, …)` to one of them may FREE-OLD on
+ * a copy-grow (park the superseded buffer for reuse). PUBLIC, mirroring `fn_escaping_vars`: the C
+ * emitter re-derives the proof per-assign (it has the enclosing `fn_body` at every emit site), but
+ * the NATIVE backend lowers a push from a bare `TCall` with no assign/body context, so it reads this
+ * precomputed set instead — one entry per proven name, checked once against the whole body.
+ *
+ * @param f  the typed function
+ * @return   the names whose accumulator chain is proven linear (free-old-safe)
+ * @since 0.3.1 (native free-old parity, #148)
+ */
+pub fn fn_frees_old_vars(f: TFunction) -> []str {
+    mut acc: []str = teko::list::empty()
+    collect_frees_old_names(f.body, f.body, acc)
+    acc
+}
+
+/**
+ * collect_frees_old_names — walk `body` (recursing into loop/defer/adopt bodies and if/match arm
+ * blocks) and, for each self-append assign to a not-yet-collected name, add the name iff
+ * `assign_frees_old` holds against the WHOLE `fn_body`. Mirrors `mark_block`'s write-through `acc`.
+ *
+ * @param fn_body  the whole function body (the proof's scope, invariant across the recursion)
+ * @param body     the block currently being walked
+ * @param acc      the collected-name accumulator (by-reference, grown in place)
+ */
+fn collect_frees_old_names(fn_body: []TStatement, body: []TStatement, ref acc: []str) -> void {
+    mut i = 0
+    loop {
+        if i >= body.len { break }
+        collect_frees_old_stmt(fn_body, body[i], acc)
+        i++
+    }
+}
+
+fn collect_frees_old_stmt(fn_body: []TStatement, s: TStatement, ref acc: []str) -> void {
+    match s {
+        TAssign as a => {
+            if assign_is_self_append(a) && !str_set_has(acc.value, a.name) && assign_frees_old(fn_body, a) {
+                acc = str_set_add(acc.value, a.name)
+            }
+        }
+        TExprStmt as es => collect_frees_old_expr(fn_body, es.expr, acc)
+        TLoopStmt as l => { collect_frees_old_names(fn_body, l.init, acc); collect_frees_old_names(fn_body, l.body, acc) }
+        TDeferStmt as d => collect_frees_old_names(fn_body, d.body, acc)
+        TAdoptStmt as a => collect_frees_old_names(fn_body, a.body, acc)
+        TBinding => { }
+        TReturn => { }
+        TBreakStmt => { }
+        TContinueStmt => { }
+    }
+}
+
+fn collect_frees_old_expr(fn_body: []TStatement, e: TExpr, ref acc: []str) -> void {
+    match e.kind {
+        TIfExpr as f => {
+            collect_frees_old_names(fn_body, f.then_blk, acc)
+            if f.has_else { collect_frees_old_names(fn_body, f.else_blk, acc) }
+        }
+        TMatchExpr as m => {
+            mut i = 0
+            loop { if i >= m.arms.len { break }; collect_frees_old_names(fn_body, m.arms[i].body, acc); i++ }
+        }
+        _ => { }
+    }
+}
+
 // binding_is_frame_local — is this binding a SIMPLE non-escaping local whose storage may ride a
 // tighter-than-root region? A `const`, a destructure, a discard (`_`), or an escaping name is NOT
 // frame-local. Codegen still decides which concrete representations actually allocate in that
