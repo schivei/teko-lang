@@ -1455,13 +1455,14 @@ static void tk_free_purge(void) {                   // rewind/termination: parke
     t->free_large = NULL;
     t->free_parked_bytes = 0;
 }
-// tk_canary_check — fwd; the diagnostic itself is defined beside tk_region_alloc further down
+// tk_canary_check_head — fwd; the diagnostic itself is defined beside tk_region_alloc further down
 // (it needs `struct tk_chunk` and the region machinery in scope), but tk_free_take/tk_free_block
 // sit ahead of it in the file and are call sites too (2026-08-03, native-region-crash, chunk-canary).
-static void tk_canary_check(const char *where);
+static void tk_canary_check_head(tk_region *r, const char *where);
+tk_region *tk_region_current(void);   // fwd (defined later in this file; public in teko_rt.h)
 
 static void *tk_free_take(size_t an) {
-    tk_canary_check("tk_free_take:entry");
+    tk_canary_check_head(tk_region_current(), "tk_free_take:entry");
     // (#148 Level-2) TAKE = CEIL-16 — never UNDERSTATE the need. The bin granularity is 16 bytes
     // (= TK_ARENA_ALIGN); requests round up so bin[qa] blocks are exactly qa ≥ an bytes. Ceil (not
     // floor) so a 24-byte request never gets handed a 16-byte block (an 8-byte OVERRUN into the
@@ -1712,77 +1713,113 @@ void *tk_region_lookup(tk_region *r, uint64_t type_id) {
 //
 // NO STRUCT CHANGE: `struct tk_chunk` keeps its exact layout (no magic field — that would move
 // `offsetof(data)` unconditionally, the one thing every existing diagnostic here refuses to do).
-// Instead a SEPARATE side-table snapshots {cap, next} for the last few hundred chunks AT CREATION
-// TIME (tk_region_alloc's own new-chunk branch, the only place a tk_chunk is born) and re-checks
-// every entry on every subsequent tk_region_alloc/tk_free_block/tk_free_take call: a live chunk's
-// `cap`/`next` never change after creation (only `used` does, by the bump itself), so any
-// discrepancy is definitionally a write nobody but this runtime's own chunk bookkeeping should ever
-// perform. A RING (not a growing table) of the MOST RECENTLY CREATED chunks, because a wild write
-// that overruns one bump-allocated block lands on whatever the allocator placed NEXT to it in the
-// process address space — overwhelmingly a recently `posix_memalign`'d neighbor, not an old one.
-#define TK_CANARY_RING 512
-typedef struct { struct tk_chunk *chunk; size_t cap; struct tk_chunk *next_snapshot; int live; } tk_canary_entry;
-static tk_canary_entry tk_canary_ring[TK_CANARY_RING];
-static int tk_canary_head = 0;      // next ring slot to overwrite
-static int tk_canary_count = 0;     // how many slots are populated (<= TK_CANARY_RING)
-static int tk_canary_tripped = 0;   // latches so one corruption is reported once, not per-call-site
+// Instead a SEPARATE side-table snapshots {cap, next} for EVERY chunk this process ever creates, AT
+// CREATION TIME (tk_region_alloc's own new-chunk branch, the only place a tk_chunk is born), and
+// re-checks the CURRENT head chunk of the region a caller is about to allocate from on every
+// tk_region_alloc entry: a live chunk's `cap`/`next` never change after creation (only `used` does,
+// by the bump itself), so any discrepancy is definitionally a write nobody but this runtime's own
+// chunk bookkeeping should ever perform.
+//
+// FULL HISTORY, NOT A RECENCY WINDOW — this replaced an earlier 512-chunk RING (measured, see the
+// commit history): a full self-build run reached the very LAST native-lowering item
+// (virtual-main's own final ELF emission, `elf_collect_const_entries`/`elf_partition_data_rel_ro`)
+// and its `tk_slice_push_fo` grow still crashed inside `tk_region_alloc` with the ring reporting
+// NOTHING — proof the corrupted head chunk predates whatever the last 512 births were. An
+// open-addressed hash table (keyed by chunk address, tombstone-free — `used` is sticky so a probe
+// chain past a freed slot still finds anyone hashed behind it) gives O(1) record/forget/lookup at
+// unbounded size, so a chunk born at item 12 that only becomes somebody's live head again at
+// virtual-main is still covered.
+#define TK_CANARY_TAB_BITS 20
+#define TK_CANARY_TAB_SIZE (1u << TK_CANARY_TAB_BITS)   // 1,048,576 slots * 32 B ≈ 32 MB — one-time diagnostic run only
+typedef struct { struct tk_chunk *chunk; size_t cap; struct tk_chunk *next_snapshot; int used; int live; } tk_canary_entry;
+static tk_canary_entry *tk_canary_tab = NULL;   // lazily malloc'd (only when the diagnostic is on)
+static int tk_canary_tripped = 0;               // latches so one corruption is reported once, not per-call-site
 
 static int tk_canary_enabled(void) {
     static int v = -1;
-    if (v < 0) { const char *e = getenv("TEKO_NATIVE_CHUNK_CANARY"); v = (e != NULL && e[0] == '1') ? 1 : 0; }
+    if (v < 0) {
+        const char *e = getenv("TEKO_NATIVE_CHUNK_CANARY");
+        v = (e != NULL && e[0] == '1') ? 1 : 0;
+        if (v == 1) tk_canary_tab = calloc(TK_CANARY_TAB_SIZE, sizeof *tk_canary_tab);
+    }
     return v;
+}
+
+static unsigned tk_canary_hash(const struct tk_chunk *c) {
+    uintptr_t v = (uintptr_t)c;
+    v ^= v >> 15; v *= (uintptr_t)0x2545F4914F6CDD1DULL; v ^= v >> 13;
+    return (unsigned)v & (TK_CANARY_TAB_SIZE - 1);
 }
 
 // tk_canary_check_region — fwd (defined further down, once tk_g_program is in scope): does `r`
 // (the region a caller is about to allocate FROM) still appear on a live region registry at all? A
 // `tk_region` is itself a small plain-malloc'd struct (`tk_region_new_on`), NOT part of any chunk
 // arena — a wild write that lands on ONE OF THOSE instead of a chunk header would corrupt fields the
-// chunk ring above never inspects (head/reg_next/parent/gen), and the very FIRST symptom would be
-// exactly what the mission's repro shows: no chunk-ring trip, yet `tk_region_alloc` still dies deref-
-// encing `r->head`. Complements, does not replace, the chunk-header ring.
+// chunk table above never inspects (head/reg_next/parent/gen), and the very FIRST symptom would be
+// exactly what the mission's repro shows: no chunk-table trip, yet `tk_region_alloc` still dies
+// dereferencing `r->head`. Complements, does not replace, the chunk-header table.
 static void tk_canary_check_region(tk_region *r, const char *where);
 
-// tk_canary_record — snapshot a just-born chunk's immutable header fields into the ring. Called
+// tk_canary_record — snapshot a just-born chunk's immutable header fields into the table. Called
 // ONLY from tk_region_alloc's new-chunk branch (the sole birthplace of a tk_chunk), and only when
-// the diagnostic is on.
+// the diagnostic is on. Linear probe to the first slot that is either unused or already names `c`
+// (a legitimate re-birth at a reused address after tk_canary_forget).
 static void tk_canary_record(struct tk_chunk *c) {
-    tk_canary_ring[tk_canary_head] = (tk_canary_entry){ .chunk = c, .cap = c->cap, .next_snapshot = c->next, .live = 1 };
-    tk_canary_head = (tk_canary_head + 1) % TK_CANARY_RING;
-    if (tk_canary_count < TK_CANARY_RING) tk_canary_count += 1;
+    unsigned h = tk_canary_hash(c);
+    for (unsigned probe = 0; probe < TK_CANARY_TAB_SIZE; probe += 1) {
+        unsigned i = (h + probe) & (TK_CANARY_TAB_SIZE - 1);
+        if (!tk_canary_tab[i].used || tk_canary_tab[i].chunk == c) {
+            tk_canary_tab[i] = (tk_canary_entry){ .chunk = c, .cap = c->cap, .next_snapshot = c->next, .used = 1, .live = 1 };
+            return;
+        }
+    }
+    // table saturated (every slot `used`) — astronomically unlikely at 2^20 entries; drop silently,
+    // this is a best-effort diagnostic, never a correctness mechanism.
 }
 
-// tk_canary_forget — mark every ring entry naming `c` dead (called from tk_chunk_free, the sole
+// tk_canary_forget — mark the entry naming `c` dead (called from tk_chunk_free, the sole
 // deallocator): a LEGITIMATE tk_region_drop / tk_arena_pop rewind frees chunks constantly, and
 // without this the diagnostic would read a freed-and-reused address on its next check and report a
-// false "corruption" over memory the allocator has since handed to someone else entirely.
+// false "corruption" over memory the allocator has since handed to someone else entirely. `used`
+// stays set (a tombstone) so the probe chain for anyone hashed behind this slot still terminates
+// correctly; only `live` clears.
 static void tk_canary_forget(struct tk_chunk *c) {
     if (!tk_canary_enabled()) return;
-    for (int i = 0; i < tk_canary_count; i += 1) {
-        if (tk_canary_ring[i].live && tk_canary_ring[i].chunk == c) tk_canary_ring[i].live = 0;
+    unsigned h = tk_canary_hash(c);
+    for (unsigned probe = 0; probe < TK_CANARY_TAB_SIZE; probe += 1) {
+        unsigned i = (h + probe) & (TK_CANARY_TAB_SIZE - 1);
+        if (!tk_canary_tab[i].used) return;   // never recorded (or table saturated past here) — nothing to forget
+        if (tk_canary_tab[i].chunk == c) { tk_canary_tab[i].live = 0; return; }
     }
 }
 
-// tk_canary_check — re-verify every ringed chunk's {cap, next} against its birth-time snapshot.
-// `where` names the call site (tk_region_alloc / tk_free_block / tk_free_take) so the report pins
-// which family of allocator activity was running when the corruption was FIRST observed — not
-// necessarily where the corrupting write itself executed, but the nearest allocator checkpoint
-// after it, which is exactly the "next allocation names the culprit" narrowing this diagnostic buys.
-static void tk_canary_check(const char *where) {
-    if (!tk_canary_enabled() || tk_canary_tripped) return;
-    for (int i = 0; i < tk_canary_count; i += 1) {
-        tk_canary_entry *e = &tk_canary_ring[i];
-        if (!e->live) continue;   // legitimately freed (tk_canary_forget) — not a live chunk to check
-        if (e->chunk->cap != e->cap || e->chunk->next != e->next_snapshot) {
+// tk_canary_check_head — verify `r->head` (the ONLY chunk tk_region_alloc actually dereferences)
+// against its birth-time snapshot, wherever in history it was recorded. `where` names the call site
+// so the report pins which family of allocator activity was running when the corruption was FIRST
+// observed — not necessarily where the corrupting write itself executed, but the nearest allocator
+// checkpoint after it, which is exactly the "next allocation names the culprit" narrowing this
+// diagnostic buys.
+static void tk_canary_check_head(tk_region *r, const char *where) {
+    if (!tk_canary_enabled() || tk_canary_tripped || r == NULL || r->head == NULL) return;
+    struct tk_chunk *c = r->head;
+    unsigned h = tk_canary_hash(c);
+    for (unsigned probe = 0; probe < TK_CANARY_TAB_SIZE; probe += 1) {
+        unsigned i = (h + probe) & (TK_CANARY_TAB_SIZE - 1);
+        if (!tk_canary_tab[i].used) return;         // never recorded — nothing to compare (should not happen for a live head)
+        if (tk_canary_tab[i].chunk != c) continue;
+        tk_canary_entry *e = &tk_canary_tab[i];
+        if (!e->live) return;                       // stale probe collision on a forgotten slot — not this chunk's live record
+        if (c->cap != e->cap || c->next != e->next_snapshot) {
             tk_canary_tripped = 1;
             fprintf(stderr,
                 "TEKO_NATIVE_CHUNK_CANARY: chunk %p header corrupted, first observed at %s\n"
                 "  cap:  recorded=%zu now=%zu\n"
                 "  next: recorded=%p now=%p\n"
                 "  used(now)=%zu\n",
-                (void *)e->chunk, where,
-                e->cap, e->chunk->cap,
-                (void *)e->next_snapshot, (void *)e->chunk->next,
-                e->chunk->used);
+                (void *)c, where,
+                e->cap, c->cap,
+                (void *)e->next_snapshot, (void *)c->next,
+                c->used);
 #ifdef TK_HAVE_BACKTRACE
             void *fr[24]; int nf = backtrace(fr, 24);
             fprintf(stderr, "  backtrace at detection:\n");
@@ -1791,11 +1828,12 @@ static void tk_canary_check(const char *where) {
             fflush(stderr);
             abort();
         }
+        return;
     }
 }
 
 void *tk_region_alloc(tk_region *r, size_t n) {
-    tk_canary_check("tk_region_alloc:entry");
+    tk_canary_check_head(r, "tk_region_alloc:entry");
     tk_canary_check_region(r, "tk_region_alloc:entry");
     if (n == 0) n = 1;                              // n→1: a zero-size alloc yields a distinct pointer
     // (S2 obs) SCOPED-lifetime side of the map — a direct allocation into a non-root region (class
@@ -4298,7 +4336,7 @@ void *tk_slice_with_cap(uint64_t esz, uint64_t cap) {
 // direct binding is scrubbed by the lowering; see teko-mem-free-design).
 void tk_free_block(void *p, uint64_t bytes) {
     if (p == NULL) return;
-    tk_canary_check("tk_free_block:entry");
+    tk_canary_check_head(tk_region_current(), "tk_free_block:entry");
     { static int dbg=-1; if (dbg<0) dbg = getenv("TEKO_FO_DEBUG")?1:0;
       if (dbg) fprintf(stderr, "PARK %p bytes=%llu\n", p, (unsigned long long)bytes); }
     unsigned h = tk_push_slot(p);
