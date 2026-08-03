@@ -1,0 +1,33 @@
+use teko::parser
+
+/**
+ * lsp_no_progress — the no-op progress hook `collect_diagnostics` hands the pre-mono checker entry
+ * point, which reports a per-item counter this path does not consume. The LSP diagnostics path wants
+ * every declaration's diagnostic, not a live "N/M items" counter, so both arguments are ignored.
+ *
+ * @param done   how many top-level items have been typed so far (ignored)
+ * @param total  the total top-level item count for this program (ignored)
+ * @since 0.3.1.0 (LSP crumb A)
+ */
+fn lsp_no_progress(done: u64, total: u64) -> void { }
+
+/**
+ * collect_diagnostics — every type diagnostic of `program`, as the `file:line:col: msg` lines the
+ * build reports, WITHOUT raising an error at the first bad declaration. This is the single seam the
+ * LSP consumes from the checker: it reuses the existing declaration-boundary walk
+ * (`type_program_with_deps_pre_mono`) with an EMPTY dependency program and a no-op progress hook, so
+ * it reports EXACTLY the set a build would report — the whole program, not a prefix truncated at the
+ * first defect. Monomorphization is deliberately skipped: the diagnostics live in the pre-mono
+ * `PreMono.diags`, and a partial program (one carrying diagnostics) must never be monomorphized.
+ *
+ * @param program  the merged, un-typed project program (from assembly, or a single open document)
+ * @return         each project diagnostic in report order (empty ⇒ the program typed cleanly)
+ * @since 0.3.1.0 (LSP crumb A)
+ */
+pub fn collect_diagnostics(program: parser::Program) -> []str {
+    let empty_dep = TProgram { items = teko::list::empty() }
+    match type_program_with_deps_pre_mono(program, empty_dep, lsp_no_progress) {
+        PreMono as pre => pre.diags
+        error as e => teko::list::push(teko::list::empty(), e.message)
+    }
+}

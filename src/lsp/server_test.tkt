@@ -1,0 +1,130 @@
+use teko::encoding::json
+
+/**
+ * DOC_URI — the `file://` URI of the document the diagnostics tests open.
+ */
+const DOC_URI: str = "file:///proj/foo.tks"
+
+/**
+ * DOC_PATH — the filesystem path `DOC_URI` resolves to (its diagnostics' `file`).
+ */
+const DOC_PATH: str = "/proj/foo.tks"
+
+/**
+ * BUGGY_DOC — a module whose function names an UNKNOWN parameter type, so the checker reports the
+ * stable `unknown type: Bogus` diagnostic. `pub` so no unused-function warning muddies the list.
+ */
+const BUGGY_DOC: str = "pub fn f(x: Bogus) -> i64 { return 0 }"
+
+/**
+ * CLEAN_DOC — a well-typed module that produces NO diagnostic (the empty-list / clear case).
+ */
+const CLEAN_DOC: str = "pub fn f() -> i64 { return 0 }"
+
+/**
+ * TYPE_MISSING — the stable substring of the checker's unknown-type diagnostic for `BUGGY_DOC`.
+ */
+const TYPE_MISSING: str = "unknown type: Bogus"
+
+/**
+ * bytes_of — the bytes of `s` as a fresh `[]byte`, for feeding the stdin-free framing decoder a
+ * literal frame.
+ *
+ * @param s  the source string
+ * @return   its bytes
+ */
+fn bytes_of(s: str) -> []byte {
+    mut b: []byte = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= s.len { break }
+        b = teko::list::push(b, s[i])
+        i = i + 1
+    }
+    b
+}
+
+/**
+ * didopen_request — a `textDocument/didOpen` notification DOM for document `uri` carrying `text`,
+ * built with the server's own JSON constructors so the test drives the exact shape a client sends.
+ *
+ * @param uri   the document URI
+ * @param text  the document buffer
+ * @return      the `didOpen` notification DOM
+ */
+fn didopen_request(uri: str, text: str) -> json::JsonValue {
+    let td = jobj(["uri", "text"], [jstr(uri), jstr(text)])
+    let params = jobj(["textDocument"], [td])
+    jobj(["jsonrpc", "method", "params"], [jstr("2.0"), jstr("textDocument/didOpen"), params])
+}
+
+#test
+/**
+ * diagnose_document_reports_type_error — the front-end pass over a buffer with an unknown type
+ * returns at least one diagnostic, and its message carries the checker's `unknown type: Bogus`.
+ */
+fn diagnose_document_reports_type_error() {
+    let diags = diagnose_document(DOC_PATH, BUGGY_DOC)
+    teko::assert::is_true(diags.len >= 1)
+    teko::assert::str_contains(diags[0].message, TYPE_MISSING)
+}
+
+#test
+/**
+ * diagnose_document_clean_is_empty — a well-typed buffer yields no diagnostics, so the client's
+ * squiggles are cleared.
+ */
+fn diagnose_document_clean_is_empty() {
+    let diags = diagnose_document(DOC_PATH, CLEAN_DOC)
+    teko::assert::eq_u64(diags.len, 0)
+}
+
+#test
+/**
+ * didopen_dispatch_publishes_diagnostics — dispatching a `didOpen` for the buggy buffer yields
+ * exactly one outgoing message, and encoding it shows a `publishDiagnostics` notification for the
+ * document's uri that carries the error text, a severity, and a range.
+ */
+fn didopen_dispatch_publishes_diagnostics() {
+    let out = handle_request(didopen_request(DOC_URI, BUGGY_DOC))
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "textDocument/publishDiagnostics")
+    teko::assert::str_contains(wire, DOC_URI)
+    teko::assert::str_contains(wire, TYPE_MISSING)
+    teko::assert::str_contains(wire, "severity")
+    teko::assert::str_contains(wire, "range")
+}
+
+#test
+/**
+ * didopen_clean_publishes_empty — dispatching a `didOpen` for a clean buffer publishes an EMPTY
+ * diagnostics array (the protocol's "now clean" signal).
+ */
+fn didopen_clean_publishes_empty() {
+    let out = handle_request(didopen_request(DOC_URI, CLEAN_DOC))
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "textDocument/publishDiagnostics")
+    teko::assert::str_contains(wire, "\"diagnostics\":[]")
+}
+
+#test
+/**
+ * jsonrpc_loop_open_to_publish — the WHOLE transport path: a `didOpen` for the buggy buffer is
+ * FRAMED, decoded back through the `Content-Length` framer, dispatched, and the resulting message
+ * re-framed. The final wire frame carries `publishDiagnostics` and the error text — the diagnostic
+ * returned through the JSON-RPC loop, proven by matching printed frame bytes, not an exit code.
+ */
+fn jsonrpc_loop_open_to_publish() {
+    let frame = encode_frame(didopen_request(DOC_URI, BUGGY_DOC))
+    let msg = match decode_frame_bytes(bytes_of(frame)) {
+        RpcMessage as m => m
+        error as e => { teko::assert::eq_str(e.message, "no error expected"); return }
+    }
+    let out = handle_request(msg.body)
+    teko::assert::eq_u64(out.len, 1)
+    let reply = encode_frame(out[0])
+    teko::assert::str_contains(reply, "textDocument/publishDiagnostics")
+    teko::assert::str_contains(reply, TYPE_MISSING)
+}
