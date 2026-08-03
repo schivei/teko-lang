@@ -20,11 +20,17 @@
 # runnable binary for arbitrary programs, that positive assertion cannot be added here without
 # silently depending on the native backend's own health — a different, already-tracked concern.
 #
-# The POSITIVE section below is the section-5.2 defence: it asserts the backtrace depth THROUGH A
-# FRAMELESS leaf (adv.s's `lvl4`), not a weak ">= N frames". A frameless function returns RSP
-# exactly as it received it; if the unwind survives it with the CALLER frame (`lvl3`) recovered
-# and named, the claim that unwinding needs CFI (red-flag 3) is refuted with no CFI in the object
-# at all.
+# The POSITIVE section below is the section-5.2 defence (also F0.2 of
+# docs/design/tdb-proposta-0.3.1.md §3.0): it asserts the backtrace depth THROUGH A FRAMELESS leaf
+# (adv.s's `lvl4`), not a weak ">= N frames". A frameless function returns RSP exactly as it
+# received it; if the unwind survives it with the CALLER frame (`lvl3`) recovered and named, the
+# claim that unwinding needs CFI (red-flag 3) is refuted with no CFI in the object at all.
+#
+# The BOUNDARY section is F0.3 (same document, same section): a stack that crosses a PLATFORM
+# LIBRARY frame in the MIDDLE (not just at the bottom, where mini.s/adv.s already show one
+# incidentally via libc's own `_start`/`__libc_start_main`). It is the one case the first two
+# fixtures do not cover, and the one a real `tdb` backtrace will hit constantly (any program that
+# calls into libc and back). See `boundary.s` for the frame layout.
 #
 # Run from this directory. It is documentation that executes, not a CI gate: it needs `as`, `cc`,
 # `gdb`, and — for the negative proof — the `teko` compiler on PATH (override with $TEKO). Every
@@ -71,6 +77,37 @@ if require_tool as && require_tool cc && require_tool gdb; then
         pass_if_contains bottom_frame_main      'in main () at hello.tks:41'  "$BT"
     else
         echo "FAIL adv_build (as/cc failed to produce $WORK/adv from adv.s)"
+        FAILED=1
+    fi
+fi
+
+echo "=== F0.3 BOUNDARY: a mid-stack platform-library frame is neither swallowed nor fabricated ==="
+if require_tool as && require_tool cc && require_tool gdb; then
+    if as -g -o "$WORK/boundary.o" boundary.s && cc -o "$WORK/boundary" "$WORK/boundary.o" 2>/dev/null; then
+        BT="$(gdb -batch -nx -ex 'break leaf' -ex run -ex bt "$WORK/boundary" 2>&1)"
+        pass_if_contains boundary_leaf_named   '#0  leaf () at hello.tks:30' "$BT"
+        pass_if_contains boundary_b_named      'in b () at hello.tks:42'     "$BT"
+        pass_if_contains boundary_cmp_named    'in cmp () at hello.tks:21'   "$BT"
+        pass_if_contains boundary_resumes_at_a 'in a () at hello.tks:17'     "$BT"
+        pass_if_contains boundary_bottom_main  'in main () at hello.tks:41' "$BT"
+        # Between the comparator (our last frame before the boundary) and `a` (our first frame
+        # after it) must sit ONE OR MORE library frames — and NONE of them may claim `hello.tks`,
+        # which would mean the debugger fabricated a Teko frame for glibc's own qsort/msort code.
+        MIDDLE="$(printf '%s\n' "$BT" | awk '/in cmp \(\) at hello\.tks:21/{f=1;next} /in a \(\) at hello\.tks:17/{f=0} f')"
+        if [ -z "$MIDDLE" ]; then
+            echo "FAIL boundary_frame_present (no frame recorded between cmp and a — cmp/a anchors did not both match)"
+            FAILED=1
+        else
+            case "$MIDDLE" in
+                *"hello.tks"*)
+                    echo "FAIL boundary_no_fabrication (a library-side frame claimed hello.tks): $MIDDLE"
+                    FAILED=1
+                    ;;
+                *) echo "PASS boundary_no_fabrication" ;;
+            esac
+        fi
+    else
+        echo "FAIL boundary_build (as/cc failed to produce $WORK/boundary from boundary.s)"
         FAILED=1
     fi
 fi
