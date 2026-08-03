@@ -1,0 +1,121 @@
+# mem.tkr — the SCOPE-MEMORY channel. Five C-route MEMBERS share one build (env C is declared on the
+# FIRST member scenario, which fixes the shared project build's configuration — `tkr_ensure_built`
+# keys the project slice on build SHAPE and ignores the env, so the first scenario's env decides the
+# route for all of them). The native-route positives and the `#must_free` leak rejection ride as
+# `Given source` cases, each earning its own build because its env/success/stage differs. TEST = the
+# token / the diagnostic, never the exit code.
+
+Feature: mem — scope-routed values survive the region churn AND the churn is actually reclaimed (C route)
+
+  # (mem_str_scope) BLOCK-LOCAL str residence (§9, crumb C3): a `str` binding whose value is a `~`
+  # concat, proven block-local by the residence oracle, routes its runtime fold through
+  # `tk_str_concat_r(<owning scope region>, …)` — bump-allocated in the scope's region, dead at the
+  # scope's exit edge. `score_marks` builds `mark-<i>` per loop iteration (a per-iteration scope
+  # dropped each turn) and probes it by str EQUALITY only (non-escaping), fingerprinting 321 across
+  # the region churn; a `_r` buffer freed before its comparison drops a digit. This member's env fixes
+  # the shared build to the C route (crumb C3's activation route).
+  Scenario: mem_str_scope — three per-iteration block-local marks fingerprint to 321 across the churn
+    Given env = ["TEKO_BACKEND=c"]
+    When built and run
+    Then stdout pattern = "scenario mem_str_scope: ok"
+
+  # (mem_block_dies) the five lexical scopes are treated identically: a `str` built inside an `if` arm
+  # and probed by a non-escaping equality is proven block-local and routed through
+  # `tk_str_concat_r(<arm region>, …)`, dead at the arm's exit. `tag_in_arm` matches its arm-scoped
+  # `arm-value` (weight 7), then `churn` opens loop scopes that recycle the arm's freed region (weight
+  # 2); fingerprint 9 witnesses the arm str read back exactly though its region died and was recycled.
+  Scenario: mem_block_dies — an arm-scoped str fingerprints to 9 across the post-arm churn
+    When built and run
+    Then stdout pattern = "scenario mem_block_dies: ok"
+
+  # (mem_accum_block, move-on-return A2+A3) a `mut xs = list::empty()` grown by top-of-block
+  # self-appends inside an `if` arm is proven block-local (A2 counts a self-append of the same name)
+  # and each `list::push` grow routes to the arm's region via `tk_slice_push_r` (A3 N-level selector),
+  # dropped at the arm's exit. `accumulate` fingerprints its arm accumulator (7), `churn` opens four
+  # more arm accumulators recycling the freed region (8), and an ESCAPING closure (M2c) is invoked
+  # after the churn (add(100)=100); 115 witnesses all three survived.
+  Scenario: mem_accum_block — an if-arm accumulator + churn + escaping closure fingerprint to 115
+    When built and run
+    Then stdout pattern = "scenario mem_accum_block: ok"
+
+  # (mem_accum_return, move-on-return M2a — the parse_function repro mem_move_retain_struct) `build`
+  # grows `xs` by self-appends and RETURNS it, so the return marks it escaping and A2's carve-out keeps
+  # it a `Caller`-tier value (never freed at the callee's block exit). `retain_wrap` opens a frame
+  # region, builds a slice by a CALL, RETAINS it in `blk` via error-propagation, and wraps `blk.items`
+  # in a RETURNED struct: WITHOUT the M2 conveyance bracket (`tk_region_enter(_tkrr) … leave()` around
+  # the escaping binding's RHS) `blk` materializes in `_tkfr` and the returned struct's `items` dangles
+  # after the frame drop. Fingerprint 25 (1 + 4 + 10 churn + 10 retain-wrap) witnesses both moved
+  # values survived the callee exits and the churn; the definitive UAF oracle for this pattern is the
+  # full self-host under ASan / TEKO_MEM_PARANOID, which this member's folding into the corpus activates.
+  Scenario: mem_accum_return — a returned accumulator and a retain-wrap struct fingerprint to 25
+    When built and run
+    Then stdout pattern = "scenario mem_accum_return: ok"
+
+  # (mem_loop_per_iter, move-on-return A3) an accumulator declared in an OUTER `if` arm and grown in an
+  # INNER loop routes each grow to the region of its DECLARING scope (walking PAST the inner loop's
+  # frame), so the buffer lives across every iteration and is read AFTER the loop breaks; the inner
+  # loop's `break` drops only regions opened inside the loop, never the enclosing arm region.
+  # `grow_in_loop(6)` reads element 5 and the length after the loop (11), then `churn` recycles the
+  # reclaimed outer region; 17 (11 + 6) witnesses the buffer survived every iteration and the read.
+  Scenario: mem_loop_per_iter — a loop-grown accumulator fingerprints to 17 read after the loop
+    When built and run
+    Then stdout pattern = "scenario mem_loop_per_iter: ok"
+
+  # (mem_scope_reclaim_bounded) the REAL-RECLAIM oracle the fingerprint members cannot give: a
+  # fingerprint reads back correctly on a leak-everything backend too. `rec::scope_reclaim_bounded`
+  # churns a ~1 KiB block-local accumulator 131072 times (a ~128 MiB footprint if nothing is
+  # reclaimed) and asserts the process peak-RSS DELTA stayed under 64 MiB — which holds only when the
+  # scope model actually reclaims each iteration's buffer. The delta cancels a sanitizer's fixed
+  # baseline; a host that cannot report peak RSS (documented `peak_rss() == 0`) passes rather than
+  # reporting a false leak.
+  Scenario: mem_scope_reclaim_bounded — a 128 MiB block-local churn stays under a 64 MiB peak-RSS delta
+    When built and run
+    Then stdout pattern = "scenario mem_scope_reclaim_bounded: ok"
+
+
+Feature: mem — teko::mem native positives (each a Given source case, native route by absence of env)
+
+  # (mem_free_arena_ok) `teko::mem::free`'s region-handle arm lowered by the native backend: a manual
+  # region handle is bulk-dropped (`tk_region_drop_subtree`) and its field scrubbed to 0. Reaching the
+  # second print proves the free lowered and ran (not the undefined `teko_teko__mem__free` symbol).
+  Scenario: mem_free_arena_ok — a manual region handle is bulk-dropped and its field scrubbed
+    Given source = "cases/mem_free_arena_ok.tks"
+    When built and run
+    Then stdout pattern = "arena freed"
+
+  # (mem_free_slice_ok) `teko::mem::free`'s `[]T` arm lowered natively: a slice is freed (parked +
+  # scrubbed to empty) and rebuilt, the second build reusing the parked block without corrupting the
+  # free-list.
+  Scenario: mem_free_slice_ok — a slice is freed and rebuilt without corrupting the free-list
+    Given source = "cases/mem_free_slice_ok.tks"
+    When built and run
+    Then stdout pattern = "b len=5 sum=10"
+
+  # (mem_region_new_ok) `teko::mem::region_new` lowered natively (`tk_region_new(tk_region_root())`):
+  # reaching the print proves the call lowered to the runtime primitives rather than the undefined
+  # `teko_teko__mem__region_new` symbol the self-host link used to reject.
+  Scenario: mem_region_new_ok — region_new opens a region instead of emitting an undefined symbol
+    Given source = "cases/mem_region_new_ok.tks"
+    When built and run
+    Then stdout pattern = "region_new ok"
+
+  # (mem_singleton_root) a local binding may carry `#singleton` (crumb C2b): the parser accepts it, the
+  # residence oracle forces the binding to `Root`. `probe` declares a `#singleton` str binding, churns
+  # inner allocating scopes, then reads it back — a root-resident anchor survives the churn and reads
+  # back its exact value. NATIVE by construction (no env).
+  Scenario: mem_singleton_root — a #singleton str binding read after inner scopes keeps its value
+    Given source = "cases/mem_singleton_root.tks"
+    When built and run
+    Then stdout pattern = "root-anchor"
+
+
+Feature: mem — dropping a #must_free handle without teko::mem::free is rejected (compile-fail case)
+
+  # (mem_free_arena_leak) the NEGATIVE: opening a `#must_free` region handle and never freeing it is a
+  # COMPILE error — the consume-or-fail dataflow rejects it, and the native `free` lowering does not
+  # weaken that checker gate. A `Given source` compile-fail (it aborts the build, so it cannot be a
+  # member of the successful shared corpus).
+  Scenario: mem_free_arena_leak — a manual region handle leaked on some path fails the build
+    Given source = "cases/mem_free_arena_leak.tks"
+    When compilation fails
+    Then diagnostic = "is dropped without being freed"

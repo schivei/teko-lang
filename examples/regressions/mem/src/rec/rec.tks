@@ -1,0 +1,54 @@
+/**
+ * one_block_local_kib — build a ~1 KiB block-local `[]i64` (128 elements) by self-appends, read it
+ * back with a NON-escaping index sum, and return only the SCALAR sum. The residence oracle proves the
+ * buffer block-local (its grows route through the scope's region via the A3 N-level selector), so it
+ * is reclaimed at this function's exit edge; nothing but that reclaim keeps a long loop of these from
+ * growing the process's resident set, because the buffer itself never escapes.
+ *
+ * @return the sum of the 128 elements (a scalar; no buffer escapes)
+ */
+fn one_block_local_kib() -> i64 {
+    mut xs: []i64 = teko::list::empty()
+    mut i: i64 = 0
+    loop {
+        if i >= 128 { break }
+        xs = teko::list::push(xs, i)
+        i++
+    }
+    mut sum: i64 = 0
+    mut k: u64 = 0
+    loop {
+        if k >= xs.len { break }
+        sum = sum + xs[k]
+        k = k + 1
+    }
+    sum
+}
+
+/**
+ * scope_reclaim_bounded — the REAL-RECLAIM oracle the fingerprint members cannot provide: a
+ * fingerprint reads its value back correctly even on a leak-everything backend, so it proves values,
+ * not reclamation. This churns a block-local KiB accumulator 131072 times — a ~128 MiB footprint if
+ * NOTHING is reclaimed — and asserts the process peak-RSS grew by LESS than 64 MiB, which holds only
+ * when the scope model actually reclaims each iteration's buffer (the move-on-return / A3 routing this
+ * `mem` corpus pins). A DELTA (after minus before) is used so a sanitizer's fixed baseline overhead
+ * cancels; `teko::mem::peak_rss() == 0` means the host cannot measure RSS (documented at the builtin),
+ * treated as a pass so an unmeasurable host never reports a false leak.
+ *
+ * @return true when the churn's peak-RSS growth is bounded (reclaim held), or when RSS is unavailable
+ */
+exp fn scope_reclaim_bounded() -> bool {
+    let before = teko::mem::peak_rss()
+    mut sink: i64 = 0
+    mut i: i64 = 0
+    loop {
+        if i >= 131072 { break }
+        sink = sink + one_block_local_kib()
+        i++
+    }
+    if sink < 0 { return false }
+    let after = teko::mem::peak_rss()
+    if before == 0 { return true }
+    if after == 0 { return true }
+    (after - before) < 67108864
+}
