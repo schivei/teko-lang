@@ -260,8 +260,11 @@ pub type DwCompileUnit = struct {
 
 /**
  * DwLineRow — one row of the DWARF-4 line-number program: the code-address advance since the
- * previous row and the source line at this address. The first row's `pc_advance` is 0 (it sits at
- * the unit's set_address) and it establishes column 1.
+ * previous row, the source line at this address, and the 1-based file-table index the line belongs
+ * to. The first row's `pc_advance` is 0 (it sits at the unit's set_address) and it establishes
+ * column 1. `file` maps a row to one entry of the header's `file_names` table, so a program spanning
+ * several `.tks` sources resolves each address to its own file (the line state machine's file
+ * register defaults to 1, so a row keeping `file = 1` emits no set_file opcode).
  *
  * @since 0.3.1.0
  */
@@ -270,6 +273,8 @@ pub type DwLineRow = struct {
     pc_advance: u64
     /** the 1-based source line at this address. */
     line: u32
+    /** the 1-based `file_names` index this row's line belongs to (1 = the primary file). */
+    file: i64
 }
 
 /**
@@ -440,14 +445,14 @@ fn append_bytes_dw(dst: []byte, src: []byte) -> []byte {
 /**
  * line_header_body — the DWARF-4 line-program header body (everything the `header_length` field
  * counts: the instruction/statement parameters, the standard opcode-length table, the empty
- * include-directory list, and the single file-table entry naming `file`). Fixed except for the
- * inlined file name, matching the verified golden.
+ * include-directory list, one file-table entry per `files` name, and the file-list terminator).
+ * Fixed except for the inlined file names; a single-element `files` reproduces the verified golden.
  *
- * @param file  the primary source file name
- * @return      the header body bytes
+ * @param files  the source file names, in file-table order (index 1 is the primary file)
+ * @return       the header body bytes
  * @since 0.3.1.0
  */
-fn line_header_body(file: str) -> []byte {
+fn line_header_body(files: []str) -> []byte {
     mut b: []byte = teko::list::empty()
     b = teko::list::push(b, 0x01 to byte)
     b = teko::list::push(b, 0x01 to byte)
@@ -457,11 +462,33 @@ fn line_header_body(file: str) -> []byte {
     b = teko::list::push(b, 0x0d to byte)
     b = append_std_opcode_lengths(b)
     b = teko::list::push(b, 0x00 to byte)
-    b = emit_cstr(b, file)
-    b = uleb128(b, 0 to u64)
-    b = uleb128(b, 0 to u64)
-    b = uleb128(b, 0 to u64)
+    b = append_file_entries(b, files)
     teko::list::push(b, 0x00 to byte)
+}
+
+/**
+ * append_file_entries — append one DWARF-4 `file_names` entry per name in `files`: the
+ * NUL-terminated name followed by the directory-index, mtime, and length ULEBs (all 0, since the
+ * writer emits no include directories and no file metadata). The caller appends the list
+ * terminator.
+ *
+ * @param buf    the header body accumulated so far
+ * @param files  the source file names, in file-table order
+ * @return       `buf` followed by the file entries
+ * @since 0.3.1.0
+ */
+fn append_file_entries(buf: []byte, files: []str) -> []byte {
+    mut b = buf
+    mut i: u64 = 0
+    loop {
+        if i >= files.len { break }
+        b = emit_cstr(b, files[i])
+        b = uleb128(b, 0 to u64)
+        b = uleb128(b, 0 to u64)
+        b = uleb128(b, 0 to u64)
+        i = i + 1
+    }
+    b
 }
 
 /**
@@ -506,6 +533,13 @@ const DW_LNS_ADVANCE_PC: u64 = 0x02
 const DW_LNS_ADVANCE_LINE: u64 = 0x03
 
 /**
+ * DW_LNS_SET_FILE — the standard line opcode that sets the current file register to a ULEB operand.
+ *
+ * @since 0.3.1.0
+ */
+const DW_LNS_SET_FILE: u64 = 0x04
+
+/**
  * DW_LNS_SET_COLUMN — the standard line opcode that sets the column to a ULEB operand.
  *
  * @since 0.3.1.0
@@ -513,22 +547,37 @@ const DW_LNS_ADVANCE_LINE: u64 = 0x03
 const DW_LNS_SET_COLUMN: u64 = 0x05
 
 /**
- * emit_line_row — append one line-program row to `prog`. The first row (`first` true, `prev` the
- * initial line 1) advances the line and sets column 1 with no address advance; every later row
- * advances the code address then the line. Each row ends with a copy.
+ * LINE_FIRST_FILE — the DWARF line state machine's initial file register (1). A row keeping this
+ * file emits no set_file opcode, so a single-file program's line program is unchanged.
  *
- * @param prog   the program bytes so far
- * @param row    the row to emit
- * @param prev   the source line of the previous row (1 before the first row)
- * @param first  true for the first row (sets column 1, no pc advance)
- * @return       the extended program bytes
  * @since 0.3.1.0
  */
-fn emit_line_row(prog: []byte, row: DwLineRow, prev: u32, first: bool) -> []byte {
+const LINE_FIRST_FILE: i64 = 1
+
+/**
+ * emit_line_row — append one line-program row to `prog`. The first row (`first` true, `prev` the
+ * initial line 1) advances the line and sets column 1 with no address advance; every later row
+ * advances the code address then the line. When the row's file differs from the running file
+ * register `cur_file`, a set_file opcode precedes the line advance; a row keeping the current file
+ * emits no set_file, so a single-file program is unchanged. Each row ends with a copy.
+ *
+ * @param prog      the program bytes so far
+ * @param row       the row to emit
+ * @param prev      the source line of the previous row (1 before the first row)
+ * @param cur_file  the file register before this row (1 before the first row)
+ * @param first     true for the first row (sets column 1, no pc advance)
+ * @return          the extended program bytes
+ * @since 0.3.1.0
+ */
+fn emit_line_row(prog: []byte, row: DwLineRow, prev: u32, cur_file: i64, first: bool) -> []byte {
     mut b = prog
     if !first {
         b = teko::list::push(b, DW_LNS_ADVANCE_PC to byte)
         b = uleb128(b, row.pc_advance)
+    }
+    if row.file != cur_file {
+        b = teko::list::push(b, DW_LNS_SET_FILE to byte)
+        b = uleb128(b, row.file to u64)
     }
     b = teko::list::push(b, DW_LNS_ADVANCE_LINE to byte)
     b = sleb128(b, (row.line to i64) - (prev to i64))
@@ -545,15 +594,15 @@ fn emit_line_row(prog: []byte, row: DwLineRow, prev: u32, first: bool) -> []byte
  * address advance, and `end_sequence`. The emitted bytes and the single set_address relocation
  * reproduce the gdb-and-lldb-verified golden.
  *
- * @param file              the primary source file name (the file-table entry)
+ * @param files             the source file names, in file-table order (index 1 is the primary file)
  * @param start_symbol      the code symbol the initial set_address relocates against
  * @param rows              the address→line rows (the first row sits at set_address)
  * @param final_pc_advance  the code advance emitted before end_sequence (past the last row)
  * @return                  the `.debug_line` section bytes and its single relocation
  * @since 0.3.1.0
  */
-pub fn debug_line(file: str, start_symbol: str, rows: []DwLineRow, final_pc_advance: u64) -> DwSection {
-    let header = line_header_body(file)
+pub fn debug_line(files: []str, start_symbol: str, rows: []DwLineRow, final_pc_advance: u64) -> DwSection {
+    let header = line_header_body(files)
     mut prog: []byte = teko::list::empty()
     prog = teko::list::push(prog, 0x00 to byte)
     prog = teko::list::push(prog, 0x09 to byte)
@@ -561,11 +610,13 @@ pub fn debug_line(file: str, start_symbol: str, rows: []DwLineRow, final_pc_adva
     let set_addr_slot = line_prefix_len() + header.len + prog.len
     prog = emit_addr_slot(prog)
     mut prev: u32 = 1
+    mut cur_file: i64 = LINE_FIRST_FILE
     mut i: u64 = 0
     loop {
         if i >= rows.len { break }
-        prog = emit_line_row(prog, rows[i], prev, i == 0)
+        prog = emit_line_row(prog, rows[i], prev, cur_file, i == 0)
         prev = rows[i].line
+        cur_file = rows[i].file
         i = i + 1
     }
     prog = teko::list::push(prog, DW_LNS_ADVANCE_PC to byte)
