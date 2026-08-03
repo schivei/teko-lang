@@ -50,7 +50,25 @@ pré-instalados; `PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers`, não rodar `playwr
 
 Isso é o end-to-end visual do lado cliente que os `.tkt` não cobrem — a versão UI do
 smoke `.tkr` que o §9.2 do design pede. **Ressalva:** instalar `openvscode-server`
-pode esbarrar na política de rede do ambiente — verificar no momento de fazer.
+pode esbarrar na política de rede DO SANDBOX LOCAL — verificar no momento de fazer.
+
+### Instrumentar em CI (GitHub Actions suporta — dono 2026-08-03)
+
+Sim, dá pra virar gate de CI. Duas rotas:
+
+- **Padrão, determinística (recomendada):** `@vscode/test-cli` + `@vscode/test-electron`
+  baixa o VS Code real e roda **headless via `xvfb-run`** num runner Ubuntu, com a
+  extensão carregada; asserções pela **Extension API** (hover/completion/diagnostics
+  RESOLVEM?). É o jeito canônico e não-flaky de testar extensão VS Code em CI.
+- **Web/visual:** `@vscode/test-web` (web-extension headless) OU
+  `openvscode-server`/`code-server` + **Playwright** dirigindo o Chromium — para o sabor
+  navegador / asserção visual.
+
+Detalhes: o `teko lsp` (rota C) sobe como o language server, **independe do backend
+nativo**. O runner Ubuntu do GH tem **rede aberta** (baixa VS Code/openvscode/npm), então
+**o gate roda em CI mesmo que não rode no sandbox local**. Custo real (baixa VS Code +
+browser, minutos) → **job dedicado, não em todo push**; preferir asserção via Extension
+API (determinística) a pixel-diff.
 
 ## Dívida de doc a corrigir junto
 
