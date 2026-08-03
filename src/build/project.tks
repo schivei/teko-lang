@@ -7431,12 +7431,27 @@ fn selected_test_stage() -> str {
  * each exit — which is exactly why this process, the one that sits through all of it, holds only
  * the manifest.
  *
+ * MINTS THIS RUN'S JOURNAL STAMP FIRST (journal wiring, 0.3.1): `teko::journal::run_id()`, called
+ * before ANY child is spawned, sets `TEKO_RUN` in THIS process's own environment — and every stage
+ * below inherits it for free through `fork` (`tk_rt_spawn_redirected`, `teko_rt.c`: the child starts
+ * as a full copy of this process's environment, `putenv`-ing only the FEW keys each spawn spec adds
+ * on top). Without this call each stage would mint its OWN stamp on first use and the gate's
+ * `s<shard>` segments would land in a different `run_root()` than the regression tier's `r0` — two
+ * runs that never fold together, which is exactly the coherence `print_journal_summary`
+ * (`test_stage_report`) needs from ONE root holding both.
+ *
+ * ALSO SWEEPS OLD RUN ROOTS HERE, on OPEN rather than on exit (`teko::journal::sweep`'s own reason:
+ * a `SIGKILL`ed run's root is left ON PURPOSE, as the very evidence a later `--replay` would read —
+ * cleaning it on THIS run's exit would destroy that evidence in the one case it matters).
+ *
  * @param dir  the project directory
  * @return     the report stage's verdict, or the first failing stage's status
  * @throws     the manifest's own message when the project directory has no readable single `.tkp`
  * @since 0.3.1.0
  */
 fn test_drive(dir: str) -> i32 {
+    let _ = teko::journal::run_id()
+    let _ = teko::journal::sweep(teko::journal::run_root())
     ensure_rt_dir_abs()
     let exe = self_exe_path()
     let launch = match teko::env::cwd() { str as c => c; error => "" }
@@ -7577,6 +7592,45 @@ fn read_sitemap(od: str, m: Manifest) -> coverage::SiteMap | error {
 }
 
 /**
+ * print_journal_summary — the cross-phase journal summary block (journal J4 §13.4), read from THIS
+ * run's own journal (`fold`+`summarize`, journal wiring 0.3.1) and completed with the coverage this
+ * stage already merged from the site-map (`with_coverage`).
+ *
+ * PRINTS UNCONDITIONALLY, even when a gate further down this function fails — a survivable,
+ * replayable record of what happened is exactly the property the journal exists for (§1.3), and a
+ * summary that only ever appeared on a green run would defeat it. Called BEFORE any gate decision in
+ * `test_stage_report`.
+ *
+ * REACHES BOTH PHASES BECAUSE `TEKO_RUN` IS INHERITED, NOT BECAUSE IT IS RE-DERIVED: `test_drive`
+ * mints (or reads an already-inherited) run stamp via `teko::journal::run_id()` before it spawns the
+ * build/gate/regression/report stages, and `tk_rt_spawn_redirected`'s `fork` carries the WHOLE
+ * parent environment to each — so the gate's `s<shard>` segments and the regression tier's `r0`
+ * segment, written by three DIFFERENT processes, land under the SAME `run_root()` this stage folds.
+ *
+ * `cov_missing` IS 0 HERE, NOT BECAUSE NOTHING CAN GO MISSING, BUT BECAUSE THIS FUNCTION NEVER
+ * REACHES THIS LINE WHEN IT DID: `merge_gate_coverage` (above, in `test_stage_report`) already
+ * returns `fail(dir, ...)` the moment a unit-gate shard left no dump (J4 §2.4), before this call
+ * runs. A REAL `cov_missing` for the REGRESSION tier is not yet threaded through
+ * `merge_regression_coverage`'s own best-effort walk — a gap named here rather than pretended away.
+ *
+ * @param sm  the site-map this stage already read
+ * @since 0.3.1
+ */
+fn print_journal_summary(sm: coverage::SiteMap) {
+    let recs = teko::journal::fold(teko::journal::run_root(), teko::journal::run_id())
+    let base = teko::journal::summarize(recs)
+    let cov = teko::journal::CovTriple {
+        functions_cov = coverage::functions_coverage_of(sm).cov
+        functions_val = coverage::functions_coverage_of(sm).val
+        lines_cov = coverage::line_coverage_of(sm).cov
+        lines_val = coverage::line_coverage_of(sm).val
+        branches_cov = coverage::branch_coverage_of(sm).cov
+        branches_val = coverage::branch_coverage_of(sm).val
+    }
+    teko::io::println(teko::journal::render_summary(teko::journal::with_coverage(base, cov, 0)))
+}
+
+/**
  * test_stage_report — STAGE 3: the verdict. Read the MANIFEST alone and the build stage's coverage
  * SITE-MAP, fold in the gate's dumps and then the regression tier's, and render coverage by JOINING
  * the site-map against the merged sink — never re-checking the source. Then apply the policies in
@@ -7615,6 +7669,7 @@ fn test_stage_report(dir: str, gen_cov: bool, cov_validation: bool, per_test_cov
     match merge_gate_coverage(GATE_OUT_DIR, gate_paths(GATE_OUT_DIR, m), test_jobs(), trc) { error as e => return fail(dir, e.message); null => { } }
     let pre_regr_cob = coverage::cov_cobertura_of(sm)
     merge_regression_coverage()
+    print_journal_summary(sm)
     if gen_cov {
         let xml = coverage::cov_cobertura_of(sm)
         match teko::io::write_file("cobertura.xml", xml) { error as e => return fail(dir, e.message); null => { } }
