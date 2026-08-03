@@ -1971,18 +1971,31 @@ fn cgt_prog_with_one_test() -> CgProg {
 }
 
 /**
- * cgt_captured_invocation — the exact C line the harness must emit for `cgt_captured_body`.
+ * cgt_captured_run_line — the exact C line the harness must emit to CAPTURE `cgt_captured_body`'s
+ * outcome (journal wiring, 0.3.1: the harness used to hand `tk_test_run`'s result straight to
+ * `tk_test_report` in one nested call; it now binds it to a local first so it can also branch on
+ * `.how` for the journal hooks, before still handing the SAME value to `tk_test_report`).
  *
  * COMPOSED FROM `TEKO_USER_PREFIX` RATHER THAN SPELLED OUT, because a literal would pin the prefix
  * ruling into an assertion that is not about it: the claim here is the SHAPE of the invocation (the
  * address of a top-level function handed to the runtime), and a prefix change would then break this
  * arm for a reason it does not measure.
  *
- * @return  `tk_test_report(tk_test_run(&<mangled symbol>));`
+ * @return  `tk_test_outcome teko_journal_rv = tk_test_run(&<mangled symbol>);`
  */
-fn cgt_captured_invocation() -> str {
-    teko::str::concat("tk_test_report(tk_test_run(&", TEKO_USER_PREFIX, "probe__guard__cgt_captured_body));")
+fn cgt_captured_run_line() -> str {
+    teko::str::concat("tk_test_outcome teko_journal_rv = tk_test_run(&", TEKO_USER_PREFIX, "probe__guard__cgt_captured_body);")
 }
+
+/**
+ * cgt_journal_symbol — the C symbol a `teko::journal` function mangles to, composed the SAME way
+ * `cb_fn_name` would (namespace-colons to underscores, `__`, bare name) so this file's assertions are
+ * not a second, independently-drifting spelling of the mangling rule.
+ *
+ * @param name  the `teko::journal` function's bare name
+ * @return      its mangled C symbol
+ */
+fn cgt_journal_symbol(name: str) -> str { teko::str::concat(TEKO_USER_PREFIX, "teko__journal__", name) }
 
 #test
 /**
@@ -1990,9 +2003,10 @@ fn cgt_captured_invocation() -> str {
  *
  * The runtime's own guard (`src/test/capture_test.tkt`) proves that a captured body's panic and exit
  * come back instead of ending the process; this proves the harness ASKS for that — that the emitted
- * invocation is `tk_test_report(tk_test_run(&<symbol>))` and not the bare call plus a blind
- * `tk_test_end()` it replaced. Without this arm the two halves could drift and the suite would still
- * be green, because the runtime half is exercised by an extern that the harness does not emit.
+ * invocation captures `tk_test_run(&<symbol>)`'s outcome and still hands it to `tk_test_report`,
+ * rather than the bare call plus a blind `tk_test_end()` it replaced long ago. Without this arm the
+ * two halves could drift and the suite would still be green, because the runtime half is exercised
+ * by an extern that the harness does not emit.
  *
  * The taking of the body's ADDRESS is the whole backend requirement the design names, and it is
  * asserted literally: a `#test` is emitted as `void <symbol>(void)`, so `&<symbol>` is already the
@@ -2002,11 +2016,33 @@ fn cgt_captured_invocation() -> str {
  */
 fn cgt_the_harness_runs_every_body_under_capture() {
     let one = str(emit_test_call(cgt_empty(), cgt_test_fn("cgt_captured_body", "probe::guard"), 0 to u64, false))
-    teko::assert::is_true(teko::str::contains(one, cgt_captured_invocation()))
+    teko::assert::is_true(teko::str::contains(one, cgt_captured_run_line()))
+    teko::assert::is_true(teko::str::contains(one, "tk_test_report(teko_journal_rv);"))
     teko::assert::is_true(!teko::str::contains(one, "tk_test_end();"))
     teko::assert::is_true(teko::str::contains(one, "tk_arena_push();"))
     teko::assert::is_true(teko::str::contains(one, "tk_arena_pop();"))
     teko::assert::is_true(teko::str::contains(one, "tk_test_begin("))
+}
+
+#test
+/**
+ * cgt_the_harness_notes_begin_ok_exited_and_panicked_to_the_journal — journal wiring (0.3.1): every
+ * `#test` invocation the plain gate emits calls the matching `teko::journal::note_test_*` hook by its
+ * mangled symbol — `begin` unconditionally (before the body runs), then exactly one of `ok`/
+ * `exited`/`panicked` depending on `teko_journal_rv.how`, with `exited` carrying `.code` verbatim
+ * (never re-derived, never re-parsed from a formatted string).
+ *
+ * @throws when a hook is missing, misnamed, or the exited call does not forward `.code`
+ */
+fn cgt_the_harness_notes_begin_ok_exited_and_panicked_to_the_journal() {
+    let one = str(emit_test_call(cgt_empty(), cgt_test_fn("cgt_captured_body", "probe::guard"), 0 to u64, false))
+    teko::assert::is_true(teko::str::contains(one, cgt_journal_symbol("note_test_begin")))
+    teko::assert::is_true(teko::str::contains(one, cgt_journal_symbol("note_test_ok")))
+    teko::assert::is_true(teko::str::contains(one, cgt_journal_symbol("note_test_panicked")))
+    teko::assert::is_true(teko::str::contains(one, teko::str::concat(cgt_journal_symbol("note_test_exited"), "((tk_str){")))
+    teko::assert::is_true(teko::str::contains(one, "}, teko_journal_rv.code);"))
+    teko::assert::is_true(teko::str::contains(one, "if (teko_journal_rv.how == TK_TEST_OK)"))
+    teko::assert::is_true(teko::str::contains(one, "else if (teko_journal_rv.how == TK_TEST_EXITED)"))
 }
 
 #test
@@ -2022,16 +2058,23 @@ fn cgt_the_harness_runs_every_body_under_capture() {
  * `return 0` after the plain one was taught to count, so a failing `#test` under `teko test .
  * --analyzer` was captured, reported as FAILED, and then handed `run_analyzer` a status of 0.
  *
- * @throws when either harness does not close on the summary plus the tally-derived status
+ * ALSO ASSERTS `note_test_end` (journal wiring, 0.3.1) ON BOTH HARNESSES, for the same reason: the
+ * close is ONE shared function precisely so neither harness can drift from the other, and a journal
+ * segment the analyze harness never closes would falsely read as a shard that died mid-suite.
+ *
+ * @throws when either harness does not close on the summary, the journal end, and the tally-derived
+ *         status
  */
 fn cgt_the_harness_ends_on_the_tally_and_not_on_zero() {
     let main_plain = match emit_test_main(cgt_empty(), cgt_prog_with_one_test(), CgMode::TestPlain) { []byte as o => str(o); error => "" }
     teko::assert::is_true(teko::str::contains(main_plain, "tk_test_summary();"))
+    teko::assert::is_true(teko::str::contains(main_plain, cgt_journal_symbol("note_test_end")))
     teko::assert::is_true(teko::str::contains(main_plain, "return tk_test_any_failed() ? 1 : 0;"))
     teko::assert::is_true(!teko::str::contains(main_plain, "return 0;"))
     let main_analyze = match emit_test_main(cgt_empty(), cgt_prog_with_one_test(), CgMode::TestAnalyze) { []byte as o => str(o); error => "" }
-    teko::assert::is_true(teko::str::contains(main_analyze, cgt_captured_invocation()))
+    teko::assert::is_true(teko::str::contains(main_analyze, cgt_captured_run_line()))
     teko::assert::is_true(teko::str::contains(main_analyze, "tk_test_summary();"))
+    teko::assert::is_true(teko::str::contains(main_analyze, cgt_journal_symbol("note_test_end")))
     teko::assert::is_true(teko::str::contains(main_analyze, "return tk_test_any_failed() ? 1 : 0;"))
     teko::assert::is_true(!teko::str::contains(main_analyze, "return 0;"))
 }
