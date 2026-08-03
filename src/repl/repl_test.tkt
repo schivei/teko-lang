@@ -1,0 +1,265 @@
+// src/repl/repl_test.tkt — tests for teko::repl (DT3 — `teko repl`).
+//
+// COVERAGE SCOPE (honest — see repl.tks's module doc and this PR's own report). Every PURE
+// function (no subprocess spawned) gets full behavioral coverage here: the string helpers
+// (`trim`, `starts_with`, `find_bare_equals`), the persist/quit classifiers (`is_state_stmt`,
+// `is_quit_command`), the text builders (`candidate_body`, `display_tail`, `run_argv`,
+// `repl_manifest_text`), the backend selection (`force_native_backend` — asserted against the
+// REAL `teko::env::var`, since it only ever touches THIS process's own environment, no child
+// spawned), and the filesystem setup (`ensure_scratch_project`, `display_out_path`,
+// `clear_display_out` — real `mkdir`/`write_file`/`remove_file` calls, but no child process).
+// `try_auto_display`, `eval_line`, and `run_cli` each spawn a REAL `teko run` child process
+// (which itself drives the own native backend, per `force_native_backend` — never the VM,
+// never the C emitter) — exercising them here would mean re-invoking the CURRENT test binary
+// as if it were the `teko` CLI, which it is not (a `.tkt` test binary's own `main()` runs
+// every `#test`, not `main.tks`'s subcommand dispatch); that would not prove anything and
+// risks a flaky/incorrect assertion. Those three are instead proven by
+// `scripts/repl_cli_test.sh`, a shell-level smoke test (the `fmt_cli_test.sh` precedent) run
+// against a REAL built `teko` binary, scripting stdin exactly as the roadmap's DT3 verify
+// clause asks ("native session smoke: scripted input → expected output") — PROVIDED the own
+// native backend itself builds and runs a program at all; see this PR's report for whether
+// that held at validation time.
+
+// --- trim ---
+
+#test
+fn trim_removes_outer_whitespace() {
+    teko::assert::eq_str(teko::repl::trim("  let x = 1  "), "let x = 1")
+    teko::assert::eq_str(teko::repl::trim("\tx\n"), "x")
+    teko::assert::eq_str(teko::repl::trim("noedges"), "noedges")
+}
+
+#test
+fn trim_of_all_whitespace_is_empty() {
+    teko::assert::eq_str(teko::repl::trim("   "), "")
+    teko::assert::eq_str(teko::repl::trim(""), "")
+}
+
+// --- starts_with ---
+
+#test
+fn starts_with_matches_prefix() {
+    teko::assert::is_true(teko::repl::starts_with("let x = 1", "let "))
+    teko::assert::is_true(teko::repl::starts_with("mut y = 2", "mut "))
+    teko::assert::is_false(teko::repl::starts_with("x = 1", "let "))
+}
+
+#test
+fn starts_with_rejects_a_prefix_longer_than_the_string() {
+    teko::assert::is_false(teko::repl::starts_with("le", "let "))
+}
+
+// --- find_bare_equals ---
+
+#test
+fn find_bare_equals_finds_a_plain_assignment() {
+    teko::assert::eq_i64(teko::repl::find_bare_equals("x = 1"), 2)
+}
+
+#test
+fn find_bare_equals_skips_comparison_operators() {
+    teko::assert::eq_i64(teko::repl::find_bare_equals("x == 1"), -1)
+    teko::assert::eq_i64(teko::repl::find_bare_equals("x != 1"), -1)
+    teko::assert::eq_i64(teko::repl::find_bare_equals("x <= 1"), -1)
+    teko::assert::eq_i64(teko::repl::find_bare_equals("x >= 1"), -1)
+}
+
+#test
+fn find_bare_equals_skips_compound_assign_operators() {
+    teko::assert::eq_i64(teko::repl::find_bare_equals("x += 1"), -1)
+    teko::assert::eq_i64(teko::repl::find_bare_equals("x -= 1"), -1)
+    teko::assert::eq_i64(teko::repl::find_bare_equals("x *= 1"), -1)
+    teko::assert::eq_i64(teko::repl::find_bare_equals("x /= 1"), -1)
+    teko::assert::eq_i64(teko::repl::find_bare_equals("x %= 1"), -1)
+}
+
+#test
+fn find_bare_equals_is_absent_when_there_is_no_equals_at_all() {
+    teko::assert::eq_i64(teko::repl::find_bare_equals("println(x)"), -1)
+}
+
+// --- is_state_stmt ---
+
+#test
+fn is_state_stmt_true_for_declarations() {
+    teko::assert::is_true(teko::repl::is_state_stmt("let x = 1"))
+    teko::assert::is_true(teko::repl::is_state_stmt("mut y = 2"))
+}
+
+#test
+fn is_state_stmt_true_for_assignment_and_compound_forms() {
+    teko::assert::is_true(teko::repl::is_state_stmt("x = 3"))
+    teko::assert::is_true(teko::repl::is_state_stmt("x += 1"))
+    teko::assert::is_true(teko::repl::is_state_stmt("x++"))
+    teko::assert::is_true(teko::repl::is_state_stmt("x--"))
+}
+
+#test
+fn is_state_stmt_false_for_a_bare_call_or_expression() {
+    teko::assert::is_false(teko::repl::is_state_stmt("println(x)"))
+    teko::assert::is_false(teko::repl::is_state_stmt("x + 1"))
+    teko::assert::is_false(teko::repl::is_state_stmt("x == 1"))
+}
+
+// --- is_quit_command ---
+
+#test
+fn is_quit_command_recognizes_every_spelling() {
+    teko::assert::is_true(teko::repl::is_quit_command(":q"))
+    teko::assert::is_true(teko::repl::is_quit_command(":quit"))
+    teko::assert::is_true(teko::repl::is_quit_command(":exit"))
+    teko::assert::is_true(teko::repl::is_quit_command("quit"))
+    teko::assert::is_true(teko::repl::is_quit_command("exit"))
+}
+
+#test
+fn is_quit_command_false_for_an_ordinary_line() {
+    teko::assert::is_false(teko::repl::is_quit_command("let x = 1"))
+}
+
+// --- candidate_body ---
+
+#test
+fn candidate_body_with_empty_prelude_is_just_the_tail() {
+    teko::assert::eq_str(teko::repl::candidate_body("", "let x = 1"), "let x = 1")
+}
+
+#test
+fn candidate_body_joins_prelude_and_tail_with_a_newline() {
+    teko::assert::eq_str(teko::repl::candidate_body("let x = 1", "let y = 2"), "let x = 1\nlet y = 2")
+}
+
+// --- display_tail ---
+
+#test
+fn display_tail_wraps_the_expression_in_a_write_file_call() {
+    let got = teko::repl::display_tail("1 + 2", "target/repl-session/.repl_out")
+    let want = "teko::io::write_file(\"target/repl-session/.repl_out\", $\"{(1 + 2)}\")"
+    teko::assert::eq_str(got, want)
+}
+
+// --- run_argv ---
+
+#test
+fn run_argv_is_exe_run_dir() {
+    let argv = teko::repl::run_argv("./bin/teko", "target/repl-session")
+    teko::assert::len_eq(argv.len, 3)
+    teko::assert::eq_str(argv[0], "./bin/teko")
+    teko::assert::eq_str(argv[1], "run")
+    teko::assert::eq_str(argv[2], "target/repl-session")
+}
+
+// --- repl_manifest_text ---
+
+#test
+fn repl_manifest_text_carries_name_and_source() {
+    let m = teko::repl::repl_manifest_text()
+    teko::assert::str_contains(m, "name = \"replsession\"")
+    teko::assert::str_contains(m, "source = \"src\"")
+}
+
+// --- default_scratch_dir ---
+
+#test
+fn default_scratch_dir_lives_under_target() {
+    teko::assert::str_starts_with(teko::repl::default_scratch_dir(), "target/")
+}
+
+// --- force_native_backend ---
+
+/** force_native_backend touches only THIS process's own environment (`teko::env::set_var`) —
+    no child spawned — so it is safe to assert directly against `teko::env::var`. */
+#test
+fn force_native_backend_selects_native() {
+    match teko::repl::force_native_backend() {
+        error => teko::assert::is_ok("force_native_backend", false)
+        null => teko::assert::is_ok("force_native_backend", true)
+    }
+    match teko::env::var("TEKO_BACKEND") {
+        str as v => teko::assert::eq_str(v, "native")
+        error => teko::assert::is_ok("TEKO_BACKEND lookup", false)
+    }
+}
+
+// --- display_out_path ---
+
+#test
+fn display_out_path_is_inside_the_scratch_dir() {
+    teko::assert::eq_str(teko::repl::display_out_path("target/repl-session"), "target/repl-session/.repl_out")
+}
+
+// --- ensure_scratch_project + clear_display_out (real filesystem, no subprocess) ---
+
+#test
+fn ensure_scratch_project_writes_a_usable_project_shape() {
+    let dir = "target/repl-test-scratch"
+    match teko::repl::ensure_scratch_project(dir) {
+        error => teko::assert::is_ok("ensure_scratch_project", false)
+        null => teko::assert::is_ok("ensure_scratch_project", true)
+    }
+    let manifest = match teko::io::read_file(teko::str::concat(dir, "/repl.tkp")) {
+        str as s => s
+        error => { teko::assert::is_ok("read the written manifest", false); "" }
+    }
+    teko::assert::str_contains(manifest, "name = \"replsession\"")
+    match teko::fs::list_dir(teko::str::concat(dir, "/src")) {
+        []str => { }
+        error => teko::assert::is_ok("list_dir(<dir>/src)", false)
+    }
+}
+
+/** ensure_scratch_project is idempotent: calling it again on the same directory still succeeds
+    (teko::fs::mkdir treats "already exists" as success). */
+#test
+fn ensure_scratch_project_is_idempotent() {
+    let dir = "target/repl-test-scratch-again"
+    match teko::repl::ensure_scratch_project(dir) {
+        error => teko::assert::is_ok("ensure_scratch_project (first)", false)
+        null => teko::assert::is_ok("ensure_scratch_project (first)", true)
+    }
+    match teko::repl::ensure_scratch_project(dir) {
+        error => teko::assert::is_ok("ensure_scratch_project (again)", false)
+        null => teko::assert::is_ok("ensure_scratch_project (again)", true)
+    }
+}
+
+#test
+fn clear_display_out_removes_a_stale_result_file() {
+    let dir = "target/repl-test-clear"
+    match teko::repl::ensure_scratch_project(dir) {
+        error => teko::assert::is_ok("ensure_scratch_project", false)
+        null => teko::assert::is_ok("ensure_scratch_project", true)
+    }
+    let out_path = teko::repl::display_out_path(dir)
+    match teko::io::write_file(out_path, "stale") {
+        error => teko::assert::is_ok("write_file(out_path)", false)
+        null => teko::assert::is_ok("write_file(out_path)", true)
+    }
+    match teko::repl::clear_display_out(dir) {
+        error => teko::assert::is_ok("clear_display_out", false)
+        null => teko::assert::is_ok("clear_display_out", true)
+    }
+    match teko::io::read_file(out_path) {
+        str => teko::assert::is_error("read_file(out_path) after clear", true)
+        error => teko::assert::is_error("read_file(out_path) after clear", false)
+    }
+}
+
+/** clear_display_out is idempotent too: clearing an ALREADY-absent result file still succeeds
+    (teko::fs::remove_file treats "already absent" as success, teko_rt.c). */
+#test
+fn clear_display_out_is_idempotent_when_already_absent() {
+    let dir = "target/repl-test-clear-again"
+    match teko::repl::ensure_scratch_project(dir) {
+        error => teko::assert::is_ok("ensure_scratch_project", false)
+        null => teko::assert::is_ok("ensure_scratch_project", true)
+    }
+    match teko::repl::clear_display_out(dir) {
+        error => teko::assert::is_ok("clear_display_out (first)", false)
+        null => teko::assert::is_ok("clear_display_out (first)", true)
+    }
+    match teko::repl::clear_display_out(dir) {
+        error => teko::assert::is_ok("clear_display_out (again)", false)
+        null => teko::assert::is_ok("clear_display_out (again)", true)
+    }
+}
