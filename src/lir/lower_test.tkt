@@ -971,6 +971,57 @@ fn lwt_agg_struct_fat_field_slot_is_8byte_aligned() {
 }
 
 /**
+ * lwt_str_array_lit — `[e0, e1, …]` of `str`-typed elements (the `[]str` array-literal shape
+ * `lwt_array_lit` cannot build — it hardcodes a `Prim` element type), for the array-of-FAT-
+ * elements `ConstImage` fixtures (`const_fat_array_image`, 0.3.1.0 native-rodata-const-align).
+ *
+ * @param elems  the element expressions (each already `str`-typed, e.g. `lwt_strlit`)
+ * @return       the typed `[]str` array-literal node
+ */
+fn lwt_str_array_lit(elems: []checker::TExpr) -> checker::TExpr {
+    mut es: []checker::TArrayElem = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= elems.len { break }
+        es = teko::list::push(es, lwt_array_elem(elems[i]))
+        i++
+    }
+    checker::TExpr { kind = checker::TArrayLit { elements = es }; type = checker::Slice { element = checker::Str { } }; line = 0; col = 0 }
+}
+
+/**
+ * lwt_agg_fat_array_slot_offsets_are_ptr_aligned — `const WORDS: []str = ["a", "bb", "ccc"]`
+ * exercises `const_fat_array_image`/`const_image_absorb` directly (the coordinator-flagged
+ * locus, `lower_const.tks:441`): three ODD-LENGTH string leaves (1/2/3 bytes) precede the
+ * array's OWN 48-byte slot blob, and each slot's rebased relocation offset — 0, 16, 32 — is
+ * exactly `index * fat_slot_bytes()`, every one already a multiple of `fat_slot_align` (8), NOW
+ * proven by construction (`ptr_align_up(img.bytes.len)`) rather than by the caller's own
+ * arithmetic. Native-rodata-const-align regression.
+ *
+ * @return void
+ */
+#test
+fn lwt_agg_fat_array_slot_offsets_are_ptr_aligned() {
+    let elems = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), lwt_strlit("a")), lwt_strlit("bb")), lwt_strlit("ccc"))
+    let cd: checker::TItem = checker::TConstDecl { name = "WORDS"; namespace = ""; ty = checker::Slice { element = checker::Str { } }; init = lwt_str_array_lit(elems); vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0 }
+    mut items: []checker::TItem = teko::list::push(teko::list::empty(), cd)
+    let m = match lower_program(checker::TProgram { items = items }) { LModule as x => x; error as err => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(m.rodata.len == 4)
+    teko::assert::is_true(m.rodata[0].symbol == ".Lconst_WORDS.0")
+    teko::assert::is_true(m.rodata[1].symbol == ".Lconst_WORDS.1")
+    teko::assert::is_true(m.rodata[2].symbol == ".Lconst_WORDS.2")
+    teko::assert::is_true(m.rodata[3].symbol == ".Lconst_WORDS")
+    teko::assert::is_true(m.rodata[3].bytes.len == 48)
+    teko::assert::is_true(m.rodata[3].relocs.len == 3)
+    teko::assert::is_true(m.rodata[3].relocs[0].offset == (0 to u32))
+    teko::assert::is_true(m.rodata[3].relocs[1].offset == (16 to u32))
+    teko::assert::is_true(m.rodata[3].relocs[2].offset == (32 to u32))
+    teko::assert::is_true(m.rodata[3].relocs[0].target == ".Lconst_WORDS.0")
+    teko::assert::is_true(m.rodata[3].relocs[1].target == ".Lconst_WORDS.1")
+    teko::assert::is_true(m.rodata[3].relocs[2].target == ".Lconst_WORDS.2")
+}
+
+/**
  * lwt_typed_var — a `TVar` of an ARBITRARY resolved type `ty` (A1-5, #382 — a
  * `match` subject is not always a scalar/Named/Optional the other `lwt_*_var`
  * helpers cover; a `Variant`-typed subject needs this general form).
