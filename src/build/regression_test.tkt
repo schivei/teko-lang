@@ -35,6 +35,27 @@ fn run_regression_sources_missing_path_is_a_manifest_error() {
 
 #test
 /**
+ * run_regression_sources_scopes_its_work_tree_inside_a_test — journal J3, families #15/#17-20:
+ * `run_regression_sources`'s work tree is `teko::test::scoped(REGR_WORK_DIR)`, so calling it from
+ * INSIDE a test — as this very fixture does — never `rm_rf`s the real `bin/.regr-work` a concurrent
+ * production run owns. Plants a sentinel at the LITERAL (production) work dir first; this call's own
+ * `rm_rf` on ITS OWN scoped copy must leave the sentinel untouched.
+ *
+ * @return void
+ */
+fn run_regression_sources_scopes_its_work_tree_inside_a_test() {
+    match mkdir_p(REGR_WORK_DIR) { error => { }; null => { } }
+    let sentinel = teko::str::concat(REGR_WORK_DIR, "/j3_sentinel")
+    match teko::io::write_file(sentinel, "kept") { error => { }; null => { } }
+    let m = manifest_with_regression_files("examples/regressions/__definitely_missing__.tkr")
+    teko::assert::is_true(run_regression_sources("teko", m) == 1)
+    let back = match teko::io::read_file(sentinel) { str as s => s; error => "" }
+    teko::assert::eq_str(back, "kept")
+    match teko::fs::remove_file(sentinel) { error => { }; null => { } }
+}
+
+#test
+/**
  * regr_summary_line_reports_skips_in_their_own_column — the M.3 fix this vagão exists for: the
  * regression summary has THREE columns, so a run whose every regressor was skipped can no longer
  * print "N run, 0 failed" (indistinguishable from a run that checked everything). Pins the exact
