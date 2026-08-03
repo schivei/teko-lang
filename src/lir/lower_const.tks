@@ -875,6 +875,138 @@ fn serialize_const(cd: checker::TConstDecl, layouts: []LStructLayout, variants: 
 }
 
 /**
+ * const_size_check_enabled — whether the native aggregate-const size/offset diagnostic
+ * (`TEKO_NATIVE_CONST_SIZE_CHECK=1`) is requested: a CI-narrowing aid (the size-mismatch sibling of
+ * the encoder's `TEKO_NATIVE_RODATA_ALIGN_CHECK`), NOT part of the ordinary output. It exists to
+ * name the exact aggregate const AND the exact fat field the native path under-sizes — the size/
+ * offset mismatch behind the macOS `ld: pointer not aligned` link failure AND the Linux/x86 gen1
+ * runtime crash (a fat field allotted 8 bytes instead of 16 shifts every following field, so a later
+ * pointer lands misaligned AND the const's own bytes read as garbage). Reads only an environment
+ * variable, so a normal build (unset) is byte-identical.
+ *
+ * @return  true iff `TEKO_NATIVE_CONST_SIZE_CHECK` is set to `"1"`
+ * @since 0.3.1.0 native-rodata-const-align
+ */
+fn const_size_check_enabled() -> bool {
+    match teko::env::var("TEKO_NATIVE_CONST_SIZE_CHECK") { str as v => v == "1"; error => false }
+}
+
+/**
+ * field_allotted_span — the byte span the registered layout reserves for the field at index `j`:
+ * the gap to the NEXT field's offset for an interior field, or the struct's total size minus this
+ * field's offset for the last field (which includes the struct's trailing alignment padding).
+ *
+ * @param layout  the struct's registered layout
+ * @param j       the field index (in `layout.field_offsets` order)
+ * @return        the field's allotted byte span
+ * @since 0.3.1.0 native-rodata-const-align
+ */
+fn field_allotted_span(layout: LStructLayout, j: u64) -> u32 {
+    if j + 1 < layout.field_names.len { return layout.field_offsets[j + 1] - layout.field_offsets[j] }
+    layout.size - layout.field_offsets[j]
+}
+
+/**
+ * check_struct_fat_spans — verify, field by field, that every field whose INITIALIZER VALUE is a fat
+ * type (`str`/`[]T` — `is_fat_type`) was allotted at least `fat_slot_bytes()` (16) bytes by the
+ * registered layout (0.3.1.0 native-rodata-const-align). This is the DECISIVE cross-check the pure
+ * alignment diagnostic could not make: the layout's per-field width came from `typeexpr_is_fat` over
+ * the field ANNOTATION, while the serializer writes a 16-byte `{ptr, len}` slot whenever the field
+ * VALUE `is_fat_type` — the two predicates the raiz-A alias bug already proved can disagree. When
+ * they do (annotation classified NON-fat → 8 bytes; value fat → 16-byte slot), the slot overflows
+ * its field, every following field shifts, a later pointer lands misaligned (macOS `ld`) and the
+ * const's bytes read as garbage (Linux/x86 gen1 crash). The honest-stop names the const, the field,
+ * and the allotted-vs-required widths.
+ *
+ * @param const_name  the owning const's declared name (for the diagnostic)
+ * @param layout      the struct's registered layout
+ * @param si          the struct-literal initializer (source of each field's value type)
+ * @return            `null` when every fat-valued field has room; the fatal honest-stop otherwise
+ * @since 0.3.1.0 native-rodata-const-align
+ */
+fn check_struct_fat_spans(const_name: str, layout: LStructLayout, si: checker::TStructInit) -> null | error {
+    mut j: u64 = 0
+    loop {
+        if j >= layout.field_names.len { break }
+        match check_struct_fat_span_at(const_name, layout, si, j) { error as e => return e; null => { } }
+        j++
+    }
+    null
+}
+
+/**
+ * check_struct_fat_span_at — the per-field body of `check_struct_fat_spans`: when the field at index
+ * `j` has a fat initializer value and the layout allotted it fewer than `fat_slot_bytes()` bytes,
+ * return the fatal honest-stop; otherwise `null`. A field the initializer does not bind is skipped
+ * (the checker guarantees a flat struct const names every field, so this is defensive only).
+ *
+ * @param const_name  the owning const's declared name (for the diagnostic)
+ * @param layout      the struct's registered layout
+ * @param si          the struct-literal initializer
+ * @param j           the field index to check
+ * @return            `null` when the field is fine or non-fat; the fatal honest-stop otherwise
+ * @since 0.3.1.0 native-rodata-const-align
+ */
+fn check_struct_fat_span_at(const_name: str, layout: LStructLayout, si: checker::TStructInit, j: u64) -> null | error {
+    let field_name = layout.field_names[j]
+    let vexpr = match struct_init_value(si, field_name) { checker::TExpr as x => x; error => return null }
+    if !is_fat_type(vexpr.type) { return null }
+    let allotted = field_allotted_span(layout, j)
+    let need = fat_slot_bytes()
+    if allotted >= need { return null }
+    error { message = $"TEKO_NATIVE_CONST_SIZE_CHECK: const '{const_name}' fat field '{field_name}' (type '{layout.name}') was allotted {allotted} bytes but a fat slot needs {need} — its layout under-sized it (a typeexpr_is_fat / is_fat_type mismatch); the following fields shift and a pointer lands misaligned" }
+}
+
+/**
+ * check_struct_const_image — verify a struct aggregate const's emitted `ConstImage` is consistent
+ * with its registered layout (0.3.1.0 native-rodata-const-align): the blob's total byte length must
+ * equal the layout's size, and every fat-valued field must have room for a full 16-byte slot
+ * (`check_struct_fat_spans`). Both are byte-count invariants the correct native materialization
+ * always satisfies; a divergence is the size/offset bug this diagnostic exists to name.
+ *
+ * @param const_name  the owning const's declared name
+ * @param layout      the struct's registered layout
+ * @param init        the const's checked initializer
+ * @param img         the serialized `ConstImage`
+ * @return            `null` when consistent; the fatal honest-stop otherwise
+ * @since 0.3.1.0 native-rodata-const-align
+ */
+fn check_struct_const_image(const_name: str, layout: LStructLayout, init: checker::TExpr, img: ConstImage) -> null | error {
+    if (img.bytes.len to u32) != layout.size {
+        return error { message = $"TEKO_NATIVE_CONST_SIZE_CHECK: const '{const_name}' (type '{layout.name}') serialized {img.bytes.len} bytes but its layout size is {layout.size} — the native ConstImage disagrees with the registered layout" }
+    }
+    match init.kind {
+        checker::TStructInit as si => check_struct_fat_spans(const_name, layout, si)
+        _ => null
+    }
+}
+
+/**
+ * check_const_image_size — the env-gated entry the const interner calls after serializing one
+ * aggregate const (0.3.1.0 native-rodata-const-align). When `const_size_check_enabled`, a `Named`
+ * const whose type resolves to a registered STRUCT layout is cross-checked against that layout
+ * (`check_struct_const_image`); a `Named` variant, a `Str`/`Slice`, or any type without a struct
+ * layout has no independent size oracle here and is skipped. A no-op returning `null` when the env
+ * var is unset, so the ordinary build stays byte-identical.
+ *
+ * @param cd       the residual typed const declaration
+ * @param img      the const's serialized `ConstImage`
+ * @param layouts  the program's struct-layout table
+ * @return         `null` when disabled, skipped, or consistent; the fatal honest-stop on a mismatch
+ * @since 0.3.1.0 native-rodata-const-align
+ */
+fn check_const_image_size(cd: checker::TConstDecl, img: ConstImage, layouts: []LStructLayout) -> null | error {
+    if !const_size_check_enabled() { return null }
+    match cd.ty {
+        checker::Named as n => match find_struct_layout(layouts, n.name) {
+            LStructLayout as layout => check_struct_const_image(cd.name, layout, cd.init, img)
+            error => null
+        }
+        _ => null
+    }
+}
+
+/**
  * intern_aggregate_const_decl — materialize one residual TConstDecl into rodata (#594 crumb 6 + T-B6):
  * a scalar const (already inlined + dropped by `inline_consts`) is a defensive skip; a Tier-A aggregate
  * interns ONE entry (empty relocs); a pointer-bearing aggregate (an ABI descriptor) interns first each
@@ -894,6 +1026,7 @@ fn serialize_const(cd: checker::TConstDecl, layouts: []LStructLayout, variants: 
 fn intern_aggregate_const_decl(m: LModule, cd: checker::TConstDecl, layouts: []LStructLayout, variants: []LVariantDef, enums: []LEnumInfo) -> LModule | error {
     if const_decl_is_scalar(cd.ty) { return m }
     let img = match serialize_const(cd, layouts, variants, enums) { ConstImage as x => x; error as e => return e }
+    match check_const_image_size(cd, img, layouts) { error as e => return e; null => { } }
     mut cur = m
     mut i: u64 = 0
     loop {
