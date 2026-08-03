@@ -307,6 +307,96 @@ fn project_arg_of_no_longer_recognizes_backend() {
     teko::assert::is_true(project_arg_of(args_of("--backend=native", "proj", ""), 0) == "--backend=native")
 }
 
+/**
+ * debug_matches — does `debug_info_of(args)` resolve to `want`? `false` on an unrecognised
+ * `--debug=` value — the shared assertion body the D1.6 golden tests below reduce to.
+ *
+ * @param args  the CLI argument vector to resolve
+ * @param want  the expected `DebugInfo` level
+ * @return      true iff `debug_info_of(args)` resolves to `want`
+ */
+fn debug_matches(args: []str, want: DebugInfo) -> bool {
+    match debug_info_of(args) { DebugInfo as d => d == want; error => false }
+}
+
+#test
+/**
+ * debug_arg_has_prefix_detects_the_selector — `--debug=` is recognized with anything after it,
+ * and an ordinary positional or an unrelated flag is NOT mistaken for it — the 8-byte guard
+ * mirroring `opt_arg_has_prefix`'s 6-byte one.
+ *
+ * @return void
+ */
+fn debug_arg_has_prefix_detects_the_selector() {
+    teko::assert::is_true(debug_arg_has_prefix("--debug=lines"))
+    teko::assert::is_true(debug_arg_has_prefix("--debug=none"))
+    teko::assert::is_true(debug_arg_has_prefix("--debug=bogus"))
+    teko::assert::is_true(!debug_arg_has_prefix("--debug"))
+    teko::assert::is_true(!debug_arg_has_prefix("--opt=2"))
+    teko::assert::is_true(!debug_arg_has_prefix("proj"))
+}
+
+#test
+/**
+ * debug_info_of_value_maps_none_and_lines_and_errors_otherwise — "none" and "lines" resolve to
+ * their levels; every other value (unlike `opt_level_of_value`, which resolves a malformed
+ * suffix to level 2) is a HARD error naming both accepted values — no silent coercion.
+ *
+ * @return void
+ */
+fn debug_info_of_value_maps_none_and_lines_and_errors_otherwise() {
+    teko::assert::is_true(match debug_info_of_value("none") { DebugInfo as d => d == DebugInfo::None; error => false })
+    teko::assert::is_true(match debug_info_of_value("lines") { DebugInfo as d => d == DebugInfo::Lines; error => false })
+    teko::assert::is_true(match debug_info_of_value("vars") { DebugInfo => false; error as e => teko::str::contains(e.message, "accepted: none, lines") })
+    teko::assert::is_true(match debug_info_of_value("") { DebugInfo => false; error => true })
+}
+
+#test
+/**
+ * debug_info_of_defaults_to_none_and_takes_the_last_flag — with no `--debug=` flag the level is
+ * `None` (never imposed, `--release` included, matching `opt_level_of`'s "no flag" default);
+ * with the flag present it resolves to the requested level, and the LAST occurrence on the
+ * line wins — the same rule `opt_level_of` follows under repetition.
+ *
+ * @return void
+ */
+fn debug_info_of_defaults_to_none_and_takes_the_last_flag() {
+    teko::assert::is_true(debug_matches(args_of(".", "--release", ""), DebugInfo::None))
+    teko::assert::is_true(debug_matches(args_of("--debug=lines", ".", ""), DebugInfo::Lines))
+    teko::assert::is_true(debug_matches(args_of("--debug=none", ".", ""), DebugInfo::None))
+    teko::assert::is_true(debug_matches(args_of("--debug=lines", "--debug=none", "."), DebugInfo::None))
+}
+
+#test
+/**
+ * project_arg_of_skips_debug_flag — `--debug=<value>` is a recognized build flag, so
+ * `project_arg_of` steps over it and still finds the project positional after it — the same
+ * trap `--opt=` already proved (§7.1 of the design doc: a flag absent from this list is read
+ * as the project path, silently).
+ *
+ * @return void
+ */
+fn project_arg_of_skips_debug_flag() {
+    teko::assert::is_true(project_arg_of(args_of("--debug=lines", ".", ""), 0) == ".")
+    teko::assert::is_true(project_arg_of(args_of("--debug=none", ".", ""), 0) == ".")
+    teko::assert::is_true(project_arg_of(args_of(".", "--debug=lines", ""), 0) == ".")
+}
+
+#test
+/**
+ * has_bare_g_flag_scans_from_start — `has_bare_g_flag` finds a bare `-g` occurrence anywhere
+ * from `start` onward, and reports absent when the line carries none — including when it only
+ * carries the (unrelated) `--debug=lines` spelling, the precedent `has_backend_flag` set.
+ *
+ * @return void
+ */
+fn has_bare_g_flag_scans_from_start() {
+    teko::assert::is_true(has_bare_g_flag(args_of("-g", "proj", ""), 0))
+    teko::assert::is_true(has_bare_g_flag(args_of("proj", "-g", ""), 0))
+    teko::assert::is_true(!has_bare_g_flag(args_of(".", "--debug=lines", ""), 0))
+    teko::assert::is_true(!has_bare_g_flag(args_of(".", "--release", ""), 0))
+}
+
 /** pt_push_u64le — append `v` as 8 little-endian bytes (the `.tkcov` wire form) to `b`. */
 fn pt_push_u64le(b: []byte, v: u64) -> []byte {
     mut out = b
