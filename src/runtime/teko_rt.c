@@ -1843,7 +1843,7 @@ tk_region *tk_region_root(void) {
 // current-region stack, or the root when the stack is empty (the behaviour-identical default). A NULL
 // slot or an over-deep pointer also falls through to the root, so an unbalanced/over-deep enter can
 // never hand back garbage — it degrades to the root.
-static tk_region *tk_region_current(void) {
+tk_region *tk_region_current(void) {
     tk_task *t = tk_task_current();
     if (t->cur_rsp > 0 && t->cur_rsp <= TK_REGION_STACK_MAX) {
         tk_region *r = t->cur_regions[t->cur_rsp - 1];
@@ -2929,6 +2929,82 @@ bool tk_rt_last_index_of_ok(tk_str hay, tk_str needle, uint64_t *out_index) {
     return r.ok;
 }
 
+// --- native-backend own-register twins for the aggregate-returning host FFI (0.3.1.0 degrau 34) ---
+// Each wraps the real (struct-returning) primitive above and re-shapes its result into the
+// single-register `bool` + shared (ptr, len) out-parameter convention the native backend's `LCall`
+// can capture — no host logic is duplicated (the SUPREME RULE seam: signature/wiring only). See
+// teko_rt.h for why the direct SRET/rax:rdx path faults on that backend.
+
+// tk_ffi_sres_into_out — unpack an sres into the shared (ptr, len) out-slots: the value on success,
+// the error message on failure, the caller's `bool` deciding which meaning it wrote.
+static bool tk_ffi_sres_into_out(tk_ffi_sres r, const tk_byte **out_ptr, uint64_t *out_len) {
+    if (r.ok) {
+        *out_ptr = r.value.ptr;
+        *out_len = r.value.len;
+        return true;
+    }
+    *out_ptr = r.err.ptr;
+    *out_len = r.err.len;
+    return false;
+}
+
+// tk_ffi_ures_into_out — the `error | null` twin's shared tail: `true` (no error) leaves the
+// out-slots untouched; on failure the error message's (ptr, len) travel through them.
+static bool tk_ffi_ures_into_out(tk_ffi_ures r, const tk_byte **out_err_ptr, uint64_t *out_err_len) {
+    if (r.ok) return true;
+    *out_err_ptr = r.err.ptr;
+    *out_err_len = r.err.len;
+    return false;
+}
+
+bool tk_rt_getenv_ok(const tk_byte *name_ptr, uint64_t name_len, const tk_byte **out_ptr, uint64_t *out_len) {
+    return tk_ffi_sres_into_out(tk_rt_getenv((tk_str){ name_ptr, (size_t)name_len }), out_ptr, out_len);
+}
+
+bool tk_rt_getcwd_ok(const tk_byte **out_ptr, uint64_t *out_len) {
+    return tk_ffi_sres_into_out(tk_rt_getcwd(), out_ptr, out_len);
+}
+
+bool tk_rt_read_file_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_ptr, uint64_t *out_len) {
+    return tk_ffi_sres_into_out(tk_rt_read_file((tk_str){ path_ptr, (size_t)path_len }), out_ptr, out_len);
+}
+
+bool tk_rt_list_dir_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_ptr, uint64_t *out_len) {
+    tk_ffi_slres r = tk_rt_list_dir((tk_str){ path_ptr, (size_t)path_len });
+    if (r.ok) {
+        *out_ptr = (const tk_byte *)r.ptr;
+        *out_len = r.len;
+        return true;
+    }
+    *out_ptr = r.err.ptr;
+    *out_len = r.err.len;
+    return false;
+}
+
+bool tk_rt_setenv_ok(const tk_byte *name_ptr, uint64_t name_len, const tk_byte *value_ptr, uint64_t value_len, const tk_byte **out_err_ptr, uint64_t *out_err_len) {
+    return tk_ffi_ures_into_out(tk_rt_setenv((tk_str){ name_ptr, (size_t)name_len }, (tk_str){ value_ptr, (size_t)value_len }), out_err_ptr, out_err_len);
+}
+
+bool tk_rt_chdir_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_err_ptr, uint64_t *out_err_len) {
+    return tk_ffi_ures_into_out(tk_rt_chdir((tk_str){ path_ptr, (size_t)path_len }), out_err_ptr, out_err_len);
+}
+
+bool tk_rt_mkdir_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_err_ptr, uint64_t *out_err_len) {
+    return tk_ffi_ures_into_out(tk_rt_mkdir((tk_str){ path_ptr, (size_t)path_len }), out_err_ptr, out_err_len);
+}
+
+bool tk_rt_remove_file_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_err_ptr, uint64_t *out_err_len) {
+    return tk_ffi_ures_into_out(tk_rt_remove_file((tk_str){ path_ptr, (size_t)path_len }), out_err_ptr, out_err_len);
+}
+
+bool tk_rt_write_file_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte *content_ptr, uint64_t content_len, const tk_byte **out_err_ptr, uint64_t *out_err_len) {
+    return tk_ffi_ures_into_out(tk_rt_write_file((tk_str){ path_ptr, (size_t)path_len }, (tk_str){ content_ptr, (size_t)content_len }), out_err_ptr, out_err_len);
+}
+
+bool tk_rt_write_file_bytes_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte *data_ptr, uint64_t data_len, const tk_byte **out_err_ptr, uint64_t *out_err_len) {
+    return tk_ffi_ures_into_out(tk_rt_write_file_bytes((tk_str){ path_ptr, (size_t)path_len }, data_ptr, data_len), out_err_ptr, out_err_len);
+}
+
 // (romaneio .31) TK_RT_SIGNAL_EXIT_BASE — the shell convention for "died by signal N": 128 + N.
 // A child killed by SIGABRT (6) therefore reports 134, exactly what `sh -c` reports for the same
 // child, so an expected exit code is the same whether the program is run directly through
@@ -3523,6 +3599,35 @@ const tk_byte *tk_rt_version_len(uint64_t *out_len) {
     return r.ptr;
 }
 
+// tk_rt_read_line_len / tk_rt_read_stdin_len / tk_assert_scenario_prefix_len / tk_test_scope_len —
+// the out-parameter-length twins for the remaining plain-tk_str-returning host primitives reached
+// through an `extern fn` on the native backend (0.3.1.0 degrau 35). Each defers to its by-value
+// primitive and re-shapes the fat return into (return ptr, *out_len) so the length survives the
+// backend's single-result-register call convention. No logic is duplicated.
+const tk_byte *tk_rt_read_line_len(uint64_t *out_len) {
+    tk_str r = tk_rt_read_line();
+    *out_len = r.len;
+    return r.ptr;
+}
+
+const tk_byte *tk_rt_read_stdin_len(uint64_t *out_len) {
+    tk_str r = tk_rt_read_stdin();
+    *out_len = r.len;
+    return r.ptr;
+}
+
+const tk_byte *tk_assert_scenario_prefix_len(uint64_t *out_len) {
+    tk_str r = tk_assert_scenario_prefix();
+    *out_len = r.len;
+    return r.ptr;
+}
+
+const tk_byte *tk_test_scope_len(uint64_t *out_len) {
+    tk_str r = tk_test_scope();
+    *out_len = r.len;
+    return r.ptr;
+}
+
 // D3 — test-coverage sink (host side-channel; see teko_rt.h). A growable array of distinct ids,
 // deduped on insert (the id count is bounded by the project's function count, so linear dedup is
 // fine). tk_cov_reset starts a fresh run; tk_cov_mark records a function-entry id; tk_cov_distinct
@@ -3935,6 +4040,13 @@ void *tk_slice_push_fo(const void *ptr, uint64_t len, const void *elem, uint64_t
         if (tk_push_cache[h].ptr == ptr && tk_push_cache[h].esz == esz && tk_push_cache[h].cap > len)
             old_bytes = tk_push_cache[h].cap * esz;   // the live tail — its full capacity is reusable
     }
+    // (0.3.1 move-on-return M2, Mechanism 1) FREE-OLD grows into the CURRENT region. Under the
+    // per-escaping-RHS bracket discipline the current region IS `_tkrr` (the caller's region) while an
+    // escaping cb/append_fo buffer is built, so it materializes there and MOVES with the return — while
+    // a non-escaping scratch buffer (current == `_tkfr`) is reclaimed at the frame drop. The old buffer
+    // is parked on the root-only free-list only at root scope (`tk_free_block` returns when
+    // `tk_cur_rsp != 0`), so a scoped grow never dangles it. Following the current region is the whole
+    // point of Mechanism 1: zero new runtime symbols, the bracket does the conveyance.
     void *buf = tk_slice_push_r(ptr, len, elem, esz, out_len, tk_region_current());
     if (buf != old && old != NULL) {
         // (#148 Level-2 BISECT) TEKO_FO_MAX=N limits parking to the first N grows (binary-search

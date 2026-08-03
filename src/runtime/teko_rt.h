@@ -197,6 +197,11 @@ void       tk_task_reset(void);                 // clear the current task's ephe
 // (leave then no-ops), keeping enter/leave balanced without ever reading past the fixed stack.
 void       tk_region_enter(tk_region *child);   // push `child` as the current region for tk_alloc
 void       tk_region_leave(void);               // pop the current region (back to the enclosing one, else root)
+// (0.3.1 move-on-return A1) tk_region_current — the region tk_alloc bump-allocates from RIGHT NOW: the
+// current-region stack TOP, else the root (empty/over-deep degrades to root, never garbage). Made
+// PUBLIC (was static) so the C and native codegens can emit the accessor to capture R_ret — the
+// caller's chosen result region — at function entry (the move-on-return conveyance channel).
+tk_region *tk_region_current(void);             // the current region for tk_alloc (root when the stack is empty)
 // (0.3.1 backend-memoria C1) the u64-HANDLE ABI the Teko `extern fn` surface binds to: a tk_region*
 // travels through Teko as a `u64` (uintptr_t), so these thin twins take/return that width and cast
 // at the boundary, matching the extern prototypes byte-for-byte (no int↔pointer conversion warning
@@ -854,6 +859,35 @@ tk_ffi_u64res tk_rt_last_index_of(tk_str hay, tk_str needle);
 // (untouched when not found). A thin wrapper over `tk_rt_last_index_of` — no scan logic is
 // duplicated (0.3.1.0 degrau 15).
 bool tk_rt_last_index_of_ok(tk_str hay, tk_str needle, uint64_t *out_index);
+// --- native-backend own-register twins for the aggregate-returning host FFI (0.3.1.0 degrau 34) ---
+// The native (non-C) backend's `LCall` captures exactly ONE result register, so a host primitive
+// whose true ABI returns a struct wider than a register (`tk_ffi_sres` is 40 bytes → SysV MEMORY
+// class → SRET hidden pointer; `tk_ffi_ures`/`tk_ffi_slres` likewise) cannot be received on that
+// path — an un-set-up SRET pointer makes the callee write its result over garbage and the caller
+// SIGSEGVs (measured: gen2 crashed in `tk_rt_getenv` at startup, `c_backend_selected`'s
+// TEKO_BACKEND check). Each twin below carries the ok/err flag as its OWN single-register `bool`
+// return and the active case's (ptr, len) through two shared out-parameters — the SAME convention
+// `tk_rt_str_from_utf8_ok`/`tk_rt_last_index_of_ok` already use, extended to the whole host surface
+// the self-host build walks (env/io/fs). Args are taken as ptr+len scalar pairs (never `tk_str`
+// by value), so the pair IS their C ABI on every target and the backend passes them in registers.
+//
+// str | error family — ok → the value's (ptr, len) in the out-slots; !ok → the error message's
+// (ptr, len) in the SAME out-slots (the caller's `bool` decides which meaning to read).
+bool tk_rt_getenv_ok(const tk_byte *name_ptr, uint64_t name_len, const tk_byte **out_ptr, uint64_t *out_len);
+bool tk_rt_getcwd_ok(const tk_byte **out_ptr, uint64_t *out_len);
+bool tk_rt_read_file_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_ptr, uint64_t *out_len);
+// []str | error — ok → the tk_str[] entries' (base, count) in the out-slots (a `[]str` slice's
+// element layout IS an array of `tk_str`, so the backend stores that pair as the fat payload
+// unchanged); !ok → the error message's (ptr, len) in the SAME out-slots.
+bool tk_rt_list_dir_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_ptr, uint64_t *out_len);
+// error | null family — the `bool` return IS "succeeded (no error)"; on failure the error message's
+// (ptr, len) travels through the two out-slots (untouched on success).
+bool tk_rt_setenv_ok(const tk_byte *name_ptr, uint64_t name_len, const tk_byte *value_ptr, uint64_t value_len, const tk_byte **out_err_ptr, uint64_t *out_err_len);
+bool tk_rt_chdir_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_err_ptr, uint64_t *out_err_len);
+bool tk_rt_mkdir_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_err_ptr, uint64_t *out_err_len);
+bool tk_rt_remove_file_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_err_ptr, uint64_t *out_err_len);
+bool tk_rt_write_file_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte *content_ptr, uint64_t content_len, const tk_byte **out_err_ptr, uint64_t *out_err_len);
+bool tk_rt_write_file_bytes_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte *data_ptr, uint64_t data_len, const tk_byte **out_err_ptr, uint64_t *out_err_len);
 // TK_RT_SPAWN_FAILED — "the runtime could not start a child at all", as distinct from any status a
 // child could report. It is NEGATIVE on purpose: a real child's code is 0..255 (128+signo for a
 // signalled one, so <= 191), which makes a negative provably outside that space and therefore
@@ -1050,6 +1084,17 @@ tk_str tk_rt_version(void);
 const tk_byte *tk_rt_os_len(uint64_t *out_len);
 const tk_byte *tk_rt_arch_len(uint64_t *out_len);
 const tk_byte *tk_rt_version_len(uint64_t *out_len);
+// tk_rt_read_line_len / tk_rt_read_stdin_len / tk_assert_scenario_prefix_len / tk_test_scope_len —
+// the out-parameter-length twins of the remaining plain-`tk_str`-returning host primitives the
+// self-host reaches through an `extern fn` declaration (io::read_line/read_stdin, assert's scenario
+// prefix, the test scope). SAME reason as the host-info trio above: the native backend's `LCall`
+// captures ONE result register, so a `tk_str`-by-value return has its length (the second eightbyte)
+// dropped — the length rides `*out_len` here instead (0.3.1.0 degrau 35). Thin wrappers; no logic
+// is duplicated.
+const tk_byte *tk_rt_read_line_len(uint64_t *out_len);
+const tk_byte *tk_rt_read_stdin_len(uint64_t *out_len);
+const tk_byte *tk_assert_scenario_prefix_len(uint64_t *out_len);
+const tk_byte *tk_test_scope_len(uint64_t *out_len);
 // (#148) the process peak RSS in bytes (0 = unavailable) — teko::mem::peak_rss.
 uint64_t tk_peak_rss(void);
 // (E1-C6) the OS-granted online processor count (>= 1) — the default and cap for the test/regression

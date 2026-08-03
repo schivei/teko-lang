@@ -376,7 +376,7 @@ fn tcall_is_list_push(c: TCall) -> bool {
 // (S2 Level-1) assign_is_self_append — is `a` exactly `xs = teko::list::push(xs, item)` (a plain
 // SIMPLE name write whose RHS grows the SAME name)? Only this shape earns the base-read carve-out;
 // a field/deref write, a different target, or any other RHS keeps the conservative escaping mark.
-fn assign_is_self_append(a: TAssign) -> bool {
+pub fn assign_is_self_append(a: TAssign) -> bool {
     match a.kind { parser::AssignKind::Simple => { }; _ => return false }
     match a.value.kind {
         TCall as c => {
@@ -774,10 +774,27 @@ fn count_reads_block(body: []TStatement, name: str) -> i64 {
     n
 }
 
-// count_block_local_reads — reads of `name` strictly inside block B that are SAFE to free past:
-// every read EXCEPT (a) the block's TAIL value when B yields a value (an arm/if value used outside
-// B), and (b) any read that is the RHS of an ASSIGN statement (could write to an enclosing var).
-// A binding's own initializer never reads its own name, so the binding statement contributes 0.
+/**
+ * count_block_local_reads — reads of `name` strictly INSIDE block B that are SAFE to free at B's exit
+ * edge. Every read EXCEPT (a) the block's TAIL value when B yields a value (an arm/if value used
+ * outside B — the UAF trap), and (b) any read that is the RHS of a top-of-block ASSIGN (could write
+ * into an enclosing-scope variable). A binding's own initializer never reads its own name, so the
+ * binding statement contributes 0.
+ *
+ * The SELF-APPEND-AWARE exception (§4): a top-of-block assign that is EXACTLY a self-append of the
+ * SAME `name` (`name = list::push(name, item)`) is NOT an escape — the write target is the block-local
+ * accumulator itself, not an enclosing variable. Its RHS reads (the base `name` plus the item) are
+ * safe inside reads and ARE counted, mirroring exactly what `count_reads_stmt` sums into the total —
+ * otherwise the total would count the base read while the inside would not, and the accumulator would
+ * be eternally excluded from block-local (the C3 finding). An assign of ANY other shape (a different
+ * target, `ys = push(ys, name)`, `outer = name`) stays SKIPPED — the conservative escape preserved.
+ *
+ * @param body      the statements of block B
+ * @param name      the tested binding's name
+ * @param is_value  does B yield a value (its tail escapes)?
+ * @return          the count of safe inside reads
+ * @since 0.3.1
+ */
 fn count_block_local_reads(body: []TStatement, name: str, is_value: bool) -> i64 {
     mut n: i64 = 0
     mut i = 0
@@ -785,11 +802,10 @@ fn count_block_local_reads(body: []TStatement, name: str, is_value: bool) -> i64
         if i >= body.len { break }
         let is_last = i + 1 == body.len
         match body[i] {
-            // an assignment RHS may flow into an ENCLOSING-scope variable → treat as escaping
-            // (do NOT count as a safe inside read), so `outerVar = x` blocks block-local freeing.
-            TAssign => { }
+            TAssign as a => {
+                if a.name == name && assign_is_self_append(a) { n = n + count_reads_expr(a.value, name) }
+            }
             TExprStmt as es => {
-                // the block's TAIL expr-statement is the block VALUE when B yields one → escaping.
                 if is_value && is_last { } else { n = n + count_reads_expr(es.expr, name) }
             }
             _ => { n = n + count_reads_stmt(body[i], name) }
