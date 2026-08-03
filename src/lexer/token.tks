@@ -161,13 +161,13 @@ pub type TokenKind = enum {
 
     // --- W10b.CLASS (2026-07-01) — the class construct. Appended LAST (ordinal stability — none
     //     of these are ever a stored operator, so their ordinals are never serialized to `.tkb`).
-    //     `self`/`base` are DELIBERATELY NOT reserved: `self` per OOP A1's name-agnostic receiver
-    //     ruling (any name is a valid receiver, matching struct methods); `base` because base
-    //     access is a NAMED BINDING chosen by the author (`class Animal(parent) {…}`), never a
-    //     literal keyword, and because ~270 existing uses of `base` as a plain identifier across
-    //     the self-hosted corpus would break if reserved (same reasoning that kept `params`/`from`
-    //     contextual). Confirmed zero real (non-comment) uses of the other 5 words as bare
-    //     identifiers anywhere in the corpus before reserving them.
+    //     `self`/`base` were DELIBERATELY NOT reserved at THIS point: `self` per OOP A1's
+    //     name-agnostic receiver ruling (any name is a valid receiver, matching struct methods);
+    //     `base` because base access is a NAMED BINDING chosen by the author (`class Animal(parent)
+    //     {…}`), never a literal keyword, and because ~270 existing uses of `base` as a plain
+    //     identifier across the self-hosted corpus would break if reserved (same reasoning that
+    //     kept `params`/`from` contextual). Confirmed zero real (non-comment) uses of the other 5
+    //     words as bare identifiers anywhere in the corpus before reserving them.
     Class   // `class` — the class construct (sealed/final by default)
     Abstract   // `abstract class` — inheritable, NOT instantiable
     Virtual   // `virtual class` / `virtual fn` — instantiable+inheritable class / an overridable method
@@ -180,6 +180,35 @@ pub type TokenKind = enum {
 // the parameter-declaration position (`tokens[p].text == "params"`). A real reserved keyword would
 // collide with ~295 existing uses of `params` as a plain identifier/field name across the
 // self-hosted corpus (e.g. `gf.params`, `lam.params`) — see parse_decl.tks/.c.
+
+/**
+ * `self` / `base` / `static` — APPROVED FUTURE KEYWORDS (owner ruling, 2026-08-03;
+ * `docs/design/self-base-static-keywords-0.3.1.md`). The ruling has TWO versions:
+ *
+ * - THIS version (0.3.1.x, groundwork only): the compiler learns to RECOGNIZE the three words —
+ *   `static` is parsed as a CONTEXTUAL method modifier (`parser::Function.is_static`, set but not
+ *   yet enforced by the checker); `self`/`base` stay untouched plain identifiers (still the
+ *   receiver-parameter name and a base-binding name, respectively — OOP A1 is unchanged). None of
+ *   the three become a reserved `TokenKind` here: the LEXER still emits a plain `Ident` for all
+ *   three, exactly like `params`/`from`/`unsafe` above. `is_future_reserved_word` below is the
+ *   single source of truth for "is this word on the future-keyword list", for tooling (`teko fmt`,
+ *   an eventual LSP) to flag a future collision without the lexer/parser rejecting anything today.
+ * - NEXT version (not this one): `self`/`base` become IMPLICIT keywords inside a method body (the
+ *   untyped receiver PARAMETER disappears — no more `fn m(self, …)`); `static` gates class/struct
+ *   method declarations for real (checker enforcement, not just parsing). See the design doc's
+ *   "Next version" section for the migration plan.
+ *
+ * KEYSTONE GUARD: this version must NOT break the current self-build, which spells the receiver
+ * parameter `self` in every method (`src/checker/synth.tks:199` and ~90 more sites) and uses `base`
+ * as an ordinary local name in production (`src/driver.tks`, `src/checker/resolve.tks`,
+ * `src/compress/zlib.tks`). Neither word is reserved here for exactly that reason.
+ *
+ * @param text  a token's raw text (only meaningful for an `Ident`-kind token)
+ * @return      true iff `text` is one of the three approved future keywords
+ */
+pub fn is_future_reserved_word(text: str) -> bool {
+    text == "self" || text == "base" || text == "static"
+}
 
 pub type Token = struct {
     kind: TokenKind

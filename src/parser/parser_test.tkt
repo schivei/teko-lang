@@ -287,6 +287,70 @@ fn rejects_malformed_functions() {
     teko::assert::is_true(func_errors("fn f(x) { }"))   // param with no type
 }
 
+// appended to parser_test.tkt — `static`/`self`/`base` future-keyword groundwork (owner ruling
+// 2026-08-03, `docs/design/self-base-static-keywords-0.3.1.md`). `static` is CONTEXTUAL, parsed
+// harmlessly as an optional method modifier (mirrors `unsafe`); `self`/`base` are NOT touched at
+// all — the KEYSTONE proof below is that they still parse fine as ordinary identifiers everywhere
+// they do today (the receiver parameter, a plain param/local name).
+
+// helper: does `source` parse as a `fn` decl with `is_static == true`?
+fn func_is_static(source: str) -> bool {
+    match func_of(source) { Function as f => f.is_static; error => false }
+}
+
+#test
+fn static_modifier_parses_contextually_and_defaults_false() {
+    teko::assert::is_true(func_is_static("static fn make() -> u8 { 0 }"))
+    teko::assert::is_false(func_is_static("fn make() -> u8 { 0 }"))   // absent — default false
+    // combines with the existing modifier chain, in the documented order (pub … static … extern/unsafe).
+    teko::assert::is_true(func_is_static("pub static fn make() -> u8 { 0 }"))
+    // `static` remains a plain identifier everywhere else — e.g. as the function's OWN name.
+    teko::assert::is_false(func_is_static("fn static() -> u8 { 0 }"))
+}
+
+// helper: does `source` (a struct/class body) parse cleanly (full token consumption, no error)?
+fn type_decl_parses(source: str) -> bool {
+    !type_decl_errors(source)
+}
+
+// helper: the FIRST method's `is_static` of a parsed struct/class body, or `false` if parsing
+// failed or it has no methods.
+fn first_method_is_static(source: str) -> bool {
+    let toks = match lexer::tokenize(source) { []lexer::Token as ts => ts; error => return false }
+    let pd = match parse_type_decl(toks, 0) { Parsed<Decl> as x => x; error => return false }
+    match pd.node {
+        TypeDecl as td => match td.body {
+            StructBody as sb => if sb.methods.len > 0 { sb.methods[0].is_static } else { false }
+            _ => false
+        }
+        _ => false
+    }
+}
+
+#test
+fn keystone_self_base_static_still_parse_as_ordinary_names() {
+    // `self` — still the untyped RECEIVER parameter name (OOP A1), unchanged: not rejected, no
+    // synthetic injection happens this version.
+    teko::assert::is_true(type_decl_parses("type T = struct { fn m(self) -> i64 { 0 } }"))
+    // `base` — still a perfectly ordinary parameter/local name (production uses it as a plain
+    // local in `driver.tks`/`resolve.tks`/`zlib.tks` — this proves the METHOD position too).
+    teko::assert::is_true(type_decl_parses("type T = struct { fn m(self, base: i64) -> i64 { base } }"))
+    // `static` used as an ordinary (non-modifier) param name still parses — it is only special
+    // in the modifier slot immediately before `fn`.
+    teko::assert::is_true(type_decl_parses("type T = struct { fn m(self, static: i64) -> i64 { static } }"))
+    // all three together, none of them special except the leading modifier position.
+    teko::assert::is_true(type_decl_parses("type T = struct { static fn make(base: i64, self: i64) -> i64 { base } }"))
+}
+
+#test
+fn static_modifier_on_a_struct_method_sets_is_static() {
+    teko::assert::is_true(first_method_is_static("type T = struct { static fn make() -> i64 { 0 } }"))
+    // an ordinary instance method (untyped receiver, no `static`) stays `is_static == false` — the
+    // EXISTING staticness detector (`params.len == 0 || params[0].has_type`) is untouched by this
+    // field; nothing downstream reads `is_static` yet.
+    teko::assert::is_false(first_method_is_static("type T = struct { fn m(self) -> i64 { 0 } }"))
+}
+
 // appended to parser_test.tkt — P5b struct type-decl tests.
 
 fn type_decl_errors(source: str) -> bool {

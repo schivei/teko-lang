@@ -107,3 +107,32 @@ fn lexes_brace_doubling_close_finding() {
     // order-free verbatim: `@$"{{x}}"` → inner `{{x}}` (preserved for the parser to collapse).
     teko::assert::is_true(one_str_text("@$\"{{x}}\"") == "{{x}}")
 }
+
+// ---- `self`/`base`/`static` future-keyword recognition (owner ruling 2026-08-03,
+// `docs/design/self-base-static-keywords-0.3.1.md`) — identify-only groundwork. `is_future_reserved_word`
+// is a pure classifier; none of the three become a reserved `TokenKind` this version, so the LEXER
+// still emits a plain `Ident` for each (proven by `kinds_eq` below) — non-breaking by construction.
+
+#test
+fn future_reserved_word_flags_exactly_self_base_static() {
+    teko::assert::is_true(is_future_reserved_word("self"))
+    teko::assert::is_true(is_future_reserved_word("base"))
+    teko::assert::is_true(is_future_reserved_word("static"))
+    // near-miss spellings and unrelated words are NOT flagged.
+    teko::assert::is_false(is_future_reserved_word("Self"))
+    teko::assert::is_false(is_future_reserved_word("this"))
+    teko::assert::is_false(is_future_reserved_word("statics"))
+    teko::assert::is_false(is_future_reserved_word(""))
+    teko::assert::is_false(is_future_reserved_word("params"))
+}
+
+// KEYSTONE proof: the lexer still tokenizes `self`/`base`/`static` as plain `Ident` — the future
+// keyword list above is advisory only, wired into nothing that changes tokenization.
+#test
+fn self_base_static_still_lex_as_plain_ident() {
+    teko::assert::is_true(kinds_eq("self", [TokenKind::Ident]))
+    teko::assert::is_true(kinds_eq("base", [TokenKind::Ident]))
+    teko::assert::is_true(kinds_eq("static", [TokenKind::Ident]))
+    // still usable as a `::`-path/field segment, exactly like any other identifier.
+    teko::assert::is_true(kinds_eq("self.base.static", [TokenKind::Ident, TokenKind::Dot, TokenKind::Ident, TokenKind::Dot, TokenKind::Ident]))
+}
