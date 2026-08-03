@@ -242,6 +242,18 @@ build_gen() {
     # exact culprit const instead of only ld's nearest-preceding-symbol guess. Remove once pinned.
     bg_align_check=""
     if [ "$bg_backend" = "native" ]; then bg_align_check="1"; fi
+    # DIAGNOSTIC (2026-08-03, native-region-crash): the same native-only gate as the two above,
+    # for the arm64-macos/x86_64-glibc native fixpoint SIGSEGV inside `tk_region_alloc` reached
+    # deep in the fused per-item lowering driver (`fuse_lower_item_arm64`/`emit_native_x86`,
+    # `docs/design/native-lowering-oom-por-funcao-0.3.1.md`). The shared linear-scan register
+    # allocator's own scan output is checked, per function, for an `InReg` assignment that
+    # crosses a call yet holds a caller-saved physreg (a violation `IntervalSet`'s own doc
+    # comment already names as forbidden) — straight to stderr, so the streamed log pins the
+    # exact vreg/physreg/function whose value a later call would clobber, instead of leaving the
+    # eventual corrupted-region-pointer read to surface as an unattributed SIGSEGV items later.
+    # Remove once pinned.
+    bg_call_safety_check=""
+    if [ "$bg_backend" = "native" ]; then bg_call_safety_check="1"; fi
     scan_project_c "$W/project-c.before"
     # Stream the build LIVE (prefixed) to the lane log AND capture to $bg_log. Owner ruling
     # 2026-08-03: "expor tudo que ele faz e não ocultar nenhuma saída". Before, the build was
@@ -251,9 +263,9 @@ build_gen() {
     # `set +e`/`set -e` brackets keep the pipe's own failure from tripping the caller early.
     set +e
     if [ -n "$RT_DIR" ]; then
-        { ( cd "$PROJ" && TK_RT_DIR="$RT_DIR" TEKO_NATIVE_TRACE_ITEMS="$bg_trace" TEKO_NATIVE_RODATA_ALIGN_CHECK="$bg_align_check" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
+        { ( cd "$PROJ" && TK_RT_DIR="$RT_DIR" TEKO_NATIVE_TRACE_ITEMS="$bg_trace" TEKO_NATIVE_RODATA_ALIGN_CHECK="$bg_align_check" TEKO_NATIVE_CALL_SAFETY_CHECK="$bg_call_safety_check" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
     else
-        { ( cd "$PROJ" && TEKO_NATIVE_TRACE_ITEMS="$bg_trace" TEKO_NATIVE_RODATA_ALIGN_CHECK="$bg_align_check" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
+        { ( cd "$PROJ" && TEKO_NATIVE_TRACE_ITEMS="$bg_trace" TEKO_NATIVE_RODATA_ALIGN_CHECK="$bg_align_check" TEKO_NATIVE_CALL_SAFETY_CHECK="$bg_call_safety_check" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
     fi
     set -e
     return "$(cat "$W/bg_status")"
