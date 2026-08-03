@@ -1036,6 +1036,62 @@ fn os_max_of_picks_the_smaller() {
     teko::assert::is_true(os_max_of(1, NO_MEM_CAP) == 1)
 }
 
+#test
+/**
+ * regression_journal_enabled_is_false_under_the_test_capture — the ONE branch this function can be
+ * proven from inside a `#test`: every call in this whole suite runs under the capture, so
+ * `teko::test::scope()` is never empty here. The other branch (a real, non-test regression run) is
+ * environmentally unreachable from a `#test` by the same construction `teko::journal::scratch`'s own
+ * "outside a test" branch already lives with — proven instead by `regr_jobs_of_reads_a_count_and_
+ * refuses_nonsense`-style production observation, never by a unit test that would have to stop being
+ * one to reach it.
+ *
+ * @return void
+ */
+fn regression_journal_enabled_is_false_under_the_test_capture() {
+    teko::assert::is_false(regression_journal_enabled())
+}
+
+#test
+/**
+ * note_row_outcome_dispatches_skip_before_ok — `regr_skip` sets BOTH `ok = true` and `skipped =
+ * true`, so the dispatch order in `note_row_outcome` (skip checked first) is what keeps a skip from
+ * misfiling as a pass. Proven by folding this run's own journal — the labels are unique to this test
+ * so they cannot be confused with a real regressor's.
+ *
+ * @return void
+ */
+fn note_row_outcome_dispatches_skip_before_ok() {
+    let label = "note_row_outcome_dispatches_skip_before_ok (journal wiring probe)"
+    note_row_outcome(label, regr_skip("no such tool"))
+    note_row_outcome(teko::str::concat(label, "-ok"), regr_pass())
+    note_row_outcome(teko::str::concat(label, "-fail"), regr_fail("boom"))
+    let recs = teko::journal::fold(teko::journal::run_root(), teko::journal::run_id())
+    teko::assert::is_true(jn_has_row_record(recs, teko::journal::KIND_SKIP, teko::str::concat(label, "\tno such tool")))
+    teko::assert::is_true(jn_has_row_record(recs, teko::journal::KIND_OK, teko::str::concat(label, "-ok")))
+    teko::assert::is_true(jn_has_row_record(recs, teko::journal::KIND_FAIL, teko::str::concat(label, "-fail\tboom")))
+}
+
+/**
+ * jn_has_row_record — whether `recs` holds a `writer = "r0"` record of exactly `kind`/`payload`
+ * (mirrors `journal/journal_test.tkt::has_record`, restated here because that helper is private to
+ * its own file).
+ *
+ * @param recs     the folded records
+ * @param kind     the kind to find
+ * @param payload  the payload to find
+ * @return         true iff a matching `r0` record is present
+ */
+fn jn_has_row_record(recs: []teko::journal::Record, kind: str, payload: str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= recs.len { break }
+        if recs[i].writer == "r0" && recs[i].kind == kind && recs[i].payload == payload { return true }
+        i = i + 1
+    }
+    false
+}
+
 /**
  * spec_of — a `ProcSpec` running `argv` with no stdin/env, dir "", under `prefix` — the shared
  * fixture builder every `run_pool` test below uses.

@@ -3122,12 +3122,15 @@ fn run_regression_sources(exe: str, m: Manifest) -> i32 {
         match teko::io::read_file(path) {
             error => {
                 teko::io::println($"teko: regression FAIL {path} — listed regressor file does not exist (M.3)")
+                if regression_journal_enabled() { teko::journal::note_row_fail(path, "listed regressor file does not exist (M.3)") }
                 fails = fails + 1
                 si = si + 1
             }
             str => {
+                if regression_journal_enabled() { teko::journal::note_row_begin(path) }
                 let fr = run_one_tkr(exe, dirname_of(path), basename_of(path), work ~ "/" ~ regr_sanitize(path), groups)
                 report_regressive(path, fr.outcome, fr.rows)
+                if regression_journal_enabled() { note_row_outcome(path, fr.outcome) }
                 regr_print_timings(fr.rows)
                 phase = phase_add(phase, rows_total(fr.rows))
                 if !fr.outcome.ok && !fr.outcome.skipped { fails = fails + 1 }
@@ -3137,8 +3140,43 @@ fn run_regression_sources(exe: str, m: Manifest) -> i32 {
         }
     }
     teko::io::println(regr_summary_line(m.test_regression_files.len, skips, fails) ~ $" ({regr_totals_text(phase)})")
+    if regression_journal_enabled() { teko::journal::note_row_end() }
     if fails > 0 && m.test_gate { return 1 }
     0
+}
+
+/**
+ * regression_journal_enabled — whether the journal wiring below should write for real: only when
+ * this call is NOT running inside a `#test`'s own capture (`teko::test::scope()` empty).
+ *
+ * PRODUCTION REGRESSION NEVER RUNS UNDER A `#test` CAPTURE. `run_regression_sources` is reached one
+ * of two ways: the real `teko test` driver (`run_regression_phase`, plain compiler-process control
+ * flow, no capture, `scope()` empty), or a `regression_test.tkt` fixture exercising this function
+ * DIRECTLY (`run_regression_sources_missing_path_is_a_manifest_error` and its neighbours) — which
+ * runs INSIDE this very compiler's own `#test` capture, `scope()` non-empty. Journaling the second
+ * case would write a fake finding into the real run's own `r0` segment for a label no real
+ * regression ever named — the same reasoning `teko::journal::scratch`'s own "outside a test" branch
+ * already states for scratch paths, applied to the journal wiring itself.
+ *
+ * @return true iff this is a real (non-test) regression run
+ * @since 0.3.1
+ */
+fn regression_journal_enabled() -> bool { teko::test::scope().len == 0 }
+
+/**
+ * note_row_outcome — translate one regressor file's already-decided `RegrOutcome` into the matching
+ * `teko::journal::note_row_*` call. `skip` is checked FIRST because a skip can carry `ok = true`
+ * (`regr_skip`'s own shape: "skipped for a missing capability" is not a failure), so testing `ok`
+ * first would misfile a skip as a pass.
+ *
+ * @param path  the regressor file's path (the row label)
+ * @param oc    its decided verdict
+ * @since 0.3.1
+ */
+fn note_row_outcome(path: str, oc: RegrOutcome) {
+    if oc.skipped { teko::journal::note_row_skip(path, oc.message); return }
+    if oc.ok { teko::journal::note_row_ok(path); return }
+    teko::journal::note_row_fail(path, oc.message)
 }
 
 /**
