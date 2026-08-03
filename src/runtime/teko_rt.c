@@ -4288,3 +4288,15 @@ int64_t tk_rt_monotonic_ns(void) {
     return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
 #endif
 }
+
+// tk_nproc — logical CPUs the OS grants this process. Floor 1: an OS that answers 0 or fails is
+// treated as one CPU, because a run always has at least the lane executing it. No allocation.
+uint64_t tk_nproc(void) {
+#if defined(_WIN32)
+    DWORD n = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+    return n < 1 ? (uint64_t)1 : (uint64_t)n;
+#else
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    return n < 1 ? (uint64_t)1 : (uint64_t)n;
+#endif
+}
