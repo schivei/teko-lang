@@ -8011,7 +8011,7 @@ fn emit_lambda(buf: []byte, prog: CgProg, e: checker::TExpr, lam: checker::TLamb
     // is materialized once. The env is region-allocated (root region — sound; escape promotes it).
     mut out = cb(buf, "({ __tkenv_")
     out = cb(out, teko::u64_to_str(lam.lift_id))
-    out = cb(out, " *_tke = tk_region_alloc(tk_region_root(), sizeof(__tkenv_")
+    out = cb(out, " *_tke = tk_region_alloc("); out = cb(out, cg_closure_env_region(dctx)); out = cb(out, ", sizeof(__tkenv_")
     out = cb(out, teko::u64_to_str(lam.lift_id))
     out = cb(out, ")); ")
     mut i = 0
@@ -10286,6 +10286,23 @@ fn cg_return_frame_exit(buf: []byte, indent: str, frame: str, dctx: DeferCtx) ->
     if dctx.rr.len > 0 { return cg_frame_exit(buf, indent, "_tkfr", true) }
     if frame.len > 0 { return cg_frame_exit(buf, indent, frame, false) }
     buf
+}
+
+/**
+ * cg_closure_env_region — the region a capturing closure's env is allocated in (0.3.1 move-on-return
+ * M2c). Inside a conveyance bracket (`bracket_depth > 0`, i.e. this closure is the RHS of an ESCAPING
+ * binding) the env routes to `_tkrr` — the caller's region — so an escaping closure's env MOVES with
+ * it and is reclaimed by the caller; its captured call-results, marked escaping by the same context,
+ * ride the same bracket. Otherwise the env keeps the process ROOT (the leak-safe fallback — never a
+ * UAF, since a non-escaping closure's env outlives its uses at root).
+ *
+ * @param dctx  the defer/bracket context
+ * @return      the C region expression the env allocates in
+ * @since 0.3.1
+ */
+fn cg_closure_env_region(dctx: DeferCtx) -> str {
+    if dctx.bracket_depth > 0 && dctx.rr.len > 0 { return dctx.rr }
+    "tk_region_root()"
 }
 
 /**

@@ -10,16 +10,17 @@
 #
 # WHAT IT PROVES. `accumulate` fingerprints its arm-scoped accumulator to 7 (elements 10/20/30 read
 # back via non-escaping index comparisons), then `churn` opens and closes four further if-arm-scoped
-# accumulators that recycle the freed region memory (8 hits). The fingerprint `15` witnesses that the
-# arm-scoped buffer read back exactly even though its region died and was recycled: a use-after-drop
-# would drop the arm's weight, not merely leak.
+# accumulators that recycle the freed region memory (8 hits), then an ESCAPING closure built by
+# `make_counter` is invoked AFTER the churn (M2c: `add(100)` = 100). The fingerprint `115` (7 + 8 +
+# 100) witnesses that the arm buffer read back exactly, the churn recycled cleanly, and the escaping
+# closure's captured env survived to the post-return call — a use-after-drop drops the weight.
 #
 # C ROUTE by construction: `Given env = ["TEKO_BACKEND=c"]` pins the shared build to the C backend,
 # the route crumbs A2/A3 activate the scope routing on.
 
-Feature: mem_accum_block — an if-arm block-local slice accumulator dies at the arm exit yet reads back exactly
+Feature: mem_accum_block — an if-arm block-local accumulator and an escaping closure both read back exactly
 
-  Scenario: an arm-scoped accumulator fingerprints to 15 across the post-arm scope churn
+  Scenario: the arm accumulator + churn + escaping closure fingerprint to 115
     Given env = ["TEKO_BACKEND=c"]
     When built and run
-    Then stdout pattern = "15"
+    Then stdout pattern = "115"

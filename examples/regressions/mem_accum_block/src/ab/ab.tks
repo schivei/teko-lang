@@ -45,12 +45,29 @@ fn accumulate(on: bool) -> i64 {
 }
 
 /**
+ * make_counter — return a closure that CAPTURES a call-built slice's element; the closure ESCAPES its
+ * frame (M2c). Its env allocates in the return region (or the leak-safe root fallback), so invoking
+ * it after this function returns — past the recycling churn — reads the captured value back exactly.
+ *
+ * @param base  the captured base value
+ * @return      a closure adding `base` to its argument
+ */
+fn make_counter(base: i64) -> (i64) -> i64 {
+    mut xs: []i64 = teko::list::empty()
+    xs = teko::list::push(xs, base)
+    let cap = xs[0 to u64]
+    (x: i64) => { cap + x }
+}
+
+/**
  * run — fingerprint the arm-scoped accumulator (7) plus the post-arm churn hit count (8 = 4 churn
- * iterations, 2 hits each). `15` proves the arm-scoped accumulator held its exact value even though
- * its region died at the arm's exit and was recycled by the churn.
+ * iterations, 2 hits each) plus an ESCAPING closure invoked AFTER the churn (M2c). `115` (7 + 8 +
+ * add(100) where add captures 0) proves the arm accumulator held, the churn recycled cleanly, and the
+ * escaping closure's captured env survived to the post-return call.
  *
  * @return  the decimal fingerprint
  */
 exp fn run() -> i64 {
-    accumulate(true) + churn(4)
+    let add = make_counter(0)
+    accumulate(true) + churn(4) + add(100)
 }
