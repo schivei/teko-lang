@@ -203,22 +203,24 @@ on:
 # instead of killing it. The group is keyed on the PR ref so distinct PRs never wait on each other,
 # and `github.workflow` is included so this file's runs never collide with another workflow's.
 #
-# This used to cancel, on the reasoning that a run superseded by a newer push grades a commit that
-# no longer gates anything. That reasoning holds for the VERDICT and fails for the MEASUREMENT. On a
-# lane whose whole job is to find where the native backend stops, a cancelled run destroys the only
-# evidence of a stop address — and `cancelled` reaches the reader looking like `failure`, which has
-# already been misread here. Owner ruling 2026-07-29: "Disparar vários de uma vez não é problema, o
-# problema é quando algo chega na fila e o processo já está em curso."
+# Cancel-in-progress is ON again — owner ruling 2026-08-03.
 #
-# The cost is real and accepted, and it grew with this wagon's redesign: a burst of pushes now runs
-# a full set each — six producer legs, six test legs, two cli-surface legs, three ar-validation
-# legs, one cross-arch-determinism run, and a four-leg seed-debut matrix — the fail-closed regression
-# executor now rides the test-linux-x86_64-musl leg (no standalone lane) —
-# rather than only the last. Batch what is ready into ONE push and the cost is the same as before;
-# the difference is that carelessness now buys minutes instead of losing evidence.
+# History (do not re-argue without reading this): it cancelled originally; was turned OFF on
+# 2026-07-29 on the reasoning that on a lane whose whole job is to find where the native backend
+# STOPS, a cancelled run destroys the only evidence of a stop address — and `cancelled` reaches the
+# reader looking like `failure`. Owner then: "Disparar vários de uma vez não é problema, o problema
+# é quando algo chega na fila e o processo já está em curso."
+#
+# That PREMISE no longer holds. The wild-write hunt now reproduces LOCALLY — the arena chunk-canary
+# (TEKO_NATIVE_CHUNK_CANARY) under a serialized 2 GB memory harness captures the stop address off-CI
+# — so a cancelled CI run destroys no evidence anymore. Meanwhile, under "push early, push often" a
+# burst of pushes floods the coordinator with delayed failure signals from commits already
+# superseded, clogging live analysis. Owner ruling 2026-08-03: re-enable cancellation — a run
+# superseded by a newer push no longer gates anything, and its stop-address evidence lives locally
+# now. (If a specific CI run's canary output is wanted, let it finish before pushing again.)
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: read
