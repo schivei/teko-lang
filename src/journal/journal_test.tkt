@@ -172,3 +172,27 @@ fn j_sweep_reclaims_a_dead_root_but_spares_keep_and_live() {
 fn j_scratch_ends_with_its_base() {
     teko::assert::str_ends_with(scratch("probe.txt"), "probe.txt")
 }
+
+/**
+ * j5_a_polite_signal_note_is_a_folded_stop_record — the polite-signal note of §6, proven through the
+ * EXACT writer the handler runs (`tk_rt_stop_handler` does nothing but `tk_journal_note(sig)` then
+ * restore-default-and-re-raise). `open` arms the `stop` head, the note writer appends the signal
+ * number, and `fold` reads a terminal `stop` record carrying it — so a run that a signal ended reads
+ * as stopped, never as passed.
+ *
+ * WHY NOT AN OS SIGNAL HERE. Delivering a real SIGTERM re-raises the default and terminates the
+ * process — the handler's whole point — which would kill this test shard before it could read the
+ * segment. The note WRITER is exercised directly; the signal that CALLS it is proven by the handler
+ * body itself.
+ */
+#test
+fn j5_a_polite_signal_note_is_a_folded_stop_record() {
+    let dir = tdir("j5note")
+    match open_seg(teko::str::concat(dir, "/m"), "r1", "m") {
+        Journal as j => { teko::assert::is_true(j.seg >= 0) }
+        error => { teko::assert::is_true(false); return }
+    }
+    let sigterm: i32 = 15
+    note(sigterm)
+    teko::assert::is_true(has_record(fold(dir, "r1"), KIND_STOP, "15"))
+}

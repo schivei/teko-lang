@@ -4399,4 +4399,30 @@ bool tk_rt_pid_alive(int64_t pid) {
     return errno == EPERM;
 #endif
 }
+
+// tk_rt_stop_handler — the POLITE-SIGNAL arm (design §6). Someone asked the program to stop (Ctrl-C, a
+// CI timeout, a cancel): write ONE `stop <sig>` record to the armed segment, then RESTORE the default
+// disposition and re-raise, so the process terminates EXACTLY as it would have with no handler at all.
+// The only observable difference is the note — the exit path, the wait-status, the core dump are the
+// signal's own default. ASYNC-SIGNAL-SAFE by construction: tk_journal_note writes pre-built bytes,
+// signal() and raise() are on POSIX's async-safe list, and nothing here allocates or formats.
+static void tk_rt_stop_handler(int sig) {
+    tk_journal_note(sig);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+// tk_rt_install_stop_handlers — install tk_rt_stop_handler for the "someone asked you to stop" signals
+// the crash installer (SIGSEGV/BUS/ILL/FPE — "the program broke") deliberately leaves alone. SIGINT
+// and SIGTERM exist on Windows too; SIGHUP and SIGQUIT are POSIX-only, under the same guard
+// tk_win32_spawnvp's platform code already uses. A SEPARATE constructor from the crash installer so a
+// drain rebase against that region stays trivial.
+__attribute__((constructor)) static void tk_rt_install_stop_handlers(void) {
+    signal(SIGINT,  tk_rt_stop_handler);
+    signal(SIGTERM, tk_rt_stop_handler);
+#ifndef _WIN32
+    signal(SIGHUP,  tk_rt_stop_handler);
+    signal(SIGQUIT, tk_rt_stop_handler);
+#endif
+}
 // ===== journal runtime funds — END =====

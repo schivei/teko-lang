@@ -98,6 +98,17 @@ extern fn pid_rt() -> i64 = "tk_rt_pid" from "teko_rt"
 extern fn pid_alive_rt(pid: i64) -> bool = "tk_rt_pid_alive" from "teko_rt"
 
 /**
+ * note_write_rt — the runtime symbol `tk_journal_note` wraps: the SAME async-signal-safe writer the
+ * polite-signal handler (`tk_rt_stop_handler`, §6) runs — it appends the armed `run\twriter\tstop\t`
+ * head, the signal number, and a newline to the segment `open` stashed. Kept private so `note` is the
+ * one caller.
+ *
+ * @param sig  the signal number the note records
+ * @since 0.3.1
+ */
+extern fn note_write_rt(sig: i32) -> void = "tk_journal_note" from "teko_rt"
+
+/**
  * BAD_DESCRIPTOR — what `open_seg_rt` answers when the segment could not be created.
  */
 const BAD_DESCRIPTOR: i64 = -1
@@ -346,6 +357,20 @@ pub fn append(j: Journal, kind: str, payload: str) -> null | error {
     }
     null
 }
+
+/**
+ * note — record a `stop <sig>` note NOW to the segment `open` armed, through the SAME async-signal-safe
+ * writer the polite-signal handler (`tk_rt_stop_handler`, §6) runs when a signal ends the run: it
+ * prepends the armed `run\twriter\tstop\t` head, appends `sig`, and terminates the line. A program that
+ * wants to mark a deliberate stop calls it; the J5 guard calls it to assert the record a polite signal
+ * PRODUCES without delivering a real terminating signal, which by the re-raise contract of §6 would end
+ * the process before it could read the note back. The signal delivery that CALLS this writer is proven
+ * by the handler's own body.
+ *
+ * @param sig  the signal number the note records
+ * @since 0.3.1
+ */
+pub fn note(sig: i32) { note_write_rt(sig) }
 
 /**
  * rename — publish `from` as `to` atomically within one directory, so no reader sees a half-written
