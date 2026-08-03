@@ -2875,7 +2875,7 @@ fn encode_rodata(rodata: []lir::LRodata) -> ModuleRodata | error {
         off = placed.off
         i++
     }
-    report_rodata_align_violations(syms, relocs)
+    match report_rodata_align_violations(syms, relocs) { error as e => return e; null => { } }
     ModuleRodata { bytes = bytes; syms = syms; relocs = relocs }
 }
 
@@ -2982,33 +2982,56 @@ fn rodata_align_check_enabled() -> bool {
 }
 
 /**
+ * rodata_align_violation_line — one misaligned-reloc diagnostic line for `v`: the owning const
+ * symbol, the pointer's target, its actual absolute rodata offset, and the 8-aligned offset it
+ * should have landed on. Built once, reused by both the per-violation stderr print and the fatal
+ * error's message (so the summary that aborts the build names the SAME first culprit as its own
+ * stderr line).
+ *
+ * @param RodataAlignViolation v  the violation to render
+ * @return str  the one-line diagnostic
+ */
+fn rodata_align_violation_line(v: RodataAlignViolation) -> str {
+    $"owner={v.owner} target={v.target} offset={v.offset} expected>={v.expected}"
+}
+
+/**
  * report_rodata_align_violation — print one misaligned-reloc diagnostic line to stderr.
  *
  * @param RodataAlignViolation v  the violation to report
  * @return void
  */
 fn report_rodata_align_violation(v: RodataAlignViolation) -> void {
-    teko::io::eprintln($"teko: TEKO_NATIVE_RODATA_ALIGN_CHECK: unaligned rodata pointer reloc — owner={v.owner} target={v.target} offset={v.offset} expected>={v.expected}")
+    teko::io::eprintln(teko::str::concat("teko: TEKO_NATIVE_RODATA_ALIGN_CHECK: unaligned rodata pointer reloc — ", rodata_align_violation_line(v)))
 }
 
 /**
- * report_rodata_align_violations — print one diagnostic line per misaligned rodata-internal
- * pointer relocation, when `rodata_align_check_enabled`; a no-op otherwise, so the ordinary
- * build's output is byte-identical to before this diagnostic existed.
+ * report_rodata_align_violations — when `rodata_align_check_enabled`, print one diagnostic line per
+ * misaligned rodata-internal pointer relocation AND THEN, if any exist, ABORT the build by
+ * returning an `error` whose message names the FIRST culprit — so the compiler that is emitting a
+ * generation (the correct seed emitting gen1) stops IMMEDIATELY with the const named, instead of
+ * emitting a corrupt object the linker rejects later (macOS `ld: pointer not aligned`) or a
+ * generation reads as garbage at runtime (the Linux/x86 crash). The named error propagates all the
+ * way up to the build driver's `fail(dir, e.message)`, so the const's name is the LAST line of the
+ * CI log — extractable by `tail` — rather than buried mid-stream. A no-op returning `null` when the
+ * env var is unset, so the ordinary build's output stays byte-identical to before this diagnostic
+ * existed.
  *
  * @param []Symbol syms  the module's rodata-local symbol table, in ascending-offset order
  * @param []lir::LDataReloc relocs  the module's rebased rodata-internal relocations
- * @return void
+ * @return null | error  `null` when disabled or clean; the fatal named honest-stop on any violation
  */
-fn report_rodata_align_violations(syms: []Symbol, relocs: []lir::LDataReloc) -> void {
-    if !rodata_align_check_enabled() { return }
+fn report_rodata_align_violations(syms: []Symbol, relocs: []lir::LDataReloc) -> null | error {
+    if !rodata_align_check_enabled() { return null }
     let violations = find_rodata_align_violations(syms, relocs)
+    if violations.len == 0 { return null }
     mut i: u64 = 0
     loop {
         if i >= violations.len { break }
         report_rodata_align_violation(violations[i])
         i++
     }
+    error { message = teko::str::concat("TEKO_NATIVE_RODATA_ALIGN_CHECK: aborting — unaligned rodata pointer reloc(s); first: ", rodata_align_violation_line(violations[0])) }
 }
 
 /**
