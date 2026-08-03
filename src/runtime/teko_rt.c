@@ -4224,7 +4224,22 @@ static void tk_redzone_verify(const void *ptr, uint64_t used, uint64_t esz, uint
 // so the whole buffer history (geometric doublings + in-place tail) is bulk-freed on frame exit.
 void *tk_slice_push_r(const void *ptr, uint64_t len, const void *elem, uint64_t esz, uint64_t *out_len, tk_region *region) {
     unsigned h = ptr ? tk_push_slot(ptr) : 0;
-    if (ptr != NULL && tk_push_cache[h].ptr == ptr && tk_push_cache[h].esz == esz) {
+    // (chunk-canary/push-redzone bug, self-caught) STALE-SLOT SAFETY applies to the
+    // DIAGNOSTIC too, not only to the real in-place decision below: tk_region_drop
+    // frees a region's chunks WITHOUT walking tk_push_cache to invalidate entries
+    // that named an address inside them (only tk_free_block/tk_push_cache_purge
+    // scrub the cache). A dropped region's chunk memory can be handed to a LATER,
+    // wholly unrelated allocation by the underlying allocator, landing on the SAME
+    // address; a stale cache entry that happens to still match {ptr, esz} (region
+    // objects and esz values repeat constantly) would otherwise report THAT old,
+    // long-gone chain's {len, cap} as if they belonged to the NEW buffer — a false
+    // "redzone stomped" over data that is simply the new buffer's own legitimate
+    // content, misread against the wrong snapshot. Requiring {region, region_gen}
+    // to match too — the EXACT witness the real in-place-growth decision below
+    // trusts — closes it: tk_g_region_gen never repeats a value for the life of
+    // the process, so a recycled address always carries a fresh region and/or gen.
+    if (ptr != NULL && tk_push_cache[h].ptr == ptr && tk_push_cache[h].esz == esz
+        && tk_push_cache[h].region == region && tk_push_cache[h].region_gen == region->gen) {
         tk_redzone_verify(ptr, tk_push_cache[h].len, esz, tk_push_cache[h].cap, "tk_slice_push_r:entry");
     }
     // in-place ONLY when this is the live tail (same ptr + length witness + element size) with spare cap
@@ -4310,7 +4325,10 @@ void *tk_append_bytes_fo(const void *ptr, uint64_t len, const void *src, uint64_
     tk_region *cur = tk_region_current();
     if (ptr != NULL) {
         unsigned h0 = tk_push_slot(ptr);
-        if (tk_push_cache[h0].ptr == ptr && tk_push_cache[h0].esz == 1) {
+        // (chunk-canary/push-redzone bug, self-caught) same STALE-SLOT SAFETY as
+        // tk_slice_push_r's own redzone check — see its comment.
+        if (tk_push_cache[h0].ptr == ptr && tk_push_cache[h0].esz == 1
+            && tk_push_cache[h0].region == cur && tk_push_cache[h0].region_gen == cur->gen) {
             tk_redzone_verify(ptr, tk_push_cache[h0].len, 1, tk_push_cache[h0].cap, "tk_append_bytes_fo:entry");
         }
     }
