@@ -5545,12 +5545,17 @@ fn run_git_diff(base: str, out_path: str) -> i32 {
  * valid ref (so the per-commit gate can degrade gracefully rather than crash — guardrail). Captures to
  * a scratch file next to the project root, then slurps it.
  *
+ * THE SCRATCH FILE IS SCOPED (journal J3): `teko::test::scoped(".teko-per-commit.diff")` is
+ * byte-for-byte the old literal outside a test (`teko::test::scope()` empty — the production
+ * `--per-commit-test` path is unchanged), and rooted under this run's own writer directory inside
+ * one, so two concurrent per-commit gates on the same host never share this capture file.
+ *
  * @param base  the git ref/sha to diff against
  * @return      the unified-diff text, or an error describing the git failure
  * @throws      when the `git diff` invocation fails or the scratch file cannot be read
  */
 fn per_commit_diff_text(base: str) -> str | error {
-    let out_path = ".teko-per-commit.diff"
+    let out_path = teko::test::scoped(".teko-per-commit.diff")
     if run_git_diff(base, out_path) != 0 {
         return error { message = teko::str::concat("git diff ", base, "...HEAD failed (git unavailable or invalid base)") }
     }

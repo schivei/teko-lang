@@ -2946,13 +2946,20 @@ fn regr_summary_line(files: u64, skips: u64, fails: u64) -> str {
  * line still accounts for every build the run paid for. A row the fold did not take (or whose group
  * did not build) reaches `tkr_ensure_artifact` exactly as it always did.
  *
+ * THE WORK TREE IS SCOPED (journal J3): `work` is `teko::test::scoped(REGR_WORK_DIR)`, so a `.tkt`
+ * that exercises this function directly (as `run_regression_sources_missing_path_is_a_manifest_error`
+ * does) gets its own `bin/.tkrun/<run>/<test>/bin/.regr-work`, never `rm_rf`-ing the real regression
+ * work tree a concurrent production run owns. Outside a test `teko::test::scope()` is empty and `work`
+ * is byte-for-byte `REGR_WORK_DIR`, so the production regression phase's own paths are unchanged —
+ * `merge_regression_coverage`'s literal `REGR_WORK_DIR` walk still finds every `.tkcov` this run wrote.
+ *
  * @param exe  the absolute path to this compiler binary (compiles each regressor / snippet)
  * @param m    the resolved manifest (its `test_regression_files`/`test_gate` drive the run)
  * @return     0 when the tier passes (or is advisory), 1 when a failure/missing-path gates it
  * @since 0.3.1
  */
 fn run_regression_sources(exe: str, m: Manifest) -> i32 {
-    let work = REGR_WORK_DIR
+    let work = teko::test::scoped(REGR_WORK_DIR)
     match rm_rf(work) { error => { }; null => { } }
     match mkdir_p(teko::str::concat(work, "/")) { error => { }; null => { } }
     let groups = regr_build_groups(exe, regr_plan_groups(m, work), work)
