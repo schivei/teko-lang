@@ -358,6 +358,58 @@ fn dwarf_base_type_encodings_frozen() {
 
 #test
 /**
+ * dwarf_frozen_base_type_covers_every_scalar — the D2.5 registry describes all twelve frozen scalar
+ * names with the exact byte_size/encoding a debugger expects: the four signed widths, the four
+ * unsigned widths, `byte` (unsigned, 1 byte — distinct from `u8` in the checker but same DWARF
+ * shape), `bool` (boolean), and the two float widths (the encoding this crumb adds).
+ */
+fn dwarf_frozen_base_type_covers_every_scalar() {
+    assert_frozen("i8", 1 to u64, DW_ATE_SIGNED)
+    assert_frozen("i16", 2 to u64, DW_ATE_SIGNED)
+    assert_frozen("i32", 4 to u64, DW_ATE_SIGNED)
+    assert_frozen("i64", 8 to u64, DW_ATE_SIGNED)
+    assert_frozen("u8", 1 to u64, DW_ATE_UNSIGNED)
+    assert_frozen("u16", 2 to u64, DW_ATE_UNSIGNED)
+    assert_frozen("u32", 4 to u64, DW_ATE_UNSIGNED)
+    assert_frozen("u64", 8 to u64, DW_ATE_UNSIGNED)
+    assert_frozen("byte", 1 to u64, DW_ATE_UNSIGNED)
+    assert_frozen("bool", 1 to u64, DW_ATE_BOOLEAN)
+    assert_frozen("f32", 4 to u64, DW_ATE_FLOAT)
+    assert_frozen("f64", 8 to u64, DW_ATE_FLOAT)
+}
+
+/**
+ * assert_frozen — asserts `frozen_base_type(name)` is found and matches the expected
+ * byte_size/encoding, keeping `dwarf_frozen_base_type_covers_every_scalar` one line per type.
+ *
+ * @param name       the frozen type name to look up
+ * @param byte_size  the expected DW_AT_byte_size
+ * @param encoding   the expected DW_AT_encoding
+ */
+fn assert_frozen(name: str, byte_size: u64, encoding: u64) {
+    let got = frozen_base_type(name)
+    teko::assert::is_true(got.found)
+    teko::assert::eq_str(got.base_type.name, name)
+    teko::assert::eq_u64(got.base_type.byte_size, byte_size)
+    teko::assert::eq_u64(got.base_type.encoding, encoding)
+}
+
+#test
+/**
+ * dwarf_frozen_base_type_rejects_unfrozen_names — the negative half of D2.5: a name outside the
+ * enumerated list (a struct name, a slice spelling, and `str`, which is NOT a DWARF base type here
+ * because it is `{ptr,len}` and needs a structure DIE, not a scalar one) yields `found = false`, with
+ * no description synthesized.
+ */
+fn dwarf_frozen_base_type_rejects_unfrozen_names() {
+    teko::assert::is_true(!frozen_base_type("str").found)
+    teko::assert::is_true(!frozen_base_type("MyStruct").found)
+    teko::assert::is_true(!frozen_base_type("[]i32").found)
+    teko::assert::is_true(!frozen_base_type("").found)
+}
+
+#test
+/**
  * dwarf_fbreg_offset_is_placeholder_sleb — the DW_OP_fbreg offset is carried verbatim as an SLEB128,
  * so when the real frame layout replaces the placeholder the location tracks it with no re-encoding.
  * A parameter at fbreg +300 (a two-group SLEB, 0xac 0x02) proves the general path the small negative

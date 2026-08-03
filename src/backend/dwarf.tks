@@ -370,6 +370,14 @@ pub const DW_ATE_SIGNED: u64 = 0x05
 pub const DW_ATE_UNSIGNED: u64 = 0x07
 
 /**
+ * DW_ATE_FLOAT — the DW_AT_encoding value (0x04) of an IEEE-754 floating-point base type (`f32`,
+ * `f64`), one of the frozen scalar encodings the writer may describe (D2.5).
+ *
+ * @since 0.3.1.0
+ */
+pub const DW_ATE_FLOAT: u64 = 0x04
+
+/**
  * DW_OP_REG6_RBP_PLACEHOLDER — the DW_AT_frame_base expression the writer emits until the real
  * frame descriptor is wired in: the single opcode DW_OP_reg6 (0x56), naming x86-64 RBP as the frame
  * base so DW_OP_fbreg offsets read RBP-relative. It is a PLACEHOLDER: the true frame base (register
@@ -751,6 +759,74 @@ pub type DwBaseType = struct {
     byte_size: u64
     /** the DWARF DW_AT_encoding (a frozen `DW_ATE_*` value), emitted as data1. */
     encoding: u64
+}
+
+/**
+ * DwBaseTypeLookup — the outcome of `frozen_base_type` (option-struct, M.2): `found` is false when
+ * the queried name is not one of the FROZEN scalar types (D2.5), in which case no `DW_TAG_base_type`
+ * DIE is describable for it and the caller MUST NOT synthesize one from a guess. `base_type` carries
+ * the described type only when `found`.
+ *
+ * @since 0.3.1.0
+ */
+pub type DwBaseTypeLookup = struct {
+    /** true iff the queried name names a frozen scalar type. */
+    found: bool
+    /** the described base type; valid only when `found`. */
+    base_type: DwBaseType
+}
+
+/**
+ * dw_bt_found — the found-branch `DwBaseTypeLookup` for one frozen `name`/`byte_size`/`encoding`
+ * triple, extracted so `frozen_base_type`'s guard chain stays one line per type.
+ *
+ * @param name       the frozen type's Teko name
+ * @param byte_size  the frozen type's DW_AT_byte_size
+ * @param encoding   the frozen type's DW_AT_encoding (one of the `DW_ATE_*` constants)
+ * @return           `found = true`, carrying the described base type
+ * @since 0.3.1.0
+ */
+fn dw_bt_found(name: str, byte_size: u64, encoding: u64) -> DwBaseTypeLookup {
+    DwBaseTypeLookup { found = true; base_type = DwBaseType { name = name; byte_size = byte_size; encoding = encoding } }
+}
+
+/**
+ * dw_bt_not_found — the not-found `DwBaseTypeLookup` `frozen_base_type` returns for any name outside
+ * the frozen list.
+ *
+ * @return  `found = false`, with a zeroed placeholder `base_type`
+ * @since 0.3.1.0
+ */
+fn dw_bt_not_found() -> DwBaseTypeLookup {
+    DwBaseTypeLookup { found = false; base_type = DwBaseType { name = ""; byte_size = 0 to u64; encoding = 0 to u64 } }
+}
+
+/**
+ * frozen_base_type — the D2.5 frozen registry: the ONLY Teko scalar type names the DWARF writer may
+ * describe as a `DW_TAG_base_type`, each carrying its byte size and `DW_AT_encoding`. The list is
+ * explicit and enumerated on purpose — a name outside it (a struct, a slice, `str`, or a future
+ * scalar not yet reviewed) returns `found = false`, never a guessed description. Widening the
+ * registry is a deliberate, reviewed addition to this function's guard chain, never an inferred
+ * default.
+ *
+ * @param name  the Teko scalar type name (e.g. "i32", "f64", "bool", "byte")
+ * @return      the described base type, or `found = false` when `name` is not frozen
+ * @since 0.3.1.0
+ */
+pub fn frozen_base_type(name: str) -> DwBaseTypeLookup {
+    if name == "bool" { return dw_bt_found(name, 1 to u64, DW_ATE_BOOLEAN) }
+    if name == "byte" { return dw_bt_found(name, 1 to u64, DW_ATE_UNSIGNED) }
+    if name == "u8" { return dw_bt_found(name, 1 to u64, DW_ATE_UNSIGNED) }
+    if name == "u16" { return dw_bt_found(name, 2 to u64, DW_ATE_UNSIGNED) }
+    if name == "u32" { return dw_bt_found(name, 4 to u64, DW_ATE_UNSIGNED) }
+    if name == "u64" { return dw_bt_found(name, 8 to u64, DW_ATE_UNSIGNED) }
+    if name == "i8" { return dw_bt_found(name, 1 to u64, DW_ATE_SIGNED) }
+    if name == "i16" { return dw_bt_found(name, 2 to u64, DW_ATE_SIGNED) }
+    if name == "i32" { return dw_bt_found(name, 4 to u64, DW_ATE_SIGNED) }
+    if name == "i64" { return dw_bt_found(name, 8 to u64, DW_ATE_SIGNED) }
+    if name == "f32" { return dw_bt_found(name, 4 to u64, DW_ATE_FLOAT) }
+    if name == "f64" { return dw_bt_found(name, 8 to u64, DW_ATE_FLOAT) }
+    dw_bt_not_found()
 }
 
 /**
