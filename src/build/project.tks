@@ -5379,17 +5379,74 @@ fn append_items(a: []parser::Item, b: []parser::Item) -> []parser::Item {
 }
 
 /**
+ * unmark_test_function — `f` with `is_test` cleared, every other field copied verbatim. The ONE
+ * field this whole file ever flips post-check — see `native_gate_unmark_tests`'s own doc for why.
+ *
+ * @param f  the checked `#test` function
+ * @return   `f`, `is_test = false`
+ * @since 0.3.1.0 (tests-native-no-c)
+ */
+fn unmark_test_function(f: checker::TFunction) -> checker::TFunction {
+    checker::TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = f.body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = false; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
+}
+
+/**
+ * native_gate_unmark_tests — `prog` with every `#test` function's `is_test` flag CLEARED (all other
+ * fields, and every non-function item, untouched) — the ONE signal the own-AOT-backend's per-item
+ * lowering (`lower_item_function`, `src/lir/lower.tks`) reads to decide whether a function's body is
+ * "part of the emitted program": `if f.is_test { skip }`, by design, so an ordinary
+ * `TEKO_BACKEND=native` PRODUCTION build never bloats its binary with test code once tests are
+ * assembled at all (the historic build path always compiles WITHOUT `.tkt` files in the first
+ * place — see `filter_tkt`/`release_build_of` — so that skip was never even reached there; it exists
+ * for this file's OWN `frontend_check(pf2, …)` re-check above, whose merged program is deliberately
+ * assembled WITH the `.tkt` tests, `#test` flag and all).
+ *
+ * THE NATIVE TEST GATE IS THE ONE CALLER THAT NEEDS THOSE BODIES EMITTED — its whole virtual main
+ * (`native_gate_harness_src`) is nothing but calls to them — so this is the one seam that asks for
+ * them: every `#test` the harness references (`native_gate_test_refs` collects ALL of them, so this
+ * unmarks the whole set) is handed to `emit_native` looking like an ORDINARY function. `is_test` is
+ * cleared only on THIS returned copy — the checked program a production build derives (`fe.prog` from
+ * `release_build_of`'s own, SEPARATE re-check) never passes through here, so a normal build's own
+ * emitted binary is untouched: it still never runs `.tkt` files through `frontend_check` at all.
+ *
+ * NO CHANGE TO `src/lir/lower.tks` — the region-lifetime work in that file is a different function
+ * (`open_frame_region`/`emit_region_*`/conveyance); this flips a checked-AST FLAG at the project.tks
+ * level, entirely upstream of lowering, so `lower_item_function`'s existing `is_test` check does the
+ * rest unmodified.
+ *
+ * @param prog  the checked program (`#test` items present, `is_test = true`)
+ * @return      `prog`, every `#test` function's `is_test` cleared
+ * @since 0.3.1.0 (tests-native-no-c)
+ */
+fn native_gate_unmark_tests(prog: checker::TProgram) -> checker::TProgram {
+    mut out: []checker::TItem = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            checker::TFunction as f => out = teko::list::push(out, if f.is_test { unmark_test_function(f) } else { f })
+            _ => out = teko::list::push(out, prog.items[i])
+        }
+        i = i + 1
+    }
+    checker::TProgram { items = out }
+}
+
+/**
  * native_gate_program — the checked program the native test gate emits FROM: `pf.parsed`'s items
  * with the project's own loose top-level statements REPLACED by the test-call harness
  * (`native_gate_drop_statements` + `native_gate_harness_items`), then re-checked
  * (`frontend_check` — the SAME check stage every build/gate already runs, so `#os` pruning, dep
  * loading and monomorphization all apply identically; reported as real, distinct work — this is a
- * second check pass, not a silent retry, exactly as `release_build_of`'s own re-check is).
+ * second check pass, not a silent retry, exactly as `release_build_of`'s own re-check is), then
+ * `native_gate_unmark_tests` so `emit_native`'s per-item lowering actually emits every `#test`
+ * body the harness calls (see that function's own doc — it, not this one, is the seam that makes a
+ * PRODUCTION native build stay test-code-free).
  *
  * @param pf   the gate's PARSED tree (`frontend_parse(true, …)` — WITH `.tkt` tests assembled)
  * @param tty  render the checker/monomorph phases' in-place `\r` updates
- * @return     the checked program whose virtual main is ONLY the test-call sequence, or the first
- *             parse/check error
+ * @return     the checked program whose virtual main is ONLY the test-call sequence and whose
+ *             `#test` bodies are unmarked for emission, or the first parse/check error
  * @since 0.3.1.0 (tests-native-no-c)
  */
 fn native_gate_program(pf: ParsedFront, tty: bool) -> checker::TProgram | error {
@@ -5400,7 +5457,7 @@ fn native_gate_program(pf: ParsedFront, tty: bool) -> checker::TProgram | error 
         error as e => return e
     }
     let pf2 = ParsedFront { parsed = parser::Program { items = append_items(kept, harness_items) }; manifest = pf.manifest; diags = pf.diags }
-    match frontend_check(pf2, false, tty) { Frontend as fe => fe.prog; error as e => e }
+    match frontend_check(pf2, false, tty) { Frontend as fe => native_gate_unmark_tests(fe.prog); error as e => e }
 }
 
 /**
