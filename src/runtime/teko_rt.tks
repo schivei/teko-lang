@@ -39,16 +39,34 @@
  * call, and it is what every function below binds through. Widening that door to arbitrary
  * foreign symbols is a separate, larger compiler change — out of this file's scope.
  *
- * THE RESIDUAL THIS FILE DOES NOT CLOSE (honest, not swept under the rug). A bare
- * `print(...)`/`write(...)`/`panic(...)` call anywhere in Teko source — including the compiler's
- * own — still lowers DIRECTLY to `tk_print`/`tk_write`/`tk_panic_str` via the native backend's
- * builtin dispatch (`lir/lower.tks::native_builtin_symbol`), never reaching the bodies here. Only
- * a FULLY QUALIFIED `teko::runtime::print(...)` (as `teko_rt_test.tkt` already does for this
- * namespace's other functions, e.g. `teko::runtime::str_eq`) resolves to what is declared below.
- * Rerouting the bare-name dispatch to call INTO this file — so a plain `print("x")` anywhere runs
- * this code instead of the parallel C path — is the next step toward retiring `teko_rt.c`; it
- * touches the native backend's core call lowering and needs the full self-host gate to validate,
- * so it is not this change.
+ * THE RESIDUAL THIS FILE DOES NOT CLOSE — B2, DEFERRED-NAMED (honest, not swept under the rug).
+ * A bare `print(...)`/`write(...)`/`panic(...)` call anywhere in Teko source — including the
+ * compiler's own — still lowers DIRECTLY to `tk_print`/`tk_write`/`tk_panic_str` via the native
+ * backend's builtin dispatch (`lir/lower.tks::native_builtin_symbol`), never reaching the bodies
+ * here; and the io declarations below themselves bind the `tk_*` symbols of `teko_rt.c`. That is
+ * B2, the io->`tk_write` circularity of `docs/design/migracao-runtime-c-para-teko-0.3.1.md` §1.1.
+ * It CANNOT be closed from this file alone with the current seed, and both candidate closures are
+ * blocked OUTSIDE L0:
+ *
+ *   1. Reroute the bare-name dispatch to the bodies here. The io-symbol resolution lives ENTIRELY
+ *      in `lir/lower.tks` (`native_builtin_symbol`/`call_symbol`/`builtin_io_symbol`, and
+ *      `is_str_arg_builtin` keys the `str`-argument routing on the seven `tk_*` names) — a native
+ *      call-lowering change that needs the full self-host gate to validate, NOT a `teko_rt.tks`
+ *      edit.
+ *   2. Bottom io at raw libc `write(fd, buf, n)` in Teko here. Blocked three ways: (a) `str` is
+ *      barred as an `extern fn` parameter except the closed seven-symbol `from "teko_rt"`
+ *      exception, which binds `tk_*` BY CONSTRUCTION (`checker/typer.tks::extern_type_ok` /
+ *      `teko_rt_type_ok`), and the general str->(ptr,len) marshalling that would replace it
+ *      (`teko::c_types`) is STAGED, not compiled (`staged/c_types/c_types.tks`); (b) the only
+ *      in-seed way to take a `str`'s byte address is `teko::mem::as_ptr` -> `tk_as_ptr`, itself a
+ *      `teko_rt` symbol, so it swaps one `tk_*` circularity for another; (c) `tk_write` carries the
+ *      harness output-capture seam (`if (tk_chan_open) tk_chan_append(...)`, `teko_rt.c`), an L6
+ *      concern a raw libc write would silently break.
+ *
+ * So B2 stays DEFERRED-NAMED: it opens the day the bare-name reroute lands in `lower.tks` behind
+ * the native self-host gate (F3 in the migration roadmap). Until then a FULLY QUALIFIED
+ * `teko::runtime::print(...)` (as `teko_rt_test.tkt` already does for e.g. `teko::runtime::str_eq`)
+ * is the only spelling that reaches what is declared below.
  *
  * FAIL LOUD (M.1). Every panic prints "teko: deliberate panic: <msg>" to stderr and exits
  * non-zero. The word "deliberate" is the marker a regressor scenario asserts on instead of an
