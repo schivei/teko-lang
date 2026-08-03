@@ -229,11 +229,20 @@ build_gen() {
     rm -rf "$W/out"
     bg_backend="$FIXPOINT_BACKEND"
     scan_project_c "$W/project-c.before"
+    # Stream the build LIVE (prefixed) to the lane log AND capture to $bg_log. Owner ruling
+    # 2026-08-03: "expor tudo que ele faz e não ocultar nenhuma saída". Before, the build was
+    # redirected to a file dumped ONLY on failure, so a mid-build OOM-kill (Killed: 9) lost the
+    # buffered tail and hid WHERE it died. POSIX sh has no PIPESTATUS, so the compiler's exit code
+    # is stashed in a status file (kept out of the streamed log by its own redirect) and returned;
+    # `set +e`/`set -e` brackets keep the pipe's own failure from tripping the caller early.
+    set +e
     if [ -n "$RT_DIR" ]; then
-        ( cd "$PROJ" && TK_RT_DIR="$RT_DIR" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ) >"$bg_log" 2>&1
+        { ( cd "$PROJ" && TK_RT_DIR="$RT_DIR" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
     else
-        ( cd "$PROJ" && TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ) >"$bg_log" 2>&1
+        { ( cd "$PROJ" && TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
     fi
+    set -e
+    return "$(cat "$W/bg_status")"
 }
 
 # scan_project_c OUTFILE — the sorted list of every `.c` in the project tree, EXCLUDING `.git` and
@@ -378,8 +387,7 @@ stage_gen1_c
 
 log "building gen2 = gen1(source) ..."
 if ! build_gen "$GEN1" "$W/gen2.log"; then
-    log "----- gen1's build of the source (did not complete) -----"
-    sed 's/^/fixpoint:   | /' "$W/gen2.log" >&2 || true
+    log "----- gen1's build of the source (streamed live above) did not complete -----"
     verdict_fail "gen1 does not build the source it came from — the compiler does not self-host, so gen2 does not exist and the fixpoint cannot hold. See the address above."
 fi
 take_gen gen2 || verdict_fail "the gen2 build reported success but left no binary at $W/out"
@@ -391,8 +399,7 @@ log "gen2 ready ($(wc -c < "$W/gen2") bytes)"
 # fixpoint não muda: continua gen2 == gen3"*), not an accident of this file's shape.
 log "building gen3 = gen2(source) ..."
 if ! build_gen "$W/gen2" "$W/gen3.log"; then
-    log "----- gen2's build of the source (did not complete) -----"
-    sed 's/^/fixpoint:   | /' "$W/gen3.log" >&2 || true
+    log "----- gen2's build of the source (streamed live above) did not complete -----"
     verdict_fail "gen2 built but does not rebuild the source — the chain breaks at the second generation. See the address above."
 fi
 take_gen gen3 || verdict_fail "the gen3 build reported success but left no binary at $W/out"
