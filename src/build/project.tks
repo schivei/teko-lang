@@ -3565,6 +3565,55 @@ fn enforce_coverage_floors(dir: str, fe: Frontend, cov_validation: bool) -> i32 
     0
 }
 
+/**
+ * The unmet-floor messages from a SITE-MAP and manifest, the site-map twin of `coverage_floor_misses`
+ * for the staged `teko test` report — the three measured percentages come from joining the site-map
+ * against the merged sink (`coverage::*_coverage_pct_of`) instead of walking the typed program, so
+ * the report stage needs no re-check. The numbers are identical: the site-map carries the same
+ * `fn_idx`/walk the AST-walk metrics read.
+ *
+ * @param sm  the parsed coverage site-map (the build stage's join table)
+ * @param m   the resolved manifest (its `[coverage]` floors)
+ * @return    one message per unmet floor; empty when every floor holds
+ */
+fn coverage_floor_misses_sm(sm: coverage::SiteMap, m: Manifest) -> []str {
+    unmet_coverage_floors(coverage::coverage_pct_of(sm), coverage::line_coverage_pct_of(sm), coverage::branch_coverage_pct_of(sm), m.cov_functions, m.cov_lines, m.cov_branches)
+}
+
+/**
+ * The strict (`--cov-validation`) floor check from a site-map: 0 when every floor holds, else the
+ * first unmet floor's `fail`. The site-map twin of `coverage_gate_result`.
+ *
+ * @param dir  the project directory (for the diagnostic prefix)
+ * @param sm   the parsed coverage site-map
+ * @param m    the resolved manifest (its `[coverage]` floors)
+ * @return     0 when every floor holds, else 1 with the first unmet floor reported to stderr
+ * @throws     the first unmet floor's message when any of functions/lines/branches is below its floor
+ */
+fn coverage_gate_result_sm(dir: str, sm: coverage::SiteMap, m: Manifest) -> i32 {
+    let misses = coverage_floor_misses_sm(sm, m)
+    if coverage_floor_blocks(misses, true) { return fail(dir, misses[0]) }
+    0
+}
+
+/**
+ * Apply the D4 coverage-floor policy from a SITE-MAP (the staged `teko test` report path): the same
+ * warn-by-default / enforce-under-`--cov-validation` policy as `enforce_coverage_floors`, reading
+ * the measured percentages from the site-map join rather than the typed program.
+ *
+ * @param dir             the project directory (for the diagnostic prefix)
+ * @param sm              the parsed coverage site-map
+ * @param m               the resolved manifest (its `[coverage]` floors)
+ * @param cov_validation  `--cov-validation` — enforce (fail) rather than warn on an unmet floor
+ * @return                0 unless `cov_validation` is set AND a floor is unmet, in which case 1
+ * @throws                under `cov_validation`, the first unmet floor's message
+ */
+fn enforce_coverage_floors_sm(dir: str, sm: coverage::SiteMap, m: Manifest, cov_validation: bool) -> i32 {
+    if cov_validation { return coverage_gate_result_sm(dir, sm, m) }
+    warn_coverage_floors(coverage_floor_misses_sm(sm, m))
+    0
+}
+
 /** report_native_coverage — print the three engine-independent coverage metrics (function/line/branch)
  *  the native gate populated (#265 Track A). Uses the exported percentage wrappers
  *  (coverage::*_coverage_pct). */
@@ -5517,8 +5566,12 @@ fn per_commit_diff_text(base: str) -> str | error {
  * unavailable or `<base>` is invalid the gate degrades gracefully — an honest warning, exit 0, never a
  * crash. Runs AFTER the aggregate floor policy, so the coverage sinks already hold the run's marks.
  *
+ * Takes the resolved MANIFEST (for the `[coverage] lines` floor) rather than the whole front-end:
+ * the delta gate reads only that one number and the pre-computed `pre_regr_cob` snapshot, so under
+ * the site-map report path it needs no typed program and forces no re-check.
+ *
  * @param dir             the project directory (for the diagnostic prefix)
- * @param fe              the assembled front-end product (checked program + manifest floors)
+ * @param m               the resolved manifest (its `cov_lines` is the delta floor)
  * @param base            the git ref/sha to measure the delta against
  * @param cov_validation  `--cov-validation` — enforce (fail) rather than warn on a below-floor delta
  * @param pre_regr_cob    the Cobertura XML snapshot taken right after the `#test` gate, BEFORE the
@@ -5528,7 +5581,7 @@ fn per_commit_diff_text(base: str) -> str | error {
  * @return                0 unless `cov_validation` is set AND the delta is below the [coverage] lines floor
  * @throws                under `cov_validation`, when the delta is below the lines floor
  */
-fn run_per_commit_test(dir: str, fe: Frontend, base: str, cov_validation: bool, pre_regr_cob: str) -> i32 {
+fn run_per_commit_test(dir: str, m: Manifest, base: str, cov_validation: bool, pre_regr_cob: str) -> i32 {
     let diff = match per_commit_diff_text(base) {
         str as s => s
         error => {
@@ -5541,7 +5594,7 @@ fn run_per_commit_test(dir: str, fe: Frontend, base: str, cov_validation: bool, 
     let d = delta_line_coverage(covlines, cls)
     teko::io::println(per_commit_report_str(base, d))
     let pct = delta_pct(d)
-    let floor = fe.manifest.cov_lines
+    let floor = m.cov_lines
     if delta_floor_blocks(pct, floor, cov_validation) {
         return fail(dir, $"per-commit delta coverage {pct}% is below the {floor}% floor ([coverage] lines) — the lines changed since {base} are undertested")
     }
@@ -5909,6 +5962,8 @@ fn test_stage_build(dir: str) -> i32 {
     ensure_rt_dir_abs()
     let fe = match project_frontend_sel(dir, true) { Frontend as x => x; error as e => return fail(dir, e.message) }
     report_arith_cast_rate(fe)
+    let smrc = emit_sitemap_file(dir, GATE_OUT_DIR, fe.manifest, fe.prog)
+    if smrc != 0 { return smrc }
     let brc = native_gate_build(dir, GATE_OUT_DIR, gate_paths(GATE_OUT_DIR, fe.manifest), fe.prog, fe.manifest, output_is_tty(false))
     if brc != 0 { return brc }
     build_regression_feed_exe(fe.manifest, fe.prog)
@@ -5916,19 +5971,73 @@ fn test_stage_build(dir: str) -> i32 {
 }
 
 /**
- * test_stage_report — STAGE 3: the verdict. Re-check the source (coverage is a walk of the TYPED
- * program — there is no other way to read the dumps back), fold in the gate's dumps and then the
- * regression tier's, and apply the policies in their historic precedence.
+ * sitemap_path — the coverage site-map the build stage emits and the report stage reads
+ * (`<od>/<name>.tksites`), beside the gate binary.
  *
- * WHY THE SOURCE IS CHECKED TWICE. Stage 1 held the checked program, but the coverage it must be
- * read against does not exist until the gate and the regressors have RUN — which is after stage 1
- * has exited, by design. The alternative is to keep stage 1's process alive through both runs,
- * which is the ~3 GB this staging exists to remove. The re-check costs one front-end pass and
- * peaks in a process that exits immediately after.
+ * @param od  the output directory (trailing separator tolerated — see `gate_out_dir`)
+ * @param m   the resolved manifest (its `name` is the file stem)
+ * @return    the site-map file path
+ * @since 0.3.1
+ */
+fn sitemap_path(od: str, m: Manifest) -> str {
+    teko::str::concat(gate_out_dir(od), "/", m.name, ".tksites")
+}
+
+/**
+ * emit_sitemap_file — serialize the coverage site-map of the checked program and write it beside the
+ * gate binary, so the report stage can render coverage by a table join instead of re-checking the
+ * whole compiler (C4 — the removal of the report stage's ~3 GB AST re-load). Emitted in the BUILD
+ * stage, which already holds the typed program; the report stage never rebuilds it.
+ *
+ * @param dir   the project directory (for the diagnostic prefix)
+ * @param od    the output directory the gate binary lands under
+ * @param m     the resolved manifest
+ * @param prog  the checked program the site-map is serialized from
+ * @return      0 on a successful write, else the write's failing status
+ * @throws      the write failure's message (already prefixed by `fail`)
+ * @since 0.3.1
+ */
+fn emit_sitemap_file(dir: str, od: str, m: Manifest, prog: checker::TProgram) -> i32 {
+    match teko::fs::mkdir(gate_out_dir(od)) { error => return fail(dir, "cannot create the output directory"); null => { } }
+    let blob = coverage::cov_emit_sitemap(prog)
+    match teko::io::write_file(sitemap_path(od, m), blob) { error as e => return fail(dir, e.message); null => { } }
+    0
+}
+
+/**
+ * read_sitemap — read and parse the coverage site-map the build stage wrote. A missing or corrupt
+ * file yields an error so the report stage can fall back to a re-check rather than mis-report.
+ *
+ * @param od  the output directory the site-map lives under
+ * @param m   the resolved manifest (its `name` is the file stem)
+ * @return    the parsed site-map, or the read/parse error
+ * @throws    "cannot read the coverage site-map …" when the file is absent, or the parse error
+ * @since 0.3.1
+ */
+fn read_sitemap(od: str, m: Manifest) -> coverage::SiteMap | error {
+    let path = sitemap_path(od, m)
+    let blob = match teko::io::read_file(path) { str as s => s; error => return error { message = teko::str::concat("cannot read the coverage site-map ", path) } }
+    coverage::cov_parse_sitemap(blob)
+}
+
+/**
+ * test_stage_report — STAGE 3: the verdict. Read the MANIFEST alone and the build stage's coverage
+ * SITE-MAP, fold in the gate's dumps and then the regression tier's, and render coverage by JOINING
+ * the site-map against the merged sink — never re-checking the source. Then apply the policies in
+ * their historic precedence.
+ *
+ * WHY THERE IS NO LONGER A RE-CHECK ON THE GATE PATH (C4). Stage 1 held the checked program, but the
+ * coverage it must be read against does not exist until the gate and the regressors have RUN — after
+ * stage 1 exits, by design. The report used to re-check the WHOLE compiler purely to walk its AST
+ * for the site-id → file:line table (the ~3 GB / ~4.5 GB peak that OOM-killed the macOS-arm64 leg
+ * right after `recheck ✓`). Stage 1 now serializes that table (`cov_emit_sitemap`) beside the gate,
+ * and this stage renders coverage and the D4 arith-cast verdict from it plus the merged sink — a
+ * light file-join process. The typed program is re-loaded ONLY for the dev-time `--per-test-cov`
+ * and `--analyzer` flags (never on any CI path), and lazily, so the gate path holds no AST at all.
  *
  * The Cobertura snapshot taken between the two merges is the PRE-REGRESSION picture the
  * `--per-commit-test` delta gate compares against, exactly as the single-process driver took it
- * between the gate and the tier.
+ * between the gate and the tier — now rendered from the site-map, so byte-identical without the AST.
  *
  * @param dir              the project directory
  * @param gen_cov          `--coverage` — write the Cobertura report next to the project root
@@ -5938,53 +6047,82 @@ fn test_stage_build(dir: str) -> i32 {
  * @param analyzer         `--analyzer` — run the dev-time stale/redundant analyzer
  * @param arith_cast_gate  `--arith-cast-gate` — enforce the D4 ARITH-CAST-RATE ceiling
  * @return                 the run's final status, in the historic precedence order
- * @throws                 the re-check's first error, or the Cobertura write failure
+ * @throws                 the manifest/site-map read error, or the Cobertura write failure
  * @since 0.3.1.0
  */
 fn test_stage_report(dir: str, gen_cov: bool, cov_validation: bool, per_test_cov: bool, per_commit_base: str, analyzer: bool, arith_cast_gate: bool) -> i32 {
     let trc = stage_rc_of_env(TEST_GATE_RC_ENV)
     let regr_rc = stage_rc_of_env(TEST_REGR_RC_ENV)
-    let fe = match recheck_frontend(dir) { Frontend as x => x; error as e => return fail(dir, e.message) }
-    let acr = checker::arith_cast_rate_report(fe.prog)
-    merge_gate_coverage(GATE_OUT_DIR, gate_paths(GATE_OUT_DIR, fe.manifest), test_jobs(), trc)
-    let pre_regr_cob = coverage::cov_cobertura(fe.prog)
+    let m = match enter_project_manifest(dir) { Manifest as x => x; error as e => return fail(dir, e.message) }
+    let sm = match read_sitemap(GATE_OUT_DIR, m) { coverage::SiteMap as x => x; error as e => return fail(dir, e.message) }
+    merge_gate_coverage(GATE_OUT_DIR, gate_paths(GATE_OUT_DIR, m), test_jobs(), trc)
+    let pre_regr_cob = coverage::cov_cobertura_of(sm)
     merge_regression_coverage()
     if gen_cov {
-        let xml = coverage::cov_cobertura(fe.prog)
+        let xml = coverage::cov_cobertura_of(sm)
         match teko::io::write_file("cobertura.xml", xml) { error as e => return fail(dir, e.message); null => { } }
         teko::io::println("teko: wrote coverage report cobertura.xml")
     }
-    let floor_rc = if trc == 0 { enforce_coverage_floors(dir, fe, cov_validation) } else { 0 }
+    let floor_rc = if trc == 0 { enforce_coverage_floors_sm(dir, sm, m, cov_validation) } else { 0 }
     mut per_commit_rc: i32 = 0
     if trc == 0 && floor_rc == 0 && per_commit_base.len > 0 {
-        per_commit_rc = run_per_commit_test(dir, fe, per_commit_base, cov_validation, pre_regr_cob)
+        per_commit_rc = run_per_commit_test(dir, m, per_commit_base, cov_validation, pre_regr_cob)
     }
-    let has_regr = fe.manifest.test_regression_files.len > 0
+    let has_regr = m.test_regression_files.len > 0
     let gate_rc = test_gate_precedence(trc, floor_rc, per_commit_rc, has_regr, regr_rc)
     if gate_rc != 0 { return gate_rc }
     if arith_cast_gate {
-        let acrc = arith_cast_verdict(acr)
+        let acrc = arith_cast_verdict(checker::arith_cast_rate_from(sm.arith_total, sm.arith_with_conversion))
         if acrc != 0 { return acrc }
     }
-    if per_test_cov { return run_per_test_cov(dir, fe) }
-    if analyzer { return run_analyzer(dir, fe) }
+    if per_test_cov { return report_per_test_cov(dir) }
+    if analyzer { return report_analyzer(dir) }
     0
 }
 
 /**
- * recheck_frontend — the report stage's front-end: the SAME assembly stage 1 did (project plus its
- * `.tkt` tests), run QUIETLY under one named phase. Quiet because the file→namespace map and the
- * per-file counters were already printed by stage 1 and a second copy would read as a second
- * build; under a phase because a silent twenty-second gap is exactly the shape this codebase
- * refuses to leave in a log.
+ * report_per_test_cov — the `--per-test-cov` branch of the report stage. This dev-time flag needs
+ * the typed program (it re-emits a single-test gate per `#test`), so it LAZILY re-checks the source
+ * here — the only place the report stage still loads the AST, and one no CI path reaches.
  *
- * @param dir  the project directory
+ * @param dir  the project directory (already the current directory)
+ * @return     0 when every per-test gate built and ran, else the failing status
+ * @throws     the re-check's first error
+ * @since 0.3.1
+ */
+fn report_per_test_cov(dir: str) -> i32 {
+    let fe = match recheck_frontend_here(dir) { Frontend as x => x; error as e => return fail(dir, e.message) }
+    run_per_test_cov(dir, fe)
+}
+
+/**
+ * report_analyzer — the `--analyzer` branch of the report stage. Like `--per-test-cov` this dev-time
+ * flag needs the typed program (it emits and runs the ANALYZE-mode gate), so it LAZILY re-checks
+ * the source here rather than on the gate path.
+ *
+ * @param dir  the project directory (already the current directory)
+ * @return     the analyzer's status
+ * @throws     the re-check's first error
+ * @since 0.3.1
+ */
+fn report_analyzer(dir: str) -> i32 {
+    let fe = match recheck_frontend_here(dir) { Frontend as x => x; error as e => return fail(dir, e.message) }
+    run_analyzer(dir, fe)
+}
+
+/**
+ * recheck_frontend_here — re-check the project in the CURRENT directory (the caller has already
+ * entered it), run QUIETLY under one named phase. Quiet because the file→namespace map and the
+ * per-file counters were already printed by stage 1 and a second copy would read as a second build;
+ * under a phase because a silent twenty-second gap is exactly the shape this codebase refuses to
+ * leave in a log.
+ *
+ * @param dir  the project directory (for the phase label only — not re-entered)
  * @return     the re-checked front-end product
  * @throws     the front-end's first error, already settled onto the phase line
- * @since 0.3.1.0
+ * @since 0.3.1
  */
-fn recheck_frontend(dir: str) -> Frontend | error {
-    match teko::env::chdir(dir) { error => return error { message = "cannot enter project directory" }; null => { } }
+fn recheck_frontend_here(dir: str) -> Frontend | error {
     let phase = phase_begin("recheck", dir, report_mode(false, output_is_tty(false)))
     match frontend_body(true, true, false) {
         Frontend as fe => { phase_end_ok(phase, dir); fe }
