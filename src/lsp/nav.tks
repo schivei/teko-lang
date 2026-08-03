@@ -1,0 +1,219 @@
+use teko::encoding::json
+use teko::parser
+use teko::lexer
+
+/**
+ * num_field — the JSON NUMBER value of `key` in `v` when `v` is an object holding a number there,
+ * else `null`. The one accessor `position_of` uses to read `line`/`character` off a request's
+ * `position` object.
+ *
+ * @param v    the JSON value (expected to be an object)
+ * @param key  the field name
+ * @return     the field's number, or `null` when absent / not a number / `v` not an object
+ * @since 0.3.1.0 (LSP crumb F)
+ */
+fn num_field(v: json::JsonValue, key: str) -> f64 | null {
+    let fv = match object_field(v, key) { json::JsonValue as x => x; null => return null }
+    match fv {
+        json::JsonNumber as n => n.value
+        _ => null
+    }
+}
+
+/**
+ * position_of — the 0-based cursor `Pos` (`line`/`character`) of a hover/definition request's
+ * `params.position`, or `null` when either field is missing or not a number.
+ *
+ * @param req  the hover/definition request DOM
+ * @return     the cursor position, or `null`
+ * @since 0.3.1.0 (LSP crumb F)
+ */
+fn position_of(req: json::JsonValue) -> Pos | null {
+    let params = match object_field(req, "params") { json::JsonValue as v => v; null => return null }
+    let pos = match object_field(params, "position") { json::JsonValue as v => v; null => return null }
+    let line = match num_field(pos, "line") { f64 as v => v; null => return null }
+    let character = match num_field(pos, "character") { f64 as v => v; null => return null }
+    Pos { line = line to u32; col = character to u32 }
+}
+
+/**
+ * word_at_position — the text of the `Ident` token under the 0-based cursor (`line0`, `char0`) of
+ * `text`, or `null` when no identifier token covers that position (a keyword, an operator, a
+ * literal, or empty space). Re-tokenizing the buffer is the design's own answer to references
+ * carrying no AST span (`docs/design/lsp-teko.md` §3.2 / §5.4 point 2): `Token` carries `line`/`col`
+ * (1-based), so the cursor's 1-based twin is matched against each identifier's `[start, start+len)`
+ * span.
+ *
+ * @param text   the document buffer
+ * @param line0  the 0-based cursor line
+ * @param char0  the 0-based cursor character
+ * @return       the identifier text under the cursor, or `null`
+ * @since 0.3.1.0 (LSP crumb F)
+ */
+fn word_at_position(text: str, line0: u32, char0: u32) -> str | null {
+    let tokens = match lexer::tokenize(text) { []lexer::Token as t => t; error => return null }
+    let line1 = line0 + 1
+    let col1 = char0 + 1
+    mut i: u64 = 0
+    loop {
+        if i >= tokens.len { break }
+        let t = tokens[i]
+        if t.kind == lexer::TokenKind::Ident && t.line == line1 {
+            let start = t.col
+            let end = t.col + (t.text.len to u32)
+            if col1 >= start && col1 < end { return t.text }
+        }
+        i = i + 1
+    }
+    null
+}
+
+/**
+ * symbol_named — the first entry of `syms` whose name is `name`, or `null` when none matches. The
+ * text→declaration resolution step of hover/definition, over the SAME index `build_symbol_index`
+ * produces (`docs/design/lsp-teko.md` §3.2 — v1 does no scope resolution; a name shared by two
+ * declarations returns the first).
+ *
+ * @param syms  the symbol index to search
+ * @param name  the identifier text to resolve
+ * @return      the first matching symbol, or `null`
+ * @since 0.3.1.0 (LSP crumb F)
+ */
+fn symbol_named(syms: []Symbol, name: str) -> Symbol | null {
+    mut i: u64 = 0
+    loop {
+        if i >= syms.len { break }
+        if syms[i].name == name { return syms[i] }
+        i = i + 1
+    }
+    null
+}
+
+/**
+ * resolve_symbol_at — the `Symbol` under the 0-based cursor (`line0`, `char0`) of the document
+ * `text` at `path`: the word under the cursor (`word_at_position`), resolved against the SINGLE
+ * document's own symbol index (`document_program` + `build_symbol_index` — the same per-document
+ * scope `diagnose_document` checks in, crumb A's own note; whole-project resolution is future work).
+ * `null` when the cursor sits on no identifier, the buffer does not parse, or the word names no
+ * declaration in this document.
+ *
+ * @param path   the document path (selects the grammar; stamps the resolved symbol's `file`)
+ * @param text   the document buffer
+ * @param line0  the 0-based cursor line
+ * @param char0  the 0-based cursor character
+ * @return       the symbol under the cursor, or `null`
+ * @since 0.3.1.0 (LSP crumb F)
+ */
+fn resolve_symbol_at(path: str, text: str, line0: u32, char0: u32) -> Symbol | null {
+    let word = match word_at_position(text, line0, char0) { str as w => w; null => return null }
+    let prog = match document_program(path, text) { parser::Program as p => p; error => return null }
+    symbol_named(build_symbol_index(prog), word)
+}
+
+/**
+ * hover_contents — the `MarkupContent` (`{ kind: "markdown", value }`) for `sym`'s hover: a fenced
+ * `teko` code block holding the rendered signature, then the raw doc-comment span beneath it when
+ * present (verbatim — v1 does no comment-marker stripping; the client renders the `/** … */` wrapper
+ * as-is).
+ *
+ * @param sym  the resolved symbol
+ * @return     the JSON `MarkupContent`
+ * @since 0.3.1.0 (LSP crumb F)
+ */
+fn hover_contents(sym: Symbol) -> json::JsonValue {
+    let code = teko::str::concat("```teko\n", sym.signature, "\n```")
+    let value = if sym.doc.len > 0 { teko::str::concat(code, "\n\n", sym.doc) } else { code }
+    jobj(["kind", "value"], [jstr("markdown"), jstr(value)])
+}
+
+/**
+ * path_to_uri — the `file://` URI naming `path`, the inverse of `uri_to_path`.
+ *
+ * @param path  the filesystem path
+ * @return      the `file://`-prefixed URI
+ * @since 0.3.1.0 (LSP crumb F)
+ */
+fn path_to_uri(path: str) -> str {
+    teko::str::concat("file://", path)
+}
+
+/**
+ * symbol_range — the 0-based LSP `Range` covering `sym`'s NAME (its recorded `line`/`col` through
+ * `col + name.len`), clamped to 0 when the recorded position is unset (`line`/`col` of 0 — never
+ * expected from a real declaration, but never underflowed either).
+ *
+ * @param sym  the resolved symbol
+ * @return     the JSON `Range`
+ * @since 0.3.1.0 (LSP crumb F)
+ */
+fn symbol_range(sym: Symbol) -> json::JsonValue {
+    let line0 = if sym.line > 0 { sym.line - 1 } else { 0 }
+    let col0 = if sym.col > 0 { sym.col - 1 } else { 0 }
+    let end_col = col0 + (sym.name.len to u32)
+    jobj(["start", "end"], [encode_position(line0, col0), encode_position(line0, end_col)])
+}
+
+/**
+ * definition_location — the LSP `Location` (`{ uri, range }`) naming `sym`'s definition site: the
+ * `file://` URI of its declaring file and the range over its name.
+ *
+ * @param sym  the resolved symbol
+ * @return     the JSON `Location`
+ * @since 0.3.1.0 (LSP crumb F)
+ */
+fn definition_location(sym: Symbol) -> json::JsonValue {
+    jobj(["uri", "range"], [jstr(path_to_uri(sym.file)), symbol_range(sym)])
+}
+
+/**
+ * navigation_symbol — the resolved `Symbol` a hover/definition request names, or `null` when the
+ * document is not open, the request carries no valid position, or the cursor names no symbol. The
+ * shared first step `hover_response`/`definition_response` both take.
+ *
+ * @param store  the current open-document store
+ * @param req    the hover/definition request DOM
+ * @return       the resolved symbol, or `null`
+ * @since 0.3.1.0 (LSP crumb F)
+ */
+fn navigation_symbol(store: DocStore, req: json::JsonValue) -> Symbol | null {
+    let uri = match format_uri(req) { str as u => u; null => return null }
+    let text = match store_get(store, uri) { str as t => t; null => return null }
+    let pos = match position_of(req) { Pos as p => p; null => return null }
+    resolve_symbol_at(uri_to_path(uri), text, pos.line, pos.col)
+}
+
+/**
+ * hover_response — answer `textDocument/hover`: resolve the symbol under the cursor and reply with
+ * its rendered `Hover` (`{ contents }`). A cursor on no known symbol, an unopened document, or a
+ * malformed request all answer a `null` result — the protocol's "nothing to show", never an error.
+ *
+ * @param store  the current store (read for the document text)
+ * @param req    the hover request DOM
+ * @return       the store (unchanged) and the `Hover`-or-null response
+ * @since 0.3.1.0 (LSP crumb F)
+ */
+fn hover_response(store: DocStore, req: json::JsonValue) -> Dispatch {
+    let id = request_id(req)
+    match navigation_symbol(store, req) {
+        Symbol as sym => dispatch_of(store, one_message(response(id, jobj(["contents"], [hover_contents(sym)]))))
+        null => dispatch_of(store, one_message(response(id, jnull())))
+    }
+}
+
+/**
+ * definition_response — answer `textDocument/definition`: resolve the symbol under the cursor and
+ * reply with the `Location` of its definition. A cursor on no known symbol, an unopened document, or
+ * a malformed request all answer a `null` result.
+ *
+ * @param store  the current store (read for the document text)
+ * @param req    the definition request DOM
+ * @return       the store (unchanged) and the `Location`-or-null response
+ * @since 0.3.1.0 (LSP crumb F)
+ */
+fn definition_response(store: DocStore, req: json::JsonValue) -> Dispatch {
+    let id = request_id(req)
+    match navigation_symbol(store, req) {
+        Symbol as sym => dispatch_of(store, one_message(response(id, definition_location(sym))))
+        null => dispatch_of(store, one_message(response(id, jnull())))
+    }
+}

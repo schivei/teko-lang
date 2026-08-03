@@ -168,11 +168,10 @@ fn error_response(id: json::JsonValue, code: i64, message: str) -> json::JsonVal
 /**
  * initialize_result — the `initialize` response. Capabilities are HONEST: `textDocumentSync` is
  * announced as FULL (1) — the client pushes the whole buffer on every `didOpen`/`didChange`, which is
- * what `diagnose_document` re-checks (crumb A) — and `documentFormattingProvider` is true, since the
- * pure `teko::fmt::format_source` answers whole-document formatting in-process (crumb B). NO
- * navigation provider is announced yet — advertising a `definitionProvider` the server cannot answer
- * would mislead every client; those join `capabilities` as hover/definition land. `serverInfo` names
- * the server and its build.
+ * what `diagnose_document` re-checks (crumb A) — `documentFormattingProvider` is true, since the pure
+ * `teko::fmt::format_source` answers whole-document formatting in-process (crumb B), and
+ * `hoverProvider`/`definitionProvider` are true, since `hover_response`/`definition_response`
+ * (crumb F) resolve the cursor against the symbol index. `serverInfo` names the server and its build.
  *
  * @param id  the request id echoed back
  * @return    the `initialize` response DOM
@@ -180,7 +179,9 @@ fn error_response(id: json::JsonValue, code: i64, message: str) -> json::JsonVal
  */
 fn initialize_result(id: json::JsonValue) -> json::JsonValue {
     let server_info = jobj(["name", "version"], [jstr("teko"), jstr(teko::env::version())])
-    let capabilities = jobj(["textDocumentSync", "documentFormattingProvider"], [jnum(1.0), jbool(true)])
+    let capability_keys = ["textDocumentSync", "documentFormattingProvider", "hoverProvider", "definitionProvider"]
+    let capability_values = [jnum(1.0), jbool(true), jbool(true), jbool(true)]
+    let capabilities = jobj(capability_keys, capability_values)
     let result = jobj(["capabilities", "serverInfo"], [capabilities, server_info])
     response(id, result)
 }
@@ -579,9 +580,11 @@ fn format_response(store: DocStore, req: json::JsonValue) -> Dispatch {
  * handle_request — dispatch ONE LSP message against `store` to the updated store and the list of
  * messages the server sends in return. Covers the lifecycle — `initialize` → capabilities;
  * `shutdown` → a null result; `initialized` / `exit` → nothing — live diagnostics (`didOpen`/
- * `didChange` record the buffer and push `publishDiagnostics`, `didClose` drops it and clears), and
- * `textDocument/formatting` → an in-process full-document `TextEdit[]`. An unknown REQUEST (one
- * carrying an `id`) gets a MethodNotFound error; an unknown notification is ignored.
+ * `didChange` record the buffer and push `publishDiagnostics`, `didClose` drops it and clears),
+ * `textDocument/formatting` → an in-process full-document `TextEdit[]`, and `textDocument/hover` /
+ * `textDocument/definition` → the cursor's symbol resolved against crumb E's index (crumb F). An
+ * unknown REQUEST (one carrying an `id`) gets a MethodNotFound error; an unknown notification is
+ * ignored.
  *
  * @param store  the open-document store to dispatch against
  * @param req    the decoded request DOM
@@ -602,6 +605,8 @@ pub fn handle_request(store: DocStore, req: json::JsonValue) -> Dispatch {
     if method == "textDocument/didChange" { return change_dispatch(store, req) }
     if method == "textDocument/didClose" { return close_dispatch(store, req) }
     if method == "textDocument/formatting" { return format_response(store, req) }
+    if method == "textDocument/hover" { return hover_response(store, req) }
+    if method == "textDocument/definition" { return definition_response(store, req) }
     if has_id(req) { return dispatch_of(store, one_message(error_response(id, -32601, teko::str::concat("method not found: ", method)))) }
     dispatch_of(store, no_messages())
 }
