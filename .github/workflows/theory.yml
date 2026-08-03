@@ -1,0 +1,88 @@
+name: Theory CI
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+# THEORY CI — two legs, SAME target (Linux x86-64 glibc), one NATIVE and one C.
+#
+# Each leg runs exactly what pr.yml's linux-x86_64-glibc pipeline runs today — produce_assets.sh
+# (seed → ladder/degrau → dry build → native asset → stage) then fixpoint_gate.sh — but on THIS
+# theory/** branch's modified source, and with the fixpoint/test backend PINNED per leg instead of
+# looked up from the planner. The point is to see, on ONE branch, the native and the C self-host
+# results side by side, so which improvement (or which INTERACTION between improvements) breaks the
+# native path is isolated by construction rather than guessed at inside the 1181-commit fix/union.
+#
+# `fail-fast: false` is load-bearing: a red native leg must NOT cancel the green C leg — seeing both
+# outcomes together is the entire experiment.
+#
+# Owner design 2026-08-03: "um CI que roda em push com duas pernas com mesmo alvo (Linux x86-64
+# glibc), mas cada uma com um target, um native e outro C, rodando exatamente o que o pr.yml roda
+# hoje mas com essas mudanças."
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+
+on:
+  push:
+    branches:
+      - 'theory/**'
+
+concurrency:
+  group: theory-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  leg:
+    name: ${{ matrix.backend }} / linux-x86_64-glibc
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [native, c]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install the object-format parsers the gates read with
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y llvm lld
+
+      - name: Report the host toolchain (diagnostic — never fails the job)
+        shell: bash
+        run: |
+          for t in cc clang gcc file python3; do
+            printf '%-8s ' "$t"; command -v "$t" || echo '(absent)'
+          done
+          for t in cc clang gcc; do
+            if command -v "$t" >/dev/null 2>&1; then
+              printf '%-8s target: ' "$t"; "$t" -dumpmachine 2>/dev/null || echo '(no -dumpmachine)'
+            fi
+          done
+
+      - name: Produce this leg's asset (seed → ladder → dry build → native asset → stage)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh scripts/produce_assets.sh linux linux-x86_64-glibc linux-x86_64-glibc
+
+      - name: Fixpoint — gen2 == gen3 over the same source (backend = ${{ matrix.backend }})
+        shell: bash
+        env:
+          TEKO_FIXPOINT_BACKEND: ${{ matrix.backend }}
+        run: sh scripts/fixpoint_gate.sh out/teko . .fixpoint
+
+      - name: Structural — the object/archive gates fail closed with nothing to check
+        shell: bash
+        run: bash scripts/objfile_gate_test.sh
+
+      - name: Asset self-test (the staged asset runs its own gate, backend = ${{ matrix.backend }})
+        shell: bash
+        env:
+          TEKO_BACKEND: ${{ matrix.backend }}
+        run: stage/linux-x86_64-glibc/teko test .
+
+      - name: No generated C after a native-backend test session
+        if: matrix.backend == 'native'
+        shell: bash
+        run: sh scripts/no_c_in_tests_gate.sh .
