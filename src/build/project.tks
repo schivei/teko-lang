@@ -962,6 +962,130 @@ fn opt_level_of(args: []str) -> i32 {
 }
 
 /**
+ * DebugInfo — how much debug information a build emits, the `--debug=<value>` axis
+ * (`docs/design/debugger-superficie-e-contramedida-0.3.1.md` §7.2, crumb D1.6).
+ *
+ * An ENUM and not a bool because the axis is LEVELLED at the reference this surface mirrors:
+ * rustc documents `line-tables-only` ("the minimal amount of debug info for backtraces with
+ * filename/line number info, but not anything else") as a first-class level distinct from
+ * `full`. `Lines` IS that level. A `Vars` member joins here at D2.6, once locals are threaded
+ * through the LIR — no existing spelling changes meaning when it does.
+ *
+ * One level drives TWO outputs from ONE origin: the DWARF sections (for gdb/lldb/VSCode, D1.3
+ * onward) and the `.tsym` v2 map (for `tdb`). They are consumers, never rival formats.
+ *
+ * @since 0.3.1 debugger piso, D1.6
+ * @see opt_level_of  the sibling build AXIS, likewise CLI-only and absent from `teko.tkp` (§7.3)
+ */
+pub type DebugInfo = enum { None; Lines }
+
+/**
+ * debug_arg_has_prefix — does `a` begin with the `--debug=` selector prefix, so its remainder is
+ * the requested level?
+ *
+ * An 8-byte prefix, guarded on length so the slice never runs past the string — deliberately the
+ * exact shape of `opt_arg_has_prefix`'s 6-byte guard: two selector flags that parse differently
+ * is how one of them ends up wrong.
+ *
+ * @param a  a single CLI argument token
+ * @return   true iff `a` is a `--debug=<value>` form
+ */
+fn debug_arg_has_prefix(a: str) -> bool {
+    a.len > 8 && teko::str::slice_to(a, 8) == "--debug="
+}
+
+/**
+ * debug_info_of_value — map the text after `--debug=` to a level, or FAIL.
+ *
+ * DELIBERATELY UNLIKE `opt_level_of_value`, which resolves a malformed suffix to level 2. An
+ * unrecognised optimization level costs speed; an unrecognised DEBUG level costs a whole
+ * debugging session spent chasing a breakpoint that silently never resolved. No silent coercion.
+ *
+ * @param v  the substring after `--debug=`
+ * @return   the level for "none"/"lines"
+ * @throws   when `v` is neither "none" nor "lines", naming both accepted values
+ */
+fn debug_info_of_value(v: str) -> DebugInfo | error {
+    if v == "none" { return DebugInfo::None }
+    if v == "lines" { return DebugInfo::Lines }
+    error { message = teko::str::concat("teko: --debug=", v, ": unknown level — accepted: none, lines") }
+}
+
+/**
+ * debug_info_of — resolve the requested debug level from the build flags.
+ *
+ * With no `--debug=` flag the level is `None` — THE DEFAULT AT EVERY PROFILE, `--release`
+ * included: debug information grows the artifacts and is never imposed. The LAST matching flag
+ * on the line wins, matching `opt_level_of`'s rule so the two axes behave the same under
+ * repetition.
+ *
+ * `--release --debug=lines` is a LEGAL, SUPPORTED pair and is not refused: it is how a release
+ * crash gets debugged, and refusing it would force a rebuild at another profile — which changes
+ * the code and erases the defect.
+ *
+ * @param args  the full CLI argument vector
+ * @return      the resolved level (`None` by default)
+ * @throws      when a `--debug=` value is not a recognised level
+ */
+fn debug_info_of(args: []str) -> DebugInfo | error {
+    mut i: u64 = 0
+    mut level = DebugInfo::None
+    loop {
+        if i >= args.len { break }
+        if debug_arg_has_prefix(args[i]) {
+            level = match debug_info_of_value(teko::str::slice_from(args[i], 8)) {
+                DebugInfo as d => d
+                error as e => return e
+            }
+        }
+        i = i + 1
+    }
+    level
+}
+
+/**
+ * has_bare_g_flag — does a bare `-g` appear anywhere in `args` from `start`?
+ *
+ * Consulted at CLI dispatch BEFORE `project_arg_of` runs, so a `-g` gets the honest rejection
+ * (`bare_g_rejected_message`) that names `--debug=lines` instead of being read as the project
+ * path. `-g` is refused rather than aliased because in gcc, clang and rustc it means FULL debug
+ * information (rustc documents it as an alias for `-C debuginfo=2`), and this compiler cannot
+ * emit that yet — an alias would promise types and variables and deliver a line table. It
+ * becomes a legal alias of `--debug=vars` only at D2.6, once that level exists.
+ *
+ * The precedent is exact and lives in this same file: `has_backend_flag` refuses the retired
+ * `--backend` by NAMING the reason rather than silently ignoring it.
+ *
+ * @param args   the full CLI argument vector
+ * @param start  the index to begin scanning from (2 for a subcommand, 1 for a bare project)
+ * @return       true iff a bare `-g` token appears anywhere from `start` onward
+ */
+fn has_bare_g_flag(args: []str, start: u64) -> bool {
+    mut i = start
+    loop {
+        if i >= args.len { break }
+        if args[i] == "-g" { return true }
+        i = i + 1
+    }
+    false
+}
+
+/**
+ * bare_g_rejected_message — the honest refusal `has_bare_g_flag` earns, naming the flag that
+ * exists in its place. Printed to stderr; the caller exits 2 (`main.tks`, mirroring the
+ * `--backend` rejection).
+ *
+ * @return the four-line refusal, ready for `teko::io::eprintln`
+ */
+fn bare_g_rejected_message() -> str {
+    teko::str::concat(
+        "teko: `-g` is not a Teko flag.\n",
+        "      In gcc, clang and rustc `-g` means FULL debug information (types and variables), and this\n",
+        "      compiler cannot emit that yet — promising it would be a lie.\n",
+        "      Use `--debug=lines` for the line table (breakpoint by .tks line, step, backtrace).")
+}
+
+/**
  * build_cc_argv — assemble the host-`cc` command line that turns one input file
  * (`input`, a generated `.c` for the C backend or an own-backend `.o`) into the
  * native `binary`, in full parity with `driver.c::run_cc` (M.5, reuse the host
@@ -1732,6 +1856,34 @@ fn run_cc_debug(cfile: str, binary: str, m: Manifest, prog: checker::TProgram) -
 }
 
 /**
+ * run_cc_for_level — the D1.6 CLI-surface sibling of `run_cc`: like it, but adds `-g` to the cc
+ * link line when `debug` requests it (`DebugInfo::Lines`), so `teko build --debug=lines` reaches
+ * a real effect on the C-backend link path via the SAME `build_cc_argv(..., debug: bool, opt)`
+ * mechanism `run_cc_debug` already proves for `teko run`.
+ *
+ * Deliberately does NOT touch `run_cc_debug`/`build_debug_binary` (the `teko run` build path):
+ * per the design doc's §7.5 rule 3, `teko run` keeps its own always-on debug profile and does not
+ * start requiring this flag. The two axes stay independent.
+ *
+ * On the own-native backend (the default since 2026-07-26) `debug` has NO effect yet — the DWARF
+ * sink into the ELF/Mach-O object writers is a still-missing codegen hook (D1.4/D1.5), not this
+ * crumb's scope; `backend` never reaches this function on that path (`emit_native` returns first).
+ *
+ * @param cfile   the generated C translation unit
+ * @param binary  the output native executable path
+ * @param m       the resolved manifest
+ * @param prog    the checked program (extern-reachability)
+ * @param opt     the cc optimization level (0 = default/no `-O`, 2 = release seed)
+ * @param debug   the requested `--debug=` level
+ * @return        the `cc` process exit code (0 on success)
+ * @since 0.3.1 debugger piso, D1.6
+ */
+fn run_cc_for_level(cfile: str, binary: str, m: Manifest, prog: checker::TProgram, opt: i32, debug: DebugInfo) -> i32 {
+    if debug == DebugInfo::None { return run_cc(cfile, binary, m, prog, opt) }
+    invoke_cc(build_cc_argv(cfile, binary, m, prog, true, opt), binary)
+}
+
+/**
  * link_object — link the own-backend Mach-O object `objfile` into the native
  * `binary` via the host `cc`-as-linker (D-C, the #385 A4-5 keystone: `cc obj.o
  * teko_rt.c assert.c -lm -o exe`). Reuses `build_cc_argv` verbatim — the ONLY
@@ -1801,9 +1953,12 @@ fn plist_xml(m: Manifest) -> str {
  *                 path is instrumented). The backend always reports — `tty` only
  *                 selects the rendering (Tty on a terminal, Plain on a CI/log),
  *                 never silence.
+ * @param debug    the requested `--debug=` level (D1.6): reaches `-g` on the C-backend link
+ *                 (`run_cc_for_level`) when non-`None`; has no effect yet on the own-native path
+ *                 (`emit_native`), whose DWARF sink is a still-missing codegen hook (D1.4/D1.5)
  * @return         0 on a successful build, else the failing status
  */
-fn backend(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest, opt: i32, tty: bool) -> i32 {
+fn backend(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest, opt: i32, tty: bool, debug: DebugInfo) -> i32 {
     match validate_extern_libs_for_target(m) { error as e => return fail(dir, e.message); null => { } }
     if m.artifact == Artifact::Static {
         return emit_static_lib(dir, stem, out_dir, prog, m)
@@ -1882,7 +2037,7 @@ fn backend(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manife
         match ffi_write_c_header(od, stem, prog) { null => { }; error as e => return fail(dir, e.message) }
     }
     let cc_phase = phase_begin("cc", binp, mode)
-    if run_cc(cfile, binp, m, prog, opt) != 0 {
+    if run_cc_for_level(cfile, binp, m, prog, opt, debug) != 0 {
         phase_end_fail(cc_phase, binp, "cc failed to build the generated C")
         return fail(dir, "cc failed to build the generated C")
     }
@@ -3279,7 +3434,7 @@ fn ensure_rt_dir_abs() {
  *  @param out_dir  the build output directory (`-o`, default "bin")
  *  @return         0 on a fully gated, successfully built release, else the failing status
  *  @since #265 */
-fn compile_project(dir: str, out_dir: str) -> i32 { compile_project_g(dir, out_dir, false, false, 0, false, Backend::C, false) }
+fn compile_project(dir: str, out_dir: str) -> i32 { compile_project_g(dir, out_dir, false, false, 0, false, Backend::C, false, DebugInfo::None) }
 
 // (#148) report_peak — the compiler prints its own memory cost at the end of a successful build
 // (peak RSS via teko::mem::peak_rss; 0 = unavailable on this host → print suppressed).
@@ -3413,11 +3568,12 @@ fn ffi_write_c_header(od: str, stem: str, prog: checker::TProgram) -> error | nu
  * @param opt      the cc optimization level
  * @param tty      render the backend's in-place `\r` phase updates
  * @param start    when the build began (the closing `built <path> <elapsed>` line's baseline)
+ * @param debug    the requested `--debug=` level (D1.6), forwarded to `backend`
  * @return         0 on success, else the backend's failing status
  */
-fn codegen_and_report(dir: str, out_dir: str, prog: checker::TProgram, m: Manifest, opt: i32, tty: bool, start: i64) -> i32 {
+fn codegen_and_report(dir: str, out_dir: str, prog: checker::TProgram, m: Manifest, opt: i32, tty: bool, start: i64, debug: DebugInfo) -> i32 {
     report_pt_census(prog)
-    let rc = backend(dir, m.name, out_dir, prog, m, opt, tty)
+    let rc = backend(dir, m.name, out_dir, prog, m, opt, tty, debug)
     if rc == 0 {
         report_build_done(built_artifact_path(out_dir, m), start)
         report_peak()
@@ -3451,10 +3607,11 @@ fn report_pt_census(prog: checker::TProgram) {
  *  opted out of re-verification — e.g. a self-host release chain re-proving the fixpoint on gen-2,
  *  where the `.tkt` gate outcome is already known deterministic from gen-1. This is the path
  *  `release.yml` drives with `--no-verify --release`, so the published seed links at `-O2`.
- *  `backend` is the resolved backend (`TEKO_BACKEND`-selected), stamped onto the manifest before codegen (D1/#390). */
-fn build_ungated(dir: str, out_dir: str, opt: i32, tty: bool, start: i64, backend: Backend) -> i32 {
+ *  `backend` is the resolved backend (`TEKO_BACKEND`-selected), stamped onto the manifest before codegen (D1/#390).
+ *  `debug` is the requested `--debug=` level (D1.6), forwarded to `codegen_and_report`. */
+fn build_ungated(dir: str, out_dir: str, opt: i32, tty: bool, start: i64, backend: Backend, debug: DebugInfo) -> i32 {
     let fe = match frontend_body(false, false, tty) { Frontend as f => f; error as e => return fail(dir, e.message) }
-    codegen_and_report(dir, out_dir, fe.prog, with_backend(fe.manifest, backend), opt, tty, start)
+    codegen_and_report(dir, out_dir, fe.prog, with_backend(fe.manifest, backend), opt, tty, start, debug)
 }
 
 /**
@@ -3975,11 +4132,12 @@ fn cobertura_path_of(out_dir: str, gen_cov: bool) -> str {
  *  distinct production-only work, not a silent retry; only the banner, printed once by
  *  `frontend_parse`, is not repeated), strip any surviving `#test` functions by provenance,
  *  and hand the clean program to the backend at optimization level `opt`. `backend` is the
- *  resolved backend (`TEKO_BACKEND`-selected), stamped onto the manifest before codegen (D1/#390). */
-fn release_build_of(dir: str, out_dir: str, opt: i32, tty: bool, start: i64, backend: Backend, pf: ParsedFront) -> i32 {
+ *  resolved backend (`TEKO_BACKEND`-selected), stamped onto the manifest before codegen (D1/#390).
+ *  `debug` is the requested `--debug=` level (D1.6), forwarded to `codegen_and_report`. */
+fn release_build_of(dir: str, out_dir: str, opt: i32, tty: bool, start: i64, backend: Backend, pf: ParsedFront, debug: DebugInfo) -> i32 {
     let pf_prod = ParsedFront { parsed = filter_tkt(pf.parsed); manifest = pf.manifest; diags = pf.diags }
     let rel = match frontend_check(pf_prod, false, tty) { Frontend as f => f; error as e => return fail(dir, e.message) }
-    codegen_and_report(dir, out_dir, strip_tests(rel.prog), with_backend(rel.manifest, backend), opt, tty, start)
+    codegen_and_report(dir, out_dir, strip_tests(rel.prog), with_backend(rel.manifest, backend), opt, tty, start, debug)
 }
 
 /** run_gate_native — the D4 test-gate body run NATIVELY (the DEFAULT since #168): run every `#test`
@@ -4002,9 +4160,10 @@ fn release_build_of(dir: str, out_dir: str, opt: i32, tty: bool, start: i64, bac
  *  @param start    when the build began (the closing `built <path> <elapsed>` line's baseline)
  *  @param backend  the resolved code-generation backend (`TEKO_BACKEND=native`, default `Backend::C`)
  *  @param cov_validation  `--cov-validation` — enforce (fail) the coverage floors instead of warning
+ *  @param debug    the requested `--debug=` level (D1.6), forwarded to `release_build_of`
  *  @return         0 when every test passes, the floor policy is satisfied, and the release build succeeds
  *  @since #265 */
-fn run_gate_native(dir: str, out_dir: str, gen_cov: bool, fe: Frontend, pf: ParsedFront, opt: i32, tty: bool, start: i64, backend: Backend, cov_validation: bool) -> i32 {
+fn run_gate_native(dir: str, out_dir: str, gen_cov: bool, fe: Frontend, pf: ParsedFront, opt: i32, tty: bool, start: i64, backend: Backend, cov_validation: bool, debug: DebugInfo) -> i32 {
     let trc = run_native_gate(dir, out_dir, fe.prog, fe.manifest, tty)
     if trc != 0 { return trc }
     report_native_coverage(fe.prog)
@@ -4016,7 +4175,7 @@ fn run_gate_native(dir: str, out_dir: str, gen_cov: bool, fe: Frontend, pf: Pars
         match teko::io::write_file(cov_path, xml) { error => { }; null => { } }
         teko::io::println(teko::str::concat("teko: wrote coverage report ", cov_path))
     }
-    release_build_of(dir, out_dir, opt, tty, start, backend, pf)
+    release_build_of(dir, out_dir, opt, tty, start, backend, pf, debug)
 }
 
 /**
@@ -4033,16 +4192,18 @@ fn run_gate_native(dir: str, out_dir: str, gen_cov: bool, fe: Frontend, pf: Pars
  * @param start    when the build began (the closing `built <path> <elapsed>` line's baseline)
  * @param backend  the resolved code-generation backend (`TEKO_BACKEND=native`, default `Backend::C`)
  * @param cov_validation  `--cov-validation` — enforce (fail) the coverage floors instead of warning
+ * @param debug    the requested `--debug=` level (D1.6), forwarded to `run_gate_native`
  * @return         0 when the gate passes and the release build succeeds, else the failing status
  */
-fn run_gate(dir: str, out_dir: str, gen_cov: bool, fe: Frontend, pf: ParsedFront, opt: i32, tty: bool, start: i64, backend: Backend, cov_validation: bool) -> i32 {
-    run_gate_native(dir, out_dir, gen_cov, fe, pf, opt, tty, start, backend, cov_validation)
+fn run_gate(dir: str, out_dir: str, gen_cov: bool, fe: Frontend, pf: ParsedFront, opt: i32, tty: bool, start: i64, backend: Backend, cov_validation: bool, debug: DebugInfo) -> i32 {
+    run_gate_native(dir, out_dir, gen_cov, fe, pf, opt, tty, start, backend, cov_validation, debug)
 }
 
 /** No `#test` functions at all: ignore the gate, build the production program straight from the
  *  already-assembled `fe` (no test code present to strip or verify) at optimization level `opt`.
- *  `backend` is the resolved backend (`TEKO_BACKEND`-selected), stamped onto the manifest before codegen (D1/#390). */
-fn build_no_tests_present(dir: str, out_dir: str, fe: Frontend, opt: i32, tty: bool, start: i64, backend: Backend) -> i32 { codegen_and_report(dir, out_dir, fe.prog, with_backend(fe.manifest, backend), opt, tty, start) }
+ *  `backend` is the resolved backend (`TEKO_BACKEND`-selected), stamped onto the manifest before codegen (D1/#390).
+ *  `debug` is the requested `--debug=` level (D1.6), forwarded to `codegen_and_report`. */
+fn build_no_tests_present(dir: str, out_dir: str, fe: Frontend, opt: i32, tty: bool, start: i64, backend: Backend, debug: DebugInfo) -> i32 { codegen_and_report(dir, out_dir, fe.prog, with_backend(fe.manifest, backend), opt, tty, start, debug) }
 
 /** compile_project_g — the build with the D4 TEST GATE (ON BY DEFAULT; `--no-test` is IGNORED for a
  *  build — a release MUST run its tests). Assemble WITH the `.tkt` tests, run them on the NATIVE gate
@@ -4064,23 +4225,25 @@ fn build_no_tests_present(dir: str, out_dir: str, fe: Frontend, opt: i32, tty: b
  *  @param no_tty       `--no-tty` — force the plain, non-interactive observability output even on a terminal
  *  @param backend      the resolved code-generation backend (`TEKO_BACKEND=native`, default `Backend::C`)
  *  @param cov_validation  `--cov-validation` — enforce (fail) the coverage floors instead of warning (0.3.0.29)
+ *  @param debug        the requested `--debug=` level (`--debug=lines`; `None` by default, D1.6),
+ *                      forwarded down every branch to `codegen_and_report`/`backend`
  *  @return             0 on a fully gated, successfully built release, else the failing status
  *  @since #265 */
-fn compile_project_g(dir: str, out_dir: str, gen_cov: bool, no_verify: bool, opt: i32, no_tty: bool, backend: Backend, cov_validation: bool) -> i32 {
+fn compile_project_g(dir: str, out_dir: str, gen_cov: bool, no_verify: bool, opt: i32, no_tty: bool, backend: Backend, cov_validation: bool, debug: DebugInfo) -> i32 {
     ensure_rt_dir_abs()
     match teko::env::chdir(dir) { error => return fail(dir, "cannot enter project directory"); null => { } }
     let tty = output_is_tty(no_tty)
     let start = now_ns()
     if no_verify {
-        return build_ungated(dir, out_dir, opt, tty, start, backend)
+        return build_ungated(dir, out_dir, opt, tty, start, backend, debug)
     }
     let pf = match frontend_parse(true, false, tty) { ParsedFront as x => x; error as e => return fail(dir, e.message) }
     match frontend_check(pf, false, tty) {
         Frontend as fe => {
             if !has_tests(fe.prog) {
-                return build_no_tests_present(dir, out_dir, fe, opt, tty, start, backend)
+                return build_no_tests_present(dir, out_dir, fe, opt, tty, start, backend, debug)
             }
-            run_gate(dir, out_dir, gen_cov, fe, pf, opt, tty, start, backend, cov_validation)
+            run_gate(dir, out_dir, gen_cov, fe, pf, opt, tty, start, backend, cov_validation, debug)
         }
         error as e => return fail(dir, e.message)
     }
@@ -4285,6 +4448,11 @@ fn has_backend_flag(args: []str, start: u64) -> bool {
  *  RATE CI gate flag, and `--allow-undef` (R5, `teko-target-crosslink-0.3.1.md` §5) — the
  *  blind-link opt-in for a shared lib the link step cannot see.
  *
+ *  Also skips `--debug=<none|lines>` (the debug-info axis, D1.6,
+ *  `debugger-superficie-e-contramedida-0.3.1.md` §7.2/§7.7) — the same trap `--opt=` already
+ *  proved: a flag absent from this list is read as the project positional, silently, with no
+ *  "unknown flag" diagnostic anywhere.
+ *
  *  @param args   the full CLI argument vector
  *  @param start  the index to begin scanning from (2 for a subcommand, 1 for a bare project)
  *  @return       the first positional argument, or "" when only flags remain
@@ -4307,6 +4475,7 @@ fn project_arg_of(args: []str, start: u64) -> str {
         else if args[i] == ALLOW_UNDEF_FLAG { i = i + 1 }
         else if args[i] == REGR_TIMINGS_FLAG { i = i + 1 }
         else if opt_arg_has_prefix(args[i]) { i = i + 1 }
+        else if debug_arg_has_prefix(args[i]) { i = i + 1 }
         else { return args[i] }
     }
     ""
