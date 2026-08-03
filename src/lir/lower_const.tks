@@ -420,7 +420,7 @@ fn const_fat_array_image(const_name: str, element: checker::Type, a: checker::TA
     loop {
         if i >= a.elements.len { break }
         match const_reject_spread(a, i) { error as e => return e; null => { } }
-        let slot_off = (i to u32) * fat_slot_bytes()
+        let slot_off = ptr_align_up(img.bytes.len to u32)
         let member = match const_fat_member(const_name, const_elem_key(i), slot_off, element, a.elements[i].expr, enums) { FatMemberImage as x => x; error as e => return e }
         img = const_image_absorb(img, member)
         i++
@@ -429,18 +429,60 @@ fn const_fat_array_image(const_name: str, element: checker::Type, a: checker::TA
 }
 
 /**
+ * fat_slot_align — the byte alignment every fat pointer slot's own START needs (#0.3.1.0
+ * native-rodata-const-align): the pointer width (`ltype_size(LType::Ptr)`, 8) macOS `ld` enforces
+ * on every `ARM64_RELOC_UNSIGNED` (`Abs64`) rodata relocation site.
+ *
+ * @return u32  the fat pointer slot's required byte alignment
+ * @since 0.3.1.0 native-rodata-const-align
+ */
+fn fat_slot_align() -> u32 {
+    ltype_size(LType::Ptr)
+}
+
+/**
+ * ptr_align_up — `v` rounded up to `fat_slot_align`'s boundary (#0.3.1.0 native-rodata-const-align):
+ * the offset a fat pointer slot may legally start at.
+ *
+ * @param v  the running byte offset to round
+ * @return u32  `v` rounded up to the next `fat_slot_align`-aligned offset
+ * @since 0.3.1.0 native-rodata-const-align
+ */
+fn ptr_align_up(v: u32) -> u32 {
+    align_up(v, fat_slot_align())
+}
+
+/**
+ * pad_bytes_to_ptr_align — `bytes` zero-extended until its length is `fat_slot_align`-aligned
+ * (#0.3.1.0 native-rodata-const-align): the sibling of `zero_pad_to` (a fixed target width) for a
+ * running accumulator whose target is "the next pointer-alignment boundary", not a constant.
+ *
+ * @param bytes  the buffer to pad
+ * @return []byte  `bytes`, zero-padded up to the next `fat_slot_align`-aligned length
+ * @since 0.3.1.0 native-rodata-const-align
+ */
+fn pad_bytes_to_ptr_align(bytes: []byte) -> []byte {
+    zero_pad_to(bytes, ptr_align_up(bytes.len to u32))
+}
+
+/**
  * const_image_absorb — append one fat member's slot bytes, relocation and leaves to the array image
- * accumulated so far (0.3.1.0 degrau const-slice). The slot bytes go at the END of the blob, which is
- * exactly the member's own `slot_off` because every fat slot is `fat_slot_bytes()` wide.
+ * accumulated so far (0.3.1.0 degrau const-slice), FIRST padding the image to `fat_slot_align` so
+ * the slot lands exactly at the caller's own `member.reloc.offset` (`slot_off`, computed by
+ * `const_fat_array_image` from this SAME padded running length — #0.3.1.0
+ * native-rodata-const-align). Every fat slot is `fat_slot_bytes()` (16) wide today, already a
+ * multiple of `fat_slot_align` (8), so this pad is a no-op for the current corpus; it keeps the
+ * invariant true BY CONSTRUCTION rather than by the caller's own arithmetic, so a future
+ * non-uniform member width cannot silently reintroduce an unaligned slot.
  *
  * @param img     the image accumulated over the preceding elements
  * @param member  the element's slot image, relocation and leaves
  * @return        the image grown by that element
- * @since 0.3.1.0 degrau const-slice
+ * @since 0.3.1.0 degrau const-slice; padded 0.3.1.0 native-rodata-const-align
  */
 fn const_image_absorb(img: ConstImage, member: FatMemberImage) -> ConstImage {
     ConstImage {
-        bytes = append_bytes(img.bytes, member.slot_bytes)
+        bytes = append_bytes(pad_bytes_to_ptr_align(img.bytes), member.slot_bytes)
         relocs = teko::list::push(img.relocs, member.reloc)
         leaves = append_rodata(img.leaves, member.leaves)
     }
