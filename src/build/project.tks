@@ -3149,6 +3149,20 @@ extern fn region_enter(child: u64) -> void = "tk_region_enter_u" from "teko_rt"
 extern fn region_leave() -> void = "tk_region_leave" from "teko_rt"
 
 /**
+ * region_current — the task's CURRENT region as a `u64` handle (`tk_region_current_u`): the region
+ * `list::push`/`tk_alloc` bump-allocates from RIGHT NOW — the root when no child window is open, the
+ * top-of-stack child while one is. Used ONLY by the `TEKO_NATIVE_REGION_CHECK` diagnostic to assert,
+ * after `region_leave()` and before the fused loop's copy-out commits, that the current region really
+ * did return to the root (a mismatch is region-stack corruption, the native-region-crash suspect).
+ * Binds the SAME frozen runtime symbol (`teko_rt.c:tk_region_current_u`) the C route already ships;
+ * no runtime is added.
+ *
+ * @return  the current region handle
+ * @since 0.3.1 native-region-crash
+ */
+extern fn region_current() -> u64 = "tk_region_current_u" from "teko_rt"
+
+/**
  * encode_lfunc_in_region_x86 — the per-function isel → regalloc → encode pipeline for ONE `LFunc`,
  * meant to run with a scratch region entered: `select_lfunc_x86` (LIR → virtual `MFuncX86`),
  * `regalloc_func_x86` (SysV coloring, the largest scratch — interval sets), then `encode_func_x86`
@@ -3698,6 +3712,58 @@ fn trace_native_item(i: u64, total: u64, it: checker::TItem) -> void {
 }
 
 /**
+ * native_region_check_enabled — whether the fused native driver's per-item region-state check
+ * (`TEKO_NATIVE_REGION_CHECK=1`) is requested: a CI-narrowing aid (mirrors
+ * `native_trace_items_enabled` and `rodata_align_check_enabled`), NOT part of the ritual's normal
+ * output. It exists for the native-region-crash SIGSEGV inside `tk_region_alloc` reached through a
+ * fused-loop copy-out (`copy_encoded_func_to_current_region_arm64` and its siblings): those copies
+ * bump-allocate into the CURRENT region, which must have returned to the ROOT once the item's
+ * `region_leave()` ran — a current region that is NOT the root there is region-stack corruption, and
+ * the very state a subsequent `tk_region_alloc` on a stale/dropped handle would fault on. Checking it
+ * turns that distant SIGSEGV into a named, controlled honest-stop at the exact item.
+ *
+ * @return  true iff `TEKO_NATIVE_REGION_CHECK` is set to `"1"`
+ * @since 0.3.1 native-region-crash
+ */
+fn native_region_check_enabled() -> bool {
+    match teko::env::var("TEKO_NATIVE_REGION_CHECK") { str as v => v == "1"; error => false }
+}
+
+/**
+ * check_current_region_is_root — when `native_region_check_enabled`, verify the CURRENT region has
+ * returned to the ROOT at the fused loop's commit point (`region_leave()` already ran for this
+ * item), and return a named honest-stop naming the item's 1-based position and both handles when it
+ * has not — instead of letting the next copy-out's `tk_region_alloc` SIGSEGV on a corrupt current
+ * region. `null` when the check is disabled (byte-identical to before this diagnostic) OR when the
+ * current region correctly equals the root; the caller propagates the error otherwise. `checkpoint`
+ * labels the site ("item N/M" or "virtual-main") for the message.
+ *
+ * @param checkpoint  a human label for the site (the item position, or the virtual-main)
+ * @return            `null` when disabled or the region state is sound; else the named honest-stop
+ * @since 0.3.1 native-region-crash
+ */
+fn check_current_region_is_root(checkpoint: str) -> error | null {
+    if !native_region_check_enabled() { return null }
+    let cur = region_current()
+    let root = region_root()
+    if cur == root { return null }
+    error { message = teko::str::concat("TEKO_NATIVE_REGION_CHECK: current region is not the root after region_leave() at ", teko::str::concat(checkpoint, teko::str::concat(" — current=", teko::str::concat(teko::u64_to_str(cur), teko::str::concat(" root=", teko::u64_to_str(root)))))) }
+}
+
+/**
+ * native_item_label — the `"item N/M"` checkpoint label (1-based `i`) for
+ * `check_current_region_is_root`'s message in the fused per-item loop.
+ *
+ * @param i      the item's 0-based index
+ * @param total  the item count
+ * @return       the `"item N/M"` label
+ * @since 0.3.1 native-region-crash
+ */
+fn native_item_label(i: u64, total: u64) -> str {
+    teko::str::concat("item ", teko::str::concat(teko::u64_to_str(i + 1), teko::str::concat("/", teko::u64_to_str(total))))
+}
+
+/**
  * emit_native_x86 — the x86-64/ELF own-backend tail (#386 B1), FUSED lower+encode per item (0.3.1
  * C6.3, `docs/design/native-lowering-oom-por-funcao-0.3.1.md`): compute the whole-program lowering
  * context ONCE (`teko::lir::lower_prelude`), then for every program item — a scratch child region,
@@ -3742,6 +3808,7 @@ fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Man
         region_leave()
         match outcome {
             FusedItemOut as out => {
+                match check_current_region_is_root(native_item_label(i, prog.items.len)) { error as e => return fail(dir, e.message); null => { } }
                 mt = fold_encoded_funcs_x86(mt, out.encoded)
                 robase = commit_rodata_delta(robase, out.rodata)
                 loose = commit_loose(loose, out.loose)
@@ -3759,6 +3826,7 @@ fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Man
     region_leave()
     match vmain_outcome {
         FusedItemOut as out => {
+            match check_current_region_is_root("virtual-main") { error as e => return fail(dir, e.message); null => { } }
             mt = fold_encoded_funcs_x86(mt, out.encoded)
             robase = commit_rodata_delta(robase, out.rodata)
             region_drop(vchild)
@@ -4043,6 +4111,7 @@ fn emit_native_arm64_fused(dir: str, od: str, stem: str, prog: checker::TProgram
         region_leave()
         match outcome {
             FusedItemOutArm64 as out => {
+                match check_current_region_is_root(native_item_label(i, prog.items.len)) { error as e => return fail(dir, e.message); null => { } }
                 mt = fold_encoded_funcs_arm64(mt, out.encoded)
                 robase = commit_rodata_delta(robase, out.rodata)
                 loose = commit_loose(loose, out.loose)
@@ -4060,6 +4129,7 @@ fn emit_native_arm64_fused(dir: str, od: str, stem: str, prog: checker::TProgram
     region_leave()
     match vmain_outcome {
         FusedItemOutArm64 as out => {
+            match check_current_region_is_root("virtual-main") { error as e => return fail(dir, e.message); null => { } }
             mt = fold_encoded_funcs_arm64(mt, out.encoded)
             robase = commit_rodata_delta(robase, out.rodata)
             region_drop(vchild)
@@ -4216,6 +4286,7 @@ fn emit_native_win(dir: str, od: str, stem: str, prog: checker::TProgram, m: Man
         region_leave()
         match outcome {
             FusedItemOut as out => {
+                match check_current_region_is_root(native_item_label(i, prog.items.len)) { error as e => return fail(dir, e.message); null => { } }
                 mt = fold_encoded_funcs_x86(mt, out.encoded)
                 robase = commit_rodata_delta(robase, out.rodata)
                 loose = commit_loose(loose, out.loose)
@@ -4233,6 +4304,7 @@ fn emit_native_win(dir: str, od: str, stem: str, prog: checker::TProgram, m: Man
     region_leave()
     match vmain_outcome {
         FusedItemOut as out => {
+            match check_current_region_is_root("virtual-main") { error as e => return fail(dir, e.message); null => { } }
             mt = fold_encoded_funcs_x86(mt, out.encoded)
             robase = commit_rodata_delta(robase, out.rodata)
             region_drop(vchild)
