@@ -677,17 +677,24 @@ fn elf_rela_info(symidx: u32, rtype: u32) -> u64 {
  * seven fixed names (`""` null, `.text`, `.rodata`, `.symtab`, `.strtab`,
  * `.shstrtab`, `.rela.text`), plus — when the module carries a pointer-bearing
  * const — the appended `.data.rel.ro` (index 7) and its `.rela.data.rel.ro`
- * (index 8), interned into `.shstrtab` to yield each header's `sh_name`. The two
- * are APPENDED so the six fixed sections keep their indices (`ELF_SHNDX_*` and
- * every `sh_link`/`sh_info`/`e_shstrndx` naming them stay valid).
+ * (index 8), plus — when a `--debug=lines` build supplies DWARF (D1.4) —
+ * `.debug_abbrev`, `.debug_info`, `.debug_line`, `.rela.debug_info`, and
+ * `.rela.debug_line`, ALWAYS the last five names regardless of `has_drr` (so
+ * their table index is `7` or `9`, never in between). Every appended block is
+ * interned into `.shstrtab` to yield its header's `sh_name`; each is APPENDED so
+ * the six fixed sections keep their indices (`ELF_SHNDX_*` and every
+ * `sh_link`/`sh_info`/`e_shstrndx` naming them stay valid).
  *
- * @param bool has_drr  whether a `.data.rel.ro` section (and its rela) is present
+ * @param bool has_drr    whether a `.data.rel.ro` section (and its rela) is present
+ * @param bool has_dwarf  whether the DWARF sections (D1.4) are present
  * @return []str  the section names, in header order
  */
-fn elf_section_names(has_drr: bool) -> []str {
+fn elf_section_names(has_drr: bool, has_dwarf: bool) -> []str {
     let base = ["", ".text", ".rodata", ".symtab", ".strtab", ".shstrtab", ".rela.text"]
-    if has_drr { return teko::list::push(teko::list::push(base, ".data.rel.ro"), ".rela.data.rel.ro") }
-    base
+    let with_drr = if has_drr { teko::list::push(teko::list::push(base, ".data.rel.ro"), ".rela.data.rel.ro") } else { base }
+    if !has_dwarf { return with_drr }
+    let with_dwarf_secs = teko::list::push(teko::list::push(teko::list::push(with_drr, ".debug_abbrev"), ".debug_info"), ".debug_line")
+    teko::list::push(teko::list::push(with_dwarf_secs, ".rela.debug_info"), ".rela.debug_line")
 }
 
 /**
@@ -707,9 +714,12 @@ const ELF64_RELA_SIZE: u32 = 24 to u32
  * ElfLayout — the resolved file offsets, sizes, and counts of the object:
  * computed BEFORE any bytes are emitted, so the `Elf64_Ehdr` `e_shoff` and each
  * `Elf64_Shdr` `sh_offset`/`sh_size` can reference the real data positions. The
- * emission order mirrors this exactly: `[Ehdr][.text][.rodata][.symtab][.strtab]
- * [.shstrtab][.rela.text][SHT]`, with `.rodata`/`.symtab`/`.rela.text`/`SHT`
- * placed at 8-aligned offsets.
+ * emission order mirrors this exactly: `[Ehdr][.text][.rodata][.data.rel.ro?]
+ * [.symtab][.strtab][.shstrtab][.rela.text][.rela.data.rel.ro?][.debug_abbrev?]
+ * [.debug_info?][.debug_line?][.rela.debug_info?][.rela.debug_line?][SHT]` (D1.4
+ * adds the five `?`-marked DWARF fields, always LAST regardless of `.data.rel.ro`
+ * — see `elf_section_names`), with every non-string-table section placed at
+ * 8-aligned offsets.
  *
  * @since #386 B1-7
  */
@@ -812,10 +822,57 @@ type ElfLayout = struct {
     nrela_rodata: u32
     /**
      * nsects — the section-header count (`e_shnum`): 7 without a pointer-bearing
-     * const, 9 with it (the appended `.data.rel.ro` + `.rela.data.rel.ro`).
-     * Derived from the section-name count.
+     * const, 9 with it (the appended `.data.rel.ro` + `.rela.data.rel.ro`), plus 5
+     * more with DWARF present (D1.4). Derived from the section-name count.
      */
     nsects: u32
+    /**
+     * debug_abbrev_offset — the `.debug_abbrev` section data file offset (D1.4;
+     * meaningful only when DWARF is present — equals the identity value below when
+     * absent, since its 0-byte size never moves the chain).
+     */
+    debug_abbrev_offset: u32
+    /**
+     * debug_abbrev_size — the `.debug_abbrev` section byte size (0 when DWARF is
+     * absent, keeping the object byte-identical to a build with no debug axis).
+     */
+    debug_abbrev_size: u32
+    /**
+     * debug_info_offset — the `.debug_info` section data file offset (D1.4).
+     */
+    debug_info_offset: u32
+    /**
+     * debug_info_size — the `.debug_info` section byte size (0 when DWARF is
+     * absent).
+     */
+    debug_info_size: u32
+    /**
+     * debug_line_offset — the `.debug_line` section data file offset (D1.4).
+     */
+    debug_line_offset: u32
+    /**
+     * debug_line_size — the `.debug_line` section byte size (0 when DWARF is
+     * absent).
+     */
+    debug_line_size: u32
+    /**
+     * rela_debug_info_offset — the `.rela.debug_info` file offset (D1.4).
+     */
+    rela_debug_info_offset: u32
+    /**
+     * rela_debug_info_size — the `.rela.debug_info` byte size (`nrela * 24`; 0
+     * when DWARF is absent).
+     */
+    rela_debug_info_size: u32
+    /**
+     * rela_debug_line_offset — the `.rela.debug_line` file offset (D1.4).
+     */
+    rela_debug_line_offset: u32
+    /**
+     * rela_debug_line_size — the `.rela.debug_line` byte size (`nrela * 24`; 0
+     * when DWARF is absent).
+     */
+    rela_debug_line_size: u32
 }
 
 /**
@@ -836,9 +893,14 @@ type ElfLayout = struct {
  * @param u32 shstrtab_len  the pre-built `.shstrtab` byte size
  * @param u32 first_global  `.symtab`'s `sh_info`
  * @param u32 nsects  the section-header count (`e_shnum`)
+ * @param u32 debug_abbrev_size  the `.debug_abbrev` byte size (0 when DWARF absent, D1.4)
+ * @param u32 debug_info_size  the `.debug_info` byte size (0 when DWARF absent)
+ * @param u32 debug_line_size  the `.debug_line` byte size (0 when DWARF absent)
+ * @param u32 nrela_debug_info  the `.rela.debug_info` `Elf64_Rela` count
+ * @param u32 nrela_debug_line  the `.rela.debug_line` `Elf64_Rela` count
  * @return ElfLayout  the resolved offsets + sizes + counts
  */
-fn compute_elf_layout(obj: ElfObject, rodata_size: u32, drr_size: u32, nsyms: u32, nrela: u32, nrela_rodata: u32, strtab_len: u32, shstrtab_len: u32, first_global: u32, nsects: u32) -> ElfLayout {
+fn compute_elf_layout(obj: ElfObject, rodata_size: u32, drr_size: u32, nsyms: u32, nrela: u32, nrela_rodata: u32, strtab_len: u32, shstrtab_len: u32, first_global: u32, nsects: u32, debug_abbrev_size: u32, debug_info_size: u32, debug_line_size: u32, nrela_debug_info: u32, nrela_debug_line: u32) -> ElfLayout {
     let text_offset = 64 to u32
     let text_size = obj.text.len to u32
     let rodata_offset = align_up(text_offset + text_size, 8 to u32)
@@ -851,7 +913,14 @@ fn compute_elf_layout(obj: ElfObject, rodata_size: u32, drr_size: u32, nsyms: u3
     let rela_size = nrela * ELF64_RELA_SIZE
     let rela_rodata_offset = align_up(rela_offset + rela_size, 8 to u32)
     let rela_rodata_size = nrela_rodata * ELF64_RELA_SIZE
-    let shoff = align_up(rela_rodata_offset + rela_rodata_size, 8 to u32)
+    let debug_abbrev_offset = align_up(rela_rodata_offset + rela_rodata_size, 8 to u32)
+    let debug_info_offset = align_up(debug_abbrev_offset + debug_abbrev_size, 8 to u32)
+    let debug_line_offset = align_up(debug_info_offset + debug_info_size, 8 to u32)
+    let rela_debug_info_offset = align_up(debug_line_offset + debug_line_size, 8 to u32)
+    let rela_debug_info_size = nrela_debug_info * ELF64_RELA_SIZE
+    let rela_debug_line_offset = align_up(rela_debug_info_offset + rela_debug_info_size, 8 to u32)
+    let rela_debug_line_size = nrela_debug_line * ELF64_RELA_SIZE
+    let shoff = align_up(rela_debug_line_offset + rela_debug_line_size, 8 to u32)
     ElfLayout {
         text_offset = text_offset
         text_size = text_size
@@ -875,6 +944,16 @@ fn compute_elf_layout(obj: ElfObject, rodata_size: u32, drr_size: u32, nsyms: u3
         nsyms = nsyms
         nrela = nrela
         first_global = first_global
+        debug_abbrev_offset = debug_abbrev_offset
+        debug_abbrev_size = debug_abbrev_size
+        debug_info_offset = debug_info_offset
+        debug_info_size = debug_info_size
+        debug_line_offset = debug_line_offset
+        debug_line_size = debug_line_size
+        rela_debug_info_offset = rela_debug_info_offset
+        rela_debug_info_size = rela_debug_info_size
+        rela_debug_line_offset = rela_debug_line_offset
+        rela_debug_line_size = rela_debug_line_size
     }
 }
 
@@ -1030,15 +1109,19 @@ const ELF_SHNDX_SYMTAB: u32 = 3 to u32
  * `.text`(1), entsize 24) — plus, when the module carries a pointer-bearing
  * const, the appended `.data.rel.ro` (PROGBITS, ALLOC|WRITE, align 8) and
  * `.rela.data.rel.ro` (RELA, INFO_LINK, `sh_link` → `.symtab`(3), `sh_info` →
- * `.data.rel.ro`) headers. An off-by-one in any link/info index makes `ld`
+ * `.data.rel.ro`) headers — plus, when DWARF is present (D1.4), the five headers
+ * `emit_elf_dwarf_shdrs` appends, ALWAYS last (their table index is `7` without
+ * `.data.rel.ro`, `9` with it). An off-by-one in any link/info index makes `ld`
  * reject the object.
  *
  * @param []byte buf  the buffer to extend
  * @param ElfLayout lay  the resolved layout
- * @param []u32 shname  the `sh_name` offsets, in header order (7 or 9)
+ * @param []u32 shname  the `sh_name` offsets, in header order
+ * @param bool has_drr  whether `.data.rel.ro`/`.rela.data.rel.ro` are present
+ * @param bool has_dwarf  whether the DWARF sections (D1.4) are present
  * @return []byte  `buf` followed by the section headers
  */
-fn emit_elf_shdrs(buf: []byte, lay: ElfLayout, shname: []u32) -> []byte {
+fn emit_elf_shdrs(buf: []byte, lay: ElfLayout, shname: []u32, has_drr: bool, has_dwarf: bool) -> []byte {
     mut b = emit_elf_shdr(buf, shname[0], 0 to u32, 0 to u32, 0 to u32, 0 to u32, 0 to u32, 0 to u32, 0 to u32, 0 to u32)
     b = emit_elf_shdr(b, shname[1], 1 to u32, SHF_ALLOC | SHF_EXECINSTR, lay.text_offset, lay.text_size, 0 to u32, 0 to u32, 16 to u32, 0 to u32)
     b = emit_elf_shdr(b, shname[2], 1 to u32, SHF_ALLOC, lay.rodata_offset, lay.rodata_size, 0 to u32, 0 to u32, 8 to u32, 0 to u32)
@@ -1046,11 +1129,39 @@ fn emit_elf_shdrs(buf: []byte, lay: ElfLayout, shname: []u32) -> []byte {
     b = emit_elf_shdr(b, shname[4], 3 to u32, 0 to u32, lay.strtab_offset, lay.strtab_size, 0 to u32, 0 to u32, 1 to u32, 0 to u32)
     b = emit_elf_shdr(b, shname[5], 3 to u32, 0 to u32, lay.shstrtab_offset, lay.shstrtab_size, 0 to u32, 0 to u32, 1 to u32, 0 to u32)
     b = emit_elf_shdr(b, shname[6], 4 to u32, SHF_INFO_LINK, lay.rela_offset, lay.rela_size, 3 to u32, 1 to u32, 8 to u32, ELF64_RELA_SIZE)
-    if shname.len > (7 to u64) {
+    mut next: u64 = 7
+    if has_drr {
         b = emit_elf_shdr(b, shname[7], SHT_PROGBITS, SHF_ALLOC | SHF_WRITE, lay.drr_offset, lay.drr_size, 0 to u32, 0 to u32, 8 to u32, 0 to u32)
         b = emit_elf_shdr(b, shname[8], SHT_RELA, SHF_INFO_LINK, lay.rela_rodata_offset, lay.rela_rodata_size, ELF_SHNDX_SYMTAB, ELF_SHNDX_DATA_REL_RO, 8 to u32, ELF64_RELA_SIZE)
+        next = 9
     }
+    if has_dwarf { return emit_elf_dwarf_shdrs(b, lay, shname, next) }
     b
+}
+
+/**
+ * emit_elf_dwarf_shdrs — append the five DWARF section headers (D1.4): `.debug_abbrev`,
+ * `.debug_info`, `.debug_line` (SHT_PROGBITS, UNALLOCATED — no `SHF_ALLOC`, so none enters the
+ * execution image, matching the design's non-negotiable), each `sh_addralign = 1` (DWARF imposes
+ * no alignment), then `.rela.debug_info`/`.rela.debug_line` (SHT_RELA, INFO_LINK, `sh_link` →
+ * `.symtab`, `sh_info` naming the section each patches). `base` is the section-header-table index
+ * `.debug_abbrev` lands at — `7` without `.data.rel.ro`, `9` with it — resolved by the caller.
+ *
+ * @param []byte buf  the buffer to extend
+ * @param ElfLayout lay  the resolved layout
+ * @param []u32 shname  the `sh_name` offsets, in header order
+ * @param u64 base  the section-header-table index of `.debug_abbrev`
+ * @return []byte  `buf` followed by the five DWARF section headers
+ * @since 0.3.1.0
+ */
+fn emit_elf_dwarf_shdrs(buf: []byte, lay: ElfLayout, shname: []u32, base: u64) -> []byte {
+    let info_idx = base + 1
+    let line_idx = base + 2
+    mut b = emit_elf_shdr(buf, shname[base], SHT_PROGBITS, 0 to u32, lay.debug_abbrev_offset, lay.debug_abbrev_size, 0 to u32, 0 to u32, 1 to u32, 0 to u32)
+    b = emit_elf_shdr(b, shname[info_idx], SHT_PROGBITS, 0 to u32, lay.debug_info_offset, lay.debug_info_size, 0 to u32, 0 to u32, 1 to u32, 0 to u32)
+    b = emit_elf_shdr(b, shname[line_idx], SHT_PROGBITS, 0 to u32, lay.debug_line_offset, lay.debug_line_size, 0 to u32, 0 to u32, 1 to u32, 0 to u32)
+    b = emit_elf_shdr(b, shname[base + 3], SHT_RELA, SHF_INFO_LINK, lay.rela_debug_info_offset, lay.rela_debug_info_size, ELF_SHNDX_SYMTAB, info_idx to u32, 8 to u32, ELF64_RELA_SIZE)
+    emit_elf_shdr(b, shname[base + 4], SHT_RELA, SHF_INFO_LINK, lay.rela_debug_line_offset, lay.rela_debug_line_size, ELF_SHNDX_SYMTAB, line_idx to u32, 8 to u32, ELF64_RELA_SIZE)
 }
 
 /**
@@ -1200,6 +1311,95 @@ pub type ElfObject = struct {
      * addend).
      */
     rodata_relocs: []ElfRelocReq
+    /**
+     * dwarf — the DWARF sections to sink (D1.4), already lowered to the ISA-agnostic
+     * `ElfDwarfSections` shape by the per-ISA adapter (`elf_dwarf_of`). `dwarf.present == false`
+     * (`no_elf_dwarf()`) places nothing, keeping the object byte-identical to a build with no
+     * debug axis.
+     * @since 0.3.1.0
+     */
+    dwarf: ElfDwarfSections
+}
+
+/**
+ * ElfDwarfSections — the ISA-AGNOSTIC form of a `DwarfSink` (D1.3's producer output) `ElfObject`
+ * carries: every `DwReloc` already lowered to an `ElfRelocReq` under the target's absolute-64
+ * relocation type (`R_X86_64_64` or `R_AARCH64_ABS64` — the ONLY ISA knowledge `elf_dwarf_of`
+ * injects, mirroring `x86_reloc_reqs`/`arm64_reloc_reqs`). `present = false` is the
+ * `DebugInfo::None` default: `emit_elf_object` places nothing when it sees it.
+ *
+ * @since 0.3.1.0
+ */
+pub type ElfDwarfSections = struct {
+    /** true iff the three fields below carry real content to place. */
+    present: bool
+    /** the `.debug_abbrev` section bytes (valid iff `present`; never relocated). */
+    abbrev: []byte
+    /** the `.debug_info` section bytes (valid iff `present`). */
+    info_bytes: []byte
+    /** the `.debug_info` section's relocations, already `ElfRelocReq`-typed. */
+    info_relocs: []ElfRelocReq
+    /** the `.debug_line` section bytes (valid iff `present`). */
+    line_bytes: []byte
+    /** the `.debug_line` section's relocations, already `ElfRelocReq`-typed (at most one). */
+    line_relocs: []ElfRelocReq
+}
+
+/**
+ * no_elf_dwarf — the absent `ElfDwarfSections` (`present = false`), the `DebugInfo::None` default
+ * every `ElfObject` construction site not requesting DWARF supplies.
+ *
+ * @return  the absent sections
+ * @since 0.3.1.0
+ */
+fn no_elf_dwarf() -> ElfDwarfSections {
+    ElfDwarfSections { present = false; abbrev = teko::list::empty(); info_bytes = teko::list::empty(); info_relocs = teko::list::empty(); line_bytes = teko::list::empty(); line_relocs = teko::list::empty() }
+}
+
+/**
+ * elf_dwreloc_reqs — lower every `DwReloc` of `relocs` to an `ElfRelocReq` under the numeric
+ * absolute-64 relocation type `rtype`: the offset narrows to `u32` (every DWARF section is well
+ * under 4 GiB) and the addend is always 0 (a DWARF low_pc/set_address slot targets a symbol's base,
+ * never an offset into it).
+ *
+ * @param []DwReloc relocs  the producer's relocations (`.text`-symbol-targeted)
+ * @param u32 rtype  the target ISA's absolute-64 relocation type
+ * @return []ElfRelocReq  the lowered relocation requests, in the same order
+ * @since 0.3.1.0
+ */
+fn elf_dwreloc_reqs(relocs: []DwReloc, rtype: u32) -> []ElfRelocReq {
+    mut out: []ElfRelocReq = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= relocs.len { break }
+        let r = relocs[i]
+        out = teko::list::push(out, ElfRelocReq { offset = r.offset to u32; sym = r.symbol; rtype = rtype; addend = 0 })
+        i++
+    }
+    out
+}
+
+/**
+ * elf_dwarf_of — lower a `DwarfSink` (D1.3's producer output) into the ISA-agnostic
+ * `ElfDwarfSections` `emit_elf_object` consumes, under the caller-supplied absolute-64 relocation
+ * type. `present = false` (the `DebugInfo::None` default) maps straight through to `no_elf_dwarf()`,
+ * so the object writer places nothing — the D1.4 sink's only entry point from the per-ISA adapters.
+ *
+ * @param DwarfSink sink  the producer output (`present` gates everything else)
+ * @param u32 abs64_rtype  the target ISA's absolute-64 relocation type
+ * @return ElfDwarfSections  the ISA-agnostic sections `ElfObject.dwarf` carries
+ * @since 0.3.1.0
+ */
+fn elf_dwarf_of(sink: DwarfSink, abs64_rtype: u32) -> ElfDwarfSections {
+    if !sink.present { return no_elf_dwarf() }
+    ElfDwarfSections {
+        present = true
+        abbrev = sink.abbrev
+        info_bytes = sink.info.bytes
+        info_relocs = elf_dwreloc_reqs(sink.info.relocs, abs64_rtype)
+        line_bytes = sink.line.bytes
+        line_relocs = elf_dwreloc_reqs(sink.line.relocs, abs64_rtype)
+    }
 }
 
 /**
@@ -1535,28 +1735,36 @@ fn elf_partition_data_rel_ro(obj: ElfObject) -> ElfDrrPartition {
  * pointer-bearing consts, the `Elf64_Sym` table local-then-global with the
  * `.rodata`/`.data.rel.ro` `STT_SECTION` symbols AND any `.text` pcrel-label
  * locals, `.strtab`, `.shstrtab`, the `.rela.text` and optional
- * `.rela.data.rel.ro` `Elf64_Rela` tables) + the `Elf64_Shdr` headers. Enough for
- * `cc`/`ld` to link into a runnable PIE executable against the C-built `teko_rt`
- * (D-2 option 1 bootstrap). No ISA knowledge remains past this boundary — the
- * per-ISA `emit_elf` adapter supplies the machine, flags, and numeric reloc
- * types, so E1 (the ELF static linker) reuses this verbatim. A defined function's
- * `st_value` stays the bare section-relative `.text` offset (the exact inverse of
- * Mach-O's rebased `n_value`).
+ * `.rela.data.rel.ro` `Elf64_Rela` tables, and — when `obj.dwarf.present` (D1.4)
+ * — `.debug_abbrev`/`.debug_info`/`.debug_line` plus their `.rela.debug_*`
+ * tables) + the `Elf64_Shdr` headers. Enough for `cc`/`ld` to link into a
+ * runnable PIE executable against the C-built `teko_rt` (D-2 option 1
+ * bootstrap). No ISA knowledge remains past this boundary — the per-ISA
+ * `emit_elf`/`emit_elf_arm64` adapters supply the machine, flags, and every
+ * numeric reloc type (including `obj.dwarf`'s, via `elf_dwarf_of`), so E1 (the
+ * ELF static linker) reuses this verbatim. A defined function's `st_value` stays
+ * the bare section-relative `.text` offset (the exact inverse of Mach-O's
+ * rebased `n_value`). `obj.dwarf.present == false` skips every DWARF step below,
+ * so a `DebugInfo::None` build's object is BYTE-IDENTICAL to before D1.4 (the
+ * FIXPOINT this sink must never disturb).
  *
- * @param ElfObject obj  the machine id + flags + section images + symbols + relocs
+ * @param ElfObject obj  the machine id + flags + section images + symbols + relocs + dwarf
  * @return []byte  the ELF64 object file bytes
  */
 pub fn emit_elf_object(obj: ElfObject) -> []byte {
     let part = elf_partition_data_rel_ro(obj)
     let has_drr = part.active
+    let has_dwarf = obj.dwarf.present
     let syms = elf_build_symbols(part.symbols)
     let strtab = build_elf_strtab(elf_sym_names(syms))
-    let secnames = elf_section_names(has_drr)
+    let secnames = elf_section_names(has_drr, has_dwarf)
     let shstrtab = build_elf_strtab(secnames)
     let relas = elf_build_relas(obj.relocs, part.symbols, syms)
     let rodata_relas = elf_build_rodata_relas(part.drr_relocs, part.symbols, syms)
+    let dwarf_info_relas = elf_resolve_relas(obj.dwarf.info_relocs, part.symbols, syms)
+    let dwarf_line_relas = elf_resolve_relas(obj.dwarf.line_relocs, part.symbols, syms)
     let first_global = elf_first_global_index(syms)
-    let lay = compute_elf_layout(obj, part.rodata.len to u32, part.drr.len to u32, syms.len to u32, relas.len to u32, rodata_relas.len to u32, strtab.bytes.len to u32, shstrtab.bytes.len to u32, first_global, secnames.len to u32)
+    let lay = compute_elf_layout(obj, part.rodata.len to u32, part.drr.len to u32, syms.len to u32, relas.len to u32, rodata_relas.len to u32, strtab.bytes.len to u32, shstrtab.bytes.len to u32, first_global, secnames.len to u32, obj.dwarf.abbrev.len to u32, obj.dwarf.info_bytes.len to u32, obj.dwarf.line_bytes.len to u32, dwarf_info_relas.len to u32, dwarf_line_relas.len to u32)
     mut b: []byte = teko::list::empty()
     b = emit_elf_header(b, lay, obj.e_machine, obj.e_flags, lay.nsects)
     b = append_bytes(b, obj.text)
@@ -1574,8 +1782,38 @@ pub fn emit_elf_object(obj: ElfObject) -> []byte {
         b = pad_to_mult(b, 8 to u32)
         b = emit_elf_relas(b, rodata_relas)
     }
+    if has_dwarf {
+        b = emit_elf_dwarf_body(b, obj.dwarf, dwarf_info_relas, dwarf_line_relas)
+    }
     b = pad_to_mult(b, 8 to u32)
-    emit_elf_shdrs(b, lay, shstrtab.strx)
+    emit_elf_shdrs(b, lay, shstrtab.strx, has_drr, has_dwarf)
+}
+
+/**
+ * emit_elf_dwarf_body — append the DWARF section data and relocation tables (D1.4): the
+ * `.debug_abbrev`/`.debug_info`/`.debug_line` bytes, each 8-aligned, then the `.rela.debug_info`/
+ * `.rela.debug_line` `Elf64_Rela` tables, each 8-aligned. Extracted from `emit_elf_object` so its
+ * `has_dwarf` branch stays one line, per the section-appending pattern every other optional block
+ * in this writer already follows.
+ *
+ * @param []byte buf  the buffer to extend
+ * @param ElfDwarfSections dwarf  the sections to place (`present` already checked by the caller)
+ * @param []ElfRela info_relas  the resolved `.rela.debug_info` rows
+ * @param []ElfRela line_relas  the resolved `.rela.debug_line` rows
+ * @return []byte  `buf` followed by the DWARF section data and relocation tables
+ * @since 0.3.1.0
+ */
+fn emit_elf_dwarf_body(buf: []byte, dwarf: ElfDwarfSections, info_relas: []ElfRela, line_relas: []ElfRela) -> []byte {
+    mut b = pad_to_mult(buf, 8 to u32)
+    b = append_bytes(b, dwarf.abbrev)
+    b = pad_to_mult(b, 8 to u32)
+    b = append_bytes(b, dwarf.info_bytes)
+    b = pad_to_mult(b, 8 to u32)
+    b = append_bytes(b, dwarf.line_bytes)
+    b = pad_to_mult(b, 8 to u32)
+    b = emit_elf_relas(b, info_relas)
+    b = pad_to_mult(b, 8 to u32)
+    emit_elf_relas(b, line_relas)
 }
 
 /**
@@ -1624,17 +1862,20 @@ fn x86_rodata_reloc_reqs(enc: EncodedModuleX86) -> []ElfRelocReq {
 /**
  * emit_elf — the x86-64 ELF adapter (B1's entry, now delegating): map the
  * `EncodedModuleX86` to a neutral `ElfObject` (`e_machine`=62, `e_flags`=0, each
- * `RelocX86` lowered to an `ElfRelocReq` via `elf_reloc_type`) and hand it to the
- * shared `emit_elf_object`. The byte output is IDENTICAL to B1's pre-B2 writer
+ * `RelocX86` lowered to an `ElfRelocReq` via `elf_reloc_type`, `dwarf` lowered to
+ * `ElfDwarfSections` via `elf_dwarf_of` under `R_X86_64_64`, D1.4) and hand it to
+ * the shared `emit_elf_object`. With `dwarf` omitted (`no_dwarf_sink()`, the
+ * `DebugInfo::None` default) the byte output is IDENTICAL to B1's pre-B2 writer
  * (B1's goldens are the guardrail — they must stay byte-for-byte green), so the
  * x86 differential is untouched. Data globals + `R_X86_64_64` data relocs are the
  * `B1-globals` stop, raised earlier in `encode_module_x86`, so a B1 object never
  * carries an `Abs64` relocation.
  *
  * @param EncodedModuleX86 enc  the section images + symbols + relocations
+ * @param DwarfSink dwarf  the D1.3 producer output to sink (default absent)
  * @return []byte  the ELF64 object file bytes
  */
-pub fn emit_elf(enc: EncodedModuleX86) -> []byte {
+pub fn emit_elf(enc: EncodedModuleX86, dwarf: DwarfSink = no_dwarf_sink()) -> []byte {
     emit_elf_object(ElfObject {
         e_machine = EM_X86_64
         e_flags = 0 to u32
@@ -1643,6 +1884,7 @@ pub fn emit_elf(enc: EncodedModuleX86) -> []byte {
         symbols = enc.symbols
         relocs = x86_reloc_reqs(enc)
         rodata_relocs = x86_rodata_reloc_reqs(enc)
+        dwarf = elf_dwarf_of(dwarf, R_X86_64_64)
     })
 }
 
@@ -1780,11 +2022,12 @@ fn arm64_rodata_reloc_reqs(enc: EncodedModule) -> []ElfRelocReq {
  * emit_elf_arm64 — the AArch64 ELF adapter, the exact sibling of `emit_elf`:
  * map an arm64 `EncodedModule` to a neutral `ElfObject` (`e_machine` =
  * `EM_AARCH64`, `e_flags` = 0, every `Reloc` lowered to an `ElfRelocReq` via
- * `elf_reloc_type_arm64`) and hand it to the shared, ISA-agnostic
- * `emit_elf_object`. The writer is untouched — its own contract already says no
- * ISA knowledge lives past that boundary — so the x86-64 goldens stay
- * byte-for-byte green and the `arm64-macos` Mach-O path is not on this route at
- * all.
+ * `elf_reloc_type_arm64`, `dwarf` lowered to `ElfDwarfSections` via
+ * `elf_dwarf_of` under `R_AARCH64_ABS64`, D1.4) and hand it to the shared,
+ * ISA-agnostic `emit_elf_object`. The writer is untouched — its own contract
+ * already says no ISA knowledge lives past that boundary — so the x86-64
+ * goldens stay byte-for-byte green and the `arm64-macos` Mach-O path is not on
+ * this route at all.
  *
  * The arm64 `Reloc` carries no addend field (a Mach-O `relocation_info` has no
  * room for one and the encoder never needed it): every `r_addend` therefore
@@ -1793,10 +2036,11 @@ fn arm64_rodata_reloc_reqs(enc: EncodedModule) -> []ElfRelocReq {
  * `clang --target=aarch64-linux-gnu` emits for a string reference.
  *
  * @param EncodedModule enc  the section images + symbols + relocations
+ * @param DwarfSink dwarf  the D1.3 producer output to sink (default absent)
  * @return []byte  the ELF64 `ET_REL` object file bytes
  * @since 0.3.1
  */
-pub fn emit_elf_arm64(enc: EncodedModule) -> []byte {
+pub fn emit_elf_arm64(enc: EncodedModule, dwarf: DwarfSink = no_dwarf_sink()) -> []byte {
     emit_elf_object(ElfObject {
         e_machine = EM_AARCH64
         e_flags = 0 to u32
@@ -1805,5 +2049,6 @@ pub fn emit_elf_arm64(enc: EncodedModule) -> []byte {
         symbols = enc.symbols
         relocs = arm64_reloc_reqs(enc)
         rodata_relocs = arm64_rodata_reloc_reqs(enc)
+        dwarf = elf_dwarf_of(dwarf, R_AARCH64_ABS64)
     })
 }

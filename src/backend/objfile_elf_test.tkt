@@ -162,6 +162,87 @@ fn elf_folds_rodata_offset_into_addend() {
 }
 
 /**
+ * el_dwarf_sink_of — a one-function `DwarfSink` (D1.4 fixture) anchored at `sym`: a compile unit
+ * with a single `DW_TAG_subprogram` DIE and a one-row line program, both targeting `sym`'s address.
+ * Built through the SAME `build_dwarf_sink` the real `--debug=lines` build glue calls, so this
+ * fixture exercises the exact producer → sink path, not a hand-faked shortcut.
+ *
+ * @param str sym  the `.text` symbol both the CU and the line program anchor to
+ * @param u64 code_size  the function's (and so the unit's) code size
+ * @return DwarfSink  the assembled, `present = true` sink
+ */
+fn el_dwarf_sink_of(sym: str, code_size: u64) -> DwarfSink {
+    let sub = DwSubprogram { name = "main"; decl_file = 1; decl_line = 10 to u32; symbol = sym; code_size = code_size }
+    let cu = DwCompileUnit {
+        producer = "teko test"; language = 0x0c to u32; name = "t.tks"; comp_dir = "."
+        text_symbol = sym; text_size = code_size; subprograms = [sub]
+    }
+    let rows = [DwLineRow { pc_advance = 0 to u64; line = 10 to u32; file = 1 }]
+    build_dwarf_sink(cu, ["t.tks"], rows, code_size)
+}
+
+#test
+/**
+ * elf_dwarf_absent_is_byte_identical — omitting `dwarf` and passing `no_dwarf_sink()` explicitly
+ * produce the SAME object, byte for byte: the `DebugInfo::None` default (§ D1.4's non-negotiable —
+ * a build with no debug axis stays byte-identical to before the sink existed).
+ *
+ * @return void
+ */
+fn elf_dwarf_absent_is_byte_identical() {
+    let a = emit_elf(el_rodata_off_module())
+    let b = emit_elf(el_rodata_off_module(), no_dwarf_sink())
+    teko::assert::eq_u64(a.len, b.len)
+    teko::assert::is_true(el_bytes_eq(a, b))
+    teko::assert::eq_u64(el_u16_at(a, EL_EHDR_SHNUM_FIELD) to u64, 7 to u64)
+}
+
+#test
+/**
+ * elf_dwarf_present_appends_five_progbits_and_rela_headers — a `--debug=lines`-shaped object
+ * (D1.4) grows `e_shnum` from 7 to 12 (the five DWARF headers, appended after `.rela.text` since
+ * this fixture carries no `.data.rel.ro`): indices 7/8/9 are `.debug_abbrev`/`.debug_info`/
+ * `.debug_line`, all `SHT_PROGBITS`(1), sized exactly like the D1.3 producers' own output
+ * (`debug_abbrev()`'s length, and the `DwarfSink`'s `info`/`line` byte counts), and indices 10/11
+ * are `.rela.debug_info`/`.rela.debug_line`, `SHT_RELA`(4), with `sh_info` naming the section EACH
+ * patches (`.debug_info`(8) / `.debug_line`(9)) — proving the placement, not just the presence.
+ *
+ * @return void
+ */
+fn elf_dwarf_present_appends_five_progbits_and_rela_headers() {
+    let sink = el_dwarf_sink_of("main", 8 to u64)
+    let obj = emit_elf(el_rodata_off_module(), sink)
+    teko::assert::eq_u64(el_u16_at(obj, EL_EHDR_SHNUM_FIELD) to u64, 12 to u64)
+    teko::assert::eq_u64(el_shdr_u32(obj, 7 to u64, EL_SHDR_TYPE_FIELD) to u64, 1 to u64)
+    teko::assert::eq_u64(el_shdr_u32(obj, 8 to u64, EL_SHDR_TYPE_FIELD) to u64, 1 to u64)
+    teko::assert::eq_u64(el_shdr_u32(obj, 9 to u64, EL_SHDR_TYPE_FIELD) to u64, 1 to u64)
+    teko::assert::eq_u64(el_shdr_u32(obj, 10 to u64, EL_SHDR_TYPE_FIELD) to u64, 4 to u64)
+    teko::assert::eq_u64(el_shdr_u32(obj, 11 to u64, EL_SHDR_TYPE_FIELD) to u64, 4 to u64)
+    teko::assert::eq_u64(el_shdr_u32(obj, 7 to u64, EL_SHDR_SIZE_FIELD) to u64, debug_abbrev().len)
+    teko::assert::eq_u64(el_shdr_u32(obj, 8 to u64, EL_SHDR_SIZE_FIELD) to u64, sink.info.bytes.len)
+    teko::assert::eq_u64(el_shdr_u32(obj, 9 to u64, EL_SHDR_SIZE_FIELD) to u64, sink.line.bytes.len)
+    teko::assert::eq_u64(el_shdr_u32(obj, 10 to u64, EL_SHDR_INFO_FIELD) to u64, 8 to u64)
+    teko::assert::eq_u64(el_shdr_u32(obj, 11 to u64, EL_SHDR_INFO_FIELD) to u64, 9 to u64)
+}
+
+#test
+/**
+ * elf_dwarf_relas_resolve_against_defined_function_symbol — the `.debug_info` low_pc relocation
+ * (D1.4) is `R_X86_64_64`(1) against `main`'s `.symtab` index (2 — after the null and `.rodata`
+ * section-symbol slots this fixture's rodata datum forces), addend 0: the DWARF reloc resolver
+ * (`elf_dwarf_of`/`elf_resolve_relas`) reaches the SAME name-indexed symbol table `.rela.text`
+ * does, not a separate/parallel one.
+ *
+ * @return void
+ */
+fn elf_dwarf_relas_resolve_against_defined_function_symbol() {
+    let obj = emit_elf(el_rodata_off_module(), el_dwarf_sink_of("main", 8 to u64))
+    teko::assert::eq_u64(el_rela_field(obj, 10 to u64, 0 to u64, EL_RELA_TYPE_FIELD) to u64, 1 to u64)
+    teko::assert::eq_u64(el_rela_field(obj, 10 to u64, 0 to u64, EL_RELA_SYM_FIELD) to u64, 2 to u64)
+    teko::assert::eq_u64(el_rela_field(obj, 10 to u64, 0 to u64, EL_RELA_ADDEND_FIELD) to u64, 0 to u64)
+}
+
+/**
  * el_abs64_module — a hand-built `EncodedModuleX86` with an `Abs64` relocation
  * targeting an undefined data global. `encode_module_x86` never produces this (it
  * raises `B1-globals` first, so a `lea` only ever carries `Pc32`/`Plt32`), but
@@ -276,9 +357,34 @@ const EL_EHDR_SHOFF_FIELD: u64 = 40 to u64
 const EL_EHDR_FLAGS_FIELD: u64 = 48 to u64
 
 /**
+ * EL_EHDR_SHNUM_FIELD — the `Elf64_Ehdr.e_shnum` byte offset (the section-header
+ * count), read as a little-endian u16 (D1.4: proves the DWARF sink appends
+ * exactly five headers).
+ */
+const EL_EHDR_SHNUM_FIELD: u64 = 60 to u64
+
+/**
  * EL_SHDR_SIZE — the `Elf64_Shdr` stride in the section-header table.
  */
 const EL_SHDR_SIZE: u64 = 64 to u64
+
+/**
+ * EL_SHDR_TYPE_FIELD — the `Elf64_Shdr.sh_type` offset within a section header
+ * (D1.4: distinguishes a `SHT_PROGBITS` DWARF section from a `SHT_RELA` table).
+ */
+const EL_SHDR_TYPE_FIELD: u64 = 4 to u64
+
+/**
+ * EL_SHDR_SIZE_FIELD — the `Elf64_Shdr.sh_size` offset within a section header
+ * (D1.4: proves a placed DWARF section's byte size matches its producer output).
+ */
+const EL_SHDR_SIZE_FIELD: u64 = 32 to u64
+
+/**
+ * EL_SHDR_INFO_FIELD — the `Elf64_Shdr.sh_info` offset within a section header
+ * (D1.4: a `.rela.debug_*` header's `sh_info` names the section it patches).
+ */
+const EL_SHDR_INFO_FIELD: u64 = 44 to u64
 
 /**
  * EL_SHDR_OFFSET_FIELD — the `Elf64_Shdr.sh_offset` offset within a section
@@ -359,6 +465,43 @@ fn el_section_offset(obj: []byte, shndx: u64) -> u64 {
  */
 fn el_rela_field(obj: []byte, shndx: u64, n: u64, field: u64) -> u32 {
     el_u32_at(obj, el_section_offset(obj, shndx) + (n * EL_RELA_SIZE) + field)
+}
+
+/**
+ * el_shdr_u32 — one 32-bit field of the section header at index `shndx`, located
+ * through the object's own section-header table (D1.4's structural-index twin of
+ * `el_section_offset`, generalized to any field instead of just `sh_offset`).
+ *
+ * @param []byte obj  the emitted ELF object bytes
+ * @param u64 shndx  the section-header index
+ * @param u64 field  the field's byte offset within the `Elf64_Shdr`
+ * @return u32  the little-endian u32 at that field
+ * @since 0.3.1.0
+ */
+fn el_shdr_u32(obj: []byte, shndx: u64, field: u64) -> u32 {
+    let shoff = el_u32_at(obj, EL_EHDR_SHOFF_FIELD) to u64
+    el_u32_at(obj, shoff + (shndx * EL_SHDR_SIZE) + field)
+}
+
+/**
+ * el_bytes_eq — whether `a` and `b` hold the same bytes in the same order (D1.4's
+ * byte-identity regression check: a `DebugInfo::None` build's object must be
+ * indistinguishable from one emitted before the DWARF sink existed).
+ *
+ * @param []byte a  the first buffer
+ * @param []byte b  the second buffer
+ * @return bool  true iff `a` and `b` are byte-for-byte identical
+ * @since 0.3.1.0
+ */
+fn el_bytes_eq(a: []byte, b: []byte) -> bool {
+    if a.len != b.len { return false }
+    mut i: u64 = 0
+    loop {
+        if i >= a.len { break }
+        if a[i] != b[i] { return false }
+        i++
+    }
+    true
 }
 
 /**
