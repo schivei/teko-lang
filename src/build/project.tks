@@ -3927,7 +3927,9 @@ const GATE_CC_FAIL: str = "cc failed to build the native test gate"
  * @param gp         the gate's paths
  * @param merge_cov  fold the dumps into THIS process's sinks — false in the staged driver, whose
  *                   sinks nothing reads (the report stage merges the same files itself)
- * @return           0 when every test passed, else the gate's failing status
+ * @return           0 when every test passed, else the gate's failing status; a shard that left no
+ *                   coverage dump fails the run even when every test it ran passed (§2.4 — a missing
+ *                   dump is a fact about the run, not a zero the floors may silently compute over)
  * @since 0.3.1.0
  */
 fn native_gate_run(od: str, gp: GatePaths, merge_cov: bool) -> i32 {
@@ -3935,7 +3937,12 @@ fn native_gate_run(od: str, gp: GatePaths, merge_cov: bool) -> i32 {
     if cross.is_cross { teko::io::println(cross.note); return 0 }
     let jobs = test_jobs()
     let rc = if jobs > 1 { run_gate_sharded(od, gp.stem, gp.binp, jobs) } else { run_gate_single(gp) }
-    if merge_cov { merge_gate_coverage(od, gp, jobs, rc) }
+    if merge_cov {
+        match merge_gate_coverage(od, gp, jobs, rc) {
+            error as e => { fail("", e.message); return if rc != 0 { rc } else { 1 } }
+            null => { }
+        }
+    }
     rc
 }
 
@@ -3963,11 +3970,15 @@ fn run_gate_single(gp: GatePaths) -> i32 {
  * @param gp    the gate's paths
  * @param jobs  how many shards ran (1 = the single-process path)
  * @param trc   the gate run's exit status
+ * @return      nothing on success, or the sharded path's failure (`merge_shard_coverage`)
+ * @throws      when a shard left no coverage dump (J4, journaling-de-corrida-0.3.1 §2.4) — never for
+ *              the single-process path, which stays best-effort as it always has
  * @since 0.3.1.0
  */
-fn merge_gate_coverage(od: str, gp: GatePaths, jobs: u64, trc: i32) -> void {
-    if jobs > 1 { merge_shard_coverage(gate_shard_base(od, gp.stem), jobs); return }
+fn merge_gate_coverage(od: str, gp: GatePaths, jobs: u64, trc: i32) -> null | error {
+    if jobs > 1 { return merge_shard_coverage(gate_shard_base(od, gp.stem), jobs) }
     if trc == 0 { coverage::cov_merge(gp.covfile) }
+    null
 }
 
 /**
@@ -4084,19 +4095,29 @@ fn report_shard_captures(caps: []CapResult) {
 
 /**
  * merge_shard_coverage — fold every shard's own `.tkcov` dump into this process's coverage sinks, so
- * the floors see the UNION of the shards. A shard that produced no dump merges nothing, which is what
- * `cov_merge` already does for a missing file.
+ * the floors see the UNION of the shards — and STOP, NAMING the shard, the first time one is missing.
+ *
+ * THE DEFECT THIS CLOSES IS MEASURED ON THE TREE (J4, journaling-de-corrida-0.3.1 §2.4). Nothing
+ * removes `<base><i>.tkcov` between runs, and `coverage::cov_merge`'s `bool` used to be discarded
+ * here — so a shard that died before dumping left the PREVIOUS run's file in place, and the floors
+ * were computed over stale coverage with no signal that anything was wrong. A missing dump is a FACT
+ * about this run, never a silent zero.
  *
  * @param base  the shards' scratch prefix directory
  * @param jobs  how many shards ran
+ * @return      nothing when every shard left a dump
+ * @throws      the first shard (in order) that left none, naming its `.tkcov` path
+ * @since 0.3.1.0
  */
-fn merge_shard_coverage(base: str, jobs: u64) {
+fn merge_shard_coverage(base: str, jobs: u64) -> null | error {
     mut i: u64 = 0
     loop {
         if i >= jobs { break }
-        coverage::cov_merge(teko::str::concat(base, $"{i}", ".tkcov"))
+        let p = teko::str::concat(base, $"{i}", ".tkcov")
+        if !coverage::cov_merge(p) { return error { message = $"shard {i} left no coverage dump ({p})" } }
         i = i + 1
     }
+    null
 }
 
 /**
@@ -6221,7 +6242,8 @@ fn read_sitemap(od: str, m: Manifest) -> coverage::SiteMap | error {
  * @param analyzer         `--analyzer` — run the dev-time stale/redundant analyzer
  * @param arith_cast_gate  `--arith-cast-gate` — enforce the D4 ARITH-CAST-RATE ceiling
  * @return                 the run's final status, in the historic precedence order
- * @throws                 the manifest/site-map read error, or the Cobertura write failure
+ * @throws                 the manifest/site-map read error, the Cobertura write failure, or a shard
+ *                          that left no coverage dump (`merge_gate_coverage`, J4 §2.4)
  * @since 0.3.1.0
  */
 fn test_stage_report(dir: str, gen_cov: bool, cov_validation: bool, per_test_cov: bool, per_commit_base: str, analyzer: bool, arith_cast_gate: bool) -> i32 {
@@ -6229,7 +6251,7 @@ fn test_stage_report(dir: str, gen_cov: bool, cov_validation: bool, per_test_cov
     let regr_rc = stage_rc_of_env(TEST_REGR_RC_ENV)
     let m = match enter_project_manifest(dir) { Manifest as x => x; error as e => return fail(dir, e.message) }
     let sm = match read_sitemap(GATE_OUT_DIR, m) { coverage::SiteMap as x => x; error as e => return fail(dir, e.message) }
-    merge_gate_coverage(GATE_OUT_DIR, gate_paths(GATE_OUT_DIR, m), test_jobs(), trc)
+    match merge_gate_coverage(GATE_OUT_DIR, gate_paths(GATE_OUT_DIR, m), test_jobs(), trc) { error as e => return fail(dir, e.message); null => { } }
     let pre_regr_cob = coverage::cov_cobertura_of(sm)
     merge_regression_coverage()
     if gen_cov {
