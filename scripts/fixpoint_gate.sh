@@ -265,6 +265,18 @@ build_gen() {
     # Remove once pinned.
     bg_region_check=""
     if [ "$bg_backend" = "native" ]; then bg_region_check="1"; fi
+    # DIAGNOSTIC (2026-08-03, native-rodata-const-align, ROUND 2): the align check above returned
+    # null even though macOS ld rejected 'pointer not aligned in AAPCS64.gpr_arg+0x1320' — so the
+    # bug is NOT a misaligned reloc offset but a const SIZE/OFFSET mismatch: a fat field allotted 8
+    # bytes instead of 16 (a typeexpr_is_fat / is_fat_type disagreement) shifts every following
+    # field, so a later pointer lands misaligned (macOS ld) AND the const's bytes read as garbage
+    # (x86 gen1 crash — x86 tolerates unaligned reads, so its crash proves DATA corruption, not
+    # alignment). This gate cross-checks each serialized aggregate const's ConstImage against its
+    # registered layout (`check_const_image_size`, lower_const.tks) and honest-stops naming the
+    # exact const + fat field + allotted-vs-required width, straight to the streamed log's tail.
+    # Native-only; byte-identical when off. Remove once pinned.
+    bg_const_size_check=""
+    if [ "$bg_backend" = "native" ]; then bg_const_size_check="1"; fi
     scan_project_c "$W/project-c.before"
     # Stream the build LIVE (prefixed) to the lane log AND capture to $bg_log. Owner ruling
     # 2026-08-03: "expor tudo que ele faz e não ocultar nenhuma saída". Before, the build was
@@ -274,9 +286,9 @@ build_gen() {
     # `set +e`/`set -e` brackets keep the pipe's own failure from tripping the caller early.
     set +e
     if [ -n "$RT_DIR" ]; then
-        { ( cd "$PROJ" && TK_RT_DIR="$RT_DIR" TEKO_NATIVE_TRACE_ITEMS="$bg_trace" TEKO_NATIVE_RODATA_ALIGN_CHECK="$bg_align_check" TEKO_NATIVE_CALL_SAFETY_CHECK="$bg_call_safety_check" TEKO_NATIVE_REGION_CHECK="$bg_region_check" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
+        { ( cd "$PROJ" && TK_RT_DIR="$RT_DIR" TEKO_NATIVE_TRACE_ITEMS="$bg_trace" TEKO_NATIVE_RODATA_ALIGN_CHECK="$bg_align_check" TEKO_NATIVE_CALL_SAFETY_CHECK="$bg_call_safety_check" TEKO_NATIVE_REGION_CHECK="$bg_region_check" TEKO_NATIVE_CONST_SIZE_CHECK="$bg_const_size_check" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
     else
-        { ( cd "$PROJ" && TEKO_NATIVE_TRACE_ITEMS="$bg_trace" TEKO_NATIVE_RODATA_ALIGN_CHECK="$bg_align_check" TEKO_NATIVE_CALL_SAFETY_CHECK="$bg_call_safety_check" TEKO_NATIVE_REGION_CHECK="$bg_region_check" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
+        { ( cd "$PROJ" && TEKO_NATIVE_TRACE_ITEMS="$bg_trace" TEKO_NATIVE_RODATA_ALIGN_CHECK="$bg_align_check" TEKO_NATIVE_CALL_SAFETY_CHECK="$bg_call_safety_check" TEKO_NATIVE_REGION_CHECK="$bg_region_check" TEKO_NATIVE_CONST_SIZE_CHECK="$bg_const_size_check" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
     fi
     set -e
     return "$(cat "$W/bg_status")"
