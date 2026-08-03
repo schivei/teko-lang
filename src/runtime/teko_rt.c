@@ -4149,12 +4149,84 @@ static void tk_push_cache_purge(void) {
     memset(t->push_cache, 0, sizeof t->push_cache);
 }
 
+// (2026-08-03, native-region-crash, push-redzone) TEKO_NATIVE_PUSH_REDZONE — a CI-narrowing aid,
+// same env-gated pattern as the other TEKO_NATIVE_* diagnostics: byte-identical when unset. The
+// chunk-header canary (TEKO_NATIVE_CHUNK_CANARY) exhaustively ruled out a corrupted chunk header
+// or a dangling region handle across three deterministic repros; TEKO_MEM_PARANOID=1 (which never
+// reuses a parked block, only poisons it) did NOT eliminate the crash either — it just moved the
+// corruption into glibc's OWN malloc metadata (`malloc.c:4196 assertion failed: chunk_main_arena`),
+// proof this is a genuine OUT-OF-BOUNDS WRITE, not merely a premature free-old reuse. The victim
+// observed live (gdb, deterministic, ASLR off) was a still-PARKED freenode whose memory held
+// readable ASCII text ("declare"...) — a []byte/[]T growable buffer this runtime's OWN push-cache
+// tracks as a live tail is being written PAST the length it reports.
+//
+// This places a small REDZONE (TK_REDZONE_BYTES of a fixed magic pattern) in the SLACK capacity
+// right after every push's just-written element (whenever slack exists), and verifies it is still
+// intact on the very NEXT push to the SAME live tail — found via the EXISTING push-cache witness,
+// no new tracking table. A stomped redzone means something wrote INTO that buffer's spare capacity
+// BETWEEN two pushes, bypassing tk_slice_push_r/tk_append_bytes_fo entirely (an aliased write
+// through some OTHER name/reference to the same buffer, or a native store with the wrong esz/width
+// computing an address past this buffer's own bounds).
+#define TK_REDZONE_BYTES 16
+#define TK_REDZONE_BYTE  0xC5
+
+static int tk_redzone_enabled(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("TEKO_NATIVE_PUSH_REDZONE"); v = (e != NULL && e[0] == '1') ? 1 : 0; }
+    return v;
+}
+
+// tk_redzone_place — write up to TK_REDZONE_BYTES of the magic pattern into the SLACK just past
+// `used` elements of `esz` bytes each, bounded by `cap` (never claims more than genuinely exists).
+static void tk_redzone_place(void *ptr, uint64_t used, uint64_t esz, uint64_t cap) {
+    if (!tk_redzone_enabled() || ptr == NULL || cap <= used) return;
+    uint64_t slack_bytes = (cap - used) * esz;
+    uint64_t rz = slack_bytes < TK_REDZONE_BYTES ? slack_bytes : TK_REDZONE_BYTES;
+    if (rz == 0) return;
+    memset((char *)ptr + used * esz, TK_REDZONE_BYTE, (size_t)rz);
+}
+
+// tk_redzone_verify — check a PREVIOUSLY placed redzone is still intact, right before this push
+// trusts `ptr`/`used` again. A miss (no redzone to check) is NOT proof of safety, only an absence
+// of coverage; a hit is definitive proof of a wild write into this exact buffer's slack.
+static void tk_redzone_verify(const void *ptr, uint64_t used, uint64_t esz, uint64_t cap, const char *where) {
+    if (!tk_redzone_enabled() || ptr == NULL || cap <= used) return;
+    uint64_t slack_bytes = (cap - used) * esz;
+    uint64_t rz = slack_bytes < TK_REDZONE_BYTES ? slack_bytes : TK_REDZONE_BYTES;
+    if (rz == 0) return;
+    const unsigned char *p = (const unsigned char *)ptr + used * esz;
+    for (uint64_t i = 0; i < rz; i += 1) {
+        if (p[i] == (unsigned char)TK_REDZONE_BYTE) continue;
+        fprintf(stderr,
+            "TEKO_NATIVE_PUSH_REDZONE: buffer %p redzone stomped, detected at %s\n"
+            "  used=%llu cap=%llu esz=%llu byte[%llu]=0x%02x (expected 0x%02x)\n"
+            "  bytes at breach (up to 32): ",
+            ptr, where,
+            (unsigned long long)used, (unsigned long long)cap, (unsigned long long)esz,
+            (unsigned long long)i, p[i], TK_REDZONE_BYTE);
+        uint64_t show = rz < 32 ? rz : 32;
+        for (uint64_t j = 0; j < show; j += 1) fprintf(stderr, "%02x ", p[j]);
+        fputc('\n', stderr);
+        fprintf(stderr, "  as text: \"");
+        for (uint64_t j = 0; j < show; j += 1) fputc((p[j] >= 32 && p[j] < 127) ? p[j] : '.', stderr);
+        fprintf(stderr, "\"\n");
+#ifdef TK_HAVE_BACKTRACE
+        { void *fr[24]; int nf = backtrace(fr, 24); fprintf(stderr, "  backtrace at detection:\n"); backtrace_symbols_fd(fr, nf, 2); }
+#endif
+        fflush(stderr);
+        abort();
+    }
+}
+
 // (S2 Level-1) the region-aware core: the grown buffer is allocated in `region`. `tk_slice_push`
 // (below) is the unchanged default lowering target (root); codegen emits THIS variant only for a
 // slice binding the escape analysis proves frame-local, passing the function's `_tkfr` frame region,
 // so the whole buffer history (geometric doublings + in-place tail) is bulk-freed on frame exit.
 void *tk_slice_push_r(const void *ptr, uint64_t len, const void *elem, uint64_t esz, uint64_t *out_len, tk_region *region) {
     unsigned h = ptr ? tk_push_slot(ptr) : 0;
+    if (ptr != NULL && tk_push_cache[h].ptr == ptr && tk_push_cache[h].esz == esz) {
+        tk_redzone_verify(ptr, tk_push_cache[h].len, esz, tk_push_cache[h].cap, "tk_slice_push_r:entry");
+    }
     // in-place ONLY when this is the live tail (same ptr + length witness + element size) with spare cap
     // AND still owned by the same live region generation (see STALE-SLOT SAFETY above).
     if (ptr != NULL && tk_push_cache[h].ptr == ptr && tk_push_cache[h].len == len
@@ -4163,6 +4235,7 @@ void *tk_slice_push_r(const void *ptr, uint64_t len, const void *elem, uint64_t 
         memcpy((char *)ptr + len * esz, elem, esz);
         tk_push_cache[h].len = len + 1;
         *out_len = len + 1;
+        tk_redzone_place((void *)ptr, len + 1, esz, tk_push_cache[h].cap);
         if (tk_g_push_ra != NULL) tk_g_push_ra = NULL;   // (#148 RA1) consume the wrapper's parked RA (NULL when obs off — predictable, ~free)
         return (void *)ptr;
     }
@@ -4216,6 +4289,7 @@ void *tk_slice_push_r(const void *ptr, uint64_t len, const void *elem, uint64_t 
         tk_push_cache[hb].cap = cap; tk_push_cache[hb].esz = esz;
         tk_push_cache[hb].region = region; tk_push_cache[hb].region_gen = region->gen;
     }
+    tk_redzone_place(buf, len + 1, esz, cap);
     *out_len = len + 1;
     return buf;
 }
@@ -4234,6 +4308,12 @@ void *tk_append_bytes_fo(const void *ptr, uint64_t len, const void *src, uint64_
     // via the same generation guard the whole fix relies on. cur == root when no window is open, so
     // this is byte-for-byte the old behaviour for every existing caller (cb runs only at root scope).
     tk_region *cur = tk_region_current();
+    if (ptr != NULL) {
+        unsigned h0 = tk_push_slot(ptr);
+        if (tk_push_cache[h0].ptr == ptr && tk_push_cache[h0].esz == 1) {
+            tk_redzone_verify(ptr, tk_push_cache[h0].len, 1, tk_push_cache[h0].cap, "tk_append_bytes_fo:entry");
+        }
+    }
     if (ptr != NULL) {   // in-place: the live tail with enough spare capacity
         unsigned h = tk_push_slot(ptr);
         if (tk_push_cache[h].ptr == ptr && tk_push_cache[h].len == len && tk_push_cache[h].esz == 1
@@ -4242,6 +4322,7 @@ void *tk_append_bytes_fo(const void *ptr, uint64_t len, const void *src, uint64_
             memcpy((char *)ptr + len, src, n);
             tk_push_cache[h].len = len + n;
             *out_len = len + n;
+            tk_redzone_place((void *)ptr, len + n, 1, tk_push_cache[h].cap);
             return (void *)ptr;
         }
     }
@@ -4264,6 +4345,7 @@ void *tk_append_bytes_fo(const void *ptr, uint64_t len, const void *src, uint64_
         tk_push_cache[hb].cap = cap; tk_push_cache[hb].esz = 1;
         tk_push_cache[hb].region = cur; tk_push_cache[hb].region_gen = cur->gen;
     }
+    tk_redzone_place(buf, len + n, 1, cap);
     if (ptr != NULL) tk_free_block((void *)ptr, old_bytes);   // the DECREE: the old buffer is dead
     *out_len = len + n;
     return buf;
@@ -4360,6 +4442,7 @@ void *tk_slice_with_cap_r(uint64_t esz, uint64_t cap, tk_region *region) {
         tk_push_cache[hb].ptr = buf; tk_push_cache[hb].len = 0;
         tk_push_cache[hb].cap = alloc_cap; tk_push_cache[hb].esz = esz;
         tk_push_cache[hb].region = region; tk_push_cache[hb].region_gen = region->gen;
+        tk_redzone_place(buf, 0, esz, alloc_cap);   // a fresh pre-sized builder — nothing used yet
     }
     return buf;
 }
