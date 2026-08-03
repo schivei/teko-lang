@@ -1462,3 +1462,61 @@ fn pt_per_commit_diff_text_writes_its_scoped_capture_file() {
         error => teko::assert::is_true(false)
     }
 }
+
+/**
+ * pt_shard_base — a hermetic scratch prefix for the `merge_shard_coverage` fixtures below, so two
+ * shards' dumps land at `<prefix>0.tkcov`/`<prefix>1.tkcov` under this test's own scoped tree.
+ *
+ * @param tag  a per-fixture label kept distinct from every other fixture's
+ * @return     the scratch prefix (with its trailing separator)
+ * @since 0.3.1.0
+ */
+fn pt_shard_base(tag: str) -> str {
+    teko::test::scoped(teko::str::concat("bin/.pt-shard-", tag, "/"))
+}
+
+/**
+ * pt_write_tkcov — plant a well-formed, empty `.tkcov` dump at `<base><i>.tkcov`, the shape
+ * `merge_shard_coverage` reads.
+ *
+ * @param base  the shard scratch prefix
+ * @param i     the shard index
+ * @since 0.3.1.0
+ */
+fn pt_write_tkcov(base: str, i: u64) {
+    let path = teko::str::concat(base, $"{i}", ".tkcov")
+    let no_ids: []u64 = teko::list::empty()
+    match teko::io::write_file(path, pt_tkcov(no_ids, no_ids, no_ids)) { error => { }; null => { } }
+}
+
+/**
+ * pt_merge_shard_coverage_merges_every_dump_present — the happy path: every shard left a dump, and
+ * `merge_shard_coverage` merges all of them without error.
+ */
+#test
+fn pt_merge_shard_coverage_merges_every_dump_present() {
+    let base = pt_shard_base("present")
+    pt_write_tkcov(base, 0)
+    pt_write_tkcov(base, 1)
+    pt_write_tkcov(base, 2)
+    match merge_shard_coverage(base, 3) {
+        error => teko::assert::is_true(false)
+        null => { }
+    }
+}
+
+/**
+ * pt_merge_shard_coverage_names_the_first_missing_shard — the defect J4 closes: a shard that left no
+ * `.tkcov` dump must STOP the merge and NAME that shard, in shard order, rather than merging what it
+ * can and moving on (the historic `-> void` path discarded `coverage::cov_merge`'s `bool` here and
+ * silently blessed a run whose floors were computed over a stale dump, or none at all).
+ */
+#test
+fn pt_merge_shard_coverage_names_the_first_missing_shard() {
+    let base = pt_shard_base("missing")
+    pt_write_tkcov(base, 0)
+    match merge_shard_coverage(base, 3) {
+        error as e => { teko::assert::str_contains(e.message, "shard 1"); teko::assert::str_contains(e.message, "1.tkcov") }
+        null => teko::assert::is_true(false)
+    }
+}
