@@ -1881,6 +1881,14 @@ uint64_t tk_region_root_u(void) {
     return (uint64_t)(uintptr_t)tk_region_root();
 }
 
+// (0.3.1 native-memoria NP1) tk_region_current_u — tk_region_current() as a u64 handle. The native
+// backend captures R_ret (the caller's chosen result region, == the current region at function
+// entry) through this at fn entry, the native dialect of the C route's A1 (which de-static'd
+// tk_region_current itself). Additive, behaviour-identical: no caller until the move flip (NP6).
+uint64_t tk_region_current_u(void) {
+    return (uint64_t)(uintptr_t)tk_region_current();
+}
+
 void tk_region_drop_u(uint64_t region) {
     tk_region_drop((tk_region *)(uintptr_t)region);
 }
