@@ -12,22 +12,27 @@ use teko::parser
 fn lsp_no_progress(done: u64, total: u64) -> void { }
 
 /**
- * collect_diagnostics — every type diagnostic of `program`, as the `file:line:col: msg` lines the
- * build reports, WITHOUT raising an error at the first bad declaration. This is the single seam the
- * LSP consumes from the checker: it reuses the existing declaration-boundary walk
- * (`type_program_with_deps_pre_mono`) with an EMPTY dependency program and a no-op progress hook, so
- * it reports EXACTLY the set a build would report — the whole program, not a prefix truncated at the
- * first defect. Monomorphization is deliberately skipped: the diagnostics live in the pre-mono
- * `PreMono.diags`, and a partial program (one carrying diagnostics) must never be monomorphized.
+ * collect_diagnostics — every diagnostic of `program` a build would report — its type ERRORS (the
+ * `file:line:col: msg` lines `type_program_with_deps_pre_mono` collects) PLUS every WARNING the two
+ * checker passes that only used to print to stderr would have raised (`warnings.tks::collect_warnings`
+ * — unused private functions, redundant D1 casts; crumb C) — WITHOUT raising an error at the first bad
+ * declaration. This is the single seam the LSP consumes from the checker: it reuses the existing
+ * declaration-boundary walk with an EMPTY dependency program and a no-op progress hook, so the ERROR
+ * half reports EXACTLY the set a build would report — the whole program, not a prefix truncated at the
+ * first defect — and the WARNING half is re-derived from that same walk's typed output (`PreMono.prog`)
+ * rather than threaded live through the deep expression typer (`warnings.tks`'s own module doc).
+ * Monomorphization is deliberately skipped: the diagnostics live in the pre-mono `PreMono`, and a
+ * partial program (one carrying error diagnostics) must never be monomorphized.
  *
  * @param program  the merged, un-typed project program (from assembly, or a single open document)
- * @return         each project diagnostic in report order (empty ⇒ the program typed cleanly)
- * @since 0.3.1.0 (LSP crumb A)
+ * @return         each project error, THEN each warning, in report order (empty ⇒ the program is
+ *                 clean AND carries no finding)
+ * @since 0.3.1.0 (LSP crumb A; warnings added crumb C)
  */
 pub fn collect_diagnostics(program: parser::Program) -> []str {
     let empty_dep = TProgram { items = teko::list::empty() }
     match type_program_with_deps_pre_mono(program, empty_dep, lsp_no_progress) {
-        PreMono as pre => pre.diags
+        PreMono as pre => concat_diags(pre.diags, collect_warnings(pre.prog))
         error as e => teko::list::push(teko::list::empty(), e.message)
     }
 }
