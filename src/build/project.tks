@@ -1865,9 +1865,10 @@ fn run_cc_debug(cfile: str, binary: str, m: Manifest, prog: checker::TProgram) -
  * per the design doc's §7.5 rule 3, `teko run` keeps its own always-on debug profile and does not
  * start requiring this flag. The two axes stay independent.
  *
- * On the own-native backend (the default since 2026-07-26) `debug` has NO effect yet — the DWARF
- * sink into the ELF/Mach-O object writers is a still-missing codegen hook (D1.4/D1.5), not this
- * crumb's scope; `backend` never reaches this function on that path (`emit_native` returns first).
+ * On the own-native backend (the default since 2026-07-26) `debug` reaches a real effect too, via
+ * a SEPARATE path: `backend` never reaches THIS function on that route (`emit_native` returns
+ * first) — the ELF/Mach-O sink is `emit_native`'s own `build_dwarf_sink_for` (D1.4/D1.5), not
+ * `build_cc_argv`'s `-g`.
  *
  * @param cfile   the generated C translation unit
  * @param binary  the output native executable path
@@ -1954,8 +1955,9 @@ fn plist_xml(m: Manifest) -> str {
  *                 selects the rendering (Tty on a terminal, Plain on a CI/log),
  *                 never silence.
  * @param debug    the requested `--debug=` level (D1.6): reaches `-g` on the C-backend link
- *                 (`run_cc_for_level`) when non-`None`; has no effect yet on the own-native path
- *                 (`emit_native`), whose DWARF sink is a still-missing codegen hook (D1.4/D1.5)
+ *                 (`run_cc_for_level`) when non-`None`, and reaches the ELF/Mach-O DWARF sink on
+ *                 the own-native path (`emit_native` → `build_dwarf_sink_for`, D1.4/D1.5) — the
+ *                 SAME flag, two independent sinks, one per backend
  * @return         0 on a successful build, else the failing status
  */
 fn backend(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest, opt: i32, tty: bool, debug: DebugInfo) -> i32 {
@@ -2006,7 +2008,7 @@ fn backend(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manife
         return 0
     }
     if m.backend == Backend::Native {
-        return emit_native(dir, stem, out_dir, prog, m)
+        return emit_native(dir, stem, out_dir, prog, m, debug)
     }
     let mode = report_mode(false, tty)
     if m.abi == "c" {
@@ -2681,6 +2683,319 @@ fn mkdir_p(dir: str) -> error | null {
 }
 
 /**
+ * DwarfFuncFact — one function's already-known DWARF facts (D1.4/D1.5's build glue): the mangled
+ * `.text` symbol, its qualified Teko name, its declaration file/line (from the checker's
+ * `checker::TFunction`, the SAME source `.tsym` v1 already reads via `codegen::tk_emit_tsym`), and
+ * its `.text` byte offset (from the encoded module's symbol table). Everything a `--debug=lines`
+ * build can honestly describe before D1.2 (`MLineMark`) lands statement-level address→line rows —
+ * ONE row per function, at its declaration position, is a real function-granularity breakpoint, not
+ * a fabricated finer resolution.
+ *
+ * @since 0.3.1 debugger piso, D1.4/D1.5
+ */
+type DwarfFuncFact = struct {
+    /** the mangled `.text` symbol (`teko::lir::mangle_fn_symbol(f.namespace, f.name)`). */
+    symbol: str
+    /** the qualified Teko name (`ns::name`, or bare `name` with no namespace). */
+    teko_name: str
+    /** the 1-based declaration file. */
+    file: str
+    /** the 1-based declaration line. */
+    line: u32
+    /** the function's `.text` byte offset. */
+    offset: u32
+}
+
+/**
+ * DwarfSymLookup — the outcome of `dwarf_find_text_symbol` (option-struct, M.2): `found` is false
+ * when `name` names no DEFINED, GLOBAL, `.text`-section symbol in the encoded module, in which case
+ * the function was never emitted (an unreferenced or dead-code-eliminated function) and MUST NOT get
+ * a DWARF entry synthesized from a guess.
+ *
+ * @since 0.3.1 debugger piso, D1.4/D1.5
+ */
+type DwarfSymLookup = struct {
+    /** true iff `name` names a defined `.text` symbol. */
+    found: bool
+    /** the symbol's `.text` byte offset; valid only when `found`. */
+    offset: u32
+}
+
+/**
+ * dwarf_find_text_symbol — the `.text` byte offset of the defined, global symbol named `name`, or
+ * `found = false` when no such symbol exists in `symbols` (the function was never emitted).
+ *
+ * @param symbols  the encoded module's symbol table
+ * @param name     the mangled symbol name to find
+ * @return         the offset, or `found = false`
+ * @since 0.3.1 debugger piso, D1.4/D1.5
+ */
+fn dwarf_find_text_symbol(symbols: []teko::backend::Symbol, name: str) -> DwarfSymLookup {
+    mut i: u64 = 0
+    loop {
+        if i >= symbols.len { break }
+        let s = symbols[i]
+        if s.defined && !s.local && s.sect == (1 to u8) && s.name == name { return DwarfSymLookup { found = true; offset = s.offset } }
+        i = i + 1
+    }
+    DwarfSymLookup { found = false; offset = 0 to u32 }
+}
+
+/**
+ * dwarf_qualified_name — the qualified Teko name a DWARF `DW_AT_name`/`.tsym` `teko_name` shows:
+ * `ns::name` when `f` declares a namespace, else the bare `name`.
+ *
+ * @param f  the typed function
+ * @return   the qualified name
+ * @since 0.3.1 debugger piso, D1.4/D1.5
+ */
+fn dwarf_qualified_name(f: checker::TFunction) -> str {
+    if f.namespace.len == 0 { return f.name }
+    teko::str::concat(f.namespace, "::", f.name)
+}
+
+/**
+ * dwarf_func_fact_of — join one checked function against the encoded module's symbol table into a
+ * `DwarfFuncFact`, or `null` when the function was never emitted (`f.is_extern`, or dead-code
+ * elimination/no reference left no `.text` symbol behind — the honest "nothing to describe" case,
+ * never a synthesized guess).
+ *
+ * @param f        the typed function
+ * @param symbols  the encoded module's symbol table
+ * @return         the joined fact, or `null`
+ * @since 0.3.1 debugger piso, D1.4/D1.5
+ */
+fn dwarf_func_fact_of(f: checker::TFunction, symbols: []teko::backend::Symbol) -> DwarfFuncFact | null {
+    if f.is_extern { return null }
+    let sym = teko::lir::mangle_fn_symbol(f.namespace, f.name)
+    let hit = dwarf_find_text_symbol(symbols, sym)
+    if !hit.found { return null }
+    DwarfFuncFact { symbol = sym; teko_name = dwarf_qualified_name(f); file = f.file; line = f.line; offset = hit.offset }
+}
+
+/**
+ * dwarf_collect_facts — every emitted function's `DwarfFuncFact`, in `prog.items` order (unsorted —
+ * `dwarf_sort_by_offset` orders them by `.text` address, which the DWARF line program requires).
+ *
+ * @param prog     the checked program
+ * @param symbols  the encoded module's symbol table
+ * @return         the joined facts, one per emitted function
+ * @since 0.3.1 debugger piso, D1.4/D1.5
+ */
+fn dwarf_collect_facts(prog: checker::TProgram, symbols: []teko::backend::Symbol) -> []DwarfFuncFact {
+    mut out: []DwarfFuncFact = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            checker::TFunction as f => {
+                match dwarf_func_fact_of(f, symbols) {
+                    DwarfFuncFact as fact => out = teko::list::push(out, fact)
+                    null => { }
+                }
+            }
+            _ => { }
+        }
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * dwarf_insert_by_offset — `sorted` (assumed ascending by `.offset`) with `item` inserted in order.
+ * A plain insertion step — the fact list is one entry per emitted function, never large enough to
+ * need more than this.
+ *
+ * @param sorted  the ascending-by-offset facts so far
+ * @param item    the fact to insert
+ * @return        `sorted` with `item` inserted at its ascending position
+ * @since 0.3.1 debugger piso, D1.4/D1.5
+ */
+fn dwarf_insert_by_offset(sorted: []DwarfFuncFact, item: DwarfFuncFact) -> []DwarfFuncFact {
+    mut out: []DwarfFuncFact = teko::list::empty()
+    mut inserted = false
+    mut i: u64 = 0
+    loop {
+        if i >= sorted.len { break }
+        if !inserted && item.offset < sorted[i].offset {
+            out = teko::list::push(out, item)
+            inserted = true
+        }
+        out = teko::list::push(out, sorted[i])
+        i = i + 1
+    }
+    if !inserted { out = teko::list::push(out, item) }
+    out
+}
+
+/**
+ * dwarf_sort_by_offset — `facts` ordered ascending by `.text` byte offset: the DWARF line program
+ * (`dwarf::debug_line`) is a single monotonic address→line sequence anchored at ONE `set_address`
+ * relocation, so its rows must walk `.text` in emission order, not declaration order.
+ *
+ * @param facts  the unordered facts
+ * @return       the same facts, ascending by `.offset`
+ * @since 0.3.1 debugger piso, D1.4/D1.5
+ */
+fn dwarf_sort_by_offset(facts: []DwarfFuncFact) -> []DwarfFuncFact {
+    mut out: []DwarfFuncFact = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= facts.len { break }
+        out = dwarf_insert_by_offset(out, facts[i])
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * dwarf_file_index_of — the 1-based index of `name` in `files`, or 0 when absent (the DWARF
+ * file-table convention `dwarf::DwLineRow.file`/`DwSubprogram.decl_file` expect).
+ *
+ * @param files  the file-table names, in table order
+ * @param name   the file name to find
+ * @return       the 1-based index, or 0 when absent
+ * @since 0.3.1 debugger piso, D1.4/D1.5
+ */
+fn dwarf_file_index_of(files: []str, name: str) -> i64 {
+    mut i: u64 = 0
+    loop {
+        if i >= files.len { break }
+        if files[i] == name { return (i to i64) + 1 }
+        i = i + 1
+    }
+    0
+}
+
+/**
+ * dwarf_files_of — the unique file names `facts` reference, in first-seen order (the DWARF
+ * `.debug_line` file table — index 1 is the primary file, matching the first fact's file).
+ *
+ * @param facts  the ascending-by-offset facts
+ * @return       the unique file names, in first-seen order
+ * @since 0.3.1 debugger piso, D1.4/D1.5
+ */
+fn dwarf_files_of(facts: []DwarfFuncFact) -> []str {
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= facts.len { break }
+        if dwarf_file_index_of(out, facts[i].file) == 0 { out = teko::list::push(out, facts[i].file) }
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * dwarf_code_size_of — the `.text` byte length of the function at `facts[i]`: the run to the next
+ * function's offset, or to `text_len` for the last one.
+ *
+ * @param facts     the ascending-by-offset facts
+ * @param i         the fact's index
+ * @param text_len  the module's total `.text` byte length
+ * @return          the function's code size
+ * @since 0.3.1 debugger piso, D1.4/D1.5
+ */
+fn dwarf_code_size_of(facts: []DwarfFuncFact, i: u64, text_len: u64) -> u64 {
+    if i + 1 < facts.len { return (facts[i + 1].offset - facts[i].offset) to u64 }
+    text_len - (facts[i].offset to u64)
+}
+
+/**
+ * dwarf_subprograms_of — one `dwarf::DwSubprogram` per fact, in address order, each `code_size`
+ * from `dwarf_code_size_of`.
+ *
+ * @param facts     the ascending-by-offset facts
+ * @param files     the unique file table (for `decl_file`)
+ * @param text_len  the module's total `.text` byte length
+ * @return          the subprograms, in address order
+ * @since 0.3.1 debugger piso, D1.4/D1.5
+ */
+fn dwarf_subprograms_of(facts: []DwarfFuncFact, files: []str, text_len: u64) -> []teko::backend::DwSubprogram {
+    mut out: []teko::backend::DwSubprogram = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= facts.len { break }
+        let f = facts[i]
+        out = teko::list::push(out, teko::backend::DwSubprogram {
+            name = f.teko_name
+            decl_file = dwarf_file_index_of(files, f.file)
+            decl_line = f.line
+            symbol = f.symbol
+            code_size = dwarf_code_size_of(facts, i, text_len)
+        })
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * dwarf_rows_of — one `dwarf::DwLineRow` per fact, in address order: the first row sits at the
+ * line program's `set_address` (`pc_advance = 0`), every later row advances by the gap since the
+ * previous fact's offset.
+ *
+ * @param facts  the ascending-by-offset facts
+ * @param files  the unique file table (for each row's `file`)
+ * @return       the line rows, in address order
+ * @since 0.3.1 debugger piso, D1.4/D1.5
+ */
+fn dwarf_rows_of(facts: []DwarfFuncFact, files: []str) -> []teko::backend::DwLineRow {
+    mut out: []teko::backend::DwLineRow = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= facts.len { break }
+        let f = facts[i]
+        let advance: u64 = if i == 0 { 0 to u64 } else { (f.offset - facts[i - 1].offset) to u64 }
+        out = teko::list::push(out, teko::backend::DwLineRow { pc_advance = advance; line = f.line; file = dwarf_file_index_of(files, f.file) })
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * build_dwarf_sink_for — assemble the D1.4/D1.5 sink for a `--debug=lines` native build: join the
+ * checker's per-function file/line against the encoded module's `.text` symbol offsets by the SAME
+ * mangled name both the C and native backends produce (`teko::lir::mangle_fn_symbol`,
+ * `cgt_mangle_parity_c_and_native` proves the two agree), sort by address, and hand the result to
+ * `dwarf::build_dwarf_sink`. Returns `no_dwarf_sink()` unless `debug == DebugInfo::Lines` (so every
+ * other build reaches `emit_elf`/`emit_elf_arm64`/`emit_macho` exactly as before D1.4/D1.5 — the
+ * byte-identity FIXPOINT) or the module emits no function at all (nothing to describe). Called ONCE
+ * per tail, at the very end of the fused per-item driver (0.3.1 C6.3/C6.4) — after every item's own
+ * scoped region has already dropped and the whole module's `EncodedModule(X86)` is assembled, so
+ * `symbols`/`text_len` are the ROOT-resident, final values, never a region-local intermediate.
+ *
+ * @param dir      the project directory (D1.5's design note: `comp_dir` is BEST-EFFORT — the
+ *                 project directory as given, not resolved to an absolute path; a wrong `comp_dir`
+ *                 makes the debugger resolve the breakpoint but fail to LIST the source, the
+ *                 documented non-fatal half-failure, see docs/design/debugger-superficie-e-
+ *                 contramedida-0.3.1.md §1.5)
+ * @param prog     the checked program (per-function file/line)
+ * @param symbols  the encoded module's symbol table (`.text` offsets)
+ * @param text_len the module's total `.text` byte length
+ * @param debug    the requested `--debug=` level
+ * @return         the assembled sink, or the absent one
+ * @since 0.3.1 debugger piso, D1.4/D1.5
+ */
+fn build_dwarf_sink_for(dir: str, prog: checker::TProgram, symbols: []teko::backend::Symbol, text_len: u64, debug: DebugInfo) -> teko::backend::DwarfSink {
+    if debug != DebugInfo::Lines { return teko::backend::no_dwarf_sink() }
+    let facts = dwarf_sort_by_offset(dwarf_collect_facts(prog, symbols))
+    if facts.len == 0 { return teko::backend::no_dwarf_sink() }
+    let files = dwarf_files_of(facts)
+    let first = facts[0]
+    let last = facts[facts.len - 1]
+    let cu = teko::backend::DwCompileUnit {
+        producer = "teko 0.3.1"
+        language = 0x0c to u32
+        name = files[0]
+        comp_dir = dir
+        text_symbol = first.symbol
+        text_size = text_len
+        subprograms = dwarf_subprograms_of(facts, files, text_len)
+    }
+    teko::backend::build_dwarf_sink(cu, files, dwarf_rows_of(facts, files), text_len - (last.offset to u64))
+}
+
+/**
  * emit_native — the own-AOT-backend driver (the #385 A4-5 KEYSTONE, extended for
  * x86-64 at #386 B1-8 and Windows at #388 B3-4): lower the
  * checked program to target-independent LIR, then dispatch on `native_target()` to
@@ -2700,13 +3015,17 @@ fn mkdir_p(dir: str) -> error | null {
  * fails the SAME honest way (R2, `native_target`'s error arm below). Reached only
  * when `m.backend == Backend::Native` (the resolved backend, `TEKO_BACKEND=native`
  * — the earlier `--backend` CLI flag was removed, owner ruling 2026-07-24); the
- * default C path is untouched.
+ * default C path is untouched. `debug` (D1.4/D1.5) sinks `.debug_abbrev`/`.debug_info`/`.debug_line`
+ * into the ELF/Mach-O tails when `DebugInfo::Lines` (`build_dwarf_sink_for`); `DebugInfo::None`
+ * (the default) reaches every tail exactly as before D1.4/D1.5, so the emitted object stays
+ * byte-identical (the FIXPOINT).
  *
  * @param dir      the project directory (for diagnostics)
  * @param stem     the output artifact name (the manifest `name`)
  * @param out_dir  the build output directory (`-o`, default "bin")
  * @param prog     the checked, typed program
  * @param m        the resolved manifest (link knobs)
+ * @param debug    the requested `--debug=` level (D1.4/D1.5)
  * @return         0 on a successful build+link, else the failing status
  *
  * (0.3.1 C6.3/C6.4) No own-backend tail lowers the WHOLE program up front anymore: every one of
@@ -2715,15 +3034,15 @@ fn mkdir_p(dir: str) -> error | null {
  * lowers each item inside its own scoped region, so `prog` is handed to each directly instead of a
  * pre-built `LModule`.
  */
-fn emit_native(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest) -> i32 {
+fn emit_native(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest, debug: DebugInfo) -> i32 {
     let od = strip_trailing_slash(out_dir)
     match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the output directory"); null => { } }
     let target = match native_target() { NativeTarget as t => t; error as e => return fail(dir, e.message) }
     match target {
-        NativeTarget::X8664Linux => emit_native_x86(dir, od, stem, prog, m)
+        NativeTarget::X8664Linux => emit_native_x86(dir, od, stem, prog, m, debug)
         NativeTarget::X8664Windows => emit_native_win(dir, od, stem, prog, m)
-        NativeTarget::Arm64Macho => emit_native_arm64(dir, od, stem, prog, m)
-        NativeTarget::Arm64Linux => emit_native_arm64_linux(dir, od, stem, prog, m)
+        NativeTarget::Arm64Macho => emit_native_arm64(dir, od, stem, prog, m, debug)
+        NativeTarget::Arm64Linux => emit_native_arm64_linux(dir, od, stem, prog, m, debug)
     }
 }
 
@@ -2733,18 +3052,21 @@ fn emit_native(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Ma
  * of the shared arm64 fused driver (`emit_native_arm64_fused`) — the platform-ABI entry point
  * (`teko::lir::wrap_native_entry`), arm64 isel, AAPCS64 regalloc and arm64 encode all run per item
  * inside their own scoped region, exactly mirroring the x86-linux fusion of C6.3. Only the final
- * object-format call (`teko::backend::emit_macho`) is specific to this tail.
+ * object-format call (`teko::backend::emit_macho`) is specific to this tail. `debug` (D1.5) sinks the
+ * DWARF sections into the Mach-O object when `DebugInfo::Lines`; `DebugInfo::None` reaches
+ * `emit_macho` exactly as before D1.5 (byte-identical).
  *
  * @param dir   the project directory (for diagnostics)
  * @param od    the slash-stripped output directory (already created)
  * @param stem  the output artifact name (the manifest `name`)
  * @param prog  the checked, typed program (lowered item-by-item, not up front — C6.4)
  * @param m     the resolved manifest (link knobs)
+ * @param debug the requested `--debug=` level (D1.5)
  * @return      0 on a successful build+link, else the failing status
  * @since 0.3.1 C6.4
  */
-fn emit_native_arm64(dir: str, od: str, stem: str, prog: checker::TProgram, m: Manifest) -> i32 {
-    emit_native_arm64_fused(dir, od, stem, prog, m, (enc) => teko::backend::emit_macho(enc))
+fn emit_native_arm64(dir: str, od: str, stem: str, prog: checker::TProgram, m: Manifest, debug: DebugInfo) -> i32 {
+    emit_native_arm64_fused(dir, od, stem, prog, m, debug, (enc, dwarf) => teko::backend::emit_macho(enc, dwarf))
 }
 
 /**
@@ -2754,18 +3076,21 @@ fn emit_native_arm64(dir: str, od: str, stem: str, prog: checker::TProgram, m: M
  * the object format swapped from Mach-O to ELF (`teko::backend::emit_elf_arm64`). Exactly ONE call
  * differs, and nothing else may: the two arm64 tails share isel, regalloc, encode AND the fused
  * per-item driver itself, so the arm64-macos differential keeps covering the arm64-linux codegen — a
- * drift between the two tails would silently void that coverage.
+ * drift between the two tails would silently void that coverage. `debug` (D1.4) sinks the DWARF
+ * sections into the ELF object when `DebugInfo::Lines`; `DebugInfo::None` reaches `emit_elf_arm64`
+ * exactly as before D1.4 (byte-identical).
  *
  * @param dir   the project directory (for diagnostics)
  * @param od    the slash-stripped output directory (already created)
  * @param stem  the output artifact name (the manifest `name`)
  * @param prog  the checked, typed program (lowered item-by-item, not up front — C6.4)
  * @param m     the resolved manifest (link knobs)
+ * @param debug the requested `--debug=` level (D1.4)
  * @return      0 on a successful build+link, else the failing status
  * @since 0.3.1
  */
-fn emit_native_arm64_linux(dir: str, od: str, stem: str, prog: checker::TProgram, m: Manifest) -> i32 {
-    emit_native_arm64_fused(dir, od, stem, prog, m, (enc) => teko::backend::emit_elf_arm64(enc))
+fn emit_native_arm64_linux(dir: str, od: str, stem: str, prog: checker::TProgram, m: Manifest, debug: DebugInfo) -> i32 {
+    emit_native_arm64_fused(dir, od, stem, prog, m, debug, (enc, dwarf) => teko::backend::emit_elf_arm64(enc, dwarf))
 }
 
 /**
@@ -3353,15 +3678,18 @@ fn trace_native_item(i: u64, total: u64, it: checker::TItem) -> void {
  * object, so the executing C-vs-own differential runs on a linux-x86_64 host
  * (`scripts/diff_c_own.sh`), while a macOS host still writes the `.o` for the
  * byte / well-formedness cross-check even though `cc` cannot link an ELF there.
+ * `debug` (D1.4) sinks the DWARF sections into the ELF object when `DebugInfo::Lines`;
+ * `DebugInfo::None` reaches `emit_elf` exactly as before D1.4 (byte-identical).
  *
  * @param dir   the project directory (for diagnostics)
  * @param od    the slash-stripped output directory (already created)
  * @param stem  the output artifact name (the manifest `name`)
  * @param prog  the checked, typed program (lowered item-by-item, not up front — C6.3)
  * @param m     the resolved manifest (link knobs)
+ * @param debug the requested `--debug=` level (D1.4)
  * @return      0 on a successful build+link, else the failing status
  */
-fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Manifest) -> i32 {
+fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Manifest, debug: DebugInfo) -> i32 {
     let prelude = match teko::lir::lower_prelude(prog, false) { teko::lir::LowerPrelude as x => x; error as e => return fail(dir, e.message) }
     mut robase = prelude.module.rodata
     mut loose: []checker::TStatement = teko::list::empty()
@@ -3398,7 +3726,10 @@ fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Man
             robase = commit_rodata_delta(robase, out.rodata)
             region_drop(vchild)
             match teko::backend::finish_encoded_module_x86(mt, robase, prelude.module.globals) {
-                teko::backend::EncodedModuleX86 as enc => finish_native_object(dir, od, stem, teko::backend::emit_elf(enc), prog, m)
+                teko::backend::EncodedModuleX86 as enc => {
+                    let dwarf = build_dwarf_sink_for(dir, prog, enc.symbols, enc.text.len, debug)
+                    finish_native_object(dir, od, stem, teko::backend::emit_elf(enc, dwarf), prog, m)
+                }
                 error as e => fail(dir, e.message)
             }
         }
@@ -3607,11 +3938,13 @@ fn fuse_virtual_main_arm64(loose: []checker::TStatement, prelude: teko::lir::Low
  * (ELF) passes `teko::backend::emit_elf_arm64`. Everything upstream of the final object-format
  * write — isel, AAPCS64 regalloc, arm64 encode, the per-item fused lowering loop itself — is
  * IDENTICAL between the two tails, preserving the invariant that the arm64-macos differential keeps
- * covering the arm64-linux codegen (§ design doc C6.4).
+ * covering the arm64-linux codegen (§ design doc C6.4). Takes the D1.4/D1.5 `DwarfSink` alongside
+ * the encoded module, so the writer's own object format decides how to place it (or, when absent,
+ * places nothing) — the SAME two-argument shape `emit_macho`/`emit_elf_arm64` already carry.
  *
  * @since 0.3.1 C6.4
  */
-type NativeObjectWriterArm64 = (teko::backend::EncodedModule) -> []byte
+type NativeObjectWriterArm64 = (teko::backend::EncodedModule, teko::backend::DwarfSink) -> []byte
 
 /**
  * emit_native_arm64_fused — the shared arm64 own-backend tail, FUSED lower+encode per item (0.3.1
@@ -3622,23 +3955,25 @@ type NativeObjectWriterArm64 = (teko::backend::EncodedModule) -> []byte
  * delta E6, the new-lifted count E5), THEN drop the region — bounding the arm64 native peak to
  * `Σ(bytes) + rodata + ONE item's LIR/scratch`, mirroring the x86-linux fusion of C6.3. The
  * virtual-main lowers and encodes the same way, in its own final window, once every item's region
- * has already dropped. The assembled `__text`/rodata/symbols are wrapped in the object format
- * `writer` selects (Mach-O for `emit_native_arm64`, ELF for `emit_native_arm64_linux` — the ONE call
- * that differs, §4a of the design) and handed to `finish_native_object` (write `.o` + `cc`-link +
- * `.tsym` + success marker) — unchanged past the encoder, so the emitted bytes are byte-identical to
- * the pre-fusion module-at-a-time path (only WHERE the compiler's own intermediates bump-allocate
- * changes, never their computed values).
+ * has already dropped. The assembled `__text`/rodata/symbols, plus the D1.5 DWARF sink
+ * (`build_dwarf_sink_for`, gated on `DebugInfo::Lines`), are wrapped in the object format `writer`
+ * selects (Mach-O for `emit_native_arm64`, ELF for `emit_native_arm64_linux` — the ONE call that
+ * differs, §4a of the design) and handed to `finish_native_object` (write `.o` + `cc`-link + `.tsym`
+ * + success marker) — unchanged past the encoder, so a `DebugInfo::None` build's emitted bytes stay
+ * byte-identical to the pre-fusion module-at-a-time path (only WHERE the compiler's own
+ * intermediates bump-allocate changes, never their computed values).
  *
  * @param dir     the project directory (for diagnostics)
  * @param od      the slash-stripped output directory (already created)
  * @param stem    the output artifact name (the manifest `name`)
  * @param prog    the checked, typed program (lowered item-by-item, not up front — C6.4)
  * @param m       the resolved manifest (link knobs)
+ * @param debug   the requested `--debug=` level (D1.4/D1.5)
  * @param writer  the target's own object-format writer (Mach-O or ELF)
  * @return        0 on a successful build+link, else the failing status
  * @since 0.3.1 C6.4
  */
-fn emit_native_arm64_fused(dir: str, od: str, stem: str, prog: checker::TProgram, m: Manifest, writer: NativeObjectWriterArm64) -> i32 {
+fn emit_native_arm64_fused(dir: str, od: str, stem: str, prog: checker::TProgram, m: Manifest, debug: DebugInfo, writer: NativeObjectWriterArm64) -> i32 {
     let prelude = match teko::lir::lower_prelude(prog, false) { teko::lir::LowerPrelude as x => x; error as e => return fail(dir, e.message) }
     mut robase = prelude.module.rodata
     mut loose: []checker::TStatement = teko::list::empty()
@@ -3675,7 +4010,10 @@ fn emit_native_arm64_fused(dir: str, od: str, stem: str, prog: checker::TProgram
             robase = commit_rodata_delta(robase, out.rodata)
             region_drop(vchild)
             match teko::backend::finish_encoded_module(mt, robase, prelude.module.globals) {
-                teko::backend::EncodedModule as enc => finish_native_object(dir, od, stem, writer(enc), prog, m)
+                teko::backend::EncodedModule as enc => {
+                    let dwarf = build_dwarf_sink_for(dir, prog, enc.symbols, enc.text.len, debug)
+                    finish_native_object(dir, od, stem, writer(enc, dwarf), prog, m)
+                }
                 error as e => fail(dir, e.message)
             }
         }
@@ -3794,7 +4132,12 @@ fn fuse_virtual_main_win(loose: []checker::TStatement, prelude: teko::lir::Lower
  * x86-64 object, so the executing C-vs-own differential runs on a Windows host
  * (B3-4), while a non-Windows host still writes the `.o` for the byte /
  * well-formedness cross-check (`llvm-readobj` is cross-format) even though the
- * host `cc` cannot link a PE there without the MinGW cross toolchain.
+ * host `cc` cannot link a PE there without the MinGW cross toolchain. Takes NO
+ * `debug` parameter: the COFF DWARF sink is `W0`…`W2` (`docs/design/debugger-
+ * superficie-e-contramedida-0.3.1.md` §9.4), a separate, still-unstarted crumb
+ * gated on a Windows-CI-only linker-survival sondagem — out of D1.4/D1.5's
+ * ELF/Mach-O scope. `emit_native` calls this tail without `debug`, so a
+ * `--debug=lines` Windows build silently gets no DWARF (same as today).
  *
  * @param dir   the project directory (for diagnostics)
  * @param od    the slash-stripped output directory (already created)
@@ -5399,6 +5742,11 @@ fn project_arg_of(args: []str, start: u64) -> str {
  * Mirrors `backend`'s binary path; the caller (`build_debug_and_report`) has already created
  * `out_dir` and its parents (`mkdir_p`).
  *
+ * `emit_native` takes `DebugInfo::None`: per the design doc's §7.5 rule 3, `teko run` keeps its own
+ * always-on debug profile and does not gain `--debug=lines`'s ELF/Mach-O DWARF sink (D1.4/D1.5) —
+ * the two axes stay independent, the same rule `run_cc_for_level`'s doc-comment states for the
+ * C-backend side of this same function.
+ *
  * @param dir      the project directory (for diagnostics)
  * @param stem     the output artifact name (the manifest `name`)
  * @param out_dir  the debug scratch directory (`target/debug`, already created)
@@ -5409,7 +5757,7 @@ fn project_arg_of(args: []str, start: u64) -> str {
 fn build_debug_binary(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest) -> i32 {
     match validate_extern_libs_for_target(m) { error as e => return fail(dir, e.message); null => { } }
     if m.backend == Backend::Native {
-        return emit_native(dir, stem, out_dir, prog, m)
+        return emit_native(dir, stem, out_dir, prog, m, DebugInfo::None)
     }
     let emitted = match codegen::tk_emit_c(prog) { str as s => s; error as e => return fail(dir, e.message) }
     let csrc = teko::str::concat(emitted, codegen::tk_emit_meta(m.name, m.version, m.suffix, m.description))
