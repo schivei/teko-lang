@@ -2724,12 +2724,7 @@ fn lower_compare(ctx: LowerCtx, e: checker::TExpr, cmp: checker::TCompare) -> Lo
  * every sibling above is: not because their runtime twin needs a shape this backend cannot build
  * yet, but because they need no CALL at all — a bit reinterpretation crosses the GPR/FPR boundary
  * with no arithmetic, so `lower_f64_bitcast_call` emits one raw `LUn` move (`IToFBits`/`FToIBits`)
- * into a fresh VReg instead of a runtime call — the same SIDESTEP of the ABI gap `calls_native_c`
- * would otherwise need (`pin_args_x86`/`select_call_result_x86` still do not carry an f64-class
- * argument/result through XMM), reached by a real machine move rather than the ORIGINAL
- * same-VReg-id alias (0.3.1.0 degrau 24), which was UNSOUND on a register-allocated backend — see
- * `lower_f64_bitcast_call`'s own doc for the measured crash (native self-build SIGSEGV lowering
- * `checker::float_binop`, degrau 27) that alias caused.
+ * into a fresh VReg — see its own doc for why a call OR a same-VReg-id alias were both unsound.
  *
  * A call into REAL C (a declared `extern fn`, OR a runtime builtin — `calls_native_c`) additionally
  * passes through `apply_native_c_return_narrow`: SysV/Win64 both permit the callee to leave the
@@ -3775,52 +3770,29 @@ fn is_f64_bitcast_call(callee: parser::Path) -> bool {
 }
 
 /**
- * is_f64_from_bits_call — narrows `is_f64_bitcast_call`'s pair to the `u64 -> f64` direction
- * alone, the one `lower_f64_bitcast_call` needs to pick `IToFBits` over `FToIBits`.
- *
- * @param callee  the call's callee path (already known to satisfy `is_f64_bitcast_call`)
- * @return        true iff `callee`'s bare last segment names `f64_from_bits`
- */
-fn is_f64_from_bits_call(callee: parser::Path) -> bool {
-    let segs = callee.segments
-    segs.len > 0 && segs[segs.len - 1].name == "f64_from_bits"
-}
-
-/**
  * lower_f64_bitcast_call — `f64_from_bits(x)`/`f64_bits(x)`: one raw `LUn` move
  * (`IToFBits`/`FToIBits`) across the GPR/FPR register-file boundary, with no arithmetic.
  *
- * PORQUE UM LUn E NAO UMA CHAMADA. Both builtins reinterpret an 8-byte IEEE-754 bit pattern
- * between `f64` and `u64`, so no ABI/call machinery is needed at all — but a bare VReg alias (the
- * ORIGINAL 0.3.1.0 degrau 24 shape, keeping the operand's VReg id unchanged) is UNSOUND on this
- * register-allocated backend: a VReg's physical register FILE (GPR vs FPR) is fixed by its OWN
- * defining instruction, so a load that defines a `u64` field lands the bits in a GPR — reusing
- * that same VReg id at a float-typed consumer (`select_falu_x86` et al.) makes the SAME numeric id
- * carry two DIFFERENT register classes across the program. `distinct_regs`/`virt_interval`
- * (`regalloc.tks`) then split it into two disjoint intervals that still share one `vid`, and
- * `subst_find`'s id-only lookup (no class check) rewrites BOTH occurrences to whichever interval's
- * color came first — so the float math reads an uninitialized/wrong-class register (the measured
- * SIGSEGV: the native self-build crashing while lowering `checker::float_binop`, the first function
- * in item order to do real f64 arithmetic through this pair). `IToFBits`/`FToIBits` fix it by
- * emitting an ACTUAL instruction (one `MFMovX86`/`MFMov`, x86-64's `MOVQ`/arm64's `FMOV` — the SAME
- * raw GPR<->FPR crossing `select_fneg_x86`'s sign-bit round-trip and `select_const_float`'s literal
- * materialization already rely on) into a FRESH result VReg whose OWN class is recorded once, so
- * every later consumer agrees.
+ * A bare VReg alias (the ORIGINAL degrau-24 shape) is UNSOUND here: a VReg's register FILE is
+ * fixed by its OWN defining instruction, so reusing the operand's id at a float-typed consumer
+ * makes ONE numeric id carry two register classes — `regalloc.tks`'s `subst_find` (id-only, no
+ * class check) then rewrites both occurrences to whichever interval colored first, so float math
+ * reads a wrong-class register (the measured SIGSEGV lowering `checker::float_binop`). Emitting a
+ * real move into a FRESH result VReg fixes it.
  *
- * @param ctx      the lowering context
- * @param e        the call expression (for its source position)
- * @param c        the call node (its one argument and its callee, to pick the direction)
+ * @param ctx  the lowering context
+ * @param e    the call expression (for its source position)
+ * @param c    the call node (its one argument and its callee, to pick the direction)
  * @return Lowered | error  the advanced context plus the reinterpreted value's fresh VReg, or a
  *                          NAMED internal error when the call's arity is not 1
- *                          (`checker::scope.tks`'s own one-argument signature for both names
- *                          already fixed it)
  */
 fn lower_f64_bitcast_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | error {
     if c.args.len != 1 {
         return error { message = "native backend N1: `f64_bits`/`f64_from_bits` expects exactly one argument (internal)" }
     }
     let ao = match lower_expr(ctx, c.args[0]) { Lowered as x => x; error as err => return err }
-    let op = if is_f64_from_bits_call(c.callee) { LUnOp::IToFBits } else { LUnOp::FToIBits }
+    let segs = c.callee.segments
+    let op = if segs.len > 0 && segs[segs.len - 1].name == "f64_from_bits" { LUnOp::IToFBits } else { LUnOp::FToIBits }
     let r = ctx_alloc(ao.ctx)
     let inst = un_inst(r.vreg, op, ao.vreg, e.line, e.col)
     Lowered { ctx = ctx_append(r.ctx, inst); vreg = r.vreg }
