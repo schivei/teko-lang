@@ -209,6 +209,7 @@ tk_region *tk_region_current(void);             // the current region for tk_all
 // pointer in its signature, so the Teko surface binds it directly (no twin needed).
 uint64_t   tk_region_new_u(uint64_t parent);    // tk_region_new((tk_region*)parent) as a handle
 uint64_t   tk_region_root_u(void);              // tk_region_root() as a handle
+uint64_t   tk_region_current_u(void);           // tk_region_current() as a handle (native captures R_ret at fn entry)
 void       tk_region_drop_u(uint64_t region);   // tk_region_drop((tk_region*)region)
 void       tk_region_enter_u(uint64_t child);   // tk_region_enter((tk_region*)child)
 // tk_region_register — bind `type_id` → `instance` in `r`'s OWN table (never an ancestor's; a
