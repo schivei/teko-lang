@@ -217,3 +217,172 @@ fn definition_response(store: DocStore, req: json::JsonValue) -> Dispatch {
         null => dispatch_of(store, one_message(response(id, jnull())))
     }
 }
+
+/**
+ * completion_kind_code — the LSP `CompletionItemKind` numeric code for a `Symbol`'s `SymKind`:
+ * `Function`→3 (Function), `Method`→2 (Method), `Type`→7 (Class — the closest generic code; Teko's
+ * own struct/class/enum/flags/interface bodies do not each get a distinct LSP kind in v1), `Const`→21
+ * (Constant), `Field`→5 (Field).
+ *
+ * @param kind  the symbol's kind
+ * @return      the protocol's `CompletionItemKind` code, as an `f64` (the one JSON numeric grammar)
+ * @since 0.3.1.0 (LSP crumb G)
+ */
+fn completion_kind_code(kind: SymKind) -> f64 {
+    match kind {
+        SymKind::Function => 3.0
+        SymKind::Method => 2.0
+        SymKind::Type => 7.0
+        SymKind::Const => 21.0
+        SymKind::Field => 5.0
+    }
+}
+
+/**
+ * symbol_completion_item — the LSP `CompletionItem` for one indexed `Symbol`: its `label` (the
+ * name), `kind` (`completion_kind_code`), and `detail` (the rendered signature — the same text
+ * `hover_contents` shows in its fenced code block). `documentation` is added only when the symbol
+ * carries a doc-comment, so a plain (undocumented) symbol's item stays terse.
+ *
+ * @param sym  the indexed symbol
+ * @return     the JSON `CompletionItem`
+ * @since 0.3.1.0 (LSP crumb G)
+ */
+fn symbol_completion_item(sym: Symbol) -> json::JsonValue {
+    mut keys: []str = ["label", "kind", "detail"]
+    mut values: []json::JsonValue = [jstr(sym.name), jnum(completion_kind_code(sym.kind)), jstr(sym.signature)]
+    if sym.doc.len > 0 {
+        keys = teko::list::push(keys, "documentation")
+        values = teko::list::push(values, jstr(sym.doc))
+    }
+    jobj(keys, values)
+}
+
+/**
+ * symbol_completion_items — one `CompletionItem` per entry of `syms`, in index order. The v1
+ * candidate half of completion named by `docs/design/lsp-teko.md` §3.3: every declaration of the
+ * SAME per-document index hover/go-to-def resolve against (crumb E/F), never scope-filtered — v1 is
+ * intentionally "crude but useful" (the design's own words), leaving prefix narrowing to the client.
+ *
+ * @param syms  the symbol index to render
+ * @return      one completion item per symbol
+ * @since 0.3.1.0 (LSP crumb G)
+ */
+fn symbol_completion_items(syms: []Symbol) -> []json::JsonValue {
+    mut out: []json::JsonValue = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= syms.len { break }
+        out = teko::list::push(out, symbol_completion_item(syms[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * RESERVED_KEYWORDS — every reserved keyword the lexer's `keyword_kind` table recognizes
+ * (`src/lexer/lexer.tks:333-364`), mirrored here as completion candidates, in the same order that
+ * table checks them. Deliberately EXCLUDES the CONTEXTUAL keywords `keyword_kind`'s own doc-comment
+ * names (`from`, `params`, `self`, `base`, `unsafe`) — they stay legal plain identifiers outside
+ * their triggering position, so offering them as reserved words would mislead the editor.
+ *
+ * @since 0.3.1.0 (LSP crumb G)
+ */
+const RESERVED_KEYWORDS: []str = [
+    "fn", "type", "struct", "enum", "flags", "variant", "let", "mut", "const",
+    "if", "else", "loop", "break", "continue", "return", "defer", "match", "when",
+    "in", "as", "to", "use", "pub", "exp", "extern", "true", "false", "null",
+    "class", "abstract", "virtual", "override", "intern", "interface"
+]
+
+/**
+ * keyword_completion_item — the LSP `CompletionItem` for one reserved keyword: its `label` and a
+ * `kind` of `Keyword` (14).
+ *
+ * @param word  the keyword spelling
+ * @return      the JSON `CompletionItem`
+ * @since 0.3.1.0 (LSP crumb G)
+ */
+fn keyword_completion_item(word: str) -> json::JsonValue {
+    jobj(["label", "kind"], [jstr(word), jnum(14.0)])
+}
+
+/**
+ * keyword_completion_items — one `CompletionItem` per `RESERVED_KEYWORDS` entry, in table order.
+ * Always non-empty and independent of any open document, so it is the candidate list's stable base
+ * even when there is no buffer (or no parseable buffer) to index.
+ *
+ * @return  every reserved keyword's completion item
+ * @since 0.3.1.0 (LSP crumb G)
+ */
+fn keyword_completion_items() -> []json::JsonValue {
+    mut out: []json::JsonValue = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= RESERVED_KEYWORDS.len { break }
+        out = teko::list::push(out, keyword_completion_item(RESERVED_KEYWORDS[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * append_all — `base` with every entry of `extra` appended, in order. The one list-concatenation
+ * helper completion needs to lay the symbol items after the keyword items (`teko::list` exposes no
+ * `concat` of its own).
+ *
+ * @param base   the list to extend
+ * @param extra  the entries to append, in order
+ * @return       `base` followed by `extra`
+ * @since 0.3.1.0 (LSP crumb G)
+ */
+fn append_all(base: []json::JsonValue, extra: []json::JsonValue) -> []json::JsonValue {
+    mut out = base
+    mut i: u64 = 0
+    loop {
+        if i >= extra.len { break }
+        out = teko::list::push(out, extra[i])
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * document_completion_items — the full candidate list for `textDocument/completion` at `req`'s
+ * document: the reserved keywords FOLLOWED BY every symbol of the document's OWN symbol index (the
+ * same single-document scope `navigation_symbol` resolves hover/go-to-def against — crumb E's index,
+ * crumb F's own note). A malformed request (no resolvable `textDocument.uri`) yields the EMPTY list;
+ * an unopened-but-named document, or one whose buffer does not currently parse, still yields the
+ * keyword list alone — keywords are always valid candidates, parse state notwithstanding.
+ *
+ * @param store  the current open-document store
+ * @param req    the completion request DOM
+ * @return       the candidate items (keywords, plus symbols when a parseable buffer is open)
+ * @since 0.3.1.0 (LSP crumb G)
+ */
+fn document_completion_items(store: DocStore, req: json::JsonValue) -> []json::JsonValue {
+    let uri = match format_uri(req) { str as u => u; null => return teko::list::empty() }
+    let keywords = keyword_completion_items()
+    let text = match store_get(store, uri) { str as t => t; null => return keywords }
+    match document_program(uri_to_path(uri), text) {
+        parser::Program as prog => append_all(keywords, symbol_completion_items(build_symbol_index(prog)))
+        error => keywords
+    }
+}
+
+/**
+ * completion_response — answer `textDocument/completion`: build the candidate list
+ * (`document_completion_items`) and reply with it as a bare `CompletionItem[]`. Unlike hover/
+ * definition, completion never answers `null` for "nothing resolved" — an unopened or malformed
+ * request simply yields the keyword-only (or empty) list `document_completion_items` already names,
+ * so the client's completion popup degrades gracefully rather than closing outright.
+ *
+ * @param store  the current store (read for the document text)
+ * @param req    the completion request DOM
+ * @return       the store (unchanged) and the `CompletionItem[]` response
+ * @since 0.3.1.0 (LSP crumb G)
+ */
+fn completion_response(store: DocStore, req: json::JsonValue) -> Dispatch {
+    let id = request_id(req)
+    dispatch_of(store, one_message(response(id, jarr(document_completion_items(store, req)))))
+}
