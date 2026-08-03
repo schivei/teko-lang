@@ -1803,12 +1803,29 @@ static void tk_canary_check_head(tk_region *r, const char *where) {
     if (!tk_canary_enabled() || tk_canary_tripped || r == NULL || r->head == NULL) return;
     struct tk_chunk *c = r->head;
     unsigned h = tk_canary_hash(c);
-    for (unsigned probe = 0; probe < TK_CANARY_TAB_SIZE; probe += 1) {
+    unsigned probe;
+    for (probe = 0; probe < TK_CANARY_TAB_SIZE; probe += 1) {
         unsigned i = (h + probe) & (TK_CANARY_TAB_SIZE - 1);
-        if (!tk_canary_tab[i].used) return;         // never recorded — nothing to compare (should not happen for a live head)
+        if (!tk_canary_tab[i].used) break;          // exhausted the probe chain without finding `c` — fall through to the report below
         if (tk_canary_tab[i].chunk != c) continue;
         tk_canary_entry *e = &tk_canary_tab[i];
-        if (!e->live) return;                       // stale probe collision on a forgotten slot — not this chunk's live record
+        // EVERY tk_chunk this process ever creates is recorded right after tk_chunk_try (the sole
+        // birthplace) with the SAME gate this check reads, so a genuinely-live, non-NULL `r->head`
+        // that is either ABSENT from the table or found but marked `!live` (a chunk this runtime
+        // itself already freed) is not a coverage gap — it is `r->head` no longer naming a real,
+        // still-alive chunk at all: the smoking gun for a wild write that clobbered the HANDLE
+        // (r->head itself, or whatever upstream variable fed it), not merely a chunk's header.
+        if (!e->live) {
+            tk_canary_tripped = 1;
+            fprintf(stderr,
+                "TEKO_NATIVE_CHUNK_CANARY: r->head %p at %s names a chunk this runtime ALREADY FREED "
+                "(tk_canary_forget saw it) — r->head is dangling, not merely corrupted\n",
+                (void *)c, where);
+#ifdef TK_HAVE_BACKTRACE
+            { void *fr[24]; int nf = backtrace(fr, 24); fprintf(stderr, "  backtrace at detection:\n"); backtrace_symbols_fd(fr, nf, 2); }
+#endif
+            fflush(stderr); abort();
+        }
         if (c->cap != e->cap || c->next != e->next_snapshot) {
             tk_canary_tripped = 1;
             fprintf(stderr,
@@ -1830,6 +1847,23 @@ static void tk_canary_check_head(tk_region *r, const char *where) {
         }
         return;
     }
+    // Probe chain exhausted (an empty slot, `!used`) without ever finding `c`: this address was
+    // NEVER born through tk_region_alloc's own chunk-creation branch, the sole birthplace — so
+    // `r->head` is not a real chunk at all. Given the diagnostic is armed from process start (the
+    // very first tk_region_alloc call evaluates the gate before any chunk exists), this is not a
+    // recording gap; it is `r->head` itself holding garbage — the wild write clobbered the HANDLE,
+    // not a chunk's header fields.
+    tk_canary_tripped = 1;
+    fprintf(stderr,
+        "TEKO_NATIVE_CHUNK_CANARY: r->head %p at %s was NEVER recorded as a chunk this runtime "
+        "created — the handle itself is garbage (a wild write clobbered r->head or whatever fed "
+        "it), not a chunk header\n",
+        (void *)c, where);
+#ifdef TK_HAVE_BACKTRACE
+    { void *fr[24]; int nf = backtrace(fr, 24); fprintf(stderr, "  backtrace at detection:\n"); backtrace_symbols_fd(fr, nf, 2); }
+#endif
+    fflush(stderr);
+    abort();
 }
 
 void *tk_region_alloc(tk_region *r, size_t n) {
