@@ -1,0 +1,126 @@
+/**
+ * Node — a self-referential struct whose `.next` is a `Node | null` union. `.next` is NOT a
+ * niche/scalar variant, so a present child is BOXED (`tk_region_alloc` of one `Node` cell, the
+ * `_ubx` construct). WHERE that box rides is exactly what this regressor pins: for a NON-escaping
+ * struct-init local it must ride the binding's own scope region (freed at the drop), and for an
+ * ESCAPING one it must ride the process root (survive the drop). The bug this file guards let the
+ * frame-local case fall to the root too (`tk_region_alloc(tk_region_root())`), so no local box was
+ * ever reclaimed — the arena's reclaim ratio sat at 0.
+ */
+type Node = struct {
+    /** the node's scalar payload — read directly off the stack value, never through a heap hop. */
+    v: i64
+    /** the boxed back-edge; `null` (zero heap) or one arena-allocated child `Node`. */
+    next: Node | null
+}
+
+/**
+ * The summed payloads of a two-node chain whose head boxes the tail in its `.next` field.
+ *
+ * NON-escaping: only the scalar `.v`s leave the frame (both reads are scalar-field reads of a bare
+ * local, the escape check's frame-local refinement), so `head` is proven frame-local and its
+ * `.next` box rides the function frame region — bulk-freed at the return edge. Reading the sum back
+ * as the closed form `2*seed+1` proves the value copied into that frame-routed box is intact.
+ *
+ * @param seed  the tail node's payload; the head's is `seed + 1`
+ * @return      `head.v + tail.v` (== `2*seed + 1`)
+ */
+fn chain2_sum(seed: i64) -> i64 {
+    let tail = Node { v = seed; next = null }
+    let head = Node { v = seed + 1; next = tail }
+    head.v + tail.v
+}
+
+/**
+ * The frame-routed box reads back the exact value copied into it.
+ *
+ * @return  100 when `chain2_sum(7)` is the expected 15, else 0
+ */
+fn local_ok() -> i64 {
+    if chain2_sum(7) == 15 { 100 } else { 0 }
+}
+
+/**
+ * Hammer the frame region: 4096 calls to `chain2_sum`, each allocating and then FREEING one
+ * `.next` box on its frame drop, so the 4096 iterations reuse the same reclaimed storage.
+ *
+ * Each term `chain2_sum(i) - (2*i + 1)` is identically 0, so a correct run nets to 0 regardless of
+ * how the arena reuses memory; the point is the 4096 region drops the routed box makes reclaimable.
+ *
+ * @return  20 when every term cancels (the routed box never corrupts the running sum), else 0
+ */
+fn churn_zero() -> i64 {
+    mut acc: i64 = 0
+    mut i: i64 = 0
+    loop {
+        if i >= 4096 { break }
+        acc = acc + (chain2_sum(i) - (2 * i + 1))
+        i++
+    }
+    if acc == 0 { 20 } else { 0 }
+}
+
+/**
+ * Build an escaping node under maximal arena pressure, then RETURN it.
+ *
+ * `scratch` is a genuinely NON-escaping local (only its scalar `.v` is read), so ITS `.next` box IS
+ * frame-routed into THIS function's frame region and freed when the frame drops on return — forcing
+ * a real drop on the exit edge. The 4096-iteration loop then reclaims that many more frame boxes
+ * (each `chain2_sum` call). The returned head is the inversion's subject: its `.next` box must ride
+ * the process ROOT and outlive both the loop's churn AND this function's own frame drop. Were the
+ * escaping box wrongly frame-routed, that drop (poisoned under `TEKO_MEM_PARANOID`) would corrupt
+ * it and the caller's read-back would fail. The escaping node is read by the caller IMMEDIATELY,
+ * with no further heap allocation between build and read.
+ *
+ * @param v  the child's payload; the head's is `v + 1`
+ * @return   a fresh escaping `Node` whose `.next` boxes a child carrying `v`
+ */
+fn build_escaping(v: i64) -> Node {
+    let inner = Node { v = v * 3; next = null }
+    let scratch = Node { v = v; next = inner }
+    mut acc: i64 = 0
+    mut i: i64 = 0
+    loop {
+        if i >= 4096 { break }
+        acc = acc + (chain2_sum(i) - (2 * i + 1))
+        i++
+    }
+    let child = Node { v = v + scratch.v - v + acc; next = null }
+    Node { v = v + 1; next = child }
+}
+
+/**
+ * The boxed `.next` payload of `n`, or -1 when `.next` is null. Reading through the box is what a
+ * corrupted (wrongly-freed) escaping box would betray.
+ *
+ * @param n  the node whose back-edge is read
+ * @return   the child's `.v`, or -1 when there is no child
+ */
+fn peek_next(n: Node) -> i64 {
+    match n.next {
+        Node as m => m.v
+        null => -1
+    }
+}
+
+/**
+ * The inversion: an escaping node's box survives its builder's frame drop AND the builder's 4096
+ * internal churn cycles that reuse reclaimed arena storage.
+ *
+ * @return  135 when the escaping box reads back intact, else 0
+ */
+fn escape_ok() -> i64 {
+    let kept = build_escaping(40)
+    if kept.v == 41 && peek_next(kept) == 40 { 135 } else { 0 }
+}
+
+/**
+ * The three disjoint weights summed: 100 (frame-routed box read-back) + 20 (4096-cycle churn nets
+ * to zero) + 135 (escaping box survives a dropped frame and the churn) == 255. Grouped so any
+ * single failing facet lands on a distinct total rather than aliasing another's.
+ *
+ * @return  255 when the scope-local box routing is correct in every facet
+ */
+exp fn score() -> i64 {
+    local_ok() + churn_zero() + escape_ok()
+}
