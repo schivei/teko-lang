@@ -1576,11 +1576,18 @@ static void tk_obs_dump_table(FILE *fp, const char *label, tk_obs_site *tab, uns
         if (best < 0) break;
         printed[np++] = best;
         const char *nm = "?";
+        // (obs) also emit the RAW return address and the module base so a STATIC/stripped bootstrap
+        // binary (where dladdr yields no dli_sname → "?") can still be named offline: the file offset
+        // `ra - fbase` fed to `addr2line -e <bin>` resolves the generated calling fn. Zero cost when
+        // obs is off (this runs only inside tk_obs_dump).
+        void *ra = tab[best].ra; void *fbase = NULL;
 #if !defined(_WIN32)
         Dl_info di;
-        if (dladdr(tab[best].ra, &di) && di.dli_sname) nm = di.dli_sname;
+        if (dladdr(ra, &di)) { if (di.dli_sname) nm = di.dli_sname; fbase = di.dli_fbase; }
 #endif
-        fprintf(fp, "  %2d  %9.1f MB  %11llu allocs  %s\n", k, tab[best].bytes / 1048576.0, tab[best].count, nm);
+        fprintf(fp, "  %2d  %9.1f MB  %11llu allocs  %-24s ra=%p base=%p off=0x%llx\n",
+                k, tab[best].bytes / 1048576.0, tab[best].count, nm, ra, fbase,
+                (unsigned long long)((char *)ra - (char *)fbase));
     }
 }
 static void tk_obs_dump(void) {
