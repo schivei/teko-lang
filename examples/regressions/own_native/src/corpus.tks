@@ -3102,9 +3102,11 @@ fn f64_bits_of(tag: i64) -> u64 {
  * GPR-only pending `B1-fp`), a real call would have carried the value through the single physical
  * XMM0 register, so a SECOND live `f64` would silently clobber the first the moment it was
  * produced — a measured scratch repro confirmed exactly that corruption. The fix instead lowers
- * both builtins as a bare VReg alias (no call at all), so ordinary register allocation — which
- * already keeps any number of plain integer values alive correctly — carries every one of
- * `a`/`b`/`c` to its own read-back untouched.
+ * both builtins as one raw GPR/FPR-crossing move (`IToFBits`/`FToIBits`, 0.3.1.0 degrau 27) into a
+ * FRESH result VReg — never a call, and never the ORIGINAL same-VReg-id alias either (see
+ * `f_f64_bitcast_arith`'s own doc for why the alias shape was itself unsound) — so ordinary
+ * register allocation, which already keeps any number of plain values alive correctly, carries
+ * every one of `a`/`b`/`c` to its own read-back untouched.
  *
  * @return 0 when every one of the three round-trips (and the negative sign bit) reads back
  *         correctly, else the number of the failing check
@@ -3121,6 +3123,41 @@ fn f_f64_bits_roundtrip() -> i64 {
     if bc != f64_bits_of(2) { return 3 }
     if (bc & 0x8000000000000000) == 0 { return 4 }
     if (ba & 0x8000000000000000) != 0 { return 5 }
+    0
+}
+
+/**
+ * f_f64_bitcast_arith — 0.3.1.0 degrau 27: real `f64` ARITHMETIC (`+`/`-`/`*`/`/`) performed
+ * directly on a `teko::f64_from_bits` result, then read back through `teko::f64_bits` — the exact
+ * shape `checker::comptime_fold::float_binop` uses (`teko::f64_from_bits(lf.bits)` fed straight
+ * into `x + y`), and the shape `f_f64_bits_roundtrip` above does NOT cover: chaining `f64_bits`
+ * straight back onto a fresh `f64_from_bits` result never forces the value through an FPR-only
+ * consumer, so THAT fixture stayed green even under the ORIGINAL same-VReg-id alias
+ * (`lower_f64_bitcast_call`, degrau 24) — the alias reused the operand's OWN VReg unchanged, and a
+ * VReg's register FILE is fixed by its DEFINING instruction (here, an integer load), so the alias
+ * silently stayed a GPR value end to end. The moment a float ALU op (`select_falu_x86`) consumes
+ * that SAME VReg id as an FPR operand, the native register allocator (`regalloc.tks`) sees ONE
+ * numeric id touched by two DIFFERENT register classes, splits it into two intervals that still
+ * share one `vid`, and `subst_find`'s id-only substitution (no class check) picks the wrong one for
+ * at least one occurrence — the measured SIGSEGV: the native self-build crashing while lowering
+ * `checker::float_binop` itself, the first compiler function in item order to do real `f64`
+ * arithmetic through this pair. `IToFBits`/`FToIBits` (one real `MFMovX86`/`MFMov` GPR/FPR move
+ * into a fresh result VReg) fix it.
+ *
+ * @return 0 when every one of the four arithmetic results reads back the exact expected bit
+ *         pattern, else the number of the failing check
+ */
+fn f_f64_bitcast_arith() -> i64 {
+    let x = teko::f64_from_bits(f64_bits_of(0))
+    let y = teko::f64_from_bits(f64_bits_of(1))
+    let sum = teko::f64_bits(x + y)
+    let diff = teko::f64_bits(x - y)
+    let prod = teko::f64_bits(x * y)
+    let quot = teko::f64_bits(x / y)
+    if sum != 4617315517961601024 { return 1 }
+    if diff != 4607182418800017408 { return 2 }
+    if prod != 4618441417868443648 { return 3 }
+    if quot != 4609434218613702656 { return 4 }
     0
 }
 
