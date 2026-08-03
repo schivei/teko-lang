@@ -12135,6 +12135,17 @@ fn union_field_placement(ctx: LowerCtx, decl: checker::Type | null) -> checker::
  * stored UNWRAPPED, which a later `match` read as the wrapper's base address — measured as a
  * SIGSEGV where the C route answered correctly.
  *
+ * The UNION arm then OWNS its wrapper (`box_aggregate_value_at`, `variant_wrapper_bytes`), the same
+ * per-EXECUTION copy every other embedded aggregate takes (`own_embedded_value`). The 24-byte wrapper
+ * `lower_value_into_type` hands back is a per-INSTRUCTION frame `alloca` — even the pass-through
+ * `lower_expr` arm of `lower_value_into_variant` returns one, since `SomeVariant{…}` is variant-typed
+ * yet builds a FRESH wrapper — so a field pointed straight at it aliased ONE slot across every
+ * iteration of a construction loop and dangled once the building frame unwound. Measured: a
+ * `[]parser::Item` whose element `Item{content = decl}` the assembler builds per file read every
+ * element's `content` back as the LAST one's, then `checker::type_item` matched a reused slot's bits
+ * (`NATIVE-AGG-SLICE-BY-ADDRESS`). The wrapper's own PAYLOAD is already boxed at construction
+ * (`store_scalar_variant_payload`, degrau 8), so owning the 24-byte wrapper is the whole of it.
+ *
  * @param ctx  the lowering context to append the store into
  * @param base  the struct slot's alloca'd base-address VReg
  * @param offset  the field's byte offset within the slot
@@ -12149,9 +12160,10 @@ fn store_struct_field(ctx: LowerCtx, base: u32, offset: u32, decl: checker::Type
     match union_field_placement(ctx, decl) {
         checker::Type as bound => {
             let uo = match lower_value_into_type(ctx, bound, value) { Lowered as x => x; error as err => return err }
-            let uaddr = ctx_alloc(uo.ctx)
+            let owned = box_aggregate_value_at(uo, variant_wrapper_bytes(), line, col)
+            let uaddr = ctx_alloc(owned.ctx)
             let with_uaddr = ctx_append(uaddr.ctx, field_addr_inst(uaddr.vreg, base, offset, line, col))
-            return ctx_append(with_uaddr, store_inst(uaddr.vreg, uo.vreg, LType::Ptr, line, col))
+            return ctx_append(with_uaddr, store_inst(uaddr.vreg, owned.vreg, LType::Ptr, line, col))
         }
         null => { }
     }

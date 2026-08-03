@@ -5490,24 +5490,31 @@ type GvfParsed<T> = struct {
 }
 
 /**
- * gvf_make — a `GvfDecl` case selected by `k`, returned inside a generic `GvfParsed<GvfDecl>`. The
- * variant value flows through the generic field `node`, the placement the native backend must WRAP
- * into a tag+payload image.
+ * gvf_case_digit — build a `GvfParsed<GvfDecl>` whose `node` is the `GvfDecl` case selected by `k`,
+ * then read `node` back and fold the case to its digit — ALL IN ONE FRAME, so the placement this
+ * probes is the WRAPPER-building itself (`store_struct_field`'s union arm). Without the fix the
+ * generic instance field `node` was stored UNWRAPPED — a pointer to the bare case payload — so
+ * `match node` read the payload's first word (a `str`'s ptr, a garbage tag), took no arm and fell to
+ * the dead exhaustiveness edge; the digit it must fold is `k` itself.
  *
  * @param k  1 for `GvfFn`, 2 for `GvfTy`, anything else for `GvfCo`
- * @return   a `GvfParsed<GvfDecl>` whose `node` holds the selected case
+ * @return   `1`/`2`/`3` — the digit of the case `k` selects, read back through the generic field
  */
-fn gvf_make(k: i64) -> GvfParsed<GvfDecl> {
-    if k == 1 { return GvfParsed<GvfDecl> { node = GvfFn { name = "fn"; a = 1 }; next = 1 } }
-    if k == 2 { return GvfParsed<GvfDecl> { node = GvfTy { name = "ty"; b = 2 }; next = 2 } }
-    GvfParsed<GvfDecl> { node = GvfCo { name = "co"; c = 3 }; next = 3 }
+fn gvf_case_digit(k: i64) -> i64 {
+    mut p = GvfParsed<GvfDecl> { node = GvfCo { name = "co"; c = 3 }; next = 3 }
+    if k == 1 { p = GvfParsed<GvfDecl> { node = GvfFn { name = "fn"; a = 1 }; next = 1 } }
+    if k == 2 { p = GvfParsed<GvfDecl> { node = GvfTy { name = "ty"; b = 2 }; next = 2 } }
+    match p.node {
+        GvfFn as f => 1
+        GvfTy as t => 2
+        GvfCo as c => 3
+    }
 }
 
 /**
- * f_generic_variant_field — reads the variant `node` back out of a generic `GvfParsed<GvfDecl>` and
- * `match`es it, folding one digit per case into a base-10 accumulator. A native backend that stored
- * `node` unwrapped reads a garbage (pointer) tag, takes no arm, and crashes on the dead edge; the
- * correct answer is the digits `1`, `2`, `3` in order.
+ * f_generic_variant_field — folds one digit per `GvfDecl` case (`gvf_case_digit`) into a base-10
+ * accumulator. A native backend that stored the generic instance field `node` unwrapped reads a
+ * garbage tag, takes no arm and crashes on the dead edge; the correct answer is `1`, `2`, `3`.
  *
  * @return 123 — `GvfFn`→1, `GvfTy`→2, `GvfCo`→3, in construction order
  */
@@ -5516,12 +5523,7 @@ fn f_generic_variant_field() -> i64 {
     mut k: i64 = 1
     loop {
         if k > 3 { break }
-        let p = gvf_make(k)
-        acc = acc * 10 + match p.node {
-            GvfFn as f => 1
-            GvfTy as t => 2
-            GvfCo as c => 3
-        }
+        acc = acc * 10 + gvf_case_digit(k)
         k = k + 1
     }
     acc
