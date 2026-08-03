@@ -1527,11 +1527,24 @@ static unsigned long long tk_obs_regions_new = 0, tk_obs_regions_dropped = 0;
 static unsigned long long tk_obs_next_dump = 512ull * 1024 * 1024;
 static int tk_obs_on = -1;                     // -1 = not probed; 0 = off; 1 = on
 static const char *tk_obs_path = "/tmp/teko_arena_obs.txt";
+// (journal J3, family #27) tk_obs_pid_path holds the PID-STAMPED default `TEKO_ARENA_OBS=1` answers
+// with, so two `teko test` runs on the SAME host no longer atrophy each other's histogram with a
+// last-writer-wins dump to one shared, unstamped /tmp file — the one family of this scan with no run
+// identity at all before this fix. An EXPLICIT path (`TEKO_ARENA_OBS=<path>`) is left untouched: the
+// caller named it on purpose and gets exactly that file, stamped or not.
+static char tk_obs_pid_path[64];
 static int tk_obs_enabled(void) {
     if (tk_obs_on < 0) {
         const char *e = getenv("TEKO_ARENA_OBS");
         tk_obs_on = (e != NULL && *e != '\0') ? 1 : 0;
-        if (tk_obs_on && strcmp(e, "1") != 0) tk_obs_path = e;
+        if (tk_obs_on) {
+            if (strcmp(e, "1") == 0) {
+                snprintf(tk_obs_pid_path, sizeof tk_obs_pid_path, "/tmp/teko_arena_obs.%lld.txt", (long long)tk_rt_pid());
+                tk_obs_path = tk_obs_pid_path;
+            } else {
+                tk_obs_path = e;
+            }
+        }
     }
     return tk_obs_on;
 }
