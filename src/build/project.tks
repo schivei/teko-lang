@@ -3314,6 +3314,57 @@ fn fuse_virtual_main_x86(loose: []checker::TStatement, prelude: teko::lir::Lower
 }
 
 /**
+ * native_trace_items_enabled — whether the fused native driver's per-item lowering trace
+ * (`TEKO_NATIVE_TRACE_ITEMS=1`) is requested: a diagnostic aid, NOT part of the ritual's normal
+ * output, for narrowing a crash (a signal, not a `TEKO_SOFT`-caught honest-stop) that happens
+ * mid-`emit_native_x86` — printing each item's label to stderr immediately BEFORE its own scoped
+ * region opens, so the LAST line on stderr names the exact item whose lowering-or-encode a native
+ * fatal signal interrupted, instead of only the generic "entered native lowering" phase boundary
+ * `checker`/`monomorph`/`consteval` already report around.
+ *
+ * @return  true iff `TEKO_NATIVE_TRACE_ITEMS` is set to `"1"`
+ * @since 0.3.1
+ */
+fn native_trace_items_enabled() -> bool {
+    match teko::env::var("TEKO_NATIVE_TRACE_ITEMS") { str as v => v == "1"; error => false }
+}
+
+/**
+ * item_trace_label — a short, best-effort human label for one program item (its kind plus its own
+ * name, when the kind carries one), for `native_trace_items_enabled`'s per-item lowering trace.
+ * Never fails: a kind with no natural single name (a loose top-level statement, a passed-through
+ * `use`/type declaration this backend does not name specially here) renders a generic tag instead.
+ *
+ * @param it  the program item to label
+ * @return    the item's trace label
+ * @since 0.3.1
+ */
+fn item_trace_label(it: checker::TItem) -> str {
+    match it {
+        checker::TFunction as f => teko::str::concat("fn ", teko::str::concat(f.namespace, teko::str::concat("::", f.name)))
+        checker::TConstDecl as c => teko::str::concat("const ", teko::str::concat(c.namespace, teko::str::concat("::", c.name)))
+        parser::TypeDecl as td => teko::str::concat("type ", td.name)
+        _ => "loose statement / use"
+    }
+}
+
+/**
+ * trace_native_item — print `it`'s trace label to stderr, prefixed by its 1-based position out of
+ * `total`, when `native_trace_items_enabled`. A no-op otherwise, so the ordinary build's output is
+ * byte-identical to before this diagnostic existed.
+ *
+ * @param i      the item's 0-based index in `prog.items`
+ * @param total  `prog.items.len`, for the "N/M" the line renders
+ * @param it     the item about to enter its own scoped lowering-and-encode window
+ * @return       void
+ * @since 0.3.1
+ */
+fn trace_native_item(i: u64, total: u64, it: checker::TItem) -> void {
+    if !native_trace_items_enabled() { return }
+    teko::io::eprintln(teko::str::concat("teko: native-lowering item ", teko::str::concat(teko::u64_to_str(i + 1), teko::str::concat("/", teko::str::concat(teko::u64_to_str(total), teko::str::concat(": ", item_trace_label(it)))))))
+}
+
+/**
  * emit_native_x86 — the x86-64/ELF own-backend tail (#386 B1), FUSED lower+encode per item (0.3.1
  * C6.3, `docs/design/native-lowering-oom-por-funcao-0.3.1.md`): compute the whole-program lowering
  * context ONCE (`teko::lir::lower_prelude`), then for every program item — a scratch child region,
@@ -3348,6 +3399,7 @@ fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Man
     mut i: u64 = 0
     loop {
         if i >= prog.items.len { break }
+        trace_native_item(i, prog.items.len, prog.items[i])
         let child = region_new(region_root())
         region_enter(child)
         let outcome = fuse_lower_item_x86(robase, prelude, loose, prog.items[i], lifted_ph)
@@ -3364,6 +3416,7 @@ fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Man
         }
         i++
     }
+    if native_trace_items_enabled() { teko::io::eprintln("teko: native-lowering item (virtual-main)") }
     let vchild = region_new(region_root())
     region_enter(vchild)
     let vmain_outcome = fuse_virtual_main_x86(loose, prelude, robase, lifted_ph)
