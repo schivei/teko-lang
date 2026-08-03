@@ -234,6 +234,14 @@ build_gen() {
     # died on. Native-only (the trace is emitted solely by emit_native_x86); remove once pinned.
     bg_trace=""
     if [ "$bg_backend" = "native" ]; then bg_trace="1"; fi
+    # DIAGNOSTIC (2026-08-03, native-rodata-const-align): the same native-only gate as
+    # TEKO_NATIVE_TRACE_ITEMS above, for the macOS-arm64 native fixpoint "ld: pointer not aligned"
+    # / Linux native gen1 const-corruption crash — encode_rodata's own reloc-alignment check names
+    # the owning rodata symbol + offset of the first pointer-bearing relocation whose ABSOLUTE
+    # __const/.rodata offset is not 8-aligned, straight to stderr, so the streamed log pins the
+    # exact culprit const instead of only ld's nearest-preceding-symbol guess. Remove once pinned.
+    bg_align_check=""
+    if [ "$bg_backend" = "native" ]; then bg_align_check="1"; fi
     scan_project_c "$W/project-c.before"
     # Stream the build LIVE (prefixed) to the lane log AND capture to $bg_log. Owner ruling
     # 2026-08-03: "expor tudo que ele faz e não ocultar nenhuma saída". Before, the build was
@@ -243,9 +251,9 @@ build_gen() {
     # `set +e`/`set -e` brackets keep the pipe's own failure from tripping the caller early.
     set +e
     if [ -n "$RT_DIR" ]; then
-        { ( cd "$PROJ" && TK_RT_DIR="$RT_DIR" TEKO_NATIVE_TRACE_ITEMS="$bg_trace" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
+        { ( cd "$PROJ" && TK_RT_DIR="$RT_DIR" TEKO_NATIVE_TRACE_ITEMS="$bg_trace" TEKO_NATIVE_RODATA_ALIGN_CHECK="$bg_align_check" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
     else
-        { ( cd "$PROJ" && TEKO_NATIVE_TRACE_ITEMS="$bg_trace" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
+        { ( cd "$PROJ" && TEKO_NATIVE_TRACE_ITEMS="$bg_trace" TEKO_NATIVE_RODATA_ALIGN_CHECK="$bg_align_check" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
     fi
     set -e
     return "$(cat "$W/bg_status")"

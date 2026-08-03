@@ -1387,6 +1387,94 @@ fn module_interns_rodata_into_const() {
     teko::assert::is_true(e.symbols[2].sect == (1 to u8))
 }
 
+/**
+ * n_zero_bytes — `n` zero bytes, the odd-length rodata-entry fixture shorthand
+ * (`enc_rodata_reloc_offset_survives_odd_length_neighbors`).
+ *
+ * @param u64 n  the buffer length
+ * @return []byte  `n` zero bytes
+ */
+fn n_zero_bytes(n: u64) -> []byte {
+    mut out: []byte = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= n { break }
+        out = teko::list::push(out, 0 to byte)
+        i++
+    }
+    out
+}
+
+#test
+/**
+ * enc_rodata_reloc_offset_survives_odd_length_neighbors — the native-rodata-const-align
+ * regression (macOS-arm64 fixpoint `ld: pointer not aligned` on `AAPCS64.gpr_arg`): TWO
+ * odd/non-8-multiple rodata entries (3 bytes, then 6 bytes — their RUNNING total, 9, is NOT
+ * a multiple of 8) precede a THIRD, POINTER-BEARING entry carrying one `LDataReloc`. The
+ * third entry's symbol offset AND its rebased relocation offset both land on 16 — the next
+ * 8-byte boundary after 9 — never on the unaligned 9 a byte-packed concatenation would
+ * produce. `module_interns_rodata_into_const` already proves the SYMBOL offset survives one
+ * odd-length neighbor; this is its reloc-bearing, two-neighbor sibling — the exact
+ * combination (a fat member's `LDataReloc` rebased across several odd-length preceding
+ * entries) the reported link failure needed and no prior fixture exercised.
+ *
+ * @return void
+ */
+fn enc_rodata_reloc_offset_survives_odd_length_neighbors() {
+    let r0 = lir::LRodata { symbol = "s0"; bytes = n_zero_bytes(3 to u64); relocs = teko::list::empty() }
+    let r1 = lir::LRodata { symbol = "s1"; bytes = n_zero_bytes(6 to u64); relocs = teko::list::empty() }
+    let r2_relocs = teko::list::push(teko::list::empty(), lir::data_reloc(0 to u32, "s0"))
+    let r2 = lir::LRodata { symbol = "s2"; bytes = n_zero_bytes(16 to u64); relocs = r2_relocs }
+    let rodata = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), r0), r1), r2)
+    let f = one_block_func("main", i1(RET_INST))
+    let funcs = teko::list::push(teko::list::empty(), f)
+    let e = em(module_with_rodata(funcs, rodata))
+    teko::assert::is_true(e.symbols[2].name == "s2")
+    teko::assert::is_true(e.symbols[2].offset == (16 to u32))
+    teko::assert::is_true(e.relocs.len == 1)
+    teko::assert::is_true(e.relocs[0].offset == (16 to u32))
+    teko::assert::is_true(e.relocs[0].offset % (8 to u32) == (0 to u32))
+    teko::assert::is_true(e.relocs[0].sect == RelocSect::Rodata)
+}
+
+#test
+/**
+ * find_rodata_align_violations_is_empty_for_aligned_relocs — the diagnostic's pure detection
+ * core (`TEKO_NATIVE_RODATA_ALIGN_CHECK`'s engine) reports NOTHING for a symbol table + reloc
+ * list where every rodata-internal pointer relocation already sits on an 8-byte boundary — the
+ * ordinary, well-formed case `encode_rodata` always produces today.
+ *
+ * @return void
+ */
+fn find_rodata_align_violations_is_empty_for_aligned_relocs() {
+    let syms = teko::list::push(teko::list::push(teko::list::empty(), Symbol { name = "s0"; defined = true; sect = 2 to u8; offset = 0 to u32; local = true }), Symbol { name = "s1"; defined = true; sect = 2 to u8; offset = 16 to u32; local = true })
+    let relocs = teko::list::push(teko::list::empty(), lir::data_reloc(16 to u32, "s0"))
+    teko::assert::is_true(find_rodata_align_violations(syms, relocs).len == 0)
+}
+
+#test
+/**
+ * find_rodata_align_violations_names_the_owning_symbol — the diagnostic's pure detection core
+ * ATTRIBUTES a misaligned relocation (offset 9, no symbol starts exactly there) to the nearest
+ * PRECEDING rodata symbol (`s0`, at offset 0) — the same "symbol+displacement" rule a linker's
+ * own alignment diagnostic applies — and reports the next 8-aligned offset (16) it should have
+ * landed on. This is the pure core `enc_rodata_reloc_offset_survives_odd_length_neighbors`
+ * proves `encode_rodata` itself never produces; this fixture proves the DIAGNOSTIC would name
+ * the right culprit if some OTHER producer ever did.
+ *
+ * @return void
+ */
+fn find_rodata_align_violations_names_the_owning_symbol() {
+    let syms = teko::list::push(teko::list::empty(), Symbol { name = "s0"; defined = true; sect = 2 to u8; offset = 0 to u32; local = true })
+    let relocs = teko::list::push(teko::list::empty(), lir::data_reloc(9 to u32, "leaf"))
+    let violations = find_rodata_align_violations(syms, relocs)
+    teko::assert::is_true(violations.len == 1)
+    teko::assert::is_true(violations[0].owner == "s0")
+    teko::assert::is_true(violations[0].target == "leaf")
+    teko::assert::is_true(violations[0].offset == (9 to u32))
+    teko::assert::is_true(violations[0].expected == (16 to u32))
+}
+
 #test
 /**
  * module_globals_honest_stops — a module carrying a top-level data global raises
