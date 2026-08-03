@@ -2057,26 +2057,37 @@ fn byte_of_u32_le(value: u32, k: u32) -> byte {
 }
 
 /**
- * write_u32_le_at — a copy of `buf` with the four bytes at `[offset, offset+4)`
+ * write_u32_le_at — `buf` with the four bytes at `[offset, offset+4)`
  * overwritten by `value`'s little-endian bytes, the byte-granular analog of
- * arm64's whole-word patch. Bytes outside the field pass through; the encoder
- * already zeroed the field, so this writes the resolved `rel32` displacement in.
+ * arm64's whole-word patch. Bytes outside the field pass through unread; the
+ * encoder already zeroed the field, so this writes the resolved `rel32`
+ * displacement in.
+ *
+ * MUTATES the 4 target bytes IN PLACE (index-assigns onto the local `out`,
+ * which aliases the SAME underlying buffer as `buf` — slice value semantics
+ * copy the {ptr,len} header, not the array) INSTEAD OF rebuilding the whole
+ * buffer byte by byte through a fresh self-append chain. `patch_branches_x86`
+ * calls this ONCE PER BRANCH FIXUP, so the old rebuild cost O(bytes) EVERY
+ * fixup — one more instance of the append_minst/append_inst/vinfo_set shape
+ * (see their own doc-comments): a live `TEKO_NATIVE_PUSH_REDZONE` hit through
+ * this exact call chain (`write_u32_le_at <- patch_branches_x86`) showed the
+ * REDZONE stomped with real encoded x86 bytes after the isel/lir-level twins
+ * were already fixed — the encode-time analog of the same self-append-rebuild
+ * idiom, this time over `[]byte` directly rather than a struct list.
  *
  * @param []byte buf  the buffer to patch
  * @param u32 offset  the byte offset of the 4-byte field
  * @param u32 value  the little-endian value to write
  * @return []byte  `buf` with the field overwritten
+ * @since 0.3.1 (native-region-crash, wild-write fix)
  */
 fn write_u32_le_at(buf: []byte, offset: u32, value: u32) -> []byte {
-    mut out: []byte = teko::list::empty()
-    mut i: u64 = 0
+    mut out = buf
+    mut k: u32 = 0
     loop {
-        if i >= buf.len { break }
-        let idx = i to u32
-        let within = (idx >= offset) && (idx < (offset + (X86_REL32_FIELD_BYTES to u32)))
-        let b = if within { byte_of_u32_le(value, idx - offset) } else { buf[i] }
-        out = teko::list::push(out, b)
-        i++
+        if k >= (X86_REL32_FIELD_BYTES to u32) { break }
+        out[(offset + k) to u64] = byte_of_u32_le(value, k)
+        k++
     }
     out
 }
