@@ -927,3 +927,238 @@ fn sweep_under(base: str, keep: str) -> u64 {
  * @since 0.3.1
  */
 pub fn sweep(keep: str) -> u64 { sweep_under(TKRUN_DIR, keep) }
+
+/**
+ * ===== WIRING (owner order, 0.3.1): the per-test/per-row hooks the emitters and runners call =====
+ *
+ * Everything above this line is the library — correct, unit-tested, and (until this section) never
+ * called by anything but its own tests. What follows are the CALL SITES: `codegen.tks`'s emitted
+ * per-`#test` C hooks (`note_test_begin`/`note_test_ok`/`note_test_panicked`/`note_test_exited`,
+ * writer `s<shard>`) and the regression runner's per-row hooks (`note_row_begin`/`_ok`/`_fail`/
+ * `_skip`, writer `r0` — the regression tier is not itself sharded into multiple journal writers
+ * today, so one writer covers the whole tier; `run_pool`'s OWN process-per-row parallelism is
+ * orthogonal and unaffected).
+ *
+ * EACH HOOK OPENS ITS OWN SEGMENT FD, APPENDS ONE RECORD, AND CLOSES IT — never a cached handle
+ * across calls. Teko carries no top-level mutable state (grep this whole corpus for a top-level
+ * `mut`: there is none), so the one "open once, reuse across many call sites" resource every OTHER
+ * per-test facility in this corpus relies on (the capture channel `tk_test_begin` opens, the
+ * per-task coverage sinks) lives in the C runtime's per-task fields — exactly the door this wiring
+ * may not walk through (`teko_rt.c` is the frozen twin here). Opening and closing per call is the
+ * honest cost of doing this in pure Teko instead: `tk_rt_close_fd` already exists for another
+ * caller's pipes (`teko::process::close_fd_raw`), so binding it again here adds no new C, and it is
+ * what keeps a 1000-plus-test suite from leaking a file descriptor per test.
+ *
+ * BEST-EFFORT, ON PURPOSE. §4's "pegajosa" failure (a journal that cannot be written fails the
+ * PROCESS) is the right law for `journal::append`'s OWN unit tests, which exist to exercise that
+ * exact contract. It is the wrong law for a hook riding along every `#test` and every regression row
+ * in every Teko program: a full disk must not turn "the suite failed" into "the suite could not even
+ * observe itself," so every hook below swallows a `journal::open`/`append` failure in silence and
+ * lets the test/row run exactly as it would have before this wiring existed.
+ */
+
+/**
+ * close_fd_rt — the runtime symbol `tk_rt_close_fd` wraps (already bound once for
+ * `teko::process`'s own pipes, `close_fd_raw`; rebinding the same existing symbol here needs no new
+ * C). Kept private so every hook below goes through it the same way.
+ *
+ * @param fd  the descriptor a hook's own `open_seg_rt` opened
+ * @return    0 on success, or the errno
+ * @since 0.3.1
+ */
+extern fn close_fd_rt(fd: i64) -> i32 = "tk_rt_close_fd" from "teko_rt"
+
+/**
+ * TEST_SHARD_ENV — mirrors `teko_rt.h`'s `TK_TEST_SHARD_ENV` (`"TEKO_TEST_SHARD"`). Read here (never
+ * compared to it) so the writer identity a compiled test binary's journal records carry matches the
+ * shard split's OWN naming (journal J2) without a second definition of the format drifting from the
+ * runtime's.
+ */
+const TEST_SHARD_ENV: str = "TEKO_TEST_SHARD"
+
+/**
+ * shard_index_of — the `<i>` a `TEKO_TEST_SHARD=<i>/<n>` value names, read digit-by-digit up to the
+ * first `/`. Anything that is not a leading run of digits (unset, empty, malformed) answers 0 — the
+ * same "no sharding" reading `tk_shard_parse` gives an unrecognised value, so an unsharded run and a
+ * malformed one both write to writer `s0`.
+ *
+ * @param v  a `TEKO_TEST_SHARD` value (or any string; never reads past its own length)
+ * @return   the shard index it names, or 0
+ * @since 0.3.1
+ */
+fn shard_index_of(v: str) -> u64 {
+    mut i: u64 = 0
+    mut n: u64 = 0
+    loop {
+        if i >= v.len { break }
+        if v[i] == b'/' { break }
+        if v[i] < b'0' || v[i] > b'9' { return 0 }
+        n = (n * 10) + ((v[i] to u64) - (b'0' to u64))
+        i = i + 1
+    }
+    n
+}
+
+/**
+ * test_writer — this process's writer identity for the compiled UNIT TEST binary's own journal
+ * segment: `s<i>` under a parsed `TEKO_TEST_SHARD=<i>/<n>`, or `s0` for an unsharded run (a single
+ * process IS shard 0 of 1, in every other sense already — E1-C6's default).
+ *
+ * @return the writer identity this test binary's per-test notes are stamped with
+ * @since 0.3.1
+ */
+fn test_writer() -> str {
+    match teko::env::var(TEST_SHARD_ENV) {
+        str as v => teko::str::concat("s", teko::str::u64_to_str(shard_index_of(v)))
+        error => "s0"
+    }
+}
+
+/**
+ * note_open_append_close — open `writer`'s segment, append one record, close it — the shared body
+ * every hook below calls, so the open/append/close discipline lives in exactly one place.
+ *
+ * @param writer   the writer identity (`test_writer()`, or a fixed row-tier id)
+ * @param kind     the record kind
+ * @param payload  the record payload
+ * @since 0.3.1
+ */
+fn note_open_append_close(writer: str, kind: str, payload: str) {
+    match open(writer) {
+        Journal as j => {
+            match append(j, kind, payload) { error => { }; null => { } }
+            let _ = close_fd_rt(j.seg)
+        }
+        error => { }
+    }
+}
+
+/**
+ * note_test_begin — called by the emitted test harness right before a `#test` body runs
+ * (`codegen.tks::emit_test_channel_open`).
+ *
+ * @param label  the test's `namespace::name` (or bare `name`)
+ * @since 0.3.1
+ */
+pub fn note_test_begin(label: str) { note_open_append_close(test_writer(), KIND_BEGIN, label) }
+
+/**
+ * note_test_ok — called by the emitted test harness when a `#test` returned normally
+ * (`codegen.tks::emit_test_captured_call`).
+ *
+ * @param label  the test's `namespace::name`
+ * @since 0.3.1
+ */
+pub fn note_test_ok(label: str) { note_open_append_close(test_writer(), KIND_OK, label) }
+
+/**
+ * note_test_panicked — called by the emitted test harness when a `#test` panicked (an explicit
+ * `panic`, a failed assertion, or an implicit panic).
+ *
+ * @param label  the test's `namespace::name`
+ * @since 0.3.1
+ */
+pub fn note_test_panicked(label: str) {
+    note_open_append_close(test_writer(), KIND_FAIL, fail_payload(label, "panicked"))
+}
+
+/**
+ * fail_payload — the `label` + `FIELD_SEP` + `reason` shape a `fail`/`skip` record's payload always
+ * takes (the same shape `summary.tks::payload_label`/`payload_reason` split back apart). Factored out
+ * so every hook that builds one, and every test that proves the shape, share ONE composer.
+ *
+ * @param label   the test/row identity
+ * @param reason  the single-line reason
+ * @return        `label` + a tab + `reason`
+ * @since 0.3.1
+ */
+fn fail_payload(label: str, reason: str) -> str { teko::str::concat(label, FIELD_SEP, reason) }
+
+/**
+ * exited_reason — the reason text `note_test_exited` names: `"exited <code>"`.
+ *
+ * @param code  the value a `#test` exited with
+ * @return      `"exited "` + `code`
+ * @since 0.3.1
+ */
+fn exited_reason(code: i32) -> str { teko::str::concat("exited ", teko::str::i64_to_str(code to i64)) }
+
+/**
+ * note_test_exited — called by the emitted test harness when a `#test` called `exit(code)`.
+ *
+ * @param label  the test's `namespace::name`
+ * @param code   the value the test exited with
+ * @since 0.3.1
+ */
+pub fn note_test_exited(label: str, code: i32) {
+    note_open_append_close(test_writer(), KIND_FAIL, fail_payload(label, exited_reason(code)))
+}
+
+/**
+ * note_test_end — called ONCE by the emitted test harness, after every `#test` has run
+ * (`codegen.tks::emit_test_main_close`): closes this shard's segment cleanly, so `fold` never
+ * synthesises `incomplete` for a shard that finished — only for one that died mid-suite.
+ *
+ * @since 0.3.1
+ */
+pub fn note_test_end() { note_open_append_close(test_writer(), KIND_END, "") }
+
+/**
+ * ROW_WRITER — the writer identity every regression-row hook stamps its records with. The
+ * regression tier is not itself split into multiple journal writers (unlike the unit phase's
+ * `s<shard>`): `run_pool`'s process-per-row parallelism already gives each row its OWN process, and
+ * every one of those processes shares this SAME writer identity by design — they are not
+ * independent journal writers racing on one segment, because `journal::open`'s segment file is
+ * opened, appended to, and closed within the SAME single call in each hook below (`note_row_*`),
+ * never held across the fork. Two rows' notes interleave at the granularity of one already-atomic
+ * `write(2)` each (§5), the same guarantee `append` states for any writer.
+ */
+const ROW_WRITER: str = "r0"
+
+/**
+ * note_row_begin — a regression row is about to run.
+ *
+ * @param label  the row's identity (`<file>.tkr[<scenario> row <n>]`)
+ * @since 0.3.1
+ */
+pub fn note_row_begin(label: str) { note_open_append_close(ROW_WRITER, KIND_BEGIN, label) }
+
+/**
+ * note_row_ok — a regression row passed.
+ *
+ * @param label  the row's identity
+ * @since 0.3.1
+ */
+pub fn note_row_ok(label: str) { note_open_append_close(ROW_WRITER, KIND_OK, label) }
+
+/**
+ * note_row_fail — a regression row failed.
+ *
+ * @param label   the row's identity
+ * @param reason  why it failed, single-line
+ * @since 0.3.1
+ */
+pub fn note_row_fail(label: str, reason: str) {
+    note_open_append_close(ROW_WRITER, KIND_FAIL, fail_payload(label, reason))
+}
+
+/**
+ * note_row_skip — a regression row was skipped (a missing tool, `REGRESSION_REQUIRE_TOOLS`'s
+ * fail-open reading).
+ *
+ * @param label   the row's identity
+ * @param reason  why it was skipped, single-line
+ * @since 0.3.1
+ */
+pub fn note_row_skip(label: str, reason: str) {
+    note_open_append_close(ROW_WRITER, KIND_SKIP, fail_payload(label, reason))
+}
+
+/**
+ * note_row_end — called ONCE by the regression driver after every row has run: closes the `r0`
+ * segment cleanly, mirroring `note_test_end`'s reason exactly (`fold` must not call a finished
+ * regression tier `incomplete`).
+ *
+ * @since 0.3.1
+ */
+pub fn note_row_end() { note_open_append_close(ROW_WRITER, KIND_END, "") }
