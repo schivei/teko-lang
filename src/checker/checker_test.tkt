@@ -2002,3 +2002,92 @@ fn collect_diagnostics_appends_a_collected_warning_after_an_error() {
     teko::assert::str_contains(diags[1], "unused private function")
     teko::assert::str_contains(diags[1], "dead_leaf")
 }
+
+#test
+/**
+ * to_diagnostic_parses_file_line_col_with_caller_known_severity — the crumb D happy path: a
+ * `file:line:col: msg` line, given its own file as the single candidate, resolves to a `Diagnostic`
+ * whose `file`/`line`/`col`/`message` are pulled straight out of the string and whose `severity` is
+ * EXACTLY the caller's `severity` argument, never re-derived from `message`'s own text.
+ */
+fn to_diagnostic_parses_file_line_col_with_caller_known_severity() {
+    let files = teko::list::push(teko::list::empty(), "foo.tks")
+    let d = to_diagnostic("foo.tks:3:5: unknown type: Bogus", files, DiagSeverity::Error)
+    teko::assert::eq_str(d.file, "foo.tks")
+    teko::assert::eq_u64(d.line to u64, 3)
+    teko::assert::eq_u64(d.col to u64, 5)
+    teko::assert::eq_u64(d.end_line to u64, 3)
+    teko::assert::eq_u64(d.end_col to u64, 6)
+    teko::assert::eq_str(d.message, "unknown type: Bogus")
+    teko::assert::is_true(d.severity == DiagSeverity::Error)
+}
+
+#test
+/**
+ * to_diagnostic_handles_a_positionless_finding_for_a_known_file — `diag_at`'s OTHER positioned shape
+ * (`file: msg`, no `line:col`, `diag_at`'s own `if line > 0` branch never taken) resolves the known
+ * `file` with `line`/`col` both 0, never dropping the finding.
+ */
+fn to_diagnostic_handles_a_positionless_finding_for_a_known_file() {
+    let files = teko::list::push(teko::list::empty(), "foo.tks")
+    let d = to_diagnostic("foo.tks: whole-file note", files, DiagSeverity::Warning)
+    teko::assert::eq_str(d.file, "foo.tks")
+    teko::assert::eq_u64(d.line to u64, 0)
+    teko::assert::eq_u64(d.col to u64, 0)
+    teko::assert::eq_str(d.message, "whole-file note")
+    teko::assert::is_true(d.severity == DiagSeverity::Warning)
+}
+
+#test
+/**
+ * to_diagnostic_falls_back_to_the_whole_line_for_an_unknown_file — a line naming none of the closed
+ * candidate `files` (or an empty candidate set) never gets silently dropped: the WHOLE line becomes
+ * the message at an unknown (`file = ""`, `line = 0`) position, `severity` still the caller's own.
+ */
+fn to_diagnostic_falls_back_to_the_whole_line_for_an_unknown_file() {
+    let d = to_diagnostic("some standalone diagnostic", teko::list::empty(), DiagSeverity::Error)
+    teko::assert::eq_str(d.file, "")
+    teko::assert::eq_u64(d.line to u64, 0)
+    teko::assert::eq_str(d.message, "some standalone diagnostic")
+    teko::assert::is_true(d.severity == DiagSeverity::Error)
+}
+
+#test
+/**
+ * program_files_collects_distinct_non_empty_files_in_first_seen_order — the closed candidate set
+ * `to_diagnostic` matches against: every DISTINCT non-empty `item.file`, first occurrence wins,
+ * duplicates dropped, an empty (single-file compile path) `file` never included.
+ */
+fn program_files_collects_distinct_non_empty_files_in_first_seen_order() {
+    mut items: []parser::Item = teko::list::empty()
+    items = teko::list::push(items, parser::Item { content = mk_fn("a", named_t("i64"), teko::list::empty()); namespace = ""; file = "a.tks" })
+    items = teko::list::push(items, parser::Item { content = mk_fn("b", named_t("i64"), teko::list::empty()); namespace = ""; file = "b.tks" })
+    items = teko::list::push(items, parser::Item { content = mk_fn("c", named_t("i64"), teko::list::empty()); namespace = ""; file = "a.tks" })
+    items = teko::list::push(items, parser::Item { content = mk_fn("d", named_t("i64"), teko::list::empty()); namespace = ""; file = "" })
+    let files = program_files(parser::Program { items = items })
+    teko::assert::eq_u64(files.len, 2)
+    teko::assert::eq_str(files[0], "a.tks")
+    teko::assert::eq_str(files[1], "b.tks")
+}
+
+#test
+/**
+ * collect_diagnostics_structured_stamps_real_severity_and_range — the crumb D end-to-end regression,
+ * driving the REAL lex → parse → `collect_diagnostics_structured` seam (mirroring
+ * `collect_diagnostics_appends_a_collected_warning_after_an_error`'s own harness): a program with ONE
+ * type error and ONE unused private function yields TWO `Diagnostic` values — the error stamped
+ * `DiagSeverity::Error`, the warning stamped `DiagSeverity::Warning` — proving severity is REAL, not a
+ * `"warning:"` text sniff, all the way from the checker's own pre-mono walk.
+ */
+fn collect_diagnostics_structured_stamps_real_severity_and_range() {
+    let src = "pub fn bad(x: Bogus) -> i64 { return 0 }\nfn dead_leaf() -> i64 { return 1 }\n"
+    let diags = collect_diagnostics_structured(prog_from_module_src(src, "warn.tks"))
+    teko::assert::eq_u64(diags.len, 2)
+    teko::assert::eq_str(diags[0].file, "warn.tks")
+    teko::assert::is_true(diags[0].severity == DiagSeverity::Error)
+    teko::assert::str_contains(diags[0].message, "Bogus")
+    teko::assert::eq_str(diags[1].file, "warn.tks")
+    teko::assert::is_true(diags[1].severity == DiagSeverity::Warning)
+    teko::assert::str_contains(diags[1].message, "unused private function")
+    teko::assert::str_contains(diags[1].message, "dead_leaf")
+}
