@@ -2775,12 +2775,86 @@ fn append_bytes(buf: []byte, src: []byte) -> []byte {
 }
 
 /**
+ * RODATA_ENTRY_ALIGN — the byte alignment every rodata ENTRY's START is padded to (8): the
+ * pointer width a fat member's `{ptr, len}` slot needs (`ltype_size(LType::Ptr)`), and the
+ * alignment macOS `ld` enforces on every `ARM64_RELOC_UNSIGNED` (`Abs64`) relocation site.
+ * `layout_of_sized` (`lir.tks`) already places a pointer FIELD on an 8-byte boundary WITHIN
+ * one entry's own bytes (natural C struct alignment); this constant closes the sibling gap
+ * BETWEEN entries — without it, an odd-length neighbor (a string leaf, a byte-count struct)
+ * pushes a following pointer-bearing entry's own start off an 8-byte boundary and the link
+ * fails (`ld: pointer not aligned in '<sym>'+<off>`, first hit on `AAPCS64.gpr_arg`'s
+ * neighbors in the self-hosting corpus).
+ */
+const RODATA_ENTRY_ALIGN: u32 = 8
+
+/**
+ * fold_rodata_entry_relocs — `entry`'s own relocations, rebased from entry-local offsets to
+ * the running `__const` offset `off` (`entry`'s own start), appended to `relocs`.
+ *
+ * @param []lir::LDataReloc relocs  the relocations accumulated over the preceding entries
+ * @param lir::LRodata entry  the rodata entry whose relocations to rebase
+ * @param u32 off  `entry`'s own start offset within the concatenated `__const` image
+ * @return []lir::LDataReloc  `relocs` extended with `entry`'s rebased relocations
+ */
+fn fold_rodata_entry_relocs(relocs: []lir::LDataReloc, entry: lir::LRodata, off: u32) -> []lir::LDataReloc {
+    mut out = relocs
+    mut j: u64 = 0
+    loop {
+        if j >= entry.relocs.len { break }
+        out = teko::list::push(out, lir::data_reloc(off + entry.relocs[j].offset, entry.relocs[j].target))
+        j++
+    }
+    out
+}
+
+/**
+ * PaddedRodata — the `__const` image plus its running byte offset after placing one entry
+ * and (except past the last one) padding to the next `RODATA_ENTRY_ALIGN`-byte boundary.
+ */
+type PaddedRodata = struct {
+    /** bytes — the `__const` image accumulated so far, entry bytes then any boundary pad. */
+    bytes: []byte
+    /**
+     * off — the running `__const` offset, always equal to `bytes.len` (kept as its own
+     * `u32` counter since every reloc/symbol offset field is `u32`, not `u64`).
+     */
+    off: u32
+}
+
+/**
+ * pad_rodata_entry_boundary — append `entry`'s bytes to the running `__const` image, then —
+ * unless `entry` is the LAST one (`is_last`) — zero-pad up to the next `RODATA_ENTRY_ALIGN`-
+ * byte boundary, so the NEXT entry's symbol (and any relocation inside it) starts 8-aligned
+ * regardless of `entry`'s own odd byte length.
+ *
+ * @param []byte bytes  the `__const` image accumulated so far
+ * @param u32 off  the running offset before placing `entry` (`entry`'s own start)
+ * @param lir::LRodata entry  the rodata entry to place
+ * @param bool is_last  whether `entry` is the final entry (no trailing pad needed)
+ * @return PaddedRodata  the image and offset advanced past `entry` (and its boundary pad)
+ */
+fn pad_rodata_entry_boundary(bytes: []byte, off: u32, entry: lir::LRodata, is_last: bool) -> PaddedRodata {
+    let placed = append_bytes(bytes, entry.bytes)
+    let placed_off = off + (entry.bytes.len to u32)
+    if is_last { return PaddedRodata { bytes = placed; off = placed_off } }
+    let aligned_off = align_up(placed_off, RODATA_ENTRY_ALIGN)
+    mut padded = placed
+    loop {
+        if padded.len >= (aligned_off to u64) { break }
+        padded = teko::list::push(padded, 0)
+    }
+    PaddedRodata { bytes = padded; off = aligned_off }
+}
+
+/**
  * encode_rodata — build the `__const` image and its defined symbols: each
  * `LRodata` entry is placed at the running byte offset with a defined, FILE-
  * LOCAL section-2 symbol (the ADRP/ADD-lo relocations in `__text` resolve to it
  * at link time; local mirrors `clang`'s own convention for string constants, so
  * same-named rodata in two objects never collides at Phase E multi-object
- * link).
+ * link), then boundary-padded to `RODATA_ENTRY_ALIGN` (`pad_rodata_entry_boundary`)
+ * so a pointer-bearing entry always starts 8-aligned regardless of its neighbors'
+ * own lengths.
  *
  * @param []lir::LRodata rodata  the module's interned rodata table
  * @return ModuleRodata | error  the `__const` image + its defined symbols
@@ -2795,30 +2869,10 @@ fn encode_rodata(rodata: []lir::LRodata) -> ModuleRodata | error {
         if i >= rodata.len { break }
         let rd = rodata[i]
         syms = teko::list::push(syms, Symbol { name = rd.symbol; defined = true; sect = 2 to u8; offset = off; local = true })
-        mut j: u64 = 0
-        loop {
-            if j >= rd.relocs.len { break }
-            relocs = teko::list::push(relocs, lir::data_reloc(off + rd.relocs[j].offset, rd.relocs[j].target))
-            j++
-        }
-        bytes = append_bytes(bytes, rd.bytes)
-        off = off + (rd.bytes.len to u32)
-        // Pad to 8-byte alignment between entries so pointer-bearing entries
-        // (fat slots with ptr+len pairs) always start at an 8-byte-aligned offset
-        // within __const.  Without this, string leaf bytes (e.g. "alpha" = 5
-        // bytes) push the next symbol to a non-8-aligned offset, and the Apple
-        // ARM64 linker rejects the unaligned pointer relocation
-        // (ld: pointer not aligned).  Skip padding after the last entry.
-        if i + 1 < rodata.len {
-            let aligned = align_up(off, 8)
-            mut pad: u32 = aligned - off
-            loop {
-                if pad == 0 { break }
-                bytes = teko::list::push(bytes, 0)
-                pad = pad - 1
-            }
-            off = aligned
-        }
+        relocs = fold_rodata_entry_relocs(relocs, rd, off)
+        let placed = pad_rodata_entry_boundary(bytes, off, rd, i + 1 >= rodata.len)
+        bytes = placed.bytes
+        off = placed.off
         i++
     }
     ModuleRodata { bytes = bytes; syms = syms; relocs = relocs }
