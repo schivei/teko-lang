@@ -383,3 +383,134 @@ Feature: F8 target — the TEKO_TARGET boundary (compile-fail; R2 honest error, 
     Given source = "cases/target_boundary.tks"
     When compilation fails
     Then diagnostic = "supported targets: x86_64-linux"
+
+# PARSER rejections — folded from the retired `parse_diagnostics` project (0.3.1 consolidation).
+# A parse error stops the compiler BEFORE the checker runs (§0.7, LEI), so these CANNOT share the
+# checker-stage project build above (that build reaches the checker only because its own manifest and
+# lexing succeed). Each rides as its OWN standalone `Given source` compile-fail build (immune to this
+# project's checker-failing `src/`), which preserves all twenty-four diagnostics verbatim. Twenty-four
+# builds where `parse_diagnostics` reported twenty-four from one — the honest price of the parse/checker
+# stage boundary under the ten-project cap (the owner blessed extra compile-fail builds).
+Feature: parser rejections, folded as standalone Given source compile-fail cases (parse stage)
+
+  Scenario: the retired T? optional-postfix sugar is rejected
+    Given source = "parse_cases/c02.tks"
+    When compilation fails
+    Then diagnostic = "nullable sugar has been removed"
+
+  Scenario: member_const_interface_rejected
+    Given source = "parse_cases/c07.tks"
+    When compilation fails
+    Then diagnostic = "a `const` member is only allowed in a struct, class, or trait body"
+
+  Scenario: member_const_override_rejected
+    Given source = "parse_cases/c08.tks"
+    When compilation fails
+    Then diagnostic = "may not carry `override`"
+
+  Scenario: reject_lit_over_u64
+    Given source = "parse_cases/c11.tks"
+    When compilation fails
+    Then diagnostic = "integer literal exceeds u64::MAX"
+
+  Scenario: sugar_coalesce_rejected
+    Given source = "parse_cases/c13.tks"
+    When compilation fails
+    Then diagnostic = "null-coalescing operator has been removed"
+
+  Scenario: sugar_qmark_field_rejected
+    Given source = "parse_cases/c14.tks"
+    When compilation fails
+    Then diagnostic = "safe-navigation operator has been removed"
+
+  Scenario: sugar_qmark_type_rejected
+    Given source = "parse_cases/c15.tks"
+    When compilation fails
+    Then diagnostic = "nullable sugar has been removed"
+
+  Scenario: sugar_slice_opt_rejected
+    Given source = "parse_cases/c16.tks"
+    When compilation fails
+    Then diagnostic = "nullable sugar has been removed"
+
+  Scenario: discard_as_alias
+    Given source = "parse_cases/c21.tks"
+    When compilation fails
+    Then diagnostic = "`_` is the write-only discard and cannot be a `let`/`mut`/`const` targ"
+
+  Scenario: discard_bare_read
+    Given source = "parse_cases/c22.tks"
+    When compilation fails
+    Then diagnostic = "`_` is a write-only discard and cannot be read — it carries no value ("
+
+  Scenario: discard_double_underscore
+    Given source = "parse_cases/c23.tks"
+    When compilation fails
+    Then diagnostic = "`_` is the write-only discard; two or more underscores in a row (`__`)"
+
+  Scenario: discard_let_binding
+    Given source = "parse_cases/c24.tks"
+    When compilation fails
+    Then diagnostic = "`_` is the write-only discard and cannot be a `let`/`mut`/`const` targ"
+
+  Scenario: discard_typed_target
+    Given source = "parse_cases/c26.tks"
+    When compilation fails
+    Then diagnostic = "`_` is the write-only discard and cannot be a `let`/`mut`/`const` targ"
+
+  Scenario: inline_attr_misplaced
+    Given source = "parse_cases/c32.tks"
+    When compilation fails
+    Then diagnostic = "`#inline` attaches to a local binding"
+
+  Scenario: let_ref_rejected
+    Given source = "parse_cases/c33.tks"
+    When compilation fails
+    Then diagnostic = "a reference binding is written `ref x: T = e`"
+
+  Scenario: refT_surface_rejected
+    Given source = "parse_cases/c41.tks"
+    When compilation fails
+    Then diagnostic = "`Ref<T>` is compiler-internal — write the `ref` keyword instead"
+
+  Scenario: ref_field_rejected
+    Given source = "parse_cases/c43.tks"
+    When compilation fails
+    Then diagnostic = "a reference cannot be stored in a struct/variant/collection"
+
+  Scenario: ref_in_collection_rejected
+    Given source = "parse_cases/c44.tks"
+    When compilation fails
+    Then diagnostic = "a reference cannot be stored in a struct/variant/col"
+
+  Scenario: ref_let_binding_rejected
+    Given source = "parse_cases/c45.tks"
+    When compilation fails
+    Then diagnostic = "a reference binding is written `ref x: T` — the `ref` is itself the bi"
+
+  Scenario: ref_mut_modifier_rejected
+    Given source = "parse_cases/c47.tks"
+    When compilation fails
+    Then diagnostic = "a reference binding is written `ref x: T` — the `ref` is itself the bi"
+
+  Scenario: underscore_as_x_rejected
+    Given source = "parse_cases/c54.tks"
+    When compilation fails
+    Then diagnostic = "`_` is a discard and cannot be bound to a name (`_ as x`) — use `_ as "
+
+  Scenario: mut_ref_annotation_rejected
+    Given source = "parse_cases/c61.tks"
+    When compilation fails
+    Then diagnostic = "a reference binding is written `ref x: T = e`"
+
+  Scenario: user_type_named_Ref_rejected_at_the_declaration
+    Given source = "parse_cases/c62.tks"
+    When compilation fails
+    Then diagnostic = "`Ref` is a reserved type name"
+
+  # A KNOWN-STOP pin, not a permanent rejection: a `[](T | null)` parameter cannot be spelled at all
+  # (#265 held-back cell). The day the parser accepts it, this row goes red and the cell is promoted.
+  Scenario: KNOWN-STOP — a `[](T | null)` parameter cannot be spelled at all (#265 held-back cell)
+    Given source = "parse_cases/pin_slice_opt_param.tks"
+    When compilation fails
+    Then diagnostic = "a function type '(A, B) -> R' needs '->' before the return type"
