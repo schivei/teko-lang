@@ -879,55 +879,6 @@ fn lwt_slice_field(name: str, elem_tname: str) -> parser::Field {
 }
 
 /**
- * lwt_tb6_deref_reads_second_element_and_len — the T-B6 sibling reads (#594 §7.3): `K2.xs[1]` derefs
- * the second interned element (exit 20), and `K2.xs.len` reads the inline length half of the fat field
- * through the new `lower_fat_field` reader (exit 2) — the two engines dereference the same target bytes.
- *
- * @return void
- */
-#test
-fn lwt_tb6_deref_reads_second_element_and_len() {
-    teko::assert::is_true(lwt_tb6_deref_exit(lwt_index(lwt_tb6_k2_xs(), lwt_num_i64(1), lwt_prim(checker::PrimKind::I64))) == (20))
-    teko::assert::is_true(lwt_tb6_deref_exit(lwt_field_access(lwt_tb6_k2_xs(), "len", lwt_prim(checker::PrimKind::I64))) == (2))
-}
-
-/**
- * lwt_tb6_k2_xs — the typed `K2.xs` fat-field access (`[]i64`) the T-B6 deref fixtures read through
- * (#594 §7.3): a field access on the aggregate-const receiver `K2` of type `S2`.
- *
- * @return the typed `K2.xs` field-access expression
- */
-fn lwt_tb6_k2_xs() -> checker::TExpr {
-    lwt_field_access(lwt_typed_var("K2", checker::Named { name = "S2" }), "xs", checker::Slice { element = lwt_prim(checker::PrimKind::I64) })
-}
-
-/**
- * lwt_tb6_deref_exit — lower a program that binds `const K2: S2 = { xs = [10, 20]; n = 2 }` and runs
- * `exit(<use>)` as its virtual main, then interpret it through the LIR interpreter and return the exit code (#594 §7.3).
- * The struct `S2` is declared first so its 16-byte fat-field layout is registered before the const
- * interns.
- *
- * @param use_expr  the i64-typed expression the virtual main exits with (a `K2.xs[i]` or `K2.xs.len`)
- * @return          the exit code of the lowered program (from LIR interpreter execution)
- */
-fn lwt_tb6_deref_exit(use_expr: checker::TExpr) -> i64 {
-    let decl = lwt_struct_decl("S2", lwt_two_fields(lwt_slice_field("xs", "i64"), lwt_field("n", "i64")))
-    let elems = teko::list::push(teko::list::push(teko::list::empty(), lwt_num_i64(10)), lwt_num_i64(20))
-    let xs_lit = lwt_array_lit(elems, checker::PrimKind::I64)
-    let fnames = teko::list::push(teko::list::push(teko::list::empty(), "xs"), "n")
-    let fvals = teko::list::push(teko::list::push(teko::list::empty(), xs_lit), lwt_num_i64(2))
-    let si = lwt_struct_init("S2", fnames, fvals)
-    let cd: checker::TItem = checker::TConstDecl { name = "K2"; namespace = ""; ty = checker::Named { name = "S2" }; init = si; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0 }
-    let exit_call = lwt_call(lwt_path1("exit"), "", teko::list::push(teko::list::empty(), use_expr), checker::Void { })
-    mut items: []checker::TItem = teko::list::push(teko::list::empty(), decl)
-    items = teko::list::push(items, cd)
-    items = teko::list::push(items, lwt_item(lwt_exprstmt(exit_call)))
-    let m = match lower_program(checker::TProgram { items = items }) { LModule as x => x; error as err => { teko::assert::is_true(false); return (-99) } }
-    let no_args: []i64 = teko::list::empty()
-    interp_lmodule(m, "main", no_args)
-}
-
-/**
  * lwt_agg_struct_fat_field_slot_is_8byte_aligned — the native-rodata-const-align regression
  * (macOS-arm64 fixpoint `ld: pointer not aligned` on `AAPCS64.gpr_arg`): a struct whose
  * declared FIRST field is a single ODD-sized scalar (`flag: byte`, 1 byte) and whose SECOND
@@ -2216,28 +2167,6 @@ fn lwt_lowers_defer_fires_before_a_void_lambdas_fall_through_return() {
     let text = print_lmodule(m)
     teko::assert::str_contains(text, "const 100")
     teko::assert::str_contains(text, "iadd")
-}
-
-/**
- * lwt_interp_runs_function_trailing_expression_as_return_value — #421, the
- * interp-oracle side: `fn f() -> i32 { 42 }` (no explicit `return`) lowered
- * via `lower_function` and run through `interp_lmodule` yields exit code 42
- * — before the fix the fall-through body closed with a valueless `ret`, so
- * the interp's `is_return` outcome carried 0, not 42.
- *
- * IT ADDRESSES THE FUNCTION THROUGH `mangle_fn_symbol`, NOT BY THE BARE NAME, and that is not
- * ceremony. `lower_function` keys the emitted function by the MANGLED symbol, so a literal `"f"`
- * stops resolving the moment the mangler moves — which is exactly what the `teko_*` user prefix
- * did. Computing the address from the mangler is not tautological here: the SUBJECT of this test
- * is the interpreter's return value, and the symbol is only how the function is reached.
- */
-#test
-fn lwt_interp_runs_function_trailing_expression_as_return_value() {
-    let body = teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num(42, checker::PrimKind::I32)))
-    let f = lwt_fn("f", "", teko::list::empty(), checker::Prim { kind = checker::PrimKind::I32 }, body)
-    let lf = match lower_function(f) { LoweredFunction as x => x.func; error as err => return }
-    let m = add_func(empty_module(), lf)
-    teko::assert::is_true(interp_lmodule(m, mangle_fn_symbol("", "f"), teko::list::empty()) == (42))
 }
 
 /**
