@@ -5685,3 +5685,60 @@ fn f_null_narrow_match() -> i64 {
     if reordered != 9 { return 3 }
     0
 }
+
+/**
+ * f_null_narrow_ifguard — retire-Optional O4 (`docs/design/retirar-optional-para-null-union-uptr-0.3.1.md`
+ * §6): a `when`-GUARDED match arm combined with `T | null` union narrowing over a migrated union
+ * still narrows and exhausts correctly now that `check_pattern`/`exhaustive`'s Optional-specific
+ * arms are deleted (`src/checker/match.tks`) and route purely through the generic `Null`-member
+ * Variant machinery. A guarded arm does NOT count for exhaustiveness (M.1) — the null arm plus an
+ * UNGUARDED present arm still cover the union on their own, so the guard's pass/fail is purely a
+ * runtime fallthrough concern, never a compile-time coverage one.
+ *
+ * @return 0 on success, a distinct non-zero code per failing check
+ */
+fn f_null_narrow_ifguard() -> i64 {
+    let big: i64 | null = 9
+    let a = match big {
+        i64 as v when v > 5 => v * 2
+        i64 as v => v
+        null => -1
+    }
+    if a != 18 { return 1 }
+    let small: i64 | null = 3
+    let b = match small {
+        i64 as v when v > 5 => v * 2
+        i64 as v => v
+        null => -1
+    }
+    if b != 3 { return 2 }
+    let absent: i64 | null = null
+    let c = match absent {
+        i64 as v when v > 5 => v * 2
+        i64 as v => v
+        null => -1
+    }
+    if c != -1 { return 3 }
+    0
+}
+
+/**
+ * f_empty_slice_sentinel_untouched — retire-Optional O4: proves the SEPARATE `Slice{Void}`
+ * empty-slice sentinel (`teko::list::empty()`'s type — `type_eq`'s Slice arm and
+ * `type_has_sentinel`'s Slice arm, BOTH left untouched by this crumb, alongside their Optional
+ * arms in the SAME two functions) still unifies with any concrete slice and lets a `push` fix its
+ * element type, including one level of nesting. A DIFFERENT sentinel from `Optional`'s `Void`
+ * inner entirely — the negative-half proof that O4 did not over-delete.
+ *
+ * @return 0 on success, a distinct non-zero code per failing check
+ */
+fn f_empty_slice_sentinel_untouched() -> i64 {
+    let e: []i64 = teko::list::empty()
+    if e.len != 0 { return 1 }
+    let one = teko::list::push(e, 11)
+    if one.len != 1 { return 2 }
+    if one[0] != 11 { return 3 }
+    let nested: [][]i64 = teko::list::empty()
+    if nested.len != 0 { return 4 }
+    0
+}

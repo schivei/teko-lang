@@ -963,26 +963,24 @@ fn ptr_widens_to_opaque(from: Type, to: Type) -> bool {
 
 // (#41-followon) Does a value of `from` WIDEN into `to`? The single source of truth for value-
 // position widening, shared by the return/trailing-value/assign/binding check (assignable_to
-// delegates here) and the match/`if` arm JOIN (type_join). Rules (B.14 + present-wrap §202):
+// delegates here) and the match/`if` arm JOIN (type_join). Rules (B.14):
 //   • type equality,
+//   • a BARE `null` into any union (inline or named) listing `null` (`null_widens_into`),
 //   • a VARIANT `from` iff EVERY member widens in (sub-variant → wider variant) — TRANSITIVE,
-//   • `T` into `T?` (and `U?`/sentinel into `T?`),
 //   • a variant MEMBER into the (named-expanded) variant — also transitive (a nested case).
 // Depth-bounded so a pathological self-referential variant cannot loop. (Mirror of resolve.c.)
+//
+// retire-Optional O4 (`docs/design/retirar-optional-para-null-union-uptr-0.3.1.md` §6): the
+// PRESENT-WRAP arm (`T (or a case of T) → T?`, `to` itself the legacy `Optional` sentinel) is
+// DELETED here — unreachable since O1/O2 migrated the two live `Optional` producers and O3's
+// gate confirmed no `Optional{…}` construction remains outside the cataloged Group C arms: `to`
+// can no longer resolve to `Optional` from any live annotation path, so this match's `to` was
+// always the `_` fallthrough. Fixture: `null_narrow_ifguard` (own_native) pins that an
+// equality-guard narrow over a migrated `T | null` union is unaffected.
 fn widens_into_at(from: Type, to: Type, table: TypeTable, depth: i64) -> bool {
     if type_eq(from, to) { return true }
     if depth <= 0 { return false }
     if from_is_bare_null(from) && null_widens_into(to, table) { return true }
-    // PRESENT-WRAP first (before variant decomposition): a whole `T` (even a named variant like
-    // `TypeExpr`) wraps into `T?`. Checking this before the variant-from split keeps `TypeExpr →
-    // TypeExpr?` a single present-wrap, not a member-by-member (which would wrongly fail).
-    match to {
-        Optional as opt => {
-            if widens_into_at(from, opt.inner, table, depth - 1) { return true }   // T (or a case of T) → T?
-            match from { Optional => return true; _ => { } }   // U? / sentinel → T?
-        }
-        _ => { }
-    }
     match expand_variant(from, table) {   // a VARIANT source decomposes into its members
         Variant as fv => {
             mut i = 0
@@ -1493,12 +1491,17 @@ pub fn type_conforms_to(name: str, iface: str, table: TypeTable) -> bool {
 // is right for ASSIGNABILITY but wrong for JOIN's "equal → return `a`" shortcut: if `a` is the
 // (less informative) sentinel side and `b` is concrete, blindly returning `a` silently discards
 // the concrete element type a sibling array-literal entry established (`[[], [1]]`'s inner `[]`
-// joined against `[1]`'s `[]i64` — see type_join). Recurses through Slice/Optional so a nested
-// sentinel (`[][]Void`) is still detected. Mirror: resolve.c::tk_type_has_sentinel.
+// joined against `[1]`'s `[]i64` — see type_join). Recurses through Slice so a nested sentinel
+// (`[][]Void`) is still detected. Mirror: resolve.c::tk_type_has_sentinel.
+//
+// retire-Optional O4 (`docs/design/retirar-optional-para-null-union-uptr-0.3.1.md` §6): the
+// `Optional` arm (the OTHER sentinel this once recursed through, `Optional{inner=Void}`) is
+// DELETED — O1 was its only producer and it now births `Null{}` instead, so `t` can no longer
+// legitimately be `Optional` here; the SEPARATE `Slice{Void}` empty-slice sentinel above is
+// UNTOUCHED (a different sentinel entirely — fixture: `empty_slice_sentinel_untouched`, own_native).
 fn type_has_sentinel(t: Type) -> bool {
     match t {
         Slice as s => match s.element { Void => true; _ => type_has_sentinel(s.element) }
-        Optional as o => match o.inner { Void => true; _ => type_has_sentinel(o.inner) }
         _ => false
     }
 }
