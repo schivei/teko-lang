@@ -278,6 +278,21 @@ build_gen() {
     bg_const_size_check=""
     if [ "$bg_backend" = "native" ]; then bg_const_size_check="1"; fi
     scan_project_c "$W/project-c.before"
+    # ASLR OFF ON THE NATIVE LEG (2026-08-04, native M.1 Heisenbug): the native backend's
+    # `checker::collect_stmt_insts` crash (`src/checker/resolve.tks:2573`) is address-sensitive —
+    # with ASLR live it either does not reproduce at all in this gate, or lands at a DIFFERENT
+    # site than the one the implementer pinned locally (native-lowering item ~1936 vs the real
+    # collect_stmt_insts M.1). `setarch "$(uname -m)" -R` (Linux/util-linux only — absent on
+    # macOS, where this leg does not run) pins the process to a fixed, deterministic address
+    # layout, matching the local reproduction recipe (docs/memory/plano-acao-nativo-fixpoint-
+    # 0.3.1.md §A1). It wraps ONLY the compiler invocation below and ONLY when this generation is
+    # being built native — the C route is unaffected and no other command in this file is
+    # touched. `command -v setarch` guards the one platform that lacks it so a missing binary
+    # degrades to "no pinning" instead of an honest-stop unrelated to the fixpoint itself.
+    bg_launcher=""
+    if [ "$bg_backend" = "native" ] && command -v setarch >/dev/null 2>&1; then
+        bg_launcher="setarch $(uname -m) -R --"
+    fi
     # Stream the build LIVE (prefixed) to the lane log AND capture to $bg_log. Owner ruling
     # 2026-08-03: "expor tudo que ele faz e não ocultar nenhuma saída". Before, the build was
     # redirected to a file dumped ONLY on failure, so a mid-build OOM-kill (Killed: 9) lost the
@@ -286,9 +301,9 @@ build_gen() {
     # `set +e`/`set -e` brackets keep the pipe's own failure from tripping the caller early.
     set +e
     if [ -n "$RT_DIR" ]; then
-        { ( cd "$PROJ" && TK_RT_DIR="$RT_DIR" TEKO_NATIVE_TRACE_ITEMS="$bg_trace" TEKO_NATIVE_RODATA_ALIGN_CHECK="$bg_align_check" TEKO_NATIVE_CALL_SAFETY_CHECK="$bg_call_safety_check" TEKO_NATIVE_REGION_CHECK="$bg_region_check" TEKO_NATIVE_CONST_SIZE_CHECK="$bg_const_size_check" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
+        { ( cd "$PROJ" && TK_RT_DIR="$RT_DIR" TEKO_NATIVE_TRACE_ITEMS="$bg_trace" TEKO_NATIVE_RODATA_ALIGN_CHECK="$bg_align_check" TEKO_NATIVE_CALL_SAFETY_CHECK="$bg_call_safety_check" TEKO_NATIVE_REGION_CHECK="$bg_region_check" TEKO_NATIVE_CONST_SIZE_CHECK="$bg_const_size_check" TEKO_BACKEND="$bg_backend" $bg_launcher "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
     else
-        { ( cd "$PROJ" && TEKO_NATIVE_TRACE_ITEMS="$bg_trace" TEKO_NATIVE_RODATA_ALIGN_CHECK="$bg_align_check" TEKO_NATIVE_CALL_SAFETY_CHECK="$bg_call_safety_check" TEKO_NATIVE_REGION_CHECK="$bg_region_check" TEKO_NATIVE_CONST_SIZE_CHECK="$bg_const_size_check" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
+        { ( cd "$PROJ" && TEKO_NATIVE_TRACE_ITEMS="$bg_trace" TEKO_NATIVE_RODATA_ALIGN_CHECK="$bg_align_check" TEKO_NATIVE_CALL_SAFETY_CHECK="$bg_call_safety_check" TEKO_NATIVE_REGION_CHECK="$bg_region_check" TEKO_NATIVE_CONST_SIZE_CHECK="$bg_const_size_check" TEKO_BACKEND="$bg_backend" $bg_launcher "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
     fi
     set -e
     return "$(cat "$W/bg_status")"
