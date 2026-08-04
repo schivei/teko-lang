@@ -4160,11 +4160,18 @@ fn lower_bytes_from_ptr_call(ctx: LowerCtx, c: checker::TCall) -> LoweredFat | e
 
 /**
  * is_buf_ptr_call — recognizes `teko::mem::buf_ptr`'s bare last segment: the arena bump-allocate
- * builtin that allocates `len` bytes into the enclosing region (0.3.1.0 degrau 26).
+ * builtin that allocates `len` bytes in ROOT (0.3.1.0 degrau 26).
  *
  * `teko::mem::buf_ptr(len: u64) -> ptr<byte>` is intercepted BEFORE the plain `call_symbol`
- * resolver table so it can route through `region_current_vreg` (NP5) rather than the `call_symbol`
- * table's ordinary by-name dispatch.
+ * resolver table because `buf_ptr` returns a RAW `ptr<byte>` with NO lifetime tracking of its
+ * own — the checker/backend cannot see whether the caller retains it past the innermost open
+ * scope (the exact shape a `{}`/if-arm/loop-iteration region NP5 opens would free out from under,
+ * a confirmed native-runtime UAF measured on `theory/heisenbug-fix`'s first NP5 push, CI run
+ * 30946284244: gen1 self-host regressed from item 6616/6616+link to a SIGSEGV at item 3518,
+ * `cg_name_reaches_byvalue`). Routing this ONE builtin to root is leak-safe (root is never
+ * dropped mid-function) and sidesteps that hazard entirely; giving `buf_ptr` its own tracked
+ * lifetime (so it COULD route to the enclosing scope) is deferred to the later memory program /
+ * route B — out of this crumb's scope.
  *
  * @param callee  the call's callee path
  * @return        true iff `callee`'s bare last segment names `buf_ptr`
@@ -4176,15 +4183,21 @@ fn is_buf_ptr_call(callee: parser::Path) -> bool {
 
 /**
  * lower_buf_ptr_call — `teko::mem::buf_ptr(len: u64) -> ptr<byte>`: allocate `len` bytes into
- * the CURRENT region (`region_current_vreg`, NP5 — the innermost open `{}`/if-arm/when-arm/loop-
- * iteration/frame region, or a fallback `tk_region_root_u()` when none is open) and return the
- * pointer. This is the enclosing-region twin of C codegen's `emit_buf_ptr`. Before NP5 this routed
- * to a FIXED `tk_region_root()` (the doc this replaces: "the enclosing region may not be directly
- * accessible at lowering time for the native backend") — untrue as of NP5, which threads
- * `ctx.region_stack` exactly as the C route's `cg_enclosing_region_expr` does.
+ * ROOT (via `tk_region_root_u()`) and return the pointer. This is the enclosing-region twin of C
+ * codegen's `emit_buf_ptr` MINUS the enclosing-region routing (`is_buf_ptr_call`'s own doc):
+ * `buf_ptr`'s raw, untracked-lifetime pointer routinely outlives the innermost lexical scope, so
+ * routing it to `region_current_vreg` (NP5's per-arm/per-iteration region) is UNSOUND — that
+ * region's own `close_native_region`/`close_loop_body` drop would free the buffer while a caller
+ * still holds it. Root is NEVER dropped mid-function, so this is leak-safe by construction
+ * (never UAF) — the residual "buf_ptr leaks past its natural scope" cost is the SAME one this
+ * builtin has always carried, not a new one.
  *
  * The runtime call is:
- *   `ptr<byte> result = tk_region_alloc(<current region>, (size_t)(len))`
+ *   `ptr<byte> result = tk_region_alloc(tk_region_root(), (size_t)(len))`
+ *
+ * We lower this to two `LCall` instructions:
+ *   1. Call `tk_region_root_u()` to get the root region handle
+ *   2. Call `tk_region_alloc(region, len)` to allocate within that region
  *
  * @param ctx  the lowering context
  * @param e    the call expression (its type is `ptr<byte>`, its source position stamps the
@@ -4201,12 +4214,14 @@ fn lower_buf_ptr_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lo
     // Lower the length argument
     let len_lowered = match lower_expr(ctx, c.args[0]) { Lowered as x => x; error as err => return err }
 
-    // The CURRENT region (NP5): the innermost open lexical region, or a fallback root.
-    let region = region_current_vreg(len_lowered.ctx)
+    // Call tk_region_root_u() to get the ROOT region (leak-safe: never UAF, buf_ptr's raw
+    // pointer routinely outlives the innermost lexical scope).
+    let region_vreg = ctx_alloc(len_lowered.ctx)
+    let with_region_call = ctx_append(region_vreg.ctx, call_inst(region_vreg.vreg, "tk_region_root_u", teko::list::empty(), false, e.line, e.col))
 
     // Call tk_region_alloc(region, len) to allocate
-    let result_vreg = ctx_alloc(region.ctx)
-    let alloc_args = two_args(region.vreg, len_lowered.vreg)
+    let result_vreg = ctx_alloc(with_region_call)
+    let alloc_args = two_args(region_vreg.vreg, len_lowered.vreg)
     let with_alloc_call = ctx_append(result_vreg.ctx, call_inst(result_vreg.vreg, "tk_region_alloc", alloc_args, false, e.line, e.col))
 
     Lowered { ctx = with_alloc_call; vreg = result_vreg.vreg }
