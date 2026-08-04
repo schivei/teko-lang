@@ -5742,3 +5742,100 @@ fn f_empty_slice_sentinel_untouched() -> i64 {
     if nested.len != 0 { return 4 }
     0
 }
+
+/**
+ * match_arm_null_widen — the MATCH ARM sub-position of native-N1-null-widen (O1 retirement): one
+ * arm's own tail is a NESTED `match` whose every arm is, itself, a bare `null` literal — the
+ * checker's `type_join` collapses that nested match's OWN inferred type to bare `Null`, not the
+ * outer `i64 | null` the OUTER match's other (real-valued) arms fix as its type. The value the
+ * placement's coercion sees is therefore `Null`-typed but NOT literally a `TNullLit`, the exact
+ * shape `teko::checker::check_must_free_locals_stmt`'s own nested `match` tail exposed on the
+ * native fixpoint.
+ *
+ * @param tag  0 takes the real-value arm, 1 the null-collapsed nested arm, anything else the other
+ *             real-value arm
+ * @return     9, `null`, or -1 depending on `tag`
+ */
+fn match_arm_null_widen(tag: i64) -> i64 | null {
+    match tag {
+        0 => 9
+        1 => match tag { 0 => null; _ => null }
+        _ => -1
+    }
+}
+
+/**
+ * if_branch_null_widen — the IF/`when` BRANCH sub-position of native-N1-null-widen: the `then`
+ * branch's own tail is a NESTED `if`/`else` whose every branch is a bare `null` literal, so that
+ * nested `if`'s OWN inferred type collapses to bare `Null` the same way `match_arm_null_widen`'s
+ * nested match does — the outer `if`'s type is fixed to `i64 | null` by its `else` branch's real
+ * value alone.
+ *
+ * @param flag  true takes the null-collapsed nested branch, false the real-value `else`
+ * @return      `null` when `flag`, else 13
+ */
+fn if_branch_null_widen(flag: bool) -> i64 | null {
+    if flag {
+        if flag { null } else { null }
+    } else {
+        13
+    }
+}
+
+/**
+ * assign_null_widen — the ASSIGNMENT right-hand-side sub-position of native-N1-null-widen: a
+ * mutable `i64 | null` local is reassigned from a NESTED `if`/`else` whose every branch is `null`
+ * (the same collapsed-to-bare-`Null` shape) on one path, and a real `i64` on the other — the
+ * assignment's own declared type (`i64 | null`) is the union the RHS's collapsed `Null` type must
+ * be widened into.
+ *
+ * @param tag  0 takes the null-widening assignment, anything else the real-value one
+ * @return     the local's final value: `null` when `tag == 0`, else 21
+ */
+fn assign_null_widen(tag: i64) -> i64 | null {
+    mut x: i64 | null = 0
+    if tag == 0 {
+        x = if tag == 0 { null } else { null }
+    } else {
+        x = 21
+    }
+    x
+}
+
+/**
+ * unwrap_or_native_null_widen — read an `i64 | null` back: the payload when present, or `sentinel`
+ * when absent — the shared reader `f_null_widen_native_subpositions` funnels every case through.
+ *
+ * @param v         the union value to read
+ * @param sentinel  the value to report when `v` is absent
+ * @return          `v`'s payload, or `sentinel`
+ */
+fn unwrap_or_native_null_widen(v: i64 | null, sentinel: i64) -> i64 {
+    match v {
+        i64 as n => n
+        null => sentinel
+    }
+}
+
+/**
+ * f_null_widen_native_subpositions — native-N1-null-widen (O1 retirement): a bare `null` reached
+ * through the THREE sub-positions whose expected `T | null` union is INFERRED/propagated from
+ * context rather than declared directly at the placement — a MATCH ARM (`match_arm_null_widen`), an
+ * IF/`when` BRANCH (`if_branch_null_widen`), and an ASSIGNMENT right-hand side
+ * (`assign_null_widen`). Each source's null value reaches its placement as a `Null`-typed
+ * `match`/`if` sub-expression, not a bare `TNullLit`, so the fixture exercises exactly the
+ * `lower_null_absent_widened` widen `lower_value_into_type`'s coercion now performs at each site,
+ * both the null-producing AND the real-value path of each.
+ *
+ * @return 0 on success, a distinct non-zero code per failing check
+ */
+fn f_null_widen_native_subpositions() -> i64 {
+    if unwrap_or_native_null_widen(match_arm_null_widen(0), -101) != 9 { return 1 }
+    if unwrap_or_native_null_widen(match_arm_null_widen(1), -101) != -101 { return 2 }
+    if unwrap_or_native_null_widen(match_arm_null_widen(2), -101) != -1 { return 3 }
+    if unwrap_or_native_null_widen(if_branch_null_widen(true), -102) != -102 { return 4 }
+    if unwrap_or_native_null_widen(if_branch_null_widen(false), -102) != 13 { return 5 }
+    if unwrap_or_native_null_widen(assign_null_widen(0), -103) != -103 { return 6 }
+    if unwrap_or_native_null_widen(assign_null_widen(1), -103) != 21 { return 7 }
+    0
+}
