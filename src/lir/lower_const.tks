@@ -1024,6 +1024,25 @@ fn check_store_fat_span(ctx: LowerCtx, layout: LStructLayout, field_name: str, d
 }
 
 /**
+ * check_array_elem_fat_stride — the array-literal sibling of `check_store_fat_span`: whenever a FAT
+ * element (`elem_t`, already known `is_fat_type` by the caller) is stored at a constant `stride`
+ * under `fat_slot_bytes()`, honest-stop instead of letting `store_fat_slot`'s length-half write
+ * (`offset+8`) overrun this element's slot into the NEXT element's pointer half. The array-literal
+ * counterpart of the struct-field wild-write class `check_store_fat_span` guards: a contiguous
+ * buffer's `stride` is its per-element "allotted span", exactly as a struct field's
+ * `field_allotted_span` is.
+ *
+ * @param elem_t  the array's element type (already known fat by the caller)
+ * @param stride  the constant byte stride between elements
+ * @return        `null` when the stride has room for a full fat slot; the fatal honest-stop otherwise
+ * @since 0.3.1.0 wild-write — array-literal stride guard
+ */
+fn check_array_elem_fat_stride(elem_t: checker::Type, stride: u32) -> null | error {
+    if stride >= fat_slot_bytes() { return null }
+    error { message = $"native fat-element store guard: array element stride {stride} bytes needs {fat_slot_bytes()} for a fat `{checker::type_render(elem_t)}` element — the fat pointer/length store overruns the following element" }
+}
+
+/**
  * check_struct_const_image — verify a struct aggregate const's emitted `ConstImage` is consistent
  * with its registered layout (0.3.1.0 native-rodata-const-align): the blob's total byte length must
  * equal the layout's size, and every fat-valued field must have room for a full 16-byte slot
@@ -1364,15 +1383,55 @@ fn field_decls_of(name: str, fields: []parser::Field, dtable: checker::TypeTable
  * resolved_field_type — a field annotation as a resolved `checker::Type`, or the `Void` marker when
  * it does not resolve (`field_decls_of`'s "no declared type" answer).
  *
+ * When `checker::resolve_type` fails, `bare_named_table_lookup` gets a SECOND try — the tolerant
+ * last-segment table lookup `typeexpr_is_fat_named` already uses, walked through any alias chain —
+ * before falling to `unresolved_named_fallback`'s syntactic-only answer (0.3.1.0 wild-write, root-
+ * cause (b)): a monomorphized bare instance name (`Parsed__g__Decl`'s stamped `node: T` field,
+ * `checker::monomorph::type_to_texpr`) resolves against an EMPTY instance namespace, which
+ * `resolve_type` cannot place even when the name is a real, declared fat alias. Without this, the
+ * fallback answered a syntactic `Named`/`Void` placeholder `is_fat_type` never recognizes as fat, so
+ * `layout_of_fields` under-sized the field and `store_fat_slot`'s length-half store overran it.
+ *
  * @param te      the field's syntactic type annotation
  * @param ns      the namespace the field was declared in
  * @param dtable  the (bare name, namespace)-keyed table `checker::resolve_type` reads
- * @return        the resolved declared type, or `Void` when the annotation does not resolve
+ * @return        the resolved declared type, the table-lookup fallback's answer, or `Void`/`Named`
+ *                when neither resolves the annotation
  */
 fn resolved_field_type(te: parser::TypeExpr, ns: str, dtable: checker::TypeTable) -> checker::Type {
     match checker::resolve_type(te, dtable, ns) {
         checker::Type as t => t
-        error => unresolved_named_fallback(te)
+        error => match bare_named_table_lookup(te, ns, dtable, teko::list::empty()) { checker::Type as t => t; null => unresolved_named_fallback(te) }
+    }
+}
+
+/**
+ * bare_named_table_lookup — `resolved_field_type`'s tolerant fallback for an annotation
+ * `checker::resolve_type` could not place: is `te` a (possibly qualified) NAMED annotation whose
+ * LAST segment the program's type table registers (`checker::type_table_find`, the SAME tolerant
+ * lookup `typeexpr_is_fat_named` uses)? A found ALIAS declaration defers to its own right-hand-side
+ * annotation, tried through `resolve_type` again and, on failure, through this SAME lookup —
+ * recursively, so a chain of bare aliases (`type A = B; type B = str`) resolves end to end. A found
+ * NON-alias declaration (struct/class/enum/…), a name the table does not know, or a chain that
+ * revisits a name already on it (`visited_name_has` — the checker rejects a cyclic alias before
+ * lowering runs, so this is a defensive backstop) all answer `null`, so the caller falls to its own
+ * unchanged `unresolved_named_fallback` answer.
+ *
+ * @param te       the annotation `resolve_type` could not resolve
+ * @param ns       the namespace to resolve an alias's own right-hand side against
+ * @param dtable   the (bare name, namespace)-keyed table to search
+ * @param visited  the alias names already entered on this chain
+ * @return         the alias chain's resolved type, or `null` when the table cannot help
+ */
+fn bare_named_table_lookup(te: parser::TypeExpr, ns: str, dtable: checker::TypeTable, visited: []str) -> checker::Type | null {
+    let nt = match te { parser::NamedType as x => x; _ => return null }
+    let name = match path_last_segment_name(nt.path) { str as s => s; null => return null }
+    if visited_name_has(visited, name) { return null }
+    let td = match checker::type_table_find(dtable, name, ns) { parser::TypeDecl as d => d; error => return null }
+    let ab = match td.body { parser::AliasBody as a => a; _ => return null }
+    match checker::resolve_type(ab.alias, dtable, ns) {
+        checker::Type as t => t
+        error => bare_named_table_lookup(ab.alias, ns, dtable, teko::list::push(visited, name))
     }
 }
 

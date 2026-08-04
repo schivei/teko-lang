@@ -3309,8 +3309,9 @@ fn load_ptr_len_out_slots(ctx: LowerCtx, ptr_slot: u32, len_slot: u32, line: u32
  * @param line     the source line to stamp the emitted instructions with
  * @param col      the source column to stamp the emitted instructions with
  * @return         the advanced context; `wrapper` is the arm's own result
+ * @throws         propagated from `store_fat_variant_payload_pair`'s span guard
  */
-fn lower_ffi_fat_ok_arm(ctx: LowerCtx, wrapper: u32, index: i64, ptr: u32, len: u32, line: u32, col: u32) -> LowerCtx {
+fn lower_ffi_fat_ok_arm(ctx: LowerCtx, wrapper: u32, index: i64, ptr: u32, len: u32, line: u32, col: u32) -> LowerCtx | error {
     let tagged = store_variant_tag(ctx, wrapper, index, line, col)
     store_fat_variant_payload_pair(tagged.ctx, wrapper, ptr, len, line, col)
 }
@@ -3596,7 +3597,7 @@ fn lower_ffi_fat_or_error_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCa
     let then_loaded = load_ptr_len_out_slots(then_ctx, slots.out_ptr, slots.out_len, e.line, e.col)
     let then_base = ctx_alloc(then_loaded.ctx)
     let then_alloca = ctx_append(then_base.ctx, alloca_inst(then_base.vreg, variant_wrapper_bytes(), variant_wrapper_align(), e.line, e.col))
-    let then_built = lower_ffi_fat_ok_arm(then_alloca, then_base.vreg, ok_index to i64, then_loaded.ptr, then_loaded.len, e.line, e.col)
+    let then_built = match lower_ffi_fat_ok_arm(then_alloca, then_base.vreg, ok_index to i64, then_loaded.ptr, then_loaded.len, e.line, e.col) { LowerCtx as c => c; error as err => return err }
     let then_func = close_arm_to(then_built, br.mergeb, teko::list::push(teko::list::empty(), then_base.vreg), e.line, e.col)
     let after_then = ctx_with(br.ctx1, then_func, br.ctx1.block_id, br.ctx1.env)
     let br_then = FfiBranch { ctx1 = after_then; thenb = br.thenb; elseb = br.elseb; mergeb = br.mergeb; merge_param = br.merge_param }
@@ -9195,8 +9196,23 @@ fn store_scalar_variant_payload(ctx: LowerCtx, base: u32, pty: checker::Type, e:
  */
 fn store_fat_variant_payload(ctx: LowerCtx, base: u32, e: checker::TExpr) -> Lowered | error {
     let fo = match lower_fat_expr(ctx, e) { LoweredFat as x => x; error as err => return err }
-    Lowered { ctx = store_fat_variant_payload_pair(fo.ctx, base, fo.ptr, fo.len, e.line, e.col); vreg = base }
+    let stored = match store_fat_variant_payload_pair(fo.ctx, base, fo.ptr, fo.len, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    Lowered { ctx = stored; vreg = base }
 }
+
+/**
+ * variant_payload_fat_span — the byte span the uniform wrapper reserves for the fat payload's
+ * `{ptr, len}` pair: from `variant_payload_offset()` (the pointer half) to `variant_wrapper_bytes()`
+ * (the wrapper's own end), which by construction also covers `variant_payload_len_offset()` (the
+ * length half). Read by `store_fat_variant_payload_pair`'s guard so the wrapper's own three
+ * constants are checked against `fat_slot_bytes()` the SAME way a struct field's layout span is
+ * (`fat_slot_underflows`) — the wrapper is fixed today, but a future edit to any one of the three
+ * constants without the others would silently reopen the wild-write class this guard exists to shut.
+ *
+ * @return  the wrapper's reserved span for the fat payload pair, in bytes
+ * @since 0.3.1.0 wild-write — variant-payload store span guard
+ */
+fn variant_payload_fat_span() -> u32 { variant_wrapper_bytes() - variant_payload_offset() }
 
 /**
  * store_fat_variant_payload_pair — write an ALREADY-LOWERED `(ptr, len)` pair into a variant
@@ -9205,6 +9221,11 @@ fn store_fat_variant_payload(ctx: LowerCtx, base: u32, e: checker::TExpr) -> Low
  * reused as-is by a payload that never lowers a source expression at all — a runtime call's own
  * out-parameter pair (`lower_str_from_utf8_call`'s two arms, 0.3.1.0 degrau 21).
  *
+ * Guarded (0.3.1.0 wild-write) against the SAME store-past-the-allotted-span class
+ * `check_store_fat_span` shuts for a struct field: the length-half store, `slot+8` past the pointer
+ * half, must land within the wrapper the caller actually alloca'd (`variant_payload_fat_span`) or it
+ * overruns the wrapper's neighbour exactly as an under-sized struct field does.
+ *
  * @param LowerCtx ctx  the lowering context to append the stores' instructions into
  * @param u32 base  the wrapper's alloca'd base-address VReg
  * @param u32 ptr  the payload's pointer half
@@ -9212,10 +9233,15 @@ fn store_fat_variant_payload(ctx: LowerCtx, base: u32, e: checker::TExpr) -> Low
  * @param u32 line  the source line to stamp the emitted instructions with
  * @param u32 col  the source column to stamp the emitted instructions with
  * @return LowerCtx  the advanced context
+ * @throws  when the wrapper's reserved payload span is under `fat_slot_bytes()` (internal — the
+ *          wrapper's own constants disagreed)
  * @since 0.3.1.0 (degrau 6 — the uniform 24-byte wrapper; degrau 21 — factored out of
- *        `store_fat_variant_payload`)
+ *        `store_fat_variant_payload`; wild-write — span guard)
  */
-fn store_fat_variant_payload_pair(ctx: LowerCtx, base: u32, ptr: u32, len: u32, line: u32, col: u32) -> LowerCtx {
+fn store_fat_variant_payload_pair(ctx: LowerCtx, base: u32, ptr: u32, len: u32, line: u32, col: u32) -> LowerCtx | error {
+    if variant_payload_fat_span() < fat_slot_bytes() {
+        return error { message = $"native fat-payload store guard: the variant wrapper reserves {variant_payload_fat_span()} bytes for its fat payload but a fat slot needs {fat_slot_bytes()} — the wrapper's own offset constants disagreed" }
+    }
     let paddr = ctx_alloc(ctx)
     let with_paddr = ctx_append(paddr.ctx, field_addr_inst(paddr.vreg, base, variant_payload_offset(), line, col))
     let with_pstore = ctx_append(with_paddr, store_inst(paddr.vreg, ptr, LType::Ptr, line, col))
@@ -13086,9 +13112,20 @@ fn lower_array_lit(ctx: LowerCtx, e: checker::TExpr, al: checker::TArrayLit) -> 
     emit_elem_box(filled, total, e.line, e.col)
 }
 
-/** store_array_elements — lower each non-spread element in turn, storing it at its
-    constant `index * stride` offset from `base` (`store_array_elem`); the result VReg is
-    `base` itself. */
+/**
+ * store_array_elements — lower each non-spread element in turn, storing it at its constant
+ * `index * stride` offset from `base` (`store_array_elem`); the result VReg is `base` itself.
+ *
+ * @param ctx       the lowering context
+ * @param base      the array literal's alloca'd base-address VReg
+ * @param elem_t    the array's element type
+ * @param elements  the literal's elements, in written order
+ * @param stride    the constant byte stride between elements
+ * @param line      the literal's source line
+ * @param col       the literal's source column
+ * @return          the advanced context plus `base`
+ * @throws          for a spread element (not yet lowered), or propagated from storing an element
+ */
 fn store_array_elements(ctx: LowerCtx, base: u32, elem_t: checker::Type, elements: []checker::TArrayElem, stride: u32, line: u32, col: u32) -> Lowered | error {
     mut cur = ctx
     mut i: u64 = 0
@@ -13097,18 +13134,39 @@ fn store_array_elements(ctx: LowerCtx, base: u32, elem_t: checker::Type, element
         let elem = elements[i]
         if elem.is_spread { return error { message = "native backend N1: spread array element not yet lowered (N2)" } }
         let offset = (i to u32) * stride
-        cur = match store_array_elem(cur, base, offset, elem_t, elem.expr, line, col) { LowerCtx as c => c; error as err => return err }
+        cur = match store_array_elem(cur, base, offset, elem_t, elem.expr, stride, line, col) { LowerCtx as c => c; error as err => return err }
         i++
     }
     Lowered { ctx = cur; vreg = base }
 }
 
-/** store_array_elem — store ONE array-literal element at `base + offset`: a FAT element
-    (`elem_t`, 0.3.1.0 degrau 10) lowers through the fat-pointer producer path and writes BOTH
-    halves of its `{ptr, len}` pair (`store_fat_slot`, the SAME shape a mutable fat local's frame
-    slot uses); every other element lowers plainly and writes its single machine word. */
-fn store_array_elem(ctx: LowerCtx, base: u32, offset: u32, elem_t: checker::Type, expr: checker::TExpr, line: u32, col: u32) -> LowerCtx | error {
+/**
+ * store_array_elem — store ONE array-literal element at `base + offset`: a FAT element (`elem_t`,
+ * 0.3.1.0 degrau 10) lowers through the fat-pointer producer path and writes BOTH halves of its
+ * `{ptr, len}` pair (`store_fat_slot`, the SAME shape a mutable fat local's frame slot uses); every
+ * other element lowers plainly and writes its single machine word.
+ *
+ * A fat element is first checked against the array's own element stride (`check_array_elem_fat_stride`,
+ * 0.3.1.0 wild-write): a stride under `fat_slot_bytes()` means the length half `store_fat_slot`
+ * writes at `offset+8` lands past this element's slot, into the NEXT element's pointer half — the
+ * same wild-write class `check_store_fat_span` guards for a struct field, generalized to a
+ * contiguous array's constant stride.
+ *
+ * @param ctx     the lowering context
+ * @param base    the array literal's alloca'd base-address VReg
+ * @param offset  this element's constant byte offset from `base`
+ * @param elem_t  the array's element type
+ * @param expr    the element's value expression
+ * @param stride  the constant byte stride between elements
+ * @param line    the element's source line
+ * @param col     the element's source column
+ * @return        the advanced context
+ * @throws        when a fat element's stride underflows a full `{ptr, len}` slot
+ *                (`check_array_elem_fat_stride`), or propagated from lowering the value
+ */
+fn store_array_elem(ctx: LowerCtx, base: u32, offset: u32, elem_t: checker::Type, expr: checker::TExpr, stride: u32, line: u32, col: u32) -> LowerCtx | error {
     if is_fat_type(elem_t) {
+        match check_array_elem_fat_stride(elem_t, stride) { error as err => return err; null => { } }
         let fo = match lower_fat_expr(ctx, expr) { LoweredFat as x => x; error as err => return err }
         let addr = ctx_alloc(fo.ctx)
         let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, offset, line, col))
@@ -13579,17 +13637,20 @@ fn lower_assign_frees_old(ctx: LowerCtx, slot: u32, a: checker::TAssign) -> Lowe
 /**
  * lower_assign_field — `recv.field = e` / `recv.field op= e`: lower the receiver to its base
  * address, compute the field's address via its registered layout offset, then store. A FAT field
- * (`a.bound`, 0.3.1.0 raiz A — R3) delegates to `store_fat_through_addr`, which writes both halves
- * of its `{ptr, len}` pair — writing the single word `store_assign_value` writes left `h.name.len`
- * reading whatever the field's PREVIOUS length happened to be, silently (raiz-comum §5.2). Every
- * other field delegates to `store_assign_value` (a compound op first loads the current value,
- * applies it, then stores the result).
+ * (`a.bound`, 0.3.1.0 raiz A — R3) is first checked against its layout's allotted span
+ * (`check_store_fat_span`, 0.3.1.0 wild-write — the store-side sibling of the struct-literal guard
+ * `store_struct_fields` already runs), then delegates to `store_fat_through_addr`, which writes both
+ * halves of its `{ptr, len}` pair — writing the single word `store_assign_value` writes left
+ * `h.name.len` reading whatever the field's PREVIOUS length happened to be, silently (raiz-comum
+ * §5.2). Every other field delegates to `store_assign_value` (a compound op first loads the current
+ * value, applies it, then stores the result).
  *
  * @param ctx  the lowering context
  * @param a    the typed assignment (kind `Field`; `a.target` is the typed field access)
  * @return     the context with the field store appended, or an honest stop
  * @throws     when the target is not a field access, the receiver's type is not a laid-out
- *             nominal, the field is unknown, or propagated from lowering the value
+ *             nominal, the field is unknown, the fat field's allotted span underflows a full
+ *             `{ptr, len}` slot (`check_store_fat_span`), or propagated from lowering the value
  */
 fn lower_assign_field(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
     let fa = match a.target.kind { checker::TFieldAccess as f => f; _ => return error { message = "native backend N1: field-assignment target is not a field access (internal)" } }
@@ -13599,7 +13660,11 @@ fn lower_assign_field(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | erro
     let off = match field_offset_of(layout, fa.field) { u32 as o => o; error as err => return err }
     let addr = ctx_alloc(ro.ctx)
     let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, ro.vreg, off, a.target.line, a.target.col))
-    if is_fat_type(a.bound) { return store_fat_through_addr(with_addr, addr.vreg, a, "a str/slice field") }
+    if is_fat_type(a.bound) {
+        let decl = find_field_decl_type(with_addr.field_decls, layout.name, fa.field)
+        match check_store_fat_span(with_addr, layout, fa.field, decl, a.value) { error as err => return err; null => { } }
+        return store_fat_through_addr(with_addr, addr.vreg, a, "a str/slice field")
+    }
     store_assign_value(with_addr, addr.vreg, ltype_of(a.bound, ro.ctx.enums), a)
 }
 
