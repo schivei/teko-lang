@@ -49,7 +49,7 @@
 // generated function symbols (the mangled Teko names). E4: each frame is RESOLVED to its Teko
 // `name (file:line)` via the `.tsym` map emitted beside the binary (E3), loaded as `<argv0>.tsym`.
 // Without the map (or argv) it degrades to the raw C symbols. In the bootstrap (which also links
-// this runtime via the VM), main.c installs ITS OWN handler INSIDE main() — so it wins there; this
+// this runtime), main.c installs ITS OWN handler INSIDE main() — so it wins there; this
 // handler is active only in generated programs (which have no such main).
 static int    tk_g_argc;   // captured argv (defined below; used here to locate <argv0>.tsym)
 static char **tk_g_argv;
@@ -837,8 +837,8 @@ typedef struct tk_intern_entry {
 // so a view has exactly the parent's lifetime and is observably identical to the old fresh-owned
 // copy — while eliminating the dominant allocation in the compiler (measured 108M tiny copies /
 // 762 MB + malloc overhead on a self-build via name_last_segment alone). Bounds: an out-of-range
-// slice (start > end, or end past the byte length) PANICS (M.1, fail-loud — matches the VM's
-// index bounds check). An empty slice keeps a valid non-NULL ptr into the parent.
+// slice (start > end, or end past the byte length) PANICS (M.1, fail-loud on out-of-bounds).
+// An empty slice keeps a valid non-NULL ptr into the parent.
 tk_str tk_str_slice(tk_str s, uint64_t start, uint64_t end) {
     if (start > end || end > s.len) tk_panic("string slice out of range");
     return (tk_str){ s.ptr + start, (size_t)(end - start) };
@@ -2375,9 +2375,9 @@ void *tk_alloc(size_t n) {
 // (head chunk, its used offset). Rewind frees every chunk PREPENDED after the checkpoint and resets
 // the checkpoint chunk's bump offset — bulk-freeing everything the root region allocated in between.
 //
-// Used ONLY by the test-gate runner (vm's run_tests_cov) to bound memory: each #test's transient
-// allocations (env cells, list copies, string concats — the self-host VM's copy-everything values,
-// [[selfhost-vm-perf]]) are freed after the test, so 659 tests no longer accumulate 9+ GB. SOUND
+// Used ONLY by the test-gate runner (run_tests_cov) to bound memory: each #test's transient
+// allocations (env cells, list copies, string concats — the self-host compiler's copy-everything
+// values) are freed after the test, so 659 tests no longer accumulate 9+ GB. SOUND
 // because run_tests_cov is compiled C (its loop state lives on the C stack, NOT in the arena) and the
 // coverage sinks are libc-heap (realloc/malloc above) — so nothing referenced after a test lives in
 // the rewound span. Balanced push/pop (depth ~1); a stack over the fixed cap is counted but not saved
@@ -2884,10 +2884,10 @@ _Noreturn void tk_panic_cast(void) {
 }
 _Noreturn void tk_panic_overflow(void) { tk_panic("integer overflow"); }
 
-// (C1.7) positioned OOB — print "line:col: " (same shape as the VM's vm_panic_pos), then the
-// canonical TK_PANIC_MARKER line for "index out of bounds", so VM and native locate identically.
-// The position goes BEFORE the marker on purpose: the marker and the reason stay adjacent, so a
-// regressor pattern can assert them together without ever naming a line or column.
+// (C1.7) positioned OOB — print "line:col: " then the canonical TK_PANIC_MARKER line for
+// "index out of bounds". The position goes BEFORE the marker on purpose: the marker and the
+// reason stay adjacent, so a regressor pattern can assert them together without ever naming
+// a line or column.
 _Noreturn void tk_panic_oob_at(uint32_t line, uint32_t col) {
     char buf[32];
     snprintf(buf, sizeof buf, "%u:%u: ", (unsigned)line, (unsigned)col);
@@ -3932,7 +3932,7 @@ bool tk_cov_is_marked(uint64_t id) {
 // D3-branch — branch-coverage sink (a SEPARATE set, so it never perturbs the function-coverage
 // count above). Recorded only when tk_cov_branches_on(true) — a plain `teko test`/build pays one
 // flag check per branch and nothing else. A branch id packs (current-fn items-index, line, col,
-// outcome): the current fn is the TOP of a small enter/leave stack the VM pushes around each call,
+// outcome): the current fn is the TOP of a small enter/leave stack pushed around each call,
 // which makes (line,col) unique per FILE globally unique (two files may share a line:col). The
 // report queries tk_cov_branch_hit(fn, line, col, outcome) walking the typed program.
 // (E1-C1) tk_covb_ids/n/cap/on are per-task members (see the seam), mirroring the function sink.
