@@ -1339,27 +1339,12 @@ fn cgt_emit_lit_pattern_str_vs_int() {
 }
 
 // ---------------------------------------------------------------------------
-// Group S: emit_safe_field_access (→ fresh_named), emit_coalesce (→ cg_expr_diverges)
+// Group S: cg_expr_diverges (still live — checked directly by emit_expr_stmt's
+// diverging-call value-position handling)
 // ---------------------------------------------------------------------------
 #test
-fn cgt_emit_coalesce_and_safe_field() {
-    // emit_safe_field_access: recv?.field where recv: Optional{I64}
-    let opt_recv = checker::TExpr {
-        kind = checker::TVar { name = "opt_x"; is_func = false; func_ns = "" }
-        type = checker::Optional { inner = checker::Prim { kind = checker::PrimKind::I64 } }
-        line = 0; col = 0
-    }
-    let sfa_e = checker::TExpr {
-        kind = checker::TSafeFieldAccess { receiver = opt_recv; field = "foo" }
-        type = checker::Optional { inner = checker::Prim { kind = checker::PrimKind::I64 } }
-        line = 0; col = 0
-    }
-    let sfa_out = match emit_expr(cgt_empty(), cgt_prog(), sfa_e) { []byte as o => str(o); error => "" }
-    teko::assert::is_true(teko::str::contains(sfa_out, "_o"))
-    teko::assert::is_true(teko::str::contains(sfa_out, ".present"))
-    teko::assert::is_true(teko::str::contains(sfa_out, "foo"))
-
-    // cg_expr_diverges: direct call — non-TCall returns false, TCall to "panic" returns true
+fn cgt_cg_expr_diverges_true_only_for_a_panic_exit_call() {
+    // direct call — non-TCall returns false, TCall to "panic" returns true
     let non_call_e = cgt_num_i64(0)
     teko::assert::is_false(cg_expr_diverges(non_call_e))
     let panic_arg = checker::TExpr {
@@ -1374,22 +1359,6 @@ fn cgt_emit_coalesce_and_safe_field() {
         line = 0; col = 0
     }
     teko::assert::is_true(cg_expr_diverges(panic_e))
-
-    // emit_coalesce: opt_left ?? fallback_i64 → (result type = I64, not Optional)
-    let opt_left = checker::TExpr {
-        kind = checker::TVar { name = "maybe_x"; is_func = false; func_ns = "" }
-        type = checker::Optional { inner = checker::Prim { kind = checker::PrimKind::I64 } }
-        line = 0; col = 0
-    }
-    let co_e = checker::TExpr {
-        kind = checker::TCoalesce { left = opt_left; right = cgt_num_i64(0) }
-        type = checker::Prim { kind = checker::PrimKind::I64 }
-        line = 0; col = 0
-    }
-    let co_out = match emit_expr(cgt_empty(), cgt_prog(), co_e) { []byte as o => str(o); error => "" }
-    teko::assert::is_true(teko::str::contains(co_out, "_c"))
-    teko::assert::is_true(teko::str::contains(co_out, ".present"))
-    teko::assert::is_true(teko::str::contains(co_out, ".value"))
 }
 
 // ---------------------------------------------------------------------------

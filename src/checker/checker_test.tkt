@@ -435,22 +435,6 @@ fn ref_te_of(inner: parser::TypeExpr) -> parser::TypeExpr {
 // a `Ref<NAME>` type-expr over a plain named type.
 fn ref_te(name: str) -> parser::TypeExpr { ref_te_of(ttype_named(name)) }
 
-// (MEM Step 0, R2) NOT NULLABLE — `Ref<…>?` is an error.
-// interpreter NOTE: a CONSTRUCTED `Ref<value>` cannot be discriminated in the interpreter (the interpreter's transparent-
-// field-descent collapses a single-field wrapper to its inner — and a constructed Reference VALUE
-// matched in a multi-arm match is unreliable), so an isolated `Ref<i64>?` rejection (driven by the
-// OptionalType arm's `Reference => error`) is observable only NATIVELY (the C twin's
-// `in.tag == TK_TYPE_REF` check + the native self-host enforce it). To assert the OPTIONAL position
-// is gated in the interpreter too, we use a CONSTRUCTION-REJECTED inner (`Ref<Ref<i64>>`): the inner
-// `Ref<i64>` resolves, then R1 rejects `Ref<Ref<…>>` at CONSTRUCTION (interpreter-reliable — matching a
-// resolved Reference type-VALUE in resolve_generic_inst), so the error propagates out of the
-// OptionalType arm before it ever needs to match a constructed Reference.
-#test
-fn mem_ref_not_nullable() {
-    let ref_opt = parser::OptionalType { inner = ref_te_of(ref_te("i64")) }   // Ref<Ref<i64>>?
-    teko::assert::is_true(match resolve_type(ref_opt, empty_table(), "") { error => true; _ => false })
-}
-
 #test
 /**
  * (MEM Step 0, R4) NOT a STRUCT FIELD — a `struct { r: Ref<…> }` is rejected at collect
@@ -648,7 +632,7 @@ fn mono_slice_and_optional_mangle() {
 fn mono_walk_covers_node_kinds() {
     // a generic fn whose body + a non-generic caller body together exercise many TExprKind /
     // TStatement walk cases (binary, compare, if, cast, field-access, struct-init, interp, in,
-    // array, coalesce, safe-field, unary, loop, assign, defer, break/continue), all under the
+    // array, unary, loop, assign, defer, break/continue), all under the
     // total rewrite walk. The generic call inside drives stamping.
     let idg = gfn("idg", named_t("T"), Named { name = "T" }, teko::list::push(teko::list::empty(), treturn(tvar("x", Named { name = "T" }))))
 
@@ -660,7 +644,6 @@ fn mono_walk_covers_node_kinds() {
     let cmp = TExpr { kind = TCompare { first = n; rest = teko::list::push(teko::list::empty(), cmpterm) }; type = boolt(); line = 0; col = 0 }
     let un = TExpr { kind = TUnary { op = lexer::TokenKind::Minus; operand = n }; type = i64t(); line = 0; col = 0 }
     let cast = TExpr { kind = TCast { expr = n }; type = u8t(); line = 0; col = 0 }
-    let cor = TExpr { kind = TCoalesce { left = tvar("o", Optional { inner = i64t() }); right = tnum(0) }; type = i64t(); line = 0; col = 0 }
     let arr = TExpr { kind = TArrayLit { elements = teko::list::push(teko::list::empty(), TArrayElem { is_spread = false; expr = tnum(1) }) }; type = Slice { element = i64t() }; line = 0; col = 0 }
     let interp = TExpr { kind = TInterp { pieces = teko::list::push(teko::list::push(teko::list::empty(), "v"), ""); holes = teko::list::push(teko::list::empty(), n); specs = teko::list::push(teko::list::empty(), TFSpec { kind = TFSpecNone { } }) }; type = strt(); line = 0; col = 0 }
     let inx = TExpr { kind = TInExpr { lhs = n; elems = teko::list::push(teko::list::empty(), tnum(2)) }; type = boolt(); line = 0; col = 0 }
@@ -672,7 +655,6 @@ fn mono_walk_covers_node_kinds() {
     mut body: []TStatement = teko::list::push(teko::list::empty(), TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "a" }; bound = i64t(); value = bin; di_kind = parser::DiKind::None })
     body = teko::list::push(body, TAssign { kind = parser::AssignKind::Simple; name = "a"; op = lexer::TokenKind::Assign; bound = i64t(); value = un; deref = false; target = no_texpr() })
     body = teko::list::push(body, texpr_stmt(cast))
-    body = teko::list::push(body, texpr_stmt(cor))
     body = teko::list::push(body, texpr_stmt(arr))
     body = teko::list::push(body, texpr_stmt(interp))
     body = teko::list::push(body, texpr_stmt(inx))
@@ -764,27 +746,6 @@ fn escape_tail_implicit_return_rebox_is_escaping() {
     let esc = fn_escaping_vars(f)
     teko::assert::is_true(str_set_has(esc, "n"))   // tail value escapes ⇒ `n` escapes
     teko::assert::is_true(!binding_is_frame_local(esc, binding))   // ⇒ NOT frame-local (routes to root)
-}
-
-#test
-fn escape_tail_safe_field_coalesce_is_escaping() {
-    // fn f() -> Node { let n = Node{…}; (n.next?.next) ?? other }
-    // The implicit-return tail reads `n.next` (a NON-scalar interior pointer) via a safe-field
-    // access whose receiver is a non-scalar field read, then COALESCES the (non-scalar) result —
-    // so `n` ESCAPES. (Reproducer A: `?.` + `??` in the implicit tail.) The safe-field RESULT type
-    // is kept NOMINAL (Node, not Optional) to dodge the interpreter single-field-wrapper-descent landmine
-    // [memory: interpreter conflates Ref/Ptr/Optional/Slice in `match`]; the native engine handles either,
-    // and what the escape check needs is only that the result is NON-scalar.
-    let binding = t_let("n", t_node_init(tnum(5)))   // binding does NOT read `n` — only the tail does
-    let nnext = t_field_node("n", "next")   // n.next : Node (non-scalar interior pointer)
-    let sfa = TExpr { kind = TSafeFieldAccess { receiver = nnext; field = "next" }; type = Named { name = "Node" }; line = 0; col = 0 }
-    let tail = TExpr { kind = TCoalesce { left = sfa; right = tvar("other", Named { name = "Node" }) }; type = Named { name = "Node" }; line = 0; col = 0 }
-    mut body: []TStatement = teko::list::push(teko::list::empty(), binding)
-    body = teko::list::push(body, texpr_stmt(tail))   // implicit-return tail (no `return`)
-    let f = plainfn("f", Named { name = "Node" }, body)
-    let esc = fn_escaping_vars(f)
-    teko::assert::is_true(str_set_has(esc, "n"))   // tail value escapes ⇒ `n` escapes
-    teko::assert::is_true(!binding_is_frame_local(esc, binding))
 }
 
 // =========================================================================

@@ -206,9 +206,9 @@ fn mono_inst_concat(a: []MonoInst, b: []MonoInst) -> []MonoInst {
 // A stamped fn's params are SYNTACTIC (parser::Param.type_ann, resolved by codegen at emit),
 // so substituting the param `T` means rewriting the syntactic annotation to the concrete
 // type's TypeExpr. Prim → NamedType{[prim_name]}, Named → NamedType{[name]}, Str → NamedType,
-// Byte → NamedType, Slice → SliceType, Optional → OptionalType. Variant/Func are not
-// expressible as a single TypeExpr in phase-1 (a generic param can only bind to such via
-// a future S6) — they fall back to a Named placeholder so a TypeExpr is always produced.
+// Byte → NamedType, Slice → SliceType. Variant/Optional are not expressible as a single
+// TypeExpr now that `T?` sugar is retired (a generic param can only bind to such via a
+// future S6) — they fall back to a Named placeholder so a TypeExpr is always produced.
 // (C: type_to_texpr.)
 pub fn type_to_texpr(t: Type) -> parser::TypeExpr {   // (W10) pub: codegen synthesizes lifted-lambda fn params from resolved Types
     match t {
@@ -219,7 +219,7 @@ pub fn type_to_texpr(t: Type) -> parser::TypeExpr {   // (W10) pub: codegen synt
         Error => mono_named_texpr("error")
         Named as n => mono_named_texpr(n.name)
         Slice as sl => parser::SliceType { element = type_to_texpr(sl.element) }
-        Optional as o => parser::OptionalType { inner = type_to_texpr(o.inner) }
+        Optional => mono_named_texpr("optional")   // unreachable in practice: `T?` sugar is retired, so no surface TypeExpr spells Optional; kept only so the match over Type stays exhaustive
         Ptr as p => match p.inner {
             null => mono_named_texpr("ptr")
             Type as t => parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = "ptr" }) }; args = teko::list::push(teko::list::empty(), type_to_texpr(t)) }
@@ -260,7 +260,6 @@ fn subst_typeexpr(te: parser::TypeExpr, s: Subst) -> parser::TypeExpr {
             parser::NamedType { path = nt.path; args = subst_typeexpr_args(nt.args, s) }
         }
         parser::SliceType as st => parser::SliceType { element = subst_typeexpr(st.element, s) }
-        parser::OptionalType as ot => parser::OptionalType { inner = subst_typeexpr(ot.inner, s) }
         parser::UnionType as ut => {
             mut ms: []parser::TypeExpr = teko::list::empty()
             mut i = 0

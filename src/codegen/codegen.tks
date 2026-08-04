@@ -1310,8 +1310,6 @@ fn cg_expr_refs_name(e: checker::TExpr, name: str) -> bool {
         }
         checker::TCast as ct => cg_expr_refs_name(ct.expr, name)
         checker::TFieldAccess as fa => cg_expr_refs_name(fa.receiver, name)
-        checker::TSafeFieldAccess as sfa => cg_expr_refs_name(sfa.receiver, name)
-        checker::TCoalesce as co => cg_expr_refs_name(co.left, name) || cg_expr_refs_name(co.right, name)
         checker::TIndex as ix => cg_expr_refs_name(ix.receiver, name) || cg_expr_refs_name(ix.index, name)
         checker::TInterp as ip => {
             mut i = 0
@@ -1545,7 +1543,6 @@ fn cg_te_reaches_byvalue(prog: CgProg, te: parser::TypeExpr, to: str, seen: []st
             if checker::name_last_segment(y) == checker::name_last_segment(to) { return true }   // (#109 W3) `to` (the decl name) is canonical; `y` a bare syntactic segment — compare bare
             cg_name_reaches_byvalue(prog, y, to, seen)
         }
-        parser::OptionalType as ot => cg_te_reaches_byvalue(prog, ot.inner, to, seen)   // opt embeds inner by value
         parser::UnionType as ut => {
             mut i = 0
             loop {
@@ -1591,13 +1588,12 @@ fn cg_name_reaches_byvalue(prog: CgProg, from: str, to: str, seen: []str) -> boo
     }
 }
 // cg_field_boxed — is the struct `sname`'s field of declared type `fte` a recursive back-edge
-// (→ box as pointer)? A NAMED `Y` or OPTIONAL `Y?` field is boxed iff its by-value content
+// (→ box as pointer)? A NAMED `Y` field is boxed iff its by-value content
 // reaches BACK to `sname`. A SLICE field is already a pointer (never boxed); an inline-UNION
 // field is left unboxed (none close a cycle in the corpus). (C: `cg_field_boxed`.)
 fn cg_field_boxed(prog: CgProg, sname: str, fte: parser::TypeExpr) -> bool {
     let is_box_candidate = match fte {
         parser::NamedType => true
-        parser::OptionalType => true
         _ => false
     }
     if !is_box_candidate { return false }
@@ -2484,7 +2480,6 @@ fn cg_emit_variant_ctype(buf: []byte, v: checker::Type) -> []byte | error {
 fn cg_opt_mangle_texpr_str(te: parser::TypeExpr) -> str | error {
     match te {
         parser::NamedType as nt => nt.path.segments[nt.path.segments.len - 1].name
-        parser::OptionalType as ot => { let inner_s = match cg_opt_mangle_texpr_str(ot.inner) { str as s => s; error as e => return e }; teko::str::concat("opt_", inner_s) }
         parser::SliceType as st => { let inner_s = match cg_opt_mangle_texpr_str(st.element) { str as s => s; error as e => return e }; teko::str::concat("slice_", inner_s) }
         _ => error { message = "codegen: optional inner type-expr not yet supported" }
     }
@@ -2550,7 +2545,6 @@ fn cg_texpr_mangle(te: parser::TypeExpr) -> str {
             if nt.args.len == 0 { last } else { cg_texpr_inst_name(last, nt.args) }
         }
         parser::SliceType as st => teko::str::concat("slice_", cg_texpr_mangle(st.element))
-        parser::OptionalType as ot => teko::str::concat("opt_", cg_texpr_mangle(ot.inner))
         parser::UnionType => "variant"
         parser::FunctionType => "func"   // (W10a) matches checker type_mangle's Func fragment
     }
@@ -2638,8 +2632,6 @@ fn emit_type_expr(buf: []byte, prog: CgProg, te: parser::TypeExpr, ref_ns: str) 
                 _ => cg_variant_typename_texpr(buf, ut)
             }
         }
-        // `T?` field/member position → the generated tk_opt_<innerMangle> struct (REBOOT §202).
-        parser::OptionalType as ot => cg_opt_mangle_texpr(cb(buf, "tk_opt_"), ot.inner)
         // (W10a) a function-type field/param annotation → the uniform `tk_closure` (teko_rt.h).
         parser::FunctionType => cb(buf, "tk_closure")
     }
@@ -2651,7 +2643,6 @@ fn emit_type_expr(buf: []byte, prog: CgProg, te: parser::TypeExpr, ref_ns: str) 
 fn cg_opt_mangle_texpr(buf: []byte, te: parser::TypeExpr) -> []byte | error {
     match te {
         parser::NamedType as nt => cb_str(buf, nt.path.segments[nt.path.segments.len - 1].name)
-        parser::OptionalType as ot => cg_opt_mangle_texpr(cb(buf, "opt_"), ot.inner)
         _ => error { message = "codegen: optional inner type-expr not yet supported" }
     }
 }
@@ -4511,20 +4502,6 @@ fn emit_call(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker::TEx
                             }
                             wrapped = true
                         }
-                        // A `T?` param: present-wrap a bare `T` arg (uniform with field/return). The
-                        // checker kept the arg's NARROW type for a bare→optional widen, so emit_as wraps
-                        // it; an already-optional / null arg passes through emit_as unchanged. The inner
-                        // expected type is NAMED from the param's inner type_ann (so a NAMED inner mangles
-                        // to the param's opt struct); any other inner shape (prim, …) uses the arg's own
-                        // type, which mangles identically to the param's inner (exact-match widen).
-                        parser::OptionalType as ot => {
-                            let inner_t = match ot.inner {
-                                parser::NamedType as int_nt => checker::Named { name = cg_canon_name_ns(prog, int_nt.path, cf_ref_ns) }
-                                _ => c.args[j].type
-                            }
-                            out = match emit_as_r(out, prog, ret_type, checker::Optional { inner = inner_t }, c.args[j], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
-                            wrapped = true
-                        }
                         parser::SliceType as slt => {
                             let exp_slice = cg_slice_param_type(prog, slt, c.args[j].type)
                             out = match emit_as_r(out, prog, ret_type, exp_slice, c.args[j], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
@@ -4625,38 +4602,6 @@ fn emit_field_access(buf: []byte, prog: CgProg, fa: checker::TFieldAccess, escap
     cb(out, "))")
 }
 
-// emit_safe_field_access — `recv?.field` (REBOOT §203). ({ <optTy> _oN = (recv); _oN.present
-//   ? (<resTy>){ .present = true, .value = _oN.value.<field> } : (<resTy>){ .present = false }; })
-// The node's `.type` is the result optional `(field)?`; the receiver type is `T?`. (C: TK_TEXPR_SAFE_FIELD_ACCESS.)
-fn emit_safe_field_access(buf: []byte, prog: CgProg, e: checker::TExpr, sfa: checker::TSafeFieldAccess, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
-    // (W10b.CLASS increment 3, latent — NP-OOP follow-up) a CLASS inner is ALWAYS a pointer
-    // (reference semantics, same as emit_field_access's class branch above): `_oN.value` holds
-    // a `<T> *`, so the field read needs `_oN.value-><field>`, not `_oN.value.<field>` (a `.` on
-    // a pointer doesn't compile). Gate identically to emit_field_access's is_class_recv check.
-    // (C: the inner_is_class branch of TK_TEXPR_SAFE_FIELD_ACCESS.)
-    let inner_is_class = match sfa.receiver.type {
-        checker::Optional as opt => match opt.inner {
-            checker::Named as nm => cg_is_class_named(prog, nm.name)
-            _ => false
-        }
-        _ => false
-    }
-    let tmp = fresh_named("_o", buf.len to i64)
-    mut out = cb(buf, "({ ")
-    out = match emit_type(out, prog, sfa.receiver.type) { []byte as o => o; error as err => return err }
-    out = cb(out, " "); out = cb(out, tmp); out = cb(out, " = (")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, sfa.receiver, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
-    out = cb(out, "); "); out = cb(out, tmp); out = cb(out, ".present ? (")
-    out = match emit_type(out, prog, e.type) { []byte as o => o; error as err => return err }
-    out = cb(out, "){ .present = true, .value = "); out = cb(out, tmp)
-    out = cb(out, if inner_is_class { ".value->" } else { ".value." })
-    out = cb_str(out, sfa.field)
-    out = cb(out, " } : (")
-    out = match emit_type(out, prog, e.type) { []byte as o => o; error as err => return err }
-    out = cb(out, "){ .present = false }; })")
-    out
-}
-
 /**
  * `cg_expr_diverges` — is a call-shaped sub-expression a diverging `panic`/`exit` call in a VALUE
  * position (a `??` fallback's right side, or a `match` arm's tail)? Delegates the "is this
@@ -4676,62 +4621,6 @@ fn cg_expr_diverges(e: checker::TExpr) -> bool {
         checker::TCall as c => checker::tcall_is_diverging_builtin(c)
         _ => false
     }
-}
-
-/**
- * Emit `a ?? b` (REBOOT §203): `({ <optTy> _cN = (a); _cN.present ? <a.value as result> : <b as
- * result>; })`. Short-circuits `b` — it is only evaluated when `a` is NONE. The result type
- * (`e.type`) is `T` (unwrapped) or `T?` (when `b` itself is optional); both arms wrap to it. A `b`
- * that is a diverging `panic`/`exit` call (`cg_expr_diverges`) lowers to `(<call>, (T){0})`
- * instead: the call is `_Noreturn`, so the zero-of-`T` is unreachable but keeps the C `?:`
- * well-typed.
- *
- * @param buf       the emit buffer
- * @param prog      codegen's threaded program view
- * @param e         the whole `??` expression (its `.type` is the wrapped result type)
- * @param co        the coalesce node (`left` = the optional operand, `right` = the fallback)
- * @param escaping  the names escaping the enclosing frame
- * @param regions   the enclosing region frames
- * @param fn_body   the enclosing function's statements
- * @param dctx      the enclosing defer context
- * @return          the buffer with the coalesce expression appended
- * @throws          propagated from emitting either operand or the result type
- */
-fn emit_coalesce(buf: []byte, prog: CgProg, e: checker::TExpr, co: checker::TCoalesce, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
-    let tmp = fresh_named("_c", buf.len to i64)
-    mut out = cb(buf, "({ ")
-    out = match emit_type(out, prog, co.left.type) { []byte as o => o; error as err => return err }
-    out = cb(out, " "); out = cb(out, tmp); out = cb(out, " = (")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, co.left, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
-    out = cb(out, "); "); out = cb(out, tmp); out = cb(out, ".present ? ")
-    // a's inner `_cN.value` into the result: plain if result is `T`, PRESENT-wrapped if `T?`.
-    match e.type {
-        checker::Optional as ropt => {
-            match ropt.inner {
-                checker::Void => { out = cb(out, tmp); out = cb(out, ".value") }
-                _ => {
-                    out = cb(out, "(")
-                    out = match emit_type(out, prog, e.type) { []byte as o => o; error as err => return err }
-                    out = cb(out, "){ .present = true, .value = "); out = cb(out, tmp); out = cb(out, ".value }")
-                }
-            }
-        }
-        _ => { out = cb(out, tmp); out = cb(out, ".value") }
-    }
-    out = cb(out, " : ")
-    if cg_expr_diverges(co.right) {
-        // a diverging fallback (panic/exit) yields no value — emit the _Noreturn call then a
-        // zero-of-result so the C `?:` type-checks (the zero is unreachable).
-        out = cb(out, "(")
-        out = match emit_expr_ctx(out, prog, checker::Void { }, co.right, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
-        out = cb(out, ", (")
-        out = match emit_type(out, prog, e.type) { []byte as o => o; error as err => return err }
-        out = cb(out, "){0})")
-    } else {
-        out = match emit_as(out, prog, e.type, co.right, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
-    }
-    out = cb(out, "; })")
-    out
 }
 
 // emit_index — W5-idx `recv[index]`. A `str` receiver lowers to a BOUNDS-CHECKED byte access
@@ -5362,21 +5251,9 @@ fn emit_struct_init_literal(buf: []byte, prog: CgProg, e: checker::TExpr, si: ch
             }
         }
         // Sentinel fields emit a concrete literal directly (emit_expr can't, the type being unknown):
-        //   * a bare `null` into a `T?` field → (tk_opt_<inner>){ .present = false }   (C: TEXPR_NULL branch)
-        //   * an empty() into a `[]T` field   → (tk_slice_<elem>){ .ptr = 0, .len = 0 }
+        //   * an empty() into a `[]T` field → (tk_slice_<elem>){ .ptr = 0, .len = 0 }
         let emitted: bool = match fv.kind {
-            checker::TNullLit => match fte_opt {
-                parser::TypeExpr as fte => match fte {
-                    parser::OptionalType => {
-                        out = cb(out, "(")
-                        out = match emit_type_expr(out, prog, fte, checker::name_qualifier(name)) { []byte as o => o; error as err => return err }
-                        out = cb(out, "){ .present = false }")
-                        true
-                    }
-                    _ => false
-                }
-                null => false
-            }
+            checker::TNullLit => false
             _ => match fv.type {
                 checker::Slice as sl => match sl.element {
                     checker::Void => {
@@ -5421,13 +5298,6 @@ fn emit_struct_init_literal(buf: []byte, prog: CgProg, e: checker::TExpr, si: ch
                             let elem = ent.path.segments[ent.path.segments.len - 1].name
                             if !cg_is_prim_name(elem) { exp_t = checker::Slice { element = checker::Named { name = cg_canon_name_ns(prog, ent.path, checker::name_qualifier(name)) } } }
                         }
-                        parser::OptionalType => { exp_t = cg_slice_param_type(prog, st, fv.type) }
-                        _ => { }
-                    }
-                    // a present value into a `T?` field (T named) → emit_as wraps T → T?
-                    // ({ .present = true, .value = … }). (A bare `null` is the sentinel branch above.)
-                    parser::OptionalType as ot => match ot.inner {
-                        parser::NamedType as inner_nt => { exp_t = checker::Optional { inner = checker::Named { name = cg_canon_name_ns(prog, inner_nt.path, checker::name_qualifier(name)) } } }
                         _ => { }
                     }
                     parser::UnionType as ut => match cg_te_to_type_ns(prog, checker::name_qualifier(name), parser::UnionType { members = ut.members }) {
@@ -6619,19 +6489,14 @@ fn emit_as(buf: []byte, prog: CgProg, expected: checker::Type, value: checker::T
 
 /** cg_slice_param_type — the expected `checker::Slice` for a `[]…` PARAM (or a `[]…` struct FIELD)
     whose annotation is `slt`, used by emit_as to coerce a bare-slice ARG (#265). A `[]…` slot never
-    reaches emit_as via the Named/Optional param branches, so this is the seam that routes it there.
-    An `OptionalType` element → `Slice { Optional { inner = <arg element> } }` so emit_as present-wraps
-    each element (UNLESS the arg element is already optional — an exact `[]T?`→`[]T?` match the checker
-    adopted to the param, where re-wrapping would make a `[]T??`). A `NamedType` element → the canonical
-    `Slice { Named }` so a covariant `[]Case`→`[]Variant` arg (e.g. `[]Return`→`[]Statement`) rebuilds
-    element-wise. Any other element → the arg's own type (emit_as no-ops when the mangle matches). The
-    checker keeps such widening args NARROW (arg_keeps_narrow_type), so the element mismatch is visible
-    here. `arg_type` is the argument's resolved slice type. */
+    reaches emit_as via the Named param branch, so this is the seam that routes it there.
+    A `NamedType` element → the canonical `Slice { Named }` so a covariant `[]Case`→`[]Variant` arg
+    (e.g. `[]Return`→`[]Statement`) rebuilds element-wise. Any other element → the arg's own type
+    (emit_as no-ops when the mangle matches). The checker keeps such widening args NARROW
+    (arg_keeps_narrow_type), so the element mismatch is visible here. `arg_type` is the argument's
+    resolved slice type. */
 fn cg_slice_param_type(prog: CgProg, slt: parser::SliceType, arg_type: checker::Type) -> checker::Type {
-    let arg_elem = match arg_type { checker::Slice as s => s.element; _ => checker::Void { } }
-    let arg_elem_opt = match arg_elem { checker::Optional => true; _ => false }
     match slt.element {
-        parser::OptionalType => if arg_elem_opt { arg_type } else { checker::Slice { element = checker::Optional { inner = arg_elem } } }
         parser::NamedType as nt => checker::Slice { element = checker::Named { name = cg_canon_name(prog, nt.path.segments[nt.path.segments.len - 1].name) } }
         _ => arg_type
     }
@@ -9143,9 +9008,9 @@ fn emit_assign(buf: []byte, prog: CgProg, ret_type: checker::Type, a: checker::T
     out = cb(out, " ")
     out = cb(out, op)
     out = cb(out, " ")
-    // Wrap the value into the target's declared type (`bound`) — a case → its variant, a `T` →
-    // `T?`, a fitting literal — exactly like a binding (emit_as_r threads ret_type for a diverging
-    // value-form arm). Without this, `node = OptionalType { … }` (node: TypeExpr, a variant)
+    // Wrap the value into the target's declared type (`bound`) — a case → its variant, a fitting
+    // literal — exactly like a binding (emit_as_r threads ret_type for a diverging value-form arm).
+    // Without this, a case value (e.g. `node = NamedType { … }`, node: TypeExpr, a variant)
     // emitted the case's fields under the variant's C type → a field-designator error.
     out = match emit_as_r(out, prog, ret_type, a.bound, a.value, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
     cb(out, ";\n")
@@ -9385,8 +9250,6 @@ fn cov_collect_expr(e: checker::TExpr, acc: []u32) -> []u32 {
         }
         checker::TCast as c => cov_collect_expr(c.expr, a0)
         checker::TFieldAccess as fa => cov_collect_expr(fa.receiver, a0)
-        checker::TSafeFieldAccess as sfa => cov_collect_expr(sfa.receiver, a0)
-        checker::TCoalesce as co => cov_collect_expr(co.right, cov_collect_expr(co.left, a0))
         checker::TIndex as ix => cov_collect_expr(ix.index, cov_collect_expr(ix.receiver, a0))
         checker::TStructInit as si => {
             mut a = a0
@@ -9704,8 +9567,6 @@ fn cg_expr_calls_self(e: checker::TExpr, ns: str, name: str) -> bool {
         }
         checker::TCast as c => cg_expr_calls_self(c.expr, ns, name)
         checker::TFieldAccess as fa => cg_expr_calls_self(fa.receiver, ns, name)
-        checker::TSafeFieldAccess as sfa => cg_expr_calls_self(sfa.receiver, ns, name)
-        checker::TCoalesce as co => cg_expr_calls_self(co.left, ns, name) || cg_expr_calls_self(co.right, ns, name)
         checker::TStructInit as si => {
             mut i = 0
             loop { if i >= si.field_vals.len { break }; if cg_expr_calls_self(si.field_vals[i], ns, name) { return true }; i++ }
@@ -10944,8 +10805,6 @@ fn cg_collect_expr_opts(set: CgTypeSet, e: checker::TExpr) -> CgTypeSet {
         }
         checker::TCast as c => { s = cg_collect_expr_opts(s, c.expr) }
         checker::TFieldAccess as fa => { s = cg_collect_expr_opts(s, fa.receiver) }
-        checker::TSafeFieldAccess as sfa => { s = cg_collect_expr_opts(s, sfa.receiver) }
-        checker::TCoalesce as co => { s = cg_collect_expr_opts(s, co.left); s = cg_collect_expr_opts(s, co.right) }
         checker::TStructInit as si => { mut i = 0; loop { if i >= si.field_vals.len { break }; s = cg_collect_expr_opts(s, si.field_vals[i]); i++ } }
         checker::TIndex as ix => { s = cg_collect_expr_opts(s, ix.receiver); s = cg_collect_expr_opts(s, ix.index) }
         checker::TInterp as in => {
@@ -11044,7 +10903,6 @@ fn cg_te_to_type_ns(prog: CgProg, ref_ns: str, te: parser::TypeExpr) -> checker:
             else { checker::Named { name = cg_te_canonical_name(prog, ref_ns, nt.path, last) } }
         }
         parser::SliceType as st => checker::Slice { element = cg_te_to_type_ns(prog, ref_ns, st.element) }
-        parser::OptionalType as ot => checker::Optional { inner = cg_te_to_type_ns(prog, ref_ns, ot.inner) }
         parser::UnionType as ut => {
             mut mem: []checker::Type = teko::list::empty()
             mut i = 0
@@ -11375,7 +11233,6 @@ fn cg_texpr_ready(prog: CgProg, em: CgEmitted, set: CgTypeSet, te: parser::TypeE
             let want = match cg_find_decl_ns(prog, nt.path, owner_ns) { parser::TypeDecl as dd => dd.name; error => base }
             cg_named_emitted_precise(prog, em, want)
         }
-        parser::OptionalType as ot => cg_opt_emitted_key(em, set, match cg_opt_mangle_texpr_str(ot.inner) { str as s => s; error => "" })
         parser::SliceType => true   // pointer (slice typedef pre-emitted)
         parser::UnionType as ut => cg_texpr_union_ready(prog, em, set, ut, owner_ns)
         parser::FunctionType => true   // (W10a) tk_closure is a runtime type — always ready
@@ -11929,8 +11786,6 @@ fn cg_lift_expr(e: checker::TExpr, ref acc: StampAcc) -> checker::TExpr {
         }
         checker::TCast as ct => checker::TExpr { kind = checker::TCast { expr = cg_lift_expr(ct.expr, acc) }; type = e.type; line = e.line; col = e.col }
         checker::TFieldAccess as fa => checker::TExpr { kind = checker::TFieldAccess { receiver = cg_lift_expr(fa.receiver, acc); field = fa.field }; type = e.type; line = e.line; col = e.col }
-        checker::TSafeFieldAccess as sfa => checker::TExpr { kind = checker::TSafeFieldAccess { receiver = cg_lift_expr(sfa.receiver, acc); field = sfa.field }; type = e.type; line = e.line; col = e.col }
-        checker::TCoalesce as co => checker::TExpr { kind = checker::TCoalesce { left = cg_lift_expr(co.left, acc); right = cg_lift_expr(co.right, acc) }; type = e.type; line = e.line; col = e.col }
         checker::TStructInit as si => {
             mut vals: []checker::TExpr = teko::list::empty()
             mut i = 0
