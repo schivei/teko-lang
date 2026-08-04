@@ -45,8 +45,8 @@ pub fn qualify_eq(ns: str, bare: str, name: str) -> bool {
     true
 }
 // (#109 W3) the bare last "::"-segment of a (possibly canonical) name: "teko::emit::Reader" → "Reader",
-// "Reader" → "Reader". Manual byte-loop (mirrors class_name_from_method_ns), since last_index_of is a
-// host-only FFI edge unavailable to the VM-interpreted checker.
+// "Reader" → "Reader". Manual byte-loop (mirrors class_name_from_method_ns); predates the retired
+// interpreter, which could not run the `last_index_of` builtin (a native-only codegen edge).
 pub fn name_last_segment(name: str) -> str {
     mut last_sep: i64 = -1
     mut i: u64 = 0
@@ -963,26 +963,24 @@ fn ptr_widens_to_opaque(from: Type, to: Type) -> bool {
 
 // (#41-followon) Does a value of `from` WIDEN into `to`? The single source of truth for value-
 // position widening, shared by the return/trailing-value/assign/binding check (assignable_to
-// delegates here) and the match/`if` arm JOIN (type_join). Rules (B.14 + present-wrap §202):
+// delegates here) and the match/`if` arm JOIN (type_join). Rules (B.14):
 //   • type equality,
+//   • a BARE `null` into any union (inline or named) listing `null` (`null_widens_into`),
 //   • a VARIANT `from` iff EVERY member widens in (sub-variant → wider variant) — TRANSITIVE,
-//   • `T` into `T?` (and `U?`/sentinel into `T?`),
 //   • a variant MEMBER into the (named-expanded) variant — also transitive (a nested case).
 // Depth-bounded so a pathological self-referential variant cannot loop. (Mirror of resolve.c.)
+//
+// retire-Optional O4 (`docs/design/retirar-optional-para-null-union-uptr-0.3.1.md` §6): the
+// PRESENT-WRAP arm (`T (or a case of T) → T?`, `to` itself the legacy `Optional` sentinel) is
+// DELETED here — unreachable since O1/O2 migrated the two live `Optional` producers and O3's
+// gate confirmed no `Optional{…}` construction remains outside the cataloged Group C arms: `to`
+// can no longer resolve to `Optional` from any live annotation path, so this match's `to` was
+// always the `_` fallthrough. Fixture: `null_narrow_ifguard` (own_native) pins that an
+// equality-guard narrow over a migrated `T | null` union is unaffected.
 fn widens_into_at(from: Type, to: Type, table: TypeTable, depth: i64) -> bool {
     if type_eq(from, to) { return true }
     if depth <= 0 { return false }
     if from_is_bare_null(from) && null_widens_into(to, table) { return true }
-    // PRESENT-WRAP first (before variant decomposition): a whole `T` (even a named variant like
-    // `TypeExpr`) wraps into `T?`. Checking this before the variant-from split keeps `TypeExpr →
-    // TypeExpr?` a single present-wrap, not a member-by-member (which would wrongly fail).
-    match to {
-        Optional as opt => {
-            if widens_into_at(from, opt.inner, table, depth - 1) { return true }   // T (or a case of T) → T?
-            match from { Optional => return true; _ => { } }   // U? / sentinel → T?
-        }
-        _ => { }
-    }
     match expand_variant(from, table) {   // a VARIANT source decomposes into its members
         Variant as fv => {
             mut i = 0
@@ -1493,12 +1491,17 @@ pub fn type_conforms_to(name: str, iface: str, table: TypeTable) -> bool {
 // is right for ASSIGNABILITY but wrong for JOIN's "equal → return `a`" shortcut: if `a` is the
 // (less informative) sentinel side and `b` is concrete, blindly returning `a` silently discards
 // the concrete element type a sibling array-literal entry established (`[[], [1]]`'s inner `[]`
-// joined against `[1]`'s `[]i64` — see type_join). Recurses through Slice/Optional so a nested
-// sentinel (`[][]Void`) is still detected. Mirror: resolve.c::tk_type_has_sentinel.
+// joined against `[1]`'s `[]i64` — see type_join). Recurses through Slice so a nested sentinel
+// (`[][]Void`) is still detected. Mirror: resolve.c::tk_type_has_sentinel.
+//
+// retire-Optional O4 (`docs/design/retirar-optional-para-null-union-uptr-0.3.1.md` §6): the
+// `Optional` arm (the OTHER sentinel this once recursed through, `Optional{inner=Void}`) is
+// DELETED — O1 was its only producer and it now births `Null{}` instead, so `t` can no longer
+// legitimately be `Optional` here; the SEPARATE `Slice{Void}` empty-slice sentinel above is
+// UNTOUCHED (a different sentinel entirely — fixture: `empty_slice_sentinel_untouched`, own_native).
 fn type_has_sentinel(t: Type) -> bool {
     match t {
         Slice as s => match s.element { Void => true; _ => type_has_sentinel(s.element) }
-        Optional as o => match o.inner { Void => true; _ => type_has_sentinel(o.inner) }
         _ => false
     }
 }
@@ -1543,7 +1546,7 @@ fn union_collect(acc: []Type, t: Type, table: TypeTable) -> []Type {
  *   design — see `type_eq`'s Slice/Optional cases). Blindly returning `a` there discards a concrete
  *   element type when the SENTINEL is the first operand: `[[], [1]]` folds `type_join` left to
  *   right over `[]`'s `[]Void` then `[1]`'s `[]i64`, and the accumulator was the sentinel, so the
- *   join silently kept `[]Void` and codegen later saw an untyped empty slice (the VM, which ignores
+ *   join silently kept `[]Void` and codegen later saw an untyped empty slice (the interpreter, which ignores
  *   element types, ran fine). Prefer the CONCRETE side when the two are sentinel-equal but not
  *   `type_has_sentinel`-equal.
  * - a union BUILT here is canonicalized through `union_normalize_null`, exactly like one written
@@ -1863,22 +1866,6 @@ pub fn resolve_type(te: parser::TypeExpr, table: TypeTable, ref_ns: str) -> Type
             let rt = match resolve_type(fnt.ret, table, ref_ns) { Type as t => t; error as e => return e }
             return Func { params = ps; ret = rt; variadic = false; param_names = []; n_required = (ps).len; defaults = [] }
         }
-        parser::OptionalType as ot => {
-            // OptionalType `T?` → Optional { inner } (REBOOT_PLAN §202). The variant case
-            // above already rejects an optional as a variant member; here we just build it.
-            let in = match resolve_type(ot.inner, table, ref_ns) {
-                Type as t => t
-                error as e => return e
-            }
-            // `void?` is illegal (void is not a value — M.3); `T??` collapses to `T?`.
-            // (MEM Step 0, R2) ESCAPE GATE — a reference is NEVER null, so `Ref<T>?` is rejected.
-            match in {
-                Void => return error { message = "`void` cannot be made optional (`void?`) — void is not a value (M.3)" }
-                Reference => return error { message = "a reference cannot be nullable (a ref is never null, R2)" }
-                Optional => return in   // `T??` collapses to `T?`
-                _ => Optional { inner = in }
-            }
-        }
     }
 }
 
@@ -2124,9 +2111,9 @@ fn resolve_generic_inst(nt: parser::NamedType, table: TypeTable, ref_ns: str) ->
         match argt { Void => return error { message = "`Ref<void>` is invalid — void is not a value (M.3)" }; _ => { } }
         // (W9a) ESCAPE GATE — the inner must be a VALUE TYPE. Teko has NO field/index assignment
         // (value-functional), so a non-scalar ref is ONLY ever mutated by WHOLE-`.value` REPLACEMENT
-        // (`r.value = newWhole` — native `*r = newWhole` struct/slice copy; VM cell_set), and read
-        // by `r.value` (native `(*r)`; VM cell_get). Under the cell-IDENTITY model both are
-        // observationally identical in VM and native, exactly like scalars. So Prim, Byte, Str,
+        // (`r.value = newWhole` — native `*r = newWhole` struct/slice copy; interpreter cell_set), and read
+        // by `r.value` (native `(*r)`; interpreter cell_get). Under the cell-IDENTITY model both are
+        // observationally identical in interpreter and native, exactly like scalars. So Prim, Byte, Str,
         // Named (struct/enum/variant), Slice, Optional and Variant are all allowed. REJECT only the
         // NON-values / aliasing hazards: Void (already above — not a value), Reference (no ref-to-ref),
         // Ptr/Uptr (raw FFI addresses), Func (a function value carries no replaceable storage).
@@ -2290,7 +2277,6 @@ fn subst_texpr_names(te: parser::TypeExpr, params: []str, args: []parser::TypeEx
             parser::NamedType { path = nt.path; args = nargs }
         }
         parser::SliceType as st => parser::SliceType { element = subst_texpr_names(st.element, params, args) }
-        parser::OptionalType as ot => parser::OptionalType { inner = subst_texpr_names(ot.inner, params, args) }
         parser::UnionType as ut => {
             mut ms: []parser::TypeExpr = teko::list::empty()
             mut i = 0
@@ -2400,7 +2386,6 @@ fn collect_texpr_insts(te: parser::TypeExpr, acc: []parser::TypeExpr) -> []parse
             if nt.args.len > 0 { out = teko::list::push(out, te) }
         }
         parser::SliceType as st => out = collect_texpr_insts(st.element, out)
-        parser::OptionalType as ot => out = collect_texpr_insts(ot.inner, out)
         parser::UnionType as ut => { mut i = 0; loop { if i >= ut.members.len { break }; out = collect_texpr_insts(ut.members[i], out); i++ } }
         parser::FunctionType as fnt => { mut i = 0; loop { if i >= fnt.params.len { break }; out = collect_texpr_insts(fnt.params[i], out); i++ }; out = collect_texpr_insts(fnt.ret, out) }   // (W10a)
     }
@@ -2533,17 +2518,10 @@ fn collect_expr_insts(e: parser::Expr, acc: []parser::TypeExpr) -> []parser::Typ
             }
         }
         parser::FieldAccess as fa => out = collect_expr_insts(fa.receiver, out)
-        parser::SafeFieldAccess as sfa => out = collect_expr_insts(sfa.receiver, out)
-        parser::Coalesce as co => { out = collect_expr_insts(co.left, out); out = collect_expr_insts(co.right, out) }
         parser::MethodCall as mc => {
             out = collect_expr_insts(mc.receiver, out)
             mut i = 0
             loop { if i >= mc.args.len { break }; out = collect_expr_insts(mc.args[i], out); i++ }
-        }
-        parser::SafeMethodCall as smc => {   // (NP-OOP, issue #116) recv?.method(args)
-            out = collect_expr_insts(smc.receiver, out)
-            mut i = 0
-            loop { if i >= smc.args.len { break }; out = collect_expr_insts(smc.args[i], out); i++ }
         }
         parser::Cast as ct => out = collect_expr_insts(ct.expr, out)
         parser::Index as ix => { out = collect_expr_insts(ix.receiver, out); out = collect_expr_insts(ix.index, out) }
@@ -2895,7 +2873,7 @@ pub fn table_generic_instances(table: TypeTable) -> []parser::TypeDecl {
 // (W9.4) NORMALIZE generic-INSTANCE references in a (syntactic) type-expr to the BARE stamped name.
 // A `Base<args>` reference where `Base` is a user-defined generic (so it resolves to a stamped
 // `Base__g__<mangle>` instance) is rewritten to a bare `NamedType{[Base__g__mangle]}` with NO args,
-// so codegen / VM / TKB (which read the SYNTACTIC declaration body) carry the SAME stamped name the
+// so codegen / interpreter / TKB (which read the SYNTACTIC declaration body) carry the SAME stamped name the
 // RESOLVED value type carries. A type-PARAMETER name (`T`, args_len == 0) is NOT rewritten; builtin
 // `ptr<T>`/`Ref<T>` (which resolve to Ptr/Ref, not a Named instance) keep their structural shape and
 // their args are normalized recursively. NO-OP when the expr carries no generic-instance reference.
@@ -2928,7 +2906,6 @@ fn normalize_inst_texpr(te: parser::TypeExpr, table: TypeTable) -> parser::TypeE
             parser::NamedType { path = nt.path; args = nargs }
         }
         parser::SliceType as st => parser::SliceType { element = normalize_inst_texpr(st.element, table) }
-        parser::OptionalType as ot => parser::OptionalType { inner = normalize_inst_texpr(ot.inner, table) }
         parser::UnionType as ut => {
             mut ms: []parser::TypeExpr = teko::list::empty()
             mut i = 0
@@ -3020,7 +2997,7 @@ fn normalize_inst_body(body: parser::TypeBody, table: TypeTable) -> parser::Type
 
 // (W9.4) normalize generic-instance references throughout a type-decl. Used by the typer to rewrite
 // BOTH the stamped instances (in the table) AND every non-generic decl item (e.g. `Wrap` whose
-// variant member is `Gen<i64>`), so the syntactic body codegen/VM read agrees with the resolved
+// variant member is `Gen<i64>`), so the syntactic body codegen/interpreter read agrees with the resolved
 // type. A NO-OP when the body has no generic-instance reference. (C: tk_normalize_inst_decl.)
 pub fn normalize_inst_decl(d: parser::TypeDecl, table: TypeTable) -> parser::TypeDecl {
     parser::TypeDecl { name = d.name; type_params = d.type_params; type_constraints = d.type_constraints; body = normalize_inst_body(d.body, table); vis = d.vis; has_doc = d.has_doc; doc = d.doc; line = d.line; col = d.col; di_kind = d.di_kind; has_di_key = d.has_di_key; di_key = d.di_key; is_unsafe = d.is_unsafe; must_free = d.must_free }

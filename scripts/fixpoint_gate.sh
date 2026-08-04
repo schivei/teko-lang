@@ -228,12 +228,70 @@ build_gen() {
     bg_bin="$1"; bg_log="$2"
     rm -rf "$W/out"
     bg_backend="$FIXPOINT_BACKEND"
+    # DIAGNOSTIC (2026-08-03, native-codegen-layer3): with the OOM cured (C6), the native self-build
+    # now reaches a codegen SIGSEGV (M.1). TEKO_NATIVE_TRACE_ITEMS names the last per-item scoped
+    # region entered before the crash, so the streamed log pins the exact function/const/type it
+    # died on. Native-only (the trace is emitted solely by emit_native_x86); remove once pinned.
+    bg_trace=""
+    if [ "$bg_backend" = "native" ]; then bg_trace="1"; fi
+    # DIAGNOSTIC (2026-08-03, native-rodata-const-align): the same native-only gate as
+    # TEKO_NATIVE_TRACE_ITEMS above, for the macOS-arm64 native fixpoint "ld: pointer not aligned"
+    # / Linux native gen1 const-corruption crash — encode_rodata's own reloc-alignment check names
+    # the owning rodata symbol + offset of the first pointer-bearing relocation whose ABSOLUTE
+    # __const/.rodata offset is not 8-aligned, straight to stderr, so the streamed log pins the
+    # exact culprit const instead of only ld's nearest-preceding-symbol guess. Remove once pinned.
+    bg_align_check=""
+    if [ "$bg_backend" = "native" ]; then bg_align_check="1"; fi
+    # DIAGNOSTIC (2026-08-03, native-region-crash): the same native-only gate as the two above,
+    # for the arm64-macos/x86_64-glibc native fixpoint SIGSEGV inside `tk_region_alloc` reached
+    # deep in the fused per-item lowering driver (`fuse_lower_item_arm64`/`emit_native_x86`,
+    # `docs/design/native-lowering-oom-por-funcao-0.3.1.md`). The shared linear-scan register
+    # allocator's own scan output is checked, per function, for an `InReg` assignment that
+    # crosses a call yet holds a caller-saved physreg (a violation `IntervalSet`'s own doc
+    # comment already names as forbidden) — straight to stderr, so the streamed log pins the
+    # exact vreg/physreg/function whose value a later call would clobber, instead of leaving the
+    # eventual corrupted-region-pointer read to surface as an unattributed SIGSEGV items later.
+    # Remove once pinned.
+    bg_call_safety_check=""
+    if [ "$bg_backend" = "native" ]; then bg_call_safety_check="1"; fi
+    # DIAGNOSTIC (2026-08-03, native-region-crash, ROUND 2): the symbolized macOS-arm64 backtrace
+    # (head 284c91c) localized the SIGSEGV precisely to copy_encoded_func_to_current_region_arm64
+    # (project.tks) doing tk_slice_push into a CORRUPT current region — region-STATE corruption, not
+    # pointer alignment (the align check above returned null). This gate asserts, per item AND for the
+    # virtual-main, that the current region really returned to the ROOT after each region_leave() in
+    # the fused loop, BEFORE the copy-out commits — converting the distant tk_region_alloc SIGSEGV into
+    # a named honest-stop naming the exact item ("item N/M") and both region handles, so the streamed
+    # log pins whether the region stack is imbalanced there. Native-only; byte-identical when off.
+    # Remove once pinned.
+    bg_region_check=""
+    if [ "$bg_backend" = "native" ]; then bg_region_check="1"; fi
+    # DIAGNOSTIC (2026-08-03, native-rodata-const-align, ROUND 2): the align check above returned
+    # null even though macOS ld rejected 'pointer not aligned in AAPCS64.gpr_arg+0x1320' — so the
+    # bug is NOT a misaligned reloc offset but a const SIZE/OFFSET mismatch: a fat field allotted 8
+    # bytes instead of 16 (a typeexpr_is_fat / is_fat_type disagreement) shifts every following
+    # field, so a later pointer lands misaligned (macOS ld) AND the const's bytes read as garbage
+    # (x86 gen1 crash — x86 tolerates unaligned reads, so its crash proves DATA corruption, not
+    # alignment). This gate cross-checks each serialized aggregate const's ConstImage against its
+    # registered layout (`check_const_image_size`, lower_const.tks) and honest-stops naming the
+    # exact const + fat field + allotted-vs-required width, straight to the streamed log's tail.
+    # Native-only; byte-identical when off. Remove once pinned.
+    bg_const_size_check=""
+    if [ "$bg_backend" = "native" ]; then bg_const_size_check="1"; fi
     scan_project_c "$W/project-c.before"
+    # Stream the build LIVE (prefixed) to the lane log AND capture to $bg_log. Owner ruling
+    # 2026-08-03: "expor tudo que ele faz e não ocultar nenhuma saída". Before, the build was
+    # redirected to a file dumped ONLY on failure, so a mid-build OOM-kill (Killed: 9) lost the
+    # buffered tail and hid WHERE it died. POSIX sh has no PIPESTATUS, so the compiler's exit code
+    # is stashed in a status file (kept out of the streamed log by its own redirect) and returned;
+    # `set +e`/`set -e` brackets keep the pipe's own failure from tripping the caller early.
+    set +e
     if [ -n "$RT_DIR" ]; then
-        ( cd "$PROJ" && TK_RT_DIR="$RT_DIR" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ) >"$bg_log" 2>&1
+        { ( cd "$PROJ" && TK_RT_DIR="$RT_DIR" TEKO_NATIVE_TRACE_ITEMS="$bg_trace" TEKO_NATIVE_RODATA_ALIGN_CHECK="$bg_align_check" TEKO_NATIVE_CALL_SAFETY_CHECK="$bg_call_safety_check" TEKO_NATIVE_REGION_CHECK="$bg_region_check" TEKO_NATIVE_CONST_SIZE_CHECK="$bg_const_size_check" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
     else
-        ( cd "$PROJ" && TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ) >"$bg_log" 2>&1
+        { ( cd "$PROJ" && TEKO_NATIVE_TRACE_ITEMS="$bg_trace" TEKO_NATIVE_RODATA_ALIGN_CHECK="$bg_align_check" TEKO_NATIVE_CALL_SAFETY_CHECK="$bg_call_safety_check" TEKO_NATIVE_REGION_CHECK="$bg_region_check" TEKO_NATIVE_CONST_SIZE_CHECK="$bg_const_size_check" TEKO_BACKEND="$bg_backend" "$bg_bin" . -o "$W/out" --no-verify --release ); echo $? >"$W/bg_status"; } 2>&1 | tee "$bg_log" | sed 's/^/fixpoint:   | /' >&2
     fi
+    set -e
+    return "$(cat "$W/bg_status")"
 }
 
 # scan_project_c OUTFILE — the sorted list of every `.c` in the project tree, EXCLUDING `.git` and
@@ -378,8 +436,7 @@ stage_gen1_c
 
 log "building gen2 = gen1(source) ..."
 if ! build_gen "$GEN1" "$W/gen2.log"; then
-    log "----- gen1's build of the source (did not complete) -----"
-    sed 's/^/fixpoint:   | /' "$W/gen2.log" >&2 || true
+    log "----- gen1's build of the source (streamed live above) did not complete -----"
     verdict_fail "gen1 does not build the source it came from — the compiler does not self-host, so gen2 does not exist and the fixpoint cannot hold. See the address above."
 fi
 take_gen gen2 || verdict_fail "the gen2 build reported success but left no binary at $W/out"
@@ -391,8 +448,7 @@ log "gen2 ready ($(wc -c < "$W/gen2") bytes)"
 # fixpoint não muda: continua gen2 == gen3"*), not an accident of this file's shape.
 log "building gen3 = gen2(source) ..."
 if ! build_gen "$W/gen2" "$W/gen3.log"; then
-    log "----- gen2's build of the source (did not complete) -----"
-    sed 's/^/fixpoint:   | /' "$W/gen3.log" >&2 || true
+    log "----- gen2's build of the source (streamed live above) did not complete -----"
     verdict_fail "gen2 built but does not rebuild the source — the chain breaks at the second generation. See the address above."
 fi
 take_gen gen3 || verdict_fail "the gen3 build reported success but left no binary at $W/out"

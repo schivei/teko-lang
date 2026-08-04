@@ -3,7 +3,7 @@
 // the monomorph pass (typer → monomorphize) is exercised broadly: it stamps idg__g__i64 /
 // idg__g__str / pickg__g__i64 / wrapg__g__i64 / firstg__g__i64 / … , rewrites the calls, and
 // drives the Phase-2 fixpoint (a generic fn that calls another generic fn → transitive insts).
-// Runs on the VM in BOTH engines (the build/test gate), so the pass must be wired before
+// Runs natively (the build/test gate), so the pass must be wired before
 // run_tests — proving a generic program type-checks, STAMPS, and EXECUTES correctly.
 
 // A box struct so a generic body can exercise struct-init + field-access node rewrites.
@@ -11,7 +11,7 @@ type GBox = struct { v: i64 }
 
 // (S4 type-generics) a GENERIC struct — instantiated via an annotation. The instantiation pass
 // stamps Gen__g__i64 / Gen__g__str into the table, mono emits the concrete decls into the program,
-// and codegen/VM build + construct + field-read them. Exercises the full type-generic pipeline.
+// and codegen builds + constructs + field-reads them. Exercises the full type-generic pipeline.
 type Gen<T> = struct { val: T }
 
 // the identity generic — one opaque type-param in param + return position.
@@ -31,8 +31,8 @@ fn wrapg<T>(x: T) -> T {
 }
 
 // a generic over a SLICE type-param shape: `firstg([]T) -> T` (exercises the Slice unify +
-// the slice_<elem> mangle branch). Indexing a slice is an honest stop in codegen but the VM
-// constructs/reads it; keep this VM-only by not building it into the binary example.
+// the slice_<elem> mangle branch). Slice indexing is fully supported in native codegen;
+// exercised directly by `generic_first_runs` below.
 fn firstg<T>(xs: []T) -> T { return xs[0] }
 
 #test fn generic_id_str_runs() {
@@ -59,9 +59,9 @@ fn firstg<T>(xs: []T) -> T { return xs[0] }
 }
 
 // (W9.4) GENERIC INSTANCE AS A VARIANT MEMBER — end-to-end (construct → wrap → match → bind), run
-// VM==native by the gate. The normalization pass rewrites the syntactic `Gen<i64>` in the variant
+// natively by the gate. The normalization pass rewrites the syntactic `Gen<i64>` in the variant
 // decl body to the bare stamped `Gen__g__i64`, so the typedef member key, the wrap, the match tag
-// and the VM case-name all agree. A non-generic member (`GenOther`) is the reference path.
+// and the case-name all agree. A non-generic member (`GenOther`) is the reference path.
 type GenOther = struct { x: i64 }
 type GenWrap = variant Gen<i64> | GenOther
 type GenMulti = variant Gen<i64> | Gen<str> | GenOther
@@ -109,9 +109,9 @@ fn gm_mk_o() -> GenMulti { return GenOther { x = 9 } }
 // `<T: I>` (I an interface) now unlocks OPERATING on T — a method call `x.area()` inside the
 // generic body resolves to I's contract method, monomorphized to the concrete class at each call
 // site (D3 vtable dispatch, reused). Two conforming classes flow through the SAME generic body;
-// two methods (a plain one + an arg-taking one) prove slot indexing. Runs on the VM in both
-// engines — the checker types it, the mono pass stamps geo_measure__g__Sq / geo_measure__g__Tri,
-// and the VM dispatches each through the concrete class's method.
+// two methods (a plain one + an arg-taking one) prove slot indexing. Runs natively — the
+// checker types it, the mono pass stamps geo_measure__g__Sq / geo_measure__g__Tri,
+// and codegen dispatches each through the concrete class's method.
 type Geo = interface {
     fn area(self) -> i64
     fn scaled(self, k: i64) -> i64

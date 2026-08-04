@@ -5,7 +5,7 @@ use teko::parser
  * ConstValue — the comptime value domain: the result of evaluating a provably-const
  * expression subtree. An integer is stored as its raw two's-complement bit pattern in
  * a `u64` PLUS its declared type (drop-128, 2026-07-24 — the fold's internal carrier is
- * detoxed off i128/u128; every width it EVALUATES is u8..u64/i8..i64, since that is now
+ * detoxed off i64/u64; every width it EVALUATES is u8..u64/i8..i64, since that is now
  * the whole of the language's non-bignum integer surface), so every integer family
  * re-emits and re-wraps exactly as the metal would; a float keeps its raw bits so
  * formatting is byte-exact; a string/bytes keeps its bytes; an aggregate holds child
@@ -77,7 +77,7 @@ pub type CVAgg = struct { elems: []ConstValue }
  * IntInfo — the width/signedness a comptime integer op runs at: the number of value
  * bits and whether the top bit is a sign bit. Derived from a `CVInt.ty` (a `Prim`
  * integer or `byte`) by `int_info`; every wrap/overflow/re-emission decision reads it.
- * `width` never exceeds 64 — the language's widest integer IS 64-bit (`u128`/`i128` were
+ * `width` never exceeds 64 — the language's widest integer IS 64-bit (`u64`/`i64` were
  * removed from the surface, drop-128, 2026-07-24), so `int_info`'s width gate is now a
  * defensive invariant rather than a live not-evaluated-width path.
  *
@@ -264,7 +264,7 @@ fn is_all_ones(bits: u64, w: u32) -> bool { mask_to_width(bits, w) == width_mask
  * int_info — classify a type as an integer width/signedness, or error when it is not an
  * integer (a `Prim` integer drives its width/signedness; `byte` is 8-bit unsigned), or when
  * it is WIDER than the fold's u64 carrier. The surface no longer HAS a type wider than 64 bits
- * (`u128`/`i128` were removed, drop-128, 2026-07-24) so this width gate is a defensive
+ * (`u64`/`i64` were removed, drop-128, 2026-07-24) so this width gate is a defensive
  * invariant, not a live path — but it is the ONE gate every `IntInfo` passes through, so it
  * protects every width/shift computation downstream from ever seeing an out-of-range width.
  *
@@ -447,7 +447,7 @@ fn eval_int_literal(value: parser::NumInt, t: Type, e: TExpr) -> ConstValue | er
  * encode_int_literal — range-check `value` against the type `t` of width/signedness
  * `info` and produce its two's-complement bits, erroring (M.1; LEGISLATION:148) when the
  * literal is out of range for its type. Sign-magnitude (drop-128, 2026-07-24) makes the
- * negative path direct — no `i128`-MIN-avoidance trick needed (the magnitude is already at
+ * negative path direct — no `i64`-MIN-avoidance trick needed (the magnitude is already at
  * hand): a negative value fits iff its magnitude is at most `2^(w-1)` (`i8::MIN`'s magnitude
  * 128 fits `i8`); the two's-complement bits are `width_mask(w) - mag + 1`.
  *
@@ -1640,7 +1640,7 @@ fn float_div(x: f64, y: f64, e: TExpr) -> ConstValue | error {
 
 /**
  * cf_is_int_type — true iff `t` is an integer type the fold re-emits as a `TNumber` literal (a
- * `Prim` integer i8..i64 / u8..u64, or `byte` — the removed `u128`/`i128` family has no surface
+ * `Prim` integer i8..i64 / u8..u64, or `byte` — the removed `u64`/`i64` family has no surface
  * type to classify, drop-128 2026-07-24). The evaluability predicate and `literal_of` both gate
  * on this so the CF2 fold stays within the integer scalar subset (floats, chars, strings and
  * aggregates are left unfolded for a later crumb).
@@ -1920,9 +1920,9 @@ fn cf_fold_cast_operand(e: TExpr, agg: AggConstMap) -> bool {
  * cv_int_to_numint — reconstruct the sign-magnitude literal carrier a `CVInt` of
  * width/signedness `info` re-emits as, in the SAME representation the parser/typer use (an
  * unsigned value as its non-negative magnitude, a signed value as its signed magnitude).
- * Replaces `cv_int_to_i128` (drop-128, 2026-07-24): with `info.width <= 64` guaranteed
+ * Replaces `cv_int_to_i64` (drop-128, 2026-07-24): with `info.width <= 64` guaranteed
  * (`int_info`'s gate), every value this returns is provably `<= u64::MAX` in magnitude, so —
- * unlike the old i128 carrier, which had no literal form for a u128 whose top bit was set —
+ * unlike the old i64 carrier, which had no literal form for a u64 whose top bit was set —
  * this NEVER returns null; the return type stays `| null` for the caller's shape (a future
  * fold form may reintroduce an unrepresentable case). Every returned carrier round-trips:
  * fed back to the pipeline as a `TNumber` of the same type, it lowers to exactly the folded
@@ -1991,8 +1991,8 @@ fn int_literal_of(ci: CVInt, ty: Type, line: u32, col: u32) -> TExpr | null {
  * op-tree becomes the literal it evaluates to (`literal_of(eval_const(e))`), and every other node is
  * rebuilt around its folded children (a partially-const tree folds its const sub-trees). Composed
  * AFTER `inline_rw_expr`'s reference substitution, so a module const's op-tree (e.g. `~(0 to u64)`,
- * substituted at each use) collapses to its literal on BOTH engines — the VM loads an immediate
- * instead of re-executing the op-tree. TOTAL over `TExprKind`. A provably-const overflow / ÷0 /
+ * substituted at each use) collapses to its literal at compile time, so native codegen emits an
+ * immediate instead of re-executing the op-tree. TOTAL over `TExprKind`. A provably-const overflow / ÷0 /
  * out-of-range surfaces as a located compile error (M.1), propagated from `eval_const`.
  *
  * @param e      the typed expression to fold (post reference-substitution)
@@ -2090,8 +2090,6 @@ fn fold_children(e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExp
         TMatchExpr as m => fold_match(m, e, table, env, agg)
         TCast as c => fold_cast(c, e, table, env, agg)
         TFieldAccess as fa => fold_field(fa, e, table, env, agg)
-        TSafeFieldAccess as sfa => fold_safe_field(sfa, e, table, env, agg)
-        TCoalesce as co => fold_coalesce(co, e, table, env, agg)
         TStructInit as si => fold_struct(si, e, table, env, agg)
         TIndex as ix => fold_index(ix, e, table, env, agg)
         TInterp as in => fold_rw_interp(in, e, table, env, agg)
@@ -2229,28 +2227,6 @@ fn fold_field_children(fa: TFieldAccess, e: TExpr, table: TypeTable, env: Env, a
  * @return       the optional field access rebuilt with a folded receiver, or a located error
  * @since #comptime-fold
  */
-fn fold_safe_field(sfa: TSafeFieldAccess, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExpr | error {
-    let r = match fold_expr(sfa.receiver, table, env, agg) { error as x => return x; TExpr as v => v }
-    TExpr { kind = TSafeFieldAccess { receiver = r; field = sfa.field }; type = e.type; line = e.line; col = e.col }
-}
-
-/**
- * fold_coalesce — rebuild a `??` coalesce node around its folded operands.
- *
- * @param co     the typed coalesce expression
- * @param e      the enclosing expression (its type/position)
- * @param table  the type table (forwarded to each operand fold)
- * @param env    the environment (forwarded to each operand fold)
- * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
- * @return       the coalesce rebuilt with folded operands, or a located error
- * @since #comptime-fold
- */
-fn fold_coalesce(co: TCoalesce, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExpr | error {
-    let l = match fold_expr(co.left, table, env, agg) { error as x => return x; TExpr as v => v }
-    let r = match fold_expr(co.right, table, env, agg) { error as x => return x; TExpr as v => v }
-    TExpr { kind = TCoalesce { left = l; right = r }; type = e.type; line = e.line; col = e.col }
-}
-
 /**
  * fold_index — fold an index of a const aggregate at a const index (Layer 1c): when the whole index
  * is const-foldable (`cf_can_index` — a const-aggregate receiver at a const integer index), evaluate
@@ -2589,7 +2565,7 @@ fn fold_stmt(st: TStatement, table: TypeTable, env: Env, agg: AggConstMap) -> TS
     match st {
         TBinding as b => {
             let v = match fold_expr(b.value, table, env, agg) { error as x => return x; TExpr as f => f }
-            TBinding { kind = b.kind; target = b.target; bound = b.bound; value = v }
+            TBinding { kind = b.kind; target = b.target; bound = b.bound; value = v; di_kind = b.di_kind }
         }
         TAssign as a => fold_assign(a, table, env, agg)
         TReturn as r => fold_return(r, st, table, env, agg)
@@ -3055,8 +3031,6 @@ fn lp_expr(e: TExpr, m: LocalConstMap) -> TExpr {
         TMatchExpr as mm => lp_match(mm, e, m)
         TCast as c => TExpr { kind = TCast { expr = lp_expr(c.expr, m) }; type = e.type; line = e.line; col = e.col }
         TFieldAccess as fa => TExpr { kind = TFieldAccess { receiver = lp_expr(fa.receiver, m); field = fa.field }; type = e.type; line = e.line; col = e.col }
-        TSafeFieldAccess as sfa => TExpr { kind = TSafeFieldAccess { receiver = lp_expr(sfa.receiver, m); field = sfa.field }; type = e.type; line = e.line; col = e.col }
-        TCoalesce as co => TExpr { kind = TCoalesce { left = lp_expr(co.left, m); right = lp_expr(co.right, m) }; type = e.type; line = e.line; col = e.col }
         TStructInit as si => TExpr { kind = TStructInit { field_names = si.field_names; field_vals = lp_exprs(si.field_vals, m) }; type = e.type; line = e.line; col = e.col }
         TIndex as ix => TExpr { kind = TIndex { receiver = lp_expr(ix.receiver, m); index = lp_expr(ix.index, m) }; type = e.type; line = e.line; col = e.col }
         TInterp as in => lp_interp(in, e, m)
@@ -3273,7 +3247,7 @@ fn lp_stmt(st: TStatement, m: LocalConstMap) -> LpStmt {
 fn lp_binding(b: TBinding, m: LocalConstMap) -> LpStmt {
     let value = lp_expr(b.value, m)
     let m2 = lp_record_binding(m, b.kind, b.target, value)
-    LpStmt { stmt = TBinding { kind = b.kind; target = b.target; bound = b.bound; value = value }; map = m2 }
+    LpStmt { stmt = TBinding { kind = b.kind; target = b.target; bound = b.bound; value = value; di_kind = b.di_kind }; map = m2 }
 }
 
 /**

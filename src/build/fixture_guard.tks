@@ -696,3 +696,124 @@ fn seed_hostile_arms_under(dir: str) -> []str {
     }
     out
 }
+
+/**
+ * OPTIONAL_PRODUCER_ALLOWLIST_RESOLVE_LINE — retire-Optional O3's ONE allowlisted `checker::Optional`
+ * RE-construction left in `src/*.tks` (`docs/design/retirar-optional-para-null-union-uptr-0.3.1.md`
+ * §4, §6): `subst_type`'s `Optional as o => Optional { inner = subst_type(o.inner, s) }`
+ * (`src/checker/resolve.tks`). It only fires when an `Optional` VALUE has already reached it — a
+ * CONSUMER re-wrapping its own input, not a producer minting one from nothing — and is itself a
+ * Group C arm the design doc schedules for deletion in O6. Pinned by LINE (not just file) so a
+ * DIFFERENT `Optional {` anywhere else in `resolve.tks` still fails the gate; bump this constant, not
+ * the gate itself, if a later crumb reflows the file before O6 removes the arm outright. Bumped
+ * 1600 → 1603 by retire-Optional O4 (deletions earlier in the file shifted it down).
+ *
+ * @since 0.3.1 (retire-Optional O3)
+ */
+const OPTIONAL_PRODUCER_ALLOWLIST_RESOLVE_LINE: u64 = 1603
+
+/**
+ * optional_ctor_at — does `code` (already `code_only_text`-blanked, comments/literals stripped)
+ * construct the bare or `checker::`-qualified `Optional` struct literal starting at byte `i` — the
+ * identifier `Optional`, an identifier boundary on both sides, followed (past any spaces/tabs) by
+ * `{`? Excludes a MATCH-ARM pattern (`Optional as o =>` / `Optional =>`, never followed by `{`) and
+ * the type FORMER'S OWN declaration (`Optional = struct { … }`, followed by `=`, not `{`).
+ *
+ * @param code  code-only text (comments/literals already blanked, line breaks preserved)
+ * @param i     the byte index to test
+ * @return      true iff a construction starts at `i`
+ * @since 0.3.1 (retire-Optional O3)
+ */
+fn optional_ctor_at(code: str, i: u64) -> bool {
+    let word = "Optional"
+    if i + word.len > code.len { return false }
+    if teko::str::slice(code, i, i + word.len) != word { return false }
+    if i > 0 && is_ident_byte(code[i - 1]) { return false }
+    let after = i + word.len
+    if after < code.len && is_ident_byte(code[after]) { return false }
+    mut j = after
+    loop {
+        if j >= code.len { return false }
+        let c = code[j]
+        if c == b' ' || c == b'\t' { j = j + 1; continue }
+        return c == b'{'
+    }
+}
+
+/**
+ * optional_producer_lines — the 1-based line numbers of `text` where a bare or `checker::`-qualified
+ * `Optional { … }` construction begins, comments and string/char literals excluded
+ * (`code_only_text`). Retire-Optional O3's grep-gate primitive (§6): with O1+O2 migrated, every
+ * construction left in `src/*.tks` must already be a cataloged Group B/C consumer arm, never a new
+ * producer.
+ *
+ * @param text  the whole (raw) source text
+ * @return      the 1-based line numbers holding a construction, in file order
+ * @since 0.3.1 (retire-Optional O3)
+ */
+fn optional_producer_lines(text: str) -> []u64 {
+    let code = code_only_text(text)
+    mut out: []u64 = teko::list::empty()
+    mut line_no: u64 = 1
+    mut i: u64 = 0
+    loop {
+        if i >= code.len { break }
+        if code[i] == b'\n' { line_no = line_no + 1; i = i + 1; continue }
+        if optional_ctor_at(code, i) { out = teko::list::push(out, line_no) }
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * optional_producer_defects — the complaints about ONE `.tks` file: one per `Optional { … }`
+ * construction not already on the O3 allowlist (`OPTIONAL_PRODUCER_ALLOWLIST_RESOLVE_LINE`). An
+ * unreadable file is reported too, mirroring `seed_hostile_arm_defects`.
+ *
+ * @param path  the `.tks` file to inspect
+ * @return      one complaint per un-allowlisted construction, empty when the file is clean
+ * @since 0.3.1 (retire-Optional O3)
+ */
+fn optional_producer_defects(path: str) -> []str {
+    let text = match teko::io::read_file(path) { str as s => s; error as e => return teko::list::push(teko::list::empty(), $"{path}: unreadable ({e.message})") }
+    let lines = optional_producer_lines(text)
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= lines.len { break }
+        let allowed = teko::str::ends_with(path, "resolve.tks") && lines[i] == OPTIONAL_PRODUCER_ALLOWLIST_RESOLVE_LINE
+        if !allowed {
+            out = teko::list::push(out, $"{path}:{lines[i]}: constructs `Optional {{ … }}` — retire-Optional O1/O2 already migrated the only two live producers (type_nulllit/typer.tks, host_error_optional/scope.tks); a construction here is either a regression or an un-cataloged Group B/C site that needs an allowlist entry, not a silent pass")
+        }
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * optional_producer_defects_under — `optional_producer_defects` over every `.tks` file under `dir`,
+ * empty when retire-Optional's Group A (§4) stays fully migrated. Only `.tks` is walked (mirrors
+ * `seed_hostile_arms_under`): a `.tkt` unit test legitimately constructs an `Optional` VALUE directly
+ * to exercise a still-kept consumer arm (`checker_test.tkt`/`borrow_test.tkt`/`lower_test.tkt`/
+ * `codegen_test.tkt`) and is not part of the `--no-verify --release` surface the bootstrap ladder
+ * builds.
+ *
+ * @param dir  the source root to walk
+ * @return     one complaint per un-allowlisted construction, in walk order
+ * @since 0.3.1 (retire-Optional O3)
+ */
+fn optional_producer_defects_under(dir: str) -> []str {
+    let files = collect_teko_sources(dir)
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= files.len { break }
+        if teko::str::ends_with(files[i], ".tks") {
+            let defects = optional_producer_defects(files[i])
+            mut d: u64 = 0
+            loop { if d >= defects.len { break }; out = teko::list::push(out, defects[d]); d = d + 1 }
+        }
+        i = i + 1
+    }
+    out
+}

@@ -232,29 +232,207 @@ fn run_captured_spec(spec: ProcSpec) -> CapResult {
 }
 
 /**
- * REGR_JOBS_DEFAULT — how many captured children run CONCURRENTLY when the run names no number.
+ * nproc_rt — the runtime bottom of E1-C6: the OS-granted online processor count. Bound as an
+ * `extern fn` (not an injected builtin) because the build SOURCE calls it, and a fresh builtin would
+ * not be recognised by the released seed that must still compile this tree — the same seed-lowerable
+ * FFI route `src/names/names.tks` binds `tk_names_live_count` through.
  *
- * Four, and the number is deliberately modest. Each child is a full `teko` build holding its own
- * arena — the wagon's own self-host peaked at 1.3 GB — so a job count tuned to core count would
- * trade a runner's memory for wall clock and lose. A CI leg that knows its machine raises it
- * through the env; the default only has to be safe on the smallest runner in the matrix.
+ * @return the OS-granted online CPU count, at least 1
+ * @since 0.3.1.0
  */
-const REGR_JOBS_DEFAULT: u64 = 4
+extern fn nproc_rt() -> u64 = "tk_rt_nproc" from "teko_rt"
 
-/** REGR_JOBS_ENV — the env key a run overrides `REGR_JOBS_DEFAULT` through (12-Factor: the
-    concurrency of the machine is the machine's business, not the source's). */
+/**
+ * MEMINFO_PATH — where Linux publishes live memory accounting, one fact per line
+ * (`MemAvailable: NNNN kB` among others). Absent on macOS/Windows: `mem_job_cap_at` reads
+ * that absence as "no memory-based cap", which is exactly today's CPU-only behaviour on
+ * those hosts — this governor is additive, never a regression on a host it cannot read.
+ */
+const MEMINFO_PATH: str = "/proc/meminfo"
+
+/**
+ * MEM_AVAILABLE_LABEL — the line prefix `mem_available_kib` scans for. Not `MemFree:`:
+ * `MemFree` excludes reclaimable cache/buffers a new child can still be granted, and would
+ * undercount by exactly the memory Linux hands back on demand. `MemAvailable` is the
+ * kernel's own estimate of what a fresh allocation could actually get.
+ */
+const MEM_AVAILABLE_LABEL: str = "MemAvailable:"
+
+/**
+ * MEM_PER_JOB_KIB — the memory this governor budgets per concurrent heavy child (2 GiB).
+ *
+ * CONSERVATIVE ON PURPOSE, AND NOT A MEASURED PER-SHARD FOOTPRINT. A job count that is too
+ * low only costs wall-clock; one that is too high OOMs the runner — and OOM is strictly
+ * worse, because a run that is killed before finishing proves nothing, while a slow one
+ * still proves everything a fast one would. Sizing this to a REAL measured per-shard/
+ * per-regression-child RSS is the honest follow-up; instrumenting that measurement here
+ * would itself risk the exact OOM this constant exists to avoid, so it is not attempted in
+ * this change. Until that measurement lands, this constant only ever LOWERS the default
+ * below `nproc` — a host whose `MemAvailable` comfortably covers `nproc` jobs at this
+ * budget sees no change at all (§`os_max_of`).
+ */
+const MEM_PER_JOB_KIB: u64 = 2097152
+
+/**
+ * NO_MEM_CAP — the job count `mem_job_cap_at` answers when memory cannot be measured
+ * (unreadable path, or a `MemAvailable:` line this parser does not recognise): a value no
+ * real `nproc_rt()` will ever reach, so `os_max_of` picks the CPU count untouched — the
+ * governor abstains rather than guesses.
+ */
+const NO_MEM_CAP: u64 = 1000000
+
+/**
+ * mem_available_kib — the kB value `content`'s `MemAvailable:` line names, or 0 when the
+ * line is absent or carries no digit after it.
+ *
+ * PURE: takes the file's text rather than reading it itself, so the parser is testable
+ * against a synthetic string with no filesystem and no platform dependency.
+ *
+ * @param content  the whole text of `/proc/meminfo` (or any string to probe the parser)
+ * @return         the kB `MemAvailable:` names, or 0
+ * @since 0.3.1
+ */
+fn mem_available_kib(content: str) -> u64 {
+    let at = mem_label_end(content, MEM_AVAILABLE_LABEL)
+    if at >= content.len { return 0 }
+    mut i = at
+    loop {
+        if i >= content.len { break }
+        if content[i] != b' ' { break }
+        i = i + 1
+    }
+    mut v: u64 = 0
+    mut seen = false
+    loop {
+        if i >= content.len { break }
+        let c = content[i]
+        if c < b'0' || c > b'9' { break }
+        v = (v * 10) + ((c to u64) - (b'0' to u64))
+        seen = true
+        i = i + 1
+    }
+    if !seen { return 0 }
+    v
+}
+
+/**
+ * mem_label_end — the index right after the first occurrence of `label` in `content`, or
+ * `content.len` when `label` does not occur (the "not found" sentinel `mem_available_kib`
+ * checks for).
+ *
+ * @param content  the text to scan
+ * @param label    the literal substring to find
+ * @return         the index just past `label`'s first occurrence, or `content.len`
+ * @since 0.3.1
+ */
+fn mem_label_end(content: str, label: str) -> u64 {
+    if label.len == 0 || label.len > content.len { return content.len }
+    mut i: u64 = 0
+    let last = content.len - label.len
+    loop {
+        if i > last { return content.len }
+        if teko::str::slice(content, i, i + label.len) == label { return i + label.len }
+        i = i + 1
+    }
+}
+
+/**
+ * mem_job_cap_at — how many concurrent `MEM_PER_JOB_KIB`-sized children `path`'s available
+ * memory can budget for, or `NO_MEM_CAP` when `path` cannot be read or its content names no
+ * usable `MemAvailable:` figure.
+ *
+ * PARAMETERISED BY PATH so the whole governor is testable with a real scratch file the test
+ * writes (a synthetic `/proc/meminfo`) and with a path that does not exist at all — no
+ * platform detection is needed to exercise every branch.
+ *
+ * @param path  the meminfo-shaped file to read (`MEMINFO_PATH` in production)
+ * @return      the memory-budgeted job count (>= 1), or `NO_MEM_CAP`
+ * @since 0.3.1
+ */
+fn mem_job_cap_at(path: str) -> u64 {
+    let content = match teko::io::read_file(path) { str as s => s; error => return NO_MEM_CAP }
+    let avail = mem_available_kib(content)
+    if avail == 0 { return NO_MEM_CAP }
+    let cap = avail / MEM_PER_JOB_KIB
+    if cap < 1 { return 1 }
+    cap
+}
+
+/**
+ * mem_job_cap — `mem_job_cap_at(MEMINFO_PATH)`, the production reading of this host's
+ * memory-budgeted job count.
+ *
+ * @return  the memory-budgeted job count (>= 1), or `NO_MEM_CAP` when unmeasurable
+ * @since 0.3.1
+ */
+fn mem_job_cap() -> u64 { mem_job_cap_at(MEMINFO_PATH) }
+
+/**
+ * os_max_of — the effective job count for a machine reporting `cpu` processors and a
+ * memory budget for `mem` concurrent children: whichever is SMALLER, because either one
+ * alone is a real ceiling this run must not cross.
+ *
+ * PURE, so the two governors (CPU count, memory budget) are each tested through their own
+ * seam and this composition is tested directly against synthetic numbers, with no
+ * dependency on the host's real hardware.
+ *
+ * @param cpu  the OS-granted processor count (`nproc_rt()`)
+ * @param mem  the memory-budgeted job count (`mem_job_cap()`), or `NO_MEM_CAP` to abstain
+ * @return     `min(cpu, mem)`
+ * @since 0.3.1
+ */
+fn os_max_of(cpu: u64, mem: u64) -> u64 { if mem < cpu { mem } else { cpu } }
+
+/**
+ * os_max — the effective default/cap job count (>= 1): BOTH the default job count when a
+ * run names no number AND the cap an explicit `TEKO_*_JOBS` is clamped to (E1-C6). The
+ * SMALLER of what the OS grants in processors (`nproc_rt`) and what this host's AVAILABLE
+ * memory budgets at `MEM_PER_JOB_KIB` per child (`mem_job_cap`) — added because the
+ * CPU-only default let a test/regression job pool size itself past the runner's real
+ * memory ceiling: `TEKO_TEST_JOBS`'s default sharded every run 4-way on a 4-core CI runner
+ * with no regard for how much memory four concurrent heavy children actually had to share,
+ * and that is precisely the shape that was observed OOMing (SIGTERM/exit 143 mid-run) under
+ * the native self-host lane. Neither governor alone decided the old behaviour; the pair
+ * does now. On a host `/proc/meminfo` cannot answer (non-Linux), this is byte-for-byte the
+ * old CPU-only value — the governor never raises concurrency, only lowers it under real
+ * pressure, and abstains rather than guesses when it cannot measure that pressure at all.
+ *
+ * @return the effective job count, at least 1
+ * @since 0.3.1.0
+ */
+fn os_max() -> u64 { os_max_of(nproc_rt(), mem_job_cap()) }
+
+/**
+ * clamp_jobs — a requested job count confined to `[1, os_max()]`: the low bound keeps a run from
+ * asking for zero children, the high bound keeps an env override from exceeding the OS-granted
+ * parallelism (E1-C6). The default path never needs it (`os_max()` is already in range); it guards
+ * the ONE untrusted input, the `TEKO_*_JOBS` value a run wrote.
+ *
+ * @param v  the requested count (already parsed)
+ * @return   `v` clamped into `[1, os_max()]`
+ * @since 0.3.1.0
+ */
+fn clamp_jobs(v: u64) -> u64 {
+    let m = os_max()
+    if v < 1 { return 1 }
+    if v > m { return m }
+    v
+}
+
+/** REGR_JOBS_ENV — the env key a run overrides the OS-granted default through (12-Factor: the
+    concurrency of the machine is the machine's business, not the source's), clamped to `[1, os_max()]`. */
 const REGR_JOBS_ENV: str = "TEKO_REGR_JOBS"
 
 /**
- * regr_jobs_of — parse a `TEKO_REGR_JOBS` value into a job count, falling back to the default for
- * anything that is not a positive decimal number. A malformed value is a CONFIGURATION mistake, and
- * the safe reading of one is "the author did not mean zero children".
+ * regr_jobs_of — parse a `TEKO_REGR_JOBS` value into a job count, falling back to the OS-granted
+ * default for anything that is not a positive decimal number. A malformed value is a CONFIGURATION
+ * mistake, and the safe reading of one is "the author did not mean zero children".
  *
  * @param raw  the env value as written
- * @return     the parsed count, or `REGR_JOBS_DEFAULT` when it is empty, non-numeric or zero
+ * @return     the parsed count, or `os_max()` when it is empty, non-numeric or zero
  * @since 0.3.1
  */
-fn regr_jobs_of(raw: str) -> u64 { regr_jobs_of_default(raw, REGR_JOBS_DEFAULT) }
+fn regr_jobs_of(raw: str) -> u64 { regr_jobs_of_default(raw, os_max()) }
 
 /**
  * regr_jobs_of_default — the job-count parser with the FALLBACK named by the caller, so the test
@@ -288,7 +466,7 @@ fn regr_jobs_of_default(raw: str, fallback: u64) -> u64 {
  * @since 0.3.1
  */
 fn regr_jobs() -> u64 {
-    match teko::env::var(REGR_JOBS_ENV) { str as v => regr_jobs_of(v); error => REGR_JOBS_DEFAULT }
+    match teko::env::var(REGR_JOBS_ENV) { str as v => clamp_jobs(regr_jobs_of(v)); error => os_max() }
 }
 
 /**
@@ -2917,13 +3095,20 @@ fn regr_summary_line(files: u64, skips: u64, fails: u64) -> str {
  * line still accounts for every build the run paid for. A row the fold did not take (or whose group
  * did not build) reaches `tkr_ensure_artifact` exactly as it always did.
  *
+ * THE WORK TREE IS SCOPED (journal J3): `work` is `teko::test::scoped(REGR_WORK_DIR)`, so a `.tkt`
+ * that exercises this function directly (as `run_regression_sources_missing_path_is_a_manifest_error`
+ * does) gets its own `bin/.tkrun/<run>/<test>/bin/.regr-work`, never `rm_rf`-ing the real regression
+ * work tree a concurrent production run owns. Outside a test `teko::test::scope()` is empty and `work`
+ * is byte-for-byte `REGR_WORK_DIR`, so the production regression phase's own paths are unchanged —
+ * `merge_regression_coverage`'s literal `REGR_WORK_DIR` walk still finds every `.tkcov` this run wrote.
+ *
  * @param exe  the absolute path to this compiler binary (compiles each regressor / snippet)
  * @param m    the resolved manifest (its `test_regression_files`/`test_gate` drive the run)
  * @return     0 when the tier passes (or is advisory), 1 when a failure/missing-path gates it
  * @since 0.3.1
  */
 fn run_regression_sources(exe: str, m: Manifest) -> i32 {
-    let work = REGR_WORK_DIR
+    let work = teko::test::scoped(REGR_WORK_DIR)
     match rm_rf(work) { error => { }; null => { } }
     match mkdir_p(teko::str::concat(work, "/")) { error => { }; null => { } }
     let groups = regr_build_groups(exe, regr_plan_groups(m, work), work)
@@ -2937,12 +3122,15 @@ fn run_regression_sources(exe: str, m: Manifest) -> i32 {
         match teko::io::read_file(path) {
             error => {
                 teko::io::println($"teko: regression FAIL {path} — listed regressor file does not exist (M.3)")
+                if regression_journal_enabled() { teko::journal::note_row_fail(path, "listed regressor file does not exist (M.3)") }
                 fails = fails + 1
                 si = si + 1
             }
             str => {
+                if regression_journal_enabled() { teko::journal::note_row_begin(path) }
                 let fr = run_one_tkr(exe, dirname_of(path), basename_of(path), work ~ "/" ~ regr_sanitize(path), groups)
                 report_regressive(path, fr.outcome, fr.rows)
+                if regression_journal_enabled() { note_row_outcome(path, fr.outcome) }
                 regr_print_timings(fr.rows)
                 phase = phase_add(phase, rows_total(fr.rows))
                 if !fr.outcome.ok && !fr.outcome.skipped { fails = fails + 1 }
@@ -2952,8 +3140,43 @@ fn run_regression_sources(exe: str, m: Manifest) -> i32 {
         }
     }
     teko::io::println(regr_summary_line(m.test_regression_files.len, skips, fails) ~ $" ({regr_totals_text(phase)})")
+    if regression_journal_enabled() { teko::journal::note_row_end() }
     if fails > 0 && m.test_gate { return 1 }
     0
+}
+
+/**
+ * regression_journal_enabled — whether the journal wiring below should write for real: only when
+ * this call is NOT running inside a `#test`'s own capture (`teko::test::scope()` empty).
+ *
+ * PRODUCTION REGRESSION NEVER RUNS UNDER A `#test` CAPTURE. `run_regression_sources` is reached one
+ * of two ways: the real `teko test` driver (`run_regression_phase`, plain compiler-process control
+ * flow, no capture, `scope()` empty), or a `regression_test.tkt` fixture exercising this function
+ * DIRECTLY (`run_regression_sources_missing_path_is_a_manifest_error` and its neighbours) — which
+ * runs INSIDE this very compiler's own `#test` capture, `scope()` non-empty. Journaling the second
+ * case would write a fake finding into the real run's own `r0` segment for a label no real
+ * regression ever named — the same reasoning `teko::journal::scratch`'s own "outside a test" branch
+ * already states for scratch paths, applied to the journal wiring itself.
+ *
+ * @return true iff this is a real (non-test) regression run
+ * @since 0.3.1
+ */
+fn regression_journal_enabled() -> bool { teko::test::scope().len == 0 }
+
+/**
+ * note_row_outcome — translate one regressor file's already-decided `RegrOutcome` into the matching
+ * `teko::journal::note_row_*` call. `skip` is checked FIRST because a skip can carry `ok = true`
+ * (`regr_skip`'s own shape: "skipped for a missing capability" is not a failure), so testing `ok`
+ * first would misfile a skip as a pass.
+ *
+ * @param path  the regressor file's path (the row label)
+ * @param oc    its decided verdict
+ * @since 0.3.1
+ */
+fn note_row_outcome(path: str, oc: RegrOutcome) {
+    if oc.skipped { teko::journal::note_row_skip(path, oc.message); return }
+    if oc.ok { teko::journal::note_row_ok(path); return }
+    teko::journal::note_row_fail(path, oc.message)
 }
 
 /**

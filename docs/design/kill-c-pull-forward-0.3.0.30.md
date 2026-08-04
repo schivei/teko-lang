@@ -1,5 +1,7 @@
 # Kill-C PULL-FORWARD into 0.3.0.30 — own-backend maturity inventory + FFI own-native validation
 
+> **[NOTA]** — este documento descreve `lir_interp`/`minst_interp` como oráculos diferenciais ativos durante o bring-up do backend nativo. Ambos os oráculos foram desde então **retirados** (a mesma limpeza que retirou o interpretador da checker, #524 e seguintes); o restante deste documento é registro histórico do método usado, não descreve o estado atual do projeto.
+
 > **Status:** DESIGN-AHEAD, doc-only. **NOT implemented — the owner ratifies before code.** Addendum to
 > `docs/design/star-ref-and-ffi-0.3.1.md`. **Owner standing rule:** *everything that can be pulled
 > forward into .30 toward KILLING the C backend must be — to shrink the future waves.* This doc maps
@@ -28,7 +30,7 @@
 > `src/lir/lir.tks`, `` (32 honest-stops, dominated by the
 > `B1-fp` float family + i128), `src/backend/encode_*`, `objfile_{elf,macho,coff}.tks`,
 > `src/codegen/codegen.tks` (`cb_fn_name` the `__` mangle; `f.c_symbol` extern no-mangle at :7515),
-> the IMPORT convention `docs/design/drain-fase3-stdlib-order.md:127/136/146` + `vm-retirement.md:327`
+> the IMPORT convention `docs/design/drain-fase3-stdlib-order.md:127/136/146` + the interpreter-retirement decision
 > (`extern fn … = "SYM" from "lib"`), `src/build/regression.tks` + `docs/design/tkr-regression-format.md`,
 > `teko.tkp` `[tests]`/`[platforms]`.
 
@@ -222,7 +224,7 @@ explicit `= "SYM"` (import-symmetric) **or** flattened canonical default, §5.2.
 **The owner's steer:** for IMPORT (FFI-in) the convention is already ratified — the dev names the C
 symbol EXPLICITLY in the `extern` clause: **`[pub|exp] extern fn name(...) -> R = "c_symbol" from "lib"`**
 (verified: `drain-fase3-stdlib-order.md:127/136/146` — `pub extern fn sqrt(x: f64) -> f64 = "sqrt" from
-"m"`; `vm-retirement.md:327` — `exp extern fn cov_merge(path: str) -> bool = "tk_cov_merge" from
+"m"`; the interpreter-retirement decision — `exp extern fn cov_merge(path: str) -> bool = "tk_cov_merge" from
 "teko_rt"`; also `embed-vfs.md`). The C symbol lives in the **`= "SYM"`** clause, the library in
 **`from "lib"`**. **EXPORT is the mirror of this** — the same `= "SYM"` clause names the C symbol; **no
 new `#[export]` attribute.**

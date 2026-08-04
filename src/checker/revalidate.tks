@@ -51,7 +51,7 @@ fn validate_texpr(te: TExpr) -> error | null {
         TByteLit => check_node_type(te.type, Byte { })
         TCharLit => check_node_type(te.type, Char { })
         TBoolLit => check_node_type(te.type, Prim { kind = PrimKind::Bool })   // true/false (LEGISLATION §75)
-        TNullLit => match te.type { Optional => null; _ => error { message = "corrupt: `null` typed as a non-optional" } }   // null is `T?` (REBOOT §202)
+        TNullLit => match te.type { Null => null; Optional => null; _ => error { message = "corrupt: `null` typed as neither `Null` nor a legacy optional" } }   // 0.3.1: null is born `Null{}` (retire-Optional §2.1); the `Optional` arm is a tolerated legacy until O6
         TVar => null   // env-dependent → trust (type is present)
         TPathExpr => null   // Enum::Member — enum/ordinal resolved by the checker → trust
         TCall as c => validate_each(c.args)   // [callee re-derivation is env-dependent]
@@ -98,21 +98,6 @@ fn validate_texpr(te: TExpr) -> error | null {
             match f.receiver.type {   // struct-receiver invariant (field type is table-dependent → trust, as TVar/TCall)
                 Named => null
                 _ => error { message = "corrupt: field access on a non-struct receiver" }
-            }
-        }
-        TSafeFieldAccess as f => {   // recv?.field (REBOOT §203): optional receiver, optional result
-            match validate_texpr(f.receiver) { null => { }; error as e => return e }
-            match f.receiver.type {   // optional-receiver invariant
-                Optional => match te.type { Optional => null; _ => error { message = "corrupt: safe field access result is not optional" } }
-                _ => error { message = "corrupt: safe field access on a non-optional receiver" }
-            }
-        }
-        TCoalesce as c => {   // a ?? b (REBOOT §203): optional left; result is the unwrapped/optional type
-            match validate_texpr(c.left) { null => { }; error as e => return e }
-            match validate_texpr(c.right) { null => { }; error as e => return e }
-            match c.left.type {   // optional-left invariant (result type re-derived in the typer)
-                Optional => null
-                _ => error { message = "corrupt: `??` left operand is not optional" }
             }
         }
         TStructInit as s => {   // Name { f = v, … } (W4a): named-struct type + each field value valid

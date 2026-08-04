@@ -1,0 +1,73 @@
+/**
+ * churn — open and close allocating scopes AFTER the accumulator arm, each an if-arm-scoped slice
+ * accumulator that dies at its own exit edge and recycles the memory the earlier arm freed. A
+ * use-after-drop of the earlier arm's accumulator would read THIS churn's recycled bytes.
+ *
+ * @param n  the number of churn iterations
+ * @return   the count of churn iterations whose block-local accumulator fingerprinted exactly
+ */
+fn churn(n: i64) -> i64 {
+    mut hits: i64 = 0
+    mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        mut ys: []i64 = teko::list::empty()
+        ys = teko::list::push(ys, i)
+        ys = teko::list::push(ys, i + 100)
+        if ys[0 to u64] == i { hits = hits + 1 }
+        if ys[1 to u64] == i + 100 { hits = hits + 1 }
+        i++
+    }
+    hits
+}
+
+/**
+ * accumulate — build a BLOCK-LOCAL slice accumulator inside an `if` arm via top-of-block self-appends
+ * and fingerprint its elements with NON-escaping index comparisons (the oracle proves it block-local,
+ * so the A3 selector routes each grow to the arm's region, dropped at the arm's exit edge). The arm
+ * fingerprint must land — proving the accumulator was fully consumed before its region died.
+ *
+ * @param on  whether to enter the accumulating arm
+ * @return    7 when the arm-scoped accumulator read back exactly, else 0
+ */
+fn accumulate(on: bool) -> i64 {
+    mut fp: i64 = 0
+    if on {
+        mut xs: []i64 = teko::list::empty()
+        xs = teko::list::push(xs, 10)
+        xs = teko::list::push(xs, 20)
+        xs = teko::list::push(xs, 30)
+        if xs[0 to u64] == 10 { fp = fp + 1 }
+        if xs[1 to u64] == 20 { fp = fp + 2 }
+        if xs[2 to u64] == 30 { fp = fp + 4 }
+    }
+    fp
+}
+
+/**
+ * make_counter — return a closure that CAPTURES a call-built slice's element; the closure ESCAPES its
+ * frame (M2c). Its env allocates in the return region (or the leak-safe root fallback), so invoking
+ * it after this function returns — past the recycling churn — reads the captured value back exactly.
+ *
+ * @param base  the captured base value
+ * @return      a closure adding `base` to its argument
+ */
+fn make_counter(base: i64) -> (i64) -> i64 {
+    mut xs: []i64 = teko::list::empty()
+    xs = teko::list::push(xs, base)
+    let cap = xs[0 to u64]
+    (x: i64) => { cap + x }
+}
+
+/**
+ * run — fingerprint the arm-scoped accumulator (7) plus the post-arm churn hit count (8 = 4 churn
+ * iterations, 2 hits each) plus an ESCAPING closure invoked AFTER the churn (M2c). `115` (7 + 8 +
+ * add(100) where add captures 0) proves the arm accumulator held, the churn recycled cleanly, and the
+ * escaping closure's captured env survived to the post-return call.
+ *
+ * @return  the decimal fingerprint
+ */
+exp fn run() -> i64 {
+    let add = make_counter(0)
+    accumulate(true) + churn(4) + add(100)
+}

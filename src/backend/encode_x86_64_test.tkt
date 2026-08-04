@@ -64,10 +64,23 @@ fn ex_bad() -> EncInstX86 {
         has_branch = false
         branch_field_off = 0 to u32
         target = 0 to u32
-        has_reloc = false
-        reloc_field_off = 0 to u32
-        reloc_sym = "<error>"
-        reloc_kind = RelocKindX86::Plt32
+        reloc = null
+    }
+}
+
+/**
+ * ex_reloc_of — the relocation `enc` owes, unwrapped for a golden assertion, or
+ * a loud sentinel when it owes none (an impossible `field_off` and a `<none>`
+ * symbol, so the assertion that follows fails on the value instead of aborting
+ * the whole test on an un-narrowed union).
+ *
+ * @param EncInstX86 enc  the encoded instruction whose relocation is asserted
+ * @return EncRelocX86  the owed relocation, or the impossible-relocation sentinel
+ */
+fn ex_reloc_of(enc: EncInstX86) -> EncRelocX86 {
+    match enc.reloc {
+        EncRelocX86 as r => r
+        null => EncRelocX86 { field_off = 0xFFFFFFFF to u32; sym = "<none>"; kind = RelocKindX86::Abs64 }
     }
 }
 
@@ -362,10 +375,11 @@ fn ex_encodes_indirect_calls_and_return() {
 fn ex_encodes_the_direct_call_reloc() {
     let enc = ex_enc(call_x86("tk_exit", teko::list::empty(), ex_p(0), false, false))
     teko::assert::is_true(teko::crypto::to_hex(enc.bytes) == "e800000000")
-    teko::assert::is_true(enc.has_reloc)
-    teko::assert::is_true(enc.reloc_field_off == (1 to u32))
-    teko::assert::is_true(enc.reloc_sym == "tk_exit")
-    ex_assert_reloc_is_plt32(enc.reloc_kind)
+    teko::assert::is_true(enc.reloc != null)
+    let r = ex_reloc_of(enc)
+    teko::assert::is_true(r.field_off == (1 to u32))
+    teko::assert::is_true(r.sym == "tk_exit")
+    ex_assert_reloc_is_plt32(r.kind)
     teko::assert::is_false(enc.has_branch)
 }
 
@@ -380,11 +394,33 @@ fn ex_encodes_the_direct_call_reloc() {
 fn ex_encodes_the_rip_relative_lea_reloc() {
     let enc = ex_enc(lea_rip_x86(ex_p(0), "g", RelocKindX86::Pc32))
     teko::assert::is_true(teko::crypto::to_hex(enc.bytes) == "488d0500000000")
-    teko::assert::is_true(enc.has_reloc)
-    teko::assert::is_true(enc.reloc_field_off == (3 to u32))
-    teko::assert::is_true(enc.reloc_sym == "g")
-    ex_assert_reloc_is_pc32(enc.reloc_kind)
+    teko::assert::is_true(enc.reloc != null)
+    let r = ex_reloc_of(enc)
+    teko::assert::is_true(r.field_off == (3 to u32))
+    teko::assert::is_true(r.sym == "g")
+    ex_assert_reloc_is_pc32(r.kind)
     ex_assert_hex(lea_rip_x86(ex_p(10), "g", RelocKindX86::Pc32), "4c8d1500000000")
+}
+
+#test
+/**
+ * ex_a_non_relocating_instruction_owes_no_relocation_kind — the x86-64 twin of
+ * the arm64 regression that kills the inert relocation default: an instruction
+ * that references no symbol carries `reloc == null`, never a defaulted
+ * `RelocKindX86`. `plain_inst_x86` used to fill `reloc_kind =
+ * RelocKindX86::Plt32` — a CALL relocation — on every position-independent
+ * instruction, inert only because a separate `has_reloc` flag sat beside it.
+ * There is now nothing to default: a mov, a cmp, a ret and an intra-function
+ * `jmp` all owe `null`, and only `call rel32` and `lea rip`-relative owe a
+ * record at all (asserted by the two goldens above).
+ *
+ * @return void
+ */
+fn ex_a_non_relocating_instruction_owes_no_relocation_kind() {
+    teko::assert::is_true(ex_enc(mov_x86(ex_p(0), ex_p(1), true)).reloc == null)
+    teko::assert::is_true(ex_enc(cmp_x86(ex_p(0), ex_p(1), true)).reloc == null)
+    teko::assert::is_true(ex_enc(ret_x86()).reloc == null)
+    teko::assert::is_true(ex_enc(jmp_x86(0 to u32)).reloc == null)
 }
 
 #test

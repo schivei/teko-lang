@@ -299,7 +299,7 @@ fn fold_expr_propagates_overflow() {
  * @param value  the binding's typed initializer
  * @return       the typed `let` binding statement
  */
-fn cf_let(name: str, value: TExpr) -> TStatement { TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = name }; bound = value.type; value = value } }
+fn cf_let(name: str, value: TExpr) -> TStatement { TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = name }; bound = value.type; value = value; di_kind = parser::DiKind::None } }
 
 /**
  * cf_const_bind — a `const NAME = value` typed LOCAL binding (a `BindKind::Const` statement, distinct
@@ -309,7 +309,7 @@ fn cf_let(name: str, value: TExpr) -> TStatement { TBinding { kind = parser::Bin
  * @param value  the binding's typed initializer
  * @return       the typed local `const` binding statement
  */
-fn cf_const_bind(name: str, value: TExpr) -> TStatement { TBinding { kind = parser::BindKind::Const; target = parser::SimpleName { name = name }; bound = value.type; value = value } }
+fn cf_const_bind(name: str, value: TExpr) -> TStatement { TBinding { kind = parser::BindKind::Const; target = parser::SimpleName { name = name }; bound = value.type; value = value; di_kind = parser::DiKind::None } }
 
 /**
  * cf_mut — a `mut NAME = value` typed local binding, the boundary CF3 must never propagate (a later
@@ -319,7 +319,7 @@ fn cf_const_bind(name: str, value: TExpr) -> TStatement { TBinding { kind = pars
  * @param value  the binding's typed initializer
  * @return       the typed `mut` binding statement
  */
-fn cf_mut(name: str, value: TExpr) -> TStatement { TBinding { kind = parser::BindKind::Mut; target = parser::SimpleName { name = name }; bound = value.type; value = value } }
+fn cf_mut(name: str, value: TExpr) -> TStatement { TBinding { kind = parser::BindKind::Mut; target = parser::SimpleName { name = name }; bound = value.type; value = value; di_kind = parser::DiKind::None } }
 
 /**
  * cf_destructure — a `let { a; b } = value` typed destructure binding, whose names CF3 never records
@@ -329,7 +329,7 @@ fn cf_mut(name: str, value: TExpr) -> TStatement { TBinding { kind = parser::Bin
  * @param value  the aggregate initializer
  * @return       the typed destructure binding statement
  */
-fn cf_destructure(names: []str, value: TExpr) -> TStatement { TBinding { kind = parser::BindKind::Let; target = parser::DestructurePattern { names = names }; bound = value.type; value = value } }
+fn cf_destructure(names: []str, value: TExpr) -> TStatement { TBinding { kind = parser::BindKind::Let; target = parser::DestructurePattern { names = names }; bound = value.type; value = value; di_kind = parser::DiKind::None } }
 
 /**
  * cf_var — a typed local reference `TVar` of type `t` (a use site CF3 may substitute with the
@@ -466,7 +466,7 @@ fn cf3_destructure_shadow_kills_const() {
 
 /**
  * cf3_walk_covers_expr_and_stmt_arms — a coverage walk: a const local `a` is used inside every common
- * expression form (call, cast, unary, compare, index, struct-init, coalesce, `in`, interp with a
+ * expression form (call, cast, unary, compare, index, struct-init, `in`, interp with a
  * none-spec AND a dynamic spec, array) and every statement form (mut, simple + field assign, loop with
  * an init-recorded const + break/continue, defer, adopt, expr-stmt, return). The walk must complete
  * without a fold error, exercising the total `lp_expr`/`lp_stmt` rewrite.
@@ -480,7 +480,6 @@ fn cf3_walk_covers_expr_and_stmt_arms() {
     let cmp_use = te(TCompare { first = cf_var("a", u64t()); rest = teko::list::push(teko::list::empty(), TCmpTerm { op = lexer::TokenKind::Lt; operand = cf_num(1000, u64t()) }) }, boolt())
     let index_use = te(TIndex { receiver = cf_var("arr", Slice { element = u64t() }); index = cf_var("a", u64t()) }, u64t())
     let struct_use = te(TStructInit { field_names = teko::list::push(teko::list::empty(), "v"); field_vals = teko::list::push(teko::list::empty(), cf_var("a", u64t())) }, Named { name = "N" })
-    let coalesce_use = te(TCoalesce { left = cf_var("o", Optional { inner = u64t() }); right = cf_var("a", u64t()) }, u64t())
     let in_use = te(TInExpr { lhs = cf_var("a", u64t()); elems = teko::list::push(teko::list::empty(), cf_num(1, u64t())) }, boolt())
     let none_spec = TFSpec { kind = TFSpecNone { } }
     let interp_use = te(TInterp { pieces = teko::list::push(teko::list::push(teko::list::empty(), "x"), ""); holes = teko::list::push(teko::list::empty(), cf_var("a", u64t())); specs = teko::list::push(teko::list::empty(), none_spec) }, strt())
@@ -488,7 +487,6 @@ fn cf3_walk_covers_expr_and_stmt_arms() {
     let interp_dyn = te(TInterp { pieces = teko::list::push(teko::list::push(teko::list::empty(), "y"), ""); holes = teko::list::push(teko::list::empty(), cf_var("a", u64t())); specs = teko::list::push(teko::list::empty(), dyn_spec) }, strt())
     let array_use = te(TArrayLit { elements = teko::list::push(teko::list::empty(), TArrayElem { is_spread = false; expr = cf_var("a", u64t()) }) }, Slice { element = u64t() })
     let field_use = te(TFieldAccess { receiver = cf_var("s", Named { name = "N" }); field = "v" }, u64t())
-    let safe_use = te(TSafeFieldAccess { receiver = cf_var("o", Optional { inner = Named { name = "N" } }); field = "v" }, Optional { inner = u64t() })
 
     mut body: []TStatement = teko::list::push(teko::list::empty(), cf_let("a", cf_num(255, u64t())))
     body = teko::list::push(body, cf_mut("m", cf_num(0, u64t())))
@@ -500,12 +498,10 @@ fn cf3_walk_covers_expr_and_stmt_arms() {
     body = teko::list::push(body, texpr_stmt(cmp_use))
     body = teko::list::push(body, texpr_stmt(index_use))
     body = teko::list::push(body, texpr_stmt(struct_use))
-    body = teko::list::push(body, texpr_stmt(coalesce_use))
     body = teko::list::push(body, texpr_stmt(in_use))
     body = teko::list::push(body, texpr_stmt(interp_use))
     body = teko::list::push(body, texpr_stmt(interp_dyn))
     body = teko::list::push(body, texpr_stmt(array_use))
-    body = teko::list::push(body, texpr_stmt(safe_use))
     body = teko::list::push(body, texpr_stmt(te(TBorrow { operand = cf_var("m", u64t()) }, Reference { inner = u64t() })))
     mut loopbody: []TStatement = teko::list::push(teko::list::empty(), texpr_stmt(cf_bin(lexer::TokenKind::Plus, cf_var("li", u64t()), cf_num(0, u64t()), u64t())))
     loopbody = teko::list::push(loopbody, TBreakStmt { label = "" })

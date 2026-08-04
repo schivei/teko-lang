@@ -64,7 +64,7 @@ fn lam_collect_descends_loop_init() {
     mut refs: []str = teko::list::empty()
     mut bound: []str = teko::list::empty()
     mut writes: []str = teko::list::empty()
-    let ib: parser::Statement = parser::Binding { kind = parser::BindKind::Mut; target = parser::SimpleName { name = "_hi" }; has_type = false; type_ann = named_t("void"); is_ref = false; value = e_var("n") }
+    let ib: parser::Statement = parser::Binding { kind = parser::BindKind::Mut; target = parser::SimpleName { name = "_hi" }; has_type = false; type_ann = named_t("void"); is_ref = false; value = e_var("n"); di_kind = parser::DiKind::None }
     let init: []parser::Statement = teko::list::push(teko::list::empty(), ib)
     let brk: []parser::Statement = teko::list::push(teko::list::empty(), parser::BreakStmt { label = "" })
     let loopnode: parser::Statement = parser::LoopStmt { label = ""; init = init; body = brk }
@@ -410,9 +410,9 @@ fn splits_and_recovers_a_generic_instance_names_base() {
 fn resolves_ptr_generic() {
     let ptr_i64 = parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = "ptr" }) }; args = teko::list::push(teko::list::empty(), ttype_named("i64")) }
     let pi = match resolve_type(ptr_i64, empty_table(), "") { Type as t => t; error => { teko::assert::is_true(false); return } }
-    // STRUCTURE (VM-safe): ptr<i64> → Ptr{inner present = i64}; opaque ptr = Ptr{inner null}; distinct.
-    // (exact `ptr_i64`/`ptr<i64>` mangle/render is verified via real codegen, not here — the VM drops
-    // a self-recursive match arm's string prefix; see selfhost-vm-perf.)
+    // STRUCTURE (interpreter-safe): ptr<i64> → Ptr{inner present = i64}; opaque ptr = Ptr{inner null}; distinct.
+    // (exact `ptr_i64`/`ptr<i64>` mangle/render is verified via real codegen, not here — the interpreter drops
+    // a self-recursive match arm's string prefix; see selfhost-interp-perf.)
     teko::assert::is_true(match pi { Ptr as p => match p.inner { null => false; Type as t => match t { Prim => true; _ => false } }; _ => false })
     teko::assert::is_true(type_eq(pi, pi))
     let bare = match resolve_type(ttype_named("ptr"), empty_table(), "") { Type as t => t; error => { teko::assert::is_true(false); return } }
@@ -424,7 +424,7 @@ fn resolves_ptr_generic() {
 // MEM Step 0 — the checker ESCAPE GATE. A `Ref<T>` is memory-safe BY CONSTRUCTION: the ONLY
 // permitted flow is PARAMETER PASS-DOWN. These tests drive the checker functions DIRECTLY,
 // asserting each forbidden position yields `error` and the allowed forms still succeed.
-// Structure/error-only assertions (VM-safe; no message-string match — the VM drops a
+// Structure/error-only assertions (interpreter-safe; no message-string match — the interpreter drops a
 // self-recursive match arm's string prefix; mirrors resolves_ref_generic's discipline).
 // ---------------------------------------------------------------------------
 
@@ -435,29 +435,13 @@ fn ref_te_of(inner: parser::TypeExpr) -> parser::TypeExpr {
 // a `Ref<NAME>` type-expr over a plain named type.
 fn ref_te(name: str) -> parser::TypeExpr { ref_te_of(ttype_named(name)) }
 
-// (MEM Step 0, R2) NOT NULLABLE — `Ref<…>?` is an error.
-// VM NOTE: a CONSTRUCTED `Ref<value>` cannot be discriminated in the VM (the VM's transparent-
-// field-descent collapses a single-field wrapper to its inner — and a constructed Reference VALUE
-// matched in a multi-arm match is unreliable), so an isolated `Ref<i64>?` rejection (driven by the
-// OptionalType arm's `Reference => error`) is observable only NATIVELY (the C twin's
-// `in.tag == TK_TYPE_REF` check + the native self-host enforce it). To assert the OPTIONAL position
-// is gated in the VM too, we use a CONSTRUCTION-REJECTED inner (`Ref<Ref<i64>>`): the inner
-// `Ref<i64>` resolves, then R1 rejects `Ref<Ref<…>>` at CONSTRUCTION (VM-reliable — matching a
-// resolved Reference type-VALUE in resolve_generic_inst), so the error propagates out of the
-// OptionalType arm before it ever needs to match a constructed Reference.
-#test
-fn mem_ref_not_nullable() {
-    let ref_opt = parser::OptionalType { inner = ref_te_of(ref_te("i64")) }   // Ref<Ref<i64>>?
-    teko::assert::is_true(match resolve_type(ref_opt, empty_table(), "") { error => true; _ => false })
-}
-
 #test
 /**
  * (MEM Step 0, R4) NOT a STRUCT FIELD — a `struct { r: Ref<…> }` is rejected at collect
  * (validate_type_decls); a struct with a scalar field collects fine.
  *
- * VM NOTE (see R2): the rejected field uses a CONSTRUCTION-REJECTED inner type (`Ref<Ref<i64>>`,
- * built by `ref_te_of(ref_te("i64"))` below) so R1's VM-reliable rejection drives the collect
+ * interpreter NOTE (see R2): the rejected field uses a CONSTRUCTION-REJECTED inner type (`Ref<Ref<i64>>`,
+ * built by `ref_te_of(ref_te("i64"))` below) so R1's interpreter-reliable rejection drives the collect
  * error; the value-inner field (`Ref<i64>`) is instead rejected NATIVELY by the C twin's
  * `tag == TK_TYPE_REF` check in the bare-position field validation.
  *
@@ -481,7 +465,7 @@ fn mem_ref_not_struct_field() {
 }
 
 // (MEM Step 0, R4) NOT a SLICE ELEMENT / VARIANT MEMBER — `[]Ref<…>` and `Ref<…> | T` reject.
-// VM NOTE (see R2): a CONSTRUCTION-REJECTED inner (`Ref<Ref<i64>>`) so R1's VM-reliable rejection
+// interpreter NOTE (see R2): a CONSTRUCTION-REJECTED inner (`Ref<Ref<i64>>`) so R1's interpreter-reliable rejection
 // drives the error out of the SliceType / UnionType arm; the value-inner element/member
 // (`[]Ref<i64>` / `Ref<i64> | T`) is rejected NATIVELY by the C twin's `el.tag == TK_TYPE_REF` /
 // `m.tag == TK_TYPE_REF` checks.
@@ -510,12 +494,12 @@ fn bind_pattern_explicit_type_args_resolves_instance() {
 }
 
 // ---------------------------------------------------------------------------
-// Group K: monomorphize (S4b crumb 2c) — direct VM coverage of the mono walk.
+// Group K: monomorphize (S4b crumb 2c) — direct coverage of the mono walk.
 // Build typed programs by hand (a generic TFunction template + non-generic callers /
 // virtual-main statements), call monomorphize, and assert the generic is DROPPED and a
 // stamped concrete copy (idg__g__<arg>) appears with the right return type. The generic
 // bodies + caller bodies span varied TExprKind / TStatement cases so the total walk and
-// both driver phases (seed collection + fixpoint stamping) execute on the VM.
+// both driver phases (seed collection + fixpoint stamping) execute natively (`teko test`).
 // ---------------------------------------------------------------------------
 
 // a typed VAR expr of a given type.
@@ -552,7 +536,7 @@ fn find_titem_fn(prog: TProgram, name: str) -> bool {
     }
     false
 }
-// is there a stamped instance of `bare` (a fn whose name contains "<bare>__g__")? VM-robust:
+// is there a stamped instance of `bare` (a fn whose name contains "<bare>__g__")? interpreter-robust:
 // it checks the synthetic `__g__` infix, not the full type-arg spelling.
 fn has_stamped_instance(prog: TProgram, bare: str) -> bool {
     let needle = teko::str::concat(bare, "__g__")
@@ -621,7 +605,7 @@ fn mono_slice_and_optional_mangle() {
     // a Slice TYPE-ARG (T bound to []i64) drives the slice_<elem> mangle branch in mono_type_mangle:
     // fn idh<T>(x: T) -> T called with arg of type []i64 → T = []i64 → instance idh__g__slice_i64.
     // (The exact slice_ spelling depends on a recursive-match string compose; assert the stamped
-    // instance EXISTS via the synthetic `__g__` infix — VM-robust, and still exercises the branch.)
+    // instance EXISTS via the synthetic `__g__` infix — interpreter-robust, and still exercises the branch.)
     let hbody = teko::list::push(teko::list::empty(), treturn(tvar("x", Named { name = "T" })))
     let idh = gfn("idh", named_t("T"), Named { name = "T" }, hbody)
     let slice_arg = tvar("s", Slice { element = i64t() })
@@ -640,7 +624,7 @@ fn mono_slice_and_optional_mangle() {
     teko::assert::is_true(teko::runtime::str_eq(mono_type_mangle(Void { }), "void"))
     teko::assert::is_true(teko::runtime::str_eq(mono_type_mangle(Ptr { inner = null }), "ptr"))
     teko::assert::is_true(teko::runtime::str_eq(mono_type_mangle(Uptr { }), "uptr"))
-    teko::assert::is_true(teko::str::len(mono_type_mangle(Reference { inner = i64t() })) > 0)   // (MEM-1b) recursive mangle — len-only (VM prefix-drop)
+    teko::assert::is_true(teko::str::len(mono_type_mangle(Reference { inner = i64t() })) > 0)   // (MEM-1b) recursive mangle — len-only (interpreter prefix-drop)
     teko::assert::is_true(teko::runtime::str_eq(mono_type_mangle(Named { name = "Foo" }), "Foo"))
 }
 
@@ -648,7 +632,7 @@ fn mono_slice_and_optional_mangle() {
 fn mono_walk_covers_node_kinds() {
     // a generic fn whose body + a non-generic caller body together exercise many TExprKind /
     // TStatement walk cases (binary, compare, if, cast, field-access, struct-init, interp, in,
-    // array, coalesce, safe-field, unary, loop, assign, defer, break/continue), all under the
+    // array, unary, loop, assign, defer, break/continue), all under the
     // total rewrite walk. The generic call inside drives stamping.
     let idg = gfn("idg", named_t("T"), Named { name = "T" }, teko::list::push(teko::list::empty(), treturn(tvar("x", Named { name = "T" }))))
 
@@ -660,7 +644,6 @@ fn mono_walk_covers_node_kinds() {
     let cmp = TExpr { kind = TCompare { first = n; rest = teko::list::push(teko::list::empty(), cmpterm) }; type = boolt(); line = 0; col = 0 }
     let un = TExpr { kind = TUnary { op = lexer::TokenKind::Minus; operand = n }; type = i64t(); line = 0; col = 0 }
     let cast = TExpr { kind = TCast { expr = n }; type = u8t(); line = 0; col = 0 }
-    let cor = TExpr { kind = TCoalesce { left = tvar("o", Optional { inner = i64t() }); right = tnum(0) }; type = i64t(); line = 0; col = 0 }
     let arr = TExpr { kind = TArrayLit { elements = teko::list::push(teko::list::empty(), TArrayElem { is_spread = false; expr = tnum(1) }) }; type = Slice { element = i64t() }; line = 0; col = 0 }
     let interp = TExpr { kind = TInterp { pieces = teko::list::push(teko::list::push(teko::list::empty(), "v"), ""); holes = teko::list::push(teko::list::empty(), n); specs = teko::list::push(teko::list::empty(), TFSpec { kind = TFSpecNone { } }) }; type = strt(); line = 0; col = 0 }
     let inx = TExpr { kind = TInExpr { lhs = n; elems = teko::list::push(teko::list::empty(), tnum(2)) }; type = boolt(); line = 0; col = 0 }
@@ -669,10 +652,9 @@ fn mono_walk_covers_node_kinds() {
     let genstamp = tcall1("idg", tnum(5), i64t())   // drives stamping from within the walk
 
     // statements: binding, assign, expr, loop (with break/continue), defer, return.
-    mut body: []TStatement = teko::list::push(teko::list::empty(), TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "a" }; bound = i64t(); value = bin })
+    mut body: []TStatement = teko::list::push(teko::list::empty(), TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "a" }; bound = i64t(); value = bin; di_kind = parser::DiKind::None })
     body = teko::list::push(body, TAssign { kind = parser::AssignKind::Simple; name = "a"; op = lexer::TokenKind::Assign; bound = i64t(); value = un; deref = false; target = no_texpr() })
     body = teko::list::push(body, texpr_stmt(cast))
-    body = teko::list::push(body, texpr_stmt(cor))
     body = teko::list::push(body, texpr_stmt(arr))
     body = teko::list::push(body, texpr_stmt(interp))
     body = teko::list::push(body, texpr_stmt(inx))
@@ -707,7 +689,7 @@ fn t_node_init(val: TExpr) -> TExpr {
 // a `let n = <value>` binding (not const, not discard) to a SimpleName — returned as the raw
 // TBinding (the codegen's emit_binding receives this same destructured node).
 fn t_let(name: str, value: TExpr) -> TBinding {
-    TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = name }; bound = value.type; value = value }
+    TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = name }; bound = value.type; value = value ; di_kind = parser::DiKind::None }
 }
 // `n.val` typed as i64 (a SCALAR field read — a pure copy, so the receiver does not escape).
 fn t_field_i64(recv_name: str, field: str) -> TExpr {
@@ -766,27 +748,6 @@ fn escape_tail_implicit_return_rebox_is_escaping() {
     teko::assert::is_true(!binding_is_frame_local(esc, binding))   // ⇒ NOT frame-local (routes to root)
 }
 
-#test
-fn escape_tail_safe_field_coalesce_is_escaping() {
-    // fn f() -> Node { let n = Node{…}; (n.next?.next) ?? other }
-    // The implicit-return tail reads `n.next` (a NON-scalar interior pointer) via a safe-field
-    // access whose receiver is a non-scalar field read, then COALESCES the (non-scalar) result —
-    // so `n` ESCAPES. (Reproducer A: `?.` + `??` in the implicit tail.) The safe-field RESULT type
-    // is kept NOMINAL (Node, not Optional) to dodge the VM single-field-wrapper-descent landmine
-    // [memory: VM conflates Ref/Ptr/Optional/Slice in `match`]; the native engine handles either,
-    // and what the escape check needs is only that the result is NON-scalar.
-    let binding = t_let("n", t_node_init(tnum(5)))   // binding does NOT read `n` — only the tail does
-    let nnext = t_field_node("n", "next")   // n.next : Node (non-scalar interior pointer)
-    let sfa = TExpr { kind = TSafeFieldAccess { receiver = nnext; field = "next" }; type = Named { name = "Node" }; line = 0; col = 0 }
-    let tail = TExpr { kind = TCoalesce { left = sfa; right = tvar("other", Named { name = "Node" }) }; type = Named { name = "Node" }; line = 0; col = 0 }
-    mut body: []TStatement = teko::list::push(teko::list::empty(), binding)
-    body = teko::list::push(body, texpr_stmt(tail))   // implicit-return tail (no `return`)
-    let f = plainfn("f", Named { name = "Node" }, body)
-    let esc = fn_escaping_vars(f)
-    teko::assert::is_true(str_set_has(esc, "n"))   // tail value escapes ⇒ `n` escapes
-    teko::assert::is_true(!binding_is_frame_local(esc, binding))
-}
-
 // =========================================================================
 // S2 — THE PER-BLOCK ESCAPE CHECK (escape.tks::binding_is_block_local). A binding declared in a
 // scope-introducing BLOCK may be freed at the block's exit edges ONLY when every read of it in the
@@ -811,6 +772,29 @@ fn block_local_read_only_inside_block_is_block_local() {
     let f = plainfn("f", i64t(), body)
     let esc = fn_escaping_vars(f)
     // n is NOT function-escaping (only a scalar copy is read) AND only read inside the loop body.
+    teko::assert::is_true(binding_is_block_local(esc, f.body, loopbody, false, binding))
+}
+
+#test
+fn block_local_boxed_union_binding_is_block_local() {
+    mut members: []Type = teko::list::push(teko::list::empty(), Null { })
+    members = teko::list::push(members, Named { name = "Node" })
+    let union_t: Type = Variant { members = members }
+    let binding = TBinding {
+        kind = parser::BindKind::Let
+        target = parser::SimpleName { name = "n" }
+        bound = union_t
+        value = t_node_init(tnum(5)); di_kind = parser::DiKind::None
+    }
+    mut loopbody: []TStatement = teko::list::push(teko::list::empty(), binding)
+    loopbody = teko::list::push(loopbody, t_let("g", t_field_i64("n", "val")))
+    loopbody = teko::list::push(loopbody, TBreakStmt { label = "" })
+    let loopstmt = TLoopStmt { label = ""; init = teko::list::empty(); body = loopbody }
+    mut body: []TStatement = teko::list::push(teko::list::empty(), t_let("t", t_node_init(tnum(0))))
+    body = teko::list::push(body, loopstmt)
+    body = teko::list::push(body, treturn(t_field_i64("t", "val")))
+    let f = plainfn("f", i64t(), body)
+    let esc = fn_escaping_vars(f)
     teko::assert::is_true(binding_is_block_local(esc, f.body, loopbody, false, binding))
 }
 
@@ -960,7 +944,7 @@ fn trait_is_not_instantiable() {
     // `Stamp { at = 1 }` — a trait literal is rejected (derive it instead).
     let tr = trait_item("Stamp", tr_fields1("at"), teko::list::empty())
     let lit = ek(parser::StructLit { type_path = path1("Stamp"); type_args = teko::list::empty(); field_names = teko::list::push(teko::list::empty(), "at"); field_vals = teko::list::push(teko::list::empty(), e_num(1)) })
-    let bind_v = parser::Binding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "v" }; has_type = false; type_ann = named_t("i64"); is_ref = false; value = lit }
+    let bind_v = parser::Binding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "v" }; has_type = false; type_ann = named_t("i64"); is_ref = false; value = lit; di_kind = parser::DiKind::None }
     teko::assert::is_true(!tr_program_ok(items2(tr, parser::Item { content = bind_v; namespace = ""; file = "" })))
 }
 
@@ -977,7 +961,7 @@ fn tr_generic_fn(name: str, trait_name: str, body: []parser::Statement) -> parse
     deriver value to feed a generic-fn call). */
 fn tr_let_struct(bind: str, type_name: str, field: str) -> parser::Item {
     let lit = ek(parser::StructLit { type_path = path1(type_name); type_args = teko::list::empty(); field_names = teko::list::push(teko::list::empty(), field); field_vals = teko::list::push(teko::list::empty(), e_num(0)) })
-    let b = parser::Binding { kind = parser::BindKind::Let; target = parser::SimpleName { name = bind }; has_type = false; type_ann = named_t("i64"); is_ref = false; value = lit }
+    let b = parser::Binding { kind = parser::BindKind::Let; target = parser::SimpleName { name = bind }; has_type = false; type_ann = named_t("i64"); is_ref = false; value = lit; di_kind = parser::DiKind::None }
     parser::Item { content = b; namespace = ""; file = "" }
 }
 
@@ -1001,7 +985,7 @@ fn trait_struct_as_dynamic_value_is_error() {
     let tr = trait_item("Need", teko::list::empty(), list1(iface_method("need")))
     let dv = deriver_struct_item("P", tr_fields1("own"), list1(impl_method("need", parser::Visibility::Private)), slist1("Need"))
     let mk = tr_let_struct("p", "P", "own")
-    let bind_s = parser::Binding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "s" }; has_type = true; type_ann = named_t("Need"); is_ref = false; value = e_var("p") }
+    let bind_s = parser::Binding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "s" }; has_type = true; type_ann = named_t("Need"); is_ref = false; value = e_var("p"); di_kind = parser::DiKind::None }
     let widen = parser::Item { content = bind_s; namespace = ""; file = "" }
     mut items: []parser::Item = teko::list::push(teko::list::empty(), tr)
     items = teko::list::push(items, dv)
@@ -1820,4 +1804,251 @@ fn f64_to_f32_follows_ieee_and_never_panics() {
     mut under: f64 = 1.0e-300
     let flushed: f32 = under to f32
     teko::assert::is_true(flushed == 0.0)
+}
+
+#test
+/**
+ * collect_unused_fn_warnings_flags_a_dead_private_function — a private function never called
+ * anywhere in the program is reported, by name, exactly like `initanalysis.tks`'s stderr line.
+ */
+fn collect_unused_fn_warnings_flags_a_dead_private_function() {
+    let body: []TStatement = teko::list::push(teko::list::empty(), treturn(tnum(1)))
+    let prog = TProgram { items = teko::list::push(teko::list::empty(), plainfn("dead_fn", i64t(), body)) }
+    let warnings = collect_unused_fn_warnings(prog)
+    teko::assert::eq_u64(warnings.len, 1)
+    teko::assert::str_contains(warnings[0], "unused private function")
+    teko::assert::str_contains(warnings[0], "dead_fn")
+}
+
+#test
+/**
+ * collect_unused_fn_warnings_spares_a_called_function — a private function CALLED from another
+ * function's body is not flagged (mirrors `used_in_program`'s own predicate): `main` calls
+ * `caller`, `caller` calls `callee`, so all three are either exempt (`main`) or used, leaving zero
+ * findings.
+ */
+fn collect_unused_fn_warnings_spares_a_called_function() {
+    let callee_body: []TStatement = teko::list::push(teko::list::empty(), treturn(tnum(1)))
+    let caller_body: []TStatement = teko::list::push(teko::list::empty(), texpr_stmt(tcall1("callee", tnum(0), i64t())))
+    let main_body: []TStatement = teko::list::push(teko::list::empty(), texpr_stmt(tcall1("caller", tnum(0), i64t())))
+    mut items: []TItem = teko::list::empty()
+    items = teko::list::push(items, plainfn("callee", i64t(), callee_body))
+    items = teko::list::push(items, plainfn("caller", i64t(), caller_body))
+    items = teko::list::push(items, plainfn("main", i64t(), main_body))
+    let warnings = collect_unused_fn_warnings(TProgram { items = items })
+    teko::assert::eq_u64(warnings.len, 0)
+}
+
+#test
+/**
+ * collect_redundant_cast_warnings_flags_a_same_type_cast — the D1 class-1 finding: a cast whose
+ * target equals its own operand's type, buried inside an expression statement.
+ */
+fn collect_redundant_cast_warnings_flags_a_same_type_cast() {
+    let cast = TExpr { kind = TCast { expr = tvar("x", u32t()) }; type = u32t(); line = 5; col = 3 }
+    let body: []TStatement = teko::list::push(teko::list::empty(), texpr_stmt(cast))
+    let prog = TProgram { items = teko::list::push(teko::list::empty(), plainfn("f1", i64t(), body)) }
+    let warnings = collect_redundant_cast_warnings(prog)
+    teko::assert::eq_u64(warnings.len, 1)
+    teko::assert::str_contains(warnings[0], "redundant cast")
+    teko::assert::str_contains(warnings[0], "provable no-op")
+}
+
+#test
+/**
+ * collect_redundant_cast_warnings_flags_a_redundant_widen_in_a_binary — the D1 class-3 finding: an
+ * arithmetic `+` whose left operand is a `to u32` cast on a `u8` value while the right operand is
+ * already `u32` — the W-RULE joins to `u32` either way, so the cast is provably a no-op.
+ */
+fn collect_redundant_cast_warnings_flags_a_redundant_widen_in_a_binary() {
+    let cast = TExpr { kind = TCast { expr = tvar("x", u8t()) }; type = u32t(); line = 8; col = 4 }
+    let bin = TExpr { kind = TBinary { op = lexer::TokenKind::Plus; left = cast; right = tvar("y", u32t()) }; type = u32t(); line = 8; col = 1 }
+    let body: []TStatement = teko::list::push(teko::list::empty(), texpr_stmt(bin))
+    let prog = TProgram { items = teko::list::push(teko::list::empty(), plainfn("f2", u32t(), body)) }
+    let warnings = collect_redundant_cast_warnings(prog)
+    teko::assert::eq_u64(warnings.len, 1)
+    teko::assert::str_contains(warnings[0], "redundant cast")
+}
+
+#test
+/**
+ * collect_redundant_cast_warnings_renders_the_innermost_type_through_a_synthetic_wrap — the
+ * `innermost_cast_type` regression: a `to u16` cast on a `u8` value, next to a `u32` sibling,
+ * WIDENS a second time (the arithmetic join is `u32`, wider than the cast's own `u16` target), so
+ * the typed tree carries a SYNTHETIC outer `to u32` wrap around the programmer's own `to u16`. The
+ * reported message must still name `u16` (what the source spells), never the synthetic `u32`.
+ */
+fn collect_redundant_cast_warnings_renders_the_innermost_type_through_a_synthetic_wrap() {
+    let inner_cast = TExpr { kind = TCast { expr = tvar("x", u8t()) }; type = u16t(); line = 12; col = 4 }
+    let outer_wrap = TExpr { kind = TCast { expr = inner_cast }; type = u32t(); line = 12; col = 4 }
+    let bin = TExpr { kind = TBinary { op = lexer::TokenKind::Plus; left = outer_wrap; right = tvar("y", u32t()) }; type = u32t(); line = 12; col = 1 }
+    let body: []TStatement = teko::list::push(teko::list::empty(), texpr_stmt(bin))
+    let prog = TProgram { items = teko::list::push(teko::list::empty(), plainfn("f3", u32t(), body)) }
+    let warnings = collect_redundant_cast_warnings(prog)
+    teko::assert::eq_u64(warnings.len, 1)
+    teko::assert::str_contains(warnings[0], "to u16")
+    teko::assert::str_absent(warnings[0], "to u32")
+}
+
+#test
+/**
+ * collect_redundant_cast_warnings_spares_a_genuine_narrowing_cast — a `to u8` cast on a `u32` value
+ * is a NARROWING (checked) conversion, never a D1 finding regardless of the sibling operand.
+ */
+fn collect_redundant_cast_warnings_spares_a_genuine_narrowing_cast() {
+    let cast = TExpr { kind = TCast { expr = tvar("x", u32t()) }; type = u8t(); line = 20; col = 4 }
+    let bin = TExpr { kind = TBinary { op = lexer::TokenKind::Plus; left = cast; right = tvar("y", u8t()) }; type = u8t(); line = 20; col = 1 }
+    let body: []TStatement = teko::list::push(teko::list::empty(), texpr_stmt(bin))
+    let prog = TProgram { items = teko::list::push(teko::list::empty(), plainfn("f4", u8t(), body)) }
+    teko::assert::eq_u64(collect_redundant_cast_warnings(prog).len, 0)
+}
+
+#test
+/**
+ * collect_warnings_combines_both_finding_kinds — a function that is ITSELF unused AND carries a
+ * redundant cast in its body reports BOTH findings, unused-fn first (`collect_warnings`'s own
+ * ordering contract).
+ */
+fn collect_warnings_combines_both_finding_kinds() {
+    let cast = TExpr { kind = TCast { expr = tvar("x", u32t()) }; type = u32t(); line = 1; col = 1 }
+    let body: []TStatement = teko::list::push(teko::list::empty(), texpr_stmt(cast))
+    let prog = TProgram { items = teko::list::push(teko::list::empty(), plainfn("noisy", i64t(), body)) }
+    let warnings = collect_warnings(prog)
+    teko::assert::eq_u64(warnings.len, 2)
+    teko::assert::str_contains(warnings[0], "unused private function")
+    teko::assert::str_contains(warnings[1], "redundant cast")
+}
+
+/**
+ * prog_from_module_src — lex + parse `src` as a MODULE (no loose statements) and flatten its
+ * declarations into a `parser::Program`, every item stamped `path` — the same shape
+ * `src/lsp/diagnostics.tks::module_items` builds for an open document, reused here so
+ * `collect_diagnostics_appends_a_collected_warning_after_an_error` drives the REAL end-to-end
+ * seam (lex → parse → `collect_diagnostics`) instead of a hand-built `TProgram`.
+ *
+ * @param src   the module source text
+ * @param path  the file path stamped onto every item
+ * @return      the flat program (empty items on a lex/parse fault — the caller expects clean text)
+ */
+fn prog_from_module_src(src: str, path: str) -> parser::Program {
+    let toks = match lexer::tokenize(src) { []lexer::Token as t => t; error => teko::list::empty() }
+    let m = match parser::parse_module(toks, 0) { parser::Parsed<parser::Module> as x => x.node; error => parser::Module { uses = teko::list::empty(); decls = teko::list::empty() } }
+    mut items: []parser::Item = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= m.decls.len { break }
+        items = match m.decls[i] {
+            parser::Function as f => teko::list::push(items, parser::Item { content = f; namespace = ""; file = path })
+            parser::TypeDecl as t => teko::list::push(items, parser::Item { content = t; namespace = ""; file = path })
+            parser::ConstDecl as c => teko::list::push(items, parser::Item { content = c; namespace = ""; file = path })
+        }
+        i = i + 1
+    }
+    parser::Program { items = items }
+}
+
+#test
+/**
+ * collect_diagnostics_appends_a_collected_warning_after_an_error — the crumb C regression named by
+ * the design doc (`docs/design/lsp-teko.md` §9.1): a program with ONE type error (an unknown
+ * parameter type) and ONE unused private function yields TWO diagnostics from `collect_diagnostics`
+ * — the error, THEN the warning — proving the checker's real declaration-boundary walk (not just
+ * the hand-built-tree unit tests above) actually wires `collect_warnings` in.
+ */
+fn collect_diagnostics_appends_a_collected_warning_after_an_error() {
+    let src = "pub fn bad(x: Bogus) -> i64 { return 0 }\nfn dead_leaf() -> i64 { return 1 }\n"
+    let diags = collect_diagnostics(prog_from_module_src(src, "warn.tks"))
+    teko::assert::eq_u64(diags.len, 2)
+    teko::assert::str_contains(diags[0], "Bogus")
+    teko::assert::str_contains(diags[1], "unused private function")
+    teko::assert::str_contains(diags[1], "dead_leaf")
+}
+
+#test
+/**
+ * to_diagnostic_parses_file_line_col_with_caller_known_severity — the crumb D happy path: a
+ * `file:line:col: msg` line, given its own file as the single candidate, resolves to a `Diagnostic`
+ * whose `file`/`line`/`col`/`message` are pulled straight out of the string and whose `severity` is
+ * EXACTLY the caller's `severity` argument, never re-derived from `message`'s own text.
+ */
+fn to_diagnostic_parses_file_line_col_with_caller_known_severity() {
+    let files = teko::list::push(teko::list::empty(), "foo.tks")
+    let d = to_diagnostic("foo.tks:3:5: unknown type: Bogus", files, DiagLevel::Error)
+    teko::assert::eq_str(d.file, "foo.tks")
+    teko::assert::eq_u64(d.line to u64, 3)
+    teko::assert::eq_u64(d.col to u64, 5)
+    teko::assert::eq_u64(d.end_line to u64, 3)
+    teko::assert::eq_u64(d.end_col to u64, 6)
+    teko::assert::eq_str(d.message, "unknown type: Bogus")
+    teko::assert::is_true(d.severity == DiagLevel::Error)
+}
+
+#test
+/**
+ * to_diagnostic_handles_a_positionless_finding_for_a_known_file — `diag_at`'s OTHER positioned shape
+ * (`file: msg`, no `line:col`, `diag_at`'s own `if line > 0` branch never taken) resolves the known
+ * `file` with `line`/`col` both 0, never dropping the finding.
+ */
+fn to_diagnostic_handles_a_positionless_finding_for_a_known_file() {
+    let files = teko::list::push(teko::list::empty(), "foo.tks")
+    let d = to_diagnostic("foo.tks: whole-file note", files, DiagLevel::Warning)
+    teko::assert::eq_str(d.file, "foo.tks")
+    teko::assert::eq_u64(d.line to u64, 0)
+    teko::assert::eq_u64(d.col to u64, 0)
+    teko::assert::eq_str(d.message, "whole-file note")
+    teko::assert::is_true(d.severity == DiagLevel::Warning)
+}
+
+#test
+/**
+ * to_diagnostic_falls_back_to_the_whole_line_for_an_unknown_file — a line naming none of the closed
+ * candidate `files` (or an empty candidate set) never gets silently dropped: the WHOLE line becomes
+ * the message at an unknown (`file = ""`, `line = 0`) position, `severity` still the caller's own.
+ */
+fn to_diagnostic_falls_back_to_the_whole_line_for_an_unknown_file() {
+    let d = to_diagnostic("some standalone diagnostic", teko::list::empty(), DiagLevel::Error)
+    teko::assert::eq_str(d.file, "")
+    teko::assert::eq_u64(d.line to u64, 0)
+    teko::assert::eq_str(d.message, "some standalone diagnostic")
+    teko::assert::is_true(d.severity == DiagLevel::Error)
+}
+
+#test
+/**
+ * program_files_collects_distinct_non_empty_files_in_first_seen_order — the closed candidate set
+ * `to_diagnostic` matches against: every DISTINCT non-empty `item.file`, first occurrence wins,
+ * duplicates dropped, an empty (single-file compile path) `file` never included.
+ */
+fn program_files_collects_distinct_non_empty_files_in_first_seen_order() {
+    mut items: []parser::Item = teko::list::empty()
+    items = teko::list::push(items, parser::Item { content = mk_fn("a", named_t("i64"), teko::list::empty()); namespace = ""; file = "a.tks" })
+    items = teko::list::push(items, parser::Item { content = mk_fn("b", named_t("i64"), teko::list::empty()); namespace = ""; file = "b.tks" })
+    items = teko::list::push(items, parser::Item { content = mk_fn("c", named_t("i64"), teko::list::empty()); namespace = ""; file = "a.tks" })
+    items = teko::list::push(items, parser::Item { content = mk_fn("d", named_t("i64"), teko::list::empty()); namespace = ""; file = "" })
+    let files = program_files(parser::Program { items = items })
+    teko::assert::eq_u64(files.len, 2)
+    teko::assert::eq_str(files[0], "a.tks")
+    teko::assert::eq_str(files[1], "b.tks")
+}
+
+#test
+/**
+ * collect_diagnostics_structured_stamps_real_severity_and_range — the crumb D end-to-end regression,
+ * driving the REAL lex → parse → `collect_diagnostics_structured` seam (mirroring
+ * `collect_diagnostics_appends_a_collected_warning_after_an_error`'s own harness): a program with ONE
+ * type error and ONE unused private function yields TWO `Diagnostic` values — the error stamped
+ * `DiagLevel::Error`, the warning stamped `DiagLevel::Warning` — proving severity is REAL, not a
+ * `"warning:"` text sniff, all the way from the checker's own pre-mono walk.
+ */
+fn collect_diagnostics_structured_stamps_real_severity_and_range() {
+    let src = "pub fn bad(x: Bogus) -> i64 { return 0 }\nfn dead_leaf() -> i64 { return 1 }\n"
+    let diags = collect_diagnostics_structured(prog_from_module_src(src, "warn.tks"))
+    teko::assert::eq_u64(diags.len, 2)
+    teko::assert::eq_str(diags[0].file, "warn.tks")
+    teko::assert::is_true(diags[0].severity == DiagLevel::Error)
+    teko::assert::str_contains(diags[0].message, "Bogus")
+    teko::assert::eq_str(diags[1].file, "warn.tks")
+    teko::assert::is_true(diags[1].severity == DiagLevel::Warning)
+    teko::assert::str_contains(diags[1].message, "unused private function")
+    teko::assert::str_contains(diags[1].message, "dead_leaf")
 }

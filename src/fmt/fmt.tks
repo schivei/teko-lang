@@ -12,8 +12,7 @@
 // AST stay untouched.
 //
 // PURE-TEKO, NO C TWIN (the teko::regex / teko::fs / teko::io precedent): this module is
-// corpus source, so BOTH engines get it automatically — the VM tree-walks it (the `.tkt`
-// gate) and every self-hosted binary compiles it natively. The C seed (main.c) only
+// corpus source, so every self-hosted binary compiles it natively automatically. The C seed (main.c) only
 // RECOGNIZES the subcommand and stops honestly (M.3) — the seed exists to bootstrap, not
 // to format.
 //
@@ -23,7 +22,7 @@
 //     (B.26), so fmt NEVER joins or splits lines — it re-indents and re-spaces them;
 //   * indentation is 4 spaces per unclosed `(`/`[`/`{` depth (leading closers dedent);
 //   * inter-token spacing is normalized (one space around binary operators, none inside
-//     parens, `, ` / `; ` / `: `, ` { ` braces, tight `.`/`::`/`?.`/`..`/postfix `?`);
+//     parens, `, ` / `; ` / `: `, ` { ` braces, tight `.`/`::`/`..`);
 //   * `<`/`>`/`<<`/`>>` are AMBIGUOUS at token level (generics vs comparison vs shift):
 //     their spacing preserves the source's tight/spaced choice — tight stays tight,
 //     spaced becomes exactly one space (idempotent both ways);
@@ -41,12 +40,6 @@
 // is an internal-error refusal, never a silent rewrite. Idempotence (fmt(fmt(x)) ==
 // fmt(x)) follows by construction: every emission decision depends only on the token
 // stream, the line structure, and per-side adjacency — all of which formatting fixes.
-//
-// CLI (run_cli): `teko fmt <path>…` rewrites files in place (prints each changed path);
-// `teko fmt --check <path>…` writes nothing, prints each UNformatted path and exits 1
-// when any exists (the CI gate). A path is a `.tks`/`.tkt` file or a directory walked
-// recursively (dot-entries skipped). `teko fmt -` (issue #229) reads the source from
-// stdin and writes the canonical result to stdout — no file is touched.
 
 use teko::lexer
 use teko::parser
@@ -456,11 +449,9 @@ fn gap(prev: FTok, cur: FTok, prev_unary: bool) -> u64 {
     if pp && (prev.text == "," || prev.text == ";") { return 1 }
     if (cp && cur.text == "::") || (pp && prev.text == "::") { return 0 }
     if (cp && cur.text == ".") || (pp && prev.text == ".") { return 0 }
-    if (cp && cur.text == "?.") || (pp && prev.text == "?.") { return 0 }
     if cp && (cur.text == ".." || cur.text == "..=") { return 0 }
     if pp && (prev.text == ".." || prev.text == "..=") { return 0 }
     if cp && (cur.text == "++" || cur.text == "--") { return 0 }   // postfix
-    if cp && cur.text == "?" { return 0 }   // postfix type suffix `T?`
     if prev_unary { return 0 }   // `!x`, `-x`, `~x`, `-(…)`
     if is_angle(cur) || is_angle(prev) {
         if cur.glued { return 0 }
@@ -669,10 +660,54 @@ pub fn format_source(source: str) -> str | error {
     out
 }
 
-// ---------------------------------------------------------------------------
-// CLI — `teko fmt [--check] <path>…`
-// ---------------------------------------------------------------------------
+/**
+ * FLAG_CHECK — the REPORT-ONLY mode flag: `teko fmt --check <path>…` lists every path that is
+ * not already canonical and writes nothing at all. Named once here so the argument parser and
+ * the usage page cannot drift apart.
+ *
+ * @since 0.3.1
+ */
+const FLAG_CHECK: str = "--check"
 
+/**
+ * FLAG_APPLY — the REWRITE mode flag: `teko fmt --apply <path>…` rewrites every unformatted
+ * file in place, which is what a bare `teko fmt <path>…` used to do. Explicit since the owner
+ * ruling of 2026-07-30 (*"Sim: fmt --apply explícito"*): in a dev-mode tool the destructive
+ * path must never be the shortest one to type, so rewriting is now asked for by name.
+ *
+ * @since 0.3.1
+ */
+const FLAG_APPLY: str = "--apply"
+
+/**
+ * STDIN_PATH — the operand that selects the stdin-to-stdout form, the one form that needs no
+ * mode: it writes to stdout and can touch no file, so there is nothing to guard.
+ *
+ * @since 0.3.1
+ */
+const STDIN_PATH: str = "-"
+
+/**
+ * FMT_HELP_CMD — the subcommand key `teko::build::print_help` prints the fmt usage page for.
+ *
+ * @since 0.3.1
+ */
+const FMT_HELP_CMD: str = "fmt"
+
+/**
+ * FmtMode — which of the two mutually exclusive fmt modes the arguments selected: `Check`
+ * (report, write nothing), `Apply` (rewrite in place), or `Unset` (no mode flag was given).
+ *
+ * @since 0.3.1
+ */
+type FmtMode = enum { Unset; Check; Apply }
+
+/**
+ * Is `name` a Teko source file this formatter owns (by extension)?
+ *
+ * @param name  a file name or path
+ * @return      true for `.tks` and `.tkt`, false for anything else
+ */
 fn is_teko_file(name: str) -> bool {
     teko::str::ends_with(name, ".tks") || teko::str::ends_with(name, ".tkt")
 }
@@ -734,29 +769,73 @@ fn run_stdin(check: bool) -> i32 {
 }
 
 /**
- * run_cli — argv is the FULL args (args[0]=program, args[1]="fmt"). Returns the exit code:
- * 0 ok; 1 = --check found unformatted files (or a `-` stdin input that would change); 2 =
- * usage/IO/parse error. A single `-` path switches to run_stdin (issue #229); mixing `-`
- * with other paths is rejected by collect_files (it is neither a directory nor a
- * .tks/.tkt file), which is an honest refusal rather than a silently ambiguous mode.
+ * The mode a command-line argument selects.
+ *
+ * @param arg  one argument from the fmt command line
+ * @return     `Check` for `--check`, `Apply` for `--apply`, `Unset` for anything else (which
+ *             the caller reads as a path)
+ */
+fn mode_of_flag(arg: str) -> FmtMode {
+    if arg == FLAG_CHECK { return FmtMode::Check }
+    if arg == FLAG_APPLY { return FmtMode::Apply }
+    FmtMode::Unset
+}
+
+/**
+ * THE GUARD: print the fmt usage page and yield the exit code of a run that named no mode.
+ *
+ * A command line with paths but no mode is answered with the help rather than with a guess.
+ * Guessing `--apply` is the behaviour this change removes: a whole tree rewritten with no flag
+ * and no confirmation. Guessing `--check` would be just as bad in the other direction — whoever
+ * relied on the old bare rewrite would stop rewriting and never be told.
+ *
+ * @return  2, the exit code of a run that produced no verdict
+ */
+fn print_help_without_a_mode() -> i32 {
+    teko::build::print_help(FMT_HELP_CMD)
+    2
+}
+
+/**
+ * run_cli — argv is the FULL args (args[0]=program, args[1]="fmt"). THE CONTRACT (owner ruling
+ * 2026-07-30, `--apply` explicit):
+ *
+ *   teko fmt --check <path>…   lists every unformatted path, writes nothing, exits 1 if any
+ *   teko fmt --apply <path>…   rewrites every unformatted file in place, listing each one
+ *   teko fmt <path>…           prints this usage page — a bare run NEVER rewrites
+ *   teko fmt -                 formats stdin to stdout, touching no file
+ *   teko fmt --check -         lists `<stdin>` and exits 1 when stdin would change
+ *
+ * A single `-` path switches to run_stdin (issue #229); mixing `-` with other paths is
+ * rejected by collect_files (it is neither a directory nor a .tks/.tkt file), which is an
+ * honest refusal rather than a silently ambiguous mode.
+ *
+ * @param args  the FULL argv (args[0] the program, args[1] "fmt")
+ * @return      0 ok; 1 = --check found unformatted files (or a `-` stdin input that would
+ *              change); 2 = usage (no mode, no path) / IO / parse error
  */
 pub fn run_cli(args: []str) -> i32 {
-    mut check = false
+    mut mode = FmtMode::Unset
     mut paths: []str = teko::list::empty()
     mut i: u64 = 2
     loop {
         if i >= args.len { break }
-        let a = args[i]
-        if a == "--check" { check = true } else { paths = teko::list::push(paths, a) }
+        let arg = args[i]
         i = i + 1
+        let selected = mode_of_flag(arg)
+        if selected == FmtMode::Unset {
+            paths = teko::list::push(paths, arg)
+            continue
+        }
+        mode = selected
     }
-    if paths.len == 1 && paths[0] == "-" {
-        return run_stdin(check)
+    if paths.len == 1 && paths[0] == STDIN_PATH {
+        return run_stdin(mode == FmtMode::Check)
     }
-    if paths.len == 0 {
-        teko::io::eprintln("teko fmt: pass a .tks/.tkt file, a directory, or - for stdin")
-        return 2
+    if mode == FmtMode::Unset || paths.len == 0 {
+        return print_help_without_a_mode()
     }
+    let check = mode == FmtMode::Check
     mut files: []str = teko::list::empty()
     mut pi: u64 = 0
     loop {

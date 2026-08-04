@@ -30,7 +30,7 @@ pub type TStrLit = struct { text: str }
 pub type TByteLit = struct { value: byte }
 pub type TCharLit = struct { bytes: str }   // c'x' — one UTF-8 codepoint; `.type` is `char`. Carries the raw UTF-8 bytes.
 pub type TBoolLit = struct { value: bool }   // `true`/`false` — `.type` is the bool prim (LEGISLATION §75)
-pub type TNullLit = struct { }   // `null` — `.type` is the inferred Optional (REBOOT_PLAN §202)
+pub type TNullLit = struct { }   // `null` — `.type` is `Null{}` (0.3.1 retire-Optional; was the inferred Optional sentinel, REBOOT_PLAN §202)
 pub type TBinary = struct { op: lexer::TokenKind; left: TExpr; right: TExpr }
 pub type TUnary = struct { op: lexer::TokenKind; operand: TExpr }
 pub type TCmpTerm = struct { op: lexer::TokenKind; operand: TExpr }
@@ -44,8 +44,6 @@ pub type TIfExpr = struct { cond: TExpr; then_blk: []TStatement; has_else: bool;
 pub type TMatchExpr = struct { subject: TExpr; arms: []TArm }
 pub type TCast = struct { expr: TExpr }   // `x to T` (C2): the cast's target IS this node's resolved `.type`
 pub type TFieldAccess = struct { receiver: TExpr; field: str }   // `x.field` (C3): `.type` is the field's resolved type (B.29 field-read)
-pub type TSafeFieldAccess = struct { receiver: TExpr; field: str }   // `recv?.field` (REBOOT_PLAN §203): optional receiver, `.type` is `(field)?`
-pub type TCoalesce = struct { left: TExpr; right: TExpr }   // `a ?? b` (REBOOT_PLAN §203): optional left, `.type` is the unwrapped/result type
 // `Name { f = v, … }` (W4a): `.type` is the named struct type; field_names/field_vals are
 // in the struct's DECLARED order (the checker reorders), so both backends lower identically.
 pub type TStructInit = struct { field_names: []str; field_vals: []TExpr }
@@ -106,15 +104,26 @@ pub type TLambda = struct { params: []TLambdaParam; body: []TStatement; captures
  */
 pub type TBorrow = struct { operand: TExpr }
 
-type TExprKind = variant TNumber | TVar | TStrLit | TByteLit | TCharLit | TBoolLit | TNullLit | TBinary | TUnary | TCompare | TCall | TIfExpr | TMatchExpr | TCast | TFieldAccess | TSafeFieldAccess | TCoalesce | TStructInit | TIndex | TInterp | TInExpr | TPathExpr | TArrayLit | TLambda | TBorrow
+type TExprKind = variant TNumber | TVar | TStrLit | TByteLit | TCharLit | TBoolLit | TNullLit | TBinary | TUnary | TCompare | TCall | TIfExpr | TMatchExpr | TCast | TFieldAccess | TStructInit | TIndex | TInterp | TInExpr | TPathExpr | TArrayLit | TLambda | TBorrow
 
 // --- typed statements (mirror Statement; children are TExpr / []TStatement) ---
-pub type TBinding = struct { kind: parser::BindKind; target: parser::BindTarget; bound: Type; value: TExpr }   // `bound`: the type the target binds to (the annotation if present, else the value's)
+/**
+ * TBinding — a typed local binding `let|mut|const TARGET [: T] = value`.
+ *
+ * @field kind     the mutability mode (Let/Mut/Const)
+ * @field target   the bound name or destructure pattern
+ * @field bound    the type the target binds to (the annotation if present, else the value's)
+ * @field value    the typed initializer expression
+ * @field di_kind  the binding's residence lifetime (0.3.1 modelo-de-memoria §2a): `Singleton` forces
+ *                 the residence oracle (`residence.tks`) to `Root`; `None` is the ordinary
+ *                 scope-ephemeral local. `Scoped`/`Transient` never reach here (rejected at parse).
+ */
+pub type TBinding = struct { kind: parser::BindKind; target: parser::BindTarget; bound: Type; value: TExpr; di_kind: parser::DiKind }
 // (#88) a typed assignment. `kind` (parser::AssignKind) tags the target shape:
 //   Simple   — write the bare binding `name` (deref=false; target = a sentinel, unused).
 //   RefDeref — write THROUGH a `Ref<T>` handle `name` (deref=true; target = a sentinel, unused).
 //   Field    — write a struct/class field; `target` is the TYPED LHS field-access expr (a TFieldAccess),
-//              so codegen/VM reuse the read-side field lowering directly; name/deref unused.
+//              so codegen/interpreter reuse the read-side field lowering directly; name/deref unused.
 // `bound` = the target's declared type (codegen wraps the RHS into it — emit_as). `deref` stays a plain
 // bool == (kind==RefDeref) so the legacy TKB layout / readers are unchanged for the two old shapes.
 pub type TAssign = struct { kind: parser::AssignKind; name: str; op: lexer::TokenKind; bound: Type; value: TExpr; deref: bool; target: TExpr }

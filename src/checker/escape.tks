@@ -180,12 +180,6 @@ fn mark_expr(e: TExpr, escaping: bool, ref acc: []str) -> void {
             let recv_ctx = if refine { false } else { escaping }
             mark_expr(fa.receiver, recv_ctx, acc)
         }
-        TSafeFieldAccess as sfa => {
-            let refine = type_is_scalar(e.type) && expr_is_bare_var(sfa.receiver)
-            let recv_ctx = if refine { false } else { escaping }
-            mark_expr(sfa.receiver, recv_ctx, acc)
-        }
-        TCoalesce as co => { mark_expr(co.left, escaping, acc); mark_expr(co.right, escaping, acc) }
 
         // INDEX READ (`a[i]`) — a slice/array is ALWAYS heap-backed, so an index read DEREFERENCES a
         // heap pointer. There is NO bare-local stack-member analogue (the elements live behind the
@@ -350,11 +344,78 @@ pub fn fn_escaping_vars(f: TFunction) -> []str {
     acc
 }
 
-// binding_is_frame_local — does this binding's value allocate into the frame region? True iff
-// it is a `let`/`mut` to a SIMPLE name that is NOT in the escaping set AND whose value is a
-// struct-init (the only codegen allocation site that can be frame-routed — the auto-boxed
-// recursive back-edge). A `const`, a destructure, a discard (`_`), an escaping name, or any
-// non-struct-init value is NOT frame-local (→ allocates in root, the safe default). PUBLIC.
+/**
+ * fn_frees_old_vars — the per-function set of accumulator names whose whole-fn linear-chain proof
+ * (`assign_frees_old`) holds, so any self-append `xs = push(xs, …)` to one of them may FREE-OLD on
+ * a copy-grow (park the superseded buffer for reuse). PUBLIC, mirroring `fn_escaping_vars`: the C
+ * emitter re-derives the proof per-assign (it has the enclosing `fn_body` at every emit site), but
+ * the NATIVE backend lowers a push from a bare `TCall` with no assign/body context, so it reads this
+ * precomputed set instead — one entry per proven name, checked once against the whole body.
+ *
+ * @param f  the typed function
+ * @return   the names whose accumulator chain is proven linear (free-old-safe)
+ * @since 0.3.1 (native free-old parity, #148)
+ */
+pub fn fn_frees_old_vars(f: TFunction) -> []str {
+    mut acc: []str = teko::list::empty()
+    collect_frees_old_names(f.body, f.body, acc)
+    acc
+}
+
+/**
+ * collect_frees_old_names — walk `body` (recursing into loop/defer/adopt bodies and if/match arm
+ * blocks) and, for each self-append assign to a not-yet-collected name, add the name iff
+ * `assign_frees_old` holds against the WHOLE `fn_body`. Mirrors `mark_block`'s write-through `acc`.
+ *
+ * @param fn_body  the whole function body (the proof's scope, invariant across the recursion)
+ * @param body     the block currently being walked
+ * @param acc      the collected-name accumulator (by-reference, grown in place)
+ */
+fn collect_frees_old_names(fn_body: []TStatement, body: []TStatement, ref acc: []str) -> void {
+    mut i = 0
+    loop {
+        if i >= body.len { break }
+        collect_frees_old_stmt(fn_body, body[i], acc)
+        i++
+    }
+}
+
+fn collect_frees_old_stmt(fn_body: []TStatement, s: TStatement, ref acc: []str) -> void {
+    match s {
+        TAssign as a => {
+            if assign_is_self_append(a) && !str_set_has(acc.value, a.name) && assign_frees_old(fn_body, a) {
+                acc = str_set_add(acc.value, a.name)
+            }
+        }
+        TExprStmt as es => collect_frees_old_expr(fn_body, es.expr, acc)
+        TLoopStmt as l => { collect_frees_old_names(fn_body, l.init, acc); collect_frees_old_names(fn_body, l.body, acc) }
+        TDeferStmt as d => collect_frees_old_names(fn_body, d.body, acc)
+        TAdoptStmt as a => collect_frees_old_names(fn_body, a.body, acc)
+        TBinding => { }
+        TReturn => { }
+        TBreakStmt => { }
+        TContinueStmt => { }
+    }
+}
+
+fn collect_frees_old_expr(fn_body: []TStatement, e: TExpr, ref acc: []str) -> void {
+    match e.kind {
+        TIfExpr as f => {
+            collect_frees_old_names(fn_body, f.then_blk, acc)
+            if f.has_else { collect_frees_old_names(fn_body, f.else_blk, acc) }
+        }
+        TMatchExpr as m => {
+            mut i = 0
+            loop { if i >= m.arms.len { break }; collect_frees_old_names(fn_body, m.arms[i].body, acc); i++ }
+        }
+        _ => { }
+    }
+}
+
+// binding_is_frame_local — is this binding a SIMPLE non-escaping local whose storage may ride a
+// tighter-than-root region? A `const`, a destructure, a discard (`_`), or an escaping name is NOT
+// frame-local. Codegen still decides which concrete representations actually allocate in that
+// region (struct auto-box, boxed union payload, routed slice growth, ...). PUBLIC.
 pub fn binding_is_frame_local(escaping: []str, b: TBinding) -> bool {
     let name = match b.target {
         parser::SimpleName as sn => sn.name
@@ -363,10 +424,7 @@ pub fn binding_is_frame_local(escaping: []str, b: TBinding) -> bool {
     if name == "_" { return false }
     if b.kind == parser::BindKind::Const { return false }
     if str_set_has(escaping, name) { return false }
-    match b.value.kind {
-        TStructInit => true
-        _ => false
-    }
+    true
 }
 
 // (S2 Level-1) tcall_is_list_push — is this call `…::list::push(base, item)`, the one true grow
@@ -380,7 +438,7 @@ fn tcall_is_list_push(c: TCall) -> bool {
 // (S2 Level-1) assign_is_self_append — is `a` exactly `xs = teko::list::push(xs, item)` (a plain
 // SIMPLE name write whose RHS grows the SAME name)? Only this shape earns the base-read carve-out;
 // a field/deref write, a different target, or any other RHS keeps the conservative escaping mark.
-fn assign_is_self_append(a: TAssign) -> bool {
+pub fn assign_is_self_append(a: TAssign) -> bool {
     match a.kind { parser::AssignKind::Simple => { }; _ => return false }
     match a.value.kind {
         TCall as c => {
@@ -489,8 +547,6 @@ fn chain_stats_expr(e: TExpr, name: str) -> ChainStats {
         }
         TCast as ct => chain_stats_expr(ct.expr, name)
         TFieldAccess as fa => chain_stats_expr(fa.receiver, name)
-        TSafeFieldAccess as sfa => chain_stats_expr(sfa.receiver, name)
-        TCoalesce as co => cs_add(chain_stats_expr(co.left, name), chain_stats_expr(co.right, name))
         TIndex as ix => cs_add(chain_stats_expr(ix.receiver, name), chain_stats_expr(ix.index, name))
         TStructInit as si => {
             mut s = cs_zero()
@@ -688,8 +744,6 @@ fn count_reads_expr(e: TExpr, name: str) -> i64 {
         }
         TCast as ct => count_reads_expr(ct.expr, name)
         TFieldAccess as fa => count_reads_expr(fa.receiver, name)
-        TSafeFieldAccess as sfa => count_reads_expr(sfa.receiver, name)
-        TCoalesce as co => count_reads_expr(co.left, name) + count_reads_expr(co.right, name)
         TIndex as ix => count_reads_expr(ix.receiver, name) + count_reads_expr(ix.index, name)
         TStructInit as si => {
             mut n: i64 = 0
@@ -778,10 +832,27 @@ fn count_reads_block(body: []TStatement, name: str) -> i64 {
     n
 }
 
-// count_block_local_reads — reads of `name` strictly inside block B that are SAFE to free past:
-// every read EXCEPT (a) the block's TAIL value when B yields a value (an arm/if value used outside
-// B), and (b) any read that is the RHS of an ASSIGN statement (could write to an enclosing var).
-// A binding's own initializer never reads its own name, so the binding statement contributes 0.
+/**
+ * count_block_local_reads — reads of `name` strictly INSIDE block B that are SAFE to free at B's exit
+ * edge. Every read EXCEPT (a) the block's TAIL value when B yields a value (an arm/if value used
+ * outside B — the UAF trap), and (b) any read that is the RHS of a top-of-block ASSIGN (could write
+ * into an enclosing-scope variable). A binding's own initializer never reads its own name, so the
+ * binding statement contributes 0.
+ *
+ * The SELF-APPEND-AWARE exception (§4): a top-of-block assign that is EXACTLY a self-append of the
+ * SAME `name` (`name = list::push(name, item)`) is NOT an escape — the write target is the block-local
+ * accumulator itself, not an enclosing variable. Its RHS reads (the base `name` plus the item) are
+ * safe inside reads and ARE counted, mirroring exactly what `count_reads_stmt` sums into the total —
+ * otherwise the total would count the base read while the inside would not, and the accumulator would
+ * be eternally excluded from block-local (the C3 finding). An assign of ANY other shape (a different
+ * target, `ys = push(ys, name)`, `outer = name`) stays SKIPPED — the conservative escape preserved.
+ *
+ * @param body      the statements of block B
+ * @param name      the tested binding's name
+ * @param is_value  does B yield a value (its tail escapes)?
+ * @return          the count of safe inside reads
+ * @since 0.3.1
+ */
 fn count_block_local_reads(body: []TStatement, name: str, is_value: bool) -> i64 {
     mut n: i64 = 0
     mut i = 0
@@ -789,11 +860,10 @@ fn count_block_local_reads(body: []TStatement, name: str, is_value: bool) -> i64
         if i >= body.len { break }
         let is_last = i + 1 == body.len
         match body[i] {
-            // an assignment RHS may flow into an ENCLOSING-scope variable → treat as escaping
-            // (do NOT count as a safe inside read), so `outerVar = x` blocks block-local freeing.
-            TAssign => { }
+            TAssign as a => {
+                if a.name == name && assign_is_self_append(a) { n = n + count_reads_expr(a.value, name) }
+            }
             TExprStmt as es => {
-                // the block's TAIL expr-statement is the block VALUE when B yields one → escaping.
                 if is_value && is_last { } else { n = n + count_reads_expr(es.expr, name) }
             }
             _ => { n = n + count_reads_stmt(body[i], name) }
@@ -805,7 +875,7 @@ fn count_block_local_reads(body: []TStatement, name: str, is_value: bool) -> i64
 
 // binding_is_block_local — may binding `b` (declared at the TOP LEVEL of block B, whose enclosing
 // function body is `fn_body`, and which yields a value iff `is_value`) be freed at B's exit edges?
-// True iff binding_is_frame_local holds (struct-init, simple non-escaping name) AND every textual
+// True iff binding_is_frame_local holds (simple non-escaping name) AND every textual
 // read of the name in the WHOLE function is a SAFE non-tail/non-assign read strictly inside B.
 // CONSERVATIVE: any read outside B, in B's tail value, or as an assignment RHS ⇒ false ⇒ route to
 // the enclosing region (the W8/leak-safe default). PUBLIC — both codegen engines read it.

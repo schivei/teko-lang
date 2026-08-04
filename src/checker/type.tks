@@ -3,9 +3,9 @@
 /**
  * PrimKind — the injected scalar primitives (B.19), distinct real types. Native numeric set
  * (B.38 / TEKO_CORRECTION_PLAN §5): unsigned/signed integers 8–64 bit and the two IEEE floats
- * f32/f64. `dec`/`bigint` remain deferred (runtime-backed). The 128-bit widths (`U128`/`I128`)
- * and the half-precision float (`F16`) are REMOVED (drop-128, 2026-07-24) — the surface no
- * longer accepts them (`scope.tks::builtin_type` honest-stops on `i128`/`u128`/`f16`), so no
+ * f32/f64. `dec`/`bigint` remain deferred (runtime-backed). The 128-bit widths (`u64`/`i64`)
+ * and the half-precision float (`f32`) are REMOVED (drop-128, 2026-07-24) — the surface no
+ * longer accepts them (`scope.tks::builtin_type` honest-stops on `i64`/`u64`/`f32`), so no
  * member for them exists here; `Bool` stays LAST.
  */
 pub type PrimKind = enum {
@@ -102,6 +102,19 @@ pub type Ptr = struct {
     /** the pointed-to type, or `null` for the opaque `ptr` ≡ `ptr<void>` ≡ `*void` (pointer-only, NOT the value-`void`). */
     inner: Type | null
 }
+/**
+ * Uptr — the checker representation of `uptr`, the opaque word-size unsigned integer FFI authors
+ * spell for a raw `void*`-style pointer (C7.1a: transport-only at the FFI boundary, never
+ * dereferenced by Teko). Owner ruling (retire-Optional, 2026-08-04, verbatim PT-BR): *"Para FFI
+ * pode se usar a união `| null` para isso e para ponteiros `void*` temos `uptr`."* — value/FFI
+ * absence is the union `T | null` (`Variant{Null,T}`, `checker::Null`), and a raw address is
+ * `uptr`, NEVER an `Optional`-of-pointer. This is a STANDING RULE for future FFI authors, not a
+ * migration of an existing site: no `checker::Optional` whose inner is a `Ptr` has ever existed in
+ * this tree (searched — the only `Ptr`/`Optional` adjacency is doc-comment prose noting the
+ * `Optional`↔`T?` naming convention), and the opaque `void*` case is already `Ptr{inner=null}`
+ * (`ptr<void>`) — so this doc-comment is an HONEST STOP recording the rule, not a code path
+ * (`docs/design/retirar-optional-para-null-union-uptr-0.3.1.md` §3.3, retire-Optional crumb O3).
+ */
 pub type Uptr = struct { }   // (C7.1a) opaque word-size unsigned — transport-only at the FFI boundary
 // (MEM-1b) `Reference` — the META-level representation of the SAFE reference (user surface keyword `ref`,
 // a compiler-known "C pointer WITHOUT `*`/`&`"). The meta-name differs from the surface name exactly
@@ -159,15 +172,14 @@ fn type_eq(a: Type, b: Type) -> bool {
             }
             _ => false
         }
-        // T? == U? iff inners equal (built-in unary former, like Slice). A bare `null` literal
-        // carries the SENTINEL optional (its inner is the `Void` marker — REBOOT_PLAN §202; the
-        // C twin uses a NULL inner pointer): it unifies with ANY concrete optional, so `if`/
-        // `match` arms and binding/return slots accept it. The concrete type wins at the
-        // destination (via assignable / emit_as). A real optional never has a `void` inner.
+        // T? == U? iff inners equal (built-in unary former, like Slice). retire-Optional O4
+        // (`docs/design/retirar-optional-para-null-union-uptr-0.3.1.md` §6): the Void-UNIFY path
+        // (an `Optional{inner=Void}` sentinel unifying with ANY concrete optional) is DELETED —
+        // O1 was the sentinel's only producer and it now births `Null{}` instead, so `oa.inner`/
+        // `ob.inner` can no longer legitimately be `Void` here. The `Optional` case ARM itself
+        // stays (O6 deletes it, alongside the type-former).
         Optional as oa => match b {
-            Optional as ob => {
-                match oa.inner { Void => true; _ => match ob.inner { Void => true; _ => type_eq(oa.inner, ob.inner) } }
-            }
+            Optional as ob => type_eq(oa.inner, ob.inner)
             _ => false
         }
         Named as na => match b { Named as nb => na.name == nb.name; _ => false }

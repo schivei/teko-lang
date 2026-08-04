@@ -6,7 +6,7 @@ use teko::lexer
  * NumInt — the resolved integer-literal carrier, sign + 64-bit magnitude (drop-128,
  * 2026-07-24). Holds any value in the language's integer range `[i64::MIN, u64::MAX]`:
  * `neg=false` covers `0..=u64::MAX`, `neg=true` covers `i64::MIN..=-1`. Replaces the old
- * `i128` carrier, whose only reason to exist was to hold a high-bit u64 losslessly — a
+ * `i64` carrier, whose only reason to exist was to hold a high-bit u64 losslessly — a
  * u64 with its high bit set needs 65 signed bits, not 128.
  *
  * @field neg  true iff the value is strictly negative (only ever set for a signed target)
@@ -204,10 +204,7 @@ pub type MatchExpr = struct { subject: Expr; arms: []Arm }   // match is an EXPR
 
 // --- postfix access & cast (F2) — recursive over Expr (compiler-managed indirection) ---
 pub type FieldAccess = struct { receiver: Expr; field: str }   // x.field — read a struct field (the checker's own `s.token`/`b.left` shape; B.29)
-pub type SafeFieldAccess = struct { receiver: Expr; field: str }   // x?.field — null-propagating access (REBOOT_PLAN §203)
-pub type Coalesce = struct { left: Expr; right: Expr }   // x ?? y — Elvis / null-coalescing (REBOOT_PLAN §203)
 pub type MethodCall = struct { receiver: Expr; method: str; args: []Expr }   // recv.method(a, …) — B.29 instance call via `.`; method *checking* is deferred (M.4)
-pub type SafeMethodCall = struct { receiver: Expr; method: str; args: []Expr }   // recv?.method(a, …) — null-propagating method call (NP-OOP, issue #116)
 pub type Cast = struct { expr: Expr; target: TypeExpr }   // x to T — explicit conversion; preserves→ok / loses→compile-error (E7; M.0+M.1)
 /**
  * Borrow — the prefix `&x` safe mutable-borrow expression (AL wave F1). Takes a live
@@ -255,7 +252,7 @@ pub type Lambda = struct { params: []LambdaParam; body: []Statement }
 // `TExpr` (tast.tks) and the C `tk_expr` (ast.h), so EVERY expression node carries its 1-based
 // source position. The parser stamps line/col from the node's first token; the checker copies
 // it onto the typed node and onto type-errors, so a message points at the failing expression.
-pub type ExprKind = variant Number | Var | Call | IfExpr | MatchExpr | StrLit | ByteLit | CharLit | BoolLit | NullLit | Binary | Unary | Compare | FieldAccess | SafeFieldAccess | Coalesce | MethodCall | SafeMethodCall | Cast | PathExpr | StructLit | Index | Interp | InExpr | ArrayLit | Lambda | Borrow
+pub type ExprKind = variant Number | Var | Call | IfExpr | MatchExpr | StrLit | ByteLit | CharLit | BoolLit | NullLit | Binary | Unary | Compare | FieldAccess | MethodCall | Cast | PathExpr | StructLit | Index | Interp | InExpr | ArrayLit | Lambda | Borrow
 pub type Expr = struct { kind: ExprKind; line: u32; col: u32 }
 
 // --- statements ---
@@ -277,6 +274,10 @@ pub type BindTarget = variant SimpleName | DestructurePattern
  *                  `Ref<>`-wrapped annotation to carry its reference-ness — without the flag the
  *                  checker saw a plain `mut` binding and silently COPIED (owner ruling 2026-07-30)
  * @field value     the initializer expression
+ * @field di_kind   the residence lifetime the binding declared (0.3.1 modelo-de-memoria §2a). `None`
+ *                  = an ordinary scope-ephemeral local; `Singleton` = a `#singleton` binding forced to
+ *                  root residence. `Scoped`/`Transient` are rejected on a binding at parse time (the
+ *                  default local IS the scope-ephemeral case), so only `None`/`Singleton` reach here.
  */
 pub type Binding = struct {
     kind: BindKind
@@ -285,6 +286,7 @@ pub type Binding = struct {
     type_ann: TypeExpr
     is_ref: bool
     value: Expr
+    di_kind: DiKind
 }
 /**
  * AssignKind — the target shape of an assignment (#88). One of four, tagged on `Assign`/`TAssign`:

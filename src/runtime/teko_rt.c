@@ -49,7 +49,7 @@
 // generated function symbols (the mangled Teko names). E4: each frame is RESOLVED to its Teko
 // `name (file:line)` via the `.tsym` map emitted beside the binary (E3), loaded as `<argv0>.tsym`.
 // Without the map (or argv) it degrades to the raw C symbols. In the bootstrap (which also links
-// this runtime via the VM), main.c installs ITS OWN handler INSIDE main() — so it wins there; this
+// this runtime), main.c installs ITS OWN handler INSIDE main() — so it wins there; this
 // handler is active only in generated programs (which have no such main).
 static int    tk_g_argc;   // captured argv (defined below; used here to locate <argv0>.tsym)
 static char **tk_g_argv;
@@ -120,6 +120,17 @@ static void tk_backtrace(void) { fputs("teko: stack trace unavailable on this pl
 static void tk_rt_crash_handler(int sig) {
     fputs("\nteko: FATAL signal — a generated program crashed (M.1).\n", stderr);
     tk_backtrace();
+    // (2026-08-03, native-region-crash, chunk-canary) TEKO_NATIVE_CRASH_CORE=1 — a CI-narrowing aid,
+    // same env-gated pattern as the other TEKO_NATIVE_* diagnostics: byte-identical when unset. The
+    // ordinary handler always _Exit()s (async-signal-safe, no core), which is right for CI but
+    // leaves no postmortem artifact to inspect registers/memory with gdb. When armed, restore the
+    // signal's default disposition and re-raise instead, so (with `ulimit -c unlimited`) the OS
+    // produces a real core dump alongside the symbolized backtrace above.
+    if (getenv("TEKO_NATIVE_CRASH_CORE") != NULL) {
+        signal(sig, SIG_DFL);
+        raise(sig);
+        return;   // unreachable once the default handler re-delivers, kept for clarity
+    }
     _Exit(128 + sig);   // async-signal-safe
 }
 __attribute__((constructor)) static void tk_rt_install_crash_handler(void) {
@@ -145,6 +156,20 @@ tk_str tk_str_concat(tk_str a, tk_str b) {
     if (tk_obs_enabled() == 1) tk_obs_mstr_note(n ? n : 1, __builtin_return_address(0));
     tk_byte *buf = malloc(n ? n : 1);
     if (buf == NULL) tk_panic("out of memory (str concat)");
+    if (a.len) memcpy(buf, a.ptr, a.len);
+    if (b.len) memcpy(buf + a.len, b.ptr, b.len);
+    return (tk_str){ buf, n };
+}
+
+// (0.3.1 modelo-de-memoria §9) tk_str_concat_r — like tk_str_concat, but the fresh result buffer is
+// bump-allocated in `r` (tk_region_alloc) instead of malloc'd. The result lives in `r` and DIES when
+// `r` is dropped. `r == tk_region_root()`/program reproduces the leak-tolerant tk_str_concat; `r` = a
+// scope region makes the concatenated str die with the scope. Allocation failure PANICS (M.1);
+// zero-length uses a 1-byte buffer so ptr is never NULL.
+tk_str tk_str_concat_r(tk_region *r, tk_str a, tk_str b) {
+    if (r == NULL) return tk_str_concat(a, b);
+    size_t n = a.len + b.len;
+    tk_byte *buf = tk_region_alloc(r, n ? n : 1);
     if (a.len) memcpy(buf, a.ptr, a.len);
     if (b.len) memcpy(buf + a.len, b.ptr, b.len);
     return (tk_str){ buf, n };
@@ -337,6 +362,17 @@ tk_str tk_one_byte(tk_byte c) {
     if (buf == NULL) tk_panic("out of memory (one byte)");
     buf[0] = c;
     return (tk_str){ buf, 1 };
+}
+
+// tk_one_byte_len — the out-parameter-length twin of `tk_one_byte` (0.3.1.0 degrau 32): the same
+// fresh 1-byte buffer, handed back through the native backend's out-parameter convention. The
+// parameter is FULL WIDTH and masked here because SysV/AAPCS64 leave an argument's bits above its
+// declared width unspecified and this backend narrows RETURNS only
+// (`apply_native_c_return_narrow`), never arguments.
+const tk_byte *tk_one_byte_len(uint64_t c, uint64_t *out_len) {
+    tk_str r = tk_one_byte((tk_byte)(c & 0xFF));
+    *out_len = r.len;
+    return r.ptr;
 }
 
 // tk_char_to_u32 — decode a `char` (1–4 UTF-8 bytes) to its scalar codepoint. The bytes are valid
@@ -790,67 +826,10 @@ typedef struct tk_intern_entry {
     struct tk_intern_entry *next;
 } tk_intern_entry;
 #define TK_INTERN_BUCKETS 1024   // power of two — bucket = hash & (N-1)
-static tk_intern_entry *tk_intern_table[TK_INTERN_BUCKETS];
-
-// tk_intern_find — the bucket chain entry whose key equals `key`, or NULL. Shared by get/put so
-// the equal-key scan (hash bucket + length + memcmp) has exactly one definition.
-static tk_intern_entry *tk_intern_find(size_t bucket, tk_str key) {
-    for (tk_intern_entry *e = tk_intern_table[bucket]; e != NULL; e = e->next) {
-        if (e->key_len == key.len && (key.len == 0 || memcmp(e->key, key.ptr, key.len) == 0)) return e;
-    }
-    return NULL;
-}
-
-// tk_intern_dup — a fresh heap copy of `s` (>=1 byte, so an empty value never shares tk_alloc's
-// NULL-for-zero convention with a real miss). OOM panics (M.1).
-static tk_byte *tk_intern_dup(tk_str s) {
-    tk_byte *b = malloc(s.len ? s.len : 1);
-    if (b == NULL) tk_panic("out of memory (intern)");
-    if (s.len) memcpy(b, s.ptr, s.len);
-    return b;
-}
-
-// tk_intern_get returns a FRESH, INDEPENDENT copy of the cached value — never a view into the
-// table's own entry. A view would dangle the instant a LATER tk_intern_put overwrites (or
-// tk_intern_reset frees) that same entry, breaking Teko's str value-semantics contract (a
-// returned str's lifetime is never tied to some other call's future). The copy costs one hash
-// lookup + one memcpy, still far cheaper than the caller's original rebuild-from-scratch loop.
-tk_str tk_intern_get(tk_str key) {
-    size_t h = (size_t)(tk_str_hash(key) & (TK_INTERN_BUCKETS - 1));
-    tk_intern_entry *e = tk_intern_find(h, key);
-    if (e == NULL) return (tk_str){ NULL, 0 };
-    tk_str cached = { e->val, e->val_len };
-    return (tk_str){ tk_intern_dup(cached), e->val_len };
-}
-
-tk_str tk_intern_put(tk_str key, tk_str value) {
-    size_t h = (size_t)(tk_str_hash(key) & (TK_INTERN_BUCKETS - 1));
-    tk_intern_entry *e = tk_intern_find(h, key);
-    if (e != NULL) {
-        free(e->val);
-        e->val = tk_intern_dup(value); e->val_len = value.len;
-        return value;
-    }
-    tk_intern_entry *ne = malloc(sizeof *ne);
-    if (ne == NULL) tk_panic("out of memory (intern)");
-    ne->key = tk_intern_dup(key); ne->key_len = key.len;
-    ne->val = tk_intern_dup(value); ne->val_len = value.len;
-    ne->next = tk_intern_table[h];
-    tk_intern_table[h] = ne;
-    return value;
-}
-
-void tk_intern_reset(void) {
-    for (int i = 0; i < TK_INTERN_BUCKETS; i += 1) {
-        tk_intern_entry *e = tk_intern_table[i];
-        while (e != NULL) {
-            tk_intern_entry *next = e->next;
-            free(e->key); free(e->val); free(e);
-            e = next;
-        }
-        tk_intern_table[i] = NULL;
-    }
-}
+// (E1-C1) tk_intern_table is now a per-task member (see the seam beside the F1 families); the bucket
+// array travels with the task and tk_intern_reset frees its entries without touching another task's.
+// (E1-C1) The intern accessors themselves live BELOW `struct tk_task` (search tk_intern_find): they
+// dereference the per-task seam, so they must follow the struct's definition, not precede it.
 
 // tk_str_slice — the bytes [start, end) as a ZERO-COPY VIEW into the parent str (#148). SAFE
 // because a Teko `str` is IMMUTABLE and its buffer is never individually freed (arena/root or
@@ -858,8 +837,8 @@ void tk_intern_reset(void) {
 // so a view has exactly the parent's lifetime and is observably identical to the old fresh-owned
 // copy — while eliminating the dominant allocation in the compiler (measured 108M tiny copies /
 // 762 MB + malloc overhead on a self-build via name_last_segment alone). Bounds: an out-of-range
-// slice (start > end, or end past the byte length) PANICS (M.1, fail-loud — matches the VM's
-// index bounds check). An empty slice keeps a valid non-NULL ptr into the parent.
+// slice (start > end, or end past the byte length) PANICS (M.1, fail-loud on out-of-bounds).
+// An empty slice keeps a valid non-NULL ptr into the parent.
 tk_str tk_str_slice(tk_str s, uint64_t start, uint64_t end) {
     if (start > end || end > s.len) tk_panic("string slice out of range");
     return (tk_str){ s.ptr + start, (size_t)(end - start) };
@@ -891,6 +870,13 @@ const tk_byte *tk_str_slice_to_len(const tk_byte *s_ptr, uint64_t s_len, uint64_
 }
 const tk_byte *tk_str_slice_from_len(const tk_byte *s_ptr, uint64_t s_len, uint64_t start, uint64_t *out_len) {
     tk_str r = tk_str_slice_from((tk_str){ s_ptr, s_len }, start);
+    *out_len = r.len;
+    return r.ptr;
+}
+// tk_str_slice_chars_len — out-parameter-length twin of tk_str_slice_chars (codepoint-index
+// slice). Thin wrapper: calls tk_str_slice_chars, writes r.len into *out_len and returns r.ptr.
+const tk_byte *tk_str_slice_chars_len(const tk_byte *s_ptr, uint64_t s_len, int64_t from, int64_t to, uint64_t *out_len) {
+    tk_str r = tk_str_slice_chars((tk_str){ s_ptr, s_len }, from, to);
     *out_len = r.len;
     return r.ptr;
 }
@@ -1131,9 +1117,18 @@ static void *tk_chunk_alloc(size_t bytes) {
 #endif
 }
 
+// tk_canary_forget — fwd (2026-08-03, native-region-crash, chunk-canary); defined beside the rest
+// of the diagnostic near tk_region_alloc. tk_chunk_free is the SOLE deallocator for a tk_chunk (a
+// legitimate tk_region_drop / tk_arena_pop rewind frees chunks all the time), so every release MUST
+// scrub any matching ring entry — otherwise the diagnostic would read a freed-and-reused address on
+// its next check and report a "corruption" that is really just a false positive over memory the
+// allocator legitimately handed to someone else.
+static void tk_canary_forget(struct tk_chunk *c);
+
 // Release a chunk block obtained from tk_chunk_alloc. Windows _aligned_malloc blocks MUST NOT be
 // passed to plain free(); every chunk-release site routes through here to stay heap-correct.
 static void tk_chunk_free(struct tk_chunk *c) {
+    tk_canary_forget(c);
 #if defined(_WIN32)
     _aligned_free(c);
 #else
@@ -1182,11 +1177,17 @@ typedef struct tk_freenode { struct tk_freenode *next; size_t bytes; } tk_freeno
 #define TK_FREE_BINS 4096                           // (i+1)*16 bytes, i.e. 16..65536 — (#148 Level-2) the doubling-ladder steps of struct lists (esz ~100-300 B × cap 32-256) must BIN exactly (the bounded large-list scan barely reuses them); 4096 ptr slots = 32 KB per task
 #define TK_PUSH_HASH_SIZE (1u << 16)                // 65536 single-probe buckets
 #define TK_ARENA_MARK_MAX 64                        // depth of the per-task arena checkpoint stack (see tk_arena_push)
+#define TK_REGION_STACK_MAX 64                       // (C1) depth of the per-task current-region stack (see tk_region_enter)
 // TK_TEST_CAPTURE_DEPTH_MAX — how deep the capture stack goes. Two is what exists (a harness run
 // and a guard's inner run); the slack costs a few hundred bytes and removes a cliff.
 #define TK_TEST_CAPTURE_DEPTH_MAX 4
 typedef struct { struct tk_chunk *chunk; size_t used; } tk_arena_mark;
 typedef struct { const void *ptr; uint64_t len, cap, esz; tk_region *region; uint64_t region_gen; } tk_push_slot_entry;
+
+/** tk_chan — one captured output stream of a running `#test` (the per-test channel; see the
+    PER-TEST CHANNEL section). Defined here, ahead of `struct tk_task`, so the task can hold its
+    stdout/stderr capture by value (E1-C1: the channel is per-task, not a process singleton). */
+typedef struct { char *buf; size_t len; size_t cap; } tk_chan;
 
 typedef struct tk_task {
     tk_region      *regs;                 // (W9.3b) registry of THIS task's live regions: on it from tk_region_new until drop
@@ -1196,6 +1197,8 @@ typedef struct tk_task {
     unsigned long long free_parked_bytes, free_reused_bytes, free_reused_count;   // free-list accounting
     tk_arena_mark   arena_marks[TK_ARENA_MARK_MAX];   // checkpoint stack: (head chunk, its used offset)
     int             arena_msp;            // checkpoint stack pointer (may exceed the cap; see tk_arena_push)
+    tk_region      *cur_regions[TK_REGION_STACK_MAX];   // (C1) current-region stack: tk_alloc bumps from the TOP
+    int             cur_rsp;              // (C1) current-region stack pointer (may exceed the cap; see tk_region_enter)
     tk_push_slot_entry push_cache[TK_PUSH_HASH_SIZE];   // (#148) live-tail witnesses for in-place slice append
     jmp_buf         test_jb[TK_TEST_CAPTURE_DEPTH_MAX];   // (§14) test-mode capture — a longjmp NEVER crosses tasks
     volatile sig_atomic_t test_depth;     // >0 = a captured body is running on THIS task
@@ -1203,6 +1206,20 @@ typedef struct tk_task {
     volatile int32_t test_code[TK_TEST_CAPTURE_DEPTH_MAX];   // per-level outcome code
     uint64_t       *fn_stack;             // (D3-branch) coverage fn-attribution stack — a shadow of THIS task's call stack
     uint64_t        fn_sp, fn_cap;        // its depth and capacity (libc heap: survives the arena rewind)
+    // (E1-C1) Category C — the singletons a `#test` body or the gate touches. Process-global before
+    // this axis, now per-task so a reshuffled test cannot read another test's residue. Large tables
+    // (intern, coverage sinks) keep their malloc'd BUFFER across a reset; only the counts/marks zero.
+    tk_intern_entry *intern_table[TK_INTERN_BUCKETS];        // C-1 codegen string-intern cache
+    uint64_t       *cov_ids;  uint64_t cov_n, cov_cap;       // C-2 function-coverage sink
+    uint64_t       *covb_ids; uint64_t covb_n, covb_cap; int covb_on;   // C-3 branch-coverage sink
+    uint64_t       *line_ids; uint64_t line_cap, line_n; int lines_on;  // C-4 line-coverage sink
+    long            test_ran, test_passed, test_failed, test_exited;    // C-6 test tally
+    int32_t         test_probe_last_code;                    // C-7 last probe's outcome code
+    char            scope_buf[TK_TEST_SCOPE_MAX]; size_t scope_len;     // C-8 running test's scope label
+    char            scen_name[TK_TEST_LABEL_MAX]; size_t scen_len; char scen_prefix[TK_TEST_LABEL_MAX + 2];   // C-9 current scenario
+    tk_chan         chan_out, chan_err; char chan_label[TK_TEST_LABEL_MAX]; size_t chan_label_len; bool chan_open;   // C-10 stdout/stderr capture
+    bool            rt_stdin_eof_flag;                       // C-11 stdin EOF sticky flag
+    tk_byte         rt_fd_stage[TK_RT_PIPE_CAPACITY]; size_t rt_fd_staged, rt_fd_taken;   // C-12 fd staging (pipe)
 } tk_task;
 
 // tk_g_main_task — the task every program starts on. Statically allocated (not malloc'd) so the
@@ -1234,6 +1251,8 @@ tk_task *tk_task_current(void) {
 #define tk_free_reused_count  (tk_task_current()->free_reused_count)
 #define tk_arena_marks        (tk_task_current()->arena_marks)
 #define tk_arena_msp          (tk_task_current()->arena_msp)
+#define tk_cur_regions        (tk_task_current()->cur_regions)
+#define tk_cur_rsp            (tk_task_current()->cur_rsp)
 #define tk_push_cache         (tk_task_current()->push_cache)
 #define tk_test_jb            (tk_task_current()->test_jb)
 #define tk_test_depth         (tk_task_current()->test_depth)
@@ -1242,6 +1261,147 @@ tk_task *tk_task_current(void) {
 #define tk_fn_stack           (tk_task_current()->fn_stack)
 #define tk_fn_sp              (tk_task_current()->fn_sp)
 #define tk_fn_cap             (tk_task_current()->fn_cap)
+
+// (E1-C1) The Category C families, read through the SAME seam. As with the 11 F1 families the names
+// are unchanged on purpose: every existing use site in this file keeps its exact text, so this axis
+// is a change of WHERE the state lives, not of who touches it.
+#define tk_intern_table       (tk_task_current()->intern_table)
+#define tk_cov_ids            (tk_task_current()->cov_ids)
+#define tk_cov_n              (tk_task_current()->cov_n)
+#define tk_cov_cap            (tk_task_current()->cov_cap)
+#define tk_covb_ids           (tk_task_current()->covb_ids)
+#define tk_covb_n             (tk_task_current()->covb_n)
+#define tk_covb_cap           (tk_task_current()->covb_cap)
+#define tk_covb_on            (tk_task_current()->covb_on)
+#define tk_line_ids           (tk_task_current()->line_ids)
+#define tk_line_cap           (tk_task_current()->line_cap)
+#define tk_line_n             (tk_task_current()->line_n)
+#define tk_lines_on           (tk_task_current()->lines_on)
+#define tk_test_ran           (tk_task_current()->test_ran)
+#define tk_test_passed        (tk_task_current()->test_passed)
+#define tk_test_failed        (tk_task_current()->test_failed)
+#define tk_test_exited        (tk_task_current()->test_exited)
+#define tk_test_probe_last_code (tk_task_current()->test_probe_last_code)
+#define tk_scope_buf          (tk_task_current()->scope_buf)
+#define tk_scope_len          (tk_task_current()->scope_len)
+#define tk_scen_name          (tk_task_current()->scen_name)
+#define tk_scen_len           (tk_task_current()->scen_len)
+#define tk_scen_prefix        (tk_task_current()->scen_prefix)
+#define tk_chan_out           (tk_task_current()->chan_out)
+#define tk_chan_err           (tk_task_current()->chan_err)
+#define tk_chan_label         (tk_task_current()->chan_label)
+#define tk_chan_label_len     (tk_task_current()->chan_label_len)
+#define tk_chan_open          (tk_task_current()->chan_open)
+#define tk_rt_stdin_eof_flag  (tk_task_current()->rt_stdin_eof_flag)
+#define tk_rt_fd_stage        (tk_task_current()->rt_fd_stage)
+#define tk_rt_fd_staged       (tk_task_current()->rt_fd_staged)
+#define tk_rt_fd_taken        (tk_task_current()->rt_fd_taken)
+
+// (E1-C1) The string-intern accessors, moved down from beside their typedef so they can read the
+// per-task seam above (`tk_intern_table` now dereferences `struct tk_task`, complete only here).
+
+// tk_intern_find — the bucket chain entry whose key equals `key`, or NULL. Shared by get/put so
+// the equal-key scan (hash bucket + length + memcmp) has exactly one definition.
+static tk_intern_entry *tk_intern_find(size_t bucket, tk_str key) {
+    for (tk_intern_entry *e = tk_intern_table[bucket]; e != NULL; e = e->next) {
+        if (e->key_len == key.len && (key.len == 0 || memcmp(e->key, key.ptr, key.len) == 0)) return e;
+    }
+    return NULL;
+}
+
+// tk_intern_dup — a fresh heap copy of `s` (>=1 byte, so an empty value never shares tk_alloc's
+// NULL-for-zero convention with a real miss). OOM panics (M.1).
+static tk_byte *tk_intern_dup(tk_str s) {
+    tk_byte *b = malloc(s.len ? s.len : 1);
+    if (b == NULL) tk_panic("out of memory (intern)");
+    if (s.len) memcpy(b, s.ptr, s.len);
+    return b;
+}
+
+// tk_intern_get returns a FRESH, INDEPENDENT copy of the cached value — never a view into the
+// table's own entry. A view would dangle the instant a LATER tk_intern_put overwrites (or
+// tk_intern_reset frees) that same entry, breaking Teko's str value-semantics contract (a
+// returned str's lifetime is never tied to some other call's future). The copy costs one hash
+// lookup + one memcpy, still far cheaper than the caller's original rebuild-from-scratch loop.
+tk_str tk_intern_get(tk_str key) {
+    size_t h = (size_t)(tk_str_hash(key) & (TK_INTERN_BUCKETS - 1));
+    tk_intern_entry *e = tk_intern_find(h, key);
+    if (e == NULL) return (tk_str){ NULL, 0 };
+    tk_str cached = { e->val, e->val_len };
+    return (tk_str){ tk_intern_dup(cached), e->val_len };
+}
+
+tk_str tk_intern_put(tk_str key, tk_str value) {
+    size_t h = (size_t)(tk_str_hash(key) & (TK_INTERN_BUCKETS - 1));
+    tk_intern_entry *e = tk_intern_find(h, key);
+    if (e != NULL) {
+        free(e->val);
+        e->val = tk_intern_dup(value); e->val_len = value.len;
+        return value;
+    }
+    tk_intern_entry *ne = malloc(sizeof *ne);
+    if (ne == NULL) tk_panic("out of memory (intern)");
+    ne->key = tk_intern_dup(key); ne->key_len = key.len;
+    ne->val = tk_intern_dup(value); ne->val_len = value.len;
+    ne->next = tk_intern_table[h];
+    tk_intern_table[h] = ne;
+    return value;
+}
+
+void tk_intern_reset(void) {
+    for (int i = 0; i < TK_INTERN_BUCKETS; i += 1) {
+        tk_intern_entry *e = tk_intern_table[i];
+        while (e != NULL) {
+            tk_intern_entry *next = e->next;
+            free(e->key); free(e->val); free(e);
+            e = next;
+        }
+        tk_intern_table[i] = NULL;
+    }
+}
+
+// (E1-C2/C3) THE CENTRALISED PER-TASK RESET. The leak the reshuffle exposes is a forgotten reset;
+// the cure is to make forgetting impossible by giving the current task's ephemeral state exactly ONE
+// place that clears it. A new per-task singleton added in the future is cleared here and nowhere
+// else, so no call site can omit it — the invariant, by construction rather than by vigilance.
+
+// tk_task_reset_transient — the leak-prone, NON-accumulator slice of the current task's ephemeral
+// state: everything a `#test` can dirty that neither a later test nor the run summary is meant to
+// read back. Run at the entry of every `#test` (tk_test_begin) so a reshuffled order can expose no
+// residue, and folded into the full tk_task_reset so the two can never drift apart. It clears the
+// string-intern table, the two cast-diagnostic positions, the scope and scenario labels, the probe
+// code and the stdin/fd staging; it deliberately leaves the coverage sinks and the tally alone —
+// those ACCUMULATE across a lane's tests and are read AFTER the run, never between tests.
+static void tk_task_reset_transient(void) {
+    tk_task *t = tk_task_current();
+    tk_intern_reset();                                   // frees this task's cached entries; buckets stay
+    _tk_cast_loc_line = 0; _tk_cast_loc_col = 0;         // C-5 (process-global; written by emitted casts)
+    t->scope_len = 0;                                    // C-8
+    t->scen_len = 0;                                     // C-9
+    t->test_probe_last_code = 0;                         // C-7
+    t->rt_stdin_eof_flag = false;                        // C-11
+    t->rt_fd_staged = 0; t->rt_fd_taken = 0;             // C-12
+}
+
+// tk_task_reset — the FULL single-site reset: the transient slice PLUS the accumulators, returning
+// the current task to the ephemeral-clean state of "before any test". The coverage sinks and the
+// capture channels keep their malloc'd BUFFER (only the counts/marks zero), so the reset is never a
+// reallocation. Every table is cleared through its own existing reset (one definition apiece), so the
+// buffer-preservation contract lives in one place per family. The exported symbol takes no argument
+// and resolves the task through the same `tk_task_current()` seam as tk_arena_push — the wrapper the
+// `task_reset` builtin lowers to; the full-rewind-of-a-foreign-lane variant belongs with the lane
+// pool of the thread mode (S8), where a parent resets a lane whose flow of control has ended.
+void tk_task_reset(void) {
+    tk_task *t = tk_task_current();
+    tk_task_reset_transient();
+    tk_cov_reset();                                      // C-2 count -> 0, buffer kept
+    tk_cov_branch_reset();                               // C-3 count + fn stack -> 0, buffer kept
+    tk_cov_line_reset();                                 // C-4 count -> 0, slots cleared, buffer kept
+    t->test_ran = 0; t->test_passed = 0; t->test_failed = 0; t->test_exited = 0;   // C-6 tally
+    t->chan_out.len = 0; t->chan_err.len = 0;            // C-10 capture buffers kept, contents forgotten
+    t->chan_label_len = 0; t->chan_open = false;
+    t->arena_msp = 0;                                    // forget arena checkpoints; root chunks untouched
+}
 
 // tk_push_cache_purge — fwd; the cache lives beside tk_slice_push far below, but the task teardown
 // above it must be able to drop every live-tail witness before the memory they name is reclaimed.
@@ -1258,6 +1418,31 @@ static uint64_t tk_region_gen_next(void) {
     return __atomic_add_fetch(&tk_g_region_gen, 1, __ATOMIC_RELAXED);
 #else
     return ++tk_g_region_gen;
+#endif
+}
+
+// (E1-C4) A dependency-free test-and-set SPINLOCK, in the same __atomic idiom as tk_region_gen_next
+// so it needs no <pthread.h> and no extra link. It guards the two Category-B singletons that must
+// stay process-global (§1b of the axis design): the arena-lifetime observability map and the lazy
+// PROGRAM region init. Both are engaged only where a race is actually possible — the obs funnel only
+// under TEKO_ARENA_OBS, the program-region guard only on the first touch — so a single-threaded run
+// (every process-shard leg today) pays a predicted, uncontended acquire and nothing more. On a
+// compiler without the GNU atomics the lock degrades to a no-op, exactly as the generation counter
+// does: correct for the single-threaded reality, and the thread mode that needs the real thing (S8)
+// is not landed.
+static volatile int tk_g_spin_obs = 0;
+static void tk_spin_lock(volatile int *lock) {
+#if defined(__GNUC__) || defined(__clang__)
+    while (__atomic_exchange_n(lock, 1, __ATOMIC_ACQUIRE)) { }
+#else
+    (void)lock;
+#endif
+}
+static void tk_spin_unlock(volatile int *lock) {
+#if defined(__GNUC__) || defined(__clang__)
+    __atomic_store_n(lock, 0, __ATOMIC_RELEASE);
+#else
+    (void)lock;
 #endif
 }
 
@@ -1281,7 +1466,14 @@ static void tk_free_purge(void) {                   // rewind/termination: parke
     t->free_large = NULL;
     t->free_parked_bytes = 0;
 }
+// tk_canary_check_head — fwd; the diagnostic itself is defined beside tk_region_alloc further down
+// (it needs `struct tk_chunk` and the region machinery in scope), but tk_free_take/tk_free_block
+// sit ahead of it in the file and are call sites too (2026-08-03, native-region-crash, chunk-canary).
+static void tk_canary_check_head(tk_region *r, const char *where);
+tk_region *tk_region_current(void);   // fwd (defined later in this file; public in teko_rt.h)
+
 static void *tk_free_take(size_t an) {
+    tk_canary_check_head(tk_region_current(), "tk_free_take:entry");
     // (#148 Level-2) TAKE = CEIL-16 — never UNDERSTATE the need. The bin granularity is 16 bytes
     // (= TK_ARENA_ALIGN); requests round up so bin[qa] blocks are exactly qa ≥ an bytes. Ceil (not
     // floor) so a 24-byte request never gets handed a 16-byte block (an 8-byte OVERRUN into the
@@ -1362,18 +1554,39 @@ static unsigned long long tk_obs_regions_new = 0, tk_obs_regions_dropped = 0;
 static unsigned long long tk_obs_next_dump = 512ull * 1024 * 1024;
 static int tk_obs_on = -1;                     // -1 = not probed; 0 = off; 1 = on
 static const char *tk_obs_path = "/tmp/teko_arena_obs.txt";
+// (journal J3, family #27) tk_obs_pid_path holds the PID-STAMPED default `TEKO_ARENA_OBS=1` answers
+// with, so two `teko test` runs on the SAME host no longer atrophy each other's histogram with a
+// last-writer-wins dump to one shared, unstamped /tmp file — the one family of this scan with no run
+// identity at all before this fix. An EXPLICIT path (`TEKO_ARENA_OBS=<path>`) is left untouched: the
+// caller named it on purpose and gets exactly that file, stamped or not.
+static char tk_obs_pid_path[64];
 static int tk_obs_enabled(void) {
     if (tk_obs_on < 0) {
         const char *e = getenv("TEKO_ARENA_OBS");
         tk_obs_on = (e != NULL && *e != '\0') ? 1 : 0;
-        if (tk_obs_on && strcmp(e, "1") != 0) tk_obs_path = e;
+        if (tk_obs_on) {
+            if (strcmp(e, "1") == 0) {
+                snprintf(tk_obs_pid_path, sizeof tk_obs_pid_path, "/tmp/teko_arena_obs.%lld.txt", (long long)tk_rt_pid());
+                tk_obs_path = tk_obs_pid_path;
+            } else {
+                tk_obs_path = e;
+            }
+        }
     }
     return tk_obs_on;
 }
 static void tk_obs_add(tk_obs_site *tab, void *ra, size_t n) {
+    // (E1-C4) The ONE funnel every histogram write passes through, so one lock here serialises the
+    // whole open-addressed insert against concurrent lanes. A race would corrupt a probe count, never
+    // a free — the map is a diagnostic — so the guard is scoped to the funnel and to obs being on.
+    tk_spin_lock(&tk_g_spin_obs);
     size_t h = ((uintptr_t)ra >> 4) & (TK_OBS_CAP - 1);
     for (;;) {
-        if (tab[h].ra == ra || tab[h].ra == NULL) { tab[h].ra = ra; tab[h].bytes += n; tab[h].count += 1; return; }
+        if (tab[h].ra == ra || tab[h].ra == NULL) {
+            tab[h].ra = ra; tab[h].bytes += n; tab[h].count += 1;
+            tk_spin_unlock(&tk_g_spin_obs);
+            return;
+        }
         h = (h + 1) & (TK_OBS_CAP - 1);
     }
 }
@@ -1390,11 +1603,18 @@ static void tk_obs_dump_table(FILE *fp, const char *label, tk_obs_site *tab, uns
         if (best < 0) break;
         printed[np++] = best;
         const char *nm = "?";
+        // (obs) also emit the RAW return address and the module base so a STATIC/stripped bootstrap
+        // binary (where dladdr yields no dli_sname → "?") can still be named offline: the file offset
+        // `ra - fbase` fed to `addr2line -e <bin>` resolves the generated calling fn. Zero cost when
+        // obs is off (this runs only inside tk_obs_dump).
+        void *ra = tab[best].ra; void *fbase = NULL;
 #if !defined(_WIN32)
         Dl_info di;
-        if (dladdr(tab[best].ra, &di) && di.dli_sname) nm = di.dli_sname;
+        if (dladdr(ra, &di)) { if (di.dli_sname) nm = di.dli_sname; fbase = di.dli_fbase; }
 #endif
-        fprintf(fp, "  %2d  %9.1f MB  %11llu allocs  %s\n", k, tab[best].bytes / 1048576.0, tab[best].count, nm);
+        fprintf(fp, "  %2d  %9.1f MB  %11llu allocs  %-24s ra=%p base=%p off=0x%llx\n",
+                k, tab[best].bytes / 1048576.0, tab[best].count, nm, ra, fbase,
+                (unsigned long long)((char *)ra - (char *)fbase));
     }
 }
 static void tk_obs_dump(void) {
@@ -1402,13 +1622,21 @@ static void tk_obs_dump(void) {
     FILE *fp = fopen(tk_obs_path, "w");
     if (fp == NULL) fp = stderr;
     unsigned long long live = tk_obs_root_bytes + tk_obs_scoped_bytes;
-    unsigned long long reclaimed = tk_obs_drop_bytes + tk_obs_rewind_bytes;
+    // (reclaim ratio honesty) the free-list REUSE is genuine reclamation — a same-size allocation
+    // served from a parked block costs no new arena bytes — but the ratio historically counted only
+    // region drops + test-gate rewinds, so a corpus whose reclamation is almost entirely the
+    // escape-proven tk_slice_push_fo free-old parking read as "0.0% reclaimed" while the free-list
+    // was in fact recycling hundreds of MB (measured: disabling it via TEKO_FO_MAX=0 raises the
+    // self-build peak by ~0.6 GB). Counting reused bytes makes the headline number tell that truth.
+    unsigned long long reclaimed = tk_obs_drop_bytes + tk_obs_rewind_bytes + tk_free_reused_bytes;
     fprintf(fp, "=== ARENA LIFETIME MAP (TEKO_ARENA_OBS) ===\n");
     fprintf(fp, "root (process-lifetime, never freed): %10.1f MB\n", tk_obs_root_bytes / 1048576.0);
     fprintf(fp, "scoped (freed at region drop):        %10.1f MB\n", tk_obs_scoped_bytes / 1048576.0);
     fprintf(fp, "reclaimed by region drops:            %10.1f MB   (%llu of %llu regions dropped)\n",
             tk_obs_drop_bytes / 1048576.0, tk_obs_regions_dropped, tk_obs_regions_new);
     fprintf(fp, "reclaimed by test-gate rewinds:       %10.1f MB\n", tk_obs_rewind_bytes / 1048576.0);
+    fprintf(fp, "reclaimed by free-list reuse (fo):    %10.1f MB   (%llu takes)\n",
+            tk_free_reused_bytes / 1048576.0, tk_free_reused_count);
     fprintf(fp, "mem::free — parked now / reused:      %10.1f MB / %.1f MB (%llu reuses)\n",
             tk_free_parked_bytes / 1048576.0, tk_free_reused_bytes / 1048576.0, tk_free_reused_count);
     fprintf(fp, "reclaim ratio: %.1f%%  (reclaimed / allocated)\n\n",
@@ -1486,7 +1714,172 @@ void *tk_region_lookup(tk_region *r, uint64_t type_id) {
     return NULL;
 }
 
+// (2026-08-03, native-region-crash, chunk-canary) TEKO_NATIVE_CHUNK_CANARY — a CI-narrowing aid, the
+// same env-gated pattern as TEKO_NATIVE_REGION_CHECK/TEKO_NATIVE_CONST_SIZE_CHECK: byte-identical
+// when unset (one predicted getenv-cached int compare), NOT part of the ordinary output. It exists
+// to bisect the "wild-write cumulative" that eventually SIGSEGVs deep inside tk_region_alloc
+// (docs/design/native-lowering-oom-por-funcao-0.3.1.md's own successors already named the region-
+// balance and const-size suspects and cleared them; this one targets a stray native store that
+// overruns a bump-allocated block and lands on a NEIGHBORING tk_chunk's header fields).
+//
+// NO STRUCT CHANGE: `struct tk_chunk` keeps its exact layout (no magic field — that would move
+// `offsetof(data)` unconditionally, the one thing every existing diagnostic here refuses to do).
+// Instead a SEPARATE side-table snapshots {cap, next} for EVERY chunk this process ever creates, AT
+// CREATION TIME (tk_region_alloc's own new-chunk branch, the only place a tk_chunk is born), and
+// re-checks the CURRENT head chunk of the region a caller is about to allocate from on every
+// tk_region_alloc entry: a live chunk's `cap`/`next` never change after creation (only `used` does,
+// by the bump itself), so any discrepancy is definitionally a write nobody but this runtime's own
+// chunk bookkeeping should ever perform.
+//
+// FULL HISTORY, NOT A RECENCY WINDOW — this replaced an earlier 512-chunk RING (measured, see the
+// commit history): a full self-build run reached the very LAST native-lowering item
+// (virtual-main's own final ELF emission, `elf_collect_const_entries`/`elf_partition_data_rel_ro`)
+// and its `tk_slice_push_fo` grow still crashed inside `tk_region_alloc` with the ring reporting
+// NOTHING — proof the corrupted head chunk predates whatever the last 512 births were. An
+// open-addressed hash table (keyed by chunk address, tombstone-free — `used` is sticky so a probe
+// chain past a freed slot still finds anyone hashed behind it) gives O(1) record/forget/lookup at
+// unbounded size, so a chunk born at item 12 that only becomes somebody's live head again at
+// virtual-main is still covered.
+#define TK_CANARY_TAB_BITS 20
+#define TK_CANARY_TAB_SIZE (1u << TK_CANARY_TAB_BITS)   // 1,048,576 slots * 32 B ≈ 32 MB — one-time diagnostic run only
+typedef struct { struct tk_chunk *chunk; size_t cap; struct tk_chunk *next_snapshot; int used; int live; } tk_canary_entry;
+static tk_canary_entry *tk_canary_tab = NULL;   // lazily malloc'd (only when the diagnostic is on)
+static int tk_canary_tripped = 0;               // latches so one corruption is reported once, not per-call-site
+
+static int tk_canary_enabled(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("TEKO_NATIVE_CHUNK_CANARY");
+        v = (e != NULL && e[0] == '1') ? 1 : 0;
+        if (v == 1) tk_canary_tab = calloc(TK_CANARY_TAB_SIZE, sizeof *tk_canary_tab);
+    }
+    return v;
+}
+
+static unsigned tk_canary_hash(const struct tk_chunk *c) {
+    uintptr_t v = (uintptr_t)c;
+    v ^= v >> 15; v *= (uintptr_t)0x2545F4914F6CDD1DULL; v ^= v >> 13;
+    return (unsigned)v & (TK_CANARY_TAB_SIZE - 1);
+}
+
+// tk_canary_check_region — fwd (defined further down, once tk_g_program is in scope): does `r`
+// (the region a caller is about to allocate FROM) still appear on a live region registry at all? A
+// `tk_region` is itself a small plain-malloc'd struct (`tk_region_new_on`), NOT part of any chunk
+// arena — a wild write that lands on ONE OF THOSE instead of a chunk header would corrupt fields the
+// chunk table above never inspects (head/reg_next/parent/gen), and the very FIRST symptom would be
+// exactly what the mission's repro shows: no chunk-table trip, yet `tk_region_alloc` still dies
+// dereferencing `r->head`. Complements, does not replace, the chunk-header table.
+static void tk_canary_check_region(tk_region *r, const char *where);
+
+// tk_canary_record — snapshot a just-born chunk's immutable header fields into the table. Called
+// ONLY from tk_region_alloc's new-chunk branch (the sole birthplace of a tk_chunk), and only when
+// the diagnostic is on. Linear probe to the first slot that is either unused or already names `c`
+// (a legitimate re-birth at a reused address after tk_canary_forget).
+static void tk_canary_record(struct tk_chunk *c) {
+    unsigned h = tk_canary_hash(c);
+    for (unsigned probe = 0; probe < TK_CANARY_TAB_SIZE; probe += 1) {
+        unsigned i = (h + probe) & (TK_CANARY_TAB_SIZE - 1);
+        if (!tk_canary_tab[i].used || tk_canary_tab[i].chunk == c) {
+            tk_canary_tab[i] = (tk_canary_entry){ .chunk = c, .cap = c->cap, .next_snapshot = c->next, .used = 1, .live = 1 };
+            return;
+        }
+    }
+    // table saturated (every slot `used`) — astronomically unlikely at 2^20 entries; drop silently,
+    // this is a best-effort diagnostic, never a correctness mechanism.
+}
+
+// tk_canary_forget — mark the entry naming `c` dead (called from tk_chunk_free, the sole
+// deallocator): a LEGITIMATE tk_region_drop / tk_arena_pop rewind frees chunks constantly, and
+// without this the diagnostic would read a freed-and-reused address on its next check and report a
+// false "corruption" over memory the allocator has since handed to someone else entirely. `used`
+// stays set (a tombstone) so the probe chain for anyone hashed behind this slot still terminates
+// correctly; only `live` clears.
+static void tk_canary_forget(struct tk_chunk *c) {
+    if (!tk_canary_enabled()) return;
+    unsigned h = tk_canary_hash(c);
+    for (unsigned probe = 0; probe < TK_CANARY_TAB_SIZE; probe += 1) {
+        unsigned i = (h + probe) & (TK_CANARY_TAB_SIZE - 1);
+        if (!tk_canary_tab[i].used) return;   // never recorded (or table saturated past here) — nothing to forget
+        if (tk_canary_tab[i].chunk == c) { tk_canary_tab[i].live = 0; return; }
+    }
+}
+
+// tk_canary_check_head — verify `r->head` (the ONLY chunk tk_region_alloc actually dereferences)
+// against its birth-time snapshot, wherever in history it was recorded. `where` names the call site
+// so the report pins which family of allocator activity was running when the corruption was FIRST
+// observed — not necessarily where the corrupting write itself executed, but the nearest allocator
+// checkpoint after it, which is exactly the "next allocation names the culprit" narrowing this
+// diagnostic buys.
+static void tk_canary_check_head(tk_region *r, const char *where) {
+    if (!tk_canary_enabled() || tk_canary_tripped || r == NULL || r->head == NULL) return;
+    struct tk_chunk *c = r->head;
+    unsigned h = tk_canary_hash(c);
+    unsigned probe;
+    for (probe = 0; probe < TK_CANARY_TAB_SIZE; probe += 1) {
+        unsigned i = (h + probe) & (TK_CANARY_TAB_SIZE - 1);
+        if (!tk_canary_tab[i].used) break;          // exhausted the probe chain without finding `c` — fall through to the report below
+        if (tk_canary_tab[i].chunk != c) continue;
+        tk_canary_entry *e = &tk_canary_tab[i];
+        // EVERY tk_chunk this process ever creates is recorded right after tk_chunk_try (the sole
+        // birthplace) with the SAME gate this check reads, so a genuinely-live, non-NULL `r->head`
+        // that is either ABSENT from the table or found but marked `!live` (a chunk this runtime
+        // itself already freed) is not a coverage gap — it is `r->head` no longer naming a real,
+        // still-alive chunk at all: the smoking gun for a wild write that clobbered the HANDLE
+        // (r->head itself, or whatever upstream variable fed it), not merely a chunk's header.
+        if (!e->live) {
+            tk_canary_tripped = 1;
+            fprintf(stderr,
+                "TEKO_NATIVE_CHUNK_CANARY: r->head %p at %s names a chunk this runtime ALREADY FREED "
+                "(tk_canary_forget saw it) — r->head is dangling, not merely corrupted\n",
+                (void *)c, where);
+#ifdef TK_HAVE_BACKTRACE
+            { void *fr[24]; int nf = backtrace(fr, 24); fprintf(stderr, "  backtrace at detection:\n"); backtrace_symbols_fd(fr, nf, 2); }
+#endif
+            fflush(stderr); abort();
+        }
+        if (c->cap != e->cap || c->next != e->next_snapshot) {
+            tk_canary_tripped = 1;
+            fprintf(stderr,
+                "TEKO_NATIVE_CHUNK_CANARY: chunk %p header corrupted, first observed at %s\n"
+                "  cap:  recorded=%zu now=%zu\n"
+                "  next: recorded=%p now=%p\n"
+                "  used(now)=%zu\n",
+                (void *)c, where,
+                e->cap, c->cap,
+                (void *)e->next_snapshot, (void *)c->next,
+                c->used);
+#ifdef TK_HAVE_BACKTRACE
+            void *fr[24]; int nf = backtrace(fr, 24);
+            fprintf(stderr, "  backtrace at detection:\n");
+            backtrace_symbols_fd(fr, nf, 2);
+#endif
+            fflush(stderr);
+            abort();
+        }
+        return;
+    }
+    // Probe chain exhausted (an empty slot, `!used`) without ever finding `c`: this address was
+    // NEVER born through tk_region_alloc's own chunk-creation branch, the sole birthplace — so
+    // `r->head` is not a real chunk at all. Given the diagnostic is armed from process start (the
+    // very first tk_region_alloc call evaluates the gate before any chunk exists), this is not a
+    // recording gap; it is `r->head` itself holding garbage — the wild write clobbered the HANDLE,
+    // not a chunk's header fields.
+    tk_canary_tripped = 1;
+    fprintf(stderr,
+        "TEKO_NATIVE_CHUNK_CANARY: r->head %p at %s was NEVER recorded as a chunk this runtime "
+        "created — the handle itself is garbage (a wild write clobbered r->head or whatever fed "
+        "it), not a chunk header\n",
+        (void *)c, where);
+#ifdef TK_HAVE_BACKTRACE
+    { void *fr[24]; int nf = backtrace(fr, 24); fprintf(stderr, "  backtrace at detection:\n"); backtrace_symbols_fd(fr, nf, 2); }
+#endif
+    fflush(stderr);
+    abort();
+}
+
 void *tk_region_alloc(tk_region *r, size_t n) {
+    tk_canary_check_head(r, "tk_region_alloc:entry");
+    tk_canary_check_region(r, "tk_region_alloc:entry");
     if (n == 0) n = 1;                              // n→1: a zero-size alloc yields a distinct pointer
     // (S2 obs) SCOPED-lifetime side of the map — a direct allocation into a non-root region (class
     // objects, frame regions). The ROOT side is recorded in tk_alloc (whose RA0 is the REAL site;
@@ -1518,6 +1911,7 @@ void *tk_region_alloc(tk_region *r, size_t n) {
     c->used = an;
     c->next = r->head;
     r->head = c;
+    if (tk_canary_enabled()) tk_canary_record(c);   // snapshot the just-born chunk's {cap, next}
     return (char *)c->data;                          // base 0 is TK_ARENA_ALIGN-aligned (over-aligned flexible member)
 }
 
@@ -1628,6 +2022,31 @@ static void tk_registry_free(tk_region **registry) {
 static tk_region *tk_g_program_regs = NULL;
 static tk_region *tk_g_program      = NULL;
 
+// tk_canary_check_region — definition (prototype declared beside the chunk-canary ring, above).
+// `r` is genuinely live iff it is on THIS task's region registry (`tk_g_regs`, walked via
+// `reg_next` — the same list `tk_regions_free_all` trusts) OR it is the one process-wide PROGRAM
+// region/registry (`tk_g_program_regs`, F2 — a separate list by design, never on any task's own).
+// Anything else is a region handle this runtime never handed out as still alive: a dangling
+// pointer left over after a drop, or outright garbage from a wild write that clobbered the
+// variable HOLDING the handle (a LowerCtx's region_stack entry, a saved u64 region handle, …).
+static void tk_canary_check_region(tk_region *r, const char *where) {
+    if (!tk_canary_enabled() || tk_canary_tripped || r == NULL) return;
+    for (tk_region *p = tk_g_regs; p != NULL; p = p->reg_next) { if (p == r) return; }
+    for (tk_region *p = tk_g_program_regs; p != NULL; p = p->reg_next) { if (p == r) return; }
+    tk_canary_tripped = 1;
+    fprintf(stderr,
+        "TEKO_NATIVE_CHUNK_CANARY: region %p passed to %s is NOT on any live region registry "
+        "(dangling/garbage region handle)\n",
+        (void *)r, where);
+#ifdef TK_HAVE_BACKTRACE
+    void *fr[24]; int nf = backtrace(fr, 24);
+    fprintf(stderr, "  backtrace at detection:\n");
+    backtrace_symbols_fd(fr, nf, 2);
+#endif
+    fflush(stderr);
+    abort();
+}
+
 // tk_termination_hook_once — register the leak-clean atexit hook exactly once, whichever of the
 // root region or the program region is materialized first. atexit fires on normal main return AND
 // on libc exit() (tk_exit's path), so a NORMALLY-terminating program is leak-clean too;
@@ -1639,6 +2058,11 @@ static void tk_termination_hook_once(void) {
     atexit(tk_regions_free_all);
 }
 
+// (F3) tk_names_forget — drop the name registry's view of the program region. Defined with the rest
+// of the registry below; declared here because tk_regions_free_all frees the very chunks that table
+// is bump-allocated in, and a table pointer that outlived them would be a dangling read.
+static void tk_names_forget(void);
+
 void tk_regions_free_all(void) {
     // (S2 obs) FINAL lifetime-map dump — this is every termination edge's choke point (atexit /
     // tk_exit / tk_panic), so an enabled run always ends with a complete map on disk.
@@ -1647,6 +2071,7 @@ void tk_regions_free_all(void) {
     tk_task *t = tk_task_current();
     t->root = NULL;                                  // the root is on the registry; it is freed below too
     tk_registry_free(&t->regs);
+    tk_names_forget();                               // (F3) the name table is bump-allocated in the program region
     tk_registry_free(&tk_g_program_regs);            // (F2) the program region outlives tasks, but not the process
     tk_g_program = NULL;
 }
@@ -1660,6 +2085,56 @@ tk_region *tk_region_root(void) {
     return t->root;
 }
 
+// (C1) tk_region_current — the region tk_alloc bump-allocates from RIGHT NOW: the top of this task's
+// current-region stack, or the root when the stack is empty (the behaviour-identical default). A NULL
+// slot or an over-deep pointer also falls through to the root, so an unbalanced/over-deep enter can
+// never hand back garbage — it degrades to the root.
+tk_region *tk_region_current(void) {
+    tk_task *t = tk_task_current();
+    if (t->cur_rsp > 0 && t->cur_rsp <= TK_REGION_STACK_MAX) {
+        tk_region *r = t->cur_regions[t->cur_rsp - 1];
+        if (r != NULL) return r;
+    }
+    return tk_region_root();
+}
+
+void tk_region_enter(tk_region *child) {
+    if (tk_cur_rsp >= 0 && tk_cur_rsp < TK_REGION_STACK_MAX) tk_cur_regions[tk_cur_rsp] = child;
+    tk_cur_rsp += 1;
+}
+
+void tk_region_leave(void) {
+    if (tk_cur_rsp <= 0) return;
+    tk_cur_rsp -= 1;
+}
+
+// (C1) the u64-handle ABI twins the Teko `extern fn` region surface binds to — see teko_rt.h. A
+// tk_region* rides through Teko as a uintptr_t-wide u64; these cast at the boundary so the extern
+// prototypes match without an int↔pointer conversion.
+uint64_t tk_region_new_u(uint64_t parent) {
+    return (uint64_t)(uintptr_t)tk_region_new((tk_region *)(uintptr_t)parent);
+}
+
+uint64_t tk_region_root_u(void) {
+    return (uint64_t)(uintptr_t)tk_region_root();
+}
+
+// (0.3.1 native-memoria NP1) tk_region_current_u — tk_region_current() as a u64 handle. The native
+// backend captures R_ret (the caller's chosen result region, == the current region at function
+// entry) through this at fn entry, the native dialect of the C route's A1 (which de-static'd
+// tk_region_current itself). Additive, behaviour-identical: no caller until the move flip (NP6).
+uint64_t tk_region_current_u(void) {
+    return (uint64_t)(uintptr_t)tk_region_current();
+}
+
+void tk_region_drop_u(uint64_t region) {
+    tk_region_drop((tk_region *)(uintptr_t)region);
+}
+
+void tk_region_enter_u(uint64_t child) {
+    tk_region_enter((tk_region *)(uintptr_t)child);
+}
+
 // tk_region_program — the PROGRAM region: one per process, owned by no task.
 //
 // (F2) F1 left the runtime with N task roots and nothing else, and an object allocated in a task
@@ -1668,12 +2143,181 @@ tk_region *tk_region_root(void) {
 // is built: a region that is NOT any task's root, so it survives both a task's tk_arena_pop (which
 // only rewinds that task's root) and the task's exit (which only frees that task's registry).
 // Freed at process termination by tk_regions_free_all, so it is still leak-clean.
+// (E1-C4) The lazy init is double-checked under the obs spinlock so two lanes touching the program
+// region for the first time at once cannot both create it (which would leak one region and hand the
+// two lanes different "singletons"). The fast path — an already-built region — takes no lock at all,
+// so the single-threaded reality of a process-shard leg pays one predicted pointer compare. Reusing
+// the obs lock (never held across a program-region touch) keeps this to one process-wide primitive.
 tk_region *tk_region_program(void) {
+    if (tk_g_program != NULL) return tk_g_program;
+    tk_spin_lock(&tk_g_spin_obs);
     if (tk_g_program == NULL) {
-        tk_g_program = tk_region_new_on(&tk_g_program_regs, NULL);
+        tk_region *r = tk_region_new_on(&tk_g_program_regs, NULL);
         tk_termination_hook_once();
+        tk_g_program = r;
     }
+    tk_spin_unlock(&tk_g_spin_obs);
     return tk_g_program;
+}
+
+// ── (F3) THE NAME REGISTRY ────────────────────────────────────────────────────────────────────
+// The contract, the packing and the reason a stale name is an error rather than undefined behaviour
+// are in teko_rt.h next to the prototypes. What follows is only how it is built.
+//
+// A slot keeps its `resource` across a close ON PURPOSE: a recycled slot whose previous tenant was a
+// cell reuses that cell's 16 bytes instead of abandoning them in the bump-allocated program region,
+// so an open/close loop costs storage once per SLOT rather than once per open. Liveness therefore
+// cannot be read off `resource`; `live` is the field that says it.
+#define TK_NAMES_GEN_SHIFT   32u                       // the name's low half is the slot, the high half the stamp
+#define TK_NAMES_SLOT_MASK   0xFFFFFFFFu               // …so a slot index is 32 bits wide
+#define TK_NAMES_NO_SLOT     0xFFFFFFFFu               // free-list terminator, and therefore not a usable index
+#define TK_NAMES_GEN_MAX     0xFFFFFFFFu               // a slot that would reach this stamp is RETIRED, never reissued
+#define TK_NAMES_INITIAL_CAP 16u                       // 16 slots = 384 bytes, one doubling step from there
+typedef struct {
+    void    *resource;    // what the name stands for; retained across a close so a recycled slot can reuse storage
+    uint32_t generation;  // the stamp a live name carries in its high half; bumped by every close
+    uint32_t kind;        // the LAST kind stored here (never cleared — that is what makes storage reuse safe)
+    uint32_t next_free;   // free-list link, or TK_NAMES_NO_SLOT
+    uint32_t live;        // 1 while a resource is registered under the current stamp
+} tk_name_slot;
+_Static_assert(sizeof(tk_name_slot) <= 32, "a registry slot must stay small — the table is per-process");
+
+static tk_name_slot *tk_g_names      = NULL;             // the slot array, bump-allocated in the program region
+static uint32_t      tk_g_names_cap  = 0;                // slots the array can hold
+static uint32_t      tk_g_names_used = 0;                // slots ever handed out (the array's high-water mark)
+static uint32_t      tk_g_names_live = 0;                // slots live right now
+static uint32_t      tk_g_names_free = TK_NAMES_NO_SLOT; // head of the LIFO free list of recyclable slots
+
+// tk_names_forget — the table dies with the program region that holds it (tk_regions_free_all).
+// Every previously issued name becomes UNKNOWN, which is a status and not a dangling pointer.
+static void tk_names_forget(void) {
+    tk_g_names = NULL; tk_g_names_cap = 0; tk_g_names_used = 0;
+    tk_g_names_live = 0; tk_g_names_free = TK_NAMES_NO_SLOT;
+}
+
+// tk_names_grow — double the slot array inside the program region and copy the live prefix over.
+// The bump allocator has no realloc, so the previous array is abandoned until process exit: the
+// steady-state cost of reaching capacity C is C * 24 bytes live plus (C - 16) * 24 abandoned.
+// 0 when the index space is exhausted (which is a refusal, never a wrap).
+static int tk_names_grow(void) {
+    uint64_t ncap = tk_g_names_cap == 0 ? (uint64_t)TK_NAMES_INITIAL_CAP : (uint64_t)tk_g_names_cap * 2u;
+    if (ncap > (uint64_t)TK_NAMES_NO_SLOT) ncap = (uint64_t)TK_NAMES_NO_SLOT;
+    if (ncap <= (uint64_t)tk_g_names_cap) return 0;
+    tk_name_slot *grown = (tk_name_slot *)tk_region_alloc(tk_region_program(), (size_t)ncap * sizeof *grown);
+    if (tk_g_names_used > 0) memcpy(grown, tk_g_names, (size_t)tk_g_names_used * sizeof *grown);
+    tk_g_names = grown;
+    tk_g_names_cap = (uint32_t)ncap;
+    return 1;
+}
+
+// tk_names_take — reserve a slot and mint its name, WITHOUT touching `kind` or `resource`: the
+// caller decides those, and the cell path needs the OLD kind to know whether the old storage is
+// reusable. NULL (and *out_name unchanged) when no slot can be issued.
+static tk_name_slot *tk_names_take(uint64_t *out_name) {
+    uint32_t index;
+    if (tk_g_names_free != TK_NAMES_NO_SLOT) {
+        index = tk_g_names_free;
+        tk_g_names_free = tk_g_names[index].next_free;
+    } else {
+        if (tk_g_names_used == tk_g_names_cap && !tk_names_grow()) return NULL;
+        index = tk_g_names_used;
+        tk_g_names_used += 1;
+        tk_g_names[index].resource = NULL;
+        tk_g_names[index].generation = 1;              // stamp 0 is never issued, so no valid name is ever 0
+        tk_g_names[index].kind = 0;
+    }
+    tk_name_slot *s = &tk_g_names[index];
+    s->next_free = TK_NAMES_NO_SLOT;
+    s->live = 1;
+    tk_g_names_live += 1;
+    *out_name = ((uint64_t)s->generation << TK_NAMES_GEN_SHIFT) | (uint64_t)index;
+    return s;
+}
+
+// tk_names_slot_at — the slot a name addresses, or NULL when the name does not address a live one.
+// The three comparisons ARE the guarantee: a stamp above the slot's was never issued, a stamp below
+// it belonged to a tenant that has been closed, and an equal stamp on a free slot is one that has
+// not been handed out yet.
+static tk_name_slot *tk_names_slot_at(uint64_t name, int64_t *status) {
+    uint32_t index = (uint32_t)(name & (uint64_t)TK_NAMES_SLOT_MASK);
+    uint32_t gen   = (uint32_t)(name >> TK_NAMES_GEN_SHIFT);
+    if (gen == 0 || index >= tk_g_names_used) { *status = TK_NAMES_ERR_UNKNOWN; return NULL; }
+    tk_name_slot *s = &tk_g_names[index];
+    if (gen > s->generation) { *status = TK_NAMES_ERR_UNKNOWN; return NULL; }
+    if (gen < s->generation) { *status = TK_NAMES_ERR_CLOSED;  return NULL; }
+    if (s->live == 0)        { *status = TK_NAMES_ERR_UNKNOWN; return NULL; }
+    *status = TK_NAMES_OK;
+    return s;
+}
+
+int64_t tk_names_status(uint64_t name) {
+    int64_t status = TK_NAMES_OK;
+    tk_names_slot_at(name, &status);
+    return status;
+}
+
+uint64_t tk_names_open(uint32_t kind, void *resource) {
+    uint64_t name = 0;
+    tk_name_slot *s = tk_names_take(&name);
+    if (s == NULL) return 0;
+    s->kind = kind;
+    s->resource = resource;
+    return name;
+}
+
+void *tk_names_lookup(uint64_t name, uint32_t kind) {
+    int64_t status = TK_NAMES_OK;
+    tk_name_slot *s = tk_names_slot_at(name, &status);
+    if (s == NULL || s->kind != kind) return NULL;
+    return s->resource;
+}
+
+int64_t tk_names_close(uint64_t name) {
+    int64_t status = TK_NAMES_OK;
+    tk_name_slot *s = tk_names_slot_at(name, &status);
+    if (s == NULL) return status;
+    s->live = 0;
+    s->generation += 1;                                // every name ever issued for this slot is now strictly older
+    tk_g_names_live -= 1;
+    if (s->generation >= TK_NAMES_GEN_MAX) return TK_NAMES_OK;   // RETIRED: the stamp may not wrap, so the slot goes
+    s->next_free = tk_g_names_free;
+    tk_g_names_free = (uint32_t)(name & (uint64_t)TK_NAMES_SLOT_MASK);
+    return TK_NAMES_OK;
+}
+
+uint64_t tk_names_live_count(void) { return (uint64_t)tk_g_names_live; }
+
+uint64_t tk_names_capacity(void) { return (uint64_t)tk_g_names_cap; }
+
+uint64_t tk_names_slot_of(uint64_t name) { return name & (uint64_t)TK_NAMES_SLOT_MASK; }
+
+uint64_t tk_names_generation_of(uint64_t name) { return name >> TK_NAMES_GEN_SHIFT; }
+
+uint64_t tk_names_cell_open(int64_t value) {
+    if (value == TK_NAMES_NO_VALUE) return 0;          // the one payload the read sentinel cannot represent
+    uint64_t name = 0;
+    tk_name_slot *s = tk_names_take(&name);
+    if (s == NULL) return 0;
+    if (s->kind != TK_NAMES_KIND_CELL || s->resource == NULL) {
+        s->resource = tk_region_alloc(tk_region_program(), sizeof(int64_t));
+        s->kind = TK_NAMES_KIND_CELL;
+    }
+    *(int64_t *)s->resource = value;
+    return name;
+}
+
+int64_t tk_names_cell_status(uint64_t name) {
+    int64_t status = TK_NAMES_OK;
+    tk_name_slot *s = tk_names_slot_at(name, &status);
+    if (s == NULL) return status;
+    if (s->kind != TK_NAMES_KIND_CELL) return TK_NAMES_ERR_KIND;
+    return TK_NAMES_OK;
+}
+
+int64_t tk_names_cell_read(uint64_t name) {
+    int64_t *cell = (int64_t *)tk_names_lookup(name, TK_NAMES_KIND_CELL);
+    if (cell == NULL) return TK_NAMES_NO_VALUE;
+    return *cell;
 }
 
 // tk_task_begin — create a fresh task and make it the one this flow of control runs on, returning
@@ -1712,12 +2356,18 @@ void *tk_alloc(size_t n) {
     // (S1) Route through the process root region: bump-allocated, never dropped = today's
     // malloc-everywhere leak (M.5). OOM still panics (M.1, never NULL). Same contract as the
     // S0 malloc(n?n:1), only the bytes now come from a region chunk instead of libc directly.
-    if (tk_obs_enabled()) {                       // (S2 obs) ROOT-lifetime side of the map, keyed by the REAL caller
+    // (C1) The default allocation now bumps from the CURRENT region (the top of the per-task
+    // current-region stack), which is the root when nothing was entered — behaviour-identical for a
+    // program that never calls tk_region_enter. When a child is current, tk_region_alloc records the
+    // SCOPED-lifetime obs; recording the ROOT obs here too would double-count, so the root-lifetime
+    // histogram is only fed when the current region actually IS the root.
+    tk_region *cur = tk_region_current();
+    if (tk_obs_enabled() && cur == tk_task_current()->root) {   // (S2 obs) ROOT-lifetime side of the map, keyed by the REAL caller
         tk_obs_root_bytes += (n ? n : 1);
         tk_obs_add(tk_obs_root, __builtin_return_address(0), n ? n : 1);
         if (tk_obs_root_bytes > tk_obs_next_dump) { tk_obs_next_dump += 512ull * 1024 * 1024; tk_obs_dump(); }   // periodic (survives SIGKILL)
     }
-    return tk_region_alloc(tk_region_root(), n);
+    return tk_region_alloc(cur, n);
 }
 
 // (#109 test-gate memory) A per-scope CHECKPOINT/REWIND of the process root region's bump position.
@@ -1725,9 +2375,9 @@ void *tk_alloc(size_t n) {
 // (head chunk, its used offset). Rewind frees every chunk PREPENDED after the checkpoint and resets
 // the checkpoint chunk's bump offset — bulk-freeing everything the root region allocated in between.
 //
-// Used ONLY by the test-gate runner (vm's run_tests_cov) to bound memory: each #test's transient
-// allocations (env cells, list copies, string concats — the self-host VM's copy-everything values,
-// [[selfhost-vm-perf]]) are freed after the test, so 659 tests no longer accumulate 9+ GB. SOUND
+// Used ONLY by the test-gate runner (run_tests_cov) to bound memory: each #test's transient
+// allocations (env cells, list copies, string concats — the self-host compiler's copy-everything
+// values) are freed after the test, so 659 tests no longer accumulate 9+ GB. SOUND
 // because run_tests_cov is compiled C (its loop state lives on the C stack, NOT in the arena) and the
 // coverage sinks are libc-heap (realloc/malloc above) — so nothing referenced after a test lives in
 // the rewound span. Balanced push/pop (depth ~1); a stack over the fixed cap is counted but not saved
@@ -1793,14 +2443,9 @@ void tk_arena_commit(void) {
 // line whose shape no test body can perturb, and the captured bytes that follow are unambiguously
 // that test's because nothing else can come between them.
 //
-// The channel is a process-wide singleton, not a stack: tests do not nest.
-typedef struct { char *buf; size_t len; size_t cap; } tk_chan;
-
-static tk_chan tk_chan_out = { NULL, 0, 0 };
-static tk_chan tk_chan_err = { NULL, 0, 0 };
-static char    tk_chan_label[TK_TEST_LABEL_MAX];
-static size_t  tk_chan_label_len = 0;
-static bool    tk_chan_open      = false;
+// The channel is per-task (E1-C1: `tk_chan` and the capture members moved into `tk_task`), not a
+// stack: tests do not nest, and a captured print must reach the running test's OWN channel, never a
+// neighbour's — which per-task storage guarantees even when lanes run concurrently.
 
 // tk_chan_append — append n bytes to a channel, growing geometrically. A failed growth DROPS the
 // bytes instead of aborting: losing a diagnostic line is bad, killing the run that would have
@@ -1853,6 +2498,7 @@ static void tk_chan_verdict_line(const char *verdict) {
 }
 
 void tk_test_begin(tk_str label) {
+    tk_task_reset_transient();   // (E1-C3) each `#test` enters on a clean transient slate — the reshuffle can expose no residue
     tk_chan_out.len = 0;
     tk_chan_err.len = 0;
     tk_chan_label_len = label.len < sizeof tk_chan_label ? label.len : sizeof tk_chan_label - 1;
@@ -1903,10 +2549,8 @@ static bool tk_test_capturing(void) { return tk_test_depth > 0; }
 // TK_TEST_VERDICT_MAX — the failing verdict buffer, sized for "FAILED (exit -2147483648)" and slack.
 #define TK_TEST_VERDICT_MAX 64
 
-static long tk_test_ran    = 0;
-static long tk_test_passed = 0;
-static long tk_test_failed = 0;
-static long tk_test_exited = 0;
+// (E1-C1) tk_test_ran/passed/failed/exited are per-task members (see the seam): the tally a lane
+// accumulates is its own, and the parent sums lanes after the barrier (§3 of the axis design).
 
 // tk_test_capture_leave — record this level's outcome, pop the stack, and hand control back to the
 // tk_test_run that owns the innermost frame. Popping BEFORE the jump is what makes the outer level
@@ -1980,7 +2624,7 @@ static void (*tk_test_probe_body(int32_t which))(void) {
 // value on this tree: codegen emits no prototype for such an extern (it relies on teko_rt.h) and the
 // header's C struct is not the mangled Teko one, so the call site fails to compile. Measured, not
 // assumed — `tk_t_teko__test__TestOutcome e = tk_test_capture_probe(...)` is an `invalid initializer`.
-static int32_t tk_test_probe_last_code = 0;
+// (E1-C1) Per-task member (see the seam beside the F1 families).
 
 int32_t tk_test_capture_probe(int32_t which) {
     void (*body)(void) = tk_test_probe_body(which);
@@ -2071,8 +2715,8 @@ static bool tk_scope_byte_ok(char c) {
     return c == '_' || c == '-';
 }
 
-static char   tk_scope_buf[TK_TEST_SCOPE_MAX];
-static size_t tk_scope_len = 0;
+// (E1-C1) tk_scope_buf/tk_scope_len are per-task members (see the seam): each test's derived scope
+// token is its own, so two lanes deriving paths at once never share the buffer.
 
 tk_str tk_test_scope(void) {
     if (!tk_chan_open) return (tk_str){ (const tk_byte *)"", 0 };
@@ -2096,9 +2740,8 @@ tk_str tk_test_scope(void) {
 // The name lives HERE rather than in the assert seed because the thing it is written onto is the
 // per-test channel above: `<name>: ok` has to land on the running test's own channel, and the panic
 // prefix has to survive the seed being replaced by the corpus's own strong definitions.
-static char   tk_scen_name[TK_TEST_LABEL_MAX];
-static size_t tk_scen_len = 0;
-static char   tk_scen_prefix[TK_TEST_LABEL_MAX + 2];
+// (E1-C1) tk_scen_name/len/prefix are per-task members (see the seam): the scenario a lane names is
+// written onto that lane's channel, so the label must travel with the task, not a shared singleton.
 
 void tk_assert_scenario_set(tk_str name) {
     tk_scen_len = name.len < sizeof tk_scen_name ? name.len : sizeof tk_scen_name - 1;
@@ -2170,6 +2813,12 @@ double tk_float_parse(tk_str s) {
     return v;
 }
 
+uint64_t tk_rt_float_parse_bits(tk_str s) {
+    union { double f; uint64_t u; } bits;
+    bits.f = tk_float_parse(s);
+    return bits.u;
+}
+
 _Noreturn void tk_panic(const char *msg) {
     // Under CAPTURE (test mode only) this stops the TEST, not the process: the line lands in this
     // test's own channel and control returns to tk_test_run. `_Noreturn` stays honest — longjmp
@@ -2235,10 +2884,10 @@ _Noreturn void tk_panic_cast(void) {
 }
 _Noreturn void tk_panic_overflow(void) { tk_panic("integer overflow"); }
 
-// (C1.7) positioned OOB — print "line:col: " (same shape as the VM's vm_panic_pos), then the
-// canonical TK_PANIC_MARKER line for "index out of bounds", so VM and native locate identically.
-// The position goes BEFORE the marker on purpose: the marker and the reason stay adjacent, so a
-// regressor pattern can assert them together without ever naming a line or column.
+// (C1.7) positioned OOB — print "line:col: " then the canonical TK_PANIC_MARKER line for
+// "index out of bounds". The position goes BEFORE the marker on purpose: the marker and the
+// reason stay adjacent, so a regressor pattern can assert them together without ever naming
+// a line or column.
 _Noreturn void tk_panic_oob_at(uint32_t line, uint32_t col) {
     char buf[32];
     snprintf(buf, sizeof buf, "%u:%u: ", (unsigned)line, (unsigned)col);
@@ -2289,7 +2938,7 @@ tk_ffi_sres tk_rt_read_file(tk_str path) {
 // generation — new/unrecognized `str | error`-shaped externs need a per-name lift the SEED's
 // frozen codegen.c cannot learn post-release (the bootstrap-seed constraint); a direct `bool`/
 // `str` return needs no lift at all (mirrors tk_rt_os/tk_rt_version's already-working shape).
-static bool tk_rt_stdin_eof_flag = false;
+// (E1-C1) Per-task member (see the seam beside the F1 families).
 
 // (DT3) tk_rt_stdin_eof() — teko::io::stdin_eof(): did the LAST read_line() hit real EOF (no
 // more input at all)? Read this AFTER an empty read_line() result to tell "EOF" from "a blank
@@ -2349,6 +2998,27 @@ tk_str tk_rt_read_stdin(void) {
     if (len) memcpy(buf, scratch, len);
     free(scratch);
     return (tk_str){ buf, len };
+}
+
+// (0.3.1.0 LSP crumb 0) tk_rt_read_stdin_n — read EXACTLY `n` bytes from stdin into an
+// arena-owned []byte slice. Loops fread until `n` bytes have been consumed or stdin hits EOF
+// (fread returns 0). The returned slice length is what was actually read: `n` on a full body,
+// fewer on EOF mid-body — the transport layer (src/lsp/jsonrpc.tks) compares that length to `n`
+// and raises "truncated body" rather than accepting a short frame, so a truncated JSON-RPC frame
+// is never silently taken. Uses fread on the same stdin FILE* the header line reader (fgetc via
+// tk_rt_read_line) uses, so headers and body share one buffered stream with no over-read: the
+// line reader stops at the '\n' after the blank separator, and this reads the exact body that
+// follows. A genuine read fault (ferror) panics (M.1 fail-loud), mirroring tk_rt_read_stdin.
+tk_slice_byte tk_rt_read_stdin_n(uint64_t n) {
+    tk_byte *out = (tk_byte *)tk_alloc(n == 0 ? 1 : n);
+    uint64_t filled = 0;
+    while (filled < n) {
+        size_t got = fread(out + filled, 1, (size_t)(n - filled), stdin);
+        if (got == 0) break;
+        filled += (uint64_t)got;
+    }
+    if (ferror(stdin)) tk_panic("cannot read stdin");
+    return (tk_slice_byte){ out, filled };
 }
 
 tk_ffi_sres tk_rt_getenv(tk_str name) {
@@ -2532,6 +3202,82 @@ bool tk_rt_last_index_of_ok(tk_str hay, tk_str needle, uint64_t *out_index) {
     tk_ffi_u64res r = tk_rt_last_index_of(hay, needle);
     if (r.ok) { *out_index = r.value; }
     return r.ok;
+}
+
+// --- native-backend own-register twins for the aggregate-returning host FFI (0.3.1.0 degrau 34) ---
+// Each wraps the real (struct-returning) primitive above and re-shapes its result into the
+// single-register `bool` + shared (ptr, len) out-parameter convention the native backend's `LCall`
+// can capture — no host logic is duplicated (the SUPREME RULE seam: signature/wiring only). See
+// teko_rt.h for why the direct SRET/rax:rdx path faults on that backend.
+
+// tk_ffi_sres_into_out — unpack an sres into the shared (ptr, len) out-slots: the value on success,
+// the error message on failure, the caller's `bool` deciding which meaning it wrote.
+static bool tk_ffi_sres_into_out(tk_ffi_sres r, const tk_byte **out_ptr, uint64_t *out_len) {
+    if (r.ok) {
+        *out_ptr = r.value.ptr;
+        *out_len = r.value.len;
+        return true;
+    }
+    *out_ptr = r.err.ptr;
+    *out_len = r.err.len;
+    return false;
+}
+
+// tk_ffi_ures_into_out — the `error | null` twin's shared tail: `true` (no error) leaves the
+// out-slots untouched; on failure the error message's (ptr, len) travel through them.
+static bool tk_ffi_ures_into_out(tk_ffi_ures r, const tk_byte **out_err_ptr, uint64_t *out_err_len) {
+    if (r.ok) return true;
+    *out_err_ptr = r.err.ptr;
+    *out_err_len = r.err.len;
+    return false;
+}
+
+bool tk_rt_getenv_ok(const tk_byte *name_ptr, uint64_t name_len, const tk_byte **out_ptr, uint64_t *out_len) {
+    return tk_ffi_sres_into_out(tk_rt_getenv((tk_str){ name_ptr, (size_t)name_len }), out_ptr, out_len);
+}
+
+bool tk_rt_getcwd_ok(const tk_byte **out_ptr, uint64_t *out_len) {
+    return tk_ffi_sres_into_out(tk_rt_getcwd(), out_ptr, out_len);
+}
+
+bool tk_rt_read_file_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_ptr, uint64_t *out_len) {
+    return tk_ffi_sres_into_out(tk_rt_read_file((tk_str){ path_ptr, (size_t)path_len }), out_ptr, out_len);
+}
+
+bool tk_rt_list_dir_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_ptr, uint64_t *out_len) {
+    tk_ffi_slres r = tk_rt_list_dir((tk_str){ path_ptr, (size_t)path_len });
+    if (r.ok) {
+        *out_ptr = (const tk_byte *)r.ptr;
+        *out_len = r.len;
+        return true;
+    }
+    *out_ptr = r.err.ptr;
+    *out_len = r.err.len;
+    return false;
+}
+
+bool tk_rt_setenv_ok(const tk_byte *name_ptr, uint64_t name_len, const tk_byte *value_ptr, uint64_t value_len, const tk_byte **out_err_ptr, uint64_t *out_err_len) {
+    return tk_ffi_ures_into_out(tk_rt_setenv((tk_str){ name_ptr, (size_t)name_len }, (tk_str){ value_ptr, (size_t)value_len }), out_err_ptr, out_err_len);
+}
+
+bool tk_rt_chdir_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_err_ptr, uint64_t *out_err_len) {
+    return tk_ffi_ures_into_out(tk_rt_chdir((tk_str){ path_ptr, (size_t)path_len }), out_err_ptr, out_err_len);
+}
+
+bool tk_rt_mkdir_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_err_ptr, uint64_t *out_err_len) {
+    return tk_ffi_ures_into_out(tk_rt_mkdir((tk_str){ path_ptr, (size_t)path_len }), out_err_ptr, out_err_len);
+}
+
+bool tk_rt_remove_file_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_err_ptr, uint64_t *out_err_len) {
+    return tk_ffi_ures_into_out(tk_rt_remove_file((tk_str){ path_ptr, (size_t)path_len }), out_err_ptr, out_err_len);
+}
+
+bool tk_rt_write_file_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte *content_ptr, uint64_t content_len, const tk_byte **out_err_ptr, uint64_t *out_err_len) {
+    return tk_ffi_ures_into_out(tk_rt_write_file((tk_str){ path_ptr, (size_t)path_len }, (tk_str){ content_ptr, (size_t)content_len }), out_err_ptr, out_err_len);
+}
+
+bool tk_rt_write_file_bytes_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte *data_ptr, uint64_t data_len, const tk_byte **out_err_ptr, uint64_t *out_err_len) {
+    return tk_ffi_ures_into_out(tk_rt_write_file_bytes((tk_str){ path_ptr, (size_t)path_len }, data_ptr, data_len), out_err_ptr, out_err_len);
 }
 
 // (romaneio .31) TK_RT_SIGNAL_EXIT_BASE — the shell convention for "died by signal N": 128 + N.
@@ -2936,11 +3682,8 @@ int32_t tk_rt_fd_wait_readable(int64_t fd, int64_t timeout_ms) {
 // left, so one drain must finish before the next begins. Static rather than arena-allocated so a
 // fill costs no allocation at all — the whole point of staging is that the per-byte call underneath
 // it never touches the host.
-static tk_byte tk_rt_fd_stage[TK_RT_PIPE_CAPACITY];
-// tk_rt_fd_staged — how many bytes of tk_rt_fd_stage the last fill left, and how many of those have
-// already been taken.
-static size_t tk_rt_fd_staged = 0;
-static size_t tk_rt_fd_taken = 0;
+// (E1-C1) tk_rt_fd_stage/staged/taken are per-task members (see the seam): the staging slot is one
+// per task, so a lane draining a pipe never sees bytes a different lane's fill left.
 
 int64_t tk_rt_fd_fill(int64_t fd, int64_t timeout_ms) {
     tk_rt_fd_staged = 0;
@@ -3056,6 +3799,21 @@ uint64_t tk_peak_rss(void) {
 #endif
 }
 
+// (E1-C6) tk_rt_nproc — the number of processors the OS grants THIS process right now (online CPUs),
+// at least 1. The OS-granted count is what the test/regression job pools default to and clamp their
+// env override against, so the parallelism a machine may use is the machine's business and never a
+// source literal. POSIX reads sysconf; Windows reads NUMBER_OF_PROCESSORS (no extra header, unlike
+// GetSystemInfo). An unavailable or nonsensical count degrades to 1 — a serial run is always valid.
+uint64_t tk_rt_nproc(void) {
+#if defined(_WIN32)
+    const char *e = getenv("NUMBER_OF_PROCESSORS");
+    long n = e != NULL ? strtol(e, NULL, 10) : 0;
+#else
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+    return n > 0 ? (uint64_t)n : 1;
+}
+
 // (#194 C6) teko::crypto::rand::secure_bytes(n) — n bytes from the host CSPRNG. Every
 // platform bottom fills a caller-owned buffer in fixed-size (or single) chunks and PANICS
 // (M.1) on a genuine host entropy failure — a CSPRNG that silently degrades to weak/short
@@ -3116,13 +3874,41 @@ const tk_byte *tk_rt_version_len(uint64_t *out_len) {
     return r.ptr;
 }
 
+// tk_rt_read_line_len / tk_rt_read_stdin_len / tk_assert_scenario_prefix_len / tk_test_scope_len —
+// the out-parameter-length twins for the remaining plain-tk_str-returning host primitives reached
+// through an `extern fn` on the native backend (0.3.1.0 degrau 35). Each defers to its by-value
+// primitive and re-shapes the fat return into (return ptr, *out_len) so the length survives the
+// backend's single-result-register call convention. No logic is duplicated.
+const tk_byte *tk_rt_read_line_len(uint64_t *out_len) {
+    tk_str r = tk_rt_read_line();
+    *out_len = r.len;
+    return r.ptr;
+}
+
+const tk_byte *tk_rt_read_stdin_len(uint64_t *out_len) {
+    tk_str r = tk_rt_read_stdin();
+    *out_len = r.len;
+    return r.ptr;
+}
+
+const tk_byte *tk_assert_scenario_prefix_len(uint64_t *out_len) {
+    tk_str r = tk_assert_scenario_prefix();
+    *out_len = r.len;
+    return r.ptr;
+}
+
+const tk_byte *tk_test_scope_len(uint64_t *out_len) {
+    tk_str r = tk_test_scope();
+    *out_len = r.len;
+    return r.ptr;
+}
+
 // D3 — test-coverage sink (host side-channel; see teko_rt.h). A growable array of distinct ids,
 // deduped on insert (the id count is bounded by the project's function count, so linear dedup is
 // fine). tk_cov_reset starts a fresh run; tk_cov_mark records a function-entry id; tk_cov_distinct
 // reports how many distinct functions executed.
-static uint64_t *tk_cov_ids = NULL;
-static uint64_t  tk_cov_n   = 0;
-static uint64_t  tk_cov_cap = 0;
+// (E1-C1) tk_cov_ids/n/cap are per-task members (see the seam): each lane's coverage sink is its
+// own, dumped to that lane's `.tkcov`, and the parent merges the dumps by re-reading (§3).
 void tk_cov_reset(void) { tk_cov_n = 0; }   // keep the buffer; just forget the marks
 void tk_cov_mark(uint64_t id) {
     for (uint64_t i = 0; i < tk_cov_n; i += 1) if (tk_cov_ids[i] == id) return;   // dedup
@@ -3146,13 +3932,10 @@ bool tk_cov_is_marked(uint64_t id) {
 // D3-branch — branch-coverage sink (a SEPARATE set, so it never perturbs the function-coverage
 // count above). Recorded only when tk_cov_branches_on(true) — a plain `teko test`/build pays one
 // flag check per branch and nothing else. A branch id packs (current-fn items-index, line, col,
-// outcome): the current fn is the TOP of a small enter/leave stack the VM pushes around each call,
+// outcome): the current fn is the TOP of a small enter/leave stack pushed around each call,
 // which makes (line,col) unique per FILE globally unique (two files may share a line:col). The
 // report queries tk_cov_branch_hit(fn, line, col, outcome) walking the typed program.
-static uint64_t *tk_covb_ids = NULL;
-static uint64_t  tk_covb_n   = 0;
-static uint64_t  tk_covb_cap = 0;
-static int       tk_covb_on  = 0;
+// (E1-C1) tk_covb_ids/n/cap/on are per-task members (see the seam), mirroring the function sink.
 /* (F1) tk_fn_stack/sp/cap moved into tk_task — this stack shadows the CALL STACK, which is per
    flow of control; two tasks sharing it would attribute one task's branches to the other's frame. */
 static uint64_t tk_branch_id(uint64_t fn, uint32_t line, uint32_t col, uint64_t outcome) {
@@ -3206,10 +3989,7 @@ bool tk_cov_branch_hit(uint64_t fn, uint32_t line, uint32_t col, uint64_t outcom
 // D3-line — LINE-coverage sink. Lines are marked on EVERY evaluated expression (far more often than
 // fns/branches), so this is an open-addressing HASH SET (O(1) insert/lookup) instead of the linear
 // dedup above. A line id packs (current-fn idx, line) via the same enter/leave fn stack; 0 = empty.
-static uint64_t *tk_line_ids = NULL;
-static uint64_t  tk_line_cap = 0;   // power of two
-static uint64_t  tk_line_n   = 0;
-static int       tk_lines_on = 0;
+// (E1-C1) tk_line_ids/cap/n/lines_on are per-task members (see the seam), mirroring the other sinks.
 static uint64_t tk_line_id(uint64_t fn, uint32_t line) { return ((fn << 24) | (uint64_t)line) + 1; }   // ≥1 (0 = empty slot)
 static void tk_line_rehash(uint64_t ncap) {
     // (#109 test-gate memory) malloc (libc heap), NOT the arena — this hash table must SURVIVE the
@@ -3369,12 +4149,99 @@ static void tk_push_cache_purge(void) {
     memset(t->push_cache, 0, sizeof t->push_cache);
 }
 
+// (2026-08-03, native-region-crash, push-redzone) TEKO_NATIVE_PUSH_REDZONE — a CI-narrowing aid,
+// same env-gated pattern as the other TEKO_NATIVE_* diagnostics: byte-identical when unset. The
+// chunk-header canary (TEKO_NATIVE_CHUNK_CANARY) exhaustively ruled out a corrupted chunk header
+// or a dangling region handle across three deterministic repros; TEKO_MEM_PARANOID=1 (which never
+// reuses a parked block, only poisons it) did NOT eliminate the crash either — it just moved the
+// corruption into glibc's OWN malloc metadata (`malloc.c:4196 assertion failed: chunk_main_arena`),
+// proof this is a genuine OUT-OF-BOUNDS WRITE, not merely a premature free-old reuse. The victim
+// observed live (gdb, deterministic, ASLR off) was a still-PARKED freenode whose memory held
+// readable ASCII text ("declare"...) — a []byte/[]T growable buffer this runtime's OWN push-cache
+// tracks as a live tail is being written PAST the length it reports.
+//
+// This places a small REDZONE (TK_REDZONE_BYTES of a fixed magic pattern) in the SLACK capacity
+// right after every push's just-written element (whenever slack exists), and verifies it is still
+// intact on the very NEXT push to the SAME live tail — found via the EXISTING push-cache witness,
+// no new tracking table. A stomped redzone means something wrote INTO that buffer's spare capacity
+// BETWEEN two pushes, bypassing tk_slice_push_r/tk_append_bytes_fo entirely (an aliased write
+// through some OTHER name/reference to the same buffer, or a native store with the wrong esz/width
+// computing an address past this buffer's own bounds).
+#define TK_REDZONE_BYTES 16
+#define TK_REDZONE_BYTE  0xC5
+
+static int tk_redzone_enabled(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("TEKO_NATIVE_PUSH_REDZONE"); v = (e != NULL && e[0] == '1') ? 1 : 0; }
+    return v;
+}
+
+// tk_redzone_place — write up to TK_REDZONE_BYTES of the magic pattern into the SLACK just past
+// `used` elements of `esz` bytes each, bounded by `cap` (never claims more than genuinely exists).
+static void tk_redzone_place(void *ptr, uint64_t used, uint64_t esz, uint64_t cap) {
+    if (!tk_redzone_enabled() || ptr == NULL || cap <= used) return;
+    uint64_t slack_bytes = (cap - used) * esz;
+    uint64_t rz = slack_bytes < TK_REDZONE_BYTES ? slack_bytes : TK_REDZONE_BYTES;
+    if (rz == 0) return;
+    memset((char *)ptr + used * esz, TK_REDZONE_BYTE, (size_t)rz);
+}
+
+// tk_redzone_verify — check a PREVIOUSLY placed redzone is still intact, right before this push
+// trusts `ptr`/`used` again. A miss (no redzone to check) is NOT proof of safety, only an absence
+// of coverage; a hit is definitive proof of a wild write into this exact buffer's slack.
+static void tk_redzone_verify(const void *ptr, uint64_t used, uint64_t esz, uint64_t cap, const char *where) {
+    if (!tk_redzone_enabled() || ptr == NULL || cap <= used) return;
+    uint64_t slack_bytes = (cap - used) * esz;
+    uint64_t rz = slack_bytes < TK_REDZONE_BYTES ? slack_bytes : TK_REDZONE_BYTES;
+    if (rz == 0) return;
+    const unsigned char *p = (const unsigned char *)ptr + used * esz;
+    for (uint64_t i = 0; i < rz; i += 1) {
+        if (p[i] == (unsigned char)TK_REDZONE_BYTE) continue;
+        fprintf(stderr,
+            "TEKO_NATIVE_PUSH_REDZONE: buffer %p redzone stomped, detected at %s\n"
+            "  used=%llu cap=%llu esz=%llu byte[%llu]=0x%02x (expected 0x%02x)\n"
+            "  bytes at breach (up to 32): ",
+            ptr, where,
+            (unsigned long long)used, (unsigned long long)cap, (unsigned long long)esz,
+            (unsigned long long)i, p[i], TK_REDZONE_BYTE);
+        uint64_t show = rz < 32 ? rz : 32;
+        for (uint64_t j = 0; j < show; j += 1) fprintf(stderr, "%02x ", p[j]);
+        fputc('\n', stderr);
+        fprintf(stderr, "  as text: \"");
+        for (uint64_t j = 0; j < show; j += 1) fputc((p[j] >= 32 && p[j] < 127) ? p[j] : '.', stderr);
+        fprintf(stderr, "\"\n");
+#ifdef TK_HAVE_BACKTRACE
+        { void *fr[24]; int nf = backtrace(fr, 24); fprintf(stderr, "  backtrace at detection:\n"); backtrace_symbols_fd(fr, nf, 2); }
+#endif
+        fflush(stderr);
+        abort();
+    }
+}
+
 // (S2 Level-1) the region-aware core: the grown buffer is allocated in `region`. `tk_slice_push`
 // (below) is the unchanged default lowering target (root); codegen emits THIS variant only for a
 // slice binding the escape analysis proves frame-local, passing the function's `_tkfr` frame region,
 // so the whole buffer history (geometric doublings + in-place tail) is bulk-freed on frame exit.
 void *tk_slice_push_r(const void *ptr, uint64_t len, const void *elem, uint64_t esz, uint64_t *out_len, tk_region *region) {
     unsigned h = ptr ? tk_push_slot(ptr) : 0;
+    // (chunk-canary/push-redzone bug, self-caught) STALE-SLOT SAFETY applies to the
+    // DIAGNOSTIC too, not only to the real in-place decision below: tk_region_drop
+    // frees a region's chunks WITHOUT walking tk_push_cache to invalidate entries
+    // that named an address inside them (only tk_free_block/tk_push_cache_purge
+    // scrub the cache). A dropped region's chunk memory can be handed to a LATER,
+    // wholly unrelated allocation by the underlying allocator, landing on the SAME
+    // address; a stale cache entry that happens to still match {ptr, esz} (region
+    // objects and esz values repeat constantly) would otherwise report THAT old,
+    // long-gone chain's {len, cap} as if they belonged to the NEW buffer — a false
+    // "redzone stomped" over data that is simply the new buffer's own legitimate
+    // content, misread against the wrong snapshot. Requiring {region, region_gen}
+    // to match too — the EXACT witness the real in-place-growth decision below
+    // trusts — closes it: tk_g_region_gen never repeats a value for the life of
+    // the process, so a recycled address always carries a fresh region and/or gen.
+    if (ptr != NULL && tk_push_cache[h].ptr == ptr && tk_push_cache[h].esz == esz
+        && tk_push_cache[h].region == region && tk_push_cache[h].region_gen == region->gen) {
+        tk_redzone_verify(ptr, tk_push_cache[h].len, esz, tk_push_cache[h].cap, "tk_slice_push_r:entry");
+    }
     // in-place ONLY when this is the live tail (same ptr + length witness + element size) with spare cap
     // AND still owned by the same live region generation (see STALE-SLOT SAFETY above).
     if (ptr != NULL && tk_push_cache[h].ptr == ptr && tk_push_cache[h].len == len
@@ -3383,6 +4250,7 @@ void *tk_slice_push_r(const void *ptr, uint64_t len, const void *elem, uint64_t 
         memcpy((char *)ptr + len * esz, elem, esz);
         tk_push_cache[h].len = len + 1;
         *out_len = len + 1;
+        tk_redzone_place((void *)ptr, len + 1, esz, tk_push_cache[h].cap);
         if (tk_g_push_ra != NULL) tk_g_push_ra = NULL;   // (#148 RA1) consume the wrapper's parked RA (NULL when obs off — predictable, ~free)
         return (void *)ptr;
     }
@@ -3436,6 +4304,7 @@ void *tk_slice_push_r(const void *ptr, uint64_t len, const void *elem, uint64_t 
         tk_push_cache[hb].cap = cap; tk_push_cache[hb].esz = esz;
         tk_push_cache[hb].region = region; tk_push_cache[hb].region_gen = region->gen;
     }
+    tk_redzone_place(buf, len + 1, esz, cap);
     *out_len = len + 1;
     return buf;
 }
@@ -3449,14 +4318,29 @@ void *tk_slice_push_r(const void *ptr, uint64_t len, const void *elem, uint64_t 
 // realloc-parity ladders (memory win).
 void *tk_append_bytes_fo(const void *ptr, uint64_t len, const void *src, uint64_t n, uint64_t *out_len) {
     if (n == 0) { *out_len = len; return (void *)ptr; }
+    // (C1 hardening) follow the CURRENT region like tk_alloc does, so a buffer grown inside a scratch
+    // window is cache-tagged with the CHILD's (region, gen) — not root — and tk_region_drop retires it
+    // via the same generation guard the whole fix relies on. cur == root when no window is open, so
+    // this is byte-for-byte the old behaviour for every existing caller (cb runs only at root scope).
+    tk_region *cur = tk_region_current();
+    if (ptr != NULL) {
+        unsigned h0 = tk_push_slot(ptr);
+        // (chunk-canary/push-redzone bug, self-caught) same STALE-SLOT SAFETY as
+        // tk_slice_push_r's own redzone check — see its comment.
+        if (tk_push_cache[h0].ptr == ptr && tk_push_cache[h0].esz == 1
+            && tk_push_cache[h0].region == cur && tk_push_cache[h0].region_gen == cur->gen) {
+            tk_redzone_verify(ptr, tk_push_cache[h0].len, 1, tk_push_cache[h0].cap, "tk_append_bytes_fo:entry");
+        }
+    }
     if (ptr != NULL) {   // in-place: the live tail with enough spare capacity
         unsigned h = tk_push_slot(ptr);
         if (tk_push_cache[h].ptr == ptr && tk_push_cache[h].len == len && tk_push_cache[h].esz == 1
-            && tk_push_cache[h].region == tk_g_root && tk_push_cache[h].region_gen == tk_g_root->gen
+            && tk_push_cache[h].region == cur && tk_push_cache[h].region_gen == cur->gen
             && len + n <= tk_push_cache[h].cap) {
             memcpy((char *)ptr + len, src, n);
             tk_push_cache[h].len = len + n;
             *out_len = len + n;
+            tk_redzone_place((void *)ptr, len + n, 1, tk_push_cache[h].cap);
             return (void *)ptr;
         }
     }
@@ -3477,26 +4361,33 @@ void *tk_append_bytes_fo(const void *ptr, uint64_t len, const void *src, uint64_
     if (tk_push_cache[hb].ptr == NULL || tk_push_cache[hb].cap * tk_push_cache[hb].esz <= cap) {
         tk_push_cache[hb].ptr = buf; tk_push_cache[hb].len = len + n;
         tk_push_cache[hb].cap = cap; tk_push_cache[hb].esz = 1;
-        tk_push_cache[hb].region = tk_g_root; tk_push_cache[hb].region_gen = tk_g_root->gen;
+        tk_push_cache[hb].region = cur; tk_push_cache[hb].region_gen = cur->gen;
     }
+    tk_redzone_place(buf, len + n, 1, cap);
     if (ptr != NULL) tk_free_block((void *)ptr, old_bytes);   // the DECREE: the old buffer is dead
     *out_len = len + n;
     return buf;
 }
 
-// the default root-region lowering (unchanged contract) — a thin wrapper over the region-aware core.
+// the default CURRENT-region lowering (unchanged contract) — a thin wrapper over the region-aware
+// core. (C1) The target is tk_region_current(), which is the root until a tk_region_enter, so a
+// program that never enters a region is byte-for-byte and cache-for-cache what it was. Inside the
+// native backend's per-function scratch window the buffer lands in the entered child AND the
+// push-cache tags it with the CHILD's generation, so tk_region_drop retires that generation and a
+// later root append can never false-hit the freed address (the gen mechanism is the drop guard).
 void *tk_slice_push(const void *ptr, uint64_t len, const void *elem, uint64_t esz, uint64_t *out_len) {
     // (#148 RA1) park THIS caller's return address so the core attributes the grow to the generated
     // fn, not to this wrapper hop. Only under obs (zero writes when off).
     if (tk_obs_enabled() == 1) tk_g_push_ra = __builtin_return_address(0);
-    return tk_slice_push_r(ptr, len, elem, esz, out_len, tk_region_root());
+    return tk_slice_push_r(ptr, len, elem, esz, out_len, tk_region_current());
 }
 
 // (0.3.1.0 degrau 4 — NATIVE-AGG-SLICE-BY-ADDRESS) tk_slice_elem_box — copy one aggregate element
-// into FRESH root-arena storage and hand back its address, so a push inside a loop stores a distinct
-// address per ITERATION instead of the one frame slot the native backend allocates per instruction.
-// tk_alloc already maps n == 0 to a unique block, so a zero-sized aggregate still yields a distinct
-// address; the copy's lifetime is the root region's, matching the buffer tk_slice_push grows.
+// into the CURRENT region's storage and hand back its address, so a push inside a loop stores a
+// distinct address per ITERATION instead of the one frame slot the native backend allocates per
+// instruction. tk_alloc already maps n == 0 to a unique block, so a zero-sized aggregate still yields
+// a distinct address; the copy follows tk_region_current() (root until a tk_region_enter), matching
+// the buffer tk_slice_push grows.
 void *tk_slice_elem_box(const void *elem, uint64_t esz) {
     void *p = tk_alloc((size_t)esz);
     if (esz != 0) memcpy(p, elem, (size_t)esz);
@@ -3524,7 +4415,14 @@ void *tk_slice_push_fo(const void *ptr, uint64_t len, const void *elem, uint64_t
         if (tk_push_cache[h].ptr == ptr && tk_push_cache[h].esz == esz && tk_push_cache[h].cap > len)
             old_bytes = tk_push_cache[h].cap * esz;   // the live tail — its full capacity is reusable
     }
-    void *buf = tk_slice_push_r(ptr, len, elem, esz, out_len, tk_region_root());
+    // (0.3.1 move-on-return M2, Mechanism 1) FREE-OLD grows into the CURRENT region. Under the
+    // per-escaping-RHS bracket discipline the current region IS `_tkrr` (the caller's region) while an
+    // escaping cb/append_fo buffer is built, so it materializes there and MOVES with the return — while
+    // a non-escaping scratch buffer (current == `_tkfr`) is reclaimed at the frame drop. The old buffer
+    // is parked on the root-only free-list only at root scope (`tk_free_block` returns when
+    // `tk_cur_rsp != 0`), so a scoped grow never dangles it. Following the current region is the whole
+    // point of Mechanism 1: zero new runtime symbols, the bracket does the conveyance.
+    void *buf = tk_slice_push_r(ptr, len, elem, esz, out_len, tk_region_current());
     if (buf != old && old != NULL) {
         // (#148 Level-2 BISECT) TEKO_FO_MAX=N limits parking to the first N grows (binary-search
         // the guilty park); TEKO_FO_TRACE at the boundary dumps the parking site's backtrace.
@@ -3562,14 +4460,15 @@ void *tk_slice_with_cap_r(uint64_t esz, uint64_t cap, tk_region *region) {
         tk_push_cache[hb].ptr = buf; tk_push_cache[hb].len = 0;
         tk_push_cache[hb].cap = alloc_cap; tk_push_cache[hb].esz = esz;
         tk_push_cache[hb].region = region; tk_push_cache[hb].region_gen = region->gen;
+        tk_redzone_place(buf, 0, esz, alloc_cap);   // a fresh pre-sized builder — nothing used yet
     }
     return buf;
 }
 
-// tk_slice_with_cap — the default root-region lowering, mirroring tk_slice_push over
-// tk_slice_push_r.
+// tk_slice_with_cap — the default CURRENT-region lowering, mirroring tk_slice_push over
+// tk_slice_push_r. (C1) Targets tk_region_current() — the root until a tk_region_enter.
 void *tk_slice_with_cap(uint64_t esz, uint64_t cap) {
-    return tk_slice_with_cap_r(esz, cap, tk_region_root());
+    return tk_slice_with_cap_r(esz, cap, tk_region_current());
 }
 
 // (mem::free ruling 2026-07-03) tk_free_block — PARK an explicitly freed root-arena block on the
@@ -3583,10 +4482,16 @@ void *tk_slice_with_cap(uint64_t esz, uint64_t cap) {
 // direct binding is scrubbed by the lowering; see teko-mem-free-design).
 void tk_free_block(void *p, uint64_t bytes) {
     if (p == NULL) return;
+    tk_canary_check_head(tk_region_current(), "tk_free_block:entry");
     { static int dbg=-1; if (dbg<0) dbg = getenv("TEKO_FO_DEBUG")?1:0;
       if (dbg) fprintf(stderr, "PARK %p bytes=%llu\n", p, (unsigned long long)bytes); }
     unsigned h = tk_push_slot(p);
     if (tk_push_cache[h].ptr == p) tk_push_cache[h].ptr = NULL;   // evict the live-tail record
+    // (C1) Inside a scoped-region window (cur_rsp != 0) the block belongs to a child region that
+    // tk_region_drop bulk-frees; parking it on the ROOT free-list would dangle after the drop and be
+    // handed back to a root allocation (a UAF the gen check cannot see, since the free-list has no
+    // generation). At root scope this is a no-op guard, so root-only frees park exactly as before.
+    if (tk_cur_rsp != 0) return;
     // (#148 Level-2) PARK = FLOOR-16 — never LIE about the block's size. The caller's `bytes` is a
     // true LOWER bound (len*esz) that need not be a 16-multiple: flooring to the 16-byte bin
     // granularity keeps the parked size ≤ the block's real usable extent, so serving it never
@@ -3731,3 +4636,141 @@ int64_t tk_rt_monotonic_ns(void) {
     return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
 #endif
 }
+
+// tk_nproc — logical CPUs the OS grants this process. Floor 1: an OS that answers 0 or fails is
+// treated as one CPU, because a run always has at least the lane executing it. No allocation.
+uint64_t tk_nproc(void) {
+#if defined(_WIN32)
+    DWORD n = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+    return n < 1 ? (uint64_t)1 : (uint64_t)n;
+#else
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    return n < 1 ? (uint64_t)1 : (uint64_t)n;
+#endif
+}
+// ===== journal runtime funds (design journaling-de-corrida-0.3.1 §2.3 / §6) — BEGIN =====
+// See teko_rt.h for the per-symbol contract. NEW symbols only; no function above is edited, so a drain
+// rebase against the M2 (tk_region_enter/leave, ~:1855) and 5th-gap (tk_slice_push*, ~:3762) edits
+// elsewhere in this file is mechanical. The str-taking entries are transcribed into lir/lower.tks's
+// by-value-tk_str arity tables, per that file's "the table mirrors the header" law.
+
+#define TK_JOURNAL_NOTE_PREFIX_MAX 512
+
+// The async-signal-safe note target: the last descriptor tk_journal_open handed out, plus the
+// pre-shaped record head tk_journal_arm stored. `volatile sig_atomic_t` for the fd because a signal
+// handler reads it. The prefix bytes are written only OUTSIDE a handler (tk_journal_arm, at run open)
+// and read inside one — safe because arming completes long before a polite signal can arrive.
+static volatile sig_atomic_t tk_journal_note_fd = -1;
+static char tk_journal_note_prefix[TK_JOURNAL_NOTE_PREFIX_MAX];
+static volatile size_t tk_journal_note_prefix_len = 0;
+
+// tk_journal_write_raw — one blocking, loop-completed write of `n` bytes to `fd`. Shared by the
+// buffered append and the async-signal-safe note; uses only write(2)/_write, so it is legal in a
+// signal handler.
+static int tk_journal_write_raw(int fd, const char *buf, size_t n) {
+    size_t done = 0;
+    while (done < n) {
+#ifdef _WIN32
+        int put = _write(fd, buf + done, (unsigned int)(n - done));
+#else
+        ssize_t put = write(fd, buf + done, n - done);
+#endif
+        if (put <= 0) return -1;
+        done += (size_t)put;
+    }
+    return 0;
+}
+
+int64_t tk_journal_open(tk_str path) {
+    char *p = tk_cstr(path);
+#ifdef _WIN32
+    int fd = _open(p, _O_WRONLY | _O_CREAT | _O_APPEND | _O_BINARY, _S_IREAD | _S_IWRITE);
+#else
+    int fd = open(p, O_WRONLY | O_CREAT | O_APPEND, 0644);
+#endif
+    if (fd < 0) return -1;
+    tk_journal_note_fd = fd;   // the segment a polite signal will note into (§6)
+    return (int64_t)fd;
+}
+
+int32_t tk_journal_append(tk_str rec, int64_t seg) {
+    if (tk_journal_write_raw((int)seg, (const char *)rec.ptr, rec.len) != 0)
+        return (int32_t)(errno ? errno : -1);
+    return 0;
+}
+
+void tk_journal_arm(tk_str prefix) {
+    size_t n = prefix.len < (size_t)(TK_JOURNAL_NOTE_PREFIX_MAX - 1) ? prefix.len : (size_t)(TK_JOURNAL_NOTE_PREFIX_MAX - 1);
+    if (n) memcpy(tk_journal_note_prefix, prefix.ptr, n);
+    tk_journal_note_prefix_len = n;
+}
+
+void tk_journal_note(int sig) {
+    int fd = (int)tk_journal_note_fd;
+    if (fd < 0) return;
+    if (tk_journal_note_prefix_len)
+        (void)tk_journal_write_raw(fd, tk_journal_note_prefix, tk_journal_note_prefix_len);
+    char num[16];
+    size_t i = sizeof num;
+    unsigned int v = (sig < 0) ? 0u : (unsigned int)sig;
+    if (v == 0u) num[--i] = '0';
+    while (v > 0u) { num[--i] = (char)('0' + (v % 10u)); v /= 10u; }
+    (void)tk_journal_write_raw(fd, num + i, sizeof num - i);
+    (void)tk_journal_write_raw(fd, "\n", 1);
+}
+
+int32_t tk_rt_rename(tk_str from, tk_str to) {
+    char *f = tk_cstr(from);
+    char *t = tk_cstr(to);
+    if (rename(f, t) != 0) return (int32_t)(errno ? errno : -1);
+    return 0;
+}
+
+int64_t tk_rt_pid(void) {
+#ifdef _WIN32
+    return (int64_t)GetCurrentProcessId();
+#else
+    return (int64_t)getpid();
+#endif
+}
+
+bool tk_rt_pid_alive(int64_t pid) {
+    if (pid <= 0) return false;
+#ifdef _WIN32
+    HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid);
+    if (h == NULL) return false;
+    DWORD w = WaitForSingleObject(h, 0);
+    CloseHandle(h);
+    return w == WAIT_TIMEOUT;
+#else
+    if (kill((pid_t)pid, 0) == 0) return true;
+    return errno == EPERM;
+#endif
+}
+
+// tk_rt_stop_handler — the POLITE-SIGNAL arm (design §6). Someone asked the program to stop (Ctrl-C, a
+// CI timeout, a cancel): write ONE `stop <sig>` record to the armed segment, then RESTORE the default
+// disposition and re-raise, so the process terminates EXACTLY as it would have with no handler at all.
+// The only observable difference is the note — the exit path, the wait-status, the core dump are the
+// signal's own default. ASYNC-SIGNAL-SAFE by construction: tk_journal_note writes pre-built bytes,
+// signal() and raise() are on POSIX's async-safe list, and nothing here allocates or formats.
+static void tk_rt_stop_handler(int sig) {
+    tk_journal_note(sig);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+// tk_rt_install_stop_handlers — install tk_rt_stop_handler for the "someone asked you to stop" signals
+// the crash installer (SIGSEGV/BUS/ILL/FPE — "the program broke") deliberately leaves alone. SIGINT
+// and SIGTERM exist on Windows too; SIGHUP and SIGQUIT are POSIX-only, under the same guard
+// tk_win32_spawnvp's platform code already uses. A SEPARATE constructor from the crash installer so a
+// drain rebase against that region stays trivial.
+__attribute__((constructor)) static void tk_rt_install_stop_handlers(void) {
+    signal(SIGINT,  tk_rt_stop_handler);
+    signal(SIGTERM, tk_rt_stop_handler);
+#ifndef _WIN32
+    signal(SIGHUP,  tk_rt_stop_handler);
+    signal(SIGQUIT, tk_rt_stop_handler);
+#endif
+}
+// ===== journal runtime funds — END =====

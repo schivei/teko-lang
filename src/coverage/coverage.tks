@@ -119,8 +119,6 @@ fn cov_walk_expr(e: checker::TExpr, w: CovWalk) -> CovWalk {
         }
         checker::TCast as c => cov_walk_expr(c.expr, w0)
         checker::TFieldAccess as fa => cov_walk_expr(fa.receiver, w0)
-        checker::TSafeFieldAccess as sfa => cov_walk_expr(sfa.receiver, w0)
-        checker::TCoalesce as co => cov_walk_expr(co.right, cov_walk_expr(co.left, w0))
         checker::TIndex as ix => cov_walk_expr(ix.index, cov_walk_expr(ix.receiver, w0))
         checker::TStructInit as si => {
             mut a = w0
@@ -352,11 +350,48 @@ fn cov_emit_lines(buf: []byte, w: CovWalk, fn_idx: u64) -> []byte {
  * @return        the buffer with this function's `<class>` block appended
  */
 fn cov_emit_class(buf: []byte, f: checker::TFunction, fn_idx: u64, w: CovWalk, lt: CovCount, bt: CovCount, fnhit: u64) -> []byte {
-    let cname = if f.namespace.len != 0 { teko::str::concat(f.namespace, "::", f.name) } else { f.name }
+    cov_emit_class_fields(buf, cov_class_name(f.namespace, f.name), f.file, f.name, f.line, fn_idx, w, lt, bt, fnhit)
+}
+
+/**
+ * The namespace-qualified Cobertura class name for a function: `namespace::name` when the function
+ * has a namespace, else the bare name. Extracted so the AST-walk renderer (`cov_emit_class`) and
+ * the site-map renderer (`cov_emit_class_fields` via `cov_cobertura_of`) qualify the name the SAME
+ * way and emit byte-identical XML.
+ *
+ * @param namespace  the function's namespace ("" when it has none)
+ * @param name       the function's bare name
+ * @return           `namespace::name`, or `name` when the namespace is empty
+ */
+fn cov_class_name(namespace: str, name: str) -> str {
+    if namespace.len != 0 { teko::str::concat(namespace, "::", name) } else { name }
+}
+
+/**
+ * Append one production function's complete Cobertura `<class>` block onto the copy-grow byte buffer
+ * from its ALREADY-RESOLVED identity fields and walk. The field-level twin of `cov_emit_class`: it
+ * takes the class name, filename, method name and method line directly rather than reading them off
+ * a `checker::TFunction`, so the site-map report path (which has no typed program) renders exactly
+ * the XML the AST-walk path renders. Attributes are single-quoted (valid XML) so no `"`-escaping is
+ * needed.
+ *
+ * @param buf     the copy-grow byte buffer being built
+ * @param cname   the namespace-qualified class name (from `cov_class_name`)
+ * @param file    the source file the class reports under
+ * @param mname   the method (function) name for the `<methods>` summary
+ * @param mline   the function's own source line (the method's single `<line>` element)
+ * @param fn_idx  the program-item index of the function (the coverage sink key)
+ * @param w       the function's walked coverage sites and distinct executable lines
+ * @param lt      the function's line tally (cov = hit lines, val = total lines)
+ * @param bt      the function's branch tally (cov = taken outcomes, val = total outcomes)
+ * @param fnhit   1 when the function itself was executed at least once, else 0
+ * @return        the buffer with this function's `<class>` block appended
+ */
+fn cov_emit_class_fields(buf: []byte, cname: str, file: str, mname: str, mline: u32, fn_idx: u64, w: CovWalk, lt: CovCount, bt: CovCount, fnhit: u64) -> []byte {
     let lrate = cov_rate_str(lt.cov, lt.val)
     let brate = cov_rate_str(bt.cov, bt.val)
-    mut b = teko::mem::append_fo(buf, $"      <class name='{cname}' filename='{f.file}' line-rate='{lrate}' branch-rate='{brate}' complexity='0'>\n")
-    b = teko::mem::append_fo(b, $"        <methods><method name='{f.name}' signature='()V' line-rate='{lrate}' branch-rate='{brate}'><lines><line number='{f.line}' hits='{fnhit}'/></lines></method></methods>\n")
+    mut b = teko::mem::append_fo(buf, $"      <class name='{cname}' filename='{file}' line-rate='{lrate}' branch-rate='{brate}' complexity='0'>\n")
+    b = teko::mem::append_fo(b, $"        <methods><method name='{mname}' signature='()V' line-rate='{lrate}' branch-rate='{brate}'><lines><line number='{mline}' hits='{fnhit}'/></lines></method></methods>\n")
     b = teko::mem::append_fo(b, "        <lines>\n")
     b = cov_emit_lines(b, w, fn_idx)
     teko::mem::append_fo(b, "        </lines>\n      </class>\n")
@@ -367,7 +402,7 @@ fn cov_emit_class(buf: []byte, f: checker::TFunction, fn_idx: u64, w: CovWalk, l
  * function (its filename is the function's source file). Each class's `<lines>` are the real
  * executable lines (every line with an evaluated expression, hit via cov_line_hit); a line that
  * hosts an if/match also carries its branch condition-coverage. The coverage machinery itself
- * (`teko::coverage`) is self-excluded, exactly as the retired VM was, so the report never measures
+ * (`teko::coverage`) is self-excluded, exactly as the retired interpreter was, so the report never measures
  * its own reporting code.
  *
  * The whole report accumulates into a copy-grow `[]byte` buffer via teko::mem::append_fo (the
@@ -382,8 +417,7 @@ fn cov_emit_class(buf: []byte, f: checker::TFunction, fn_idx: u64, w: CovWalk, l
  */
 exp fn cov_cobertura(prog: checker::TProgram) -> str {
     mut body: []byte = teko::list::empty()
-    mut lines_cov: u64 = 0; mut lines_val: u64 = 0
-    mut br_cov: u64 = 0; mut br_val: u64 = 0
+    mut agg = CovAgg { lines_cov = 0; lines_val = 0; br_cov = 0; br_val = 0 }
     mut i = 0
     loop {
         if i >= prog.items.len { break }
@@ -391,23 +425,99 @@ exp fn cov_cobertura(prog: checker::TProgram) -> str {
             checker::TFunction as f => {
                 if !f.is_test && f.namespace != "teko::coverage" {
                     let w = cov_walk_block(f.body, cov_walk_empty())
-                    let lt = cov_fn_line_tally(w, i to u64)
-                    let bt = cov_fn_branch_tally(w, i to u64)
-                    lines_cov = lines_cov + lt.cov; lines_val = lines_val + lt.val
-                    br_cov = br_cov + bt.cov; br_val = br_val + bt.val
-                    let fnhit: u64 = if teko::cov_is_marked(i to u64) { 1 to u64 } else { 0 to u64 }
-                    body = cov_emit_class(body, f, i to u64, w, lt, bt, fnhit)
+                    let r = cov_render_class(body, cov_class_name(f.namespace, f.name), f.file, f.name, f.line, i to u64, w)
+                    body = r.body
+                    agg = cov_agg_add(agg, r.lt, r.bt)
                 }
             }
             _ => { }
         }
         i++
     }
-    let lrate = cov_rate_str(lines_cov, lines_val)
-    let brate = cov_rate_str(br_cov, br_val)
+    cov_cobertura_wrap(body, agg)
+}
+
+/**
+ * The running whole-program coverage totals a Cobertura render accumulates across its classes: the
+ * covered/total line counts and the taken/total branch outcomes that the document's header rates
+ * are computed from. Threaded through the class loop so the AST-walk path (`cov_cobertura`) and the
+ * site-map path (`cov_cobertura_of`) accumulate identically.
+ */
+type CovAgg = struct {
+    /** the covered executable-line count summed over every class so far. */
+    lines_cov: u64
+    /** the total executable-line count summed over every class so far. */
+    lines_val: u64
+    /** the taken branch-outcome count summed over every class so far. */
+    br_cov: u64
+    /** the total branch-outcome count summed over every class so far. */
+    br_val: u64
+}
+
+/**
+ * Fold one class's line and branch tallies into the running whole-program aggregate.
+ *
+ * @param a   the aggregate so far
+ * @param lt  the class's line tally (cov = hit lines, val = total lines)
+ * @param bt  the class's branch tally (cov = taken outcomes, val = total outcomes)
+ * @return    `a` with `lt`/`bt` added
+ */
+fn cov_agg_add(a: CovAgg, lt: CovCount, bt: CovCount) -> CovAgg {
+    CovAgg { lines_cov = a.lines_cov + lt.cov; lines_val = a.lines_val + lt.val; br_cov = a.br_cov + bt.cov; br_val = a.br_val + bt.val }
+}
+
+/**
+ * One rendered class plus the tallies it contributed — the return of `cov_render_class`, so the
+ * caller both grows the body buffer and folds the class's line/branch counts into the aggregate
+ * from a single computation of the walk.
+ */
+type CovClassRender = struct {
+    /** the body buffer with this class's `<class>` block appended. */
+    body: []byte
+    /** the class's line tally (cov = hit lines, val = total lines). */
+    lt: CovCount
+    /** the class's branch tally (cov = taken outcomes, val = total outcomes). */
+    bt: CovCount
+}
+
+/**
+ * Render ONE production function's Cobertura `<class>` block AND compute its line/branch tallies in
+ * one place, so the AST-walk path and the site-map path produce byte-identical XML and identical
+ * aggregates. Reads the function's hit/line/branch marks from the coverage sink under `fn_idx` (the
+ * program-item index the native run keyed its marks by).
+ *
+ * @param body    the copy-grow body buffer being built
+ * @param cname   the namespace-qualified class name (from `cov_class_name`)
+ * @param file    the source file the class reports under
+ * @param mname   the method (function) name
+ * @param mline   the function's own source line
+ * @param fn_idx  the program-item index of the function (the coverage sink key)
+ * @param w       the function's walked coverage sites and distinct executable lines
+ * @return        the grown body plus the class's line and branch tallies
+ */
+fn cov_render_class(body: []byte, cname: str, file: str, mname: str, mline: u32, fn_idx: u64, w: CovWalk) -> CovClassRender {
+    let lt = cov_fn_line_tally(w, fn_idx)
+    let bt = cov_fn_branch_tally(w, fn_idx)
+    let fnhit: u64 = if teko::cov_is_marked(fn_idx) { 1 to u64 } else { 0 to u64 }
+    let b = cov_emit_class_fields(body, cname, file, mname, mline, fn_idx, w, lt, bt, fnhit)
+    CovClassRender { body = b; lt = lt; bt = bt }
+}
+
+/**
+ * Wrap the accumulated `<class>` body in the Cobertura document header and footer, computing the
+ * whole-program line/branch rates from the aggregate. The single closer for both render paths, so a
+ * report built from the site-map is byte-for-byte the report built from the typed program.
+ *
+ * @param body  the accumulated `<class>` blocks
+ * @param agg   the whole-program line/branch aggregate
+ * @return      the complete Cobertura XML document as a str
+ */
+fn cov_cobertura_wrap(body: []byte, agg: CovAgg) -> str {
+    let lrate = cov_rate_str(agg.lines_cov, agg.lines_val)
+    let brate = cov_rate_str(agg.br_cov, agg.br_val)
     mut out: []byte = teko::list::empty()
     out = teko::mem::append_fo(out, "<?xml version='1.0' ?>\n")
-    out = teko::mem::append_fo(out, $"<coverage line-rate='{lrate}' branch-rate='{brate}' lines-covered='{lines_cov}' lines-valid='{lines_val}' branches-covered='{br_cov}' branches-valid='{br_val}' complexity='0' version='teko' timestamp='0'>\n")
+    out = teko::mem::append_fo(out, $"<coverage line-rate='{lrate}' branch-rate='{brate}' lines-covered='{agg.lines_cov}' lines-valid='{agg.lines_val}' branches-covered='{agg.br_cov}' branches-valid='{agg.br_val}' complexity='0' version='teko' timestamp='0'>\n")
     out = teko::mem::append_fo(out, "  <sources><source>.</source></sources>\n  <packages>\n")
     out = teko::mem::append_fo(out, $"    <package name='teko' line-rate='{lrate}' branch-rate='{brate}' complexity='0'>\n      <classes>\n")
     out = teko::mem::append_fo(out, str(body))
@@ -418,7 +528,7 @@ exp fn cov_cobertura(prog: checker::TProgram) -> str {
 /**
  * Union a child test binary's dumped `.tkcov` into THIS process's coverage sinks, so the
  * engine-independent static walk (functions_coverage/line_coverage/branch_coverage) reads the
- * native gate's coverage exactly as it once read the VM's in-process marks. Backed by teko_rt.c's
+ * native gate's coverage exactly as it once read the interpreter's in-process marks. Backed by teko_rt.c's
  * `tk_cov_merge` (the #168 cross-process protocol).
  *
  * @param path  the child's dumped `.tkcov` file path
@@ -576,3 +686,452 @@ fn count_prod_fns(prog: checker::TProgram) -> u64 {
  * @return      the function-coverage percentage in [0, 100]
  */
 exp fn coverage_pct(prog: checker::TProgram) -> u64 { cov_pct(functions_coverage(prog)) }
+
+/**
+ * SITEMAP_MAGIC — the first word of a serialized site-map blob, so a corrupt or foreign file is
+ * rejected (and the report stage can fall back to a re-check) instead of being mis-parsed.
+ *
+ * @since 0.3.1
+ */
+const SITEMAP_MAGIC: str = "tksites"
+
+/**
+ * SITEMAP_VERSION — the serialized site-map layout version. Bumped only if the field order changes;
+ * a reader that finds a different version rejects the blob.
+ *
+ * @since 0.3.1
+ */
+const SITEMAP_VERSION: u64 = 1
+
+/**
+ * SiteFn — ONE production function's coverage identity, frozen at build time so the report stage can
+ * render its Cobertura `<class>` and tally its floors WITHOUT the typed program. It is exactly the
+ * subset of `checker::TFunction` the coverage renderer reads (`fn_idx`, namespace, name, file,
+ * `fn_line`) plus the `CovWalk` the build stage already computed by walking the body — the AST-walk
+ * the report used to redo after re-checking the whole compiler (the ~3 GB peak C4 removes).
+ *
+ * @since 0.3.1
+ */
+type SiteFn = struct {
+    /** the program-item index of the function — the coverage sink key the native run marked by. */
+    fn_idx: u64
+    /** the function's namespace ("" when it has none). */
+    namespace: str
+    /** the function's bare name. */
+    name: str
+    /** the source file the function lives in (the class's `filename`). */
+    file: str
+    /** the function's own 1-based source line (the method's single `<line>` element). */
+    fn_line: u32
+    /** the branch sites and distinct executable lines the build stage walked from the body. */
+    walk: CovWalk
+}
+
+/**
+ * SiteMap — the whole build's serialized coverage site-map: one `SiteFn` per production function, in
+ * program-item order. Emitted by the build stage next to the gate binary and read by the report
+ * stage, which then renders coverage by JOINING this table against the merged `.tkcov` sink — never
+ * re-parsing or re-checking the source. The join reproduces the AST-walk report byte for byte
+ * because every `SiteFn` carries the same `fn_idx`, identity fields and `CovWalk` in the same order.
+ *
+ * @since 0.3.1
+ */
+exp type SiteMap = struct {
+    /** the production functions, in program-item order (the render/tally iteration order). */
+    fns: []SiteFn
+    /** the D4 ARITH-CAST-RATE denominator the build measured (arith/assignment expressions visited). */
+    arith_total: u64
+    /** the D4 ARITH-CAST-RATE numerator the build measured (of those, how many carried a conversion). */
+    arith_with_conversion: u64
+}
+
+/**
+ * cov_build_sitefns — walk the typed program and collect one `SiteFn` per production function, in
+ * program-item order, applying the SAME filter the AST-walk report applies (skip `#test` functions
+ * and the coverage machinery itself). The `fn_idx` recorded is the program-item index `i`, which is
+ * exactly the sink key the native run marked by, so the report's join matches the build's marks.
+ *
+ * @param prog  the fully-typed program the build stage already holds
+ * @return      the production functions' coverage identities, in render order
+ */
+fn cov_build_sitefns(prog: checker::TProgram) -> []SiteFn {
+    mut fns: []SiteFn = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            checker::TFunction as f => {
+                if !f.is_test && f.namespace != "teko::coverage" {
+                    let w = cov_walk_block(f.body, cov_walk_empty())
+                    fns = teko::list::push(fns, SiteFn { fn_idx = i to u64; namespace = f.namespace; name = f.name; file = f.file; fn_line = f.line; walk = w })
+                }
+            }
+            _ => { }
+        }
+        i++
+    }
+    fns
+}
+
+/**
+ * cov_emit_sitemap — serialize the site-map of `prog` (its site-id → file:line:col:fn table) into a
+ * self-describing text blob the report stage reads WITHOUT re-parsing the source. This is what
+ * lets the report render coverage by a table join instead of a walk of the typed program — the
+ * removal of the last "reload the AST" the owner's ruling names.
+ *
+ * Emitted by the build stage, which ALREADY holds `prog` typed, alongside the gate; the report
+ * stage never needs the AST to report again.
+ *
+ * The layout is length-driven, not delimiter-driven: a header
+ * `tksites <version> <n> <arith_total> <arith_with_conversion>` line, then per function a counts
+ * line (`fn_idx fn_line ns_len name_len file_len n_lines n_sites`), the three identity strings
+ * concatenated (sliced back by their byte lengths, so a path's own digits or separators never
+ * confuse the parser), then the distinct lines and the `(line col n)` triples. All integers are
+ * whitespace-separated and the counts drive the read, so the newlines are for a human reader only.
+ *
+ * @param prog  the verified program (the same `fe.prog` the build stage checked)
+ * @return      the serialized site-map blob
+ * @since 0.3.1
+ */
+exp fn cov_emit_sitemap(prog: checker::TProgram) -> str {
+    let fns = cov_build_sitefns(prog)
+    let acr = checker::arith_cast_rate_report(prog)
+    mut b: []byte = teko::list::empty()
+    b = teko::mem::append_fo(b, $"{SITEMAP_MAGIC} {SITEMAP_VERSION} {fns.len} {acr.total} {acr.with_conversion}\n")
+    mut i: u64 = 0
+    loop {
+        if i >= fns.len { break }
+        b = cov_emit_one_sitefn(b, fns[i])
+        i = i + 1
+    }
+    str(b)
+}
+
+/**
+ * cov_emit_one_sitefn — append ONE `SiteFn`'s serialized record to the blob buffer: its counts
+ * line, its three length-prefixed identity strings, its distinct lines, and its branch-site
+ * triples. The mirror of `sm_parse_fn`.
+ *
+ * @param buf  the copy-grow blob buffer being built
+ * @param sf   the production function's coverage identity to serialize
+ * @return     the buffer with `sf`'s record appended
+ */
+fn cov_emit_one_sitefn(buf: []byte, sf: SiteFn) -> []byte {
+    mut b = teko::mem::append_fo(buf, $"{sf.fn_idx} {sf.fn_line} {sf.namespace.len} {sf.name.len} {sf.file.len} {sf.walk.lines.len} {sf.walk.sites.len}\n")
+    b = teko::mem::append_fo(b, sf.namespace)
+    b = teko::mem::append_fo(b, sf.name)
+    b = teko::mem::append_fo(b, sf.file)
+    b = teko::mem::append_fo(b, "\n")
+    mut k: u64 = 0
+    loop {
+        if k >= sf.walk.lines.len { break }
+        b = teko::mem::append_fo(b, $"{sf.walk.lines[k]} ")
+        k = k + 1
+    }
+    b = teko::mem::append_fo(b, "\n")
+    mut s: u64 = 0
+    loop {
+        if s >= sf.walk.sites.len { break }
+        let st = sf.walk.sites[s]
+        b = teko::mem::append_fo(b, $"{st.line} {st.col} {st.n} ")
+        s = s + 1
+    }
+    teko::mem::append_fo(b, "\n")
+}
+
+/**
+ * SmScan — one decoded unsigned integer plus the cursor position just past its last digit, the
+ * return of `sm_uint` so the site-map parser threads a position through the blob without a mutable
+ * out-parameter.
+ */
+type SmScan = struct {
+    /** the decoded value. */
+    v: u64
+    /** the byte offset immediately after the value's last digit. */
+    pos: u64
+}
+
+/**
+ * sm_is_ws — is `c` a byte the site-map's whitespace-separated integer stream skips (space, tab,
+ * CR, LF)?
+ *
+ * @param c  the byte to test
+ * @return   whether `c` separates tokens
+ */
+fn sm_is_ws(c: byte) -> bool { c == b' ' || c == b'\n' || c == b'\t' || c == b'\r' }
+
+/**
+ * sm_skip_ws — advance past any run of whitespace from `p`.
+ *
+ * @param s  the blob
+ * @param p  the start offset
+ * @return   the offset of the first non-whitespace byte at or after `p` (or `s.len`)
+ */
+fn sm_skip_ws(s: str, p: u64) -> u64 {
+    mut q = p
+    loop {
+        if q >= s.len { break }
+        if !sm_is_ws(s[q]) { break }
+        q = q + 1
+    }
+    q
+}
+
+/**
+ * sm_uint — read one decimal unsigned integer from the blob, skipping any leading whitespace. The
+ * counts in the header drive how many of these each record reads, so a physical newline is just
+ * skipped as whitespace like any separator.
+ *
+ * @param s  the blob
+ * @param p  the offset to read from
+ * @return   the decoded value and the offset just past its last digit
+ */
+fn sm_uint(s: str, p: u64) -> SmScan {
+    mut q = sm_skip_ws(s, p)
+    mut n: u64 = 0
+    loop {
+        if q >= s.len { break }
+        let c = s[q]
+        if c < b'0' || c > b'9' { break }
+        n = n * 10 + (c to u64) - (b'0' to u64)
+        q = q + 1
+    }
+    SmScan { v = n; pos = q }
+}
+
+/**
+ * SmFnParse — one parsed `SiteFn` plus the cursor position just past its record, the return of
+ * `sm_parse_fn`.
+ */
+type SmFnParse = struct {
+    /** the parsed production-function coverage identity. */
+    sf: SiteFn
+    /** the byte offset immediately after this record. */
+    pos: u64
+}
+
+/**
+ * sm_parse_fn — parse ONE `SiteFn` record from the blob at `p`: the seven counts, the three
+ * length-sliced identity strings, the distinct lines, and the branch-site triples. The mirror of
+ * `cov_emit_one_sitefn`. The strings are taken by BYTE LENGTH (from the counts) rather than by a
+ * delimiter, so a file path's own digits or slashes cannot be mistaken for structure.
+ *
+ * @param s  the blob
+ * @param p  the offset of this record's counts line
+ * @return   the parsed function and the offset past its record, or a truncation error
+ * @throws   when the declared string lengths run past the end of the blob (a truncated site-map)
+ */
+fn sm_parse_fn(s: str, p: u64) -> SmFnParse | error {
+    let fn_idx = sm_uint(s, p)
+    let fn_line = sm_uint(s, fn_idx.pos)
+    let ns_len = sm_uint(s, fn_line.pos)
+    let name_len = sm_uint(s, ns_len.pos)
+    let file_len = sm_uint(s, name_len.pos)
+    let n_lines = sm_uint(s, file_len.pos)
+    let n_sites = sm_uint(s, n_lines.pos)
+    let bs = sm_skip_ws(s, n_sites.pos)
+    let ns_end = bs + ns_len.v
+    let name_end = ns_end + name_len.v
+    let file_end = name_end + file_len.v
+    if file_end > s.len { return error { message = "site-map: identity strings run past end of blob" } }
+    let namespace = teko::str::slice(s, bs, ns_end)
+    let name = teko::str::slice(s, ns_end, name_end)
+    let file = teko::str::slice(s, name_end, file_end)
+    mut lines: []u32 = teko::list::empty()
+    mut cur = file_end
+    mut k: u64 = 0
+    loop {
+        if k >= n_lines.v { break }
+        let u = sm_uint(s, cur)
+        lines = teko::list::push(lines, u.v to u32)
+        cur = u.pos
+        k = k + 1
+    }
+    mut sites: []BranchSite = teko::list::empty()
+    mut j: u64 = 0
+    loop {
+        if j >= n_sites.v { break }
+        let ul = sm_uint(s, cur)
+        let uc = sm_uint(s, ul.pos)
+        let un = sm_uint(s, uc.pos)
+        sites = teko::list::push(sites, BranchSite { line = ul.v to u32; col = uc.v to u32; n = un.v })
+        cur = un.pos
+        j = j + 1
+    }
+    SmFnParse { sf = SiteFn { fn_idx = fn_idx.v; namespace = namespace; name = name; file = file; fn_line = fn_line.v to u32; walk = CovWalk { sites = sites; lines = lines } }; pos = cur }
+}
+
+/**
+ * cov_parse_sitemap — decode a serialized site-map blob back into a `SiteMap`. Verifies the magic
+ * and version so a corrupt or foreign file is rejected (the report stage then falls back to a
+ * re-check rather than mis-reporting). The mirror of `cov_emit_sitemap`.
+ *
+ * @param blob  the serialized site-map (from `cov_emit_sitemap`)
+ * @return      the decoded site-map
+ * @throws      when the magic or version is wrong, or the blob is truncated
+ * @since 0.3.1
+ */
+exp fn cov_parse_sitemap(blob: str) -> SiteMap | error {
+    if blob.len < SITEMAP_MAGIC.len || teko::str::slice_to(blob, SITEMAP_MAGIC.len) != SITEMAP_MAGIC { return error { message = "site-map: bad magic" } }
+    let ver = sm_uint(blob, SITEMAP_MAGIC.len)
+    if ver.v != SITEMAP_VERSION { return error { message = "site-map: unsupported version" } }
+    let n = sm_uint(blob, ver.pos)
+    let arith_total = sm_uint(blob, n.pos)
+    let arith_with = sm_uint(blob, arith_total.pos)
+    mut fns: []SiteFn = teko::list::empty()
+    mut cur = arith_with.pos
+    mut i: u64 = 0
+    loop {
+        if i >= n.v { break }
+        match sm_parse_fn(blob, cur) {
+            SmFnParse as r => { fns = teko::list::push(fns, r.sf); cur = r.pos }
+            error as e => return e
+        }
+        i = i + 1
+    }
+    SiteMap { fns = fns; arith_total = arith_total.v; arith_with_conversion = arith_with.v }
+}
+
+/**
+ * cov_cobertura_of — render the Cobertura report from a parsed `SiteMap` and the already-merged
+ * coverage sink, WITHOUT touching the AST. The site-map twin of `cov_cobertura`: it feeds the SAME
+ * per-class renderer (`cov_render_class`) and the SAME document wrapper (`cov_cobertura_wrap`) the
+ * same `SiteFn`s in program-item order, so the XML is byte-for-byte identical to the AST-walk
+ * report.
+ *
+ * @param sm  the parsed site-map
+ * @return    the complete Cobertura XML document as a str
+ * @since 0.3.1
+ */
+exp fn cov_cobertura_of(sm: SiteMap) -> str {
+    mut body: []byte = teko::list::empty()
+    mut agg = CovAgg { lines_cov = 0; lines_val = 0; br_cov = 0; br_val = 0 }
+    mut i: u64 = 0
+    loop {
+        if i >= sm.fns.len { break }
+        let sf = sm.fns[i]
+        let r = cov_render_class(body, cov_class_name(sf.namespace, sf.name), sf.file, sf.name, sf.fn_line, sf.fn_idx, sf.walk)
+        body = r.body
+        agg = cov_agg_add(agg, r.lt, r.bt)
+        i = i + 1
+    }
+    cov_cobertura_wrap(body, agg)
+}
+
+/**
+ * cov_cobertura_from_sitemap — render the Cobertura report from a serialized site-map blob and the
+ * merged sink, without touching the AST. The convenience twin of `cov_cobertura` for a caller that
+ * holds the blob rather than a parsed `SiteMap` (parse then `cov_cobertura_of`).
+ *
+ * @param sitemap  the serialized site-map blob (from `cov_emit_sitemap`)
+ * @return         the Cobertura XML, or the parse error
+ * @throws         when the blob's magic/version is wrong or it is truncated
+ * @since 0.3.1
+ */
+exp fn cov_cobertura_from_sitemap(sitemap: str) -> str | error {
+    match cov_parse_sitemap(sitemap) {
+        SiteMap as sm => cov_cobertura_of(sm)
+        error as e => e
+    }
+}
+
+/**
+ * functions_coverage_of — the FUNCTIONS metric from a site-map: distinct production functions
+ * executed (the sink's `cov_distinct`) over the site-map's function count. The site-map twin of
+ * `functions_coverage`; the denominator is the recorded production-function count, exactly what
+ * `count_prod_fns` computes from the AST.
+ *
+ * @param sm  the parsed site-map
+ * @return    a CovCount whose `cov` is distinct hit functions and `val` the production-fn total
+ * @since 0.3.1
+ */
+exp fn functions_coverage_of(sm: SiteMap) -> CovCount {
+    CovCount { cov = teko::cov_distinct(); val = sm.fns.len }
+}
+
+/**
+ * line_coverage_of — the LINES metric from a site-map: distinct executable lines hit over total,
+ * aggregated across every recorded function by joining its walked lines against the sink. The
+ * site-map twin of `line_coverage`.
+ *
+ * @param sm  the parsed site-map
+ * @return    a CovCount whose `cov` is hit lines and `val` the total executable lines
+ * @since 0.3.1
+ */
+exp fn line_coverage_of(sm: SiteMap) -> CovCount {
+    mut cov: u64 = 0; mut val: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= sm.fns.len { break }
+        let sf = sm.fns[i]
+        mut k: u64 = 0
+        loop {
+            if k >= sf.walk.lines.len { break }
+            val = val + 1
+            if teko::cov_line_hit(sf.fn_idx, sf.walk.lines[k]) { cov = cov + 1 }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    CovCount { cov = cov; val = val }
+}
+
+/**
+ * branch_coverage_of — the BRANCHES metric from a site-map: taken outcomes over total outcomes
+ * across every recorded function's if/match sites, joining each site's outcomes against the sink.
+ * The site-map twin of `branch_coverage`.
+ *
+ * @param sm  the parsed site-map
+ * @return    a CovCount whose `cov` is taken outcomes and `val` the total outcomes
+ * @since 0.3.1
+ */
+exp fn branch_coverage_of(sm: SiteMap) -> CovCount {
+    mut cov: u64 = 0; mut val: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= sm.fns.len { break }
+        let sf = sm.fns[i]
+        mut s: u64 = 0
+        loop {
+            if s >= sf.walk.sites.len { break }
+            let st = sf.walk.sites[s]
+            mut o: u64 = 0
+            loop {
+                if o >= st.n { break }
+                if teko::cov_branch_hit(sf.fn_idx, st.line, st.col, o) { cov = cov + 1 }
+                o = o + 1
+            }
+            val = val + st.n
+            s = s + 1
+        }
+        i = i + 1
+    }
+    CovCount { cov = cov; val = val }
+}
+
+/**
+ * coverage_pct_of — the FUNCTION-coverage percentage from a site-map (the D4 `functions` floor).
+ *
+ * @param sm  the parsed site-map
+ * @return    the function-coverage percentage in [0, 100]
+ * @since 0.3.1
+ */
+exp fn coverage_pct_of(sm: SiteMap) -> u64 { cov_pct(functions_coverage_of(sm)) }
+
+/**
+ * line_coverage_pct_of — the LINE-coverage percentage from a site-map (the D4 `lines` floor).
+ *
+ * @param sm  the parsed site-map
+ * @return    the line-coverage percentage in [0, 100]
+ * @since 0.3.1
+ */
+exp fn line_coverage_pct_of(sm: SiteMap) -> u64 { cov_pct(line_coverage_of(sm)) }
+
+/**
+ * branch_coverage_pct_of — the BRANCH-coverage percentage from a site-map (the D4 `branches` floor).
+ *
+ * @param sm  the parsed site-map
+ * @return    the branch-coverage percentage in [0, 100]
+ * @since 0.3.1
+ */
+exp fn branch_coverage_pct_of(sm: SiteMap) -> u64 { cov_pct(branch_coverage_of(sm)) }

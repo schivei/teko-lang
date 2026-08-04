@@ -1,13 +1,49 @@
 /**
+ * EncRelocX86 — the symbol relocation ONE `EncInstX86` owes: which byte of the
+ * instruction the linker patches, the target symbol, and the relocation kind.
+ * Present only on an instruction that actually references a symbol (`call
+ * rel32`, `lea rip`-relative); every other instruction carries `null` instead of
+ * this record.
+ *
+ * THE ARM64 TWIN'S REASON APPLIES HERE UNCHANGED (`EncReloc`): the three fields
+ * used to sit beside a `has_reloc: bool` that every instruction carried, with
+ * `RelocKindX86::Plt32` — a *call* relocation — as the inert default on
+ * instructions that are not calls. x86-64 never suffered the mispairing arm64
+ * did (only two producers exist: `encode_call_x86` hardcodes `Plt32` on `E8`,
+ * and `encode_lea_rip_x86` forwards the isel-tagged kind), but the defaulted
+ * field is the same seed, and it is cheaper to remove than to keep documenting
+ * as harmless.
+ *
+ * @since 0.3.1.0
+ */
+pub type EncRelocX86 = struct {
+    /**
+     * field_off — the byte offset WITHIN the instruction's `bytes` of the field
+     * the relocation patches (the emit pass rebases it by the instruction's
+     * start offset in the function's `.text` image).
+     */
+    field_off: u32
+    /**
+     * sym — the relocation's target symbol, already in its final linker name.
+     */
+    sym: str
+    /**
+     * kind — which psABI relocation the writer emits (`Plt32` for a direct
+     * `call`, `Pc32` for a rip-relative `lea`, `Abs64` for a data pointer).
+     */
+    kind: RelocKindX86
+}
+
+/**
  * EncInstX86 — one x86-64 instruction's encoding outcome: its variable-length
  * byte string plus optional pending fixups. A position-independent instruction
- * resolves to just `bytes` (`has_branch`/`has_reloc` false). An intra-function
+ * resolves to just `bytes` (`has_branch` false, `reloc` null). An intra-function
  * branch carries a `rel32` fixup — the byte offset WITHIN `bytes` of the 4-byte
  * little-endian displacement field and the destination machine-block id —
  * patched once every block's byte offset is known (the B1-6 layout pass). A
- * symbol reference carries a relocation shape (the byte offset of its rel32
- * field + the target symbol + kind), materialized into an `Elf64_Rela` at B1-7.
- * Mirrors arm64's `EncWord`, byte-granular instead of fixed 32-bit words.
+ * symbol reference carries an `EncRelocX86`, materialized into an `Elf64_Rela`
+ * at B1-7. Mirrors arm64's `EncWord`, byte-granular instead of fixed 32-bit
+ * words.
  *
  * @since #386 B1-5
  */
@@ -31,21 +67,10 @@ pub type EncInstX86 = struct {
      */
     target: u32
     /**
-     * has_reloc — true iff this instruction owes a symbol relocation.
+     * reloc — the symbol relocation this instruction owes, or `null` when it
+     * owes none. There is no third state and no inert default.
      */
-    has_reloc: bool
-    /**
-     * reloc_field_off — the byte offset within `bytes` of the relocated field.
-     */
-    reloc_field_off: u32
-    /**
-     * reloc_sym — the relocation's target symbol (meaningful when `has_reloc`).
-     */
-    reloc_sym: str
-    /**
-     * reloc_kind — the relocation kind (meaningful when `has_reloc`).
-     */
-    reloc_kind: RelocKindX86
+    reloc: EncRelocX86 | null
 }
 
 /**
@@ -350,7 +375,7 @@ fn fits_i32_x86(x: i64) -> bool {
 /**
  * plain_inst_x86 — an `EncInstX86` for a position-independent instruction: just
  * the finished bytes, with no branch displacement and no symbol relocation
- * pending (the fixup fields carry inert defaults).
+ * pending (`reloc` is `null`, not a defaulted kind).
  *
  * @param []byte bytes  the finished instruction bytes
  * @return EncInstX86  the instruction with no pending fixup
@@ -361,10 +386,7 @@ fn plain_inst_x86(bytes: []byte) -> EncInstX86 {
         has_branch = false
         branch_field_off = 0 to u32
         target = 0 to u32
-        has_reloc = false
-        reloc_field_off = 0 to u32
-        reloc_sym = ""
-        reloc_kind = RelocKindX86::Plt32
+        reloc = null
     }
 }
 
@@ -384,10 +406,7 @@ fn branch_inst_x86(bytes: []byte, field_off: u32, target: u32) -> EncInstX86 {
         has_branch = true
         branch_field_off = field_off
         target = target
-        has_reloc = false
-        reloc_field_off = 0 to u32
-        reloc_sym = ""
-        reloc_kind = RelocKindX86::Plt32
+        reloc = null
     }
 }
 
@@ -409,10 +428,7 @@ fn reloc_inst_x86(bytes: []byte, field_off: u32, sym: str, kind: RelocKindX86) -
         has_branch = false
         branch_field_off = 0 to u32
         target = 0 to u32
-        has_reloc = true
-        reloc_field_off = field_off
-        reloc_sym = sym
-        reloc_kind = kind
+        reloc = EncRelocX86 { field_off = field_off; sym = sym; kind = kind }
     }
 }
 
@@ -2041,26 +2057,37 @@ fn byte_of_u32_le(value: u32, k: u32) -> byte {
 }
 
 /**
- * write_u32_le_at — a copy of `buf` with the four bytes at `[offset, offset+4)`
+ * write_u32_le_at — `buf` with the four bytes at `[offset, offset+4)`
  * overwritten by `value`'s little-endian bytes, the byte-granular analog of
- * arm64's whole-word patch. Bytes outside the field pass through; the encoder
- * already zeroed the field, so this writes the resolved `rel32` displacement in.
+ * arm64's whole-word patch. Bytes outside the field pass through unread; the
+ * encoder already zeroed the field, so this writes the resolved `rel32`
+ * displacement in.
+ *
+ * MUTATES the 4 target bytes IN PLACE (index-assigns onto the local `out`,
+ * which aliases the SAME underlying buffer as `buf` — slice value semantics
+ * copy the {ptr,len} header, not the array) INSTEAD OF rebuilding the whole
+ * buffer byte by byte through a fresh self-append chain. `patch_branches_x86`
+ * calls this ONCE PER BRANCH FIXUP, so the old rebuild cost O(bytes) EVERY
+ * fixup — one more instance of the append_minst/append_inst/vinfo_set shape
+ * (see their own doc-comments): a live `TEKO_NATIVE_PUSH_REDZONE` hit through
+ * this exact call chain (`write_u32_le_at <- patch_branches_x86`) showed the
+ * REDZONE stomped with real encoded x86 bytes after the isel/lir-level twins
+ * were already fixed — the encode-time analog of the same self-append-rebuild
+ * idiom, this time over `[]byte` directly rather than a struct list.
  *
  * @param []byte buf  the buffer to patch
  * @param u32 offset  the byte offset of the 4-byte field
  * @param u32 value  the little-endian value to write
  * @return []byte  `buf` with the field overwritten
+ * @since 0.3.1 (native-region-crash, wild-write fix)
  */
 fn write_u32_le_at(buf: []byte, offset: u32, value: u32) -> []byte {
-    mut out: []byte = teko::list::empty()
-    mut i: u64 = 0
+    mut out = buf
+    mut k: u32 = 0
     loop {
-        if i >= buf.len { break }
-        let idx = i to u32
-        let within = (idx >= offset) && (idx < (offset + (X86_REL32_FIELD_BYTES to u32)))
-        let b = if within { byte_of_u32_le(value, idx - offset) } else { buf[i] }
-        out = teko::list::push(out, b)
-        i++
+        if k >= (X86_REL32_FIELD_BYTES to u32) { break }
+        out[(offset + k) to u64] = byte_of_u32_le(value, k)
+        k++
     }
     out
 }
@@ -2086,11 +2113,32 @@ fn lookup_block_offset_x86(offsets: []BlockOffsetX86, id: u32) -> u32 | error {
 }
 
 /**
+ * collect_inst_reloc_x86 — fold the relocation ONE `EncInstX86` owes into the
+ * function's `RelocX86` list: an instruction that owes none (`reloc` null)
+ * leaves the list untouched, and one that owes a relocation contributes exactly
+ * one record, its patch offset rebased from instruction-relative to
+ * function-relative and its addend derived from the kind. The nullable `reloc`
+ * is the only input, so there is no flag to read out of step with a kind.
+ *
+ * @param []RelocX86 acc  the relocations collected so far
+ * @param EncRelocX86 | null reloc  the relocation the instruction owes, if any
+ * @param u32 start  the instruction's byte offset within the function's `.text`
+ * @return []RelocX86  `acc`, extended when a relocation is owed
+ */
+fn collect_inst_reloc_x86(acc: []RelocX86, reloc: EncRelocX86 | null, start: u32) -> []RelocX86 {
+    match reloc {
+        null => acc
+        EncRelocX86 as r => teko::list::push(acc, RelocX86 { offset = start + r.field_off; sym = r.sym; kind = r.kind; addend = reloc_addend_x86(r.kind); sect = RelocSect::Text })
+    }
+}
+
+/**
  * append_enc_inst_x86 — fold one non-terminator `EncInstX86` into the emit
  * accumulator: append its bytes, and (rebased by the instruction's start offset)
  * record a `rel32` branch fixup for an intra-function jump or a `RelocX86` for a
- * symbol reference. The instruction's own `branch_field_off`/`reloc_field_off`
- * are relative to its bytes, so the recorded offsets add the stream start.
+ * symbol reference. The instruction's own `branch_field_off` and its `reloc`'s
+ * `field_off` are relative to its bytes, so the recorded offsets add the stream
+ * start.
  *
  * @param FuncEmitX86 acc  the emit accumulator
  * @param EncInstX86 ei  the encoded instruction to fold in
@@ -2104,11 +2152,7 @@ fn append_enc_inst_x86(acc: FuncEmitX86, ei: EncInstX86) -> FuncEmitX86 {
     } else {
         acc.branch_fixups
     }
-    let relocs2 = if ei.has_reloc {
-        teko::list::push(acc.relocs, RelocX86 { offset = start + ei.reloc_field_off; sym = ei.reloc_sym; kind = ei.reloc_kind; addend = reloc_addend_x86(ei.reloc_kind); sect = RelocSect::Text })
-    } else {
-        acc.relocs
-    }
+    let relocs2 = collect_inst_reloc_x86(acc.relocs, ei.reloc, start)
     FuncEmitX86 { bytes = bytes2; block_offsets = acc.block_offsets; branch_fixups = fixups2; relocs = relocs2 }
 }
 
@@ -2253,9 +2297,12 @@ pub fn encode_func_x86(abi: AbiDescriptor, f: MFuncX86) -> EncodedFuncX86 | erro
  * the current base (the next function's `.text` byte offset). The byte-granular
  * x86 analog of arm64's `ModuleText`.
  *
+ * (0.3.1 backend-memoria C2) Made `pub` so the per-function fused emit driver in `project.tks`
+ * can hold it as the ROOT-resident accumulator (Group B) across the scoped per-function windows.
+ *
  * @since #386 B1-6
  */
-type ModuleTextX86 = struct {
+pub type ModuleTextX86 = struct {
     /**
      * text — the concatenated `.text` bytes so far.
      */
@@ -2276,11 +2323,12 @@ type ModuleTextX86 = struct {
 
 /**
  * empty_module_text_x86 — the seed `ModuleTextX86`: empty image, no relocations,
- * no symbols, base 0.
+ * no symbols, base 0. (0.3.1 backend-memoria C2) `pub` so the fused emit driver seeds its
+ * root-resident accumulator with it.
  *
  * @return ModuleTextX86  the seed accumulator
  */
-fn empty_module_text_x86() -> ModuleTextX86 {
+pub fn empty_module_text_x86() -> ModuleTextX86 {
     ModuleTextX86 { text = teko::list::empty(); relocs = teko::list::empty(); syms = teko::list::empty(); base = 0 to u32 }
 }
 
@@ -2323,6 +2371,26 @@ fn rebase_relocs_x86(acc: []RelocX86, relocs: []RelocX86, base: u32) -> []RelocX
  */
 fn fold_func_into_text_x86(abi: AbiDescriptor, acc: ModuleTextX86, f: MFuncX86) -> ModuleTextX86 | error {
     let ef = match encode_func_x86(abi, f) { EncodedFuncX86 as x => x; error as e => return e }
+    fold_encoded_func_x86(acc, ef)
+}
+
+/**
+ * fold_encoded_func_x86 — fold ONE already-encoded function's `EncodedFuncX86` into the running
+ * module `.text` accumulator: record its GLOBAL defined symbol at the current base (section 1,
+ * `.text`), append its bytes, and rebase its function-relative relocations by the base; the base
+ * then advances by the function's byte length. The encode of `f` and this fold are SEPARATE so the
+ * fused per-function emit driver can encode inside a scoped scratch region and fold AFTER leaving
+ * it — the fold's appends land in the ROOT-resident accumulator (Group B), COPYING the bytes and
+ * the symbol/reloc `str` names (which originate in `prog`, not the scratch region) out of the
+ * still-live child before it is dropped (§2 non-escape proof). `fold_func_into_text_x86` is the
+ * non-scoped composition of `encode_func_x86` and this fold.
+ *
+ * @param ModuleTextX86 acc  the running root-resident `.text` accumulator
+ * @param EncodedFuncX86 ef  one function's encoded bytes, symbol name and function-relative relocs
+ * @return ModuleTextX86  the extended accumulator
+ * @since 0.3.1
+ */
+pub fn fold_encoded_func_x86(acc: ModuleTextX86, ef: EncodedFuncX86) -> ModuleTextX86 {
     let sym = Symbol { name = ef.symbol; defined = true; sect = 1 to u8; offset = acc.base; local = false }
     let text = append_bytes(acc.text, ef.bytes)
     let relocs = rebase_relocs_x86(acc.relocs, ef.relocs, acc.base)
@@ -2441,7 +2509,29 @@ fn append_relocs_x86(a: []RelocX86, b: []RelocX86) -> []RelocX86 {
 pub fn encode_module_x86(abi: AbiDescriptor, m: MModuleX86) -> EncodedModuleX86 | error {
     if m.globals.len > (0 to u64) { return honest_globals_x86() }
     let mt = match encode_functions_x86(abi, m.funcs) { ModuleTextX86 as x => x; error as e => return e }
-    let rod = encode_rodata(m.rodata)
+    finish_encoded_module_x86(mt, m.rodata, m.globals)
+}
+
+/**
+ * finish_encoded_module_x86 — assemble the final `EncodedModuleX86` from an already-accumulated
+ * `.text` (`mt`, one defined symbol + rebased relocs per function) plus the module's PERSISTENT
+ * rodata/globals tables (Group B, carried by-reference the whole way — never in a scratch region,
+ * §2 exception E2): intern the rodata bytes, build the symbol table in the required
+ * LOCAL-then-GLOBAL-then-UNDEFINED order (file-local per rodata entry, global per function, then one
+ * undefined per externally-referenced symbol), and partition the relocations. A module carrying data
+ * globals raises `B1-globals` (the N2 subset lowers none). This is the module-finalize tail of
+ * `encode_module_x86` factored out so the fused per-function emit driver reaches the SAME assembly
+ * incrementally, after its per-function windows have folded into `mt`.
+ *
+ * @param ModuleTextX86 mt  the accumulated `.text` image, symbols and rebased relocs
+ * @param []lir::LRodata rodata  the module's rodata table (Group B, by-reference)
+ * @param []lir::LGlobal globals  the module's data globals (empty in the N2 subset)
+ * @return EncodedModuleX86 | error  the section images + ordered symbols + relocs, or `B1-globals`
+ * @since 0.3.1
+ */
+pub fn finish_encoded_module_x86(mt: ModuleTextX86, rodata: []lir::LRodata, globals: []lir::LGlobal) -> EncodedModuleX86 | error {
+    if globals.len > (0 to u64) { return honest_globals_x86() }
+    let rod = match encode_rodata(rodata) { ModuleRodata as x => x; error as e => return e }
     let defined = concat_symbols(rod.syms, mt.syms)
     let undef = collect_undefined_x86(defined, mt.relocs)
     let symbols = concat_symbols(defined, undef)

@@ -5,7 +5,7 @@
 // PrimKind predicates, type emission, and the full emit_function pipeline.
 //
 // Helper functions use the `cgt_` prefix to avoid last-segment name collision
-// with checker_test.tkt helpers (VM resolves functions by last path segment only).
+// with checker_test.tkt helpers (the checker resolves functions by last path segment only).
 //
 // Original invariant tests (lowers_*) are preserved below the new groups.
 
@@ -118,10 +118,10 @@ fn cgt_buffer_basics() {
  * cgt_large_int_and_escape — Group B: large-integer printing and C-string escaping
  * (`cb_u64_digits`, `cb_u64_c_expr`, `cb_numint`, `cb_f64_literal`, `cb_cstr_escaped`).
  *
- * `cb_numint`'s negative case (drop-128, 2026-07-24) used to PANIC in the VM (the old `v to
- * u128` reinterpretation of a negative source); `NumInt`'s explicit sign flag needs no such
- * reinterpretation, so both a `-(` prefix and the correct magnitude are now directly coverable
- * on both engines (#299).
+ * `cb_numint`'s negative case (drop-128, 2026-07-24) used to PANIC in the (now-retired)
+ * interpreter (the old `v to u64` reinterpretation of a negative source); `NumInt`'s explicit
+ * sign flag needs no such reinterpretation, so both a `-(` prefix and the correct magnitude are
+ * now directly coverable (#299).
  */
 #test
 fn cgt_large_int_and_escape() {
@@ -447,7 +447,6 @@ fn cgt_prog_queries() {
     teko::assert::is_true(cg_is_builtin_scalar("byte"))
     teko::assert::is_true(cg_is_builtin_scalar("error"))
     teko::assert::is_false(cg_is_builtin_scalar("Foo"))
-    teko::assert::is_false(cg_is_builtin_scalar("i128"))
 
     // cg_find_decl — empty program → error (but function is covered)
     let fd = match cg_find_decl(prog, "Foo") { parser::TypeDecl => "found"; error => "not-found" }
@@ -494,7 +493,7 @@ fn cgt_emit_expr_variants() {
     teko::assert::is_true(teko::str::contains(e1, "42"))
     teko::assert::is_true(teko::str::contains(e1, "int64_t"))
 
-    // TNumber (I8) → ((int8_t)3)  — positive only; negative I8 hits cb_i128 neg branch which panics in VM
+    // TNumber (I8) → ((int8_t)3)  — positive only; negative I8 hits cb_i64 neg branch (separately covered)
     let e2 = match emit_expr(cgt_empty(), prog, cgt_num_i8(3)) { []byte as o => str(o); error => "" }
     teko::assert::is_true(teko::str::contains(e2, "int8_t"))
 
@@ -685,7 +684,7 @@ fn cgt_emit_value_arm_no_region_when_no_context() {
         kind = parser::BindKind::Let
         target = parser::SimpleName { name = "tmp" }
         bound = checker::Prim { kind = checker::PrimKind::I64 }
-        value = cgt_num_i64(5)
+        value = cgt_num_i64(5); di_kind = parser::DiKind::None
     }
     let tail_read: checker::TStatement = cgt_stmt(cgt_e_var("tmp"))
     mut then_blk: []checker::TStatement = teko::list::push(teko::list::empty(), bind_tmp)
@@ -709,7 +708,7 @@ fn cgt_emit_value_match_arm_commits_tail() {
         kind = parser::BindKind::Let
         target = parser::SimpleName { name = "tmp" }
         bound = checker::Prim { kind = checker::PrimKind::I64 }
-        value = cgt_num_i64(7)
+        value = cgt_num_i64(7); di_kind = parser::DiKind::None
     }
     let arm_lit: parser::Pattern = parser::LiteralPattern {
         value = parser::Expr { kind = parser::Number { is_float = false; value = parser::numint_of_u64(1); fval = 0.0 }; line = 0; col = 0 }
@@ -737,7 +736,7 @@ fn cgt_emit_loop_with_init() {
         kind = parser::BindKind::Mut
         target = parser::SimpleName { name = "_hi" }
         bound = checker::Prim { kind = checker::PrimKind::I64 }
-        value = cgt_num_i64(3)
+        value = cgt_num_i64(3); di_kind = parser::DiKind::None
     }
     let init: []checker::TStatement = teko::list::push(cgt_empty_stmts(), init_bind)
     let body: []checker::TStatement = teko::list::push(cgt_empty_stmts(), checker::TBreakStmt { label = "" })
@@ -759,7 +758,7 @@ fn cgt_loop_init_walkers() {
         kind = parser::BindKind::Mut
         target = parser::SimpleName { name = "_hi" }
         bound = checker::Prim { kind = checker::PrimKind::I64 }
-        value = cgt_num_i64(3)
+        value = cgt_num_i64(3); di_kind = parser::DiKind::None
     }
     let init: []checker::TStatement = teko::list::push(cgt_empty_stmts(), init_bind)
     let body: []checker::TStatement = teko::list::push(cgt_empty_stmts(), checker::TBreakStmt { label = "" })
@@ -800,7 +799,7 @@ fn cgt_emit_function_comprehensive() {
         kind = parser::BindKind::Let
         target = parser::SimpleName { name = "x" }
         bound = checker::Prim { kind = checker::PrimKind::I64 }
-        value = cgt_num_i64(10)
+        value = cgt_num_i64(10); di_kind = parser::DiKind::None
     }
     let assign_s: checker::TStatement = checker::TAssign {
         kind = parser::AssignKind::Simple
@@ -872,13 +871,35 @@ fn cgt_emit_function_comprehensive() {
     teko::assert::is_true(teko::str::contains(r4, "n"))   // cb_ident("n")
 }
 
+// Explicit `return` drops active block regions before emitting the return value. The value must be
+// emitted against the escaping context (no active block-region parent), or a class literal would
+// parent under a dropped handle.
+#test
+fn cgt_emit_return_uses_escaping_region_context() {
+    let c = cgt_class_decl("RetClass", parser::ClassKind::Sealed, false, "")
+    let prog = cg_prog_of(checker::TProgram { items = teko::list::push(teko::list::empty(), c) })
+    let empty_names: []str = teko::list::empty()
+    let empty_vals: []checker::TExpr = teko::list::empty()
+    let ret_expr = checker::TExpr {
+        kind = checker::TStructInit { field_names = empty_names; field_vals = empty_vals }
+        type = checker::Named { name = "RetClass" }
+        line = 0; col = 0
+    }
+    let ret = checker::TReturn { has_value = true; value = ret_expr }
+    let regions: []RegionFrame = teko::list::push(teko::list::empty(), RegionFrame { name = "_tkbr_ret"; label = ""; is_loop = false; defer_base = 0 to u64; decls = teko::list::empty() })
+    let out = match emit_return(cgt_empty(), prog, ret, false, checker::Named { name = "RetClass" }, "    ", "", teko::list::empty(), regions, teko::list::empty(), dctx_empty()) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(teko::str::contains(out, "tk_region_drop(_tkbr_ret); _tkbr_ret = NULL;"))
+    teko::assert::is_true(teko::str::contains(out, "tk_region_new(tk_region_root())"))
+    teko::assert::is_true(!teko::str::contains(out, "tk_region_new(_tkbr_ret)"))
+}
+
 // ---------------------------------------------------------------------------
 // Group N1b: void TAIL match must CHAIN its arms with a commit jump (REGRESSION).
 //   A statement-position / tail `match` in a `-> void` fn has arm bodies that do NOT diverge
 //   (no implicit `return`). emit_match_tail must emit the FIRST winning arm's body then `goto`
 //   a unique commit label past the rest — otherwise the arms fall through as independent `if`s
 //   (`if(c){a} if(1){b}`) and MULTIPLE arms fire (the wildcard `if(1)` ALWAYS fires). The fix
-//   makes EXACTLY ONE arm run, matching the VM and the value-form match. This test asserts the
+//   makes EXACTLY ONE arm run, matching the value-form match. This test asserts the
 //   emitted C carries the commit `goto …_done` chain (the structural guarantee).
 // ---------------------------------------------------------------------------
 fn cgt_lit_arm(v: u64, body_name: str) -> checker::TArm {
@@ -890,7 +911,7 @@ fn cgt_lit_arm(v: u64, body_name: str) -> checker::TArm {
         kind = parser::BindKind::Let
         target = parser::SimpleName { name = body_name }
         bound = checker::Prim { kind = checker::PrimKind::I64 }
-        value = cgt_num_i64(v to i64)
+        value = cgt_num_i64(v to i64); di_kind = parser::DiKind::None
     }
     checker::TArm { pattern = lit; has_when = false; guard = cgt_num_i64(0); body = teko::list::push(cgt_empty_stmts(), eff) }
 }
@@ -899,7 +920,7 @@ fn cgt_wild_arm(body_name: str) -> checker::TArm {
         kind = parser::BindKind::Let
         target = parser::SimpleName { name = body_name }
         bound = checker::Prim { kind = checker::PrimKind::I64 }
-        value = cgt_num_i64(99)
+        value = cgt_num_i64(99); di_kind = parser::DiKind::None
     }
     checker::TArm { pattern = parser::WildcardPattern { }; has_when = false; guard = cgt_num_i64(0); body = teko::list::push(cgt_empty_stmts(), eff) }
 }
@@ -967,7 +988,7 @@ fn cgt_emit_defer() {
             kind = parser::BindKind::Let
             target = parser::SimpleName { name = "_c" }
             bound = checker::Prim { kind = checker::PrimKind::I64 }
-            value = cgt_num_i64(0)
+            value = cgt_num_i64(0); di_kind = parser::DiKind::None
     })
     let defer_s: checker::TStatement = checker::TDeferStmt { body = defer_body }
 
@@ -1015,7 +1036,7 @@ fn cgt_emit_adopt() {
             kind = parser::BindKind::Let
             target = parser::SimpleName { name = "_a" }
             bound = checker::Prim { kind = checker::PrimKind::I64 }
-            value = cgt_num_i64(0)
+            value = cgt_num_i64(0); di_kind = parser::DiKind::None
     })
     let adopt_s: checker::TStatement = checker::TAdoptStmt { name = ""; body = inner_body }
     mut body: []checker::TStatement = cgt_empty_stmts()
@@ -1304,7 +1325,7 @@ fn cgt_emit_lit_pattern_str_vs_int() {
         value = parser::Expr { kind = parser::Number { value = parser::numint_of_u64(42); is_float = false; fval = 0.0 }; line = 0; col = 0 }
     }
     let int_out = match emit_pat_test(cgt_empty(), cgt_prog(), int_pat, "_s", checker::Prim { kind = checker::PrimKind::I64 }) { []byte as o => str(o); error => "" }
-    teko::assert::is_true(teko::str::contains(int_out, "(_s == "))   // bare C `==` (cb_i128 spells the constant)
+    teko::assert::is_true(teko::str::contains(int_out, "(_s == "))   // bare C `==` (cb_i64 spells the constant)
     teko::assert::is_true(teko::str::contains(int_out, "42"))
     teko::assert::is_false(teko::str::contains(int_out, "tk_str_eq"))
 
@@ -1318,27 +1339,12 @@ fn cgt_emit_lit_pattern_str_vs_int() {
 }
 
 // ---------------------------------------------------------------------------
-// Group S: emit_safe_field_access (→ fresh_named), emit_coalesce (→ cg_expr_diverges)
+// Group S: cg_expr_diverges (still live — checked directly by emit_expr_stmt's
+// diverging-call value-position handling)
 // ---------------------------------------------------------------------------
 #test
-fn cgt_emit_coalesce_and_safe_field() {
-    // emit_safe_field_access: recv?.field where recv: Optional{I64}
-    let opt_recv = checker::TExpr {
-        kind = checker::TVar { name = "opt_x"; is_func = false; func_ns = "" }
-        type = checker::Optional { inner = checker::Prim { kind = checker::PrimKind::I64 } }
-        line = 0; col = 0
-    }
-    let sfa_e = checker::TExpr {
-        kind = checker::TSafeFieldAccess { receiver = opt_recv; field = "foo" }
-        type = checker::Optional { inner = checker::Prim { kind = checker::PrimKind::I64 } }
-        line = 0; col = 0
-    }
-    let sfa_out = match emit_expr(cgt_empty(), cgt_prog(), sfa_e) { []byte as o => str(o); error => "" }
-    teko::assert::is_true(teko::str::contains(sfa_out, "_o"))
-    teko::assert::is_true(teko::str::contains(sfa_out, ".present"))
-    teko::assert::is_true(teko::str::contains(sfa_out, "foo"))
-
-    // cg_expr_diverges: direct call — non-TCall returns false, TCall to "panic" returns true
+fn cgt_cg_expr_diverges_true_only_for_a_panic_exit_call() {
+    // direct call — non-TCall returns false, TCall to "panic" returns true
     let non_call_e = cgt_num_i64(0)
     teko::assert::is_false(cg_expr_diverges(non_call_e))
     let panic_arg = checker::TExpr {
@@ -1353,22 +1359,6 @@ fn cgt_emit_coalesce_and_safe_field() {
         line = 0; col = 0
     }
     teko::assert::is_true(cg_expr_diverges(panic_e))
-
-    // emit_coalesce: opt_left ?? fallback_i64 → (result type = I64, not Optional)
-    let opt_left = checker::TExpr {
-        kind = checker::TVar { name = "maybe_x"; is_func = false; func_ns = "" }
-        type = checker::Optional { inner = checker::Prim { kind = checker::PrimKind::I64 } }
-        line = 0; col = 0
-    }
-    let co_e = checker::TExpr {
-        kind = checker::TCoalesce { left = opt_left; right = cgt_num_i64(0) }
-        type = checker::Prim { kind = checker::PrimKind::I64 }
-        line = 0; col = 0
-    }
-    let co_out = match emit_expr(cgt_empty(), cgt_prog(), co_e) { []byte as o => str(o); error => "" }
-    teko::assert::is_true(teko::str::contains(co_out, "_c"))
-    teko::assert::is_true(teko::str::contains(co_out, ".present"))
-    teko::assert::is_true(teko::str::contains(co_out, ".value"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1662,7 +1652,7 @@ fn cgt_var2(a: checker::Type, b: checker::Type) -> checker::Variant {
 
 /**
  * cgt_pair16_decl — a two-`i64`-field struct TypeDecl (`Pair16`), a real by-value 16-byte
- * aggregate — the ≥16-byte no-niche test vehicle standing in for the removed scalar `u128`
+ * aggregate — the ≥16-byte no-niche test vehicle standing in for the removed scalar `u64`
  * (drop-128, 2026-07-24). Unlike `Func` (unsupported by `cg_opt_mangle`, so `cg_mangle_eq`
  * would spuriously treat it as "equal" to the enclosing union in `cg_union_inline_recursive`'s
  * both-error fallback), a real struct mangles cleanly, matching the `repr_box` regression
@@ -1700,6 +1690,16 @@ fn cgt_pair16_null() -> checker::Variant {
     cgt_var2(checker::Null { }, checker::Named { name = "Pair16" })
 }
 
+fn cgt_pair16_expr() -> checker::TExpr {
+    let names: []str = teko::list::push(teko::list::push(teko::list::empty(), "x"), "y")
+    let vals: []checker::TExpr = teko::list::push(teko::list::push(teko::list::empty(), cgt_num_i64(1)), cgt_num_i64(2))
+    checker::TExpr {
+        kind = checker::TStructInit { field_names = names; field_vals = vals }
+        type = checker::Named { name = "Pair16" }
+        line = 0; col = 0
+    }
+}
+
 /**
  * The `i32 | null` union — a saturating scalar < 16 bytes (the inline-tag class).
  *
@@ -1731,6 +1731,22 @@ fn cgt_union_repr_class_dial() {
     teko::assert::is_true(match union_repr_class(p, cgt_i32_null(), false) { UnionRepr::InlineTag => true; _ => false })
     teko::assert::is_true(match union_repr_class(p, cgt_ptr_null(), false) { UnionRepr::Niche => true; _ => false })
     teko::assert::is_true(match union_repr_class(p, cgt_ptr_null(), true) { UnionRepr::Niche => true; _ => false })
+}
+
+#test
+fn cgt_boxed_union_wrap_uses_requested_local_region() {
+    let p = cgt_prog_with_pair16()
+    let expected: checker::Type = cgt_pair16_null()
+    let wrapped = match emit_as_r_in(cgt_empty(), p, checker::Void { }, expected, cgt_pair16_expr(), "_tkbr0", teko::list::empty(), teko::list::empty(), teko::list::empty(), dctx_empty()) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(teko::str::contains(wrapped, "tk_region_alloc(_tkbr0, sizeof("))
+}
+
+#test
+fn cgt_boxed_union_wrap_defaults_to_root_region() {
+    let p = cgt_prog_with_pair16()
+    let expected: checker::Type = cgt_pair16_null()
+    let wrapped = match emit_as_r(cgt_empty(), p, checker::Void { }, expected, cgt_pair16_expr(), teko::list::empty(), teko::list::empty(), teko::list::empty(), dctx_empty()) { []byte as o => str(o); error => "" }
+    teko::assert::is_true(teko::str::contains(wrapped, "tk_region_alloc(tk_region_root(), sizeof("))
 }
 
 /**
@@ -1924,18 +1940,31 @@ fn cgt_prog_with_one_test() -> CgProg {
 }
 
 /**
- * cgt_captured_invocation — the exact C line the harness must emit for `cgt_captured_body`.
+ * cgt_captured_run_line — the exact C line the harness must emit to CAPTURE `cgt_captured_body`'s
+ * outcome (journal wiring, 0.3.1: the harness used to hand `tk_test_run`'s result straight to
+ * `tk_test_report` in one nested call; it now binds it to a local first so it can also branch on
+ * `.how` for the journal hooks, before still handing the SAME value to `tk_test_report`).
  *
  * COMPOSED FROM `TEKO_USER_PREFIX` RATHER THAN SPELLED OUT, because a literal would pin the prefix
  * ruling into an assertion that is not about it: the claim here is the SHAPE of the invocation (the
  * address of a top-level function handed to the runtime), and a prefix change would then break this
  * arm for a reason it does not measure.
  *
- * @return  `tk_test_report(tk_test_run(&<mangled symbol>));`
+ * @return  `tk_test_outcome teko_journal_rv = tk_test_run(&<mangled symbol>);`
  */
-fn cgt_captured_invocation() -> str {
-    teko::str::concat("tk_test_report(tk_test_run(&", TEKO_USER_PREFIX, "probe__guard__cgt_captured_body));")
+fn cgt_captured_run_line() -> str {
+    teko::str::concat("tk_test_outcome teko_journal_rv = tk_test_run(&", TEKO_USER_PREFIX, "probe__guard__cgt_captured_body);")
 }
+
+/**
+ * cgt_journal_symbol — the C symbol a `teko::journal` function mangles to, composed the SAME way
+ * `cb_fn_name` would (namespace-colons to underscores, `__`, bare name) so this file's assertions are
+ * not a second, independently-drifting spelling of the mangling rule.
+ *
+ * @param name  the `teko::journal` function's bare name
+ * @return      its mangled C symbol
+ */
+fn cgt_journal_symbol(name: str) -> str { teko::str::concat(TEKO_USER_PREFIX, "teko__journal__", name) }
 
 #test
 /**
@@ -1943,9 +1972,10 @@ fn cgt_captured_invocation() -> str {
  *
  * The runtime's own guard (`src/test/capture_test.tkt`) proves that a captured body's panic and exit
  * come back instead of ending the process; this proves the harness ASKS for that — that the emitted
- * invocation is `tk_test_report(tk_test_run(&<symbol>))` and not the bare call plus a blind
- * `tk_test_end()` it replaced. Without this arm the two halves could drift and the suite would still
- * be green, because the runtime half is exercised by an extern that the harness does not emit.
+ * invocation captures `tk_test_run(&<symbol>)`'s outcome and still hands it to `tk_test_report`,
+ * rather than the bare call plus a blind `tk_test_end()` it replaced long ago. Without this arm the
+ * two halves could drift and the suite would still be green, because the runtime half is exercised
+ * by an extern that the harness does not emit.
  *
  * The taking of the body's ADDRESS is the whole backend requirement the design names, and it is
  * asserted literally: a `#test` is emitted as `void <symbol>(void)`, so `&<symbol>` is already the
@@ -1955,11 +1985,33 @@ fn cgt_captured_invocation() -> str {
  */
 fn cgt_the_harness_runs_every_body_under_capture() {
     let one = str(emit_test_call(cgt_empty(), cgt_test_fn("cgt_captured_body", "probe::guard"), 0 to u64, false))
-    teko::assert::is_true(teko::str::contains(one, cgt_captured_invocation()))
+    teko::assert::is_true(teko::str::contains(one, cgt_captured_run_line()))
+    teko::assert::is_true(teko::str::contains(one, "tk_test_report(teko_journal_rv);"))
     teko::assert::is_true(!teko::str::contains(one, "tk_test_end();"))
     teko::assert::is_true(teko::str::contains(one, "tk_arena_push();"))
     teko::assert::is_true(teko::str::contains(one, "tk_arena_pop();"))
     teko::assert::is_true(teko::str::contains(one, "tk_test_begin("))
+}
+
+#test
+/**
+ * cgt_the_harness_notes_begin_ok_exited_and_panicked_to_the_journal — journal wiring (0.3.1): every
+ * `#test` invocation the plain gate emits calls the matching `teko::journal::note_test_*` hook by its
+ * mangled symbol — `begin` unconditionally (before the body runs), then exactly one of `ok`/
+ * `exited`/`panicked` depending on `teko_journal_rv.how`, with `exited` carrying `.code` verbatim
+ * (never re-derived, never re-parsed from a formatted string).
+ *
+ * @throws when a hook is missing, misnamed, or the exited call does not forward `.code`
+ */
+fn cgt_the_harness_notes_begin_ok_exited_and_panicked_to_the_journal() {
+    let one = str(emit_test_call(cgt_empty(), cgt_test_fn("cgt_captured_body", "probe::guard"), 0 to u64, false))
+    teko::assert::is_true(teko::str::contains(one, cgt_journal_symbol("note_test_begin")))
+    teko::assert::is_true(teko::str::contains(one, cgt_journal_symbol("note_test_ok")))
+    teko::assert::is_true(teko::str::contains(one, cgt_journal_symbol("note_test_panicked")))
+    teko::assert::is_true(teko::str::contains(one, teko::str::concat(cgt_journal_symbol("note_test_exited"), "((tk_str){")))
+    teko::assert::is_true(teko::str::contains(one, "}, teko_journal_rv.code);"))
+    teko::assert::is_true(teko::str::contains(one, "if (teko_journal_rv.how == TK_TEST_OK)"))
+    teko::assert::is_true(teko::str::contains(one, "else if (teko_journal_rv.how == TK_TEST_EXITED)"))
 }
 
 #test
@@ -1975,16 +2027,23 @@ fn cgt_the_harness_runs_every_body_under_capture() {
  * `return 0` after the plain one was taught to count, so a failing `#test` under `teko test .
  * --analyzer` was captured, reported as FAILED, and then handed `run_analyzer` a status of 0.
  *
- * @throws when either harness does not close on the summary plus the tally-derived status
+ * ALSO ASSERTS `note_test_end` (journal wiring, 0.3.1) ON BOTH HARNESSES, for the same reason: the
+ * close is ONE shared function precisely so neither harness can drift from the other, and a journal
+ * segment the analyze harness never closes would falsely read as a shard that died mid-suite.
+ *
+ * @throws when either harness does not close on the summary, the journal end, and the tally-derived
+ *         status
  */
 fn cgt_the_harness_ends_on_the_tally_and_not_on_zero() {
     let main_plain = match emit_test_main(cgt_empty(), cgt_prog_with_one_test(), CgMode::TestPlain) { []byte as o => str(o); error => "" }
     teko::assert::is_true(teko::str::contains(main_plain, "tk_test_summary();"))
+    teko::assert::is_true(teko::str::contains(main_plain, cgt_journal_symbol("note_test_end")))
     teko::assert::is_true(teko::str::contains(main_plain, "return tk_test_any_failed() ? 1 : 0;"))
     teko::assert::is_true(!teko::str::contains(main_plain, "return 0;"))
     let main_analyze = match emit_test_main(cgt_empty(), cgt_prog_with_one_test(), CgMode::TestAnalyze) { []byte as o => str(o); error => "" }
-    teko::assert::is_true(teko::str::contains(main_analyze, cgt_captured_invocation()))
+    teko::assert::is_true(teko::str::contains(main_analyze, cgt_captured_run_line()))
     teko::assert::is_true(teko::str::contains(main_analyze, "tk_test_summary();"))
+    teko::assert::is_true(teko::str::contains(main_analyze, cgt_journal_symbol("note_test_end")))
     teko::assert::is_true(teko::str::contains(main_analyze, "return tk_test_any_failed() ? 1 : 0;"))
     teko::assert::is_true(!teko::str::contains(main_analyze, "return 0;"))
 }

@@ -25,6 +25,7 @@ fn frameless_layout() -> FrameLayout {
         saved_gpr = teko::list::empty()
         saved_fpr = teko::list::empty()
         slot_offsets = teko::list::empty()
+        out_arg_base = 0
     }
 }
 
@@ -40,7 +41,7 @@ fn frameless_layout() -> FrameLayout {
  * @return FrameLayout  the assembled frame side-table
  */
 fn layout_of(size: u32, gpr: []u32, fpr: []u32, slots: []u32) -> FrameLayout {
-    FrameLayout { size = size; saved_gpr = gpr; saved_fpr = fpr; slot_offsets = slots }
+    FrameLayout { size = size; saved_gpr = gpr; saved_fpr = fpr; slot_offsets = slots; out_arg_base = 0 }
 }
 
 /**
@@ -221,9 +222,7 @@ fn bad_word() -> EncWord {
         has_branch = false
         target = 0 to u32
         branch_form = 0 to u32
-        has_reloc = false
-        reloc_sym = "<error>"
-        reloc_kind = MRelocKind::Call
+        reloc = null
     }
 }
 
@@ -1049,6 +1048,22 @@ fn kind_name(k: MRelocKind) -> str {
 }
 
 /**
+ * reloc_shape — an `EncWord`'s pending relocation rendered as `<sym>/<kind>`, or
+ * `<none>` when it owes none: the whole record in one comparable string, so a
+ * fixture asserts symbol AND kind together and can never read one without the
+ * other.
+ *
+ * @param EncWord ew  the encoded word whose relocation is rendered
+ * @return str  `<sym>/<kind>`, or `<none>` for a word that owes no relocation
+ */
+fn reloc_shape(ew: EncWord) -> str {
+    match ew.reloc {
+        null => "<none>"
+        EncReloc as r => teko::str::concat(r.sym, "/", kind_name(r.kind))
+    }
+}
+
+/**
  * field_stop — the honest-stop message of a `branch_disp_field` result, or
  * `<ok>` when it produces a field.
  *
@@ -1125,6 +1140,46 @@ fn reloc_records_carry_exact_offsets_kinds_syms() {
     teko::assert::is_true(e.relocs[2].offset == (12 to u32))
     teko::assert::is_true(e.relocs[2].sym == "tk_exit")
     teko::assert::is_true(kind_name(e.relocs[2].kind) == "Call")
+}
+
+#test
+/**
+ * a_non_relocating_word_owes_no_relocation_kind — the regression that kills the
+ * seed of the `ARM64_RELOC_BRANCH26`-on-`ADRP` bug at the type level: a word
+ * that references no symbol carries `reloc == null`, never a defaulted
+ * `MRelocKind`. `plain_word` used to fill `reloc_kind = MRelocKind::Call` on
+ * every position-independent instruction and rely on a separate `has_reloc`
+ * flag to make it inert — so "branch relocation" was the resting value of a
+ * field every instruction in the stream carried. There is now nothing to
+ * default: a movz, an add, a cmp and a ret all owe `null`, and only the three
+ * symbol-referencing forms owe a record at all.
+ *
+ * @return void
+ */
+fn a_non_relocating_word_owes_no_relocation_kind() {
+    teko::assert::is_true(enc(movz_inst(true, p(0), 1, 0)).reloc == null)
+    teko::assert::is_true(enc(alu_inst(MAluOp::Add, true, p(0), p(1), p(2))).reloc == null)
+    teko::assert::is_true(enc(cmp_inst(true, p(0), p(1))).reloc == null)
+    teko::assert::is_true(enc(RET_INST).reloc == null)
+    teko::assert::is_true(enc(branch_inst(0 to u32)).reloc == null)
+}
+
+#test
+/**
+ * a_relocating_word_owes_exactly_its_own_kind — the other half of the same
+ * regression: each of the three symbol-referencing words owes a relocation whose
+ * kind names the INSTRUCTION FIELD being patched, read straight off the nullable
+ * record instead of off a flag-plus-kind pair. `ADRP` owes `PageHi`, the
+ * completing `ADD` owes `PageLo`, and only `BL` owes `Call` — the pairing whose
+ * mispairing Apple's `ld` rejects.
+ *
+ * @return void
+ */
+fn a_relocating_word_owes_exactly_its_own_kind() {
+    let no_uses: []MReg = teko::list::empty()
+    teko::assert::is_true(reloc_shape(enc(adrp_inst(p(1), "g", MRelocKind::PageHi))) == "g/PageHi")
+    teko::assert::is_true(reloc_shape(enc(add_lo_inst(p(1), p(1), "g", MRelocKind::PageLo))) == "g/PageLo")
+    teko::assert::is_true(reloc_shape(enc(call_inst("tk_exit", no_uses, p(0), false, false))) == "tk_exit/Call")
 }
 
 #test
@@ -1301,9 +1356,10 @@ fn module_with_rodata(funcs: []MFunc, rodata: []lir::LRodata) -> MModule {
 /**
  * module_interns_rodata_into_const — a rodata entry becomes `__const` bytes plus
  * a defined, FILE-LOCAL section-2 symbol at its offset; a second entry is
- * placed after the first, its symbol offset the first entry's byte length. The
- * two file-local rodata symbols sort BEFORE the globally-visible function
- * symbol (`s0`,`s1`,`main` — the local-then-global order `LC_DYSYMTAB` needs).
+ * placed after the first, padded to the next 8-byte boundary, its symbol offset
+ * reflecting the aligned end of the first entry. The two file-local rodata
+ * symbols sort BEFORE the globally-visible function symbol (`s0`,`s1`,`main` —
+ * the local-then-global order `LC_DYSYMTAB` needs).
  *
  * @return void
  */
@@ -1314,7 +1370,7 @@ fn module_interns_rodata_into_const() {
     let f = one_block_func("main", i1(RET_INST))
     let funcs = teko::list::push(teko::list::empty(), f)
     let e = em(module_with_rodata(funcs, rodata))
-    teko::assert::is_true(e.rodata.len == (5 to u64))
+    teko::assert::is_true(e.rodata.len == (10 to u64))
     teko::assert::is_true(e.rodata[0] == (0x68 to byte))
     teko::assert::is_true(e.symbols.len == 3)
     teko::assert::is_true(e.symbols[0].name == "s0")
@@ -1324,11 +1380,99 @@ fn module_interns_rodata_into_const() {
     teko::assert::is_true(e.symbols[0].offset == (0 to u32))
     teko::assert::is_true(e.symbols[1].name == "s1")
     teko::assert::is_true(e.symbols[1].local)
-    teko::assert::is_true(e.symbols[1].offset == (3 to u32))
+    teko::assert::is_true(e.symbols[1].offset == (8 to u32))
     teko::assert::is_true(e.symbols[2].name == "main")
     teko::assert::is_true(e.symbols[2].defined)
     teko::assert::is_false(e.symbols[2].local)
     teko::assert::is_true(e.symbols[2].sect == (1 to u8))
+}
+
+/**
+ * n_zero_bytes — `n` zero bytes, the odd-length rodata-entry fixture shorthand
+ * (`enc_rodata_reloc_offset_survives_odd_length_neighbors`).
+ *
+ * @param u64 n  the buffer length
+ * @return []byte  `n` zero bytes
+ */
+fn n_zero_bytes(n: u64) -> []byte {
+    mut out: []byte = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= n { break }
+        out = teko::list::push(out, 0 to byte)
+        i++
+    }
+    out
+}
+
+#test
+/**
+ * enc_rodata_reloc_offset_survives_odd_length_neighbors — the native-rodata-const-align
+ * regression (macOS-arm64 fixpoint `ld: pointer not aligned` on `AAPCS64.gpr_arg`): TWO
+ * odd/non-8-multiple rodata entries (3 bytes, then 6 bytes — their RUNNING total, 9, is NOT
+ * a multiple of 8) precede a THIRD, POINTER-BEARING entry carrying one `LDataReloc`. The
+ * third entry's symbol offset AND its rebased relocation offset both land on 16 — the next
+ * 8-byte boundary after 9 — never on the unaligned 9 a byte-packed concatenation would
+ * produce. `module_interns_rodata_into_const` already proves the SYMBOL offset survives one
+ * odd-length neighbor; this is its reloc-bearing, two-neighbor sibling — the exact
+ * combination (a fat member's `LDataReloc` rebased across several odd-length preceding
+ * entries) the reported link failure needed and no prior fixture exercised.
+ *
+ * @return void
+ */
+fn enc_rodata_reloc_offset_survives_odd_length_neighbors() {
+    let r0 = lir::LRodata { symbol = "s0"; bytes = n_zero_bytes(3 to u64); relocs = teko::list::empty() }
+    let r1 = lir::LRodata { symbol = "s1"; bytes = n_zero_bytes(6 to u64); relocs = teko::list::empty() }
+    let r2_relocs = teko::list::push(teko::list::empty(), lir::data_reloc(0 to u32, "s0"))
+    let r2 = lir::LRodata { symbol = "s2"; bytes = n_zero_bytes(16 to u64); relocs = r2_relocs }
+    let rodata = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), r0), r1), r2)
+    let f = one_block_func("main", i1(RET_INST))
+    let funcs = teko::list::push(teko::list::empty(), f)
+    let e = em(module_with_rodata(funcs, rodata))
+    teko::assert::is_true(e.symbols[2].name == "s2")
+    teko::assert::is_true(e.symbols[2].offset == (16 to u32))
+    teko::assert::is_true(e.relocs.len == 1)
+    teko::assert::is_true(e.relocs[0].offset == (16 to u32))
+    teko::assert::is_true(e.relocs[0].offset % (8 to u32) == (0 to u32))
+    teko::assert::is_true(e.relocs[0].sect == RelocSect::Rodata)
+}
+
+#test
+/**
+ * find_rodata_align_violations_is_empty_for_aligned_relocs — the diagnostic's pure detection
+ * core (`TEKO_NATIVE_RODATA_ALIGN_CHECK`'s engine) reports NOTHING for a symbol table + reloc
+ * list where every rodata-internal pointer relocation already sits on an 8-byte boundary — the
+ * ordinary, well-formed case `encode_rodata` always produces today.
+ *
+ * @return void
+ */
+fn find_rodata_align_violations_is_empty_for_aligned_relocs() {
+    let syms = teko::list::push(teko::list::push(teko::list::empty(), Symbol { name = "s0"; defined = true; sect = 2 to u8; offset = 0 to u32; local = true }), Symbol { name = "s1"; defined = true; sect = 2 to u8; offset = 16 to u32; local = true })
+    let relocs = teko::list::push(teko::list::empty(), lir::data_reloc(16 to u32, "s0"))
+    teko::assert::is_true(find_rodata_align_violations(syms, relocs).len == 0)
+}
+
+#test
+/**
+ * find_rodata_align_violations_names_the_owning_symbol — the diagnostic's pure detection core
+ * ATTRIBUTES a misaligned relocation (offset 9, no symbol starts exactly there) to the nearest
+ * PRECEDING rodata symbol (`s0`, at offset 0) — the same "symbol+displacement" rule a linker's
+ * own alignment diagnostic applies — and reports the next 8-aligned offset (16) it should have
+ * landed on. This is the pure core `enc_rodata_reloc_offset_survives_odd_length_neighbors`
+ * proves `encode_rodata` itself never produces; this fixture proves the DIAGNOSTIC would name
+ * the right culprit if some OTHER producer ever did.
+ *
+ * @return void
+ */
+fn find_rodata_align_violations_names_the_owning_symbol() {
+    let syms = teko::list::push(teko::list::empty(), Symbol { name = "s0"; defined = true; sect = 2 to u8; offset = 0 to u32; local = true })
+    let relocs = teko::list::push(teko::list::empty(), lir::data_reloc(9 to u32, "leaf"))
+    let violations = find_rodata_align_violations(syms, relocs)
+    teko::assert::is_true(violations.len == 1)
+    teko::assert::is_true(violations[0].owner == "s0")
+    teko::assert::is_true(violations[0].target == "leaf")
+    teko::assert::is_true(violations[0].offset == (9 to u32))
+    teko::assert::is_true(violations[0].expected == (16 to u32))
 }
 
 #test
@@ -1421,9 +1565,9 @@ fn big_frame_addr_words_chain_the_add_sequence() {
     teko::assert::is_true(ws[0].word == (0x914007E0 to u32))
     teko::assert::is_true(ws[1].word == (0x910E2000 to u32))
     teko::assert::is_false(ws[0].has_branch)
-    teko::assert::is_false(ws[0].has_reloc)
+    teko::assert::is_true(ws[0].reloc == null)
     teko::assert::is_false(ws[1].has_branch)
-    teko::assert::is_false(ws[1].has_reloc)
+    teko::assert::is_true(ws[1].reloc == null)
 }
 
 #test

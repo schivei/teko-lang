@@ -14,7 +14,7 @@
     (Ptr), or the no-value marker (Void). Signedness is a property of the OPCODE
     (IDivS vs IDivU), never of the type — exactly like x86. str/slice/Ref/ptr/
     Named all collapse to Ptr; those are only EXERCISED from N2 (fat-pointers),
-    but the enum closes now so N2 does not re-version it. `I128`/`F16` are REMOVED
+    but the enum closes now so N2 does not re-version it. `i64`/`f32` are REMOVED
     (drop-128, 2026-07-24) — the language's widest integer is 64-bit and its floats
     are f32/f64, so no carrier ever needs a 128-bit or half-precision machine class. */
 pub type LType = enum {
@@ -39,11 +39,15 @@ pub type LBinOp = enum {
 /** LUnOp — the closed set of unary operations: integer/float negation + bitwise
     not, plus the width/representation conversions (extend/truncate/int<->float).
     N1 emits INeg/FNeg/INot + the numeric conversions from a `to` cast; the rest is
-    declared for N2. */
-pub type LUnOp = enum { INeg; INot; FNeg; ZExt; SExt; Trunc; IToF; FToI; FToF }
+    declared for N2.
+
+    `IToFBits`/`FToIBits` are a RAW bit-reinterpretation pair (`teko::f64_from_bits`/
+    `teko::f64_bits`), distinct from the numeric CONVERSION `IToF`/`FToI`: each backend selects
+    one plain GPR/FPR-crossing move (x86-64's `MOVQ`, arm64's `FMOV`), never a conversion opcode. */
+pub type LUnOp = enum { INeg; INot; FNeg; ZExt; SExt; Trunc; IToF; FToI; FToF; IToFBits; FToIBits }
 
 /** LConstInt — materialize an integer literal into a VReg. `val` is the raw i64
-    two's-complement register carrier (drop-128, 2026-07-24 — was i128) so no literal in the
+    two's-complement register carrier (drop-128, 2026-07-24 — was i64) so no literal in the
     language's post-drop range loses bits before machine lowering. */
 pub type LConstInt = struct { val: i64 }
 
@@ -527,16 +531,33 @@ fn push_inst_block(b: LBlock, inst: LInst) -> LBlock {
     LBlock { id = b.id; params = b.params; insts = teko::list::push(b.insts, inst) }
 }
 
-/** append_inst — return a copy of `f` with `inst` appended to the block whose id is
-    `block_id`. N1 threads a single block (id 0). */
+/** append_inst — `f` with `inst` appended to the block whose id is `block_id`
+    (N1 threads a single block, id 0 — but LOWERING itself builds multi-block
+    functions long before isel mirrors them, so this runs once per LIR
+    instruction of every function).
+    MUTATES `blocks[i]` IN PLACE (an index-assign onto the local `blocks`,
+    which aliases the SAME underlying buffer as `f.blocks` — slice value
+    semantics copy the {ptr,len} header, not the array) INSTEAD OF rebuilding
+    the whole `blocks` list every call. The old rebuild re-pushed a SHALLOW
+    STRUCT COPY of every untouched block (`nb = b`), so its `insts` fat
+    pointer kept aliasing the SAME instruction buffer across every one of
+    those O(blocks) rebuilds — and the outer `blocks` self-append is
+    checker-proven free-old-safe, so each rebuild PARKED the previous
+    generation's array while an aliased `insts` pointer it carried could still
+    be some LATER generation's live push-cache tail — the wild-write chase
+    (`TEKO_NATIVE_PUSH_REDZONE`) caught this exact shape, ONE LEVEL BELOW the
+    isel-side twins (`append_minst`/`append_minst_x86`) it was first fixed in:
+    LOWERING builds `LFunc`/`LBlock` before isel ever mirrors them, so this
+    site trips first. */
 pub fn append_inst(f: LFunc, block_id: u32, inst: LInst) -> LFunc {
-    mut blocks: []LBlock = teko::list::empty()
+    mut blocks = f.blocks
     mut i: u64 = 0
     loop {
-        if i >= f.blocks.len { break }
-        let b = f.blocks[i]
-        let nb = if b.id == block_id { push_inst_block(b, inst) } else { b }
-        blocks = teko::list::push(blocks, nb)
+        if i >= blocks.len { break }
+        if blocks[i].id == block_id {
+            blocks[i] = push_inst_block(blocks[i], inst)
+            break
+        }
         i++
     }
     LFunc { symbol = f.symbol; n_params = f.n_params; param_types = f.param_types; ret_type = f.ret_type; blocks = blocks; next_vreg = f.next_vreg }
@@ -630,16 +651,18 @@ pub fn add_block_param(f: LFunc, block_id: u32) -> BlockParam {
     BlockParam { func = set_block_param(fresh.func, block_id, fresh.vreg); vreg = fresh.vreg }
 }
 
-/** set_block_param — return a copy of `f` with `vreg` appended to the params list of the
-    block whose id is `block_id` (mirrors append_inst's per-block rewrite shape). */
+/** set_block_param — return `f` with `vreg` appended to the params list of the block
+    whose id is `block_id` (mirrors `append_inst`'s per-block rewrite shape — same
+    in-place mutation, same reason: see `append_inst`'s own doc-comment). */
 fn set_block_param(f: LFunc, block_id: u32, vreg: u32) -> LFunc {
-    mut blocks: []LBlock = teko::list::empty()
+    mut blocks = f.blocks
     mut i: u64 = 0
     loop {
-        if i >= f.blocks.len { break }
-        let b = f.blocks[i]
-        let nb = if b.id == block_id { LBlock { id = b.id; params = teko::list::push(b.params, vreg); insts = b.insts } } else { b }
-        blocks = teko::list::push(blocks, nb)
+        if i >= blocks.len { break }
+        if blocks[i].id == block_id {
+            blocks[i] = LBlock { id = blocks[i].id; params = teko::list::push(blocks[i].params, vreg); insts = blocks[i].insts }
+            break
+        }
         i++
     }
     LFunc { symbol = f.symbol; n_params = f.n_params; param_types = f.param_types; ret_type = f.ret_type; blocks = blocks; next_vreg = f.next_vreg }

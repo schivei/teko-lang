@@ -110,3 +110,236 @@ pub fn join_checker_diags(diags: []str) -> str {
 fn diags_error(diags: []str) -> error {
     error { message = join_checker_diags(diags) }
 }
+
+/**
+ * DiagLevel — the severity of a collected diagnostic: Error for every checker type-error, Warning
+ * for a collected finding that only used to reach stderr before crumb C (`warnings.tks::collect_warnings`).
+ * A checker-side twin of the LSP's OWN `DiagSeverity` (`src/lsp/diagnostics.tks`) rather than a
+ * cross-package `use`, so `teko::checker` never depends on `teko::lsp` — the LSP wraps the checker, not
+ * the other way around (`docs/design/lsp-teko.md` §2.1).
+ *
+ * @since 0.3.1.0 (LSP crumb D)
+ */
+pub type DiagLevel = enum { Error; Warning; Info; Hint }
+
+/**
+ * Diagnostic — one positioned, structured, SEVERITY-KNOWN diagnostic: the crumb D hardening of the flat
+ * `file:line:col: msg` string `collect_diagnostics` (`lsp_api.tks`) returns alone. `severity` is stamped
+ * at the SOURCE of each finding (Error for `type_program_with_deps_pre_mono`'s own diagnostics, Warning
+ * for `warnings.tks::collect_warnings`'s) — never re-derived downstream by sniffing the rendered message
+ * text for a `"warning:"` marker, the fragile v1 heuristic `docs/design/lsp-teko.md` §3.1 names as its
+ * own "lacuna 1". `end_line`/`end_col` default to one column past the start: the checker has no source
+ * buffer to widen a range over the flagged token's own text — that widening stays the LSP's job
+ * (`src/lsp/diagnostics.tks`'s `word_end_col`, once it has the open document's buffer).
+ *
+ * @since 0.3.1.0 (LSP crumb D)
+ */
+pub type Diagnostic = struct {
+    /** the diagnostic's source file ("" when the underlying finding carries none). */
+    file: str
+    /** the 1-based line of the range start (0 when the finding carries no position). */
+    line: u32
+    /** the 1-based column of the range start (read only when `line` is known). */
+    col: u32
+    /** the 1-based line of the range end (same as `line` for a single-line finding). */
+    end_line: u32
+    /** the 1-based column just past the range end (`col + 1` when the source reports no wider range). */
+    end_col: u32
+    /** Error / Warning / Info / Hint, known at the finding's own source, never sniffed from `message`. */
+    severity: DiagLevel
+    /** the diagnostic text, with the `file:line:col:` location prefix already stripped. */
+    message: str
+}
+
+/**
+ * DiagNum — the result of reading a decimal `u32` run out of a diagnostic line: the value, the index
+ * just past the last digit, and whether any digit was actually consumed (`ok` false ⇒ the position held
+ * no number). A checker-local twin of `src/lsp/diagnostics.tks`'s `ParsedNum` — duplicated rather than
+ * shared for the same reason `join_checker_diags` already is (this file's own doc), and because the
+ * checker must not depend on `teko::lsp`.
+ *
+ * @since 0.3.1.0 (LSP crumb D)
+ */
+type DiagNum = struct {
+    /** the parsed value (0 when `ok` is false). */
+    value: u32
+    /** the index of the first byte after the digit run. */
+    next: u64
+    /** true when at least one digit was read. */
+    ok: bool
+}
+
+/**
+ * diag_read_u32 — read a decimal `u32` out of `s` starting at `from`, stopping at the first non-digit.
+ *
+ * @param s     the string to read from
+ * @param from  the start index
+ * @return      the value, the index past the digits, and whether any digit was read
+ * @since 0.3.1.0 (LSP crumb D)
+ */
+fn diag_read_u32(s: str, from: u64) -> DiagNum {
+    mut i = from
+    mut n: u64 = 0
+    mut any = false
+    loop {
+        if i >= s.len { break }
+        if s[i] < b'0' || s[i] > b'9' { break }
+        n = n * 10 + ((s[i] to u64) - (b'0' to u64))
+        any = true
+        i = i + 1
+    }
+    DiagNum { value = n to u32; next = i; ok = any }
+}
+
+/**
+ * has_diag_prefix — does `s` begin with `prefix`? A local byte compare because the corpus lacks a
+ * `teko::str::starts_with` builtin (the same gap `src/lsp/diagnostics.tks::has_prefix` already works
+ * around).
+ *
+ * @param s       the string tested
+ * @param prefix  the prefix to look for
+ * @return        true when `s` starts with `prefix`
+ * @since 0.3.1.0 (LSP crumb D)
+ */
+fn has_diag_prefix(s: str, prefix: str) -> bool {
+    if s.len < prefix.len { return false }
+    mut i: u64 = 0
+    loop {
+        if i >= prefix.len { break }
+        if s[i] != prefix[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+/**
+ * matches_diag_file — does `diag` (a `collect_diagnostics`-style line) name `file` as its own leading
+ * `file:` prefix, exactly the shape `diag_at` emits for a positioned diagnostic (`file` non-empty)?
+ *
+ * @param diag  one diagnostic line
+ * @param file  the candidate file to test
+ * @return      true when `diag` begins with `file` immediately followed by `:`
+ * @since 0.3.1.0 (LSP crumb D)
+ */
+fn matches_diag_file(diag: str, file: str) -> bool {
+    if file == "" { return false }
+    if diag.len <= file.len { return false }
+    if diag[file.len] != b':' { return false }
+    has_diag_prefix(diag, file)
+}
+
+/**
+ * file_prefix_of — the FIRST entry of `files` that `diag` names as its own `file:` prefix, or `""` when
+ * none matches. `files` is the small, CLOSED set of source files the diagnosed program actually carries
+ * (`lsp_api.tks::program_files`), so this reverses `diag_at`'s concatenation WITHOUT the general
+ * ambiguity a path-less scan would carry (a file path that itself happened to contain a `:digit:digit:`
+ * run) — the closed-candidate trick crumb A's own string re-parse already relied on for the
+ * single-document case, generalized here to the whole (possibly multi-file) program.
+ *
+ * @param diag   one `collect_diagnostics`-style diagnostic line
+ * @param files  the known candidate files, tried in order
+ * @return       the matching file, or `""` when `diag` names none of them
+ * @since 0.3.1.0 (LSP crumb D)
+ */
+fn file_prefix_of(diag: str, files: []str) -> str {
+    mut i: u64 = 0
+    loop {
+        if i >= files.len { break }
+        if matches_diag_file(diag, files[i]) { return files[i] }
+        i = i + 1
+    }
+    ""
+}
+
+/**
+ * strip_leading_diag_space — drop a single leading space from `s` when present (the separator
+ * `diag_at` inserts between its `:` and the message). A string with no leading space is unchanged.
+ *
+ * @param s  the string to trim
+ * @return   `s` without a single leading space
+ * @since 0.3.1.0 (LSP crumb D)
+ */
+fn strip_leading_diag_space(s: str) -> str {
+    if s.len > 0 && s[0] == b' ' { return teko::str::slice_from(s, 1) }
+    s
+}
+
+/**
+ * to_diagnostic — turn one `collect_diagnostics`-style line (`file:line:col: msg`, `file: msg`, or a
+ * bare message) into a structured `Diagnostic` stamped with the CALLER-KNOWN `severity` — never sniffed
+ * from `diag`'s own text. `file` is resolved against the closed `files` candidate set
+ * (`file_prefix_of`); a line naming none of them (or an unpositioned finding) yields `file = ""`,
+ * `line = 0`, `col = 0` with the WHOLE line as the message, mirroring `diag_at`'s own graceful
+ * degradation for an unknown position.
+ *
+ * @param diag      one diagnostic line
+ * @param files     the known candidate files, tried in order
+ * @param severity  the severity to stamp (known at the caller's own source, e.g. errors vs. warnings)
+ * @return          the structured diagnostic
+ * @since 0.3.1.0 (LSP crumb D)
+ */
+fn to_diagnostic(diag: str, files: []str, severity: DiagLevel) -> Diagnostic {
+    let file = file_prefix_of(diag, files)
+    if file == "" {
+        return Diagnostic { file = ""; line = 0; col = 0; end_line = 0; end_col = 0; severity = severity; message = diag }
+    }
+    let rest = teko::str::slice_from(diag, file.len + 1)
+    let p1 = diag_read_u32(rest, 0)
+    if !p1.ok || p1.next >= rest.len || rest[p1.next] != b':' {
+        return Diagnostic { file = file; line = 0; col = 0; end_line = 0; end_col = 0; severity = severity; message = strip_leading_diag_space(rest) }
+    }
+    let p2 = diag_read_u32(rest, p1.next + 1)
+    if !p2.ok || p2.next >= rest.len || rest[p2.next] != b':' {
+        return Diagnostic { file = file; line = 0; col = 0; end_line = 0; end_col = 0; severity = severity; message = strip_leading_diag_space(rest) }
+    }
+    mut j = p2.next + 1
+    if j < rest.len && rest[j] == b' ' { j = j + 1 }
+    let msg = teko::str::slice_from(rest, j)
+    let line = p1.value
+    let col = p2.value
+    Diagnostic { file = file; line = line; col = col; end_line = line; end_col = col + 1; severity = severity; message = msg }
+}
+
+/**
+ * structure_diags — every line of `diags` as a structured `Diagnostic`, all stamped `severity`, in the
+ * same order. The mapping half of the crumb D seam: turns one already-collected `[]str` batch (all of
+ * the SAME severity by construction — an error batch or a warning batch, never mixed) into `[]Diagnostic`.
+ *
+ * @param diags     the diagnostic lines, all of one severity
+ * @param files     the known candidate files, tried in order
+ * @param severity  the severity every line is stamped with
+ * @return          the structured diagnostics, in `diags`' order
+ * @since 0.3.1.0 (LSP crumb D)
+ */
+fn structure_diags(diags: []str, files: []str, severity: DiagLevel) -> []Diagnostic {
+    mut out: []Diagnostic = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= diags.len { break }
+        out = teko::list::push(out, to_diagnostic(diags[i], files, severity))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * concat_structured_diags — `b`'s structured diagnostics appended to `a`'s, in order. The `[]Diagnostic`
+ * twin of `concat_diags`, kept separate because the corpus has no generic-over-element-type list append.
+ *
+ * @param a  the diagnostics collected first
+ * @param b  the diagnostics to append
+ * @return   the concatenation, `a` before `b`
+ * @since 0.3.1.0 (LSP crumb D)
+ */
+fn concat_structured_diags(a: []Diagnostic, b: []Diagnostic) -> []Diagnostic {
+    if b.len == 0 { return a }
+    if a.len == 0 { return b }
+    mut out = a
+    mut i: u64 = 0
+    loop {
+        if i >= b.len { break }
+        out = teko::list::push(out, b[i])
+        i = i + 1
+    }
+    out
+}

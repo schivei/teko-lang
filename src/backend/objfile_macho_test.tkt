@@ -51,7 +51,7 @@ fn mo_no_uses() -> []MReg {
  */
 fn mo_object_of(m: MModule) -> []byte {
     match encode_module(AAPCS64, m) {
-        EncodedModule as x => emit_macho(x)
+        EncodedModule as x => emit_macho(x, no_dwarf_sink())
         error as e => teko::list::empty()
     }
 }
@@ -197,7 +197,7 @@ fn rodata_reloc_module_pins_symtab_and_page_relocs() {
     }
     teko::assert::is_true(enc.relocs.len == 3)
     teko::assert::is_true(enc.symbols.len == 3)
-    let obj = emit_macho(enc)
+    let obj = emit_macho(enc, no_dwarf_sink())
     teko::assert::is_true(obj.len == (500 to u64))
     teko::assert::is_true(mo_u32_at(obj, 324 to u64) == (1 to u32))
     teko::assert::is_true(mo_u32_at(obj, 328 to u64) == (1 to u32))
@@ -256,7 +256,7 @@ fn mo_rodata_ptr_enc() -> EncodedModule {
  */
 #test
 fn tb3_macho_const_reloc_emitted() {
-    let obj = emit_macho(mo_rodata_ptr_enc())
+    let obj = emit_macho(mo_rodata_ptr_enc(), no_dwarf_sink())
     teko::assert::is_true(obj.len == 462)
     teko::assert::is_true(mo_u32_at(obj, 96) == 2)
     teko::assert::is_true(mo_u32_at(obj, 240) == 408)
@@ -391,6 +391,199 @@ fn mo_global_addr_func() -> lir::LFunc {
     let v = lir::alloc_vreg(f0)
     let s0 = lir::append_inst(v.func, 0, lir::global_addr_inst(v.vreg, ".Lstr0", 0, 0))
     lir::append_inst(s0, 0, lir::ret_inst(v.vreg, 0, 0))
+}
+
+/**
+ * mo_dwarf_fixture_enc — a hand-built, no-rodata `EncodedModule` (D1.5 fixture): one 4-byte
+ * `__text` function `main` and nothing else, so the object has exactly one section (`nsects = 1`)
+ * and a deterministic, self-relocating layout to read the `__DWARF` segment out of.
+ *
+ * @return EncodedModule  the one-function, no-rodata module
+ */
+fn mo_dwarf_fixture_enc() -> EncodedModule {
+    let text = [0x1F to byte, 0x20 to byte, 0x03 to byte, 0xD5 to byte]
+    let main = Symbol { name = "main"; defined = true; sect = 1 to u8; offset = 0 to u32; local = false }
+    EncodedModule { text = text; rodata = teko::list::empty(); symbols = [main]; relocs = teko::list::empty() }
+}
+
+/**
+ * mo_dwarf_sink_of — a one-function `DwarfSink` (D1.5 fixture) anchored at `sym`, built through the
+ * SAME `build_dwarf_sink` the real `--debug=lines` build glue calls. Structurally identical to the
+ * ELF writer's `el_dwarf_sink_of` fixture (D1.4).
+ *
+ * @param str sym  the `.text` symbol both the CU and the line program anchor to
+ * @param u64 code_size  the function's (and so the unit's) code size
+ * @return DwarfSink  the assembled, `present = true` sink
+ */
+fn mo_dwarf_sink_of(sym: str, code_size: u64) -> DwarfSink {
+    let sub = DwSubprogram { name = "main"; decl_file = 1; decl_line = 10 to u32; symbol = sym; code_size = code_size }
+    let cu = DwCompileUnit {
+        producer = "teko test"; language = 0x0c to u32; name = "t.tks"; comp_dir = "."
+        text_symbol = sym; text_size = code_size; subprograms = [sub]
+    }
+    let rows = [DwLineRow { pc_advance = 0 to u64; line = 10 to u32; file = 1 }]
+    build_dwarf_sink(cu, ["t.tks"], rows, code_size)
+}
+
+/**
+ * mo_main_seg_cmdsize — the byte size of the FIRST (`__TEXT`) `LC_SEGMENT_64` load command, read
+ * from its own `cmdsize` field at fixed offset 36 (`mach_header_64`'s 32 bytes + the 4-byte `cmd`
+ * field of the first load command): the self-relocating key that locates every load command AFTER
+ * it, whatever `nsects` this particular fixture carries.
+ *
+ * @param []byte obj  the emitted Mach-O object
+ * @return u64  the first segment command's `cmdsize`
+ */
+fn mo_main_seg_cmdsize(obj: []byte) -> u64 {
+    mo_u32_at(obj, 36 to u64) to u64
+}
+
+/**
+ * mo_dwarf_seg_offset — the file byte offset of the `__DWARF` `LC_SEGMENT_64` load command: right
+ * after the first (`__TEXT`) segment command, located through the object's own `cmdsize` field
+ * rather than a hardcoded constant.
+ *
+ * @param []byte obj  the emitted Mach-O object
+ * @return u64  the `__DWARF` segment command's byte offset
+ */
+fn mo_dwarf_seg_offset(obj: []byte) -> u64 {
+    32 to u64 + mo_main_seg_cmdsize(obj)
+}
+
+/**
+ * mo_dwarf_section_offset — the file byte offset of the `n`-th `section_64` inside the `__DWARF`
+ * segment (0 = `__debug_abbrev`, 1 = `__debug_info`, 2 = `__debug_line`): the segment command header
+ * is 72 bytes, each section entry 80.
+ *
+ * @param []byte obj  the emitted Mach-O object
+ * @param u64 n  the zero-based section index within `__DWARF`
+ * @return u64  that section's `section_64` byte offset
+ */
+fn mo_dwarf_section_offset(obj: []byte, n: u64) -> u64 {
+    mo_dwarf_seg_offset(obj) + (72 to u64) + (n * (80 to u64))
+}
+
+/**
+ * mo_str16_eq — whether the 16-byte fixed-width name field at `off` starts with `s` (the rest
+ * zero-padded, `emit_fixed16`'s contract).
+ *
+ * @param []byte obj  the emitted Mach-O object
+ * @param u64 off  the 16-byte field's start offset
+ * @param str s  the expected name (at most 16 bytes)
+ * @return bool  true iff the field's first `s.len` bytes equal `s`
+ */
+fn mo_str16_eq(obj: []byte, off: u64, s: str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= s.len { break }
+        if obj[off + i] != s[i] { return false }
+        i++
+    }
+    true
+}
+
+/**
+ * mo_bytes_eq — whether `a` and `b` hold the same bytes in the same order (D1.5's byte-identity
+ * regression check).
+ *
+ * @param []byte a  the first buffer
+ * @param []byte b  the second buffer
+ * @return bool  true iff `a` and `b` are byte-for-byte identical
+ */
+fn mo_bytes_eq(a: []byte, b: []byte) -> bool {
+    if a.len != b.len { return false }
+    mut i: u64 = 0
+    loop {
+        if i >= a.len { break }
+        if a[i] != b[i] { return false }
+        i++
+    }
+    true
+}
+
+#test
+/**
+ * macho_dwarf_absent_is_byte_identical — omitting `dwarf` and passing `no_dwarf_sink()` explicitly
+ * produce the SAME object, byte for byte, and `ncmds` stays 4 — the `DebugInfo::None` default (D1.5's
+ * non-negotiable: a build with no debug axis stays byte-identical to before the sink existed).
+ *
+ * @return void
+ */
+fn macho_dwarf_absent_is_byte_identical() {
+    let a = emit_macho(mo_dwarf_fixture_enc(), no_dwarf_sink())
+    let b = emit_macho(mo_dwarf_fixture_enc(), no_dwarf_sink())
+    teko::assert::eq_u64(a.len, b.len)
+    teko::assert::is_true(mo_bytes_eq(a, b))
+    teko::assert::eq_u64(mo_u32_at(a, 16 to u64) to u64, 4 to u64)
+}
+
+#test
+/**
+ * macho_dwarf_present_adds_dwarf_segment — a `--debug=lines`-shaped object (D1.5) reports `ncmds = 5`
+ * (the `mach_header_64` field at byte 16); the second `LC_SEGMENT_64` load command, located through
+ * the first segment's own `cmdsize`, is named `__DWARF`, sized `72 + 3*80 = 312` bytes, and reports
+ * `nsects = 3` — proving the SEGMENT is placed, not just its sections.
+ *
+ * @return void
+ */
+fn macho_dwarf_present_adds_dwarf_segment() {
+    let obj = emit_macho(mo_dwarf_fixture_enc(), mo_dwarf_sink_of("main", 4 to u64))
+    teko::assert::eq_u64(mo_u32_at(obj, 16 to u64) to u64, 5 to u64)
+    let seg = mo_dwarf_seg_offset(obj)
+    teko::assert::eq_u64(mo_u32_at(obj, seg) to u64, 25 to u64)
+    teko::assert::eq_u64(mo_u32_at(obj, seg + (4 to u64)) to u64, 312 to u64)
+    teko::assert::is_true(mo_str16_eq(obj, seg + (8 to u64), "__DWARF"))
+    teko::assert::eq_u64(mo_u32_at(obj, seg + (64 to u64)) to u64, 3 to u64)
+}
+
+#test
+/**
+ * macho_dwarf_sections_are_named_sized_and_flagged_debug — the three `__DWARF` sections (D1.5) are
+ * `__debug_abbrev`/`__debug_info`/`__debug_line`, each `S_ATTR_DEBUG` (0x02000000, so `ld`/`lldb`
+ * treat them as debug-only, never mapped), each sized exactly like the D1.3 producers' own output.
+ *
+ * @return void
+ */
+fn macho_dwarf_sections_are_named_sized_and_flagged_debug() {
+    let sink = mo_dwarf_sink_of("main", 4 to u64)
+    let obj = emit_macho(mo_dwarf_fixture_enc(), sink)
+    let abbrev_off = mo_dwarf_section_offset(obj, 0 to u64)
+    let info_off = mo_dwarf_section_offset(obj, 1 to u64)
+    let line_off = mo_dwarf_section_offset(obj, 2 to u64)
+    teko::assert::is_true(mo_str16_eq(obj, abbrev_off, "__debug_abbrev"))
+    teko::assert::is_true(mo_str16_eq(obj, info_off, "__debug_info"))
+    teko::assert::is_true(mo_str16_eq(obj, line_off, "__debug_line"))
+    teko::assert::eq_u64(mo_u32_at(obj, abbrev_off + (40 to u64)) to u64, debug_abbrev().len)
+    teko::assert::eq_u64(mo_u32_at(obj, info_off + (40 to u64)) to u64, sink.info.bytes.len)
+    teko::assert::eq_u64(mo_u32_at(obj, line_off + (40 to u64)) to u64, sink.line.bytes.len)
+    teko::assert::eq_u64(mo_u32_at(obj, abbrev_off + (64 to u64)) to u64, 0x02000000 to u64)
+    teko::assert::eq_u64(mo_u32_at(obj, info_off + (64 to u64)) to u64, 0x02000000 to u64)
+    teko::assert::eq_u64(mo_u32_at(obj, line_off + (64 to u64)) to u64, 0x02000000 to u64)
+}
+
+#test
+/**
+ * macho_dwarf_info_reloc_resolves_against_defined_function_symbol — the `__debug_info` section's
+ * relocation table (D1.5) has exactly one entry (the CU-level low_pc; this fixture's single
+ * subprogram shares the same address, but `debug_info` emits the CU-level slot first — see
+ * `dwarf_info_matches_golden`), `ARM64_RELOC_UNSIGNED`(0)/`r_length=3`/`r_pcrel=0`/`r_extern=1`,
+ * against `main`'s ONLY `.symtab` index (0 — the sole symbol in this no-rodata fixture).
+ *
+ * @return void
+ */
+fn macho_dwarf_info_reloc_resolves_against_defined_function_symbol() {
+    let obj = emit_macho(mo_dwarf_fixture_enc(), mo_dwarf_sink_of("main", 4 to u64))
+    let info_off = mo_dwarf_section_offset(obj, 1 to u64)
+    let reloff = mo_u32_at(obj, info_off + (56 to u64)) to u64
+    let word = mo_u32_at(obj, reloff + (4 to u64))
+    let symnum = word & (0x00FFFFFF to u32)
+    let rtype = word >> (28 to u32)
+    let pcrel = (word >> (24 to u32)) & (1 to u32)
+    let is_extern = (word >> (27 to u32)) & (1 to u32)
+    teko::assert::eq_u64(rtype to u64, 0 to u64)
+    teko::assert::eq_u64(pcrel to u64, 0 to u64)
+    teko::assert::eq_u64(is_extern to u64, 1 to u64)
+    teko::assert::eq_u64(symnum to u64, 0 to u64)
 }
 
 /**

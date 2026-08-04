@@ -29,7 +29,7 @@ priority order:
    (`:438-455` — the current cross path re-runs `zig cc` **six times**, once per Linux artifact;
    the own backend lowers the front-end **once** and emits N cheap machine-code lowerings), and
    wins on independence. It wins only **~2.4% on a local self-build** (`:429-436`; `cc` is 0.69s of
-   the ~28s self-build — the cost is the VM gate + coverage, not the C compiler) and **~nothing on
+   the ~28s self-build — the cost is the interpreter gate + coverage, not the C compiler) and **~nothing on
    qemu** (`:457-462`). This doc records that verdict so no one over-attributes local speed to this
    epic: **the win is independence + cross-compile, not single-host wall-clock.**
 3. **It obsoletes a live bug class.** The generated `teko.c` carries latent UB that
@@ -38,7 +38,7 @@ priority order:
    `-O2` UB and no `-O0` tax — `memory-unsafe-backend-remodel.md:176-177` records this as
    "obsoleted by the own-backend".
 
-The VM's fate rides along (`memory-unsafe-backend-remodel.md` §4): the noisy VM-vs-native
+The interpreter's fate rides along (`memory-unsafe-backend-remodel.md` §4): the noisy interpreter-vs-native
 differential **migrates** to **C-backend-vs-own-backend** (both native, C-backend trusted and
 self-hosting) — a *stronger* oracle that validates the new backend exactly when it is born; the
 C backend then retires when the own path is trusted. This recon scopes exactly that migration and
@@ -72,11 +72,11 @@ lane with the most RAM (macOS runs the coverage/gate per the native-test-gate ru
 reaches full type/control parity with `tk_emit_c` on this one target *first*; N3–N5 (#223) are
 ports that reuse the whole LIR + lowering + regalloc frame and swap only isel/encoder/objfile.
 
-### 2.3 The differential gate (VM == C-native == own-native)
+### 2.3 The differential gate (interpreter == C-native == own-native)
 
 The correctness bar is a **3-way differential** built on the four oracles that already exist:
 
-- **VM** (`teko run`) — the language oracle (retiring, but kept until C-vs-own is trusted).
+- **Interpreter** (`teko run`) — the language oracle (retiring, but kept until C-vs-own is trusted).
 - **C-native** — `tk_emit_c` → `run_cc` → binary (the trusted, self-hosting production path).
 - **own-native** — the new backend's binary.
 - **LIR interpreter** (`src/lir/lir_interp.tks`) — the "FOURTH oracle" (`:1-8`): runs the LIR
@@ -94,7 +94,7 @@ all targets. The LIR-dump (`src/lir/lir_print.tks`, deterministic, floats as exa
 passes the full 3-way gate on every target for K consecutive green releases; (2) the own backend
 self-hosts (gen1==gen2 byte-identical through the own path, the fixpoint bar); (3) the
 M-linker (#226) removes the last external-linker dependency, so no target silently falls back to
-`cc`. Until then C-native stays the trusted side of the differential. **Do not retire the VM
+`cc`. Until then C-native stays the trusted side of the differential. **Do not retire the interpreter
 differential before C-vs-own is in place** (`memory-unsafe-backend-remodel.md:187-189`).
 
 ### 2.5 DWARF / debug scope
@@ -248,7 +248,7 @@ that PROVES each issue.
 - Depends on: N1 (#221, CLOSED).
 - Files: `src/lir/lower.tks`, `src/lir/lir.tks` (LModule rodata/globals), `src/lir/lir_interp.tks`,
   `src/lir/lir_print.tks`; tests `src/lir/lower_test.tkt`, `lir_interp_test.tkt`, `lir_test.tkt`.
-- Verifies via: **LIR-interpreter oracle** (exit code parity vs VM over the subset) + golden
+- Verifies via: **LIR-interpreter oracle** (exit code parity vs the interpreter over the subset) + golden
   LIR-dump diff. No machine code yet — proves lowering completeness independently.
 
 **A2 · N2b — arm64 instruction selection**
@@ -310,7 +310,7 @@ design doc are gone; the phase letter is kept so B1/B3 keep their names.
   `src/build/manifest.tks` (`Backend` field); tests in `project` + `manifest` `.tkt`.
 - Verifies via: `manifest`/`project` unit tests + fixpoint unchanged (flag defaults to C).
 
-**D2 · N8 — the 3-way differential CI (VM == C-native == own-native) + retire/DWARF decisions**
+**D2 · N8 — the 3-way differential CI (interpreter == C-native == own-native) + retire/DWARF decisions**
 - Scope: extend `scripts/diff_vm_native.sh` with the own-backend leg across all 8 targets; collect
   the **C-RETIRE** criteria evidence (§2.4) and the **DWARF/PDB** scope decision (§2.5) as owner
   forks. Does NOT retire anything.
@@ -369,11 +369,11 @@ D-3 (C-retire timing), D-4 (reference target).**
 
 ### D-1 · The REPL's fate (owner fork, from remodel §4)
 An interactive REPL is naturally an interpreter; on an AOT-only world it becomes either
-compile-and-run-per-line or a retained minimal tree-walker. **Law tension:** keeping the VM alive
+compile-and-run-per-line or a retained minimal tree-walker. **Law tension:** keeping the interpreter alive
 just for the REPL violates M.1 (two evaluators for one language) and M.5 (two ways to run code);
 compile-per-line honors both but pays latency (M.4 visible cost, acceptable for an interactive
-tool). **Recommendation:** compile-and-run-per-line on the own backend; retire the VM entirely. Not
-blocking (the REPL is not on the backend critical path) — collected at D2/#225 alongside VM
+tool). **Recommendation:** compile-and-run-per-line on the own backend; retire the interpreter entirely. Not
+blocking (the REPL is not on the backend critical path) — collected at D2/#225 alongside interpreter
 retirement.
 
 ### D-2 · The runtime-link path (blocks A4 — genuine fork)

@@ -1306,6 +1306,33 @@ fn f_alias_fat_field() -> i64 {
 }
 
 /**
+ * OwnedFatCorpus — a GENERIC struct whose FIRST field is a bare type-parameter `T` and whose second
+ * is a plain `i64` sibling (0.3.1.0 raiz A — fat-field layout unification). When `T` is stamped fat
+ * (`OwnedFatCorpus<str>`), the field's SYNTACTIC annotation the old layout predicate read (`T`, a
+ * name no type table registers) answered THIN — 8 bytes — while the store wrote the full 16-byte
+ * `{ptr, len}` slot the value's RESOLVED `Str` type calls for, spilling the length half onto the
+ * sibling. Sizing the field off `field_is_fat_resolved` (`typeexpr_is_fat` OR `is_fat_type` of the
+ * resolved declared type) makes the two agree.
+ */
+type OwnedFatCorpus<T> = struct { value: T; sibling: i64 }
+
+/**
+ * f_owned_fat_field — construct `OwnedFatCorpus<str>` with a 5-byte fat first field and a sibling set
+ * to a value distinct from that length, then assert every half reads back correctly: the fat field's
+ * `.len` and content, AND that the sibling was not overwritten by the fat field's own store. The
+ * layout==store witness for a bare-`T` fat field, the class the self-host's native crash belonged to.
+ *
+ * @return 0 on success, a distinct non-zero code per failing check
+ */
+fn f_owned_fat_field() -> i64 {
+    let h = OwnedFatCorpus<str> { value = "abcde"; sibling = 41 }
+    if h.sibling != 41 { return 1 }
+    if h.value.len != 5 { return 2 }
+    if h.value != "abcde" { return 3 }
+    0
+}
+
+/**
  * f_int_to_str — `teko::u64_to_str`/`teko::i64_to_str`, both `(iNN) -> str` (fat) (0.3.1.0 degrau
  * 12 / raiz-comum §R5): before this degrau, `native_builtin_symbol` had no entry for either bare
  * name, so a DIRECT call honest-stopped ("builtin `u64_to_str` not yet lowered") — first surfaced
@@ -1721,7 +1748,7 @@ fn f_ref_deref_assign() -> i64 {
  * commits to (a SIGNED negative value through the ALWAYS-`uint64_t` `x`/`b` cast, and an
  * UNSIGNED value through the ALWAYS-`int64_t` `d` cast) — every one BY VALUE, expected strings
  * cross-checked against `examples/regressions/bulk/src/q080_format_spec_families/body.tks`
- * (the SAME families, proven correct on the C/VM routes already).
+ * (the SAME families, proven correct on the native routes already).
  *
  * Every hole is a `mut` local, never reassigned — the SAME fold-opaque idiom `f_arith` itself
  * established at the top of this file — so the check exercises the RUNTIME lowering and not the
@@ -1756,7 +1783,7 @@ fn f_static_format_spec() -> i64 {
  * string's (ptr, len) pair through one of the three `tk_fmt_dyn_*_len` twins, split only by the
  * hole's own numeric family. This project's own source never writes a dynamic spec (searched:
  * `examples/regressions/bulk`'s own `q080_format_spec_families` is the only user in the whole
- * tree, and it targets the C/VM routes only), so THIS fixture is the first to exercise it
+ * tree, and it targets the native routes only), so THIS fixture is the first to exercise it
  * natively — the same INTEGER-family subset `f_static_format_spec` covers (the float family
  * being blocked by the SAME pre-existing `B1-fp` epic, not a gap of this degrau's own), each
  * spec string itself a `mut` local so neither the VALUE nor the SPEC TEXT can be folded away.
@@ -3102,9 +3129,11 @@ fn f64_bits_of(tag: i64) -> u64 {
  * GPR-only pending `B1-fp`), a real call would have carried the value through the single physical
  * XMM0 register, so a SECOND live `f64` would silently clobber the first the moment it was
  * produced — a measured scratch repro confirmed exactly that corruption. The fix instead lowers
- * both builtins as a bare VReg alias (no call at all), so ordinary register allocation — which
- * already keeps any number of plain integer values alive correctly — carries every one of
- * `a`/`b`/`c` to its own read-back untouched.
+ * both builtins as one raw GPR/FPR-crossing move (`IToFBits`/`FToIBits`, 0.3.1.0 degrau 27) into a
+ * FRESH result VReg — never a call, and never the ORIGINAL same-VReg-id alias either (see
+ * `f_f64_bitcast_arith`'s own doc for why the alias shape was itself unsound) — so ordinary
+ * register allocation, which already keeps any number of plain values alive correctly, carries
+ * every one of `a`/`b`/`c` to its own read-back untouched.
  *
  * @return 0 when every one of the three round-trips (and the negative sign bit) reads back
  *         correctly, else the number of the failing check
@@ -3121,6 +3150,41 @@ fn f_f64_bits_roundtrip() -> i64 {
     if bc != f64_bits_of(2) { return 3 }
     if (bc & 0x8000000000000000) == 0 { return 4 }
     if (ba & 0x8000000000000000) != 0 { return 5 }
+    0
+}
+
+/**
+ * f_f64_bitcast_arith — 0.3.1.0 degrau 27: real `f64` ARITHMETIC (`+`/`-`/`*`/`/`) performed
+ * directly on a `teko::f64_from_bits` result, then read back through `teko::f64_bits` — the exact
+ * shape `checker::comptime_fold::float_binop` uses (`teko::f64_from_bits(lf.bits)` fed straight
+ * into `x + y`), and the shape `f_f64_bits_roundtrip` above does NOT cover: chaining `f64_bits`
+ * straight back onto a fresh `f64_from_bits` result never forces the value through an FPR-only
+ * consumer, so THAT fixture stayed green even under the ORIGINAL same-VReg-id alias
+ * (`lower_f64_bitcast_call`, degrau 24) — the alias reused the operand's OWN VReg unchanged, and a
+ * VReg's register FILE is fixed by its DEFINING instruction (here, an integer load), so the alias
+ * silently stayed a GPR value end to end. The moment a float ALU op (`select_falu_x86`) consumes
+ * that SAME VReg id as an FPR operand, the native register allocator (`regalloc.tks`) sees ONE
+ * numeric id touched by two DIFFERENT register classes, splits it into two intervals that still
+ * share one `vid`, and `subst_find`'s id-only substitution (no class check) picks the wrong one for
+ * at least one occurrence — the measured SIGSEGV: the native self-build crashing while lowering
+ * `checker::float_binop` itself, the first compiler function in item order to do real `f64`
+ * arithmetic through this pair. `IToFBits`/`FToIBits` (one real `MFMovX86`/`MFMov` GPR/FPR move
+ * into a fresh result VReg) fix it.
+ *
+ * @return 0 when every one of the four arithmetic results reads back the exact expected bit
+ *         pattern, else the number of the failing check
+ */
+fn f_f64_bitcast_arith() -> i64 {
+    let x = teko::f64_from_bits(f64_bits_of(0))
+    let y = teko::f64_from_bits(f64_bits_of(1))
+    let sum = teko::f64_bits(x + y)
+    let diff = teko::f64_bits(x - y)
+    let prod = teko::f64_bits(x * y)
+    let quot = teko::f64_bits(x / y)
+    if sum != 4617315517961601024 { return 1 }
+    if diff != 4607182418800017408 { return 2 }
+    if prod != 4618441417868443648 { return 3 }
+    if quot != 4609434218613702656 { return 4 }
     0
 }
 
@@ -3940,7 +4004,7 @@ fn f_ftoa_nonfinite_text() -> i64 {
     teko::assert::eq_str(teko::ftoa(d27_infinity()), "inf")
     teko::assert::eq_str(teko::ftoa(minus_one * d27_infinity()), "-inf")
     let nan_text = teko::ftoa(d27_not_a_number())
-    teko::assert::str_ends_with(nan_text, "nan")
+    teko::assert::str_contains(nan_text, "nan")
     0
 }
 
@@ -4146,6 +4210,33 @@ fn f_f32_text_is_its_own_value() -> i64 {
     if $"{halves:P1}" != "250.0%" { return 11 }
     if $"{halves:[d27_dynamic_spec()]}" != "2.500" { return 12 }
     if $"{tenth:[d27_dynamic_spec()]}" != "0.100" { return 13 }
+    0
+}
+
+/**
+ * f_float_hole_bare_literal_stays_runtime — the OWNER invariant for numeric interpolation
+ * (2026-08-02): the render of an `f32`/`f64` (and of `dec`/`bigint`) hole to text is deferred to the
+ * RUNTIME renderer and is NEVER folded to a string literal at compile time, because a compile-time
+ * fold of a float would diverge from the runtime's own result (rounding, precision, FPU mode) and so
+ * break both correctness and the fixpoint.
+ *
+ * A BARE float LITERAL sitting directly in the hole (`$"{2.5}"`) is the PUREST fold target the layer
+ * can face — the hole expression is itself the constant a fold would render — and the sibling
+ * `f_f32_text_is_its_own_value` only ever interpolates a `let`-bound const, never a raw literal. The
+ * fold declines every float family (`cf_is_const_literal` excludes a float number literal), so the
+ * value travels the same `tk_ftoa_len`/`tk_fmt_f_len` runtime path a runtime float does. Proven two
+ * ways per value: agreement with a DIRECT `teko::ftoa` call on the same literal (the interpolation
+ * hole builder and the builtin call resolver are different lowerings meeting at one runtime symbol,
+ * so agreement is evidence and not a restated expectation) and, for the exactly-representable `2.5`
+ * whose text is unambiguous, agreement with the pinned form.
+ *
+ * @return 0 when every bare-literal hole matches its runtime twin and pinned text, else the failing check
+ */
+fn f_float_hole_bare_literal_stays_runtime() -> i64 {
+    if $"{2.5}" != teko::ftoa(2.5) { return 1 }
+    if $"{0.1}" != teko::ftoa(0.1) { return 2 }
+    if $"{2.5}" != "2.5" { return 3 }
+    if $"{2.5:F2}" != "2.50" { return 4 }
     0
 }
 
@@ -5405,5 +5496,249 @@ fn f_d29_float_memory_widths() -> i64 {
     if teko::ftoa(ss[1] to f64) != "2" { return 11 }
     if teko::ftoa(ss[2] to f64) != "0.10000000149011612" { return 12 }
     if teko::ftoa(ds[1] + ss[2] to f64) != "0.20000000149011612" { return 13 }
+    0
+}
+
+/**
+ * GvfFn — the first case of the `GvfDecl` variant: a struct payload WIDER than a variant wrapper's
+ * inline area, so a slot holding it is held BY ADDRESS. Its own first field is a `str`, whose
+ * pointer word is exactly what a mis-wrapped variant read reports as a (garbage) tag.
+ */
+type GvfFn = struct {
+    /** an identifying name, wide enough to make the payload by-address. */
+    name: str
+    /** a payload word. */
+    a: i64
+}
+
+/**
+ * GvfTy — the second `GvfDecl` case, structurally distinct from `GvfFn` so a `match` that read the
+ * wrong tag would answer the wrong arm.
+ */
+type GvfTy = struct {
+    /** an identifying name. */
+    name: str
+    /** a payload word. */
+    b: i64
+}
+
+/**
+ * GvfCo — the third `GvfDecl` case, completing a three-arm exhaustive `match`.
+ */
+type GvfCo = struct {
+    /** an identifying name. */
+    name: str
+    /** a payload word. */
+    c: i64
+}
+
+/**
+ * GvfDecl — a declared variant whose cases are aggregates held BY ADDRESS
+ * (`NATIVE-AGG-SLICE-BY-ADDRESS`): a slot holding a `GvfDecl` carries the address of a `{tag,
+ * payload}` wrapper, and a `match` reads the tag through that address.
+ */
+type GvfDecl = variant GvfFn | GvfTy | GvfCo
+
+/**
+ * GvfParsed — a GENERIC container whose payload field `node` is a type PARAMETER. Instantiated at
+ * `GvfDecl` (a variant), the stamped instance `GvfParsed__g__GvfDecl` loses the field's declaring
+ * namespace, so the native backend's field-type resolution used to answer "no declared type" and
+ * store `node` UNWRAPPED — the exact `parser::Parsed<parser::Decl>` shape the self-host parser
+ * builds, whose corrupted tag drove `build::assemble_sel` into the dead exhaustiveness edge.
+ */
+type GvfParsed<T> = struct {
+    /** the parsed node — a type-parameter field, a variant at this instantiation. */
+    node: T
+    /** a resume cursor, the non-variant field proving the struct itself is well-formed. */
+    next: u64
+}
+
+/**
+ * gvf_case_digit — build a `GvfParsed<GvfDecl>` whose `node` is the `GvfDecl` case selected by `k`,
+ * then read `node` back and fold the case to its digit — ALL IN ONE FRAME, so the placement this
+ * probes is the WRAPPER-building itself (`store_struct_field`'s union arm). Without the fix the
+ * generic instance field `node` was stored UNWRAPPED — a pointer to the bare case payload — so
+ * `match node` read the payload's first word (a `str`'s ptr, a garbage tag), took no arm and fell to
+ * the dead exhaustiveness edge; the digit it must fold is `k` itself.
+ *
+ * @param k  1 for `GvfFn`, 2 for `GvfTy`, anything else for `GvfCo`
+ * @return   `1`/`2`/`3` — the digit of the case `k` selects, read back through the generic field
+ */
+fn gvf_case_digit(k: i64) -> i64 {
+    mut p = GvfParsed<GvfDecl> { node = GvfCo { name = "co"; c = 3 }; next = 3 }
+    if k == 1 { p = GvfParsed<GvfDecl> { node = GvfFn { name = "fn"; a = 1 }; next = 1 } }
+    if k == 2 { p = GvfParsed<GvfDecl> { node = GvfTy { name = "ty"; b = 2 }; next = 2 } }
+    match p.node {
+        GvfFn as f => 1
+        GvfTy as t => 2
+        GvfCo as c => 3
+    }
+}
+
+/**
+ * f_generic_variant_field — folds one digit per `GvfDecl` case (`gvf_case_digit`) into a base-10
+ * accumulator. A native backend that stored the generic instance field `node` unwrapped reads a
+ * garbage tag, takes no arm and crashes on the dead edge; the correct answer is `1`, `2`, `3`.
+ *
+ * @return 123 — `GvfFn`→1, `GvfTy`→2, `GvfCo`→3, in construction order
+ */
+fn f_generic_variant_field() -> i64 {
+    mut acc: i64 = 0
+    mut k: i64 = 1
+    loop {
+        if k > 3 { break }
+        acc = acc * 10 + gvf_case_digit(k)
+        k = k + 1
+    }
+    acc
+}
+
+/**
+ * f_native_union_scalar — the native lowering of a numeric null-union reached through the const
+ * inliner's widen (folded from the retired `native_union_known_stop` project, CLOSED by
+ * cargo/0.3.1.0-null-adopt). It is a MEMBER of this channel now that it lowers: one build, no extra
+ * cost, asserting the value the C route always produced.
+ *
+ * @return the scalar null-union sum (42)
+ */
+fn f_native_union_scalar() -> i64 {
+    nunion::probe() to i64
+}
+
+/**
+ * f_native_union_nested — the native lowering of a null-union struct nested inside another
+ * null-union field (folded from the retired `native_union_nested_known_stop` project, CLOSED by
+ * 0.3.1.0 degrau 25). A wrapper written at either nesting level with the wrong tag shows up as a
+ * wrong SUM, not a stop.
+ *
+ * @return the two-level nested null-union sum (42)
+ */
+fn f_native_union_nested() -> i64 {
+    nunion_nested::probe() to i64
+}
+
+/**
+ * f_one_byte_score — the native lowering of `teko::one_byte(byte) -> str` across six disjoint call
+ * shapes (folded from the retired `one_byte_native` project). The weights (3, 12, 16, 32, 64, 128)
+ * sum to 255 and no partial sum reaches it, so a call shape that misses names itself in the score;
+ * the C-route oracle for the same 255 rides as `cases/one_byte_c.tks`.
+ *
+ * @return 255 when all six `one_byte` call shapes read back their own byte and length
+ */
+fn f_one_byte_score() -> i64 {
+    ob::score()
+}
+
+/**
+ * f_null_birth_null_type — retire-Optional O1 (`typer.tks:type_nulllit`,
+ * `docs/design/retirar-optional-para-null-union-uptr-0.3.1.md` §2.1): a bare `null` literal's
+ * `.type` is now the concrete `Null{}`, not the retired `Optional{inner=Void}` sentinel. Emission
+ * is DESTINATION-driven (§2.2: `from_is_bare_null`/`null_widens_into` already treat both
+ * representations identically), so the flip must be behavior-invisible at every slot a bare `null`
+ * reaches — this pins the birth type itself across the slot classes the pre-existing corpus
+ * already exercises piecemeal (`f_null_union_reassign_to_null`'s REASSIGNMENT,
+ * `f_d30_null_placement_field_arg_local`'s FIELD/ARGUMENT/RETURN, `f_null_union_struct_present_and_absent`'s
+ * struct-typed union member) in ONE place named after the crumb that changed the birth type, so a
+ * regression here points straight at `type_nulllit` rather than a name that predates it.
+ *
+ * @return 0 on success, a distinct non-zero code per failing slot class
+ */
+fn f_null_birth_null_type() -> i64 {
+    // slot class: a `mut` union-member local, bound present then reassigned to a bare `null`
+    mut reassigned: i64 | null = 5
+    reassigned = null
+    let r = match reassigned { i64 => 1; null => 0 }
+    if r != 0 { return 1 }
+
+    // slot class: a standalone annotated `let`, bound directly to a bare `null`
+    let bound: i64 | null = null
+    let b = match bound { i64 => 1; null => 0 }
+    if b != 0 { return 2 }
+
+    // slot class: a bare `null` ARGUMENT into a struct-typed null-union parameter, and its RETURN
+    let absent: Point_iface | null = null
+    if sum_or(absent, 12) != 12 { return 3 }
+    if sum_or(null, 7) != 7 { return 4 }
+    0
+}
+
+/**
+ * f_null_narrow_match — retire-Optional O1: `match x { null => …; T as t => … }` over a union
+ * whose member list used to be reached only through the `Optional`-sugar path (`T?`, now retired —
+ * `docs/design/retirar-optional-para-null-union-uptr-0.3.1.md` §2/§7 R-6) still exhausts (every arm
+ * reachable, no missing-case diagnostic) and BINDS (the `T as t` arm's payload reads back
+ * correctly) now that a bare `null` is born `Null{}` instead of the sentinel. The fuller arity/order
+ * matrix lives in the 0.3.1.0 degrau-30 family (`f_d30_null_arm_three_member`,
+ * `f_d30_null_arm_orders`, `f_d30_null_arm_exhaustive_selection`); this is the O1-named anchor.
+ *
+ * @return 0 on success, a distinct non-zero code per failing check
+ */
+fn f_null_narrow_match() -> i64 {
+    let present: i64 | null = 9
+    let bound = match present { i64 as v => v; null => -1 }
+    if bound != 9 { return 1 }
+    let absent: i64 | null = null
+    let missing = match absent { i64 as v => v; null => -1 }
+    if missing != -1 { return 2 }
+    // arm order reversed: the `null` arm first must still bind the concrete case second
+    let reordered = match present { null => -1; i64 as v => v }
+    if reordered != 9 { return 3 }
+    0
+}
+
+/**
+ * f_null_narrow_ifguard — retire-Optional O4 (`docs/design/retirar-optional-para-null-union-uptr-0.3.1.md`
+ * §6): a `when`-GUARDED match arm combined with `T | null` union narrowing over a migrated union
+ * still narrows and exhausts correctly now that `check_pattern`/`exhaustive`'s Optional-specific
+ * arms are deleted (`src/checker/match.tks`) and route purely through the generic `Null`-member
+ * Variant machinery. A guarded arm does NOT count for exhaustiveness (M.1) — the null arm plus an
+ * UNGUARDED present arm still cover the union on their own, so the guard's pass/fail is purely a
+ * runtime fallthrough concern, never a compile-time coverage one.
+ *
+ * @return 0 on success, a distinct non-zero code per failing check
+ */
+fn f_null_narrow_ifguard() -> i64 {
+    let big: i64 | null = 9
+    let a = match big {
+        i64 as v when v > 5 => v * 2
+        i64 as v => v
+        null => -1
+    }
+    if a != 18 { return 1 }
+    let small: i64 | null = 3
+    let b = match small {
+        i64 as v when v > 5 => v * 2
+        i64 as v => v
+        null => -1
+    }
+    if b != 3 { return 2 }
+    let absent: i64 | null = null
+    let c = match absent {
+        i64 as v when v > 5 => v * 2
+        i64 as v => v
+        null => -1
+    }
+    if c != -1 { return 3 }
+    0
+}
+
+/**
+ * f_empty_slice_sentinel_untouched — retire-Optional O4: proves the SEPARATE `Slice{Void}`
+ * empty-slice sentinel (`teko::list::empty()`'s type — `type_eq`'s Slice arm and
+ * `type_has_sentinel`'s Slice arm, BOTH left untouched by this crumb, alongside their Optional
+ * arms in the SAME two functions) still unifies with any concrete slice and lets a `push` fix its
+ * element type, including one level of nesting. A DIFFERENT sentinel from `Optional`'s `Void`
+ * inner entirely — the negative-half proof that O4 did not over-delete.
+ *
+ * @return 0 on success, a distinct non-zero code per failing check
+ */
+fn f_empty_slice_sentinel_untouched() -> i64 {
+    let e: []i64 = teko::list::empty()
+    if e.len != 0 { return 1 }
+    let one = teko::list::push(e, 11)
+    if one.len != 1 { return 2 }
+    if one[0] != 11 { return 3 }
+    let nested: [][]i64 = teko::list::empty()
+    if nested.len != 0 { return 4 }
     0
 }

@@ -193,8 +193,6 @@ fn inline_rw_expr(e: TExpr, map: ScalarConstMap) -> TExpr {
         TMatchExpr as m => inline_rw_match(m, e, map)
         TCast as c => TExpr { kind = TCast { expr = inline_rw_expr(c.expr, map) }; type = e.type; line = e.line; col = e.col }
         TFieldAccess as fa => TExpr { kind = TFieldAccess { receiver = inline_rw_expr(fa.receiver, map); field = fa.field }; type = e.type; line = e.line; col = e.col }
-        TSafeFieldAccess as sfa => TExpr { kind = TSafeFieldAccess { receiver = inline_rw_expr(sfa.receiver, map); field = sfa.field }; type = e.type; line = e.line; col = e.col }
-        TCoalesce as co => TExpr { kind = TCoalesce { left = inline_rw_expr(co.left, map); right = inline_rw_expr(co.right, map) }; type = e.type; line = e.line; col = e.col }
         TStructInit as si => TExpr { kind = TStructInit { field_names = si.field_names; field_vals = inline_rw_exprs(si.field_vals, map) }; type = e.type; line = e.line; col = e.col }
         TIndex as ix => TExpr { kind = TIndex { receiver = inline_rw_expr(ix.receiver, map); index = inline_rw_expr(ix.index, map) }; type = e.type; line = e.line; col = e.col }
         TInterp as in => inline_rw_interp(in, e, map)
@@ -387,7 +385,7 @@ fn inline_rw_block(stmts: []TStatement, map: ScalarConstMap) -> []TStatement {
  */
 fn inline_rw_stmt(st: TStatement, map: ScalarConstMap) -> TStatement {
     match st {
-        TBinding as b => TBinding { kind = b.kind; target = b.target; bound = b.bound; value = inline_rw_expr(b.value, map) }
+        TBinding as b => TBinding { kind = b.kind; target = b.target; bound = b.bound; value = inline_rw_expr(b.value, map); di_kind = b.di_kind }
         TAssign as a => inline_rw_assign(a, map)
         TReturn as r => if r.has_value { TReturn { has_value = true; value = inline_rw_expr(r.value, map) } } else { st }
         TLoopStmt as l => TLoopStmt { label = l.label; init = inline_rw_block(l.init, map); body = inline_rw_block(l.body, map) }
@@ -1021,7 +1019,7 @@ fn inline_place_item_agg(out: []TItem, it: TItem, map: ScalarConstMap) -> []TIte
  * by raw item index; dropping the item here shifted every later function's `fn_items_index` out of
  * sync with that walk, corrupting line/branch coverage for the whole remainder of the program. The C
  * backend emits an aggregate value as a self-contained expression, so inlining each use is correct and
- * side-steps needing a C static-initializer for a runtime-allocated `[]T`. The LIR/native + VM path
+ * side-steps needing a C static-initializer for a runtime-allocated `[]T`. The LIR/native + interpreter path
  * does NOT run this pass — it materializes ONE shared rodata entry per aggregate const instead
  * (`lower_program`'s `intern_aggregate_consts`), so the two backends diverge in mechanism but agree in
  * value. A const-free program (the self-host itself) is returned unchanged, so the C-emission

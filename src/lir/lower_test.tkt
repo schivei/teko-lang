@@ -86,7 +86,7 @@ fn lwt_param(name: str, tname: str) -> parser::Param {
 
 fn lwt_ret(e: checker::TExpr) -> checker::TStatement { checker::TReturn { has_value = true; value = e } }
 fn lwt_bind(name: str, e: checker::TExpr, k: checker::PrimKind) -> checker::TStatement {
-    checker::TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = name }; bound = lwt_prim(k); value = e }
+    checker::TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = name }; bound = lwt_prim(k); value = e; di_kind = parser::DiKind::None }
 }
 fn lwt_exprstmt(e: checker::TExpr) -> checker::TStatement { checker::TExprStmt { expr = e } }
 
@@ -148,7 +148,8 @@ fn lwt_lower_expr_text_with(e: checker::TExpr, layouts: []LStructLayout) -> str 
         defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = teko::list::empty()
         flat_symbols = false; ret_type = checker::Prim { kind = checker::PrimKind::I64 }
         has_ret_len_slot = false; ret_len_slot = 0
-        ref_fns = teko::list::empty(); field_decls = teko::list::empty(); addr_taken = teko::list::empty()
+        ref_fns = teko::list::empty(); field_decls = teko::list::empty(); addr_taken = teko::list::empty(); table = teko::list::empty()
+        region_stack = teko::list::empty(); escaping = teko::list::empty(); frees_old_names = teko::list::empty(); bracket_depth = 0
     }
     let lo = match lower_expr(ctx0, e) { Lowered as x => x; error as err => return teko::str::concat("ERR: ", err.message) }
     let m0 = with_rodata(add_func(empty_module(), lo.ctx.func), lo.ctx.rodata)
@@ -188,7 +189,8 @@ fn lwt_lower_expr_text_with_enums(e: checker::TExpr, enums: []LEnumInfo) -> str 
         defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = teko::list::empty()
         flat_symbols = false; ret_type = checker::Prim { kind = checker::PrimKind::I64 }
         has_ret_len_slot = false; ret_len_slot = 0
-        ref_fns = teko::list::empty(); field_decls = teko::list::empty(); addr_taken = teko::list::empty()
+        ref_fns = teko::list::empty(); field_decls = teko::list::empty(); addr_taken = teko::list::empty(); table = teko::list::empty()
+        region_stack = teko::list::empty(); escaping = teko::list::empty(); frees_old_names = teko::list::empty(); bracket_depth = 0
     }
     let lo = match lower_expr(ctx0, e) { Lowered as x => x; error as err => return teko::str::concat("ERR: ", err.message) }
     let m0 = with_rodata(add_func(empty_module(), lo.ctx.func), lo.ctx.rodata)
@@ -215,6 +217,52 @@ fn lwt_ltype_of_maps_prims_to_machine_classes() {
     teko::assert::is_true(match ltype_of(lwt_prim(checker::PrimKind::Bool), teko::list::empty()) { I8 => true; _ => false })
 }
 
+#test
+fn lwt_is_register_value_type_treats_byte_as_scalar() {
+    teko::assert::is_true(is_register_value_type(checker::Byte { }, teko::list::empty()))
+}
+
+#test
+fn lwt_variant_member_named_accepts_primitive_case_names() {
+    teko::assert::is_true(variant_member_named(checker::Prim { kind = checker::PrimKind::U32 }, "u32"))
+    teko::assert::is_true(variant_member_named(checker::Byte { }, "byte"))
+    teko::assert::is_true(variant_member_named(checker::Char { }, "char"))
+}
+
+#test
+fn lwt_push_aggregate_size_accepts_registered_named_structs() {
+    let layout = LStructLayout { name = "Pair16"; size = 16 to u32; align = 8 to u32; field_names = teko::list::empty(); field_offsets = teko::list::empty(); field_types = teko::list::empty() }
+    let layouts = teko::list::push(teko::list::empty(), layout)
+    let ctx0 = LowerCtx {
+        func = new_func("t", 0, teko::list::empty(), LType::I64); block_id = 0; env = empty_lenv()
+        layouts = layouts; rodata = teko::list::empty(); enums = teko::list::empty(); lifted = teko::list::empty()
+        variants = teko::list::empty()
+        defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = teko::list::empty()
+        flat_symbols = false; ret_type = checker::Prim { kind = checker::PrimKind::I64 }
+        has_ret_len_slot = false; ret_len_slot = 0
+        ref_fns = teko::list::empty(); field_decls = teko::list::empty(); addr_taken = teko::list::empty(); table = teko::list::empty()
+        region_stack = teko::list::empty(); escaping = teko::list::empty(); frees_old_names = teko::list::empty(); bracket_depth = 0
+    }
+    teko::assert::is_true(match aggregate_box_bytes(checker::Named { name = "Pair16" }, ctx0) { u32 as n => n == (16 to u32); null => false })
+}
+
+/**
+ * lwt_variant_case_of_bind_pattern_resolves_slice_by_kind — a `[]T` bind pattern carries NO type
+ * path (`type_name` empty, `is_slice` set), so `variant_case_of_bind_pattern` resolves it by KIND
+ * through `find_variant_slice_member` (lower.tks:9057) — selecting the variant's slice member and
+ * skipping the non-slice member ahead of it — never through `bind_pattern_case_name`, which reads a
+ * type path's last segment and would have none to read here. A slice pattern has no case-name at
+ * all; it matches on being a slice, so this pins the by-kind routing, not any `"slice_<elem>"` name.
+ */
+#test
+fn lwt_variant_case_of_bind_pattern_resolves_slice_by_kind() {
+    mut members: []checker::Type = teko::list::empty()
+    members = teko::list::push(members, lwt_prim(checker::PrimKind::U32))
+    members = teko::list::push(members, checker::Slice { element = lwt_prim(checker::PrimKind::U32) })
+    let pat = parser::BindPattern { type_name = parser::Path { segments = teko::list::empty() }; has_binding = true; binding = "xs"; is_slice = true; slice_type = parser::SliceType { element = parser::NamedType { path = lwt_path1("u32"); args = teko::list::empty() } }; type_args = teko::list::empty() }
+    teko::assert::is_true(match variant_case_of_bind_pattern(members, pat) { VariantMember as vm => vm.index == (1 to u32); error => false })
+}
+
 /** lwt_binop_is — did lbinop_of return exactly `want` (not an error)? */
 fn lwt_binop_is(op: lexer::TokenKind, k: checker::PrimKind, want: LBinOp) -> bool {
     match lbinop_of(op, k) { LBinOp as o => o == want; error => false }
@@ -232,6 +280,8 @@ fn lwt_lbinop_of_picks_signedness_and_family() {
     teko::assert::is_true(lwt_binop_is(lexer::TokenKind::Slash, checker::PrimKind::U32, LBinOp::IDivU))
     teko::assert::is_true(lwt_binop_is(lexer::TokenKind::Percent, checker::PrimKind::I64, LBinOp::IRemS))
     teko::assert::is_true(lwt_binop_is(lexer::TokenKind::Plus, checker::PrimKind::F64, LBinOp::FAdd))
+    teko::assert::is_true(lwt_binop_is(lexer::TokenKind::AndAnd, checker::PrimKind::Bool, LBinOp::IAnd))
+    teko::assert::is_true(lwt_binop_is(lexer::TokenKind::OrOr, checker::PrimKind::Bool, LBinOp::IOr))
 }
 
 /**
@@ -719,7 +769,7 @@ fn lwt_agg_slice_const_materializes_one_rodata_entry() {
     let slice_ty = checker::Slice { element = lwt_prim(checker::PrimKind::I64) }
     let cd: checker::TItem = checker::TConstDecl { name = "NUMS"; namespace = ""; ty = slice_ty; init = lwt_array_lit(elems, checker::PrimKind::I64); vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0 }
     let i64_ty = lwt_prim(checker::PrimKind::I64)
-    let idx_bind: checker::TStatement = checker::TBinding { kind = parser::BindKind::Mut; target = parser::SimpleName { name = "idx" }; bound = i64_ty; value = lwt_num_i64(0) }
+    let idx_bind: checker::TStatement = checker::TBinding { kind = parser::BindKind::Mut; target = parser::SimpleName { name = "idx" }; bound = i64_ty; value = lwt_num_i64(0); di_kind = parser::DiKind::None }
     let use0 = lwt_index(lwt_typed_var("NUMS", slice_ty), lwt_typed_var("idx", i64_ty), i64_ty)
     let use1 = lwt_index(lwt_typed_var("NUMS", slice_ty), lwt_typed_var("idx", i64_ty), i64_ty)
     let sum = lwt_bin(lexer::TokenKind::Plus, use0, use1, checker::PrimKind::I64)
@@ -829,52 +879,148 @@ fn lwt_slice_field(name: str, elem_tname: str) -> parser::Field {
 }
 
 /**
- * lwt_tb6_deref_reads_second_element_and_len — the T-B6 sibling reads (#594 §7.3): `K2.xs[1]` derefs
- * the second interned element (exit 20), and `K2.xs.len` reads the inline length half of the fat field
- * through the new `lower_fat_field` reader (exit 2) — the two engines dereference the same target bytes.
+ * lwt_agg_struct_fat_field_slot_is_8byte_aligned — the native-rodata-const-align regression
+ * (macOS-arm64 fixpoint `ld: pointer not aligned` on `AAPCS64.gpr_arg`): a struct whose
+ * declared FIRST field is a single ODD-sized scalar (`flag: byte`, 1 byte) and whose SECOND
+ * field is a fat slice (`xs: []i64`, the 16-byte `{ptr, len}` image) places that fat field's
+ * pointer/len slot at BYTE OFFSET 8 within the struct's OWN `ConstImage` — never at offset 1,
+ * which a byte-packed (non-natural-alignment) layout would place it at.
+ *
+ * C's own struct layout inserts 7 padding bytes after a 1-byte field before an 8-byte-aligned
+ * pointer member; `layout_of_sized` (`lir.tks`) mirrors that rule exactly, so `AbiDescriptor`'s
+ * `gpr_arg`/`fpr_arg`/… fat fields (each preceded only by OTHER 16-byte fat fields, hence
+ * already 8-aligned) and a struct like this one's `xs` (preceded by a 1-byte field) both land
+ * their pointer slot on an 8-byte boundary, matching the `cc`-compiled layout of `struct {
+ * unsigned char flag; int64_t *ptr; uint64_t len; }` bit-for-bit. This is the LOCUS-1 half of
+ * the fix; the LOCUS-2 half (every rodata ENTRY's own start staying 8-aligned once several
+ * odd-length entries precede it) is proven separately by
+ * `enc_rodata_reloc_offset_survives_odd_length_neighbors` (`encode_arm64_test.tkt`).
  *
  * @return void
  */
 #test
-fn lwt_tb6_deref_reads_second_element_and_len() {
-    teko::assert::is_true(lwt_tb6_deref_exit(lwt_index(lwt_tb6_k2_xs(), lwt_num_i64(1), lwt_prim(checker::PrimKind::I64))) == (20))
-    teko::assert::is_true(lwt_tb6_deref_exit(lwt_field_access(lwt_tb6_k2_xs(), "len", lwt_prim(checker::PrimKind::I64))) == (2))
-}
-
-/**
- * lwt_tb6_k2_xs — the typed `K2.xs` fat-field access (`[]i64`) the T-B6 deref fixtures read through
- * (#594 §7.3): a field access on the aggregate-const receiver `K2` of type `S2`.
- *
- * @return the typed `K2.xs` field-access expression
- */
-fn lwt_tb6_k2_xs() -> checker::TExpr {
-    lwt_field_access(lwt_typed_var("K2", checker::Named { name = "S2" }), "xs", checker::Slice { element = lwt_prim(checker::PrimKind::I64) })
-}
-
-/**
- * lwt_tb6_deref_exit — lower a program that binds `const K2: S2 = { xs = [10, 20]; n = 2 }` and runs
- * `exit(<use>)` as its virtual main, then interpret it through the LIR interpreter and return the exit code (#594 §7.3).
- * The struct `S2` is declared first so its 16-byte fat-field layout is registered before the const
- * interns.
- *
- * @param use_expr  the i64-typed expression the virtual main exits with (a `K2.xs[i]` or `K2.xs.len`)
- * @return          the exit code of the lowered program (from LIR interpreter execution)
- */
-fn lwt_tb6_deref_exit(use_expr: checker::TExpr) -> i64 {
-    let decl = lwt_struct_decl("S2", lwt_two_fields(lwt_slice_field("xs", "i64"), lwt_field("n", "i64")))
-    let elems = teko::list::push(teko::list::push(teko::list::empty(), lwt_num_i64(10)), lwt_num_i64(20))
+fn lwt_agg_struct_fat_field_slot_is_8byte_aligned() {
+    let decl = lwt_struct_decl("M3", lwt_two_fields(lwt_field("flag", "byte"), lwt_slice_field("xs", "i64")))
+    let elems = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), lwt_num_i64(10)), lwt_num_i64(20)), lwt_num_i64(30))
     let xs_lit = lwt_array_lit(elems, checker::PrimKind::I64)
-    let fnames = teko::list::push(teko::list::push(teko::list::empty(), "xs"), "n")
-    let fvals = teko::list::push(teko::list::push(teko::list::empty(), xs_lit), lwt_num_i64(2))
-    let si = lwt_struct_init("S2", fnames, fvals)
-    let cd: checker::TItem = checker::TConstDecl { name = "K2"; namespace = ""; ty = checker::Named { name = "S2" }; init = si; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0 }
-    let exit_call = lwt_call(lwt_path1("exit"), "", teko::list::push(teko::list::empty(), use_expr), checker::Void { })
+    let fnames = teko::list::push(teko::list::push(teko::list::empty(), "flag"), "xs")
+    let fvals = teko::list::push(teko::list::push(teko::list::empty(), lwt_num_i64(7)), xs_lit)
+    let si = lwt_struct_init("M3", fnames, fvals)
+    let cd: checker::TItem = checker::TConstDecl { name = "K3"; namespace = ""; ty = checker::Named { name = "M3" }; init = si; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0 }
     mut items: []checker::TItem = teko::list::push(teko::list::empty(), decl)
     items = teko::list::push(items, cd)
-    items = teko::list::push(items, lwt_item(lwt_exprstmt(exit_call)))
-    let m = match lower_program(checker::TProgram { items = items }) { LModule as x => x; error as err => { teko::assert::is_true(false); return (-99) } }
-    let no_args: []i64 = teko::list::empty()
-    interp_lmodule(m, "main", no_args)
+    let m = match lower_program(checker::TProgram { items = items }) { LModule as x => x; error as err => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(m.rodata.len == 2)
+    teko::assert::is_true(m.rodata[0].symbol == ".Lconst_K3.xs")
+    teko::assert::is_true(m.rodata[1].symbol == ".Lconst_K3")
+    teko::assert::is_true(m.rodata[1].bytes.len == 24)
+    teko::assert::is_true(m.rodata[1].bytes[0] == (7 to byte))
+    teko::assert::is_true(m.rodata[1].relocs.len == 1)
+    teko::assert::is_true(m.rodata[1].relocs[0].offset == (8 to u32))
+    teko::assert::is_true(m.rodata[1].relocs[0].offset % (8 to u32) == (0 to u32))
+    teko::assert::is_true(m.rodata[1].relocs[0].target == ".Lconst_K3.xs")
+}
+
+/**
+ * lwt_str_array_lit — `[e0, e1, …]` of `str`-typed elements (the `[]str` array-literal shape
+ * `lwt_array_lit` cannot build — it hardcodes a `Prim` element type), for the array-of-FAT-
+ * elements `ConstImage` fixtures (`const_fat_array_image`, 0.3.1.0 native-rodata-const-align).
+ *
+ * @param elems  the element expressions (each already `str`-typed, e.g. `lwt_strlit`)
+ * @return       the typed `[]str` array-literal node
+ */
+fn lwt_str_array_lit(elems: []checker::TExpr) -> checker::TExpr {
+    mut es: []checker::TArrayElem = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= elems.len { break }
+        es = teko::list::push(es, lwt_array_elem(elems[i]))
+        i++
+    }
+    checker::TExpr { kind = checker::TArrayLit { elements = es }; type = checker::Slice { element = checker::Str { } }; line = 0; col = 0 }
+}
+
+/**
+ * lwt_agg_fat_array_slot_offsets_are_ptr_aligned — `const WORDS: []str = ["a", "bb", "ccc"]`
+ * exercises `const_fat_array_image`/`const_image_absorb` directly (the coordinator-flagged
+ * locus, `lower_const.tks:441`): three ODD-LENGTH string leaves (1/2/3 bytes) precede the
+ * array's OWN 48-byte slot blob, and each slot's rebased relocation offset — 0, 16, 32 — is
+ * exactly `index * fat_slot_bytes()`, every one already a multiple of `fat_slot_align` (8), NOW
+ * proven by construction (`ptr_align_up(img.bytes.len)`) rather than by the caller's own
+ * arithmetic. Native-rodata-const-align regression.
+ *
+ * @return void
+ */
+#test
+fn lwt_agg_fat_array_slot_offsets_are_ptr_aligned() {
+    let elems = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), lwt_strlit("a")), lwt_strlit("bb")), lwt_strlit("ccc"))
+    let cd: checker::TItem = checker::TConstDecl { name = "WORDS"; namespace = ""; ty = checker::Slice { element = checker::Str { } }; init = lwt_str_array_lit(elems); vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0 }
+    mut items: []checker::TItem = teko::list::push(teko::list::empty(), cd)
+    let m = match lower_program(checker::TProgram { items = items }) { LModule as x => x; error as err => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(m.rodata.len == 4)
+    teko::assert::is_true(m.rodata[0].symbol == ".Lconst_WORDS.0")
+    teko::assert::is_true(m.rodata[1].symbol == ".Lconst_WORDS.1")
+    teko::assert::is_true(m.rodata[2].symbol == ".Lconst_WORDS.2")
+    teko::assert::is_true(m.rodata[3].symbol == ".Lconst_WORDS")
+    teko::assert::is_true(m.rodata[3].bytes.len == 48)
+    teko::assert::is_true(m.rodata[3].relocs.len == 3)
+    teko::assert::is_true(m.rodata[3].relocs[0].offset == (0 to u32))
+    teko::assert::is_true(m.rodata[3].relocs[1].offset == (16 to u32))
+    teko::assert::is_true(m.rodata[3].relocs[2].offset == (32 to u32))
+    teko::assert::is_true(m.rodata[3].relocs[0].target == ".Lconst_WORDS.0")
+    teko::assert::is_true(m.rodata[3].relocs[1].target == ".Lconst_WORDS.1")
+    teko::assert::is_true(m.rodata[3].relocs[2].target == ".Lconst_WORDS.2")
+}
+
+/**
+ * lwt_one_field_fat_layout — a single-fat-field struct layout `struct <name> { s: <fat> }` whose
+ * ONLY field `s` is Ptr-classed and allotted `size` bytes (native-rodata-const-align size-check
+ * fixtures). A `size` of 8 models the mis-sized layout the size check must flag (a fat field needs
+ * `fat_slot_bytes()` = 16); a `size` of 16 models the correct layout.
+ *
+ * @param name  the struct type's name
+ * @param size  the byte size the layout allots (8 = under-sized, 16 = correct)
+ * @return      the one-field layout
+ */
+fn lwt_one_field_fat_layout(name: str, size: u32) -> LStructLayout {
+    LStructLayout {
+        name = name; size = size; align = 8 to u32
+        field_names = teko::list::push(teko::list::empty(), "s")
+        field_offsets = teko::list::push(teko::list::empty(), 0 to u32)
+        field_types = teko::list::push(teko::list::empty(), LType::Ptr)
+    }
+}
+
+/**
+ * lwt_one_str_field_init — the struct-literal initializer `{ s = "x" }`, whose sole field's VALUE
+ * is a `str` (fat — `is_fat_type` true), for the size-check fixtures.
+ *
+ * @return the one-field struct-literal initializer
+ */
+fn lwt_one_str_field_init() -> checker::TStructInit {
+    checker::TStructInit {
+        field_names = teko::list::push(teko::list::empty(), "s")
+        field_vals = teko::list::push(teko::list::empty(), lwt_strlit("x"))
+    }
+}
+
+/**
+ * lwt_const_size_check_flags_undersized_fat_field — the native-rodata-const-align size diagnostic
+ * (`check_struct_fat_spans`, the pure core `TEKO_NATIVE_CONST_SIZE_CHECK` gates): a struct whose fat
+ * field is allotted only 8 bytes FIRES (a fat `{ptr, len}` slot needs 16 — the exact "fat field
+ * sized 8 instead of 16" mismatch that shifts every following field and misaligns a later pointer),
+ * while the same field allotted 16 bytes passes clean. The check is env-INDEPENDENT here — this
+ * exercises the detection core directly, no environment variable involved.
+ *
+ * @return void
+ */
+#test
+fn lwt_const_size_check_flags_undersized_fat_field() {
+    let si = lwt_one_str_field_init()
+    let fired = match check_struct_fat_spans("KBAD", lwt_one_field_fat_layout("Bad", 8 to u32), si) { error => true; null => false }
+    teko::assert::is_true(fired)
+    let clean = match check_struct_fat_spans("KGOOD", lwt_one_field_fat_layout("Good", 16 to u32), si) { error => false; null => true }
+    teko::assert::is_true(clean)
 }
 
 /**
@@ -1762,33 +1908,6 @@ fn lwt_lowers_in_expr_as_an_eq_chain_ored_together() {
     teko::assert::str_contains(text, "ior")
 }
 
-/** lwt_named_opt_var — a `TVar` of `Named?` type — the safe-field-access receiver shape
-    (A1-4, #382). */
-fn lwt_named_opt_var(name: str, tname: str) -> checker::TExpr {
-    checker::TExpr { kind = checker::TVar { name = name; is_func = false; func_ns = "" }; type = checker::Optional { inner = checker::Named { name = tname } }; line = 0; col = 0 }
-}
-
-/** lwt_safe_field_access — `recv?.field` of resolved (unwrapped) field type `ft` — its
-    `.type` is `ft` widened into `Optional` (A1-4, #382). */
-fn lwt_safe_field_access(recv: checker::TExpr, field: str, ft: checker::Type) -> checker::TExpr {
-    checker::TExpr { kind = checker::TSafeFieldAccess { receiver = recv; field = field }; type = checker::Optional { inner = ft }; line = 0; col = 0 }
-}
-
-#test
-fn lwt_lowers_safe_field_access_via_branch_and_merge() {
-    let p = lwt_named_opt_var("p", "Point")
-    let sfa = lwt_safe_field_access(p, "y", lwt_prim(checker::PrimKind::I64))
-    let params = teko::list::push(teko::list::empty(), lwt_param("p", "Point"))
-    let body = teko::list::push(teko::list::empty(), lwt_ret(sfa))
-    let f = lwt_fn("read_y_opt", "teko::demo", params, checker::Optional { inner = checker::Prim { kind = checker::PrimKind::I64 } }, body)
-    let lf = match lower_function(f, lwt_one_layout(lwt_point_layout())) { LoweredFunction as r => r.func; error as err => return }
-    let text = print_lmodule(add_func(empty_module(), lf))
-    teko::assert::str_contains(text, "branch %0, #B1(), #B2()")
-    teko::assert::str_contains(text, "  #B1:\n    %2 = field_addr %0, 8\n    %3 = load.i64 %2\n    jump #B3(%3)")
-    teko::assert::str_contains(text, "  #B2:\n    %4 = const 0\n    jump #B3(%4)")
-    teko::assert::str_contains(text, "  #B3(%1):\n    ret %1")
-}
-
 /**
  * lwt_iface_call — a dynamic contract-method `TCall`
  * (`is_iface_dispatch=true`): `args[0]` is the receiver, `slot` its vtable
@@ -1867,7 +1986,7 @@ fn lwt_func_type(params: []checker::Type, ret: checker::Type) -> checker::Type {
  * @return checker::TStatement  the built `let` binding
  */
 fn lwt_bind_typed(name: str, e: checker::TExpr, ty: checker::Type) -> checker::TStatement {
-    checker::TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = name }; bound = ty; value = e }
+    checker::TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = name }; bound = ty; value = e; di_kind = parser::DiKind::None }
 }
 
 /**
@@ -2021,28 +2140,6 @@ fn lwt_lowers_defer_fires_before_a_void_lambdas_fall_through_return() {
     let text = print_lmodule(m)
     teko::assert::str_contains(text, "const 100")
     teko::assert::str_contains(text, "iadd")
-}
-
-/**
- * lwt_interp_runs_function_trailing_expression_as_return_value — #421, the
- * interp-oracle side: `fn f() -> i32 { 42 }` (no explicit `return`) lowered
- * via `lower_function` and run through `interp_lmodule` yields exit code 42
- * — before the fix the fall-through body closed with a valueless `ret`, so
- * the interp's `is_return` outcome carried 0, not 42.
- *
- * IT ADDRESSES THE FUNCTION THROUGH `mangle_fn_symbol`, NOT BY THE BARE NAME, and that is not
- * ceremony. `lower_function` keys the emitted function by the MANGLED symbol, so a literal `"f"`
- * stops resolving the moment the mangler moves — which is exactly what the `teko_*` user prefix
- * did. Computing the address from the mangler is not tautological here: the SUBJECT of this test
- * is the interpreter's return value, and the symbol is only how the function is reached.
- */
-#test
-fn lwt_interp_runs_function_trailing_expression_as_return_value() {
-    let body = teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num(42, checker::PrimKind::I32)))
-    let f = lwt_fn("f", "", teko::list::empty(), checker::Prim { kind = checker::PrimKind::I32 }, body)
-    let lf = match lower_function(f) { LoweredFunction as x => x.func; error as err => return }
-    let m = add_func(empty_module(), lf)
-    teko::assert::is_true(interp_lmodule(m, mangle_fn_symbol("", "f"), teko::list::empty()) == (42))
 }
 
 /**
@@ -2365,18 +2462,28 @@ fn lwt_lowers_str_call_result_allocates_out_slot_and_loads_the_length_back() {
 }
 
 /**
- * lwt_honest_stop_on_fat_closure_call_result — a closure-call whose result is fat honest-stops
- * by NAME (`lower_call_fat`'s own narrower stop) rather than silently under-passing the hidden
- * out-slot argument the callee-side convention (`bind_ret_len_slot`) now expects — a closure's
- * own thunk calling convention does not yet reserve it (call-gordo degrau, #382 N2).
+ * lwt_lowers_fat_closure_call_result_with_hidden_out_slot — a closure-call whose result is fat
+ * now lowers through the same hidden out-slot caller contract as direct fat calls: the call site
+ * allocates an 8-byte slot, passes it as the trailing argument to `call.indirect`, then loads
+ * the length back (`load.i64`) for the surrounding `.len` read.
  *
  * @return void
  */
 #test
-fn lwt_honest_stop_on_fat_closure_call_result() {
+fn lwt_lowers_fat_closure_call_result_with_hidden_out_slot() {
     let fty = lwt_func_type(teko::list::empty(), checker::Str { })
+    mut items: []checker::TItem = teko::list::empty()
+    items = teko::list::push(items, lwt_item(lwt_bind_typed("f", lwt_fn_value("make_str", "teko::demo", fty), fty)))
     let call = lwt_closure_call("f", teko::list::empty(), fty, checker::Str { })
-    teko::assert::str_contains(lwt_lower_expr_text(call), "fat-pointer closure-call result not yet lowered")
+    items = teko::list::push(items, lwt_item(lwt_exprstmt(lwt_len_field(call))))
+    let prog = checker::TProgram { items = items }
+    let m = match lower_program(prog) { LModule as x => x; error as err => { teko::assert::is_true(false); return } }
+    let text = print_lmodule(m)
+    teko::assert::str_contains(text, "func @.Lclofn0(%0: ptr, %1: ptr) -> ptr {")
+    teko::assert::str_contains(text, "call @teko_teko__demo__make_str(%1)")
+    teko::assert::str_contains(text, "alloca 8, align 8")
+    teko::assert::str_contains(text, "call.indirect")
+    teko::assert::str_contains(text, "load.i64")
 }
 
 /**
@@ -2930,6 +3037,14 @@ fn lwt_call_symbol_resolves_the_assert_seed() {
     teko::assert::is_true(match call_symbol(lwt_bare_call(names, ""), no_ext) { str as s => s == "teko__assert__is_true"; error => false })
 }
 
+#test
+fn lwt_call_symbol_resolves_runtime_string_builtins() {
+    let no_ext: []LExternFn = teko::list::empty()
+    teko::assert::is_true(match call_symbol(lwt_bare_call(teko::list::push(teko::list::empty(), "str_slice_chars"), ""), no_ext) { str as s => s == "tk_str_slice_chars_len"; error => false })
+    teko::assert::is_true(match call_symbol(lwt_bare_call(teko::list::push(teko::list::empty(), "bytes_of_str"), ""), no_ext) { str as s => s == "tk_bytes_of_str_len"; error => false })
+    teko::assert::is_true(match call_symbol(lwt_bare_call(teko::list::push(teko::list::empty(), "one_byte"), ""), no_ext) { str as s => s == "tk_one_byte_len"; error => false })
+}
+
 /**
  * Assert `call_symbol` resolves the two `str` PREDICATE builtins (`contains`/`ends_with`) to
  * their plain runtime symbol (0.3.1.0 degrau 11): before this, either bare name fell through to
@@ -3323,7 +3438,7 @@ fn lwt_assert_fat_predicate_agrees(table: checker::TypeTable, te: parser::TypeEx
  * lwt_fat_predicates_agree — the R0 gate (0.3.1.0 raiz A): `is_fat_type` (the SEMANTIC predicate,
  * over a RESOLVED `checker::Type`) and `typeexpr_is_fat` (the SYNTACTIC predicate, over the
  * WRITTEN annotation) must answer the SAME question the same way, for a direct type, a type
- * ALIASED once, a type aliased TWICE, an aliased `[]T` slice, an OPTIONAL of an aliased type, and
+ * ALIASED once, a type aliased TWICE, an aliased `[]T` slice, and
  * a handful of definitely-not-fat controls (a scalar, a nominal struct, `ptr<T>`).
  *
  * This is crumb R0's own portal, named in `docs/memory/raiz-comum-dos-degraus-0.3.1.0.md`: a
@@ -3348,7 +3463,6 @@ fn lwt_fat_predicates_agree() {
     lwt_assert_fat_predicate_agrees(table, lwt_named_te("AliasStr"), checker::Str { })
     lwt_assert_fat_predicate_agrees(table, lwt_named_te("AliasStrTwice"), checker::Str { })
     lwt_assert_fat_predicate_agrees(table, lwt_named_te("AliasSlice"), checker::Slice { element = lwt_prim(checker::PrimKind::I64) })
-    lwt_assert_fat_predicate_agrees(table, parser::OptionalType { inner = lwt_named_te("AliasStr") }, checker::Optional { inner = checker::Str { } })
     lwt_assert_fat_predicate_agrees(table, lwt_named_te("byte"), checker::Byte { })
     lwt_assert_fat_predicate_agrees(table, lwt_named_te("i32"), lwt_prim(checker::PrimKind::I32))
     lwt_assert_fat_predicate_agrees(table, lwt_named_te("bool"), lwt_prim(checker::PrimKind::Bool))
@@ -3507,4 +3621,175 @@ fn lwt_assert_seed_entries_are_not_single_str_builtins() {
     teko::assert::is_false(is_str_arg_builtin("teko__assert__scenario_begin"))
     teko::assert::is_false(is_str_arg_builtin("teko__assert__is_present"))
     teko::assert::is_false(is_str_arg_builtin("teko__assert__eq_str"))
+}
+
+/**
+ * lwt_count_substr — how many occurrences of `needle` appear in `text`, found by repeatedly
+ * taking the LAST match (`teko::str::last_index_of`, the one substring-search primitive this
+ * backend exposes) and truncating the search window to everything before it
+ * (`teko::str::slice_to`) until no match remains. Order-agnostic by design — a caller that needs
+ * a specific occurrence's POSITION (not just the total count) chains `last_index_of`/`slice_to`
+ * directly instead (the NP4 conveyance-bracket fixtures below do both).
+ *
+ * @param text    the haystack
+ * @param needle  the substring to count
+ * @return        the number of (non-overlapping, left-to-right) occurrences
+ */
+fn lwt_count_substr(text: str, needle: str) -> u64 {
+    mut remaining = text
+    mut count: u64 = 0
+    loop {
+        match teko::str::last_index_of(remaining, needle) {
+            u64 as pos => { count = count + 1; remaining = teko::str::slice_to(remaining, pos) }
+            error => break
+        }
+    }
+    count
+}
+
+/**
+ * lwt_region_ctx — a minimal i64-returning `LowerCtx` fixture with ONE frame region already
+ * pushed onto `region_stack` and the given `bracket_depth` — the shared base every NP4
+ * plain-tail conveyance-bracket unit test below (`lower_conveyed_tail_expr_stmt`/
+ * `lower_block_value` called DIRECTLY, bypassing `lower_function`'s own `open_frame_region`)
+ * builds its call against, so each test states only the ONE field it actually varies.
+ *
+ * @param bracket_depth  the nesting depth to seed (0 = top-level call, >0 = already inside an
+ *                        outer conveyance bracket)
+ * @param region_vreg     the already-open frame region's own VReg — fabricated (no real
+ *                        `tk_region_new_u` call produced it in these fixtures); the tests below
+ *                        only care whether ANOTHER `tk_region_leave`/`tk_region_enter_u` gets
+ *                        emitted, never this VReg's own origin
+ * @return               the fixture context
+ * @since 0.3.1.0 (NP4 UAF fix regression coverage)
+ */
+fn lwt_region_ctx(bracket_depth: u32, region_vreg: u32) -> LowerCtx {
+    LowerCtx {
+        func = new_func("t", 0, teko::list::empty(), LType::I64); block_id = 0; env = empty_lenv()
+        layouts = teko::list::empty(); rodata = teko::list::empty(); enums = teko::list::empty(); lifted = teko::list::empty()
+        variants = teko::list::empty()
+        defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = teko::list::empty()
+        flat_symbols = false; ret_type = checker::Prim { kind = checker::PrimKind::I64 }
+        has_ret_len_slot = false; ret_len_slot = 0
+        ref_fns = teko::list::empty(); field_decls = teko::list::empty(); addr_taken = teko::list::empty(); table = teko::list::empty()
+        region_stack = teko::list::push(teko::list::empty(), NativeRegionFrame { region_vreg = region_vreg; decl_name = ""; is_loop = false })
+        escaping = teko::list::empty(); frees_old_names = teko::list::empty(); bracket_depth = bracket_depth
+    }
+}
+
+/**
+ * lwt_fn_body_plain_auto_return_tail_conveys_nested_pointer_field_before_the_frame_drops — the
+ * CONFIRMED NP4 use-after-free regression test (`lower.tks` `lower_fn_body`/`lower_fn_tail`):
+ * `struct Foo { items: []i32 }; fn make() -> Foo { Foo { items = [1, 2, 3] } }` — a PLAIN
+ * (non-fat) function-body auto-return tail (no explicit `return`) whose aggregate result carries
+ * a NESTED pointer field (`items`, a fat `[]i32`).
+ *
+ * Before the fix, the tail's own construction lowered UNDER the frame region `fr` — so the array
+ * literal's `tk_slice_elem_box` buffer (`items`'s own backing) landed in `fr` — and only the
+ * OUTER `Foo` struct got re-homed to `rr` afterward, via `own_returned_value`'s SHALLOW
+ * `tk_slice_elem_box` copy of the struct's own 16 bytes (which copies `items`'s POINTER, not its
+ * backing). `emit_region_drops(fr)` then freed that backing out from under the still-live
+ * pointer the caller reads through `make().items[0]` — a confirmed UAF.
+ *
+ * The fix mirrors the fat axis (`lower_fn_tail_fat`/`lower_conveyed_tail_expr_stmt_fat`):
+ * `lower_fn_tail`'s own `lower_conveyed_tail_expr_stmt` leaves the frame region BEFORE the tail's
+ * `Foo { items = … }` is constructed, so the array literal's `tk_slice_elem_box` call executes
+ * with `current == rr` — landing `items`'s backing directly in the conveyance anchor, not `fr` —
+ * then restores `fr` before `lower_fn_body`'s own final leave/box/drop tail runs. This asserts
+ * the emitted LIR text proves exactly that ordering, the way the existing lowering tests already
+ * inspect emitted LIR rather than an exit code (this delta shipped with none of that until now).
+ *
+ * @return void
+ * @since 0.3.1.0 (NP4 UAF fix)
+ */
+#test
+fn lwt_fn_body_plain_auto_return_tail_conveys_nested_pointer_field_before_the_frame_drops() {
+    let items_field = lwt_slice_field("items", "i32")
+    let foo_decl = lwt_struct_decl("Foo", teko::list::push(teko::list::empty(), items_field))
+    let elems = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), lwt_num(1, checker::PrimKind::I32)), lwt_num(2, checker::PrimKind::I32)), lwt_num(3, checker::PrimKind::I32))
+    let array_lit = lwt_array_lit(elems, checker::PrimKind::I32)
+    let field_names = teko::list::push(teko::list::empty(), "items")
+    let field_vals = teko::list::push(teko::list::empty(), array_lit)
+    let si = lwt_struct_init("Foo", field_names, field_vals)
+    let body = teko::list::push(teko::list::empty(), lwt_exprstmt(si))
+    let make_fn = lwt_fn_item("make", "teko::demo", teko::list::empty(), checker::Named { name = "Foo" }, body)
+    let items = teko::list::push(teko::list::push(teko::list::empty(), foo_decl), make_fn)
+    let m = match lower_program(checker::TProgram { items = items }) { LModule as x => x; error as err => { teko::assert::is_true(false); return } }
+    let text = print_lmodule(m)
+    teko::assert::is_true(lwt_count_substr(text, "call @tk_slice_elem_box(") == (2 to u64))
+    teko::assert::is_true(lwt_count_substr(text, "call @tk_region_leave()") == (2 to u64))
+    let last_box_pos = match teko::str::last_index_of(text, "call @tk_slice_elem_box(") { u64 as p => p; error => { teko::assert::is_true(false); return } }
+    let before_last_box = teko::str::slice_to(text, last_box_pos)
+    let array_box_pos = match teko::str::last_index_of(before_last_box, "call @tk_slice_elem_box(") { u64 as p => p; error => { teko::assert::is_true(false); return } }
+    let before_array_box = teko::str::slice_to(text, array_box_pos)
+    teko::assert::is_true(teko::str::contains(before_array_box, "call @tk_region_leave()"))
+    let drop_pos = match teko::str::last_index_of(text, "call @tk_region_drop_u(") { u64 as p => p; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(drop_pos > last_box_pos)
+}
+
+/**
+ * lwt_lower_block_value_if_arm_tail_stays_unbracketed — the NP4 fix must NOT leak into
+ * `lower_block_value` (shared by every if/match ARM, not just a function body's own top-level
+ * tail): an arm's tail value merges into a shared block-arg the ENCLOSING construct goes on to
+ * use, so bracketing it here would convey out of the frame/block region too early. Calls
+ * `lower_block_value` DIRECTLY (bypassing `lower_fn_body`/`lower_fn_tail` entirely) and asserts
+ * NO `tk_region_leave`/`tk_region_enter_u` call was emitted at all.
+ *
+ * @return void
+ * @since 0.3.1.0 (NP4 UAF fix regression coverage)
+ */
+#test
+fn lwt_lower_block_value_if_arm_tail_stays_unbracketed() {
+    let ctx0 = lwt_region_ctx(0, 7)
+    let body = teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num_i64(42)))
+    let out = match lower_block_value(ctx0, body, LType::I64, checker::Prim { kind = checker::PrimKind::I64 }) { LowerBlockValue as x => x; error as err => { teko::assert::is_true(false); return } }
+    let text = print_lmodule(add_func(empty_module(), out.ctx.func))
+    teko::assert::is_false(teko::str::contains(text, "tk_region_leave"))
+    teko::assert::is_false(teko::str::contains(text, "tk_region_enter_u"))
+}
+
+/**
+ * lwt_lower_conveyed_tail_expr_stmt_brackets_and_restores_bracket_depth — the LEAVE/ENTER
+ * BALANCE `lower_fn_tail`'s own bracket (`lower_conveyed_tail_expr_stmt`) must keep: at
+ * `bracket_depth == 0` (a top-level call, not nested inside an outer bracket) it emits EXACTLY
+ * ONE `tk_region_leave` and EXACTLY ONE `tk_region_enter_u` (the restore), and hands back
+ * `bracket_depth` restored to the CALLER's own original value (0) — never left stuck at the `1`
+ * it marks itself with while lowering the bracketed tail.
+ *
+ * @return void
+ * @since 0.3.1.0 (NP4 UAF fix regression coverage)
+ */
+#test
+fn lwt_lower_conveyed_tail_expr_stmt_brackets_and_restores_bracket_depth() {
+    let ctx0 = lwt_region_ctx(0, 7)
+    let es = checker::TExprStmt { expr = lwt_num_i64(42) }
+    let out = match lower_conveyed_tail_expr_stmt(ctx0, es, LType::I64, checker::Prim { kind = checker::PrimKind::I64 }, 0, 0) { LowerBlockValue as x => x; error as err => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(out.ctx.bracket_depth == (0 to u32))
+    let text = print_lmodule(add_func(empty_module(), out.ctx.func))
+    teko::assert::is_true(lwt_count_substr(text, "call @tk_region_leave()") == (1 to u64))
+    teko::assert::is_true(lwt_count_substr(text, "call @tk_region_enter_u(") == (1 to u64))
+}
+
+/**
+ * lwt_lower_conveyed_tail_expr_stmt_skips_bracket_when_already_nested — the BRACKET_DEPTH
+ * NESTED-SKIP `lower_conveyed_tail_expr_stmt` shares with `lower_binding_conveyed`/
+ * `lower_assign_conveyed`/`lower_conveyed_tail_expr_stmt_fat`: when the caller is ALREADY inside
+ * an outer conveyance bracket (`bracket_depth > 0`), it must NOT re-leave/re-enter the frame
+ * region mid-span (that would re-enter the frame in the middle of the outer bracket's still-open
+ * span, misrouting whatever the outer RHS still has left to build) — it just lowers the tail
+ * expression on the context UNCHANGED, emitting NO `tk_region_leave`/`tk_region_enter_u` call at
+ * all, and leaves `bracket_depth` exactly as the caller passed it in (1).
+ *
+ * @return void
+ * @since 0.3.1.0 (NP4 UAF fix regression coverage)
+ */
+#test
+fn lwt_lower_conveyed_tail_expr_stmt_skips_bracket_when_already_nested() {
+    let ctx0 = lwt_region_ctx(1, 7)
+    let es = checker::TExprStmt { expr = lwt_num_i64(42) }
+    let out = match lower_conveyed_tail_expr_stmt(ctx0, es, LType::I64, checker::Prim { kind = checker::PrimKind::I64 }, 0, 0) { LowerBlockValue as x => x; error as err => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(out.ctx.bracket_depth == (1 to u32))
+    let text = print_lmodule(add_func(empty_module(), out.ctx.func))
+    teko::assert::is_false(teko::str::contains(text, "tk_region_leave"))
+    teko::assert::is_false(teko::str::contains(text, "tk_region_enter_u"))
 }

@@ -62,7 +62,6 @@ name: Pull Request CI
 #
 #   artifact-linux-x86_64-glibc  ──► cli-surface-linux-x86_64-glibc ─┐
 #   artifact-macos-arm64         ──► cli-surface-macos-arm64        ─┤
-#   artifact-linux-x86_64-glibc  ──► regressor-full                 │
 #   artifact-linux-x86_64-glibc  ──► ar-validation-linux-x86_64-glibc├─► CI gate
 #   artifact-macos-arm64         ──► ar-validation-macos-arm64      ─┤
 #   artifact-windows-x86_64      ──► ar-validation-windows-x86_64   ─┤
@@ -161,7 +160,7 @@ name: Pull Request CI
 #         Sanitizer gate
 #   FULL  artifact-linux-arm64-glibc, artifact-linux-arm64-musl, artifact-linux-x86_64-musl,
 #         artifact-macos-arm64, test-linux-arm64-glibc, test-linux-arm64-musl,
-#         test-linux-x86_64-musl, test-macos-arm64, cli-surface-macos-arm64, regressor-full,
+#         test-linux-x86_64-musl, test-macos-arm64, cli-surface-macos-arm64,
 #         ar-validation-linux-x86_64-glibc, ar-validation-macos-arm64, ar-validation-windows-x86_64,
 #         cross-arch-determinism, seed-debut, mem-paranoid
 #
@@ -204,21 +203,24 @@ on:
 # instead of killing it. The group is keyed on the PR ref so distinct PRs never wait on each other,
 # and `github.workflow` is included so this file's runs never collide with another workflow's.
 #
-# This used to cancel, on the reasoning that a run superseded by a newer push grades a commit that
-# no longer gates anything. That reasoning holds for the VERDICT and fails for the MEASUREMENT. On a
-# lane whose whole job is to find where the native backend stops, a cancelled run destroys the only
-# evidence of a stop address — and `cancelled` reaches the reader looking like `failure`, which has
-# already been misread here. Owner ruling 2026-07-29: "Disparar vários de uma vez não é problema, o
-# problema é quando algo chega na fila e o processo já está em curso."
+# Cancel-in-progress is ON again — owner ruling 2026-08-03.
 #
-# The cost is real and accepted, and it grew with this wagon's redesign: a burst of pushes now runs
-# a full set each — six producer legs, six test legs, two cli-surface legs, three ar-validation
-# legs, one cross-arch-determinism run, a four-leg seed-debut matrix and one regressor-full run —
-# rather than only the last. Batch what is ready into ONE push and the cost is the same as before;
-# the difference is that carelessness now buys minutes instead of losing evidence.
+# History (do not re-argue without reading this): it cancelled originally; was turned OFF on
+# 2026-07-29 on the reasoning that on a lane whose whole job is to find where the native backend
+# STOPS, a cancelled run destroys the only evidence of a stop address — and `cancelled` reaches the
+# reader looking like `failure`. Owner then: "Disparar vários de uma vez não é problema, o problema
+# é quando algo chega na fila e o processo já está em curso."
+#
+# That PREMISE no longer holds. The wild-write hunt now reproduces LOCALLY — the arena chunk-canary
+# (TEKO_NATIVE_CHUNK_CANARY) under a serialized 2 GB memory harness captures the stop address off-CI
+# — so a cancelled CI run destroys no evidence anymore. Meanwhile, under "push early, push often" a
+# burst of pushes floods the coordinator with delayed failure signals from commits already
+# superseded, clogging live analysis. Owner ruling 2026-08-03: re-enable cancellation — a run
+# superseded by a newer push no longer gates anything, and its stop-address evidence lives locally
+# now. (If a specific CI run's canary output is wanted, let it finish before pushing again.)
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -598,7 +600,7 @@ jobs:
 
   # ══ artifact-linux-x86_64-glibc ════════════════════════════════════════════════════════════
   # TIER: both — the light tier's ONLY Linux asset (see `plan`'s TIER SUMMARY), so it is the one
-  # every fixed-name consumer downloads (regressor-full, mem-paranoid). SAME BODY as
+  # every fixed-name consumer downloads (mem-paranoid). SAME BODY as
   # artifact-linux-arm64-glibc above.
   artifact-linux-x86_64-glibc:
     needs: plan
@@ -931,8 +933,11 @@ jobs:
   # untouched, because they each name only their OWN producer.
   #
   # A C TOOLCHAIN IS STILL REQUIRED HERE, and that is not a build sneaking back in: `teko test .`
-  # IS a native gate — it emits the #test corpus as C, compiles it and runs it out-of-process
-  # (#168). The compiler under test is the downloaded asset; `cc` is the suite's engine.
+  # IS a native gate — the gate binary (`bin/<name>-tktest`) is built through the own-AOT backend
+  # (0.3.1.0 tests-native-no-c: no `.c` translation unit for the test program any more), and `cc`
+  # is still the LINKER that resolves it against `teko_rt`/`assert`, then runs it out-of-process
+  # (#168). The compiler under test is the downloaded asset; `cc` never compiles teko-generated C
+  # here — it only links the own-backend object.
   #
   # NO "asset self-test must have run" GUARD ANY MORE, and its removal is deliberate, not an
   # omission. The matrix version needed it because ONE shared job carried both a POSIX and a
@@ -946,7 +951,7 @@ jobs:
     if: needs.plan.outputs.run == 'true' && needs.plan.outputs.full == 'true'
     name: test / linux-arm64-glibc
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 45
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -1038,11 +1043,16 @@ jobs:
 
       # THE NO-C-IN-TESTS GATE (owner ruling 2026-07-29, literal): "esse é outro que não pode
       # emitir C quando for compilar nativo [...] se ao final de uma sessão de testes houver um C
-      # gerado, tem que fechar vermelha a lane." `teko test .`'s unit half emits the `#test` corpus
-      # as C and compiles it with `cc` UNCONDITIONALLY — it never reads `TEKO_BACKEND` — so a green
-      # suite on a leg that claims to run native proves nothing about the native backend unless
-      # something checks that no C survived the session. `scripts/no_c_in_tests_gate.sh` is that
-      # check; `scripts/no_c_in_tests_gate_test.sh` (run in `CI gate`) proves the check itself.
+      # gerado, tem que fechar vermelha a lane." `scripts/no_c_in_tests_gate.sh` is that check;
+      # `scripts/no_c_in_tests_gate_test.sh` (run in `CI gate`) proves the check itself.
+      #
+      # STILL HONESTLY RED ON THIS PROJECT'S OWN `teko test .` (0.3.1.0 tests-native-no-c). The
+      # gate's UNIT half (`run_native_gate`/`native_gate_build`) no longer emits a `.c` for the
+      # test program — that emission site is CLOSED. The REGRESSION tier's
+      # `build_regression_cov_exe` (`bin/teko-regrcov.c`) still does — it needs the C emitter's
+      # coverage instrumentation the native backend does not have yet — so this step still fails
+      # here, naming exactly that ONE file, until that separate gap closes. See
+      # `scripts/no_c_in_tests_gate.sh`'s own header for the full accounting.
       #
       # SCOPED TO A NATIVE LEG ONLY, via the SAME lookup the producer's fixpoint step uses. RUNS
       # ON THE CHECKED-OUT SOURCE TREE (`.`), NOT ON `dl/`: `teko test .` compiled ITS OWN
@@ -1059,7 +1069,7 @@ jobs:
     if: needs.plan.outputs.run == 'true' && needs.plan.outputs.full == 'true'
     name: test / linux-arm64-musl
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 45
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -1157,7 +1167,7 @@ jobs:
     if: needs.plan.outputs.run == 'true'
     name: test / linux-x86_64-glibc
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -1255,7 +1265,7 @@ jobs:
     if: needs.plan.outputs.run == 'true' && needs.plan.outputs.full == 'true'
     name: test / linux-x86_64-musl
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -1337,9 +1347,36 @@ jobs:
         run: bash scripts/objfile_gate_test.sh
 
 
-      - name: Asset self-test (the published asset runs its own gate)
+      # The corpus links some rows with the host clang; the fail-closed executor below turns an
+      # absent capability into a HARD failure, so provision it here (llvm/lld are installed above).
+      - name: Install the clang the fail-closed corpus links with
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y clang
+
+      # THE SINGLE REGRESSION EXECUTOR, fail-closed on every declared capability (+ D4 arith-cast
+      # gate), folded in from the retired standalone `regressor-full` lane (owner ruling 2026-08-02:
+      # *"mova os gates para executarem nas lanes de testes ... logo após um `teko test`"*). Same
+      # asset, same `teko test .` this lane already ran — now carrying the three enforcements the
+      # standalone lane was the only place to hold:
+      #   - REGRESSION_REQUIRE_TOOLS=1: a provisionable capability gap is a HARD failure, not an
+      #     honest-skip that reports green over unexecuted rows.
+      #   - --arith-cast-gate (D4, owner 2026-07-27): the only instrument still enforcing cast
+      #     hygiene (D1 is a warning); the rate prints on every `teko test`, this adds the VERDICT.
+      - name: Asset self-test — the published asset runs its own gate, fail-closed (+ D4)
         shell: bash
-        run: dl/linux-x86_64-musl/teko test .
+        env:
+          REGRESSION_REQUIRE_TOOLS: "1"
+        run: dl/linux-x86_64-musl/teko test . --arith-cast-gate 2>&1 | tee teko-test.log
+
+      # NO SKIPS IN THE COMPILER'S OWN CI (owner 2026-07-27), evaluated AFTER the lane so the policy
+      # never leaks into `teko test`'s user-facing semantics: a row nobody ran is inconclusive, and
+      # reporting green over it is a lie. This catches what REGRESSION_REQUIRE_TOOLS cannot: a
+      # regressor that reports `ok` while carrying skipped rows inside it.
+      - name: No skips — every declared row must have run
+        if: always()
+        shell: bash
+        run: sh scripts/no_skips_gate.sh teko-test.log
 
       - name: No generated C after a native-backend test session
         if: needs.plan.outputs.fb_linux_x86_64_musl == 'native'
@@ -1353,7 +1390,7 @@ jobs:
     if: needs.plan.outputs.run == 'true' && needs.plan.outputs.full == 'true'
     name: test / macos-arm64
     runs-on: macos-latest
-    timeout-minutes: 45
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -1478,7 +1515,7 @@ jobs:
     if: needs.plan.outputs.run == 'true'
     name: test / windows-x86_64
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -1714,113 +1751,6 @@ jobs:
         env:
           TEKO: ./dl/macos-arm64/teko
         run: ./scripts/target_host_default_test.sh
-
-  # ══ regressor-full ═════════════════════════════════════════════════════════════════════════
-  # TIER: full only. It no longer builds anything.
-  #
-  # `needs: [plan, artifact-linux-x86_64-glibc]` — this lane always downloaded exactly this one
-  # producer, so unrolling the matrix changes nothing about its own dependency, only its name.
-  #
-  # This is the ONE lane that runs the regression executor with REGRESSION_REQUIRE_TOOLS=1, and
-  # that flag IS the point: without it a lane whose provisioning broke would honest-SKIP the
-  # rows whose capability is missing and report green — worse than having no lane at all, because
-  # it LOOKS like coverage. With it, an absent tool is a hard failure.
-  #
-  # …and BECAUSE the flag is fail-closed for EVERY capability the corpus declares, this is the one
-  # lane that must provision ALL of them, starting with the host binutils and the LLVM object
-  # readers that scripts/check_elf.sh and scripts/check_coff.sh need.
-  # That is why the flag lives HERE and not on the `test-*` legs: a lane that cannot run part of
-  # the corpus cannot honestly demand that none of it be skipped.
-  regressor-full:
-    # REPOINTED FROM THE glibc LEG TO THE musl ONE (owner ruling 2026-07-30). This job needs a
-    # compiler it can RUN, and `artifact-linux-x86_64-glibc` carries `fixpoint_backend: native`, so
-    # it is RED BY DESIGN until the native ladder closes — which made this whole job `skipped` on
-    # every run (measured: run 30500310856, `regressor-full = skipped`). That is not a leg stopping
-    # where it went red; it is a LANE-WIDE job that happened to be wired to a red producer by a
-    # fixed artifact name — and a lane-wide job that never runs proves nothing at all, which is a
-    # quieter failure than a red one and therefore worse.
-    # linux-x86_64-musl is the same architecture on the same runner with the C route, and it is
-    # green, so this lane measures again instead of waiting on a ladder it does not depend on.
-    needs: [plan, artifact-linux-x86_64-musl]
-    if: needs.plan.outputs.run == 'true' && needs.plan.outputs.full == 'true'
-    name: regressor / all capabilities (fail-closed)
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # `llvm` carries `llvm-readobj`/`llvm-objdump`, which `scripts/check_coff.sh` needs to read the
-      # cross-emitted COFF object on a Linux host — and that gate fails CLOSED when they are absent.
-      - name: Install the host clang the corpus links with
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y clang llvm lld
-
-      # THE MINGW CROSS-LINKER USED TO BE INSTALLED HERE, AND IS GONE (owner ruling 2026-07-30:
-      # *"queremos sim Cross compiling quando todos os natives estiverem funcionando, mas não quero
-      # saber de mingw"*).
-      #
-      # It served exactly one row, `own_cross_x86_64_windows_emits_coff` — and that row never needed a
-      # linker. Its own name says *"the object is the claim"*: `When built` + `Then object well-formed`,
-      # no `and run`, no `Then exit`, and `scripts/check_coff.sh` reads COFF on any host. The linker was
-      # there because `When built` LINKED, not because the row checked a link. The cross build now stops
-      # at the object, so the capability is unnecessary and the row still proves everything it ever did.
-      #
-      # THE LESSON, AND IT GENERALISES: a capability installed to satisfy a step is a sign that the step
-      # ASSERTS MORE THAN IT VERIFIES. Read the assertion before installing the tool.
-      - name: Download the published x86_64 asset
-        uses: actions/download-artifact@v4
-        with:
-          name: teko-assets-linux-x86_64-musl
-          path: dl
-
-      - name: Restore the executable bit
-        run: |
-          set -eu
-          chmod +x dl/linux-x86_64-musl/teko
-          dl/linux-x86_64-musl/teko --version
-
-      # `--arith-cast-gate` ENABLED HERE (D4), owner ruling 2026-07-27: *"posso baixar a guarda:
-      # <= 5% e então habilita o D4"*. The ceiling moved 2% -> 5% in the same ruling; see
-      # `checker::ARITH_CAST_RATE_CEILING` for the ratchet and why a 5% gate that RUNS beats a 2%
-      # gate that never did.
-      #
-      # WHY THIS MATTERS NOW AND NOT BEFORE: D1 (`redundant cast`) was downgraded from a compile
-      # ERROR to a warning on the same day, which makes D4 the ONLY instrument still enforcing the
-      # cast-hygiene policy. Leaving it unwired would have moved the policy onto a gate that does
-      # not exist.
-      #
-      # The RATE is printed by every `teko test` regardless of this flag — it is reported right
-      # after the front end, before the test gate, so it is visible even on a tree whose suite is
-      # red. The flag adds the VERDICT, which runs at the END so a style ceiling can never mask a
-      # test failure.
-      - name: The single regression executor, fail-closed on every declared capability (+ D4 gate)
-        shell: bash
-        env:
-          REGRESSION_REQUIRE_TOOLS: "1"
-        run: ./dl/linux-x86_64-musl/teko test . --arith-cast-gate 2>&1 | tee teko-test.log
-
-      # NO SKIPS IN THE COMPILER'S OWN CI, evaluated AFTER the lane rather than inside the
-      # executor. Owner ruling 2026-07-27: *"não podem haver skips, se houver é falha (deve ser
-      # avaliado após a execução da lane para não imputar o comportamento no fonte do teko mas sim
-      # no CI)"*.
-      #
-      # A skipped row is a legitimate outcome for a USER — their machine may genuinely lack a
-      # cross-linker. It is never a legitimate outcome HERE: a row nobody ran is inconclusive, and
-      # reporting green over it is the same class of lie the fixpoint's soft mode was. Keeping the
-      # rule in a post-lane script is what stops that policy from leaking into `teko test`'s
-      # semantics and thence into every user's project.
-      #
-      # `REGRESSION_REQUIRE_TOOLS=1` above already turns a PROVISIONABLE capability gap into a hard
-      # failure. This catches what that flag cannot: a regressor that reports `ok` while carrying
-      # skipped rows inside it — a green line over unexecuted work.
-      - name: No skips — every declared row must have run
-        if: always()
-        shell: bash
-        run: sh scripts/no_skips_gate.sh teko-test.log
 
   # ══ ar-validation-linux-x86_64-glibc ═══════════════════════════════════════════════════════
   # TIER: full only.
@@ -2294,7 +2224,7 @@ jobs:
     if: needs.plan.outputs.run == 'true' && needs.plan.outputs.full == 'true'
     name: Memory paranoid (native self-host)
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -2424,7 +2354,7 @@ jobs:
     if: needs.plan.outputs.run == 'true' && needs.plan.outputs.full == 'true'
     name: Memory paranoid (linux-x86_64-musl)
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -2476,7 +2406,7 @@ jobs:
     if: needs.plan.outputs.run == 'true' && needs.plan.outputs.full == 'true'
     name: Memory paranoid (linux-arm64-glibc)
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 120
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -2522,7 +2452,7 @@ jobs:
   gate:
     name: CI gate
     runs-on: ubuntu-latest
-    needs: [plan, artifact-linux-x86_64-glibc, cli-surface-linux-x86_64-glibc, cli-surface-macos-arm64, regressor-full, ar-validation-linux-x86_64-glibc, ar-validation-macos-arm64, ar-validation-windows-x86_64, cross-arch-determinism, seed-debut]
+    needs: [plan, artifact-linux-x86_64-glibc, cli-surface-linux-x86_64-glibc, cli-surface-macos-arm64, ar-validation-linux-x86_64-glibc, ar-validation-macos-arm64, ar-validation-windows-x86_64, cross-arch-determinism, seed-debut]
     if: always()
     permissions:
       contents: read
@@ -2655,7 +2585,6 @@ jobs:
           ANCHOR_RESULT: ${{ needs.artifact-linux-x86_64-glibc.result }}
           CLI_XG_RESULT: ${{ needs.cli-surface-linux-x86_64-glibc.result }}
           CLI_MAC_RESULT: ${{ needs.cli-surface-macos-arm64.result }}
-          REGRESSOR_RESULT: ${{ needs.regressor-full.result }}
           AR_XG_RESULT: ${{ needs.ar-validation-linux-x86_64-glibc.result }}
           AR_MAC_RESULT: ${{ needs.ar-validation-macos-arm64.result }}
           AR_WX_RESULT: ${{ needs.ar-validation-windows-x86_64.result }}
@@ -2670,7 +2599,6 @@ jobs:
           echo "artifact-linux-x86_64-glibc (anchor) = $ANCHOR_RESULT   (both tiers)"
           echo "cli-surface-linux-x86_64-glibc       = $CLI_XG_RESULT   (both tiers)"
           echo "cli-surface-macos-arm64              = $CLI_MAC_RESULT   (full only)"
-          echo "regressor-full                       = $REGRESSOR_RESULT   (full only)"
           echo "ar-validation-linux-x86_64-glibc     = $AR_XG_RESULT   (full only)"
           echo "ar-validation-macos-arm64            = $AR_MAC_RESULT   (full only)"
           echo "ar-validation-windows-x86_64         = $AR_WX_RESULT   (full only)"
@@ -2724,7 +2652,6 @@ jobs:
             echo "::warning::$1 = $2 on the light tier — expected skipped; check its \`if:\` condition."
           }
           require_full_only cli-surface-macos-arm64          "$CLI_MAC_RESULT"
-          require_full_only regressor-full                   "$REGRESSOR_RESULT"
           require_full_only ar-validation-linux-x86_64-glibc  "$AR_XG_RESULT"
           require_full_only ar-validation-macos-arm64         "$AR_MAC_RESULT"
           require_full_only ar-validation-windows-x86_64      "$AR_WX_RESULT"

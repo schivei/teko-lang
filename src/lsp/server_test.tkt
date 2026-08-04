@@ -1,0 +1,399 @@
+use teko::encoding::json
+use teko::checker
+
+/**
+ * DOC_URI — the `file://` URI of the document the diagnostics tests open.
+ */
+const DOC_URI: str = "file:///proj/foo.tks"
+
+/**
+ * DOC_PATH — the filesystem path `DOC_URI` resolves to (its diagnostics' `file`).
+ */
+const DOC_PATH: str = "/proj/foo.tks"
+
+/**
+ * BUGGY_DOC — a module whose function names an UNKNOWN parameter type, so the checker reports the
+ * stable `unknown type: Bogus` diagnostic. `pub` so no unused-function warning muddies the list.
+ */
+const BUGGY_DOC: str = "pub fn f(x: Bogus) -> i64 { return 0 }"
+
+/**
+ * CLEAN_DOC — a well-typed module that produces NO diagnostic (the empty-list / clear case).
+ */
+const CLEAN_DOC: str = "pub fn f() -> i64 { return 0 }"
+
+/**
+ * TYPE_MISSING — the stable substring of the checker's unknown-type diagnostic for `BUGGY_DOC`.
+ */
+const TYPE_MISSING: str = "unknown type: Bogus"
+
+/**
+ * WARN_DOC — a well-typed module whose ONLY defect is a dead private function: no `pub`, never
+ * called, not `main`, not `#test`. Before crumb C this produced ZERO diagnostics (the finding only
+ * ever reached stderr); it now exercises `warnings.tks::collect_warnings` end to end through the
+ * SAME `didOpen` -> `publishDiagnostics` pipeline crumb A already wired for errors.
+ */
+const WARN_DOC: str = "fn dead() -> i64 { return 0 }"
+
+/**
+ * UNUSED_FN_MISSING — the stable substring of the collected unused-private-function warning for
+ * `WARN_DOC`.
+ */
+const UNUSED_FN_MISSING: str = "unused private function `dead`"
+
+/**
+ * didopen_request — a `textDocument/didOpen` notification DOM for document `uri` carrying `text`,
+ * built with the server's own JSON constructors so the test drives the exact shape a client sends.
+ *
+ * @param uri   the document URI
+ * @param text  the document buffer
+ * @return      the `didOpen` notification DOM
+ */
+fn didopen_request(uri: str, text: str) -> json::JsonValue {
+    let td = jobj(["uri", "text"], [jstr(uri), jstr(text)])
+    let params = jobj(["textDocument"], [td])
+    jobj(["jsonrpc", "method", "params"], [jstr("2.0"), jstr("textDocument/didOpen"), params])
+}
+
+#test
+/**
+ * diagnose_document_reports_type_error — the front-end pass over a buffer with an unknown type
+ * returns at least one diagnostic, and its message carries the checker's `unknown type: Bogus`.
+ */
+fn diagnose_document_reports_type_error() {
+    let diags = diagnose_document(DOC_PATH, BUGGY_DOC)
+    teko::assert::is_true(diags.len >= 1)
+    teko::assert::str_contains(diags[0].message, TYPE_MISSING)
+}
+
+#test
+/**
+ * diagnose_document_clean_is_empty — a well-typed buffer yields no diagnostics, so the client's
+ * squiggles are cleared.
+ */
+fn diagnose_document_clean_is_empty() {
+    let diags = diagnose_document(DOC_PATH, CLEAN_DOC)
+    teko::assert::eq_u64(diags.len, 0)
+}
+
+#test
+/**
+ * didopen_dispatch_publishes_diagnostics — dispatching a `didOpen` for the buggy buffer yields
+ * exactly one outgoing message, and encoding it shows a `publishDiagnostics` notification for the
+ * document's uri that carries the error text, a severity, and a range.
+ */
+fn didopen_dispatch_publishes_diagnostics() {
+    let out = handle_request(store_empty(), didopen_request(DOC_URI, BUGGY_DOC)).out
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "textDocument/publishDiagnostics")
+    teko::assert::str_contains(wire, DOC_URI)
+    teko::assert::str_contains(wire, TYPE_MISSING)
+    teko::assert::str_contains(wire, "severity")
+    teko::assert::str_contains(wire, "range")
+}
+
+#test
+/**
+ * didopen_clean_publishes_empty — dispatching a `didOpen` for a clean buffer publishes an EMPTY
+ * diagnostics array (the protocol's "now clean" signal).
+ */
+fn didopen_clean_publishes_empty() {
+    let out = handle_request(store_empty(), didopen_request(DOC_URI, CLEAN_DOC)).out
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "textDocument/publishDiagnostics")
+    teko::assert::str_contains(wire, "\"diagnostics\":[]")
+}
+
+#test
+/**
+ * didopen_dispatch_publishes_a_collected_warning — crumb C's own regression: a document whose
+ * ONLY defect is a dead private function (a WARNING, `warnings.tks::collect_unused_fn_warnings`,
+ * never a hard error) still publishes one diagnostic, at `severity` 2 (`DiagSeverity::Warning`),
+ * carrying the finding's text — proving the crumb A pipeline now surfaces what used to reach only
+ * stderr.
+ */
+fn didopen_dispatch_publishes_a_collected_warning() {
+    let out = handle_request(store_empty(), didopen_request(DOC_URI, WARN_DOC)).out
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "textDocument/publishDiagnostics")
+    teko::assert::str_contains(wire, DOC_URI)
+    teko::assert::str_contains(wire, UNUSED_FN_MISSING)
+    teko::assert::str_contains(wire, "\"severity\":2")
+}
+
+#test
+/**
+ * jsonrpc_loop_open_to_publish — the WHOLE transport path: a `didOpen` for the buggy buffer is
+ * FRAMED, decoded back through the `Content-Length` framer, dispatched, and the resulting message
+ * re-framed. The final wire frame carries `publishDiagnostics` and the error text — the diagnostic
+ * returned through the JSON-RPC loop, proven by matching printed frame bytes, not an exit code.
+ */
+fn jsonrpc_loop_open_to_publish() {
+    let frame = encode_frame(didopen_request(DOC_URI, BUGGY_DOC))
+    let msg = match decode_frame_bytes(teko::text::bytes_of_str(frame)) {
+        RpcMessage as m => m
+        error as e => { teko::assert::eq_str(e.message, "no error expected"); return }
+    }
+    let out = handle_request(store_empty(), msg.body).out
+    teko::assert::eq_u64(out.len, 1)
+    let reply = encode_frame(out[0])
+    teko::assert::str_contains(reply, "textDocument/publishDiagnostics")
+    teko::assert::str_contains(reply, TYPE_MISSING)
+}
+
+/**
+ * formatting_request — a `textDocument/formatting` request DOM for document `uri` with request id
+ * `id`, built with the server's JSON constructors so the test drives the exact client shape.
+ *
+ * @param uri  the document URI
+ * @param id   the request id
+ * @return     the `textDocument/formatting` request DOM
+ */
+fn formatting_request(uri: str, id: f64) -> json::JsonValue {
+    let td = jobj(["uri"], [jstr(uri)])
+    let options = jobj(["tabSize", "insertSpaces"], [jnum(4.0), jbool(true)])
+    let params = jobj(["textDocument", "options"], [td, options])
+    jobj(["jsonrpc", "id", "method", "params"], [jstr("2.0"), jnum(id), jstr("textDocument/formatting"), params])
+}
+
+#test
+/**
+ * formatting_returns_full_range_edit — after a document is opened into the store, a formatting
+ * request answers with a one-element `TextEdit[]` that carries the formatted text (`newText`) over a
+ * `range`, echoing the request id. Proves the in-process `fmt::format_source` wiring end to end.
+ */
+fn formatting_returns_full_range_edit() {
+    let opened = handle_request(store_empty(), didopen_request(DOC_URI, CLEAN_DOC))
+    let out = handle_request(opened.store, formatting_request(DOC_URI, 7.0)).out
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "\"id\":7")
+    teko::assert::str_contains(wire, "newText")
+    teko::assert::str_contains(wire, "range")
+    teko::assert::str_contains(wire, "fn f")
+}
+
+#test
+/**
+ * formatting_unopened_is_null — formatting a document the server never saw opened yields a `null`
+ * result (the protocol's "no edits"), never a corrupt edit.
+ */
+fn formatting_unopened_is_null() {
+    let out = handle_request(store_empty(), formatting_request(DOC_URI, 9.0)).out
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "\"result\":null")
+    teko::assert::str_absent(wire, "newText")
+}
+
+#test
+/**
+ * initialize_advertises_formatting — the `initialize` result announces the formatting provider, so a
+ * client knows the server answers `textDocument/formatting`.
+ */
+fn initialize_advertises_formatting() {
+    let req = jobj(["jsonrpc", "id", "method"], [jstr("2.0"), jnum(1.0), jstr("initialize")])
+    let out = handle_request(store_empty(), req).out
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "documentFormattingProvider")
+}
+
+#test
+/**
+ * initialize_advertises_hover_and_definition — crumb F's regression: the `initialize` result also
+ * announces `hoverProvider` and `definitionProvider`, so a client knows the server now answers
+ * `textDocument/hover` and `textDocument/definition`.
+ */
+fn initialize_advertises_hover_and_definition() {
+    let req = jobj(["jsonrpc", "id", "method"], [jstr("2.0"), jnum(1.0), jstr("initialize")])
+    let out = handle_request(store_empty(), req).out
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "hoverProvider")
+    teko::assert::str_contains(wire, "definitionProvider")
+}
+
+/**
+ * position_request — a `method` request DOM at document `uri`, request id `id`, targeting the
+ * 0-based cursor (`line`, `character`) — the shared builder the hover/definition fixture requests
+ * use, mirroring `formatting_request`'s client-shape fidelity.
+ *
+ * @param method     the LSP method name (`textDocument/hover` or `textDocument/definition`)
+ * @param uri        the document URI
+ * @param id         the request id
+ * @param line       the 0-based cursor line
+ * @param character  the 0-based cursor character
+ * @return           the request DOM
+ */
+fn position_request(method: str, uri: str, id: f64, line: f64, character: f64) -> json::JsonValue {
+    let td = jobj(["uri"], [jstr(uri)])
+    let position = jobj(["line", "character"], [jnum(line), jnum(character)])
+    let params = jobj(["textDocument", "position"], [td, position])
+    jobj(["jsonrpc", "id", "method", "params"], [jstr("2.0"), jnum(id), jstr(method), params])
+}
+
+#test
+/**
+ * hover_returns_signature_and_doc_for_symbol_under_cursor — after `CLEAN_DOC` is opened, a hover at
+ * its `f` function name (line 0, char 7 — `pub fn f() -> i64 { … }`) answers a `Hover` whose markdown
+ * carries the rendered signature, echoing the request id.
+ */
+fn hover_returns_signature_and_doc_for_symbol_under_cursor() {
+    let opened = handle_request(store_empty(), didopen_request(DOC_URI, CLEAN_DOC))
+    let out = handle_request(opened.store, position_request("textDocument/hover", DOC_URI, 11.0, 0.0, 7.0)).out
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "\"id\":11")
+    teko::assert::str_contains(wire, "contents")
+    teko::assert::str_contains(wire, "fn f() -> i64")
+}
+
+#test
+/**
+ * hover_on_no_symbol_is_null — a cursor far past the document's last line covers no token, so the
+ * hover answers a `null` result rather than a stale/guessed symbol.
+ */
+fn hover_on_no_symbol_is_null() {
+    let opened = handle_request(store_empty(), didopen_request(DOC_URI, CLEAN_DOC))
+    let out = handle_request(opened.store, position_request("textDocument/hover", DOC_URI, 12.0, 100.0, 0.0)).out
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "\"result\":null")
+}
+
+#test
+/**
+ * hover_unopened_is_null — hovering in a document the server never saw opened yields a `null`
+ * result: there is no buffer to resolve the cursor against.
+ */
+fn hover_unopened_is_null() {
+    let out = handle_request(store_empty(), position_request("textDocument/hover", DOC_URI, 14.0, 0.0, 7.0)).out
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "\"result\":null")
+}
+
+#test
+/**
+ * definition_returns_location_of_symbol_under_cursor — the same cursor over `CLEAN_DOC`'s `f`
+ * answers a `Location` naming the document's own uri and a range starting at line 0, echoing the
+ * request id.
+ */
+fn definition_returns_location_of_symbol_under_cursor() {
+    let opened = handle_request(store_empty(), didopen_request(DOC_URI, CLEAN_DOC))
+    let out = handle_request(opened.store, position_request("textDocument/definition", DOC_URI, 13.0, 0.0, 7.0)).out
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "\"id\":13")
+    teko::assert::str_contains(wire, DOC_URI)
+    teko::assert::str_contains(wire, "\"line\":0")
+}
+
+#test
+/**
+ * completion_returns_symbol_and_keyword_items_for_open_document — after `CLEAN_DOC` is opened, a
+ * completion request answers a `CompletionItem[]` that carries BOTH halves of crumb G's candidate
+ * list: the document's own symbol `f` (label, `kind` 3 — Function, and `detail` echoing its rendered
+ * signature, reusing crumb E's index) and a reserved keyword (`fn`, `kind` 14 — Keyword, reusing the
+ * lexer's own reserved table).
+ */
+fn completion_returns_symbol_and_keyword_items_for_open_document() {
+    let opened = handle_request(store_empty(), didopen_request(DOC_URI, CLEAN_DOC))
+    let out = handle_request(opened.store, position_request("textDocument/completion", DOC_URI, 15.0, 0.0, 0.0)).out
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "\"id\":15")
+    teko::assert::str_contains(wire, "\"label\":\"f\"")
+    teko::assert::str_contains(wire, "\"detail\":\"fn f() -> i64\"")
+    teko::assert::str_contains(wire, "\"kind\":3")
+    teko::assert::str_contains(wire, "\"label\":\"fn\"")
+    teko::assert::str_contains(wire, "\"kind\":14")
+}
+
+#test
+/**
+ * completion_unopened_document_still_returns_keywords — a completion request for a document the
+ * server never saw opened has no symbol index to draw from, so the response carries the KEYWORD list
+ * alone (`document_completion_items`'s own contract): the reserved word `fn` is present, but no
+ * `f`-named symbol item is (there is no buffer to have indexed it from).
+ */
+fn completion_unopened_document_still_returns_keywords() {
+    let out = handle_request(store_empty(), position_request("textDocument/completion", DOC_URI, 16.0, 0.0, 0.0)).out
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "\"label\":\"fn\"")
+    teko::assert::str_absent(wire, "\"label\":\"f\"")
+}
+
+#test
+/**
+ * initialize_advertises_completion — the `initialize` result also announces `completionProvider` (an
+ * OBJECT, per protocol) naming its trigger characters, so a client knows the server now answers
+ * `textDocument/completion`.
+ */
+fn initialize_advertises_completion() {
+    let req = jobj(["jsonrpc", "id", "method"], [jstr("2.0"), jnum(1.0), jstr("initialize")])
+    let out = handle_request(store_empty(), req).out
+    teko::assert::eq_u64(out.len, 1)
+    let wire = json::encode(out[0])
+    teko::assert::str_contains(wire, "completionProvider")
+    teko::assert::str_contains(wire, "triggerCharacters")
+}
+
+#test
+/**
+ * checker_severity_maps_every_checker_severity_to_its_lsp_twin — crumb D's structural re-tag between
+ * `checker::DiagLevel` and the LSP's own `DiagSeverity`: each of the four members round-trips to the
+ * identically-named LSP member.
+ */
+fn checker_severity_maps_every_checker_severity_to_its_lsp_twin() {
+    teko::assert::is_true(checker_severity(checker::DiagLevel::Error) == DiagSeverity::Error)
+    teko::assert::is_true(checker_severity(checker::DiagLevel::Warning) == DiagSeverity::Warning)
+    teko::assert::is_true(checker_severity(checker::DiagLevel::Info) == DiagSeverity::Info)
+    teko::assert::is_true(checker_severity(checker::DiagLevel::Hint) == DiagSeverity::Hint)
+}
+
+/**
+ * struct_diag — a `checker::Diagnostic` at (`line`, `col`) in `file`, stamped `sev`, carrying `message`
+ * verbatim — the fixture `to_lsp_diagnostic`'s own tests build directly, bypassing the checker.
+ *
+ * @param file     the diagnostic's source file
+ * @param line     the 1-based line
+ * @param col      the 1-based column
+ * @param sev      the severity to stamp
+ * @param message  the diagnostic text
+ * @return         the structured checker diagnostic
+ */
+fn struct_diag(file: str, line: u32, col: u32, sev: checker::DiagLevel, message: str) -> checker::Diagnostic {
+    checker::Diagnostic { file = file; line = line; col = col; end_line = line; end_col = col + 1; severity = sev; message = message }
+}
+
+#test
+/**
+ * to_lsp_diagnostic_reads_severity_from_the_field_not_the_message_text — the crumb D regression: a
+ * `checker::Diagnostic` stamped `Error` whose MESSAGE TEXT itself carries the literal `"warning:"`
+ * substring (an adversarial message the OLD `severity_of` text-sniff — `contains(message, "warning:")`
+ * — would have misclassified as a Warning) still maps to LSP severity 1 (Error), proving severity now
+ * flows from the struct field alone.
+ */
+fn to_lsp_diagnostic_reads_severity_from_the_field_not_the_message_text() {
+    let d = struct_diag("foo.tks", 4, 2, checker::DiagLevel::Error, "unexpected token near \"warning:\"")
+    let lsp = to_lsp_diagnostic("mut x = 1\n", d)
+    teko::assert::is_true(lsp.severity == DiagSeverity::Error)
+}
+
+#test
+/**
+ * to_lsp_diagnostic_reads_a_warning_severity_from_the_field_too — the mirror case: a `checker::Diagnostic`
+ * stamped `Warning` whose message carries NO `"warning:"` marker at all still maps to LSP severity 2 —
+ * the old heuristic would have misclassified THIS as an Error.
+ */
+fn to_lsp_diagnostic_reads_a_warning_severity_from_the_field_too() {
+    let d = struct_diag("foo.tks", 1, 4, checker::DiagLevel::Warning, "dead private function `f`")
+    let lsp = to_lsp_diagnostic("fn f() -> i64 { return 0 }\n", d)
+    teko::assert::is_true(lsp.severity == DiagSeverity::Warning)
+}

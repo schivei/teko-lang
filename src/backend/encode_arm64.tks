@@ -1,10 +1,40 @@
 /**
+ * EncReloc — the symbol relocation ONE `EncWord` owes: the target symbol and
+ * which instruction field the linker patches. Present only on a word that
+ * actually references a symbol (BL/ADRP/ADDLo); every other word carries `null`
+ * instead of this record.
+ *
+ * ITS EXISTENCE IS THE POINT. The reloc used to be a `has_reloc: bool` beside a
+ * `reloc_kind: MRelocKind` that a non-relocating word still had to fill, and the
+ * value it filled it with was `MRelocKind::Call` — a BRANCH26 default on words
+ * that are not branches. That inert lie is the same shape as the bug
+ * `select_addr_pair` was built to make unrepresentable (a `Call` relocation
+ * landing on an `ADRP`, which Apple's `ld` rejects outright). Two fields
+ * encoding one state is what let a meaningless kind sit in a real field;
+ * folding them into ONE nullable record leaves nothing to default, so
+ * "no relocation" can no longer be spelled as a relocation kind.
+ *
+ * @since 0.3.1.0
+ */
+pub type EncReloc = struct {
+    /**
+     * sym — the relocation's target symbol, already in its final linker name.
+     */
+    sym: str
+    /**
+     * kind — which instruction field the relocation patches (`PageHi` for the
+     * `ADRP`, `PageLo` for the completing `ADD`, `Call` for a `BL`).
+     */
+    kind: MRelocKind
+}
+
+/**
  * EncWord — one instruction's encoding outcome: its base word plus an optional
  * pending fixup. A position-independent instruction resolves to just `word`
- * (`has_branch`/`has_reloc` false). A branch carries `has_branch=true` +
+ * (`has_branch` false, `reloc` null). A branch carries `has_branch=true` +
  * `target` (the machine-block id, patched once block offsets are known in
- * A4-3). A symbol reference carries `has_reloc=true` + `reloc_sym`/`reloc_kind`
- * (the `Reloc` record is materialized in A4-3).
+ * A4-3). A symbol reference carries an `EncReloc` (the `Reloc` record is
+ * materialized in A4-3).
  *
  * @since #385 A4-1
  */
@@ -29,17 +59,10 @@ pub type EncWord = struct {
      */
     branch_form: u32
     /**
-     * has_reloc — true iff this word owes a symbol `Reloc` (BL/ADRP/ADDLo).
+     * reloc — the symbol relocation this word owes (BL/ADRP/ADDLo), or `null`
+     * when it owes none. There is no third state and no inert default.
      */
-    has_reloc: bool
-    /**
-     * reloc_sym — the relocation's target symbol (meaningful when `has_reloc`).
-     */
-    reloc_sym: str
-    /**
-     * reloc_kind — the relocation kind (meaningful when `has_reloc`).
-     */
-    reloc_kind: MRelocKind
+    reloc: EncReloc | null
 }
 
 /**
@@ -75,6 +98,13 @@ pub type FrameLayout = struct {
      * mixed-size/mixed-align frames (structs/arrays/spills) map correctly.
      */
     slot_offsets: []u32
+    /**
+     * out_arg_base — the SP-relative byte offset of the outgoing stack-arg
+     * area (always 0: the area sits at the very bottom of the frame,
+     * [sp + 0 .. sp + out_arg_bytes)). Present as a named field so the
+     * encoder can reference it symbolically without hard-coding 0.
+     */
+    out_arg_base: u32
 }
 
 /**
@@ -101,7 +131,7 @@ type MemForm = struct {
 /**
  * plain_word — an `EncWord` for a position-independent instruction: just the
  * finished 32-bit word, with no branch displacement and no symbol relocation
- * pending. The reloc/branch fields carry inert defaults.
+ * pending (`reloc` is `null`, not a defaulted kind).
  *
  * @param u32 w  the finished instruction word
  * @return EncWord  the word with no pending fixup
@@ -112,9 +142,7 @@ fn plain_word(w: u32) -> EncWord {
         has_branch = false
         target = 0 to u32
         branch_form = 0 to u32
-        has_reloc = false
-        reloc_sym = ""
-        reloc_kind = MRelocKind::Call
+        reloc = null
     }
 }
 
@@ -134,9 +162,7 @@ fn branch_word(w: u32, target: u32, form: u32) -> EncWord {
         has_branch = true
         target = target
         branch_form = form
-        has_reloc = false
-        reloc_sym = ""
-        reloc_kind = MRelocKind::Call
+        reloc = null
     }
 }
 
@@ -156,9 +182,7 @@ fn reloc_word(w: u32, sym: str, kind: MRelocKind) -> EncWord {
         has_branch = false
         target = 0 to u32
         branch_form = 0 to u32
-        has_reloc = true
-        reloc_sym = sym
-        reloc_kind = kind
+        reloc = EncReloc { sym = sym; kind = kind }
     }
 }
 
@@ -1239,12 +1263,108 @@ fn frame_total_size(slots_size: u32, saved: Saved, lr_save: bool) -> u32 {
 }
 
 /**
+ * out_arg_slots_of_inst — the number of outgoing stack-arg slots this
+ * instruction contributes: `index + 1` for an `MOutArg` (one-past the highest
+ * slot index used), 0 for every other instruction.
+ *
+ * @param MInst i  the instruction to inspect
+ * @return u32  the contribution to the max-slot scan
+ */
+fn out_arg_slots_of_inst(i: MInst) -> u32 {
+    match i {
+        MOutArg as x => x.index + (1 to u32)
+        _ => 0 to u32
+    }
+}
+
+/**
+ * max_out_arg_slots_of_block — the maximum one-past-index among all `MOutArg`
+ * instructions in a single block.
+ *
+ * @param MBlock b  the block to scan
+ * @return u32  the maximum slot count for this block
+ */
+fn max_out_arg_slots_of_block(b: MBlock) -> u32 {
+    mut max: u32 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= b.insts.len { break }
+        let slots = out_arg_slots_of_inst(b.insts[i])
+        if slots > max { max = slots }
+        i++
+    }
+    max
+}
+
+/**
+ * max_out_arg_slots — the maximum one-past-index among all `MOutArg`
+ * instructions in the whole function: how many 8-byte slots the outgoing
+ * stack-arg area must hold.
+ *
+ * @param MFunc f  the fully-physical function
+ * @return u32  the maximum slot count (0 if no stack args are passed)
+ */
+fn max_out_arg_slots(f: MFunc) -> u32 {
+    mut max: u32 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= f.blocks.len { break }
+        let b_max = max_out_arg_slots_of_block(f.blocks[i])
+        if b_max > max { max = b_max }
+        i++
+    }
+    max
+}
+
+/**
+ * out_arg_bytes — the size of the outgoing stack-arg area in bytes: the number
+ * of 8-byte slots, aligned up to 16 for SP alignment, or 0 when there are no
+ * stack args.
+ *
+ * @param MFunc f  the fully-physical function
+ * @return u32  the byte size of the outgoing stack-arg area (0 or ≥ 16)
+ */
+fn out_arg_bytes(f: MFunc) -> u32 {
+    let slots = max_out_arg_slots(f)
+    if slots == (0 to u32) { return 0 to u32 }
+    align_up(slots * ARM64_REG_BYTES, ARM64_STACK_ALIGN)
+}
+
+/**
+ * shift_slot_offsets — add `delta` to every element of `offsets`, returning
+ * the shifted slice. Used to push local-variable slots up past the outgoing
+ * stack-arg area when the frame includes `MOutArg` instructions.
+ *
+ * @param []u32 offsets  the original per-slot SP-relative byte offsets
+ * @param u32 delta  the byte amount to add to each offset
+ * @return []u32  the shifted offsets
+ */
+fn shift_slot_offsets(offsets: []u32, delta: u32) -> []u32 {
+    if delta == (0 to u32) { return offsets }
+    mut result: []u32 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= offsets.len { break }
+        result = teko::list::push(result, offsets[i] + delta)
+        i++
+    }
+    result
+}
+
+/**
  * compute_frame_layout — build a function's `FrameLayout`: re-derive the
  * callee-saved save-set (§3.1), lay out the frame slots honoring each
- * `LAlloca`'s alignment, and size the whole frame (0 when frameless). A pure
- * side-table pass — it does NOT mutate the block stream, so the A3 interp
- * oracle stays valid on the pre-encode `MFunc`. Offsets that outrun their
- * encodable fields are caught at emission time (`A4-bigframe`), not here.
+ * `LAlloca`'s alignment, size the whole frame (0 when frameless), and compute
+ * the outgoing stack-arg area at the bottom of the frame. A pure side-table
+ * pass — it does NOT mutate the block stream, so the A3 interp oracle stays
+ * valid on the pre-encode `MFunc`. Offsets that outrun their encodable fields
+ * are caught at emission time (`A4-bigframe`), not here.
+ *
+ * Frame layout (SP-relative, bottom to top):
+ *   [sp + 0 .. sp + out_bytes)            outgoing stack-arg area (MOutArg slots)
+ *   [sp + out_bytes .. sp + out_bytes + slots_size)  local variable slots
+ *   [sp + callee_base]                    callee-saved registers
+ *   [sp + size - 16]                      FP/LR pair
  *
  * @param AbiDescriptor abi  the register file (callee-saved partition)
  * @param MFunc f  the fully-physical function
@@ -1253,12 +1373,16 @@ fn frame_total_size(slots_size: u32, saved: Saved, lr_save: bool) -> u32 {
 pub fn compute_frame_layout(abi: AbiDescriptor, f: MFunc) -> FrameLayout {
     let saved = collect_callee_saved(abi, f)
     let slots = compute_slot_offsets(f.frame)
-    let size = frame_total_size(slots.slots_size, saved, needs_lr_save(f))
+    let out_bytes = out_arg_bytes(f)
+    let effective_slots_size = slots.slots_size + out_bytes
+    let size = frame_total_size(effective_slots_size, saved, needs_lr_save(f))
+    let shifted_offsets = shift_slot_offsets(slots.offsets, out_bytes)
     FrameLayout {
         size = size
         saved_gpr = saved.gpr
         saved_fpr = saved.fpr
-        slot_offsets = slots.offsets
+        slot_offsets = shifted_offsets
+        out_arg_base = 0
     }
 }
 
@@ -1854,17 +1978,46 @@ fn encode_frame_addr(layout: FrameLayout, i: MFrameAddr) -> EncWord | error {
 }
 
 /**
+ * encode_out_arg — encode an `MOutArg{size, src, index}` as `STR src, [sp, #(index * 8)]`:
+ * a store to the outgoing stack-arg area at the bottom of the frame. The slot
+ * byte offset is always a multiple of 8 (AAPCS64 §6.4.2), so `encode_store`'s
+ * scaled-immediate check always passes for the slot counts seen in practice.
+ *
+ * @param MOutArg i  the outgoing stack-argument store instruction
+ * @return EncWord | error  the encoded STR, or a named honest-stop
+ */
+fn encode_out_arg(i: MOutArg) -> EncWord | error {
+    let mem = MMem { base = preg(ARM64_SP_ID, MRegClass::GPR); offset = (i.index * ARM64_REG_BYTES) to i32 }
+    encode_store(MStore { size = i.size; src = i.src; mem = mem })
+}
+
+/**
+ * encode_in_arg — encode an `MInArg{size, dst, index}` as `LDR dst, [sp, #(layout.size + index * 8)]`:
+ * a load from the caller's outgoing stack-arg area, which is above the current
+ * function's frame top (SP points to the bottom of this callee's frame, so the
+ * caller's stack-arg area is at `SP + layout.size + index * 8`).
+ *
+ * @param FrameLayout layout  the function's resolved frame (for the frame size)
+ * @param MInArg i  the incoming stack-parameter load instruction
+ * @return EncWord | error  the encoded LDR, or a named honest-stop
+ */
+fn encode_in_arg(layout: FrameLayout, i: MInArg) -> EncWord | error {
+    let mem = MMem { base = preg(ARM64_SP_ID, MRegClass::GPR); offset = (layout.size + i.index * ARM64_REG_BYTES) to i32 }
+    encode_load(MLoad { size = i.size; sign = false; dst = i.dst; mem = mem })
+}
+
+/**
  * encode_inst_word — encode one fully-physical `MInst` to its `EncWord`, a
- * TOTAL per-case match over the 29-case variant mirroring `print_minst`'s
+ * TOTAL per-case match over the 31-case variant mirroring `print_minst`'s
  * dispatch. The position-independent integer/control/memory subset encodes
  * fully; branches and symbol references return placeholder words flagged for
  * A4-3 patching; `MFrameAddr` resolves through `layout` to the real `ADD dst,
  * sp, #off` (A4-2); the float family encodes fully too (0.3.1.0 degrau 29
- * closed the `A4-fp` stop, the arm64 twin of the x86 `B1-fp` arc); big
- * immediates, unscaled offsets, and big-frame offsets return their NAMED
- * honest-stops.
+ * closed the `A4-fp` stop, the arm64 twin of the x86 `B1-fp` arc); `MOutArg`
+ * and `MInArg` handle AAPCS64 stack argument passing; big immediates,
+ * unscaled offsets, and big-frame offsets return their NAMED honest-stops.
  *
- * @param FrameLayout layout  the enclosing function's resolved frame (for `MFrameAddr`)
+ * @param FrameLayout layout  the enclosing function's resolved frame (for `MFrameAddr`, `MInArg`)
  * @param MInst inst  the instruction to encode (all operands physical)
  * @return EncWord | error  the encoding, or a named honest-stop
  */
@@ -1900,6 +2053,8 @@ pub fn encode_inst_word(layout: FrameLayout, inst: MInst) -> EncWord | error {
         MCall as x => encode_call(x)
         MCallIndirect as x => encode_call_indirect(x)
         MRet => encode_ret()
+        MOutArg as x => encode_out_arg(x)
+        MInArg as x => encode_in_arg(layout, x)
     }
 }
 
@@ -2200,9 +2355,13 @@ fn encode_frame_addr_words(layout: FrameLayout, i: MFrameAddr) -> []EncWord | er
  */
 fn encode_one(layout: FrameLayout, words0: []EncWord, inst: MInst) -> []EncWord | error {
     if inst_is_ret(inst) {
-        let epi = match emit_epilogue(layout) { []u32 as w => w; error as e => return e }
-        let after = wrap_plain_words(words0, epi)
-        return teko::list::push(after, encode_ret())
+        match emit_epilogue(layout) {
+            []u32 as epi => {
+                let after = wrap_plain_words(words0, epi)
+                return teko::list::push(after, encode_ret())
+            }
+            error as e => return e
+        }
     }
     if inst_is_frame_addr(inst) {
         let fa = as_frame_addr(inst)
@@ -2256,6 +2415,25 @@ fn resolve_word(ew: EncWord, here: u32, offsets: []BlockOffset) -> u32 | error {
 }
 
 /**
+ * collect_word_reloc — fold the relocation ONE `EncWord` owes into the
+ * function's `Reloc` list: a word that owes none (`reloc` null) leaves the list
+ * untouched, and a word that owes one contributes exactly one `__text`-relative
+ * record at its word index times four. The nullable `reloc` is the only input,
+ * so there is no flag to read out of step with a kind.
+ *
+ * @param []Reloc acc  the relocations collected so far
+ * @param EncWord ew  the word whose relocation (if any) is folded in
+ * @param u64 word_index  the word's index in the function's word stream
+ * @return []Reloc  `acc`, extended when `ew` owes a relocation
+ */
+fn collect_word_reloc(acc: []Reloc, ew: EncWord, word_index: u64) -> []Reloc {
+    match ew.reloc {
+        null => acc
+        EncReloc as r => teko::list::push(acc, Reloc { offset = (word_index to u32) * ARM64_WORD_BYTES; sym = r.sym; kind = r.kind; sect = RelocSect::Text })
+    }
+}
+
+/**
  * finalize_func — the patch pass: resolve every emitted `EncWord` to its final
  * word (patching branch displacements from the recorded block offsets) and
  * collect one `Reloc` per symbol-reference word (its offset the word index times
@@ -2275,9 +2453,7 @@ fn finalize_func(symbol: str, words: []EncWord, offsets: []BlockOffset) -> Encod
         let ew = words[i]
         let w = match resolve_word(ew, i to u32, offsets) { u32 as v => v; error as e => return e }
         out_words = teko::list::push(out_words, w)
-        if ew.has_reloc {
-            relocs = teko::list::push(relocs, Reloc { offset = (i to u32) * ARM64_WORD_BYTES; sym = ew.reloc_sym; kind = ew.reloc_kind; sect = RelocSect::Text })
-        }
+        relocs = collect_word_reloc(relocs, ew, i)
         i++
     }
     EncodedFunc { symbol = symbol; words = out_words; relocs = relocs }
@@ -2451,9 +2627,13 @@ fn rebase_relocs(acc: []Reloc, relocs: []Reloc, base: u32) -> []Reloc {
  * byte image, the module-rebased relocations, the defined function symbols, and
  * the current base (the next function's `__text` byte offset).
  *
+ * (0.3.1 C6.4) Made `pub` so the per-item fused native emit driver in `project.tks`
+ * (`emit_native_arm64`/`emit_native_arm64_linux`) can hold it as the ROOT-resident
+ * accumulator (Group B) across the scoped per-item lowering-and-encode windows.
+ *
  * @since #385 A4-4
  */
-type ModuleText = struct {
+pub type ModuleText = struct {
     /**
      * text — the concatenated `__text` bytes so far.
      */
@@ -2475,11 +2655,12 @@ type ModuleText = struct {
 
 /**
  * empty_module_text — the seed `ModuleText`: empty image, no relocations, no
- * symbols, base 0.
+ * symbols, base 0. (0.3.1 C6.4) `pub` so the fused emit driver seeds its
+ * root-resident accumulator with it.
  *
  * @return ModuleText  the seed accumulator
  */
-fn empty_module_text() -> ModuleText {
+pub fn empty_module_text() -> ModuleText {
     ModuleText { text = teko::list::empty(); relocs = teko::list::empty(); syms = teko::list::empty(); base = 0 to u32 }
 }
 
@@ -2499,6 +2680,26 @@ fn empty_module_text() -> ModuleText {
  */
 fn fold_func_into_text(abi: AbiDescriptor, acc: ModuleText, f: MFunc) -> ModuleText | error {
     let ef = match encode_func(abi, f) { EncodedFunc as x => x; error as e => return e }
+    fold_encoded_func(acc, ef)
+}
+
+/**
+ * fold_encoded_func — fold ONE already-encoded function's `EncodedFunc` into the running module
+ * `__text` accumulator: record its GLOBAL defined symbol at the current base (section 1, `__text`),
+ * flatten its words as little-endian bytes, and rebase its function-relative relocations by the
+ * base; the base then advances by the function's byte length. The encode of `f` and this fold are
+ * SEPARATE so the fused per-item native emit driver (0.3.1 C6.4) can encode inside a scoped scratch
+ * region and fold AFTER leaving it — the fold's appends land in the ROOT-resident accumulator
+ * (Group B), flattening the words and rebasing the relocs into freshly bump-allocated lists at the
+ * CURRENT (root) region, out of the still-live child before it is dropped (§2/§3 non-escape proof).
+ * `fold_func_into_text` is the non-scoped composition of `encode_func` and this fold.
+ *
+ * @param ModuleText acc  the running root-resident `__text` accumulator
+ * @param EncodedFunc ef  one function's encoded words, symbol name and function-relative relocs
+ * @return ModuleText  the extended accumulator
+ * @since 0.3.1 C6.4
+ */
+pub fn fold_encoded_func(acc: ModuleText, ef: EncodedFunc) -> ModuleText {
     let sym = Symbol { name = ef.symbol; defined = true; sect = 1 to u8; offset = acc.base; local = false }
     let text = append_words_le(acc.text, ef.words)
     let relocs = rebase_relocs(acc.relocs, ef.relocs, acc.base)
@@ -2574,17 +2775,91 @@ fn append_bytes(buf: []byte, src: []byte) -> []byte {
 }
 
 /**
+ * RODATA_ENTRY_ALIGN — the byte alignment every rodata ENTRY's START is padded to (8): the
+ * pointer width a fat member's `{ptr, len}` slot needs (`ltype_size(LType::Ptr)`), and the
+ * alignment macOS `ld` enforces on every `ARM64_RELOC_UNSIGNED` (`Abs64`) relocation site.
+ * `layout_of_sized` (`lir.tks`) already places a pointer FIELD on an 8-byte boundary WITHIN
+ * one entry's own bytes (natural C struct alignment); this constant closes the sibling gap
+ * BETWEEN entries — without it, an odd-length neighbor (a string leaf, a byte-count struct)
+ * pushes a following pointer-bearing entry's own start off an 8-byte boundary and the link
+ * fails (`ld: pointer not aligned in '<sym>'+<off>`, first hit on `AAPCS64.gpr_arg`'s
+ * neighbors in the self-hosting corpus).
+ */
+const RODATA_ENTRY_ALIGN: u32 = 8
+
+/**
+ * fold_rodata_entry_relocs — `entry`'s own relocations, rebased from entry-local offsets to
+ * the running `__const` offset `off` (`entry`'s own start), appended to `relocs`.
+ *
+ * @param []lir::LDataReloc relocs  the relocations accumulated over the preceding entries
+ * @param lir::LRodata entry  the rodata entry whose relocations to rebase
+ * @param u32 off  `entry`'s own start offset within the concatenated `__const` image
+ * @return []lir::LDataReloc  `relocs` extended with `entry`'s rebased relocations
+ */
+fn fold_rodata_entry_relocs(relocs: []lir::LDataReloc, entry: lir::LRodata, off: u32) -> []lir::LDataReloc {
+    mut out = relocs
+    mut j: u64 = 0
+    loop {
+        if j >= entry.relocs.len { break }
+        out = teko::list::push(out, lir::data_reloc(off + entry.relocs[j].offset, entry.relocs[j].target))
+        j++
+    }
+    out
+}
+
+/**
+ * PaddedRodata — the `__const` image plus its running byte offset after placing one entry
+ * and (except past the last one) padding to the next `RODATA_ENTRY_ALIGN`-byte boundary.
+ */
+type PaddedRodata = struct {
+    /** bytes — the `__const` image accumulated so far, entry bytes then any boundary pad. */
+    bytes: []byte
+    /**
+     * off — the running `__const` offset, always equal to `bytes.len` (kept as its own
+     * `u32` counter since every reloc/symbol offset field is `u32`, not `u64`).
+     */
+    off: u32
+}
+
+/**
+ * pad_rodata_entry_boundary — append `entry`'s bytes to the running `__const` image, then —
+ * unless `entry` is the LAST one (`is_last`) — zero-pad up to the next `RODATA_ENTRY_ALIGN`-
+ * byte boundary, so the NEXT entry's symbol (and any relocation inside it) starts 8-aligned
+ * regardless of `entry`'s own odd byte length.
+ *
+ * @param []byte bytes  the `__const` image accumulated so far
+ * @param u32 off  the running offset before placing `entry` (`entry`'s own start)
+ * @param lir::LRodata entry  the rodata entry to place
+ * @param bool is_last  whether `entry` is the final entry (no trailing pad needed)
+ * @return PaddedRodata  the image and offset advanced past `entry` (and its boundary pad)
+ */
+fn pad_rodata_entry_boundary(bytes: []byte, off: u32, entry: lir::LRodata, is_last: bool) -> PaddedRodata {
+    let placed = append_bytes(bytes, entry.bytes)
+    let placed_off = off + (entry.bytes.len to u32)
+    if is_last { return PaddedRodata { bytes = placed; off = placed_off } }
+    let aligned_off = align_up(placed_off, RODATA_ENTRY_ALIGN)
+    mut padded = placed
+    loop {
+        if padded.len >= (aligned_off to u64) { break }
+        padded = teko::list::push(padded, 0)
+    }
+    PaddedRodata { bytes = padded; off = aligned_off }
+}
+
+/**
  * encode_rodata — build the `__const` image and its defined symbols: each
  * `LRodata` entry is placed at the running byte offset with a defined, FILE-
  * LOCAL section-2 symbol (the ADRP/ADD-lo relocations in `__text` resolve to it
  * at link time; local mirrors `clang`'s own convention for string constants, so
  * same-named rodata in two objects never collides at Phase E multi-object
- * link).
+ * link), then boundary-padded to `RODATA_ENTRY_ALIGN` (`pad_rodata_entry_boundary`)
+ * so a pointer-bearing entry always starts 8-aligned regardless of its neighbors'
+ * own lengths.
  *
  * @param []lir::LRodata rodata  the module's interned rodata table
- * @return ModuleRodata  the `__const` image + its defined symbols
+ * @return ModuleRodata | error  the `__const` image + its defined symbols
  */
-fn encode_rodata(rodata: []lir::LRodata) -> ModuleRodata {
+fn encode_rodata(rodata: []lir::LRodata) -> ModuleRodata | error {
     mut bytes: []byte = teko::list::empty()
     mut syms: []Symbol = teko::list::empty()
     mut relocs: []lir::LDataReloc = teko::list::empty()
@@ -2594,17 +2869,169 @@ fn encode_rodata(rodata: []lir::LRodata) -> ModuleRodata {
         if i >= rodata.len { break }
         let rd = rodata[i]
         syms = teko::list::push(syms, Symbol { name = rd.symbol; defined = true; sect = 2 to u8; offset = off; local = true })
-        mut j: u64 = 0
-        loop {
-            if j >= rd.relocs.len { break }
-            relocs = teko::list::push(relocs, lir::data_reloc(off + rd.relocs[j].offset, rd.relocs[j].target))
-            j++
-        }
-        bytes = append_bytes(bytes, rd.bytes)
-        off = off + (rd.bytes.len to u32)
+        relocs = fold_rodata_entry_relocs(relocs, rd, off)
+        let placed = pad_rodata_entry_boundary(bytes, off, rd, i + 1 >= rodata.len)
+        bytes = placed.bytes
+        off = placed.off
         i++
     }
+    match report_rodata_align_violations(syms, relocs) { error as e => return e; null => { } }
     ModuleRodata { bytes = bytes; syms = syms; relocs = relocs }
+}
+
+/**
+ * RodataAlignViolation — one pointer-bearing rodata relocation whose absolute `__const`/`.rodata`
+ * offset is NOT `RODATA_ENTRY_ALIGN`-aligned: the diagnostic `TEKO_NATIVE_RODATA_ALIGN_CHECK=1`
+ * names to pin the exact culprit const behind a macOS `ld: pointer not aligned` link failure, or
+ * the equivalent silent const-corruption crash on a target whose linker tolerates the
+ * misalignment (an x86_64 `.rodata` reloc still lands on the wrong byte position even though the
+ * CPU itself tolerates the unaligned read).
+ */
+type RodataAlignViolation = struct {
+    /**
+     * owner — the nearest-preceding rodata symbol's name (the entry the misaligned reloc's own
+     * bytes actually live in — a linker names the SAME symbol in its own diagnostic when no
+     * symbol sits exactly at the violating offset).
+     */
+    owner: str
+    /** target — the misaligned pointer's own target symbol (what it was meant to point at). */
+    target: str
+    /** offset — the misaligned relocation's absolute offset within the concatenated rodata image. */
+    offset: u32
+    /**
+     * expected — the next `RODATA_ENTRY_ALIGN`-aligned offset the relocation should have landed
+     * on.
+     */
+    expected: u32
+}
+
+/**
+ * rodata_owning_symbol_name — the rodata-local symbol whose own entry contains absolute offset
+ * `off`: the nearest symbol at or before `off`, in ascending-offset (append) order — the same
+ * "symbol+displacement" rule a linker's own alignment diagnostic applies (`syms` is exactly the
+ * per-entry symbol table `encode_rodata` builds, so this walk mirrors what `ld` itself would
+ * report for the identical offset).
+ *
+ * @param []Symbol syms  the module's rodata-local symbol table, in ascending-offset order
+ * @param u32 off  the absolute offset to attribute
+ * @return str  the owning symbol's name, or `<unknown>` when `syms` is empty or every symbol
+ *              starts past `off`
+ */
+fn rodata_owning_symbol_name(syms: []Symbol, off: u32) -> str {
+    mut best = "<unknown>"
+    mut i: u64 = 0
+    loop {
+        if i >= syms.len { break }
+        if syms[i].offset <= off { best = syms[i].name }
+        i++
+    }
+    best
+}
+
+/**
+ * find_rodata_align_violations — every rodata-internal pointer relocation in `relocs` whose
+ * absolute offset is not `RODATA_ENTRY_ALIGN`-aligned, attributed to its owning entry via `syms`.
+ * A pure, unit-testable core (`enc_rodata_test.tkt` exercises it directly, with no environment
+ * variable involved); `report_rodata_align_violations` is its env-gated stderr sink.
+ *
+ * @param []Symbol syms  the module's rodata-local symbol table, in ascending-offset order
+ * @param []lir::LDataReloc relocs  the module's rebased rodata-internal relocations
+ * @return []RodataAlignViolation  every misaligned relocation, in `relocs`' own order
+ */
+fn find_rodata_align_violations(syms: []Symbol, relocs: []lir::LDataReloc) -> []RodataAlignViolation {
+    mut out: []RodataAlignViolation = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= relocs.len { break }
+        out = push_rodata_align_violation(out, syms, relocs[i])
+        i++
+    }
+    out
+}
+
+/**
+ * push_rodata_align_violation — `out` extended with `r`'s violation record when its absolute
+ * offset is not `RODATA_ENTRY_ALIGN`-aligned, unchanged otherwise.
+ *
+ * @param []RodataAlignViolation out  the violations accumulated so far
+ * @param []Symbol syms  the module's rodata-local symbol table, in ascending-offset order
+ * @param lir::LDataReloc r  the relocation to check
+ * @return []RodataAlignViolation  `out`, with `r`'s violation appended when applicable
+ */
+fn push_rodata_align_violation(out: []RodataAlignViolation, syms: []Symbol, r: lir::LDataReloc) -> []RodataAlignViolation {
+    if r.offset % RODATA_ENTRY_ALIGN == 0 { return out }
+    teko::list::push(out, RodataAlignViolation {
+        owner = rodata_owning_symbol_name(syms, r.offset)
+        target = r.target
+        offset = r.offset
+        expected = align_up(r.offset, RODATA_ENTRY_ALIGN)
+    })
+}
+
+/**
+ * rodata_align_check_enabled — whether the native rodata/reloc alignment diagnostic
+ * (`TEKO_NATIVE_RODATA_ALIGN_CHECK=1`) is requested: a CI-narrowing aid (mirrors
+ * `native_trace_items_enabled` in `project.tks`), NOT part of the ritual's normal output — it
+ * exists to name the exact const behind a macOS `ld: pointer not aligned` link failure, or the
+ * equivalent silent const-corruption crash on a target whose linker tolerates the misalignment.
+ *
+ * @return bool  true iff `TEKO_NATIVE_RODATA_ALIGN_CHECK` is set to `"1"`
+ */
+fn rodata_align_check_enabled() -> bool {
+    match teko::env::var("TEKO_NATIVE_RODATA_ALIGN_CHECK") { str as v => v == "1"; error => false }
+}
+
+/**
+ * rodata_align_violation_line — one misaligned-reloc diagnostic line for `v`: the owning const
+ * symbol, the pointer's target, its actual absolute rodata offset, and the 8-aligned offset it
+ * should have landed on. Built once, reused by both the per-violation stderr print and the fatal
+ * error's message (so the summary that aborts the build names the SAME first culprit as its own
+ * stderr line).
+ *
+ * @param RodataAlignViolation v  the violation to render
+ * @return str  the one-line diagnostic
+ */
+fn rodata_align_violation_line(v: RodataAlignViolation) -> str {
+    $"owner={v.owner} target={v.target} offset={v.offset} expected>={v.expected}"
+}
+
+/**
+ * report_rodata_align_violation — print one misaligned-reloc diagnostic line to stderr.
+ *
+ * @param RodataAlignViolation v  the violation to report
+ * @return void
+ */
+fn report_rodata_align_violation(v: RodataAlignViolation) -> void {
+    teko::io::eprintln(teko::str::concat("teko: TEKO_NATIVE_RODATA_ALIGN_CHECK: unaligned rodata pointer reloc — ", rodata_align_violation_line(v)))
+}
+
+/**
+ * report_rodata_align_violations — when `rodata_align_check_enabled`, print one diagnostic line per
+ * misaligned rodata-internal pointer relocation AND THEN, if any exist, ABORT the build by
+ * returning an `error` whose message names the FIRST culprit — so the compiler that is emitting a
+ * generation (the correct seed emitting gen1) stops IMMEDIATELY with the const named, instead of
+ * emitting a corrupt object the linker rejects later (macOS `ld: pointer not aligned`) or a
+ * generation reads as garbage at runtime (the Linux/x86 crash). The named error propagates all the
+ * way up to the build driver's `fail(dir, e.message)`, so the const's name is the LAST line of the
+ * CI log — extractable by `tail` — rather than buried mid-stream. A no-op returning `null` when the
+ * env var is unset, so the ordinary build's output stays byte-identical to before this diagnostic
+ * existed.
+ *
+ * @param []Symbol syms  the module's rodata-local symbol table, in ascending-offset order
+ * @param []lir::LDataReloc relocs  the module's rebased rodata-internal relocations
+ * @return null | error  `null` when disabled or clean; the fatal named honest-stop on any violation
+ */
+fn report_rodata_align_violations(syms: []Symbol, relocs: []lir::LDataReloc) -> null | error {
+    if !rodata_align_check_enabled() { return null }
+    let violations = find_rodata_align_violations(syms, relocs)
+    if violations.len == 0 { return null }
+    mut i: u64 = 0
+    loop {
+        if i >= violations.len { break }
+        report_rodata_align_violation(violations[i])
+        i++
+    }
+    error { message = teko::str::concat("TEKO_NATIVE_RODATA_ALIGN_CHECK: aborting — unaligned rodata pointer reloc(s); first: ", rodata_align_violation_line(violations[0])) }
 }
 
 /**
@@ -2730,7 +3157,29 @@ fn append_relocs_arm64(a: []Reloc, b: []Reloc) -> []Reloc {
 pub fn encode_module(abi: AbiDescriptor, m: MModule) -> EncodedModule | error {
     if m.globals.len > (0 to u64) { return honest_globals() }
     let mt = match encode_functions(abi, m.funcs) { ModuleText as x => x; error as e => return e }
-    let rod = encode_rodata(m.rodata)
+    finish_encoded_module(mt, m.rodata, m.globals)
+}
+
+/**
+ * finish_encoded_module — assemble the final `EncodedModule` from an already-accumulated `__text`
+ * (`mt`, one defined symbol + rebased relocs per function) plus the module's PERSISTENT
+ * rodata/globals tables (Group B, carried by-reference the whole way — never in a scratch region):
+ * intern the rodata bytes, build the symbol table in the Mach-O-required
+ * LOCAL-then-GLOBAL-then-UNDEFINED order (file-local per rodata entry, global per function, then one
+ * undefined per externally-referenced symbol), and partition the relocations. A module carrying data
+ * globals raises `A4-globals` (the N2 subset lowers none). This is the module-finalize tail of
+ * `encode_module` factored out so the fused per-item native emit driver (0.3.1 C6.4) reaches the SAME
+ * assembly incrementally, after its per-item windows have folded into `mt`.
+ *
+ * @param ModuleText mt  the accumulated `__text` image, symbols and rebased relocs
+ * @param []lir::LRodata rodata  the module's rodata table (Group B, by-reference)
+ * @param []lir::LGlobal globals  the module's data globals (empty in the N2 subset)
+ * @return EncodedModule | error  the section images + ordered symbols + relocs, or `A4-globals`
+ * @since 0.3.1 C6.4
+ */
+pub fn finish_encoded_module(mt: ModuleText, rodata: []lir::LRodata, globals: []lir::LGlobal) -> EncodedModule | error {
+    if globals.len > (0 to u64) { return honest_globals() }
+    let rod = match encode_rodata(rodata) { ModuleRodata as x => x; error as e => return e }
     let defined = concat_symbols(rod.syms, mt.syms)
     let undef = collect_undefined(defined, mt.relocs)
     let symbols = concat_symbols(defined, undef)

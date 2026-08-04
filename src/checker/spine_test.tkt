@@ -55,7 +55,7 @@ fn sp_field(recv: str, field: str, t: Type) -> TExpr {
  * @return TStatement  a `TBinding` statement
  */
 fn sp_let(name: str, value: TExpr) -> TStatement {
-    TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = name }; bound = value.type; value = value }
+    TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = name }; bound = value.type; value = value ; di_kind = parser::DiKind::None }
 }
 
 /**
@@ -418,15 +418,6 @@ fn sp_union_ann() -> parser::TypeExpr {
 }
 
 /**
- * A `T?` optional annotation is NOT a `Ref<T>` — `type_ann_is_ref` returns false.
- *
- * @return parser::TypeExpr  an optional type annotation
- */
-fn sp_optional_ann() -> parser::TypeExpr {
-    parser::OptionalType { inner = sp_named_ann("i64") }
-}
-
-/**
  * A `(A) -> R` function-type annotation is NOT a `Ref<T>` — `type_ann_is_ref` returns false.
  *
  * @return parser::TypeExpr  a function-type annotation
@@ -458,7 +449,7 @@ fn sp_ref_head_no_args() -> parser::TypeExpr {
 
 /**
  * `type_ann_is_ref` recognizes `Ref<T>` (a single-arg `NamedType` headed `Ref`) and rejects every
- * other syntactic type-annotation shape: a plain name, a slice, a union, an optional, a function
+ * other syntactic type-annotation shape: a plain name, a slice, a union, a function
  * type, and a `Ref`-headed name with the wrong arity.
  */
 #test fn spine_type_ann_is_ref_recognizes_only_ref_and_rejects_every_other_shape() {
@@ -466,7 +457,6 @@ fn sp_ref_head_no_args() -> parser::TypeExpr {
     teko::assert::is_false(type_ann_is_ref(sp_named_ann("i64")))
     teko::assert::is_false(type_ann_is_ref(sp_slice_ann("i64")))
     teko::assert::is_false(type_ann_is_ref(sp_union_ann()))
-    teko::assert::is_false(type_ann_is_ref(sp_optional_ann()))
     teko::assert::is_false(type_ann_is_ref(sp_function_ann()))
     teko::assert::is_false(type_ann_is_ref(sp_ref_head_no_args()))
 }
@@ -792,7 +782,7 @@ fn sp_i64_lit(v: u64) -> TExpr {
  * so the axis passes through unchanged (no cell is joined to `UsShared`).
  */
 #test fn spine_transfer_binding_destructure_with_alias_source_rhs_is_a_no_op() {
-    let destructure = TBinding { kind = parser::BindKind::Let; target = parser::DestructurePattern { names = teko::list::push(teko::list::push(teko::list::empty(), "a"), "b") }; bound = sp_nonscalar(); value = sp_nonscalar_var("donor") }
+    let destructure = TBinding { kind = parser::BindKind::Let; target = parser::DestructurePattern { names = teko::list::push(teko::list::push(teko::list::empty(), "a"), "b") }; bound = sp_nonscalar(); value = sp_nonscalar_var("donor"); di_kind = parser::DiKind::None }
     let body = teko::list::push(teko::list::push(teko::list::empty(), sp_let("donor", sp_i64_lit(1))), destructure)
     let s = fn_spine(sp_fn(teko::list::empty(), body))
     teko::assert::is_true(is_unique_at(s, cell_of(s, "donor") to u32))
@@ -867,7 +857,7 @@ fn sp_set_us(us: []Unique, i: u32, v: Unique) -> []Unique {
  * through unchanged.
  */
 #test fn spine_pt_transfer_binding_destructure_inside_adopter_is_a_no_op() {
-    let destructure = TBinding { kind = parser::BindKind::Let; target = parser::DestructurePattern { names = teko::list::push(teko::list::push(teko::list::empty(), "a"), "b") }; bound = sp_i64(); value = sp_i64_lit(1) }
+    let destructure = TBinding { kind = parser::BindKind::Let; target = parser::DestructurePattern { names = teko::list::push(teko::list::push(teko::list::empty(), "a"), "b") }; bound = sp_i64(); value = sp_i64_lit(1); di_kind = parser::DiKind::None }
     let body = teko::list::push(teko::list::empty(), sp_adopt(teko::list::push(teko::list::empty(), destructure)))
     let s = fn_spine(sp_fn(teko::list::empty(), body))
     teko::assert::is_true(s.cells.len == 0)
@@ -1021,7 +1011,7 @@ fn sp_wrap(k: TExprKind) -> TExpr { TExpr { kind = k; type = sp_nonscalar(); lin
 
 /**
  * (#331 L2b, option b) The capture sweep RECURSES through every compound-expression arm — a capturing
- * call nested inside a binary, unary, comparison, cast, coalesce, index, interpolation, `in`, and
+ * call nested inside a binary, unary, comparison, cast, index, interpolation, `in`, and
  * array literal each still reaches `xs` and joins it shared (monotone, so one shared handle suffices).
  * Covers `capture_expr`'s compound arms + `capture_cmp` + `capture_array`.
  */
@@ -1031,8 +1021,6 @@ fn sp_wrap(k: TExprKind) -> TExpr { TExpr { kind = k; type = sp_nonscalar(); lin
     body = teko::list::push(body, sp_let("b", sp_wrap(TUnary { op = lexer::TokenKind::Assign; operand = sp_cap() })))
     body = teko::list::push(body, sp_let("c", sp_wrap(TCompare { first = sp_cap(); rest = teko::list::push(teko::list::empty(), TCmpTerm { op = lexer::TokenKind::Assign; operand = sp_cap() }) })))
     body = teko::list::push(body, sp_let("d", sp_wrap(TCast { expr = sp_cap() })))
-    body = teko::list::push(body, sp_let("k", sp_wrap(TSafeFieldAccess { receiver = sp_cap(); field = "x" })))
-    body = teko::list::push(body, sp_let("e", sp_wrap(TCoalesce { left = sp_cap(); right = sp_cap() })))
     body = teko::list::push(body, sp_let("g", sp_wrap(TIndex { receiver = sp_cap(); index = sp_cap() })))
     body = teko::list::push(body, sp_let("h", sp_wrap(TInterp { pieces = teko::list::push(teko::list::empty(), ""); holes = teko::list::push(teko::list::empty(), sp_cap()); specs = teko::list::push(teko::list::empty(), TFSpec { kind = TFSpecNone { } }) })))
     body = teko::list::push(body, sp_let("i", sp_wrap(TInExpr { lhs = sp_cap(); elems = teko::list::push(teko::list::empty(), sp_cap()) })))

@@ -75,7 +75,7 @@ typedef struct {
 } tk_closure;
 
 // error — the Teko built-in error-as-value (E2-NATIVE). Mirrors core.h's tk_error so that
-// generated programs carry full diagnostic adornments in native just as the VM does.
+// generated programs carry full diagnostic adornments in native.
 // A message-only `error { message = "…" }` literal leaves file/line/col/expected/actual
 // at their zero/NULL defaults (C1.3 additive — all existing sites are unchanged).
 typedef struct {
@@ -119,9 +119,9 @@ TK_RT_LIST(int64_t,   tk_i64_list)     // []i64   — integer accumulator lists
 // of calling malloc directly — the swap is mechanical, the contract is unchanged, and the
 // root is never dropped so the leak profile is identical to malloc-everywhere (M.5).
 // LINKAGE NOTE: this is the EXTERN runtime tk_alloc, distinct from core.h's static-inline
-// tk_alloc (internal linkage, used by the compiler/VM TUs over libc). The two never merge;
-// do NOT give core.h's tk_alloc external linkage nor #include this header into a vm.c-linked
-// TU — that would route VM allocations to the arena while their tk_free0 stays libc (corruption).
+// tk_alloc (internal linkage, used by the compiler TUs over libc). The two never merge;
+// do NOT give core.h's tk_alloc external linkage nor #include this header into a compiler-internal
+// TU — that would route those allocations to the arena while their tk_free0 stays libc (corruption).
 void *tk_alloc(size_t n);
 
 // ── Arena allocation (S1 — TEKO_EVOLUTION_DESIGN §5.2: arena primitive + root region) ──
@@ -182,6 +182,36 @@ void       tk_arena_pop(void);                  // free every root-region chunk 
 // folded permanently into the (now-current) mark below it. The Boundary-A counterpart to
 // tk_arena_pop: a scope that turned out to ESCAPE commits its allocations instead of losing them.
 void       tk_arena_commit(void);               // discard the top mark, keeping its allocations
+// (E1-C2) tk_task_reset — return the current task to the ephemeral-clean state of "before any test":
+// the ONE place that clears every per-task singleton a `#test` can dirty (intern table, coverage
+// counts, cast positions, tally, scope/scenario labels, capture channels, stdin/fd staging), buffers
+// preserved. The `task_reset` builtin lowers to it; resolves the task through tk_task_current().
+void       tk_task_reset(void);                 // clear the current task's ephemeral per-test state
+// (0.3.1 backend-memoria C1) tk_region_enter / tk_region_leave — the SWAPPABLE CURRENT REGION. A
+// per-task stack of "current region": tk_alloc bump-allocates from the stack TOP instead of a fixed
+// tk_region_root(). An EMPTY stack ⇒ the root, so a program that never enters is byte-for-byte the
+// program it was (behaviour-identical). Reuses the tk_region_new/tk_region_drop child tree (separate
+// chunk lists — NONE of tk_arena_push's interleaved-bump trap), letting the native backend route its
+// per-function scratch into a child region and drop it wholesale after copying the emitted bytes to
+// the root object accumulators. Balanced enter/leave; an over-deep enter is counted but not stored
+// (leave then no-ops), keeping enter/leave balanced without ever reading past the fixed stack.
+void       tk_region_enter(tk_region *child);   // push `child` as the current region for tk_alloc
+void       tk_region_leave(void);               // pop the current region (back to the enclosing one, else root)
+// (0.3.1 move-on-return A1) tk_region_current — the region tk_alloc bump-allocates from RIGHT NOW: the
+// current-region stack TOP, else the root (empty/over-deep degrades to root, never garbage). Made
+// PUBLIC (was static) so the C and native codegens can emit the accessor to capture R_ret — the
+// caller's chosen result region — at function entry (the move-on-return conveyance channel).
+tk_region *tk_region_current(void);             // the current region for tk_alloc (root when the stack is empty)
+// (0.3.1 backend-memoria C1) the u64-HANDLE ABI the Teko `extern fn` surface binds to: a tk_region*
+// travels through Teko as a `u64` (uintptr_t), so these thin twins take/return that width and cast
+// at the boundary, matching the extern prototypes byte-for-byte (no int↔pointer conversion warning
+// in the C route). The native backend passes the same 64-bit word untouched. tk_region_leave has no
+// pointer in its signature, so the Teko surface binds it directly (no twin needed).
+uint64_t   tk_region_new_u(uint64_t parent);    // tk_region_new((tk_region*)parent) as a handle
+uint64_t   tk_region_root_u(void);              // tk_region_root() as a handle
+uint64_t   tk_region_current_u(void);           // tk_region_current() as a handle (native captures R_ret at fn entry)
+void       tk_region_drop_u(uint64_t region);   // tk_region_drop((tk_region*)region)
+void       tk_region_enter_u(uint64_t child);   // tk_region_enter((tk_region*)child)
 // tk_region_register — bind `type_id` → `instance` in `r`'s OWN table (never an ancestor's; a
 // second registration of the same type_id in the same region OVERWRITES — the compiler is
 // expected to enforce true duplicate-registration errors at a higher DI layer; this is just the
@@ -198,6 +228,78 @@ void      *tk_region_lookup(tk_region *r, uint64_t type_id);
 // registries are empty, so a second call (e.g. atexit after an explicit panic/exit call) is a no-op.
 // A task other than the caller's owns its own regions; tk_task_end is what frees those.
 void       tk_regions_free_all(void);
+
+// --- (F3) THE NAME REGISTRY — a u64 NAME resolves to a resource, and a stale name is an ERROR ---
+//
+// WHY THIS IS RUNTIME AND NOT TEKO. Teko has no module-level mutable state (`mut REG = …` outside a
+// function does not parse — "expected a declaration") and check_ref_return_passdown only admits
+// returning one of a function's own `ref` parameters, so a stored field cannot escape. There is
+// nowhere in Teko to PUT a process-wide table today, so the table lives here and Teko reaches it
+// through `extern fn` (src/names/names.tks).
+//
+// WHY A NAME AND NOT A POINTER. A stale pointer is undefined behaviour; a stale NAME is a reportable
+// error. Every entry point below answers a dead name with a status code, never with another
+// resource's bytes. That is the whole reason this layer exists between a task and a shared resource.
+//
+// WHERE IT LIVES. In the (F2) PROGRAM region: the slot array must outlive both the tk_arena_pop of
+// whatever task grew it and the exit of that task, and the program region is the only seat with that
+// lifetime. tk_regions_free_all frees the program region, so it also forgets this table (a name
+// issued before termination is UNKNOWN after it, never a dangling read).
+//
+// THE PACKING, AND WHY RESURRECTION IS IMPOSSIBLE RATHER THAN MERELY UNLIKELY. A name is
+// `(generation << 32) | slot`: the low half indexes the slot array directly (O(1), no hashing), the
+// high half is that slot's lifetime stamp. tk_names_close bumps the stamp, so every name ever issued
+// for a slot is strictly older than the live one and compares unequal — a recycled slot cannot
+// answer to its predecessor's name. A slot whose stamp would reach TK_NAMES_GEN_MAX is RETIRED
+// (never returned to the free list), so the counter cannot wrap and hand a second resource the name
+// of a first: the guarantee is arithmetic, not statistical. Its price is one slot (24 bytes on LP64)
+// withheld per 4 294 967 293 open/close cycles of that same slot.
+//
+// NOT the per-region `tk_region_register`/`tk_region_lookup` pair above, deliberately: that one is
+// keyed by a compile-time type_id, is PER REGION with a parent walk, is a linear scan, and its
+// duplicate rule is OVERWRITE — i.e. exactly the silent-resurrection behaviour this table exists to
+// make impossible. Nothing here touches it and the DI surface is unchanged.
+#define TK_NAMES_KIND_CELL      1u          // the F3-owned resource kind: one int64_t in the program region
+#define TK_NAMES_OK             0           // the name is live (and, for a kinded query, of that kind)
+#define TK_NAMES_ERR_UNKNOWN  (-1)          // no such name was ever issued (includes the 0 name)
+#define TK_NAMES_ERR_CLOSED   (-2)          // the name WAS issued and has since been closed — the stale case
+#define TK_NAMES_ERR_KIND     (-3)          // the name is live, but names another kind of resource
+// The two codes below classify a REFUSED open — an open answers with the name 0 and the caller is
+// what tells the two apart, because only the caller's own argument distinguishes them.
+#define TK_NAMES_ERR_FULL     (-4)          // no slot could be issued (the index space is exhausted)
+#define TK_NAMES_ERR_RESERVED (-5)          // a cell was asked to hold TK_NAMES_NO_VALUE
+#define TK_NAMES_NO_VALUE     INT64_MIN     // the reserved payload tk_names_cell_read returns for a dead name
+// tk_names_open — register `resource` under a fresh name of `kind`. The registry never allocates,
+// frees or dereferences the resource: it only hands back a name for it. 0 on refusal (index space
+// exhausted). THIS IS THE F4 SEAM: a `tk_chan *` enters here under its own kind.
+uint64_t   tk_names_open(uint32_t kind, void *resource);
+// tk_names_lookup — the resource `name` stands for, or NULL when the name is dead, was never issued,
+// or names a resource of another kind. The kind argument is what stops one kind's name from ever
+// resolving to another kind's bytes.
+void      *tk_names_lookup(uint64_t name, uint32_t kind);
+// tk_names_status — TK_NAMES_OK, or which of the failure modes `name` is in (kind-agnostic).
+int64_t    tk_names_status(uint64_t name);
+// tk_names_close — retire `name`, bumping its slot's stamp so the name can never resolve again.
+// TK_NAMES_OK, or the same status a lookup would have failed with (closing twice is an ERROR).
+int64_t    tk_names_close(uint64_t name);
+// tk_names_live_count — how many names are live right now (the F3 leak probe: open+close returns it).
+uint64_t   tk_names_live_count(void);
+// tk_names_capacity — how many slots the array currently holds (its byte cost is capacity * 24).
+uint64_t   tk_names_capacity(void);
+// tk_names_slot_of — the slot half of a name. A PURE decode: defined for a dead name too, which is
+// what lets a test show that the slot really is recycled while the name is not.
+uint64_t   tk_names_slot_of(uint64_t name);
+// tk_names_generation_of — the stamp half of a name. Pure decode, same reason.
+uint64_t   tk_names_generation_of(uint64_t name);
+// tk_names_cell_open — the first resource kind, and the one Teko can hold today: a single int64_t
+// allocated in the program region. 0 on refusal (TK_NAMES_NO_VALUE is not storable).
+uint64_t   tk_names_cell_open(int64_t value);
+// tk_names_cell_read — the value the cell named by `name` holds, or TK_NAMES_NO_VALUE when the name
+// does not resolve to a live cell.
+int64_t    tk_names_cell_read(uint64_t name);
+// tk_names_cell_status — TK_NAMES_OK when `name` is a live cell, else the failure mode (so a caller
+// can report WHY the read failed instead of only that it did).
+int64_t    tk_names_cell_status(uint64_t name);
 
 // --- the PER-TEST CHANNEL (owner ruling: "para os que rodam em processo, passar um canal proprio
 // pra stdin, out e err"). ---------------------------------------------------------------------
@@ -376,14 +478,23 @@ void tk_eprint(tk_str s);
 void tk_eprintln(tk_str s);
 // teko::float::parse(str) -> f64 (strtod over a NUL-terminated copy; non-numeric → 0.0).
 double tk_float_parse(tk_str s);
+// Native backend bridge: tk_float_parse returning IEEE-754 bits as u64 (to work around LCall
+// result-class limitation). The native lowering intercepts teko::float::parse and routes through
+// this, then bitcasts the u64 back to f64 on the assignment side.
+uint64_t tk_rt_float_parse_bits(tk_str s);
 
 // --- string interpolation `$"…{expr}…"` builders (self-host parity) ---
-// These are EXTERN (linked from teko_rt.c), NOT static inline — both the generated C and
-// the VM call them, and the VM forward-declares them (like tk_print) rather than including
-// this header. Leak-tolerant (M.5 — the results are short-lived process-lifetime buffers).
+// These are EXTERN (linked from teko_rt.c), NOT static inline — the generated C calls them
+// via a forward declaration (like tk_print) rather than including this header. Leak-tolerant
+// (M.5 — the results are short-lived process-lifetime buffers).
 //
 // tk_str_concat — a fresh str holding a's bytes then b's bytes; the result OWNS the buffer.
 tk_str tk_str_concat(tk_str a, tk_str b);
+// (0.3.1 modelo-de-memoria §9) tk_str_concat_r — tk_str_concat with the result buffer bump-allocated
+// in `r` (tk_region_alloc) instead of malloc'd: the str lives in `r` and dies when `r` is dropped, so
+// a str produced inside a `{}` can participate in death-by-scope. `r == tk_region_root()`/program (or
+// NULL) reproduces the leak-tolerant malloc behaviour of tk_str_concat.
+tk_str tk_str_concat_r(tk_region *r, tk_str a, tk_str b);
 // (C7.1a) FFI marshalling: the raw byte pointer of a str (teko::mem::as_ptr — borrows, ptr+len
 // use), a fresh NUL-terminated C copy of a str (teko::mem::as_cstr), and a copy of a
 // NUL-terminated foreign C string back into a fresh str (teko::mem::str_from_cstr).
@@ -427,6 +538,16 @@ tk_str tk_str_of_bytes(tk_str bytes);
 const tk_byte *tk_str_of_bytes_len(const tk_byte *ptr, uint64_t len, uint64_t *out_len);
 // tk_one_byte — a fresh 1-byte str holding c.
 tk_str tk_one_byte(tk_byte c);
+// tk_one_byte_len — the out-parameter-length twin of `tk_one_byte` (mirrors `tk_str_of_bytes_len`'s
+// own doc): the native backend's `LCall` reads exactly one result register, never the true
+// 2-eightbyte SysV/AAPCS64 struct `tk_one_byte` returns by value, so the fresh buffer's pointer
+// rides the return register and its length (always 1) rides `*out_len`. The byte travels in a
+// FULL-WIDTH parameter — the same shape every other `_len` twin uses for its scalar arguments
+// (`tk_i64_to_str_len`, `tk_str_slice_len`) — because SysV/AAPCS64 leave the bits ABOVE a
+// sub-register-width argument unspecified, and this backend has no argument-narrowing pass
+// (`apply_native_c_return_narrow` narrows RETURNS only); the low 8 bits are taken here instead
+// (0.3.1.0 degrau 32).
+const tk_byte *tk_one_byte_len(uint64_t c, uint64_t *out_len);
 // tk_bytes_of_str — zero-copy view of a str's bytes as a []byte slice. Returns a tk_slice_byte
 // pointing into the same memory. The caller must not outlive the originating str allocation.
 tk_slice_byte tk_bytes_of_str(tk_str s);
@@ -573,7 +694,7 @@ tk_str tk_intern_put(tk_str key, tk_str value);
 // compilation pass that must not observe a PRIOR pass's cached strings.
 void   tk_intern_reset(void);
 // tk_str_slice — the substring bytes [start, end) as a fresh owned str. An out-of-range slice
-// (start > end, or end > s.len) PANICS (M.1, parity with the VM's bounds check). The empty
+// (start > end, or end > s.len) PANICS (M.1, fail-loud on out-of-bounds). The empty
 // slice (start == end) is a valid empty str (1-byte buffer so ptr is never NULL+stale len).
 tk_str tk_str_slice(tk_str s, uint64_t start, uint64_t end);
 // tk_str_slice_to — tk_str_slice(s, 0, end).
@@ -590,6 +711,12 @@ tk_str tk_str_slice_from(tk_str s, uint64_t start);
 const tk_byte *tk_str_slice_len(const tk_byte *s_ptr, uint64_t s_len, uint64_t start, uint64_t end, uint64_t *out_len);
 const tk_byte *tk_str_slice_to_len(const tk_byte *s_ptr, uint64_t s_len, uint64_t end, uint64_t *out_len);
 const tk_byte *tk_str_slice_from_len(const tk_byte *s_ptr, uint64_t s_len, uint64_t start, uint64_t *out_len);
+// tk_str_slice_chars_len — out-parameter-length twin of tk_str_slice_chars (codepoint-index
+// slice). Same hidden-out-param convention as tk_str_slice_len: the native backend's LCall result
+// capture is one register, one short of the two-eightbyte tk_str return; this wrapper hands the
+// length back through *out_len and returns the pointer half. Thin wrapper — calls tk_str_slice_chars
+// and owns no logic of its own.
+const tk_byte *tk_str_slice_chars_len(const tk_byte *s_ptr, uint64_t s_len, int64_t from, int64_t to, uint64_t *out_len);
 // tk_str_len — s.len (the byte length). No allocation.
 uint64_t tk_str_len(tk_str s);
 // tk_str_ends_with — true iff s ends with suffix (suffix.len <= s.len and the tail bytes
@@ -603,7 +730,7 @@ bool tk_str_contains(tk_str s, tk_str needle);
 tk_str tk_f64_g17(double x);
 
 // --- ROUND 0: UTF-8 codepoint operations (char_at / str_slice_chars / is_alpha / is_digit /
-//     is_space / to_lower / to_upper). Mirrored in scope.c/.tks, codegen.c/.tks, vm.c/.tks. ---
+//     is_space / to_lower / to_upper). Mirrored in scope.c/.tks, codegen.c/.tks. ---
 //
 // tk_char_at — the UTF-8 codepoint at 0-based codepoint index i in s. Panics if out of range.
 // Returns a tk_char view INTO s.ptr (no copy); the caller must ensure s outlives the result.
@@ -678,6 +805,17 @@ bool tk_rt_stdin_eof(void);
 // A bare tk_str (no error union — see tk_rt_read_stdin's definition for why); panics on a
 // genuine read failure.
 tk_str tk_rt_read_stdin(void);
+// (0.3.1.0 LSP crumb 0) read EXACTLY `n` bytes from stdin into an arena-owned []byte slice,
+// blocking until `n` bytes have arrived or stdin hits EOF. The RETURNED slice's length is the
+// count actually read: `len == n` on a full body, `len < n` on EOF mid-body (a truncated frame,
+// which the LSP transport surfaces as an honest error rather than a silent accept). Needed
+// because the JSON-RPC / LSP base-protocol body is `Content-Length`-framed with NO trailing
+// newline, so the line reader (`tk_rt_read_line`) cannot bound it — the caller knows the exact
+// byte count from the header and reads precisely that many. A `tk_slice_byte` return (the same
+// {ptr,len} ABI `tk_rt_secure_bytes` already uses) so a brand-new primitive stays lowerable by
+// the released bootstrap seed's frozen codegen (the generic user-`extern` path emits the raw C
+// symbol directly — no per-name lift, which only `str | error`-shaped externs would need).
+tk_slice_byte tk_rt_read_stdin_n(uint64_t n);
 // teko::env::var(name) — the environment value, or error when unset.
 tk_ffi_sres tk_rt_getenv(tk_str name);
 // teko::io::write_file(path, content) — (over)write the file; error on failure.
@@ -733,6 +871,35 @@ tk_ffi_u64res tk_rt_last_index_of(tk_str hay, tk_str needle);
 // (untouched when not found). A thin wrapper over `tk_rt_last_index_of` — no scan logic is
 // duplicated (0.3.1.0 degrau 15).
 bool tk_rt_last_index_of_ok(tk_str hay, tk_str needle, uint64_t *out_index);
+// --- native-backend own-register twins for the aggregate-returning host FFI (0.3.1.0 degrau 34) ---
+// The native (non-C) backend's `LCall` captures exactly ONE result register, so a host primitive
+// whose true ABI returns a struct wider than a register (`tk_ffi_sres` is 40 bytes → SysV MEMORY
+// class → SRET hidden pointer; `tk_ffi_ures`/`tk_ffi_slres` likewise) cannot be received on that
+// path — an un-set-up SRET pointer makes the callee write its result over garbage and the caller
+// SIGSEGVs (measured: gen2 crashed in `tk_rt_getenv` at startup, `c_backend_selected`'s
+// TEKO_BACKEND check). Each twin below carries the ok/err flag as its OWN single-register `bool`
+// return and the active case's (ptr, len) through two shared out-parameters — the SAME convention
+// `tk_rt_str_from_utf8_ok`/`tk_rt_last_index_of_ok` already use, extended to the whole host surface
+// the self-host build walks (env/io/fs). Args are taken as ptr+len scalar pairs (never `tk_str`
+// by value), so the pair IS their C ABI on every target and the backend passes them in registers.
+//
+// str | error family — ok → the value's (ptr, len) in the out-slots; !ok → the error message's
+// (ptr, len) in the SAME out-slots (the caller's `bool` decides which meaning to read).
+bool tk_rt_getenv_ok(const tk_byte *name_ptr, uint64_t name_len, const tk_byte **out_ptr, uint64_t *out_len);
+bool tk_rt_getcwd_ok(const tk_byte **out_ptr, uint64_t *out_len);
+bool tk_rt_read_file_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_ptr, uint64_t *out_len);
+// []str | error — ok → the tk_str[] entries' (base, count) in the out-slots (a `[]str` slice's
+// element layout IS an array of `tk_str`, so the backend stores that pair as the fat payload
+// unchanged); !ok → the error message's (ptr, len) in the SAME out-slots.
+bool tk_rt_list_dir_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_ptr, uint64_t *out_len);
+// error | null family — the `bool` return IS "succeeded (no error)"; on failure the error message's
+// (ptr, len) travels through the two out-slots (untouched on success).
+bool tk_rt_setenv_ok(const tk_byte *name_ptr, uint64_t name_len, const tk_byte *value_ptr, uint64_t value_len, const tk_byte **out_err_ptr, uint64_t *out_err_len);
+bool tk_rt_chdir_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_err_ptr, uint64_t *out_err_len);
+bool tk_rt_mkdir_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_err_ptr, uint64_t *out_err_len);
+bool tk_rt_remove_file_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte **out_err_ptr, uint64_t *out_err_len);
+bool tk_rt_write_file_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte *content_ptr, uint64_t content_len, const tk_byte **out_err_ptr, uint64_t *out_err_len);
+bool tk_rt_write_file_bytes_ok(const tk_byte *path_ptr, uint64_t path_len, const tk_byte *data_ptr, uint64_t data_len, const tk_byte **out_err_ptr, uint64_t *out_err_len);
 // TK_RT_SPAWN_FAILED — "the runtime could not start a child at all", as distinct from any status a
 // child could report. It is NEGATIVE on purpose: a real child's code is 0..255 (128+signo for a
 // signalled one, so <= 191), which makes a negative provably outside that space and therefore
@@ -929,8 +1096,24 @@ tk_str tk_rt_version(void);
 const tk_byte *tk_rt_os_len(uint64_t *out_len);
 const tk_byte *tk_rt_arch_len(uint64_t *out_len);
 const tk_byte *tk_rt_version_len(uint64_t *out_len);
+// tk_rt_read_line_len / tk_rt_read_stdin_len / tk_assert_scenario_prefix_len / tk_test_scope_len —
+// the out-parameter-length twins of the remaining plain-`tk_str`-returning host primitives the
+// self-host reaches through an `extern fn` declaration (io::read_line/read_stdin, assert's scenario
+// prefix, the test scope). SAME reason as the host-info trio above: the native backend's `LCall`
+// captures ONE result register, so a `tk_str`-by-value return has its length (the second eightbyte)
+// dropped — the length rides `*out_len` here instead (0.3.1.0 degrau 35). Thin wrappers; no logic
+// is duplicated.
+const tk_byte *tk_rt_read_line_len(uint64_t *out_len);
+const tk_byte *tk_rt_read_stdin_len(uint64_t *out_len);
+const tk_byte *tk_assert_scenario_prefix_len(uint64_t *out_len);
+const tk_byte *tk_test_scope_len(uint64_t *out_len);
 // (#148) the process peak RSS in bytes (0 = unavailable) — teko::mem::peak_rss.
 uint64_t tk_peak_rss(void);
+// (E1-C6) the OS-granted online processor count (>= 1) — the default and cap for the test/regression
+// job pools, so a run never hard-codes how parallel a machine may be. Bound in the build source
+// through an `extern fn ... from "teko_rt"` (regression.tks `os_max`), the seed-lowerable route the
+// name registry's `tk_names_live_count` uses; a new injected builtin would need a release to seed it.
+uint64_t tk_rt_nproc(void);
 
 // (#194 C6) teko::crypto::rand::secure_bytes(n) — n cryptographically-secure random bytes
 // from the host CSPRNG (getrandom(2)/getentropy(3) on POSIX, rand_s (ucrt) on Windows).
@@ -975,10 +1158,50 @@ uint64_t tk_rt_wall_ns_of_day(void);       // ns since midnight, UTC, host wall 
 int16_t  tk_rt_wall_offset_minutes(void);  // host local UTC offset, in minutes
 int64_t  tk_rt_monotonic_ns(void);         // ns from an unspecified monotonic origin
 
-// D3 — TEST-COVERAGE SINK. A host side-channel (like print's buffer / args), so the VM can
-// record which production functions executed during a `teko test` run WITHOUT a Teko
-// module-mutable (M.0). The VM marks a function's id (its source line) on entry; the runner
-// reads the distinct count afterward to compute function-level coverage.
+// tk_nproc — logical processors the OS grants this process now. POSIX: sysconf(_SC_NPROCESSORS_ONLN).
+// Windows: GetActiveProcessorCount(ALL_PROCESSOR_GROUPS). Floor 1 (never 0). No allocation. The
+// default degree of build parallelism (teko::env::nproc → build_jobs, TEST_JOBS default).
+uint64_t tk_nproc(void);
+// ===== journal runtime funds (design journaling-de-corrida-0.3.1 §2.3 / §6) — BEGIN =====
+// A DELIMITED, DISJOINT BLOCK of NEW symbols (the J1 crumb). Kept apart from tk_region_enter/leave
+// (the M2 territory) and tk_slice_push* (the 5th-gap territory) so a drain rebase is trivial: nothing
+// here edits a function either of those touches. The str-taking entries are ALSO transcribed into
+// lir/lower.tks's by-value-tk_str arity tables, per that file's "the table mirrors the header" law.
+//
+// tk_journal_open — open/create `path` in O_WRONLY|O_APPEND|O_CREAT and return the RAW descriptor
+// (>= 0), or -1 on failure. NO stdio: a FILE*'s user-space buffer dies with the process, which is the
+// one moment this file had value. Also STASHES the descriptor as the target a later async-signal-safe
+// tk_journal_note writes to (the polite-signal arm, §6).
+int64_t tk_journal_open(tk_str path);
+// tk_journal_append — write `rec` whole to descriptor `seg`, finishing a short write in a loop.
+// Returns 0, or the errno. `rec` leads (a by-value tk_str is only ABI-describable when leading; see
+// lir/lower.tks::takes_one_str_by_value) so the whole record lands in the kernel as one O_APPEND write.
+int32_t tk_journal_append(tk_str rec, int64_t seg);
+// tk_journal_arm — remember `prefix` (a pre-shaped "run\twriter\tstop\t" record head) as the bytes a
+// later tk_journal_note prepends before the signal number. Formatting the stamp HERE, at open time,
+// is what lets the note itself allocate and format nothing — the async-signal-safety requirement (§6).
+void tk_journal_arm(tk_str prefix);
+// tk_journal_note — the ASYNC-SIGNAL-SAFE arm (§6): write the armed prefix, the decimal `sig`, and a
+// newline to the stashed descriptor, using only write(2) over pre-built bytes (no malloc, no stdio).
+// A no-op when no segment was opened. WIRED into the signal handlers by the J5 crumb; defined here so
+// J5 is pure handler installation.
+void tk_journal_note(int sig);
+// tk_rt_rename — rename `from` to `to` atomically within one directory (rename(2) / MoveFileExW with
+// MOVEFILE_REPLACE_EXISTING). The second half of the discipline (§2.3): what is append goes by append,
+// what is a whole artefact writes to a temporary and publishes here, so no reader sees a half file.
+int32_t tk_rt_rename(tk_str from, tk_str to);
+// tk_rt_pid — this process's id (getpid / GetCurrentProcessId). One half of a run's identity stamp,
+// disambiguating two runs that mint the same monotonic nanosecond.
+int64_t tk_rt_pid(void);
+// tk_rt_pid_alive — whether a process with id `pid` is currently alive (kill(pid,0) / OpenProcess).
+// The liveness `sweep` reads from a run root's lock before reclaiming it: a live sibling is spared.
+bool tk_rt_pid_alive(int64_t pid);
+// ===== journal runtime funds — END =====
+
+// D3 — TEST-COVERAGE SINK. A host side-channel (like print's buffer / args), so the compiler
+// can record which production functions executed during a `teko test` run WITHOUT a Teko
+// module-mutable (M.0). The native test binary marks a function's id (its source line) on
+// entry; the runner reads the distinct count afterward to compute function-level coverage.
 void     tk_cov_reset(void);        // clear the executed-id set (call before a test run)
 void     tk_cov_mark(uint64_t id);  // record an executed id (deduped)
 uint64_t tk_cov_distinct(void);     // how many distinct ids were marked
@@ -999,9 +1222,9 @@ void     tk_cov_line_reset(void);
 void     tk_cov_line(uint32_t line);                       // mark a line as executed (current fn)
 bool     tk_cov_line_hit(uint64_t fn, uint32_t line);      // report query
 
-// #265 (Track A) — EXPLICIT-fn line/branch marks for the native test gate. The VM keeps a live
-// enter/leave fn-stack (eval_call), so tk_cov_line/tk_cov_branch read tk_fn_stack[sp-1]. The native
-// test binary has NO enter/leave inside production bodies, so codegen passes the owning fn's
+// #265 (Track A) — EXPLICIT-fn line/branch marks for the native test gate. tk_cov_line/tk_cov_branch
+// read tk_fn_stack[sp-1], but the native test binary has NO enter/leave inside production bodies
+// to maintain that stack automatically, so codegen passes the owning fn's
 // prog.items index EXPLICITLY, bypassing the stack — every interior mark keys on the fn the static
 // floor walk (line_coverage/branch_coverage) queries. Same tk_line_id/tk_branch_id packing.
 void     tk_cov_line_at(uint64_t fn, uint32_t line);                             // mark a line for fn (explicit)
@@ -1131,8 +1354,7 @@ _Noreturn void tk_panic_oob(void);        // "index out of bounds"
 _Noreturn void tk_panic_cast(void);       // "impossible conversion" (the `x to T` guard — B.36 / M.1)
 _Noreturn void tk_panic_overflow(void);   // "integer overflow"
 // (C1.7) positioned OOB panic — prefix "line:col: " then the canonical OOB panic. codegen passes
-// the offending index node's position (C1-POS) so a NATIVE index-out-of-bounds locates like the VM
-// (vm_panic_oob_at).
+// the offending index node's position (C1-POS) so a NATIVE index-out-of-bounds locates precisely.
 _Noreturn void tk_panic_oob_at(uint32_t line, uint32_t col);
 // (C1.7-CAST) positioned cast panic — same shape as tk_panic_oob_at. codegen wraps every
 // tk_to_* call in a statement-expression that sets these globals first; tk_panic_cast reads them.
@@ -1189,8 +1411,8 @@ static inline int64_t  tk_mod_i64(int64_t  a, int64_t  b){ if (b == 0) tk_panic_
 // Plain C `<<`/`>>` is UB when the shift count is >= the operand's bit-width (or negative); a
 // Teko program that computes a large/negative-looking `u32`/`i64`/… count (e.g. from user input
 // or arithmetic) must not hit native UB. Ruling: mask the count by (bit-width - 1) — C#/Java
-// semantics — so `(1 as i32) << 40` == `1 << (40 & 31)` == `1 << 8` == 256, matching the VM
-// (vm.c's eval_binary / vm.tks's apply_int_op) bit-for-bit. In-range counts are unaffected (the
+// semantics — so `(1 as i32) << 40` == `1 << (40 & 31)` == `1 << 8` == 256. In-range counts
+// are unaffected (the
 // mask is a no-op when count < width). One helper per signed/unsigned width (u8..u64, i8..i64);
 // codegen selects by the binary node's result prim (same tag as tk_div_*/tk_add_*). Signed `>>`
 // keeps its existing sign-preserving (arithmetic) behavior — only the COUNT is fixed here.

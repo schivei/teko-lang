@@ -31,6 +31,21 @@ pub type ArithCastRateReport = struct {
 fn arith_cast_rate_empty() -> ArithCastRateReport { ArithCastRateReport { total = 0; with_conversion = 0 } }
 
 /**
+ * arith_cast_rate_from — reconstruct an `ArithCastRateReport` from its two serialized totals. The
+ * staged `teko test` report reads these numbers back from the build stage's site-map (rather than
+ * re-walking the typed program) and reconstitutes the report to apply the D4 verdict, so the
+ * `--arith-cast-gate` path needs no re-check either.
+ *
+ * @param total            the number of arithmetic/assignment expressions visited at build time
+ * @param with_conversion  how many of those carried a conversion
+ * @return                 the reconstituted report
+ * @since 0.3.1
+ */
+pub fn arith_cast_rate_from(total: u64, with_conversion: u64) -> ArithCastRateReport {
+    ArithCastRateReport { total = total; with_conversion = with_conversion }
+}
+
+/**
  * arith_cast_rate_note — `w` with one more arithmetic/assignment expression visited, its
  * `with_conversion` bumped iff `e`'s own operand tree carries a conversion.
  *
@@ -151,8 +166,6 @@ fn expr_has_conversion(e: TExpr) -> bool {
             false
         }
         TFieldAccess as fa => expr_has_conversion(fa.receiver)
-        TSafeFieldAccess as sfa => expr_has_conversion(sfa.receiver)
-        TCoalesce as co => expr_has_conversion(co.left) || expr_has_conversion(co.right)
         TIndex as ix => expr_has_conversion(ix.receiver) || expr_has_conversion(ix.index)
         TStructInit as si => {
             mut i = 0
@@ -274,8 +287,6 @@ fn arith_cast_rate_walk_expr(e: TExpr, w: ArithCastRateReport) -> ArithCastRateR
             a
         }
         TFieldAccess as fa => arith_cast_rate_walk_expr(fa.receiver, w)
-        TSafeFieldAccess as sfa => arith_cast_rate_walk_expr(sfa.receiver, w)
-        TCoalesce as co => arith_cast_rate_walk_expr(co.right, arith_cast_rate_walk_expr(co.left, w))
         TIndex as ix => arith_cast_rate_walk_expr(ix.index, arith_cast_rate_walk_expr(ix.receiver, w))
         TStructInit as si => {
             mut a = w

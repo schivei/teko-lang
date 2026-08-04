@@ -48,6 +48,15 @@
 .33–.34          OWN LINKER        ── resolve C-lib symbols (.a/.o/.so) with no cc
 ```
 
+> **⚠ SUPERSEDED (2026-07-28, ruling "Plano de Sequenciamento por Plataforma"):** the timeline above
+> reflects the design-ahead sketch. The **actual backend retirement is per-platform** — the C backend is
+> **ALIVE until 0.3.1.4 inclusive** (per the sequenced roadmap at
+> `docs/memory/0.3.1-plano-sequenciado-por-plataforma.md` § Discrepância encontrada), then each platform
+> that has migrated to native discontinues it, others migrate or pause. This correction does not alter
+> the FFI design (all capabilities remain own-backend-first); it updates the **nominal version** where
+> the C emitter is **decommissioned globally**. Reference: `0.3.1-plano-sequenciado-por-plataforma.md`
+> for platform-specific migration.
+
 **Consequence:** every FFI capability must be split into (a) an **own-backend codegen** part that is
 own-native and ships as early as the own backend can express it, and (b) — only where unavoidable — a
 **own-linker** part (resolving external C symbols) that couples with .33–.34. **No part may depend on

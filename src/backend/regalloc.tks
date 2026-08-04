@@ -432,6 +432,8 @@ pub fn inst_regs(inst: MInst) -> InstRegs {
         MCall as x => ir_call(x.ret_reg, x.has_result, x.uses)
         MCallIndirect as x => ir_call(x.ret_reg, x.has_result, cons_reg(x.target, x.uses))
         MRet => ir_none()
+        MOutArg as x => ir_use(one_reg(x.src))
+        MInArg as x => ir_def(x.dst)
     }
 }
 
@@ -1104,36 +1106,108 @@ fn interval_before(a: LiveInterval, b: LiveInterval) -> bool {
 }
 
 /**
- * sort_by_start — the virtual intervals in start order (an insertion sort;
- * deterministic tie-break by `reg_id`).
+ * run_end — the exclusive end of a merge run starting at `lo` with width
+ * `width`, clamped to `len` so a pass's final short run is handled by the same
+ * code as a full one.
+ *
+ * @param u64 lo  the run's inclusive start
+ * @param u64 width  the pass's run width
+ * @param u64 len  the sequence length
+ * @return u64  `min(lo + width, len)`
+ */
+fn run_end(lo: u64, width: u64, len: u64) -> u64 {
+    let raw = lo + width
+    if raw > len { return len }
+    raw
+}
+
+/**
+ * merge_runs — stably merge the two adjacent sorted runs `src[lo..mid)` and
+ * `src[mid..hi)` onto the tail of `out0`. The left run is taken unless the
+ * right head sorts STRICTLY before the left head, so a pair `interval_before`
+ * orders in neither direction keeps its input order. That left-bias is what
+ * makes the whole sort stable, and stability is what makes the output the
+ * same permutation the retired insertion sort produced.
+ *
+ * @param []LiveInterval src  the sequence holding both runs
+ * @param u64 lo  the left run's inclusive start
+ * @param u64 mid  the left run's exclusive end and the right run's start
+ * @param u64 hi  the right run's exclusive end
+ * @param []LiveInterval out0  the pass output built so far
+ * @return []LiveInterval  `out0` with both runs appended in sorted order
+ */
+fn merge_runs(src: []LiveInterval, lo: u64, mid: u64, hi: u64, out0: []LiveInterval) -> []LiveInterval {
+    mut out = out0
+    mut i: u64 = lo
+    mut j: u64 = mid
+    loop {
+        if i >= mid { break }
+        if j >= hi { break }
+        if interval_before(src[j], src[i]) {
+            out = teko::list::push(out, src[j])
+            j++
+            continue
+        }
+        out = teko::list::push(out, src[i])
+        i++
+    }
+    loop { if i >= mid { break }; out = teko::list::push(out, src[i]); i++ }
+    loop { if j >= hi { break }; out = teko::list::push(out, src[j]); j++ }
+    out
+}
+
+/**
+ * merge_pass — one bottom-up pass of the merge sort: every adjacent pair of
+ * `width`-wide sorted runs of `src` is merged, doubling the sorted-run length.
+ * ONE output list is built per PASS, never one per element — that is the whole
+ * point. A pass allocates O(V) and there are `ceil(log2 V)` passes, against
+ * the V allocations of O(V) bytes each the insertion sort paid.
+ *
+ * @param []LiveInterval src  the sequence, already sorted in `width`-wide runs
+ * @param u64 width  the current run width
+ * @return []LiveInterval  the same elements, sorted in `2*width`-wide runs
+ */
+fn merge_pass(src: []LiveInterval, width: u64) -> []LiveInterval {
+    mut out: []LiveInterval = teko::list::empty()
+    mut lo: u64 = 0
+    loop {
+        if lo >= src.len { break }
+        let mid = run_end(lo, width, src.len)
+        let hi = run_end(mid, width, src.len)
+        out = merge_runs(src, lo, mid, hi, out)
+        lo = hi
+    }
+    out
+}
+
+/**
+ * sort_by_start — the virtual intervals in start order (a bottom-up STABLE
+ * merge sort; deterministic tie-break by `reg_id`). O(V log V) in time and in
+ * allocated bytes, replacing an insertion sort that rebuilt the entire output
+ * list once per interval — O(V^2) on both axes, and 98.9% of the backend's
+ * copy-grow bytes as measured under `TEKO_ARENA_OBS`.
+ *
+ * The output is the SAME permutation the insertion sort produced, not merely
+ * an equivalent one, and that identity does not rest on the absence of ties.
+ * `interval_before` is a lexicographic order on the pair `(start, reg_id)`,
+ * hence a strict weak ordering; the retired insertion sort placed each
+ * interval after every already-placed interval it did not sort strictly
+ * before, which is a STABLE insertion; and `merge_runs` is a stable merge. Two
+ * stable sorts under one strict weak ordering agree element for element, so
+ * `linear_scan` walks the identical sequence and emits identical code.
  *
  * @param []LiveInterval virt  the virtual intervals
  * @return []LiveInterval  the start-sorted intervals
  */
 fn sort_by_start(virt: []LiveInterval) -> []LiveInterval {
-    mut out: []LiveInterval = teko::list::empty()
-    mut i: u64 = 0
+    mut sorted: []LiveInterval = virt
+    mut width: u64 = 1
     loop {
-        if i >= virt.len { break }
-        let v = virt[i]
-        mut ins: []LiveInterval = teko::list::empty()
-        mut placed: bool = false
-        mut j: u64 = 0
-        loop {
-            if j >= out.len { break }
-            let o = out[j]
-            if !placed && interval_before(v, o) {
-                ins = teko::list::push(ins, v)
-                placed = true
-            }
-            ins = teko::list::push(ins, o)
-            j++
-        }
-        if !placed { ins = teko::list::push(ins, v) }
-        out = ins
-        i++
+        if width >= sorted.len { break }
+        sorted = merge_pass(sorted, width)
+        width = width * 2
     }
-    out
+    sorted
 }
 
 /**
@@ -1262,20 +1336,43 @@ type FurthestActive = struct {
 }
 
 /**
- * furthest_active — the active entry of class `reg_class` with the largest
- * `end` (the furthest-next-use spill candidate), or `found=false`.
+ * furthest_active_eligible — whether active entry `a`'s physreg is safe to hand to the
+ * interval currently being colored: unconditionally eligible when that interval does not
+ * cross a call, otherwise only when `a.phys` is NOT in the caller-saved set (§3.3's
+ * documented invariant on `IntervalSet` — "a `crosses_call` value must avoid the
+ * caller-saved set" — which the spill-displacement fallback below must honor too, not just
+ * `candidate_pool`'s first-choice free-register search).
+ *
+ * @param AbiDescriptor abi  the register file
+ * @param ActiveEntry a  the active entry being considered as a displacement victim
+ * @param bool crosses_call  whether the interval being colored crosses a call
+ * @return bool  true iff displacing `a` and reusing its physreg is call-safe
+ */
+fn furthest_active_eligible(abi: AbiDescriptor, a: ActiveEntry, crosses_call: bool) -> bool {
+    !crosses_call || !is_caller_saved(abi, preg(a.phys, a.reg_class))
+}
+
+/**
+ * furthest_active — the active entry of class `reg_class` with the largest `end` (the
+ * furthest-next-use spill candidate) whose physreg is call-safe to hand to the interval
+ * being colored (`furthest_active_eligible`), or `found=false` when none qualifies —
+ * including when every same-class active entry holds a caller-saved register and the
+ * interval being colored crosses a call, in which case the caller must fall through to
+ * spilling the NEW interval instead of displacing an unsafe one.
  *
  * @param []ActiveEntry active  the active set
  * @param MRegClass reg_class  the register class
- * @return FurthestActive  the furthest entry, or none
+ * @param AbiDescriptor abi  the register file (for the call-safety filter)
+ * @param bool crosses_call  whether the interval being colored crosses a call
+ * @return FurthestActive  the furthest call-safe entry, or none
  */
-fn furthest_active(active: []ActiveEntry, reg_class: MRegClass) -> FurthestActive {
+fn furthest_active(active: []ActiveEntry, reg_class: MRegClass, abi: AbiDescriptor, crosses_call: bool) -> FurthestActive {
     mut best = FurthestActive { found = false; vreg_id = 0; phys = 0; end = 0 }
     mut i: u64 = 0
     loop {
         if i >= active.len { break }
         let a = active[i]
-        if a.reg_class == reg_class {
+        if a.reg_class == reg_class && furthest_active_eligible(abi, a, crosses_call) {
             if !best.found || a.end > best.end {
                 best = FurthestActive { found = true; vreg_id = a.vreg_id; phys = a.phys; end = a.end }
             }
@@ -1349,8 +1446,12 @@ fn add_unique_u32(list: []u32, x: u32) -> []u32 {
  * linear_scan — the §3.3 Poletto–Sarkar linear scan extended for fixed pin
  * intervals and call clobbers: the virtual intervals are colored in start
  * order, expiring the active set at each start, choosing the first candidate
- * physreg (free of active + fixed-pin overlap, callee-saved if the value
- * crosses a call), and on register pressure spilling the furthest-next-use.
+ * physreg (free of active + fixed-pin overlap, call-safe if the value
+ * crosses a call), and on register pressure spilling the furthest-next-use —
+ * itself restricted to a call-safe victim when the interval being colored
+ * crosses a call (`furthest_active`'s own filter), so displacing an active
+ * entry can never hand a call-crossing value a caller-saved register that a
+ * callee between its def and its last use would clobber.
  *
  * @param AbiDescriptor abi  the register file the scan colors from
  * @param IntervalSet ivals  the computed intervals (A3-2)
@@ -1374,7 +1475,7 @@ fn linear_scan(abi: AbiDescriptor, ivals: IntervalSet) -> ScanResult {
             assignments = teko::list::push(assignments, InReg { vreg_id = v.reg_id; phys = phys })
             if is_callee_saved(abi, preg(phys, v.reg_class)) { used_callee = add_unique_u32(used_callee, phys) }
         } else {
-            let far = furthest_active(active, v.reg_class)
+            let far = furthest_active(active, v.reg_class, abi, v.crosses_call)
             if far.found && far.end > v.end {
                 let slot = next_slot
                 next_slot = next_slot + 1
@@ -1392,6 +1493,157 @@ fn linear_scan(abi: AbiDescriptor, ivals: IntervalSet) -> ScanResult {
         i++
     }
     ScanResult { assignments = assignments; used_callee_saved = used_callee }
+}
+
+/**
+ * CallSafetyLookup — whether `IntervalSet.virt` carries an interval for a queried vreg id
+ * (option-struct, M.2), and if so its class and `crosses_call` — the two facts
+ * `report_call_unsafe_assignments` needs to judge one `InReg` assignment.
+ */
+type CallSafetyLookup = struct {
+    /** found — true iff `virt` carries an interval for the queried id. */
+    found: bool
+    /** reg_class — the interval's register file (meaningful only when `found`). */
+    reg_class: MRegClass
+    /** crosses_call — the interval's own flag (meaningful only when `found`). */
+    crosses_call: bool
+}
+
+/**
+ * lookup_call_safety — the `CallSafetyLookup` for `vreg_id` in `virt`: the first interval whose
+ * `reg_id` matches, or not-found (an assignment for an id the scan never colored — should not
+ * happen, but the lookup stays total rather than assume it).
+ *
+ * @param []LiveInterval virt  the scan's own virtual intervals
+ * @param u32 vreg_id  the virtual register id to find
+ * @return CallSafetyLookup  the match, or found=false
+ */
+fn lookup_call_safety(virt: []LiveInterval, vreg_id: u32) -> CallSafetyLookup {
+    mut i: u64 = 0
+    loop {
+        if i >= virt.len { break }
+        if virt[i].reg_id == vreg_id { return CallSafetyLookup { found = true; reg_class = virt[i].reg_class; crosses_call = virt[i].crosses_call } }
+        i++
+    }
+    CallSafetyLookup { found = false; reg_class = MRegClass::GPR; crosses_call = false }
+}
+
+/**
+ * CallUnsafeAssignment — one virtual register the scan colored `InReg` with a caller-saved
+ * physreg despite its own interval crossing a call: the exact failure mode a caller-saved
+ * register clobbered mid-lifetime by an intervening call would later surface as — a corrupted
+ * value read back after the call, attributable to nothing in particular without this diagnostic.
+ */
+type CallUnsafeAssignment = struct {
+    /** vreg_id — the virtual register the scan colored. */
+    vreg_id: u32
+    /** phys — the caller-saved physreg it was (wrongly) assigned. */
+    phys: u32
+    /** reg_class — the register file `phys` belongs to. */
+    reg_class: MRegClass
+}
+
+/**
+ * push_call_unsafe_assignment — `out` extended with `a`'s violation record when `a` is an
+ * `InReg` assignment whose looked-up interval crosses a call and whose physreg is caller-saved,
+ * unchanged otherwise (a `Spilled` assignment, or an `InReg` that is call-safe).
+ *
+ * @param []CallUnsafeAssignment out  the violations accumulated so far
+ * @param AbiDescriptor abi  the register file
+ * @param []LiveInterval virt  the scan's own virtual intervals
+ * @param RegAssignment a  the assignment to check
+ * @return []CallUnsafeAssignment  `out`, with `a`'s violation appended when applicable
+ */
+fn push_call_unsafe_assignment(out: []CallUnsafeAssignment, abi: AbiDescriptor, virt: []LiveInterval, a: RegAssignment) -> []CallUnsafeAssignment {
+    match a {
+        InReg as r => {
+            let lookup = lookup_call_safety(virt, r.vreg_id)
+            if !lookup.found || !lookup.crosses_call { return out }
+            if !is_caller_saved(abi, preg(r.phys, lookup.reg_class)) { return out }
+            teko::list::push(out, CallUnsafeAssignment { vreg_id = r.vreg_id; phys = r.phys; reg_class = lookup.reg_class })
+        }
+        Spilled => out
+    }
+}
+
+/**
+ * find_call_unsafe_assignments — every `InReg` assignment in `sr.assignments` whose interval
+ * (looked up in `ivals.virt` by vreg id) crosses a call yet was colored a caller-saved physreg:
+ * the invariant `candidate_pool`'s `call_ok` filter and `furthest_active`'s own call-safety
+ * filter are BOTH meant to make unreachable (§3.3, `IntervalSet`'s own doc comment). A pure,
+ * unit-testable core; `report_call_unsafe_assignments` is its env-gated stderr sink.
+ *
+ * @param AbiDescriptor abi  the register file
+ * @param IntervalSet ivals  the scan's own intervals
+ * @param ScanResult sr  the scan's own output
+ * @return []CallUnsafeAssignment  every violating assignment, in `sr.assignments`' own order
+ */
+fn find_call_unsafe_assignments(abi: AbiDescriptor, ivals: IntervalSet, sr: ScanResult) -> []CallUnsafeAssignment {
+    mut out: []CallUnsafeAssignment = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= sr.assignments.len { break }
+        out = push_call_unsafe_assignment(out, abi, ivals.virt, sr.assignments[i])
+        i++
+    }
+    out
+}
+
+/**
+ * call_safety_check_enabled — whether the native regalloc call-safety diagnostic
+ * (`TEKO_NATIVE_CALL_SAFETY_CHECK=1`) is requested: a CI-narrowing aid (mirrors
+ * `rodata_align_check_enabled` in `encode_arm64.tks`), NOT part of the ritual's normal output —
+ * it names, straight from one function's own scan output, any `InReg` assignment that violates
+ * the call-crossing invariant `candidate_pool`/`furthest_active` are meant to enforce, instead of
+ * leaving the eventual clobbered-value read to surface as a distant, unattributed crash.
+ *
+ * @return bool  true iff `TEKO_NATIVE_CALL_SAFETY_CHECK` is set to `"1"`
+ */
+fn call_safety_check_enabled() -> bool {
+    match teko::env::var("TEKO_NATIVE_CALL_SAFETY_CHECK") { str as v => v == "1"; error => false }
+}
+
+/**
+ * reg_class_name — `class`'s diagnostic name (`"gpr"`/`"fpr"`), for a stderr line that must not
+ * assume string interpolation formats an enum value on its own.
+ *
+ * @param MRegClass rc  the register class to name
+ * @return str  `"gpr"` or `"fpr"`
+ */
+fn reg_class_name(rc: MRegClass) -> str {
+    match rc { MRegClass::GPR => "gpr"; MRegClass::FPR => "fpr" }
+}
+
+/**
+ * report_call_unsafe_assignment — print one call-unsafe-assignment diagnostic line to stderr.
+ *
+ * @param CallUnsafeAssignment v  the violation to report
+ * @return void
+ */
+fn report_call_unsafe_assignment(v: CallUnsafeAssignment) -> void {
+    let rc = reg_class_name(v.reg_class)
+    teko::io::eprintln($"teko: TEKO_NATIVE_CALL_SAFETY_CHECK: call-crossing vreg in caller-saved register — vreg={v.vreg_id} phys={v.phys} class={rc}")
+}
+
+/**
+ * report_call_unsafe_assignments — print one diagnostic line per call-unsafe assignment `abi`/
+ * `ivals`/`sr` disclose, when `call_safety_check_enabled`; a no-op otherwise, so the ordinary
+ * build's output is byte-identical to before this diagnostic existed.
+ *
+ * @param AbiDescriptor abi  the register file
+ * @param IntervalSet ivals  the scan's own intervals
+ * @param ScanResult sr  the scan's own output
+ * @return void
+ */
+fn report_call_unsafe_assignments(abi: AbiDescriptor, ivals: IntervalSet, sr: ScanResult) -> void {
+    if !call_safety_check_enabled() { return }
+    let violations = find_call_unsafe_assignments(abi, ivals, sr)
+    mut i: u64 = 0
+    loop {
+        if i >= violations.len { break }
+        report_call_unsafe_assignment(violations[i])
+        i++
+    }
 }
 
 /**
@@ -1608,6 +1860,8 @@ pub fn map_minst_regs(inst: MInst, table: []SubstEntry) -> MInst {
         MCall as x => MCall { sym = x.sym; uses = map_regs_list(x.uses, table); ret_reg = subst_find(table, x.ret_reg); has_result = x.has_result; variadic = x.variadic }
         MCallIndirect as x => MCallIndirect { target = subst_find(table, x.target); uses = map_regs_list(x.uses, table); ret_reg = subst_find(table, x.ret_reg); has_result = x.has_result }
         MRet => MRet { }
+        MOutArg as x => MOutArg { size = x.size; src = subst_find(table, x.src); index = x.index }
+        MInArg as x => MInArg { size = x.size; dst = subst_find(table, x.dst); index = x.index }
     }
 }
 
@@ -1940,6 +2194,10 @@ pub fn all_physical(f: MFunc) -> bool {
  * GONE (0.3.1.0 degrau 29): a spilled float now lowers to one `MFSpill`, so both
  * register files spill and there is nothing left for a pre-check to reject. That
  * closes the arm64 half of the same gap the x86 twin closed with `MFSpillX86`.
+ * `report_call_unsafe_assignments` runs on the scan's own output right before the rewrite
+ * (env-gated, `TEKO_NATIVE_CALL_SAFETY_CHECK=1` — a no-op otherwise), so a violation of the
+ * call-crossing invariant is named per-function instead of only surfacing as a distant,
+ * unattributed crash once the corrupted value is read back after a clobbering call.
  *
  * @param AbiDescriptor abi  the register file
  * @param MFunc f  the selected function (virtual MRegs + ABI pins)
@@ -1953,6 +2211,7 @@ pub fn regalloc_func(abi: AbiDescriptor, f: MFunc) -> MFunc | error {
         error as e => return e
     }
     let sr = linear_scan(abi, ivals)
+    report_call_unsafe_assignments(abi, ivals, sr)
     rewrite_func(abi, f, sr)
 }
 

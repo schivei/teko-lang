@@ -37,14 +37,21 @@ fn type_charlit(c: parser::CharLit) -> TExpr {
 fn type_boollit(b: parser::BoolLit) -> TExpr {   // `true`/`false` — the bool prim (LEGISLATION §75)
     TExpr { kind = TBoolLit { value = b.value }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
 }
-// A bare `null` types to the SENTINEL optional (an `Optional` whose inner is the `Void` marker
-// — REBOOT_PLAN §202; the C twin uses a NULL inner pointer): it unifies with ANY concrete `T?`
-// (type_eq) and is assignable to any optional slot (assignable). The CONCRETE inner is supplied
-// by the destination — a binding annotation `: T?`, a return `-> T?`, the other match/`if` arm,
-// or `x ?? null` — like a variant case widening into a variant slot. The VM lowers it to NONE
-// (untyped); codegen wraps it to the slot's optional type via emit_as.
+/**
+ * type_nulllit — a bare `null` literal is the concrete unit value `null : Null`. It
+ * WIDENS by set-membership into any union listing `null` (see `null_widens_into`); the
+ * destination type supplies the surrounding union at the binding/return/arm slot, exactly
+ * as a variant case widens into its variant. Retires the legacy `Optional{inner=Void}`
+ * bare-null sentinel (REBOOT_PLAN §202), which required a special "sentinel inner == Void
+ * unifies with any optional" arm in `type_eq`.
+ *
+ * @param n  the parsed `null` literal node
+ * @return   a `TExpr` whose `.type` is `Null{}` (never fails; the `| error` is the
+ *           uniform typer return shape)
+ * @since 0.3.1 (retire-Optional)
+ */
 fn type_nulllit(n: parser::NullLit) -> TExpr | error {
-    TExpr { kind = TNullLit { }; type = Optional { inner = Void { } }; line = 0; col = 0 }
+    TExpr { kind = TNullLit { }; type = Null { }; line = 0; col = 0 }
 }
 fn type_var(v: parser::Var, env: Env) -> TExpr | error {
     let b = match lookup_binding(env, v.name) { ValBinding as bb => bb; error as e => return e }
@@ -124,9 +131,9 @@ fn lam_collect_stmt(s: parser::Statement, ref refs: []str, ref bound: []str, ref
  * Collects the read/bound/written names of a single lambda-body expression `e` — the
  * per-expression-kind dispatch `lam_collect_stmt`/`lam_collect_block` recurse through. An
  * expression carries no assignment of its own, but the BLOCKS inside one (an `if`/`match` arm, a
- * nested lambda body) do, so `writes` is threaded through unchanged. Two arms carry history worth
+ * nested lambda body) do, so `writes` is threaded through unchanged. One arm carries history worth
  * keeping: `Borrow` (`&x`) recurses because a free read transits through the borrowed operand (AL
- * wave F1), and `SafeMethodCall` is the NP-OOP receiver/args walk (issue #116).
+ * wave F1).
  *
  * @param e       the expression to scan
  * @param refs    accumulates every read name (by-reference, write-through)
@@ -143,12 +150,9 @@ fn lam_collect_expr(e: parser::Expr, ref refs: []str, ref bound: []str, ref writ
         parser::IfExpr as f => { lam_collect_expr(f.cond, refs, bound, writes); lam_collect_block(f.then_blk, refs, bound, writes); if f.has_else { lam_collect_block(f.else_blk, refs, bound, writes) } }
         parser::MatchExpr as m => { lam_collect_expr(m.subject, refs, bound, writes); mut i = 0; loop { if i >= m.arms.len { break }; lam_collect_block(m.arms[i].body, refs, bound, writes); i++ } }
         parser::FieldAccess as fa => lam_collect_expr(fa.receiver, refs, bound, writes)
-        parser::SafeFieldAccess as sfa => lam_collect_expr(sfa.receiver, refs, bound, writes)
-        parser::Coalesce as co => { lam_collect_expr(co.left, refs, bound, writes); lam_collect_expr(co.right, refs, bound, writes) }
         parser::Cast as ct => lam_collect_expr(ct.expr, refs, bound, writes)
         parser::Borrow as b => lam_collect_expr(b.operand, refs, bound, writes)
         parser::MethodCall as mc => { lam_collect_expr(mc.receiver, refs, bound, writes); mut i = 0; loop { if i >= mc.args.len { break }; lam_collect_expr(mc.args[i], refs, bound, writes); i++ } }
-        parser::SafeMethodCall as smc => { lam_collect_expr(smc.receiver, refs, bound, writes); mut i = 0; loop { if i >= smc.args.len { break }; lam_collect_expr(smc.args[i], refs, bound, writes); i++ } }
         parser::StructLit as sl => { mut i = 0; loop { if i >= sl.field_vals.len { break }; lam_collect_expr(sl.field_vals[i], refs, bound, writes); i++ } }
         parser::Index as ix => { lam_collect_expr(ix.receiver, refs, bound, writes); lam_collect_expr(ix.index, refs, bound, writes) }
         parser::Interp as in => { mut i = 0; loop { if i >= in.holes.len { break }; lam_collect_expr(in.holes[i], refs, bound, writes); i++ } }
@@ -356,7 +360,7 @@ fn type_tilde_chain(b: parser::Binary, env: Env, table: TypeTable) -> TExpr | er
     type_call(call, env, table)
 }
 /** `~` is desugared WHOLESALE (chain-flattened + literal-folded) BEFORE the generic operand-typing
-    below — it never reaches a plain TBinary node (codegen/VM see an ordinary TCall or TStrLit,
+    below — it never reaches a plain TBinary node (codegen/interpreter see an ordinary TCall or TStrLit,
     nothing new to handle, mirroring how `params` needed no engine changes).
     (S6, issue #162) operators over a constrained type-param T stay a HONEST STOP, intentionally —
     no operator-trait exists yet to authorize `+`/`-`/… the way an interface constraint authorizes
@@ -701,7 +705,7 @@ fn type_bitwise_binop(op: lexer::TokenKind, l: TExpr, r: TExpr) -> TExpr | error
 
 /**
  * type_logical_binop — type a logical operator (`&& ||`): bool operands, bool result, short-circuit
- * (matches C + the VM).
+ * (matches C + the interpreter).
  *
  * @param op  the logical operator token
  * @param l   the typed left operand
@@ -875,7 +879,7 @@ fn type_list_builtin(c: parser::Call, env: Env, table: TypeTable) -> TExpr | Not
                 elem
             }
         }
-        // (#57) CONCRETIZE a SENTINEL base (bare empty()) to []elem so codegen can EMIT it; the VM
+        // (#57) CONCRETIZE a SENTINEL base (bare empty()) to []elem so codegen can EMIT it; the interpreter
         // ignores a slice's element type but codegen's emit_list_empty REQUIRES it. (Mirror expr.c.)
         let base = match elem { Void => TExpr { kind = s.kind; type = Slice { element = result_elem }; line = s.line; col = s.col }; _ => s }
         mut args = teko::list::push(teko::list::push(teko::list::empty(), base), x)
@@ -1136,7 +1140,7 @@ fn type_flags_method(mc: parser::MethodCall, env: Env, table: TypeTable) -> TExp
         return TExpr { kind = TCompare { first = andexpr; rest = teko::list::push(teko::list::empty(), term) }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
     }
     // any/none: compare (recv & mask) against a zero-valued flags literal (the same pattern as
-    // an enum ordinal cast — codegen/VM read the NAMED flags type off the node, not the literal).
+    // an enum ordinal cast — codegen/interpreter read the NAMED flags type off the node, not the literal).
     let zero = TExpr { kind = TNumber { is_float = false; value = parser::numint_of_u64(0); fval = 0.0 }; type = rt; line = 0; col = 0 }
     let cmp_op = if is_none { lexer::TokenKind::EqEq } else { lexer::TokenKind::Ne }
     let term = TCmpTerm { op = cmp_op; operand = zero }
@@ -1242,11 +1246,11 @@ fn type_param_call_error(decl: parser::TypeDecl, table: TypeTable) -> error | nu
  * segment; `ns_matches_call_qualifier` then compares `b.ns` against that whole canonical string
  * (equals, or ends-with `::<class>`), disambiguating two same-bare classes. Keeping the qualifier in
  * ONE segment — rather than splitting it back to `[..ns.., Class]` — means the callee never starts
- * with `teko`, so it never trips the VM's `teko`-rooted builtin name-sniffer (which would otherwise
+ * with `teko`, so it never trips the interpreter's `teko`-rooted builtin name-sniffer (which would otherwise
  * treat a method named `len`/`str`/`parse`/… on a `teko::…` class as a string builtin). Mirrors how
  * FIELD access already resolves off the canonical `Named` via the type table (why fields never
  * regressed). Both backends read only the LAST segment (the method) plus `TCall.call_ns`, so the
- * qualifier's shape is transparent to codegen and the VM.
+ * qualifier's shape is transparent to codegen and the interpreter.
  *
  * @param struct_name  the receiver's canonical class name (`ns::…::Class`, or bare at the root ns)
  * @param method       the dispatched method's bare name
@@ -1326,7 +1330,7 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable) -> TExpr
     // dynamically through the base's vtable — exactly the D3 mechanism, keyed on the base class as
     // the "contract". The slot is the method's index in the base's EFFECTIVE method list (the same
     // order codegen's `tk_vt_<Sub>_<Base>` build uses). The receiver rides args[0]; both engines
-    // resolve the CONCRETE override (VM by the payload's class name, native via the vtable slot).
+    // resolve the CONCRETE override (interpreter by the payload's class name, native via the vtable slot).
     // A `sealed` class is never a base — is_polymorphic_base filters it — so its calls stay direct.
     match decl.body {
         parser::ClassBody as bcb => {
@@ -1752,7 +1756,7 @@ fn type_call(c0: parser::Call, env: Env, table: TypeTable) -> TExpr | error {
 /**
  * numint_fits — does the signed-magnitude literal `v` fit the target integer prim `k`? (B.38 —
  * the full int set is now u8..u64/i8..i64, the 128-bit surface types having been removed,
- * drop-128 2026-07-24.) Replaces the old i128-carrier `value_fits` (carrier-detoxed off i128,
+ * drop-128 2026-07-24.) Replaces the old i64-carrier `value_fits` (carrier-detoxed off i64,
  * §2.1). Floats are handled separately (`float_fits`); Bool is never a literal target. An
  * unsigned target rejects a negative `v` first, then gates the magnitude against its max; a
  * signed target gates the magnitude against its positive max (non-negative `v`) or against
@@ -1801,15 +1805,90 @@ fn cast_kind(t: Type) -> PrimKind | error {
             else { p.kind }
         }
         Byte => PrimKind::U8
+        Ptr as p => cast_kind_of_ptr(p)
         _ => error { message = "cast not defined for this type in the seed (Named/Str/Slice/… — pending)" }
     }
 }
 
+/**
+ * cast_kind_of_ptr — `cast_kind`'s `Ptr` arm: the arena address-carrier decision
+ * (`docs/design/arena-em-teko.md` §2 P1 — "não existe cast `u64 -> ptr<byte>`, então nem o
+ * caminho alocante é alcançável a partir de um endereço calculado"). `u64` is ABI-identical to
+ * `void *` on every 64-bit target, so a `ptr<byte> <-> u64` pair carries `PrimKind::U64` into
+ * `cast_check`'s generic "any numeric to any numeric is defined" rule, making the cast a
+ * reinterpret rather than a conversion. Scoped NARROWLY to `ptr<byte>` (not every `ptr<T>`, and
+ * not the opaque `ptr`): the arena's whole address surface is `u64`-carried bytes, and widening
+ * this admission to arbitrary pointee types or the opaque pointer is outside what that decision
+ * asked for.
+ *
+ * @param p  the resolved `Ptr` type (`p.inner` is the pointee, or `null` for the opaque `ptr`)
+ * @return   `PrimKind::U64` when `p` is `ptr<byte>`; a NAMED error for every other pointer shape
+ */
+fn cast_kind_of_ptr(p: Ptr) -> PrimKind | error {
+    match p.inner {
+        Type as inner => match inner {
+            Byte => PrimKind::U64
+            _ => error { message = "cast not defined for this pointer's element type in the seed (only `ptr<byte> <-> u64`, the arena address carrier, is defined — arena-em-teko.md §2)" }
+        }
+        null => error { message = "cast not defined for the opaque `ptr` in the seed (only `ptr<byte> <-> u64`, the arena address carrier, is defined — arena-em-teko.md §2)" }
+    }
+}
+
+/**
+ * cast_ptr_partner_ok — when either cast endpoint is a `Ptr`, is the OTHER endpoint the ONE
+ * partner the address-carrier decision admits (`docs/design/arena-em-teko.md` §2: `ptr<byte> <->
+ * u64`, and ONLY that pairing)?
+ *
+ * WHY THIS EXISTS SEPARATELY FROM `cast_kind_of_ptr`. `cast_kind_of_ptr` answers `ptr<byte>` with
+ * `PrimKind::U64` so the pair can ride `cast_check`'s generic "any numeric to any numeric is
+ * defined" rule below — but that rule only ever sees the two `PrimKind`s, never the concrete
+ * types they came from. Left alone, it would accept `ptr<byte> to i32` or `f64 to ptr<byte>` —
+ * ANY numeric partner, not just `u64` — because `PrimKind::U64` reads as "some 64-bit-ish numeric"
+ * to a rule that was written for genuine numeric-to-numeric pairs. P1 is a same-bit-pattern
+ * REINTERPRET, not a machine conversion (`lir::lower_cast`'s `is_u64_ptr_byte_reinterpret_cast`
+ * emits it as literally zero instructions), so a pairing that rule cannot honour must never
+ * type-check in the first place. This checks the ACTUAL partner type, closing that gap before
+ * `cast_kind` is ever consulted.
+ *
+ * @param from  the cast operand's resolved type
+ * @param to    the cast target's resolved type
+ * @return      `null` when NEITHER side is `Ptr` (the generic rule below decides it), or the one
+ *              `Ptr` side's partner is exactly `u64`; a NAMED error for every other
+ *              pointer-involving pairing (including pointer-to-pointer)
+ * @since 0.3.1
+ */
+fn cast_ptr_partner_ok(from: Type, to: Type) -> error | null {
+    let from_ptr = is_bare_ptr(from)
+    let to_ptr = is_bare_ptr(to)
+    if !from_ptr && !to_ptr { return null }
+    if from_ptr && to_ptr {
+        return error { message = "cast not defined between two pointer types in the seed (only `ptr<byte> <-> u64`, the arena address carrier, is defined — arena-em-teko.md §2)" }
+    }
+    let partner = if from_ptr { to } else { from }
+    if is_u64_prim(partner) { return null }
+    error { message = "cast not defined for this pointer/numeric pairing in the seed (only `ptr<byte> <-> u64`, the arena address carrier, is defined — arena-em-teko.md §2)" }
+}
+
+// is `t` (structurally) a `Ptr` — opaque `ptr` or any `ptr<T>`? `cast_ptr_partner_ok`'s own
+// classifier; `cast_kind_of_ptr` still owns which POINTEE that `Ptr` may carry.
+fn is_bare_ptr(t: Type) -> bool {
+    match t { Ptr => true; _ => false }
+}
+
+// is `t` the resolved primitive `u64` — the ONE partner `cast_ptr_partner_ok` admits opposite a `Ptr`?
+fn is_u64_prim(t: Type) -> bool {
+    match t { Prim as p => p.kind == PrimKind::U64; _ => false }
+}
+
 // is `from -> to` a DEFINED conversion? Any integer/byte ↔ integer/byte is (the loss is
 // runtime/codegen's — B; byte casts AS u8 — B.36). Only Bool and non-numeric ends are rejected.
+// A `Ptr` endpoint is additionally pairwise-gated by `cast_ptr_partner_ok` (arena-em-teko.md §2 —
+// see its own doc for why `cast_kind`'s `PrimKind::U64` answer for `ptr<byte>` is not, by itself,
+// enough to keep this rule scoped to the one pairing that decision admits).
 // Reused by the counter-validation (E6-2) — ONE source of truth (M.5).
 fn cast_check(from: Type, to: Type) -> error | null {
     if type_eq(from, to) { return null }   // same type — a no-op
+    match cast_ptr_partner_ok(from, to) { null => { }; error as e => return e }
     match cast_kind(from) { PrimKind => { }; error as e => return e }
     match cast_kind(to) { PrimKind => { }; error as e => return e }
     null   // any numeric/byte → any numeric/byte is defined (B; byte AS u8)
@@ -1821,7 +1900,7 @@ fn cast_check(from: Type, to: Type) -> error | null {
  * only (comptime folding deferred). Only the int-literal → int-target case is statically
  * range-checkable (B.38, u8..u64/i8..i64); float→int / int→float / float→float constant
  * conversions are runtime-guarded (trunc toward zero, overflow/NaN/∞ → panic — §5) — the checker
- * permits them, the fit is codegen/VM's.
+ * permits them, the fit is codegen/interpreter's.
  *
  * @param e       the candidate literal expression
  * @param target  the cast/annotation target type
@@ -2151,7 +2230,7 @@ fn type_field_access(fa: parser::FieldAccess, env: Env, table: TypeTable) -> TEx
 
 // ---- `?.` safe navigation (NP-OOP, issue #116) — the shared checker DESUGAR ----
 // `recv?.member…` on a CLASS/INTERFACE optional lowers IN THE CHECKER to the equivalent
-// typed match (no new TAST node, so the VM and native codegen run it through their
+// typed match (no new TAST node, so the interpreter and native codegen run it through their
 // existing match/method/field machinery — twin-identical by construction):
 //     match recv { null => null; <Inner> as __tkqL_C => __tkqL_C.<member…> }
 // typed `R?` (an already-optional R stays R?; a void R makes the whole safe call void —
@@ -2159,8 +2238,6 @@ fn type_field_access(fa: parser::FieldAccess, env: Env, table: TypeTable) -> TEx
 
 // the deterministic per-node binder name `__tkq<line>_<col>` (position-derived, no global
 // counter — both twin checkers produce the same name for the same node).
-fn safe_binder_name(line: u32, col: u32) -> str { $"__tkq{line}_{col}" }
-
 /**
  * unread_guard_placeholder — a syntactically-valid but never-evaluated `TArm.guard` for an arm
  * built with `has_when = false`; every consumer skips the guard field entirely in that case, so
@@ -2172,32 +2249,6 @@ fn unread_guard_placeholder() -> TExpr {
     TExpr { kind = TNumber { is_float = false; value = parser::numint_of_u64(0); fval = 0.0 }; type = Void { }; line = 0; col = 0 }
 }
 
-// build the typed `match recv { null => <null:R?>; <Inner> as binder => <armv> }`.
-// `armv` is the already-typed present-arm value (the member call/read on the binder).
-fn safe_nav_match(recv: TExpr, inner_name: str, binder: str, armv: TExpr) -> TExpr {
-    let is_void = match armv.type { Void => true; _ => false }
-    let result = if is_void { armv.type } else {
-        match armv.type { Optional => armv.type; _ => Optional { inner = armv.type } }
-    }
-    // null arm: `null => null` (typed to the result optional) — or an EMPTY body when void.
-    mut null_body: []TStatement = teko::list::empty()
-    if !is_void {
-        null_body = teko::list::push(null_body, TExprStmt { expr = TExpr { kind = TNullLit { }; type = result; line = 0; col = 0 } })
-    }
-    mut arms: []TArm = teko::list::empty()
-    let guard_ph = unread_guard_placeholder()
-    arms = teko::list::push(arms, TArm { pattern = parser::NullPattern { }; has_when = false; guard = guard_ph; body = null_body })
-    // present arm: `<Inner> as binder => <armv>` — the pattern re-resolves nominally in the
-    // VM/codegen exactly like a user-written `match` over a `T?`.
-    mut segs: []parser::Segment = teko::list::empty()
-    segs = teko::list::push(segs, parser::Segment { name = inner_name })
-    let bindp = parser::BindPattern { type_name = parser::Path { segments = segs }; has_binding = true; binding = binder; is_slice = false; slice_type = null; type_args = [] }
-    mut pbody: []TStatement = teko::list::empty()
-    pbody = teko::list::push(pbody, TExprStmt { expr = armv })
-    arms = teko::list::push(arms, TArm { pattern = bindp; has_when = false; guard = guard_ph; body = pbody })
-    TExpr { kind = TMatchExpr { subject = recv; arms = arms }; type = result; line = 0; col = 0 }
-}
-
 /**
  * is_foreach_elem_placeholder — is `p` the for-each loop-head desugar's element-bind placeholder
  * (§5.4)? `loop mut x in <it> { … }` desugars (`parser::loop_head.tks`) to `match _it() { null =>
@@ -2207,7 +2258,7 @@ fn safe_nav_match(recv: TExpr, inner_name: str, binder: str, armv: TExpr) -> TEx
  * capture — a semantic contradiction, owner ruling). `resolve_foreach_arm`, BEFORE any
  * pattern-matching/exhaustiveness/codegen ever sees a for-each match's arms, rewrites this
  * placeholder into a REAL `T as x` bind (T = the iterator's resolved element type) — the SAME
- * sound, pre-existing named-bind mechanism `Foo as v` already uses, so VM/native/LIR need NO
+ * sound, pre-existing named-bind mechanism `Foo as v` already uses, so interpreter/native/LIR need NO
  * special case.
  *
  * @param p  the arm pattern to classify
@@ -2222,9 +2273,9 @@ fn is_foreach_elem_placeholder(p: parser::Pattern) -> bool {
 
 /**
  * elem_type_name — the RUNTIME-facing BARE name of a for-each iterator's element type `t` — the
- * SAME bare, unqualified spelling VM's `bind_case_name`/`val_type_matches` and codegen's
+ * SAME bare, unqualified spelling interpreter's `bind_case_name`/`val_type_matches` and codegen's
  * `cg_path_last`/`cg_emit_case_key_str` already compare against for an ordinary `Foo as v` bind
- * (mirrors the "#109 W3 bare-vs-bare" convention throughout match.tks/vm.tks/codegen.tks — the
+ * (mirrors the "#109 W3 bare-vs-bare" convention throughout match.tks/the interpreter's twin/codegen.tks — the
  * runtime never carries a namespace). Handles the realistic element-type shapes (prim, byte, char,
  * str, a named struct/class/enum); every other `Type` case is a clean, named internal error (not
  * yet supported by the for-each desugar).
@@ -2309,7 +2360,7 @@ fn resolve_foreach_placeholders(arms: []parser::Arm, subject: Type) -> []parser:
  * the element type in ONE function (mirrors `resolve_foreach_arm`'s shape), binds the element name
  * directly to the ALREADY-KNOWN type (no re-derivation needed — it came straight from `_it`'s
  * resolved return type), types the body against that binding, and the emitted `TArm.pattern`
- * carries a REAL, bare-named `BindPattern` (`elem_type_name`) — so VM's `pat_match`/codegen's
+ * carries a REAL, bare-named `BindPattern` (`elem_type_name`) — so interpreter's `pat_match`/codegen's
  * `emit_pat_binds` see an ORDINARY named bind and need no special case (#517, §5.4.1).
  *
  * @param a        the syntactic placeholder arm
@@ -2351,138 +2402,10 @@ fn type_match_arm(a: parser::Arm, subject: Type, env: Env, table: TypeTable) -> 
     type_arm(a, subject, env, table)
 }
 
-// validate a `?.` receiver: must be a NON-sentinel optional; enrich the disjoint-domain
-// case (an `X | error` union reads via `match`, never `?.` — the LAW's other half).
-fn safe_nav_receiver(receiver: parser::Expr, env: Env, table: TypeTable) -> TExpr | error {
-    let recv = match type_expr(receiver, env, table) { TExpr as te => te; error as e => return e }
-    let inner = match recv.type {
-        Optional as o => o.inner
-        _ => {
-            let is_error_like = match recv.type { Error => true; _ => match expand_variant(recv.type, table) { Variant => true; _ => false } }
-            if is_error_like {
-                return error { message = "`?.` reads absence (`T?`), never errors — inspect an `X | error` union with `match` (disjoint-domain law)" }
-            }
-            return error { message = "safe access `?.` needs an optional receiver (`T?`) — use `.` for a non-optional (REBOOT_PLAN §203)" }
-        }
-    }
-    match inner {
-        Void => error { message = "`?.` on a bare `null` has no member to reach (annotate the optional's type)" }
-        _ => recv
-    }
-}
-
-// `recv?.field` (REBOOT_PLAN §203): the receiver must be an OPTIONAL of a named struct or
-// class; the result is the field's type made optional — null propagates. A STRUCT inner
-// keeps the dedicated TSafeFieldAccess node; a CLASS inner desugars to the safe-nav match
-// (NP-OOP), routing through type_field_access so visibility holds EXACTLY like a bare `.`.
-fn type_safe_field_access(sfa: parser::SafeFieldAccess, line: u32, col: u32, env: Env, table: TypeTable) -> TExpr | error {
-    let recv = match safe_nav_receiver(sfa.receiver, env, table) { TExpr as te => te; error as e => return e }
-    let inner = match recv.type { Optional as o => o.inner; _ => return error { message = "internal: safe_nav_receiver guarantees an optional" } }
-    let name = match inner {
-        Named as n => n.name
-        _ => return error { message = "safe field access on a non-struct optional is not yet supported (the struct-field layer is pending — M.3)" }
-    }
-    let decl = match type_table_find(table, name, "") {   // (#109 W1) safe-field-access receiver lookup on a resolved name — no referencing ns
-        parser::TypeDecl as td => td
-        error => return error { message = $"unknown type for safe field access: {name}" }
-    }
-    // (NP-OOP, issue #116) CLASS route — desugar to the safe-nav match; the arm's field read
-    // is typed by type_field_access itself (same visibility, same `.len`/field rules).
-    match decl.body {
-        parser::ClassBody => {
-            let binder = safe_binder_name(line, col)
-            let env2 = define(env, binder, inner, false)
-            let rvar = parser::Expr { kind = parser::Var { name = binder }; line = line; col = col }
-            let fa2 = parser::FieldAccess { receiver = rvar; field = sfa.field }
-            let tf = match type_field_access(fa2, env2, table) { TExpr as te => te; error as e => return e }
-            return safe_nav_match(recv, name, binder, tf)
-        }
-        _ => { }
-    }
-    // STRUCT route — the original TSafeFieldAccess lowering (native emission is value-based).
-    let ft = match decl.body {
-        parser::StructBody as sb => match field_type(sb.fields, sfa.field, table, type_ns_of(table, name)) { Type as t => t; error as e => return e }
-        _ => return error { message = $"type {name} is not a struct (no fields)" }
-    }
-    // the result is `(field)?` — an already-optional field stays as-is (no double-wrap).
-    let rt = match ft { Optional => ft; _ => Optional { inner = ft } }
-    TExpr { kind = TSafeFieldAccess { receiver = recv; field = sfa.field }; type = rt; line = 0; col = 0 }
-}
-
-// `recv?.method(args)` (NP-OOP, issue #116): a null-propagating METHOD call on a `T?` of a
-// named struct/class/interface. Desugars to the safe-nav match; the arm's call is typed by
-// type_method_call itself — visibility, arity, defaults and interface (vtable) dispatch all
-// behave EXACTLY like a bare `.` call (no bypass through the null-propagating path).
-fn type_safe_method_call(smc: parser::SafeMethodCall, line: u32, col: u32, env: Env, table: TypeTable) -> TExpr | error {
-    let recv = match safe_nav_receiver(smc.receiver, env, table) { TExpr as te => te; error as e => return e }
-    let inner = match recv.type { Optional as o => o.inner; _ => return error { message = "internal: safe_nav_receiver guarantees an optional" } }
-    let name = match inner {
-        Named as n => n.name
-        _ => return error { message = "safe method call `?.` needs an optional of a named type (a struct, class or interface)" }
-    }
-    let decl = match type_table_find(table, name, "") {   // (#109 W1) safe-method-call receiver lookup on a resolved name — no referencing ns
-        parser::TypeDecl as td => td
-        error => return error { message = $"unknown type for safe method call: {name}" }
-    }
-    // an ENUM inner would desugar into a member pattern, not a type bind — honest stop.
-    match decl.body {
-        parser::EnumBody => return error { message = "safe method call on an optional enum is not yet supported — bind it with `match` first" }
-        _ => { }
-    }
-    let binder = safe_binder_name(line, col)
-    let env2 = define(env, binder, inner, false)
-    let rvar = parser::Expr { kind = parser::Var { name = binder }; line = line; col = col }
-    let call = parser::MethodCall { receiver = rvar; method = smc.method; args = smc.args }
-    let tc = match type_method_call(call, env2, table) { TExpr as te => te; error as e => return e }
-    safe_nav_match(recv, name, binder, tc)
-}
-
-// `a ?? b` (REBOOT_PLAN §203): the left must be Optional `T?`; the right is `T` (result `T`)
-// or `T?` (result `T?`). A bare `null` on the right adopts the left's optional (the one site
-// where `null` gets its context — REBOOT_PLAN §202).
-fn type_coalesce(co: parser::Coalesce, env: Env, table: TypeTable) -> TExpr | error {
-    let l = match type_expr(co.left, env, table) { TExpr as te => te; error as e => return e }
-    let unwrapped = match l.type {
-        Optional as o => o.inner
-        _ => return error { message = "`??` needs an optional left operand (`T?`) — its right is the fallback (REBOOT_PLAN §203)" }
-    }
-    // (NP-OOP, issue #116) a SENTINEL optional left (`null ?? x`) has no inner `T` to unwrap —
-    // honest error (M.1), mirroring the C twin's NULL-inner guard.
-    match unwrapped {
-        Void => return error { message = "`??` on a bare `null` has nothing to unwrap — the left must be a typed `T?` (REBOOT_PLAN §203)" }
-        _ => { }
-    }
-    match co.right.kind {
-        parser::NullLit => {   // `x ?? null` ⇒ T? — the right adopts the left's optional type
-            let rnull = TExpr { kind = TNullLit { }; type = l.type; line = 0; col = 0 }
-            return TExpr { kind = TCoalesce { left = l; right = rnull }; type = l.type; line = 0; col = 0 }
-        }
-        _ => { }
-    }
-    let r = match type_expr(co.right, env, table) { TExpr as te => te; error as e => return e }
-    // A DIVERGING fallback (panic/exit) never produces a value — accept it for any left type; the
-    // result is the unwrapped `T` (the present-case value). (No `never` type — legislator's ruling.)
-    if texpr_diverges(r) { return TExpr { kind = TCoalesce { left = l; right = r }; type = unwrapped; line = 0; col = 0 } }
-    // (issue #120) a `void` fallback never produces a value either — but unlike a diverging
-    // call it does not GUARANTEE control never returns, so it cannot stand in for `T`. Honest
-    // error (M.1), mirroring the C twin's `tk_type_is_void(&rt)` guard exactly (same message).
-    if type_is_void(r.type) { return error { message = "a `void` expression cannot be the `??` fallback (M.1)" } }
-    // `T? ?? T` ⇒ T (the unwrapping case). (NP-OOP, issue #116) the fallback may also WIDEN
-    // into T — the same assignability a binding/param slot grants (widens_into), so a
-    // conforming class instance backs an interface-typed optional: `shape_opt ?? circle`.
-    if type_eq(r.type, unwrapped) || widens_into(r.type, unwrapped, table) {
-        return TExpr { kind = TCoalesce { left = l; right = r }; type = unwrapped; line = 0; col = 0 }
-    }
-    if type_eq(r.type, l.type) {   // `T? ?? T?` ⇒ T?
-        return TExpr { kind = TCoalesce { left = l; right = r }; type = l.type; line = 0; col = 0 }
-    }
-    error { message = "the `??` fallback must be `T` or `T?` for the left's optional `T?` (REBOOT_PLAN §203)" }
-}
-
 // ---- struct literal `Name { f = v, … }` (W4a) ----
 // Resolve the named struct, require EXACTLY the declared fields (once each — M.1), check
 // per-field value types, and emit the typed children in the struct's DECLARED order (so the
-// VM and codegen lower identically). A numeric literal adopts a fitting field prim type
+// interpreter and codegen lower identically). A numeric literal adopts a fitting field prim type
 // (parity with annotated bindings).
 // `expected` is the binding/return/param type the literal flows into (a `Void` sentinel = none). It
 // retargets a GENERIC struct constructor `Box { … }` to the concrete instance named by the annotation
@@ -2659,7 +2582,7 @@ fn name_has_generic_base(mname: str, base: str) -> bool {
 // ---- subscript index `recv[index]` (W5-idx) ----
 // The receiver is a `str` (-> byte) or a slice `[]T` (-> element type T); the index must be
 // an integer prim. str indexing/.len is fully lowered in both backends; slice values can't
-// be constructed yet, so a slice index type-checks here but is an honest stop in VM/codegen.
+// be constructed yet, so a slice index type-checks here but is an honest stop in interpreter/codegen.
 fn type_index(ix: parser::Index, env: Env, table: TypeTable) -> TExpr | error {
     let recv = match type_expr(ix.receiver, env, table) { TExpr as te => te; error as e => return e }
     let idx = match type_expr(ix.index, env, table) { TExpr as te => te; error as e => return e }
@@ -2723,7 +2646,7 @@ fn datetime_formatter_of(t: Type) -> str {
  * Desugar a Date/Time interpolation hole with a calendar pattern into a `to_string` CALL.
  *
  * Rewrites `$"{d:yyyy-MM-dd}"` into `<ns>::date_to_string(d, "yyyy-MM-dd")` (or `time_to_string`),
- * typed here so codegen and the VM see an ordinary str-returning call — both engines then run the
+ * typed here so codegen and the interpreter see an ordinary str-returning call — both engines then run the
  * SAME pure-Teko formatter, guaranteeing byte-identical output. The raw (un-typed) hole is reused
  * as the receiver so the call's own argument typing applies uniformly.
  *
@@ -3293,9 +3216,6 @@ fn type_dispatch(e: parser::Expr, env: Env, table: TypeTable) -> TExpr | error {
         parser::IfExpr as f => type_if(f, env, table)
         parser::MatchExpr as m => type_match(m, env, table)
         parser::FieldAccess as fa => type_field_access(fa, env, table)
-        parser::SafeFieldAccess as sfa => type_safe_field_access(sfa, e.line, e.col, env, table)
-        parser::SafeMethodCall as smc => type_safe_method_call(smc, e.line, e.col, env, table)   // (NP-OOP, issue #116)
-        parser::Coalesce as co => type_coalesce(co, env, table)
         parser::Cast as c => type_cast(c, env, table)
         parser::MethodCall as mc => {
             // (C8.3) flags helper methods are typed here; (OOP A1) struct instance methods
@@ -4348,7 +4268,7 @@ fn type_binding(b: parser::Binding, env: Env, table: TypeTable) -> TypedStmt | e
     if !env.fn_unsafe && unsafe_carrying(bound, table) {
         return error { message = "safe fn binds a local of unsafe type — mark the enclosing fn `unsafe fn` or bind only safe types (§2: unsafe data cannot be held by a safe local)" }
     }
-    let node = TBinding { kind = b.kind; target = b.target; bound = bound; value = v }
+    let node = TBinding { kind = b.kind; target = b.target; bound = bound; value = v; di_kind = b.di_kind }
     match b.target {
         parser::SimpleName as sn => TypedStmt { node = node; env = define(env, sn.name, bound, bind_is_mut(b.kind)) }
         parser::DestructurePattern => TypedStmt { node = node; env = env }   // [destructuring binding: refinement]
@@ -4803,7 +4723,7 @@ fn coerce_argument_into(a: TExpr, pt: Type, table: TypeTable) -> TExpr | error {
 
 /** arg_keeps_narrow_type — an argument that WIDENS into a parameter type `pt` normally ADOPTS `pt`
     (its TExpr.type is rewritten to `pt`); but where the EMIT wraps the value at the use site, the
-    arg must KEEP its narrow `arg_type` so codegen/VM see the concrete value they must wrap. True for:
+    arg must KEEP its narrow `arg_type` so codegen/interpreter see the concrete value they must wrap. True for:
     a case→variant widen (emit_as tags the union), a bare `T`→`T?` widen (present-wrap), a class→
     interface/base upcast (fat-pointer build), and a `[]E_a`→`[]E_p` element widen where `E_a != E_p`
     (the slice is REBUILT element-wise — bare `[]i64`→`[]i64?` or covariant `[]Return`→`[]Statement`;
@@ -5998,7 +5918,7 @@ fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable
             type = Named { name = qualify(env.cur_ns, struct_name) }   // (#109 W3) canonical: self's concrete subclass type qualified by the method's ns
             line = 0; col = 0
         }
-        let bind_stmt = TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = base_binding_name }; bound = Named { name = if name_qualifier(base_name) != "" { base_name } else { qualify(env.cur_ns, base_name) } }; value = cast_val }   // (#109 W3 / #152) canonical: base_name arrives PRE-QUALIFIED from canon_class_bases; a bare one qualifies by the class's own ns
+        let bind_stmt = TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = base_binding_name }; bound = Named { name = if name_qualifier(base_name) != "" { base_name } else { qualify(env.cur_ns, base_name) } }; value = cast_val; di_kind = parser::DiKind::None }
         mut prefixed: []TStatement = teko::list::push(teko::list::empty(), bind_stmt)
         mut si = 0
         loop { if si >= ret_stmts.len { break }; prefixed = teko::list::push(prefixed, ret_stmts[si]); si++ }
@@ -6379,7 +6299,7 @@ fn type_function(f: parser::Function, env: Env, table: TypeTable) -> TFunction |
 /**
  * (OOP A1, 2026-07-01) Type-check EVERY method body on a struct TypeDecl and stamp each into a full
  * `TFunction` item (namespace = "<owning-ns>::<StructName>", mirroring `collect_signatures`'
- * registration exactly, so codegen and the VM mangle and resolve method calls to these SAME items).
+ * registration exactly, so codegen and the interpreter mangle and resolve method calls to these SAME items).
  *
  * Called from both `type_program` and `type_program_with_deps`' main loops, alongside the ordinary
  * TypeDecl pass-through — a struct with methods contributes MULTIPLE `TItem`s, not one.
@@ -6742,7 +6662,7 @@ pub fn type_program_with_deps_pre_mono(raw_program: parser::Program, dep_prog: T
     let lc = check_labels(mainbody, teko::list::empty(), false, teko::list::empty())
     if lc.failed { diags = teko::list::push(diags, lc.message) }
     // For the result, prepend dep items so the TProgram contains the full program (dep + project).
-    // This allows subsequent operations (codegen, VM, coverage) to see all items.
+    // This allows subsequent operations (codegen, interpreter, coverage) to see all items.
     mut all_items: []TItem = teko::list::empty()
     mut di: u64 = 0
     loop {
@@ -6813,7 +6733,7 @@ fn pre_walk(program: parser::Program, col: CollectOutcome) -> PreWalk {
 // THE TYPED ENTRY POINT: pass 1 (collect top-level names) + pass 2 (type each item).
 pub fn type_program(raw_program: parser::Program) -> TProgram | error {
     // (TR0) FOLD trait derivations FIRST — every later stage (collect, conformance, typing,
-    // codegen layout, the VM) sees each deriver's already-folded body; a trait decl itself stays
+    // codegen layout, the interpreter) sees each deriver's already-folded body; a trait decl itself stays
     // registered (for honest value-position/instantiation errors) but is never emitted.
     let folded = fold_traits_collected(raw_program)
     if folded.diags.len > 0 { return diags_error(folded.diags) }

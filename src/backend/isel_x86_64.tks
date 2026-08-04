@@ -575,10 +575,9 @@ fn select_identity_mov_x86(ctx0: SelCtxX86, inst: lir::LInst, a: u32, wide: bool
  * (`0x8000000000000000`, `i64::MIN`'s two's-complement image) `select_fneg_x86`
  * XORs into an f64 value's raw bits to flip its sign — the true IEEE negate
  * (unlike `0 - x`, which mis-signs a zero operand in round-to-nearest). Reuses
- * `MINST_I64_MIN` (`minst_interp.tks`, the same GPR-staging constant
- * `select_const_float_x86`'s sibling `decode_signed64` is built from) rather
- * than a fresh literal — `i64::MIN`'s own magnitude has no positive `i64` form,
- * so the two-step subtraction trick would only duplicate an already-named one.
+ * `MINST_I64_MIN` (`isel_arm64.tks`, beside `decode_signed64`) rather than a
+ * fresh literal — `i64::MIN`'s own magnitude has no positive `i64` form, so a
+ * two-step subtraction trick would only duplicate an already-named constant.
  *
  * @return i64  the f64 sign-bit mask
  */
@@ -600,6 +599,27 @@ fn f64_sign_bit_mask_x86() -> i64 {
  */
 fn f32_sign_bit_mask_x86() -> i64 {
     (0) - X86_IMM32_MIN_MAGNITUDE
+}
+
+/**
+ * select_bits_cross_x86 — the `IToFBits`/`FToIBits` selection (degrau 27): one `MFMovX86` raw
+ * GPR/FPR-crossing move (x86-64's `MOVQ`) into a fresh result VReg — NOT `CVTSI2SD`/`CVTTSD2SI`
+ * (numeric conversion, a different value). `dbl` is always true: `f64_from_bits`/`f64_bits`
+ * (`checker/scope.tks`) are fixed to `u64 <-> f64`, no `f32` form exists.
+ *
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param a  the operand VReg
+ * @param bool to_float  true for `IToFBits` (GPR operand, fresh FPR result), false for
+ *                       `FToIBits` (FPR operand, fresh GPR result)
+ * @return SelCtxX86  the advanced context
+ */
+fn select_bits_cross_x86(ctx0: SelCtxX86, inst: lir::LInst, a: u32, to_float: bool) -> SelCtxX86 {
+    let dst_class = if to_float { MRegClass::FPR } else { MRegClass::GPR }
+    let src_class = if to_float { MRegClass::GPR } else { MRegClass::FPR }
+    let dst = vreg(inst.result, dst_class)
+    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, dst_class, true)
+    selctx_x86_emit(ctx1, fmov_x86(dst, vreg(a, src_class), true))
 }
 
 /**
@@ -692,8 +712,9 @@ fn select_ftof_x86(ctx0: SelCtxX86, inst: lir::LInst, a: u32, a_wide: bool) -> S
 
 /**
  * select_un_x86 — the `LUn` dispatch (§4.1): the two-address integer
- * negate/complement, the identity move for the extend/truncate ops, and the
- * float negate/convert family (`B1-fp`, closed 2026-07-29).
+ * negate/complement, the identity move for the extend/truncate ops, the
+ * float negate/convert family (`B1-fp`, closed 2026-07-29), and the raw
+ * IEEE-754 bit-reinterpretation pair (`IToFBits`/`FToIBits`, degrau 27).
  *
  * @param SelCtxX86 ctx0  the context to extend
  * @param lir::LInst inst  the enclosing instruction (its result VReg)
@@ -712,6 +733,8 @@ fn select_un_x86(ctx0: SelCtxX86, inst: lir::LInst, u: lir::LUn) -> SelCtxX86 {
         lir::LUnOp::IToF => select_itof_x86(ctx0, inst, u.a)
         lir::LUnOp::FToI => select_ftoi_x86(ctx0, inst, u.a, a_info.wide)
         lir::LUnOp::FToF => select_ftof_x86(ctx0, inst, u.a, a_info.wide)
+        lir::LUnOp::IToFBits => select_bits_cross_x86(ctx0, inst, u.a, true)
+        lir::LUnOp::FToIBits => select_bits_cross_x86(ctx0, inst, u.a, false)
     }
 }
 

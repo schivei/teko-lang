@@ -866,6 +866,54 @@ pub type MCallIndirect = struct {
 pub type MRet = struct { }
 
 /**
+ * MOutArg — store one OUTGOING call argument into the caller-owned stack-arg
+ * area (AAPCS64 §6.4.2): `STR src, [sp, #index * ARM64_REG_BYTES]`. Each
+ * slot is 8 bytes wide; the actual transfer uses `size` so a 32-bit value is
+ * stored with the correct STR width. Emitted by `pin_args` for every argument
+ * that overflows the 8-register window of its register class.
+ *
+ * @since #383 A2-5
+ */
+pub type MOutArg = struct {
+    /**
+     * size — the access width (X/W for GPR, D/S for FPR).
+     */
+    size: MMemSize
+    /**
+     * src — the source register (holds the overflow argument value).
+     */
+    src: MReg
+    /**
+     * index — the stack slot index (byte offset = index * 8).
+     */
+    index: u32
+}
+
+/**
+ * MInArg — load one INCOMING parameter out of the caller-owned stack-arg
+ * area (AAPCS64 §6.4.2): `LDR dst, [sp, #frame_size + index * ARM64_REG_BYTES]`.
+ * Emitted by `select_param` for every parameter past the 8-register window
+ * of its register class. The frame_size displacement is resolved at encoding
+ * time from `FrameLayout.size`.
+ *
+ * @since #383 A2-5
+ */
+pub type MInArg = struct {
+    /**
+     * size — the access width (X/W for GPR, D/S for FPR).
+     */
+    size: MMemSize
+    /**
+     * dst — the destination virtual register.
+     */
+    dst: MReg
+    /**
+     * index — the stack slot index (byte offset from incoming-arg base = index * 8).
+     */
+    index: u32
+}
+
+/**
  * MInst — the machine-instruction payload: one of the AArch64-keyed cases
  * above. A `MInst` carries virtual registers (A3 colors them) and physical-
  * register pins (the ABI); it holds no encoded bytes (§2.2 of the isel
@@ -873,7 +921,7 @@ pub type MRet = struct { }
  *
  * @since #383 A2-1
  */
-pub type MInst = variant MAlu | MAluImm | MMSub | MNeg | MMvn | MFAlu | MFNeg | MCmp | MCmpImm | MFCmp | MCSet | MMovZ | MMovK | MMovN | MFMov | MMov | MExt | MCvt | MLoad | MStore | MFSpill | MFrameAddr | MAdrp | MAddLo | MBranch | MBranchCond | MCbz | MCall | MCallIndirect | MRet
+pub type MInst = variant MAlu | MAluImm | MMSub | MNeg | MMvn | MFAlu | MFNeg | MCmp | MCmpImm | MFCmp | MCSet | MMovZ | MMovK | MMovN | MFMov | MMov | MExt | MCvt | MLoad | MStore | MFSpill | MFrameAddr | MAdrp | MAddLo | MBranch | MBranchCond | MCbz | MCall | MCallIndirect | MRet | MOutArg | MInArg
 
 /**
  * MBlock — a machine basic block: its id, its block-args (the SSA-lite
@@ -1359,6 +1407,30 @@ pub fn call_indirect_inst(target: MReg, uses: []MReg, ret_reg: MReg, has_result:
 pub const RET_INST: MInst = MRet { }
 
 /**
+ * out_arg — an outgoing stack-argument store instruction (MOutArg).
+ *
+ * @param MMemSize size  the transfer width (X/W for GPR, D/S for FPR)
+ * @param MReg src  the source register (holds the argument value)
+ * @param u32 index  the stack slot index (byte offset = index * 8)
+ * @return MInst  the built instruction
+ */
+pub fn out_arg(size: MMemSize, src: MReg, index: u32) -> MInst {
+    MOutArg { size = size; src = src; index = index }
+}
+
+/**
+ * in_arg — an incoming stack-parameter load instruction (MInArg).
+ *
+ * @param MMemSize size  the transfer width (X/W for GPR, D/S for FPR)
+ * @param MReg dst  the destination register
+ * @param u32 index  the stack slot index (byte offset from frame top = index * 8)
+ * @return MInst  the built instruction
+ */
+pub fn in_arg(size: MMemSize, dst: MReg, index: u32) -> MInst {
+    MInArg { size = size; dst = dst; index = index }
+}
+
+/**
  * empty_mmodule — a module with no functions/rodata/globals/layouts (the
  * isel seed, mirroring `lir::empty_module`).
  *
@@ -1393,22 +1465,46 @@ fn push_minst_block(b: MBlock, inst: MInst) -> MBlock {
 }
 
 /**
- * append_minst — a copy of `f` with `inst` appended to the block whose id
- * is `block_id` (mirrors `lir::append_inst`).
+ * append_minst — `f` with `inst` appended to the block whose id is
+ * `block_id` (mirrors `lir::append_inst`).
+ *
+ * MUTATES `blocks[i]` IN PLACE (an index-assign onto the local `blocks`,
+ * which aliases the SAME underlying buffer as `f.blocks` — slice value
+ * semantics copy the {ptr,len} header, not the array) INSTEAD OF rebuilding
+ * the whole `blocks` list every call. `selctx_emit` (the arm64 twin's
+ * emit helper) calls this ONCE PER EMITTED INSTRUCTION, so the old rebuild
+ * was O(blocks × instructions) over a whole function's selection — and
+ * every untouched block was re-pushed as a SHALLOW STRUCT COPY (`nb = b`),
+ * so its own `insts` fat pointer kept aliasing the SAME instruction buffer
+ * across every one of those rebuilds. The OUTER `blocks` list itself is a
+ * self-append `mut` chain the checker proves free-old-safe
+ * (`assign_frees_old`), so each rebuild PARKED the previous `blocks` array
+ * on the free-list — while the aliased `insts` pointers those parked
+ * copies carried were still the LIVE tail some other generation's
+ * push-cache witness could authorize an in-place grow into, corrupting
+ * memory the free-list believed dead (the wild-write chase
+ * `TEKO_NATIVE_PUSH_REDZONE` caught live on the x86 twin: a
+ * `[]MBlockX86`-sized redzone stomped by exactly this shape — arm64 shares
+ * the identical `MBlock`/`append_minst` structure). Appending in place
+ * removes the O(n²) cost AND the shallow-copy generations that made the
+ * aliasing possible in the first place — there is no rebuilt array for the
+ * wrong generation to survive into.
  *
  * @param MFunc f  the function to extend
  * @param u32 block_id  which block's instruction stream gains `inst`
  * @param MInst inst  the instruction to append
  * @return MFunc  the extended function
+ * @since 0.3.1 (native-region-crash, wild-write fix)
  */
 pub fn append_minst(f: MFunc, block_id: u32, inst: MInst) -> MFunc {
-    mut blocks: []MBlock = teko::list::empty()
+    mut blocks = f.blocks
     mut i: u64 = 0
     loop {
-        if i >= f.blocks.len { break }
-        let b = f.blocks[i]
-        let nb = if b.id == block_id { push_minst_block(b, inst) } else { b }
-        blocks = teko::list::push(blocks, nb)
+        if i >= blocks.len { break }
+        if blocks[i].id == block_id {
+            blocks[i] = push_minst_block(blocks[i], inst)
+            break
+        }
         i++
     }
     MFunc { symbol = f.symbol; blocks = blocks; frame = f.frame }
@@ -1473,13 +1569,14 @@ fn mreg_list_set(xs: []MReg, index: u32, reg: MReg) -> []MReg {
  * @return MFunc  the updated function
  */
 pub fn set_block_param(f: MFunc, block_id: u32, index: u32, reg: MReg) -> MFunc {
-    mut blocks: []MBlock = teko::list::empty()
+    mut blocks = f.blocks
     mut i: u64 = 0
     loop {
-        if i >= f.blocks.len { break }
-        let b = f.blocks[i]
-        let nb = if b.id == block_id { MBlock { id = b.id; params = mreg_list_set(b.params, index, reg); insts = b.insts } } else { b }
-        blocks = teko::list::push(blocks, nb)
+        if i >= blocks.len { break }
+        if blocks[i].id == block_id {
+            blocks[i] = MBlock { id = blocks[i].id; params = mreg_list_set(blocks[i].params, index, reg); insts = blocks[i].insts }
+            break
+        }
         i++
     }
     MFunc { symbol = f.symbol; blocks = blocks; frame = f.frame }
@@ -1992,6 +2089,26 @@ fn print_ret(i: MRet) -> str {
 }
 
 /**
+ * print_out_arg — `outarg.<size> src, #index`.
+ *
+ * @param MOutArg i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_out_arg(i: MOutArg) -> str {
+    teko::str::concat("outarg.", mem_size_name(i.size), " ", reg_ref(i.src), ", #", teko::u64_to_str(i.index to u64))
+}
+
+/**
+ * print_in_arg — `inarg.<size> dst, #index`.
+ *
+ * @param MInArg i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_in_arg(i: MInArg) -> str {
+    teko::str::concat("inarg.", mem_size_name(i.size), " ", reg_ref(i.dst), ", #", teko::u64_to_str(i.index to u64))
+}
+
+/**
  * print_minst — the instruction text for one `MInst` (no result prefix —
  * a case's own destination operand, when it has one, already renders it).
  *
@@ -2030,6 +2147,8 @@ fn print_minst(i: MInst) -> str {
         MCall as x => print_call(x)
         MCallIndirect as x => print_call_indirect(x)
         MRet as x => print_ret(x)
+        MOutArg as x => print_out_arg(x)
+        MInArg as x => print_in_arg(x)
     }
 }
 

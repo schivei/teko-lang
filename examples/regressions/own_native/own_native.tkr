@@ -38,9 +38,13 @@
 # THE TWO FILES MOVE TOGETHER, and that is enforced, not hoped for:
 # `src/build/own_native_pairing_test.tkt` reads both and fails when a name lives on only one side.
 #
-# THE FIVE REMAINING `Then exit` ROWS ARE NOT A LEFTOVER. Each is a `Given source` program whose whole
-# contract IS its exit code (the cross targets and the C-route oracle) — that is a program's observable,
-# not a case addressed by a number.
+# THE EXIT CODE IS NO LONGER A DATA CHANNEL (owner ruling 2026-08-02 — "removi dos testes os exit; os
+# regressivos que esperam um exit devem olhar para o stdout, e os codigos que faziam exit agora fazem
+# println"). Every case whose exit code merely CARRIED a value — the cross-target verticals and the
+# null-arm C-route oracle — now `println`s that value and its row asserts it on stdout. The exit code
+# stays the observable of ONLY two kinds of program: a deliberate PANIC (`Then it traps`, non-zero via
+# stderr) and the lone KNOWN-STOP whose whole subject IS the exit syscall firing in program mode
+# (`capture_off_in_program_mode_still_exits_for_real`) — neither of which a stdout line can express.
 Feature: F2 language corpus — folded EXPECT_EXIT single-file fixtures (dobrado, dir removido)
 
   Scenario: own_arith_exit (own-native — `n` is a `mut` local, so the MUL/ADD are fold-opaque)
@@ -124,9 +128,9 @@ Feature: F5 own-native corpus — os cenarios que o backend nativo tem de fechar
   # keep is what makes it honest, not louder.
   #
   # `Then object well-formed` still runs, and it is the whole point of a cross build: the emitted
-  # artefact IS the requested format. PROMOTE BACK to `When built and run` + `Then exit = 42` the
-  # day this lane gains an emulator — at which point the exit becomes checkable and the row should
-  # go back to checking it.
+  # artefact IS the requested format. PROMOTE BACK to `When built and run` + `Then stdout pattern =
+  # "42"` the day this lane gains an emulator — at which point the printed value becomes checkable and
+  # the row should go back to checking it (the source `println`s 42; owner ruling 2026-08-02).
   Scenario: own_cross_x86_64_windows_emits_coff (0.3.1 C5 — the object is the claim)
     Given target = "x86_64-windows"
     Given source = "cases/cross_exit42.tks"
@@ -140,7 +144,7 @@ Feature: F5 own-native corpus — os cenarios que o backend nativo tem de fechar
   # did not exist; the fix was to make the target exist.
   #
   # `When built`, not `When built and run`, for the SAME reason the COFF row above gives: on an
-  # x86_64 host `arm64-linux` is CROSS, the run is honest-skipped, and a declared `Then exit` would
+  # x86_64 host `arm64-linux` is CROSS, the run is honest-skipped, and a declared stdout claim would
   # be a claim no host here can keep — which is a skip, and `no_skips_gate.sh` is right to fail a
   # lane over it. The claim this row makes is the OBJECT: a well-formed, linker-consumable AArch64
   # `ET_REL` carrying e_machine 183.
@@ -152,7 +156,8 @@ Feature: F5 own-native corpus — os cenarios que o backend nativo tem de fechar
   # directions: with the argument, an AArch64 object passes as `arm64-linux` and FAILS as
   # `x86_64-linux`; the mirror case (x86_64 bytes claimed as `arm64-linux`) fails too.
   #
-  # The exit code lives on `own_host_os_arch_exit210_runs` below, where a host can actually check it.
+  # The value 210 lives on `own_host_os_arch_exit210_runs` below, printed to stdout where a host can
+  # actually check it.
   Scenario: own_cross_arm64_linux_emits_elf (AArch64-ELF — the object is the claim)
     Given target = "arm64-linux"
     Given source = "cases/cross_exit210.tks"
@@ -175,14 +180,14 @@ Feature: F5 own-native corpus — os cenarios que o backend nativo tem de fechar
     Given target = "host-os-arch"
     Given source = "cases/cross_exit42.tks"
     When built and run
-    Then exit = 42
+    Then stdout pattern = "42"
     Then object well-formed
 
   # (AArch64-ELF crumb 3) THE VALUE THE arm64-Linux LANE OWES, and the only row that can collect it:
   # `host-os-arch` resolves to whatever os-arch this host natively builds, so this row RUNS on every
   # host — and on an arm64 Linux runner that name is now `arm64-linux`, which means the whole
   # vertical is exercised end to end and JUDGED BY ITS VALUE: arm64 isel → AAPCS64 regalloc → arm64
-  # encode → `emit_elf_arm64` → the host `cc` links the ELF → the binary runs → exit 210. Before
+  # encode → `emit_elf_arm64` → the host `cc` links the ELF → the binary runs → prints 210. Before
   # `Arm64Linux` existed, `tkr_resolve_target_name` degraded `host-os-arch` to the plain `host`
   # sentinel there (the resolver had no name to spell out) and the row honest-skipped.
   #
@@ -190,13 +195,13 @@ Feature: F5 own-native corpus — os cenarios que o backend nativo tem de fechar
   # `e_machine` must be the one the RESOLVED os-arch names — AArch64 on the arm64 leg, X86-64 on the
   # x86_64 leg — which is the assertion check_elf.sh's second argument makes possible.
   #
-  # 210 is this lane's own exit value, distinct from the corpus-wide 42, so a row asserting it can
+  # 210 is this lane's own value, distinct from the corpus-wide 42, so a row asserting it can
   # never be satisfied by another fixture's binary being run by mistake.
   Scenario: own_host_os_arch_exit210_runs (AArch64-ELF — the host vertical, judged by its value)
     Given target = "host-os-arch"
     Given source = "cases/cross_exit210.tks"
     When built and run
-    Then exit = 210
+    Then stdout pattern = "210"
     Then object well-formed
 
 
@@ -464,6 +469,13 @@ Feature: str query/slice builtins — `contains`/`ends_with`/`slice`/`slice_to`/
     When built and run
     Then stdout pattern = "scenario str_slice_family: ok"
 
+  Scenario: native_host_ffi (own-native — the aggregate-returning host FFI marshalled by the own-register `tk_rt_*_ok` twins: env::var/env::cwd/io::read_file/fs::list_dir each read back a correct str/[]str-or-error, weighted-summed to 60)
+    When built and run
+    Then stdout pattern = "scenario native_host_ffi: ok"
+
+  Scenario: host_error_union_fallback (own-native — retire-Optional O2: the `null | error` host FFI shapes (mkdir/write_file/remove_file), through the SAME no-`use`-import fallback path that resolves `host_error_optional` — now `Variant{Null,Error}` instead of `Optional{Error}` — both arms of each, weighted-summed to 63)
+    When built and run
+    Then stdout pattern = "scenario host_error_union_fallback: ok"
 
 Feature: a breakless loop tail — a value-returning function/arm whose LAST statement is a bare `loop { … }` with no `break` at all
 
@@ -920,6 +932,15 @@ Feature: float-to-text — `ftoa`/`f64_g17` lower to the runtime's own `%.17g` r
     When built and run
     Then stdout pattern = "scenario f32_text_is_its_own_value: ok"
 
+  # The OWNER invariant (2026-08-02): a float hole is rendered by the RUNTIME renderer, never folded to
+  # a literal at compile time, because a compile-time float fold diverges from the runtime and breaks
+  # the fixpoint. A BARE float literal in the hole is the purest fold target the const-fold layer can
+  # face, and the sibling above only ever interpolates a `let`-bound const — so this pins the raw
+  # literal, proving it agrees with a direct `teko::ftoa` call on the same value and with the pinned text.
+  Scenario: float_hole_bare_literal_stays_runtime (own-native — a bare `f64` literal hole travels the runtime `tk_ftoa_len` path, never a compile-time fold)
+    When built and run
+    Then stdout pattern = "scenario float_hole_bare_literal_stays_runtime: ok"
+
 Feature: slice/str element READ — `recv[i]` is bounds-checked on the native backend too (0.3.1.0 leitura-fora-de-fronteira)
 
   # Degrau 28 closed the element WRITE and, in closing it, MEASURED that the element READ had no guard
@@ -1084,16 +1105,36 @@ Feature: 0.3.1.0 degrau 30 — o padrao `null` num match sobre uniao de QUALQUER
     When built and run
     Then stdout pattern = "scenario d30_null_arm_wrong_arm_guard: ok"
 
+Feature: retire-Optional O1 — a bare `null` literal born `Null{}` instead of the retired `Optional{inner=Void}` sentinel
+
+  Scenario: null_birth_null_type (own-native — the birth-type flip pinned across its slot classes: a `mut` union-member reassignment, a standalone annotated `let`, a struct-typed union ARGUMENT/RETURN)
+    When built and run
+    Then stdout pattern = "scenario null_birth_null_type: ok"
+
+  Scenario: null_narrow_match (own-native — `match x { null => …; T as t => … }` over a migrated union still exhausts and binds, arm order reversed too)
+    When built and run
+    Then stdout pattern = "scenario null_narrow_match: ok"
+
+Feature: retire-Optional O4 — fold the SENTINEL consumer arms into the Null rail (widens_into_at present-wrap, type_eq Void-unify, type_has_sentinel Optional arm, match.tks Optional arms deleted)
+
+  Scenario: null_narrow_ifguard (own-native — a `when`-guarded match arm combined with `T | null` narrowing still narrows and exhausts correctly, routed purely through the generic Null-member Variant machinery)
+    When built and run
+    Then stdout pattern = "scenario null_narrow_ifguard: ok"
+
+  Scenario: empty_slice_sentinel_untouched (own-native — the SEPARATE `Slice{Void}` empty-slice sentinel is untouched by O4: proves the Optional-arm deletions in type_eq/type_has_sentinel did not over-delete the Slice arms in the same two functions)
+    When built and run
+    Then stdout pattern = "scenario empty_slice_sentinel_untouched: ok"
+
   Scenario: null_arm_three_member_union (own-native — o MESMO programa nas duas rotas; esta e a rota propria)
     Given source = "cases/null_arm_three_member_union.tks"
     When built and run
-    Then exit = 42
+    Then stdout pattern = "42"
 
   Scenario: null_arm_three_member_union (C route — o ORACULO: a rota que ja respondia, contra a qual o valor da rota propria se mede)
     Given source = "cases/null_arm_three_member_union.tks"
     Given env = ["TEKO_BACKEND=c"]
     When built and run
-    Then exit = 42
+    Then stdout pattern = "42"
 
   # A INVERSAO DA CAPTURA, e ela e por REVERSAO e nao por interruptor (§14.6 do desenho de journaling).
   # A captura de `#test` (§14) faz um `exit(n)` dentro de um corpo de teste voltar como um FACTO SOBRE
@@ -1106,8 +1147,9 @@ Feature: 0.3.1.0 degrau 30 — o padrao `null` num match sobre uniao de QUALQUER
   # esta LIGADA dentro do modo teste — e a guarda de `src/test/capture_test.tkt`. A guarda so nao e
   # decoracao porque pode falhar nos DOIS sentidos.
   #
-  # As filas cujo contrato E o codigo de saida (os alvos cruzados 42/210, o `defer_cascade_exit` cujo
-  # codigo de saida E a prova LIFO) dependem todas desta mesma lei; estas duas nomeiam-na.
+  # Desde que o dono tirou o exit dos canais de dado (2026-08-02), a UNICA fila cujo contrato ainda E
+  # mesmo o codigo de saida e este known-stop — o `exit(7)` num PROGRAMA tem de sair pela syscall com o
+  # seu valor; nao ha stdout que o exprima. Estas duas rotas dependem desta lei e nomeiam-na.
 
   Scenario: capture_off_in_program_mode_still_exits_for_real (own-native — a rota propria)
     Given source = "cases/capture_exit_7.tks"
@@ -1156,6 +1198,10 @@ Feature: 0.3.1.0 degrau 30 — o padrao `null` num match sobre uniao de QUALQUER
     When built and run
     Then stdout pattern = "scenario alias_fat_field: ok"
 
+  Scenario: owned_fat_field (own-native — o cenario afirma-se pelo nome, nao por um codigo de saida)
+    When built and run
+    Then stdout pattern = "scenario owned_fat_field: ok"
+
   Scenario: int_to_str (own-native — o cenario afirma-se pelo nome, nao por um codigo de saida)
     When built and run
     Then stdout pattern = "scenario int_to_str: ok"
@@ -1163,6 +1209,10 @@ Feature: 0.3.1.0 degrau 30 — o padrao `null` num match sobre uniao de QUALQUER
   Scenario: generic_variant_match (own-native — o cenario afirma-se pelo nome, nao por um codigo de saida)
     When built and run
     Then stdout pattern = "scenario generic_variant_match: ok"
+
+  Scenario: generic_variant_field (own-native — um campo de variante num struct generico instanciado tem de ser embrulhado, senao o `match` le uma tag-lixo e cai na aresta morta)
+    When built and run
+    Then stdout pattern = "scenario generic_variant_field: ok"
 
   Scenario: last_index_of (own-native — o cenario afirma-se pelo nome, nao por um codigo de saida)
     When built and run
@@ -1259,6 +1309,10 @@ Feature: 0.3.1.0 degrau 30 — o padrao `null` num match sobre uniao de QUALQUER
   Scenario: f64_bits_roundtrip (own-native — o cenario afirma-se pelo nome, nao por um codigo de saida)
     When built and run
     Then stdout pattern = "scenario f64_bits_roundtrip: ok"
+
+  Scenario: f64_bitcast_arith (own-native — o cenario afirma-se pelo nome, nao por um codigo de saida)
+    When built and run
+    Then stdout pattern = "scenario f64_bitcast_arith: ok"
 
   Scenario: cast_narrow_in_range_keeps_value (own-native — o cenario afirma-se pelo nome, nao por um codigo de saida)
     When built and run
@@ -1663,4 +1717,100 @@ Feature: 0.3.1.0 degrau agregado-copia — todo o agregado POR VALOR emite copia
   Scenario: an_unaliased_aggregate_reassignment_still_rebinds (own-native — a SEGUNDA inversao, no arco da reatribuicao: uma fonte que ninguem alia mantem o caminho ordinario)
     When built and run
     Then stdout pattern = "scenario an_unaliased_aggregate_reassignment_still_rebinds: ok"
+
+
+Feature: 0.3.1 backend-memoria — o emit nativo fundido por-funcao escopa o scratch e larga por funcao (encode_module_fused_x86), e cada forma continua a emitir bytes correctos
+
+  Scenario: bmem_two_fns (own-native — DUAS funcoes, cada uma emitida na sua propria regiao de scratch; simbolos/relocs por-funcao copiados para a raiz antes do drop)
+    When built and run
+    Then stdout pattern = "scenario bmem_two_fns: ok"
+
+  Scenario: bmem_call_chain (own-native — bm_f chama bm_g: o reloc de `call` cruza funcoes, `RelocX86.sym` (E1) sobrevive ao drop e o rebase de `.text` entre funcoes esta correcto)
+    When built and run
+    Then stdout pattern = "scenario bmem_call_chain: ok"
+
+  Scenario: bmem_many_small (own-native — 64 funcoes pequenas somadas: ~64 regioes largadas, nenhum vazamento de nome/byte cruzando funcoes)
+    When built and run
+    Then stdout pattern = "scenario bmem_many_small: ok"
+
+  Scenario: bmem_rodata_shared (own-native — duas funcoes com o MESMO literal: a rodata (Grupo B, E2) e carregada por-referencia, NUNCA cai na regiao de scratch, e a partilha sobrevive)
+    When built and run
+    Then stdout pattern = "scenario bmem_rodata_shared: ok"
+
+  Scenario: bmem_loop_fn (own-native — funcao com `loop` e valor loop-carried: o maior scratch de regalloc (IntervalSet) e escopado-e-largado sem afectar os bytes)
+    When built and run
+    Then stdout pattern = "scenario bmem_loop_fn: ok"
+
+  Scenario: bmem_lambda (own-native, 0.3.1 C6.3 — UM closure liftado numa janela por-item de LOWERING fundido; o seu id de thunk sobrevive ao drop da regiao que o criou e e chamado corretamente por outro item)
+    When built and run
+    Then stdout pattern = "scenario bmem_lambda: ok"
+
+  Scenario: bmem_lambdas_many (own-native, 0.3.1 C6.3 — SETE closures liftados, cada um na sua propria janela de item; nenhum id de thunk colide entre items (E5))
+    When built and run
+    Then stdout pattern = "scenario bmem_lambdas_many: ok"
+
+
+Feature: promoted native known-stops and the one_byte oracle — folded from the retired native_union / one_byte projects (0.3.1 consolidation)
+
+  # (native_union_scalar) THE NATIVE BACKEND'S NULL-UNION STOP, PROMOTED. Owner ruling 2026-07-28:
+  # "trocar a asserção para esperar por falha honesta". CLOSED (cargo/0.3.1.0-null-adopt): `probe()`
+  # returns 42 on BOTH routes. What closed it is narrow — `lower_cast` unconditionally asked
+  # `prim_kind_of` for its cast's own type, which has no single machine class for a `Variant`; a
+  # `Variant`-targeted cast (the synthetic widening node the const inliner wraps a scalar-const
+  # reference in) now routes through `lower_value_into_type`. The general `.32` UnionRepr porting is
+  # NOT claimed done — only this shape (a numeric null-union reached through the const-inliner's widen)
+  # is verified. It is a MEMBER now that it lowers: one build, asserting the value the C route always
+  # produced (40 present + 2 absent-fallback = 42).
+  Scenario: native_union_scalar (own-native — a numeric null-union reached through the const-inliner's widen now lowers)
+    When built and run
+    Then stdout pattern = "scenario native_union_scalar: ok"
+
+  # (native_union_nested) CLOSED — 0.3.1.0 degrau 25. A null-union struct nested INSIDE another
+  # null-union field, the shape the native placement-coercion stop was first measured on. Every
+  # own-backend placement coerces its value into the slot's DECLARED type (`lower_value_into_type`)
+  # except two that had no declared type — a struct-literal field and a call argument;
+  # `collect_field_decls` and `callee_param_types` are what those placements now read. Both levels
+  # present (30), inner `null` (fallback 5), outer `null` (fallback 7) sum to 42, so a wrapper written
+  # at either level with the wrong tag shows up as a WRONG SUM, not a stop.
+  Scenario: native_union_nested (own-native — a null-union field nested inside a null-union field round-trips both levels)
+    When built and run
+    Then stdout pattern = "scenario native_union_nested: ok"
+
+  # (one_byte_native) `teko::one_byte(byte) -> str` existed in the checker and the runtime mirror but
+  # was NOT lowered natively: `call_symbol` found no symbol and returned `unresolved_builtin_stop`.
+  # The exit sums SIX disjoint weights (3, 12, 16, 32, 64, 128 = 255), one per call shape: the minimal
+  # call, the escape-accumulation of `json.tks:218-225`, the UTF-8 pair of `json.tks:296`, a byte from
+  # a slice index, two live results at once, and the NUL byte. No partial sum reaches 255, so a shape
+  # that falls moves the number and names itself. The C-route oracle for the same 255 rides as
+  # `cases/one_byte_c.tks` (env C — the shared project build's config is fixed by the first scenario's
+  # env, so the two routes cannot share one build).
+  Scenario: one_byte_native (own-native — the six call shapes of `one_byte` each produce their own byte and length)
+    When built and run
+    Then stdout pattern = "scenario one_byte_native: ok"
+
+  # (one_byte_c) the C route of the `one_byte` regressor, the ORACLE of the value the native side
+  # asserts. `Given env = ["TEKO_BACKEND=c"]` fixes a STANDALONE build (its own synthesized manifest),
+  # so it never shares the native member build above. The same program, the same 255: the C route
+  # reaches it by `tk_one_byte` (a `tk_str` struct return by value) and the native route by
+  # `tk_one_byte_len` (pointer in the result register, length through the hidden out-slot) — two
+  # independent realizations that must agree on the number.
+  Scenario: one_byte_c (C route — the same 255 the native member asserts, through tk_one_byte)
+    Given source = "cases/one_byte_c.tks"
+    Given env = ["TEKO_BACKEND=c"]
+    When built and run
+    Then stdout pattern = "255"
+
+  # (native_iface_fat) A KNOWN-STOP still open: a fat (`str`) result arriving through INTERFACE
+  # DISPATCH. The arm calls `v.speak()` — a VIRTUAL dispatch whose result is `str` — and
+  # `lower_call_fat`'s own narrower stop refuses a fat result through a vtable. Nothing declares a loose
+  # `null`; both bindings are annotated `Animal_sbmd | null` and receive what that type accepts, so the
+  # stop is the backend's, not a bad fixture. It rides as a `Given source` compile-fail (it aborts the
+  # build and cannot be a member of the successful shared build). PROMOTE to a member (`When built and
+  # run` / value 42) the day the fat interface-dispatch result lands. (Four bulk scenarios hit this
+  # exact stop while being triaged — `class_base_binding`, `class_inheritance`,
+  # `class_invariant_construction`, `class_upcast` — reported, not re-pinned: identical diagnostic.)
+  Scenario: native_iface_fat (own-native — a str-returning virtual method called through its base stops honestly)
+    Given source = "cases/native_iface_fat.tks"
+    When compilation fails
+    Then diagnostic = "fat-pointer interface-dispatch result not yet lowered"
 

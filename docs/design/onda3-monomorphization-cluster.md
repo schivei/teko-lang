@@ -1,4 +1,4 @@
-# Onda-3 — the monomorphization + VM + 128-bit keystone cluster
+# Onda-3 — the monomorphization + interpreter + 128-bit keystone cluster
 
 **Status:** DESIGN-AHEAD (architect). No product code changed. Ready to implement the instant #300 merges.
 **Seed:** `0.0.1.37-alpha` (teko.tkp).
@@ -39,9 +39,9 @@ low-risk, and unblocks the 128-bit math family without waiting on A. A is the re
 - **Root:** (historically) — inside `fn norm_int(raw: i128, signed: bool, width: u8)` the unsigned
   128-bit arm is `else { raw to u128 }`. `raw` is the `i128` carrier; a u128 with the high bit set is
   stored as a *negative* i128, and `i128 to u128` is a **checked** cast that PANICS on a negative source
-  ("impossible conversion"). So `u128::MAX`, `2^127`, any high-bit value: the former VM would panic; native lowers it as a
+  ("impossible conversion"). So `u128::MAX`, `2^127`, any high-bit value: the former interpreter would panic; native lowers it as a
   plain two's-complement `(unsigned __int128)` and is correct → **divergence historically present.**
-- **Layer:** none of the five mono layers — this is the **value-normalization** layer (historically in VM) (the `.tks`
+- **Layer:** none of the five mono layers — this is the **value-normalization** layer (historically in interpreter) (the `.tks`
   stand-in for the C `tag` switch), entirely inside the interpreter.
 - **Kind:** historically interpreter-only.
 - **The idiom already exists** three functions up: `wrap_hole_to_u64` ((historically)) does the non-trapping
@@ -104,10 +104,10 @@ Grounded against the current tree:
   classes nominally (so the struct *satisfies* the constraint — `constraint_atom_satisfied`,
   `monomorph.tks:72`), but the codegen upcast + `tk_vt_<T>_<iface>` vtable are gated on
   `cg_is_class_named` (`codegen.tks:441`, and every `tk_vt_`/`tk_base_` site). A struct has no fat-pointer
-  `{data, vtable}` rep, so a `x.measure()` on a constraint-bound struct either panicked in the former VM (no vtable
+  `{data, vtable}` rep, so a `x.measure()` on a constraint-bound struct either panicked in the former interpreter (no vtable
   to name-dispatch through as a value) or emits an upcast to a never-generated symbol natively.
 - **Layer:** straddles **stamp/rewrite-calls** (`rekey_iface_dispatch`) and **codegen** (vtable emission).
-- **Kind:** both engines (former VM panic; native cc-reject / miscompile).
+- **Kind:** both engines (former interpreter panic; native cc-reject / miscompile).
 - **Design fork (see §4):** structs are value types with no vtable slot. There are two law-clean
   resolutions; one is a genuine scope decision → **HALT candidate** (resolved below, but flagged).
 
@@ -120,7 +120,7 @@ Grounded against the current tree:
   `codegen.tks:849`) and the annotation path (`codegen.tks:1214`) DO know `checker::Func => "tk_closure"` —
   the mangle family is the sole gap. Also `cg_opt_mangle_texpr_str` (`codegen.tks:1086`) has no
   `FunctionType` arm (its `_` is the syntactic twin of the same gap).
-- **Former VM root:** a closure (`FuncVal`) re-seated into a `Ref` cell (`cell_set`) is dropped across a call
+- **Former interpreter root:** a closure (`FuncVal`) re-seated into a `Ref` cell (`cell_set`) is dropped across a call
   boundary. The cell store threads back correctly for scalars (`with_cells(caller, fe.env.cells)`,
   historically at (historically)), so the drop is in the closure-value *capture-vs-cell* path: a `FuncVal` carries its
   `cap_vals` by SNAPSHOT (`eval_lambda_call`, historically at (historically)), so a closure written into a cell after
@@ -205,7 +205,7 @@ clean keying + mangle base; #294 is the ruled scope decision layered on the stam
 > (`teko-verify-both-with-test-gate`): gen1 `teko . -o bin` (native #test gate) + `./bin/teko test .`
 > (historically interpreter) + FIXPOINT `gen1==gen2` byte-identical + `diff_vm_native.sh` + `TEKO_MEM_PARANOID=1` + `//`-audit.
 
-### B/#296 — u128 non-trapping reinterpret (formerly VM-specific, ~1 crumb)
+### B/#296 — u128 non-trapping reinterpret (formerly interpreter-specific, ~1 crumb)
 
 **File:** (historically). **Touches:** `norm_int` (1586). **Adds:** one helper.
 
@@ -496,7 +496,7 @@ checker::Func => "func"
 parser::FunctionType => "func"
 ```
 
-**#301 crumb 2 — ref-cell closure round-trip (historically VM-specific).**
+**#301 crumb 2 — ref-cell closure round-trip (historically interpreter-specific).**
 Historically, the interpreter would drop a `FuncVal` re-seated into a cell across a call boundary because `eval_lambda_call` (historically at (historically)) would bind captures by SNAPSHOT (`fv.cap_vals`). Design: a closure that must observe a
 cell WRITE performed after its capture must capture the CELL INDEX (a `RefVal`), not the value — which is
 already the sound pattern (#300's "make_counter returns 1,1,1" proof). For the `reseat(cell: Ref<IntFn>, n)`

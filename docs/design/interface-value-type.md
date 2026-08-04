@@ -82,7 +82,7 @@ law-first, and delivers the IO1 payoff on the half that ships **today**.
    (`lir/lower.tks:5,13`, exit(n)/integer/control only). A `class & Reader`
    build on the own backend fails `native backend N1: no layout registered for
    struct …` (reproduced). This is the emit-throughput remodel's own multi-wave
-   track, **NOT this keystone** — see §3 (the VM is retired — the differential is C-vs-own,
+   track, **NOT this keystone** — see §3 (the interpreter is retired — the differential is C-vs-own,
    `scripts/diff_c_own.sh`, and its corpus is exit(n)-scoped by design).
 
 **Verdict up front:** the keystone ships its user-visible value (dynamic
