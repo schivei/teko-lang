@@ -72,10 +72,18 @@ jobs:
       # heavier runs here (owner 2026-08-03: "não precisa, em theory, executar o mem paranoid,
       # queremos apenas encontrar pontos de ruptura"); the CI-hygiene fixtures pr.yml runs after the
       # fixpoint are not rupture detectors and are deliberately absent.
+      # ONE-OFF H2 narrowing (2026-08-04, wild-write): gen2 native now COMPILES (gate met) but
+      # crashes M.1 in the CHECKER phase while building gen3 — before any lowering, so the fat-store
+      # guards cannot be on its path (H1 refuted for the residual). Arm the runtime's own H2 aids on
+      # the native leg ONLY: TEKO_NATIVE_POISON_FREE reports a corrupted PARKED block + offset at
+      # take, TEKO_NATIVE_PUSH_REDZONE catches a push-cache/stale-slot append overrun at its source.
+      # The C leg stays clean (both '0') so its byte-identity fixpoint + teko.c harvest are unaffected.
       - name: Fixpoint — gen2 == gen3 over the same source (backend = ${{ matrix.backend }})
         shell: bash
         env:
           TEKO_FIXPOINT_BACKEND: ${{ matrix.backend }}
+          TEKO_NATIVE_POISON_FREE: ${{ matrix.backend == 'native' && '1' || '0' }}
+          TEKO_NATIVE_PUSH_REDZONE: ${{ matrix.backend == 'native' && '1' || '0' }}
         run: sh scripts/fixpoint_gate.sh out/teko . .fixpoint
 
       # HARVEST THE FRESH SEED. When the fixpoint HELD, the gate staged gen3.c — this run's
