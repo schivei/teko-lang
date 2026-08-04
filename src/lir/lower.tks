@@ -14045,15 +14045,21 @@ fn lower_assign_frees_old(ctx: LowerCtx, slot: u32, a: checker::TAssign) -> Lowe
  * address, compute the field's address via its registered layout offset, then store. A FAT field
  * (`a.bound`, 0.3.1.0 raiz A — R3) delegates to `store_fat_through_addr`, which writes both halves
  * of its `{ptr, len}` pair — writing the single word `store_assign_value` writes left `h.name.len`
- * reading whatever the field's PREVIOUS length happened to be, silently (raiz-comum §5.2). Every
- * other field delegates to `store_assign_value` (a compound op first loads the current value,
- * applies it, then stores the result).
+ * reading whatever the field's PREVIOUS length happened to be, silently (raiz-comum §5.2). Before
+ * that write, `check_store_fat_span` re-asserts the SAME under-size guard `store_struct_fields`
+ * already runs on the struct-literal path (raiz A — R4): a fat value landing in a field whose
+ * registered layout span is under `fat_slot_bytes()` would let the 16-byte `{ptr, len}` store
+ * overrun into the next field, so the guard honest-stops NAMING the struct and field instead of
+ * leaving the overrun to surface as a heap corruption at teardown. Every other field delegates to
+ * `store_assign_value` (a compound op first loads the current value, applies it, then stores the
+ * result).
  *
  * @param ctx  the lowering context
  * @param a    the typed assignment (kind `Field`; `a.target` is the typed field access)
  * @return     the context with the field store appended, or an honest stop
  * @throws     when the target is not a field access, the receiver's type is not a laid-out
- *             nominal, the field is unknown, or propagated from lowering the value
+ *             nominal, the field is unknown, the field's layout span under-sizes a fat store, or
+ *             propagated from lowering the value
  */
 fn lower_assign_field(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
     let fa = match a.target.kind { checker::TFieldAccess as f => f; _ => return error { message = "native backend N1: field-assignment target is not a field access (internal)" } }
@@ -14063,7 +14069,11 @@ fn lower_assign_field(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | erro
     let off = match field_offset_of(layout, fa.field) { u32 as o => o; error as err => return err }
     let addr = ctx_alloc(ro.ctx)
     let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, ro.vreg, off, a.target.line, a.target.col))
-    if is_fat_type(a.bound) { return store_fat_through_addr(with_addr, addr.vreg, a, "a str/slice field") }
+    if is_fat_type(a.bound) {
+        let decl = find_field_decl_type(with_addr.field_decls, layout.name, fa.field)
+        match check_store_fat_span(with_addr, layout, fa.field, decl, a.value) { error as err => return err; null => { } }
+        return store_fat_through_addr(with_addr, addr.vreg, a, "a str/slice field")
+    }
     store_assign_value(with_addr, addr.vreg, ltype_of(a.bound, ro.ctx.enums), a)
 }
 
