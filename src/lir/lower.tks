@@ -1869,7 +1869,12 @@ fn lower_logical_not(ao: Lowered, line: u32, col: u32) -> Lowered {
  * substituted initializer's narrower member type — the SAME shape the C backend's `emit_cast`
  * routes through `cg_cast_target_is_variant`/`emit_as`. This backend's placement-aware analog is
  * `lower_value_into_type`, so a `Variant` target routes there instead of `prim_kind_of`, which has
- * no single machine class for a union to answer with.
+ * no single machine class for a union to answer with. A `ptr<byte> <-> u64` pair (P1, `arena-em-
+ * teko.md` §2 — the arena address-carrier cast `checker::cast_kind_of_ptr` admits) is caught
+ * BEFORE `prim_kind_of` too, by `is_u64_ptr_byte_reinterpret_cast`: `prim_kind_of` has no
+ * `PrimKind` for `Ptr` at all, and none is needed — on a 64-bit target the two share
+ * representation, so the already-lowered operand IS the result, with no instruction emitted (the
+ * pointer/address twin of `is_same_width_float_cast`).
  *
  * @param LowerCtx ctx  the lowering context
  * @param checker::TExpr e  the cast expression (its resolved `.type` is the cast's target)
@@ -1884,6 +1889,7 @@ fn lower_cast(ctx: LowerCtx, e: checker::TExpr, c: checker::TCast) -> Lowered | 
         null => { }
     }
     let ao = match lower_expr(ctx, c.expr) { Lowered as x => x; error as err => return err }
+    if is_u64_ptr_byte_reinterpret_cast(c.expr.type, e.type) { return ao }
     let src = match prim_kind_of(c.expr.type, ctx.enums, "cast source") { checker::PrimKind as p => p; error as err => return err }
     let dst = match prim_kind_of(e.type, ctx.enums, "cast target") { checker::PrimKind as p => p; error as err => return err }
     if is_same_width_float_cast(src, dst) { return ao }
@@ -1945,6 +1951,54 @@ fn lower_int_to_f32(ao: Lowered, e: checker::TExpr) -> Lowered {
  */
 fn is_same_width_float_cast(src: checker::PrimKind, dst: checker::PrimKind) -> bool {
     prim_is_float_kind(src) && prim_is_float_kind(dst) && prim_width_of(src) == prim_width_of(dst)
+}
+
+/**
+ * is_u64_type — is `t` the resolved primitive `u64`?
+ *
+ * @param checker::Type t  the type to test
+ * @return bool  true iff `t` is `Prim{kind = PrimKind::U64}`
+ * @since 0.3.1
+ */
+fn is_u64_type(t: checker::Type) -> bool {
+    match t {
+        checker::Prim as p => p.kind == checker::PrimKind::U64
+        _ => false
+    }
+}
+
+/**
+ * is_ptr_byte_type — is `t` the resolved `ptr<byte>` type (never the opaque `ptr`, never a
+ * `ptr<T>` of any other element)?
+ *
+ * @param checker::Type t  the type to test
+ * @return bool  true iff `t` is `Ptr{inner = Byte{}}`
+ * @since 0.3.1
+ */
+fn is_ptr_byte_type(t: checker::Type) -> bool {
+    match t {
+        checker::Ptr as p => match p.inner {
+            checker::Type as inner => match inner { checker::Byte => true; _ => false }
+            null => false
+        }
+        _ => false
+    }
+}
+
+/**
+ * is_u64_ptr_byte_reinterpret_cast — is this `to` cast a same-bit-pattern move between the arena
+ * address carrier `u64` and `ptr<byte>` (`arena-em-teko.md` §2, P1 — the address-carrier
+ * decision `checker::cast_kind_of_ptr` admits)? Such a cast lowers to NO instruction: on a
+ * 64-bit target `u64` and `ptr<byte>` share representation, so the already-lowered operand IS
+ * the result — the pointer/address twin of `is_same_width_float_cast`.
+ *
+ * @param checker::Type src  the cast operand's resolved type
+ * @param checker::Type dst  the cast target's resolved type
+ * @return bool  true iff one side is `u64` and the other is `ptr<byte>`, in either direction
+ * @since 0.3.1
+ */
+fn is_u64_ptr_byte_reinterpret_cast(src: checker::Type, dst: checker::Type) -> bool {
+    (is_u64_type(src) && is_ptr_byte_type(dst)) || (is_ptr_byte_type(src) && is_u64_type(dst))
 }
 
 /**
@@ -2731,6 +2785,9 @@ fn lower_compare(ctx: LowerCtx, e: checker::TExpr, cmp: checker::TCompare) -> Lo
  * yet, but because they need no CALL at all — a bit reinterpretation crosses the GPR/FPR boundary
  * with no arithmetic, so `lower_f64_bitcast_call` emits one raw `LUn` move (`IToFBits`/`FToIBits`)
  * into a fresh VReg — see its own doc for why a call OR a same-VReg-id alias were both unsound.
+ * `load_u64`/`store_u64` (`is_load_u64_call`/`is_store_u64_call`, arena-em-teko.md §2 P1) are
+ * intercepted the SAME no-call way: each is ONE `LLoad`/`LStore` against the argument's own VReg
+ * as the address, with no runtime symbol to resolve at all.
  *
  * A call into REAL C (a declared `extern fn`, OR a runtime builtin — `calls_native_c`) additionally
  * passes through `apply_native_c_return_narrow`: SysV/Win64 both permit the callee to leave the
@@ -2760,6 +2817,8 @@ fn lower_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | 
     if c.call_ns.len == 0 && is_f64_bitcast_call(c.callee) { return lower_f64_bitcast_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_float_parse_call(c.callee) { return lower_float_parse_call(ctx, e, c) }
     if c.call_ns.len == 0 && is_buf_ptr_call(c.callee) { return lower_buf_ptr_call(ctx, e, c) }
+    if c.call_ns.len == 0 && is_load_u64_call(c.callee) { return lower_load_u64_call(ctx, e, c) }
+    if c.call_ns.len == 0 && is_store_u64_call(c.callee) { return lower_store_u64_call(ctx, e, c) }
     if is_region_new_call(c) { return lower_region_new_call(ctx, e, c) }
     if is_region_alloc_call(c) { return lower_region_alloc_call(ctx, e, c) }
     if is_mem_free_call(c) { return lower_mem_free_call(ctx, e, c) }
@@ -3937,6 +3996,83 @@ fn lower_buf_ptr_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lo
     let with_alloc_call = ctx_append(result_vreg.ctx, call_inst(result_vreg.vreg, "tk_region_alloc", alloc_args, false, e.line, e.col))
 
     Lowered { ctx = with_alloc_call; vreg = result_vreg.vreg }
+}
+
+/**
+ * is_load_u64_call — recognizes `teko::mem::load_u64`'s bare last segment: P1's raw memory-READ
+ * primitive over an already-computed address (`arena-em-teko.md` §2). No `call_ns` stamp is
+ * needed to intercept this call — there is only ONE fixed signature, so the recognition key is
+ * the bare last path segment, exactly like `bytes_from_ptr`/`buf_ptr`.
+ *
+ * @param callee  the call's callee path
+ * @return        true iff `callee`'s bare last segment names `load_u64`
+ * @since 0.3.1
+ */
+fn is_load_u64_call(callee: parser::Path) -> bool {
+    let segs = callee.segments
+    segs.len > 0 && segs[segs.len - 1].name == "load_u64"
+}
+
+/**
+ * lower_load_u64_call — `teko::mem::load_u64(addr: u64) -> u64`: read ONE 64-bit word at the
+ * caller-computed address. Lowers directly to `LLoad{addr, ty=I64}` (`lir.tks:151`) — the SAME
+ * instruction every struct field read already emits — with NO runtime call: the argument's own
+ * VReg IS the address, because a raw `u64` address carries no field offset to add on top (P1's
+ * whole point — a load/store that does not allocate, unlike `bytes_from_ptr`).
+ *
+ * @param ctx  the lowering context
+ * @param e    the call expression (its type is `u64`, its source position stamps the load)
+ * @param c    the call node (its one `u64` argument: the address)
+ * @return Lowered | error  the advanced context plus the loaded word's VReg
+ * @throws  when the call's arity is not 1 (an invariant break — `checker::scope.tks`'s
+ *          `load_u64` signature already fixed it), or propagated from lowering the argument
+ * @since 0.3.1
+ */
+fn lower_load_u64_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | error {
+    if c.args.len != 1 {
+        return error { message = "native backend N1: `load_u64` expects exactly one u64 argument (internal)" }
+    }
+    let addr = match lower_expr(ctx, c.args[0]) { Lowered as x => x; error as err => return err }
+    let r = ctx_alloc(addr.ctx)
+    let with_load = ctx_append(r.ctx, load_inst(r.vreg, addr.vreg, LType::I64, e.line, e.col))
+    Lowered { ctx = with_load; vreg = r.vreg }
+}
+
+/**
+ * is_store_u64_call — recognizes `teko::mem::store_u64`'s bare last segment: P1's raw memory-
+ * WRITE twin of `load_u64`.
+ *
+ * @param callee  the call's callee path
+ * @return        true iff `callee`'s bare last segment names `store_u64`
+ * @since 0.3.1
+ */
+fn is_store_u64_call(callee: parser::Path) -> bool {
+    let segs = callee.segments
+    segs.len > 0 && segs[segs.len - 1].name == "store_u64"
+}
+
+/**
+ * lower_store_u64_call — `teko::mem::store_u64(addr: u64, v: u64) -> void`: write ONE 64-bit
+ * word to the caller-computed address. Lowers directly to `LStore{addr, value, ty=I64}`
+ * (`lir.tks:155`) with no runtime call — the twin of `lower_load_u64_call`.
+ *
+ * @param ctx  the lowering context
+ * @param e    the call expression (`-> void`; its source position stamps the store)
+ * @param c    the call node (two `u64` arguments: address, then value, in that order)
+ * @return Lowered | error  the advanced context plus VReg 0 (void has no result, the same
+ *                          convention every other void call in this file follows)
+ * @throws  when the call's arity is not 2 (an invariant break — `checker::scope.tks`'s
+ *          `store_u64` signature already fixed it), or propagated from lowering either argument
+ * @since 0.3.1
+ */
+fn lower_store_u64_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | error {
+    if c.args.len != 2 {
+        return error { message = "native backend N1: `store_u64` expects exactly two u64 arguments (internal)" }
+    }
+    let addr = match lower_expr(ctx, c.args[0]) { Lowered as x => x; error as err => return err }
+    let value = match lower_expr(addr.ctx, c.args[1]) { Lowered as x => x; error as err => return err }
+    let with_store = ctx_append(value.ctx, store_inst(addr.vreg, value.vreg, LType::I64, e.line, e.col))
+    Lowered { ctx = with_store; vreg = 0 to u32 }
 }
 
 /**
