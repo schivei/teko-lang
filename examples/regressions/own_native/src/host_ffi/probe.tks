@@ -43,3 +43,49 @@ pub fn score() -> i64 {
     }
     s
 }
+
+/**
+ * error_union_score — exercise the `null | error` (0.3.1 `Variant{Null,Error}`) host FFI shapes
+ * through the SAME no-`use`-import fallback path `score()` above exercises for the `str | error`
+ * shapes: `teko::checker::host_error_optional` (`src/checker/scope.tks`), consulted only when no
+ * local extern declaration for the callee is in scope (the compiler's own project always resolves
+ * through its discovered externs first — `scope.tks` doc-comment). This is the O2 crumb of the
+ * `checker::Optional` retirement (`docs/design/retirar-optional-para-null-union-uptr-0.3.1.md`
+ * §3.1): `host_error_optional` used to return `Optional{Error}`, now `Variant{Null,Error}`. `mkdir`/
+ * `write_file` each take BOTH arms — the SUCCESS (`null`) arm on a fresh path this probe owns, the
+ * FAILURE (`error`) arm on a path whose parent directory does not exist, each comparing the
+ * runtime's exact failure message — so a mis-migrated fallback return moves this number instead of
+ * passing quietly. `remove_file` cleans up what this probe created (its own success arm), leaving
+ * no debris.
+ *
+ * @return  63 (1 + 2 + 4 + 8 + 16 + 32) when every arm marshals and narrows correctly
+ * @since 0.3.1 (retire-Optional O2)
+ */
+pub fn error_union_score() -> i64 {
+    mut s: i64 = 0
+    match teko::fs::mkdir("host_ffi_error_union_probe_dir") {
+        null => { s = s + 1 }
+        error => { }
+    }
+    match teko::fs::mkdir("host_ffi_error_union_probe_dir/definitely-absent-parent/leaf") {
+        null => { }
+        error as e => if e.message == "cannot create directory" { s = s + 2 }
+    }
+    match teko::io::write_file("host_ffi_error_union_probe_dir/probe.txt", "retire-optional O2") {
+        null => { s = s + 4 }
+        error => { }
+    }
+    match teko::io::write_file("definitely-absent-ffi-dir/probe.txt", "unreachable") {
+        null => { }
+        error as e => if e.message == "cannot open file for writing" { s = s + 8 }
+    }
+    match teko::fs::remove_file("host_ffi_error_union_probe_dir/probe.txt") {
+        null => { s = s + 16 }
+        error => { }
+    }
+    match teko::fs::remove_file("host_ffi_error_union_probe_dir") {
+        null => { s = s + 32 }
+        error => { }
+    }
+    s
+}

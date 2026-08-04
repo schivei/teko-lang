@@ -5628,3 +5628,60 @@ fn f_native_union_nested() -> i64 {
 fn f_one_byte_score() -> i64 {
     ob::score()
 }
+
+/**
+ * f_null_birth_null_type — retire-Optional O1 (`typer.tks:type_nulllit`,
+ * `docs/design/retirar-optional-para-null-union-uptr-0.3.1.md` §2.1): a bare `null` literal's
+ * `.type` is now the concrete `Null{}`, not the retired `Optional{inner=Void}` sentinel. Emission
+ * is DESTINATION-driven (§2.2: `from_is_bare_null`/`null_widens_into` already treat both
+ * representations identically), so the flip must be behavior-invisible at every slot a bare `null`
+ * reaches — this pins the birth type itself across the slot classes the pre-existing corpus
+ * already exercises piecemeal (`f_null_union_reassign_to_null`'s REASSIGNMENT,
+ * `f_d30_null_placement_field_arg_local`'s FIELD/ARGUMENT/RETURN, `f_null_union_struct_present_and_absent`'s
+ * struct-typed union member) in ONE place named after the crumb that changed the birth type, so a
+ * regression here points straight at `type_nulllit` rather than a name that predates it.
+ *
+ * @return 0 on success, a distinct non-zero code per failing slot class
+ */
+fn f_null_birth_null_type() -> i64 {
+    // slot class: a `mut` union-member local, bound present then reassigned to a bare `null`
+    mut reassigned: i64 | null = 5
+    reassigned = null
+    let r = match reassigned { i64 => 1; null => 0 }
+    if r != 0 { return 1 }
+
+    // slot class: a standalone annotated `let`, bound directly to a bare `null`
+    let bound: i64 | null = null
+    let b = match bound { i64 => 1; null => 0 }
+    if b != 0 { return 2 }
+
+    // slot class: a bare `null` ARGUMENT into a struct-typed null-union parameter, and its RETURN
+    let absent: Point_iface | null = null
+    if sum_or(absent, 12) != 12 { return 3 }
+    if sum_or(null, 7) != 7 { return 4 }
+    0
+}
+
+/**
+ * f_null_narrow_match — retire-Optional O1: `match x { null => …; T as t => … }` over a union
+ * whose member list used to be reached only through the `Optional`-sugar path (`T?`, now retired —
+ * `docs/design/retirar-optional-para-null-union-uptr-0.3.1.md` §2/§7 R-6) still exhausts (every arm
+ * reachable, no missing-case diagnostic) and BINDS (the `T as t` arm's payload reads back
+ * correctly) now that a bare `null` is born `Null{}` instead of the sentinel. The fuller arity/order
+ * matrix lives in the 0.3.1.0 degrau-30 family (`f_d30_null_arm_three_member`,
+ * `f_d30_null_arm_orders`, `f_d30_null_arm_exhaustive_selection`); this is the O1-named anchor.
+ *
+ * @return 0 on success, a distinct non-zero code per failing check
+ */
+fn f_null_narrow_match() -> i64 {
+    let present: i64 | null = 9
+    let bound = match present { i64 as v => v; null => -1 }
+    if bound != 9 { return 1 }
+    let absent: i64 | null = null
+    let missing = match absent { i64 as v => v; null => -1 }
+    if missing != -1 { return 2 }
+    // arm order reversed: the `null` arm first must still bind the concrete case second
+    let reordered = match present { null => -1; i64 as v => v }
+    if reordered != 9 { return 3 }
+    0
+}
