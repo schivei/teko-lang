@@ -6706,30 +6706,40 @@ fn lower_value_into_null_union(ctx: LowerCtx, shape: NullUnionShape, value: chec
 
 /**
  * lower_value_into_variant — the general (three-or-more-member, or non-null-bearing)
- * `checker::Variant` arm of `lower_value_into_type`: a bare `null` literal builds the absence
- * wrapper at the union's OWN `Null` member index (`lower_variant_null_construct`); a value ALREADY
- * typed as the variant itself (re-flowing an existing union value — the same passthrough
- * `lower_value_into_null_union` uses for `T | null`) passes through unwrapped; any other value (a
- * bare case, e.g. a `Box` or a bare `error{…}` flowing into a declared `Box | error` slot) is
- * wrapped via `lower_variant_construct` at its own matched member index (#382, degrau N2).
+ * `checker::Variant` arm of `lower_value_into_type`: a `Null`-typed value (a bare `null` literal, OR
+ * a `match`/`if` sub-expression whose OWN inferred type collapsed to bare `Null` because every one
+ * of its arms is, recursively, `null` — `checker::resolve.type_join`'s bare-null-only join) builds
+ * the absence wrapper at the union's OWN `Null` member index (`lower_variant_null_construct`); a
+ * value ALREADY typed as the variant itself (re-flowing an existing union value — the same
+ * passthrough `lower_value_into_null_union` uses for `T | null`) passes through unwrapped; any other
+ * value (a bare case, e.g. a `Box` or a bare `error{…}` flowing into a declared `Box | error` slot)
+ * is wrapped via `lower_variant_construct` at its own matched member index (#382, degrau N2).
  *
- * THE `null` ARM IS DEGRAU 30, and it is the WRITER half of `lower_null_pattern_test`'s reader.
+ * THE `Null` ARM IS DEGRAU 30, and it is the WRITER half of `lower_null_pattern_test`'s reader.
  * Without it a `return null` into a `[]byte | null | error` fell through to
  * `lower_variant_construct`, whose by-TYPE member lookup has no `Null` case, and stopped with
  * "value's type is not a member of its declared variant" — measured on the compiler's own
  * `codegen::emit_variant_wrap_exact_pass`. Landing only the reader would have been worse than
  * landing neither: the `null` arm would have tested a tag that nothing ever stored.
  *
+ * KEYED BY `value.type`, NOT `value.kind` (native-N1-null-widen, O1 retirement): the C route wraps
+ * by `value.type`'s member key rather than by node kind (`codegen.tks:6816-6829`), so a `match`/`if`
+ * collapsed to bare `Null` by nested `type_join` folding needs the SAME ancestor-level widen a bare
+ * `TNullLit` gets — otherwise its leaf `null` literals reach `lower_null_lit` with no enclosing
+ * union coercion in sight and the own backend honest-stops (measured on the self-hosted native gate,
+ * `teko::checker::check_must_free_locals_stmt`'s own nested `match` tail).
+ *
  * @param LowerCtx ctx  the lowering context to append the value's instructions into
  * @param checker::Variant v  the declared variant the value is placed into
  * @param checker::TExpr value  the typed value expression being placed into the variant slot
  * @return Lowered  the value's own VReg (already the variant), or a freshly built wrapper
  * @throws  propagated from lowering the value, or when its type names no member of `v`
- * @since 0.3.1 (own-backend general variant construction, degrau N2); 0.3.1.0 degrau 30 (`null`)
+ * @since 0.3.1 (own-backend general variant construction, degrau N2); 0.3.1.0 degrau 30 (`null`);
+ *        native-N1-null-widen (O1 retirement — a non-literal `Null`-typed sub-tree)
  */
 fn lower_value_into_variant(ctx: LowerCtx, v: checker::Variant, value: checker::TExpr) -> Lowered | error {
-    match value.kind {
-        checker::TNullLit => return lower_variant_null_construct(ctx, v, value)
+    match value.type {
+        checker::Null => return lower_variant_null_construct(ctx, v, value)
         _ => { }
     }
     match expand_named_variant(value.type, ctx.variants) {
@@ -6739,22 +6749,24 @@ fn lower_value_into_variant(ctx: LowerCtx, v: checker::Variant, value: checker::
 }
 
 /**
- * lower_variant_null_construct — the `null`-literal arm of `lower_value_into_variant`: the absence
- * wrapper (`lower_variant_absent`) tagged with the union's OWN `Null` member index
+ * lower_variant_null_construct — the `Null`-typed arm of `lower_value_into_variant`: the absence
+ * wrapper (`lower_null_absent_widened`) tagged with the union's OWN `Null` member index
  * (`variant_null_member_index`) — the SAME lookup `lower_null_pattern_test` reads, so writer and
  * reader cannot disagree. A union declaring no `Null` member keeps a NAMED honest stop; the checker
  * already rejects a bare `null` in such a slot, so reaching it is an invariant break.
  *
  * @param LowerCtx ctx  the lowering context to append the construction's instructions into
- * @param checker::Variant v  the declared variant the `null` is placed into
- * @param checker::TExpr e  the `null` literal (for its source position)
+ * @param checker::Variant v  the declared variant the `null`-typed value is placed into
+ * @param checker::TExpr e  the `null` literal, or a `Null`-typed `match`/`if` sub-expression
  * @return Lowered  the absence wrapper's alloca'd base address
- * @throws  when `v` declares no `Null` member (an internal invariant break)
- * @since 0.3.1.0 (degrau 30 — `null` into a union of any arity)
+ * @throws  when `v` declares no `Null` member (an internal invariant break), or propagated from
+ *          lowering a non-literal `e`'s own effects
+ * @since 0.3.1.0 (degrau 30 — `null` into a union of any arity); native-N1-null-widen
+ *        (O1 retirement — the non-literal `Null`-typed sub-tree)
  */
 fn lower_variant_null_construct(ctx: LowerCtx, v: checker::Variant, e: checker::TExpr) -> Lowered | error {
     match variant_null_member_index(v) {
-        u32 as index => lower_variant_absent(ctx, index to i64, e)
+        u32 as index => lower_null_absent_widened(ctx, index, e)
         null => error { message = "native backend N1: a `null` value placed into a union that declares no `null` member (internal)" }
     }
 }
@@ -9019,7 +9031,14 @@ fn lower_null_pattern_test(ctx: LowerCtx, subj: MatchSubj, line: u32, col: u32) 
  * coerced into a null-bearing two-member union (`null_union_shape`'s doc): allocate the uniform
  * `{ i32 tag@0; ptr@8; len@16 }` (`variant_wrapper_bytes` — the fixed layout
  * `lower_variant_tag_eq_test`/`bind_case_payload` read), then store `shape.null_index` for a
- * `null` value, or `shape.payload_index` plus the lowered payload for any other value.
+ * `Null`-typed value, or `shape.payload_index` plus the lowered payload for any other value.
+ *
+ * KEYED BY `e.type`, NOT `e.kind` (native-N1-null-widen, O1 retirement): a bare `TNullLit` and a
+ * `match`/`if` sub-expression whose OWN inferred type collapsed to bare `Null` (every one of its
+ * arms is, recursively, `null` — `checker::resolve.type_join`'s bare-null-only join) are the SAME
+ * absence value from this coercion's point of view, and both are widened by
+ * `lower_null_absent_widened` — the mirror of the C route's `emit_as_r`, which builds the wrapper
+ * from the EXPECTED type rather than the source node's own kind (`codegen.tks:6816-6829`).
  *
  * A payload that is ITSELF a union takes the nested arm (`lower_null_union_nested_present`) — the
  * TWIN of the split degrau 23 gave `lower_variant_construct`, and the twin that had NOT diverged
@@ -9034,16 +9053,18 @@ fn lower_null_pattern_test(ctx: LowerCtx, subj: MatchSubj, line: u32, col: u32) 
  *                              indices; the payload type drives the payload's SHAPE (a fat member
  *                              writes both halves, a union member an inner wrapper, any other one
  *                              word)
- * @param checker::TExpr e  the value being coerced (a `TNullLit`, or an expression of the
- *                          payload type)
+ * @param checker::TExpr e  the value being coerced (a `TNullLit`, a `Null`-typed `match`/`if`
+ *                          sub-expression, or an expression of the payload type)
  * @return Lowered  the wrapper's alloca'd base address
- * @throws  propagated from lowering a non-null payload expression
+ * @throws  propagated from lowering a non-null payload expression, or a `Null`-typed sub-tree's own
+ *          effects
  * @since 0.3.1 (null-union C7 own-backend gap); 0.3.1.0 degrau 25 (the nested
- *        union payload); 0.3.1.0 degrau 30 (the looked-up tags)
+ *        union payload); 0.3.1.0 degrau 30 (the looked-up tags); native-N1-null-widen
+ *        (O1 retirement — a non-literal `Null`-typed sub-tree)
  */
 fn lower_null_union_construct(ctx: LowerCtx, shape: NullUnionShape, e: checker::TExpr) -> Lowered | error {
-    match e.kind {
-        checker::TNullLit => return lower_variant_absent(ctx, shape.null_index to i64, e)
+    match e.type {
+        checker::Null => return lower_null_absent_widened(ctx, shape.null_index, e)
         _ => { }
     }
     if payload_needs_inner_wrapper(ctx, shape.payload, e) { return lower_null_union_nested_present(ctx, shape, e) }
@@ -9055,13 +9076,14 @@ fn lower_null_union_construct(ctx: LowerCtx, shape: NullUnionShape, e: checker::
 /**
  * lower_variant_absent — the ABSENT construction shared by every null-bearing union, at every
  * arity: the uniform wrapper with tag `index` and no payload written (absence carries none).
- * `lower_null_union_construct`'s `null` arm and `lower_variant_null_construct`'s only arm both
- * reduce to it, so a two-member `T | null` and a three-member `T | null | error` build the SAME
- * bytes and differ only in the index they were handed.
+ * `lower_null_absent_widened`'s two callers (`lower_null_union_construct`'s `Null` arm and
+ * `lower_variant_null_construct`'s only arm) both reduce to it through that shared widen, so a
+ * two-member `T | null` and a three-member `T | null | error` build the SAME bytes and differ only
+ * in the index they were handed.
  *
  * @param LowerCtx ctx  the lowering context to append the construction's instructions into
  * @param i64 index  the `Null` member's declared index (`variant_null_member_index`)
- * @param checker::TExpr e  the `null` literal (for its source position)
+ * @param checker::TExpr e  the `null`-typed value being widened (for its source position)
  * @return Lowered  the wrapper's alloca'd base address
  * @since 0.3.1.0 (degrau 25 — extracted so the present arms can each pick their own shape; degrau
  *        30 — the index became a parameter so any arity shares it)
@@ -9070,6 +9092,41 @@ fn lower_variant_absent(ctx: LowerCtx, index: i64, e: checker::TExpr) -> Lowered
     let base = ctx_alloc(ctx)
     let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, variant_wrapper_bytes(), variant_wrapper_align(), e.line, e.col))
     store_variant_tag(with_alloca, base.vreg, index, e.line, e.col)
+}
+
+/**
+ * lower_null_absent_widened — the shared `Null`-typed widen `lower_null_union_construct` and
+ * `lower_variant_null_construct` both reduce to: a bare `TNullLit` carries no side effects of its
+ * own, so its absence wrapper (`lower_variant_absent`) is built directly, over the UNCHANGED `ctx`,
+ * without lowering `e` at all (the pre-existing fast path — no extra instruction is emitted for the
+ * overwhelmingly common case of a literal `null`). Any OTHER `Null`-typed `e` (a `match`/`if`
+ * sub-expression whose every arm is, recursively, `null` — `checker::resolve.type_join`'s
+ * bare-null-only join) is lowered IN PLACE first (`lower_expr` — its own nested arms carry the SAME
+ * narrow `Null` target type this backend already threads down at every match/if arm and tail
+ * position, so each leaf `null` literal reduces harmlessly through `lower_null_lit`'s plain zero
+ * constant), then the resulting register is discarded and the SAME absence wrapper is tagged over
+ * the ADVANCED context — `e`'s own control flow and side effects (an early `return` nested inside
+ * one of its arms, a call with side effects) run exactly once, in their original position, before
+ * the ABSENT tag is written.
+ *
+ * @param LowerCtx ctx  the lowering context to append `e`'s instructions (when any), then the
+ *                      wrapper's, into
+ * @param u32 index  the `Null` member's declared index (`shape.null_index`/`variant_null_member_index`)
+ * @param checker::TExpr e  the `Null`-typed value being widened into the union — a `TNullLit`, or a
+ *                          collapsed `match`/`if` sub-expression
+ * @return Lowered  the wrapper's alloca'd base address
+ * @throws  propagated from lowering a non-literal `e`
+ * @since native-N1-null-widen (O1 retirement — the native-lowering gap O1 exposed at
+ *        `teko::checker::check_must_free_locals_stmt`'s own nested `match` tail)
+ */
+fn lower_null_absent_widened(ctx: LowerCtx, index: u32, e: checker::TExpr) -> Lowered | error {
+    match e.kind {
+        checker::TNullLit => lower_variant_absent(ctx, index to i64, e)
+        _ => {
+            let lowered = match lower_expr(ctx, e) { Lowered as x => x; error as err => return err }
+            lower_variant_absent(lowered.ctx, index to i64, e)
+        }
+    }
 }
 
 /**
@@ -13491,32 +13548,27 @@ fn lower_bool_lit(ctx: LowerCtx, e: checker::TExpr, b: checker::TBoolLit) -> Low
 }
 
 /**
- * lower_null_lit — a `null` literal in a position that lowers it as a VALUE: a zero (null) Ptr
- * constant, which is the whole representation for an `Optional`-typed null.
+ * lower_null_lit — a `null` literal lowered as a bare VALUE: a zero (null) Ptr constant.
  *
- * A null typed `checker::Null` is a different thing and HONEST-STOPS here. The checker gives a bare
- * `null` the `Null` type exactly when its context is a null-bearing union (`typer.type_expr`'s
- * `null_widens_into` arm), and in the own backend such a value must become the union's tag+payload
- * wrapper (`lower_value_into_type`). Every placement intercepts it before this function is reached
- * — a binding, an assignment, a return, a tail value, a pushed element and, since degrau 25, a
- * struct-literal field (`find_field_decl_type`) and a call argument (`callee_param_types`). What is
- * left for this stop is a placement whose DECLARED type the backend genuinely cannot name: an
- * argument at a callee the checker left untyped (a generic instantiation), or a field of a
- * declaration whose annotation did not resolve. Writing a raw `const 0` there would put a value a
- * later `match` reads as the wrapper's BASE ADDRESS into the slot, i.e. a load from address 0, so
- * refusing to lower it names the gap instead (M.3).
+ * A `checker::TNullLit` is ALWAYS typed `checker::Null` (`typer.type_nulllit`/`type_value_expected`'s
+ * `NullLit` arm, O1 — a bare `null` no longer carries the retired `Optional{Void}` sentinel), so this
+ * plain zero constant is what EVERY reachable `null` literal reduces to at this leaf. The union
+ * tag+payload wrapper a `T | null` PLACEMENT actually needs is built by the placement's own coercion
+ * site (`lower_value_into_type` — a binding, an assignment, a return, a tail value, a pushed element,
+ * a struct-literal field, a call argument), which recognizes a `Null`-typed value (whether the
+ * literal itself, or a `match`/`if` whose OWN inferred type collapsed to bare `Null` because every
+ * one of its arms is, recursively, a `null`) and wraps it there (`lower_null_absent_widened`).
+ * Reached from a context whose own declared type is ALSO bare `Null` (a `match`/`if` arm nested one
+ * level inside another `Null`-typed one), this zero is a harmless, never-observed placeholder: the
+ * ANCESTOR coercion site that DOES know the real union discards this leaf's register value and
+ * builds the wrapper itself.
  *
  * @param LowerCtx ctx  the lowering context to append the constant into
- * @param checker::TExpr e  the null-literal expression (its `.type` decides value vs union)
+ * @param checker::TExpr e  the null-literal expression
  * @param checker::TNullLit n  the null-literal node
- * @return Lowered | error  the zero constant, or the honest stop for a union-typed null
- * @throws  when the literal's type is `Null` (a union placement with no coercion site)
+ * @return Lowered  the zero constant
  */
-fn lower_null_lit(ctx: LowerCtx, e: checker::TExpr, n: checker::TNullLit) -> Lowered | error {
-    match e.type {
-        checker::Null => return error { message = "native backend N1: a `null` in this position needs the null-union wrapper the placement does not declare a type for (N2)" }
-        _ => { }
-    }
+fn lower_null_lit(ctx: LowerCtx, e: checker::TExpr, n: checker::TNullLit) -> Lowered {
     let r = ctx_alloc(ctx)
     Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, 0, e.line, e.col)); vreg = r.vreg }
 }
