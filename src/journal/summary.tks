@@ -249,19 +249,54 @@ fn finding_of(r: Record) -> Finding {
 }
 
 /**
- * parse_plan_count — the decimal count a `plan` record's payload holds, read digit by digit. A
- * payload with no digit answers 0.
+ * WriterStat — the per-writer aggregate `summarize` derives from the records of ONE writer: the
+ * plan, the verdict counts, whether it closed, whether a synthetic `incomplete` from the `fold`
+ * marked it, the test it died in, and the coverage it dumped. Private: it is the shape `summarize`
+ * folds each writer into before it fills the `RunSummary`.
  *
- * @param payload  a `plan` record's payload
- * @return         the count it names, or 0
  * @since 0.3.1
  */
-fn parse_plan_count(payload: str) -> u64 {
+type WriterStat = struct {
+    /** the writer this aggregate is of. */
+    writer: str
+    /** `unit`, `regression`, or "" for the orchestrator. */
+    phase: str
+    /** how many tests this writer declared it would run (0 when it declared no plan). */
+    plan: u64
+    /** whether the writer declared a plan at all. */
+    has_plan: bool
+    /** tests that passed. */
+    ok: u64
+    /** tests that failed. */
+    fail: u64
+    /** tests that were skipped. */
+    skip: u64
+    /** whether the writer wrote a terminal (`end`/`stop`) record. */
+    has_end: bool
+    /** whether the `fold`'s synthetic `incomplete` marked this writer (died with a `begin` open). */
+    has_incomplete: bool
+    /** the last test this writer began (the one it died in, when dead). */
+    last_begin: str
+    /** whether the writer dumped a `cov` record. */
+    has_cov: bool
+    /** the coverage this writer dumped. */
+    cov: CovTriple
+}
+
+/**
+ * parse_u64 — the leading decimal `u64` in `s`, read digit by digit (the corpus has no
+ * string→int intrinsic). A string with no leading digit answers 0.
+ *
+ * @param s  a decimal string
+ * @return   its value, or 0
+ * @since 0.3.1
+ */
+fn parse_u64(s: str) -> u64 {
     mut v: u64 = 0
     mut i: u64 = 0
     loop {
-        if i >= payload.len { break }
-        let c = payload[i]
+        if i >= s.len { break }
+        let c = s[i]
         if c < b'0' || c > b'9' { break }
         v = (v * 10) + ((c to u64) - (b'0' to u64))
         i = i + 1
@@ -270,85 +305,279 @@ fn parse_plan_count(payload: str) -> u64 {
 }
 
 /**
- * writer_plan — the count `writer`'s own `plan` record names in `recs`, or 0 when it wrote none (a
- * writer that never plans has nothing to compare `never_ran` against).
+ * nth_field — the `n`-th (0-based) `TAB`-separated field of `s`, or "" when `s` has fewer fields.
  *
- * @param recs    the records to scan
- * @param writer  the writer identity to match
- * @return        the planned count, or 0
+ * @param s  a tab-separated payload
+ * @param n  the field index
+ * @return   the field, or ""
  * @since 0.3.1
  */
-fn writer_plan(recs: []Record, writer: str) -> u64 {
+fn nth_field(s: str, n: u64) -> str {
+    let tab = b'\t'
+    mut start: u64 = 0
+    mut field: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= s.len {
+            if field == n { return teko::str::slice_from(s, start) }
+            return ""
+        }
+        if s[i] == tab {
+            if field == n { return teko::str::slice(s, start, i) }
+            field = field + 1
+            start = i + 1
+        }
+        i = i + 1
+    }
+}
+
+/**
+ * cov_of_payload — decode a `cov` record's six `TAB`-separated `u64` fields (functions cov/val,
+ * lines cov/val, branches cov/val) into a `CovTriple`.
+ *
+ * @param payload  a `cov` record's payload
+ * @return         the decoded triple
+ * @since 0.3.1
+ */
+fn cov_of_payload(payload: str) -> CovTriple {
+    CovTriple {
+        functions_cov = parse_u64(nth_field(payload, 0))
+        functions_val = parse_u64(nth_field(payload, 1))
+        lines_cov = parse_u64(nth_field(payload, 2))
+        lines_val = parse_u64(nth_field(payload, 3))
+        branches_cov = parse_u64(nth_field(payload, 4))
+        branches_val = parse_u64(nth_field(payload, 5))
+    }
+}
+
+/**
+ * cov_add — the field-wise sum of two coverage triples, folding one writer's dump into the
+ * running total.
+ *
+ * @param a  the running total
+ * @param b  a writer's dump
+ * @return   their sum
+ * @since 0.3.1
+ */
+fn cov_add(a: CovTriple, b: CovTriple) -> CovTriple {
+    CovTriple {
+        functions_cov = a.functions_cov + b.functions_cov
+        functions_val = a.functions_val + b.functions_val
+        lines_cov = a.lines_cov + b.lines_cov
+        lines_val = a.lines_val + b.lines_val
+        branches_cov = a.branches_cov + b.branches_cov
+        branches_val = a.branches_val + b.branches_val
+    }
+}
+
+/**
+ * stat_of — fold every record of `writer` into its `WriterStat`: the plan, the verdict counts,
+ * whether it closed, the test it last began, and the coverage it dumped.
+ *
+ * @param recs    the folded records (of every writer)
+ * @param writer  the writer to aggregate
+ * @return        the writer's aggregate
+ * @since 0.3.1
+ */
+fn stat_of(recs: []Record, writer: str) -> WriterStat {
+    mut st = WriterStat {
+        writer = writer; phase = phase_of(writer); plan = 0; has_plan = false
+        ok = 0; fail = 0; skip = 0; has_end = false; has_incomplete = false; last_begin = ""
+        has_cov = false; cov = zero_cov()
+    }
     mut i: u64 = 0
     loop {
         if i >= recs.len { break }
-        if recs[i].writer == writer && recs[i].kind == KIND_PLAN { return parse_plan_count(recs[i].payload) }
+        let r = recs[i]
+        if r.writer == writer { st = fold_writer_record(st, r) }
         i = i + 1
     }
-    0
+    st
 }
 
 /**
- * is_verdict_kind — whether `kind` is one of the three verdicts a `plan` is measured against
- * (`ok`/`fail`/`skip`).
+ * fold_writer_record — fold ONE of a writer's records into its running stat.
  *
- * @param kind  a record's kind
- * @return      true iff it is a verdict
+ * @param st  the stat so far
+ * @param r   a record of this writer
+ * @return    the stat with `r` applied
  * @since 0.3.1
  */
-fn is_verdict_kind(kind: str) -> bool {
-    if kind == KIND_OK { return true }
-    if kind == KIND_FAIL { return true }
-    kind == KIND_SKIP
+fn fold_writer_record(st: WriterStat, r: Record) -> WriterStat {
+    if r.kind == KIND_PLAN {
+        return WriterStat {
+            writer = st.writer; phase = st.phase; plan = parse_u64(r.payload); has_plan = true
+            ok = st.ok; fail = st.fail; skip = st.skip; has_end = st.has_end; has_incomplete = st.has_incomplete
+            last_begin = st.last_begin; has_cov = st.has_cov; cov = st.cov
+        }
+    }
+    if r.kind == KIND_BEGIN { return with_last_begin(st, r.payload) }
+    if r.kind == KIND_OK { return bump_ok(st) }
+    if r.kind == KIND_FAIL { return bump_fail(st) }
+    if r.kind == KIND_SKIP { return bump_skip(st) }
+    if r.kind == KIND_COV { return with_cov(st, cov_of_payload(r.payload)) }
+    if r.kind == KIND_INCOMPLETE { return with_incomplete(st, r.payload) }
+    if r.kind == KIND_END || r.kind == KIND_STOP { return with_end(st) }
+    st
 }
 
 /**
- * writer_verdicts_seen — how many `ok`/`fail`/`skip` records `writer` produced in `recs` — the
- * count `never_ran` subtracts from its `plan`.
+ * with_last_begin — the stat with its last-begun test set to `label`.
  *
- * @param recs    the records to scan
- * @param writer  the writer identity to match
- * @return        the number of verdicts seen
+ * @param st     the stat so far
+ * @param label  the test that began
+ * @return       the updated stat
  * @since 0.3.1
  */
-fn writer_verdicts_seen(recs: []Record, writer: str) -> u64 {
-    mut n: u64 = 0
+fn with_last_begin(st: WriterStat, label: str) -> WriterStat {
+    WriterStat {
+        writer = st.writer; phase = st.phase; plan = st.plan; has_plan = st.has_plan
+        ok = st.ok; fail = st.fail; skip = st.skip; has_end = st.has_end; has_incomplete = st.has_incomplete
+        last_begin = label; has_cov = st.has_cov; cov = st.cov
+    }
+}
+
+/**
+ * bump_ok — the stat with one more passing test.
+ *
+ * @param st  the stat so far
+ * @return    the updated stat
+ * @since 0.3.1
+ */
+fn bump_ok(st: WriterStat) -> WriterStat {
+    WriterStat {
+        writer = st.writer; phase = st.phase; plan = st.plan; has_plan = st.has_plan
+        ok = st.ok + 1; fail = st.fail; skip = st.skip; has_end = st.has_end; has_incomplete = st.has_incomplete
+        last_begin = st.last_begin; has_cov = st.has_cov; cov = st.cov
+    }
+}
+
+/**
+ * bump_fail — the stat with one more failing test.
+ *
+ * @param st  the stat so far
+ * @return    the updated stat
+ * @since 0.3.1
+ */
+fn bump_fail(st: WriterStat) -> WriterStat {
+    WriterStat {
+        writer = st.writer; phase = st.phase; plan = st.plan; has_plan = st.has_plan
+        ok = st.ok; fail = st.fail + 1; skip = st.skip; has_end = st.has_end; has_incomplete = st.has_incomplete
+        last_begin = st.last_begin; has_cov = st.has_cov; cov = st.cov
+    }
+}
+
+/**
+ * bump_skip — the stat with one more skipped test.
+ *
+ * @param st  the stat so far
+ * @return    the updated stat
+ * @since 0.3.1
+ */
+fn bump_skip(st: WriterStat) -> WriterStat {
+    WriterStat {
+        writer = st.writer; phase = st.phase; plan = st.plan; has_plan = st.has_plan
+        ok = st.ok; fail = st.fail; skip = st.skip + 1; has_end = st.has_end; has_incomplete = st.has_incomplete
+        last_begin = st.last_begin; has_cov = st.has_cov; cov = st.cov
+    }
+}
+
+/**
+ * with_end — the stat marked as terminated (an `end` or `stop` was seen), so it is not read as
+ * dead by the `has_plan && !has_end` arm of `is_dead`.
+ *
+ * @param st  the stat so far
+ * @return    the updated stat
+ * @since 0.3.1
+ */
+fn with_end(st: WriterStat) -> WriterStat {
+    WriterStat {
+        writer = st.writer; phase = st.phase; plan = st.plan; has_plan = st.has_plan
+        ok = st.ok; fail = st.fail; skip = st.skip; has_end = true; has_incomplete = st.has_incomplete
+        last_begin = st.last_begin; has_cov = st.has_cov; cov = st.cov
+    }
+}
+
+/**
+ * with_cov — the stat with its coverage dump recorded.
+ *
+ * @param st  the stat so far
+ * @param c   the coverage the writer dumped
+ * @return    the updated stat
+ * @since 0.3.1
+ */
+fn with_cov(st: WriterStat, c: CovTriple) -> WriterStat {
+    WriterStat {
+        writer = st.writer; phase = st.phase; plan = st.plan; has_plan = st.has_plan
+        ok = st.ok; fail = st.fail; skip = st.skip; has_end = st.has_end; has_incomplete = st.has_incomplete
+        last_begin = st.last_begin; has_cov = true; cov = c
+    }
+}
+
+/**
+ * with_incomplete — the stat marked as dead by the `fold`'s synthetic `incomplete` record,
+ * recording the test it died in (`label`) so the DEAD section can name it.
+ *
+ * @param st     the stat so far
+ * @param label  the test the `fold` saw begin without a close
+ * @return       the updated stat
+ * @since 0.3.1
+ */
+fn with_incomplete(st: WriterStat, label: str) -> WriterStat {
+    WriterStat {
+        writer = st.writer; phase = st.phase; plan = st.plan; has_plan = st.has_plan
+        ok = st.ok; fail = st.fail; skip = st.skip; has_end = st.has_end; has_incomplete = true
+        last_begin = label; has_cov = st.has_cov; cov = st.cov
+    }
+}
+
+/**
+ * is_dead — whether a writer died: OR the `fold` marked it with an `incomplete` (it began a test
+ * and never closed it), OR it declared a plan and never wrote a terminal record (it died before
+ * even its first `begin`). The union of the two detections — the canonical one (via `incomplete`)
+ * and the journal-impl one (via `plan` without `end`) — so no dead writer escapes `never_ran` or
+ * the DEAD section.
+ *
+ * @param st  a writer's aggregate
+ * @return    true iff the writer died by either route
+ * @since 0.3.1
+ */
+fn is_dead(st: WriterStat) -> bool { st.has_incomplete || (st.has_plan && !st.has_end) }
+
+/**
+ * ran_of — how many tests a writer actually reached a verdict on (passed + failed + skipped).
+ *
+ * @param st  a writer's aggregate
+ * @return    the verdict count
+ * @since 0.3.1
+ */
+fn ran_of(st: WriterStat) -> u64 { st.ok + st.fail + st.skip }
+
+/**
+ * collect_findings — the `fail` (or `skip`) findings across `recs`, in record order, so a failure
+ * and a skip are named exactly once and in a deterministic sequence. Reuses the canonical
+ * `finding_of` (label/reason split off the payload's first tab) rather than a private duplicate.
+ *
+ * @param recs  the folded records
+ * @param kind  `KIND_FAIL` or `KIND_SKIP`
+ * @return      the findings of that kind, record order
+ * @since 0.3.1
+ */
+fn collect_findings(recs: []Record, kind: str) -> []Finding {
+    mut out: []Finding = teko::list::empty()
     mut i: u64 = 0
     loop {
         if i >= recs.len { break }
-        if recs[i].writer == writer && is_verdict_kind(recs[i].kind) { n = n + 1 }
+        if recs[i].kind == kind { out = teko::list::push(out, finding_of(recs[i])) }
         i = i + 1
     }
-    n
+    out
 }
 
 /**
- * never_ran_tally — the `never_ran` tally over every distinct writer in `recs`: each writer
- * contributes the gap between its own `plan` and the verdicts it actually produced (never negative —
- * a writer that ran MORE than it planned, or never planned at all, contributes 0).
- *
- * @param recs     the records to fold
- * @param writers  the distinct writers `recs` names
- * @return         the never-ran tally
- * @since 0.3.1
- */
-fn never_ran_tally(recs: []Record, writers: []str) -> PhaseTally {
-    mut t = zero_tally()
-    mut i: u64 = 0
-    loop {
-        if i >= writers.len { break }
-        let w = writers[i]
-        let plan = writer_plan(recs, w)
-        let seen = writer_verdicts_seen(recs, w)
-        if plan > seen { t = tally_bump(t, phase_of(w), plan - seen) }
-        i = i + 1
-    }
-    t
-}
-
-/**
- * run_of — the run stamp `recs` share, or "" when `recs` is empty. `fold`'s rule 1 already discarded
- * every record of a foreign run, so every element left shares one stamp and the first is enough.
+ * run_of — the run stamp `recs` share, or "" when `recs` is empty. `fold`'s rule 1 already
+ * discarded every record of a foreign run, so every element left shares one stamp and the first is
+ * enough.
  *
  * @param recs  the folded records
  * @return      the shared run stamp, or ""
@@ -357,15 +586,18 @@ fn never_ran_tally(recs: []Record, writers: []str) -> PhaseTally {
 fn run_of(recs: []Record) -> str { if recs.len > 0 { recs[0].run } else { "" } }
 
 /**
- * summarize — the verdict of BOTH phases, as a pure function of the records `fold` returned.
+ * summarize — the veredict of BOTH phases, a function PURE of the records `fold` returned, folding
+ * each writer into its `WriterStat` (the plan, the verdicts, the close, the coverage dumped) and
+ * from there the `RunSummary`. `cov`/`cov_missing` come from whatever `cov` records the writers
+ * carried (spec §3.8, the measurement transported in the journal itself); a caller that holds the
+ * site-map sums completes them with `with_coverage` (`project.tks` does, and that is what
+ * production observes).
  *
- * PURE ON PURPOSE. It is what lets it run over synthetic records in a unit test (§13.6) with no
- * suite to run, and what lets `teko test --replay <run>` (J9) print the identical block from an OLD
- * root after the process that would have printed it live is gone.
+ * PURE ON PURPOSE: it runs over synthetic records in a test (§13.6) with no suite to run, and lets
+ * `--replay` reprint the identical block from an OLD root after the live process is gone.
  *
  * @param recs  the records `fold` returned
- * @return      the aggregated verdict — `cov`/`cov_missing` zeroed (see `CovTriple`); a caller that
- *              holds the merged coverage sinks fills them with `with_coverage`
+ * @return      the aggregated verdict
  * @since 0.3.1
  */
 pub fn summarize(recs: []Record) -> RunSummary {
@@ -373,31 +605,38 @@ pub fn summarize(recs: []Record) -> RunSummary {
     mut passed = zero_tally()
     mut failed = zero_tally()
     mut skipped = zero_tally()
-    mut fails: []Finding = teko::list::empty()
-    mut skips: []Finding = teko::list::empty()
+    mut never_ran = zero_tally()
     mut dead: []Finding = teko::list::empty()
-    mut i: u64 = 0
+    mut cov = zero_cov()
+    mut cov_missing: u64 = 0
+    mut w: u64 = 0
     loop {
-        if i >= recs.len { break }
-        let r = recs[i]
-        let phase = phase_of(r.writer)
-        if r.kind == KIND_OK { passed = tally_bump(passed, phase, 1) }
-        if r.kind == KIND_FAIL { failed = tally_bump(failed, phase, 1); fails = teko::list::push(fails, finding_of(r)) }
-        if r.kind == KIND_SKIP { skipped = tally_bump(skipped, phase, 1); skips = teko::list::push(skips, finding_of(r)) }
-        if r.kind == KIND_INCOMPLETE { dead = teko::list::push(dead, finding_of(r)) }
-        i = i + 1
+        if w >= writers.len { break }
+        let st = stat_of(recs, writers[w])
+        passed = tally_bump(passed, st.phase, st.ok)
+        failed = tally_bump(failed, st.phase, st.fail)
+        skipped = tally_bump(skipped, st.phase, st.skip)
+        cov = cov_add(cov, st.cov)
+        if st.has_plan && !st.has_cov { cov_missing = cov_missing + 1 }
+        if is_dead(st) {
+            let ran = ran_of(st)
+            let nr = if st.plan > ran { st.plan - ran } else { 0 }
+            never_ran = tally_bump(never_ran, st.phase, nr)
+            dead = teko::list::push(dead, Finding { phase = st.phase; writer = st.writer; label = st.last_begin; reason = "" })
+        }
+        w = w + 1
     }
     RunSummary {
         run = run_of(recs)
         passed = passed
         failed = failed
         skipped = skipped
-        never_ran = never_ran_tally(recs, writers)
-        fails = fails
-        skips = skips
+        never_ran = never_ran
+        fails = collect_findings(recs, KIND_FAIL)
+        skips = collect_findings(recs, KIND_SKIP)
         dead = dead
-        cov = zero_cov()
-        cov_missing = 0
+        cov = cov
+        cov_missing = cov_missing
     }
 }
 
