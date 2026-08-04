@@ -32,12 +32,16 @@ Os quatro argumentos-chave:
    ficheiros mais densos da árvore (encoders/isel). É **31–35 % das 27 149 linhas de `src/backend/`**
    e **~7–9 % das 111 854 linhas do compilador inteiro**, evitadas *no pipeline todo*, não só na
    emissão (§2).
-2. **Menos superfície nativa = menos superfície para o wild-write.** O bug de wild-write do
-   fixpoint nativo gen2 (bissetado por `TEKO_NATIVE_CHUNK_CANARY`, commits `da8bfb2f`/`c2ee1091`)
-   vive no código nativo *exercido* durante o self-host. `host-only` remove ~⅓ desse código
-   exercido de cada perna — tornando *inalcançável* qualquer stop que hoje vem de baixar código de
-   um target que aquela perna nem emite (§2.3). É a mesma filosofia "tornar o defeito inalcançável
-   é melhor que corrigi-lo" já na árvore.
+2. **O wild-write NÃO é resolvido por particionamento de target — nem pelo gate, nem pela
+   decomposição.** [CORREÇÃO de uma afirmação exagerada da 1ª versão deste doc, após o dono
+   apontar, com razão, que era rasa.] O wild-write crasha **dentro de `tk_region_alloc`**
+   (`src/runtime/teko_rt.c` + `src/mem/unsafe/arena.tks`) — o alocador de arena PARTILHADO,
+   exercido por TODA baixa nativa, seja qual for o target. As repros crasham em itens DIFERENTES
+   (2453, virtual-main, 770), inclusive na "última baixa nativa — a emissão ELF do próprio
+   virtual-main" (`elf_collect_const_entries`), que é a emissão do target DO HOST. Ou seja: o bug
+   vive no NÚCLEO e dispara ao emitir o HOST. Tirar código de OUTROS targets não toca a máquina que
+   escreve fora dos limites. A §7.5 prova isto na fonte; **nenhum esquema de partição de target
+   conserta este bug — ele precisa de fix próprio no `tk_region_alloc`.**
 3. **Remover o cross de vez NÃO é preciso para colher o ganho — e custaria caro.** O ganho vem de
    *não incluir* os outros backends no build por omissão; vem de graça no `host-only`. Apagar o
    cross a mais destruiria capacidade já **legislada e ratificada** (`teko-target-crosslink-0.3.1.md`,
@@ -52,6 +56,16 @@ O mecanismo já está desenhado: `docs/design/backend-feature-gating-0.3.1.md`. 
 **avaliação de política** (manter vs. remover vs. gate) que decide se aquele mecanismo é o caminho.
 Recomenda: **implemente aquele desenho, faça `host-only` o default de self-host/CI/dev, e mantenha
 `cross` como opt-in.**
+
+**A pergunta funda do dono — decompor cada ISA+OS num PROJETO teko à parte (dep `.tkl`)** — é
+respondida na fonte na §6. Resumo: (a) SIM, hoje o self-host monomorfiza/baixa TODOS os backends,
+porque o compilador é um projeto monolítico e `discover` não filtra por target (§6.1); (b) a
+decomposição é viável em princípio (o `.tkl`/`.tkb` existe) mas exige package-manager PK0–PK3 +
+uma interface de backend + história de bootstrap que NÃO existem (§6.3); (c) o ganho de compilação
+da decomposição é **IGUAL** ao do gate — os dois deixam um backend no grafo, e o `.tkb` ainda
+re-monomorfiza contra uso, então decompor não baixa menos, só é arquitetura mais limpa por muito
+mais trabalho (§6.4); (d) **nenhum dos dois toca o wild-write**, que vive na arena partilhada
+(`tk_region_alloc`) e dispara na emissão do host (§6.5).
 
 ---
 
@@ -144,22 +158,15 @@ self-host mais rápida** e menos memória (o backend "rebaixa TUDO isso dentro d
 de tradução, mais estruturas de isel/regalloc em memória). O efeito no tempo de codegen/lowering é
 proporcional às linhas removidas — de primeira ordem, ~⅓ do backend fora do caminho.
 
-### 2.3 Efeito no wild-write (menos superfície nativa exercida)
+### 2.3 Efeito no wild-write — remetido para a §7.5 (o dono estava certo)
 
-O wild-write do fixpoint gen2 (bissetado por `TEKO_NATIVE_CHUNK_CANARY` via snapshots de
-chunk-header, commits `da8bfb2f`/`c2ee1091`) é um bug do **código nativo exercido durante o
-self-host**. Dois efeitos de `host-only`:
-
-- **Reduz a superfície onde o bug pode disparar.** ~⅓ menos código nativo é baixado por perna →
-  ~⅓ menos alocações de arena/estruturas de codegen onde um wild-write pode nascer ou aterrar.
-- **Torna inalcançável uma classe inteira de stops.** Um tropeço ao baixar `append_minst_x86`
-  (`minst_x86.tks:1219`, código 100 % x86_64) hoje pode travar o self-host **arm64**, sem relação
-  com arm64 (`backend-feature-gating-0.3.1.md` §0). Sob `host-only` esse ficheiro nem está no
-  programa comparado — o stop deixa de existir, em vez de precisar ser corrigido. Mesma filosofia
-  "tornar o defeito inalcançável é melhor que corrigi-lo" (`teko-laws-digest.md`).
-
-Isto não *conserta* o wild-write — reduz a probabilidade e a área de busca, e destrava pernas que
-hoje ficam reféns de bugs de um backend que nem lhes compete.
+A 1ª versão deste doc alegava aqui que `host-only` "reduz a superfície do wild-write". **Isso era
+raso e o dono apontou com razão.** A análise na fonte (§7.5) mostra que o wild-write vive no
+alocador de arena PARTILHADO (`tk_region_alloc`), disparado ao emitir o target DO HOST — logo
+**nem o gate nem a decomposição por-projeto o tocam**. O único efeito de segunda ordem de reduzir
+input é mudar o NÚMERO de alocações, o que pode deslocar ONDE o crash aflora — mas ele já aflora na
+emissão do host, então não fica inalcançável. Ver §7.5 para a prova completa. Este documento
+**não** conta o wild-write como benefício de nenhuma opção de partição.
 
 ### 2.4 Tamanho do binário
 
@@ -279,9 +286,148 @@ escolhas de produto/nomenclatura, não tensões de lei.
 
 ---
 
-## 6. Sumário de uma linha
+## 6. Decomposição por-projeto (a pergunta funda do dono)
 
-Manter o cross como capacidade, mas **flipar o default para target-único-por-OS** (`host-only`)
-colhe todo o ganho de performance que o dono descreveu (~⅓ do backend fora do caminho, menos
-superfície para o wild-write, self-host mais rápido) **sem perder nada** — porque o release já é
-native-per-runner e o cross ratificado continua a um opt-in de distância.
+> O dono achou a 1ª versão rasa e tem razão: "gate a descoberta pula o parse mas não muda a
+> monomorfização/lowering do NÚCLEO nem toca o backend do HOST (onde o wild-write vive)". Esta
+> secção responde na fonte, com análise ESTÁTICA (nenhum build/teste corrido).
+
+### 6.1 O self-host monomorfiza/lowera TODOS os backends? — SIM. Prova na fonte.
+
+O compilador é **um único projeto monolítico**: `teko.tkp` declara `name = "teko"`,
+`source = "src"`, e `[aliases]` diz literalmente *"none yet — the seed has no external
+dependencies"*. Não há fronteira de projeto entre os backends hoje.
+
+1. **Descoberta cega ao target.** `discover.tks::dsc_walk` caminha `src/` inteiro e coleta TODO
+   `.tks`/`.tkt` num `[]SourceFile`, sem noção de target. O único filtro, `prune_os`
+   (`project.tks:116`), é **por-item** (`os_guard`, ex.: `host_write` vs `_write`), pós-parse — NÃO
+   por-ficheiro-de-target. Logo `isel_x86_64`, `isel_arm64`, `encode_x86_64`, `encode_arm64`,
+   `objfile_elf/macho/coff` — TODOS — entram no `TProgram`.
+2. **Monomorfização dirigida por USO.** `monomorph.tks` estampa uma cópia concreta por
+   instanciação distinta de fn genérica, e um programa **sem genéricos passa BYTE-IDÊNTICO** (guard
+   no-op). Os backends são majoritariamente funções CONCRETAS (`append_minst_x86` etc.) MAIS
+   genéricos partilhados (coleções/slices) instanciados sobre os tipos concretos de cada target
+   (`MInstX86`, `MInstArm64`, …). Portanto o self-host monomorfiza `push<MInstX86>`,
+   `push<MInstArm64>`, slices sobre ambos, etc. — as instâncias por-target dos genéricos do núcleo.
+3. **O LModule é target-agnóstico — a baixa é feita UMA vez.** `emit_native` faz
+   `lower_program(prog)` produzindo UM `LModule` (LIR independente de target, confirmado em
+   `teko-target-crosslink-0.3.1.md` §3) ANTES do `match target`. Mas durante o self-host o `LModule`
+   **do próprio compilador** contém a LIR de TODAS as funções de backend — o backend do host então
+   faz isel/encode/objfile desse módulo ~⅓ maior.
+
+**Conclusão (a):** SIM. Hoje o self-host baixa as ~27 149 linhas de `src/backend/` — incluindo
+~8,3k–9,6k de targets que o binário resultante nem emite naquela corrida — através do backend do
+host. Esse é o peso real que o dono nomeou, e é ANTERIOR e maior que o front-half de compilar um
+programa de usuário.
+
+### 6.2 A monomorfização carrega especialização por-target que a decomposição cortaria?
+
+Não há monomorfização por-target ESCONDIDA no núcleo que só a decomposição alcançaria. A
+especialização que existe é: genéricos partilhados instanciados sobre os tipos concretos de cada
+target, e essas instâncias nascem dos **call-sites nos ficheiros do target**. Remover os ficheiros
+de um target — pelo gate OU pela decomposição — remove exatamente esses call-sites e, com eles,
+essas instâncias. É o MESMO conjunto removido pelos dois mecanismos. O núcleo não tem um eixo de
+especialização por-target que sobreviva ao gate mas caia só na decomposição.
+
+### 6.3 A decomposição é viável no sistema de deps do teko? Como — e o que falta.
+
+O mecanismo de dependência EXISTE, e é de um tipo específico que muda a análise:
+
+- **A unidade `.tkl`** = ZIP(`.tkh` + `.tkb` + `.tsym`). O `.tkb` é **AST TIPADA** (pós-checker,
+  genéricos INTACTOS), **não** é código de máquina e **não** linka (`package-manager.md` §1,
+  decisões CLOSED 2026-07-11).
+- **Modelo de consumo = crate-Rust:** o consumidor **monomorfiza o `.tkb` contra o uso real**
+  (M.5, por instanciação de fato usada) → nativo → cache por `(AST-hash, instantiation-set,
+  target)`. `load_deps_program`/`load_dep_program` (`project.tks:134–238`) já carregam
+  `packages/<dep>-*.tkl` e pré-anexam os itens tipados antes do checking; o harness de regressão
+  (`regression.tks:1508`) já compila um dep para `.tkl` e consome — **consumidor-compila-dep
+  FUNCIONA hoje**.
+
+Mas transformar os backends do compilador em deps `.tkl` exige três coisas que NÃO existem:
+
+1. **Package-manager PK0–PK3** (`{ path = … }`/`git` deps, resolver, versão, lockfile) — hoje
+   DESIGN-only (`package-manager.md` é doc-only). O manifesto-raiz tem ZERO deps.
+2. **Uma interface de backend.** O dispatch é um `match` MONOLÍTICO (`project.tks:3042`) chamando
+   `emit_native_x86`/`emit_native_arm64`/`emit_native_win` definidas no mesmo `project.tks`. Para o
+   backend virar dep, esse `match` tem de virar uma INTERFACE que o dep-backend implementa (uma
+   costura de plugin), não um `match` fechado no núcleo.
+3. **Uma história de bootstrap para a galinha-e-ovo.** Um backend entregue como `.tkb` (AST tipada)
+   precisa ser TIPADO/baixado PELO compilador; mas o compilador precisa de um backend para se
+   compilar. O backend-do-host tem de estar disponível ao seed/cadeia-de-gerações ANTES de poder
+   ser tratado como "dep". Isso é uma complicação de ordem-de-build real (M.4), não um detalhe.
+
+**Conclusão (b):** VIÁVEL em princípio (o `.tkl`/`.tkb` existe e é exercido), mas é um programa
+GRANDE — PK0–PK3 + interface de backend + história de bootstrap — muito mais fundo que o gate.
+
+### 6.4 O ganho REAL da decomposição vs. o gate raso — sê honesto.
+
+Este é o ponto onde a intuição do dono ("decomposição tira do grafo inteiro ⇒ ganho maior") precisa
+de ser testada na fonte, e a resposta honesta é: **para o self-host/fixpoint, o ganho é O MESMO.**
+
+- O gate DESENHADO corta em `discover.tks::dsc_walk` **antes do lexer** — o ficheiro não-host nunca
+  é lido, lexado, parseado, tipado, monomorfizado NEM baixado. A decomposição tira o ficheiro do
+  grafo de deps. **Os dois deixam EXATAMENTE UM backend no grafo compilado.** O efeito na
+  monomorfização/lowering é idêntico.
+- E o `.tkb` **não** é código de máquina: o consumidor **re-monomorfiza e re-baixa** o dep contra o
+  uso. Então um backend decomposto em `.tkl` custa o MESMO para baixar que um backend in-tree — não
+  há economia de baixa por ele ser um dep. A intuição de que "tirar do grafo" poupa mais só vale
+  contra um gate INGÊNUO que cortasse DEPOIS do parse; o gate desenhado corta antes, e iguala.
+- **Onde a decomposição PODERIA ganhar (honestamente):** o **cache** de build do `.tkl`
+  (`(AST-hash, instantiation-set, target)`) faz um HIT saltar a re-baixa do backend em builds
+  REPETIDAS. Mas (i) o self-host do fixpoint tem de compilar **da fonte** para ser um fixpoint
+  válido (`gen2 == gen3`) — cache o mina ou é neutro; e (ii) o cache é uma facilidade GERAL, não
+  um benefício exclusivo da decomposição.
+
+**Conclusão (c):** ranking de ganho de COMPILAÇÃO: **gate ≈ decomposição ≫ hoje.** A decomposição
+NÃO é "muito maior" que o gate para o peso do self-host — ela é MAIS TRABALHO pela MESMA perf,
+comprando ARQUITETURA (fronteira de módulo dura — `append_minst_x86` fica fisicamente
+inalcançável a partir de código arm64; teste/versão por-backend; os backends cross distribuíveis
+como `.tkl` separados — a história `teko-cross`; e a costura de plugin substituindo o `match`
+monolítico), não velocidade extra.
+
+### 6.5 O wild-write: nenhum dos dois toca o bug. Prova na fonte.
+
+O wild-write crasha **dentro de `tk_region_alloc`** — o alocador de arena/região em
+`src/runtime/teko_rt.c` (+ gêmeo `.tks` + `src/mem/unsafe/arena.tks`), PARTILHADO por toda baixa
+nativa. Evidência dos commits do canário:
+
+- `620fe1c9`: *"the wild write clobbered the HANDLE — `r->head` itself, or whatever upstream
+  variable/slot fed it — not necessarily a chunk's own cap/next fields"*; três repros crasharam
+  dentro de `tk_region_alloc` em **itens diferentes (2453, virtual-main, 770)** com zero trips.
+- `3f887208`: *"a full native self-build run reached the very LAST native-lowering item
+  (virtual-main's own final ELF emission, `elf_collect_const_entries`)"* — a emissão **ELF**, ou
+  seja, o target DO HOST num runner linux.
+
+Portanto o bug (i) vive no NÚCLEO partilhado (a arena + a máquina de baixa nativa que o backend do
+HOST dirige), e (ii) DISPARA ao emitir o target do host. Remover os ficheiros de outros targets não
+remove a máquina que escreve fora dos limites, nem o caminho de emissão-do-host onde ele reproduz.
+Reduzir input muda o NÚMERO de alocações, o que pode deslocar ONDE o crash aflora — mas ele já
+aflora na emissão do host, então **não fica inalcançável**.
+
+**Conclusão (d):** NÃO. Nem o gate nem a decomposição tocam o wild-write. Ambos só reduzem a
+superfície de OUTROS targets, enquanto o backend do host (buggy) continua idêntico e continua a
+disparar o bug ao emitir o host. O wild-write é um defeito SEPARADO — corrupção de handle de arena
+no escritor upstream de `tk_region_alloc` — e tem de ser corrigido por seus próprios méritos. Não
+deixar o particionamento de target ser vendido como remédio do wild-write: **não é.**
+
+### 6.6 O que isto muda na recomendação
+
+- Para a PERF que o dono pediu: **o gate basta e é o menor caminho** (uma tabela + um gancho em
+  `discover`) — não precisa de PK0–PK3, nem de interface de plugin, nem de história de bootstrap. A
+  decomposição entrega a MESMA perf por muito mais trabalho.
+- A **decomposição é o alvo de ARQUITETURA certo** (fronteiras duras, backends cross distribuíveis,
+  costura de plugin) — persiga-a como objetivo de arquitetura/produto, **não** como a alavanca de
+  perf, e só depois de PK0–PK3 existirem.
+- O **wild-write é ortogonal** aos dois e precisa de fix próprio no caminho de arena/`tk_region_alloc`.
+  Trate-o em paralelo; não bloqueie nem justifique a decisão de target por ele.
+
+---
+
+## 7. Sumário de uma linha
+
+O ganho de compilação que o dono quer é REAL (~⅓ do backend — 8,3k–9,6k linhas — fora da
+monomorfização/baixa/self-host) e é entregue **igualmente** pelo gate raso OU pela decomposição
+por-projeto; a decomposição é arquitetura mais limpa mas **não** dá ganho de perf maior (§7.4), e
+**nenhuma das duas conserta o wild-write**, que é um bug do alocador de arena partilhado exercido
+na emissão do host (§7.5) e precisa de fix próprio. Recomendação: **gate agora pela perf,
+decomposição depois pela arquitetura, wild-write em paralelo como bug independente.**
