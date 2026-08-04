@@ -1830,11 +1830,61 @@ fn cast_kind_of_ptr(p: Ptr) -> PrimKind | error {
     }
 }
 
+/**
+ * cast_ptr_partner_ok — when either cast endpoint is a `Ptr`, is the OTHER endpoint the ONE
+ * partner the address-carrier decision admits (`docs/design/arena-em-teko.md` §2: `ptr<byte> <->
+ * u64`, and ONLY that pairing)?
+ *
+ * WHY THIS EXISTS SEPARATELY FROM `cast_kind_of_ptr`. `cast_kind_of_ptr` answers `ptr<byte>` with
+ * `PrimKind::U64` so the pair can ride `cast_check`'s generic "any numeric to any numeric is
+ * defined" rule below — but that rule only ever sees the two `PrimKind`s, never the concrete
+ * types they came from. Left alone, it would accept `ptr<byte> to i32` or `f64 to ptr<byte>` —
+ * ANY numeric partner, not just `u64` — because `PrimKind::U64` reads as "some 64-bit-ish numeric"
+ * to a rule that was written for genuine numeric-to-numeric pairs. P1 is a same-bit-pattern
+ * REINTERPRET, not a machine conversion (`lir::lower_cast`'s `is_u64_ptr_byte_reinterpret_cast`
+ * emits it as literally zero instructions), so a pairing that rule cannot honour must never
+ * type-check in the first place. This checks the ACTUAL partner type, closing that gap before
+ * `cast_kind` is ever consulted.
+ *
+ * @param from  the cast operand's resolved type
+ * @param to    the cast target's resolved type
+ * @return      `null` when NEITHER side is `Ptr` (the generic rule below decides it), or the one
+ *              `Ptr` side's partner is exactly `u64`; a NAMED error for every other
+ *              pointer-involving pairing (including pointer-to-pointer)
+ * @since 0.3.1
+ */
+fn cast_ptr_partner_ok(from: Type, to: Type) -> error | null {
+    let from_ptr = is_bare_ptr(from)
+    let to_ptr = is_bare_ptr(to)
+    if !from_ptr && !to_ptr { return null }
+    if from_ptr && to_ptr {
+        return error { message = "cast not defined between two pointer types in the seed (only `ptr<byte> <-> u64`, the arena address carrier, is defined — arena-em-teko.md §2)" }
+    }
+    let partner = if from_ptr { to } else { from }
+    if is_u64_prim(partner) { return null }
+    error { message = "cast not defined for this pointer/numeric pairing in the seed (only `ptr<byte> <-> u64`, the arena address carrier, is defined — arena-em-teko.md §2)" }
+}
+
+// is `t` (structurally) a `Ptr` — opaque `ptr` or any `ptr<T>`? `cast_ptr_partner_ok`'s own
+// classifier; `cast_kind_of_ptr` still owns which POINTEE that `Ptr` may carry.
+fn is_bare_ptr(t: Type) -> bool {
+    match t { Ptr => true; _ => false }
+}
+
+// is `t` the resolved primitive `u64` — the ONE partner `cast_ptr_partner_ok` admits opposite a `Ptr`?
+fn is_u64_prim(t: Type) -> bool {
+    match t { Prim as p => p.kind == PrimKind::U64; _ => false }
+}
+
 // is `from -> to` a DEFINED conversion? Any integer/byte ↔ integer/byte is (the loss is
 // runtime/codegen's — B; byte casts AS u8 — B.36). Only Bool and non-numeric ends are rejected.
+// A `Ptr` endpoint is additionally pairwise-gated by `cast_ptr_partner_ok` (arena-em-teko.md §2 —
+// see its own doc for why `cast_kind`'s `PrimKind::U64` answer for `ptr<byte>` is not, by itself,
+// enough to keep this rule scoped to the one pairing that decision admits).
 // Reused by the counter-validation (E6-2) — ONE source of truth (M.5).
 fn cast_check(from: Type, to: Type) -> error | null {
     if type_eq(from, to) { return null }   // same type — a no-op
+    match cast_ptr_partner_ok(from, to) { null => { }; error as e => return e }
     match cast_kind(from) { PrimKind => { }; error as e => return e }
     match cast_kind(to) { PrimKind => { }; error as e => return e }
     null   // any numeric/byte → any numeric/byte is defined (B; byte AS u8)
