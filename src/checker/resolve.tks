@@ -1863,22 +1863,6 @@ pub fn resolve_type(te: parser::TypeExpr, table: TypeTable, ref_ns: str) -> Type
             let rt = match resolve_type(fnt.ret, table, ref_ns) { Type as t => t; error as e => return e }
             return Func { params = ps; ret = rt; variadic = false; param_names = []; n_required = (ps).len; defaults = [] }
         }
-        parser::OptionalType as ot => {
-            // OptionalType `T?` → Optional { inner } (REBOOT_PLAN §202). The variant case
-            // above already rejects an optional as a variant member; here we just build it.
-            let in = match resolve_type(ot.inner, table, ref_ns) {
-                Type as t => t
-                error as e => return e
-            }
-            // `void?` is illegal (void is not a value — M.3); `T??` collapses to `T?`.
-            // (MEM Step 0, R2) ESCAPE GATE — a reference is NEVER null, so `Ref<T>?` is rejected.
-            match in {
-                Void => return error { message = "`void` cannot be made optional (`void?`) — void is not a value (M.3)" }
-                Reference => return error { message = "a reference cannot be nullable (a ref is never null, R2)" }
-                Optional => return in   // `T??` collapses to `T?`
-                _ => Optional { inner = in }
-            }
-        }
     }
 }
 
@@ -2290,7 +2274,6 @@ fn subst_texpr_names(te: parser::TypeExpr, params: []str, args: []parser::TypeEx
             parser::NamedType { path = nt.path; args = nargs }
         }
         parser::SliceType as st => parser::SliceType { element = subst_texpr_names(st.element, params, args) }
-        parser::OptionalType as ot => parser::OptionalType { inner = subst_texpr_names(ot.inner, params, args) }
         parser::UnionType as ut => {
             mut ms: []parser::TypeExpr = teko::list::empty()
             mut i = 0
@@ -2400,7 +2383,6 @@ fn collect_texpr_insts(te: parser::TypeExpr, acc: []parser::TypeExpr) -> []parse
             if nt.args.len > 0 { out = teko::list::push(out, te) }
         }
         parser::SliceType as st => out = collect_texpr_insts(st.element, out)
-        parser::OptionalType as ot => out = collect_texpr_insts(ot.inner, out)
         parser::UnionType as ut => { mut i = 0; loop { if i >= ut.members.len { break }; out = collect_texpr_insts(ut.members[i], out); i++ } }
         parser::FunctionType as fnt => { mut i = 0; loop { if i >= fnt.params.len { break }; out = collect_texpr_insts(fnt.params[i], out); i++ }; out = collect_texpr_insts(fnt.ret, out) }   // (W10a)
     }
@@ -2533,17 +2515,10 @@ fn collect_expr_insts(e: parser::Expr, acc: []parser::TypeExpr) -> []parser::Typ
             }
         }
         parser::FieldAccess as fa => out = collect_expr_insts(fa.receiver, out)
-        parser::SafeFieldAccess as sfa => out = collect_expr_insts(sfa.receiver, out)
-        parser::Coalesce as co => { out = collect_expr_insts(co.left, out); out = collect_expr_insts(co.right, out) }
         parser::MethodCall as mc => {
             out = collect_expr_insts(mc.receiver, out)
             mut i = 0
             loop { if i >= mc.args.len { break }; out = collect_expr_insts(mc.args[i], out); i++ }
-        }
-        parser::SafeMethodCall as smc => {   // (NP-OOP, issue #116) recv?.method(args)
-            out = collect_expr_insts(smc.receiver, out)
-            mut i = 0
-            loop { if i >= smc.args.len { break }; out = collect_expr_insts(smc.args[i], out); i++ }
         }
         parser::Cast as ct => out = collect_expr_insts(ct.expr, out)
         parser::Index as ix => { out = collect_expr_insts(ix.receiver, out); out = collect_expr_insts(ix.index, out) }
@@ -2928,7 +2903,6 @@ fn normalize_inst_texpr(te: parser::TypeExpr, table: TypeTable) -> parser::TypeE
             parser::NamedType { path = nt.path; args = nargs }
         }
         parser::SliceType as st => parser::SliceType { element = normalize_inst_texpr(st.element, table) }
-        parser::OptionalType as ot => parser::OptionalType { inner = normalize_inst_texpr(ot.inner, table) }
         parser::UnionType as ut => {
             mut ms: []parser::TypeExpr = teko::list::empty()
             mut i = 0

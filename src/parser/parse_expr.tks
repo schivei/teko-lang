@@ -425,38 +425,19 @@ fn parse_atom(tokens: []lexer::Token, pos: u64, allow_struct: bool) -> Parsed<Ex
     err_at(tokens, pos, "expected an expression")
 }
 
-// THE EXPRESSION ENTRY — descends the whole ladder (P2 complete: coalesce → or → and →
+// THE EXPRESSION ENTRY — descends the whole ladder (P2 complete: or → and →
 // comparison → additive → multiplicative → shift → cast → unary → postfix → atom). The whole
 // ladder threads `allow_struct` (W4a): the default entry allows struct literals.
 fn parse_expr(tokens: []lexer::Token, pos: u64) -> Parsed<Expr> | error {
-    parse_coalesce(tokens, pos, true)   // default: struct literals allowed
+    parse_or(tokens, pos, true)   // default: struct literals allowed
 }
 
 // the scrutinee form (B.20/B.15): a trailing `{` opens the if/match block, NOT a struct
 // literal — so struct literals are suppressed at the top level of the condition/subject.
 fn parse_expr_no_struct(tokens: []lexer::Token, pos: u64) -> Parsed<Expr> | error {
-    parse_coalesce(tokens, pos, false)
+    parse_or(tokens, pos, false)
 }
 
-/**
- * parse_coalesce — the loosest rung of the expression ladder (below `||`). The `??` null-coalescing
- * sugar has been REMOVED: an expression now parses straight through `parse_or`, and a trailing `??`
- * token is rejected with a diagnostic naming the explicit replacement. `T | null` values narrow with
- * an explicit `match`, not the Elvis operator.
- *
- * @param tokens        the token stream
- * @param pos           the position at which the expression begins
- * @param allow_struct  whether a bare `Name { … }` struct literal is admissible here (W4a)
- * @return              the parsed expression, or an error when a `??` operator is encountered
- * @throws              error naming `match` on the `T | null` value when the removed `??` appears
- */
-fn parse_coalesce(tokens: []lexer::Token, pos: u64, allow_struct: bool) -> Parsed<Expr> | error {
-    let first = match parse_or(tokens, pos, allow_struct) { Parsed<Expr> as x => x; error as e => return e }
-    if is_kind_at(tokens, first.next, lexer::TokenKind::QQ) {
-        return err_at(tokens, first.next, "the `??` null-coalescing operator has been removed — use an explicit `match` on the `T | null` value instead")
-    }
-    Parsed<Expr> { node = first.node; next = first.next }
-}
 
 // postfix: a chain of `.field` and `.method(args)` after an atom (tightest after the
 // leaf). Left-assoc. `a.b`, `a.b().c`, `f(x).g`.
@@ -477,9 +458,6 @@ fn parse_postfix(tokens: []lexer::Token, pos: u64, allow_struct: bool) -> Parsed
             node = Expr { kind = Index { receiver = node; index = idx.node }; line = tokens[pos].line; col = tokens[pos].col }
             p = idx.next + 1
             continue
-        }
-        if is_kind_at(tokens, p, lexer::TokenKind::QDot) {
-            return err_at(tokens, p, "the `?.` safe-navigation operator has been removed — use an explicit `match` on the `T | null` receiver instead")
         }
         if !is_kind_at(tokens, p, lexer::TokenKind::Dot) { break }
         if !is_name_at(tokens, p + 1) {

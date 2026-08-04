@@ -2090,8 +2090,6 @@ fn fold_children(e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExp
         TMatchExpr as m => fold_match(m, e, table, env, agg)
         TCast as c => fold_cast(c, e, table, env, agg)
         TFieldAccess as fa => fold_field(fa, e, table, env, agg)
-        TSafeFieldAccess as sfa => fold_safe_field(sfa, e, table, env, agg)
-        TCoalesce as co => fold_coalesce(co, e, table, env, agg)
         TStructInit as si => fold_struct(si, e, table, env, agg)
         TIndex as ix => fold_index(ix, e, table, env, agg)
         TInterp as in => fold_rw_interp(in, e, table, env, agg)
@@ -2229,28 +2227,6 @@ fn fold_field_children(fa: TFieldAccess, e: TExpr, table: TypeTable, env: Env, a
  * @return       the optional field access rebuilt with a folded receiver, or a located error
  * @since #comptime-fold
  */
-fn fold_safe_field(sfa: TSafeFieldAccess, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExpr | error {
-    let r = match fold_expr(sfa.receiver, table, env, agg) { error as x => return x; TExpr as v => v }
-    TExpr { kind = TSafeFieldAccess { receiver = r; field = sfa.field }; type = e.type; line = e.line; col = e.col }
-}
-
-/**
- * fold_coalesce — rebuild a `??` coalesce node around its folded operands.
- *
- * @param co     the typed coalesce expression
- * @param e      the enclosing expression (its type/position)
- * @param table  the type table (forwarded to each operand fold)
- * @param env    the environment (forwarded to each operand fold)
- * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
- * @return       the coalesce rebuilt with folded operands, or a located error
- * @since #comptime-fold
- */
-fn fold_coalesce(co: TCoalesce, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExpr | error {
-    let l = match fold_expr(co.left, table, env, agg) { error as x => return x; TExpr as v => v }
-    let r = match fold_expr(co.right, table, env, agg) { error as x => return x; TExpr as v => v }
-    TExpr { kind = TCoalesce { left = l; right = r }; type = e.type; line = e.line; col = e.col }
-}
-
 /**
  * fold_index — fold an index of a const aggregate at a const index (Layer 1c): when the whole index
  * is const-foldable (`cf_can_index` — a const-aggregate receiver at a const integer index), evaluate
@@ -3055,8 +3031,6 @@ fn lp_expr(e: TExpr, m: LocalConstMap) -> TExpr {
         TMatchExpr as mm => lp_match(mm, e, m)
         TCast as c => TExpr { kind = TCast { expr = lp_expr(c.expr, m) }; type = e.type; line = e.line; col = e.col }
         TFieldAccess as fa => TExpr { kind = TFieldAccess { receiver = lp_expr(fa.receiver, m); field = fa.field }; type = e.type; line = e.line; col = e.col }
-        TSafeFieldAccess as sfa => TExpr { kind = TSafeFieldAccess { receiver = lp_expr(sfa.receiver, m); field = sfa.field }; type = e.type; line = e.line; col = e.col }
-        TCoalesce as co => TExpr { kind = TCoalesce { left = lp_expr(co.left, m); right = lp_expr(co.right, m) }; type = e.type; line = e.line; col = e.col }
         TStructInit as si => TExpr { kind = TStructInit { field_names = si.field_names; field_vals = lp_exprs(si.field_vals, m) }; type = e.type; line = e.line; col = e.col }
         TIndex as ix => TExpr { kind = TIndex { receiver = lp_expr(ix.receiver, m); index = lp_expr(ix.index, m) }; type = e.type; line = e.line; col = e.col }
         TInterp as in => lp_interp(in, e, m)
