@@ -532,3 +532,116 @@ fecho a instrução exata e finalizo o fix de §7.4 para o coder aplicar.
 - Alvo do fix (C): `/home/user/teko-lang/src/backend/isel_x86_64.tks`,
   `/home/user/teko-lang/src/backend/regalloc.tks`/`regalloc_x86.tks` — liveness da
   base sobre a chamada de grow.
+
+---
+
+# §7.7 ORDEM EMITIDA — resposta ao hint do dono (transfer-após-clear)
+
+Hint do dono: "tentando transferir um ponteiro de região DEPOIS da memória ter
+sido limpa" — um bug de SEQUENCIAMENTO: o transfer do ponteiro emitido APÓS o
+free/park/region-drop. Âncoras: `port-…-backend-nativo-0.3.1.md §2c` (leave-
+antes-de-`own_returned_value`) e `modelo-de-memoria-por-escopo-0.3.1.md §1`
+(não-UAF-por-construção). Verifiquei a ORDEM EMITIDA em cada aresta de saída.
+
+## (1) A ordem emitida, aresta por aresta (CLEAR = park/drop; TRANSFER = box/store/ret)
+
+**A. self-append fat `xs = push(xs, item)` escapante (`lower_assign_conveyed:13224`
+→ `lower_assign_frees_old:13514`):**
+```
+tk_region_leave() × N            (emit_region_leaves — current → rr=root, cur_rsp→0)
+  load xs.ptr (=O_old), xs.len   (lower_fat_expr base)
+  store item → item_slot
+  CALL tk_slice_push_fo(O_old,len,item_slot,16,&out)  → O_new; PARK O_old  ← CLEAR
+  load out
+  store {O_new,out} → xs_slot     (store_fat_slot)                         ← TRANSFER (alvo O_new, VIVO)
+tk_region_enter_u(fr) × N        (emit_region_enters — current → fr)
+```
+O TRANSFER (store_fat_slot) mira O_new (o buffer VIVO), não O_old. A base O_old
+(vreg) tem seu último uso NO argumento da CALL — morta depois. Ordem CORRETA.
+
+**B. return de AGREGADO `return s` / auto-return de cauda (`lower_return:6446`,
+`lower_fn_body:13825`):**
+```
+replay_defers
+tk_region_leave() × N            (LEAVE — current → root)                 [§2c: ANTES do box]
+own_returned_value → tk_slice_elem_box(src, bytes) → dst em root          ← TRANSFER (box copia p/ root)
+tk_region_drop_u(fr) × N         (DROP — libera fr)                       ← CLEAR (por ÚLTIMO)
+ret dst
+```
+LEAVE antes do box (§2c HONRADO); DROP estritamente APÓS o box. Ordem CORRETA.
+
+**C. return FAT / auto-return fat `-> []str` (`lower_return_fat:6479`,
+`lower_fn_body_fat:13865` + `lower_conveyed_tail_expr_stmt_fat`):**
+```
+tk_region_leave() × N            (LEAVE — current → root)  [ANTES da construção]
+  <constrói o valor fat sob current=root; um push_fo aqui PARKa O_old em root> ← CLEAR
+store len → ret_len_slot
+tk_region_drop_u(fr) × N         (DROP)                                    ← por ÚLTIMO
+ret ptr (=O_new, em root)
+```
+`lower_conveyed_tail_expr_stmt_fat` faz leave-ANTES/enter-DEPOIS da construção
+(confirmado no corpo). LEAVE antes de construir; DROP por último. Ordem CORRETA.
+
+**Conclusão (1):** em TODAS as arestas — `lower_return`, `lower_return_fat`,
+`lower_fn_body`, `lower_fn_body_fat`, `lower_conveyed_tail_expr_stmt_fat`,
+`close_function`, `close_loop_body` — o CLEAR (park/drop) é emitido ESTRITAMENTE
+APÓS o TRANSFER (box/store/ret), e o `tk_region_leave()` precede `own_returned_value`
+(§2c honrado). **A hipótese de INVERSÃO DE ORDEM DE EMISSÃO está REFUTADA no
+nível de `lower.tks`.** O parking-em-root vem da CORREÇÃO do bracket (current=root
+→ `tk_free_block` não retorna cedo), não de um drop fora de ordem.
+
+## (2) Qual "ponteiro de região" e qual regra é violada
+NÃO é (a) o endereço do box agregado nem (b) o handle-âncora `rr` — esses estão
+ordenados corretamente (box→drop; `rr` nunca é dropado). É **(c) a BASE do buffer
+de slice pré-grow** (O_old). A intuição do dono está CORRETA na CLASSE (um
+ponteiro para memória limpa é usado), mas o uso-após-clear NÃO está na ORDEM DE
+EMISSÃO LIR (que está certa) — está no nível de REGISTRADOR: a vreg da base
+sobrevive à CALL de grow que limpou sua memória. A regra violada NÃO é §2c
+(honrada) — é a invariante de residência/cadeia-linear do `modelo §1`
+(não-UAF-por-construção): a base deve estar MORTA assim que o grow a substitui, e
+o isel/regalloc a mantém viva/hoisted.
+
+Nota de reforço: `lower.tks` re-lê `xs` do frame slot a cada statement/iteração
+(`lower_var_fat:load_fat_slot`; loops não threadam fat como block-arg — só
+escalares, `close_loop_body:7580`), então a base estante NÃO nasce em `lower.tks`.
+Nasce na alocação de registrador do backend, que pode comum/hoistar o load da base
+ou reusar a vreg da base através da CALL de grow (LICM sobre um loop de
+push/index-write) — precisamente "transferir o ponteiro depois da memória limpa",
+um passo abaixo da emissão LIR.
+
+## (3) Fix mínimo que honra o spec
+Como a ordem de emissão já está certa, o fix NÃO é reordenar `lower.tks` — é
+tornar a CALL de grow um CLOBBER da base no modelo de liveness/ABI do backend:
+- Em `src/backend/isel_x86_64.tks` (lowering da call) + `src/backend/regalloc.tks`/
+  `regalloc_x86.tks`: modelar `tk_slice_push`/`tk_slice_push_fo`/`tk_append_bytes_fo`
+  como MATANDO (clobber) o operando-base do buffer fat na saída, de modo que
+  nenhum load da base seja hoisted/commoned através dela e nenhuma vreg de base
+  pré-grow seja reusada depois. Isso força todo acesso pós-grow a partir do
+  RESULTADO (o buffer retornado) — exatamente a invariante linear-chain que a prova
+  garante e que o leg C honra por construção do seu modelo de lvalue.
+- (Defensivo, `lower.tks`, opcional) re-ler a base do frame slot IMEDIATAMENTE
+  antes de cada `element_addr_at`/`store_fat_slot` de elemento, para que mesmo um
+  regalloc agressivo não tenha uma base pré-grow para reusar.
+
+Sem tocar `assign_frees_old` (prova sã), sem tocar `teko_rt.c` (oráculo congelado),
+sem desabilitar free-old; o emissor C e o programa emitido não mudam → C
+byte-idêntico; o self-fixpoint nativo converge.
+
+## (4) Dado único que fecha (emissão-order vs regalloc)
+Se o dono suspeita de uma aresta de emissão que EU não inspecionei, o teste é a
+INSTRUÇÃO GRAVADORA (§7.5): watchpoint no payload do bloco estacionado; a
+(line,col) da store que dispara → se cai num `store_fat_slot`/`element_addr_at`
+cuja base foi carregada no MESMO statement pós-leave → é regalloc (clobber fix);
+se cai num transfer emitido APÓS um `tk_region_drop_u`/park no MESMO bloco LIR →
+é uma inversão de emissão que eu não vi, e reordena-se ali. Uma corrida, um
+watchpoint, desempata definitivamente.
+
+## §7.7 ponteiros (absolutos)
+- Ordem correta confirmada: `/home/user/teko-lang/src/lir/lower.tks:6446`
+  (`lower_return`), `:6479` (`lower_return_fat`), `:13825` (`lower_fn_body`),
+  `:13865` (`lower_fn_body_fat`), `:13224` (`lower_assign_conveyed`),
+  `lower_conveyed_tail_expr_stmt_fat`, `:13190` (`close_function`), `:7576`
+  (`close_loop_body`); box `:10750` (`box_aggregate_value_at`)/`emit_elem_box`.
+- Clear-precede-cedo só via bracket: runtime `/home/user/teko-lang/src/runtime/teko_rt.c:4494`.
+- Alvo do fix: `/home/user/teko-lang/src/backend/isel_x86_64.tks`,
+  `/home/user/teko-lang/src/backend/regalloc.tks`/`regalloc_x86.tks`.
