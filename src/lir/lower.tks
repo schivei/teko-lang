@@ -1703,28 +1703,6 @@ fn native_scope_region_of(stack: []NativeRegionFrame, name: str) -> u32 | null {
     null
 }
 
-/**
- * self_append_bracket_region — the region VReg a self-append `xs = teko::list::push(xs, …)`'s grow
- * call must run under: `native_scope_region_of`'s declaring-scope resolution, falling back to the
- * FRAME (`stack[0]`, index 0 — the outermost, longest-lived open region) when unresolved — the
- * SAFETY INVARIANT (any doubt routes to the ENCLOSING region, never the innermost). `null` only when
- * `stack` itself is empty (no frame open yet — an unreachable shape for a self-append, which only
- * lowers inside a function body; kept as a defensive no-bracket fallback rather than an assumed
- * invariant).
- *
- * @param stack  the open lexical-region stack (`ctx.region_stack`)
- * @param name   the self-append target's name
- * @return       the VReg of the region the growth call should run under, or `null` to run it
- *               unbracketed (whatever the runtime's own current region already is)
- * @since 0.3.1
- */
-fn self_append_bracket_region(stack: []NativeRegionFrame, name: str) -> u32 | null {
-    match native_scope_region_of(stack, name) {
-        u32 as v => v
-        null => if stack.len > 0 { stack[0].region_vreg } else { null }
-    }
-}
-
 /** lower_expr — lower a typed expression to LIR, returning the VReg carrying its value.
     Mirrors emit_expr_ctx's dispatch over the subset; every out-of-subset node honest-stops
     with a NAMED error. */
@@ -13909,12 +13887,34 @@ fn lower_assign_fat(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error 
 type SelfAppendBracket = struct { ctx: LowerCtx; opened: bool }
 
 /**
- * enter_self_append_region — the N-level selector's runtime realization (§1/§7,
- * `self_append_bracket_region`): emit `tk_region_enter_u(<R_decl>)` around a self-append's own grow
- * call, so the helper bare `tk_slice_push`/`tk_slice_push_fo` — which bump-allocates from WHATEVER
- * `tk_region_current()` is — materializes the grown buffer in the accumulator's DECLARING scope
- * instead of the innermost currently-open one. A no-op (`opened=false`) when `ctx.region_stack` is
- * empty (no frame open yet — an unreachable shape for a self-append in practice).
+ * enter_self_append_region — the N-level selector's runtime realization (§1/§7): emit
+ * `tk_region_enter_u(<R_decl>)` around a self-append's own grow call, so the helper bare
+ * `tk_slice_push`/`tk_slice_push_fo` — which bump-allocates from WHATEVER `tk_region_current()` is
+ * — materializes the grown buffer in the accumulator's DECLARING scope instead of the innermost
+ * currently-open one. Three cases, by `native_scope_region_of(ctx.region_stack, name)`:
+ *
+ * - REGISTERED (a `u32` target, `native_scope_region_of` resolved a declaring `NativeRegionFrame`):
+ *   bracket to it. The real N-level fix (`mem_loop_per_iter` — an accumulator declared in an outer
+ *   arm, grown in an inner loop, must not die per-iteration).
+ * - UNREGISTERED (`null`) AND `name` ESCAPES this function (`binding_conveys_escape`): emit NO
+ *   bracket (`opened=false`). An escaping self-append's assignment already runs inside
+ *   `lower_assign_conveyed`'s own OUTER bracket (`emit_region_leaves`, detouring the runtime's
+ *   current region all the way down to the conveyance anchor `rr`, root through NP5) — that detour
+ *   is what makes the grown buffer survive the frame drop. A `stack[0]` (frame) fallback here would
+ *   OVERRIDE that detour with `tk_region_enter_u(fr)`, landing the buffer back in `fr` — which
+ *   `emit_region_drops` frees at the very return this self-append's value is escaping THROUGH: a
+ *   confirmed double-free/heap-corruption UAF (measured on `theory/heisenbug-fix`, CI run
+ *   30947982111, gen1 SIGSEGV in `emit_call`; the C route never makes this mistake —
+ *   `cg_self_append_escapes`, `codegen.tks:8020`, threads `dctx.rr` for exactly this case, reserving
+ *   its own `scope_region_of` selector for the non-escaping route only). This native twin now
+ *   mirrors that split.
+ * - UNREGISTERED AND NOT escaping: bracket to the FRAME (`ctx.region_stack[0]`) — leak-safe (the
+ *   frame outlives every use inside this function), never UAF; a non-escaping accumulator whose
+ *   `decl_name` registration was overwritten by a LATER binding in the same scope (only the
+ *   last-bound name per scope is tracked, `register_scope_decl_name`) still just leaks wider than
+ *   optimal (a peak-memory cost, not a crash) — a known, accepted follow-up, NOT this crumb's fix.
+ * - Empty `ctx.region_stack`: no bracket (unreachable in practice — a self-append only lowers
+ *   inside a function body, which always has an open frame region by the time it lowers).
  *
  * @param ctx   the lowering context
  * @param name  the self-append target's name
@@ -13924,9 +13924,20 @@ type SelfAppendBracket = struct { ctx: LowerCtx; opened: bool }
  * @since 0.3.1
  */
 fn enter_self_append_region(ctx: LowerCtx, name: str, line: u32, col: u32) -> SelfAppendBracket {
-    match self_append_bracket_region(ctx.region_stack, name) {
+    match native_scope_region_of(ctx.region_stack, name) {
         u32 as target => SelfAppendBracket { ctx = ctx_append(ctx, void_call_inst("tk_region_enter_u", one_region_arg(target), false, line, col)); opened = true }
-        null => SelfAppendBracket { ctx = ctx; opened = false }
+        null => {
+            if binding_conveys_escape(ctx.escaping, name) {
+                SelfAppendBracket { ctx = ctx; opened = false }
+            } else {
+                if ctx.region_stack.len > 0 {
+                    let fr_vreg = ctx.region_stack[0].region_vreg
+                    SelfAppendBracket { ctx = ctx_append(ctx, void_call_inst("tk_region_enter_u", one_region_arg(fr_vreg), false, line, col)); opened = true }
+                } else {
+                    SelfAppendBracket { ctx = ctx; opened = false }
+                }
+            }
+        }
     }
 }
 

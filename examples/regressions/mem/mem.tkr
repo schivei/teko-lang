@@ -132,6 +132,21 @@ Feature: mem — teko::mem native positives (each a Given source case, native ro
     When built and run
     Then stdout pattern = "fp=17"
 
+  # (mem_accum_escapes_native, native scope-memory port NP5 — the CONFIRMED double-free fix) an
+  # ESCAPING self-append accumulator (`mut xs = list::empty(); … xs = list::push(xs, e) …; return
+  # xs`, both directly in a function body and inside a nested `if` arm) MUST bump-allocate into the
+  # conveyance anchor `rr` (the caller's region, root through NP5) that its own `lower_binding_conveyed`/
+  # `lower_assign_conveyed` bracket already detours to — NEVER into the frame `stack[0]` fallback
+  # `enter_self_append_region` used to fall back to unconditionally when `xs` was unregistered (every
+  # escaping binding IS unregistered — `register_scope_decl_name` only runs on the non-escaping path).
+  # The frame fallback there froze the buffer in `fr`, which `emit_region_drops` freed at THIS
+  # function's own return — a confirmed double-free/heap-corruption UAF (CI run 30947982111, gen1
+  # SIGSEGV in `emit_call`), not merely a leak. `Given source`, no env — native by construction.
+  Scenario: mem_accum_escapes_native — an escaping self-append accumulator (direct + nested-arm) fingerprints to 85
+    Given source = "cases/mem_accum_escapes_native.tks"
+    When built and run
+    Then stdout pattern = "fp=85"
+
 
 Feature: mem — dropping a #must_free handle without teko::mem::free is rejected (compile-fail case)
 
