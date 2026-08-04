@@ -12628,7 +12628,6 @@ fn store_struct_fields(ctx: LowerCtx, base: u32, layout: LStructLayout, field_na
         if i >= field_names.len { break }
         let off = match field_offset_of(layout, field_names[i]) { u32 as o => o; error as err => return err }
         let decl = find_field_decl_type(ctx.field_decls, layout.name, field_names[i])
-        match check_store_fat_span(cur, layout, field_names[i], decl, field_vals[i]) { error as err => return err; null => { } }
         cur = match store_struct_field(cur, base, off, decl, field_vals[i], line, col) { LowerCtx as c => c; error as err => return err }
         i++
     }
@@ -14323,8 +14322,7 @@ pub fn lower_prelude(prog: checker::TProgram, flat_symbols: bool) -> LowerPrelud
     let table = checker::type_table_of(prog)
     match fat_divergence_guard(prog, table, checker::type_table_rekeyed(table)) { error as e => return e; null => { } }
     let enums = collect_enums(prog)
-    let dtable = declared_type_table(prog)
-    let layouts = match collect_struct_layouts(prog, enums, table, dtable) { []LStructLayout as ls => ls; error as e => return e }
+    let layouts = match collect_struct_layouts(prog, enums, table) { []LStructLayout as ls => ls; error as e => return e }
     let externs = collect_externs(prog)
     let variants = collect_variant_defs(prog)
     let ref_fns = collect_ref_fns(prog)
@@ -14641,22 +14639,18 @@ fn register_layouts(m: LModule, layouts: []LStructLayout) -> LModule {
  *               `layout_of_fields`'s alias resolver (`typeexpr_is_fat`, 0.3.1.0 raiz A, crumb
  *               R0), taken as a PARAMETER rather than recomputed here so `lower_program` builds
  *               it exactly once and shares it with a function's own parameter list too
- * @param dtable the (bare name, namespace)-keyed table `checker::resolve_type` reads
- *               (`declared_type_table`) — threaded down so `layout_of_fields` can size a field off
- *               its RESOLVED declared type (`is_fat_type`), the SAME signal the store writes through
- *               (0.3.1.0 raiz A — fat-field layout unification)
  * @return      every registered layout (the seeded `error` layout first, then every
  *              declaration's own, in the order it appears)
  * @throws      when a class's base chain cannot be walked (an unknown or non-class base) —
  *              an invariant the checker already enforces, so a miss here is an internal
  *              break, reported as a NAMED stop instead of a guessed layout (M.3)
  */
-fn collect_struct_layouts(prog: checker::TProgram, enums: []LEnumInfo, table: checker::TypeTable, dtable: checker::TypeTable) -> []LStructLayout | error {
+fn collect_struct_layouts(prog: checker::TProgram, enums: []LEnumInfo, table: checker::TypeTable) -> []LStructLayout | error {
     mut out: []LStructLayout = teko::list::push(teko::list::empty(), error_struct_layout())
     mut i: u64 = 0
     loop {
         if i >= prog.items.len { break }
-        out = match collect_struct_layout_item(out, prog.items[i], table, enums, dtable) {
+        out = match collect_struct_layout_item(out, prog.items[i], table, enums) {
             []LStructLayout as next => next
             error as e => return e
         }
@@ -14673,13 +14667,12 @@ fn collect_struct_layouts(prog: checker::TProgram, enums: []LEnumInfo, table: ch
  * @param it     the typed top-level item to inspect
  * @param table  the program's type table, for a class's base-chain walk
  * @param enums  the program's declared-enum table, for an enum-typed field's width
- * @param dtable the resolver-keyed table `layout_of_fields` sizes a fat field's resolved type through
  * @return       `acc`, extended with `it`'s layout when it declares one
  * @throws       propagated from `collect_struct_layout_decl`
  */
-fn collect_struct_layout_item(acc: []LStructLayout, it: checker::TItem, table: checker::TypeTable, enums: []LEnumInfo, dtable: checker::TypeTable) -> []LStructLayout | error {
+fn collect_struct_layout_item(acc: []LStructLayout, it: checker::TItem, table: checker::TypeTable, enums: []LEnumInfo) -> []LStructLayout | error {
     match it {
-        parser::TypeDecl as td => collect_struct_layout_decl(acc, td, table, enums, dtable)
+        parser::TypeDecl as td => collect_struct_layout_decl(acc, td, table, enums)
         _ => acc
     }
 }
@@ -14704,14 +14697,13 @@ fn collect_struct_layout_item(acc: []LStructLayout, it: checker::TItem, table: c
  * @param td     the type declaration to inspect
  * @param table  the program's type table, for a class's base-chain walk
  * @param enums  the program's declared-enum table, for an enum-typed field's width
- * @param dtable the resolver-keyed table `layout_of_fields` sizes a fat field's resolved type through
  * @return       `acc`, extended with `td`'s layout when its body is field-shaped
  * @throws       propagated from `class_instance_fields`
  */
-fn collect_struct_layout_decl(acc: []LStructLayout, td: parser::TypeDecl, table: checker::TypeTable, enums: []LEnumInfo, dtable: checker::TypeTable) -> []LStructLayout | error {
+fn collect_struct_layout_decl(acc: []LStructLayout, td: parser::TypeDecl, table: checker::TypeTable, enums: []LEnumInfo) -> []LStructLayout | error {
     match td.body {
-        parser::StructBody as sb => teko::list::push(acc, layout_of_fields(td.name, sb.fields, acc, enums, table, dtable))
-        parser::ClassBody as cb => push_class_layout(acc, td.name, cb, table, enums, dtable)
+        parser::StructBody as sb => teko::list::push(acc, layout_of_fields(td.name, sb.fields, acc, enums, table))
+        parser::ClassBody as cb => push_class_layout(acc, td.name, cb, table, enums)
         _ => acc
     }
 }
@@ -14725,16 +14717,15 @@ fn collect_struct_layout_decl(acc: []LStructLayout, td: parser::TypeDecl, table:
  * @param cb     the class's body
  * @param table  the program's type table, for the base-chain walk
  * @param enums  the program's declared-enum table, for an enum-typed field's width
- * @param dtable the resolver-keyed table `layout_of_fields` sizes a fat field's resolved type through
  * @return       `acc` with the class's layout appended
  * @throws       propagated from `class_instance_fields`
  */
-fn push_class_layout(acc: []LStructLayout, name: str, cb: parser::ClassBody, table: checker::TypeTable, enums: []LEnumInfo, dtable: checker::TypeTable) -> []LStructLayout | error {
+fn push_class_layout(acc: []LStructLayout, name: str, cb: parser::ClassBody, table: checker::TypeTable, enums: []LEnumInfo) -> []LStructLayout | error {
     let fields = match class_instance_fields(name, cb, table) {
         []parser::Field as fs => fs
         error as e => return e
     }
-    teko::list::push(acc, layout_of_fields(name, fields, acc, enums, table, dtable))
+    teko::list::push(acc, layout_of_fields(name, fields, acc, enums, table))
 }
 
 /**
@@ -14802,14 +14793,9 @@ fn class_instance_fields(name: str, cb: parser::ClassBody, table: checker::TypeT
  * @param table  the program's type table — `field_layout_size`/`field_layout_align`'s alias
  *               resolver, so a field ANNOTATED through an alias (`type S = str`) sizes exactly
  *               like a field annotated `str` directly (0.3.1.0 raiz A, crumb R0)
- * @param dtable the resolver-keyed table (`declared_type_table`) each field's RESOLVED declared type
- *               (`resolved_field_type`) is read from, so a monomorphized bare-`T` fat field
- *               (`Owned<str>`) sizes off `is_fat_type` exactly as its store does — layout == store by
- *               construction (0.3.1.0 raiz A — fat-field layout unification)
  * @return LStructLayout  the resolved size/align/per-field offsets
  */
-fn layout_of_fields(name: str, fields: []parser::Field, known: []LStructLayout, enums: []LEnumInfo, table: checker::TypeTable, dtable: checker::TypeTable) -> LStructLayout {
-    let ns = checker::name_qualifier(name)
+fn layout_of_fields(name: str, fields: []parser::Field, known: []LStructLayout, enums: []LEnumInfo, table: checker::TypeTable) -> LStructLayout {
     mut field_names: []str = teko::list::empty()
     mut field_types: []LType = teko::list::empty()
     mut field_sizes: []u32 = teko::list::empty()
@@ -14820,11 +14806,10 @@ fn layout_of_fields(name: str, fields: []parser::Field, known: []LStructLayout, 
         let te = fields[i].type_ann
         let ft = ltype_of_typeexpr(te, enums)
         let nested = struct_layout_of_field(te, known)
-        let rft = resolved_field_type(te, ns, dtable)
         field_names = teko::list::push(field_names, fields[i].name)
         field_types = teko::list::push(field_types, ft)
-        field_sizes = teko::list::push(field_sizes, field_layout_size(te, ft, nested, table, rft))
-        field_aligns = teko::list::push(field_aligns, field_layout_align(te, ft, nested, table, rft))
+        field_sizes = teko::list::push(field_sizes, field_layout_size(te, ft, nested, table))
+        field_aligns = teko::list::push(field_aligns, field_layout_align(te, ft, nested, table))
         i++
     }
     layout_of_sized(name, field_names, field_types, field_sizes, field_aligns)
@@ -15116,62 +15101,36 @@ fn typeexpr_is_fat(te: parser::TypeExpr, table: checker::TypeTable) -> bool {
 
 /**
  * field_layout_size — a field's byte size, widening a fat-pointer field (`[]T`/`str`, resolved
- * THROUGH any alias OR through the RESOLVED declared type — `field_is_fat_resolved`) to the 16-byte
- * `{ptr, len}` image and otherwise deferring to `field_size_of` (#594 T-B6). The 16-byte width is the
- * layout the aggregate-const serializer writes (`{ptr@off, len@off+8}`) and the store writes
- * (`store_fat_slot`) — sizing it off the SAME semantic predicate the store uses is what keeps the two
- * from ever disagreeing (0.3.1.0 raiz A — fat-field layout unification).
+ * THROUGH any alias — `typeexpr_is_fat`) to the 16-byte `{ptr, len}` image and otherwise
+ * deferring to `field_size_of` (#594 T-B6). The 16-byte width is the layout the aggregate-const
+ * serializer writes (`{ptr@off, len@off+8}`) and the reader loads.
  *
  * @param te      the field's syntactic type annotation (the fat-vs-scalar signal)
  * @param ft      the field's machine class (`ltype_of_typeexpr`'s mapping)
  * @param nested  the field's nested struct layout, when known
  * @param table   the program's type table (`typeexpr_is_fat`'s alias resolver)
- * @param rft     the field's RESOLVED declared type (`is_fat_type`, the store's own signal)
  * @return        the field's byte size
  * @since #594 T-B6
  */
-fn field_layout_size(te: parser::TypeExpr, ft: LType, nested: LStructLayout | null, table: checker::TypeTable, rft: checker::Type) -> u32 {
-    if field_is_fat_resolved(te, table, rft) { return ltype_size(LType::Ptr) * (2 to u32) }
+fn field_layout_size(te: parser::TypeExpr, ft: LType, nested: LStructLayout | null, table: checker::TypeTable) -> u32 {
+    if typeexpr_is_fat(te, table) { return ltype_size(LType::Ptr) * (2 to u32) }
     field_size_of(ft, nested)
 }
 
 /**
- * field_is_fat_resolved — the SINGLE fat-vs-scalar verdict a field's layout is sized by, agreeing with
- * the store BY CONSTRUCTION: a field is fat when its SYNTACTIC annotation resolves fat
- * (`typeexpr_is_fat`, over any alias chain) OR its RESOLVED declared type is fat (`is_fat_type`, the
- * SAME semantic predicate `store_struct_field` writes the value through). The disjunction is what
- * closes the raiz-A bare-type-parameter gap: a generic field annotated `T` and monomorphized fat
- * (`Owned<str>`, `Parsed<str>`) whose stamped annotation the syntactic predicate reads as thin still
- * sizes 16 the moment the resolver sees its concrete `Str`/`Slice`, so `field_layout_size` reserves
- * exactly the 16-byte `{ptr, len}` slot `store_fat_slot` writes — the two can no longer disagree.
- *
- * @param te     the field's syntactic type annotation
- * @param table  the program's type table (`typeexpr_is_fat`'s alias resolver)
- * @param rft    the field's RESOLVED declared type (`resolved_field_type`, `Void`/`Named "T"` when the
- *               annotation does not resolve — those answer `is_fat_type` false, so the syntactic arm
- *               governs unchanged)
- * @return       whether the field holds a fat-pointer `{ptr, len}` value
- * @since 0.3.1.0 raiz A — fat-field layout unification
- */
-fn field_is_fat_resolved(te: parser::TypeExpr, table: checker::TypeTable, rft: checker::Type) -> bool {
-    typeexpr_is_fat(te, table) || is_fat_type(rft)
-}
-
-/**
  * field_layout_align — a field's byte alignment, pinning a fat-pointer field (`[]T`/`str`,
- * resolved THROUGH any alias OR through the RESOLVED declared type — `field_is_fat_resolved`) to
- * pointer alignment and otherwise deferring to `field_align_of` (#594 T-B6).
+ * resolved THROUGH any alias — `typeexpr_is_fat`) to pointer alignment and otherwise deferring
+ * to `field_align_of` (#594 T-B6).
  *
  * @param te      the field's syntactic type annotation (the fat-vs-scalar signal)
  * @param ft      the field's machine class (`ltype_of_typeexpr`'s mapping)
  * @param nested  the field's nested struct layout, when known
  * @param table   the program's type table (`typeexpr_is_fat`'s alias resolver)
- * @param rft     the field's RESOLVED declared type (`is_fat_type`, the store's own signal)
  * @return        the field's byte alignment
  * @since #594 T-B6
  */
-fn field_layout_align(te: parser::TypeExpr, ft: LType, nested: LStructLayout | null, table: checker::TypeTable, rft: checker::Type) -> u32 {
-    if field_is_fat_resolved(te, table, rft) { return ltype_align(LType::Ptr) }
+fn field_layout_align(te: parser::TypeExpr, ft: LType, nested: LStructLayout | null, table: checker::TypeTable) -> u32 {
+    if typeexpr_is_fat(te, table) { return ltype_align(LType::Ptr) }
     field_align_of(ft, nested)
 }
 

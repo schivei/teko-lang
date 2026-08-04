@@ -950,77 +950,11 @@ fn check_struct_fat_spans(const_name: str, layout: LStructLayout, si: checker::T
 fn check_struct_fat_span_at(const_name: str, layout: LStructLayout, si: checker::TStructInit, j: u64) -> null | error {
     let field_name = layout.field_names[j]
     let vexpr = match struct_init_value(si, field_name) { checker::TExpr as x => x; error => return null }
-    if !fat_slot_underflows(layout, j, vexpr.type) { return null }
-    error { message = $"TEKO_NATIVE_CONST_SIZE_CHECK: const '{const_name}' fat field '{field_name}' (type '{layout.name}') was allotted {field_allotted_span(layout, j)} bytes but a fat slot needs {fat_slot_bytes()} — its layout under-sized it (a typeexpr_is_fat / is_fat_type mismatch); the following fields shift and a pointer lands misaligned" }
-}
-
-/**
- * fat_slot_underflows — whether the layout's reserved span for the field at index `j` is too narrow
- * to hold a value of `value_type`'s fat `{ptr, len}` image: true ONLY when the value is a fat type
- * (`is_fat_type` — the SAME semantic predicate the store writes through) AND the layout allotted the
- * field fewer than `fat_slot_bytes()` (16) bytes.
- *
- * The single width predicate the const guard (`check_struct_fat_span_at`) and the non-const store
- * guard (`check_store_fat_span`) both read, so the two can never disagree about WHEN a fat field is
- * under-sized — the divergence they both exist to name is measured once, here.
- *
- * @param layout      the struct's registered layout
- * @param j           the field's index within `layout.field_offsets`
- * @param value_type  the resolved type of the value being placed in the field
- * @return            whether a fat value would overrun the field's allotted span
- * @since 0.3.1.0 raiz A — fat-field layout unification
- */
-fn fat_slot_underflows(layout: LStructLayout, j: u64, value_type: checker::Type) -> bool {
-    if !is_fat_type(value_type) { return false }
-    field_allotted_span(layout, j) < fat_slot_bytes()
-}
-
-/**
- * field_index_of — the index of the field named `field` within `layout.field_names`, or `null` when
- * the layout registers no such field (the nullable sibling of `field_offset_of`, which the store
- * guard needs because `field_allotted_span` keys on the index, not the offset).
- *
- * @param layout  the struct's registered layout
- * @param field   the field name to locate
- * @return        the field's index, or `null` when the layout names none
- * @since 0.3.1.0 raiz A — fat-field layout unification
- */
-fn field_index_of(layout: LStructLayout, field: str) -> u64 | null {
-    mut i: u64 = 0
-    loop {
-        if i >= layout.field_names.len { break }
-        if layout.field_names[i] == field { return i }
-        i++
-    }
-    null
-}
-
-/**
- * check_store_fat_span — the NON-const generalization of `check_struct_fat_span_at`, asserted at
- * every ordinary struct-literal field store (`store_struct_fields`): whenever a fat VALUE
- * (`is_fat_type`) is written into a field whose registered layout span is under `fat_slot_bytes()`,
- * honest-stop instead of letting `store_fat_slot` overrun the field's 8-byte reservation into its
- * neighbour. This is the same class the const path already craved (a `typeexpr_is_fat` /
- * `is_fat_type` mismatch under-sizing a bare-`T` fat field), now armed on the common store path so a
- * regression fails LOUDLY — a named honest-stop — rather than as a layout-sensitive M.1 crash.
- *
- * A UNION field is skipped exactly as `store_struct_field` skips it: its slot holds the tag+payload
- * wrapper's single ADDRESS word, so a `str` value flowing into a `str | null` field is not a fat
- * placement and its 8-byte span is correct.
- *
- * @param ctx         the lowering context (its variant table decides a union placement)
- * @param layout      the owning struct's registered layout
- * @param field_name  the field being written
- * @param decl        the field's declared type, or `null` when the table names none
- * @param value       the value written into the field
- * @return            `null` when the placement is safe or non-fat; the fatal honest-stop otherwise
- * @since 0.3.1.0 raiz A — fat-field layout unification
- */
-fn check_store_fat_span(ctx: LowerCtx, layout: LStructLayout, field_name: str, decl: checker::Type | null, value: checker::TExpr) -> null | error {
-    match union_field_placement(ctx, decl) { checker::Type => return null; null => { } }
-    let j = match field_index_of(layout, field_name) { u64 as k => k; null => return null }
-    if !fat_slot_underflows(layout, j, value.type) { return null }
-    error { message = $"native fat-field store guard: struct '{layout.name}' fat field '{field_name}' was allotted {field_allotted_span(layout, j)} bytes but a fat slot needs {fat_slot_bytes()} — its layout under-sized it (a typeexpr_is_fat / is_fat_type mismatch); the fat pointer/length store overruns the following field" }
+    if !is_fat_type(vexpr.type) { return null }
+    let allotted = field_allotted_span(layout, j)
+    let need = fat_slot_bytes()
+    if allotted >= need { return null }
+    error { message = $"TEKO_NATIVE_CONST_SIZE_CHECK: const '{const_name}' fat field '{field_name}' (type '{layout.name}') was allotted {allotted} bytes but a fat slot needs {need} — its layout under-sized it (a typeexpr_is_fat / is_fat_type mismatch); the following fields shift and a pointer lands misaligned" }
 }
 
 /**
