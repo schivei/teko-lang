@@ -1306,6 +1306,33 @@ fn f_alias_fat_field() -> i64 {
 }
 
 /**
+ * OwnedFatCorpus — a GENERIC struct whose FIRST field is a bare type-parameter `T` and whose second
+ * is a plain `i64` sibling (0.3.1.0 raiz A — fat-field layout unification). When `T` is stamped fat
+ * (`OwnedFatCorpus<str>`), the field's SYNTACTIC annotation the old layout predicate read (`T`, a
+ * name no type table registers) answered THIN — 8 bytes — while the store wrote the full 16-byte
+ * `{ptr, len}` slot the value's RESOLVED `Str` type calls for, spilling the length half onto the
+ * sibling. Sizing the field off `field_is_fat_resolved` (`typeexpr_is_fat` OR `is_fat_type` of the
+ * resolved declared type) makes the two agree.
+ */
+type OwnedFatCorpus<T> = struct { value: T; sibling: i64 }
+
+/**
+ * f_owned_fat_field — construct `OwnedFatCorpus<str>` with a 5-byte fat first field and a sibling set
+ * to a value distinct from that length, then assert every half reads back correctly: the fat field's
+ * `.len` and content, AND that the sibling was not overwritten by the fat field's own store. The
+ * layout==store witness for a bare-`T` fat field, the class the self-host's native crash belonged to.
+ *
+ * @return 0 on success, a distinct non-zero code per failing check
+ */
+fn f_owned_fat_field() -> i64 {
+    let h = OwnedFatCorpus<str> { value = "abcde"; sibling = 41 }
+    if h.sibling != 41 { return 1 }
+    if h.value.len != 5 { return 2 }
+    if h.value != "abcde" { return 3 }
+    0
+}
+
+/**
  * f_int_to_str — `teko::u64_to_str`/`teko::i64_to_str`, both `(iNN) -> str` (fat) (0.3.1.0 degrau
  * 12 / raiz-comum §R5): before this degrau, `native_builtin_symbol` had no entry for either bare
  * name, so a DIRECT call honest-stopped ("builtin `u64_to_str` not yet lowered") — first surfaced
