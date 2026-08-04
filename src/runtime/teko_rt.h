@@ -75,7 +75,7 @@ typedef struct {
 } tk_closure;
 
 // error — the Teko built-in error-as-value (E2-NATIVE). Mirrors core.h's tk_error so that
-// generated programs carry full diagnostic adornments in native just as the VM does.
+// generated programs carry full diagnostic adornments in native.
 // A message-only `error { message = "…" }` literal leaves file/line/col/expected/actual
 // at their zero/NULL defaults (C1.3 additive — all existing sites are unchanged).
 typedef struct {
@@ -119,9 +119,9 @@ TK_RT_LIST(int64_t,   tk_i64_list)     // []i64   — integer accumulator lists
 // of calling malloc directly — the swap is mechanical, the contract is unchanged, and the
 // root is never dropped so the leak profile is identical to malloc-everywhere (M.5).
 // LINKAGE NOTE: this is the EXTERN runtime tk_alloc, distinct from core.h's static-inline
-// tk_alloc (internal linkage, used by the compiler/VM TUs over libc). The two never merge;
-// do NOT give core.h's tk_alloc external linkage nor #include this header into a vm.c-linked
-// TU — that would route VM allocations to the arena while their tk_free0 stays libc (corruption).
+// tk_alloc (internal linkage, used by the compiler TUs over libc). The two never merge;
+// do NOT give core.h's tk_alloc external linkage nor #include this header into a compiler-internal
+// TU — that would route those allocations to the arena while their tk_free0 stays libc (corruption).
 void *tk_alloc(size_t n);
 
 // ── Arena allocation (S1 — TEKO_EVOLUTION_DESIGN §5.2: arena primitive + root region) ──
@@ -484,9 +484,9 @@ double tk_float_parse(tk_str s);
 uint64_t tk_rt_float_parse_bits(tk_str s);
 
 // --- string interpolation `$"…{expr}…"` builders (self-host parity) ---
-// These are EXTERN (linked from teko_rt.c), NOT static inline — both the generated C and
-// the VM call them, and the VM forward-declares them (like tk_print) rather than including
-// this header. Leak-tolerant (M.5 — the results are short-lived process-lifetime buffers).
+// These are EXTERN (linked from teko_rt.c), NOT static inline — the generated C calls them
+// via a forward declaration (like tk_print) rather than including this header. Leak-tolerant
+// (M.5 — the results are short-lived process-lifetime buffers).
 //
 // tk_str_concat — a fresh str holding a's bytes then b's bytes; the result OWNS the buffer.
 tk_str tk_str_concat(tk_str a, tk_str b);
@@ -694,7 +694,7 @@ tk_str tk_intern_put(tk_str key, tk_str value);
 // compilation pass that must not observe a PRIOR pass's cached strings.
 void   tk_intern_reset(void);
 // tk_str_slice — the substring bytes [start, end) as a fresh owned str. An out-of-range slice
-// (start > end, or end > s.len) PANICS (M.1, parity with the VM's bounds check). The empty
+// (start > end, or end > s.len) PANICS (M.1, fail-loud on out-of-bounds). The empty
 // slice (start == end) is a valid empty str (1-byte buffer so ptr is never NULL+stale len).
 tk_str tk_str_slice(tk_str s, uint64_t start, uint64_t end);
 // tk_str_slice_to — tk_str_slice(s, 0, end).
@@ -730,7 +730,7 @@ bool tk_str_contains(tk_str s, tk_str needle);
 tk_str tk_f64_g17(double x);
 
 // --- ROUND 0: UTF-8 codepoint operations (char_at / str_slice_chars / is_alpha / is_digit /
-//     is_space / to_lower / to_upper). Mirrored in scope.c/.tks, codegen.c/.tks, vm.c/.tks. ---
+//     is_space / to_lower / to_upper). Mirrored in scope.c/.tks, codegen.c/.tks. ---
 //
 // tk_char_at — the UTF-8 codepoint at 0-based codepoint index i in s. Panics if out of range.
 // Returns a tk_char view INTO s.ptr (no copy); the caller must ensure s outlives the result.
@@ -1198,10 +1198,10 @@ int64_t tk_rt_pid(void);
 bool tk_rt_pid_alive(int64_t pid);
 // ===== journal runtime funds — END =====
 
-// D3 — TEST-COVERAGE SINK. A host side-channel (like print's buffer / args), so the VM can
-// record which production functions executed during a `teko test` run WITHOUT a Teko
-// module-mutable (M.0). The VM marks a function's id (its source line) on entry; the runner
-// reads the distinct count afterward to compute function-level coverage.
+// D3 — TEST-COVERAGE SINK. A host side-channel (like print's buffer / args), so the compiler
+// can record which production functions executed during a `teko test` run WITHOUT a Teko
+// module-mutable (M.0). The native test binary marks a function's id (its source line) on
+// entry; the runner reads the distinct count afterward to compute function-level coverage.
 void     tk_cov_reset(void);        // clear the executed-id set (call before a test run)
 void     tk_cov_mark(uint64_t id);  // record an executed id (deduped)
 uint64_t tk_cov_distinct(void);     // how many distinct ids were marked
@@ -1222,9 +1222,9 @@ void     tk_cov_line_reset(void);
 void     tk_cov_line(uint32_t line);                       // mark a line as executed (current fn)
 bool     tk_cov_line_hit(uint64_t fn, uint32_t line);      // report query
 
-// #265 (Track A) — EXPLICIT-fn line/branch marks for the native test gate. The VM keeps a live
-// enter/leave fn-stack (eval_call), so tk_cov_line/tk_cov_branch read tk_fn_stack[sp-1]. The native
-// test binary has NO enter/leave inside production bodies, so codegen passes the owning fn's
+// #265 (Track A) — EXPLICIT-fn line/branch marks for the native test gate. tk_cov_line/tk_cov_branch
+// read tk_fn_stack[sp-1], but the native test binary has NO enter/leave inside production bodies
+// to maintain that stack automatically, so codegen passes the owning fn's
 // prog.items index EXPLICITLY, bypassing the stack — every interior mark keys on the fn the static
 // floor walk (line_coverage/branch_coverage) queries. Same tk_line_id/tk_branch_id packing.
 void     tk_cov_line_at(uint64_t fn, uint32_t line);                             // mark a line for fn (explicit)
@@ -1354,8 +1354,7 @@ _Noreturn void tk_panic_oob(void);        // "index out of bounds"
 _Noreturn void tk_panic_cast(void);       // "impossible conversion" (the `x to T` guard — B.36 / M.1)
 _Noreturn void tk_panic_overflow(void);   // "integer overflow"
 // (C1.7) positioned OOB panic — prefix "line:col: " then the canonical OOB panic. codegen passes
-// the offending index node's position (C1-POS) so a NATIVE index-out-of-bounds locates like the VM
-// (vm_panic_oob_at).
+// the offending index node's position (C1-POS) so a NATIVE index-out-of-bounds locates precisely.
 _Noreturn void tk_panic_oob_at(uint32_t line, uint32_t col);
 // (C1.7-CAST) positioned cast panic — same shape as tk_panic_oob_at. codegen wraps every
 // tk_to_* call in a statement-expression that sets these globals first; tk_panic_cast reads them.
@@ -1412,8 +1411,8 @@ static inline int64_t  tk_mod_i64(int64_t  a, int64_t  b){ if (b == 0) tk_panic_
 // Plain C `<<`/`>>` is UB when the shift count is >= the operand's bit-width (or negative); a
 // Teko program that computes a large/negative-looking `u32`/`i64`/… count (e.g. from user input
 // or arithmetic) must not hit native UB. Ruling: mask the count by (bit-width - 1) — C#/Java
-// semantics — so `(1 as i32) << 40` == `1 << (40 & 31)` == `1 << 8` == 256, matching the VM
-// (vm.c's eval_binary / vm.tks's apply_int_op) bit-for-bit. In-range counts are unaffected (the
+// semantics — so `(1 as i32) << 40` == `1 << (40 & 31)` == `1 << 8` == 256. In-range counts
+// are unaffected (the
 // mask is a no-op when count < width). One helper per signed/unsigned width (u8..u64, i8..i64);
 // codegen selects by the binary node's result prim (same tag as tk_div_*/tk_add_*). Signed `>>`
 // keeps its existing sign-preserving (arithmetic) behavior — only the COUNT is fixed here.
