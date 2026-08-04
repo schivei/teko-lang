@@ -37,14 +37,21 @@ fn type_charlit(c: parser::CharLit) -> TExpr {
 fn type_boollit(b: parser::BoolLit) -> TExpr {   // `true`/`false` — the bool prim (LEGISLATION §75)
     TExpr { kind = TBoolLit { value = b.value }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
 }
-// A bare `null` types to the SENTINEL optional (an `Optional` whose inner is the `Void` marker
-// — REBOOT_PLAN §202; the C twin uses a NULL inner pointer): it unifies with ANY concrete `T?`
-// (type_eq) and is assignable to any optional slot (assignable). The CONCRETE inner is supplied
-// by the destination — a binding annotation `: T?`, a return `-> T?`, the other match/`if` arm,
-// or `x ?? null` — like a variant case widening into a variant slot. The interpreter lowers it to NONE
-// (untyped); codegen wraps it to the slot's optional type via emit_as.
+/**
+ * type_nulllit — a bare `null` literal is the concrete unit value `null : Null`. It
+ * WIDENS by set-membership into any union listing `null` (see `null_widens_into`); the
+ * destination type supplies the surrounding union at the binding/return/arm slot, exactly
+ * as a variant case widens into its variant. Retires the legacy `Optional{inner=Void}`
+ * bare-null sentinel (REBOOT_PLAN §202), which required a special "sentinel inner == Void
+ * unifies with any optional" arm in `type_eq`.
+ *
+ * @param n  the parsed `null` literal node
+ * @return   a `TExpr` whose `.type` is `Null{}` (never fails; the `| error` is the
+ *           uniform typer return shape)
+ * @since 0.3.1 (retire-Optional)
+ */
 fn type_nulllit(n: parser::NullLit) -> TExpr | error {
-    TExpr { kind = TNullLit { }; type = Optional { inner = Void { } }; line = 0; col = 0 }
+    TExpr { kind = TNullLit { }; type = Null { }; line = 0; col = 0 }
 }
 fn type_var(v: parser::Var, env: Env) -> TExpr | error {
     let b = match lookup_binding(env, v.name) { ValBinding as bb => bb; error as e => return e }
