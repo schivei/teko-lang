@@ -1908,33 +1908,6 @@ fn lwt_lowers_in_expr_as_an_eq_chain_ored_together() {
     teko::assert::str_contains(text, "ior")
 }
 
-/** lwt_named_opt_var — a `TVar` of `Named?` type — the safe-field-access receiver shape
-    (A1-4, #382). */
-fn lwt_named_opt_var(name: str, tname: str) -> checker::TExpr {
-    checker::TExpr { kind = checker::TVar { name = name; is_func = false; func_ns = "" }; type = checker::Optional { inner = checker::Named { name = tname } }; line = 0; col = 0 }
-}
-
-/** lwt_safe_field_access — `recv?.field` of resolved (unwrapped) field type `ft` — its
-    `.type` is `ft` widened into `Optional` (A1-4, #382). */
-fn lwt_safe_field_access(recv: checker::TExpr, field: str, ft: checker::Type) -> checker::TExpr {
-    checker::TExpr { kind = checker::TSafeFieldAccess { receiver = recv; field = field }; type = checker::Optional { inner = ft }; line = 0; col = 0 }
-}
-
-#test
-fn lwt_lowers_safe_field_access_via_branch_and_merge() {
-    let p = lwt_named_opt_var("p", "Point")
-    let sfa = lwt_safe_field_access(p, "y", lwt_prim(checker::PrimKind::I64))
-    let params = teko::list::push(teko::list::empty(), lwt_param("p", "Point"))
-    let body = teko::list::push(teko::list::empty(), lwt_ret(sfa))
-    let f = lwt_fn("read_y_opt", "teko::demo", params, checker::Optional { inner = checker::Prim { kind = checker::PrimKind::I64 } }, body)
-    let lf = match lower_function(f, lwt_one_layout(lwt_point_layout())) { LoweredFunction as r => r.func; error as err => return }
-    let text = print_lmodule(add_func(empty_module(), lf))
-    teko::assert::str_contains(text, "branch %0, #B1(), #B2()")
-    teko::assert::str_contains(text, "  #B1:\n    %2 = field_addr %0, 8\n    %3 = load.i64 %2\n    jump #B3(%3)")
-    teko::assert::str_contains(text, "  #B2:\n    %4 = const 0\n    jump #B3(%4)")
-    teko::assert::str_contains(text, "  #B3(%1):\n    ret %1")
-}
-
 /**
  * lwt_iface_call — a dynamic contract-method `TCall`
  * (`is_iface_dispatch=true`): `args[0]` is the receiver, `slot` its vtable
@@ -3465,7 +3438,7 @@ fn lwt_assert_fat_predicate_agrees(table: checker::TypeTable, te: parser::TypeEx
  * lwt_fat_predicates_agree — the R0 gate (0.3.1.0 raiz A): `is_fat_type` (the SEMANTIC predicate,
  * over a RESOLVED `checker::Type`) and `typeexpr_is_fat` (the SYNTACTIC predicate, over the
  * WRITTEN annotation) must answer the SAME question the same way, for a direct type, a type
- * ALIASED once, a type aliased TWICE, an aliased `[]T` slice, an OPTIONAL of an aliased type, and
+ * ALIASED once, a type aliased TWICE, an aliased `[]T` slice, and
  * a handful of definitely-not-fat controls (a scalar, a nominal struct, `ptr<T>`).
  *
  * This is crumb R0's own portal, named in `docs/memory/raiz-comum-dos-degraus-0.3.1.0.md`: a
@@ -3490,7 +3463,6 @@ fn lwt_fat_predicates_agree() {
     lwt_assert_fat_predicate_agrees(table, lwt_named_te("AliasStr"), checker::Str { })
     lwt_assert_fat_predicate_agrees(table, lwt_named_te("AliasStrTwice"), checker::Str { })
     lwt_assert_fat_predicate_agrees(table, lwt_named_te("AliasSlice"), checker::Slice { element = lwt_prim(checker::PrimKind::I64) })
-    lwt_assert_fat_predicate_agrees(table, parser::OptionalType { inner = lwt_named_te("AliasStr") }, checker::Optional { inner = checker::Str { } })
     lwt_assert_fat_predicate_agrees(table, lwt_named_te("byte"), checker::Byte { })
     lwt_assert_fat_predicate_agrees(table, lwt_named_te("i32"), lwt_prim(checker::PrimKind::I32))
     lwt_assert_fat_predicate_agrees(table, lwt_named_te("bool"), lwt_prim(checker::PrimKind::Bool))

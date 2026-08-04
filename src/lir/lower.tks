@@ -8074,76 +8074,6 @@ fn lower_if_value(ctx: LowerCtx, e: checker::TExpr, f: checker::TIfExpr, cond_vr
     Lowered { ctx = ctx_with(else_closed.ctx, else_closed.func, mergeblk.block_id, merged.env); vreg = mp.vreg }
 }
 
-/** unwrap_optional — the inner `T` of an `Optional<T>`; any other type is already unwrapped
-    (returned as-is) (A1-4, #382). */
-fn unwrap_optional(t: checker::Type) -> checker::Type {
-    match t {
-        checker::Optional as o => o.inner
-        _ => t
-    }
-}
-
-/** lower_coalesce — `a ?? b`: branch on `a`'s ALREADY-LOWERED value (nonzero = present,
-    mirroring the null sentinel every Optional shares with its inner type); the present arm
-    merges `a` itself (already unwrapped — no re-lowering), the absent arm lowers `b` (which
-    may itself diverge, e.g. `a ?? panic(...)` — its dead post-call jump is harmless, mirrors
-    `lower_if_value`'s own arm-closing convention) (A1-4, #382). The final merged context is
-    built from `ro.ctx` (the RHS's own POST-lowering context), NOT `ctx1` (the pre-RHS one) —
-    `ctx_with` only OVERRIDES `func`/`block_id`/`env` and copies every other field (rodata,
-    lifted closures, …) from its first argument, so building it from `ctx1` would SILENTLY
-    DROP any rodata `co.right` interned (e.g. a string literal fed to `panic`, C1-6 — a
-    genuine miscompile: the caller emits a `global_addr` relocation against a symbol whose
-    definition never made it into the module). `ctx1.env` is still the right ENV (unchanged
-    across both arms — neither introduces a new binding visible past the merge). */
-fn lower_coalesce(ctx: LowerCtx, e: checker::TExpr, co: checker::TCoalesce) -> Lowered | error {
-    let lo = match lower_expr(ctx, co.left) { Lowered as x => x; error as err => return err }
-    let thenb = alloc_block(lo.ctx.func)
-    let elseb = alloc_block(thenb.func)
-    let mergeb = alloc_block(elseb.func)
-    let mp = add_block_param(mergeb.func, mergeb.block_id)
-    let br = branch_inst(lo.vreg, thenb.block_id, teko::list::empty(), elseb.block_id, teko::list::empty(), e.line, e.col)
-    let ctx1 = ctx_append(ctx_with(lo.ctx, mp.func, lo.ctx.block_id, lo.ctx.env), br)
-    let then_args = teko::list::push(teko::list::empty(), lo.vreg)
-    let then_func = append_inst(ctx1.func, thenb.block_id, jump_inst(mergeb.block_id, then_args, e.line, e.col))
-    let else_ctx = ctx_with(ctx1, then_func, elseb.block_id, ctx1.env)
-    let ro = match lower_expr(else_ctx, co.right) { Lowered as x => x; error as err => return err }
-    let else_args = teko::list::push(teko::list::empty(), ro.vreg)
-    let else_func = close_arm_to(ro.ctx, mergeb.block_id, else_args, e.line, e.col)
-    Lowered { ctx = ctx_with(ro.ctx, else_func, mergeb.block_id, ctx1.env); vreg = mp.vreg }
-}
-
-/** lower_safe_field_access — `recv?.field` on an optional STRUCT receiver (the checker
-    desugars a CLASS inner elsewhere — a TSafeFieldAccess node is always the struct route):
-    branch on the receiver (nonzero = present); the present arm reads the field through its
-    registered layout offset (mirrors `lower_field_access`), the absent arm merges a null
-    (zero) constant of the field's machine class (A1-4, #382). */
-fn lower_safe_field_access(ctx: LowerCtx, e: checker::TExpr, sfa: checker::TSafeFieldAccess) -> Lowered | error {
-    let ro = match lower_expr(ctx, sfa.receiver) { Lowered as x => x; error as err => return err }
-    let name = match named_type_name(unwrap_optional(sfa.receiver.type)) { str as s => s; error as err => return err }
-    let layout = match find_struct_layout(ro.ctx.layouts, name) { LStructLayout as l => l; error as err => return err }
-    let off = match field_offset_of(layout, sfa.field) { u32 as o => o; error as err => return err }
-    let result_ty = ltype_of(unwrap_optional(e.type), ro.ctx.enums)
-    let thenb = alloc_block(ro.ctx.func)
-    let elseb = alloc_block(thenb.func)
-    let mergeb = alloc_block(elseb.func)
-    let mp = add_block_param(mergeb.func, mergeb.block_id)
-    let br = branch_inst(ro.vreg, thenb.block_id, teko::list::empty(), elseb.block_id, teko::list::empty(), e.line, e.col)
-    let ctx1 = ctx_append(ctx_with(ro.ctx, mp.func, ro.ctx.block_id, ro.ctx.env), br)
-    let then_ctx = ctx_with(ctx1, ctx1.func, thenb.block_id, ctx1.env)
-    let addr = ctx_alloc(then_ctx)
-    let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, ro.vreg, off, e.line, e.col))
-    let fld = ctx_alloc(with_addr)
-    let with_load = ctx_append(fld.ctx, load_inst(fld.vreg, addr.vreg, result_ty, e.line, e.col))
-    let then_args = teko::list::push(teko::list::empty(), fld.vreg)
-    let then_func = append_inst(with_load.func, thenb.block_id, jump_inst(mergeb.block_id, then_args, e.line, e.col))
-    let nullr_ctx = ctx_with(ctx1, then_func, elseb.block_id, ctx1.env)
-    let nullr = ctx_alloc(nullr_ctx)
-    let with_null = ctx_append(nullr.ctx, const_int_inst(nullr.vreg, 0, e.line, e.col))
-    let else_args = teko::list::push(teko::list::empty(), nullr.vreg)
-    let else_func = append_inst(with_null.func, elseb.block_id, jump_inst(mergeb.block_id, else_args, e.line, e.col))
-    Lowered { ctx = ctx_with(ctx1, else_func, mergeb.block_id, ctx1.env); vreg = mp.vreg }
-}
-
 /**
  * MatchSubj — a `match`'s already-lowered SUBJECT: its resolved type (drives
  * every arm's pattern-test/bind dispatch), its scalar/base-address VReg, and
@@ -10939,7 +10869,6 @@ fn expr_is_aggregate_place(e: checker::TExpr) -> bool {
     match e.kind {
         checker::TVar => true
         checker::TFieldAccess => true
-        checker::TSafeFieldAccess => true
         checker::TIndex => true
         checker::TPathExpr => true
         _ => false
@@ -13791,8 +13720,6 @@ fn texpr_kind_name(e: checker::TExpr) -> str {
         checker::TMatchExpr => "match-expression"
         checker::TCast => "cast"
         checker::TFieldAccess => "field access"
-        checker::TSafeFieldAccess => "safe field access"
-        checker::TCoalesce => "?? coalesce"
         checker::TStructInit => "struct literal"
         checker::TIndex => "index"
         checker::TInterp => "string interpolation"
