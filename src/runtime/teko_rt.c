@@ -1527,19 +1527,51 @@ static void tk_poison_scan_one(tk_freenode *n, const char *where) {
     }
 }
 
-// tk_poison_scan_all — `tk_poison_scan_one` over every currently-parked node: all TK_FREE_BINS
-// bins, then the large list. Called from BOTH allocator entry points so a corruption is caught on
-// the very next allocation after it happened, wherever in the source that allocation is.
+// tk_poison_touch_bin — record that bin `i` has EVER held a parked node, in a SPARSE list instead
+// of relying on a 4096-wide sweep to discover it. Measured necessary: even with the
+// tk_free_parked_bytes != 0 fast exit below, a run that parks even ONE long-lived block keeps
+// that counter nonzero for the rest of the process, so every subsequent allocation paid the full
+// 4096-slot walk regardless of how few bins actually held anything — unusably slow (self-host
+// still hadn't finished lexing 155 files after 90+ CPU-seconds). `seen`/`list` dedupe in O(1): a
+// compiler's own allocation sizes cluster into a small number of DISTINCT size classes (repeated
+// struct/slice-element widths), so the list stays short even though it can be touched millions of
+// times.
+static int tk_poison_bin_seen[TK_FREE_BINS];
+static int tk_poison_bin_list[TK_FREE_BINS];
+static int tk_poison_bin_list_n = 0;
+static void tk_poison_touch_bin(int i) {
+    if (tk_poison_bin_seen[i]) return;
+    tk_poison_bin_seen[i] = 1;
+    tk_poison_bin_list[tk_poison_bin_list_n] = i;
+    tk_poison_bin_list_n += 1;
+}
+
+// tk_poison_scan_all — `tk_poison_scan_one` over every currently-parked node: only the bins
+// `tk_poison_touch_bin` has ever seen populated (a small, size-class-bounded set — see its own
+// comment), then the large list. Called from BOTH allocator entry points so a corruption is
+// caught on the very next allocation after it happened, wherever in the source that allocation is.
 static void tk_poison_scan_all(const char *where) {
     if (!tk_poison_enabled()) return;
-    // FAST EXIT — this is called on EVERY allocation (tk_region_alloc/tk_free_take/tk_free_block),
-    // so a full 4096-bin sweep on each call is the dominant cost when almost all of them are
-    // empty (the common case early in a run, and any time nothing is currently parked). The
-    // existing `tk_free_parked_bytes` counter is already load-bearing bookkeeping (incremented on
-    // park, decremented on take) — zero means the bins AND the large list are provably all empty,
-    // so the sweep below is skipped entirely rather than walking 4096 NULL slots for nothing.
+    // FAST EXIT — this is called on EVERY allocation, so even the sparse walk below costs a
+    // function call + a few comparisons; skip it outright when NOTHING is parked at all (the
+    // common case early in a run). tk_free_parked_bytes is already load-bearing bookkeeping
+    // (incremented on park, decremented on take), so this is free to reuse.
     if (tk_free_parked_bytes == 0) return;
-    for (int i = 0; i < TK_FREE_BINS; i += 1) {
+    // THROTTLE — measured necessary even with the sparse bin list above: a self-host run parks
+    // large, long-lived buffers (codegen's `cb` builder, tk_append_bytes_fo's free-old-on-grow),
+    // and scanning a multi-KB payload on EVERY one of millions of allocations is pathological
+    // (the full-node byte scan, not the bin-list walk, is the actual cost once anything sizeable
+    // is parked). Only 1 call in TK_POISON_SCAN_EVERY actually scans; the rest are free (one
+    // static counter compare). Trades exhaustiveness (catches the corruption on the very NEXT
+    // allocation) for a bounded window (catches it within TK_POISON_SCAN_EVERY allocations) —
+    // still narrow enough, combined with TEKO_NATIVE_TRACE_ITEMS's live item stream, to localize
+    // to the same or a neighboring native-lowering item.
+#define TK_POISON_SCAN_EVERY 2000
+    static unsigned long tk_poison_call_n = 0;
+    tk_poison_call_n += 1;
+    if (tk_poison_call_n % TK_POISON_SCAN_EVERY != 0) return;
+    for (int li = 0; li < tk_poison_bin_list_n; li += 1) {
+        int i = tk_poison_bin_list[li];
         for (tk_freenode *n = tk_free_bins[i]; n != NULL; n = n->next) tk_poison_scan_one(n, where);
     }
     for (tk_freenode *n = tk_free_large; n != NULL; n = n->next) tk_poison_scan_one(n, where);
@@ -4589,7 +4621,9 @@ void tk_free_block(void *p, uint64_t bytes) {
     tk_freenode *n = (tk_freenode *)p;
     n->bytes = usable;
     if (usable <= (size_t)TK_FREE_BINS * 16) {
-        tk_freenode **bin = &tk_free_bins[usable / 16 - 1];
+        int bin_i = (int)(usable / 16 - 1);
+        if (tk_poison_enabled()) tk_poison_touch_bin(bin_i);
+        tk_freenode **bin = &tk_free_bins[bin_i];
         n->next = *bin; *bin = n;
     } else {
         n->next = tk_free_large; tk_free_large = n;
