@@ -1472,8 +1472,82 @@ static void tk_free_purge(void) {                   // rewind/termination: parke
 static void tk_canary_check_head(tk_region *r, const char *where);
 tk_region *tk_region_current(void);   // fwd (defined later in this file; public in teko_rt.h)
 
+// (2026-08-04, native-fixpoint, POISON-ON-FREE) TEKO_NATIVE_POISON_FREE=1 — a CI-narrowing aid in
+// the same env-gated family as TEKO_NATIVE_CHUNK_CANARY above: byte-identical when unset (one
+// predicted getenv-cached int compare), not part of the ordinary output.
+//
+// WHAT THE EXISTING CANARY DOES NOT COVER. tk_canary_check_head only re-verifies a CHUNK's own
+// {cap, next} header, and only the region's CURRENT `head` chunk, at tk_region_alloc's entry — it
+// has nothing to say about a PARKED tk_freenode (the mem::free / free-old-on-grow overlay,
+// tk_free_take/tk_free_block below), because a freenode is not a chunk: its bytes live INSIDE a
+// live chunk's data, addressed by tk_free_bins/tk_free_large, and neither list is ever walked by
+// the chunk canary. Crash A of docs/memory/native-fixpoint-gen2-wild-write-0.3.1.md is exactly
+// this blind spot: tk_free_take dereferenced a freenode whose `next` field had been overwritten
+// by SOMETHING, with no diagnostic naming when or by what.
+//
+// THE MECHANISM: on PARK (tk_free_block, below), fill the ENTIRE freed block with 0xDD BEFORE
+// installing the freenode header ({next, bytes} — 16 bytes on a 64-bit target) on top of it, so
+// bytes [sizeof(tk_freenode), n->bytes) stay 0xDD for as long as the block sits on a free list. A
+// live write into a parked block — the UAF this whole family of bug is suspected to be — flips at
+// least one of those bytes away from 0xDD. `tk_poison_scan_all`, called at the top of BOTH
+// allocator entry points (tk_region_alloc and tk_free_take — every single allocation, not merely
+// the one about to be popped), walks every bin and the large list and ABORTS on the FIRST node
+// whose payload has drifted from poison, naming the node's address, its parked size, and the
+// call site that caught it. Combined with the already-existing TEKO_NATIVE_TRACE_ITEMS (which
+// streams "native-lowering item N/M: <symbol>" to the same stderr live), the item line immediately
+// preceding this abort in the log is the item whose lowering was running when the corruption was
+// caught — narrowing "somewhere in ~6644 items" down to the ONE most recently entered.
+//
+// COST WHEN ON: O(populated bins + parked nodes) per allocation — acceptable for a one-shot
+// diagnostic run, never for the default path (which never calls this at all).
+static int tk_poison_enabled(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("TEKO_NATIVE_POISON_FREE"); v = (e != NULL && e[0] == '1') ? 1 : 0; }
+    return v;
+}
+
+// tk_poison_scan_one — verify ONE parked node's payload bytes are still all 0xDD; abort naming it
+// (address, parked size, first differing offset + byte, and `where`) if not.
+static void tk_poison_scan_one(tk_freenode *n, const char *where) {
+    unsigned char *base = (unsigned char *)n;
+    for (size_t i = sizeof(tk_freenode); i < n->bytes; i += 1) {
+        if (base[i] != 0xDD) {
+            fprintf(stderr,
+                "TEKO_NATIVE_POISON_FREE: parked block %p (bytes=%zu) corrupted at offset %zu "
+                "(0x%02x, expected 0xDD), first read at %s — something wrote into freed memory\n",
+                (void *)n, n->bytes, i, base[i], where);
+#ifdef TK_HAVE_BACKTRACE
+            void *fr[24]; int nf = backtrace(fr, 24);
+            fprintf(stderr, "  backtrace at detection:\n");
+            backtrace_symbols_fd(fr, nf, 2);
+#endif
+            fflush(stderr);
+            abort();
+        }
+    }
+}
+
+// tk_poison_scan_all — `tk_poison_scan_one` over every currently-parked node: all TK_FREE_BINS
+// bins, then the large list. Called from BOTH allocator entry points so a corruption is caught on
+// the very next allocation after it happened, wherever in the source that allocation is.
+static void tk_poison_scan_all(const char *where) {
+    if (!tk_poison_enabled()) return;
+    // FAST EXIT — this is called on EVERY allocation (tk_region_alloc/tk_free_take/tk_free_block),
+    // so a full 4096-bin sweep on each call is the dominant cost when almost all of them are
+    // empty (the common case early in a run, and any time nothing is currently parked). The
+    // existing `tk_free_parked_bytes` counter is already load-bearing bookkeeping (incremented on
+    // park, decremented on take) — zero means the bins AND the large list are provably all empty,
+    // so the sweep below is skipped entirely rather than walking 4096 NULL slots for nothing.
+    if (tk_free_parked_bytes == 0) return;
+    for (int i = 0; i < TK_FREE_BINS; i += 1) {
+        for (tk_freenode *n = tk_free_bins[i]; n != NULL; n = n->next) tk_poison_scan_one(n, where);
+    }
+    for (tk_freenode *n = tk_free_large; n != NULL; n = n->next) tk_poison_scan_one(n, where);
+}
+
 static void *tk_free_take(size_t an) {
     tk_canary_check_head(tk_region_current(), "tk_free_take:entry");
+    tk_poison_scan_all("tk_free_take:entry");
     // (#148 Level-2) TAKE = CEIL-16 — never UNDERSTATE the need. The bin granularity is 16 bytes
     // (= TK_ARENA_ALIGN); requests round up so bin[qa] blocks are exactly qa ≥ an bytes. Ceil (not
     // floor) so a 24-byte request never gets handed a 16-byte block (an 8-byte OVERRUN into the
@@ -1880,6 +1954,7 @@ static void tk_canary_check_head(tk_region *r, const char *where) {
 void *tk_region_alloc(tk_region *r, size_t n) {
     tk_canary_check_head(r, "tk_region_alloc:entry");
     tk_canary_check_region(r, "tk_region_alloc:entry");
+    tk_poison_scan_all("tk_region_alloc:entry");
     if (n == 0) n = 1;                              // n→1: a zero-size alloc yields a distinct pointer
     // (S2 obs) SCOPED-lifetime side of the map — a direct allocation into a non-root region (class
     // objects, frame regions). The ROOT side is recorded in tk_alloc (whose RA0 is the REAL site;
@@ -4483,6 +4558,7 @@ void *tk_slice_with_cap(uint64_t esz, uint64_t cap) {
 void tk_free_block(void *p, uint64_t bytes) {
     if (p == NULL) return;
     tk_canary_check_head(tk_region_current(), "tk_free_block:entry");
+    tk_poison_scan_all("tk_free_block:entry");
     { static int dbg=-1; if (dbg<0) dbg = getenv("TEKO_FO_DEBUG")?1:0;
       if (dbg) fprintf(stderr, "PARK %p bytes=%llu\n", p, (unsigned long long)bytes); }
     unsigned h = tk_push_slot(p);
@@ -4506,6 +4582,10 @@ void tk_free_block(void *p, uint64_t bytes) {
     if (tk_paranoid < 0) { const char *e = getenv("TEKO_MEM_PARANOID"); tk_paranoid = (e != NULL && *e != '\0') ? 1 : 0; }
     if (tk_paranoid == 1) { if (usable) memset(p, 0xDD, usable); return; }
     if (usable < sizeof(tk_freenode)) return;                     // too small to park — leak it (bump can't shrink)
+    // (POISON-ON-FREE) fill the WHOLE block first, then the freenode header ({next, bytes}) is
+    // written on top of the poison's own first 16 bytes — payload bytes past the header stay 0xDD
+    // for as long as the block is parked. See the tk_poison_scan_all block above tk_free_take.
+    if (tk_poison_enabled()) memset(p, 0xDD, usable);
     tk_freenode *n = (tk_freenode *)p;
     n->bytes = usable;
     if (usable <= (size_t)TK_FREE_BINS * 16) {
