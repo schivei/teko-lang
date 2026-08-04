@@ -32,3 +32,26 @@ fn owned_str_make_and_take_round_trip() {
     let handle = Owned<str>::make("held")
     teko::assert::is_true(teko::runtime::str_eq(handle.take(), "held"))
 }
+
+/**
+ * A generic struct whose FIRST field is a bare type-parameter `T` and whose second is a plain scalar
+ * sibling — the layout==store witness for 0.3.1.0 raiz A. When `T` is stamped fat
+ * (`OwnedFatSibling<str>`), the field's syntactic annotation (`T`, a name no type table registers)
+ * read THIN under the old layout predicate while its store wrote the full 16-byte `{ptr, len}` slot,
+ * spilling the length half onto `sibling`. `field_is_fat_resolved` sizes the field off the SAME
+ * resolved-type predicate the store uses, so the two can no longer disagree.
+ */
+type OwnedFatSibling<T> = struct { value: T; sibling: i64 }
+
+/**
+ * `OwnedFatSibling<str>` — a bare-`T` fat FIRST field ahead of a scalar sibling — reads BOTH halves
+ * back intact: the fat field's length and content, AND the sibling the mis-sized store used to
+ * overwrite. The direct layout==store assertion for the bare-type-parameter fat-field class.
+ */
+#test
+fn owned_bare_t_fat_field_does_not_overrun_sibling() {
+    let h = OwnedFatSibling<str> { value = "abcde"; sibling = 41 }
+    teko::assert::is_true(h.sibling == 41)
+    teko::assert::is_true(h.value.len == 5)
+    teko::assert::is_true(teko::runtime::str_eq(h.value, "abcde"))
+}
