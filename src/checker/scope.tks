@@ -431,6 +431,34 @@ fn buf_ptr_signature() -> Type {
 }
 
 /**
+ * load_u64_signature — `teko::mem::load_u64(addr: u64) -> u64`'s signature (P1,
+ * `docs/design/arena-em-teko.md` §2): read ONE 64-bit word at a caller-computed address, with NO
+ * allocation. The no-allocation property is the whole point — `bytes_from_ptr` also reads raw
+ * memory but ALLOCATES its `[]byte` result, which is exactly the circularity that blocked
+ * `src/runtime/teko_rt.tks`'s own arena bookkeeping. UNSAFE BY CONTRACT, in the same sense as
+ * `bytes_from_ptr`/`as_cstr` (`capability_audit.md` §4): the checker cannot prove `addr` names
+ * live, aligned, in-bounds memory.
+ *
+ * @return  the fixed `(u64) -> u64` signature
+ */
+fn load_u64_signature() -> Type {
+    let addr_param: []Type = teko::list::push(teko::list::empty(), Prim { kind = PrimKind::U64 })
+    Func { params = addr_param; ret = Prim { kind = PrimKind::U64 }; variadic = false; param_names = []; n_required = addr_param.len; defaults = [] }
+}
+
+/**
+ * store_u64_signature — `teko::mem::store_u64(addr: u64, v: u64) -> void`'s signature: P1's raw
+ * memory-WRITE twin of `load_u64_signature`, same no-allocation / UNSAFE-BY-CONTRACT contract.
+ *
+ * @return  the fixed `(u64, u64) -> void` signature
+ */
+fn store_u64_signature() -> Type {
+    mut params: []Type = teko::list::push(teko::list::empty(), Prim { kind = PrimKind::U64 })
+    params = teko::list::push(params, Prim { kind = PrimKind::U64 })
+    Func { params = params; ret = Void { }; variadic = false; param_names = []; n_required = params.len; defaults = [] }
+}
+
+/**
  * Build a `str | error` result type (`tk_ffi_sres`-shaped), the union returned by the
  * value-or-error host primitives `teko::env::var` / `teko::env::cwd` / `teko::io::read_file`.
  *
@@ -889,6 +917,8 @@ fn builtin_fn(name: str) -> Type | error {
         bp = teko::list::push(bp, Prim { kind = PrimKind::U64 })
         return Func { params = bp; ret = bytes_t; variadic = false; param_names = []; n_required = (bp).len; defaults = [] }
     }
+    if name == "load_u64" { return load_u64_signature() }
+    if name == "store_u64" { return store_u64_signature() }
     if name == "buf_ptr" { return buf_ptr_signature() }
     // `region_buf(region: uptr, len: u64, init: str) -> ptr<byte>` — the NAMED-region twin of
     // `buf_ptr` (c-types-and-marshalling-0.3.1.md §7.3, crumb C5): bump-allocates `len` contiguous

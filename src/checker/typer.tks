@@ -1801,7 +1801,32 @@ fn cast_kind(t: Type) -> PrimKind | error {
             else { p.kind }
         }
         Byte => PrimKind::U8
+        Ptr as p => cast_kind_of_ptr(p)
         _ => error { message = "cast not defined for this type in the seed (Named/Str/Slice/… — pending)" }
+    }
+}
+
+/**
+ * cast_kind_of_ptr — `cast_kind`'s `Ptr` arm: the arena address-carrier decision
+ * (`docs/design/arena-em-teko.md` §2 P1 — "não existe cast `u64 -> ptr<byte>`, então nem o
+ * caminho alocante é alcançável a partir de um endereço calculado"). `u64` is ABI-identical to
+ * `void *` on every 64-bit target, so a `ptr<byte> <-> u64` pair carries `PrimKind::U64` into
+ * `cast_check`'s generic "any numeric to any numeric is defined" rule, making the cast a
+ * reinterpret rather than a conversion. Scoped NARROWLY to `ptr<byte>` (not every `ptr<T>`, and
+ * not the opaque `ptr`): the arena's whole address surface is `u64`-carried bytes, and widening
+ * this admission to arbitrary pointee types or the opaque pointer is outside what that decision
+ * asked for.
+ *
+ * @param p  the resolved `Ptr` type (`p.inner` is the pointee, or `null` for the opaque `ptr`)
+ * @return   `PrimKind::U64` when `p` is `ptr<byte>`; a NAMED error for every other pointer shape
+ */
+fn cast_kind_of_ptr(p: Ptr) -> PrimKind | error {
+    match p.inner {
+        Type as inner => match inner {
+            Byte => PrimKind::U64
+            _ => error { message = "cast not defined for this pointer's element type in the seed (only `ptr<byte> <-> u64`, the arena address carrier, is defined — arena-em-teko.md §2)" }
+        }
+        null => error { message = "cast not defined for the opaque `ptr` in the seed (only `ptr<byte> <-> u64`, the arena address carrier, is defined — arena-em-teko.md §2)" }
     }
 }
 

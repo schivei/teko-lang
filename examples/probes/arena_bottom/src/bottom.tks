@@ -250,10 +250,59 @@ pub fn prove_reacquire_after_release() {
 }
 
 /**
- * Runs the whole bottom proof: the allocator round trip, chunk writability, and Teko-computed bump
+ * The arbitrary 64-bit control word `prove_word_round_trip` writes and reads back — a pattern
+ * chosen to be unlikely to arise by accident from any OTHER arithmetic in this probe, so a
+ * mis-addressed load could not accidentally match it.
+ *
+ * @return  0xDEADBEEFCAFEBABE
+ */
+pub fn control_word() -> u64 {
+    0xDEADBEEFCAFEBABE
+}
+
+/**
+ * Demands that a 64-bit word written through `teko::mem::store_u64` at a Teko-computed bump offset
+ * reads back byte-for-byte through `teko::mem::load_u64` — P1's whole contract (`docs/design/
+ * arena-em-teko.md` §2): a raw load/store over a caller-computed address that does NOT allocate,
+ * unlike `bytes_from_ptr`. The chunk is zeroed first, so a load that missed its address would read
+ * zero rather than the control word by coincidence. Exits 18 on a mismatch.
+ *
+ * @param offset  the bump offset, in bytes, from the chunk base
+ * @return        nothing
+ */
+pub fn prove_word_round_trip(offset: u64) {
+    let chunk = acquire_chunk()
+    c_memset(chunk, 0, default_chunk_bytes())
+    let address = chunk + offset
+    teko::mem::store_u64(address, control_word())
+    demand(teko::mem::load_u64(address) == control_word(), 18)
+    release_chunk(chunk)
+}
+
+/**
+ * Demands that a real allocator address survives a round trip through the `u64 <-> ptr<byte>` cast
+ * — P1's third gap (`docs/design/arena-em-teko.md` §2): on a 64-bit target `ptr<byte>` and `u64`
+ * share representation, so the cast is a reinterpret, never a conversion, and the SAME bit
+ * pattern comes back both ways. Exits 19 on a mismatch.
+ *
+ * @return  nothing
+ */
+pub fn prove_u64_ptr_byte_cast_round_trip() {
+    let chunk = acquire_chunk()
+    let as_ptr_byte = chunk to ptr<byte>
+    let back_to_u64 = as_ptr_byte to u64
+    demand(back_to_u64 == chunk, 19)
+    release_chunk(chunk)
+}
+
+/**
+ * Runs the whole bottom proof: the allocator round trip, chunk writability, Teko-computed bump
  * offsets landing on the right bytes — including an offset at the very tail of the chunk, which is
- * where an off-by-one in the bump arithmetic would overrun. Every demand exits with its own code on
- * failure, so reaching the return value at all is the proof.
+ * where an off-by-one in the bump arithmetic would overrun — and P1's two remaining language-gap
+ * primitives (`docs/design/arena-em-teko.md` §2) a Teko arena needs to hold its own bookkeeping:
+ * `teko::mem::load_u64`/`store_u64` reading back a word at a bump offset, and the `u64 <-> ptr<byte>`
+ * cast round-tripping a real allocator address. Every demand exits with its own code on failure, so
+ * reaching the return value at all is the proof.
  *
  * @return  42 when the arena's floor holds
  */
@@ -263,5 +312,8 @@ pub fn probe_bottom() -> i32 {
     prove_bump_offset_addresses_memory(0, 4096)
     prove_bump_offset_addresses_memory(arena_align(), 4096)
     prove_bump_offset_addresses_memory(default_chunk_bytes() - arena_align(), arena_align())
+    prove_word_round_trip(0)
+    prove_word_round_trip(default_chunk_bytes() - arena_align())
+    prove_u64_ptr_byte_cast_round_trip()
     42
 }
