@@ -12632,6 +12632,60 @@ fn union_field_placement(ctx: LowerCtx, decl: checker::Type | null) -> checker::
 }
 
 /**
+ * fat_elem_stride — the byte width of ONE element inside a fat (`str`/`[]T`) value's backing
+ * buffer: 1 for `str` (a byte string), else `T`'s own machine width (`ltype_of`, the SAME per-slot
+ * stride `lower_scalar_element_push`'s `esz`/`lower_free_slice`'s `esz` already use for a `[]T`'s
+ * buffer — a register-value `T` occupies its own width, a boxed-by-address `T` occupies one `Ptr`
+ * slot, NATIVE-AGG-SLICE-BY-ADDRESS).
+ *
+ * @param t    the fat type (`is_fat_type(t)` already true at every call site)
+ * @param ctx  the lowering context (its declared-enum table sizes an enum-carrier element)
+ * @return     the element stride, in bytes
+ * @since 0.3.1
+ */
+fn fat_elem_stride(t: checker::Type, ctx: LowerCtx) -> u32 {
+    match t {
+        checker::Slice as sl => ltype_size(ltype_of(sl.element, ctx.enums))
+        _ => 1 to u32
+    }
+}
+
+/**
+ * own_fat_field_value — a struct-literal FAT field's `(ptr, len)` pair, re-homed into a FRESH
+ * per-EXECUTION copy of its own bytes (`tk_slice_elem_box(ptr, len*stride)`) before the field is
+ * stored — the fat-axis counterpart of `own_embedded_value`/the union arm's `box_aggregate_value_at`,
+ * which already own THEIR field's storage; the fat arm alone wrote `fo` straight through.
+ *
+ * This is what a struct RETURN needed and did not have: `own_returned_value`'s post-hoc box
+ * (`aggregate_box_bytes`) only memcpy's the OUTER struct's own flat bytes — the `{ptr, len}` PAIR,
+ * not the buffer it points at — so a nested fat field's buffer, if it was never itself conveyed to
+ * `rr` (NP3b/NP4), still pointed into the callee's own frame region when that region dropped
+ * (0.3.1.0 native-fixpoint gen2 wild write). `store_struct_field` runs AFTER its caller's own
+ * `emit_region_leaves` on every return/tail-value path (`lower_return`/`lower_fn_tail`'s bracket),
+ * exactly the "leave the region before building/copying" ordering `lower_fn_tail_fat`'s NP4 bracket
+ * uses for a DIRECT fat return — so boxing HERE, unconditionally (mirroring the union/embedded arms'
+ * own unconditional box), anchors the field's buffer at whatever region is current at construction
+ * time: `rr` on an escaping struct's field, the frame's own region on a non-escaping one, matching
+ * the SAME safety-net convention `store_struct_field`'s other two arms already keep.
+ *
+ * @param fo    the field's already-lowered `(ptr, len)` pair
+ * @param t     the field's fat type (its element stride sizes the copy)
+ * @param line  the source line to stamp the emitted copy with
+ * @param col   the source column to stamp
+ * @return      the SAME length, with `ptr` now the fresh copy's address
+ * @since 0.3.1
+ */
+fn own_fat_field_value(fo: LoweredFat, t: checker::Type, line: u32, col: u32) -> LoweredFat {
+    let esz = fat_elem_stride(t, fo.ctx)
+    let szc = ctx_alloc(fo.ctx)
+    let with_sz = ctx_append(szc.ctx, const_int_inst(szc.vreg, esz to i64, line, col))
+    let bytes = ctx_alloc(with_sz)
+    let with_bytes = ctx_append(bytes.ctx, bin_inst(bytes.vreg, LBinOp::IMul, fo.len, szc.vreg, line, col))
+    let boxed = ctx_alloc(with_bytes)
+    LoweredFat { ctx = ctx_append(boxed.ctx, call_inst(boxed.vreg, "tk_slice_elem_box", two_args(fo.ptr, bytes.vreg), false, line, col)); ptr = boxed.vreg; len = fo.len }
+}
+
+/**
  * store_struct_field — store ONE struct-literal field value at `base + offset`, in the ONE shape
  * the field's DECLARED type calls for:
  *
@@ -12688,9 +12742,10 @@ fn store_struct_field(ctx: LowerCtx, base: u32, offset: u32, decl: checker::Type
     }
     if is_fat_type(value.type) {
         let fo = match lower_fat_expr(ctx, value) { LoweredFat as x => x; error as err => return err }
-        let addr = ctx_alloc(fo.ctx)
+        let owned = own_fat_field_value(fo, value.type, line, col)
+        let addr = ctx_alloc(owned.ctx)
         let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, offset, line, col))
-        return store_fat_slot(with_addr, addr.vreg, fo, line, col)
+        return store_fat_slot(with_addr, addr.vreg, owned, line, col)
     }
     let raw = match lower_expr(ctx, value) { Lowered as x => x; error as err => return err }
     let vo = own_embedded_value(raw, value)
