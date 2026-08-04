@@ -24,7 +24,7 @@ itself, is Teko.
 ## Orientation: what "compiler" means here
 
 There is exactly one production compiler binary, `teko`, self-hosted. Historically the project
-also carried a C bootstrap and a bytecode VM; both are retired as execution engines (native
+also carried a C bootstrap and a bytecode interpreter; both are retired as execution engines (native
 AOT is the sole engine — see [`self-host-fixpoint.md`](self-host-fixpoint.md)). The compiler's
 source lives under `src/`, one namespace-directory per stdlib/compiler module
 (`teko::lexer`, `teko::parser`, `teko::checker`, `teko::lir`, `teko::backend`,

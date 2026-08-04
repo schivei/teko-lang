@@ -1880,7 +1880,7 @@ O que segue é o que se usa em todo despacho:
   defeito do C.
 - **mingw é PROIBIDO.** Cross-compiling é objetivo declarado, **depois** dos nativos, e nunca por
   mingw. MSVC no Windows. Linker nativo em vez de `cc`/`gcc` quando houver binário fim-a-fim.
-- **Zero menções a "VM"** em texto novo (só `docs/design/vm-retirement.md`).
+- **Zero menções ao interpretador retirado** em texto novo.
 - **`void` é banido. Sobrecarga é banida.** Ao invocar uma das quatro referências de desenho
   (superfície → Rust, controlo → Zig, addins → C#, comportamentos → Go), **verificar que a NOSSA
   superfície suporta o que a referência oferece.** Eu escorreguei nisto hoje.

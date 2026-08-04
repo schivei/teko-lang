@@ -1,5 +1,7 @@
 # A2 / N2b — arm64 instruction selection (crumb plan)
 
+> **[NOTA]** — este documento descreve `lir_interp`/`minst_interp` como oráculos diferenciais ativos durante o bring-up do backend nativo. Ambos os oráculos foram desde então **retirados** (a mesma limpeza que retirou o interpretador da checker, #524 e seguintes); o restante deste documento é registro histórico do método usado, não descreve o estado atual do projeto.
+
 **Status:** DESIGN (doc-only). Sub-PR of the 0.3 own-AOT-backend wave (umbrella
 `remodel/backend-build`). Issue **#383**. Branch `fix/issue-383-isel-arm64`. Base for the
 design: `docs/design/own-backend-architecture.md` §3.3 (isel) and §2 (AAPCS64), grounded in

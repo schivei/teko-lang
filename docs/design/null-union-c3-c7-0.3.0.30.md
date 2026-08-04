@@ -87,10 +87,10 @@ the desugar bridge (C5) makes `T?` ≡ `T | null` before the corpus is rewritten
 - **[RITUAL: size probe]** — a native throughput gate: an emitted-C fixture under
   `examples/regressions/` that `EXPECT_EXIT`s on `sizeof`/heap assertions matching
   the base §6.2/§6.5 targets. Any crumb changing representation carries one.
-- **[RITUAL: dual-engine]** — the fixture runs on BOTH engines: the LIR-interp
-  oracle (`src/lir/lir_interp.tks`, the semantic oracle that replaced the retired
-  VM — #524) AND native (the C backend; and, where in the differential corpus, the
-  own AOT backend via `scripts/diff_c_own.sh`).
+- **[RITUAL: dual-engine]** — the fixture runs on native (the C backend; and, where in the
+  differential corpus, the own AOT backend via `scripts/diff_c_own.sh`). *(This ritual line
+  predates the retirement of the LIR-interp oracle that had itself replaced the tree-walking
+  interpreter, #524 — native is now the sole engine.)*
 - **[RITUAL: full gate]** — the whole `teko test .` suite + all `scripts/*_regressions.sh`
   legs `completed + success`. Reserved for C7 (the ratified end-state).
 

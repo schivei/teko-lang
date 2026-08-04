@@ -1,5 +1,7 @@
 # B1 / N3 — x86-64 SysV ABI + ELF object emission (crumb plan)
 
+> **[NOTA]** — este documento descreve `lir_interp`/`minst_interp` como oráculos diferenciais ativos durante o bring-up do backend nativo. Ambos os oráculos foram desde então **retirados** (a mesma limpeza que retirou o interpretador da checker, #524 e seguintes); o restante deste documento é registro histórico do método usado, não descreve o estado atual do projeto.
+
 **Status:** DESIGN (doc-only). Sub-PR of the 0.3 own-AOT-backend wave. Issue **#386**. Branch
 `fix/issue-386-x8664` (the B1 mini-umbrella; base = the umbrella `remodel/backend-build` carrying
 A1→A4 + #443, seed `teko 0.3.0.6-beta`). Base for the design:

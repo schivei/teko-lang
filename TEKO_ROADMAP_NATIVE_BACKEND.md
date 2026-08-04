@@ -139,7 +139,7 @@ uma sozinha já testável ponta-a-ponta), não em "plataformas primeiro depois f
 | Sub-fase | Entrega | Critério de saída |
 |---|---|---|
 | **N1** | LIR + lower TAST→LIR (aritmética, `let`, `return`, chamada de função) para UM alvo de referência (Linux x86_64 — CI já builda nesse alvo nativamente, sem QEMU/cross, loop de iteração mais rápido). | `exit(42)`-equivalente E aritmética+chamada rodam via objeto nativo + `teko_rt` linkado pelo `cc` do sistema. |
-| **N2** | Cobertura de tipos/controle de fluxo completa no alvo de referência: structs, variants/match, slices, strings, loops/`defer`, closures, generics monomorfizados — paridade de feature com `tk_emit_c` no mesmo alvo. | Suite de testes/regressão (`teko test .`) passa via binário nativo-x86_64-ELF, resultado idêntico ao backend C (mesma verificação "VM==native" já usada, estendida a "native-C==native-obj"). |
+| **N2** | Cobertura de tipos/controle de fluxo completa no alvo de referência: structs, variants/match, slices, strings, loops/`defer`, closures, generics monomorfizados — paridade de feature com `tk_emit_c` no mesmo alvo. | Suite de testes/regressão (`teko test .`) passa via binário nativo-x86_64-ELF, resultado idêntico ao backend C (mesma verificação de paridade diferencial já usada, estendida a "native-C==native-obj"). |
 | **N3** | Replicar N1+N2 para **arm64 Linux** e **arm64 macOS** (mesma família AAPCS64, encoder compartilhável entre os dois com pequenas variações de ABI Apple). | Mesma suite verde nos 2 alvos arm64. |
 | **N5** | **Windows x86_64** (COFF é o formato mais diferente; convenção de chamada Microsoft x64 diverge de System V mesmo na mesma arquitetura x86_64 — não é reuso do encoder Linux, é reuso da tabela de instruções x86_64 com uma convenção de argumentos diferente). | Suite verde no alvo Windows. |
 | **N7** | CI: novo workflow (ou extensão do `native.yml`) roda a suite via o backend nativo em paralelo ao backend C, nos 4 alvos nativos — todos precisam concordar (diferencial de 2 vias: native-C == native-obj). | Gate CI verde, todos os motores concordando. |
@@ -155,12 +155,12 @@ com o portão de 4 passos de sempre).
 
 ## Verificação (portão, adaptado do padrão já em uso)
 
-O portão de 4 passos existente (`teko-verify-both-with-test-gate`) verifica
-VM == native-C. Com um terceiro motor, o portão cresce para uma verificação de
-3 vias em qualquer sub-fase N2+:
+O portão existente (`teko-verify-both-with-test-gate`) verifica os dois binários
+nativos (bootstrap C e self-hosted) concordarem. Com um terceiro motor, o portão
+cresce para uma verificação de 3 vias em qualquer sub-fase N2+:
 
 1. `./build/teko test .` (C nativo de bootstrap — motor de referência)
-2. `./bin/teko test .` (VM auto-hospedado)
+2. `./bin/teko test .` (self-hosted nativo, via backend C)
 3. **novo:** `./build/teko test . --backend=native` (mesmo binário de bootstrap, mas
    emitindo objeto nativo em vez de C, para o alvo host)
 4. Os três precisam concordar (mesmos testes passam, mesmos valores). Divergência

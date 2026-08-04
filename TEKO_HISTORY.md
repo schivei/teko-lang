@@ -5640,11 +5640,11 @@ to be audited. A **closed system, without gaps.**
   implying the first runnable would be an interpreter over the typed tree / `.tkb`. *IS* — for the FIRST
   executable, the legislator chose to **skip the stage-1 interpreter** and go straight to **transpiling the
   typed tree to C**, letting the host `cc` produce a native binary. *WHY* — **M.5** (reuse the host toolchain;
-  do not write a native codegen — or even an interpreter VM — when lowering to C reaches a real binary fastest)
+  do not write a native codegen — or even an interpreter — when lowering to C reaches a real binary fastest)
   **+ M.0** (the metal mapping is direct: Teko ints→stdint, the operators→C operators) **+ M.4** (it still rests
   on the completed checker/typed-AST). Transpile-to-C is thus a *realization of stage 2* (AOT-native via C), not
   a new stage. **Teko targets BOTH execution modes:** (1) transpile-to-C / AOT (this, first) and (2) the
-  `.tkb` VM/interpreter (stage 1) — the VM is a **planned future mode**, not dropped; it just does not gate the
+  `.tkb` interpreter (stage 1) — the interpreter is a **planned future mode**, not dropped; it just does not gate the
   first binary (its real prerequisite is the statement/program-level `.tkb` codec, today expression-only). The full path is defined in
   TEKO_ROADMAP_BINARY.md (F0 compile the C mirror → F1 wire the pipeline → F2 emit C + call cc → F3 minimal
   runtime; M0 = a `main.tks` of integer arithmetic + print runs as a native binary).
@@ -6633,7 +6633,7 @@ the struct's namespace, method = sugar), adapted to Teko (value-semantics, no `r
      nullable**: `Value? | i32` is illegal → the dev declares `type Val = Value | i32` and marks the
      *return* `-> Val?`. The two failure domains are **disjoint**: value-absence flows through
      `?.`/`??`; recoverable error flows through `match`. The seed implements `T?` **fully** (model +
-     parser + checker + codegen + VM). *(Already canon: `REBOOT_PLAN §202–203`; `LEGISLATION §75` "`?`
+     parser + checker + codegen + interpreter). *(Already canon: `REBOOT_PLAN §202–203`; `LEGISLATION §75` "`?`
      is reserved strictly for nullability"; B.2.)*
   4. **`error` is the NATIVE lowercase type.** It **supersedes** `Error` / `teko::Error` / `Valor |
      Error`. *(Already lowercase in `src/core.tks`.)*
@@ -6693,7 +6693,7 @@ the struct's namespace, method = sugar), adapted to Teko (value-semantics, no `r
   - Plus the existing **`bool`** (two values, boolean algebra) and **`byte`** (an octet, newtype over `u8` —
     B.36). **This supersedes the seed's narrower `u8…u64`/`i8…i64` set.**
   - **Staging:** **Tier 1** (`u128`/`i128` + `f16`/`f32`/`f64`) is implemented **now** (lexer → checker →
-    codegen → VM, end-to-end); **`dec`** and **`bigint`** are **named-but-deferred** — larger,
+    codegen → interpreter, end-to-end); **`dec`** and **`bigint`** are **named-but-deferred** — larger,
     **runtime-backed** types (a 512-bit decimal; a heap-limb bignum) that land when their runtime is built.
 
 - **Is (the three float rulings, ratified):**
@@ -6714,7 +6714,7 @@ the struct's namespace, method = sugar), adapted to Teko (value-semantics, no `r
   never silent. **M.3** (honest, explicit) — the **literal default is documented** (`f64`) and a narrower
   width is *asked for* by **annotation**, not silently chosen; each type names exactly what it is (`dec` is
   decimal, not binary float; `byte` is an octet, not a number). **M.4** (build order) — Tier 1 enters because
-  lexer/checker/codegen/VM carry it; `dec`/`bigint` are **deferred behind their runtime**, named now so the
+  lexer/checker/codegen/interpreter carry it; `dec`/`bigint` are **deferred behind their runtime**, named now so the
   spelling is reserved without building ahead of the layer. **M.5** (austere) — naming the deferred types
   costs nothing; only Tier 1 carries implementation weight in the seed.
 
@@ -6736,13 +6736,13 @@ the struct's namespace, method = sugar), adapted to Teko (value-semantics, no `r
 - **Was:** the AOT backend was **transpile-to-C** — the codegen lowered the typed tree to **C**, and the host
   **`cc`** compiled it to a native binary (the legislator's original choice — §B.34/§B.35; TEKO_ROADMAP_BINARY
   Fase 2 "TC"). *Why then:* **M.5** (reuse the host toolchain; realize stage-2 AOT-native without writing a
-  native code generator). Two execution modes were planned: (1) transpile-to-C/AOT, (2) the `.tkb` VM.
+  native code generator). Two execution modes were planned: (1) transpile-to-C/AOT, (2) the `.tkb` interpreter.
 
 - **Is (legislator, 2026-06-24):** **transpile-to-C is REVOKED** as the destination architecture. Teko will
   build its **OWN native backend** — a direct native code generator (typed tree / `.tkb` → native object/binary),
   realizing the Constitution's **stage-2 (AOT-native on a host OS)** *without* `cc` as an intermediary.
   **Sequencing:** *conclude ALL current work FIRST*; the native backend is **not started** until the rest is
-  done. The **`.tkb` VM (stage-1)** is **unaffected** and stays (debug/test + differential-correctness anchor).
+  done. The **`.tkb` interpreter (stage-1)** is **unaffected** and stays (debug/test + differential-correctness anchor).
 
 - **Why:** **M.0** (the *ethos* is the metal — native code with no C middleman is closer to the silicon than
   "native via a transpiled C intermediary"). **M.4** (build order — the front end + checker + middle must be
@@ -6752,12 +6752,12 @@ the struct's namespace, method = sugar), adapted to Teko (value-semantics, no `r
 
 - **Resolved (operational, legislator 2026-06-24):** transpile-to-C is **revoked as PRIMARY but RETAINED — kept
   fully equalized — as a permanent FALLBACK and DIFFERENTIAL-CORRECTNESS COMPARATIVE.** *Why:* "we need to keep a
-  fallback and comparative." So **three** execution paths must agree: the `.tkb` **VM**, the **transpile-to-C/`cc`**
+  fallback and comparative." So **three** execution paths must agree: the `.tkb` **interpreter**, the **transpile-to-C/`cc`**
   path (fallback + comparative), and the future **native backend** (primary). **Every wave lands in ALL active
-  paths — codegen is NOT frozen** (W4/W5 etc. go into VM *and* codegen now; the native backend later).
+  paths — codegen is NOT frozen** (W4/W5 etc. go into interpreter *and* codegen now; the native backend later).
 
 - **Agent rule:** do **not** start the native backend yet; **conclude the current equalization** first, applying
-  each wave to **both** the VM and the transpile-to-C codegen (they + the future native backend are the differential
+  each wave to **both** the interpreter and the transpile-to-C codegen (they + the future native backend are the differential
   anchor — M.1). Do not delete the C path. The Constitution's three materialization stages are unchanged (only
   stage-2's *shipping implementation* moves from C-transpile to a native codegen; C-transpile lives on as fallback).
 

@@ -11,7 +11,7 @@
 > modifier, `ref` grafia in every type position with `Ref<>` compiler-internal + depth cap 2,
 > never-null refs, `Ref<T?>` transparency + no-narrowing, cases A–F); `docs/design/marshall-spec.md`
 > (operand law, wrapper law, arrays §5.7, crumbs C0–C8); `docs/design/safety-spine.md` (PR #507,
-> SP-0..SP-6); `docs/design/vm-retirement.md` (context); `DECISION_LOG.md` **D36** (seed chain),
+> SP-0..SP-6); the interpreter-retirement decision (context); `DECISION_LOG.md` **D36** (seed chain),
 > **D33** (metaprogramming post-1.0).
 >
 > **This plan writes NO product code and does NOT touch `teko.tkp`.** It is the sequencing contract;
@@ -618,5 +618,5 @@ awareness; the plan is executable as written.
 
 *Companion designs: `docs/design/ref-transparent-model.md` (the model + A1–A6 + §10.4 open case),
 `docs/design/marshall-spec.md` (C0–C8), `docs/design/safety-spine.md` (SP-0..SP-6 + thesis risks),
-`docs/design/vm-retirement.md` (context). Governing: `DECISION_LOG.md` D36 (seed chain), D33
+the interpreter-retirement decision (context). Governing: `DECISION_LOG.md` D36 (seed chain), D33
 (metaprogramming post-1.0). Wave epic: #395 (stays OPEN until SW13 = 100%).*
