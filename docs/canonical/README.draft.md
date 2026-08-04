@@ -28,7 +28,7 @@ working native binary — and that binary rebuilds itself to a byte-identical fi
 (generation N == generation N+1).
 
 - **All-native output.** `teko build` lowers your program directly to native object code (own
-  backend) and links it — no runtime VM, no GC, no interpreter in production binaries. A
+  backend) and links it — no GC, no interpreter in production binaries. A
   transpile-to-C path is kept alongside as a differential-correctness comparative and a
   bootstrap bridge, never as the shipping default.
 - **Native debug iteration.** `teko run` compiles the same checked program natively under

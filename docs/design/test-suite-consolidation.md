@@ -34,7 +34,7 @@ pins distinct encoder/isel/regalloc branches) mean the apparent bigness of "2,13
 real coverage, not redundancy. The honest reduction that provably keeps coverage is:
 
 - **Safe deletes (subsumed + obsolete):** the entire `src/reprobug/` module — **5 tests + 2
-  scaffold `.tks`, ~155 lines** — a guard for a bug in the now-**deleted** VM (`src/vm/vm.c`),
+  scaffold `.tks`, ~155 lines** — a guard for a bug in the now-**deleted** interpreter (its C twin),
   whose surviving invariant is already covered elsewhere (§4.2).
 - **Fixture consolidation (redundant same-branch negatives):** the `discard_*` R-value cluster,
   **4 fixtures → 1**, plus 1–2 `own_exit*` overlaps (§4.5). Net ~**4–5 fixtures**.
@@ -92,7 +92,7 @@ so we do not claim it.
 | um backend encoder | 51 | 1,385 | RISC-V encodings |
 | `regalloc_test.tkt` / `_x86` / `` / `_match` | 42/33/30/3 | — | register allocation |
 | `isel_arm64_test.tkt` | 38 | 753 | AArch64 isel |
-| `minst_interp_test.tkt` / `minst_*` | 35/14/10/8 | — | MInst interpreter **oracle** (active, not the retired VM) |
+| `minst_interp_test.tkt` / `minst_*` | 35/14/10/8 | — | MInst interpreter **oracle** (distinct from the retired tree-walking interpreter; since retired itself too) |
 | `objfile_*`
 
 **Poda posture:** **KEEP essentially all.** Each `#test` here is a distinct golden vector (a
@@ -122,8 +122,9 @@ Off-limits per the "law/invariant tests stay" rule (§6).
 
 **Poda posture:** **KEEP.** `parser_test.tkt`'s 20 `rejects_malformed_*` and 13 discard tests are
 the unit-level coverage that *backs* the negative fixtures (§4.5) — they are the reason the
-fixtures can be thinned. `lir_interp_test.tkt` is the **LIR interpreter oracle** (issue #221,
-the lowering-independent side of the agreement) — active, not the retired VM.
+fixtures can be thinned. `lir_interp_test.tkt` was the **LIR interpreter oracle** (issue #221,
+the lowering-independent side of the agreement) — distinct from the retired tree-walking
+interpreter at the time of this audit; since retired itself too.
 
 ### 2.4 Stdlib / encoding / tooling — the long tail
 
@@ -144,7 +145,8 @@ built-in value-thread array module; `teko::collections::List<T>` is the referenc
    branches.
 2. **Law/invariant tests** — the checker/borrow/spine/const suites (§2.2).
 3. **Oracles** — `lir_interp_test.tkt`, `minst_interp_test.tkt` (differential-agreement engines,
-   not the retired VM).
+   distinct from the retired tree-walking interpreter at the time of this audit; since retired
+   themselves too).
 4. **The unit backing of every fixture** — parser/lexer rejection tests. Thinning a fixture is
    safe ONLY because these keep the branch covered.
 5. **Owner-pinned negatives** — every `EXPECT_COMPILE_FAIL` created by a dated owner ruling
@@ -167,10 +169,10 @@ this category: ~0.**
 **~155 lines total.**
 
 - **Evidence of obsolescence:** the module's own doc-comment states it is a "MINIMAL REPRO +
-  regression guard for a confirmed VM state-corruption bug" in `find_function` **in
-  `src/vm/vm.c` AND `src/vm/vm.tks`**. The VM was retired 100 % (issue #524,
-  `docs/design/vm-retirement.md`, owner-ratified 2026-07-12: *"tudo que precisar pra remover
-  100 % a VM"*). `src/vm/` is gone; the code the guard protects **no longer exists**.
+  regression guard for a confirmed interpreter state-corruption bug" in `find_function` **in
+  the interpreter's twins**. The interpreter was retired 100 % (issue #524,
+  owner-ratified 2026-07-12: *"tudo que precisar pra remover
+  100 % o interpretador"*). The interpreter's directory is gone; the code the guard protects **no longer exists**.
 - **Retention-of-coverage argument (the surviving invariant IS covered):** the only
   *language-level* behaviour the tests assert — that same-named functions in different
   namespaces (`teko::reprobug::probe(u64)` vs `teko::reprobug::inner::probe(str)`) resolve
@@ -179,11 +181,11 @@ this category: ~0.**
   `examples/regressions/di_same_name_cross_ns/`. Deleting `reprobug` removes zero unique
   coverage.
 - **Recommendation: DELETE** the module (test + the two scaffold `.tks`). This is the single
-  cleanest win: it removes a whole namespace whose sole reason to exist retired with the VM,
+  cleanest win: it removes a whole namespace whose sole reason to exist retired with the interpreter,
   shrinking both the corpus (faster fixpoint) and the sweep surface.
 
 **Adjacent (hygiene, NOT poda — reported up):** ~10 surviving `*_test.tkt` files still carry
-stale comment-framing that references "the VM" / `src/vm` (e.g. `checker_test.tkt`,
+stale comment-framing that references "the interpreter" / its former directory (e.g. `checker_test.tkt`,
 `generics_test.tkt`, `closures_test.tkt`, `encode_x86_64_test.tkt`, `lexer_test.tkt`,
 `manifest_test.tkt`). The *tests* are valid; only the prose is stale. This is a doc-sync/W15
 refresh item — it does not reduce test count and is not part of this poda.
@@ -265,7 +267,7 @@ Mitigation ritual: §7.
 
 - Every **single coverer** of a backend encode/isel/regalloc/objfile/abi branch (§2.1).
 - Every **law/invariant** test in checker/borrow/spine/const/comptime (§2.2).
-- The **oracles** (`lir_interp`, `minst_interp`).
+- The **oracles** (`lir_interp`, `minst_interp`) — as of this audit; since retired themselves too.
 - The **unit backing** of the fixtures (parser/lexer rejection tests) — the reason a fixture can
   be thinned at all.
 - Every **owner-pinned** negative fixture not proven same-branch-redundant.
@@ -293,8 +295,8 @@ CONTRIBUTING §2–3:
 
 The owner's supposition holds **only weakly**: the suite CAN shrink while keeping coverage, but
 the coverage-safe amount is **~0.2–0.6 % of tests and ~2 % of fixtures**, dominated by one clean
-obsolete-module delete (`src/reprobug/`, a retired-VM guard) plus one owner-pinned fixture
+obsolete-module delete (`src/reprobug/`, a retired-interpreter guard) plus one owner-pinned fixture
 consolidation. The suite's real character is **mature and lean** (0.48 test:source line ratio,
 3.4 asserts/test, golden-vector backend), not padded. The larger legibility win is **hygiene**
-(stale VM comment-framing) and the larger *future* win is **per-test coverage tooling** — both
+(stale interpreter comment-framing) and the larger *future* win is **per-test coverage tooling** — both
 reported up, neither a coverage cut.

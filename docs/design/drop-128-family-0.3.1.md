@@ -1,5 +1,7 @@
 # Drop the 128-bit family (i128 / u128) + f16 from the Teko language — carrier-detox then surface-removal (crumb plan)
 
+> **[NOTA]** — este documento descreve `lir_interp`/`minst_interp` como oráculos diferenciais ativos durante o bring-up do backend nativo. Ambos os oráculos foram desde então **retirados** (a mesma limpeza que retirou o interpretador da checker, #524 e seguintes); o restante deste documento é registro histórico do método usado, não descreve o estado atual do projeto.
+
 **Status:** DESIGN (doc-only; owner ratifies before any code). Proposal of the owner, 2026-07-23.
 Two scope messages fold in: (1) drop i128/u128 from the language (f128 never existed); (2) also drop
 f16. Branch `design/drop-128-family`, base conceptually **`origin/main` AFTER the null-union pivot
@@ -630,7 +632,7 @@ carries exactly ONE re-baseline).
 | `` | exercise i128 + F16 plumbing | removed | **PRUNE** the 128/F16 cases |
 | `enum_member_shadows_primkind/src/kinds.tks` | user enum member `F16` | unaffected | **KEEP** (identifier, not the builtin) |
 
-**Rejection fixtures born (native exit codes — updated for native-only, cf. `vm-retirement.md`):**
+**Rejection fixtures born (native exit codes — updated for native-only, per the interpreter retirement):**
 
 | New fixture | Input | Expected |
 |---|---|---|

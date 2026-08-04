@@ -85,8 +85,8 @@ install separately.
 
 ## A note on `teko repl`'s foundation
 
-`teko repl`'s original design leaned on a tree-walking VM to evaluate expressions incrementally
-without invoking full codegen. Since the VM's retirement as a production execution engine (see
+`teko repl`'s original design leaned on a tree-walking interpreter to evaluate expressions
+incrementally without invoking full codegen. Since the interpreter's retirement as a production execution engine (see
 `self-host-fixpoint.md`), the REPL's evaluation strategy is restated on top of the native
 backend's fast, unoptimized (`-O0`) debug-compile-and-run path rather than a tree-walker — the
 observable behavior (incremental, interactive evaluation) is unchanged; the mechanism

@@ -1,5 +1,7 @@
 # A1 / N2a — closing the LIR lowering coverage frontier (crumb plan)
 
+> **[NOTA]** — este documento descreve `lir_interp`/`minst_interp` como oráculos diferenciais ativos durante o bring-up do backend nativo. Ambos os oráculos foram desde então **retirados** (a mesma limpeza que retirou o interpretador da checker, #524 e seguintes); o restante deste documento é registro histórico do método usado, não descreve o estado atual do projeto.
+
 **Status:** PLAN (doc-only). Sub-PR of the 0.3 own-AOT-backend wave (umbrella
 `remodel/backend-build`). Issue **#382**. Branch `fix/issue-382-lir-lowering`, which becomes a
 **mini-umbrella**: A1 is XL, so it is drained as an ordered set of sub-sub-PRs based on this branch

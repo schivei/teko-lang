@@ -14,7 +14,7 @@
 > **Sequenciamento (ordem do legislador):** *concluir TODO o trabalho atual ANTES* de construir o
 > backend nativo. O transpile-para-C é **revogado como backend PRIMÁRIO/de release, porém RETIDO —
 > mantido equalizado — como FALLBACK permanente e COMPARATIVO de corretude diferencial** ("we need to
-> keep a fallback and comparative"). Logo **três** caminhos devem concordar: a **VM `.tkb`**, o
+> keep a fallback and comparative"). Logo **três** caminhos devem concordar: o **interpretador `.tkb`**, o
 > **transpile-para-C/`cc`** (fallback+comparativo) e o futuro **backend nativo** (primário). **Cada onda
 > (W4/W5/…) entra em TODOS os caminhos ativos — o codegen NÃO é congelado.**
 > *(↺ supersede a decisão original transpile-para-C — HISTORY §B.34/§B.35; ver LEGISLATION "Backend nativo próprio".)*
@@ -144,7 +144,7 @@ ast.h/result.h como headers reais + `tk_expr`/helpers/corpos → B0d `tk_str_eq`
 "puro") · codec `.tkb` de statement (→ `if`/`match`) · análise de divergência (C5) · reconciliação
 geral newtype↔base · `str↔bytes` transcodificação.
 
-> **Modo VM (planejado, futuro).** O segundo modo de execução — a **VM/interpretador do `.tkb`**
+> **Modo interpretador (planejado, futuro).** O segundo modo de execução — o **interpretador do `.tkb`**
 > (estágio-1) — entra **depois** do M0. Pré-requisito real dele: o **codec `.tkb` de statement/programa**
 > (hoje o codec só serializa `TExpr`; `if`/`match`/funções/programa faltam). Não está descartado — é o
 > caminho do dev-loop rápido e do bootstrap interpretado; só não bloqueia o primeiro binário.

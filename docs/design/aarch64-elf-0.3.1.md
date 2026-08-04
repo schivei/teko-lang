@@ -550,7 +550,7 @@ capability.
 
 ### Regression fixtures (inputs → expected exit codes)
 
-| fixture | where | VM / interp | native |
+| fixture | where | interp | native |
 |---|---|---|---|
 | `arm64_func_addr_pair_is_a_page_pair_not_a_branch` | `src/backend/isel_arm64_test.tkt` | 0 | n/a (unit) |
 | `macho_func_addr_relocs_are_page21_pageoff12` | `src/backend/objfile_macho_test.tkt` | 0 | n/a (unit) |

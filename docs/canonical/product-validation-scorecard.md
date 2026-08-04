@@ -45,7 +45,7 @@ existe / fantasia (no design consensus, or the doc's claim conflicts with what's
 | **`teko fmt`** | Zero-option canonical formatter, `--check` CI gate, idempotent | Real, DONE (`DT0`, `src/fmt/fmt.tks`), proven `fmt(fmt(x))==fmt(x)` over the whole corpus | 🟢 | Corpus-wide reformat + CI `--check` gate itself still open per the roadmap, but the tool works |
 | **`teko doc`** | Doc-comment → HTML/Markdown/JSON generator | **No such subcommand exists.** No `src/doc/` or equivalent found. `TEKO_ROADMAP_DEVTOOLS.md`: "DT1 doc … remain ⬜" | 🔴 | Entirely unbuilt |
 | **`teko lint`** | Style/best-practice linter, `--fix` | **No such subcommand exists.** `TEKO_ROADMAP_DEVTOOLS.md`: "DT2 lint … remain ⬜" | 🔴 | Entirely unbuilt |
-| **`teko repl`** | Interactive REPL, "restated on top of the native backend's -O0 debug-compile-and-run path" since the VM's retirement | **No `src/repl/` exists at all.** The VM-based REPL was **explicitly, ratified-ly retired** (`docs/design/vm-retirement.md`, micro-decision **M1**, "RATIFIED = retire"), on the stated grounds that a native AOT compiler has no line-by-line eval "without a JIT or a compile-per-line loop (both out of scope for #524)." `TEKO_ROADMAP_DEVTOOLS.md` (pre-dates the retirement) still lists `DT3 repl` as `Deps: VM`, now stale/orphaned. **The canonical doc's "-O0 compile-and-run" resolution is the architect's own proposed fix for a gap the ratified retirement explicitly declared out of scope — it is not an owner ruling on record.** | 🔴 (retired feature; proposed revival is unratified) | **Owner decision needed**: does Teko get a REPL at all, and on what mechanism? See §3 |
+| **`teko repl`** | Interactive REPL, "restated on top of the native backend's -O0 debug-compile-and-run path" since the interpreter's retirement | **No `src/repl/` exists at all.** The interpreter-based REPL was **explicitly, ratified-ly retired** (the interpreter-retirement decision, micro-decision **M1**, "RATIFIED = retire"), on the stated grounds that a native AOT compiler has no line-by-line eval "without a JIT or a compile-per-line loop (both out of scope for #524)." `TEKO_ROADMAP_DEVTOOLS.md` (pre-dates the retirement) still lists `DT3 repl` as `Deps: the interpreter`, now stale/orphaned. **The canonical doc's "-O0 compile-and-run" resolution is the architect's own proposed fix for a gap the ratified retirement explicitly declared out of scope — it is not an owner ruling on record.** | 🔴 (retired feature; proposed revival is unratified) | **Owner decision needed**: does Teko get a REPL at all, and on what mechanism? See §3 |
 | **`tdb` debugger** | 8-phase description (harness/oracle → `.tsym` v2 → control floor → breakpoints → stepping → variables → editor/DAP → ports), reads as delivered | **Zero lines of `tdb` implementation exist.** The design doc it's drawn from says so explicitly: *"Nada disto se implementa nesta versão nem na seguinte"* ("none of this is implemented in this version nor the next" — `docs/design/tdb-proposta-0.3.1.md`). What **is** real: `.tsym` symbol-map emission (Phase 1 E3, DONE) and DWARF line/frame emission (`src/backend/dwarf.tks`) — genuinely the *substrate* the debugger would need, but not the debugger. | 🟠 (substrate real; the tool is 100% design) | Everything past the two emission pieces already shipped |
 | **FFI / `extern` / `teko_rt`** | `extern fn ... = "sym" from "lib"`, marshalling restrictions, `extern type`, no variadics, per-OS manifest resolution | Well-supported by `src/build/manifest.tks` (`[extern.libs]` resolution, per-OS/per-arch keys, link-mode tracking) and the parser/checker surface | 🟢 | Exhaustive rule-by-rule audit not done in this pass, but structurally solid |
 | **Package manifest (`teko.tkp`), local deps, `.tkl` format** | TOML manifest, `.tkl` ZIP of `.tkh`+`.tkb`(+`.tsym`), consumer-driven monomorphization | Real: `src/build/manifest.tks`, `.tkl` load/emit in `src/build/project.tks` (search `packages/<dep>-*.tkl`, ZIP parse, C7.10 pre-linker merge) | 🟢 | None for the local-only flow |
@@ -65,7 +65,7 @@ existe / fantasia (no design consensus, or the doc's claim conflicts with what's
    states: *"Where the target is genuinely open... this canon says so explicitly... see each file's
    'Open / needs a ruling' note where present."* **Not one file in `dev/` or `product/` contains such
    a note** — despite at least three live candidates that arguably warrant one (the `this`/`base`/
-   `static` OOP-syntax proposal, the REPL's VM-vs-native mechanism, and the isolate-vs-`Intent<T>`
+   `static` OOP-syntax proposal, the REPL's interpreter-vs-native mechanism, and the isolate-vs-`Intent<T>`
    concurrency tension, all detailed in §3 below). This is a promise the doc set doesn't keep, and
    it's an easy, low-cost fix (either add the notes, or drop the sentence).
 
@@ -104,8 +104,8 @@ governing concurrency surface, or has `Intent<T>` superseded it? Whichever answe
 `memory-model.md` concurrency section needs to be rewritten to match — right now it is the chapter
 most likely to actively mislead a contributor who takes it as settled.
 
-### 3.2 `teko repl`: VM-vs-native — **flagged by the architect**
-The VM-based REPL is ratified-retired (M1). No native replacement mechanism is ratified — the
+### 3.2 `teko repl`: interpreter-vs-native — **flagged by the architect**
+The interpreter-based REPL is ratified-retired (M1). No native replacement mechanism is ratified — the
 canonical doc's "-O0 debug-compile-and-run" framing is a proposed resolution to a gap the retirement
 ruling explicitly scoped *out*. Needs an owner call: build a native REPL (accepting the
 compile-per-line cost the retirement doc flagged as out of scope), or drop `teko repl` from the
@@ -119,13 +119,12 @@ migration. Current code and the canonical docs both still reflect the **old** sy
 decision. Needs the owner's one-line call on migration shape (the design doc recommends hard-cut,
 sequenced before the fase-3 collections work).
 
-### 3.4 `TEKO_LEGISLATION.md` is stale on the VM — **flagged by the architect, confirmed in this pass**
-`TEKO_LEGISLATION.md` (lines ~397–423) still describes the VM as *"a future mode (not dropped)"* and
-`.tkt` tests as running *"on the VM."* Both are flatly superseded by the ratified VM retirement
-(`docs/design/vm-retirement.md`, native is the sole execution engine per `TEKO_MASTER_PLAN.md`'s
-2026-07-13 ruling). This is a legislative document — of higher authority than any roadmap note — that
-needs a distillation pass to remove the VM-as-future-mode language before it misleads a future reader
-into thinking the VM is still load-bearing anywhere.
+### 3.4 `TEKO_LEGISLATION.md` is stale on the interpreter — **flagged by the architect, confirmed in this pass; fixed in this sweep**
+`TEKO_LEGISLATION.md` (lines ~397–423) used to describe the interpreter as *"a future mode (not dropped)"* and
+`.tkt` tests as running *"on the interpreter."* Both were flatly superseded by the ratified interpreter retirement
+(native is the sole execution engine per `TEKO_MASTER_PLAN.md`'s
+2026-07-13 ruling). This is a legislative document — of higher authority than any roadmap note — and
+has since had the distillation pass to remove the interpreter-as-future-mode language.
 
 ---
 

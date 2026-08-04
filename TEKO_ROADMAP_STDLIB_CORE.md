@@ -99,7 +99,7 @@ Lazy adapters as pure-Teko functions/closures (no intermediate allocation): `map
 `skip`, `zip`, `enumerate`, `chain`, `flat_map`; eager terminals: `fold`, `reduce`, `count`, `sum`,
 `any`, `all`, `find`, `collect → []T`. Iterators over `array`/slices and (later) over `teko::collections`
 and `teko::io` lines/bytes. **Verify:** `.tkt` — laziness (a `map` whose closure is never called past a
-`take`), correctness of each adapter/terminal; VM == native.
+`take`), correctness of each adapter/terminal (native).
 
 > **Deliberately NOT added** (Laws): no `for`/`foreach` sugar — iteration is `loop { match it.next() {
 > null => break; T as v => … } }` or the terminals above ([[teko-only-loop]]). `iter` is a library, not

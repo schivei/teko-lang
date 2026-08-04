@@ -1,5 +1,7 @@
 # A4 / N2d — arm64 encoder + Mach-O object + link via system `ld` (crumb plan)
 
+> **[NOTA]** — este documento descreve `lir_interp`/`minst_interp` como oráculos diferenciais ativos durante o bring-up do backend nativo. Ambos os oráculos foram desde então **retirados** (a mesma limpeza que retirou o interpretador da checker, #524 e seguintes); o restante deste documento é registro histórico do método usado, não descreve o estado atual do projeto.
+
 **Status:** DESIGN (doc-only). Sub-PR of the 0.3 own-AOT-backend wave. Issue **#385**. Branch
 `fix/issue-385-encoder` (the A4 mini-umbrella; base = the umbrella carrying A1+A2+A3+#443). Base for
 the design: `docs/design/own-backend-architecture.md` §3.5 (object emission) + §5 (D-2 runtime link,

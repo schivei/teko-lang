@@ -16,7 +16,7 @@ This does not soften "no new C emissions" — that ruling is about the compiler 
 
 Worked example (0.3.1.0 degrau 9): `tk_str_concat_len` / `tk_i64_to_str_len` / `tk_u64_to_str_len` — out-parameter-length twins of three existing builders, because the native backend's `LCall` captures a result in ONE register while a `tk_str` returned by value occupies the two-eightbyte SysV/AAPCS64 pair. Thin wrappers over their own twins, owning no logic, mirroring `tk_slice_push`'s established `(…, &out_len)` shape.
 
-**Twins retired (2026-07-13, #524):** VM interpreter, REPL, C bootstrap all retired; native AOT sole engine.
+**Twins retired (2026-07-13, #524):** the tree-walking interpreter, REPL, C bootstrap all retired; native AOT sole engine.
 
 **W15-from-now:** code quality (doc-comments only, no inline; flatten, extract; cyclomatic <N) applied continuously, not deferred.
 

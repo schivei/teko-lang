@@ -13,7 +13,7 @@ consumer-side honest-stop scaffold that never fires today.
 > `encode_x86_64.tks:1310`); the LIR carries a data-section relocation entry for a
 > rodata-internal pointer field." T-B1 delivers the TYPES + the plumbing seam;
 > emission is T-B2 (ELF `.rela.rodata`), T-B3 (Mach-O/COFF rodata relocs), T-B4
-> (wasm intra-data offsets), T-B5 (VM). No producer emits a Tier-B const yet
+> (wasm intra-data offsets), T-B5 (interpretador). No producer emits a Tier-B const yet
 > (`serialize_const` still honest-stops pointer-bearing aggregates — T-B6 flips it).
 
 ---
@@ -86,7 +86,7 @@ relocation, `.text`-section-relative (module-rebased)" (`encode_x86_64.tks:1921`
    Mach-O local rodata reloc / wasm intra-data offset) — T-B2/T-B3/T-B4.
 
 T-B1 delivers #1, #2, and the #3 seam (as a honest-stop). #4/#5 are the later
-writer/VM crumbs.
+writer/interpretador crumbs.
 
 ### 1.5 Codec audit (risk #5, answered)
 
@@ -194,7 +194,7 @@ flat-bytes behavior):
     string literal's UTF-8, an interpolation piece, or a Tier-A aggregate const's
     serialized image), and its internal pointer relocations (#594 T-B1 — EMPTY for
     every entry the compiler produces today; a Tier-B aggregate const populates it
-    from T-B6, and T-B2..T-B5 teach the writers/VM to emit/resolve them). Referenced
+    from T-B6, and T-B2..T-B5 teach the writers/interpretador to emit/resolve them). Referenced
     by `LGlobalAddr` (A1-4, #382). */
 pub type LRodata = struct { symbol: str; bytes: []byte; relocs: []LDataReloc }
 ```
@@ -214,7 +214,7 @@ pub type LRodata = struct { symbol: str; bytes: []byte; relocs: []LDataReloc }
 ### 2.4 `encode_rodata` — the consumer seam (honest-stop, all three encoders)
 
 `encode_rodata` gains a scan of each entry's `relocs`; if any is non-empty it
-honest-stops (a rodata-internal pointer needs the T-B2..T-B5 writer/VM path). Its
+honest-stops (a rodata-internal pointer needs the T-B2..T-B5 writer/interpretador path). Its
 return type becomes `ModuleRodata | error` (arm64 `encode_arm64.tks:2638`) and the
 `encode_module*` callers (`encode_x86_64.tks:2425`,
 `encode_arm64.tks:2735`, um backend encoder) match the new arm. Because every
@@ -225,7 +225,7 @@ byte-identical.
 /**
  * honest_data_reloc — the named honest-stop for a rodata-INTERNAL pointer relocation
  * (#594 T-B1): a Tier-B aggregate const whose rodata image contains a pointer needs a
- * data→data relocation the object writers/VM cannot emit until T-B2..T-B5 (§5.1). No
+ * data→data relocation the object writers/interpretador cannot emit until T-B2..T-B5 (§5.1). No
  * const produces one yet (`serialize_const` honest-stops pointer-bearing aggregates
  * upstream), so this never fires in T-B1 — it is the placed seam T-B2 replaces with
  * real `.rela.rodata` emission.
@@ -344,10 +344,10 @@ Each edit is independently gate-able; run the listed `.tkt` after each.
 
 ---
 
-## 5. Regression fixtures to ADD (inputs → expected, VM and native)
+## 5. Regression fixtures to ADD (inputs → expected, interpretador and native)
 
 All three are unit `.tkt` tests calling the backend directly, so they run identically
-under the VM and the native harness (same `error`/exit outcome).
+under the interpretador and the native harness (same `error`/exit outcome).
 
 1. **The gate fires (new behavior):** hand-build an `LModule` with one `LRodata {
    symbol = "k"; bytes = <8 zero bytes>; relocs = [data_reloc(0, "other")] }` and call

@@ -326,17 +326,17 @@ Cada crumb é independentemente gate-able. **Nenhum é implementado neste docume
    compartilhada pelos 6 alvos (`mapa-native-6-pernas-0.3.1.0.md`), então uma religação
    errada quebra os 6 de uma vez — o ritual não é opcional nesses pontos.
 
-### 5.1 Fixtures de regressão a adicionar (entrada → exit, VM e nativo)
+### 5.1 Fixtures de regressão a adicionar (entrada → exit, nativo)
 
-Objetivo: provar que o gêmeo Teko é semanticamente idêntico ao `tk_*` que substitui, nas
-DUAS engines. Cada caso em `cases/` roda VM e nativo e compara exit.
+Objetivo: provar que o gêmeo Teko é semanticamente idêntico ao `tk_*` que substitui.
+Cada caso em `cases/` roda nativo e compara exit.
 
-| Fixture | Entrada | Exit esperado (VM = nativo) |
+| Fixture | Entrada | Exit esperado |
 |---|---|---|
 | `rt_str_eq_parity` | `"abc"=="abc"`, `"abc"=="abd"`, vazio, embutido-NUL | 0 |
 | `rt_ends_contains_parity` | `ends_with`/`contains` com sufixo vazio, sufixo>agulha, hit no fim | 0 |
 | `rt_str_cmp_parity` | `<`/`>`/`==` sobre prefixos e comprimentos distintos | 0 |
-| `rt_str_hash_parity` | mesmo `str` → mesmo hash em ambas as engines | 0 |
+| `rt_str_hash_parity` | mesmo `str` → mesmo hash, deterministicamente | 0 |
 | `rt_panic_div0_marker` | `1/0` | não-zero **e** stderr contém `deliberate panic` (marcador, não código — `teko_rt.tks:688–690`) |
 | `rt_panic_cast_marker` | cast impossível | idem |
 | `rt_concat_parity` (C3) | `str_concat` de N pedaços, um vazio | 0 |

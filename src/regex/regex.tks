@@ -55,13 +55,13 @@
 // A SECOND, NARROWER workaround lives in the AST shape itself: every "single child"
 // field (RStar/RPlus/ROpt/RGroup's operand) is stored as `[]RegexNode` (a ONE-element
 // slice), never a bare `inner: RegexNode`, and always read back via `[0]`. This routes
-// around a confirmed VM defect (VM-only — the native engine is unaffected): reading a
+// around a confirmed defect in the (now-retired) tree-walking interpreter (native was always unaffected): reading a
 // BARE variant-typed struct field off a variable that is itself bound by an enclosing
 // `match … as x =>` arm returns a corrupted value (reproduced in isolation — a
 // self-referential variant is not even required; any variant-typed struct field
 // triggers it). The identical field wrapped as a one-element `[]T` and read via `[0]`
-// is unaffected — slices already go through a different (correct) VM code path. Filed
-// as a VM bug for a future fix; this module works around it rather than blocking on it.
+// was unaffected — slices already went through a different (correct) interpreter code path.
+// This module's workaround predates the interpreter's retirement and was never unwound.
 
 // --- the AST (RegexNode) — one named struct per arm (no inline variant bodies; the
 // canonical pattern used by e.g. checker::Type — inline anonymous variant bodies are
@@ -73,7 +73,7 @@ pub type RRange = struct { lo: u32; hi: u32 }   // one class member: a single cp
 pub type RClass = struct { negate: bool; ranges: []RRange }   // `[...]` / `[^...]`
 pub type RConcat = struct { parts: []RegexNode }   // sequential composition
 pub type RAlt = struct { branches: []RegexNode }   // `a|b|c`
-// `inner` is a ONE-element `[]RegexNode` (never a bare `RegexNode` field) — see the VM
+// `inner` is a ONE-element `[]RegexNode` (never a bare `RegexNode` field) — see the interpreter
 // workaround note above. Built via `one(node)`, read via `one_of(x.inner)`.
 pub type RStar = struct { inner: []RegexNode }   // `x*`  (0 or more, greedy)
 pub type RPlus = struct { inner: []RegexNode }   // `x+`  (1 or more, greedy)
@@ -90,7 +90,7 @@ pub type RegexNode = variant RChar | RAny | RClass | RConcat | RAlt | RStar | RP
 // structs stay pure data), so every operation is a free function taking `Regex` by value.
 pub type Regex = struct { pattern: str; ast: RegexNode }
 
-// --- the []RegexNode-of-one helper pair (the VM workaround plumbing) ---
+// --- the []RegexNode-of-one helper pair (the interpreter workaround plumbing) ---
 
 fn one(node: RegexNode) -> []RegexNode { teko::list::push(teko::list::empty(), node) }
 fn one_of(wrapped: []RegexNode) -> RegexNode { wrapped[0] }

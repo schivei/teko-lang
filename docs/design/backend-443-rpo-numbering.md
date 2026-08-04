@@ -1,5 +1,7 @@
 # #443 — RPO block numbering for the A3 register allocator (crumb plan)
 
+> **[NOTA]** — este documento descreve `lir_interp`/`minst_interp` como oráculos diferenciais ativos durante o bring-up do backend nativo. Ambos os oráculos foram desde então **retirados** (a mesma limpeza que retirou o interpretador da checker, #524 e seguintes); o restante deste documento é registro histórico do método usado, não descreve o estado atual do projeto.
+
 **Status:** DESIGN (doc-only). Sub-PR of the 0.3 own-AOT-backend wave (umbrella
 `remodel/backend-build`). Issue **#443**. Fix branch `fix/issue-443-rpo-numbering`, base the
 backend wave umbrella. **0.3.1 backend-completion — must land EARLY, before A4**, because it
