@@ -13594,11 +13594,24 @@ fn lower_assign_fat(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error 
 }
 
 /**
+ * NATIVE_FREES_OLD_PARKING — whether the native backend may park a self-append's superseded slice
+ * buffer on copy-grow (`tk_slice_push_fo`). HELD OFF (0.3.1.0 wild-write): the native aggregate-by-
+ * address + NP3/NP4 conveyance retains the PRE-GROW buffer address and writes the grown element
+ * through it AFTER the free-old parks+poisons that buffer — a use-after-free (a 560-byte `[]str`
+ * buffer clobbered at offset 32, confirmed by TEKO_NATIVE_POISON_FREE) that the C emitter's lvalue
+ * reassignment never hits. With this false the native self-append falls to the plain `tk_slice_push`
+ * (leaks the old buffer instead of parking it), closing the UAF window; the C emitter is untouched,
+ * so its fixpoint stays byte-identical. Re-enabled by the free-old root fix.
+ */
+const NATIVE_FREES_OLD_PARKING: bool = false
+
+/**
  * is_frees_old_self_append — is `a` a self-append `xs = teko::list::push(xs, …)` whose accumulator
  * `xs` the checker PROVED a linear chain (`ctx.frees_old_names`, from `checker::fn_frees_old_vars`)?
- * When so, the copy-grow may park the superseded buffer for reuse — the exact upgrade the C emitter
- * makes at `codegen.tks:9068`. The native backend, unlike the C emitter, has no per-assign body at
- * the push site, so it consults the precomputed set instead of re-deriving the proof.
+ * When so, the copy-grow MAY park the superseded buffer for reuse — the exact upgrade the C emitter
+ * makes at `codegen.tks:9068` — but only while `NATIVE_FREES_OLD_PARKING` is on (held off for the
+ * wild-write UAF). The native backend, unlike the C emitter, has no per-assign body at the push site,
+ * so it consults the precomputed set instead of re-deriving the proof.
  *
  * @param ctx  the lowering context (its precomputed `frees_old_names` oracle)
  * @param a    the typed assignment
@@ -13606,7 +13619,7 @@ fn lower_assign_fat(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error 
  * @since 0.3.1 (native free-old parity, #148)
  */
 fn is_frees_old_self_append(ctx: LowerCtx, a: checker::TAssign) -> bool {
-    checker::assign_is_self_append(a) && contains_str(ctx.frees_old_names, a.name)
+    NATIVE_FREES_OLD_PARKING && checker::assign_is_self_append(a) && contains_str(ctx.frees_old_names, a.name)
 }
 
 /**
