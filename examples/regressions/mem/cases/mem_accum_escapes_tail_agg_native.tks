@@ -1,0 +1,101 @@
+/**
+ * Item — the aggregate element the escaping accumulator carries, pushed BY ADDRESS
+ * (`box_aggregate_value`/`reserve_item_slot`) rather than by scalar register value — the shape whose
+ * boxed copy the tail-expr conveyance bracket (`lower_conveyed_tail_expr_stmt_fat`, NP6 Crumb 1) must
+ * ALSO route to `rr`, distinct from the scalar `[]i64` element `mem_accum_escapes_nested_native`
+ * already covers.
+ */
+type Item = struct {
+    /** tag — the element's own index-derived value. */
+    tag: i64
+
+    /** dbl — `tag` doubled, so a half-width copy shows up here and not in `tag`. */
+    dbl: i64
+}
+
+/**
+ * builder — an ESCAPING, aggregate-element accumulator returned through a BARE TAIL EXPRESSION: the
+ * FINAL self-append (`teko::list::push`) is the function's own trailing statement, never bound to a
+ * name first, so its freshly boxed buffer must materialize at the conveyance anchor `rr` through
+ * `lower_conveyed_tail_expr_stmt_fat` (Crumb 1) itself — the loop's OWN prior grows already route
+ * through `lower_assign_conveyed`, but that alone left the LAST element's push unconveyed pre-fix.
+ *
+ * @param n  how many elements to grow (n > 0)
+ * @return   the grown slice, `n` elements, `tag = 0, 1, …, n-1`
+ */
+fn builder(n: i64) -> []Item {
+    mut out: []Item = teko::list::empty()
+    mut i: i64 = 0
+    loop {
+        if i >= n - 1 { break }
+        out = teko::list::push(out, Item { tag = i; dbl = i * 2 })
+        i++
+    }
+    teko::list::push(out, Item { tag = n - 1; dbl = (n - 1) * 2 })
+}
+
+/**
+ * churn — allocate and free further scratch AFTER `mid`'s own if-arm has closed, recycling its freed
+ * region before the accumulator built inside that arm is read back. Exists so a use-after-free of the
+ * accumulator (rather than a merely-untouched dangling pointer) reads OVERWRITTEN bytes, giving a
+ * deterministic wrong fingerprint pre-fix instead of a lucky pass.
+ *
+ * @param n  the number of churn iterations
+ * @return   the count of churn iterations whose scratch accumulator fingerprinted exactly
+ */
+fn churn(n: i64) -> i64 {
+    mut hits: i64 = 0
+    mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        mut zs: []i64 = teko::list::empty()
+        zs = teko::list::push(zs, i * 7)
+        if zs[0 to u64] == i * 7 { hits = hits + 1 }
+        i++
+    }
+    hits
+}
+
+/**
+ * mid — call `builder` from INSIDE an open `if`-arm (NP5's own `NativeRegionFrame` for that arm),
+ * while `bx` (the local `builder`'s return is stored into) is NEVER itself read in an escaping
+ * position — only via the non-escaping index/length COMPARISONS below — so `bx`'s own binding and its
+ * reassignment inside the arm carry NO conveyance bracket (`binding_conveys_escape` is false for it)
+ * and `builder(n)` runs with the if-arm's own region genuinely CURRENT: the nested-caller depth the
+ * confirmed UAF needs, mirroring `mem_accum_escapes_nested_native::mid`, one axis over (an aggregate
+ * element built at the TAIL position, not a scalar grown by assignment). The if-arm CLOSES (dropping
+ * its own region) before `bx` is ever read: pre-fix, `builder`'s final self-append (its bare tail
+ * expression) landed in exactly that region, which the arm's own close then reclaimed; post-fix it
+ * always lands at root, surviving the drop intact.
+ *
+ * @param n  how many elements `builder` grows (n > 0)
+ * @return   the fingerprint: 6 churn hits + 10 (length matches) + 1 (last tag matches) + 100 (last
+ *           dbl matches) = 117
+ */
+fn mid(n: i64) -> i64 {
+    mut bx: []Item = teko::list::empty()
+    if n > 0 {
+        bx = builder(n)
+    }
+    let churn_hits = churn(n)
+    mut fp: i64 = churn_hits
+    if bx.len == n to u64 { fp = fp + 10 }
+    if bx[(n - 1) to u64].tag == n - 1 { fp = fp + 1 }
+    if bx[(n - 1) to u64].dbl == (n - 1) * 2 { fp = fp + 100 }
+    fp
+}
+
+/**
+ * outer — the outermost link of the `outer() → mid() → builder()` chain the confirmed UAF needs (see
+ * `mid`'s own doc): a plain forwarding call, so the non-root nesting `builder` is called under is
+ * established entirely by `mid`'s own open if-arm, never by how `outer` itself gets invoked.
+ *
+ * @param n  forwarded to `mid`
+ * @return   `mid(n)`'s fingerprint
+ */
+fn outer(n: i64) -> i64 {
+    mid(n)
+}
+
+let fp = outer(6)
+teko::io::println($"fp={fp}")

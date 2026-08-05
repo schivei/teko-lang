@@ -8352,16 +8352,24 @@ fn lower_fn_tail(ctx: LowerCtx, s: checker::TStatement, result_ty: LType, target
 }
 
 /**
- * lower_conveyed_tail_expr_stmt — `lower_fn_tail`'s expression-statement arm: bracket
- * `lower_tail_expr_stmt` in `emit_region_leaves` … `emit_region_enters` (NP4), mirroring
- * `lower_binding_conveyed`/`lower_assign_conveyed` (NP3b) and `lower_conveyed_tail_expr_stmt_fat`
- * exactly, one axis over (a function body's own auto-returned SCALAR tail vs a named binding/
- * assign vs the FAT tail) — INCLUDING marking `ctx.bracket_depth = 1` for the tail's own
- * evaluation, so a NESTED escaping binding inside the tail expression (e.g. a struct literal field
- * initialized from a `match` arm's own `let`) sees `bracket_depth > 0` and skips its own
- * leave/enter rather than re-entering the frame region mid-span. The re-enter restores the frame
- * region so `lower_fn_body`'s OWN subsequent defer replay and final leave/`own_returned_value`/drop
- * run under the SAME region-stack shape every other exit edge sees them under.
+ * lower_conveyed_tail_expr_stmt — `lower_fn_tail`'s expression-statement arm (NP6, direct anchor
+ * bracket): `emit_anchor_enter` (push the conveyance anchor `rr` — the caller's own captured region
+ * — on top of whatever is current), run `lower_tail_expr_stmt` unchanged so its own value
+ * materializes at `rr`, then `emit_anchor_leave` (pop that single push, restoring the frame/block
+ * region for whatever runs after). Mirrors `lower_binding_conveyed`/`lower_assign_conveyed` (NP3b)
+ * and `lower_conveyed_tail_expr_stmt_fat` exactly, one axis over (a function body's own
+ * auto-returned SCALAR tail vs a named binding/assign vs the FAT tail) — a stable, caller-owned
+ * landing region regardless of how many scopes are open here, unlike the earlier
+ * `emit_region_leaves`/`emit_region_enters` pop-then-push-back detour, which only reached `rr`
+ * because the runtime stack slot it popped down to HAPPENED to still hold it (the self-append UAF
+ * this closes).
+ *
+ * INCLUDING marking `ctx.bracket_depth = 1` for the tail's own evaluation, so a NESTED escaping
+ * binding inside the tail expression (e.g. a struct literal field initialized from a `match` arm's
+ * own `let`) sees `bracket_depth > 0` and skips its own leave/enter rather than re-entering the
+ * frame region mid-span. The re-enter restores the frame region so `lower_fn_body`'s OWN subsequent
+ * defer replay and final leave/`own_returned_value`/drop run under the SAME region-stack shape every
+ * other exit edge sees them under.
  *
  * @param ctx        the lowering context, positioned at the tail expression-statement
  * @param es         the tail expression-statement
@@ -8371,15 +8379,15 @@ fn lower_fn_tail(ctx: LowerCtx, s: checker::TStatement, result_ty: LType, target
  * @param col        the source column to stamp
  * @return           the value outcome, its `ctx` back under the frame region
  * @throws           propagated from `lower_tail_expr_stmt`
- * @since 0.3.1.0
+ * @since 0.3.1 (NP6: direct anchor bracket)
  */
 fn lower_conveyed_tail_expr_stmt(ctx: LowerCtx, es: checker::TExprStmt, result_ty: LType, target_ty: checker::Type, line: u32, col: u32) -> LowerBlockValue | error {
     if ctx.bracket_depth > 0 { return lower_tail_expr_stmt(ctx, es, result_ty, target_ty) }
-    let left = emit_region_leaves(ctx, line, col)
-    let marked = ctx_with_bracket_depth(left, 1)
+    let entered_rr = emit_anchor_enter(ctx, line, col)
+    let marked = ctx_with_bracket_depth(entered_rr, 1)
     let out = match lower_tail_expr_stmt(marked, es, result_ty, target_ty) { LowerBlockValue as x => x; error as err => return err }
-    let entered = emit_region_enters(out.ctx, line, col)
-    LowerBlockValue { ctx = ctx_with_bracket_depth(entered, ctx.bracket_depth); terminated = out.terminated; vreg = out.vreg }
+    let left_rr = emit_anchor_leave(out.ctx, line, col)
+    LowerBlockValue { ctx = ctx_with_bracket_depth(left_rr, ctx.bracket_depth); terminated = out.terminated; vreg = out.vreg }
 }
 
 /**
@@ -11731,15 +11739,22 @@ fn lower_fn_tail_fat(ctx: LowerCtx, s: checker::TStatement, line: u32, col: u32)
 }
 
 /**
- * lower_conveyed_tail_expr_stmt_fat — `lower_fn_tail_fat`'s expression-statement arm: bracket
- * `lower_tail_expr_stmt_fat` in `emit_region_leaves` … `emit_region_enters` (NP4), mirroring
- * `lower_binding_conveyed`/`lower_assign_conveyed` (NP3b) exactly, one axis over (a function body's
- * own auto-returned tail vs a named binding/assign) — INCLUDING marking `ctx.bracket_depth = 1` for
- * the tail's own evaluation, so a NESTED escaping binding inside the tail expression (e.g. a `match`
- * arm's own `let`) sees `bracket_depth > 0` and skips its own leave/enter rather than re-entering the
- * frame region mid-span. The re-enter restores the frame region so `lower_fn_body_fat`'s OWN
- * subsequent defer replay and final leave/drop run under the SAME region-stack shape every other
- * exit edge sees them under.
+ * lower_conveyed_tail_expr_stmt_fat — `lower_fn_tail_fat`'s expression-statement arm (NP6, direct
+ * anchor bracket): `emit_anchor_enter` (push the conveyance anchor `rr` — the caller's own captured
+ * region — on top of whatever is current), run `lower_tail_expr_stmt_fat` unchanged so its own fat
+ * buffer materializes at `rr`, then `emit_anchor_leave` (pop that single push, restoring the
+ * frame/block region for whatever runs after). Mirrors `lower_binding_conveyed`/
+ * `lower_assign_conveyed` (NP3b) exactly, one axis over (a function body's own auto-returned tail vs
+ * a named binding/assign) — a stable, caller-owned landing region regardless of how many scopes are
+ * open here, unlike the earlier `emit_region_leaves`/`emit_region_enters` pop-then-push-back detour,
+ * which only reached `rr` because the runtime stack slot it popped down to HAPPENED to still hold it
+ * (the self-append UAF this closes).
+ *
+ * INCLUDING marking `ctx.bracket_depth = 1` for the tail's own evaluation, so a NESTED escaping
+ * binding inside the tail expression (e.g. a `match` arm's own `let`) sees `bracket_depth > 0` and
+ * skips its own leave/enter rather than re-entering the frame region mid-span. The re-enter restores
+ * the frame region so `lower_fn_body_fat`'s OWN subsequent defer replay and final leave/drop run
+ * under the SAME region-stack shape every other exit edge sees them under.
  *
  * @param ctx  the lowering context, positioned at the tail expression-statement
  * @param es   the tail expression-statement
@@ -11747,15 +11762,15 @@ fn lower_fn_tail_fat(ctx: LowerCtx, s: checker::TStatement, line: u32, col: u32)
  * @param col  the source column to stamp
  * @return     the fat value outcome, its `ctx` back under the frame region
  * @throws     propagated from `lower_tail_expr_stmt_fat`
- * @since 0.3.1
+ * @since 0.3.1 (NP6: direct anchor bracket)
  */
 fn lower_conveyed_tail_expr_stmt_fat(ctx: LowerCtx, es: checker::TExprStmt, line: u32, col: u32) -> LowerBlockValueFat | error {
     if ctx.bracket_depth > 0 { return lower_tail_expr_stmt_fat(ctx, es) }
-    let left = emit_region_leaves(ctx, line, col)
-    let marked = ctx_with_bracket_depth(left, 1)
+    let entered_rr = emit_anchor_enter(ctx, line, col)
+    let marked = ctx_with_bracket_depth(entered_rr, 1)
     let out = match lower_tail_expr_stmt_fat(marked, es) { LowerBlockValueFat as x => x; error as err => return err }
-    let entered = emit_region_enters(out.ctx, line, col)
-    LowerBlockValueFat { ctx = ctx_with_bracket_depth(entered, ctx.bracket_depth); terminated = out.terminated; ptr = out.ptr; len = out.len }
+    let left_rr = emit_anchor_leave(out.ctx, line, col)
+    LowerBlockValueFat { ctx = ctx_with_bracket_depth(left_rr, ctx.bracket_depth); terminated = out.terminated; ptr = out.ptr; len = out.len }
 }
 
 /**
