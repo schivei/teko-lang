@@ -136,12 +136,15 @@ type WFn = struct { func: TFunction; insts: []MonoInst }
     the whole-program method-stamp result (#254 layer 3). */
 type WFnList = struct { fns: []TFunction; insts: []MonoInst }
 
-// ── name mangling ──────────────────────────────────────────────────────────────────────
-// A type → its symbol fragment for the mangled instance name. Prim → its surface spelling
-// (i64/u8/f64/…), Str → "str", Byte → "byte", Named → the name, Slice → "slice_"+elem,
-// Optional → "opt_"+inner. Other shapes (Variant/Func/Error/Void/Ptr/Uptr) get a stable
-// fragment so a name is always produced (they cannot be a phase-1 type-arg, but we never
-// crash). (C: mono_type_mangle.)
+/**
+ * mono_type_mangle — a type's symbol fragment for the mangled instance name. Prim → its surface
+ * spelling (i64/u8/f64/…), Str → "str", Byte → "byte", Named → the name, Slice → "slice_"+elem.
+ * Other shapes (Variant/Func/Error/Void/Ptr/Uptr) get a stable fragment so a name is always
+ * produced (they cannot be a phase-1 type-arg, but we never crash). (C: mono_type_mangle.)
+ *
+ * @param t  the concrete type to mangle
+ * @return   its symbol-safe name fragment
+ */
 fn mono_type_mangle(t: Type) -> str {
     match t {
         Prim as p => prim_name(p.kind)
@@ -150,7 +153,6 @@ fn mono_type_mangle(t: Type) -> str {
         Char => "char"
         Named as n => name_last_segment(n.name)   // (#109 W3) BARE — the generic-FN instance symbol `fn__g__<arg>` stays a valid C identifier; stamp + call site both use this, so they agree
         Slice as sl => { let e = mono_type_mangle(sl.element); teko::str::concat("slice_", e) }
-        Optional as o => { let e = mono_type_mangle(o.inner); teko::str::concat("opt_", e) }
         Error => "error"
         Void => "void"
         Ptr as p => match p.inner { null => "ptr"; Type as t => teko::str::concat("ptr_", mono_type_mangle(t)) }
@@ -202,14 +204,18 @@ fn mono_inst_concat(a: []MonoInst, b: []MonoInst) -> []MonoInst {
     out
 }
 
-// ── semantic Type → syntactic TypeExpr ───────────────────────────────────────────────────
-// A stamped fn's params are SYNTACTIC (parser::Param.type_ann, resolved by codegen at emit),
-// so substituting the param `T` means rewriting the syntactic annotation to the concrete
-// type's TypeExpr. Prim → NamedType{[prim_name]}, Named → NamedType{[name]}, Str → NamedType,
-// Byte → NamedType, Slice → SliceType. Variant/Optional are not expressible as a single
-// TypeExpr now that `T?` sugar is retired (a generic param can only bind to such via a
-// future S6) — they fall back to a Named placeholder so a TypeExpr is always produced.
-// (C: type_to_texpr.)
+/**
+ * type_to_texpr — semantic `Type` → syntactic `TypeExpr`. A stamped fn's params are SYNTACTIC
+ * (`parser::Param.type_ann`, resolved by codegen at emit), so substituting the param `T` means
+ * rewriting the syntactic annotation to the concrete type's `TypeExpr`. Prim → `NamedType{[prim_name]}`,
+ * Named → `NamedType{[name]}`, Str → `NamedType`, Byte → `NamedType`, Slice → `SliceType`. A
+ * Variant is not expressible as a single `TypeExpr` (a generic param can only bind to such via a
+ * future S6) — it falls back to a Named placeholder so a `TypeExpr` is always produced.
+ * (C: type_to_texpr.)
+ *
+ * @param t  the resolved semantic type
+ * @return   the syntactic type-expr codegen re-checks against `t`
+ */
 pub fn type_to_texpr(t: Type) -> parser::TypeExpr {   // (W10) pub: codegen synthesizes lifted-lambda fn params from resolved Types
     match t {
         Prim as p => mono_named_texpr(prim_name(p.kind))
@@ -219,7 +225,6 @@ pub fn type_to_texpr(t: Type) -> parser::TypeExpr {   // (W10) pub: codegen synt
         Error => mono_named_texpr("error")
         Named as n => mono_named_texpr(n.name)
         Slice as sl => parser::SliceType { element = type_to_texpr(sl.element) }
-        Optional => mono_named_texpr("optional")   // unreachable in practice: `T?` sugar is retired, so no surface TypeExpr spells Optional; kept only so the match over Type stays exhaustive
         Ptr as p => match p.inner {
             null => mono_named_texpr("ptr")
             Type as t => parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = "ptr" }) }; args = teko::list::push(teko::list::empty(), type_to_texpr(t)) }

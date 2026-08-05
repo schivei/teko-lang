@@ -371,11 +371,10 @@ fn cgt_type_emission() {
     teko::assert::is_true(t6 == "tk_t_Shape")
 }
 
-// ---------------------------------------------------------------------------
-// Group G: Optional mangle + member keys + variant typename
-//   cg_opt_mangle_str, cg_opt_mangle, cg_member_key_str, cg_member_key,
-//   cg_variant_typename_str, cg_variant_typename
-// ---------------------------------------------------------------------------
+/**
+ * Group G: type mangle + member keys + variant typename — `cg_opt_mangle_str`, `cg_opt_mangle`,
+ * `cg_member_key_str`, `cg_member_key`, `cg_variant_typename_str`, `cg_variant_typename`.
+ */
 #test
 fn cgt_opt_mangle_and_keys() {
     // cg_opt_mangle_str — the suffix string for prim, byte, str, error, named
@@ -1539,10 +1538,10 @@ fn cgt_vtable_pair_gate_excludes_abstract_self() {
  * expected boolean AND that `cg_mangle_eq` agrees with that string oracle, proving the refactor
  * is behavior-preserving. Covers: same-shape equal/unequal; two DISTINCT `Named` that mangle
  * EQUAL because they share a bare last segment (#109 `teko::io::Reader` vs `teko::emit::Reader`);
- * a `Named` whose text coincides with a composite's rendered form (`Named "opt_str"` vs `str?`,
- * both mangle to `opt_str`) — distinct types, equal mangle; a fixed leaf vs a same-text `Named`
- * (`str` vs `Named "str"`); erroring types (inline `Variant`, both map to the empty key `""`);
- * and distinct types that mangle DIFFERENTLY.
+ * a `Named` whose text coincides with a composite's rendered form (`Named "slice_str"` vs
+ * `[]str`, both mangle to `slice_str`) — distinct types, equal mangle; a fixed leaf vs a
+ * same-text `Named` (`str` vs `Named "str"`); erroring types (inline `Variant`, both map to the
+ * empty key `""`); and distinct types that mangle DIFFERENTLY.
  */
 #test
 fn cgt_mangle_eq() {
@@ -1553,13 +1552,12 @@ fn cgt_mangle_eq() {
     let reader_io: checker::Type = checker::Named { name = "teko::io::Reader" }
     let reader_emit: checker::Type = checker::Named { name = "teko::emit::Reader" }
     let writer: checker::Type = checker::Named { name = "teko::io::Writer" }
-    let opt_str: checker::Type = checker::Optional { inner = strt }
-    let opt_str2: checker::Type = checker::Optional { inner = checker::Str { } }
     let slice_str: checker::Type = checker::Slice { element = strt }
-    let named_opt_str: checker::Type = checker::Named { name = "opt_str" }
+    let slice_str2: checker::Type = checker::Slice { element = checker::Str { } }
+    let named_slice_str: checker::Type = checker::Named { name = "slice_str" }
     let slice_reader_a: checker::Type = checker::Slice { element = reader_io }
     let slice_reader_b: checker::Type = checker::Slice { element = reader_emit }
-    let opt_i64: checker::Type = checker::Optional { inner = checker::Prim { kind = checker::PrimKind::I64 } }
+    let slice_i64: checker::Type = checker::Slice { element = checker::Prim { kind = checker::PrimKind::I64 } }
     mut va_members: []checker::Type = teko::list::empty()
     va_members = teko::list::push(va_members, i32t)
     va_members = teko::list::push(va_members, u8t)
@@ -1573,12 +1571,11 @@ fn cgt_mangle_eq() {
     teko::assert::is_false(cg_mangle_eq(i32t, u8t))
     teko::assert::is_true(cg_mangle_eq(reader_io, reader_emit))
     teko::assert::is_false(cg_mangle_eq(reader_io, writer))
-    teko::assert::is_true(cg_mangle_eq(opt_str, opt_str2))
-    teko::assert::is_false(cg_mangle_eq(opt_str, slice_str))
-    teko::assert::is_true(cg_mangle_eq(named_opt_str, opt_str))
+    teko::assert::is_true(cg_mangle_eq(slice_str, slice_str2))
+    teko::assert::is_false(cg_mangle_eq(slice_str, slice_i64))
+    teko::assert::is_true(cg_mangle_eq(named_slice_str, slice_str))
     teko::assert::is_true(cg_mangle_eq(strt, named_str))
     teko::assert::is_true(cg_mangle_eq(slice_reader_a, slice_reader_b))
-    teko::assert::is_false(cg_mangle_eq(opt_str, opt_i64))
     teko::assert::is_true(cg_mangle_eq(variant_a, variant_b))
     teko::assert::is_false(cg_mangle_eq(variant_a, i32t))
 
@@ -1586,12 +1583,11 @@ fn cgt_mangle_eq() {
     teko::assert::is_false(cg_opt_key(i32t) == cg_opt_key(u8t))
     teko::assert::is_true(cg_opt_key(reader_io) == cg_opt_key(reader_emit))
     teko::assert::is_false(cg_opt_key(reader_io) == cg_opt_key(writer))
-    teko::assert::is_true(cg_opt_key(opt_str) == cg_opt_key(opt_str2))
-    teko::assert::is_false(cg_opt_key(opt_str) == cg_opt_key(slice_str))
-    teko::assert::is_true(cg_opt_key(named_opt_str) == cg_opt_key(opt_str))
+    teko::assert::is_true(cg_opt_key(slice_str) == cg_opt_key(slice_str2))
+    teko::assert::is_false(cg_opt_key(slice_str) == cg_opt_key(slice_i64))
+    teko::assert::is_true(cg_opt_key(named_slice_str) == cg_opt_key(slice_str))
     teko::assert::is_true(cg_opt_key(strt) == cg_opt_key(named_str))
     teko::assert::is_true(cg_opt_key(slice_reader_a) == cg_opt_key(slice_reader_b))
-    teko::assert::is_false(cg_opt_key(opt_str) == cg_opt_key(opt_i64))
     teko::assert::is_true(cg_opt_key(variant_a) == cg_opt_key(variant_b))
     teko::assert::is_false(cg_opt_key(variant_a) == cg_opt_key(i32t))
 }
@@ -1603,21 +1599,14 @@ fn cgt_mangle_eq() {
  * type array; (2) every cached key byte-equals the freshly recomputed key (`cg_opt_key` /
  * `cg_variant_key`) — the identical string the scans compared before; (3) a mangle-equal duplicate
  * still collapses (no growth) while a distinct type appends one entry alongside its key.
+ * `inners`/`opt_keys` are RETIRED (the null-as-union pivot dropped the nullable former) and stay
+ * permanently empty — not exercised here.
  */
 #test
 fn cgt_dedup_key_cache() {
     let strt: checker::Type = checker::Str { }
     let i64t: checker::Type = checker::Prim { kind = checker::PrimKind::I64 }
-    let named_str: checker::Type = checker::Named { name = "str" }
     mut set = CgTypeSet { inners = teko::list::empty(); opt_keys = teko::list::empty(); slices = teko::list::empty(); slice_keys = teko::list::empty(); variants = teko::list::empty(); variant_keys = teko::list::empty() }
-
-    set = cg_opt_set_add(set, strt)
-    set = cg_opt_set_add(set, i64t)
-    set = cg_opt_set_add(set, named_str)
-    teko::assert::is_true(set.inners.len == 2)
-    teko::assert::is_true(set.opt_keys.len == set.inners.len)
-    teko::assert::is_true(set.opt_keys[0] == cg_opt_key(set.inners[0]))
-    teko::assert::is_true(set.opt_keys[1] == cg_opt_key(set.inners[1]))
 
     set = cg_slice_add(set, strt)
     set = cg_slice_add(set, strt)
@@ -1881,11 +1870,11 @@ fn cgt_prog_with_colliding_names() -> CgProg {
     items = teko::list::push(items, cgt_fn0("arena_push", "probe::mine", checker::Void { }, cgt_empty_stmts()))
     let ext = cgt_fn0("getpid", "probe::sys", checker::Void { }, cgt_empty_stmts())
     items = teko::list::push(items, checker::TFunction {
-        name = ext.name; type_params = ext.type_params; type_constraints = ext.type_constraints
-        namespace = ext.namespace; params = ext.params; return_type = ext.return_type; body = ext.body
-        vis = ext.vis; has_doc = ext.has_doc; doc = ext.doc; file = ext.file; line = ext.line; col = ext.col
-        is_test = ext.is_test; is_extern = true; c_symbol = "getpid"; from_lib = "c"
-        has_arena_size = ext.has_arena_size; arena_size = ext.arena_size
+            name = ext.name; type_params = ext.type_params; type_constraints = ext.type_constraints
+            namespace = ext.namespace; params = ext.params; return_type = ext.return_type; body = ext.body
+            vis = ext.vis; has_doc = ext.has_doc; doc = ext.doc; file = ext.file; line = ext.line; col = ext.col
+            is_test = ext.is_test; is_extern = true; c_symbol = "getpid"; from_lib = "c"
+            has_arena_size = ext.has_arena_size; arena_size = ext.arena_size
     })
     cg_prog_of(checker::TProgram { items = items })
 }
