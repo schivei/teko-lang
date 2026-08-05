@@ -315,6 +315,7 @@ pub fn eval_const(e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> Con
         TBinary as bi => eval_binary_expr(bi, e, table, env, agg)
         TVar as v => eval_agg_ref(v, e, table, env, agg)
         TArrayLit as a => eval_array_agg(a, table, env, agg)
+        TStructInit as si => eval_struct_agg(si, table, env, agg)
         TIndex as ix => eval_index_expr(ix, e, table, env, agg)
         TFieldAccess as fa => eval_field_expr(fa, e, table, env, agg)
         _ => const_form_error("this expression is not a Tier-0..2 scalar constant the comptime fold evaluates yet (#comptime-fold)", e)
@@ -916,6 +917,41 @@ fn eval_array_agg(a: TArrayLit, table: TypeTable, env: Env, agg: AggConstMap) ->
         if i >= a.elements.len { break }
         if a.elements[i].is_spread { return error { message = "comptime fold: a spread element is not a const aggregate (#comptime-fold)" } }
         let v = match eval_const(a.elements[i].expr, table, env, agg) { error as x => return x; ConstValue as cv => cv }
+        elems = teko::list::push(elems, v)
+        i++
+    }
+    cv_agg(elems)
+}
+
+/**
+ * eval_struct_agg — evaluate a struct-init literal's field values to a `CVAgg`, recursing
+ * `eval_const` into each field expression (Layer 1c, struct leg — the sibling of
+ * `eval_array_agg`). A struct-typed AGGREGATE ELEMENT is exactly what a `const []Struct`
+ * table needs its per-element `TStructInit` to fold to: `eval_array_agg` already recurses
+ * `eval_const` into every element, so a struct-typed element reached the (until now)
+ * unhandled `_` arm and a genuinely-const array-of-structs const hard-failed the whole
+ * build with a located "not a Tier-0..2 scalar constant" error INSTEAD OF gracefully
+ * degrading — `literal_of` already returns `null` for any non-`CVInt` kind (a `CVAgg` has
+ * no scalar literal form), so the existing `fold_index`/`fold_field` "no literal form"
+ * fallback (`fold_index_children`/`fold_field_children`) already leaves a struct-typed
+ * element read as a runtime `TIndex`/`TFieldAccess` — this arm only needed to stop
+ * `eval_const` itself from refusing to SEE a struct field. Field order is declaration
+ * order (`field_vals` is already positional — the checker/synth pipeline normalizes named
+ * struct-literal fields to declaration order before this typed AST exists).
+ *
+ * @param si     the typed struct-init expression
+ * @param table  the type table (forwarded to each field eval)
+ * @param env    the environment (forwarded to each field eval)
+ * @param agg    the module-aggregate resolution table (forwarded)
+ * @return       the aggregate comptime value, or the first located field error
+ * @since #comptime-fold (mem-lean fat-const teaching)
+ */
+fn eval_struct_agg(si: TStructInit, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
+    mut elems: []ConstValue = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= si.field_vals.len { break }
+        let v = match eval_const(si.field_vals[i], table, env, agg) { error as x => return x; ConstValue as cv => cv }
         elems = teko::list::push(elems, v)
         i++
     }

@@ -22,13 +22,15 @@ fn parse_num_suffix_lit(tokens: []lexer::Token, pos: u64, txt: str) -> Parsed<Ex
         return err_at(tokens, pos, "a `bi` bigint literal must be a whole number (no fraction or exponent)")
     }
     let module = if is_big { "bigint" } else { "dec" }
-    mut segs: []Segment = teko::list::push(teko::list::empty(), Segment { name = "teko" })
-    segs = teko::list::push(segs, Segment { name = "numeric" })
-    segs = teko::list::push(segs, Segment { name = module })
-    segs = teko::list::push(segs, Segment { name = "of_lit" })
+    // mem-lean pass: a single array literal (one precise allocation), not a push-chain — the
+    // 4 Segments, the 1-elem args, and the 1-elem arg_names are all known at this point.
+    // Verified: []Segment and []str array literals lower correctly on BOTH the C backend
+    // (codegen::emit_array_lit) and the native backend (lir::lower_array_lit /
+    // store_array_elem's is_fat_type branch, which already handles fat elements).
+    let segs: []Segment = [Segment { name = "teko" }, Segment { name = "numeric" }, Segment { name = module }, Segment { name = "of_lit" }]
     let arg = Expr { kind = StrLit { text = numeric }; line = tokens[pos].line; col = tokens[pos].col }
-    let args = teko::list::push(teko::list::empty(), arg)
-    let arg_names = teko::list::push(teko::list::empty(), "")
+    let args = [arg]
+    let arg_names = [""]
     let call = Call { callee = Path { segments = segs }; args = args; arg_names = arg_names; type_args = teko::list::empty() }
     Parsed<Expr> { node = Expr { kind = call; line = tokens[pos].line; col = tokens[pos].col }; next = pos + 1 }
 }
