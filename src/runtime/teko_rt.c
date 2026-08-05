@@ -133,6 +133,97 @@ static void tk_rt_crash_handler(int sig) {
     }
     _Exit(128 + sig);   // async-signal-safe
 }
+#if defined(_WIN32)
+// (Windows SEH twin of tk_rt_crash_handler/tk_backtrace above.) POSIX raises a SIGSEGV/SIGBUS/
+// SIGILL/SIGFPE signal on a fault; Windows raises a Structured Exception instead — `signal(SIGSEGV,
+// ...)` (still installed below, unconditionally, on both platforms) is NOT reliably delivered for a
+// real hardware fault under MinGW, so without this the native fixpoint gate died SILENT on Windows:
+// no address, nothing to feed addr2line. This is installed as a VECTORED handler
+// (AddVectoredExceptionHandler) so it runs before any language/CRT __try frame gets a look, and it
+// prints the SAME per-frame shape backtrace_symbols prints on the POSIX side —
+// `<module-path>(+0x<offset-from-module-base>)[0x<absolute-address>]` — resolved by hand
+// (GetModuleHandleExA + GetModuleFileNameA) since dbghelp/SymFromAddr symbolication is deliberately
+// NOT used here, exactly like the POSIX side: resolving the printed module-relative offset to a
+// Teko name/line happens OFFLINE, via `addr2line -e <binary> 0x<offset>` against the very binary
+// the fixpoint already built.
+
+// True when `code` is one of the fault classes the POSIX handler installs for (SIGSEGV, SIGBUS,
+// SIGILL, SIGFPE) — the Structured-Exception codes a generated program can actually raise on a
+// genuine bug, as opposed to a first-chance exception a debugger or the CRT itself expects to see
+// (a C++ throw, a breakpoint, …), which must fall through this handler untouched.
+static bool tk_win_seh_is_fatal(DWORD code) {
+    switch (code) {
+        case EXCEPTION_ACCESS_VIOLATION:
+        case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+        case EXCEPTION_IN_PAGE_ERROR:
+        case EXCEPTION_ILLEGAL_INSTRUCTION:
+        case EXCEPTION_PRIV_INSTRUCTION:
+        case EXCEPTION_STACK_OVERFLOW:
+        case EXCEPTION_INT_DIVIDE_BY_ZERO:
+        case EXCEPTION_INT_OVERFLOW:
+        case EXCEPTION_FLT_DIVIDE_BY_ZERO:
+        case EXCEPTION_FLT_INVALID_OPERATION:
+        case EXCEPTION_FLT_OVERFLOW:
+        case EXCEPTION_FLT_UNDERFLOW:
+        case EXCEPTION_FLT_DENORMAL_OPERAND:
+        case EXCEPTION_FLT_INEXACT_RESULT:
+        case EXCEPTION_FLT_STACK_CHECK:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// One POSIX-shaped backtrace line for `addr` — `<module-path>(+0x<offset>)[0x<absolute>]`,
+// matching what glibc's backtrace_symbols prints for an unsymbolized (stripped/static) frame on the
+// POSIX side (tk_backtrace above), so the SAME addr2line recipe resolves either platform's crash.
+// `addr` falling outside every loaded module (module lookup failure) degrades to a bare
+// `[0x<absolute>]` line — still useful, just not addr2line-able.
+static void tk_win_seh_print_frame(void *addr) {
+    HMODULE hmod = NULL;
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                             (LPCSTR)addr, &hmod) || hmod == NULL) {
+        fprintf(stderr, "[0x%p]\n", addr);
+        return;
+    }
+    char path[1024];
+    DWORD len = GetModuleFileNameA(hmod, path, (DWORD)sizeof path);
+    if (len == 0 || len >= sizeof path) {
+        fprintf(stderr, "[0x%p]\n", addr);
+        return;
+    }
+    uintptr_t offset = (uintptr_t)addr - (uintptr_t)hmod;
+    fprintf(stderr, "%s(+0x%" PRIxPTR ")[0x%p]\n", path, offset, addr);
+}
+
+// SEH twin of tk_backtrace: the fault address (ep->ExceptionRecord->ExceptionAddress) followed by
+// up to 62 captured return addresses (RtlCaptureStackBackTrace), each printed via
+// tk_win_seh_print_frame — module-relative, exactly like the POSIX per-frame shape.
+static void tk_win_seh_backtrace(EXCEPTION_POINTERS *ep) {
+    fputs("teko: stack trace:\n", stderr);
+    fputs("fault address: ", stderr);
+    tk_win_seh_print_frame(ep->ExceptionRecord->ExceptionAddress);
+    void *frames[62];
+    USHORT n = RtlCaptureStackBackTrace(0, 62, frames, NULL);
+    for (USHORT i = 0; i < n; i += 1) tk_win_seh_print_frame(frames[i]);
+}
+
+// The vectored exception handler itself — the Structured-Exception counterpart of
+// tk_rt_crash_handler. A non-fatal code (a C++ throw, a debugger breakpoint, …) is left ALONE
+// (EXCEPTION_CONTINUE_SEARCH, unchanged, so nothing downstream — the CRT, a debugger, a language
+// __try — ever notices this handler exists). A fatal code prints the same "FATAL" header and
+// module-relative backtrace the POSIX side prints, then terminates via _Exit (ISO C, matching
+// tk_rt_crash_handler's own async-signal-safe exit) with a non-zero status so the native fixpoint
+// gate observes the failure exactly like a POSIX abort.
+static LONG WINAPI tk_win_seh_handler(EXCEPTION_POINTERS *ep) {
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    if (!tk_win_seh_is_fatal(code)) return EXCEPTION_CONTINUE_SEARCH;
+    fprintf(stderr, "\nteko: FATAL exception 0x%08lX — a generated program crashed (M.1).\n", (unsigned long)code);
+    tk_win_seh_backtrace(ep);
+    _Exit(128 + (int)(code & 0x7f));
+    return EXCEPTION_CONTINUE_SEARCH;   // unreachable, kept for the compiler's return-path check
+}
+#endif
 __attribute__((constructor)) static void tk_rt_install_crash_handler(void) {
     signal(SIGSEGV, tk_rt_crash_handler);
 #ifndef _WIN32
@@ -140,6 +231,9 @@ __attribute__((constructor)) static void tk_rt_install_crash_handler(void) {
 #endif
     signal(SIGILL,  tk_rt_crash_handler);
     signal(SIGFPE,  tk_rt_crash_handler);
+#if defined(_WIN32)
+    AddVectoredExceptionHandler(1, tk_win_seh_handler);   // runs first — catches what signal() misses
+#endif
 }
 
 // --- string interpolation builders (self-host parity) ---
