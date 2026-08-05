@@ -15406,9 +15406,27 @@ fn layout_of_fields(name: str, fields: []parser::Field, known: []LStructLayout, 
  * @return LStructLayout?  the matching nested layout, or `null`
  */
 fn struct_layout_of_field(te: parser::TypeExpr, known: []LStructLayout) -> LStructLayout | null {
-    match named_type_name_of(te) {
-        str as name => find_known_struct_layout(known, name)
-        null => null
+    // Struct layouts are keyed by CANONICAL (qualified) name — `find_struct_layout` is called at
+    // field-access time with `named_type_name(arg.type)`, a `resolve_named`-qualified name. A field
+    // whose annotation is itself written QUALIFIED (`decl: parser::TypeDecl`, `sig: checker::TFuncSig`
+    // — pervasive across the self-hosted compiler's own parser/checker structs) must therefore be
+    // looked up by its FULL path name; the bare single-segment lookup alone matched only a
+    // root-namespace type (canonical == bare), so every non-root nested struct-by-value field fell
+    // through to `null` and was under-sized to the 8-byte `Ptr` fallback (`field_size_of`), placing
+    // every LATER field at the wrong offset and truncating the field's own inline extent — the
+    // wrong-OFFSET base a `tk_slice_elem_box`/by-address copy then read garbage from (the native
+    // `resolve_named`/`assemble_sel` SIGSEGV, arch-independent because this layout math is shared).
+    // The C leg is immune: it lets `cc` lay every struct out. Try the qualified path first, then the
+    // bare segment — purely additive, so no name that matched before stops matching.
+    match te {
+        parser::NamedType as nt => match find_known_struct_layout(known, path_name_of(nt.path)) {
+            LStructLayout as l => l
+            null => match single_segment_name(nt.path) {
+                str as bare => find_known_struct_layout(known, bare)
+                null => null
+            }
+        }
+        _ => null
     }
 }
 
