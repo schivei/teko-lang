@@ -1107,8 +1107,10 @@ fn bare_g_rejected_message() -> str {
  * (`-target`/`--sysroot`/`-nostdlib`, C7.1f); the runtime + assert include dirs; the
  * input; the two C runtime
  * seed sources (`teko_rt.c` + `assert.c`); `-lm` (unless freestanding); the
- * reachable `[extern.libs]` link flags (C7.20); and, on macOS, the `__info_plist`
- * `-Wl,-sectcreate` section. Shared verbatim by `run_cc` (a `.c` input) and
+ * reachable `[extern.libs]` link flags (C7.20); on macOS, the `__info_plist`
+ * `-Wl,-sectcreate` section; and, on Windows, the reproducible-build flag (`/Brepro`) plus a widened
+ * 16 MiB stack reserve (`/STACK:16777216`, past the PE default's 1 MiB — see
+ * `WINDOWS_STACK_RESERVE_FLAG`). Shared verbatim by `run_cc` (a `.c` input) and
  * `link_object` (an own-backend `.o` input) so both link the SAME way — the only
  * difference is the input file, keeping the two paths from drifting. When `debug`
  * is set it also appends the DEBUG profile flag `-g` (emit DWARF so the E4 native
@@ -1166,6 +1168,7 @@ fn build_cc_argv(input: str, binary: str, m: Manifest, prog: checker::TProgram, 
     argv = append_allow_undef_flag(argv)
     argv = append_macos_plist_flag(argv, binary, m, keys.emit_os)
     argv = append_windows_reproducible_flag(argv, keys.emit_os)
+    argv = append_windows_stack_reserve_flag(argv, keys.emit_os)
     argv = teko::list::push(argv, "-o")
     teko::list::push(argv, binary)
 }
@@ -1248,6 +1251,36 @@ const WINDOWS_NO_TIMESTAMP_FLAG: str = "-Wl,/Brepro"
 fn append_windows_reproducible_flag(argv: []str, emit_os: str) -> []str {
     if emit_os != "windows" { return argv }
     teko::list::push(argv, WINDOWS_NO_TIMESTAMP_FLAG)
+}
+
+/**
+ * WINDOWS_STACK_RESERVE_FLAG — the MSVC-linker option that reserves a 16 MiB (0x1000000) stack for
+ * the produced PE image, instead of the PE default's 1 MiB reserve.
+ *
+ * Windows' 1 MiB default thread stack is far smaller than Linux's 8 MiB default, and this
+ * compiler's own bounded-but-deep recursive-descent passes (e.g. `teko::checker::monomorph`'s
+ * `mono_texpr`/`mono_tstmt`/`mono_block` AST walk, whose depth tracks the INPUT program's
+ * statement/expression nesting, not any bug) overflow the smaller Windows default well before the
+ * SAME recursion would overflow Linux's — a stack-size gap, not a codegen defect (confirmed by
+ * reproducing the SAME crash on Linux under an artificially shrunk 1 MiB `ulimit -s`, and by the
+ * crash disappearing once the stack is widened past the observed recursion depth). `/STACK` reaches
+ * `lld-link`/`link.exe` through the `clang` driver exactly like `WINDOWS_NO_TIMESTAMP_FLAG` reaches
+ * it for `/Brepro`.
+ */
+const WINDOWS_STACK_RESERVE_FLAG: str = "-Wl,/STACK:16777216"
+
+/**
+ * append_windows_stack_reserve_flag — on a Windows/COFF target, widen the produced binary's stack
+ * reserve past the PE default's 1 MiB so the compiler's deep-but-finite recursive passes (checker
+ * monomorphization, codegen lowering) do not overflow it on the OS whose default stack is smallest.
+ *
+ * @param argv     the link argument vector so far
+ * @param emit_os  the RESOLVED TARGET's own OS (`LinkTargetKeys.emit_os`) — "windows" enables it
+ * @return         `argv` with the flag appended on a Windows target, else unchanged
+ */
+fn append_windows_stack_reserve_flag(argv: []str, emit_os: str) -> []str {
+    if emit_os != WINDOWS_OS_NAME { return argv }
+    teko::list::push(argv, WINDOWS_STACK_RESERVE_FLAG)
 }
 
 /**
