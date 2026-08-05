@@ -6763,9 +6763,17 @@ fn lower_value_into_variant(ctx: LowerCtx, v: checker::Variant, value: checker::
         checker::Null => return lower_variant_null_construct(ctx, v, value)
         _ => { }
     }
-    match direct_variant_member_index(v.members, value.type) {
-        u32 => return lower_variant_construct(ctx, v, value)
-        null => { }
+    // SUBSUMPTION — the residual PAYLOAD-ADDRESS side of B1 (native-variant-into-variant-widen). A
+    // value whose OWN type is a MEMBER of `v` (directly, OR through an alias member's own
+    // expansion — `variant_any_member_matches`) is being WIDENED into `v` and must be RE-WRAPPED as
+    // that member, EVEN WHEN IT IS ITSELF A VARIANT: `Ty` flowing into `Ty | error` is the case
+    // `collect_sig_type_params`/`assemble_sel` reach. The former passthrough returned the NARROWER
+    // variant's own 24-byte wrapper unchanged, so a later `Ty as t` read the wider union's payload
+    // word (offset 8) — the inner wrapper's OWN payload pointer, not a boxed `Ty` — as the case
+    // address, then boxed 24 bytes from it (`tk_slice_elem_box`) → SIGSEGV. Only a value whose type
+    // is `v` ITSELF (re-flowing the SAME union) is a non-member here, and it alone passes through.
+    if variant_any_member_matches(v.members, value.type, ctx.variants) {
+        return lower_variant_construct(ctx, v, value)
     }
     match expand_named_variant(value.type, ctx.variants) {
         checker::Variant => lower_expr(ctx, value)
@@ -8162,13 +8170,19 @@ pub type ClosedArm = struct { ctx: LowerCtx; func: LFunc }
  *                             path's region close finds the stack already empty
  *                             (an invariant break — every caller opened one)
  */
-fn close_arm_replaying_defers(ctx: LowerCtx, pre_arm_defers: []checker::TDeferStmt, pre_arm_regions: []NativeRegionFrame, target: u32, value_args: []u32, indices: []u64, line: u32, col: u32) -> ClosedArm | error {
+fn close_arm_replaying_defers(ctx: LowerCtx, pre_arm_defers: []checker::TDeferStmt, pre_arm_regions: []NativeRegionFrame, target: u32, value_args: []u32, indices: []u64, line: u32, col: u32, had_region: bool = true) -> ClosedArm | error {
     if block_terminated(ctx.func, ctx.block_id) {
         let reset_terminated = ctx_with_regions(ctx_with_defers(ctx, pre_arm_defers), pre_arm_regions)
         return ClosedArm { ctx = reset_terminated; func = ctx.func }
     }
     let replayed = match replay_defers(ctx, pre_arm_defers.len) { LowerCtx as c => c; error as err => return err }
-    let region_closed = match close_native_region(replayed, line, col) { LowerCtx as c => c; error as err => return err }
+    // NP3b/conveyance: a VALUE arm lowered inside a conveyance bracket opens NO droppable region of
+    // its own (`had_region == false`) — the enclosing bracket already detoured every allocation to
+    // the conveyance anchor `rr`, so the arm's tail value (a fresh str/slice/struct that ESCAPES via
+    // the assign/binding the match/if feeds) must NOT be captured by an arm region that this close
+    // would drop out from under it. Mirrors the C route's `emit_arm_value` `want_block` gate
+    // (`codegen.tks:7233`), which likewise opens `_tkbr<len>` only for NON-tail block-locals.
+    let region_closed = if had_region { match close_native_region(replayed, line, col) { LowerCtx as c => c; error as err => return err } } else { replayed }
     let reset = ctx_with_regions(ctx_with_defers(region_closed, pre_arm_defers), pre_arm_regions)
     let args = append_all_u32(value_args, arm_scalar_args(reset.env, indices))
     ClosedArm { ctx = reset; func = close_arm_to(reset, target, args, line, col) }
@@ -8502,13 +8516,14 @@ fn lower_if_value(ctx: LowerCtx, e: checker::TExpr, f: checker::TIfExpr, cond_vr
     let br = branch_inst(cond_vreg, thenb.block_id, teko::list::empty(), elseb.block_id, teko::list::empty(), e.line, e.col)
     let ctx1 = ctx_append(ctx_with(ctx, merged.func, ctx.block_id, ctx.env), br)
     let result_ty = ltype_of(e.type, ctx.enums)
-    let then_opened = match open_native_region(ctx_goto(ctx1, thenb.block_id), "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    let want_region = ctx.bracket_depth == 0
+    let then_opened = if want_region { match open_native_region(ctx_goto(ctx1, thenb.block_id), "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err } } else { ctx_goto(ctx1, thenb.block_id) }
     let then_val = match lower_block_value(then_opened, f.then_blk, result_ty, e.type) { LowerBlockValue as x => x; error as err => return err }
-    let then_closed = match close_arm_replaying_defers(then_val.ctx, ctx1.defers, ctx1.region_stack, mergeblk.block_id, teko::list::push(teko::list::empty(), then_val.vreg), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    let then_closed = match close_arm_replaying_defers(then_val.ctx, ctx1.defers, ctx1.region_stack, mergeblk.block_id, teko::list::push(teko::list::empty(), then_val.vreg), indices, e.line, e.col, want_region) { ClosedArm as c => c; error as err => return err }
     let else_ctx = ctx_with(then_closed.ctx, then_closed.func, elseb.block_id, ctx.env)
-    let else_opened = match open_native_region(else_ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    let else_opened = if want_region { match open_native_region(else_ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err } } else { else_ctx }
     let else_val = match lower_block_value(else_opened, f.else_blk, result_ty, e.type) { LowerBlockValue as x => x; error as err => return err }
-    let else_closed = match close_arm_replaying_defers(else_val.ctx, ctx1.defers, ctx1.region_stack, mergeblk.block_id, teko::list::push(teko::list::empty(), else_val.vreg), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    let else_closed = match close_arm_replaying_defers(else_val.ctx, ctx1.defers, ctx1.region_stack, mergeblk.block_id, teko::list::push(teko::list::empty(), else_val.vreg), indices, e.line, e.col, want_region) { ClosedArm as c => c; error as err => return err }
     Lowered { ctx = ctx_with(else_closed.ctx, else_closed.func, mergeblk.block_id, merged.env); vreg = mp.vreg }
 }
 
@@ -10379,9 +10394,10 @@ fn lower_match_guard(ctx: LowerCtx, arm: checker::TArm, next_block: u32) -> Matc
 fn lower_match_arm_value(ctx: LowerCtx, e: checker::TExpr, arm: checker::TArm, subj: MatchSubj, merge_id: u32, names: []str) -> LowerCtx | error {
     let indices = merge_scalar_indices(ctx.env, names)
     let step = match lower_match_arm_entry(ctx, e, arm, subj) { MatchArmEntry as x => x; error as err => return err }
-    let opened = match open_native_region(step.ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    let want_region = ctx.bracket_depth == 0
+    let opened = if want_region { match open_native_region(step.ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err } } else { step.ctx }
     let bv = match lower_block_value(opened, arm.body, ltype_of(e.type, ctx.enums), e.type) { LowerBlockValue as x => x; error as err => return err }
-    let closed = match close_arm_replaying_defers(bv.ctx, ctx.defers, step.ctx.region_stack, merge_id, teko::list::push(teko::list::empty(), bv.vreg), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    let closed = match close_arm_replaying_defers(bv.ctx, ctx.defers, step.ctx.region_stack, merge_id, teko::list::push(teko::list::empty(), bv.vreg), indices, e.line, e.col, want_region) { ClosedArm as c => c; error as err => return err }
     ctx_with(closed.ctx, closed.func, step.next_block, ctx.env)
 }
 
@@ -11819,13 +11835,14 @@ fn lower_if_fat(ctx: LowerCtx, e: checker::TExpr, f: checker::TIfExpr) -> Lowere
     let merged = add_merge_scalar_params(mpl.func, mergeb.block_id, co.ctx.env, names)
     let br = branch_inst(co.vreg, thenb.block_id, teko::list::empty(), elseb.block_id, teko::list::empty(), e.line, e.col)
     let ctx1 = ctx_append(ctx_with(co.ctx, merged.func, co.ctx.block_id, co.ctx.env), br)
-    let then_opened = match open_native_region(ctx_goto(ctx1, thenb.block_id), "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    let want_region = co.ctx.bracket_depth == 0
+    let then_opened = if want_region { match open_native_region(ctx_goto(ctx1, thenb.block_id), "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err } } else { ctx_goto(ctx1, thenb.block_id) }
     let then_fat = match lower_block_value_fat(then_opened, f.then_blk) { LowerBlockValueFat as x => x; error as err => return err }
-    let then_closed = match close_arm_replaying_defers(then_fat.ctx, ctx1.defers, ctx1.region_stack, mergeb.block_id, merge_fat_value_args(then_fat.ptr, then_fat.len), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    let then_closed = match close_arm_replaying_defers(then_fat.ctx, ctx1.defers, ctx1.region_stack, mergeb.block_id, merge_fat_value_args(then_fat.ptr, then_fat.len), indices, e.line, e.col, want_region) { ClosedArm as c => c; error as err => return err }
     let else_ctx = ctx_with(then_closed.ctx, then_closed.func, elseb.block_id, co.ctx.env)
-    let else_opened = match open_native_region(else_ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    let else_opened = if want_region { match open_native_region(else_ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err } } else { else_ctx }
     let else_fat = match lower_block_value_fat(else_opened, f.else_blk) { LowerBlockValueFat as x => x; error as err => return err }
-    let else_closed = match close_arm_replaying_defers(else_fat.ctx, ctx1.defers, ctx1.region_stack, mergeb.block_id, merge_fat_value_args(else_fat.ptr, else_fat.len), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    let else_closed = match close_arm_replaying_defers(else_fat.ctx, ctx1.defers, ctx1.region_stack, mergeb.block_id, merge_fat_value_args(else_fat.ptr, else_fat.len), indices, e.line, e.col, want_region) { ClosedArm as c => c; error as err => return err }
     LoweredFat { ctx = ctx_with(else_closed.ctx, else_closed.func, mergeb.block_id, merged.env); ptr = mpp.vreg; len = mpl.vreg }
 }
 
@@ -11928,9 +11945,10 @@ fn lower_match_arms_fat(ctx: LowerCtx, e: checker::TExpr, arms: []checker::TArm,
 fn lower_match_arm_fat(ctx: LowerCtx, e: checker::TExpr, arm: checker::TArm, subj: MatchSubj, merge_id: u32, names: []str) -> LowerCtx | error {
     let indices = merge_scalar_indices(ctx.env, names)
     let step = match lower_match_arm_entry(ctx, e, arm, subj) { MatchArmEntry as x => x; error as err => return err }
-    let opened = match open_native_region(step.ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    let want_region = ctx.bracket_depth == 0
+    let opened = if want_region { match open_native_region(step.ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err } } else { step.ctx }
     let bv = match lower_block_value_fat(opened, arm.body) { LowerBlockValueFat as x => x; error as err => return err }
-    let closed = match close_arm_replaying_defers(bv.ctx, ctx.defers, step.ctx.region_stack, merge_id, merge_fat_value_args(bv.ptr, bv.len), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    let closed = match close_arm_replaying_defers(bv.ctx, ctx.defers, step.ctx.region_stack, merge_id, merge_fat_value_args(bv.ptr, bv.len), indices, e.line, e.col, want_region) { ClosedArm as c => c; error as err => return err }
     ctx_with(closed.ctx, closed.func, step.next_block, ctx.env)
 }
 
