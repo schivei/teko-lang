@@ -149,7 +149,7 @@ fn lwt_lower_expr_text_with(e: checker::TExpr, layouts: []LStructLayout) -> str 
         flat_symbols = false; ret_type = checker::Prim { kind = checker::PrimKind::I64 }
         has_ret_len_slot = false; ret_len_slot = 0
         ref_fns = teko::list::empty(); field_decls = teko::list::empty(); addr_taken = teko::list::empty(); table = teko::list::empty()
-        region_stack = teko::list::empty(); escaping = teko::list::empty(); frees_old_names = teko::list::empty(); bracket_depth = 0
+        region_stack = teko::list::empty(); anchor_vreg = 0; anchor_slot = 0; escaping = teko::list::empty(); frees_old_names = teko::list::empty(); bracket_depth = 0
     }
     let lo = match lower_expr(ctx0, e) { Lowered as x => x; error as err => return teko::str::concat("ERR: ", err.message) }
     let m0 = with_rodata(add_func(empty_module(), lo.ctx.func), lo.ctx.rodata)
@@ -190,7 +190,7 @@ fn lwt_lower_expr_text_with_enums(e: checker::TExpr, enums: []LEnumInfo) -> str 
         flat_symbols = false; ret_type = checker::Prim { kind = checker::PrimKind::I64 }
         has_ret_len_slot = false; ret_len_slot = 0
         ref_fns = teko::list::empty(); field_decls = teko::list::empty(); addr_taken = teko::list::empty(); table = teko::list::empty()
-        region_stack = teko::list::empty(); escaping = teko::list::empty(); frees_old_names = teko::list::empty(); bracket_depth = 0
+        region_stack = teko::list::empty(); anchor_vreg = 0; anchor_slot = 0; escaping = teko::list::empty(); frees_old_names = teko::list::empty(); bracket_depth = 0
     }
     let lo = match lower_expr(ctx0, e) { Lowered as x => x; error as err => return teko::str::concat("ERR: ", err.message) }
     let m0 = with_rodata(add_func(empty_module(), lo.ctx.func), lo.ctx.rodata)
@@ -241,7 +241,7 @@ fn lwt_push_aggregate_size_accepts_registered_named_structs() {
         flat_symbols = false; ret_type = checker::Prim { kind = checker::PrimKind::I64 }
         has_ret_len_slot = false; ret_len_slot = 0
         ref_fns = teko::list::empty(); field_decls = teko::list::empty(); addr_taken = teko::list::empty(); table = teko::list::empty()
-        region_stack = teko::list::empty(); escaping = teko::list::empty(); frees_old_names = teko::list::empty(); bracket_depth = 0
+        region_stack = teko::list::empty(); anchor_vreg = 0; anchor_slot = 0; escaping = teko::list::empty(); frees_old_names = teko::list::empty(); bracket_depth = 0
     }
     teko::assert::is_true(match aggregate_box_bytes(checker::Named { name = "Pair16" }, ctx0) { u32 as n => n == (16 to u32); null => false })
 }
@@ -3659,9 +3659,12 @@ fn lwt_count_substr(text: str, needle: str) -> u64 {
  * @param region_vreg     the already-open frame region's own VReg — fabricated (no real
  *                        `tk_region_new_u` call produced it in these fixtures); the tests below
  *                        only care whether ANOTHER `tk_region_leave`/`tk_region_enter_u` gets
- *                        emitted, never this VReg's own origin
+ *                        emitted, never this VReg's own origin. Reused as-is for `anchor_vreg`/
+ *                        `anchor_slot` too (NP6's anchor bracket, `emit_anchor_enter`, reads
+ *                        `anchor_slot` — its own real value is likewise unchecked by these tests,
+ *                        which only assert on emitted call/leave COUNTS, never operand VRegs)
  * @return               the fixture context
- * @since 0.3.1.0 (NP4 UAF fix regression coverage)
+ * @since 0.3.1.0 (NP4 UAF fix regression coverage; NP6 anchor fields seeded)
  */
 fn lwt_region_ctx(bracket_depth: u32, region_vreg: u32) -> LowerCtx {
     LowerCtx {
@@ -3673,6 +3676,7 @@ fn lwt_region_ctx(bracket_depth: u32, region_vreg: u32) -> LowerCtx {
         has_ret_len_slot = false; ret_len_slot = 0
         ref_fns = teko::list::empty(); field_decls = teko::list::empty(); addr_taken = teko::list::empty(); table = teko::list::empty()
         region_stack = teko::list::push(teko::list::empty(), NativeRegionFrame { region_vreg = region_vreg; decl_name = ""; is_loop = false })
+        anchor_vreg = region_vreg; anchor_slot = region_vreg
         escaping = teko::list::empty(); frees_old_names = teko::list::empty(); bracket_depth = bracket_depth
     }
 }
