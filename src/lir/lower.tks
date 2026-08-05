@@ -1094,6 +1094,20 @@ pub type LowerCtx = struct {
      */
     region_stack: []NativeRegionFrame
     /**
+     * anchor_vreg — the VReg holding the CONVEYANCE ANCHOR `rr`: the caller's own current region,
+     * captured by `open_frame_region` (`tk_region_current_u()`) at function entry, BEFORE the frame
+     * region `fr` is opened (NP6, the move-on-return flip — the functional twin of the C route's
+     * `_tkrr`, `codegen.tks:9989`). Every conveyance bracket (`enter_self_append_region`'s escaping
+     * arm, `lower_binding_conveyed`/`lower_assign_conveyed`/`lower_match_subject_conveyed`) enters
+     * THIS vreg's region around an escaping value's construction, so the value materializes in the
+     * CALLER's own region — reclaimed when the caller's own scope exits, never routed to the process
+     * root and never exposed to a mid-chain ancestor's free-list. `0` before the frame opens (a
+     * lambda/virtual-main body, which never opens a frame region and never escapes through this
+     * mechanism — see `escaping`).
+     * @since 0.3.1 (NP6)
+     */
+    anchor_vreg: u32
+    /**
      * escaping — the CURRENT function's `checker::fn_escaping_vars(f)` set (`escape.tks`), computed
      * ONCE in `lower_function` exactly like `addr_taken`. The conservative superset of the names that
      * escape the frame; consumed by `binding_conveys_escape` to decide which RHS to bracket
@@ -1173,7 +1187,7 @@ fn ctx_with(ctx: LowerCtx, func: LFunc, block_id: u32, env: LEnv) -> LowerCtx {
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
-        region_stack = ctx.region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
+        region_stack = ctx.region_stack; anchor_vreg = ctx.anchor_vreg; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
     }
 }
 
@@ -1195,7 +1209,7 @@ fn ctx_with_rodata(ctx: LowerCtx, rodata: []LRodata) -> LowerCtx {
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
-        region_stack = ctx.region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
+        region_stack = ctx.region_stack; anchor_vreg = ctx.anchor_vreg; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
     }
 }
 
@@ -1217,7 +1231,7 @@ fn ctx_with_lifted(ctx: LowerCtx, lifted: []LFunc) -> LowerCtx {
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
-        region_stack = ctx.region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
+        region_stack = ctx.region_stack; anchor_vreg = ctx.anchor_vreg; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
     }
 }
 
@@ -1239,7 +1253,7 @@ fn ctx_with_defers(ctx: LowerCtx, defers: []checker::TDeferStmt) -> LowerCtx {
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
-        region_stack = ctx.region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
+        region_stack = ctx.region_stack; anchor_vreg = ctx.anchor_vreg; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
     }
 }
 
@@ -1261,7 +1275,7 @@ fn ctx_with_loops(ctx: LowerCtx, loop_targets: []LoopTargets) -> LowerCtx {
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
-        region_stack = ctx.region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
+        region_stack = ctx.region_stack; anchor_vreg = ctx.anchor_vreg; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
     }
 }
 
@@ -1330,7 +1344,7 @@ fn ctx_with_regions(ctx: LowerCtx, region_stack: []NativeRegionFrame) -> LowerCt
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
-        region_stack = region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
+        region_stack = region_stack; anchor_vreg = ctx.anchor_vreg; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
     }
 }
 
@@ -1356,7 +1370,30 @@ fn ctx_with_bracket_depth(ctx: LowerCtx, bracket_depth: u32) -> LowerCtx {
         flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
         has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
-        region_stack = ctx.region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = bracket_depth
+        region_stack = ctx.region_stack; anchor_vreg = ctx.anchor_vreg; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = bracket_depth
+    }
+}
+
+/**
+ * ctx_with_anchor — a copy of `ctx` with its conveyance anchor `anchor_vreg` replaced (everything
+ * else unchanged) — the ONE site `open_frame_region` records the caller's captured current region
+ * (NP6), the anchor-axis twin of `ctx_with_bracket_depth`.
+ *
+ * @param ctx          the context to rebuild
+ * @param anchor_vreg  the VReg holding the newly captured conveyance anchor
+ * @return             the rebuilt context
+ * @since 0.3.1 (NP6)
+ */
+fn ctx_with_anchor(ctx: LowerCtx, anchor_vreg: u32) -> LowerCtx {
+    LowerCtx {
+        func = ctx.func; block_id = ctx.block_id; env = ctx.env
+        layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
+        variants = ctx.variants
+        defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
+        flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
+        has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
+        ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
+        region_stack = ctx.region_stack; anchor_vreg = anchor_vreg; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
     }
 }
 
@@ -1373,26 +1410,30 @@ fn one_region_arg(vreg: u32) -> []u32 {
 }
 
 /**
- * open_frame_region — open the FUNCTION FRAME region at a function's entry (NP3): emit
- * `rr = tk_region_root_u()` (the conveyance anchor — root through NP3-NP5, flips to
- * `tk_region_current_u()` at the move, NP6), `fr = tk_region_new_u(rr)` (a fresh child of it), and
- * `tk_region_enter_u(fr)` (make `fr` the current region), then push its `NativeRegionFrame` onto
+ * open_frame_region — open the FUNCTION FRAME region at a function's entry (NP3, moved at NP6): emit
+ * `rr = tk_region_current_u()` (the conveyance anchor — the CALLER's own current region, captured
+ * BEFORE `fr` opens; the twin of the C route's `_tkrr`, `cg_rr_init_expr`), record it on the context
+ * (`ctx_with_anchor`) so every later conveyance bracket in this function can reach it, `fr =
+ * tk_region_new_u(rr)` (a fresh child of it — mirrors `cg_tkfr_init_expr`'s `tk_region_new(_tkrr)`),
+ * and `tk_region_enter_u(fr)` (make `fr` the current region), then push its `NativeRegionFrame` onto
  * `ctx.region_stack`. Every `tk_alloc`/slice-grow/box the body emits now bump-allocates from `fr`.
  * The matching `tk_region_leave()` on every normal-return edge is `emit_region_leaves`; the matching
- * `tk_region_drop_u(fr)` is `emit_region_drops` — REACTIVATED as of NP4 (a real reclaim: `fr`'s
- * non-escaping scratch dies with the frame; an escaping value was already conveyed to `rr` by NP3b's
- * brackets before this drop runs, so the drop never touches it).
+ * `tk_region_drop_u(fr)` is `emit_region_drops` (NP4: a real reclaim — `fr`'s non-escaping scratch
+ * dies with the frame; an escaping value was already conveyed to `rr` by a conveyance bracket before
+ * this drop runs, so the drop never touches it). `rr` itself is NEVER dropped here — it belongs to
+ * the caller, exactly like `_tkrr` is never dropped by the callee in C.
  *
  * @param ctx   the lowering context at function entry (empty `region_stack`)
  * @param line  the source line to stamp the emitted calls with
  * @param col   the source column to stamp
- * @return      the context with the frame region opened, entered, and pushed
- * @since 0.3.1
+ * @return      the context with the frame region opened, entered, pushed, and its anchor recorded
+ * @since 0.3.1 (NP6)
  */
 fn open_frame_region(ctx: LowerCtx, line: u32, col: u32) -> LowerCtx {
     let rr = ctx_alloc(ctx)
-    let with_rr = ctx_append(rr.ctx, call_inst(rr.vreg, "tk_region_root_u", teko::list::empty(), false, line, col))
-    let fr = ctx_alloc(with_rr)
+    let with_rr = ctx_append(rr.ctx, call_inst(rr.vreg, "tk_region_current_u", teko::list::empty(), false, line, col))
+    let anchored = ctx_with_anchor(with_rr, rr.vreg)
+    let fr = ctx_alloc(anchored)
     let with_fr = ctx_append(fr.ctx, call_inst(fr.vreg, "tk_region_new_u", one_region_arg(rr.vreg), false, line, col))
     let entered = ctx_append(with_fr, void_call_inst("tk_region_enter_u", one_region_arg(fr.vreg), false, line, col))
     ctx_with_regions(entered, teko::list::push(entered.region_stack, NativeRegionFrame { region_vreg = fr.vreg; decl_name = ""; is_loop = false }))
@@ -1456,6 +1497,45 @@ fn emit_region_enters(ctx: LowerCtx, line: u32, col: u32) -> LowerCtx {
         i++
     }
     cur
+}
+
+/**
+ * emit_anchor_enter — the OPEN half of a DIRECT conveyance bracket (NP6): emit
+ * `tk_region_enter_u(<ctx.anchor_vreg>)`, pushing the conveyance anchor `rr` — the caller's own
+ * captured region — on TOP of whatever is currently open, WITHOUT first popping `ctx.region_stack`'s
+ * own entries off the runtime's current-region stack. Paired with `emit_anchor_leave`'s single
+ * matching pop, this is the ONE push/ONE pop bracket `lower_binding_conveyed`/
+ * `lower_assign_conveyed`/`lower_match_subject_conveyed` wrap an escaping RHS/subject in, mirroring
+ * the C route's `tk_region_enter(_tkrr); …; tk_region_leave();` (`codegen.tks:9375-9380`) exactly.
+ * Unlike `emit_region_leaves`/`emit_region_enters` (a POP-`ctx.region_stack.len`-times-then-PUSH-them-
+ * back detour, which only reaches `rr` because the runtime stack slot it pops down to HAPPENS to
+ * still hold it), this reaches `rr` DIRECTLY by VALUE — correct regardless of how many scopes are
+ * open at the bracket site or how deep the enclosing call chain sits.
+ *
+ * @param ctx   the lowering context, its `anchor_vreg` already captured by `open_frame_region`
+ * @param line  the source line to stamp the emitted call with
+ * @param col   the source column to stamp
+ * @return      the context with the anchor `enter` appended
+ * @since 0.3.1 (NP6)
+ */
+fn emit_anchor_enter(ctx: LowerCtx, line: u32, col: u32) -> LowerCtx {
+    ctx_append(ctx, void_call_inst("tk_region_enter_u", one_region_arg(ctx.anchor_vreg), false, line, col))
+}
+
+/**
+ * emit_anchor_leave — the CLOSE half of `emit_anchor_enter`'s direct conveyance bracket (NP6): emit a
+ * single `tk_region_leave()`, popping exactly the one push `emit_anchor_enter` made and restoring
+ * whatever region was current before it (the frame/block `ctx.region_stack`'s own top already had
+ * current, untouched by this bracket).
+ *
+ * @param ctx   the lowering context, positioned right after the bracketed RHS/subject
+ * @param line  the source line to stamp the emitted call with
+ * @param col   the source column to stamp
+ * @return      the context with the anchor `leave` appended
+ * @since 0.3.1 (NP6)
+ */
+fn emit_anchor_leave(ctx: LowerCtx, line: u32, col: u32) -> LowerCtx {
+    ctx_append(ctx, void_call_inst("tk_region_leave", teko::list::empty(), false, line, col))
 }
 
 /**
@@ -6372,7 +6452,7 @@ fn build_lambda_lfunc(lam: checker::TLambda, env_layout: LStructLayout, ctx: Low
         flat_symbols = ctx.flat_symbols; ret_type = lam.ret
         has_ret_len_slot = fat_ret; ret_len_slot = if fat_ret { slot_reg } else { 0 }
         ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = collect_addr_taken_locals(lam.body, ctx.ref_fns, ctx.enums); table = ctx.table
-        region_stack = teko::list::empty(); escaping = teko::list::empty(); frees_old_names = teko::list::empty(); bracket_depth = 0
+        region_stack = teko::list::empty(); anchor_vreg = 0; escaping = teko::list::empty(); frees_old_names = teko::list::empty(); bracket_depth = 0
     }
     let with_captures = match bind_lambda_captures(ctx0, env_layout, lam.captures, line, col) { LowerCtx as c => c; error as err => return err }
     let done = match lower_fn_body(with_captures, lam.body, ltype_of(lam.ret, ctx.enums), line, col) { LowerCtx as c => c; error as err => return err }
@@ -6443,10 +6523,10 @@ pub fn lower_stmt(ctx: LowerCtx, s: checker::TStatement) -> LowerStmtOut | error
  *
  * A binding whose name ESCAPES this function (`binding_conveys_escape`, NP3b) runs its whole RHS
  * lowering (whichever of the three branches below it takes) inside a conveyance bracket
- * (`lower_binding_conveyed`): a retained call-result must land at `rr` — the conveyance anchor, root
- * through NP5, the caller's own region at the NP6 move — not the frame/block region a later
- * `tk_region_drop_u` reclaims. This is delegated AFTER `bind_target_name`/the `Reference` check, so
- * a destructuring target's own honest-stop and an identity `ref` binding are unaffected.
+ * (`lower_binding_conveyed`): a retained call-result must land at `rr` — the conveyance anchor, the
+ * caller's own captured region (NP6) — not the frame/block region a later `tk_region_drop_u`
+ * reclaims. This is delegated AFTER `bind_target_name`/the `Reference` check, so a destructuring
+ * target's own honest-stop and an identity `ref` binding are unaffected.
  *
  * @param LowerCtx ctx  the lowering context to append the binding's instructions into
  * @param checker::TBinding b  the typed binding statement
@@ -6468,37 +6548,38 @@ fn lower_binding(ctx: LowerCtx, b: checker::TBinding) -> LowerStmtOut | error {
 }
 
 /**
- * lower_binding_conveyed — `lower_binding`'s escaping arm (NP3b): `emit_region_leaves` (detour the
- * runtime's current region to the conveyance anchor `rr`), run `lower_binding_direct` unchanged so
- * ITS call-result(s) materialize at `rr`, then `emit_region_enters` (restore the frame/block region
- * for every statement that follows). `ctx.region_stack` is read but never rewritten by either half
- * (the region-axis twin of a bare defer replay, §2d) — `out.ctx.region_stack` is the SAME list
- * `ctx.region_stack` was, so the restore is exact.
+ * lower_binding_conveyed — `lower_binding`'s escaping arm (NP3b, direct anchor bracket NP6):
+ * `emit_anchor_enter` (push the conveyance anchor `rr` — the caller's own captured region — on top of
+ * whatever is current), run `lower_binding_direct` unchanged so ITS call-result(s) materialize at
+ * `rr`, then `emit_anchor_leave` (pop that single push, restoring the frame/block region for every
+ * statement that follows). Mirrors the C route's `tk_region_enter(_tkrr); …; tk_region_leave();`
+ * exactly — a stable, caller-owned landing region regardless of how many scopes are open here or how
+ * deep the enclosing call chain sits (unlike the earlier `emit_region_leaves`/`emit_region_enters`
+ * pop-then-push-back detour, which only reached `rr` because the runtime stack slot it popped down to
+ * HAPPENED to still hold it).
  *
  * NESTED escaping binding (`ctx.bracket_depth > 0`, e.g. an escaping `let` INSIDE a match/if arm
- * that is itself part of an OUTER escaping binding's RHS): skips the leave/enter entirely and just
- * runs `lower_binding_direct` on `ctx` UNCHANGED. The outer bracket already moved `current` down to
- * the SAME conveyance anchor for this whole subtree; re-leaving/re-entering here would
- * `tk_region_enter_u` the FRAME region back in mid-span, so anything the OUTER bracket's RHS still
- * has left to lower after this nested binding would wrongly land back in the frame — exactly the
- * shape `tk_region_drop_u` would free out from under the outer binding's own escaping value (the C
- * route's `dctx.bracket_depth == 0` re-bracket guard, mirrored via `ctx.bracket_depth` here since the
- * native backend has no `dctx` — see the field's own doc on `LowerCtx`).
+ * that is itself part of an OUTER escaping binding's RHS): skips the enter/leave entirely and just
+ * runs `lower_binding_direct` on `ctx` UNCHANGED. The outer bracket already entered the SAME
+ * conveyance anchor for this whole subtree; re-entering here would just double-push the same anchor
+ * pointlessly (the C route's `dctx.bracket_depth == 0` re-bracket guard, mirrored via
+ * `ctx.bracket_depth` here since the native backend has no `dctx` — see the field's own doc on
+ * `LowerCtx`).
  *
  * @param ctx   the lowering context, positioned to lower `b`'s RHS
  * @param b     the typed binding statement (its LHS name already known to escape)
  * @param name  the bound name (`bind_target_name(b.target)`, computed once by the caller)
  * @return      the context with the name bound through the bracket, or an honest stop
  * @throws      propagated from `lower_binding_direct`
- * @since 0.3.1
+ * @since 0.3.1 (NP6: direct anchor bracket)
  */
 fn lower_binding_conveyed(ctx: LowerCtx, b: checker::TBinding, name: str) -> LowerStmtOut | error {
     if ctx.bracket_depth > 0 { return lower_binding_direct(ctx, b, name) }
-    let left = emit_region_leaves(ctx, b.value.line, b.value.col)
-    let marked = ctx_with_bracket_depth(left, 1)
+    let entered_rr = emit_anchor_enter(ctx, b.value.line, b.value.col)
+    let marked = ctx_with_bracket_depth(entered_rr, 1)
     let out = match lower_binding_direct(marked, b, name) { LowerStmtOut as x => x; error as err => return err }
-    let entered = emit_region_enters(out.ctx, b.value.line, b.value.col)
-    LowerStmtOut { ctx = ctx_with_bracket_depth(entered, ctx.bracket_depth); terminated = out.terminated }
+    let left_rr = emit_anchor_leave(out.ctx, b.value.line, b.value.col)
+    LowerStmtOut { ctx = ctx_with_bracket_depth(left_rr, ctx.bracket_depth); terminated = out.terminated }
 }
 
 /**
@@ -7983,7 +8064,7 @@ fn close_loop(outer: LowerCtx, body_done: LowerCtx, exit_block: u32, exit_env: L
         flat_symbols = body_done.flat_symbols; ret_type = body_done.ret_type
         has_ret_len_slot = body_done.has_ret_len_slot; ret_len_slot = body_done.ret_len_slot
         ref_fns = body_done.ref_fns; field_decls = body_done.field_decls; addr_taken = body_done.addr_taken; table = body_done.table
-        region_stack = outer.region_stack; escaping = body_done.escaping; frees_old_names = body_done.frees_old_names; bracket_depth = body_done.bracket_depth
+        region_stack = outer.region_stack; anchor_vreg = body_done.anchor_vreg; escaping = body_done.escaping; frees_old_names = body_done.frees_old_names; bracket_depth = body_done.bracket_depth
     }
 }
 
@@ -10607,17 +10688,17 @@ fn match_arm_binds_escaping(arms: []checker::TArm, escaping: []str) -> bool {
 }
 
 /**
- * lower_match_subject_conveyed — lower the match subject, wrapping it in a conveyance BRACKET
- * (`emit_region_leaves` … `emit_region_enters`, NP3b) exactly when an arm binds an escaping alias
- * of it (`match_arm_binds_escaping`) and we are not already inside an outer bracket
- * (`ctx.bracket_depth == 0`). The bracket detours the runtime's current region down to the
- * conveyance anchor `rr` for the subject's evaluation ONLY, so a subject that ALLOCATES (a call
- * result, an aggregate construction) materializes at `rr` and survives the frame drop; the re-enter
- * restores the frame/block region so the arm bodies keep bump-allocating their own scratch there.
- * The mirror of `lower_binding_conveyed` for the anonymous "binding" a `match … { X as x => … }`
- * arm makes of the subject. A subject with no escaping arm alias, or one already under an outer
- * bracket, is lowered bare (the outer bracket already moved `current` to the same anchor —
- * re-leaving would wrongly re-enter the frame mid-span). Inert (a leave/enter around a
+ * lower_match_subject_conveyed — lower the match subject, wrapping it in a DIRECT conveyance
+ * BRACKET (`emit_anchor_enter` … `emit_anchor_leave`, NP3b/NP6) exactly when an arm binds an
+ * escaping alias of it (`match_arm_binds_escaping`) and we are not already inside an outer bracket
+ * (`ctx.bracket_depth == 0`). The bracket pushes the conveyance anchor `rr` on top of whatever is
+ * current for the subject's evaluation ONLY, so a subject that ALLOCATES (a call result, an
+ * aggregate construction) materializes at `rr` and survives the frame drop; the matching single
+ * `leave` restores the frame/block region so the arm bodies keep bump-allocating their own scratch
+ * there. The mirror of `lower_binding_conveyed` for the anonymous "binding" a
+ * `match … { X as x => … }` arm makes of the subject. A subject with no escaping arm alias, or one
+ * already under an outer bracket, is lowered bare (the outer bracket already entered the same
+ * anchor — re-entering here would just double-push it pointlessly). Inert (an enter/leave around a
  * non-allocating bare-var subject copies nothing) and leak-safe when over-applied, matching the
  * BLIND discipline `binding_conveys_escape` already uses.
  *
@@ -10625,17 +10706,17 @@ fn match_arm_binds_escaping(arms: []checker::TArm, escaping: []str) -> bool {
  * @param m    the typed match (its `subject` and `arms`)
  * @return     the advanced context + the subject descriptor, its `ctx` back under the frame region
  * @throws     propagated from `lower_match_subject`
- * @since 0.3.1.0 (native-region-lifetime)
+ * @since 0.3.1.0 (native-region-lifetime; NP6: direct anchor bracket)
  */
 fn lower_match_subject_conveyed(ctx: LowerCtx, m: checker::TMatchExpr) -> MatchSubjOut | error {
     if ctx.bracket_depth > 0 || !match_arm_binds_escaping(m.arms, ctx.escaping) {
         return lower_match_subject(ctx, m.subject)
     }
-    let left = emit_region_leaves(ctx, m.subject.line, m.subject.col)
-    let marked = ctx_with_bracket_depth(left, 1)
+    let entered_rr = emit_anchor_enter(ctx, m.subject.line, m.subject.col)
+    let marked = ctx_with_bracket_depth(entered_rr, 1)
     let s = match lower_match_subject(marked, m.subject) { MatchSubjOut as x => x; error as err => return err }
-    let entered = emit_region_enters(s.ctx, m.subject.line, m.subject.col)
-    MatchSubjOut { ctx = ctx_with_bracket_depth(entered, ctx.bracket_depth); subj = s.subj }
+    let left_rr = emit_anchor_leave(s.ctx, m.subject.line, m.subject.col)
+    MatchSubjOut { ctx = ctx_with_bracket_depth(left_rr, ctx.bracket_depth); subj = s.subj }
 }
 
 /** is_fat_type — is `t` a fat-pointer-VALUED type (`str` or `[]T`)? Selects the
@@ -13657,26 +13738,27 @@ fn lower_assign(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
 }
 
 /**
- * lower_assign_conveyed — `lower_assign`'s escaping arm (NP3b): `emit_region_leaves` (detour the
- * runtime's current region to the conveyance anchor `rr`), run `lower_assign_dispatch` unchanged so
- * its written value materializes at `rr`, then `emit_region_enters` (restore the frame/block region
- * for every statement that follows). Mirrors `lower_binding_conveyed` exactly, one axis over
- * (reassignment vs a fresh binding), INCLUDING its `ctx.bracket_depth > 0` nested-skip guard (see
- * that function's own doc for why re-bracketing inside an already-open outer bracket is unsound).
+ * lower_assign_conveyed — `lower_assign`'s escaping arm (NP3b, direct anchor bracket NP6):
+ * `emit_anchor_enter` (push the conveyance anchor `rr` on top of whatever is current), run
+ * `lower_assign_dispatch` unchanged so its written value materializes at `rr`, then
+ * `emit_anchor_leave` (pop that single push, restoring the frame/block region for every statement
+ * that follows). Mirrors `lower_binding_conveyed` exactly, one axis over (reassignment vs a fresh
+ * binding), INCLUDING its `ctx.bracket_depth > 0` nested-skip guard (see that function's own doc for
+ * why re-bracketing inside an already-open outer bracket is unsound).
  *
  * @param ctx  the lowering context, positioned to lower `a`
  * @param a    the typed assignment (its `a.name` already known to escape)
  * @return     the context with the assignment applied through the bracket, or an honest stop
  * @throws     propagated from `lower_assign_dispatch`
- * @since 0.3.1
+ * @since 0.3.1 (NP6: direct anchor bracket)
  */
 fn lower_assign_conveyed(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
     if ctx.bracket_depth > 0 { return lower_assign_dispatch(ctx, a) }
-    let left = emit_region_leaves(ctx, a.value.line, a.value.col)
-    let marked = ctx_with_bracket_depth(left, 1)
+    let entered_rr = emit_anchor_enter(ctx, a.value.line, a.value.col)
+    let marked = ctx_with_bracket_depth(entered_rr, 1)
     let out = match lower_assign_dispatch(marked, a) { LowerStmtOut as x => x; error as err => return err }
-    let entered = emit_region_enters(out.ctx, a.value.line, a.value.col)
-    LowerStmtOut { ctx = ctx_with_bracket_depth(entered, ctx.bracket_depth); terminated = out.terminated }
+    let left_rr = emit_anchor_leave(out.ctx, a.value.line, a.value.col)
+    LowerStmtOut { ctx = ctx_with_bracket_depth(left_rr, ctx.bracket_depth); terminated = out.terminated }
 }
 
 /**
@@ -13949,23 +14031,24 @@ type SelfAppendBracket = struct { ctx: LowerCtx; opened: bool }
  *   bracket to it. The real N-level fix (`mem_loop_per_iter` — an accumulator declared in an outer
  *   arm, grown in an inner loop, must not die per-iteration).
  * - UNREGISTERED (`null`) AND `name` ESCAPES this function (`binding_conveys_escape`): bracket to
- *   ROOT — emit `rr = tk_region_root_u()` (the same on-demand fallback `region_current_vreg` uses on
- *   an empty stack) then `tk_region_enter_u(rr)`, `opened=true`. This is NOT redundant with
- *   `lower_assign_conveyed`'s own OUTER bracket (`emit_region_leaves` … `emit_region_enters`):
- *   `emit_region_leaves` only POPS every region THIS function has open off the runtime's
- *   current-region stack, it never PUSHES a replacement, so once those pops run, "current" is
- *   whatever sits BELOW this function's frame — the CALLER's own active region at the depth this
- *   call happened from. At root nesting that pop-exposed region IS root, which is why the earlier,
- *   bracket-less version of this arm went undetected; from a NESTED caller (`outer()` → `mid()` →
- *   this fn, `mid`'s own scope still open) it is a live NON-root ancestor arena that the grow's
- *   buffer would land in and that a LATER `tk_region_drop_u` up the chain frees out from under it —
- *   a confirmed use-after-free (`copy_relocs_to_current_region_x86`, `src/build/project.tks:3313`,
- *   reached via `copy_encoded_func_to_current_region_x86` from within `fold_encoded_funcs_x86`'s open
- *   scope; SIGSEGV in `tk_region_alloc`). An EXPLICIT push of the root anchor around the grow closes
- *   that gap at every nesting depth — the twin of the C route's `cg_self_append_escapes`
- *   (`codegen.tks:8020`), which wraps the SAME grow with an explicit
- *   `tk_region_enter(_tkrr); …; tk_region_leave();` (`codegen.tks:9375-9380`) rather than relying on
- *   any ambient pop-exposed region. This native route now mirrors that PUSH exactly.
+ *   the ALREADY-CAPTURED conveyance anchor `ctx.anchor_vreg` (NP6) — emit
+ *   `tk_region_enter_u(<anchor_vreg>)`, `opened=true`. `anchor_vreg` is `open_frame_region`'s own
+ *   `rr`: the CALLER's current region, captured once at function entry, BEFORE this frame ever
+ *   pushed. Entering it directly — rather than relying on `lower_assign_conveyed`'s own OUTER
+ *   bracket's `emit_region_leaves` to POP down to whatever the runtime stack exposes below this
+ *   frame — makes the landing region a STABLE, caller-owned region regardless of how many nested
+ *   scopes/loops/arms are open at the grow site or how deep the call chain sits. A prior route
+ *   (`rr = tk_region_root_u()`, before NP6) sent every escaping grow to the process ROOT instead:
+ *   leak-safe but WRONG under `TEKO_MEM_PARANOID`, whose free-list poisoning turns any root-routed
+ *   reuse into a redzone hit. Before that, no bracket ran at all, trusting the OUTER bracket's pop —
+ *   from a NESTED caller (`outer()` → `mid()` → this fn, `mid`'s own scope still open) that pop
+ *   exposed a live, LATER-DROPPED ancestor arena, a confirmed use-after-free
+ *   (`copy_relocs_to_current_region_x86`, `src/build/project.tks:3313`, reached via
+ *   `copy_encoded_func_to_current_region_x86` from within `fold_encoded_funcs_x86`'s open scope;
+ *   SIGSEGV in `tk_region_alloc`). Entering the captured anchor closes both gaps at once — the twin
+ *   of the C route's `cg_self_append_escapes` (`codegen.tks:8020`), which wraps the SAME grow with
+ *   `tk_region_enter(_tkrr); …; tk_region_leave();` (`codegen.tks:9375-9380`) against the SAME
+ *   captured `_tkrr`. This native route now mirrors that exactly.
  * - UNREGISTERED AND NOT escaping: bracket to the FRAME (`ctx.region_stack[0]`) — leak-safe (the
  *   frame outlives every use inside this function), never UAF; a non-escaping accumulator whose
  *   `decl_name` registration was overwritten by a LATER binding in the same scope (only the
@@ -13986,9 +14069,7 @@ fn enter_self_append_region(ctx: LowerCtx, name: str, line: u32, col: u32) -> Se
         u32 as target => SelfAppendBracket { ctx = ctx_append(ctx, void_call_inst("tk_region_enter_u", one_region_arg(target), false, line, col)); opened = true }
         null => {
             if binding_conveys_escape(ctx.escaping, name) {
-                let rr = ctx_alloc(ctx)
-                let rooted = ctx_append(rr.ctx, call_inst(rr.vreg, "tk_region_root_u", teko::list::empty(), false, line, col))
-                SelfAppendBracket { ctx = ctx_append(rooted, void_call_inst("tk_region_enter_u", one_region_arg(rr.vreg), false, line, col)); opened = true }
+                SelfAppendBracket { ctx = ctx_append(ctx, void_call_inst("tk_region_enter_u", one_region_arg(ctx.anchor_vreg), false, line, col)); opened = true }
             } else {
                 if ctx.region_stack.len > 0 {
                     let fr_vreg = ctx.region_stack[0].region_vreg
@@ -14651,7 +14732,7 @@ pub fn lower_function(f: checker::TFunction, layouts: []LStructLayout = teko::li
         flat_symbols = flat_symbols; ret_type = f.return_type
         has_ret_len_slot = fat_ret; ret_len_slot = if fat_ret { slot_reg } else { 0 }
         ref_fns = ref_fns; field_decls = field_decls; addr_taken = collect_addr_taken_locals(f.body, ref_fns, enums); table = table
-        region_stack = teko::list::empty(); escaping = checker::fn_escaping_vars(f); frees_old_names = checker::fn_frees_old_vars(f); bracket_depth = 0
+        region_stack = teko::list::empty(); anchor_vreg = 0; escaping = checker::fn_escaping_vars(f); frees_old_names = checker::fn_frees_old_vars(f); bracket_depth = 0
     }
     let framed = open_frame_region(ctx0, f.line, f.col)
     let done = match lower_fn_body(framed, f.body, ltype_of(f.return_type, enums), f.line, f.col) { LowerCtx as c => c; error as err => return stop_in_function(err, f) }
@@ -15960,7 +16041,7 @@ pub fn lower_virtual_main(loose: []checker::TStatement, layouts: []LStructLayout
         flat_symbols = flat_symbols; ret_type = checker::Prim { kind = checker::PrimKind::I32 }
         has_ret_len_slot = false; ret_len_slot = 0
         ref_fns = ref_fns; field_decls = field_decls; addr_taken = collect_addr_taken_locals(loose, ref_fns, enums); table = table
-        region_stack = teko::list::empty(); escaping = teko::list::empty(); frees_old_names = teko::list::empty(); bracket_depth = 0
+        region_stack = teko::list::empty(); anchor_vreg = 0; escaping = teko::list::empty(); frees_old_names = teko::list::empty(); bracket_depth = 0
     }
     let tail = match lower_main_tail(ctx0, loose) { LowerMainTail as x => x; error as err => return err }
     let closed = match close_virtual_main(tail) { LowerCtx as c => c; error as err => return err }
