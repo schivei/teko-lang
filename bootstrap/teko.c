@@ -44873,6 +44873,15 @@ tk_slice_str teko_teko__build__build_cc_argv(tk_str input, tk_str binary, tk_t_t
             .ptr = _sp2010558, .len = _sl2010559
         };
     });
+    if ((tk_str_eq(tk_rt_os(), (tk_str) { (const tk_byte *)"windows", 7 }))) {
+        argv = ( {
+            tk_slice_str _sbwintgt = argv;
+            tk_str _siwintgt = (tk_str) { (const tk_byte *)"--target=x86_64-pc-windows-msvc", 31 };
+            uint64_t _slwintgt;
+            tk_str *_spwintgt = (tk_str *)tk_slice_push(_sbwintgt.ptr, _sbwintgt.len, &_siwintgt, sizeof(tk_str), &_slwintgt);
+            (tk_slice_str) { .ptr = _spwintgt, .len = _slwintgt };
+        });
+    }
     argv = ( {
         tk_slice_str _sb2010827 = argv;
         tk_str _si2010828 = ( {

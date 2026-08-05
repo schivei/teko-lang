@@ -284,9 +284,9 @@ declared_degrau_rung() {
   # (`cannot execute 'cc1': CreateProcess`), and its MSVC-family linker has no `m.lib` so `-lm` is a
   # hard link error. clang (x86_64-pc-windows-msvc, already on the runner) is monolithic, fast, and
   # needs no libm — the same Windows rules build_cc_argv already applies for gen1 and beyond.
-  deg_cc="cc"; deg_std="-std=c2x"; deg_libm="-lm"
+  deg_cc="cc"; deg_std="-std=c2x"; deg_libm="-lm"; deg_tgt=""
   case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT) deg_cc="clang"; deg_std="-std=c23"; deg_libm="" ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) deg_cc="clang"; deg_std="-std=c23"; deg_libm=""; deg_tgt="--target=x86_64-pc-windows-msvc" ;;
   esac
   if ! command -v "$deg_cc" >/dev/null 2>&1; then
     log "rung -1: a degrau is declared at $cc_src but no $deg_cc is on PATH — skipping"
@@ -300,7 +300,7 @@ declared_degrau_rung() {
   # x86_64 lane SLOWER (780s -> 869s), so the flag was reverted everywhere. It survived in this
   # function only because rung -1 was written while the experiment was still live.
   log "rung -1: building the degrau's compiler from $cc_src (cc=$deg_cc)"
-  if ! "$deg_cc" "$deg_std" -w -O2 \
+  if ! "$deg_cc" "$deg_std" $deg_tgt -w -O2 \
         -I src/runtime -I src/assert \
         "$cc_src" src/runtime/teko_rt.c src/assert/assert.c $deg_libm \
         -o "$cc_out/teko" >"$cc_log" 2>&1; then
