@@ -278,8 +278,18 @@ declared_degrau_rung() {
     return 1
   fi
   cc_src="$DEGRAU_C"
-  if ! command -v cc >/dev/null 2>&1; then
-    log "rung -1: a degrau is declared at $cc_src but no cc is on PATH — skipping"
+  # On Windows the toolchain MUST be clang, not MinGW gcc (owner ruling 2026-08-05). MinGW gcc is
+  # pathologically slow on the 10 MB bootstrap C (its -O2 optimizer is superlinear — a single
+  # produce step measured 55 min), its separate `cc1` backend breaks under any PATH wrapper
+  # (`cannot execute 'cc1': CreateProcess`), and its MSVC-family linker has no `m.lib` so `-lm` is a
+  # hard link error. clang (x86_64-pc-windows-msvc, already on the runner) is monolithic, fast, and
+  # needs no libm — the same Windows rules build_cc_argv already applies for gen1 and beyond.
+  deg_cc="cc"; deg_std="-std=c2x"; deg_libm="-lm"; deg_tgt=""
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) deg_cc="clang"; deg_std="-std=c23"; deg_libm=""; deg_tgt="--target=x86_64-pc-windows-msvc" ;;
+  esac
+  if ! command -v "$deg_cc" >/dev/null 2>&1; then
+    log "rung -1: a degrau is declared at $cc_src but no $deg_cc is on PATH — skipping"
     return 1
   fi
   cc_out="$PWD/.rung-c"
@@ -289,10 +299,10 @@ declared_degrau_rung() {
   # standing hypothesis for the generation-to-generation slowdown; measured on the wagon it made the
   # x86_64 lane SLOWER (780s -> 869s), so the flag was reverted everywhere. It survived in this
   # function only because rung -1 was written while the experiment was still live.
-  log "rung -1: building the degrau's compiler from $cc_src"
-  if ! cc -std=c2x -w -O2 \
+  log "rung -1: building the degrau's compiler from $cc_src (cc=$deg_cc)"
+  if ! "$deg_cc" "$deg_std" $deg_tgt -w -O2 \
         -I src/runtime -I src/assert \
-        "$cc_src" src/runtime/teko_rt.c src/assert/assert.c -lm \
+        "$cc_src" src/runtime/teko_rt.c src/assert/assert.c $deg_libm \
         -o "$cc_out/teko" >"$cc_log" 2>&1; then
     log "rung -1: the declared C did not compile — skipping to the next rung. cc said:"
     sed 's/^/teko-ci:   | /' "$cc_log" >&2

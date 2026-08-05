@@ -155,14 +155,17 @@ fn variant_has_null_member(t: Type) -> bool {
     }
 }
 
-// validate a pattern against the subject; return the env extended with bindings.
-//
-// retire-Optional O4 (`docs/design/retirar-optional-para-null-union-uptr-0.3.1.md` §6): the
-// OPTIONAL-subject arm (`T?`: `null` → NONE binds nothing, anything else → PRESENT checked
-// against `opt.inner`) is DELETED — `subject` can no longer resolve to `Optional` (O1/O2
-// migrated the two live producers), and a migrated `T | null` union subject is already handled
-// below by the generic `NullPattern` arm (`variant_has_null_member`) plus the PRESENT case's
-// ordinary variant-member matching. Fixture: `null_narrow_ifguard` (own_native).
+/**
+ * check_pattern — validate a pattern against the subject; return the env extended with bindings.
+ * A `T | null` union subject is handled by the generic `NullPattern` arm
+ * (`variant_has_null_member`) below plus the present case's ordinary variant-member matching.
+ *
+ * @param p        the syntactic pattern
+ * @param subject  the resolved subject type
+ * @param env      the enclosing type environment
+ * @param table    the type table
+ * @return         the env extended with the pattern's bindings, or an error
+ */
 fn check_pattern(p: parser::Pattern, subject: Type, env: Env, table: TypeTable) -> Env | error {
     // ENUM subject (C7b): member patterns, not type binds — detected before the generic match so a
     // bare `U8` is not mis-resolved as a type name (resolve_named → "unknown type: U8").
@@ -450,11 +453,6 @@ fn some_arm_is_null(arms: []parser::Arm) -> bool {
     false
 }
 
-// retire-Optional O4 (`docs/design/retirar-optional-para-null-union-uptr-0.3.1.md` §6):
-// `present_case_covered` (the PRESENT-case coverage check for an optional `T?` subject) is
-// DELETED — its only caller was `exhaustive`'s now-deleted `Optional` arm below; a migrated
-// `T | null` union's present member is covered by `variant_covered`'s ordinary per-member arms.
-
 // a `_` covers all; otherwise a Variant subject must have every case named (its `null` member,
 // if any, by `variant_covered`'s own `Null` arm). A NAMED variant subject is first expanded to
 // its Variant cases (B.14/B.15) so `match s { Circle … }` over a `Shape = Circle | …` covers
@@ -475,12 +473,6 @@ fn exhaustive(arms: []parser::Arm, subject: Type, table: TypeTable, ref_ns: str)
         }
         _ => { }
     }
-    // retire-Optional O4 (`docs/design/retirar-optional-para-null-union-uptr-0.3.1.md` §6): the
-    // OPTIONAL-subject arm (`T?` — `null` + present coverage, REBOOT §202) is DELETED — `subject`
-    // can no longer resolve to `Optional` (O1/O2 migrated the two live producers), and a migrated
-    // `T | null` union subject's `null` member is ALREADY covered generically below, by
-    // `variant_covered`'s own `Null => { if !some_arm_is_null(arms) { return false } }` arm.
-    // Fixture: `null_narrow_ifguard` (own_native).
     match expand_variant(subject, table) {   // a NAMED variant → its Variant cases (B.14/B.15)
         Variant as v => variant_covered(arms, v.members, table, ref_ns)
         _ => false

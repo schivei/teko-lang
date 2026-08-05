@@ -108,6 +108,45 @@ Feature: mem — teko::mem native positives (each a Given source case, native ro
     When built and run
     Then stdout pattern = "root-anchor"
 
+  # (mem_accum_block_native, native scope-memory port NP5) the native-lowering twin of the shared
+  # corpus's mem_accum_block (which env-pins the C route): an if-arm-scoped slice accumulator grown
+  # by top-of-block self-appends, fingerprinted (7), then a post-arm churn (8) opens and closes its
+  # own arm-scoped accumulators recycling the freed region. `Given source`, no env, so this build
+  # actually exercises lower.tks's own `open_native_region`/`close_native_region` (`lower_if_stmt`)
+  # rather than codegen.tks's `emit_block_region` — the two routes read the same oracle but emit
+  # through separate machinery, and only a NATIVE build proves lower.tks's own is wired correctly.
+  Scenario: mem_accum_block_native — a native if-arm accumulator + churn fingerprint to 15
+    Given source = "cases/mem_accum_block_native.tks"
+    When built and run
+    Then stdout pattern = "fp=15"
+
+  # (mem_loop_per_iter_native, native scope-memory port NP5) the native-lowering twin of the shared
+  # corpus's mem_loop_per_iter: an accumulator declared in an outer `if` arm and grown in an inner
+  # loop routes each grow to the DECLARING arm's region (`native_scope_region_of`, the N-level
+  # selector), not the inner loop's own per-iteration region NP5 opens fresh every pass — so the
+  # buffer survives every iteration and is read AFTER the loop breaks. Without the selector this
+  # self-append would read a buffer a PRIOR iteration's own region-drop already freed — the wild-write
+  # heisenbug this crumb kills by construction.
+  Scenario: mem_loop_per_iter_native — a native loop-grown accumulator fingerprints to 17 read after the loop
+    Given source = "cases/mem_loop_per_iter_native.tks"
+    When built and run
+    Then stdout pattern = "fp=17"
+
+  # (mem_accum_escapes_native, native scope-memory port NP5 — the CONFIRMED double-free fix) an
+  # ESCAPING self-append accumulator (`mut xs = list::empty(); … xs = list::push(xs, e) …; return
+  # xs`, both directly in a function body and inside a nested `if` arm) MUST bump-allocate into the
+  # conveyance anchor `rr` (the caller's region, root through NP5) that its own `lower_binding_conveyed`/
+  # `lower_assign_conveyed` bracket already detours to — NEVER into the frame `stack[0]` fallback
+  # `enter_self_append_region` used to fall back to unconditionally when `xs` was unregistered (every
+  # escaping binding IS unregistered — `register_scope_decl_name` only runs on the non-escaping path).
+  # The frame fallback there froze the buffer in `fr`, which `emit_region_drops` freed at THIS
+  # function's own return — a confirmed double-free/heap-corruption UAF (CI run 30947982111, gen1
+  # SIGSEGV in `emit_call`), not merely a leak. `Given source`, no env — native by construction.
+  Scenario: mem_accum_escapes_native — an escaping self-append accumulator (direct + nested-arm) fingerprints to 85
+    Given source = "cases/mem_accum_escapes_native.tks"
+    When built and run
+    Then stdout pattern = "fp=85"
+
 
 Feature: mem — dropping a #must_free handle without teko::mem::free is rejected (compile-fail case)
 

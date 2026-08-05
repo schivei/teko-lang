@@ -1107,8 +1107,10 @@ fn bare_g_rejected_message() -> str {
  * (`-target`/`--sysroot`/`-nostdlib`, C7.1f); the runtime + assert include dirs; the
  * input; the two C runtime
  * seed sources (`teko_rt.c` + `assert.c`); `-lm` (unless freestanding); the
- * reachable `[extern.libs]` link flags (C7.20); and, on macOS, the `__info_plist`
- * `-Wl,-sectcreate` section. Shared verbatim by `run_cc` (a `.c` input) and
+ * reachable `[extern.libs]` link flags (C7.20); on macOS, the `__info_plist`
+ * `-Wl,-sectcreate` section; and, on Windows, the reproducible-build flag (`/Brepro`) plus a widened
+ * 16 MiB stack reserve (`/STACK:16777216`, past the PE default's 1 MiB — see
+ * `WINDOWS_STACK_RESERVE_FLAG`). Shared verbatim by `run_cc` (a `.c` input) and
  * `link_object` (an own-backend `.o` input) so both link the SAME way — the only
  * difference is the input file, keeping the two paths from drifting. When `debug`
  * is set it also appends the DEBUG profile flag `-g` (emit DWARF so the E4 native
@@ -1166,6 +1168,7 @@ fn build_cc_argv(input: str, binary: str, m: Manifest, prog: checker::TProgram, 
     argv = append_allow_undef_flag(argv)
     argv = append_macos_plist_flag(argv, binary, m, keys.emit_os)
     argv = append_windows_reproducible_flag(argv, keys.emit_os)
+    argv = append_windows_stack_reserve_flag(argv, keys.emit_os)
     argv = teko::list::push(argv, "-o")
     teko::list::push(argv, binary)
 }
@@ -1248,6 +1251,36 @@ const WINDOWS_NO_TIMESTAMP_FLAG: str = "-Wl,/Brepro"
 fn append_windows_reproducible_flag(argv: []str, emit_os: str) -> []str {
     if emit_os != "windows" { return argv }
     teko::list::push(argv, WINDOWS_NO_TIMESTAMP_FLAG)
+}
+
+/**
+ * WINDOWS_STACK_RESERVE_FLAG — the MSVC-linker option that reserves a 16 MiB (0x1000000) stack for
+ * the produced PE image, instead of the PE default's 1 MiB reserve.
+ *
+ * Windows' 1 MiB default thread stack is far smaller than Linux's 8 MiB default, and this
+ * compiler's own bounded-but-deep recursive-descent passes (e.g. `teko::checker::monomorph`'s
+ * `mono_texpr`/`mono_tstmt`/`mono_block` AST walk, whose depth tracks the INPUT program's
+ * statement/expression nesting, not any bug) overflow the smaller Windows default well before the
+ * SAME recursion would overflow Linux's — a stack-size gap, not a codegen defect (confirmed by
+ * reproducing the SAME crash on Linux under an artificially shrunk 1 MiB `ulimit -s`, and by the
+ * crash disappearing once the stack is widened past the observed recursion depth). `/STACK` reaches
+ * `lld-link`/`link.exe` through the `clang` driver exactly like `WINDOWS_NO_TIMESTAMP_FLAG` reaches
+ * it for `/Brepro`.
+ */
+const WINDOWS_STACK_RESERVE_FLAG: str = "-Wl,/STACK:16777216"
+
+/**
+ * append_windows_stack_reserve_flag — on a Windows/COFF target, widen the produced binary's stack
+ * reserve past the PE default's 1 MiB so the compiler's deep-but-finite recursive passes (checker
+ * monomorphization, codegen lowering) do not overflow it on the OS whose default stack is smallest.
+ *
+ * @param argv     the link argument vector so far
+ * @param emit_os  the RESOLVED TARGET's own OS (`LinkTargetKeys.emit_os`) — "windows" enables it
+ * @return         `argv` with the flag appended on a Windows target, else unchanged
+ */
+fn append_windows_stack_reserve_flag(argv: []str, emit_os: str) -> []str {
+    if emit_os != WINDOWS_OS_NAME { return argv }
+    teko::list::push(argv, WINDOWS_STACK_RESERVE_FLAG)
 }
 
 /**
@@ -3698,19 +3731,82 @@ fn item_trace_label(it: checker::TItem) -> str {
 }
 
 /**
- * trace_native_item — print `it`'s trace label to stderr, prefixed by its 1-based position out of
- * `total`, when `native_trace_items_enabled`. A no-op otherwise, so the ordinary build's output is
- * byte-identical to before this diagnostic existed.
+ * native_lowering_mono_ns — binds the EXISTING runtime symbol `tk_rt_monotonic_ns` (also wrapped by
+ * `journal::mono_ns_rt` and `time::monotonic_ns`) so the per-item native-lowering trace can stamp a
+ * wall-clock window around each item WITHOUT a new C symbol. Kept private to this backend driver, the
+ * one place that times item lowering. The origin is unspecified; only DELTAS between two readings on
+ * the same run are meaningful, which is exactly what a per-item duration is.
+ *
+ * @return  a monotonically non-decreasing nanosecond reading
+ * @since 0.3.1 native-lowering-timing
+ */
+extern fn native_lowering_mono_ns() -> i64 = "tk_rt_monotonic_ns" from "teko_rt"
+
+/**
+ * ns_delta_ms_str — the whole-milliseconds label (e.g. `"120ms"`) for the monotonic-ns window
+ * `[start_ns, end_ns]`, for the per-item native-lowering trace's trailing ` | Nms`. Truncates toward
+ * zero, so a sub-millisecond item reads `0ms` — the fast items the owner wants to tell apart from the
+ * slow ones by sight. The delta is non-negative (monotonic origin), so `i64` division is exact here.
+ *
+ * @param start_ns  the reading taken just before the item's lowering-and-encode window
+ * @param end_ns    the reading taken just after that window committed
+ * @return          the `"<ms>ms"` label
+ * @since 0.3.1 native-lowering-timing
+ */
+fn ns_delta_ms_str(start_ns: i64, end_ns: i64) -> str {
+    teko::str::concat(teko::i64_to_str((end_ns - start_ns) / 1000000), "ms")
+}
+
+/**
+ * trace_native_item — OPEN the per-item native-lowering trace line for `it` (its 1-based position out
+ * of `total`, then its label) to stderr WITHOUT a trailing newline, and return the monotonic-ns
+ * reading that starts the item's timing window, when `native_trace_items_enabled`. The line is closed
+ * by `trace_native_item_done` with a trailing ` | Nms` once the item's lowering-and-encode committed;
+ * an item whose native codegen faults mid-window therefore leaves its OPEN line on stderr WITHOUT the
+ * ` | Nms` — the last line names the exact crashing item, the ms-less tail marking it as the one that
+ * did not finish. A no-op returning `0` otherwise, so the ordinary build's output is byte-identical to
+ * before this diagnostic existed.
  *
  * @param i      the item's 0-based index in `prog.items`
  * @param total  `prog.items.len`, for the "N/M" the line renders
  * @param it     the item about to enter its own scoped lowering-and-encode window
- * @return       void
+ * @return       the window-start monotonic-ns reading (`0` when the trace is disabled)
  * @since 0.3.1
  */
-fn trace_native_item(i: u64, total: u64, it: checker::TItem) -> void {
+fn trace_native_item(i: u64, total: u64, it: checker::TItem) -> i64 {
+    if !native_trace_items_enabled() { return 0 }
+    teko::io::eprint(teko::str::concat("teko: native-lowering item ", teko::str::concat(teko::u64_to_str(i + 1), teko::str::concat("/", teko::str::concat(teko::u64_to_str(total), teko::str::concat(": ", item_trace_label(it)))))))
+    native_lowering_mono_ns()
+}
+
+/**
+ * trace_native_vmain — the `trace_native_item` counterpart for the virtual-main window: OPEN its trace
+ * line (`... item (virtual-main)`) WITHOUT a trailing newline and return the timing-window start, when
+ * enabled. Closed by `trace_native_item_done` exactly like a real item, so the virtual main is timed
+ * and crash-marked the same way. A no-op returning `0` otherwise.
+ *
+ * @return  the window-start monotonic-ns reading (`0` when the trace is disabled)
+ * @since 0.3.1 native-lowering-timing
+ */
+fn trace_native_vmain() -> i64 {
+    if !native_trace_items_enabled() { return 0 }
+    teko::io::eprint("teko: native-lowering item (virtual-main)")
+    native_lowering_mono_ns()
+}
+
+/**
+ * trace_native_item_done — CLOSE the trace line `trace_native_item`/`trace_native_vmain` opened, with
+ * a trailing ` | Nms` naming how long the item's lowering-and-encode window took (`start_ns` to now),
+ * when `native_trace_items_enabled`. Called only on the item's success path, so a faulting item never
+ * reaches it and its open line stays ms-less — the crash indicator. A no-op otherwise.
+ *
+ * @param start_ns  the reading `trace_native_item`/`trace_native_vmain` returned for this item
+ * @return          void
+ * @since 0.3.1 native-lowering-timing
+ */
+fn trace_native_item_done(start_ns: i64) -> void {
     if !native_trace_items_enabled() { return }
-    teko::io::eprintln(teko::str::concat("teko: native-lowering item ", teko::str::concat(teko::u64_to_str(i + 1), teko::str::concat("/", teko::str::concat(teko::u64_to_str(total), teko::str::concat(": ", item_trace_label(it)))))))
+    teko::io::eprintln(teko::str::concat(" | ", ns_delta_ms_str(start_ns, native_lowering_mono_ns())))
 }
 
 /**
@@ -3803,7 +3899,7 @@ fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Man
     mut i: u64 = 0
     loop {
         if i >= prog.items.len { break }
-        trace_native_item(i, prog.items.len, prog.items[i])
+        let t0 = trace_native_item(i, prog.items.len, prog.items[i])
         let child = region_new(region_root())
         region_enter(child)
         let outcome = fuse_lower_item_x86(robase, prelude, loose, prog.items[i], lifted_ph)
@@ -3816,12 +3912,13 @@ fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Man
                 loose = commit_loose(loose, out.loose)
                 lifted_ph = extend_lifted_placeholders(lifted_ph, out.new_lifted_count)
                 region_drop(child)
+                trace_native_item_done(t0)
             }
             error as e => return fail(dir, e.message)
         }
         i++
     }
-    if native_trace_items_enabled() { teko::io::eprintln("teko: native-lowering item (virtual-main)") }
+    let vt0 = trace_native_vmain()
     let vchild = region_new(region_root())
     region_enter(vchild)
     let vmain_outcome = fuse_virtual_main_x86(loose, prelude, robase, lifted_ph)
@@ -3832,6 +3929,7 @@ fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Man
             mt = fold_encoded_funcs_x86(mt, out.encoded)
             robase = commit_rodata_delta(robase, out.rodata)
             region_drop(vchild)
+            trace_native_item_done(vt0)
             match teko::backend::finish_encoded_module_x86(mt, robase, prelude.module.globals) {
                 teko::backend::EncodedModuleX86 as enc => {
                     let dwarf = build_dwarf_sink_for(dir, prog, enc.symbols, enc.text.len, debug)
@@ -4106,7 +4204,7 @@ fn emit_native_arm64_fused(dir: str, od: str, stem: str, prog: checker::TProgram
     mut i: u64 = 0
     loop {
         if i >= prog.items.len { break }
-        trace_native_item(i, prog.items.len, prog.items[i])
+        let t0 = trace_native_item(i, prog.items.len, prog.items[i])
         let child = region_new(region_root())
         region_enter(child)
         let outcome = fuse_lower_item_arm64(robase, prelude, loose, prog.items[i], lifted_ph)
@@ -4119,12 +4217,13 @@ fn emit_native_arm64_fused(dir: str, od: str, stem: str, prog: checker::TProgram
                 loose = commit_loose(loose, out.loose)
                 lifted_ph = extend_lifted_placeholders(lifted_ph, out.new_lifted_count)
                 region_drop(child)
+                trace_native_item_done(t0)
             }
             error as e => return fail(dir, e.message)
         }
         i++
     }
-    if native_trace_items_enabled() { teko::io::eprintln("teko: native-lowering item (virtual-main)") }
+    let vt0 = trace_native_vmain()
     let vchild = region_new(region_root())
     region_enter(vchild)
     let vmain_outcome = fuse_virtual_main_arm64(loose, prelude, robase, lifted_ph)
@@ -4135,6 +4234,7 @@ fn emit_native_arm64_fused(dir: str, od: str, stem: str, prog: checker::TProgram
             mt = fold_encoded_funcs_arm64(mt, out.encoded)
             robase = commit_rodata_delta(robase, out.rodata)
             region_drop(vchild)
+            trace_native_item_done(vt0)
             match teko::backend::finish_encoded_module(mt, robase, prelude.module.globals) {
                 teko::backend::EncodedModule as enc => {
                     let dwarf = build_dwarf_sink_for(dir, prog, enc.symbols, enc.text.len, debug)
@@ -4281,7 +4381,7 @@ fn emit_native_win(dir: str, od: str, stem: str, prog: checker::TProgram, m: Man
     mut i: u64 = 0
     loop {
         if i >= prog.items.len { break }
-        trace_native_item(i, prog.items.len, prog.items[i])
+        let t0 = trace_native_item(i, prog.items.len, prog.items[i])
         let child = region_new(region_root())
         region_enter(child)
         let outcome = fuse_lower_item_win(robase, prelude, loose, prog.items[i], lifted_ph)
@@ -4294,12 +4394,13 @@ fn emit_native_win(dir: str, od: str, stem: str, prog: checker::TProgram, m: Man
                 loose = commit_loose(loose, out.loose)
                 lifted_ph = extend_lifted_placeholders(lifted_ph, out.new_lifted_count)
                 region_drop(child)
+                trace_native_item_done(t0)
             }
             error as e => return fail(dir, e.message)
         }
         i++
     }
-    if native_trace_items_enabled() { teko::io::eprintln("teko: native-lowering item (virtual-main)") }
+    let vt0 = trace_native_vmain()
     let vchild = region_new(region_root())
     region_enter(vchild)
     let vmain_outcome = fuse_virtual_main_win(loose, prelude, robase, lifted_ph)
@@ -4310,6 +4411,7 @@ fn emit_native_win(dir: str, od: str, stem: str, prog: checker::TProgram, m: Man
             mt = fold_encoded_funcs_x86(mt, out.encoded)
             robase = commit_rodata_delta(robase, out.rodata)
             region_drop(vchild)
+            trace_native_item_done(vt0)
             match teko::backend::finish_encoded_module_x86(mt, robase, prelude.module.globals) {
                 teko::backend::EncodedModuleX86 as enc => finish_native_object(dir, od, stem, teko::backend::emit_coff(enc), prog, m)
                 error as e => fail(dir, e.message)

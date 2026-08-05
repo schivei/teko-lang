@@ -319,7 +319,7 @@ fn enum_carrier_ltype() -> LType { LType::I32 }
 
 /** ltype_of — the machine class of a RESOLVED checker::Type: an integer/float by width,
     an `enum`'s integer carrier for a Named type registered in `enums` (`enum_carrier_ltype`),
-    or Ptr for every other address-shaped type (str/slice/Ref/ptr/Named/Optional/Variant/
+    or Ptr for every other address-shaped type (str/slice/Ref/ptr/Named/Variant/
     Func/Byte — all EXERCISED from N2; `byte`'s own I8 mapping is deferred past A1-4,
     CAUTION: only apply this mapping to an operand's OWN type, never to a container's element type
     (e.g., do not map `Byte` in `Slice{element: Byte}`) — see `prim_kind_of`'s doc for the narrower, SAFE fix this phase actually needs),
@@ -990,9 +990,12 @@ pub type LExternFn = struct { namespace: str; name: str; c_symbol: str }
  * every back/break edge flow into them), so a `break`/`continue` jump must
  * supply, in this SAME order, the CURRENT VReg of each — mirroring the
  * SAME block-arg merge principle an if-expression's result VReg already
- * uses (§2.4).
+ * uses (§2.4). `region_base` is `ctx.region_stack.len` at the loop body's own entry (BEFORE its own
+ * per-iteration region opens, NP5) — the `defer_base` twin for regions: a break/continue crossing
+ * this loop closes (leave+drop) exactly the regions opened SINCE, via `close_native_regions_to`,
+ * never an enclosing scope's.
  */
-pub type LoopTargets = struct { label: str; head: u32; exit: u32; defer_base: u64; names: []str }
+pub type LoopTargets = struct { label: str; head: u32; exit: u32; defer_base: u64; names: []str; region_base: u64 }
 
 /**
  * LowerCtx — the lowering state threaded through the expr/stmt walk: the
@@ -1506,6 +1509,198 @@ fn emit_region_drops(ctx: LowerCtx, line: u32, col: u32) -> LowerCtx {
  */
 fn binding_conveys_escape(escaping: []str, name: str) -> bool {
     contains_str(escaping, name)
+}
+
+/**
+ * pop_region_stack — `stack` with its TOP frame removed (region-stack twin of a defer-stack
+ * truncation): rebuilt by an O(depth) copy, since this dialect has no in-place array mutation and no
+ * slice-range operator to truncate with. `stack.len` is bounded by `checker::TK_REGION_STACK_CAP`
+ * (`residence.tks`, 64), so this stays cheap. A no-op (returns `stack` unchanged) when `stack` is
+ * already empty — callers that need the "invariant broken" case NAMED (`close_native_region`) check
+ * `stack.len == 0` themselves before calling.
+ *
+ * @param stack  the open lexical-region stack
+ * @return       `stack` minus its top entry
+ * @since 0.3.1
+ */
+fn pop_region_stack(stack: []NativeRegionFrame) -> []NativeRegionFrame {
+    if stack.len == 0 { return stack }
+    mut acc: []NativeRegionFrame = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i + 1 >= stack.len { break }
+        acc = teko::list::push(acc, stack[i])
+        i++
+    }
+    acc
+}
+
+/**
+ * region_stack_with_top_decl — `stack` rebuilt with its TOP frame's `decl_name` replaced by `name`
+ * (the N-level selector's REGISTRATION half, §1/§7): a fresh non-escaping local binding registers
+ * itself as the accumulator its ENCLOSING lexical scope declares, so a later self-append inside a
+ * NESTED scope (an inner loop/if-arm) can route its growth back HERE (`native_scope_region_of`)
+ * instead of the nested scope's own shorter-lived region — the fix `mem_loop_per_iter` pins. A no-op
+ * (returns `stack` unchanged) when `stack` is empty (no open scope to register into — a lambda body,
+ * which opens no frame region under this degrau).
+ *
+ * @param stack  the open lexical-region stack
+ * @param name   the freshly bound local's name
+ * @return       `stack` with its top frame's `decl_name` replaced by `name`
+ * @since 0.3.1
+ */
+fn region_stack_with_top_decl(stack: []NativeRegionFrame, name: str) -> []NativeRegionFrame {
+    if stack.len == 0 { return stack }
+    let top = stack[stack.len - 1]
+    let popped = pop_region_stack(stack)
+    teko::list::push(popped, NativeRegionFrame { region_vreg = top.region_vreg; decl_name = name; is_loop = top.is_loop })
+}
+
+/**
+ * register_scope_decl_name — `lower_binding`'s own registration call: mark `name` as the
+ * `Scope`-tier accumulator this binding's ENCLOSING open region declares
+ * (`region_stack_with_top_decl`), so a self-append of `name` from inside a nested scope routes its
+ * growth back here instead of dying with the nested scope. Overwrites whatever `decl_name` the
+ * top frame held before (a scope with more than one non-escaping local only tracks its LAST-bound
+ * name this way; an earlier one's self-append, if any, falls back to the FRAME via
+ * `native_scope_region_of`'s `null` case — leak-safe, never UAF, per the SAFETY INVARIANT).
+ *
+ * @param ctx   the lowering context, positioned right after `name` is decided (before its RHS lowers)
+ * @param name  the freshly bound local's name
+ * @return      the context with its `region_stack`'s top frame's `decl_name` set to `name`
+ * @since 0.3.1
+ */
+fn register_scope_decl_name(ctx: LowerCtx, name: str) -> LowerCtx {
+    ctx_with_regions(ctx, region_stack_with_top_decl(ctx.region_stack, name))
+}
+
+/**
+ * region_current_vreg — the VReg of the handle of the CURRENT region (the top of
+ * `ctx.region_stack`): the region `tk_alloc`/`tk_slice_push`/`tk_slice_elem_box` bump-allocate from
+ * RIGHT NOW, and the parent a nested scope's own `tk_region_new_u` opens against. When the stack is
+ * empty (before the frame opens, or a value-form site with no live frame), emits a fresh
+ * `tk_region_root_u()` call and returns ITS VReg — the twin of the C route's
+ * `cg_enclosing_region_expr` (`codegen.tks:8052`), which falls back to `tk_region_root()` on an
+ * empty stack. Allocates the root VReg on demand (only emits `tk_region_root_u` when actually
+ * needed), matching `open_frame_region`'s own `rr` — but this call never touches `ctx.region_stack`
+ * itself (a fallback root handle is not a NEW open region, just a value to parent one against or to
+ * allocate directly into).
+ *
+ * @param ctx  the lowering context (its `region_stack`)
+ * @return     the context (possibly with a fallback `tk_region_root_u` emitted) + the current
+ *             region's VReg
+ * @since 0.3.1
+ */
+fn region_current_vreg(ctx: LowerCtx) -> Lowered {
+    if ctx.region_stack.len > 0 { return Lowered { ctx = ctx; vreg = ctx.region_stack[ctx.region_stack.len - 1].region_vreg } }
+    let r = ctx_alloc(ctx)
+    Lowered { ctx = ctx_append(r.ctx, call_inst(r.vreg, "tk_region_root_u", teko::list::empty(), false, 0, 0)); vreg = r.vreg }
+}
+
+/**
+ * open_native_region — open a lexical region (NP5, §5/§7): emit `bl = tk_region_new_u(<current>)`
+ * (`region_current_vreg`, so a NESTED scope parents against its own enclosing scope, not root) and
+ * `void tk_region_enter_u(bl)`, push a `NativeRegionFrame` onto `ctx.region_stack`, and return the
+ * grown context. Called on the entry of every `{}`/if-arm/when-arm block and, PER ITERATION, a
+ * loop's own body — twin of the C route's `emit_block_region` open (`codegen.tks:8302-8304`), a
+ * VReg in place of the textual `_tkbr<n>` name (§2a). Every `tk_alloc`/slice-grow/box a statement
+ * inside this scope emits now bump-allocates from `bl` — UNLESS a self-append's N-level selector
+ * (`native_scope_region_of`) or an escaping RHS's conveyance bracket detours it elsewhere.
+ *
+ * @param ctx        the lowering context
+ * @param decl_name  the `Scope`-tier accumulator this scope declares at its top, or "" if none yet
+ *                    (registered later, per binding, by `register_scope_decl_name`)
+ * @param is_loop    is this region a loop body (dropped PER ITERATION by `close_loop_body`, not once)?
+ * @param line       the source line to stamp the emitted calls with
+ * @param col        the source column to stamp
+ * @return           the context with the region opened, entered, and pushed
+ * @since 0.3.1
+ */
+fn open_native_region(ctx: LowerCtx, decl_name: str, is_loop: bool, line: u32, col: u32) -> LowerCtx | error {
+    let cur = region_current_vreg(ctx)
+    let bl = ctx_alloc(cur.ctx)
+    let with_new = ctx_append(bl.ctx, call_inst(bl.vreg, "tk_region_new_u", one_region_arg(cur.vreg), false, line, col))
+    let entered = ctx_append(with_new, void_call_inst("tk_region_enter_u", one_region_arg(bl.vreg), false, line, col))
+    ctx_with_regions(entered, teko::list::push(entered.region_stack, NativeRegionFrame { region_vreg = bl.vreg; decl_name = decl_name; is_loop = is_loop }))
+}
+
+/**
+ * close_native_region — close the region on the TOP of `ctx.region_stack` at a scope's own exit
+ * edge (NP5, §5/§7): emit `void tk_region_leave()` and `void tk_region_drop_u(<top>.region_vreg)`,
+ * then pop it (`pop_region_stack`). Twin of the C route's `emit_block_region` close
+ * (`codegen.tks:8311`). Every ESCAPING value this scope's statements produced was already conveyed
+ * OUT (to `rr`, by `binding_conveys_escape`'s brackets) before this ever runs — this drop only ever
+ * reclaims scratch that never left the scope (the residence-rule split, `modelo-…:§0`).
+ *
+ * @param ctx   the lowering context (its `region_stack` expected non-empty)
+ * @param line  the source line to stamp the emitted calls with
+ * @param col   the source column to stamp
+ * @return      the context with the top region left, dropped, and popped
+ * @throws      a NAMED internal error when `ctx.region_stack` is already empty (an invariant break —
+ *              every call site opens exactly one region before it can reach this close)
+ * @since 0.3.1
+ */
+fn close_native_region(ctx: LowerCtx, line: u32, col: u32) -> LowerCtx | error {
+    if ctx.region_stack.len == 0 {
+        return error { message = "native backend N1: close_native_region with no open region (internal invariant break)" }
+    }
+    let top = ctx.region_stack[ctx.region_stack.len - 1]
+    let left = ctx_append(ctx, void_call_inst("tk_region_leave", teko::list::empty(), false, line, col))
+    let dropped = ctx_append(left, void_call_inst("tk_region_drop_u", one_region_arg(top.region_vreg), false, line, col))
+    ctx_with_regions(dropped, pop_region_stack(ctx.region_stack))
+}
+
+/**
+ * close_native_regions_to — close every region open ABOVE `base` on `ctx.region_stack`, innermost
+ * (top) first, repeating `close_native_region` — the BOUNDED unwind `break`/`continue` need: only the
+ * regions opened INSIDE the loop being exited (the loop's own per-iteration body, and any nested
+ * if/when-arm regions between the jump site and the loop body) close; every region open BEFORE the
+ * loop (`base` = its own `region_base`, `LoopTargets`) stays open, exactly like `replay_defers(ctx,
+ * defer_base)` only fires the defers registered since the loop's own entry.
+ *
+ * @param ctx   the lowering context
+ * @param base  the target depth (`ctx.region_stack.len` this call leaves behind)
+ * @param line  the source line to stamp the emitted calls with
+ * @param col   the source column to stamp
+ * @return      the context with every region above `base` left, dropped, and popped
+ * @throws      propagated from `close_native_region` (unreachable in practice — `base` is always
+ *              a depth this scope actually passed through on the way in)
+ * @since 0.3.1
+ */
+fn close_native_regions_to(ctx: LowerCtx, base: u64, line: u32, col: u32) -> LowerCtx | error {
+    mut cur = ctx
+    loop {
+        if cur.region_stack.len <= base { break }
+        cur = match close_native_region(cur, line, col) { LowerCtx as c => c; error as err => return err }
+    }
+    cur
+}
+
+/**
+ * native_scope_region_of — the N-level selector (§1/§7): the VReg of the region of the scope that
+ * DECLARED the `Scope`-tier accumulator `name` — walk `stack` top (innermost) to base (outermost)
+ * looking for the `NativeRegionFrame` whose `decl_name == name`, and return its `region_vreg`, so a
+ * self-append of `name` from inside a NESTED scope (an inner loop/if-arm) grows the buffer THERE
+ * instead of the nested scope's own shorter-lived region (else the buffer would die per-iteration —
+ * UAF, the exact heisenbug this crumb kills). Returns `null` when `name` was never registered as a
+ * declarant on `stack` (`register_scope_decl_name` never ran for it, or it is declared at a scope
+ * this self-append is not lexically inside) — the caller falls back to the FRAME (leak-safe; never
+ * the innermost/current, which could easily be the WRONG, too-short-lived choice). Twin of the C
+ * route's `scope_region_of` (`transicao-…:372`), a VReg in place of the textual `_tkbr` name.
+ *
+ * @param stack  the open lexical-region stack
+ * @param name   the self-append target's name
+ * @return       the declaring scope's region VReg, or `null` if unresolved
+ * @since 0.3.1
+ */
+fn native_scope_region_of(stack: []NativeRegionFrame, name: str) -> u32 | null {
+    mut i: u64 = stack.len
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        if stack[i].decl_name == name { return stack[i].region_vreg }
+    }
+    null
 }
 
 /** lower_expr — lower a typed expression to LIR, returning the VReg carrying its value.
@@ -3069,7 +3264,7 @@ fn lower_args_ref_aware(ctx: LowerCtx, args: []checker::TExpr, rf: []bool, param
  *   the content pointer, not the address of the `{ptr,len}` pair holding it — which is exactly
  *   the "passed a value where an address was needed" shape this whole degrau exists to fix, one
  *   level removed;
- * - an AGGREGATE-typed local (`struct`/`class`/`Optional`/a declared `Variant` —
+ * - an AGGREGATE-typed local (`struct`/`class`/a declared `Variant` —
  *   `!is_register_value_type`) is, in this backend's own memory model, ALREADY represented BY
  *   its address (§ NATIVE-AGG-SLICE-BY-ADDRESS) — the local's own VReg IS the address to pass,
  *   no different from any other read of it;
@@ -3943,13 +4138,18 @@ fn lower_bytes_from_ptr_call(ctx: LowerCtx, c: checker::TCall) -> LoweredFat | e
 
 /**
  * is_buf_ptr_call — recognizes `teko::mem::buf_ptr`'s bare last segment: the arena bump-allocate
- * builtin that allocates `len` bytes into the enclosing region (0.3.1.0 degrau 26).
+ * builtin that allocates `len` bytes in ROOT (0.3.1.0 degrau 26).
  *
  * `teko::mem::buf_ptr(len: u64) -> ptr<byte>` is intercepted BEFORE the plain `call_symbol`
- * resolver table because the enclosing region may not be directly accessible at lowering time
- * for the native backend (unlike C codegen, where `cg_enclosing_region_expr` tracks the open
- * region frame stack). The native backend routes `buf_ptr` through `tk_region_alloc` with
- * `tk_region_root()` as the allocation context.
+ * resolver table because `buf_ptr` returns a RAW `ptr<byte>` with NO lifetime tracking of its
+ * own — the checker/backend cannot see whether the caller retains it past the innermost open
+ * scope (the exact shape a `{}`/if-arm/loop-iteration region NP5 opens would free out from under,
+ * a confirmed native-runtime UAF measured on `theory/heisenbug-fix`'s first NP5 push, CI run
+ * 30946284244: gen1 self-host regressed from item 6616/6616+link to a SIGSEGV at item 3518,
+ * `cg_name_reaches_byvalue`). Routing this ONE builtin to root is leak-safe (root is never
+ * dropped mid-function) and sidesteps that hazard entirely; giving `buf_ptr` its own tracked
+ * lifetime (so it COULD route to the enclosing scope) is deferred to the later memory program /
+ * route B — out of this crumb's scope.
  *
  * @param callee  the call's callee path
  * @return        true iff `callee`'s bare last segment names `buf_ptr`
@@ -3961,14 +4161,20 @@ fn is_buf_ptr_call(callee: parser::Path) -> bool {
 
 /**
  * lower_buf_ptr_call — `teko::mem::buf_ptr(len: u64) -> ptr<byte>`: allocate `len` bytes into
- * the current region (via `tk_region_root()`) and return the pointer. This is the enclosing-
- * region twin of C codegen's `emit_buf_ptr`.
+ * ROOT (via `tk_region_root_u()`) and return the pointer. This is the enclosing-region twin of C
+ * codegen's `emit_buf_ptr` MINUS the enclosing-region routing (`is_buf_ptr_call`'s own doc):
+ * `buf_ptr`'s raw, untracked-lifetime pointer routinely outlives the innermost lexical scope, so
+ * routing it to `region_current_vreg` (NP5's per-arm/per-iteration region) is UNSOUND — that
+ * region's own `close_native_region`/`close_loop_body` drop would free the buffer while a caller
+ * still holds it. Root is NEVER dropped mid-function, so this is leak-safe by construction
+ * (never UAF) — the residual "buf_ptr leaks past its natural scope" cost is the SAME one this
+ * builtin has always carried, not a new one.
  *
  * The runtime call is:
  *   `ptr<byte> result = tk_region_alloc(tk_region_root(), (size_t)(len))`
  *
  * We lower this to two `LCall` instructions:
- *   1. Call `tk_region_root()` to get the current region handle
+ *   1. Call `tk_region_root_u()` to get the root region handle
  *   2. Call `tk_region_alloc(region, len)` to allocate within that region
  *
  * @param ctx  the lowering context
@@ -3985,11 +4191,12 @@ fn lower_buf_ptr_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lo
     }
     // Lower the length argument
     let len_lowered = match lower_expr(ctx, c.args[0]) { Lowered as x => x; error as err => return err }
-    
-    // Call tk_region_root() to get the current region
+
+    // Call tk_region_root_u() to get the ROOT region (leak-safe: never UAF, buf_ptr's raw
+    // pointer routinely outlives the innermost lexical scope).
     let region_vreg = ctx_alloc(len_lowered.ctx)
-    let with_region_call = ctx_append(region_vreg.ctx, call_inst(region_vreg.vreg, "tk_region_root", teko::list::empty(), false, e.line, e.col))
-    
+    let with_region_call = ctx_append(region_vreg.ctx, call_inst(region_vreg.vreg, "tk_region_root_u", teko::list::empty(), false, e.line, e.col))
+
     // Call tk_region_alloc(region, len) to allocate
     let result_vreg = ctx_alloc(with_region_call)
     let alloc_args = two_args(region_vreg.vreg, len_lowered.vreg)
@@ -5180,9 +5387,9 @@ fn native_builtin_symbol(last: str) -> str | null {
  * `Variant` this backend already builds (`str | error`, `[]str | error`), so a STANDALONE call to
  * `teko::env::var`/`env::cwd`/`io::read_file`/`fs::list_dir` lowers through the same twin path the
  * compiler's own `extern fn` declarations take. The `error | null` writers are NOT here: the
- * checker types their standalone form as `Optional { Error }` (`host_error_optional`), a
- * representation this backend does not yet build a value of, so they keep their honest stop until
- * native `Optional` lowering lands (reported alongside 0.3.1.0 degrau 34).
+ * checker types their standalone form as `Variant { Null, Error }` (`host_error_optional`), a
+ * null-union representation this backend does not yet build a value of for a STANDALONE call, so
+ * they keep their honest stop (reported alongside 0.3.1.0 degrau 34).
  *
  * @param str last  the call path's LAST segment (the bare builtin name)
  * @return str | null  the host symbol for a Variant-returning host read, or `null` otherwise
@@ -6246,12 +6453,18 @@ pub fn lower_stmt(ctx: LowerCtx, s: checker::TStatement) -> LowerStmtOut | error
  * @return LowerStmtOut | error  the context with the name bound, or an honest stop
  * @throws  when the target is a destructuring pattern (out of the N1 subset), or propagated
  *          from lowering the value
+ * @implNote NP5: a NON-escaping binding registers `name` as its enclosing open region's own
+ *           `decl_name` (`register_scope_decl_name`, the N-level selector's registration half,
+ *           §1/§7) BEFORE its RHS lowers — so a LATER self-append of `name` from inside a nested
+ *           scope (an inner loop/if-arm) routes its growth back to THIS scope
+ *           (`native_scope_region_of`) instead of dying with the nested one. An escaping binding
+ *           skips this: its value is conveyed to `rr` regardless of scope, never block-routed.
  */
 fn lower_binding(ctx: LowerCtx, b: checker::TBinding) -> LowerStmtOut | error {
     let name = match bind_target_name(b.target) { str as s => s; error as err => return err }
     match b.bound { checker::Reference => return bind_reference_local(ctx, b, name); _ => { } }
     if binding_conveys_escape(ctx.escaping, name) { return lower_binding_conveyed(ctx, b, name) }
-    lower_binding_direct(ctx, b, name)
+    lower_binding_direct(register_scope_decl_name(ctx, name), b, name)
 }
 
 /**
@@ -6424,8 +6637,8 @@ fn bind_mutable_fat(fo: LoweredFat, name: str, line: u32, col: u32) -> LowerStmt
  * THE LAST TWO WERE MISSING UNTIL DEGRAU 25, and this doc used to claim they were closed at the
  * other end instead, by `lower_null_lit`'s honest-stop. They were not. Only the struct-literal
  * field reached that stop (a field value IS typed against its declared type, so its bare `null`
- * carries `checker::Null`); a call ARGUMENT is typed with no expected type at all and carries the
- * `Optional{Void}` bare-null sentinel, which walked straight past the stop into a raw `const 0`
+ * carries `checker::Null`); a call ARGUMENT is typed with no expected type at all and (pre-0.3.1)
+ * carried the legacy bare-null sentinel, which walked straight past the stop into a raw `const 0`
  * that the callee's own `match` then read as the wrapper's base address — measured as a SIGSEGV
  * against a C route that answered correctly. A bare `T` flowing into either placement was equally
  * unwrapped and equally fatal. Neither placement guesses any more: each looks its declared type up
@@ -6493,31 +6706,66 @@ fn lower_value_into_null_union(ctx: LowerCtx, shape: NullUnionShape, value: chec
 
 /**
  * lower_value_into_variant — the general (three-or-more-member, or non-null-bearing)
- * `checker::Variant` arm of `lower_value_into_type`: a bare `null` literal builds the absence
- * wrapper at the union's OWN `Null` member index (`lower_variant_null_construct`); a value ALREADY
- * typed as the variant itself (re-flowing an existing union value — the same passthrough
- * `lower_value_into_null_union` uses for `T | null`) passes through unwrapped; any other value (a
- * bare case, e.g. a `Box` or a bare `error{…}` flowing into a declared `Box | error` slot) is
- * wrapped via `lower_variant_construct` at its own matched member index (#382, degrau N2).
+ * `checker::Variant` arm of `lower_value_into_type`: a `Null`-typed value (a bare `null` literal, OR
+ * a `match`/`if` sub-expression whose OWN inferred type collapsed to bare `Null` because every one
+ * of its arms is, recursively, `null` — `checker::resolve.type_join`'s bare-null-only join) builds
+ * the absence wrapper at the union's OWN `Null` member index (`lower_variant_null_construct`); a
+ * value whose type is DIRECTLY one of `v`'s own declared members (`direct_variant_member_index` —
+ * INCLUDING a member that happens to itself be a declared variant, e.g. a bare `Inner` flowing into
+ * `-> Outer`, `Outer = variant A | Inner`) is ALWAYS wrapped via `lower_variant_construct` at its
+ * matched index; any other value (a bare case reached only through alias nesting, e.g. a `Box` or a
+ * bare `error{…}` flowing into a declared `Box | error` slot) is wrapped the same way, UNLESS its
+ * own type already expands to SOME `Variant` shape — the "value ALREADY typed as the variant itself"
+ * re-flow (the same passthrough `lower_value_into_null_union` uses for `T | null`) — in which case it
+ * passes through unwrapped.
  *
- * THE `null` ARM IS DEGRAU 30, and it is the WRITER half of `lower_null_pattern_test`'s reader.
+ * THE DIRECT-MEMBER CHECK RUNS FIRST (degrau 33, #cego-gen2), AHEAD OF the "expands to some
+ * `Variant`" passthrough test: a member that is itself a declared variant (`Inner` above) ALSO
+ * expands to a bare `Variant`, so the passthrough test alone used to take the SAME arm for it —
+ * `value`'s OWN wrapper (tagged in `Inner`'s tag space) flowed out unrewrapped, so a later `match`
+ * against `v`'s members read `Inner`'s tag as if it were `v`'s — a silent WRONG ANSWER (measured: a
+ * `Holder{node: Inner}.node` returned as `Outer` matched the WRONG arm, reading `Inner`'s boxed
+ * payload through `Outer`'s unrelated field layout) — the general three-or-more-member twin of the
+ * two-level `Outer = variant P | Q` bug `lower_variant_construct`'s own doc already names (degrau
+ * 23, direct vs. nested). Checking DIRECT membership first (rather than widening the passthrough
+ * test to "is it the SAME declared variant as `v`") keeps every OTHER passthrough this function
+ * already relied on intact: a value's own type need not equal `v` structurally member-for-member
+ * for the re-flow case to be legitimate (measured: `teko::checker::eval_len_field`'s own `ConstValue
+ * | error` tail — a wider structural-equality gate honest-stopped there with "value's type is not a
+ * member of its declared variant", a REGRESSION a first attempt at this fix introduced and this
+ * narrower direct-membership-first ordering does not).
+ *
+ * THE `Null` ARM IS DEGRAU 30, and it is the WRITER half of `lower_null_pattern_test`'s reader.
  * Without it a `return null` into a `[]byte | null | error` fell through to
  * `lower_variant_construct`, whose by-TYPE member lookup has no `Null` case, and stopped with
  * "value's type is not a member of its declared variant" — measured on the compiler's own
  * `codegen::emit_variant_wrap_exact_pass`. Landing only the reader would have been worse than
  * landing neither: the `null` arm would have tested a tag that nothing ever stored.
  *
+ * KEYED BY `value.type`, NOT `value.kind` (native-N1-null-widen, O1 retirement): the C route wraps
+ * by `value.type`'s member key rather than by node kind (`codegen.tks:6816-6829`), so a `match`/`if`
+ * collapsed to bare `Null` by nested `type_join` folding needs the SAME ancestor-level widen a bare
+ * `TNullLit` gets — otherwise its leaf `null` literals reach `lower_null_lit` with no enclosing
+ * union coercion in sight and the own backend honest-stops (measured on the self-hosted native gate,
+ * `teko::checker::check_must_free_locals_stmt`'s own nested `match` tail).
+ *
  * @param LowerCtx ctx  the lowering context to append the value's instructions into
  * @param checker::Variant v  the declared variant the value is placed into
  * @param checker::TExpr value  the typed value expression being placed into the variant slot
  * @return Lowered  the value's own VReg (already the variant), or a freshly built wrapper
  * @throws  propagated from lowering the value, or when its type names no member of `v`
- * @since 0.3.1 (own-backend general variant construction, degrau N2); 0.3.1.0 degrau 30 (`null`)
+ * @since 0.3.1 (own-backend general variant construction, degrau N2); 0.3.1.0 degrau 30 (`null`);
+ *        native-N1-null-widen (O1 retirement — a non-literal `Null`-typed sub-tree); 0.3.1.0
+ *        degrau 33 (a variant-typed value that is itself a DIRECT member of `v`, #cego-gen2)
  */
 fn lower_value_into_variant(ctx: LowerCtx, v: checker::Variant, value: checker::TExpr) -> Lowered | error {
-    match value.kind {
-        checker::TNullLit => return lower_variant_null_construct(ctx, v, value)
+    match value.type {
+        checker::Null => return lower_variant_null_construct(ctx, v, value)
         _ => { }
+    }
+    match direct_variant_member_index(v.members, value.type) {
+        u32 => return lower_variant_construct(ctx, v, value)
+        null => { }
     }
     match expand_named_variant(value.type, ctx.variants) {
         checker::Variant => lower_expr(ctx, value)
@@ -6526,22 +6774,24 @@ fn lower_value_into_variant(ctx: LowerCtx, v: checker::Variant, value: checker::
 }
 
 /**
- * lower_variant_null_construct — the `null`-literal arm of `lower_value_into_variant`: the absence
- * wrapper (`lower_variant_absent`) tagged with the union's OWN `Null` member index
+ * lower_variant_null_construct — the `Null`-typed arm of `lower_value_into_variant`: the absence
+ * wrapper (`lower_null_absent_widened`) tagged with the union's OWN `Null` member index
  * (`variant_null_member_index`) — the SAME lookup `lower_null_pattern_test` reads, so writer and
  * reader cannot disagree. A union declaring no `Null` member keeps a NAMED honest stop; the checker
  * already rejects a bare `null` in such a slot, so reaching it is an invariant break.
  *
  * @param LowerCtx ctx  the lowering context to append the construction's instructions into
- * @param checker::Variant v  the declared variant the `null` is placed into
- * @param checker::TExpr e  the `null` literal (for its source position)
+ * @param checker::Variant v  the declared variant the `null`-typed value is placed into
+ * @param checker::TExpr e  the `null` literal, or a `Null`-typed `match`/`if` sub-expression
  * @return Lowered  the absence wrapper's alloca'd base address
- * @throws  when `v` declares no `Null` member (an internal invariant break)
- * @since 0.3.1.0 (degrau 30 — `null` into a union of any arity)
+ * @throws  when `v` declares no `Null` member (an internal invariant break), or propagated from
+ *          lowering a non-literal `e`'s own effects
+ * @since 0.3.1.0 (degrau 30 — `null` into a union of any arity); native-N1-null-widen
+ *        (O1 retirement — the non-literal `Null`-typed sub-tree)
  */
 fn lower_variant_null_construct(ctx: LowerCtx, v: checker::Variant, e: checker::TExpr) -> Lowered | error {
     match variant_null_member_index(v) {
-        u32 as index => lower_variant_absent(ctx, index to i64, e)
+        u32 as index => lower_null_absent_widened(ctx, index, e)
         null => error { message = "native backend N1: a `null` value placed into a union that declares no `null` member (internal)" }
     }
 }
@@ -7664,8 +7914,9 @@ fn find_loop_target(loops: []LoopTargets, label: str) -> LoopTargets | error {
 fn lower_break(ctx: LowerCtx, b: checker::TBreakStmt) -> LowerStmtOut | error {
     let target = match find_loop_target(ctx.loop_targets, b.label) { LoopTargets as t => t; error as err => return err }
     let replayed = match replay_defers(ctx, target.defer_base) { LowerCtx as c => c; error as err => return err }
-    let args = jump_args_for_names(replayed.env, target.names)
-    LowerStmtOut { ctx = ctx_append(replayed, jump_inst(target.exit, args, 0, 0)); terminated = true }
+    let unwound = match close_native_regions_to(replayed, target.region_base, 0, 0) { LowerCtx as c => c; error as err => return err }
+    let args = jump_args_for_names(unwound.env, target.names)
+    LowerStmtOut { ctx = ctx_append(unwound, jump_inst(target.exit, args, 0, 0)); terminated = true }
 }
 
 /**
@@ -7684,8 +7935,9 @@ fn lower_break(ctx: LowerCtx, b: checker::TBreakStmt) -> LowerStmtOut | error {
 fn lower_continue(ctx: LowerCtx, c: checker::TContinueStmt) -> LowerStmtOut | error {
     let target = match find_loop_target(ctx.loop_targets, c.label) { LoopTargets as t => t; error as err => return err }
     let replayed = match replay_defers(ctx, target.defer_base) { LowerCtx as c2 => c2; error as err => return err }
-    let args = jump_args_for_names(replayed.env, target.names)
-    LowerStmtOut { ctx = ctx_append(replayed, jump_inst(target.head, args, 0, 0)); terminated = true }
+    let unwound = match close_native_regions_to(replayed, target.region_base, 0, 0) { LowerCtx as c2 => c2; error as err => return err }
+    let args = jump_args_for_names(unwound.env, target.names)
+    LowerStmtOut { ctx = ctx_append(unwound, jump_inst(target.head, args, 0, 0)); terminated = true }
 }
 
 /**
@@ -7695,7 +7947,10 @@ fn lower_continue(ctx: LowerCtx, c: checker::TContinueStmt) -> LowerStmtOut | er
  * `defer_base`, LIFO) and append an implicit jump BACK to `head` carrying
  * the current VReg of each promoted name — the body fell through, an
  * ordinary `while(1)` iteration end (mirrors the C backend's
- * `emit_loop`'s fall-through edge, `codegen.tks:5845-5850`) (A1-2, #382).
+ * `emit_loop`'s fall-through edge, `codegen.tks:5845-5850`) (A1-2, #382). NP5: the fall-through also
+ * closes (`close_native_region`) the loop body's OWN per-iteration region BEFORE the jump back to
+ * `head`, where its `open_native_region` counterpart opens a FRESH one for the next go-around — the
+ * per-iteration death `lower_loop`'s doc describes.
  *
  * @param LowerCtx ctx  the context after lowering the loop's body
  * @param u32 head  the loop head block a fall-through implicitly continues to
@@ -7708,8 +7963,9 @@ fn lower_continue(ctx: LowerCtx, c: checker::TContinueStmt) -> LowerStmtOut | er
 fn close_loop_body(ctx: LowerCtx, head: u32, names: []str, defer_base: u64) -> LowerCtx | error {
     if block_terminated(ctx.func, ctx.block_id) { return ctx }
     let replayed = match replay_defers(ctx, defer_base) { LowerCtx as c => c; error as err => return err }
-    let args = jump_args_for_names(replayed.env, names)
-    ctx_append(replayed, jump_inst(head, args, 0, 0))
+    let closed = match close_native_region(replayed, 0, 0) { LowerCtx as c => c; error as err => return err }
+    let args = jump_args_for_names(closed.env, names)
+    ctx_append(closed, jump_inst(head, args, 0, 0))
 }
 
 /**
@@ -7736,6 +7992,12 @@ fn close_loop_body(ctx: LowerCtx, head: u32, names: []str, defer_base: u64) -> L
  * @param u32 exit_block  the loop's exit block id (the new current block)
  * @param LEnv exit_env  the exit block's own promoted env
  * @return LowerCtx  the context positioned after the loop
+ * @implNote NP5: `region_stack` is ALSO restored from `outer` (not threaded from `body_done`),
+ *           exactly like `defers`/`loop_targets` — the loop body's own per-iteration region (and any
+ *           regions nested inside it) must never survive past the loop; every runtime path out
+ *           already closed them (`close_loop_body`'s fall-through, `close_native_regions_to` on
+ *           break/continue, `emit_region_leaves`/`emit_region_drops` on a return), so `outer`'s
+ *           pre-loop depth is the exact, always-correct post-loop bookkeeping value.
  */
 fn close_loop(outer: LowerCtx, body_done: LowerCtx, exit_block: u32, exit_env: LEnv) -> LowerCtx {
     LowerCtx {
@@ -7746,7 +8008,7 @@ fn close_loop(outer: LowerCtx, body_done: LowerCtx, exit_block: u32, exit_env: L
         flat_symbols = body_done.flat_symbols; ret_type = body_done.ret_type
         has_ret_len_slot = body_done.has_ret_len_slot; ret_len_slot = body_done.ret_len_slot
         ref_fns = body_done.ref_fns; field_decls = body_done.field_decls; addr_taken = body_done.addr_taken; table = body_done.table
-        region_stack = body_done.region_stack; escaping = body_done.escaping; frees_old_names = body_done.frees_old_names; bracket_depth = body_done.bracket_depth
+        region_stack = outer.region_stack; escaping = body_done.escaping; frees_old_names = body_done.frees_old_names; bracket_depth = body_done.bracket_depth
     }
 }
 
@@ -7770,6 +8032,15 @@ fn close_loop(outer: LowerCtx, body_done: LowerCtx, exit_block: u32, exit_env: L
  *                               loop is reachable through a `break`), or a
  *                               NAMED internal error when the body fails to
  *                               lower
+ * @implNote NP5: the loop's own body opens ONE `open_native_region` at its very start, INSIDE
+ *           `#Bhead` (a back-edge target reached on the initial entry, every fall-through iteration
+ *           end, and every `continue`) — so the SAME emitted instructions re-run, and re-open a
+ *           FRESH region, on every pass, giving each iteration its own arena that dies at the
+ *           iteration's own exit edge (`close_loop_body`'s fall-through close,
+ *           `close_native_regions_to`'s break/continue unwind, or `lower_return`'s whole-stack
+ *           unwind) — never flattened across iterations, `modelo-…:§4/§7`. `target.region_base`
+ *           (`ictx.region_stack.len`, captured BEFORE this open) is the depth a break/continue
+ *           crossing this loop unwinds down to.
  */
 fn lower_loop(ctx: LowerCtx, l: checker::TLoopStmt) -> LowerStmtOut | error {
     let ictx = match lower_block(ctx, l.init) { LowerCtx as c => c; error as err => return err }
@@ -7780,9 +8051,10 @@ fn lower_loop(ctx: LowerCtx, l: checker::TLoopStmt) -> LowerStmtOut | error {
     let entry_args = env_scalar_vregs(ictx.env)
     let entered = append_inst(exit_seed.func, ictx.block_id, jump_inst(headb.block_id, entry_args, 0, 0))
     let defer_base = ictx.defers.len
-    let target = LoopTargets { label = l.label; head = headb.block_id; exit = exitb.block_id; defer_base = defer_base; names = head_seed.names }
+    let target = LoopTargets { label = l.label; head = headb.block_id; exit = exitb.block_id; defer_base = defer_base; names = head_seed.names; region_base = ictx.region_stack.len }
     let body_seed = ctx_with_loops(ctx_with(ictx, entered, headb.block_id, head_seed.env), teko::list::push(ictx.loop_targets, target))
-    let body_done = match lower_block(body_seed, l.body) { LowerCtx as c => c; error as err => return err }
+    let region_opened = match open_native_region(body_seed, "", true, 0, 0) { LowerCtx as c => c; error as err => return err }
+    let body_done = match lower_block(region_opened, l.body) { LowerCtx as c => c; error as err => return err }
     let closed = match close_loop_body(body_done, headb.block_id, head_seed.names, defer_base) { LowerCtx as c => c; error as err => return err }
     LowerStmtOut { ctx = close_loop(ictx, closed, exitb.block_id, exit_seed.env); terminated = false }
 }
@@ -7849,12 +8121,27 @@ pub type ClosedArm = struct { ctx: LowerCtx; func: LFunc }
  * arm registered before terminating must not leak into a sibling arm or
  * the merge either — that arm's control never reaches them.
  *
+ * NP5: an arm's own body opens EXACTLY ONE `open_native_region` before ever reaching here (every
+ * call site pairs it with this close) — a `{}`/if-arm/when-arm's own lexical region (§5). On the
+ * non-terminated path, `close_native_region` leaves+drops it AFTER `replay_defers` (a defer may
+ * still read a block-local this arm's region owns) and BEFORE the merge jump, mirroring
+ * `lower_return`'s own replay-then-region-close order. On the TERMINATED path (an inner
+ * `return`/`break`/`continue` already unwound region_stack — the WHOLE stack for a return,
+ * or down to the loop's own `region_base` for a break/continue — which may have popped MORE than
+ * just this arm's one region, or none of it if it terminated before ever opening one) `region_stack`
+ * is still force-RESET to `pre_arm_regions`, exactly like `.defers` — the SAME "arm control never
+ * reaches the merge, so whatever it leaves behind must not leak past" reasoning `pre_arm_defers`
+ * already documents, generalized to the region axis.
+ *
  * @param LowerCtx ctx  the context after lowering the arm's own body
  * @param []checker::TDeferStmt pre_arm_defers  the defer stack as it stood
  *                                               BEFORE the arm (its `.len`
  *                                               is the replay base, and the
  *                                               slice itself is what gets
  *                                               restored)
+ * @param []NativeRegionFrame pre_arm_regions  the open-region stack as it stood BEFORE the arm's own
+ *                                              `open_native_region` (NP5) — what `ctx.region_stack`
+ *                                              is force-reset to on EITHER path
  * @param u32 target  the merge block id
  * @param []u32 value_args  the arm's PRE-replay value block-args (the
  *                          if/match tail-value VReg for a value arm, empty for
@@ -7871,13 +8158,19 @@ pub type ClosedArm = struct { ctx: LowerCtx; func: LFunc }
  * @param u32 col  the source column to stamp the replayed defers/jump with
  * @return ClosedArm | error  the closed arm + the resume context, or a
  *                             NAMED internal error when a pending defer
- *                             body fails to lower
+ *                             body fails to lower, or when the non-terminated
+ *                             path's region close finds the stack already empty
+ *                             (an invariant break — every caller opened one)
  */
-fn close_arm_replaying_defers(ctx: LowerCtx, pre_arm_defers: []checker::TDeferStmt, target: u32, value_args: []u32, indices: []u64, line: u32, col: u32) -> ClosedArm | error {
-    if block_terminated(ctx.func, ctx.block_id) { return ClosedArm { ctx = ctx_with_defers(ctx, pre_arm_defers); func = ctx.func } }
+fn close_arm_replaying_defers(ctx: LowerCtx, pre_arm_defers: []checker::TDeferStmt, pre_arm_regions: []NativeRegionFrame, target: u32, value_args: []u32, indices: []u64, line: u32, col: u32) -> ClosedArm | error {
+    if block_terminated(ctx.func, ctx.block_id) {
+        let reset_terminated = ctx_with_regions(ctx_with_defers(ctx, pre_arm_defers), pre_arm_regions)
+        return ClosedArm { ctx = reset_terminated; func = ctx.func }
+    }
     let replayed = match replay_defers(ctx, pre_arm_defers.len) { LowerCtx as c => c; error as err => return err }
-    let reset = ctx_with_defers(replayed, pre_arm_defers)
-    let args = append_all_u32(value_args, arm_scalar_args(replayed.env, indices))
+    let region_closed = match close_native_region(replayed, line, col) { LowerCtx as c => c; error as err => return err }
+    let reset = ctx_with_regions(ctx_with_defers(region_closed, pre_arm_defers), pre_arm_regions)
+    let args = append_all_u32(value_args, arm_scalar_args(reset.env, indices))
     ClosedArm { ctx = reset; func = close_arm_to(reset, target, args, line, col) }
 }
 
@@ -8159,7 +8452,12 @@ fn lower_if_expr(ctx: LowerCtx, e: checker::TExpr, f: checker::TIfExpr) -> Lower
     param — otherwise an arm-local rebind (`if c { x = 5 }`) would be DROPPED at the merge and
     the name would read its stale pre-branch VReg past the `if` (the #389 A3-loop range-`for`
     back-edge root: the per-iteration `if !first { i = i+1 }` step froze the counter). A branch
-    that mutates no enclosing scalar adds ZERO params and stays byte-identical (#389 F1). */
+    that mutates no enclosing scalar adds ZERO params and stays byte-identical (#389 F1).
+    NP5: EACH arm opens its OWN lexical region (`open_native_region`) right after the branch, closed
+    by `close_arm_replaying_defers` — a non-escaping local this arm declares dies at ITS OWN exit
+    edge, never the other arm's or the merge's. The (unentered) else arm of an if-WITHOUT-else opens
+    and immediately closes a trivial region too, so every path reaching `close_arm_replaying_defers`
+    has opened exactly one — the invariant that function relies on. */
 fn lower_if_stmt(ctx: LowerCtx, e: checker::TExpr, f: checker::TIfExpr, cond_vreg: u32) -> Lowered | error {
     let names = reassigned_scalars(if_arm_stmts(f), ctx.env)
     let indices = merge_scalar_indices(ctx.env, names)
@@ -8169,11 +8467,13 @@ fn lower_if_stmt(ctx: LowerCtx, e: checker::TExpr, f: checker::TIfExpr, cond_vre
     let merged = add_merge_scalar_params(mergeblk.func, mergeblk.block_id, ctx.env, names)
     let br = branch_inst(cond_vreg, thenb.block_id, teko::list::empty(), elseb.block_id, teko::list::empty(), e.line, e.col)
     let ctx1 = ctx_append(ctx_with(ctx, merged.func, ctx.block_id, ctx.env), br)
-    let then_done = match lower_block(ctx_goto(ctx1, thenb.block_id), f.then_blk) { LowerCtx as c => c; error as err => return err }
-    let then_closed = match close_arm_replaying_defers(then_done, ctx1.defers, mergeblk.block_id, teko::list::empty(), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    let then_opened = match open_native_region(ctx_goto(ctx1, thenb.block_id), "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    let then_done = match lower_block(then_opened, f.then_blk) { LowerCtx as c => c; error as err => return err }
+    let then_closed = match close_arm_replaying_defers(then_done, ctx1.defers, ctx1.region_stack, mergeblk.block_id, teko::list::empty(), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     let else_ctx = ctx_with(then_closed.ctx, then_closed.func, elseb.block_id, ctx.env)
-    let else_done = if f.has_else { match lower_block(else_ctx, f.else_blk) { LowerCtx as c => c; error as err => return err } } else { else_ctx }
-    let else_closed = match close_arm_replaying_defers(else_done, ctx1.defers, mergeblk.block_id, teko::list::empty(), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    let else_opened = match open_native_region(else_ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    let else_done = if f.has_else { match lower_block(else_opened, f.else_blk) { LowerCtx as c => c; error as err => return err } } else { else_opened }
+    let else_closed = match close_arm_replaying_defers(else_done, ctx1.defers, ctx1.region_stack, mergeblk.block_id, teko::list::empty(), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     Lowered { ctx = ctx_with(else_closed.ctx, else_closed.func, mergeblk.block_id, merged.env); vreg = 0 }
 }
 
@@ -8202,11 +8502,13 @@ fn lower_if_value(ctx: LowerCtx, e: checker::TExpr, f: checker::TIfExpr, cond_vr
     let br = branch_inst(cond_vreg, thenb.block_id, teko::list::empty(), elseb.block_id, teko::list::empty(), e.line, e.col)
     let ctx1 = ctx_append(ctx_with(ctx, merged.func, ctx.block_id, ctx.env), br)
     let result_ty = ltype_of(e.type, ctx.enums)
-    let then_val = match lower_block_value(ctx_goto(ctx1, thenb.block_id), f.then_blk, result_ty, e.type) { LowerBlockValue as x => x; error as err => return err }
-    let then_closed = match close_arm_replaying_defers(then_val.ctx, ctx1.defers, mergeblk.block_id, teko::list::push(teko::list::empty(), then_val.vreg), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    let then_opened = match open_native_region(ctx_goto(ctx1, thenb.block_id), "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    let then_val = match lower_block_value(then_opened, f.then_blk, result_ty, e.type) { LowerBlockValue as x => x; error as err => return err }
+    let then_closed = match close_arm_replaying_defers(then_val.ctx, ctx1.defers, ctx1.region_stack, mergeblk.block_id, teko::list::push(teko::list::empty(), then_val.vreg), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     let else_ctx = ctx_with(then_closed.ctx, then_closed.func, elseb.block_id, ctx.env)
-    let else_val = match lower_block_value(else_ctx, f.else_blk, result_ty, e.type) { LowerBlockValue as x => x; error as err => return err }
-    let else_closed = match close_arm_replaying_defers(else_val.ctx, ctx1.defers, mergeblk.block_id, teko::list::push(teko::list::empty(), else_val.vreg), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    let else_opened = match open_native_region(else_ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    let else_val = match lower_block_value(else_opened, f.else_blk, result_ty, e.type) { LowerBlockValue as x => x; error as err => return err }
+    let else_closed = match close_arm_replaying_defers(else_val.ctx, ctx1.defers, ctx1.region_stack, mergeblk.block_id, teko::list::push(teko::list::empty(), else_val.vreg), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     Lowered { ctx = ctx_with(else_closed.ctx, else_closed.func, mergeblk.block_id, merged.env); vreg = mp.vreg }
 }
 
@@ -8575,7 +8877,7 @@ type NullUnionShape = struct {
  *
  * WHY TWO MEMBERS AND NOT MORE: because a two-member union's PAYLOAD arm is the one that needs no
  * by-name case lookup — with exactly one non-null member, `X as x` can only mean that member,
- * whatever the pattern spells it (an `Optional`/`Func` member has no case name at all, so the
+ * whatever the pattern spells it (a `Func` member has no case name at all, so the
  * general by-name path would honest-stop on it). At three members the payload arms DO need the
  * name, and they already get it (`variant_case_of_bind_pattern`). The `null` arm is the part that
  * never needed a name, and it no longer asks this classifier — see `variant_null_member_index`.
@@ -8754,7 +9056,14 @@ fn lower_null_pattern_test(ctx: LowerCtx, subj: MatchSubj, line: u32, col: u32) 
  * coerced into a null-bearing two-member union (`null_union_shape`'s doc): allocate the uniform
  * `{ i32 tag@0; ptr@8; len@16 }` (`variant_wrapper_bytes` — the fixed layout
  * `lower_variant_tag_eq_test`/`bind_case_payload` read), then store `shape.null_index` for a
- * `null` value, or `shape.payload_index` plus the lowered payload for any other value.
+ * `Null`-typed value, or `shape.payload_index` plus the lowered payload for any other value.
+ *
+ * KEYED BY `e.type`, NOT `e.kind` (native-N1-null-widen, O1 retirement): a bare `TNullLit` and a
+ * `match`/`if` sub-expression whose OWN inferred type collapsed to bare `Null` (every one of its
+ * arms is, recursively, `null` — `checker::resolve.type_join`'s bare-null-only join) are the SAME
+ * absence value from this coercion's point of view, and both are widened by
+ * `lower_null_absent_widened` — the mirror of the C route's `emit_as_r`, which builds the wrapper
+ * from the EXPECTED type rather than the source node's own kind (`codegen.tks:6816-6829`).
  *
  * A payload that is ITSELF a union takes the nested arm (`lower_null_union_nested_present`) — the
  * TWIN of the split degrau 23 gave `lower_variant_construct`, and the twin that had NOT diverged
@@ -8769,16 +9078,18 @@ fn lower_null_pattern_test(ctx: LowerCtx, subj: MatchSubj, line: u32, col: u32) 
  *                              indices; the payload type drives the payload's SHAPE (a fat member
  *                              writes both halves, a union member an inner wrapper, any other one
  *                              word)
- * @param checker::TExpr e  the value being coerced (a `TNullLit`, or an expression of the
- *                          payload type)
+ * @param checker::TExpr e  the value being coerced (a `TNullLit`, a `Null`-typed `match`/`if`
+ *                          sub-expression, or an expression of the payload type)
  * @return Lowered  the wrapper's alloca'd base address
- * @throws  propagated from lowering a non-null payload expression
+ * @throws  propagated from lowering a non-null payload expression, or a `Null`-typed sub-tree's own
+ *          effects
  * @since 0.3.1 (null-union C7 own-backend gap); 0.3.1.0 degrau 25 (the nested
- *        union payload); 0.3.1.0 degrau 30 (the looked-up tags)
+ *        union payload); 0.3.1.0 degrau 30 (the looked-up tags); native-N1-null-widen
+ *        (O1 retirement — a non-literal `Null`-typed sub-tree)
  */
 fn lower_null_union_construct(ctx: LowerCtx, shape: NullUnionShape, e: checker::TExpr) -> Lowered | error {
-    match e.kind {
-        checker::TNullLit => return lower_variant_absent(ctx, shape.null_index to i64, e)
+    match e.type {
+        checker::Null => return lower_null_absent_widened(ctx, shape.null_index, e)
         _ => { }
     }
     if payload_needs_inner_wrapper(ctx, shape.payload, e) { return lower_null_union_nested_present(ctx, shape, e) }
@@ -8790,13 +9101,14 @@ fn lower_null_union_construct(ctx: LowerCtx, shape: NullUnionShape, e: checker::
 /**
  * lower_variant_absent — the ABSENT construction shared by every null-bearing union, at every
  * arity: the uniform wrapper with tag `index` and no payload written (absence carries none).
- * `lower_null_union_construct`'s `null` arm and `lower_variant_null_construct`'s only arm both
- * reduce to it, so a two-member `T | null` and a three-member `T | null | error` build the SAME
- * bytes and differ only in the index they were handed.
+ * `lower_null_absent_widened`'s two callers (`lower_null_union_construct`'s `Null` arm and
+ * `lower_variant_null_construct`'s only arm) both reduce to it through that shared widen, so a
+ * two-member `T | null` and a three-member `T | null | error` build the SAME bytes and differ only
+ * in the index they were handed.
  *
  * @param LowerCtx ctx  the lowering context to append the construction's instructions into
  * @param i64 index  the `Null` member's declared index (`variant_null_member_index`)
- * @param checker::TExpr e  the `null` literal (for its source position)
+ * @param checker::TExpr e  the `null`-typed value being widened (for its source position)
  * @return Lowered  the wrapper's alloca'd base address
  * @since 0.3.1.0 (degrau 25 — extracted so the present arms can each pick their own shape; degrau
  *        30 — the index became a parameter so any arity shares it)
@@ -8805,6 +9117,41 @@ fn lower_variant_absent(ctx: LowerCtx, index: i64, e: checker::TExpr) -> Lowered
     let base = ctx_alloc(ctx)
     let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, variant_wrapper_bytes(), variant_wrapper_align(), e.line, e.col))
     store_variant_tag(with_alloca, base.vreg, index, e.line, e.col)
+}
+
+/**
+ * lower_null_absent_widened — the shared `Null`-typed widen `lower_null_union_construct` and
+ * `lower_variant_null_construct` both reduce to: a bare `TNullLit` carries no side effects of its
+ * own, so its absence wrapper (`lower_variant_absent`) is built directly, over the UNCHANGED `ctx`,
+ * without lowering `e` at all (the pre-existing fast path — no extra instruction is emitted for the
+ * overwhelmingly common case of a literal `null`). Any OTHER `Null`-typed `e` (a `match`/`if`
+ * sub-expression whose every arm is, recursively, `null` — `checker::resolve.type_join`'s
+ * bare-null-only join) is lowered IN PLACE first (`lower_expr` — its own nested arms carry the SAME
+ * narrow `Null` target type this backend already threads down at every match/if arm and tail
+ * position, so each leaf `null` literal reduces harmlessly through `lower_null_lit`'s plain zero
+ * constant), then the resulting register is discarded and the SAME absence wrapper is tagged over
+ * the ADVANCED context — `e`'s own control flow and side effects (an early `return` nested inside
+ * one of its arms, a call with side effects) run exactly once, in their original position, before
+ * the ABSENT tag is written.
+ *
+ * @param LowerCtx ctx  the lowering context to append `e`'s instructions (when any), then the
+ *                      wrapper's, into
+ * @param u32 index  the `Null` member's declared index (`shape.null_index`/`variant_null_member_index`)
+ * @param checker::TExpr e  the `Null`-typed value being widened into the union — a `TNullLit`, or a
+ *                          collapsed `match`/`if` sub-expression
+ * @return Lowered  the wrapper's alloca'd base address
+ * @throws  propagated from lowering a non-literal `e`
+ * @since native-N1-null-widen (O1 retirement — the native-lowering gap O1 exposed at
+ *        `teko::checker::check_must_free_locals_stmt`'s own nested `match` tail)
+ */
+fn lower_null_absent_widened(ctx: LowerCtx, index: u32, e: checker::TExpr) -> Lowered | error {
+    match e.kind {
+        checker::TNullLit => lower_variant_absent(ctx, index to i64, e)
+        _ => {
+            let lowered = match lower_expr(ctx, e) { Lowered as x => x; error as err => return err }
+            lower_variant_absent(lowered.ctx, index to i64, e)
+        }
+    }
 }
 
 /**
@@ -10032,8 +10379,9 @@ fn lower_match_guard(ctx: LowerCtx, arm: checker::TArm, next_block: u32) -> Matc
 fn lower_match_arm_value(ctx: LowerCtx, e: checker::TExpr, arm: checker::TArm, subj: MatchSubj, merge_id: u32, names: []str) -> LowerCtx | error {
     let indices = merge_scalar_indices(ctx.env, names)
     let step = match lower_match_arm_entry(ctx, e, arm, subj) { MatchArmEntry as x => x; error as err => return err }
-    let bv = match lower_block_value(step.ctx, arm.body, ltype_of(e.type, ctx.enums), e.type) { LowerBlockValue as x => x; error as err => return err }
-    let closed = match close_arm_replaying_defers(bv.ctx, ctx.defers, merge_id, teko::list::push(teko::list::empty(), bv.vreg), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    let opened = match open_native_region(step.ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    let bv = match lower_block_value(opened, arm.body, ltype_of(e.type, ctx.enums), e.type) { LowerBlockValue as x => x; error as err => return err }
+    let closed = match close_arm_replaying_defers(bv.ctx, ctx.defers, step.ctx.region_stack, merge_id, teko::list::push(teko::list::empty(), bv.vreg), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     ctx_with(closed.ctx, closed.func, step.next_block, ctx.env)
 }
 
@@ -10162,8 +10510,9 @@ fn lfallback_const(rt: LType) -> i64 {
 fn lower_match_arm_stmt(ctx: LowerCtx, e: checker::TExpr, arm: checker::TArm, subj: MatchSubj, merge_id: u32, names: []str) -> LowerCtx | error {
     let indices = merge_scalar_indices(ctx.env, names)
     let step = match lower_match_arm_entry(ctx, e, arm, subj) { MatchArmEntry as x => x; error as err => return err }
-    let done = match lower_block(step.ctx, arm.body) { LowerCtx as c => c; error as err => return err }
-    let closed = match close_arm_replaying_defers(done, ctx.defers, merge_id, teko::list::empty(), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    let opened = match open_native_region(step.ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    let done = match lower_block(opened, arm.body) { LowerCtx as c => c; error as err => return err }
+    let closed = match close_arm_replaying_defers(done, ctx.defers, step.ctx.region_stack, merge_id, teko::list::empty(), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     ctx_with(closed.ctx, closed.func, step.next_block, ctx.env)
 }
 
@@ -10817,7 +11166,6 @@ fn named_layout_bytes(n: checker::Named, ctx: LowerCtx) -> u32 | null {
 fn aggregate_form_name(t: checker::Type) -> str {
     match t {
         checker::Named as n => teko::str::concat("the nominal type `", teko::str::concat(n.name, "`, which has no registered layout"))
-        checker::Optional => "an OPTIONAL (`T | null`), whose sentinel-carrying image this backend pins no whole-type byte width for"
         checker::Func => "a CLOSURE, whose captured environment is a second allocation this copy would alias"
         _ => "an aggregate this backend assigns no whole-type byte width"
     }
@@ -11471,11 +11819,13 @@ fn lower_if_fat(ctx: LowerCtx, e: checker::TExpr, f: checker::TIfExpr) -> Lowere
     let merged = add_merge_scalar_params(mpl.func, mergeb.block_id, co.ctx.env, names)
     let br = branch_inst(co.vreg, thenb.block_id, teko::list::empty(), elseb.block_id, teko::list::empty(), e.line, e.col)
     let ctx1 = ctx_append(ctx_with(co.ctx, merged.func, co.ctx.block_id, co.ctx.env), br)
-    let then_fat = match lower_block_value_fat(ctx_goto(ctx1, thenb.block_id), f.then_blk) { LowerBlockValueFat as x => x; error as err => return err }
-    let then_closed = match close_arm_replaying_defers(then_fat.ctx, ctx1.defers, mergeb.block_id, merge_fat_value_args(then_fat.ptr, then_fat.len), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    let then_opened = match open_native_region(ctx_goto(ctx1, thenb.block_id), "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    let then_fat = match lower_block_value_fat(then_opened, f.then_blk) { LowerBlockValueFat as x => x; error as err => return err }
+    let then_closed = match close_arm_replaying_defers(then_fat.ctx, ctx1.defers, ctx1.region_stack, mergeb.block_id, merge_fat_value_args(then_fat.ptr, then_fat.len), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     let else_ctx = ctx_with(then_closed.ctx, then_closed.func, elseb.block_id, co.ctx.env)
-    let else_fat = match lower_block_value_fat(else_ctx, f.else_blk) { LowerBlockValueFat as x => x; error as err => return err }
-    let else_closed = match close_arm_replaying_defers(else_fat.ctx, ctx1.defers, mergeb.block_id, merge_fat_value_args(else_fat.ptr, else_fat.len), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    let else_opened = match open_native_region(else_ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    let else_fat = match lower_block_value_fat(else_opened, f.else_blk) { LowerBlockValueFat as x => x; error as err => return err }
+    let else_closed = match close_arm_replaying_defers(else_fat.ctx, ctx1.defers, ctx1.region_stack, mergeb.block_id, merge_fat_value_args(else_fat.ptr, else_fat.len), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     LoweredFat { ctx = ctx_with(else_closed.ctx, else_closed.func, mergeb.block_id, merged.env); ptr = mpp.vreg; len = mpl.vreg }
 }
 
@@ -11578,8 +11928,9 @@ fn lower_match_arms_fat(ctx: LowerCtx, e: checker::TExpr, arms: []checker::TArm,
 fn lower_match_arm_fat(ctx: LowerCtx, e: checker::TExpr, arm: checker::TArm, subj: MatchSubj, merge_id: u32, names: []str) -> LowerCtx | error {
     let indices = merge_scalar_indices(ctx.env, names)
     let step = match lower_match_arm_entry(ctx, e, arm, subj) { MatchArmEntry as x => x; error as err => return err }
-    let bv = match lower_block_value_fat(step.ctx, arm.body) { LowerBlockValueFat as x => x; error as err => return err }
-    let closed = match close_arm_replaying_defers(bv.ctx, ctx.defers, merge_id, merge_fat_value_args(bv.ptr, bv.len), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    let opened = match open_native_region(step.ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    let bv = match lower_block_value_fat(opened, arm.body) { LowerBlockValueFat as x => x; error as err => return err }
+    let closed = match close_arm_replaying_defers(bv.ctx, ctx.defers, step.ctx.region_stack, merge_id, merge_fat_value_args(bv.ptr, bv.len), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
     ctx_with(closed.ctx, closed.func, step.next_block, ctx.env)
 }
 
@@ -12863,7 +13214,7 @@ fn is_ref_deref(fa: checker::TFieldAccess) -> bool {
  * value already IS the address to read (no `field_addr` computation, unlike a struct field —
  * the handle is not itself a struct). A REGISTER-value `T` (`is_register_value_type` — every
  * primitive, `byte`, an `enum`) is genuinely stored AT that address and must be LOADED; an
- * AGGREGATE `T` (`struct`/`class`/`Optional`/a declared `Variant`) is, in this backend's own
+ * AGGREGATE `T` (`struct`/`class`/a declared `Variant`) is, in this backend's own
  * memory model, already represented BY its address (§ NATIVE-AGG-SLICE-BY-ADDRESS) — the SAME
  * address `Ref<T>` itself carries — so the deref is a passthrough of the handle's own VReg, not
  * a load: loading eight bytes FROM that address would read whatever the pointee's OWN first
@@ -13221,32 +13572,27 @@ fn lower_bool_lit(ctx: LowerCtx, e: checker::TExpr, b: checker::TBoolLit) -> Low
 }
 
 /**
- * lower_null_lit — a `null` literal in a position that lowers it as a VALUE: a zero (null) Ptr
- * constant, which is the whole representation for an `Optional`-typed null.
+ * lower_null_lit — a `null` literal lowered as a bare VALUE: a zero (null) Ptr constant.
  *
- * A null typed `checker::Null` is a different thing and HONEST-STOPS here. The checker gives a bare
- * `null` the `Null` type exactly when its context is a null-bearing union (`typer.type_expr`'s
- * `null_widens_into` arm), and in the own backend such a value must become the union's tag+payload
- * wrapper (`lower_value_into_type`). Every placement intercepts it before this function is reached
- * — a binding, an assignment, a return, a tail value, a pushed element and, since degrau 25, a
- * struct-literal field (`find_field_decl_type`) and a call argument (`callee_param_types`). What is
- * left for this stop is a placement whose DECLARED type the backend genuinely cannot name: an
- * argument at a callee the checker left untyped (a generic instantiation), or a field of a
- * declaration whose annotation did not resolve. Writing a raw `const 0` there would put a value a
- * later `match` reads as the wrapper's BASE ADDRESS into the slot, i.e. a load from address 0, so
- * refusing to lower it names the gap instead (M.3).
+ * A `checker::TNullLit` is ALWAYS typed `checker::Null` (`typer.type_nulllit`/`type_value_expected`'s
+ * `NullLit` arm — a bare `null` is born `Null{}` directly, never a wrapped sentinel), so this
+ * plain zero constant is what EVERY reachable `null` literal reduces to at this leaf. The union
+ * tag+payload wrapper a `T | null` PLACEMENT actually needs is built by the placement's own coercion
+ * site (`lower_value_into_type` — a binding, an assignment, a return, a tail value, a pushed element,
+ * a struct-literal field, a call argument), which recognizes a `Null`-typed value (whether the
+ * literal itself, or a `match`/`if` whose OWN inferred type collapsed to bare `Null` because every
+ * one of its arms is, recursively, a `null`) and wraps it there (`lower_null_absent_widened`).
+ * Reached from a context whose own declared type is ALSO bare `Null` (a `match`/`if` arm nested one
+ * level inside another `Null`-typed one), this zero is a harmless, never-observed placeholder: the
+ * ANCESTOR coercion site that DOES know the real union discards this leaf's register value and
+ * builds the wrapper itself.
  *
  * @param LowerCtx ctx  the lowering context to append the constant into
- * @param checker::TExpr e  the null-literal expression (its `.type` decides value vs union)
+ * @param checker::TExpr e  the null-literal expression
  * @param checker::TNullLit n  the null-literal node
- * @return Lowered | error  the zero constant, or the honest stop for a union-typed null
- * @throws  when the literal's type is `Null` (a union placement with no coercion site)
+ * @return Lowered  the zero constant
  */
-fn lower_null_lit(ctx: LowerCtx, e: checker::TExpr, n: checker::TNullLit) -> Lowered | error {
-    match e.type {
-        checker::Null => return error { message = "native backend N1: a `null` in this position needs the null-union wrapper the placement does not declare a type for (N2)" }
-        _ => { }
-    }
+fn lower_null_lit(ctx: LowerCtx, e: checker::TExpr, n: checker::TNullLit) -> Lowered {
     let r = ctx_alloc(ctx)
     Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, 0, e.line, e.col)); vreg = r.vreg }
 }
@@ -13604,7 +13950,119 @@ fn lower_assign_fat(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error 
         return error { message = teko::str::concat("native backend N1: `", a.name, "` is assigned but is not a mutable fat local (internal)") }
     }
     if is_frees_old_self_append(ctx, a) { return lower_assign_frees_old(ctx, slot.slot, a) }
+    if checker::assign_is_self_append(a) { return lower_assign_plain_self_append(ctx, slot.slot, a) }
     store_fat_through_addr(ctx, slot.slot, a, teko::str::concat("the str/slice local `", a.name, "`"))
+}
+
+/**
+ * SelfAppendBracket — the outcome of `enter_self_append_region`: the (possibly bracketed) context +
+ * whether a bracket was actually opened, so the matching `leave_self_append_region` knows whether to
+ * emit its own closing call.
+ * @since 0.3.1
+ */
+type SelfAppendBracket = struct { ctx: LowerCtx; opened: bool }
+
+/**
+ * enter_self_append_region — the N-level selector's runtime realization (§1/§7): emit
+ * `tk_region_enter_u(<R_decl>)` around a self-append's own grow call, so the helper bare
+ * `tk_slice_push`/`tk_slice_push_fo` — which bump-allocates from WHATEVER `tk_region_current()` is
+ * — materializes the grown buffer in the accumulator's DECLARING scope instead of the innermost
+ * currently-open one. Three cases, by `native_scope_region_of(ctx.region_stack, name)`:
+ *
+ * - REGISTERED (a `u32` target, `native_scope_region_of` resolved a declaring `NativeRegionFrame`):
+ *   bracket to it. The real N-level fix (`mem_loop_per_iter` — an accumulator declared in an outer
+ *   arm, grown in an inner loop, must not die per-iteration).
+ * - UNREGISTERED (`null`) AND `name` ESCAPES this function (`binding_conveys_escape`): emit NO
+ *   bracket (`opened=false`). An escaping self-append's assignment already runs inside
+ *   `lower_assign_conveyed`'s own OUTER bracket (`emit_region_leaves`, detouring the runtime's
+ *   current region all the way down to the conveyance anchor `rr`, root through NP5) — that detour
+ *   is what makes the grown buffer survive the frame drop. A `stack[0]` (frame) fallback here would
+ *   OVERRIDE that detour with `tk_region_enter_u(fr)`, landing the buffer back in `fr` — which
+ *   `emit_region_drops` frees at the very return this self-append's value is escaping THROUGH: a
+ *   confirmed double-free/heap-corruption UAF (measured on `theory/heisenbug-fix`, CI run
+ *   30947982111, gen1 SIGSEGV in `emit_call`; the C route never makes this mistake —
+ *   `cg_self_append_escapes`, `codegen.tks:8020`, threads `dctx.rr` for exactly this case, reserving
+ *   its own `scope_region_of` selector for the non-escaping route only). This native twin now
+ *   mirrors that split.
+ * - UNREGISTERED AND NOT escaping: bracket to the FRAME (`ctx.region_stack[0]`) — leak-safe (the
+ *   frame outlives every use inside this function), never UAF; a non-escaping accumulator whose
+ *   `decl_name` registration was overwritten by a LATER binding in the same scope (only the
+ *   last-bound name per scope is tracked, `register_scope_decl_name`) still just leaks wider than
+ *   optimal (a peak-memory cost, not a crash) — a known, accepted follow-up, NOT this crumb's fix.
+ * - Empty `ctx.region_stack`: no bracket (unreachable in practice — a self-append only lowers
+ *   inside a function body, which always has an open frame region by the time it lowers).
+ *
+ * @param ctx   the lowering context
+ * @param name  the self-append target's name
+ * @param line  the source line to stamp the emitted call with
+ * @param col   the source column to stamp
+ * @return      the (possibly bracketed) context + whether a bracket was opened
+ * @since 0.3.1
+ */
+fn enter_self_append_region(ctx: LowerCtx, name: str, line: u32, col: u32) -> SelfAppendBracket {
+    match native_scope_region_of(ctx.region_stack, name) {
+        u32 as target => SelfAppendBracket { ctx = ctx_append(ctx, void_call_inst("tk_region_enter_u", one_region_arg(target), false, line, col)); opened = true }
+        null => {
+            if binding_conveys_escape(ctx.escaping, name) {
+                SelfAppendBracket { ctx = ctx; opened = false }
+            } else {
+                if ctx.region_stack.len > 0 {
+                    let fr_vreg = ctx.region_stack[0].region_vreg
+                    SelfAppendBracket { ctx = ctx_append(ctx, void_call_inst("tk_region_enter_u", one_region_arg(fr_vreg), false, line, col)); opened = true }
+                } else {
+                    SelfAppendBracket { ctx = ctx; opened = false }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * leave_self_append_region — the CLOSE half of `enter_self_append_region`'s bracket: emit
+ * `tk_region_leave()` to pop the detour back to whatever region was current before, restoring it for
+ * every statement that follows the grow call. A no-op when `opened` is false (no matching enter ran).
+ *
+ * @param ctx     the lowering context, positioned right after the grow call
+ * @param opened  whether `enter_self_append_region` actually opened a bracket
+ * @param line    the source line to stamp the emitted call with
+ * @param col     the source column to stamp
+ * @return        the context with the bracket closed (or unchanged, when nothing was opened)
+ * @since 0.3.1
+ */
+fn leave_self_append_region(ctx: LowerCtx, opened: bool, line: u32, col: u32) -> LowerCtx {
+    if !opened { return ctx }
+    ctx_append(ctx, void_call_inst("tk_region_leave", teko::list::empty(), false, line, col))
+}
+
+/**
+ * lower_assign_plain_self_append — lower a self-append `xs = teko::list::push(xs, item)` whose
+ * accumulator the checker did NOT prove a linear chain (`is_frees_old_self_append`'s twin for the
+ * PLAIN, non-`_fo`, grow symbol): the N-level selector's bracket
+ * (`enter_self_append_region`/`leave_self_append_region`) wraps the SAME `tk_slice_push` call
+ * `store_fat_through_addr`'s generic FAT path would otherwise reach unbracketed via
+ * `lower_fat_expr`/`lower_call_fat`/`lower_list_builtin` — routing its growth to the accumulator's
+ * DECLARING scope (§1) rather than whatever scope happens to be innermost at the assign site (the
+ * `mem_loop_per_iter` fix). Mirrors `lower_assign_frees_old` exactly, one axis over (the grow symbol).
+ *
+ * @param ctx   the lowering context
+ * @param slot  the accumulator's fat frame slot (the store target)
+ * @param a     the typed self-append assignment (its `a.value` is the `list::push` call)
+ * @return      the context with the bracketed grow + store appended, or an honest stop
+ * @throws      when `a.value` is not the expected push call (internal — unreachable, since
+ *              `checker::assign_is_self_append(a)` already guarantees it), or propagated from
+ *              lowering the growth call
+ * @since 0.3.1
+ */
+fn lower_assign_plain_self_append(ctx: LowerCtx, slot: u32, a: checker::TAssign) -> LowerStmtOut | error {
+    match a.value.kind {
+        checker::TCall as c => {
+            let br = enter_self_append_region(ctx, a.name, a.value.line, a.value.col)
+            let fo = match lower_list_push(br.ctx, a.value, c, "tk_slice_push") { LoweredFat as x => x; error as err => return err }
+            let left = leave_self_append_region(fo.ctx, br.opened, a.value.line, a.value.col)
+            LowerStmtOut { ctx = store_fat_slot(left, slot, fo, a.value.line, a.value.col); terminated = false }
+        }
+        _ => store_fat_through_addr(ctx, slot, a, teko::str::concat("the str/slice local `", a.name, "`"))
+    }
 }
 
 /**
@@ -13637,12 +14095,22 @@ fn is_frees_old_self_append(ctx: LowerCtx, a: checker::TAssign) -> bool {
  * @return      the context with the free-old grow + store appended, or an honest stop
  * @throws      when `a.value` is not the expected push call (internal), or propagated from lowering
  * @since 0.3.1 (native free-old parity, #148)
+ * @implNote NP5: the grow call is bracketed by `enter_self_append_region`/`leave_self_append_region`
+ *           (the N-level selector, §1/§7), so the free-old-on-grow parks the SUPERSEDED buffer only
+ *           after the runtime's own current region is the accumulator's DECLARING scope — the exact
+ *           bracket that kills the heisenbug this crumb exists for: WITHOUT it, a self-append inside
+ *           a nested loop/if-arm scope would free-old-park into whatever region is innermost at the
+ *           call site, which a later `tk_region_drop_u` could free out from under a stale pre-grow
+ *           pointer someone still held (`tk_free_block` only parks at `tk_cur_rsp == 0`; a free-old
+ *           INSIDE a live, correctly-routed region never parks a block anything else can reach).
  */
 fn lower_assign_frees_old(ctx: LowerCtx, slot: u32, a: checker::TAssign) -> LowerStmtOut | error {
     match a.value.kind {
         checker::TCall as c => {
-            let fo = match lower_list_push(ctx, a.value, c, "tk_slice_push_fo") { LoweredFat as x => x; error as err => return err }
-            LowerStmtOut { ctx = store_fat_slot(fo.ctx, slot, fo, a.value.line, a.value.col); terminated = false }
+            let br = enter_self_append_region(ctx, a.name, a.value.line, a.value.col)
+            let fo = match lower_list_push(br.ctx, a.value, c, "tk_slice_push_fo") { LoweredFat as x => x; error as err => return err }
+            let left = leave_self_append_region(fo.ctx, br.opened, a.value.line, a.value.col)
+            LowerStmtOut { ctx = store_fat_slot(left, slot, fo, a.value.line, a.value.col); terminated = false }
         }
         _ => store_fat_through_addr(ctx, slot, a, teko::str::concat("the str/slice local `", a.name, "`"))
     }
@@ -13653,15 +14121,21 @@ fn lower_assign_frees_old(ctx: LowerCtx, slot: u32, a: checker::TAssign) -> Lowe
  * address, compute the field's address via its registered layout offset, then store. A FAT field
  * (`a.bound`, 0.3.1.0 raiz A — R3) delegates to `store_fat_through_addr`, which writes both halves
  * of its `{ptr, len}` pair — writing the single word `store_assign_value` writes left `h.name.len`
- * reading whatever the field's PREVIOUS length happened to be, silently (raiz-comum §5.2). Every
- * other field delegates to `store_assign_value` (a compound op first loads the current value,
- * applies it, then stores the result).
+ * reading whatever the field's PREVIOUS length happened to be, silently (raiz-comum §5.2). Before
+ * that write, `check_store_fat_span` re-asserts the SAME under-size guard `store_struct_fields`
+ * already runs on the struct-literal path (raiz A — R4): a fat value landing in a field whose
+ * registered layout span is under `fat_slot_bytes()` would let the 16-byte `{ptr, len}` store
+ * overrun into the next field, so the guard honest-stops NAMING the struct and field instead of
+ * leaving the overrun to surface as a heap corruption at teardown. Every other field delegates to
+ * `store_assign_value` (a compound op first loads the current value, applies it, then stores the
+ * result).
  *
  * @param ctx  the lowering context
  * @param a    the typed assignment (kind `Field`; `a.target` is the typed field access)
  * @return     the context with the field store appended, or an honest stop
  * @throws     when the target is not a field access, the receiver's type is not a laid-out
- *             nominal, the field is unknown, or propagated from lowering the value
+ *             nominal, the field is unknown, the field's layout span under-sizes a fat store, or
+ *             propagated from lowering the value
  */
 fn lower_assign_field(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
     let fa = match a.target.kind { checker::TFieldAccess as f => f; _ => return error { message = "native backend N1: field-assignment target is not a field access (internal)" } }
@@ -13671,7 +14145,11 @@ fn lower_assign_field(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | erro
     let off = match field_offset_of(layout, fa.field) { u32 as o => o; error as err => return err }
     let addr = ctx_alloc(ro.ctx)
     let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, ro.vreg, off, a.target.line, a.target.col))
-    if is_fat_type(a.bound) { return store_fat_through_addr(with_addr, addr.vreg, a, "a str/slice field") }
+    if is_fat_type(a.bound) {
+        let decl = find_field_decl_type(with_addr.field_decls, layout.name, fa.field)
+        match check_store_fat_span(with_addr, layout, fa.field, decl, a.value) { error as err => return err; null => { } }
+        return store_fat_through_addr(with_addr, addr.vreg, a, "a str/slice field")
+    }
     store_assign_value(with_addr, addr.vreg, ltype_of(a.bound, ro.ctx.enums), a)
 }
 
@@ -15391,7 +15869,6 @@ fn const_decl_is_scalar(t: checker::Type) -> bool {
     match t {
         checker::Slice => false
         checker::Str => false
-        checker::Optional => false
         checker::Named => false
         checker::Variant => false
         checker::Func => false
