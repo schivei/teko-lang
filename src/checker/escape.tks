@@ -350,7 +350,8 @@ pub fn fn_escaping_vars(f: TFunction) -> []str {
  * a copy-grow (park the superseded buffer for reuse). PUBLIC, mirroring `fn_escaping_vars`: the C
  * emitter re-derives the proof per-assign (it has the enclosing `fn_body` at every emit site), but
  * the NATIVE backend lowers a push from a bare `TCall` with no assign/body context, so it reads this
- * precomputed set instead — one entry per proven name, checked once against the whole body.
+ * precomputed set instead — one entry per proven name, checked once against the whole body. The
+ * escaping-accumulator exclusion lives in `assign_frees_old` itself, so both engines agree here.
  *
  * @param f  the typed function
  * @return   the names whose accumulator chain is proven linear (free-old-safe)
@@ -630,10 +631,34 @@ fn chain_stats_block(body: []TStatement, name: str) -> ChainStats {
     s
 }
 
+/**
+ * name_escapes_body — does `name` escape the frame of the function whose body is `fn_body`? Computed
+ * with the SAME walk `fn_escaping_vars` runs (tail-position analysis + self-append base carve-out), so
+ * the answer matches the escaping set both codegen engines already consult. Used by `assign_frees_old`
+ * to DENY free-old to an escaping accumulator: an escaping self-append's grow is conveyed to the
+ * caller's region (root scope, `tk_cur_rsp == 0`), the one scope where `tk_slice_push_fo` parks the
+ * superseded buffer on the root free-list — but the escaped value still reaches that buffer, so the
+ * park is a use-after-park UAF (measured as a paranoid redzone stomp / SIGSEGV at scale, in
+ * `copy_relocs_to_current_region_*` and every other escaping accumulator). Only FRAME-LOCAL
+ * accumulators (grown at `tk_cur_rsp > 0`) may safely free-old.
+ *
+ * @param fn_body  the whole function body (the escape-analysis scope)
+ * @param name     the accumulator name to test
+ * @return         whether `name` escapes the frame
+ * @since 0.3.1 (escaping-exclusion UAF fix)
+ */
+fn name_escapes_body(fn_body: []TStatement, name: str) -> bool {
+    mut esc: []str = teko::list::empty()
+    mark_block(fn_body, true, esc)
+    str_set_has(esc, name)
+}
+
 // assign_frees_old — may THIS self-append's copy-grow PARK the old buffer for reuse? True iff the
-// whole-fn linear-chain proof above holds for the assigned name. PUBLIC (codegen reads it).
+// whole-fn linear-chain proof above holds for the assigned name AND the name is frame-local (an
+// escaping accumulator is denied — see name_escapes_body). PUBLIC (codegen reads it).
 pub fn assign_frees_old(fn_body: []TStatement, a: TAssign) -> bool {
     if !assign_is_self_append(a) { return false }
+    if name_escapes_body(fn_body, a.name) { return false }
     let st = chain_stats_block(fn_body, a.name)
     if st.births_empty != 1 { return false }   // born exactly once, from empty()
     if st.births_other != 0 { return false }   // no shadow / no aliasing rebirth
