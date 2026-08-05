@@ -142,7 +142,9 @@ static void tk_rt_crash_handler(int sig) {
 // (Windows SEH twin of tk_rt_crash_handler/tk_backtrace above.) POSIX raises a SIGSEGV/SIGBUS/
 // SIGILL/SIGFPE signal on a fault; Windows raises a Structured Exception instead — `signal(SIGSEGV,
 // ...)` (still installed below, unconditionally, on both platforms) is NOT reliably delivered for a
-// real hardware fault under MinGW, so without this the native fixpoint gate died SILENT on Windows:
+// real hardware fault under this project's Windows toolchain (clang --target=x86_64-pc-windows-msvc
+// — see src/build/project.tks's WINDOWS_CC_NAME/build_cc_argv; MinGW is explicitly banned there,
+// owner ruling 2026-08-05), so without this the native fixpoint gate died SILENT on Windows:
 // no address, nothing to feed addr2line. This is installed as a VECTORED handler
 // (AddVectoredExceptionHandler) so it runs before any language/CRT __try frame gets a look, and it
 // prints the SAME per-frame shape backtrace_symbols prints on the POSIX side —
@@ -228,12 +230,17 @@ static LONG WINAPI tk_win_seh_handler(EXCEPTION_POINTERS *ep) {
     // (Theory CI #62, windows-x86_64 native leg: gen2 crashed 130ms into "building gen3", with
     // NOT EVEN the first "lexer 0/N files" progress line visible — the Linux legs print that AND a
     // full symbolized backtrace on the same class of crash.) ROOT CAUSE: unlike POSIX (glibc/musl),
-    // the Windows CRT (both legacy msvcrt and UCRT — MinGW-w64 links one of these) fully buffers
-    // stdio streams, INCLUDING stderr, once they are not attached to an interactive console —
-    // exactly the case here, since the fixpoint gate pipes the child through
-    // `2>&1 | tee "$bg_log" | sed ... >&2` (fixpoint_gate.sh's build_gen). progress.tks bakes in
-    // the OPPOSITE assumption ("the C standard library never buffers stderr") — true on POSIX,
-    // false on Windows once redirected. So every `teko::io::eprint`/`eprintln` progress line
+    // the Universal CRT (UCRT — ucrtbase.dll) this binary links fully buffers stdio streams,
+    // INCLUDING stderr, once they are not attached to an interactive console. This project's
+    // Windows toolchain is `clang --target=x86_64-pc-windows-msvc` (src/build/project.tks's
+    // WINDOWS_CC_NAME/WINDOWS_MSVC_TRIPLE/build_cc_argv; MinGW is explicitly banned there, owner
+    // ruling 2026-08-05, over MinGW-gcc's own -O2 slowness and cc1/PATH/libm breakage) — targeting
+    // `-windows-msvc` links the SAME UCRT the MSVC toolchain does, via `lld-link`/`link.exe`
+    // through the clang driver, not MinGW's own runtime. The buffered-when-redirected behavior is
+    // this UCRT's, not a MinGW artifact — and it is exactly the case in CI, since the fixpoint gate
+    // pipes the child through `2>&1 | tee "$bg_log" | sed ... >&2` (fixpoint_gate.sh's build_gen).
+    // progress.tks bakes in the OPPOSITE assumption ("the C standard library never buffers stderr")
+    // — true on POSIX, false on Windows/UCRT once redirected. So every `teko::io::eprint`/`eprintln` progress line
     // (tk_eprint/tk_eprintln, both plain fwrite/fputc to stderr with no flush) sat in the CRT's
     // stdio buffer, AND this handler's own FATAL header + backtrace above sat in that same buffer
     // — then `_Exit()` tore the process down without running the flush-on-exit machinery
@@ -250,12 +257,17 @@ static LONG WINAPI tk_win_seh_handler(EXCEPTION_POINTERS *ep) {
 __attribute__((constructor)) static void tk_rt_install_crash_handler(void) {
 #if defined(_WIN32)
     // (Theory CI #62 root cause, part 1 of 2 — see the fflush comment in tk_win_seh_handler above
-    // for the full account.) MUST run before anything else in this constructor, and before any
-    // application code gets a chance to write a byte: `setvbuf` is only well-defined before the
-    // stream has been touched. Forcing `_IONBF` here makes stderr (and stdout, for the same
-    // buffered-when-redirected reason) behave on Windows exactly the way progress.tks already
-    // assumes stderr behaves everywhere — unbuffered, so every write lands immediately instead of
-    // sitting in the CRT's stdio buffer for a crash's `_Exit()` to discard unflushed.
+    // for the full account of WHY: this project's Windows toolchain is
+    // `clang --target=x86_64-pc-windows-msvc`, which links the UCRT.) `setvbuf`/`fflush` are plain
+    // ISO C / UCRT stdio API, not a compiler-specific extension — they behave identically whichever
+    // front end (clang here, historically MinGW-gcc, MSVC's own cl.exe) drives the same UCRT, so
+    // this fix takes effect under this project's actual toolchain exactly as reasoned. MUST run
+    // before anything else in this constructor, and before any application code gets a chance to
+    // write a byte: `setvbuf` is only well-defined before the stream has been touched. Forcing
+    // `_IONBF` here makes stderr (and stdout, for the same buffered-when-redirected reason) behave
+    // on Windows exactly the way progress.tks already assumes stderr behaves everywhere —
+    // unbuffered, so every write lands immediately instead of sitting in the CRT's stdio buffer for
+    // a crash's `_Exit()` to discard unflushed.
     setvbuf(stderr, NULL, _IONBF, 0);
     setvbuf(stdout, NULL, _IONBF, 0);
     // (Theory CI #62 root cause, part 2 of 2 — a SEPARATE gap from the buffering one above, and
