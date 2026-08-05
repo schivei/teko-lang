@@ -90,6 +90,32 @@ fn pad_to_mult(buf: []byte, k: u32) -> []byte {
 }
 
 /**
+ * pad_to_offset — append zero bytes until the buffer length equals `target` (the
+ * `__text`-to-`__const` alignment gap `MACHO_CONST_ALIGN` opens between the code
+ * and the rodata blob, #0.3.1.0 macho-const-section-align). Unlike `pad_to_mult`
+ * (which pads to the next multiple of a small `k`, agnostic of any base), this
+ * pads to an EXACT pre-computed offset — `compute_macho_layout`'s `const_offset`
+ * — so the byte stream physically lands where the load commands already say it
+ * does. `target >= buf.len` always holds for `emit_macho`'s one call site
+ * (`const_offset` is derived by rounding `text_size` UP), so the loop terminates
+ * having appended `target - buf.len` zero bytes (0 when already there — the
+ * common no-rodata and already-aligned-`text_size` cases, keeping the object
+ * byte-identical to before this fix in both).
+ *
+ * @param []byte buf  the buffer to extend
+ * @param u32 target  the exact byte length to pad up to
+ * @return []byte  `buf` zero-padded to exactly `target` bytes long
+ */
+fn pad_to_offset(buf: []byte, target: u32) -> []byte {
+    mut b = buf
+    loop {
+        if b.len >= (target to u64) { break }
+        b = teko::list::push(b, 0)
+    }
+    b
+}
+
+/**
  * StrTab — the assembled Mach-O string table: the raw bytes (a leading NUL then
  * one `_`-prefixed, NUL-terminated name per symbol) and the parallel per-symbol
  * `n_strx` offsets the `nlist_64` entries carry.
@@ -355,8 +381,25 @@ type MachoLayout = struct {
      */
     text_size: u32
     /**
-     * const_offset — the file offset of the `__const` section data (immediately
-     * after `__text`).
+     * const_addr — the `__const` section's segment-relative vm address (the
+     * `section_64.addr` `emit_segment` gives it, and the base `section_addr`
+     * folds every `__const` symbol's `n_value` onto): `text_size` rounded up to
+     * `MACHO_CONST_ALIGN` (8) when rodata is present, `text_size` unchanged
+     * otherwise (#0.3.1.0 macho-const-section-align). `__text` is a multiple of 4
+     * (every ARM64 instruction word) but NOT necessarily of 8, so without this
+     * rounding `__const` — and every "8-aligned" entry inside it, `gpr_arg`
+     * included — silently loses whatever alignment `text_size % 8` steals,
+     * regardless of the section's OWN declared `align` field or of
+     * `RODATA_ENTRY_ALIGN`'s entry-to-entry padding (both are relative to this
+     * base, not absolute). The gap this opens between `__text` and `__const`
+     * (`const_addr - text_size`) is physically emitted by `emit_macho`'s
+     * `pad_to_offset` call, so `const_offset` and the byte stream agree.
+     * @since 0.3.1.0 macho-const-section-align
+     */
+    const_addr: u32
+    /**
+     * const_offset — the file offset of the `__const` section data (`text_offset
+     * + const_addr`; immediately after `__text` plus its alignment gap).
      */
     const_offset: u32
     /**
@@ -481,7 +524,8 @@ type MachoLayout = struct {
  * the `EncodedModule`, the pre-built string-table size, and the DWARF sink
  * (D1.5): the load commands come first (their size fixes `text_offset` —
  * `dwarf.present` inserts a second `LC_SEGMENT_64` and bumps `ncmds` 4→5), then
- * the section data (`__text` then `__const`, contiguous), the 4-aligned `__text`/
+ * the section data (`__text` then, when rodata is present, a `MACHO_CONST_ALIGN`
+ * gap and `__const`; #0.3.1.0 macho-const-section-align), the 4-aligned `__text`/
  * `__const` relocation tables (UNCHANGED formula — DWARF never shifts them), then
  * — only when `dwarf.present` — the three DWARF section images (contiguous,
  * 4-aligned start) and their relocation tables, THEN the 8-aligned symbol table
@@ -489,6 +533,9 @@ type MachoLayout = struct {
  * load-command offset fields point at the real data. With `dwarf.present ==
  * false` every DWARF field here is computed but UNUSED (`symtab_offset` reads
  * straight from `reloc_end`), so the object is BYTE-IDENTICAL to before D1.5.
+ * With `enc.rodata.len == 0` OR `text_size` already `MACHO_CONST_ALIGN`-aligned,
+ * `const_addr == text_size` (no gap), so the object is BYTE-IDENTICAL to before
+ * this fix in both cases too.
  *
  * @param EncodedModule enc  the section images + symbols + relocations
  * @param u32 strtab_size  the pre-built string-table byte size
@@ -506,8 +553,9 @@ fn compute_macho_layout(enc: EncodedModule, strtab_size: u32, nreloc_text: u32, 
     let ncmds: u32 = if has_dwarf { 5 } else { 4 }
     let text_offset = 32 + sizeofcmds
     let text_size = enc.text.len to u32
-    let const_offset = text_offset + text_size
     let const_size = enc.rodata.len to u32
+    let const_addr: u32 = if const_size > 0 { align_up(text_size, MACHO_CONST_ALIGN) } else { text_size }
+    let const_offset = text_offset + const_addr
     let seg_data_end = const_offset + const_size
     let nreloc = nreloc_text
     let reloc_offset = align_up(seg_data_end, 4)
@@ -537,6 +585,7 @@ fn compute_macho_layout(enc: EncodedModule, strtab_size: u32, nreloc_text: u32, 
         sizeofcmds = sizeofcmds
         text_offset = text_offset
         text_size = text_size
+        const_addr = const_addr
         const_offset = const_offset
         const_size = const_size
         reloc_offset = reloc_offset
@@ -632,6 +681,20 @@ const MACHO_NTYPE_SECT: u32 = 0x0E
  * visible symbol: `N_SECT | N_EXT` (0x0F).
  */
 const MACHO_NTYPE_SECT_EXT: u32 = 0x0F
+
+/**
+ * MACHO_CONST_ALIGN — the byte alignment the `__const` section's own START
+ * (its segment-relative `addr`, `compute_macho_layout`'s `const_addr`) is
+ * rounded up to: 8, the pointer width Apple's `ld` enforces on every
+ * `ARM64_RELOC_UNSIGNED` (`Abs64`) relocation site, and the same value the ELF
+ * writer's `rodata_offset` already aligns to (`objfile_elf.tks`'s
+ * `align_up(text_offset + text_size, 8)`) — mach-o's own `emit_section` `align`
+ * argument for `__const` (3, i.e. `1 << 3 == 8`) was already this value; only
+ * the section's OWN base offset was missing the matching round-up
+ * (#0.3.1.0 macho-const-section-align).
+ * @since 0.3.1.0 macho-const-section-align
+ */
+const MACHO_CONST_ALIGN: u32 = 8
 
 /**
  * MACHO_BYTE_MASK — the low-byte mask (u32 lanes) the little-endian field
@@ -747,7 +810,7 @@ const S_ATTR_DEBUG: u32 = 0x02000000
  */
 fn emit_segment(buf: []byte, lay: MachoLayout) -> []byte {
     let seg_cmdsize = 72 + lay.nsects * 80
-    let data_size = lay.text_size + lay.const_size
+    let data_size = lay.const_addr + lay.const_size
     mut b = emit_u32_le(buf, MACHO_LC_SEGMENT_64)
     b = emit_u32_le(b, seg_cmdsize)
     b = emit_fixed16(b, "")
@@ -764,7 +827,7 @@ fn emit_segment(buf: []byte, lay: MachoLayout) -> []byte {
     if lay.nsects > 1 {
         let const_reloff = if lay.nreloc_const > 0 { lay.const_reloc_offset } else { 0 }
         let const_segname = if lay.nreloc_const > 0 { "__DATA" } else { "__TEXT" }
-        b = emit_section(b, "__const", const_segname, lay.text_size, lay.const_size, lay.const_offset, 3, const_reloff, lay.nreloc_const, 0)
+        b = emit_section(b, "__const", const_segname, lay.const_addr, lay.const_size, lay.const_offset, 3, const_reloff, lay.nreloc_const, 0)
     }
     b
 }
@@ -791,7 +854,7 @@ fn emit_segment(buf: []byte, lay: MachoLayout) -> []byte {
 fn emit_dwarf_segment(buf: []byte, lay: MachoLayout) -> []byte {
     let dwarf_nsects: u32 = 3
     let seg_cmdsize = 72 + dwarf_nsects * 80
-    let vmaddr = align_up(lay.text_size + lay.const_size, 16)
+    let vmaddr = align_up(lay.const_addr + lay.const_size, 16)
     let data_size = lay.debug_abbrev_size + lay.debug_info_size + lay.debug_line_size
     mut b = emit_u32_le(buf, MACHO_LC_SEGMENT_64)
     b = emit_u32_le(b, seg_cmdsize)
@@ -962,19 +1025,20 @@ fn emit_reloc_table(buf: []byte, relocs: []Reloc, symbols: []Symbol) -> []byte {
 
 /**
  * section_addr — the `section_64` `addr` (vm address, section-relative to 0)
- * of a 1-based Mach-O section index: 0 for `__text` (section 1), `text_size`
- * for `__const` (section 2, laid out immediately after `__text` — the same
- * value `emit_segment` gives that section's `addr` field). An `nlist_64`
- * `n_value` is the symbol's ABSOLUTE address, `section_addr + Symbol.offset` —
- * NOT the bare section-relative offset (the F1 fix: a bare offset understates
- * every `__const` symbol by `text_size`, which `ld` hard-rejects).
+ * of a 1-based Mach-O section index: 0 for `__text` (section 1), `const_addr`
+ * for `__const` (section 2 — the ALIGNED gap-inclusive offset `emit_segment`
+ * gives that section's own `addr` field, NOT the raw `text_size`; #0.3.1.0
+ * macho-const-section-align). An `nlist_64` `n_value` is the symbol's ABSOLUTE
+ * address, `section_addr + Symbol.offset` — NOT the bare section-relative
+ * offset (the F1 fix: a bare offset understates every `__const` symbol by
+ * `const_addr`, which `ld` hard-rejects).
  *
  * @param u8 sect  the 1-based section index (1 or 2)
- * @param u32 text_size  the `__text` section's byte size
+ * @param u32 const_addr  the `__const` section's own (aligned) vm address
  * @return u32  the section's vm address
  */
-fn section_addr(sect: u8, text_size: u32) -> u32 {
-    if sect == 2 { return text_size }
+fn section_addr(sect: u8, const_addr: u32) -> u32 {
+    if sect == 2 { return const_addr }
     0
 }
 
@@ -1028,10 +1092,10 @@ fn macho_sym_type(s: Symbol) -> MachoSymType {
  * @param []byte buf  the buffer to extend
  * @param Symbol s  the symbol to emit
  * @param u32 strx  the symbol's name offset in the string table
- * @param u32 text_size  the `__text` section's byte size (for `__const`'s addr)
+ * @param u32 const_addr  the `__const` section's own (aligned) vm address
  * @return []byte  `buf` followed by the 16-byte `nlist_64`
  */
-fn emit_one_symbol(buf: []byte, s: Symbol, strx: u32, text_size: u32) -> []byte {
+fn emit_one_symbol(buf: []byte, s: Symbol, strx: u32, const_addr: u32) -> []byte {
     mut b = emit_u32_le(buf, strx)
     b = emit_u8_field(b, macho_symtype_wire(macho_sym_type(s)))
     if s.defined {
@@ -1041,7 +1105,7 @@ fn emit_one_symbol(buf: []byte, s: Symbol, strx: u32, text_size: u32) -> []byte 
     }
     b = teko::list::push(b, 0)
     b = teko::list::push(b, 0)
-    let value = if s.defined { section_addr(s.sect, text_size) + s.offset } else { 0 }
+    let value = if s.defined { section_addr(s.sect, const_addr) + s.offset } else { 0 }
     emit_u64_le(b, value to u64)
 }
 
@@ -1053,15 +1117,15 @@ fn emit_one_symbol(buf: []byte, s: Symbol, strx: u32, text_size: u32) -> []byte 
  * @param []byte buf  the buffer to extend
  * @param []Symbol symbols  the symbol table
  * @param StrTab strtab  the string table (for the per-symbol name offsets)
- * @param u32 text_size  the `__text` section's byte size (for `__const`'s addr)
+ * @param u32 const_addr  the `__const` section's own (aligned) vm address
  * @return []byte  `buf` followed by the symbol-table entries
  */
-fn emit_symtab(buf: []byte, symbols: []Symbol, strtab: StrTab, text_size: u32) -> []byte {
+fn emit_symtab(buf: []byte, symbols: []Symbol, strtab: StrTab, const_addr: u32) -> []byte {
     mut b = buf
     mut i: u64 = 0
     loop {
         if i >= symbols.len { break }
-        b = emit_one_symbol(b, symbols[i], strtab.strx[i], text_size)
+        b = emit_one_symbol(b, symbols[i], strtab.strx[i], const_addr)
         i++
     }
     b
@@ -1097,12 +1161,13 @@ pub fn emit_macho(enc: EncodedModule, dwarf: DwarfSink) -> []byte {
     b = emit_symtab_cmd(b, lay)
     b = emit_dysymtab_cmd(b, lay)
     b = append_bytes(b, enc.text)
+    b = pad_to_offset(b, lay.const_offset)
     b = append_bytes(b, enc.rodata)
     b = pad_to_mult(b, 4)
     b = emit_reloc_table(b, parts.text, enc.symbols)
     b = emit_reloc_table(b, parts.rodata, enc.symbols)
     if dwarf.present { b = emit_dwarf_body(b, dwarf, enc.symbols) }
     b = pad_to_mult(b, 8)
-    b = emit_symtab(b, enc.symbols, strtab, lay.text_size)
+    b = emit_symtab(b, enc.symbols, strtab, lay.const_addr)
     append_bytes(b, strtab.bytes)
 }
