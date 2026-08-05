@@ -969,14 +969,6 @@ fn ptr_widens_to_opaque(from: Type, to: Type) -> bool {
 //   • a VARIANT `from` iff EVERY member widens in (sub-variant → wider variant) — TRANSITIVE,
 //   • a variant MEMBER into the (named-expanded) variant — also transitive (a nested case).
 // Depth-bounded so a pathological self-referential variant cannot loop. (Mirror of resolve.c.)
-//
-// retire-Optional O4 (`docs/design/retirar-optional-para-null-union-uptr-0.3.1.md` §6): the
-// PRESENT-WRAP arm (`T (or a case of T) → T?`, `to` itself the legacy `Optional` sentinel) is
-// DELETED here — unreachable since O1/O2 migrated the two live `Optional` producers and O3's
-// gate confirmed no `Optional{…}` construction remains outside the cataloged Group C arms: `to`
-// can no longer resolve to `Optional` from any live annotation path, so this match's `to` was
-// always the `_` fallthrough. Fixture: `null_narrow_ifguard` (own_native) pins that an
-// equality-guard narrow over a migrated `T | null` union is unaffected.
 fn widens_into_at(from: Type, to: Type, table: TypeTable, depth: i64) -> bool {
     if type_eq(from, to) { return true }
     if depth <= 0 { return false }
@@ -1037,19 +1029,14 @@ fn widens_into_at(from: Type, to: Type, table: TypeTable, depth: i64) -> bool {
 fn widens_into(from: Type, to: Type, table: TypeTable) -> bool { widens_into_at(from, to, table, 16) }
 
 /**
- * Is `from` a bare `null` value — either the concrete `Null` type (null-as-union), or the legacy
- * `Optional{Void}` bare-null sentinel that a `null` literal still carries in an optional context?
- * Both denote the value `null`, so both widen into a union listing `null`.
+ * Is `from` a bare `null` value — the concrete `Null` type (null-as-union)? A bare `null`
+ * widens into any union listing `null`.
  *
  * @param from  the source value type
- * @return      true iff `from` is a bare `null` in either representation
+ * @return      true iff `from` is `Null`
  */
 fn from_is_bare_null(from: Type) -> bool {
-    match from {
-        Null => true
-        Optional as o => match o.inner { Void => true; _ => false }
-        _ => false
-    }
+    match from { Null => true; _ => false }
 }
 
 /**
@@ -1274,7 +1261,6 @@ fn unsafe_carrying_at(t: Type, table: TypeTable, depth: i64) -> bool {
     match t {
         Named as n => is_unsafe_type(n.name, table)
         Slice as s => unsafe_carrying_at(s.element, table, depth - 1)
-        Optional as o => unsafe_carrying_at(o.inner, table, depth - 1)
         Reference as r => unsafe_carrying_at(r.inner, table, depth - 1)
         Ptr as p => match p.inner { Type as inner => unsafe_carrying_at(inner, table, depth - 1); null => false }
         Func as f => func_type_unsafe_carrying(f, table, depth - 1)
@@ -1486,19 +1472,18 @@ pub fn type_conforms_to(name: str, iface: str, table: TypeTable) -> bool {
     false
 }
 
-// (#83) Does `t` carry a SENTINEL anywhere (a Slice whose element is `Void`, or an Optional whose
-// inner is `Void`)? `type_eq` treats a sentinel as equal to ANY concrete peer (see type.tks), which
-// is right for ASSIGNABILITY but wrong for JOIN's "equal → return `a`" shortcut: if `a` is the
-// (less informative) sentinel side and `b` is concrete, blindly returning `a` silently discards
-// the concrete element type a sibling array-literal entry established (`[[], [1]]`'s inner `[]`
-// joined against `[1]`'s `[]i64` — see type_join). Recurses through Slice so a nested sentinel
-// (`[][]Void`) is still detected. Mirror: resolve.c::tk_type_has_sentinel.
-//
-// retire-Optional O4 (`docs/design/retirar-optional-para-null-union-uptr-0.3.1.md` §6): the
-// `Optional` arm (the OTHER sentinel this once recursed through, `Optional{inner=Void}`) is
-// DELETED — O1 was its only producer and it now births `Null{}` instead, so `t` can no longer
-// legitimately be `Optional` here; the SEPARATE `Slice{Void}` empty-slice sentinel above is
-// UNTOUCHED (a different sentinel entirely — fixture: `empty_slice_sentinel_untouched`, own_native).
+/**
+ * type_has_sentinel — (#83) does `t` carry a SENTINEL anywhere (a Slice whose element is
+ * `Void`)? `type_eq` treats a sentinel as equal to ANY concrete peer (see type.tks), which is
+ * right for ASSIGNABILITY but wrong for JOIN's "equal → return `a`" shortcut: if `a` is the
+ * (less informative) sentinel side and `b` is concrete, blindly returning `a` silently discards
+ * the concrete element type a sibling array-literal entry established (`[[], [1]]`'s inner `[]`
+ * joined against `[1]`'s `[]i64` — see type_join). Recurses through Slice so a nested sentinel
+ * (`[][]Void`) is still detected. Mirror: resolve.c::tk_type_has_sentinel.
+ *
+ * @param t  the resolved type to inspect
+ * @return   true iff `t` carries a `Void`-marker sentinel
+ */
 fn type_has_sentinel(t: Type) -> bool {
     match t {
         Slice as s => match s.element { Void => true; _ => type_has_sentinel(s.element) }
@@ -1543,7 +1528,7 @@ fn union_collect(acc: []Type, t: Type, table: TypeTable) -> []Type {
  * Two invariants this function must not break:
  *
  * - (#83) "Equal" per `type_eq` ALSO holds sentinel-vs-concrete (`[]Void == []i64`, permissive by
- *   design — see `type_eq`'s Slice/Optional cases). Blindly returning `a` there discards a concrete
+ *   design — see `type_eq`'s Slice case). Blindly returning `a` there discards a concrete
  *   element type when the SENTINEL is the first operand: `[[], [1]]` folds `type_join` left to
  *   right over `[]`'s `[]Void` then `[1]`'s `[]i64`, and the accumulator was the sentinel, so the
  *   join silently kept `[]Void` and codegen later saw an untyped empty slice (the interpreter, which ignores
@@ -1600,7 +1585,6 @@ pub fn subst_type(t: Type, s: Subst) -> Type {
     match t {
         Named as n => match subst_find(s, n.name) { Type as ct => ct; null => t }
         Slice as sl => Slice { element = subst_type(sl.element, s) }
-        Optional as o => Optional { inner = subst_type(o.inner, s) }
         Reference as r => Reference { inner = subst_type(r.inner, s) }   // (MEM-1b) Ref<T> substitutes its referenced type
         Variant as v => {
             mut ms: []Type = teko::list::empty()
@@ -1618,22 +1602,35 @@ pub fn subst_type(t: Type, s: Subst) -> Type {
     }
 }
 
-// a non-concrete Void SENTINEL (`empty()` → []Void, bare `null` → Void?)? Such a type cannot pin a
-// type-param (it concretizes only in a typed slot — M.2 no-guessing). (C: tk_type_has_void_sentinel.)
+/**
+ * type_has_void_sentinel — a non-concrete Void SENTINEL (`empty()` → `[]Void`)? Such a type
+ * cannot pin a type-param (it concretizes only in a typed slot — M.2 no-guessing).
+ * (C: tk_type_has_void_sentinel.)
+ *
+ * @param t  the resolved argument type to inspect
+ * @return   true iff `t` is a `Void`-marker sentinel
+ */
 fn type_has_void_sentinel(t: Type) -> bool {
     match t {
         Void => true
         Slice as sl => match sl.element { Void => true; _ => false }
-        Optional as o => match o.inner { Void => true; _ => false }
         _ => false
     }
 }
 
-// unify a param PATTERN (may contain type-param Named's) against a concrete ARG type, extending the
-// Subst. Binds each type-param; a re-occurrence must AGREE (S4: exact; LUB is a future refinement).
-// `[]T`/`T?` unify their element/inner by structure. REJECT a Void-sentinel arg (cannot pin T —
-// M.2). A non-type-param (concrete) pattern binds nothing (strict arg-check happens elsewhere).
-// (C: tk_unify.)
+/**
+ * unify — unify a param PATTERN (may contain type-param Named's) against a concrete ARG type,
+ * extending the Subst. Binds each type-param; a re-occurrence must AGREE (S4: exact; LUB is a
+ * future refinement). `[]T` unifies its element by structure. REJECT a Void-sentinel arg (cannot
+ * pin T — M.2). A non-type-param (concrete) pattern binds nothing (strict arg-check happens
+ * elsewhere). (C: tk_unify.)
+ *
+ * @param pattern  the (possibly type-param-carrying) declared pattern
+ * @param arg      the concrete argument type
+ * @param s        the substitution accumulated so far
+ * @param table    the type table
+ * @return         the extended substitution, or an inference-conflict error
+ */
 pub fn unify(pattern: Type, arg: Type, s: Subst, table: TypeTable) -> Subst | error {
     match pattern {
         Named as n => {
@@ -1655,7 +1652,6 @@ pub fn unify(pattern: Type, arg: Type, s: Subst, table: TypeTable) -> Subst | er
             }
         }
         Slice as sl => match arg { Slice as asl => unify(sl.element, asl.element, s, table); _ => s }
-        Optional as o => match arg { Optional as ao => unify(o.inner, ao.inner, s, table); _ => s }
         Reference as r => match arg { Reference as ar => unify(r.inner, ar.inner, s, table); _ => s }   // (MEM-1b)
         _ => s
     }
@@ -1671,7 +1667,6 @@ pub fn collect_sig_type_params(t: Type, table: TypeTable, acc: []str) -> []str {
             error => if is_type_param(n.name, acc) { acc } else { teko::list::push(acc, n.name) }
         }
         Slice as sl => collect_sig_type_params(sl.element, table, acc)
-        Optional as o => collect_sig_type_params(o.inner, table, acc)
         Reference as r => collect_sig_type_params(r.inner, table, acc)   // (MEM-1b) Ref<T> may carry a type-param
         Variant as v => { mut a = acc; mut i = 0; loop { if i >= v.members.len { break }; a = collect_sig_type_params(v.members[i], table, a); i++ }; a }
         Func as f => { mut a = acc; mut i = 0; loop { if i >= f.params.len { break }; a = collect_sig_type_params(f.params[i], table, a); i++ }; collect_sig_type_params(f.ret, table, a) }
@@ -1699,22 +1694,15 @@ fn named_type_is_null(nt: parser::NamedType) -> bool {
  * `null | error` and `error | null` share one resolved type (and one mangled typedef). A null-free
  * member list is returned unchanged (behavior-preserving for the existing corpus).
  *
- * Recognizes BOTH bare-null representations `from_is_bare_null` already treats as the same value
- * (the concrete `Null` a `null | X` annotation resolves to, AND the `Optional{Void}` sentinel a
- * bare `null` LITERAL adopts when typed with no expected-type context, e.g. a `match` arm whose
- * body is exactly `null`) — collapsing either into the single canonical `Null{}` leading member.
- * Without this, a `match` joining a bare `null` arm against a concrete case (`type_join`) left the
- * literal's `Optional{Void}` sentinel as an ordinary VARIANT MEMBER instead of `Null`, so this
- * function's old `Null`-only test never fired: the union normalizer's whole POINT (never emit an
- * un-normalized null-bearing union) silently failed for exactly the case a bare `null` arm
- * produces. Downstream, both the (now-retired) C backend's `cg_union_niche_member` and the own
- * backend's `null_union_shape` classify a null-union SOLELY by a literal `Null` member, so the
- * un-normalized union fell through their niche/tag detection entirely — the own backend's generic
- * BY-NAME variant lowering then bound the union's non-null case at the WRONG index (no `null`
- * pattern has a name to look up), and the write silently landed on the wrong payload slot instead
- * of raising an honest stop (found chasing the `bulk.tkr` KNOWN-STOP pin, `bare_null_match_arm_
- * optional.tks`: it went from a loud "nested bare-null optional" compile error to a SILENT
- * miscompile — the exact regression a correct normalizer here prevents).
+ * Detects a bare-null member via `from_is_bare_null` (the concrete `Null` any `null | X`
+ * annotation, or bare `null` literal, resolves to) and collapses it to the single canonical
+ * `Null{}` leading member. Without this, both the (now-retired) C backend's
+ * `cg_union_niche_member` and the own backend's `null_union_shape` classify a null-union SOLELY by
+ * a literal `Null` member, so an un-normalized union falls through their niche/tag detection
+ * entirely — the own backend's generic BY-NAME variant lowering then binds the union's non-null
+ * case at the WRONG index (no `null` pattern has a name to look up), silently landing the write on
+ * the wrong payload slot instead of raising an honest stop (the exact regression a correct
+ * normalizer here prevents).
  *
  * @param members  the resolved union members (source order)
  * @return         the members with any bare-null member collapsed to a single leading `Null`
@@ -1760,28 +1748,22 @@ fn variant_siblings(xs: []Type, skip: i64) -> []Type {
 
 /**
  * Decide whether a resolved `member` may stand in a union alongside `siblings` (the C3 replacement
- * for the flat variant-member gate). `void` and a nullable `T?` are never members. A `Reference` is
- * admitted ONLY as the never-null handle of a two-member `Ref<T> | null` union (R2 relaxed, owner
- * D3) — exactly one sibling, itself a `Null`; every other stored `Reference` stays rejected (R4). An
- * interface `Named` remains an honest stop (the #28 S4 carve-out — interface-in-union rebases on top
- * of null-union and relaxes this arm itself). `Null` and ordinary value members are admissible.
- *
- * NOTE (divergence from the design signature, reported to the integrator): the design return is
- * `null | error`; the seed-sequencing law forbids a null-union VALUE in production `src/` before C5,
- * so the seed-safe legacy `error?` (Optional) is used — `null` = admissible, an `error` = rejected.
- * The caller match (`{ error as e => …; null => … }`) is byte-identical between the two spellings.
+ * for the flat variant-member gate). `void` is never a member. A `Reference` is admitted ONLY as
+ * the never-null handle of a two-member `Ref<T> | null` union (R2 relaxed, owner D3) — exactly one
+ * sibling, itself a `Null`; every other stored `Reference` stays rejected (R4). An interface
+ * `Named` remains an honest stop (the #28 S4 carve-out — interface-in-union rebases on top of
+ * null-union and relaxes this arm itself). `Null` and ordinary value members are admissible.
  *
  * @param member    the resolved candidate member type
  * @param siblings  the other resolved members already collected for this union
  * @param table     the type table (interface-name resolution)
  * @return          null when `member` is admissible; an error naming why not
- * @throws          error when `member` is `void`, a nullable, an out-of-shape `Reference`, or an interface
+ * @throws          error when `member` is `void`, an out-of-shape `Reference`, or an interface
  * @since 0.3.0.30 (null-union C3)
  */
 fn variant_member_admissible(member: Type, siblings: []Type, table: TypeTable) -> error | null {
     match member {
         Void => return error { message = "a variant member may not be `void`" }
-        Optional => return error { message = "a variant member may not be nullable (`T?`) — use `T | …` and mark the whole type `?`" }
         Reference => {
             if siblings.len == 1 {
                 match siblings[0] { Null => return null; _ => { } }
@@ -1896,8 +1878,8 @@ fn prim_name(k: PrimKind) -> str {
  *
  * A `Named` type deliberately returns `""`: a nominal case is selected by its canonical name's
  * last segment (`name_last_segment`), never by a keyword, and answering here would give callers
- * two different ways to identify the same case. So do `Slice`/`Optional`/`Variant`/`Func`/
- * `Reference`/`Null`, which no bare keyword names.
+ * two different ways to identify the same case. So do `Slice`/`Variant`/`Func`/`Reference`/`Null`,
+ * which no bare keyword names.
  *
  * WHY IT EXISTS (0.3.1.0, degrau 2): the native backend resolved a variant case BY NAME and knew
  * only `Named` + `error`, so `match add_sub_imm_base(…) { u32 as b => b; error as e => … }` — the
@@ -1922,13 +1904,15 @@ pub fn builtin_case_name(t: Type) -> str {
     }
 }
 
-// (S4) a concrete type → its symbol fragment for a mangled generic-instance name. Prim → its
-// surface spelling (i64/…), Str/Byte/Error/Void/Ptr/Uptr → fixed words, Named → the name, Slice →
-// "slice_"+elem, Optional → "opt_"+inner. Total — always yields a symbol-safe fragment. Shared by
-// resolve (type instantiation) and the mono pass so a use and its stamped decl agree byte-for-byte.
-// (#109 W3) a symbol-safe fragment of a canonical name: each "::" → "__". Keeps a generic-instance
-// name (Gen__g__teko__emit__Reader) a valid C identifier AND distinct from Gen<teko::io::Reader> —
-// name_last_segment would collide the two. Slice-based (no byte-append-to-str primitive exists).
+/**
+ * mangle_ns_frag — (#109 W3) a symbol-safe fragment of a canonical name: each "::" → "__". Keeps
+ * a generic-instance name (`Gen__g__teko__emit__Reader`) a valid C identifier AND distinct from
+ * `Gen<teko::io::Reader>` — `name_last_segment` would collide the two. Slice-based (no
+ * byte-append-to-str primitive exists).
+ *
+ * @param name  the canonical "ns::…::Name" to mangle
+ * @return      `name` with every "::" replaced by "__"
+ */
 pub fn mangle_ns_frag(name: str) -> str {
     mut out = ""
     mut start: u64 = 0
@@ -1946,16 +1930,27 @@ pub fn mangle_ns_frag(name: str) -> str {
     out ~ teko::str::slice_from(name, start)   // (#148) builtin slice
 }
 
-// (C: tk_type_mangle.)
+/**
+ * type_mangle — (S4) a concrete type → its symbol fragment for a mangled generic-instance name.
+ * Prim → its surface spelling (i64/…), Str/Byte/Error/Void/Ptr/Uptr → fixed words, Named → its
+ * BARE last segment (#109 W3 — slice/generic-inst suffixes stay bare, matching the syntactic
+ * `cg_opt_mangle_texpr`/`cg_texpr_inst_name`; only DIRECT `tk_t_` typedefs, `mangle_type_name`,
+ * carry the canonical ns where the io/emit `Reader` collision needs distinguishing), Slice →
+ * "slice_"+elem. Total — always yields a symbol-safe fragment. Shared by resolve (type
+ * instantiation) and the mono pass so a use and its stamped decl agree byte-for-byte.
+ * (C: tk_type_mangle.)
+ *
+ * @param t  the concrete type to mangle
+ * @return   its symbol-safe name fragment
+ */
 pub fn type_mangle(t: Type) -> str {
     match t {
         Prim as p => prim_name(p.kind)
         Str => "str"
         Byte => "byte"
         Char => "char"
-        Named as n => name_last_segment(n.name)   // (#109 W3) BARE last-segment — slice/opt/generic-inst suffixes stay bare (matching the syntactic cg_opt_mangle_texpr/cg_texpr_inst_name); only DIRECT tk_t_ typedefs (mangle_type_name) carry the canonical ns where the io/emit Reader collision needs distinguishing.
+        Named as n => name_last_segment(n.name)
         Slice as sl => teko::str::concat("slice_", type_mangle(sl.element))
-        Optional as o => teko::str::concat("opt_", type_mangle(o.inner))
         Error => "error"
         Void => "void"
         Ptr as p => match p.inner { null => "ptr"; Type as t => teko::str::concat("ptr_", type_mangle(t)) }
@@ -2087,6 +2082,30 @@ pub fn phantom_self_inst_name(base_name: str, owner_tparams: []str) -> str {
     generic_inst_name(base_name, args)
 }
 
+/**
+ * ref_target_type — validate a `Ref<T>` type-argument and build the safe reference `Ref{inner}`
+ * (MEM-1b). The inner must be a VALUE TYPE: Teko has NO field/index assignment (value-functional),
+ * so a non-scalar ref is ONLY ever mutated by WHOLE-`.value` REPLACEMENT (`r.value = newWhole` —
+ * native `*r = newWhole` struct/slice copy; interpreter cell_set), and read by `r.value` (native
+ * `(*r)`; interpreter cell_get). Under the cell-IDENTITY model both are observationally identical
+ * in interpreter and native, exactly like scalars, so Prim, Byte, Str, Named (struct/enum/
+ * variant), Slice, and Variant are all allowed. REJECTS the NON-values / aliasing hazards:
+ * `Reference` (no ref-to-ref), `Ptr`/`Uptr` (raw FFI addresses), `Func` (a function value carries
+ * no replaceable storage).
+ *
+ * @param argt  the resolved `Ref<T>` type-argument (the caller already rejected `Void`)
+ * @return      `Reference{inner=argt}` when `argt` is a valid ref target; an error naming why not
+ */
+fn ref_target_type(argt: Type) -> Type | error {
+    match argt {
+        Reference => error { message = "a reference cannot target another reference (`Ref<Ref<T>>` is invalid)" }
+        Ptr => error { message = "a reference cannot target a raw pointer (`Ref<ptr<T>>` is invalid — raw FFI addresses are not safe ref targets)" }
+        Uptr => error { message = "a reference cannot target a raw pointer (`Ref<uptr>` is invalid — raw FFI addresses are not safe ref targets)" }
+        Func => error { message = "a reference cannot target a function (`Ref<(…)->…>` is invalid)" }
+        _ => Reference { inner = argt }
+    }
+}
+
 // (S4) `Box<i64>` → the nominal instance `Named{Box__g__i64}`. Resolves every type-argument, then
 // validates against the generic decl's arity (the decl must exist, be generic, same count). The
 // concrete decl (fields with T→arg substituted) is stamped by the instantiation pass / mono.
@@ -2109,21 +2128,7 @@ fn resolve_generic_inst(nt: parser::NamedType, table: TypeTable, ref_ns: str) ->
         if nt.args.len != 1 { return error { message = "`Ref<T>` takes exactly one type argument" } }
         let argt = match resolve_type(nt.args[0], table, ref_ns) { Type as t => t; error as e => return e }
         match argt { Void => return error { message = "`Ref<void>` is invalid — void is not a value (M.3)" }; _ => { } }
-        // (W9a) ESCAPE GATE — the inner must be a VALUE TYPE. Teko has NO field/index assignment
-        // (value-functional), so a non-scalar ref is ONLY ever mutated by WHOLE-`.value` REPLACEMENT
-        // (`r.value = newWhole` — native `*r = newWhole` struct/slice copy; interpreter cell_set), and read
-        // by `r.value` (native `(*r)`; interpreter cell_get). Under the cell-IDENTITY model both are
-        // observationally identical in interpreter and native, exactly like scalars. So Prim, Byte, Str,
-        // Named (struct/enum/variant), Slice, Optional and Variant are all allowed. REJECT only the
-        // NON-values / aliasing hazards: Void (already above — not a value), Reference (no ref-to-ref),
-        // Ptr/Uptr (raw FFI addresses), Func (a function value carries no replaceable storage).
-        match argt {
-            Reference => return error { message = "a reference cannot target another reference (`Ref<Ref<T>>` is invalid)" }
-            Ptr => return error { message = "a reference cannot target a raw pointer (`Ref<ptr<T>>` is invalid — raw FFI addresses are not safe ref targets)" }
-            Uptr => return error { message = "a reference cannot target a raw pointer (`Ref<uptr>` is invalid — raw FFI addresses are not safe ref targets)" }
-            Func => return error { message = "a reference cannot target a function (`Ref<(…)->…>` is invalid)" }
-            _ => return Reference { inner = argt }
-        }
+        return ref_target_type(argt)
     }
     mut argtypes: []Type = teko::list::empty()
     mut i = 0
@@ -2154,13 +2159,18 @@ fn resolve_generic_inst(nt: parser::NamedType, table: TypeTable, ref_ns: str) ->
     }
 }
 
-// (C1.8) render a semantic Type to a human string for diagnostics ("expected X, found Y"):
-//   prims → "i32"/… , "byte", "str", "error", "void", slice → "[]<elem>", optional → "<inner>?",
-//   variant → "A | B | …", named → "<name>". Recursion builds slice/optional/variant bottom-up.
-// Mirror of resolve.c::tk_type_render. This depends ONLY on the Type model (E2-independent — it
-// never touches the surface `error` value), so it is materialized now, not deferred to E2.
-// (A SENTINEL slice/optional — a `Void`-marker element/inner, the untyped `empty()` / bare `null`
-//  — renders its hole as "_", matching the C twin's NULL-pointer case.)
+/**
+ * type_render — (C1.8) render a semantic Type to a human string for diagnostics ("expected X,
+ * found Y"): prims → "i32"/…, "byte", "str", "error", "void", slice → "[]elem", variant → "A |
+ * B | …", named → "name". Recursion builds slice/variant bottom-up. Mirror of
+ * resolve.c::tk_type_render. This depends ONLY on the Type model (E2-independent — it never
+ * touches the surface `error` value), so it is materialized now, not deferred to E2. A SENTINEL
+ * slice (a `Void`-marker element, the untyped `empty()`) renders its hole as "_", matching the C
+ * twin's NULL-pointer case.
+ *
+ * @param t  the resolved type to render
+ * @return   its human-readable spelling
+ */
 pub fn type_render(t: Type) -> str {
     match t {
         Prim as p => prim_name(p.kind)
@@ -2171,7 +2181,6 @@ pub fn type_render(t: Type) -> str {
         Void => "void"
         Named as n => name_last_segment(n.name)   // (#109 W3) canonical "ns::Name" → bare "Name" for readable diagnostics
         Slice as s => match s.element { Void => "[]_"; _ => $"[]{type_render(s.element)}" }
-        Optional as o => match o.inner { Void => "_?"; _ => $"{type_render(o.inner)}?" }
         Variant as v => render_members(v.members)
         Func as f => render_func(f)   // (C1.8) "(p0, …) -> ret" — full mirror of resolve.c (M.3, show what we know)
         Ptr as p => match p.inner { null => "ptr"; Type as t => $"ptr<{type_render(t)}>" }   // ptr<T> human render

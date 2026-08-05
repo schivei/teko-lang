@@ -41,14 +41,12 @@ fn type_boollit(b: parser::BoolLit) -> TExpr {   // `true`/`false` — the bool 
  * type_nulllit — a bare `null` literal is the concrete unit value `null : Null`. It
  * WIDENS by set-membership into any union listing `null` (see `null_widens_into`); the
  * destination type supplies the surrounding union at the binding/return/arm slot, exactly
- * as a variant case widens into its variant. Retires the legacy `Optional{inner=Void}`
- * bare-null sentinel (REBOOT_PLAN §202), which required a special "sentinel inner == Void
- * unifies with any optional" arm in `type_eq`.
+ * as a variant case widens into its variant (REBOOT_PLAN §202).
  *
  * @param n  the parsed `null` literal node
  * @return   a `TExpr` whose `.type` is `Null{}` (never fails; the `| error` is the
  *           uniform typer return shape)
- * @since 0.3.1 (retire-Optional)
+ * @since 0.3.1
  */
 fn type_nulllit(n: parser::NullLit) -> TExpr | error {
     TExpr { kind = TNullLit { }; type = Null { }; line = 0; col = 0 }
@@ -817,7 +815,6 @@ fn type_compare(c: parser::Compare, env: Env, table: TypeTable) -> TExpr | error
     TExpr { kind = TCompare { first = first; rest = terms }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
 }
 
-
 /**
  * Marker: the call is not a `teko::list::*` builtin — `type_list_builtin` falls back so its
  * caller resolves the call through the ordinary path.
@@ -1270,9 +1267,9 @@ fn method_dispatch_callee(struct_name: str, method: str) -> parser::Path {
     is targeted; `type_call` re-types it (and every arg) as part of its normal argument pass.
     Flags-typed receivers dispatch to type_flags_method (the dispatch's job, mirroring the C
     switch's precedence — see type_dispatch's MethodCall arm), never reaching here. A bare `.` call
-    on a nullable receiver stays a compile error (NP-OOP, issue #116) — but names WHY and points at
-    the sanctioned null-propagating call (`?.`) instead of the deferral message. The receiver-type
-    lookup (`type_table_find`) is a resolved-name probe (#109 W1, no referencing ns); once resolved,
+    on an un-narrowed `T | null` receiver stays a compile error (NP-OOP, issue #116) — but names WHY
+    and points at the narrowing match (`require_narrowed`) instead of the deferral message. The
+    receiver-type lookup (`type_table_find`) is a resolved-name probe (#109 W1, no referencing ns); once resolved,
     a type-param's swallowed constraint error (S6, M.1 — a trait atom / an unknown atom / a Risco-3
     ambiguity) re-surfaces here, named, before an INTERFACE-typed receiver's DYNAMIC contract-method
     call resolves against the interface's EFFECTIVE (extends-transitive) signature list; its index
@@ -1283,7 +1280,7 @@ fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable) -> TExpr
     let recv_t = match type_expr(mc.receiver, env, table) { TExpr as te => te.type; error as e => return e }
     if is_flags_named(recv_t, table) { return error { message = "method typing is deferred (B.29 / M.4)" } }
     match recv_t {
-        Optional => return error { message = "cannot call a method with `.` on a nullable value (`T?`) — use `?.` (REBOOT_PLAN §203)" }
+        Variant => if variant_has_null_member(recv_t) { return require_narrowed(recv_t) }
         _ => { }
     }
     let struct_name = match recv_t { Named as n => n.name; _ => return error { message = "method typing is deferred (B.29 / M.4)" } }
@@ -2162,6 +2159,18 @@ fn require_narrowed(t: Type) -> error {
     error { message = "cannot use `.` on a `T | null` value before narrowing — narrow it first (`match x { null => …; T as v => v.… }`)" }
 }
 
+/**
+ * type_field_access — type `recv.field`. Handles the non-struct receivers FIRST (`str`/slice
+ * `.len`, `error`'s carrier fields, `Ref<T>.value`), then requires a `T | null` receiver be
+ * narrowed before `.` is used on it (NP-OOP, issue #116 — `require_narrowed` names WHY and
+ * points at the narrowing match instead of the generic struct message), and finally resolves an
+ * ordinary struct/class field.
+ *
+ * @param fa     the syntactic field access
+ * @param env    the enclosing type environment
+ * @param table  the type table
+ * @return       the typed field access, or an error
+ */
 fn type_field_access(fa: parser::FieldAccess, env: Env, table: TypeTable) -> TExpr | error {
     mut recv = match type_expr(fa.receiver, env, table) { TExpr as te => te; error as e => return e }
     // `.len` on a `str` or a slice (`[]T`) -> u64 (W5-idx). This precedes the struct-field
@@ -2194,10 +2203,7 @@ fn type_field_access(fa: parser::FieldAccess, env: Env, table: TypeTable) -> TEx
         }
         _ => { }
     }
-    // (NP-OOP, issue #116) a bare `.` on a nullable receiver stays a compile error — but say WHY
-    // and point at the sanctioned readers (`?.`/`??`) instead of the generic struct message.
     match recv.type {
-        Optional => return error { message = "cannot use `.` on a nullable value (`T?`) — read it with `?.` or `??` (REBOOT_PLAN §203)" }
         Variant => if variant_has_null_member(recv.type) { return require_narrowed(recv.type) }
         _ => { }
     }
@@ -2295,15 +2301,30 @@ fn elem_type_name(t: Type) -> str | error {
 }
 
 /**
- * optional_inner_or_self — the Optional-stripped inner of `t` (or `t` itself when it is not an
- * Optional). A DEDICATED, single-purpose function (not inlined) so every caller shares ONE
- * extraction point.
+ * strip_null_member_or_self — for a two-member `T | null` union, the non-null member `T`; `t`
+ * unchanged otherwise (not a union, or a union that is not exactly `{ Null, T }`). A DEDICATED,
+ * single-purpose function (not inlined) so every caller shares ONE extraction point.
  *
  * @param t  the type to strip
- * @return   `t`'s Optional inner, or `t` unchanged
+ * @return   the non-null member of a two-member null union, or `t` unchanged
  */
-fn optional_inner_or_self(t: Type) -> Type {
-    match t { Optional as o => o.inner; _ => t }
+fn strip_null_member_or_self(t: Type) -> Type {
+    match t {
+        Variant as v => {
+            if v.members.len != 2 { return t }
+            mut null_count = 0
+            mut other: Type | null = null
+            mut i = 0
+            loop {
+                if i >= v.members.len { break }
+                match v.members[i] { Null => null_count = null_count + 1; _ => other = v.members[i] }
+                i++
+            }
+            if null_count != 1 { return t }
+            match other { Type as o => o; null => t }
+        }
+        _ => t
+    }
 }
 
 /**
@@ -2313,17 +2334,16 @@ fn optional_inner_or_self(t: Type) -> Type {
  * exactly like it already does for `Foo as v`); every other arm (the `null => break` arm, and any
  * ordinary user arm) passes through unchanged. This rewrite is NEVER re-resolved via `resolve_named`
  * (see `type_foreach_elem_arm` for the actual TYPED binding, which bypasses name-resolution — the
- * element type may live outside the match's own referencing namespace, exactly the reason the
- * existing `?.` desugar's `safe_nav_match` ALSO bypasses it).
+ * element type may live outside the match's own referencing namespace).
  *
  * @param a        the syntactic match arm
- * @param subject  the match's subject type (an Optional when this is a for-each pull)
+ * @param subject  the match's subject type (a `T | null` union when this is a for-each pull)
  * @return         the (possibly rewritten) arm, or an error when the element type is unnameable
  */
 fn resolve_foreach_arm(a: parser::Arm, subject: Type) -> parser::Arm | error {
     if !is_foreach_elem_placeholder(a.pattern) { return a }
     let bp = match a.pattern { parser::BindPattern as b => b; _ => return a }
-    let inner = optional_inner_or_self(subject)
+    let inner = strip_null_member_or_self(subject)
     let tn = match elem_type_name(inner) { str as s => s; error as e => return e }
     let segs = teko::list::push(teko::list::empty(), parser::Segment { name = tn })
     let real = parser::BindPattern { type_name = parser::Path { segments = segs }; has_binding = bp.has_binding; binding = bp.binding; is_slice = false; slice_type = null; type_args = teko::list::empty() }
@@ -2355,16 +2375,16 @@ fn resolve_foreach_placeholders(arms: []parser::Arm, subject: Type) -> []parser:
  * type_foreach_elem_arm — TYPE the for-each pull's element-bind placeholder arm DIRECTLY, bypassing
  * `check_pattern`'s name-based type-RESOLUTION (`bind_pattern_type`/`resolve_named`'s bare-path rule
  * requires the SAME referencing namespace as the type's own declaration — the element type may live
- * elsewhere; the SAME reason the existing `?.` desugar's `safe_nav_match` ALSO builds its `TArm`
- * directly instead of going through `check_pattern`). Extracts the placeholder's `BindPattern` and
- * the element type in ONE function (mirrors `resolve_foreach_arm`'s shape), binds the element name
- * directly to the ALREADY-KNOWN type (no re-derivation needed — it came straight from `_it`'s
- * resolved return type), types the body against that binding, and the emitted `TArm.pattern`
- * carries a REAL, bare-named `BindPattern` (`elem_type_name`) — so interpreter's `pat_match`/codegen's
- * `emit_pat_binds` see an ORDINARY named bind and need no special case (#517, §5.4.1).
+ * elsewhere). Extracts the placeholder's `BindPattern` and the element type in ONE function (mirrors
+ * `resolve_foreach_arm`'s shape), binds the element name directly to the ALREADY-KNOWN type (no
+ * re-derivation needed — it came straight from `_it`'s resolved return type), types the body against
+ * that binding, and the emitted `TArm.pattern` carries a REAL, bare-named `BindPattern`
+ * (`elem_type_name`) — so interpreter's `pat_match`/codegen's `emit_pat_binds` see an ORDINARY named
+ * bind and need no special case (#517, §5.4.1).
  *
  * @param a        the syntactic placeholder arm
- * @param subject  the match's subject type (an Optional; its inner is the element type T)
+ * @param subject  the match's subject type (a `T | null` union; its non-null member is the
+ *                 element type T)
  * @param env      the enclosing type environment
  * @param table    the type table
  * @return         the typed arm, or an error when the pattern is not the expected placeholder
@@ -2372,7 +2392,7 @@ fn resolve_foreach_placeholders(arms: []parser::Arm, subject: Type) -> []parser:
  */
 fn type_foreach_elem_arm(a: parser::Arm, subject: Type, env: Env, table: TypeTable) -> TArm | error {
     let bp = match a.pattern { parser::BindPattern as b => b; _ => return error { message = "internal: for-each placeholder must be a BindPattern" } }
-    let inner = optional_inner_or_self(subject)
+    let inner = strip_null_member_or_self(subject)
     let tn = match elem_type_name(inner) { str as s => s; error as e => return e }
     let e2 = define(env, bp.binding, inner, false)
     let body = match type_block(a.body, e2, table) { TypedBlock as bk => bk; error as err => return err }
@@ -4724,17 +4744,15 @@ fn coerce_argument_into(a: TExpr, pt: Type, table: TypeTable) -> TExpr | error {
 /** arg_keeps_narrow_type — an argument that WIDENS into a parameter type `pt` normally ADOPTS `pt`
     (its TExpr.type is rewritten to `pt`); but where the EMIT wraps the value at the use site, the
     arg must KEEP its narrow `arg_type` so codegen/interpreter see the concrete value they must wrap. True for:
-    a case→variant widen (emit_as tags the union), a bare `T`→`T?` widen (present-wrap), a class→
-    interface/base upcast (fat-pointer build), and a `[]E_a`→`[]E_p` element widen where `E_a != E_p`
-    (the slice is REBUILT element-wise — bare `[]i64`→`[]i64?` or covariant `[]Return`→`[]Statement`;
-    #265: the native gate cc-compiles these for the first time, so a widened arg-type would hide the
-    element mismatch and cc would reject the distinct `tk_slice_*` struct). */
+    a case→variant widen (emit_as tags the union, including a bare `T`→`T | null` present-wrap), a
+    class→interface/base upcast (fat-pointer build), and a `[]E_a`→`[]E_p` element widen where
+    `E_a != E_p` (the slice is REBUILT element-wise — bare `[]i64`→`[]i64 | null` or covariant
+    `[]Return`→`[]Statement`; #265: the native gate cc-compiles these for the first time, so a
+    widened arg-type would hide the element mismatch and cc would reject the distinct `tk_slice_*`
+    struct). */
 fn arg_keeps_narrow_type(pt: Type, arg_type: Type, table: TypeTable) -> bool {
     let pt_is_variant = match expand_variant(pt, table) { Variant => true; _ => false }
     if pt_is_variant { return true }
-    let pt_is_opt = match pt { Optional => true; _ => false }
-    let arg_is_opt = match arg_type { Optional => true; _ => false }
-    if pt_is_opt && !arg_is_opt { return true }
     if arg_class_upcast(pt, arg_type, table) { return true }
     slice_element_widens(pt, arg_type)
 }
@@ -5593,11 +5611,17 @@ fn extern_type_ok(t: Type, table: TypeTable) -> bool {
     }
 }
 
-// C7.2: teko_rt speaks Teko's own internal ABI (tk_str/tk_ffi_sres/tk_ffi_ures/etc.) and may
-// legally declare str/[]str/str|error/error?/i32 — allow those for `from "teko_rt"` externs.
-// `Named` is also allowed: user-defined structs declared in teko-native namespaces (e.g.
-// teko::time's DateTime/Date/…) are passed by value across the teko_rt boundary using their
-// generated C struct layout (the C side mirrors the Teko field layout exactly — SUPREME RULE).
+/**
+ * teko_rt_type_ok — C7.2: teko_rt speaks Teko's own internal ABI (tk_str/tk_ffi_sres/
+ * tk_ffi_ures/etc.) and may legally declare str/[]str/str|error/null|error/i32 (`Variant` covers
+ * both union shapes) — allow those for `from "teko_rt"` externs. `Named` is also allowed:
+ * user-defined structs declared in teko-native namespaces (e.g. teko::time's DateTime/Date/…)
+ * are passed by value across the teko_rt boundary using their generated C struct layout (the C
+ * side mirrors the Teko field layout exactly — SUPREME RULE).
+ *
+ * @param t  the extern's declared type
+ * @return   whether `t` is a legal `from "teko_rt"` extern type
+ */
 fn teko_rt_type_ok(t: Type) -> bool {
     match t {
         Str => true
@@ -5607,8 +5631,7 @@ fn teko_rt_type_ok(t: Type) -> bool {
         Ptr => true
         Uptr => true
         Slice => true   // []str, []byte, etc.
-        Variant => true   // str | error
-        Optional => true   // error?
+        Variant => true
         Named => true   // user struct (e.g. DateTime, Date) — passed by value, layout-matched
         _ => false
     }
