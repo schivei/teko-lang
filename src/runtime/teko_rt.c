@@ -131,6 +131,11 @@ static void tk_rt_crash_handler(int sig) {
         raise(sig);
         return;   // unreachable once the default handler re-delivers, kept for clarity
     }
+    // (Windows visibility fix, Theory CI #62) _Exit() does NOT run the libc stream-flush atexit
+    // machinery — only exit() does. On POSIX this fflush is a no-op (stderr is already unbuffered
+    // there by convention), but it is NOT a no-op everywhere this same handler runs: see the
+    // fflush in tk_win_seh_handler below for why Windows needs it explicitly.
+    fflush(stderr);
     _Exit(128 + sig);   // async-signal-safe
 }
 #if defined(_WIN32)
@@ -220,11 +225,54 @@ static LONG WINAPI tk_win_seh_handler(EXCEPTION_POINTERS *ep) {
     if (!tk_win_seh_is_fatal(code)) return EXCEPTION_CONTINUE_SEARCH;
     fprintf(stderr, "\nteko: FATAL exception 0x%08lX — a generated program crashed (M.1).\n", (unsigned long)code);
     tk_win_seh_backtrace(ep);
+    // (Theory CI #62, windows-x86_64 native leg: gen2 crashed 130ms into "building gen3", with
+    // NOT EVEN the first "lexer 0/N files" progress line visible — the Linux legs print that AND a
+    // full symbolized backtrace on the same class of crash.) ROOT CAUSE: unlike POSIX (glibc/musl),
+    // the Windows CRT (both legacy msvcrt and UCRT — MinGW-w64 links one of these) fully buffers
+    // stdio streams, INCLUDING stderr, once they are not attached to an interactive console —
+    // exactly the case here, since the fixpoint gate pipes the child through
+    // `2>&1 | tee "$bg_log" | sed ... >&2` (fixpoint_gate.sh's build_gen). progress.tks bakes in
+    // the OPPOSITE assumption ("the C standard library never buffers stderr") — true on POSIX,
+    // false on Windows once redirected. So every `teko::io::eprint`/`eprintln` progress line
+    // (tk_eprint/tk_eprintln, both plain fwrite/fputc to stderr with no flush) sat in the CRT's
+    // stdio buffer, AND this handler's own FATAL header + backtrace above sat in that same buffer
+    // — then `_Exit()` tore the process down without running the flush-on-exit machinery
+    // (`_Exit`/`_exit`, unlike `exit`, is specified to skip it), so a hard fault dropped everything
+    // silently no matter how much was printed. tk_rt_install_crash_handler below now forces
+    // `_IONBF` on stderr (and stdout) as the very first thing it does — before any application
+    // code can write a byte — which fixes the progress lines AND makes this fflush() usually a
+    // no-op; it stays as defense-in-depth in case some other code path re-buffers the stream later.
+    fflush(stderr);
     _Exit(128 + (int)(code & 0x7f));
     return EXCEPTION_CONTINUE_SEARCH;   // unreachable, kept for the compiler's return-path check
 }
 #endif
 __attribute__((constructor)) static void tk_rt_install_crash_handler(void) {
+#if defined(_WIN32)
+    // (Theory CI #62 root cause, part 1 of 2 — see the fflush comment in tk_win_seh_handler above
+    // for the full account.) MUST run before anything else in this constructor, and before any
+    // application code gets a chance to write a byte: `setvbuf` is only well-defined before the
+    // stream has been touched. Forcing `_IONBF` here makes stderr (and stdout, for the same
+    // buffered-when-redirected reason) behave on Windows exactly the way progress.tks already
+    // assumes stderr behaves everywhere — unbuffered, so every write lands immediately instead of
+    // sitting in the CRT's stdio buffer for a crash's `_Exit()` to discard unflushed.
+    setvbuf(stderr, NULL, _IONBF, 0);
+    setvbuf(stdout, NULL, _IONBF, 0);
+    // (Theory CI #62 root cause, part 2 of 2 — a SEPARATE gap from the buffering one above, and
+    // plausible on its own for a checker-phase crash walking 154 files' worth of recursive ASTs.)
+    // EXCEPTION_STACK_OVERFLOW is in tk_win_seh_is_fatal's list above, but WITHOUT this call the
+    // vectored handler runs on the SAME, already-exhausted stack that just faulted: the first
+    // guard page is gone, so fprintf/RtlCaptureStackBackTrace/tk_win_seh_backtrace can (and
+    // typically do) immediately re-fault on entry, delivering a SECOND, unhandled access
+    // violation with NO output — silent, exactly what Theory CI #62 observed, and independent of
+    // the stdio-buffering fix above (that fix cannot help if the handler body never gets to run).
+    // `SetThreadStackGuarantee` must be called BEFORE the overflow, on the thread that may
+    // overflow (the main thread — this compiler is single-threaded), reserving extra committed
+    // stack the OS hands back specifically for a stack-overflow handler to run in. 64 KiB matches
+    // what MSDN's own SEH sample uses and is ample for this handler's non-recursive, fixed-frame
+    // print path.
+    { ULONG tk_stk_guarantee = 64 * 1024; SetThreadStackGuarantee(&tk_stk_guarantee); }
+#endif
     signal(SIGSEGV, tk_rt_crash_handler);
 #ifndef _WIN32
     signal(SIGBUS,  tk_rt_crash_handler);   // not defined on Windows
