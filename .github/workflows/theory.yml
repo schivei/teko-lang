@@ -137,6 +137,17 @@ jobs:
           TEKO_MEM_PARANOID: '1'
         run: sh scripts/fixpoint_gate.sh out/teko . .fixpoint
 
+      # THE WINDOWS GLOB GAP (Theory CI #62): every build on this leg produces `teko.exe`, not
+      # `teko` — `cc`/MinGW appends the extension automatically, and `take_gen` in
+      # scripts/fixpoint_gate.sh strips it ONLY for `.fixpoint/gen2`/`.fixpoint/gen3` (its rename
+      # target has no extension by construction: `mv "$W/out/teko.exe" "$W/$tg_name"`). `out/teko`
+      # (produce_assets.sh's dry build) and `.fixpoint/out/teko` (a build still IN PROGRESS at
+      # failure time, before take_gen ever runs) both keep whatever extension the compiler wrote —
+      # `.exe` on this runner — so the un-suffixed path never matched anything on Windows and the
+      # step warned "No files were found" even though the crashing gen2 binary sat right there on
+      # disk. Listing the `.exe` variant alongside each un-suffixed one is a no-op on Linux/macOS
+      # (upload-artifact's `if-no-files-found: warn` tolerates the pattern matching nothing there)
+      # and is what actually picks the binary up on Windows.
       - name: Upload native binaries for offline symbolization (always — the crash IS the signal)
         if: ${{ always() && matrix.backend == 'native' }}
         uses: actions/upload-artifact@v4
@@ -144,8 +155,11 @@ jobs:
           name: native-bins-${{ matrix.leg.target }}-${{ github.sha }}
           path: |
             out/teko
+            out/teko.exe
             .fixpoint/gen2
+            .fixpoint/gen2.exe
             .fixpoint/out/teko
+            .fixpoint/out/teko.exe
           if-no-files-found: warn
           retention-days: 7
 
