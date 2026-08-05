@@ -3743,27 +3743,29 @@ fn item_trace_label(it: checker::TItem) -> str {
 extern fn native_lowering_mono_ns() -> i64 = "tk_rt_monotonic_ns" from "teko_rt"
 
 /**
- * ns_delta_ms_str — the whole-milliseconds label (e.g. `"120ms"`) for the monotonic-ns window
- * `[start_ns, end_ns]`, for the per-item native-lowering trace's trailing ` | Nms`. Truncates toward
- * zero, so a sub-millisecond item reads `0ms` — the fast items the owner wants to tell apart from the
- * slow ones by sight. The delta is non-negative (monotonic origin), so `i64` division is exact here.
+ * ns_delta_str — the raw-nanoseconds label (e.g. `"120000000ns"`) for the monotonic-ns window
+ * `[start_ns, end_ns]`, for the per-item native-lowering trace's trailing ` | Nns`. Reports the FULL
+ * nanosecond delta with NO truncation: a whole-millisecond unit (the prior `ms`) collapsed every
+ * sub-millisecond item to `0ms`, hiding exactly the fast-vs-slow spread the trace exists to expose —
+ * nanoseconds keep every item's true cost visible (finer than microseconds, which would still zero a
+ * sub-µs item). The delta is non-negative (monotonic origin).
  *
  * @param start_ns  the reading taken just before the item's lowering-and-encode window
  * @param end_ns    the reading taken just after that window committed
- * @return          the `"<ms>ms"` label
+ * @return          the `"<ns>ns"` label
  * @since 0.3.1 native-lowering-timing
  */
-fn ns_delta_ms_str(start_ns: i64, end_ns: i64) -> str {
-    teko::str::concat(teko::i64_to_str((end_ns - start_ns) / 1000000), "ms")
+fn ns_delta_str(start_ns: i64, end_ns: i64) -> str {
+    teko::str::concat(teko::i64_to_str(end_ns - start_ns), "ns")
 }
 
 /**
  * trace_native_item — OPEN the per-item native-lowering trace line for `it` (its 1-based position out
  * of `total`, then its label) to stderr WITHOUT a trailing newline, and return the monotonic-ns
  * reading that starts the item's timing window, when `native_trace_items_enabled`. The line is closed
- * by `trace_native_item_done` with a trailing ` | Nms` once the item's lowering-and-encode committed;
+ * by `trace_native_item_done` with a trailing ` | Nns` once the item's lowering-and-encode committed;
  * an item whose native codegen faults mid-window therefore leaves its OPEN line on stderr WITHOUT the
- * ` | Nms` — the last line names the exact crashing item, the ms-less tail marking it as the one that
+ * ` | Nns` — the last line names the exact crashing item, the ns-less tail marking it as the one that
  * did not finish. A no-op returning `0` otherwise, so the ordinary build's output is byte-identical to
  * before this diagnostic existed.
  *
@@ -3796,9 +3798,9 @@ fn trace_native_vmain() -> i64 {
 
 /**
  * trace_native_item_done — CLOSE the trace line `trace_native_item`/`trace_native_vmain` opened, with
- * a trailing ` | Nms` naming how long the item's lowering-and-encode window took (`start_ns` to now),
+ * a trailing ` | Nns` naming how long the item's lowering-and-encode window took (`start_ns` to now),
  * when `native_trace_items_enabled`. Called only on the item's success path, so a faulting item never
- * reaches it and its open line stays ms-less — the crash indicator. A no-op otherwise.
+ * reaches it and its open line stays ns-less — the crash indicator. A no-op otherwise.
  *
  * @param start_ns  the reading `trace_native_item`/`trace_native_vmain` returned for this item
  * @return          void
@@ -3806,7 +3808,7 @@ fn trace_native_vmain() -> i64 {
  */
 fn trace_native_item_done(start_ns: i64) -> void {
     if !native_trace_items_enabled() { return }
-    teko::io::eprintln(teko::str::concat(" | ", ns_delta_ms_str(start_ns, native_lowering_mono_ns())))
+    teko::io::eprintln(teko::str::concat(" | ", ns_delta_str(start_ns, native_lowering_mono_ns())))
 }
 
 /**
