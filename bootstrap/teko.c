@@ -44719,7 +44719,7 @@ tk_str teko_teko__build__default_cc_for_target(tk_t_teko__build__NativeTarget t)
         tk_t_teko__build__NativeTarget _s2005680 = (t);
         if ((_s2005680 == TK_E_NATIVETARGET_X8664WINDOWS)) {
             return (tk_str) {
-                (const tk_byte *)"x86_64-w64-mingw32-gcc", 22
+                (const tk_byte *)"clang", 5
             };
             goto tk_mt2005681_done;
         } if ((_s2005680 == TK_E_NATIVETARGET_X8664LINUX)) {
@@ -44790,9 +44790,7 @@ tk_str teko_teko__build__resolve_cc(tk_t_teko__build__Manifest m) {
                 };
             } goto tk_mt2007117_done;
         } if ((_s2007116.tag == TK_TAG_U_STR_ERROR_ERROR)) {
-            return (tk_str) {
-                (const tk_byte *)"cc", 2
-            };
+            return (tk_str_eq(tk_rt_os(), (tk_str) { (const tk_byte *)"windows", 7 }) ? (tk_str) { (const tk_byte *)"clang", 5 } : (tk_str) { (const tk_byte *)"cc", 2 });
             goto tk_mt2007117_done;
         } tk_mt2007117_done:;
         return (tk_str) {
@@ -45185,7 +45183,7 @@ tk_slice_str teko_teko__build__build_cc_argv(tk_str input, tk_str binary, tk_t_t
             .ptr = _sp2018693, .len = _sl2018694
         };
     });
-    if ((!((m.freestanding)))) {
+    if (((!((m.freestanding)))) && ((!tk_str_eq(tk_rt_os(), (tk_str) { (const tk_byte *)"windows", 7 })))) {
         argv = ( {
             tk_slice_str _sb2019437 = argv;
             tk_str _si2019438 = (tk_str) {

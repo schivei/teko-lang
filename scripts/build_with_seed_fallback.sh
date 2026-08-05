@@ -115,55 +115,9 @@ log() { printf '%s\n' "teko-ci: $*" >&2; }
 # removing it reclaims all of them.
 cleanup() {
   [ -n "$WORKTREE_DIR" ] && [ -d "$WORKTREE_DIR" ] && git worktree remove --force "$WORKTREE_DIR" >/dev/null 2>&1
-  [ -n "${CC_SHIM_DIR:-}" ] && [ -d "${CC_SHIM_DIR:-}" ] && rm -rf "$CC_SHIM_DIR"
   return 0
 }
 trap cleanup EXIT
-
-# ── WINDOWS-ONLY clang -Werror TOLERANCE SHIM (owner ruling 2026-08-03, revised 2026-08-05) ──────
-# GCC 14 / recent clang promoted -Wincompatible-pointer-types (and -Wint-conversion,
-# -Wimplicit-function-declaration, -Wimplicit-int) from WARNING to hard ERROR by default. The
-# machine-generated C this ladder compiles — the pinned historical rungs AND the tip's own emitted
-# teko.c — has always contained pointer assignments across distinct-but-layout-identical named types
-# (e.g. teko::backend::Symbol vs teko::lsp::Symbol), which every prior toolchain accepted and which
-# run correctly (this exact ladder was green through PR #92). The published seed bakes its cc
-# invocation in and cannot be re-released this version, so that C cannot be regenerated.
-#
-# SCOPED TO WINDOWS (owner 2026-08-05: "use o shim somente na perna do Windows"). Linux and macOS
-# never needed it — their runners' cc treats the class as a warning, so the ladder and both fixpoints
-# are already clean there and the shim would only add risk.
-#
-# IT MUST BE clang, NOT MinGW gcc (owner 2026-08-05: "tem que ser clang"). gcc is a *driver* that
-# spawns a separate `cc1`; wrapping it in an sh shim hands gcc a POSIX argv[0] from which its
-# CreateProcess of cc1 resolves to a path Windows cannot open ("cc: fatal error: cannot execute
-# 'cc1': CreateProcess: No such file or directory") — the shim then breaks EVERY cc on Windows,
-# worse than no shim. clang is monolithic (no cc1 subprocess), so the wrapper is transparent, and it
-# honours -Wno-error identically. So on Windows the shim routes cc/gcc/clang ALL to the real clang,
-# resolved to its NATIVE path (cygpath -w) so clang's own resource lookup stays valid, re-appending
-# -Wno-error=<the four escalated diagnostics>. NOT a re-pin (docs/medicoes/2026-07-31-seed-compat-e-escada.md).
-CC_SHIM_DIR=""
-setup_cc_shim() {
-  case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT) ;;
-    *) return 0 ;;
-  esac
-  real_clang="$(command -v clang 2>/dev/null)" || { log "Windows cc shim: no clang on PATH — skipping"; return 0; }
-  [ -n "$real_clang" ] || { log "Windows cc shim: no clang on PATH — skipping"; return 0; }
-  real_clang_w="$(cygpath -w "$real_clang" 2>/dev/null || printf '%s' "$real_clang")"
-  shim_dir="$(mktemp -d 2>/dev/null)" || return 0
-  for tool in cc gcc clang; do
-    {
-      printf '%s\n' '#!/bin/sh'
-      printf 'exec "%s" -Wno-error=incompatible-pointer-types -Wno-error=int-conversion -Wno-error=implicit-function-declaration -Wno-error=implicit-int "$@"\n' "$real_clang_w"
-    } > "$shim_dir/$tool" || { rm -rf "$shim_dir"; return 0; }
-    chmod +x "$shim_dir/$tool"
-  done
-  CC_SHIM_DIR="$shim_dir"
-  PATH="$shim_dir:$PATH"
-  export PATH
-  log "Windows clang -Werror tolerance shim active (cc/gcc/clang -> clang $real_clang_w): $shim_dir"
-}
-setup_cc_shim
 
 # ── THE CHAIN'S FIRST QUESTION, ASKED ONCE ────────────────────────────────────────────────────
 # Whether `bootstrap/teko.c` is a rung or a payload is decided HERE, from a versioned human claim,
@@ -324,8 +278,18 @@ declared_degrau_rung() {
     return 1
   fi
   cc_src="$DEGRAU_C"
-  if ! command -v cc >/dev/null 2>&1; then
-    log "rung -1: a degrau is declared at $cc_src but no cc is on PATH — skipping"
+  # On Windows the toolchain MUST be clang, not MinGW gcc (owner ruling 2026-08-05). MinGW gcc is
+  # pathologically slow on the 10 MB bootstrap C (its -O2 optimizer is superlinear — a single
+  # produce step measured 55 min), its separate `cc1` backend breaks under any PATH wrapper
+  # (`cannot execute 'cc1': CreateProcess`), and its MSVC-family linker has no `m.lib` so `-lm` is a
+  # hard link error. clang (x86_64-pc-windows-msvc, already on the runner) is monolithic, fast, and
+  # needs no libm — the same Windows rules build_cc_argv already applies for gen1 and beyond.
+  deg_cc="cc"; deg_std="-std=c2x"; deg_libm="-lm"
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) deg_cc="clang"; deg_std="-std=c23"; deg_libm="" ;;
+  esac
+  if ! command -v "$deg_cc" >/dev/null 2>&1; then
+    log "rung -1: a degrau is declared at $cc_src but no $deg_cc is on PATH — skipping"
     return 1
   fi
   cc_out="$PWD/.rung-c"
@@ -335,10 +299,10 @@ declared_degrau_rung() {
   # standing hypothesis for the generation-to-generation slowdown; measured on the wagon it made the
   # x86_64 lane SLOWER (780s -> 869s), so the flag was reverted everywhere. It survived in this
   # function only because rung -1 was written while the experiment was still live.
-  log "rung -1: building the degrau's compiler from $cc_src"
-  if ! cc -std=c2x -w -O2 \
+  log "rung -1: building the degrau's compiler from $cc_src (cc=$deg_cc)"
+  if ! "$deg_cc" "$deg_std" -w -O2 \
         -I src/runtime -I src/assert \
-        "$cc_src" src/runtime/teko_rt.c src/assert/assert.c -lm \
+        "$cc_src" src/runtime/teko_rt.c src/assert/assert.c $deg_libm \
         -o "$cc_out/teko" >"$cc_log" 2>&1; then
     log "rung -1: the declared C did not compile — skipping to the next rung. cc said:"
     sed 's/^/teko-ci:   | /' "$cc_log" >&2
