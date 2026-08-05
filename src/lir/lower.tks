@@ -6710,10 +6710,30 @@ fn lower_value_into_null_union(ctx: LowerCtx, shape: NullUnionShape, value: chec
  * a `match`/`if` sub-expression whose OWN inferred type collapsed to bare `Null` because every one
  * of its arms is, recursively, `null` — `checker::resolve.type_join`'s bare-null-only join) builds
  * the absence wrapper at the union's OWN `Null` member index (`lower_variant_null_construct`); a
- * value ALREADY typed as the variant itself (re-flowing an existing union value — the same
- * passthrough `lower_value_into_null_union` uses for `T | null`) passes through unwrapped; any other
- * value (a bare case, e.g. a `Box` or a bare `error{…}` flowing into a declared `Box | error` slot)
- * is wrapped via `lower_variant_construct` at its own matched member index (#382, degrau N2).
+ * value whose type is DIRECTLY one of `v`'s own declared members (`direct_variant_member_index` —
+ * INCLUDING a member that happens to itself be a declared variant, e.g. a bare `Inner` flowing into
+ * `-> Outer`, `Outer = variant A | Inner`) is ALWAYS wrapped via `lower_variant_construct` at its
+ * matched index; any other value (a bare case reached only through alias nesting, e.g. a `Box` or a
+ * bare `error{…}` flowing into a declared `Box | error` slot) is wrapped the same way, UNLESS its
+ * own type already expands to SOME `Variant` shape — the "value ALREADY typed as the variant itself"
+ * re-flow (the same passthrough `lower_value_into_null_union` uses for `T | null`) — in which case it
+ * passes through unwrapped.
+ *
+ * THE DIRECT-MEMBER CHECK RUNS FIRST (degrau 33, #cego-gen2), AHEAD OF the "expands to some
+ * `Variant`" passthrough test: a member that is itself a declared variant (`Inner` above) ALSO
+ * expands to a bare `Variant`, so the passthrough test alone used to take the SAME arm for it —
+ * `value`'s OWN wrapper (tagged in `Inner`'s tag space) flowed out unrewrapped, so a later `match`
+ * against `v`'s members read `Inner`'s tag as if it were `v`'s — a silent WRONG ANSWER (measured: a
+ * `Holder{node: Inner}.node` returned as `Outer` matched the WRONG arm, reading `Inner`'s boxed
+ * payload through `Outer`'s unrelated field layout) — the general three-or-more-member twin of the
+ * two-level `Outer = variant P | Q` bug `lower_variant_construct`'s own doc already names (degrau
+ * 23, direct vs. nested). Checking DIRECT membership first (rather than widening the passthrough
+ * test to "is it the SAME declared variant as `v`") keeps every OTHER passthrough this function
+ * already relied on intact: a value's own type need not equal `v` structurally member-for-member
+ * for the re-flow case to be legitimate (measured: `teko::checker::eval_len_field`'s own `ConstValue
+ * | error` tail — a wider structural-equality gate honest-stopped there with "value's type is not a
+ * member of its declared variant", a REGRESSION a first attempt at this fix introduced and this
+ * narrower direct-membership-first ordering does not).
  *
  * THE `Null` ARM IS DEGRAU 30, and it is the WRITER half of `lower_null_pattern_test`'s reader.
  * Without it a `return null` into a `[]byte | null | error` fell through to
@@ -6735,12 +6755,17 @@ fn lower_value_into_null_union(ctx: LowerCtx, shape: NullUnionShape, value: chec
  * @return Lowered  the value's own VReg (already the variant), or a freshly built wrapper
  * @throws  propagated from lowering the value, or when its type names no member of `v`
  * @since 0.3.1 (own-backend general variant construction, degrau N2); 0.3.1.0 degrau 30 (`null`);
- *        native-N1-null-widen (O1 retirement — a non-literal `Null`-typed sub-tree)
+ *        native-N1-null-widen (O1 retirement — a non-literal `Null`-typed sub-tree); 0.3.1.0
+ *        degrau 33 (a variant-typed value that is itself a DIRECT member of `v`, #cego-gen2)
  */
 fn lower_value_into_variant(ctx: LowerCtx, v: checker::Variant, value: checker::TExpr) -> Lowered | error {
     match value.type {
         checker::Null => return lower_variant_null_construct(ctx, v, value)
         _ => { }
+    }
+    match direct_variant_member_index(v.members, value.type) {
+        u32 => return lower_variant_construct(ctx, v, value)
+        null => { }
     }
     match expand_named_variant(value.type, ctx.variants) {
         checker::Variant => lower_expr(ctx, value)
