@@ -15383,8 +15383,8 @@ fn layout_of_fields(name: str, fields: []parser::Field, known: []LStructLayout, 
         if i >= fields.len { break }
         let te = fields[i].type_ann
         let ft = ltype_of_typeexpr(te, enums)
-        let nested = struct_layout_of_field(te, known)
         let rft = resolved_field_type(te, ns, dtable)
+        let nested = struct_layout_of_resolved(rft, te, known)
         field_names = teko::list::push(field_names, fields[i].name)
         field_types = teko::list::push(field_types, ft)
         field_sizes = teko::list::push(field_sizes, field_layout_size(te, ft, nested, table, rft))
@@ -15405,6 +15405,40 @@ fn layout_of_fields(name: str, fields: []parser::Field, known: []LStructLayout, 
  * @param []LStructLayout known  every struct layout resolved so far
  * @return LStructLayout?  the matching nested layout, or `null`
  */
+/**
+ * struct_layout_of_resolved — a field's nested struct-BY-VALUE layout, keyed by the field's RESOLVED
+ * CANONICAL type name (`resolved_field_type`), with the syntactic annotation only as a fallback.
+ *
+ * This is the whole `resolve_named`/self-build fix. Struct layouts are registered under the CANONICAL
+ * name a `checker::Named` carries (`qualify`'s `teko::parser::TypeDecl`), which is exactly the key
+ * `find_struct_layout` probes at field-access time (`named_type_name(arg.type)`). But the field's
+ * syntactic annotation is written RELATIVE (`decl: parser::TypeDecl`) or bare (`body: TypeBody`), so a
+ * lookup by the annotation string — single-segment OR full path (`struct_layout_of_field`) — missed
+ * every non-root nested struct field and fell to the 8-byte `Ptr` fallback (`field_size_of`). A field
+ * like `TypeReg.decl: parser::TypeDecl` was then sized 8 instead of `TypeDecl`'s full inline width, so
+ * the BOX of a `TypeReg` value (`named_layout_bytes(TypeReg)`, the variant-payload/return copy)
+ * truncated the inline `decl` — and a later `r.decl` / `td.body` read past the copied prefix,
+ * dereferencing a garbage pointer (the native `resolve_named` SIGSEGV; arch-independent shared layout
+ * math; C leg immune, `cc` lays its own structs out). Resolving through `rft` yields the SAME canonical
+ * spelling the layout table is keyed by, so the two finally agree. A resolver-unqualifiable annotation
+ * (a monomorphized bare-`T` instance) keeps the syntactic fallback.
+ *
+ * @param rft    the field's RESOLVED declared type (`resolved_field_type`)
+ * @param te     the field's syntactic annotation (the fallback when `rft` is not a canonical Named)
+ * @param known  every struct layout resolved so far
+ * @return       the field's nested struct layout, or `null` (a scalar/fat/variant/forward-ref field)
+ */
+fn struct_layout_of_resolved(rft: checker::Type, te: parser::TypeExpr, known: []LStructLayout) -> LStructLayout | null {
+    match rft {
+        checker::Named as n => match find_known_struct_layout(known, n.name) {
+            LStructLayout as l => return l
+            null => { }
+        }
+        _ => { }
+    }
+    struct_layout_of_field(te, known)
+}
+
 fn struct_layout_of_field(te: parser::TypeExpr, known: []LStructLayout) -> LStructLayout | null {
     // Struct layouts are keyed by CANONICAL (qualified) name — `find_struct_layout` is called at
     // field-access time with `named_type_name(arg.type)`, a `resolve_named`-qualified name. A field
