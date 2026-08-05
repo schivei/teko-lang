@@ -617,7 +617,7 @@ fn mono_slice_and_optional_mangle() {
     teko::assert::is_true(has_stamped_instance(mp2, "idh"))
     // directly exercise EVERY mono_type_mangle arm (branch coverage of the mangle + type_to_texpr).
     teko::assert::is_true(teko::str::len(mono_type_mangle(Slice { element = i64t() })) > 0)
-    teko::assert::is_true(teko::str::len(mono_type_mangle(Optional { inner = Str { } })) > 0)
+    teko::assert::is_true(teko::runtime::str_eq(mono_type_mangle(Variant { members = teko::list::empty() }), "variant"))
     teko::assert::is_true(teko::runtime::str_eq(mono_type_mangle(Str { }), "str"))
     teko::assert::is_true(teko::runtime::str_eq(mono_type_mangle(Byte { }), "byte"))
     teko::assert::is_true(teko::runtime::str_eq(mono_type_mangle(Error { }), "error"))
@@ -689,7 +689,7 @@ fn t_node_init(val: TExpr) -> TExpr {
 // a `let n = <value>` binding (not const, not discard) to a SimpleName — returned as the raw
 // TBinding (the codegen's emit_binding receives this same destructured node).
 fn t_let(name: str, value: TExpr) -> TBinding {
-    TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = name }; bound = value.type; value = value ; di_kind = parser::DiKind::None }
+    TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = name }; bound = value.type; value = value; di_kind = parser::DiKind::None }
 }
 // `n.val` typed as i64 (a SCALAR field read — a pure copy, so the receiver does not escape).
 fn t_field_i64(recv_name: str, field: str) -> TExpr {
@@ -1261,7 +1261,7 @@ fn method_is_effective_unsafe_all_three_arms() {
     teko::assert::is_false(method_is_effective_unsafe(safe_method, "Foo", "", foo_table()))
 }
 
-/** `unsafe_carrying` recurses through `[]M` (Slice), `M?` (Optional), `Ref<M>` (Reference), and
+/** `unsafe_carrying` recurses through `[]M` (Slice), `M | null` (Variant), `Ref<M>` (Reference), and
  *  `ptr<M>` (Ptr, present inner) — every compositional carrier the design calls out (criterion
  *  7). Each wraps the SAME unsafe leaf `M`; the safe-scalar sibling of each shape is false. The
  *  final assertion is the OPAQUE `ptr` (`inner = null`) — the `Ptr` case's `null` arm, never
@@ -1272,8 +1272,8 @@ fn unsafe_carrying_recurses_through_every_carrier() {
     let m = Named { name = "M" }
     teko::assert::is_true(unsafe_carrying(Slice { element = m }, table))
     teko::assert::is_false(unsafe_carrying(Slice { element = i64t() }, table))
-    teko::assert::is_true(unsafe_carrying(Optional { inner = m }, table))
-    teko::assert::is_false(unsafe_carrying(Optional { inner = i64t() }, table))
+    teko::assert::is_true(unsafe_carrying(Variant { members = teko::list::push(teko::list::push(teko::list::empty(), Null { }), m) }, table))
+    teko::assert::is_false(unsafe_carrying(Variant { members = teko::list::push(teko::list::push(teko::list::empty(), Null { }), i64t()) }, table))
     teko::assert::is_true(unsafe_carrying(Reference { inner = m }, table))
     teko::assert::is_false(unsafe_carrying(Reference { inner = i64t() }, table))
     teko::assert::is_true(unsafe_carrying(Ptr { inner = m }, table))

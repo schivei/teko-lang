@@ -27,7 +27,17 @@ fn bindkind_byte(k: parser::BindKind) -> byte { k to byte }   // (C7.16) Let/Mut
 fn assign_kind_byte(k: parser::AssignKind) -> byte { k to byte }   // (#88) Simple/RefDeref/Field → ordinal byte
 fn vis_byte(v: parser::Visibility) -> byte { v to byte }   // (C7.16) Private/Pub/Exp → ordinal byte
 
-// a Type → tag byte + payload. (prim_byte/kind_byte = the enum's ordinal — E7.)
+/**
+ * write_type — a Type → tag byte + payload (`prim_byte`/`kind_byte` = the enum's ordinal — E7).
+ * Tag 9 (the legacy `T?` former, B.37) is RETIRED IN PLACE — no case writes it any more, and it
+ * is never reused, so every other tag stays byte-stable; `tkb_read.tks`'s reader rejects a stray
+ * tag 9 as legacy.
+ *
+ * @param buf  the byte buffer to append to
+ * @param t    the string table (interns a `Named` type's name)
+ * @param ty   the resolved type to encode
+ * @return     `buf` with the type's tag + payload appended
+ */
 fn write_type(buf: []byte, t: StrTable, ty: checker::Type) -> []byte {
     match ty {
         checker::Prim as p => write_u8(write_u8(buf, 0), prim_byte(p.kind))
@@ -39,7 +49,6 @@ fn write_type(buf: []byte, t: StrTable, ty: checker::Type) -> []byte {
         checker::Named as n => write_u32(write_u8(buf, 6), st_find(t, n.name))
         checker::Variant as v => write_types(write_u8(buf, 7), t, v.members)
         checker::Func as f => write_type(write_types(write_u8(buf, 8), t, f.params), t, f.ret)
-        checker::Optional as o => write_type(write_u8(buf, 9), t, o.inner)   // tag 9 = T? (B.37)
         checker::Ptr as p => match p.inner { null => write_u8(buf, 10); checker::Type as it => write_type(write_u8(buf, 12), t, it) }   // tag 10 = opaque ptr; tag 12 = ptr<T> (S-mem)
         checker::Uptr => write_u8(buf, 11)   // (C7.1a) tag 11 = uptr
         checker::Reference as r => write_type(write_u8(buf, 13), t, r.inner)   // (MEM-1b) tag 13 = Ref<T>

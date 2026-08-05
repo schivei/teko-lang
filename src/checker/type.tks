@@ -69,22 +69,21 @@ pub fn prim_width(k: PrimKind) -> u32 {
     }
 }
 
-// Doctrinal correction (TEKO_CORRECTION_PLAN §3 [Z1]; Laws M.0/M.1/M.3):
-//   - `Unit` (the value-less struct) is EXCISED. "Returns no value" is `void`.
-//   - `void` is a RETURN-ONLY marker: legal ONLY as `Func.ret`. It is never a
-//     value, never a binding type, never a variant member. (Enforced in the
-//     checker, Z2a — the model only needs to REPRESENT it.)
-//   - `error` is the native lowercase type — it SUPERSEDES the old capitalized
-//     `Error` / `teko::Error`.
-//   - `Optional` (`T?`) is the built-in unary type-former for nullability
-//     (complete in the seed, Z3=a). A variant member may NOT be optional
-//     (enforced in the checker, Z2a).
-
-// the cases that carry data (Teko has no payload on a bare enum — a variant case
-// is a struct). Byte/Str/error/void are markers (no payload).
+/**
+ * Doctrinal correction (TEKO_CORRECTION_PLAN §3 [Z1]; Laws M.0/M.1/M.3): `Unit` (the
+ * value-less struct) is EXCISED — "returns no value" is `void`. `void` is a RETURN-ONLY
+ * marker, legal ONLY as `Func.ret`: never a value, never a binding type, never a variant
+ * member (enforced in the checker, Z2a — the model only needs to REPRESENT it). `error` is
+ * the native lowercase type — it SUPERSEDES the old capitalized `Error` / `teko::Error`.
+ * Nullability has no dedicated unary type-former: an absent value is the union `T | null`
+ * (a `Variant` carrying a `Null` member), and a variant member may not itself be a bare
+ * `null` (enforced in the checker's `variant_member_admissible`).
+ *
+ * The cases below that carry data (Teko has no payload on a bare enum — a variant case is
+ * a struct). Byte/Str/error/void are markers (no payload).
+ */
 pub type Prim = struct { kind: PrimKind }
 pub type Slice = struct { element: Type }   // []T — recursive (B.8)
-pub type Optional = struct { inner: Type }   // T? — built-in nullable former (like Slice)
 pub type Named = struct { name: str }   // a user type, equal by NAME (nominal)
 pub type Variant = struct { members: []Type }   // A | B | … (two or more); members are COMPLETE types
 pub type Func = struct { params: []Type; ret: Type; variadic: bool; param_names: []str; n_required: u64; defaults: []parser::Expr }   // (params) -> ret (ret may be void); variadic = the LAST param is a C#-style `params` slice (2026-07-01) — false for closures/FFI/lambda types, true ONLY for a declared fn whose last source param carried `params`. DEFARGS (2026-07-01): param_names PARALLEL to params (empty []str for closures/FFI/builtins — no named-call, rule B); n_required = count of LEADING params with NO default (params[n_required..] all have one, TRAILING-ONLY rule A); defaults = the n_required..params.len default EXPRESSIONS, in order (params.len - n_required entries)
@@ -95,8 +94,7 @@ pub type Error = struct { }   // the native `error` (lowercase; supersedes `Erro
 pub type Void = struct { }   // return-only marker; legal ONLY as Func.ret
 /**
  * Ptr — the checker representation of `ptr<T>`, a TYPED machine address. The internal meta-name
- * differs from the surface `ptr<T>` exactly as `Optional`↔`T?` and `Slice`↔`[]T`; it is the primitive
- * inside `Ref<T>`.
+ * differs from the surface `ptr<T>` exactly as `Slice`↔`[]T`; it is the primitive inside `Ref<T>`.
  */
 pub type Ptr = struct {
     /** the pointed-to type, or `null` for the opaque `ptr` ≡ `ptr<void>` ≡ `*void` (pointer-only, NOT the value-`void`). */
@@ -105,26 +103,23 @@ pub type Ptr = struct {
 /**
  * Uptr — the checker representation of `uptr`, the opaque word-size unsigned integer FFI authors
  * spell for a raw `void*`-style pointer (C7.1a: transport-only at the FFI boundary, never
- * dereferenced by Teko). Owner ruling (retire-Optional, 2026-08-04, verbatim PT-BR): *"Para FFI
- * pode se usar a união `| null` para isso e para ponteiros `void*` temos `uptr`."* — value/FFI
- * absence is the union `T | null` (`Variant{Null,T}`, `checker::Null`), and a raw address is
- * `uptr`, NEVER an `Optional`-of-pointer. This is a STANDING RULE for future FFI authors, not a
- * migration of an existing site: no `checker::Optional` whose inner is a `Ptr` has ever existed in
- * this tree (searched — the only `Ptr`/`Optional` adjacency is doc-comment prose noting the
- * `Optional`↔`T?` naming convention), and the opaque `void*` case is already `Ptr{inner=null}`
- * (`ptr<void>`) — so this doc-comment is an HONEST STOP recording the rule, not a code path
- * (`docs/design/retirar-optional-para-null-union-uptr-0.3.1.md` §3.3, retire-Optional crumb O3).
+ * dereferenced by Teko). Owner ruling (2026-08-04, verbatim PT-BR): *"Para FFI pode se usar a
+ * união `| null` para isso e para ponteiros `void*` temos `uptr`."* — value/FFI absence is the
+ * union `T | null` (`Variant{Null,T}`, `checker::Null`), and a raw address is `uptr`. The opaque
+ * `void*` case is already `Ptr{inner=null}` (`ptr<void>`).
  */
 pub type Uptr = struct { }   // (C7.1a) opaque word-size unsigned — transport-only at the FFI boundary
-// (MEM-1b) `Reference` — the META-level representation of the SAFE reference (user surface keyword `ref`,
-// a compiler-known "C pointer WITHOUT `*`/`&`"). The meta-name differs from the surface name exactly
-// as `Ptr`↔`ptr<T>`, `Optional`↔`T?`, `Slice`↔`[]T` (the lowercase/distinct convention avoids the
-// surface name colliding with this internal type-case during self-host codegen). `Ref<T>` is the
-// internal notation within the checker; it is never user-spellable. Reuses generics (no keyword).
-// Mutable-target only and NEVER null (R2), so `inner` is a plain `Type` (not optional) and
-// there is no opaque/bare form (unlike `Ptr`). Deref/assign via `.value`+`mut`; auto-ref when a `mut`
-// lvalue is passed where `Reference` (i.e., `ref T`) is expected. C representation = bare `<T> *` today (the `{p,
-// metadata}` struct wrapper waits until regions/DI add metadata fields — W9+).
+/**
+ * Reference — (MEM-1b) the META-level representation of the SAFE reference (user surface keyword
+ * `ref`, a compiler-known "C pointer WITHOUT `*`/`&`"). The meta-name differs from the surface
+ * name exactly as `Ptr`↔`ptr<T>`, `Slice`↔`[]T` (the lowercase/distinct convention avoids the
+ * surface name colliding with this internal type-case during self-host codegen). `Ref<T>` is the
+ * internal notation within the checker; it is never user-spellable. Reuses generics (no keyword).
+ * Mutable-target only and NEVER null (R2), so `inner` is a plain `Type` and there is no
+ * opaque/bare form (unlike `Ptr`). Deref/assign via `.value`+`mut`; auto-ref when a `mut` lvalue
+ * is passed where `Reference` (i.e., `ref T`) is expected. C representation = bare `<T> *` today
+ * (the `{p, metadata}` struct wrapper waits until regions/DI add metadata fields — W9+).
+ */
 pub type Reference = struct { inner: Type }
 
 /**
@@ -137,7 +132,7 @@ pub type Reference = struct { inner: Type }
 pub type Null = struct { }
 
 // a semantic type. (Compiler-managed indirection for the recursive cases.)
-pub type Type = variant Prim | Byte | Char | Str | Slice | Optional | Named | Variant | Func | Error | Void | Ptr | Uptr | Reference | Null
+pub type Type = variant Prim | Byte | Char | Str | Slice | Named | Variant | Func | Error | Void | Ptr | Uptr | Reference | Null
 
 // `void` recognition (M.3): the checker (Z2a) calls this to admit void in a
 // `Func.ret` position and to reject it everywhere else (value / binding / member).
@@ -172,16 +167,6 @@ fn type_eq(a: Type, b: Type) -> bool {
             }
             _ => false
         }
-        // T? == U? iff inners equal (built-in unary former, like Slice). retire-Optional O4
-        // (`docs/design/retirar-optional-para-null-union-uptr-0.3.1.md` §6): the Void-UNIFY path
-        // (an `Optional{inner=Void}` sentinel unifying with ANY concrete optional) is DELETED —
-        // O1 was the sentinel's only producer and it now births `Null{}` instead, so `oa.inner`/
-        // `ob.inner` can no longer legitimately be `Void` here. The `Optional` case ARM itself
-        // stays (O6 deletes it, alongside the type-former).
-        Optional as oa => match b {
-            Optional as ob => type_eq(oa.inner, ob.inner)
-            _ => false
-        }
         Named as na => match b { Named as nb => na.name == nb.name; _ => false }
         Variant as va => match b { Variant as vb => types_eq(va.members, vb.members); _ => false }
         Func as fa => match b {
@@ -207,17 +192,22 @@ fn types_eq(xs: []Type, ys: []Type) -> bool {
     true
 }
 
-// (MEM Step 0) ESCAPE-GATE PREDICATE — does `t` carry a Reference anywhere a value can be stored?
-// The invariant: a Reference may appear ONLY as a bare scalar function PARAMETER; in EVERY other
-// value position it is forbidden, even nested. So this returns true if t IS a Reference, OR a Slice
-// whose element contains a ref, OR an Optional whose inner contains a ref, OR a Variant any of whose
-// members contains a ref. Recursive. The annotated forms are already caught by resolve (R2/R4), but
-// an INFERRED slice/optional element (e.g. `let xs = [r, r]`) only surfaces here. C: tk_type_contains_ref.
+/**
+ * type_contains_ref — (MEM Step 0) ESCAPE-GATE PREDICATE — does `t` carry a Reference anywhere a
+ * value can be stored? The invariant: a Reference may appear ONLY as a bare scalar function
+ * PARAMETER; in EVERY other value position it is forbidden, even nested. So this returns true if
+ * `t` IS a Reference, OR a Slice whose element contains a ref, OR a Variant any of whose members
+ * contains a ref (this also covers a `Ref<T> | null` union — the ref lives as an ordinary
+ * member). Recursive. The annotated forms are already caught by resolve (R2/R4), but an INFERRED
+ * slice element (e.g. `let xs = [r, r]`) only surfaces here. C: tk_type_contains_ref.
+ *
+ * @param t  the type to scan
+ * @return   true iff `t` carries a `Reference` anywhere a value is stored
+ */
 fn type_contains_ref(t: Type) -> bool {
     match t {
         Reference => true
         Slice as s => type_contains_ref(s.element)
-        Optional as o => type_contains_ref(o.inner)
         Variant as v => types_contain_ref(v.members)
         _ => false
     }

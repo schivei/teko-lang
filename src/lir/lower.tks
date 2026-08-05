@@ -319,7 +319,7 @@ fn enum_carrier_ltype() -> LType { LType::I32 }
 
 /** ltype_of — the machine class of a RESOLVED checker::Type: an integer/float by width,
     an `enum`'s integer carrier for a Named type registered in `enums` (`enum_carrier_ltype`),
-    or Ptr for every other address-shaped type (str/slice/Ref/ptr/Named/Optional/Variant/
+    or Ptr for every other address-shaped type (str/slice/Ref/ptr/Named/Variant/
     Func/Byte — all EXERCISED from N2; `byte`'s own I8 mapping is deferred past A1-4,
     CAUTION: only apply this mapping to an operand's OWN type, never to a container's element type
     (e.g., do not map `Byte` in `Slice{element: Byte}`) — see `prim_kind_of`'s doc for the narrower, SAFE fix this phase actually needs),
@@ -3264,7 +3264,7 @@ fn lower_args_ref_aware(ctx: LowerCtx, args: []checker::TExpr, rf: []bool, param
  *   the content pointer, not the address of the `{ptr,len}` pair holding it — which is exactly
  *   the "passed a value where an address was needed" shape this whole degrau exists to fix, one
  *   level removed;
- * - an AGGREGATE-typed local (`struct`/`class`/`Optional`/a declared `Variant` —
+ * - an AGGREGATE-typed local (`struct`/`class`/a declared `Variant` —
  *   `!is_register_value_type`) is, in this backend's own memory model, ALREADY represented BY
  *   its address (§ NATIVE-AGG-SLICE-BY-ADDRESS) — the local's own VReg IS the address to pass,
  *   no different from any other read of it;
@@ -5387,9 +5387,9 @@ fn native_builtin_symbol(last: str) -> str | null {
  * `Variant` this backend already builds (`str | error`, `[]str | error`), so a STANDALONE call to
  * `teko::env::var`/`env::cwd`/`io::read_file`/`fs::list_dir` lowers through the same twin path the
  * compiler's own `extern fn` declarations take. The `error | null` writers are NOT here: the
- * checker types their standalone form as `Optional { Error }` (`host_error_optional`), a
- * representation this backend does not yet build a value of, so they keep their honest stop until
- * native `Optional` lowering lands (reported alongside 0.3.1.0 degrau 34).
+ * checker types their standalone form as `Variant { Null, Error }` (`host_error_optional`), a
+ * null-union representation this backend does not yet build a value of for a STANDALONE call, so
+ * they keep their honest stop (reported alongside 0.3.1.0 degrau 34).
  *
  * @param str last  the call path's LAST segment (the bare builtin name)
  * @return str | null  the host symbol for a Variant-returning host read, or `null` otherwise
@@ -6637,8 +6637,8 @@ fn bind_mutable_fat(fo: LoweredFat, name: str, line: u32, col: u32) -> LowerStmt
  * THE LAST TWO WERE MISSING UNTIL DEGRAU 25, and this doc used to claim they were closed at the
  * other end instead, by `lower_null_lit`'s honest-stop. They were not. Only the struct-literal
  * field reached that stop (a field value IS typed against its declared type, so its bare `null`
- * carries `checker::Null`); a call ARGUMENT is typed with no expected type at all and carries the
- * `Optional{Void}` bare-null sentinel, which walked straight past the stop into a raw `const 0`
+ * carries `checker::Null`); a call ARGUMENT is typed with no expected type at all and (pre-0.3.1)
+ * carried the legacy bare-null sentinel, which walked straight past the stop into a raw `const 0`
  * that the callee's own `match` then read as the wrapper's base address — measured as a SIGSEGV
  * against a C route that answered correctly. A bare `T` flowing into either placement was equally
  * unwrapped and equally fatal. Neither placement guesses any more: each looks its declared type up
@@ -8852,7 +8852,7 @@ type NullUnionShape = struct {
  *
  * WHY TWO MEMBERS AND NOT MORE: because a two-member union's PAYLOAD arm is the one that needs no
  * by-name case lookup — with exactly one non-null member, `X as x` can only mean that member,
- * whatever the pattern spells it (an `Optional`/`Func` member has no case name at all, so the
+ * whatever the pattern spells it (a `Func` member has no case name at all, so the
  * general by-name path would honest-stop on it). At three members the payload arms DO need the
  * name, and they already get it (`variant_case_of_bind_pattern`). The `null` arm is the part that
  * never needed a name, and it no longer asks this classifier — see `variant_null_member_index`.
@@ -11141,7 +11141,6 @@ fn named_layout_bytes(n: checker::Named, ctx: LowerCtx) -> u32 | null {
 fn aggregate_form_name(t: checker::Type) -> str {
     match t {
         checker::Named as n => teko::str::concat("the nominal type `", teko::str::concat(n.name, "`, which has no registered layout"))
-        checker::Optional => "an OPTIONAL (`T | null`), whose sentinel-carrying image this backend pins no whole-type byte width for"
         checker::Func => "a CLOSURE, whose captured environment is a second allocation this copy would alias"
         _ => "an aggregate this backend assigns no whole-type byte width"
     }
@@ -13190,7 +13189,7 @@ fn is_ref_deref(fa: checker::TFieldAccess) -> bool {
  * value already IS the address to read (no `field_addr` computation, unlike a struct field —
  * the handle is not itself a struct). A REGISTER-value `T` (`is_register_value_type` — every
  * primitive, `byte`, an `enum`) is genuinely stored AT that address and must be LOADED; an
- * AGGREGATE `T` (`struct`/`class`/`Optional`/a declared `Variant`) is, in this backend's own
+ * AGGREGATE `T` (`struct`/`class`/a declared `Variant`) is, in this backend's own
  * memory model, already represented BY its address (§ NATIVE-AGG-SLICE-BY-ADDRESS) — the SAME
  * address `Ref<T>` itself carries — so the deref is a passthrough of the handle's own VReg, not
  * a load: loading eight bytes FROM that address would read whatever the pointee's OWN first
@@ -13551,7 +13550,7 @@ fn lower_bool_lit(ctx: LowerCtx, e: checker::TExpr, b: checker::TBoolLit) -> Low
  * lower_null_lit — a `null` literal lowered as a bare VALUE: a zero (null) Ptr constant.
  *
  * A `checker::TNullLit` is ALWAYS typed `checker::Null` (`typer.type_nulllit`/`type_value_expected`'s
- * `NullLit` arm, O1 — a bare `null` no longer carries the retired `Optional{Void}` sentinel), so this
+ * `NullLit` arm — a bare `null` is born `Null{}` directly, never a wrapped sentinel), so this
  * plain zero constant is what EVERY reachable `null` literal reduces to at this leaf. The union
  * tag+payload wrapper a `T | null` PLACEMENT actually needs is built by the placement's own coercion
  * site (`lower_value_into_type` — a binding, an assignment, a return, a tail value, a pushed element,
@@ -15853,7 +15852,6 @@ fn const_decl_is_scalar(t: checker::Type) -> bool {
     match t {
         checker::Slice => false
         checker::Str => false
-        checker::Optional => false
         checker::Named => false
         checker::Variant => false
         checker::Func => false

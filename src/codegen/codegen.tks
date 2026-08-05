@@ -194,6 +194,17 @@ fn cb_i64(buf: []byte, v: i64) -> []byte {
 }
 
 /**
+ * cb_to_str — `<a><b>` as a fresh str: append `a` then `b` to a scratch buffer and materialize it
+ * once, so a caller that needs the concatenation as a plain `str` (not a buffer) does not thread
+ * one through by hand.
+ *
+ * @param a  the first fragment
+ * @param b  the second fragment
+ * @return   `a ~ b` materialized as a `str`
+ */
+fn cb_to_str(a: str, b: str) -> str { str(cb(cb(teko::list::empty(), a), b)) }
+
+/**
  * cb_u64_digits — append the decimal MAGNITUDE of an unsigned 64-bit value (no sign) (drop-128,
  * 2026-07-24 — replaces `cb_u64_digits`; the widest integer carrier is now u64, so this covers
  * every literal, not just a below-128-bit subset). The digits are spelled out high-to-low
@@ -1411,7 +1422,7 @@ fn cg_binding_is_slice_element_borrow(b: checker::TBinding) -> bool {
  * (emit_return / emit_exprstmt_tail's tail-value-return / emit_function's fall-through),
  * mirroring exactly where the frame region itself gets dropped.
  *
- * `has_tail`/`tail_expr` is a plain pair, NOT `checker::TExpr?` — an Optional wrapping the
+ * `has_tail`/`tail_expr` is a plain pair, NOT `checker::TExpr | null` — a nullable wrapping the
  * compiler's own large recursive TExpr type hits a latent self-host codegen gap unrelated to
  * this feature; the has-flag pair sidesteps it, matching the codebase's has_X/X convention.
  *
@@ -1637,13 +1648,6 @@ fn emit_type(buf: []byte, prog: CgProg, t: checker::Type) -> []byte | error {
         // here is always a Func.ret position.
         checker::Void => cb(buf, "void")
         checker::Str => cb(buf, "tk_str")
-        // OPTIONAL (T?) — the generated `tk_opt_<innerMangle>` struct (REBOOT_PLAN §202). The
-        // sentinel optional (a bare `null`, inner = the Void marker) never reaches here on its
-        // own — it is always wrapped to a concrete slot type via emit_as.
-        checker::Optional as opt => match opt.inner {
-            checker::Void => error { message = "codegen: a bare `null` needs a known optional type from context (internal)" }
-            _ => cg_opt_typename(buf, opt.inner)
-        }
         // SLICE (`[]T`) — the generated tk_slice_<elem> struct. The sentinel/untyped slice
         // (element = the Void marker, from teko::list::empty()) never reaches here on its own —
         // emit_as wraps it to a concrete slot type, exactly like a bare `null` optional.
@@ -1786,10 +1790,6 @@ fn cg_opt_mangle(buf: []byte, inner: checker::Type) -> []byte | error {
         checker::Error => cb(buf, "error")
         checker::Null => cb(buf, "null")
         checker::Named as nm => cb_str(buf, checker::name_last_segment(nm.name))   // (#149) BARE key — the (#109 W3) canonical nm.name carries `::` (invalid C); mirror cg_opt_mangle_str and the C twin (tk_name_last_segment)
-        checker::Optional as o => match o.inner {
-            checker::Void => error { message = "codegen: nested bare-null optional (internal)" }
-            _ => cg_opt_mangle(cb(buf, "opt_"), o.inner)
-        }
         // NESTED SLICE (#81) — a `[]T` in an element/inner position mangles to `slice_<elem>`
         // (the SAME key cg_member_key_str already uses for a slice variant member), so `[][]T`
         // lowers to tk_slice_slice_<elem> and every use agrees with the collected typedef.
@@ -1823,14 +1823,6 @@ fn cg_opt_mangle_str(inner: checker::Type) -> str | error {
         checker::Error => "error"
         checker::Null => "null"
         checker::Named as nm => checker::name_last_segment(nm.name)   // (#109 W3) BARE key — matches the syntactic cg_opt_mangle_texpr_str; keeps tk_u_/tk_slice_/tk_opt_ names valid C identifiers
-        checker::Optional as o => match o.inner {
-            checker::Void => error { message = "codegen: nested bare-null optional (internal)" }
-            // (2026-07-01) bind the recursive result FIRST — `concat` is now variadic, so its 2nd
-            // arg packs into a synthetic array literal; an early `return` embedded directly inside
-            // an array-literal element trips a pre-existing codegen gap (the union-error wrap
-            // isn't threaded through nested array-element stmt-exprs). A plain TVar arg sidesteps it.
-            _ => { let inner_s = match cg_opt_mangle_str(o.inner) { str as s => s; error as e => return e }; teko::str::concat("opt_", inner_s) }
-        }
         // NESTED SLICE (#81) — the str twin of cg_opt_mangle's Slice arm: `slice_<elem>`.
         checker::Slice as sl => match sl.element {
             checker::Void => error { message = "codegen: an untyped empty slice needs a known element type from context (internal)" }
@@ -1881,8 +1873,8 @@ fn cg_member_key_str(m: checker::Type) -> str | error {
 /**
  * Report whether a resolved variant member's mangled KEY collides with a C keyword — the
  * allocation-free predicate that drives the trailing-`_` escape in the buffer-emitting
- * `cg_member_key`. Only a bare leaf key can be a keyword: a composite member (`Optional`,
- * `Slice`) always carries an `opt_`/`slice_` prefix, so it never collides; a `Prim` yields a
+ * `cg_member_key`. Only a bare leaf key can be a keyword: a composite member (`Slice`) always
+ * carries a `slice_` prefix, so it never collides; a `Prim` yields a
  * keyword only for `Bool` (`bool`), a `Char` yields `char`, and a `Named` is tested against its
  * last path segment. Mirrors `cg_is_c_keyword(cg_member_key_str(m))` byte-for-byte without
  * building the key string.
@@ -2022,9 +2014,8 @@ fn cg_type_is_niche_able(prog: CgProg, x: checker::Type) -> bool {
  * NOTE (divergence from the design signature, reported to the integrator): (1) the design writes
  * `cg_union_niche_member(v)`; a `Named` niche must distinguish a CLASS handle (a pointer, niche-able)
  * from a by-value struct (no NULL niche), which needs the program, so `prog` is threaded in. (2) the
- * design return is `checker::Type | null | error`; the seed-sequencing law forbids a null-union
- * VALUE in production `src/` before C5, so the seed-safe legacy `checker::Type?` (Optional) is used —
- * `null` = tagged, a member = niche; there is no failing path, so the error arm is unnecessary.
+ * design return is `checker::Type | null | error`; there is no failing path here, so the return is
+ * the plain two-case `checker::Type | null` — `null` = tagged, a member = niche.
  *
  * @param prog  the typed program (class/interface resolution for a `Named` member)
  * @param v     the resolved union type (its members already null-first normalized)
@@ -5285,10 +5276,6 @@ fn emit_struct_init_literal(buf: []byte, prog: CgProg, e: checker::TExpr, si: ch
             // Other field shapes keep the plain emit.
             // `Void` is the "no expected slot" sentinel (mirrors the C `tk_type exp = {.tag = VOID}`):
             // emit plainly when nothing was built.
-            // Build the expected slot type IMPERATIVELY (mut + statement-matches assigning the full
-            // `Type`), mirroring the C twin's if/else. A nested match-VALUE would yield sub-unions
-            // (`Void|Slice`, `Optional|Void`) that codegen can't widen into this union; each
-            // `exp_t = <case>` instead wraps the case into `Type` at the assignment (assign-wrap).
             mut exp_t: checker::Type = checker::Void { }
             match fte_opt {
                 parser::TypeExpr as fte => match fte {
@@ -5930,14 +5917,12 @@ fn emit_variant_wrap_str(buf: []byte, prog: CgProg, expected: checker::Type, vty
  * `mem`) into the absence/sum slot `uni`, using the slot's PHYSICAL representation. A niche union
  * stores the present member BARE (the member itself carries the representation, e.g. `error | null`
  * ≡ `tk_error`); any other sum embeds the member behind its inline-tag through `emit_variant_wrap_str`.
- * The legacy `Optional` former (`T?`, still buildable while an intermediate bootstrap seed carries a
- * pre-pivot corpus) present-wraps into its `tk_opt_<inner>` struct. This is the string-position dual
- * of `emit_as_r`'s present-value wrapping, for FFI result arms whose value is a runtime C expression
- * rather than a typed `TExpr`.
+ * This is the string-position dual of `emit_as_r`'s present-value wrapping, for FFI result arms
+ * whose value is a runtime C expression rather than a typed `TExpr`.
  *
  * @param buf    the output byte buffer
  * @param prog   the typed program (union representation classification)
- * @param uni    the target absence slot (a null-union `Variant` or a legacy `Optional`)
+ * @param uni    the target absence slot (a null-union `Variant`)
  * @param mem    the static type of the present member being wrapped
  * @param cexpr  the C expression string producing the present member value
  * @return       the buffer with the representation-correct wrapped value appended
@@ -5945,16 +5930,6 @@ fn emit_variant_wrap_str(buf: []byte, prog: CgProg, expected: checker::Type, vty
  * @since 0.3.1 (null-union C6 — FFI `error | null` result arms)
  */
 fn cg_emit_union_present_str(buf: []byte, prog: CgProg, uni: checker::Type, mem: checker::Type, cexpr: str) -> []byte | error {
-    match uni {
-        checker::Optional as opt => {
-            mut o = cb(buf, "(")
-            o = match cg_opt_typename(o, opt.inner) { []byte as r => r; error as err => return err }
-            o = cb(o, "){ .present = true, .value = ")
-            o = cb(o, cexpr)
-            return cb(o, " }")
-        }
-        _ => { }
-    }
     let va = match uni { checker::Variant as v => v; _ => return cb(buf, cexpr) }
     match cg_union_niche_member(prog, va) {
         checker::Type => return cb(buf, cexpr)
@@ -6013,10 +5988,6 @@ fn cg_emit_ffi_ures(buf: []byte, prog: CgProg, result_ty: checker::Type, ures_tm
  */
 fn cg_wrap_elem_str(buf: []byte, prog: CgProg, expected: checker::Type, vtype: checker::Type, cexpr: str) -> []byte | error {
     match expected {
-        checker::Optional as opt => return cg_wrap_elem_str_optional(buf, prog, opt, vtype, cexpr)
-        _ => { }
-    }
-    match expected {
         checker::Named as en => match cg_wrap_elem_str_contract(buf, prog, en, vtype, cexpr) {
             []byte as o => return o
             null => { }
@@ -6034,31 +6005,6 @@ fn cg_wrap_elem_str(buf: []byte, prog: CgProg, expected: checker::Type, vtype: c
         return emit_variant_wrap_str(buf, prog, expected, vtype, cexpr)
     }
     cb(buf, cexpr)
-}
-
-/**
- * cg_wrap_elem_str_optional — the OPTIONAL branch of `cg_wrap_elem_str`: present-wraps `cexpr`
- * into `opt`'s `tk_opt_<inner>` struct, recursing into `opt.inner` for the inner element (which
- * may itself need its own wrap). A `Void` inner is a sentinel that should not occur, so it is
- * emitted bare.
- *
- * @param buf    the output byte buffer
- * @param prog   the typed program
- * @param opt    the target optional type
- * @param vtype  the source element's static type
- * @param cexpr  the C-expression string for the element value
- * @return       `buf` with the present-wrapped element appended
- */
-fn cg_wrap_elem_str_optional(buf: []byte, prog: CgProg, opt: checker::Optional, vtype: checker::Type, cexpr: str) -> []byte | error {
-    match opt.inner {
-        checker::Void => return cb(buf, cexpr)
-        _ => { }
-    }
-    mut o = cb(buf, "(")
-    o = match cg_opt_typename(o, opt.inner) { []byte as r => r; error as err => return err }
-    o = cb(o, "){ .present = true, .value = ")
-    o = match cg_wrap_elem_str(o, prog, opt.inner, vtype, cexpr) { []byte as r => r; error as err => return err }
-    cb(o, " }")
 }
 
 /**
@@ -6285,8 +6231,8 @@ fn cg_mangle_eq(a: checker::Type, b: checker::Type) -> bool {
 /**
  * Report whether a type's mangle would ERROR (making its `cg_opt_key` the empty string `""`),
  * mirroring the error arms of `cg_opt_mangle` precisely: an inline `Variant` and any unsupported
- * shape error, and an `Optional`/`Slice` errors when its inner/element is the `Void` sentinel or
- * itself errors. Every leaf (`Prim`, `Byte`, `Char`, `Str`, `Error`, `Named`) mangles cleanly.
+ * shape error, and a `Slice` errors when its element is the `Void` sentinel or itself errors.
+ * Every leaf (`Prim`, `Byte`, `Char`, `Str`, `Error`, `Named`) mangles cleanly.
  *
  * @param t  the resolved type
  * @return   true iff `cg_opt_mangle` would return an error for `t`
@@ -6299,10 +6245,6 @@ fn cg_mangle_errors(t: checker::Type) -> bool {
         checker::Str => false
         checker::Error => false
         checker::Named => false
-        checker::Optional as o => match o.inner {
-            checker::Void => true
-            _ => cg_mangle_errors(o.inner)
-        }
         checker::Slice as sl => match sl.element {
             checker::Void => true
             _ => cg_mangle_errors(sl.element)
@@ -6313,10 +6255,10 @@ fn cg_mangle_errors(t: checker::Type) -> bool {
 
 /**
  * Compare the mangles of two types already known to mangle cleanly, byte-for-byte and without
- * allocating. `Optional` prepends `opt_`, `Slice` prepends `slice_`, and each recurses; a `Named`
- * mangles to its bare last path segment; every other leaf mangles to a fixed literal. Because a
- * `Named`'s arbitrary segment text can coincide with a composite's rendered form (`Named "opt_str"`
- * and `str?` both yield `opt_str`), any comparison that touches a `Named` is routed through
+ * allocating. `Slice` prepends `slice_` and recurses; a `Named` mangles to its bare last path
+ * segment; every other leaf mangles to a fixed literal. Because a `Named`'s arbitrary segment text
+ * can coincide with a composite's rendered form (`Named "slice_str"` and `[]str` both yield
+ * `slice_str`), any comparison that touches a `Named` is routed through
  * `cg_mangle_type_matches_name`, which folds the other side's WHOLE mangle against the segment
  * bytes — giving true byte-identity with the old string compare, not a mere constructor match.
  *
@@ -6327,11 +6269,6 @@ fn cg_mangle_errors(t: checker::Type) -> bool {
 fn cg_mangle_bytes_eq(a: checker::Type, b: checker::Type) -> bool {
     match a {
         checker::Named as na => cg_mangle_type_matches_name(b, na.name)
-        checker::Optional as oa => match b {
-            checker::Named as nb => cg_mangle_type_matches_name(a, nb.name)
-            checker::Optional as ob => cg_mangle_bytes_eq(oa.inner, ob.inner)
-            _ => false
-        }
         checker::Slice as sa => match b {
             checker::Named as nb => cg_mangle_type_matches_name(a, nb.name)
             checker::Slice as sb => cg_mangle_bytes_eq(sa.element, sb.element)
@@ -6339,7 +6276,6 @@ fn cg_mangle_bytes_eq(a: checker::Type, b: checker::Type) -> bool {
         }
         _ => match b {
             checker::Named as nb => cg_mangle_type_matches_name(a, nb.name)
-            checker::Optional => false
             checker::Slice => false
             _ => cg_leaf_literal_eq(a, b)
         }
@@ -6379,10 +6315,9 @@ fn cg_mangle_type_matches_name(t: checker::Type, name: str) -> bool {
 
 /**
  * Advance an allocation-free cursor over `name` by matching the mangle of `t` against the bytes at
- * `off`, returning the new offset or `-1` on any mismatch/overrun. `Optional` consumes `opt_` then
- * recurses on its inner; `Slice` consumes `slice_` then recurses on its element; a `Named` matches
- * its own bare last segment; every fixed leaf matches its literal. Mirrors the exact byte sequence
- * `cg_opt_mangle` would emit.
+ * `off`, returning the new offset or `-1` on any mismatch/overrun. `Slice` consumes `slice_` then
+ * recurses on its element; a `Named` matches its own bare last segment; every fixed leaf matches
+ * its literal. Mirrors the exact byte sequence `cg_opt_mangle` would emit.
  *
  * @param t     the cleanly-mangling type to consume
  * @param name  the byte source the cursor walks
@@ -6391,10 +6326,6 @@ fn cg_mangle_type_matches_name(t: checker::Type, name: str) -> bool {
  */
 fn cg_mangle_consume(t: checker::Type, name: str, off: u64) -> i64 {
     match t {
-        checker::Optional as o => {
-            let o2 = cg_match_literal(name, off, "opt_")
-            if o2 < 0 { -1 } else { cg_mangle_consume(o.inner, name, o2 to u64) }
-        }
         checker::Slice as sl => {
             let o2 = cg_match_literal(name, off, "slice_")
             if o2 < 0 { -1 } else { cg_mangle_consume(sl.element, name, o2 to u64) }
@@ -6628,38 +6559,6 @@ fn emit_as_r_in(buf: []byte, prog: CgProg, ret_type: checker::Type, expected: ch
         checker::Variant as iva => match value.kind {
             checker::TNullLit => if cg_variant_has_null(iva) { return cg_emit_inline_null(buf, expected) }
             _ => { }
-        }
-        _ => { }
-    }
-    // OPTIONAL slot (REBOOT_PLAN §202): wrap the value into the slot's tk_opt_<inner> struct.
-    //   * a bare `null`           → (tk_opt_<inner>){ .present = false }
-    //   * an already-optional val → emitted plainly (it IS a tk_opt_<inner>)
-    //   * a plain `T`             → (tk_opt_<inner>){ .present = true, .value = <v> }  (present-wrap)
-    match expected {
-        checker::Optional as opt => {
-            match opt.inner {
-                checker::Void => { }   // sentinel — fall through (should not occur at a real slot)
-                _ => {
-                    match value.kind {
-                        checker::TNullLit => {
-                            mut o0 = cb(buf, "(")
-                            o0 = match cg_opt_typename(o0, opt.inner) { []byte as o => o; error as err => return err }
-                            return cb(o0, "){ .present = false }")
-                        }
-                        _ => { }
-                    }
-                    match value.type {
-                        checker::Optional => return emit_expr_ctx(buf, prog, ret_type, value, escaping, regions, fn_body, dctx)   // already optional → pass through
-                        _ => {
-                            mut o1 = cb(buf, "(")
-                            o1 = match cg_opt_typename(o1, opt.inner) { []byte as o => o; error as err => return err }
-                            o1 = cb(o1, "){ .present = true, .value = ")
-                            o1 = match emit_as_r_in(o1, prog, ret_type, opt.inner, value, box_region, escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
-                            return cb(o1, " }")
-                        }
-                    }
-                }
-            }
         }
         _ => { }
     }
@@ -7105,42 +7004,8 @@ fn cg_emit_pat_test(buf: []byte, prog: CgProg, pat: parser::Pattern, subj: str, 
         }
         _ => { }
     }
-    match subjT {
-        checker::Optional as opt => {
-            match opt.inner {
-                checker::Void => { }   // sentinel — never a real match subject; fall through
-                _ => {
-                    match pat {
-                        parser::NullPattern => { mut o = cb(buf, "(!"); o = cb(o, subj); return cb(o, ".present)") }
-                        _ => { }
-                    }
-                    let inner_is_variant = match opt.inner {
-                        checker::Variant => true
-                        checker::Named as nm => cg_named_is_variant(prog, nm.name)
-                        _ => false
-                    }
-                    // bare bind/wildcard over a NON-variant present value matches whenever present.
-                    match pat {
-                        parser::WildcardPattern => { if !inner_is_variant { mut o = cb(buf, "("); o = cb(o, subj); return cb(o, ".present)") } }
-                        parser::BindPattern => { if !inner_is_variant { mut o = cb(buf, "("); o = cb(o, subj); return cb(o, ".present)") } }
-                        _ => { }
-                    }
-                    let val = cb_to_str(subj, ".value")
-                    mut o2 = cb(buf, "(")
-                    o2 = cb(o2, subj)
-                    o2 = cb(o2, ".present && ")
-                    o2 = match emit_pat_test(o2, prog, pat, val, opt.inner) { []byte as o => o; error as err => return err }
-                    return cb(o2, ")")
-                }
-            }
-        }
-        _ => { }
-    }
     emit_pat_test(buf, prog, pat, subj, subjT)
 }
-
-// cb_to_str — `<a><b>` as a fresh str (the `_s.value` accessor for an optional present subject).
-fn cb_to_str(a: str, b: str) -> str { str(cb(cb(teko::list::empty(), a), b)) }
 
 // emit_pat_binds — emit the BINDINGS a pattern introduces (BIND `as x`, FIELD fields), at
 // the top of the arm block (in scope for the guard and the body). Mirrors pat_match's
@@ -7246,65 +7111,6 @@ fn cg_emit_pat_binds(buf: []byte, prog: CgProg, pat: parser::Pattern, subj: str,
         }
         _ => { }
     }
-    match subjT {
-        checker::Optional as opt => {
-            match opt.inner {
-                checker::Void => { }
-                _ => {
-                    match pat { parser::NullPattern => return buf; _ => { } }   // NONE binds nothing
-                    let inner_is_variant = match opt.inner {
-                        checker::Variant => true
-                        checker::Named as nm => cg_named_is_variant(prog, nm.name)
-                        _ => false
-                    }
-                    let val = cb_to_str(subj, ".value")
-                    // bare `T as x` over a non-variant present value binds the inner directly.
-                    match pat {
-                        parser::BindPattern as bp => {
-                            if !inner_is_variant {
-                                if bp.has_binding {
-                                    mut o = cb(buf, indent); o = cb(o, "auto "); o = cb_str(o, bp.binding)
-                                    o = cb(o, " = "); o = cb(o, val); return cb(o, ";\n")
-                                }
-                                return buf
-                            }
-                            // A bind whose type IS the inner variant itself (`TypeExpr as t` over
-                            // `TypeExpr?`) binds the WHOLE present value, not a `.as.<case>` member.
-                            let bind_whole = match opt.inner {
-                                checker::Named as nm => (!bp.is_slice) && (cg_path_last(bp.type_name) == checker::name_last_segment(nm.name))   // (#109 W3) BARE compare (pattern bare vs canonical variant name)
-                                _ => false
-                            }
-                            if bind_whole {
-                                if bp.has_binding {
-                                    mut o = cb(buf, indent); o = cb(o, "auto "); o = cb_str(o, bp.binding)
-                                    o = cb(o, " = "); o = cb(o, val); return cb(o, ";\n")
-                                }
-                                return buf
-                            }
-                        }
-                        parser::FieldPattern as fp => {
-                            if !inner_is_variant {
-                                mut o = buf
-                                mut i = 0
-                                loop {
-                                    if i >= fp.fields.len { break }
-                                    o = cb(o, indent); o = cb(o, "auto "); o = cb_str(o, fp.fields[i])
-                                    o = cb(o, " = "); o = cb(o, val); o = cb(o, "."); o = cb_str(o, fp.fields[i]); o = cb(o, ";\n")
-                                    i++
-                                }
-                                return o
-                            }
-                        }
-                        _ => { }
-                    }
-                    return emit_pat_binds(buf, pat, val, indent)   // variant inner: bind via the union over _s.value
-                }
-            }
-        }
-        _ => { }
-    }
-    // Non-optional bind-WHOLE-variant (`TypeExpr as t` where the subject IS the TypeExpr variant)
-    // binds the whole value, not a `.as.<case>`.
     match pat {
         parser::BindPattern as bp => {
             let bind_whole = match subjT {
@@ -10622,28 +10428,25 @@ fn emit_type_decl(buf: []byte, prog: CgProg, d: parser::TypeDecl) -> []byte | er
     }
 }
 
-// ---------------------------------------------------------------------------
-// OPTIONAL TYPEDEF COLLECTION (REBOOT_PLAN §202). Every distinct optional inner type used in
-// the typed program needs its `typedef struct { bool present; <inner> value; } tk_opt_<inner>;`
-// emitted once in the prelude. We walk every type that flows through emit_type (function sigs,
-// bindings, every TExpr `.type`), collecting distinct inners (deduped by mangled name). Nested
-// optionals register the inner first so its typedef precedes the outer's reference. (C: the
-// cg_opt_set / cg_collect_* family.)
-// ---------------------------------------------------------------------------
 /**
- * B-cg2 — the codegen registry of distinct anonymous types needing a typedef, each stored
- * ALONGSIDE its already-computed mangled key so a dedup scan READS the key (O(1)) rather than
- * recomputing it (the owner's "assign the converted value once, then only reference it"). The
- * keys are collision-safe by construction: the SAME mangled string already used for dedup, so
- * two types that mangle equal still collapse to one typedef (mangle-eq, not type-eq). Collected
- * in ONE walk (cg_collect_type_opts registers a slice's element in the same traversal as
- * optionals); threaded by return value (the functional `.tks` idiom), mirroring the C's
- * `cg_opt_set`.
+ * B-cg2 — SLICE/VARIANT TYPEDEF COLLECTION: the codegen registry of distinct anonymous types
+ * needing a typedef, each stored ALONGSIDE its already-computed mangled key so a dedup scan READS
+ * the key (O(1)) rather than recomputing it (the owner's "assign the converted value once, then
+ * only reference it"). The keys are collision-safe by construction: the SAME mangled string
+ * already used for dedup, so two types that mangle equal still collapse to one typedef (mangle-eq,
+ * not type-eq). Every distinct slice element / inline variant type used in the typed program needs
+ * its `tk_slice_<elem>` / `tk_u_<keys>` typedef emitted once in the prelude; we walk every type
+ * that flows through emit_type (function sigs, bindings, every TExpr `.type`), collecting distinct
+ * elements (deduped by mangled name) in ONE walk. Nested slices register the element first so its
+ * typedef precedes the outer's reference. Threaded by return value (the functional `.tks` idiom),
+ * mirroring the C's `cg_opt_set`. `inners`/`opt_keys` are RETIRED (the null-as-union pivot dropped
+ * the `tk_opt_<inner>` nullable former) — kept as permanently empty fields rather than threaded out
+ * of every `CgTypeSet` construction site. (C: the cg_opt_set / cg_collect_* family.)
  */
 type CgTypeSet = struct {
-    /** Optional inner types needing a `tk_opt_<key>` typedef, in registration order. */
+    /** RETIRED (the `tk_opt_<inner>` nullable former is gone) — always empty. */
     inners: []checker::Type
-    /** The mangled dedup key of each `inners` entry, computed once at insertion. */
+    /** RETIRED alongside `inners` — always empty. */
     opt_keys: []str
     /** Slice element types needing a `tk_slice_<key>` typedef, in registration order. */
     slices: []checker::Type
@@ -10668,32 +10471,10 @@ fn cg_opt_key(t: checker::Type) -> str {
     match cg_opt_mangle(teko::list::empty(), t) { []byte as o => str(o); error => "" }
 }
 /**
- * Register an optional inner in the codegen set, deduped by its mangled key.
- *
- * Computes the key ONCE and pushes it to the parallel `opt_keys` so later dedup scans READ the
- * stored key instead of recomputing it. An unsupported inner (empty key) is skipped.
- *
- * @param set    the registry to extend
- * @param inner  the optional's inner type to register
- * @return       the set with `inner` appended, or unchanged if already present or unsupported
- */
-fn cg_opt_set_add(set: CgTypeSet, inner: checker::Type) -> CgTypeSet {
-    let key = cg_opt_key(inner)
-    if key == "" { return set }
-    mut i = 0
-    loop {
-        if i >= set.opt_keys.len { break }
-        if set.opt_keys[i] == key { return set }
-        i++
-    }
-    CgTypeSet { inners = teko::list::push(set.inners, inner); opt_keys = teko::list::push(set.opt_keys, key); slices = set.slices; slice_keys = set.slice_keys; variants = set.variants; variant_keys = set.variant_keys }
-}
-/**
  * Register a slice element type in the codegen set, deduped by its mangled key.
  *
- * Parallel to `cg_opt_set_add`: computes the key ONCE, pushes it to `slice_keys`, and dedup
- * scans read the stored key. An unsupported element (empty key) is skipped so `emit_type` errors
- * honestly.
+ * Computes the key ONCE, pushes it to `slice_keys`, and dedup scans read the stored key. An
+ * unsupported element (empty key) is skipped so `emit_type` errors honestly.
  *
  * @param set   the registry to extend
  * @param elem  the slice's element type to register
@@ -10747,23 +10528,22 @@ fn cg_variant_add(set: CgTypeSet, t: checker::Type) -> CgTypeSet {
     }
     CgTypeSet { inners = set.inners; opt_keys = set.opt_keys; slices = set.slices; slice_keys = set.slice_keys; variants = teko::list::push(set.variants, t); variant_keys = teko::list::push(set.variant_keys, key) }
 }
-// register every optional in a type AND every slice's element (nested inners/elements first, so
-// `T??` and `[][]T`/`[]T?` order right). (C: `cg_collect_type_opts`.)
+/**
+ * cg_collect_type_opts — register every slice's element in a type (nested elements first, so
+ * `[][]T` orders right), and every INLINE `A | B | …` variant (recursing into each member FIRST,
+ * so a member that is a slice gets its typedef before the enclosing `tk_u_<keys>` references it).
+ * (C: `cg_collect_type_opts`.)
+ *
+ * @param set  the registry accumulated so far
+ * @param t    the resolved type to walk
+ * @return     `set` extended with every slice/variant `t` reaches
+ */
 fn cg_collect_type_opts(set: CgTypeSet, t: checker::Type) -> CgTypeSet {
     match t {
-        checker::Optional as opt => {
-            match opt.inner {
-                checker::Void => set
-                _ => cg_opt_set_add(cg_collect_type_opts(set, opt.inner), opt.inner)
-            }
-        }
         checker::Slice as sl => match sl.element {
             checker::Void => set
-            _ => cg_slice_add(cg_collect_type_opts(set, sl.element), sl.element)   // recurse (covers [][]T, []T?), then register THIS slice's element
+            _ => cg_slice_add(cg_collect_type_opts(set, sl.element), sl.element)
         }
-        // B-cg2 — an INLINE `A | B | …`. Recurse into each member FIRST (so a member that is a
-        // slice/optional gets its typedef before this tk_u_ references it), then register THIS
-        // variant's tk_u_<keys> typedef. (C: the VARIANT arm of cg_collect_type_opts.)
         checker::Variant as va => {
             mut s = set
             mut i = 0
@@ -10867,8 +10647,8 @@ fn cg_collect_block_opts(set: CgTypeSet, stmts: []checker::TStatement) -> CgType
     s
 }
 /** Convert a SYNTACTIC type-expr to a resolved Type only as far as the typedef collector needs
- *  (cg_collect_type_opts walks Optional/Slice/Variant; every other node is a no-op leaf). A
- *  struct/variant FIELD's optional/slice/variant whose type surfaces nowhere in any expression
+ *  (cg_collect_type_opts walks Slice/Variant; every other node is a no-op leaf). A
+ *  struct/variant FIELD's slice/variant whose type surfaces nowhere in any expression
  *  (only in the declaration) would otherwise never feed the collector, so its tk_opt_/tk_slice_/
  *  tk_u_ typedef is never emitted and `cc` fails with "unknown type name". `ref_ns` is the
  *  ENCLOSING decl's namespace: a bare same-namespace field ref (`[]DiProvider` inside
@@ -11111,29 +10891,6 @@ fn cg_named_emitted(em: CgEmitted, name: str) -> bool {
     false
 }
 /**
- * Report whether the optional whose inner mangles to `key` has already been emitted.
- *
- * An optional inner not present in the program's collected set carries no dependency edge, so it
- * is treated as ready. The presence scan READS the stored `opt_keys` rather than recomputing each
- * inner's mangle.
- *
- * @param em   the emitted-so-far record
- * @param set  the collected type registry
- * @param key  the mangled key of the optional inner in question
- * @return     true if the inner is uncollected (no edge) or already emitted
- */
-fn cg_opt_emitted_key(em: CgEmitted, set: CgTypeSet, key: str) -> bool {
-    mut i = 0
-    mut present = false
-    loop {
-        if i >= set.opt_keys.len { break }
-        if set.opt_keys[i] == key { present = true; break }
-        i++
-    }
-    if !present { return true }
-    cg_str_in(em.opt_keys, key)
-}
-/**
  * Report whether the inline variant whose typename is `key` has already been emitted.
  *
  * A variant not present in the collected set carries no dependency edge and is ready. The
@@ -11155,18 +10912,21 @@ fn cg_uvar_emitted_key(em: CgEmitted, set: CgTypeSet, key: str) -> bool {
     if !present { return true }
     cg_str_in(em.uvar_keys, key)
 }
-// By-value readiness of a resolved type (an opt inner / a variant member tk_type).
+/**
+ * cg_type_ready — by-value readiness of a resolved type (a variant member tk_type). (#122) A
+ * CLASS inner is stored as a POINTER (`tk_t_C *`) inside a variant, so it needs only the forward
+ * typedef (always present) — READY like a slice. Requiring the full class body would deadlock
+ * the fixpoint.
+ *
+ * @param prog  the typed program (class/interface resolution)
+ * @param em    the emitted-so-far record
+ * @param set   the collected type registry
+ * @param t     the resolved type to test
+ * @return      true iff `t` carries no unemitted by-value dependency
+ */
 fn cg_type_ready(prog: CgProg, em: CgEmitted, set: CgTypeSet, t: checker::Type) -> bool {
     match t {
-        // (#122) a CLASS inner is stored as a POINTER (`tk_t_C *`) inside a `tk_opt_C`/variant, so
-        // it needs only the forward typedef (always present) — READY like a slice. Requiring the
-        // full class body would deadlock the fixpoint: `tk_t_Node`'s by-value `Node?` field needs
-        // `tk_opt_Node` first, and `tk_opt_Node`'s `Node` value would need `tk_t_Node` first.
         checker::Named as nm => if cg_is_class_named(prog, nm.name) { true } else { cg_named_emitted_precise(prog, em, nm.name) }
-        checker::Optional as opt => match opt.inner {
-            checker::Void => true
-            _ => cg_opt_emitted_key(em, set, cg_opt_key(opt.inner))
-        }
         checker::Variant as va => cg_uvar_emitted_key(em, set, cg_variant_key(t))
         checker::Slice => true   // pointer (slice typedef pre-emitted)
         _ => true   // prim/byte/str/error/void/func — no aggregate edge
@@ -11376,20 +11136,6 @@ fn cg_emit_types_ordered(buf: []byte, prog: CgProg) -> []byte | error {
         ei++
     }
     if enum_count > 0 { out = cb(out, "\n") }
-    // 1b) FORWARD typedefs for optionals + inline variants (named struct tags), so a boxed
-    //     back-edge field (a POINTER to tk_opt_/tk_u_) and slices-of-opt/-uvar resolve before the
-    //     bodies are emitted. A pointer needs a named, forward-declarable tag — an anonymous-struct
-    //     typedef can't be forward-declared. (Same redef-to-same-type idiom as the named decls.)
-    mut fi = 0
-    loop {
-        if fi >= set.inners.len { break }
-        out = cb(out, "typedef struct ")
-        out = match cg_opt_typename(out, set.inners[fi]) { []byte as o => o; error as err => return err }
-        out = cb(out, " ")
-        out = match cg_opt_typename(out, set.inners[fi]) { []byte as o => o; error as err => return err }
-        out = cb(out, ";\n")
-        fi++
-    }
     mut fv = 0
     loop {
         if fv >= set.variants.len { break }
@@ -11405,7 +11151,7 @@ fn cg_emit_types_ordered(buf: []byte, prog: CgProg) -> []byte | error {
         }
         fv++
     }
-    if set.inners.len + set.variants.len > 0 { out = cb(out, "\n") }
+    if set.variants.len > 0 { out = cb(out, "\n") }
 
     // 2) SLICE typedefs first (pointer-only; their named elements already have forward typedefs).
     // tk_slice_char is pre-declared in teko_rt.h (the `chars` builtin return type) — skip it to
@@ -11429,7 +11175,7 @@ fn cg_emit_types_ordered(buf: []byte, prog: CgProg) -> []byte | error {
     //    and exclude them from `remaining` — the fixpoint then skips them (cg_named_emitted is true)
     //    and any struct embedding an enum/flags is immediately ready.
     mut em = em0
-    mut remaining = named.len + set.inners.len + set.variants.len - enum_count
+    mut remaining = named.len + set.variants.len - enum_count
     mut progress = true
     loop {
         if remaining == 0 { break }
@@ -11452,28 +11198,6 @@ fn cg_emit_types_ordered(buf: []byte, prog: CgProg) -> []byte | error {
                     remaining = remaining - 1
                     progress = true
                     ni++
-                }
-            }
-        }
-        // optionals
-        mut oi = 0
-        loop {
-            if oi >= set.inners.len { break }
-            let inner = set.inners[oi]
-            let okey = set.opt_keys[oi]
-            if cg_str_in(em.opt_keys, okey) { oi++ } else {
-                if !cg_type_ready(prog, em, set, inner) { oi++ } else {
-                    out = cb(out, "typedef struct ")   // named tag (matches the forward decl) so a pointer to it resolves
-                    out = match cg_opt_typename(out, inner) { []byte as o => o; error as err => return err }
-                    out = cb(out, " { bool present; ")
-                    out = match emit_type(out, prog, inner) { []byte as o => o; error as err => return err }
-                    out = cb(out, " value; } ")
-                    out = match cg_opt_typename(out, inner) { []byte as o => o; error as err => return err }
-                    out = cb(out, ";\n")
-                    em = CgEmitted { names = em.names; opt_keys = teko::list::push(em.opt_keys, okey); uvar_keys = em.uvar_keys }
-                    remaining = remaining - 1
-                    progress = true
-                    oi++
                 }
             }
         }
