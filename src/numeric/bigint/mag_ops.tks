@@ -1,0 +1,149 @@
+/**
+ * A fresh `[]u64` of length `n` with every limb zero. The buffer is newly allocated (never aliased),
+ * so the caller may index-assign into it safely.
+ *
+ * @param n  the number of zero limbs
+ * @return   a length-`n` zero-filled limb vector
+ */
+fn zeros(n: u64) -> []u64 {
+    mut out: []u64 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= n { break }
+        out = teko::list::push(out, 0)
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * A single power-of-two bit mask `1 << pos` as a `u64` (a typed `1` so the shift result is `u64`,
+ * not the default `i64`).
+ *
+ * @param pos  the bit position, in `[0, 64)`
+ * @return     `1 << pos` as a `u64`
+ */
+fn bit_mask(pos: u64) -> u64 {
+    let one: u64 = 1
+    one << pos
+}
+
+/**
+ * Strip trailing (high) zero limbs so the magnitude is canonical. Returns the input unchanged when it
+ * already has no trailing zeros; otherwise a fresh trimmed copy.
+ *
+ * @param limbs  a (possibly denormalized) magnitude
+ * @return       the same magnitude with trailing zero limbs removed
+ */
+fn mag_norm(limbs: []u64) -> []u64 {
+    mut n = limbs.len
+    loop {
+        if n == 0 { break }
+        if limbs[n - 1] != 0 { break }
+        n = n - 1
+    }
+    if n == limbs.len { return limbs }
+    mut out: []u64 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= n { break }
+        out = teko::list::push(out, limbs[i])
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * Is this normalized magnitude zero (the empty limb vector)?
+ *
+ * @param a  a normalized magnitude
+ * @return   `true` iff every limb is zero
+ */
+fn mag_is_zero(a: []u64) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= a.len { break }
+        if a[i] != 0 { return false }
+        i = i + 1
+    }
+    true
+}
+
+/**
+ * Compare two normalized magnitudes.
+ *
+ * @param a  the left magnitude (normalized)
+ * @param b  the right magnitude (normalized)
+ * @return   `1` if `a > b`, `-1` if `a < b`, `0` if equal
+ */
+fn mag_cmp(a: []u64, b: []u64) -> i64 {
+    if a.len != b.len {
+        if a.len > b.len { return 1 }
+        return -1
+    }
+    mut i = a.len
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        if a[i] != b[i] {
+            if a[i] > b[i] { return 1 }
+            return -1
+        }
+    }
+    0
+}
+
+/**
+ * Add two magnitudes (base-2^32 schoolbook addition with carry).
+ *
+ * @param a  the left magnitude
+ * @param b  the right magnitude
+ * @return   the normalized sum magnitude
+ */
+fn mag_add(a: []u64, b: []u64) -> []u64 {
+    let n = if a.len > b.len { a.len } else { b.len }
+    mut out: []u64 = teko::list::empty()
+    mut carry: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= n { break }
+        mut s = carry
+        if i < a.len { s = s + a[i] }
+        if i < b.len { s = s + b[i] }
+        out = teko::list::push(out, s & LIMB_MASK)
+        carry = s >> LIMB_BITS
+        i = i + 1
+    }
+    if carry != 0 { out = teko::list::push(out, carry) }
+    mag_norm(out)
+}
+
+/**
+ * Subtract magnitude `b` from magnitude `a`, requiring `a >= b` (base-2^32 schoolbook subtraction
+ * with borrow). Callers guarantee the ordering.
+ *
+ * @param a  the minuend magnitude (must be >= `b`)
+ * @param b  the subtrahend magnitude
+ * @return   the normalized difference magnitude
+ */
+fn mag_sub(a: []u64, b: []u64) -> []u64 {
+    mut out: []u64 = teko::list::empty()
+    mut borrow: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= a.len { break }
+        let ai = a[i]
+        mut sub = borrow
+        if i < b.len { sub = sub + b[i] }
+        if ai >= sub {
+            out = teko::list::push(out, ai - sub)
+            borrow = 0
+        } else {
+            out = teko::list::push(out, ai + LIMB_BASE - sub)
+            borrow = 1
+        }
+        i = i + 1
+    }
+    mag_norm(out)
+}
+
