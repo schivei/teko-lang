@@ -1,0 +1,63 @@
+/**
+ * Start a `BitReader` at the beginning of `data`.
+ *
+ * @param data  the compressed bytes to read
+ * @return      a fresh cursor positioned at bit 0 of byte 0
+ */
+fn bitreader_new(data: []byte) -> BitReader {
+    BitReader { data = data; byte_pos = 0; bit_pos = 0 }
+}
+
+/**
+ * Read one bit from `r`, LSB-first within the current byte.
+ *
+ * @param r  the cursor to read from
+ * @return   the bit value (`0` or `1`) and the advanced cursor, or an `error` if `r` has
+ *           run past the end of its data
+ * @throws   when `r.byte_pos >= r.data.len` (the stream ended mid-block)
+ */
+fn read_bit(r: BitReader) -> BitResult | error {
+    if r.byte_pos >= r.data.len { return error { message = "inflate: unexpected end of stream" } }
+    let cur_byte = r.data[r.byte_pos] to u32
+    let bit = (cur_byte >> r.bit_pos) & 1
+    if r.bit_pos == 7 {
+        return BitResult { bit = bit; next = BitReader { data = r.data; byte_pos = r.byte_pos + 1; bit_pos = 0 } }
+    }
+    BitResult { bit = bit; next = BitReader { data = r.data; byte_pos = r.byte_pos; bit_pos = r.bit_pos + 1 } }
+}
+
+/**
+ * Read `count` bits from `r`, LSB-first (the bit read first becomes the LOW-order bit of
+ * the result — DEFLATE's "extra bits" and stored-block length convention).
+ *
+ * @param r      the cursor to read from
+ * @param count  the number of bits to read (0-32)
+ * @return       the assembled value and the advanced cursor, or an `error` on truncation
+ * @throws       when the stream ends before `count` bits are available
+ */
+fn read_bits(r: BitReader, count: u32) -> BitsResult | error {
+    mut cur = r
+    mut value: u32 = 0
+    mut i: u32 = 0
+    loop {
+        if i >= count { break }
+        let step = match read_bit(cur) { BitResult as b => b; error as e => return e }
+        value = value | (step.bit << i)
+        cur = step.next
+        i++
+    }
+    BitsResult { value = value; next = cur }
+}
+
+/**
+ * Advance `r` to the start of the next byte, discarding any partially-read bits
+ * (the stored-block alignment rule, RFC 1951 §3.2.4).
+ *
+ * @param r  the cursor to align
+ * @return   `r` at `bit_pos == 0`, advancing to the next byte if any bits were pending
+ */
+fn align_to_byte(r: BitReader) -> BitReader {
+    if r.bit_pos == 0 { return r }
+    BitReader { data = r.data; byte_pos = r.byte_pos + 1; bit_pos = 0 }
+}
+

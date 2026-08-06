@@ -1,0 +1,117 @@
+/**
+ * Copy one LZ77 back-reference (`length` bytes, each copied from `distance` bytes before
+ * the current output end) into `output`. Overlapping copies (`distance < length`, the
+ * common run-length-encoding case) are correct because each byte is appended before the
+ * next one is read.
+ *
+ * @param output    the output buffer to extend
+ * @param distance  how many bytes back the copy source starts (1-32768)
+ * @param length    how many bytes to copy (3-258)
+ * @return          `output` with the `length` copied bytes appended, or an `error` if
+ *                  `distance` reaches before the start of `output`
+ * @throws          when `distance > output.len` (a malformed or truncated stream)
+ */
+fn copy_back_reference(output: []byte, distance: u32, length: u32) -> []byte | error {
+    if distance > output.len { return error { message = "inflate: back-reference distance exceeds output so far" } }
+    mut out = output
+    mut i: u32 = 0
+    loop {
+        if i >= length { break }
+        let src_index = out.len - distance
+        out = teko::list::push(out, out[src_index])
+        i++
+    }
+    out
+}
+
+/**
+ * Decode one literal/length/distance symbol stream (shared by fixed- and
+ * dynamic-Huffman blocks) until the end-of-block symbol (256) is reached.
+ *
+ * @param state      the running inflate state (cursor + output so far)
+ * @param litlen     the literal/length Huffman table
+ * @param dist       the distance Huffman table
+ * @return           the state advanced past this block's end-of-block symbol, or an
+ *                   `error` on a malformed code, an out-of-range distance code, or
+ *                   stream truncation
+ * @throws           when a decoded distance symbol has no assigned base/extra-bits (an
+ *                   invalid code, RFC 1951 §3.2.5 reserves 30-31)
+ */
+fn inflate_huffman_block(state: InflateState, litlen: HuffTable, dist: HuffTable) -> InflateState | error {
+    mut cur = state.reader
+    mut out = state.output
+    loop {
+        let sym_step = match decode_symbol(cur, litlen) { SymbolResult as s => s; error as e => return e }
+        cur = sym_step.next
+        let symbol = sym_step.symbol
+
+        if symbol < 256 {
+            out = teko::list::push(out, symbol to byte)
+            continue
+        }
+        if symbol == 256 { break }
+
+        let len_offset = symbol - 257
+        if len_offset > 28 { return error { message = "inflate: invalid length code" } }
+        let extra_len = match read_bits(cur, length_extra_bits(len_offset)) { BitsResult as b => b; error as e => return e }
+        cur = extra_len.next
+        let match_length = length_base(len_offset) + extra_len.value
+
+        let dist_step = match decode_symbol(cur, dist) { SymbolResult as s => s; error as e => return e }
+        cur = dist_step.next
+        if dist_step.symbol > 29 { return error { message = "inflate: invalid distance code" } }
+        let extra_dist = match read_bits(cur, distance_extra_bits(dist_step.symbol)) { BitsResult as b => b; error as e => return e }
+        cur = extra_dist.next
+        let match_distance = distance_base(dist_step.symbol) + extra_dist.value
+
+        out = match copy_back_reference(out, match_distance, match_length) { []byte as b => b; error as e => return e }
+    }
+    InflateState { reader = cur; output = out }
+}
+
+/**
+ * Decode one STORED block (BTYPE 00): align to a byte boundary, read `LEN`/`NLEN`
+ * (`u16` each, `NLEN` the one's-complement check of `LEN`), then copy `LEN` raw bytes
+ * (RFC 1951 §3.2.4).
+ *
+ * @param state  the running inflate state (cursor + output so far)
+ * @return       the state advanced past this stored block, or an `error` if `NLEN`
+ *               fails its check or the block is truncated
+ * @throws       when `NLEN != ~LEN` (a corrupted stored-block header)
+ */
+fn inflate_stored_block(state: InflateState) -> InflateState | error {
+    let aligned = align_to_byte(state.reader)
+    if aligned.byte_pos + 4 > aligned.data.len { return error { message = "inflate: truncated stored-block header" } }
+    let len = (aligned.data[aligned.byte_pos] to u64) | ((aligned.data[aligned.byte_pos + 1] to u64) << 8)
+    let nlen = (aligned.data[aligned.byte_pos + 2] to u64) | ((aligned.data[aligned.byte_pos + 3] to u64) << 8)
+    if (nlen & DEFLATE_STORED_LEN_MASK) != ((~len) & DEFLATE_STORED_LEN_MASK) { return error { message = "inflate: stored-block NLEN check failed" } }
+
+    let data_start = aligned.byte_pos + 4
+    if data_start + len > aligned.data.len { return error { message = "inflate: truncated stored-block data" } }
+
+    mut out = state.output
+    mut i: u64 = 0
+    loop {
+        if i >= len { break }
+        out = teko::list::push(out, aligned.data[data_start + i])
+        i++
+    }
+
+    InflateState { reader = BitReader { data = aligned.data; byte_pos = data_start + len; bit_pos = 0 }; output = out }
+}
+
+/**
+ * Decode one FIXED-Huffman block (BTYPE 01): the fixed literal/length and distance
+ * tables are rebuilt for every such block (RFC 1951 §3.2.6) — simple and correct; a
+ * production decoder would cache them, but a DEFLATE stream typically has few blocks.
+ *
+ * @param state  the running inflate state (cursor + output so far)
+ * @return       the state advanced past this fixed-Huffman block, or an `error` on a
+ *               malformed code or stream truncation
+ */
+fn inflate_fixed_block(state: InflateState) -> InflateState | error {
+    let litlen = match build_huffman(fixed_litlen_lengths()) { HuffTable as t => t; error as e => return e }
+    let dist = match build_huffman(fixed_dist_lengths()) { HuffTable as t => t; error as e => return e }
+    inflate_huffman_block(state, litlen, dist)
+}
+

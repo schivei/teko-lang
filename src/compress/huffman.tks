@@ -1,0 +1,134 @@
+/**
+ * Count how many entries of `lengths` equal `len`.
+ *
+ * @param lengths  the per-symbol code-length array
+ * @param len      the length to count
+ * @return         the number of symbols whose code length is `len`
+ */
+fn count_symbols_of_length(lengths: []u32, len: u32) -> u32 {
+    mut n: u32 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= lengths.len { break }
+        if lengths[i] == len { n = n + 1 }
+        i++
+    }
+    n
+}
+
+/**
+ * Build the `count`/`first_code`/`first_index` tables and the `symbols_by_len` list for a
+ * canonical Huffman code, from its per-symbol length array (RFC 1951 §3.2.2's algorithm).
+ *
+ * @param lengths  the per-symbol code-length array (`0` = symbol unused)
+ * @return         the fully-built `HuffTable`, or an `error` if the lengths do not form a
+ *                 valid (over- or under-subscribed) canonical code
+ * @throws         when the codes assigned would exceed `MAX_HUFFMAN_BITS` capacity at
+ *                  some length (an over-subscribed code)
+ */
+fn build_huffman(lengths: []u32) -> HuffTable | error {
+    mut count: []u32 = teko::list::push(teko::list::empty(), 0 to u32)
+    mut len: u32 = 1
+    loop {
+        if len > MAX_HUFFMAN_BITS { break }
+        count = teko::list::push(count, count_symbols_of_length(lengths, len))
+        len++
+    }
+
+    mut first_code: []u32 = teko::list::push(teko::list::empty(), 0 to u32)
+    mut first_index: []u32 = teko::list::push(teko::list::empty(), 0 to u32)
+    mut code: u32 = 0
+    mut index: u32 = 0
+    len = 1
+    loop {
+        if len > MAX_HUFFMAN_BITS { break }
+        code = (code + count[len - 1]) << 1
+        first_code = teko::list::push(first_code, code)
+        first_index = teko::list::push(first_index, index)
+        index = index + count[len]
+        len++
+    }
+
+    let max_len = index
+    mut symbols_by_len: []u32 = teko::list::empty()
+    len = 1
+    loop {
+        if len > MAX_HUFFMAN_BITS { break }
+        mut sym: u64 = 0
+        loop {
+            if sym >= lengths.len { break }
+            if lengths[sym] == len { symbols_by_len = teko::list::push(symbols_by_len, sym to u32) }
+            sym++
+        }
+        len++
+    }
+
+    HuffTable { first_code = first_code; count = count; first_index = first_index; symbols_by_len = symbols_by_len; max_len = max_len }
+}
+
+/**
+ * Decode one symbol from `r` against `table`, peeling one bit at a time (RFC 1951's
+ * canonical-code decode: extend the running code and compare against each length's
+ * first assigned code).
+ *
+ * @param r      the cursor to read from
+ * @param table  the Huffman table to decode against
+ * @return       the decoded symbol and the advanced cursor, or an `error` on a malformed
+ *               (unassigned) code or stream truncation
+ * @throws       when no valid symbol is found within `MAX_HUFFMAN_BITS` bits
+ */
+fn decode_symbol(r: BitReader, table: HuffTable) -> SymbolResult | error {
+    mut cur = r
+    mut code: u32 = 0
+    mut len: u32 = 1
+    loop {
+        if len > MAX_HUFFMAN_BITS { return error { message = "inflate: invalid Huffman code" } }
+        let step = match read_bit(cur) { BitResult as b => b; error as e => return e }
+        code = (code << 1) | step.bit
+        cur = step.next
+        let next_len_first = code - table.first_code[len]
+        if table.count[len] > 0 && next_len_first < table.count[len] {
+            let symbol = table.symbols_by_len[(table.first_index[len] to u64) + (next_len_first to u64)]
+            return SymbolResult { symbol = symbol; next = cur }
+        }
+        len++
+    }
+    error { message = "inflate: invalid Huffman code" }
+}
+
+/**
+ * The fixed literal/length code lengths (RFC 1951 §3.2.6): 0-143 -> 8 bits, 144-255 -> 9
+ * bits, 256-279 -> 7 bits, 280-287 -> 8 bits.
+ *
+ * @return  the 288-entry code-length array for the fixed literal/length alphabet
+ */
+fn fixed_litlen_lengths() -> []u32 {
+    mut lengths: []u32 = teko::list::empty()
+    mut sym: u32 = 0
+    loop {
+        if sym >= 288 { break }
+        if sym < 144 { lengths = teko::list::push(lengths, 8) }
+        else if sym < 256 { lengths = teko::list::push(lengths, 9) }
+        else if sym < 280 { lengths = teko::list::push(lengths, 7) }
+        else { lengths = teko::list::push(lengths, 8) }
+        sym++
+    }
+    lengths
+}
+
+/**
+ * The fixed distance code lengths (RFC 1951 §3.2.6): all 32 codes at 5 bits.
+ *
+ * @return  the 32-entry code-length array for the fixed distance alphabet
+ */
+fn fixed_dist_lengths() -> []u32 {
+    mut lengths: []u32 = teko::list::empty()
+    mut sym: u32 = 0
+    loop {
+        if sym >= 32 { break }
+        lengths = teko::list::push(lengths, 5)
+        sym++
+    }
+    lengths
+}
+
