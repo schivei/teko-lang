@@ -5839,3 +5839,50 @@ fn f_null_widen_native_subpositions() -> i64 {
     if unwrap_or_native_null_widen(assign_null_widen(1), -103) != 21 { return 7 }
     0
 }
+
+/**
+ * GfcBox — a single-field generic struct used to prove a generic FUNCTION may construct a generic
+ * TYPE from its OWN still-abstract type-param (`GfcBox<T>` built inside `gfc_wrap<T>`). Before
+ * fix/generic-stamping the construction inside the generic body left the phantom `GfcBox__g__T`
+ * un-concretized — the monomorph pass reported "internal: generic instance `GfcBox__g__T` was not
+ * stamped"; it now re-mangles the phantom through the bound `T` (`resolve::subst_instance_name`).
+ */
+type GfcBox<T> = struct { v: T }
+
+/**
+ * gfc_wrap — THE regression: a generic free function whose body constructs the generic type
+ * `GfcBox<T>` from the function's own type-param `T`. Monomorphizing `gfc_wrap<i64>` / `gfc_wrap<u8>`
+ * must concretize the construction node to `GfcBox__g__i64` / `GfcBox__g__u8` (each per its instance),
+ * never a shared or leftover `GfcBox__g__T`.
+ *
+ * @param x  the value to wrap
+ * @return   a `GfcBox<T>` holding `x`
+ */
+fn gfc_wrap<T>(x: T) -> GfcBox<T> { GfcBox<T>{ v = x } }
+
+/**
+ * gfc_seed_i / gfc_seed_u — explicit WRITTEN `GfcBox<i64>` / `GfcBox<u8>` uses so `instantiate_types`
+ * stamps those concrete instance decls, exactly the shape the compiler's own static-factory
+ * workaround relies on (the type argument concrete at a written site). The generic FUNCTION's
+ * construction node concretizes to these same stamps.
+ *
+ * @param n  the value to wrap
+ * @return   the concrete `GfcBox` instance holding `n`
+ */
+fn gfc_seed_i(n: i64) -> GfcBox<i64> { GfcBox<i64>{ v = n } }
+fn gfc_seed_u(n: u8) -> GfcBox<u8> { GfcBox<u8>{ v = n } }
+
+/**
+ * f_generic_fn_constructs_generic — a generic function constructing a generic type from its OWN
+ * type-param, monomorphized at two distinct instances (`i64`, `u8`) so each construction node must
+ * concretize to its own stamp; a leftover `GfcBox__g__T` would mistype or crash the native emit.
+ *
+ * @return 42 — `gfc_wrap(40).v` (i64, 40) + `gfc_wrap(2 to u8).v` (u8, 2) + the two zero-valued seeds
+ */
+fn f_generic_fn_constructs_generic() -> i64 {
+    let a = gfc_wrap(40)
+    let b = gfc_wrap(2 to u8)
+    let si = gfc_seed_i(0)
+    let su = gfc_seed_u(0 to u8)
+    a.v + (b.v to i64) + si.v + (su.v to i64)
+}
