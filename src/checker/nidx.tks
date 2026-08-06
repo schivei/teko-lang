@@ -1,0 +1,157 @@
+/**
+ * NameSlot — one entry of a NameIndex: a name's FNV-1a hash paired with the POSITION of that name in
+ * the ORIGINAL indexed array (an `Env.base` index, or a `TypeTable` index). The slot never holds the
+ * value or the name itself — the caller re-reads the original array at `pos` to confirm the exact
+ * name and apply its own namespace predicate, so a hash collision is always resolved against real
+ * bytes and the ordered array stays the single source of truth.
+ *
+ * @param hash  the FNV-1a hash (teko::runtime::str_hash) of the indexed name
+ * @param pos   the index of that name in the original ordered array it was built from
+ * @since 0.3.1
+ */
+type NameSlot = struct {
+    /** the FNV-1a hash (teko::runtime::str_hash) of the indexed name — the binary-search key */
+    hash: u64
+    /** the index of that name in the original ordered array the index was built from */
+    pos: u64
+}
+
+/**
+ * NameIndex — a build-once, value-threaded hash index over an ordered `[]str` of names, its slots
+ * sorted by `hash` ascending so a lookup binary-searches to the run of slots sharing a hash. It is a
+ * LATERAL structure: the array it indexes is never reordered, so every observable iteration over
+ * that array (symbol emission, diagnostic order, the fixpoint) is untouched; the index only
+ * accelerates point lookups. Built once (over a sealed/collected read-only table) and copied by
+ * handle through the functional `Env` threading, because nothing mutates the indexed array after the
+ * build.
+ *
+ * COMPLEXITY. Construction is O(n log n) once (a stable merge sort over the slots). A lookup is
+ * O(log n + c), where c is the number of slots colliding on the sought hash (~1). This collapses the
+ * per-body O(n^2) linear-scan cost to O(n log n) with no behavioural change. The O(1) open-addressing
+ * form (same API) is deferred to CK1' behind the in-place-array foundation (F3) — today's Teko has no
+ * `a[i] = v`, so open-addressing cannot be built in O(n) in pure Teko yet.
+ *
+ * @param slots  the (hash, pos) slots, sorted by `hash` ascending
+ * @since 0.3.1
+ */
+type NameIndex = struct {
+    /** the (hash, pos) slots, sorted by `hash` ascending — binary-searched by `nidx_lower_bound` */
+    slots: []NameSlot
+}
+
+/**
+ * nidx_empty — the empty index (no slots). The pre-seal / pre-collect state: a lookup against it
+ * finds nothing and the caller falls through to its (small) linear segment, exactly as before.
+ *
+ * @return an empty NameIndex
+ * @since 0.3.1
+ */
+fn nidx_empty() -> NameIndex {
+    NameIndex { slots = teko::list::empty() }
+}
+
+/**
+ * nidx_merge — merge two hash-sorted slot runs into one hash-sorted run, taking the left element on a
+ * tie so the merge is STABLE (equal hashes keep input order). Mirrors `teko::sort::merge_i64` on the
+ * `hash` key.
+ *
+ * @param left   a run already sorted ascending by `hash`
+ * @param right  a run already sorted ascending by `hash`
+ * @return       one fresh run holding every element of both, ascending by `hash`, stable on ties
+ * @since 0.3.1
+ */
+fn nidx_merge(left: []NameSlot, right: []NameSlot) -> []NameSlot {
+    mut out: []NameSlot = teko::list::empty()
+    mut i: u64 = 0
+    mut j: u64 = 0
+    loop {
+        if i >= left.len { break }
+        if j >= right.len { break }
+        if left[i].hash <= right[j].hash {
+            out = teko::list::push(out, left[i])
+            i++
+            continue
+        }
+        out = teko::list::push(out, right[j])
+        j++
+    }
+    loop { if i >= left.len { break }; out = teko::list::push(out, left[i]); i++ }
+    loop { if j >= right.len { break }; out = teko::list::push(out, right[j]); j++ }
+    out
+}
+
+/**
+ * nidx_msort — top-down stable merge sort of the half-open range `xs[lo..hi)` of slots by `hash`,
+ * returning a fresh sorted slice. Mirrors `teko::sort::msort_i64`; `xs` is never mutated in place.
+ *
+ * @param xs  the source slots (read only)
+ * @param lo  the inclusive start of the range to sort
+ * @param hi  the exclusive end of the range to sort (`lo <= hi <= xs.len`)
+ * @return    a new slice holding `xs[lo..hi)` ascending by `hash`, stable on ties
+ * @since 0.3.1
+ */
+fn nidx_msort(xs: []NameSlot, lo: u64, hi: u64) -> []NameSlot {
+    mut out: []NameSlot = teko::list::empty()
+    if hi - lo <= 1 {
+        if hi - lo == 1 { out = teko::list::push(out, xs[lo]) }
+        return out
+    }
+    let mid = lo + (hi - lo) / 2
+    let left = nidx_msort(xs, lo, mid)
+    let right = nidx_msort(xs, mid, hi)
+    nidx_merge(left, right)
+}
+
+/**
+ * nidx_sorted — a fresh copy of `slots` sorted ascending by `hash` (stable). The single sort site
+ * `nidx_build` funnels through, kept separate so the sort algorithm is named and swappable.
+ *
+ * @param slots  the unordered slots
+ * @return       the slots sorted ascending by `hash`
+ * @since 0.3.1
+ */
+fn nidx_sorted(slots: []NameSlot) -> []NameSlot {
+    nidx_msort(slots, 0, slots.len)
+}
+
+/**
+ * nidx_build — build a NameIndex over `names` (the ordered name-of each entry in the array being
+ * indexed, e.g. `b.name` for each `Env.base` binding). Hashes each name (teko::runtime::str_hash),
+ * pairs it with its position, and stable-merge-sorts the slots by hash. O(n log n), called ONCE at
+ * the seal/collect boundary; the result is threaded read-only thereafter.
+ *
+ * @param names  the ordered names of the array to index (position i corresponds to names[i])
+ * @return       the sorted hash index over `names`
+ * @since 0.3.1
+ */
+fn nidx_build(names: []str) -> NameIndex {
+    mut slots: []NameSlot = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= names.len { break }
+        slots = teko::list::push(slots, NameSlot { hash = teko::runtime::str_hash(names[i]); pos = i })
+        i++
+    }
+    NameIndex { slots = nidx_sorted(slots) }
+}
+
+/**
+ * nidx_lower_bound — the index of the first slot whose `hash` is >= `h` (binary search over the
+ * hash-sorted slots). The caller then walks forward from here while `slots[k].hash == h`, reading
+ * each `slots[k].pos`, to visit every candidate that could carry the sought name.
+ *
+ * @param idx  the built index
+ * @param h    the sought name's hash
+ * @return     the first slot index with `slots[k].hash >= h` (`idx.slots.len` when none)
+ * @since 0.3.1
+ */
+fn nidx_lower_bound(idx: NameIndex, h: u64) -> u64 {
+    mut lo: u64 = 0
+    mut hi: u64 = idx.slots.len
+    loop {
+        if lo >= hi { break }
+        let mid = lo + (hi - lo) / 2
+        if idx.slots[mid].hash < h { lo = mid + 1 } else { hi = mid }
+    }
+    lo
+}

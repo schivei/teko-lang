@@ -1,0 +1,95 @@
+/**
+ * nidx_lookup_pos — the canonical NameIndex walk under test: the position of the entry named `name`
+ * with the LARGEST index in `names`, resolved through `idx`, or -1 when none. A verbatim copy of the
+ * walk `lookup_binding` runs over `Env.base` (design §3): binary-search the bucket, break at the
+ * first differing hash, re-test the exact name against `names[p]`, keep the max matching position.
+ *
+ * @param idx    the index built over `names`
+ * @param names  the ordered names the index was built from (position p corresponds to names[p])
+ * @param name   the sought bare name
+ * @return       the largest position whose name equals `name`, or -1 when no name matches
+ * @since 0.3.1
+ */
+fn nidx_lookup_pos(idx: NameIndex, names: []str, name: str) -> i64 {
+    let h = teko::runtime::str_hash(name)
+    mut best: i64 = -1
+    mut k = nidx_lower_bound(idx, h)
+    loop {
+        if k >= idx.slots.len { break }
+        if idx.slots[k].hash != h { break }
+        let p = idx.slots[k].pos
+        if names[p] == name && (p to i64) > best { best = p to i64 }
+        k++
+    }
+    best
+}
+
+/**
+ * A duplicate name resolves to its LARGEST position (the redefine-last-wins guarantee, design §5):
+ * `"a"` at positions {0, 2} returns 2, not 0.
+ */
+#test fn nidx_duplicate_name_takes_max_position() {
+    let names = ["a", "b", "a", "c"]
+    let idx = nidx_build(names)
+    teko::assert::is_true(nidx_lookup_pos(idx, names, "a") == 2)
+    teko::assert::is_true(nidx_lookup_pos(idx, names, "b") == 1)
+    teko::assert::is_true(nidx_lookup_pos(idx, names, "c") == 3)
+}
+
+/**
+ * A name absent from the indexed array is not found: its hash bucket carries no matching entry.
+ */
+#test fn nidx_absent_name_is_not_found() {
+    let names = ["a", "b", "a", "c"]
+    let idx = nidx_build(names)
+    teko::assert::is_true(nidx_lookup_pos(idx, names, "z") == -1)
+}
+
+/**
+ * The empty index finds nothing — the pre-seal state, where the caller falls through to its linear
+ * segment exactly as before.
+ */
+#test fn nidx_empty_finds_nothing() {
+    let names: []str = teko::list::empty()
+    let idx = nidx_empty()
+    teko::assert::is_true(idx.slots.len == 0)
+    teko::assert::is_true(nidx_lookup_pos(idx, names, "a") == -1)
+}
+
+/**
+ * A single-element index resolves its one name and rejects any other.
+ */
+#test fn nidx_singleton_resolves_and_rejects() {
+    let names = ["only"]
+    let idx = nidx_build(names)
+    teko::assert::is_true(nidx_lookup_pos(idx, names, "only") == 0)
+    teko::assert::is_true(nidx_lookup_pos(idx, names, "other") == -1)
+}
+
+/**
+ * A hash COLLISION is resolved against real bytes: two positions share one bucket (forced by hand to
+ * the SAME hash), but the byte re-test `names[p] == name` accepts only the position whose name
+ * actually matches and rejects the colliding-but-different name. This is the guarantee that a
+ * collision never returns the wrong record (design §3/§5).
+ */
+#test fn nidx_collision_is_separated_by_byte_retest() {
+    let names = ["foo", "bar"]
+    let h = teko::runtime::str_hash("foo")
+    let idx = NameIndex { slots = [NameSlot { hash = h; pos = 0 }, NameSlot { hash = h; pos = 1 }] }
+    teko::assert::is_true(nidx_lookup_pos(idx, names, "foo") == 0)
+    teko::assert::is_true(nidx_lookup_pos(idx, names, "bar") == -1)
+}
+
+/**
+ * `nidx_lower_bound` lands on the first slot whose hash is >= the query and on `slots.len` when every
+ * slot hashes below it — the binary-search contract the walk depends on.
+ */
+#test fn nidx_lower_bound_contract() {
+    let idx = NameIndex { slots = [NameSlot { hash = 10; pos = 0 }, NameSlot { hash = 20; pos = 1 }, NameSlot { hash = 20; pos = 2 }, NameSlot { hash = 30; pos = 3 }] }
+    teko::assert::is_true(nidx_lower_bound(idx, 5) == 0)
+    teko::assert::is_true(nidx_lower_bound(idx, 10) == 0)
+    teko::assert::is_true(nidx_lower_bound(idx, 20) == 1)
+    teko::assert::is_true(nidx_lower_bound(idx, 25) == 3)
+    teko::assert::is_true(nidx_lower_bound(idx, 30) == 3)
+    teko::assert::is_true(nidx_lower_bound(idx, 99) == 4)
+}
