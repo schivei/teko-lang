@@ -21,7 +21,207 @@ type TypeReg = struct {
     /** the parsed declaration itself */
     decl: parser::TypeDecl
 }
-pub type TypeTable = []TypeReg
+/**
+ * TypeTable — the folded registry of user types, wrapped (CK1.4, design
+ * docs/design/ck1-scoped-hash-maps-0.3.1.md) as its ordered `regs` PLUS a LATERAL hash index
+ * `by_last` keyed on `str_hash(name_last_segment(reg.name))`. `regs` is the sole source of every
+ * observable iteration (validation order, diagnostic enumeration, codegen) and is never reordered;
+ * `by_last` only accelerates the point lookups (`type_table_find` and the `resolve_*_type_reg`
+ * family), collapsing their per-body O(n^2) linear scans to O(log n + c). The index is built ONCE by
+ * `tt_freeze` at the collect->type boundary (the mirror of `seal`) and carried read-only thereafter;
+ * a table that has been `tt_push`ed since (or never frozen) reports `tt_indexed == false` and every
+ * lookup falls back to the exact linear scan, so a stale index is never consulted.
+ *
+ * @since 0.3.1 (CK1.4)
+ */
+pub type TypeTable = struct {
+    /** the ordered registrations — the single source of every observable iteration over the table */
+    regs: []TypeReg
+    /** the lateral hash index over `name_last_segment(regs[i].name)`, or empty until `tt_freeze` */
+    by_last: NameIndex
+}
+
+/**
+ * tt_empty — the empty type table (no registrations, empty index). The starting point every
+ * table-builder folds registrations onto, and the `-> TypeTable` unit value.
+ *
+ * @return a fresh empty TypeTable
+ * @since 0.3.1 (CK1.4)
+ */
+pub fn tt_empty() -> TypeTable {
+    TypeTable { regs = teko::list::empty(); by_last = nidx_empty() }
+}
+
+/**
+ * tt_len — the number of registrations in `t` (its observable length), i.e. `t.regs.len`.
+ *
+ * @param t  the type table
+ * @return   the count of registrations
+ * @since 0.3.1 (CK1.4)
+ */
+pub fn tt_len(t: TypeTable) -> u64 {
+    t.regs.len
+}
+
+/**
+ * tt_at — the registration at position `i` in `t` (its observable order), i.e. `t.regs[i]`.
+ *
+ * @param t  the type table
+ * @param i  the position (0 <= i < tt_len(t))
+ * @return   the registration at that position
+ * @since 0.3.1 (CK1.4)
+ */
+pub fn tt_at(t: TypeTable, i: u64) -> TypeReg {
+    t.regs[i]
+}
+
+/**
+ * tt_push — `t` with `r` appended to its registrations. The appended entry is NOT reflected in
+ * `by_last`, so the result reports `tt_indexed == false` and lookups fall back to the linear scan
+ * until a fresh `tt_freeze` re-indexes the whole table (mirrors how `define*` never touches the
+ * sealed `Env.base_index`).
+ *
+ * @param t  the table to extend
+ * @param r  the registration to append
+ * @return   `t` with `r` at the end and an unbuilt index
+ * @since 0.3.1 (CK1.4)
+ */
+pub fn tt_push(t: TypeTable, r: TypeReg) -> TypeTable {
+    TypeTable { regs = teko::list::push(t.regs, r); by_last = nidx_empty() }
+}
+
+/**
+ * tt_indexed — is `t`'s `by_last` index built and complete for its current registrations? True iff
+ * the index has exactly one slot per registration (the post-`tt_freeze` state); false after any
+ * `tt_push` or before the first freeze, which routes every lookup through the linear fallback.
+ *
+ * @param t  the type table
+ * @return   true iff a lookup may safely probe `by_last` instead of scanning `regs`
+ * @since 0.3.1 (CK1.4)
+ */
+pub fn tt_indexed(t: TypeTable) -> bool {
+    t.by_last.slots.len == t.regs.len
+}
+
+/**
+ * tt_last_names — the ordered last `::`-segments of every registration's name (`name_last_segment`),
+ * position-aligned with `regs` — the input `tt_freeze` hands to `nidx_build`, so a slot's `pos`
+ * indexes straight back into `regs`.
+ *
+ * @param regs  the registrations, in their fixed order
+ * @return      the bare last segment of each `regs[i].name`, in the same order
+ * @since 0.3.1 (CK1.4)
+ */
+fn tt_last_names(regs: []TypeReg) -> []str {
+    mut names: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= regs.len { break }
+        names = teko::list::push(names, name_last_segment(regs[i].name))
+        i++
+    }
+    names
+}
+
+/**
+ * tt_freeze — build `t`'s lateral `by_last` index over the last segment of every registration name,
+ * the mirror of `seal` for the type table. Called ONCE where a table is fully folded and about to be
+ * queried heavily (the collect->type boundary, `type_table_of`); the result is threaded read-only so
+ * every subsequent `type_table_find`/`resolve_*_type_reg` probes the index instead of scanning. A
+ * table left unfrozen still resolves correctly through the linear fallback (`tt_indexed == false`).
+ *
+ * Idempotent: an already-indexed table is returned unchanged, so the pipeline's repeated freezes
+ * (collect_types -> instantiate_types passthrough -> collect_over -> pre_walk) rebuild the index only
+ * once instead of allocating a fresh slot array at each hop.
+ *
+ * @param t  the fully folded table to index
+ * @return   `t` with `by_last` built (`tt_indexed(result) == true`)
+ * @since 0.3.1 (CK1.4)
+ */
+pub fn tt_freeze(t: TypeTable) -> TypeTable {
+    if tt_indexed(t) { return t }
+    TypeTable { regs = t.regs; by_last = nidx_build(tt_last_names(t.regs)) }
+}
+
+/**
+ * TtCands — an ALLOCATION-FREE cursor over the candidate positions a `key` lookup must test in `t`,
+ * IN ASCENDING POSITION ORDER. `indexed` records whether the walk is the hash bucket (a slot range
+ * `[lo, lo+count)` of `t.by_last`) or the whole `[0, count)` linear fallback; `tt_cand_reg` maps an
+ * ordinal `0..count` to the registration either way, so every converted lookup shares ONE loop shape
+ * that visits the same registrations a forward linear scan would, without materializing a list.
+ *
+ * @param indexed  true iff the cursor walks the `by_last` bucket rather than every registration
+ * @param lo       the first slot index of the bucket (unused, 0, when not indexed)
+ * @param count    the number of candidates to visit
+ * @since 0.3.1 (CK1.4)
+ */
+type TtCands = struct {
+    /** true iff the cursor walks the `by_last` hash bucket rather than every registration */
+    indexed: bool
+    /** the first slot index of the hash bucket (0 when not indexed) */
+    lo: u64
+    /** the number of candidate positions to visit (`0..count`) */
+    count: u64
+}
+
+/**
+ * tt_cands — the candidate cursor for last-segment `key` in `t`. When `t` is indexed this
+ * binary-searches `by_last` to the run of slots sharing `str_hash(key)` (a SUPERSET of every entry
+ * whose last segment equals `key`, since a match implies last-segment equality — design §5) and, as
+ * `nidx_build` stable-sorts the slots, that run is already in ascending position order, so a caller
+ * that keeps the FIRST accepted candidate reproduces a forward linear scan's first match exactly.
+ * When `t` is not indexed the cursor spans every registration, so the same caller degrades to the
+ * identical linear scan. Allocation-free: the cursor is three integers, not a list.
+ *
+ * @param t    the type table
+ * @param key  the sought bare last segment (`name_last_segment` of the query)
+ * @return     the candidate cursor to drive with `tt_cand_reg`
+ * @since 0.3.1 (CK1.4)
+ */
+fn tt_cands(t: TypeTable, key: str) -> TtCands {
+    if !tt_indexed(t) { return TtCands { indexed = false; lo = 0; count = t.regs.len } }
+    let h = teko::runtime::str_hash(key)
+    let lo = nidx_lower_bound(t.by_last, h)
+    mut hi = lo
+    loop {
+        if hi >= t.by_last.slots.len { break }
+        if t.by_last.slots[hi].hash != h { break }
+        hi++
+    }
+    TtCands { indexed = true; lo = lo; count = hi - lo }
+}
+
+/**
+ * tt_cand_reg — the registration at ordinal `i` (`0..c.count`) of the cursor `c` over `t`: the bucket
+ * slot's position when indexed, else `i` itself. The one indirection that lets a converted lookup
+ * read `t.regs` the same way whether it is probing the hash bucket or scanning linearly.
+ *
+ * @param t  the type table the cursor was built over
+ * @param c  the candidate cursor from `tt_cands`
+ * @param i  the ordinal in `0..c.count`
+ * @return   the candidate registration at that ordinal
+ * @since 0.3.1 (CK1.4)
+ */
+fn tt_cand_reg(t: TypeTable, c: TtCands, i: u64) -> TypeReg {
+    if c.indexed { return t.regs[t.by_last.slots[c.lo + i].pos] }
+    t.regs[i]
+}
+
+/**
+ * tt_cand_pos — the ACTUAL `regs` position of ordinal `i` of the cursor `c`, for the one caller
+ * (`resolve_qualified_type_reg`) whose ambiguity state machine records the winning POSITION rather
+ * than the registration.
+ *
+ * @param t  the type table the cursor was built over
+ * @param c  the candidate cursor from `tt_cands`
+ * @param i  the ordinal in `0..c.count`
+ * @return   the position in `t.regs` of that candidate
+ * @since 0.3.1 (CK1.4)
+ */
+fn tt_cand_pos(t: TypeTable, c: TtCands, i: u64) -> u64 {
+    if c.indexed { return t.by_last.slots[c.lo + i].pos }
+    i
+}
 
 // (#109 W3) the CANONICAL name of a type: "ns::Name" (bare "Name" at the root ns). The semantic
 // `Named.name` carries THIS — so two same-bare-name public types in different namespaces (teko::io::
@@ -95,16 +295,53 @@ pub fn name_qualifier(name: str) -> str {
  * @return        the matching declaration, or a named error when `name` registers nothing
  */
 pub fn type_table_find(table: TypeTable, name: str, ref_ns: str) -> parser::TypeDecl | error {
-    mut i = 0
+    if !tt_indexed(table) { return type_table_find_scan(table, name) }
+    let h = teko::runtime::str_hash(name_last_segment(name))
+    let lo = nidx_lower_bound(table.by_last, h)
+    mut k = lo
     loop {
-        if i >= table.len { break }
-        if table[i].name == name || qualify_eq(table[i].namespace, table[i].name, name) { return table[i].decl }
+        if k >= table.by_last.slots.len { break }
+        if table.by_last.slots[k].hash != h { break }
+        let r = table.regs[table.by_last.slots[k].pos]
+        if r.name == name || qualify_eq(r.namespace, r.name, name) { return r.decl }
+        k++
+    }
+    mut k2 = lo
+    loop {
+        if k2 >= table.by_last.slots.len { break }
+        if table.by_last.slots[k2].hash != h { break }
+        let r = table.regs[table.by_last.slots[k2].pos]
+        if name_last_segment(r.name) == name { return r.decl }
+        k2++
+    }
+    error { message = "not a user type" }
+}
+
+/**
+ * type_table_find_scan — the linear two-pass body of `type_table_find`, used when `table` is not yet
+ * indexed (`tt_indexed == false`: mid-collect or mid-instantiation). Byte-identical to the indexed
+ * bucket walk (design §5), it just visits EVERY registration instead of the hash bucket: pass 1
+ * matches the entry's name exactly or through its qualified form, pass 2 the bare last-segment
+ * fallback.
+ *
+ * @param table  the (unindexed) folded type table to search
+ * @param name   the type name to find (bare or canonical)
+ * @return       the matching declaration, or a named error when `name` registers nothing
+ * @since 0.3.1 (CK1.4)
+ */
+fn type_table_find_scan(table: TypeTable, name: str) -> parser::TypeDecl | error {
+    mut i: u64 = 0
+    loop {
+        if i >= tt_len(table) { break }
+        let r = tt_at(table, i)
+        if r.name == name || qualify_eq(r.namespace, r.name, name) { return r.decl }
         i++
     }
-    mut j = 0
+    mut j: u64 = 0
     loop {
-        if j >= table.len { break }
-        if name_last_segment(table[j].name) == name { return table[j].decl }
+        if j >= tt_len(table) { break }
+        let r = tt_at(table, j)
+        if name_last_segment(r.name) == name { return r.decl }
         j++
     }
     error { message = "not a user type" }
@@ -138,10 +375,12 @@ pub fn type_table_find(table: TypeTable, name: str, ref_ns: str) -> parser::Type
  */
 pub fn type_table_find_path(table: TypeTable, qual: str, last: str) -> parser::TypeDecl | error {
     if qual == "" { return type_table_find(table, last, "") }
+    let cands = tt_cands(table, last)
     mut i: u64 = 0
     loop {
-        if i >= table.len { break }
-        if name_last_segment(table[i].name) == last && qualifier_selects_ns(reg_declaring_ns(table[i]), qual) { return table[i].decl }
+        if i >= cands.count { break }
+        let r = tt_cand_reg(table, cands, i)
+        if name_last_segment(r.name) == last && qualifier_selects_ns(reg_declaring_ns(r), qual) { return r.decl }
         i++
     }
     type_table_find(table, last, "")
@@ -175,14 +414,14 @@ pub fn type_table_find_path(table: TypeTable, qual: str, last: str) -> parser::T
  * @since 0.3.1.0 degrau 31
  */
 pub fn type_table_rekeyed(table: TypeTable) -> TypeTable {
-    mut out: []TypeReg = teko::list::empty()
+    mut out = tt_empty()
     mut i: u64 = 0
     loop {
-        if i >= table.len { break }
-        out = teko::list::push(out, rekeyed_reg(table[i]))
+        if i >= tt_len(table) { break }
+        out = tt_push(out, rekeyed_reg(tt_at(table, i)))
         i++
     }
-    out
+    tt_freeze(out)
 }
 
 /**
@@ -243,9 +482,10 @@ fn namespaces_declaring(table: TypeTable, name: str) -> str {
     mut out = ""
     mut i: u64 = 0
     loop {
-        if i >= table.len { break }
-        if table[i].name == name {
-            let label = if table[i].namespace == "" { "<top-level>" } else { table[i].namespace }
+        if i >= tt_len(table) { break }
+        let r = tt_at(table, i)
+        if r.name == name {
+            let label = if r.namespace == "" { "<top-level>" } else { r.namespace }
             if out == "" { out = label } else { out = out ~ ", " ~ label }
         }
         i++
@@ -253,18 +493,25 @@ fn namespaces_declaring(table: TypeTable, name: str) -> str {
     out
 }
 
-// (#109 W2) the DECLARING namespace of a type by its (resolved) name — first match, "" if unknown.
-// A struct/class field's, or a method signature's, source type annotation is written in the type's
-// OWN namespace, so resolving those annotations must reference that namespace, not the code site's.
-// Shared across the checker (collect conformance, typer field/struct-init resolution). Under W0 no
-// two types share a bare name, so the first match is unambiguous (W3 canonical names make it exact).
+/**
+ * (#109 W2) the DECLARING namespace of a type by its (resolved) name — first match, "" if unknown. A
+ * struct/class field's, or a method signature's, source type annotation is written in the type's OWN
+ * namespace, so resolving those annotations must reference that namespace, not the code site's. Shared
+ * across the checker (collect conformance, typer field/struct-init resolution). Under W0 no two types
+ * share a bare name, so the first match is unambiguous (W3 canonical names make it exact). Probes the
+ * `by_last` index (`tt_cands`) with the same exact/`qualify_eq` predicate the linear scan used.
+ *
+ * @param table  the folded type table to search
+ * @param name   the (resolved, possibly canonical) type name
+ * @return       the declaring namespace of the first matching registration, or "" when none matches
+ */
 fn type_ns_of(table: TypeTable, name: str) -> str {
+    let cands = tt_cands(table, name_last_segment(name))
     mut i: u64 = 0
     loop {
-        if i >= table.len { break }
-        // (#109 W3) `name` may be a CANONICAL "ns::Name" (a resolved Named.name) or a bare stamped
-        // `__g__` instance — match exact OR by the entry's qualified form (like type_table_find).
-        if table[i].name == name || qualify_eq(table[i].namespace, table[i].name, name) { return table[i].namespace }   // (#148) allocation-free qualified compare
+        if i >= cands.count { break }
+        let r = tt_cand_reg(table, cands, i)
+        if r.name == name || qualify_eq(r.namespace, r.name, name) { return r.namespace }
         i++
     }
     ""
@@ -287,10 +534,12 @@ fn type_ns_of(table: TypeTable, name: str) -> str {
  */
 fn resolve_bare_g_instance(last: str, table: TypeTable) -> TypeReg | null {
     if !name_is_g_instance(last) { return null }
+    let cands = tt_cands(table, last)
     mut g: u64 = 0
     loop {
-        if g >= table.len { break }
-        if table[g].name == last { return table[g] }
+        if g >= cands.count { break }
+        let r = tt_cand_reg(table, cands, g)
+        if r.name == last { return r }
         g++
     }
     null
@@ -348,10 +597,12 @@ fn resolve_type_reg(path: parser::Path, table: TypeTable, ref_ns: str) -> TypeRe
  * @return        the matched registration, `NotUserType`, or the not-visible-bare error
  */
 fn resolve_bare_type_reg(last: str, table: TypeTable, ref_ns: str) -> TypeReg | NotUserType | error {
+    let cands = tt_cands(table, last)
     mut i: u64 = 0
     loop {
-        if i >= table.len { break }
-        if table[i].name == last && table[i].namespace == ref_ns { return table[i] }
+        if i >= cands.count { break }
+        let r = tt_cand_reg(table, cands, i)
+        if r.name == last && r.namespace == ref_ns { return r }
         i++
     }
     match resolve_root_scope_reg(last, table, ref_ns) { TypeReg as r => return r; null => { } }
@@ -375,10 +626,12 @@ fn resolve_bare_type_reg(last: str, table: TypeTable, ref_ns: str) -> TypeReg | 
  */
 fn resolve_root_scope_reg(last: str, table: TypeTable, ref_ns: str) -> TypeReg | null {
     if ref_ns == "" { return null }
+    let cands = tt_cands(table, last)
     mut k: u64 = 0
     loop {
-        if k >= table.len { break }
-        if table[k].name == last && table[k].namespace == "" { return table[k] }
+        if k >= cands.count { break }
+        let r = tt_cand_reg(table, cands, k)
+        if r.name == last && r.namespace == "" { return r }
         k++
     }
     null
@@ -396,10 +649,11 @@ fn resolve_root_scope_reg(last: str, table: TypeTable, ref_ns: str) -> TypeReg |
  * @return        `NotUserType` when the name is nowhere, else the not-visible-bare error
  */
 fn reject_or_unknown_bare_type(last: str, table: TypeTable, ref_ns: str) -> NotUserType | error {
+    let cands = tt_cands(table, last)
     mut j: u64 = 0
     loop {
-        if j >= table.len { break }
-        if table[j].name == last {
+        if j >= cands.count { break }
+        if tt_cand_reg(table, cands, j).name == last {
             let nss = namespaces_declaring(table, last)
             let here = if ref_ns == "" { "<top-level>" } else { ref_ns }
             return error { message = $"type '{last}' is not visible bare from namespace '{here}' — it is declared in: {nss}. Qualify it (`ns::{last}`) or reference it from its own namespace." }
@@ -421,27 +675,30 @@ fn reject_or_unknown_bare_type(last: str, table: TypeTable, ref_ns: str) -> NotU
  */
 fn resolve_qualified_type_reg(path: parser::Path, last: str, table: TypeTable) -> TypeReg | NotUserType | error {
     let qual = path_qualifier(path, path.segments.len - 1)
+    let cands = tt_cands(table, last)
     mut winner_idx: i64 = -1
     mut matched_ns = ""
     mut ambiguous = false
-    mut i2: u64 = 0
+    mut c: u64 = 0
     loop {
-        if i2 >= table.len { break }
-        if table[i2].name == last && qualifier_selects_ns(table[i2].namespace, qual) {
-            if winner_idx >= 0 && table[i2].namespace != matched_ns {
+        if c >= cands.count { break }
+        let i2 = tt_cand_pos(table, cands, c)
+        let r = tt_cand_reg(table, cands, c)
+        if r.name == last && qualifier_selects_ns(r.namespace, qual) {
+            if winner_idx >= 0 && r.namespace != matched_ns {
                 ambiguous = true
             } else {
                 winner_idx = i2 to i64
-                matched_ns = table[i2].namespace
+                matched_ns = r.namespace
             }
         }
-        i2++
+        c++
     }
     if ambiguous {
         let nss = namespaces_declaring(table, last)
         return error { message = $"ambiguous type reference '{qual}::{last}' — the qualifier matches more than one namespace ({nss}). Use the absolute path (`teko::…::{last}`)." }
     }
-    if winner_idx >= 0 { return table[winner_idx to u64] }
+    if winner_idx >= 0 { return tt_at(table, winner_idx to u64) }
     NotUserType { }
 }
 
@@ -507,20 +764,23 @@ pub fn resolved_name_ns(name: str, table: TypeTable, ref_ns: str) -> str {
 fn type_ref_ns(path: parser::Path, table: TypeTable, ref_ns: str) -> str {
     if path.segments.len == 0 { return "" }
     let last = path.segments[path.segments.len - 1].name
+    let cands = tt_cands(table, last)
     if path.segments.len == 1 {
         mut i: u64 = 0
         loop {
-            if i >= table.len { break }
-            if table[i].name == last && table[i].namespace == ref_ns { return ref_ns }   // R3 own-ns match → its own ns
+            if i >= cands.count { break }
+            let r = tt_cand_reg(table, cands, i)
+            if r.name == last && r.namespace == ref_ns { return ref_ns }
             i++
         }
-        return ""   // R1/root ("") match, or unknown → root scope
+        return ""
     }
     let qual = path_qualifier(path, path.segments.len - 1)
     mut j: u64 = 0
     loop {
-        if j >= table.len { break }
-        if table[j].name == last && qualifier_selects_ns(table[j].namespace, qual) { return table[j].namespace }
+        if j >= cands.count { break }
+        let r = tt_cand_reg(table, cands, j)
+        if r.name == last && qualifier_selects_ns(r.namespace, qual) { return r.namespace }
         j++
     }
     ""
@@ -805,21 +1065,21 @@ fn type_param_reg(name: str, own_constraint: parser::ConstraintExpr, ns: str, ta
     degenerate case, unchanged since #99). */
 pub fn type_param_table(type_params: []str, type_constraints: []parser::ConstraintExpr, ns: str, table: TypeTable) -> TypeTable {
     if type_params.len == 0 { return table }
-    mut tbl: TypeTable = teko::list::empty()
+    mut tbl = tt_empty()
     mut i = 0
     loop {
         if i >= type_params.len { break }
         let own_constraint = constraint_at(type_constraints, i to u64)
-        tbl = teko::list::push(tbl, type_param_reg(type_params[i], own_constraint, ns, table))
+        tbl = tt_push(tbl, type_param_reg(type_params[i], own_constraint, ns, table))
         i++
     }
-    mut j = 0
+    mut j: u64 = 0
     loop {
-        if j >= table.len { break }
-        tbl = teko::list::push(tbl, table[j])
+        if j >= tt_len(table) { break }
+        tbl = tt_push(tbl, tt_at(table, j))
         j++
     }
-    tbl
+    tt_freeze(tbl)
 }
 
 /**
@@ -2731,10 +2991,12 @@ fn generic_template_reg(nt: parser::NamedType, table: TypeTable, ref_ns: str) ->
         error => { }
     }
     let name = nt.path.segments[nt.path.segments.len - 1].name
-    mut i = 0
+    let cands = tt_cands(table, name)
+    mut i: u64 = 0
     loop {
-        if i >= table.len { break }
-        if name_last_segment(table[i].name) == name && table[i].decl.type_params.len == arity { return table[i] }
+        if i >= cands.count { break }
+        let r = tt_cand_reg(table, cands, i)
+        if name_last_segment(r.name) == name && r.decl.type_params.len == arity { return r }
         i++
     }
     null
@@ -2856,7 +3118,7 @@ fn stamp_inst_site(entry: InstSite, state: StampState) -> StampState {
     let mangled = generic_inst_name(nt.path.segments[nt.path.segments.len - 1].name, argtypes)
     match type_table_find(tbl, mangled, "") { parser::TypeDecl => return state; error => { } }
     let stamped = stamped_instance_decl(template, mangled, nt, argtypes, tbl)
-    let grown = teko::list::push(tbl, TypeReg { name = mangled; namespace = template.namespace; file = template.file; vis = template.decl.vis; decl = stamped })
+    let grown = tt_push(tbl, TypeReg { name = mangled; namespace = template.namespace; file = template.file; vis = template.decl.vis; decl = stamped })
     let queued = tag_inst_sites(collect_body_insts(stamped.body, teko::list::empty()), template.namespace, state.work)
     StampState { table = grown; work = queued }
 }
@@ -2891,10 +3153,11 @@ pub type TemplateReg = struct { decl: parser::TypeDecl; namespace: str }
  * @since onda-3 (#254)
  */
 pub fn find_generic_template(table: TypeTable, base: str) -> TemplateReg | null {
-    mut i = 0
+    let cands = tt_cands(table, base)
+    mut i: u64 = 0
     loop {
-        if i >= table.len { break }
-        let reg = table[i]
+        if i >= cands.count { break }
+        let reg = tt_cand_reg(table, cands, i)
         if reg.decl.type_params.len > 0 {
             if teko::runtime::str_eq(reg.name, base) || teko::runtime::str_eq(name_last_segment(reg.name), base) {
                 return TemplateReg { decl = reg.decl; namespace = reg.namespace }
@@ -2919,12 +3182,13 @@ pub fn find_generic_template(table: TypeTable, base: str) -> TemplateReg | null 
  * @since 0.3.1
  */
 pub fn table_generic_instance_regs(table: TypeTable) -> TypeTable {
-    mut out: TypeTable = teko::list::empty()
-    mut i = 0
+    mut out = tt_empty()
+    mut i: u64 = 0
     loop {
-        if i >= table.len { break }
-        if name_is_g_instance(table[i].name) {
-            if table[i].decl.type_params.len == 0 { out = teko::list::push(out, table[i]) }
+        if i >= tt_len(table) { break }
+        let r = tt_at(table, i)
+        if name_is_g_instance(r.name) {
+            if r.decl.type_params.len == 0 { out = tt_push(out, r) }
         }
         i++
     }
@@ -2933,11 +3197,12 @@ pub fn table_generic_instance_regs(table: TypeTable) -> TypeTable {
 
 pub fn table_generic_instances(table: TypeTable) -> []parser::TypeDecl {
     mut out: []parser::TypeDecl = teko::list::empty()
-    mut i = 0
+    mut i: u64 = 0
     loop {
-        if i >= table.len { break }
-        if name_is_g_instance(table[i].name) {
-            if table[i].decl.type_params.len == 0 { out = teko::list::push(out, table[i].decl) }
+        if i >= tt_len(table) { break }
+        let r = tt_at(table, i)
+        if name_is_g_instance(r.name) {
+            if r.decl.type_params.len == 0 { out = teko::list::push(out, r.decl) }
         }
         i++
     }
@@ -3082,15 +3347,16 @@ pub fn normalize_inst_decl(d: parser::TypeDecl, table: TypeTable) -> parser::Typ
 // templates + ordinary decls) pass through unchanged here; ordinary decls are normalized as program
 // ITEMS by the typer (their bodies do not live in the emitted table). (C: tk_normalize_table_instances.)
 pub fn normalize_table_instances(table: TypeTable) -> TypeTable {
-    mut out: TypeTable = teko::list::empty()
-    mut i = 0
+    mut out = tt_empty()
+    mut i: u64 = 0
     loop {
-        if i >= table.len { break }
-        if name_is_g_instance(table[i].name) {
-            let nd = normalize_inst_decl(table[i].decl, table)
-            out = teko::list::push(out, TypeReg { name = table[i].name; namespace = table[i].namespace; file = table[i].file; vis = table[i].vis; decl = nd })
+        if i >= tt_len(table) { break }
+        let r = tt_at(table, i)
+        if name_is_g_instance(r.name) {
+            let nd = normalize_inst_decl(r.decl, table)
+            out = tt_push(out, TypeReg { name = r.name; namespace = r.namespace; file = r.file; vis = r.vis; decl = nd })
         } else {
-            out = teko::list::push(out, table[i])
+            out = tt_push(out, r)
         }
         i++
     }
