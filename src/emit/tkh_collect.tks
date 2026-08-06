@@ -1,0 +1,94 @@
+// src/emit/tkh_collect.tks  (namespace 'teko::emit')
+//
+// collect every string in a `.tkh` Header (pre-pass; mirrors the tkh_model.tks writers; reuses
+// collect_type_* from tkb_frame_collect_expr.tks). Pure line-count split of tkh.tks; no
+// behavior change.
+
+use teko::checker
+
+fn collect_doc(t: StrTable, has_doc: bool, doc: str) -> StrTable {
+    if !has_doc { return t }
+    st_intern(t, doc).table
+}
+
+fn collect_sigparam(t: StrTable, p: SigParam) -> StrTable {
+    collect_type_strings(st_intern(t, p.name).table, p.type)
+}
+
+fn collect_sigparams(t: StrTable, xs: []SigParam) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        tab = collect_sigparam(tab, xs[i])
+        i++
+    }
+    tab
+}
+
+fn collect_fnsig(t: StrTable, f: FnSig) -> StrTable {
+    let t1 = st_intern(t, f.name).table
+    let t2 = collect_sigparams(t1, f.params)
+    let t3 = collect_type_strings(t2, f.ret)
+    collect_doc(t3, f.has_doc, f.doc)
+}
+
+fn collect_fnsigs(t: StrTable, xs: []FnSig) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        tab = collect_fnsig(tab, xs[i])
+        i++
+    }
+    tab
+}
+
+fn collect_sigfield(t: StrTable, f: SigField) -> StrTable {
+    collect_type_strings(st_intern(t, f.name).table, f.type)
+}
+
+fn collect_sigfields(t: StrTable, xs: []SigField) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        tab = collect_sigfield(tab, xs[i])
+        i++
+    }
+    tab
+}
+
+fn collect_members(t: StrTable, xs: []str) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        tab = st_intern(tab, xs[i]).table
+        i++
+    }
+    tab
+}
+
+fn collect_tyexport(t: StrTable, e: TyExport) -> StrTable {
+    let t1 = st_intern(t, e.name).table
+    let t2 = collect_sigfields(t1, e.fields)
+    let t3 = collect_members(t2, e.members)
+    let t4 = collect_type_list(t3, e.cases)
+    collect_doc(t4, e.has_doc, e.doc)
+}
+
+fn collect_tyexports(t: StrTable, xs: []TyExport) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        tab = collect_tyexport(tab, xs[i])
+        i++
+    }
+    tab
+}
+
+fn collect_header(t: StrTable, h: Header) -> StrTable {
+    collect_fnsigs(collect_tyexports(t, h.types), h.fns)
+}

@@ -1,0 +1,144 @@
+// src/emit/tkh_model.tks  (namespace 'teko::emit')
+//
+// The `.tkh` exported-interface MODEL + its writers (reuse write_type / write_types from
+// tkb_write_prim.tks/tkb_write_frame.tks; strings by u32 index). Pure line-count split of
+// tkh.tks; no behavior change.
+
+use teko::checker
+
+// --- the exported-interface model -------------------------------------------
+
+// a parameter in a signature: a name + its resolved type.
+type SigParam = struct { name: str; type: checker::Type }
+
+// an exported FUNCTION's signature (no body — that is the .tkb's). Docs kept.
+type FnSig = struct {
+    name: str
+    params: []SigParam
+    ret: checker::Type
+    has_doc: bool
+    doc: str
+}
+
+// a field of an exported struct: a name + its resolved type.
+type SigField = struct { name: str; type: checker::Type }
+
+// which shape an exported type has (B.14 — struct/enum/variant; flags is evolution).
+type TyShape = enum { Struct; Enum; Variant }
+
+// an exported TYPE declaration's interface (nominal — B.13; the consumer needs the
+// shape to check construction/membership against it). Per `shape`, exactly one of
+// fields/members/cases is meaningful; the other two are serialized empty.
+type TyExport = struct {
+    name: str
+    shape: TyShape
+    fields: []SigField   // Struct:  the fields  (empty otherwise)
+    members: []str   // Enum:    the members (empty otherwise)
+    cases: []checker::Type   // Variant: the cases   (empty otherwise)
+    has_doc: bool
+    doc: str
+}
+
+// a whole project's exported surface: its types, then its functions.
+type Header = struct { types: []TyExport; fns: []FnSig }
+
+// --- the writers (reuse write_type / write_types; strings by u32 index) -----------
+
+// a doc: a presence byte, then (iff present) its string index.
+fn write_doc(buf: []byte, t: StrTable, has_doc: bool, doc: str) -> []byte {
+    if !has_doc { return write_u8(buf, 0) }
+    write_u32(write_u8(buf, 1), st_find(t, doc))
+}
+
+fn write_sigparam(buf: []byte, t: StrTable, p: SigParam) -> []byte {
+    write_type(write_u32(buf, st_find(t, p.name)), t, p.type)
+}
+
+fn write_sigparams(buf: []byte, t: StrTable, xs: []SigParam) -> []byte {
+    mut b = write_u32(buf, xs.len to u32)
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        b = write_sigparam(b, t, xs[i])
+        i++
+    }
+    b
+}
+
+fn write_fnsig(buf: []byte, t: StrTable, f: FnSig) -> []byte {
+    mut b = write_u32(buf, st_find(t, f.name))
+    b = write_sigparams(b, t, f.params)
+    b = write_type(b, t, f.ret)
+    write_doc(b, t, f.has_doc, f.doc)
+}
+
+fn write_fnsigs(buf: []byte, t: StrTable, xs: []FnSig) -> []byte {
+    mut b = write_u32(buf, xs.len to u32)
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        b = write_fnsig(b, t, xs[i])
+        i++
+    }
+    b
+}
+
+fn write_sigfield(buf: []byte, t: StrTable, f: SigField) -> []byte {
+    write_type(write_u32(buf, st_find(t, f.name)), t, f.type)
+}
+
+fn write_sigfields(buf: []byte, t: StrTable, xs: []SigField) -> []byte {
+    mut b = write_u32(buf, xs.len to u32)
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        b = write_sigfield(b, t, xs[i])
+        i++
+    }
+    b
+}
+
+// a list of member NAMES (enum) → count + each name index.
+fn write_members(buf: []byte, t: StrTable, xs: []str) -> []byte {
+    mut b = write_u32(buf, xs.len to u32)
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        b = write_u32(b, st_find(t, xs[i]))
+        i++
+    }
+    b
+}
+
+// the TyShape ordinal byte — explicit (no enum→int cast needed). Struct=0 Enum=1 Variant=2.
+fn shape_byte(s: TyShape) -> byte {
+    if s == TyShape::Struct { return 0 }
+    if s == TyShape::Enum { return 1 }
+    2
+}
+
+// uniform: all three lists are written; `shape` selects the meaningful one, the others
+// come out empty (count 0). Sequential, branch-free both ways (M.1 / M.5).
+fn write_tyexport(buf: []byte, t: StrTable, e: TyExport) -> []byte {
+    mut b = write_u32(buf, st_find(t, e.name))
+    b = write_u8(b, shape_byte(e.shape))
+    b = write_sigfields(b, t, e.fields)
+    b = write_members(b, t, e.members)
+    b = write_types(b, t, e.cases)
+    write_doc(b, t, e.has_doc, e.doc)
+}
+
+fn write_tyexports(buf: []byte, t: StrTable, xs: []TyExport) -> []byte {
+    mut b = write_u32(buf, xs.len to u32)
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        b = write_tyexport(b, t, xs[i])
+        i++
+    }
+    b
+}
+
+fn write_header(buf: []byte, t: StrTable, h: Header) -> []byte {
+    write_fnsigs(write_tyexports(buf, t, h.types), t, h.fns)
+}
