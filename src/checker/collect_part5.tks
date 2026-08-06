@@ -1,0 +1,249 @@
+// src/checker/collect.tks  (namespace 'teko::checker') — pass 1 (forward refs).
+use teko::parser
+
+
+// (W10b.IF) does implementing method `impl_m` satisfy interface-required method `req`? Same NON-
+// receiver param types (both skip their 1st untyped receiver param) + same return type. Any type
+// that fails to resolve makes it a non-match (the conformance error surfaces the missing/mismatched
+// method; the unresolved type surfaces separately via check_modules/normal resolution).
+fn method_sig_matches(req: parser::Function, impl_m: parser::Function, table: TypeTable, ref_ns: str) -> bool {
+    mut rstart: u64 = 0
+    if req.params.len > 0 && !req.params[0].has_type { rstart = 1 }
+    mut istart: u64 = 0
+    if impl_m.params.len > 0 && !impl_m.params[0].has_type { istart = 1 }
+    // instance/static parity: an INSTANCE interface method (has a receiver) must be satisfied by an
+    // INSTANCE method, not a same-named STATIC one (rstart/istart are 1 iff a receiver is present).
+    if rstart != istart { return false }
+    if req.params.len - rstart != impl_m.params.len - istart { return false }
+    mut k: u64 = 0
+    loop {
+        if rstart + k >= req.params.len { break }
+        let ip = impl_m.params[istart + k]
+        if !ip.has_type && ip.name == "_" {
+            k++
+            continue
+        }
+        let rt = match resolve_type(req.params[rstart + k].type_ann, table, ref_ns) { Type as t => t; error => return false }   // (#109 W2) source-ref types resolve in the conforming type's namespace
+        let it = match resolve_type(ip.type_ann, table, ref_ns) { Type as t => t; error => return false }
+        if !type_eq(rt, it) { return false }
+        k++
+    }
+    if req.has_return != impl_m.has_return { return false }
+    if req.has_return {
+        let rr = match resolve_type(req.return_type, table, ref_ns) { Type as t => t; error => return false }   // (#109 W2) source-ref types resolve in the conforming type's namespace
+        let ir = match resolve_type(impl_m.return_type, table, ref_ns) { Type as t => t; error => return false }   // (#109 W2) source-ref types resolve in the conforming type's namespace
+        if !type_eq(rr, ir) { return false }
+    }
+    true
+}
+
+/**
+ * (W10b.IF) THE CONFORMANCE CHECK: `type_name` (a class or struct) must CONFORM to every INTERFACE
+ * in `implements` — each interface name must be provided by `own_methods` (a class's EFFECTIVE
+ * methods, or a struct's own methods) for every method of that interface (transitively via extends)
+ * by NAME, with a matching signature AND `pub` visibility (per the OOP design: `pub fn` is required
+ * to satisfy an interface method). (TR1) Trait names also live in `implements` under Option B; they
+ * are SKIPPED here — a trait's requirements are validated by `check_trait_requirements`, and its
+ * bodied members are already folded in by `fold_traits`. (TR3) A compiler-known STRUCTURAL trait
+ * name (`is_structural_trait`) is likewise SKIPPED — its contract IS the synthesized method
+ * `fold_traits` folds in, never the interface path.
+ *
+ * @param type_name          the conforming struct/class name
+ * @param type_ns            the conforming type's declaring namespace
+ * @param own_methods        the type's effective methods (class: base chain; struct: own)
+ * @param implements         the `&`-list of contract names (interfaces ∪ derived traits)
+ * @param table              the folded type table
+ * @param members_all_public true for a STRUCT (members all-public per W10b.0.A, `vis` irrelevant);
+ *                           false for a CLASS (a satisfying method must genuinely be `pub`/`exp`)
+ * @return null on full conformance
+ * @throws when an interface method is missing, mismatched, or not `pub` on a class
+ */
+fn check_conformance(type_name: str, type_ns: str, own_methods: []parser::Function, implements: []str, table: TypeTable, members_all_public: bool) -> error | null {
+    mut ii = 0
+    loop {
+        if ii >= implements.len { break }
+        let iname = implements[ii]
+        if !is_trait_name(iname, table) && !is_structural_trait(iname) {
+            match check_one_interface(type_name, type_ns, own_methods, iname, table, members_all_public) { error as e => return e; null => { } }
+        }
+        ii++
+    }
+    null
+}
+
+/**
+ * Check that `own_methods` satisfies a SINGLE interface `iname` (transitively via extends): each
+ * required method is present by NAME, with a matching signature, no restated default, and — for a
+ * class — real `pub`/`exp` visibility. `iname` is a SOURCE name resolved from the conforming type's
+ * namespace; its extends walk starts from the found decl's own namespace.
+ *
+ * @param type_name          the conforming struct/class name
+ * @param type_ns            the conforming type's declaring namespace
+ * @param own_methods        the type's effective methods
+ * @param iname              the interface name to check against
+ * @param table              the folded type table
+ * @param members_all_public true for a STRUCT; false for a CLASS
+ * @return null when the type conforms to `iname`
+ * @throws when a required method is missing, mismatched, restates a default, or is not `pub`
+ */
+fn check_one_interface(type_name: str, type_ns: str, own_methods: []parser::Function, iname: str, table: TypeTable, members_all_public: bool) -> error | null {
+    let ihit = match find_interface_decl(iname, table, type_ns) { IfaceHit as h => h; error as e => return e }
+    let ib = match ihit.decl.body { parser::InterfaceBody as b => b; _ => return error { message = $"{iname} is not an interface" } }
+    let req_methods = match effective_interface_methods(ib, ihit.ns, table, teko::list::push(teko::list::empty(), qualify(ihit.ns, name_last_segment(ihit.decl.name)))) { []parser::Function as f => f; error as e => return e }
+    mut ri = 0
+    loop {
+        if ri >= req_methods.len { break }
+        match check_one_requirement(type_name, type_ns, own_methods, iname, req_methods[ri], table, members_all_public) { error as e => return e; null => { } }
+        ri++
+    }
+    null
+}
+
+/**
+ * Check that `own_methods` provides ONE required interface method `req` (matched by NAME) with a
+ * matching signature, no restated default, and the required visibility on a class.
+ *
+ * @param type_name          the conforming struct/class name
+ * @param type_ns            the conforming type's declaring namespace
+ * @param own_methods        the type's effective methods
+ * @param iname              the owning interface name (for error messages)
+ * @param req                the required method
+ * @param table              the folded type table
+ * @param members_all_public true for a STRUCT; false for a CLASS
+ * @return null when `req` is satisfied
+ * @throws when `req` is missing, its signature mismatches, it restates a default, or is not `pub`
+ */
+fn check_one_requirement(type_name: str, type_ns: str, own_methods: []parser::Function, iname: str, req: parser::Function, table: TypeTable, members_all_public: bool) -> error | null {
+    mut mi = 0
+    loop {
+        if mi >= own_methods.len { break }
+        if own_methods[mi].name == req.name {
+            if !method_sig_matches(req, own_methods[mi], table, type_ns) {
+                return error { message = $"'{type_name}' method '{req.name}' does not match interface '{iname}'s signature" }
+            }
+            let restated = default_restated_param(req.params, own_methods[mi].params)
+            if restated != "" { return error { message = $"'{type_name}' method '{req.name}' must not restate the default for '{restated}' — interface '{iname}' owns its default" } }
+            if !members_all_public {
+                match own_methods[mi].vis {
+                    parser::Visibility::Pub => { }
+                    parser::Visibility::Exp => { }
+                    _ => return error { message = $"'{type_name}' method '{req.name}' must be `pub` to satisfy interface '{iname}'" }
+                }
+            }
+            return null
+        }
+        mi++
+    }
+    error { message = $"'{type_name}' does not implement interface '{iname}' — missing method '{req.name}'" }
+}
+
+/**
+ * (TR2, 2026-07-04) One field of a deriver's compile-time FIELD VIEW: its declared name and its
+ * fully RESOLVED `Type` (not just the source `TypeExpr`) — what a structural trait's synthesized
+ * body (TR3's `Eq`/`Ord`/`Hash`/`Clone`/`Default`) needs to pick a per-field strategy (primitive
+ * compare vs. nested struct/class recursion). Compiler-internal only: no surface syntax reaches
+ * this shape, and it carries no runtime value or metadata (Law M.0 — zero reflection).
+ */
+pub type FieldView = struct { name: str; type: Type }
+
+/**
+ * Resolve one `parser::Field` into a `FieldView` in `owner_ns` (the field's OWN declaring
+ * namespace — its type annotation was written there, mirroring `field_type`/`type_ns_of` call
+ * sites elsewhere in the checker).
+ */
+fn resolve_field_view(f: parser::Field, table: TypeTable, owner_ns: str) -> FieldView | error {
+    match resolve_type(f.type_ann, table, owner_ns) {
+        Type as t => FieldView { name = f.name; type = t }
+        error as e => e
+    }
+}
+
+/**
+ * Resolve a list of `parser::Field` into `FieldView`s, in order, stopping at the first resolution
+ * error.
+ */
+fn resolve_field_views(fields: []parser::Field, table: TypeTable, owner_ns: str) -> []FieldView | error {
+    mut out: []FieldView = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= fields.len { break }
+        let fv = match resolve_field_view(fields[i], table, owner_ns) { FieldView as v => v; error as e => return e }
+        out = teko::list::push(out, fv)
+        i++
+    }
+    out
+}
+
+/**
+ * (TR2) THE FIELD VIEW — a deriver-agnostic, compile-time-only enumeration of a struct/class's
+ * data shape by TYPE NAME: every field (a class's through its FULL base chain, via
+ * `effective_class_fields`; a struct's own — already trait-folded by TR0's `fold_traits`, which
+ * runs before this is ever consulted) with its type annotation resolved to a real `Type`. This is
+ * the API `TR3` synthesizes structural-trait bodies (`Eq`/`Ord`/`Hash`/`Clone`/`Default`) from: no
+ * surface syntax, no runtime value — the view exists only inside the checker. Errors on an unknown
+ * `type_name`, a type_name that is neither a struct nor a class, or a field whose annotation fails
+ * to resolve.
+ */
+pub fn deriver_field_view(type_name: str, table: TypeTable) -> []FieldView | error {
+    let decl = match type_table_find(table, type_name, "") {
+        parser::TypeDecl as td => td
+        error => return error { message = $"unknown deriver: {type_name}" }
+    }
+    let owner_ns = type_ns_of(table, type_name)
+    match decl.body {
+        parser::StructBody as sb => resolve_field_views(sb.fields, table, owner_ns)
+        parser::ClassBody as cb => {
+            let fields = match effective_class_fields(cb, table) { []parser::Field as f => f; error as e => return e }
+            resolve_field_views(fields, table, owner_ns)
+        }
+        _ => error { message = $"'{type_name}' is not a struct or a class — a structural trait can only derive from a field-shaped deriver" }
+    }
+}
+
+// ── (TR0, 2026-07-02) TRAITS — the derivation FOLD ─────────────────────────────────────────────
+// A `trait` is a struct-shaped, NON-instantiable bundle of fields + methods a struct/class
+// DERIVES via the same `&`-list as interfaces. The fold runs BEFORE collect/typing
+// (type_program's first step), so every later stage — registration, conformance, typing, codegen,
+// and struct layout — sees each deriver's ALREADY-FOLDED body, and a trait never reaches a
+// value position (resolve_named rejects it; TR1 brings trait-typed dynamic values).
+
+// look up a trait body by name — error if the name is unknown or not a trait.
+pub fn find_trait_body(name: str, table: TypeTable) -> parser::TraitBody | error {
+    let decl = match type_table_find(table, name, "") { parser::TypeDecl as td => td; error => return error { message = $"unknown trait: {name}" } }   // (#109 W1) trait-body lookup on a resolved name — no referencing ns
+    match decl.body {
+        parser::TraitBody as tb => tb
+        _ => return error { message = $"{name} is not a trait" }
+    }
+}
+
+/**
+ * The full method surface a `trait` contributes as a contract — its provided (bodied) methods AND
+ * its bodyless requirements, by declaration order. A trait has no `extends`, so (unlike an
+ * interface) there is no transitive closure to walk: the trait's own method list IS its effective
+ * surface. Keyed by NAME, matching `iface_methods_by_name`'s shape so the shared D2/D3 contract
+ * machinery (constraint surface, vtable slots, dynamic dispatch) is kind-agnostic.
+ *
+ * @param name  the resolved trait name
+ * @param table the (folded) type table
+ * @return the trait's methods, or an error if `name` is not a declared trait
+ * @throws when `name` names no trait
+ */
+pub fn trait_methods_by_name(name: str, table: TypeTable) -> []parser::Function | error {
+    let tb = match find_trait_body(name, table) { parser::TraitBody as t => t; error as e => return e }
+    tb.methods
+}
+
+// one recorded derivation: `type_name` derived `trait_name`. The bodyless-REQUIREMENT check runs
+// after ALL derivers fold, against the FOLDED table — so a class's INHERITED methods (its base
+// may itself derive or define them) can satisfy a requirement too.
+type TraitDerive = struct { type_name: str; trait_name: str }
+/**
+ * (TR0/TR3) THE `&`-LIST SPLIT — three disjoint buckets from one contract list: names declared as
+ * user `trait`s FOLD their bodies (`traits`); names in the compiler-known STRUCTURAL set (`Eq`/
+ * `Ord`/`Hash`/`Clone`/`Default`, incl. synonyms) SYNTHESIZE their method bodies from the field view
+ * (`structural`); everything else — interfaces, or unknown names the conformance check rejects —
+ * stays in `ifaces`. A structural name is neither an `InterfaceBody` nor a `TraitBody`, so it is
+ * recognized by `is_structural_trait` (a closed set) BEFORE the trait/interface probe.
+ */
+type SplitImpls = struct { traits: []str; ifaces: []str; structural: []str }
+type FoldedMembers = struct { fields: []parser::Field; methods: []parser::Function; consts: []parser::ConstDecl }

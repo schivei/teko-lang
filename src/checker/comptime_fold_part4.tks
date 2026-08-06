@@ -1,0 +1,262 @@
+use teko::lexer
+use teko::parser
+
+
+/**
+ * int_negate — negate an integer value. Negating a signed MIN, or any non-zero unsigned
+ * value, is out of range and a located compile error (M.1); every other case is the
+ * exact two's-complement negation.
+ *
+ * @param a     the operand's bit pattern (masked to width)
+ * @param info  the operand's width/signedness
+ * @param ty    the operand's declared type (the result's type)
+ * @param e     the enclosing expression (positions any error)
+ * @return      the negated integer value, or a located out-of-range error
+ * @since #comptime-fold
+ */
+fn int_negate(a: u64, info: IntInfo, ty: Type, e: TExpr) -> ConstValue | error {
+    if !info.is_signed {
+        if mask_to_width(a, info.width) == (0 to u64) { return cv_int(0 to u64, ty) }
+        return const_form_error("negation of a non-zero unsigned constant is out of range (#comptime-fold)", e)
+    }
+    if is_min_bits(a, info) { return const_form_error("integer overflow negating a constant (a signed MIN has no positive) (#comptime-fold)", e) }
+    cv_int(twos_neg(a, info.width), ty)
+}
+
+/**
+ * apply_float_unary — apply a unary operator to a float value: only `-` (sign flip) is
+ * defined on a float; any other is a located error.
+ *
+ * @param op  the unary operator token
+ * @param cf  the float operand
+ * @param e   the enclosing expression (positions any error)
+ * @return    the folded float value, or a located error
+ * @since #comptime-fold
+ */
+fn apply_float_unary(op: lexer::TokenKind, cf: CVFloat, e: TExpr) -> ConstValue | error {
+    match op {
+        lexer::TokenKind::Minus => float_negate(cf, e)
+        _ => const_form_error("comptime fold: unsupported unary operator on a float constant (#comptime-fold)", e)
+    }
+}
+
+/**
+ * float_negate — negate an f64 value through its IEEE bits; an f32 is not yet folded.
+ *
+ * @param cf  the float operand
+ * @param e   the enclosing expression (positions any error)
+ * @return    the negated float value, or a located error
+ * @since #comptime-fold
+ */
+fn float_negate(cf: CVFloat, e: TExpr) -> ConstValue | error {
+    if cf.is_f32 { return const_form_error("comptime folding of f32 is not yet supported (#comptime-fold)", e) }
+    cv_float(teko::f64_bits(-(teko::f64_from_bits(cf.bits))), false)
+}
+
+/**
+ * eval_binary_expr — evaluate a binary `+ - * / % & | ^ << >>` expression (Tier 2): fold
+ * both operands, then apply the operator.
+ *
+ * @param bi     the typed binary node
+ * @param e      the enclosing expression (positions any error)
+ * @param table  the type table (forwarded to the operand folds)
+ * @param env    the environment (forwarded to the operand folds)
+ * @param agg    the module-aggregate resolution table (forwarded to the operand folds)
+ * @return       the folded value, or a located error
+ * @since #comptime-fold
+ */
+fn eval_binary_expr(bi: TBinary, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
+    match eval_const(bi.left, table, env, agg) {
+        error as x => return x
+        ConstValue as lv => eval_binary_right(bi, lv, e, table, env, agg)
+    }
+}
+
+/**
+ * eval_binary_right — the left operand of a binary op is folded; fold the right operand
+ * and apply the operator.
+ *
+ * @param bi     the typed binary node
+ * @param lv     the folded left value
+ * @param e      the enclosing expression (positions any error)
+ * @param table  the type table (forwarded to the right-operand fold)
+ * @param env    the environment (forwarded to the right-operand fold)
+ * @param agg    the module-aggregate resolution table (forwarded to the right-operand fold)
+ * @return       the folded value, or a located error
+ * @since #comptime-fold
+ */
+fn eval_binary_right(bi: TBinary, lv: ConstValue, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
+    match eval_const(bi.right, table, env, agg) {
+        error as y => return y
+        ConstValue as rv => apply_binary(bi.op, lv, rv, e)
+    }
+}
+
+/**
+ * agg_const_init — resolve the collapsed initializer of the module aggregate const named
+ * `(name, ns)` in `agg`, or null when no such const is recorded (a fn-value, a local, a scalar
+ * const, or a different-module name never resolves — the fold then leaves the index runtime). A thin
+ * `(name, ns)`-keyed lookup over the parallel lists, mirroring `scalar_const_init` (`consteval.tks`).
+ *
+ * @param agg   the module-aggregate resolution table
+ * @param name  the reference's name
+ * @param ns    the reference's resolved namespace (`func_ns`)
+ * @return      the const's collapsed initializer, or null
+ * @since #comptime-fold
+ */
+fn agg_const_init(agg: AggConstMap, name: str, ns: str) -> TExpr | null {
+    mut i: u64 = 0
+    loop {
+        if i >= agg.names.len { break }
+        if agg.names[i] == name && agg.nss[i] == ns { return agg.inits[i] }
+        i++
+    }
+    null
+}
+
+/**
+ * eval_agg_ref — evaluate a `TVar` reference that names a module-level aggregate const: resolve its
+ * collapsed initializer through `agg` and evaluate that (Layer 1c). A function-value reference
+ * (`is_func`) is never a const aggregate; a name absent from `agg` (a local, a scalar, a
+ * different-module name) is a soft `const_form_error` located at `e` — the `cf_agg_value`/
+ * `cf_can_index` gate proves the shape before the fold calls `eval_const`, so this arm never spuriously
+ * rejects a program: a non-foldable receiver simply stays runtime.
+ *
+ * @param v      the reference node
+ * @param e      the enclosing expression (positions any error)
+ * @param table  the type table (forwarded to the initializer eval)
+ * @param env    the environment (forwarded to the initializer eval)
+ * @param agg    the module-aggregate resolution table
+ * @return       the aggregate comptime value, or a located error
+ * @since #comptime-fold
+ */
+fn eval_agg_ref(v: TVar, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
+    if v.is_func { return const_form_error("comptime fold: a function value is not a const aggregate (#comptime-fold)", e) }
+    match agg_const_init(agg, v.name, v.func_ns) {
+        null => const_form_error("comptime fold: this reference is not a module aggregate const (#comptime-fold)", e)
+        TExpr as init => eval_const(init, table, env, agg)
+    }
+}
+
+/**
+ * eval_array_agg — evaluate an array/slice literal's elements to a `CVAgg`, recursing `eval_const`
+ * into each element expression (Layer 1c). A spread element is not const-foldable in CF4 and makes
+ * the aggregate non-const; its presence — rejected by `cf_agg_value` before the fold reaches here —
+ * is a located error on the direct-eval path. Element order is index order.
+ *
+ * @param a      the typed array literal
+ * @param table  the type table (forwarded to each element eval)
+ * @param env    the environment (forwarded to each element eval)
+ * @param agg    the module-aggregate resolution table (forwarded)
+ * @return       the aggregate comptime value, or the first located element error
+ * @since #comptime-fold
+ */
+fn eval_array_agg(a: TArrayLit, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
+    mut elems: []ConstValue = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= a.elements.len { break }
+        if a.elements[i].is_spread { return error { message = "comptime fold: a spread element is not a const aggregate (#comptime-fold)" } }
+        let v = match eval_const(a.elements[i].expr, table, env, agg) { error as x => return x; ConstValue as cv => cv }
+        elems = teko::list::push(elems, v)
+        i++
+    }
+    cv_agg(elems)
+}
+
+/**
+ * eval_struct_agg — evaluate a struct-init literal's field values to a `CVAgg`, recursing
+ * `eval_const` into each field expression (Layer 1c, struct leg — the sibling of
+ * `eval_array_agg`). A struct-typed AGGREGATE ELEMENT is exactly what a `const []Struct`
+ * table needs its per-element `TStructInit` to fold to: `eval_array_agg` already recurses
+ * `eval_const` into every element, so a struct-typed element reached the (until now)
+ * unhandled `_` arm and a genuinely-const array-of-structs const hard-failed the whole
+ * build with a located "not a Tier-0..2 scalar constant" error INSTEAD OF gracefully
+ * degrading — `literal_of` already returns `null` for any non-`CVInt` kind (a `CVAgg` has
+ * no scalar literal form), so the existing `fold_index`/`fold_field` "no literal form"
+ * fallback (`fold_index_children`/`fold_field_children`) already leaves a struct-typed
+ * element read as a runtime `TIndex`/`TFieldAccess` — this arm only needed to stop
+ * `eval_const` itself from refusing to SEE a struct field. Field order is declaration
+ * order (`field_vals` is already positional — the checker/synth pipeline normalizes named
+ * struct-literal fields to declaration order before this typed AST exists).
+ *
+ * @param si     the typed struct-init expression
+ * @param table  the type table (forwarded to each field eval)
+ * @param env    the environment (forwarded to each field eval)
+ * @param agg    the module-aggregate resolution table (forwarded)
+ * @return       the aggregate comptime value, or the first located field error
+ * @since #comptime-fold (mem-lean fat-const teaching)
+ */
+fn eval_struct_agg(si: TStructInit, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
+    mut elems: []ConstValue = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= si.field_vals.len { break }
+        let v = match eval_const(si.field_vals[i], table, env, agg) { error as x => return x; ConstValue as cv => cv }
+        elems = teko::list::push(elems, v)
+        i++
+    }
+    cv_agg(elems)
+}
+
+/**
+ * eval_index_expr — evaluate a `TIndex` of a const aggregate at a const index (Layer 1c): evaluate
+ * the receiver (which must yield a `CVAgg`) and the index (which must yield a `CVInt`), then read the
+ * element. A negative index or an index `>= elems.len` is a LOCATED COMPILE ERROR (M.1;
+ * LEGISLATION:148) — a hazard the compiler can already see. A non-aggregate receiver or non-integer
+ * index reaching here is a located error (the `cf_can_index` gate proves the shape before the fold
+ * calls `eval_const`).
+ *
+ * @param ix     the typed index expression
+ * @param e      the enclosing expression (positions any error)
+ * @param table  the type table (forwarded to the child evals)
+ * @param env    the environment (forwarded to the child evals)
+ * @param agg    the module-aggregate resolution table (forwarded)
+ * @return       the element comptime value, or a located error (out-of-range / shape)
+ * @since #comptime-fold
+ */
+fn eval_index_expr(ix: TIndex, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
+    let recv = match eval_const(ix.receiver, table, env, agg) { error as x => return x; ConstValue as cv => cv }
+    let idx = match eval_const(ix.index, table, env, agg) { error as x => return x; ConstValue as cv => cv }
+    match recv.kind {
+        CVAgg as ag => eval_index_at(ag, idx, e)
+        _ => const_form_error("comptime fold: index receiver is not a const aggregate (#comptime-fold)", e)
+    }
+}
+
+/**
+ * eval_index_at — read element `idx` of the folded aggregate `ag`: the index must be a `CVInt` with a
+ * representable non-negative value strictly below `ag.elems.len`; a negative or out-of-range index is
+ * a located compile error (M.1). The bounds hazard the compiler can already see fails loudly at
+ * comptime, never as a silent wrap or a deferred runtime trap.
+ *
+ * @param ag   the folded aggregate value
+ * @param idx  the folded index value (must be a `CVInt`)
+ * @param e    the enclosing expression (positions any error)
+ * @return     the element comptime value, or a located out-of-range error
+ * @since #comptime-fold
+ */
+fn eval_index_at(ag: CVAgg, idx: ConstValue, e: TExpr) -> ConstValue | error {
+    match idx.kind {
+        CVInt as ci => eval_index_pick(ag, ci, e)
+        _ => const_form_error("comptime fold: index is not a const integer (#comptime-fold)", e)
+    }
+}
+
+/**
+ * eval_index_pick — the bounds-checked element read: recover the index's signed carrier, reject a
+ * negative or unrepresentable value, reject an index at or beyond the aggregate length, then return
+ * the element. Every rejection is a located M.1 compile error.
+ *
+ * @param ag  the folded aggregate value
+ * @param ci  the folded index integer
+ * @param e   the enclosing expression (positions any error)
+ * @return    the element comptime value, or a located out-of-range error
+ * @since #comptime-fold
+ */
+fn eval_index_pick(ag: CVAgg, ci: CVInt, e: TExpr) -> ConstValue | error {
+    let iv = match index_carrier(ci) { null => return const_form_error("comptime fold: index is out of range (#comptime-fold)", e); parser::NumInt as v => v }
+    if iv.neg { return const_form_error("comptime fold: a negative index is out of range (#comptime-fold)", e) }
+    if iv.mag >= ag.elems.len { return const_form_error("comptime fold: index is out of range for the aggregate length (#comptime-fold)", e) }
+    ag.elems[iv.mag]
+}

@@ -1,0 +1,239 @@
+// src/checker/typer.tks  (namespace 'teko::checker')
+// Each check_* (E4/E5) EVOLVES into a type_*: the SAME checks (B.22 regimes, B.20
+// `if`, B.15 `match` + exhaustiveness), but the producer BUILDS the typed node
+// instead of returning a bare Type. Predicates (is_bool/is_integer/op_is_*),
+// resolvers (resolve_type), env (lookup/define) and the pattern + exhaustiveness
+// logic (check_pattern/exhaustive) are reused from their stages — re-derivation,
+// not duplication (M.5). C1: every node, statement and item re-derived.
+use teko::lexer
+use teko::parser
+
+
+/**
+ * type_compare — type a comparison chain (`a < b <= c`), operand by operand. Each step adopts a
+ * bare numeric literal to its partner's type through the very function the binary ops use
+ * (`adopt_binop_operands`, so `c < 0x20` compares a `byte` against a `u8`-adopted literal), applies
+ * the SHARED D1 class-3 WARNING
+ * (`redundant_widen_cast_of` — the same guarded decision `type_binary` uses, so an arithmetic and a
+ * comparison spelling of the same operand pair always agree), and checks comparability.
+ *
+ * @param c      the comparison chain node
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       the typed comparison (always `bool`), or a type error
+ * @throws       on a `void` operand or an incomparable operand pair — NOT on a redundant widen
+ *               cast, which only warns (owner ruling 2026-07-27, `warn_redundant_cast`)
+ */
+fn type_compare(c: parser::Compare, env: Env, table: TypeTable) -> TExpr | error {
+    mut first = deref_ref_value(match type_expr(c.first, env, table) { TExpr as te => te; error as e => return e })
+    if type_is_void(first.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
+    let fk = bignum_kind(first.type)
+    if fk != "" { return type_bignum_compare(first, c.rest, env, table, fk) }
+    mut prev = first
+    mut terms: []TCmpTerm = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= c.rest.len { break }
+        let raw = deref_ref_value(match type_expr(c.rest[i].operand, env, table) { TExpr as te => te; error as e => return e })
+        if type_is_void(raw.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
+        let adopted = adopt_binop_operands(prev, raw)
+        if i == 0 { first = adopted.l }
+        match redundant_widen_cast_of(adopted.l, adopted.r) { TExpr as bad => warn_redundant_cast(env, bad); null => { } }
+        if !is_comparable(adopted.l.type, adopted.r.type) { return error { message = "operands are not comparable" } }
+        let is_variant_member_pair = variant_has_member(adopted.l.type, adopted.r.type) || variant_has_member(adopted.r.type, adopted.l.type)
+        if is_variant_member_pair && !op_is_eq_ne(c.rest[i].op) {
+            return error { message = "a union compares to one of its own members only with `==`/`!=` (ordering needs an explicit `to`)" }
+        }
+        terms = teko::list::push(terms, TCmpTerm { op = c.rest[i].op; operand = adopted.r })
+        prev = adopted.r
+        i++
+    }
+    TExpr { kind = TCompare { first = first; rest = terms }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
+}
+
+/**
+ * Marker: the call is not a `teko::list::*` builtin — `type_list_builtin` falls back so its
+ * caller resolves the call through the ordinary path.
+ */
+type NotListBuiltin = struct { }
+
+/**
+ * The GENERIC `teko::list::*` builtins that have no `.tks` module of their own (like
+ * print/assert): `empty()`, `push(s, x)`, and `with_cap(n)`. Recognized by the LAST-2 path
+ * segments (`list::empty` / `list::push` / `list::with_cap`), rooted at `teko` (or bare
+ * `list::*`). The element type is INFERRED (B.8/Slice):
+ *   - `empty()` -> `[]<sentinel>` (a `Slice` whose element is the `Void` marker, unifying with
+ *     any concrete slice);
+ *   - `push(s, x)` -> `[]typeof(x)`; `s` must be a slice (sentinel or a matching element);
+ *   - `with_cap(n)` -> `[]<sentinel>`, exactly like `empty()`, but the runtime buffer is
+ *     pre-sized for `n` elements (an enabling primitive — staged off; no compiler source calls
+ *     it yet).
+ * The C twin instead uses a `bool handled` out-param; Teko has no out-params, so the tri-state
+ * result here is a 3-member variant (`T? | error` is illegal — a variant member may not be
+ * nullable).
+ *
+ * @param c      the raw call node
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       the typed `TExpr` for a recognized `list::*` builtin, `NotListBuiltin` when the
+ *               call is not one of these (the caller falls back to ordinary resolution), or
+ *               `error` on a malformed call (wrong arity, a non-slice base, or a mismatched item)
+ */
+fn type_list_builtin(c: parser::Call, env: Env, table: TypeTable) -> TExpr | NotListBuiltin | error {
+    if c.callee.segments.len < 2 { return NotListBuiltin { } }
+    let last = c.callee.segments[c.callee.segments.len - 1].name
+    let prev = c.callee.segments[c.callee.segments.len - 2].name
+    // (#148 R3) teko::mem::push_fo — push with FREE-OLD BY DECREE. Same typing/semantics as
+    // teko::list::push; the CALLER asserts the base is a linear chain (the old buffer is dead
+    // after the grow), so native codegen frees it (tk_slice_push_fo). TEKO_MEM_PARANOID is the
+    // fiscal: a wrong decree poisons instead of parking and the gate fails loudly. (Mirror expr.c.)
+    let is_pushfo = prev == "mem" && last == "push_fo"
+    if prev != "list" && !is_pushfo { return NotListBuiltin { } }
+    let rooted = c.callee.segments.len == 2 || c.callee.segments[0].name == "teko"
+    if !rooted { return NotListBuiltin { } }
+
+    if last == "empty" {
+        if c.args.len != 0 { return error { message = "teko::list::empty expects no arguments" } }
+        // SENTINEL slice: element is the Void marker (unifies with any concrete slice — type_eq).
+        TExpr { kind = TCall { callee = c.callee; args = teko::list::empty(); call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = Slice { element = Void { } }; line = 0; col = 0 }
+    } else if last == "push" || is_pushfo {
+        if c.args.len != 2 { return error { message = "teko::list::push expects two arguments (slice, item)" } }
+        let s = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
+        let x = match type_expr(c.args[1], env, table) { TExpr as te => te; error as e => return e }
+        let elem = match s.type { Slice as sl => sl.element; _ => return error { message = "teko::list::push first argument must be a slice (`[]T`)" } }
+        if type_is_void(x.type) { return error { message = "teko::list::push item cannot be a `void` expression (M.1)" } }
+        // A SENTINEL base (Void element) is fixed BY the item — the result element is the item's type.
+        // A CONCRETE element is preserved; the item must WIDEN into it (a case into a variant element —
+        // so a `[]Type` accepts heterogeneous cases: str, u64, …) OR adopt it (literal). (Mirror expr.c.)
+        let result_elem = match elem {
+            Void => x.type
+            _ => {
+                if !widens_into(x.type, elem, table) && !literal_adopts(x, elem) { return error { message = "teko::list::push item type does not match the slice element type" } }
+                elem
+            }
+        }
+        // (#57) CONCRETIZE a SENTINEL base (bare empty()) to []elem so codegen can EMIT it; the interpreter
+        // ignores a slice's element type but codegen's emit_list_empty REQUIRES it. (Mirror expr.c.)
+        let base = match elem { Void => TExpr { kind = s.kind; type = Slice { element = result_elem }; line = s.line; col = s.col }; _ => s }
+        mut args = teko::list::push(teko::list::push(teko::list::empty(), base), x)
+        TExpr { kind = TCall { callee = c.callee; args = args; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = Slice { element = result_elem }; line = 0; col = 0 }
+    } else if last == "with_cap" {
+        if c.args.len != 1 { return error { message = "teko::list::with_cap expects one argument (the initial capacity, a `u64`)" } }
+        let n = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
+        let cap_t = Prim { kind = PrimKind::U64 }
+        mut n_typed = n
+        if !type_eq(n.type, cap_t) {
+            if !literal_adopts(n, cap_t) { return error { message = $"teko::list::with_cap's argument must be a `u64` — got `{type_render(n.type)}`" } }
+            n_typed = TExpr { kind = n.kind; type = cap_t; line = n.line; col = n.col }
+        }
+        let wargs = teko::list::push(teko::list::empty(), n_typed)
+        TExpr { kind = TCall { callee = c.callee; args = wargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = Slice { element = Void { } }; line = 0; col = 0 }
+    } else {
+        NotListBuiltin { }
+    }
+}
+
+// (mem::free ruling 2026-07-03) `teko::mem::free<T>(target: []T | Ref<T>) -> void` — MANUAL opt-in
+// deallocation, the third lifetime lever ([[teko-mem-free-design]]). ONE builtin whose parameter is a
+// SUM of the two heap shapes; the checker dispatches the arm STATICALLY by the argument's resolved
+// type (no runtime tag). SAFETY (the "equilíbrio"): the target must be a MUTABLE VARIABLE — the
+// lowering scrubs it (slice → empty, class handle → null) at the free site, so a direct
+// `free(x); use(x)` reads the scrubbed-empty value, never the parked buffer. But an ALIASED free
+// (`y = x; free(x); use(y)`) is NOT caught: not statically (there is no uniqueness/points-to fact
+// yet), and NOT by ASan either. `mem::free` never calls libc `free` -- it parks the block on a
+// private free-list over the arena (teko_rt.c:856), so a use-after-free reads reused-but-still-mapped
+// memory that AddressSanitizer cannot see. Only `TEKO_MEM_PARANOID=1` (poison-and-never-reuse) traps
+// it today. The real fix is the inferred-spine affine/uniqueness check
+// (docs/design/memory-unsafe-backend-remodel.md); until it lands, aliased free is the caller's razor
+// + PARANOID, NOT a static or ASan guarantee. Returns void.
+type NotMemFree = struct { }
+fn type_mem_free(c: parser::Call, env: Env, table: TypeTable) -> TExpr | NotMemFree | error {
+    if c.callee.segments.len < 2 { return NotMemFree { } }
+    let last = c.callee.segments[c.callee.segments.len - 1].name
+    let prev = c.callee.segments[c.callee.segments.len - 2].name
+    if last != "free" || prev != "mem" { return NotMemFree { } }
+    let rooted = c.callee.segments.len == 2 || c.callee.segments[0].name == "teko"
+    if !rooted { return NotMemFree { } }
+    if c.args.len != 1 { return error { message = "teko::mem::free expects one argument (a mutable `[]T` or class variable)" } }
+    let arg = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
+    // the target must be a plain VARIABLE (so the lowering can scrub it) that is `mut` (owned to free).
+    let vname = match arg.kind { TVar as v => v.name; _ => return error { message = "teko::mem::free requires a mutable variable — the value must have a binding to invalidate" } }
+    let vb = match lookup_binding(env, vname) { ValBinding as b => b; error as e => return e }
+    if !vb.is_mut { return error { message = $"cannot free immutable `{vname}` — declare it `mut` (free invalidates the binding)" } }
+    let is_heap = match arg.type {
+        Slice => true
+        Named as nm => is_class_name(nm.name, table) || is_region_handle_name(nm.name, table)
+        _ => false
+    }
+    if !is_heap { return error { message = $"teko::mem::free target must be a `[]T` slice, a class instance, or a manual region handle (`unsafe #must_free type` with a single `uptr` field) — `{type_render(arg.type)}` owns no freeable heap block" } }
+    let av = teko::list::push(teko::list::empty(), arg)
+    TExpr { kind = TCall { callee = c.callee; args = av; call_ns = "teko::mem"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = Void { }; line = 0; col = 0 }
+}
+
+/**
+ * The negative sentinel for `type_region_new`/`type_region_alloc` — the call is not one of the
+ * manual-region builtins, so `type_call` falls through to ordinary resolution.
+ */
+type NotRegionOp = struct { }
+
+/**
+ * (S3, issue #358) `teko::mem::region_new() -> uptr` — the manual-region CONSTRUCTOR builtin
+ * behind `Arena::new()`. Opens a fresh child region under the process root (`tk_region_new`) and
+ * hands its raw `tk_region *` back as an opaque `uptr` word — the value an `unsafe #must_free type
+ * Arena` stores in its single field and later bulk-frees via `teko::mem::free`. Non-generic,
+ * zero-arity; dispatched statically by the (rooted) `teko::mem::region_new` path exactly like
+ * `type_mem_free`, BEFORE ordinary name resolution, so it never collides with a user symbol.
+ *
+ * @param parser::Call c  the raw call node
+ * @param Env env  the typing environment
+ * @param TypeTable table  the folded type table
+ * @return TExpr | NotRegionOp | error  a `uptr`-typed void-namespaced TCall, `NotRegionOp` if the path is not region_new,
+ *               or an error on wrong arity
+ */
+fn type_region_new(c: parser::Call, env: Env, table: TypeTable) -> TExpr | NotRegionOp | error {
+    if c.callee.segments.len < 2 { return NotRegionOp { } }
+    let last = c.callee.segments[c.callee.segments.len - 1].name
+    let prev = c.callee.segments[c.callee.segments.len - 2].name
+    if last != "region_new" || prev != "mem" { return NotRegionOp { } }
+    let rooted = c.callee.segments.len == 2 || c.callee.segments[0].name == "teko"
+    if !rooted { return NotRegionOp { } }
+    if c.args.len != 0 { return error { message = "teko::mem::region_new takes no arguments (it opens a fresh region)" } }
+    TExpr { kind = TCall { callee = c.callee; args = teko::list::empty(); call_ns = "teko::mem"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = Uptr { }; line = 0; col = 0 }
+}
+
+/**
+ * (S3, issue #358) `teko::mem::region_alloc(region: uptr, init: T) -> ptr<T>` — bump-allocates a
+ * `T` INTO the region named by the `uptr` handle, copies `init` into it, and hands back a raw
+ * `ptr<T>` attached to that region's lifetime (dangling after the region is freed — the `unsafe`
+ * risk the dev owns). This is the manual, non-lexical complement to `teko::mem::buf_ptr` (which
+ * allocates a byte buffer into the ENCLOSING region); here the region is CHOSEN by the caller.
+ *
+ * The element type `T` is INFERRED from `init`'s resolved type — no method-level/free generic
+ * machinery is involved (this is a special checker+codegen builtin, not a Teko-bodied generic fn),
+ * so it sidesteps the generic-stack gaps entirely (see the #358 fixture header + DECISION_LOG).
+ * `init` may be any concrete non-void value; the returned `ptr<T>` is opaque in Teko, crossing the
+ * boundary only via the existing raw-pointer builtins (`bytes_from_ptr`, a raw `extern`).
+ *
+ * @param parser::Call c  the raw call node
+ * @param Env env  the typing environment
+ * @param TypeTable table  the folded type table
+ * @return TExpr | NotRegionOp | error  a `ptr<T>`-typed TCall (T = init's type), `NotRegionOp` if the path is not
+ *               region_alloc, or an error on wrong arity / a non-`uptr` region / a `void` init
+ */
+fn type_region_alloc(c: parser::Call, env: Env, table: TypeTable) -> TExpr | NotRegionOp | error {
+    if c.callee.segments.len < 2 { return NotRegionOp { } }
+    let last = c.callee.segments[c.callee.segments.len - 1].name
+    let prev = c.callee.segments[c.callee.segments.len - 2].name
+    if last != "region_alloc" || prev != "mem" { return NotRegionOp { } }
+    let rooted = c.callee.segments.len == 2 || c.callee.segments[0].name == "teko"
+    if !rooted { return NotRegionOp { } }
+    if c.args.len != 2 { return error { message = "teko::mem::region_alloc expects two arguments (a `uptr` region handle and the value to allocate)" } }
+    let region = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
+    let region_ok = match region.type { Uptr => true; _ => false }
+    if !region_ok { return error { message = $"teko::mem::region_alloc's first argument must be a `uptr` region handle — got `{type_render(region.type)}`" } }
+    let init = match type_expr(c.args[1], env, table) { TExpr as te => te; error as e => return e }
+    if type_is_void(init.type) { return error { message = "teko::mem::region_alloc cannot allocate a `void` value" } }
+    mut ra_args = teko::list::push(teko::list::empty(), region)
+    ra_args = teko::list::push(ra_args, init)
+    TExpr { kind = TCall { callee = c.callee; args = ra_args; call_ns = "teko::mem"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = Ptr { inner = init.type }; line = 0; col = 0 }
+}

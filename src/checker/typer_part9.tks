@@ -1,0 +1,250 @@
+// src/checker/typer.tks  (namespace 'teko::checker')
+// Each check_* (E4/E5) EVOLVES into a type_*: the SAME checks (B.22 regimes, B.20
+// `if`, B.15 `match` + exhaustiveness), but the producer BUILDS the typed node
+// instead of returning a bare Type. Predicates (is_bool/is_integer/op_is_*),
+// resolvers (resolve_type), env (lookup/define) and the pattern + exhaustiveness
+// logic (check_pattern/exhaustive) are reused from their stages — re-derivation,
+// not duplication (M.5). C1: every node, statement and item re-derived.
+use teko::lexer
+use teko::parser
+
+
+// `x to T` — type the inner, resolve the target, demand the conversion is DEFINED, then reject a
+// CONSTANT literal already out of range (fail early — M.1). The runtime fit-check for non-constant
+// operands is codegen's (debug-panic / release-defined) — deferred (M.4).
+// (E7) is `t` a NAMED type whose declaration is an `enum`? (C: is_enum_named.)
+fn is_enum_named(t: Type, table: TypeTable) -> bool {
+    match t {
+        Named as n => match type_table_find(table, n.name, "") {   // (#109 W1) enum-kind probe on a resolved name — no referencing ns
+            parser::TypeDecl as td => match td.body { parser::EnumBody => true; _ => false }
+            error => false
+        }
+        _ => false
+    }
+}
+
+// (E7) an INTEGER cast endpoint: an int prim, or `byte` (= u8). Floats/bool excluded. (C: is_int_cast_end.)
+fn is_int_cast_end(t: Type) -> bool {
+    match t {
+        Byte => true
+        Prim as p => prim_is_int(p.kind)
+        _ => false
+    }
+}
+
+// (UTF-8 increment 1) `char to <int>` — the EXPLICIT decode of a codepoint to its scalar value.
+// Allowed for u32 (the natural codepoint width), and trivially for the wider unsigned/signed ints
+// that hold any codepoint (u64/i64). The REVERSE (`<int> to char`, an encode) is a later increment.
+fn is_char_decode_target(t: Type) -> bool {
+    match t {
+        Prim as p => p.kind == PrimKind::U32 || p.kind == PrimKind::U64 || p.kind == PrimKind::I64
+        _ => false
+    }
+}
+
+/**
+ * is_flags_wire_cast — E8 (#594 crumb 11): is `from -> to` a flags ↔ integer WIRE
+ * cast? A flags value's raw bit pattern → an integer (an object-writer
+ * `sh_flags`/`Characteristics` field needs the combined mask as a plain `uN`), or
+ * an integer → a flags value. `cast_check` is prim-only, so `type_cast` handles
+ * this pair directly — mirroring E7's enum-ordinal cast. Any OTHER flags cast
+ * stays rejected by `cast_check`.
+ *
+ * @param from   the cast's source type
+ * @param to     the cast's target type
+ * @param table  the type table (to detect a flags-declared Named type)
+ * @return       true iff the pair is a flags↔integer wire cast
+ */
+fn is_flags_wire_cast(from: Type, to: Type, table: TypeTable) -> bool {
+    (is_flags_named(from, table) && is_int_cast_end(to)) ||
+    (is_int_cast_end(from) && is_flags_named(to, table))
+}
+
+/**
+ * warn_redundant_cast — the D1 diagnostic (`cast-width-hygiene-0.3.1.md` §4/§9):
+ * a WARNING printed to stderr, never a build failure. Fires on a provable no-op
+ * `to` (class 1 — same-type; class 3 — a lossless widen the W-RULE/B.22
+ * sign-check already performs), never on a genuine narrow/widen the source
+ * still needs.
+ *
+ * WHY IT IS NO LONGER AN ERROR (owner ruling 2026-07-27, REVERSING the
+ * 2026-07-24 ruling that made it a hard failure — *"prefiro que falhe para
+ * evitarmos de cair no mesmo erro"*): *"o cast, nestes casos, não deveria ser
+ * falha, deveria ser warning, o que não nos exime de não ter warnings no
+ * próprio compilador (lembra? <= 2%)."*
+ *
+ * The reversal is not a softening of the policy — it moves enforcement to the
+ * instrument that can actually carry it. D1-as-error made a redundant cast
+ * UNSPELLABLE, and a bootstrap chain has two compilers that disagree about
+ * which spelling is redundant: the released seed applies B.22 (*"operands must
+ * be the same type — no promotion"*) and REQUIRES the cast, while a
+ * locally-built gen1 has the W-RULE (`widen_int_binop`) and therefore proves
+ * that same cast a no-op. As an error, no single source text satisfies both —
+ * measured on the wagon: 17 of the 18 B.22 casts the seed demands make gen1
+ * reject the tree outright. As a warning, one text compiles under both and the
+ * seed's demand becomes payable.
+ *
+ * The ceiling that keeps redundant casts from returning en masse is D4, and it
+ * is untouched and still HARD: ARITH-CAST-RATE ≤ 2% (`metrics.tks`,
+ * `run_arith_cast_gate` in `project.tks`) fails the build. That is why the
+ * same-type site below deliberately keeps the `TCast` node in the typed tree
+ * instead of folding it away — a warned cast must still be COUNTED by the gate,
+ * or downgrading this diagnostic would have quietly disabled the ≤2% ceiling
+ * along with it.
+ *
+ * @param t  the redundant cast's own (unchanged) type
+ * @since    0.3.1
+ */
+fn warn_redundant_cast(env: Env, e: TExpr) {
+    teko::io::eprintln($"{diag_at(env.file, e.line, e.col, "")}warning: redundant cast: this `to {type_render(e.type)}` is a provable no-op (cast-width-hygiene-0.3.1.md D1) — delete it")
+}
+
+fn type_cast(c: parser::Cast, env: Env, table: TypeTable) -> TExpr | error {
+    let inner = match type_expr(c.expr, env, table) { TExpr as te => te; error as e => return e }
+    if type_is_void(inner.type) { return error { message = "a `void` expression cannot be cast (M.1)" } }
+    let target = match resolve_type(c.target, table, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the cast's enclosing namespace
+    // D1 class 1 — same type. Warn and TYPE IT ANYWAY, returning the identity `TCast`: falling
+    // through instead would hand a non-prim same-type pair to `cast_check` (prim-only) and blame it
+    // for a construct that is merely superfluous, and dropping the node would hide the cast from the
+    // D4 ≤2% gate that now carries the policy.
+    if type_eq(inner.type, target) {
+        let noop = TExpr { kind = TCast { expr = inner }; type = target; line = inner.line; col = inner.col }
+        warn_redundant_cast(env, noop)
+        return noop
+    }
+    // (UTF-8 increment 1) `char to u32`/u64/i64 — decode the codepoint to its scalar value. char is
+    // NOT a numeric cast endpoint (cast_kind rejects it), so this pair is handled here; the result
+    // type is the target. `<int> to char` (encode) is NOT allowed yet. (Mirrors expr.c type_cast.)
+    match inner.type {
+        Char => {
+            if is_char_decode_target(target) {
+                return TExpr { kind = TCast { expr = inner }; type = target; line = 0; col = 0 }
+            }
+            return error { message = "a `char` may only be cast to u32/u64/i64 (its codepoint value); other casts are not defined" }
+        }
+        _ => { }
+    }
+    // (E7) enum ↔ integer ORDINAL cast: an enum value → its ordinal integer, an integer → the enum
+    // member (the `(byte)k` / `(TokenKind)b` the .tkb serializer relies on). cast_check is prim-only,
+    // so handle this pair here (it has the type table to detect an enum); the result type is the
+    // target. Any OTHER enum cast stays rejected by cast_check. (Mirrors expr.c type_cast's e7.)
+    let e7 = (is_enum_named(inner.type, table) && is_int_cast_end(target)) ||
+    (is_int_cast_end(inner.type) && is_enum_named(target, table))
+    let e8 = is_flags_wire_cast(inner.type, target, table)
+    if !e7 && !e8 {
+        match cast_check(inner.type, target) { null => { }; error as e => return e }
+    }
+    match const_range_check(c.expr, target) { null => { }; error as e => return e }
+    TExpr { kind = TCast { expr = inner }; type = target; line = 0; col = 0 }   // the cast's type IS the resolved target
+}
+
+// ---- field access `x.field` (C3): read a struct field; `.type` is the field's resolved type ----
+// B.29: FIELD read only (method *checking* stays deferred). M.3: nominal — resolve the receiver's
+// `Named` type to its `TypeDecl` body and read the field's declared type. Receiver must be a struct.
+
+// find a field by name in a struct body and resolve its annotation (M.3 — exact).
+fn field_type(fields: []parser::Field, field: str, table: TypeTable, ref_ns: str) -> Type | error {
+    mut i = 0
+    loop {
+        if i >= fields.len { break }
+        if fields[i].name == field { return resolve_type(fields[i].type_ann, table, ref_ns) }   // (#109 W2) field annotation resolves in the struct's OWN ns (its declaring namespace)
+        i++
+    }
+    error { message = $"no such field: {field}" }
+}
+
+/**
+ * require_narrowed — the null-union C5 deref fence (base §3d/§3f). Using a `T | null` (any
+ * null-bearing union) payload AS a bare member — a field read, or the `.value` deref of a
+ * `Ref<T> | null` — is REJECTED until the union has been narrowed to its bare member, the SAME
+ * narrowing invariant an unmatched `T | error` obeys. The two accepted narrowing scopes rebind the
+ * value to its bare member BEFORE this point (a `match` arm's pattern binding; the flow-narrowed
+ * branch of an equality guard), so reaching here with a still-`Variant` null-bearing type means the
+ * use is un-narrowed. Directs the author to the sanctioned narrowing forms.
+ *
+ * @param t  the receiver's resolved (still-union) type
+ * @return   the error demanding narrowing before the bare-member use
+ * @throws   error always (this is the reject path; the caller only calls it on a null-bearing union)
+ * @since 0.3.0.30 (null-union C5)
+ */
+fn require_narrowed(t: Type) -> error {
+    if is_ref_null_variant(t) {
+        return error { message = "cannot dereference a `Ref<T> | null` — narrow it to a bare `Ref<T>` first (`match r { null => …; Ref<T> as v => v.value }`), the deref fence keeping the never-null reference promise sound" }
+    }
+    error { message = "cannot use `.` on a `T | null` value before narrowing — narrow it first (`match x { null => …; T as v => v.… }`)" }
+}
+
+/**
+ * type_field_access — type `recv.field`. Handles the non-struct receivers FIRST (`str`/slice
+ * `.len`, `error`'s carrier fields, `Ref<T>.value`), then requires a `T | null` receiver be
+ * narrowed before `.` is used on it (NP-OOP, issue #116 — `require_narrowed` names WHY and
+ * points at the narrowing match instead of the generic struct message), and finally resolves an
+ * ordinary struct/class field.
+ *
+ * @param fa     the syntactic field access
+ * @param env    the enclosing type environment
+ * @param table  the type table
+ * @return       the typed field access, or an error
+ */
+fn type_field_access(fa: parser::FieldAccess, env: Env, table: TypeTable) -> TExpr | error {
+    mut recv = match type_expr(fa.receiver, env, table) { TExpr as te => te; error as e => return e }
+    // `.len` on a `str` or a slice (`[]T`) -> u64 (W5-idx). This precedes the struct-field
+    // path: a str/slice has no struct body, so `len` is a built-in length, not a field.
+    let is_str_or_slice = match recv.type { Str => true; Slice => true; _ => false }
+    if is_str_or_slice && fa.field == "len" {
+        return TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = Prim { kind = PrimKind::U64 }; line = 0; col = 0 }
+    }
+    // error diagnostic adornments (E2): the built-in `error` value exposes its carrier fields as
+    // readable fields — message/file/expected/actual -> str, line/col -> u32. error has no struct
+    // body, so (like str/slice `.len`) this precedes the struct-field path.
+    let is_error = match recv.type { Error => true; _ => false }
+    if is_error {
+        if fa.field == "message" || fa.field == "file" || fa.field == "expected" || fa.field == "actual" {
+            return TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = Str { }; line = 0; col = 0 }
+        }
+        if fa.field == "line" || fa.field == "col" {
+            return TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = Prim { kind = PrimKind::U32 }; line = 0; col = 0 }
+        }
+        return error { message = "no such field on error (message/file/expected/actual: str; line/col: u32)" }
+    }
+    // (MEM-1b-ii) `Ref<T>.value` — the deref: reading `r.value` yields the referenced T. A Reference
+    // has no struct body and exposes ONLY `.value` (the pointed-to value); any other field is an error.
+    match recv.type {
+        Reference as rf => {
+            if fa.field == "value" {
+                return TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = rf.inner; line = 0; col = 0 }
+            }
+            recv = deref_ref_value(recv)
+        }
+        _ => { }
+    }
+    match recv.type {
+        Variant => if variant_has_null_member(recv.type) { return require_narrowed(recv.type) }
+        _ => { }
+    }
+    let name = match recv.type {
+        Named as n => n.name
+        _ => return error { message = "field access requires a struct receiver" }
+    }
+    let decl = match type_table_find(table, name, "") {   // (#109 W1) field-access receiver lookup on a resolved name — no referencing ns
+        parser::TypeDecl as td => td
+        error => return error { message = $"unknown type for field access: {name}" }
+    }
+    let ft = match decl.body {
+        parser::StructBody as sb => match field_type(sb.fields, fa.field, table, type_ns_of(table, name)) { Type as t => t; error as e => return e }
+        parser::ClassBody as cb => {
+            let t = match effective_class_fields(cb, table) { []parser::Field as fs => match field_type(fs, fa.field, table, type_ns_of(table, name)) { Type as t => t; error as e => return e }; error as e => return e }   // (W10b.CLASS increment 2)
+            // (W10b.CLASS residual — intern visibility) a private (default) field is reachable
+            // only from its OWN declaring class's code, or — if `intern` — a subclass's too.
+            let owner = match find_field_owner(name, table, fa.field) { MemberOwner as mo => mo; error as e => return e }
+            if !member_accessible(owner, env.owner_type, table) {
+                return error { message = $"field '{fa.field}' is private to {owner.declaring_class}" }
+            }
+            t
+        }
+        // (W10b.D3) an interface value is data + vtable — the contract exposes METHODS only.
+        parser::InterfaceBody => return error { message = "an interface value exposes no fields — only its contract methods" }
+        _ => return error { message = $"type {name} is not a struct (no fields)" }
+    }
+    TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = ft; line = 0; col = 0 }
+}

@@ -1,0 +1,254 @@
+// src/checker/collect.tks  (namespace 'teko::checker') — pass 1 (forward refs).
+use teko::parser
+
+
+fn split_trait_derives(implements: []str, table: TypeTable, ref_ns: str) -> SplitImpls {
+    mut traits: []str = teko::list::empty()
+    mut ifaces: []str = teko::list::empty()
+    mut structural: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= implements.len { break }
+        if is_structural_trait(implements[i]) {
+            structural = teko::list::push(structural, implements[i])
+            i++
+            continue
+        }
+        let is_trait = match resolve_name_ref(implements[i], table, ref_ns) {   // (#109 order fix) SOURCE name — R0-R5 from the declaring item's namespace, never by scan order
+            parser::TypeDecl as td => match td.body { parser::TraitBody => true; _ => false }
+            error => false
+        }
+        if is_trait { traits = teko::list::push(traits, implements[i]) }
+        else { ifaces = teko::list::push(ifaces, implements[i]) }
+        i++
+    }
+    SplitImpls { traits = traits; ifaces = ifaces; structural = structural }
+}
+
+fn fields_have_name(fields: []parser::Field, name: str) -> bool {
+    mut i: u64 = 0
+    loop { if i >= fields.len { break }; if fields[i].name == name { return true }; i++ }
+    false
+}
+fn methods_have_name(methods: []parser::Function, name: str) -> bool {
+    mut i: u64 = 0
+    loop { if i >= methods.len { break }; if methods[i].name == name { return true }; i++ }
+    false
+}
+
+/**
+ * (TR3, #594 crumb 7) does `consts` already declare a member const named `name`? Used to reject a
+ * trait member const that would collide with the deriver's own (or an earlier co-derived trait's).
+ *
+ * @param consts  the member consts accumulated so far
+ * @param name    the candidate member const name
+ * @return        true iff a member const of that name already exists
+ */
+fn consts_have_name(consts: []parser::ConstDecl, name: str) -> bool {
+    mut i: u64 = 0
+    loop { if i >= consts.len { break }; if consts[i].name == name { return true }; i++ }
+    false
+}
+
+// fold `trait_names`' members into ONE deriver. Fields APPEND after the deriver's own — a name
+// collision (with the deriver's own fields or an earlier trait's) is a COMPILE ERROR (fields
+// cannot be overridden — rename or don't co-derive). A trait method WITH a body folds in UNLESS
+// the deriver defines that name itself (the deriver's own method IS the override); TWO traits
+// providing the same bodied name with no deriver override = a compile error (never an implicit
+// resolution order — W10b's no-overloading/override-only ruling). Bodyless methods are
+// REQUIREMENTS — not folded here; checked after all folds (check_trait_requirements). A folded
+// field's visibility obeys the DERIVER's kind (`into_class`: struct = public value data, class =
+// encapsulated/private); a folded method is `pub` (the bundle's methods are its public surface,
+// and a class needs `pub` methods to satisfy interfaces through them).
+fn fold_trait_members(type_name: str, own_fields: []parser::Field, own_methods: []parser::Function, own_consts: []parser::ConstDecl, trait_names: []str, table: TypeTable, into_class: bool) -> FoldedMembers | error {
+    mut fields = own_fields
+    mut methods = own_methods
+    mut consts = own_consts
+    mut i: u64 = 0
+    loop {
+        if i >= trait_names.len { break }
+        let tname = trait_names[i]
+        mut di: u64 = 0
+        loop {
+            if di >= i { break }
+            if trait_names[di] == tname { return error { message = $"'{type_name}' derives trait '{tname}' more than once" } }
+            di++
+        }
+        let tb = match find_trait_body(tname, table) { parser::TraitBody as t => t; error as e => return e }
+        mut fi: u64 = 0
+        loop {
+            if fi >= tb.fields.len { break }
+            let tf = tb.fields[fi]
+            if fields_have_name(fields, tf.name) {
+                return error { message = $"trait '{tname}' field '{tf.name}' collides with an existing field on '{type_name}' — fields cannot be overridden; rename it or do not co-derive" }
+            }
+            let fvis = if into_class { parser::Visibility::Private } else { parser::Visibility::Pub }
+            fields = teko::list::push(fields, parser::Field { name = tf.name; type_ann = tf.type_ann; vis = fvis; is_intern = false; has_doc = tf.has_doc; doc = tf.doc })
+            fi++
+        }
+        mut ci: u64 = 0
+        loop {
+            if ci >= tb.consts.len { break }
+            let tc = tb.consts[ci]
+            if consts_have_name(consts, tc.name) {
+                return error { message = $"trait '{tname}' const '{tc.name}' collides with an existing member const on '{type_name}' — rename it or do not co-derive" }
+            }
+            consts = teko::list::push(consts, tc)
+            ci++
+        }
+        mut mi: u64 = 0
+        loop {
+            if mi >= tb.methods.len { break }
+            let tm = tb.methods[mi]
+            if tm.body.len > 0 {
+                if methods_have_name(own_methods, tm.name) {
+                    // the deriver defines this name itself — its method IS the override; the
+                    // trait's provided body steps aside.
+                } else if methods_have_name(methods, tm.name) {
+                    return error { message = $"method '{tm.name}' is provided by more than one derived trait — '{type_name}' must define its own '{tm.name}' to resolve the conflict" }
+                } else {
+                    methods = teko::list::push(methods, parser::Function { name = tm.name; type_params = tm.type_params; type_constraints = tm.type_constraints; params = tm.params; has_return = tm.has_return; return_type = tm.return_type; body = tm.body; vis = parser::Visibility::Pub; has_doc = tm.has_doc; doc = tm.doc; line = tm.line; col = tm.col; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; os_guard = tm.os_guard; is_intern = false; is_abstract = false; is_virtual = false; is_override = false; has_inject = false; injects = teko::list::empty(); is_unsafe = false; has_arena_size = false; arena_size = 0 to u64 })
+                }
+            }
+            mi++
+        }
+        i++
+    }
+    FoldedMembers { fields = fields; methods = methods; consts = consts }
+}
+
+// the bodyless-REQUIREMENT check, against the FOLDED table: for each recorded (deriver, trait)
+// pair, every bodyless trait method must be provided by the deriver — its own methods (a folded
+// bodied method from a sibling trait counts: it IS a deriver method now) or, for a class, an
+// inherited one. A requirement SHARED by several derived traits is naturally satisfied once
+// (each pair checks independently against the same method).
+fn check_trait_requirements(derives: []TraitDerive, table: TypeTable) -> []str {
+    mut diags: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= derives.len { break }
+        diags = concat_diags(diags, one_derive_requirement_diags(derives[i], table))
+        i++
+    }
+    diags
+}
+
+/**
+ * The requirement diagnostics of ONE (deriver, trait) pair: every bodyless method the trait
+ * declares must be provided by the deriver with a matching signature. A pure check — it reads the
+ * folded table and rewrites nothing — so it reports every unsatisfied requirement of the pair, not
+ * just the first.
+ *
+ * @param d      the recorded (deriver, trait) pair
+ * @param table  the FOLDED type table
+ * @return       one diagnostic per unsatisfied or mismatched requirement
+ * @since 0.3.1
+ */
+fn one_derive_requirement_diags(d: TraitDerive, table: TypeTable) -> []str {
+    let tb = match find_trait_body(d.trait_name, table) { parser::TraitBody as t => t; error as e => return one_diag(e.message) }
+    let decl = match type_table_find(table, d.type_name, "") {
+        parser::TypeDecl as td => td
+        error => return one_diag($"internal: trait deriver '{d.type_name}' vanished from the type table")
+    }
+    let own = match decl.body {
+        parser::StructBody as sb => sb.methods
+        parser::ClassBody as cb => match effective_class_methods(cb, table) { []parser::Function as f => f; error as e => return one_diag(diag_at("", decl.line, decl.col, e.message)) }
+        _ => teko::list::empty()
+    }
+    mut diags: []str = teko::list::empty()
+    mut ri: u64 = 0
+    loop {
+        if ri >= tb.methods.len { break }
+        let req = tb.methods[ri]
+        if req.body.len == 0 {
+            diags = concat_diags(diags, one_requirement_diag(d, decl, req, own, table))
+        }
+        ri++
+    }
+    diags
+}
+
+/**
+ * The diagnostic ONE bodyless trait method contributes for a deriver: none when the deriver
+ * provides it with a matching signature, a mismatch when the names agree but the signatures do
+ * not, and a missing-method error otherwise.
+ *
+ * @param d      the (deriver, trait) pair being checked
+ * @param decl   the deriver's declaration (for the diagnostic's position)
+ * @param req    the trait's bodyless requirement
+ * @param own    the deriver's own (and, for a class, inherited) methods
+ * @param table  the FOLDED type table (for signature comparison)
+ * @return       the requirement's diagnostic, or an empty list when it is satisfied
+ * @since 0.3.1
+ */
+fn one_requirement_diag(d: TraitDerive, decl: parser::TypeDecl, req: parser::Function, own: []parser::Function, table: TypeTable) -> []str {
+    mut mi: u64 = 0
+    loop {
+        if mi >= own.len { break }
+        if own[mi].name == req.name {
+            if method_sig_matches(req, own[mi], table, type_ns_of(table, d.type_name)) { return teko::list::empty() }
+            return one_diag(diag_at("", own[mi].line, own[mi].col, $"'{d.type_name}' method '{req.name}' does not match trait '{d.trait_name}'s required signature"))
+        }
+        mi++
+    }
+    one_diag(diag_at("", decl.line, decl.col, $"'{d.type_name}' does not satisfy trait '{d.trait_name}' — missing required method '{req.name}'"))
+}
+
+/**
+ * (TR3) Does the program declare a user `trait`, OR does any deriver's `&`-list name a
+ * compiler-known STRUCTURAL trait (`Eq`/`Ord`/`Hash`/`Clone`/`Default`, incl. synonyms)? Either
+ * gates the fold — a program deriving ONLY structural traits (no user `trait` declared) must still
+ * synthesize their methods, so the old "any TraitBody?" gate alone would miss it.
+ *
+ * @param program the parsed program
+ * @param table   the pre-fold type table
+ * @return true iff the program needs the derivation fold
+ */
+fn program_needs_trait_fold(program: parser::Program, table: TypeTable) -> bool {
+    mut t: u64 = 0
+    loop {
+        if t >= table.len { break }
+        match table[t].decl.body { parser::TraitBody => { return true }; _ => { } }
+        t++
+    }
+    mut i: u64 = 0
+    loop {
+        if i >= program.items.len { break }
+        match program.items[i].content {
+            parser::TypeDecl as td => match td.body {
+                parser::StructBody as sb => { if any_structural(sb.implements) { return true } }
+                parser::ClassBody as cb => { if any_structural(cb.implements) { return true } }
+                _ => { }
+            }
+            _ => { }
+        }
+        i++
+    }
+    false
+}
+
+/**
+ * (TR3) Does any name in `implements` name a compiler-known structural trait?
+ *
+ * @param implements the `&`-list of contract names
+ * @return true iff at least one is a structural trait
+ */
+fn any_structural(implements: []str) -> bool {
+    mut i: u64 = 0
+    loop { if i >= implements.len { break }; if is_structural_trait(implements[i]) { return true }; i++ }
+    false
+}
+
+/**
+ * (TR3) The names of `methods` as a `[]str` — the deriver's own method names, so a synthesized
+ * structural method whose name is already provided is SKIPPED (the hand-written one is the override).
+ *
+ * @param methods the deriver's own methods
+ * @return the parallel list of method names
+ */
+fn method_name_set(methods: []parser::Function) -> []str {
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop { if i >= methods.len { break }; out = teko::list::push(out, methods[i].name); i++ }
+    out
+}

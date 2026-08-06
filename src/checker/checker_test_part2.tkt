@@ -1,0 +1,265 @@
+// src/checker/checker_test.tkt — tests for the typer (C1). #test functions the runner collects.
+// The typer is unit-tested on HAND-BUILT AST: each type_* must produce a fully typed node (happy)
+// or refuse an ill-typed one (barrier). Rewritten to current Teko (the `Expr` node-wrapper C1-POS,
+// all-fields struct literals, `Function`/`Arm`/`TypeDecl`/`Item` shapes) and module-qualified.
+use teko::parser
+
+fn checker_render_and_join() {
+    // render_members directly — two-member variant renders with " | "
+    let m1: []Type = teko::list::push(teko::list::empty(), i64t())
+    let m2: []Type = teko::list::push(m1, Str { })
+    let rms = render_members(m2)
+    teko::assert::is_true(teko::str::contains(rms, "|"))
+    // render_func directly — "(i64) -> str"
+    let fparams: []Type = teko::list::push(teko::list::empty(), i64t())
+    let rf = render_func(Func { params = fparams; ret = Str { }; variadic = false; param_names = []; n_required = (fparams).len; defaults = [] })
+    teko::assert::is_true(teko::str::contains(rf, "->"))
+    // union_collect directly — accumulate two types
+    let acc1 = union_collect(teko::list::empty(), i64t(), empty_table())
+    teko::assert::is_true(acc1.len == 1)
+    let acc2 = union_collect(acc1, Str { }, empty_table())
+    teko::assert::is_true(acc2.len == 2)
+    // dedup: same type twice → still length 1
+    let acc3 = union_collect(teko::list::empty(), i64t(), empty_table())
+    let acc4 = union_collect(acc3, i64t(), empty_table())
+    teko::assert::is_true(acc4.len == 1)
+}
+
+// ---------------------------------------------------------------------------
+// Group J: lbl_eq, lbl_enclosing, surface_at
+// ---------------------------------------------------------------------------
+#test
+fn checker_label_surface() {
+    // lbl_eq
+    teko::assert::is_true(lbl_eq("outer", "outer"))
+    teko::assert::is_false(lbl_eq("outer", "inner"))
+    // lbl_enclosing
+    let scope: []str = teko::list::push(teko::list::push(teko::list::empty(), "outer"), "inner")
+    teko::assert::is_true(lbl_enclosing(scope, "outer"))
+    teko::assert::is_true(lbl_enclosing(scope, "inner"))
+    teko::assert::is_false(lbl_enclosing(scope, "missing"))
+    // surface_at
+    let e = error { message = "test error" }
+    let surfaced = surface_at("test.tks", 3, 7, e)
+    teko::assert::is_true(teko::str::contains(surfaced.message, "test.tks"))
+}
+
+/** loop_label_must_be_upper_snake — check_labels rejects a lowercase loop label with the
+    UPPER_SNAKE diagnostic and accepts an UPPER_SNAKE one (#517 checker-enforced format). */
+#test
+fn loop_label_must_be_upper_snake() {
+    let empty_body: []TStatement = teko::list::empty()
+    let bad = teko::list::push(teko::list::empty(), TLoopStmt { label = "outer"; init = teko::list::empty(); body = empty_body })
+    let rbad = check_labels(bad, teko::list::empty(), false, teko::list::empty())
+    teko::assert::is_true(rbad.failed)
+    teko::assert::is_true(teko::str::contains(rbad.message, "UPPER_SNAKE"))
+    let good = teko::list::push(teko::list::empty(), TLoopStmt { label = "OUTER"; init = teko::list::empty(); body = empty_body })
+    let rgood = check_labels(good, teko::list::empty(), false, teko::list::empty())
+    teko::assert::is_false(rgood.failed)
+}
+
+// (S4) generics inference primitives — subst_type / unify / collect_sig_type_params.
+#test
+fn subst_unify_inference() {
+    let tbl: TypeTable = teko::list::empty()
+    let params: []str = teko::list::push(teko::list::empty(), "T")
+    let s0 = Subst { params = params; names = teko::list::empty(); types = teko::list::empty() }
+    let patT: Type = Named { name = "T" }
+
+    // unify Named{T} ~ i64 binds T=i64; subst_type then yields i64.
+    let s1 = match unify(patT, i64t(), s0, tbl) { Subst as x => x; error => s0 }
+    teko::assert::is_true(prim_is(subst_type(patT, s1), PrimKind::I64))
+    // a non-type-param Named passes through subst unchanged.
+    teko::assert::is_true(match subst_type(Named { name = "Other" }, s1) { Named as n => n.name == "Other"; _ => false })
+
+    // unify []T ~ []str binds T=str; subst []T → []str (structural recursion).
+    let patSlice: Type = Slice { element = Named { name = "T" } }
+    let s2 = match unify(patSlice, Slice { element = Str { } }, s0, tbl) { Subst as x => x; error => s0 }
+    teko::assert::is_true(match subst_type(patSlice, s2) { Slice as sl => match sl.element { Str => true; _ => false }; _ => false })
+
+    // a Void-sentinel arg (empty()/null) cannot pin a type-param → unify errors.
+    teko::assert::is_true(match unify(patSlice, Slice { element = Void { } }, s0, tbl) { Subst => false; error => true })
+
+    // collect_sig_type_params over Func{(T) -> T} → ["T"] (deduped).
+    let sig: Type = Func { params = teko::list::push(teko::list::empty(), Named { name = "T" }); ret = Named { name = "T" }; variadic = false; param_names = []; n_required = (teko::list::push(teko::list::empty(), Named { name = "T" })).len; defaults = [] }
+    let tps = collect_sig_type_params(sig, tbl, teko::list::empty())
+    teko::assert::is_true(tps.len == 1)
+    teko::assert::is_true(tps[0] == "T")
+}
+
+// (S4 type-generics) a single-segment NamedType type-expr with no args.
+fn ttype_named(name: str) -> parser::TypeExpr {
+    parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = name }) }; args = teko::list::empty() }
+}
+// a table with one GENERIC struct decl: `type Box<T> = struct { value: T }`.
+fn box_generic_table() -> TypeTable {
+    let fld = parser::Field { name = "value"; type_ann = ttype_named("T"); vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = "" }
+    let body = parser::StructBody { fields = teko::list::push(teko::list::empty(), fld); methods = teko::list::empty(); implements = teko::list::empty(); consts = teko::list::empty() }
+    let decl = parser::TypeDecl { name = "Box"; type_params = teko::list::push(teko::list::empty(), "T"); type_constraints = teko::list::empty(); body = body; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""; is_unsafe = false; must_free = false }
+    teko::list::push(teko::list::empty(), TypeReg { name = "Box"; namespace = ""; file = ""; vis = parser::Visibility::Private; decl = decl })
+}
+
+// (S4 type-generics) resolve_type on `Box<i64>` → Named{Box__g__i64}; arity is validated; the
+// mangle helpers produce the shared instance name.
+#test
+fn resolves_generic_type_instantiation() {
+    let tbl = box_generic_table()
+    // Box<i64> → Named{"Box__g__i64"}
+    let one = teko::list::push(teko::list::empty(), ttype_named("i64"))
+    let inst = parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = "Box" }) }; args = one }
+    // (#110) `resolve_type` returns `Type | error`; `Named` is a case of the INNER `Type` variant,
+    // not a direct case of the outer `Type | error` subject — double-match (Type as t => match t {…}).
+    teko::assert::is_true(match resolve_type(inst, tbl, "") { Type as t => match t { Named as n => n.name == "Box__g__i64"; _ => false }; error => false })
+
+    // wrong arity Box<i64, str> → error
+    mut two: []parser::TypeExpr = teko::list::push(teko::list::empty(), ttype_named("i64"))
+    two = teko::list::push(two, ttype_named("str"))
+    let inst2 = parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = "Box" }) }; args = two }
+    teko::assert::is_true(match resolve_type(inst2, tbl, "") { error => true; _ => false })
+
+    // a plain `Box` (no args) still resolves nominally — no regression. (#110: double-match, see above.)
+    teko::assert::is_true(match resolve_type(ttype_named("Box"), tbl, "") { Type as t => match t { Named as n => n.name == "Box"; _ => false }; error => false })
+
+    // generic_inst_name / type_mangle directly: Box + [i64, str] → "Box__g__i64__str".
+    mut at: []Type = teko::list::push(teko::list::empty(), i64t())
+    at = teko::list::push(at, Str { })
+    teko::assert::is_true(generic_inst_name("Box", at) == "Box__g__i64__str")
+}
+
+#test
+/**
+ * splits_and_recovers_a_generic_instance_names_base — `split_generic_instance_name` finds the
+ * `__g__` stamp `generic_inst_name` writes and recovers the exact BASE it was built from, for one
+ * type-argument (`Box__g__i64`) and for two (`Pair__g__i64__str`); an ordinary nominal name (no
+ * stamp at all, and one that merely CONTAINS the marker's letters split across two segments) is
+ * reported as not-generic. `named_case_name` then delegates to the base for a generic instance and
+ * to the bare last `::`-segment otherwise — the read `variant_member_named`'s `Named` arm needs
+ * (0.3.1.0 degrau 14, #382: a generic instance's canonical name carries no `::` at all, so
+ * `name_last_segment` alone left it whole and unmatchable against a pattern's bare base).
+ */
+fn splits_and_recovers_a_generic_instance_names_base() {
+    let one = split_generic_instance_name("Box__g__i64")
+    teko::assert::is_true(one.is_generic)
+    teko::assert::is_true(one.base == "Box")
+
+    let two = split_generic_instance_name("Pair__g__i64__str")
+    teko::assert::is_true(two.is_generic)
+    teko::assert::is_true(two.base == "Pair")
+
+    let plain = split_generic_instance_name("teko::parser::MainFile")
+    teko::assert::is_true(!plain.is_generic)
+
+    teko::assert::is_true(named_case_name("Box__g__i64") == "Box")
+    teko::assert::is_true(named_case_name("teko::parser::MainFile") == "MainFile")
+    teko::assert::is_true(named_case_name("MainFile") == "MainFile")
+}
+
+// (S-mem) `ptr<T>` — typed pointer: resolves to Ptr{inner}, opaque ptr = Ptr{null}, equal-by-inner.
+#test
+fn resolves_ptr_generic() {
+    let ptr_i64 = parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = "ptr" }) }; args = teko::list::push(teko::list::empty(), ttype_named("i64")) }
+    let pi = match resolve_type(ptr_i64, empty_table(), "") { Type as t => t; error => { teko::assert::is_true(false); return } }
+    // STRUCTURE (interpreter-safe): ptr<i64> → Ptr{inner present = i64}; opaque ptr = Ptr{inner null}; distinct.
+    // (exact `ptr_i64`/`ptr<i64>` mangle/render is verified via real codegen, not here — the interpreter drops
+    // a self-recursive match arm's string prefix; see selfhost-interp-perf.)
+    teko::assert::is_true(match pi { Ptr as p => match p.inner { null => false; Type as t => match t { Prim => true; _ => false } }; _ => false })
+    teko::assert::is_true(type_eq(pi, pi))
+    let bare = match resolve_type(ttype_named("ptr"), empty_table(), "") { Type as t => t; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(match bare { Ptr as p => match p.inner { null => true; Type => false }; _ => false })   // opaque ptr = null inner
+    teko::assert::is_true(!type_eq(bare, pi))   // opaque ptr ≠ ptr<i64>
+}
+
+// ---------------------------------------------------------------------------
+// MEM Step 0 — the checker ESCAPE GATE. A `Ref<T>` is memory-safe BY CONSTRUCTION: the ONLY
+// permitted flow is PARAMETER PASS-DOWN. These tests drive the checker functions DIRECTLY,
+// asserting each forbidden position yields `error` and the allowed forms still succeed.
+// Structure/error-only assertions (interpreter-safe; no message-string match — the interpreter drops a
+// self-recursive match arm's string prefix; mirrors resolves_ref_generic's discipline).
+// ---------------------------------------------------------------------------
+
+// a `Ref<INNER>` type-expr where INNER is itself a (hand-built) type-expr.
+fn ref_te_of(inner: parser::TypeExpr) -> parser::TypeExpr {
+    parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = "Ref" }) }; args = teko::list::push(teko::list::empty(), inner) }
+}
+// a `Ref<NAME>` type-expr over a plain named type.
+fn ref_te(name: str) -> parser::TypeExpr { ref_te_of(ttype_named(name)) }
+
+#test
+/**
+ * (MEM Step 0, R4) NOT a STRUCT FIELD — a `struct { r: Ref<…> }` is rejected at collect
+ * (validate_type_decls); a struct with a scalar field collects fine.
+ *
+ * interpreter NOTE (see R2): the rejected field uses a CONSTRUCTION-REJECTED inner type (`Ref<Ref<i64>>`,
+ * built by `ref_te_of(ref_te("i64"))` below) so R1's interpreter-reliable rejection drives the collect
+ * error; the value-inner field (`Ref<i64>`) is instead rejected NATIVELY by the C twin's
+ * `tag == TK_TYPE_REF` check in the bare-position field validation.
+ *
+ * NOTE (bootstrap ordering, issue #285): the doc sits AFTER `#test` here (the pre-existing
+ * placement) rather than before it — the RELEASED seed compiler that builds this very source
+ * tree does not yet contain this issue's parser fix, so a doc-before-`#test` fixture in the
+ * compiler's OWN corpus would fail to bootstrap. The new before-the-attribute placement is
+ * exercised in src/parser/parser_test.tkt instead, via a source STRING the compiler parses at
+ * runtime (not through its own bootstrap corpus), which needs no such affordance.
+ */
+fn mem_ref_not_struct_field() {
+    let fld = parser::Field { name = "r"; type_ann = ref_te_of(ref_te("i64")); vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = "" }
+    let decl = parser::TypeDecl { name = "Holder"; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = parser::StructBody { fields = teko::list::push(teko::list::empty(), fld); methods = teko::list::empty(); implements = teko::list::empty(); consts = teko::list::empty() }; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""; is_unsafe = false; must_free = false }
+    let items: []parser::Item = teko::list::push(teko::list::empty(), parser::Item { content = decl; namespace = ""; file = "" })
+    teko::assert::is_true(collect(parser::Program { items = items }).decl_diags.len > 0)
+    let okfld = parser::Field { name = "n"; type_ann = named_t("i64"); vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = "" }
+    let okdecl = parser::TypeDecl { name = "Holder2"; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = parser::StructBody { fields = teko::list::push(teko::list::empty(), okfld); methods = teko::list::empty(); implements = teko::list::empty(); consts = teko::list::empty() }; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""; is_unsafe = false; must_free = false }
+    let okitems: []parser::Item = teko::list::push(teko::list::empty(), parser::Item { content = okdecl; namespace = ""; file = "" })
+    let ok = collect(parser::Program { items = okitems })
+    teko::assert::is_true(ok.decl_diags.len == 0 && ok.sig_diags.len == 0)
+}
+
+// (MEM Step 0, R4) NOT a SLICE ELEMENT / VARIANT MEMBER — `[]Ref<…>` and `Ref<…> | T` reject.
+// interpreter NOTE (see R2): a CONSTRUCTION-REJECTED inner (`Ref<Ref<i64>>`) so R1's interpreter-reliable rejection
+// drives the error out of the SliceType / UnionType arm; the value-inner element/member
+// (`[]Ref<i64>` / `Ref<i64> | T`) is rejected NATIVELY by the C twin's `el.tag == TK_TYPE_REF` /
+// `m.tag == TK_TYPE_REF` checks.
+#test
+fn mem_ref_not_collection_or_variant() {
+    // []Ref<Ref<i64>> → error.
+    teko::assert::is_true(match resolve_type(parser::SliceType { element = ref_te_of(ref_te("i64")) }, empty_table(), "") { error => true; _ => false })
+    // Ref<Ref<i64>> | i64 → error (a reference may not be a variant member).
+    let members: []parser::TypeExpr = teko::list::push(teko::list::push(teko::list::empty(), ref_te_of(ref_te("i64"))), ttype_named("i64"))
+    teko::assert::is_true(match resolve_type(parser::UnionType { members = members }, empty_table(), "") { error => true; _ => false })
+}
+
+// (W9.4) a bind pattern carrying explicit type-args `Box<i64> as x` resolves to the stamped instance
+// Box__g__i64 (so exhaustiveness / binding use the concrete case type).
+#test
+fn bind_pattern_explicit_type_args_resolves_instance() {
+    let tbl = box_generic_table()
+    let args = teko::list::push(teko::list::empty(), ttype_named("i64"))
+    let bp = parser::BindPattern { type_name = path1("Box"); has_binding = true; binding = "x"; is_slice = false; slice_type = null; type_args = args }
+    // (#110) bind_pattern_type returns `Type | error`; Named is a case of the INNER `Type` variant —
+    // double-match the outer Type case first.
+    teko::assert::is_true(match bind_pattern_type(bp, tbl, "") { Type as t => match t { Named as n => n.name == "Box__g__i64"; _ => false }; error => false })   // (#109 W1) ref_ns = "" in the test
+    // a bare bind (no type-args) keeps the base name (no regression).
+    let plain = parser::BindPattern { type_name = path1("Box"); has_binding = true; binding = "x"; is_slice = false; slice_type = null; type_args = teko::list::empty() }
+    teko::assert::is_true(match bind_pattern_type(plain, tbl, "") { Type as t => match t { Named as n => n.name == "Box"; _ => false }; error => false })   // (#109 W1) ref_ns = "" in the test
+}
+
+// ---------------------------------------------------------------------------
+// Group K: monomorphize (S4b crumb 2c) — direct coverage of the mono walk.
+// Build typed programs by hand (a generic TFunction template + non-generic callers /
+// virtual-main statements), call monomorphize, and assert the generic is DROPPED and a
+// stamped concrete copy (idg__g__<arg>) appears with the right return type. The generic
+// bodies + caller bodies span varied TExprKind / TStatement cases so the total walk and
+// both driver phases (seed collection + fixpoint stamping) execute natively (`teko test`).
+// ---------------------------------------------------------------------------
+
+// a typed VAR expr of a given type.
+fn tvar(name: str, t: Type) -> TExpr { TExpr { kind = TVar { name = name; is_func = false; func_ns = "" }; type = t; line = 0; col = 0 } }
+// a typed integer literal (i64).
+fn tnum(v: i64) -> TExpr { TExpr { kind = TNumber { is_float = false; value = parser::numint_of_i64(v); fval = 0.0 }; type = i64t(); line = 0; col = 0 } }
+// a generic TFunction `fn NAME<T>(x: PARAMSPELL) -> RET { body }`.
+fn gfn(name: str, param_ann: parser::TypeExpr, ret: Type, body: []TStatement) -> TFunction {
+    let tps: []str = teko::list::push(teko::list::empty(), "T")
+    let tcs: []parser::ConstraintExpr = teko::list::push(teko::list::empty(), parser::NoConstraint { })
+    let p = parser::Param { name = "x"; has_type = true; type_ann = param_ann; is_params = false; has_default = false; default_expr = e_num(0) }
+    let params = teko::list::push(teko::list::empty(), p)
+    TFunction { name = name; type_params = tps; type_constraints = tcs; params = params; return_type = ret; body = body; vis = parser::Visibility::Private; has_doc = false; doc = ""; namespace = ""; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64 }
+}

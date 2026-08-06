@@ -1,0 +1,246 @@
+use teko::parser
+
+/**
+ * (SP-1a, #389/#498 the safety-spine PURE-QUERY spike) Does the type `t` TRANSITIVELY reach a
+ * `Reference` — through struct/class/trait fields, a type alias, a `variant`'s members, a
+ * collection element, an optional's inner, or a function type's params/return — such that a
+ * by-value copy of a `t` would copy a POINTER (the ref-transparent-model §7 soundness hole: copying
+ * a `Holder { r: Ref<int> }` copies `r`, not the pointee)? A purely TYPE-STRUCTURAL walk, NOT a
+ * points-to analysis. Nominal recursion is bounded by `visited` (a type name visited twice on the
+ * same path contributes no new edge), so the walk terminates; the type universe is finite per
+ * compilation. An unresolvable `Named` (an unregistered name) conservatively answers `true` (the
+ * safe over-reject direction — mirrors `escaping_value_leaks_ref`'s honest-stop).
+ *
+ * Consulted NOWHERE yet (SP-1 is a pure, unwired fact) — fixpoint is preserved by construction.
+ *
+ * @param t        the resolved type under test
+ * @param table    the program's type table (to resolve a `Named` type's own field/alias shape)
+ * @param visited  the nominal type names already entered on this path (recursion guard)
+ * @return         true iff a by-value copy of `t` carries at least one live `Reference` edge
+ * @see            docs/design/safety-spine.md §B2.1(a); docs/design/ref-transparent-model.md §7
+ * @since          0.3.1.0-beta (#389 SP-1)
+ */
+pub fn type_reaches_ref(t: Type, table: TypeTable, visited: []str) -> bool {
+    match t {
+        Reference => true
+        Slice as s => type_reaches_ref(s.element, table, visited)
+        Variant as v => types_reach_ref(v.members, table, visited)
+        Func as f => func_type_reaches_ref(f, table, visited)
+        Named as n => named_type_reaches_ref(n, table, visited)
+        _ => false
+    }
+}
+
+/**
+ * Any-of `type_reaches_ref` over a type list (a `Variant`'s members or a `Func`'s params) —
+ * short-circuits on the first reaching member.
+ *
+ * @param xs       the type list
+ * @param table    the program's type table
+ * @param visited  the recursion guard, threaded unchanged into each member
+ * @return         true iff any element of `xs` reaches a `Reference`
+ */
+fn types_reach_ref(xs: []Type, table: TypeTable, visited: []str) -> bool {
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        if type_reaches_ref(xs[i], table, visited) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * Does a function TYPE `f` reach a `Reference` through its return type or any parameter type? A
+ * function value's captured ENVIRONMENT is not represented in `Func` (it is a call signature, not
+ * an env struct) — that opacity is handled separately by `fn_borrow_summary`'s capture walk, which
+ * treats every `Func`-typed value as inherently opaque regardless of what this structural check
+ * finds. This check only sees what the SIGNATURE itself states (e.g. `() -> Ref<T>`).
+ *
+ * @param f        the function type
+ * @param table    the program's type table
+ * @param visited  the recursion guard
+ * @return         true iff `f`'s return or any parameter reaches a `Reference`
+ */
+fn func_type_reaches_ref(f: Func, table: TypeTable, visited: []str) -> bool {
+    if type_reaches_ref(f.ret, table, visited) { return true }
+    types_reach_ref(f.params, table, visited)
+}
+
+/**
+ * Does a `Named` type (a user struct/class/trait/alias/variant/enum/flags/extern/interface) reach a
+ * `Reference`? Guards against infinite recursion on a self-referential type (`visited` already
+ * contains `n.name` ⇒ no NEW edge, stop). An unregistered name (a lookup miss) conservatively
+ * answers `true` — unresolvable, over-reject.
+ *
+ * @param n        the named type
+ * @param table    the program's type table
+ * @param visited  the recursion guard so far
+ * @return         true iff `n`'s declaration transitively reaches a `Reference`
+ */
+fn named_type_reaches_ref(n: Named, table: TypeTable, visited: []str) -> bool {
+    if str_set_has(visited, n.name) { return false }
+    match type_table_find(table, n.name, "") {
+        parser::TypeDecl as td => type_decl_reaches_ref(td, table, teko::list::push(visited, n.name))
+        error => true
+    }
+}
+
+/**
+ * Dispatch the reachability walk over a `TypeDecl`'s body by kind: a struct/class walks its
+ * (base-chain-folded) field views; a trait walks its own fields; an alias/variant-union walks its
+ * aliased/unioned type expression; an enum/flags carries no data (`false`); an extern/interface type
+ * is opaque/non-instantiable and conservatively answers `true`.
+ *
+ * @param td       the type declaration
+ * @param table    the program's type table
+ * @param visited  the recursion guard (already extended with `td.name` by the caller)
+ * @return         true iff `td`'s body transitively reaches a `Reference`
+ */
+fn type_decl_reaches_ref(td: parser::TypeDecl, table: TypeTable, visited: []str) -> bool {
+    match td.body {
+        parser::StructBody => field_view_list_reaches_ref(deriver_field_view(td.name, table), table, visited)
+        parser::ClassBody => field_view_list_reaches_ref(deriver_field_view(td.name, table), table, visited)
+        parser::TraitBody as tb => fields_reach_ref(tb.fields, table, visited, type_ns_of(table, td.name))
+        parser::AliasBody as ab => type_expr_reaches_ref(ab.alias, table, visited, type_ns_of(table, td.name))
+        parser::VariantBody as vb => type_expr_reaches_ref(vb.type_expr, table, visited, type_ns_of(table, td.name))
+        parser::EnumBody => false
+        parser::FlagsBody => false
+        parser::ExternBody => true
+        parser::InterfaceBody => true
+    }
+}
+
+/**
+ * Resolve a syntactic type expression (an alias's RHS or a `variant`'s union) in `owner_ns`, then
+ * walk the resolved type for reachability. A resolution failure conservatively answers `true`.
+ *
+ * @param te       the syntactic type expression
+ * @param table    the program's type table
+ * @param visited  the recursion guard
+ * @param owner_ns the declaring namespace the expression was written in
+ * @return         true iff the resolved type reaches a `Reference`
+ */
+fn type_expr_reaches_ref(te: parser::TypeExpr, table: TypeTable, visited: []str, owner_ns: str) -> bool {
+    match resolve_type(te, table, owner_ns) {
+        Type as t => type_reaches_ref(t, table, visited)
+        error => true
+    }
+}
+
+/**
+ * Resolve a raw field list (a trait's own fields — a struct/class instead goes through
+ * `deriver_field_view`, which already folds a class's base chain) in `owner_ns`, then walk the
+ * resulting field views for reachability.
+ *
+ * @param fields   the unresolved field declarations
+ * @param table    the program's type table
+ * @param visited  the recursion guard
+ * @param owner_ns the declaring namespace the fields were written in
+ * @return         true iff any resolved field reaches a `Reference`
+ */
+fn fields_reach_ref(fields: []parser::Field, table: TypeTable, visited: []str, owner_ns: str) -> bool {
+    field_view_list_reaches_ref(resolve_field_views(fields, table, owner_ns), table, visited)
+}
+
+/**
+ * Unwrap a `[]FieldView | error` (as `deriver_field_view`/`resolve_field_views` return) and walk it
+ * for reachability; a resolution error conservatively answers `true`.
+ *
+ * @param fv       the resolved field views, or the error that resolving them produced
+ * @param table    the program's type table
+ * @param visited  the recursion guard
+ * @return         true iff `fv` is a view list with at least one reaching field
+ */
+fn field_view_list_reaches_ref(fv: []FieldView | error, table: TypeTable, visited: []str) -> bool {
+    match fv {
+        []FieldView as views => any_field_view_reaches_ref(views, table, visited)
+        error => true
+    }
+}
+
+/**
+ * Any-of `type_reaches_ref` over a struct/class/trait's resolved field views.
+ *
+ * @param views    the resolved field views
+ * @param table    the program's type table
+ * @param visited  the recursion guard
+ * @return         true iff any field's type reaches a `Reference`
+ */
+fn any_field_view_reaches_ref(views: []FieldView, table: TypeTable, visited: []str) -> bool {
+    mut i = 0
+    loop {
+        if i >= views.len { break }
+        if type_reaches_ref(views[i].type, table, visited) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * Is `t` a function (closure) type? A `Func`-typed value is OPAQUE to the structural reachability
+ * walk (its captured environment is invisible in the `Func` type — §B2.2 slice 1b's "higher-order
+ * opacity"), so `fn_borrow_summary` treats it as a potential borrow vehicle regardless of what
+ * `type_reaches_ref` finds in its bare signature.
+ *
+ * @param t  the type under test
+ * @return   true iff `t` is a `Func`
+ */
+fn type_is_func(t: Type) -> bool {
+    match t { Func => true; _ => false }
+}
+
+/**
+ * (SP-1b, #389/#498) The per-function BORROW SUMMARY: which of `f`'s parameters the RETURN VALUE
+ * (transitively) borrows. This is lifetime-elision-LITE — the ONE fact past the #330 one-hop escape
+ * ceiling that the compiler's own iterator/stream stdlib forces (28 `src/iter`/`src/io` functions
+ * return a closure capturing a `Ref`/closure parameter). It is NOT a named-lifetime system and NOT
+ * whole-program: a single bitmask per function, computed from `f`'s body in one bottom-up pass,
+ * consumed exactly ONE hop deep at each call site (by a future caller-side gate — not SP-1).
+ *
+ * @field returns_borrow_of  the 0-based parameter indices the return value borrows
+ * @field returns_all        true ⇒ un-summarizable: treat the return as borrowing every param (over-reject)
+ * @see   docs/design/safety-spine.md §B2.1(b)
+ * @since 0.3.1.0-beta (#389 SP-1)
+ */
+pub type BorrowSummary = struct { returns_borrow_of: []u32; returns_all: bool }
+
+/**
+ * A bottom-up environment of already-computed callee summaries, keyed by the callee's qualified
+ * name (`qualify(namespace, bare_name)`) — the DRIVER (not SP-1 itself) is responsible for ordering
+ * a program's functions so a callee is summarized before its callers, falling back to `returns_all`
+ * for a not-yet-summarized / recursive callee (a single monotone widening, never a full fixpoint).
+ * Parallel arrays, mirroring the `str_set_*`/`Cell` parallel-list idiom the checker already uses
+ * for small, function-scale collections.
+ *
+ * @field keys  the qualified callee names already summarized
+ * @field sums  the matching summaries, parallel to `keys` by index
+ * @since 0.3.1.0-beta (#389 SP-1)
+ */
+pub type BorrowSummaryEnv = struct { keys: []str; sums: []BorrowSummary }
+
+/**
+ * The empty borrow-summary environment — the starting point for a bottom-up driver, and what a
+ * single-function (or leaf-function) summary needs when no callee has been summarized yet.
+ *
+ * @return an environment with no summarized callees
+ * @since 0.3.1.0-beta (#389 SP-1)
+ */
+pub fn borrow_summary_env_empty() -> BorrowSummaryEnv {
+    BorrowSummaryEnv { keys = teko::list::empty(); sums = teko::list::empty() }
+}
+
+/**
+ * Record `sum` as the summary of the function named `name` in namespace `ns`, returning the grown
+ * environment (a driver builds one call at a time as it summarizes a program bottom-up).
+ *
+ * @param env   the environment so far
+ * @param ns    the function's declaring namespace ("" = top-level)
+ * @param name  the function's bare name
+ * @param sum   its computed summary
+ * @return      the environment with `name` (qualified by `ns`) bound to `sum`
+ * @since 0.3.1.0-beta (#389 SP-1)
+ */
+pub fn borrow_summary_env_insert(env: BorrowSummaryEnv, ns: str, name: str, sum: BorrowSummary) -> BorrowSummaryEnv {
+    BorrowSummaryEnv { keys = teko::list::push(env.keys, qualify(ns, name)); sums = teko::list::push(env.sums, sum) }
+}

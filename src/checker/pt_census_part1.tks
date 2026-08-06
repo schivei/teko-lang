@@ -1,0 +1,250 @@
+/**
+ * PT_CENSUS_UNIT — the unit this census counts, spelled out so the number is never read as
+ * something it is not.
+ *
+ * The summand is a spine CELL (`Cell`, `src/checker/spine.tks`), not a binding occurrence and not
+ * an allocation site: `add_cell` DEDUPES by the `name` / `field` key, so two `let x` in disjoint
+ * blocks of the same function collapse into ONE cell, and a one-hop `x.f` path is a cell of its own
+ * beside the bare `x`. Every parameter contributes a cell whether or not it is a `Ref<T>`.
+ */
+pub const PT_CENSUS_UNIT: str = "cell (deduped name/field key per function)"
+
+/**
+ * The whole-corpus tally of the spine's POINTS-TO axis (`pt`) — how many cells of the checked
+ * program each lattice arm claims, gathered by re-running `fn_spine` over every `TFunction` of the
+ * program and folding its `pt` array.
+ *
+ * The axis is computed today only inside `check_ref_storability` (`src/checker/typer.tks`), which
+ * runs `fn_spine` behind a guard (a `Ref<T>` param or a `mem::free` in the body) and then throws
+ * the fact away. This census re-derives it for EVERY function — nothing is cached, nothing is
+ * shared with the gate — and reports, never acts.
+ */
+pub type PtCensus = struct {
+    /** how many `TFunction` items of the program were walked. */
+    fns: u64
+    /** the total number of cells over every walked function (the census denominator). */
+    cells: u64
+    /** cells whose `pt` is `PtFrame` — dies with the frame; the climb-floor. */
+    frame: u64
+    /** cells whose `pt` is `PtRoot` — outlives the frame (the safe leak). */
+    root: u64
+    /** cells whose `pt` is `PtParam` — owned by a parameter slot; the caller owns the value. */
+    param: u64
+    /** cells whose `pt` is `PtAdopter` — confined to one lexical `adopt { }` region. */
+    adopter: u64
+    /** the `PtAdopter` subset carrying the `⊤` fallback id (region un-nameable, reject on escape). */
+    adopter_top: u64
+    /** cells whose `pt` is `PtTop` — joined-over / unknown; every consumer treats it as Root. */
+    top: u64
+    /** the largest single-function cell count seen (the fat-tail probe beside the mean). */
+    max_cells: u64
+}
+
+/**
+ * The zero census — no function walked yet.
+ *
+ * @return  a census with every field at zero
+ */
+fn pt_census_empty() -> PtCensus {
+    PtCensus { fns = 0; cells = 0; frame = 0; root = 0; param = 0; adopter = 0; adopter_top = 0; top = 0; max_cells = 0 }
+}
+
+/**
+ * The points-to census of a whole checked program: `fn_spine` is run once per `TFunction` item and
+ * its `pt` axis folded in, cell by cell.
+ *
+ * @param prog  the checked program
+ * @return      the accumulated census over every function of `prog`
+ */
+pub fn pt_census(prog: TProgram) -> PtCensus {
+    mut acc = pt_census_empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        acc = pt_census_add_item(acc, prog.items[i])
+        i++
+    }
+    acc
+}
+
+/**
+ * Fold one program item into the census — a `TFunction` contributes its spine, everything else
+ * contributes nothing.
+ *
+ * @param c   the accumulated census
+ * @param it  the program item
+ * @return    the census with the item's cells folded in (unchanged for a non-function item)
+ */
+fn pt_census_add_item(c: PtCensus, it: TItem) -> PtCensus {
+    match it {
+        TFunction as f => pt_census_add_spine(c, fn_spine(f))
+        _ => c
+    }
+}
+
+/**
+ * Fold one function's already-built spine into the census: one function, plus one summand per cell
+ * of its `pt` axis.
+ *
+ * Kept public and taking a `Spine` (rather than a `TFunction`) so the counter can be driven from a
+ * HAND-BUILT axis in the unit suite — that is what proves a zero in the report is the axis and not
+ * a broken count.
+ *
+ * @param c  the accumulated census
+ * @param s  one function's spine fact
+ * @return   the census with `s`'s cells folded in
+ */
+pub fn pt_census_add_spine(c: PtCensus, s: Spine) -> PtCensus {
+    mut acc = pt_census_open_fn(c, s.pt.len)
+    mut i: u64 = 0
+    loop {
+        if i >= s.pt.len { break }
+        acc = pt_census_bump(acc, s.pt[i])
+        i++
+    }
+    acc
+}
+
+/**
+ * Open one more function in the census: bump the function count, add its cell count to the total,
+ * and raise the fat-tail high-water mark.
+ *
+ * @param c  the accumulated census
+ * @param n  the number of cells the function's universe holds
+ * @return   the census with the function's totals opened (no arm counted yet)
+ */
+fn pt_census_open_fn(c: PtCensus, n: u64) -> PtCensus {
+    PtCensus {
+        fns = c.fns + 1
+        cells = c.cells + n
+        frame = c.frame
+        root = c.root
+        param = c.param
+        adopter = c.adopter
+        adopter_top = c.adopter_top
+        top = c.top
+        max_cells = pt_census_larger(c.max_cells, n)
+    }
+}
+
+/**
+ * Count one cell's points-to value into the census — exactly one arm counter rises, and the
+ * `PtAdopter` sub-counter rises with it when the region id is the `⊤` fallback.
+ *
+ * @param c  the accumulated census
+ * @param p  the cell's points-to value
+ * @return   the census with `p` counted
+ */
+fn pt_census_bump(c: PtCensus, p: PointsTo) -> PtCensus {
+    PtCensus {
+        fns = c.fns
+        cells = c.cells
+        frame = c.frame + pt_is_frame(p)
+        root = c.root + pt_is_root(p)
+        param = c.param + pt_is_param(p)
+        adopter = c.adopter + pt_is_adopter(p)
+        adopter_top = c.adopter_top + pt_is_adopter_top(p)
+        top = c.top + pt_is_top(p)
+        max_cells = c.max_cells
+    }
+}
+
+/**
+ * The `PtFrame` summand of one points-to value.
+ *
+ * @param p  the points-to value
+ * @return   1 for `PtFrame`, else 0
+ */
+fn pt_is_frame(p: PointsTo) -> u64 {
+    match p { PtFrame => 1; _ => 0 }
+}
+
+/**
+ * The `PtRoot` summand of one points-to value.
+ *
+ * @param p  the points-to value
+ * @return   1 for `PtRoot`, else 0
+ */
+fn pt_is_root(p: PointsTo) -> u64 {
+    match p { PtRoot => 1; _ => 0 }
+}
+
+/**
+ * The `PtParam` summand of one points-to value.
+ *
+ * @param p  the points-to value
+ * @return   1 for `PtParam`, else 0
+ */
+fn pt_is_param(p: PointsTo) -> u64 {
+    match p { PtParam => 1; _ => 0 }
+}
+
+/**
+ * The `PtAdopter` summand of one points-to value.
+ *
+ * @param p  the points-to value
+ * @return   1 for `PtAdopter`, else 0
+ */
+fn pt_is_adopter(p: PointsTo) -> u64 {
+    match p { PtAdopter => 1; _ => 0 }
+}
+
+/**
+ * The `PtAdopter(⊤)` summand of one points-to value — the depth-budget fallback, counted as a
+ * SUBSET of `pt_is_adopter`, never beside it.
+ *
+ * @param p  the points-to value
+ * @return   1 for a `PtAdopter` whose region id is the `⊤` fallback, else 0
+ */
+fn pt_is_adopter_top(p: PointsTo) -> u64 {
+    match p {
+        PtAdopter as a => if a.id.top { 1 } else { 0 }
+        _ => 0
+    }
+}
+
+/**
+ * The `PtTop` summand of one points-to value.
+ *
+ * @param p  the points-to value
+ * @return   1 for `PtTop`, else 0
+ */
+fn pt_is_top(p: PointsTo) -> u64 {
+    match p { PtTop => 1; _ => 0 }
+}
+
+/**
+ * The larger of two counts (the fat-tail high-water mark's step).
+ *
+ * @param a  the running maximum
+ * @param b  the candidate
+ * @return   whichever is greater
+ */
+fn pt_census_larger(a: u64, b: u64) -> u64 {
+    if b > a { return b }
+    a
+}
+
+/**
+ * One arm's share of the census, in percent.
+ *
+ * @param n      the arm's cell count
+ * @param total  the census denominator (the total cell count)
+ * @return       `100 * n / total`, or `0.0` when `total` is zero
+ */
+pub fn pt_census_pct(n: u64, total: u64) -> f64 {
+    if total == 0 { return 0.0 }
+    (100.0 * (n to f64)) / (total to f64)
+}
+
+/**
+ * The mean cell count per walked function — the shape check the fat-tail probe (`max_cells`) sits
+ * beside.
+ *
+ * @param c  the accumulated census
+ * @return   `cells / fns`, or `0.0` when no function was walked
+ */
+pub fn pt_census_cells_per_fn(c: PtCensus) -> f64 {
+    if c.fns == 0 { return 0.0 }
+    (c.cells to f64) / (c.fns to f64)
+}

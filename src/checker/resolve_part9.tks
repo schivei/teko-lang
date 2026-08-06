@@ -1,0 +1,258 @@
+// src/checker/resolve.tks  (namespace 'teko::checker')
+use teko::parser
+
+
+/**
+ * mangle_ns_frag — (#109 W3) a symbol-safe fragment of a canonical name: each "::" → "__". Keeps
+ * a generic-instance name (`Gen__g__teko__emit__Reader`) a valid C identifier AND distinct from
+ * `Gen<teko::io::Reader>` — `name_last_segment` would collide the two. Slice-based (no
+ * byte-append-to-str primitive exists).
+ *
+ * @param name  the canonical "ns::…::Name" to mangle
+ * @return      `name` with every "::" replaced by "__"
+ */
+pub fn mangle_ns_frag(name: str) -> str {
+    mut out = ""
+    mut start: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i + 1 >= name.len { break }
+        if name[i] == b':' && name[i + 1] == b':' {
+            out = out ~ teko::str::slice(name, start, i) ~ "__"   // (#148) builtin slice — see name_last_segment
+            i = i + 2
+            start = i
+        } else {
+            i++
+        }
+    }
+    out ~ teko::str::slice_from(name, start)   // (#148) builtin slice
+}
+
+/**
+ * type_mangle — (S4) a concrete type → its symbol fragment for a mangled generic-instance name.
+ * Prim → its surface spelling (i64/…), Str/Byte/Error/Void/Ptr/Uptr → fixed words, Named → its
+ * BARE last segment (#109 W3 — slice/generic-inst suffixes stay bare, matching the syntactic
+ * `cg_opt_mangle_texpr`/`cg_texpr_inst_name`; only DIRECT `tk_t_` typedefs, `mangle_type_name`,
+ * carry the canonical ns where the io/emit `Reader` collision needs distinguishing), Slice →
+ * "slice_"+elem. Total — always yields a symbol-safe fragment. Shared by resolve (type
+ * instantiation) and the mono pass so a use and its stamped decl agree byte-for-byte.
+ * (C: tk_type_mangle.)
+ *
+ * @param t  the concrete type to mangle
+ * @return   its symbol-safe name fragment
+ */
+pub fn type_mangle(t: Type) -> str {
+    match t {
+        Prim as p => prim_name(p.kind)
+        Str => "str"
+        Byte => "byte"
+        Char => "char"
+        Named as n => name_last_segment(n.name)
+        Slice as sl => teko::str::concat("slice_", type_mangle(sl.element))
+        Error => "error"
+        Void => "void"
+        Ptr as p => match p.inner { null => "ptr"; Type as t => teko::str::concat("ptr_", type_mangle(t)) }
+        Uptr => "uptr"
+        Reference as r => teko::str::concat("ref_", type_mangle(r.inner))   // (MEM-1b)
+        Variant => "variant"
+        Func => "func"
+        Null => "null"
+    }
+}
+
+// (S4) the mangled name of a generic INSTANCE: `<base>__g__<arg0>[__<arg1>…]` over the args IN
+// ORDER. The `__g__` infix marks a stamped symbol (no user name may contain it). (C: tk_generic_inst_name.)
+pub fn generic_inst_name(base: str, args: []Type) -> str {
+    mut out = teko::str::concat(base, "__g__")
+    mut i = 0
+    loop {
+        if i >= args.len { break }
+        if i > 0 { out = teko::str::concat(out, "__") }
+        out = teko::str::concat(out, type_mangle(args[i]))
+        i++
+    }
+    out
+}
+
+/**
+ * GenericInstanceSplit — the result of locating `generic_inst_name`'s `__g__` stamp inside a
+ * resolved `Named` canonical name: whether the name IS a generic instance, and — when it is — the
+ * BASE half before the stamp (`generic_inst_name`'s inverse). One shape serves both the membership
+ * test and the base extraction a single caller needs, so `split_generic_instance_name` scans the
+ * name once instead of twice.
+ */
+type GenericInstanceSplit = struct {
+    /** true when `name` carries the `__g__` stamp (it is a generic instance's canonical name). */
+    is_generic: bool
+    /** the base before the stamp (valid iff `is_generic`; `""` otherwise). */
+    base: str
+}
+
+/**
+ * split_generic_instance_name — locate `generic_inst_name`'s `__g__` stamp in a resolved `Named`
+ * canonical name. A generic-instance name is stamped bare (`resolve_generic_inst` takes the
+ * WRITTEN path's last segment as its base, never the namespace-qualified form — `qualify`'s own
+ * doc: "generic `__g__` instances stay bare"), so no `::` search can ever find it; the stamp
+ * itself is the only reliable marker.
+ *
+ * @param str name  a resolved `Named` type's canonical name
+ * @return GenericInstanceSplit  `is_generic=false, base=""` when `name` carries no stamp;
+ *                                otherwise `is_generic=true` and `base` = everything before it
+ */
+pub fn split_generic_instance_name(name: str) -> GenericInstanceSplit {
+    mut i: u64 = 0
+    loop {
+        if i + 5 > name.len { break }
+        if name[i] == b'_' && name[i + 1] == b'_' && name[i + 2] == b'g' && name[i + 3] == b'_' && name[i + 4] == b'_' {
+            return GenericInstanceSplit { is_generic = true; base = teko::str::slice_to(name, i) }
+        }
+        i++
+    }
+    GenericInstanceSplit { is_generic = false; base = "" }
+}
+
+/**
+ * named_case_name — the case name a bind/field pattern would spell to select the `Named` member
+ * whose resolved canonical name is `name`: the BASE before `generic_inst_name`'s `__g__` stamp for
+ * a generic instance (a pattern's type-args are carried separately from its case name —
+ * `bind_pattern_case_name`'s own doc — so the stamped suffix can never appear in a case name), or
+ * the canonical name's bare last `::`-segment for an ordinary nominal member.
+ *
+ * WHY IT EXISTS (0.3.1.0, degrau 14): `variant_member_named`'s `Named` arm compared only
+ * `name_last_segment(n.name)` against a pattern's case name. That is correct for an ordinary
+ * nominal member, but a generic-instance name carries no `::` at all, so `name_last_segment`
+ * returned the WHOLE mangled instance (`Parsed__g__MainFile`) unchanged — never equal to the
+ * pattern's bare base (`Parsed`). The compiler's OWN `teko::build::asm_parse` writes
+ * `match parser::parse_main_file(…) { parser::Parsed<parser::MainFile> as x => x.node; … }` and the
+ * native self-build stopped there with "unknown variant case `Parsed` (internal)".
+ *
+ * @param str name  a resolved `Named` type's canonical name
+ * @return str  the case name a pattern selecting this member would spell
+ */
+pub fn named_case_name(name: str) -> str {
+    let split = split_generic_instance_name(name)
+    if split.is_generic { return split.base }
+    name_last_segment(name)
+}
+
+/**
+ * Is this struct/class literal a SELF-CONSTRUCT inside its own generic template — i.e. the base
+ * being constructed equals the enclosing method's owner type, AND that owner is generic (so no
+ * concrete instance is stamped while typing the abstract template)? Only then do we type against the
+ * abstract template body and tag the node with the phantom `Base__g__<param>` instance name that the
+ * mono pass will later remap to the concrete stamp (#254 L4/L5). A non-generic owner, or a
+ * construction of a DIFFERENT generic type, is NOT a self-construct → the ordinary
+ * expected-instance path (unchanged) applies.
+ *
+ * @param base_name    the bare base of the constructed type (`Box`)
+ * @param owner_type   the enclosing method's owner (`env.owner_type`, canonical or "")
+ * @param decl_tparams the constructed base's type-params (generic iff non-empty)
+ * @return             true iff this is a self-construct of the enclosing generic template
+ * @since onda-3 (#254 L4/L5)
+ */
+pub fn is_self_generic_construct(base_name: str, owner_type: str, decl_tparams: []str) -> bool {
+    if decl_tparams.len == 0 { return false }
+    if owner_type == "" { return false }
+    name_last_segment(owner_type) == base_name
+}
+
+/**
+ * The PHANTOM generic-instance name for a self-construct inside a generic template: the enclosing
+ * type's OWN type-params, in order, mangled exactly as `resolve_generic_inst` mangles `-> Box<T>`
+ * (`Box__g__T`). The template body's self-init, its `-> Box<T>` return, and any `Box<T>` local all
+ * carry this SAME spelling, so the mono pass's single `phantom → concrete` remap retargets them
+ * together (#254 L4/L5). Reuses `generic_inst_name` over the owner's params-as-Named so the spelling
+ * cannot drift from the resolver's.
+ *
+ * @param base_name     the bare base (`Box`)
+ * @param owner_tparams the enclosing type's type-param names (`["T"]`)
+ * @return              the phantom instance name (`Box__g__T`)
+ * @since onda-3 (#254 L4/L5)
+ */
+pub fn phantom_self_inst_name(base_name: str, owner_tparams: []str) -> str {
+    mut args: []Type = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= owner_tparams.len { break }
+        args = teko::list::push(args, Named { name = owner_tparams[i] })
+        i++
+    }
+    generic_inst_name(base_name, args)
+}
+
+/**
+ * ref_target_type — validate a `Ref<T>` type-argument and build the safe reference `Ref{inner}`
+ * (MEM-1b). The inner must be a VALUE TYPE: Teko has NO field/index assignment (value-functional),
+ * so a non-scalar ref is ONLY ever mutated by WHOLE-`.value` REPLACEMENT (`r.value = newWhole` —
+ * native `*r = newWhole` struct/slice copy; interpreter cell_set), and read by `r.value` (native
+ * `(*r)`; interpreter cell_get). Under the cell-IDENTITY model both are observationally identical
+ * in interpreter and native, exactly like scalars, so Prim, Byte, Str, Named (struct/enum/
+ * variant), Slice, and Variant are all allowed. REJECTS the NON-values / aliasing hazards:
+ * `Reference` (no ref-to-ref), `Ptr`/`Uptr` (raw FFI addresses), `Func` (a function value carries
+ * no replaceable storage).
+ *
+ * @param argt  the resolved `Ref<T>` type-argument (the caller already rejected `Void`)
+ * @return      `Reference{inner=argt}` when `argt` is a valid ref target; an error naming why not
+ */
+fn ref_target_type(argt: Type) -> Type | error {
+    match argt {
+        Reference => error { message = "a reference cannot target another reference (`Ref<Ref<T>>` is invalid)" }
+        Ptr => error { message = "a reference cannot target a raw pointer (`Ref<ptr<T>>` is invalid — raw FFI addresses are not safe ref targets)" }
+        Uptr => error { message = "a reference cannot target a raw pointer (`Ref<uptr>` is invalid — raw FFI addresses are not safe ref targets)" }
+        Func => error { message = "a reference cannot target a function (`Ref<(…)->…>` is invalid)" }
+        _ => Reference { inner = argt }
+    }
+}
+
+// (S4) `Box<i64>` → the nominal instance `Named{Box__g__i64}`. Resolves every type-argument, then
+// validates against the generic decl's arity (the decl must exist, be generic, same count). The
+// concrete decl (fields with T→arg substituted) is stamped by the instantiation pass / mono.
+fn resolve_generic_inst(nt: parser::NamedType, table: TypeTable, ref_ns: str) -> Type | error {
+    // (#109 W1) reserved for the R0-R5 rules (W2); threaded to every resolve_type arg + the table lookup.
+    let name = nt.path.segments[nt.path.segments.len - 1].name
+    // (S-mem) the builtin generic `ptr<T>` → a typed pointer `Ptr{inner}`. `ptr<void>` ≡ the opaque
+    // `ptr` (void isn't a value type) → null inner. Not a user decl, handled before the table lookup.
+    if name == "ptr" {
+        if nt.args.len != 1 { return error { message = "`ptr<T>` takes exactly one type argument" } }
+        let argt = match resolve_type(nt.args[0], table, ref_ns) { Type as t => t; error as e => return e }
+        match argt { Void => return Ptr { inner = null }; _ => return Ptr { inner = argt } }
+    }
+    // (MEM-1b) the compiler-known generic struct `Ref<T>` → the SAFE reference `Ref{inner}` (the safe
+    // surface OVER the raw `ptr<T>`). Capitalized (a struct-like named type, reusing generics — no
+    // keyword). Unlike `ptr`, a ref is never null and never opaque, so `Ref<void>` is rejected (void
+    // is not a value) and `Ref` requires a type argument. Not a user decl — reserved, handled before
+    // the table lookup.
+    if name == "Ref" {
+        if nt.args.len != 1 { return error { message = "`Ref<T>` takes exactly one type argument" } }
+        let argt = match resolve_type(nt.args[0], table, ref_ns) { Type as t => t; error as e => return e }
+        match argt { Void => return error { message = "`Ref<void>` is invalid — void is not a value (M.3)" }; _ => { } }
+        return ref_target_type(argt)
+    }
+    mut argtypes: []Type = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= nt.args.len { break }
+        let a = match resolve_type(nt.args[i], table, ref_ns) { Type as t => t; error as e => return e }
+        // (MEM Step 0, A) ESCAPE GATE — a reference can NEVER be a generic type ARGUMENT: carrying a
+        // `Ref<T>` into a user generic would stamp it into a struct field / return position (e.g.
+        // `Box<Ref<i64>>` → `struct { value: int64_t * }` returned by value) and escape. The template
+        // itself is validated pre-instantiation (R1–R5); the only way a Reference enters a stamped
+        // decl/fn is via a type-arg — blocked here (written) and in unify (inferred).
+        match a { Reference => return error { message = "a reference cannot be a generic type argument (it would be stored/escape)" }; _ => { } }
+        argtypes = teko::list::push(argtypes, a)
+        i++
+    }
+    match resolve_type_ref(nt.path, table, ref_ns) {   // (#109 W2) R0/R3/R4 over the WRITTEN path
+        parser::TypeDecl as td => {
+            if td.type_params.len == 0 {
+                return error { message = $"type `{name}` is not generic but was given type arguments" }
+            }
+            if td.type_params.len != nt.args.len {
+                return error { message = $"generic type `{name}` expects a different number of type arguments" }
+            }
+            Named { name = generic_inst_name(name, argtypes) }
+        }
+        NotUserType => return error { message = $"unknown generic type: {name}" }
+        error as e => return e
+    }
+}

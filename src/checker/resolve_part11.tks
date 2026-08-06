@@ -1,0 +1,242 @@
+// src/checker/resolve.tks  (namespace 'teko::checker')
+use teko::parser
+
+
+/**
+ * Collect every generic-type USE reachable through a method — its signature (param annotations +
+ * return type) AND its body statements (#254 layer 2). This is what makes a transitive instance
+ * that appears ONLY inside a method body (`list.push(Box<i64>{…})`) get stamped: without it, such an
+ * instance is never discovered. A NO-OP when the method references no generic type.
+ *
+ * @param f    the method (a struct/class body Function)
+ * @param acc  the accumulated generic-use list
+ * @return     `acc` extended with every generic use found in the method's signature and body
+ * @since onda-3 (#254)
+ */
+fn collect_method_insts(f: parser::Function, acc: []parser::TypeExpr) -> []parser::TypeExpr {
+    mut out = acc
+    mut i = 0
+    loop { if i >= f.params.len { break }; if f.params[i].has_type { out = collect_texpr_insts(f.params[i].type_ann, out) }; i++ }
+    if f.has_return { out = collect_texpr_insts(f.return_type, out) }
+    collect_stmts_insts(f.body, out)
+}
+
+/**
+ * Collect every generic-type USE reachable through a method LIST (#254 layer 2). NO-OP on empty.
+ *
+ * @param methods the type's methods
+ * @param acc     the accumulated generic-use list
+ * @return        `acc` extended with every generic use found in the methods
+ * @since onda-3 (#254)
+ */
+fn collect_methods_insts(methods: []parser::Function, acc: []parser::TypeExpr) -> []parser::TypeExpr {
+    mut out = acc
+    mut i = 0
+    loop { if i >= methods.len { break }; out = collect_method_insts(methods[i], out); i++ }
+    out
+}
+
+fn collect_body_insts(body: parser::TypeBody, acc: []parser::TypeExpr) -> []parser::TypeExpr {
+    mut out = acc
+    match body {
+        parser::StructBody as sb => {
+            mut i = 0
+            loop { if i >= sb.fields.len { break }; out = collect_texpr_insts(sb.fields[i].type_ann, out); i++ }
+            out = collect_methods_insts(sb.methods, out)
+        }
+        parser::ClassBody as cb => {
+            mut i = 0
+            loop { if i >= cb.fields.len { break }; out = collect_texpr_insts(cb.fields[i].type_ann, out); i++ }
+            out = collect_methods_insts(cb.methods, out)
+        }
+        parser::VariantBody as vb => out = collect_texpr_insts(vb.type_expr, out)
+        parser::AliasBody as ab => out = collect_texpr_insts(ab.alias, out)
+        _ => { }
+    }
+    out
+}
+
+fn collect_stmts_insts(stmts: []parser::Statement, acc: []parser::TypeExpr) -> []parser::TypeExpr {
+    mut out = acc
+    mut i = 0
+    loop { if i >= stmts.len { break }; out = collect_stmt_insts(stmts[i], out); i++ }
+    out
+}
+
+// (W9.4) collect the generic instance a construction-site / bind-pattern type-arg list names: synthesize
+// the NamedType `<path><args>` and run it through collect_texpr_insts (which pushes it AND recurses into
+// the args), so `Foo<i64>{…}` / `Foo<i64> as x` get `Foo__g__i64` stamped exactly like an annotation.
+fn collect_site_args(path: parser::Path, args: []parser::TypeExpr, acc: []parser::TypeExpr) -> []parser::TypeExpr {
+    if args.len == 0 { return acc }
+    collect_texpr_insts(parser::NamedType { path = path; args = args }, acc)
+}
+
+/**
+ * Collect the generic-instance a static-factory call names via construction-site type-args
+ * (`Cell<i64>::make(…)` → stamp `Cell__g__i64`) (#254 L5). The instance's OWNER base is the callee's
+ * SECOND-TO-LAST segment (`Cell` of `Cell::make`); synthesizing `Cell<i64>` and running it through
+ * `collect_site_args` stamps it exactly like a `Cell<i64>{…}` construction. A call with no type-args
+ * (or a single-segment callee) contributes nothing — every existing call is unchanged.
+ *
+ * @param call the parsed call (possibly carrying construction-site type-args)
+ * @param acc  the instance worklist so far
+ * @return     `acc` plus the factory instance's synthetic NamedType (or `acc` unchanged)
+ * @since onda-3 (#254 L5)
+ */
+fn collect_call_site_args(call: parser::Call, acc: []parser::TypeExpr) -> []parser::TypeExpr {
+    if call.type_args.len == 0 { return acc }
+    if call.callee.segments.len < 2 { return acc }
+    let base = call.callee.segments[call.callee.segments.len - 2].name
+    collect_site_args(parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = base }) }, call.type_args, acc)
+}
+
+// (W9.4) walk an expression for construction-site type-args (`Foo<i64>{…}`) and nested patterns.
+fn collect_expr_insts(e: parser::Expr, acc: []parser::TypeExpr) -> []parser::TypeExpr {
+    mut out = acc
+    match e.kind {
+        parser::StructLit as sl => {
+            out = collect_site_args(sl.type_path, sl.type_args, out)
+            mut i = 0
+            loop { if i >= sl.field_vals.len { break }; out = collect_expr_insts(sl.field_vals[i], out); i++ }
+        }
+        parser::Binary as b => { out = collect_expr_insts(b.left, out); out = collect_expr_insts(b.right, out) }
+        parser::Unary as u => out = collect_expr_insts(u.operand, out)
+        parser::Compare as c => {
+            out = collect_expr_insts(c.first, out)
+            mut i = 0
+            loop { if i >= c.rest.len { break }; out = collect_expr_insts(c.rest[i].operand, out); i++ }
+        }
+        parser::Call as call => {
+            out = collect_call_site_args(call, out)
+            mut i = 0
+            loop { if i >= call.args.len { break }; out = collect_expr_insts(call.args[i], out); i++ }
+        }
+        parser::IfExpr as f => {
+            out = collect_expr_insts(f.cond, out)
+            out = collect_stmts_insts(f.then_blk, out)
+            if f.has_else { out = collect_stmts_insts(f.else_blk, out) }
+        }
+        parser::MatchExpr as m => {
+            out = collect_expr_insts(m.subject, out)
+            mut i = 0
+            loop {
+                if i >= m.arms.len { break }
+                out = collect_pattern_insts(m.arms[i].pattern, out)
+                if m.arms[i].has_when { out = collect_expr_insts(m.arms[i].guard, out) }
+                out = collect_stmts_insts(m.arms[i].body, out)
+                i++
+            }
+        }
+        parser::FieldAccess as fa => out = collect_expr_insts(fa.receiver, out)
+        parser::MethodCall as mc => {
+            out = collect_expr_insts(mc.receiver, out)
+            mut i = 0
+            loop { if i >= mc.args.len { break }; out = collect_expr_insts(mc.args[i], out); i++ }
+        }
+        parser::Cast as ct => out = collect_expr_insts(ct.expr, out)
+        parser::Index as ix => { out = collect_expr_insts(ix.receiver, out); out = collect_expr_insts(ix.index, out) }
+        parser::Interp as ip => { mut i = 0; loop { if i >= ip.holes.len { break }; out = collect_expr_insts(ip.holes[i], out); i++ } }
+        parser::InExpr as ie => {
+            out = collect_expr_insts(ie.lhs, out)
+            mut i = 0
+            loop { if i >= ie.elems.len { break }; out = collect_expr_insts(ie.elems[i], out); i++ }
+        }
+        parser::ArrayLit as al => { mut i = 0; loop { if i >= al.elements.len { break }; out = collect_expr_insts(al.elements[i].expr, out); i++ } }
+        _ => { }   // leaves (Number/Var/StrLit/ByteLit/BoolLit/NullLit/PathExpr) carry no type-args
+    }
+    out
+}
+
+// (W9.4) walk a pattern for bind-pattern type-args (`Foo<i64> as x`, incl alt options).
+fn collect_pattern_insts(p: parser::Pattern, acc: []parser::TypeExpr) -> []parser::TypeExpr {
+    mut out = acc
+    match p {
+        parser::BindPattern as bp => { if !bp.is_slice { out = collect_site_args(bp.type_name, bp.type_args, out) } }
+        parser::AltPattern as ap => { mut i = 0; loop { if i >= ap.options.len { break }; out = collect_pattern_insts(ap.options[i], out); i++ } }
+        _ => { }
+    }
+    out
+}
+
+fn collect_stmt_insts(s: parser::Statement, acc: []parser::TypeExpr) -> []parser::TypeExpr {
+    mut out = acc
+    match s {
+        parser::Binding as b => { if b.has_type { out = collect_texpr_insts(b.type_ann, out) }; out = collect_expr_insts(b.value, out) }
+        parser::Assign as a => { out = collect_expr_insts(a.value, out); if parser::assign_has_target(a.kind) { out = collect_expr_insts(a.target, out) } }
+        parser::Return as r => { if r.has_value { out = collect_expr_insts(r.value, out) } }
+        parser::ExprStmt as es => out = collect_expr_insts(es.expr, out)
+        parser::LoopStmt as l => out = collect_stmts_insts(l.body, out)
+        parser::DeferStmt as d => out = collect_stmts_insts(d.body, out)
+        parser::AdoptStmt as a => out = collect_stmts_insts(a.body, out)
+        _ => { }
+    }
+    out
+}
+
+fn collect_item_insts(it: parser::Item, acc: []parser::TypeExpr) -> []parser::TypeExpr {
+    mut out = acc
+    match it.content {
+        parser::Function as f => {
+            mut i = 0
+            loop { if i >= f.params.len { break }; out = collect_texpr_insts(f.params[i].type_ann, out); i++ }
+            if f.has_return { out = collect_texpr_insts(f.return_type, out) }
+            out = collect_stmts_insts(f.body, out)
+        }
+        parser::TypeDecl as td => out = collect_body_insts(td.body, out)
+        parser::Statement as s => out = collect_stmt_insts(s, out)
+        _ => { }
+    }
+    out
+}
+
+/**
+ * InstSite — one WRITTEN generic-type use (`Box<i64>`) paired with the namespace whose source text
+ * wrote it. The collectors walk a syntax tree and know nothing of namespaces; the enclosing
+ * `parser::Item` (or, for a transitive use found inside a stamped body, the template's own
+ * declaring namespace) does. Carrying that namespace ALONGSIDE the site is what makes the
+ * instantiation pass resolve each site in the scope it was written in, instead of falling back to a
+ * scope-less bare table probe whose answer is whichever same-bare-named type happens to sit earliest
+ * in the table — i.e. an answer decided by source-discovery order rather than by the program.
+ */
+type InstSite = struct { site: parser::TypeExpr; ref_ns: str }
+
+/**
+ * Tag a freshly collected batch of instantiation sites with the namespace that wrote them and append
+ * it to the worklist. The collectors stay namespace-blind (one walk, one namespace); this is the one
+ * place the two are joined.
+ *
+ * @param sites   the raw sites one collector walk produced
+ * @param ref_ns  the namespace whose source text contains them
+ * @param acc     the worklist so far
+ * @return        `acc` extended with every site, each tagged with `ref_ns`
+ */
+fn tag_inst_sites(sites: []parser::TypeExpr, ref_ns: str, acc: []InstSite) -> []InstSite {
+    mut out = acc
+    mut i = 0
+    loop {
+        if i >= sites.len { break }
+        out = teko::list::push(out, InstSite { site = sites[i]; ref_ns = ref_ns })
+        i++
+    }
+    out
+}
+
+/**
+ * Every instantiation site the program's items name, each tagged with its item's namespace — the
+ * SEED of the stamping fixpoint (the transitive sites found inside a stamped body are appended as
+ * the worklist drains).
+ *
+ * @param program the flattened program
+ * @return        the seed worklist
+ */
+fn seed_inst_sites(program: parser::Program) -> []InstSite {
+    mut work: []InstSite = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= program.items.len { break }
+        let raw = collect_item_insts(program.items[i], teko::list::empty())
+        work = tag_inst_sites(raw, program.items[i].namespace, work)
+        i++
+    }
+    work
+}

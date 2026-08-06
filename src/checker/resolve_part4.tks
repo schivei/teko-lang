@@ -1,0 +1,209 @@
+// src/checker/resolve.tks  (namespace 'teko::checker')
+use teko::parser
+
+fn type_param_extends(c: parser::ConstraintExpr, table: TypeTable) -> []str {
+    let no_interfaces: []str = teko::list::empty()
+    match constraint_interfaces(c, table) {
+        []str as ifaces => ifaces
+        error => no_interfaces
+    }
+}
+
+/** (S6) the constraint at index `i`, or NoConstraint when the caller supplied fewer constraints
+    than type-params (the parser's own invariant keeps them same-length, but callers that build
+    `type_constraints` by hand — tests, synthetic tables — may not). */
+fn constraint_at(type_constraints: []parser::ConstraintExpr, i: u64) -> parser::ConstraintExpr {
+    if i < type_constraints.len { return type_constraints[i] }
+    parser::NoConstraint { }
+}
+
+/** (S6) a type-param's synthetic TypeReg for `type_param_table`: namespace = the USING namespace
+    (so the W-vis-enforce cross-namespace/visibility check treats the type-param as LOCAL, never a
+    cross-namespace reference), and `body` mirrors the constraint's own contract surface (empty
+    `extends` → opaque ExternBody, an honest stop; a non-empty `extends` → InterfaceBody, unlocking
+    D3 dispatch — see type_param_extends). The synthetic TypeDecl carries the OWN constraint on its
+    own `type_constraints` (a single-element list — `type_params` stays empty, so this can never
+    collide with a genuine multi-param user decl's parallel arrays) so a later honest-stop site
+    (type_method_call) can recompute the REAL reason a swallowed error occurred (a trait atom / an
+    unknown atom / a Risco-3 ambiguity) instead of a generic "deferred" message (M.1 fail-loud even
+    when type_param_extends itself has to swallow the error, S4's total-function shape). The two
+    `body` arms are DIFFERENT members of the wider `TypeBody` variant; the arm-join infers the
+    narrow `InterfaceBody | ExternBody` union while the binding is the wider `TypeBody` — native
+    codegen widens each arm into `TypeBody` (fix/selfhost-arm-join-widen), so this natural form (was
+    a per-arm whole-TypeReg workaround under #99) compiles on the self-host BUILD too. */
+fn type_param_reg(name: str, own_constraint: parser::ConstraintExpr, ns: str, table: TypeTable) -> TypeReg {
+    let ifaces: []str = type_param_extends(own_constraint, table)
+    let body: parser::TypeBody = if ifaces.len > 0 { parser::InterfaceBody { extends = ifaces; methods = teko::list::empty() } } else { parser::ExternBody { } }
+    let carried_constraints = teko::list::push(teko::list::empty(), own_constraint)
+    let d = parser::TypeDecl { name = name; type_params = teko::list::empty(); type_constraints = carried_constraints; body = body; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""; is_unsafe = false; must_free = false }
+    TypeReg { name = name; namespace = ns; file = ""; vis = parser::Visibility::Private; decl = d }
+}
+
+/** (S4) Extend the type table with generic type-params as OPAQUE nominal types, so a generic
+    signature/body resolves with `T` abstract. An unconstrained `T` has no members/operators, so
+    OPERATING on it (`x.foo`, `a > b`) fails at the definition (M.1 fail-loud, no reflection) — only
+    opaque usage (store/pass/return/hold/match-bind) is allowed (constraints unlock ops at S6). The
+    monomorph pass substitutes each `Named{T}` with the concrete arg before codegen. PREPENDED so a
+    type-param SHADOWS a same-named user type within the generic. Empty type_params → table unchanged.
+    Used by collect (func sigs), check_modules (vis check), and typer (bodies). (C: tk_type_param_table.)
+    (W10b.D2, issue #99; generalized S6/issue #162) `type_constraints` runs PARALLEL to
+    `type_params` (same length; NoConstraint where the caller has none) — see type_param_reg for how
+    index i's constraint becomes its synthetic TypeReg (a single-interface atom `<T: I>` is the N=1
+    degenerate case, unchanged since #99). */
+pub fn type_param_table(type_params: []str, type_constraints: []parser::ConstraintExpr, ns: str, table: TypeTable) -> TypeTable {
+    if type_params.len == 0 { return table }
+    mut tbl: TypeTable = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= type_params.len { break }
+        let own_constraint = constraint_at(type_constraints, i to u64)
+        tbl = teko::list::push(tbl, type_param_reg(type_params[i], own_constraint, ns, table))
+        i++
+    }
+    mut j = 0
+    loop {
+        if j >= table.len { break }
+        tbl = teko::list::push(tbl, table[j])
+        j++
+    }
+    tbl
+}
+
+/**
+ * Append two type-param name lists (`a ++ b`) — the enclosing type's params ahead of a method's own.
+ * A trivial two-list concat, factored so the method-table builder reads declaratively.
+ *
+ * @param a  the leading names (the enclosing type's type-params)
+ * @param b  the trailing names (the method's own type-params)
+ * @return   a new list holding every name of `a` followed by every name of `b`
+ * @since onda-3 (#254)
+ */
+fn concat_tps(a: []str, b: []str) -> []str {
+    mut out: []str = teko::list::empty()
+    mut i = 0
+    loop { if i >= a.len { break }; out = teko::list::push(out, a[i]); i++ }
+    mut j = 0
+    loop { if j >= b.len { break }; out = teko::list::push(out, b[j]); j++ }
+    out
+}
+
+/**
+ * Append two constraint lists (`a ++ b`), parallel to concat_tps so the enclosing type's constraints
+ * stay index-aligned with its params when both lists are prepended to a method's own.
+ *
+ * @param a  the leading constraints (the enclosing type's type-constraints)
+ * @param b  the trailing constraints (the method's own type-constraints)
+ * @return   a new list holding every constraint of `a` followed by every constraint of `b`
+ * @since onda-3 (#254)
+ */
+fn concat_tcs(a: []parser::ConstraintExpr, b: []parser::ConstraintExpr) -> []parser::ConstraintExpr {
+    mut out: []parser::ConstraintExpr = teko::list::empty()
+    mut i = 0
+    loop { if i >= a.len { break }; out = teko::list::push(out, a[i]); i++ }
+    mut j = 0
+    loop { if j >= b.len { break }; out = teko::list::push(out, b[j]); j++ }
+    out
+}
+
+/**
+ * Build a method's type-param table PREPENDED with the enclosing type's own type-params/constraints,
+ * so a method of `Box<T>` that references `T` resolves against the OWNER's `T` instead of failing
+ * with "unknown type: T" (#254 layer 1). `owner_name` is looked up by its CANONICAL name via the
+ * two-pass exact/qualified match (never an order-dependent bare probe — #290/#109 family): a bare
+ * name absent from the table (a plain non-generic owner, a free fn, or a receiver type-param)
+ * contributes an empty prefix, keeping the result byte-identical to `type_param_table(mtps, …)` for
+ * the existing corpus (which carries ZERO generic methods).
+ *
+ * @param owner_name  the enclosing type's canonical name (`ns::…::Type`, or bare at the root ns)
+ * @param mtps        the method's own type-params
+ * @param mtcs        the method's own type-constraints
+ * @param ns          the using namespace for the synthesized type-param TypeRegs (per type_param_table)
+ * @param table       the folded type table (source of the owner's params + the canonical lookup)
+ * @return            a type-param table over `owner_tps ++ mtps` / `owner_tcs ++ mtcs`
+ * @since onda-3 (#254)
+ */
+pub fn method_type_param_table(owner_name: str, mtps: []str, mtcs: []parser::ConstraintExpr, ns: str, table: TypeTable) -> TypeTable {
+    match type_table_find(table, owner_name, "") {
+        parser::TypeDecl as td => type_param_table(concat_tps(td.type_params, mtps), concat_tcs(td.type_constraints, mtcs), ns, table)
+        error => type_param_table(mtps, mtcs, ns, table)
+    }
+}
+
+// resolve a NAMED type (a path) to a semantic Type: built-in or user type.
+// (#109 W2) `ref_ns` = the referencing namespace; drives the R0-R5 resolution rules (via
+// resolve_type_ref). R2 builtins are matched FIRST (bare only — a builtin is never namespaced); the
+// user-type lookup then applies R3 (bare = strict own-ns) / R4/R0 (qualified = last+qualifier).
+fn resolve_named(path: parser::Path, table: TypeTable, ref_ns: str) -> Type | error {
+    // M.1: an empty path is an internal invariant break — an honest error, never an out-of-bounds.
+    if path.segments.len == 0 { return error { message = "internal: empty type path (a void/missing type used where a value type is required)" } }
+    let name = path.segments[path.segments.len - 1].name   // seed: last segment
+    // R2 — a BUILTIN resolves only for a BARE reference (`u8`…`u64`, `byte`, `str`, `error`, …). A
+    // qualified path can never name a builtin, so a `ns::str` falls through to the user-type rules.
+    if path.segments.len == 1 {
+        match builtin_type(name) {
+            Type as t => return t
+            NotBuiltinType => { }
+            error as e => return e
+        }
+    }
+    match resolve_type_ref(path, table, ref_ns) {   // R0/R3/R4 — a user struct/enum/variant/alias
+        // A TRANSPARENT alias `type Name = <type-expr>` resolves THROUGH to the aliased type
+        // (self-host parity): `TypeTable = []TypeReg` → a Slice, `Foo = Circle` → its Named
+        // struct, etc. struct/enum/variant decls stay NOMINAL (a bare Named of `name`).
+        parser::TypeDecl as td => {
+            match td.body {
+                parser::AliasBody as ab => return resolve_type(ab.alias, table, type_ref_ns(path, table, ref_ns))   // (#109 W2) alias body resolves in the alias's OWN ns, not the referencing ns
+                _ => return if name_is_g_instance(name) { Named { name = name } } else { Named { name = qualify(type_ref_ns(path, table, ref_ns), name) } }
+            }
+        }
+        NotUserType => return error { message = $"unknown type: {name}" }
+        error as e => return e
+    }
+    error { message = $"unknown type: {name}" }
+}
+
+// A NAMED type referring to a `variant` decl → its expanded Variant. A variant decl's body IS
+// a union type-expr (A | B | …), so resolve_type on it yields the Variant with its members; the
+// members resolve to Named (resolve_named keeps user types nominal), so this terminates and does
+// NOT recurse into nested named variants. Anything else returns unchanged.
+fn expand_variant(t: Type, table: TypeTable) -> Type {
+    let name = match t {
+        Named as n => n.name
+        _ => return t   // not a named type → unchanged
+    }
+    let decl = match type_table_find(table, name, "") {   // (#109 W1) resolved-name probe, no referencing ns
+        parser::TypeDecl as td => td
+        error => return t   // not a user type → unchanged
+    }
+    match decl.body {
+        parser::VariantBody as vb => {
+            match resolve_type(vb.type_expr, table, type_ns_of(table, name)) {   // (#109 W2) variant body resolves in the variant's OWN ns (its members are written there)
+                Type as ex => ex   // the variant body's union → its Variant
+                error => t   // unresolvable → unchanged (honest fallback, like the C `ex.ok ? … : t`)
+            }
+        }
+        _ => t   // a struct/enum decl, not a variant → unchanged
+    }
+}
+
+/**
+ * ptr_widens_to_opaque — C7.19 OPAQUE-PTR DEGRADE: a typed `ptr<T>` (`from`) widens into the
+ * untyped opaque `ptr` (`to = Ptr{inner = null}`) — the reverse of `type_eq`'s `ptr_inner_eq`,
+ * which requires matching inners because it also backs strict overload/return checks. The
+ * transport-only builtin `bytes_from_ptr` takes the opaque `ptr` so ANY typed pointer (e.g.
+ * `teko::mem::buf_ptr`'s `ptr<byte>`) may flow in without a cast; a typed pointer never widens
+ * into a DIFFERENTLY typed one (no `ptr<byte>` -> `ptr<i32>`). `str_from_c`
+ * (c-types-and-marshalling-0.3.1.md §6, crumb C2) is deliberately NOT on the opaque-ptr list — it
+ * takes `ptr<byte>` directly (the design's own §5.3 rule for an address Teko reads octets from),
+ * so a caller with a `ptr<i32>` or the bare opaque `ptr` must convert explicitly rather than have
+ * the widen paper over a category mismatch.
+ */
+fn ptr_widens_to_opaque(from: Type, to: Type) -> bool {
+    match from {
+        Ptr => match to {
+            Ptr as tp => match tp.inner { null => true; Type => false }
+            _ => false
+        }
+        _ => false
+    }
+}
