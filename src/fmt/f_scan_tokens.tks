@@ -1,0 +1,137 @@
+fn scan_tokens(source: str) -> []FTok | error {
+    mut toks: []FTok = teko::list::empty()
+    mut pos: u64 = 0
+    mut last_end: u64 = source.len + 1   // sentinel: nothing is glued to "before the file"
+    loop {
+        // skip spaces/tabs/CR (newlines are tokens)
+        loop {
+            if pos >= source.len { break }
+            let w = source[pos]
+            if w != b' ' && w != b'\t' && w != b'\r' { break }
+            pos++
+        }
+        if pos >= source.len { break }
+        let c = source[pos]
+        let glued = pos == last_end
+        if c == b'\n' {
+            toks = teko::list::push(toks, FTok { kind = FTokKind::Break; text = "\n"; glued = false })
+            pos = pos + 1
+            last_end = source.len + 1   // nothing after a line break is "glued"
+            continue
+        }
+        if c == b'/' && f_at(source, pos + 1) == b'/' {
+            mut e = pos
+            loop {
+                if e >= source.len { break }
+                if source[e] == b'\n' { break }
+                e++
+            }
+            let te = rtrim_end(source, pos, e)
+            toks = teko::list::push(toks, FTok { kind = FTokKind::Comment; text = slice(source, pos, te); glued = glued })
+            pos = e
+            last_end = source.len + 1
+            continue
+        }
+        if c == b'/' && f_at(source, pos + 1) == b'*' {
+            mut e = pos + 2
+            loop {
+                if e + 1 >= source.len { return f_err("unterminated block comment") }
+                if source[e] == b'*' && source[e + 1] == b'/' { e = e + 2; break }
+                e++
+            }
+            toks = teko::list::push(toks, FTok { kind = FTokKind::Comment; text = slice(source, pos, e); glued = glued })
+            last_end = e
+            pos = e
+            continue
+        }
+        if c == b'b' && f_at(source, pos + 1) == b'\'' {
+            let s = match span_byte_lit(source, pos) { Span as sp => sp; error as err => return err }
+            toks = teko::list::push(toks, FTok { kind = FTokKind::Strish; text = slice(source, pos, s.end); glued = glued })
+            last_end = s.end
+            pos = s.end
+            continue
+        }
+        if c == b'c' && f_at(source, pos + 1) == b'\'' {
+            let s = match span_char_lit(source, pos) { Span as sp => sp; error as err => return err }
+            toks = teko::list::push(toks, FTok { kind = FTokKind::Strish; text = slice(source, pos, s.end); glued = glued })
+            last_end = s.end
+            pos = s.end
+            continue
+        }
+        if (c == b'"' || c == b'$' || c == b'@') && f_string_start(source, pos) {
+            let s = match span_string(source, pos) { Span as sp => sp; error as err => return err }
+            toks = teko::list::push(toks, FTok { kind = FTokKind::Strish; text = slice(source, pos, s.end); glued = glued })
+            last_end = s.end
+            pos = s.end
+            continue
+        }
+        if f_is_digit(c) {
+            let e = span_number(source, pos)
+            toks = teko::list::push(toks, FTok { kind = FTokKind::Num; text = slice(source, pos, e); glued = glued })
+            last_end = e
+            pos = e
+            continue
+        }
+        if f_is_alpha(c) || c == b'_' {
+            mut e = span_word(source, pos)
+            if e == pos { e = pos + 1 }   // a lone `_` wildcard
+            toks = teko::list::push(toks, FTok { kind = FTokKind::Word; text = slice(source, pos, e); glued = glued })
+            last_end = e
+            pos = e
+            continue
+        }
+        let n = punct_len(source, pos)
+        if n == 0 { return f_err("unexpected character") }
+        toks = teko::list::push(toks, FTok { kind = FTokKind::Punct; text = slice(source, pos, pos + n); glued = glued })
+        last_end = pos + n
+        pos = pos + n
+    }
+    toks
+}
+
+// ---------------------------------------------------------------------------
+// spacing rules
+// ---------------------------------------------------------------------------
+
+// reserved words (lexer::keyword_kind's table) — for spacing, `keyword (` keeps its
+// space (`return (x)`) while `ident (` is a call (`f(x)`). Contextual words
+// (`from`/`params`/`self`/`base`) are identifiers here, exactly as in the lexer.
+fn is_kw(t: str) -> bool {
+    if t == "fn" || t == "type" || t == "struct" || t == "enum" || t == "flags" { return true }
+    if t == "variant" || t == "let" || t == "mut" || t == "const" || t == "if" { return true }
+    if t == "else" || t == "loop" || t == "break" || t == "continue" || t == "return" { return true }
+    if t == "defer" || t == "match" || t == "when" || t == "in" || t == "as" { return true }
+    if t == "to" || t == "use" || t == "pub" || t == "exp" || t == "extern" { return true }
+    if t == "true" || t == "false" || t == "null" || t == "class" || t == "abstract" { return true }
+    if t == "virtual" || t == "override" || t == "intern" || t == "interface" { return true }
+    false
+}
+
+// can this token END an operand? (drives unary-vs-binary for `+`/`-`/`~`.)
+fn ends_operand(t: FTok) -> bool {
+    if t.kind == FTokKind::Num || t.kind == FTokKind::Strish { return true }
+    if t.kind == FTokKind::Word {
+        if t.text == "true" || t.text == "false" || t.text == "null" { return true }
+        return !is_kw(t.text)
+    }
+    if t.kind == FTokKind::Punct {
+        return t.text == ")" || t.text == "]" || t.text == "}" || t.text == "?" || t.text == "++" || t.text == "--"
+    }
+    false
+}
+
+fn is_opener(t: str) -> bool {
+    t == "(" || t == "[" || t == "{"
+}
+
+fn is_closer(t: str) -> bool {
+    t == ")" || t == "]" || t == "}"
+}
+
+// `<`/`>`/`<<`/`>>` are ambiguous (generics vs comparison vs shift) at token level:
+// their spacing PRESERVES the source's adjacency (tight stays tight; spaced → one space).
+fn is_angle(t: FTok) -> bool {
+    if t.kind != FTokKind::Punct { return false }
+    t.text == "<" || t.text == ">" || t.text == "<<" || t.text == ">>"
+}
+
