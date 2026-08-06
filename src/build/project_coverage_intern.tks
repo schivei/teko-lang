@@ -1,55 +1,52 @@
-// src/build/project.tks   (namespace 'teko::build')
+// use teko::checker
+// use teko::codegen
+// use teko::lir
 //
-// The PROJECT ORCHESTRATION entry layer — the canonical Teko ORIGINAL of the project
-// surfaces in src/driver.c (project_frontend / tk_compile_project / tk_run_project) and
-// the directory resolution in main.c (project_dir_of). main.tks dispatches here:
-//   teko build <dir>  → compile_project  (front-end → native codegen)
-//   teko run   <dir>  → run_project      (front-end → native codegen + execute, debug profile)
-//   teko <projarg>    → project_dir_of   (a `.tkp` → its dir; else the dir as-is)
+// // src/build/project.tks   (namespace 'teko::build')
+// //
+// // The PROJECT ORCHESTRATION entry layer — the canonical Teko ORIGINAL of the project
+// // surfaces in src/driver.c (project_frontend / tk_compile_project / tk_run_project) and
+// // the directory resolution in main.c (project_dir_of). main.tks dispatches here:
+// //   teko build <dir>  → compile_project  (front-end → native codegen)
+// //   teko run   <dir>  → run_project      (front-end → native codegen + execute, debug profile)
+// //   teko <projarg>    → project_dir_of   (a `.tkp` → its dir; else the dir as-is)
+// //
+// // FAITHFUL-NOT-LITERAL (M.3). It mirrors the C twins' SHAPE and contracts in native Teko:
+// // the C uses out-params (project_frontend(dir, &prog, &manifest)); Teko has NO out-params,
+// // so the shared front-end returns a small `Frontend` struct (prog + manifest), as
+// // `Frontend | error`. Both entries (build/run) run the SAME front-end AND the SAME
+// // codegen→cc backend; `run` additionally executes the resulting binary (the interpreter this once
+// // diverged to is retired, #524).
 //
-// FAITHFUL-NOT-LITERAL (M.3). It mirrors the C twins' SHAPE and contracts in native Teko:
-// the C uses out-params (project_frontend(dir, &prog, &manifest)); Teko has NO out-params,
-// so the shared front-end returns a small `Frontend` struct (prog + manifest), as
-// `Frontend | error`. Both entries (build/run) run the SAME front-end AND the SAME
-// codegen→cc backend; `run` additionally executes the resulting binary (the interpreter this once
-// diverged to is retired, #524).
-
-use teko::parser
-use teko::lexer
-use teko::checker
-use teko::codegen
-use teko::emit
-use teko::compress
-use teko::coverage
-
- * E4, the loose-statement delta E6, the new-lifted count E5), THEN drop the region — bounding the
- * Windows native peak to `Σ(bytes) + rodata + ONE item's LIR/scratch`, mirroring the x86-linux
- * fusion of C6.3 (the win64 register file — call/return arguments in RCX/RDX/R8/R9 — is the ONLY
- * byte-difference from `emit_native_x86`; the x86 ISA itself, and the encoded machine bytes for any
- * shared instruction, are identical). The virtual-main lowers and encodes the same way, in its own
- * final window, once every item's region has already dropped. The assembled `.text`/rodata/symbols
- * are wrapped in a PE/COFF object (`teko::backend::emit_coff`, B3-3) and handed to
- * `finish_native_object` (write `.o` + `cc`-link + `.tsym` + success marker) — unchanged past the
- * encoder, so the emitted bytes are byte-identical to the pre-fusion module-at-a-time path (only
- * WHERE the compiler's own intermediates bump-allocate changes, never their computed values).
- * Reached only via `TEKO_TARGET=x86_64-windows`; the emitted `.o` is a Windows
- * x86-64 object, so the executing C-vs-own differential runs on a Windows host
- * (B3-4), while a non-Windows host still writes the `.o` for the byte /
- * well-formedness cross-check (`llvm-readobj` is cross-format) even though the
- * host `cc` cannot link a PE there without the MinGW cross toolchain. Takes NO
- * `debug` parameter: the COFF DWARF sink is `W0`…`W2` (`docs/design/debugger-
- * superficie-e-contramedida-0.3.1.md` §9.4), a separate, still-unstarted crumb
- * gated on a Windows-CI-only linker-survival sondagem — out of D1.4/D1.5's
- * ELF/Mach-O scope. `emit_native` calls this tail without `debug`, so a
- * `--debug=lines` Windows build silently gets no DWARF (same as today).
- *
- * @param dir   the project directory (for diagnostics)
- * @param od    the slash-stripped output directory (already created)
- * @param stem  the output artifact name (the manifest `name`)
- * @param prog  the checked, typed program (lowered item-by-item, not up front — C6.4)
- * @param m     the resolved manifest (link knobs)
- * @return      0 on a successful build+link, else the failing status
- */
+//
+// E4, the loose-statement delta E6, the new-lifted count E5), THEN drop the region — bounding the
+// Windows native peak to `Σ(bytes) + rodata + ONE item's LIR/scratch`, mirroring the x86-linux
+// fusion of C6.3 (the win64 register file — call/return arguments in RCX/RDX/R8/R9 — is the ONLY
+// byte-difference from `emit_native_x86`; the x86 ISA itself, and the encoded machine bytes for any
+// shared instruction, are identical). The virtual-main lowers and encodes the same way, in its own
+// final window, once every item's region has already dropped. The assembled `.text`/rodata/symbols
+// are wrapped in a PE/COFF object (`teko::backend::emit_coff`, B3-3) and handed to
+// `finish_native_object` (write `.o` + `cc`-link + `.tsym` + success marker) — unchanged past the
+// encoder, so the emitted bytes are byte-identical to the pre-fusion module-at-a-time path (only
+// WHERE the compiler's own intermediates bump-allocate changes, never their computed values).
+// Reached only via `TEKO_TARGET=x86_64-windows`; the emitted `.o` is a Windows
+// x86-64 object, so the executing C-vs-own differential runs on a Windows host
+// (B3-4), while a non-Windows host still writes the `.o` for the byte /
+// well-formedness cross-check (`llvm-readobj` is cross-format) even though the
+// host `cc` cannot link a PE there without the MinGW cross toolchain. Takes NO
+// `debug` parameter: the COFF DWARF sink is `W0`…`W2` (`docs/design/debugger-
+// superficie-e-contramedida-0.3.1.md` §9.4), a separate, still-unstarted crumb
+// gated on a Windows-CI-only linker-survival sondagem — out of D1.4/D1.5's
+// ELF/Mach-O scope. `emit_native` calls this tail without `debug`, so a
+// `--debug=lines` Windows build silently gets no DWARF (same as today).
+//
+// @param dir   the project directory (for diagnostics)
+// @param od    the slash-stripped output directory (already created)
+// @param stem  the output artifact name (the manifest `name`)
+// @param prog  the checked, typed program (lowered item-by-item, not up front — C6.4)
+// @param m     the resolved manifest (link knobs)
+// @return      0 on a successful build+link, else the failing status
+//
 fn emit_native_win(dir: str, od: str, stem: str, prog: checker::TProgram, m: Manifest) -> i32 {
     let prelude = match teko::lir::lower_prelude(prog, false) { teko::lir::LowerPrelude as x => x; error as e => return fail(dir, e.message) }
     mut robase = prelude.module.rodata

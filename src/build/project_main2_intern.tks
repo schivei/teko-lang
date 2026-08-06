@@ -1,31 +1,24 @@
-// src/build/project.tks   (namespace 'teko::build')
+// // src/build/project.tks   (namespace 'teko::build')
+// //
+// // The PROJECT ORCHESTRATION entry layer — the canonical Teko ORIGINAL of the project
+// // surfaces in src/driver.c (project_frontend / tk_compile_project / tk_run_project) and
+// // the directory resolution in main.c (project_dir_of). main.tks dispatches here:
+// //   teko build <dir>  → compile_project  (front-end → native codegen)
+// //   teko run   <dir>  → run_project      (front-end → native codegen + execute, debug profile)
+// //   teko <projarg>    → project_dir_of   (a `.tkp` → its dir; else the dir as-is)
+// //
+// // FAITHFUL-NOT-LITERAL (M.3). It mirrors the C twins' SHAPE and contracts in native Teko:
+// // the C uses out-params (project_frontend(dir, &prog, &manifest)); Teko has NO out-params,
+// // so the shared front-end returns a small `Frontend` struct (prog + manifest), as
+// // `Frontend | error`. Both entries (build/run) run the SAME front-end AND the SAME
+// // codegen→cc backend; `run` additionally executes the resulting binary (the interpreter this once
+// // diverged to is retired, #524).
 //
-// The PROJECT ORCHESTRATION entry layer — the canonical Teko ORIGINAL of the project
-// surfaces in src/driver.c (project_frontend / tk_compile_project / tk_run_project) and
-// the directory resolution in main.c (project_dir_of). main.tks dispatches here:
-//   teko build <dir>  → compile_project  (front-end → native codegen)
-//   teko run   <dir>  → run_project      (front-end → native codegen + execute, debug profile)
-//   teko <projarg>    → project_dir_of   (a `.tkp` → its dir; else the dir as-is)
 //
-// FAITHFUL-NOT-LITERAL (M.3). It mirrors the C twins' SHAPE and contracts in native Teko:
-// the C uses out-params (project_frontend(dir, &prog, &manifest)); Teko has NO out-params,
-// so the shared front-end returns a small `Frontend` struct (prog + manifest), as
-// `Frontend | error`. Both entries (build/run) run the SAME front-end AND the SAME
-// codegen→cc backend; `run` additionally executes the resulting binary (the interpreter this once
-// diverged to is retired, #524).
-
-use teko::parser
-use teko::lexer
-use teko::checker
-use teko::codegen
-use teko::emit
-use teko::compress
-use teko::coverage
-
- * @param exe    this compiler binary's absolute path
- * @return       the child's exit status, or `STAGE_SELECT_FAILED` when the selector cannot be set
- * @since 0.3.1.0
- */
+// @param exe    this compiler binary's absolute path
+// @return       the child's exit status, or `STAGE_SELECT_FAILED` when the selector cannot be set
+// @since 0.3.1.0
+//
 fn run_test_stage(stage: str, exe: str) -> i32 {
     if !env_visible_to_children(TEST_STAGE_ENV, stage) { return report_stage_select_failure(stage) }
     teko::io::flush()
@@ -117,17 +110,18 @@ fn self_stage_argv(exe: str) -> []str {
     out
 }
 
-/**
- * test_gate_precedence — `test_project`'s combined failing status, in PRECEDENCE order, extracted
- * to a pure function so the invariant this fixes (owner-observed run `30400712261`: a crashed unit
- * gate used to return IMMEDIATELY, skipping the regression tier's run entirely — the tier's own
- * report went missing, not merely failed) is provable without a real build. The gate's own status
- * (`trc`) is still the highest-precedence failure, UNCHANGED; only the caller's control flow moved,
- * computing `floor_rc`/`per_commit_rc`/`regr_rc` before ever consulting `trc`, so their reports are
- * never swallowed by an earlier return.
- *
- * @param trc            the unit-test gate's own exit status (0 = every `#test` passed)
- * @param floor_rc       the D4 coverage-floor policy's status (0 when it was never consulted)
- * @param per_commit_rc  the delta-coverage enforcer's status (0 when `--per-commit-test` was absent)
- * @param has_regr       whether the manifest declares `[tests] regression` files at all
- * @param regr_rc        the regression tier's own exit status (ignored when `has_regr` is false)
+//
+// test_gate_precedence — `test_project`'s combined failing status, in PRECEDENCE order, extracted
+// to a pure function so the invariant this fixes (owner-observed run `30400712261`: a crashed unit
+// gate used to return IMMEDIATELY, skipping the regression tier's run entirely — the tier's own
+// report went missing, not merely failed) is provable without a real build. The gate's own status
+// (`trc`) is still the highest-precedence failure, UNCHANGED; only the caller's control flow moved,
+// computing `floor_rc`/`per_commit_rc`/`regr_rc` before ever consulting `trc`, so their reports are
+// never swallowed by an earlier return.
+//
+// @param trc            the unit-test gate's own exit status (0 = every `#test` passed)
+// @param floor_rc       the D4 coverage-floor policy's status (0 when it was never consulted)
+// @param per_commit_rc  the delta-coverage enforcer's status (0 when `--per-commit-test` was absent)
+// @param has_regr       whether the manifest declares `[tests] regression` files at all
+// @param regr_rc        the regression tier's own exit status (ignored when `has_regr` is false)
+//

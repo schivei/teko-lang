@@ -1,38 +1,38 @@
-/**
- * objfile_ar_coff.tks — the Microsoft COFF `.lib` static-archive writer, the
- * `lib.exe` sibling of `objfile_ar.tks` (KP16's GNU-format ELF writer) and
- * `objfile_ar_macho.tks` (the BSD-format writer). Ported from the
- * `theory/kp16-ar-macho-coff` validation branch (tip 3798ab4c, run d44f63c9 =
- * SUCCESS on a real Windows runner: `lld-link` accepted this writer's output
- * AND LINKED+RAN a consumer against it) into the official `emit_static_lib`
- * dispatch (`src/build/project.tks`'s `X8664Windows` arm) once real-toolchain
- * validation closed KP16's MS two-linker-member `.lib` honest stop.
- *
- * A COFF `.lib` shares the GNU `!<arch>\n` global header, the generic 60-byte
- * `ar_hdr`, and the GNU short-inline-name / `"//"`-longnames-member convention
- * for its REAL object members (all reused from `objfile_ar.tks`: `AR_GLOBAL_
- * HEADER`, `ar_header`, `ar_member_name_field`, `emit_ar_member`,
- * `ar_member_offsets`), but PREPENDS two synthetic "linker member"s ahead of
- * any real member (PE/COFF spec, "Archive (Import) Library Format"):
- *
- *   1. the FIRST linker member (`Name = "/"`): byte-identical in WIRE SHAPE to
- *      GNU's own `"/"` symbol table (`ar_symtab_data_size`/`build_ar_symtab_
- *      data`, reused as-is) — a big-endian symbol count, one big-endian
- *      per-symbol member-header-offset, then the NUL-terminated names, in
- *      caller (member-declaration) order.
- *   2. the SECOND linker member (`Name = "/"`, a second `/`-named member —
- *      resolved by ARCHIVE POSITION, not by a distinct name): a little-endian
- *      member count + one little-endian member-header-offset per member (the
- *      "member table"), a little-endian symbol count + one little-endian
- *      1-BASED member-table INDEX per symbol (SORTED ALPHABETICALLY — the
- *      point of this member: `lib.exe`/`link.exe` binary-search it), then the
- *      NUL-terminated names in that same sorted order.
- *
- * Then, optionally, the GNU-compatible `"//"` longnames member (any real
- * member name over 15 bytes — unreached by KP16's sole producer, whose member
- * name is always `"<stem>.o"`, covered by a direct unit test), then the real
- * members themselves.
- */
+//
+// objfile_ar_coff.tks — the Microsoft COFF `.lib` static-archive writer, the
+// `lib.exe` sibling of `objfile_ar.tks` (KP16's GNU-format ELF writer) and
+// `objfile_ar_macho.tks` (the BSD-format writer). Ported from the
+// `theory/kp16-ar-macho-coff` validation branch (tip 3798ab4c, run d44f63c9 =
+// SUCCESS on a real Windows runner: `lld-link` accepted this writer's output
+// AND LINKED+RAN a consumer against it) into the official `emit_static_lib`
+// dispatch (`src/build/project.tks`'s `X8664Windows` arm) once real-toolchain
+// validation closed KP16's MS two-linker-member `.lib` honest stop.
+//
+// A COFF `.lib` shares the GNU `!<arch>\n` global header, the generic 60-byte
+// `ar_hdr`, and the GNU short-inline-name / `"//"`-longnames-member convention
+// for its REAL object members (all reused from `objfile_ar.tks`: `AR_GLOBAL_
+// HEADER`, `ar_header`, `ar_member_name_field`, `emit_ar_member`,
+// `ar_member_offsets`), but PREPENDS two synthetic "linker member"s ahead of
+// any real member (PE/COFF spec, "Archive (Import) Library Format"):
+//
+// 1. the FIRST linker member (`Name = "/"`): byte-identical in WIRE SHAPE to
+// GNU's own `"/"` symbol table (`ar_symtab_data_size`/`build_ar_symtab_
+// data`, reused as-is) — a big-endian symbol count, one big-endian
+// per-symbol member-header-offset, then the NUL-terminated names, in
+// caller (member-declaration) order.
+// 2. the SECOND linker member (`Name = "/"`, a second `/`-named member —
+// resolved by ARCHIVE POSITION, not by a distinct name): a little-endian
+// member count + one little-endian member-header-offset per member (the
+// "member table"), a little-endian symbol count + one little-endian
+// 1-BASED member-table INDEX per symbol (SORTED ALPHABETICALLY — the
+// point of this member: `lib.exe`/`link.exe` binary-search it), then the
+// NUL-terminated names in that same sorted order.
+//
+// Then, optionally, the GNU-compatible `"//"` longnames member (any real
+// member name over 15 bytes — unreached by KP16's sole producer, whose member
+// name is always `"<stem>.o"`, covered by a direct unit test), then the real
+// members themselves.
+//
 
 
 /**
@@ -68,15 +68,15 @@ const COFF_LIB_LONGNAME_TERMINATOR: byte = 0 to byte
  * GNU-compatible `"/<offset>"` reference.
  */
 type CoffLibLongnames = struct {
-    /**
-     * bytes — the `"//"` member's payload (only long names; empty when every
-     * member name is inline-sized).
-     */
+//
+// bytes — the `"//"` member's payload (only long names; empty when every
+// member name is inline-sized).
+//
     bytes: []byte
-    /**
-     * name_fields — each member's resolved 16-byte `Name` field text, member
-     * order.
-     */
+//
+// name_fields — each member's resolved 16-byte `Name` field text, member
+// order.
+//
     name_fields: []str
 }
 

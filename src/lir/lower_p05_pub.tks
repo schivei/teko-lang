@@ -1,3 +1,4 @@
+use teko::checker
 
 /**
  * LoopTargets — one active `loop`'s break/continue jump targets (A1-2,
@@ -66,84 +67,84 @@ pub type LowerCtx = struct {
     defers: []checker::TDeferStmt; loop_targets: []LoopTargets; externs: []LExternFn
     flat_symbols: bool; ret_type: checker::Type
     has_ret_len_slot: bool; ret_len_slot: u32
-    /**
-     * variants — the program's declared-`variant` table, threaded read-only exactly like `enums`:
-     * the ONE place `expand_named_variant` turns a nominal `Named` back into the union it declares,
-     * so a value's wrapper and a `match` arm's tag test agree on the member list.
-     */
+//
+// variants — the program's declared-`variant` table, threaded read-only exactly like `enums`:
+// the ONE place `expand_named_variant` turns a nominal `Named` back into the union it declares,
+// so a value's wrapper and a `match` arm's tag test agree on the member list.
+//
     variants: []LVariantDef
-    /**
-     * ref_fns — the whole program's `ref<T>` PARAMETER-position table (0.3.1.0 degrau 18),
-     * threaded read-only exactly like `enums`/`variants`: `lower_call`'s ONE place to ask "does
-     * THIS callee auto-ref one of its arguments?" (`find_ref_flags`), built ONCE
-     * (`collect_ref_fns`) rather than re-scanning the program per call site.
-     */
+//
+// ref_fns — the whole program's `ref<T>` PARAMETER-position table (0.3.1.0 degrau 18),
+// threaded read-only exactly like `enums`/`variants`: `lower_call`'s ONE place to ask "does
+// THIS callee auto-ref one of its arguments?" (`find_ref_flags`), built ONCE
+// (`collect_ref_fns`) rather than re-scanning the program per call site.
+//
     ref_fns: []LRefFnInfo
-    /**
-     * field_decls — the whole program's DECLARED-field-type table (0.3.1.0 degrau 25), threaded
-     * read-only exactly like `variants`/`ref_fns`: the ONE place a struct-literal field store asks
-     * "what type does this field DECLARE?" (`find_field_decl_type`), so the value written there is
-     * coerced into it (`lower_value_into_type`) like every other placement's value is.
-     */
+//
+// field_decls — the whole program's DECLARED-field-type table (0.3.1.0 degrau 25), threaded
+// read-only exactly like `variants`/`ref_fns`: the ONE place a struct-literal field store asks
+// "what type does this field DECLARE?" (`find_field_decl_type`), so the value written there is
+// coerced into it (`lower_value_into_type`) like every other placement's value is.
+//
     field_decls: []LFieldDecls
-    /**
-     * addr_taken — the CURRENT function's own address-taken `mut` scalar local names (0.3.1.0
-     * degrau 18): every name `collect_addr_taken_locals` found passed as a `ref<T>` call
-     * argument anywhere in this function's body, computed ONCE before the body lowers. A name in
-     * this set binds through a memory slot (`lenv_bind_scalar_slot`) instead of a plain VReg —
-     * see `lower_binding`.
-     */
+//
+// addr_taken — the CURRENT function's own address-taken `mut` scalar local names (0.3.1.0
+// degrau 18): every name `collect_addr_taken_locals` found passed as a `ref<T>` call
+// argument anywhere in this function's body, computed ONCE before the body lowers. A name in
+// this set binds through a memory slot (`lenv_bind_scalar_slot`) instead of a plain VReg —
+// see `lower_binding`.
+//
     addr_taken: []str
-    /**
-     * table — the program's type table (`checker::type_table_of(prog)`), threaded read-only
-     * exactly like `variants`/`field_decls`: the ONE place `lower_mem_free_call` asks the checker's
-     * structural probes `checker::is_region_handle_name`/`region_handle_field_name` whether a
-     * `teko::mem::free` argument is a manual region handle and, if so, which field carries its
-     * `uptr`, so the native `free` routes to `tk_region_drop_subtree` on exactly the same shape the
-     * C route does.
-     */
+//
+// table — the program's type table (`checker::type_table_of(prog)`), threaded read-only
+// exactly like `variants`/`field_decls`: the ONE place `lower_mem_free_call` asks the checker's
+// structural probes `checker::is_region_handle_name`/`region_handle_field_name` whether a
+// `teko::mem::free` argument is a manual region handle and, if so, which field carries its
+// `uptr`, so the native `free` routes to `tk_region_drop_subtree` on exactly the same shape the
+// C route does.
+//
     table: checker::TypeTable
-    /**
-     * region_stack — the stack of OPEN lexical regions (the frame + blocks/loops/arms), outermost
-     * (index 0, the frame) to innermost (the top). `tk_alloc`'s current is the TOP's handle;
-     * `region_current_vreg` reads it, and a `Scope`-tier accumulator's self-append consults this
-     * stack by `decl_name` to route its growth to the DECLARING region (the N-level selector) rather
-     * than the innermost current — else the buffer would die per-iteration in an inner loop (UAF).
-     * Twin of the C route's `regions: []RegionFrame` threaded by parameter (`codegen.tks`); here it
-     * lives on `LowerCtx` because the native backend threads one context. Empty until the frame
-     * opens; unconsumed until NP3.
-     */
+//
+// region_stack — the stack of OPEN lexical regions (the frame + blocks/loops/arms), outermost
+// (index 0, the frame) to innermost (the top). `tk_alloc`'s current is the TOP's handle;
+// `region_current_vreg` reads it, and a `Scope`-tier accumulator's self-append consults this
+// stack by `decl_name` to route its growth to the DECLARING region (the N-level selector) rather
+// than the innermost current — else the buffer would die per-iteration in an inner loop (UAF).
+// Twin of the C route's `regions: []RegionFrame` threaded by parameter (`codegen.tks`); here it
+// lives on `LowerCtx` because the native backend threads one context. Empty until the frame
+// opens; unconsumed until NP3.
+//
     region_stack: []NativeRegionFrame
-    /**
-     * escaping — the CURRENT function's `checker::fn_escaping_vars(f)` set (`escape.tks`), computed
-     * ONCE in `lower_function` exactly like `addr_taken`. The conservative superset of the names that
-     * escape the frame; consumed by `binding_conveys_escape` to decide which RHS to bracket
-     * (`enter(rr)…leave()`, the move-on-return conveyance) and by `own_returned_value` (the
-     * `leave`-before-the-box). Reads the SAME oracle the C route reads — no native-only analysis, no
-     * possible divergence.
-     */
+//
+// escaping — the CURRENT function's `checker::fn_escaping_vars(f)` set (`escape.tks`), computed
+// ONCE in `lower_function` exactly like `addr_taken`. The conservative superset of the names that
+// escape the frame; consumed by `binding_conveys_escape` to decide which RHS to bracket
+// (`enter(rr)…leave()`, the move-on-return conveyance) and by `own_returned_value` (the
+// `leave`-before-the-box). Reads the SAME oracle the C route reads — no native-only analysis, no
+// possible divergence.
+//
     escaping: []str
-    /**
-     * frees_old_names — computed ONCE in `lower_function` exactly like `escaping`/`addr_taken`. The
-     * set of accumulator names whose linear-chain proof holds (`checker::fn_frees_old_vars`), so a
-     * self-append to one may FREE-OLD on grow. The C emitter re-derives this per-assign from the
-     * enclosing body; the native push site has no body, so it reads this precomputed oracle — the
-     * SAME `assign_frees_old` proof the C route trusts, no native-only analysis, no divergence.
-     */
+//
+// frees_old_names — computed ONCE in `lower_function` exactly like `escaping`/`addr_taken`. The
+// set of accumulator names whose linear-chain proof holds (`checker::fn_frees_old_vars`), so a
+// self-append to one may FREE-OLD on grow. The C emitter re-derives this per-assign from the
+// enclosing body; the native push site has no body, so it reads this precomputed oracle — the
+// SAME `assign_frees_old` proof the C route trusts, no native-only analysis, no divergence.
+//
     frees_old_names: []str
-    /**
-     * bracket_depth — how many conveyance brackets (`lower_binding_conveyed`/`lower_assign_conveyed`/
-     * `lower_conveyed_tail_expr_stmt_fat`, NP3b/NP4) are CURRENTLY open around the statement being
-     * lowered. `0` outside any bracket. A bracket that finds `bracket_depth > 0` is ALREADY nested
-     * inside an outer one — the outer bracket's own `emit_region_leaves` already moved `current` down
-     * to the conveyance anchor for this WHOLE subtree, so the inner bracket does NOT leave/enter again
-     * (that would incorrectly `tk_region_enter_u` the FRAME region back in the middle of the outer
-     * bracket's still-open span, corrupting the outer bracket's own resume state — the twin of the C
-     * route's `dctx.bracket_depth == 0` re-bracket guard, `codegen.tks`, `emit_stmt`). Threaded like
-     * `region_stack`/`escaping` rather than as a bare boolean because it is the SAME "how many opens
-     * are outstanding" shape those two already establish.
-     * @since 0.3.1
-     */
+//
+// bracket_depth — how many conveyance brackets (`lower_binding_conveyed`/`lower_assign_conveyed`/
+// `lower_conveyed_tail_expr_stmt_fat`, NP3b/NP4) are CURRENTLY open around the statement being
+// lowered. `0` outside any bracket. A bracket that finds `bracket_depth > 0` is ALREADY nested
+// inside an outer one — the outer bracket's own `emit_region_leaves` already moved `current` down
+// to the conveyance anchor for this WHOLE subtree, so the inner bracket does NOT leave/enter again
+// (that would incorrectly `tk_region_enter_u` the FRAME region back in the middle of the outer
+// bracket's still-open span, corrupting the outer bracket's own resume state — the twin of the C
+// route's `dctx.bracket_depth == 0` re-bracket guard, `codegen.tks`, `emit_stmt`). Threaded like
+// `region_stack`/`escaping` rather than as a bare boolean because it is the SAME "how many opens
+// are outstanding" shape those two already establish.
+// @since 0.3.1
+//
     bracket_depth: u32
 }
 

@@ -1,46 +1,42 @@
-// src/build/project.tks   (namespace 'teko::build')
+// use teko::checker
+// use teko::coverage
 //
-// The PROJECT ORCHESTRATION entry layer — the canonical Teko ORIGINAL of the project
-// surfaces in src/driver.c (project_frontend / tk_compile_project / tk_run_project) and
-// the directory resolution in main.c (project_dir_of). main.tks dispatches here:
-//   teko build <dir>  → compile_project  (front-end → native codegen)
-//   teko run   <dir>  → run_project      (front-end → native codegen + execute, debug profile)
-//   teko <projarg>    → project_dir_of   (a `.tkp` → its dir; else the dir as-is)
+// // src/build/project.tks   (namespace 'teko::build')
+// //
+// // The PROJECT ORCHESTRATION entry layer — the canonical Teko ORIGINAL of the project
+// // surfaces in src/driver.c (project_frontend / tk_compile_project / tk_run_project) and
+// // the directory resolution in main.c (project_dir_of). main.tks dispatches here:
+// //   teko build <dir>  → compile_project  (front-end → native codegen)
+// //   teko run   <dir>  → run_project      (front-end → native codegen + execute, debug profile)
+// //   teko <projarg>    → project_dir_of   (a `.tkp` → its dir; else the dir as-is)
+// //
+// // FAITHFUL-NOT-LITERAL (M.3). It mirrors the C twins' SHAPE and contracts in native Teko:
+// // the C uses out-params (project_frontend(dir, &prog, &manifest)); Teko has NO out-params,
+// // so the shared front-end returns a small `Frontend` struct (prog + manifest), as
+// // `Frontend | error`. Both entries (build/run) run the SAME front-end AND the SAME
+// // codegen→cc backend; `run` additionally executes the resulting binary (the interpreter this once
+// // diverged to is retired, #524).
 //
-// FAITHFUL-NOT-LITERAL (M.3). It mirrors the C twins' SHAPE and contracts in native Teko:
-// the C uses out-params (project_frontend(dir, &prog, &manifest)); Teko has NO out-params,
-// so the shared front-end returns a small `Frontend` struct (prog + manifest), as
-// `Frontend | error`. Both entries (build/run) run the SAME front-end AND the SAME
-// codegen→cc backend; `run` additionally executes the resulting binary (the interpreter this once
-// diverged to is retired, #524).
-
-use teko::parser
-use teko::lexer
-use teko::checker
-use teko::codegen
-use teko::emit
-use teko::compress
-use teko::coverage
-
- * light file-join process. The typed program is re-loaded ONLY for the dev-time `--per-test-cov`
- * and `--analyzer` flags (never on any CI path), and lazily, so the gate path holds no AST at all.
- *
- * The Cobertura snapshot taken between the two merges is the PRE-REGRESSION picture the
- * `--per-commit-test` delta gate compares against, exactly as the single-process driver took it
- * between the gate and the tier — now rendered from the site-map, so byte-identical without the AST.
- *
- * @param dir              the project directory
- * @param gen_cov          `--coverage` — write the Cobertura report next to the project root
- * @param cov_validation   `--cov-validation` — enforce (fail) the coverage floors instead of warning
- * @param per_test_cov     `--per-test-cov` — also print the dev-time per-test attribution report
- * @param per_commit_base  `--per-commit-test <base>` — the git base for the delta gate ("" = no-op)
- * @param analyzer         `--analyzer` — run the dev-time stale/redundant analyzer
- * @param arith_cast_gate  `--arith-cast-gate` — enforce the D4 ARITH-CAST-RATE ceiling
- * @return                 the run's final status, in the historic precedence order
- * @throws                 the manifest/site-map read error, the Cobertura write failure, or a shard
- *                          that left no coverage dump (`merge_gate_coverage`, J4 §2.4)
- * @since 0.3.1.0
- */
+//
+// light file-join process. The typed program is re-loaded ONLY for the dev-time `--per-test-cov`
+// and `--analyzer` flags (never on any CI path), and lazily, so the gate path holds no AST at all.
+//
+// The Cobertura snapshot taken between the two merges is the PRE-REGRESSION picture the
+// `--per-commit-test` delta gate compares against, exactly as the single-process driver took it
+// between the gate and the tier — now rendered from the site-map, so byte-identical without the AST.
+//
+// @param dir              the project directory
+// @param gen_cov          `--coverage` — write the Cobertura report next to the project root
+// @param cov_validation   `--cov-validation` — enforce (fail) the coverage floors instead of warning
+// @param per_test_cov     `--per-test-cov` — also print the dev-time per-test attribution report
+// @param per_commit_base  `--per-commit-test <base>` — the git base for the delta gate ("" = no-op)
+// @param analyzer         `--analyzer` — run the dev-time stale/redundant analyzer
+// @param arith_cast_gate  `--arith-cast-gate` — enforce the D4 ARITH-CAST-RATE ceiling
+// @return                 the run's final status, in the historic precedence order
+// @throws                 the manifest/site-map read error, the Cobertura write failure, or a shard
+// that left no coverage dump (`merge_gate_coverage`, J4 §2.4)
+// @since 0.3.1.0
+//
 fn test_stage_report(dir: str, gen_cov: bool, cov_validation: bool, per_test_cov: bool, per_commit_base: str, analyzer: bool, arith_cast_gate: bool) -> i32 {
     let trc = stage_rc_of_env(TEST_GATE_RC_ENV)
     let regr_rc = stage_rc_of_env(TEST_REGR_RC_ENV)
@@ -122,12 +118,13 @@ fn recheck_frontend_here(dir: str) -> Frontend | error {
     }
 }
 
-/**
- * run_test_stage — re-invoke THIS binary for `stage`, with the argv the user typed. Everything the
- * child needs beyond that is the stage selector and the two statuses, all in the environment.
- *
- * stdout is flushed FIRST: it is block-buffered whenever it is not a terminal, and the child
- * writes to the same file description, so an unflushed line would land after the child's output
- * and the log would read out of order.
- *
- * @param stage  `TEST_STAGE_BUILD`, `TEST_STAGE_REGR`, or `TEST_STAGE_REPORT`
+//
+// run_test_stage — re-invoke THIS binary for `stage`, with the argv the user typed. Everything the
+// child needs beyond that is the stage selector and the two statuses, all in the environment.
+//
+// stdout is flushed FIRST: it is block-buffered whenever it is not a terminal, and the child
+// writes to the same file description, so an unflushed line would land after the child's output
+// and the log would read out of order.
+//
+// @param stage  `TEST_STAGE_BUILD`, `TEST_STAGE_REGR`, or `TEST_STAGE_REPORT`
+//

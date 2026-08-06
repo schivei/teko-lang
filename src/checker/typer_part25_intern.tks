@@ -1,3 +1,5 @@
+use teko::parser
+
 // src/checker/typer.tks  (namespace 'teko::checker')
 // Each check_* (E4/E5) EVOLVES into a type_*: the SAME checks (B.22 regimes, B.20
 // `if`, B.15 `match` + exhaustiveness), but the producer BUILDS the typed node
@@ -5,30 +7,28 @@
 // resolvers (resolve_type), env (lookup/define) and the pattern + exhaustiveness
 // logic (check_pattern/exhaustive) are reused from their stages — re-derivation,
 // not duplication (M.5). C1: every node, statement and item re-derived.
-use teko::lexer
-use teko::parser
 
 
-/**
- * (OOP A1, 2026-07-01) Type-check a struct/class METHOD's BODY. Mirrors type_function, except the
- * RECEIVER param (`has_type=false`, only ever index 0) binds to `Named{struct_name}` instead of going
- * through resolve_type (its type is implicit, never written by the user). (#254) The method's
- * type-param table is PREPENDED with the enclosing type's own params, so a body referencing `T`
- * resolves against the owner's `T` — a NO-OP for a non-generic owner.
- *
- * @param f                  the method to type-check
- * @param struct_name        the enclosing type name (bare from the caller; canonicalized here)
- * @param env                the typing environment
- * @param table              the folded type table
- * @param has_base_binding   does the class expose a named base-object binding to this method?
- * @param base_binding_name  the base-binding local name (valid iff has_base_binding)
- * @param base_name          the (canonical) base class name (valid iff has_base_binding)
- * @param declaring_class    the class that ORIGINALLY declared this body (intern/private access ctx)
- * @return                   the typed method as a TFunction (namespace stamped by the caller)
- *                           or (U2, §2 line 72) a local/param/return of unsafe type when neither
- *                           the method's own `is_unsafe` nor its owning type's is set — a method
- *                           inherits its OWNER type's unsafe-ness (`method_is_effective_unsafe`)
- */
+//
+// (OOP A1, 2026-07-01) Type-check a struct/class METHOD's BODY. Mirrors type_function, except the
+// RECEIVER param (`has_type=false`, only ever index 0) binds to `Named{struct_name}` instead of going
+// through resolve_type (its type is implicit, never written by the user). (#254) The method's
+// type-param table is PREPENDED with the enclosing type's own params, so a body referencing `T`
+// resolves against the owner's `T` — a NO-OP for a non-generic owner.
+//
+// @param f                  the method to type-check
+// @param struct_name        the enclosing type name (bare from the caller; canonicalized here)
+// @param env                the typing environment
+// @param table              the folded type table
+// @param has_base_binding   does the class expose a named base-object binding to this method?
+// @param base_binding_name  the base-binding local name (valid iff has_base_binding)
+// @param base_name          the (canonical) base class name (valid iff has_base_binding)
+// @param declaring_class    the class that ORIGINALLY declared this body (intern/private access ctx)
+// @return                   the typed method as a TFunction (namespace stamped by the caller)
+// or (U2, §2 line 72) a local/param/return of unsafe type when neither
+// the method's own `is_unsafe` nor its owning type's is set — a method
+// inherits its OWNER type's unsafe-ness (`method_is_effective_unsafe`)
+//
 /**
  * canonical_base_type — the CANONICAL type of the injected `base` handle a subclass method reaches
  * its inherited members through (#109 W3 / #152). `base_name` arrives PRE-QUALIFIED from

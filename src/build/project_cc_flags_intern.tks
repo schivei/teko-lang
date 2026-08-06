@@ -1,32 +1,27 @@
-// src/build/project.tks   (namespace 'teko::build')
+// use teko::checker
 //
-// The PROJECT ORCHESTRATION entry layer — the canonical Teko ORIGINAL of the project
-// surfaces in src/driver.c (project_frontend / tk_compile_project / tk_run_project) and
-// the directory resolution in main.c (project_dir_of). main.tks dispatches here:
-//   teko build <dir>  → compile_project  (front-end → native codegen)
-//   teko run   <dir>  → run_project      (front-end → native codegen + execute, debug profile)
-//   teko <projarg>    → project_dir_of   (a `.tkp` → its dir; else the dir as-is)
+// // src/build/project.tks   (namespace 'teko::build')
+// //
+// // The PROJECT ORCHESTRATION entry layer — the canonical Teko ORIGINAL of the project
+// // surfaces in src/driver.c (project_frontend / tk_compile_project / tk_run_project) and
+// // the directory resolution in main.c (project_dir_of). main.tks dispatches here:
+// //   teko build <dir>  → compile_project  (front-end → native codegen)
+// //   teko run   <dir>  → run_project      (front-end → native codegen + execute, debug profile)
+// //   teko <projarg>    → project_dir_of   (a `.tkp` → its dir; else the dir as-is)
+// //
+// // FAITHFUL-NOT-LITERAL (M.3). It mirrors the C twins' SHAPE and contracts in native Teko:
+// // the C uses out-params (project_frontend(dir, &prog, &manifest)); Teko has NO out-params,
+// // so the shared front-end returns a small `Frontend` struct (prog + manifest), as
+// // `Frontend | error`. Both entries (build/run) run the SAME front-end AND the SAME
+// // codegen→cc backend; `run` additionally executes the resulting binary (the interpreter this once
+// // diverged to is retired, #524).
 //
-// FAITHFUL-NOT-LITERAL (M.3). It mirrors the C twins' SHAPE and contracts in native Teko:
-// the C uses out-params (project_frontend(dir, &prog, &manifest)); Teko has NO out-params,
-// so the shared front-end returns a small `Frontend` struct (prog + manifest), as
-// `Frontend | error`. Both entries (build/run) run the SAME front-end AND the SAME
-// codegen→cc backend; `run` additionally executes the resulting binary (the interpreter this once
-// diverged to is retired, #524).
-
-use teko::parser
-use teko::lexer
-use teko::checker
-use teko::codegen
-use teko::emit
-use teko::compress
-use teko::coverage
-
- * MinGW answer, which is what keeps `TEKO_CC=...mingw...` from being a way around the law.
- *
- * @param m  the resolved manifest (the `cc` override, if any)
- * @return   the compiler command for the current build, plus the target flag it implies
- */
+//
+// MinGW answer, which is what keeps `TEKO_CC=...mingw...` from being a way around the law.
+//
+// @param m  the resolved manifest (the `cc` override, if any)
+// @return   the compiler command for the current build, plus the target flag it implies
+//
 fn resolve_cc_choice(m: Manifest) -> CcChoice {
     if m.cc.len > 0 { return CcChoice { cmd = m.cc; target_flag = "" } }
     let env_cc = teko_cc_env()
@@ -43,33 +38,33 @@ fn resolve_cc_choice(m: Manifest) -> CcChoice {
  */
 fn resolve_cc(m: Manifest) -> str { resolve_cc_choice(m).cmd }
 
-/**
- * opt_cc_flag — the portable cc optimization flag for an optimization `level`, or
- * "" for level 0. Level 0 (the DEV/CI default) emits NO flag so the link line stays
- * byte-identical to the historic `-O0` release line (the FIXPOINT is preserved);
- * level 1/2 emit `-O1`/`-O2`, which both gcc and clang accept (deliberately NOT
- * `-march=native`, which is not portable for a released seed).
- *
- * @param level  the requested optimization level (0, 1 or 2; >2 is clamped to `-O2`)
- * @return       "-O1"/"-O2" for level 1/2, else "" (no flag) for level 0
- */
+//
+// opt_cc_flag — the portable cc optimization flag for an optimization `level`, or
+// "" for level 0. Level 0 (the DEV/CI default) emits NO flag so the link line stays
+// byte-identical to the historic `-O0` release line (the FIXPOINT is preserved);
+// level 1/2 emit `-O1`/`-O2`, which both gcc and clang accept (deliberately NOT
+// `-march=native`, which is not portable for a released seed).
+//
+// @param level  the requested optimization level (0, 1 or 2; >2 is clamped to `-O2`)
+// @return       "-O1"/"-O2" for level 1/2, else "" (no flag) for level 0
+//
 
-/**
- * DebugInfo — how much debug information a build emits, the `--debug=<value>` axis
- * (`docs/design/debugger-superficie-e-contramedida-0.3.1.md` §7.2, crumb D1.6).
- *
- * An ENUM and not a bool because the axis is LEVELLED at the reference this surface mirrors:
- * rustc documents `line-tables-only` ("the minimal amount of debug info for backtraces with
- * filename/line number info, but not anything else") as a first-class level distinct from
- * `full`. `Lines` IS that level. A `Vars` member joins here at D2.6, once locals are threaded
- * through the LIR — no existing spelling changes meaning when it does.
- *
- * One level drives TWO outputs from ONE origin: the DWARF sections (for gdb/lldb/VSCode, D1.3
- * onward) and the `.tsym` v2 map (for `tdb`). They are consumers, never rival formats.
- *
- * @since 0.3.1 debugger piso, D1.6
- * @see opt_level_of  the sibling build AXIS, likewise CLI-only and absent from `teko.tkp` (§7.3)
- */
+//
+// DebugInfo — how much debug information a build emits, the `--debug=<value>` axis
+// (`docs/design/debugger-superficie-e-contramedida-0.3.1.md` §7.2, crumb D1.6).
+//
+// An ENUM and not a bool because the axis is LEVELLED at the reference this surface mirrors:
+// rustc documents `line-tables-only` ("the minimal amount of debug info for backtraces with
+// filename/line number info, but not anything else") as a first-class level distinct from
+// `full`. `Lines` IS that level. A `Vars` member joins here at D2.6, once locals are threaded
+// through the LIR — no existing spelling changes meaning when it does.
+//
+// One level drives TWO outputs from ONE origin: the DWARF sections (for gdb/lldb/VSCode, D1.3
+// onward) and the `.tsym` v2 map (for `tdb`). They are consumers, never rival formats.
+//
+// @since 0.3.1 debugger piso, D1.6
+// @see opt_level_of  the sibling build AXIS, likewise CLI-only and absent from `teko.tkp` (§7.3)
+//
 
 /**
  * build_cc_argv — assemble the host-`cc` command line that turns one input file

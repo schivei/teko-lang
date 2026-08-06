@@ -1,61 +1,61 @@
-/**
- * src/time/time.tks   (namespace `teko::time`)
- *
- * DATE/TIME — the drop-128 A6 redesign (owner-ratified type table, 2026-07-24). Five value
- * types, EVERY carrier field <= 64 bits (no `i64`/`u64` anywhere in this module):
- *
- *   `date`      — `i32` days since 1970-01-01 (Gregorian proleptic), +-5.88M years.
- *   `time`      — `u64` ns since midnight, domain `0..86_399_999_999_999` (23:59:59.999999999).
- *   `span`      — `i64` ns signed duration/delta, +-292 years; also the monotonic-clock reading.
- *   `datetime`  — `{days: i32; ticks: u64}`, a civil date+time-of-day with NO timezone.
- *   `dto`       — a `datetime` plus a fixed `offset_minutes: i16`. A geographic zone id
- *                 (tzdata-backed) is Tier 2, deferred to .32+ — `dto` carries only the fixed
- *                 numeric offset, never a zone name.
- *
- * `timestamp` (i64 UNIX seconds) is a REPRESENTATION, not a carrier type — see
- * `timestamp_from_datetime`/`timestamp_to_datetime` below. Its domain (+-292 BILLION years)
- * vastly exceeds `datetime`'s (+-5.88M years, bounded by `date`'s `i32`), so
- * `timestamp_to_datetime` HONESTLY PANICS (via the `to i32` cast) on a timestamp whose day
- * count does not fit `date` — never a silent wrap.
- *
- * EXTERN-STRUCT CALLING CONVENTION (read before adding a new extern here). An `extern fn`'s
- * struct param/return is declared, in the generated C, using `teko_rt.h`'s OWN typedef — never
- * the mangled typedef codegen generates for the SAME-shaped Teko type. The two are
- * layout-identical but NOMINALLY DISTINCT C types, so a value fresh off an extern call can
- * NEVER be stored in a `let`/field or passed to a non-extern fn (a C COMPILE ERROR, not a
- * runtime bug — verified empirically against this compiler). So every host-dependent clock read
- * below is a PRIVATE extern returning a bare SCALAR (`wall_days`/`wall_ns_of_day`/
- * `wall_offset_minutes`/`monotonic_ns`), never a carrier struct; the PUBLIC `*_now`/`*_today`
- * constructors are ordinary (non-extern) Teko functions that compose the scalar into the
- * carrier struct entirely on the Teko side — fully storable/composable from that point on. Only
- * the four private scalar reads themselves require native codegen (extern calls, same as
- * the ROUND 0 design). Every other operation (accessors, arithmetic, `timestamp` conversions) is
- * pure Teko end-to-end.
- */
+//
+// src/time/time.tks   (namespace `teko::time`)
+//
+// DATE/TIME — the drop-128 A6 redesign (owner-ratified type table, 2026-07-24). Five value
+// types, EVERY carrier field <= 64 bits (no `i64`/`u64` anywhere in this module):
+//
+// `date`      — `i32` days since 1970-01-01 (Gregorian proleptic), +-5.88M years.
+// `time`      — `u64` ns since midnight, domain `0..86_399_999_999_999` (23:59:59.999999999).
+// `span`      — `i64` ns signed duration/delta, +-292 years; also the monotonic-clock reading.
+// `datetime`  — `{days: i32; ticks: u64}`, a civil date+time-of-day with NO timezone.
+// `dto`       — a `datetime` plus a fixed `offset_minutes: i16`. A geographic zone id
+// (tzdata-backed) is Tier 2, deferred to .32+ — `dto` carries only the fixed
+// numeric offset, never a zone name.
+//
+// `timestamp` (i64 UNIX seconds) is a REPRESENTATION, not a carrier type — see
+// `timestamp_from_datetime`/`timestamp_to_datetime` below. Its domain (+-292 BILLION years)
+// vastly exceeds `datetime`'s (+-5.88M years, bounded by `date`'s `i32`), so
+// `timestamp_to_datetime` HONESTLY PANICS (via the `to i32` cast) on a timestamp whose day
+// count does not fit `date` — never a silent wrap.
+//
+// EXTERN-STRUCT CALLING CONVENTION (read before adding a new extern here). An `extern fn`'s
+// struct param/return is declared, in the generated C, using `teko_rt.h`'s OWN typedef — never
+// the mangled typedef codegen generates for the SAME-shaped Teko type. The two are
+// layout-identical but NOMINALLY DISTINCT C types, so a value fresh off an extern call can
+// NEVER be stored in a `let`/field or passed to a non-extern fn (a C COMPILE ERROR, not a
+// runtime bug — verified empirically against this compiler). So every host-dependent clock read
+// below is a PRIVATE extern returning a bare SCALAR (`wall_days`/`wall_ns_of_day`/
+// `wall_offset_minutes`/`monotonic_ns`), never a carrier struct; the PUBLIC `*_now`/`*_today`
+// constructors are ordinary (non-extern) Teko functions that compose the scalar into the
+// carrier struct entirely on the Teko side — fully storable/composable from that point on. Only
+// the four private scalar reads themselves require native codegen (extern calls, same as
+// the ROUND 0 design). Every other operation (accessors, arithmetic, `timestamp` conversions) is
+// pure Teko end-to-end.
+//
 
 /** A calendar date: `i32` days since 1970-01-01 (Gregorian proleptic). No time-of-day, no zone. */
 pub type date = struct {
-    /** the number of days since 1970-01-01 (may be negative for a pre-epoch date) */
+// the number of days since 1970-01-01 (may be negative for a pre-epoch date)
     days: i32
 }
 
 /** A time-of-day: `u64` nanoseconds since midnight. Domain `0..86_399_999_999_999`. */
 pub type time = struct {
-    /** the number of nanoseconds since 00:00:00.000000000 (< 86_400_000_000_000) */
+// the number of nanoseconds since 00:00:00.000000000 (< 86_400_000_000_000)
     ticks: u64
 }
 
 /** A signed duration/delta: `i64` nanoseconds, +-292 years. Also a monotonic-clock reading. */
 pub type span = struct {
-    /** the signed nanosecond count (negative = a duration into the past) */
+// the signed nanosecond count (negative = a duration into the past)
     ticks: i64
 }
 
 /** A civil date+time-of-day with NO timezone: a `date` and a `time` flattened into one value. */
 pub type datetime = struct {
-    /** the date component — days since 1970-01-01 (see `date.days`) */
+// the date component — days since 1970-01-01 (see `date.days`)
     days: i32
-    /** the time-of-day component — ns since midnight (see `time.ticks`) */
+// the time-of-day component — ns since midnight (see `time.ticks`)
     ticks: u64
 }
 
@@ -64,11 +64,11 @@ pub type datetime = struct {
  * (deferred to .32+); this carries only the numeric offset, never a zone name.
  */
 pub type dto = struct {
-    /** the date component — days since 1970-01-01 (see `date.days`) */
+// the date component — days since 1970-01-01 (see `date.days`)
     days: i32
-    /** the time-of-day component — ns since midnight (see `time.ticks`) */
+// the time-of-day component — ns since midnight (see `time.ticks`)
     ticks: u64
-    /** the fixed UTC offset, in minutes (positive = east of UTC) */
+// the fixed UTC offset, in minutes (positive = east of UTC)
     offset_minutes: i16
 }
 
@@ -361,11 +361,11 @@ pub fn timestamp_to_datetime(ts: i64) -> datetime {
  * (via `civil_from_days`), producing deterministic output.
  */
 pub type CivilDate = struct {
-    /** the Gregorian year (e.g. 1970 for epoch day 0; may be negative for far-past dates) */
+// the Gregorian year (e.g. 1970 for epoch day 0; may be negative for far-past dates)
     year: i64
-    /** the month, 1 through 12 */
+// the month, 1 through 12
     month: i64
-    /** the day of the month, 1 through 31 */
+// the day of the month, 1 through 31
     day: i64
 }
 

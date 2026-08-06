@@ -1,35 +1,30 @@
-// src/build/project.tks   (namespace 'teko::build')
+// use teko::checker
 //
-// The PROJECT ORCHESTRATION entry layer — the canonical Teko ORIGINAL of the project
-// surfaces in src/driver.c (project_frontend / tk_compile_project / tk_run_project) and
-// the directory resolution in main.c (project_dir_of). main.tks dispatches here:
-//   teko build <dir>  → compile_project  (front-end → native codegen)
-//   teko run   <dir>  → run_project      (front-end → native codegen + execute, debug profile)
-//   teko <projarg>    → project_dir_of   (a `.tkp` → its dir; else the dir as-is)
+// // src/build/project.tks   (namespace 'teko::build')
+// //
+// // The PROJECT ORCHESTRATION entry layer — the canonical Teko ORIGINAL of the project
+// // surfaces in src/driver.c (project_frontend / tk_compile_project / tk_run_project) and
+// // the directory resolution in main.c (project_dir_of). main.tks dispatches here:
+// //   teko build <dir>  → compile_project  (front-end → native codegen)
+// //   teko run   <dir>  → run_project      (front-end → native codegen + execute, debug profile)
+// //   teko <projarg>    → project_dir_of   (a `.tkp` → its dir; else the dir as-is)
+// //
+// // FAITHFUL-NOT-LITERAL (M.3). It mirrors the C twins' SHAPE and contracts in native Teko:
+// // the C uses out-params (project_frontend(dir, &prog, &manifest)); Teko has NO out-params,
+// // so the shared front-end returns a small `Frontend` struct (prog + manifest), as
+// // `Frontend | error`. Both entries (build/run) run the SAME front-end AND the SAME
+// // codegen→cc backend; `run` additionally executes the resulting binary (the interpreter this once
+// // diverged to is retired, #524).
 //
-// FAITHFUL-NOT-LITERAL (M.3). It mirrors the C twins' SHAPE and contracts in native Teko:
-// the C uses out-params (project_frontend(dir, &prog, &manifest)); Teko has NO out-params,
-// so the shared front-end returns a small `Frontend` struct (prog + manifest), as
-// `Frontend | error`. Both entries (build/run) run the SAME front-end AND the SAME
-// codegen→cc backend; `run` additionally executes the resulting binary (the interpreter this once
-// diverged to is retired, #524).
-
-use teko::parser
-use teko::lexer
-use teko::checker
-use teko::codegen
-use teko::emit
-use teko::compress
-use teko::coverage
-
- * find `-l<name>` in its own (or the cross toolchain's) search paths is the linker's question, and
- * its fail-loud miss IS the R5 default — a dev who means to blind-link one must point at its path.
- *
- * @param flag  the resolved link flag
- * @param mode  the element's declared linkage mode (`LINK_MODE_SHARED` for a `shared:` element)
- * @return      true iff the flag must be left off the link line for the blind link
- * @since 0.3.1
- */
+//
+// find `-l<name>` in its own (or the cross toolchain's) search paths is the linker's question, and
+// its fail-loud miss IS the R5 default — a dev who means to blind-link one must point at its path.
+//
+// @param flag  the resolved link flag
+// @param mode  the element's declared linkage mode (`LINK_MODE_SHARED` for a `shared:` element)
+// @return      true iff the flag must be left off the link line for the blind link
+// @since 0.3.1
+//
 fn omit_flag_for_blind_link(flag: str, mode: str) -> bool {
     if mode != LINK_MODE_SHARED { return false }
     if !allow_undef_selected() { return false }
@@ -243,9 +238,9 @@ const CC_TARGET_FLAG_PREFIX: str = "--target="
  * @since 0.3.1
  */
 type CcChoice = struct {
-    /** the compiler command `build_cc_argv` puts at argv[0]. */
+// the compiler command `build_cc_argv` puts at argv[0].
     cmd: str
-    /** the target-pinning flag this choice implies ("" for a pinned compiler and for every non-Windows host). */
+// the target-pinning flag this choice implies ("" for a pinned compiler and for every non-Windows host).
     target_flag: str
 }
 
@@ -278,16 +273,17 @@ fn host_cc_choice() -> CcChoice {
     CcChoice { cmd = HOST_CC_NAME; target_flag = "" }
 }
 
-/**
- * resolve_cc_choice — pick the compiler `build_cc_argv` invokes, in the precedence order that was
- * already law (#387 B2-8, D-D) and is preserved here exactly: the manifest `[extern] cc` override
- * wins; then the `TEKO_CC` env seam; then this host's default (`host_cc_choice`).
- *
- * THE `TEKO_TARGET` ARM IS GONE, and its removal is a simplification rather than a policy change:
- * it existed only to reach `default_cc_for_target`'s MinGW cross driver, and now that every target
- * answers with the host `cc` the arm could not say anything the default does not. A cross build no
- * longer needs it either — it stops at the object (`build_links_binary`).
- *
- * A PINNED COMPILER IS OBEYED WITHOUT A TARGET FLAG. Whoever names the compiler owns its ABI, so
- * neither override inherits the Windows default's `--target=`; and a pinned compiler is still
- * subject to the MinGW ban — `invoke_cc` asks whatever was resolved what it targets and refuses a
+//
+// resolve_cc_choice — pick the compiler `build_cc_argv` invokes, in the precedence order that was
+// already law (#387 B2-8, D-D) and is preserved here exactly: the manifest `[extern] cc` override
+// wins; then the `TEKO_CC` env seam; then this host's default (`host_cc_choice`).
+//
+// THE `TEKO_TARGET` ARM IS GONE, and its removal is a simplification rather than a policy change:
+// it existed only to reach `default_cc_for_target`'s MinGW cross driver, and now that every target
+// answers with the host `cc` the arm could not say anything the default does not. A cross build no
+// longer needs it either — it stops at the object (`build_links_binary`).
+//
+// A PINNED COMPILER IS OBEYED WITHOUT A TARGET FLAG. Whoever names the compiler owns its ABI, so
+// neither override inherits the Windows default's `--target=`; and a pinned compiler is still
+// subject to the MinGW ban — `invoke_cc` asks whatever was resolved what it targets and refuses a
+//

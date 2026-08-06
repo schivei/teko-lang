@@ -1,89 +1,89 @@
-/**
- * objfile_ar_macho.tks — the BSD-format `.a` static-archive writer for a
- * Mach-O member, the `ranlib` sibling of `objfile_ar.tks` (KP16's GNU-format
- * ELF writer). Ported from the `theory/kp16-ar-macho-coff` validation branch
- * (tip 3798ab4c, run d44f63c9 = SUCCESS on a real macOS runner: `ar`/`nm`/
- * `ld64` accepted this writer's output AND LINKED+RAN a consumer against it)
- * into the official `emit_static_lib` dispatch (`src/build/project.tks`'s
- * `Arm64Macho` arm) once real-toolchain validation closed KP16's Mach-O
- * honest stop.
- *
- * ITERATION NOTE 1 (run 30062198432): the FIRST cut used the LEGACY 32-bit
- * `__.SYMDEF` shape (4-byte fields, an inline-or-#1/N name choice) — wrong for
- * a 64-bit object. Cross-checked against LLVM's own canonical BSD/Darwin
- * archive writer (`llvm/lib/Object/ArchiveWriter.cpp`) and rewritten to its
- * `#1/<N>`-every-member, 8-byte-field, 8-byte-aligned shape.
- *
- * ITERATION NOTE 2 (run 30064264749, GROUND TRUTH — Apple's REAL `ar t`
- * output on a reference archive built by `libtool -static` from the SAME
- * `.o`, not a hand-read spec): the symbol-table member's REAL name on Apple's
- * own cctools toolchain is `"__.SYMDEF SORTED"` — NOT LLVM's `"__.SYMDEF_64"`
- * convention (that `_64` suffix is an LLVM-writer-only distinction; Apple's
- * `ar`/`ranlib`/`ld64` apparently never renamed the member for 64-bit content
- * — the bit width is resolved some other way on the reader side, and the
- * literal member name stays the traditional one). The `#1/<N>` extended-name
- * mechanism itself was ALREADY correct at this point (Apple's `ar t` resolved
- * our wrong-named member through it just fine); only the LITERAL NAME TEXT
- * was fixed here, plus sorting the ranlib table by symbol name (what
- * `SORTED` in that name promises).
- *
- * ITERATION NOTE 3 (run 30065167036, GROUND TRUTH — byte-for-byte `od -A d
- * -t x1` diff of `ref_libtool.a`/`ref_arranlib.a`, built by Apple's OWN
- * `libtool -static`/`ar rcs`+`ranlib` from the IDENTICAL `.o`, against our
- * own archive from the SAME diagnostic step): the name fix alone did not
- * satisfy `ar t`/`ld64` — the payload's INTERNAL layout also diverged from
- * cctools' real `struct ranlib`/`struct symdef` shape, which turns out to be
- * the CLASSIC 32-bit BSD layout, not LLVM's `ranlib_64`:
- *
- *   - Every field inside the symtab payload is 4 bytes (u32), little-endian —
- *     NOT 8 (u64): the `ranlib` array's byte-size prefix, each entry's
- *     `ran_strx`/`ran_off` (u32 each, `strx` first), and the string table's
- *     byte-size prefix. (`BSD_RANLIB_ENTRY_SIZE` = 8, `bsd_ranlib_array`
- *     emits `emit_u32_le`.)
- *   - The string table's declared size prefix is its PADDED length —
- *     `align_up(raw_len, BSD_ALIGN)` — with the padding bytes (`0x00`
- *     fill) actually appended and included in that count
- *     (`build_bsd_symstrtab`); the reference has ZERO trailing/outer padding
- *     after the whole symdef payload specifically BECAUSE this construction
- *     (`4 + 8*n + 4 + align_up(raw, 8)`) is already always a multiple of 8.
- *   - The `Mode` field differs PER MEMBER KIND: `"100644"` for the
- *     `__.SYMDEF SORTED` member, but `"644"` (no leading `"100"`) for a real
- *     object member — two distinct BSD-specific constants
- *     (`BSD_MODE_SYMDEF`/`BSD_MODE_MEMBER`), replacing the GNU writer's
- *     reused `AR_MODE_SPECIAL`/`AR_MODE_REGULAR` (whose values don't match
- *     either BSD case).
- *   - A member's CONTENT is padded to a multiple of 8 bytes with `0x00` fill
- *     (not `0x0A`) so the NEXT member's header also lands 8-byte aligned.
- *   - The `#1/<N>` name-field mechanism (name text, inner padding formula
- *     relative to the member's absolute header offset) was independently
- *     re-confirmed byte-identical to the reference for both the symdef and
- *     the real-object member names — no change there.
- *
- * ITERATION NOTE 4 (run 30067176730, GROUND TRUTH — same technique, next
- * error surfaced: `ld64` now said "malformed archive, member exceeds file
- * size" and `ar t` still printed "Inappropriate file type or format" after
- * correctly listing both members): a real object's byte length is not
- * always already a multiple of `BSD_ALIGN` (our demo's `.o` is 373 bytes,
- * needing 3 trailing pad bytes to reach 376), and the reference's `Size`
- * field for that member was `396` — `nwp(20) + 376`, the PADDED content
- * length — while this writer declared `393` — `nwp(20) + 373`, the RAW
- * content length, one member-span short of what was actually written.
- * `ar`/`ld64` trust `Size` to locate the NEXT member's header
- * (`header_start + 60 + Size`, rounded to even); with the undercounted
- * `Size`, that lands 3 bytes short of this (the LAST) member's true end —
- * still inside the file for a middle member, but for the trailing member it
- * points 3 bytes before EOF, so the reader's attempted 60-byte header read
- * there overruns the file ("member exceeds file size"); `ar t`'s bogus
- * trailing-header read hits the same 3 stray pad bytes and calls them
- * "Inappropriate file type or format". Fixed by declaring `Size` as
- * `name_with_padding + align_up(content.len, BSD_ALIGN)` — the content's
- * OWN trailing pad counted INTO `Size`, not left implicit — while the
- * bytes actually written are unchanged (`bsd_write_member` already wrote
- * the correct padding; only the header's own declared number was wrong).
- * The symdef member's `Size` is unaffected (its 40-byte payload is already
- * 8-aligned, so `raw == padded` there), which is why this bug only showed
- * up on a real, non-8-aligned object.
- */
+//
+// objfile_ar_macho.tks — the BSD-format `.a` static-archive writer for a
+// Mach-O member, the `ranlib` sibling of `objfile_ar.tks` (KP16's GNU-format
+// ELF writer). Ported from the `theory/kp16-ar-macho-coff` validation branch
+// (tip 3798ab4c, run d44f63c9 = SUCCESS on a real macOS runner: `ar`/`nm`/
+// `ld64` accepted this writer's output AND LINKED+RAN a consumer against it)
+// into the official `emit_static_lib` dispatch (`src/build/project.tks`'s
+// `Arm64Macho` arm) once real-toolchain validation closed KP16's Mach-O
+// honest stop.
+//
+// ITERATION NOTE 1 (run 30062198432): the FIRST cut used the LEGACY 32-bit
+// `__.SYMDEF` shape (4-byte fields, an inline-or-#1/N name choice) — wrong for
+// a 64-bit object. Cross-checked against LLVM's own canonical BSD/Darwin
+// archive writer (`llvm/lib/Object/ArchiveWriter.cpp`) and rewritten to its
+// `#1/<N>`-every-member, 8-byte-field, 8-byte-aligned shape.
+//
+// ITERATION NOTE 2 (run 30064264749, GROUND TRUTH — Apple's REAL `ar t`
+// output on a reference archive built by `libtool -static` from the SAME
+// `.o`, not a hand-read spec): the symbol-table member's REAL name on Apple's
+// own cctools toolchain is `"__.SYMDEF SORTED"` — NOT LLVM's `"__.SYMDEF_64"`
+// convention (that `_64` suffix is an LLVM-writer-only distinction; Apple's
+// `ar`/`ranlib`/`ld64` apparently never renamed the member for 64-bit content
+// — the bit width is resolved some other way on the reader side, and the
+// literal member name stays the traditional one). The `#1/<N>` extended-name
+// mechanism itself was ALREADY correct at this point (Apple's `ar t` resolved
+// our wrong-named member through it just fine); only the LITERAL NAME TEXT
+// was fixed here, plus sorting the ranlib table by symbol name (what
+// `SORTED` in that name promises).
+//
+// ITERATION NOTE 3 (run 30065167036, GROUND TRUTH — byte-for-byte `od -A d
+// -t x1` diff of `ref_libtool.a`/`ref_arranlib.a`, built by Apple's OWN
+// `libtool -static`/`ar rcs`+`ranlib` from the IDENTICAL `.o`, against our
+// own archive from the SAME diagnostic step): the name fix alone did not
+// satisfy `ar t`/`ld64` — the payload's INTERNAL layout also diverged from
+// cctools' real `struct ranlib`/`struct symdef` shape, which turns out to be
+// the CLASSIC 32-bit BSD layout, not LLVM's `ranlib_64`:
+//
+// - Every field inside the symtab payload is 4 bytes (u32), little-endian —
+// NOT 8 (u64): the `ranlib` array's byte-size prefix, each entry's
+// `ran_strx`/`ran_off` (u32 each, `strx` first), and the string table's
+// byte-size prefix. (`BSD_RANLIB_ENTRY_SIZE` = 8, `bsd_ranlib_array`
+// emits `emit_u32_le`.)
+// - The string table's declared size prefix is its PADDED length —
+// `align_up(raw_len, BSD_ALIGN)` — with the padding bytes (`0x00`
+// fill) actually appended and included in that count
+// (`build_bsd_symstrtab`); the reference has ZERO trailing/outer padding
+// after the whole symdef payload specifically BECAUSE this construction
+// (`4 + 8*n + 4 + align_up(raw, 8)`) is already always a multiple of 8.
+// - The `Mode` field differs PER MEMBER KIND: `"100644"` for the
+// `__.SYMDEF SORTED` member, but `"644"` (no leading `"100"`) for a real
+// object member — two distinct BSD-specific constants
+// (`BSD_MODE_SYMDEF`/`BSD_MODE_MEMBER`), replacing the GNU writer's
+// reused `AR_MODE_SPECIAL`/`AR_MODE_REGULAR` (whose values don't match
+// either BSD case).
+// - A member's CONTENT is padded to a multiple of 8 bytes with `0x00` fill
+// (not `0x0A`) so the NEXT member's header also lands 8-byte aligned.
+// - The `#1/<N>` name-field mechanism (name text, inner padding formula
+// relative to the member's absolute header offset) was independently
+// re-confirmed byte-identical to the reference for both the symdef and
+// the real-object member names — no change there.
+//
+// ITERATION NOTE 4 (run 30067176730, GROUND TRUTH — same technique, next
+// error surfaced: `ld64` now said "malformed archive, member exceeds file
+// size" and `ar t` still printed "Inappropriate file type or format" after
+// correctly listing both members): a real object's byte length is not
+// always already a multiple of `BSD_ALIGN` (our demo's `.o` is 373 bytes,
+// needing 3 trailing pad bytes to reach 376), and the reference's `Size`
+// field for that member was `396` — `nwp(20) + 376`, the PADDED content
+// length — while this writer declared `393` — `nwp(20) + 373`, the RAW
+// content length, one member-span short of what was actually written.
+// `ar`/`ld64` trust `Size` to locate the NEXT member's header
+// (`header_start + 60 + Size`, rounded to even); with the undercounted
+// `Size`, that lands 3 bytes short of this (the LAST) member's true end —
+// still inside the file for a middle member, but for the trailing member it
+// points 3 bytes before EOF, so the reader's attempted 60-byte header read
+// there overruns the file ("member exceeds file size"); `ar t`'s bogus
+// trailing-header read hits the same 3 stray pad bytes and calls them
+// "Inappropriate file type or format". Fixed by declaring `Size` as
+// `name_with_padding + align_up(content.len, BSD_ALIGN)` — the content's
+// OWN trailing pad counted INTO `Size`, not left implicit — while the
+// bytes actually written are unchanged (`bsd_write_member` already wrote
+// the correct padding; only the header's own declared number was wrong).
+// The symdef member's `Size` is unaffected (its 40-byte payload is already
+// 8-aligned, so `raw == padded` there), which is why this bug only showed
+// up on a real, non-8-aligned object.
+//
 
 
 /**
@@ -148,24 +148,24 @@ fn bsd_align_pad(pos: u32) -> u32 {
  * whole point is landing the CONTENT that follows at an 8-byte boundary).
  */
 type BsdNameLayout = struct {
-    /**
-     * name_field — the pre-formatted 16-byte `Name` field text: `"#1/<N>"`,
-     * space-padded (`N` = `name_with_padding`).
-     */
+//
+// name_field — the pre-formatted 16-byte `Name` field text: `"#1/<N>"`,
+// space-padded (`N` = `name_with_padding`).
+//
     name_field: str
-    /**
-     * raw_name — the member's real name, as raw bytes (unpadded).
-     */
+//
+// raw_name — the member's real name, as raw bytes (unpadded).
+//
     raw_name: []byte
-    /**
-     * inner_pad — the zero-fill byte count appended after `raw_name`, before
-     * the member's content, so the content starts 8-byte aligned.
-     */
+//
+// inner_pad — the zero-fill byte count appended after `raw_name`, before
+// the member's content, so the content starts 8-byte aligned.
+//
     inner_pad: u32
-    /**
-     * name_with_padding — `raw_name.len + inner_pad`: the `Size` field's
-     * name-prefix contribution (`Size` = this plus the content's own length).
-     */
+//
+// name_with_padding — `raw_name.len + inner_pad`: the `Size` field's
+// name-prefix contribution (`Size` = this plus the content's own length).
+//
     name_with_padding: u32
 }
 
@@ -259,13 +259,13 @@ fn bsd_write_member(buf: []byte, layout: BsdNameLayout, content: []byte, mode: s
  * per-member computations the way the GNU/COFF writers' offset math is).
  */
 type BsdLayoutResult = struct {
-    /**
-     * layouts — each member's resolved `#1/<N>` name encoding, member order.
-     */
+//
+// layouts — each member's resolved `#1/<N>` name encoding, member order.
+//
     layouts: []BsdNameLayout
-    /**
-     * offsets — each member's own header's absolute file offset, member order.
-     */
+//
+// offsets — each member's own header's absolute file offset, member order.
+//
     offsets: []u32
 }
 
