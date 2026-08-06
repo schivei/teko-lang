@@ -1,0 +1,479 @@
+fn mem_size_of(t: lir::LType) -> MMemSize | error {
+    match t {
+        lir::LType::I8 => MMemSize::B
+        lir::LType::I16 => MMemSize::H
+        lir::LType::I32 => MMemSize::W
+        lir::LType::I64 => MMemSize::X
+        lir::LType::Ptr => MMemSize::X
+        lir::LType::F32 => MMemSize::S
+        lir::LType::F64 => MMemSize::D
+        lir::LType::Void => error { message = "isel arm64: a void-typed memory access is malformed (internal)" }
+    }
+}
+
+/**
+ * select_alloca — the `LAlloca` selection: reserve a frame slot (its index is
+ * the current frame length) and materialize its address with `MFrameAddr`; A3
+ * resolves the slot to an FP/SP displacement. The address is a Ptr (wide GPR).
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param lir::LAlloca a  the alloca op (its byte-size/alignment shape)
+ * @return SelCtx  the advanced context
+ */
+fn select_alloca(ctx0: SelCtx, inst: lir::LInst, a: lir::LAlloca) -> SelCtx {
+    let slot = ctx0.func.frame.len
+    let ctx1 = SelCtx { func = append_frame(ctx0.func, a); vinfo = ctx0.vinfo; next_scratch = ctx0.next_scratch; cur_block = ctx0.cur_block; next_block = ctx0.next_block }
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx2 = selctx_set_vinfo(ctx1, inst.result, MRegClass::GPR, true)
+    selctx_emit(ctx2, frame_addr_inst(dst, slot))
+}
+
+/**
+ * select_field_addr — the `LFieldAddr` selection: `ADD dst, base, #offset`
+ * (an `MAluImm`, a Ptr result). The fold of the offset into a following
+ * `MMem` displacement is deferred to A4 so A2's golden dumps stay 1:1 (M.1).
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param lir::LFieldAddr fa  the field-address op
+ * @return SelCtx  the advanced context
+ */
+fn select_field_addr(ctx0: SelCtx, inst: lir::LInst, fa: lir::LFieldAddr) -> SelCtx {
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::GPR, true)
+    selctx_emit(ctx1, alu_imm_inst(MAluOp::Add, true, dst, vreg(fa.base, MRegClass::GPR), fa.offset to i64))
+}
+
+/**
+ * select_load — the `LLoad` selection: `MLoad{size, sign, dst, [addr, #0]}`,
+ * size + register file from the loaded `ty`. Loads zero-extend (`sign=false`):
+ * a narrow value's own producing `Trunc`/`ZExt`/`SExt` chain already fixed its
+ * class, so the load itself does not re-sign.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param lir::LLoad l  the load op
+ * @return SelCtx | error  the advanced context, or a propagated size error
+ */
+fn select_load(ctx0: SelCtx, inst: lir::LInst, l: lir::LLoad) -> SelCtx | error {
+    let size = match mem_size_of(l.ty) { MMemSize as s => s; error as e => return e }
+    let reg_class = mregclass_of_ltype(l.ty)
+    let wide = ltype_is_wide(l.ty)
+    let dst = vreg(inst.result, reg_class)
+    let ctx1 = selctx_set_vinfo(ctx0, inst.result, reg_class, wide)
+    selctx_emit(ctx1, load_inst(size, false, dst, MMem { base = vreg(l.addr, MRegClass::GPR); offset = 0 to i32 }))
+}
+
+/**
+ * select_store — the `LStore` selection: `MStore{size, value, [addr, #0]}`,
+ * size + register file from the stored `ty`. No result VReg.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LStore s  the store op
+ * @return SelCtx | error  the advanced context, or a propagated size error
+ */
+fn select_store(ctx0: SelCtx, s: lir::LStore) -> SelCtx | error {
+    let size = match mem_size_of(s.ty) { MMemSize as sz => sz; error as e => return e }
+    let reg_class = mregclass_of_ltype(s.ty)
+    selctx_emit(ctx0, store_inst(size, vreg(s.value, reg_class), MMem { base = vreg(s.addr, MRegClass::GPR); offset = 0 to i32 }))
+}
+
+/**
+ * select_addr_pair — the ONE `ADRP + ADD` sequence that materializes a symbol's
+ * address, and the ONE relocation pair it may carry: `MAdrp{dst, sym, PageHi}`
+ * (`ARM64_RELOC_PAGE21`) then `MAddLo{dst, dst, sym, PageLo}`
+ * (`ARM64_RELOC_PAGEOFF12`).
+ *
+ * THE HALVES ARE NOT A PARAMETER, and that is the whole point. They used to be,
+ * and `LFuncAddr` passed `Call` for both — so a `BRANCH26` relocation landed on
+ * an `ADRP` and on an `ADD`, which Apple's `ld` rejects outright
+ * (`ARM64_RELOC_BRANCH26 relocation on non-b/bl instruction`). The page/page-off
+ * pair does not depend on whether the symbol lives in `__text` or in `__const`:
+ * a relocation type describes the INSTRUCTION FIELD being patched, never the
+ * target's section. Making the kinds unreachable from the call site makes that
+ * mispairing unrepresentable, which is the same shape the x86-64 twin already
+ * had (`select_global_addr_x86`/`select_func_addr_x86` both emit one
+ * `lea rip`-relative `Pc32`).
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param str symbol  the symbol whose address is materialized
+ * @return SelCtx  the advanced context
+ */
+fn select_addr_pair(ctx0: SelCtx, inst: lir::LInst, symbol: str) -> SelCtx {
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::GPR, true)
+    let ctx2 = selctx_emit(ctx1, adrp_inst(dst, symbol, MRelocKind::PageHi))
+    selctx_emit(ctx2, add_lo_inst(dst, dst, symbol, MRelocKind::PageLo))
+}
+
+/**
+ * select_global_addr — the `LGlobalAddr` selection: the `ADRP + ADD`
+ * page/page-off relocation pair for a rodata/global symbol.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param lir::LGlobalAddr g  the global-address op
+ * @return SelCtx  the advanced context
+ */
+fn select_global_addr(ctx0: SelCtx, inst: lir::LInst, g: lir::LGlobalAddr) -> SelCtx {
+    select_addr_pair(ctx0, inst, g.symbol)
+}
+
+/**
+ * select_func_addr — the `LFuncAddr` selection: the same `ADRP + ADD`
+ * page/page-off relocation pair a global address uses. A function's address is
+ * materialized, not branched to, so it owes `PAGE21`/`PAGEOFF12` exactly like
+ * any other symbol; `BRANCH26` belongs to `MCall` (a `bl`) alone.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param lir::LFuncAddr fa  the function-address op
+ * @return SelCtx  the advanced context
+ */
+fn select_func_addr(ctx0: SelCtx, inst: lir::LInst, fa: lir::LFuncAddr) -> SelCtx {
+    select_addr_pair(ctx0, inst, fa.symbol)
+}
+
+/**
+ * PinnedArgs — the outcome of lowering a call's arguments into their AAPCS64
+ * argument registers: the advanced context + the pinned physical registers
+ * (the `uses` the `MCall`/`MCallIndirect` records for A3 liveness).
+ *
+ * @since #383 A2-5
+ */
+type PinnedArgs = struct {
+    /**
+     * ctx — the context with every argument pinned into its ABI register.
+     */
+    ctx: SelCtx
+    /**
+     * uses — the physical argument registers pinned, in argument order.
+     */
+    uses: []MReg
+}
+
+/**
+ * pin_args — lower each argument into its AAPCS64 slot using a two-pass
+ * approach that mirrors the x86_64 implementation.
+ *
+ * Pass 1 (stack overflows first): iterate over `args` and, for any argument
+ * whose per-class index is ≥ 8 (overflow), emit an `MOutArg` store to the
+ * outgoing stack-arg area. These are emitted BEFORE the register moves to
+ * reduce register pressure against live fixed intervals.
+ *
+ * Pass 2 (register args): iterate again; for arguments that fit in the
+ * 8-register window, emit an `MMov`/`MFMov` to pin them in the physical
+ * argument register and collect those physregs as the call's `uses`.
+ *
+ * Variadic calls still honest-stop: AAPCS64 requires the callee's fixed
+ * arity to route the tail correctly, and `LCall` carries none.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param []u32 args  the argument VRegs, in declaration order
+ * @param bool variadic  whether the call is variadic (honest-stops here)
+ * @return PinnedArgs | error  the pinned args, or a NAMED honest-stop
+ */
+fn pin_args(ctx0: SelCtx, args: []u32, variadic: bool) -> PinnedArgs | error {
+    if variadic {
+        return error { message = "isel arm64: a variadic call needs the callee's fixed arity to route its tail to the stack (AAPCS64 §3.5); LCall carries no arity — deferred to the call stack-arg follow-up" }
+    }
+    mut ctx = ctx0
+    mut uses: []MReg = teko::list::empty()
+
+    // Pass 1: emit MOutArg for stack-overflow arguments
+    mut gpr_n1: u32 = 0
+    mut fpr_n1: u32 = 0
+    mut stack_n: u32 = 0
+    mut i1: u64 = 0
+    loop {
+        if i1 >= args.len { break }
+        let a = args[i1]
+        let info = vinfo_get(ctx.vinfo, a)
+        let is_fpr = info.reg_class == MRegClass::FPR
+        let idx = if is_fpr { fpr_n1 } else { gpr_n1 }
+        if idx >= 8 {
+            let sz = arg_slot_size(info.reg_class, info.wide)
+            ctx = selctx_emit(ctx, out_arg(sz, vreg(a, info.reg_class), stack_n))
+            stack_n = stack_n + 1
+        }
+        if is_fpr { fpr_n1 = fpr_n1 + 1 } else { gpr_n1 = gpr_n1 + 1 }
+        i1++
+    }
+
+    // Pass 2: emit MMov/MFMov for register arguments and collect uses
+    mut gpr_n2: u32 = 0
+    mut fpr_n2: u32 = 0
+    mut i2: u64 = 0
+    loop {
+        if i2 >= args.len { break }
+        let a = args[i2]
+        let info = vinfo_get(ctx.vinfo, a)
+        let is_fpr = info.reg_class == MRegClass::FPR
+        let idx = if is_fpr { fpr_n2 } else { gpr_n2 }
+        if idx < 8 {
+            let phys = preg(idx, info.reg_class)
+            let mv = if is_fpr { fmov_inst(info.wide, phys, vreg(a, MRegClass::FPR)) } else { mov_inst(info.wide, phys, vreg(a, MRegClass::GPR)) }
+            ctx = selctx_emit(ctx, mv)
+            uses = teko::list::push(uses, phys)
+        }
+        if is_fpr { fpr_n2 = fpr_n2 + 1 } else { gpr_n2 = gpr_n2 + 1 }
+        i2++
+    }
+
+    PinnedArgs { ctx = ctx; uses = uses }
+}
+
+/**
+ * select_call_result — after a call, move its result out of the ABI result register into the result
+ * VReg (when the call produces one), in the REGISTER FILE the call's own `ret_type` names: `x0` for
+ * every integer/pointer/`bool` result, `d0`/`s0` for an `f64`/`f32` one (`B1-fp`).
+ *
+ * This USED to take the class as GPR unconditionally, because `LInst` carries no result type — a
+ * limitation this function's own doc named. `lir::LCall`/`LCallIndirect` now record `ret_type`
+ * (0.3.1.0 degrau 27), and the limitation was not benign: `select_ret` and `pin_args` had already
+ * been taught the two files, so the callee PUT a float result in `d0` and a later float argument had
+ * to travel in `d`/`s` — this one hole between them read `x0` instead and then recorded the value as
+ * a GPR. Measured on x86-64 (the same hole, the same shape): `$"{f():F2}"` over an `f64`-returning
+ * function crashed the generated program where the C route printed `2.50`.
+ *
+ * @param SelCtx ctx0  the post-call context to extend
+ * @param lir::LInst inst  the call instruction (its result VReg + `has_result`)
+ * @param MReg ret_reg  the ABI result register the call wrote (`call_result_reg`)
+ * @param lir::LType ret_type  the call's own recorded result class
+ * @return SelCtx  the advanced context
+ */
+fn select_call_result(ctx0: SelCtx, inst: lir::LInst, ret_reg: MReg, ret_type: lir::LType) -> SelCtx {
+    if !inst.has_result {
+        return ctx0
+    }
+    if mregclass_of_ltype(ret_type) == MRegClass::FPR {
+        let wide = ltype_is_wide(ret_type)
+        let fdst = vreg(inst.result, MRegClass::FPR)
+        let fctx = selctx_set_vinfo(ctx0, inst.result, MRegClass::FPR, wide)
+        return selctx_emit(fctx, fmov_inst(wide, fdst, ret_reg))
+    }
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::GPR, true)
+    selctx_emit(ctx1, mov_inst(true, dst, ret_reg))
+}
+
+/**
+ * call_result_reg — the physical register a call's result comes back in, by its recorded machine
+ * class: `d0`/`s0` (FPR id 0) for a float, `x0` (GPR id 0) for everything else — AAPCS64's own
+ * per-register-file result split (0.3.1.0 degrau 27).
+ *
+ * @param lir::LType ret_type  the call's own recorded result class
+ * @return MReg  the ABI result register
+ */
+fn call_result_reg(ret_type: lir::LType) -> MReg {
+    preg(0, mregclass_of_ltype(ret_type))
+}
+
+/**
+ * select_call — the `LCall` selection: lower the arguments into their AAPCS64
+ * registers (`pin_args`), emit `MCall{sym, uses, ret_reg, has_result,
+ * variadic}`, then move the result out of x0 if the call produces one.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param lir::LCall c  the call op
+ * @return SelCtx | error  the advanced context, or a propagated error
+ */
+fn select_call(ctx0: SelCtx, inst: lir::LInst, c: lir::LCall) -> SelCtx | error {
+    let pinned = match pin_args(ctx0, c.args, c.variadic) { PinnedArgs as p => p; error as e => return e }
+    let ret_reg = call_result_reg(c.ret_type)
+    let ctx1 = selctx_emit(pinned.ctx, call_inst(c.symbol, pinned.uses, ret_reg, inst.has_result, c.variadic))
+    select_call_result(ctx1, inst, ret_reg, c.ret_type)
+}
+
+/**
+ * select_call_indirect — the `LCallIndirect` selection: identical argument
+ * lowering, then `MCallIndirect{target, uses, ret_reg, has_result}` (BLR
+ * through the target Ptr VReg), then the result move.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param lir::LCallIndirect ci  the indirect-call op
+ * @return SelCtx | error  the advanced context, or a propagated error
+ */
+fn select_call_indirect(ctx0: SelCtx, inst: lir::LInst, ci: lir::LCallIndirect) -> SelCtx | error {
+    let pinned = match pin_args(ctx0, ci.args, ci.variadic) { PinnedArgs as p => p; error as e => return e }
+    let ret_reg = call_result_reg(ci.ret_type)
+    let ctx1 = selctx_emit(pinned.ctx, call_indirect_inst(vreg(ci.target, MRegClass::GPR), pinned.uses, ret_reg, inst.has_result))
+    select_call_result(ctx1, inst, ret_reg, ci.ret_type)
+}
+
+/**
+ * select_inst — the per-`LOp` dispatch (§3 of the isel plan): with A2-5's
+ * calls (`LCall`/`LCallIndirect`) the whole `LOp` frontier now selects — the
+ * A2-2 core (`LConstInt`/`LConstFloat`/`LBin`/`LUn`/`LParam`/`LRet`), A2-3
+ * control flow (`LJump`/`LBranch`), A2-4 memory (`LAlloca`/`LFieldAddr`/
+ * `LLoad`/`LStore`/`LGlobalAddr`/`LFuncAddr`), and A2-5 calls.
+ *
+ * @param SelCtx ctx  the context to extend
+ * @param lir::LFunc f  the enclosing function (`LParam` needs its
+ *                      `param_types`)
+ * @param lir::LInst inst  the instruction to select
+ * @return SelCtx | error  the advanced context, or a propagated/named error
+ */
+fn select_inst(ctx: SelCtx, f: lir::LFunc, inst: lir::LInst) -> SelCtx | error {
+    match inst.op {
+        lir::LConstInt as c => select_const_int(ctx, inst, c)
+        lir::LConstFloat as c => select_const_float(ctx, inst, c)
+        lir::LBin as b => select_bin(ctx, f, inst, b)
+        lir::LUn as u => select_un(ctx, inst, u)
+        lir::LParam as p => select_param(ctx, f, inst, p)
+        lir::LRet as r => select_ret(ctx, r)
+        lir::LJump as j => select_jump(ctx, f, j)
+        lir::LBranch as br => select_branch(ctx, f, br)
+        lir::LAlloca as a => select_alloca(ctx, inst, a)
+        lir::LFieldAddr as fa => select_field_addr(ctx, inst, fa)
+        lir::LLoad as l => select_load(ctx, inst, l)
+        lir::LStore as s => select_store(ctx, s)
+        lir::LGlobalAddr as g => select_global_addr(ctx, inst, g)
+        lir::LCallIndirect as ci => select_call_indirect(ctx, inst, ci)
+        lir::LFuncAddr as fa => select_func_addr(ctx, inst, fa)
+        lir::LCall as c => select_call(ctx, inst, c)
+    }
+}
+
+/**
+ * select_insts — select every instruction of `insts`, in order, threading
+ * the context forward and short-circuiting on the first error.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LFunc f  the enclosing function
+ * @param []lir::LInst insts  the instruction stream to select
+ * @return SelCtx | error  the fully-advanced context, or the first
+ *                         propagated error
+ */
+fn select_insts(ctx0: SelCtx, f: lir::LFunc, insts: []lir::LInst) -> SelCtx | error {
+    mut ctx = ctx0
+    mut i: u64 = 0
+    loop {
+        if i >= insts.len { break }
+        let stepped = match select_inst(ctx, f, insts[i]) { SelCtx as c => c; error as e => return e }
+        ctx = stepped
+        i++
+    }
+    ctx
+}
+
+/**
+ * provisional_params — a mirror block's params built from its `LBlock` param
+ * VRegs with a provisional GPR class; each entry is refined to its real class
+ * by `emit_edge_moves` when a feeding edge is selected.
+ *
+ * @param []u32 pids  the block's param VReg ids
+ * @return []MReg  the provisional param registers
+ */
+fn provisional_params(pids: []u32) -> []MReg {
+    mut out: []MReg = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= pids.len { break }
+        out = teko::list::push(out, vreg(pids[i], MRegClass::GPR))
+        i++
+    }
+    out
+}
+
+/**
+ * build_mirror_blocks — an `MFunc` with one empty machine block per `LBlock`,
+ * same id + (provisionally-classed) params, in source order. Selection then
+ * fills each block's instructions and splits edge blocks in past them.
+ *
+ * @param lir::LFunc f  the function whose block skeleton is mirrored
+ * @return MFunc  the empty-bodied mirror function
+ */
+fn build_mirror_blocks(f: lir::LFunc) -> MFunc {
+    mut blocks: []MBlock = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= f.blocks.len { break }
+        let lb = f.blocks[i]
+        blocks = teko::list::push(blocks, MBlock { id = lb.id; params = provisional_params(lb.params); insts = teko::list::empty() })
+        i++
+    }
+    MFunc { symbol = f.symbol; blocks = blocks; frame = teko::list::empty() }
+}
+
+/**
+ * max_block_id — the highest `LBlock` id in `f` (edge blocks are numbered
+ * past it so a split edge block never collides with a mirror block).
+ *
+ * @param lir::LFunc f  the function to scan
+ * @return u32  its greatest block id
+ */
+fn max_block_id(f: lir::LFunc) -> u32 {
+    mut m: u32 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= f.blocks.len { break }
+        if f.blocks[i].id > m { m = f.blocks[i].id }
+        i++
+    }
+    m
+}
+
+/**
+ * select_all_blocks — select every `LBlock` of `f` in order, retargeting the
+ * emit cursor to each block's mirror before selecting its instructions.
+ *
+ * @param SelCtx ctx0  the initial context (targeting the entry block)
+ * @param lir::LFunc f  the function to select
+ * @return SelCtx | error  the fully-advanced context, or the first error
+ */
+fn select_all_blocks(ctx0: SelCtx, f: lir::LFunc) -> SelCtx | error {
+    mut ctx = ctx0
+    mut i: u64 = 0
+    loop {
+        if i >= f.blocks.len { break }
+        let lb = f.blocks[i]
+        let switched = selctx_switch(ctx, lb.id)
+        // A `let` binding for the match — NOT `ctx = match {…return}` — for clarity and
+        // consistency with `select_insts` (mirrors the same let-then-assign pattern).
+        let stepped = match select_insts(switched, f, lb.insts) { SelCtx as c => c; error as e => return e }
+        ctx = stepped
+        i++
+    }
+    ctx
+}
+
+/**
+ * select_lfunc — select one `LFunc` into an `MFunc`: build the mirror block
+ * skeleton, then select every block's instructions (A2-3 handles the full
+ * control-flow set — jumps, branches, and their split edge blocks).
+ *
+ * @param lir::LFunc f  the function to select
+ * @return MFunc | error  the selected function, or any instruction's own
+ *                        propagated error
+ */
+pub fn select_lfunc(f: lir::LFunc) -> MFunc | error {
+    let ctx0 = SelCtx { func = build_mirror_blocks(f); vinfo = vinfo_empty(); next_scratch = f.next_vreg; cur_block = 0; next_block = max_block_id(f) + 1 }
+    let done = match select_all_blocks(ctx0, f) { SelCtx as c => c; error as e => return e }
+    done.func
+}
+
+/**
+ * select_module — select every function of `m` into an `MModule`, carrying
+ * its rodata/globals/layouts tables through UNCHANGED (A2 never touches
+ * their bytes — that is A4's job).
+ *
+ * @param lir::LModule m  the module to select
+ * @return MModule | error  the selected module, or the first function's
+ *                          propagated error
+ */
+pub fn select_module(m: lir::LModule) -> MModule | error {
+    mut out = MModule { funcs = teko::list::empty(); rodata = m.rodata; globals = m.globals; layouts = m.layouts }
+    mut i: u64 = 0
+    loop {
+        if i >= m.funcs.len { break }
+        let mf = match select_lfunc(m.funcs[i]) { MFunc as x => x; error as e => return e }
+        out = add_mfunc(out, mf)
+        i++
+    }
+    out
+}

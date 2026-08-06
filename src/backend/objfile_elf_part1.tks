@@ -1,0 +1,892 @@
+fn emit_u16_le_elf(buf: []byte, v: u32) -> []byte {
+    mut b = teko::list::push(buf, (v & ELF_BYTE_MASK) to byte)
+    teko::list::push(b, ((v >> (8 to u32)) & ELF_BYTE_MASK) to byte)
+}
+
+/**
+ * ElfStrtab — an assembled ELF string table: the raw bytes (a leading NUL then
+ * one NUL-terminated name per non-empty entry) and the parallel per-entry byte
+ * offsets. Serves both the symbol `.strtab` (names in `Elf64_Sym` order) and the
+ * section `.shstrtab` (names in section-header order); an empty name maps to
+ * offset 0 (the reserved leading NUL), which the null symbol and the
+ * `STT_SECTION` rodata symbol both carry.
+ *
+ * @since #386 B1-7
+ */
+type ElfStrtab = struct {
+    /**
+     * bytes — the string-table image (a leading NUL, then `name\0` per entry).
+     */
+    bytes: []byte
+    /**
+     * strx — the byte offset of each entry's name in `bytes`, in entry order
+     * (0 for an empty name).
+     */
+    strx: []u32
+}
+
+/**
+ * build_elf_strtab — assemble an ELF string table from `names`: a leading NUL
+ * (the reserved empty name at offset 0), then each non-empty name — the raw
+ * bytes followed by a NUL terminator — recording each name's start offset. An
+ * empty name records offset 0 (the shared leading NUL) and appends nothing, so
+ * the null symbol / null section and the unnamed `STT_SECTION` symbol all point
+ * at index 0. Unlike the Mach-O `build_strtab`, ELF names carry NO `_` prefix.
+ *
+ * @param []str names  the names to intern, in table order
+ * @return ElfStrtab  the string-table bytes + the per-name offsets
+ */
+fn build_elf_strtab(names: []str) -> ElfStrtab {
+    mut bytes: []byte = teko::list::push(teko::list::empty(), 0 to byte)
+    mut strx: []u32 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= names.len { break }
+        if names[i].len == (0 to u64) {
+            strx = teko::list::push(strx, 0 to u32)
+        } else {
+            strx = teko::list::push(strx, bytes.len to u32)
+            bytes = emit_str_bytes(bytes, names[i])
+            bytes = teko::list::push(bytes, 0 to byte)
+        }
+        i++
+    }
+    ElfStrtab { bytes = bytes; strx = strx }
+}
+
+/**
+ * EM_X86_64 — the `Elf64_Ehdr.e_machine` value identifying an x86-64 object
+ * (the SysV psABI machine number).
+ */
+const EM_X86_64: u32 = 62 to u32
+
+/**
+ * ELF_BYTE_MASK — the low-byte mask the little-endian field serializers apply
+ * per lane (`(v >> lane) & 0xFF`), narrowing each half/quarter to one `byte`.
+ */
+const ELF_BYTE_MASK: u32 = 0xFF to u32
+
+/**
+ * STB_LOCAL — the ELF `st_info` bind field value for a file-local symbol,
+ * visible only within this object.
+ */
+const STB_LOCAL: u8 = 0
+
+/**
+ * STB_GLOBAL — the ELF `st_info` bind field value for a globally-visible
+ * symbol, linkable from other objects.
+ */
+const STB_GLOBAL: u8 = 1
+
+/**
+ * STT_NOTYPE — the ELF `st_info` type field value for a symbol with no type:
+ * the reserved null symbol and every undefined extern reference.
+ */
+const STT_NOTYPE: u8 = 0
+
+/**
+ * STT_FUNC — the ELF `st_info` type field value for a function symbol.
+ */
+const STT_FUNC: u8 = 2
+
+/**
+ * STT_SECTION — the ELF `st_info` type field value for a section symbol: the
+ * `.rodata`/`.data.rel.ro` section symbols every rodata relocation targets.
+ */
+const STT_SECTION: u8 = 3
+
+/**
+ * ELF_SECT_RODATA — the neutral `Symbol.sect` tag for a datum that lands in
+ * the read-only `.rodata` section (`SHF_ALLOC` only): a string literal or any
+ * const leaf that carries no pointer relocation of its own.
+ */
+const ELF_SECT_RODATA: u8 = 2
+
+/**
+ * ELF_SECT_DATA_REL_RO — the neutral `Symbol.sect` tag the data-rel-ro
+ * partition stamps onto a const datum that carries at least one pointer
+ * relocation (a `const []T` fat slot). Such a datum needs a load-time fixup, so
+ * it must live in a section the linker may write during relocation processing;
+ * `.data.rel.ro` (`SHF_ALLOC|SHF_WRITE`, RELRO) is that section, and this tag is
+ * an ELF-writer-local convention (the neutral producer only ever emits `.text`
+ * (1) and `.rodata` (2) — see `encode_rodata`), so it never collides with a real
+ * producer sect.
+ */
+const ELF_SECT_DATA_REL_RO: u8 = 4
+
+/**
+ * ELF_SHNDX_RODATA — the fixed section-header-table index of `.rodata` in the
+ * writer's section order (`""`, `.text`, `.rodata`, ...): the `st_shndx` of every
+ * pure rodata datum's section symbol.
+ */
+const ELF_SHNDX_RODATA: u32 = 2 to u32
+
+/**
+ * ELF_SHNDX_DATA_REL_RO — the section-header-table index of `.data.rel.ro`,
+ * APPENDED after `.rela.text` (index 6) so the six fixed sections keep their
+ * indices and every `st_shndx`/`sh_link`/`sh_info`/`e_shstrndx` that names them
+ * stays valid. Present only when the module carries a pointer-bearing const
+ * (`elf_partition_data_rel_ro` active); it is the `st_shndx` of the
+ * `.data.rel.ro` section symbol and of the `.rela.data.rel.ro` `sh_info`.
+ */
+const ELF_SHNDX_DATA_REL_RO: u32 = 7 to u32
+
+/**
+ * st_info — pack an `Elf64_Sym.st_info` byte from its bind and type sub-fields:
+ * `(bind << 4) | stt`. `st_info` is a COMPOSED field (two adjacent sub-fields
+ * shifted into one byte), not an OR of independent bits, so a `flags` bitmask
+ * would misrepresent it — this is a plain helper over the `STB_*`/`STT_*`
+ * constants (#594 crumb 11).
+ *
+ * @param bind  the bind sub-field (`STB_LOCAL`/`STB_GLOBAL`)
+ * @param stt   the type sub-field (`STT_NOTYPE`/`STT_FUNC`/`STT_SECTION`)
+ * @return      the packed `st_info` byte
+ */
+fn st_info(bind: u8, stt: u8) -> u8 {
+    (bind << 4) | stt
+}
+
+/**
+ * ElfSym — one resolved `Elf64_Sym` in the object's final symbol-table order
+ * (local-then-global): its name (interned into `.strtab`), its `st_info`
+ * bind/type byte, its `st_shndx` section index, and its `st_value`. For a
+ * defined function in an `ET_REL` object `value` is the SECTION-RELATIVE byte
+ * offset within `.text` (`st_shndx = 1`) — NOT an absolute address. This is the
+ * exact INVERSE of Mach-O's `nlist_64.n_value`, which is `section_addr + offset`
+ * (the A4-4 F1 fix); porting that rebase to ELF would over-state every symbol
+ * and make `ld` mis-link the object, so ELF deliberately keeps the bare offset.
+ *
+ * @since #386 B1-7
+ */
+type ElfSym = struct {
+    /**
+     * name — the symbol name interned into `.strtab` (empty for the null symbol
+     * and the `STT_SECTION` rodata symbol, both of which carry `st_name = 0`).
+     */
+    name: str
+    /**
+     * info — the `st_info` byte, packed by `st_info(bind, stt)`: `st_info(STB_LOCAL,
+     * STT_NOTYPE)` (`0x00`) null, `st_info(STB_LOCAL, STT_SECTION)` (`0x03`) LOCAL|SECTION
+     * (rodata), `st_info(STB_GLOBAL, STT_FUNC)` (`0x12`) GLOBAL|FUNC (defined function),
+     * `st_info(STB_GLOBAL, STT_NOTYPE)` (`0x10`) GLOBAL|NOTYPE (undefined extern).
+     */
+    info: u32
+    /**
+     * shndx — the `st_shndx` section index: 0 (`SHN_UNDEF`) for an undefined
+     * symbol, 1 (`.text`) for a function, 2 (`.rodata`) for the section symbol.
+     */
+    shndx: u32
+    /**
+     * value — the `st_value`: for a defined function the SECTION-RELATIVE byte
+     * offset within its `st_shndx` section, 0 for the null/section/undefined
+     * symbols.
+     */
+    value: u32
+}
+
+/**
+ * elf_has_rodata_section — whether the module defines any file-local `.rodata`
+ * datum (a defined, local, section-2 `Symbol`): gates emission of the single
+ * `.rodata` `STT_SECTION` symbol that rodata relocations target (§7.1). The ELF
+ * idiom collapses every per-string symbol into one section symbol + an addend,
+ * dodging the per-string symbols and their cross-object duplicate-name clashes.
+ *
+ * @param []Symbol symbols  the module's neutral symbol list
+ * @return bool  true iff a defined section-2 local symbol is present
+ */
+fn elf_has_rodata_section(symbols: []Symbol) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= symbols.len { break }
+        let s = symbols[i]
+        if s.defined && s.local && s.sect == (2 to u8) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * elf_append_text_locals — append each file-local `.text` symbol (a defined,
+ * file-local, section-1 `Symbol` — a pcrel-pair label an ISA may synthesize,
+ * §7.2) to `out` as an `STB_LOCAL|STT_NOTYPE` entry (`st_info = 0x00`,
+ * `st_shndx = 1`, section-relative `st_value`). x86-64 produces NO section-1
+ * local (only section-2 rodata locals, globals, and undefined externs), so this
+ * pass is inert for x86 and its symbol table — and thus its object bytes — stay
+ * unchanged (the B2-7 reuse guardrail). The labels slot into the leading LOCAL
+ * block, so `.symtab.sh_info` (first-global) still counts them correctly.
+ *
+ * @param []ElfSym out  the table so far (null + optional `.rodata` section symbol)
+ * @param []Symbol symbols  the module's neutral symbol list
+ * @return []ElfSym  `out` followed by every section-1 file-local symbol
+ */
+fn elf_append_text_locals(out: []ElfSym, symbols: []Symbol) -> []ElfSym {
+    mut acc = out
+    mut i: u64 = 0
+    loop {
+        if i >= symbols.len { break }
+        let s = symbols[i]
+        if s.defined && s.local && s.sect == (1 to u8) {
+            acc = teko::list::push(acc, ElfSym { name = s.name; info = st_info(STB_LOCAL, STT_NOTYPE) to u32; shndx = 1 to u32; value = s.offset })
+        }
+        i++
+    }
+    acc
+}
+
+/**
+ * elf_append_globals — append each defined, globally-visible `Symbol` (a defined
+ * function) to `out` as a `GLOBAL|FUNC` entry (`st_info = 0x12`, `st_shndx = 1`)
+ * at its section-relative `.text` offset — the bare offset, never rebased (the
+ * Mach-O F1 inverse). Runs after every local symbol so the ELF-required
+ * local-then-global order holds.
+ *
+ * @param []ElfSym out  the table so far (null + rodata section + `.text` locals)
+ * @param []Symbol symbols  the module's neutral symbol list
+ * @return []ElfSym  `out` followed by every defined global function symbol
+ */
+fn elf_append_globals(out: []ElfSym, symbols: []Symbol) -> []ElfSym {
+    mut acc = out
+    mut i: u64 = 0
+    loop {
+        if i >= symbols.len { break }
+        let s = symbols[i]
+        if s.defined && !s.local {
+            acc = teko::list::push(acc, ElfSym { name = s.name; info = st_info(STB_GLOBAL, STT_FUNC) to u32; shndx = 1 to u32; value = s.offset })
+        }
+        i++
+    }
+    acc
+}
+
+/**
+ * elf_append_undefined — append each undefined `Symbol` (an externally-referenced
+ * name this object does not define) to `out` as a `GLOBAL|NOTYPE` entry
+ * (`st_info = 0x10`, `st_shndx = SHN_UNDEF`(0), `st_value = 0`). Runs last, after
+ * every defined symbol.
+ *
+ * @param []ElfSym out  the table so far (null + locals + defined globals)
+ * @param []Symbol symbols  the module's neutral symbol list
+ * @return []ElfSym  `out` followed by every undefined extern symbol
+ */
+fn elf_append_undefined(out: []ElfSym, symbols: []Symbol) -> []ElfSym {
+    mut acc = out
+    mut i: u64 = 0
+    loop {
+        if i >= symbols.len { break }
+        let s = symbols[i]
+        if !s.defined {
+            acc = teko::list::push(acc, ElfSym { name = s.name; info = st_info(STB_GLOBAL, STT_NOTYPE) to u32; shndx = 0 to u32; value = 0 to u32 })
+        }
+        i++
+    }
+    acc
+}
+
+/**
+ * elf_build_symbols — the object's `Elf64_Sym` table in the ELF-required
+ * LOCAL-then-GLOBAL order: the reserved null symbol, then (when rodata is
+ * present) the `.rodata` `STT_SECTION` local symbol, then every file-local
+ * `.text` label (§7.2 — none for x86), then
+ * every defined function as `GLOBAL|FUNC` at its section-relative `.text` offset
+ * (`st_shndx = 1`), then every undefined extern as `GLOBAL|NOTYPE`
+ * (`st_shndx = SHN_UNDEF`). The neutral `Symbol` list's per-rodata locals are NOT
+ * emitted individually — they are represented by the one section symbol, so
+ * `st_value` for a function stays the bare section-relative offset (never
+ * rebased, the Mach-O F1 inverse).
+ *
+ * @param []Symbol symbols  the module's neutral symbol list
+ * @return []ElfSym  the resolved symbol table, local-then-global
+ */
+fn elf_build_symbols(symbols: []Symbol) -> []ElfSym {
+    mut out: []ElfSym = teko::list::push(teko::list::empty(), ElfSym { name = ""; info = 0 to u32; shndx = 0 to u32; value = 0 to u32 })
+    if elf_has_rodata_section(symbols) {
+        out = teko::list::push(out, ElfSym { name = ""; info = st_info(STB_LOCAL, STT_SECTION) to u32; shndx = ELF_SHNDX_RODATA; value = 0 to u32 })
+    }
+    if elf_has_data_rel_ro_section(symbols) {
+        out = teko::list::push(out, ElfSym { name = ""; info = st_info(STB_LOCAL, STT_SECTION) to u32; shndx = ELF_SHNDX_DATA_REL_RO; value = 0 to u32 })
+    }
+    out = elf_append_text_locals(out, symbols)
+    out = elf_append_globals(out, symbols)
+    elf_append_undefined(out, symbols)
+}
+
+/**
+ * elf_has_data_rel_ro_section — whether the post-partition symbol list carries
+ * any moved, pointer-bearing const (a defined, local, `ELF_SECT_DATA_REL_RO`
+ * `Symbol`): gates emission of the `.data.rel.ro` `STT_SECTION` symbol that the
+ * moved data's relocations target. The `.data.rel.ro` twin of
+ * `elf_has_rodata_section`.
+ *
+ * @param []Symbol symbols  the post-partition neutral symbol list
+ * @return bool  true iff a defined `.data.rel.ro` local symbol is present
+ */
+fn elf_has_data_rel_ro_section(symbols: []Symbol) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= symbols.len { break }
+        let s = symbols[i]
+        if s.defined && s.local && s.sect == ELF_SECT_DATA_REL_RO { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * elf_sym_names — the `.strtab` name of each `ElfSym`, in symbol-table order,
+ * feeding `build_elf_strtab`. The null and `STT_SECTION` symbols contribute the
+ * empty name (offset 0).
+ *
+ * @param []ElfSym syms  the resolved symbol table
+ * @return []str  each symbol's name, in order
+ */
+fn elf_sym_names(syms: []ElfSym) -> []str {
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= syms.len { break }
+        out = teko::list::push(out, syms[i].name)
+        i++
+    }
+    out
+}
+
+/**
+ * elf_first_global_index — the index of the first non-local symbol in `syms`
+ * (`st_info` bind field `!= STB_LOCAL`), or `syms.len` when all are local. This
+ * is `.symtab`'s `sh_info`: ELF requires every local symbol to precede every
+ * global, and `sh_info` to name the boundary (the analog of Mach-O's
+ * `iextdefsym`). An off-by-one here makes `ld` reject the object.
+ *
+ * @param []ElfSym syms  the resolved symbol table (locals first)
+ * @return u32  the index of the first global symbol, or `syms.len`
+ */
+fn elf_first_global_index(syms: []ElfSym) -> u32 {
+    mut i: u64 = 0
+    loop {
+        if i >= syms.len { break }
+        if (syms[i].info >> (4 to u32)) != (0 to u32) { return i to u32 }
+        i++
+    }
+    syms.len to u32
+}
+
+/**
+ * elf_symbol_index — the symbol-table index of the symbol named `name`, or
+ * `syms.len` when absent. `elf_build_relas` packs this POST-partition index into
+ * `r_info`; because locals were sorted before globals, the index a function/
+ * extern lands at differs from its pre-partition position, so the lookup runs
+ * against the FINAL table. The absent sentinel is unreached for a well-formed
+ * module (every non-rodata reloc target is a function or an undefined extern in
+ * the table) and is covered by a direct unit test on a hand-built input.
+ *
+ * @param []ElfSym syms  the resolved symbol table
+ * @param str name  the target symbol's name
+ * @return u32  the symbol's index, or `syms.len` when not found
+ */
+fn elf_symbol_index(syms: []ElfSym, name: str) -> u32 {
+    mut i: u64 = 0
+    loop {
+        if i >= syms.len { break }
+        if syms[i].name == name { return i to u32 }
+        i++
+    }
+    syms.len to u32
+}
+
+/**
+ * elf_rodata_secsym_index — the symbol-table index of the `.rodata`
+ * `STT_SECTION` symbol (`st_info == 0x03`, `st_shndx == 2`), the target every
+ * rodata relocation resolves to, or `syms.len` when no rodata section symbol was
+ * emitted. The absent case is unreached because a rodata relocation is emitted
+ * only when the rodata datum — and thus its section symbol — exists.
+ *
+ * @param []ElfSym syms  the resolved symbol table
+ * @return u32  the `.rodata` section symbol's index, or `syms.len`
+ */
+fn elf_rodata_secsym_index(syms: []ElfSym) -> u32 {
+    elf_secsym_index_at(syms, ELF_SHNDX_RODATA)
+}
+
+/**
+ * elf_drr_secsym_index — the symbol-table index of the `.data.rel.ro`
+ * `STT_SECTION` symbol (`st_shndx == ELF_SHNDX_DATA_REL_RO`), the target every
+ * relocation whose datum MOVED to `.data.rel.ro` resolves to, or `syms.len` when
+ * no such section symbol was emitted (a module with no pointer-bearing const).
+ *
+ * @param []ElfSym syms  the resolved symbol table
+ * @return u32  the `.data.rel.ro` section symbol's index, or `syms.len`
+ */
+fn elf_drr_secsym_index(syms: []ElfSym) -> u32 {
+    elf_secsym_index_at(syms, ELF_SHNDX_DATA_REL_RO)
+}
+
+/**
+ * elf_secsym_index_at — the symbol-table index of the `STT_SECTION` local whose
+ * `st_shndx` equals `shndx`, or `syms.len` when absent. The shared scan behind
+ * `elf_rodata_secsym_index` and `elf_drr_secsym_index`.
+ *
+ * @param []ElfSym syms  the resolved symbol table
+ * @param u32 shndx  the section-header index whose section symbol is sought
+ * @return u32  that section symbol's table index, or `syms.len`
+ */
+fn elf_secsym_index_at(syms: []ElfSym, shndx: u32) -> u32 {
+    mut i: u64 = 0
+    loop {
+        if i >= syms.len { break }
+        if syms[i].info == st_info(STB_LOCAL, STT_SECTION) && syms[i].shndx == shndx { return i to u32 }
+        i++
+    }
+    syms.len to u32
+}
+
+/**
+ * R_X86_64_64 — the `Elf64_Rela` `r_info` relocation type for a 64-bit absolute
+ * address (the psABI's value 1).
+ */
+const R_X86_64_64: u32 = 1 to u32
+
+/**
+ * R_X86_64_PC32 — the `Elf64_Rela` `r_info` relocation type for a 32-bit
+ * PC-relative displacement (the psABI's value 2), which is what a
+ * `lea reg, [rip+disp32]` address materialization owes.
+ */
+const R_X86_64_PC32: u32 = 2 to u32
+
+/**
+ * R_X86_64_PLT32 — the `Elf64_Rela` `r_info` relocation type for a 32-bit
+ * PC-relative displacement to a symbol's PLT entry (the psABI's value 4), which
+ * a static link resolves to a plain PC-relative `call`.
+ */
+const R_X86_64_PLT32: u32 = 4 to u32
+
+/**
+ * elf_reloc_type — the `R_X86_64_*` relocation type for a `RelocKindX86`, one
+ * named psABI constant per kind: `PLT32` for a `Plt32` call (resolves to a plain
+ * PC-relative call under a static link, the correct choice for both the `cc`
+ * bootstrap and the future E1 linker), `PC32` for a `Pc32` rip-relative `lea`,
+ * `64` for an `Abs64` data-global address. `Abs64` is the FUTURE data path:
+ * `encode_module_x86` raises the `B1-globals` honest-stop before any `Abs64`
+ * relocation is produced, so a real B1 object never carries one, and a
+ * rip-relative `lea` only ever carries `Pc32`/`Plt32`, never `Abs64` (asserted
+ * in the tests).
+ *
+ * @param RelocKindX86 kind  the relocation kind
+ * @return u32  the `Elf64_Rela` `r_info` type field
+ */
+fn elf_reloc_type(kind: RelocKindX86) -> u32 {
+    match kind {
+        Plt32 => R_X86_64_PLT32
+        Pc32 => R_X86_64_PC32
+        Abs64 => R_X86_64_64
+    }
+}
+
+/**
+ * ElfRodataHit — the result of resolving a relocation's target against the
+ * module's rodata locals: whether the named target is a defined, file-local
+ * `.rodata` datum, and (when it is) that datum's byte offset within `.rodata`.
+ * A hit re-points the relocation at the `.rodata` section symbol and folds the
+ * offset into the addend (the ELF section-symbol idiom); a miss leaves the
+ * relocation targeting the named function/extern symbol directly.
+ *
+ * @since #386 B1-7
+ */
+type ElfRodataHit = struct {
+    /**
+     * found — true iff the relocation target is a defined section-local datum
+     * (`.rodata` OR `.data.rel.ro`).
+     */
+    found: bool
+    /**
+     * offset — the target datum's byte offset within its section (0 on a miss).
+     */
+    offset: u32
+    /**
+     * is_drr — true iff the target datum lives in `.data.rel.ro` (a moved,
+     * pointer-bearing const) rather than `.rodata`, so the caller folds onto the
+     * `.data.rel.ro` section symbol instead of the `.rodata` one.
+     */
+    is_drr: bool
+}
+
+/**
+ * elf_rodata_hit — resolve `name` against the module's rodata locals: a hit iff
+ * some `Symbol` named `name` is defined, file-local, and section-tagged
+ * `.rodata` (`ELF_SECT_RODATA`) or `.data.rel.ro` (`ELF_SECT_DATA_REL_RO`),
+ * carrying that datum's section byte offset. `elf_resolve_rela` folds a hit's
+ * offset into the relocation addend and re-targets the datum's section symbol —
+ * the `.data.rel.ro` symbol when the datum moved, the `.rodata` symbol otherwise.
+ *
+ * @param []Symbol symbols  the module's neutral symbol list (post-partition)
+ * @param str name  the relocation's target symbol name
+ * @return ElfRodataHit  whether it is a section-local datum, its offset, and its section
+ */
+fn elf_rodata_hit(symbols: []Symbol, name: str) -> ElfRodataHit {
+    mut i: u64 = 0
+    loop {
+        if i >= symbols.len { break }
+        let s = symbols[i]
+        let is_local_datum = s.defined && s.local && (s.sect == ELF_SECT_RODATA || s.sect == ELF_SECT_DATA_REL_RO)
+        if is_local_datum && s.name == name {
+            return ElfRodataHit { found = true; offset = s.offset; is_drr = s.sect == ELF_SECT_DATA_REL_RO }
+        }
+        i++
+    }
+    ElfRodataHit { found = false; offset = 0 to u32; is_drr = false }
+}
+
+/**
+ * ElfRela — one resolved `Elf64_Rela`: the `.text`-relative field offset, the
+ * POST-partition symbol-table index it targets, the `R_X86_64_*` type, and the
+ * final addend (a rodata target folds its `.rodata` byte offset onto the base
+ * `-4`, so the linker's `S + A - P` lands on the datum).
+ *
+ * @since #386 B1-7
+ */
+type ElfRela = struct {
+    /**
+     * offset — the `r_offset`: the patched field's `.text`-section-relative byte
+     * offset (module-rebased at encode).
+     */
+    offset: u32
+    /**
+     * symidx — the `r_info` symbol index (the final, post-partition table
+     * index).
+     */
+    symidx: u32
+    /**
+     * rtype — the `r_info` `R_X86_64_*` type field.
+     */
+    rtype: u32
+    /**
+     * addend — the `r_addend`: the kind's base addend, plus a rodata target's
+     * `.rodata` byte offset.
+     */
+    addend: i64
+}
+
+/**
+ * elf_build_relas — resolve every neutral `ElfRelocReq` of `obj` into an
+ * `Elf64_Rela` row: a rodata target (a defined section-2 local) re-points at the
+ * `.rodata` section symbol with its `.rodata` byte offset folded onto the addend;
+ * any other target (a defined function, a `.text` pcrel label, or an undefined
+ * extern) keeps its base addend and takes that symbol's POST-partition table
+ * index. The numeric `R_<arch>_*` type rides through unchanged — each per-ISA
+ * adapter already lowered its own `RelocKind*` to `rtype`, so no ISA knowledge
+ * remains here. The `r_offset` is the encoder's module-rebased `.text`-relative
+ * field offset, unchanged.
+ *
+ * @param relocs   the `.text`-relative neutral relocation requests
+ * @param symbols  the post-partition neutral symbol list (for `elf_rodata_hit`)
+ * @param syms  the resolved symbol table (for target indices)
+ * @return []ElfRela  the resolved relocation rows, in emission order
+ */
+fn elf_build_relas(relocs: []ElfRelocReq, symbols: []Symbol, syms: []ElfSym) -> []ElfRela {
+    elf_resolve_relas(relocs, symbols, syms)
+}
+
+/**
+ * elf_resolve_relas — resolve a list of neutral `ElfRelocReq` rows into
+ * `Elf64_Rela` rows, computing the two section-symbol indices once and folding
+ * each row through `elf_resolve_rela`. Shared by the `.rela.text` and
+ * `.rela.data.rel.ro` builders.
+ *
+ * @param reqs     the neutral relocation requests, in emission order
+ * @param symbols  the post-partition neutral symbol list (for `elf_rodata_hit`)
+ * @param syms     the resolved symbol table (for section-symbol + target indices)
+ * @return []ElfRela  the resolved relocation rows, in the same order
+ */
+fn elf_resolve_relas(reqs: []ElfRelocReq, symbols: []Symbol, syms: []ElfSym) -> []ElfRela {
+    let rodata_secidx = elf_rodata_secsym_index(syms)
+    let drr_secidx = elf_drr_secsym_index(syms)
+    mut out: []ElfRela = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= reqs.len { break }
+        out = teko::list::push(out, elf_resolve_rela(reqs[i], symbols, syms, rodata_secidx, drr_secidx))
+        i++
+    }
+    out
+}
+
+/**
+ * elf_resolve_rela — resolve ONE neutral `ElfRelocReq` `r` into an `Elf64_Rela`
+ * row: a section-local target (a defined `.rodata` OR `.data.rel.ro` local)
+ * re-points at THAT section's section symbol — `rodata_secidx` for a pure datum,
+ * `drr_secidx` for a moved pointer-bearing one — with the datum's section byte
+ * offset folded onto the addend; any other target takes its POST-partition
+ * symbol index. The numeric `rtype` and the section-base-relative `r.offset` ride
+ * through unchanged.
+ *
+ * @param r             the neutral relocation request
+ * @param symbols       the post-partition neutral symbol list (for `elf_rodata_hit`)
+ * @param syms          the resolved symbol table (for target indices)
+ * @param rodata_secidx the `.rodata` section symbol's table index
+ * @param drr_secidx    the `.data.rel.ro` section symbol's table index (or `syms.len`)
+ * @return              the resolved `Elf64_Rela` row
+ */
+fn elf_resolve_rela(r: ElfRelocReq, symbols: []Symbol, syms: []ElfSym, rodata_secidx: u32, drr_secidx: u32) -> ElfRela {
+    let hit = elf_rodata_hit(symbols, r.sym)
+    let secidx = if hit.is_drr { drr_secidx } else { rodata_secidx }
+    let symidx = if hit.found { secidx } else { elf_symbol_index(syms, r.sym) }
+    let addend = if hit.found { r.addend + hit.offset } else { r.addend }
+    ElfRela { offset = r.offset; symidx = symidx; rtype = r.rtype; addend = addend }
+}
+
+/**
+ * elf_build_rodata_relas — resolve each moved-datum relocation into a
+ * `.rela.data.rel.ro` row: a `const []T` fat slot's data→data pointer becomes
+ * R_X86_64_64 against the target leaf's section symbol (the `.rodata` symbol,
+ * since a leaf stays read-only) with the leaf's `.rodata` offset folded onto the
+ * addend; its `r_offset` is the pointer slot's byte offset INSIDE `.data.rel.ro`
+ * (the partition already rebased it). Empty unless the module carries a
+ * pointer-bearing const.
+ *
+ * @param drr_relocs  the `.data.rel.ro`-relative moved-datum relocations
+ * @param symbols  the post-partition neutral symbol list
+ * @param syms  the resolved symbol table (for target indices)
+ * @return      the `.rela.data.rel.ro` rows, in emission order
+ */
+fn elf_build_rodata_relas(drr_relocs: []ElfRelocReq, symbols: []Symbol, syms: []ElfSym) -> []ElfRela {
+    elf_resolve_relas(drr_relocs, symbols, syms)
+}
+
+/**
+ * elf_rela_info — the `Elf64_Rela` `r_info` word, `(symbol_index << 32) | type`.
+ *
+ * @param u32 symidx  the symbol-table index
+ * @param u32 rtype  the `R_X86_64_*` type
+ * @return u64  the packed `r_info`
+ */
+fn elf_rela_info(symidx: u32, rtype: u32) -> u64 {
+    ((symidx to u64) << (32 to u64)) | rtype
+}
+
+/**
+ * elf_section_names — the section names, in section-header-table order: the
+ * seven fixed names (`""` null, `.text`, `.rodata`, `.symtab`, `.strtab`,
+ * `.shstrtab`, `.rela.text`), plus — when the module carries a pointer-bearing
+ * const — the appended `.data.rel.ro` (index 7) and its `.rela.data.rel.ro`
+ * (index 8), plus — when a `--debug=lines` build supplies DWARF (D1.4) —
+ * `.debug_abbrev`, `.debug_info`, `.debug_line`, `.rela.debug_info`, and
+ * `.rela.debug_line`, ALWAYS the last five names regardless of `has_drr` (so
+ * their table index is `7` or `9`, never in between). Every appended block is
+ * interned into `.shstrtab` to yield its header's `sh_name`; each is APPENDED so
+ * the six fixed sections keep their indices (`ELF_SHNDX_*` and every
+ * `sh_link`/`sh_info`/`e_shstrndx` naming them stay valid).
+ *
+ * @param bool has_drr    whether a `.data.rel.ro` section (and its rela) is present
+ * @param bool has_dwarf  whether the DWARF sections (D1.4) are present
+ * @return []str  the section names, in header order
+ */
+fn elf_section_names(has_drr: bool, has_dwarf: bool) -> []str {
+    let base = ["", ".text", ".rodata", ".symtab", ".strtab", ".shstrtab", ".rela.text"]
+    let with_drr = if has_drr { teko::list::push(teko::list::push(base, ".data.rel.ro"), ".rela.data.rel.ro") } else { base }
+    if !has_dwarf { return with_drr }
+    let with_dwarf_secs = teko::list::push(teko::list::push(teko::list::push(with_drr, ".debug_abbrev"), ".debug_info"), ".debug_line")
+    teko::list::push(teko::list::push(with_dwarf_secs, ".rela.debug_info"), ".rela.debug_line")
+}
+
+/**
+ * ELF64_SYM_SIZE — `sizeof(Elf64_Sym)`: the 24-byte size of one symbol-table
+ * entry, `.symtab`'s `sh_entsize` and the multiplier of its `sh_size`.
+ */
+const ELF64_SYM_SIZE: u32 = 24 to u32
+
+/**
+ * ELF64_RELA_SIZE — `sizeof(Elf64_Rela)`: the 24-byte size of one relocation
+ * entry, the `.rela.*` sections' `sh_entsize` and the multiplier of their
+ * `sh_size`.
+ */
+const ELF64_RELA_SIZE: u32 = 24 to u32
+
+/**
+ * ElfLayout — the resolved file offsets, sizes, and counts of the object:
+ * computed BEFORE any bytes are emitted, so the `Elf64_Ehdr` `e_shoff` and each
+ * `Elf64_Shdr` `sh_offset`/`sh_size` can reference the real data positions. The
+ * emission order mirrors this exactly: `[Ehdr][.text][.rodata][.data.rel.ro?]
+ * [.symtab][.strtab][.shstrtab][.rela.text][.rela.data.rel.ro?][.debug_abbrev?]
+ * [.debug_info?][.debug_line?][.rela.debug_info?][.rela.debug_line?][SHT]` (D1.4
+ * adds the five `?`-marked DWARF fields, always LAST regardless of `.data.rel.ro`
+ * — see `elf_section_names`), with every non-string-table section placed at
+ * 8-aligned offsets.
+ *
+ * @since #386 B1-7
+ */
+type ElfLayout = struct {
+    /**
+     * text_offset — the `.text` section data file offset (just past the Ehdr).
+     */
+    text_offset: u32
+    /**
+     * text_size — the `.text` section byte size.
+     */
+    text_size: u32
+    /**
+     * rodata_offset — the 8-aligned `.rodata` section data file offset.
+     */
+    rodata_offset: u32
+    /**
+     * rodata_size — the `.rodata` section byte size (0 when no rodata).
+     */
+    rodata_size: u32
+    /**
+     * drr_offset — the 8-aligned `.data.rel.ro` section data file offset (right
+     * after `.rodata`), or the 8-aligned end-of-`.rodata` value when the module
+     * carries no pointer-bearing const (nothing is emitted there).
+     */
+    drr_offset: u32
+    /**
+     * drr_size — the `.data.rel.ro` section byte size; 0 when the module carries
+     * no pointer-bearing const, keeping the object byte-identical to the
+     * pre-partition writer.
+     */
+    drr_size: u32
+    /**
+     * symtab_offset — the 8-aligned `.symtab` file offset.
+     */
+    symtab_offset: u32
+    /**
+     * symtab_size — the `.symtab` byte size (`nsyms * 24`).
+     */
+    symtab_size: u32
+    /**
+     * strtab_offset — the `.strtab` file offset (immediately after `.symtab`).
+     */
+    strtab_offset: u32
+    /**
+     * strtab_size — the `.strtab` byte size.
+     */
+    strtab_size: u32
+    /**
+     * shstrtab_offset — the `.shstrtab` file offset (immediately after
+     * `.strtab`).
+     */
+    shstrtab_offset: u32
+    /**
+     * shstrtab_size — the `.shstrtab` byte size.
+     */
+    shstrtab_size: u32
+    /**
+     * rela_offset — the 8-aligned `.rela.text` file offset.
+     */
+    rela_offset: u32
+    /**
+     * rela_size — the `.rela.text` byte size (`nrela * 24`).
+     */
+    rela_size: u32
+    /**
+     * shoff — the 8-aligned section-header-table file offset (the Ehdr's
+     * `e_shoff`).
+     */
+    shoff: u32
+    /**
+     * nsyms — the number of `Elf64_Sym` entries.
+     */
+    nsyms: u32
+    /**
+     * nrela — the number of `Elf64_Rela` entries.
+     */
+    nrela: u32
+    /**
+     * first_global — `.symtab`'s `sh_info`: the index of the first non-local
+     * symbol.
+     */
+    first_global: u32
+    /**
+     * rela_rodata_offset — the 8-aligned file offset of `.rela.data.rel.ro`
+     * (right after `.rela.text`), or the 8-aligned end-of-`.rela.text` value when
+     * the module carries no pointer-bearing const (nothing is emitted there).
+     */
+    rela_rodata_offset: u32
+    /**
+     * rela_rodata_size — the byte size of `.rela.data.rel.ro`
+     * (`nrela_rodata * 24`); 0 when the module carries no pointer-bearing const,
+     * keeping the object byte-identical to the pre-partition writer.
+     */
+    rela_rodata_size: u32
+    /**
+     * nrela_rodata — the `Elf64_Rela` count of `.rela.data.rel.ro` (0 for a
+     * module with no pointer-bearing const).
+     */
+    nrela_rodata: u32
+    /**
+     * nsects — the section-header count (`e_shnum`): 7 without a pointer-bearing
+     * const, 9 with it (the appended `.data.rel.ro` + `.rela.data.rel.ro`), plus 5
+     * more with DWARF present (D1.4). Derived from the section-name count.
+     */
+    nsects: u32
+    /**
+     * debug_abbrev_offset — the `.debug_abbrev` section data file offset (D1.4;
+     * meaningful only when DWARF is present — equals the identity value below when
+     * absent, since its 0-byte size never moves the chain).
+     */
+    debug_abbrev_offset: u32
+    /**
+     * debug_abbrev_size — the `.debug_abbrev` section byte size (0 when DWARF is
+     * absent, keeping the object byte-identical to a build with no debug axis).
+     */
+    debug_abbrev_size: u32
+    /**
+     * debug_info_offset — the `.debug_info` section data file offset (D1.4).
+     */
+    debug_info_offset: u32
+    /**
+     * debug_info_size — the `.debug_info` section byte size (0 when DWARF is
+     * absent).
+     */
+    debug_info_size: u32
+    /**
+     * debug_line_offset — the `.debug_line` section data file offset (D1.4).
+     */
+    debug_line_offset: u32
+    /**
+     * debug_line_size — the `.debug_line` section byte size (0 when DWARF is
+     * absent).
+     */
+    debug_line_size: u32
+    /**
+     * rela_debug_info_offset — the `.rela.debug_info` file offset (D1.4).
+     */
+    rela_debug_info_offset: u32
+    /**
+     * rela_debug_info_size — the `.rela.debug_info` byte size (`nrela * 24`; 0
+     * when DWARF is absent).
+     */
+    rela_debug_info_size: u32
+    /**
+     * rela_debug_line_offset — the `.rela.debug_line` file offset (D1.4).
+     */
+    rela_debug_line_offset: u32
+    /**
+     * rela_debug_line_size — the `.rela.debug_line` byte size (`nrela * 24`; 0
+     * when DWARF is absent).
+     */
+    rela_debug_line_size: u32
+}
+
+/**
+ * compute_elf_layout — resolve every file offset, size, and count of the object
+ * from the encoded module and the pre-built table sizes. `.text` follows the
+ * 64-byte Ehdr; `.rodata`, `.symtab`, `.rela.text`, and the section-header table
+ * are each placed at the next 8-aligned offset (matching their `sh_addralign`);
+ * `.strtab` and `.shstrtab` (byte strings, align 1) follow their predecessors
+ * directly. Mirrors `emit_elf`'s emission order exactly.
+ *
+ * @param ElfObject obj  the neutral object (for the `.text`/`.rodata` sizes)
+ * @param u32 rodata_size  the `.rodata` section byte size (post-partition)
+ * @param u32 drr_size  the `.data.rel.ro` section byte size (0 when absent)
+ * @param u32 nsyms  the `Elf64_Sym` count
+ * @param u32 nrela  the `Elf64_Rela` count
+ * @param u32 nrela_rodata  the `Elf64_Rela` count of `.rela.data.rel.ro`
+ * @param u32 strtab_len  the pre-built `.strtab` byte size
+ * @param u32 shstrtab_len  the pre-built `.shstrtab` byte size
+ * @param u32 first_global  `.symtab`'s `sh_info`
+ * @param u32 nsects  the section-header count (`e_shnum`)
+ * @param u32 debug_abbrev_size  the `.debug_abbrev` byte size (0 when DWARF absent, D1.4)
+ * @param u32 debug_info_size  the `.debug_info` byte size (0 when DWARF absent)
+ * @param u32 debug_line_size  the `.debug_line` byte size (0 when DWARF absent)
+ * @param u32 nrela_debug_info  the `.rela.debug_info` `Elf64_Rela` count
+ * @param u32 nrela_debug_line  the `.rela.debug_line` `Elf64_Rela` count
+ * @return ElfLayout  the resolved offsets + sizes + counts
+ */

@@ -1,0 +1,677 @@
+fn furthest_active_eligible(abi: AbiDescriptor, a: ActiveEntry, crosses_call: bool) -> bool {
+    !crosses_call || !is_caller_saved(abi, preg(a.phys, a.reg_class))
+}
+
+/**
+ * furthest_active — the active entry of class `reg_class` with the largest `end` (the
+ * furthest-next-use spill candidate) whose physreg is call-safe to hand to the interval
+ * being colored (`furthest_active_eligible`), or `found=false` when none qualifies —
+ * including when every same-class active entry holds a caller-saved register and the
+ * interval being colored crosses a call, in which case the caller must fall through to
+ * spilling the NEW interval instead of displacing an unsafe one.
+ *
+ * @param []ActiveEntry active  the active set
+ * @param MRegClass reg_class  the register class
+ * @param AbiDescriptor abi  the register file (for the call-safety filter)
+ * @param bool crosses_call  whether the interval being colored crosses a call
+ * @return FurthestActive  the furthest call-safe entry, or none
+ */
+fn furthest_active(active: []ActiveEntry, reg_class: MRegClass, abi: AbiDescriptor, crosses_call: bool) -> FurthestActive {
+    mut best = FurthestActive { found = false; vreg_id = 0; phys = 0; end = 0 }
+    mut i: u64 = 0
+    loop {
+        if i >= active.len { break }
+        let a = active[i]
+        if a.reg_class == reg_class && furthest_active_eligible(abi, a, crosses_call) {
+            if !best.found || a.end > best.end {
+                best = FurthestActive { found = true; vreg_id = a.vreg_id; phys = a.phys; end = a.end }
+            }
+        }
+        i++
+    }
+    best
+}
+
+/**
+ * remove_active — the active set with the entry for `vreg_id` removed.
+ *
+ * @param []ActiveEntry active  the active set
+ * @param u32 vreg_id  the vreg whose entry to drop
+ * @return []ActiveEntry  the reduced active set
+ */
+fn remove_active(active: []ActiveEntry, vreg_id: u32) -> []ActiveEntry {
+    mut out: []ActiveEntry = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= active.len { break }
+        if active[i].vreg_id != vreg_id { out = teko::list::push(out, active[i]) }
+        i++
+    }
+    out
+}
+
+/**
+ * mark_spilled — the assignment list with `vreg_id`'s `InReg` replaced by a
+ * `Spilled{slot}` (the furthest-next-use victim loses its register).
+ *
+ * @param []RegAssignment assignments  the assignments so far
+ * @param u32 vreg_id  the victim vreg
+ * @param u64 slot  its new spill slot
+ * @return []RegAssignment  the updated assignments
+ */
+fn mark_spilled(assignments: []RegAssignment, vreg_id: u32, slot: u64) -> []RegAssignment {
+    mut out: []RegAssignment = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= assignments.len { break }
+        let a = assignments[i]
+        let repl = match a {
+            InReg as r => if r.vreg_id == vreg_id { Spilled { vreg_id = vreg_id; slot = slot } } else { a }
+            Spilled => a
+        }
+        out = teko::list::push(out, repl)
+        i++
+    }
+    out
+}
+
+/**
+ * add_unique_u32 — `list` with `x` appended iff not already present.
+ *
+ * @param []u32 list  the list
+ * @param u32 x  the value to add
+ * @return []u32  the (possibly extended) list
+ */
+fn add_unique_u32(list: []u32, x: u32) -> []u32 {
+    mut i: u64 = 0
+    loop {
+        if i >= list.len { break }
+        if list[i] == x { return list }
+        i++
+    }
+    teko::list::push(list, x)
+}
+
+/**
+ * linear_scan — the §3.3 Poletto–Sarkar linear scan extended for fixed pin
+ * intervals and call clobbers: the virtual intervals are colored in start
+ * order, expiring the active set at each start, choosing the first candidate
+ * physreg (free of active + fixed-pin overlap, call-safe if the value
+ * crosses a call), and on register pressure spilling the furthest-next-use —
+ * itself restricted to a call-safe victim when the interval being colored
+ * crosses a call (`furthest_active`'s own filter), so displacing an active
+ * entry can never hand a call-crossing value a caller-saved register that a
+ * callee between its def and its last use would clobber.
+ *
+ * @param AbiDescriptor abi  the register file the scan colors from
+ * @param IntervalSet ivals  the computed intervals (A3-2)
+ * @return ScanResult  the per-vreg assignments + the callee-saved used
+ */
+fn linear_scan(abi: AbiDescriptor, ivals: IntervalSet) -> ScanResult {
+    let sorted = sort_by_start(ivals.virt)
+    mut active: []ActiveEntry = teko::list::empty()
+    mut assignments: []RegAssignment = teko::list::empty()
+    mut used_callee: []u32 = teko::list::empty()
+    mut next_slot: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= sorted.len { break }
+        let v = sorted[i]
+        active = expire_active(active, v.start)
+        let cand = candidate_pool(abi, v, active, ivals.fixed)
+        if cand.len > 0 {
+            let phys = cand[0]
+            active = teko::list::push(active, ActiveEntry { vreg_id = v.reg_id; phys = phys; end = v.end; reg_class = v.reg_class })
+            assignments = teko::list::push(assignments, InReg { vreg_id = v.reg_id; phys = phys })
+            if is_callee_saved(abi, preg(phys, v.reg_class)) { used_callee = add_unique_u32(used_callee, phys) }
+        } else {
+            let far = furthest_active(active, v.reg_class, abi, v.crosses_call)
+            if far.found && far.end > v.end {
+                let slot = next_slot
+                next_slot = next_slot + 1
+                assignments = mark_spilled(assignments, far.vreg_id, slot)
+                active = remove_active(active, far.vreg_id)
+                active = teko::list::push(active, ActiveEntry { vreg_id = v.reg_id; phys = far.phys; end = v.end; reg_class = v.reg_class })
+                assignments = teko::list::push(assignments, InReg { vreg_id = v.reg_id; phys = far.phys })
+                if is_callee_saved(abi, preg(far.phys, v.reg_class)) { used_callee = add_unique_u32(used_callee, far.phys) }
+            } else {
+                let slot = next_slot
+                next_slot = next_slot + 1
+                assignments = teko::list::push(assignments, Spilled { vreg_id = v.reg_id; slot = slot })
+            }
+        }
+        i++
+    }
+    ScanResult { assignments = assignments; used_callee_saved = used_callee }
+}
+
+/**
+ * CallSafetyLookup — whether `IntervalSet.virt` carries an interval for a queried vreg id
+ * (option-struct, M.2), and if so its class and `crosses_call` — the two facts
+ * `report_call_unsafe_assignments` needs to judge one `InReg` assignment.
+ */
+type CallSafetyLookup = struct {
+    /** found — true iff `virt` carries an interval for the queried id. */
+    found: bool
+    /** reg_class — the interval's register file (meaningful only when `found`). */
+    reg_class: MRegClass
+    /** crosses_call — the interval's own flag (meaningful only when `found`). */
+    crosses_call: bool
+}
+
+/**
+ * lookup_call_safety — the `CallSafetyLookup` for `vreg_id` in `virt`: the first interval whose
+ * `reg_id` matches, or not-found (an assignment for an id the scan never colored — should not
+ * happen, but the lookup stays total rather than assume it).
+ *
+ * @param []LiveInterval virt  the scan's own virtual intervals
+ * @param u32 vreg_id  the virtual register id to find
+ * @return CallSafetyLookup  the match, or found=false
+ */
+fn lookup_call_safety(virt: []LiveInterval, vreg_id: u32) -> CallSafetyLookup {
+    mut i: u64 = 0
+    loop {
+        if i >= virt.len { break }
+        if virt[i].reg_id == vreg_id { return CallSafetyLookup { found = true; reg_class = virt[i].reg_class; crosses_call = virt[i].crosses_call } }
+        i++
+    }
+    CallSafetyLookup { found = false; reg_class = MRegClass::GPR; crosses_call = false }
+}
+
+/**
+ * CallUnsafeAssignment — one virtual register the scan colored `InReg` with a caller-saved
+ * physreg despite its own interval crossing a call: the exact failure mode a caller-saved
+ * register clobbered mid-lifetime by an intervening call would later surface as — a corrupted
+ * value read back after the call, attributable to nothing in particular without this diagnostic.
+ */
+type CallUnsafeAssignment = struct {
+    /** vreg_id — the virtual register the scan colored. */
+    vreg_id: u32
+    /** phys — the caller-saved physreg it was (wrongly) assigned. */
+    phys: u32
+    /** reg_class — the register file `phys` belongs to. */
+    reg_class: MRegClass
+}
+
+/**
+ * push_call_unsafe_assignment — `out` extended with `a`'s violation record when `a` is an
+ * `InReg` assignment whose looked-up interval crosses a call and whose physreg is caller-saved,
+ * unchanged otherwise (a `Spilled` assignment, or an `InReg` that is call-safe).
+ *
+ * @param []CallUnsafeAssignment out  the violations accumulated so far
+ * @param AbiDescriptor abi  the register file
+ * @param []LiveInterval virt  the scan's own virtual intervals
+ * @param RegAssignment a  the assignment to check
+ * @return []CallUnsafeAssignment  `out`, with `a`'s violation appended when applicable
+ */
+fn push_call_unsafe_assignment(out: []CallUnsafeAssignment, abi: AbiDescriptor, virt: []LiveInterval, a: RegAssignment) -> []CallUnsafeAssignment {
+    match a {
+        InReg as r => {
+            let lookup = lookup_call_safety(virt, r.vreg_id)
+            if !lookup.found || !lookup.crosses_call { return out }
+            if !is_caller_saved(abi, preg(r.phys, lookup.reg_class)) { return out }
+            teko::list::push(out, CallUnsafeAssignment { vreg_id = r.vreg_id; phys = r.phys; reg_class = lookup.reg_class })
+        }
+        Spilled => out
+    }
+}
+
+/**
+ * find_call_unsafe_assignments — every `InReg` assignment in `sr.assignments` whose interval
+ * (looked up in `ivals.virt` by vreg id) crosses a call yet was colored a caller-saved physreg:
+ * the invariant `candidate_pool`'s `call_ok` filter and `furthest_active`'s own call-safety
+ * filter are BOTH meant to make unreachable (§3.3, `IntervalSet`'s own doc comment). A pure,
+ * unit-testable core; `report_call_unsafe_assignments` is its env-gated stderr sink.
+ *
+ * @param AbiDescriptor abi  the register file
+ * @param IntervalSet ivals  the scan's own intervals
+ * @param ScanResult sr  the scan's own output
+ * @return []CallUnsafeAssignment  every violating assignment, in `sr.assignments`' own order
+ */
+fn find_call_unsafe_assignments(abi: AbiDescriptor, ivals: IntervalSet, sr: ScanResult) -> []CallUnsafeAssignment {
+    mut out: []CallUnsafeAssignment = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= sr.assignments.len { break }
+        out = push_call_unsafe_assignment(out, abi, ivals.virt, sr.assignments[i])
+        i++
+    }
+    out
+}
+
+/**
+ * call_safety_check_enabled — whether the native regalloc call-safety diagnostic
+ * (`TEKO_NATIVE_CALL_SAFETY_CHECK=1`) is requested: a CI-narrowing aid (mirrors
+ * `rodata_align_check_enabled` in `encode_arm64.tks`), NOT part of the ritual's normal output —
+ * it names, straight from one function's own scan output, any `InReg` assignment that violates
+ * the call-crossing invariant `candidate_pool`/`furthest_active` are meant to enforce, instead of
+ * leaving the eventual clobbered-value read to surface as a distant, unattributed crash.
+ *
+ * @return bool  true iff `TEKO_NATIVE_CALL_SAFETY_CHECK` is set to `"1"`
+ */
+fn call_safety_check_enabled() -> bool {
+    match teko::env::var("TEKO_NATIVE_CALL_SAFETY_CHECK") { str as v => v == "1"; error => false }
+}
+
+/**
+ * reg_class_name — `class`'s diagnostic name (`"gpr"`/`"fpr"`), for a stderr line that must not
+ * assume string interpolation formats an enum value on its own.
+ *
+ * @param MRegClass rc  the register class to name
+ * @return str  `"gpr"` or `"fpr"`
+ */
+fn reg_class_name(rc: MRegClass) -> str {
+    match rc { MRegClass::GPR => "gpr"; MRegClass::FPR => "fpr" }
+}
+
+/**
+ * report_call_unsafe_assignment — print one call-unsafe-assignment diagnostic line to stderr.
+ *
+ * @param CallUnsafeAssignment v  the violation to report
+ * @return void
+ */
+fn report_call_unsafe_assignment(v: CallUnsafeAssignment) -> void {
+    let rc = reg_class_name(v.reg_class)
+    teko::io::eprintln($"teko: TEKO_NATIVE_CALL_SAFETY_CHECK: call-crossing vreg in caller-saved register — vreg={v.vreg_id} phys={v.phys} class={rc}")
+}
+
+/**
+ * report_call_unsafe_assignments — print one diagnostic line per call-unsafe assignment `abi`/
+ * `ivals`/`sr` disclose, when `call_safety_check_enabled`; a no-op otherwise, so the ordinary
+ * build's output is byte-identical to before this diagnostic existed.
+ *
+ * @param AbiDescriptor abi  the register file
+ * @param IntervalSet ivals  the scan's own intervals
+ * @param ScanResult sr  the scan's own output
+ * @return void
+ */
+fn report_call_unsafe_assignments(abi: AbiDescriptor, ivals: IntervalSet, sr: ScanResult) -> void {
+    if !call_safety_check_enabled() { return }
+    let violations = find_call_unsafe_assignments(abi, ivals, sr)
+    mut i: u64 = 0
+    loop {
+        if i >= violations.len { break }
+        report_call_unsafe_assignment(violations[i])
+        i++
+    }
+}
+
+/**
+ * AssignLookup — the assignment outcome for a queried virtual register
+ * (option-struct, M.2): `found` is false when the id has no interval;
+ * otherwise `is_spill` selects between `phys` (an `InReg` color) and `slot`
+ * (a `Spilled` frame slot).
+ *
+ * @since #384 A3-4
+ */
+pub type AssignLookup = struct {
+    /**
+     * found — true iff the queried id has an assignment.
+     */
+    found: bool
+    /**
+     * is_spill — true iff the assignment is a `Spilled` (read `slot`).
+     */
+    is_spill: bool
+    /**
+     * phys — the assigned physical register id (when `!is_spill`).
+     */
+    phys: u32
+    /**
+     * slot — the spill-relative frame slot (when `is_spill`). `u64` (D5,
+     * `cast-width-hygiene-0.3.1.md` §3/C3) — a pure internal count.
+     */
+    slot: u64
+}
+
+/**
+ * al_none — the not-found `AssignLookup`.
+ *
+ * @return AssignLookup  found=false
+ */
+fn al_none() -> AssignLookup {
+    AssignLookup { found = false; is_spill = false; phys = 0 to u32; slot = 0 }
+}
+
+/**
+ * in_lookup — the `AssignLookup` for an `InReg` assignment `r` if it names
+ * `vreg_id`, else not-found.
+ *
+ * @param InReg r  the candidate in-register assignment
+ * @param u32 vreg_id  the queried id
+ * @return AssignLookup  the hit, or found=false
+ */
+fn in_lookup(r: InReg, vreg_id: u32) -> AssignLookup {
+    if r.vreg_id == vreg_id {
+        AssignLookup { found = true; is_spill = false; phys = r.phys; slot = 0 }
+    } else {
+        al_none()
+    }
+}
+
+/**
+ * sp_lookup — the `AssignLookup` for a `Spilled` assignment `s` if it names
+ * `vreg_id`, else not-found.
+ *
+ * @param Spilled s  the candidate spilled assignment
+ * @param u32 vreg_id  the queried id
+ * @return AssignLookup  the hit, or found=false
+ */
+fn sp_lookup(s: Spilled, vreg_id: u32) -> AssignLookup {
+    if s.vreg_id == vreg_id {
+        AssignLookup { found = true; is_spill = true; phys = 0 to u32; slot = s.slot }
+    } else {
+        al_none()
+    }
+}
+
+/**
+ * assign_lookup — the `RegAssignment` for virtual id `vreg_id`, flattened into
+ * an `AssignLookup` (found=false when no interval named it). Vreg ids are
+ * unique across register classes (isel draws every vreg from one counter), so
+ * the id alone keys the assignment.
+ *
+ * @param ScanResult sr  the linear-scan output
+ * @param u32 vreg_id  the virtual register to resolve
+ * @return AssignLookup  the assignment, or found=false
+ */
+pub fn assign_lookup(sr: ScanResult, vreg_id: u32) -> AssignLookup {
+    mut i: u64 = 0
+    loop {
+        if i >= sr.assignments.len { break }
+        let a = sr.assignments[i]
+        let hit = match a {
+            InReg as r => in_lookup(r, vreg_id)
+            Spilled as s => sp_lookup(s, vreg_id)
+        }
+        if hit.found { return hit }
+        i++
+    }
+    al_none()
+}
+
+/**
+ * SubstEntry — one virtual-register substitution for the rewrite: the virtual
+ * id `vid` becomes the physical register `to` (a color, a spill reload
+ * scratch, or a spill def scratch).
+ *
+ * @since #384 A3-4
+ */
+pub type SubstEntry = struct {
+    /**
+     * vid — the virtual register id being replaced.
+     */
+    vid: u32
+    /**
+     * to — the physical register it maps to.
+     */
+    to: MReg
+}
+
+/**
+ * subst_has — whether `table` already substitutes virtual id `vid`.
+ *
+ * @param []SubstEntry table  the substitution table
+ * @param u32 vid  the virtual id to test
+ * @return bool  true iff already present
+ */
+fn subst_has(table: []SubstEntry, vid: u32) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= table.len { break }
+        if table[i].vid == vid { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * subst_find — `r` mapped through `table`: a physical pin passes through
+ * unchanged; a virtual register resolves to its table entry, or (defensively,
+ * for a register with no interval) to itself.
+ *
+ * @param []SubstEntry table  the substitution table
+ * @param MReg r  the register to map
+ * @return MReg  the substituted register
+ */
+fn subst_find(table: []SubstEntry, r: MReg) -> MReg {
+    if r.is_phys { return r }
+    mut i: u64 = 0
+    loop {
+        if i >= table.len { break }
+        let e = table[i]
+        if e.vid == r.id { return e.to }
+        i++
+    }
+    r
+}
+
+/**
+ * map_regs_list — element-wise substitution of an `MReg` list (an `MCall`/
+ * `MCallIndirect` `uses` list).
+ *
+ * @param []MReg list  the register list
+ * @param []SubstEntry table  the substitution table
+ * @return []MReg  the substituted list
+ */
+fn map_regs_list(list: []MReg, table: []SubstEntry) -> []MReg {
+    mut out: []MReg = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= list.len { break }
+        out = teko::list::push(out, subst_find(table, list[i]))
+        i++
+    }
+    out
+}
+
+/**
+ * map_minst_regs — a copy of `inst` with every `MReg` field replaced through
+ * `table` (a flat per-case reconstruction over the 29-case variant, mirroring
+ * `inst_regs`'s dispatch). `MCall`/`MCallIndirect` map their `uses`
+ * element-wise, their `ret_reg`, and (indirect) their `target`. This is the
+ * single point where the machine-IR's register-field shape is walked for
+ * rewriting — a missed case would leak a virtual register into the output,
+ * which the all-physical invariant test catches.
+ *
+ * @param MInst inst  the instruction to rewrite
+ * @param []SubstEntry table  the substitution table
+ * @return MInst  the rewritten instruction
+ */
+pub fn map_minst_regs(inst: MInst, table: []SubstEntry) -> MInst {
+    match inst {
+        MAlu as x => MAlu { op = x.op; wide = x.wide; dst = subst_find(table, x.dst); a = subst_find(table, x.a); b = subst_find(table, x.b) }
+        MAluImm as x => MAluImm { op = x.op; wide = x.wide; dst = subst_find(table, x.dst); a = subst_find(table, x.a); imm = x.imm }
+        MMSub as x => MMSub { wide = x.wide; dst = subst_find(table, x.dst); a = subst_find(table, x.a); b = subst_find(table, x.b); c = subst_find(table, x.c) }
+        MNeg as x => MNeg { wide = x.wide; dst = subst_find(table, x.dst); a = subst_find(table, x.a) }
+        MMvn as x => MMvn { wide = x.wide; dst = subst_find(table, x.dst); a = subst_find(table, x.a) }
+        MFAlu as x => MFAlu { op = x.op; dbl = x.dbl; dst = subst_find(table, x.dst); a = subst_find(table, x.a); b = subst_find(table, x.b) }
+        MFNeg as x => MFNeg { dbl = x.dbl; dst = subst_find(table, x.dst); a = subst_find(table, x.a) }
+        MCmp as x => MCmp { wide = x.wide; a = subst_find(table, x.a); b = subst_find(table, x.b) }
+        MCmpImm as x => MCmpImm { wide = x.wide; a = subst_find(table, x.a); imm = x.imm }
+        MFCmp as x => MFCmp { dbl = x.dbl; a = subst_find(table, x.a); b = subst_find(table, x.b) }
+        MCSet as x => MCSet { wide = x.wide; dst = subst_find(table, x.dst); cond = x.cond }
+        MMovZ as x => MMovZ { wide = x.wide; dst = subst_find(table, x.dst); imm16 = x.imm16; shift = x.shift }
+        MMovK as x => MMovK { wide = x.wide; dst = subst_find(table, x.dst); imm16 = x.imm16; shift = x.shift }
+        MMovN as x => MMovN { wide = x.wide; dst = subst_find(table, x.dst); imm16 = x.imm16; shift = x.shift }
+        MFMov as x => MFMov { dbl = x.dbl; dst = subst_find(table, x.dst); src = subst_find(table, x.src) }
+        MMov as x => MMov { wide = x.wide; dst = subst_find(table, x.dst); src = subst_find(table, x.src) }
+        MExt as x => MExt { op = x.op; dst = subst_find(table, x.dst); a = subst_find(table, x.a) }
+        MCvt as x => MCvt { op = x.op; dst = subst_find(table, x.dst); a = subst_find(table, x.a); src_wide = x.src_wide; dst_wide = x.dst_wide }
+        MLoad as x => MLoad { size = x.size; sign = x.sign; dst = subst_find(table, x.dst); mem = MMem { base = subst_find(table, x.mem.base); offset = x.mem.offset } }
+        MStore as x => MStore { size = x.size; src = subst_find(table, x.src); mem = MMem { base = subst_find(table, x.mem.base); offset = x.mem.offset } }
+        MFSpill as x => MFSpill { reg = subst_find(table, x.reg); slot = x.slot; is_load = x.is_load }
+        MFrameAddr as x => MFrameAddr { dst = subst_find(table, x.dst); slot = x.slot }
+        MAdrp as x => MAdrp { dst = subst_find(table, x.dst); sym = x.sym; kind = x.kind }
+        MAddLo as x => MAddLo { dst = subst_find(table, x.dst); a = subst_find(table, x.a); sym = x.sym; kind = x.kind }
+        MBranch as x => MBranch { target = x.target }
+        MBranchCond as x => MBranchCond { cond = x.cond; target = x.target }
+        MCbz as x => MCbz { wide = x.wide; zero = x.zero; a = subst_find(table, x.a); target = x.target }
+        MCall as x => MCall { sym = x.sym; uses = map_regs_list(x.uses, table); ret_reg = subst_find(table, x.ret_reg); has_result = x.has_result; variadic = x.variadic }
+        MCallIndirect as x => MCallIndirect { target = subst_find(table, x.target); uses = map_regs_list(x.uses, table); ret_reg = subst_find(table, x.ret_reg); has_result = x.has_result }
+        MRet => MRet { }
+        MOutArg as x => MOutArg { size = x.size; src = subst_find(table, x.src); index = x.index }
+        MInArg as x => MInArg { size = x.size; dst = subst_find(table, x.dst); index = x.index }
+    }
+}
+
+/**
+ * minst_single — a one-element instruction list.
+ *
+ * @param MInst x  the instruction
+ * @return []MInst  the singleton list
+ */
+fn minst_single(x: MInst) -> []MInst {
+    teko::list::push(teko::list::empty(), x)
+}
+
+/**
+ * minst_cat — `a` followed by every element of `b`.
+ *
+ * @param []MInst a  the prefix list
+ * @param []MInst b  the suffix list
+ * @return []MInst  the concatenation
+ */
+fn minst_cat(a: []MInst, b: []MInst) -> []MInst {
+    mut out = a
+    mut i: u64 = 0
+    loop {
+        if i >= b.len { break }
+        out = teko::list::push(out, b[i])
+        i++
+    }
+    out
+}
+
+/**
+ * emit_gpr_reload — the two-instruction GPR spill reload into `sv`: compute the
+ * slot address into `sv`, then load the slot value into `sv` (base==dst is
+ * legal, §1.4). Both the address and the value live in `sv`.
+ *
+ * @param MReg sv  the GPR scratch to reload into
+ * @param u64 slot  the absolute frame slot
+ * @return []MInst  the reload sequence
+ */
+fn emit_gpr_reload(sv: MReg, slot: u64) -> []MInst {
+    let fa = frame_addr_inst(sv, slot)
+    let ld = load_inst(MMemSize::X, false, sv, MMem { base = sv; offset = 0 to i32 })
+    teko::list::push(minst_single(fa), ld)
+}
+
+/**
+ * emit_gpr_store — the two-instruction GPR spill store of the value already in
+ * `dsv`: compute the slot address into a distinct scratch `asv`, then store
+ * `dsv` to `[asv]`.
+ *
+ * @param MReg dsv  the GPR scratch holding the value to store
+ * @param MReg asv  a distinct GPR scratch for the slot address
+ * @param u64 slot  the absolute frame slot
+ * @return []MInst  the store sequence
+ */
+fn emit_gpr_store(dsv: MReg, asv: MReg, slot: u64) -> []MInst {
+    let fa = frame_addr_inst(asv, slot)
+    let st = store_inst(MMemSize::X, dsv, MMem { base = asv; offset = 0 to i32 })
+    teko::list::push(minst_single(fa), st)
+}
+
+/**
+ * emit_spill_reload — the reload sequence for one spilled value into scratch
+ * `sv`, by `sv`'s register file: the two-instruction GPR pair
+ * (`emit_gpr_reload`) or the single-instruction FPR `MFSpill` (which needs no
+ * address scratch — see `MFSpill`'s own doc for why the GPR pair cannot be
+ * reused for a float). The arm64 twin of `emit_spill_reload_x86`.
+ *
+ * @param MReg sv  the scratch to reload into (its `reg_class` picks the form)
+ * @param u64 slot  the absolute frame slot
+ * @return []MInst  the reload sequence
+ */
+fn emit_spill_reload(sv: MReg, slot: u64) -> []MInst {
+    if sv.reg_class == MRegClass::FPR { return minst_single(fspill_inst(sv, slot, true)) }
+    emit_gpr_reload(sv, slot)
+}
+
+/**
+ * emit_spill_store — the spill-store sequence for the value already in scratch
+ * `dsv`, by `dsv`'s register file: the two-instruction GPR pair
+ * (`emit_gpr_store`, which needs the distinct address scratch `asv`) or the
+ * single-instruction FPR `MFSpill` (which ignores `asv`).
+ *
+ * @param MReg dsv  the scratch holding the value (its `reg_class` picks the form)
+ * @param MReg asv  a distinct GPR scratch for the GPR path's slot address
+ * @param u64 slot  the absolute frame slot
+ * @return []MInst  the store sequence
+ */
+fn emit_spill_store(dsv: MReg, asv: MReg, slot: u64) -> []MInst {
+    if dsv.reg_class == MRegClass::FPR { return minst_single(fspill_inst(dsv, slot, false)) }
+    emit_gpr_store(dsv, asv, slot)
+}
+
+/**
+ * add_use_subst — the substitution table extended for one instruction operand
+ * use `u`: a physical pin or an already-mapped id is left as-is; an `InReg`
+ * use maps to its color; a `Spilled` use draws the next reload scratch
+ * (`nth`) OF ITS OWN REGISTER FILE, whose reload is appended to `reloads`
+ * (0.3.1.0 degrau 29: an FPR spill draws an FPR scratch and reloads with one
+ * `MFSpill`, an integer one keeps the GPR `frame_addr`+`ldr` pair). Returns the
+ * grown table, the grown reloads, and the advanced scratch counter via `UseAcc`.
+ *
+ * @param AbiDescriptor abi  the register file (for spill scratch)
+ * @param ScanResult sr  the allocation
+ * @param MReg u  the use operand
+ * @param u64 frame_base  the first spill frame slot index
+ * @param UseAcc acc  the table/reloads/counter so far
+ * @return UseAcc  the updated accumulator
+ */
+fn add_use_subst(abi: AbiDescriptor, sr: ScanResult, u: MReg, frame_base: u64, acc: UseAcc) -> UseAcc {
+    if u.is_phys { return acc }
+    if subst_has(acc.table, u.id) { return acc }
+    let la = assign_lookup(sr, u.id)
+    if !la.found { return acc }
+    if la.is_spill {
+        let sv = spill_scratch(abi, u.reg_class, acc.nth)
+        let reloads2 = minst_cat(acc.reloads, emit_spill_reload(sv, frame_base + la.slot))
+        let table2 = teko::list::push(acc.table, SubstEntry { vid = u.id; to = sv })
+        return UseAcc { table = table2; reloads = reloads2; nth = acc.nth + 1 }
+    }
+    let table3 = teko::list::push(acc.table, SubstEntry { vid = u.id; to = preg(la.phys, u.reg_class) })
+    UseAcc { table = table3; reloads = acc.reloads; nth = acc.nth }
+}
+
+/**
+ * UseAcc — the fold state while substituting an instruction's use operands:
+ * the substitution table, the accumulated reload sequence, and the next
+ * reload-scratch index.
+ *
+ * @since #384 A3-4
+ */
+type UseAcc = struct {
+    /**
+     * table — the substitution entries so far.
+     */
+    table: []SubstEntry
+    /**
+     * reloads — the reload instructions so far (emitted before the inst).
+     */
+    reloads: []MInst
+    /**
+     * nth — the next spill-reload scratch index.
+     */
+    nth: u32
+}
+
+/**
+ * rewrite_inst — expand one instruction into its final physical sequence: the
+ * reloads for its spilled uses, the register-substituted instruction, and the
+ * store for a spilled def (§3.4). Non-spilled operands map to their `InReg`
+ * physreg; physical pins pass through. A spilled value of EITHER register file
+ * lowers (0.3.1.0 degrau 29): the scratch is drawn from the value's own class and
+ * the sequence shape comes from `emit_spill_reload`/`emit_spill_store`. The GPR
+ * path's second (address) scratch is still a GPR, and it is unused on the FPR
+ * path, which addresses the slot from SP directly.
+ *
+ * @param AbiDescriptor abi  the register file (for spill scratch)
+ * @param ScanResult sr  the allocation
+ * @param MInst inst  the instruction to rewrite
+ * @param u64 frame_base  the first spill frame slot index
+ * @return []MInst  the reloads ++ the rewritten instruction ++ the store
+ */

@@ -1,0 +1,759 @@
+fn collect_word_reloc(acc: []Reloc, ew: EncWord, word_index: u64) -> []Reloc {
+    match ew.reloc {
+        null => acc
+        EncReloc as r => teko::list::push(acc, Reloc { offset = (word_index to u32) * ARM64_WORD_BYTES; sym = r.sym; kind = r.kind; sect = RelocSect::Text })
+    }
+}
+
+/**
+ * finalize_func — the patch pass: resolve every emitted `EncWord` to its final
+ * word (patching branch displacements from the recorded block offsets) and
+ * collect one `Reloc` per symbol-reference word (its offset the word index times
+ * 4). Produces the `EncodedFunc` hand-off to the A4-4 Mach-O writer.
+ *
+ * @param str symbol  the function's already-final symbol
+ * @param []EncWord words  the emitted `EncWord` stream (prologue ++ blocks)
+ * @param []BlockOffset offsets  the recorded per-block starting word indices
+ * @return EncodedFunc | error  the encoded function, or a named honest-stop
+ */
+fn finalize_func(symbol: str, words: []EncWord, offsets: []BlockOffset) -> EncodedFunc | error {
+    mut out_words: []u32 = teko::list::empty()
+    mut relocs: []Reloc = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= words.len { break }
+        let ew = words[i]
+        let w = match resolve_word(ew, i to u32, offsets) { u32 as v => v; error as e => return e }
+        out_words = teko::list::push(out_words, w)
+        relocs = collect_word_reloc(relocs, ew, i)
+        i++
+    }
+    EncodedFunc { symbol = symbol; words = out_words; relocs = relocs }
+}
+
+/**
+ * encode_func — lower one fully-colored `MFunc` to an `EncodedFunc`: compute its
+ * frame layout (A4-2), prepend the prologue, encode every block in `f.blocks`
+ * order (RPO after #443) recording each block's starting word index, expand
+ * `MFrameAddr`/`MRet`, then resolve intra-function branch displacements from the
+ * recorded offsets and collect the symbol relocations. Arm64 is fixed-width, so
+ * block offsets are exact after one encode pass — no branch relaxation. Any
+ * instruction's named honest-stop propagates out unchanged.
+ *
+ * @param AbiDescriptor abi  the register file (for the callee-saved save-set)
+ * @param MFunc f  the fully-physical function
+ * @return EncodedFunc | error  the encoded function, or a named honest-stop
+ */
+pub fn encode_func(abi: AbiDescriptor, f: MFunc) -> EncodedFunc | error {
+    let layout = compute_frame_layout(abi, f)
+    let pro_words = match emit_prologue(layout) { []u32 as w => w; error as e => return e }
+    mut words: []EncWord = wrap_plain_words(teko::list::empty(), pro_words)
+    mut offsets: []BlockOffset = teko::list::empty()
+    mut bi: u64 = 0
+    loop {
+        if bi >= f.blocks.len { break }
+        let blk = f.blocks[bi]
+        let off = words.len to u32
+        offsets = teko::list::push(offsets, BlockOffset { id = blk.id; word = off })
+        let next = match encode_block_words(layout, words, blk) { []EncWord as w => w; error as e => return e }
+        words = next
+        bi++
+    }
+    finalize_func(f.symbol, words, offsets)
+}
+
+/**
+ * Symbol — one symbol-table entry: its name, whether it is defined in this
+ * object, which section it lives in (when defined), its offset within that
+ * section, and whether it is file-local. Undefined symbols (the `tk_*` runtime
+ * + any not-yet-emitted callee) carry `defined=false`; the relocations
+ * reference them by name, the Mach-O writer by table index. `local` mirrors
+ * `clang`'s own convention (verified against a reference object): a function
+ * symbol is always global (so the C runtime's `crt0`/other objects can see
+ * it), a rodata symbol is always file-local (so two objects may each define
+ * their own same-named string constant without a duplicate-symbol clash at
+ * link time, Phase E) — `local` is meaningless for an undefined symbol (always
+ * global-external by construction).
+ *
+ * @since #385 A4-4
+ */
+pub type Symbol = struct {
+    /**
+     * name — the symbol's final name (unprefixed; the writer adds the `_`).
+     */
+    name: str
+    /**
+     * defined — true iff this object defines the symbol (a `__text`/`__const`
+     * datum), false for an external reference.
+     */
+    defined: bool
+    /**
+     * sect — the 1-based Mach-O section index the definition lives in
+     * (meaningful only when `defined`): 1 for `__text`, 2 for `__const`.
+     */
+    sect: u8
+    /**
+     * offset — the byte offset of the definition within its section
+     * (meaningful only when `defined`).
+     */
+    offset: u32
+    /**
+     * local — true iff a defined symbol is file-local (`N_SECT` without
+     * `N_EXT`, and belongs in `LC_DYSYMTAB`'s leading local range); false for a
+     * globally-visible defined symbol or for any undefined symbol.
+     */
+    local: bool
+}
+
+/**
+ * EncodedModule — the whole program lowered to section images + a flat symbol
+ * table: the concatenated `__text` bytes, the `__const` (rodata) bytes, the
+ * defined-then-undefined symbol list, and the module-rebased relocations. The
+ * Mach-O writer (A4-4) turns this into an object file; no arm64 knowledge
+ * remains past this boundary (the writer is ISA-agnostic — Phase B reuses its
+ * shape).
+ *
+ * @since #385 A4-4
+ */
+pub type EncodedModule = struct {
+    /**
+     * text — the `__TEXT,__text` section image (all functions concatenated,
+     * each function's words flattened little-endian).
+     */
+    text: []byte
+    /**
+     * rodata — the `__TEXT,__const` section image (interned string bytes, all
+     * rodata entries concatenated).
+     */
+    rodata: []byte
+    /**
+     * symbols — the symbol table, in Mach-O's required local-then-global-then-
+     * undefined order: one file-local entry per rodata entry, one globally-
+     * visible entry per function, then one undefined entry per externally-
+     * referenced symbol not defined in-module.
+     */
+    symbols: []Symbol
+    /**
+     * relocs — every relocation, `text`-section-relative (module-rebased), in
+     * emission order.
+     */
+    relocs: []Reloc
+}
+
+/**
+ * honest_globals — the named honest-stop A4-4 raises for a module carrying
+ * top-level data globals: the `__data` section + its GOT data relocs are not
+ * emitted by A4 (the N2 subset lowers no `LGlobal`, so this is unreached by the
+ * keystone corpus), and are closed when lowering starts emitting globals.
+ *
+ * @return error  the `A4-globals` named honest-stop
+ */
+fn honest_globals() -> error {
+    error { message = "A4-globals: __data section + GOT data relocs deferred (the N2 subset lowers no LGlobal)" }
+}
+
+/**
+ * append_words_le — append each u32 word of `ws` to a byte buffer as four
+ * little-endian bytes (the per-function `__text` word stream flattened into the
+ * module image).
+ *
+ * @param []byte buf  the byte buffer to extend
+ * @param []u32 ws  the instruction words to flatten
+ * @return []byte  `buf` followed by every word's little-endian bytes
+ */
+fn append_words_le(buf: []byte, ws: []u32) -> []byte {
+    mut b = buf
+    mut i: u64 = 0
+    loop {
+        if i >= ws.len { break }
+        b = emit_u32_le(b, ws[i])
+        i++
+    }
+    b
+}
+
+/**
+ * rebase_relocs — append each function-relative `Reloc` of `relocs` to `acc`
+ * with its byte offset shifted by `base` (the function's `__text` base), so the
+ * module reloc offset points at the instruction word in the concatenated image.
+ *
+ * @param []Reloc acc  the running module reloc list
+ * @param []Reloc relocs  one function's function-relative relocations
+ * @param u32 base  the function's `__text` base byte offset
+ * @return []Reloc  `acc` followed by the rebased relocations
+ */
+fn rebase_relocs(acc: []Reloc, relocs: []Reloc, base: u32) -> []Reloc {
+    mut out = acc
+    mut i: u64 = 0
+    loop {
+        if i >= relocs.len { break }
+        let r = relocs[i]
+        out = teko::list::push(out, Reloc { offset = r.offset + base; sym = r.sym; kind = r.kind; sect = r.sect })
+        i++
+    }
+    out
+}
+
+/**
+ * ModuleText — the running `__text` assembly of the module: the concatenated
+ * byte image, the module-rebased relocations, the defined function symbols, and
+ * the current base (the next function's `__text` byte offset).
+ *
+ * (0.3.1 C6.4) Made `pub` so the per-item fused native emit driver in `project.tks`
+ * (`emit_native_arm64`/`emit_native_arm64_linux`) can hold it as the ROOT-resident
+ * accumulator (Group B) across the scoped per-item lowering-and-encode windows.
+ *
+ * @since #385 A4-4
+ */
+pub type ModuleText = struct {
+    /**
+     * text — the concatenated `__text` bytes so far.
+     */
+    text: []byte
+    /**
+     * relocs — the module-rebased relocations so far.
+     */
+    relocs: []Reloc
+    /**
+     * syms — one defined `__text` symbol per function encoded so far.
+     */
+    syms: []Symbol
+    /**
+     * base — the next function's `__text` base byte offset (the current image
+     * length).
+     */
+    base: u32
+}
+
+/**
+ * empty_module_text — the seed `ModuleText`: empty image, no relocations, no
+ * symbols, base 0. (0.3.1 C6.4) `pub` so the fused emit driver seeds its
+ * root-resident accumulator with it.
+ *
+ * @return ModuleText  the seed accumulator
+ */
+pub fn empty_module_text() -> ModuleText {
+    ModuleText { text = teko::list::empty(); relocs = teko::list::empty(); syms = teko::list::empty(); base = 0 to u32 }
+}
+
+/**
+ * fold_func_into_text — encode one function and fold it into the running module
+ * `__text`: record its GLOBAL defined symbol at the current base (section 1,
+ * `__text` — a function must stay globally visible so the C runtime's `crt0`
+ * and other objects can call it), append its words as little-endian bytes, and
+ * rebase its relocs by the base. The base advances by the function's byte
+ * length (`words.len * 4`). Any named honest-stop from `encode_func` propagates
+ * out.
+ *
+ * @param AbiDescriptor abi  the register file
+ * @param ModuleText acc  the running `__text` assembly
+ * @param MFunc f  the fully-physical function to encode
+ * @return ModuleText | error  the extended assembly, or a named honest-stop
+ */
+fn fold_func_into_text(abi: AbiDescriptor, acc: ModuleText, f: MFunc) -> ModuleText | error {
+    let ef = match encode_func(abi, f) { EncodedFunc as x => x; error as e => return e }
+    fold_encoded_func(acc, ef)
+}
+
+/**
+ * fold_encoded_func — fold ONE already-encoded function's `EncodedFunc` into the running module
+ * `__text` accumulator: record its GLOBAL defined symbol at the current base (section 1, `__text`),
+ * flatten its words as little-endian bytes, and rebase its function-relative relocations by the
+ * base; the base then advances by the function's byte length. The encode of `f` and this fold are
+ * SEPARATE so the fused per-item native emit driver (0.3.1 C6.4) can encode inside a scoped scratch
+ * region and fold AFTER leaving it — the fold's appends land in the ROOT-resident accumulator
+ * (Group B), flattening the words and rebasing the relocs into freshly bump-allocated lists at the
+ * CURRENT (root) region, out of the still-live child before it is dropped (§2/§3 non-escape proof).
+ * `fold_func_into_text` is the non-scoped composition of `encode_func` and this fold.
+ *
+ * @param ModuleText acc  the running root-resident `__text` accumulator
+ * @param EncodedFunc ef  one function's encoded words, symbol name and function-relative relocs
+ * @return ModuleText  the extended accumulator
+ * @since 0.3.1 C6.4
+ */
+pub fn fold_encoded_func(acc: ModuleText, ef: EncodedFunc) -> ModuleText {
+    let sym = Symbol { name = ef.symbol; defined = true; sect = 1 to u8; offset = acc.base; local = false }
+    let text = append_words_le(acc.text, ef.words)
+    let relocs = rebase_relocs(acc.relocs, ef.relocs, acc.base)
+    let syms = teko::list::push(acc.syms, sym)
+    let base = acc.base + ((ef.words.len to u32) * ARM64_WORD_BYTES)
+    ModuleText { text = text; relocs = relocs; syms = syms; base = base }
+}
+
+/**
+ * encode_functions — fold every function of the module into one `ModuleText`
+ * (concatenated `__text` image + rebased relocations + one defined symbol per
+ * function). Any function's named honest-stop propagates out.
+ *
+ * @param AbiDescriptor abi  the register file
+ * @param []MFunc funcs  the module's fully-physical functions
+ * @return ModuleText | error  the assembled `__text`, or a named honest-stop
+ */
+fn encode_functions(abi: AbiDescriptor, funcs: []MFunc) -> ModuleText | error {
+    mut acc = empty_module_text()
+    mut i: u64 = 0
+    loop {
+        if i >= funcs.len { break }
+        let next = match fold_func_into_text(abi, acc, funcs[i]) { ModuleText as x => x; error as e => return e }
+        acc = next
+        i++
+    }
+    acc
+}
+
+/**
+ * ModuleRodata — the `__const` assembly of the module: the concatenated rodata
+ * byte image and one defined `__const` symbol per rodata entry.
+ *
+ * @since #385 A4-4
+ */
+type ModuleRodata = struct {
+    /**
+     * bytes — the concatenated `__const` image (all rodata entries).
+     */
+    bytes: []byte
+    /**
+     * syms — one defined `__const` symbol per rodata entry (section 2).
+     */
+    syms: []Symbol
+    /**
+     * relocs — the rodata-INTERNAL pointer relocations of every entry, REBASED to the
+     * concatenated `__const` image (each `LDataReloc.offset` becomes blob-base +
+     * field-offset; #594 T-B5). A NEUTRAL carrier (LIR-level, shared by the three
+     * encoders — this struct is namespace-shared): each `encode_module*` converts an
+     * entry to its own ISA reloc type with kind `Abs64` and `sect = Rodata`. EMPTY in
+     * every real compile until T-B6 (`serialize_const` honest-stops pointer-bearing
+     * aggregates), keeping every emitted object byte-identical.
+     */
+    relocs: []lir::LDataReloc
+}
+
+/**
+ * append_bytes — append every byte of `src` to `buf`.
+ *
+ * @param []byte buf  the buffer to extend
+ * @param []byte src  the bytes to append
+ * @return []byte  `buf` followed by `src`
+ */
+fn append_bytes(buf: []byte, src: []byte) -> []byte {
+    mut b = buf
+    mut i: u64 = 0
+    loop {
+        if i >= src.len { break }
+        b = teko::list::push(b, src[i])
+        i++
+    }
+    b
+}
+
+/**
+ * RODATA_ENTRY_ALIGN — the byte alignment every rodata ENTRY's START is padded to (8): the
+ * pointer width a fat member's `{ptr, len}` slot needs (`ltype_size(LType::Ptr)`), and the
+ * alignment macOS `ld` enforces on every `ARM64_RELOC_UNSIGNED` (`Abs64`) relocation site.
+ * `layout_of_sized` (`lir.tks`) already places a pointer FIELD on an 8-byte boundary WITHIN
+ * one entry's own bytes (natural C struct alignment); this constant closes the sibling gap
+ * BETWEEN entries — without it, an odd-length neighbor (a string leaf, a byte-count struct)
+ * pushes a following pointer-bearing entry's own start off an 8-byte boundary and the link
+ * fails (`ld: pointer not aligned in '<sym>'+<off>`, first hit on `AAPCS64.gpr_arg`'s
+ * neighbors in the self-hosting corpus).
+ */
+const RODATA_ENTRY_ALIGN: u32 = 8
+
+/**
+ * fold_rodata_entry_relocs — `entry`'s own relocations, rebased from entry-local offsets to
+ * the running `__const` offset `off` (`entry`'s own start), appended to `relocs`.
+ *
+ * @param []lir::LDataReloc relocs  the relocations accumulated over the preceding entries
+ * @param lir::LRodata entry  the rodata entry whose relocations to rebase
+ * @param u32 off  `entry`'s own start offset within the concatenated `__const` image
+ * @return []lir::LDataReloc  `relocs` extended with `entry`'s rebased relocations
+ */
+fn fold_rodata_entry_relocs(relocs: []lir::LDataReloc, entry: lir::LRodata, off: u32) -> []lir::LDataReloc {
+    mut out = relocs
+    mut j: u64 = 0
+    loop {
+        if j >= entry.relocs.len { break }
+        out = teko::list::push(out, lir::data_reloc(off + entry.relocs[j].offset, entry.relocs[j].target))
+        j++
+    }
+    out
+}
+
+/**
+ * PaddedRodata — the `__const` image plus its running byte offset after placing one entry
+ * and (except past the last one) padding to the next `RODATA_ENTRY_ALIGN`-byte boundary.
+ */
+type PaddedRodata = struct {
+    /** bytes — the `__const` image accumulated so far, entry bytes then any boundary pad. */
+    bytes: []byte
+    /**
+     * off — the running `__const` offset, always equal to `bytes.len` (kept as its own
+     * `u32` counter since every reloc/symbol offset field is `u32`, not `u64`).
+     */
+    off: u32
+}
+
+/**
+ * pad_rodata_entry_boundary — append `entry`'s bytes to the running `__const` image, then —
+ * unless `entry` is the LAST one (`is_last`) — zero-pad up to the next `RODATA_ENTRY_ALIGN`-
+ * byte boundary, so the NEXT entry's symbol (and any relocation inside it) starts 8-aligned
+ * regardless of `entry`'s own odd byte length.
+ *
+ * @param []byte bytes  the `__const` image accumulated so far
+ * @param u32 off  the running offset before placing `entry` (`entry`'s own start)
+ * @param lir::LRodata entry  the rodata entry to place
+ * @param bool is_last  whether `entry` is the final entry (no trailing pad needed)
+ * @return PaddedRodata  the image and offset advanced past `entry` (and its boundary pad)
+ */
+fn pad_rodata_entry_boundary(bytes: []byte, off: u32, entry: lir::LRodata, is_last: bool) -> PaddedRodata {
+    let placed = append_bytes(bytes, entry.bytes)
+    let placed_off = off + (entry.bytes.len to u32)
+    if is_last { return PaddedRodata { bytes = placed; off = placed_off } }
+    let aligned_off = align_up(placed_off, RODATA_ENTRY_ALIGN)
+    mut padded = placed
+    loop {
+        if padded.len >= (aligned_off to u64) { break }
+        padded = teko::list::push(padded, 0)
+    }
+    PaddedRodata { bytes = padded; off = aligned_off }
+}
+
+/**
+ * encode_rodata — build the `__const` image and its defined symbols: each
+ * `LRodata` entry is placed at the running byte offset with a defined, FILE-
+ * LOCAL section-2 symbol (the ADRP/ADD-lo relocations in `__text` resolve to it
+ * at link time; local mirrors `clang`'s own convention for string constants, so
+ * same-named rodata in two objects never collides at Phase E multi-object
+ * link), then boundary-padded to `RODATA_ENTRY_ALIGN` (`pad_rodata_entry_boundary`)
+ * so a pointer-bearing entry always starts 8-aligned regardless of its neighbors'
+ * own lengths.
+ *
+ * @param []lir::LRodata rodata  the module's interned rodata table
+ * @return ModuleRodata | error  the `__const` image + its defined symbols
+ */
+fn encode_rodata(rodata: []lir::LRodata) -> ModuleRodata | error {
+    mut bytes: []byte = teko::list::empty()
+    mut syms: []Symbol = teko::list::empty()
+    mut relocs: []lir::LDataReloc = teko::list::empty()
+    mut off: u32 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= rodata.len { break }
+        let rd = rodata[i]
+        syms = teko::list::push(syms, Symbol { name = rd.symbol; defined = true; sect = 2 to u8; offset = off; local = true })
+        relocs = fold_rodata_entry_relocs(relocs, rd, off)
+        let placed = pad_rodata_entry_boundary(bytes, off, rd, i + 1 >= rodata.len)
+        bytes = placed.bytes
+        off = placed.off
+        i++
+    }
+    match report_rodata_align_violations(syms, relocs) { error as e => return e; null => { } }
+    ModuleRodata { bytes = bytes; syms = syms; relocs = relocs }
+}
+
+/**
+ * RodataAlignViolation — one pointer-bearing rodata relocation whose absolute `__const`/`.rodata`
+ * offset is NOT `RODATA_ENTRY_ALIGN`-aligned: the diagnostic `TEKO_NATIVE_RODATA_ALIGN_CHECK=1`
+ * names to pin the exact culprit const behind a macOS `ld: pointer not aligned` link failure, or
+ * the equivalent silent const-corruption crash on a target whose linker tolerates the
+ * misalignment (an x86_64 `.rodata` reloc still lands on the wrong byte position even though the
+ * CPU itself tolerates the unaligned read).
+ */
+type RodataAlignViolation = struct {
+    /**
+     * owner — the nearest-preceding rodata symbol's name (the entry the misaligned reloc's own
+     * bytes actually live in — a linker names the SAME symbol in its own diagnostic when no
+     * symbol sits exactly at the violating offset).
+     */
+    owner: str
+    /** target — the misaligned pointer's own target symbol (what it was meant to point at). */
+    target: str
+    /** offset — the misaligned relocation's absolute offset within the concatenated rodata image. */
+    offset: u32
+    /**
+     * expected — the next `RODATA_ENTRY_ALIGN`-aligned offset the relocation should have landed
+     * on.
+     */
+    expected: u32
+}
+
+/**
+ * rodata_owning_symbol_name — the rodata-local symbol whose own entry contains absolute offset
+ * `off`: the nearest symbol at or before `off`, in ascending-offset (append) order — the same
+ * "symbol+displacement" rule a linker's own alignment diagnostic applies (`syms` is exactly the
+ * per-entry symbol table `encode_rodata` builds, so this walk mirrors what `ld` itself would
+ * report for the identical offset).
+ *
+ * @param []Symbol syms  the module's rodata-local symbol table, in ascending-offset order
+ * @param u32 off  the absolute offset to attribute
+ * @return str  the owning symbol's name, or `<unknown>` when `syms` is empty or every symbol
+ *              starts past `off`
+ */
+fn rodata_owning_symbol_name(syms: []Symbol, off: u32) -> str {
+    mut best = "<unknown>"
+    mut i: u64 = 0
+    loop {
+        if i >= syms.len { break }
+        if syms[i].offset <= off { best = syms[i].name }
+        i++
+    }
+    best
+}
+
+/**
+ * find_rodata_align_violations — every rodata-internal pointer relocation in `relocs` whose
+ * absolute offset is not `RODATA_ENTRY_ALIGN`-aligned, attributed to its owning entry via `syms`.
+ * A pure, unit-testable core (`enc_rodata_test.tkt` exercises it directly, with no environment
+ * variable involved); `report_rodata_align_violations` is its env-gated stderr sink.
+ *
+ * @param []Symbol syms  the module's rodata-local symbol table, in ascending-offset order
+ * @param []lir::LDataReloc relocs  the module's rebased rodata-internal relocations
+ * @return []RodataAlignViolation  every misaligned relocation, in `relocs`' own order
+ */
+fn find_rodata_align_violations(syms: []Symbol, relocs: []lir::LDataReloc) -> []RodataAlignViolation {
+    mut out: []RodataAlignViolation = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= relocs.len { break }
+        out = push_rodata_align_violation(out, syms, relocs[i])
+        i++
+    }
+    out
+}
+
+/**
+ * push_rodata_align_violation — `out` extended with `r`'s violation record when its absolute
+ * offset is not `RODATA_ENTRY_ALIGN`-aligned, unchanged otherwise.
+ *
+ * @param []RodataAlignViolation out  the violations accumulated so far
+ * @param []Symbol syms  the module's rodata-local symbol table, in ascending-offset order
+ * @param lir::LDataReloc r  the relocation to check
+ * @return []RodataAlignViolation  `out`, with `r`'s violation appended when applicable
+ */
+fn push_rodata_align_violation(out: []RodataAlignViolation, syms: []Symbol, r: lir::LDataReloc) -> []RodataAlignViolation {
+    if r.offset % RODATA_ENTRY_ALIGN == 0 { return out }
+    teko::list::push(out, RodataAlignViolation {
+        owner = rodata_owning_symbol_name(syms, r.offset)
+        target = r.target
+        offset = r.offset
+        expected = align_up(r.offset, RODATA_ENTRY_ALIGN)
+    })
+}
+
+/**
+ * rodata_align_check_enabled — whether the native rodata/reloc alignment diagnostic
+ * (`TEKO_NATIVE_RODATA_ALIGN_CHECK=1`) is requested: a CI-narrowing aid (mirrors
+ * `native_trace_items_enabled` in `project.tks`), NOT part of the ritual's normal output — it
+ * exists to name the exact const behind a macOS `ld: pointer not aligned` link failure, or the
+ * equivalent silent const-corruption crash on a target whose linker tolerates the misalignment.
+ *
+ * @return bool  true iff `TEKO_NATIVE_RODATA_ALIGN_CHECK` is set to `"1"`
+ */
+fn rodata_align_check_enabled() -> bool {
+    match teko::env::var("TEKO_NATIVE_RODATA_ALIGN_CHECK") { str as v => v == "1"; error => false }
+}
+
+/**
+ * rodata_align_violation_line — one misaligned-reloc diagnostic line for `v`: the owning const
+ * symbol, the pointer's target, its actual absolute rodata offset, and the 8-aligned offset it
+ * should have landed on. Built once, reused by both the per-violation stderr print and the fatal
+ * error's message (so the summary that aborts the build names the SAME first culprit as its own
+ * stderr line).
+ *
+ * @param RodataAlignViolation v  the violation to render
+ * @return str  the one-line diagnostic
+ */
+fn rodata_align_violation_line(v: RodataAlignViolation) -> str {
+    $"owner={v.owner} target={v.target} offset={v.offset} expected>={v.expected}"
+}
+
+/**
+ * report_rodata_align_violation — print one misaligned-reloc diagnostic line to stderr.
+ *
+ * @param RodataAlignViolation v  the violation to report
+ * @return void
+ */
+fn report_rodata_align_violation(v: RodataAlignViolation) -> void {
+    teko::io::eprintln(teko::str::concat("teko: TEKO_NATIVE_RODATA_ALIGN_CHECK: unaligned rodata pointer reloc — ", rodata_align_violation_line(v)))
+}
+
+/**
+ * report_rodata_align_violations — when `rodata_align_check_enabled`, print one diagnostic line per
+ * misaligned rodata-internal pointer relocation AND THEN, if any exist, ABORT the build by
+ * returning an `error` whose message names the FIRST culprit — so the compiler that is emitting a
+ * generation (the correct seed emitting gen1) stops IMMEDIATELY with the const named, instead of
+ * emitting a corrupt object the linker rejects later (macOS `ld: pointer not aligned`) or a
+ * generation reads as garbage at runtime (the Linux/x86 crash). The named error propagates all the
+ * way up to the build driver's `fail(dir, e.message)`, so the const's name is the LAST line of the
+ * CI log — extractable by `tail` — rather than buried mid-stream. A no-op returning `null` when the
+ * env var is unset, so the ordinary build's output stays byte-identical to before this diagnostic
+ * existed.
+ *
+ * @param []Symbol syms  the module's rodata-local symbol table, in ascending-offset order
+ * @param []lir::LDataReloc relocs  the module's rebased rodata-internal relocations
+ * @return null | error  `null` when disabled or clean; the fatal named honest-stop on any violation
+ */
+fn report_rodata_align_violations(syms: []Symbol, relocs: []lir::LDataReloc) -> null | error {
+    if !rodata_align_check_enabled() { return null }
+    let violations = find_rodata_align_violations(syms, relocs)
+    if violations.len == 0 { return null }
+    mut i: u64 = 0
+    loop {
+        if i >= violations.len { break }
+        report_rodata_align_violation(violations[i])
+        i++
+    }
+    error { message = teko::str::concat("TEKO_NATIVE_RODATA_ALIGN_CHECK: aborting — unaligned rodata pointer reloc(s); first: ", rodata_align_violation_line(violations[0])) }
+}
+
+/**
+ * name_in_symbols — whether some symbol in `syms` already carries `name` (a
+ * defined function/rodata symbol, or an already-collected undefined one).
+ *
+ * @param []Symbol syms  the symbols to scan
+ * @param str name  the symbol name to look for
+ * @return bool  true iff `name` is present
+ */
+fn name_in_symbols(syms: []Symbol, name: str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= syms.len { break }
+        if syms[i].name == name { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * collect_undefined — one undefined `Symbol` per relocation target not defined
+ * in `defined` and not already collected (dedup'd, in first-reference order):
+ * the `tk_*` runtime symbols and any not-yet-emitted callee.
+ *
+ * @param []Symbol defined  the module's defined symbols
+ * @param []Reloc relocs  the module's relocations
+ * @return []Symbol  the undefined symbols, deduplicated
+ */
+fn collect_undefined(defined: []Symbol, relocs: []Reloc) -> []Symbol {
+    mut undef: []Symbol = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= relocs.len { break }
+        let name = relocs[i].sym
+        let known = name_in_symbols(defined, name) || name_in_symbols(undef, name)
+        if !known {
+            undef = teko::list::push(undef, Symbol { name = name; defined = false; sect = 0 to u8; offset = 0 to u32; local = false })
+        }
+        i++
+    }
+    undef
+}
+
+/**
+ * concat_symbols — append every symbol of `b` to `a`. `encode_module` calls
+ * this twice, in the order that keeps the symbol table's three Mach-O ranges
+ * (local, global-defined, undefined) contiguous.
+ *
+ * @param []Symbol a  the leading symbols
+ * @param []Symbol b  the trailing symbols
+ * @return []Symbol  `a` followed by `b`
+ */
+fn concat_symbols(a: []Symbol, b: []Symbol) -> []Symbol {
+    mut out = a
+    mut i: u64 = 0
+    loop {
+        if i >= b.len { break }
+        out = teko::list::push(out, b[i])
+        i++
+    }
+    out
+}
+
+/**
+ * rodata_relocs_arm64 — convert the NEUTRAL rebased `ModuleRodata.relocs` into arm64
+ * `Reloc` rows (#594 T-B5): each rodata-internal pointer becomes an `Abs64`
+ * (ARM64_RELOC_UNSIGNED, r_length 3) relocation whose patch site is
+ * `__const`-relative (`sect = Rodata`), targeting the datum's own local symbol.
+ * Empty in every real compile until T-B6.
+ *
+ * @param []lir::LDataReloc rs  the rebased neutral rodata relocations
+ * @return []Reloc  the `Rodata`-tagged arm64 relocation rows
+ */
+fn rodata_relocs_arm64(rs: []lir::LDataReloc) -> []Reloc {
+    mut out: []Reloc = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= rs.len { break }
+        out = teko::list::push(out, Reloc { offset = rs[i].offset; sym = rs[i].target; kind = MRelocKind::Abs64; sect = RelocSect::Rodata })
+        i++
+    }
+    out
+}
+
+/**
+ * append_relocs_arm64 — concatenate two relocation lists (text-partition first, then the
+ * rodata-internal rows; #594 T-B5), preserving each list's emission order. The
+ * module keeps ONE `.sect`-tagged list (the T-B1..T-B3 model); the writers
+ * partition by `RelocSect`.
+ *
+ * @param a  the `__text`/`.text` relocations, in emission order
+ * @param b  the rodata-internal relocations, in emission order
+ * @return   `a` followed by `b`
+ */
+fn append_relocs_arm64(a: []Reloc, b: []Reloc) -> []Reloc {
+    mut out = a
+    mut i: u64 = 0
+    loop {
+        if i >= b.len { break }
+        out = teko::list::push(out, b[i])
+        i++
+    }
+    out
+}
+
+/**
+ * encode_module — encode every `MFunc` of `m`, concatenate their `__text` words
+ * into the module image and REBASE each function's reloc offsets by its `__text`
+ * base, intern the rodata bytes into `__const`, and build the symbol table in
+ * the Mach-O-required LOCAL-then-GLOBAL-then-UNDEFINED order: one file-local
+ * entry per rodata entry, one globally-visible entry per function, then one
+ * undefined entry per externally-referenced symbol not defined in-module (the
+ * three contiguous ranges `LC_DYSYMTAB` needs). A module carrying data globals
+ * raises the `A4-globals` honest-stop (the N2 subset lowers none); any
+ * function's encode honest-stop propagates out unchanged.
+ *
+ * @param AbiDescriptor abi  the register file
+ * @param MModule m  the fully-colored module
+ * @return EncodedModule | error  the section images + symbols + relocs, or a
+ *                                 named honest-stop
+ */
+pub fn encode_module(abi: AbiDescriptor, m: MModule) -> EncodedModule | error {
+    if m.globals.len > (0 to u64) { return honest_globals() }
+    let mt = match encode_functions(abi, m.funcs) { ModuleText as x => x; error as e => return e }
+    finish_encoded_module(mt, m.rodata, m.globals)
+}
+
+/**
+ * finish_encoded_module — assemble the final `EncodedModule` from an already-accumulated `__text`
+ * (`mt`, one defined symbol + rebased relocs per function) plus the module's PERSISTENT
+ * rodata/globals tables (Group B, carried by-reference the whole way — never in a scratch region):
+ * intern the rodata bytes, build the symbol table in the Mach-O-required
+ * LOCAL-then-GLOBAL-then-UNDEFINED order (file-local per rodata entry, global per function, then one
+ * undefined per externally-referenced symbol), and partition the relocations. A module carrying data
+ * globals raises `A4-globals` (the N2 subset lowers none). This is the module-finalize tail of
+ * `encode_module` factored out so the fused per-item native emit driver (0.3.1 C6.4) reaches the SAME
+ * assembly incrementally, after its per-item windows have folded into `mt`.
+ *
+ * @param ModuleText mt  the accumulated `__text` image, symbols and rebased relocs
+ * @param []lir::LRodata rodata  the module's rodata table (Group B, by-reference)
+ * @param []lir::LGlobal globals  the module's data globals (empty in the N2 subset)
+ * @return EncodedModule | error  the section images + ordered symbols + relocs, or `A4-globals`
+ * @since 0.3.1 C6.4
+ */
+pub fn finish_encoded_module(mt: ModuleText, rodata: []lir::LRodata, globals: []lir::LGlobal) -> EncodedModule | error {
+    if globals.len > (0 to u64) { return honest_globals() }
+    let rod = match encode_rodata(rodata) { ModuleRodata as x => x; error as e => return e }
+    let defined = concat_symbols(rod.syms, mt.syms)
+    let undef = collect_undefined(defined, mt.relocs)
+    let symbols = concat_symbols(defined, undef)
+    EncodedModule { text = mt.text; rodata = rod.bytes; symbols = symbols; relocs = append_relocs_arm64(mt.relocs, rodata_relocs_arm64(rod.relocs)) }
+}
