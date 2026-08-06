@@ -1,0 +1,100 @@
+// src/parser/ast_expr.tks   (namespace 'teko::parser')
+
+use teko::lexer
+
+/**
+ * A literal number leaf (N1 — TEKO_CORRECTION_PLAN §5). Carries the RAW value; the resolved
+ * type (set by the typer) decides width/signedness/float-kind.
+ *
+ * @field is_float  false for an integer literal (`value` holds it, any width u8..u64/i8..i64),
+ *                   true for a float literal (f32/f64; `fval` holds it, default f64)
+ * @field value      the raw integer literal value as a sign+64-bit-magnitude pair (meaningful
+ *                    only when `!is_float`) — see `NumInt`
+ * @field fval       the raw float literal value (meaningful only when `is_float`)
+ */
+pub type Number = struct { is_float: bool; value: NumInt; fval: f64 }
+pub type Var = struct { name: str }   // a variable reference (reading)
+pub type StrLit = struct { text: str }   // "…"  (B.36)
+pub type ByteLit = struct { value: byte }   // b'x' (B.36)
+pub type CharLit = struct { bytes: str }   // c'x' — one UTF-8 codepoint (1–4 bytes), carried as its raw UTF-8
+pub type BoolLit = struct { value: bool }   // true / false (LEGISLATION §75)
+pub type NullLit = struct { }   // null (REBOOT_PLAN §202) — no payload; typed `T?` by the checker
+pub type Binary = struct { op: lexer::TokenKind; left: Expr; right: Expr }   // any binary op
+pub type Unary = struct { op: lexer::TokenKind; operand: Expr }   // - ~ ! (prefix)
+/**
+ * One continuation term of a `Compare` chain (`<op> operand`) — e.g. the `< c` in `a < b < c`.
+ * ((TR3) `pub` so the structural-trait synthesis can build a `Compare` node directly.)
+ */
+pub type CmpTerm = struct { op: lexer::TokenKind; operand: Expr }
+pub type Compare = struct { first: Expr; rest: []CmpTerm }   // a<b<c chain, kept as written (M.3)
+/**
+ * A call expression `f(x)` / `lexer::foo(x)` / `Cell<i64>::make(7)`.
+ *
+ * @param callee    the callee path (the function or generic-instance factory owner)
+ * @param args      the positional/named argument expressions
+ * @param arg_names PARALLEL to `args` (DEFARGS 2026-07-01) — "" = positional, else the NAMED param this
+ *                  arg targets (`f(name = x)`); named-LAST ordering enforced at parse time
+ * @param type_args (#254 L5) explicit `Cell<i64>::make(…)` construction-site generic args — empty for a
+ *                  bare call. TRANSIENT: the `.tkb` codec persists `checker::TCall`, not `parser::Call`
+ */
+pub type Call = struct { callee: Path; args: []Expr; arg_names: []str; type_args: []TypeExpr }
+pub type IfExpr = struct {   // if/else is an EXPRESSION (B.20)
+    cond: Expr
+    then_blk: []Statement
+    has_else: bool
+    else_blk: []Statement
+}
+pub type MatchExpr = struct { subject: Expr; arms: []Arm }   // match is an EXPRESSION (B.15)
+
+// --- postfix access & cast (F2) — recursive over Expr (compiler-managed indirection) ---
+pub type FieldAccess = struct { receiver: Expr; field: str }   // x.field — read a struct field (the checker's own `s.token`/`b.left` shape; B.29)
+pub type MethodCall = struct { receiver: Expr; method: str; args: []Expr }   // recv.method(a, …) — B.29 instance call via `.`; method *checking* is deferred (M.4)
+pub type Cast = struct { expr: Expr; target: TypeExpr }   // x to T — explicit conversion; preserves→ok / loses→compile-error (E7; M.0+M.1)
+/**
+ * Borrow — the prefix `&x` safe mutable-borrow expression (AL wave F1). Takes a live
+ * borrow of the operand lvalue, surfacing the auto-ref that is implicit in argument
+ * position today as an explicit operator. Types to `Reference<T>`; mutability is inferred
+ * from the operand's binding + the consuming position (bare `&x`, no `&mut`). A borrow of
+ * an immutable (`let`) binding in mutable position is a checker error (auto-enforces F2).
+ * `&` is the SAFE `ref` surface here — NOT the unsafe raw-pointer sigil (that stays unsafe;
+ * `*`/deref untouched, prospecção §12).
+ */
+pub type Borrow = struct { operand: Expr }   // &x — safe mutable borrow (AL wave F1)
+pub type PathExpr = struct { path: Path }   // a qualified path as a VALUE — Enum::Member (e.g. PrimKind::U32), module statics (P2; the F2/Part-1 AST had only single-name Var)
+pub type StructLit = struct { type_path: Path; type_args: []TypeExpr; field_names: []str; field_vals: []Expr }   // Name { field = value, … } — a struct VALUE constructor (W4a); (W9.4) type_args = explicit `Foo<i64>{ … }` generic args (empty for bare `Foo { … }`); parallel slices (.len replaces nfields)
+pub type Index = struct { receiver: Expr; index: Expr }   // recv[index] — str→byte, []T→T (W5-idx)
+// Format spec for a single $"…{expr:spec}…" hole. Three variants:
+//   FSpecNone    — no colon in hole (existing behavior)
+//   FSpecStatic  — `:literal` → static spec string (e.g. "F2")
+//   FSpecDynamic — `:[arg1, arg2, …]` → arg expressions evaluated at runtime
+pub type FSpecNone = struct { }
+pub type FSpecStatic = struct { s: str }
+pub type FSpecDynamic = struct { args: []Expr }
+pub type FSpecKind = variant FSpecNone | FSpecStatic | FSpecDynamic
+pub type FSpec = struct { kind: FSpecKind }
+// `$"pre {a} mid {b} post"` — string interpolation (self-host parity). The string is
+// pieces[0] ++ str(holes[0]) ++ pieces[1] ++ … ++ pieces[nholes] — so pieces.len == holes.len + 1.
+// Pieces are DECODED literal str spans (escapes resolved, like StrLit); each hole is a full Expr.
+// specs[i] carries the optional format spec for holes[i] (specs.len == holes.len).
+pub type Interp = struct { pieces: []str; holes: []Expr; specs: []FSpec }   // $"…{expr}…" (self-host parity)
+// `<expr> in [ e0, e1, … ]` → bool (Phase 2). True iff the LHS equals any element; the LHS is
+// EVALUATED ONCE. The `[ … ]` is a SPECIAL membership-set syntax valid ONLY here (no general
+// array literal). Empty set `x in []` is allowed → always false.
+pub type InExpr = struct { lhs: Expr; elems: []Expr }   // x in [ … ] — membership test (Phase 2)
+pub type ArrayElem = struct { is_spread: bool; expr: Expr }   // one element in an array literal: plain (is_spread=false) or spread (is_spread=true, ..expr)
+pub type ArrayLit = struct { elements: []ArrayElem }   // [ e0, e1, … ] — a slice/array literal (Increment B+); element type unified by the checker
+// (W10) a closure LITERAL `(params) => expr` / `(params) => { … }` — an anonymous function value
+// (NO `fn` keyword). A param's type is OPTIONAL (`has_type` false ⇒ inferred from the target type,
+// per the W10 ruling). The body is a STATEMENT BLOCK (a `=> expr` form is stored as one trailing
+// ExprStmt, like a fn body), so the trailing value is the closure's result. The return type is
+// inferred (no `-> R` on a literal). The checker types it to a `Func` and lifts it to a top-level
+// function + capture env. (`.type` ends up the closure's Func type.)
+pub type LambdaParam = struct { name: str; has_type: bool; type_ann: TypeExpr }
+pub type Lambda = struct { params: []LambdaParam; body: []Statement }
+
+// (C1-POS/E1) Expr is a STRUCT WRAPPER over the variant of node kinds — mirroring the typed
+// `TExpr` (tast.tks) and the C `tk_expr` (ast.h), so EVERY expression node carries its 1-based
+// source position. The parser stamps line/col from the node's first token; the checker copies
+// it onto the typed node and onto type-errors, so a message points at the failing expression.
+pub type ExprKind = variant Number | Var | Call | IfExpr | MatchExpr | StrLit | ByteLit | CharLit | BoolLit | NullLit | Binary | Unary | Compare | FieldAccess | MethodCall | Cast | PathExpr | StructLit | Index | Interp | InExpr | ArrayLit | Lambda | Borrow
+pub type Expr = struct { kind: ExprKind; line: u32; col: u32 }

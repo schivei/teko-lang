@@ -1,0 +1,270 @@
+// src/parser/parse_decl_params.tks   (namespace 'teko::parser')
+
+use teko::lexer
+
+/**
+ * parse_discard_param — parse a `_` DISCARD parameter (owner refinement 2026-07-15): a parameter
+ * that occupies the ABI slot but binds no name and allocates nothing. It carries NO type annotation
+ * (`_`, never `_: T`) — its type is resolved BY POSITION from the interface/base signature the
+ * function implements or overrides; the CHECKER both fills that type and enforces that a discard
+ * parameter appears only in an implementing/overriding signature. Repetition (`x, _, _, p`) is
+ * allowed: each `_` is a separate comma-separated token. Emitted as a Param named "_" — a name the
+ * lexer can never produce for a real identifier, so the checker recognizes it unambiguously.
+ *
+ * @param tokens   the token stream
+ * @param pos      the index of the `_` (Underscore) token
+ * @param params   the parameters accumulated so far
+ * @return         `params` with the discard Param appended, and the index just past the `_`
+ * @throws         when a type annotation follows the `_` (`_: T` is invalid for a discard param)
+ */
+fn parse_discard_param(tokens: []lexer::Token, pos: u64, params: []Param) -> ParsedList<Param> | error {
+    if is_kind_at(tokens, pos + 1, lexer::TokenKind::Colon) {
+        return err_at(tokens, pos + 1, "a `_` discard parameter takes no type annotation — its type is fixed by position from the interface/base signature being implemented or overridden")
+    }
+    let out = teko::list::push(params, Param { name = "_"; has_type = false; type_ann = no_type(); is_params = false; has_default = false; default_expr = no_expr() })
+    ParsedList<Param> { items = out; next = pos + 1 }
+}
+
+// `( name: T, name: T, … )` — comma-separated params; empty `()` allowed; params are
+// immutable (B.21). `pos` is at `(`. `allow_untyped_first` (OOP A1, 2026-07-01) — true ONLY
+// for a struct method's param list: the 1st param may be a bare name with NO `: type` (the
+// unified-method-model RECEIVER, name free, type injected by the checker as the enclosing
+// struct); every other caller (a top-level/extern `fn`) passes false, where every param stays
+// mandatorily typed exactly as before (no behavior change for the non-method corpus).
+fn parse_params(tokens: []lexer::Token, pos: u64, allow_untyped_first: bool) -> ParsedList<Param> | error {
+    mut p = pos + 1   // consume `(`
+    mut params: []Param = teko::list::empty()
+    mut seen_default = false   // DEFARGS (2026-07-01) — TRAILING-ONLY: once true, every later param must also default
+    mut first = true
+    if is_kind_at(tokens, p, lexer::TokenKind::RParen) {
+        return ParsedList<Param> { items = params; next = p + 1 }
+    }
+    loop {
+        if is_kind_at(tokens, p, lexer::TokenKind::Underscore) {
+            let dp = match parse_discard_param(tokens, p, params) { ParsedList<Param> as x => x; error as e => return e }
+            params = dp.items
+            first = false
+            p = dp.next
+            if !is_kind_at(tokens, p, lexer::TokenKind::Comma) { break }
+            p = p + 1
+            continue
+        }
+        // `params` — a CONTEXTUAL variadic-parameter modifier (2026-07-01), like `from` in the
+        // `extern` position: NOT a reserved word (295+ existing uses as a plain identifier/field
+        // name across the corpus), so it only triggers when `params` is immediately followed by
+        // ANOTHER name + `:` — i.e. `params pieces: []T`. A parameter *literally named* `params`
+        // (`params: []T`, colon right after) is unaffected — ordinary parsing. Trailing-only:
+        // rejected below if another param follows. Type must be a slice `[]T` (checked once parsed).
+        let has_params_kw = is_kind_at(tokens, p, lexer::TokenKind::Ident) && tokens[p].text == "params" &&
+        is_name_at(tokens, p + 1) && is_kind_at(tokens, p + 2, lexer::TokenKind::Colon)
+        if has_params_kw { p = p + 1 }
+        let has_ref_kw = is_kind_at(tokens, p, lexer::TokenKind::Ident) && tokens[p].text == "ref" &&
+        is_name_at(tokens, p + 1) && is_kind_at(tokens, p + 2, lexer::TokenKind::Colon)
+        if has_ref_kw { p = p + 1 }
+        if !is_name_at(tokens, p) {
+            return err_at(tokens, p, "expected a parameter name")
+        }
+        let name = tokens[p].text
+        // (OOP A1) the RECEIVER: only the very first param, only when the caller allows it, only
+        // when NOT immediately followed by `:` (a typed 1st param means the method is STATIC).
+        let is_receiver = first && allow_untyped_first && !has_params_kw && !has_ref_kw && !is_kind_at(tokens, p + 1, lexer::TokenKind::Colon)
+        first = false
+        if is_receiver {
+            params = teko::list::push(params, Param { name = name; has_type = false; type_ann = no_type(); is_params = false; has_default = false; default_expr = no_expr() })
+            p = p + 1
+        } else {
+            if !is_kind_at(tokens, p + 1, lexer::TokenKind::Colon) {
+                return err_at(tokens, p + 1, "expected ':' after a parameter name")
+            }
+            let ty = match parse_type(tokens, p + 2) { ParsedType as x => x; error as e => return e }
+            if has_params_kw {
+                match ty.node { SliceType => { }; _ => return err_at(tokens, p + 2, "'params' parameter must have a slice type ([]T)") }
+            }
+            let param_ty = if has_ref_kw { wrap_ref_type(ty.node) } else { ty.node }
+            // DEFARGS (2026-07-01) — `= <expr>` right after the type: a default value, evaluated at
+            // the call site when the argument is omitted. TRAILING-ONLY (rule A): once ANY param
+            // defaults, every param after it must ALSO default — `=` uses Assign, consistent with
+            // struct-init `{f=v}` (not `:`, which is a type annotation).
+            mut ppos = ty.next
+            mut has_default = false
+            mut default_expr = no_expr()
+            if is_kind_at(tokens, ppos, lexer::TokenKind::Assign) {
+                let dv = match parse_expr(tokens, ppos + 1) { Parsed<Expr> as x => x; error as e => return e }
+                has_default = true
+                default_expr = dv.node
+                ppos = dv.next
+            } else if seen_default {
+                return err_at(tokens, ppos, "a default-valued parameter must be followed only by other defaulted parameters (defaults are trailing-only)")
+            }
+            if has_default { seen_default = true }
+            params = teko::list::push(params, Param { name = name; has_type = true; type_ann = param_ty; is_params = has_params_kw; has_default = has_default; default_expr = default_expr })
+            p = ppos
+        }
+        if has_params_kw && is_kind_at(tokens, p, lexer::TokenKind::Comma) {
+            return err_at(tokens, p, "'params' must be the last parameter")
+        }
+        if !is_kind_at(tokens, p, lexer::TokenKind::Comma) { break }
+        p = p + 1   // consume `,`
+    }
+    if !is_kind_at(tokens, p, lexer::TokenKind::RParen) {
+        return err_at(tokens, p, "expected ')' to close the parameter list")
+    }
+    ParsedList<Param> { items = params; next = p + 1 }
+}
+
+// (W11/S6, 2026-07-01) `<T: A & B | C>` — a constraint ATOM: a bare nominal name (a
+// variant/struct the type-param must nominally belong to). Never `?`/null/void (a
+// constraint targets a concrete nominal type, matching the `<T?>` ban below).
+fn parse_constraint_atom(tokens: []lexer::Token, pos: u64) -> Parsed<ConstraintExpr> | error {
+    if !is_kind_at(tokens, pos, lexer::TokenKind::Ident) {
+        return err_at(tokens, pos, "expected a constraint name (a nominal variant/struct) in a type-parameter constraint")
+    }
+    let name = tokens[pos].text
+    mut p = pos + 1
+    Parsed<ConstraintExpr> { node = ConstraintAtom { name = name }; next = p }
+}
+// `&`-term: one or more atoms joined by `&` (AND), left-associative.
+fn parse_constraint_and(tokens: []lexer::Token, pos: u64) -> Parsed<ConstraintExpr> | error {
+    mut left = match parse_constraint_atom(tokens, pos) { Parsed<ConstraintExpr> as x => x; error as e => return e }
+    loop {
+        if !is_kind_at(tokens, left.next, lexer::TokenKind::Amp) { break }
+        let right = match parse_constraint_atom(tokens, left.next + 1) { Parsed<ConstraintExpr> as x => x; error as e => return e }
+        left = Parsed<ConstraintExpr> { node = ConstraintAnd { left = left.node; right = right.node }; next = right.next }
+    }
+    left
+}
+// `|`-chain over `&`-terms (so `&` binds tighter than `|`: `C1 & C2 | C3` = `(C1 & C2) | C3`),
+// left-associative. This is a DEDICATED grammar (2 precedence levels, boolean semantics),
+// distinct from parse_type's `|` (a type UNION) — reusing that grammar would conflate two
+// different meanings of the same token under different AST targets.
+fn parse_constraint_expr(tokens: []lexer::Token, pos: u64) -> Parsed<ConstraintExpr> | error {
+    mut left = match parse_constraint_and(tokens, pos) { Parsed<ConstraintExpr> as x => x; error as e => return e }
+    loop {
+        if !is_kind_at(tokens, left.next, lexer::TokenKind::Pipe) { break }
+        let right = match parse_constraint_and(tokens, left.next + 1) { Parsed<ConstraintExpr> as x => x; error as e => return e }
+        left = Parsed<ConstraintExpr> { node = ConstraintOr { left = left.node; right = right.node }; next = right.next }
+    }
+    left
+}
+
+// `[doc] [pub|exp] fn name(params) -> ret { body }` (B.21, B.29). Doc + visibility optional
+// and precede `fn`; `-> ret` optional (absent = Unit). `pos` is at the doc, `pub`/`exp`, or `fn`.
+// (S4) An OPTIONAL generic type-parameter list `<T, U, …>` after a fn/type NAME. `pos` is at the
+// token AFTER the name. No `<` → empty list, pos unchanged. The decl-site `<` is UNAMBIGUOUS: the
+// `fn`/`type` keyword already committed the parse to a decl, so it is never a comparison. A decl
+// list never nests, so it closes with a single `>` (no `>>` split — that is parse_type_args' job).
+// (W11/S6) each name may carry an OPTIONAL `: ConstraintExpr` — names/constraints stay PARALLEL
+// (NoConstraint{} filling an unconstrained slot), so every downstream reader indexes both by i.
+fn parse_type_params(tokens: []lexer::Token, pos: u64) -> ParsedTypeParams | error {
+    if !is_kind_at(tokens, pos, lexer::TokenKind::Lt) {
+        return ParsedTypeParams { names = teko::list::empty(); constraints = teko::list::empty(); next = pos }
+    }
+    mut p = pos + 1
+    mut names: []str = teko::list::empty()
+    mut constraints: []ConstraintExpr = teko::list::empty()
+    loop {
+        if !is_kind_at(tokens, p, lexer::TokenKind::Ident) {
+            return err_at(tokens, p, "expected a type-parameter name in '<…>'")
+        }
+        names = teko::list::push(names, tokens[p].text)
+        p = p + 1
+        if is_kind_at(tokens, p, lexer::TokenKind::Colon) {
+            let c = match parse_constraint_expr(tokens, p + 1) { Parsed<ConstraintExpr> as x => x; error as e => return e }
+            constraints = teko::list::push(constraints, c.node)
+            p = c.next
+        } else {
+            constraints = teko::list::push(constraints, NoConstraint { })
+        }
+        if is_kind_at(tokens, p, lexer::TokenKind::Comma) { p = p + 1 }
+        else if is_kind_at(tokens, p, lexer::TokenKind::Gt) { p = p + 1; break }
+        else { return err_at(tokens, p, "expected ',' or '>' in a type-parameter list") }
+    }
+    ParsedTypeParams { names = names; constraints = constraints; next = p }
+}
+
+/**
+ * Does token `pos` start a contextual `unsafe` declaration modifier?
+ *
+ * `unsafe` (U1, 0.1.0.0-beta memory+unsafe remodel §3) is deliberately CONTEXTUAL — a plain
+ * `Ident` whose text is `"unsafe"` — not a reserved keyword, so a namespace segment literally
+ * named `unsafe` (e.g. `teko::mem::unsafe`) stays a legal `::`-path component.
+ *
+ * @param []lexer::Token tokens  the full token stream
+ * @param u64 pos  the position to test
+ * @return bool  true iff `tokens[pos]` is the contextual `unsafe` modifier
+ */
+fn is_unsafe_modifier_at(tokens: []lexer::Token, pos: u64) -> bool {
+    is_kind_at(tokens, pos, lexer::TokenKind::Ident) && tokens[pos].text == "unsafe"
+}
+
+/**
+ * Consume an optional contextual `unsafe` modifier at `pos` — the declaration-level risk marker
+ * on `type`/`fn` (U1, 0.1.0.0-beta memory+unsafe remodel §2/§3). Placed AFTER `extern` in both
+ * `parse_function` and `parse_type_decl`'s modifier chain, so `pub unsafe fn`/bare `unsafe fn`
+ * parse, and so does `extern unsafe fn`/`pub extern unsafe fn` — `extern` is consumed FIRST and
+ * this call comes second, so it simply sees the modifier in its expected slot. The token order
+ * `unsafe extern fn` is what fails (`unsafe` gets consumed here, `extern` is then found where
+ * `fn` was required) — that is a WORD-ORDER rule, not a claim that an extern cannot be unsafe;
+ * `docs/design/c-types-and-marshalling-0.3.1.md` §4 measured `pub extern unsafe fn … = "sym"`
+ * parsing, checking, and threading `is_unsafe` through to the `Function` node end to end.
+ *
+ * @param []lexer::Token tokens  the full token stream
+ * @param u64 pos  the position to consume from (immediately after the `extern` consume)
+ * @return Parsed<bool>  whether `unsafe` was present (`node`), and the position just past it (`next`,
+ *               unchanged if absent)
+ */
+fn consume_unsafe_modifier(tokens: []lexer::Token, pos: u64) -> Parsed<bool> {
+    if !is_unsafe_modifier_at(tokens, pos) { return Parsed<bool> { node = false; next = pos } }
+    Parsed<bool> { node = true; next = pos + 1 }
+}
+
+// `allow_receiver` (OOP A1, 2026-07-01) — true ONLY when called for a struct-body method: lets
+// the 1st param be a bare untyped name (the receiver). A top-level `fn` always passes false.
+// `allow_bodyless` (W10b.IF) — true ONLY for an INTERFACE method: a pure signature `fn sig(self) -> T`
+// with NO body (the interface is a contract). Mirrors the `abstract fn` bodyless path; every other
+// caller passes false.
+/**
+ * Consume the OPTIONAL `("c_name")` reverse-FFI symbol override that may follow an `exp` visibility
+ * marker on a function (FFI-D, reverse-FFI export). The override names the exact C symbol the `exp`
+ * function is emitted under in an `abi="c"` artifact, mirroring the `= "SYM"` an `extern` import uses;
+ * absent, the codegen flattens the canonical name (`ns::fn` → `ns_fn`) instead. A `(` that opens the
+ * override MUST wrap a single quoted string and close with `)`.
+ *
+ * @param tokens  the full token stream
+ * @param pos     the index immediately past the consumed `exp` keyword
+ * @return        the override symbol (empty string when no `(` follows) and the index past it
+ * @throws        when a `(` opens but is not a single quoted string closed by `)`
+ * @since 0.3.0.30 (FFI base — reverse-FFI export)
+ */
+fn parse_export_override(tokens: []lexer::Token, pos: u64) -> Parsed<str> | error {
+    if !is_kind_at(tokens, pos, lexer::TokenKind::LParen) { return Parsed<str> { node = ""; next = pos } }
+    mut p = pos + 1
+    if !is_kind_at(tokens, p, lexer::TokenKind::Str) {
+        return err_at(tokens, p, "expected a quoted C symbol inside `exp(\"…\")`")
+    }
+    let sym = tokens[p].text
+    p = p + 1
+    if !is_kind_at(tokens, p, lexer::TokenKind::RParen) {
+        return err_at(tokens, p, "expected `)` to close the `exp(\"…\")` export-symbol override")
+    }
+    Parsed<str> { node = sym; next = p + 1 }
+}
+
+/**
+ * Advance the `parse_decl` keyword-search cursor past an OPTIONAL `("c_name")` reverse-FFI export
+ * override that may follow an `exp` marker, so the following `fn`/`type`/`flags`/`const` search lands on
+ * the real keyword (FFI-D). This is a lightweight peek only — `parse_function` re-parses (and validates)
+ * the override from the declaration's true start.
+ *
+ * @param tokens  the full token stream
+ * @param pos     the index immediately past the consumed `exp` keyword
+ * @return        the index past a `("STR")` override group, or `pos` unchanged when none follows
+ * @since 0.3.0.30 (FFI base — reverse-FFI export)
+ */
+fn skip_export_override_peek(tokens: []lexer::Token, pos: u64) -> u64 {
+    if !is_kind_at(tokens, pos, lexer::TokenKind::LParen) { return pos }
+    mut k = pos + 1
+    if is_kind_at(tokens, k, lexer::TokenKind::Str) { k = k + 1 }
+    if is_kind_at(tokens, k, lexer::TokenKind::RParen) { k = k + 1 }
+    k
+}

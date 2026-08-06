@@ -1,0 +1,162 @@
+// src/parser/ast_numint.tks   (namespace 'teko::parser')
+
+use teko::lexer
+
+
+use teko::lexer
+
+/**
+ * NumInt — the resolved integer-literal carrier, sign + 64-bit magnitude (drop-128,
+ * 2026-07-24). Holds any value in the language's integer range `[i64::MIN, u64::MAX]`:
+ * `neg=false` covers `0..=u64::MAX`, `neg=true` covers `i64::MIN..=-1`. Replaces the old
+ * `i64` carrier, whose only reason to exist was to hold a high-bit u64 losslessly — a
+ * u64 with its high bit set needs 65 signed bits, not 128.
+ *
+ * @field neg  true iff the value is strictly negative (only ever set for a signed target)
+ * @field mag  the magnitude: the value itself when `neg=false`, else its absolute value.
+ *             `i64::MIN` is representable as `{ neg = true; mag = 0x8000000000000000 }`
+ *             (`|i64::MIN|` = 2^63 fits u64)
+ * @since 0.3.1 (drop-128-family)
+ */
+pub type NumInt = struct { neg: bool; mag: u64 }
+
+/**
+ * numint_of_u64 — a non-negative `NumInt` carrying the magnitude `m` (`neg=false`). The
+ * constructor every non-negated integer literal / synthesized constant value uses.
+ *
+ * @param m  the non-negative magnitude
+ * @return   `{ neg = false; mag = m }`
+ * @since 0.3.1 (drop-128-family)
+ */
+pub fn numint_of_u64(m: u64) -> NumInt { NumInt { neg = false; mag = m } }
+
+/**
+ * numint_of_i64 — the `NumInt` a plain signed `i64` value denotes (sign-splits it). Safe at
+ * the `i64::MIN` boundary: `-(v+1)` never overflows (`v+1` stays in range even at `i64::MIN`,
+ * and negating it lands at worst on `i64::MAX`), and `+1` recovers the true magnitude — the
+ * classic MIN-safe negation, avoiding the CHECKED `i64 -> u64` cast (M.1) a direct negation
+ * would need.
+ *
+ * @param v  the signed value to convert
+ * @return   `v` as a sign-magnitude `NumInt`
+ * @since 0.3.1 (drop-128-family)
+ */
+pub fn numint_of_i64(v: i64) -> NumInt {
+    if v >= 0 { return numint_of_u64(v to u64) }
+    NumInt { neg = true; mag = ((0 - (v + 1)) to u64) + 1 }
+}
+
+/**
+ * numint_negate — the arithmetic negation of `v` (unary `-`). Zero stays zero (canonical
+ * non-negative); every other magnitude flips its sign flag, magnitude unchanged (sign +
+ * magnitude negation never touches the magnitude bits, unlike two's-complement negation).
+ *
+ * @param v  the value to negate
+ * @return   `-v`
+ * @since 0.3.1 (drop-128-family)
+ */
+pub fn numint_negate(v: NumInt) -> NumInt {
+    if v.mag == 0 { v } else { NumInt { neg = !v.neg; mag = v.mag } }
+}
+
+/**
+ * numint_is_zero — is `v` the value zero? (`neg` is ignored — a canonical `NumInt` never
+ * carries `neg=true` at magnitude 0, but a caller-built one might; this checks the value,
+ * not the representation.)
+ *
+ * @param v  the value to test
+ * @return   true iff `v` denotes zero
+ * @since 0.3.1 (drop-128-family)
+ */
+pub fn numint_is_zero(v: NumInt) -> bool { v.mag == 0 }
+
+/**
+ * U64_ALL_ONES — every bit of a `u64` set (`2^64 - 1`). The subtrahend `numint_bits` negates a
+ * magnitude against, so the two's-complement negation never leaves the `u64` domain.
+ *
+ * @since 0.3.1 (drop-128-family)
+ */
+const U64_ALL_ONES: u64 = 0xFFFFFFFFFFFFFFFF
+
+/**
+ * I64_SIGN_BIT_U — `2^63` as a `u64`: the smallest bit pattern whose SIGNED reading is negative,
+ * and exactly the distance between the unsigned and the signed reading of any pattern at or above
+ * it (`signed = unsigned - 2^63 + i64::MIN`).
+ *
+ * @since 0.3.1 (drop-128-family)
+ */
+const I64_SIGN_BIT_U: u64 = 9223372036854775808
+
+/**
+ * I64_MIN — the most negative `i64` (`-2^63`). Spelled as a subtraction because `2^63` itself has
+ * no `i64` literal form (the language's largest is `i64::MAX`).
+ *
+ * @since 0.3.1 (drop-128-family)
+ */
+const I64_MIN: i64 = -9223372036854775807 - 1
+
+/**
+ * numint_to_i64 — `v`'s raw 64-bit two's-complement bit pattern, reinterpreted as `i64` (the SAME
+ * register value the native backend would hold). Every carrier that needs a plain machine-register
+ * view of a literal (LIR constants, the interpreters, const-aggregate serialization) goes through
+ * this one conversion.
+ *
+ * PROOF THAT NO STEP CAN TRAP OR OVERFLOW, in any build mode (the reason the pre-0.3.1 32-bit split
+ * was replaced): the old form computed `((mag >> 32) to i64) * 4294967296 + (mag & 0xFFFFFFFF)`,
+ * and for any `mag >= 2^63` — a magnitude the corpus really carries, e.g. the
+ * `18446744073709551615` literal in `parse_lit.tks` — that multiplication overflows `i64`, which is
+ * UNDEFINED behavior in the emitted C (`tk_mul_i64` is a bare `*` unless `TEKO_OVERFLOW_DEBUG` is
+ * set, and a panic if it ever is). The result happened to be right on wrapping hardware; the
+ * derivation was not. The split is also unnecessary — `mag` already IS the bit pattern.
+ *
+ * The form below reaches the same value in three provably-in-range steps:
+ *   1. `numint_bits` produces the 64-bit pattern in the UNSIGNED domain: `mag` itself when
+ *      non-negative, else `(U64_ALL_ONES - mag) + 1` (the textbook two's-complement negation). The
+ *      subtraction cannot underflow (`mag <= U64_ALL_ONES`) and the `+ 1` cannot overflow (`mag >= 1`
+ *      on that branch, so the difference is `<= U64_ALL_ONES - 1`); `mag == 0` returns 0 directly.
+ *   2. a pattern below `2^63` casts straight across: it is inside `i64`'s positive range, so the
+ *      CHECKED `u64 -> i64` cast (M.1 — it panics past `i64::MAX`, which is why the full magnitude
+ *      is never cast directly) always succeeds.
+ *   3. a pattern at or above `2^63` casts `bits - 2^63` (in `[0, 2^63)`, so again inside the
+ *      positive range) and adds `I64_MIN`; the sum lies in `[i64::MIN, -1]`, so the signed addition
+ *      cannot overflow either.
+ * Total over the whole `NumInt` domain, exact at `i64::MIN`, and identical to the old result for
+ * every value that did not overflow.
+ *
+ * @param v  the value to reinterpret
+ * @return   `v`'s value as a raw i64 register bit pattern
+ * @since 0.3.1 (drop-128-family)
+ */
+pub fn numint_to_i64(v: NumInt) -> i64 {
+    i64_of_u64_bits(numint_bits(v))
+}
+
+/**
+ * numint_bits — `v`'s 64-bit two's-complement pattern, as a `u64`: the magnitude itself when `v` is
+ * non-negative, else its two's-complement negation computed with in-range unsigned steps only (see
+ * `numint_to_i64`'s proof, step 1). The same value the frozen `.tkb` wire encoding writes as its
+ * `lo` half (`tkb_write.numint_lo`).
+ *
+ * @param v  the value whose bit pattern is wanted
+ * @return   the 64-bit pattern denoting `v`
+ * @since 0.3.1 (drop-128-family)
+ */
+fn numint_bits(v: NumInt) -> u64 {
+    if !v.neg { return v.mag }
+    if v.mag == 0 { return 0 }
+    (U64_ALL_ONES - v.mag) + 1
+}
+
+/**
+ * i64_of_u64_bits — the signed value a 64-bit pattern denotes: a straight reinterpretation, done
+ * with two in-range steps because the `u64 -> i64` cast is CHECKED (see `numint_to_i64`'s proof,
+ * steps 2 and 3).
+ *
+ * @param bits  the 64-bit two's-complement pattern
+ * @return      its signed reading
+ * @since 0.3.1 (drop-128-family)
+ */
+fn i64_of_u64_bits(bits: u64) -> i64 {
+    if bits < I64_SIGN_BIT_U { return bits to i64 }
+    ((bits - I64_SIGN_BIT_U) to i64) + I64_MIN
+}
