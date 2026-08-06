@@ -1,0 +1,292 @@
+/**
+ * encode_movi — the shared MOVZ/MOVK/MOVN encoding: `base | sf | (hw<<21) |
+ * (imm16<<5) | Rd`, with `hw = shift/16` selecting the 16-bit lane.
+ *
+ * @param u32 base  the family template (MOVZ/MOVK/MOVN, bit-31-clear)
+ * @param bool wide  true for the 64-bit X form
+ * @param MReg dst  the destination register
+ * @param u32 imm16  the 16-bit lane value
+ * @param u32 shift  the lane's bit position (0/16/32/48)
+ * @return EncWord  the encoded word
+ */
+fn encode_movi(base: u32, wide: bool, dst: MReg, imm16: u32, shift: u32) -> EncWord {
+    let hw = (shift / ARM64_MOVI_LANE_BITS) << ARM64_MOVI_HW_SHIFT
+    let imm = (imm16 & ARM64_IMM16_MASK) << ARM64_MOVI_IMM16_SHIFT
+    plain_word(base | sf_bit(wide) | hw | imm | enc_rd(dst))
+}
+
+/**
+ * encode_movz — MOVZ (`dst = imm16 << shift`), template `0x52800000`.
+ *
+ * @param MMovZ i  the MOVZ instruction (operand physical)
+ * @return EncWord  the encoded word
+ */
+fn encode_movz(i: MMovZ) -> EncWord {
+    encode_movi(ARM64_MOVZ, i.wide, i.dst, i.imm16, i.shift)
+}
+
+/**
+ * encode_movk — MOVK (`dst |= imm16 << shift`, keeping other lanes), template
+ * `0x72800000`.
+ *
+ * @param MMovK i  the MOVK instruction (operand physical)
+ * @return EncWord  the encoded word
+ */
+fn encode_movk(i: MMovK) -> EncWord {
+    encode_movi(ARM64_MOVK, i.wide, i.dst, i.imm16, i.shift)
+}
+
+/**
+ * encode_movn — MOVN (`dst = ~(imm16 << shift)`), template `0x12800000`.
+ *
+ * @param MMovN i  the MOVN instruction (operand physical)
+ * @return EncWord  the encoded word
+ */
+fn encode_movn(i: MMovN) -> EncWord {
+    encode_movi(ARM64_MOVN, i.wide, i.dst, i.imm16, i.shift)
+}
+
+/**
+ * encode_mov — a GPR-GPR move as ORR from XZR: `0x2A0003E0 | sf | Rm(src) |
+ * Rd(dst)` (the template bakes `Rn=XZR`).
+ *
+ * @param MMov i  the move instruction (operands physical)
+ * @return EncWord  the encoded word
+ */
+fn encode_mov(i: MMov) -> EncWord {
+    plain_word(ARM64_MOV_REG | sf_bit(i.wide) | enc_rm(i.src) | enc_rd(i.dst))
+}
+
+/**
+ * encode_ext — a narrow sign/zero-extend as SBFM/UBFM: `ext_base | Rn(a) |
+ * Rd(dst)` (the template bakes the width bits and the fixed immr/imms).
+ *
+ * @param MExt i  the extend instruction (operands physical)
+ * @return EncWord  the encoded word
+ */
+fn encode_ext(i: MExt) -> EncWord {
+    plain_word(ext_base(i.op) | enc_rn(i.a) | enc_rd(i.dst))
+}
+
+/**
+ * falu_base — the single-precision template word of a float ALU mnemonic, the
+ * float family's counterpart of `alu_reg_base`.
+ *
+ * @param MFAluOp op  the float ALU operation
+ * @return u32  its `type=00` template word (operand fields zero)
+ */
+fn falu_base(op: MFAluOp) -> u32 {
+    match op {
+        FAdd => ARM64_FADD
+        FSub => ARM64_FSUB
+        FMul => ARM64_FMUL
+        FDiv => ARM64_FDIV
+    }
+}
+
+/**
+ * encode_falu — a register-register float ALU op: `falu_base | type | Rm(b) |
+ * Rn(a) | Rd(dst)`, the exact shape `encode_alu` has for integers with
+ * `ftype_bit` where it has `sf_bit`.
+ *
+ * @param MFAlu i  the float ALU instruction (operands physical)
+ * @return EncWord  the encoded word
+ */
+fn encode_falu(i: MFAlu) -> EncWord {
+    plain_word(falu_base(i.op) | ftype_bit(i.dbl) | enc_rm(i.b) | enc_rn(i.a) | enc_rd(i.dst))
+}
+
+/**
+ * encode_fneg — a float negate: `FNEG | type | Rn(a) | Rd(dst)`. One word, and
+ * the TRUE IEEE negate: it flips the sign bit, so `-0.0` stays a negative zero
+ * and a NaN keeps its payload — unlike a `0.0 - x` subtraction, which mis-signs
+ * a zero operand under round-to-nearest.
+ *
+ * @param MFNeg i  the float negate instruction (operands physical)
+ * @return EncWord  the encoded word
+ */
+fn encode_fneg(i: MFNeg) -> EncWord {
+    plain_word(ARM64_FNEG | ftype_bit(i.dbl) | enc_rn(i.a) | enc_rd(i.dst))
+}
+
+/**
+ * encode_fcmp — a float compare: `FCMP | type | Rm(b) | Rn(a)`, writing NZCV
+ * and no register (the `Rd` field is the fixed `opcode2` of the register form,
+ * already zero in the template).
+ *
+ * @param MFCmp i  the float compare instruction (operands physical)
+ * @return EncWord  the encoded word
+ */
+fn encode_fcmp(i: MFCmp) -> EncWord {
+    plain_word(ARM64_FCMP | ftype_bit(i.dbl) | enc_rm(i.b) | enc_rn(i.a))
+}
+
+/**
+ * fmov_base_bits — the template word plus width bits of an `MFMov`, chosen by
+ * WHICH register files its two operands live in: FPR-to-FPR is the scalar
+ * `FMOV Sd, Sn` (only `type` varies), and either crossing form is the raw
+ * bit-pattern transfer whose `sf` and `type` move together
+ * (`cross_width_bits`). A GPR-to-GPR `MFMov` is not a float instruction at all
+ * — `MMov` owns that — so it is a named internal error rather than a guessed
+ * word.
+ *
+ * @param MFMov i  the move instruction (operands physical)
+ * @return u32 | error  the base word with width bits, or the internal error
+ */
+fn fmov_base_bits(i: MFMov) -> u32 | error {
+    let dst_fpr = i.dst.reg_class == MRegClass::FPR
+    let src_fpr = i.src.reg_class == MRegClass::FPR
+    if dst_fpr && src_fpr { return ARM64_FMOV_FPR_FPR | ftype_bit(i.dbl) }
+    if dst_fpr { return ARM64_FMOV_FPR_GPR | cross_width_bits(i.dbl) }
+    if src_fpr { return ARM64_FMOV_GPR_FPR | cross_width_bits(i.dbl) }
+    internal_fp("an MFMov between two GPRs")
+}
+
+/**
+ * encode_fmov — a float move: `fmov_base_bits | Rn(src) | Rd(dst)`. The three
+ * legal shapes (FPR-FPR, GPR-to-FPR, FPR-to-GPR) differ only in the base word,
+ * so the operand placement is shared.
+ *
+ * @param MFMov i  the move instruction (operands physical)
+ * @return EncWord | error  the encoded word, or the internal error
+ */
+fn encode_fmov(i: MFMov) -> EncWord | error {
+    let base = match fmov_base_bits(i) { u32 as b => b; error as e => return e }
+    plain_word(base | enc_rn(i.src) | enc_rd(i.dst))
+}
+
+/**
+ * int_float_cvt_bits — the template word plus width bits of an int/float
+ * conversion. The two width fields are assigned BY REGISTER FILE, not by
+ * operand position: `sf` always names the integer end and `type` always names
+ * the float end, so `SCVTF`/`UCVTF` (integer source) read `src_wide` into `sf`
+ * while `FCVTZS`/`FCVTZU` (integer destination) read `dst_wide` into it. Both
+ * halves of one convert are therefore independent, which is the whole reason
+ * `MCvt` carries two flags.
+ *
+ * @param MCvtOp op  the conversion mnemonic (never `Fcvt`, whose two ends are both float)
+ * @param bool src_wide  whether the source operand is its file's 64-bit form
+ * @param bool dst_wide  whether the destination operand is its file's 64-bit form
+ * @return u32 | error  the base word with width bits, or the internal error for `Fcvt`
+ */
+fn int_float_cvt_bits(op: MCvtOp, src_wide: bool, dst_wide: bool) -> u32 | error {
+    match op {
+        Scvtf => ARM64_SCVTF | sf_bit(src_wide) | ftype_bit(dst_wide)
+        Ucvtf => ARM64_UCVTF | sf_bit(src_wide) | ftype_bit(dst_wide)
+        Fcvtzs => ARM64_FCVTZS | sf_bit(dst_wide) | ftype_bit(src_wide)
+        Fcvtzu => ARM64_FCVTZU | sf_bit(dst_wide) | ftype_bit(src_wide)
+        Fcvt => internal_fp("an Fcvt routed through the int/float conversion form")
+    }
+}
+
+/**
+ * fcvt_word — the whole word of a float-to-float convert, chosen by the two
+ * ends' widths: `FCVT Dd, Sn` widens and `FCVT Sd, Dn` narrows. Both widths sit
+ * in fixed fields of the word, so neither direction is an OR away from the
+ * other. Equal widths name an identity convert, which has no encoding and which
+ * no lowering emits.
+ *
+ * @param bool src_wide  true when the source is `D` (f64)
+ * @param bool dst_wide  true when the destination is `D` (f64)
+ * @return u32 | error  the finished template, or the internal error for an identity convert
+ */
+fn fcvt_word(src_wide: bool, dst_wide: bool) -> u32 | error {
+    if src_wide == dst_wide { return internal_fp("an identity FCVT (both ends the same width)") }
+    if dst_wide { return ARM64_FCVT_D_S }
+    ARM64_FCVT_S_D
+}
+
+/**
+ * cvt_base — the template word plus width bits of any `MCvt`: the
+ * float-to-float family through `fcvt_word`, every int/float direction through
+ * `int_float_cvt_bits`.
+ *
+ * @param MCvt i  the conversion instruction
+ * @return u32 | error  the base word with width bits, or a named internal error
+ */
+fn cvt_base(i: MCvt) -> u32 | error {
+    let is_fcvt = match i.op { Scvtf => false; Ucvtf => false; Fcvtzs => false; Fcvtzu => false; Fcvt => true }
+    if is_fcvt { return fcvt_word(i.src_wide, i.dst_wide) }
+    int_float_cvt_bits(i.op, i.src_wide, i.dst_wide)
+}
+
+/**
+ * encode_cvt — an int/float conversion: `cvt_base | Rn(a) | Rd(dst)`. The whole
+ * width decision lives in `cvt_base`; the operand placement is the same
+ * two-register shape as every other one-source form.
+ *
+ * @param MCvt i  the conversion instruction (operands physical)
+ * @return EncWord | error  the encoded word, or a named internal error
+ */
+fn encode_cvt(i: MCvt) -> EncWord | error {
+    let base = match cvt_base(i) { u32 as b => b; error as e => return e }
+    plain_word(base | enc_rn(i.a) | enc_rd(i.dst))
+}
+
+/**
+ * encode_load — a scaled-offset load: `load_form.base | (imm12<<10) | Rn(base)
+ * | Rd(dst)`, with the offset scaled by the access width. An
+ * unscaled/out-of-range offset raises `A4-ldur`.
+ *
+ * @param MLoad i  the load instruction (operands physical)
+ * @return EncWord | error  the encoded word, or a named honest-stop
+ */
+fn encode_load(i: MLoad) -> EncWord | error {
+    let form = load_form(i.size, i.sign)
+    let imm = match scaled_offset(i.mem.offset, form.scale) { u32 as v => v; error as e => return e }
+    let field = (imm & ARM64_IMM12_MASK) << ARM64_IMM12_SHIFT
+    plain_word(form.base | field | enc_rn(i.mem.base) | enc_rd(i.dst))
+}
+
+/**
+ * encode_store — a scaled-offset store: `store_form.base | (imm12<<10) |
+ * Rn(base) | Rt(src)`, with the offset scaled by the access width. An
+ * unscaled/out-of-range offset raises `A4-ldur`.
+ *
+ * @param MStore i  the store instruction (operands physical)
+ * @return EncWord | error  the encoded word, or a named honest-stop
+ */
+fn encode_store(i: MStore) -> EncWord | error {
+    let form = store_form(i.size)
+    let imm = match scaled_offset(i.mem.offset, form.scale) { u32 as v => v; error as e => return e }
+    let field = (imm & ARM64_IMM12_MASK) << ARM64_IMM12_SHIFT
+    plain_word(form.base | field | enc_rn(i.mem.base) | enc_rd(i.src))
+}
+
+/**
+ * encode_branch — an unconditional branch (B): the placeholder `0x14000000`
+ * flagged for imm26 displacement patching (A4-3) with its target block id.
+ *
+ * @param MBranch i  the branch instruction
+ * @return EncWord  the branch-flagged placeholder word
+ */
+fn encode_branch(i: MBranch) -> EncWord {
+    branch_word(ARM64_B, i.target, 0 to u32)
+}
+
+/**
+ * encode_branch_cond — a conditional branch (B.cond): `0x54000000 | cond` (the
+ * condition is position-independent) flagged for imm19 displacement patching
+ * (A4-3) with its taken-target block id.
+ *
+ * @param MBranchCond i  the conditional-branch instruction
+ * @return EncWord  the branch-flagged placeholder word
+ */
+fn encode_branch_cond(i: MBranchCond) -> EncWord {
+    let w = ARM64_BCOND | (cond_code(i.cond) & ARM64_COND_MASK)
+    branch_word(w, i.target, 1 to u32)
+}
+
+/**
+ * encode_cbz — a compare-and-branch (CBZ/CBNZ): `base | sf | Rt(a)` flagged for
+ * imm19 displacement patching (A4-3). The register and zero/nonzero opcode are
+ * position-independent; only the displacement is deferred.
+ *
+ * @param MCbz i  the compare-and-branch instruction (operand physical)
+ * @return EncWord  the branch-flagged placeholder word
+ */
+fn encode_cbz(i: MCbz) -> EncWord {
+    let base = if i.zero { ARM64_CBZ } else { ARM64_CBNZ }
+    let w = base | sf_bit(i.wide) | enc_rd(i.a)
+    branch_word(w, i.target, 1 to u32)
+}

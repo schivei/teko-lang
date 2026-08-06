@@ -1,0 +1,284 @@
+type SelCtxX86 = struct {
+    /**
+     * func — the machine function built so far.
+     */
+    func: MFuncX86
+    /**
+     * vinfo — the neutral `class_of` side-table for every VReg selected so far
+     * (reused from the arm64 isel; it records register file + width only).
+     */
+    vinfo: VInfoTable
+    /**
+     * next_scratch — the next fresh scratch VReg id the selector may hand out.
+     */
+    next_scratch: u32
+    /**
+     * cur_block — the machine-block id `selctx_x86_emit` currently appends to.
+     */
+    cur_block: u32
+    /**
+     * next_block — the next fresh machine-block id `selctx_x86_new_block` hands
+     * out for a split edge block (starts past the highest `LBlock` id so an
+     * edge block never collides with a mirror block).
+     */
+    next_block: u32
+}
+
+/**
+ * selctx_x86_emit — append `inst` to the selector's current machine block,
+ * returning the advanced context.
+ *
+ * @param SelCtxX86 ctx  the context to extend
+ * @param MInstX86 inst  the instruction to append
+ * @return SelCtxX86  the advanced context
+ */
+fn selctx_x86_emit(ctx: SelCtxX86, inst: MInstX86) -> SelCtxX86 {
+    SelCtxX86 { func = append_minst_x86(ctx.func, ctx.cur_block, inst); vinfo = ctx.vinfo; next_scratch = ctx.next_scratch; cur_block = ctx.cur_block; next_block = ctx.next_block }
+}
+
+/**
+ * selctx_x86_switch — retarget the context so subsequent `selctx_x86_emit`s
+ * append to machine block `block_id` (used when selection moves from one
+ * `LBlock`'s mirror to the next, or into a freshly-split edge block).
+ *
+ * @param SelCtxX86 ctx  the context to retarget
+ * @param u32 block_id  the machine-block id to emit into next
+ * @return SelCtxX86  the retargeted context
+ */
+fn selctx_x86_switch(ctx: SelCtxX86, block_id: u32) -> SelCtxX86 {
+    SelCtxX86 { func = ctx.func; vinfo = ctx.vinfo; next_scratch = ctx.next_scratch; cur_block = block_id; next_block = ctx.next_block }
+}
+
+/**
+ * FreshBlockX86 — a freshly-allocated machine block (its id) plus the advanced
+ * context that reserved it and appended the empty block to the function.
+ *
+ * @since #386 B1-3
+ */
+type FreshBlockX86 = struct {
+    /**
+     * ctx — the context with the block reserved and appended.
+     */
+    ctx: SelCtxX86
+    /**
+     * id — the reserved machine-block id.
+     */
+    id: u32
+}
+
+/**
+ * selctx_x86_new_block — append a fresh empty machine block (no params — a
+ * split edge block carries its merge values as edge moves, never as block
+ * params) and hand back its id. The context's emit target is left unchanged;
+ * call `selctx_x86_switch` to start emitting into it.
+ *
+ * @param SelCtxX86 ctx  the context to extend
+ * @return FreshBlockX86  the advanced context + the reserved block id
+ */
+fn selctx_x86_new_block(ctx: SelCtxX86) -> FreshBlockX86 {
+    let id = ctx.next_block
+    let blk = MBlockX86 { id = id; params = teko::list::empty(); insts = teko::list::empty() }
+    let advanced = SelCtxX86 { func = append_block_x86(ctx.func, blk); vinfo = ctx.vinfo; next_scratch = ctx.next_scratch; cur_block = ctx.cur_block; next_block = id + 1 }
+    FreshBlockX86 { ctx = advanced; id = id }
+}
+
+/**
+ * selctx_x86_set_vinfo — record `reg_class`/`wide` for VReg `id` in the
+ * context's neutral side-table, returning the advanced context.
+ *
+ * @param SelCtxX86 ctx  the context to extend
+ * @param u32 id  the VReg id being recorded
+ * @param MRegClass reg_class  its register file
+ * @param bool wide  its width flag
+ * @return SelCtxX86  the advanced context
+ */
+fn selctx_x86_set_vinfo(ctx: SelCtxX86, id: u32, reg_class: MRegClass, wide: bool) -> SelCtxX86 {
+    SelCtxX86 { func = ctx.func; vinfo = vinfo_set(ctx.vinfo, id, reg_class, wide); next_scratch = ctx.next_scratch; cur_block = ctx.cur_block; next_block = ctx.next_block }
+}
+
+/**
+ * FreshScratchX86 — a freshly-allocated scratch VReg (an isel-only temporary,
+ * never a source `LFunc` VReg id) plus the advanced context that reserved it.
+ *
+ * @since #386 B1-3
+ */
+type FreshScratchX86 = struct {
+    /**
+     * ctx — the context with the scratch id reserved.
+     */
+    ctx: SelCtxX86
+    /**
+     * reg — the freshly-allocated virtual register operand.
+     */
+    reg: MReg
+}
+
+/**
+ * selctx_x86_scratch — reserve a fresh scratch VReg in `reg_class` (the
+ * field-offset immediate a `LFieldAddr` materializes before its two-address
+ * add, or the zero register a generic boolean branch compares against).
+ *
+ * @param SelCtxX86 ctx  the context to extend
+ * @param MRegClass reg_class  which register file the scratch lives in
+ * @return FreshScratchX86  the advanced context + the reserved register
+ */
+fn selctx_x86_scratch(ctx: SelCtxX86, reg_class: MRegClass) -> FreshScratchX86 {
+    let id = ctx.next_scratch
+    let advanced = SelCtxX86 { func = ctx.func; vinfo = ctx.vinfo; next_scratch = id + 1; cur_block = ctx.cur_block; next_block = ctx.next_block }
+    FreshScratchX86 { ctx = advanced; reg = vreg(id, reg_class) }
+}
+
+/**
+ * RAX_X86 — the physical RAX register (GPR id 0), the SysV integer RESULT
+ * register isel pins at a value return / call-result site. Distinct from the
+ * first integer ARGUMENT register RDI(7): SysV's result register is not its
+ * first argument register, unlike AAPCS64 where both are x0 (decision D-A,
+ * §3 of the B1 plan), so the result is pinned to RAX directly here rather than
+ * read from `arg_reg(...,0)`. A flat-POD `MReg` aggregate const (#594 crumb 9b).
+ */
+const RAX_X86: MReg = preg(0, MRegClass::GPR)
+
+/**
+ * RCX_X86 — the physical RCX register (GPR id 1), whose low byte `CL` holds a
+ * variable shift count. A shift's count operand is moved into RCX before the
+ * `shl`/`shr`/`sar dst, cl` (§4.1 of the B1 plan) so the shift instruction
+ * itself names only the shifted destination. A flat-POD `MReg` aggregate const
+ * (#594 crumb 9b).
+ */
+const RCX_X86: MReg = preg(1, MRegClass::GPR)
+
+/**
+ * XMM0_X86 — the physical XMM0 register (FPR id 0), the SysV/Win64 float
+ * RESULT register isel pins at a value return whose recorded `class_of` is
+ * FPR (`B1-fp`) — the float twin of `RAX_X86`, and (index 0) also the ABI's
+ * first float ARGUMENT register (`SYSV64.fpr_arg`/`WIN64.fpr_arg`), unlike
+ * RAX/RDI's split. A flat-POD `MReg` aggregate const (#594 crumb 9b).
+ */
+const XMM0_X86: MReg = preg(0, MRegClass::FPR)
+
+/**
+ * select_const_int_x86 — the `LConstInt` selection: one `mov r64, imm` (the
+ * encoder later narrows to `mov r32, imm32` / `movabs r64, imm64` from the
+ * value). Defaults to the widest, no-information-loss 64-bit form, matching
+ * `LConstInt.val`'s own i64 two's-complement carrier (drop-128, 2026-07-24),
+ * since the LIR carries no per-value width for a bare constant.
+ *
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param lir::LConstInt c  the constant op
+ * @return SelCtxX86  the advanced context
+ */
+fn select_const_int_x86(ctx0: SelCtxX86, inst: lir::LInst, c: lir::LConstInt) -> SelCtxX86 {
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::GPR, true)
+    selctx_x86_emit(ctx1, movimm_x86(dst, c.val, true))
+}
+
+/**
+ * select_const_float_x86 — the `LConstFloat` selection: materialize its IEEE
+ * bit pattern into a scratch GPR (`movabs`, exactly `select_const_int_x86`'s
+ * own materialization), then `MFMovX86` it across the GPR/FPR boundary into
+ * an FPR (a `MOVQ xmm, r64` at encode, `B1-fp`, mirroring arm64's
+ * `select_const_float`/`FMOV`).
+ *
+ * `LConstFloat.bits` is always the f64 pattern, so an `f32`-declared literal
+ * (`!c.wide`) needs one more step: the f64 value is NARROWED by `CVTSD2SS`
+ * (`select_ftof_x86`'s own narrowing instruction) into the result, which is the
+ * same correctly-rounded conversion a C compiler performs on
+ * `float f = <double literal>;`. Skipping it is the bug that made
+ * `let f: f32 = 2.5` compare unequal to `2.5` on this backend while the C route
+ * said equal — the value was an f64 pattern in a register everything downstream
+ * then read at single width.
+ *
+ * `c.bits` is decoded through `decode_signed64` FIRST (not widened directly) so
+ * the GPR staging value is the exact signed two's-complement i64 reading of the
+ * IEEE bit pattern.
+ *
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param lir::LConstFloat c  the float constant op
+ * @return SelCtxX86  the advanced context
+ */
+fn select_const_float_x86(ctx0: SelCtxX86, inst: lir::LInst, c: lir::LConstFloat) -> SelCtxX86 {
+    let dst = vreg(inst.result, MRegClass::FPR)
+    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::FPR, c.wide)
+    let scratch = selctx_x86_scratch(ctx1, MRegClass::GPR)
+    let ctx2 = selctx_x86_emit(scratch.ctx, movimm_x86(scratch.reg, decode_signed64(c.bits), true))
+    if c.wide {
+        return selctx_x86_emit(ctx2, fmov_x86(dst, scratch.reg, true))
+    }
+    let staged = selctx_x86_scratch(ctx2, MRegClass::FPR)
+    let ctx3 = selctx_x86_emit(staged.ctx, fmov_x86(staged.reg, scratch.reg, true))
+    selctx_x86_emit(ctx3, cvt_x86(MCvtOpX86::Cvtsd2ss, dst, staged.reg))
+}
+
+/**
+ * select_alu_x86 — the two-address `LBin` selection shared by every integer
+ * arithmetic/bitwise x86 ALU case (§4.2 of the B1 plan). x86's `OP dst, src` is
+ * destructive (`dst = dst OP src`), so a three-address `r = a OP b` lowers to a
+ * COPY of the left operand into the result register followed by the
+ * read-modify-write op: `mov dst, a` ; `OP dst, b`. The RMW op reports `dst` as
+ * BOTH a def and a use (the shape arm64's `MMovK` already carries), so the
+ * shared regalloc handles it unchanged. The extra copy is an honest cost a
+ * later coalescer removes; the copy-elision-free correctness-first form always
+ * inserts it. The whole two-address concept lives HERE, in the ISA that has it,
+ * never in the shared allocator (a regalloc operand-tie is rejected, D-B).
+ *
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param MAluOpX86 op  the x86 ALU mnemonic (Add/Sub/And/Or/Xor)
+ * @param a  the left-operand VReg (copied into dst)
+ * @param b  the right-operand VReg (the RMW source)
+ * @param bool wide  true for the 64-bit r64 form, false for the 32-bit r32 form
+ * @return SelCtxX86  the advanced context
+ */
+fn select_alu_x86(ctx0: SelCtxX86, inst: lir::LInst, op: MAluOpX86, a: u32, b: u32, wide: bool) -> SelCtxX86 {
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::GPR, wide)
+    let ctx2 = selctx_x86_emit(ctx1, mov_x86(dst, vreg(a, MRegClass::GPR), wide))
+    selctx_x86_emit(ctx2, alu_rm_x86(op, dst, vreg(b, MRegClass::GPR), wide))
+}
+
+/**
+ * select_imul_x86 — the `IMul` selection: the two-address copy-first shape of
+ * `select_alu_x86` over the two-operand `imul dst, src` (§4.1). Unlike the
+ * one-operand `imul`/`mul` (which pin RDX:RAX), the two-operand form needs no
+ * fixed register, so it rides the same `mov dst, a` ; `imul dst, b` pattern.
+ *
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param a  the left-operand VReg (copied into dst)
+ * @param b  the right-operand VReg (the multiplicand)
+ * @param bool wide  true for the 64-bit r64 form, false for the 32-bit r32 form
+ * @return SelCtxX86  the advanced context
+ */
+fn select_imul_x86(ctx0: SelCtxX86, inst: lir::LInst, a: u32, b: u32, wide: bool) -> SelCtxX86 {
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::GPR, wide)
+    let ctx2 = selctx_x86_emit(ctx1, mov_x86(dst, vreg(a, MRegClass::GPR), wide))
+    selctx_x86_emit(ctx2, imul_x86(dst, vreg(b, MRegClass::GPR), wide))
+}
+
+/**
+ * select_div_x86 — the `IDivS`/`IDivU`/`IRemS`/`IRemU` selection: one
+ * `MDivSeqX86` macro-instruction carrying the whole fixed-register sequence's
+ * operands (§4.4). x86 `idiv`/`div` divides `RDX:RAX` by the divisor, quotient
+ * into RAX and remainder into RDX, so the RAX/RDX pins + the `cqo`/`xor edx,edx`
+ * widening are the encoder's expansion of this one case — isel emits the macro
+ * and the shared regalloc (via `inst_regs_x86`, B1-4) reads its RAX/RDX
+ * defs+clobbers as the fixed intervals the scan already avoids.
+ *
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param bool is_signed  true for `idiv`/`cqo`, false for `div`/`xor edx,edx`
+ * @param bool is_rem  true for the remainder (RDX), false for the quotient (RAX)
+ * @param a  the dividend VReg (moved into RAX before the divide)
+ * @param b  the divisor VReg (the `idiv`/`div` r/m operand)
+ * @param bool wide  true for the 64-bit r64 form, false for the 32-bit r32 form
+ * @return SelCtxX86  the advanced context
+ */
+fn select_div_x86(ctx0: SelCtxX86, inst: lir::LInst, is_signed: bool, is_rem: bool, a: u32, b: u32, wide: bool) -> SelCtxX86 {
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::GPR, wide)
+    selctx_x86_emit(ctx1, divseq_x86(dst, vreg(a, MRegClass::GPR), vreg(b, MRegClass::GPR), is_signed, is_rem, wide))
+}

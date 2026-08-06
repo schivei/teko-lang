@@ -1,0 +1,181 @@
+/**
+ * wrap_plain_words — append each raw instruction word of `ws` to the `EncWord`
+ * stream as a position-independent `plain_word` (the prologue/epilogue expansion
+ * carries no branch or reloc fixup).
+ *
+ * @param []EncWord acc0  the `EncWord` stream to extend
+ * @param []u32 ws  the raw instruction words to append
+ * @return []EncWord  `acc0` followed by each word wrapped as a plain `EncWord`
+ */
+fn wrap_plain_words(acc0: []EncWord, ws: []u32) -> []EncWord {
+    mut acc = acc0
+    mut i: u64 = 0
+    loop {
+        if i >= ws.len { break }
+        acc = teko::list::push(acc, plain_word(ws[i]))
+        i++
+    }
+    acc
+}
+
+/**
+ * append_encwords — append every `EncWord` of `xs` to `acc`, in order: the
+ * concatenation `encode_one`'s `MFrameAddr` branch uses to fold
+ * `encode_frame_addr_words`'s one-or-two-word result into the running
+ * `EncWord` stream.
+ *
+ * @param []EncWord acc  the `EncWord` stream to extend
+ * @param []EncWord xs  the words to append
+ * @return []EncWord  `acc` followed by `xs`
+ */
+fn append_encwords(acc: []EncWord, xs: []EncWord) -> []EncWord {
+    mut out = acc
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, xs[i])
+        i++
+    }
+    out
+}
+
+/**
+ * inst_is_frame_addr — whether an instruction is `MFrameAddr`: the abstract
+ * slot-address instruction `encode_one` may need to expand into MORE than one
+ * word (the big-frame ADD sequence), mirroring `inst_is_ret`'s `MRet` check.
+ *
+ * @param MInst inst  the instruction
+ * @return bool  true iff `inst` is `MFrameAddr`
+ */
+fn inst_is_frame_addr(inst: MInst) -> bool {
+    match inst {
+        MFrameAddr => true
+        _ => false
+    }
+}
+
+/**
+ * as_frame_addr — `inst` as its `MFrameAddr` payload. Only ever called after
+ * `inst_is_frame_addr(inst)` has already held; the `_` arm's placeholder
+ * value is unreachable in practice (required by the exhaustive-match
+ * contract, the same shape `bad_word`/`bad_func` use in the golden tests).
+ *
+ * @param MInst inst  an instruction already known to be `MFrameAddr`
+ * @return MFrameAddr  its payload
+ */
+fn as_frame_addr(inst: MInst) -> MFrameAddr {
+    match inst {
+        MFrameAddr as x => x
+        _ => MFrameAddr { dst = preg(0 to u32, MRegClass::GPR); slot = 0 to u64 }
+    }
+}
+
+/**
+ * encode_frame_addr_words — resolve `MFrameAddr{dst, slot}` to one or two
+ * `EncWord`s: a slot offset within the inline 12-bit ADD-imm field resolves
+ * exactly as `encode_frame_addr` does (byte-identical, ONE word, delegated
+ * directly); a bigger offset expands to the chained big-offset ADD sequence
+ * (`big_offset_words`, A4-2's big-frame fast-follow) — two words at most,
+ * `dst` itself the scratch (safe: nothing else reads `dst` before both writes
+ * land). Past `ARM64_IMM24_FIELD_MAX`, `A4-bigframe`.
+ *
+ * @param FrameLayout layout  the enclosing function's resolved frame
+ * @param MFrameAddr i  the frame-slot address instruction (operand physical)
+ * @return []EncWord | error  the one or two encoded words, or `A4-bigframe`
+ */
+fn encode_frame_addr_words(layout: FrameLayout, i: MFrameAddr) -> []EncWord | error {
+    let off = slot_offset(layout, i.slot)
+    if off <= ARM64_IMM12_FIELD_MAX {
+        let ew = match encode_frame_addr(layout, i) { EncWord as x => x; error as e => return e }
+        return teko::list::push(teko::list::empty(), ew)
+    }
+    let raw = match big_offset_words(ARM64_SP_ID, enc_reg(i.dst), off, false) { []u32 as w => w; error as e => return e }
+    wrap_plain_words(teko::list::empty(), raw)
+}
+
+/**
+ * encode_one — append one instruction's `EncWord`(s) to the stream: an `MRet`
+ * expands to the frame epilogue words (A4-2 left it bare) followed by the RET
+ * word; an `MFrameAddr` expands through `encode_frame_addr_words` (one word
+ * for a small slot offset, two for a big one); every other instruction
+ * encodes to its single `EncWord` via `encode_inst_word`. Any named
+ * honest-stop propagates out.
+ *
+ * @param FrameLayout layout  the enclosing function's resolved frame
+ * @param []EncWord words0  the `EncWord` stream to extend
+ * @param MInst inst  the instruction to encode
+ * @return []EncWord | error  the extended stream, or a named honest-stop
+ */
+fn encode_one(layout: FrameLayout, words0: []EncWord, inst: MInst) -> []EncWord | error {
+    if inst_is_ret(inst) {
+        match emit_epilogue(layout) {
+            []u32 as epi => {
+                let after = wrap_plain_words(words0, epi)
+                return teko::list::push(after, encode_ret())
+            }
+            error as e => return e
+        }
+    }
+    if inst_is_frame_addr(inst) {
+        let fa = as_frame_addr(inst)
+        let ews = match encode_frame_addr_words(layout, fa) { []EncWord as w => w; error as e => return e }
+        return append_encwords(words0, ews)
+    }
+    let ew = match encode_inst_word(layout, inst) { EncWord as x => x; error as e => return e }
+    teko::list::push(words0, ew)
+}
+
+/**
+ * encode_block_words — append every instruction of one block to the `EncWord`
+ * stream, in order, expanding `MRet` as `encode_one` does. Any named honest-stop
+ * propagates out.
+ *
+ * @param FrameLayout layout  the enclosing function's resolved frame
+ * @param []EncWord words0  the `EncWord` stream to extend
+ * @param MBlock blk  the block whose instructions to encode
+ * @return []EncWord | error  the extended stream, or a named honest-stop
+ */
+fn encode_block_words(layout: FrameLayout, words0: []EncWord, blk: MBlock) -> []EncWord | error {
+    mut words = words0
+    mut i: u64 = 0
+    loop {
+        if i >= blk.insts.len { break }
+        let next = match encode_one(layout, words, blk.insts[i]) { []EncWord as w => w; error as e => return e }
+        words = next
+        i++
+    }
+    words
+}
+
+/**
+ * resolve_word — the final u32 of one emitted `EncWord`: a position-independent
+ * or symbol-reference word is returned as-is (the reloc placeholder stays; the
+ * linker patches it), a branch word gets its displacement patched from the
+ * recorded block offsets (`disp = target_offset - here`, in whole words). A
+ * missing target or an out-of-field displacement raises a named honest-stop.
+ *
+ * @param EncWord ew  the emitted word
+ * @param u32 here  this word's own index in the function's stream
+ * @param []BlockOffset offsets  the recorded per-block starting word indices
+ * @return u32 | error  the resolved word, or a named honest-stop
+ */
+fn resolve_word(ew: EncWord, here: u32, offsets: []BlockOffset) -> u32 | error {
+    if !ew.has_branch { return ew.word }
+    let target_off = match lookup_block_offset(offsets, ew.target) { u32 as v => v; error as e => return e }
+    let disp_words = (target_off to i64) - (here to i64)
+    let field = match branch_disp_field(disp_words, ew.branch_form) { u32 as v => v; error as e => return e }
+    ew.word | field
+}
+
+/**
+ * collect_word_reloc — fold the relocation ONE `EncWord` owes into the
+ * function's `Reloc` list: a word that owes none (`reloc` null) leaves the list
+ * untouched, and a word that owes one contributes exactly one `__text`-relative
+ * record at its word index times four. The nullable `reloc` is the only input,
+ * so there is no flag to read out of step with a kind.
+ *
+ * @param []Reloc acc  the relocations collected so far
+ * @param EncWord ew  the word whose relocation (if any) is folded in
+ * @param u64 word_index  the word's index in the function's word stream
+ * @return []Reloc  `acc`, extended when `ew` owes a relocation
+ */

@@ -1,0 +1,297 @@
+fn furthest_active_eligible(abi: AbiDescriptor, a: ActiveEntry, crosses_call: bool) -> bool {
+    !crosses_call || !is_caller_saved(abi, preg(a.phys, a.reg_class))
+}
+
+/**
+ * furthest_active — the active entry of class `reg_class` with the largest `end` (the
+ * furthest-next-use spill candidate) whose physreg is call-safe to hand to the interval
+ * being colored (`furthest_active_eligible`), or `found=false` when none qualifies —
+ * including when every same-class active entry holds a caller-saved register and the
+ * interval being colored crosses a call, in which case the caller must fall through to
+ * spilling the NEW interval instead of displacing an unsafe one.
+ *
+ * @param []ActiveEntry active  the active set
+ * @param MRegClass reg_class  the register class
+ * @param AbiDescriptor abi  the register file (for the call-safety filter)
+ * @param bool crosses_call  whether the interval being colored crosses a call
+ * @return FurthestActive  the furthest call-safe entry, or none
+ */
+fn furthest_active(active: []ActiveEntry, reg_class: MRegClass, abi: AbiDescriptor, crosses_call: bool) -> FurthestActive {
+    mut best = FurthestActive { found = false; vreg_id = 0; phys = 0; end = 0 }
+    mut i: u64 = 0
+    loop {
+        if i >= active.len { break }
+        let a = active[i]
+        if a.reg_class == reg_class && furthest_active_eligible(abi, a, crosses_call) {
+            if !best.found || a.end > best.end {
+                best = FurthestActive { found = true; vreg_id = a.vreg_id; phys = a.phys; end = a.end }
+            }
+        }
+        i++
+    }
+    best
+}
+
+/**
+ * remove_active — the active set with the entry for `vreg_id` removed.
+ *
+ * @param []ActiveEntry active  the active set
+ * @param u32 vreg_id  the vreg whose entry to drop
+ * @return []ActiveEntry  the reduced active set
+ */
+fn remove_active(active: []ActiveEntry, vreg_id: u32) -> []ActiveEntry {
+    mut out: []ActiveEntry = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= active.len { break }
+        if active[i].vreg_id != vreg_id { out = teko::list::push(out, active[i]) }
+        i++
+    }
+    out
+}
+
+/**
+ * mark_spilled — the assignment list with `vreg_id`'s `InReg` replaced by a
+ * `Spilled{slot}` (the furthest-next-use victim loses its register).
+ *
+ * @param []RegAssignment assignments  the assignments so far
+ * @param u32 vreg_id  the victim vreg
+ * @param u64 slot  its new spill slot
+ * @return []RegAssignment  the updated assignments
+ */
+fn mark_spilled(assignments: []RegAssignment, vreg_id: u32, slot: u64) -> []RegAssignment {
+    mut out: []RegAssignment = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= assignments.len { break }
+        let a = assignments[i]
+        let repl = match a {
+            InReg as r => if r.vreg_id == vreg_id { Spilled { vreg_id = vreg_id; slot = slot } } else { a }
+            Spilled => a
+        }
+        out = teko::list::push(out, repl)
+        i++
+    }
+    out
+}
+
+/**
+ * add_unique_u32 — `list` with `x` appended iff not already present.
+ *
+ * @param []u32 list  the list
+ * @param u32 x  the value to add
+ * @return []u32  the (possibly extended) list
+ */
+fn add_unique_u32(list: []u32, x: u32) -> []u32 {
+    mut i: u64 = 0
+    loop {
+        if i >= list.len { break }
+        if list[i] == x { return list }
+        i++
+    }
+    teko::list::push(list, x)
+}
+
+/**
+ * linear_scan — the §3.3 Poletto–Sarkar linear scan extended for fixed pin
+ * intervals and call clobbers: the virtual intervals are colored in start
+ * order, expiring the active set at each start, choosing the first candidate
+ * physreg (free of active + fixed-pin overlap, call-safe if the value
+ * crosses a call), and on register pressure spilling the furthest-next-use —
+ * itself restricted to a call-safe victim when the interval being colored
+ * crosses a call (`furthest_active`'s own filter), so displacing an active
+ * entry can never hand a call-crossing value a caller-saved register that a
+ * callee between its def and its last use would clobber.
+ *
+ * @param AbiDescriptor abi  the register file the scan colors from
+ * @param IntervalSet ivals  the computed intervals (A3-2)
+ * @return ScanResult  the per-vreg assignments + the callee-saved used
+ */
+fn linear_scan(abi: AbiDescriptor, ivals: IntervalSet) -> ScanResult {
+    let sorted = sort_by_start(ivals.virt)
+    mut active: []ActiveEntry = teko::list::empty()
+    mut assignments: []RegAssignment = teko::list::empty()
+    mut used_callee: []u32 = teko::list::empty()
+    mut next_slot: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= sorted.len { break }
+        let v = sorted[i]
+        active = expire_active(active, v.start)
+        let cand = candidate_pool(abi, v, active, ivals.fixed)
+        if cand.len > 0 {
+            let phys = cand[0]
+            active = teko::list::push(active, ActiveEntry { vreg_id = v.reg_id; phys = phys; end = v.end; reg_class = v.reg_class })
+            assignments = teko::list::push(assignments, InReg { vreg_id = v.reg_id; phys = phys })
+            if is_callee_saved(abi, preg(phys, v.reg_class)) { used_callee = add_unique_u32(used_callee, phys) }
+        } else {
+            let far = furthest_active(active, v.reg_class, abi, v.crosses_call)
+            if far.found && far.end > v.end {
+                let slot = next_slot
+                next_slot = next_slot + 1
+                assignments = mark_spilled(assignments, far.vreg_id, slot)
+                active = remove_active(active, far.vreg_id)
+                active = teko::list::push(active, ActiveEntry { vreg_id = v.reg_id; phys = far.phys; end = v.end; reg_class = v.reg_class })
+                assignments = teko::list::push(assignments, InReg { vreg_id = v.reg_id; phys = far.phys })
+                if is_callee_saved(abi, preg(far.phys, v.reg_class)) { used_callee = add_unique_u32(used_callee, far.phys) }
+            } else {
+                let slot = next_slot
+                next_slot = next_slot + 1
+                assignments = teko::list::push(assignments, Spilled { vreg_id = v.reg_id; slot = slot })
+            }
+        }
+        i++
+    }
+    ScanResult { assignments = assignments; used_callee_saved = used_callee }
+}
+
+/**
+ * CallSafetyLookup — whether `IntervalSet.virt` carries an interval for a queried vreg id
+ * (option-struct, M.2), and if so its class and `crosses_call` — the two facts
+ * `report_call_unsafe_assignments` needs to judge one `InReg` assignment.
+ */
+type CallSafetyLookup = struct {
+    /** found — true iff `virt` carries an interval for the queried id. */
+    found: bool
+    /** reg_class — the interval's register file (meaningful only when `found`). */
+    reg_class: MRegClass
+    /** crosses_call — the interval's own flag (meaningful only when `found`). */
+    crosses_call: bool
+}
+
+/**
+ * lookup_call_safety — the `CallSafetyLookup` for `vreg_id` in `virt`: the first interval whose
+ * `reg_id` matches, or not-found (an assignment for an id the scan never colored — should not
+ * happen, but the lookup stays total rather than assume it).
+ *
+ * @param []LiveInterval virt  the scan's own virtual intervals
+ * @param u32 vreg_id  the virtual register id to find
+ * @return CallSafetyLookup  the match, or found=false
+ */
+fn lookup_call_safety(virt: []LiveInterval, vreg_id: u32) -> CallSafetyLookup {
+    mut i: u64 = 0
+    loop {
+        if i >= virt.len { break }
+        if virt[i].reg_id == vreg_id { return CallSafetyLookup { found = true; reg_class = virt[i].reg_class; crosses_call = virt[i].crosses_call } }
+        i++
+    }
+    CallSafetyLookup { found = false; reg_class = MRegClass::GPR; crosses_call = false }
+}
+
+/**
+ * CallUnsafeAssignment — one virtual register the scan colored `InReg` with a caller-saved
+ * physreg despite its own interval crossing a call: the exact failure mode a caller-saved
+ * register clobbered mid-lifetime by an intervening call would later surface as — a corrupted
+ * value read back after the call, attributable to nothing in particular without this diagnostic.
+ */
+type CallUnsafeAssignment = struct {
+    /** vreg_id — the virtual register the scan colored. */
+    vreg_id: u32
+    /** phys — the caller-saved physreg it was (wrongly) assigned. */
+    phys: u32
+    /** reg_class — the register file `phys` belongs to. */
+    reg_class: MRegClass
+}
+
+/**
+ * push_call_unsafe_assignment — `out` extended with `a`'s violation record when `a` is an
+ * `InReg` assignment whose looked-up interval crosses a call and whose physreg is caller-saved,
+ * unchanged otherwise (a `Spilled` assignment, or an `InReg` that is call-safe).
+ *
+ * @param []CallUnsafeAssignment out  the violations accumulated so far
+ * @param AbiDescriptor abi  the register file
+ * @param []LiveInterval virt  the scan's own virtual intervals
+ * @param RegAssignment a  the assignment to check
+ * @return []CallUnsafeAssignment  `out`, with `a`'s violation appended when applicable
+ */
+fn push_call_unsafe_assignment(out: []CallUnsafeAssignment, abi: AbiDescriptor, virt: []LiveInterval, a: RegAssignment) -> []CallUnsafeAssignment {
+    match a {
+        InReg as r => {
+            let lookup = lookup_call_safety(virt, r.vreg_id)
+            if !lookup.found || !lookup.crosses_call { return out }
+            if !is_caller_saved(abi, preg(r.phys, lookup.reg_class)) { return out }
+            teko::list::push(out, CallUnsafeAssignment { vreg_id = r.vreg_id; phys = r.phys; reg_class = lookup.reg_class })
+        }
+        Spilled => out
+    }
+}
+
+/**
+ * find_call_unsafe_assignments — every `InReg` assignment in `sr.assignments` whose interval
+ * (looked up in `ivals.virt` by vreg id) crosses a call yet was colored a caller-saved physreg:
+ * the invariant `candidate_pool`'s `call_ok` filter and `furthest_active`'s own call-safety
+ * filter are BOTH meant to make unreachable (§3.3, `IntervalSet`'s own doc comment). A pure,
+ * unit-testable core; `report_call_unsafe_assignments` is its env-gated stderr sink.
+ *
+ * @param AbiDescriptor abi  the register file
+ * @param IntervalSet ivals  the scan's own intervals
+ * @param ScanResult sr  the scan's own output
+ * @return []CallUnsafeAssignment  every violating assignment, in `sr.assignments`' own order
+ */
+fn find_call_unsafe_assignments(abi: AbiDescriptor, ivals: IntervalSet, sr: ScanResult) -> []CallUnsafeAssignment {
+    mut out: []CallUnsafeAssignment = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= sr.assignments.len { break }
+        out = push_call_unsafe_assignment(out, abi, ivals.virt, sr.assignments[i])
+        i++
+    }
+    out
+}
+
+/**
+ * call_safety_check_enabled — whether the native regalloc call-safety diagnostic
+ * (`TEKO_NATIVE_CALL_SAFETY_CHECK=1`) is requested: a CI-narrowing aid (mirrors
+ * `rodata_align_check_enabled` in `encode_arm64.tks`), NOT part of the ritual's normal output —
+ * it names, straight from one function's own scan output, any `InReg` assignment that violates
+ * the call-crossing invariant `candidate_pool`/`furthest_active` are meant to enforce, instead of
+ * leaving the eventual clobbered-value read to surface as a distant, unattributed crash.
+ *
+ * @return bool  true iff `TEKO_NATIVE_CALL_SAFETY_CHECK` is set to `"1"`
+ */
+fn call_safety_check_enabled() -> bool {
+    match teko::env::var("TEKO_NATIVE_CALL_SAFETY_CHECK") { str as v => v == "1"; error => false }
+}
+
+/**
+ * reg_class_name — `class`'s diagnostic name (`"gpr"`/`"fpr"`), for a stderr line that must not
+ * assume string interpolation formats an enum value on its own.
+ *
+ * @param MRegClass rc  the register class to name
+ * @return str  `"gpr"` or `"fpr"`
+ */
+fn reg_class_name(rc: MRegClass) -> str {
+    match rc { MRegClass::GPR => "gpr"; MRegClass::FPR => "fpr" }
+}
+
+/**
+ * report_call_unsafe_assignment — print one call-unsafe-assignment diagnostic line to stderr.
+ *
+ * @param CallUnsafeAssignment v  the violation to report
+ * @return void
+ */
+fn report_call_unsafe_assignment(v: CallUnsafeAssignment) -> void {
+    let rc = reg_class_name(v.reg_class)
+    teko::io::eprintln($"teko: TEKO_NATIVE_CALL_SAFETY_CHECK: call-crossing vreg in caller-saved register — vreg={v.vreg_id} phys={v.phys} class={rc}")
+}
+
+/**
+ * report_call_unsafe_assignments — print one diagnostic line per call-unsafe assignment `abi`/
+ * `ivals`/`sr` disclose, when `call_safety_check_enabled`; a no-op otherwise, so the ordinary
+ * build's output is byte-identical to before this diagnostic existed.
+ *
+ * @param AbiDescriptor abi  the register file
+ * @param IntervalSet ivals  the scan's own intervals
+ * @param ScanResult sr  the scan's own output
+ * @return void
+ */
+fn report_call_unsafe_assignments(abi: AbiDescriptor, ivals: IntervalSet, sr: ScanResult) -> void {
+    if !call_safety_check_enabled() { return }
+    let violations = find_call_unsafe_assignments(abi, ivals, sr)
+    mut i: u64 = 0
+    loop {
+        if i >= violations.len { break }
+        report_call_unsafe_assignment(violations[i])
+        i++
+    }
+}

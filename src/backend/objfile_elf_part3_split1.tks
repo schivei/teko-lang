@@ -1,0 +1,294 @@
+fn elf_remap_partition_symbols(symbols: []Symbol, entries: []ElfConstEntry) -> []Symbol {
+    mut out: []Symbol = teko::list::empty()
+    mut k: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= symbols.len { break }
+        let s = symbols[i]
+        if s.defined && s.local && s.sect == ELF_SECT_RODATA {
+            let e = entries[k]
+            let sect = if e.to_drr { ELF_SECT_DATA_REL_RO } else { ELF_SECT_RODATA }
+            out = teko::list::push(out, Symbol { name = s.name; defined = s.defined; sect = sect; offset = e.new_offset; local = s.local })
+            k++
+        } else {
+            out = teko::list::push(out, s)
+        }
+        i++
+    }
+    out
+}
+
+/**
+ * elf_owner_new_base — the moved datum owning the relocation site at byte offset
+ * `off`: its (original `start`, post-partition `new_offset`) pair, so a site is
+ * rebased as `new_offset + (off - start)`. The owner is the entry whose span
+ * contains `off`; only `to_drr` entries carry sites.
+ *
+ * @param []ElfConstEntry entries  the entries with offsets assigned
+ * @param u32 off  the relocation site's original `.rodata` byte offset
+ * @return u32  the rebased `.data.rel.ro`-relative site offset
+ */
+fn elf_rebased_site(entries: []ElfConstEntry, off: u32) -> u32 {
+    mut i: u64 = 0
+    loop {
+        if i >= entries.len { break }
+        let e = entries[i]
+        if off >= e.start && off < e.end { return e.new_offset + (off - e.start) }
+        i++
+    }
+    off
+}
+
+/**
+ * elf_remap_drr_relocs — rebase every `.rodata`-relative relocation's site to be
+ * `.data.rel.ro`-relative (its owning datum moved there), leaving the target
+ * name, type, and addend unchanged (the target is a `.rodata` leaf, resolved
+ * later against the `.rodata` section symbol).
+ *
+ * @param []ElfRelocReq rodata_relocs  the `.rodata`-relative relocations
+ * @param []ElfConstEntry entries  the entries with offsets assigned
+ * @return []ElfRelocReq  the relocations with `.data.rel.ro`-relative sites
+ */
+fn elf_remap_drr_relocs(rodata_relocs: []ElfRelocReq, entries: []ElfConstEntry) -> []ElfRelocReq {
+    mut out: []ElfRelocReq = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= rodata_relocs.len { break }
+        let r = rodata_relocs[i]
+        out = teko::list::push(out, ElfRelocReq { offset = elf_rebased_site(entries, r.offset); sym = r.sym; rtype = r.rtype; addend = r.addend })
+        i++
+    }
+    out
+}
+
+/**
+ * elf_partition_data_rel_ro — split the object's `.rodata` image by
+ * relocation-presence: every const datum whose bytes hold a pointer relocation
+ * (a `const []T` fat slot) moves to a writable-then-RELRO `.data.rel.ro` section,
+ * while pure string/leaf data stays in read-only `.rodata`. This is what makes
+ * the object link under a default PIE toolchain: an absolute (`R_X86_64_64`)
+ * relocation into a read-only section forces `DT_TEXTREL` (which `ld` refuses in
+ * a PIE), whereas the same relocation in `.data.rel.ro` is applied at load time
+ * and the page is then protected read-only (RELRO) — PIE- and ASLR-safe, exactly
+ * as a C toolchain places a `static const` with a pointer initializer.
+ *
+ * A no-op passthrough when the module carries no rodata-internal relocation, so
+ * every existing object (and golden) stays byte-identical.
+ *
+ * @param ElfObject obj  the neutral object (rodata image + symbols + rodata relocs)
+ * @return ElfDrrPartition  the rebuilt sections + re-stamped symbols + rebased relocs
+ */
+fn elf_partition_data_rel_ro(obj: ElfObject) -> ElfDrrPartition {
+    if obj.rodata_relocs.len == (0 to u64) {
+        return ElfDrrPartition { active = false; rodata = obj.rodata; drr = teko::list::empty(); symbols = obj.symbols; drr_relocs = teko::list::empty() }
+    }
+    let entries = elf_assign_partition_offsets(elf_collect_const_entries(obj.symbols, obj.rodata.len to u32), obj.rodata_relocs)
+    let rodata = elf_build_partition_blob(entries, obj.rodata, false)
+    let drr = elf_build_partition_blob(entries, obj.rodata, true)
+    let symbols = elf_remap_partition_symbols(obj.symbols, entries)
+    let drr_relocs = elf_remap_drr_relocs(obj.rodata_relocs, entries)
+    ElfDrrPartition { active = true; rodata = rodata; drr = drr; symbols = symbols; drr_relocs = drr_relocs }
+}
+
+/**
+ * emit_elf_object — the ISA-AGNOSTIC ELF64 `ET_REL` writer (the extracted B1
+ * body): the `Elf64_Ehdr` (with the supplied `e_machine`/`e_flags`) + the
+ * section images (`.text`/`.rodata` bytes, the optional `.data.rel.ro` image for
+ * pointer-bearing consts, the `Elf64_Sym` table local-then-global with the
+ * `.rodata`/`.data.rel.ro` `STT_SECTION` symbols AND any `.text` pcrel-label
+ * locals, `.strtab`, `.shstrtab`, the `.rela.text` and optional
+ * `.rela.data.rel.ro` `Elf64_Rela` tables, and — when `obj.dwarf.present` (D1.4)
+ * — `.debug_abbrev`/`.debug_info`/`.debug_line` plus their `.rela.debug_*`
+ * tables) + the `Elf64_Shdr` headers. Enough for `cc`/`ld` to link into a
+ * runnable PIE executable against the C-built `teko_rt` (D-2 option 1
+ * bootstrap). No ISA knowledge remains past this boundary — the per-ISA
+ * `emit_elf`/`emit_elf_arm64` adapters supply the machine, flags, and every
+ * numeric reloc type (including `obj.dwarf`'s, via `elf_dwarf_of`), so E1 (the
+ * ELF static linker) reuses this verbatim. A defined function's `st_value` stays
+ * the bare section-relative `.text` offset (the exact inverse of Mach-O's
+ * rebased `n_value`). `obj.dwarf.present == false` skips every DWARF step below,
+ * so a `DebugInfo::None` build's object is BYTE-IDENTICAL to before D1.4 (the
+ * FIXPOINT this sink must never disturb).
+ *
+ * @param ElfObject obj  the machine id + flags + section images + symbols + relocs + dwarf
+ * @return []byte  the ELF64 object file bytes
+ */
+pub fn emit_elf_object(obj: ElfObject) -> []byte {
+    let part = elf_partition_data_rel_ro(obj)
+    let has_drr = part.active
+    let has_dwarf = obj.dwarf.present
+    let syms = elf_build_symbols(part.symbols)
+    let strtab = build_elf_strtab(elf_sym_names(syms))
+    let secnames = elf_section_names(has_drr, has_dwarf)
+    let shstrtab = build_elf_strtab(secnames)
+    let relas = elf_build_relas(obj.relocs, part.symbols, syms)
+    let rodata_relas = elf_build_rodata_relas(part.drr_relocs, part.symbols, syms)
+    let dwarf_info_relas = elf_resolve_relas(obj.dwarf.info_relocs, part.symbols, syms)
+    let dwarf_line_relas = elf_resolve_relas(obj.dwarf.line_relocs, part.symbols, syms)
+    let first_global = elf_first_global_index(syms)
+    let lay = compute_elf_layout(obj, part.rodata.len to u32, part.drr.len to u32, syms.len to u32, relas.len to u32, rodata_relas.len to u32, strtab.bytes.len to u32, shstrtab.bytes.len to u32, first_global, secnames.len to u32, obj.dwarf.abbrev.len to u32, obj.dwarf.info_bytes.len to u32, obj.dwarf.line_bytes.len to u32, dwarf_info_relas.len to u32, dwarf_line_relas.len to u32)
+    mut b: []byte = teko::list::empty()
+    b = emit_elf_header(b, lay, obj.e_machine, obj.e_flags, lay.nsects)
+    b = append_bytes(b, obj.text)
+    b = pad_to_mult(b, 8 to u32)
+    b = append_bytes(b, part.rodata)
+    b = pad_to_mult(b, 8 to u32)
+    b = append_bytes(b, part.drr)
+    b = pad_to_mult(b, 8 to u32)
+    b = emit_elf_symtab(b, syms, strtab)
+    b = append_bytes(b, strtab.bytes)
+    b = append_bytes(b, shstrtab.bytes)
+    b = pad_to_mult(b, 8 to u32)
+    b = emit_elf_relas(b, relas)
+    if has_drr {
+        b = pad_to_mult(b, 8 to u32)
+        b = emit_elf_relas(b, rodata_relas)
+    }
+    if has_dwarf {
+        b = emit_elf_dwarf_body(b, obj.dwarf, dwarf_info_relas, dwarf_line_relas)
+    }
+    b = pad_to_mult(b, 8 to u32)
+    emit_elf_shdrs(b, lay, shstrtab.strx, has_drr, has_dwarf)
+}
+
+/**
+ * emit_elf_dwarf_body — append the DWARF section data and relocation tables (D1.4): the
+ * `.debug_abbrev`/`.debug_info`/`.debug_line` bytes, each 8-aligned, then the `.rela.debug_info`/
+ * `.rela.debug_line` `Elf64_Rela` tables, each 8-aligned. Extracted from `emit_elf_object` so its
+ * `has_dwarf` branch stays one line, per the section-appending pattern every other optional block
+ * in this writer already follows.
+ *
+ * @param []byte buf  the buffer to extend
+ * @param ElfDwarfSections dwarf  the sections to place (`present` already checked by the caller)
+ * @param []ElfRela info_relas  the resolved `.rela.debug_info` rows
+ * @param []ElfRela line_relas  the resolved `.rela.debug_line` rows
+ * @return []byte  `buf` followed by the DWARF section data and relocation tables
+ * @since 0.3.1.0
+ */
+fn emit_elf_dwarf_body(buf: []byte, dwarf: ElfDwarfSections, info_relas: []ElfRela, line_relas: []ElfRela) -> []byte {
+    mut b = pad_to_mult(buf, 8 to u32)
+    b = append_bytes(b, dwarf.abbrev)
+    b = pad_to_mult(b, 8 to u32)
+    b = append_bytes(b, dwarf.info_bytes)
+    b = pad_to_mult(b, 8 to u32)
+    b = append_bytes(b, dwarf.line_bytes)
+    b = pad_to_mult(b, 8 to u32)
+    b = emit_elf_relas(b, info_relas)
+    b = pad_to_mult(b, 8 to u32)
+    emit_elf_relas(b, line_relas)
+}
+
+/**
+ * x86_reloc_reqs — lower every `RelocX86` of `enc` to a neutral `ElfRelocReq`,
+ * mapping the x86 `kind` to its numeric `R_X86_64_*` type via `elf_reloc_type`
+ * (the ONLY x86 knowledge the adapter injects). The offset, target name, and
+ * base addend ride through unchanged; the shared writer folds a rodata target's
+ * `.rodata` offset onto the addend and resolves the name to a symbol index.
+ *
+ * @param EncodedModuleX86 enc  the x86 module (relocations)
+ * @return []ElfRelocReq  the neutral relocation requests, in emission order
+ */
+fn x86_reloc_reqs(enc: EncodedModuleX86) -> []ElfRelocReq {
+    mut out: []ElfRelocReq = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= enc.relocs.len { break }
+        let r = enc.relocs[i]
+        if r.sect == RelocSect::Text { out = teko::list::push(out, ElfRelocReq { offset = r.offset; sym = r.sym; rtype = elf_reloc_type(r.kind); addend = r.addend }) }
+        i++
+    }
+    out
+}
+
+/**
+ * x86_rodata_reloc_reqs — the `.rodata`-partition twin of `x86_reloc_reqs` (#594
+ * T-B5): lower every `RelocX86` whose patch site is INSIDE `.rodata`
+ * (`sect == Rodata`) to a neutral `ElfRelocReq` for `.rela.rodata`. Empty in every
+ * real compile until T-B6.
+ *
+ * @param EncodedModuleX86 enc  the x86 module (relocations, `.sect`-tagged)
+ * @return []ElfRelocReq  the `.rodata`-relative relocation requests, in order
+ */
+fn x86_rodata_reloc_reqs(enc: EncodedModuleX86) -> []ElfRelocReq {
+    mut out: []ElfRelocReq = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= enc.relocs.len { break }
+        let r = enc.relocs[i]
+        if r.sect == RelocSect::Rodata { out = teko::list::push(out, ElfRelocReq { offset = r.offset; sym = r.sym; rtype = elf_reloc_type(r.kind); addend = r.addend }) }
+        i++
+    }
+    out
+}
+
+/**
+ * emit_elf — the x86-64 ELF adapter (B1's entry, now delegating): map the
+ * `EncodedModuleX86` to a neutral `ElfObject` (`e_machine`=62, `e_flags`=0, each
+ * `RelocX86` lowered to an `ElfRelocReq` via `elf_reloc_type`, `dwarf` lowered to
+ * `ElfDwarfSections` via `elf_dwarf_of` under `R_X86_64_64`, D1.4) and hand it to
+ * the shared `emit_elf_object`. With `dwarf` omitted (`no_dwarf_sink()`, the
+ * `DebugInfo::None` default) the byte output is IDENTICAL to B1's pre-B2 writer
+ * (B1's goldens are the guardrail — they must stay byte-for-byte green), so the
+ * x86 differential is untouched. Data globals + `R_X86_64_64` data relocs are the
+ * `B1-globals` stop, raised earlier in `encode_module_x86`, so a B1 object never
+ * carries an `Abs64` relocation.
+ *
+ * @param EncodedModuleX86 enc  the section images + symbols + relocations
+ * @param DwarfSink dwarf  the D1.3 producer output to sink (default absent)
+ * @return []byte  the ELF64 object file bytes
+ */
+pub fn emit_elf(enc: EncodedModuleX86, dwarf: DwarfSink) -> []byte {
+    emit_elf_object(ElfObject {
+        e_machine = EM_X86_64
+        e_flags = 0 to u32
+        text = enc.text
+        rodata = enc.rodata
+        symbols = enc.symbols
+        relocs = x86_reloc_reqs(enc)
+        rodata_relocs = x86_rodata_reloc_reqs(enc)
+        dwarf = elf_dwarf_of(dwarf, R_X86_64_64)
+    })
+}
+
+/**
+ * EM_AARCH64 — the `Elf64_Ehdr.e_machine` value identifying an AArch64 (arm64)
+ * object (`/usr/include/elf.h`, value 183). The AArch64 LP64 ABI defines no
+ * processor-specific `e_flags` for an `ET_REL`, so `emit_elf_arm64` passes `0`
+ * exactly as the x86-64 adapter does; both halves were measured against a
+ * `clang --target=aarch64-linux-gnu` reference object, whose header reads
+ * `Machine: AArch64  Flags: 0x0`.
+ *
+ * @since 0.3.1
+ */
+const EM_AARCH64: u32 = 183 to u32
+
+/**
+ * R_AARCH64_ADR_PREL_PG_HI21 — the `Elf64_Rela` `r_info` type for the 21-bit
+ * page displacement an `ADRP` immediate carries, bits 32:12 of `Page(S+A) -
+ * Page(P)` (`/usr/include/elf.h`, value 275). The high half of every AArch64
+ * address pair, whether the target is a `.rodata` datum or a function.
+ *
+ * @since 0.3.1
+ */
+const R_AARCH64_ADR_PREL_PG_HI21: u32 = 275 to u32
+
+/**
+ * R_AARCH64_ADD_ABS_LO12_NC — the `Elf64_Rela` `r_info` type for the low-12
+ * immediate of an `ADD` (`/usr/include/elf.h`, value 277): bits 11:0 of `S+A`,
+ * UNSCALED and unchecked. The `LDST*_ABS_LO12_NC` family patches the same 12
+ * bits but SCALED by the access size, so this constant belongs to an `ADD`
+ * alone — `elf_arm64_reloc_kinds_are_add_form_only` pins that.
+ *
+ * @since 0.3.1
+ */
+const R_AARCH64_ADD_ABS_LO12_NC: u32 = 277 to u32
+
+/**
+ * R_AARCH64_CALL26 — the `Elf64_Rela` `r_info` type for the 26-bit
+ * PC-relative displacement of a `BL` (`/usr/include/elf.h`, value 283), bits
+ * 27:2 of `S+A-P`. The AArch64-ELF counterpart of Mach-O's
+ * `ARM64_RELOC_BRANCH26`, and like it, legal on a branch word only.
+ *
+ * @since 0.3.1
+ */
+const R_AARCH64_CALL26: u32 = 283 to u32

@@ -1,0 +1,285 @@
+/**
+ * el_drr_module — a hand-built `EncodedModuleX86` shaped like the self-host's
+ * `const []T`: a 16-byte `.rodata` whose first 8 bytes are a fat-slot pointer
+ * (offset 0, carrying an `Abs64`/`Rodata` relocation at the target leaf) and
+ * whose last 8 bytes are the leaf (`0x41` at offset 8), plus a `.text` `lea` that
+ * takes the fat slot's address (a `Pc32`/`Text` relocation at the slot symbol).
+ * The partition must move the fat slot to `.data.rel.ro` and leave the leaf in
+ * `.rodata`, re-pointing the `.text` reference at the `.data.rel.ro` section
+ * symbol and the data pointer at the `.rodata` one.
+ *
+ * @return EncodedModuleX86  the hand-built pointer-bearing-const module
+ */
+fn el_drr_module() -> EncodedModuleX86 {
+    let text = [0x48 to byte, 0x8D to byte, 0x05 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0xC3 to byte]
+    let rodata = [0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0x41 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte]
+    let slot = Symbol { name = "slot"; defined = true; sect = 2 to u8; offset = 0 to u32; local = true }
+    let leaf = Symbol { name = "leaf"; defined = true; sect = 2 to u8; offset = 8 to u32; local = true }
+    let main = Symbol { name = "main"; defined = true; sect = 1 to u8; offset = 0 to u32; local = false }
+    let text_ref = RelocX86 { offset = 3 to u32; sym = "slot"; kind = RelocKindX86::Pc32; addend = (0) - (4); sect = RelocSect::Text }
+    let data_ptr = RelocX86 { offset = 0 to u32; sym = "leaf"; kind = RelocKindX86::Abs64; addend = 0; sect = RelocSect::Rodata }
+    EncodedModuleX86 { text = text; rodata = rodata; symbols = [slot, leaf, main]; relocs = [text_ref, data_ptr] }
+}
+
+#test
+
+/**
+ * elf_partition_moves_pointer_const_to_data_rel_ro — the pointer-bearing-const
+ * module emits a `.data.rel.ro` section (index 7, non-empty) holding the moved
+ * fat slot; its `.rela.data.rel.ro` row is `R_X86_64_64`(1) against the `.rodata`
+ * section symbol (index 1) with addend 0 (the leaf rebased to `.rodata` offset 0);
+ * the `.text` `lea` relocation re-points at the `.data.rel.ro` section symbol
+ * (index 2) as `R_X86_64_PC32`(2) with the base addend −4; and the leaf byte
+ * `0x41` now sits at `.rodata` offset 0. This is the exact shape that made the
+ * self-host object refuse to link under PIE, proven fixed on emitted BYTES.
+ *
+ * @return void
+ */
+fn elf_partition_moves_pointer_const_to_data_rel_ro() {
+    let obj = emit_elf(el_drr_module(), no_dwarf_sink())
+    teko::assert::is_true(el_section_offset(obj, EL_SHNDX_DATA_REL_RO) > (0 to u64))
+    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_DATA_REL_RO, 0 to u64, EL_RELA_TYPE_FIELD) == (1 to u32))
+    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_DATA_REL_RO, 0 to u64, EL_RELA_SYM_FIELD) == (1 to u32))
+    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_DATA_REL_RO, 0 to u64, EL_RELA_ADDEND_FIELD) == (0 to u32))
+    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_TEXT, 0 to u64, EL_RELA_TYPE_FIELD) == (2 to u32))
+    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_TEXT, 0 to u64, EL_RELA_SYM_FIELD) == (2 to u32))
+    teko::assert::is_true(el_rela_field(obj, EL_SHNDX_RELA_TEXT, 0 to u64, EL_RELA_ADDEND_FIELD) == (0xFFFFFFFC to u32))
+    teko::assert::is_true(obj[el_section_offset(obj, 2 to u64)] == (0x41 to byte))
+}
+
+#test
+
+/**
+ * elf_symbol_index_finds_and_sentinels — `elf_symbol_index` returns a present
+ * symbol's index and, for an absent name, the one-past-end sentinel
+ * (`syms.len`), covering both arms of the lookup the relocation table relies on.
+ *
+ * @return void
+ */
+fn elf_symbol_index_finds_and_sentinels() {
+    let syms = [ElfSym { name = ""; info = 0 to u32; shndx = 0 to u32; value = 0 to u32 }, ElfSym { name = "main"; info = 0x12 to u32; shndx = 1 to u32; value = 0 to u32 }]
+    teko::assert::is_true(elf_symbol_index(syms, "main") == (1 to u32))
+    teko::assert::is_true(elf_symbol_index(syms, "absent") == (2 to u32))
+}
+
+/**
+ * EL_EHDR_MACHINE_FIELD — the `Elf64_Ehdr.e_machine` byte offset (16 bytes of
+ * `e_ident` then the 2-byte `e_type`), read as a little-endian u16.
+ */
+const EL_EHDR_MACHINE_FIELD: u64 = 18 to u64
+
+/**
+ * EL_EHDR_SHOFF_FIELD — the `Elf64_Ehdr.e_shoff` byte offset (the section-header
+ * table's file offset), read as a little-endian u32 since every object this
+ * writer emits is far below 4 GiB.
+ */
+const EL_EHDR_SHOFF_FIELD: u64 = 40 to u64
+
+/**
+ * EL_EHDR_FLAGS_FIELD — the `Elf64_Ehdr.e_flags` byte offset (the
+ * processor-specific ABI flags), read as a little-endian u32.
+ */
+const EL_EHDR_FLAGS_FIELD: u64 = 48 to u64
+
+/**
+ * EL_EHDR_SHNUM_FIELD — the `Elf64_Ehdr.e_shnum` byte offset (the section-header
+ * count), read as a little-endian u16 (D1.4: proves the DWARF sink appends
+ * exactly five headers).
+ */
+const EL_EHDR_SHNUM_FIELD: u64 = 60 to u64
+
+/**
+ * EL_SHDR_SIZE — the `Elf64_Shdr` stride in the section-header table.
+ */
+const EL_SHDR_SIZE: u64 = 64 to u64
+
+/**
+ * EL_SHDR_TYPE_FIELD — the `Elf64_Shdr.sh_type` offset within a section header
+ * (D1.4: distinguishes a `SHT_PROGBITS` DWARF section from a `SHT_RELA` table).
+ */
+const EL_SHDR_TYPE_FIELD: u64 = 4 to u64
+
+/**
+ * EL_SHDR_SIZE_FIELD — the `Elf64_Shdr.sh_size` offset within a section header
+ * (D1.4: proves a placed DWARF section's byte size matches its producer output).
+ */
+const EL_SHDR_SIZE_FIELD: u64 = 32 to u64
+
+/**
+ * EL_SHDR_INFO_FIELD — the `Elf64_Shdr.sh_info` offset within a section header
+ * (D1.4: a `.rela.debug_*` header's `sh_info` names the section it patches).
+ */
+const EL_SHDR_INFO_FIELD: u64 = 44 to u64
+
+/**
+ * EL_SHDR_OFFSET_FIELD — the `Elf64_Shdr.sh_offset` offset within a section
+ * header (the section image's file offset).
+ */
+const EL_SHDR_OFFSET_FIELD: u64 = 24 to u64
+
+/**
+ * EL_SHNDX_RELA_TEXT — `.rela.text`'s fixed section-header index in the writer's
+ * section order (`""`, `.text`, `.rodata`, `.symtab`, `.strtab`, `.shstrtab`,
+ * `.rela.text`).
+ */
+const EL_SHNDX_RELA_TEXT: u64 = 6 to u64
+
+/**
+ * EL_SHNDX_DATA_REL_RO — `.data.rel.ro`'s fixed section-header index: the
+ * seventh header the writer appends when a const carries a pointer relocation,
+ * holding the moved fat-slot bytes (`SHF_ALLOC|SHF_WRITE`).
+ */
+const EL_SHNDX_DATA_REL_RO: u64 = 7 to u64
+
+/**
+ * EL_SHNDX_RELA_DATA_REL_RO — `.rela.data.rel.ro`'s fixed section-header index:
+ * the eighth header the writer appends, carrying the moved consts' relocations.
+ * Naming the index rather than scanning for the first `SHT_RELA` keeps the two
+ * relocation tables distinguishable even when `.rela.text` is empty and the two
+ * share a file offset.
+ */
+const EL_SHNDX_RELA_DATA_REL_RO: u64 = 8 to u64
+
+/**
+ * EL_RELA_SIZE — the `Elf64_Rela` stride (`r_offset`, `r_info`, `r_addend`).
+ */
+const EL_RELA_SIZE: u64 = 24 to u64
+
+/**
+ * EL_RELA_TYPE_FIELD — the offset, within an `Elf64_Rela`, of `r_info`'s low
+ * 32 bits: the `R_<arch>_*` relocation type.
+ */
+const EL_RELA_TYPE_FIELD: u64 = 8 to u64
+
+/**
+ * EL_RELA_SYM_FIELD — the offset, within an `Elf64_Rela`, of `r_info`'s high
+ * 32 bits: the target's `.symtab` index.
+ */
+const EL_RELA_SYM_FIELD: u64 = 12 to u64
+
+/**
+ * EL_RELA_ADDEND_FIELD — the offset, within an `Elf64_Rela`, of `r_addend`'s low
+ * 32 bits (every addend these fixtures build is small and non-negative).
+ */
+const EL_RELA_ADDEND_FIELD: u64 = 16 to u64
+
+/**
+ * el_section_offset — the file offset of the section whose header sits at index
+ * `shndx`, read from the object's own section-header table so a fixture never
+ * hardcodes a layout-dependent constant.
+ *
+ * @param []byte obj  the emitted ELF object bytes
+ * @param u64 shndx  the section-header index
+ * @return u64  that section's `sh_offset`
+ */
+fn el_section_offset(obj: []byte, shndx: u64) -> u64 {
+    let shoff = el_u32_at(obj, EL_EHDR_SHOFF_FIELD) to u64
+    el_u32_at(obj, shoff + (shndx * EL_SHDR_SIZE) + EL_SHDR_OFFSET_FIELD) to u64
+}
+
+/**
+ * el_rela_field — one 32-bit field of row `n` of the relocation section at
+ * section-header index `shndx`, located through the object's own section-header
+ * table so the assertion survives any layout shift.
+ *
+ * @param []byte obj  the emitted ELF object bytes
+ * @param u64 shndx  the relocation section's header index
+ * @param u64 n  the zero-based row index within that table
+ * @param u64 field  the field's byte offset within the `Elf64_Rela`
+ * @return u32  the little-endian u32 at that field
+ */
+fn el_rela_field(obj: []byte, shndx: u64, n: u64, field: u64) -> u32 {
+    el_u32_at(obj, el_section_offset(obj, shndx) + (n * EL_RELA_SIZE) + field)
+}
+
+/**
+ * el_shdr_u32 — one 32-bit field of the section header at index `shndx`, located
+ * through the object's own section-header table (D1.4's structural-index twin of
+ * `el_section_offset`, generalized to any field instead of just `sh_offset`).
+ *
+ * @param []byte obj  the emitted ELF object bytes
+ * @param u64 shndx  the section-header index
+ * @param u64 field  the field's byte offset within the `Elf64_Shdr`
+ * @return u32  the little-endian u32 at that field
+ * @since 0.3.1.0
+ */
+fn el_shdr_u32(obj: []byte, shndx: u64, field: u64) -> u32 {
+    let shoff = el_u32_at(obj, EL_EHDR_SHOFF_FIELD) to u64
+    el_u32_at(obj, shoff + (shndx * EL_SHDR_SIZE) + field)
+}
+
+/**
+ * el_bytes_eq — whether `a` and `b` hold the same bytes in the same order (D1.4's
+ * byte-identity regression check: a `DebugInfo::None` build's object must be
+ * indistinguishable from one emitted before the DWARF sink existed).
+ *
+ * @param []byte a  the first buffer
+ * @param []byte b  the second buffer
+ * @return bool  true iff `a` and `b` are byte-for-byte identical
+ * @since 0.3.1.0
+ */
+fn el_bytes_eq(a: []byte, b: []byte) -> bool {
+    if a.len != b.len { return false }
+    mut i: u64 = 0
+    loop {
+        if i >= a.len { break }
+        if a[i] != b[i] { return false }
+        i++
+    }
+    true
+}
+
+/**
+ * el_arm64_gpr — a physical arm64 GPR operand with the given ISA id (the arm64
+ * fixture shorthand; the encoder runs post-regalloc, every operand physical).
+ *
+ * @param u32 id  the arm64 ISA register number
+ * @return MReg  the physical GPR operand
+ */
+fn el_arm64_gpr(id: u32) -> MReg {
+    preg(id, MRegClass::GPR)
+}
+
+/**
+ * el_arm64_func — a single-block, frameless arm64 `MFunc` with the given symbol
+ * and instruction stream.
+ *
+ * @param str sym  the function's symbol
+ * @param []MInst insts  the block's instructions
+ * @return MFunc  the assembled arm64 function
+ */
+fn el_arm64_func(sym: str, insts: []MInst) -> MFunc {
+    MFunc { symbol = sym; blocks = [MBlock { id = 0 to u32; params = teko::list::empty(); insts = insts }]; frame = teko::list::empty() }
+}
+
+/**
+ * el_arm64_reloc_module — a frameless arm64 `main` of `adrp x0,"s0"; add-lo
+ * x0,x0,"s0"; bl tk_exit` plus one `.rodata` datum `s0 = "A\0"`. Exercises all
+ * THREE relocation kinds a real arm64 compile produces — the address pair
+ * against a DEFINED `.rodata` local and the branch against an UNDEFINED extern —
+ * in one object.
+ *
+ * @return MModule  the one-function, one-rodata, three-reloc arm64 module
+ */
+fn el_arm64_reloc_module() -> MModule {
+    let insts = [adrp_inst(el_arm64_gpr(0), "s0", MRelocKind::PageHi), add_lo_inst(el_arm64_gpr(0), el_arm64_gpr(0), "s0", MRelocKind::PageLo), call_inst("tk_exit", teko::list::empty(), el_arm64_gpr(0), false, false)]
+    let rodata = [lir::LRodata { symbol = "s0"; bytes = [0x41 to byte, 0 to byte]; relocs = teko::list::empty() }]
+    MModule { funcs = [el_arm64_func("main", insts)]; rodata = rodata; globals = teko::list::empty(); layouts = teko::list::empty() }
+}
+
+/**
+ * el_arm64_object_of — encode `m` under `AAPCS64` and assemble its AArch64 ELF
+ * object, or an empty buffer on an unexpected honest-stop (so a golden field
+ * assertion fails loudly rather than aborting the run).
+ *
+ * @param MModule m  the arm64 module to encode + emit
+ * @return []byte  the AArch64 ELF object bytes, or empty on error
+ */
+fn el_arm64_object_of(m: MModule) -> []byte {
+    match encode_module(AAPCS64, m) {
+        EncodedModule as x => emit_elf_arm64(x, no_dwarf_sink())
+        error as e => teko::list::empty()
+    }
+}
+
+#test

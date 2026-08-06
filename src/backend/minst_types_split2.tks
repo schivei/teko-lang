@@ -1,0 +1,284 @@
+/**
+ * MCmp — an integer compare (CMP, `SUBS xzr, a, b`) that sets the condition
+ * flags without materializing a value; consumed by a fused `MBranchCond` or
+ * followed by an `MCSet` when the compare is used as a plain value.
+ *
+ * @since #383 A2-1
+ */
+pub type MCmp = struct {
+    /**
+     * wide — true for the 64-bit X-register form, false for the 32-bit
+     * W-register form.
+     */
+    wide: bool
+    /**
+     * a — the first compared register operand.
+     */
+    a: MReg
+    /**
+     * b — the second compared register operand.
+     */
+    b: MReg
+}
+
+/**
+ * MCmpImm — an integer compare against an immediate (CMP …, #imm), the
+ * cond-vs-0/cond-vs-const shape of a fused branch or a `MCSet` value.
+ *
+ * @since #383 A2-1
+ */
+pub type MCmpImm = struct {
+    /**
+     * wide — true for the 64-bit X-register form, false for the 32-bit
+     * W-register form.
+     */
+    wide: bool
+    /**
+     * a — the compared register operand.
+     */
+    a: MReg
+    /**
+     * imm — the immediate compared against.
+     */
+    imm: i64
+}
+
+/**
+ * MFCmp — a float compare (FCMP), the selection of an `LBin` float-compare
+ * case; consumed the same way as `MCmp` (fused branch or `MCSet`).
+ *
+ * @since #383 A2-1
+ */
+pub type MFCmp = struct {
+    /**
+     * dbl — true for the f64 (D-register) form, false for the f32
+     * (S-register) form.
+     */
+    dbl: bool
+    /**
+     * a — the first compared register operand.
+     */
+    a: MReg
+    /**
+     * b — the second compared register operand.
+     */
+    b: MReg
+}
+
+/**
+ * MCSet — `dst = (cond) ? 1 : 0` (CSET), materializing a preceding `MCmp`/
+ * `MFCmp` as a plain 0/1 value (an integer/float compare NOT fused into a
+ * branch).
+ *
+ * @since #383 A2-1
+ */
+pub type MCSet = struct {
+    /**
+     * wide — true for the 64-bit X-register form, false for the 32-bit
+     * W-register form.
+     */
+    wide: bool
+    /**
+     * dst — the destination register the 0/1 result is written to.
+     */
+    dst: MReg
+    /**
+     * cond — the AArch64 condition code tested against the flags a prior
+     * compare set.
+     */
+    cond: MCond
+}
+
+/**
+ * MMovZ — `dst = imm16 << shift` (MOVZ), one 16-bit lane of an integer
+ * literal's minimal materialization sequence (`materialize_int`, A2-2).
+ *
+ * @since #383 A2-1
+ */
+pub type MMovZ = struct {
+    /**
+     * wide — true for the 64-bit X-register form, false for the 32-bit
+     * W-register form.
+     */
+    wide: bool
+    /**
+     * dst — the destination register the lane is written to.
+     */
+    dst: MReg
+    /**
+     * imm16 — the 16-bit lane value.
+     */
+    imm16: u32
+    /**
+     * shift — the lane's bit position (0/16/32/48).
+     */
+    shift: u32
+}
+
+/**
+ * MMovK — `dst |= imm16 << shift`, keeping the other lanes (MOVK), a
+ * follow-up lane of `materialize_int` after the first `MMovZ`/`MMovN`.
+ *
+ * @since #383 A2-1
+ */
+pub type MMovK = struct {
+    /**
+     * wide — true for the 64-bit X-register form, false for the 32-bit
+     * W-register form.
+     */
+    wide: bool
+    /**
+     * dst — the destination register the lane is merged into.
+     */
+    dst: MReg
+    /**
+     * imm16 — the 16-bit lane value.
+     */
+    imm16: u32
+    /**
+     * shift — the lane's bit position (0/16/32/48).
+     */
+    shift: u32
+}
+
+/**
+ * MMovN — `dst = ~(imm16 << shift)` (MOVN), the inverted-literal
+ * materialization `materialize_int` picks when it is the denser encoding.
+ *
+ * @since #383 A2-1
+ */
+pub type MMovN = struct {
+    /**
+     * wide — true for the 64-bit X-register form, false for the 32-bit
+     * W-register form.
+     */
+    wide: bool
+    /**
+     * dst — the destination register the inverted lane is written to.
+     */
+    dst: MReg
+    /**
+     * imm16 — the 16-bit lane value (before inversion).
+     */
+    imm16: u32
+    /**
+     * shift — the lane's bit position (0/16/32/48).
+     */
+    shift: u32
+}
+
+/**
+ * MFMov — `dst = src` across the GPR/FPR boundary or between two FPRs
+ * (FMOV), the `LConstFloat` bit-materialization and FPR-FPR moves.
+ *
+ * @since #383 A2-1
+ */
+pub type MFMov = struct {
+    /**
+     * dbl — true for the f64 (D-register) form, false for the f32
+     * (S-register) form.
+     */
+    dbl: bool
+    /**
+     * dst — the destination register.
+     */
+    dst: MReg
+    /**
+     * src — the source register.
+     */
+    src: MReg
+}
+
+/**
+ * MMov — `dst = src` between two GPRs (ORR xzr-form reg move), the
+ * `Trunc` W-view write and ordinary/edge register moves.
+ *
+ * @since #383 A2-1
+ */
+pub type MMov = struct {
+    /**
+     * wide — true for the 64-bit X-register form, false for the 32-bit
+     * W-register form.
+     */
+    wide: bool
+    /**
+     * dst — the destination register.
+     */
+    dst: MReg
+    /**
+     * src — the source register.
+     */
+    src: MReg
+}
+
+/**
+ * MExt — a narrow sign/zero-extend (SXTB/SXTH/SXTW/UXTB/UXTH/UXTW), the
+ * selection of a narrow `SExt`/`ZExt`.
+ *
+ * @since #383 A2-1
+ */
+pub type MExt = struct {
+    /**
+     * op — which extend mnemonic to emit.
+     */
+    op: MExtOp
+    /**
+     * dst — the destination register the extended value is written to.
+     */
+    dst: MReg
+    /**
+     * a — the source register operand.
+     */
+    a: MReg
+}
+
+/**
+ * MCvt — an int/float conversion (SCVTF/UCVTF/FCVTZS/FCVTZU/FCVT), the
+ * selection of `IToF`/`FToI`/`FToF`.
+ *
+ * THE TWO WIDTH FLAGS ARE THE WHOLE POINT, and their absence was a measured
+ * defect of exactly the class this family keeps producing (0.3.1.0 degrau 29).
+ * Every AArch64 conversion word carries TWO independent width fields — `sf`
+ * (the GPR side: `W` or `X`) and `type` (the FPR side: `S` or `D`) — and for
+ * `FCVT` both are float widths naming the two ENDS of the convert. With no
+ * width on the instruction the encoder had to guess one, and a guess is a
+ * silently wrong VALUE: reading an `f32` operand with the `D` template decodes
+ * its 32 live bits as the low half of a double and truncates to nonsense, and
+ * an `FCVT` with no direction narrows where it should widen. The sibling
+ * `MCvtOpX86` encodes the same two facts in its mnemonic set
+ * (`Cvttsd2si`/`Cvttss2si`, `Cvtsd2ss`/`Cvtss2sd`); AArch64's five mnemonics
+ * are width-parametric instead, so the widths ride the struct.
+ *
+ * @since #383 A2-1
+ */
+pub type MCvt = struct {
+    /**
+     * op — which conversion mnemonic to emit.
+     */
+    op: MCvtOp
+    /**
+     * dst — the destination register the converted value is written to.
+     */
+    dst: MReg
+    /**
+     * a — the source register operand.
+     */
+    a: MReg
+    /**
+     * src_wide — whether the SOURCE operand is the 64-bit form of ITS OWN
+     * register file: `X` (not `W`) for a GPR source, `D` (not `S`) for an FPR
+     * source. The encoder routes it to `sf` or to `type` by which file `a`
+     * lives in, so one flag serves both `SCVTF`'s integer source and
+     * `FCVTZS`'s float source.
+     */
+    src_wide: bool
+    /**
+     * dst_wide — whether the DESTINATION operand is the 64-bit form of its own
+     * register file: `X` for a GPR destination, `D` for an FPR one. For `Fcvt`
+     * (both operands FPR) `src_wide` and `dst_wide` name the convert's two
+     * ends and MUST differ — an identity `FCVT` has no encoding, and the
+     * lowering never emits one (`is_same_width_float_cast` returns the operand
+     * unchanged).
+     */
+    dst_wide: bool
+}

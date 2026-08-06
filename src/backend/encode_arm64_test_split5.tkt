@@ -1,0 +1,297 @@
+/**
+ * reloc_records_carry_exact_offsets_kinds_syms — an `adrp; add-lo; movz; bl`
+ * function collects three relocations in order: `{0,"g",PageHi}`,
+ * `{4,"g",PageLo}`, `{12,"tk_exit",Call}` — the placeholder words stay
+ * (linker-patched), and every offset/symbol/kind is exact.
+ *
+ * @return void
+ */
+fn reloc_records_carry_exact_offsets_kinds_syms() {
+    let no_uses: []MReg = teko::list::empty()
+    let insts = i4(adrp_inst(p(1), "g", MRelocKind::PageHi), add_lo_inst(p(1), p(1), "g", MRelocKind::PageLo), movz_inst(true, p(0), 0, 0), call_inst("tk_exit", no_uses, p(0), false, false))
+    let e = ef(func_blocks(bl1(mblock(0 to u32, insts))))
+    teko::assert::is_true(e.words.len == 4)
+    teko::assert::is_true(e.words[0] == (0x90000001 to u32))
+    teko::assert::is_true(e.words[1] == (0x91000021 to u32))
+    teko::assert::is_true(e.words[3] == (0x94000000 to u32))
+    teko::assert::is_true(e.relocs.len == 3)
+    teko::assert::is_true(e.relocs[0].offset == (0 to u32))
+    teko::assert::is_true(e.relocs[0].sym == "g")
+    teko::assert::is_true(kind_name(e.relocs[0].kind) == "PageHi")
+    teko::assert::is_true(e.relocs[1].offset == (4 to u32))
+    teko::assert::is_true(kind_name(e.relocs[1].kind) == "PageLo")
+    teko::assert::is_true(e.relocs[2].offset == (12 to u32))
+    teko::assert::is_true(e.relocs[2].sym == "tk_exit")
+    teko::assert::is_true(kind_name(e.relocs[2].kind) == "Call")
+}
+
+#test
+
+/**
+ * a_non_relocating_word_owes_no_relocation_kind — the regression that kills the
+ * seed of the `ARM64_RELOC_BRANCH26`-on-`ADRP` bug at the type level: a word
+ * that references no symbol carries `reloc == null`, never a defaulted
+ * `MRelocKind`. `plain_word` used to fill `reloc_kind = MRelocKind::Call` on
+ * every position-independent instruction and rely on a separate `has_reloc`
+ * flag to make it inert — so "branch relocation" was the resting value of a
+ * field every instruction in the stream carried. There is now nothing to
+ * default: a movz, an add, a cmp and a ret all owe `null`, and only the three
+ * symbol-referencing forms owe a record at all.
+ *
+ * @return void
+ */
+fn a_non_relocating_word_owes_no_relocation_kind() {
+    teko::assert::is_true(enc(movz_inst(true, p(0), 1, 0)).reloc == null)
+    teko::assert::is_true(enc(alu_inst(MAluOp::Add, true, p(0), p(1), p(2))).reloc == null)
+    teko::assert::is_true(enc(cmp_inst(true, p(0), p(1))).reloc == null)
+    teko::assert::is_true(enc(RET_INST).reloc == null)
+    teko::assert::is_true(enc(branch_inst(0 to u32)).reloc == null)
+}
+
+#test
+
+/**
+ * a_relocating_word_owes_exactly_its_own_kind — the other half of the same
+ * regression: each of the three symbol-referencing words owes a relocation whose
+ * kind names the INSTRUCTION FIELD being patched, read straight off the nullable
+ * record instead of off a flag-plus-kind pair. `ADRP` owes `PageHi`, the
+ * completing `ADD` owes `PageLo`, and only `BL` owes `Call` — the pairing whose
+ * mispairing Apple's `ld` rejects.
+ *
+ * @return void
+ */
+fn a_relocating_word_owes_exactly_its_own_kind() {
+    let no_uses: []MReg = teko::list::empty()
+    teko::assert::is_true(reloc_shape(enc(adrp_inst(p(1), "g", MRelocKind::PageHi))) == "g/PageHi")
+    teko::assert::is_true(reloc_shape(enc(add_lo_inst(p(1), p(1), "g", MRelocKind::PageLo))) == "g/PageLo")
+    teko::assert::is_true(reloc_shape(enc(call_inst("tk_exit", no_uses, p(0), false, false))) == "tk_exit/Call")
+}
+
+#test
+
+/**
+ * branch_disp_field_far_honest_stops — a displacement past the imm26 field (both
+ * directions) and past the imm19 field (both directions) raises the
+ * `A4-farbranch` honest-stop, covering each range guard.
+ *
+ * @return void
+ */
+fn branch_disp_field_far_honest_stops() {
+    teko::assert::str_contains(field_stop(branch_disp_field(33554432, 0 to u32)), "A4-farbranch")
+    teko::assert::str_contains(field_stop(branch_disp_field(neg64(33554433), 0 to u32)), "A4-farbranch")
+    teko::assert::str_contains(field_stop(branch_disp_field(262144, 1 to u32)), "A4-farbranch")
+    teko::assert::str_contains(field_stop(branch_disp_field(neg64(262145), 1 to u32)), "A4-farbranch")
+}
+
+#test
+
+/**
+ * dangling_branch_target_honest_stops — a branch to a block id absent from the
+ * function raises the `A4-badblock` internal-invariant honest-stop.
+ *
+ * @return void
+ */
+fn dangling_branch_target_honest_stops() {
+    let e = func_blocks(bl1(mblock(0 to u32, i1(branch_inst(99 to u32)))))
+    teko::assert::str_contains(ef_stop(e), "A4-badblock")
+}
+
+#test
+
+/**
+ * encode_func_uses_the_big_sequence_for_a_big_alloca — a function whose frame
+ * outruns the STP field (a single 8192-byte alloca, `size=8208`) no longer
+ * honest-stops through `encode_func`: it emits the full big-frame prologue
+ * (`sub sp` chained over two words, since `8208 = (2<<12)+16`; individual
+ * `str x29`/`str x30`; a single chained-shift `add x29`), the epilogue mirror,
+ * and the `ret` — ten words total, every one bit-exact.
+ *
+ * @return void
+ */
+fn encode_func_uses_the_big_sequence_for_a_big_alloca() {
+    let frame = teko::list::push(l_frame(), alloca_slot(8192, 8))
+    let e = ef(func_of(frame, i1(RET_INST)))
+    teko::assert::is_true(e.words.len == 10)
+    teko::assert::is_true(e.words[0] == (0xD1400BFF to u32))
+    teko::assert::is_true(e.words[1] == (0xD10043FF to u32))
+    teko::assert::is_true(e.words[2] == (0xF91003FD to u32))
+    teko::assert::is_true(e.words[3] == (0xF91007FE to u32))
+    teko::assert::is_true(e.words[4] == (0x91400BFD to u32))
+    teko::assert::is_true(e.words[5] == (0xF95003FD to u32))
+    teko::assert::is_true(e.words[6] == (0xF95007FE to u32))
+    teko::assert::is_true(e.words[7] == (0x91400BFF to u32))
+    teko::assert::is_true(e.words[8] == (0x910043FF to u32))
+    teko::assert::is_true(e.words[9] == (0xD65F03C0 to u32))
+}
+
+/**
+ * bo — a `BlockOffset` fixture, the crafted offset-table shorthand.
+ *
+ * @param u32 id  the block id
+ * @param u32 word  the block's starting word index
+ * @return BlockOffset  the assembled offset entry
+ */
+fn bo(id: u32, word: u32) -> BlockOffset {
+    BlockOffset { id = id; word = word }
+}
+
+/**
+ * named_func — an `MFunc` with the given symbol and blocks and an empty frame,
+ * the `encode_module` multi-function fixture shorthand.
+ *
+ * @param str sym  the function's symbol
+ * @param []MBlock blocks  the function's blocks
+ * @return MFunc  the assembled function
+ */
+fn named_func(sym: str, blocks: []MBlock) -> MFunc {
+    MFunc { symbol = sym; blocks = blocks; frame = l_frame() }
+}
+
+/**
+ * one_block_func — an `MFunc` of one block (id 0) holding `insts`, for the
+ * `encode_module` fixtures.
+ *
+ * @param str sym  the function's symbol
+ * @param []MInst insts  the sole block's instructions
+ * @return MFunc  the assembled function
+ */
+fn one_block_func(sym: str, insts: []MInst) -> MFunc {
+    named_func(sym, bl1(mblock(0 to u32, insts)))
+}
+
+/**
+ * l_bytes — the empty `[]byte` list, typed for the sentinel module.
+ *
+ * @return []byte  an empty byte list
+ */
+fn l_bytes() -> []byte {
+    teko::list::empty()
+}
+
+/**
+ * l_syms — the empty `[]Symbol` list, typed for the sentinel module.
+ *
+ * @return []Symbol  an empty symbol list
+ */
+fn l_syms() -> []Symbol {
+    teko::list::empty()
+}
+
+/**
+ * bad_module — the sentinel `EncodedModule` returned when an `encode_module`
+ * fixture that must succeed unexpectedly honest-stops, so the assertion fails
+ * loudly rather than aborting.
+ *
+ * @return EncodedModule  the empty sentinel module
+ */
+fn bad_module() -> EncodedModule {
+    EncodedModule { text = l_bytes(); rodata = l_bytes(); symbols = l_syms(); relocs = l_relocs() }
+}
+
+/**
+ * em — encode module `m` through `encode_module`, unwrapping the success case
+ * and falling back to the sentinel on an unexpected honest-stop.
+ *
+ * @param MModule m  the module to encode
+ * @return EncodedModule  the encoded module, or the sentinel on error
+ */
+fn em(m: MModule) -> EncodedModule {
+    match encode_module(AAPCS64, m) {
+        EncodedModule as x => x
+        error as e => bad_module()
+    }
+}
+
+/**
+ * em_stop — the honest-stop message `encode_module` produces for `m`, or `<ok>`
+ * when it succeeds.
+ *
+ * @param MModule m  the module to encode
+ * @return str  the error message, or `<ok>`
+ */
+fn em_stop(m: MModule) -> str {
+    match encode_module(AAPCS64, m) {
+        EncodedModule as x => "<ok>"
+        error as e => e.message
+    }
+}
+
+/**
+ * rodata_of — a one-entry rodata table with the given symbol and bytes, the
+ * `__const` fixture shorthand.
+ *
+ * @param str sym  the rodata symbol
+ * @param []byte bs  the rodata bytes
+ * @return []lir::LRodata  the one-entry rodata table
+ */
+fn rodata_of(sym: str, bs: []byte) -> []lir::LRodata {
+    teko::list::push(teko::list::empty(), lir::LRodata { symbol = sym; bytes = bs; relocs = teko::list::empty() })
+}
+
+/**
+ * module_with_rodata — an `MModule` with the given functions and rodata table
+ * (no globals/layouts), for the `__const` encode tests.
+ *
+ * @param []MFunc funcs  the module's functions
+ * @param []lir::LRodata rodata  the rodata table
+ * @return MModule  the assembled module
+ */
+fn module_with_rodata(funcs: []MFunc, rodata: []lir::LRodata) -> MModule {
+    MModule { funcs = funcs; rodata = rodata; globals = teko::list::empty(); layouts = teko::list::empty() }
+}
+
+#test
+
+/**
+ * module_interns_rodata_into_const — a rodata entry becomes `__const` bytes plus
+ * a defined, FILE-LOCAL section-2 symbol at its offset; a second entry is
+ * placed after the first, padded to the next 8-byte boundary, its symbol offset
+ * reflecting the aligned end of the first entry. The two file-local rodata
+ * symbols sort BEFORE the globally-visible function symbol (`s0`,`s1`,`main` —
+ * the local-then-global order `LC_DYSYMTAB` needs).
+ *
+ * @return void
+ */
+fn module_interns_rodata_into_const() {
+    let r0 = teko::list::push(teko::list::push(teko::list::push(l_bytes(), 0x68 to byte), 0x69 to byte), 0 to byte)
+    let r1 = teko::list::push(teko::list::push(l_bytes(), 0x41 to byte), 0 to byte)
+    let rodata = teko::list::push(rodata_of("s0", r0), lir::LRodata { symbol = "s1"; bytes = r1; relocs = teko::list::empty() })
+    let f = one_block_func("main", i1(RET_INST))
+    let funcs = teko::list::push(teko::list::empty(), f)
+    let e = em(module_with_rodata(funcs, rodata))
+    teko::assert::is_true(e.rodata.len == (10 to u64))
+    teko::assert::is_true(e.rodata[0] == (0x68 to byte))
+    teko::assert::is_true(e.symbols.len == 3)
+    teko::assert::is_true(e.symbols[0].name == "s0")
+    teko::assert::is_true(e.symbols[0].defined)
+    teko::assert::is_true(e.symbols[0].local)
+    teko::assert::is_true(e.symbols[0].sect == (2 to u8))
+    teko::assert::is_true(e.symbols[0].offset == (0 to u32))
+    teko::assert::is_true(e.symbols[1].name == "s1")
+    teko::assert::is_true(e.symbols[1].local)
+    teko::assert::is_true(e.symbols[1].offset == (8 to u32))
+    teko::assert::is_true(e.symbols[2].name == "main")
+    teko::assert::is_true(e.symbols[2].defined)
+    teko::assert::is_false(e.symbols[2].local)
+    teko::assert::is_true(e.symbols[2].sect == (1 to u8))
+}
+
+/**
+ * n_zero_bytes — `n` zero bytes, the odd-length rodata-entry fixture shorthand
+ * (`enc_rodata_reloc_offset_survives_odd_length_neighbors`).
+ *
+ * @param u64 n  the buffer length
+ * @return []byte  `n` zero bytes
+ */
+fn n_zero_bytes(n: u64) -> []byte {
+    mut out: []byte = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= n { break }
+        out = teko::list::push(out, 0 to byte)
+        i++
+    }
+    out
+}
+
+#test

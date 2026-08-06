@@ -1,0 +1,85 @@
+/**
+ * emit_spill_store — the spill-store sequence for the value already in scratch
+ * `dsv`, by `dsv`'s register file: the two-instruction GPR pair
+ * (`emit_gpr_store`, which needs the distinct address scratch `asv`) or the
+ * single-instruction FPR `MFSpill` (which ignores `asv`).
+ *
+ * @param MReg dsv  the scratch holding the value (its `reg_class` picks the form)
+ * @param MReg asv  a distinct GPR scratch for the GPR path's slot address
+ * @param u64 slot  the absolute frame slot
+ * @return []MInst  the store sequence
+ */
+fn emit_spill_store(dsv: MReg, asv: MReg, slot: u64) -> []MInst {
+    if dsv.reg_class == MRegClass::FPR { return minst_single(fspill_inst(dsv, slot, false)) }
+    emit_gpr_store(dsv, asv, slot)
+}
+
+/**
+ * add_use_subst — the substitution table extended for one instruction operand
+ * use `u`: a physical pin or an already-mapped id is left as-is; an `InReg`
+ * use maps to its color; a `Spilled` use draws the next reload scratch
+ * (`nth`) OF ITS OWN REGISTER FILE, whose reload is appended to `reloads`
+ * (0.3.1.0 degrau 29: an FPR spill draws an FPR scratch and reloads with one
+ * `MFSpill`, an integer one keeps the GPR `frame_addr`+`ldr` pair). Returns the
+ * grown table, the grown reloads, and the advanced scratch counter via `UseAcc`.
+ *
+ * @param AbiDescriptor abi  the register file (for spill scratch)
+ * @param ScanResult sr  the allocation
+ * @param MReg u  the use operand
+ * @param u64 frame_base  the first spill frame slot index
+ * @param UseAcc acc  the table/reloads/counter so far
+ * @return UseAcc  the updated accumulator
+ */
+fn add_use_subst(abi: AbiDescriptor, sr: ScanResult, u: MReg, frame_base: u64, acc: UseAcc) -> UseAcc {
+    if u.is_phys { return acc }
+    if subst_has(acc.table, u.id) { return acc }
+    let la = assign_lookup(sr, u.id)
+    if !la.found { return acc }
+    if la.is_spill {
+        let sv = spill_scratch(abi, u.reg_class, acc.nth)
+        let reloads2 = minst_cat(acc.reloads, emit_spill_reload(sv, frame_base + la.slot))
+        let table2 = teko::list::push(acc.table, SubstEntry { vid = u.id; to = sv })
+        return UseAcc { table = table2; reloads = reloads2; nth = acc.nth + 1 }
+    }
+    let table3 = teko::list::push(acc.table, SubstEntry { vid = u.id; to = preg(la.phys, u.reg_class) })
+    UseAcc { table = table3; reloads = acc.reloads; nth = acc.nth }
+}
+
+/**
+ * UseAcc — the fold state while substituting an instruction's use operands:
+ * the substitution table, the accumulated reload sequence, and the next
+ * reload-scratch index.
+ *
+ * @since #384 A3-4
+ */
+type UseAcc = struct {
+    /**
+     * table — the substitution entries so far.
+     */
+    table: []SubstEntry
+    /**
+     * reloads — the reload instructions so far (emitted before the inst).
+     */
+    reloads: []MInst
+    /**
+     * nth — the next spill-reload scratch index.
+     */
+    nth: u32
+}
+
+/**
+ * rewrite_inst — expand one instruction into its final physical sequence: the
+ * reloads for its spilled uses, the register-substituted instruction, and the
+ * store for a spilled def (§3.4). Non-spilled operands map to their `InReg`
+ * physreg; physical pins pass through. A spilled value of EITHER register file
+ * lowers (0.3.1.0 degrau 29): the scratch is drawn from the value's own class and
+ * the sequence shape comes from `emit_spill_reload`/`emit_spill_store`. The GPR
+ * path's second (address) scratch is still a GPR, and it is unused on the FPR
+ * path, which addresses the slot from SP directly.
+ *
+ * @param AbiDescriptor abi  the register file (for spill scratch)
+ * @param ScanResult sr  the allocation
+ * @param MInst inst  the instruction to rewrite
+ * @param u64 frame_base  the first spill frame slot index
+ * @return []MInst  the reloads ++ the rewritten instruction ++ the store
+ */

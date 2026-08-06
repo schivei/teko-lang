@@ -1,0 +1,282 @@
+use teko::lir
+
+/**
+ * el_p — a physical GPR operand with the given x86 ISA id (the ELF-writer
+ * fixture shorthand; B1 runs post-regalloc, every operand physical).
+ *
+ * @param u32 id  the x86 ISA register number
+ * @return MReg  the physical GPR operand
+ */
+fn el_p(id: u32) -> MReg {
+    preg(id, MRegClass::GPR)
+}
+
+/**
+ * el_block — a machine block (no params) with the given id and stream.
+ *
+ * @param u32 id  the block id
+ * @param []MInstX86 insts  the block's instructions
+ * @return MBlockX86  the built block
+ */
+fn el_block(id: u32, insts: []MInstX86) -> MBlockX86 {
+    MBlockX86 { id = id; params = teko::list::empty(); insts = insts }
+}
+
+/**
+ * el_1block_func — a single-block `MFuncX86` with the given symbol, stream, and
+ * frame.
+ *
+ * @param str sym  the function's symbol
+ * @param []MInstX86 insts  the block's instructions
+ * @param []lir::LAlloca frame  the function's frame slots
+ * @return MFuncX86  the built function
+ */
+fn el_1block_func(sym: str, insts: []MInstX86, frame: []lir::LAlloca) -> MFuncX86 {
+    MFuncX86 { symbol = sym; blocks = [el_block(0 to u32, insts)]; frame = frame }
+}
+
+/**
+ * el_no_frame — the empty `[]lir::LAlloca` frame (a frameless function).
+ *
+ * @return []lir::LAlloca  an empty frame slot list
+ */
+fn el_no_frame() -> []lir::LAlloca {
+    teko::list::empty()
+}
+
+/**
+ * el_object_of — encode `m` under `SYSV64` and assemble its ELF object, or an
+ * empty buffer on an unexpected honest-stop (so a golden length/byte assertion
+ * fails loudly rather than aborting the run).
+ *
+ * @param MModuleX86 m  the module to encode + emit
+ * @return []byte  the ELF object bytes, or empty on error
+ */
+fn el_object_of(m: MModuleX86) -> []byte {
+    match encode_module_x86(SYSV64, m) {
+        EncodedModuleX86 as x => emit_elf(x, no_dwarf_sink())
+        error as e => teko::list::empty()
+    }
+}
+
+/**
+ * el_u32_at — the little-endian u32 read from `bytes` at byte index `i` (the
+ * golden-object field reader).
+ *
+ * @param []byte bytes  the object bytes
+ * @param u64 i  the field's byte offset
+ * @return u32  the little-endian u32 at `i`
+ */
+fn el_u32_at(bytes: []byte, i: u64) -> u32 {
+    (bytes[i] to u32) | ((bytes[i + (1 to u64)] to u32) << (8 to u32)) | ((bytes[i + (2 to u64)] to u32) << (16 to u32)) | ((bytes[i + (3 to u64)] to u32) << (24 to u32))
+}
+
+/**
+ * el_u16_at — the little-endian u16 read from `bytes` at byte index `i` (the
+ * `Elf64_Ehdr`/`Elf64_Sym` 16-bit-field reader).
+ *
+ * @param []byte bytes  the object bytes
+ * @param u64 i  the field's byte offset
+ * @return u32  the little-endian u16 at `i`
+ */
+fn el_u16_at(bytes: []byte, i: u64) -> u32 {
+    (bytes[i] to u32) | ((bytes[i + (1 to u64)] to u32) << (8 to u32))
+}
+
+/**
+ * el_rodata_module — a frameless `main` of `lea rax, [rip+"s0"]` (a `Pc32`
+ * rodata reference) then `ret`, plus one rodata datum `s0 = "A\0"`. Exercises the
+ * `.rodata` `STT_SECTION` symbol + the rodata-target relocation the writer folds
+ * onto the section symbol.
+ *
+ * @return MModuleX86  the one-function, one-rodata module
+ */
+fn el_rodata_module() -> MModuleX86 {
+    let insts = [lea_rip_x86(el_p(0), "s0", RelocKindX86::Pc32), ret_x86()]
+    let f = el_1block_func("main", insts, el_no_frame())
+    let rbytes = [0x41 to byte, 0 to byte]
+    let rodata = [lir::LRodata { symbol = "s0"; bytes = rbytes; relocs = teko::list::empty() }]
+    MModuleX86 { funcs = [f]; rodata = rodata; globals = teko::list::empty(); layouts = teko::list::empty() }
+}
+
+#test
+
+/**
+ * elf_rodata_uses_section_symbol_and_pc32 — the rodata object's `.symtab` (at 80)
+ * carries the `.rodata` `STT_SECTION` local symbol (`st_info = 0x03`,
+ * `st_shndx = 2`) BEFORE the global `main`, so `.symtab.sh_info` (first-global) is
+ * 2; the single `Pc32` relocation (at 216) is `R_X86_64_PC32`(2) against symbol
+ * index 1 (the section symbol, NOT a per-string symbol) with addend −4 — the ELF
+ * idiom that dodges per-string symbols and cross-object name clashes.
+ *
+ * @return void
+ */
+fn elf_rodata_uses_section_symbol_and_pc32() {
+    let obj = el_object_of(el_rodata_module())
+    teko::assert::is_true(obj[108] == (0x03 to byte))
+    teko::assert::is_true(el_u16_at(obj, 110 to u64) == (2 to u32))
+    teko::assert::is_true(obj[132] == (0x12 to byte))
+    teko::assert::is_true(el_u16_at(obj, 134 to u64) == (1 to u32))
+    teko::assert::is_true(el_u32_at(obj, 456 to u64) == (80 to u32))
+    teko::assert::is_true(el_u32_at(obj, 476 to u64) == (2 to u32))
+    teko::assert::is_true(el_u32_at(obj, 216 to u64) == (3 to u32))
+    teko::assert::is_true(el_u32_at(obj, 224 to u64) == (2 to u32))
+    teko::assert::is_true(el_u32_at(obj, 228 to u64) == (1 to u32))
+    teko::assert::is_true(el_u32_at(obj, 232 to u64) == (0xFFFFFFFC to u32))
+}
+
+/**
+ * el_rodata_off_module — a hand-built `EncodedModuleX86` whose rodata datum `s1`
+ * sits at `.rodata` byte offset 8, with a `Pc32` relocation targeting it. Pins
+ * the writer's addend folding — the section-symbol relocation's addend becomes
+ * `base(−4) + rodata_offset(8) = 4` — without routing through isel.
+ *
+ * @return EncodedModuleX86  the hand-built module
+ */
+fn el_rodata_off_module() -> EncodedModuleX86 {
+    let text = [0x48 to byte, 0x8D to byte, 0x05 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0xC3 to byte]
+    let rodata = [0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0x41 to byte, 0 to byte]
+    let s1 = Symbol { name = "s1"; defined = true; sect = 2 to u8; offset = 8 to u32; local = true }
+    let main = Symbol { name = "main"; defined = true; sect = 1 to u8; offset = 0 to u32; local = false }
+    let reloc = RelocX86 { offset = 3 to u32; sym = "s1"; kind = RelocKindX86::Pc32; addend = (0) - (4); sect = RelocSect::Text }
+    EncodedModuleX86 { text = text; rodata = rodata; symbols = [s1, main]; relocs = [reloc] }
+}
+
+#test
+
+/**
+ * elf_folds_rodata_offset_into_addend — the hand-built offset-8 rodata module's
+ * lone relocation (at file offset 224 — its 10-byte `.rodata` pushes `.symtab`/
+ * `.strtab`/`.rela.text` past the exit-module positions) has `r_offset = 3`, is
+ * `R_X86_64_PC32`(2) against the section symbol (index 1), and carries the folded
+ * addend `−4 + 8 = 4`, proving the writer adds the datum's `.rodata` offset onto
+ * the base addend so `S + A − P` lands on `s1`.
+ *
+ * @return void
+ */
+fn elf_folds_rodata_offset_into_addend() {
+    let obj = emit_elf(el_rodata_off_module(), no_dwarf_sink())
+    teko::assert::is_true(el_u32_at(obj, 224 to u64) == (3 to u32))
+    teko::assert::is_true(el_u32_at(obj, 232 to u64) == (2 to u32))
+    teko::assert::is_true(el_u32_at(obj, 236 to u64) == (1 to u32))
+    teko::assert::is_true(el_u32_at(obj, 240 to u64) == (4 to u32))
+    teko::assert::is_true(el_u32_at(obj, 244 to u64) == (0 to u32))
+}
+
+/**
+ * el_dwarf_sink_of — a one-function `DwarfSink` (D1.4 fixture) anchored at `sym`: a compile unit
+ * with a single `DW_TAG_subprogram` DIE and a one-row line program, both targeting `sym`'s address.
+ * Built through the SAME `build_dwarf_sink` the real `--debug=lines` build glue calls, so this
+ * fixture exercises the exact producer → sink path, not a hand-faked shortcut.
+ *
+ * @param str sym  the `.text` symbol both the CU and the line program anchor to
+ * @param u64 code_size  the function's (and so the unit's) code size
+ * @return DwarfSink  the assembled, `present = true` sink
+ */
+fn el_dwarf_sink_of(sym: str, code_size: u64) -> DwarfSink {
+    let sub = DwSubprogram { name = "main"; decl_file = 1; decl_line = 10 to u32; symbol = sym; code_size = code_size }
+    let cu = DwCompileUnit {
+        producer = "teko test"; language = 0x0c to u32; name = "t.tks"; comp_dir = "."
+        text_symbol = sym; text_size = code_size; subprograms = [sub]
+    }
+    let rows = [DwLineRow { pc_advance = 0 to u64; line = 10 to u32; file = 1 }]
+    build_dwarf_sink(cu, ["t.tks"], rows, code_size)
+}
+
+#test
+
+/**
+ * elf_dwarf_absent_is_byte_identical — omitting `dwarf` and passing `no_dwarf_sink()` explicitly
+ * produce the SAME object, byte for byte: the `DebugInfo::None` default (§ D1.4's non-negotiable —
+ * a build with no debug axis stays byte-identical to before the sink existed).
+ *
+ * @return void
+ */
+fn elf_dwarf_absent_is_byte_identical() {
+    let a = emit_elf(el_rodata_off_module(), no_dwarf_sink())
+    let b = emit_elf(el_rodata_off_module(), no_dwarf_sink())
+    teko::assert::eq_u64(a.len, b.len)
+    teko::assert::is_true(el_bytes_eq(a, b))
+    teko::assert::eq_u64(el_u16_at(a, EL_EHDR_SHNUM_FIELD) to u64, 7 to u64)
+}
+
+#test
+
+/**
+ * elf_dwarf_present_appends_five_progbits_and_rela_headers — a `--debug=lines`-shaped object
+ * (D1.4) grows `e_shnum` from 7 to 12 (the five DWARF headers, appended after `.rela.text` since
+ * this fixture carries no `.data.rel.ro`): indices 7/8/9 are `.debug_abbrev`/`.debug_info`/
+ * `.debug_line`, all `SHT_PROGBITS`(1), sized exactly like the D1.3 producers' own output
+ * (`debug_abbrev()`'s length, and the `DwarfSink`'s `info`/`line` byte counts), and indices 10/11
+ * are `.rela.debug_info`/`.rela.debug_line`, `SHT_RELA`(4), with `sh_info` naming the section EACH
+ * patches (`.debug_info`(8) / `.debug_line`(9)) — proving the placement, not just the presence.
+ *
+ * @return void
+ */
+fn elf_dwarf_present_appends_five_progbits_and_rela_headers() {
+    let sink = el_dwarf_sink_of("main", 8 to u64)
+    let obj = emit_elf(el_rodata_off_module(), sink)
+    teko::assert::eq_u64(el_u16_at(obj, EL_EHDR_SHNUM_FIELD) to u64, 12 to u64)
+    teko::assert::eq_u64(el_shdr_u32(obj, 7 to u64, EL_SHDR_TYPE_FIELD) to u64, 1 to u64)
+    teko::assert::eq_u64(el_shdr_u32(obj, 8 to u64, EL_SHDR_TYPE_FIELD) to u64, 1 to u64)
+    teko::assert::eq_u64(el_shdr_u32(obj, 9 to u64, EL_SHDR_TYPE_FIELD) to u64, 1 to u64)
+    teko::assert::eq_u64(el_shdr_u32(obj, 10 to u64, EL_SHDR_TYPE_FIELD) to u64, 4 to u64)
+    teko::assert::eq_u64(el_shdr_u32(obj, 11 to u64, EL_SHDR_TYPE_FIELD) to u64, 4 to u64)
+    teko::assert::eq_u64(el_shdr_u32(obj, 7 to u64, EL_SHDR_SIZE_FIELD) to u64, debug_abbrev().len)
+    teko::assert::eq_u64(el_shdr_u32(obj, 8 to u64, EL_SHDR_SIZE_FIELD) to u64, sink.info.bytes.len)
+    teko::assert::eq_u64(el_shdr_u32(obj, 9 to u64, EL_SHDR_SIZE_FIELD) to u64, sink.line.bytes.len)
+    teko::assert::eq_u64(el_shdr_u32(obj, 10 to u64, EL_SHDR_INFO_FIELD) to u64, 8 to u64)
+    teko::assert::eq_u64(el_shdr_u32(obj, 11 to u64, EL_SHDR_INFO_FIELD) to u64, 9 to u64)
+}
+
+#test
+
+/**
+ * elf_dwarf_relas_resolve_against_defined_function_symbol — the `.debug_info` low_pc relocation
+ * (D1.4) is `R_X86_64_64`(1) against `main`'s `.symtab` index (2 — after the null and `.rodata`
+ * section-symbol slots this fixture's rodata datum forces), addend 0: the DWARF reloc resolver
+ * (`elf_dwarf_of`/`elf_resolve_relas`) reaches the SAME name-indexed symbol table `.rela.text`
+ * does, not a separate/parallel one.
+ *
+ * @return void
+ */
+fn elf_dwarf_relas_resolve_against_defined_function_symbol() {
+    let obj = emit_elf(el_rodata_off_module(), el_dwarf_sink_of("main", 8 to u64))
+    teko::assert::eq_u64(el_rela_field(obj, 10 to u64, 0 to u64, EL_RELA_TYPE_FIELD) to u64, 1 to u64)
+    teko::assert::eq_u64(el_rela_field(obj, 10 to u64, 0 to u64, EL_RELA_SYM_FIELD) to u64, 2 to u64)
+    teko::assert::eq_u64(el_rela_field(obj, 10 to u64, 0 to u64, EL_RELA_ADDEND_FIELD) to u64, 0 to u64)
+}
+
+/**
+ * el_abs64_module — a hand-built `EncodedModuleX86` with an `Abs64` relocation
+ * targeting an undefined data global. `encode_module_x86` never produces this (it
+ * raises `B1-globals` first, so a `lea` only ever carries `Pc32`/`Plt32`), but
+ * feeding it directly documents and pins the future `R_X86_64_64` data-reloc
+ * encoding the writer will emit.
+ *
+ * @return EncodedModuleX86  the hand-built Abs64 module
+ */
+fn el_abs64_module() -> EncodedModuleX86 {
+    let text = [0x48 to byte, 0xB8 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0xC3 to byte]
+    let main = Symbol { name = "main"; defined = true; sect = 1 to u8; offset = 0 to u32; local = false }
+    let gv = Symbol { name = "gv"; defined = false; sect = 0 to u8; offset = 0 to u32; local = false }
+    let reloc = RelocX86 { offset = 2 to u32; sym = "gv"; kind = RelocKindX86::Abs64; addend = 0; sect = RelocSect::Text }
+    EncodedModuleX86 { text = text; rodata = teko::list::empty(); symbols = [main, gv]; relocs = [reloc] }
+}
+
+#test
+
+/**
+ * elf_abs64_emits_r_x86_64_64 — the hand-built `Abs64` module's relocation (at
+ * 216) is `R_X86_64_64`(1) against the undefined `gv` (symbol index 2) with
+ * addend 0: the writer's correct future data-global encoding, reachable only by a
+ * hand-built input since `encode_module_x86` honest-stops on globals first.
+ *
+ * @return void
+ */
+fn elf_abs64_emits_r_x86_64_64() {
+    let obj = emit_elf(el_abs64_module(), no_dwarf_sink())
+    teko::assert::is_true(el_u32_at(obj, 224 to u64) == (1 to u32))
+    teko::assert::is_true(el_u32_at(obj, 228 to u64) == (2 to u32))
+    teko::assert::is_true(el_u32_at(obj, 232 to u64) == (0 to u32))
+}

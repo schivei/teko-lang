@@ -1,0 +1,221 @@
+/**
+ * ex_func_call_with_no_return_stays_frameless_even_when_named_differently —
+ * `needs_call_align_x86` is NOT keyed on the symbol `"main"`: any function whose only call
+ * never returns stays byte-identical to the pre-degrau-19 frameless encoding, confirming the
+ * fix is scoped to the call-AND-return axis alone (0.3.1.0 degrau 19).
+ *
+ * @return void
+ */
+fn ex_func_call_with_no_return_stays_frameless_even_when_named_differently() {
+    let f = fx_1block_func("teko_main", fx_i1(call_x86("tk_exit", teko::list::empty(), ex_p(0), false, false)), fx_no_frame())
+    let ef = fx_encode_func(f)
+    teko::assert::is_true(teko::crypto::to_hex(ef.bytes) == "e800000000")
+}
+
+#test
+
+/**
+ * ex_func_rip_lea_reloc — a `lea rax,[rip+gv]` then `ret` encodes to the
+ * zeroed-disp `lea` (`48 8D 05 00000000`) plus the bare `ret`, carrying one
+ * `Pc32` relocation at disp32 offset 3, addend −4.
+ *
+ * @return void
+ */
+fn ex_func_rip_lea_reloc() {
+    let f = fx_1block_func("main", fx_i2(lea_rip_x86(ex_p(0), "gv", RelocKindX86::Pc32), ret_x86()), fx_no_frame())
+    let ef = fx_encode_func(f)
+    teko::assert::is_true(teko::crypto::to_hex(ef.bytes) == "488d0500000000c3")
+    teko::assert::is_true(ef.relocs.len == 1)
+    teko::assert::is_true(ef.relocs[0].offset == (3 to u32))
+    teko::assert::is_true(ef.relocs[0].sym == "gv")
+    teko::assert::is_true(fx_reloc_kind_name(ef.relocs[0].kind) == "pc32")
+    teko::assert::is_true(ef.relocs[0].addend == ((0) - (4)))
+}
+
+#test
+
+/**
+ * ex_func_branch_to_missing_block_honest_stops — a `jmp` to a block id absent
+ * from the function raises the `B1-badblock` internal-invariant honest-stop
+ * during the patch pass.
+ *
+ * @return void
+ */
+fn ex_func_branch_to_missing_block_honest_stops() {
+    let f = fx_1block_func("g", fx_i1(jmp_x86(99 to u32)), fx_no_frame())
+    teko::assert::str_contains(fx_func_stop(f), "B1-badblock")
+}
+
+#test
+
+/**
+ * ex_func_bigframe_propagates — a function whose alloca forces a frame past the
+ * imm32 `sub rsp` field propagates the `B1-bigframe` stop from `emit_prologue_x86`
+ * out of `encode_func_x86`.
+ *
+ * @return void
+ */
+fn ex_func_bigframe_propagates() {
+    let f = fx_1block_func("g", fx_i1(ret_x86()), fx_alloca_frame(2147483648 to u32, 8 to u32))
+    teko::assert::str_contains(fx_func_stop(f), "B1-bigframe")
+}
+
+/**
+ * fx_patch_stop — the honest-stop message `patch_branches_x86` raises for a
+ * crafted fixup/offset pair, or `<ok>` when it patches (the direct rel32-range
+ * probe).
+ *
+ * @param []byte raw  the byte image to patch
+ * @param []BranchFixupX86 fixups  the pending fixups
+ * @param []BlockOffsetX86 offsets  the block byte offsets
+ * @return str  the error message, or `<ok>`
+ */
+fn fx_patch_stop(raw: []byte, fixups: []BranchFixupX86, offsets: []BlockOffsetX86) -> str {
+    match patch_branches_x86(raw, fixups, offsets) {
+        []byte as b => "<ok>"
+        error as e => e.message
+    }
+}
+
+#test
+
+/**
+ * ex_patch_far_displacement_honest_stops — a crafted branch whose target byte
+ * offset lands the rel32 displacement just past the signed 32-bit boundary
+ * (2^31) raises the `B1-farbranch` internal-invariant stop, the boundary case a
+ * real (tiny) function never reaches.
+ *
+ * @return void
+ */
+fn ex_patch_far_displacement_honest_stops() {
+    let raw = teko::list::push(teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), 0 to byte), 0 to byte), 0 to byte), 0 to byte)
+    let fixups = teko::list::push(teko::list::empty(), BranchFixupX86 { field_off = 0 to u32; target = 0 to u32 })
+    let offsets = teko::list::push(teko::list::empty(), BlockOffsetX86 { id = 0 to u32; byte = 2147483652 to u32 })
+    teko::assert::str_contains(fx_patch_stop(raw, fixups, offsets), "B1-farbranch")
+}
+
+#test
+
+/**
+ * ex_reloc_addend_convention — the pinned `r_addend` per kind: `Plt32`/`Pc32`
+ * carry −4 (the rel32-is-from-field-end correction the assembler oracle
+ * confirmed) and `Abs64` carries 0 (the deferred `B1-globals` data case,
+ * exercised directly since no B1-6 instruction emits it).
+ *
+ * @return void
+ */
+fn ex_reloc_addend_convention() {
+    teko::assert::is_true(reloc_addend_x86(RelocKindX86::Plt32) == ((0) - (4)))
+    teko::assert::is_true(reloc_addend_x86(RelocKindX86::Pc32) == ((0) - (4)))
+    teko::assert::is_true(reloc_addend_x86(RelocKindX86::Abs64) == (0))
+}
+
+/**
+ * fx_module_of1 — a single-function `MModuleX86` (empty rodata/globals/layouts).
+ *
+ * @param MFuncX86 f  the function
+ * @return MModuleX86  the wrapping module
+ */
+fn fx_module_of1(f: MFuncX86) -> MModuleX86 {
+    MModuleX86 { funcs = teko::list::push(teko::list::empty(), f); rodata = teko::list::empty(); globals = teko::list::empty(); layouts = teko::list::empty() }
+}
+
+/**
+ * fx_module_stop — the honest-stop message `m`'s `encode_module_x86` raises, or
+ * `<ok>` when it encodes.
+ *
+ * @param MModuleX86 m  the module to encode
+ * @return str  the error message, or `<ok>`
+ */
+fn fx_module_stop(m: MModuleX86) -> str {
+    match encode_module_x86(SYSV64, m) {
+        EncodedModuleX86 as e => "<ok>"
+        error as er => er.message
+    }
+}
+
+#test
+
+/**
+ * ex_module_globals_honest_stops — a module carrying a top-level data global
+ * raises the `B1-globals` named honest-stop (the `.data` section is deferred; the
+ * N2 subset lowers none).
+ *
+ * @return void
+ */
+fn ex_module_globals_honest_stops() {
+    let f = fx_1block_func("main", fx_i1(ret_x86()), fx_no_frame())
+    let globals = teko::list::push(teko::list::empty(), lir::LGlobal { symbol = "gv"; ty = lir::LType::I32; bytes = teko::list::empty() })
+    let m = MModuleX86 { funcs = teko::list::push(teko::list::empty(), f); rodata = teko::list::empty(); globals = globals; layouts = teko::list::empty() }
+    teko::assert::str_contains(fx_module_stop(m), "B1-globals")
+}
+
+#test
+
+/**
+ * ex_module_propagates_function_stop — a function reaching a per-function
+ * encoder stop propagates it out of `encode_module_x86` unchanged: a frame whose
+ * sole `LAlloca` overruns the signed imm32 `sub rsp` field raises
+ * `B1-bigframe` at prologue emission, and the module driver surfaces that same
+ * message rather than swallowing it.
+ *
+ * @return void
+ */
+fn ex_module_propagates_function_stop() {
+    let f = fx_1block_func("main", fx_i1(ret_x86()), fx_alloca_frame(0xFFFFFF00 to u32, 8 to u32))
+    teko::assert::str_contains(fx_module_stop(fx_module_of1(f)), "B1-bigframe")
+}
+
+/**
+ * fx_in_arg_hex — the hex of a one-block function encoded under `abi`, whose body
+ * is a single `MInArgX86{Q, RAX, 0}` load of incoming stack argument 0 followed by
+ * `ret`. The reader behind the caller-shadow goldens: the displacement inside
+ * those bytes IS `in_arg_base_x86`'s answer.
+ *
+ * @param AbiDescriptor abi  the register file to encode under
+ * @return str  the encoded bytes as hex, or `<err>` on an unexpected honest-stop
+ */
+fn fx_in_arg_hex(abi: AbiDescriptor) -> str {
+    let f = fx_1block_func("main", fx_i2(in_arg_x86(MMemSizeX86::Q, ex_p(0), 0 to u32), ret_x86()), fx_no_frame())
+    match encode_func_x86(abi, f) {
+        EncodedFuncX86 as ef => teko::crypto::to_hex(ef.bytes)
+        error as e => "<err>"
+    }
+}
+
+#test
+
+/**
+ * ex_win64_incoming_stack_arg_skips_the_callers_shadow — a Win64 callee reads its
+ * first INCOMING stack argument 32 bytes higher than a SysV one, because the Win64
+ * caller reserved the 32-byte home space between its own RSP and that argument.
+ *
+ * The two hex strings differ in exactly the displacement byte: SysV loads
+ * `[rsp+8]` (`488b442408`), Win64 `[rsp+40]` (`488b442428`). Before this term
+ * existed both read `[rsp+8]` while `encode_out_arg_x86` stored the argument at
+ * `[rsp+32]` of the caller — a 32-byte disagreement between the two halves of one
+ * ABI contract.
+ *
+ * @return void
+ */
+fn ex_win64_incoming_stack_arg_skips_the_callers_shadow() {
+    teko::assert::is_true(fx_in_arg_hex(SYSV64) == "488b442408c3")
+    teko::assert::is_true(fx_in_arg_hex(WIN64) == "488b442428c3")
+}
+
+#test
+
+/**
+ * ex_frame_layout_carries_the_callers_shadow_unconditionally — `caller_shadow`
+ * comes off the DESCRIPTOR, not off `shadow_bytes_x86`: a Win64 LEAF (which
+ * reserves no shadow of its own, so its `out_arg_base` is 0) still has 32 bytes of
+ * the CALLER's shadow below its incoming arguments.
+ *
+ * @return void
+ */
+fn ex_frame_layout_carries_the_callers_shadow_unconditionally() {
+    let leaf = fx_1block_func("main", fx_i1(ret_x86()), fx_no_frame())
+    teko::assert::is_true(compute_frame_layout_x86(WIN64, leaf).out_arg_base == (0 to u32))
+    teko::assert::is_true(compute_frame_layout_x86(WIN64, leaf).caller_shadow == (32 to u32))
+    teko::assert::is_true(compute_frame_layout_x86(SYSV64, leaf).caller_shadow == (0 to u32))
+}

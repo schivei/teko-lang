@@ -1,0 +1,283 @@
+fn emit_u16_le_elf(buf: []byte, v: u32) -> []byte {
+    mut b = teko::list::push(buf, (v & ELF_BYTE_MASK) to byte)
+    teko::list::push(b, ((v >> (8 to u32)) & ELF_BYTE_MASK) to byte)
+}
+
+/**
+ * ElfStrtab — an assembled ELF string table: the raw bytes (a leading NUL then
+ * one NUL-terminated name per non-empty entry) and the parallel per-entry byte
+ * offsets. Serves both the symbol `.strtab` (names in `Elf64_Sym` order) and the
+ * section `.shstrtab` (names in section-header order); an empty name maps to
+ * offset 0 (the reserved leading NUL), which the null symbol and the
+ * `STT_SECTION` rodata symbol both carry.
+ *
+ * @since #386 B1-7
+ */
+type ElfStrtab = struct {
+    /**
+     * bytes — the string-table image (a leading NUL, then `name\0` per entry).
+     */
+    bytes: []byte
+    /**
+     * strx — the byte offset of each entry's name in `bytes`, in entry order
+     * (0 for an empty name).
+     */
+    strx: []u32
+}
+
+/**
+ * build_elf_strtab — assemble an ELF string table from `names`: a leading NUL
+ * (the reserved empty name at offset 0), then each non-empty name — the raw
+ * bytes followed by a NUL terminator — recording each name's start offset. An
+ * empty name records offset 0 (the shared leading NUL) and appends nothing, so
+ * the null symbol / null section and the unnamed `STT_SECTION` symbol all point
+ * at index 0. Unlike the Mach-O `build_strtab`, ELF names carry NO `_` prefix.
+ *
+ * @param []str names  the names to intern, in table order
+ * @return ElfStrtab  the string-table bytes + the per-name offsets
+ */
+fn build_elf_strtab(names: []str) -> ElfStrtab {
+    mut bytes: []byte = teko::list::push(teko::list::empty(), 0 to byte)
+    mut strx: []u32 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= names.len { break }
+        if names[i].len == (0 to u64) {
+            strx = teko::list::push(strx, 0 to u32)
+        } else {
+            strx = teko::list::push(strx, bytes.len to u32)
+            bytes = emit_str_bytes(bytes, names[i])
+            bytes = teko::list::push(bytes, 0 to byte)
+        }
+        i++
+    }
+    ElfStrtab { bytes = bytes; strx = strx }
+}
+
+/**
+ * EM_X86_64 — the `Elf64_Ehdr.e_machine` value identifying an x86-64 object
+ * (the SysV psABI machine number).
+ */
+const EM_X86_64: u32 = 62 to u32
+
+/**
+ * ELF_BYTE_MASK — the low-byte mask the little-endian field serializers apply
+ * per lane (`(v >> lane) & 0xFF`), narrowing each half/quarter to one `byte`.
+ */
+const ELF_BYTE_MASK: u32 = 0xFF to u32
+
+/**
+ * STB_LOCAL — the ELF `st_info` bind field value for a file-local symbol,
+ * visible only within this object.
+ */
+const STB_LOCAL: u8 = 0
+
+/**
+ * STB_GLOBAL — the ELF `st_info` bind field value for a globally-visible
+ * symbol, linkable from other objects.
+ */
+const STB_GLOBAL: u8 = 1
+
+/**
+ * STT_NOTYPE — the ELF `st_info` type field value for a symbol with no type:
+ * the reserved null symbol and every undefined extern reference.
+ */
+const STT_NOTYPE: u8 = 0
+
+/**
+ * STT_FUNC — the ELF `st_info` type field value for a function symbol.
+ */
+const STT_FUNC: u8 = 2
+
+/**
+ * STT_SECTION — the ELF `st_info` type field value for a section symbol: the
+ * `.rodata`/`.data.rel.ro` section symbols every rodata relocation targets.
+ */
+const STT_SECTION: u8 = 3
+
+/**
+ * ELF_SECT_RODATA — the neutral `Symbol.sect` tag for a datum that lands in
+ * the read-only `.rodata` section (`SHF_ALLOC` only): a string literal or any
+ * const leaf that carries no pointer relocation of its own.
+ */
+const ELF_SECT_RODATA: u8 = 2
+
+/**
+ * ELF_SECT_DATA_REL_RO — the neutral `Symbol.sect` tag the data-rel-ro
+ * partition stamps onto a const datum that carries at least one pointer
+ * relocation (a `const []T` fat slot). Such a datum needs a load-time fixup, so
+ * it must live in a section the linker may write during relocation processing;
+ * `.data.rel.ro` (`SHF_ALLOC|SHF_WRITE`, RELRO) is that section, and this tag is
+ * an ELF-writer-local convention (the neutral producer only ever emits `.text`
+ * (1) and `.rodata` (2) — see `encode_rodata`), so it never collides with a real
+ * producer sect.
+ */
+const ELF_SECT_DATA_REL_RO: u8 = 4
+
+/**
+ * ELF_SHNDX_RODATA — the fixed section-header-table index of `.rodata` in the
+ * writer's section order (`""`, `.text`, `.rodata`, ...): the `st_shndx` of every
+ * pure rodata datum's section symbol.
+ */
+const ELF_SHNDX_RODATA: u32 = 2 to u32
+
+/**
+ * ELF_SHNDX_DATA_REL_RO — the section-header-table index of `.data.rel.ro`,
+ * APPENDED after `.rela.text` (index 6) so the six fixed sections keep their
+ * indices and every `st_shndx`/`sh_link`/`sh_info`/`e_shstrndx` that names them
+ * stays valid. Present only when the module carries a pointer-bearing const
+ * (`elf_partition_data_rel_ro` active); it is the `st_shndx` of the
+ * `.data.rel.ro` section symbol and of the `.rela.data.rel.ro` `sh_info`.
+ */
+const ELF_SHNDX_DATA_REL_RO: u32 = 7 to u32
+
+/**
+ * st_info — pack an `Elf64_Sym.st_info` byte from its bind and type sub-fields:
+ * `(bind << 4) | stt`. `st_info` is a COMPOSED field (two adjacent sub-fields
+ * shifted into one byte), not an OR of independent bits, so a `flags` bitmask
+ * would misrepresent it — this is a plain helper over the `STB_*`/`STT_*`
+ * constants (#594 crumb 11).
+ *
+ * @param bind  the bind sub-field (`STB_LOCAL`/`STB_GLOBAL`)
+ * @param stt   the type sub-field (`STT_NOTYPE`/`STT_FUNC`/`STT_SECTION`)
+ * @return      the packed `st_info` byte
+ */
+fn st_info(bind: u8, stt: u8) -> u8 {
+    (bind << 4) | stt
+}
+
+/**
+ * ElfSym — one resolved `Elf64_Sym` in the object's final symbol-table order
+ * (local-then-global): its name (interned into `.strtab`), its `st_info`
+ * bind/type byte, its `st_shndx` section index, and its `st_value`. For a
+ * defined function in an `ET_REL` object `value` is the SECTION-RELATIVE byte
+ * offset within `.text` (`st_shndx = 1`) — NOT an absolute address. This is the
+ * exact INVERSE of Mach-O's `nlist_64.n_value`, which is `section_addr + offset`
+ * (the A4-4 F1 fix); porting that rebase to ELF would over-state every symbol
+ * and make `ld` mis-link the object, so ELF deliberately keeps the bare offset.
+ *
+ * @since #386 B1-7
+ */
+type ElfSym = struct {
+    /**
+     * name — the symbol name interned into `.strtab` (empty for the null symbol
+     * and the `STT_SECTION` rodata symbol, both of which carry `st_name = 0`).
+     */
+    name: str
+    /**
+     * info — the `st_info` byte, packed by `st_info(bind, stt)`: `st_info(STB_LOCAL,
+     * STT_NOTYPE)` (`0x00`) null, `st_info(STB_LOCAL, STT_SECTION)` (`0x03`) LOCAL|SECTION
+     * (rodata), `st_info(STB_GLOBAL, STT_FUNC)` (`0x12`) GLOBAL|FUNC (defined function),
+     * `st_info(STB_GLOBAL, STT_NOTYPE)` (`0x10`) GLOBAL|NOTYPE (undefined extern).
+     */
+    info: u32
+    /**
+     * shndx — the `st_shndx` section index: 0 (`SHN_UNDEF`) for an undefined
+     * symbol, 1 (`.text`) for a function, 2 (`.rodata`) for the section symbol.
+     */
+    shndx: u32
+    /**
+     * value — the `st_value`: for a defined function the SECTION-RELATIVE byte
+     * offset within its `st_shndx` section, 0 for the null/section/undefined
+     * symbols.
+     */
+    value: u32
+}
+
+/**
+ * elf_has_rodata_section — whether the module defines any file-local `.rodata`
+ * datum (a defined, local, section-2 `Symbol`): gates emission of the single
+ * `.rodata` `STT_SECTION` symbol that rodata relocations target (§7.1). The ELF
+ * idiom collapses every per-string symbol into one section symbol + an addend,
+ * dodging the per-string symbols and their cross-object duplicate-name clashes.
+ *
+ * @param []Symbol symbols  the module's neutral symbol list
+ * @return bool  true iff a defined section-2 local symbol is present
+ */
+fn elf_has_rodata_section(symbols: []Symbol) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= symbols.len { break }
+        let s = symbols[i]
+        if s.defined && s.local && s.sect == (2 to u8) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * elf_append_text_locals — append each file-local `.text` symbol (a defined,
+ * file-local, section-1 `Symbol` — a pcrel-pair label an ISA may synthesize,
+ * §7.2) to `out` as an `STB_LOCAL|STT_NOTYPE` entry (`st_info = 0x00`,
+ * `st_shndx = 1`, section-relative `st_value`). x86-64 produces NO section-1
+ * local (only section-2 rodata locals, globals, and undefined externs), so this
+ * pass is inert for x86 and its symbol table — and thus its object bytes — stay
+ * unchanged (the B2-7 reuse guardrail). The labels slot into the leading LOCAL
+ * block, so `.symtab.sh_info` (first-global) still counts them correctly.
+ *
+ * @param []ElfSym out  the table so far (null + optional `.rodata` section symbol)
+ * @param []Symbol symbols  the module's neutral symbol list
+ * @return []ElfSym  `out` followed by every section-1 file-local symbol
+ */
+fn elf_append_text_locals(out: []ElfSym, symbols: []Symbol) -> []ElfSym {
+    mut acc = out
+    mut i: u64 = 0
+    loop {
+        if i >= symbols.len { break }
+        let s = symbols[i]
+        if s.defined && s.local && s.sect == (1 to u8) {
+            acc = teko::list::push(acc, ElfSym { name = s.name; info = st_info(STB_LOCAL, STT_NOTYPE) to u32; shndx = 1 to u32; value = s.offset })
+        }
+        i++
+    }
+    acc
+}
+
+/**
+ * elf_append_globals — append each defined, globally-visible `Symbol` (a defined
+ * function) to `out` as a `GLOBAL|FUNC` entry (`st_info = 0x12`, `st_shndx = 1`)
+ * at its section-relative `.text` offset — the bare offset, never rebased (the
+ * Mach-O F1 inverse). Runs after every local symbol so the ELF-required
+ * local-then-global order holds.
+ *
+ * @param []ElfSym out  the table so far (null + rodata section + `.text` locals)
+ * @param []Symbol symbols  the module's neutral symbol list
+ * @return []ElfSym  `out` followed by every defined global function symbol
+ */
+fn elf_append_globals(out: []ElfSym, symbols: []Symbol) -> []ElfSym {
+    mut acc = out
+    mut i: u64 = 0
+    loop {
+        if i >= symbols.len { break }
+        let s = symbols[i]
+        if s.defined && !s.local {
+            acc = teko::list::push(acc, ElfSym { name = s.name; info = st_info(STB_GLOBAL, STT_FUNC) to u32; shndx = 1 to u32; value = s.offset })
+        }
+        i++
+    }
+    acc
+}
+
+/**
+ * elf_append_undefined — append each undefined `Symbol` (an externally-referenced
+ * name this object does not define) to `out` as a `GLOBAL|NOTYPE` entry
+ * (`st_info = 0x10`, `st_shndx = SHN_UNDEF`(0), `st_value = 0`). Runs last, after
+ * every defined symbol.
+ *
+ * @param []ElfSym out  the table so far (null + locals + defined globals)
+ * @param []Symbol symbols  the module's neutral symbol list
+ * @return []ElfSym  `out` followed by every undefined extern symbol
+ */
+fn elf_append_undefined(out: []ElfSym, symbols: []Symbol) -> []ElfSym {
+    mut acc = out
+    mut i: u64 = 0
+    loop {
+        if i >= symbols.len { break }
+        let s = symbols[i]
+        if !s.defined {
+            acc = teko::list::push(acc, ElfSym { name = s.name; info = st_info(STB_GLOBAL, STT_NOTYPE) to u32; shndx = 0 to u32; value = 0 to u32 })
+        }
+        i++
+    }
+    acc
+}

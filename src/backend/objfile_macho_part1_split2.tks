@@ -1,0 +1,218 @@
+/**
+ * MachoRelocParts — a `EncodedModule`'s relocations split by patch-site section
+ * (#594 T-B3): `text` (the historical `__text`-base-relative fixups) and `rodata`
+ * (the `__const`-base-relative data→data pointers). The canonical seam: the single
+ * `.sect`-tagged `enc.relocs` list is partitioned at the writer boundary, the same
+ * logical point ELF's bridge partitions into `ElfObject.{relocs, rodata_relocs}`.
+ * `rodata` is EMPTY in every real compile (the `encode_rodata` honest-stop keeps
+ * producers out), so `__const` carries no relocation and the object is
+ * byte-identical.
+ *
+ * @since #594 T-B3
+ */
+type MachoRelocParts = struct {
+    /** text — the relocations whose patch site is in `__text` (`r.sect == Text`). */
+    text: []Reloc
+    /** rodata — the relocations whose patch site is in `__const` (`r.sect == Rodata`). */
+    rodata: []Reloc
+}
+
+/**
+ * macho_partition_relocs — split `relocs` into its `__text` and `__const` partitions
+ * by each reloc's `RelocSect` tag (#594 T-B3). Preserves emission order within each
+ * partition. Today every reloc is `Text`, so `rodata` is empty and the writer's
+ * `__const` relocation path is never entered.
+ *
+ * @param []Reloc relocs  the module's relocations, `.sect`-tagged, in emission order
+ * @return MachoRelocParts  the `text` and `rodata` partitions
+ */
+fn macho_partition_relocs(relocs: []Reloc) -> MachoRelocParts {
+    mut text: []Reloc = teko::list::empty()
+    mut rodata: []Reloc = teko::list::empty()
+    mut i: u32 = 0
+    loop {
+        if i >= relocs.len { break }
+        let r = relocs[i]
+        match r.sect {
+            Text => { text = teko::list::push(text, r) }
+            Rodata => { rodata = teko::list::push(rodata, r) }
+        }
+        i++
+    }
+    MachoRelocParts { text = text; rodata = rodata }
+}
+
+/**
+ * MachoLayout — the resolved file offsets and counts of a Mach-O object: sizes
+ * driving the load commands (computed BEFORE any bytes are emitted, so the
+ * commands can reference the section/relocation/symbol/string table positions),
+ * and the symbol partition counts driving `LC_DYSYMTAB`.
+ *
+ * @since #385 A4-4
+ */
+type MachoLayout = struct {
+    /**
+     * ncmds — the load-command count (the header's `ncmds`): 4 (`LC_SEGMENT_64`
+     * for the unnamed `__TEXT` segment, `LC_BUILD_VERSION`, `LC_SYMTAB`,
+     * `LC_DYSYMTAB`) without DWARF, 5 with it (D1.5's `__DWARF` segment inserted
+     * right after the unnamed segment).
+     * @since 0.3.1.0
+     */
+    ncmds: u32
+    /**
+     * nsects — the segment's section count (1 for `__text` only, 2 with
+     * `__const`).
+     */
+    nsects: u32
+    /**
+     * sizeofcmds — the total byte size of all load commands (the header's
+     * `sizeofcmds`).
+     */
+    sizeofcmds: u32
+    /**
+     * text_offset — the file offset of the `__text` section data (immediately
+     * after the load commands).
+     */
+    text_offset: u32
+    /**
+     * text_size — the `__text` section byte size.
+     */
+    text_size: u32
+    /**
+     * const_addr — the `__const` section's segment-relative vm address (the
+     * `section_64.addr` `emit_segment` gives it, and the base `section_addr`
+     * folds every `__const` symbol's `n_value` onto): `text_size` rounded up to
+     * `MACHO_CONST_ALIGN` (8) when rodata is present, `text_size` unchanged
+     * otherwise (#0.3.1.0 macho-const-section-align). `__text` is a multiple of 4
+     * (every ARM64 instruction word) but NOT necessarily of 8, so without this
+     * rounding `__const` — and every "8-aligned" entry inside it, `gpr_arg`
+     * included — silently loses whatever alignment `text_size % 8` steals,
+     * regardless of the section's OWN declared `align` field or of
+     * `RODATA_ENTRY_ALIGN`'s entry-to-entry padding (both are relative to this
+     * base, not absolute). The gap this opens between `__text` and `__const`
+     * (`const_addr - text_size`) is physically emitted by `emit_macho`'s
+     * `pad_to_offset` call, so `const_offset` and the byte stream agree.
+     * @since 0.3.1.0 macho-const-section-align
+     */
+    const_addr: u32
+    /**
+     * const_offset — the file offset of the `__const` section data (`text_offset
+     * + const_addr`; immediately after `__text` plus its alignment gap).
+     */
+    const_offset: u32
+    /**
+     * const_size — the `__const` section byte size (0 when no rodata).
+     */
+    const_size: u32
+    /**
+     * reloc_offset — the 4-aligned file offset of the `__text` relocation table.
+     */
+    reloc_offset: u32
+    /**
+     * nreloc — the number of `__text` relocation entries.
+     */
+    nreloc: u32
+    /**
+     * const_reloc_offset — the file offset of the `__const` relocation table
+     * (contiguous, immediately after the `__text` table; #594 T-B3), or the
+     * `__text`-table-end value when there is no rodata-internal relocation
+     * (nothing is emitted there in that case).
+     */
+    const_reloc_offset: u32
+    /**
+     * nreloc_const — the number of `__const` relocation entries (a rodata-internal
+     * data→data pointer per entry); 0 in every real compile, keeping the object
+     * byte-identical to the pre-T-B3 writer (#594 T-B3).
+     */
+    nreloc_const: u32
+    /**
+     * symtab_offset — the 8-aligned file offset of the `nlist_64` symbol table.
+     */
+    symtab_offset: u32
+    /**
+     * nsyms — the number of symbol-table entries.
+     */
+    nsyms: u32
+    /**
+     * strtab_offset — the file offset of the string table (after the symbols).
+     */
+    strtab_offset: u32
+    /**
+     * strtab_size — the string-table byte size.
+     */
+    strtab_size: u32
+    /**
+     * ndef — the number of defined symbols, local + global (the undefined
+     * range starts here: `iundefsym`).
+     */
+    ndef: u32
+    /**
+     * nlocal — the number of file-local defined symbols (`nlocalsym`; the
+     * global-defined range starts here: `iextdefsym`).
+     */
+    nlocal: u32
+    /**
+     * nundef — the number of undefined symbols (`nundefsym`).
+     */
+    nundef: u32
+    /**
+     * debug_abbrev_offset — the `__debug_abbrev` section data file offset (D1.5;
+     * meaningful only when DWARF is present).
+     * @since 0.3.1.0
+     */
+    debug_abbrev_offset: u32
+    /**
+     * debug_abbrev_size — the `__debug_abbrev` section byte size (0 when DWARF
+     * is absent, keeping the object byte-identical to a build with no debug
+     * axis).
+     * @since 0.3.1.0
+     */
+    debug_abbrev_size: u32
+    /**
+     * debug_info_offset — the `__debug_info` section data file offset (D1.5).
+     * @since 0.3.1.0
+     */
+    debug_info_offset: u32
+    /**
+     * debug_info_size — the `__debug_info` section byte size (0 when DWARF is
+     * absent).
+     * @since 0.3.1.0
+     */
+    debug_info_size: u32
+    /**
+     * debug_line_offset — the `__debug_line` section data file offset (D1.5).
+     * @since 0.3.1.0
+     */
+    debug_line_offset: u32
+    /**
+     * debug_line_size — the `__debug_line` section byte size (0 when DWARF is
+     * absent).
+     * @since 0.3.1.0
+     */
+    debug_line_size: u32
+    /**
+     * debug_info_reloc_offset — the 4-aligned file offset of `__debug_info`'s
+     * `relocation_info` table (D1.5).
+     * @since 0.3.1.0
+     */
+    debug_info_reloc_offset: u32
+    /**
+     * nreloc_debug_info — the number of `__debug_info` relocation entries (0
+     * when DWARF is absent).
+     * @since 0.3.1.0
+     */
+    nreloc_debug_info: u32
+    /**
+     * debug_line_reloc_offset — the file offset of `__debug_line`'s
+     * `relocation_info` table, immediately after `__debug_info`'s (D1.5).
+     * @since 0.3.1.0
+     */
+    debug_line_reloc_offset: u32
+    /**
+     * nreloc_debug_line — the number of `__debug_line` relocation entries (at
+     * most one — the single `DW_LNE_set_address` operand; 0 when DWARF is
+     * absent).
+     * @since 0.3.1.0
+     */
+    nreloc_debug_line: u32
+}

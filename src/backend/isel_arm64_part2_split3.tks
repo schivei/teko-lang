@@ -1,0 +1,40 @@
+/**
+ * select_branch — the `LBranch` selection: resolve each edge to a landing
+ * block (splitting an arg-carrying edge, §3.2), then in the branch block emit
+ * the conditional test to the taken edge and an unconditional `MBranch` to
+ * the else edge. When the condition is a compare fused into this branch
+ * (`is_fused_compare`), re-emit `MCmp`/`MFCmp` over its operands + a
+ * `MBranchCond`; otherwise test the boolean condition register with a CBNZ
+ * (`MCbz{zero=false}`).
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LFunc f  the enclosing function
+ * @param lir::LBranch br  the branch op
+ * @return SelCtx | error  the advanced context, or a propagated error
+ */
+fn select_branch(ctx0: SelCtx, f: lir::LFunc, br: lir::LBranch) -> SelCtx | error {
+    let t_land = match resolve_edge(ctx0, f, br.t_target, br.t_args) { EdgeRes as r => r; error as e => return e }
+    let f_land = match resolve_edge(t_land.ctx, f, br.f_target, br.f_args) { EdgeRes as r => r; error as e => return e }
+    let ctx1 = f_land.ctx
+    let dc = find_cmp_def(f, br.cond)
+    let ctx2 = if dc.found && is_fused_compare(f, br.cond) {
+        let ck = cmp_kind_of(dc.op)
+        let a_info = vinfo_get(ctx1.vinfo, dc.a)
+        let cmp = if ck.is_float { fcmp_inst(a_info.wide, vreg(dc.a, MRegClass::FPR), vreg(dc.bb, MRegClass::FPR)) } else { cmp_inst(a_info.wide, vreg(dc.a, MRegClass::GPR), vreg(dc.bb, MRegClass::GPR)) }
+        let ca = selctx_emit(ctx1, cmp)
+        selctx_emit(ca, branch_cond_inst(ck.cond, t_land.block))
+    } else {
+        let c_info = vinfo_get(ctx1.vinfo, br.cond)
+        selctx_emit(ctx1, cbz_inst(c_info.wide, false, vreg(br.cond, MRegClass::GPR), t_land.block))
+    }
+    selctx_emit(ctx2, branch_inst(f_land.block))
+}
+
+/**
+ * mem_size_of — the load/store transfer size for a machine class: B/H/W/X for
+ * the integer widths (and Ptr = X), S/D for f32/f64. A void-typed access
+ * (malformed) honest-stops.
+ *
+ * @param lir::LType t  the accessed value's machine class
+ * @return MMemSize | error  the transfer size, or a NAMED honest-stop
+ */

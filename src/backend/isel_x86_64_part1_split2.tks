@@ -1,0 +1,287 @@
+/**
+ * select_shift_x86 — the `IShl`/`IShrS`/`IShrU` selection: the two-address
+ * copy of the shifted value into `dst`, the count pinned into `CL` (RCX's low
+ * byte), then the `shl`/`shr`/`sar dst, cl` (§4.1). The destination is seeded
+ * BEFORE the count is pinned so a left operand that happens to occupy RCX is
+ * read before `mov cl, b` overwrites it; the shift's implicit RCX use (reported
+ * by `inst_regs_x86`, B1-4) keeps the destination off RCX.
+ *
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param MShiftOpX86 op  the shift mnemonic (Shl/Shr/Sar)
+ * @param a  the shifted-value VReg (copied into dst)
+ * @param b  the count VReg (moved into CL)
+ * @param bool wide  true for the 64-bit r64 form, false for the 32-bit r32 form
+ * @return SelCtxX86  the advanced context
+ */
+fn select_shift_x86(ctx0: SelCtxX86, inst: lir::LInst, op: MShiftOpX86, a: u32, b: u32, wide: bool) -> SelCtxX86 {
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::GPR, wide)
+    let ctx2 = selctx_x86_emit(ctx1, mov_x86(dst, vreg(a, MRegClass::GPR), wide))
+    let ctx3 = selctx_x86_emit(ctx2, mov_x86(RCX_X86, vreg(b, MRegClass::GPR), wide))
+    selctx_x86_emit(ctx3, shift_x86(op, dst, wide))
+}
+
+/**
+ * select_icmp_x86 — an integer compare `LBin` used as a plain VALUE (not fused
+ * into a branch): `cmp a, b` sets the flags, `setcc dst` materializes the 0/1
+ * result (the encoder appends the zero-extend, §6.3). The boolean lands at the
+ * narrow (32-bit) width booleans conventionally use.
+ *
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param MCond cond  the condition code the source opcode picks
+ * @param a  the first compared VReg
+ * @param b  the second compared VReg
+ * @param bool wide  the COMPARED operands' width (true for the 64-bit r64 form)
+ * @return SelCtxX86  the advanced context
+ */
+fn select_icmp_x86(ctx0: SelCtxX86, inst: lir::LInst, cond: MCond, a: u32, b: u32, wide: bool) -> SelCtxX86 {
+    let ctx1 = selctx_x86_emit(ctx0, cmp_x86(vreg(a, MRegClass::GPR), vreg(b, MRegClass::GPR), wide))
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx2 = selctx_x86_set_vinfo(ctx1, inst.result, MRegClass::GPR, false)
+    selctx_x86_emit(ctx2, setcc_x86(dst, cond))
+}
+
+/**
+ * select_falu_x86 — the two-address `dst = dst <op> src` selection shared by
+ * every float `LBinOp` arithmetic case (`B1-fp`): a preceding `MFMovX86` seeds
+ * `dst` (fresh) with the left operand (x86's `ADDSD`/… is destructive, exactly
+ * `select_alu_x86`'s integer copy-first pattern, §4.2), then the two-address
+ * `MFAluX86`.
+ *
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param MFAluOpX86 op  the SSE ALU mnemonic (FAdd/FSub/FMul/FDiv)
+ * @param a  the left-operand VReg (copied into dst)
+ * @param b  the right-operand VReg (the RMW source)
+ * @param bool dbl  true for the f64 form, false for the f32 form
+ * @return SelCtxX86  the advanced context
+ */
+fn select_falu_x86(ctx0: SelCtxX86, inst: lir::LInst, op: MFAluOpX86, a: u32, b: u32, dbl: bool) -> SelCtxX86 {
+    let dst = vreg(inst.result, MRegClass::FPR)
+    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::FPR, dbl)
+    let ctx2 = selctx_x86_emit(ctx1, fmov_x86(dst, vreg(a, MRegClass::FPR), dbl))
+    selctx_x86_emit(ctx2, falu_x86(op, dst, vreg(b, MRegClass::FPR), dbl))
+}
+
+/**
+ * select_fcmp_value_x86 — a float compare `LBinOp` used as a plain VALUE, into
+ * `dst` (`B1-fp`). `<`/`<=`/`>`/`>=` swap `a`/`b` into the compare and land on
+ * the CF-based `HI`/`HS` condition (`MFCmpX86`'s own doc explains why the
+ * unordered/NaN result is then uniformly false, matching the swap-free `>`/`>=`
+ * forms exactly). `==`/`!=` need the parity-aware composite `MSetccX86` alone
+ * cannot express — `UCOMISD` also sets ZF on an UNORDERED (NaN) compare, so a
+ * bare `sete` would call a NaN "equal to itself": `==` ANDs the ZF-based
+ * `sete` with `MSetPX86{is_np=true}` (ordered), `!=` ORs the ZF-based `setne`
+ * with `MSetPX86{is_np=false}` (unordered) — each writing `dst` a second time,
+ * the same two-address-destination idiom every RMW case in this file already
+ * uses.
+ *
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param MReg dst  the destination register (the enclosing instruction's result)
+ * @param MCond cond  the condition code the source opcode picks (EQ/NE/LT/LE/GT/GE)
+ * @param a  the first compared VReg
+ * @param b  the second compared VReg
+ * @param bool dbl  the compared operands' width (true for the f64 form)
+ * @return SelCtxX86  the advanced context
+ */
+fn select_fcmp_value_x86(ctx0: SelCtxX86, dst: MReg, cond: MCond, a: u32, b: u32, dbl: bool) -> SelCtxX86 {
+    let av = vreg(a, MRegClass::FPR)
+    let bv = vreg(b, MRegClass::FPR)
+    match cond {
+        EQ => {
+            let ctx1 = selctx_x86_emit(ctx0, fcmp_x86(av, bv, dbl))
+            let ctx2 = selctx_x86_emit(ctx1, setcc_x86(dst, MCond::EQ))
+            let ordered = selctx_x86_scratch(ctx2, MRegClass::GPR)
+            let ctx3 = selctx_x86_emit(ordered.ctx, setp_x86(ordered.reg, true))
+            selctx_x86_emit(ctx3, alu_rm_x86(MAluOpX86::And, dst, ordered.reg, false))
+        }
+        NE => {
+            let ctx1 = selctx_x86_emit(ctx0, fcmp_x86(av, bv, dbl))
+            let ctx2 = selctx_x86_emit(ctx1, setcc_x86(dst, MCond::NE))
+            let unordered = selctx_x86_scratch(ctx2, MRegClass::GPR)
+            let ctx3 = selctx_x86_emit(unordered.ctx, setp_x86(unordered.reg, false))
+            selctx_x86_emit(ctx3, alu_rm_x86(MAluOpX86::Or, dst, unordered.reg, false))
+        }
+        LT => {
+            let ctx1 = selctx_x86_emit(ctx0, fcmp_x86(bv, av, dbl))
+            selctx_x86_emit(ctx1, setcc_x86(dst, MCond::HI))
+        }
+        LE => {
+            let ctx1 = selctx_x86_emit(ctx0, fcmp_x86(bv, av, dbl))
+            selctx_x86_emit(ctx1, setcc_x86(dst, MCond::HS))
+        }
+        GT => {
+            let ctx1 = selctx_x86_emit(ctx0, fcmp_x86(av, bv, dbl))
+            selctx_x86_emit(ctx1, setcc_x86(dst, MCond::HI))
+        }
+        GE => {
+            let ctx1 = selctx_x86_emit(ctx0, fcmp_x86(av, bv, dbl))
+            selctx_x86_emit(ctx1, setcc_x86(dst, MCond::HS))
+        }
+        LO => {
+            let ctx1 = selctx_x86_emit(ctx0, fcmp_x86(bv, av, dbl))
+            selctx_x86_emit(ctx1, setcc_x86(dst, MCond::HI))
+        }
+        LS => {
+            let ctx1 = selctx_x86_emit(ctx0, fcmp_x86(bv, av, dbl))
+            selctx_x86_emit(ctx1, setcc_x86(dst, MCond::HS))
+        }
+        HI => {
+            let ctx1 = selctx_x86_emit(ctx0, fcmp_x86(av, bv, dbl))
+            selctx_x86_emit(ctx1, setcc_x86(dst, MCond::HI))
+        }
+        HS => {
+            let ctx1 = selctx_x86_emit(ctx0, fcmp_x86(av, bv, dbl))
+            selctx_x86_emit(ctx1, setcc_x86(dst, MCond::HS))
+        }
+    }
+}
+
+/**
+ * select_fcmp_x86 — a float compare `LBinOp` used as a plain VALUE (not fused
+ * into a branch): sets the destination's `class_of` to GPR (booleans are
+ * always GPR, matching `select_icmp_x86`) then delegates to
+ * `select_fcmp_value_x86` (`B1-fp`).
+ *
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param MCond cond  the condition code the source opcode picks
+ * @param a  the first compared VReg
+ * @param b  the second compared VReg
+ * @param bool dbl  the compared operands' width (true for the f64 form)
+ * @return SelCtxX86  the advanced context
+ */
+fn select_fcmp_x86(ctx0: SelCtxX86, inst: lir::LInst, cond: MCond, a: u32, b: u32, dbl: bool) -> SelCtxX86 {
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::GPR, false)
+    select_fcmp_value_x86(ctx1, dst, cond, a, b, dbl)
+}
+
+/**
+ * select_bin_x86 — the `LBin` dispatch (§4.1/§4.2): the two-address integer
+ * arithmetic/bitwise selection, the fixed-register div/rem, the CL-count
+ * shift, the value-producing integer/float compare, and the two-address float
+ * ALU (`B1-fp`, closed 2026-07-29). A compare fused into a branch (its result
+ * read exactly once, as that branch's condition) emits NOTHING here — the
+ * branch re-emits the compare (`select_branch_x86`). `wide`/`dbl` is read
+ * from the first operand's recorded `class_of` entry (an SSA guarantee: the
+ * operand was selected before this use).
+ *
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param lir::LFunc f  the enclosing function (the fusion test reads its uses)
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param lir::LBin b  the binary op
+ * @return SelCtxX86 | error  the advanced context
+ */
+fn select_bin_x86(ctx0: SelCtxX86, f: lir::LFunc, inst: lir::LInst, b: lir::LBin) -> SelCtxX86 | error {
+    if cmp_kind_of(b.op).is_cmp && is_fused_compare(f, inst.result) {
+        return ctx0
+    }
+    let a_info = vinfo_get(ctx0.vinfo, b.a)
+    match b.op {
+        lir::LBinOp::IAdd => select_alu_x86(ctx0, inst, MAluOpX86::Add, b.a, b.b, a_info.wide)
+        lir::LBinOp::ISub => select_alu_x86(ctx0, inst, MAluOpX86::Sub, b.a, b.b, a_info.wide)
+        lir::LBinOp::IMul => select_imul_x86(ctx0, inst, b.a, b.b, a_info.wide)
+        lir::LBinOp::IDivS => select_div_x86(ctx0, inst, true, false, b.a, b.b, a_info.wide)
+        lir::LBinOp::IDivU => select_div_x86(ctx0, inst, false, false, b.a, b.b, a_info.wide)
+        lir::LBinOp::IRemS => select_div_x86(ctx0, inst, true, true, b.a, b.b, a_info.wide)
+        lir::LBinOp::IRemU => select_div_x86(ctx0, inst, false, true, b.a, b.b, a_info.wide)
+        lir::LBinOp::IAnd => select_alu_x86(ctx0, inst, MAluOpX86::And, b.a, b.b, a_info.wide)
+        lir::LBinOp::IOr => select_alu_x86(ctx0, inst, MAluOpX86::Or, b.a, b.b, a_info.wide)
+        lir::LBinOp::IXor => select_alu_x86(ctx0, inst, MAluOpX86::Xor, b.a, b.b, a_info.wide)
+        lir::LBinOp::IShl => select_shift_x86(ctx0, inst, MShiftOpX86::Shl, b.a, b.b, a_info.wide)
+        lir::LBinOp::IShrS => select_shift_x86(ctx0, inst, MShiftOpX86::Sar, b.a, b.b, a_info.wide)
+        lir::LBinOp::IShrU => select_shift_x86(ctx0, inst, MShiftOpX86::Shr, b.a, b.b, a_info.wide)
+        lir::LBinOp::ICmpEq => select_icmp_x86(ctx0, inst, MCond::EQ, b.a, b.b, a_info.wide)
+        lir::LBinOp::ICmpNe => select_icmp_x86(ctx0, inst, MCond::NE, b.a, b.b, a_info.wide)
+        lir::LBinOp::ICmpLtS => select_icmp_x86(ctx0, inst, MCond::LT, b.a, b.b, a_info.wide)
+        lir::LBinOp::ICmpLtU => select_icmp_x86(ctx0, inst, MCond::LO, b.a, b.b, a_info.wide)
+        lir::LBinOp::ICmpLeS => select_icmp_x86(ctx0, inst, MCond::LE, b.a, b.b, a_info.wide)
+        lir::LBinOp::ICmpLeU => select_icmp_x86(ctx0, inst, MCond::LS, b.a, b.b, a_info.wide)
+        lir::LBinOp::ICmpGtS => select_icmp_x86(ctx0, inst, MCond::GT, b.a, b.b, a_info.wide)
+        lir::LBinOp::ICmpGtU => select_icmp_x86(ctx0, inst, MCond::HI, b.a, b.b, a_info.wide)
+        lir::LBinOp::ICmpGeS => select_icmp_x86(ctx0, inst, MCond::GE, b.a, b.b, a_info.wide)
+        lir::LBinOp::ICmpGeU => select_icmp_x86(ctx0, inst, MCond::HS, b.a, b.b, a_info.wide)
+        lir::LBinOp::FAdd => select_falu_x86(ctx0, inst, MFAluOpX86::FAdd, b.a, b.b, a_info.wide)
+        lir::LBinOp::FSub => select_falu_x86(ctx0, inst, MFAluOpX86::FSub, b.a, b.b, a_info.wide)
+        lir::LBinOp::FMul => select_falu_x86(ctx0, inst, MFAluOpX86::FMul, b.a, b.b, a_info.wide)
+        lir::LBinOp::FDiv => select_falu_x86(ctx0, inst, MFAluOpX86::FDiv, b.a, b.b, a_info.wide)
+        lir::LBinOp::FCmpEq => select_fcmp_x86(ctx0, inst, MCond::EQ, b.a, b.b, a_info.wide)
+        lir::LBinOp::FCmpNe => select_fcmp_x86(ctx0, inst, MCond::NE, b.a, b.b, a_info.wide)
+        lir::LBinOp::FCmpLt => select_fcmp_x86(ctx0, inst, MCond::LT, b.a, b.b, a_info.wide)
+        lir::LBinOp::FCmpLe => select_fcmp_x86(ctx0, inst, MCond::LE, b.a, b.b, a_info.wide)
+        lir::LBinOp::FCmpGt => select_fcmp_x86(ctx0, inst, MCond::GT, b.a, b.b, a_info.wide)
+        lir::LBinOp::FCmpGe => select_fcmp_x86(ctx0, inst, MCond::GE, b.a, b.b, a_info.wide)
+    }
+}
+
+/**
+ * select_ineg_x86 — the `INeg` selection: the two-address copy of the operand
+ * into `dst`, then the read-modify-write `neg dst`.
+ *
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param a  the operand VReg (copied into dst)
+ * @param bool wide  true for the 64-bit r64 form, false for the 32-bit r32 form
+ * @return SelCtxX86  the advanced context
+ */
+fn select_ineg_x86(ctx0: SelCtxX86, inst: lir::LInst, a: u32, wide: bool) -> SelCtxX86 {
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::GPR, wide)
+    let ctx2 = selctx_x86_emit(ctx1, mov_x86(dst, vreg(a, MRegClass::GPR), wide))
+    selctx_x86_emit(ctx2, neg_x86(dst, wide))
+}
+
+/**
+ * select_inot_x86 — the `INot` selection: the two-address copy of the operand
+ * into `dst`, then the read-modify-write `not dst`.
+ *
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param a  the operand VReg (copied into dst)
+ * @param bool wide  true for the 64-bit r64 form, false for the 32-bit r32 form
+ * @return SelCtxX86  the advanced context
+ */
+fn select_inot_x86(ctx0: SelCtxX86, inst: lir::LInst, a: u32, wide: bool) -> SelCtxX86 {
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::GPR, wide)
+    let ctx2 = selctx_x86_emit(ctx1, mov_x86(dst, vreg(a, MRegClass::GPR), wide))
+    selctx_x86_emit(ctx2, not_x86(dst, wide))
+}
+
+/**
+ * select_identity_mov_x86 — the `Trunc`/`ZExt`/`SExt` selection: a plain
+ * register-to-register `mov`. The LIR carries no per-value width for these, and
+ * the LIR interpreter oracle treats all three as the identity over its carrier,
+ * so a bit-preserving move is the honest match rather than an unfounded narrow
+ * form isel has no real type to justify (mirrors arm64's `select_identity_mov`).
+ * `Trunc` picks the 32-bit form (its write zeroes the upper half).
+ *
+ * @param SelCtxX86 ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param a  the operand VReg
+ * @param bool wide  true for the 64-bit r64 form, false for the 32-bit r32 form
+ * @return SelCtxX86  the advanced context
+ */
+fn select_identity_mov_x86(ctx0: SelCtxX86, inst: lir::LInst, a: u32, wide: bool) -> SelCtxX86 {
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx1 = selctx_x86_set_vinfo(ctx0, inst.result, MRegClass::GPR, wide)
+    selctx_x86_emit(ctx1, mov_x86(dst, vreg(a, MRegClass::GPR), wide))
+}
+
+/**
+ * f64_sign_bit_mask_x86 — the IEEE-754 f64 sign-bit pattern
+ * (`0x8000000000000000`, `i64::MIN`'s two's-complement image) `select_fneg_x86`
+ * XORs into an f64 value's raw bits to flip its sign — the true IEEE negate
+ * (unlike `0 - x`, which mis-signs a zero operand in round-to-nearest). Reuses
+ * `MINST_I64_MIN` (`isel_arm64.tks`, beside `decode_signed64`) rather than a
+ * fresh literal — `i64::MIN`'s own magnitude has no positive `i64` form, so a
+ * two-step subtraction trick would only duplicate an already-named constant.
+ *
+ * @return i64  the f64 sign-bit mask
+ */
+fn f64_sign_bit_mask_x86() -> i64 {
+    MINST_I64_MIN
+}

@@ -1,0 +1,291 @@
+fn emit_u64_le(buf: []byte, v: u64) -> []byte {
+    mut b = teko::list::push(buf, (v & MACHO_BYTE_MASK_64) to byte)
+    b = teko::list::push(b, ((v >> 8) & MACHO_BYTE_MASK_64) to byte)
+    b = teko::list::push(b, ((v >> 16) & MACHO_BYTE_MASK_64) to byte)
+    b = teko::list::push(b, ((v >> 24) & MACHO_BYTE_MASK_64) to byte)
+    b = teko::list::push(b, ((v >> 32) & MACHO_BYTE_MASK_64) to byte)
+    b = teko::list::push(b, ((v >> 40) & MACHO_BYTE_MASK_64) to byte)
+    b = teko::list::push(b, ((v >> 48) & MACHO_BYTE_MASK_64) to byte)
+    teko::list::push(b, ((v >> 56) & MACHO_BYTE_MASK_64) to byte)
+}
+
+/**
+ * emit_str_bytes — append every byte of `s` to `buf` (a symbol name into the
+ * string table, or a fixed section/segment name before padding). A `str` is a
+ * byte sequence indexed by `s[i]`, so no re-encoding happens.
+ *
+ * @param []byte buf  the buffer to extend
+ * @param str s  the string whose bytes to append
+ * @return []byte  `buf` followed by s's raw bytes
+ */
+fn emit_str_bytes(buf: []byte, s: str) -> []byte {
+    mut b = buf
+    mut i: u64 = 0
+    loop {
+        if i >= s.len { break }
+        b = teko::list::push(b, s[i])
+        i++
+    }
+    b
+}
+
+/**
+ * emit_fixed16 — append `s`'s bytes then zero-pad to exactly 16 bytes (the
+ * `section_64` `sectname`/`segname` fixed fields, and the `LC_SEGMENT_64` empty
+ * segment name). `s` is at most 16 bytes for every name A4 emits.
+ *
+ * @param []byte buf  the buffer to extend
+ * @param str s  the name (at most 16 bytes)
+ * @return []byte  `buf` followed by s zero-padded to 16 bytes
+ */
+fn emit_fixed16(buf: []byte, s: str) -> []byte {
+    mut b = emit_str_bytes(buf, s)
+    mut n: u64 = s.len
+    loop {
+        if n >= 16 { break }
+        b = teko::list::push(b, 0)
+        n++
+    }
+    b
+}
+
+/**
+ * emit_u8_field — append one byte-wide field (an `nlist_64` `n_type`/`n_sect`),
+ * narrowing the u32 field value to a single `byte`.
+ *
+ * @param []byte buf  the buffer to extend
+ * @param u32 v  the field value (0..255)
+ * @return []byte  `buf` followed by v's low byte
+ */
+fn emit_u8_field(buf: []byte, v: u32) -> []byte {
+    teko::list::push(buf, (v & MACHO_BYTE_MASK) to byte)
+}
+
+/**
+ * pad_to_mult — append zero bytes until the buffer length is a multiple of `k`
+ * (the section-data-to-relocation-table 4-byte and the relocation-to-symbol-
+ * table 8-byte gaps). `k` is a small power of two, so the loop terminates.
+ *
+ * @param []byte buf  the buffer to extend
+ * @param u32 k  the alignment (a small power of two)
+ * @return []byte  `buf` zero-padded up to a multiple of `k`
+ */
+fn pad_to_mult(buf: []byte, k: u32) -> []byte {
+    mut b = buf
+    loop {
+        if b.len % k == 0 { break }
+        b = teko::list::push(b, 0)
+    }
+    b
+}
+
+/**
+ * pad_to_offset — append zero bytes until the buffer length equals `target` (the
+ * `__text`-to-`__const` alignment gap `MACHO_CONST_ALIGN` opens between the code
+ * and the rodata blob, #0.3.1.0 macho-const-section-align). Unlike `pad_to_mult`
+ * (which pads to the next multiple of a small `k`, agnostic of any base), this
+ * pads to an EXACT pre-computed offset — `compute_macho_layout`'s `const_offset`
+ * — so the byte stream physically lands where the load commands already say it
+ * does. `target >= buf.len` always holds for `emit_macho`'s one call site
+ * (`const_offset` is derived by rounding `text_size` UP), so the loop terminates
+ * having appended `target - buf.len` zero bytes (0 when already there — the
+ * common no-rodata and already-aligned-`text_size` cases, keeping the object
+ * byte-identical to before this fix in both).
+ *
+ * @param []byte buf  the buffer to extend
+ * @param u32 target  the exact byte length to pad up to
+ * @return []byte  `buf` zero-padded to exactly `target` bytes long
+ */
+fn pad_to_offset(buf: []byte, target: u32) -> []byte {
+    mut b = buf
+    loop {
+        if b.len >= (target to u64) { break }
+        b = teko::list::push(b, 0)
+    }
+    b
+}
+
+/**
+ * StrTab — the assembled Mach-O string table: the raw bytes (a leading NUL then
+ * one `_`-prefixed, NUL-terminated name per symbol) and the parallel per-symbol
+ * `n_strx` offsets the `nlist_64` entries carry.
+ *
+ * @since #385 A4-4
+ */
+type StrTab = struct {
+    /**
+     * bytes — the string-table image (leading NUL + `_name\0` per symbol).
+     */
+    bytes: []byte
+    /**
+     * strx — the byte offset of each symbol's name in `bytes`, in symbol order.
+     */
+    strx: []u32
+}
+
+/**
+ * build_strtab — assemble the string table from the symbol list: a leading NUL
+ * (the reserved empty name at index 0), then each symbol's Mach-O name — the
+ * `_` prefix the object format requires, the unprefixed `Symbol.name`, and a
+ * NUL terminator — recording each name's start offset as its `n_strx`.
+ *
+ * @param []Symbol symbols  the symbol table, in emission order
+ * @return StrTab  the string-table bytes + the per-symbol name offsets
+ */
+fn build_strtab(symbols: []Symbol) -> StrTab {
+    mut bytes: []byte = teko::list::push(teko::list::empty(), 0 to byte)
+    mut strx: []u32 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= symbols.len { break }
+        strx = teko::list::push(strx, bytes.len to u32)
+        bytes = teko::list::push(bytes, MACHO_SYM_UNDERSCORE)
+        bytes = emit_str_bytes(bytes, symbols[i].name)
+        bytes = teko::list::push(bytes, 0 to byte)
+        i++
+    }
+    StrTab { bytes = bytes; strx = strx }
+}
+
+/**
+ * count_defined — the number of defined symbols in `symbols` (local + global):
+ * the start index of the undefined range (`iundefsym`).
+ *
+ * @param []Symbol symbols  the symbol table
+ * @return u32  the count of `defined` symbols
+ */
+fn count_defined(symbols: []Symbol) -> u32 {
+    mut n: u32 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= symbols.len { break }
+        if symbols[i].defined { n = n + 1 }
+        i++
+    }
+    n
+}
+
+/**
+ * count_local — the number of file-local defined symbols in `symbols` (the
+ * leading run of the local-then-global-then-undefined table): `LC_DYSYMTAB`'s
+ * `nlocalsym`, and the start index of the global-defined range (`iextdefsym`).
+ *
+ * @param []Symbol symbols  the symbol table
+ * @return u32  the count of `defined && local` symbols
+ */
+fn count_local(symbols: []Symbol) -> u32 {
+    mut n: u32 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= symbols.len { break }
+        if symbols[i].defined && symbols[i].local { n = n + 1 }
+        i++
+    }
+    n
+}
+
+/**
+ * sym_index — the symbol-table index of the symbol named `name` (the
+ * `relocation_info` `r_symbolnum`), or `symbols.len` when absent. `encode_module`
+ * adds every relocation target to the table, so the absent-sentinel is
+ * unreached for a well-formed `EncodedModule` (and is covered directly by a
+ * unit test on a hand-built input).
+ *
+ * @param []Symbol symbols  the symbol table
+ * @param str name  the target symbol's unprefixed name
+ * @return u32  the symbol's index, or `symbols.len` when not found
+ */
+fn sym_index(symbols: []Symbol, name: str) -> u32 {
+    mut i: u32 = 0
+    loop {
+        if i >= symbols.len { break }
+        if symbols[i].name == name { return i }
+        i++
+    }
+    symbols.len to u32
+}
+
+/**
+ * ARM64_RELOC_UNSIGNED — the `relocation_info.r_type` for a plain absolute
+ * pointer slot (`<mach-o/arm64/reloc.h>`, value 0): an 8-byte address written
+ * into data, which is the only relocation `__const` ever carries.
+ */
+const ARM64_RELOC_UNSIGNED: u32 = 0
+
+/**
+ * ARM64_RELOC_BRANCH26 — the `relocation_info.r_type` for the 26-bit branch
+ * displacement of a `b`/`bl` (`<mach-o/arm64/reloc.h>`, value 2). Apple's `ld`
+ * REJECTS this type on any other instruction encoding, so it belongs to `MCall`
+ * alone — never to an `ADRP`/`ADD` address pair.
+ */
+const ARM64_RELOC_BRANCH26: u32 = 2
+
+/**
+ * ARM64_RELOC_PAGE21 — the `relocation_info.r_type` for the 21-bit page
+ * displacement of an `ADRP` (`<mach-o/arm64/reloc.h>`, value 3): the high half
+ * of an address materialization, whatever section the target lives in.
+ */
+const ARM64_RELOC_PAGE21: u32 = 3
+
+/**
+ * ARM64_RELOC_PAGEOFF12 — the `relocation_info.r_type` for the 12-bit
+ * within-page offset of the `ADD` (or scaled load/store) completing an `ADRP`
+ * (`<mach-o/arm64/reloc.h>`, value 4).
+ */
+const ARM64_RELOC_PAGEOFF12: u32 = 4
+
+/**
+ * reloc_type_value — the ARM64 Mach-O relocation type for an `MRelocKind`, one
+ * named `<mach-o/arm64/reloc.h>` constant per kind: `PAGE21` for `PageHi`,
+ * `PAGEOFF12` for `PageLo`, `BRANCH26` for `Call`, `UNSIGNED` for `Abs64` (the
+ * 1:1 mapping isel pre-tags, §2.2).
+ *
+ * @param MRelocKind k  the relocation kind
+ * @return u32  the `r_type` field value
+ */
+fn reloc_type_value(k: MRelocKind) -> u32 {
+    match k {
+        PageHi => ARM64_RELOC_PAGE21
+        PageLo => ARM64_RELOC_PAGEOFF12
+        Call => ARM64_RELOC_BRANCH26
+        Abs64 => ARM64_RELOC_UNSIGNED
+    }
+}
+
+/**
+ * reloc_pcrel — the `r_pcrel` bit for an `MRelocKind`: 1 for the PC-relative
+ * PAGE21 (ADRP) and BRANCH26 (BL) fixups, 0 for the absolute PAGEOFF12 (ADD
+ * lo12) fixup.
+ *
+ * @param MRelocKind k  the relocation kind
+ * @return u32  the `r_pcrel` field value (0 or 1)
+ */
+fn reloc_pcrel(k: MRelocKind) -> u32 {
+    match k {
+        PageHi => 1
+        PageLo => 0
+        Call => 1
+        Abs64 => 0
+    }
+}
+
+/**
+ * reloc_length — the Mach-O `relocation_info.r_length` for an `MRelocKind`: 2 (a
+ * 4-byte word) for every instruction fixup (`PageHi`/`PageLo`/`Call`, patched into a
+ * 32-bit ARM64 instruction word), and 3 (an 8-byte quad) for `Abs64` — a 64-bit
+ * absolute pointer slot inside `__const` (#594 T-B3). Extracted from the historical
+ * hardcoded `2` in `emit_reloc_table` so the value is byte-identical for the three
+ * instruction kinds (the `__text` relocation goldens prove it) and correct for the
+ * new pointer kind.
+ *
+ * @param MRelocKind k  the relocation kind
+ * @return u32  the `r_length` field value (2 or 3)
+ */
+fn reloc_length(k: MRelocKind) -> u32 {
+    match k {
+        Abs64 => 3
+        PageHi => 2
+        PageLo => 2
+        Call => 2
+    }
+}
