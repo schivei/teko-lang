@@ -1,0 +1,92 @@
+/**
+ * `math::checked_i64` test suite — i64-specific tests for teko::math::checked (M1).
+ * Signed overflow, MIN/-1 edges, wrapping, saturation, shifts, and power operations on i64.
+ */
+fn chk_unwrap_i64(r: i64 | error) -> i64 {
+    match r {
+        i64 as v => v
+        error => { teko::assert::is_true(false); (0) }
+    }
+}
+
+/**
+ * True iff a `i64 | error` carries the error arm — the error-path predicate.
+ */
+fn chk_is_err_i64(r: i64 | error) -> bool {
+    match r { i64 => false; error => true }
+}
+
+/**
+ * `checked_*` on `u8` reports overflow / underflow / div-by-zero / unsigned-neg as errors, never a panic; happy paths return the value.
+ */
+
+fn checked_i64_edges() {
+    teko::assert::is_true(chk_is_err_i64(checked_add_i64(I64_MAX, (1))))
+    teko::assert::is_true(chk_is_err_i64(checked_sub_i64(i64_min(), (1))))
+    teko::assert::is_true(chk_is_err_i64(checked_mul_i64(I64_MAX, (2))))
+    teko::assert::is_true(chk_is_err_i64(checked_mul_i64(i64_min(), (-1))))
+    teko::assert::is_true(chk_is_err_i64(checked_div_i64((1), (0))))
+    teko::assert::is_true(chk_is_err_i64(checked_div_i64(i64_min(), (-1))))
+    teko::assert::is_true(chk_is_err_i64(checked_rem_i64((1), (0))))
+    teko::assert::is_true(chk_is_err_i64(checked_neg_i64(i64_min())))
+    teko::assert::is_true(chk_unwrap_i64(checked_rem_i64(i64_min(), (-1))) == (0))
+    teko::assert::is_true(chk_unwrap_i64(checked_add_i64(i64_min(), I64_MAX)) == (-1))
+    teko::assert::is_true(chk_unwrap_i64(checked_mul_i64((-1), (10))) == (-10))
+    teko::assert::is_true(chk_unwrap_i64(checked_div_i64(i64_min(), (2))) == i64_min() / (2))
+    teko::assert::is_true(chk_unwrap_i64(checked_neg_i64(I64_MAX)) == i64_min() + (1))
+}
+
+/**
+ * `wrapping_*` on `i64` wraps two's-complement: MAX+1 -> MIN, MIN-1 -> MAX, MAX*2 -> -2, neg(MIN) -> MIN; happy paths total.
+ */
+#test
+fn wrapping_i64_wraps() {
+    teko::assert::is_true(wrapping_add_i64(I64_MAX, (1)) == i64_min())
+    teko::assert::is_true(wrapping_sub_i64(i64_min(), (1)) == I64_MAX)
+    teko::assert::is_true(wrapping_mul_i64(I64_MAX, (2)) == (-2))
+    teko::assert::is_true(wrapping_neg_i64(i64_min()) == i64_min())
+    teko::assert::is_true(wrapping_neg_i64((5)) == (-5))
+    teko::assert::is_true(wrapping_add_i64((100), (23)) == (123))
+    teko::assert::is_true(wrapping_mul_i64((-1), (-1)) == (1))
+    teko::assert::is_true(wrapping_sub_i64((10), (30)) == (-20))
+}
+
+/**
+ * `saturating_*` on `i64` clamps to MAX on positive overflow and MIN on negative overflow (sign-directed); happy inputs pass through.
+ */
+#test
+fn saturating_i64_clamps() {
+    teko::assert::is_true(saturating_add_i64(I64_MAX, (1)) == I64_MAX)
+    teko::assert::is_true(saturating_add_i64(i64_min(), (-1)) == i64_min())
+    teko::assert::is_true(saturating_sub_i64(i64_min(), (1)) == i64_min())
+    teko::assert::is_true(saturating_sub_i64(I64_MAX, (-1)) == I64_MAX)
+    teko::assert::is_true(saturating_mul_i64(I64_MAX, (2)) == I64_MAX)
+    teko::assert::is_true(saturating_mul_i64(i64_min(), (2)) == i64_min())
+    teko::assert::is_true(saturating_mul_i64(i64_min(), (-1)) == I64_MAX)
+    teko::assert::is_true(saturating_add_i64((2), (3)) == (5))
+}
+
+/**
+ * Shift edges on `i64`: `checked_shl/shr` error at count = width; `wrapping_shl/shr` mask the count `mod 64` (the #49/#61 regression).
+ */
+#test
+fn shift_i64_edges() {
+    teko::assert::is_true(chk_is_err_i64(checked_shl_i64((1), 64)))
+    teko::assert::is_true(chk_is_err_i64(checked_shr_i64((1), 64)))
+    teko::assert::is_true(chk_unwrap_i64(checked_shl_i64((1), 1)) == (2))
+    teko::assert::is_true(chk_unwrap_i64(checked_shr_i64((4), 1)) == (2))
+    teko::assert::is_true(wrapping_shl_i64((1), 64) == wrapping_shl_i64((1), 0))
+    teko::assert::is_true(wrapping_shr_i64((4), 64) == wrapping_shr_i64((4), 0))
+    teko::assert::is_true(wrapping_shl_i64((1), 2) == (4))
+}
+
+/**
+ * `checked_pow` on `i64`: exact powers (incl. a negative base), `x^0 == 1`, overflow -> error.
+ */
+#test
+fn pow_i64_cases() {
+    teko::assert::is_true(chk_unwrap_i64(checked_pow_i64((2), 3)) == (8))
+    teko::assert::is_true(chk_unwrap_i64(checked_pow_i64((-2), 3)) == (-8))
+    teko::assert::is_true(chk_unwrap_i64(checked_pow_i64((5), 0)) == (1))
+    teko::assert::is_true(chk_is_err_i64(checked_pow_i64(I64_MAX, 2)))
+}

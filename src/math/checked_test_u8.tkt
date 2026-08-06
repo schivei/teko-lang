@@ -1,0 +1,91 @@
+/**
+ * `math::checked_u8` test suite — u8-specific tests for teko::math::checked (M1).
+ * Boundary cases, wrapping, saturation, shifts, and power operations on u8.
+ */
+fn chk_unwrap_u8(r: u8 | error) -> u8 {
+    match r {
+        u8 as v => v
+        error => { teko::assert::is_true(false); (0 to u8) }
+    }
+}
+
+/**
+ * True iff a `u8 | error` carries the error arm — the error-path predicate.
+ */
+fn chk_is_err_u8(r: u8 | error) -> bool {
+    match r { u8 => false; error => true }
+}
+
+/**
+ * Unwrap a `u16 | error` for a happy-path assertion; a surprise `error` fails the test.
+ */
+
+fn checked_u8_edges() {
+    teko::assert::is_true(chk_is_err_u8(checked_add_u8(U8_MAX, (1 to u8))))
+    teko::assert::is_true(chk_is_err_u8(checked_sub_u8(U8_MIN, (1 to u8))))
+    teko::assert::is_true(chk_is_err_u8(checked_mul_u8(U8_MAX, (2 to u8))))
+    teko::assert::is_true(chk_is_err_u8(checked_div_u8((1 to u8), U8_MIN)))
+    teko::assert::is_true(chk_is_err_u8(checked_rem_u8((1 to u8), U8_MIN)))
+    teko::assert::is_true(chk_is_err_u8(checked_neg_u8((1 to u8))))
+    teko::assert::is_true(chk_unwrap_u8(checked_add_u8(U8_MAX, U8_MIN)) == U8_MAX)
+    teko::assert::is_true(chk_unwrap_u8(checked_sub_u8(U8_MAX, (1 to u8))) == U8_MAX - (1 to u8))
+    teko::assert::is_true(chk_unwrap_u8(checked_mul_u8(U8_MAX, (1 to u8))) == U8_MAX)
+    teko::assert::is_true(chk_unwrap_u8(checked_div_u8(U8_MAX, (1 to u8))) == U8_MAX)
+    teko::assert::is_true(chk_unwrap_u8(checked_rem_u8(U8_MAX, (2 to u8))) == (1 to u8))
+    teko::assert::is_true(chk_unwrap_u8(checked_neg_u8(U8_MIN)) == U8_MIN)
+}
+
+/**
+ * `wrapping_*` on `u8` wraps modulo 2^8: MAX+1 -> 0, 0-1 -> MAX, MAX*2 -> MAX-1; and totality on happy inputs.
+ */
+#test
+fn wrapping_u8_wraps() {
+    teko::assert::is_true(wrapping_add_u8(U8_MAX, (1 to u8)) == U8_MIN)
+    teko::assert::is_true(wrapping_sub_u8(U8_MIN, (1 to u8)) == U8_MAX)
+    teko::assert::is_true(wrapping_mul_u8(U8_MAX, (2 to u8)) == U8_MAX - (1 to u8))
+    teko::assert::is_true(wrapping_neg_u8(U8_MIN) == U8_MIN)
+    teko::assert::is_true(wrapping_neg_u8((1 to u8)) == U8_MAX)
+    teko::assert::is_true(wrapping_add_u8((2 to u8), (1 to u8)) == (3 to u8))
+    teko::assert::is_true(wrapping_mul_u8((3 to u8), (2 to u8)) == (6 to u8))
+}
+
+/**
+ * `saturating_*` on `u8` clamps to MAX on overflow and 0 on underflow; happy inputs pass through unchanged.
+ */
+#test
+fn saturating_u8_clamps() {
+    teko::assert::is_true(saturating_add_u8(U8_MAX, (1 to u8)) == U8_MAX)
+    teko::assert::is_true(saturating_sub_u8(U8_MIN, (1 to u8)) == U8_MIN)
+    teko::assert::is_true(saturating_mul_u8(U8_MAX, (2 to u8)) == U8_MAX)
+    teko::assert::is_true(saturating_add_u8((2 to u8), (1 to u8)) == (3 to u8))
+    teko::assert::is_true(saturating_sub_u8((5 to u8), (2 to u8)) == (3 to u8))
+}
+
+/**
+ * Shift edges on `u8`: `checked_shl/shr` error when the count reaches the width; `wrapping_shl/shr` mask the count `mod 8` (the #49/#61 regression) and never trap.
+ */
+#test
+fn shift_u8_edges() {
+    teko::assert::is_true(chk_is_err_u8(checked_shl_u8((1 to u8), 8)))
+    teko::assert::is_true(chk_is_err_u8(checked_shr_u8((1 to u8), 8)))
+    teko::assert::is_true(chk_unwrap_u8(checked_shl_u8((1 to u8), 1)) == (2 to u8))
+    teko::assert::is_true(chk_unwrap_u8(checked_shr_u8((2 to u8), 1)) == (1 to u8))
+    teko::assert::is_true(wrapping_shl_u8((1 to u8), 8) == wrapping_shl_u8((1 to u8), 0))
+    teko::assert::is_true(wrapping_shr_u8((2 to u8), 8) == wrapping_shr_u8((2 to u8), 0))
+    teko::assert::is_true(wrapping_shl_u8((1 to u8), 1) == (2 to u8))
+}
+
+/**
+ * `checked_pow` on `u8`: exact powers, `x^0 == 1`, and overflow -> error.
+ */
+#test
+fn pow_u8_cases() {
+    teko::assert::is_true(chk_unwrap_u8(checked_pow_u8((2 to u8), 3)) == (8 to u8))
+    teko::assert::is_true(chk_unwrap_u8(checked_pow_u8((5 to u8), 0)) == (1 to u8))
+    teko::assert::is_true(chk_is_err_u8(checked_pow_u8(U8_MAX, 2)))
+}
+
+/**
+ * `checked_*` on `u16` reports overflow / underflow / div-by-zero / unsigned-neg as errors, never a panic; happy paths return the value.
+ */
+#test

@@ -1,0 +1,91 @@
+/**
+ * `math::checked_u64` test suite — u64-specific tests for teko::math::checked (M1).
+ * Boundary cases, wrapping, saturation, shifts, and power operations on u64.
+ */
+fn chk_unwrap_u64(r: u64 | error) -> u64 {
+    match r {
+        u64 as v => v
+        error => { teko::assert::is_true(false); (0 to u64) }
+    }
+}
+
+/**
+ * True iff a `u64 | error` carries the error arm — the error-path predicate.
+ */
+fn chk_is_err_u64(r: u64 | error) -> bool {
+    match r { u64 => false; error => true }
+}
+
+/**
+ * Unwrap a `i8 | error` for a happy-path assertion; a surprise `error` fails the test.
+ */
+
+fn checked_u64_edges() {
+    teko::assert::is_true(chk_is_err_u64(checked_add_u64(U64_MAX, (1 to u64))))
+    teko::assert::is_true(chk_is_err_u64(checked_sub_u64(U64_MIN, (1 to u64))))
+    teko::assert::is_true(chk_is_err_u64(checked_mul_u64(U64_MAX, (2 to u64))))
+    teko::assert::is_true(chk_is_err_u64(checked_div_u64((1 to u64), U64_MIN)))
+    teko::assert::is_true(chk_is_err_u64(checked_rem_u64((1 to u64), U64_MIN)))
+    teko::assert::is_true(chk_is_err_u64(checked_neg_u64((1 to u64))))
+    teko::assert::is_true(chk_unwrap_u64(checked_add_u64(U64_MAX, U64_MIN)) == U64_MAX)
+    teko::assert::is_true(chk_unwrap_u64(checked_sub_u64(U64_MAX, (1 to u64))) == U64_MAX - (1 to u64))
+    teko::assert::is_true(chk_unwrap_u64(checked_mul_u64(U64_MAX, (1 to u64))) == U64_MAX)
+    teko::assert::is_true(chk_unwrap_u64(checked_div_u64(U64_MAX, (1 to u64))) == U64_MAX)
+    teko::assert::is_true(chk_unwrap_u64(checked_rem_u64(U64_MAX, (2 to u64))) == (1 to u64))
+    teko::assert::is_true(chk_unwrap_u64(checked_neg_u64(U64_MIN)) == U64_MIN)
+}
+
+/**
+ * `wrapping_*` on `u64` wraps modulo 2^64: MAX+1 -> 0, 0-1 -> MAX, MAX*2 -> MAX-1; and totality on happy inputs.
+ */
+#test
+fn wrapping_u64_wraps() {
+    teko::assert::is_true(wrapping_add_u64(U64_MAX, (1 to u64)) == U64_MIN)
+    teko::assert::is_true(wrapping_sub_u64(U64_MIN, (1 to u64)) == U64_MAX)
+    teko::assert::is_true(wrapping_mul_u64(U64_MAX, (2 to u64)) == U64_MAX - (1 to u64))
+    teko::assert::is_true(wrapping_neg_u64(U64_MIN) == U64_MIN)
+    teko::assert::is_true(wrapping_neg_u64((1 to u64)) == U64_MAX)
+    teko::assert::is_true(wrapping_add_u64((2 to u64), (1 to u64)) == (3 to u64))
+    teko::assert::is_true(wrapping_mul_u64((3 to u64), (2 to u64)) == (6 to u64))
+}
+
+/**
+ * `saturating_*` on `u64` clamps to MAX on overflow and 0 on underflow; happy inputs pass through unchanged.
+ */
+#test
+fn saturating_u64_clamps() {
+    teko::assert::is_true(saturating_add_u64(U64_MAX, (1 to u64)) == U64_MAX)
+    teko::assert::is_true(saturating_sub_u64(U64_MIN, (1 to u64)) == U64_MIN)
+    teko::assert::is_true(saturating_mul_u64(U64_MAX, (2 to u64)) == U64_MAX)
+    teko::assert::is_true(saturating_add_u64((2 to u64), (1 to u64)) == (3 to u64))
+    teko::assert::is_true(saturating_sub_u64((5 to u64), (2 to u64)) == (3 to u64))
+}
+
+/**
+ * Shift edges on `u64`: `checked_shl/shr` error when the count reaches the width; `wrapping_shl/shr` mask the count `mod 64` (the #49/#61 regression) and never trap.
+ */
+#test
+fn shift_u64_edges() {
+    teko::assert::is_true(chk_is_err_u64(checked_shl_u64((1 to u64), 64)))
+    teko::assert::is_true(chk_is_err_u64(checked_shr_u64((1 to u64), 64)))
+    teko::assert::is_true(chk_unwrap_u64(checked_shl_u64((1 to u64), 1)) == (2 to u64))
+    teko::assert::is_true(chk_unwrap_u64(checked_shr_u64((2 to u64), 1)) == (1 to u64))
+    teko::assert::is_true(wrapping_shl_u64((1 to u64), 64) == wrapping_shl_u64((1 to u64), 0))
+    teko::assert::is_true(wrapping_shr_u64((2 to u64), 64) == wrapping_shr_u64((2 to u64), 0))
+    teko::assert::is_true(wrapping_shl_u64((1 to u64), 1) == (2 to u64))
+}
+
+/**
+ * `checked_pow` on `u64`: exact powers, `x^0 == 1`, and overflow -> error.
+ */
+#test
+fn pow_u64_cases() {
+    teko::assert::is_true(chk_unwrap_u64(checked_pow_u64((2 to u64), 3)) == (8 to u64))
+    teko::assert::is_true(chk_unwrap_u64(checked_pow_u64((5 to u64), 0)) == (1 to u64))
+    teko::assert::is_true(chk_is_err_u64(checked_pow_u64(U64_MAX, 2)))
+}
+
+/**
+ * `checked_*` on `i8` reports overflow / div-by-zero / MIN-neg / MIN-over--1 as errors; happy paths (incl. negatives) return the value.
+ */
+#test
