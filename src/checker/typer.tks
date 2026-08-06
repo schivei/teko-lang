@@ -1220,6 +1220,40 @@ fn is_type_param_decl(decl: parser::TypeDecl) -> bool {
     decl.type_params.len == 0 && decl.type_constraints.len == 1
 }
 
+/**
+ * Is `name` a PHANTOM generic-instance name — a `Base__g__…` mangling at least one of whose argument
+ * tokens is an in-scope abstract type-param (a `type_param_table` synthetic decl)? A generic function
+ * or method that constructs a DIFFERENT generic type from its OWN type-param (`Box<T>` inside
+ * `wrap<T>`) resolves that construction to `Box__g__T`, which no `instantiate_types` site stamps while
+ * `T` is abstract. `type_struct_lit` tolerates such a phantom (deferring the stamp to the mono pass,
+ * which re-mangles it through the bound `T` via `subst_instance_name`) instead of failing with the
+ * "was not stamped" internal error — but ONLY for a genuine phantom: a name every token of which is a
+ * concrete type is a real missing-stamp defect and still errors. Each maximal non-`_` token is probed
+ * against the type table; a token resolving to a type-param's synthetic decl (`is_type_param_decl`)
+ * makes the whole name a phantom.
+ *
+ * @param name   a resolved, `__g__`-stamped instance name
+ * @param table  the folded type table, with the enclosing generic's type-params registered
+ * @return       true iff some argument token of `name` is an in-scope abstract type-param
+ */
+fn name_is_phantom_instance(name: str, table: TypeTable) -> bool {
+    if !name_is_g_instance(name) { return false }
+    mut i: u64 = 0
+    loop {
+        if i >= name.len { break }
+        if name[i] == b'_' { i++; continue }
+        mut j = i
+        loop { if j >= name.len { break }; if name[j] == b'_' { break }; j++ }
+        let tok = teko::str::slice(name, i, j)
+        match type_table_find(table, tok, "") {
+            parser::TypeDecl as td => { if is_type_param_decl(td) { return true } }
+            error => { }
+        }
+        i = j
+    }
+    false
+}
+
 /** (S6, M.1) when a constrained type-param's `extends` list came back EMPTY not because the
     constraint genuinely authorizes nothing (NoConstraint / a struct-or-variant atom) but because
     resolve::constraint_interfaces ERRORED (a trait atom / an unknown atom / a Risco-3 ambiguity),
@@ -2490,11 +2524,20 @@ fn type_struct_lit(sl: parser::StructLit, expected: Type, env: Env, table: TypeT
             if !name_has_generic_base(mname, base_name) {
                 return error { message = $"struct literal `{base_name}` does not match the annotated type" }
             }
-            decl = match type_table_find(table, mname, "") {
-                parser::TypeDecl as td => td
-                error => return error { message = $"internal: generic instance `{mname}` was not stamped" }
+            match type_table_find(table, mname, "") {
+                parser::TypeDecl as td => { decl = td; name = mname }
+                error => {
+                    // A PHANTOM instance (`Box__g__T`) — its type-args still carry an in-scope
+                    // abstract type-param, so no concrete decl is stamped while typing the ENCLOSING
+                    // generic (a generic fn/method constructing a DIFFERENT generic type from its own
+                    // `T`). Tolerate it exactly like a self-construct: keep the abstract template
+                    // `decl` (its fields type against `T`) and tag the node with the phantom name; the
+                    // monomorph pass substitutes `T` (subst_instance_name) and stamps the concrete
+                    // instance. A name whose tokens are all concrete is a GENUINE missing stamp → error.
+                    if name_is_phantom_instance(mname, table) { name = mname }
+                    else { return error { message = $"internal: generic instance `{mname}` was not stamped" } }
+                }
             }
-            name = mname
         }
     }
     // (W10b.CLASS) `Name { … }` also constructs a class instance — a class's fields are typed
