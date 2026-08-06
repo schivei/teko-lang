@@ -1,0 +1,163 @@
+// --- string & byte literals ---
+
+// ---- the UNIFIED string reader: two ORTHOGONAL prefix modifiers × two delimiters ----
+//
+// A string START is an optional run of `$`/`@` (each at most once, ANY order: `$@` == `@$`)
+// followed by the opening delimiter `"` (single-line) or `"""` (multi-line). The eight
+// combinations are all valid; `$` and `@` COMPOSE freely (C# `$@"…"`).
+//   `$`  = interpolation (holes `{expr}`, literal braces `{{`/`}}`).
+//   `@`  = verbatim / raw  (NO escape processing — a `\` is a literal byte).
+// One unified body scanner is parameterized by (has_interp, has_verbatim, multiline).
+// Non-interp → fully-decoded Str; interp → Interp (parser decodes escapes) or InterpRaw
+// (parser does NOT decode escapes).
+//
+// InterpRaw REPRESENTATION (the parser splits it the same way as Interp, but appends literal
+// bytes verbatim): for SINGLE-line verbatim the lexer copies the inner text to FRESH bytes,
+// applying the depth-0-outside-holes `""`→`"` collapse while leaving `\` and the hole `{…}`
+// spans intact; for MULTI-line verbatim the inner text is copied AS-IS (a lone `"`/`""` is
+// literal — only `"""` closes). Thus the `""`-collapse lives ONLY here, in the lexer, so the
+// parser can treat single- vs multi-line InterpRaw uniformly. For non-verbatim Interp the
+// raw-VIEW + parser-decodes-escapes path is unchanged.
+
+// the closing delimiter matches at `p`? (three quotes if multiline, else one).
+fn str_close_at(source: str, p: u64, multiline: bool) -> bool {
+    if source[p] != b'"' { return false }
+    if !multiline { return true }
+    at(source, p + 1) == b'"' && at(source, p + 2) == b'"'
+}
+
+// the UNIFIED string body scanner. `inner` is the first byte AFTER the opening delimiter;
+// (has_interp, has_verbatim, multiline) select the four behaviours.
+fn read_string_body(source: str, pos: u64, inner: u64, has_interp: bool, has_verbatim: bool, multiline: bool) -> Scan | error {
+    mut delim: u64 = 1
+    if multiline { delim = 3 }
+    if has_interp {
+        if !has_verbatim {
+            // plain interp → keep the zero-copy raw-VIEW; the parser decodes escapes.
+            mut p = inner
+            mut depth: u64 = 0   // brace nesting inside holes
+            loop {
+                if p >= source.len { return scan_err_at(source, pos, "unterminated interpolated string") }
+                let c = source[p]
+                if !multiline && c == b'\\' {   // an escape — skip the next byte too (single-line only)
+                    if p + 1 >= source.len { return scan_err_at(source, pos, "unterminated escape in interpolated string") }
+                    p = p + 2
+                    continue
+                }
+                if depth == 0 && c == b'{' && at(source, p + 1) == b'{' { p = p + 2; continue }   // `{{` literal — depth unchanged
+                if depth == 0 && c == b'}' && at(source, p + 1) == b'}' { p = p + 2; continue }   // `}}` literal — depth unchanged
+                if c == b'{' { depth = depth + 1; p++; continue }
+                if c == b'}' { if depth > 0 { depth = depth - 1 }; p++; continue }
+                if depth == 0 && str_close_at(source, p, multiline) {
+                    return Scan { token = Token { kind = TokenKind::Interp; text = slice(source, inner, p); line = 0; col = 0 }; next = p + delim }
+                }
+                p++
+            }
+        }
+        // VERBATIM interp → emit FRESH inner bytes (single-line collapses `""`→`"` at depth 0;
+        // multi-line copies as-is). `\` stays literal; hole `{…}` spans are copied intact.
+        mut p = inner
+        mut depth: u64 = 0
+        mut bytes: []byte = teko::list::empty()
+        loop {
+            if p >= source.len { return scan_err_at(source, pos, "unterminated interpolated string") }
+            let c = source[p]
+            if depth == 0 && c == b'{' && at(source, p + 1) == b'{' {   // `{{` literal — copy BOTH bytes AS-IS, depth unchanged
+                bytes = teko::list::push(bytes, b'{'); bytes = teko::list::push(bytes, b'{'); p = p + 2; continue
+            }
+            if depth == 0 && c == b'}' && at(source, p + 1) == b'}' {   // `}}` literal — copy BOTH bytes AS-IS, depth unchanged
+                bytes = teko::list::push(bytes, b'}'); bytes = teko::list::push(bytes, b'}'); p = p + 2; continue
+            }
+            if c == b'{' { depth = depth + 1; bytes = teko::list::push(bytes, c); p++; continue }
+            if c == b'}' { if depth > 0 { depth = depth - 1 }; bytes = teko::list::push(bytes, c); p++; continue }
+            if c == b'"' && depth == 0 {
+                if !multiline {
+                    if at(source, p + 1) == b'"' {   // doubled quote → one literal `"`, continue
+                        bytes = teko::list::push(bytes, b'"')
+                        p = p + 2
+                        continue
+                    }
+                    return Scan { token = Token { kind = TokenKind::InterpRaw; text = str_of_bytes(bytes); line = 0; col = 0 }; next = p + 1 }
+                }
+                if str_close_at(source, p, true) {   // only `"""` closes; a lone `"`/`""` is literal
+                    return Scan { token = Token { kind = TokenKind::InterpRaw; text = str_of_bytes(bytes); line = 0; col = 0 }; next = p + 3 }
+                }
+            }
+            bytes = teko::list::push(bytes, c)   // every other byte (incl `\` and `\n`) is literal
+            p++
+        }
+    }
+    // NON-INTERP: fully decode to a Str token.
+    mut p = inner
+    mut bytes: []byte = teko::list::empty()
+    loop {
+        if p >= source.len { return scan_err_at(source, pos, "unterminated string literal") }
+        let c = source[p]
+        if has_verbatim {
+            // verbatim: NO escapes. SINGLE-line `""`→`"` (a doubled quote is content, NOT a close —
+            // checked BEFORE str_close_at); multi-line a lone `"`/`""` is literal.
+            if !multiline && c == b'"' && at(source, p + 1) == b'"' {
+                bytes = teko::list::push(bytes, b'"')
+                p = p + 2
+                continue
+            }
+            if str_close_at(source, p, multiline) {
+                return Scan { token = Token { kind = TokenKind::Str; text = str_of_bytes(bytes); line = 0; col = 0 }; next = p + delim }
+            }
+            bytes = teko::list::push(bytes, c)   // every other byte (incl `\` and `\n`) is literal
+            p++
+            continue
+        }
+        if str_close_at(source, p, multiline) {
+            return Scan { token = Token { kind = TokenKind::Str; text = str_of_bytes(bytes); line = 0; col = 0 }; next = p + delim }
+        }
+        // plain (escapes on).
+        if c == b'\\' {
+            let e = match escape_byte(source, p) {
+                EscByte as eb => eb
+                error as err => return err
+            }
+            bytes = teko::list::push(bytes, e.value)
+            p = e.next
+            continue
+        }
+        bytes = teko::list::push(bytes, c)   // a literal byte (ASCII or UTF-8 cont.)
+        p++
+    }
+}
+
+// recognize a string START at `pos`: an optional run of `$`/`@` (each ≤1, any order) then a
+// `"`. On match, scan the prefix flags + delimiter and dispatch to read_string_body. Mirrors
+// the C twin's read_string; the caller (next_token) checks for a `"`/`$`/`@` lead first.
+fn read_string(source: str, pos: u64) -> Scan | error {
+    mut has_interp = false
+    mut has_verbatim = false
+    mut p = pos
+    loop {
+        let c = at(source, p)
+        if c == b'$' { if has_interp { break }; has_interp = true; p = p + 1; continue }
+        if c == b'@' { if has_verbatim { break }; has_verbatim = true; p = p + 1; continue }
+        break
+    }
+    // the caller only routes here when a string start is certain (a `"` follows the prefix run).
+    let multiline = at(source, p + 1) == b'"' && at(source, p + 2) == b'"'
+    let inner = if multiline { p + 3 } else { p + 1 }
+    read_string_body(source, pos, inner, has_interp, has_verbatim, multiline)
+}
+
+// is there a string START at `pos`? an optional `$`/`@` prefix run (each ≤1, any order)
+// then a `"`. Used by next_token to decide between the unified string reader and falling
+// through (a bare `$`/`@` not so followed is an unexpected character via read_symbol).
+fn is_string_start(source: str, pos: u64) -> bool {
+    mut has_interp = false
+    mut has_verbatim = false
+    mut p = pos
+    loop {
+        let c = at(source, p)
+        if c == b'$' { if has_interp { break }; has_interp = true; p = p + 1; continue }
+        if c == b'@' { if has_verbatim { break }; has_verbatim = true; p = p + 1; continue }
+        break
+    }
+    at(source, p) == b'"'
+}
+

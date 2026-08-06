@@ -1,0 +1,152 @@
+// --- symbols: operators, delimiters, punctuation (maximal munch — B.23) ---
+
+fn read_symbol(source: str, pos: u64) -> Scan | error {
+    let c = source[pos]
+    let c1 = at(source, pos + 1)
+    let c2 = at(source, pos + 2)
+
+    // 3-byte (longest first)
+    if c == b'<' && c1 == b'<' && c2 == b'=' { return sym(source, pos, 3, TokenKind::ShlEq) }
+    if c == b'>' && c1 == b'>' && c2 == b'=' { return sym(source, pos, 3, TokenKind::ShrEq) }
+    if c == b'.' && c1 == b'.' && c2 == b'=' { return sym(source, pos, 3, TokenKind::DotDotEq) }
+
+    // 2-byte
+    if c == b'=' && c1 == b'=' { return sym(source, pos, 2, TokenKind::EqEq) }
+    if c == b'=' && c1 == b'>' { return sym(source, pos, 2, TokenKind::FatArrow) }
+    if c == b'!' && c1 == b'=' { return sym(source, pos, 2, TokenKind::Ne) }
+    if c == b'<' && c1 == b'=' { return sym(source, pos, 2, TokenKind::Le) }
+    if c == b'>' && c1 == b'=' { return sym(source, pos, 2, TokenKind::Ge) }
+    if c == b'<' && c1 == b'<' { return sym(source, pos, 2, TokenKind::Shl) }
+    if c == b'>' && c1 == b'>' { return sym(source, pos, 2, TokenKind::Shr) }
+    if c == b'-' && c1 == b'>' { return sym(source, pos, 2, TokenKind::Arrow) }
+    if c == b':' && c1 == b':' { return sym(source, pos, 2, TokenKind::ColonColon) }
+    if c == b'&' && c1 == b'&' { return sym(source, pos, 2, TokenKind::AndAnd) }
+    if c == b'|' && c1 == b'|' { return sym(source, pos, 2, TokenKind::OrOr) }
+    if c == b'+' && c1 == b'+' { return sym(source, pos, 2, TokenKind::PlusPlus) }   // ++ (maximal munch, before +/+=)
+    if c == b'-' && c1 == b'-' { return sym(source, pos, 2, TokenKind::MinusMinus) }   // -- (before -/-=/->)
+    if c == b'+' && c1 == b'=' { return sym(source, pos, 2, TokenKind::PlusEq) }
+    if c == b'-' && c1 == b'=' { return sym(source, pos, 2, TokenKind::MinusEq) }
+    if c == b'*' && c1 == b'=' { return sym(source, pos, 2, TokenKind::StarEq) }
+    if c == b'/' && c1 == b'=' { return sym(source, pos, 2, TokenKind::SlashEq) }
+    if c == b'%' && c1 == b'=' { return sym(source, pos, 2, TokenKind::PercentEq) }
+    if c == b'&' && c1 == b'=' { return sym(source, pos, 2, TokenKind::AmpEq) }
+    if c == b'|' && c1 == b'=' { return sym(source, pos, 2, TokenKind::PipeEq) }
+    if c == b'^' && c1 == b'=' { return sym(source, pos, 2, TokenKind::CaretEq) }
+
+
+    // `..` — bare range / spread (C6.7); `..=` is already consumed above by the 3-byte check.
+    if c == b'.' && c1 == b'.' { return sym(source, pos, 2, TokenKind::DotDot) }
+
+    // 1-byte
+    let one = match c {
+        b'+' => TokenKind::Plus
+        b'-' => TokenKind::Minus
+        b'*' => TokenKind::Star
+        b'/' => TokenKind::Slash
+        b'%' => TokenKind::Percent
+        b'&' => TokenKind::Amp
+        b'|' => TokenKind::Pipe
+        b'^' => TokenKind::Caret
+        b'~' => TokenKind::Tilde
+        b'!' => TokenKind::Bang
+        b'<' => TokenKind::Lt
+        b'>' => TokenKind::Gt
+        b'=' => TokenKind::Assign
+        b':' => TokenKind::Colon
+        b';' => TokenKind::Semicolon
+        b',' => TokenKind::Comma
+        b'.' => TokenKind::Dot
+        b'(' => TokenKind::LParen
+        b')' => TokenKind::RParen
+        b'{' => TokenKind::LBrace
+        b'}' => TokenKind::RBrace
+        b'[' => TokenKind::LBracket
+        b']' => TokenKind::RBracket
+        b'#' => TokenKind::Hash   // attribute marker (`#test`) — D2 test gate
+        _ => return scan_err_at(source, pos, "unexpected character")
+    }
+    sym(source, pos, 1, one)
+}
+
+// --- one token at pos (already past spaces/comments/newline), or fail ---
+
+fn next_token(source: str, pos: u64) -> Scan | error {
+    let c = source[pos]
+    // a byte literal `b'…'` — `b` would otherwise begin an identifier
+    if c == b'b' && at(source, pos + 1) == b'\'' { return read_byte_lit(source, pos) }
+    // a char literal `c'…'` — `c` would otherwise begin an identifier
+    if c == b'c' && at(source, pos + 1) == b'\'' { return read_char_lit(source, pos) }
+    // a string literal: an optional `$`/`@` prefix run (each ≤1, any order) then `"` / `"""`.
+    // Covers `"`, `$"`, `@"`, `$@"`, `@$"` and the `"""` variants — the unified reader. A bare
+    // `$`/`@` not followed (after the prefix run) by a quote is NOT a string start.
+    if (c == b'"' || c == b'$' || c == b'@') && is_string_start(source, pos) { return read_string(source, pos) }
+    if is_digit(c) { return read_number(source, pos) }
+    if is_alpha(c) { return keyword_or_ident(source, pos) }
+    if c == b'_' { return read_underscore(source, pos) }
+    read_symbol(source, pos)
+}
+
+// --- the main loop ---
+
+pub fn tokenize(source: str) -> []Token | error {
+    mut pos: u64 = 0
+    // (#148 R3 DECREE) `tokens` is a linear chain: born empty, self-append-only, read only
+    // after the loop — every copy-grow frees the superseded buffer (mem::push_fo; paranoid-gated).
+    mut tokens: []Token = teko::list::empty()
+    // location cursor: (cur_line, cur_col) is the 1-based location of byte `cur_pos`. It
+    // advances forward to each token-start `pos`; since the token starts are monotonic, the
+    // total advance work is O(N) (each byte crossed once) — replacing the old O(N²) stamping.
+    mut cur_pos: u64 = 0
+    mut cur_line: u32 = 1
+    mut cur_col: u32 = 1
+
+    loop {
+        pos = skip_spaces(source, pos)
+        if pos >= source.len { break }
+
+        // advance the cursor from cur_pos up to the token start `pos`, counting newlines.
+        loop {
+            if cur_pos >= pos { break }
+            if source[cur_pos] == b'\n' { cur_line = cur_line + 1; cur_col = 1 } else { cur_col = cur_col + 1 }
+            cur_pos = cur_pos + 1
+        }
+
+        let c = source[pos]
+
+        // `//` line comment → skip to the newline
+        if c == b'/' && at(source, pos + 1) == b'/' {
+            pos = skip_line(source, pos)
+            continue
+        }
+        // `/* … */` block & `/** … */` doc comments
+        if c == b'/' && at(source, pos + 1) == b'*' {
+            // a DOC comment `/** … */` (but NOT the empty `/**/`) becomes a Doc
+            // TOKEN (the parser attaches it to the next type/fn declaration); a plain
+            // block comment is skipped.
+            if at(source, pos + 2) == b'*' && at(source, pos + 3) != b'/' {
+                let scan = match read_doc_comment(source, pos) { Scan as sc => sc; error as e => return e }
+                tokens = teko::mem::push_fo(tokens, stamp_loc(scan.token, cur_line, cur_col))
+                pos = scan.next
+                continue
+            }
+            pos = match skip_block_comment(source, pos) { u64 as p => p; error as e => return e }
+            continue
+        }
+        // a significant newline (B.26) is a token
+        if c == b'\n' {
+            tokens = teko::mem::push_fo(tokens, stamp_loc(sym(source, pos, 1, TokenKind::Newline).token, cur_line, cur_col))
+            pos = pos + 1
+            continue
+        }
+
+        let scan = match next_token(source, pos) {
+            Scan as sc => sc
+            error as e => return e
+        }
+        tokens = teko::mem::push_fo(tokens, stamp_loc(scan.token, cur_line, cur_col))
+        pos = scan.next
+    }
+
+    tokens
+}
+

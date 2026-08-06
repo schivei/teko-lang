@@ -1,0 +1,112 @@
+// --- small ASCII classification helpers (not in the language's builtin char-ops set —
+// `is_alpha`/`is_digit`/`is_space` exist but not a hex-digit or JSON-specific whitespace
+// predicate, so these are written locally, over `byte` — the parser scans UTF-8 bytes
+// directly, decoding codepoints only inside string literals where `\uXXXX` needs it). ---
+
+fn is_json_ws(b: byte) -> bool {
+    b == b' ' || b == b'\t' || b == b'\n' || b == b'\r'
+}
+
+fn is_digit_byte(b: byte) -> bool {
+    b >= b'0' && b <= b'9'
+}
+
+fn hex_digit_value(b: byte) -> i64 {
+    if b >= b'0' && b <= b'9' { return (b to i64) - (b'0' to i64) }
+    if b >= b'a' && b <= b'f' { return (b to i64) - (b'a' to i64) + 10 }
+    if b >= b'A' && b <= b'F' { return (b to i64) - (b'A' to i64) + 10 }
+    -1
+}
+
+fn skip_ws(p: []byte, pos: u64) -> u64 {
+    mut at = pos
+    loop {
+        if at >= p.len || !is_json_ws(p[at]) { break }
+        at++
+    }
+    at
+}
+
+// --- the parser: hand-written recursive descent over the input's raw UTF-8 bytes.
+// JSON's structural grammar (RFC 8259 §2) is pure ASCII (whitespace, punctuation,
+// digits, the literal keywords) — only STRING CONTENTS can carry arbitrary UTF-8, and
+// those bytes are copied through verbatim (unescaped) except inside a recognized `\`
+// escape, so scanning by byte index (not codepoint index) is correct and avoids the
+// O(n) codepoint-reindexing `teko::regex` needs for its `.`/class matcher. ---
+
+fn parse_value(p: []byte, pos: u64) -> PResult | error {
+    let at = skip_ws(p, pos)
+    if at >= p.len { return error { message = "json: unexpected end of input" } }
+    let b = p[at]
+    if b == b'{' { return parse_object(p, at) }
+    if b == b'[' { return parse_array(p, at) }
+    if b == b'"' { return parse_string_value(p, at) }
+    if b == b't' { return parse_literal(p, at, "true", JsonBool { value = true }) }
+    if b == b'f' { return parse_literal(p, at, "false", JsonBool { value = false }) }
+    if b == b'n' { return parse_literal(p, at, "null", JsonNull { }) }
+    if b == b'-' || is_digit_byte(b) { return parse_number(p, at) }
+    error { message = concat("json: unexpected character at offset ", i64_to_str(at to i64)) }
+}
+
+// matches a fixed ASCII keyword (`true`/`false`/`null`) starting at `pos`.
+fn parse_literal(p: []byte, pos: u64, word: str, value: JsonValue) -> PResult | error {
+    mut i: u64 = 0
+    loop {
+        if i >= word.len { break }
+        if pos + i >= p.len || p[pos + i] != word[i] {
+            return error { message = concat("json: invalid literal at offset ", i64_to_str(pos to i64)) }
+        }
+        i++
+    }
+    PResult { pos = pos + word.len; value = value }
+}
+
+// --- object: `{ "key" : value , "key" : value ... }` ---
+
+fn parse_object(p: []byte, pos: u64) -> PResult | error {
+    // pos is at '{'
+    mut at = skip_ws(p, pos + 1)
+    mut keys: []str = teko::list::empty()
+    mut values: []JsonValue = teko::list::empty()
+    if at < p.len && p[at] == b'}' { return PResult { pos = at + 1; value = JsonObject { keys = keys; values = values } } }
+    loop {
+        at = skip_ws(p, at)
+        if at >= p.len || p[at] != b'"' {
+            return error { message = concat("json: expected string key at offset ", i64_to_str(at to i64)) }
+        }
+        let key_res = match parse_string(p, at) { PStringResult as s => s; error as e => return e }
+        at = skip_ws(p, key_res.pos)
+        if at >= p.len || p[at] != b':' {
+            return error { message = concat("json: expected ':' after object key at offset ", i64_to_str(at to i64)) }
+        }
+        let val_res = match parse_value(p, at + 1) { PResult as v => v; error as e => return e }
+        keys = teko::list::push(keys, key_res.text)
+        values = teko::list::push(values, val_res.value)
+        at = skip_ws(p, val_res.pos)
+        if at >= p.len { return error { message = "json: unterminated object — expected ',' or '}'" } }
+        if p[at] == b',' { at = at + 1; continue }
+        if p[at] == b'}' { return PResult { pos = at + 1; value = JsonObject { keys = keys; values = values } } }
+        return error { message = concat("json: expected ',' or '}' at offset ", i64_to_str(at to i64)) }
+    }
+    error { message = "json: unreachable" }   // loop always returns; satisfies the checker's fall-through requirement
+}
+
+// --- array: `[ value , value ... ]` ---
+
+fn parse_array(p: []byte, pos: u64) -> PResult | error {
+    // pos is at '['
+    mut at = skip_ws(p, pos + 1)
+    mut items: []JsonValue = teko::list::empty()
+    if at < p.len && p[at] == b']' { return PResult { pos = at + 1; value = JsonArray { items = items } } }
+    loop {
+        let val_res = match parse_value(p, at) { PResult as v => v; error as e => return e }
+        items = teko::list::push(items, val_res.value)
+        at = skip_ws(p, val_res.pos)
+        if at >= p.len { return error { message = "json: unterminated array — expected ',' or ']'" } }
+        if p[at] == b',' { at = at + 1; continue }
+        if p[at] == b']' { return PResult { pos = at + 1; value = JsonArray { items = items } } }
+        return error { message = concat("json: expected ',' or ']' at offset ", i64_to_str(at to i64)) }
+    }
+    error { message = "json: unreachable" }
+}
+

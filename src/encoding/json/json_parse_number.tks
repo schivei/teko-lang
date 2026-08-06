@@ -1,0 +1,148 @@
+// --- number: RFC 8259 §6 — `-? int frac? exp?` ---
+
+fn parse_number(p: []byte, pos: u64) -> PResult | error {
+    mut at = pos
+    mut negative = false
+    if at < p.len && p[at] == b'-' { negative = true; at = at + 1 }
+    if at >= p.len || !is_digit_byte(p[at]) {
+        return error { message = concat("json: invalid number at offset ", i64_to_str(pos to i64)) }
+    }
+    // integer part: '0' alone, or a nonzero digit followed by more digits (no leading
+    // zeros — RFC 8259 forbids "01"). This loop also validates that shape.
+    if p[at] == b'0' {
+        at = at + 1
+    } else {
+        loop {
+            if at >= p.len || !is_digit_byte(p[at]) { break }
+            at++
+        }
+    }
+    mut has_frac = false
+    mut frac_start: u64 = 0
+    mut frac_end: u64 = 0
+    if at < p.len && p[at] == b'.' {
+        has_frac = true
+        at = at + 1
+        frac_start = at
+        if at >= p.len || !is_digit_byte(p[at]) {
+            return error { message = "json: expected digit after '.' in number" }
+        }
+        loop {
+            if at >= p.len || !is_digit_byte(p[at]) { break }
+            at++
+        }
+        frac_end = at
+    }
+    mut has_exp = false
+    mut exp_negative = false
+    mut exp_start: u64 = 0
+    mut exp_end: u64 = 0
+    if at < p.len && (p[at] == b'e' || p[at] == b'E') {
+        has_exp = true
+        at = at + 1
+        if at < p.len && (p[at] == b'+' || p[at] == b'-') {
+            exp_negative = p[at] == b'-'
+            at = at + 1
+        }
+        exp_start = at
+        if at >= p.len || !is_digit_byte(p[at]) {
+            return error { message = "json: expected digit in number exponent" }
+        }
+        loop {
+            if at >= p.len || !is_digit_byte(p[at]) { break }
+            at++
+        }
+        exp_end = at
+        // M.1 fail-loud, not fail-slow: `pow10`/`pow10_signed` below are O(|exponent|)
+        // (a simple repeated-multiply loop, not O(log n)), so an adversarial exponent
+        // with many digits (e.g. "1e999999999") would otherwise hang the parser for a
+        // very long time before ever reaching the inevitable overflow-to-infinity. f64's
+        // usable decimal exponent range is roughly ±308 (double.MAX_EXP), so any exponent
+        // needing more than 6 digits to write is already far outside representable range
+        // — reject it as a checked error instead of spinning.
+        if exp_end - exp_start > 6 {
+            return error { message = "json: number exponent has too many digits" }
+        }
+    }
+    let sign_width = if negative { 1 to u64 } else { 0 to u64 }
+    let int_text = str_slice_bytes(p, pos + sign_width, int_end_of(p, pos, negative))
+    mut mantissa = digits_to_f64(int_text)
+    if has_frac {
+        let frac_text = str_slice_bytes(p, frac_start, frac_end)
+        mantissa = mantissa + (digits_to_f64(frac_text) / pow10(frac_end - frac_start))
+    }
+    if negative { mantissa = -mantissa }
+    if has_exp {
+        let exp_text = str_slice_bytes(p, exp_start, exp_end)
+        mut exp_val = digits_to_i64(exp_text)
+        if exp_negative { exp_val = -exp_val }
+        mantissa = mantissa * pow10_signed(exp_val)
+    }
+    PResult { pos = at; value = JsonNumber { value = mantissa } }
+}
+
+// the integer part ends where the fractional/exponent part (or the number) ends; this
+// helper just re-derives that boundary cheaply by rescanning (numbers are short).
+fn int_end_of(p: []byte, pos: u64, negative: bool) -> u64 {
+    let sign_width = if negative { 1 to u64 } else { 0 to u64 }
+    mut at = pos + sign_width
+    if at < p.len && p[at] == b'0' { return at + 1 }
+    loop {
+        if at >= p.len || !is_digit_byte(p[at]) { break }
+        at++
+    }
+    at
+}
+
+fn str_slice_bytes(p: []byte, from: u64, to_pos: u64) -> str {
+    mut out: str = ""
+    mut i = from
+    loop {
+        if i >= to_pos { break }
+        out = out ~ one_byte(p[i])
+        i++
+    }
+    out
+}
+
+// decimal-digit text (ASCII '0'-'9' only, as produced by the scans above) -> f64.
+fn digits_to_f64(digits: str) -> f64 {
+    mut v: f64 = 0.0
+    mut i: u64 = 0
+    loop {
+        if i >= digits.len { break }
+        let d = ((digits[i] to i64) - (b'0' to i64)) to f64
+        v = (v * 10.0) + d
+        i++
+    }
+    v
+}
+
+fn digits_to_i64(digits: str) -> i64 {
+    mut v: i64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= digits.len { break }
+        let d = (digits[i] to i64) - (b'0' to i64)
+        v = (v * 10) + d
+        i++
+    }
+    v
+}
+
+fn pow10(n: u64) -> f64 {
+    mut v: f64 = 1.0
+    mut i: u64 = 0
+    loop {
+        if i >= n { break }
+        v = v * 10.0
+        i++
+    }
+    v
+}
+
+fn pow10_signed(n: i64) -> f64 {
+    if n >= 0 { return pow10(n to u64) }
+    1.0 / pow10((-n) to u64)
+}
+

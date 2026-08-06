@@ -1,0 +1,47 @@
+/**
+ * ZipMethod — the PKZIP local/central-directory compression-method tag: `Store` (no
+ * compression, entry bytes verbatim) or `Deflate` (RFC 1951). The format's own method
+ * codes (`0`/`8`) do not match the enum's declaration ordinal (`Store`=0, `Deflate`=1),
+ * so `zip_method_wire` is the single translation point between the tag and its
+ * on-disk `u16` code.
+ */
+pub type ZipMethod = enum { Store; Deflate }
+
+/**
+ * zip_method_wire — the PKZIP on-disk method code (RFC-external, the ZIP spec's own
+ * numbering) a `ZipMethod` tag encodes to: `Store` → `0`, `Deflate` → `8`.
+ *
+ * @param m  the ZIP compression-method tag
+ * @return   the on-disk method code
+ */
+fn zip_method_wire(m: ZipMethod) -> u32 {
+    match m { Store => 0; Deflate => 8 }
+}
+
+/**
+ * One bookkeeping record collected while writing local file headers, consumed when
+ * assembling the matching central-directory entries in phase 2 of `write_zip_entries`.
+ */
+type ZipCDEntry = struct {
+    /** The entry's filename, copied verbatim into the central-directory record. */
+    name: str
+    /** The CRC-32 of the entry's UNCOMPRESSED data. */
+    crc32: u32
+    /** The uncompressed size, in bytes. */
+    uncompressed_size: u32
+    /** The size of the entry's data as stored in the archive, in bytes (== `uncompressed_size` for STORE). */
+    compressed_size: u32
+    /** The on-disk compression-method code (`zip_method_wire` of the entry's `ZipMethod`). */
+    method: u32
+    /** The byte offset of this entry's local file header from the start of the archive. */
+    offset: u32
+}
+
+/**
+ * A single archive member: its filename and its raw (uncompressed) bytes.
+ *
+ * @param name  the entry's filename, stored verbatim (no path normalization)
+ * @param data  the entry's uncompressed bytes
+ */
+pub type ZipEntry = struct { name: str; data: []byte }
+

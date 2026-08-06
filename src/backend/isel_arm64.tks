@@ -1,0 +1,2036 @@
+use teko::lir
+
+/**
+ * VInfo — one VReg's recorded machine facts: which register file it lives
+ * in (`reg_class`) and whether it occupies the 64-bit form (`wide=true`) or
+ * the 32-bit form (`wide=false`) — the isel side-table's per-entry payload
+ * (`class_of`, §3 of the isel plan).
+ *
+ * @since #383 A2-2
+ */
+type VInfo = struct {
+    /**
+     * reg_class — which register file (GPR/FPR) the VReg's defining op
+     * lives in.
+     */
+    reg_class: MRegClass
+    /**
+     * wide — true for the 64-bit X/D form, false for the 32-bit W/S form.
+     */
+    wide: bool
+}
+
+/**
+ * VInfoTable — the isel side-table mapping a VReg id to its `VInfo`,
+ * densely indexed (VReg ids are assigned in strictly increasing order by
+ * the LIR's own SSA allocator, so a growable positional array suffices —
+ * §3 of the isel plan, the `class_of` mechanism).
+ *
+ * @since #383 A2-2
+ */
+type VInfoTable = struct {
+    /**
+     * classes — each recorded VReg's register file, parallel to `wides`.
+     */
+    classes: []MRegClass
+    /**
+     * wides — each recorded VReg's width flag, parallel to `classes`.
+     */
+    wides: []bool
+    /**
+     * set — whether each position has actually been recorded (a growth
+     * placeholder reads as `false` until a real `vinfo_set` writes it).
+     */
+    set: []bool
+}
+
+/**
+ * vinfo_empty — a side-table with no VRegs recorded yet (a function's
+ * selection seed).
+ *
+ * @return VInfoTable  the empty table
+ */
+fn vinfo_empty() -> VInfoTable {
+    VInfoTable { classes = teko::list::empty(); wides = teko::list::empty(); set = teko::list::empty() }
+}
+
+/**
+ * vinfo_grow — pad `t` with placeholder entries (GPR/wide=true/unset) until
+ * it holds at least `n` positions, so a subsequent positional write never
+ * runs past the end of the array.
+ *
+ * @param VInfoTable t  the table to pad
+ * @param u64 n  the minimum length the padded table must reach
+ * @return VInfoTable  the padded table
+ */
+fn vinfo_grow(t: VInfoTable, n: u64) -> VInfoTable {
+    mut classes = t.classes
+    mut wides = t.wides
+    mut set = t.set
+    loop {
+        if classes.len >= n { break }
+        classes = teko::list::push(classes, MRegClass::GPR)
+        wides = teko::list::push(wides, true)
+        set = teko::list::push(set, false)
+    }
+    VInfoTable { classes = classes; wides = wides; set = set }
+}
+
+/**
+ * vinfo_set — record `reg_class`/`wide` for VReg `id`, growing the table
+ * first when `id` is past its current length.
+ *
+ * MUTATES position `id` of each of the three PARALLEL arrays IN PLACE (an
+ * index-assign — slice value semantics alias the same underlying buffer as
+ * `grown.classes`/`.wides`/`.set`) INSTEAD OF rebuilding all three from
+ * scratch. `vinfo_set` is called once per recorded VReg — every isel result —
+ * so the old rebuild was O(VRegs²) over a whole function's selection, one
+ * more instance of the same shape `append_minst`/`append_inst` had (see
+ * their own doc-comments): every untouched position was re-pushed as a
+ * shallow copy across every rebuild generation, and the outer `classes`/
+ * `wides`/`set` self-appends are each checker-proven free-old-safe, so a
+ * stale generation's buffer could be parked as dead while still being the
+ * live tail a LATER generation's push-cache witness authorized an in-place
+ * grow into.
+ *
+ * @param VInfoTable t0  the table to update
+ * @param u32 id  the VReg id being recorded
+ * @param MRegClass reg_class  its register file
+ * @param bool wide  its width flag
+ * @return VInfoTable  the updated table
+ * @since 0.3.1 (native-region-crash, wild-write fix)
+ */
+fn vinfo_set(t0: VInfoTable, id: u32, reg_class: MRegClass, wide: bool) -> VInfoTable {
+    let grown = vinfo_grow(t0, (id to u64) + 1)
+    mut classes = grown.classes
+    mut wides = grown.wides
+    mut set = grown.set
+    let i = id to u64
+    classes[i] = reg_class
+    wides[i] = wide
+    set[i] = true
+    VInfoTable { classes = classes; wides = wides; set = set }
+}
+
+/**
+ * vinfo_get — the recorded facts for VReg `id`, or a GPR/wide=true default
+ * when `id` was never recorded (defensive only — the LIR's SSA property
+ * guarantees every operand is recorded before it is read).
+ *
+ * @param VInfoTable t  the table to read
+ * @param u32 id  the VReg id to look up
+ * @return VInfo  its recorded (or default) facts
+ */
+fn vinfo_get(t: VInfoTable, id: u32) -> VInfo {
+    let i = id to u64
+    if i >= t.classes.len { return VInfo { reg_class = MRegClass::GPR; wide = true } }
+    VInfo { reg_class = t.classes[i]; wide = t.wides[i] }
+}
+
+/**
+ * MINST_I64_SIGN_BIT_U — `2^63` as a `u64`: the smallest pattern whose SIGNED
+ * reading is negative, and exactly the distance between the unsigned and the
+ * signed reading of any pattern at or above it. The twin of
+ * `parser::I64_SIGN_BIT_U` (this unit may not import the parser's private
+ * consts). Formerly defined in the now-retired machine-IR interpreter oracle
+ * (owner ruling: the interpreter is retired) — relocated here,
+ * beside `decode_signed64`, its one surviving consumer's dependency.
+ */
+const MINST_I64_SIGN_BIT_U: u64 = 9223372036854775808
+
+/**
+ * MINST_I64_MIN — the most negative `i64` (`-2^63`), spelled as a subtraction
+ * because `2^63` has no positive `i64` literal form. Formerly defined
+ * alongside `MINST_I64_SIGN_BIT_U` in the now-retired machine-IR interpreter oracle
+ * (owner ruling: the interpreter is retired) — relocated here,
+ * beside its sibling constant; `isel_x86_64.tks`'s `f64_sign_bit_mask_x86`
+ * reuses it unqualified, the same intra-package visibility
+ * `VInfoTable`/`vinfo_set` already rely on the other way around.
+ */
+const MINST_I64_MIN: i64 = -9223372036854775807 - 1
+
+/**
+ * decode_signed64 — the signed i64 value a 64-bit two's-complement bit
+ * pattern represents: a straight bit-reinterpret, shared by BOTH isel
+ * backends (`select_const_float`/`select_const_float_x86` stage an
+ * `LConstFloat`'s raw IEEE bits through it before materializing). `bits: u64
+ * -> i64` is a CHECKED same-width cross-signedness cast (M.1) that panics
+ * past `i64::MAX`, so this never casts the full pattern directly.
+ *
+ * PROOF THAT NO STEP CAN TRAP OR OVERFLOW (the twin of
+ * `parser::numint_to_i64`'s): a pattern below `2^63` casts straight across
+ * (inside `i64`'s positive range, so the checked cast passes), and a pattern
+ * at or above it casts `bits - 2^63` (in `[0, 2^63)`, again inside that
+ * range) and adds `i64::MIN` (`MINST_I64_MIN`, in `f64_sign_bit_mask_x86`'s
+ * own file), a sum in `[i64::MIN, -1]` that cannot overflow.
+ *
+ * @param u64 bits  the 64-bit bit pattern to decode
+ * @return i64  its signed value
+ */
+fn decode_signed64(bits: u64) -> i64 {
+    if bits < MINST_I64_SIGN_BIT_U { return bits to i64 }
+    ((bits - MINST_I64_SIGN_BIT_U) to i64) + MINST_I64_MIN
+}
+
+/**
+ * SelCtx — the instruction selector's threaded state: the in-progress
+ * `MFunc` (a single block, #M0, for A2-2's straight-line scope), the
+ * `class_of` side-table, and the next fresh scratch VReg id (past the
+ * source `LFunc`'s own `next_vreg`, so a materialization/remainder scratch
+ * register never collides with a LIR-numbered VReg).
+ *
+ * @since #383 A2-2
+ */
+type SelCtx = struct {
+    /**
+     * func — the machine function built so far.
+     */
+    func: MFunc
+    /**
+     * vinfo — the `class_of` side-table for every VReg selected so far.
+     */
+    vinfo: VInfoTable
+    /**
+     * next_scratch — the next fresh scratch VReg id the selector may hand
+     * out.
+     */
+    next_scratch: u32
+    /**
+     * cur_block — the machine-block id `selctx_emit` currently appends to.
+     * A2-2 only ever had #M0; A2-3 threads it so each selected `LBlock`
+     * emits into its mirror block and split edge blocks emit into their own.
+     */
+    cur_block: u32
+    /**
+     * next_block — the next fresh machine-block id `selctx_new_block` may
+     * hand out for a split edge block (starts past the highest `LBlock` id
+     * so an edge block never collides with a mirror block).
+     */
+    next_block: u32
+}
+
+/**
+ * selctx_emit — append `inst` to the selector's single machine block,
+ * returning the advanced context.
+ *
+ * @param SelCtx ctx  the context to extend
+ * @param MInst inst  the instruction to append
+ * @return SelCtx  the advanced context
+ */
+fn selctx_emit(ctx: SelCtx, inst: MInst) -> SelCtx {
+    SelCtx { func = append_minst(ctx.func, ctx.cur_block, inst); vinfo = ctx.vinfo; next_scratch = ctx.next_scratch; cur_block = ctx.cur_block; next_block = ctx.next_block }
+}
+
+/**
+ * selctx_switch — retarget the context so subsequent `selctx_emit`s append
+ * to machine block `block_id` (used when selection moves from one `LBlock`'s
+ * mirror to the next, or into a freshly-split edge block).
+ *
+ * @param SelCtx ctx  the context to retarget
+ * @param u32 block_id  the machine-block id to emit into next
+ * @return SelCtx  the retargeted context
+ */
+fn selctx_switch(ctx: SelCtx, block_id: u32) -> SelCtx {
+    SelCtx { func = ctx.func; vinfo = ctx.vinfo; next_scratch = ctx.next_scratch; cur_block = block_id; next_block = ctx.next_block }
+}
+
+/**
+ * FreshBlock — a freshly-allocated machine block (its id) plus the advanced
+ * context that reserved it and appended the empty block to the function.
+ *
+ * @since #383 A2-3
+ */
+type FreshBlock = struct {
+    /**
+     * ctx — the context with the block reserved and appended.
+     */
+    ctx: SelCtx
+    /**
+     * id — the reserved machine-block id.
+     */
+    id: u32
+}
+
+/**
+ * selctx_new_block — append a fresh empty machine block (no params — a split
+ * edge block carries its merge values as edge moves, never as block params)
+ * and hand back its id. The context's emit target is left unchanged; call
+ * `selctx_switch` to start emitting into it.
+ *
+ * @param SelCtx ctx  the context to extend
+ * @return FreshBlock  the advanced context + the reserved block id
+ */
+fn selctx_new_block(ctx: SelCtx) -> FreshBlock {
+    let id = ctx.next_block
+    let blk = MBlock { id = id; params = teko::list::empty(); insts = teko::list::empty() }
+    let advanced = SelCtx { func = append_block(ctx.func, blk); vinfo = ctx.vinfo; next_scratch = ctx.next_scratch; cur_block = ctx.cur_block; next_block = id + 1 }
+    FreshBlock { ctx = advanced; id = id }
+}
+
+/**
+ * selctx_set_vinfo — record `reg_class`/`wide` for VReg `id` in the
+ * context's side-table, returning the advanced context.
+ *
+ * @param SelCtx ctx  the context to extend
+ * @param u32 id  the VReg id being recorded
+ * @param MRegClass reg_class  its register file
+ * @param bool wide  its width flag
+ * @return SelCtx  the advanced context
+ */
+fn selctx_set_vinfo(ctx: SelCtx, id: u32, reg_class: MRegClass, wide: bool) -> SelCtx {
+    SelCtx { func = ctx.func; vinfo = vinfo_set(ctx.vinfo, id, reg_class, wide); next_scratch = ctx.next_scratch; cur_block = ctx.cur_block; next_block = ctx.next_block }
+}
+
+/**
+ * FreshScratch — a freshly-allocated scratch VReg (an isel-only temporary,
+ * never a source `LFunc` VReg id) plus the advanced context that reserved
+ * it.
+ *
+ * @since #383 A2-2
+ */
+type FreshScratch = struct {
+    /**
+     * ctx — the context with the scratch id reserved.
+     */
+    ctx: SelCtx
+    /**
+     * reg — the freshly-allocated virtual register operand.
+     */
+    reg: MReg
+}
+
+/**
+ * selctx_scratch — reserve a fresh scratch VReg in `reg_class` (the
+ * remainder quotient, or the GPR staging register for a float constant's
+ * bit pattern).
+ *
+ * @param SelCtx ctx  the context to extend
+ * @param MRegClass reg_class  which register file the scratch lives in
+ * @return FreshScratch  the advanced context + the reserved register
+ */
+fn selctx_scratch(ctx: SelCtx, reg_class: MRegClass) -> FreshScratch {
+    let id = ctx.next_scratch
+    let advanced = SelCtx { func = ctx.func; vinfo = ctx.vinfo; next_scratch = id + 1; cur_block = ctx.cur_block; next_block = ctx.next_block }
+    FreshScratch { ctx = advanced; reg = vreg(id, reg_class) }
+}
+
+/**
+ * u64_bits_of — the 64-bit two's-complement bit pattern of `val` (drop-128, 2026-07-24 —
+ * `val` is now the i64 carrier itself, not a wider i64): a non-negative value casts
+ * directly (`i64 -> u64` is a CHECKED cast, M.1, but always passes for a non-negative
+ * source); a negative value's magnitude is formed via `-(val + 1)` (never overflowing —
+ * the classic `i64::MIN`-safe negation, avoided even at the boundary since `val + 1` and its
+ * negation both stay in range), cast to `u64` (safe — the magnitude is non-negative and `<=
+ * 2^63`), then the two's-complement pattern is `u64::MAX - magnitude + 1`.
+ *
+ * @param i64 val  the value to convert
+ * @return u64  its 64-bit two's-complement bit pattern
+ */
+fn u64_bits_of(val: i64) -> u64 {
+    if val >= (0) { return val to u64 }
+    let mag = ((0) - (val + (1))) to u64 + (1 to u64)
+    (MASK_ALL_U64 - mag) + (1 to u64)
+}
+
+/**
+ * `MASK_ALL_U64` — the all-ones 64-bit mask (`u64::MAX`), computed as the
+ * bitwise complement of zero rather than a decimal literal (the same
+ * parser-range workaround as `two_pow_64`).
+ */
+const MASK_ALL_U64: u64 = ~(0 to u64)
+
+/**
+ * mask32_u64 — the low-32-bits mask (`u32::MAX` widened to u64), derived by
+ * right-shifting the all-ones mask.
+ *
+ * @return u64  0x00000000FFFFFFFF
+ */
+fn mask32_u64() -> u64 {
+    MASK_ALL_U64 >> (32 to u64)
+}
+
+/**
+ * mask_for — the bit mask covering the register width `wide` selects: all
+ * 64 bits for the X-register form, the low 32 for the W-register form.
+ *
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @return u64  the covering mask
+ */
+fn mask_for(wide: bool) -> u64 {
+    if wide { MASK_ALL_U64 } else { mask32_u64() }
+}
+
+/**
+ * lane_count — how many 16-bit MOVZ/MOVK/MOVN lanes a register width holds:
+ * 4 for the 64-bit X form, 2 for the 32-bit W form.
+ *
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @return u32  the lane count
+ */
+fn lane_count(wide: bool) -> u32 {
+    if wide { 4 } else { 2 }
+}
+
+/**
+ * lane_shift_u32 — the bit-position of lane `i` (`i * 16`), the `shift`
+ * field every MOVZ/MOVK/MOVN instruction carries.
+ *
+ * @param u32 i  the lane index (0-3)
+ * @return u32  the lane's bit position
+ */
+fn lane_shift_u32(i: u32) -> u32 {
+    i * 16
+}
+
+/**
+ * lane_value — the 16-bit value held in lane `i` of `bits`.
+ *
+ * @param u64 bits  the full register-width bit pattern
+ * @param u32 i  the lane index (0-3)
+ * @return u32  the lane's 16-bit value
+ */
+fn lane_value(bits: u64, i: u32) -> u32 {
+    let shift = i * (16 to u64)
+    ((bits >> shift) & (65535 to u64)) to u32
+}
+
+/**
+ * count_nonzero_lanes — how many of the first `n` 16-bit lanes of `bits`
+ * are nonzero (the density test `materialize_bits` uses to pick MOVZ+MOVK
+ * vs MOVN+MOVK).
+ *
+ * @param u64 bits  the full register-width bit pattern
+ * @param u32 n  how many lanes to inspect (2 or 4)
+ * @return u32  the count of nonzero lanes
+ */
+fn count_nonzero_lanes(bits: u64, n: u32) -> u32 {
+    mut count: u32 = 0
+    mut i: u32 = 0
+    loop {
+        if i >= n { break }
+        if lane_value(bits, i) != 0 { count++ }
+        i++
+    }
+    count
+}
+
+/**
+ * first_nonzero_lane — the index of the first nonzero lane among the first
+ * `n`, or `n` itself when every inspected lane is zero (the caller treats
+ * `n` as "not found" and picks lane 0 as the anchor).
+ *
+ * @param u64 bits  the full register-width bit pattern
+ * @param u32 n  how many lanes to inspect (2 or 4)
+ * @return u32  the first nonzero lane's index, or `n` when none is nonzero
+ */
+fn first_nonzero_lane(bits: u64, n: u32) -> u32 {
+    mut i: u32 = 0
+    loop {
+        if i >= n { break }
+        if lane_value(bits, i) != 0 { return i }
+        i++
+    }
+    n
+}
+
+/**
+ * materialize_movz_chain — the MOVZ-anchored materialization: a single
+ * MOVZ at the first nonzero lane (or lane 0 with a zero immediate when
+ * `bits` is entirely zero), followed by one MOVK per remaining nonzero
+ * lane.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param MReg dst  the destination register
+ * @param u64 bits  the full register-width bit pattern to materialize
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @param u32 n  the lane count (2 or 4, from `lane_count(wide)`)
+ * @return SelCtx  the advanced context
+ */
+fn materialize_movz_chain(ctx0: SelCtx, dst: MReg, bits: u64, wide: bool, n: u32) -> SelCtx {
+    if bits == (0 to u64) {
+        return selctx_emit(ctx0, movz_inst(wide, dst, 0, 0))
+    }
+    let first = first_nonzero_lane(bits, n)
+    mut ctx = selctx_emit(ctx0, movz_inst(wide, dst, lane_value(bits, first), lane_shift_u32(first)))
+    mut i = first + 1
+    loop {
+        if i >= n { break }
+        let lv = lane_value(bits, i)
+        if lv != 0 { ctx = selctx_emit(ctx, movk_inst(wide, dst, lv, lane_shift_u32(i))) }
+        i++
+    }
+    ctx
+}
+
+/**
+ * materialize_movn_chain — the MOVN-anchored materialization (chosen when
+ * `bits`' inverse is denser): a MOVN at the first nonzero lane of the
+ * inverted pattern `nbits` (lane 0 with a zero immediate when `nbits` is
+ * entirely zero, i.e. `bits` is all-ones), then one MOVK carrying the
+ * TRUE (non-inverted) lane value for every OTHER lane where `nbits` is
+ * nonzero — MOVN's implicit all-ones fill already matches every lane
+ * where `nbits` is zero, so those need no follow-up.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param MReg dst  the destination register
+ * @param u64 bits  the true bit pattern to materialize
+ * @param u64 nbits  `bits`' bitwise complement, masked to the same width
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @param u32 n  the lane count (2 or 4, from `lane_count(wide)`)
+ * @return SelCtx  the advanced context
+ */
+fn materialize_movn_chain(ctx0: SelCtx, dst: MReg, bits: u64, nbits: u64, wide: bool, n: u32) -> SelCtx {
+    let found = first_nonzero_lane(nbits, n)
+    let anchor = if found >= n { 0 } else { found }
+    mut ctx = selctx_emit(ctx0, movn_inst(wide, dst, lane_value(nbits, anchor), lane_shift_u32(anchor)))
+    mut i: u32 = 0
+    loop {
+        if i >= n { break }
+        if i != anchor {
+            let nlv = lane_value(nbits, i)
+            if nlv != 0 { ctx = selctx_emit(ctx, movk_inst(wide, dst, lane_value(bits, i), lane_shift_u32(i))) }
+        }
+        i++
+    }
+    ctx
+}
+
+/**
+ * materialize_bits — materialize the register-width bit pattern `bits`
+ * into `dst`, picking whichever of the MOVZ+MOVK / MOVN+MOVK chains needs
+ * fewer nonzero lanes (the plan's §3.1 "minimal…MOVN for a value denser as
+ * its inverse" rule).
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param MReg dst  the destination register
+ * @param u64 bits  the full register-width bit pattern to materialize
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @return SelCtx  the advanced context
+ */
+fn materialize_bits(ctx0: SelCtx, dst: MReg, bits: u64, wide: bool) -> SelCtx {
+    let n = lane_count(wide)
+    let nbits = (~bits) & mask_for(wide)
+    let pos = count_nonzero_lanes(bits, n)
+    let neg = count_nonzero_lanes(nbits, n)
+    if pos <= neg { materialize_movz_chain(ctx0, dst, bits, wide, n) } else { materialize_movn_chain(ctx0, dst, bits, nbits, wide, n) }
+}
+
+/**
+ * materialize_int — materialize the integer literal `val` into `dst` at
+ * width `wide` (the `LConstInt` selection, and the GPR staging step of
+ * `LConstFloat`'s bit materialization): converts `val` to its two's-
+ * complement bit pattern, masks it to `wide`'s width, then emits the
+ * minimal MOVZ/MOVK/MOVN sequence. `val` is always in i64 range (the LIR's
+ * own carrier, drop-128 2026-07-24), so no register-pair materialization is
+ * ever needed.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param MReg dst  the destination register
+ * @param i64 val  the literal value to materialize
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @return SelCtx  the advanced context
+ */
+fn materialize_int(ctx0: SelCtx, dst: MReg, val: i64, wide: bool) -> SelCtx {
+    let bits = u64_bits_of(val) & mask_for(wide)
+    materialize_bits(ctx0, dst, bits, wide)
+}
+
+/**
+ * select_const_int — the `LConstInt` selection: materialize its value into
+ * a fresh 64-bit GPR (A2-2 defaults every untyped constant to the widest,
+ * no-information-loss form — matching `LConstInt.val`'s own i64 carrier
+ * choice, drop-128 2026-07-24 — since the LIR carries no per-value width
+ * for a bare constant).
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param lir::LConstInt c  the constant op
+ * @return SelCtx  the advanced context
+ */
+fn select_const_int(ctx0: SelCtx, inst: lir::LInst, c: lir::LConstInt) -> SelCtx {
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::GPR, true)
+    materialize_int(ctx1, dst, c.val, true)
+}
+
+/**
+ * select_const_float — the `LConstFloat` selection: materialize its IEEE bit
+ * pattern into a scratch GPR via `materialize_int`, then `FMOV` it across the
+ * GPR/FPR boundary into the result (§3.1 of the isel plan). `c.bits` is decoded
+ * through `decode_signed64` FIRST (not widened directly) so the GPR staging
+ * value is the exact signed two's-complement i64 reading of the IEEE bit
+ * pattern.
+ *
+ * `LConstFloat.bits` is ALWAYS the f64 pattern, whatever `c.wide` says, so an
+ * `f32`-declared literal needs one more step: the staged f64 is NARROWED by
+ * `FCVT Sd, Dn` into the result, the same correctly-rounded conversion a C
+ * compiler performs on `float f = <double literal>;`. Skipping it is the bug the
+ * x86 twin already measured and this side still had — the value stayed an f64
+ * pattern in a register that everything downstream then read at single width,
+ * and the vinfo recorded it WIDE, so `FToF`'s direction, a compare's scalar
+ * width and a stack argument's transfer size all went wrong from one place.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param lir::LConstFloat c  the constant op
+ * @return SelCtx  the advanced context
+ */
+fn select_const_float(ctx0: SelCtx, inst: lir::LInst, c: lir::LConstFloat) -> SelCtx {
+    let dst = vreg(inst.result, MRegClass::FPR)
+    let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::FPR, c.wide)
+    let scratch = selctx_scratch(ctx1, MRegClass::GPR)
+    let materialized = materialize_int(scratch.ctx, scratch.reg, decode_signed64(c.bits), true)
+    if c.wide {
+        return selctx_emit(materialized, fmov_inst(true, dst, scratch.reg))
+    }
+    let staged = selctx_scratch(materialized, MRegClass::FPR)
+    let ctx2 = selctx_emit(staged.ctx, fmov_inst(true, staged.reg, scratch.reg))
+    selctx_emit(ctx2, cvt_inst(MCvtOp::Fcvt, dst, staged.reg, true, false))
+}
+
+/**
+ * select_alu — the register-register `MAlu` selection shared by every
+ * integer arithmetic/bitwise/shift `LBinOp` case: one instruction, `dst`
+ * inheriting `wide` from the first operand (both operands of a checker-
+ * typed binop already share one width).
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param MAluOp op  which ALU mnemonic to emit
+ * @param u32 a  the first operand VReg
+ * @param u32 bb  the second operand VReg
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @return SelCtx  the advanced context
+ */
+fn select_alu(ctx0: SelCtx, inst: lir::LInst, op: MAluOp, a: u32, bb: u32, wide: bool) -> SelCtx {
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::GPR, wide)
+    selctx_emit(ctx1, alu_inst(op, wide, dst, vreg(a, MRegClass::GPR), vreg(bb, MRegClass::GPR)))
+}
+
+/**
+ * select_rem — `IRemS`/`IRemU`'s two-instruction selection: SDIV/UDIV the
+ * quotient into a scratch register, then MSUB the remainder (`dst = a -
+ * quotient*b`) — the plan's §3.1 remainder lowering.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param MAluOp op  `Sdiv` or `Udiv`, matching the source opcode's
+ *                   signedness
+ * @param u32 a  the dividend VReg
+ * @param u32 bb  the divisor VReg
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @return SelCtx  the advanced context
+ */
+fn select_rem(ctx0: SelCtx, inst: lir::LInst, op: MAluOp, a: u32, bb: u32, wide: bool) -> SelCtx {
+    let q = selctx_scratch(ctx0, MRegClass::GPR)
+    let ctx1 = selctx_emit(q.ctx, alu_inst(op, wide, q.reg, vreg(a, MRegClass::GPR), vreg(bb, MRegClass::GPR)))
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx2 = selctx_set_vinfo(ctx1, inst.result, MRegClass::GPR, wide)
+    selctx_emit(ctx2, msub_inst(wide, dst, q.reg, vreg(bb, MRegClass::GPR), vreg(a, MRegClass::GPR)))
+}
+
+/**
+ * select_falu — the register-register `MFAlu` selection shared by every
+ * float arithmetic `LBinOp` case.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param MFAluOp op  which float ALU mnemonic to emit
+ * @param u32 a  the first operand VReg
+ * @param u32 bb  the second operand VReg
+ * @param bool dbl  true for the f64 D form, false for f32 S
+ * @return SelCtx  the advanced context
+ */
+fn select_falu(ctx0: SelCtx, inst: lir::LInst, op: MFAluOp, a: u32, bb: u32, dbl: bool) -> SelCtx {
+    let dst = vreg(inst.result, MRegClass::FPR)
+    let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::FPR, dbl)
+    selctx_emit(ctx1, falu_inst(op, dbl, dst, vreg(a, MRegClass::FPR), vreg(bb, MRegClass::FPR)))
+}
+
+/**
+ * select_icmp — an integer compare `LBinOp` used as a plain VALUE (A2-2
+ * never fuses a compare into a branch — control flow is A2-3): `MCmp` sets
+ * the flags, `MCSet` materializes the 0/1 result at the narrow (32-bit)
+ * width booleans conventionally use.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param MCond cond  the condition code the source opcode picks
+ * @param u32 a  the first compared VReg
+ * @param u32 bb  the second compared VReg
+ * @param bool wide  the COMPARED operands' width (true for 64-bit X)
+ * @return SelCtx  the advanced context
+ */
+fn select_icmp(ctx0: SelCtx, inst: lir::LInst, cond: MCond, a: u32, bb: u32, wide: bool) -> SelCtx {
+    let ctx1 = selctx_emit(ctx0, cmp_inst(wide, vreg(a, MRegClass::GPR), vreg(bb, MRegClass::GPR)))
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx2 = selctx_set_vinfo(ctx1, inst.result, MRegClass::GPR, false)
+    selctx_emit(ctx2, cset_inst(false, dst, cond))
+}
+
+/**
+ * float_lt_cond — the condition an ORDERED float `<` tests after an `FCMP`:
+ * `LO` (the AArch64 `CC` encoding, "C clear"), NOT the signed-integer `LT`.
+ *
+ * `FCMP` writes a four-way NZCV result, and `C` is clear in EXACTLY ONE of the
+ * four cases: less-than gives `N=1 Z=0 C=0 V=0`, equal gives `C=1`,
+ * greater-than gives `C=1`, and UNORDERED (either operand NaN) gives
+ * `N=0 Z=0 C=1 V=1`. So `C==0` is precisely "ordered and less than", which is
+ * what the source `<` means. The signed `LT` (`N!=V`) reads TRUE on the
+ * unordered case, which would make `nan < x` true — the same NaN hole the x86
+ * twin closes by swapping the operands onto the CF-based `HI`
+ * (`select_fcmp_value_x86`). Cross-checked against `clang
+ * --target=aarch64-linux-gnu`, which picks the equivalent `MI` (`N==1`, set in
+ * that same single case) for a C `<` on doubles.
+ *
+ * @return MCond  the condition an ordered float `<` tests
+ */
+fn float_lt_cond() -> MCond {
+    MCond::LO
+}
+
+/**
+ * float_le_cond — the condition an ORDERED float `<=` tests after an `FCMP`:
+ * `LS` (`C==0 || Z==1`), NOT the signed-integer `LE`. True for less-than
+ * (`C=0`) and for equal (`Z=1`), false for greater-than (`C=1, Z=0`) and false
+ * for UNORDERED (`C=1, Z=0`); the signed `LE` (`Z==1 || N!=V`) would again read
+ * TRUE on unordered. This is the condition `clang --target=aarch64-linux-gnu`
+ * emits for a C `<=` on doubles.
+ *
+ * @return MCond  the condition an ordered float `<=` tests
+ */
+fn float_le_cond() -> MCond {
+    MCond::LS
+}
+
+/**
+ * select_fcmp — a float compare `LBinOp` used as a plain value: `MFCmp`
+ * then `MCSet`, mirroring `select_icmp`.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param MCond cond  the condition code the source opcode picks
+ * @param u32 a  the first compared VReg
+ * @param u32 bb  the second compared VReg
+ * @param bool dbl  the COMPARED operands' width (true for f64 D)
+ * @return SelCtx  the advanced context
+ */
+fn select_fcmp(ctx0: SelCtx, inst: lir::LInst, cond: MCond, a: u32, bb: u32, dbl: bool) -> SelCtx {
+    let ctx1 = selctx_emit(ctx0, fcmp_inst(dbl, vreg(a, MRegClass::FPR), vreg(bb, MRegClass::FPR)))
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx2 = selctx_set_vinfo(ctx1, inst.result, MRegClass::GPR, false)
+    selctx_emit(ctx2, cset_inst(false, dst, cond))
+}
+
+/**
+ * select_bin — the `LBin` dispatch: one `MAlu`/`MFAlu`/compare selection
+ * per `LBinOp` case (§3.1 of the isel plan). `wide`/`dbl` is read from the
+ * first operand's already-recorded `class_of` entry (an SSA guarantee: the
+ * operand was selected, and its width recorded, before this use).
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LFunc f  the enclosing function (the compare-fusion test reads
+ *                      its function-wide use counts)
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param lir::LBin b  the binary op
+ * @return SelCtx  the advanced context
+ */
+fn select_bin(ctx0: SelCtx, f: lir::LFunc, inst: lir::LInst, b: lir::LBin) -> SelCtx {
+    if cmp_kind_of(b.op).is_cmp && is_fused_compare(f, inst.result) {
+        return ctx0
+    }
+    let a_info = vinfo_get(ctx0.vinfo, b.a)
+    match b.op {
+        lir::LBinOp::IAdd => select_alu(ctx0, inst, MAluOp::Add, b.a, b.b, a_info.wide)
+        lir::LBinOp::ISub => select_alu(ctx0, inst, MAluOp::Sub, b.a, b.b, a_info.wide)
+        lir::LBinOp::IMul => select_alu(ctx0, inst, MAluOp::Mul, b.a, b.b, a_info.wide)
+        lir::LBinOp::IDivS => select_alu(ctx0, inst, MAluOp::Sdiv, b.a, b.b, a_info.wide)
+        lir::LBinOp::IDivU => select_alu(ctx0, inst, MAluOp::Udiv, b.a, b.b, a_info.wide)
+        lir::LBinOp::IRemS => select_rem(ctx0, inst, MAluOp::Sdiv, b.a, b.b, a_info.wide)
+        lir::LBinOp::IRemU => select_rem(ctx0, inst, MAluOp::Udiv, b.a, b.b, a_info.wide)
+        lir::LBinOp::IAnd => select_alu(ctx0, inst, MAluOp::And, b.a, b.b, a_info.wide)
+        lir::LBinOp::IOr => select_alu(ctx0, inst, MAluOp::Orr, b.a, b.b, a_info.wide)
+        lir::LBinOp::IXor => select_alu(ctx0, inst, MAluOp::Eor, b.a, b.b, a_info.wide)
+        lir::LBinOp::IShl => select_alu(ctx0, inst, MAluOp::Lsl, b.a, b.b, a_info.wide)
+        lir::LBinOp::IShrS => select_alu(ctx0, inst, MAluOp::Asr, b.a, b.b, a_info.wide)
+        lir::LBinOp::IShrU => select_alu(ctx0, inst, MAluOp::Lsr, b.a, b.b, a_info.wide)
+        lir::LBinOp::ICmpEq => select_icmp(ctx0, inst, MCond::EQ, b.a, b.b, a_info.wide)
+        lir::LBinOp::ICmpNe => select_icmp(ctx0, inst, MCond::NE, b.a, b.b, a_info.wide)
+        lir::LBinOp::ICmpLtS => select_icmp(ctx0, inst, MCond::LT, b.a, b.b, a_info.wide)
+        lir::LBinOp::ICmpLtU => select_icmp(ctx0, inst, MCond::LO, b.a, b.b, a_info.wide)
+        lir::LBinOp::ICmpLeS => select_icmp(ctx0, inst, MCond::LE, b.a, b.b, a_info.wide)
+        lir::LBinOp::ICmpLeU => select_icmp(ctx0, inst, MCond::LS, b.a, b.b, a_info.wide)
+        lir::LBinOp::ICmpGtS => select_icmp(ctx0, inst, MCond::GT, b.a, b.b, a_info.wide)
+        lir::LBinOp::ICmpGtU => select_icmp(ctx0, inst, MCond::HI, b.a, b.b, a_info.wide)
+        lir::LBinOp::ICmpGeS => select_icmp(ctx0, inst, MCond::GE, b.a, b.b, a_info.wide)
+        lir::LBinOp::ICmpGeU => select_icmp(ctx0, inst, MCond::HS, b.a, b.b, a_info.wide)
+        lir::LBinOp::FAdd => select_falu(ctx0, inst, MFAluOp::FAdd, b.a, b.b, a_info.wide)
+        lir::LBinOp::FSub => select_falu(ctx0, inst, MFAluOp::FSub, b.a, b.b, a_info.wide)
+        lir::LBinOp::FMul => select_falu(ctx0, inst, MFAluOp::FMul, b.a, b.b, a_info.wide)
+        lir::LBinOp::FDiv => select_falu(ctx0, inst, MFAluOp::FDiv, b.a, b.b, a_info.wide)
+        lir::LBinOp::FCmpEq => select_fcmp(ctx0, inst, MCond::EQ, b.a, b.b, a_info.wide)
+        lir::LBinOp::FCmpNe => select_fcmp(ctx0, inst, MCond::NE, b.a, b.b, a_info.wide)
+        lir::LBinOp::FCmpLt => select_fcmp(ctx0, inst, float_lt_cond(), b.a, b.b, a_info.wide)
+        lir::LBinOp::FCmpLe => select_fcmp(ctx0, inst, float_le_cond(), b.a, b.b, a_info.wide)
+        lir::LBinOp::FCmpGt => select_fcmp(ctx0, inst, MCond::GT, b.a, b.b, a_info.wide)
+        lir::LBinOp::FCmpGe => select_fcmp(ctx0, inst, MCond::GE, b.a, b.b, a_info.wide)
+    }
+}
+
+/**
+ * select_ineg — the `INeg` selection: one `MNeg`.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param u32 a  the operand VReg
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @return SelCtx  the advanced context
+ */
+fn select_ineg(ctx0: SelCtx, inst: lir::LInst, a: u32, wide: bool) -> SelCtx {
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::GPR, wide)
+    selctx_emit(ctx1, neg_inst(wide, dst, vreg(a, MRegClass::GPR)))
+}
+
+/**
+ * select_inot — the `INot` selection: one `MMvn`.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param u32 a  the operand VReg
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @return SelCtx  the advanced context
+ */
+fn select_inot(ctx0: SelCtx, inst: lir::LInst, a: u32, wide: bool) -> SelCtx {
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::GPR, wide)
+    selctx_emit(ctx1, mvn_inst(wide, dst, vreg(a, MRegClass::GPR)))
+}
+
+/**
+ * select_bits_cross — the `IToFBits`/`FToIBits` selection (degrau 27): one `MFMov` raw
+ * GPR/FPR-crossing move (arm64's `FMOV`) into a fresh result VReg — NOT `SCVTF`/`FCVTZS`
+ * (numeric conversion, a different value). `dbl` is always true: `f64_from_bits`/`f64_bits`
+ * (`checker/scope.tks`) are fixed to `u64 <-> f64`, no `f32` form exists.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param u32 a  the operand VReg
+ * @param bool to_float  true for `IToFBits` (GPR operand, fresh FPR result), false for
+ *                       `FToIBits` (FPR operand, fresh GPR result)
+ * @return SelCtx  the advanced context
+ */
+fn select_bits_cross(ctx0: SelCtx, inst: lir::LInst, a: u32, to_float: bool) -> SelCtx {
+    let dst_class = if to_float { MRegClass::FPR } else { MRegClass::GPR }
+    let src_class = if to_float { MRegClass::GPR } else { MRegClass::FPR }
+    let dst = vreg(inst.result, dst_class)
+    let ctx1 = selctx_set_vinfo(ctx0, inst.result, dst_class, true)
+    selctx_emit(ctx1, fmov_inst(true, dst, vreg(a, src_class)))
+}
+
+/**
+ * select_fneg — the `FNeg` selection: one `MFNeg`.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param u32 a  the operand VReg
+ * @param bool dbl  true for the f64 D form, false for f32 S
+ * @return SelCtx  the advanced context
+ */
+fn select_fneg(ctx0: SelCtx, inst: lir::LInst, a: u32, dbl: bool) -> SelCtx {
+    let dst = vreg(inst.result, MRegClass::FPR)
+    let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::FPR, dbl)
+    selctx_emit(ctx1, fneg_inst(dbl, dst, vreg(a, MRegClass::FPR)))
+}
+
+/**
+ * select_identity_mov — the `Trunc`/`ZExt`/`SExt` selection: a plain `MMov`
+ * register-to-register copy. The LIR carries no per-value width for these
+ * (`LUn{op,a}` has no type field), and the LIR interpreter oracle itself
+ * treats all three as the identity over its carrier — so a bit-preserving
+ * move is the honest match for that same semantics, rather than guessing an
+ * unfounded narrow SXTB/UXTH form isel has no real type to justify. A real
+ * narrowing extend is selected once the value instead crosses a typed
+ * memory boundary (`LLoad`'s own `ty`, A2-4).
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param u32 a  the operand VReg
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ *                   (`Trunc` always picks the W form: its write zeroes the
+ *                   upper half)
+ * @return SelCtx  the advanced context
+ */
+fn select_identity_mov(ctx0: SelCtx, inst: lir::LInst, a: u32, wide: bool) -> SelCtx {
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::GPR, wide)
+    selctx_emit(ctx1, mov_inst(wide, dst, vreg(a, MRegClass::GPR)))
+}
+
+/**
+ * select_itof — the `IToF` selection: one `SCVTF` (signed source — `LUnOp`
+ * declares no unsigned `IToF` variant, so signed is the total, documented
+ * default) reading the WIDE `X` integer form and producing the WIDE `D` float.
+ *
+ * Both widths are exact rather than defaults, and they are the x86 twin's
+ * (`select_itof_x86`, whose `CVTSI2SD` also pins `REX.W` + double): the integer
+ * carrier of every LIR value is `i64`, and an `int to f32` cast is decomposed by
+ * the lowering into this `IToF` followed by an `FToF` narrowing
+ * (`lower.tks`'s `int_to_narrow_float_cast`), so `IToF` alone never has to
+ * produce a single.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param u32 a  the GPR operand VReg
+ * @return SelCtx  the advanced context
+ */
+fn select_itof(ctx0: SelCtx, inst: lir::LInst, a: u32) -> SelCtx {
+    let dst = vreg(inst.result, MRegClass::FPR)
+    let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::FPR, true)
+    selctx_emit(ctx1, cvt_inst(MCvtOp::Scvtf, dst, vreg(a, MRegClass::GPR), true, true))
+}
+
+/**
+ * select_ftoi — the `FToI` selection: one `FCVTZS` (signed destination,
+ * mirroring `select_itof`'s default) into the wide `X` integer form, reading the
+ * source at the OPERAND's own recorded float width.
+ *
+ * The source width is the load-bearing half: reading an `f32` value with the `D`
+ * template decodes its 32 live bits as the low half of a double and truncates to
+ * nonsense. Its x86 twin makes the same choice by picking between
+ * `CVTTSD2SI`/`CVTTSS2SI` from the same recorded width.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param u32 a  the FPR operand VReg
+ * @param bool a_wide  the operand's own recorded float width (true f64, false f32)
+ * @return SelCtx  the advanced context
+ */
+fn select_ftoi(ctx0: SelCtx, inst: lir::LInst, a: u32, a_wide: bool) -> SelCtx {
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::GPR, true)
+    selctx_emit(ctx1, cvt_inst(MCvtOp::Fcvtzs, dst, vreg(a, MRegClass::FPR), a_wide, true))
+}
+
+/**
+ * select_ftof — the `FToF` selection: one `FCVT`, its DIRECTION taken from the
+ * operand's own recorded width (`a_wide` narrows f64->f32, `!a_wide` widens
+ * f32->f64). Sound because the lowering never emits an identity `FToF`
+ * (`is_same_width_float_cast` returns the operand unchanged instead), so the two
+ * widths always differ and "not the operand's width" names exactly one target —
+ * the same argument `select_ftof_x86` runs on its own two mnemonics.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param u32 a  the FPR operand VReg
+ * @param bool a_wide  the operand's own recorded width (true f64, false f32)
+ * @return SelCtx  the advanced context
+ */
+fn select_ftof(ctx0: SelCtx, inst: lir::LInst, a: u32, a_wide: bool) -> SelCtx {
+    let dst_wide = !a_wide
+    let dst = vreg(inst.result, MRegClass::FPR)
+    let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::FPR, dst_wide)
+    selctx_emit(ctx1, cvt_inst(MCvtOp::Fcvt, dst, vreg(a, MRegClass::FPR), a_wide, dst_wide))
+}
+
+/**
+ * select_un — the `LUn` dispatch: one selection per `LUnOp` case (§3.1 of
+ * the isel plan).
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param lir::LUn u  the unary op
+ * @return SelCtx  the advanced context
+ */
+fn select_un(ctx0: SelCtx, inst: lir::LInst, u: lir::LUn) -> SelCtx {
+    let a_info = vinfo_get(ctx0.vinfo, u.a)
+    match u.op {
+        lir::LUnOp::INeg => select_ineg(ctx0, inst, u.a, a_info.wide)
+        lir::LUnOp::INot => select_inot(ctx0, inst, u.a, a_info.wide)
+        lir::LUnOp::FNeg => select_fneg(ctx0, inst, u.a, a_info.wide)
+        lir::LUnOp::Trunc => select_identity_mov(ctx0, inst, u.a, false)
+        lir::LUnOp::ZExt => select_identity_mov(ctx0, inst, u.a, a_info.wide)
+        lir::LUnOp::SExt => select_identity_mov(ctx0, inst, u.a, a_info.wide)
+        lir::LUnOp::IToF => select_itof(ctx0, inst, u.a)
+        lir::LUnOp::FToI => select_ftoi(ctx0, inst, u.a, a_info.wide)
+        lir::LUnOp::FToF => select_ftof(ctx0, inst, u.a, a_info.wide)
+        lir::LUnOp::IToFBits => select_bits_cross(ctx0, inst, u.a, true)
+        lir::LUnOp::FToIBits => select_bits_cross(ctx0, inst, u.a, false)
+    }
+}
+
+/**
+ * mregclass_of_ltype — the register file a machine class lives in: FPR for
+ * F32/F64, GPR for every integer width and Ptr/Void.
+ *
+ * @param lir::LType t  the machine class
+ * @return MRegClass  its register file
+ */
+fn mregclass_of_ltype(t: lir::LType) -> MRegClass {
+    match t {
+        lir::LType::F32 => MRegClass::FPR
+        lir::LType::F64 => MRegClass::FPR
+        lir::LType::I8 => MRegClass::GPR
+        lir::LType::I16 => MRegClass::GPR
+        lir::LType::I32 => MRegClass::GPR
+        lir::LType::I64 => MRegClass::GPR
+        lir::LType::Ptr => MRegClass::GPR
+        lir::LType::Void => MRegClass::GPR
+    }
+}
+
+/**
+ * ltype_is_wide — whether a machine class occupies the 64-bit register
+ * form: true for I64/Ptr/F64, false for every narrower class.
+ *
+ * @param lir::LType t  the machine class
+ * @return bool  its width flag
+ */
+fn ltype_is_wide(t: lir::LType) -> bool {
+    match t {
+        lir::LType::I64 => true
+        lir::LType::Ptr => true
+        lir::LType::F64 => true
+        lir::LType::I8 => false
+        lir::LType::I16 => false
+        lir::LType::I32 => false
+        lir::LType::F32 => false
+        lir::LType::Void => false
+    }
+}
+
+/**
+ * gpr_index_before — how many of `param_types[0..index)` classify as GPR
+ * (the AAPCS64 classifier's per-class counter, run independently of the
+ * FPR one — §3.5 of the isel plan).
+ *
+ * @param []lir::LType param_types  the function's parameter machine classes
+ * @param u32 index  the parameter position to count up to (exclusive)
+ * @return u32  the GPR-class count among the earlier parameters
+ */
+fn gpr_index_before(param_types: []lir::LType, index: u32) -> u32 {
+    mut count: u32 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= index { break }
+        if mregclass_of_ltype(param_types[i]) == MRegClass::GPR { count++ }
+        i++
+    }
+    count
+}
+
+/**
+ * fpr_index_before — how many of `param_types[0..index)` classify as FPR,
+ * mirroring `gpr_index_before`.
+ *
+ * @param []lir::LType param_types  the function's parameter machine classes
+ * @param u32 index  the parameter position to count up to (exclusive)
+ * @return u32  the FPR-class count among the earlier parameters
+ */
+fn fpr_index_before(param_types: []lir::LType, index: u32) -> u32 {
+    mut count: u32 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= index { break }
+        if mregclass_of_ltype(param_types[i]) == MRegClass::FPR { count++ }
+        i++
+    }
+    count
+}
+
+/**
+ * arg_slot_size — the `MMemSize` to use when storing or loading a stack
+ * argument: `X`/`D` (64-bit) for a wide value, `W`/`S` (32-bit) for a narrow
+ * one, choosing between the GPR and FPR families by `reg_class`.
+ *
+ * Each stack slot is 8 bytes wide (AAPCS64 §6.4.2, all slots aligned to
+ * max(8, type_align)); using the natural transfer width for the actual value
+ * stores/loads the right number of bytes at the right position.
+ *
+ * @param MRegClass reg_class  the register file (GPR/FPR)
+ * @param bool wide  true for the 64-bit form, false for 32-bit
+ * @return MMemSize  the appropriate access width
+ */
+fn arg_slot_size(reg_class: MRegClass, wide: bool) -> MMemSize {
+    if reg_class == MRegClass::FPR {
+        return if wide { MMemSize::D } else { MMemSize::S }
+    }
+    if wide { MMemSize::X } else { MMemSize::W }
+}
+
+/**
+ * ParamSlot — the AAPCS64 argument-register slot a parameter's per-class
+ * index resolves to, or `ok=false` past the 8-register window (the stack-
+ * overflow case, handled by `select_param`/`pin_args`).
+ *
+ * @since #383 A2-2
+ */
+type ParamSlot = struct {
+    /**
+     * ok — true iff `index` names one of the first 8 registers of its
+     * class.
+     */
+    ok: bool
+    /**
+     * reg — the physical argument register (meaningful only when `ok`).
+     */
+    reg: MReg
+}
+
+/**
+ * param_slot — the physical AAPCS64 register for per-class index `index`
+ * (x0..x7 or v0..v7), or `ok=false` past the 8-register window.
+ *
+ * @param MRegClass reg_class  which register file the parameter lives in
+ * @param u32 index  the parameter's per-class position
+ * @return ParamSlot  the resolved slot, or `ok=false`
+ */
+fn param_slot(reg_class: MRegClass, index: u32) -> ParamSlot {
+    if index >= 8 { return ParamSlot { ok = false; reg = preg(0, reg_class) } }
+    ParamSlot { ok = true; reg = preg(index, reg_class) }
+}
+
+/**
+ * select_param — the `LParam` selection: read the AAPCS64 argument
+ * register for `index` (classified independently per register file,
+ * §3.5) into the parameter's VReg via `MMov`/`MFMov`, or load from
+ * the caller-owned stack-arg area via `MInArg` when the parameter
+ * overflows the 8-register window.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LFunc f  the enclosing function (its `param_types`)
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param lir::LParam p  the parameter op
+ * @return SelCtx | error  the advanced context, or a NAMED error when
+ *                         `p.index` is out of range (internal)
+ */
+fn select_param(ctx0: SelCtx, f: lir::LFunc, inst: lir::LInst, p: lir::LParam) -> SelCtx | error {
+    if p.index >= f.param_types.len {
+        return error { message = "isel arm64: param index out of range (internal)" }
+    }
+    let ty = f.param_types[p.index to u64]
+    let reg_class = mregclass_of_ltype(ty)
+    let wide = ltype_is_wide(ty)
+    let class_index = if reg_class == MRegClass::FPR { fpr_index_before(f.param_types, p.index) } else { gpr_index_before(f.param_types, p.index) }
+    let slot = param_slot(reg_class, class_index)
+    let dst = vreg(inst.result, reg_class)
+    let ctx1 = selctx_set_vinfo(ctx0, inst.result, reg_class, wide)
+    if !slot.ok {
+        mut gi: u32 = 0
+        mut fi: u32 = 0
+        mut stack_n: u32 = 0
+        mut k: u64 = 0
+        loop {
+            if k >= p.index { break }
+            let kc = mregclass_of_ltype(f.param_types[k])
+            if kc == MRegClass::FPR {
+                if fi >= 8 { stack_n++ }
+                fi++
+            } else {
+                if gi >= 8 { stack_n++ }
+                gi++
+            }
+            k++
+        }
+        return selctx_emit(ctx1, in_arg(arg_slot_size(reg_class, wide), dst, stack_n))
+    }
+    let mv = if reg_class == MRegClass::FPR { fmov_inst(wide, dst, slot.reg) } else { mov_inst(wide, dst, slot.reg) }
+    selctx_emit(ctx1, mv)
+}
+
+/**
+ * select_ret — the `LRet` selection: for a value-carrying return, pin the
+ * returned VReg's current value into the ABI's result register (x0/v0, by
+ * its recorded `class_of`) via `MMov`/`MFMov`, then emit `MRet`; a void
+ * return emits `MRet` alone.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LRet r  the return op
+ * @return SelCtx  the advanced context
+ */
+fn select_ret(ctx0: SelCtx, r: lir::LRet) -> SelCtx {
+    if !r.has_value {
+        return selctx_emit(ctx0, RET_INST)
+    }
+    let info = vinfo_get(ctx0.vinfo, r.value)
+    let pinned = preg(0, info.reg_class)
+    let mv = if info.reg_class == MRegClass::FPR { fmov_inst(info.wide, pinned, vreg(r.value, MRegClass::FPR)) } else { mov_inst(info.wide, pinned, vreg(r.value, MRegClass::GPR)) }
+    let ctx1 = selctx_emit(ctx0, mv)
+    selctx_emit(ctx1, RET_INST)
+}
+
+/**
+ * CmpKind — the classification of an `LBinOp`: whether it is a compare, and
+ * if so whether it is a float compare and which `MCond` its taken edge tests.
+ *
+ * @since #383 A2-3
+ */
+type CmpKind = struct {
+    /**
+     * is_cmp — true iff the opcode is an integer or float compare.
+     */
+    is_cmp: bool
+    /**
+     * is_float — true iff the compare is a float compare (`MFCmp` vs `MCmp`).
+     */
+    is_float: bool
+    /**
+     * cond — the AArch64 condition the compare's taken edge tests (only
+     * meaningful when `is_cmp`).
+     */
+    cond: MCond
+}
+
+/**
+ * cmp_kind_of — classify an `LBinOp` as a compare (with its `MCond`) or not.
+ * The single source of truth for the opcode→condition map, shared by the
+ * value-producing compare selection (`select_bin`) and the fused branch
+ * (`select_branch`).
+ *
+ * @param lir::LBinOp op  the binary opcode
+ * @return CmpKind  its compare classification
+ */
+fn cmp_kind_of(op: lir::LBinOp) -> CmpKind {
+    match op {
+        lir::LBinOp::ICmpEq => CmpKind { is_cmp = true; is_float = false; cond = MCond::EQ }
+        lir::LBinOp::ICmpNe => CmpKind { is_cmp = true; is_float = false; cond = MCond::NE }
+        lir::LBinOp::ICmpLtS => CmpKind { is_cmp = true; is_float = false; cond = MCond::LT }
+        lir::LBinOp::ICmpLtU => CmpKind { is_cmp = true; is_float = false; cond = MCond::LO }
+        lir::LBinOp::ICmpLeS => CmpKind { is_cmp = true; is_float = false; cond = MCond::LE }
+        lir::LBinOp::ICmpLeU => CmpKind { is_cmp = true; is_float = false; cond = MCond::LS }
+        lir::LBinOp::ICmpGtS => CmpKind { is_cmp = true; is_float = false; cond = MCond::GT }
+        lir::LBinOp::ICmpGtU => CmpKind { is_cmp = true; is_float = false; cond = MCond::HI }
+        lir::LBinOp::ICmpGeS => CmpKind { is_cmp = true; is_float = false; cond = MCond::GE }
+        lir::LBinOp::ICmpGeU => CmpKind { is_cmp = true; is_float = false; cond = MCond::HS }
+        lir::LBinOp::FCmpEq => CmpKind { is_cmp = true; is_float = true; cond = MCond::EQ }
+        lir::LBinOp::FCmpNe => CmpKind { is_cmp = true; is_float = true; cond = MCond::NE }
+        lir::LBinOp::FCmpLt => CmpKind { is_cmp = true; is_float = true; cond = float_lt_cond() }
+        lir::LBinOp::FCmpLe => CmpKind { is_cmp = true; is_float = true; cond = float_le_cond() }
+        lir::LBinOp::FCmpGt => CmpKind { is_cmp = true; is_float = true; cond = MCond::GT }
+        lir::LBinOp::FCmpGe => CmpKind { is_cmp = true; is_float = true; cond = MCond::GE }
+        _ => CmpKind { is_cmp = false; is_float = false; cond = MCond::EQ }
+    }
+}
+
+/**
+ * count_in_list — how many entries of `xs` equal `vreg`.
+ *
+ * @param []u32 xs  the VReg list to scan
+ * @param u32 vreg  the VReg to count
+ * @return u32  its occurrence count
+ */
+fn count_in_list(xs: []u32, vreg: u32) -> u32 {
+    mut n: u32 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if xs[i] == vreg { n++ }
+        i++
+    }
+    n
+}
+
+/**
+ * b2n — a boolean as its 0/1 count, typed `u32` so the occurrence sums below
+ * anchor to `u32` (a bare `1`/`0` literal has no type context in the arms
+ * that never touch a `u32`-typed subexpression).
+ *
+ * @param bool cond  the condition to count
+ * @return u32  1 when `cond`, else 0
+ */
+fn b2n(cond: bool) -> u32 {
+    if cond { 1 } else { 0 }
+}
+
+/**
+ * count_in_inst — how many times `vreg` appears as an operand of `inst`.
+ * Only the operand-bearing ops selectable in A2-3 scope are enumerated
+ * (const/param have no operands; the memory/call ops are A2-4/A2-5 and any
+ * function still carrying one honest-stops before its output ships, so a
+ * conservative zero here can never let a wrong fusion escape).
+ *
+ * @param lir::LInst inst  the instruction to inspect
+ * @param u32 vreg  the VReg to count
+ * @return u32  its operand-occurrence count in `inst`
+ */
+fn count_in_inst(inst: lir::LInst, vreg: u32) -> u32 {
+    match inst.op {
+        lir::LBin as b => b2n(b.a == vreg) + b2n(b.b == vreg)
+        lir::LUn as u => b2n(u.a == vreg)
+        lir::LRet as r => b2n(r.has_value && r.value == vreg)
+        lir::LJump as j => count_in_list(j.args, vreg)
+        lir::LBranch as br => b2n(br.cond == vreg) + count_in_list(br.t_args, vreg) + count_in_list(br.f_args, vreg)
+        _ => 0 to u32
+    }
+}
+
+/**
+ * count_uses — how many operand slots across the whole function read `vreg`.
+ * The compare-into-branch fusion test (a compare is fused only when its sole
+ * consumer is the branch) reads this.
+ *
+ * @param lir::LFunc f  the function to scan
+ * @param u32 vreg  the VReg to count
+ * @return u32  its total use count
+ */
+fn count_uses(f: lir::LFunc, vreg: u32) -> u32 {
+    mut n: u32 = 0
+    mut bi: u64 = 0
+    loop {
+        if bi >= f.blocks.len { break }
+        let insts = f.blocks[bi].insts
+        mut ii: u64 = 0
+        loop {
+            if ii >= insts.len { break }
+            n = n + count_in_inst(insts[ii], vreg)
+            ii++
+        }
+        bi++
+    }
+    n
+}
+
+/**
+ * used_as_branch_cond — whether some `LBranch` in `f` tests `vreg` directly
+ * as its condition (the second half of the fusion test: the sole use is a
+ * branch condition, not a jump-arg or arithmetic operand).
+ *
+ * @param lir::LFunc f  the function to scan
+ * @param u32 vreg  the VReg to check
+ * @return bool  true iff a branch's `cond` is `vreg`
+ */
+fn used_as_branch_cond(f: lir::LFunc, vreg: u32) -> bool {
+    mut bi: u64 = 0
+    loop {
+        if bi >= f.blocks.len { break }
+        let insts = f.blocks[bi].insts
+        mut ii: u64 = 0
+        loop {
+            if ii >= insts.len { break }
+            let hit = match insts[ii].op { lir::LBranch as br => br.cond == vreg; _ => false }
+            if hit { return true }
+            ii++
+        }
+        bi++
+    }
+    false
+}
+
+/**
+ * is_fused_compare — whether the compare producing `result` is fused into a
+ * branch: its result is read exactly once, and that read is a branch's
+ * condition. A fused compare emits nothing at its own site (`select_bin`);
+ * the branch re-emits `MCmp`/`MFCmp` over the same operands (`select_branch`).
+ *
+ * @param lir::LFunc f  the enclosing function
+ * @param u32 result  the compare's result VReg
+ * @return bool  true iff the compare is fused into a branch
+ */
+fn is_fused_compare(f: lir::LFunc, result: u32) -> bool {
+    count_uses(f, result) == 1 && used_as_branch_cond(f, result)
+}
+
+/**
+ * DefCmp — the resolved definition of a branch condition when that
+ * definition is a compare: the opcode and its two operand VRegs.
+ *
+ * @since #383 A2-3
+ */
+type DefCmp = struct {
+    /**
+     * found — true iff the condition's defining instruction is a compare.
+     */
+    found: bool
+    /**
+     * op — the compare opcode (meaningful only when `found`).
+     */
+    op: lir::LBinOp
+    /**
+     * a — the first compared operand VReg.
+     */
+    a: u32
+    /**
+     * bb — the second compared operand VReg.
+     */
+    bb: u32
+}
+
+/**
+ * find_cmp_def — locate the instruction defining `vreg` and, when it is a
+ * compare `LBin`, return its opcode + operands (so a fused branch can
+ * re-emit the compare it never materialized).
+ *
+ * @param lir::LFunc f  the function to scan
+ * @param u32 vreg  the condition VReg to resolve
+ * @return DefCmp  the compare definition, or `found=false`
+ */
+fn find_cmp_def(f: lir::LFunc, vreg: u32) -> DefCmp {
+    mut bi: u64 = 0
+    loop {
+        if bi >= f.blocks.len { break }
+        let insts = f.blocks[bi].insts
+        mut ii: u64 = 0
+        loop {
+            if ii >= insts.len { break }
+            let inst = insts[ii]
+            if inst.has_result && inst.result == vreg {
+                return match inst.op {
+                    lir::LBin as b => DefCmp { found = cmp_kind_of(b.op).is_cmp; op = b.op; a = b.a; bb = b.b }
+                    _ => DefCmp { found = false; op = lir::LBinOp::IAdd; a = 0; bb = 0 }
+                }
+            }
+            ii++
+        }
+        bi++
+    }
+    DefCmp { found = false; op = lir::LBinOp::IAdd; a = 0; bb = 0 }
+}
+
+/**
+ * block_params_of — the block-arg VRegs declared by the `LBlock` with id
+ * `block_id` (the destinations an edge move copies into).
+ *
+ * @param lir::LFunc f  the function to search
+ * @param u32 block_id  the target block id
+ * @return []u32  its param VRegs (empty if the block has none/does not exist)
+ */
+fn block_params_of(f: lir::LFunc, block_id: u32) -> []u32 {
+    mut i: u64 = 0
+    loop {
+        if i >= f.blocks.len { break }
+        if f.blocks[i].id == block_id { return f.blocks[i].params }
+        i++
+    }
+    teko::list::empty()
+}
+
+/**
+ * selctx_set_block_param — refine mirror block `block_id`'s parameter at
+ * `index` to `reg` in the context's function (the class becomes known when
+ * the feeding edge move is selected).
+ *
+ * @param SelCtx ctx  the context to update
+ * @param u32 block_id  the target block
+ * @param u32 index  the parameter position
+ * @param MReg reg  the refined parameter register
+ * @return SelCtx  the updated context
+ */
+fn selctx_set_block_param(ctx: SelCtx, block_id: u32, index: u32, reg: MReg) -> SelCtx {
+    SelCtx { func = set_block_param(ctx.func, block_id, index, reg); vinfo = ctx.vinfo; next_scratch = ctx.next_scratch; cur_block = ctx.cur_block; next_block = ctx.next_block }
+}
+
+/**
+ * emit_edge_moves — the parallel-copy of `args` into the block params of
+ * `target`, emitted into the current block just before the branch. A plain
+ * sequential copy is correct here by construction: a block param is always a
+ * FRESH VReg (from `add_block_param`), disjoint from every jump arg, so no
+ * source is also a destination and no cycle can arise. Each move also refines
+ * the target param's register class and records the param's `class_of`.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LFunc f  the enclosing function (for the target's params)
+ * @param u32 target  the destination block id
+ * @param []u32 args  the block-args this edge supplies, positionally
+ * @return SelCtx | error  the advanced context, or a NAMED error on an
+ *                         arg/param count mismatch (internal)
+ */
+fn emit_edge_moves(ctx0: SelCtx, f: lir::LFunc, target: u32, args: []u32) -> SelCtx | error {
+    let params = block_params_of(f, target)
+    if params.len != args.len {
+        return error { message = "isel arm64: edge arg count does not match target block param count (internal)" }
+    }
+    mut ctx = ctx0
+    mut i: u64 = 0
+    loop {
+        if i >= args.len { break }
+        let src = args[i]
+        let src_info = vinfo_get(ctx.vinfo, src)
+        let dst = vreg(params[i], src_info.reg_class)
+        let mv = if src_info.reg_class == MRegClass::FPR { fmov_inst(src_info.wide, dst, vreg(src, MRegClass::FPR)) } else { mov_inst(src_info.wide, dst, vreg(src, MRegClass::GPR)) }
+        let ctx_a = selctx_emit(ctx, mv)
+        let ctx_b = selctx_set_block_param(ctx_a, target, i to u32, dst)
+        ctx = selctx_set_vinfo(ctx_b, params[i], src_info.reg_class, src_info.wide)
+        i++
+    }
+    ctx
+}
+
+/**
+ * select_jump — the `LJump` selection: the parallel-copy of its block-args
+ * into the target's params, then an unconditional `MBranch` to the target.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LFunc f  the enclosing function
+ * @param lir::LJump j  the jump op
+ * @return SelCtx | error  the advanced context, or a propagated error
+ */
+fn select_jump(ctx0: SelCtx, f: lir::LFunc, j: lir::LJump) -> SelCtx | error {
+    let ctx1 = match emit_edge_moves(ctx0, f, j.target, j.args) { SelCtx as c => c; error as e => return e }
+    selctx_emit(ctx1, branch_inst(j.target))
+}
+
+/**
+ * EdgeRes — a resolved branch edge: the block the branch actually targets
+ * (the real block for an empty-arg edge, or a freshly-split edge block that
+ * performs the moves then branches on), plus the advanced context.
+ *
+ * @since #383 A2-3
+ */
+type EdgeRes = struct {
+    /**
+     * ctx — the advanced context (edge block appended when one was split).
+     */
+    ctx: SelCtx
+    /**
+     * block — the machine-block id the branch transfers control to.
+     */
+    block: u32
+}
+
+/**
+ * resolve_edge — the landing block for one branch edge. An AArch64
+ * conditional branch cannot carry moves, so an edge that supplies block-args
+ * is split into its own block (the moves, then `MBranch` to the real target)
+ * and the branch targets that edge block; an empty-arg edge branches straight
+ * to its target (the fast path A1 hits in practice). The current emit target
+ * is restored before returning.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LFunc f  the enclosing function
+ * @param u32 target  the edge's real destination block
+ * @param []u32 args  the block-args the edge supplies (empty for the fast path)
+ * @return EdgeRes | error  the landing block + advanced context, or an error
+ */
+fn resolve_edge(ctx0: SelCtx, f: lir::LFunc, target: u32, args: []u32) -> EdgeRes | error {
+    if args.len == 0 {
+        return EdgeRes { ctx = ctx0; block = target }
+    }
+    let saved = ctx0.cur_block
+    let fb = selctx_new_block(ctx0)
+    let ctx_in = selctx_switch(fb.ctx, fb.id)
+    let ctx_moved = match emit_edge_moves(ctx_in, f, target, args) { SelCtx as c => c; error as e => return e }
+    let ctx_end = selctx_emit(ctx_moved, branch_inst(target))
+    let ctx_back = selctx_switch(ctx_end, saved)
+    EdgeRes { ctx = ctx_back; block = fb.id }
+}
+
+/**
+ * select_branch — the `LBranch` selection: resolve each edge to a landing
+ * block (splitting an arg-carrying edge, §3.2), then in the branch block emit
+ * the conditional test to the taken edge and an unconditional `MBranch` to
+ * the else edge. When the condition is a compare fused into this branch
+ * (`is_fused_compare`), re-emit `MCmp`/`MFCmp` over its operands + a
+ * `MBranchCond`; otherwise test the boolean condition register with a CBNZ
+ * (`MCbz{zero=false}`).
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LFunc f  the enclosing function
+ * @param lir::LBranch br  the branch op
+ * @return SelCtx | error  the advanced context, or a propagated error
+ */
+fn select_branch(ctx0: SelCtx, f: lir::LFunc, br: lir::LBranch) -> SelCtx | error {
+    let t_land = match resolve_edge(ctx0, f, br.t_target, br.t_args) { EdgeRes as r => r; error as e => return e }
+    let f_land = match resolve_edge(t_land.ctx, f, br.f_target, br.f_args) { EdgeRes as r => r; error as e => return e }
+    let ctx1 = f_land.ctx
+    let dc = find_cmp_def(f, br.cond)
+    let ctx2 = if dc.found && is_fused_compare(f, br.cond) {
+        let ck = cmp_kind_of(dc.op)
+        let a_info = vinfo_get(ctx1.vinfo, dc.a)
+        let cmp = if ck.is_float { fcmp_inst(a_info.wide, vreg(dc.a, MRegClass::FPR), vreg(dc.bb, MRegClass::FPR)) } else { cmp_inst(a_info.wide, vreg(dc.a, MRegClass::GPR), vreg(dc.bb, MRegClass::GPR)) }
+        let ca = selctx_emit(ctx1, cmp)
+        selctx_emit(ca, branch_cond_inst(ck.cond, t_land.block))
+    } else {
+        let c_info = vinfo_get(ctx1.vinfo, br.cond)
+        selctx_emit(ctx1, cbz_inst(c_info.wide, false, vreg(br.cond, MRegClass::GPR), t_land.block))
+    }
+    selctx_emit(ctx2, branch_inst(f_land.block))
+}
+
+/**
+ * mem_size_of — the load/store transfer size for a machine class: B/H/W/X for
+ * the integer widths (and Ptr = X), S/D for f32/f64. A void-typed access
+ * (malformed) honest-stops.
+ *
+ * @param lir::LType t  the accessed value's machine class
+ * @return MMemSize | error  the transfer size, or a NAMED honest-stop
+ */
+fn mem_size_of(t: lir::LType) -> MMemSize | error {
+    match t {
+        lir::LType::I8 => MMemSize::B
+        lir::LType::I16 => MMemSize::H
+        lir::LType::I32 => MMemSize::W
+        lir::LType::I64 => MMemSize::X
+        lir::LType::Ptr => MMemSize::X
+        lir::LType::F32 => MMemSize::S
+        lir::LType::F64 => MMemSize::D
+        lir::LType::Void => error { message = "isel arm64: a void-typed memory access is malformed (internal)" }
+    }
+}
+
+/**
+ * select_alloca — the `LAlloca` selection: reserve a frame slot (its index is
+ * the current frame length) and materialize its address with `MFrameAddr`; A3
+ * resolves the slot to an FP/SP displacement. The address is a Ptr (wide GPR).
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param lir::LAlloca a  the alloca op (its byte-size/alignment shape)
+ * @return SelCtx  the advanced context
+ */
+fn select_alloca(ctx0: SelCtx, inst: lir::LInst, a: lir::LAlloca) -> SelCtx {
+    let slot = ctx0.func.frame.len
+    let ctx1 = SelCtx { func = append_frame(ctx0.func, a); vinfo = ctx0.vinfo; next_scratch = ctx0.next_scratch; cur_block = ctx0.cur_block; next_block = ctx0.next_block }
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx2 = selctx_set_vinfo(ctx1, inst.result, MRegClass::GPR, true)
+    selctx_emit(ctx2, frame_addr_inst(dst, slot))
+}
+
+/**
+ * select_field_addr — the `LFieldAddr` selection: `ADD dst, base, #offset`
+ * (an `MAluImm`, a Ptr result). The fold of the offset into a following
+ * `MMem` displacement is deferred to A4 so A2's golden dumps stay 1:1 (M.1).
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param lir::LFieldAddr fa  the field-address op
+ * @return SelCtx  the advanced context
+ */
+fn select_field_addr(ctx0: SelCtx, inst: lir::LInst, fa: lir::LFieldAddr) -> SelCtx {
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::GPR, true)
+    selctx_emit(ctx1, alu_imm_inst(MAluOp::Add, true, dst, vreg(fa.base, MRegClass::GPR), fa.offset to i64))
+}
+
+/**
+ * select_load — the `LLoad` selection: `MLoad{size, sign, dst, [addr, #0]}`,
+ * size + register file from the loaded `ty`. Loads zero-extend (`sign=false`):
+ * a narrow value's own producing `Trunc`/`ZExt`/`SExt` chain already fixed its
+ * class, so the load itself does not re-sign.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param lir::LLoad l  the load op
+ * @return SelCtx | error  the advanced context, or a propagated size error
+ */
+fn select_load(ctx0: SelCtx, inst: lir::LInst, l: lir::LLoad) -> SelCtx | error {
+    let size = match mem_size_of(l.ty) { MMemSize as s => s; error as e => return e }
+    let reg_class = mregclass_of_ltype(l.ty)
+    let wide = ltype_is_wide(l.ty)
+    let dst = vreg(inst.result, reg_class)
+    let ctx1 = selctx_set_vinfo(ctx0, inst.result, reg_class, wide)
+    selctx_emit(ctx1, load_inst(size, false, dst, MMem { base = vreg(l.addr, MRegClass::GPR); offset = 0 to i32 }))
+}
+
+/**
+ * select_store — the `LStore` selection: `MStore{size, value, [addr, #0]}`,
+ * size + register file from the stored `ty`. No result VReg.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LStore s  the store op
+ * @return SelCtx | error  the advanced context, or a propagated size error
+ */
+fn select_store(ctx0: SelCtx, s: lir::LStore) -> SelCtx | error {
+    let size = match mem_size_of(s.ty) { MMemSize as sz => sz; error as e => return e }
+    let reg_class = mregclass_of_ltype(s.ty)
+    selctx_emit(ctx0, store_inst(size, vreg(s.value, reg_class), MMem { base = vreg(s.addr, MRegClass::GPR); offset = 0 to i32 }))
+}
+
+/**
+ * select_addr_pair — the ONE `ADRP + ADD` sequence that materializes a symbol's
+ * address, and the ONE relocation pair it may carry: `MAdrp{dst, sym, PageHi}`
+ * (`ARM64_RELOC_PAGE21`) then `MAddLo{dst, dst, sym, PageLo}`
+ * (`ARM64_RELOC_PAGEOFF12`).
+ *
+ * THE HALVES ARE NOT A PARAMETER, and that is the whole point. They used to be,
+ * and `LFuncAddr` passed `Call` for both — so a `BRANCH26` relocation landed on
+ * an `ADRP` and on an `ADD`, which Apple's `ld` rejects outright
+ * (`ARM64_RELOC_BRANCH26 relocation on non-b/bl instruction`). The page/page-off
+ * pair does not depend on whether the symbol lives in `__text` or in `__const`:
+ * a relocation type describes the INSTRUCTION FIELD being patched, never the
+ * target's section. Making the kinds unreachable from the call site makes that
+ * mispairing unrepresentable, which is the same shape the x86-64 twin already
+ * had (`select_global_addr_x86`/`select_func_addr_x86` both emit one
+ * `lea rip`-relative `Pc32`).
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param str symbol  the symbol whose address is materialized
+ * @return SelCtx  the advanced context
+ */
+fn select_addr_pair(ctx0: SelCtx, inst: lir::LInst, symbol: str) -> SelCtx {
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::GPR, true)
+    let ctx2 = selctx_emit(ctx1, adrp_inst(dst, symbol, MRelocKind::PageHi))
+    selctx_emit(ctx2, add_lo_inst(dst, dst, symbol, MRelocKind::PageLo))
+}
+
+/**
+ * select_global_addr — the `LGlobalAddr` selection: the `ADRP + ADD`
+ * page/page-off relocation pair for a rodata/global symbol.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param lir::LGlobalAddr g  the global-address op
+ * @return SelCtx  the advanced context
+ */
+fn select_global_addr(ctx0: SelCtx, inst: lir::LInst, g: lir::LGlobalAddr) -> SelCtx {
+    select_addr_pair(ctx0, inst, g.symbol)
+}
+
+/**
+ * select_func_addr — the `LFuncAddr` selection: the same `ADRP + ADD`
+ * page/page-off relocation pair a global address uses. A function's address is
+ * materialized, not branched to, so it owes `PAGE21`/`PAGEOFF12` exactly like
+ * any other symbol; `BRANCH26` belongs to `MCall` (a `bl`) alone.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param lir::LFuncAddr fa  the function-address op
+ * @return SelCtx  the advanced context
+ */
+fn select_func_addr(ctx0: SelCtx, inst: lir::LInst, fa: lir::LFuncAddr) -> SelCtx {
+    select_addr_pair(ctx0, inst, fa.symbol)
+}
+
+/**
+ * PinnedArgs — the outcome of lowering a call's arguments into their AAPCS64
+ * argument registers: the advanced context + the pinned physical registers
+ * (the `uses` the `MCall`/`MCallIndirect` records for A3 liveness).
+ *
+ * @since #383 A2-5
+ */
+type PinnedArgs = struct {
+    /**
+     * ctx — the context with every argument pinned into its ABI register.
+     */
+    ctx: SelCtx
+    /**
+     * uses — the physical argument registers pinned, in argument order.
+     */
+    uses: []MReg
+}
+
+/**
+ * pin_args — lower each argument into its AAPCS64 slot using a two-pass
+ * approach that mirrors the x86_64 implementation.
+ *
+ * Pass 1 (stack overflows first): iterate over `args` and, for any argument
+ * whose per-class index is ≥ 8 (overflow), emit an `MOutArg` store to the
+ * outgoing stack-arg area. These are emitted BEFORE the register moves to
+ * reduce register pressure against live fixed intervals.
+ *
+ * Pass 2 (register args): iterate again; for arguments that fit in the
+ * 8-register window, emit an `MMov`/`MFMov` to pin them in the physical
+ * argument register and collect those physregs as the call's `uses`.
+ *
+ * Variadic calls still honest-stop: AAPCS64 requires the callee's fixed
+ * arity to route the tail correctly, and `LCall` carries none.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param []u32 args  the argument VRegs, in declaration order
+ * @param bool variadic  whether the call is variadic (honest-stops here)
+ * @return PinnedArgs | error  the pinned args, or a NAMED honest-stop
+ */
+fn pin_args(ctx0: SelCtx, args: []u32, variadic: bool) -> PinnedArgs | error {
+    if variadic {
+        return error { message = "isel arm64: a variadic call needs the callee's fixed arity to route its tail to the stack (AAPCS64 §3.5); LCall carries no arity — deferred to the call stack-arg follow-up" }
+    }
+    mut ctx = ctx0
+    mut uses: []MReg = teko::list::empty()
+
+    // Pass 1: emit MOutArg for stack-overflow arguments
+    mut gpr_n1: u32 = 0
+    mut fpr_n1: u32 = 0
+    mut stack_n: u32 = 0
+    mut i1: u64 = 0
+    loop {
+        if i1 >= args.len { break }
+        let a = args[i1]
+        let info = vinfo_get(ctx.vinfo, a)
+        let is_fpr = info.reg_class == MRegClass::FPR
+        let idx = if is_fpr { fpr_n1 } else { gpr_n1 }
+        if idx >= 8 {
+            let sz = arg_slot_size(info.reg_class, info.wide)
+            ctx = selctx_emit(ctx, out_arg(sz, vreg(a, info.reg_class), stack_n))
+            stack_n = stack_n + 1
+        }
+        if is_fpr { fpr_n1 = fpr_n1 + 1 } else { gpr_n1 = gpr_n1 + 1 }
+        i1++
+    }
+
+    // Pass 2: emit MMov/MFMov for register arguments and collect uses
+    mut gpr_n2: u32 = 0
+    mut fpr_n2: u32 = 0
+    mut i2: u64 = 0
+    loop {
+        if i2 >= args.len { break }
+        let a = args[i2]
+        let info = vinfo_get(ctx.vinfo, a)
+        let is_fpr = info.reg_class == MRegClass::FPR
+        let idx = if is_fpr { fpr_n2 } else { gpr_n2 }
+        if idx < 8 {
+            let phys = preg(idx, info.reg_class)
+            let mv = if is_fpr { fmov_inst(info.wide, phys, vreg(a, MRegClass::FPR)) } else { mov_inst(info.wide, phys, vreg(a, MRegClass::GPR)) }
+            ctx = selctx_emit(ctx, mv)
+            uses = teko::list::push(uses, phys)
+        }
+        if is_fpr { fpr_n2 = fpr_n2 + 1 } else { gpr_n2 = gpr_n2 + 1 }
+        i2++
+    }
+
+    PinnedArgs { ctx = ctx; uses = uses }
+}
+
+/**
+ * select_call_result — after a call, move its result out of the ABI result register into the result
+ * VReg (when the call produces one), in the REGISTER FILE the call's own `ret_type` names: `x0` for
+ * every integer/pointer/`bool` result, `d0`/`s0` for an `f64`/`f32` one (`B1-fp`).
+ *
+ * This USED to take the class as GPR unconditionally, because `LInst` carries no result type — a
+ * limitation this function's own doc named. `lir::LCall`/`LCallIndirect` now record `ret_type`
+ * (0.3.1.0 degrau 27), and the limitation was not benign: `select_ret` and `pin_args` had already
+ * been taught the two files, so the callee PUT a float result in `d0` and a later float argument had
+ * to travel in `d`/`s` — this one hole between them read `x0` instead and then recorded the value as
+ * a GPR. Measured on x86-64 (the same hole, the same shape): `$"{f():F2}"` over an `f64`-returning
+ * function crashed the generated program where the C route printed `2.50`.
+ *
+ * @param SelCtx ctx0  the post-call context to extend
+ * @param lir::LInst inst  the call instruction (its result VReg + `has_result`)
+ * @param MReg ret_reg  the ABI result register the call wrote (`call_result_reg`)
+ * @param lir::LType ret_type  the call's own recorded result class
+ * @return SelCtx  the advanced context
+ */
+fn select_call_result(ctx0: SelCtx, inst: lir::LInst, ret_reg: MReg, ret_type: lir::LType) -> SelCtx {
+    if !inst.has_result {
+        return ctx0
+    }
+    if mregclass_of_ltype(ret_type) == MRegClass::FPR {
+        let wide = ltype_is_wide(ret_type)
+        let fdst = vreg(inst.result, MRegClass::FPR)
+        let fctx = selctx_set_vinfo(ctx0, inst.result, MRegClass::FPR, wide)
+        return selctx_emit(fctx, fmov_inst(wide, fdst, ret_reg))
+    }
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::GPR, true)
+    selctx_emit(ctx1, mov_inst(true, dst, ret_reg))
+}
+
+/**
+ * call_result_reg — the physical register a call's result comes back in, by its recorded machine
+ * class: `d0`/`s0` (FPR id 0) for a float, `x0` (GPR id 0) for everything else — AAPCS64's own
+ * per-register-file result split (0.3.1.0 degrau 27).
+ *
+ * @param lir::LType ret_type  the call's own recorded result class
+ * @return MReg  the ABI result register
+ */
+fn call_result_reg(ret_type: lir::LType) -> MReg {
+    preg(0, mregclass_of_ltype(ret_type))
+}
+
+/**
+ * select_call — the `LCall` selection: lower the arguments into their AAPCS64
+ * registers (`pin_args`), emit `MCall{sym, uses, ret_reg, has_result,
+ * variadic}`, then move the result out of x0 if the call produces one.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param lir::LCall c  the call op
+ * @return SelCtx | error  the advanced context, or a propagated error
+ */
+fn select_call(ctx0: SelCtx, inst: lir::LInst, c: lir::LCall) -> SelCtx | error {
+    let pinned = match pin_args(ctx0, c.args, c.variadic) { PinnedArgs as p => p; error as e => return e }
+    let ret_reg = call_result_reg(c.ret_type)
+    let ctx1 = selctx_emit(pinned.ctx, call_inst(c.symbol, pinned.uses, ret_reg, inst.has_result, c.variadic))
+    select_call_result(ctx1, inst, ret_reg, c.ret_type)
+}
+
+/**
+ * select_call_indirect — the `LCallIndirect` selection: identical argument
+ * lowering, then `MCallIndirect{target, uses, ret_reg, has_result}` (BLR
+ * through the target Ptr VReg), then the result move.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param lir::LCallIndirect ci  the indirect-call op
+ * @return SelCtx | error  the advanced context, or a propagated error
+ */
+fn select_call_indirect(ctx0: SelCtx, inst: lir::LInst, ci: lir::LCallIndirect) -> SelCtx | error {
+    let pinned = match pin_args(ctx0, ci.args, ci.variadic) { PinnedArgs as p => p; error as e => return e }
+    let ret_reg = call_result_reg(ci.ret_type)
+    let ctx1 = selctx_emit(pinned.ctx, call_indirect_inst(vreg(ci.target, MRegClass::GPR), pinned.uses, ret_reg, inst.has_result))
+    select_call_result(ctx1, inst, ret_reg, ci.ret_type)
+}
+
+/**
+ * select_inst — the per-`LOp` dispatch (§3 of the isel plan): with A2-5's
+ * calls (`LCall`/`LCallIndirect`) the whole `LOp` frontier now selects — the
+ * A2-2 core (`LConstInt`/`LConstFloat`/`LBin`/`LUn`/`LParam`/`LRet`), A2-3
+ * control flow (`LJump`/`LBranch`), A2-4 memory (`LAlloca`/`LFieldAddr`/
+ * `LLoad`/`LStore`/`LGlobalAddr`/`LFuncAddr`), and A2-5 calls.
+ *
+ * @param SelCtx ctx  the context to extend
+ * @param lir::LFunc f  the enclosing function (`LParam` needs its
+ *                      `param_types`)
+ * @param lir::LInst inst  the instruction to select
+ * @return SelCtx | error  the advanced context, or a propagated/named error
+ */
+fn select_inst(ctx: SelCtx, f: lir::LFunc, inst: lir::LInst) -> SelCtx | error {
+    match inst.op {
+        lir::LConstInt as c => select_const_int(ctx, inst, c)
+        lir::LConstFloat as c => select_const_float(ctx, inst, c)
+        lir::LBin as b => select_bin(ctx, f, inst, b)
+        lir::LUn as u => select_un(ctx, inst, u)
+        lir::LParam as p => select_param(ctx, f, inst, p)
+        lir::LRet as r => select_ret(ctx, r)
+        lir::LJump as j => select_jump(ctx, f, j)
+        lir::LBranch as br => select_branch(ctx, f, br)
+        lir::LAlloca as a => select_alloca(ctx, inst, a)
+        lir::LFieldAddr as fa => select_field_addr(ctx, inst, fa)
+        lir::LLoad as l => select_load(ctx, inst, l)
+        lir::LStore as s => select_store(ctx, s)
+        lir::LGlobalAddr as g => select_global_addr(ctx, inst, g)
+        lir::LCallIndirect as ci => select_call_indirect(ctx, inst, ci)
+        lir::LFuncAddr as fa => select_func_addr(ctx, inst, fa)
+        lir::LCall as c => select_call(ctx, inst, c)
+    }
+}
+
+/**
+ * select_insts — select every instruction of `insts`, in order, threading
+ * the context forward and short-circuiting on the first error.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LFunc f  the enclosing function
+ * @param []lir::LInst insts  the instruction stream to select
+ * @return SelCtx | error  the fully-advanced context, or the first
+ *                         propagated error
+ */
+fn select_insts(ctx0: SelCtx, f: lir::LFunc, insts: []lir::LInst) -> SelCtx | error {
+    mut ctx = ctx0
+    mut i: u64 = 0
+    loop {
+        if i >= insts.len { break }
+        let stepped = match select_inst(ctx, f, insts[i]) { SelCtx as c => c; error as e => return e }
+        ctx = stepped
+        i++
+    }
+    ctx
+}
+
+/**
+ * provisional_params — a mirror block's params built from its `LBlock` param
+ * VRegs with a provisional GPR class; each entry is refined to its real class
+ * by `emit_edge_moves` when a feeding edge is selected.
+ *
+ * @param []u32 pids  the block's param VReg ids
+ * @return []MReg  the provisional param registers
+ */
+fn provisional_params(pids: []u32) -> []MReg {
+    mut out: []MReg = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= pids.len { break }
+        out = teko::list::push(out, vreg(pids[i], MRegClass::GPR))
+        i++
+    }
+    out
+}
+
+/**
+ * build_mirror_blocks — an `MFunc` with one empty machine block per `LBlock`,
+ * same id + (provisionally-classed) params, in source order. Selection then
+ * fills each block's instructions and splits edge blocks in past them.
+ *
+ * @param lir::LFunc f  the function whose block skeleton is mirrored
+ * @return MFunc  the empty-bodied mirror function
+ */
+fn build_mirror_blocks(f: lir::LFunc) -> MFunc {
+    mut blocks: []MBlock = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= f.blocks.len { break }
+        let lb = f.blocks[i]
+        blocks = teko::list::push(blocks, MBlock { id = lb.id; params = provisional_params(lb.params); insts = teko::list::empty() })
+        i++
+    }
+    MFunc { symbol = f.symbol; blocks = blocks; frame = teko::list::empty() }
+}
+
+/**
+ * max_block_id — the highest `LBlock` id in `f` (edge blocks are numbered
+ * past it so a split edge block never collides with a mirror block).
+ *
+ * @param lir::LFunc f  the function to scan
+ * @return u32  its greatest block id
+ */
+fn max_block_id(f: lir::LFunc) -> u32 {
+    mut m: u32 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= f.blocks.len { break }
+        if f.blocks[i].id > m { m = f.blocks[i].id }
+        i++
+    }
+    m
+}
+
+/**
+ * select_all_blocks — select every `LBlock` of `f` in order, retargeting the
+ * emit cursor to each block's mirror before selecting its instructions.
+ *
+ * @param SelCtx ctx0  the initial context (targeting the entry block)
+ * @param lir::LFunc f  the function to select
+ * @return SelCtx | error  the fully-advanced context, or the first error
+ */
+fn select_all_blocks(ctx0: SelCtx, f: lir::LFunc) -> SelCtx | error {
+    mut ctx = ctx0
+    mut i: u64 = 0
+    loop {
+        if i >= f.blocks.len { break }
+        let lb = f.blocks[i]
+        let switched = selctx_switch(ctx, lb.id)
+        // A `let` binding for the match — NOT `ctx = match {…return}` — for clarity and
+        // consistency with `select_insts` (mirrors the same let-then-assign pattern).
+        let stepped = match select_insts(switched, f, lb.insts) { SelCtx as c => c; error as e => return e }
+        ctx = stepped
+        i++
+    }
+    ctx
+}
+
+/**
+ * select_lfunc — select one `LFunc` into an `MFunc`: build the mirror block
+ * skeleton, then select every block's instructions (A2-3 handles the full
+ * control-flow set — jumps, branches, and their split edge blocks).
+ *
+ * @param lir::LFunc f  the function to select
+ * @return MFunc | error  the selected function, or any instruction's own
+ *                        propagated error
+ */
+pub fn select_lfunc(f: lir::LFunc) -> MFunc | error {
+    let ctx0 = SelCtx { func = build_mirror_blocks(f); vinfo = vinfo_empty(); next_scratch = f.next_vreg; cur_block = 0; next_block = max_block_id(f) + 1 }
+    let done = match select_all_blocks(ctx0, f) { SelCtx as c => c; error as e => return e }
+    done.func
+}
+
+/**
+ * select_module — select every function of `m` into an `MModule`, carrying
+ * its rodata/globals/layouts tables through UNCHANGED (A2 never touches
+ * their bytes — that is A4's job).
+ *
+ * @param lir::LModule m  the module to select
+ * @return MModule | error  the selected module, or the first function's
+ *                          propagated error
+ */
+pub fn select_module(m: lir::LModule) -> MModule | error {
+    mut out = MModule { funcs = teko::list::empty(); rodata = m.rodata; globals = m.globals; layouts = m.layouts }
+    mut i: u64 = 0
+    loop {
+        if i >= m.funcs.len { break }
+        let mf = match select_lfunc(m.funcs[i]) { MFunc as x => x; error as e => return e }
+        out = add_mfunc(out, mf)
+        i++
+    }
+    out
+}

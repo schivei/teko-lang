@@ -1,0 +1,127 @@
+/**
+ * Compress `data` under the given ZIP method (STORE = pass through verbatim, DEFLATE =
+ * `teko::compress::deflate`).
+ *
+ * @param method  the ZIP compression-method tag
+ * @param data    the entry's uncompressed bytes
+ * @return        the entry's on-disk bytes under `method`
+ */
+fn zip_encode_entry(method: ZipMethod, data: []byte) -> []byte {
+    match method { Deflate => teko::compress::deflate(data); Store => data }
+}
+
+/**
+ * Assemble a complete ZIP archive (local headers + file data + central directory + end
+ * record) from a list of entries, using ONE compression method for every entry.
+ *
+ * @param entries  the archive members to write, in the order they will appear on disk
+ * @param method   the ZIP compression-method tag applied to every entry
+ * @return         the complete archive bytes
+ */
+fn write_zip_entries(entries: []ZipEntry, method: ZipMethod) -> []byte {
+    let wire = zip_method_wire(method)
+    mut buf: []byte = teko::list::empty()
+    mut cd: []ZipCDEntry = teko::list::empty()
+
+    mut i = 0
+    loop {
+        if i >= entries.len { break }
+        let entry = entries[i]
+        let crc = crc32_of(entry.data)
+        let uncompressed_size = entry.data.len to u32
+        let stored_bytes = zip_encode_entry(method, entry.data)
+        let compressed_size = stored_bytes.len to u32
+        let off = buf.len to u32
+
+        buf = teko::list::push(buf, 0x50 to byte)
+        buf = teko::list::push(buf, 0x4B to byte)
+        buf = teko::list::push(buf, 0x03 to byte)
+        buf = teko::list::push(buf, 0x04 to byte)
+        buf = zip_u16(buf, 20)
+        buf = zip_u16(buf, 0)
+        buf = zip_u16(buf, wire)
+        buf = zip_u16(buf, 0)
+        buf = zip_u16(buf, zip_fixed_dos_date())
+        buf = zip_u32(buf, crc)
+        buf = zip_u32(buf, compressed_size)
+        buf = zip_u32(buf, uncompressed_size)
+        buf = zip_u16(buf, entry.name.len to u32)
+        buf = zip_u16(buf, 0)
+        buf = zip_str(buf, entry.name)
+        buf = zip_bytes(buf, stored_bytes)
+
+        cd = teko::list::push(cd, ZipCDEntry { name = entry.name; crc32 = crc; uncompressed_size = uncompressed_size; compressed_size = compressed_size; method = wire; offset = off })
+        i++
+    }
+
+    let cd_offset = buf.len to u32
+    mut j = 0
+    loop {
+        if j >= cd.len { break }
+        let rec = cd[j]
+
+        buf = teko::list::push(buf, 0x50 to byte)
+        buf = teko::list::push(buf, 0x4B to byte)
+        buf = teko::list::push(buf, 0x01 to byte)
+        buf = teko::list::push(buf, 0x02 to byte)
+        buf = zip_u16(buf, 20)
+        buf = zip_u16(buf, 20)
+        buf = zip_u16(buf, 0)
+        buf = zip_u16(buf, rec.method)
+        buf = zip_u16(buf, 0)
+        buf = zip_u16(buf, zip_fixed_dos_date())
+        buf = zip_u32(buf, rec.crc32)
+        buf = zip_u32(buf, rec.compressed_size)
+        buf = zip_u32(buf, rec.uncompressed_size)
+        buf = zip_u16(buf, rec.name.len to u32)
+        buf = zip_u16(buf, 0)
+        buf = zip_u16(buf, 0)
+        buf = zip_u16(buf, 0)
+        buf = zip_u16(buf, 0)
+        buf = zip_u32(buf, 0)
+        buf = zip_u32(buf, rec.offset)
+        buf = zip_str(buf, rec.name)
+
+        j++
+    }
+
+    let cd_size = (buf.len to u32) - cd_offset
+
+    buf = teko::list::push(buf, 0x50 to byte)
+    buf = teko::list::push(buf, 0x4B to byte)
+    buf = teko::list::push(buf, 0x05 to byte)
+    buf = teko::list::push(buf, 0x06 to byte)
+    buf = zip_u16(buf, 0)
+    buf = zip_u16(buf, 0)
+    buf = zip_u16(buf, entries.len to u32)
+    buf = zip_u16(buf, entries.len to u32)
+    buf = zip_u32(buf, cd_size)
+    buf = zip_u32(buf, cd_offset)
+    buf = zip_u16(buf, 0)
+
+    buf
+}
+
+/**
+ * Assemble a complete ZIP archive with every entry STORED verbatim (method 0 — no
+ * compression). Fully deterministic (no timestamps, no filesystem metadata, no
+ * host-OS variance).
+ *
+ * @param entries  the archive members to write, in the order they will appear on disk
+ * @return         the complete archive bytes
+ */
+pub fn write_zip(entries: []ZipEntry) -> []byte {
+    write_zip_entries(entries, ZipMethod::Store)
+}
+
+/**
+ * Assemble a complete ZIP archive with every entry DEFLATE-compressed (method 8).
+ * `read_zip` decompresses these entries transparently, exactly like STORE ones.
+ *
+ * @param entries  the archive members to write, in the order they will appear on disk
+ * @return         the complete archive bytes
+ */
+pub fn write_zip_deflate(entries: []ZipEntry) -> []byte {
+    write_zip_entries(entries, ZipMethod::Deflate)
+}
+

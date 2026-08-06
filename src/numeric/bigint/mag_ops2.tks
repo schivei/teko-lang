@@ -1,0 +1,166 @@
+/**
+ * Multiply two magnitudes (base-2^32 schoolbook multiplication). The accumulator is a fresh
+ * zero-filled buffer of size `len(a)+len(b)`; every limb stays below 2^32 (carries are propagated
+ * immediately), so the `u64` accumulator never overflows.
+ *
+ * @param a  the left magnitude
+ * @param b  the right magnitude
+ * @return   the normalized product magnitude
+ */
+fn mag_mul(a: []u64, b: []u64) -> []u64 {
+    if a.len == 0 { return teko::list::empty() }
+    if b.len == 0 { return teko::list::empty() }
+    mut r = zeros(a.len + b.len)
+    mut i: u64 = 0
+    loop {
+        if i >= a.len { break }
+        mut carry: u64 = 0
+        mut j: u64 = 0
+        loop {
+            if j >= b.len { break }
+            let cur = r[i + j] + a[i] * b[j] + carry
+            r[i + j] = cur & LIMB_MASK
+            carry = cur >> LIMB_BITS
+            j = j + 1
+        }
+        mut k = i + b.len
+        loop {
+            if carry == 0 { break }
+            let cur2 = r[k] + carry
+            r[k] = cur2 & LIMB_MASK
+            carry = cur2 >> LIMB_BITS
+            k = k + 1
+        }
+        i = i + 1
+    }
+    mag_norm(r)
+}
+
+/**
+ * The bit length of a normalized magnitude — the position of its highest set bit plus one, or 0 for
+ * zero.
+ *
+ * @param a  a magnitude
+ * @return   the number of significant bits
+ */
+fn mag_bitlen(a: []u64) -> u64 {
+    let n = mag_norm(a)
+    if n.len == 0 { return 0 }
+    let hi = n[n.len - 1]
+    mut bits: u64 = 0
+    mut v = hi
+    loop {
+        if v == 0 { break }
+        bits = bits + 1
+        v = v >> 1
+    }
+    (n.len - 1) * LIMB_BITS + bits
+}
+
+/**
+ * Read bit `i` of a magnitude (bit 0 is the least significant).
+ *
+ * @param a  the magnitude
+ * @param i  the bit index
+ * @return   the bit value, `0` or `1`
+ */
+fn mag_bit(a: []u64, i: u64) -> u64 {
+    let limb = i / LIMB_BITS
+    let pos = i % LIMB_BITS
+    if limb >= a.len { return 0 }
+    (a[limb] >> pos) & 1
+}
+
+/**
+ * Shift a magnitude left by one bit (multiply by two).
+ *
+ * @param a  the magnitude
+ * @return   the normalized doubled magnitude
+ */
+fn mag_shl1(a: []u64) -> []u64 {
+    mut out: []u64 = teko::list::empty()
+    mut carry: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= a.len { break }
+        let v = ((a[i] << 1) & LIMB_MASK) | carry
+        out = teko::list::push(out, v)
+        carry = (a[i] >> (LIMB_BITS - 1)) & 1
+        i = i + 1
+    }
+    if carry != 0 { out = teko::list::push(out, carry) }
+    mag_norm(out)
+}
+
+/**
+ * Set bit `i` of a magnitude, growing it if needed. Builds a fresh buffer (never mutates the input),
+ * so no caller's magnitude is aliased.
+ *
+ * @param a  the magnitude
+ * @param i  the bit index to set
+ * @return   a fresh magnitude equal to `a` with bit `i` set
+ */
+fn mag_setbit(a: []u64, i: u64) -> []u64 {
+    let limb = i / LIMB_BITS
+    let pos = i % LIMB_BITS
+    let need = limb + 1
+    let n = if a.len > need { a.len } else { need }
+    mut out = zeros(n)
+    mut j: u64 = 0
+    loop {
+        if j >= a.len { break }
+        out[j] = a[j]
+        j = j + 1
+    }
+    out[limb] = out[limb] | bit_mask(pos)
+    mag_norm(out)
+}
+
+/**
+ * Divide a magnitude by a single-limb divisor (`d < 2^32`), returning the quotient magnitude and the
+ * remainder. Used by `to_str` for base-10 digit extraction.
+ *
+ * @param a  the dividend magnitude
+ * @param d  the divisor, a value in `(0, 2^32)`
+ * @return   the quotient magnitude and the remainder in `[0, d)`
+ */
+fn mag_divmod_small(a: []u64, d: u64) -> SmallDivMod {
+    mut q = zeros(a.len)
+    mut r: u64 = 0
+    mut i = a.len
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        let cur = (r << LIMB_BITS) | a[i]
+        q[i] = cur / d
+        r = cur % d
+    }
+    SmallDivMod { q = mag_norm(q); r = r }
+}
+
+/**
+ * Divide magnitude `a` by nonzero magnitude `b` (bit-by-bit long division). The caller guarantees
+ * `b` is nonzero.
+ *
+ * @param a  the dividend magnitude
+ * @param b  the divisor magnitude (nonzero)
+ * @return   the quotient and remainder magnitudes
+ */
+fn mag_divmod(a: []u64, b: []u64) -> MagDivMod {
+    let n = mag_bitlen(a)
+    mut q: []u64 = teko::list::empty()
+    mut r: []u64 = teko::list::empty()
+    mut i = n
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        r = mag_shl1(r)
+        if mag_bit(a, i) == 1 { r = mag_setbit(r, 0) }
+        if mag_cmp(r, b) >= 0 {
+            r = mag_sub(r, b)
+            q = mag_setbit(q, i)
+        }
+    }
+    MagDivMod { q = mag_norm(q); r = mag_norm(r) }
+}
+

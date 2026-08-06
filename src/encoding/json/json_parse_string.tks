@@ -1,0 +1,113 @@
+// --- string ---
+
+fn parse_string_value(p: []byte, pos: u64) -> PResult | error {
+    let s = match parse_string(p, pos) { PStringResult as r => r; error as e => return e }
+    PResult { pos = s.pos; value = JsonString { value = s.text } }
+}
+
+// pos is at the opening '"'. Decodes all RFC 8259 §7 escapes, including \uXXXX and
+// surrogate pairs (\uD800-\uDBFF followed by \uDC00-\uDFFF -> one astral codepoint);
+// a lone/unpaired surrogate is preserved as the Unicode replacement handling documented
+// below (M.3 — no silent corruption: an unpaired high surrogate with no valid low
+// surrogate following is a decode error rather than emitting an invalid codepoint).
+fn parse_string(p: []byte, pos: u64) -> PStringResult | error {
+    mut at = pos + 1   // past the opening quote
+    mut out: str = ""
+    loop {
+        if at >= p.len { return error { message = "json: unterminated string" } }
+        let b = p[at]
+        if b == b'"' { return PStringResult { pos = at + 1; text = out } }
+        if b == b'\\' {
+            if at + 1 >= p.len { return error { message = "json: unterminated escape sequence" } }
+            let esc = p[at + 1]
+            if esc == b'"' { out = out ~ one_byte(b'"'); at = at + 2; continue }
+            if esc == b'\\' { out = out ~ one_byte(b'\\'); at = at + 2; continue }
+            if esc == b'/' { out = out ~ one_byte(b'/'); at = at + 2; continue }
+            if esc == b'b' { out = out ~ one_byte(0x08 to byte); at = at + 2; continue }
+            if esc == b'f' { out = out ~ one_byte(0x0C to byte); at = at + 2; continue }
+            if esc == b'n' { out = out ~ one_byte(b'\n'); at = at + 2; continue }
+            if esc == b'r' { out = out ~ one_byte(b'\r'); at = at + 2; continue }
+            if esc == b't' { out = out ~ one_byte(b'\t'); at = at + 2; continue }
+            if esc == b'u' {
+                let step = match parse_unicode_escape(p, at) { UEscResult as u => u; error as e => return e }
+                out = out ~ step.text
+                at = step.pos
+                continue
+            }
+            return error { message = concat("json: invalid escape sequence at offset ", i64_to_str(at to i64)) }
+        }
+        if b < 0x20 to byte {
+            return error { message = concat("json: raw control character in string at offset ", i64_to_str(at to i64)) }
+        }
+        // any other byte (ASCII or a UTF-8 continuation/lead byte of a multibyte
+        // codepoint) is copied through verbatim — the source is already valid UTF-8
+        // (M.3's always-on invariant), so re-slicing raw bytes here can't produce
+        // invalid UTF-8 as long as escapes (the only place non-passthrough bytes are
+        // synthesized) always emit complete, valid encodings, which they do above.
+        out = out ~ one_byte(b)
+        at = at + 1
+    }
+    error { message = "json: unreachable" }
+}
+
+// pos is at the 'u' escape's leading backslash (p[pos] == '\\', p[pos+1] == 'u').
+// Decodes one \uXXXX, resolving a UTF-16 surrogate pair into its astral codepoint when a
+// high surrogate is immediately followed by \uDCxx-\uDFxx low surrogate.
+fn parse_unicode_escape(p: []byte, pos: u64) -> UEscResult | error {
+    let cp1 = match read_hex4(p, pos + 2) { i64 as v => v; error as e => return e }
+    // high surrogate range D800-DBFF: only valid alone as an error; try to pair it.
+    if cp1 >= 0xD800 && cp1 <= 0xDBFF {
+        if pos + 6 + 1 < p.len && p[pos + 6] == b'\\' && p[pos + 7] == b'u' {
+            let cp2 = match read_hex4(p, pos + 8) { i64 as v => v; error as e => return e }
+            if cp2 >= 0xDC00 && cp2 <= 0xDFFF {
+                let astral = 0x10000 + ((cp1 - 0xD800) * 0x400) + (cp2 - 0xDC00)
+                return UEscResult { pos = pos + 12; text = codepoint_to_str(astral) }
+            }
+        }
+        return error { message = "json: unpaired UTF-16 high surrogate in \\u escape" }
+    }
+    if cp1 >= 0xDC00 && cp1 <= 0xDFFF {
+        return error { message = "json: unpaired UTF-16 low surrogate in \\u escape" }
+    }
+    UEscResult { pos = pos + 6; text = codepoint_to_str(cp1) }
+}
+
+// reads exactly 4 hex digits starting at `pos`, returning their value (0..0xFFFF).
+fn read_hex4(p: []byte, pos: u64) -> i64 | error {
+    if pos + 4 > p.len { return error { message = "json: truncated \\u escape" } }
+    mut v: i64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= 4 { break }
+        let d = hex_digit_value(p[pos + i])
+        if d < 0 { return error { message = "json: invalid hex digit in \\u escape" } }
+        v = (v * 16) + d
+        i++
+    }
+    v
+}
+
+// builds a one-codepoint `str` by hand-encoding UTF-8 (no builtin "codepoint -> str"
+// exists yet, so this is written locally; it mirrors the well-known UTF-8 encoding
+// table and is only ever fed values in 0..0x10FFFF by the caller above).
+fn codepoint_to_str(cp: i64) -> str {
+    if cp <= 0x7F {
+        one_byte(cp to byte)
+    } else if cp <= 0x7FF {
+        let b0 = (0xC0 | (cp >> 6)) to byte
+        let b1 = (0x80 | (cp & 0x3F)) to byte
+        one_byte(b0) ~ one_byte(b1)
+    } else if cp <= 0xFFFF {
+        let b0 = (0xE0 | (cp >> 12)) to byte
+        let b1 = (0x80 | ((cp >> 6) & 0x3F)) to byte
+        let b2 = (0x80 | (cp & 0x3F)) to byte
+        one_byte(b0) ~ one_byte(b1) ~ one_byte(b2)
+    } else {
+        let b0 = (0xF0 | (cp >> 18)) to byte
+        let b1 = (0x80 | ((cp >> 12) & 0x3F)) to byte
+        let b2 = (0x80 | ((cp >> 6) & 0x3F)) to byte
+        let b3 = (0x80 | (cp & 0x3F)) to byte
+        one_byte(b0) ~ one_byte(b1) ~ one_byte(b2) ~ one_byte(b3)
+    }
+}
+

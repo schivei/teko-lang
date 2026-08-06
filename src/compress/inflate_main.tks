@@ -1,0 +1,53 @@
+/**
+ * Decode exactly one DEFLATE block (its 3-bit header, `BFINAL`+`BTYPE`, then the body
+ * matching `BTYPE`).
+ *
+ * @param state  the running inflate state, positioned at a block header
+ * @return       the advanced state and whether this was the FINAL block (`BFINAL == 1`),
+ *               or an `error` on a malformed header or block body
+ * @throws       when `BTYPE == 3` (reserved, RFC 1951 §3.2.3)
+ */
+fn inflate_one_block(state: InflateState) -> BlockResult | error {
+    let final_step = match read_bit(state.reader) { BitResult as b => b; error as e => return e }
+    let is_final = final_step.bit != 0
+    let type_step = match read_bits(final_step.next, 2) { BitsResult as b => b; error as e => return e }
+    let btype = type_step.value
+    let body_state = InflateState { reader = type_step.next; output = state.output }
+
+    match btype to BlockType {
+        Stored => {
+            let next = match inflate_stored_block(body_state) { InflateState as s => s; error as e => return e }
+            BlockResult { state = next; is_final = is_final }
+        }
+        Fixed => {
+            let next = match inflate_fixed_block(body_state) { InflateState as s => s; error as e => return e }
+            BlockResult { state = next; is_final = is_final }
+        }
+        Dynamic => {
+            let next = match inflate_dynamic_block(body_state) { InflateState as s => s; error as e => return e }
+            BlockResult { state = next; is_final = is_final }
+        }
+        _ => error { message = "inflate: reserved block type (BTYPE 3)" }
+    }
+}
+
+/**
+ * Decompress a raw DEFLATE bitstream (RFC 1951 — no zlib/gzip framing) into its original
+ * bytes.
+ *
+ * @param data  the compressed DEFLATE stream
+ * @return      the decompressed bytes, or an `error` on any malformed block, code, or
+ *              truncation
+ * @throws      when the stream ends before a `BFINAL == 1` block, or any block body is
+ *              malformed (see `inflate_one_block`)
+ */
+pub fn inflate(data: []byte) -> []byte | error {
+    mut state = InflateState { reader = bitreader_new(data); output = teko::list::empty() }
+    loop {
+        let step = match inflate_one_block(state) { BlockResult as r => r; error as e => return e }
+        state = step.state
+        if step.is_final { break }
+    }
+    state.output
+}
+

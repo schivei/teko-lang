@@ -1,0 +1,140 @@
+/**
+ * `teko::compress::inflate` — a RFC 1951 DEFLATE decompressor: stored, fixed-Huffman,
+ * and dynamic-Huffman blocks, plus LZ77 back-reference expansion.
+ *
+ * PURE TEKO, MONOMORPHIC (`[]byte -> []byte | error`), no mutation of shared state — the
+ * whole decode is VALUE-THREADED: every step function takes a cursor (a `BitReader` or
+ * `InflateState`) and returns a NEW one, the same pattern `teko::regex`'s parser uses
+ * (no index assignment / no in-place mutation is expressible in Teko — B.4/B.21).
+ *
+ * Canonical Huffman decoding (RFC 1951 §3.2.2) is done WITHOUT a lookup table: bits are
+ * peeled one at a time, extending a running `code` and comparing it against each length's
+ * first assigned code (`first_code[len]`), threaded through `[]u32` count/offset lists
+ * built once per Huffman table from an explicit code-length array.
+ */
+
+/**
+ * A bit-level cursor over a byte slice: DEFLATE packs bits LSB-first within each byte,
+ * consumed in stream order (RFC 1951 §3.1.1).
+ */
+type BitReader = struct {
+    /** The underlying compressed bytes. */
+    data: []byte
+    /** The index of the next byte to read bits from. */
+    byte_pos: u64
+    /** The number of bits already consumed from `data[byte_pos]` (0-7). */
+    bit_pos: u32
+}
+
+/**
+ * The result of reading one bit: its value plus the advanced cursor.
+ */
+type BitResult = struct {
+    /** The bit value (`0` or `1`). */
+    bit: u32
+    /** The cursor advanced past the consumed bit. */
+    next: BitReader
+}
+
+/**
+ * The result of reading a multi-bit field: its assembled value plus the advanced cursor.
+ */
+type BitsResult = struct {
+    /** The assembled value (the first bit read is the LOW-order bit). */
+    value: u32
+    /** The cursor advanced past the consumed bits. */
+    next: BitReader
+}
+
+/**
+ * A canonical Huffman decode table (RFC 1951 §3.2.2), built from an explicit
+ * per-symbol code-length array. Symbols are decoded bit-by-bit: `first_code[len]` is the
+ * smallest `len`-bit code assigned to any symbol of that length, and `first_index[len]`
+ * is that symbol's position in `symbols_by_len` (which lists every symbol in
+ * (length, original-index) order, matching the canonical assignment order).
+ */
+type HuffTable = struct {
+    /** `first_code[len]` = the first canonical code assigned at bit-length `len` (index 0 unused). */
+    first_code: []u32
+    /** `count[len]` = how many symbols have bit-length `len` (index 0 unused). */
+    count: []u32
+    /** `first_index[len]` = the starting offset into `symbols_by_len` for length `len`. */
+    first_index: []u32
+    /** every symbol with a nonzero code length, ordered by (length, original symbol index). */
+    symbols_by_len: []u32
+    /** the longest code length present (0 if the table is empty). */
+    max_len: u32
+}
+
+/**
+ * `MAX_HUFFMAN_BITS` — the largest DEFLATE Huffman code length reachable
+ * (RFC 1951 caps literal/length and distance codes at 15 bits; the
+ * code-length alphabet itself at 7).
+ */
+const MAX_HUFFMAN_BITS: u32 = 15
+
+/**
+ * The result of decoding one Huffman-coded symbol: its value plus the advanced cursor.
+ */
+type SymbolResult = struct {
+    /** The decoded symbol. */
+    symbol: u32
+    /** The cursor advanced past the consumed code bits. */
+    next: BitReader
+}
+
+/**
+ * The full running state of one inflate pass: the bit cursor plus the growing output
+ * buffer (value-threaded — every step returns a NEW `InflateState`).
+ */
+type InflateState = struct {
+    /** The bit cursor over the compressed input. */
+    reader: BitReader
+    /** The decompressed bytes produced so far. */
+    output: []byte
+}
+
+/**
+ * The running state of decoding a dynamic block's code-length arrays (literal/length +
+ * distance lengths are transmitted as ONE combined sequence, RFC 1951 §3.2.7).
+ */
+type CodeLengthsResult = struct {
+    /** The cursor advanced past the decoded length sequence. */
+    reader: BitReader
+    /** The decoded code lengths, in symbol order. */
+    lengths: []u32
+}
+
+/**
+ * One `(position, length)` pair read while decoding the code-length alphabet's own
+ * lengths — Teko has no index assignment, so the out-of-order `code_length_order()`
+ * permutation is applied by RECORDING pairs in read order and then, for each of the 19
+ * positions, scanning for its match (`code_length_lengths_of`), rather than writing
+ * into a mutable array by index.
+ */
+type CodeLengthSlot = struct {
+    /** The alphabet position (symbol index, 0-18) this length was transmitted for. */
+    position: u32
+    /** The code length assigned to `position`. */
+    length: u32
+}
+
+/**
+ * The DEFLATE `BTYPE` tag (RFC 1951 §3.2.3): `Stored` (uncompressed, code `0`), `Fixed`
+ * (fixed-Huffman, code `1`), or `Dynamic` (dynamic-Huffman, code `2`). The declaration
+ * order fixes the ordinal to the on-the-wire `BTYPE` code, so `btype to BlockType`
+ * reproduces the wire value directly — no separate wire-mapping helper is needed.
+ */
+pub type BlockType = enum { Stored; Fixed; Dynamic }
+
+/**
+ * The result of decoding one DEFLATE block: the advanced state plus whether it was the
+ * stream's final block.
+ */
+type BlockResult = struct {
+    /** The inflate state advanced past this block. */
+    state: InflateState
+    /** Whether this block's `BFINAL` bit was set (the stream's last block). */
+    is_final: bool
+}
+

@@ -1,0 +1,40 @@
+// --- byte access ---
+
+// the byte at p, or 0 if out of bounds (a safe peek for look-ahead — maximal munch).
+fn at(source: str, p: u64) -> byte {
+    if p >= source.len { return 0 }
+    source[p]
+}
+
+// --- source LOCATION: the 1-based (line, col) of byte `pos` (for token stamping +
+//     file:line:col diagnostics — M.3 honest about WHERE). O(pos) scan; the bootstrap
+//     files are small (M.5 — a line table is a later optimization, not needed now). ---
+
+fn compute_loc(source: str, pos: u64) -> Loc {
+    mut line: u32 = 1
+    mut col: u32 = 1
+    let limit = if pos < source.len { pos } else { source.len }
+    mut i: u64 = 0
+    loop {
+        if i >= limit { break }
+        if source[i] == b'\n' { line = line + 1; col = 1 } else { col = col + 1 }
+        i++
+    }
+    Loc { line = line; col = col }
+}
+
+// stamp a token with an ALREADY-COMPUTED 1-based (line, col). `tokenize` threads a location
+// cursor that advances MONOTONICALLY with the token-start position, so each source byte is
+// crossed exactly once across the whole file — O(1) amortized per token (a line table without
+// the table). The old per-token compute_loc rescan was O(pos), i.e. O(N²) over a file.
+fn stamp_loc(tok: Token, line: u32, col: u32) -> Token {
+    Token { kind = tok.kind; text = tok.text; line = line; col = col }
+}
+
+// a LOCATED lexer error: "line:col: msg" at byte `pos` (the file is prepended later by the
+// driver/assemble — same shape as parse errors, so lexer errors carry file:line:col too — M.3).
+fn scan_err_at(source: str, pos: u64, msg: str) -> error {
+    let loc = compute_loc(source, pos)
+    error { message = $"{loc.line}:{loc.col}: {msg}" }
+}
+

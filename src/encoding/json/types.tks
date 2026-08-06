@@ -1,0 +1,90 @@
+// src/encoding/json/json.tks   (namespace 'teko::encoding::json')
+//
+// S-JSON — TEKO_ROADMAP_NET_CRYPTO.md §2b: "teko::encoding::json. Deps: none. Parser +
+// encoder (RFC 8259), streaming + DOM. Needed by HTTP APIs, config, DoH, many cloud
+// services. High priority, unblocks a lot. (T1)". Pure Teko, no C twin (the `teko::regex`
+// precedent — src/regex/regex.tks — establishes that library code with zero OS/FFI
+// dependency ships as `.tks` + `.tkt` only).
+//
+// SCOPE (this unit). A full RFC 8259 DOM parser + encoder:
+//   - all 6 JSON value kinds: object, array, string, number, true/false, null;
+//   - full string escape handling (\" \\ \/ \b \f \n \r \t \uXXXX incl. surrogate pairs);
+//   - full number grammar (sign, integer, fraction, exponent) with round-trip-safe
+//     f64 decoding and shortest-safe re-encoding of integral vs fractional values;
+//   - streaming is satisfied by the DOM parser reading one `str` in one pass (no
+//     incremental/partial-input token API in this round — see "TR4-readiness" below
+//     for why a DOM-first cut is the right shape for the trait consumer).
+// NOT implemented (documented, future round, JSON5/JSONC extensions — RFC 8259 forbids
+// all of these, so their absence is spec-conformance, not a gap): comments, trailing
+// commas, unquoted keys, single-quoted strings, NaN/Infinity literals.
+//
+// VALUE MODEL — the design tension the task flagged, resolved here (no Map exists yet;
+// S7 is a later round). RFC 8259 §1 defines an "object" as "an unordered collection of
+// zero or more name/value pairs" — the wire grammar is literally a sequence of pairs, so
+// preserving SOURCE ORDER (rather than committing to hash semantics prematurely) is the
+// most faithful and least-surface DOM shape today; a future `Json::from_map`/`to_map`
+// bridge into `teko::collections::Map` (once S7 lands) can layer on top without
+// invalidating this shape.
+//
+//   DECISION: parallel slices — `JsonObject = struct { keys: []str; values: []JsonValue }`
+//   — over a `variant`-of-pairs (`[]JsonPair` where `JsonPair = struct { key: str; value:
+//   JsonValue }`). Both are expressible; parallel slices is the LEAST-SURFACE choice and
+//   matches established precedent elsewhere in this exact compiler for "n unlabeled things
+//   walked in lockstep": `parser::StructLit { field_names: []str; field_vals: []Expr }`,
+//   `parser::FlagsBody { members: []str; values: []u64 }` (src/parser/ast.tks). A
+//   `JsonPair` struct would ALSO work and reads slightly more "one item at a time", but
+//   it's one more named type for no behavioral gain — parallel slices is the established
+//   idiom here, so it's what's used. (If a future round wants keyed lookup, that's a
+//   `find_key`/`with_key` helper over these same two slices, not a shape change.)
+//
+//   The recursive cases (`array`'s elements, `object`'s values) are stored as `[]JsonValue`
+//   (a slice), matching the `teko::regex` precedent for a self-referential variant: never a
+//   bare `JsonValue` struct field, because of a confirmed defect in the (now-retired) interpreter
+//   where a bare variant-typed field read off a `match`-bound variable could come back corrupted,
+//   while the identical value behind a `[]T` slice (a different, unaffected interpreter code path)
+//   was fine (see src/regex/regex.tks's "the interpreter workaround plumbing" note). Arrays and objects
+//   already need slices for their multi-element payload, so this costs nothing extra here
+//   (unlike regex's RStar/RPlus/ROpt, which had to wrap an inherently single child).
+//
+// ERROR MODEL (M.1 fail-loud / M.3 honest types). `decode(str) -> JsonValue | error` —
+// malformed input is a checked failure (never a panic), following the `str_from_utf8` /
+// `teko::regex::compile` fallible-builtin convention. `encode` is total (a well-formed
+// `JsonValue` tree always has a valid JSON rendering) so it returns `str`, not `str |
+// error`.
+//
+// TR4-READINESS (teko::traits' Json structural trait, TEKO_ROADMAP_TRAITS.md TR4 — NOT
+// implemented here, just kept in view). TR4 will synthesize `to_json`/`from_json` for a
+// user struct by deriving field-by-field. The natural bridge point is exactly this
+// module's DOM: derived `to_json` builds a `JsonValue` (mostly `JsonObject`) and calls
+// `encode`; derived `from_json` calls `decode` then walks the resulting `JsonValue` by
+// field name via `object_get`. That is why `object_get`/`array_get` (below) exist as
+// public, trait-friendly accessors NOW even though nothing in this unit calls them
+// internally except tests — they are the exact shape TR4's generated code will want.
+
+// --- the value model ---
+
+pub type JsonNull = struct { }   // `null`
+
+pub type JsonBool = struct { value: bool }   // `true` / `false`
+
+pub type JsonNumber = struct { value: f64 }   // any JSON number (int or float; RFC 8259 has one numeric grammar)
+
+pub type JsonString = struct { value: str }   // a decoded (escapes resolved) string
+
+pub type JsonArray = struct { items: []JsonValue }   // `[...]` — see the interpreter-workaround note above for why this is a slice
+
+pub type JsonObject = struct { keys: []str; values: []JsonValue }   // `{...}` — parallel slices, source order preserved (see rationale above)
+
+pub type JsonValue = variant JsonNull | JsonBool | JsonNumber | JsonString | JsonArray | JsonObject
+
+// a parse result: the position just past what was consumed, plus the value built.
+// Threaded through by return value (no mutable out-param — the same idiom `teko::regex`
+// uses for its own `PState`).
+pub type PResult = struct { pos: u64; value: JsonValue }
+
+// a decoded string's parse result (kept distinct from `PResult` because the OBJECT-KEY
+// case needs the decoded text, not a wrapped `JsonValue` — avoids an unwrap-then-rewrap).
+pub type PStringResult = struct { pos: u64; text: str }
+
+pub type UEscResult = struct { pos: u64; text: str }
+

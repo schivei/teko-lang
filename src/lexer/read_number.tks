@@ -1,0 +1,89 @@
+// --- numbers & identifiers ---
+
+// a run of digits, allowing `_` as a separator BETWEEN digits (B.28): `1_000`.
+fn scan_digits(source: str, pos: u64) -> u64 {
+    mut p = pos
+    loop {
+        if p >= source.len { break }
+        let c = source[p]
+        if is_digit(c) { p++; continue }
+        if c == b'_' {
+            if p + 1 < source.len && is_digit(at(source, p + 1)) { p++; continue }
+        }
+        break
+    }
+    p
+}
+
+// a Number token — integer (`123`, `1_000`) OR float (`3.14`, `1.5e3`, `1e9`) (N1 —
+// TEKO_CORRECTION_PLAN §5). The token stays TokenKind::Number carrying the raw text;
+// the int-vs-float decision is made by the literal decoders (lit_is_float). No float
+// SUFFIXES (`1.5f`): the default is f64, an annotation picks f32/f32.
+fn read_number(source: str, pos: u64) -> Scan {
+    // hex `0x…` / binary `0b…` integer literals (B.28; no fraction/exponent). `_` may
+    // separate digits. The raw text (incl the prefix) rides the token; lit_int decodes.
+    if at(source, pos) == b'0' && (at(source, pos + 1) == b'x' || at(source, pos + 1) == b'X') {
+        mut h = pos + 2
+        loop {
+            if h >= source.len { break }
+            let c = source[h]
+            if is_hex_digit(c) { h++; continue }
+            if c == b'_' {
+                if h + 1 < source.len && is_hex_digit(at(source, h + 1)) { h++; continue }
+            }
+            break
+        }
+        return Scan { token = Token { kind = TokenKind::Number; text = slice(source, pos, h); line = 0; col = 0 }; next = h }
+    }
+    if at(source, pos) == b'0' && (at(source, pos + 1) == b'b' || at(source, pos + 1) == b'B') && is_bin_body_start(at(source, pos + 2)) {
+        mut bp = pos + 2
+        loop {
+            if bp >= source.len { break }
+            let c = source[bp]
+            if c == b'0' || c == b'1' { bp++; continue }
+            if c == b'_' {
+                if bp + 1 < source.len && (at(source, bp + 1) == b'0' || at(source, bp + 1) == b'1') { bp++; continue }
+            }
+            break
+        }
+        return Scan { token = Token { kind = TokenKind::Number; text = slice(source, pos, bp); line = 0; col = 0 }; next = bp }
+    }
+    mut p = scan_digits(source, pos)   // integer part
+
+    // fractional part: a `.` FOLLOWED BY a digit (so `1.method` / `1..=` stay ints).
+    if at(source, p) == b'.' && is_digit(at(source, p + 1)) {
+        p = scan_digits(source, p + 1)
+    }
+
+    // exponent: `[eE][+-]?<digits>` — only consume `e` if a valid exponent follows.
+    if at(source, p) == b'e' || at(source, p) == b'E' {
+        mut q = p + 1
+        if at(source, q) == b'+' || at(source, q) == b'-' { q = q + 1 }
+        if is_digit(at(source, q)) {
+            p = scan_digits(source, q)
+        }
+    }
+
+    if at(source, p) == b'b' && at(source, p + 1) == b'i' && !is_ident_continue(at(source, p + 2)) {
+        return Scan { token = Token { kind = TokenKind::Number; text = slice(source, pos, p + 2); line = 0; col = 0 }; next = p + 2 }
+    }
+    if at(source, p) == b'd' && !is_ident_continue(at(source, p + 1)) {
+        return Scan { token = Token { kind = TokenKind::Number; text = slice(source, pos, p + 1); line = 0; col = 0 }; next = p + 1 }
+    }
+
+    Scan { token = Token { kind = TokenKind::Number; text = slice(source, pos, p); line = 0; col = 0 }; next = p }
+}
+
+/**
+ * is_bin_body_start — may `c` begin the body of a binary literal after the `0b` prefix (a binary
+ * digit or a `_` group separator)? This GUARDS the binary-literal branch so `0b` NOT followed by a
+ * binary digit (e.g. `0bi`) is not mistaken for a binary literal, letting the `bi`/`d` suffix path
+ * treat it as an arbitrary-precision literal instead. A real binary literal always has a digit here.
+ *
+ * @param c  the byte after the `0b` prefix
+ * @return   true iff `c` is `0`, `1`, or `_`
+ */
+fn is_bin_body_start(c: byte) -> bool {
+    c == b'0' || c == b'1' || c == b'_'
+}
+
