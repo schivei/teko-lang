@@ -1,0 +1,242 @@
+/**
+ * teko::journal::summary_types — phase constants, Finding/PhaseTally/CovTriple/RunSummary
+ * types, and small pure helpers over them, split out of summary.tks (mechanical file-size
+ * split; no logic changes).
+ *
+ * @since 0.3.1
+ */
+
+/**
+ * PHASE_UNIT — the phase a `s<i>` writer's records belong to (a gate shard).
+ */
+const PHASE_UNIT: str = "unit"
+
+/**
+ * PHASE_REGRESSION — the phase a `r<i>` writer's records belong to (a regression-tier child).
+ */
+const PHASE_REGRESSION: str = "regression"
+
+/**
+ * Finding — ONE named finding of the summary: a failure, a skip, or a writer that died.
+ *
+ * NAMED, NEVER ONLY COUNTED. A number cannot be acted on: "1 skipped" names neither the row nor the
+ * reason, and this project's own CI treats a skip as a failure (`scripts/no_skips_gate.sh`). A law
+ * with no instrument naming its breach is a law nobody enforces.
+ *
+ * @since 0.3.1
+ */
+pub type Finding = struct {
+    /** `unit` or `regression`, derived from the writer's prefix (`phase_of`). */
+    phase: str
+    /** which writer produced it (`s2`, `r0`). */
+    writer: str
+    /** what it names: the `#test`, or `<file>.tkr[<scenario> row <n>]`. */
+    label: str
+    /** why — the honest reason the producer already writes today, carried rather than summarised. */
+    reason: str
+}
+
+/**
+ * PhaseTally — one count, split by phase and totalled.
+ *
+ * @since 0.3.1
+ */
+pub type PhaseTally = struct {
+    /** how many in the unit phase (writers whose prefix is `s`). */
+    unit: u64
+    /** how many in the regression phase (writers whose prefix is `r`). */
+    regression: u64
+    /** `unit + regression`. */
+    total: u64
+}
+
+/**
+ * zero_tally — a `PhaseTally` with every field at 0, the fold's starting accumulator.
+ *
+ * @return  the zero tally
+ * @since 0.3.1
+ */
+fn zero_tally() -> PhaseTally { PhaseTally { unit = 0; regression = 0; total = 0 } }
+
+/**
+ * CovTriple — functions/lines/branches measured, covered over valid, from the coverage sinks this
+ * run's dumps were folded into. `summarize` cannot populate this itself (it is a pure fold over
+ * journal records, and a covered/valid count is not a journal record) — it is left zeroed, and the
+ * caller that DOES hold the merged coverage sinks (the report stage, which already reads the
+ * isolamento-C4 site-map) fills it in with `with_coverage`.
+ *
+ * @since 0.3.1
+ */
+pub type CovTriple = struct {
+    /** functions marked hit, in this run's merged sinks. */
+    functions_cov: u64
+    /** functions valid (the site-map's total), the denominator `functions_cov` is measured against. */
+    functions_val: u64
+    /** lines marked hit. */
+    lines_cov: u64
+    /** lines valid. */
+    lines_val: u64
+    /** branches marked hit. */
+    branches_cov: u64
+    /** branches valid. */
+    branches_val: u64
+}
+
+/**
+ * zero_cov — a `CovTriple` with every field at 0, `summarize`'s honest default when it has no
+ * coverage sinks to read (it only ever sees journal records).
+ *
+ * @return  the zero triple
+ * @since 0.3.1
+ */
+fn zero_cov() -> CovTriple {
+    CovTriple { functions_cov = 0; functions_val = 0; lines_cov = 0; lines_val = 0; branches_cov = 0; branches_val = 0 }
+}
+
+/**
+ * RunSummary — the WHOLE verdict of a run: both phases, the named findings, the coverage.
+ *
+ * @since 0.3.1
+ */
+pub type RunSummary = struct {
+    /** the stamp of the run this summary describes, or "" for a run that produced no records at all. */
+    run: str
+    /** tests/rows that passed, by phase and in total. */
+    passed: PhaseTally
+    /** the ones that failed. */
+    failed: PhaseTally
+    /** the ones skipped for a missing capability. */
+    skipped: PhaseTally
+    /** the ones that NEVER RAN because their writer died before reaching them (`plan` minus the rest). */
+    never_ran: PhaseTally
+    /** every failure, named. */
+    fails: []Finding
+    /** every skip, named WITH its reason. */
+    skips: []Finding
+    /** every writer with no terminal record, with the last test it reached. */
+    dead: []Finding
+    /** functions/lines/branches measured, from the fold of this run's coverage dumps. */
+    cov: CovTriple
+    /** how many coverage dumps were expected and did not appear (§2.4). */
+    cov_missing: u64
+}
+
+/**
+ * phase_of — the phase `writer`'s records belong to, from its prefix alone (`s<i>` = unit,
+ * `r<i>` = regression). A writer of neither shape (the orchestrator, `m`) belongs to no phase and is
+ * excluded from both tallies — it notes the run, it does not run tests.
+ *
+ * @param writer  a record's writer field
+ * @return        `PHASE_UNIT`, `PHASE_REGRESSION`, or "" when `writer` names neither
+ * @since 0.3.1
+ */
+fn phase_of(writer: str) -> str {
+    if writer.len > 0 && writer[0] == b's' { return PHASE_UNIT }
+    if writer.len > 0 && writer[0] == b'r' { return PHASE_REGRESSION }
+    ""
+}
+
+/**
+ * tally_bump — `t` with `n` more counted against `phase` (and against the total). A writer belonging
+ * to neither phase leaves `t` unchanged — there is nowhere honest to file it.
+ *
+ * @param t      the tally so far
+ * @param phase  `PHASE_UNIT`, `PHASE_REGRESSION`, or ""
+ * @param n      how many to add
+ * @return       the updated tally
+ * @since 0.3.1
+ */
+fn tally_bump(t: PhaseTally, phase: str, n: u64) -> PhaseTally {
+    if phase == PHASE_UNIT { return PhaseTally { unit = t.unit + n; regression = t.regression; total = t.total + n } }
+    if phase == PHASE_REGRESSION { return PhaseTally { unit = t.unit; regression = t.regression + n; total = t.total + n } }
+    t
+}
+
+/**
+ * str_list_contains — whether `x` is already an element of `xs`, the membership test `distinct_writers`
+ * uses to keep each writer once.
+ *
+ * @param xs  the list to search
+ * @param x   the value to find
+ * @return    true iff `x` is present
+ * @since 0.3.1
+ */
+fn str_list_contains(xs: []str, x: str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if xs[i] == x { return true }
+        i = i + 1
+    }
+    false
+}
+
+/**
+ * distinct_writers — every writer named in `recs`, each once, in first-seen order.
+ *
+ * @param recs  the records to scan
+ * @return      the distinct writer identities
+ * @since 0.3.1
+ */
+fn distinct_writers(recs: []Record) -> []str {
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= recs.len { break }
+        if !str_list_contains(out, recs[i].writer) { out = teko::list::push(out, recs[i].writer) }
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * first_tab_index — the index of the first tab in `s`, or `s.len` when there is none.
+ *
+ * @param s  a payload
+ * @return   the first tab's index, or `s.len`
+ * @since 0.3.1
+ */
+fn first_tab_index(s: str) -> u64 {
+    mut i: u64 = 0
+    loop {
+        if i >= s.len { return s.len }
+        if s[i] == b'\t' { return i }
+        i = i + 1
+    }
+}
+
+/**
+ * payload_label — the label half of a `fail`/`skip` payload (everything before its first tab), or
+ * the WHOLE payload when it carries no tab (a `begin`/`ok`/`incomplete` payload, which is a label
+ * alone).
+ *
+ * @param payload  a record's payload
+ * @return         the label
+ * @since 0.3.1
+ */
+fn payload_label(payload: str) -> str { teko::str::slice_to(payload, first_tab_index(payload)) }
+
+/**
+ * payload_reason — the reason half of a `fail`/`skip` payload (everything after its first tab), or
+ * "" when it carries none.
+ *
+ * @param payload  a record's payload
+ * @return         the reason, or ""
+ * @since 0.3.1
+ */
+fn payload_reason(payload: str) -> str {
+    let t = first_tab_index(payload)
+    if t >= payload.len { return "" }
+    teko::str::slice_from(payload, t + 1)
+}
+
+/**
+ * finding_of — a `Finding` read off one `fail`/`skip`/`incomplete` record.
+ *
+ * @param r  the record (its `kind` decides nothing here; the caller has already dispatched on it)
+ * @return   the finding, with the payload split into `label`/`reason`
+ * @since 0.3.1
+ */
+fn finding_of(r: Record) -> Finding {
+    Finding { phase = phase_of(r.writer); writer = r.writer; label = payload_label(r.payload); reason = payload_reason(r.payload) }
+}
