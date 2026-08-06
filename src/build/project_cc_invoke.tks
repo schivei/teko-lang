@@ -275,39 +275,3 @@ fn validate_extern_libs_for_target(m: Manifest) -> null | error {
     validate_shared_libs_for_target(m, target, allow_undef_selected())
 }
 
-/**
- * append_macos_plist_flag — on a macOS target, write the project's `Info.plist`
- * beside `binary` and append the `-Wl,-sectcreate,__TEXT,__info_plist,<plist>`
- * flag so the linked Mach-O carries native version metadata (C7.1k; visible to
- * `mdls` / `otool -s __TEXT __info_plist`). Best-effort — a plist write failure
- * leaves `argv` unchanged and never breaks the build. A no-op off macOS (the
- * Windows VERSIONINFO + Linux ELF note are the staged follow-ons).
- *
- * `tos` MUST BE THE EMIT OS, NEVER `target_os(m)`. `-sectcreate` is an Apple `ld`
- * flag and a question about the OS being linked FOR, but `target_os` answers with
- * the HOST whenever no `[extern] target` triple is set — and a `TEKO_TARGET` cross
- * build sets no triple. On a macOS host cross-linking to Windows that handed the
- * flag to `x86_64-w64-mingw32-ld`, which fails the link outright:
- *
- *     unable to disambiguate: -sectcreate (did you mean --sectcreate ?)
- *
- * No Linux lane could ever see it (`teko::os()` there is never "macos"), and the
- * one lane that could was SKIPPING the row for a missing cross-linker. Provisioning
- * mingw is what surfaced it — the skip was hiding a real defect, which is the whole
- * reason a skipped row counts as a failure in this project's own CI.
- *
- * @param argv    the link argument vector so far
- * @param binary  the output executable path (the plist lands at `<binary>.Info.plist`)
- * @param m       the manifest (project identity embedded in the plist)
- * @param tos     the RESOLVED TARGET's own OS (`LinkTargetKeys.emit_os`); "macos" enables
- *                 the section, every other value leaves `argv` untouched
- * @return        `argv` with the sectcreate flag appended on macOS, else unchanged
- */
-fn append_macos_plist_flag(argv: []str, binary: str, m: Manifest, tos: str) -> []str {
-    if tos != "macos" { return argv }
-    let plist = teko::str::concat(binary, ".Info.plist")
-    match teko::io::write_file(plist, plist_xml(m)) {
-        null => teko::list::push(argv, teko::str::concat("-Wl,-sectcreate,__TEXT,__info_plist,", plist))
-        error => argv
-    }
-}

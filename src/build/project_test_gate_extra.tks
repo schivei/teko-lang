@@ -1,0 +1,28 @@
+/**
+ * The unmet-floor messages from a SITE-MAP and manifest, the site-map twin of `coverage_floor_misses`
+ * for the staged `teko test` report — the three measured percentages come from joining the site-map
+ * against the merged sink (`coverage::*_coverage_pct_of`) instead of walking the typed program, so
+ * the report stage needs no re-check. The numbers are identical: the site-map carries the same
+ * `fn_idx`/walk the AST-walk metrics read.
+ *
+ * @param sm  the parsed coverage site-map (the build stage's join table)
+ * @param m   the resolved manifest (its `[coverage]` floors)
+ * @return    one message per unmet floor; empty when every floor holds
+ */
+fn coverage_floor_misses_sm(sm: coverage::SiteMap, m: Manifest) -> []str {
+    unmet_coverage_floors(coverage::coverage_pct_of(sm), coverage::line_coverage_pct_of(sm), coverage::branch_coverage_pct_of(sm), m.cov_functions, m.cov_lines, m.cov_branches)
+}
+
+/**
+ * The strict (`--cov-validation`) floor check from a site-map: 0 when every floor holds, else the
+ * first unmet floor's `fail`. The site-map twin of `coverage_gate_result`.
+ *
+ * @param dir  the project directory (for the diagnostic prefix)
+ * @param sm   the parsed coverage site-map
+ * @param m    the resolved manifest (its `[coverage]` floors)
+ * @return     0 when every floor holds, else 1 with the first unmet floor reported to stderr
+ * @throws     the first unmet floor's message when any of functions/lines/branches is below its floor
+ */
+fn coverage_gate_result_sm(dir: str, sm: coverage::SiteMap, m: Manifest) -> i32 {
+    let misses = coverage_floor_misses_sm(sm, m)
+    if coverage_floor_blocks(misses, true) { return fail(dir, misses[0]) }

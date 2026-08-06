@@ -281,33 +281,3 @@ fn fuse_lower_item_win(robase: []teko::lir::LRodata, prelude: teko::lir::LowerPr
     FusedItemOut { encoded = encoded; rodata = step.module.rodata; loose = step.loose; new_lifted_count = new_lifted.len }
 }
 
-/**
- * fuse_virtual_main_win — lower the synthesized virtual-main and encode it, ENTIRELY inside the
- * caller's already-entered scratch region: the Win64 twin of `fuse_virtual_main_x86`, identical
- * except the encode step runs under the Win64 ABI (`encode_lfuncs_in_region_win`).
- *
- * @param loose     every item's collected loose top-level statement, in program order
- * @param prelude   the whole-program lowering context
- * @param robase    the root-resident rodata accumulator (read-only seed)
- * @param lifted_ph  the root-resident lifted-count placeholder list (length = the running total)
- * @return          the entry's encoded output (renamed vmain + stub + any new lifted) + grown
- *                  rodata, or a propagated honest-stop
- * @since 0.3.1 C6.4
- */
-fn fuse_virtual_main_win(loose: []checker::TStatement, prelude: teko::lir::LowerPrelude, robase: []teko::lir::LRodata, lifted_ph: []teko::lir::LFunc) -> FusedItemOut | error {
-    let vmain = match teko::lir::lower_virtual_main(loose, prelude.layouts, prelude.enums, robase, lifted_ph, prelude.externs, false, prelude.variants, prelude.ref_fns, prelude.field_decls, prelude.table) { teko::lir::LoweredFunction as x => x; error as e => return e }
-    let new_lifted = lifted_suffix(vmain.lifted, lifted_ph.len)
-    let seed = teko::lir::LModule { funcs = teko::list::push(teko::list::empty(), vmain.func); rodata = vmain.rodata; globals = prelude.module.globals; layouts = prelude.module.layouts }
-    let wrapped = match teko::lir::wrap_native_entry(seed) { teko::lir::LModule as x => x; error as e => return e }
-    let all_funcs = concat_lfuncs(wrapped.funcs, new_lifted)
-    match frame_escape_window(all_funcs) { error as e => return e; null => { } }
-    let encoded = match encode_lfuncs_in_region_win(all_funcs) { []teko::backend::EncodedFuncX86 as x => x; error as e => return e }
-    FusedItemOut { encoded = encoded; rodata = vmain.rodata; loose = teko::list::empty(); new_lifted_count = new_lifted.len }
-}
-
-/**
- * emit_native_win — the x86-64/Win64/PE-COFF own-backend tail (#388 B3), FUSED lower+encode per item
- * (0.3.1 C6.4, `docs/design/native-lowering-oom-por-funcao-0.3.1.md`): compute the whole-program
- * lowering context ONCE (`teko::lir::lower_prelude`), then for every program item — a scratch child
- * region, lower AND encode that ONE item inside it under the Win64 ABI (`fuse_lower_item_win`),
- * leave the region, commit its outputs to the root accumulators (`.text` bytes E1, the rodata delta

@@ -1,0 +1,33 @@
+/**
+ * Do two source paths refer to the same file, tolerant of the repo-relative vs project-relative
+ * mismatch between what `git diff` reports (repo root) and what the checker records on a function
+ * (`f.file`, which may be project-relative)? True when they are equal or one is a path-suffix of the
+ * other (`.../src/x.tks` matches `x.tks` only across a `/` boundary, so `ax.tks` never matches `x.tks`).
+ *
+ * @param a  one path
+ * @param b  the other path
+ * @return   true iff `a` and `b` denote the same file up to a leading-directory prefix
+ */
+fn path_tail_match(a: str, b: str) -> bool {
+    if a == b { return true }
+    if teko::str::ends_with(a, teko::str::concat("/", b)) { return true }
+    if teko::str::ends_with(b, teko::str::concat("/", a)) { return true }
+    false
+}
+
+/**
+ * Was `(file, line)` changed since the base — i.e. is `line` in the changed-line set of a file that
+ * `path_tail_match`es `file`? The membership predicate the delta attribution consults per executable
+ * line. PURE and directly unit-testable against a synthetic `ChangedLines`.
+ *
+ * @param cls   the changed-line set from `changed_line_set`
+ * @param file  the executable line's source file
+ * @param line  the executable line's 1-based line number
+ * @return      true iff that file+line was added/replaced since the base
+ */
+fn changed_contains(cls: ChangedLines, file: str, line: u32) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= cls.files.len { break }
+        if path_tail_match(cls.files[i].path, file) {
+            mut j: u64 = 0
