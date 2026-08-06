@@ -1,0 +1,71 @@
+/**
+ * Feeds `data` into an in-progress SHA-512 computation: joins it with any buffered tail,
+ * compresses every complete 128-byte block, and buffers the shorter remainder for the next
+ * call (or `sha512_finalize`). May be called any number of times before finalizing —
+ * `sha512_of(m)` is equivalent to `sha512_finalize(sha512_update(sha512_init(), m))`.
+ *
+ * @param state  the state to advance
+ * @param data   the next chunk of message bytes
+ * @return       the updated state after absorbing every complete block in `data`
+ */
+pub fn sha512_update(state: Sha512State, data: []byte) -> Sha512State {
+    let joined = bytes_concat(state.pending, data)
+    mut h = state.h
+    mut off: u64 = 0
+    loop {
+        if joined.len - off < 128 { break }
+        h = sha512_compress(h, bytes_slice(joined, off, off + 128))
+        off = off + 128
+    }
+    Sha512State { h = h; pending = bytes_slice(joined, off, joined.len); total_len = state.total_len + data.len }
+}
+
+/**
+ * Completes a SHA-512 computation: pads the buffered tail (a 128-bit length suffix, per
+ * FIPS 180-4 §5.1.2 — the top 64 bits are always zero since a `u64` byte count times 8
+ * bits never overflows 64 bits), compresses the resulting final block(s), and renders the
+ * eight state words as 64 big-endian bytes (the 512-bit digest).
+ *
+ * @param state  the state after every `sha512_update` call for this message
+ * @return       the 64-byte SHA-512 digest
+ */
+pub fn sha512_finalize(state: Sha512State) -> []byte {
+    let padded = sha2_pad(state.pending, state.total_len, true)
+    mut h = state.h
+    mut off: u64 = 0
+    loop {
+        if off >= padded.len { break }
+        h = sha512_compress(h, bytes_slice(padded, off, off + 128))
+        off = off + 128
+    }
+    mut out: []byte = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= h.len { break }
+        out = push_be_u64(out, h[i])
+        i++
+    }
+    out
+}
+
+/**
+ * One-shot SHA-512: hashes the whole of `data` in a single call. Equivalent to
+ * `sha512_finalize(sha512_update(sha512_init(), data))`.
+ *
+ * @param data  the complete message to hash
+ * @return      the 64-byte SHA-512 digest
+ */
+pub fn sha512_of(data: []byte) -> []byte {
+    sha512_finalize(sha512_update(sha512_init(), data))
+}
+
+/**
+ * `sha512_of`, rendered as a lowercase hex string — the form every published known-answer
+ * vector uses.
+ *
+ * @param data  the complete message to hash
+ * @return      the SHA-512 digest of `data` as 128 lowercase hex characters
+ */
+pub fn sha512_hex_of(data: []byte) -> str {
+    teko::crypto::to_hex(sha512_of(data))
+}

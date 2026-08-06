@@ -1,0 +1,154 @@
+/**
+ * Render a `BigInt` to its canonical decimal string (a leading `-` for a negative value, no leading
+ * zeros, `"0"` for zero).
+ *
+ * @param x  the value
+ * @return   the decimal text
+ */
+pub fn to_str(x: BigInt) -> str {
+    if is_zero(x) { return "0" }
+    mut digs: []byte = teko::list::empty()
+    mut m = x.limbs
+    loop {
+        if mag_is_zero(m) { break }
+        let dm = mag_divmod_small(m, DEC_RADIX)
+        digs = teko::list::push(digs, ((b'0' to u64) + dm.r) to byte)
+        m = dm.q
+    }
+    mut out: []byte = teko::list::empty()
+    if x.neg { out = teko::list::push(out, b'-') }
+    mut i = digs.len
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        out = teko::list::push(out, digs[i])
+    }
+    match teko::text::str_from_utf8(out) {
+        str as s => s
+        error => ""
+    }
+}
+
+/**
+ * Negate a `BigInt` (zero is unchanged).
+ *
+ * @param x  the value
+ * @return   `-x`
+ */
+pub fn neg(x: BigInt) -> BigInt {
+    if is_zero(x) { return zero() }
+    mk(!x.neg, x.limbs)
+}
+
+/**
+ * The magnitude (absolute value) of a `BigInt`.
+ *
+ * @param x  the value
+ * @return   `|x|`
+ */
+pub fn abs(x: BigInt) -> BigInt {
+    mk(false, x.limbs)
+}
+
+/**
+ * Add two `BigInt`s. Same signs add magnitudes; opposite signs subtract the smaller magnitude from
+ * the larger and take the larger's sign.
+ *
+ * @param a  the left addend
+ * @param b  the right addend
+ * @return   `a + b`
+ */
+pub fn add(a: BigInt, b: BigInt) -> BigInt {
+    if a.neg == b.neg { return mk(a.neg, mag_add(a.limbs, b.limbs)) }
+    let c = mag_cmp(a.limbs, b.limbs)
+    if c == 0 { return zero() }
+    if c > 0 { return mk(a.neg, mag_sub(a.limbs, b.limbs)) }
+    mk(b.neg, mag_sub(b.limbs, a.limbs))
+}
+
+/**
+ * Subtract `b` from `a`.
+ *
+ * @param a  the minuend
+ * @param b  the subtrahend
+ * @return   `a - b`
+ */
+pub fn sub(a: BigInt, b: BigInt) -> BigInt {
+    add(a, neg(b))
+}
+
+/**
+ * Multiply two `BigInt`s. The sign is the XOR of the operand signs; a zero product is canonical zero.
+ *
+ * @param a  the left factor
+ * @param b  the right factor
+ * @return   `a * b`
+ */
+pub fn mul(a: BigInt, b: BigInt) -> BigInt {
+    mk(a.neg != b.neg, mag_mul(a.limbs, b.limbs))
+}
+
+/**
+ * Truncating integer division `a / b` (quotient rounded toward zero). Panics on a zero divisor.
+ *
+ * @param a  the dividend
+ * @param b  the divisor
+ * @return   the truncated quotient
+ */
+pub fn div(a: BigInt, b: BigInt) -> BigInt {
+    if is_zero(b) { panic("bigint::div: division by zero") }
+    let dm = mag_divmod(a.limbs, b.limbs)
+    mk(a.neg != b.neg, dm.q)
+}
+
+/**
+ * Remainder `a % b` with the sign of the dividend (truncated-division convention, matching the
+ * machine-int `%`). Panics on a zero divisor.
+ *
+ * @param a  the dividend
+ * @param b  the divisor
+ * @return   the remainder, with the sign of `a`
+ */
+pub fn rem(a: BigInt, b: BigInt) -> BigInt {
+    if is_zero(b) { panic("bigint::rem: division by zero") }
+    let dm = mag_divmod(a.limbs, b.limbs)
+    mk(a.neg, dm.r)
+}
+
+/**
+ * Three-way compare of two `BigInt`s.
+ *
+ * @param a  the left value
+ * @param b  the right value
+ * @return   `1` if `a > b`, `-1` if `a < b`, `0` if equal
+ */
+pub fn cmp(a: BigInt, b: BigInt) -> i64 {
+    if a.neg != b.neg {
+        if a.neg { return -1 }
+        return 1
+    }
+    let mc = mag_cmp(a.limbs, b.limbs)
+    if a.neg { return 0 - mc }
+    mc
+}
+
+/**
+ * Value equality of two `BigInt`s.
+ *
+ * @param a  the left value
+ * @param b  the right value
+ * @return   `true` iff `a == b`
+ */
+pub fn eq(a: BigInt, b: BigInt) -> bool {
+    cmp(a, b) == 0
+}
+
+/**
+ * Is this value strictly negative? (Zero is never negative — it is canonicalized to a clear sign.)
+ *
+ * @param x  the value
+ * @return   `true` iff `x < 0`
+ */
+pub fn is_neg(x: BigInt) -> bool {
+    x.neg
+}
