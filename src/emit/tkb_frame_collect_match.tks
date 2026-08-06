@@ -1,0 +1,45 @@
+// src/emit/tkb_frame_collect_match.tks  (namespace 'teko::emit')
+//
+// (C7.16) MATCH FRAMING collect — pattern-expr / Pattern / TArm. Pure line-count split of
+// tkb_frame.tks; no behavior change.
+
+use teko::checker
+use teko::parser
+
+fn collect_pexpr(t: StrTable, e: parser::Expr) -> StrTable {
+    match e.kind {
+        parser::StrLit as s => st_intern(t, s.text).table
+        _ => t   // Number/ByteLit carry no interned string
+    }
+}
+fn collect_patterns(t: StrTable, xs: []parser::Pattern) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop { if i >= xs.len { break }; tab = collect_pattern(tab, xs[i]); i++ }
+    tab
+}
+fn collect_pattern(t: StrTable, p: parser::Pattern) -> StrTable {
+    match p {
+        parser::LiteralPattern as l => collect_pexpr(t, l.value)
+        parser::RangePattern as r => collect_pexpr(collect_pexpr(t, r.lo), r.hi)
+        parser::AltPattern as a => collect_patterns(t, a.options)
+        parser::BindPattern as bp => {
+            mut tab = st_intern(collect_path(t, bp.type_name), bp.binding).table
+            match bp.slice_type { parser::TypeExpr as st => collect_typeexpr(tab, st); null => tab }
+        }
+        parser::FieldPattern as f => collect_pieces(collect_path(t, f.type_name), f.fields)
+        parser::WildcardPattern => t
+        parser::NullPattern => t
+    }
+}
+fn collect_tarms(t: StrTable, xs: []checker::TArm) -> StrTable {
+    mut tab = t
+    mut i = 0
+    loop { if i >= xs.len { break }; tab = collect_tarm(tab, xs[i]); i++ }
+    tab
+}
+fn collect_tarm(t: StrTable, a: checker::TArm) -> StrTable {
+    mut tab = collect_pattern(t, a.pattern)
+    if a.has_when { tab = collect_strings(tab, a.guard) }
+    collect_tstatements(tab, a.body)
+}
