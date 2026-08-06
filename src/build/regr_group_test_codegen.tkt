@@ -1,0 +1,66 @@
+/**
+ * src/build/regr_group_test_codegen.tkt   (namespace `teko::build`)
+ *
+ * Unit tests for code generation functions: module wrapper, dispatcher, and manifest synthesis.
+ */
+
+#test
+/**
+ * regr_group_module_text_wraps_the_statements_in_an_entry — the generated module: the snippet's
+ * declarations stay verbatim ahead of a `pub fn entry()` carrying its statements, and a VALUE tail
+ * becomes an explicit `exit(…)` so the virtual-main rule survives the move into a function body.
+ *
+ * @return void
+ */
+fn regr_group_module_text_wraps_the_statements_in_an_entry() {
+    let text = regr_group_module_text("fn total() -> i32 { 42 }\ntotal()\n")
+    teko::assert::is_true(teko::str::contains(text, "fn total() -> i32 { 42 }"))
+    teko::assert::is_true(teko::str::contains(text, "pub fn entry() {"))
+    teko::assert::is_true(teko::str::contains(text, "exit(total())"))
+}
+
+#test
+/**
+ * regr_group_module_text_leaves_a_void_tail_alone — the same generator over a snippet that already
+ * ends in `exit(…)`: the tail must NOT be wrapped a second time (`exit(exit(0))` does not typecheck,
+ * and the group build would fail for a snippet that was perfectly foldable).
+ *
+ * @return void
+ */
+fn regr_group_module_text_leaves_a_void_tail_alone() {
+    let text = regr_group_module_text("let x = 21\nexit(x + x)\n")
+    teko::assert::is_true(teko::str::contains(text, "exit(x + x)"))
+    teko::assert::is_true(!teko::str::contains(text, "exit(exit"))
+}
+
+#test
+/**
+ * regr_group_main_text_dispatches_and_ends_at_exit_zero — the generated dispatcher: it reads the
+ * selector, routes to each member, and ENDS at `exit(0)` (a member whose own virtual main fell
+ * through exits 0), with the unknown-selector arm taking the loud sentinel instead.
+ *
+ * @return void
+ */
+fn regr_group_main_text_dispatches_and_ends_at_exit_zero() {
+    let text = regr_group_main_text(regr_group_dispatch_line("m7"))
+    teko::assert::is_true(teko::str::contains(text, REGR_GROUP_ENTRY_VAR))
+    teko::assert::is_true(teko::str::contains(text, "if regr_entry == \"m7\" { regr_hit = true; m7::entry() }"))
+    teko::assert::is_true(teko::str::contains(text, "exit(97)"))
+    teko::assert::is_true(teko::str::ends_with(text, "exit(0)\n"))
+}
+
+#test
+/**
+ * regr_group_manifest_text_names_the_generated_project — the synthesized `.tkp` must root the
+ * project at `src` (so every `src/m<k>/` directory becomes its own namespace, which is what keeps
+ * two members' same-named declarations apart) and carry the fixed artifact name the runner resolves
+ * the built binary through.
+ *
+ * @return void
+ */
+fn regr_group_manifest_text_names_the_generated_project() {
+    let text = regr_group_manifest_text()
+    teko::assert::is_true(teko::str::contains(text, "name = \"" ~ REGR_GROUP_PROJECT_NAME ~ "\""))
+    teko::assert::is_true(teko::str::contains(text, "source = \"src\""))
+    teko::assert::is_true(teko::str::contains(text, "kind = \"binary\""))
+}
