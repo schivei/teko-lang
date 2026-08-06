@@ -1,0 +1,107 @@
+// src/parser/ast_stmt.tks   (namespace 'teko::parser')
+
+use teko::lexer
+
+// --- statements ---
+pub type BindKind = enum { Let; Mut; Const }
+pub type SimpleName = struct { name: str }
+pub type DestructurePattern = struct { names: []str }   // let { x; y } = … (B.13 partial)
+pub type BindTarget = variant SimpleName | DestructurePattern
+
+/**
+ * Binding — a local binding statement `let|mut|const|ref TARGET [: T] = value`.
+ *
+ * @field kind      the mutability mode the binder declared; a `ref` binding desugars to `Mut`
+ * @field target    the bound name, or a `{ x; y }` destructure
+ * @field has_type  true iff the source carried a `: T` annotation (A.8)
+ * @field type_ann  the parsed annotation, meaningful only when `has_type` (A.8)
+ * @field is_ref    true iff the binder was the `ref` modifier. INDEPENDENT of `kind`: `let`/`mut` is
+ *                  the mutability axis, `ref` is the IDENTITY axis (alias, not copy) and is born
+ *                  mutable. It is recorded here because an UN-annotated `ref r = c` has no
+ *                  `Ref<>`-wrapped annotation to carry its reference-ness — without the flag the
+ *                  checker saw a plain `mut` binding and silently COPIED (owner ruling 2026-07-30)
+ * @field value     the initializer expression
+ * @field di_kind   the residence lifetime the binding declared (0.3.1 modelo-de-memoria §2a). `None`
+ *                  = an ordinary scope-ephemeral local; `Singleton` = a `#singleton` binding forced to
+ *                  root residence. `Scoped`/`Transient` are rejected on a binding at parse time (the
+ *                  default local IS the scope-ephemeral case), so only `None`/`Singleton` reach here.
+ */
+pub type Binding = struct {
+    kind: BindKind
+    target: BindTarget
+    has_type: bool
+    type_ann: TypeExpr
+    is_ref: bool
+    value: Expr
+    di_kind: DiKind
+}
+/**
+ * AssignKind — the target shape of an assignment (#88). One of four, tagged on `Assign`/`TAssign`:
+ *
+ * @field Simple    `name op= value` — the bare binding `name` (deref=false; target = no_expr()).
+ * @field RefDeref  `name.value op= value` — write THROUGH a `Ref<T>` handle `name` (deref=true, the
+ *                  legacy MEM-1b-ii flag; target = no_expr()).
+ * @field Field     `recv.field op= value` — a struct/class field write; `target` is the LHS field-access
+ *                  EXPR (a FieldAccess, arbitrarily nested); `name`/`deref` unused.
+ * @field Index     `ids[i] op= value` — a slice/array ELEMENT write; `target` is the LHS index EXPR (an
+ *                  `Index{receiver,index}`); `name`/`deref` unused. Appended LAST so the three legacy
+ *                  ordinals (and thus the TKB `assign_kind_byte` layout) are unchanged. `deref` stays a
+ *                  plain bool == (kind==RefDeref); Field/Index both carry the general lvalue in `target`
+ *                  (see `assign_has_target`).
+ */
+pub type AssignKind = enum { Simple; RefDeref; Field; Index }
+pub type Assign = struct { kind: AssignKind; name: str; op: lexer::TokenKind; value: Expr; deref: bool; target: Expr }   // x = / += / … (B.4); see AssignKind above
+
+/**
+ * assign_has_target — does an `AssignKind` carry a general lvalue EXPRESSION in `Assign.target` /
+ * `TAssign.target`? True for the two expr-target shapes — `Field` (`recv.field`) and `Index`
+ * (`ids[i]`) — and false for `Simple` / `RefDeref` (which write a bare `name`). Every AST/TAST walk
+ * that descends into a field assignment's `target` must descend an index assignment's `target` too
+ * (both hold sub-expressions naming free variables), so the two share this single predicate.
+ *
+ * @param kind  the assignment's target discriminant
+ * @return      true iff `target` holds a walkable lvalue expression (`Field` or `Index`)
+ */
+pub fn assign_has_target(kind: AssignKind) -> bool {
+    match kind {
+        AssignKind::Field => true
+        AssignKind::Index => true
+        _ => false
+    }
+}
+pub type Return = struct { has_value: bool; value: Expr }   // `return [expr]` — bare `return` (no value) has has_value=false, value a placeholder (B.20; P4a)
+/**
+ * `[LABEL:] loop [<head>] { … }` (M.5, #517). The head is fully desugared by the parser: `init`
+ * holds the run-once, LOOP-SCOPED preamble (counter/bound/`_first` for range & 3-part, `_it` for
+ * for-each; empty for infinite & while) and `body` already contains the folded condition-break, the
+ * guarded step, and/or the closure-iterator `match`. `label` empty (len 0) = unlabeled.
+ *
+ * @field label the UPPER_SNAKE prefix label, or "" when unlabeled
+ * @field init  the loop-scoped preamble, run once before the first iteration; it does NOT leak past
+ *              the loop (checker scope / codegen brace)
+ * @field body  the iteration body (folded head + user statements)
+ */
+pub type LoopStmt = struct { label: str; init: []Statement; body: []Statement }
+pub type BreakStmt = struct { label: str }   // break [NAME] — label empty = innermost loop
+pub type ContinueStmt = struct { label: str }   // continue [NAME] — label empty = innermost loop
+pub type ExprStmt = struct { expr: Expr }   // a bare expression on its own line
+// `defer { stmts }` (C7.18) — scoped cleanup block; executes LIFO at ANY scope exit
+// (normal return, early return inside a loop, break out of a function).
+// Panic does NOT run deferred blocks (simplifies implementation).
+// Nested `defer` is rejected by the checker.
+pub type DeferStmt = struct { body: []Statement }
+
+/**
+ * `adopt [name] { stmts }` — opens an ADOPTER region; every object allocated lexically inside
+ * belongs to it, and the closing brace BULK-drops the whole subtree at once (cycles irrelevant —
+ * nothing is freed per-object). The C1 closer of the memory remodel (§1 L4). `adopt` is a
+ * CONTEXTUAL statement head (not a hard keyword) recognized by ident text at statement position.
+ *
+ * @field name  the optional bound name (`adopt r { … }`); empty = anonymous adopter. The region
+ *              is opened/dropped either way; the name only matters when a future increment lets
+ *              code reference the region handle.
+ * @field body  the statements executed inside the adopter region.
+ */
+pub type AdoptStmt = struct { name: str; body: []Statement }
+
+pub type Statement = variant Binding | Assign | Return | LoopStmt | BreakStmt | ContinueStmt | ExprStmt | DeferStmt | AdoptStmt

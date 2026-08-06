@@ -1,0 +1,174 @@
+// src/parser/loop_head_dispatch.tks   (namespace 'teko::parser')
+
+use teko::lexer
+
+
+/**
+ * parse_loop_elem_bind — parse a slice-loop element binding: `<name>` (element form) or `( <name> ,
+ * <name> )` (enumerate form, element first / index second). Loop-binding-only; does not touch general
+ * `let` destructuring.
+ *
+ * @param tokens  the token stream
+ * @param pos     the position of the binding (a name or `(`)
+ * @return        the parsed `LoopElemBind` and the index past it, or a parse error
+ */
+fn parse_loop_elem_bind(tokens: []lexer::Token, pos: u64) -> Parsed<LoopElemBind> | error {
+    if is_kind_at(tokens, pos, lexer::TokenKind::LParen) {
+        if !is_name_at(tokens, pos + 1) { return err_at(tokens, pos + 1, "expected the element name after `(` in a for-each enumerate binding") }
+        if !is_kind_at(tokens, pos + 2, lexer::TokenKind::Comma) { return err_at(tokens, pos + 2, "expected `,` between the element and index names in `(x, i)`") }
+        if !is_name_at(tokens, pos + 3) { return err_at(tokens, pos + 3, "expected the index name after `,` in a for-each enumerate binding") }
+        if !is_kind_at(tokens, pos + 4, lexer::TokenKind::RParen) { return err_at(tokens, pos + 4, "expected `)` to close a for-each enumerate binding `(x, i)`") }
+        return Parsed<LoopElemBind> { node = LoopElemBind { elem = tokens[pos + 1].text; has_index = true; index = tokens[pos + 3].text }; next = pos + 5 }
+    }
+    if !is_name_at(tokens, pos) { return err_at(tokens, pos, "expected a for-each element name") }
+    Parsed<LoopElemBind> { node = LoopElemBind { elem = tokens[pos].text; has_index = false; index = "" }; next = pos + 1 }
+}
+
+/**
+ * loop_head_is_foreach — bounded, depth-aware lookahead deciding whether the head after `loop` (no
+ * leading `mut`) is a slice for-each: it opens with an element name or an `(x, i)` tuple, and carries
+ * a TOP-LEVEL `in` (before the body `{`) whose RHS is a bare value (NOT a `[ … ]` membership set —
+ * that is the `in` operator inside a `while` condition). Splits `loop x in ids { … }` (for-each) from
+ * `loop x in [a, b] { … }` (a membership while-condition) and from any other while head.
+ *
+ * @param tokens  the token stream
+ * @param after   the position just past the `loop` keyword
+ * @return        true iff the head is a slice for-each
+ */
+fn loop_head_is_foreach(tokens: []lexer::Token, after: u64) -> bool {
+    if !is_kind_at(tokens, after, lexer::TokenKind::Ident) && !is_kind_at(tokens, after, lexer::TokenKind::LParen) { return false }
+    mut depth: i64 = 0
+    mut p = after
+    loop {
+        if !has_token(tokens, p) { break }
+        if depth == 0 && is_kind_at(tokens, p, lexer::TokenKind::LBrace) { break }
+        if is_kind_at(tokens, p, lexer::TokenKind::LParen) || is_kind_at(tokens, p, lexer::TokenKind::LBracket) { depth += 1 }
+        else if is_kind_at(tokens, p, lexer::TokenKind::RParen) || is_kind_at(tokens, p, lexer::TokenKind::RBracket) { depth -= 1 }
+        else if depth == 0 && is_kind_at(tokens, p, lexer::TokenKind::In) {
+            return !is_kind_at(tokens, p + 1, lexer::TokenKind::LBracket)
+        }
+        p += 1
+    }
+    false
+}
+
+/**
+ * parse_loop_foreach_slice — `[LABEL:] loop <x | (x, i)> in <E> { B }` over a slice `[]T`: capture the
+ * source and lower to the PROVEN counter form `loop mut _i in 0 .. <src>.len { <binds> …B }` (reusing
+ * `loop_range_init` / `loop_range_body`). The element MODE is chosen type-blind: if the body assigns
+ * the element AND `E` is a bare variable, bind `mut <x> = E[_i]` and append the write-back `E[_i] = <x>`
+ * (the element-assignment primitive — its mut-check inherits the container's mutability); otherwise
+ * bind a read-only `let <x> = <src>[_i]` over a captured `let _src = E`. The index (enumerate form) is
+ * an immutable `u64`. Slice-ness / integer-index / element-type are validated by the ordinary checker
+ * rules on the emitted `.len` / index / element-assignment.
+ *
+ * @param tokens  the token stream
+ * @param bind    the parsed element/index binding
+ * @param src     the already-parsed iterable expression (its `.next` is the body `{`)
+ * @param label   the UPPER_SNAKE prefix label, or "" when unlabeled
+ * @param line    the loop keyword's source line
+ * @param col     the loop keyword's source column
+ * @return        the parsed loop statement, or a parse error
+ */
+fn parse_loop_foreach_slice(tokens: []lexer::Token, bind: LoopElemBind, src: Parsed<Expr>, label: str, line: u32, col: u32) -> Parsed<Statement> | error {
+    if !is_kind_at(tokens, src.next, lexer::TokenKind::LBrace) {
+        return err_at(tokens, src.next, "expected '{' after the loop iterable")
+    }
+    let blk = match parse_block(tokens, src.next) { ParsedList<Statement> as x => x; error as e => return e }
+    let idx_name = loop_temp("i", line, col)
+    let hi_name = loop_temp("hi", line, col)
+    let first_name = loop_temp("first", line, col)
+    let writes = loop_body_writes_name(blk.items, bind.elem)
+    let src_var = loop_expr_root_name_of_var(src.node)
+    if writes && src_var != "" {
+        let binds = loop_slice_elem_binds(bind, src_var, idx_name, true, blk.items, line, col)
+        let hi = loop_field_access(src_var, "len", line, col)
+        let init = loop_range_init(idx_name, loop_zero(line, col), hi, true, loop_u64_type(), hi_name, first_name, line, col)
+        let body = loop_range_body(idx_name, hi_name, first_name, false, binds, line, col)
+        return Parsed<Statement> { node = LoopStmt { label = label; init = init; body = body }; next = blk.next }
+    }
+    let src_name = loop_temp("src", line, col)
+    let binds = loop_slice_elem_binds(bind, src_name, idx_name, false, blk.items, line, col)
+    let hi = loop_field_access(src_name, "len", line, col)
+    mut init: []Statement = teko::list::push(teko::list::empty(), loop_let_binding(src_name, src.node))
+    init = loop_append_all(init, loop_range_init(idx_name, loop_zero(line, col), hi, true, loop_u64_type(), hi_name, first_name, line, col))
+    let body = loop_range_body(idx_name, hi_name, first_name, false, binds, line, col)
+    Parsed<Statement> { node = LoopStmt { label = label; init = init; body = body }; next = blk.next }
+}
+
+/**
+ * loop_expr_root_name_of_var — the source variable name of a for-each iterable IFF it is a bare
+ * variable (the write-back-capable case); "" for any other expression (a call, field, index — which
+ * has no writable container binding, so the for-each is read-only).
+ *
+ * @param e  the parsed iterable expression
+ * @return   the bare variable name, or "" when `e` is not a bare variable
+ */
+fn loop_expr_root_name_of_var(e: Expr) -> str {
+    match e.kind { Var as v => v.name; _ => "" }
+}
+
+/**
+ * parse_loop_binding — parse a `mut <bind-target> [: T]` loop head, then dispatch on the separator:
+ * `in` with a `..`/`..=` iterable is a range (§5.2); `=` is a 3-part head (§5.3,
+ * `parse_loop_three_part`). A `mut` binding with any other `in` iterable is rejected with the
+ * inherited-mutability diagnostic (a for-each element's mutability comes from its container, so `mut`
+ * is dropped — the read-only / write-back for-each is the un-`mut` slice form, `parse_loop_foreach_slice`
+ * dispatched from `parse_loop`, §5.4). Binding is `mut` only (#517).
+ *
+ * @param tokens   the token stream
+ * @param mut_pos  the position of the `mut` keyword (just past `loop`)
+ * @param label    the UPPER_SNAKE prefix label, or "" when unlabeled
+ * @param line     the loop keyword's source line
+ * @param col      the loop keyword's source column
+ * @return         the parsed loop statement, or a parse error
+ */
+fn parse_loop_binding(tokens: []lexer::Token, mut_pos: u64, label: str, line: u32, col: u32) -> Parsed<Statement> | error {
+    let tgt = match parse_bind_target(tokens, mut_pos + 1) { Parsed<BindTarget> as x => x; error as e => return e }
+    let ann = match parse_annotation(tokens, tgt.next) { Annotation as x => x; error as e => return e }
+    if is_kind_at(tokens, ann.next, lexer::TokenKind::In) {
+        let after_in = ann.next + 1
+        let lo = match parse_expr_no_struct(tokens, after_in) { Parsed<Expr> as x => x; error as e => return e }
+        if is_kind_at(tokens, lo.next, lexer::TokenKind::DotDot) {
+            return parse_loop_range(tokens, tgt, ann, lo, false, label, line, col)
+        }
+        if is_kind_at(tokens, lo.next, lexer::TokenKind::DotDotEq) {
+            return parse_loop_range(tokens, tgt, ann, lo, true, label, line, col)
+        }
+        return err_at(tokens, mut_pos, "a for-each element's mutability is inherited from the container — drop `mut` and write `loop x in ids`; to mutate elements, use a `mut` container (`loop x in ids { x = … }` writes back) or the index form `loop mut i in 0..ids.len { ids[i] = … }`")
+    }
+    if is_kind_at(tokens, ann.next, lexer::TokenKind::Assign) {
+        return parse_loop_three_part(tokens, tgt, ann, ann.next + 1, label, line, col)
+    }
+    err_at(tokens, ann.next, "expected `in` or `;` after a loop binding")
+}
+
+/**
+ * parse_loop — dispatch a loop head after the `loop` keyword (#517). The token just past `loop`
+ * selects the form: `{` = infinite; `mut` = a binding head (range / for-each / 3-part, via
+ * `parse_loop_binding`); anything else = a while condition. The `label` is the UPPER_SNAKE prefix
+ * ("" when unlabeled); its format is enforced by the checker's `check_labels`.
+ *
+ * @param tokens  the token stream
+ * @param loop_pos  the position of the `loop` keyword
+ * @param label  the UPPER_SNAKE prefix label, or "" when unlabeled
+ * @return  the parsed loop statement, or a parse error
+ */
+fn parse_loop(tokens: []lexer::Token, loop_pos: u64, label: str) -> Parsed<Statement> | error {
+    let after = loop_pos + 1
+    if is_kind_at(tokens, after, lexer::TokenKind::LBrace) {
+        return parse_loop_infinite(tokens, after, label)
+    }
+    if is_kind_at(tokens, after, lexer::TokenKind::Mut) {
+        return parse_loop_binding(tokens, after, label, tokens[loop_pos].line, tokens[loop_pos].col)
+    }
+    if loop_head_is_foreach(tokens, after) {
+        let bind = match parse_loop_elem_bind(tokens, after) { Parsed<LoopElemBind> as x => x; error as e => return e }
+        if !is_kind_at(tokens, bind.next, lexer::TokenKind::In) {
+            return err_at(tokens, bind.next, "expected `in` after the for-each element binding")
+        }
+        let src = match parse_expr_no_struct(tokens, bind.next + 1) { Parsed<Expr> as x => x; error as e => return e }
+        return parse_loop_foreach_slice(tokens, bind.node, src, label, tokens[loop_pos].line, tokens[loop_pos].col)
+    }
+    parse_loop_while(tokens, after, label, tokens[loop_pos].line, tokens[loop_pos].col)
+}

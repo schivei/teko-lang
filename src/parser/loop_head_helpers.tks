@@ -1,0 +1,184 @@
+// src/parser/loop_head_helpers.tks   (namespace 'teko::parser')
+
+use teko::lexer
+
+
+/**
+ * prepend_stmt — build a fresh statement list with `head` in front of `rest`, preserving order.
+ * Used to fold a synthesized head statement (the condition-break) onto the front of a parsed loop
+ * body (#517).
+ *
+ * @param head  the statement to place first
+ * @param rest  the following statements, in order
+ * @return      a new `[]Statement` = `[head, ...rest]`
+ */
+fn prepend_stmt(head: Statement, rest: []Statement) -> []Statement {
+    mut out = teko::list::push(teko::list::empty(), head)
+    mut i: u64 = 0
+    loop {
+        if i >= rest.len { break }
+        out = teko::list::push(out, rest[i])
+        i++
+    }
+    out
+}
+
+/**
+ * loop_break — the synthesized `break` (innermost, unlabeled) a desugared head emits to leave the
+ * loop when its condition fails (#517).
+ *
+ * @return  a `BreakStmt` targeting the innermost loop
+ */
+fn loop_break() -> Statement {
+    BreakStmt { label = "" }
+}
+
+/**
+ * loop_not — wrap `e` in a boolean `!e`, positioned at (`line`, `col`) — the negated condition of a
+ * folded `if !<cond> { break }` (#517).
+ *
+ * @param e     the condition expression to negate
+ * @param line  the source line to stamp on the synthesized node
+ * @param col   the source column to stamp on the synthesized node
+ * @return      the `Expr` `!e`
+ */
+fn loop_not(e: Expr, line: u32, col: u32) -> Expr {
+    Expr { kind = Unary { op = lexer::TokenKind::Bang; operand = e }; line = line; col = col }
+}
+
+/**
+ * loop_cond_break — the folded `if !<cond> { break }` statement a while/3-part head places at the
+ * TOP of the loop body, so a false condition exits and a `continue` re-checks the condition (#517).
+ *
+ * @param cond  the loop's boolean condition expression
+ * @param line  the source line to stamp on the synthesized nodes
+ * @param col   the source column to stamp on the synthesized nodes
+ * @return      the `if !<cond> { break }` statement
+ */
+fn loop_cond_break(cond: Expr, line: u32, col: u32) -> Statement {
+    let neg = loop_not(cond, line, col)
+    let brk = teko::list::push(teko::list::empty(), loop_break())
+    let iff = Expr { kind = IfExpr { cond = neg; then_blk = brk; has_else = false; else_blk = teko::list::empty() }; line = line; col = col }
+    ExprStmt { expr = iff }
+}
+
+/**
+ * loop_temp — a hygienic, user-unwritable temp name for a desugared loop head, unique per loop
+ * (keyed on the loop keyword's position): `_tk_<kind>_L<line>C<col>` (#517).
+ *
+ * @param kind  the temp's role (`hi` / `first` / `it` / `elem`)
+ * @param line  the loop keyword's source line
+ * @param col   the loop keyword's source column
+ * @return      the reserved temp name
+ */
+fn loop_temp(kind: str, line: u32, col: u32) -> str {
+    $"_tk_{kind}_L{line}C{col}"
+}
+
+/**
+ * loop_mut_binding — a `mut <name> = <value>` binding with no type annotation (inferred), the shape
+ * of every desugared loop-head preamble binding (#517).
+ *
+ * @param name   the bound name
+ * @param value  the initializer expression
+ * @return       the `mut` binding statement
+ */
+fn loop_mut_binding(name: str, value: Expr) -> Statement {
+    Binding { kind = BindKind::Mut; target = SimpleName { name = name }; has_type = false; type_ann = no_type(); is_ref = false; value = value; di_kind = DiKind::None }
+}
+
+/**
+ * loop_counter_binding — a `mut <name>[: T] = <value>` binding as a `Statement`, the range counter
+ * carrying the user's optional type annotation (#517).
+ *
+ * @param name      the counter name
+ * @param value     the counter's initializer (the low endpoint)
+ * @param has_type  whether the counter carries a `: T` annotation
+ * @param type_ann  the counter's type annotation (valid iff `has_type`)
+ * @return          the `mut` counter binding statement
+ */
+fn loop_counter_binding(name: str, value: Expr, has_type: bool, type_ann: TypeExpr) -> Statement {
+    Binding { kind = BindKind::Mut; target = SimpleName { name = name }; has_type = has_type; type_ann = type_ann; is_ref = false; value = value; di_kind = DiKind::None }
+}
+
+/**
+ * loop_var — a variable-read expression `name`, positioned at (`line`, `col`) (#517).
+ *
+ * @param name  the variable name
+ * @param line  the source line to stamp
+ * @param col   the source column to stamp
+ * @return      the `Var` expression
+ */
+fn loop_var(name: str, line: u32, col: u32) -> Expr {
+    Expr { kind = Var { name = name }; line = line; col = col }
+}
+
+/**
+ * loop_bool — a boolean literal expression, positioned at (`line`, `col`) (#517).
+ *
+ * @param v     the boolean value
+ * @param line  the source line to stamp
+ * @param col   the source column to stamp
+ * @return      the `BoolLit` expression
+ */
+fn loop_bool(v: bool, line: u32, col: u32) -> Expr {
+    Expr { kind = BoolLit { value = v }; line = line; col = col }
+}
+
+/**
+ * loop_one — the integer literal `1`, positioned at (`line`, `col`) — the range step increment
+ * (#517).
+ *
+ * @param line  the source line to stamp
+ * @param col   the source column to stamp
+ * @return      the `Number` `1` expression
+ */
+fn loop_one(line: u32, col: u32) -> Expr {
+    Expr { kind = Number { is_float = false; value = numint_of_u64(1); fval = 0.0 }; line = line; col = col }
+}
+
+/**
+ * loop_assign_simple — a simple assignment `name op= value` (op = `=`/`+=`/…), the desugared step /
+ * `_first` reset of a range or 3-part head (#517).
+ *
+ * @param name   the target variable name
+ * @param op     the assignment operator token (`Assign` / `PlusEq` / …)
+ * @param value  the right-hand side
+ * @return       the assignment statement
+ */
+fn loop_assign_simple(name: str, op: lexer::TokenKind, value: Expr) -> Statement {
+    Assign { kind = AssignKind::Simple; name = name; op = op; value = value; deref = false; target = no_expr() }
+}
+
+/**
+ * loop_less — a comparison `lo < hi` (exclusive) or `lo <= hi` (inclusive) as a single-term
+ * `Compare`, the range guard condition (#517).
+ *
+ * @param lo         the counter expression
+ * @param hi         the captured endpoint expression
+ * @param inclusive  true for `..=` (`<=`), false for `..` (`<`)
+ * @param line       the source line to stamp
+ * @param col        the source column to stamp
+ * @return           the comparison expression
+ */
+fn loop_less(lo: Expr, hi: Expr, inclusive: bool, line: u32, col: u32) -> Expr {
+    let op = if inclusive { lexer::TokenKind::Le } else { lexer::TokenKind::Lt }
+    let term = CmpTerm { op = op; operand = hi }
+    Expr { kind = Compare { first = lo; rest = teko::list::push(teko::list::empty(), term) }; line = line; col = col }
+}
+
+/**
+ * loop_if_then — a folded `if <cond> { <then> }` statement (no else) — the guarded step
+ * `if !_first { i += 1 }` a range/3-part head places at the TOP of the body (#517).
+ *
+ * @param cond  the guard condition expression
+ * @param then  the single guarded statement
+ * @param line  the source line to stamp
+ * @param col   the source column to stamp
+ * @return      the `if <cond> { <then> }` statement
+ */
+fn loop_if_then(cond: Expr, then: Statement, line: u32, col: u32) -> Statement {
+    let blk = teko::list::push(teko::list::empty(), then)
+    let iff = Expr { kind = IfExpr { cond = cond; then_blk = blk; has_else = false; else_blk = teko::list::empty() }; line = line; col = col }
+    ExprStmt { expr = iff }
+}
