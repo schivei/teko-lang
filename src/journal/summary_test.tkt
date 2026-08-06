@@ -1,0 +1,201 @@
+/**
+ * teko::journal tests — j4_* summary tests, split out of journal_test.tkt (mechanical
+ * file-size split; no logic changes).
+ *
+ * @since 0.3.1
+ */
+
+fn j4_rec(run: str, writer: str, kind: str, payload: str) -> Record {
+    Record { run = run; writer = writer; kind = kind; payload = payload }
+}
+
+/**
+ * j4_planted_records — a fail, two named skips, and a dead writer, planted across one synthetic run
+ * — the §13.6 fixture `js_the_summary_names_every_finding` folds.
+ *
+ * @return  the planted records
+ * @since 0.3.1
+ */
+fn j4_planted_records() -> []Record {
+    mut recs: []Record = teko::list::empty()
+    recs = teko::list::push(recs, j4_rec("jt4", "s1", KIND_FAIL, "js_planted_failure\tassertion failed: eq_u64(0, 1)"))
+    recs = teko::list::push(recs, j4_rec("jt4", "r0", KIND_SKIP, "own_native.tkr[x86_64-windows row 3]\tx86_64-w64-mingw32-gcc (the cross-linker for target x86_64-windows) not found on PATH"))
+    recs = teko::list::push(recs, j4_rec("jt4", "r0", KIND_SKIP, "own_native.tkr[x86_64-windows row 7]\tx86_64-w64-mingw32-gcc (the cross-linker for target x86_64-windows) not found on PATH"))
+    recs = teko::list::push(recs, j4_rec("jt4", "s3", KIND_INCOMPLETE, "j4_test_that_never_finished"))
+    recs
+}
+
+/**
+ * j4_records_of_a_dead_shard — a single writer that declared `plan` tests, produced `verdicts` `ok`
+ * records, and then died (a synthetic `incomplete`, since no real segment is read here) — the fixture
+ * `js_a_dead_writer_cannot_read_as_passed` folds.
+ *
+ * @param plan      how many tests the writer declared it would run
+ * @param verdicts  how many verdicts it actually produced before dying
+ * @return          the synthetic records
+ * @since 0.3.1
+ */
+fn j4_records_of_a_dead_shard(plan: u64, verdicts: u64) -> []Record {
+    mut recs: []Record = teko::list::empty()
+    recs = teko::list::push(recs, j4_rec("jt4dead", "s2", KIND_PLAN, $"{plan}"))
+    mut i: u64 = 0
+    loop {
+        if i >= verdicts { break }
+        recs = teko::list::push(recs, j4_rec("jt4dead", "s2", KIND_OK, $"test_{i}"))
+        i = i + 1
+    }
+    recs = teko::list::push(recs, j4_rec("jt4dead", "s2", KIND_INCOMPLETE, $"test_{verdicts}"))
+    recs
+}
+
+/**
+ * j4_summarize_names_every_finding — the inversion of §13.6: fed a fail, two skips, and a dead
+ * writer, `render_summary(summarize(...))` names all four. A summary that only COUNTED them would
+ * pass a test that asserted numbers; this asserts NAMES.
+ */
+#test
+fn j4_summarize_names_every_finding() {
+    let block = render_summary(summarize(j4_planted_records()))
+    teko::assert::str_contains(block, "own_native.tkr[x86_64-windows row 3]")
+    teko::assert::str_contains(block, "not found on PATH")
+    teko::assert::str_contains(block, "js_planted_failure")
+    teko::assert::str_contains(block, "never-ran")
+}
+
+/**
+ * j4_an_empty_run_is_a_failure_not_a_green — the vivacity arm: zero records means the run produced
+ * nothing, and a summary that rendered "0 failed" with the air of green over zero records is exactly
+ * the blind guard that read ZERO three times on a tree that kept stopping.
+ */
+#test
+fn j4_an_empty_run_is_a_failure_not_a_green() {
+    let block = render_summary(summarize(teko::list::empty()))
+    teko::assert::str_contains(block, "no records — run produced nothing")
+    teko::assert::str_absent(block, "run PASSED")
+}
+
+/**
+ * j4_a_dead_writer_cannot_read_as_passed — a shard that dies mid-way cannot round up to green, and
+ * `never_ran` has to be exactly the gap to the `plan` it declared.
+ */
+#test
+fn j4_a_dead_writer_cannot_read_as_passed() {
+    let s = summarize(j4_records_of_a_dead_shard(300, 9))
+    teko::assert::eq_u64(s.never_ran.total, 291)
+    teko::assert::eq_u64(s.dead.len, 1)
+    teko::assert::str_absent(render_summary(s), "run PASSED")
+}
+
+/**
+ * j4_summarize_tallies_pass_fail_skip_by_phase — a sanity pass over the tally itself: a unit `ok`
+ * and a regression `fail` land in their own phase AND in `TOTAL`, never crossed.
+ */
+#test
+fn j4_summarize_tallies_pass_fail_skip_by_phase() {
+    mut recs: []Record = teko::list::empty()
+    recs = teko::list::push(recs, j4_rec("jt4phase", "s0", KIND_OK, "unit_probe"))
+    recs = teko::list::push(recs, j4_rec("jt4phase", "r0", KIND_FAIL, "regr_probe\tboom"))
+    let s = summarize(recs)
+    teko::assert::eq_u64(s.passed.unit, 1)
+    teko::assert::eq_u64(s.passed.regression, 0)
+    teko::assert::eq_u64(s.failed.unit, 0)
+    teko::assert::eq_u64(s.failed.regression, 1)
+    teko::assert::eq_u64(s.passed.total, 1)
+    teko::assert::eq_u64(s.failed.total, 1)
+}
+
+/**
+ * j4_with_coverage_replaces_only_the_coverage_fields — `with_coverage` completes a `summarize`d
+ * verdict without disturbing anything it already carried (the seam a caller holding the merged
+ * sinks uses; `summarize` itself never touches `cov`/`cov_missing` beyond zeroing them).
+ */
+#test
+fn j4_with_coverage_replaces_only_the_coverage_fields() {
+    let base = summarize(j4_planted_records())
+    let cov = CovTriple { functions_cov = 4811; functions_val = 5219; lines_cov = 61233; lines_val = 69582; branches_cov = 18220; branches_val = 24486 }
+    let full = with_coverage(base, cov, 2)
+    teko::assert::eq_u64(full.cov.functions_cov, 4811)
+    teko::assert::eq_u64(full.cov_missing, 2)
+    teko::assert::eq_u64(full.fails.len, base.fails.len)
+    teko::assert::eq_str(full.run, base.run)
+    let block = render_summary(full)
+    teko::assert::str_contains(block, "COVERAGE (2 missing)")
+}
+
+#test
+/**
+ * j4_a_clean_run_reads_as_passed — the positive of vivacity: a run where every writer declared a
+ * plan, reached every verdict, and closed with `end` is the ONLY shape that reads `run PASSED`.
+ * Without it, nothing proves the green path renders green — only that the failing ones don't.
+ *
+ * @throws quando uma corrida limpa não fecha `run PASSED`, ou vaza um marcador `run FAILED`
+ * @since 0.3.1
+ */
+fn j4_a_clean_run_reads_as_passed() {
+    mut recs: []Record = teko::list::empty()
+    recs = teko::list::push(recs, j4_rec("jt4green", "s0", KIND_PLAN, "2"))
+    recs = teko::list::push(recs, j4_rec("jt4green", "s0", KIND_BEGIN, "unit_one"))
+    recs = teko::list::push(recs, j4_rec("jt4green", "s0", KIND_OK, "unit_one"))
+    recs = teko::list::push(recs, j4_rec("jt4green", "s0", KIND_BEGIN, "unit_two"))
+    recs = teko::list::push(recs, j4_rec("jt4green", "s0", KIND_OK, "unit_two"))
+    recs = teko::list::push(recs, j4_rec("jt4green", "s0", KIND_END, ""))
+    recs = teko::list::push(recs, j4_rec("jt4green", "r0", KIND_PLAN, "1"))
+    recs = teko::list::push(recs, j4_rec("jt4green", "r0", KIND_BEGIN, "regr_one"))
+    recs = teko::list::push(recs, j4_rec("jt4green", "r0", KIND_OK, "regr_one"))
+    recs = teko::list::push(recs, j4_rec("jt4green", "r0", KIND_END, ""))
+    let block = render_summary(summarize(recs))
+    teko::assert::str_contains(block, "run PASSED")
+    teko::assert::str_absent(block, "run FAILED")
+}
+
+#test
+/**
+ * j4_a_planned_writer_that_never_ended_is_dead — the death route the canonical `incomplete`
+ * detection alone missed: a writer that declared a plan, reached a few verdicts, and died with NO
+ * terminal record and NO synthetic `incomplete` (a plain fixture, not one `fold` produced) is DEAD
+ * all the same, and `never_ran` is the gap to its plan. Proves `is_dead`'s `has_plan && !has_end`
+ * arm (ported from `journal-impl`, §3 of the reconciliation) is alive.
+ *
+ * @throws quando um escritor com plano e sem fecho não conta como morto nem enche o never-ran
+ * @since 0.3.1
+ */
+fn j4_a_planned_writer_that_never_ended_is_dead() {
+    mut recs: []Record = teko::list::empty()
+    recs = teko::list::push(recs, j4_rec("jt4nofin", "s2", KIND_PLAN, "5"))
+    recs = teko::list::push(recs, j4_rec("jt4nofin", "s2", KIND_BEGIN, "started_one"))
+    recs = teko::list::push(recs, j4_rec("jt4nofin", "s2", KIND_OK, "started_one"))
+    let s = summarize(recs)
+    teko::assert::eq_u64(s.dead.len, 1)
+    teko::assert::eq_u64(s.never_ran.total, 4)
+    teko::assert::str_absent(render_summary(s), "run PASSED")
+}
+
+#test
+/**
+ * j4_a_cov_record_folds_into_the_triple — the measurement transported in the journal itself (spec
+ * §3.8): a six-field `cov` record is decoded by `cov_of_payload` and summed into the triple, and a
+ * writer with a plan but no `cov` bumps `cov_missing`. Proves the fold exists before any emitter
+ * does.
+ *
+ * @throws quando o triplo não reflete o registro `cov`, ou o `cov_missing` não vê o dump ausente
+ * @since 0.3.1
+ */
+fn j4_a_cov_record_folds_into_the_triple() {
+    mut recs: []Record = teko::list::empty()
+    recs = teko::list::push(recs, j4_rec("jt4cov", "s0", KIND_PLAN, "1"))
+    recs = teko::list::push(recs, j4_rec("jt4cov", "s0", KIND_BEGIN, "probe"))
+    recs = teko::list::push(recs, j4_rec("jt4cov", "s0", KIND_OK, "probe"))
+    recs = teko::list::push(recs, j4_rec("jt4cov", "s0", KIND_COV, "3\t4\t50\t60\t7\t8"))
+    recs = teko::list::push(recs, j4_rec("jt4cov", "s0", KIND_END, ""))
+    recs = teko::list::push(recs, j4_rec("jt4cov", "r0", KIND_PLAN, "1"))
+    recs = teko::list::push(recs, j4_rec("jt4cov", "r0", KIND_BEGIN, "regr"))
+    recs = teko::list::push(recs, j4_rec("jt4cov", "r0", KIND_OK, "regr"))
+    recs = teko::list::push(recs, j4_rec("jt4cov", "r0", KIND_END, ""))
+    let s = summarize(recs)
+    teko::assert::eq_u64(s.cov.functions_cov, 3)
+    teko::assert::eq_u64(s.cov.functions_val, 4)
+    teko::assert::eq_u64(s.cov.lines_cov, 50)
+    teko::assert::eq_u64(s.cov.branches_val, 8)
+    teko::assert::eq_u64(s.cov_missing, 1)
+}
+

@@ -1,0 +1,259 @@
+/**
+ * teko::journal tests — segment/fold/root fixtures and j_*/j2_* tests, split out of
+ * journal_test.tkt (mechanical file-size split; no logic changes).
+ *
+ * @since 0.3.1
+ */
+
+/**
+ * tdir — a hermetic scratch directory for one fixture, under THIS run's own root so parallel gate
+ * shards (each in its own process, each minting its own `run_id`) never collide, and created eagerly
+ * so a segment file can be opened inside it.
+ *
+ * @param tag  a per-fixture label kept distinct from every other fixture's
+ * @return     the created directory
+ * @since 0.3.1
+ */
+fn tdir(tag: str) -> str {
+    let dir = teko::str::concat(run_root(), "/jt_", tag)
+    match mkdir_p(dir) { error => { }; null => { } }
+    dir
+}
+
+/**
+ * has_record — whether `recs` holds a record of exactly `kind` and `payload`, the shape every fold
+ * fixture asserts on (it names the record it expects rather than a count).
+ *
+ * @param recs     the folded records
+ * @param kind     the kind to find
+ * @param payload  the payload to find
+ * @return         true iff a matching record is present
+ * @since 0.3.1
+ */
+fn has_record(recs: []Record, kind: str, payload: str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= recs.len { break }
+        if recs[i].kind == kind && recs[i].payload == payload { return true }
+        i = i + 1
+    }
+    false
+}
+
+/**
+ * dir_absent — whether `path` names no listable directory, the way a fixture reads "this root was
+ * reclaimed" (a removed directory no longer lists; a present one lists, if only as empty).
+ *
+ * @param path  a directory path
+ * @return      true iff `path` cannot be listed
+ * @since 0.3.1
+ */
+fn dir_absent(path: str) -> bool {
+    match teko::fs::list_dir(path) { []str => false; error => true }
+}
+
+/**
+ * plant_segment — write `content` verbatim as the segment file `name` inside `dir`, the way the
+ * hygiene fixtures forge a torn or foreign-run segment `fold` then has to clean.
+ *
+ * @param dir      the directory to write into
+ * @param name     the segment file's basename
+ * @param content  the exact bytes of the segment
+ * @since 0.3.1
+ */
+fn plant_segment(dir: str, name: str, content: str) {
+    match teko::io::write_file(teko::str::concat(dir, "/", name), content) { error => { }; null => { } }
+}
+
+/**
+ * j_append_then_fold_returns_the_record — the append→fold round trip through the writer seam: one
+ * `ok probe` written, and `fold` reads it back.
+ */
+#test
+fn j_append_then_fold_returns_the_record() {
+    let dir = tdir("append")
+    let j = match open_seg(teko::str::concat(dir, "/s0"), "r1", "s0") {
+        Journal as jj => jj
+        error => { teko::assert::is_true(false); return }
+    }
+    match append(j, "ok", "probe") { error => { teko::assert::is_true(false) }; null => { } }
+    teko::assert::is_true(has_record(fold(dir, "r1"), "ok", "probe"))
+}
+
+/**
+ * j_append_raw_writes_the_line_verbatim — the unstructured half `teko::process::verdict_emit`
+ * reuses: no run stamp, no writer, no kind — exactly the bytes handed in, plus one newline. Two
+ * calls prove it is genuinely APPEND (the second line does not replace the first).
+ */
+#test
+fn j_append_raw_writes_the_line_verbatim() {
+    let path = teko::str::concat(tdir("appendraw"), "/chan")
+    match append_raw(path, "first line") { error => { teko::assert::is_true(false) }; null => { } }
+    match append_raw(path, "second line") { error => { teko::assert::is_true(false) }; null => { } }
+    let content = match teko::io::read_file(path) { str as s => s; error => "" }
+    teko::assert::eq_str(content, "first line\nsecond line\n")
+}
+
+/**
+ * j_append_raw_names_the_failure_when_the_path_cannot_be_opened — a directory that does not exist
+ * (no parent created for it, unlike `scratch`) answers the named error rather than panicking.
+ */
+#test
+fn j_append_raw_names_the_failure_when_the_path_cannot_be_opened() {
+    match append_raw("/definitely/not/a/real/directory/chan", "x") {
+        error as e => teko::assert::str_contains(e.message, "append_raw")
+        null => teko::assert::is_true(false)
+    }
+}
+
+/**
+ * j_a_record_of_another_run_is_discarded — hygiene rule 1 (§4): a line stamped with another run is
+ * dropped by `fold`, and only this run's record survives.
+ */
+#test
+fn j_a_record_of_another_run_is_discarded() {
+    let dir = tdir("otherrun")
+    let mine = teko::str::concat(record_line("r1", "s0", "ok", "mine"), "\n")
+    let theirs = teko::str::concat(record_line("other", "s0", "ok", "theirs"), "\n")
+    plant_segment(dir, "s0", teko::str::concat(mine, theirs))
+    let recs = fold(dir, "r1")
+    teko::assert::is_true(has_record(recs, "ok", "mine"))
+    teko::assert::is_false(has_record(recs, "ok", "theirs"))
+}
+
+/**
+ * j_a_torn_last_line_is_dropped — hygiene rule 2 (§4): a final line with no trailing newline is a
+ * torn write, and `fold` keeps only the completed line before it.
+ */
+#test
+fn j_a_torn_last_line_is_dropped() {
+    let dir = tdir("torn")
+    let kept = teko::str::concat(record_line("r1", "s0", "ok", "kept"), "\n")
+    let torn = record_line("r1", "s0", "ok", "torn")
+    plant_segment(dir, "s0", teko::str::concat(kept, torn))
+    let recs = fold(dir, "r1")
+    teko::assert::is_true(has_record(recs, "ok", "kept"))
+    teko::assert::is_false(has_record(recs, "ok", "torn"))
+}
+
+/**
+ * j_a_segment_without_end_yields_incomplete — hygiene rule 3 (§4): a segment that opened a test but
+ * wrote no terminal kind is folded with a synthetic `incomplete` naming the test it died in.
+ */
+#test
+fn j_a_segment_without_end_yields_incomplete() {
+    let dir = tdir("noend")
+    plant_segment(dir, "s0", teko::str::concat(record_line("r1", "s0", KIND_BEGIN, "test_x"), "\n"))
+    teko::assert::is_true(has_record(fold(dir, "r1"), KIND_INCOMPLETE, "test_x"))
+}
+
+/**
+ * j_a_closed_segment_is_not_synthesised_incomplete — the inversion of rule 3: a segment that DID
+ * write an `end` is left alone, so the synthetic `incomplete` is not a blind default.
+ */
+#test
+fn j_a_closed_segment_is_not_synthesised_incomplete() {
+    let dir = tdir("closed")
+    let begin = teko::str::concat(record_line("r1", "s0", KIND_BEGIN, "test_y"), "\n")
+    let end = teko::str::concat(record_line("r1", "s0", KIND_END, ""), "\n")
+    plant_segment(dir, "s0", teko::str::concat(begin, end))
+    teko::assert::is_false(has_record(fold(dir, "r1"), KIND_INCOMPLETE, "test_y"))
+}
+
+/**
+ * j_open_append_fold_roundtrips_the_public_api — the whole §2.2 public surface in one path:
+ * `open`/`run_id`/`run_root`/`append`/`fold` agree on a record written to this run's real root.
+ */
+#test
+fn j_open_append_fold_roundtrips_the_public_api() {
+    let j = match open("m") {
+        Journal as jj => jj
+        error => { teko::assert::is_true(false); return }
+    }
+    match append(j, "ok", "public_probe") { error => { teko::assert::is_true(false) }; null => { } }
+    teko::assert::is_true(has_record(fold(run_root(), run_id()), "ok", "public_probe"))
+}
+
+/**
+ * j_sweep_reclaims_a_dead_root_but_spares_keep_and_live — `sweep`'s two guards, both exercised on a
+ * hermetic tree: a dead root (no live lock) is reclaimed WITH its children, while the kept root and a
+ * root whose lock names THIS live process are both spared.
+ */
+#test
+fn j_sweep_reclaims_a_dead_root_but_spares_keep_and_live() {
+    let base = tdir("sweep")
+    let keep = teko::str::concat(base, "/keep")
+    let dead = teko::str::concat(base, "/dead")
+    let live = teko::str::concat(base, "/live")
+    match mkdir_p(keep) { error => { }; null => { } }
+    match mkdir_p(dead) { error => { }; null => { } }
+    match mkdir_p(live) { error => { }; null => { } }
+    plant_segment(dead, "s0", "child")
+    match teko::io::write_file(lock_path(live), teko::str::i64_to_str(pid_rt())) { error => { }; null => { } }
+    let removed = sweep_under(base, keep)
+    teko::assert::is_true(dir_absent(dead))
+    teko::assert::is_false(dir_absent(keep))
+    teko::assert::is_false(dir_absent(live))
+    teko::assert::eq_u64(removed, 1)
+}
+
+/**
+ * j2_claim_root_refuses_a_fresh_collision_with_a_live_root — the ferrolho of design §11.3: a FRESH
+ * run id (never inherited via `TEKO_RUN`) landing on a root some OTHER live process already holds is
+ * a NAMED refusal, never a silent share.
+ */
+#test
+fn j2_claim_root_refuses_a_fresh_collision_with_a_live_root() {
+    let dir = tdir("ferrolho-fresh")
+    match teko::io::write_file(lock_path(dir), teko::str::concat(teko::str::i64_to_str(pid_rt()), "\n")) { error => { }; null => { } }
+    match claim_root(dir, true) {
+        str => teko::assert::is_true(false)
+        error as e => teko::assert::str_contains(e.message, dir)
+    }
+}
+
+/**
+ * j2_claim_root_allows_an_inherited_run_to_share_a_live_root — the inversion: the SAME live root and
+ * the SAME lock, but `fresh = false` (a `TEKO_RUN` this process inherited) is never refused — that is
+ * the deliberate multi-writer sharing §1.1 describes, not a conflict.
+ */
+#test
+fn j2_claim_root_allows_an_inherited_run_to_share_a_live_root() {
+    let dir = tdir("ferrolho-inherited")
+    match teko::io::write_file(lock_path(dir), teko::str::concat(teko::str::i64_to_str(pid_rt()), "\n")) { error => { }; null => { } }
+    match claim_root(dir, false) {
+        str as r => teko::assert::eq_str(r, dir)
+        error => teko::assert::is_true(false)
+    }
+}
+
+/**
+ * j2_record_self_pid_never_erases_an_earlier_writers_pid — the multi-writer fix itself: a second
+ * writer claiming an already-locked root APPENDS its pid instead of overwriting the first one's, so
+ * the lock still names every sibling that ever claimed the root.
+ */
+#test
+fn j2_record_self_pid_never_erases_an_earlier_writers_pid() {
+    let dir = tdir("multi-pid")
+    match teko::io::write_file(lock_path(dir), "1\n") { error => { }; null => { } }
+    record_self_pid(dir)
+    let pids = lock_pids(dir)
+    teko::assert::eq_u64(pids.len, 2)
+    teko::assert::eq_i64(pids[0], 1)
+    teko::assert::eq_i64(pids[1], pid_rt())
+}
+
+/**
+ * j2_root_is_live_when_any_recorded_pid_is_alive — `root_is_live`'s multi-writer reading: a root
+ * whose lock names one dead-looking pid AND one truly live one (this process's own) still reads live,
+ * because ANY sibling still running is enough (§1.1: a root outlives the FIRST writer to finish, not
+ * only the last).
+ */
+#test
+fn j2_root_is_live_when_any_recorded_pid_is_alive() {
+    let dir = tdir("multi-live")
+    let body = teko::str::concat("999999999\n", teko::str::i64_to_str(pid_rt()), "\n")
+    match teko::io::write_file(lock_path(dir), body) { error => { }; null => { } }
+    teko::assert::is_true(root_is_live(dir))
+}
+
