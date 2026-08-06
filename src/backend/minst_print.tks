@@ -1,0 +1,620 @@
+use teko::lir
+
+/**
+ * wide_suffix — the printer suffix for a `wide` flag: `"x"` for the 64-bit
+ * X-register form, `"w"` for the 32-bit W-register form.
+ *
+ * @param bool wide  the flag to render
+ * @return str  the register-width suffix
+ */
+fn wide_suffix(wide: bool) -> str {
+    if wide { "x" } else { "w" }
+}
+
+/**
+ * dbl_suffix — the printer suffix for a `dbl` flag: `"d"` for the f64
+ * D-register form, `"s"` for the f32 S-register form.
+ *
+ * @param bool dbl  the flag to render
+ * @return str  the register-width suffix
+ */
+fn dbl_suffix(dbl: bool) -> str {
+    if dbl { "d" } else { "s" }
+}
+
+/**
+ * reg_ref — a register operand's printer text: `%N` for a virtual register,
+ * `%pN` for a physical one.
+ *
+ * @param MReg r  the register to render
+ * @return str  the operand text
+ */
+fn reg_ref(r: MReg) -> str {
+    let num = teko::u64_to_str(r.id to u64)
+    if r.is_phys { teko::str::concat("%p", num) } else { teko::str::concat("%", num) }
+}
+
+/**
+ * mem_ref — a memory operand's printer text: `[base, #offset]`.
+ *
+ * @param MMem m  the memory operand to render
+ * @return str  the operand text
+ */
+fn mem_ref(m: MMem) -> str {
+    teko::str::concat("[", reg_ref(m.base), ", #", teko::i64_to_str(m.offset to i64), "]")
+}
+
+/**
+ * print_regs — a comma-separated list of register operands (no surrounding
+ * parens; the caller supplies them).
+ *
+ * @param []MReg regs  the registers to render, in order
+ * @return str  the rendered list
+ */
+fn print_regs(regs: []MReg) -> str {
+    mut out = ""
+    mut i: u64 = 0
+    loop {
+        if i >= regs.len { break }
+        if i > 0 { out = teko::str::concat(out, ", ") }
+        out = teko::str::concat(out, reg_ref(regs[i]))
+        i++
+    }
+    out
+}
+
+/**
+ * alu_op_name — the printer mnemonic for an `MAluOp`.
+ *
+ * @param MAluOp op  the operation to name
+ * @return str  its lowercase AArch64 mnemonic
+ */
+fn alu_op_name(op: MAluOp) -> str {
+    match op {
+        Add => "add"; Sub => "sub"; Mul => "mul"
+        Sdiv => "sdiv"; Udiv => "udiv"
+        And => "and"; Orr => "orr"; Eor => "eor"
+        Lsl => "lsl"; Asr => "asr"; Lsr => "lsr"
+    }
+}
+
+/**
+ * falu_op_name — the printer mnemonic for an `MFAluOp`.
+ *
+ * @param MFAluOp op  the operation to name
+ * @return str  its lowercase AArch64 mnemonic
+ */
+fn falu_op_name(op: MFAluOp) -> str {
+    match op { FAdd => "fadd"; FSub => "fsub"; FMul => "fmul"; FDiv => "fdiv" }
+}
+
+/**
+ * ext_op_name — the printer mnemonic for an `MExtOp`.
+ *
+ * @param MExtOp op  the operation to name
+ * @return str  its lowercase AArch64 mnemonic
+ */
+fn ext_op_name(op: MExtOp) -> str {
+    match op {
+        Sxtb => "sxtb"; Sxth => "sxth"; Sxtw => "sxtw"
+        Uxtb => "uxtb"; Uxth => "uxth"; Uxtw => "uxtw"
+    }
+}
+
+/**
+ * cvt_op_name — the printer mnemonic for an `MCvtOp`.
+ *
+ * @param MCvtOp op  the operation to name
+ * @return str  its lowercase AArch64 mnemonic
+ */
+fn cvt_op_name(op: MCvtOp) -> str {
+    match op { Scvtf => "scvtf"; Ucvtf => "ucvtf"; Fcvtzs => "fcvtzs"; Fcvtzu => "fcvtzu"; Fcvt => "fcvt" }
+}
+
+/**
+ * mem_size_name — the printer suffix for an `MMemSize`.
+ *
+ * @param MMemSize s  the access width to name
+ * @return str  its lowercase letter (b/h/w/x/s/d)
+ */
+fn mem_size_name(s: MMemSize) -> str {
+    match s { B => "b"; H => "h"; W => "w"; X => "x"; S => "s"; D => "d" }
+}
+
+/**
+ * cond_name — the printer mnemonic for an `MCond`.
+ *
+ * @param MCond c  the condition code to name
+ * @return str  its lowercase AArch64 condition mnemonic
+ */
+fn cond_name(c: MCond) -> str {
+    match c {
+        EQ => "eq"; NE => "ne"
+        LT => "lt"; LE => "le"; GT => "gt"; GE => "ge"
+        LO => "lo"; LS => "ls"; HI => "hi"; HS => "hs"
+    }
+}
+
+/**
+ * reloc_kind_name — the printer suffix for an `MRelocKind`.
+ *
+ * @param MRelocKind k  the relocation kind to name
+ * @return str  its lowercase name
+ */
+fn reloc_kind_name(k: MRelocKind) -> str {
+    match k { PageHi => "page_hi"; PageLo => "page_lo"; Call => "call"; Abs64 => "abs64" }
+}
+
+/**
+ * print_alu — `<op>.<w> dst, a, b`.
+ *
+ * @param MAlu i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_alu(i: MAlu) -> str {
+    teko::str::concat(alu_op_name(i.op), ".", wide_suffix(i.wide), " ", reg_ref(i.dst), ", ", reg_ref(i.a), ", ", reg_ref(i.b))
+}
+
+/**
+ * print_alu_imm — `<op>.<w> dst, a, #imm`.
+ *
+ * @param MAluImm i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_alu_imm(i: MAluImm) -> str {
+    teko::str::concat(alu_op_name(i.op), ".", wide_suffix(i.wide), " ", reg_ref(i.dst), ", ", reg_ref(i.a), ", #", teko::i64_to_str(i.imm))
+}
+
+/**
+ * print_msub — `msub.<w> dst, a, b, c`.
+ *
+ * @param MMSub i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_msub(i: MMSub) -> str {
+    teko::str::concat("msub.", wide_suffix(i.wide), " ", reg_ref(i.dst), ", ", reg_ref(i.a), ", ", reg_ref(i.b), ", ", reg_ref(i.c))
+}
+
+/**
+ * print_neg — `neg.<w> dst, a`.
+ *
+ * @param MNeg i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_neg(i: MNeg) -> str {
+    teko::str::concat("neg.", wide_suffix(i.wide), " ", reg_ref(i.dst), ", ", reg_ref(i.a))
+}
+
+/**
+ * print_mvn — `mvn.<w> dst, a`.
+ *
+ * @param MMvn i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_mvn(i: MMvn) -> str {
+    teko::str::concat("mvn.", wide_suffix(i.wide), " ", reg_ref(i.dst), ", ", reg_ref(i.a))
+}
+
+/**
+ * print_falu — `<op>.<w> dst, a, b` (the float form).
+ *
+ * @param MFAlu i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_falu(i: MFAlu) -> str {
+    teko::str::concat(falu_op_name(i.op), ".", dbl_suffix(i.dbl), " ", reg_ref(i.dst), ", ", reg_ref(i.a), ", ", reg_ref(i.b))
+}
+
+/**
+ * print_fneg — `fneg.<w> dst, a`.
+ *
+ * @param MFNeg i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_fneg(i: MFNeg) -> str {
+    teko::str::concat("fneg.", dbl_suffix(i.dbl), " ", reg_ref(i.dst), ", ", reg_ref(i.a))
+}
+
+/**
+ * print_cmp — `cmp.<w> a, b`.
+ *
+ * @param MCmp i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_cmp(i: MCmp) -> str {
+    teko::str::concat("cmp.", wide_suffix(i.wide), " ", reg_ref(i.a), ", ", reg_ref(i.b))
+}
+
+/**
+ * print_cmp_imm — `cmp.<w> a, #imm`.
+ *
+ * @param MCmpImm i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_cmp_imm(i: MCmpImm) -> str {
+    teko::str::concat("cmp.", wide_suffix(i.wide), " ", reg_ref(i.a), ", #", teko::i64_to_str(i.imm))
+}
+
+/**
+ * print_fcmp — `fcmp.<w> a, b` (the float form).
+ *
+ * @param MFCmp i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_fcmp(i: MFCmp) -> str {
+    teko::str::concat("fcmp.", dbl_suffix(i.dbl), " ", reg_ref(i.a), ", ", reg_ref(i.b))
+}
+
+/**
+ * print_cset — `cset.<w> dst, <cond>`.
+ *
+ * @param MCSet i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_cset(i: MCSet) -> str {
+    teko::str::concat("cset.", wide_suffix(i.wide), " ", reg_ref(i.dst), ", ", cond_name(i.cond))
+}
+
+/**
+ * print_movi — the shared `<mnemonic>.<w> dst, #imm16, lsl #shift` text
+ * for the MOVZ/MOVK/MOVN family (extracted so the three cases share one
+ * rendering rule).
+ *
+ * @param str mnemonic  which of movz/movk/movn to render
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @param MReg dst  the destination register
+ * @param u32 imm16  the 16-bit lane value
+ * @param u32 shift  the lane's bit position
+ * @return str  the rendered text
+ */
+fn print_movi(mnemonic: str, wide: bool, dst: MReg, imm16: u32, shift: u32) -> str {
+    teko::str::concat(mnemonic, ".", wide_suffix(wide), " ", reg_ref(dst), ", #", teko::u64_to_str(imm16 to u64), ", lsl #", teko::u64_to_str(shift to u64))
+}
+
+/**
+ * print_movz — `movz.<w> dst, #imm16, lsl #shift`.
+ *
+ * @param MMovZ i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_movz(i: MMovZ) -> str {
+    print_movi("movz", i.wide, i.dst, i.imm16, i.shift)
+}
+
+/**
+ * print_movk — `movk.<w> dst, #imm16, lsl #shift`.
+ *
+ * @param MMovK i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_movk(i: MMovK) -> str {
+    print_movi("movk", i.wide, i.dst, i.imm16, i.shift)
+}
+
+/**
+ * print_movn — `movn.<w> dst, #imm16, lsl #shift`.
+ *
+ * @param MMovN i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_movn(i: MMovN) -> str {
+    print_movi("movn", i.wide, i.dst, i.imm16, i.shift)
+}
+
+/**
+ * print_fmov — `fmov.<w> dst, src`.
+ *
+ * @param MFMov i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_fmov(i: MFMov) -> str {
+    teko::str::concat("fmov.", dbl_suffix(i.dbl), " ", reg_ref(i.dst), ", ", reg_ref(i.src))
+}
+
+/**
+ * print_mov — `mov.<w> dst, src`.
+ *
+ * @param MMov i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_mov(i: MMov) -> str {
+    teko::str::concat("mov.", wide_suffix(i.wide), " ", reg_ref(i.dst), ", ", reg_ref(i.src))
+}
+
+/**
+ * print_ext — `<op> dst, a`.
+ *
+ * @param MExt i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_ext(i: MExt) -> str {
+    teko::str::concat(ext_op_name(i.op), " ", reg_ref(i.dst), ", ", reg_ref(i.a))
+}
+
+/**
+ * operand_width_letter — one operand's AArch64 register-form letter: `x`/`w` for
+ * a GPR and `d`/`s` for an FPR. A conversion's two ends live in different
+ * register files, so a single suffix helper would print `d` where the ISA writes
+ * `x` — this keeps each end's letter the one the assembler uses.
+ *
+ * @param MReg r  the operand (its `reg_class` picks the letter pair)
+ * @param bool wide  whether the operand is its file's 64-bit form
+ * @return str  the register-form letter
+ */
+fn operand_width_letter(r: MReg, wide: bool) -> str {
+    if r.reg_class == MRegClass::FPR { return dbl_suffix(wide) }
+    wide_suffix(wide)
+}
+
+/**
+ * print_cvt — `<op>.<dst><src> dst, a`, the two width flags rendered as one
+ * two-letter suffix in operand order (`scvtf.dx`, `fcvtzs.xd`, `fcvt.sd`).
+ * Rendering them is not decoration: a conversion's whole correctness is which
+ * width each end reads, so a golden that showed only `fcvt %0, %1` could not
+ * tell a narrowing convert from a widening one.
+ *
+ * @param MCvt i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_cvt(i: MCvt) -> str {
+    let widths = teko::str::concat(operand_width_letter(i.dst, i.dst_wide), operand_width_letter(i.a, i.src_wide))
+    teko::str::concat(cvt_op_name(i.op), ".", widths, " ", reg_ref(i.dst), ", ", reg_ref(i.a))
+}
+
+/**
+ * print_load — `ldr[s].<size> dst, [mem]` (the `s` marks a sign-extending
+ * narrow load).
+ *
+ * @param MLoad i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_load(i: MLoad) -> str {
+    let mnemonic = if i.sign { "ldrs" } else { "ldr" }
+    teko::str::concat(mnemonic, ".", mem_size_name(i.size), " ", reg_ref(i.dst), ", ", mem_ref(i.mem))
+}
+
+/**
+ * print_store — `str.<size> src, [mem]`.
+ *
+ * @param MStore i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_store(i: MStore) -> str {
+    teko::str::concat("str.", mem_size_name(i.size), " ", reg_ref(i.src), ", ", mem_ref(i.mem))
+}
+
+/**
+ * print_fspill — `fspill.<dir> reg, #slot`, the direction spelled out (`ld`/`st`)
+ * rather than left as a bare flag: a spill whose direction is wrong writes the
+ * slot where it meant to read it, so the golden has to show which way it went.
+ *
+ * @param MFSpill i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_fspill(i: MFSpill) -> str {
+    let dir = if i.is_load { "ld" } else { "st" }
+    teko::str::concat("fspill.", dir, " ", reg_ref(i.reg), ", #", teko::u64_to_str(i.slot))
+}
+
+/**
+ * print_frame_addr — `frame_addr dst, #slot`.
+ *
+ * @param MFrameAddr i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_frame_addr(i: MFrameAddr) -> str {
+    teko::str::concat("frame_addr ", reg_ref(i.dst), ", #", teko::u64_to_str(i.slot))
+}
+
+/**
+ * print_adrp — `adrp.<kind> dst, @sym`.
+ *
+ * @param MAdrp i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_adrp(i: MAdrp) -> str {
+    teko::str::concat("adrp.", reloc_kind_name(i.kind), " ", reg_ref(i.dst), ", @", i.sym)
+}
+
+/**
+ * print_add_lo — `add_lo.<kind> dst, a, @sym`.
+ *
+ * @param MAddLo i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_add_lo(i: MAddLo) -> str {
+    teko::str::concat("add_lo.", reloc_kind_name(i.kind), " ", reg_ref(i.dst), ", ", reg_ref(i.a), ", @", i.sym)
+}
+
+/**
+ * print_branch — `b #M<target>`.
+ *
+ * @param MBranch i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_branch(i: MBranch) -> str {
+    teko::str::concat("b #M", teko::u64_to_str(i.target to u64))
+}
+
+/**
+ * print_branch_cond — `b.<cond> #M<target>`.
+ *
+ * @param MBranchCond i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_branch_cond(i: MBranchCond) -> str {
+    teko::str::concat("b.", cond_name(i.cond), " #M", teko::u64_to_str(i.target to u64))
+}
+
+/**
+ * print_cbz — `cbz[n].<w> a, #M<target>` (the `n` marks CBNZ).
+ *
+ * @param MCbz i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_cbz(i: MCbz) -> str {
+    let mnemonic = if i.zero { "cbz" } else { "cbnz" }
+    teko::str::concat(mnemonic, ".", wide_suffix(i.wide), " ", reg_ref(i.a), ", #M", teko::u64_to_str(i.target to u64))
+}
+
+/**
+ * print_call — `call @sym(uses)`, with an optional ` variadic` marker and
+ * an optional ` -> ret_reg` result suffix.
+ *
+ * @param MCall i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_call(i: MCall) -> str {
+    mut out = teko::str::concat("call @", i.sym, "(", print_regs(i.uses), ")")
+    if i.variadic { out = teko::str::concat(out, " variadic") }
+    if i.has_result { out = teko::str::concat(out, " -> ", reg_ref(i.ret_reg)) }
+    out
+}
+
+/**
+ * print_call_indirect — `call.indirect target(uses)`, with an optional
+ * ` -> ret_reg` result suffix.
+ *
+ * @param MCallIndirect i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_call_indirect(i: MCallIndirect) -> str {
+    mut out = teko::str::concat("call.indirect ", reg_ref(i.target), "(", print_regs(i.uses), ")")
+    if i.has_result { out = teko::str::concat(out, " -> ", reg_ref(i.ret_reg)) }
+    out
+}
+
+/**
+ * print_ret — `ret`. The returned value, if any, was already pinned by a
+ * preceding move, so `MRet` carries nothing further to render.
+ *
+ * @param MRet i  the instruction to render (carries no fields)
+ * @return str  the rendered text
+ */
+fn print_ret(i: MRet) -> str {
+    "ret"
+}
+
+/**
+ * print_out_arg — `outarg.<size> src, #index`.
+ *
+ * @param MOutArg i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_out_arg(i: MOutArg) -> str {
+    teko::str::concat("outarg.", mem_size_name(i.size), " ", reg_ref(i.src), ", #", teko::u64_to_str(i.index to u64))
+}
+
+/**
+ * print_in_arg — `inarg.<size> dst, #index`.
+ *
+ * @param MInArg i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_in_arg(i: MInArg) -> str {
+    teko::str::concat("inarg.", mem_size_name(i.size), " ", reg_ref(i.dst), ", #", teko::u64_to_str(i.index to u64))
+}
+
+/**
+ * print_minst — the instruction text for one `MInst` (no result prefix —
+ * a case's own destination operand, when it has one, already renders it).
+ *
+ * @param MInst i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_minst(i: MInst) -> str {
+    match i {
+        MAlu as x => print_alu(x)
+        MAluImm as x => print_alu_imm(x)
+        MMSub as x => print_msub(x)
+        MNeg as x => print_neg(x)
+        MMvn as x => print_mvn(x)
+        MFAlu as x => print_falu(x)
+        MFNeg as x => print_fneg(x)
+        MCmp as x => print_cmp(x)
+        MCmpImm as x => print_cmp_imm(x)
+        MFCmp as x => print_fcmp(x)
+        MCSet as x => print_cset(x)
+        MMovZ as x => print_movz(x)
+        MMovK as x => print_movk(x)
+        MMovN as x => print_movn(x)
+        MFMov as x => print_fmov(x)
+        MMov as x => print_mov(x)
+        MExt as x => print_ext(x)
+        MCvt as x => print_cvt(x)
+        MLoad as x => print_load(x)
+        MStore as x => print_store(x)
+        MFSpill as x => print_fspill(x)
+        MFrameAddr as x => print_frame_addr(x)
+        MAdrp as x => print_adrp(x)
+        MAddLo as x => print_add_lo(x)
+        MBranch as x => print_branch(x)
+        MBranchCond as x => print_branch_cond(x)
+        MCbz as x => print_cbz(x)
+        MCall as x => print_call(x)
+        MCallIndirect as x => print_call_indirect(x)
+        MRet as x => print_ret(x)
+        MOutArg as x => print_out_arg(x)
+        MInArg as x => print_in_arg(x)
+    }
+}
+
+/**
+ * print_mblock — a block header `  #Mn:` (with block-args when present)
+ * followed by its instructions, one per line, 4-space indented.
+ *
+ * @param MBlock b  the block to render
+ * @return str  the rendered text
+ */
+fn print_mblock(b: MBlock) -> str {
+    mut out = teko::str::concat("  #M", teko::u64_to_str(b.id to u64))
+    if b.params.len != 0 { out = teko::str::concat(out, "(", print_regs(b.params), ")") }
+    out = teko::str::concat(out, ":\n")
+    mut i: u64 = 0
+    loop {
+        if i >= b.insts.len { break }
+        out = teko::str::concat(out, "    ", print_minst(b.insts[i]), "\n")
+        i++
+    }
+    out
+}
+
+/**
+ * print_mfunc — a full function: `func @sym {` + its blocks + `}`.
+ *
+ * @param MFunc f  the function to render
+ * @return str  the rendered text
+ */
+fn print_mfunc(f: MFunc) -> str {
+    mut out = teko::str::concat("func @", f.symbol, " {\n")
+    mut i: u64 = 0
+    loop {
+        if i >= f.blocks.len { break }
+        out = teko::str::concat(out, print_mblock(f.blocks[i]))
+        i++
+    }
+    teko::str::concat(out, "}\n")
+}
+
+/**
+ * minst_print — the whole selected module as stable text: every function,
+ * in declaration order, blank-line separated. The rodata/globals/layouts
+ * tables ride THROUGH `MModule` unchanged from the source `LModule` (A1's
+ * own printer already covers their diff/fixpoint gate), so this dump
+ * renders only the machine instructions — the artifact A2's golden-dump
+ * tests read.
+ *
+ * @param MModule m  the module to render
+ * @return str  the module's stable text
+ */
+pub fn minst_print(m: MModule) -> str {
+    mut out = ""
+    mut i: u64 = 0
+    loop {
+        if i >= m.funcs.len { break }
+        if i > 0 { out = teko::str::concat(out, "\n") }
+        out = teko::str::concat(out, print_mfunc(m.funcs[i]))
+        i++
+    }
+    out
+}

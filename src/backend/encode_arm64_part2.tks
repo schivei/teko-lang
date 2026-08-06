@@ -1,0 +1,769 @@
+fn encode_call(i: MCall) -> EncWord {
+    reloc_word(ARM64_BL, i.sym, MRelocKind::Call)
+}
+
+/**
+ * encode_call_indirect — an indirect call (BLR): `0xD63F0000 | Rn(target)`, a
+ * position-independent word (no relocation, no displacement).
+ *
+ * @param MCallIndirect i  the indirect-call instruction (operand physical)
+ * @return EncWord  the encoded word
+ */
+fn encode_call_indirect(i: MCallIndirect) -> EncWord {
+    plain_word(ARM64_BLR | enc_rn(i.target))
+}
+
+/**
+ * encode_adrp — the page-high half of a symbol address (ADRP): the placeholder
+ * `0x90000000 | Rd` flagged for the instruction's relocation kind (PAGE21); the
+ * linker patches the page immediate.
+ *
+ * @param MAdrp i  the ADRP instruction (operand physical)
+ * @return EncWord  the reloc-flagged placeholder word
+ */
+fn encode_adrp(i: MAdrp) -> EncWord {
+    reloc_word(ARM64_ADRP | enc_rd(i.dst), i.sym, i.kind)
+}
+
+/**
+ * encode_add_lo — the page-low completion of an `MAdrp` (ADD lo12): the
+ * placeholder `0x91000000 | Rn(a) | Rd` flagged for the instruction's
+ * relocation kind (PAGEOFF12); the linker patches the low-12 immediate.
+ *
+ * @param MAddLo i  the ADD-lo12 instruction (operands physical)
+ * @return EncWord  the reloc-flagged placeholder word
+ */
+fn encode_add_lo(i: MAddLo) -> EncWord {
+    reloc_word(ARM64_ADD_IMM64_BASE | enc_rn(i.a) | enc_rd(i.dst), i.sym, i.kind)
+}
+
+/**
+ * encode_ret — a return terminator (RET): the bare `0xD65F03C0` word. The
+ * epilogue that precedes it is prepended by `encode_func` in A4-2; A4-1 emits
+ * only the RET itself.
+ *
+ * @return EncWord  the RET word
+ */
+fn encode_ret() -> EncWord {
+    plain_word(ARM64_RET)
+}
+
+/**
+ * Saved — the re-derived callee-saved register partition of one function: the
+ * GPR ids and FPR ids that appear as a def or use somewhere in the physical
+ * body and are callee-saved (so the prologue must preserve them). Both lists
+ * are kept ascending and duplicate-free as they are built.
+ *
+ * @since #385 A4-2
+ */
+type Saved = struct {
+    /**
+     * gpr — the ascending, duplicate-free callee-saved GPR ids used.
+     */
+    gpr: []u32
+    /**
+     * fpr — the ascending, duplicate-free callee-saved FPR ids used.
+     */
+    fpr: []u32
+}
+
+/**
+ * SlotLayout — the frame-slot region of one function: the SP-relative byte
+ * offset of each slot (alignment-honoring, in frame order) and the total slot
+ * region size rounded up to 16 (so the callee-saved save area above it starts
+ * 16-aligned).
+ *
+ * @since #385 A4-2
+ */
+type SlotLayout = struct {
+    /**
+     * offsets — the SP-relative byte offset of each `MFunc.frame` entry.
+     */
+    offsets: []u32
+    /**
+     * slots_size — the 16-rounded total byte size of the slot region.
+     */
+    slots_size: u32
+}
+
+/**
+ * align_up — round `x` up to the next multiple of `a`, the standard
+ * stack-slot / frame-size alignment step. A no-op when `a` is 0/1 (the same
+ * guarded contract as `lir::align_up` — a zero-size/zero-align entry never
+ * grows or divides the running offset).
+ *
+ * @param u32 x  the value to round
+ * @param u32 a  the alignment (a power of two, or 0/1 for none)
+ * @return u32  the least multiple of `a` not less than `x`
+ */
+fn align_up(x: u32, a: u32) -> u32 {
+    if a <= 1 { return x }
+    (((x + a) - (1 to u32)) / a) * a
+}
+
+/**
+ * insert_sorted_unique — `xs` (assumed ascending) with `v` inserted in order,
+ * or `xs` unchanged when `v` is already present. Keeps the re-derived save-set
+ * deterministic (M.2) and duplicate-free without a separate sort pass.
+ *
+ * @param []u32 xs  the ascending, duplicate-free list
+ * @param u32 v  the id to insert
+ * @return []u32  the list with `v` present exactly once, still ascending
+ */
+fn insert_sorted_unique(xs: []u32, v: u32) -> []u32 {
+    mut out: []u32 = teko::list::empty()
+    mut inserted = false
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        let cur = xs[i]
+        if cur == v { return xs }
+        if !inserted {
+            if v < cur {
+                out = teko::list::push(out, v)
+                inserted = true
+            }
+        }
+        out = teko::list::push(out, cur)
+        i++
+    }
+    if !inserted { out = teko::list::push(out, v) }
+    out
+}
+
+/**
+ * consider_reg — fold one register into the callee-saved partition: a
+ * caller-saved / non-allocatable register (including FP/LR/SP) is ignored; a
+ * callee-saved one is inserted into its class's ascending list.
+ *
+ * @param AbiDescriptor abi  the register file (callee-saved partition)
+ * @param Saved acc  the partition so far
+ * @param MReg r  a physical register the instruction defs or uses
+ * @return Saved  the partition with `r` folded in
+ */
+fn consider_reg(abi: AbiDescriptor, acc: Saved, r: MReg) -> Saved {
+    if !is_callee_saved(abi, r) { return acc }
+    if r.reg_class == MRegClass::FPR {
+        return Saved { gpr = acc.gpr; fpr = insert_sorted_unique(acc.fpr, r.id) }
+    }
+    Saved { gpr = insert_sorted_unique(acc.gpr, r.id); fpr = acc.fpr }
+}
+
+/**
+ * scan_inst_saved — fold one instruction's def and use registers into the
+ * callee-saved partition (via `inst_regs`, the same def/use decomposition
+ * regalloc reads — the emitted instructions ARE the source of truth, §3.1 D-A).
+ *
+ * @param AbiDescriptor abi  the register file
+ * @param Saved acc0  the partition so far
+ * @param MInst inst  the physical instruction to scan
+ * @return Saved  the partition with `inst`'s registers folded in
+ */
+fn scan_inst_saved(abi: AbiDescriptor, acc0: Saved, inst: MInst) -> Saved {
+    let ir = inst_regs(inst)
+    mut acc = acc0
+    if ir.has_def {
+        acc = consider_reg(abi, acc, ir.def_reg)
+    }
+    mut i: u64 = 0
+    loop {
+        if i >= ir.uses.len { break }
+        acc = consider_reg(abi, acc, ir.uses[i])
+        i++
+    }
+    acc
+}
+
+/**
+ * scan_block_saved — fold one block's instruction stream into the callee-saved
+ * partition.
+ *
+ * @param AbiDescriptor abi  the register file
+ * @param Saved acc0  the partition so far
+ * @param MBlock b  the block to scan
+ * @return Saved  the partition with `b`'s registers folded in
+ */
+fn scan_block_saved(abi: AbiDescriptor, acc0: Saved, b: MBlock) -> Saved {
+    mut acc = acc0
+    mut i: u64 = 0
+    loop {
+        if i >= b.insts.len { break }
+        acc = scan_inst_saved(abi, acc, b.insts[i])
+        i++
+    }
+    acc
+}
+
+/**
+ * collect_callee_saved — re-derive the callee-saved save-set of a physical
+ * function by scanning every block's def/use registers (§3.1). `MFunc` does not
+ * carry `used_callee_saved` (regalloc drops it), so A4 recomputes it; FP/LR are
+ * excluded here (never allocatable) and saved unconditionally by the prologue.
+ *
+ * @param AbiDescriptor abi  the register file
+ * @param MFunc f  the fully-physical function
+ * @return Saved  the ascending, duplicate-free callee-saved GPR/FPR ids used
+ */
+fn collect_callee_saved(abi: AbiDescriptor, f: MFunc) -> Saved {
+    mut acc = Saved { gpr = teko::list::empty(); fpr = teko::list::empty() }
+    mut i: u64 = 0
+    loop {
+        if i >= f.blocks.len { break }
+        acc = scan_block_saved(abi, acc, f.blocks[i])
+        i++
+    }
+    acc
+}
+
+/**
+ * compute_slot_offsets — lay out the frame-slot region bottom-up, honoring each
+ * `LAlloca`'s own alignment and byte size: slot k sits at `align_up(end of
+ * slot k-1, align_k)`. Produces the per-slot SP offsets and the 16-rounded
+ * region size.
+ *
+ * @param []lir::LAlloca frame  the ordered frame-slot table (`MFunc.frame`)
+ * @return SlotLayout  the per-slot offsets + rounded region size
+ */
+fn compute_slot_offsets(frame: []lir::LAlloca) -> SlotLayout {
+    mut offsets: []u32 = teko::list::empty()
+    mut running: u32 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= frame.len { break }
+        let la = frame[i]
+        let at = align_up(running, la.align)
+        offsets = teko::list::push(offsets, at)
+        running = at + la.bytes
+        i++
+    }
+    SlotLayout { offsets = offsets; slots_size = align_up(running, ARM64_STACK_ALIGN) }
+}
+
+/**
+ * inst_is_call — whether an instruction is a call (clobbers LR), read from the
+ * `inst_regs` decomposition so the definition stays single-sourced.
+ *
+ * @param MInst inst  the instruction
+ * @return bool  true iff `inst` is `MCall`/`MCallIndirect`
+ */
+fn inst_is_call(inst: MInst) -> bool {
+    inst_regs(inst).is_call
+}
+
+/**
+ * inst_is_ret — whether an instruction is the return terminator.
+ *
+ * @param MInst inst  the instruction
+ * @return bool  true iff `inst` is `MRet`
+ */
+fn inst_is_ret(inst: MInst) -> bool {
+    match inst {
+        MRet => true
+        _ => false
+    }
+}
+
+/**
+ * block_any_call — whether any instruction in `b` is a call.
+ *
+ * @param MBlock b  the block to scan
+ * @return bool  true iff `b` contains a call
+ */
+fn block_any_call(b: MBlock) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= b.insts.len { break }
+        if inst_is_call(b.insts[i]) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * block_any_ret — whether any instruction in `b` is the return terminator.
+ *
+ * @param MBlock b  the block to scan
+ * @return bool  true iff `b` contains an `MRet`
+ */
+fn block_any_ret(b: MBlock) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= b.insts.len { break }
+        if inst_is_ret(b.insts[i]) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * func_any_call — whether the function makes any call.
+ *
+ * @param MFunc f  the function to scan
+ * @return bool  true iff any block contains a call
+ */
+fn func_any_call(f: MFunc) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= f.blocks.len { break }
+        if block_any_call(f.blocks[i]) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * func_any_ret — whether the function has a reachable return terminator.
+ *
+ * @param MFunc f  the function to scan
+ * @return bool  true iff any block contains an `MRet`
+ */
+fn func_any_ret(f: MFunc) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= f.blocks.len { break }
+        if block_any_ret(f.blocks[i]) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * needs_lr_save — whether LR must be preserved across the function body: true
+ * only when the function BOTH makes a call (clobbering LR) AND can return
+ * (so the clobbered LR would be read). A leaf function, or the `exit(n)`-
+ * terminated virtual-`main` (a call but no `MRet`), needs no LR save — the
+ * frameless first-light case (§3.2 first-light note).
+ *
+ * @param MFunc f  the fully-physical function
+ * @return bool  true iff the prologue must save FP/LR for LR preservation
+ */
+fn needs_lr_save(f: MFunc) -> bool {
+    func_any_call(f) && func_any_ret(f)
+}
+
+/**
+ * frame_total_size — the total 16-aligned frame size: 0 when the function is
+ * frameless (no slots, no callee-saved registers, no LR to preserve), else the
+ * slot region + the callee-saved save area (8 bytes each) + 16 for FP/LR,
+ * rounded up to 16.
+ *
+ * @param u32 slots_size  the 16-rounded slot-region size
+ * @param Saved saved  the re-derived callee-saved partition
+ * @param bool lr_save  whether FP/LR must be preserved (`needs_lr_save`)
+ * @return u32  the total frame size (0 when frameless)
+ */
+fn frame_total_size(slots_size: u32, saved: Saved, lr_save: bool) -> u32 {
+    let n_saved = (saved.gpr.len + saved.fpr.len) to u32
+    let framed = (slots_size > (0 to u32)) || (n_saved > (0 to u32)) || lr_save
+    if !framed { return 0 to u32 }
+    align_up(slots_size + (n_saved * ARM64_REG_BYTES) + ARM64_FP_LR_BYTES, ARM64_STACK_ALIGN)
+}
+
+/**
+ * out_arg_slots_of_inst — the number of outgoing stack-arg slots this
+ * instruction contributes: `index + 1` for an `MOutArg` (one-past the highest
+ * slot index used), 0 for every other instruction.
+ *
+ * @param MInst i  the instruction to inspect
+ * @return u32  the contribution to the max-slot scan
+ */
+fn out_arg_slots_of_inst(i: MInst) -> u32 {
+    match i {
+        MOutArg as x => x.index + (1 to u32)
+        _ => 0 to u32
+    }
+}
+
+/**
+ * max_out_arg_slots_of_block — the maximum one-past-index among all `MOutArg`
+ * instructions in a single block.
+ *
+ * @param MBlock b  the block to scan
+ * @return u32  the maximum slot count for this block
+ */
+fn max_out_arg_slots_of_block(b: MBlock) -> u32 {
+    mut max: u32 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= b.insts.len { break }
+        let slots = out_arg_slots_of_inst(b.insts[i])
+        if slots > max { max = slots }
+        i++
+    }
+    max
+}
+
+/**
+ * max_out_arg_slots — the maximum one-past-index among all `MOutArg`
+ * instructions in the whole function: how many 8-byte slots the outgoing
+ * stack-arg area must hold.
+ *
+ * @param MFunc f  the fully-physical function
+ * @return u32  the maximum slot count (0 if no stack args are passed)
+ */
+fn max_out_arg_slots(f: MFunc) -> u32 {
+    mut max: u32 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= f.blocks.len { break }
+        let b_max = max_out_arg_slots_of_block(f.blocks[i])
+        if b_max > max { max = b_max }
+        i++
+    }
+    max
+}
+
+/**
+ * out_arg_bytes — the size of the outgoing stack-arg area in bytes: the number
+ * of 8-byte slots, aligned up to 16 for SP alignment, or 0 when there are no
+ * stack args.
+ *
+ * @param MFunc f  the fully-physical function
+ * @return u32  the byte size of the outgoing stack-arg area (0 or ≥ 16)
+ */
+fn out_arg_bytes(f: MFunc) -> u32 {
+    let slots = max_out_arg_slots(f)
+    if slots == (0 to u32) { return 0 to u32 }
+    align_up(slots * ARM64_REG_BYTES, ARM64_STACK_ALIGN)
+}
+
+/**
+ * shift_slot_offsets — add `delta` to every element of `offsets`, returning
+ * the shifted slice. Used to push local-variable slots up past the outgoing
+ * stack-arg area when the frame includes `MOutArg` instructions.
+ *
+ * @param []u32 offsets  the original per-slot SP-relative byte offsets
+ * @param u32 delta  the byte amount to add to each offset
+ * @return []u32  the shifted offsets
+ */
+fn shift_slot_offsets(offsets: []u32, delta: u32) -> []u32 {
+    if delta == (0 to u32) { return offsets }
+    mut result: []u32 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= offsets.len { break }
+        result = teko::list::push(result, offsets[i] + delta)
+        i++
+    }
+    result
+}
+
+/**
+ * compute_frame_layout — build a function's `FrameLayout`: re-derive the
+ * callee-saved save-set (§3.1), lay out the frame slots honoring each
+ * `LAlloca`'s alignment, size the whole frame (0 when frameless), and compute
+ * the outgoing stack-arg area at the bottom of the frame. A pure side-table
+ * pass — it does NOT mutate the block stream, so the A3 interp oracle stays
+ * valid on the pre-encode `MFunc`. Offsets that outrun their encodable fields
+ * are caught at emission time (`A4-bigframe`), not here.
+ *
+ * Frame layout (SP-relative, bottom to top):
+ *   [sp + 0 .. sp + out_bytes)            outgoing stack-arg area (MOutArg slots)
+ *   [sp + out_bytes .. sp + out_bytes + slots_size)  local variable slots
+ *   [sp + callee_base]                    callee-saved registers
+ *   [sp + size - 16]                      FP/LR pair
+ *
+ * @param AbiDescriptor abi  the register file (callee-saved partition)
+ * @param MFunc f  the fully-physical function
+ * @return FrameLayout  the resolved frame side-table
+ */
+pub fn compute_frame_layout(abi: AbiDescriptor, f: MFunc) -> FrameLayout {
+    let saved = collect_callee_saved(abi, f)
+    let slots = compute_slot_offsets(f.frame)
+    let out_bytes = out_arg_bytes(f)
+    let effective_slots_size = slots.slots_size + out_bytes
+    let size = frame_total_size(effective_slots_size, saved, needs_lr_save(f))
+    let shifted_offsets = shift_slot_offsets(slots.offsets, out_bytes)
+    FrameLayout {
+        size = size
+        saved_gpr = saved.gpr
+        saved_fpr = saved.fpr
+        slot_offsets = shifted_offsets
+        out_arg_base = 0
+    }
+}
+
+/**
+ * slot_offset — the SP-relative byte offset of frame slot `slot` under
+ * `layout`, the concrete displacement `MFrameAddr{slot}` resolves to (an ADD
+ * from SP). A direct lookup into the alignment-honoring per-slot map.
+ *
+ * @param FrameLayout layout  the resolved frame
+ * @param u64 slot  the frame-slot index (a valid `MFunc.frame` index)
+ * @return u32  the SP-relative byte offset
+ */
+pub fn slot_offset(layout: FrameLayout, slot: u64) -> u32 {
+    layout.slot_offsets[slot]
+}
+
+/**
+ * sub_sp_imm_word — `SUB sp, sp, #imm12` (the 64-bit form, Rn=Rd=SP): the
+ * prologue's stack-claim word.
+ *
+ * @param u32 imm12  the byte amount to subtract (0..4095)
+ * @return u32  the encoded instruction word
+ */
+fn sub_sp_imm_word(imm12: u32) -> u32 {
+    ARM64_SUB_IMM64_BASE | ((imm12 & ARM64_IMM12_MASK) << ARM64_IMM12_SHIFT) | (ARM64_SP_ID << ARM64_RN_SHIFT) | ARM64_SP_ID
+}
+
+/**
+ * add_sp_imm_word — `ADD dst, sp, #imm12` (the 64-bit form, Rn=SP): the
+ * stack-release word (dst=SP), the FP-setup word (dst=x29), and the resolved
+ * `MFrameAddr` word (dst=slot register) all share this shape.
+ *
+ * @param u32 dst_id  the destination register id (31=SP for `add sp,sp`)
+ * @param u32 imm12  the byte amount to add (0..4095)
+ * @return u32  the encoded instruction word
+ */
+fn add_sp_imm_word(dst_id: u32, imm12: u32) -> u32 {
+    ARM64_ADD_IMM64_BASE | ((imm12 & ARM64_IMM12_MASK) << ARM64_IMM12_SHIFT) | (ARM64_SP_ID << ARM64_RN_SHIFT) | dst_id
+}
+
+/**
+ * add_reg_imm_word — `ADD rd, rn, #imm12` (the 64-bit immediate form, no
+ * `sh`): the general two-register building block `big_offset_words` chains
+ * for a big SP-relative offset; `add_sp_imm_word` is its `rn=SP`
+ * specialization.
+ *
+ * @param u32 rn_id  the source register id
+ * @param u32 rd_id  the destination register id
+ * @param u32 imm12  the byte amount to add (0..4095)
+ * @return u32  the encoded instruction word
+ */
+fn add_reg_imm_word(rn_id: u32, rd_id: u32, imm12: u32) -> u32 {
+    ARM64_ADD_IMM64_BASE | ((imm12 & ARM64_IMM12_MASK) << ARM64_IMM12_SHIFT) | (rn_id << ARM64_RN_SHIFT) | rd_id
+}
+
+/**
+ * add_reg_imm_shifted_word — `ADD rd, rn, #imm12, LSL #12` (the `sh`-set
+ * form): the HIGH lane of a chained big-offset ADD sequence, contributing
+ * `imm12 << 12` bytes.
+ *
+ * @param u32 rn_id  the source register id
+ * @param u32 rd_id  the destination register id
+ * @param u32 imm12  the shifted 12-bit lane (contributes `imm12 << 12` bytes)
+ * @return u32  the encoded instruction word
+ */
+fn add_reg_imm_shifted_word(rn_id: u32, rd_id: u32, imm12: u32) -> u32 {
+    ARM64_ADD_IMM64_BASE | ARM64_ADD_SUB_SH_BIT | ((imm12 & ARM64_IMM12_MASK) << ARM64_IMM12_SHIFT) | (rn_id << ARM64_RN_SHIFT) | rd_id
+}
+
+/**
+ * sub_reg_imm_word — `SUB rd, rn, #imm12` (the 64-bit immediate form, no
+ * `sh`): the general two-register building block `big_offset_words` chains
+ * for a big SP-relative subtraction; `sub_sp_imm_word` is its `rn=rd=SP`
+ * specialization.
+ *
+ * @param u32 rn_id  the source register id
+ * @param u32 rd_id  the destination register id
+ * @param u32 imm12  the byte amount to subtract (0..4095)
+ * @return u32  the encoded instruction word
+ */
+fn sub_reg_imm_word(rn_id: u32, rd_id: u32, imm12: u32) -> u32 {
+    ARM64_SUB_IMM64_BASE | ((imm12 & ARM64_IMM12_MASK) << ARM64_IMM12_SHIFT) | (rn_id << ARM64_RN_SHIFT) | rd_id
+}
+
+/**
+ * sub_reg_imm_shifted_word — `SUB rd, rn, #imm12, LSL #12` (the `sh`-set
+ * form): the HIGH lane of a chained big-offset SUB sequence.
+ *
+ * @param u32 rn_id  the source register id
+ * @param u32 rd_id  the destination register id
+ * @param u32 imm12  the shifted 12-bit lane (contributes `imm12 << 12` bytes)
+ * @return u32  the encoded instruction word
+ */
+fn sub_reg_imm_shifted_word(rn_id: u32, rd_id: u32, imm12: u32) -> u32 {
+    ARM64_SUB_IMM64_BASE | ARM64_ADD_SUB_SH_BIT | ((imm12 & ARM64_IMM12_MASK) << ARM64_IMM12_SHIFT) | (rn_id << ARM64_RN_SHIFT) | rd_id
+}
+
+/**
+ * big_offset_words — materialize `rd = rn ± off` for an `off` past the
+ * inline 12-bit ADD/SUB-immediate field, as ONE or TWO chained ADD/SUB-
+ * immediate instructions: `rd = rn ± (hi << 12)` (the `sh`-set high lane,
+ * skipped when `hi` is 0) then `rd = rd ± lo` (chained off `rd`, skipped when
+ * `lo` is 0 and the high lane already ran) — the A4-2 big-frame sequence
+ * `emit_prologue_big`/`emit_epilogue_big`/`encode_frame_addr_words` share.
+ * `rn_id`/`rd_id` may be the same id (an SP adjustment) or different (an
+ * `MFrameAddr` destination, safely used as its own scratch: nothing else
+ * reads it before both writes land). An `off` past what two chained 12-bit
+ * lanes reach (`> ARM64_IMM24_FIELD_MAX`) raises `A4-bigframe` — unreached by
+ * any real frame size or slot offset.
+ *
+ * @param u32 rn_id  the source register id
+ * @param u32 rd_id  the destination register id
+ * @param u32 off  the non-negative byte offset to add/subtract
+ * @param bool is_sub  true for a SUB sequence, false for ADD
+ * @return []u32 | error  the one or two chained instruction words, or `A4-bigframe`
+ */
+fn big_offset_words(rn_id: u32, rd_id: u32, off: u32, is_sub: bool) -> []u32 | error {
+    if off > ARM64_IMM24_FIELD_MAX { return honest_bigframe() }
+    let hi = off >> ARM64_IMM12_SPLIT_SHIFT
+    let lo = off & ARM64_IMM12_MASK
+    mut words: []u32 = teko::list::empty()
+    mut cur_rn = rn_id
+    if hi > (0 to u32) {
+        let w = if is_sub { sub_reg_imm_shifted_word(rn_id, rd_id, hi) } else { add_reg_imm_shifted_word(rn_id, rd_id, hi) }
+        words = teko::list::push(words, w)
+        cur_rn = rd_id
+    }
+    if (lo > (0 to u32)) || (hi == (0 to u32)) {
+        let w = if is_sub { sub_reg_imm_word(cur_rn, rd_id, lo) } else { add_reg_imm_word(cur_rn, rd_id, lo) }
+        words = teko::list::push(words, w)
+    }
+    words
+}
+
+/**
+ * stp_gpr — `STP xa, xb, [sp, #imm7*8]` (the 64-bit GPR store-pair, Rn=SP): one
+ * callee-saved GPR pair (and the FP/LR pair) save word.
+ *
+ * @param u32 ra  the first (lower-address) register id
+ * @param u32 rb  the second (higher-address) register id
+ * @param u32 imm7  the scaled signed offset (byte offset / 8)
+ * @return u32  the encoded instruction word
+ */
+fn stp_gpr(ra: u32, rb: u32, imm7: u32) -> u32 {
+    ARM64_STP_GPR64 | ((imm7 & ARM64_IMM7_MASK) << ARM64_IMM7_SHIFT) | (rb << ARM64_REG2_SHIFT) | (ARM64_SP_ID << ARM64_RN_SHIFT) | ra
+}
+
+/**
+ * ldp_gpr — `LDP xa, xb, [sp, #imm7*8]` (the 64-bit GPR load-pair, Rn=SP): the
+ * epilogue restore counterpart of `stp_gpr`.
+ *
+ * @param u32 ra  the first (lower-address) register id
+ * @param u32 rb  the second (higher-address) register id
+ * @param u32 imm7  the scaled signed offset (byte offset / 8)
+ * @return u32  the encoded instruction word
+ */
+fn ldp_gpr(ra: u32, rb: u32, imm7: u32) -> u32 {
+    ARM64_LDP_GPR64 | ((imm7 & ARM64_IMM7_MASK) << ARM64_IMM7_SHIFT) | (rb << ARM64_REG2_SHIFT) | (ARM64_SP_ID << ARM64_RN_SHIFT) | ra
+}
+
+/**
+ * str_gpr_sp — `STR xa, [sp, #imm12*8]` (the 64-bit GPR unsigned-offset store,
+ * Rn=SP): the odd trailing callee-saved GPR save word.
+ *
+ * @param u32 ra  the register id to store
+ * @param u32 imm12  the scaled unsigned offset (byte offset / 8)
+ * @return u32  the encoded instruction word
+ */
+fn str_gpr_sp(ra: u32, imm12: u32) -> u32 {
+    ARM64_STR_X | ((imm12 & ARM64_IMM12_MASK) << ARM64_IMM12_SHIFT) | (ARM64_SP_ID << ARM64_RN_SHIFT) | ra
+}
+
+/**
+ * ldr_gpr_sp — `LDR xa, [sp, #imm12*8]` (the 64-bit GPR unsigned-offset load,
+ * Rn=SP): the epilogue restore counterpart of `str_gpr_sp`.
+ *
+ * @param u32 ra  the register id to load
+ * @param u32 imm12  the scaled unsigned offset (byte offset / 8)
+ * @return u32  the encoded instruction word
+ */
+fn ldr_gpr_sp(ra: u32, imm12: u32) -> u32 {
+    ARM64_LDR_X | ((imm12 & ARM64_IMM12_MASK) << ARM64_IMM12_SHIFT) | (ARM64_SP_ID << ARM64_RN_SHIFT) | ra
+}
+
+/**
+ * stp_fpr — `STP da, db, [sp, #imm7*8]` (the 64-bit FP store-pair, Rn=SP): one
+ * callee-saved FPR pair save word.
+ *
+ * @param u32 ra  the first (lower-address) register id
+ * @param u32 rb  the second (higher-address) register id
+ * @param u32 imm7  the scaled signed offset (byte offset / 8)
+ * @return u32  the encoded instruction word
+ */
+fn stp_fpr(ra: u32, rb: u32, imm7: u32) -> u32 {
+    ARM64_STP_FPR64 | ((imm7 & ARM64_IMM7_MASK) << ARM64_IMM7_SHIFT) | (rb << ARM64_REG2_SHIFT) | (ARM64_SP_ID << ARM64_RN_SHIFT) | ra
+}
+
+/**
+ * ldp_fpr — `LDP da, db, [sp, #imm7*8]` (the 64-bit FP load-pair, Rn=SP): the
+ * epilogue restore counterpart of `stp_fpr`.
+ *
+ * @param u32 ra  the first (lower-address) register id
+ * @param u32 rb  the second (higher-address) register id
+ * @param u32 imm7  the scaled signed offset (byte offset / 8)
+ * @return u32  the encoded instruction word
+ */
+fn ldp_fpr(ra: u32, rb: u32, imm7: u32) -> u32 {
+    ARM64_LDP_FPR64 | ((imm7 & ARM64_IMM7_MASK) << ARM64_IMM7_SHIFT) | (rb << ARM64_REG2_SHIFT) | (ARM64_SP_ID << ARM64_RN_SHIFT) | ra
+}
+
+/**
+ * str_fpr_sp — `STR da, [sp, #imm12*8]` (the 64-bit FP unsigned-offset store,
+ * Rn=SP): the odd trailing callee-saved FPR save word.
+ *
+ * @param u32 ra  the register id to store
+ * @param u32 imm12  the scaled unsigned offset (byte offset / 8)
+ * @return u32  the encoded instruction word
+ */
+fn str_fpr_sp(ra: u32, imm12: u32) -> u32 {
+    ARM64_STR_FPR64 | ((imm12 & ARM64_IMM12_MASK) << ARM64_IMM12_SHIFT) | (ARM64_SP_ID << ARM64_RN_SHIFT) | ra
+}
+
+/**
+ * ldr_fpr_sp — `LDR da, [sp, #imm12*8]` (the 64-bit FP unsigned-offset load,
+ * Rn=SP): the epilogue restore counterpart of `str_fpr_sp`.
+ *
+ * @param u32 ra  the register id to load
+ * @param u32 imm12  the scaled unsigned offset (byte offset / 8)
+ * @return u32  the encoded instruction word
+ */
+fn ldr_fpr_sp(ra: u32, imm12: u32) -> u32 {
+    ARM64_LDR_FPR64 | ((imm12 & ARM64_IMM12_MASK) << ARM64_IMM12_SHIFT) | (ARM64_SP_ID << ARM64_RN_SHIFT) | ra
+}
+
+/**
+ * pair_frame_word — the STP (store) or LDP (load) word for a register pair,
+ * selecting the GPR or FPR family. Dispatched by the `is_store`/`is_fpr`
+ * booleans (never a `match` on a bool, per the style law).
+ *
+ * @param u32 ra  the first (lower-address) register id
+ * @param u32 rb  the second (higher-address) register id
+ * @param u32 imm7  the scaled signed offset (byte offset / 8)
+ * @param bool is_fpr  true for the FP register family
+ * @param bool is_store  true for a save (STP), false for a restore (LDP)
+ * @return u32  the encoded instruction word
+ */
+fn pair_frame_word(ra: u32, rb: u32, imm7: u32, is_fpr: bool, is_store: bool) -> u32 {
+    if is_store {
+        if is_fpr { return stp_fpr(ra, rb, imm7) }
+        return stp_gpr(ra, rb, imm7)
+    }
+    if is_fpr { return ldp_fpr(ra, rb, imm7) }
+    ldp_gpr(ra, rb, imm7)
+}
+
+/**
+ * single_frame_word — the STR (store) or LDR (load) word for one register,
+ * selecting the GPR or FPR family — the odd trailing register of a class.
+ *
+ * @param u32 ra  the register id
+ * @param u32 imm12  the scaled unsigned offset (byte offset / 8)
+ * @param bool is_fpr  true for the FP register family
+ * @param bool is_store  true for a save (STR), false for a restore (LDR)
+ * @return u32  the encoded instruction word
+ */
+fn single_frame_word(ra: u32, imm12: u32, is_fpr: bool, is_store: bool) -> u32 {
+    if is_store {
+        if is_fpr { return str_fpr_sp(ra, imm12) }
+        return str_gpr_sp(ra, imm12)
+    }
+    if is_fpr { return ldr_fpr_sp(ra, imm12) }
+    ldr_gpr_sp(ra, imm12)
+}
+
+/**
+ * emit_frame_mem — append the save (or restore) words for one register class's
+ * callee-saved list, packed as consecutive STP/LDP pairs with a trailing
+ * STR/LDR for an odd count, starting at SP offset `base`. Every offset is a
+ * multiple of 8 by construction, so the scaled fields are exact.
+ *
+ * @param []u32 words0  the word buffer to extend
+ * @param []u32 ids  the class's ascending callee-saved ids
+ * @param u32 base  the SP byte offset of the first id
+ * @param bool is_fpr  true for the FP register family
+ * @param bool is_store  true for saves (prologue), false for restores (epilogue)
+ * @return []u32  `words0` followed by the class's save/restore words
+ */
