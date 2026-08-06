@@ -1266,6 +1266,13 @@ void *tk_slice_with_cap_r(uint64_t esz, uint64_t cap, tk_region *region);
 // tk_slice_with_cap — the default root-region lowering (unchanged contract), mirroring
 // tk_slice_push over tk_slice_push_r.
 void *tk_slice_with_cap(uint64_t esz, uint64_t cap);
+// tk_slice_grow_inplace — the Model A (#F3) in-place append primitive: append `elem` to the slice
+// whose {ptr,len,cap} header lives at `*hdr`, mutating the header DIRECTLY. len<cap writes ptr[len]
+// and bumps len (O(1)); len==cap reallocs to cap*2 (tk_panic on u64 overflow) then writes. NO global
+// push cache, NO defensive copy, NO slot collision — cap lives in the header. Sound ONLY under an
+// exclusive `ref` borrow (F1 is_unique_at proves no live copy). `esz` is sizeof(T); `region` is the
+// current allocation region (root/frame/phase). Distinct from tk_slice_push (the value form, kept).
+void tk_slice_grow_inplace(void *hdr, const void *elem, uint64_t esz, tk_region *region);
 // (#148 R2) bulk byte-append with free-old-on-grow BY DECREE (the linear cb emitter chain) — one
 // memcpy per fragment; the old buffer parks for reuse the moment a grow replaces it.
 void *tk_append_bytes_fo(const void *ptr, uint64_t len, const void *src, uint64_t n, uint64_t *out_len);

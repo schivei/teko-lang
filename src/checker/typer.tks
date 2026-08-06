@@ -892,6 +892,29 @@ fn type_list_builtin(c: parser::Call, env: Env, table: TypeTable) -> TExpr | Not
         }
         let wargs = teko::list::push(teko::list::empty(), n_typed)
         TExpr { kind = TCall { callee = c.callee; args = wargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = Slice { element = Void { } }; line = 0; col = 0 }
+    } else if last == "grow_inplace" {
+        if c.args.len != 2 { return error { message = "teko::list::grow_inplace expects two arguments (a `ref []T`, item)" } }
+        let r = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
+        let x = match type_expr(c.args[1], env, table) { TExpr as te => te; error as e => return e }
+        let elem = match r.type {
+            Reference as rf => match rf.inner { Slice as sl => sl.element; _ => return error { message = "teko::list::grow_inplace first argument must reference a slice (`ref []T`)" } }
+            _ => return error { message = "teko::list::grow_inplace first argument must be an exclusive `ref []T`" }
+        }
+        match elem {
+            Byte => return error { message = "teko::list::grow_inplace on `[]byte` is not yet supported: `tk_slice_byte` is the 2-word runtime VIEW rep (no `cap` slot); the uniform 3-word rep for the view types is the #112 native-rep remainder" }
+            Char => return error { message = "teko::list::grow_inplace on `[]char` is not yet supported: `tk_slice_char` is the 2-word runtime VIEW rep (no `cap` slot); the uniform 3-word rep for the view types is the #112 native-rep remainder" }
+            _ => { }
+        }
+        if type_is_void(x.type) { return error { message = "teko::list::grow_inplace item cannot be a `void` expression (M.1)" } }
+        let item = match elem {
+            Void => x
+            _ => {
+                if !widens_into(x.type, elem, table) && !literal_adopts(x, elem) { return error { message = "teko::list::grow_inplace item type does not match the slice element type" } }
+                TExpr { kind = x.kind; type = elem; line = x.line; col = x.col }
+            }
+        }
+        mut gargs = teko::list::push(teko::list::push(teko::list::empty(), r), item)
+        TExpr { kind = TCall { callee = c.callee; args = gargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = Void { }; line = 0; col = 0 }
     } else {
         NotListBuiltin { }
     }
