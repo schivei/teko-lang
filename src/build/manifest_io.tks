@@ -1,0 +1,168 @@
+// src/build/manifest_io.tks   (namespace 'teko::build')
+//
+// Low-level I/O and parsing helper functions for manifest reading.
+
+// the byte at p, or 0 past the end (a safe peek, like the lexer's `at`).
+fn mf_at(s: str, p: u64) -> byte {
+    if p >= s.len { return 0 }
+    s[p]
+}
+
+fn mf_is_space(c: byte) -> bool { c == b' ' || c == b'\t' || c == b'\r' }
+
+// advance past spaces/tabs/CR (NOT newlines — a line is the unit of work).
+fn mf_skip_spaces(s: str, p: u64) -> u64 {
+    mut q = p
+    loop {
+        if q >= s.len { break }
+        if !mf_is_space(s[q]) { break }
+        q = q + 1
+    }
+    q
+}
+
+// a key byte: letters, digits, `_`, `-`, `.` (TOML bare-key set + `.` for dotted deps).
+fn mf_is_key_byte(c: byte) -> bool {
+    (c >= b'a' && c <= b'z') || (c >= b'A' && c <= b'Z') || (c >= b'0' && c <= b'9') ||
+    c == b'_' || c == b'-' || c == b'.'
+}
+
+// the position just past the bare key at p (== p if none).
+fn mf_key_end(s: str, p: u64) -> u64 {
+    mut q = p
+    loop {
+        if q >= s.len { break }
+        if !mf_is_key_byte(s[q]) { break }
+        q = q + 1
+    }
+    q
+}
+
+fn mf_read_quoted(s: str, p: u64) -> MfQuoted | error {
+    if mf_at(s, p) != b'"' { return error { message = "expected a quoted string value" } }
+    let start = p + 1
+    mut q = start
+    loop {
+        if q >= s.len { break }
+        if s[q] == b'"' { break }
+        q = q + 1
+    }
+    if q >= s.len { return error { message = "unterminated string value" } }
+    MfQuoted { text = teko::str::slice(s, start, q); next = q + 1 }
+}
+
+// an UNQUOTED non-negative integer value (TOML `key = 80`): the digit run at p (0 if none).
+fn mf_read_int(s: str, p: u64) -> u64 {
+    mut q = p
+    mut n: u64 = 0
+    loop {
+        if q >= s.len { break }
+        let c = s[q]
+        if c < b'0' || c > b'9' { break }
+        n = n * 10 + (c to u64) - (b'0' to u64)
+        q = q + 1
+    }
+    n
+}
+
+fn mf_read_array(s: str, p: u64) -> MfArray | error {
+    if mf_at(s, p) != b'[' { return error { message = "expected '[' for an array value" } }
+    mut q = mf_skip_spaces(s, p + 1)
+    mut items: []str = teko::list::empty()
+    if mf_at(s, q) == b']' { return MfArray { items = items; next = q + 1 } }   // empty []
+    loop {
+        let elem = match mf_read_quoted(s, q) { MfQuoted as x => x; error as e => return e }
+        items = teko::list::push(items, elem.text)
+        q = mf_skip_spaces(s, elem.next)
+        let c = mf_at(s, q)
+        if c == b']' { return MfArray { items = items; next = q + 1 } }
+        if c != b',' { return error { message = "expected ',' or ']' in an array value" } }
+        q = mf_skip_spaces(s, q + 1)
+    }
+    error { message = "unterminated array value" }   // unreachable (the loop returns on ']' / errors)
+}
+
+// strip a leading `lib` from a library name for the `-l` flag (`libc` -> `c`; `z` stays `z`). (C7.1e)
+fn mf_strip_lib(name: str) -> str {
+    if name.len > 3 && name[0] == b'l' && name[1] == b'i' && name[2] == b'b' { teko::str::slice_from(name, 3) } else { name }
+}
+
+fn mf_starts_with(s: str, p: str) -> bool {
+    if s.len < p.len { return false }
+    teko::str::slice_to(s, p.len) == p
+}
+
+// does `s` name a direct library FILE (a path or a known extension), vs a `-l` lib name?
+fn mf_has_path(s: str) -> bool {
+    if teko::str::contains(s, "/") { return true }
+    teko::str::ends_with(s, ".a") || teko::str::ends_with(s, ".so") || teko::str::ends_with(s, ".dylib") ||
+    teko::str::ends_with(s, ".dll") || teko::str::ends_with(s, ".o") || teko::str::ends_with(s, ".lib")
+}
+
+/**
+ * mf_mode_from_ext — the linkage mode a DIRECT FILE's extension decides, per LEGISLATION:423 ("a
+ * path … → linked as a direct file (the extension decides static vs shared)"): `.a`/`.lib`/`.o` →
+ * static, `.so`/`.dylib`/`.dll` → shared, anything else → `""` (unstated). Consulted only when the
+ * element carried no explicit `static:`/`shared:` prefix, which always wins.
+ *
+ * @param s  the path form of the element (mode prefix already stripped)
+ * @return   `LINK_MODE_STATIC`, `LINK_MODE_SHARED`, or `""` when the extension decides neither
+ * @since 0.3.1
+ */
+fn mf_mode_from_ext(s: str) -> str {
+    if teko::str::ends_with(s, ".a") || teko::str::ends_with(s, ".lib") || teko::str::ends_with(s, ".o") { return LINK_MODE_STATIC }
+    if teko::str::ends_with(s, ".so") || teko::str::ends_with(s, ".dylib") || teko::str::ends_with(s, ".dll") { return LINK_MODE_SHARED }
+    ""
+}
+
+/**
+ * mf_extern_spec — resolve ONE `[extern.libs]` array element (or, for an empty array, the lib key
+ * itself) to its cc link flag PLUS its declared linkage mode (C7.1e + the §4.3 mode column):
+ * a `-flag` element passes through verbatim with no mode (the M.5 escape); otherwise an explicit
+ * `static:`/`shared:` prefix is stripped and REMEMBERED, and what remains is either a direct file
+ * (a `/` or a known library extension — linked verbatim, the extension supplying the mode when the
+ * prefix did not) or a bare name (`-l<name>`, a leading `lib` stripped). Stripping the prefix
+ * BEFORE the path test is what makes the ratified `static:vendor/x86_64-linux/libfoo.a` spelling
+ * (§4.2) resolve to the file `vendor/x86_64-linux/libfoo.a` instead of leaking the literal
+ * `static:` prefix onto the link line.
+ *
+ * @param s  the raw array element (or the lib key, for an empty array)
+ * @return   the resolved flag + declared mode
+ * @since 0.3.1
+ */
+fn mf_extern_spec(s: str) -> ExternLibSpec {
+    if s.len > 0 && s[0] == b'-' { return ExternLibSpec { flag = s; mode = "" } }
+    mut mode = ""
+    mut rest = s
+    if mf_starts_with(rest, "static:") { mode = LINK_MODE_STATIC; rest = teko::str::slice_from(rest, MODE_PREFIX_LEN) }
+    else if mf_starts_with(rest, "shared:") { mode = LINK_MODE_SHARED; rest = teko::str::slice_from(rest, MODE_PREFIX_LEN) }
+    if mf_has_path(rest) {
+        let by_ext = if mode.len > 0 { mode } else { mf_mode_from_ext(rest) }
+        return ExternLibSpec { flag = rest; mode = by_ext }
+    }
+    ExternLibSpec { flag = teko::str::concat("-l", mf_strip_lib(rest)); mode = mode }
+}
+
+/**
+ * mf_read_str_list — read a `[tests]`-style list value that accepts BOTH the array form
+ * `["a", "b"]` AND a bare quoted string `"a"` (normalized to a 1-element list), for the ergonomic
+ * `regression = "dir"` ≡ `regression = ["dir"]` shorthand. Any other value form is an honest
+ * error (M.3 — no coercion).
+ *
+ * @param s  the manifest line being parsed
+ * @param p  the cursor at the value (past `=` and leading spaces)
+ * @return   the parsed element list, or an `error` on a malformed value
+ * @since 0.3.0.29
+ */
+fn mf_read_str_list(s: str, p: u64) -> []str | error {
+    let c = mf_at(s, p)
+    if c == b'[' {
+        let arr = match mf_read_array(s, p) { MfArray as a => a; error as e => return e }
+        return arr.items
+    }
+    if c == b'"' {
+        let q = match mf_read_quoted(s, p) { MfQuoted as x => x; error as e => return e }
+        return teko::list::push(teko::list::empty(), q.text)
+    }
+    error { message = "expected a quoted string or an array value" }
+}
