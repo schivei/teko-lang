@@ -14283,13 +14283,29 @@ type SelfAppendBracket = struct { ctx: LowerCtx; opened: bool }
  *   `cg_self_append_escapes`, `codegen.tks:8020`, threads `dctx.rr` for exactly this case, reserving
  *   its own `scope_region_of` selector for the non-escaping route only). This native twin now
  *   mirrors that split.
- * - UNREGISTERED AND NOT escaping: bracket to the FRAME (`ctx.region_stack[0]`) — leak-safe (the
- *   frame outlives every use inside this function), never UAF; a non-escaping accumulator whose
- *   `decl_name` registration was overwritten by a LATER binding in the same scope (only the
- *   last-bound name per scope is tracked, `register_scope_decl_name`) still just leaks wider than
- *   optimal (a peak-memory cost, not a crash) — a known, accepted follow-up, NOT this crumb's fix.
- * - Empty `ctx.region_stack`: no bracket (unreachable in practice — a self-append only lowers
- *   inside a function body, which always has an open frame region by the time it lowers).
+ * - UNREGISTERED AND NOT escaping, base region is a DURABLE FRAME (`ctx.region_stack[0].is_loop`
+ *   false): bracket to that frame (`ctx.region_stack[0]`) — leak-safe (the frame outlives every use
+ *   inside this function), never UAF; a non-escaping accumulator whose `decl_name` registration was
+ *   overwritten by a LATER binding in the same scope (only the last-bound name per scope is tracked,
+ *   `register_scope_decl_name`) still just leaks wider than optimal (a peak-memory cost, not a
+ *   crash) — a known, accepted follow-up, NOT this crumb's fix.
+ * - UNREGISTERED AND NOT escaping, base region is a LOOP body (`ctx.region_stack[0].is_loop` true):
+ *   bracket to the ROOT (`bracket_to_root`). This is the N112 fix. A VIRTUAL-MAIN opens NO frame
+ *   region (`lower_virtual_main`, `emit_region_leaves`' own note), so a top-level accumulator grown
+ *   in a `loop { one = push(one, make_func()) }` has `ctx.region_stack[0]` be that loop's OWN
+ *   per-iteration body region — which `close_loop_body` reclaims (and `tk_region_new_u` re-hands at
+ *   the same freed address) EVERY iteration. Bracketing the grow + the by-address element box
+ *   (`tk_slice_elem_box`) there landed both in a region freed under the still-live `one`, so a later
+ *   read of `one[k]` dereferenced a dangling/aliased by-address element -> SIGSEGV (the self-hosted
+ *   `assemble_sel` gen2==gen3 crash class, the plain-loop instance the probe
+ *   `examples/probes/n112_assemble_sel_crash` pins). The accumulator was declared at ROOT scope (its
+ *   registration never took — `register_scope_decl_name` is a no-op on an empty stack), so ROOT is
+ *   its true home: it outlives the whole virtual-main, never freed early. A REAL function is
+ *   untouched — `open_frame_region` always pushes a non-loop frame at index 0, so this arm is
+ *   virtual-main-only.
+ * - Empty `ctx.region_stack`: no bracket — the runtime's current region is already the root
+ *   (`tk_region_current` defaults there on an empty stack), which is exactly where a top-level
+ *   accumulator's growth belongs.
  *
  * @param ctx   the lowering context
  * @param name  the self-append target's name
@@ -14300,20 +14316,73 @@ type SelfAppendBracket = struct { ctx: LowerCtx; opened: bool }
  */
 fn enter_self_append_region(ctx: LowerCtx, name: str, line: u32, col: u32) -> SelfAppendBracket {
     match native_scope_region_of(ctx.region_stack, name) {
-        u32 as target => SelfAppendBracket { ctx = ctx_append(ctx, void_call_inst("tk_region_enter_u", one_region_arg(target), false, line, col)); opened = true }
-        null => {
-            if binding_conveys_escape(ctx.escaping, name) {
-                SelfAppendBracket { ctx = ctx; opened = false }
-            } else {
-                if ctx.region_stack.len > 0 {
-                    let fr_vreg = ctx.region_stack[0].region_vreg
-                    SelfAppendBracket { ctx = ctx_append(ctx, void_call_inst("tk_region_enter_u", one_region_arg(fr_vreg), false, line, col)); opened = true }
-                } else {
-                    SelfAppendBracket { ctx = ctx; opened = false }
-                }
-            }
-        }
+        u32 as target => bracket_to_region(ctx, target, line, col)
+        null => enter_self_append_fallback(ctx, name, line, col)
     }
+}
+
+/**
+ * bracket_to_region — open a self-append region bracket to an EXPLICIT region VReg: emit
+ * `tk_region_enter_u(<region_vreg>)` and report the bracket opened, so `leave_self_append_region`
+ * emits its matching `tk_region_leave`. The one shape `enter_self_append_region`'s registered arm and
+ * its durable-frame fallback both reduce to (extracted so both, and `bracket_to_root`, share exactly
+ * one emission — no arm can drift from another about how a self-append enters its target region).
+ *
+ * @param ctx          the lowering context
+ * @param region_vreg  the region the grow + element box must bump-allocate from
+ * @param line         the source line to stamp the emitted call with
+ * @param col          the source column to stamp
+ * @return             the context with `tk_region_enter_u` appended + `opened = true`
+ * @since 0.3.1
+ */
+fn bracket_to_region(ctx: LowerCtx, region_vreg: u32, line: u32, col: u32) -> SelfAppendBracket {
+    SelfAppendBracket { ctx = ctx_append(ctx, void_call_inst("tk_region_enter_u", one_region_arg(region_vreg), false, line, col)); opened = true }
+}
+
+/**
+ * bracket_to_root — open a self-append region bracket to the ROOT region: emit a fresh
+ * `tk_region_root_u()` (its VReg) and `tk_region_enter_u(<root>)`, so the grow + by-address element
+ * box land in the root — the home a VIRTUAL-MAIN's top-level accumulator needs when its base region
+ * is a per-iteration loop body rather than a durable frame (`enter_self_append_fallback`'s N112 arm).
+ * The twin of `region_current_vreg`'s empty-stack case, which likewise mints the root on demand.
+ *
+ * @param ctx   the lowering context
+ * @param line  the source line to stamp the emitted calls with
+ * @param col   the source column to stamp
+ * @return      the context with the root minted + entered + `opened = true`
+ * @since 0.3.1
+ */
+fn bracket_to_root(ctx: LowerCtx, line: u32, col: u32) -> SelfAppendBracket {
+    let rr = ctx_alloc(ctx)
+    let with_rr = ctx_append(rr.ctx, call_inst(rr.vreg, "tk_region_root_u", teko::list::empty(), false, line, col))
+    bracket_to_region(with_rr, rr.vreg, line, col)
+}
+
+/**
+ * enter_self_append_fallback — the UNREGISTERED arm of `enter_self_append_region` (its
+ * `native_scope_region_of` returned `null`, so `name` was never registered as a declaring scope's
+ * accumulator). Three sub-cases, guard-clause flattened; see `enter_self_append_region`'s doc for the
+ * full rationale:
+ *
+ * - `name` ESCAPES this function: NO bracket. Its assignment already runs inside
+ *   `lower_assign_conveyed`'s outer bracket, which detoured the current region to the conveyance
+ *   anchor `rr`; a bracket here would override that and re-introduce the escaping-self-append UAF.
+ * - base region is a durable FRAME (`region_stack[0].is_loop` false): bracket to it (leak-safe).
+ * - base region is a per-iteration LOOP body (virtual-main, `region_stack[0].is_loop` true): bracket
+ *   to ROOT — the N112 region-lifetime fix (the loop body region is reclaimed each iteration).
+ *
+ * @param ctx   the lowering context
+ * @param name  the self-append target's name
+ * @param line  the source line to stamp the emitted call with
+ * @param col   the source column to stamp
+ * @return      the (possibly bracketed) context + whether a bracket was opened
+ * @since 0.3.1
+ */
+fn enter_self_append_fallback(ctx: LowerCtx, name: str, line: u32, col: u32) -> SelfAppendBracket {
+    if binding_conveys_escape(ctx.escaping, name) { return SelfAppendBracket { ctx = ctx; opened = false } }
+    if ctx.region_stack.len == 0 { return SelfAppendBracket { ctx = ctx; opened = false } }
+    if ctx.region_stack[0].is_loop { return bracket_to_root(ctx, line, col) }
+    bracket_to_region(ctx, ctx.region_stack[0].region_vreg, line, col)
 }
 
 /**

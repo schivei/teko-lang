@@ -1808,6 +1808,21 @@ Feature: promoted native known-stops and the one_byte oracle — folded from the
     When built and run
     Then stdout pattern = "scenario generic_fn_constructs_generic: ok"
 
+  # (n112_region_lifetime_selfappend_in_virtual_main) THE N112 region-lifetime regression. A
+  # by-address aggregate (`n112::Item`) whose variant `content` holds a FAT-element `[]str` payload is
+  # self-appended into a `[]Item` inside a TOP-LEVEL `main.tks` loop, then read back (`n112::readback`).
+  # A virtual-main opens no frame region, so the accumulator's base region is the loop's OWN
+  # per-iteration body; `enter_self_append_region`'s fallback used to bracket the grow + element box
+  # (`tk_slice_elem_box`) to `region_stack[0]` — that per-iteration region — which `close_loop_body`
+  # reclaims each turn, dangling every by-address element and faulting the read-back (the self-hosted
+  # `assemble_sel` gen2==gen3 crash; probe `examples/probes/n112_assemble_sel_crash`). The fallback now
+  # routes a virtual-main top-level accumulator's growth to the ROOT (`enter_self_append_fallback`), so
+  # the fold reaches its 108 (72 trailing-str + 24 Func-case + 12 TypeDecl-case). A REAL function is
+  # unaffected: its `region_stack[0]` is a durable frame, not a loop body.
+  Scenario: n112_region_lifetime_selfappend_in_virtual_main (own-native — a fat-element-payload aggregate self-appended in a virtual-main loop survives the region drop)
+    When built and run
+    Then stdout pattern = "scenario n112_region_lifetime_selfappend_in_virtual_main: ok"
+
   # (one_byte_native) `teko::one_byte(byte) -> str` existed in the checker and the runtime mirror but
   # was NOT lowered natively: `call_symbol` found no symbol and returned `unresolved_builtin_stop`.
   # The exit sums SIX disjoint weights (3, 12, 16, 32, 64, 128 = 255), one per call shape: the minimal
