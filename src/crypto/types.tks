@@ -1,0 +1,50 @@
+/**
+ * `teko::crypto::hash` (C1) — the SHA-2 hash family: SHA-256 and SHA-512, each with a
+ * streaming `init`/`update`/`finalize` API AND a one-shot convenience wrapper. Per issue
+ * #194 (C0+C1+C6): pure Teko, no OS dependency, testable via `.tkt` unit tests against the
+ * FIPS 180-4 / NIST known-answer vectors.
+ *
+ * DEFERRED (reported, not silently dropped — M.3 honesty): SHA-3/Keccak, SHAKE128/256,
+ * BLAKE2b/2s, and the `legacy` SHA-1/MD5 primitives that TEKO_ROADMAP_NET_CRYPTO.md §3
+ * groups under the same C1 unit are NOT in this increment. This file ships SHA-256 + SHA-512
+ * (the SHA-2 family) as a first gate-able slice; the remainder stays open under #194.
+ *
+ * TOTAL, NO PANICS. Every function here operates on caller-supplied `[]byte` and always
+ * succeeds — there is no host/entropy dependency and no malformed-input domain (any byte
+ * sequence, including empty, is a valid message). `wrapping_add_u32`/`wrapping_add_u64`
+ * (`teko::math::checked`, M1) carry every modular addition so the compression rounds stay
+ * well-defined under `TEKO_OVERFLOW_DEBUG` (roadmap open decision #4) — plain `+` would trip
+ * the debug overflow guard on the very wraparound the algorithm requires.
+ *
+ * NO INDEX-ASSIGNMENT. The 8-word running state and the 64/80-word message schedule are
+ * both rebuilt via `teko::list::push` each round rather than mutated in place, the same
+ * discipline `teko::compress`'s CRC-32 table and `teko::crypto::ct_eq` already use.
+ */
+
+/**
+ * The 32-bit running state of an in-progress SHA-256 computation, plus the unprocessed
+ * tail bytes (fewer than 64) and the total message length seen so far (needed by the
+ * length-suffix padding at `finalize` time).
+ */
+pub type Sha256State = struct {
+    /** the eight 32-bit working words `h0..h7`, in order */
+    h: []u32
+    /** buffered input bytes not yet forming a complete 64-byte block */
+    pending: []byte
+    /** total message length processed so far, in bytes */
+    total_len: u64
+}
+
+/**
+ * The 64-bit running state of an in-progress SHA-512 computation, plus the unprocessed
+ * tail bytes (fewer than 128) and the total message length seen so far.
+ */
+pub type Sha512State = struct {
+    /** the eight 64-bit working words `h0..h7`, in order */
+    h: []u64
+    /** buffered input bytes not yet forming a complete 128-byte block */
+    pending: []byte
+    /** total message length processed so far, in bytes */
+    total_len: u64
+}
+

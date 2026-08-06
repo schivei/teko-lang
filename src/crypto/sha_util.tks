@@ -1,0 +1,155 @@
+/**
+ * Right-rotate a 32-bit word by `count` bits (0..31) — the `ROTR` primitive FIPS 180-4
+ * defines for every SHA-256 round function.
+ *
+ * @param x      the word to rotate
+ * @param count  the rotation amount in bits, 0..31
+ * @return       `x` rotated right by `count` bits
+ */
+fn rotr32(x: u32, count: u32) -> u32 {
+    (x >> count) | (x << (32 - count))
+}
+
+/**
+ * Right-rotate a 64-bit word by `count` bits (0..63) — the `ROTR` primitive FIPS 180-4
+ * defines for every SHA-512 round function.
+ *
+ * @param x      the word to rotate
+ * @param count  the rotation amount in bits, 0..63
+ * @return       `x` rotated right by `count` bits
+ */
+fn rotr64(x: u64, count: u32) -> u64 {
+    (x >> (count to u64)) | (x << ((64 - count) to u64))
+}
+
+/**
+ * Reads a big-endian 32-bit word out of `block` starting at byte offset `off` (4 bytes,
+ * most-significant byte first) — the wire order FIPS 180-4 mandates for every message block.
+ *
+ * @param block  the 64-byte block being read
+ * @param off    the starting byte offset (0, 4, 8, … 60)
+ * @return       the big-endian `u32` at `block[off..off+4)`
+ */
+fn be_u32_at(block: []byte, off: u64) -> u32 {
+    let b0 = block[off] to u32
+    let b1 = block[off + 1] to u32
+    let b2 = block[off + 2] to u32
+    let b3 = block[off + 3] to u32
+    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+}
+
+/**
+ * Reads a big-endian 64-bit word out of `block` starting at byte offset `off` (8 bytes,
+ * most-significant byte first) — the wire order FIPS 180-4 mandates for every SHA-512
+ * message block.
+ *
+ * @param block  the 128-byte block being read
+ * @param off    the starting byte offset (0, 8, 16, … 120)
+ * @return       the big-endian `u64` at `block[off..off+8)`
+ */
+fn be_u64_at(block: []byte, off: u64) -> u64 {
+    let hi = be_u32_at(block, off) to u64
+    let lo = be_u32_at(block, off + 4) to u64
+    (hi << 32) | lo
+}
+
+/**
+ * Appends the big-endian bytes of a 32-bit word to `buf` (most-significant byte first) —
+ * the inverse of `be_u32_at`, used to render the final digest.
+ *
+ * @param buf  the output buffer to extend
+ * @param x    the word to append
+ * @return     `buf` with `x`'s four big-endian bytes appended
+ */
+fn push_be_u32(buf: []byte, x: u32) -> []byte {
+    mut b = buf
+    b = teko::list::push(b, ((x >> 24) & 0xFF) to byte)
+    b = teko::list::push(b, ((x >> 16) & 0xFF) to byte)
+    b = teko::list::push(b, ((x >> 8) & 0xFF) to byte)
+    b = teko::list::push(b, (x & 0xFF) to byte)
+    b
+}
+
+/**
+ * Appends the big-endian bytes of a 64-bit word to `buf` (most-significant byte first) —
+ * the inverse of `be_u64_at`, used to render the SHA-512 digest and the 128-bit length
+ * suffix both SHA-2 variants append during padding.
+ *
+ * @param buf  the output buffer to extend
+ * @param x    the word to append
+ * @return     `buf` with `x`'s eight big-endian bytes appended
+ */
+fn push_be_u64(buf: []byte, x: u64) -> []byte {
+    mut b = buf
+    b = push_be_u32(b, ((x >> 32) & 0xFFFFFFFF) to u32)
+    b = push_be_u32(b, (x & 0xFFFFFFFF) to u32)
+    b
+}
+
+/**
+ * Concatenates `a` then `b` into a fresh `[]byte` — the buffered-tail + new-input join
+ * every streaming `update` performs before slicing off whole blocks.
+ *
+ * @param a  the first slice
+ * @param b  the second slice
+ * @return   a fresh slice holding `a`'s bytes followed by `b`'s bytes
+ */
+fn bytes_concat(a: []byte, b: []byte) -> []byte {
+    mut out = a
+    mut i: u64 = 0
+    loop {
+        if i >= b.len { break }
+        out = teko::list::push(out, b[i])
+        i++
+    }
+    out
+}
+
+/**
+ * The sub-slice `data[from..to)` as a fresh `[]byte` — used to split a buffered stream
+ * into whole blocks plus a shorter remainder.
+ *
+ * @param data  the source slice
+ * @param from  the inclusive start index
+ * @param to    the exclusive end index
+ * @return      a fresh slice holding `data[from..to)`
+ */
+fn bytes_slice(data: []byte, from: u64, to: u64) -> []byte {
+    mut out: []byte = teko::list::empty()
+    mut i = from
+    loop {
+        if i >= to { break }
+        out = teko::list::push(out, data[i])
+        i++
+    }
+    out
+}
+
+/**
+ * Builds the FIPS 180-4 padding: a single `0x80` byte, zero bytes up to the length that
+ * leaves exactly 8 (SHA-256) or 16 (SHA-512) bytes free in a `block_size`-byte block, then
+ * the message length in BITS as a big-endian suffix of that width. Shared by both SHA-2
+ * variants; `is_512` selects the 128-byte block / 128-bit length-suffix shape (the top 64
+ * bits of that suffix are always zero — a `u64` byte count times 8 bits never overflows 64
+ * bits) versus SHA-256's 64-byte block / 64-bit length suffix.
+ *
+ * @param pending    the buffered tail bytes (fewer than one block)
+ * @param total_len  the total message length seen so far, in bytes
+ * @param is_512     true for SHA-512's 128-byte block / 128-bit length suffix, false for
+ *                   SHA-256's 64-byte block / 64-bit length suffix
+ * @return           `pending` followed by the `0x80` marker, zero padding, and the length suffix
+ */
+fn sha2_pad(pending: []byte, total_len: u64, is_512: bool) -> []byte {
+    mut out = pending
+    out = teko::list::push(out, 0x80 to byte)
+    let block_size = if is_512 { 128 to u64 } else { 64 to u64 }
+    let length_field = if is_512 { 16 to u64 } else { 8 to u64 }
+    loop {
+        if (out.len + length_field) % block_size == 0 { break }
+        out = teko::list::push(out, 0 to byte)
+    }
+    let bit_len = total_len * 8
+    if is_512 { return push_be_u64(push_be_u64(out, 0), bit_len) }
+    push_be_u64(out, bit_len)
+}
+
