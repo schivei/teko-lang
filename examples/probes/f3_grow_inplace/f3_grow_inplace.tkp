@@ -1,0 +1,29 @@
+# The F3 (Model A `{ptr,len,cap}`) in-place-append probe (AL-Wave FUNDAÇÃO keystone).
+#
+# WHAT IT PROVES, end to end on the C route: the three-word slice rep (F3.1), the seeded backing
+# capacity (F3.2 — array literals and `teko::list::with_cap`), and the in-place append primitive
+# `teko::list::grow_inplace` (F3.3, `tk_slice_grow_inplace`) that mutates the `{ptr,len,cap}` header
+# DIRECTLY — NO global `tk_push_cache`, NO defensive copy. The 100 000-element arm exercises the
+# cap-doubling realloc path at scale: a wrong header write (an off-by-one `cap`, a lost `ptr` after a
+# realloc) corrupts a read and reds an assertion, so a green run is a structural proof that the header
+# is the sole source of truth for the append.
+#
+# WHY grow_inplace SIDESTEPS THE CACHE MISS BY CONSTRUCTION. The value-form `teko::list::push` decides
+# in-place-vs-copy by matching a global witness (ptr + len + region + gen); a slot collision there is
+# the "other-ptr" MISS that forces a full copy-grow (the `append_cost_probe` quadratic). `grow_inplace`
+# consults the slice's OWN `cap` field instead, so it can never miss on another buffer's slot — the
+# ref-push path allocates only the geometric doublings, never a spurious full copy.
+#
+# C ROUTE ONLY: the own backend still models a slice as a 2-word `{ptr,len}` fat, so it fail-stops on
+# `teko::list::grow_inplace` (the 3-word native rep is the #112 remainder). The primitive under test is
+# a C-route reading until #112 closes.
+#
+# EXIT CODES: 1..12 a specific invariant failed (see main.tks); 42 all good.
+#
+#   TK_RT_DIR=<repo>/src/runtime TEKO_BACKEND=c teko build examples/probes/f3_grow_inplace
+#   ./examples/probes/f3_grow_inplace/bin/f3_grow_inplace    # -> 42
+name = "f3_grow_inplace"
+source = "src"
+
+[artifact]
+kind = "binary"

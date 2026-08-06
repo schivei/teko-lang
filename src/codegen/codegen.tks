@@ -3794,6 +3794,43 @@ fn emit_list_with_cap(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::
 }
 
 /**
+ * emit_list_grow_inplace — `teko::list::grow_inplace(ref x, v)` (F3.3, the ref-push win path). Emits
+ * the in-place append primitive `tk_slice_grow_inplace(<header ptr>, &<item>, sizeof(<elem>),
+ * tk_region_current())`. The first argument is the exclusive `ref []T` — a `Reference` value that
+ * lowers to the slice header pointer `tk_slice_<elem> *`, so emitting it bare yields the address
+ * `tk_slice_grow_inplace` mutates. The item is spilled to a temporary whose address is taken, exactly
+ * as `emit_list_push` spills its item. Yields a `void` GNU statement-expression: the whole append is
+ * a header mutation with NO push cache and NO defensive copy (the cap lives in the header).
+ *
+ * @param buf       the output buffer to append to
+ * @param prog      the typed program (for emit_type)
+ * @param c         the call node (`c.args[0]` the `ref []T`, `c.args[1]` the item)
+ * @param escaping  the escaping-binding set threaded through nested expr emission
+ * @param regions   the open S1 region stack
+ * @param fn_body   the enclosing function's statements (for nested expr emission)
+ * @param dctx      the defer context threaded through nested expr emission
+ * @return          the emitted C, or `error` on a malformed call / non-reference receiver
+ */
+fn emit_list_grow_inplace(buf: []byte, prog: CgProg, c: checker::TCall, escaping: []str, regions: []RegionFrame, fn_body: []checker::TStatement, dctx: DeferCtx) -> []byte | error {
+    if c.args.len != 2 { return error { message = "codegen: teko::list::grow_inplace has the wrong arity (internal)" } }
+    let elem = match c.args[0].type {
+        checker::Reference as r => match r.inner { checker::Slice as sl => sl.element; _ => return error { message = "codegen: teko::list::grow_inplace receiver is not a `ref []T` (internal)" } }
+        _ => return error { message = "codegen: teko::list::grow_inplace receiver is not a reference (internal)" }
+    }
+    let iN = $"_gi{buf.len}"
+    mut out = cb(buf, "({ ")
+    out = match emit_type(out, prog, elem) { []byte as o => o; error as err => return err }
+    out = cb(out, " "); out = cb(out, iN); out = cb(out, " = ")
+    out = match emit_as(out, prog, elem, c.args[1], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, "; tk_slice_grow_inplace((void *)(")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, "), &"); out = cb(out, iN); out = cb(out, ", sizeof(")
+    out = match emit_type(out, prog, elem) { []byte as o => o; error as err => return err }
+    out = cb(out, "), tk_region_current()); })")
+    out
+}
+
+/**
  * C7.19 (#169 D0) — `teko::mem::buf_ptr(len)` lowers to a direct arena bump-allocation:
  * `(uint8_t *)tk_region_alloc(<enclosing region>, (size_t)(len))`. Reuses whichever S1 region is
  * open at the call site (a block region, else the function frame, else the process root — the
@@ -4239,6 +4276,9 @@ fn emit_call(buf: []byte, prog: CgProg, ret_type: checker::Type, e: checker::TEx
         }
         if llast == "with_cap" {
             return emit_list_with_cap(buf, prog, e, c, escaping, regions, fn_body, dctx, "")
+        }
+        if llast == "grow_inplace" {
+            return emit_list_grow_inplace(buf, prog, c, escaping, regions, fn_body, dctx)
         }
     }
     let mem_op = !user_declared && p.segments.len >= 2 && p.segments[p.segments.len - 2].name == "mem"

@@ -4625,6 +4625,31 @@ void *tk_slice_with_cap(uint64_t esz, uint64_t cap) {
     return tk_slice_with_cap_r(esz, cap, tk_region_current());
 }
 
+// tk_slice_grow_inplace — the F3 Model A in-place append. The slice's three-word {ptr,len,cap}
+// header lives at *hdr (the exact layout cg_slice_typename emits: a data pointer, then two u64).
+// When len<cap the spare slot at ptr[len] is written in place and len bumps — O(1), NO push cache,
+// NO copy, NO slot collision, because the capacity is READ FROM THE HEADER, not a global witness.
+// When len==cap the backing doubles (cap 0 -> 1) into a fresh region buffer, the live prefix is
+// copied once, and ptr/cap are rewritten in the header. Value-semantics safety rests on the caller
+// holding an EXCLUSIVE `ref` (F1 is_unique_at): no stale copy of the header survives the realloc.
+typedef struct { void *ptr; uint64_t len; uint64_t cap; } tk_slice_hdr;
+void tk_slice_grow_inplace(void *hdr, const void *elem, uint64_t esz, tk_region *region) {
+    tk_slice_hdr *h = (tk_slice_hdr *)hdr;
+    if (h->len < h->cap) {
+        memcpy((char *)h->ptr + h->len * esz, elem, esz);
+        h->len += 1;
+        return;
+    }
+    if (h->cap > (UINT64_MAX >> 1)) tk_panic("tk_slice_grow_inplace: capacity overflows u64");
+    uint64_t new_cap = (h->cap == 0) ? 1 : (h->cap * 2);
+    void *buf = (region == tk_g_root) ? tk_alloc(new_cap * esz) : tk_region_alloc(region, new_cap * esz);
+    if (h->len && h->ptr != NULL) memcpy(buf, h->ptr, h->len * esz);
+    memcpy((char *)buf + h->len * esz, elem, esz);
+    h->ptr = buf;
+    h->len += 1;
+    h->cap = new_cap;
+}
+
 // (mem::free ruling 2026-07-03) tk_free_block — PARK an explicitly freed root-arena block on the
 // free list (see the free-list overlay above tk_region_alloc) so the next same-size allocation
 // REUSES it. This is `teko::mem::free`'s runtime seat: the []T arm passes the slice buffer
