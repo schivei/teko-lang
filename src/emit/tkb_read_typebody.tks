@@ -1,0 +1,123 @@
+// src/emit/tkb_read_typebody.tks  (namespace 'teko::emit')
+//
+// (#165 C4/C5) parser::Function (type-body method) and TypeBody codecs. Pure line-count split
+// of tkb_read.tks; no behavior change.
+
+use teko::checker
+use teko::parser
+
+/** (#165 C4) a parser::Function (type-body method): inverse of write_function. has_body is always 0
+    (the honest signature-only stub — R2); a nonzero has_body would need a parser-statement codec that
+    does not exist, so reject it loudly rather than mis-read. is_unsafe (U1) rides last — always false
+    for a method (the enclosing TypeDecl.is_unsafe is the source of truth per the remodel design).
+    `has_arena_size`/`arena_size` (#453) are NOT round-tripped — a method never carries the
+    directive in this crumb (`parse_decl_attributes` only runs at the top-level `fn` position), so
+    a `.tkb`-read method always reads back `has_arena_size = false`, the same precedent as
+    `TypeDecl.di_kind`/`must_free` above. */
+fn read_function(r: Reader, table: []str) -> RFunction | error {
+    let nm = match tkb_read_str(r, table) { RStr as x => x; error as e => return e }
+    let tp = match read_strs(nm.r, table) { RStrs as x => x; error as e => return e }
+    let tc = match read_constraints(tp.r, table) { RConstraints as x => x; error as e => return e }
+    let ps = match read_params(tc.r, table) { RParams as x => x; error as e => return e }
+    let hr = match read_u8(ps.r) { RByte as x => x; error as e => return e }
+    let rt = match read_typeexpr(hr.r, table) { RTypeExpr as x => x; error as e => return e }
+    let hb = match read_u8(rt.r) { RByte as x => x; error as e => return e }
+    if hb.value != 0 { return error { message = "method body in .tkb (unsupported; signature-only)" } }
+    let vis = match read_u8(hb.r) { RByte as x => x; error as e => return e }
+    let hd = match read_u8(vis.r) { RByte as x => x; error as e => return e }
+    let doc = match tkb_read_str(hd.r, table) { RStr as x => x; error as e => return e }
+    let ln = match read_u32(doc.r) { RU32 as x => x; error as e => return e }
+    let cl = match read_u32(ln.r) { RU32 as x => x; error as e => return e }
+    let it = match read_u8(cl.r) { RByte as x => x; error as e => return e }
+    let ie = match read_u8(it.r) { RByte as x => x; error as e => return e }
+    let cs = match tkb_read_str(ie.r, table) { RStr as x => x; error as e => return e }
+    let fr = match tkb_read_str(cs.r, table) { RStr as x => x; error as e => return e }
+    let og = match tkb_read_str(fr.r, table) { RStr as x => x; error as e => return e }
+    let ii = match read_u8(og.r) { RByte as x => x; error as e => return e }
+    let ia = match read_u8(ii.r) { RByte as x => x; error as e => return e }
+    let iv = match read_u8(ia.r) { RByte as x => x; error as e => return e }
+    let io = match read_u8(iv.r) { RByte as x => x; error as e => return e }
+    let iu = match read_u8(io.r) { RByte as x => x; error as e => return e }
+    RFunction { r = iu.r; value = parser::Function {
+            name = nm.value; type_params = tp.value; type_constraints = tc.value; params = ps.value
+            has_return = hr.value != 0; return_type = rt.value; body = teko::list::empty()
+            vis = vis.value to parser::Visibility; has_doc = hd.value != 0; doc = doc.value
+            line = ln.value; col = cl.value; is_test = it.value != 0; is_extern = ie.value != 0
+            c_symbol = cs.value; from_lib = fr.value; os_guard = og.value
+            is_intern = ii.value != 0; is_abstract = ia.value != 0; is_virtual = iv.value != 0; is_override = io.value != 0
+            has_inject = false; injects = teko::list::empty(); is_unsafe = iu.value != 0
+            has_arena_size = false; arena_size = 0 to u64
+    } }
+}
+/** (#165 C4/C5) a []parser::Function: inverse of write_functions (declaration = vtable order). */
+fn read_functions(r: Reader, table: []str) -> RFunctions | error {
+    let n = match read_u64(r) { RU64 as x => x; error as e => return e }
+    mut rr = n.r
+    mut xs: []parser::Function = teko::list::empty()
+    mut i = 0
+    loop { if i >= n.value { break }; let f = match read_function(rr, table) { RFunction as x => x; error as e => return e }; xs = teko::list::push(xs, f.value); rr = f.r; i++ }
+    RFunctions { r = rr; value = xs }
+}
+/** a TypeBody: inverse of write_typebody. (#165 C5) StructBody(0) reads fields + methods +
+    implements; ClassBody(6) reads kind + base + binding + implements + fields + methods; Interface(7)
+    reads extends + method sigs; Trait(8) reads fields + method sigs — all methods in vtable order. */
+fn read_typebody(r: Reader, table: []str) -> RTypeBody | error {
+    let tag = match read_u8(r) { RByte as x => x; error as e => return e }
+    if tag.value == 0 {
+        let fs = match read_fields(tag.r, table) { RFields as x => x; error as e => return e }
+        let ms = match read_functions(fs.r, table) { RFunctions as x => x; error as e => return e }
+        let im = match read_strs(ms.r, table) { RStrs as x => x; error as e => return e }
+        let cs = match read_constdecls(im.r, table) { RConstDecls as x => x; error as e => return e }
+        return RTypeBody { r = cs.r; value = parser::StructBody { fields = fs.value; methods = ms.value; implements = im.value; consts = cs.value } }
+    }
+    if tag.value == 1 { let ms = match read_strs(tag.r, table) { RStrs as x => x; error as e => return e }; return RTypeBody { r = ms.r; value = parser::EnumBody { members = ms.value } } }
+    if tag.value == 2 { let te = match read_typeexpr(tag.r, table) { RTypeExpr as x => x; error as e => return e }; return RTypeBody { r = te.r; value = parser::VariantBody { type_expr = te.value } } }
+    if tag.value == 3 { let te = match read_typeexpr(tag.r, table) { RTypeExpr as x => x; error as e => return e }; return RTypeBody { r = te.r; value = parser::AliasBody { alias = te.value } } }
+    if tag.value == 4 { return RTypeBody { r = tag.r; value = parser::ExternBody { } } }
+    if tag.value == 5 {
+        let n = match read_u64(tag.r) { RU64 as x => x; error as e => return e }
+        mut rr = n.r
+        mut names: []str = teko::list::empty()
+        mut vals: []u64 = teko::list::empty()
+        mut i = 0
+        loop {
+            if i >= n.value { break }
+            let nm = match tkb_read_str(rr, table) { RStr as x => x; error as e => return e }
+            let hi = match read_u64(nm.r) { RU64 as x => x; error as e => return e }
+            let lo = match read_u64(hi.r) { RU64 as x => x; error as e => return e }
+            names = teko::list::push(names, nm.value)
+            vals = teko::list::push(vals, lo.value)
+            rr = lo.r
+            i++
+        }
+        return RTypeBody { r = rr; value = parser::FlagsBody { members = names; values = vals } }
+    }
+    if tag.value == 6 {
+        let ck = match read_u8(tag.r) { RByte as x => x; error as e => return e }
+        let hb = match read_u8(ck.r) { RByte as x => x; error as e => return e }
+        let bn = match tkb_read_str(hb.r, table) { RStr as x => x; error as e => return e }
+        let hbb = match read_u8(bn.r) { RByte as x => x; error as e => return e }
+        let bbn = match tkb_read_str(hbb.r, table) { RStr as x => x; error as e => return e }
+        let im = match read_strs(bbn.r, table) { RStrs as x => x; error as e => return e }
+        let fs = match read_fields(im.r, table) { RFields as x => x; error as e => return e }
+        let ms = match read_functions(fs.r, table) { RFunctions as x => x; error as e => return e }
+        let cs = match read_constdecls(ms.r, table) { RConstDecls as x => x; error as e => return e }
+        return RTypeBody { r = cs.r; value = parser::ClassBody {
+                kind = ck.value to parser::ClassKind; has_base = hb.value != 0; base_name = bn.value
+                has_base_binding = hbb.value != 0; base_binding_name = bbn.value
+                implements = im.value; fields = fs.value; methods = ms.value; consts = cs.value
+        } }
+    }
+    if tag.value == 7 {
+        let ex = match read_strs(tag.r, table) { RStrs as x => x; error as e => return e }
+        let ms = match read_functions(ex.r, table) { RFunctions as x => x; error as e => return e }
+        return RTypeBody { r = ms.r; value = parser::InterfaceBody { extends = ex.value; methods = ms.value } }
+    }
+    if tag.value == 8 {
+        let fs = match read_fields(tag.r, table) { RFields as x => x; error as e => return e }
+        let ms = match read_functions(fs.r, table) { RFunctions as x => x; error as e => return e }
+        let cs = match read_constdecls(ms.r, table) { RConstDecls as x => x; error as e => return e }
+        return RTypeBody { r = cs.r; value = parser::TraitBody { fields = fs.value; methods = ms.value; consts = cs.value } }
+    }
+    error { message = "bad typebody tag in .tkb" }
+}

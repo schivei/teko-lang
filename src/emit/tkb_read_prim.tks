@@ -1,0 +1,168 @@
+// src/emit/tkb_read_prim.tks  (namespace 'teko::emit')
+//
+// (split/emit) low-level .tkb primitive readers: u8/u32/u64, the string table, PrimKind
+// decode, and the Type codec. Pure line-count split of tkb_read.tks; no behavior change.
+
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * numint_of_hilo — reconstruct a `parser::NumInt` from the frozen `hi:lo` u64-pair wire
+ * encoding (drop-128, 2026-07-24; see `tkb_write.tks::write_numint`) — the exact inverse of
+ * the writer's derivation: `hi` all-ones marks a negative value (sign-extension), any other
+ * `hi` (always 0 for a value this codec ever writes) marks non-negative; the magnitude is
+ * `lo` directly when non-negative, else `lo`'s own two's-complement negation (`0 - lo`).
+ *
+ * @param hi  the high wire half
+ * @param lo  the low wire half
+ * @return    the reconstructed literal carrier
+ */
+fn numint_of_hilo(hi: u64, lo: u64) -> parser::NumInt {
+    if hi == 0xFFFFFFFFFFFFFFFF { return parser::NumInt { neg = true; mag = 0 - lo } }
+    parser::numint_of_u64(lo)
+}
+
+fn read_u8(r: Reader) -> RByte | error {
+    if r.pos >= r.data.len { return error { message = "truncated .tkb" } }
+    RByte { r = Reader { data = r.data; pos = r.pos + 1 }; value = r.data[r.pos] }
+}
+
+fn read_u32(r: Reader) -> RU32 | error {
+    let a = match read_u8(r) { RByte as x => x; error as e => return e }
+    let b = match read_u8(a.r) { RByte as x => x; error as e => return e }
+    let c = match read_u8(b.r) { RByte as x => x; error as e => return e }
+    let d = match read_u8(c.r) { RByte as x => x; error as e => return e }
+    RU32 { r = d.r; value = (a.value to u32) | ((b.value to u32) << 8) | ((c.value to u32) << 16) | ((d.value to u32) << 24) }
+}
+
+fn read_u64(r: Reader) -> RU64 | error {
+    let lo = match read_u32(r) { RU32 as x => x; error as e => return e }
+    let hi = match read_u32(lo.r) { RU32 as x => x; error as e => return e }
+    RU64 { r = hi.r; value = lo.value | ((hi.value to u64) << 32) }
+}
+
+// a string reference = a u32 index into the (already-read) table.
+pub fn tkb_read_str(r: Reader, table: []str) -> RStr | error {
+    let idx = match read_u32(r) { RU32 as x => x; error as e => return e }
+    if idx.value >= table.len { return error { message = "bad string index in .tkb" } }
+    RStr { r = idx.r; value = table[idx.value] }
+}
+
+// the string table: count, then each (len + bytes).
+fn read_strtable(r: Reader) -> RTable | error {
+    let n = match read_u32(r) { RU32 as x => x; error as e => return e }
+    mut rr = n.r
+    mut table: []str = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= n.value { break }
+        let len = match read_u32(rr) { RU32 as x => x; error as e => return e }
+        mut bytes: []byte = teko::list::empty()
+        mut br = len.r
+        mut j = 0
+        loop {
+            if j >= len.value { break }
+            let by = match read_u8(br) { RByte as x => x; error as e => return e }
+            bytes = teko::list::push(bytes, by.value)
+            br = by.r
+            j++
+        }
+        table = teko::list::push(table, str(bytes))   // []byte → str [wrap form TBD]
+        rr = br
+        i++
+    }
+    RTable { r = rr; value = table }
+}
+
+/**
+ * prim_of — the inverse of `prim_byte` (`PrimKind` ↔ byte = the prim's ENUM ORDINAL). Ordinals
+ * match `PrimKind` exactly (drop-128, 2026-07-24 — `u64`/`i64`/`f32` are gone, so the family
+ * renumbers): `U8..U64` (0..3), `I8..I64` (4..7), `F32`/`F64` (8..9), `Bool` (10). New tags
+ * APPEND within their family (old tags stable going forward, but this renumbering itself is a
+ * one-time break from the pre-drop wire — see the drop-128 design doc §7 for the scope of the
+ * `.tkb` compat proof, which covers `Number.value` only, not this ordinal).
+ *
+ * @param b  the serialized ordinal byte
+ * @return   the `PrimKind` it names
+ */
+fn prim_of(b: byte) -> checker::PrimKind {
+    if b == 0 { return checker::PrimKind::U8 }
+    if b == 1 { return checker::PrimKind::U16 }
+    if b == 2 { return checker::PrimKind::U32 }
+    if b == 3 { return checker::PrimKind::U64 }
+    if b == 4 { return checker::PrimKind::I8 }
+    if b == 5 { return checker::PrimKind::I16 }
+    if b == 6 { return checker::PrimKind::I32 }
+    if b == 7 { return checker::PrimKind::I64 }
+    if b == 8 { return checker::PrimKind::F32 }
+    if b == 9 { return checker::PrimKind::F64 }
+    checker::PrimKind::Bool
+}
+
+fn read_types(r: Reader, table: []str) -> RTypes | error {
+    let n = match read_u32(r) { RU32 as x => x; error as e => return e }
+    mut rr = n.r
+    mut xs: []checker::Type = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= n.value { break }
+        let t = match read_type(rr, table) { RType as x => x; error as e => return e }
+        xs = teko::list::push(xs, t.value)
+        rr = t.r
+        i++
+    }
+    RTypes { r = rr; value = xs }
+}
+
+/**
+ * read_type — the inverse of `write_type`: tags 0=Prim 1=Byte 2=Str 3=error 4=void 5=Slice
+ * 6=Named 7=Variant 8=Func 10=opaque ptr 11=uptr 12=typed ptr 13=Reference 14=char 15=Null.
+ * Tag 9 (the legacy nullable former, B.37) is RETIRED — no branch reads it, so a stray tag 9
+ * falls through to the trailing "bad type tag" error, exactly like any other unknown tag.
+ *
+ * @param r      the reader cursor
+ * @param table  the interned string table
+ * @return       the decoded type plus the advanced cursor, or a decode error
+ */
+fn read_type(r: Reader, table: []str) -> RType | error {
+    let tag = match read_u8(r) { RByte as x => x; error as e => return e }
+    if tag.value == 0 {
+        let k = match read_u8(tag.r) { RByte as x => x; error as e => return e }
+        return RType { r = k.r; value = checker::Prim { kind = prim_of(k.value) } }
+    }
+    if tag.value == 1 { return RType { r = tag.r; value = checker::Byte { } } }
+    if tag.value == 2 { return RType { r = tag.r; value = checker::Str { } } }
+    if tag.value == 3 { return RType { r = tag.r; value = checker::Error { } } }
+    if tag.value == 4 { return RType { r = tag.r; value = checker::Void { } } }   // tag 4 = void (was Unit — B.37)
+    if tag.value == 5 {
+        let el = match read_type(tag.r, table) { RType as x => x; error as e => return e }
+        return RType { r = el.r; value = checker::Slice { element = el.value } }
+    }
+    if tag.value == 6 {
+        let nm = match tkb_read_str(tag.r, table) { RStr as x => x; error as e => return e }
+        return RType { r = nm.r; value = checker::Named { name = nm.value } }
+    }
+    if tag.value == 7 {
+        let ms = match read_types(tag.r, table) { RTypes as x => x; error as e => return e }
+        return RType { r = ms.r; value = checker::Variant { members = ms.value } }
+    }
+    if tag.value == 8 {
+        let ps = match read_types(tag.r, table) { RTypes as x => x; error as e => return e }
+        let rt = match read_type(ps.r, table) { RType as x => x; error as e => return e }
+        return RType { r = rt.r; value = checker::Func { params = ps.value; ret = rt.value; variadic = false; param_names = []; n_required = (ps.value).len; defaults = [] } }
+    }
+    if tag.value == 10 { return RType { r = tag.r; value = checker::Ptr { inner = null } } }   // tag 10 = opaque ptr (S-mem)
+    if tag.value == 11 { return RType { r = tag.r; value = checker::Uptr { } } }   // (C7.1a) tag 11 = uptr
+    if tag.value == 12 {   // tag 12 = ptr<T> (S-mem)
+        let in = match read_type(tag.r, table) { RType as x => x; error as e => return e }
+        return RType { r = in.r; value = checker::Ptr { inner = in.value } }
+    }
+    if tag.value == 13 {   // (MEM-1b) tag 13 = Ref<T>
+        let in = match read_type(tag.r, table) { RType as x => x; error as e => return e }
+        return RType { r = in.r; value = checker::Reference { inner = in.value } }
+    }
+    if tag.value == 14 { return RType { r = tag.r; value = checker::Char { } } }   // (UTF-8 increment 1) tag 14 = char
+    if tag.value == 15 { return RType { r = tag.r; value = checker::Null { } } }
+    error { message = "bad type tag in .tkb" }
+}
