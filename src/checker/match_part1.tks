@@ -1,0 +1,155 @@
+// src/checker/match.tks  (namespace 'teko::checker')
+use teko::parser
+
+// (C7b) is `name` a member of the enum body?
+fn enum_has_member(eb: parser::EnumBody, name: str) -> bool {
+    mut i = 0
+    loop {
+        if i >= eb.members.len { break }
+        if eb.members[i] == name { return true }
+        i++
+    }
+    false
+}
+
+// (C7b) ENUM-subject pattern check: a bare/qualified path pattern names a MEMBER (enum members
+// carry NO data). `U8` and `PrimKind::U8` both name member "U8" (by the LAST path segment, like the
+// `Type::Member` enum-value form). `_` matches anything; an Alt checks each option; `as x` binds the
+// whole enum value. (Mirror of match.c check_enum_pattern.)
+fn check_enum_pattern(p: parser::Pattern, subject: Type, eb: parser::EnumBody, env: Env, table: TypeTable) -> Env | error {
+    match p {
+        parser::WildcardPattern => env
+        parser::BindPattern as bp => {
+            if bp.is_slice { return error { message = "a slice pattern cannot match an enum value" } }
+            let name = bp.type_name.segments[bp.type_name.segments.len - 1].name
+            if !enum_has_member(eb, name) { return error { message = $"not a member of the enum: {name}" } }
+            if bp.has_binding { define(env, bp.binding, subject, false) }   // `as x` — the enum value
+            else { env }   // bare member — binds nothing
+        }
+        parser::AltPattern as ap => {
+            mut i = 0
+            loop {
+                if i >= ap.options.len { break }
+                match ap.options[i] {
+                    parser::BindPattern as bp => { if bp.has_binding { return error { message = "an alternative (`|`) cannot bind; use a separate arm" } } }
+                    _ => { }
+                }
+                match check_enum_pattern(ap.options[i], subject, eb, env, table) { Env => { }; error as e => return e }
+                i++
+            }
+            env
+        }
+        _ => error { message = "an enum subject needs member patterns (`U8`) or `_`" }
+    }
+}
+
+// (#110) Is `named` a DIRECT case of `subject_variant` (the ONE-level-expanded subject), OR the
+// WHOLE subject itself (`raw_subject` — the pre-expansion type, e.g. a `Type as t` arm binding a
+// NAMED variant wholesale, not picking one case)? A case that is itself a nested variant must be
+// double-matched (`Outer as v => match v { Inner as i => … }`), never skip-matched directly —
+// that would require descending into a union the native codegen never synthesizes a tag for.
+// Returns true when `subject_variant` is not a variant at all (nothing to guard — the ordinary
+// resolve/typecheck path already validates non-variant subjects). Mirror of match.c::is_direct_case_of.
+fn is_direct_case_of(named: Type, subject_variant: Type, raw_subject: Type) -> bool {
+    if type_eq(named, raw_subject) { return true }   // binds the WHOLE subject, not a case of it
+    match subject_variant {
+        Variant as v => {
+            mut i = 0
+            loop {
+                if i >= v.members.len { break }
+                if type_eq(named, v.members[i]) { return true }
+                i++
+            }
+            false
+        }
+        _ => true
+    }
+}
+// (#109 W2, R5) CONTEXTUAL pattern resolution — a match-arm pattern name resolves against the
+// SUBJECT variant's own members FIRST, regardless of namespace. In `match shape { Circle as c => … }`
+// the bare `Circle` binds the Shape variant's `Circle` member even when the match site sits in a
+// different namespace than Shape — a valid reference that R3 (strict own-ns bare) would otherwise
+// reject. Matches by the pattern's LAST path segment against each member's nominal name; returns the
+// member Type when found (the arm binds exactly that case), else null (fall to resolve_named/R0-R4).
+// A non-variant subject (subject_variant is not a Variant) yields null — nothing contextual to bind.
+// Mirror of match.c::variant_member_by_name.
+fn variant_member_by_name(subject_variant: Type, last: str) -> Type | null {
+    match subject_variant {
+        Variant as v => {
+            mut i = 0
+            loop {
+                if i >= v.members.len { break }
+                match v.members[i] {
+                    Named as n => if name_last_segment(n.name) == last { return v.members[i] }   // (#109 W3) member name is canonical "ns::Name"; the pattern's last segment is bare
+                    _ => { }
+                }
+                i++
+            }
+            null
+        }
+        _ => null
+    }
+}
+// (#110) find the DIRECT member of `subject` whose own (one-level) expansion contains `named` —
+// i.e. the outer case the caller should match FIRST before re-matching `named` inside it. Used
+// only to build a concrete, pasteable hint (`FooBar as v => match v { Foo as x => … }` rather than
+// the whole `FooBar | error` union, which is not a nameable bind pattern). Mirror of
+// match.c::find_containing_case (returns null when no direct member's expansion contains `named`).
+fn find_containing_case(named: Type, subject: Type, table: TypeTable) -> Type | null {
+    match subject {
+        Variant as v => {
+            mut i = 0
+            loop {
+                if i >= v.members.len { break }
+                let mem = v.members[i]
+                match expand_variant(mem, table) {
+                    Variant as mv => {
+                        mut j = 0
+                        loop {
+                            if j >= mv.members.len { break }
+                            if type_eq(named, mv.members[j]) { return mem }
+                            j++
+                        }
+                    }
+                    _ => { }
+                }
+                i++
+            }
+            null
+        }
+        _ => null
+    }
+}
+// (#110) the skip-level-match diagnostic: "'Foo' is not a direct case of 'FooBar | error' —
+// match the outer case first (FooBar as v => match v { Foo as f => … })". When a direct member's
+// own expansion contains the arm's case (the common shape — a nested named variant), the hint
+// names THAT member (a real, pasteable bind pattern); otherwise it falls back to the whole subject.
+// Mirror of match.c::skip_level_error.
+fn skip_level_error(arm_type: Type, subject: Type, table: TypeTable) -> error {
+    let arm_s = type_render(arm_type)
+    let subj_s = type_render(subject)
+    let hint_s = match find_containing_case(arm_type, subject, table) { Type as t => type_render(t); null => subj_s }
+    error { message = $"'{arm_s}' is not a direct case of '{subj_s}' — match the outer case first ({hint_s} as v => match v {{ {arm_s} as x => … }})" }
+}
+
+/**
+ * Does `t` (an already one-level-expanded subject) carry a `null` member (null-as-union)? Used to
+ * admit a `null` match pattern over a `T | null` subject, mirroring the `variant`-member machinery.
+ *
+ * @param t  the subject's variant view (from `expand_variant`)
+ * @return   true iff `t` is a `Variant` one of whose members is `Null`
+ */
+fn variant_has_null_member(t: Type) -> bool {
+    match t {
+        Variant as v => {
+            mut i = 0
+            loop {
+                if i >= v.members.len { break }
+                match v.members[i] { Null => return true; _ => { } }
+                i++
+            }
+            false
+        }
+        _ => false
+    }
+}

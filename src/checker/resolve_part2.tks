@@ -1,0 +1,249 @@
+// src/checker/resolve.tks  (namespace 'teko::checker')
+use teko::parser
+
+
+// (#109 W2) the DECLARING namespace of a type by its (resolved) name — first match, "" if unknown.
+// A struct/class field's, or a method signature's, source type annotation is written in the type's
+// OWN namespace, so resolving those annotations must reference that namespace, not the code site's.
+// Shared across the checker (collect conformance, typer field/struct-init resolution). Under W0 no
+// two types share a bare name, so the first match is unambiguous (W3 canonical names make it exact).
+fn type_ns_of(table: TypeTable, name: str) -> str {
+    mut i: u64 = 0
+    loop {
+        if i >= table.len { break }
+        // (#109 W3) `name` may be a CANONICAL "ns::Name" (a resolved Named.name) or a bare stamped
+        // `__g__` instance — match exact OR by the entry's qualified form (like type_table_find).
+        if table[i].name == name || qualify_eq(table[i].namespace, table[i].name, name) { return table[i].namespace }   // (#148) allocation-free qualified compare
+        i++
+    }
+    ""
+}
+
+/**
+ * Resolve a BARE stamped generic-instance name (`Box__g__i64`) to its TypeDecl from ANY namespace, or
+ * null when `last` is not a stamped instance name (#254 L4/L5). A stamped instance name is
+ * collision-proof — no user symbol may carry the `__g__` infix — so it is bare-visible everywhere,
+ * exactly like a root-level or type-param name. A stamped instance's own methods carry the instance
+ * name in their (normalized) signatures, and `register_instance_methods` resolves those signatures with
+ * no referencing namespace, so a bare `Box__g__i64` in a `-> Box<T>` return / `Box<T>` param must
+ * resolve regardless of the instance's declaring namespace. Consulted BEFORE the cross-namespace
+ * collision error, which would otherwise reject the bare stamped name from "".
+ *
+ * @param last  the path's last segment (the referenced type name)
+ * @param table the folded type table
+ * @return      the stamped instance's registration, or null when `last` is not a stamped instance name
+ * @since onda-3 (#254 L4/L5)
+ */
+fn resolve_bare_g_instance(last: str, table: TypeTable) -> TypeReg | null {
+    if !name_is_g_instance(last) { return null }
+    mut g: u64 = 0
+    loop {
+        if g >= table.len { break }
+        if table[g].name == last { return table[g] }
+        g++
+    }
+    null
+}
+
+/**
+ * NotUserType — the marker `resolve_type_ref` returns when a path names no registered user type: a
+ * STRUCTURED "keep looking / report it unknown" answer, distinct from the `error` arm, which is
+ * reserved for a path that DID match something and was rejected (a cross-namespace visibility
+ * violation, an ambiguous qualifier). Its two readers (`resolve_named`, the generic-instance
+ * resolver) each turn it into their own caller-facing message.
+ *
+ * It replaces a sentinel `error { message = "not a user type" }` that those readers discriminated
+ * by comparing the MESSAGE TEXT — identity by string, which any rewording silently breaks, and the
+ * breakage would surface as an internal sentinel leaking into a user-facing diagnostic.
+ */
+type NotUserType = struct { }
+
+/**
+ * (#109 W2) The namespace-aware SOURCE-reference resolver — R0-R5 — answering with the matched
+ * REGISTRATION (the decl PLUS the namespace it is declared in). `path` is the WRITTEN reference,
+ * `ref_ns` the namespace of the code that wrote it. R1 (type-params) and R2 (builtins) are handled
+ * by the callers BEFORE this point (`type_param_table` registers params in ref_ns; `builtin_type`
+ * runs first). R3 (bare) and R4/R0 (qualified) are delegated to `resolve_bare_type_reg` /
+ * `resolve_qualified_type_reg`. Privates: found-then-rejected is left to the module-visibility pass
+ * (`check_modules`) — a private type in another namespace is MENTIONABLE here (so error wording is
+ * precise), and that pass keeps rejecting it.
+ *
+ * Answering with the registration rather than the bare decl is what lets a caller that must key on
+ * the DECLARING namespace — the instantiation pass, which stamps each concrete instance into its
+ * generic base's namespace — obtain it from this ONE scope-correct resolution instead of a second,
+ * order-dependent bare re-probe of the table.
+ *
+ * @param path    the WRITTEN reference path
+ * @param table   the folded type table
+ * @param ref_ns  the namespace of the code that wrote the reference
+ * @return        the matched registration, `NotUserType` when nothing matches, or a fail-loud error
+ */
+fn resolve_type_reg(path: parser::Path, table: TypeTable, ref_ns: str) -> TypeReg | NotUserType | error {
+    if path.segments.len == 0 { return NotUserType { } }
+    let last = path.segments[path.segments.len - 1].name
+    if path.segments.len == 1 { return resolve_bare_type_reg(last, table, ref_ns) }
+    resolve_qualified_type_reg(path, last, table)
+}
+
+/**
+ * R3 — resolve a BARE (single-segment) type reference to its registration: strict own-namespace
+ * resolution first, then the root ("") scope that type-params and top-level types share, then the
+ * collision-proof stamped-instance names. A name that exists ONLY in other namespaces is rejected
+ * fail-loud; a name that exists nowhere is `NotUserType`.
+ *
+ * @param last    the referenced bare type name
+ * @param table   the folded type table
+ * @param ref_ns  the namespace of the code that wrote the reference
+ * @return        the matched registration, `NotUserType`, or the not-visible-bare error
+ */
+fn resolve_bare_type_reg(last: str, table: TypeTable, ref_ns: str) -> TypeReg | NotUserType | error {
+    mut i: u64 = 0
+    loop {
+        if i >= table.len { break }
+        if table[i].name == last && table[i].namespace == ref_ns { return table[i] }
+        i++
+    }
+    match resolve_root_scope_reg(last, table, ref_ns) { TypeReg as r => return r; null => { } }
+    match resolve_bare_g_instance(last, table) { TypeReg as r => return r; null => { } }
+    match reject_or_unknown_bare_type(last, table, ref_ns) {
+        NotUserType => NotUserType { }
+        error as e => e
+    }
+}
+
+/**
+ * (R1/root) The root-scope registration for a bare name: a generic type-PARAM (registered at "" by
+ * `type_param_table`) and a root-level type are bare-visible from ANY namespace, so a bare `T`
+ * inside a namespaced fn still resolves. Null when the reference is already at the root, or when
+ * the root declares no such name.
+ *
+ * @param last    the referenced bare type name
+ * @param table   the folded type table
+ * @param ref_ns  the namespace of the code that wrote the reference
+ * @return        the root-scope registration, or null
+ */
+fn resolve_root_scope_reg(last: str, table: TypeTable, ref_ns: str) -> TypeReg | null {
+    if ref_ns == "" { return null }
+    mut k: u64 = 0
+    loop {
+        if k >= table.len { break }
+        if table[k].name == last && table[k].namespace == "" { return table[k] }
+        k++
+    }
+    null
+}
+
+/**
+ * The verdict for a bare reference that matched nothing visible: if the name lives in other
+ * namespace(s), that is the cross-namespace collision — the reference is not visible bare and MUST
+ * be qualified (fail-loud, naming those namespaces). Otherwise it is simply unknown and the caller's
+ * own "unknown type" message stands.
+ *
+ * @param last    the referenced bare type name
+ * @param table   the folded type table
+ * @param ref_ns  the namespace of the code that wrote the reference
+ * @return        `NotUserType` when the name is nowhere, else the not-visible-bare error
+ */
+fn reject_or_unknown_bare_type(last: str, table: TypeTable, ref_ns: str) -> NotUserType | error {
+    mut j: u64 = 0
+    loop {
+        if j >= table.len { break }
+        if table[j].name == last {
+            let nss = namespaces_declaring(table, last)
+            let here = if ref_ns == "" { "<top-level>" } else { ref_ns }
+            return error { message = $"type '{last}' is not visible bare from namespace '{here}' — it is declared in: {nss}. Qualify it (`ns::{last}`) or reference it from its own namespace." }
+        }
+        j++
+    }
+    NotUserType { }
+}
+
+/**
+ * R4/R0 — resolve a QUALIFIED (multi-segment) type reference to its registration: match the last
+ * segment AND the qualifier; exactly one namespace may win, two or more is an ambiguity error, zero
+ * is `NotUserType`.
+ *
+ * @param path   the WRITTEN reference path (more than one segment)
+ * @param last   the path's last segment
+ * @param table  the folded type table
+ * @return       the unique matching registration, `NotUserType`, or the ambiguity error
+ */
+fn resolve_qualified_type_reg(path: parser::Path, last: str, table: TypeTable) -> TypeReg | NotUserType | error {
+    let qual = path_qualifier(path, path.segments.len - 1)
+    mut winner_idx: i64 = -1
+    mut matched_ns = ""
+    mut ambiguous = false
+    mut i2: u64 = 0
+    loop {
+        if i2 >= table.len { break }
+        if table[i2].name == last && qualifier_selects_ns(table[i2].namespace, qual) {
+            if winner_idx >= 0 && table[i2].namespace != matched_ns {
+                ambiguous = true
+            } else {
+                winner_idx = i2 to i64
+                matched_ns = table[i2].namespace
+            }
+        }
+        i2++
+    }
+    if ambiguous {
+        let nss = namespaces_declaring(table, last)
+        return error { message = $"ambiguous type reference '{qual}::{last}' — the qualifier matches more than one namespace ({nss}). Use the absolute path (`teko::…::{last}`)." }
+    }
+    if winner_idx >= 0 { return table[winner_idx to u64] }
+    NotUserType { }
+}
+
+/**
+ * The DECL a written type reference names — `resolve_type_reg` with the declaring namespace dropped,
+ * for the callers that only need the declaration.
+ *
+ * @param path    the WRITTEN reference path
+ * @param table   the folded type table
+ * @param ref_ns  the namespace of the code that wrote the reference
+ * @return        the matched decl, `NotUserType` when nothing matches, or a fail-loud error
+ */
+fn resolve_type_ref(path: parser::Path, table: TypeTable, ref_ns: str) -> parser::TypeDecl | NotUserType | error {
+    match resolve_type_reg(path, table, ref_ns) {
+        TypeReg as r => r.decl
+        NotUserType => NotUserType { }
+        error as e => e
+    }
+}
+
+// (#109 order fix) split a SOURCE-WRITTEN type name string on "::" into a Path — so an
+// `implements`/`extends` entry or a trait-derive probe (bare "Reader" or qualified "io::Reader")
+// can ride the R0-R5 resolver like any other source reference. (Mirror resolve.c::name_to_path.)
+fn name_to_path(name: str) -> parser::Path {
+    mut segs: []parser::Segment = teko::list::empty()
+    mut rest = name
+    loop {
+        mut sep: i64 = -1
+        mut i: u64 = 0
+        loop {
+            if i + 1 >= rest.len { break }
+            if rest[i] == b':' && rest[i + 1] == b':' { sep = i to i64; break }
+            i++
+        }
+        if sep < 0 { break }
+        segs = teko::list::push(segs, parser::Segment { name = teko::str::slice_to(rest, sep to u64) })
+        rest = teko::str::slice_from(rest, (sep to u64) + 2)
+    }
+    segs = teko::list::push(segs, parser::Segment { name = rest })
+    parser::Path { segments = segs }
+}
+
+// (#109 order fix) resolve a SOURCE-WRITTEN type name string by the R0-R5 rules from `ref_ns` —
+// the string-shaped twin of resolve_type_ref. `resolved_name_ns` mirrors the WINNING namespace
+// (companion, like type_ref_ns). Used by collect's `implements`/`extends`/trait-derive walks, so
+// a bare name never resolves by table-scan order. (Mirrors resolve.c.)
+pub fn resolve_name_ref(name: str, table: TypeTable, ref_ns: str) -> parser::TypeDecl | error {
+    match resolve_type_ref(name_to_path(name), table, ref_ns) {
+        parser::TypeDecl as td => td
+        NotUserType => error { message = "not a user type" }
+        error as e => e
+    }
+}
+pub fn resolved_name_ns(name: str, table: TypeTable, ref_ns: str) -> str {
+    type_ref_ns(name_to_path(name), table, ref_ns)
+}

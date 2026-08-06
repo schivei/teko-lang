@@ -1,0 +1,253 @@
+use teko::lexer
+use teko::parser
+
+
+/**
+ * int_info — classify a type as an integer width/signedness, or error when it is not an
+ * integer (a `Prim` integer drives its width/signedness; `byte` is 8-bit unsigned), or when
+ * it is WIDER than the fold's u64 carrier. The surface no longer HAS a type wider than 64 bits
+ * (`u64`/`i64` were removed, drop-128, 2026-07-24) so this width gate is a defensive
+ * invariant, not a live path — but it is the ONE gate every `IntInfo` passes through, so it
+ * protects every width/shift computation downstream from ever seeing an out-of-range width.
+ *
+ * @param t  the type to classify
+ * @return   the width/signedness, or an error when `t` is not an integer type the fold carries
+ * @since #comptime-fold
+ */
+fn int_info(t: Type) -> IntInfo | error {
+    match t {
+        Prim as p => {
+            if !prim_is_int(p.kind) { return error { message = "comptime fold: type is not an integer" } }
+            let w = prim_width(p.kind)
+            if w > 64 { return error { message = "comptime fold: integer width wider than 64 bits is not evaluated" } }
+            IntInfo { width = w; is_signed = prim_is_signed(p.kind) }
+        }
+        Byte => IntInfo { width = 8; is_signed = false }
+        _ => error { message = "comptime fold: type is not an integer" }
+    }
+}
+
+/**
+ * eval_const — evaluate a PROVABLY-const expression subtree (one already accepted by
+ * `is_const_expr`) to its ConstValue, matching the backend's arithmetic semantics
+ * EXACTLY (Layer 1a). Recurses over the Tier-0..5 grammar plus `TIndex` of a const
+ * aggregate at a const index (Layer 1c). An overflow, a ÷0, or an out-of-range cast on
+ * a constant is a LOCATED COMPILE ERROR, never a silent wrap (M.1; LEGISLATION:148) —
+ * a value the compiler can already see is out of range fails loudly at compile time.
+ * The caller MUST have proven `is_const_expr(e) == null` first; a non-const form here
+ * is an internal-error located at `e`.
+ *
+ * @param e      the typed, provably-const expression to evaluate
+ * @param table  the type table (to classify a callee / resolve a referenced type)
+ * @param env    the environment resolving a name to a const/binding + its value
+ * @param agg    the module-aggregate resolution table (resolves a `TVar` index receiver, Layer 1c)
+ * @return       the computed comptime value, or a located error (overflow / ÷0 /
+ *               out-of-range / a non-const form reaching this evaluator)
+ * @since #comptime-fold
+ */
+pub fn eval_const(e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
+    match e.kind {
+        TNumber as n => eval_number(n, e)
+        TBoolLit as b => cv_bool(b.value)
+        TByteLit as by => cv_int(by.value to u64, Byte { })
+        TCharLit as ch => cv_bytes(bytes_of_str(ch.bytes))
+        TStrLit as s => cv_bytes(bytes_of_str(s.text))
+        TCast as c => eval_cast_expr(c, e, table, env, agg)
+        TUnary as u => eval_unary_expr(u, e, table, env, agg)
+        TBinary as bi => eval_binary_expr(bi, e, table, env, agg)
+        TVar as v => eval_agg_ref(v, e, table, env, agg)
+        TArrayLit as a => eval_array_agg(a, table, env, agg)
+        TStructInit as si => eval_struct_agg(si, table, env, agg)
+        TIndex as ix => eval_index_expr(ix, e, table, env, agg)
+        TFieldAccess as fa => eval_field_expr(fa, e, table, env, agg)
+        _ => const_form_error("this expression is not a Tier-0..2 scalar constant the comptime fold evaluates yet (#comptime-fold)", e)
+    }
+}
+
+/**
+ * predicate_folds_const — does the boolean predicate `e` reduce to a COMPILE-TIME CONSTANT? (the
+ * test-analyzer's assertion discriminator, 0.3.0.29). An assertion whose predicate folds to a
+ * constant can NEVER discriminate at run time — `is_true` of a folded-`true` is a dead guard; a test
+ * whose predicates ALL fold tests the fold/foundation, not live production. This complements
+ * `eval_const`: `eval_const` reduces the SCALAR grammar (numbers/casts/arith), while a predicate is a
+ * BOOLEAN tree — so this also decides a `TCompare` (folds iff every operand folds), a logical `&&`/`||`
+ * (folds iff both sides fold), and a `!` (folds iff its operand folds). A leaf that is a runtime call
+ * or variable never folds, so the whole predicate is a real guard.
+ *
+ * @param e  the checked predicate expression (the single argument of `is_true`/`is_false`)
+ * @return   true iff `e` is comptime-decided (a dead guard), false iff it depends on a runtime value
+ * @since 0.3.0.29
+ */
+pub fn predicate_folds_const(e: TExpr) -> bool {
+    predicate_folds(e, fold_empty_table(), env_empty())
+}
+
+/**
+ * eval_folds — does `eval_const` reduce `e` to a `ConstValue` (versus erroring on a runtime form)?
+ * The scalar leg of `predicate_folds`.
+ *
+ * @param e      the expression to test
+ * @param table  the (empty) type table
+ * @param env    the (empty) environment
+ * @return       true iff `e` folds to a comptime `ConstValue`
+ * @since 0.3.0.29
+ */
+fn eval_folds(e: TExpr, table: TypeTable, env: Env) -> bool {
+    match eval_const(e, table, env, fold_empty_agg()) { ConstValue => true; error => false }
+}
+
+/**
+ * predicate_folds — the recursive boolean-predicate fold decision behind `predicate_folds_const`.
+ * A scalar/arith form defers to `eval_folds`; a comparison, a logical `&&`/`||`, and a `!` are decided
+ * structurally; every other form (a call, a variable) is a runtime value and does not fold.
+ *
+ * @param e      the predicate (sub)expression
+ * @param table  the (empty) type table forwarded to the scalar evaluator
+ * @param env    the (empty) environment forwarded to the scalar evaluator
+ * @return       true iff `e` is comptime-decided
+ * @since 0.3.0.29
+ */
+fn predicate_folds(e: TExpr, table: TypeTable, env: Env) -> bool {
+    if eval_folds(e, table, env) { return true }
+    match e.kind {
+        TCompare as c => compare_operands_fold(c, table, env)
+        TBinary as b => logical_binary_folds(b, table, env)
+        TUnary as u => predicate_folds(u.operand, table, env)
+        _ => false
+    }
+}
+
+/**
+ * compare_operands_fold — a `TCompare` is comptime-decided iff its first operand AND every subsequent
+ * operand each fold to a `ConstValue` (a comparison of constants has a fixed truth value).
+ *
+ * @param c      the typed comparison
+ * @param table  the (empty) type table
+ * @param env    the (empty) environment
+ * @return       true iff every operand folds
+ * @since 0.3.0.29
+ */
+fn compare_operands_fold(c: TCompare, table: TypeTable, env: Env) -> bool {
+    if !eval_folds(c.first, table, env) { return false }
+    mut i: u64 = 0
+    loop {
+        if i >= c.rest.len { break }
+        if !eval_folds(c.rest[i].operand, table, env) { return false }
+        i++
+    }
+    true
+}
+
+/**
+ * logical_binary_folds — a `TBinary` predicate is comptime-decided only for the boolean connectives
+ * `&&`/`||` and only when BOTH sides fold; any other binary that reached here failed `eval_folds`
+ * because an operand is a runtime value, so it does not fold.
+ *
+ * @param b      the typed binary node
+ * @param table  the (empty) type table
+ * @param env    the (empty) environment
+ * @return       true iff `b` is a `&&`/`||` whose both sides fold
+ * @since 0.3.0.29
+ */
+fn logical_binary_folds(b: TBinary, table: TypeTable, env: Env) -> bool {
+    if b.op != lexer::TokenKind::AndAnd && b.op != lexer::TokenKind::OrOr { return false }
+    predicate_folds(b.left, table, env) && predicate_folds(b.right, table, env)
+}
+
+/**
+ * eval_number — evaluate a numeric literal (Tier 0): a float routes to the float-literal
+ * encoder, an integer to the range-checked integer-literal encoder.
+ *
+ * @param n  the typed number literal
+ * @param e  the enclosing expression (its type is the literal's declared type; its
+ *           line/col position any error)
+ * @return   the literal's comptime value, or a located error
+ * @since #comptime-fold
+ */
+fn eval_number(n: TNumber, e: TExpr) -> ConstValue | error {
+    if n.is_float { return eval_float_literal(n.fval, e.type, e) }
+    eval_int_literal(n.value, e.type, e)
+}
+
+/**
+ * eval_int_literal — encode a sign-magnitude integer literal `value` as its declared type
+ * `t`, erroring when `t` is not an integer or the value is out of range for it.
+ *
+ * @param value  the literal's value (sign + 64-bit magnitude — `parser::NumInt`)
+ * @param t      the literal's declared type
+ * @param e      the enclosing expression (positions any error)
+ * @return       the integer comptime value, or a located error
+ * @since #comptime-fold
+ */
+fn eval_int_literal(value: parser::NumInt, t: Type, e: TExpr) -> ConstValue | error {
+    match int_info(t) {
+        error => return const_form_error("comptime fold: a non-integer type on an integer literal (#comptime-fold)", e)
+        IntInfo as info => encode_int_literal(value, info, t, e)
+    }
+}
+
+/**
+ * encode_int_literal — range-check `value` against the type `t` of width/signedness
+ * `info` and produce its two's-complement bits, erroring (M.1; LEGISLATION:148) when the
+ * literal is out of range for its type. Sign-magnitude (drop-128, 2026-07-24) makes the
+ * negative path direct — no `i64`-MIN-avoidance trick needed (the magnitude is already at
+ * hand): a negative value fits iff its magnitude is at most `2^(w-1)` (`i8::MIN`'s magnitude
+ * 128 fits `i8`); the two's-complement bits are `width_mask(w) - mag + 1`.
+ *
+ * @param value  the literal's value (sign + 64-bit magnitude)
+ * @param info   the type's width/signedness
+ * @param t      the literal's declared type
+ * @param e      the enclosing expression (positions any error)
+ * @return       the integer comptime value, or a located out-of-range error
+ * @since #comptime-fold
+ */
+fn encode_int_literal(value: parser::NumInt, info: IntInfo, t: Type, e: TExpr) -> ConstValue | error {
+    if value.neg {
+        if !info.is_signed { return const_form_error("negative literal is out of range for an unsigned type (#comptime-fold)", e) }
+        if value.mag > msb_value(info.width) { return const_form_error("integer literal is out of range for its type (#comptime-fold)", e) }
+        return cv_int(mask_to_width((width_mask(info.width) - value.mag) + (1 to u64), info.width), t)
+    }
+    let max = if info.is_signed { msb_value(info.width) - (1 to u64) } else { width_mask(info.width) }
+    if value.mag > max { return const_form_error("integer literal is out of range for its type (#comptime-fold)", e) }
+    cv_int(mask_to_width(value.mag, info.width), t)
+}
+
+/**
+ * eval_float_literal — encode a float literal from its f64 value into raw IEEE bits.
+ * Only f64 is folded today; an f32 (which needs the not-yet-exposed `f32_bits`
+ * primitive) and any non-float type are a located error.
+ *
+ * @param fval  the literal's f64 value
+ * @param t     the literal's declared type
+ * @param e     the enclosing expression (positions any error)
+ * @return      the float comptime value, or a located error
+ * @since #comptime-fold
+ */
+fn eval_float_literal(fval: f64, t: Type, e: TExpr) -> ConstValue | error {
+    match t {
+        Prim as p => {
+            if p.kind == PrimKind::F64 { return cv_float(teko::f64_bits(fval), false) }
+            const_form_error("comptime folding of this float width is not yet supported (only f64) (#comptime-fold)", e)
+        }
+        _ => const_form_error("comptime fold: a non-float type on a float literal (#comptime-fold)", e)
+    }
+}
+
+/**
+ * eval_cast_expr — evaluate a `to T` cast (Tier 1): fold the operand, then convert it to
+ * the cast's target type `e.type`, erroring on an out-of-range value (M.1).
+ *
+ * @param c      the typed cast node
+ * @param e      the enclosing expression (its type is the cast target; positions errors)
+ * @param table  the type table (forwarded to the operand fold)
+ * @param env    the environment (forwarded to the operand fold)
+ * @param agg    the module-aggregate resolution table (forwarded to the operand fold)
+ * @return       the converted comptime value, or a located error
+ * @since #comptime-fold
+ */
+fn eval_cast_expr(c: TCast, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
+    match eval_const(c.expr, table, env, agg) {
+        error as x => return x
+        ConstValue as v => apply_cast(v, e.type, e)
+    }
+}

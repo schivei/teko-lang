@@ -1,0 +1,245 @@
+use teko::parser
+
+
+/**
+ * Add every PARAMETER of `f` to the cell universe: one bare cell per param, marking a `Reference`
+ * param as `is_ref_param`. The bare cell anchors the referent an outlives proof reads.
+ *
+ * @param TFunction f  the analyzed function
+ * @param []Cell cells  the cell universe so far
+ * @return []Cell  the cell universe including `f`'s parameters
+ */
+fn add_param_cells(f: TFunction, cells: []Cell) -> []Cell {
+    mut acc = cells
+    mut i = 0
+    loop {
+        if i >= f.params.len { break }
+        let p = f.params[i]
+        let is_ref = if p.has_type { type_ann_is_ref(p.type_ann) } else { false }
+        acc = add_cell(acc, p.name, "", is_ref)
+        i++
+    }
+    acc
+}
+
+/**
+ * Add every BINDING target and one-hop field cell reachable from a statement block to the universe.
+ * A `TBinding` to a `SimpleName` yields a bare cell; a one-hop `x.f` field read / write off a bare
+ * local yields an `x.f` cell (`a.b.c` is NOT a cell — it collapses to `⊤`, added nowhere).
+ *
+ * @param []TStatement body  the typed statement block
+ * @param []Cell cells  the cell universe so far
+ * @return []Cell  the cell universe including this block's binding + one-hop cells
+ */
+fn add_block_cells(body: []TStatement, cells: []Cell) -> []Cell {
+    mut acc = cells
+    mut i = 0
+    loop {
+        if i >= body.len { break }
+        acc = add_stmt_cells(body[i], acc)
+        i++
+    }
+    acc
+}
+
+/**
+ * Add the binding-target + one-hop field cells named by one statement, recursing into nested blocks
+ * (loop / defer / adopt bodies + if / match arms reached via expressions). Bounded by `f`'s syntactic
+ * size (each node is visited once).
+ *
+ * @param TStatement s  the typed statement
+ * @param []Cell cells  the cell universe so far
+ * @return []Cell  the cell universe including this statement's cells
+ */
+fn add_stmt_cells(s: TStatement, cells: []Cell) -> []Cell {
+    match s {
+        TBinding as b => add_binding_cell(b, cells)
+        TAssign as a => add_expr_cells(a.value, cells)
+        TReturn as r => if r.has_value { add_expr_cells(r.value, cells) } else { cells }
+        TExprStmt as es => add_expr_cells(es.expr, cells)
+        TLoopStmt as l => add_block_cells(l.body, add_block_cells(l.init, cells))
+        TBreakStmt => cells
+        TContinueStmt => cells
+        TDeferStmt as d => add_block_cells(d.body, cells)
+        TAdoptStmt as a => add_block_cells(a.body, cells)
+    }
+}
+
+/**
+ * Add the bare cell named by a binding's `SimpleName` target (a destructure names no single cell),
+ * then the one-hop cells of its value.
+ *
+ * @param TBinding b  the typed binding
+ * @param []Cell cells  the cell universe so far
+ * @return []Cell  the cell universe including this binding's target cell
+ */
+fn add_binding_cell(b: TBinding, cells: []Cell) -> []Cell {
+    match b.target {
+        parser::SimpleName as sn => add_expr_cells(b.value, add_cell(cells, sn.name, "", false))
+        parser::DestructurePattern => add_expr_cells(b.value, cells)
+    }
+}
+
+/**
+ * Add a one-hop field cell (`x.f` off a bare local) named by an expression, recursing into control
+ * flow so nested blocks contribute their cells. A deeper path (`a.b.c`) contributes no cell (it
+ * collapses to `⊤`); a non-field expression contributes only its sub-cells.
+ *
+ * @param TExpr e  the typed expression
+ * @param []Cell cells  the cell universe so far
+ * @return []Cell  the cell universe including this expression's one-hop cells
+ */
+fn add_expr_cells(e: TExpr, cells: []Cell) -> []Cell {
+    match e.kind {
+        TFieldAccess as fa => add_field_cell(fa, cells)
+        TIfExpr as f => add_block_cells(f.else_blk, add_block_cells(f.then_blk, cells))
+        TMatchExpr as m => add_match_cells(m, cells)
+        _ => cells
+    }
+}
+
+/**
+ * Add the `x.f` one-hop cell for a field access whose receiver is a BARE local (`expr_is_bare_var`
+ * shape in `escape.tks`); a non-bare receiver contributes no one-hop cell (the path is deeper).
+ *
+ * @param TFieldAccess fa  the typed field access
+ * @param []Cell cells  the cell universe so far
+ * @return []Cell  the cell universe including the one-hop cell (or unchanged)
+ */
+fn add_field_cell(fa: TFieldAccess, cells: []Cell) -> []Cell {
+    match fa.receiver.kind {
+        TVar as v => add_cell(cells, v.name, fa.field, false)
+        _ => add_expr_cells(fa.receiver, cells)
+    }
+}
+
+/**
+ * Add the one-hop cells reachable through a match expression's arm bodies (each arm is a statement
+ * block, like an if-branch).
+ *
+ * @param TMatchExpr m  the typed match expression
+ * @param []Cell cells  the cell universe so far
+ * @return []Cell  the cell universe including the arm bodies' cells
+ */
+fn add_match_cells(m: TMatchExpr, cells: []Cell) -> []Cell {
+    mut acc = cells
+    mut i = 0
+    loop {
+        if i >= m.arms.len { break }
+        acc = add_block_cells(m.arms[i].body, acc)
+        i++
+    }
+    acc
+}
+
+/**
+ * Seed the points-to axis: a `Reference` param cell starts `PtParam(i)` (the caller owns its slot);
+ * every other cell starts `PtFrame` (the climb-floor). Parallel to `cells` by index.
+ *
+ * @param []Cell cells  the cell universe
+ * @return []PointsTo  the seeded points-to axis
+ */
+fn seed_pt(cells: []Cell) -> []PointsTo {
+    mut acc: []PointsTo = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= cells.len { break }
+        if cells[i].is_ref_param {
+            acc = teko::list::push(acc, PtParam { id = PtParamId { index = i to u32 } })
+        } else {
+            acc = teko::list::push(acc, PtFrame { })
+        }
+        i++
+    }
+    acc
+}
+
+/**
+ * Seed the borrowed-from axis: a `Reference` param cell starts `BfParam(i)` (it borrows its own
+ * slot); every other cell starts `BfNone`. Parallel to `cells` by index.
+ *
+ * @param []Cell cells  the cell universe
+ * @return []BorrowedFrom  the seeded borrowed-from axis
+ */
+fn seed_bf(cells: []Cell) -> []BorrowedFrom {
+    mut acc: []BorrowedFrom = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= cells.len { break }
+        if cells[i].is_ref_param {
+            acc = teko::list::push(acc, BfParam { id = BfParamId { index = i to u32 } })
+        } else {
+            acc = teko::list::push(acc, BfNone { })
+        }
+        i++
+    }
+    acc
+}
+
+/**
+ * Seed the unique-vs-shared axis: every cell starts `UsUnique` (the climb-floor — aliasing joins it
+ * up to `UsShared`). Parallel to `cells` by index.
+ *
+ * @param []Cell cells  the cell universe
+ * @return []Unique  the seeded unique-vs-shared axis
+ */
+fn seed_us(cells: []Cell) -> []Unique {
+    mut acc: []Unique = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= cells.len { break }
+        acc = teko::list::push(acc, UsUnique { })
+        i++
+    }
+    acc
+}
+
+/**
+ * The lattice rank of a points-to value (`PtFrame` = 0 < concrete sites = 1 < `PtTop` = 2). The join
+ * keeps the higher rank; equal ranks with differing payloads climb to `PtTop` (the safe leak).
+ *
+ * @param PointsTo p  the points-to value
+ * @return u32  its lattice rank
+ */
+fn pt_rank(p: PointsTo) -> u32 {
+    match p {
+        PtFrame => 0
+        PtParam => 1
+        PtAdopter => 1
+        PtRoot => 1
+        PtTop => 2
+    }
+}
+
+/**
+ * Do two points-to values name the SAME concrete site? Two `PtParam` agree iff same slot; two
+ * `PtAdopter` agree iff same non-top region; `PtRoot` agrees with `PtRoot`. Used by the join to
+ * decide whether equal-rank concrete sites climb to `PtTop`.
+ *
+ * @param PointsTo a  the first points-to value
+ * @param PointsTo b  the second points-to value
+ * @return bool  true iff both name the identical concrete allocation site
+ */
+fn pt_same_site(a: PointsTo, b: PointsTo) -> bool {
+    match a {
+        PtParam as pa => match b { PtParam as pb => pa.id.index == pb.id.index; _ => false }
+        PtAdopter as aa => match b { PtAdopter as ab => adopter_same(aa.id, ab.id); _ => false }
+        PtRoot => match b { PtRoot => true; _ => false }
+        PtFrame => false
+        PtTop => false
+    }
+}
+
+/**
+ * Do two adopter ids name the same lexical region? A `⊤` fallback id never agrees (its region is
+ * un-nameable), so two `PtAdopter(⊤)` still climb to `PtTop` — conservative.
+ *
+ * @param PtAdopterId a  the first adopter id
+ * @param PtAdopterId b  the second adopter id
+ * @return bool  true iff both are concrete and share a region id
+ */
+fn adopter_same(a: PtAdopterId, b: PtAdopterId) -> bool {
+    if a.top { return false }
+    if b.top { return false }
+    a.region == b.region
+}

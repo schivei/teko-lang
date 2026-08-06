@@ -1,0 +1,245 @@
+// src/checker/resolve.tks  (namespace 'teko::checker')
+use teko::parser
+
+
+/**
+ * type_render — (C1.8) render a semantic Type to a human string for diagnostics ("expected X,
+ * found Y"): prims → "i32"/…, "byte", "str", "error", "void", slice → "[]elem", variant → "A |
+ * B | …", named → "name". Recursion builds slice/variant bottom-up. Mirror of
+ * resolve.c::tk_type_render. This depends ONLY on the Type model (E2-independent — it never
+ * touches the surface `error` value), so it is materialized now, not deferred to E2. A SENTINEL
+ * slice (a `Void`-marker element, the untyped `empty()`) renders its hole as "_", matching the C
+ * twin's NULL-pointer case.
+ *
+ * @param t  the resolved type to render
+ * @return   its human-readable spelling
+ */
+pub fn type_render(t: Type) -> str {
+    match t {
+        Prim as p => prim_name(p.kind)
+        Byte => "byte"
+        Char => "char"
+        Str => "str"
+        Error => "error"
+        Void => "void"
+        Named as n => name_last_segment(n.name)   // (#109 W3) canonical "ns::Name" → bare "Name" for readable diagnostics
+        Slice as s => match s.element { Void => "[]_"; _ => $"[]{type_render(s.element)}" }
+        Variant as v => render_members(v.members)
+        Func as f => render_func(f)   // (C1.8) "(p0, …) -> ret" — full mirror of resolve.c (M.3, show what we know)
+        Ptr as p => match p.inner { null => "ptr"; Type as t => $"ptr<{type_render(t)}>" }   // ptr<T> human render
+        Uptr => "uptr"   // (C7.1a) opaque word-size unsigned
+        Reference as r => $"Ref<{type_render(r.inner)}>"   // (MEM-1b) Ref<T> human render
+        Null => "null"
+    }
+}
+
+// (C1.8) render a function type "(p0, p1, …) -> ret" — mirror of the FUNC branch of
+// resolve.c::tk_type_render (M.3, show what we know). `ret` may be void.
+fn render_func(f: Func) -> str {
+    mut params = ""
+    mut i = 0
+    loop {
+        if i >= f.params.len { break }
+        if i > 0 { params = $"{params}, " }
+        params = $"{params}{type_render(f.params[i])}"
+        i++
+    }
+    $"({params}) -> {type_render(f.ret)}"
+}
+
+// (C1.8) join variant members with " | " (e.g. "Circle | Square | Triangle"). Mirror of the
+// variant branch of resolve.c::tk_type_render.
+// A BARE `null` MEMBER RENDERS LAST, whatever position it holds internally. Owner ruling
+// 2026-07-28: *"a mensagem precisa de correção, pois ela induz a erro, não é `null | T` é
+// `T | null`"*.
+//
+// The two orders are not a disagreement about the type. `union_normalize_null` deliberately
+// collapses any bare null into a single LEADING member, so the canonical internal form of every
+// nullable union has `Null` first — including one the programmer wrote as `u64 | null`. Rendering
+// that order back verbatim shows a spelling nobody typed: a stop reading ``arithmetic operand of
+// type `null | u64` `` sends its reader hunting for a declaration that does not exist in the
+// source, which is time this wagon already spent.
+//
+// The canonical order is untouched — `type_eq`, `exhaustive` and the backends go on reading `Null`
+// first — and only the HUMAN rendering moves it to the tail, which is how the language is written
+// and how `T | null` appears in every fixture and doc.
+fn render_members(members: []Type) -> str {
+    if members.len == 0 { return "<empty variant>" }
+    let ordered = null_member_last(members)
+    mut out = type_render(ordered[0])
+    mut i = 1
+    loop {
+        if i >= ordered.len { break }
+        out = $"{out} | {type_render(ordered[i])}"
+        i++
+    }
+    out
+}
+
+/**
+ * null_member_last — the members with a bare `null` moved to the END, for RENDERING only.
+ *
+ * The exact inverse of `union_normalize_null`'s leading-null canonicalization, applied at the one
+ * place a human reads a type. Nothing else may use it: the canonical order is what `type_eq`,
+ * `exhaustive` and the backends agree on, so reordering it anywhere but inside a message would
+ * change meaning instead of presentation.
+ *
+ * @param members  the union's members in canonical order (bare null first, when present)
+ * @return         the same members with the bare null last; unchanged when there is none
+ */
+fn null_member_last(members: []Type) -> []Type {
+    if !from_is_bare_null(members[0]) { return members }
+    mut out: []Type = teko::list::empty()
+    mut i = 1
+    loop {
+        if i >= members.len { break }
+        out = teko::list::push(out, members[i])
+        i++
+    }
+    teko::list::push(out, Null { })
+}
+
+// ── (S4) type-generic INSTANTIATION pass ────────────────────────────────────────────────────────
+// Discover every WRITTEN generic-type use `Box<i64>` across the program and STAMP a concrete decl
+// `Box__g__i64 = struct { value: i64 }` into the TypeTable BEFORE typing, so field-access and
+// struct-init see concrete fields. No generic type used → the table is returned UNCHANGED (the
+// non-generic corpus is unperturbed). The stamped name reuses generic_inst_name, so a USE
+// (resolve_generic_inst) and its stamped decl agree byte-for-byte. (C: tk_instantiate_types.)
+//
+// SCOPE (this crumb): instantiation sites are fn params/returns, type-decl bodies (struct/variant/
+// alias), and binding ANNOTATIONS (recursing loop/defer blocks). Casts and if/match-nested bindings
+// are not yet walked (a later crumb) — those surface as an "unknown type" at typing, not silently.
+
+// substitute type-parameter NAMES with their argument type-exprs throughout a (syntactic) type-expr.
+fn subst_texpr_names(te: parser::TypeExpr, params: []str, args: []parser::TypeExpr) -> parser::TypeExpr {
+    match te {
+        parser::NamedType as nt => {
+            if nt.path.segments.len == 1 && nt.args.len == 0 {
+                let nm = nt.path.segments[0].name
+                mut k = 0
+                loop {
+                    if k >= params.len { break }
+                    if params[k] == nm { return args[k] }
+                    k++
+                }
+            }
+            mut nargs: []parser::TypeExpr = teko::list::empty()
+            mut j = 0
+            loop { if j >= nt.args.len { break }; nargs = teko::list::push(nargs, subst_texpr_names(nt.args[j], params, args)); j++ }
+            parser::NamedType { path = nt.path; args = nargs }
+        }
+        parser::SliceType as st => parser::SliceType { element = subst_texpr_names(st.element, params, args) }
+        parser::UnionType as ut => {
+            mut ms: []parser::TypeExpr = teko::list::empty()
+            mut i = 0
+            loop { if i >= ut.members.len { break }; ms = teko::list::push(ms, subst_texpr_names(ut.members[i], params, args)); i++ }
+            parser::UnionType { members = ms }
+        }
+        parser::FunctionType as fnt => {   // (W10a) recurse into params + return
+            mut nps: []parser::TypeExpr = teko::list::empty()
+            mut i = 0
+            loop { if i >= fnt.params.len { break }; nps = teko::list::push(nps, subst_texpr_names(fnt.params[i], params, args)); i++ }
+            parser::FunctionType { params = nps; ret = subst_texpr_names(fnt.ret, params, args) }
+        }
+    }
+}
+
+/**
+ * Substitute the enclosing type's parameters through a method's SIGNATURE (its param type
+ * annotations and return type) so a stamped instance carries a concrete method signature (#254
+ * layer 2). Only the signature is rewritten — the body statements are left untouched, because a
+ * stamped-instance method is never re-typed nor re-emitted from this syntactic body; its concrete
+ * body is stamped from the ALREADY-TYPED template method by the mono pass (layer 3). The receiver
+ * param (index 0, `has_type=false`) is preserved verbatim: the checker re-injects the enclosing
+ * (now concrete) type as its type when the instance's method is typed/registered.
+ *
+ * @param f       the method (a struct/class body Function)
+ * @param params  the enclosing type's parameter names
+ * @param args    the concrete type-args at this instantiation
+ * @return        the method with its param annotations + return type substituted to concrete types
+ * @since onda-3 (#254)
+ */
+fn subst_method_sig_names(f: parser::Function, params: []str, args: []parser::TypeExpr) -> parser::Function {
+    mut nps: []parser::Param = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= f.params.len { break }
+        let np = if f.params[i].has_type {
+            parser::Param { name = f.params[i].name; has_type = true; type_ann = subst_texpr_names(f.params[i].type_ann, params, args); is_params = f.params[i].is_params; has_default = f.params[i].has_default; default_expr = f.params[i].default_expr }
+        } else {
+            f.params[i]
+        }
+        nps = teko::list::push(nps, np)
+        i++
+    }
+    let nret = if f.has_return { subst_texpr_names(f.return_type, params, args) } else { f.return_type }
+    parser::Function { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = nps; has_return = f.has_return; return_type = nret; body = f.body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; os_guard = f.os_guard; is_intern = f.is_intern; is_abstract = f.is_abstract; is_virtual = f.is_virtual; is_override = f.is_override; has_inject = f.has_inject; injects = f.injects; is_unsafe = f.is_unsafe; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
+}
+
+/**
+ * Substitute the enclosing type's parameters through a method LIST — every method's signature is
+ * rewritten to concrete types (#254 layer 2). A NO-OP on an empty list (the existing corpus's
+ * generic types carry no methods) → byte-identical.
+ *
+ * @param methods the enclosing type's methods
+ * @param params  the enclosing type's parameter names
+ * @param args    the concrete type-args at this instantiation
+ * @return        the methods with their signatures substituted
+ * @since onda-3 (#254)
+ */
+fn subst_methods_names(methods: []parser::Function, params: []str, args: []parser::TypeExpr) -> []parser::Function {
+    mut out: []parser::Function = teko::list::empty()
+    mut i = 0
+    loop { if i >= methods.len { break }; out = teko::list::push(out, subst_method_sig_names(methods[i], params, args)); i++ }
+    out
+}
+
+/**
+ * Substitute the enclosing type's parameters throughout a type-decl BODY (struct fields + methods /
+ * class fields + methods / variant / alias). (#254 layer 2) methods are now KEPT and their signatures
+ * substituted — previously dropped for a struct (`methods = []`), previously passed through
+ * un-substituted for a class via the `_` arm. A body kind that carries no type-exprs (enum/flags/
+ * extern) passes through unchanged.
+ *
+ * @param body    the generic type's body
+ * @param params  the enclosing type's parameter names
+ * @param args    the concrete type-args at this instantiation
+ * @return        the body with fields AND method signatures substituted to concrete types
+ * @since onda-3 (#254)
+ */
+fn subst_body_names(body: parser::TypeBody, params: []str, args: []parser::TypeExpr) -> parser::TypeBody {
+    match body {
+        parser::StructBody as sb => {
+            mut nf: []parser::Field = teko::list::empty()
+            mut i = 0
+            loop { if i >= sb.fields.len { break }; nf = teko::list::push(nf, parser::Field { name = sb.fields[i].name; type_ann = subst_texpr_names(sb.fields[i].type_ann, params, args); vis = parser::Visibility::Pub; is_intern = false; has_doc = sb.fields[i].has_doc; doc = sb.fields[i].doc }); i++ }
+            parser::StructBody { fields = nf; methods = subst_methods_names(sb.methods, params, args); implements = sb.implements; consts = sb.consts }
+        }
+        parser::ClassBody as cb => {
+            mut nf: []parser::Field = teko::list::empty()
+            mut i = 0
+            loop { if i >= cb.fields.len { break }; nf = teko::list::push(nf, parser::Field { name = cb.fields[i].name; type_ann = subst_texpr_names(cb.fields[i].type_ann, params, args); vis = cb.fields[i].vis; is_intern = cb.fields[i].is_intern; has_doc = cb.fields[i].has_doc; doc = cb.fields[i].doc }); i++ }
+            parser::ClassBody { kind = cb.kind; has_base = cb.has_base; base_name = cb.base_name; has_base_binding = cb.has_base_binding; base_binding_name = cb.base_binding_name; implements = cb.implements; fields = nf; methods = subst_methods_names(cb.methods, params, args); consts = cb.consts }
+        }
+        parser::VariantBody as vb => parser::VariantBody { type_expr = subst_texpr_names(vb.type_expr, params, args) }
+        parser::AliasBody as ab => parser::AliasBody { alias = subst_texpr_names(ab.alias, params, args) }
+        _ => body   // enum / flags / extern carry no type-exprs
+    }
+}
+
+// collect every generic-type USE (a NamedType carrying args) reachable in a type-expr — innermost
+// first, so a nested `Box<i64>` inside `[]Box<i64>` is stamped before the enclosing use.
+fn collect_texpr_insts(te: parser::TypeExpr, acc: []parser::TypeExpr) -> []parser::TypeExpr {
+    mut out = acc
+    match te {
+        parser::NamedType as nt => {
+            mut i = 0
+            loop { if i >= nt.args.len { break }; out = collect_texpr_insts(nt.args[i], out); i++ }
+            if nt.args.len > 0 { out = teko::list::push(out, te) }
+        }
+        parser::SliceType as st => out = collect_texpr_insts(st.element, out)
+        parser::UnionType as ut => { mut i = 0; loop { if i >= ut.members.len { break }; out = collect_texpr_insts(ut.members[i], out); i++ } }
+        parser::FunctionType as fnt => { mut i = 0; loop { if i >= fnt.params.len { break }; out = collect_texpr_insts(fnt.params[i], out); i++ }; out = collect_texpr_insts(fnt.ret, out) }   // (W10a)
+    }
+    out
+}

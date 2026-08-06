@@ -1,0 +1,246 @@
+// src/checker/resolve.tks  (namespace 'teko::checker')
+use teko::parser
+
+
+/**
+ * type_has_sentinel — (#83) does `t` carry a SENTINEL anywhere (a Slice whose element is
+ * `Void`)? `type_eq` treats a sentinel as equal to ANY concrete peer (see type.tks), which is
+ * right for ASSIGNABILITY but wrong for JOIN's "equal → return `a`" shortcut: if `a` is the
+ * (less informative) sentinel side and `b` is concrete, blindly returning `a` silently discards
+ * the concrete element type a sibling array-literal entry established (`[[], [1]]`'s inner `[]`
+ * joined against `[1]`'s `[]i64` — see type_join). Recurses through Slice so a nested sentinel
+ * (`[][]Void`) is still detected. Mirror: resolve.c::tk_type_has_sentinel.
+ *
+ * @param t  the resolved type to inspect
+ * @return   true iff `t` carries a `Void`-marker sentinel
+ */
+fn type_has_sentinel(t: Type) -> bool {
+    match t {
+        Slice as s => match s.element { Void => true; _ => type_has_sentinel(s.element) }
+        _ => false
+    }
+}
+
+// (#41-followon) Collect `t`'s members into `acc` for a union JOIN: an INLINE variant contributes
+// its members (flattened); anything else contributes itself. Deduped by type_eq. Named variants
+// stay NOMINAL (consistent with how `Type | error` keeps `Type` named). (Mirror of resolve.c.)
+fn union_collect(acc: []Type, t: Type, table: TypeTable) -> []Type {
+    match t {
+        Variant as v => {
+            mut out = acc
+            mut i = 0
+            loop {
+                if i >= v.members.len { break }
+                out = union_collect(out, v.members[i], table)
+                i++
+            }
+            out
+        }
+        _ => {
+            mut i = 0
+            loop {
+                if i >= acc.len { break }
+                if type_eq(acc[i], t) { return acc }   // dedup
+                i++
+            }
+            teko::list::push(acc, t)
+        }
+    }
+}
+
+/**
+ * type_join — the JOIN (least-upper-bound) of two arm/branch types, for match/`if` value
+ * unification (B.20, #41-followon). If either widens into the other, the WIDER one; otherwise the
+ * UNION variant `a | b` (members flattened, deduped, and null-normalized) — the branch values are
+ * bare cases that each widen into this union, which in turn widens into any wider declared return
+ * variant. Mirror of resolve.c.
+ *
+ * Two invariants this function must not break:
+ *
+ * - (#83) "Equal" per `type_eq` ALSO holds sentinel-vs-concrete (`[]Void == []i64`, permissive by
+ *   design — see `type_eq`'s Slice case). Blindly returning `a` there discards a concrete
+ *   element type when the SENTINEL is the first operand: `[[], [1]]` folds `type_join` left to
+ *   right over `[]`'s `[]Void` then `[1]`'s `[]i64`, and the accumulator was the sentinel, so the
+ *   join silently kept `[]Void` and codegen later saw an untyped empty slice (the interpreter, which ignores
+ *   element types, ran fine). Prefer the CONCRETE side when the two are sentinel-equal but not
+ *   `type_has_sentinel`-equal.
+ * - a union BUILT here is canonicalized through `union_normalize_null`, exactly like one written
+ *   out in source (`resolve_type`'s `UnionType` arm). Null-first is not cosmetic: the own backend
+ *   classifies a two-member absence union by which member is `Null` (`lower.null_union_shape`),
+ *   so an inferred `mut x = if c { 5 } else { null }` used to produce `Variant{i64, Null}` and be
+ *   REJECTED with "null match pattern not yet lowered", while the identical annotated
+ *   `: i64 | null` worked. One normalizer, every construction site (M.5/D39). Degrau 30 made the
+ *   own backend read the `Null` member's INDEX rather than assume it, so a non-canonical order can
+ *   no longer swap two arms; the normalization stays the single source of that order regardless.
+ *
+ * @param a      the first branch/arm type
+ * @param b      the second branch/arm type
+ * @param table  the resolved type table (drives `widens_into`)
+ * @return       the least-upper-bound type of `a` and `b`
+ */
+fn type_join(a: Type, b: Type, table: TypeTable) -> Type {
+    if type_eq(a, b) {
+        let a_sentinel = type_has_sentinel(a)
+        let b_sentinel = type_has_sentinel(b)
+        return if a_sentinel && !b_sentinel { b } else { a }   // prefer the concrete side
+    }
+    if widens_into(a, b, table) { return b }
+    if widens_into(b, a, table) { return a }
+    let m1 = union_collect(teko::list::empty(), a, table)
+    let m2 = union_collect(m1, b, table)
+    Variant { members = union_normalize_null(m2) }
+}
+
+// ── (S4) generics inference: subst + unify ───────────────────────────────────────────────────
+// A type-param → concrete-type binding (parallel arrays). `params` is the generic's type-param
+// universe; `names`/`types` are the bindings discovered by unify. Used by type_call (call result
+// type) and the monomorph pass (stamping). (C: tk_subst.)
+pub type Subst = struct { params: []str; names: []str; types: []Type }
+
+fn is_type_param(name: str, params: []str) -> bool {
+    mut i = 0
+    loop { if i >= params.len { break }; if params[i] == name { return true }; i++ }
+    false
+}
+
+fn subst_find(s: Subst, name: str) -> Type | null {
+    mut i = 0
+    loop { if i >= s.names.len { break }; if s.names[i] == name { return s.types[i] }; i++ }
+    null
+}
+
+/**
+ * Concretize a PHANTOM generic-instance NAME through a substitution: rewrite every type-param TOKEN
+ * embedded in a mangled `Base__g__…` name by the `type_mangle` of its bound concrete type, so a
+ * `Box__g__T` referenced inside a generic FUNCTION instance (`wrap__g__i64`, `T → i64`) becomes the
+ * concrete `Box__g__i64` — the stamp the mono pass emits. A generic function that constructs a generic
+ * TYPE from its own type-param leaves that phantom on every `TExpr.type`, return type and local
+ * annotation of the abstract template body (`type_struct_lit` tags it, deferring the stamp); this is
+ * the single hook that retargets them ALL once `T` is bound, mirroring the `__g__`-aware structural
+ * substitution the type-template body path (`subst_body_names`) already enjoys.
+ *
+ * Only a maximal non-`_` token that is a bound TYPE-PARAM (`is_type_param` over `s.params`, with a
+ * concrete binding in `s`) is rewritten; the base and any concrete/nested-instance tokens pass through
+ * verbatim, and the `_`/`__`/`__g__` delimiter structure is preserved byte-for-byte, so the result is
+ * exactly what `generic_inst_name` would have produced from the substituted arguments. A name carrying
+ * no `__g__` stamp, or none of whose tokens is a bound param, returns UNCHANGED — a strict no-op for
+ * every non-phantom name (the whole existing corpus), so `subst_type` stays byte-identical there.
+ *
+ * @param name  a resolved type name (a `__g__`-stamped instance name, or any other)
+ * @param s     the active `{type-param → concrete}` substitution
+ * @return      `name` with its embedded type-param tokens concretized, or `name` unchanged
+ */
+pub fn subst_instance_name(name: str, s: Subst) -> str {
+    if !name_is_g_instance(name) { return name }
+    mut out = ""
+    mut i: u64 = 0
+    loop {
+        if i >= name.len { break }
+        if name[i] == b'_' {
+            mut j = i
+            loop { if j >= name.len { break }; if name[j] != b'_' { break }; j++ }
+            out = out ~ teko::str::slice(name, i, j)   // copy the `_`-run delimiter verbatim
+            i = j
+        } else {
+            mut j = i
+            loop { if j >= name.len { break }; if name[j] == b'_' { break }; j++ }
+            let tok = teko::str::slice(name, i, j)
+            if is_type_param(tok, s.params) {
+                match subst_find(s, tok) {
+                    Type as ct => out = out ~ type_mangle(ct)
+                    null => out = out ~ tok
+                }
+            } else {
+                out = out ~ tok
+            }
+            i = j
+        }
+    }
+    out
+}
+
+// substitute each BOUND type-param Named{Tp} by its concrete type. TOTAL over Type cases; structural
+// recursion. A Named that is not a bound param passes through unchanged; a phantom generic-instance
+// name whose args embed a bound param is re-mangled to its concrete stamp (subst_instance_name).
+// (C: tk_subst_type.)
+pub fn subst_type(t: Type, s: Subst) -> Type {
+    match t {
+        Named as n => match subst_find(s, n.name) {
+            Type as ct => ct
+            null => {
+                let rem = subst_instance_name(n.name, s)
+                if teko::runtime::str_eq(rem, n.name) { t } else { Named { name = rem } }
+            }
+        }
+        Slice as sl => Slice { element = subst_type(sl.element, s) }
+        Reference as r => Reference { inner = subst_type(r.inner, s) }   // (MEM-1b) Ref<T> substitutes its referenced type
+        Variant as v => {
+            mut ms: []Type = teko::list::empty()
+            mut i = 0
+            loop { if i >= v.members.len { break }; ms = teko::list::push(ms, subst_type(v.members[i], s)); i++ }
+            Variant { members = union_normalize_null(ms) }
+        }
+        Func as f => {
+            mut ps: []Type = teko::list::empty()
+            mut i = 0
+            loop { if i >= f.params.len { break }; ps = teko::list::push(ps, subst_type(f.params[i], s)); i++ }
+            Func { params = ps; ret = subst_type(f.ret, s); variadic = false; param_names = []; n_required = (ps).len; defaults = [] }
+        }
+        _ => t   // Prim, Byte, Char, Str, Error, Void, Ptr, Uptr — leaves
+    }
+}
+
+/**
+ * type_has_void_sentinel — a non-concrete Void SENTINEL (`empty()` → `[]Void`)? Such a type
+ * cannot pin a type-param (it concretizes only in a typed slot — M.2 no-guessing).
+ * (C: tk_type_has_void_sentinel.)
+ *
+ * @param t  the resolved argument type to inspect
+ * @return   true iff `t` is a `Void`-marker sentinel
+ */
+fn type_has_void_sentinel(t: Type) -> bool {
+    match t {
+        Void => true
+        Slice as sl => match sl.element { Void => true; _ => false }
+        _ => false
+    }
+}
+
+/**
+ * unify — unify a param PATTERN (may contain type-param Named's) against a concrete ARG type,
+ * extending the Subst. Binds each type-param; a re-occurrence must AGREE (S4: exact; LUB is a
+ * future refinement). `[]T` unifies its element by structure. REJECT a Void-sentinel arg (cannot
+ * pin T — M.2). A non-type-param (concrete) pattern binds nothing (strict arg-check happens
+ * elsewhere). (C: tk_unify.)
+ *
+ * @param pattern  the (possibly type-param-carrying) declared pattern
+ * @param arg      the concrete argument type
+ * @param s        the substitution accumulated so far
+ * @param table    the type table
+ * @return         the extended substitution, or an inference-conflict error
+ */
+pub fn unify(pattern: Type, arg: Type, s: Subst, table: TypeTable) -> Subst | error {
+    match pattern {
+        Named as n => {
+            if !is_type_param(n.name, s.params) { return s }
+            if type_has_void_sentinel(arg) {
+                return error { message = $"cannot infer type parameter {n.name} from an untyped empty slice / null — annotate the argument" }
+            }
+            // (MEM Step 0, B) ESCAPE GATE — a reference can NEVER be the INFERRED binding for a type
+            // parameter: `id(r)` where r: Ref<i64> would stamp `int64_t * id__g__ref_i64(int64_t *)`,
+            // returning a raw reference that outlives its target. Mirror of the written-arg gate in
+            // resolve_generic_inst (A); same message.
+            match arg { Reference => return error { message = "a reference cannot be a generic type argument (it would be stored/escape)" }; _ => { } }
+            match subst_find(s, n.name) {
+                Type as existing => {
+                    if type_eq(existing, arg) { s }
+                    else { error { message = $"type parameter {n.name} inferred as conflicting types" } }
+                }
+                null => Subst { params = s.params; names = teko::list::push(s.names, n.name); types = teko::list::push(s.types, arg) }
+            }
+        }
+        Slice as sl => match arg { Slice as asl => unify(sl.element, asl.element, s, table); _ => s }
+        Reference as r => match arg { Reference as ar => unify(r.inner, ar.inner, s, table); _ => s }   // (MEM-1b)
+        _ => s
+    }
+}

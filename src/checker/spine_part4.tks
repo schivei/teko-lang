@@ -1,0 +1,258 @@
+use teko::parser
+
+
+/**
+ * Join `UsShared` into the cells of both sides of an alias `dst = src` (both `dst` and the aliased
+ * `src` become shared), returning the updated axis. Return-value threaded (a functional accumulate,
+ * like the cell-building walk) so the join is deterministic on both engines.
+ *
+ * @param []Cell cells  the cell universe
+ * @param []Unique us  the unique-vs-shared axis so far
+ * @param str dst  the destination binding name
+ * @param str src  the aliased source name
+ * @return []Unique  the axis with both cells joined to `UsShared`
+ */
+fn mark_alias_shared(cells: []Cell, us: []Unique, dst: str, src: str) -> []Unique {
+    join_us_at(cells, join_us_at(cells, us, dst, ""), src, "")
+}
+
+/**
+ * Join `UsShared` into the cell keyed by `name` / `field`, returning the possibly-updated axis. A
+ * missing cell leaves the axis unchanged (the key is not in this function's universe).
+ *
+ * @param []Cell cells  the cell universe
+ * @param []Unique us  the unique-vs-shared axis
+ * @param str name  the cell's binding name
+ * @param str field  the cell's one-hop field ("" for a bare cell)
+ * @return []Unique  the axis with the named cell joined to `UsShared`
+ */
+fn join_us_at(cells: []Cell, us: []Unique, name: str, field: str) -> []Unique {
+    let idx = cell_index(cells, name, field)
+    if idx < 0 { return us }
+    set_us(us, idx to u32, us_join(us[idx to u32], UsShared { }))
+}
+
+/**
+ * Return the unique-vs-shared axis with index `i` replaced by `v` (parallel arrays are rebuilt by
+ * copy — the compiler corpus has no in-place slice write for a value element).
+ *
+ * @param []Unique us  the unique-vs-shared axis
+ * @param u32 i  the cell index to replace
+ * @param Unique v  the new unique-vs-shared value
+ * @return []Unique  the axis with element `i` set to `v`
+ */
+fn set_us(us: []Unique, i: u32, v: Unique) -> []Unique {
+    mut acc: []Unique = teko::list::empty()
+    mut k = 0
+    loop {
+        if k >= us.len { break }
+        if k to u32 == i {
+            acc = teko::list::push(acc, v)
+        } else {
+            acc = teko::list::push(acc, us[k])
+        }
+        k++
+    }
+    acc
+}
+
+/**
+ * The alias-transfer sweep over one statement block: every `let y = x` / `y = x` whose RHS is a
+ * non-scalar bare-local read joins BOTH cells to `UsShared` (the any-alias-anywhere ⇒ shared reading
+ * — the conservative over-reject direction). Monotone (only climbs `us` up); recurses into nested
+ * blocks so a loop / adopter body's aliases count too. Return-value threaded (a functional
+ * accumulate) so it is deterministic on both engines.
+ *
+ * @param []TStatement body  the typed statement block
+ * @param []Cell cells  the cell universe
+ * @param []Unique us  the unique-vs-shared axis so far
+ * @return []Unique  the axis with this block's aliases joined to `UsShared`
+ */
+fn transfer_block(body: []TStatement, cells: []Cell, us: []Unique) -> []Unique {
+    mut acc = us
+    mut i = 0
+    loop {
+        if i >= body.len { break }
+        acc = transfer_stmt(body[i], cells, acc)
+        i++
+    }
+    acc
+}
+
+/**
+ * Descend the alias-transfer into an expression's control-flow arm bodies. A statement- or
+ * value-position `if` / `match` carries a STATEMENT BLOCK per branch, and the cell universe
+ * (`add_expr_cells`) enumerates those blocks' cells — so the transfer MUST visit them too, else an
+ * alias created inside a branch never joins `UsShared` (an unsound under-approximation). Mirrors
+ * `add_expr_cells` exactly; a non-branching expression contributes no block, so it is a no-op.
+ *
+ * @param TExpr e  the typed expression
+ * @param []Cell cells  the cell universe
+ * @param []Unique us  the unique-vs-shared axis so far
+ * @return []Unique  the axis with the expression's arm-body aliases joined
+ */
+fn transfer_expr(e: TExpr, cells: []Cell, us: []Unique) -> []Unique {
+    match e.kind {
+        TIfExpr as f => transfer_block(f.else_blk, cells, transfer_block(f.then_blk, cells, us))
+        TMatchExpr as m => transfer_match(m, cells, us)
+        _ => us
+    }
+}
+
+/**
+ * The alias-transfer over a match expression's arm bodies (each arm is a statement block, like an
+ * if-branch). Return-value threaded (functional accumulate); monotone (only climbs `us` up).
+ *
+ * @param TMatchExpr m  the typed match expression
+ * @param []Cell cells  the cell universe
+ * @param []Unique us  the unique-vs-shared axis so far
+ * @return []Unique  the axis with every arm body's aliases joined
+ */
+fn transfer_match(m: TMatchExpr, cells: []Cell, us: []Unique) -> []Unique {
+    mut acc = us
+    mut i = 0
+    loop {
+        if i >= m.arms.len { break }
+        acc = transfer_block(m.arms[i].body, cells, acc)
+        i++
+    }
+    acc
+}
+
+/**
+ * The alias-transfer for one statement. A `TBinding` / `TAssign` to a `SimpleName` whose RHS aliases
+ * a bare non-scalar local joins both cells to `UsShared`; a loop / defer / adopt body recurses; and
+ * a statement- or value-position `if` / `match` (`TExprStmt`, or a binding / assign / return value)
+ * recurses into its arm bodies (`transfer_expr`) so a branch-local alias is not missed.
+ *
+ * @param TStatement s  the typed statement
+ * @param []Cell cells  the cell universe
+ * @param []Unique us  the unique-vs-shared axis so far
+ * @return []Unique  the axis with this statement's aliases joined to `UsShared`
+ */
+fn transfer_stmt(s: TStatement, cells: []Cell, us: []Unique) -> []Unique {
+    match s {
+        TBinding as b => transfer_expr(b.value, cells, transfer_binding(b, cells, us))
+        TAssign as a => transfer_expr(a.value, cells, transfer_assign(a, cells, us))
+        TLoopStmt as l => transfer_block(l.body, cells, transfer_block(l.init, cells, us))
+        TDeferStmt as d => transfer_block(d.body, cells, us)
+        TAdoptStmt as a => transfer_block(a.body, cells, us)
+        TReturn as r => if r.has_value { transfer_expr(r.value, cells, us) } else { us }
+        TExprStmt as es => transfer_expr(es.expr, cells, us)
+        TBreakStmt => us
+        TContinueStmt => us
+    }
+}
+
+/**
+ * The alias-transfer for a binding: `let y = x` where `x` is a bare non-scalar local aliases `y` and
+ * `x` to `UsShared`.
+ *
+ * @param TBinding b  the typed binding
+ * @param []Cell cells  the cell universe
+ * @param []Unique us  the unique-vs-shared axis so far
+ * @return []Unique  the axis with this binding's alias (if any) joined to `UsShared`
+ */
+fn transfer_binding(b: TBinding, cells: []Cell, us: []Unique) -> []Unique {
+    let src = binding_alias_src_name(b.value)
+    if src == "" { return us }
+    match b.target {
+        parser::SimpleName as sn => mark_alias_shared(cells, us, sn.name, src)
+        parser::DestructurePattern => us
+    }
+}
+
+/**
+ * The aliased SOURCE name a binding's RHS threads into the unique-vs-shared transfer: the borrowed
+ * local `x` of an explicit `&x` (`TBorrow`) — a stored ref-bind `mut y = &x` ALIASES its referent,
+ * so a live borrow marks `x` shared and the exclusive-mut authorization `is_unique_at` reflects it
+ * (F1.3) — else the bare non-scalar local of an alias-source `let y = x`. "" when the RHS aliases
+ * no single local (a scalar copy, a fresh value, a non-lvalue borrow).
+ *
+ * @param TExpr v  the typed binding RHS
+ * @return str  the aliased source local name, or "" when the RHS names none
+ */
+fn binding_alias_src_name(v: TExpr) -> str {
+    let borrowed = borrow_referent_name(v)
+    if borrowed != "" { return borrowed }
+    if !rhs_is_alias_source(v) { return "" }
+    alias_src_name(v)
+}
+
+/**
+ * The borrowed referent name of an explicit `&x` safe-borrow expression: the bare `TVar` operand's
+ * name, or "" when the operand is not a bare local (a non-lvalue borrow names no single referent).
+ * The one syntactic `&x` site a local ref-bind reads (F1.3 L2a).
+ *
+ * @param TExpr e  the typed expression
+ * @return str  the borrowed local's name, or "" when `e` is not a bare-local borrow
+ */
+fn borrow_referent_name(e: TExpr) -> str {
+    match e.kind {
+        TBorrow as tb => match tb.operand.kind {
+            TVar as v => v.name
+            _ => ""
+        }
+        _ => ""
+    }
+}
+
+/**
+ * The alias-transfer for an assignment: `y = x` (a simple-name write) where `x` is a bare non-scalar
+ * local aliases `y` and `x` to `UsShared`. A field / deref write names no single alias pair.
+ *
+ * @param TAssign a  the typed assignment
+ * @param []Cell cells  the cell universe
+ * @param []Unique us  the unique-vs-shared axis so far
+ * @return []Unique  the axis with this assignment's alias (if any) joined to `UsShared`
+ */
+fn transfer_assign(a: TAssign, cells: []Cell, us: []Unique) -> []Unique {
+    if !rhs_is_alias_source(a.value) { return us }
+    match a.kind {
+        parser::AssignKind::Simple => mark_alias_shared(cells, us, a.name, alias_src_name(a.value))
+        _ => us
+    }
+}
+
+/**
+ * The aliased source name of an alias-source RHS (`rhs_is_alias_source` held): the bare `TVar`'s
+ * name. The fallback ("") is unreachable on that path.
+ *
+ * @param TExpr e  the typed RHS expression
+ * @return str  the aliased source variable name
+ */
+fn alias_src_name(e: TExpr) -> str {
+    match e.kind {
+        TVar as v => v.name
+        _ => ""
+    }
+}
+
+/**
+ * Is `e` a bare non-scalar local read (a `TVar` of heap type)? The CAPTURE-source shape: only a
+ * heap-carrying local passed by value can be aliased by a capturing callee / container / interior
+ * handle. A scalar copy carries no shared handle.
+ *
+ * @param TExpr e  the typed expression
+ * @return bool  true iff `e` is a bare `TVar` read of non-scalar type
+ */
+fn is_nonscalar_bare_local(e: TExpr) -> bool {
+    if !expr_is_bare_local(e) { return false }
+    !type_is_scalar(e.type)
+}
+
+/**
+ * Is `c` a `teko::mem::free(_)` call? Mirrors `typer.tks`'s `type_mem_free` shape probe (last two
+ * segments `mem::free`, rooted at `teko` or bare). The capture sweep must SKIP such a call: its
+ * argument is CONSUMED (the affine gate's subject), never captured — else `free(x)` would mark its
+ * own `x` shared and the gate would reject every free.
+ *
+ * @param TCall c  the typed call
+ * @return bool  true iff `c` is a canonical `teko::mem::free` call
+ */
+fn is_mem_free_call(c: TCall) -> bool {
+    if c.callee.segments.len < 2 { return false }
+    if c.callee.segments[c.callee.segments.len - 1].name != "free" { return false }
+    if c.callee.segments[c.callee.segments.len - 2].name != "mem" { return false }
+    c.callee.segments.len == 2 || c.callee.segments[0].name == "teko"
+}

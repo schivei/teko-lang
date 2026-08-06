@@ -1,0 +1,125 @@
+use teko::parser
+
+
+/** Build a located DI error (1-based line/col from the offending decl or binding). */
+fn err_di(line: u32, col: u32, message: str) -> error {
+    teko::error::err_loc(error { message = message }, line, col)
+}
+
+/** The DI pass entry point over an ALREADY-BUILT registry: check every overlay. A no-op (returns
+ *  no diagnostics) on a program with no DI annotation, so the corpus is byte-identical until DI is
+ *  used. The registry is passed in rather than rebuilt because the checker's pre-walk already
+ *  builds it once — its own HARD boundary — and a second build would report every registration
+ *  defect twice.
+ *
+ *  @param prog   the flattened program
+ *  @param reg    the registry `build_di_registry` produced for this program
+ *  @param table  the collected type table
+ *  @return       every DI overlay diagnostic, in program order */
+pub fn check_di(prog: parser::Program, reg: DiRegistry, table: TypeTable) -> []str {
+    if !program_uses_di(prog) { return teko::list::empty() }
+    check_inject_overlays(prog, reg, table)
+}
+
+/** The overlay diagnostics for a registry that BUILT CLEANLY, and none for one that did not.
+ *  An incomplete registry has empty provider slots, so checking overlays against it would report
+ *  every `#inject` of a rejected registration as unprovided — blaming the use for the
+ *  declaration's defect (M.3). The registration diagnostics already name the real cause.
+ *
+ *  @param prog   the flattened program
+ *  @param di     the DI registry pass's outcome
+ *  @param table  the collected type table
+ *  @return       every overlay diagnostic, or an empty list when the registry itself failed */
+pub fn di_overlay_diags(prog: parser::Program, di: DiRegistryOutcome, table: TypeTable) -> []str {
+    if di.diags.len > 0 { return teko::list::empty() }
+    check_di(prog, di.registry, table)
+}
+
+/** Seed a fn body's environment with its `#inject` overlay (Crumb 4): each binding becomes a local
+ *  of its resolved interface type AND a `DiInjectBind` on the env, so a later USE of the name lowers
+ *  to the provider's materializer call. The registry is read off the env (set once at program
+ *  level). A binding whose interface has no provider is caught by `check_inject_overlays`; here a
+ *  miss falls through to a plain local, so this never introduces a second diagnostic. */
+fn seed_di_injects(f: parser::Function, env: Env, tbl: TypeTable) -> Env | error {
+    mut local = env
+    mut binds: []DiInjectBind = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= f.injects.len { break }
+        let b = f.injects[i]
+        let iface = binding_iface_name(b.type_ann, env.cur_ns, tbl)
+        match resolve_provider(env.di, iface) {
+            DiProvider as p => {
+                let t = match resolve_type(named_texpr(name_last_segment(p.impl_name)), tbl, name_qualifier(p.impl_name)) { Type as ty => ty; error as e => return e }
+                local = define(local, b.name, t, false)
+                binds = teko::list::push(binds, DiInjectBind { name = b.name; iface = iface; impl_name = p.impl_name; kind = p.kind })
+            }
+            error => {
+                let t = match resolve_type(b.type_ann, tbl, env.cur_ns) { Type as ty => ty; error as e => return e }
+                local = define(local, b.name, t, false)
+            }
+        }
+        i++
+    }
+    with_injects(local, binds)
+}
+
+/** A bare single-segment `NamedType` for `name` — used to bind an injected local to its concrete
+ *  DI impl type (dispatch is static: a provider resolves to exactly one impl). */
+fn named_texpr(name: str) -> parser::TypeExpr {
+    parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = name }) }; args = teko::list::empty() }
+}
+
+/** Lower a USE of an injected name into the provider's materializer call (Crumb 4): a `TCall` to
+ *  `__di_materialize_<mangled canonical Impl>` with NO source args — codegen/interpreter thread the enclosing
+ *  region in — typed as the injected interface. The symbol suffix is the canonical impl name with
+ *  each `::` collapsed to `__` (a valid, per-namespace-distinct C identifier, issue #284); the full
+ *  canonical impl name rides on `call_ns` so the interpreter materializer resolves the exact class + factory
+ *  (codegen ignores `call_ns` on a DI call — it emits the symbol verbatim). Reusing `TCall` keeps
+ *  the typed AST free of any new node variant. */
+pub fn di_lower_use(b: DiInjectBind, t: Type) -> TExpr {
+    let seg = parser::Segment { name = di_materializer_name(mangle_ns_frag(b.impl_name)) }
+    let callee = parser::Path { segments = teko::list::push(teko::list::empty(), seg) }
+    let call = TCall { callee = callee; args = teko::list::empty(); call_ns = b.impl_name; is_closure_call = false; callee_type = t; is_iface_dispatch = false; iface_slot = 0 }
+    TExpr { kind = call; type = t; line = 0; col = 0 }
+}
+
+/** Is `name` a call to a DI materializer helper (`__di_materialize_…`)? Codegen and the interpreter use this
+ *  to recognize the synthesized call an injected-name use lowered to (Crumb 5/7). */
+pub fn is_di_materializer_call(name: str) -> bool {
+    let prefix = "__di_materialize_"
+    if name.len < prefix.len { return false }
+    mut i: u64 = 0
+    loop {
+        if i >= prefix.len { break }
+        if name[i] != prefix[i] { return false }
+        i++
+    }
+    true
+}
+
+/** The synthesized per-impl materializer name — the compiler-chosen helper an injected-name use
+ *  lowers to (`__di_materialize_<Impl symbol>`), shared by codegen and the interpreter. The caller passes the
+ *  impl's canonical name already collapsed to a C-safe symbol (`mangle_ns_frag`), so two same-bare
+ *  impls in different namespaces never share a materializer symbol (issue #284). */
+pub fn di_materializer_name(impl_name: str) -> str {
+    "__di_materialize_" ~ impl_name
+}
+
+/** (W10c/MEM-3) di_type_id — the deterministic 64-bit type identity of a type name, the key
+ *  `tk_region_register`/`tk_region_lookup` (native) and the interpreter's `di_cache` share for a DI lifetime.
+ *  Callers pass the impl's C-safe canonical symbol (`mangle_ns_frag` of its canonical name), so two
+ *  same-bare impls in different namespaces get DISTINCT ids (issue #284). FNV-1a over the name's
+ *  bytes (offset basis 14695981039346656037, prime 1099511628211, u64 wraparound). One derivation,
+ *  so `#singleton`/`#scoped` sharing agrees across both engines. */
+pub fn di_type_id(name: str) -> u64 {
+    mut hash: u64 = 14695981039346656037
+    mut i: u64 = 0
+    loop {
+        if i >= name.len { break }
+        hash = hash ^ (name[i] to u64)
+        hash = hash * 1099511628211
+        i++
+    }
+    hash
+}

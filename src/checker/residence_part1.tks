@@ -1,0 +1,272 @@
+// src/checker/residence.tks   (namespace 'teko::checker')
+//
+// THE RESIDENCE ORACLE (0.3.1 modelo-de-memoria-por-escopo §3b/§14). A PURE, shared checker
+// artefact: for one typed function it computes, per local binding, WHERE the value resides — the
+// tightest region tier of the scope lattice that still dominates all of its uses (the LUB the
+// spine already computes, spine.tks:495). Both lowering engines (the C route in codegen.tks and the
+// native route in lower.tks) are meant to consume this IDENTICAL plan so they never diverge in
+// routing (the escape.tks:405 warning "they must never disagree", generalized).
+//
+// SCOPE (the FOUNDATION crumbs C1-C2b): this file DEFINES the oracle. NOBODY consumes it yet — the
+// activation (the C route reading the plan, C3; the native route inheriting the lifecycle, C4) is a
+// FOLLOW-ON. Being additive, it emits no C, changes no byte of existing output, and keeps the
+// FIXPOINT trivial.
+//
+// THE MODEL it realizes (design §0/§1): every value dies at the end of its LEXICAL scope; a return
+// MOVES the value to the caller's arena; ROOT residence has EXACTLY two legitimate origins — a
+// declared `#singleton` binding OR a structural cross-thread value (chan/wait_group). A join the
+// analysis cannot tighten below the top is a MEASURED DEFECT (tier `Unresolved`), never a silent
+// leak-to-root.
+use teko::parser
+
+/**
+ * TK_REGION_STACK_CAP — the SAFETY ceiling of the per-task active-region stack (anti-overflow),
+ * today the magic `regions.len < 64` scattered through codegen and the C twin's `TK_ARENA_MARK_MAX
+ * 64`. It is a hard guard: no MORE than this many regions may be open SIMULTANEOUSLY (a bound on
+ * lexical nesting depth), so an unbounded recursion of scope openings can never overrun the fixed
+ * region stack.
+ *
+ * NOT the same concept as `ARENA_DEPTH_DEFAULT` (design §7, R10): this is the stack-overflow guard,
+ * `#arena_depth` is the flattening level of sub-arenas. The design keeps them SEPARATE constants and
+ * they must never be equated.
+ *
+ * @since 0.3.1
+ */
+pub const TK_REGION_STACK_CAP: u64 = 64
+
+/**
+ * ARENA_DEPTH_DEFAULT — the DEFAULT `#arena_depth` materialization level (design §7, owner
+ * correction 2026-08-02): 1, meaning EACH lexical scope opens its OWN sub-arena and flattens no
+ * child (maximum granularity — the direct realization of "every variable dies at the end of its
+ * scope"). `#arena_depth(N>1)` is the opt-in OVERRIDE that flattens N straight-line nested scopes
+ * into one arena (never across a loop back-edge); it is a follow-on optimization (crumb C6), not
+ * this foundation. Distinct from `TK_REGION_STACK_CAP` (the safety ceiling above).
+ *
+ * @since 0.3.1
+ */
+pub const ARENA_DEPTH_DEFAULT: u64 = 1
+
+/**
+ * Scope — the tightest tier: the value resides in the region of its declaring lexical scope `{}`
+ * (bare block / loop body / if-else arm / when arm / fn body — the five treated identically) and
+ * dies at that scope's exit edge. The default tier of an ordinary non-escaping local.
+ *
+ * @since 0.3.1
+ */
+pub type Scope = struct { }
+
+/**
+ * Frame — the value outlives its inner block but not the function: it resides in the FRAME region
+ * and dies at the return edge. The particular case where the owning scope is the function body
+ * itself.
+ *
+ * @since 0.3.1
+ */
+pub type Frame = struct { }
+
+/**
+ * Caller — the value is MOVED to the caller's arena (a returned value climbs one frame level,
+ * transitively N). It dies with the caller scope that received it, never in the callee — the LUB
+ * of a return use, provably outliving every callee use (design §5).
+ *
+ * @since 0.3.1
+ */
+pub type Caller = struct { }
+
+/**
+ * Root — the WIDE tier (`tk_region_root()` / program). It has EXACTLY two legitimate origins: a
+ * declared `#singleton` binding (short-circuiting the oracle, reusing `DiKind::Singleton →
+ * tk_region_root()`, codegen.tks:9564) OR a structural cross-thread value (chan/wait_group). Never
+ * a fallback-for-uncertainty (that is `Unresolved`).
+ *
+ * @since 0.3.1
+ */
+pub type Root = struct { }
+
+/**
+ * Unresolved — a MEASURED DEFECT: the transitive join could not be tightened below the lattice top
+ * (`PtTop`). M.1 (never UAF) still holds — a downstream consumer treats it as the safe wide
+ * residence — but it is COUNTED and driven to zero on the real corpus, never accepted as a silent
+ * leak-to-root. Only chan/wait_group reside wide BY DESIGN (design §1).
+ *
+ * @since 0.3.1
+ */
+pub type Unresolved = struct { }
+
+/**
+ * ResidenceTier — the tier of residence of a value, the lattice that replaces the binary
+ * frame-local-vs-root of M.1/M.5. Ordered from tightest to widest: a value resides in the SMALLEST
+ * tier that dominates all of its uses (the LUB of `pt_join`). `Root` is the wide tier with exactly
+ * two legitimate origins (`#singleton` OR cross-thread); `Unresolved` is a measured defect, never a
+ * silent accepted leak-root. There is no `Scoped`/`Transient` variable tier — the default IS the
+ * scope-ephemeral case and the move covers the climb.
+ *
+ * @since 0.3.1
+ */
+pub type ResidenceTier = variant Scope | Frame | Caller | Root | Unresolved
+
+/**
+ * BindingResidence — the residence verdict for one local binding: its source name (empty for a
+ * destructure, which the oracle leaves `Unresolved`) and the tier it was assigned.
+ *
+ * @since 0.3.1
+ */
+pub type BindingResidence = struct {
+    /** the binding's source name, or "" for a destructure pattern. */
+    name: str
+    /** the tier of residence the oracle assigned to the binding. */
+    tier: ResidenceTier
+}
+
+/**
+ * ReturnResidence — the residence verdict for one `return` site: whether the returned value is a
+ * MOVE (a frame-born value climbing to the caller) and the destination tier it moves to.
+ *
+ * @since 0.3.1
+ */
+pub type ReturnResidence = struct {
+    /** true iff the returned value is a move (frame-born → caller); false for a bare return or a
+     *  value that already lives in the destination (an identity pass of a parameter/root value). */
+    is_move: bool
+    /** the destination tier of the returned value. */
+    tier: ResidenceTier
+}
+
+/**
+ * ResidencePlan — the PURE artefact the checker produces per function and that both engines are
+ * meant to consume identically. It is the single source of truth that stops the C and native routes
+ * from diverging in routing. Each binding receives its tier; each `return` receives whether it moves
+ * and to which tier.
+ *
+ * @since 0.3.1
+ */
+pub type ResidencePlan = struct {
+    /** the tier of residence of each local binding, in the function's textual binding order. */
+    bindings: []BindingResidence
+    /** per `return` site, whether the value moves and its destination tier, in textual order. */
+    returns: []ReturnResidence
+}
+
+/**
+ * residence_tier — the PURE decision core of the oracle. Maps a binding's inputs to its tier: a
+ * `#singleton` binding is forced to `Root` (short-circuit); otherwise the transitive points-to
+ * value decides — `PtTop` is the measured defect `Unresolved`, `PtRoot` is `Root`, `PtParam` points
+ * at caller storage so it moves to `Caller`, and a frame-born (`PtFrame`/`PtAdopter`) value refines
+ * via the escape fast-path: it moves to `Caller` if it escapes the frame, resides in `Scope` if it
+ * is block-local, else in the `Frame`.
+ *
+ * @param is_singleton   the binding carried `#singleton` (declared root residence)
+ * @param pt             the binding's transitive points-to value (from `fn_spine`)
+ * @param escapes_frame  the binding's name is in the function's frame-escape set
+ * @param is_block_local the binding is provably freeable at its block's exit edges
+ * @return               the residence tier
+ * @since 0.3.1
+ */
+pub fn residence_tier(is_singleton: bool, pt: PointsTo, escapes_frame: bool, is_block_local: bool) -> ResidenceTier {
+    if is_singleton { return Root { } }
+    match pt {
+        PtRoot => return Root { }
+        PtParam => return Caller { }
+        PtTop => return Unresolved { }
+        PtFrame => { }
+        PtAdopter => { }
+    }
+    if escapes_frame { return Caller { } }
+    if is_block_local { return Scope { } }
+    Frame { }
+}
+
+/**
+ * residence_plan — THE ORACLE. Computes, for one function, where each local binding resides and
+ * whether each return moves, using `fn_spine` (the transitive points-to lattice built on `pt_join`,
+ * spine.tks:495) as the precise source and `escape.tks` (`fn_escaping_vars` /
+ * `binding_is_block_local`) as the conservative fast-path. It is the piece that RAISES the memory
+ * decision into the shared checker so the native backend can inherit the same cleanup the C route
+ * already has — each engine merely lowers this plan its own way.
+ *
+ * @param f  the typed function to analyze
+ * @return   the residence plan (never an error — an indeterminate join becomes the measured
+ *           `Unresolved` tier, not a rejection)
+ * @since 0.3.1
+ */
+pub fn residence_plan(f: TFunction) -> ResidencePlan {
+    let sp = fn_spine(f)
+    let escaping = fn_escaping_vars(f)
+    let bindings = plan_block_bindings(f.body, f.body, false, sp, escaping)
+    let returns = plan_block_returns(f.body, sp)
+    ResidencePlan { bindings = bindings; returns = returns }
+}
+
+/**
+ * binding_name — the source name of a binding's target, or "" for a destructure pattern (which the
+ * oracle cannot key into a single residence and leaves `Unresolved`).
+ *
+ * @param b  the typed binding
+ * @return   the simple name, or "" for a destructure
+ * @since 0.3.1
+ */
+fn binding_name(b: TBinding) -> str {
+    match b.target {
+        parser::SimpleName as sn => sn.name
+        parser::DestructurePattern => ""
+    }
+}
+
+/**
+ * residence_name_in_set — membership of `name` in a string set. A local (namespace-private) helper so the
+ * oracle needs no cross-file access to `escape.tks`'s own private `str_set_has`.
+ *
+ * @param set   the string set (the frame-escape set)
+ * @param name  the candidate name
+ * @return      true iff `name` occurs in `set`
+ * @since 0.3.1
+ */
+fn residence_name_in_set(set: []str, name: str) -> bool {
+    mut i = 0
+    loop {
+        if i >= set.len { break }
+        if set[i] == name { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * binding_points_to — the transitive points-to value of a bound name in the function's spine, or a
+ * conservative default: `PtTop` for a nameless (destructure) target so it resolves to the measured
+ * `Unresolved`, and `PtFrame` for a name outside the spine's cell universe (treated frame-local,
+ * then refined by the escape fast-path).
+ *
+ * @param sp    the function's spine
+ * @param name  the bound name ("" for a destructure)
+ * @return      the points-to value
+ * @since 0.3.1
+ */
+fn binding_points_to(sp: Spine, name: str) -> PointsTo {
+    if name == "" { return PtTop { } }
+    let idx = cell_of(sp, name)
+    if idx < 0 { return PtFrame { } }
+    sp.pt[idx to u32]
+}
+
+/**
+ * plan_binding — the per-binding residence verdict: combine the `#singleton` declaration, the
+ * spine's points-to, the frame-escape membership, and the block-local fast-path into a tier.
+ *
+ * @param b          the typed binding
+ * @param fn_body    the whole function body (the read-count denominator for block-locality)
+ * @param block_body the block the binding is declared at the top level of
+ * @param is_value   whether that block yields a value (its tail is escaping)
+ * @param sp         the function's spine
+ * @param escaping   the function's frame-escape set
+ * @return           the binding's residence verdict
+ * @since 0.3.1
+ */
+fn plan_binding(b: TBinding, fn_body: []TStatement, block_body: []TStatement, is_value: bool, sp: Spine, escaping: []str) -> BindingResidence {
+    let name = binding_name(b)
+    let is_singleton = b.di_kind == parser::DiKind::Singleton
+    let pt = binding_points_to(sp, name)
+    let escapes = residence_name_in_set(escaping, name)
+    let blk_local = binding_is_block_local(escaping, fn_body, block_body, is_value, b)
+    BindingResidence { name = name; tier = residence_tier(is_singleton, pt, escapes, blk_local) }
+}
