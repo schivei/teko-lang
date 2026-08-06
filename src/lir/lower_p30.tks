@@ -1,0 +1,240 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * lower_expr_stmt — an expression statement: lower for effect (the call), discard the VReg. A
+ * DIVERGING call (`checker::texpr_diverges` — an unqualified `panic`/`exit`, the SAME fronteira
+ * `lower_return` leaves via, W15/#defer-nas-saidas) leaves EVERY enclosing scope exactly like a
+ * `return`, so it fires ALL pending defers (from index 0, LIFO) FIRST — this is `lower_return`'s
+ * own body, minus the return value, mirroring the C backend's `emit_stmt` TExprStmt default arm.
+ * The call itself is still lowered afterward (the runtime call runs — and, being `panic`/`exit`,
+ * never returns), then `terminate_diverging_stmt` closes the block with a REAL LIR terminator so
+ * `block_terminated` reports it correctly to every downstream closer (`close_arm_to`/
+ * `close_arm_replaying_defers`/`close_loop_body`/`close_function`) — each of those ALREADY skips
+ * its own fall-through defer replay for a terminated block (the same guard `return`/`break`/
+ * `continue` rely on), so this is the ONE site that must produce a terminator, not a new guard
+ * at each of them.
+ *
+ * @param LowerCtx ctx  the lowering context to append the statement's instructions into
+ * @param checker::TExprStmt es  the typed expression statement
+ * @return LowerStmtOut | error  the advanced (terminated=true for a diverging call, else
+ *                               terminated=false) context, or a NAMED internal error when a
+ *                               pending defer body, the statement's own expression, or the
+ *                               closing terminator fails to lower
+ */
+fn lower_expr_stmt(ctx: LowerCtx, es: checker::TExprStmt) -> LowerStmtOut | error {
+    if checker::texpr_diverges(es.expr) {
+        let replayed = match replay_defers(ctx, 0) { LowerCtx as c => c; error as err => return err }
+        let lo = match lower_expr(replayed, es.expr) { Lowered as x => x; error as err => return err }
+        let closed = match terminate_diverging_stmt(lo.ctx, es.expr.line, es.expr.col) { LowerCtx as c => c; error as err => return err }
+        return LowerStmtOut { ctx = closed; terminated = true }
+    }
+    let lo = match lower_expr(ctx, es.expr) { Lowered as x => x; error as err => return err }
+    LowerStmtOut { ctx = lo.ctx; terminated = false }
+}
+
+/**
+ * terminate_diverging_stmt — close the block right after a diverging (`panic`/`exit`) STATEMENT
+ * call with a REAL `LRet` terminator, so `block_terminated` sees the block as closed exactly
+ * like an explicit `return`'s own `ret_inst`/`ret_void_inst` (`lower_return`). The value is a
+ * defensive, WIDTH-CORRECT placeholder of the enclosing function's own declared return machine
+ * class (`diverging_tail_value`'s own technique, C7 — never observed at runtime, since the call
+ * that precedes it already trapped/exited) when that class is non-void; a void-returning
+ * function closes with a bare `ret_void_inst` instead.
+ *
+ * @param LowerCtx ctx  the lowering context, positioned right after the diverging call
+ * @param u32 line  the source line to propagate onto the synthesized terminator
+ * @param u32 col  the source column to propagate onto the synthesized terminator
+ * @return LowerCtx | error  the closed context
+ * @throws  when the enclosing function's own return type is fat (`str`/`[]T`) — out of this
+ *          degrau's closed set, mirroring `lower_tail_expr_stmt_fat`'s own documented limit
+ */
+fn terminate_diverging_stmt(ctx: LowerCtx, line: u32, col: u32) -> LowerCtx | error {
+    if is_fat_type(ctx.ret_type) { return error { message = "native backend N1: a diverging panic/exit statement inside a fat-returning function is not yet lowered (N2)" } }
+    let ret_ty = ltype_of(ctx.ret_type, ctx.enums)
+    if ltype_is_void(ret_ty) { return ctx_append(ctx, ret_void_inst(line, col)) }
+    let r = ctx_alloc(ctx)
+    let with_const = ctx_append(r.ctx, const_int_inst(r.vreg, lfallback_const(ret_ty), line, col))
+    ctx_append(with_const, ret_inst(r.vreg, line, col))
+}
+
+/**
+ * lower_defer — `defer { … }`: register the node onto the pending-defer
+ * stack (LIFO order is `replay_defers`'s job, at whichever scope exit fires
+ * it) and emit nothing inline — mirrors the C backend's `dctx_register`
+ * (`codegen.tks:5273-5277`) (A1-2, #382).
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param checker::TDeferStmt d  the defer node to register
+ * @return LowerStmtOut  the context with `d` appended to `.defers`
+ *                        (terminated=false — a `defer` never closes its
+ *                        enclosing block)
+ */
+fn lower_defer(ctx: LowerCtx, d: checker::TDeferStmt) -> LowerStmtOut {
+    LowerStmtOut { ctx = ctx_with_defers(ctx, teko::list::push(ctx.defers, d)); terminated = false }
+}
+
+/**
+ * replay_defers — fire every deferred body registered at index ≥ `base` in
+ * `ctx.defers`, LIFO (innermost/most-recent first), by lowering each body's
+ * statements straight-line into the CURRENT block — mirrors the C backend's
+ * `emit_defers` (`codegen.tks:5247-5271`). A defer body never itself
+ * contains a `return`/`break`/`continue`/`defer` (checker-enforced,
+ * `typer.tks:3068-3079`), so lowering it plainly via `lower_block` never
+ * re-enters this replay (A1-2, #382).
+ *
+ * @param LowerCtx ctx  the lowering context; its OWN `.defers` stack is READ
+ *                      (not shrunk — firing is a symbolic replay over
+ *                      already-lowered source structure, not a runtime pop)
+ * @param u64 base  the defer-stack index the exiting scope started at;
+ *                  every entry at or after this index fires
+ * @return LowerCtx | error  the advanced context (its current block grown
+ *                           with the replayed instructions), or a NAMED
+ *                           internal error when a defer body fails to lower
+ */
+fn replay_defers(ctx: LowerCtx, base: u64) -> LowerCtx | error {
+    mut cur = ctx
+    mut i: u64 = ctx.defers.len
+    loop {
+        if i <= base { break }
+        i = i - 1
+        cur = match lower_block(cur, ctx.defers[i].body) { LowerCtx as c => c; error as err => return err }
+    }
+    cur
+}
+
+/**
+ * PromotedEnv — the result of giving a MERGE block (a loop's head or exit)
+ * one block-arg per SCALAR (non-fat) name in an env: the advanced function,
+ * the rebuilt env (each such name now bound to its fresh block-arg VReg,
+ * every FAT binding passed through unchanged, unpromoted), and the ordered
+ * name list a caller matches against `env_scalar_vregs` to build a jump's
+ * argument list into this block (A1-2, #382 — a loop head/exit are both
+ * MERGE points, mirroring the SAME block-arg principle an if-expression's
+ * result VReg already uses, §2.4).
+ */
+pub type PromotedEnv = struct { func: LFunc; env: LEnv; names: []str }
+
+/**
+ * promote_env — allocate one fresh block-arg VReg per SCALAR (non-fat)
+ * binding in `env`, in order, on block `block_id`; rebuild the env with
+ * those names now bound to their fresh block-arg VReg. A FAT (str/slice)
+ * binding is left UNPROMOTED — its ptr/len stay whatever they were for the
+ * whole scope; no A1-2 fixture reassigns a fat local inside a loop
+ * (A1-2, #382).
+ *
+ * @param LFunc f  the function whose block gains the params
+ * @param u32 block_id  the merge block (already allocated) to add params to
+ * @param LEnv env  the env to promote (its SHAPE — names/fat-vs-scalar —
+ *                   drives which entries get a param)
+ * @return PromotedEnv  the advanced function + the rebuilt env + the ordered
+ *                       promoted-name list
+ */
+fn promote_env(f: LFunc, block_id: u32, env: LEnv) -> PromotedEnv {
+    mut cur_f = f
+    mut new_env = empty_lenv()
+    mut names: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= env.names.len { break }
+        if env.has_len[i] {
+            new_env = lenv_bind_fat(new_env, env.names[i], env.vregs[i], env.len_vregs[i])
+        } else {
+            let bp = add_block_param(cur_f, block_id)
+            cur_f = bp.func
+            new_env = rebind_promoted(new_env, env, i, bp.vreg)
+            names = teko::list::push(names, env.names[i])
+        }
+        i++
+    }
+    PromotedEnv { func = cur_f; env = new_env; names = names }
+}
+
+/**
+ * rebind_promoted — append `env`'s binding at index `i` to `out`, now carrying `vreg` (the fresh
+ * block/merge param), PRESERVING its binding SHAPE. A mutable fat local (`is_slot`) threads its
+ * 16-byte slot's ADDRESS through the merge like any other scalar, but it must arrive on the other
+ * side still known as a slot — rebinding it plainly would leave a later read treating the address
+ * as the pointer half (list-builtin degrau). An address-taken `mut` scalar local
+ * (`is_scalar_slot`, 0.3.1.0 degrau 18) threads its OWN one-word slot's address the same way, and
+ * must arrive still known as THAT slot (with its `LType` intact) so a read past the merge still
+ * loads rather than reusing the address as the value.
+ *
+ * @param out   the env being rebuilt
+ * @param env   the source env
+ * @param i     the source binding's index
+ * @param vreg  the VReg the rebuilt binding carries
+ * @return      `out` extended with the rebuilt binding
+ */
+fn rebind_promoted(out: LEnv, env: LEnv, i: u64, vreg: u32) -> LEnv {
+    if env.is_slot[i] { return lenv_bind_fat_slot(out, env.names[i], vreg) }
+    if env.is_scalar_slot[i] { return lenv_bind_scalar_slot(out, env.names[i], vreg, env.slot_ltype[i]) }
+    lenv_bind(out, env.names[i], vreg)
+}
+
+/**
+ * env_scalar_vregs — the CURRENT VReg of each SCALAR (non-fat) binding in
+ * `env`, in order — the argument list a jump/branch into a `promote_env`'d
+ * merge block supplies (A1-2, #382).
+ *
+ * @param LEnv env  the env to read
+ * @return []u32  each non-fat binding's current VReg, in order
+ */
+fn env_scalar_vregs(env: LEnv) -> []u32 {
+    mut out: []u32 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= env.names.len { break }
+        if !env.has_len[i] { out = teko::list::push(out, env.vregs[i]) }
+        i++
+    }
+    out
+}
+
+/**
+ * jump_args_for_names — the CURRENT VReg of each name in `names` (in
+ * order), read from `env` — the argument list a `break`/`continue`/loop
+ * back-edge jump supplies into a target `promote_env`'d block whose params
+ * are exactly `names`, positionally (A1-2, #382).
+ *
+ * @param LEnv env  the env to read (the jump SITE's own, however deeply
+ *                  nested)
+ * @param []str names  the target block's promoted-name list (its param
+ *                      order)
+ * @return []u32  each name's current VReg, in the SAME order as `names`
+ */
+fn jump_args_for_names(env: LEnv, names: []str) -> []u32 {
+    mut out: []u32 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= names.len { break }
+        out = teko::list::push(out, lenv_lookup(env, names[i]).vreg)
+        i++
+    }
+    out
+}
+
+/**
+ * merge_scalar_indices — the pre-branch INDEX of each threaded name in `env`
+ * (its newest occurrence), in `names` order — computed ONCE at a merge site
+ * from the PRE-BRANCH env so every arm reads its enclosing scalar's value from
+ * the SAME fixed slot, immune to any shadow the arm appends after it (#389 F1b
+ * item 3). Each threaded name occurs once in the pre-branch env, so the newest
+ * index IS the enclosing binding's index.
+ *
+ * @param LEnv env  the pre-branch env (each threaded name occurs once)
+ * @param []str names  the threaded scalar names, in merge-param order
+ * @return []u64  each name's pre-branch index, in the SAME order as `names`
+ */
+fn merge_scalar_indices(env: LEnv, names: []str) -> []u64 {
+    mut out: []u64 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= names.len { break }
+        out = teko::list::push(out, lenv_newest_index(env, names[i]))
+        i++
+    }
+    out
+}
+

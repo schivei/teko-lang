@@ -1,0 +1,253 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * builtin_cov_symbol — the runtime twin of an ADDRESSABLE coverage-sink builtin (D3/D3-branch/
+ * D3-line, `checker/scope.tks:496-536`). The sinks are a HOST side-channel, so every one of them
+ * is a direct `tk_cov_*` call with scalar arguments only — exactly the shape the N1 call path
+ * already lowers. The compiler's own `teko::coverage` reporting reads them (`cov_distinct`,
+ * `cov_is_marked`, `cov_line_hit`, `cov_branch_hit`) and the NATIVE test gate writes them
+ * (`cov_enter`/`cov_leave` around each `#test`).
+ *
+ * @param last  the call path's LAST segment (the bare builtin name)
+ * @return      the `tk_cov_*` runtime symbol, or `null` when `last` names no coverage builtin
+ */
+fn builtin_cov_symbol(last: str) -> str | null {
+    if last == "cov_reset" { return "tk_cov_reset" }
+    if last == "cov_mark" { return "tk_cov_mark" }
+    if last == "cov_distinct" { return "tk_cov_distinct" }
+    if last == "cov_is_marked" { return "tk_cov_is_marked" }
+    if last == "cov_branches_on" { return "tk_cov_branches_on" }
+    if last == "cov_branch_reset" { return "tk_cov_branch_reset" }
+    if last == "cov_enter" { return "tk_cov_enter" }
+    if last == "cov_leave" { return "tk_cov_leave" }
+    if last == "cov_branch" { return "tk_cov_branch" }
+    if last == "cov_branch_hit" { return "tk_cov_branch_hit" }
+    if last == "cov_lines_on" { return "tk_cov_lines_on" }
+    if last == "cov_line_reset" { return "tk_cov_line_reset" }
+    if last == "cov_line" { return "tk_cov_line" }
+    if last == "cov_line_hit" { return "tk_cov_line_hit" }
+    null
+}
+
+/**
+ * builtin_arena_symbol — the runtime twin of an ADDRESSABLE root-region checkpoint builtin
+ * (#109 test-gate memory): `arena_push`/`arena_pop`/`arena_commit`. The native test gate brackets
+ * every `#test` with a push/pop pair, so the whole per-test span is bulk-freed instead of
+ * accumulating across the run.
+ *
+ * @param last  the call path's LAST segment (the bare builtin name)
+ * @return      the `tk_arena_*` runtime symbol, or `null` when `last` names no arena builtin
+ */
+fn builtin_arena_symbol(last: str) -> str | null {
+    if last == "arena_push" { return "tk_arena_push" }
+    if last == "arena_pop" { return "tk_arena_pop" }
+    if last == "arena_commit" { return "tk_arena_commit" }
+    if last == "task_reset" { return "tk_task_reset" }
+    null
+}
+
+/**
+ * assert_seed_symbol — the C ASSERT SEED symbol a `teko::assert::<name>` call lowers to when the
+ * program does not declare `teko::assert` itself (`src/assert/assert.c` realizes the family as
+ * `teko__assert__*`; `src/assert/assert.h` is its header). Keyed on the callee PATH — the reserved
+ * `teko` root plus an `assert` parent segment — exactly as the C backend's `cg_assert_c_symbol`
+ * keys it, so the two backends name the same symbol.
+ *
+ * Without this, a program that CALLS `teko::assert::is_true` without defining it fell through to
+ * the plain mangler and emitted the bare `is_true`, which links against nothing: the native tail
+ * had no assert resolution at all and only survived because the compiler's OWN corpus declares
+ * `teko::assert`, so its mangle happened to spell the seed's symbol.
+ *
+ * WHICH names are assertions is asked of `checker::assert_builtin_name`, never re-listed here: this
+ * file, `codegen::cg_assert_c_symbol` and the typer each carried their own copy of the list, so an
+ * assertion added to two of the three type-checked and then failed to LINK.
+ *
+ * @param callee  the call's callee path
+ * @return        the seed symbol, or `null` when this is not an assert-seed call
+ */
+fn assert_seed_symbol(callee: parser::Path) -> str | null {
+    let segs = callee.segments
+    if segs.len < 2 { return null }
+    if segs[0].name != "teko" { return null }
+    if segs[segs.len - 2].name != "assert" { return null }
+    let last = segs[segs.len - 1].name
+    if checker::assert_builtin_name(last) {
+        return teko::str::concat(ASSERT_SEED_PREFIX, last)
+    }
+    null
+}
+
+/**
+ * builtin_str_query_symbol — the runtime twin of the two `str` PREDICATE builtins this N1 subset
+ * lowers directly: `ends_with`/`contains` (`checker/scope.tks`), both `(str, str) -> bool`. A
+ * `bool` result fits the SAME single result register `select_call_result_x86`/
+ * `select_call_result_arm64` already capture for every ordinary scalar call — unlike the SLICE
+ * family below (`builtin_str_slice_symbol`), no out-parameter-length twin is needed here, because
+ * neither builtin's OWN return type is fat (0.3.1.0 degrau 11).
+ *
+ * @param last  the call path's LAST segment (the bare builtin name)
+ * @return      the `tk_str_*` runtime predicate, or `null` when `last` names neither
+ */
+fn builtin_str_query_symbol(last: str) -> str | null {
+    if last == "ends_with" { return "tk_str_ends_with" }
+    if last == "contains" { return "tk_str_contains" }
+    null
+}
+
+/**
+ * builtin_str_slice_symbol — the runtime twin of the four `str`-returning SLICE builtins this N1
+ * subset lowers directly: `slice`/`slice_to`/`slice_from`/`str_slice_chars` (`checker/scope.tks`),
+ * each resolving to the runtime's out-parameter-length twin (`tk_str_slice_len`/
+ * `tk_str_slice_to_len`/`tk_str_slice_from_len`/`tk_str_slice_chars_len`, `teko_rt.h`) rather than
+ * the real two-eightbyte `tk_str` return `codegen.tks` targets — the SAME `lower_len_out_call`
+ * shape `tk_str_concat_len` built at 0.3.1.0 degrau 9, reused rather than reinvented. Resolving
+ * the symbol here is enough: `lower_call_fat`'s own generic tail (`lower_args` +
+ * `lower_len_out_call`) already appends the hidden length out-slot and flattens the `str` receiver
+ * into its (ptr, len) pair. `str_slice_chars` passes its two `i64` codepoint-index arguments as
+ * ordinary scalar VRegs, matching `tk_str_slice_chars_len`'s `int64_t from, int64_t to` ABI, so
+ * no new lowering ARM is needed (0.3.1.0 degrau 11; `str_slice_chars` closed in the self-host fix).
+ *
+ * @param last  the call path's LAST segment (the bare builtin name)
+ * @return      the `tk_str_slice*_len` runtime twin, or `null` when `last` names none of the four
+ */
+fn builtin_str_slice_symbol(last: str) -> str | null {
+    if last == "slice" { return "tk_str_slice_len" }
+    if last == "slice_to" { return "tk_str_slice_to_len" }
+    if last == "slice_from" { return "tk_str_slice_from_len" }
+    if last == "str_slice_chars" { return "tk_str_slice_chars_len" }
+    null
+}
+
+/**
+ * builtin_int_to_str_symbol — the runtime twin of the two INTEGER-TO-DECIMAL-STRING builtins this
+ * N1 subset lowers directly: `i64_to_str`/`u64_to_str` (`checker/scope.tks`), each `(iNN) -> str`
+ * (fat), resolving to the out-parameter-length twins built at 0.3.1.0 degrau 9
+ * (`tk_i64_to_str_len`/`tk_u64_to_str_len`, `teko_rt.h`) — the SAME `lower_len_out_call` shape
+ * `builtin_str_slice_symbol` already uses. Before this resolved, the ONLY native path to either
+ * twin was `lower_interp_hole_prim_fat`'s own HARDCODED symbol string, reached solely from inside
+ * a `$"…{n}…"` interpolation hole; a DIRECT call (`teko::u64_to_str(n)`, the shape
+ * `teko::backend::reg_ref` itself uses) fell through `call_symbol` to `unresolved_builtin_stop`
+ * (0.3.1.0 degrau 12) — the same builtin reachable through one path and not the other, this lane's
+ * recurring disease (named at degrau 11's own family, R5).
+ *
+ * @param last  the call path's LAST segment (the bare builtin name)
+ * @return      the `tk_*_to_str_len` runtime twin, or `null` when `last` names neither
+ */
+fn builtin_int_to_str_symbol(last: str) -> str | null {
+    if last == "i64_to_str" { return "tk_i64_to_str_len" }
+    if last == "u64_to_str" { return "tk_u64_to_str_len" }
+    null
+}
+
+/**
+ * builtin_float_to_str_symbol — the runtime twin of the two FLOAT-TO-TEXT builtins this N1 subset
+ * lowers directly: `ftoa` and `f64_g17` (`checker/scope.tks`), each `(f64) -> str` (fat) and each
+ * the SAME `%.17g` host renderer (`teko_rt.c` — one exact-binary64-round-trip spelling under two
+ * names, which the C route already treats as interchangeable). Both resolve to the out-parameter-
+ * length twins added at 0.3.1.0 degrau 27 (`tk_ftoa_len`/`tk_f64_g17_len`, `teko_rt.h`) — the SAME
+ * `lower_len_out_call` shape `builtin_int_to_str_symbol` already uses for its own integer half.
+ *
+ * This is the stop that blocked the native SELF-HOST: `teko::codegen::cb_f64_literal` renders every
+ * float literal the C route emits through `teko::ftoa`, so with no lowering for it the native build
+ * of the compiler could not get past `codegen.tks` at all.
+ *
+ * The `f64` argument needs NO detour of its own — it rides XMM0/D0 through `pin_args_x86`/
+ * `pin_args_arm64`'s per-register-file classification (`B1-fp`), the same path degrau 19's
+ * `tk_fmt_f_len` already takes for its own leading `double`. An `f32` argument is widened to `f64`
+ * by the checker's implicit numeric widening (`coerce_argument_into` → `widen_value_into`, a REAL
+ * `TCast` node), so it reaches here as an ordinary `FToF` result and not as a single-precision
+ * register read at double width — the INTERPOLATION path had no parameter type to coerce against
+ * and so needed that widening lowered by hand (`widen_hole_to_f64`).
+ *
+ * @param last  the call path's LAST segment (the bare builtin name)
+ * @return      the `%.17g` renderer's `_len` runtime twin, or `null` when `last` names neither
+ */
+fn builtin_float_to_str_symbol(last: str) -> str | null {
+    if last == "ftoa" { return "tk_ftoa_len" }
+    if last == "f64_g17" { return "tk_f64_g17_len" }
+    null
+}
+
+/**
+ * builtin_str_of_bytes_symbol — the runtime twin of the `str`/`str_of_bytes` builtin ALIAS pair
+ * this N1 subset lowers directly (`checker/scope.tks`'s own `if name == "str" || name ==
+ * "str_of_bytes"` — ONE registration, two spellings): `([]byte) -> str` (fat), resolving to the
+ * out-parameter-length twin (`tk_str_of_bytes_len`, `teko_rt.h`) — the SAME `lower_len_out_call`
+ * shape `builtin_str_slice_symbol`/`builtin_int_to_str_symbol` already use. No new lowering ARM is
+ * needed: a `[]byte` argument is ALREADY fat (`is_fat_type`), so `lower_args`' existing
+ * ptr+len flattening feeds `lower_len_out_call` exactly the two words `tk_str_of_bytes_len`
+ * expects (0.3.1.0 degrau 16, found while closing degrau 15's own sibling search).
+ *
+ * @param last  the call path's LAST segment (the bare builtin name)
+ * @return      `"tk_str_of_bytes_len"`, or `null` when `last` names neither spelling
+ */
+fn builtin_str_of_bytes_symbol(last: str) -> str | null {
+    if last == "str" { return "tk_str_of_bytes_len" }
+    if last == "str_of_bytes" { return "tk_str_of_bytes_len" }
+    null
+}
+
+/**
+ * builtin_bytes_of_str_symbol — the runtime twin of the ONE STRING-TO-BYTES VIEW builtin this N1
+ * subset lowers directly: `bytes_of_str` (`teko::text::bytes_of_str`, `checker/scope.tks`), a
+ * `(str) -> []byte` (fat) ZERO-COPY view of a `str`'s own bytes — resolves to the out-parameter-
+ * length twin (`tk_bytes_of_str_len`, `teko_rt.h`), the SAME `lower_len_out_call` shape
+ * `builtin_str_of_bytes_symbol` already uses for its own reverse direction (`[]byte -> str`). No
+ * new lowering ARM is needed: `s`'s fat (ptr, len) pair already flattens through `lower_args`
+ * exactly like every other `str` argument, and the runtime twin hands the SAME pair straight back
+ * — `bytes_of_str` copies nothing, so its own `_len` twin needs no allocation either (0.3.1.0
+ * degrau 21, closing a sibling `native_builtin_symbol` left open since degrau 17's own sibling
+ * search, `docs/memory/0.3.1.0-linux-native-first-stop.md`).
+ *
+ * @param last  the call path's LAST segment (the bare builtin name)
+ * @return      `"tk_bytes_of_str_len"`, or `null` when `last` names something else
+ */
+fn builtin_bytes_of_str_symbol(last: str) -> str | null {
+    if last == "bytes_of_str" { return "tk_bytes_of_str_len" }
+    null
+}
+
+/**
+ * builtin_one_byte_symbol — the runtime twin of the ONE BYTE-TO-STRING builtin this N1 subset
+ * lowers directly: `one_byte` (`checker/scope.tks`'s `(byte) -> str`), a fresh 1-byte `str` holding
+ * its argument — resolves to the out-parameter-length twin (`tk_one_byte_len`, `teko_rt.h`), the
+ * SAME `lower_len_out_call` shape `builtin_str_of_bytes_symbol`/`builtin_bytes_of_str_symbol`
+ * already use for their own `[]byte`/`str` directions. No new lowering ARM is needed: the lone
+ * `byte` argument is a PLAIN SCALAR, so it flattens through `lower_args` as one word exactly like
+ * `builtin_int_to_str_symbol`'s own `i64`/`u64` argument, and `lower_call_fat` appends the length
+ * out-slot the twin writes through.
+ *
+ * The twin's parameter is FULL WIDTH (`uint64_t`, masked inside) rather than `tk_byte`, because
+ * SysV/AAPCS64 leave an argument's bits ABOVE its declared width unspecified and this backend
+ * narrows RETURNS only (`apply_native_c_return_narrow`) — the same full-width shape every other
+ * `_len` twin gives its scalar arguments (0.3.1.0 degrau 32).
+ *
+ * @param last  the call path's LAST segment (the bare builtin name)
+ * @return      `"tk_one_byte_len"`, or `null` when `last` names something else
+ */
+fn builtin_one_byte_symbol(last: str) -> str | null {
+    if last == "one_byte" { return "tk_one_byte_len" }
+    null
+}
+
+/**
+ * builtin_host_info_symbol — the runtime twin of the three ZERO-ARGUMENT, COMPILE-TIME-CONSTANT
+ * host-info strings this N1 subset lowers directly: `os`/`arch`/`version` (`checker/scope.tks`),
+ * each `() -> str` (fat), resolving to the out-parameter-length twin (`tk_rt_os_len`/
+ * `tk_rt_arch_len`/`tk_rt_version_len`, `teko_rt.h`) — the SAME `lower_len_out_call` shape
+ * `builtin_str_slice_symbol`/`builtin_str_of_bytes_symbol` already use. Found while closing
+ * degrau 15/16's own sibling search: the compiler's own `teko::build::target_os` calls `os`/
+ * `arch` bare (0.3.1.0 degrau 17).
+ *
+ * @param last  the call path's LAST segment (the bare builtin name)
+ * @return      the `tk_rt_*_len` runtime twin, or `null` when `last` names none of the three
+ */
+fn builtin_host_info_symbol(last: str) -> str | null {
+    if last == "os" { return "tk_rt_os_len" }
+    if last == "arch" { return "tk_rt_arch_len" }
+    if last == "version" { return "tk_rt_version_len" }
+    null
+}
+

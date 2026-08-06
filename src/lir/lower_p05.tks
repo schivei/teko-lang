@@ -1,0 +1,247 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * LoopTargets — one active `loop`'s break/continue jump targets (A1-2,
+ * #382): `head` is the block a `continue` jumps to (the loop body's own
+ * entry), `exit` is the block a `break` jumps to (the block immediately
+ * after the loop), `defer_base` is `ctx.defers.len` at the loop body's
+ * entry (so a break/continue crossing this loop fires exactly the defers
+ * registered INSIDE its own body, LIFO), and `names` is the ordered list
+ * of SCALAR local names `promote_env` gave a block-arg on both `head` and
+ * `exit` — the loop head/exit are both MERGE points (the entry edge and
+ * every back/break edge flow into them), so a `break`/`continue` jump must
+ * supply, in this SAME order, the CURRENT VReg of each — mirroring the
+ * SAME block-arg merge principle an if-expression's result VReg already
+ * uses (§2.4). `region_base` is `ctx.region_stack.len` at the loop body's own entry (BEFORE its own
+ * per-iteration region opens, NP5) — the `defer_base` twin for regions: a break/continue crossing
+ * this loop closes (leave+drop) exactly the regions opened SINCE, via `close_native_regions_to`,
+ * never an enclosing scope's.
+ */
+pub type LoopTargets = struct { label: str; head: u32; exit: u32; defer_base: u64; names: []str; region_base: u64 }
+
+/**
+ * LowerCtx — the lowering state threaded through the expr/stmt walk: the
+ * current LFunc being built + the id of the block instructions append to (N1
+ * always block 0) + the local env (name -> VReg) so a TVar resolves to its
+ * already-lowered value + the struct-layout table (A1-3, #382 — read-only for
+ * the whole lowering of a program, so every copy just carries the SAME slice
+ * forward) + the WHOLE-PROGRAM interned-rodata table (A1-4, #382 — grows as
+ * string literals/interpolation pieces are found, so a fresh entry mid-function
+ * is threaded forward like `func`, unlike the read-only `layouts`) + the
+ * WHOLE-PROGRAM enum table (A1-5, #382 — read-only, like `layouts`, so a
+ * `match` arm's bare enum-member pattern resolves its ordinal) + the
+ * WHOLE-PROGRAM lifted-function table (A1-7, #382 — grows like `rodata`:
+ * every closure/thunk LFunc a `TLambda`/`TVar.is_func` lowering builds is
+ * folded in here first, then into the module's `funcs` ONCE, at the very end
+ * of `lower_program` — its length also serves as the monotonic id counter a
+ * fresh lifted symbol's name embeds) + the CURRENT FUNCTION'S pending-defer
+ * stack (A1-2, #382 — every `defer { … }` reached so far, in program order;
+ * append-only, reset per function/lambda body, fired in LIFO slices by
+ * `replay_defers` at each scope exit) + the active loop-target stack (A1-2,
+ * #382 — innermost loop last, so a `break`/`continue` resolves by scanning
+ * from the end; reset per function/lambda body, since neither construct
+ * crosses a function boundary) + the WHOLE-PROGRAM `extern fn` table (C7.1a —
+ * read-only, like `layouts`/`enums`, so a call to a foreign function resolves
+ * to its declared C symbol instead of the Teko mangling) + `flat_symbols` (the static/shared-
+ * archive carve-out, read-only for the whole lowering of a program — `mangle_fn_symbol`'s `flat`
+ * argument threads through from here, both at a function's own declaration and at every
+ * `call_symbol` resolution, so the two stay consistent) + `ret_type` (the CURRENT FUNCTION/
+ * lambda's own DECLARED return type, reset per function/lambda body exactly like `defers`/
+ * `loop_targets` — `lower_return` and the trailing-tail auto-return both read it so a bare case
+ * value flowing back through a `T | error`-shaped return slot is coerced into the uniform
+ * tag+payload wrapper via `lower_value_into_type`, mirroring the C backend's `emit_return`
+ * threading `ret_type` into `emit_as_r`, #382 degrau N2) + `has_ret_len_slot`/`ret_len_slot`
+ * (the CURRENT FUNCTION'S own fat-return out-slot, reset per function/lambda body exactly like
+ * `ret_type` — a `str`/`[]T`-returning `fn` reserves ONE hidden trailing incoming register for
+ * the caller-supplied length-out address (`bind_ret_len_slot`), so `lower_return`/`lower_fn_body`
+ * can STORE the tail value's length half through it before the ordinary single-VReg `LRet`
+ * carries the ptr half — the callee-side contract `lower_call_fat`'s caller-side alloca+load
+ * mirrors exactly. `has_ret_len_slot=false` for every OTHER body (a void/scalar-returning `fn`,
+ * or a lambda — fat-returning closures are a NARROWER, still-closed gap, #382 degrau N2 call-gordo)
+ * so `lower_return`/`lower_fn_body`'s fat arm can honest-stop instead of storing through an unset
+ * slot when reached somewhere this backend does not yet wire the hidden parameter for).
+ */
+pub type LowerCtx = struct {
+    func: LFunc; block_id: u32; env: LEnv
+    layouts: []LStructLayout; rodata: []LRodata; enums: []LEnumInfo; lifted: []LFunc
+    defers: []checker::TDeferStmt; loop_targets: []LoopTargets; externs: []LExternFn
+    flat_symbols: bool; ret_type: checker::Type
+    has_ret_len_slot: bool; ret_len_slot: u32
+    /**
+     * variants — the program's declared-`variant` table, threaded read-only exactly like `enums`:
+     * the ONE place `expand_named_variant` turns a nominal `Named` back into the union it declares,
+     * so a value's wrapper and a `match` arm's tag test agree on the member list.
+     */
+    variants: []LVariantDef
+    /**
+     * ref_fns — the whole program's `ref<T>` PARAMETER-position table (0.3.1.0 degrau 18),
+     * threaded read-only exactly like `enums`/`variants`: `lower_call`'s ONE place to ask "does
+     * THIS callee auto-ref one of its arguments?" (`find_ref_flags`), built ONCE
+     * (`collect_ref_fns`) rather than re-scanning the program per call site.
+     */
+    ref_fns: []LRefFnInfo
+    /**
+     * field_decls — the whole program's DECLARED-field-type table (0.3.1.0 degrau 25), threaded
+     * read-only exactly like `variants`/`ref_fns`: the ONE place a struct-literal field store asks
+     * "what type does this field DECLARE?" (`find_field_decl_type`), so the value written there is
+     * coerced into it (`lower_value_into_type`) like every other placement's value is.
+     */
+    field_decls: []LFieldDecls
+    /**
+     * addr_taken — the CURRENT function's own address-taken `mut` scalar local names (0.3.1.0
+     * degrau 18): every name `collect_addr_taken_locals` found passed as a `ref<T>` call
+     * argument anywhere in this function's body, computed ONCE before the body lowers. A name in
+     * this set binds through a memory slot (`lenv_bind_scalar_slot`) instead of a plain VReg —
+     * see `lower_binding`.
+     */
+    addr_taken: []str
+    /**
+     * table — the program's type table (`checker::type_table_of(prog)`), threaded read-only
+     * exactly like `variants`/`field_decls`: the ONE place `lower_mem_free_call` asks the checker's
+     * structural probes `checker::is_region_handle_name`/`region_handle_field_name` whether a
+     * `teko::mem::free` argument is a manual region handle and, if so, which field carries its
+     * `uptr`, so the native `free` routes to `tk_region_drop_subtree` on exactly the same shape the
+     * C route does.
+     */
+    table: checker::TypeTable
+    /**
+     * region_stack — the stack of OPEN lexical regions (the frame + blocks/loops/arms), outermost
+     * (index 0, the frame) to innermost (the top). `tk_alloc`'s current is the TOP's handle;
+     * `region_current_vreg` reads it, and a `Scope`-tier accumulator's self-append consults this
+     * stack by `decl_name` to route its growth to the DECLARING region (the N-level selector) rather
+     * than the innermost current — else the buffer would die per-iteration in an inner loop (UAF).
+     * Twin of the C route's `regions: []RegionFrame` threaded by parameter (`codegen.tks`); here it
+     * lives on `LowerCtx` because the native backend threads one context. Empty until the frame
+     * opens; unconsumed until NP3.
+     */
+    region_stack: []NativeRegionFrame
+    /**
+     * escaping — the CURRENT function's `checker::fn_escaping_vars(f)` set (`escape.tks`), computed
+     * ONCE in `lower_function` exactly like `addr_taken`. The conservative superset of the names that
+     * escape the frame; consumed by `binding_conveys_escape` to decide which RHS to bracket
+     * (`enter(rr)…leave()`, the move-on-return conveyance) and by `own_returned_value` (the
+     * `leave`-before-the-box). Reads the SAME oracle the C route reads — no native-only analysis, no
+     * possible divergence.
+     */
+    escaping: []str
+    /**
+     * frees_old_names — computed ONCE in `lower_function` exactly like `escaping`/`addr_taken`. The
+     * set of accumulator names whose linear-chain proof holds (`checker::fn_frees_old_vars`), so a
+     * self-append to one may FREE-OLD on grow. The C emitter re-derives this per-assign from the
+     * enclosing body; the native push site has no body, so it reads this precomputed oracle — the
+     * SAME `assign_frees_old` proof the C route trusts, no native-only analysis, no divergence.
+     */
+    frees_old_names: []str
+    /**
+     * bracket_depth — how many conveyance brackets (`lower_binding_conveyed`/`lower_assign_conveyed`/
+     * `lower_conveyed_tail_expr_stmt_fat`, NP3b/NP4) are CURRENTLY open around the statement being
+     * lowered. `0` outside any bracket. A bracket that finds `bracket_depth > 0` is ALREADY nested
+     * inside an outer one — the outer bracket's own `emit_region_leaves` already moved `current` down
+     * to the conveyance anchor for this WHOLE subtree, so the inner bracket does NOT leave/enter again
+     * (that would incorrectly `tk_region_enter_u` the FRAME region back in the middle of the outer
+     * bracket's still-open span, corrupting the outer bracket's own resume state — the twin of the C
+     * route's `dctx.bracket_depth == 0` re-bracket guard, `codegen.tks`, `emit_stmt`). Threaded like
+     * `region_stack`/`escaping` rather than as a bare boolean because it is the SAME "how many opens
+     * are outstanding" shape those two already establish.
+     * @since 0.3.1
+     */
+    bracket_depth: u32
+}
+
+/**
+ * NativeRegionFrame — one lexical region OPEN on the native lowering's scope stack: the VReg holding
+ * the region's u64 handle (returned by `tk_region_new_u`) and, for the N-level selector, the name of
+ * the `Scope`-tier binding declared at the top of this scope whose self-append must grow HERE (not in
+ * the innermost current). Functional twin of the C route's `RegionFrame` (`codegen.tks`), with the
+ * VReg in place of the textual `_tkbr<n>` name — the C-vs-native difference of the port's §2a.
+ *
+ * @param region_vreg  the VReg holding this region's u64 handle (from `tk_region_new_u`)
+ * @param decl_name    the name of the `Scope`-tier accumulator declared in this scope, or "" if none
+ * @param is_loop      is this region a `loop` body (dropped PER ITERATION, not once)?
+ * @since 0.3.1
+ */
+pub type NativeRegionFrame = struct { region_vreg: u32; decl_name: str; is_loop: bool }
+
+/** Lowered — the result of lowering an expression: the updated context + the VReg the
+    value lives in. */
+pub type Lowered = struct { ctx: LowerCtx; vreg: u32 }
+
+/** LowerStmtOut — the result of lowering a statement: the updated context (its env may be
+    extended by a `let`) + whether the statement TERMINATED the block (a return), so the
+    caller stops emitting into a closed block. */
+pub type LowerStmtOut = struct { ctx: LowerCtx; terminated: bool }
+
+/**
+ * ctx_with — a copy of `ctx` with a new func/block_id/env, carrying its
+ * (unchanged) layouts/enums tables + its (unchanged) rodata table forward.
+ * Centralizes the fields every LowerCtx rebuild must not forget, so a future
+ * field addition touches this ONE function instead of every construction site.
+ * Use `ctx_with_rodata` when the rodata table itself grows (a string literal
+ * was just interned).
+ *
+ * @param LowerCtx ctx  the context to rebuild (its layouts/rodata/enums carry
+ *                      forward)
+ * @param LFunc func  the new current function
+ * @param u32 block_id  the new current block id
+ * @param LEnv env  the new local env
+ * @return LowerCtx  the rebuilt context
+ */
+fn ctx_with(ctx: LowerCtx, func: LFunc, block_id: u32, env: LEnv) -> LowerCtx {
+    LowerCtx {
+        func = func; block_id = block_id; env = env
+        layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
+        variants = ctx.variants
+        defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
+        flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
+        has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
+        ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
+        region_stack = ctx.region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
+    }
+}
+
+/**
+ * ctx_with_rodata — a copy of `ctx` with its rodata table replaced by `rodata`
+ * (everything else unchanged) — the one site a fresh interned entry threads
+ * forward (A1-4, #382).
+ *
+ * @param LowerCtx ctx  the context to rebuild
+ * @param []LRodata rodata  the grown rodata table
+ * @return LowerCtx  the rebuilt context
+ */
+fn ctx_with_rodata(ctx: LowerCtx, rodata: []LRodata) -> LowerCtx {
+    LowerCtx {
+        func = ctx.func; block_id = ctx.block_id; env = ctx.env
+        layouts = ctx.layouts; rodata = rodata; enums = ctx.enums; lifted = ctx.lifted
+        variants = ctx.variants
+        defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
+        flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
+        has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
+        ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
+        region_stack = ctx.region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
+    }
+}
+
+/**
+ * ctx_with_lifted — a copy of `ctx` with its lifted-function table replaced
+ * by `lifted` (everything else unchanged) — the one site a fresh closure/
+ * thunk LFunc threads forward (A1-7, #382).
+ *
+ * @param LowerCtx ctx  the context to rebuild
+ * @param []LFunc lifted  the grown lifted-function table
+ * @return LowerCtx  the rebuilt context
+ */
+fn ctx_with_lifted(ctx: LowerCtx, lifted: []LFunc) -> LowerCtx {
+    LowerCtx {
+        func = ctx.func; block_id = ctx.block_id; env = ctx.env
+        layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = lifted
+        variants = ctx.variants
+        defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
+        flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
+        has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
+        ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
+        region_stack = ctx.region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
+    }
+}
+

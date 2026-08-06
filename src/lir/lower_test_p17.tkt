@@ -1,0 +1,71 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * lwt_lower_block_value_if_arm_tail_stays_unbracketed — the NP4 fix must NOT leak into
+ * `lower_block_value` (shared by every if/match ARM, not just a function body's own top-level
+ * tail): an arm's tail value merges into a shared block-arg the ENCLOSING construct goes on to
+ * use, so bracketing it here would convey out of the frame/block region too early. Calls
+ * `lower_block_value` DIRECTLY (bypassing `lower_fn_body`/`lower_fn_tail` entirely) and asserts
+ * NO `tk_region_leave`/`tk_region_enter_u` call was emitted at all.
+ *
+ * @return void
+ * @since 0.3.1.0 (NP4 UAF fix regression coverage)
+ */
+#test
+fn lwt_lower_block_value_if_arm_tail_stays_unbracketed() {
+    let ctx0 = lwt_region_ctx(0, 7)
+    let body = teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num_i64(42)))
+    let out = match lower_block_value(ctx0, body, LType::I64, checker::Prim { kind = checker::PrimKind::I64 }) { LowerBlockValue as x => x; error as err => { teko::assert::is_true(false); return } }
+    let text = print_lmodule(add_func(empty_module(), out.ctx.func))
+    teko::assert::is_false(teko::str::contains(text, "tk_region_leave"))
+    teko::assert::is_false(teko::str::contains(text, "tk_region_enter_u"))
+}
+
+/**
+ * lwt_lower_conveyed_tail_expr_stmt_brackets_and_restores_bracket_depth — the LEAVE/ENTER
+ * BALANCE `lower_fn_tail`'s own bracket (`lower_conveyed_tail_expr_stmt`) must keep: at
+ * `bracket_depth == 0` (a top-level call, not nested inside an outer bracket) it emits EXACTLY
+ * ONE `tk_region_leave` and EXACTLY ONE `tk_region_enter_u` (the restore), and hands back
+ * `bracket_depth` restored to the CALLER's own original value (0) — never left stuck at the `1`
+ * it marks itself with while lowering the bracketed tail.
+ *
+ * @return void
+ * @since 0.3.1.0 (NP4 UAF fix regression coverage)
+ */
+#test
+fn lwt_lower_conveyed_tail_expr_stmt_brackets_and_restores_bracket_depth() {
+    let ctx0 = lwt_region_ctx(0, 7)
+    let es = checker::TExprStmt { expr = lwt_num_i64(42) }
+    let out = match lower_conveyed_tail_expr_stmt(ctx0, es, LType::I64, checker::Prim { kind = checker::PrimKind::I64 }, 0, 0) { LowerBlockValue as x => x; error as err => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(out.ctx.bracket_depth == (0 to u32))
+    let text = print_lmodule(add_func(empty_module(), out.ctx.func))
+    teko::assert::is_true(lwt_count_substr(text, "call @tk_region_leave()") == (1 to u64))
+    teko::assert::is_true(lwt_count_substr(text, "call @tk_region_enter_u(") == (1 to u64))
+}
+
+/**
+ * lwt_lower_conveyed_tail_expr_stmt_skips_bracket_when_already_nested — the BRACKET_DEPTH
+ * NESTED-SKIP `lower_conveyed_tail_expr_stmt` shares with `lower_binding_conveyed`/
+ * `lower_assign_conveyed`/`lower_conveyed_tail_expr_stmt_fat`: when the caller is ALREADY inside
+ * an outer conveyance bracket (`bracket_depth > 0`), it must NOT re-leave/re-enter the frame
+ * region mid-span (that would re-enter the frame in the middle of the outer bracket's still-open
+ * span, misrouting whatever the outer RHS still has left to build) — it just lowers the tail
+ * expression on the context UNCHANGED, emitting NO `tk_region_leave`/`tk_region_enter_u` call at
+ * all, and leaves `bracket_depth` exactly as the caller passed it in (1).
+ *
+ * @return void
+ * @since 0.3.1.0 (NP4 UAF fix regression coverage)
+ */
+#test
+fn lwt_lower_conveyed_tail_expr_stmt_skips_bracket_when_already_nested() {
+    let ctx0 = lwt_region_ctx(1, 7)
+    let es = checker::TExprStmt { expr = lwt_num_i64(42) }
+    let out = match lower_conveyed_tail_expr_stmt(ctx0, es, LType::I64, checker::Prim { kind = checker::PrimKind::I64 }, 0, 0) { LowerBlockValue as x => x; error as err => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(out.ctx.bracket_depth == (1 to u32))
+    let text = print_lmodule(add_func(empty_module(), out.ctx.func))
+    teko::assert::is_false(teko::str::contains(text, "tk_region_leave"))
+    teko::assert::is_false(teko::str::contains(text, "tk_region_enter_u"))
+}
+

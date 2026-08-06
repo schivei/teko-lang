@@ -1,0 +1,256 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * builtin_peak_rss_symbol — the runtime twin of the ONE plain-scalar host-info builtin this N1
+ * subset lowers directly: `peak_rss() -> u64` (`checker/scope.tks`) — a whole 64-bit register,
+ * so it needs no out-parameter convention at all, unlike its `str`-returning `os`/`arch`/
+ * `version` siblings above (0.3.1.0 degrau 17).
+ *
+ * @param last  the call path's LAST segment (the bare builtin name)
+ * @return      `"tk_peak_rss"`, or `null` when `last` names something else
+ */
+fn builtin_peak_rss_symbol(last: str) -> str | null {
+    if last == "peak_rss" { return "tk_peak_rss" }
+    null
+}
+
+/**
+ * native_builtin_symbol — the runtime symbol an ADDRESSABLE bare builtin lowers to, across the
+ * THIRTEEN families the N1 call path resolves DIRECTLY: io/process, coverage sinks, arena
+ * checkpoints, the `str` predicate pair, the `str` slice trio, the integer-to-string pair, the
+ * float-to-text pair (`ftoa`/`f64_g17`, 0.3.1.0 degrau 27), the `str`/`str_of_bytes` alias,
+ * `bytes_of_str` (its reverse direction), `one_byte` (the byte-to-`str` producer, 0.3.1.0 degrau
+ * 32), the `os`/`arch`/`version` host-info trio, the plain-scalar `peak_rss`, and the one
+ * `teko::env` host-surface primitive with a native lowering (`builtin_env_symbol`). Split into one
+ * predicate per family so a family grows without lengthening the others.
+ *
+ * The INVERSE direction of the float pair — `teko::float::parse(str) -> f64`, the language's own
+ * `atof` — is deliberately NOT here, and its absence is a MEASURED refusal rather than an
+ * oversight: its result is a `double` in XMM0/D0, and `select_call_result_x86`/
+ * `select_call_result_arm64` capture every call result out of the INTEGER result register (`LInst`
+ * carries no result type — their own documented limitation). Resolving a symbol for it would
+ * therefore compile and then hand back whatever integer register held, which is a silent wrong
+ * value in the compiler's OWN float-literal parser (`parser/parse_lit.tks`). It keeps
+ * `float_parse_result_stop`'s NAMED stop until the LIR records a call's result class
+ * (0.3.1.0 degrau 27).
+ *
+ * `f64_bits`/`f64_from_bits` are NOT in this table — they never reach it: `lower_call` intercepts
+ * both directly (`is_f64_bitcast_call`/`lower_f64_bitcast_call`) as a raw `LUn` bit
+ * reinterpretation, never as a runtime CALL, so this resolver never sees either name (0.3.1.0
+ * degrau 24, made a real move at degrau 27). `append_fo` is not in it either, for the mirror-image
+ * reason: its result is FAT, so `lower_call_fat` intercepts it (`is_append_fo_call`/
+ * `lower_append_fo_call`) before any symbol resolution happens — a bare symbol here could not
+ * carry the out-parameter length its runtime twin returns through (0.3.1.0 degrau 26).
+ *
+ * @param last  the call path's LAST segment (the bare builtin name)
+ * @return      the `tk_*` runtime symbol, or `null` when `last` names no directly-lowered builtin
+ */
+fn native_builtin_symbol(last: str) -> str | null {
+    match builtin_io_symbol(last) { str as s => return s; null => { } }
+    match builtin_cov_symbol(last) { str as s => return s; null => { } }
+    match builtin_arena_symbol(last) { str as s => return s; null => { } }
+    match builtin_str_query_symbol(last) { str as s => return s; null => { } }
+    match builtin_str_slice_symbol(last) { str as s => return s; null => { } }
+    match builtin_int_to_str_symbol(last) { str as s => return s; null => { } }
+    match builtin_float_to_str_symbol(last) { str as s => return s; null => { } }
+    match builtin_str_of_bytes_symbol(last) { str as s => return s; null => { } }
+    match builtin_bytes_of_str_symbol(last) { str as s => return s; null => { } }
+    match builtin_one_byte_symbol(last) { str as s => return s; null => { } }
+    match builtin_host_info_symbol(last) { str as s => return s; null => { } }
+    match builtin_peak_rss_symbol(last) { str as s => return s; null => { } }
+    match builtin_hostffi_variant_symbol(last) { str as s => return s; null => { } }
+    builtin_env_symbol(last)
+}
+
+/**
+ * builtin_hostffi_variant_symbol — the subset of the aggregate-returning host surface whose result is a bare
+ * `Variant` this backend already builds (`str | error`, `[]str | error`), so a STANDALONE call to
+ * `teko::env::var`/`env::cwd`/`io::read_file`/`fs::list_dir` lowers through the same twin path the
+ * compiler's own `extern fn` declarations take. The `error | null` writers are NOT here: the
+ * checker types their standalone form as `Variant { Null, Error }` (`host_error_optional`), a
+ * null-union representation this backend does not yet build a value of for a STANDALONE call, so
+ * they keep their honest stop (reported alongside 0.3.1.0 degrau 34).
+ *
+ * @param str last  the call path's LAST segment (the bare builtin name)
+ * @return str | null  the host symbol for a Variant-returning host read, or `null` otherwise
+ * @since 0.3.1.0 degrau 34
+ */
+fn builtin_hostffi_variant_symbol(last: str) -> str | null {
+    if last == "var" { return "tk_rt_getenv" }
+    if last == "cwd" { return "tk_rt_getcwd" }
+    if last == "read_file" { return "tk_rt_read_file" }
+    if last == "list_dir" { return "tk_rt_list_dir" }
+    null
+}
+
+/**
+ * builtin_env_symbol — the runtime twin of the ONE `teko::env` host-surface builtin this N1
+ * subset lowers directly: `args` (`teko::env::args`). Its fixed-ABI shape (`tk_str
+ * *tk_rt_args(uint64_t *n)`, `teko_rt.h`) already matches the fat-return hidden-out-param
+ * convention `lower_call_fat` builds for EVERY fat-returning call (the caller allocates an
+ * 8-byte length slot and passes its address as the call's own last argument), so once the
+ * symbol resolves, no extra plumbing is needed for the ABI itself.
+ *
+ * Scoped to `args` ONLY: the value-or-error/error-optional/`[]str`-or-error host surface
+ * (`var`/`cwd`/`read_file`/`write_file`/`list_dir`/…) is resolved by `builtin_hostffi_symbol`
+ * instead (0.3.1.0 degrau 34), since those share the aggregate-return twin lowering `args` does
+ * not; the remaining host surface (`process::run`/…) still honest-stops.
+ *
+ * @param last  the call path's LAST segment (the bare builtin name)
+ * @return      `"tk_rt_args"` for `args`, else `null`
+ */
+fn builtin_env_symbol(last: str) -> str | null {
+    if last == "args" { return "tk_rt_args" }
+    null
+}
+
+/**
+ * call_symbol — the LIR symbol a direct call targets, decided by the callee's ORIGIN NAMESPACE and
+ * never by its bare name. An UNRESOLVED callee (`call_ns` empty — the checker found no declaration
+ * and fell through to `builtin_fn`) is the only one that may mean a builtin, and lowers to its
+ * runtime twin (`native_builtin_symbol`); an `extern fn` lowers to its declared FOREIGN symbol
+ * VERBATIM (C7.1a, resolved through `externs` — the same fact the C backend reads off
+ * `TFunction.is_extern`/`c_symbol`, and the reason `find_extern_symbol` is consulted BEFORE the
+ * mangler); any other Teko-Teko call lowers to the `teko_`-prefixed mangle of `call_ns::name`.
+ *
+ * Keying on the namespace is what makes the two families disjoint: before it, a user function whose
+ * bare name happened to match a builtin (`arena_push`, `one_byte`, …) was silently emitted as the
+ * RUNTIME symbol — it type-checked with the user's own arity and then never ran its own body.
+ *
+ * @param c        the checked call
+ * @param externs  the program's whole `extern fn` table
+ * @param flat     the static/shared-archive carve-out (`mangle_fn_symbol`'s `flat`): default
+ *                 `false`; a `flat` module's Teko-Teko call must resolve the SAME flat spelling
+ *                 the callee's own declaration uses (`LowerCtx.flat_symbols`, threaded in by the
+ *                 caller)
+ * @return         the symbol the LCall targets
+ * @throws         on an empty callee path, on a bare builtin the N1 subset does not lower yet, or
+ *                 on the generic `teko::list::*`/`teko::mem::push_fo` growth-builtin family
+ *                 (`is_list_builtin_call`) — it has no `.tks` declaration for `find_extern_symbol`/
+ *                 the mangler to resolve EITHER, so without this check it would silently fall
+ *                 through to `mangle_fn_symbol(c.call_ns, last, flat)` and target a symbol no
+ *                 function ever defines (a link-time failure at best). That family is now
+ *                 INTERCEPTED upstream by `lower_call_fat`/`lower_list_builtin`, which lowers it to
+ *                 the runtime's own grow entries, so this arm survives only as the backstop for a
+ *                 future caller that reaches the symbol resolver with one of them directly
+ *                 (list-builtin degrau; call-gordo degrau, #382 N2)
+ */
+fn call_symbol(c: checker::TCall, externs: []LExternFn, flat: bool = false) -> str | error {
+    let segs = c.callee.segments
+    if segs.len == 0 { return error { message = "native backend N1: empty call path (internal)" } }
+    let last = segs[segs.len - 1].name
+    if c.call_ns.len == 0 {
+        match assert_seed_symbol(c.callee) { str as s => return s; null => { } }
+        match native_builtin_symbol(last) { str as s => return s; null => { } }
+        if is_list_builtin_call(c.callee) {
+            return error { message = "native backend N1: the generic `teko::list::*`/`teko::mem::push_fo` growth builtin has no native runtime backing yet (N2)" }
+        }
+        if last == "parse" { return float_parse_result_stop() }
+        return unresolved_builtin_stop(last)
+    }
+    match find_extern_symbol(externs, c.call_ns, last) {
+        str as foreign => foreign
+        null => mangle_fn_symbol(c.call_ns, last, flat)
+    }
+}
+
+/**
+ * float_parse_result_stop — the NAMED honest stop for `teko::float::parse(str) -> f64`, the
+ * language's own `atof` and the INVERSE direction of the float-to-text pair degrau 27 lowered
+ * (`builtin_float_to_str_symbol`). Its runtime twin already exists (`tk_float_parse`, `teko_rt.h`)
+ * and its `str` argument already flattens through `lower_args`, so the ONLY thing missing is the
+ * one thing this backend cannot fake: the RESULT class.
+ *
+ * A `double` result comes back in XMM0 (SysV) / D0 (AAPCS64), and `select_call_result_x86`/
+ * `select_call_result_arm64` move EVERY call result out of the INTEGER result register, because
+ * `lir::LInst` records no result type for a call — their own documented limitation. Resolving a
+ * symbol here would therefore produce a program that compiles, links and runs while every parsed
+ * float is whatever the integer register happened to hold. This stop exists so that the day the
+ * compiler's own float-literal parser (`parser/parse_lit.tks`, the one caller on the self-host
+ * path) reaches the native backend, it reaches a STOP naming the missing fact and not a wrong
+ * number: measured 0.3.1.0 degrau 27, deliberately NOT lowered.
+ *
+ * @return  the honest stop, always
+ */
+fn float_parse_result_stop() -> error {
+    error { message = "native backend N1: builtin `parse` (`teko::float::parse(str) -> f64`) not yet lowered (N2) — its `double` result comes back in XMM0/D0 and `LCall` records no result class, so `select_call_result_*` would capture the integer register instead and hand back a silently wrong float" }
+}
+
+/**
+ * unresolved_builtin_stop — the NAMED honest stop for a callee whose `call_ns` came back empty
+ * (the checker's own signal that no declaration was found — `call_symbol`'s doc) and that matched
+ * none of the builtin families this function already recognizes.
+ *
+ * Before this stop existed for a MULTI-segment callee, only a single-segment one (`segs.len == 1`)
+ * reached it; a path of two or more segments — `teko::str::slice`, `teko::str::ends_with`, …, 80+
+ * call sites in this compiler's own source — instead fell through to `mangle_fn_symbol("", last,
+ * flat)`, producing `teko_<last>` with NO declaration anywhere to back it: a silent LINK-time
+ * failure (`undefined reference to teko_slice`) rather than a compile-time stop this backend can
+ * name. `call_ns.len == 0` means "a builtin, or nothing" for EVERY segment count — the mangler was
+ * never a legitimate fallback for it — so this stop is now unconditional (0.3.1.0 raiz-comum §6 R6).
+ *
+ * @param last  the callee path's bare last segment
+ * @return      the honest stop, always
+ */
+fn unresolved_builtin_stop(last: str) -> error {
+    error { message = teko::str::concat("native backend N1: builtin `", last, "` not yet lowered (N2)") }
+}
+
+/**
+ * is_list_builtin_call — recognizes a callee path shaped like the checker's OWN
+ * `teko::list::push`/`teko::list::empty`/`teko::mem::push_fo` GENERIC builtin family
+ * (`typer.tks`'s `type_list_builtin`, mirrored here since the checker leaves NO declaration
+ * behind for these — `call_ns` stays empty exactly like an `teko::assert::*`/io/cov/arena
+ * builtin, C7.1a's sibling gap). Recognized by the LAST TWO path segments (`list::push`/
+ * `list::empty`/`mem::push_fo`), rooted at `teko` (or bare `list::*`/`mem::push_fo`) — the SAME
+ * shape `type_list_builtin` matches, so the two families never disagree about which calls this
+ * one covers.
+ *
+ * @param callee  the call's callee path
+ * @return        true iff `callee` names one of the three list/mem growth builtins
+ */
+fn is_list_builtin_call(callee: parser::Path) -> bool {
+    let segs = callee.segments
+    if segs.len < 2 { return false }
+    let last = segs[segs.len - 1].name
+    let prev = segs[segs.len - 2].name
+    let is_pushfo = prev == "mem" && last == "push_fo"
+    if prev != "list" && !is_pushfo { return false }
+    segs.len == 2 || segs[0].name == "teko"
+}
+
+/**
+ * find_extern_symbol — the FOREIGN symbol declared by the `extern fn` named
+ * `ns::name`, or `null` when that callee is an ordinary Teko function (C7.1a).
+ * A linear scan mirrors the C backend's own `cg_find_function`: the table holds
+ * one entry per declared `extern`, a set small enough that an index would cost
+ * more than it saves.
+ *
+ * @param []LExternFn externs  the program's whole `extern fn` table
+ * @param str ns  the callee's resolved namespace (`TCall.call_ns`)
+ * @param str name  the callee's last path segment
+ * @return str | null  the declared C symbol, or `null` when no `extern`
+ *                     matches
+ */
+fn find_extern_symbol(externs: []LExternFn, ns: str, name: str) -> str | null {
+    mut i: u64 = 0
+    loop {
+        if i >= externs.len { break }
+        if externs[i].namespace == ns && externs[i].name == name { return externs[i].c_symbol }
+        i++
+    }
+    null
+}
+
+/**
+ * IfaceFatPtr — the two loaded halves of an interface receiver's fat
+ * pointer (§5.3: `{data@0, vtable@8}`): its object-data VReg (field 0, the
+ * value a dispatched method call rides as its own receiver arg) and its
+ * vtable-base VReg (field 1, the address `lower_iface_slot` indexes).
+ *
+ * @since #382 A1-6
+ */
+pub type IfaceFatPtr = struct { ctx: LowerCtx; data: u32; vtable: u32 }
+

@@ -1,0 +1,243 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+#test
+fn lwt_lowers_chain_comparison_ands_adjacent_terms() {
+    let a = lwt_num_i64(1)
+    let b = lwt_num_i64(2)
+    let c = lwt_num_i64(3)
+    let terms = teko::list::push(teko::list::push(teko::list::empty(), lwt_cmp_term(lexer::TokenKind::Lt, b)), lwt_cmp_term(lexer::TokenKind::Lt, c))
+    let text = lwt_lower_expr_text(lwt_cmp(a, terms))
+    teko::assert::str_contains(text, "icmplts %0, %1")
+    teko::assert::str_contains(text, "icmplts %1, %3")
+    teko::assert::str_contains(text, "branch")
+    teko::assert::str_contains(text, "jump #B")
+}
+
+#test
+/**
+ * lwt_if_stmt_value_if_rhs_reassign_threads_the_outer_merge — the #389 F1b
+ * item 2 proof at the LIR level: a `mut` scalar reassigned INSIDE a
+ * value-position `if` that is the RHS of a `let` binding in an OUTER
+ * statement-`if` arm must ALSO thread through the OUTER merge, not just the
+ * inner value-if's own. `if 1 == 1 { let y = if 1 == 1 { x = 5; x } else { 0
+ * } }; return x` — the inner value-if threads `x` through its OWN merge
+ * (`#B6(%8, %9)`, value param `%8` + scalar `%9`), so past the binding `x`
+ * reads `%9`; the OUTER statement merge must carry `x` too or the read past
+ * the outer `if` freezes at the stale pre-branch `x` (`%0`). F1b's
+ * `collect_reassigned_stmt` `TBinding` case descends into the binding's
+ * value-position `if`/`match` RHS, so the reassigned-scalar scan SEES `x` and
+ * the outer merge gains its param (`#B3(%4)`). Asserts the inner arms feed the
+ * inner merge (`#B4`/`#B5` → `#B6`), the outer then-arm (which ENDS in the
+ * inner merge block `#B6`) closes carrying the POST-inner `x` (`jump
+ * #B3(%9)`), the outer else pass-through carries the PRE-branch `x` (`#B2` →
+ * `jump #B3(%0)`), and the read past the outer merge sees the merge param
+ * (`#B3(%4): ret %4`). Before F1b the outer merge carried ZERO params and
+ * `return x` read the stale `%0`.
+ *
+ * @return void
+ */
+fn lwt_if_stmt_value_if_rhs_reassign_threads_the_outer_merge() {
+    let inner_cond = lwt_cmp(lwt_num_i64(1), teko::list::push(teko::list::empty(), lwt_cmp_term(lexer::TokenKind::EqEq, lwt_num_i64(1))))
+    let inner_then = teko::list::push(teko::list::push(teko::list::empty(), lwt_simple_assign("x", lexer::TokenKind::Assign, lwt_num_i64(5), checker::PrimKind::I64)), lwt_exprstmt(lwt_var("x", checker::PrimKind::I64)))
+    let inner_else = teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num_i64(0)))
+    let inner_if = lwt_if_value(inner_cond, inner_then, inner_else, checker::PrimKind::I64)
+    let outer_then = teko::list::push(teko::list::empty(), lwt_bind("y", inner_if, checker::PrimKind::I64))
+    let outer_cond = lwt_cmp(lwt_num_i64(1), teko::list::push(teko::list::empty(), lwt_cmp_term(lexer::TokenKind::EqEq, lwt_num_i64(1))))
+    let ifstmt = lwt_if_stmt(outer_cond, outer_then, false, teko::list::empty())
+    let body = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), lwt_bind("x", lwt_num_i64(1), checker::PrimKind::I64)), lwt_exprstmt(ifstmt)), lwt_ret(lwt_var("x", checker::PrimKind::I64)))
+    let f = lwt_fn("nested_value_if_rhs", "teko::demo", teko::list::empty(), checker::Prim { kind = checker::PrimKind::I64 }, body)
+    let lf = match lower_function(f) { LoweredFunction as x => x.func; error as err => return }
+    let text = print_lmodule(add_func(empty_module(), lf))
+    teko::assert::str_contains(text, "  #B4:\n    %10 = const 5\n    jump #B6(%10, %10)")
+    teko::assert::str_contains(text, "  #B5:\n    %11 = const 0\n    jump #B6(%11, %0)")
+    teko::assert::str_contains(text, "  #B6(%8, %9):\n    jump #B3(%9)")
+    teko::assert::str_contains(text, "  #B2:\n    jump #B3(%0)")
+    teko::assert::str_contains(text, "  #B3(%4):\n    ret %4")
+}
+
+#test
+/**
+ * lwt_match_stmt_threads_both_the_reassigned_and_the_pattern_shadowed_name —
+ * #389 F1b item 3: a match subject `k` whose FIRST arm pattern-binds its own
+ * value under `x` (`A as x`, no further statements), and whose SECOND
+ * (wildcard) arm reassigns BOTH `x` and `y`. Under enclosing-IDENTITY
+ * threading BOTH `x` and `y` are threaded (the former across-all-arms pattern
+ * exclusion is gone), so the merge carries TWO scalar params in `env` order
+ * (`#B1(%3, %4):`, `x` = `%3`, `y` = `%4`). The pattern arm appends its `A as
+ * x` bind at a HIGHER index than the enclosing `x`, so `arm_scalar_args` reads
+ * both scalars at their untouched pre-branch indices and its closing jump
+ * carries pre-branch `x` and pre-branch `y` (`jump #B1(%1, %2)`); the wildcard
+ * arm reassigns both in place, so its closing jump carries the reassigned
+ * VRegs (`jump #B1(%5, %6)`). The read past the merge sums the two params
+ * (`ret %7`). This UPDATE fixes the latent wildcard-path miscompile the old
+ * one-param golden enshrined: `x`'s reassignment on the wildcard path was
+ * silently dropped when a SIBLING arm's pattern shadowed the name.
+ *
+ * @return void
+ */
+fn lwt_match_stmt_threads_both_the_reassigned_and_the_pattern_shadowed_name() {
+    let subject = lwt_var("k", checker::PrimKind::I64)
+    let arm0 = lwt_arm(lwt_bind_pattern("A", "x"), teko::list::empty())
+    let arm1_body = teko::list::push(teko::list::push(teko::list::empty(), lwt_simple_assign("x", lexer::TokenKind::Assign, lwt_num_i64(99), checker::PrimKind::I64)), lwt_simple_assign("y", lexer::TokenKind::Assign, lwt_num_i64(20), checker::PrimKind::I64))
+    let arm1 = lwt_arm(lwt_wildcard_pattern(), arm1_body)
+    let arms = teko::list::push(teko::list::push(teko::list::empty(), arm0), arm1)
+    let match_stmt = checker::TExpr { kind = checker::TMatchExpr { subject = subject; arms = arms }; type = checker::Void { }; line = 0; col = 0 }
+    let tail = lwt_ret(lwt_bin(lexer::TokenKind::Plus, lwt_var("x", checker::PrimKind::I64), lwt_var("y", checker::PrimKind::I64), checker::PrimKind::I64))
+    let body = teko::list::push(teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), lwt_bind("x", lwt_num_i64(1), checker::PrimKind::I64)), lwt_bind("y", lwt_num_i64(10), checker::PrimKind::I64)), lwt_exprstmt(match_stmt)), tail)
+    let params = teko::list::push(teko::list::empty(), lwt_param("k", "i64"))
+    let f = lwt_fn("shadow_and_clean_reassign", "teko::demo", params, checker::Prim { kind = checker::PrimKind::I64 }, body)
+    let lf = match lower_function(f) { LoweredFunction as x => x.func; error as err => return }
+    let text = print_lmodule(add_func(empty_module(), lf))
+    teko::assert::str_contains(text, "#B1(%3, %4):")
+    teko::assert::str_contains(text, "jump #B1(%1, %2)")
+    teko::assert::str_contains(text, "jump #B1(%5, %6)")
+    teko::assert::str_contains(text, "ret %7")
+}
+
+#test
+fn lwt_honest_stop_on_if_without_else_as_a_value() {
+    let cond = lwt_cmp(lwt_num_i64(1), teko::list::push(teko::list::empty(), lwt_cmp_term(lexer::TokenKind::Lt, lwt_num_i64(2))))
+    let then_blk = teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num_i64(1)))
+    let ifexpr = checker::TExpr { kind = checker::TIfExpr { cond = cond; then_blk = then_blk; has_else = false; else_blk = then_blk }; type = lwt_prim(checker::PrimKind::I64); line = 0; col = 0 }
+    teko::assert::str_contains(lwt_lower_expr_text(ifexpr), "if-without-else used as a value not yet lowered")
+}
+
+#test
+fn lwt_println_arity_mismatch_honest_stops() {
+    let args = teko::list::push(teko::list::push(teko::list::empty(), lwt_strlit("a")), lwt_strlit("b"))
+    let call = lwt_call(lwt_path1("println"), "", args, checker::Void { })
+    teko::assert::str_contains(lwt_lower_expr_text(call), "expects exactly one str argument")
+}
+
+/**
+ * lwt_println_of_a_direct_call_producer_lowers_through_the_hidden_out_slot — `println(mk_str())`
+ * USED to honest-stop ("fat-pointer receiver `call` not yet lowered") because `lower_fat_expr`'s
+ * closed producer set had no `TCall` arm; a direct call is now a closed producer
+ * (`lower_call_fat`), so `mk_str()`'s own out-slot alloca/call/load sequence feeds straight into
+ * `tk_println`'s two-argument `(ptr, len)` call, exactly like a `let`-bound fat local would
+ * (call-gordo degrau, #382 N2).
+ *
+ * @return void
+ */
+#test
+fn lwt_println_of_a_direct_call_producer_lowers_through_the_hidden_out_slot() {
+    let inner = lwt_call(lwt_path1("mk_str"), "teko::demo", teko::list::empty(), checker::Str { })
+    let call = lwt_call(lwt_path1("println"), "", teko::list::push(teko::list::empty(), inner), checker::Void { })
+    let text = lwt_lower_expr_text(call)
+    teko::assert::str_contains(text, "%0 = alloca 8, align 8")
+    teko::assert::str_contains(text, "%1 = call @teko_teko__demo__mk_str(%0)")
+    teko::assert::str_contains(text, "%2 = load.i64 %0")
+    teko::assert::str_contains(text, "call @tk_println(%1, %2)")
+}
+
+/**
+ * A Teko-Teko call is emitted under the mangled symbol: `TEKO_USER_PREFIX` + the namespace with
+ * `::` folded to `_` + `__` + the name.
+ *
+ * THE DOUBLE `teko_` IS NOT A BUG AND MUST NOT BE "FIXED". `teko_` is the user-code prefix (owner
+ * ruling: non-builtin is `teko_*`, builtin is `tk_*`), and this FIXTURE's namespace happens to be
+ * spelled `teko::demo`, which mangles to `teko__demo`. Real user code whose namespace is not
+ * literally `teko` sees a single prefix. Collapsing the two here would assert the pre-ruling
+ * spelling and hide the prefix this test exists to pin.
+ *
+ * @return void
+ */
+#test
+fn lwt_lowers_direct_teko_call_with_mangle() {
+    let args = teko::list::push(teko::list::push(teko::list::empty(), lwt_num_i64(40)), lwt_num_i64(2))
+    let call = lwt_call(lwt_path1("add"), "teko::demo", args, checker::Prim { kind = checker::PrimKind::I64 })
+    teko::assert::str_contains(lwt_lower_expr_text(call), "%2 = call @teko_teko__demo__add(%0, %1)")
+}
+
+/** lwt_extern_fn — an `extern fn <name>() -> i32 = "<sym>"` declaration in namespace `ns`
+    (C7.1a), the item `collect_externs` folds into the call-resolution table. */
+fn lwt_extern_fn(name: str, ns: str, sym: str) -> checker::TItem {
+    checker::TFunction {
+        name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty()
+        namespace = ns; params = teko::list::empty(); return_type = lwt_prim(checker::PrimKind::I32)
+        body = teko::list::empty()
+        vis = parser::Visibility::Pub; has_doc = false; doc = ""
+        file = ""; line = 0; col = 0; is_test = false; is_extern = true; c_symbol = sym; from_lib = ""
+        has_arena_size = false; arena_size = 0 to u64
+    }
+}
+
+/**
+ * A call to an `extern fn` targets the DECLARED FOREIGN SYMBOL, never the Teko namespace
+ * mangling (C7.1a). The mangled spelling (`p__c_getpid`) is defined by nobody, so emitting
+ * it left the own-backend object with an undefined reference the system linker could not
+ * resolve — the C backend has always emitted `cf.c_symbol` here (`codegen.tks`), and the
+ * native lowering now reads the same fact off the whole-program `externs` table.
+ *
+ * @return void
+ */
+#test
+fn lwt_extern_call_targets_the_declared_c_symbol() {
+    mut items: []checker::TItem = teko::list::push(teko::list::empty(), lwt_extern_fn("c_getpid", "p", "getpid"))
+    let call = lwt_call(lwt_path1("c_getpid"), "p", teko::list::empty(), checker::Prim { kind = checker::PrimKind::I32 })
+    items = teko::list::push(items, lwt_item(lwt_exprstmt(call)))
+    let m = match lower_program(checker::TProgram { items = items }) { LModule as x => x; error as err => { teko::assert::is_true(false); return } }
+    let text = print_lmodule(m)
+    teko::assert::str_contains(text, "call @getpid()")
+    teko::assert::is_true(!teko::str::contains(text, "p__c_getpid"))
+}
+
+/**
+ * An `extern fn` declared `-> i32` (`lwt_extern_fn`'s fixed return type) has its call result
+ * cleaned RIGHT AFTER the call: a shift-left by 32 then a SIGNED shift-right by 32 (a sign
+ * round trip through the top of the register). SysV/Win64 both permit the callee to leave the
+ * bits ABOVE the declared 32 unspecified (glibc's `memcmp`, the corpus-documented case —
+ * `examples/probes/arena_bottom/src/bottom.tks:50`), so without this cleanup a Teko read of the
+ * raw call result can misread even a logically-zero/small C `int`.
+ *
+ * @return void
+ */
+#test
+fn lwt_extern_call_i32_return_is_narrowed() {
+    mut items: []checker::TItem = teko::list::push(teko::list::empty(), lwt_extern_fn("c_memcmp", "p", "memcmp"))
+    let call = lwt_call(lwt_path1("c_memcmp"), "p", teko::list::empty(), checker::Prim { kind = checker::PrimKind::I32 })
+    items = teko::list::push(items, lwt_item(lwt_exprstmt(call)))
+    let m = match lower_program(checker::TProgram { items = items }) { LModule as x => x; error as err => { teko::assert::is_true(false); return } }
+    let text = print_lmodule(m)
+    teko::assert::str_contains(text, "call @memcmp()")
+    teko::assert::str_contains(text, "const 32")
+    teko::assert::str_contains(text, "= ishl ")
+    teko::assert::str_contains(text, "= ishrs ")
+    teko::assert::is_true(!teko::str::contains(text, "ishru"))
+}
+
+/** lwt_extern_fn_ret — `lwt_extern_fn`, but with an explicit return type (a `u32`/`u64`/`void`
+    fixture needs a return type other than `lwt_extern_fn`'s fixed `i32`). */
+fn lwt_extern_fn_ret(name: str, ns: str, sym: str, ret: checker::Type) -> checker::TItem {
+    checker::TFunction {
+        name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty()
+        namespace = ns; params = teko::list::empty(); return_type = ret
+        body = teko::list::empty()
+        vis = parser::Visibility::Pub; has_doc = false; doc = ""
+        file = ""; line = 0; col = 0; is_test = false; is_extern = true; c_symbol = sym; from_lib = ""
+        has_arena_size = false; arena_size = 0 to u64
+    }
+}
+
+/**
+ * An `extern fn` declared `-> u64` returns the WHOLE register: there is nothing ABOVE its
+ * declared width to clean, so its call result carries straight through with no shift pair
+ * (`extern_return_narrow`'s "already the whole register" case — the same reasoning that keeps
+ * `c_aligned_alloc`'s own `u64` declaration in `examples/probes/arena_bottom/src/bottom.tks`
+ * un-narrowed).
+ *
+ * @return void
+ */
+#test
+fn lwt_extern_call_u64_return_is_not_narrowed() {
+    mut items: []checker::TItem = teko::list::push(teko::list::empty(), lwt_extern_fn_ret("c_aligned_alloc", "p", "aligned_alloc", checker::Prim { kind = checker::PrimKind::U64 }))
+    let call = lwt_call(lwt_path1("c_aligned_alloc"), "p", teko::list::empty(), checker::Prim { kind = checker::PrimKind::U64 })
+    items = teko::list::push(items, lwt_item(lwt_exprstmt(call)))
+    let m = match lower_program(checker::TProgram { items = items }) { LModule as x => x; error as err => { teko::assert::is_true(false); return } }
+    let text = print_lmodule(m)
+    teko::assert::str_contains(text, "call @aligned_alloc()")
+    teko::assert::is_true(!teko::str::contains(text, "ishl"))
+}
+

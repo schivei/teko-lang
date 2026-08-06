@@ -1,0 +1,244 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * lower_compare — a `TCompare` (`first` + `rest` chain) -> the chain of ICmp/FCmp opcodes, ANDed
+ * together. Four subject shapes detour before the generic chain: a `str` subject goes to
+ * `lower_str_compare` (two words, no single machine comparison); a `char` subject goes to
+ * `lower_char_compare` (a scalar, but with no `PrimKind` — see its own doc); a `[]T` subject goes
+ * to `lower_slice_compare` (value equality, element-by-element); and a tagged-variant-vs-member
+ * pairing (`a == null` / `a != 5` over `a: i32 | null`, recognized by
+ * `lower_variant_member_compare_dispatch` regardless of which side is `first`) goes to
+ * `lower_variant_member_cmp`. A lone subject (no `rest`) is degenerate: its own value is already
+ * the bool result (mirrors `emit_compare`'s C twin).
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param checker::TExpr e  the comparison expression (source position)
+ * @param checker::TCompare cmp  the comparison node
+ * @return Lowered | error  the chain's bool result
+ * @throws  propagated from any of the four detours or from the generic ICmp/FCmp chain
+ */
+fn lower_compare(ctx: LowerCtx, e: checker::TExpr, cmp: checker::TCompare) -> Lowered | error {
+    if cmp.rest.len > 0 && is_str_type(cmp.first.type) { return lower_str_compare(ctx, e, cmp) }
+    if cmp.rest.len > 0 && is_char_type(cmp.first.type) { return lower_char_compare(ctx, e, cmp) }
+    if cmp.rest.len > 0 && is_fat_type(cmp.first.type) { return lower_slice_compare(ctx, e, cmp) }
+    match lower_variant_member_compare_dispatch(ctx, e, cmp) {
+        Lowered as r => return r
+        error as err => return err
+        null => { }
+    }
+    let lo = match lower_expr(ctx, cmp.first) { Lowered as x => x; error as err => return err }
+    if cmp.rest.len == 0 { return Lowered { ctx = lo.ctx; vreg = lo.vreg } }
+    let chain = match lower_compare_terms(lo.ctx, e, cmp.first.type, lo.vreg, cmp.rest) { CmpChain as c => c; error as err => return err }
+    mut cur = chain.ctx
+    mut acc = chain.bools[0]
+    mut i: u64 = 1
+    loop {
+        if i >= chain.bools.len { break }
+        let merged = lower_bool_and(cur, acc, chain.bools[i], e.line, e.col)
+        cur = merged.ctx
+        acc = merged.vreg
+        i++
+    }
+    Lowered { ctx = cur; vreg = acc }
+}
+
+/**
+ * lower_call — a direct, interface-dispatch, or closure call. The `exit`/
+ * `panic` builtins and the `print`/`println`/`eprint`/`eprintln`/`write`/
+ * `ewrite` io builtins map to their runtime symbols (tk_exit / tk_panic_str /
+ * tk_print / …), matching the C backend; a Teko-Teko call resolves its
+ * symbol through the shared mangler (call_ns::name). A DYNAMIC
+ * contract-method call (`is_iface_dispatch`) routes to `lower_iface_call`
+ * (A1-6, #382); a call through a local closure VALUE (`is_closure_call`)
+ * routes to `lower_closure_call` (A1-7, #382). A resolved symbol taking its
+ * lone argument as a runtime `tk_str` (the C1-6 io/panic group,
+ * `is_str_arg_builtin`) routes to `lower_str_arg_call`, which lowers that ONE
+ * argument through the (ptr, len) FAT pair (`lower_fat_expr`) instead of the
+ * generic left-to-right scalar path — every other call lowers its arguments
+ * plainly (`lower_args`) and emits through `lower_call_symbol`. A call whose OWN result is
+ * fat (`str`/`[]T`, `is_fat_type(e.type)`) routes to `lower_call_fat` instead — the callee
+ * needs its hidden length out-slot argument REGARDLESS of whether this particular call site
+ * ends up reading the length back (a statement-level call whose value is discarded still owes
+ * the callee that register, exactly like a fat PARAMETER's ptr+len pair is never optional) —
+ * only the ptr half is kept as this function's own single-VReg result (call-gordo degrau, #382 N2).
+ * `teko::str::last_index_of` (`is_last_index_of_call`) is intercepted BEFORE the plain resolver
+ * table too — its `u64 | error` result is neither fat nor an ordinary single-register scalar, so
+ * it routes to `lower_last_index_of_call`'s own bool-branch + variant-wrapper construction
+ * (0.3.1.0 degrau 15). `teko::text::str_from_utf8` (`is_str_from_utf8_call`) is intercepted the
+ * SAME way — its `str | error` result is a fat PAYLOAD wrapped in a variant, neither the bare
+ * `is_fat_type` shape above nor `last_index_of`'s scalar payload, so it routes to its own
+ * `lower_str_from_utf8_call` (0.3.1.0 degrau 21). `teko::error::err_loc`/`err_typed`
+ * (`is_err_loc_call`/`is_err_typed_call`) are intercepted the SAME way too — the `tk_error_loc`/
+ * `tk_error_types` twins they mirror are `static inline` in `teko_rt.h` with no linkable symbol,
+ * so `native_builtin_symbol` has no entry to resolve either one; they route to
+ * `lower_err_loc_call`/`lower_err_typed_call` (0.3.1.0 degrau 22). `f64_bits`/`f64_from_bits`
+ * (`is_f64_bitcast_call`) are intercepted BEFORE `call_symbol` too, but for the OPPOSITE reason
+ * every sibling above is: not because their runtime twin needs a shape this backend cannot build
+ * yet, but because they need no CALL at all — a bit reinterpretation crosses the GPR/FPR boundary
+ * with no arithmetic, so `lower_f64_bitcast_call` emits one raw `LUn` move (`IToFBits`/`FToIBits`)
+ * into a fresh VReg — see its own doc for why a call OR a same-VReg-id alias were both unsound.
+ * `load_u64`/`store_u64` (`is_load_u64_call`/`is_store_u64_call`, arena-em-teko.md §2 P1) are
+ * intercepted the SAME no-call way: each is ONE `LLoad`/`LStore` against the argument's own VReg
+ * as the address, with no runtime symbol to resolve at all.
+ *
+ * A call into REAL C (a declared `extern fn`, OR a runtime builtin — `calls_native_c`) additionally
+ * passes through `apply_native_c_return_narrow`: SysV/Win64 both permit the callee to leave the
+ * return register's bits ABOVE the DECLARED width unspecified (glibc's `memcmp`, declared
+ * `-> i32`, is the corpus-documented case — `examples/probes/arena_bottom/src/bottom.tks:50`), so
+ * a sub-64-bit integer OR `bool` return is narrowed to its declared/1-byte width before the
+ * caller ever reads it (0.3.1.0 degrau 11 — a `bool` builtin's raw result used to be tested
+ * WHOLE); every other call (Teko-Teko, void, or a callee already returning a whole register)
+ * passes through unchanged.
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param checker::TExpr e  the call expression (for its type + source
+ *                          position)
+ * @param checker::TCall c  the call node
+ * @return Lowered | error  the advanced context + the call's result VReg (0
+ *                          for a void call), or a NAMED internal error when
+ *                          the node is malformed
+ */
+fn lower_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | error {
+    if c.is_closure_call { return lower_closure_call(ctx, e, c) }
+    if c.is_iface_dispatch { return lower_iface_call(ctx, e, c) }
+    if is_fat_type(e.type) { return lower_call_fat_as_scalar(ctx, e, c) }
+    if c.call_ns.len == 0 && is_last_index_of_call(c.callee) { return lower_last_index_of_call(ctx, e, c) }
+    if c.call_ns.len == 0 && is_str_from_utf8_call(c.callee) { return lower_str_from_utf8_call(ctx, e, c) }
+    if c.call_ns.len == 0 && is_err_loc_call(c.callee) { return lower_err_loc_call(ctx, e, c) }
+    if c.call_ns.len == 0 && is_err_typed_call(c.callee) { return lower_err_typed_call(ctx, e, c) }
+    if c.call_ns.len == 0 && is_f64_bitcast_call(c.callee) { return lower_f64_bitcast_call(ctx, e, c) }
+    if c.call_ns.len == 0 && is_float_parse_call(c.callee) { return lower_float_parse_call(ctx, e, c) }
+    if c.call_ns.len == 0 && is_buf_ptr_call(c.callee) { return lower_buf_ptr_call(ctx, e, c) }
+    if c.call_ns.len == 0 && is_load_u64_call(c.callee) { return lower_load_u64_call(ctx, e, c) }
+    if c.call_ns.len == 0 && is_store_u64_call(c.callee) { return lower_store_u64_call(ctx, e, c) }
+    if is_region_new_call(c) { return lower_region_new_call(ctx, e, c) }
+    if is_region_alloc_call(c) { return lower_region_alloc_call(ctx, e, c) }
+    if is_mem_free_call(c) { return lower_mem_free_call(ctx, e, c) }
+    let sym = match call_symbol(c, ctx.externs, ctx.flat_symbols) { str as s => s; error as err => return err }
+    if is_ffi_aggregate_return_symbol(sym) { return lower_ffi_aggregate_return_call(ctx, e, c, sym) }
+    if is_str_arg_builtin(sym) { return lower_str_arg_call(ctx, e, sym, c) }
+    let lo = match lower_call_args(ctx, c) { LoweredArgs as x => x; error as err => return err }
+    let called = match lower_call_symbol(lo.ctx, e, sym, lo.vregs) { Lowered as x => x; error as err => return err }
+    apply_native_c_return_narrow(called, ctx.externs, c, e)
+}
+
+/**
+ * LRefFnInfo — one top-level function's `ref<T>` PARAMETER-position table (0.3.1.0 degrau 18):
+ * `ref_flags[i]` is true iff the function's `i`-th declared parameter is written `ref name: T`.
+ * Built ONCE for the whole program (`collect_ref_fns`) and consulted by EVERY call site
+ * (`find_ref_flags`), so a caller and a `ref` parameter's own binder never disagree about which
+ * positions auto-ref.
+ */
+pub type LRefFnInfo = struct { ns: str; name: str; ref_flags: []bool }
+
+/**
+ * is_ref_param_ann — is a parameter's syntactic annotation the internal `Ref<T>` wrapper
+ * (`wrap_ref_type`'s own output, `src/parser/parse_type.tks`) a surface `ref name: T` parameter
+ * desugars to? The SAME syntactic test the C backend's own call-site auto-ref
+ * (`codegen.tks::emit_call`, `pn == "Ref"`) already runs — this backend agrees with it rather
+ * than re-deriving a second answer from the (unavailable, at lowering time) resolved type.
+ *
+ * @param te  the parameter's syntactic type annotation
+ * @return    whether `te` is `Ref<...>`
+ */
+fn is_ref_param_ann(te: parser::TypeExpr) -> bool {
+    match named_type_name_of(te) { str as n => n == "Ref"; null => false }
+}
+
+/**
+ * fn_ref_flags — one function's `ref_flags`: `is_ref_param_ann` applied to each declared
+ * parameter's annotation, in order.
+ *
+ * @param params  the function's declared parameter list
+ * @return        one flag per parameter, true where it is a `ref` parameter
+ */
+fn fn_ref_flags(params: []parser::Param) -> []bool {
+    mut out: []bool = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= params.len { break }
+        out = teko::list::push(out, is_ref_param_ann(params[i].type_ann))
+        i++
+    }
+    out
+}
+
+/**
+ * fn_has_ref_param — does ANY of `rf` say true? `collect_ref_fns`'s own filter: a function
+ * with no `ref` parameter at all contributes no entry, keeping the whole-program table sized to
+ * the functions a call site actually needs to ask about.
+ *
+ * @param rf  one function's `ref_flags`
+ * @return    whether any position is a `ref` parameter
+ */
+fn fn_has_ref_param(rf: []bool) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= rf.len { break }
+        if rf[i] { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * collect_ref_fns — the whole program's `ref<T>` parameter-position table (0.3.1.0 degrau 18):
+ * one `LRefFnInfo` per top-level FUNCTION that declares at least one `ref` parameter. Built ONCE,
+ * before any function body lowers, exactly like `collect_enums`/`collect_variant_defs`.
+ *
+ * @param prog  the whole typed program
+ * @return      one entry per `ref`-parameter-bearing function
+ */
+fn collect_ref_fns(prog: checker::TProgram) -> []LRefFnInfo {
+    mut out: []LRefFnInfo = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            checker::TFunction as f => {
+                let rf = fn_ref_flags(f.params)
+                if fn_has_ref_param(rf) { out = teko::list::push(out, LRefFnInfo { ns = f.namespace; name = f.name; ref_flags = rf }) }
+            }
+            _ => { }
+        }
+        i++
+    }
+    out
+}
+
+/**
+ * find_ref_flags — `ref_fns`' entry for (`ns`, `name`), or `null` when that function declares no
+ * `ref` parameter at all (the common case — most calls need no auto-ref handling whatsoever).
+ *
+ * @param ref_fns  the whole-program table (`collect_ref_fns`)
+ * @param ns       the callee's resolved namespace (`checker::TCall.call_ns`)
+ * @param name     the callee's bare name (the call path's last segment)
+ * @return         the matching entry's `ref_flags`, or `null`
+ */
+fn find_ref_flags(ref_fns: []LRefFnInfo, ns: str, name: str) -> []bool | null {
+    mut i: u64 = 0
+    loop {
+        if i >= ref_fns.len { break }
+        if ref_fns[i].ns == ns && ref_fns[i].name == name { return ref_fns[i].ref_flags }
+        i++
+    }
+    null
+}
+
+/**
+ * arg_needs_auto_ref — does call argument `arg`, at a `ref<T>` parameter position, need this
+ * backend to take ITS ADDRESS (rather than lower it plainly)? False when `arg` is ALREADY
+ * `Reference`-typed — a `ref` parameter FORWARDED to another `ref<T>` parameter carries the
+ * pointer as its own plain value already (`checker::typer.tks`'s own auto-ref gate: `assignable_to`
+ * already holds for that case, so the checker never marks it `auto_reffed` either) — passing it
+ * along needs no address-of, only the ordinary scalar arg path.
+ *
+ * @param arg  the call argument (already checker-typed)
+ * @return     whether this argument is the auto-ref shape
+ */
+fn arg_needs_auto_ref(arg: checker::TExpr) -> bool {
+    match arg.type { checker::Reference => false; _ => true }
+}
+

@@ -1,0 +1,257 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * collect_struct_layouts — the declared-order, natural-alignment layout of every FIELD-SHAPED
+ * type declaration in `prog`: a `struct` body's own fields, and a `class` body's effective
+ * instance fields (A1-3, #382), SEEDED with the built-in `error` type's own synthetic layout
+ * (`error_struct_layout` — `error` is never a `parser::TypeDecl` in `prog.items`, so it needs
+ * this ONE seed entry rather than a program-order slot, #382 degrau N2).
+ *
+ * A generic struct's type-parameter field annotations collapse to Ptr (ltype_of_typeexpr's
+ * total fallback) — harmless, since no A1-3 fixture instantiates one; a declaration that is
+ * not field-shaped (enum/flags/variant/alias/extern/interface/trait) contributes no layout
+ * entry, because none of them reaches a field/index access in this backend.
+ *
+ * @param prog   the whole typed program, in program order
+ * @param enums  the program's declared-enum table, collected FIRST because an enum-typed
+ *               field's width decides the offsets of every field after it
+ * @param table  the program's type table (`checker::type_table_of(prog)`) — threaded down to
+ *               `layout_of_fields`'s alias resolver (`typeexpr_is_fat`, 0.3.1.0 raiz A, crumb
+ *               R0), taken as a PARAMETER rather than recomputed here so `lower_program` builds
+ *               it exactly once and shares it with a function's own parameter list too
+ * @param dtable the (bare name, namespace)-keyed table `checker::resolve_type` reads
+ *               (`declared_type_table`) — threaded down so `layout_of_fields` can size a field off
+ *               its RESOLVED declared type (`is_fat_type`), the SAME signal the store writes through
+ *               (0.3.1.0 raiz A — fat-field layout unification)
+ * @return      every registered layout (the seeded `error` layout first, then every
+ *              declaration's own, in the order it appears)
+ * @throws      when a class's base chain cannot be walked (an unknown or non-class base) —
+ *              an invariant the checker already enforces, so a miss here is an internal
+ *              break, reported as a NAMED stop instead of a guessed layout (M.3)
+ */
+fn collect_struct_layouts(prog: checker::TProgram, enums: []LEnumInfo, table: checker::TypeTable, dtable: checker::TypeTable) -> []LStructLayout | error {
+    mut out: []LStructLayout = teko::list::push(teko::list::empty(), error_struct_layout())
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        out = match collect_struct_layout_item(out, prog.items[i], table, enums, dtable) {
+            []LStructLayout as next => next
+            error as e => return e
+        }
+        i++
+    }
+    out
+}
+
+/**
+ * collect_struct_layout_item — accumulate `it`'s layout onto `acc` when it is a field-shaped
+ * type declaration, unchanged for every other item kind (a function, a `use`, a const, …).
+ *
+ * @param acc    every layout resolved so far, in program order
+ * @param it     the typed top-level item to inspect
+ * @param table  the program's type table, for a class's base-chain walk
+ * @param enums  the program's declared-enum table, for an enum-typed field's width
+ * @param dtable the resolver-keyed table `layout_of_fields` sizes a fat field's resolved type through
+ * @return       `acc`, extended with `it`'s layout when it declares one
+ * @throws       propagated from `collect_struct_layout_decl`
+ */
+fn collect_struct_layout_item(acc: []LStructLayout, it: checker::TItem, table: checker::TypeTable, enums: []LEnumInfo, dtable: checker::TypeTable) -> []LStructLayout | error {
+    match it {
+        parser::TypeDecl as td => collect_struct_layout_decl(acc, td, table, enums, dtable)
+        _ => acc
+    }
+}
+
+/**
+ * collect_struct_layout_decl — accumulate `td`'s layout onto `acc` when its body is field-
+ * shaped: a `StructBody` contributes its own declared fields, a `ClassBody` its effective
+ * instance fields (`class_instance_fields`); every other body shape is unchanged.
+ *
+ * A class registers under the SAME table as a struct because this backend has one aggregate
+ * representation: a class value is a field-shaped object, addressed by the very
+ * `find_struct_layout` lookup a struct value uses. Leaving the ClassBody arm out is what made
+ * every class instantiation honest-stop with "no layout registered".
+ *
+ * One consequence follows from sharing that table, and it is INTENDED: a field annotated with an
+ * already-declared class's bare name is now sized BY VALUE, exactly as a nested struct field is
+ * (`layout_of_fields`/`struct_layout_of_field`, #414), instead of collapsing to the 8-byte `Ptr`
+ * fallback. That is the consistent reading here — this backend holds a class instance in an
+ * `alloca`d, field-shaped slot like any other aggregate, never behind an implicit pointer.
+ *
+ * @param acc    every layout resolved so far, in program order
+ * @param td     the type declaration to inspect
+ * @param table  the program's type table, for a class's base-chain walk
+ * @param enums  the program's declared-enum table, for an enum-typed field's width
+ * @param dtable the resolver-keyed table `layout_of_fields` sizes a fat field's resolved type through
+ * @return       `acc`, extended with `td`'s layout when its body is field-shaped
+ * @throws       propagated from `class_instance_fields`
+ */
+fn collect_struct_layout_decl(acc: []LStructLayout, td: parser::TypeDecl, table: checker::TypeTable, enums: []LEnumInfo, dtable: checker::TypeTable) -> []LStructLayout | error {
+    match td.body {
+        parser::StructBody as sb => teko::list::push(acc, layout_of_fields(td.name, sb.fields, acc, enums, table, dtable))
+        parser::ClassBody as cb => push_class_layout(acc, td.name, cb, table, enums, dtable)
+        _ => acc
+    }
+}
+
+/**
+ * push_class_layout — `acc` extended with the layout of the class named `name`, built from its
+ * instance fields exactly as a struct's is built from `StructBody.fields`.
+ *
+ * @param acc    every layout resolved so far, in program order
+ * @param name   the class's canonical (declaring) name — the key `find_struct_layout` probes
+ * @param cb     the class's body
+ * @param table  the program's type table, for the base-chain walk
+ * @param enums  the program's declared-enum table, for an enum-typed field's width
+ * @param dtable the resolver-keyed table `layout_of_fields` sizes a fat field's resolved type through
+ * @return       `acc` with the class's layout appended
+ * @throws       propagated from `class_instance_fields`
+ */
+fn push_class_layout(acc: []LStructLayout, name: str, cb: parser::ClassBody, table: checker::TypeTable, enums: []LEnumInfo, dtable: checker::TypeTable) -> []LStructLayout | error {
+    let fields = match class_instance_fields(name, cb, table) {
+        []parser::Field as fs => fs
+        error as e => return e
+    }
+    teko::list::push(acc, layout_of_fields(name, fields, acc, enums, table, dtable))
+}
+
+/**
+ * class_instance_fields — the members of a class that OCCUPY A SLOT, in the order they occupy
+ * it: `checker::effective_class_fields`, i.e. every ancestor's instance fields (base-first,
+ * recursively) followed by the class's own, each in declared order.
+ *
+ * That order is NOT chosen here. Class inheritance in Teko is field-flattening composition, and
+ * the checker (`effective_class_fields`, "the base's fields as a PREFIX of the derived struct")
+ * plus the C emitter already fixed base-before-own everywhere a class's data shape is used;
+ * this backend mirrors that single decision rather than inventing a second one.
+ *
+ * DELIBERATELY EXCLUDED, each because it occupies no instance slot:
+ *   - `methods` — statically dispatched by mangled symbol; a class carries no vtable pointer
+ *     (dynamic dispatch is not in this backend, and an interface is a compile-time contract
+ *     that emits no runtime representation at all).
+ *   - `consts` — static TYPE members reached as `ClassName::NAME`; the AST's own contract for
+ *     them is that each "occupies NO layout slot".
+ *   - `implements` — conformance, checked at compile time, with no field of its own.
+ *   - the base-binding name (`Base(parent)`) — a NAME instance methods use to reach inherited
+ *     members of the SAME flattened object, not a second embedded object.
+ *   - the C emitter's hidden trailing `tk_region *` per-object arena handle — a property of
+ *     THAT emitter's object-region retention, which this backend does not implement. Adding an
+ *     unused pointer slot here would only mis-state the object's size.
+ *
+ * An abstract class is never instantiated, but it still registers a layout: its fields are a
+ * prefix of every concrete subclass's, and a uniform rule costs less than a special case.
+ *
+ * @param name   the class's canonical name, for the honest-stop message
+ * @param cb     the class's body
+ * @param table  the program's type table, for the base-chain walk
+ * @return       the slot-occupying fields, in slot order
+ * @throws       when the base chain cannot be walked (an unknown or non-class base) — the
+ *               checker rejects both before lowering, so a miss here is an internal break and
+ *               is NAMED as one rather than answered with a partial, silently wrong layout
+ */
+fn class_instance_fields(name: str, cb: parser::ClassBody, table: checker::TypeTable) -> []parser::Field | error {
+    match checker::effective_class_fields(cb, table) {
+        []parser::Field as fs => fs
+        error as e => error { message = teko::str::concat("native backend N1: no layout for class `", name, "`: ", e.message, " (internal)") }
+    }
+}
+
+/**
+ * layout_of_fields — a struct's LStructLayout from its DECLARED field list: each
+ * field's machine class comes from its syntactic annotation (`ltype_of_typeexpr` —
+ * the same mapping a parameter list already uses), in the struct's own declared
+ * order. A field whose type NAMES an already-registered struct in `known` (an
+ * EARLIER-declared struct — layouts are collected in program order) is a
+ * struct-BY-VALUE field: its size/align come from that struct's OWN resolved
+ * layout (recursively already-computed, since it registered first), not from
+ * `ltype_of_typeexpr`'s total `Ptr` fallback (which would under-size it to 8
+ * bytes). A forward-referenced or non-struct field falls back to the scalar
+ * `ltype_size`/`ltype_align` mapping, unchanged (#414, #382).
+ *
+ * @param str name  the struct's canonical (declaring) name
+ * @param []parser::Field fields  the struct's declared fields, in order
+ * @param []LStructLayout known  every struct layout resolved so far (program
+ *                               order) — the lookup table a nested-struct
+ *                               field's size/align resolves against
+ * @param []LEnumInfo enums  the program's declared-enum table — an enum-typed field
+ *                           occupies `enum_carrier_ltype()`'s width, not the 8-byte
+ *                           `Ptr` fallback, and that width sets every LATER field's
+ *                           offset as well as the struct's own size/align
+ * @param table  the program's type table — `field_layout_size`/`field_layout_align`'s alias
+ *               resolver, so a field ANNOTATED through an alias (`type S = str`) sizes exactly
+ *               like a field annotated `str` directly (0.3.1.0 raiz A, crumb R0)
+ * @param dtable the resolver-keyed table (`declared_type_table`) each field's RESOLVED declared type
+ *               (`resolved_field_type`) is read from, so a monomorphized bare-`T` fat field
+ *               (`Owned<str>`) sizes off `is_fat_type` exactly as its store does — layout == store by
+ *               construction (0.3.1.0 raiz A — fat-field layout unification)
+ * @return LStructLayout  the resolved size/align/per-field offsets
+ */
+fn layout_of_fields(name: str, fields: []parser::Field, known: []LStructLayout, enums: []LEnumInfo, table: checker::TypeTable, dtable: checker::TypeTable) -> LStructLayout {
+    let ns = checker::name_qualifier(name)
+    mut field_names: []str = teko::list::empty()
+    mut field_types: []LType = teko::list::empty()
+    mut field_sizes: []u32 = teko::list::empty()
+    mut field_aligns: []u32 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= fields.len { break }
+        let te = fields[i].type_ann
+        let ft = ltype_of_typeexpr(te, enums)
+        let rft = resolved_field_type(te, ns, dtable)
+        let nested = struct_layout_of_resolved(rft, te, known)
+        field_names = teko::list::push(field_names, fields[i].name)
+        field_types = teko::list::push(field_types, ft)
+        field_sizes = teko::list::push(field_sizes, field_layout_size(te, ft, nested, table, rft))
+        field_aligns = teko::list::push(field_aligns, field_layout_align(te, ft, nested, table, rft))
+        i++
+    }
+    layout_of_sized(name, field_names, field_types, field_sizes, field_aligns)
+}
+
+/**
+ * struct_layout_of_field — the ALREADY-KNOWN layout of a field's type, when that
+ * type is a single-segment Named type matching a struct in `known` by name; `null`
+ * for every other field-type shape (a scalar, a multi-segment path, a slice/
+ * optional/union/function annotation, or a forward reference to a not-yet-
+ * registered struct) (#414, #382).
+ *
+ * @param parser::TypeExpr te  the field's syntactic type annotation
+ * @param []LStructLayout known  every struct layout resolved so far
+ * @return LStructLayout?  the matching nested layout, or `null`
+ */
+/**
+ * struct_layout_of_resolved — a field's nested struct-BY-VALUE layout, keyed by the field's RESOLVED
+ * CANONICAL type name (`resolved_field_type`), with the syntactic annotation only as a fallback.
+ *
+ * This is the whole `resolve_named`/self-build fix. Struct layouts are registered under the CANONICAL
+ * name a `checker::Named` carries (`qualify`'s `teko::parser::TypeDecl`), which is exactly the key
+ * `find_struct_layout` probes at field-access time (`named_type_name(arg.type)`). But the field's
+ * syntactic annotation is written RELATIVE (`decl: parser::TypeDecl`) or bare (`body: TypeBody`), so a
+ * lookup by the annotation string — single-segment OR full path (`struct_layout_of_field`) — missed
+ * every non-root nested struct field and fell to the 8-byte `Ptr` fallback (`field_size_of`). A field
+ * like `TypeReg.decl: parser::TypeDecl` was then sized 8 instead of `TypeDecl`'s full inline width, so
+ * the BOX of a `TypeReg` value (`named_layout_bytes(TypeReg)`, the variant-payload/return copy)
+ * truncated the inline `decl` — and a later `r.decl` / `td.body` read past the copied prefix,
+ * dereferencing a garbage pointer (the native `resolve_named` SIGSEGV; arch-independent shared layout
+ * math; C leg immune, `cc` lays its own structs out). Resolving through `rft` yields the SAME canonical
+ * spelling the layout table is keyed by, so the two finally agree. A resolver-unqualifiable annotation
+ * (a monomorphized bare-`T` instance) keeps the syntactic fallback.
+ *
+ * @param rft    the field's RESOLVED declared type (`resolved_field_type`)
+ * @param te     the field's syntactic annotation (the fallback when `rft` is not a canonical Named)
+ * @param known  every struct layout resolved so far
+ * @return       the field's nested struct layout, or `null` (a scalar/fat/variant/forward-ref field)
+ */
+fn struct_layout_of_resolved(rft: checker::Type, te: parser::TypeExpr, known: []LStructLayout) -> LStructLayout | null {
+    match rft {
+        checker::Named as n => match find_known_struct_layout(known, n.name) {
+            LStructLayout as l => return l
+            null => { }
+        }
+        _ => { }
+    }
+    struct_layout_of_field(te, known)
+}
+

@@ -1,0 +1,244 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * variant_null_member_index — the declared index of `v`'s `Null` member, at ANY arity and in ANY
+ * position, or `null` when `v` declares no absence case at all. The tag a `null` MATCH ARM tests
+ * against (`lower_null_pattern_test`) and the tag a `null` VALUE stores when it is placed into
+ * such a union (`lower_variant_null_construct`) — one lookup, so the reader and the writer of the
+ * wrapper can never disagree about which tag means absent.
+ *
+ * ARITY-BLIND ON PURPOSE, and that is degrau 30. `null_union_shape` answers only for the
+ * TWO-member union `{ null, X }`, because a two-member union's payload arm needs no by-name case
+ * lookup. The `null` ARM needs no such lookup at any arity — absence has exactly one member
+ * whatever else the union declares — so pinning it to arity two was the whole defect: the
+ * compiler's own `codegen::emit_variant_wrap` matches `null` over a `[]byte | null | error`, a
+ * THREE-member union, and both the arm and the `return null` that feeds it stopped.
+ *
+ * @param checker::Variant v  the resolved union type to search
+ * @return u32?  the `Null` member's declared index, or `null` when `v` declares none
+ * @since 0.3.1.0 (degrau 30 — the `null` match pattern at any union arity)
+ */
+fn variant_null_member_index(v: checker::Variant) -> u32 | null {
+    mut i: u64 = 0
+    loop {
+        if i >= v.members.len { break }
+        match v.members[i] {
+            checker::Null => return i to u32
+            _ => { }
+        }
+        i++
+    }
+    null
+}
+
+/**
+ * NullUnionShape — a TWO-member absence union `{ null, X }` fully described: its sole non-null
+ * member's type, that member's declared index (the tag a PRESENT value stores and a payload arm
+ * tests) and the `Null` member's declared index (the tag an ABSENT value stores).
+ *
+ * BOTH INDICES ARE CARRIED, never assumed. The pre-degrau-30 code read the payload tag as the
+ * literal `1` and the null tag as the literal `0` while its own classifier accepted EITHER member
+ * order — so a `{ X, null }` union would have had its two arms swapped, silently, with no
+ * diagnostic. The resolver's null-first normalization makes that unreachable today; carrying the
+ * indices makes it unreachable by construction instead of by a distant invariant.
+ *
+ * @since 0.3.1.0 (degrau 30 — the two literal tags became looked-up indices)
+ */
+type NullUnionShape = struct {
+    /** payload — the union's sole non-null member type (drives the payload's machine SHAPE). */
+    payload: checker::Type
+
+    /** payload_index — that member's declared index, the tag a PRESENT value carries. */
+    payload_index: u32
+
+    /** null_index — the `Null` member's declared index, the tag an ABSENT value carries. */
+    null_index: u32
+}
+
+/**
+ * null_union_shape — for a two-member absence union `{ null, X }` (the resolver's
+ * null-first canonical order, `checker::resolve.union_normalize_null`), the payload type `X` and
+ * BOTH members' declared indices; `null` for any other member-list shape (more/fewer members, or
+ * no `Null` member). The own backend has no niche/box optimization dial (unlike the C backend's
+ * `cg_union_niche_member`/`cg_union_box_member`, #382 predates the null-union pivot) — EVERY
+ * null-bearing union uses the SAME uniform 24-byte wrapper every variant uses
+ * (`variant_wrapper_bytes`), the shape `lower_variant_case_test`/`bind_case_payload` read.
+ *
+ * WHY TWO MEMBERS AND NOT MORE: because a two-member union's PAYLOAD arm is the one that needs no
+ * by-name case lookup — with exactly one non-null member, `X as x` can only mean that member,
+ * whatever the pattern spells it (a `Func` member has no case name at all, so the
+ * general by-name path would honest-stop on it). At three members the payload arms DO need the
+ * name, and they already get it (`variant_case_of_bind_pattern`). The `null` arm is the part that
+ * never needed a name, and it no longer asks this classifier — see `variant_null_member_index`.
+ *
+ * ORDER-INSENSITIVE by construction: the resolver canonicalizes null-first at every union
+ * construction site (`resolve.union_normalize_null`, called from `resolve_type` AND from
+ * `type_join`), so `members[0]` IS the `Null` in every union this backend can be handed today.
+ * This function nevertheless accepts either order — a classifier that answers "not a null union"
+ * for a union that IS one degrades into a false honest-stop (the exact defect the `type_join`
+ * normalization fixed), and the two-member check above already bounds the search.
+ *
+ * @param checker::Variant v  the resolved union type to classify
+ * @return NullUnionShape?  the payload member plus both declared indices, or `null` when `v` is
+ *                          not a two-member union with exactly one `Null` member
+ * @since 0.3.1 (null-union C7 own-backend gap); 0.3.1.0 degrau 30 (the indices)
+ */
+fn null_union_shape(v: checker::Variant) -> NullUnionShape | null {
+    if v.members.len != 2 { return null }
+    match v.members[0] {
+        checker::Null => match v.members[1] {
+            checker::Null => null
+            _ => NullUnionShape { payload = v.members[1]; payload_index = 1; null_index = 0 }
+        }
+        _ => match v.members[1] {
+            checker::Null => NullUnionShape { payload = v.members[0]; payload_index = 0; null_index = 1 }
+            _ => null
+        }
+    }
+}
+
+/**
+ * lower_variant_tag_eq_test — `subj.tag == index`: load the tag (field 0, `I32`) off the
+ * subject's base address, then compare against `index` — the shared test both a NAMED-case
+ * lookup (`lower_variant_case_test`) and a fixed-index null-union arm (`lower_null_pattern_test`,
+ * `lower_bind_pattern_test`'s null-union branch) reduce to (the variant runtime image is the
+ * uniform `tag@0; ptr@8; len@16`, `variant_wrapper_bytes`).
+ *
+ * @param LowerCtx ctx  the lowering context to append the test's instructions into
+ * @param MatchSubj subj  the match's already-lowered (base-address) subject
+ * @param i64 index  the tag value to compare the subject against
+ * @param u32 line  the source line to stamp the emitted instructions with
+ * @param u32 col  the source column to stamp the emitted instructions with
+ * @return PatternTest  the computed tag-equality test
+ */
+fn lower_variant_tag_eq_test(ctx: LowerCtx, subj: MatchSubj, index: i64, line: u32, col: u32) -> PatternTest {
+    let addr = ctx_alloc(ctx)
+    let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, subj.vreg, 0, line, col))
+    let tagr = ctx_alloc(with_addr)
+    let with_tag = ctx_append(tagr.ctx, load_inst(tagr.vreg, addr.vreg, LType::I32, line, col))
+    let cr = ctx_alloc(with_tag)
+    let with_const = ctx_append(cr.ctx, const_int_inst(cr.vreg, index, line, col))
+    let eqr = ctx_alloc(with_const)
+    PatternTest { ctx = ctx_append(eqr.ctx, bin_inst(eqr.vreg, LBinOp::ICmpEq, tagr.vreg, cr.vreg, line, col)); always = false; vreg = eqr.vreg }
+}
+
+/**
+ * bind_case_payload — bind `binding` to the case payload held in the variant wrapper of base
+ * address `base`, reading it as the SHAPE its declared type asks for: a FAT member
+ * (`str`/`[]T`) binds the (ptr@8, len@16) pair through `lenv_bind_fat`, every other member
+ * binds the single word at `variant_payload_offset()` of its own machine class. The shared
+ * bind both a NAMED-case bind (`lower_variant_bind_pattern_binds`) and a fixed-index null-union
+ * payload bind (`bind_null_union_payload`) reduce to.
+ *
+ * THE TYPE IS TAKEN, NOT THE MACHINE CLASS, and that is the whole point of degrau 6: `ltype_of`
+ * answers `Ptr` for a `str`, for a `[]T` AND for a struct, so a caller that had already collapsed
+ * the member to an `LType` could no longer tell a fat member from an address-shaped one and bound
+ * every one of them as a lone scalar — an `xs` whose `.len` read whatever sat past the pointer.
+ *
+ * @param LowerCtx ctx  the lowering context to append the load's instructions into
+ * @param u32 base  the wrapper's base-address VReg
+ * @param checker::Type ty  the case member's declared type
+ * @param str binding  the name to bind the loaded payload to
+ * @return LowerCtx  the context with `binding` bound to the loaded payload
+ * @since 0.3.1.0 (degrau 6 — the uniform 24-byte wrapper)
+ */
+fn bind_case_payload(ctx: LowerCtx, base: u32, ty: checker::Type, binding: str) -> LowerCtx {
+    if is_fat_type(ty) { return bind_fat_case_payload(ctx, base, binding) }
+    bind_scalar_case_payload(ctx, base, ltype_of(ty, ctx.enums), binding)
+}
+
+/**
+ * bind_scalar_case_payload — the single-word arm of `bind_case_payload`: load the wrapper's
+ * payload word at `variant_payload_offset()`, of machine class `ty`, and bind it as a plain
+ * scalar. The wrapper's length half is not read — a non-fat member never wrote it.
+ *
+ * @param LowerCtx ctx  the lowering context to append the load's instructions into
+ * @param u32 base  the wrapper's base-address VReg
+ * @param LType ty  the payload word's machine class
+ * @param str binding  the name to bind the loaded payload to
+ * @return LowerCtx  the context with `binding` bound to the loaded payload word
+ * @since 0.3.1.0 (degrau 6 — the uniform 24-byte wrapper)
+ */
+fn bind_scalar_case_payload(ctx: LowerCtx, base: u32, ty: LType, binding: str) -> LowerCtx {
+    let addr = ctx_alloc(ctx)
+    let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, variant_payload_offset(), 0, 0))
+    let r = ctx_alloc(with_addr)
+    let with_load = ctx_append(r.ctx, load_inst(r.vreg, addr.vreg, ty, 0, 0))
+    ctx_bind(with_load, binding, r.vreg)
+}
+
+/**
+ * bind_fat_case_payload — the FAT arm of `bind_case_payload`: load BOTH halves the wrapper's
+ * 24-byte shape reserves for a `str`/`[]T` member — the pointer at `variant_payload_offset()`
+ * and the length at `variant_payload_len_offset()` — and bind them as one fat local, so the
+ * bound name answers `.len`, an index and a further fat use exactly like any other `str`/`[]T`.
+ *
+ * @param LowerCtx ctx  the lowering context to append the loads' instructions into
+ * @param u32 base  the wrapper's base-address VReg
+ * @param str binding  the name to bind the loaded (ptr, len) pair to
+ * @return LowerCtx  the context with `binding` bound as a fat local
+ * @since 0.3.1.0 (degrau 6 — the uniform 24-byte wrapper)
+ */
+fn bind_fat_case_payload(ctx: LowerCtx, base: u32, binding: str) -> LowerCtx {
+    let pa = ctx_alloc(ctx)
+    let with_pa = ctx_append(pa.ctx, field_addr_inst(pa.vreg, base, variant_payload_offset(), 0, 0))
+    let pr = ctx_alloc(with_pa)
+    let with_pr = ctx_append(pr.ctx, load_inst(pr.vreg, pa.vreg, LType::Ptr, 0, 0))
+    let la = ctx_alloc(with_pr)
+    let with_la = ctx_append(la.ctx, field_addr_inst(la.vreg, base, variant_payload_len_offset(), 0, 0))
+    let lr = ctx_alloc(with_la)
+    let with_lr = ctx_append(lr.ctx, load_inst(lr.vreg, la.vreg, LType::I64, 0, 0))
+    ctx_bind_fat(with_lr, binding, pr.vreg, lr.vreg)
+}
+
+/**
+ * bind_null_union_payload — `X as x` over a null-bearing two-member union subject: `x` binds
+ * the payload the wrapper holds, in the shape the payload's own type asks for
+ * (`bind_case_payload`). Needs no NAME lookup (`null_union_shape`'s doc): a two-member null
+ * union has exactly one non-null case.
+ *
+ * @param LowerCtx ctx  the lowering context to extend with the binding
+ * @param MatchSubj subj  the match's already-lowered (base-address) subject
+ * @param checker::Type payload  the union's non-null member type
+ * @param str binding  the name to bind the payload to
+ * @return LowerCtx  the context with `binding` bound to the loaded payload
+ * @since 0.3.1 (null-union C7 own-backend gap)
+ */
+fn bind_null_union_payload(ctx: LowerCtx, subj: MatchSubj, payload: checker::Type, binding: str) -> LowerCtx {
+    bind_case_payload(ctx, subj.vreg, payload, binding)
+}
+
+/**
+ * lower_null_pattern_test — a `null` pattern's test over a union subject that declares an absence
+ * case: `subj.tag == variant_null_member_index(v)`, at ANY arity and in ANY arm position. A
+ * subject that is not a union, or a union with no `Null` member, keeps its NAMED honest stop —
+ * `null` can only ever match an absence case, so either shape is a checker invariant break rather
+ * than a missing lowering.
+ *
+ * THIS WAS THE LIVE SELF-HOST STOP AT DEGRAU 30. The test used to be the literal `subj.tag == 0`
+ * gated on `null_union_shape`, so it answered ONLY for a two-member `{ null, X }`; the compiler's
+ * own `codegen::emit_variant_wrap` matches `null` over a `[]byte | null | error` and the native
+ * build of the compiler stopped there. Reading the index instead of assuming it closes the arity
+ * axis and the arm-order axis in one move, since the tag now comes from the member list both the
+ * reader (here) and the writer (`lower_variant_null_construct`) consult.
+ *
+ * @param LowerCtx ctx  the lowering context to append the test's instructions into
+ * @param MatchSubj subj  the match's already-lowered subject
+ * @param u32 line  the source line to stamp the emitted instructions with
+ * @param u32 col  the source column to stamp the emitted instructions with
+ * @return PatternTest  the computed tag-equality test
+ * @throws  when the subject is not a `Variant`, or is a `Variant` declaring no `Null` member
+ * @since 0.3.1 (null-union C7 own-backend gap); 0.3.1.0 degrau 30 (any arity)
+ */
+fn lower_null_pattern_test(ctx: LowerCtx, subj: MatchSubj, line: u32, col: u32) -> PatternTest | error {
+    match subj.ty {
+        checker::Variant as v => match variant_null_member_index(v) {
+            u32 as index => lower_variant_tag_eq_test(ctx, subj, index to i64, line, col)
+            null => error { message = "native backend N1: `null` match pattern over a union that declares no `null` member (internal)" }
+        }
+        _ => error { message = "native backend N1: `null` match pattern over a non-union subject (internal)" }
+    }
+}
+
