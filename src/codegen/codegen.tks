@@ -1767,11 +1767,36 @@ fn emit_closure_call(buf: []byte, prog: CgProg, ret_type: checker::Type, c: chec
 fn cg_opt_typename(buf: []byte, inner: checker::Type) -> []byte | error {
     cg_opt_mangle(cb(buf, "tk_opt_"), inner)
 }
-// SLICE value layer (fixed+copy): a `[]T` lowers to the generated `tk_slice_<elemMangle>`
-// struct `{ <elemC> *ptr; uint64_t len; }` (same shape as tk_str). Reuses the optional element
-// mangle for the suffix, so decl + every use agree byte-for-byte. (C: `cg_slice_typename`.)
+/**
+ * The C typedef NAME `tk_slice_<elemMangle>` for the SLICE value layer (F3 Model A, fixed+copy): a
+ * `[]T` lowers to the generated struct `{ <elemC> *ptr; uint64_t len; uint64_t cap; }` — the
+ * three-word rep whose `cap` (reserved backing, in elements) sidesteps the global push cache for the
+ * in-place grow (`tk_slice_grow_inplace`). Reuses the optional element mangle for the suffix, so decl
+ * + every use agree byte-for-byte. The designated `{ .ptr = …, .len = … }` construction sites leave
+ * `cap` zero-initialised (an empty/push-built slice reports cap 0 and copy-grows on first append);
+ * `emit_array_lit`/`emit_list_with_cap` seed the real backing cap (F3.2).
+ *
+ * @param buf   the output buffer to append the typename to
+ * @param elem  the resolved slice element type, driving the mangle suffix
+ * @return      the buffer with `tk_slice_<mangle>` appended
+ * @throws      when `elem` has no representable mangle (`cg_opt_mangle`'s untyped-empty / unsupported cases)
+ */
 fn cg_slice_typename(buf: []byte, elem: checker::Type) -> []byte | error {
     cg_opt_mangle(cb(buf, "tk_slice_"), elem)
+}
+/**
+ * Does the `tk_slice_<elem>` C typedef carry the Model A `cap` third word (F3)? TRUE for every
+ * GENERATED slice typedef (the 3-word `{ptr,len,cap}` rep), FALSE for the two pre-declared runtime
+ * VIEW types `[]byte`/`[]char` (`tk_slice_byte`/`tk_slice_char`, kept at their 2-word `{ptr,len}`
+ * shape because they cross the runtime ABI seam a `cap` slot would widen — the uniform 3-word view
+ * rep is the #112 native-rep remainder). Construction seeds `.cap` only when this holds, so a
+ * `[]byte`/`[]char` literal never names a member its typedef lacks.
+ *
+ * @param elem  the resolved slice element type
+ * @return      true iff the element's slice typedef is the 3-word `{ptr,len,cap}` rep (not a view type)
+ */
+fn cg_slice_rep_has_cap(elem: checker::Type) -> bool {
+    match elem { checker::Byte => false; checker::Char => false; _ => true }
 }
 // The deterministic mangle SUFFIX for an optional inner type (used in tk_opt_<suffix>).
 fn cg_opt_mangle(buf: []byte, inner: checker::Type) -> []byte | error {
@@ -3748,19 +3773,23 @@ fn emit_list_with_cap(buf: []byte, prog: CgProg, e: checker::TExpr, c: checker::
     if c.args.len != 1 { return error { message = "codegen: teko::list::with_cap result has the wrong arity (internal)" } }
     let is_r = frame.len > 0
     let wN = $"_wp{buf.len}"
-    mut out = cb(buf, "({ ")
+    let capN = $"_wc{buf.len}"
+    mut out = cb(buf, "({ uint64_t ")
+    out = cb(out, capN); out = cb(out, " = (uint64_t)(")
+    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
+    out = cb(out, "); ")
     out = match emit_type(out, prog, elem) { []byte as o => o; error as err => return err }
     out = cb(out, " *"); out = cb(out, wN); out = cb(out, " = (")
     out = match emit_type(out, prog, elem) { []byte as o => o; error as err => return err }
     out = cb(out, if is_r { " *)tk_slice_with_cap_r(sizeof(" } else { " *)tk_slice_with_cap(sizeof(" })
     out = match emit_type(out, prog, elem) { []byte as o => o; error as err => return err }
-    out = cb(out, "), (uint64_t)(")
-    out = match emit_expr_ctx(out, prog, checker::Void { }, c.args[0], escaping, regions, fn_body, dctx) { []byte as o => o; error as err => return err }
-    out = cb(out, ")")
+    out = cb(out, "), "); out = cb(out, capN)
     if is_r { out = cb(out, ", "); out = cb(out, frame) }
     out = cb(out, "); (")
     out = match cg_slice_typename(out, elem) { []byte as o => o; error as err => return err }
-    out = cb(out, "){ .ptr = "); out = cb(out, wN); out = cb(out, ", .len = 0 }; })")
+    out = cb(out, "){ .ptr = "); out = cb(out, wN); out = cb(out, ", .len = 0")
+    if cg_slice_rep_has_cap(elem) { out = cb(out, ", .cap = "); out = cb(out, capN) }
+    out = cb(out, " }; })")
     out
 }
 
@@ -4779,6 +4808,10 @@ fn emit_array_lit(buf: []byte, prog: CgProg, e: checker::TExpr, a: checker::TArr
         out = match cg_slice_typename(out, elem) { []byte as o => o; error as err => return err }
         out = cb(out, "){ .ptr = "); out = cb(out, pN); out = cb(out, ", .len = ")
         out = cb_u64_digits(out, a.elements.len)
+        if cg_slice_rep_has_cap(elem) {
+            out = cb(out, ", .cap = ")
+            out = cb_u64_digits(out, a.elements.len)
+        }
         return cb(out, " }; })")
     }
     // slow path: has spread — build incrementally via tk_slice_push
@@ -11163,7 +11196,7 @@ fn cg_emit_types_ordered(buf: []byte, prog: CgProg) -> []byte | error {
         match set.slices[k] { Byte => { k++; continue }; _ => { } }   // tk_slice_byte pre-declared in teko_rt.h
         out = cb(out, "typedef struct { ")
         out = match emit_type(out, prog, set.slices[k]) { []byte as o => o; error as err => return err }
-        out = cb(out, " *ptr; uint64_t len; } ")
+        out = cb(out, " *ptr; uint64_t len; uint64_t cap; } ")
         out = match cg_slice_typename(out, set.slices[k]) { []byte as o => o; error as err => return err }
         out = cb(out, ";\n")
         k++
