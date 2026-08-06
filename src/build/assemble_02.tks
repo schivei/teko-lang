@@ -1,0 +1,114 @@
+/**
+ * FileOverride — a (path, content) pair that stands in for a file's ON-DISK contents during
+ * assembly: the editor's unsaved buffer for one open document (`docs/design/lsp-teko.md` §5.5).
+ * `assemble_with_overrides` reads a file's text from here, when present, instead of from disk —
+ * the seam that lets the LSP re-check the WHOLE project as the editor currently sees it, not as
+ * the last save left it.
+ *
+ * @field path     the project-relative path the override replaces (matches a `SourceFile.path`)
+ * @field content  the buffer's current text, used in place of a disk read for that path
+ * @since 0.3.1.0 (LSP crumb E)
+ */
+pub type FileOverride = struct {
+    /** the project-relative path the override replaces (matches a `SourceFile.path`). */
+    path: str
+    /** the buffer's current text, used in place of a disk read for that path. */
+    content: str
+}
+
+/**
+ * overridden_content — the buffer `overrides` holds for `path`, or `null` when no override names
+ * that path (a plain disk read applies). The override set is the small handful of currently-open
+ * documents, never the whole project, so a linear scan is ample.
+ *
+ * @param overrides  the open buffers standing in for the disk
+ * @param path       the file path to look up
+ * @return           the override's content, or `null` when `path` is not overridden
+ * @since 0.3.1.0 (LSP crumb E)
+ */
+fn overridden_content(overrides: []FileOverride, path: str) -> str | null {
+    mut i: u64 = 0
+    loop {
+        if i >= overrides.len { break }
+        if overrides[i].path == path { return overrides[i].content }
+        i = i + 1
+    }
+    null
+}
+
+/**
+ * read_source_with_overrides — `path`'s source text: the matching `FileOverride`'s buffer when one
+ * names `path`, else the file read fresh from disk. The single read `assemble_with_overrides` makes
+ * per file, so the override substitution is one seam rather than threaded through the whole loop.
+ *
+ * @param path       the file to read
+ * @param overrides  the open buffers standing in for the disk
+ * @return           the source text, or the I/O error from a disk read that missed the override set
+ * @since 0.3.1.0 (LSP crumb E)
+ */
+fn read_source_with_overrides(path: str, overrides: []FileOverride) -> str | error {
+    match overridden_content(overrides, path) {
+        str as c => return c
+        null => { }
+    }
+    match teko::io::read_file(path) { str as s => s; error as e => return e }
+}
+
+/**
+ * append_tagged_items — `merged` with every entry of `items` appended, each RE-STAMPED with `sf`'s
+ * namespace (A3 provenance) and path (W-loc-2) — the same per-file tagging `assemble_sel`'s own
+ * loop applies before merging.
+ *
+ * @param merged  the merged item list built so far
+ * @param items   one file's reconciled item list
+ * @param sf      the source file `items` came from
+ * @return        `merged` with `items` appended, tagged with `sf`'s namespace and path
+ * @since 0.3.1.0 (LSP crumb E)
+ */
+fn append_tagged_items(merged: []parser::Item, items: []parser::Item, sf: SourceFile) -> []parser::Item {
+    mut out = merged
+    mut i: u64 = 0
+    loop {
+        if i >= items.len { break }
+        out = teko::list::push(out, parser::Item { content = items[i].content; namespace = sf.namespace; file = sf.path })
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * assemble_with_overrides — like `assemble`'s silent production build, but each file whose path
+ * matches a `FileOverride` is lexed/parsed from that BUFFER instead of the disk — the LSP's
+ * unsaved-document override (`docs/design/lsp-teko.md` §2.3, §5.5). Discovery, per-file lex/parse,
+ * the FILE-boundary error isolation (a bad file records its diagnostic and the walk continues to
+ * the next file — `Assembled`'s own doc), and the merge are otherwise IDENTICAL to `assemble_sel`;
+ * only the source of each file's TEXT differs. `.tkt` test files are excluded, matching `assemble`'s
+ * own production-build selection — the LSP re-checks the PROJECT the same way a build would, never
+ * the test surface.
+ *
+ * @param files      the discovered project file set
+ * @param overrides  the open, possibly-unsaved buffers that win over the disk for their paths
+ * @return           the merged program plus one diagnostic per file that failed to lex or parse, or
+ *                   an `error` when a non-overridden file cannot be READ at all
+ * @since 0.3.1.0 (LSP crumb E)
+ */
+pub fn assemble_with_overrides(files: []SourceFile, overrides: []FileOverride) -> Assembled | error {
+    mut merged: []parser::Item = teko::list::empty()
+    mut diags: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= files.len { break }
+        let sf = files[i]
+        if teko::str::ends_with(sf.path, ".tkt") {
+            i = i + 1
+            continue
+        }
+        let src = match read_source_with_overrides(sf.path, overrides) { str as s => s; error as e => return e }
+        match asm_lex_and_parse(sf.path, src) {
+            []parser::Item as items => { merged = append_tagged_items(merged, items, sf) }
+            error as e => { diags = teko::list::push(diags, teko::str::concat(sf.path, ":", e.message)) }
+        }
+        i = i + 1
+    }
+    Assembled { program = parser::Program { items = merged }; diags = diags }
+}

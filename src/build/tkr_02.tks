@@ -1,0 +1,269 @@
+/**
+ * tkr_is_ws — is `c` an ASCII whitespace byte (space, tab, CR, LF)? The trim/hex-scan predicate.
+ *
+ * @param c  the byte
+ * @return   true for space/tab/CR/LF
+ * @since 0.3.0.30
+ */
+fn tkr_is_ws(c: byte) -> bool { c == b' ' || c == b'\t' || c == b'\r' || c == b'\n' }
+
+/**
+ * tkr_trim — `s` with leading and trailing ASCII whitespace removed.
+ *
+ * @param s  the text
+ * @return   the trimmed text
+ * @since 0.3.0.30
+ */
+fn tkr_trim(s: str) -> str {
+    mut a: u64 = 0
+    loop {
+        if a >= s.len { break }
+        if !tkr_is_ws(s[a]) { break }
+        a = a + 1
+    }
+    mut b = s.len
+    loop {
+        if b <= a { break }
+        if !tkr_is_ws(s[b - 1]) { break }
+        b = b - 1
+    }
+    teko::str::slice(s, a, b)
+}
+
+/**
+ * tkr_find_byte — the index of the first `c` in `s` at or after `from`, or `s.len` when absent.
+ *
+ * @param s     the text
+ * @param c     the byte to find
+ * @param from  the start cursor
+ * @return      the index of `c`, or `s.len`
+ * @since 0.3.0.30
+ */
+fn tkr_find_byte(s: str, c: byte, from: u64) -> u64 {
+    mut k = from
+    loop {
+        if k >= s.len { break }
+        if s[k] == c { return k }
+        k = k + 1
+    }
+    s.len
+}
+
+/**
+ * tkr_after — the remainder of `line` past `prefix` (already known to be a prefix of `line`),
+ * trimmed of surrounding whitespace. Used to read a keyword line's free text or a step body.
+ *
+ * @param line    the source line
+ * @param prefix  the matched keyword prefix
+ * @return        the trimmed remainder
+ * @since 0.3.0.30
+ */
+fn tkr_after(line: str, prefix: str) -> str { tkr_trim(teko::str::slice_from(line, prefix.len)) }
+
+/**
+ * tkr_table_cells — split a `| a | b | c |` table line into its trimmed cell values, dropping the
+ * empty spans before the first `|` and after the last. A line with no `|` yields [].
+ *
+ * @param line  the table line
+ * @return      the ordered cell values
+ * @since 0.3.0.30
+ */
+fn tkr_table_cells(line: str) -> []str {
+    let t = tkr_trim(line)
+    mut out: []str = teko::list::empty()
+    if t.len == 0 || t[0] != b'|' { return out }
+    mut k: u64 = 1
+    loop {
+        if k >= t.len { break }
+        let nb = tkr_find_byte(t, b'|', k)
+        if nb >= t.len { break }
+        out = teko::list::push(out, tkr_trim(teko::str::slice(t, k, nb)))
+        k = nb + 1
+    }
+    out
+}
+
+/**
+ * tkr_phase_of_keyword — the phase a leading step keyword selects: Given/When/Then map to their
+ * phase; `And`/`But` inherit `prev`. Returns `prev` for a non-keyword (never reached — the caller
+ * only calls this on a recognised keyword).
+ *
+ * @param kw    the keyword ("Given" | "When" | "Then" | "And" | "But")
+ * @param prev  the preceding step's phase (for And/But inheritance)
+ * @return      the resolved phase
+ * @since 0.3.0.30
+ */
+fn tkr_phase_of_keyword(kw: str, prev: TkrPhase) -> TkrPhase {
+    if kw == "Given" { return TkrPhase::Given }
+    if kw == "When" { return TkrPhase::When }
+    if kw == "Then" { return TkrPhase::Then }
+    prev
+}
+
+/**
+ * TkrStepKw — a step line resolved into its leading keyword and the trimmed body past it. The
+ * keyword is "" when the line opens with no recognised step keyword.
+ *
+ * @since 0.3.0.30
+ */
+type TkrStepKw = struct {
+    /** the recognised step keyword ("Given"/"When"/"Then"/"And"/"But"), or "". */
+    kw: str
+    /** the trimmed remainder of the line past the keyword. */
+    body: str
+}
+
+/**
+ * tkr_step_keyword — split a step line into its leading keyword + trimmed body, or a "" keyword when
+ * the line does not open with `Given`/`When`/`Then`/`And`/`But` followed by a space.
+ *
+ * @param line  the trimmed source line
+ * @return      the keyword + body split
+ * @since 0.3.0.30
+ */
+fn tkr_step_keyword(line: str) -> TkrStepKw {
+    if mf_starts_with(line, "Given ") { return TkrStepKw { kw = "Given"; body = tkr_after(line, "Given ") } }
+    if mf_starts_with(line, "When ") { return TkrStepKw { kw = "When"; body = tkr_after(line, "When ") } }
+    if mf_starts_with(line, "Then ") { return TkrStepKw { kw = "Then"; body = tkr_after(line, "Then ") } }
+    if mf_starts_with(line, "And ") { return TkrStepKw { kw = "And"; body = tkr_after(line, "And ") } }
+    if mf_starts_with(line, "But ") { return TkrStepKw { kw = "But"; body = tkr_after(line, "But ") } }
+    TkrStepKw { kw = ""; body = "" }
+}
+
+/**
+ * tkr_parse_step — lower one step body (past its keyword) into a `TkrStep`: an entry verb when it
+ * carries no `=`, else an `on "<os-arch>"`-routed `noun = value` pair. The value keeps its surface
+ * form (placeholders intact) so the reused `mf_read_*` lexers decode it after Outline substitution.
+ *
+ * @param phase  the step's resolved phase
+ * @param body   the trimmed step body (past the keyword)
+ * @return       the parsed step, or an `error` on a malformed `on "<os-arch>"` prefix
+ * @throws       when an `on` prefix is present but its os-arch is not a quoted string
+ * @since 0.3.0.30
+ */
+fn tkr_parse_step(phase: TkrPhase, body: str) -> TkrStep | error {
+    let eq = tkr_find_byte(body, b'=', 0)
+    if eq >= body.len {
+        return TkrStep { phase = phase; noun = ""; verb = body; osarch = ""; value = "" }
+    }
+    let value = tkr_trim(teko::str::slice_from(body, eq + 1))
+    mut lhs = tkr_trim(teko::str::slice_to(body, eq))
+    mut osarch = ""
+    if mf_starts_with(lhs, "on ") {
+        let rest = tkr_trim(teko::str::slice_from(lhs, 3))
+        let q = match mf_read_quoted(rest, 0) { MfQuoted as x => x; error as e => return e }
+        osarch = q.text
+        lhs = tkr_trim(teko::str::slice_from(rest, q.next))
+    }
+    TkrStep { phase = phase; noun = lhs; verb = ""; osarch = osarch; value = value }
+}
+
+/**
+ * TkrParse — the in-progress `.tkr` parse. It accumulates COMPLETED features (`features`) and the
+ * OPEN feature (`feat_active`/`name`/`scenarios`), the shared Background Given `bg` steps, the OPEN
+ * scenario (`cur_*`), its `examples` accumulator, the `phase` inherited by an And/But, and the
+ * location flags (`in_bg`/`have_cur`/`in_examples`). Bundled so each line handler is one small
+ * `TkrParse -> TkrParse | error` step, keeping `parse_tkr` flat.
+ *
+ * @since 0.3.0.30
+ */
+type TkrParse = struct {
+    /** the features closed by a subsequent `Feature:` opener (or end of file). */
+    features: []TkrFeature
+    /** true while a feature is open (a `Feature:` seen, or an implicit feature under a scenario). */
+    feat_active: bool
+    /** the open feature's free-text label. */
+    name: str
+    /** the open feature's scenarios closed so far. */
+    scenarios: []TkrScenario
+    /** the Background Given steps (prepended to every scenario on flush). */
+    bg: []TkrStep
+    /** true while a Background block is open (its Given steps append to `bg`). */
+    in_bg: bool
+    /** true while a Scenario/Scenario Outline is open (flushed on the next opener / EOF). */
+    have_cur: bool
+    /** the open scenario's label. */
+    cur_name: str
+    /** true when the open scenario is a `Scenario Outline`. */
+    cur_outline: bool
+    /** the open scenario's own steps (before Background prepend). */
+    cur_steps: []TkrStep
+    /** the open Examples header row (placeholder names); empty until read. */
+    ex_headers: []str
+    /** true once the Examples header row has been consumed. */
+    ex_have_headers: bool
+    /** the open Examples data rows. */
+    ex_rows: []TkrRow
+    /** true while an `Examples:` table is open (subsequent `|` lines are its rows). */
+    in_examples: bool
+    /** the phase an And/But inherits (the last Given/When/Then). */
+    phase: TkrPhase
+}
+
+/**
+ * tkr_parse_new — a fresh `TkrParse` before the first line (no features, nothing open).
+ *
+ * @return the initial parse state
+ * @since 0.3.0.30
+ */
+fn tkr_parse_new() -> TkrParse {
+    TkrParse {
+        features = teko::list::empty(); feat_active = false; name = ""; scenarios = teko::list::empty()
+        bg = teko::list::empty(); in_bg = false
+        have_cur = false; cur_name = ""; cur_outline = false; cur_steps = teko::list::empty()
+        ex_headers = teko::list::empty(); ex_have_headers = false; ex_rows = teko::list::empty()
+        in_examples = false; phase = TkrPhase::Given
+    }
+}
+
+/**
+ * tkr_prepend_bg — a step list with the Background Given steps prepended, in Background-then-own
+ * order (shared opaque inputs precede a scenario's own).
+ *
+ * @param bg     the Background Given steps
+ * @param steps  the scenario's own steps
+ * @return       the combined step list
+ * @since 0.3.0.30
+ */
+fn tkr_prepend_bg(bg: []TkrStep, steps: []TkrStep) -> []TkrStep {
+    mut out: []TkrStep = teko::list::empty()
+    mut k: u64 = 0
+    loop {
+        if k >= bg.len { break }
+        out = teko::list::push(out, bg[k])
+        k = k + 1
+    }
+    mut j: u64 = 0
+    loop {
+        if j >= steps.len { break }
+        out = teko::list::push(out, steps[j])
+        j = j + 1
+    }
+    out
+}
+
+/**
+ * tkr_flush_cur — close the open scenario (if any) into the open feature's `scenarios`, folding the
+ * Background steps and the Examples table into it, then clear the open-scenario/examples state. A
+ * no-op when no scenario is open. The open feature (`feat_active`/`name`/`features`) is preserved.
+ *
+ * @param p  the parse state
+ * @return   `p` with the open scenario appended and the per-scenario accumulators reset
+ * @since 0.3.0.30
+ */
+fn tkr_flush_cur(p: TkrParse) -> TkrParse {
+    if !p.have_cur { return p }
+    let sc = TkrScenario {
+        name = p.cur_name; outline = p.cur_outline
+        steps = tkr_prepend_bg(p.bg, p.cur_steps)
+        examples = TkrExamples { headers = p.ex_headers; rows = p.ex_rows }
+    }
+    TkrParse {
+        features = p.features; feat_active = p.feat_active; name = p.name; scenarios = teko::list::push(p.scenarios, sc)
+        bg = p.bg; in_bg = false
+        have_cur = false; cur_name = ""; cur_outline = false; cur_steps = teko::list::empty()
+        ex_headers = teko::list::empty(); ex_have_headers = false; ex_rows = teko::list::empty()
+        in_examples = false; phase = p.phase
+    }
+}
+

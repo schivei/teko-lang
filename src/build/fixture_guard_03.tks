@@ -1,0 +1,160 @@
+/**
+ * seed_hostile_match_body — does this `match` body MIX a bare numeric literal arm with an arm whose
+ * value is a narrowing numeric cast? That mixture is the one shape a compiler without match-arm
+ * literal cross-adoption types as a UNION (`i32 | i64`) instead of the anchor's width, which is how
+ * `stage_rc_of_env` came to be unbuildable by the published seed. A DIVERGING arm (`… => return …`)
+ * contributes no value to the join and is skipped.
+ *
+ * @param body  the text BETWEEN the match's braces, already blanked by `code_only_text`
+ * @return      true when the body mixes a bare literal with a narrowing-cast anchor
+ * @since 0.3.1
+ */
+fn seed_hostile_match_body(body: str) -> bool {
+    let vals = match_arm_values(body)
+    mut bare: u64 = 0
+    mut anchors: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= vals.len { break }
+        let v = vals[i]
+        i = i + 1
+        if mf_starts_with(v, "return") { continue }
+        if is_bare_number(v) { bare = bare + 1; continue }
+        if ends_with_narrowing_cast(v) { anchors = anchors + 1 }
+    }
+    bare > 0 && anchors > 0
+}
+
+/**
+ * match_keyword_at — does a `match` KEYWORD (not the tail of a longer identifier) start at `i`?
+ *
+ * @param code  the blanked source text
+ * @param i     the candidate start index
+ * @return      true when `code` has the keyword `match` at `i`
+ * @since 0.3.1
+ */
+fn match_keyword_at(code: str, i: u64) -> bool {
+    if i + 6 > code.len { return false }
+    if teko::str::slice(code, i, i + 6) != "match " { return false }
+    if i == 0 { return true }
+    !is_ident_byte(code[i - 1])
+}
+
+/**
+ * brace_open_on_line — the index of the `{` opening a match body that starts at `from`, or `code.len`
+ * when the rest of that LINE carries none (a `match` whose brace is on a later line is not a shape
+ * this tree writes, and refusing to guess keeps the scanner free of false positives).
+ *
+ * @param code  the blanked source text
+ * @param from  the index just past the `match` keyword
+ * @return      the index of the opening brace, or `code.len`
+ * @since 0.3.1
+ */
+fn brace_open_on_line(code: str, from: u64) -> u64 {
+    mut k = from
+    loop {
+        if k >= code.len { break }
+        if code[k] == b'\n' { return code.len }
+        if code[k] == b'{' { return k }
+        k = k + 1
+    }
+    code.len
+}
+
+/**
+ * matching_brace — the index of the `}` closing the `{` at `open`, or `code.len` when the text ends
+ * first.
+ *
+ * @param code  the blanked source text
+ * @param open  the index of the opening brace
+ * @return      the index of its closing brace, or `code.len`
+ * @since 0.3.1
+ */
+fn matching_brace(code: str, open: u64) -> u64 {
+    mut depth: i64 = 0
+    mut k = open
+    loop {
+        if k >= code.len { break }
+        if code[k] == b'{' { depth = depth + 1 }
+        if code[k] == b'}' {
+            depth = depth - 1
+            if depth == 0 { return k }
+        }
+        k = k + 1
+    }
+    code.len
+}
+
+/**
+ * seed_hostile_arm_lines — the 1-based line of every `match` in `text` that mixes a bare numeric
+ * literal arm with a narrowing-cast anchor. The scan runs over `code_only_text`, so a brace or a `;`
+ * inside a string literal or a comment can never open, close or split a match body.
+ *
+ * @param text  the whole source text
+ * @return      the offending lines, in source order
+ * @since 0.3.1
+ */
+fn seed_hostile_arm_lines(text: str) -> []u64 {
+    let code = code_only_text(text)
+    mut out: []u64 = teko::list::empty()
+    mut line: u64 = 1
+    mut i: u64 = 0
+    loop {
+        if i >= code.len { break }
+        if code[i] == b'\n' { line = line + 1; i = i + 1; continue }
+        if !match_keyword_at(code, i) { i = i + 1; continue }
+        let open = brace_open_on_line(code, i + 6)
+        if open >= code.len { i = i + 6; continue }
+        let close = matching_brace(code, open)
+        if close >= code.len { i = i + 6; continue }
+        if seed_hostile_match_body(teko::str::slice(code, open + 1, close)) { out = teko::list::push(out, line) }
+        i = i + 6
+    }
+    out
+}
+
+/**
+ * seed_hostile_arm_defects — the one-line complaints about `path`, one per offending `match`. An
+ * unreadable file is reported too, for the same reason `source_structure_defect` reports one.
+ *
+ * @param path  the `.tks` file to inspect
+ * @return      one complaint per offending match, empty when the file is seed-safe
+ * @since 0.3.1
+ */
+fn seed_hostile_arm_defects(path: str) -> []str {
+    let text = match teko::io::read_file(path) { str as s => s; error as e => return teko::list::push(teko::list::empty(), $"{path}: unreadable ({e.message})") }
+    let lines = seed_hostile_arm_lines(text)
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= lines.len { break }
+        out = teko::list::push(out, $"{path}:{lines[i]}: a bare numeric literal arm shares this `match` with a narrowing-cast arm — annotate the literal (`0 to i32`), or a seed without match-arm literal cross-adoption types the join as a union")
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * seed_hostile_arms_under — the complaints about every compiler source under `dir`, empty when the
+ * whole subtree is buildable by a compiler that does not cross-adopt a bare literal arm. Only `.tks`
+ * is walked: a `.tkt` is not part of the `--no-verify --release` surface the bootstrap ladder builds.
+ *
+ * @param dir  the source root to walk
+ * @return     one complaint per offending match, in walk order
+ * @since 0.3.1
+ */
+fn seed_hostile_arms_under(dir: str) -> []str {
+    let files = collect_teko_sources(dir)
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= files.len { break }
+        if teko::str::ends_with(files[i], ".tks") {
+            let defects = seed_hostile_arm_defects(files[i])
+            mut d: u64 = 0
+            loop { if d >= defects.len { break }; out = teko::list::push(out, defects[d]); d = d + 1 }
+        }
+        i = i + 1
+    }
+    out
+}

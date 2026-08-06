@@ -1,0 +1,256 @@
+/**
+ * tkr_noun_stream_match — the `TkrMatch` for a stream noun-phrase value: `stdout`/`stderr` ⇒ Literal
+ * bytes, `… sha256` ⇒ a Sha256 digest, `… bytes` ⇒ the HEX-docstring-decoded Literal bytes,
+ * `… pattern` ⇒ a `teko::regex` source SEARCHED for in the stream. M.3 on a malformed quoted /
+ * hex value.
+ *
+ * The four suffixes are recognised on both `stdout` and `stderr`, and both at top level and behind
+ * an `on "<os-arch>"` route, because they are all read through this one function — a per-target
+ * `Then on "x86_64-linux" stderr pattern = "…"` costs nothing extra.
+ *
+ * @param noun   the stream noun ("stdout" | "… sha256" | "… bytes" | "… pattern"; stderr alike)
+ * @param value  the surface value (a quoted string or a `"""hex"""` docstring)
+ * @return       the parsed match, or an `error` on a malformed value
+ * @throws       on a malformed quoted string or HEX docstring
+ * @since 0.3.0.30
+ */
+fn tkr_noun_stream_match(noun: str, value: str) -> TkrMatch | error {
+    if teko::str::ends_with(noun, "bytes") {
+        let b = match tkr_read_hex_docstring(value, 0) { str as x => x; error as e => return e }
+        return TkrMatch { mode = TkrMatchMode::Literal; text = b }
+    }
+    let q = match mf_read_quoted(value, 0) { MfQuoted as x => x; error as e => return e }
+    if teko::str::ends_with(noun, "sha256") { return TkrMatch { mode = TkrMatchMode::Sha256; text = q.text } }
+    if teko::str::ends_with(noun, "pattern") { return TkrMatch { mode = TkrMatchMode::Pattern; text = q.text } }
+    TkrMatch { mode = TkrMatchMode::Literal; text = q.text }
+}
+
+/**
+ * TkrLower — the in-progress lowering of a scenario to a `Tkr`: every top-level field plus the
+ * per-os-arch `expect`/`golden` upserts. Bundled so each step folds through one small
+ * `TkrLower -> TkrLower | error`.
+ *
+ * @since 0.3.0.30
+ */
+type TkrLower = struct {
+    /** accumulated fold-opaque argv operands. */
+    args: []str
+    /** accumulated stdin bytes. */
+    stdin: str
+    /** the classification (defaults to Exit until a When sets it). */
+    kind: TkrKind
+    /** the expected exit code. */
+    exit: i32
+    /** the top-level stdout expectation. */
+    stdout: TkrMatch
+    /** the top-level stderr expectation. */
+    stderr: TkrMatch
+    /** the declared variant set. */
+    targets: []str
+    /** the compile-fail diagnostic substring. */
+    diagnostic: str
+    /** the per-os-arch expectation overrides. */
+    expect: []TkrExpect
+    /** the per-os-arch byte goldens. */
+    golden: []TkrGolden
+    /** an inline Teko source program; "" when none declared. @since 0.3.1 */
+    source_inline: str
+    /** an explicit standalone source file (relative to `regr_dir`); "" when none declared. @since 0.3.1 */
+    source_file: str
+    /** accumulated per-scenario child env (`K=V` tokens). @since 0.3.1 */
+    env: []str
+    /** the declared effective os-arch target; "" when none declared, `HOST_TARGET` when declared AS the host. @since 0.3.1 */
+    target: str
+    /** true once a `When built in place` entry verb is seen. @since 0.3.1 */
+    in_place: bool
+    /** the declared `Background: Given dependency` sub-project directory; "" when none declared. @since 0.3.1 */
+    dep_dir: str
+    /** true once a `Then object well-formed` step is seen. @since 0.3.1 */
+    check_wellformed: bool
+}
+
+/**
+ * tkr_lower_new — a fresh `TkrLower` at the documented defaults (kind Exit, exit 0, ignored streams,
+ * empty lists).
+ *
+ * @return the initial lowering accumulator
+ * @since 0.3.0.30
+ */
+fn tkr_lower_new() -> TkrLower {
+    TkrLower {
+        args = teko::list::empty(); stdin = ""; kind = TkrKind::Exit; exit = 0
+        stdout = tkr_match_ignore(); stderr = tkr_match_ignore(); targets = teko::list::empty()
+        diagnostic = ""; expect = teko::list::empty(); golden = teko::list::empty()
+        source_inline = ""; source_file = ""; env = teko::list::empty(); target = ""
+        in_place = false; dep_dir = ""; check_wellformed = false
+    }
+}
+
+/**
+ * tkr_env_extend — `base` with every token of `extra` appended, in order. The accumulator step
+ * `Given env`/`Given target` use to grow the per-scenario child env without a
+ * general list-concat builtin (none exists in `teko::list`).
+ *
+ * @param base   the env tokens accumulated so far
+ * @param extra  the tokens to append
+ * @return       `base` followed by `extra`
+ * @since 0.3.1
+ */
+fn tkr_env_extend(base: []str, extra: []str) -> []str {
+    mut out = base
+    mut k: u64 = 0
+    loop {
+        if k >= extra.len { break }
+        out = teko::list::push(out, extra[k])
+        k = k + 1
+    }
+    out
+}
+
+/**
+ * tkr_target_env — the env token(s) `Given target` sugars to: a real cross target `t` →
+ * `TEKO_TARGET=<t>`; the `HOST_TARGET` sentinel (`"host"`) and the empty value → NO token at all.
+ * The sentinel exists so a target `Examples` table can spell its HOST row explicitly, and
+ * for that row "the build host's own target" must mean exactly what an UNSET `TEKO_TARGET` means
+ * (`native_target()`'s R1 host-derived default). Exporting `TEKO_TARGET=host` instead would hand
+ * the own backend an unrecognised target name and earn its honest R2 stop on every host — turning
+ * the table's host row red for spelling out the default it already had.
+ *
+ * @param value  the declared target name (a cross target, `"host"`, or "")
+ * @return       the env token(s) the name sugars to, or `[]` for the host
+ * @since 0.3.1
+ */
+fn tkr_target_env(value: str) -> []str {
+    if value.len == 0 || value == HOST_TARGET { return teko::list::empty() }
+    teko::list::push(teko::list::empty(), teko::str::concat("TEKO_TARGET=", value))
+}
+
+/**
+ * HOST_OS_ARCH_TARGET — the `Given target` token meaning "THIS host's own os-arch, spelled out".
+ *
+ * It is not the same thing as `HOST_TARGET` (`"host"`) and the difference is the whole point. `host`
+ * means "declare no target at all" — the row exercises the UNSET-`TEKO_TARGET` default path. This
+ * token means "declare a target, and let it be the one this host natively builds" — the row
+ * exercises the EXPLICITLY-SPELLED path, which is a different code path in the build and the one a
+ * real user takes when they pin their own platform.
+ *
+ * WHY IT EXISTS (owner ruling 2026-07-27: *"precisa ensinar o regressor a entender diferentes OSes e
+ * arquiteturas para variar um mesmo teste"*). A row that wanted "the explicitly-spelled host target"
+ * had to hardcode one — `x86_64-linux` — which turns the row into a CROSS row on every other host and
+ * earns it an honest skip there. Hardcoding an architecture where the subject is "an explicit
+ * spelling" is what silently narrows the corpus to one machine. A row whose subject genuinely IS an
+ * architecture (emitting COFF, emitting Mach-O) still names that architecture and still skips
+ * honestly where the toolchain is absent — this token is for the other kind of row, and only that.
+ */
+const HOST_OS_ARCH_TARGET: str = "host-os-arch"
+
+/**
+ * tkr_resolve_target_name — the DECLARED target name a `Given target` value stands for, with
+ * `HOST_OS_ARCH_TARGET` resolved to this host's own os-arch (`x86_64-linux`, `arm64-macos`, …), or
+ * to the plain `HOST_TARGET` sentinel when this host's (os, arch) pair names no own-backend target
+ * at all (`host_default_target`'s own honest R2 error): there is no real name to spell out
+ * explicitly on such a host, so the row degrades to the EXACT same "declare no target" path the
+ * plain `host` sentinel already takes — which the row's own capability probe
+ * (`host_cc_cannot_link_host_default_reason`) then honestly skips, instead of exporting a
+ * `TEKO_TARGET` this host cannot actually build.
+ *
+ * Resolved at LOWERING time, on purpose: every consumer downstream (the run-wrapper resolution, the
+ * cross classification, the toolchain probe, the artifact extension, the object-format check) reads
+ * `Tkr.target` as a real os-arch name, so a token that survived into the lowered row would have to be
+ * understood again at each of those sites — six chances to forget one. Resolving here means exactly
+ * one site knows the token exists.
+ *
+ * @param value  the surface `Given target` value
+ * @return       the same value, this host's os-arch name when it is `HOST_OS_ARCH_TARGET` and the
+ *               host has one, or `HOST_TARGET` when it does not
+ * @since 0.3.1
+ */
+fn tkr_resolve_target_name(value: str) -> str {
+    if value != HOST_OS_ARCH_TARGET { return value }
+    match host_default_target() { NativeTarget as t => target_name(t); error => HOST_TARGET }
+}
+
+/**
+ * tkr_apply_given — fold a `Given` noun (`args`/`stdin`/`stdin bytes`/`targets`/`source`/
+ * `source inline`/`env`/`target`/`dependency`) into `b`. M.3 on a malformed value or an
+ * unknown Given noun.
+ *
+ * @param b      the lowering accumulator
+ * @param noun   the Given noun-phrase
+ * @param value  the surface value
+ * @return       the updated accumulator, or an `error` on a bad value / unknown noun
+ * @throws       on a malformed value or an unknown Given noun-phrase
+ * @since 0.3.0.30
+ */
+fn tkr_apply_given(b: TkrLower, noun: str, value: str) -> TkrLower | error {
+    if noun == "source" {
+        let q = match mf_read_quoted(value, 0) { MfQuoted as x => x; error as e => return e }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = q.text; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
+    }
+    if noun == "source inline" {
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = value; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
+    }
+    if noun == "env" {
+        let xs = match mf_read_str_list(value, 0) { []str as x => x; error as e => return e }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = tkr_env_extend(b.env, xs); target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
+    }
+    if noun == "target" {
+        let q = match mf_read_quoted(value, 0) { MfQuoted as x => x; error as e => return e }
+        let name = tkr_resolve_target_name(q.text)
+        let env2 = tkr_env_extend(b.env, tkr_target_env(name))
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = env2; target = name; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
+    }
+    if noun == "dependency" {
+        let q = match mf_read_quoted(value, 0) { MfQuoted as x => x; error as e => return e }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = q.text; check_wellformed = b.check_wellformed }
+    }
+    if noun == "args" {
+        let xs = match mf_read_str_list(value, 0) { []str as x => x; error as e => return e }
+        return TkrLower { args = xs; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
+    }
+    if noun == "targets" {
+        let xs = match mf_read_str_list(value, 0) { []str as x => x; error as e => return e }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = xs; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
+    }
+    if noun == "stdin" {
+        let q = match mf_read_quoted(value, 0) { MfQuoted as x => x; error as e => return e }
+        return TkrLower { args = b.args; stdin = q.text; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
+    }
+    if noun == "stdin bytes" {
+        let d = match tkr_read_hex_docstring(value, 0) { str as x => x; error as e => return e }
+        return TkrLower { args = b.args; stdin = d; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
+    }
+    error { message = teko::str::concat("tkr: unknown Given noun-phrase: ", noun) }
+}
+
+/**
+ * tkr_apply_then_top — fold a top-level (no `on`) `Then` noun (`exit`/the stdout+stderr families/
+ * `diagnostic`) into `b`. M.3 on a malformed value or an unknown Then noun.
+ *
+ * @param b      the lowering accumulator
+ * @param noun   the Then noun-phrase
+ * @param value  the surface value
+ * @return       the updated accumulator, or an `error` on a bad value / unknown noun
+ * @throws       on a malformed value or an unknown Then noun-phrase
+ * @since 0.3.0.30
+ */
+fn tkr_apply_then_top(b: TkrLower, noun: str, value: str) -> TkrLower | error {
+    if noun == "exit" {
+        let code = match tkr_read_i32(value, 0) { i32 as v => v; error as e => return e }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = code; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
+    }
+    if noun == "diagnostic" {
+        let q = match mf_read_quoted(value, 0) { MfQuoted as x => x; error as e => return e }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = b.stderr; targets = b.targets; diagnostic = q.text; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
+    }
+    if mf_starts_with(noun, "stdout") {
+        let m = match tkr_noun_stream_match(noun, value) { TkrMatch as x => x; error as e => return e }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = m; stderr = b.stderr; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
+    }
+    if mf_starts_with(noun, "stderr") {
+        let m = match tkr_noun_stream_match(noun, value) { TkrMatch as x => x; error as e => return e }
+        return TkrLower { args = b.args; stdin = b.stdin; kind = b.kind; exit = b.exit; stdout = b.stdout; stderr = m; targets = b.targets; diagnostic = b.diagnostic; expect = b.expect; golden = b.golden; source_inline = b.source_inline; source_file = b.source_file; env = b.env; target = b.target; in_place = b.in_place; dep_dir = b.dep_dir; check_wellformed = b.check_wellformed }
+    }
+    error { message = teko::str::concat("tkr: unknown Then noun-phrase: ", noun) }
+}
+

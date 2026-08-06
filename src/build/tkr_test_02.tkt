@@ -1,0 +1,211 @@
+/**
+ * tkr_verdict_parity — a lowered scenario and the equivalent hand-built `Tkr` yield the SAME
+ * `check_run` verdict on both a matching and a mismatching `CapResult` (identical `RegrOutcome.ok`),
+ * proving the lowering IR is faithful AND that the runner REPORTS a failure on a mismatch (the
+ * failure-reporting self-test the deleted `regression-fixture/` demo used to carry, companion §7).
+ *
+ * @return void
+ */
+fn tkr_verdict_parity() {
+    let src = "Feature: f\n  Scenario: s\n    Given args = [\"7\"]\n    When built and run\n    Then exit = 42\n    And stdout = \"ok\"\n"
+    match tkr_first_lowered(src) {
+        Tkr as lowered => {
+            let hand = Tkr {
+                args = teko::list::push(teko::list::empty(), "7"); stdin = ""; kind = TkrKind::Print; exit = 42
+                stdout = TkrMatch { mode = TkrMatchMode::Literal; text = "ok" }; stderr = tkr_match_ignore()
+                targets = teko::list::empty(); expect = teko::list::empty(); golden = teko::list::empty(); diagnostic = ""
+                source_inline = ""; source_file = ""; env = teko::list::empty(); target = ""
+                in_place = false; dep_dir = ""; check_wellformed = false
+            }
+            let good = CapResult { exit = 42; stdout = "ok"; stderr = ""; harness_ns = 0; child_ns = 0; cmd = ""; chan_text = "" }
+            let bad = CapResult { exit = 1; stdout = "no"; stderr = ""; harness_ns = 0; child_ns = 0; cmd = ""; chan_text = "" }
+            teko::assert::is_true(check_run(lowered, HOST_TARGET, good).ok)
+            teko::assert::is_true(check_run(hand, HOST_TARGET, good).ok)
+            teko::assert::is_false(check_run(lowered, HOST_TARGET, bad).ok)
+            teko::assert::is_false(check_run(hand, HOST_TARGET, bad).ok)
+        }
+        error => teko::assert::is_true(false)
+    }
+}
+
+#test
+/**
+ * tkr_rejects_malformed — an unknown noun-phrase, an unknown When verb, and a step before any
+ * Scenario are honest errors (M.3); a well-formed feature still parses.
+ *
+ * @return void
+ */
+fn tkr_rejects_malformed() {
+    teko::assert::is_false(tkr_parses("Feature: f\n  Given args = [\"x\"]\n"))
+    let bad_noun = "Feature: f\n  Scenario: s\n    When built and run\n    Then bogus = \"x\"\n"
+    match tkr_first_lowered(bad_noun) { Tkr => teko::assert::is_true(false); error => teko::assert::is_true(true) }
+    let bad_verb = "Feature: f\n  Scenario: s\n    When teleported\n"
+    match tkr_first_lowered(bad_verb) { Tkr => teko::assert::is_true(false); error => teko::assert::is_true(true) }
+    teko::assert::is_true(tkr_parses("Feature: f\n  Scenario: s\n    When built and run\n    Then exit = 0\n"))
+}
+
+#test
+/**
+ * tkr_lowers_stream_pattern — the `pattern` suffix on a stream noun lowers to
+ * `TkrMatchMode::Pattern` carrying the raw regex source, on stdout and stderr alike, and behind an
+ * `on "<os-arch>"` route as well as at top level.
+ *
+ * @return void
+ */
+fn tkr_lowers_stream_pattern() {
+    let src = "Feature: f\n  Scenario: s\n    When built and run\n    Then it traps\n    And stderr pattern = \"^teko: deliberate panic: boom$\"\n    And stdout pattern = \"[0-9]+\"\n    And on \"x86_64-windows\" stderr pattern = \"unreachable\"\n"
+    match tkr_first_lowered(src) {
+        Tkr as t => {
+            teko::assert::is_true(t.kind == TkrKind::Trap)
+            teko::assert::is_true(t.stderr.mode == TkrMatchMode::Pattern)
+            teko::assert::is_true(t.stderr.text == "^teko: deliberate panic: boom$")
+            teko::assert::is_true(t.stdout.mode == TkrMatchMode::Pattern)
+            teko::assert::is_true(t.stdout.text == "[0-9]+")
+            teko::assert::is_true(t.expect.len == 1)
+            teko::assert::is_true(t.expect[0].stderr.mode == TkrMatchMode::Pattern)
+            teko::assert::is_true(t.expect[0].stderr.text == "unreachable")
+        }
+        error => teko::assert::is_true(false)
+    }
+}
+
+/**
+ * tkr_trap_run — a `CapResult` for the panic-scenario verdict tests: the exit code the host
+ * happened to report, and the stderr the program actually wrote.
+ *
+ * @param exit    the exit code the run reported
+ * @param stderr  the captured stderr bytes
+ * @return        the captured outcome
+ */
+fn tkr_trap_run(exit: i32, stderr: str) -> CapResult {
+    CapResult { exit = exit; stdout = ""; stderr = stderr; harness_ns = 0; child_ns = 0; cmd = ""; chan_text = "" }
+}
+
+#test
+/**
+ * tkr_pattern_verdict_is_the_panic_proof — the migration this whole step exists for: `Then it
+ * traps` plus a `stderr pattern` accepts a deliberate panic under EITHER host convention (a POSIX
+ * shell's synthesised 128+SIGABRT, and the unrelated number Windows reports), because neither is
+ * consulted; and it still refuses the three ways the old `exit = 134` oracle could be fooled —
+ * the wrong guard firing, the binary never running at all, and a clean exit.
+ *
+ * @return void
+ */
+fn tkr_pattern_verdict_is_the_panic_proof() {
+    let src = "Feature: f\n  Scenario: s\n    When built and run\n    Then it traps\n    And stderr pattern = \"teko: deliberate panic: impossible conversion\"\n"
+    match tkr_first_lowered(src) {
+        Tkr as t => {
+            let glibc = "6:17: teko: deliberate panic: impossible conversion\nteko: stack trace:\n./p(+0x1234) [0x55]\n"
+            let musl = "6:17: teko: deliberate panic: impossible conversion\nteko: stack trace unavailable on this platform (no execinfo)\n"
+            teko::assert::is_true(check_run(t, HOST_TARGET, tkr_trap_run(134, glibc)).ok)
+            teko::assert::is_true(check_run(t, HOST_TARGET, tkr_trap_run(3, musl)).ok)
+            teko::assert::is_false(check_run(t, HOST_TARGET, tkr_trap_run(134, "6:17: teko: deliberate panic: integer overflow\n")).ok)
+            teko::assert::is_false(check_run(t, HOST_TARGET, tkr_trap_run(127, "")).ok)
+            teko::assert::is_false(check_run(t, HOST_TARGET, tkr_trap_run(0, glibc)).ok)
+        }
+        error => teko::assert::is_true(false)
+    }
+}
+
+#test
+/**
+ * tkr_uncompilable_pattern_fails_red — a `pattern` that is not a valid regex fails its scenario and
+ * says so in those words. The dangerous alternative would be a pattern that quietly matched
+ * everything: the runner judges every other scenario, so an oracle that cannot parse its own
+ * expectation must go red, never green (M.3).
+ *
+ * @return void
+ */
+fn tkr_uncompilable_pattern_fails_red() {
+    let src = "Feature: f\n  Scenario: s\n    When built and run\n    Then it traps\n    And stderr pattern = \"teko: (\"\n"
+    match tkr_first_lowered(src) {
+        Tkr as t => {
+            let v = check_run(t, HOST_TARGET, tkr_trap_run(134, "teko: (deliberate) panic\n"))
+            teko::assert::is_false(v.ok)
+            teko::assert::is_true(teko::str::contains(v.message, "not a valid regex"))
+        }
+        error => teko::assert::is_true(false)
+    }
+}
+
+#test
+/**
+ * tkr_row_capability_skip_reason_matches_the_host_default_rule — a HOST row is skipped exactly when
+ * `host_cc_cannot_link_host_default_reason` says this host cannot link what the own backend would
+ * emit, and carries that reason verbatim. Written as an EQUIVALENCE rather than as a fixed
+ * expectation so it holds on every lane: on x86_64-linux, macos-arm64 and windows-x86_64 both sides
+ * are empty and the row runs; on an aarch64-linux host both sides are the same non-empty reason and
+ * the row honest-skips.
+ *
+ * This ALSO absorbs the R3 guard the retired `..._spares_the_c_backend_host_row` test carried: the
+ * plainest row there is (no backend sugar, host target) is now an own-backend row like every other,
+ * so the equivalence covers it instead of a second, separate expectation.
+ *
+ * @return void
+ */
+fn tkr_row_capability_skip_reason_matches_the_host_default_rule() {
+    let own_host = "Feature: f\n  Scenario: s\n    Given target = \"host\"\n    When built and run\n    Then exit = 0\n"
+    let want = host_cc_cannot_link_host_default_reason(HOST_TARGET, true)
+    match tkr_first_lowered(own_host) {
+        Tkr as t => teko::assert::is_true(tkr_row_capability_skip_reason(t) == want)
+        error => teko::assert::is_true(false)
+    }
+}
+
+#test
+/**
+ * tkr_host_os_arch_target_resolves_to_this_hosts_own_os_arch — the `host-os-arch` token means "an
+ * EXPLICITLY spelled target, and let it be the one this host natively builds" (owner ruling
+ * 2026-07-27). On a host `host_default_target` names a real target for, three properties hold,
+ * every one of which a hardcoded `x86_64-linux` fails off x86_64:
+ *
+ *   1. the lowered row's target IS this host's own os-arch name — never the token, never a fixed one;
+ *   2. it is spelled EXPLICITLY, so the row exports `TEKO_TARGET=<that name>` where the plain `host`
+ *      sentinel exports nothing at all — the two exercise different build paths on purpose;
+ *   3. it is never CROSS on the host that resolved it, so the row runs instead of honest-skipping.
+ *
+ * On a host with NO own-backend target at all (`host_default_target`'s own R2 error — an aarch64
+ * linux host, an x86_64 macOS host), there is no real name left to spell explicitly, so the row
+ * degrades to the plain `host` sentinel's own shape instead (`HOST_TARGET`, no exported
+ * `TEKO_TARGET`) — the capability probe then honestly skips it downstream, rather than exporting a
+ * target this host cannot actually build.
+ *
+ * @return void
+ */
+fn tkr_host_os_arch_target_resolves_to_this_hosts_own_os_arch() {
+    let src = "Feature: f\n  Scenario: s\n    Given target = \"host-os-arch\"\n    When built and run\n    Then exit = 0\n"
+    let t = match tkr_first_lowered(src) { Tkr as x => x; error => { teko::assert::is_true(false); return } }
+    match host_default_target() {
+        NativeTarget as h => {
+            let want = target_name(h)
+            teko::assert::is_true(t.target == want)
+            teko::assert::is_true(t.env.len == 1)
+            teko::assert::is_true(t.env[0] == teko::str::concat("TEKO_TARGET=", want))
+            teko::assert::is_true(!cross_note_for_name(t.target).is_cross)
+        }
+        error => {
+            teko::assert::is_true(t.target == HOST_TARGET)
+            teko::assert::is_true(t.env.len == 0)
+        }
+    }
+}
+
+#test
+/**
+ * tkr_plain_host_sentinel_still_declares_no_target — the guard that keeps the two host spellings
+ * apart. `host` must go on meaning "declare NOTHING": it exports no `TEKO_TARGET` token, so the row
+ * exercises the unset-default path. Without this guard the new `host-os-arch` token could quietly be
+ * implemented by widening `host`, which would delete a build path the corpus covers.
+ *
+ * @return void
+ */
+fn tkr_plain_host_sentinel_still_declares_no_target() {
+    let src = "Feature: f\n  Scenario: s\n    Given target = \"host\"\n    When built and run\n    Then exit = 0\n"
+    match tkr_first_lowered(src) {
+        Tkr as t => {
+            teko::assert::is_true(t.target == HOST_TARGET)
+            teko::assert::is_true(t.env.len == 0)
+        }
+        error => teko::assert::is_true(false)
+    }
+}
