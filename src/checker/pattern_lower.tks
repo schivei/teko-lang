@@ -1,0 +1,195 @@
+// src/checker/pattern_lower.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+    let recv_is_class = match recv.type { Named as nm => match find_class_body(nm.name, table) { parser::ClassBody => true; error => false }; _ => false }
+    if !recv_is_class {
+        let root = lvalue_root(lhs_fa.receiver)
+        if !root.reachable { return error { message = "cannot assign to a field of a temporary value — the receiver is not a mutable variable" } }
+        let rb = match lookup_binding(env, root.name) { ValBinding as vb => vb; error as e => return e }
+        if !rb.is_mut { return error { message = "cannot assign to a field of an immutable binding — declare it `mut` (B.21)" } }
+    }
+
+    // Type-check the RHS against the FIELD type (same widen/adopt rule as a simple assign / binding).
+    mut v = match type_expr(a.value, env, table) { TExpr as te => te; error as e => return e }
+    if type_contains_ref(field_t) || type_contains_ref(v.type) { return error { message = "a reference cannot be stored in a field (parameter-only in this version)" } }
+    if !assignable_to(v.type, field_t, table) {
+        if !literal_adopts(v, field_t) { return teko::error::err_typed(error { message = "assigned value does not match the field type" }, type_render(field_t), type_render(v.type)) }
+        v = retype_literal(v, field_t)
+    }
+    let v_is_sentinel_slice = match v.type { Slice as vs => match vs.element { Void => true; _ => false }; _ => false }
+    let field_is_concrete_slice = match field_t { Slice as bs => match bs.element { Void => false; _ => true }; _ => false }
+    if v_is_sentinel_slice {
+        if field_is_concrete_slice {
+            v = TExpr { kind = v.kind; type = field_t; line = v.line; col = v.col }
+        }
+    }
+    TypedStmt { node = TAssign { kind = parser::AssignKind::Field; name = ""; op = a.op; bound = field_t; value = v; deref = false; target = lhs }; env = env }
+}
+
+/**
+ * type_index_assign — type an INDEX-target assignment `ids[i] op= value` (`AssignKind::Index`). The
+ * receiver must be a mutable slice/array binding `[]T`, the index an integer, and the value assignable
+ * to the element type `T` (the same widen/adopt rule as a simple assign). Element write-back mutates
+ * the underlying buffer, so — exactly like a struct-field write — the receiver's ROOT variable must be
+ * a `mut` binding; a `let` / parameter slice is read-only and yields an honest diagnostic.
+ *
+ * @param a      the raw index assignment (`a.target` is the `Index{receiver,index}` LHS)
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       the typed `TAssign` (kind `Index`, `bound` = the element type), or a type error
+ * @throws       when the receiver is not a mutable slice, the index is non-integer, or the value does
+ *               not match the element type
+ */
+fn type_index_assign(a: parser::Assign, env: Env, table: TypeTable) -> TypedStmt | error {
+    let ix = match a.target.kind { parser::Index as x => x; _ => return error { message = "assignment target is not an index access (internal: parser guarantees an index LHS)" } }
+    let recv = match type_expr(ix.receiver, env, table) { TExpr as te => te; error as e => return e }
+    let elem = match recv.type {
+        Slice as sl => match sl.element { Void => return error { message = "cannot assign into an untyped empty slice — its element type is unknown" }; _ => sl.element }
+        _ => return teko::error::err_typed(error { message = "index-assignment target is not a slice — only a slice `[]T` supports `ids[i] = v`" }, "[]T", type_render(recv.type))
+    }
+    let root = lvalue_root(ix.receiver)
+    if !root.reachable { return error { message = "cannot assign into an element of a temporary value — the receiver is not a mutable variable" } }
+    let rb = match lookup_binding(env, root.name) { ValBinding as vb => vb; error as e => return e }
+    if !rb.is_mut { return error { message = $"cannot assign into an element of immutable `{root.name}` — declare it `mut` (B.21)" } }
+    let lhs = match type_expr(a.target, env, table) { TExpr as te => te; error as e => return e }
+    mut v = match type_expr(a.value, env, table) { TExpr as te => te; error as e => return e }
+    if type_contains_ref(elem) || type_contains_ref(v.type) { return error { message = "a reference cannot be stored in a slice element (parameter-only in this version)" } }
+    if !assignable_to(v.type, elem, table) {
+        if !literal_adopts(v, elem) { return teko::error::err_typed(error { message = "assigned value does not match the slice element type" }, type_render(elem), type_render(v.type)) }
+        v = retype_literal(v, elem)
+    }
+    TypedStmt { node = TAssign { kind = parser::AssignKind::Index; name = ""; op = a.op; bound = elem; value = v; deref = false; target = lhs }; env = env }
+}
+
+fn type_assign(a: parser::Assign, env: Env, table: TypeTable) -> TypedStmt | error {
+    let is_field = match a.kind { parser::AssignKind::Field => true; _ => false }
+    if is_field { return type_field_assign(a, env, table) }
+    let is_index = match a.kind { parser::AssignKind::Index => true; _ => false }
+    if is_index { return type_index_assign(a, env, table) }
+    let tb = match lookup_binding(env, a.name) { ValBinding as vb => vb; error as e => return e }
+    if !a.deref {
+        match tb.type {
+            Reference as rf => {
+                mut wv = match type_expr(a.value, env, table) { TExpr as te => te; error as e => return e }
+                let rhs_is_ref = match wv.type { Reference => true; _ => false }
+                if !rhs_is_ref {
+                    if !assignable_to(wv.type, rf.inner, table) {
+                        if !literal_adopts(wv, rf.inner) { return teko::error::err_typed(error { message = "assigned value does not match the referenced type" }, type_render(rf.inner), type_render(wv.type)) }
+                        wv = retype_literal(wv, rf.inner)
+                    }
+                    return TypedStmt { node = TAssign { kind = parser::AssignKind::RefDeref; name = a.name; op = a.op; bound = rf.inner; value = wv; deref = true; target = no_texpr() }; env = env }
+                }
+            }
+            _ => { }
+        }
+    }
+    // (MEM-1b-ii) `r.value op= x` — write THROUGH a reference. The handle `r` need NOT be `mut`
+    // (a `Ref<T>` is a const handle that grants WRITE to its mutable target — R2 mutable-target).
+    // The assigned-to type is the ref's inner T; the value must widen/adopt into T.
+    if a.deref {
+        let inner = match tb.type {
+            Reference as rf => rf.inner
+            _ => return error { message = $"`{a.name}.value` requires a reference (`Ref<T>`) — `{a.name}` is not a reference" }
+        }
+        mut dv = match type_expr(a.value, env, table) { TExpr as te => te; error as e => return e }
+        if !assignable_to(dv.type, inner, table) {
+            if !literal_adopts(dv, inner) { return teko::error::err_typed(error { message = "assigned value does not match the referenced type" }, type_render(inner), type_render(dv.type)) }
+            dv = TExpr { kind = dv.kind; type = inner; line = dv.line; col = dv.col }   // a fitting literal adopts T
+        }
+        return TypedStmt { node = TAssign { kind = parser::AssignKind::RefDeref; name = a.name; op = a.op; bound = inner; value = dv; deref = true; target = no_texpr() }; env = env }
+    }
+    if !tb.is_mut { return error { message = $"cannot assign to immutable `{a.name}` — declare it `mut` (B.21)" } }
+    mut v = match type_expr(a.value, env, table) { TExpr as te => te; error as e => return e }
+    let both_bare_ref = (match tb.type { Reference => true; _ => false }) && (match v.type { Reference => true; _ => false })
+    if !both_bare_ref {
+        if type_contains_ref(tb.type) || type_contains_ref(v.type) { return error { message = "a reference cannot be bound to a local (parameter-only in this version)" } }
+    }
+    // The value must WIDEN into the target's type (B.14 case→variant, T→T?) OR be a fitting literal
+    // that adopts it (C6) — same rule as an annotated binding (the single source of truth).
+    if !assignable_to(v.type, tb.type, table) {
+        // (C1.8/E2) attach expected=type_render(tb.type), actual=type_render(v.type) — mirrors
+        // typer.c type_assign's tk_error_types wrap.
+        if !literal_adopts(v, tb.type) { return teko::error::err_typed(error { message = "assigned value does not match the target type" }, type_render(tb.type), type_render(v.type)) }
+        // a fitting bare-literal (plain-scalar) RHS ADOPTS the target's narrow type — retype the leaf
+        // itself (mirrors type_binding's identical adoption above), so a plain `y = 200` on a `u8`
+        // slot stores/re-widths at 8 bits, not the literal's native i64.
+        // (#71) retype_literal recurses into an array literal's elements — see type_binding.
+        v = retype_literal(v, tb.type)
+    }
+    // (#4) a sentinel empty list/array ADOPTS the target's concrete slice type so codegen sees the
+    // element. OTHERWISE keep the value's NATURAL (case / T) type and store the target as `bound` —
+    // codegen's emit_as wraps the value into the target at the assign site (case→variant, T→T?, a
+    // fitting literal). Mirrors type_binding (clobbering the case type made `node = OptionalType{…}`
+    // emit the case's fields under the variant's C type → a field-designator error).
+    let v_is_sentinel_slice = match v.type { Slice as vs => match vs.element { Void => true; _ => false }; _ => false }
+    let bound_is_concrete_slice = match tb.type { Slice as bs => match bs.element { Void => false; _ => true }; _ => false }
+    if v_is_sentinel_slice {
+        if bound_is_concrete_slice {
+            v = TExpr { kind = v.kind; type = tb.type; line = v.line; col = v.col }
+        }
+    }
+    TypedStmt { node = TAssign { kind = parser::AssignKind::Simple; name = a.name; op = a.op; bound = tb.type; value = v; deref = false; target = no_texpr() }; env = env }   // mut rule enforced (B.21)
+}
+
+fn type_return(r: parser::Return, env: Env, table: TypeTable) -> TypedStmt | error {
+    let v = match type_expr(r.value, env, table) { TExpr as te => te; error as e => return e }
+    TypedStmt { node = TReturn { has_value = r.has_value; value = v }; env = env }   // value gated by has_value (B.20); the return-type match is enforced by type_function's check_returns (C5)
+}
+
+/**
+ * type_loop — type a `[LABEL:] loop [head] { … }` (#517). The head is already desugared: `init`
+ * is typed in a LOOP-PRIVATE child scope so its bindings (counter / bound / `_first` / `_it`) do
+ * NOT leak past the loop, then `body` is typed in that same scope (so the body reads the preamble).
+ * The env returned is the CALLER's env — every loop-local binding (init AND body) is dropped.
+ *
+ * @param l the surface loop node (label + init + body)
+ * @param env the enclosing type environment
+ * @param table the type table
+ * @return the typed loop statement paired with the UNCHANGED outer env, or a type error
+ */
+fn type_loop(l: parser::LoopStmt, env: Env, table: TypeTable) -> TypedStmt | error {
+    let ib = match type_block(l.init, env, table) { TypedBlock as bk => bk; error as e => return e }
+    let bb = match type_block(l.body, ib.env, table) { TypedBlock as bk => bk; error as e => return e }
+    TypedStmt { node = TLoopStmt { label = l.label; init = ib.stmts; body = bb.stmts }; env = env }
+}
+
+fn type_exprstmt(es: parser::ExprStmt, env: Env, table: TypeTable) -> TypedStmt | error {
+    // a TOP-LEVEL if/match is a STATEMENT — its value is discarded, so no `else` is required.
+    match es.expr.kind {
+        parser::IfExpr as f => {
+            let te = match type_if_stmt(f, env, table) { TExpr as x => x; error as e => return e }
+            TypedStmt { node = TExprStmt { expr = te }; env = env }
+        }
+        parser::MatchExpr as m => {
+            let te = match type_match_stmt(m, env, table) { TExpr as x => x; error as e => return e }
+            TypedStmt { node = TExprStmt { expr = te }; env = env }
+        }
+        _ => {
+            let te = match type_expr(es.expr, env, table) { TExpr as x => x; error as e => return e }
+            TypedStmt { node = TExprStmt { expr = te }; env = env }
+        }
+    }
+}
+
+fn type_statement(s: parser::Statement, env: Env, table: TypeTable) -> TypedStmt | error {
+    match s {
+        parser::Binding as b => type_binding(b, env, table)
+        parser::Assign as a => type_assign(a, env, table)
+        parser::Return as r => type_return(r, env, table)
+        parser::LoopStmt as l => type_loop(l, env, table)
+        parser::BreakStmt as b => TypedStmt { node = TBreakStmt { label = b.label }; env = env }
+        parser::ContinueStmt as c => TypedStmt { node = TContinueStmt { label = c.label }; env = env }
+        parser::ExprStmt as es => type_exprstmt(es, env, table)
+        parser::DeferStmt as d => {
+            // Validate: defer block may not directly contain return, break, or nested defer.
+            mut vi: u64 = 0
+            loop {
+                if vi >= d.body.len { break }
+                match d.body[vi] {
+                    parser::Return => return error { message = "defer block may not return" }
+                    parser::BreakStmt => return error { message = "defer block may not break" }
+                    parser::DeferStmt => return error { message = "nested defer is not allowed" }
+                    _ => { }
+                }

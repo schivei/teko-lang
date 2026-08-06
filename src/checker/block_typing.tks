@@ -1,0 +1,96 @@
+// src/checker/block_typing.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+    let env2 = define(env, binder, inner, false)
+    let rvar = parser::Expr { kind = parser::Var { name = binder }; line = line; col = col }
+    let call = parser::MethodCall { receiver = rvar; method = smc.method; args = smc.args }
+    let tc = match type_method_call(call, env2, table) { TExpr as te => te; error as e => return e }
+    safe_nav_match(recv, name, binder, tc)
+}
+
+// `a ?? b` (REBOOT_PLAN §203): the left must be Optional `T?`; the right is `T` (result `T`)
+// or `T?` (result `T?`). A bare `null` on the right adopts the left's optional (the one site
+// where `null` gets its context — REBOOT_PLAN §202).
+fn type_coalesce(co: parser::Coalesce, env: Env, table: TypeTable) -> TExpr | error {
+    let l = match type_expr(co.left, env, table) { TExpr as te => te; error as e => return e }
+    let unwrapped = match l.type {
+        Optional as o => o.inner
+        _ => return error { message = "`??` needs an optional left operand (`T?`) — its right is the fallback (REBOOT_PLAN §203)" }
+    }
+    // (NP-OOP, issue #116) a SENTINEL optional left (`null ?? x`) has no inner `T` to unwrap —
+    // honest error (M.1), mirroring the C twin's NULL-inner guard.
+    match unwrapped {
+        Void => return error { message = "`??` on a bare `null` has nothing to unwrap — the left must be a typed `T?` (REBOOT_PLAN §203)" }
+        _ => { }
+    }
+    match co.right.kind {
+        parser::NullLit => {   // `x ?? null` ⇒ T? — the right adopts the left's optional type
+            let rnull = TExpr { kind = TNullLit { }; type = l.type; line = 0; col = 0 }
+            return TExpr { kind = TCoalesce { left = l; right = rnull }; type = l.type; line = 0; col = 0 }
+        }
+        _ => { }
+    }
+    let r = match type_expr(co.right, env, table) { TExpr as te => te; error as e => return e }
+    // A DIVERGING fallback (panic/exit) never produces a value — accept it for any left type; the
+    // result is the unwrapped `T` (the present-case value). (No `never` type — legislator's ruling.)
+    if texpr_diverges(r) { return TExpr { kind = TCoalesce { left = l; right = r }; type = unwrapped; line = 0; col = 0 } }
+    // (issue #120) a `void` fallback never produces a value either — but unlike a diverging
+    // call it does not GUARANTEE control never returns, so it cannot stand in for `T`. Honest
+    // error (M.1), mirroring the C twin's `tk_type_is_void(&rt)` guard exactly (same message).
+    if type_is_void(r.type) { return error { message = "a `void` expression cannot be the `??` fallback (M.1)" } }
+    // `T? ?? T` ⇒ T (the unwrapping case). (NP-OOP, issue #116) the fallback may also WIDEN
+    // into T — the same assignability a binding/param slot grants (widens_into), so a
+    // conforming class instance backs an interface-typed optional: `shape_opt ?? circle`.
+    if type_eq(r.type, unwrapped) || widens_into(r.type, unwrapped, table) {
+        return TExpr { kind = TCoalesce { left = l; right = r }; type = unwrapped; line = 0; col = 0 }
+    }
+    if type_eq(r.type, l.type) {   // `T? ?? T?` ⇒ T?
+        return TExpr { kind = TCoalesce { left = l; right = r }; type = l.type; line = 0; col = 0 }
+    }
+    error { message = "the `??` fallback must be `T` or `T?` for the left's optional `T?` (REBOOT_PLAN §203)" }
+}
+
+// ---- struct literal `Name { f = v, … }` (W4a) ----
+// Resolve the named struct, require EXACTLY the declared fields (once each — M.1), check
+// per-field value types, and emit the typed children in the struct's DECLARED order (so the
+// VM and codegen lower identically). A numeric literal adopts a fitting field prim type
+// (parity with annotated bindings).
+// `expected` is the binding/return/param type the literal flows into (a `Void` sentinel = none). It
+// retargets a GENERIC struct constructor `Box { … }` to the concrete instance named by the annotation
+// (`Box__g__i64`), so the fields type against i64 — annotation-driven (S4 type-generics, legislated).
+fn type_struct_lit(sl: parser::StructLit, expected: Type, env: Env, table: TypeTable) -> TExpr | error {
+    let nt = match resolve_named(sl.type_path, table, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the literal's enclosing namespace
+    // The builtin `error` is the one non-Named constructible type — `error { message = <str> }` (B.1).
+    match nt {
+        Error => {
+            if sl.field_names.len != 1 || sl.field_names[0] != "message" {
+                return error { message = "`error` is constructed as `error { message = <str> }` (one `message` field)" }
+            }
+            let v = match type_expr(sl.field_vals[0], env, table) { TExpr as te => te; error as e => return e }
+            match v.type { Str => { }; _ => return error { message = "`error`'s `message` must be a `str`" } }
+            mut enames = teko::list::push(teko::list::empty(), "message")
+            mut evals = teko::list::push(teko::list::empty(), v)
+            return TExpr { kind = TStructInit { field_names = enames; field_vals = evals }; type = Error { }; line = 0; col = 0 }
+        }
+        _ => { }
+    }
+    let canon_name = match nt {
+        Named as n => n.name   // (#109 W3) CANONICAL result-type name (mirrors expr.c `name = nt.name`); type_eq compares canonical both sides
+        _ => return error { message = "a struct literal requires a named struct type" }
+    }
+    let base_name = name_last_segment(canon_name)   // (#109 W3) BARE base — a generic instance name (Gen__g__i64) is bare, so name_has_generic_base matches the bare "Gen" prefix
+    mut name = canon_name
+    mut decl = match type_table_find(table, name, "") {   // (#109 W1) struct-literal decl lookup on a resolved name — no referencing ns
+        parser::TypeDecl as td => td
+        error => return error { message = $"unknown type in a struct literal: {name}" }
+    }
+    mut tgt = expected
+    // (W9.4) explicit construction-site type-args `Foo<i64>{ … }` resolve to the concrete instance
+    // `Foo__g__i64` directly — NO annotation required. This OVERRIDES `expected`: resolve the synthetic
+    // generic type (the same path as an annotation), which validates arity and rejects non-generic-with-args.
+    // The instance decl is stamped by instantiate_types (fed from the construction site). If the annotation
+    // is ANOTHER instance of the SAME generic base, the two must name the same instance; if it is a wider
+    // type (a variant the instance widens into), the binding-level widening check below handles it (so
+    // `let w: Wrap = Gen<i64>{…}` is fine).

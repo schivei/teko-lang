@@ -1,0 +1,196 @@
+// src/checker/ref_storability.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+ * discard_governing_sig — the base/interface method whose signature dictates the TYPES of a `_`
+ * discard parameter in method `f` of type `struct_name` (owner refinement 2026-07-15): the base
+ * class's same-named method (when `f` overrides) or a same-named method of an interface the type
+ * implements. Null when `f` neither overrides nor implements a same-named method — the caller then
+ * rejects the discard parameter as illegal in a self-owned signature.
+ *
+ * @param f            the method being typed
+ * @param struct_name  the enclosing type name (bare or canonical)
+ * @param ref_ns       the enclosing type's namespace
+ * @param table        the folded type table
+ * @return             the governing base/interface method, or null when none matches
+ */
+fn discard_governing_sig(f: parser::Function, struct_name: str, ref_ns: str, table: TypeTable) -> parser::Function | null {
+    match type_table_find(table, struct_name, ref_ns) {
+        parser::TypeDecl as td => match td.body {
+            parser::ClassBody as cb => {
+                if cb.has_base {
+                    match find_class_body(cb.base_name, table) {
+                        parser::ClassBody as bcb => match effective_class_methods(bcb, table) {
+                            []parser::Function as ms => match method_named(ms, f.name) { parser::Function as m => return m; null => { } }
+                            error => { }
+                        }
+                        error => { }
+                    }
+                }
+            }
+            _ => { }
+        }
+        error => { }
+    }
+    find_interface_method(type_implements_list(struct_name, ref_ns, table), f.name, table, ref_ns)
+}
+
+/**
+ * discard_param_name — the synthesized C-visible name for the `_` discard parameter at position
+ * `idx`: unique per position so multiple `_` params never collide in the emitted C signature, while
+ * the body can never name it (a discard read is a compile error).
+ *
+ * @param idx  the parameter's positional index
+ * @return     a per-position throwaway parameter name
+ */
+fn discard_param_name(idx: u64) -> str { $"_tk_discard_{idx}" }
+
+/**
+ * discard_param_type — the resolved type of the `_` discard parameter at position `idx`, taken BY
+ * POSITION from the governing base/interface signature `gov`. A null `gov` is the GATE: a `_`
+ * discard parameter is only legal in an implementing/overriding signature.
+ *
+ * @param gov     the governing base/interface method, or null
+ * @param idx     the discard parameter's positional index
+ * @param table   the folded type table
+ * @param ref_ns  the conforming type's namespace (the governing param type resolves here, matching
+ *                the conformance check's own resolution namespace)
+ * @return        the resolved discard-parameter type
+ * @throws        when `gov` is null (a discard param in a self-owned signature), when `idx` has no
+ *                matching governing slot, or when the governing param type fails to resolve
+ */
+fn discard_param_type(gov: parser::Function | null, idx: u64, table: TypeTable, ref_ns: str) -> Type | error {
+    match gov {
+        parser::Function as g => {
+            if idx >= g.params.len { return error { message = "a `_` discard parameter has no matching slot in the implemented/overridden signature" } }
+            resolve_type(g.params[idx].type_ann, table, ref_ns)
+        }
+        null => error { message = "a `_` discard parameter is only allowed when implementing an interface method or overriding a base method — a plain function must name its parameters" }
+    }
+}
+
+/**
+ * (OOP A1, 2026-07-01) Type-check a struct/class METHOD's BODY. Mirrors type_function, except the
+ * RECEIVER param (`has_type=false`, only ever index 0) binds to `Named{struct_name}` instead of going
+ * through resolve_type (its type is implicit, never written by the user). (#254) The method's
+ * type-param table is PREPENDED with the enclosing type's own params, so a body referencing `T`
+ * resolves against the owner's `T` — a NO-OP for a non-generic owner.
+ *
+ * @param f                  the method to type-check
+ * @param struct_name        the enclosing type name (bare from the caller; canonicalized here)
+ * @param env                the typing environment
+ * @param table              the folded type table
+ * @param has_base_binding   does the class expose a named base-object binding to this method?
+ * @param base_binding_name  the base-binding local name (valid iff has_base_binding)
+ * @param base_name          the (canonical) base class name (valid iff has_base_binding)
+ * @param declaring_class    the class that ORIGINALLY declared this body (intern/private access ctx)
+ * @return                   the typed method as a TFunction (namespace stamped by the caller)
+ *                           or (U2, §2 line 72) a local/param/return of unsafe type when neither
+ *                           the method's own `is_unsafe` nor its owning type's is set — a method
+ *                           inherits its OWNER type's unsafe-ness (`method_is_effective_unsafe`)
+ */
+fn type_method(f: parser::Function, struct_name: str, env: Env, table: TypeTable, has_base_binding: bool, base_binding_name: str, base_name: str, declaring_class: str) -> TFunction | error {
+    // (W10b.CLASS residual — intern visibility) this body's OWN field/method accesses are
+    // checked against `declaring_class` (see type_struct_methods's own comment on why this can
+    // differ from `struct_name`), NOT `struct_name` — set before typing the body below.
+    mut local = with_fn_unsafe(with_owner(env, declaring_class), method_is_effective_unsafe(f, struct_name, env.cur_ns, table))
+    let tbl = method_type_param_table(receiver_canonical_name(struct_name, env.cur_ns, table), f.type_params, f.type_constraints, "", table)
+    let is_teko_rt = f.is_extern && f.from_lib == "teko_rt"
+    // (W10b.CLASS) `class Base(parent) { … }` — the NAMED BINDING an instance method uses to
+    // reach the base object. Only meaningful for an INSTANCE method (has a receiver); a class's
+    // static methods never chain/inherit, so there is no base object to bind there. The binding
+    // is a REINTERPRET of the SAME receiver pointer as the base type — sound because
+    // effective_class_fields lays out the base's fields as a PREFIX of the derived struct
+    // (field-flattening composition, increment 2), so a `tk_t_Derived *` and a `tk_t_Base *`
+    // pointing at the SAME address read identical bytes for every base field.
+    let is_instance_method = f.params.len > 0 && !f.params[0].has_type
+    let inject_base_binding = has_base_binding && is_instance_method
+    // codegen reads TFunction.params[i].type_ann DIRECTLY (the syntactic node, not the checked
+    // Type) to emit a C signature — so the receiver's placeholder type_ann (no_type(), from
+    // parsing) must be REWRITTEN to a real Named(struct_name) TypeExpr before it ever reaches
+    // codegen, or emit_function_sig recurses on an empty path (M.1 crash). Every other param's
+    // type_ann is already meaningful from parsing and passes through unchanged.
+    let discard_gov: parser::Function | null = if params_have_discard(f.params) { discard_governing_sig(f, struct_name, env.cur_ns, table) } else { null }
+    mut fixed_params: []parser::Param = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= f.params.len { break }
+        if !f.params[i].has_type && f.params[i].name == "_" {
+            let dpt = match discard_param_type(discard_gov, i, tbl, env.cur_ns) { Type as t => t; error as e => return e }
+            fixed_params = teko::list::push(fixed_params, parser::Param { name = discard_param_name(i); has_type = true; type_ann = type_to_texpr(dpt); is_params = false; has_default = false; default_expr = parser::no_expr() })
+            i++
+            continue
+        }
+        let pt = if !f.params[i].has_type {
+            Named { name = qualify(env.cur_ns, struct_name) }   // (#109 W3) canonical: the method's own ns qualifies its receiver type
+        } else {
+            match resolve_type(f.params[i].type_ann, tbl, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the method's enclosing namespace
+        }
+        fixed_params = teko::list::push(fixed_params, if !f.params[i].has_type {
+                parser::Param { name = f.params[i].name; has_type = true; type_ann = type_to_texpr(pt); is_params = false; has_default = false; default_expr = parser::no_expr() }
+            } else {
+                f.params[i]
+        })
+        if f.is_extern {
+            if is_teko_rt {
+                if !teko_rt_type_ok(pt) {
+                    return error { message = "a `teko_rt` extern function parameter must be a primitive, `str`, slice, variant, or optional (C7.2)" }
+                }
+            } else {
+                if !extern_type_ok(pt, table) {
+                    return error { message = "an `extern` function parameter must be a primitive (int/float/bool), `byte`, `ptr`, `uptr`, or an `extern type` handle (C7.1a)" }
+                }
+            }
+        }
+        local = define(local, f.params[i].name, pt, false)
+        i++
+    }
+    if inject_base_binding { local = define(local, base_binding_name, Named { name = if name_qualifier(base_name) != "" { base_name } else { qualify(env.cur_ns, base_name) } }, false) }   // (#109 W3 / #152) canonical: base_name arrives PRE-QUALIFIED from canon_class_bases (cross-ns exact); a bare (unresolvable/root) one qualifies by the class's own ns
+    let ret = match function_return(f, tbl, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the fn's enclosing namespace
+    if is_ref_null_variant(ret) { return error { message = "a function cannot return an optional reference (`Ref<T> | null`) — references are pass-down only (R3)" } }
+    if f.is_extern {
+        let ret_ok = if is_teko_rt {
+            teko_rt_type_ok(ret)
+        } else {
+            match ret { Void => true; _ => extern_type_ok(ret, table) }
+        }
+        if !ret_ok {
+            return error { message = "an `extern` function return must be a primitive (int/float/bool), `byte`, `ptr`, `uptr`, an `extern type` handle, or absent (C7.1a)" }
+        }
+        let no_body: []TStatement = teko::list::empty()
+        return TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = fixed_params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
+    }
+    let tb = match type_block(f.body, local, tbl) { TypedBlock as bk => bk; error as e => return e }
+    match check_returns(tb.stmts, ret, table) { null => { }; error as e => return e }
+    match check_trailing_value(tb.stmts, ret, table) { null => { }; error as e => return e }
+    match ret { Reference => match check_ref_return_passdown(tb.stmts, collect_ref_param_names(f.params, tbl, env.cur_ns)) { null => { }; error as e => return e }; _ => { } }
+    let lc = check_labels(tb.stmts, teko::list::empty(), false, teko::list::empty())
+    if lc.failed { return error { message = lc.message } }
+    let ret_stmts = retype_union_returns(tb.stmts, ret, table)
+    // (W10b.CLASS / #98 Option A) PREPEND the base-binding as the method body's FIRST statement: a
+    // synthetic `let <binding>: <Base> = <self>` — self UPCAST to the base, NOT a reinterpret-cast.
+    // Binding self (the concrete subclass) with the base-typed `bound` lets emit_as build the D3 fat
+    // pointer (data + tk_vt_<Sub>_<Base>), so dispatch through the base-binding works uniformly under
+    // the one-representation model (widens_into now permits the Sub→Base widen). Checked ABOVE the
+    // injection (check_returns/check_trailing_value/check_labels all read the ORIGINAL body) since it
+    // changes nothing about return/trailing-value/label semantics.
+    let body = if inject_base_binding {
+        let receiver_name = f.params[0].name
+        let cast_val = TExpr {
+            kind = TVar { name = receiver_name; is_func = false; func_ns = "" }
+            type = Named { name = qualify(env.cur_ns, struct_name) }   // (#109 W3) canonical: self's concrete subclass type qualified by the method's ns
+            line = 0; col = 0
+        }
+        let bind_stmt = TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = base_binding_name }; bound = Named { name = if name_qualifier(base_name) != "" { base_name } else { qualify(env.cur_ns, base_name) } }; value = cast_val }   // (#109 W3 / #152) canonical: base_name arrives PRE-QUALIFIED from canon_class_bases; a bare one qualifies by the class's own ns
+        mut prefixed: []TStatement = teko::list::push(teko::list::empty(), bind_stmt)
+        mut si = 0
+        loop { if si >= ret_stmts.len { break }; prefixed = teko::list::push(prefixed, ret_stmts[si]); si++ }
+        prefixed
+    } else {
+        ret_stmts
+    }
+    let tf = TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = fixed_params; return_type = ret; body = body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = false; c_symbol = f.c_symbol; from_lib = ""; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
+    match check_ref_storability(tf) { null => { }; error as e => return e }
+    tf
+}

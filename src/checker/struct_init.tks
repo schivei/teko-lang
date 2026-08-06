@@ -1,0 +1,196 @@
+// src/checker/struct_init.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+                }
+            }
+            _ => { }
+        }
+        i++
+    }
+    null
+}
+
+/**
+ * The diagnostic for a dropped `#must_free` handle (S2 #336) — shared by the param check and the
+ * local-binding check so both name the same contract in the same words.
+ *
+ * @param str name  the dropped handle's binding/param name
+ * @return str  the rendered message
+ */
+fn must_free_dropped_message(name: str) -> str {
+    $"`#must_free` value `{name}` is dropped without being freed on this path — call `teko::mem::free({name})` or move it out"
+}
+
+/**
+ * Check every `#must_free`-typed LOCAL BINDING (`let`/`mut`/`const` simple-name target) declared
+ * in `stmts` — a binding whose bound type (`TBinding.bound`) is a `Named` naming a `must_free`
+ * `TypeDecl`. Each is checked over its OWN remaining scope: the statements strictly AFTER its own
+ * declaration in the SAME block (`must_free_consumed_on_all_paths(stmts, i + 1, name)`), which is
+ * exactly where a read of it can occur (the structural definite-assignment guarantee —
+ * `initanalysis.tks` relies on the same fact for its unused-local check). Recurses into a value-
+ * position `if`/`match`'s branch blocks (a binding declared inside one is scoped to that branch).
+ * Returns the FIRST dropped-path error found (fail-fast, mirrors every other checker pass).
+ *
+ * @param []TStatement stmts  the typed statement block to walk
+ * @param TypeTable table  the type table (kind probes for each binding's bound type)
+ * @return error?  an error naming the first dropped `#must_free` local, or nothing
+ */
+fn check_must_free_locals(stmts: []TStatement, table: TypeTable) -> error | null {
+    mut i: u64 = 0
+    loop {
+        if i >= stmts.len { break }
+        match check_must_free_locals_stmt(stmts[i], stmts, i, table) { null => { }; error as e => return e }
+        i++
+    }
+    null
+}
+
+/**
+ * The single-statement step of `check_must_free_locals`: if `stmts[i]` is a `#must_free`
+ * binding, check its own remaining scope; if it carries nested branch blocks (`if`/`match`),
+ * recurse into each. A `DestructurePattern` target is not tracked (mirrors
+ * `initanalysis.tks`'s unused-local check — `type_binding` never defines destructure names,
+ * so there is nothing to bind against here either).
+ *
+ * @param TStatement s  the statement at index `i`
+ * @param []TStatement stmts  the enclosing block (so a binding's remaining scope can be re-walked)
+ * @param u64 i  `s`'s own index in `stmts`
+ * @param TypeTable table  the type table (kind probes for a binding's bound type)
+ * @return error?  an error naming the first dropped `#must_free` local, or nothing
+ */
+fn check_must_free_locals_stmt(s: TStatement, stmts: []TStatement, i: u64, table: TypeTable) -> error | null {
+    match s {
+        TBinding as b => match b.target {
+            parser::SimpleName as sn => match b.bound {
+                Named as nm => {
+                    if is_must_free_name(nm.name, table) && !must_free_consumed_on_all_paths(stmts, i + 1, sn.name) {
+                        return teko::error::err_loc(error { message = must_free_dropped_message(sn.name) }, b.value.line, b.value.col)
+                    }
+                    null
+                }
+                _ => null
+            }
+            parser::DestructurePattern => null
+        }
+        TExprStmt as es => check_must_free_locals_expr(es.expr, table)
+        _ => null
+    }
+}
+
+/**
+ * Recurse `check_must_free_locals` into a value-position `if`/`match`'s branch blocks (a plain
+ * non-branching expression carries none).
+ *
+ * @param TExpr e  the typed expression to inspect
+ * @param TypeTable table  the type table (kind probes for each binding's bound type)
+ * @return error?  an error naming the first dropped `#must_free` local inside `e`'s branches, or nothing
+ */
+fn check_must_free_locals_expr(e: TExpr, table: TypeTable) -> error | null {
+    match e.kind {
+        TIfExpr as f => {
+            match check_must_free_locals(f.then_blk, table) { null => { }; error as er => return er }
+            if f.has_else { return check_must_free_locals(f.else_blk, table) }
+            null
+        }
+        TMatchExpr as m => {
+            mut i = 0
+            loop {
+                if i >= m.arms.len { break }
+                match check_must_free_locals(m.arms[i].body, table) { null => { }; error as er => return er }
+                i++
+            }
+            null
+        }
+        _ => null
+    }
+}
+
+/**
+ * Run the consume-or-fail dataflow over every `#must_free`-tracked binding/param in a function
+ * (S2, the 0.1.0.0-beta memory+unsafe remodel #336): each must be consumed
+ * (`must_free_consumed_on_all_paths`) on every path reachable from its own declaration point —
+ * params from the whole body, locals from their own declaring block onward. Returns the FIRST
+ * dropped-path error found (fail-fast, mirrors every other checker pass).
+ *
+ * HONEST BOUNDS: see `must_free_consumed_on_all_paths`'s doc-comment and
+ * `docs/design/memory-unsafe-backend-remodel.md` §5a — this pass does not walk loop bodies, does
+ * not track a param consumed any way other than `return`, does not track a `mut` local
+ * reassigned before its prior value was freed, and `#must_free` itself is not yet serialized in
+ * the `.tkb` codec (module-local today).
+ *
+ * @param parser::Function f  the parsed function (for param collection + the position fallback)
+ * @param TypeTable tbl  the fn's type table (extended with its own generic type-params)
+ * @param str ns  the fn's enclosing namespace (param type resolution, #109 W1)
+ * @param []TStatement body  the fn's typed body
+ * @param TypeTable table  the outer type table (kind probes)
+ * @return error?  an error naming the first dropped `#must_free` handle, or nothing
+ */
+fn check_must_free(f: parser::Function, tbl: TypeTable, ns: str, body: []TStatement, table: TypeTable) -> error | null {
+    match check_must_free_params(f, tbl, ns, body) { null => { }; error as e => return e }
+    check_must_free_locals(body, table)
+}
+
+// ---- a typed block: thread the env, collect the typed statements ----
+fn type_block(stmts: []parser::Statement, env: Env, table: TypeTable) -> TypedBlock | error {
+    mut cur = env
+    // (#148 R3 DECREE) `out` is a linear chain: born empty, self-append-only, read only after the
+    // loop — so every copy-grow frees the superseded buffer (mem::push_fo; paranoid-gated).
+    mut out: []TStatement = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= stmts.len { break }
+        // W5a — a block's TRAILING `if`-with-`else` / `match` is its VALUE (B.20): type it via
+        // the VALUE form (type_expr → type_if/type_match) so the block yields the branch type.
+        // A trailing `if` WITHOUT `else` can't be a value → stays a statement; `match` is
+        // exhaustive so it always yields. Non-tail if/match → statement (value discarded).
+        mut handled = false
+        if i + 1 == stmts.len {
+            match stmts[i] {
+                ExprStmt as es => {
+                    match es.expr.kind {
+                        IfExpr as f => {
+                            if f.has_else {
+                                let te = match type_expr(es.expr, cur, table) { TExpr as x => x; error as e => return e }
+                                out = teko::mem::push_fo(out, TExprStmt { expr = te })
+                                handled = true
+                            }
+                        }
+                        MatchExpr => {
+                            let te = match type_expr(es.expr, cur, table) { TExpr as x => x; error as e => return e }
+                            out = teko::mem::push_fo(out, TExprStmt { expr = te })
+                            handled = true
+                        }
+                        _ => { }
+                    }
+                }
+                _ => { }
+            }
+        }
+        if !handled {
+            let ts = match type_statement(stmts[i], cur, table) { TypedStmt as t => t; error as e => return e }
+            out = teko::mem::push_fo(out, ts.node)
+            cur = ts.env
+        }
+        i++
+    }
+    TypedBlock { stmts = out; env = cur }
+}
+
+// ---- if as a VALUE (B.20): cond bool; `else` required; both branches one type ----
+fn type_if(f: parser::IfExpr, env: Env, table: TypeTable) -> TExpr | error {
+    let c = match type_expr(f.cond, env, table) { TExpr as te => te; error as e => return e }
+    if !is_bool(c.type) { return error { message = "an `if` condition must be a bool" } }
+    if !f.has_else { return error { message = "an `if` used as a value needs an `else`" } }
+    let tb = match type_block(f.then_blk, env, table) { TypedBlock as bk => bk; error as e => return e }
+    let eb = match type_block(f.else_blk, env, table) { TypedBlock as bk => bk; error as e => return e }
+    mut tt = tblock_type(tb.stmts)
+    mut et = tblock_type(eb.stmts)
+    // literal cross-adoption (mirrors expr.c type_if): a numeric-literal branch adopts the OTHER
+    // branch's numeric type, so `if c { u32_expr } else { 64 }` is u32, not the union u32 | i64.
+    let tl = trailing_number(tb.stmts)
+    let el = trailing_number(eb.stmts)
+    let then_adopts = match tl { TExpr as t => literal_adopts(t, et); null => false }
+    if then_adopts { tt = et }
+    else {

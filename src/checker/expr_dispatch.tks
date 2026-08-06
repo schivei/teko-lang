@@ -1,0 +1,102 @@
+// src/checker/expr_dispatch.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+}
+
+/** `recv.method(args)` — an INSTANCE struct-method dot-call (OOP A1, 2026-07-01). Desugars into
+    an ordinary `StructName::method(recv, ...args)` Call and delegates to `type_call` wholesale
+    (reuses arity/defargs/generics/namespace-mangling for free — the same trick `~` used for
+    `teko::string::concat`). The receiver is typed ONCE here just to discover which struct/method
+    is targeted; `type_call` re-types it (and every arg) as part of its normal argument pass.
+    Flags-typed receivers dispatch to type_flags_method (the dispatch's job, mirroring the C
+    switch's precedence — see type_dispatch's MethodCall arm), never reaching here. A bare `.` call
+    on a nullable receiver stays a compile error (NP-OOP, issue #116) — but names WHY and points at
+    the sanctioned null-propagating call (`?.`) instead of the deferral message. The receiver-type
+    lookup (`type_table_find`) is a resolved-name probe (#109 W1, no referencing ns); once resolved,
+    a type-param's swallowed constraint error (S6, M.1 — a trait atom / an unknown atom / a Risco-3
+    ambiguity) re-surfaces here, named, before an INTERFACE-typed receiver's DYNAMIC contract-method
+    call resolves against the interface's EFFECTIVE (extends-transitive) signature list; its index
+    there is the vtable slot both backends dispatch through. The receiver rides as args[0] (an
+    interface value, or a class instance the emitters upcast on the fly). Mirror:
+    expr.c::type_method_call. */
+fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable) -> TExpr | error {
+    let recv_t = match type_expr(mc.receiver, env, table) { TExpr as te => te.type; error as e => return e }
+    if is_flags_named(recv_t, table) { return error { message = "method typing is deferred (B.29 / M.4)" } }
+    match recv_t {
+        Optional => return error { message = "cannot call a method with `.` on a nullable value (`T?`) — use `?.` (REBOOT_PLAN §203)" }
+        _ => { }
+    }
+    let struct_name = match recv_t { Named as n => n.name; _ => return error { message = "method typing is deferred (B.29 / M.4)" } }
+    let decl = match type_table_find(table, struct_name, "") { parser::TypeDecl as td => td; error => return error { message = "method typing is deferred (B.29 / M.4)" } }
+    match type_param_call_error(decl, table) { error as e => return e; null => { } }
+    match decl.body {
+        parser::InterfaceBody as ib => return type_contract_dispatch(ib, struct_name, mc, env, table)
+        parser::TraitBody as tb => return type_contract_dispatch(parser::InterfaceBody { extends = teko::list::empty(); methods = tb.methods }, struct_name, mc, env, table)
+        _ => { }
+    }
+    // (W10b.CLASS increment 1) a class's instance dot-call reuses this SAME desugar — only the
+    // methods list's source differs; a class's methods are otherwise typed exactly like a struct's.
+    let methods = match decl.body {
+        parser::StructBody as sb => sb.methods
+        parser::ClassBody as cb => match effective_class_methods(cb, table) { []parser::Function as f => f; error as e => return e }   // (W10b.CLASS increment 2) inherited methods are callable too
+        _ => return error { message = "method typing is deferred (B.29 / M.4)" }
+    }
+    if methods.len == 0 { return error { message = $"no such method '{mc.method}' on struct '{struct_name}'" } }
+    mut mi: u64 = 0
+    mut found = false
+    mut mfn = methods[0]   // placeholder; overwritten below iff `found` (Teko has no uninitialized values)
+    loop {
+        if mi >= methods.len { break }
+        if methods[mi].name == mc.method { found = true; mfn = methods[mi]; break }
+        mi++
+    }
+    if !found { return error { message = $"no such method '{mc.method}' on struct '{struct_name}'" } }
+    let is_instance = mfn.params.len > 0 && !mfn.params[0].has_type
+    if !is_instance { return error { message = $"'{mc.method}' is a static method — call it as {struct_name}::{mc.method}(…)" } }
+    // (W10b.CLASS residual — intern visibility) a private (default) method is reachable only
+    // from its OWN declaring class's code, or — if `intern` — a subclass's too. Struct methods
+    // stay all-public (W10b.0.A) — this check only fires for a ClassBody receiver.
+    match decl.body {
+        parser::ClassBody => {
+            let owner = match find_method_owner(struct_name, table, mc.method) { MemberOwner as mo => mo; error as e => return e }
+            if !member_accessible(owner, env.owner_type, table) {
+                return error { message = $"method '{mc.method}' is private to {owner.declaring_class}" }
+            }
+        }
+        _ => { }
+    }
+    // (#98) VIRTUAL DISPATCH through a POLYMORPHIC-BASE-typed receiver. When the receiver's STATIC
+    // type is a `virtual`/`abstract` class, the value may hold a subclass, so the call dispatches
+    // dynamically through the base's vtable — exactly the D3 mechanism, keyed on the base class as
+    // the "contract". The slot is the method's index in the base's EFFECTIVE method list (the same
+    // order codegen's `tk_vt_<Sub>_<Base>` build uses). The receiver rides args[0]; both engines
+    // resolve the CONCRETE override (VM by the payload's class name, native via the vtable slot).
+    // A `sealed` class is never a base — is_polymorphic_base filters it — so its calls stay direct.
+    match decl.body {
+        parser::ClassBody as bcb => {
+            if is_polymorphic_base(struct_name, table) {
+                let slot_res = base_vtable_slot(struct_name, mc.method, table)
+                match slot_res {
+                    u32 as bslot => {
+                        let bft = match method_func_type(mfn, struct_name, table, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the call's enclosing namespace
+                        let bf = match bft { Func as ff => ff; _ => return error { message = "internal: base method signature is not a function type" } }
+                        mut bcargs: []parser::Expr = teko::list::push(teko::list::empty(), mc.receiver)
+                        mut bai: u64 = 0
+                        loop { if bai >= mc.args.len { break }; bcargs = teko::list::push(bcargs, mc.args[bai]); bai++ }
+                        mut bcnames: []str = teko::list::empty()
+                        mut bni: u64 = 0
+                        loop { if bni >= bcargs.len { break }; bcnames = teko::list::push(bcnames, ""); bni++ }
+                        let bdargs = match resolve_defargs(bf, bcargs, bcnames) { []parser::Expr as x => x; error as e => return e }
+                        if bdargs.len != bf.params.len { return error { message = "wrong number of arguments" } }
+                        mut biargs: []TExpr = teko::list::empty()
+                        mut bii: u64 = 0
+                        loop {
+                            if bii >= bdargs.len { break }
+                            mut ba = match type_expr(bdargs[bii], env, table) { TExpr as te => te; error as e => return e }
+                            if type_is_void(ba.type) { return error { message = "a `void` expression cannot be passed as an argument (M.1)" } }
+                            let bpt = bf.params[bii]
+                            if !assignable_to(ba.type, bpt, table) {
+                                if !literal_adopts(ba, bpt) { return teko::error::err_typed(error { message = "argument type mismatch" }, type_render(bpt), type_render(ba.type)) }
+                                ba = TExpr { kind = ba.kind; type = bpt; line = ba.line; col = ba.col }

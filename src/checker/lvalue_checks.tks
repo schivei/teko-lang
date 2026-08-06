@@ -1,0 +1,196 @@
+// src/checker/lvalue_checks.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+}
+
+/**
+ * Re-types the return-position literal leaves of a single statement to the union `ret` (C2b). An
+ * explicit `return e` and (when `is_trailing`) a trailing expr-statement retype their value via
+ * `retype_literal` gated on `literal_adopts` — which fires ONLY on a bare literal leaf (a number,
+ * `null`, or an `if`/`match`/array composite of them), so a value already typed as the union or a
+ * member (a var/call/error — `literal_adopts` is false) is left untouched. The `null` case is why
+ * assignability is NOT a pre-filter: a bare-`null` sentinel widens into the union yet still must be
+ * born at `Null` for codegen. A loop/adopt body recurses (returns only); an `if`/`match` statement
+ * recurses into its branches.
+ *
+ * @param s            the statement to rebuild
+ * @param ret          the union return type each return-position leaf adopts
+ * @param table        the program's type table
+ * @param is_trailing  true iff `s` is a return-position trailing expr-statement
+ * @return             the statement with its return-position literal leaves born at their member
+ */
+fn retype_return_stmt(s: TStatement, ret: Type, table: TypeTable, is_trailing: bool) -> TStatement {
+    match s {
+        TReturn as r => {
+            if !r.has_value { return s }
+            if !literal_adopts(r.value, ret) { return s }
+            TReturn { has_value = true; value = retype_literal(r.value, ret) }
+        }
+        TLoopStmt as l => TLoopStmt { label = l.label; init = l.init; body = retype_return_positions(l.body, ret, table, false) }
+        TAdoptStmt as a => TAdoptStmt { name = a.name; body = retype_return_positions(a.body, ret, table, false) }
+        TExprStmt as es => {
+            let inner = retype_returns_in_expr(es.expr, ret, table)
+            if is_trailing && !texpr_diverges(inner) && literal_adopts(inner, ret) {
+                TExprStmt { expr = retype_literal(inner, ret) }
+            } else {
+                TExprStmt { expr = inner }
+            }
+        }
+        _ => s
+    }
+}
+
+/**
+ * Recurses into an `if`/`match` used as a STATEMENT, re-typing the return-position leaves inside its
+ * branches to the union `ret` (C2b) — the branch bodies are not trailing values (the composite is a
+ * statement), so only their explicit `return`s are return positions. Any other expression is
+ * returned unchanged.
+ *
+ * @param e      the statement-expression
+ * @param ret    the union return type each nested return leaf adopts
+ * @param table  the program's type table
+ * @return       the expression with its branch return leaves born at their member
+ */
+fn retype_returns_in_expr(e: TExpr, ret: Type, table: TypeTable) -> TExpr {
+    match e.kind {
+        TIfExpr as f => {
+            let then_blk = retype_return_positions(f.then_blk, ret, table, false)
+            let else_blk = if f.has_else { retype_return_positions(f.else_blk, ret, table, false) } else { f.else_blk }
+            TExpr { kind = TIfExpr { cond = f.cond; then_blk = then_blk; has_else = f.has_else; else_blk = else_blk }; type = e.type; line = e.line; col = e.col }
+        }
+        TMatchExpr as m => {
+            mut arms: []TArm = teko::list::empty()
+            mut i = 0
+            loop {
+                if i >= m.arms.len { break }
+                let ar = m.arms[i]
+                arms = teko::list::push(arms, TArm { pattern = ar.pattern; has_when = ar.has_when; guard = ar.guard; body = retype_return_positions(ar.body, ret, table, false) })
+                i++
+            }
+            TExpr { kind = TMatchExpr { subject = m.subject; arms = arms }; type = e.type; line = e.line; col = e.col }
+        }
+        _ => e
+    }
+}
+
+fn check_return_stmt(s: TStatement, ret: Type, table: TypeTable) -> error | null {
+    match s {
+        TReturn as r => {
+            if r.has_value {
+                if assignable_to(r.value.type, ret, table) || literal_adopts(r.value, ret) { null }   // a fitting int/float/byte literal adopts the return type (C6)
+                // (C1.8/E2) attach expected=type_render(ret), actual=type_render(r.value.type) —
+                // mirrors typer.c check_return_stmt's tk_error_types wrap.
+                else { teko::error::err_typed(error { message = "return value does not match the function's declared return type" }, type_render(ret), type_render(r.value.type)) }
+            } else {
+                if type_is_void(ret) { null }   // a bare `return` is legal iff the function returns no value (M.3)
+                else { error { message = "bare `return` in a function that declares a value-returning (non-void) return type" } }
+            }
+        }
+        TLoopStmt as l => check_returns(l.body, ret, table)
+        TExprStmt as es => check_returns_inexpr(es.expr, ret, table)
+        TAdoptStmt as a => check_returns(a.body, ret, table)
+        _ => null
+    }
+}
+
+// returns can also live inside a top-level `if`'s blocks (`if c { return e }`) and inside a
+// `match`'s arm blocks (arm bodies are blocks now — a `return` inside one is checked — B.20).
+fn check_returns_inexpr(e: TExpr, ret: Type, table: TypeTable) -> error | null {
+    match e.kind {
+        TIfExpr as f => {
+            match check_returns(f.then_blk, ret, table) { null => { }; error as e => return e }
+            check_returns(f.else_blk, ret, table)
+        }
+        TMatchExpr as m => {
+            mut i = 0
+            loop {
+                if i >= m.arms.len { break }
+                match check_returns(m.arms[i].body, ret, table) { null => { }; error as e => return e }
+                i++
+            }
+            null
+        }
+        _ => null
+    }
+}
+
+/**
+ * name_in_set — is `name` one of `set` (a small ordered string set)? The membership test the `ref`
+ * return pass-down gate uses over the function's reference-parameter names.
+ *
+ * @param set   the candidate names
+ * @param name  the name to find
+ * @return      true iff `name` occurs in `set`
+ */
+fn name_in_set(set: []str, name: str) -> bool {
+    mut i = 0
+    loop {
+        if i >= set.len { break }
+        if set[i] == name { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * ref_value_is_passdown — is the returned reference expression `e` a sound R6/R7 pass-down: a BARE
+ * read of one of the function's own `ref`/`Reference` parameters (whose target is the caller's,
+ * outliving the call), or an if/match whose every branch trailing value is itself a pass-down? Any
+ * other reference source (an `&x` borrow of a local, a ref local, a field/element) is NOT a pass-down.
+ *
+ * @param e           the returned typed expression (already known to be `Reference`-typed)
+ * @param ref_params  the names of the function's reference parameters
+ * @return            true iff `e` is a sound reference pass-down
+ */
+fn ref_value_is_passdown(e: TExpr, ref_params: []str) -> bool {
+    match e.kind {
+        TVar as v => name_in_set(ref_params, v.name)
+        TIfExpr as f => ref_trailing_is_passdown(f.then_blk, ref_params) && ref_trailing_is_passdown(f.else_blk, ref_params)
+        TMatchExpr as m => ref_arms_are_passdown(m.arms, ref_params)
+        _ => false
+    }
+}
+
+/**
+ * ref_arms_are_passdown — do ALL match arms' trailing values qualify as reference pass-downs?
+ *
+ * @param arms        the typed match arms
+ * @param ref_params  the function's reference-parameter names
+ * @return            true iff every arm's trailing value is a pass-down
+ */
+fn ref_arms_are_passdown(arms: []TArm, ref_params: []str) -> bool {
+    mut i = 0
+    loop {
+        if i >= arms.len { break }
+        if !ref_trailing_is_passdown(arms[i].body, ref_params) { return false }
+        i++
+    }
+    true
+}
+
+/**
+ * ref_trailing_is_passdown — does a block's trailing value qualify as a reference pass-down (a bare
+ * ref-parameter read, transitively through nested if/match)? A block with no expression trailing
+ * value cannot yield the reference and is treated as non-pass-down (conservative reject).
+ *
+ * @param stmts       the block's typed statements
+ * @param ref_params  the function's reference-parameter names
+ * @return            true iff the block's trailing value is a pass-down
+ */
+fn ref_trailing_is_passdown(stmts: []TStatement, ref_params: []str) -> bool {
+    match tblock_trailing(stmts) {
+        TExpr as t => ref_value_is_passdown(t, ref_params)
+        null => false
+    }
+}
+
+/**
+ * check_ref_return_passdown — the soundness gate for a `-> ref T` function (0.3.0.30 Part A). A
+ * function that returns a reference may return ONLY a bare read of one of its own `ref` PARAMETERS
+ * (the identity pass-down, R6/R7 — the aliased storage belongs to the caller and outlives the call).
+ * Every explicit `return`, and the body's trailing value, is checked; a reference sourced any other
+ * way (a local `&x` borrow, a ref local, a struct field) is conservatively REJECTED pending the
+ * transitive-escape spine (ref-transparent-model §9 honest-stop). Non-reference returns are ignored.
+ *

@@ -1,0 +1,196 @@
+// src/checker/assign_target.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+            mut any = false
+            mut i = 0
+            loop {
+                if i >= m.arms.len { break }
+                if !tblock_diverges(m.arms[i].body) {   // a diverging arm yields no value (M.3)
+                    match tblock_trailing(m.arms[i].body) {
+                        TExpr as t => { if !literal_adopts(t, to) { return false }; any = true }
+                        null => return false
+                    }
+                }
+                i++
+            }
+            any   // ≥1 contributing arm, all adopt
+        }
+        TIfExpr as f => {
+            if !f.has_else { return false }   // a one-armed `if` has no value
+            mut any = false
+            if !tblock_diverges(f.then_blk) {
+                match tblock_trailing(f.then_blk) {
+                    TExpr as t => { if !literal_adopts(t, to) { return false }; any = true }
+                    null => return false
+                }
+            }
+            if !tblock_diverges(f.else_blk) {
+                match tblock_trailing(f.else_blk) {
+                    TExpr as t => { if !literal_adopts(t, to) { return false }; any = true }
+                    null => return false
+                }
+            }
+            any
+        }
+        // an ARRAY LITERAL adopts a `[]E` slot when EVERY non-spread element adopts E (element-wise
+        // literal adoption — e.g. `[0x68, 0x65]` adopts `[]byte`). Spread elements are already
+        // `[]T` and were type-checked at construction time — skip adoption for them.
+        // An empty `[]` adopts any slice.
+        TArrayLit as a => match to {
+            Slice as s => {
+                mut i = 0
+                loop {
+                    if i >= a.elements.len { break }
+                    if !a.elements[i].is_spread {
+                        if !literal_adopts(a.elements[i].expr, s.element) { return false }
+                    }
+                    i++
+                }
+                true
+            }
+            _ => false
+        }
+        TNullLit => match to {
+            Variant as v => union_lists_null(v.members)
+            Null => true
+            _ => false
+        }
+        _ => false
+    }
+}
+
+/**
+ * (#71/C2b) RETYPE a value that `literal_adopts(e, to)` already accepted — the retyping twin of the
+ * range-check above. A plain scalar leaf adopts by taking `to` wholesale (binding/assign/arg/struct-
+ * field). Into a UNION `to`, a numeric leaf instead takes its sole fitting MEMBER (so `1` becomes
+ * `i32`, assignable into `i32 | null`) and a `null` leaf becomes `Null` — the leaf is born at the
+ * narrow member while the surrounding `if`/`match` becomes the union. An ARRAY LITERAL retypes
+ * ELEMENT-WISE: each non-spread element recurses into the slice's element type (so a nested array-of-
+ * arrays retypes at every depth), and the array's own `.type` becomes `to`. Mirrors `literal_adopts`'s
+ * recursion exactly, one level deeper (it REBUILDS the already-typed tree — TExpr/TArrayLit/TArrayElem
+ * are value types — rather than just reporting fit). A spread element is already a concrete `[]T` —
+ * left untouched (its own widen was checked at array-literal typing time, same as the read side above).
+ *
+ * @param e   the typed value whose literal leaves adopt `to`
+ * @param to  the destination type each contributing leaf is born at (a union → its matching member)
+ * @return    the value rebuilt with its literal leaves re-typed
+ */
+fn retype_literal(e: TExpr, to: Type) -> TExpr {
+    match e.kind {
+        TNumber as n => match to {
+            Variant as v => match union_sole_numeric_member(n, v.members) {
+                Type as mem => TExpr { kind = e.kind; type = mem; line = e.line; col = e.col }
+                error => TExpr { kind = e.kind; type = to; line = e.line; col = e.col }
+            }
+            _ => TExpr { kind = e.kind; type = to; line = e.line; col = e.col }
+        }
+        TNullLit => match to {
+            Variant => TExpr { kind = e.kind; type = Null { }; line = e.line; col = e.col }
+            _ => TExpr { kind = e.kind; type = to; line = e.line; col = e.col }
+        }
+        TArrayLit as a => match to {
+            Slice as s => {
+                mut elems: []TArrayElem = teko::list::empty()
+                mut i = 0
+                loop {
+                    if i >= a.elements.len { break }
+                    let el = a.elements[i]
+                    if el.is_spread {
+                        elems = teko::list::push(elems, el)
+                    } else {
+                        elems = teko::list::push(elems, TArrayElem { is_spread = false; expr = retype_literal(el.expr, s.element) })
+                    }
+                    i++
+                }
+                TExpr { kind = TArrayLit { elements = elems }; type = to; line = e.line; col = e.col }
+            }
+            _ => TExpr { kind = e.kind; type = to; line = e.line; col = e.col }
+        }
+        TIfExpr as f => {
+            let then_blk = retype_block_trailing(f.then_blk, to)
+            let else_blk = if f.has_else { retype_block_trailing(f.else_blk, to) } else { f.else_blk }
+            TExpr { kind = TIfExpr { cond = f.cond; then_blk = then_blk; has_else = f.has_else; else_blk = else_blk }; type = to; line = e.line; col = e.col }
+        }
+        TMatchExpr as m => {
+            mut arms: []TArm = teko::list::empty()
+            mut i = 0
+            loop {
+                if i >= m.arms.len { break }
+                let ar = m.arms[i]
+                arms = teko::list::push(arms, TArm { pattern = ar.pattern; has_when = ar.has_when; guard = ar.guard; body = retype_block_trailing(ar.body, to) })
+                i++
+            }
+            TExpr { kind = TMatchExpr { subject = m.subject; arms = arms }; type = to; line = e.line; col = e.col }
+        }
+        _ => TExpr { kind = e.kind; type = to; line = e.line; col = e.col }
+    }
+}
+
+/**
+ * Rebuilds a typed statement block so its trailing value-expression is re-typed to `to`, mirroring
+ * `retype_literal`'s array-element recursion one level deeper into an `if`/`match` branch body. A
+ * diverging block (`return`/`break`/trailing panic) carries no value and is returned unchanged, as
+ * is a block whose last statement is not a trailing expression. Only reached for a branch whose
+ * trailing value already satisfied `literal_adopts(_, to)`, so retyping its leaf is sound.
+ *
+ * @param stmts  the branch/arm statement block
+ * @param to     the destination type each contributing branch leaf adopts
+ * @return       the block with its trailing expression re-typed to `to`, or the block unchanged
+ */
+fn retype_block_trailing(stmts: []TStatement, to: Type) -> []TStatement {
+    if stmts.len == 0 { return stmts }
+    if tblock_diverges(stmts) { return stmts }
+    match stmts[stmts.len - 1] {
+        TExprStmt as es => {
+            let last_index = stmts.len - 1
+            mut out: []TStatement = teko::list::empty()
+            mut i = 0
+            loop {
+                if i >= last_index { break }
+                out = teko::list::push(out, stmts[i])
+                i++
+            }
+            let last: TStatement = TExprStmt { expr = retype_literal(es.expr, to) }
+            teko::list::push(out, last)
+        }
+        _ => stmts
+    }
+}
+
+/**
+ * (C2b) BORN every literal return-position leaf of a function body at a UNION return type `ret`, so a
+ * numeric or `null` leaf that `literal_adopts(_, ret)` accepted is retyped to its member before
+ * codegen (which wraps the member into the union tag). The pass is GATED on `ret` being a `Variant`:
+ * a scalar/`byte`/optional return keeps its body byte-identical (codegen truncates/wraps a bare leaf
+ * at the boundary exactly as before), so the change is purely additive to the new union case.
+ *
+ * @param stmts  the typed function-body statements
+ * @param ret    the function's declared return type
+ * @param table  the program's type table (for the already-assignable probe)
+ * @return       the body with its adopting union return/trailing leaves born at their member, else
+ *               `stmts` unchanged
+ */
+fn retype_union_returns(stmts: []TStatement, ret: Type, table: TypeTable) -> []TStatement {
+    match ret {
+        Variant => retype_return_positions(stmts, ret, table, true)
+        _ => stmts
+    }
+}
+
+/**
+ * Rebuilds a statement block, re-typing each RETURN-position literal leaf to the union `ret` (C2b).
+ * `retype_trailing` distinguishes a value block (a function body — its final expr-statement is a
+ * return-position value) from a loop/adopt body (no trailing value; only explicit `return`s inside
+ * it are return positions). Recurses through nested loop/adopt bodies and through an `if`/`match`
+ * used as a statement so a `return` in any branch is reached.
+ *
+ * @param stmts            the statement block
+ * @param ret              the union return type each return-position leaf adopts
+ * @param table            the program's type table
+ * @param retype_trailing  true iff the block's final expr-statement is a return-position value
+ * @return                 the block with its return-position literal leaves born at their member
+ */
+fn retype_return_positions(stmts: []TStatement, ret: Type, table: TypeTable, retype_trailing: bool) -> []TStatement {
+    if stmts.len == 0 { return stmts }

@@ -1,0 +1,48 @@
+// src/checker/compare.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+        if i >= c.rest.len { break }
+        let raw = deref_ref_value(match type_expr(c.rest[i].operand, env, table) { TExpr as te => te; error as e => return e })
+        if type_is_void(raw.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
+        let adopted = adopt_binop_operands(prev, raw)
+        if i == 0 { first = adopted.l }
+        match redundant_widen_cast_of(adopted.l, adopted.r) { TExpr as bad => warn_redundant_cast(env, bad); null => { } }
+        if !is_comparable(adopted.l.type, adopted.r.type) { return error { message = "operands are not comparable" } }
+        terms = teko::list::push(terms, TCmpTerm { op = c.rest[i].op; operand = adopted.r })
+        prev = adopted.r
+        i++
+    }
+    TExpr { kind = TCompare { first = first; rest = terms }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
+}
+
+
+/**
+ * Marker: the call is not a `teko::list::*` builtin — `type_list_builtin` falls back so its
+ * caller resolves the call through the ordinary path.
+ */
+type NotListBuiltin = struct { }
+
+/**
+ * The GENERIC `teko::list::*` builtins that have no `.tks` module of their own (like
+ * print/assert): `empty()`, `push(s, x)`, and `with_cap(n)`. Recognized by the LAST-2 path
+ * segments (`list::empty` / `list::push` / `list::with_cap`), rooted at `teko` (or bare
+ * `list::*`). The element type is INFERRED (B.8/Slice):
+ *   - `empty()` -> `[]<sentinel>` (a `Slice` whose element is the `Void` marker, unifying with
+ *     any concrete slice);
+ *   - `push(s, x)` -> `[]typeof(x)`; `s` must be a slice (sentinel or a matching element);
+ *   - `with_cap(n)` -> `[]<sentinel>`, exactly like `empty()`, but the runtime buffer is
+ *     pre-sized for `n` elements (an enabling primitive — staged off; no compiler source calls
+ *     it yet).
+ * The C twin instead uses a `bool handled` out-param; Teko has no out-params, so the tri-state
+ * result here is a 3-member variant (`T? | error` is illegal — a variant member may not be
+ * nullable).
+ *
+ * @param c      the raw call node
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       the typed `TExpr` for a recognized `list::*` builtin, `NotListBuiltin` when the
+ *               call is not one of these (the caller falls back to ordinary resolution), or
+ *               `error` on a malformed call (wrong arity, a non-slice base, or a mismatched item)
+ */

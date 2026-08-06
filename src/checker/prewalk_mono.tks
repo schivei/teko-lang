@@ -1,0 +1,183 @@
+// src/checker/prewalk_mono.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+                                    error as e => { diags = teko::list::push(diags, located_diag(it.file, line, col, e)) }
+                                }
+                                match type_type_member_consts(td, it.namespace, it.file, ienv, types) {
+                                    []TItem as citems => {
+                                        mut ci2 = 0
+                                        loop { if ci2 >= citems.len { break }; items = teko::list::push(items, citems[ci2]); ci2++ }
+                                    }
+                                    error as e => { diags = teko::list::push(diags, located_diag(it.file, line, col, e)) }
+                                }
+                            }
+                            _ => { }
+                        }
+                    }
+                    error as e => { diags = teko::list::push(diags, located_diag(it.file, line, col, e)) }
+                }
+            }
+        }
+        i++
+        on_item(i to u64, program.items.len)
+    }
+    let lc = check_labels(mainbody, teko::list::empty(), false, teko::list::empty())
+    if lc.failed { diags = teko::list::push(diags, lc.message) }
+    // For the result, prepend dep items so the TProgram contains the full program (dep + project).
+    // This allows subsequent operations (codegen, VM, coverage) to see all items.
+    mut all_items: []TItem = teko::list::empty()
+    mut di: u64 = 0
+    loop {
+        if di >= dep_prog.items.len { break }
+        all_items = teko::list::push(all_items, dep_prog.items[di])
+        di++
+    }
+    mut pi: u64 = 0
+    loop {
+        if pi >= items.len { break }
+        all_items = teko::list::push(all_items, items[pi])
+        pi++
+    }
+    let tp = TProgram { items = all_items }
+    PreMono { prog = tp; table = types; diags = diags }
+}
+
+/**
+ * The checker's PRE-WALK product: the state the declaration-boundary item walk runs against, plus
+ * everything the six pre-walk passes had to say about the program.
+ *
+ * `cut` is the boundary verdict of docs/design/all-diagnostics-pre-walk-0.3.1.md §3 — true when a
+ * HARD pass (the signature walk, the DI registry, the stamped-instance registration) left the state
+ * it produces incomplete. The item walk must NOT run on a cut: it would type bodies against missing
+ * bindings and blame every caller for its callee's defect.
+ */
+type PreWalk = struct {
+    /** the fully stamped type table the item walk resolves against */
+    types: TypeTable
+    /** the sealed top-level environment the item walk types against */
+    env: Env
+    /** every pre-walk diagnostic, in pass order (source, then line, then column within a pass) */
+    diags: []str
+    /** did a HARD pass leave its produced state incomplete? */
+    cut: bool
+}
+
+/**
+ * Run the five pre-walk passes that follow collection and fold their diagnostics into ONE list, in
+ * pass order — the all-diagnostics ruling applied to the checker's pre-walk (issue #68).
+ *
+ * SOFT passes (`check_modules`, the DI overlay check) produce nothing the item walk reads, so their
+ * diagnostics travel WITH the item walk's and the build reports them together. HARD passes (the
+ * signature walk inside `col`, the DI registry, the stamped-instance registration) produce state a
+ * failure leaves incomplete, so each collects everything it can and then sets `cut`.
+ *
+ * @param program  the trait-folded, base-canonicalized program
+ * @param col      the collection pass's outcome (its two diagnostic classes come in with it)
+ * @return         the item walk's state, every pre-walk diagnostic, and the boundary verdict
+ * @since 0.3.1
+ */
+fn pre_walk(program: parser::Program, col: CollectOutcome) -> PreWalk {
+    let table = col.collected.types
+    let module_diags = check_modules(program, table)
+    let di = build_di_registry(program, table)
+    let overlay_diags = di_overlay_diags(program, di, table)
+    let types = instantiate_types(program, table)
+    let insts = register_instance_methods(col.collected.env, types)
+    mut diags = concat_diags(col.decl_diags, col.sig_diags)
+    diags = concat_diags(diags, module_diags)
+    diags = concat_diags(diags, di.diags)
+    diags = concat_diags(diags, overlay_diags)
+    diags = concat_diags(diags, insts.diags)
+    let cut = col.sig_diags.len > 0 || di.diags.len > 0 || insts.diags.len > 0
+    PreWalk { types = types; env = with_di(seal(insts.env), di.registry); diags = diags; cut = cut }
+}
+
+// THE TYPED ENTRY POINT: pass 1 (collect top-level names) + pass 2 (type each item).
+pub fn type_program(raw_program: parser::Program) -> TProgram | error {
+    // (TR0) FOLD trait derivations FIRST — every later stage (collect, conformance, typing,
+    // codegen layout, the VM) sees each deriver's already-folded body; a trait decl itself stays
+    // registered (for honest value-position/instantiation errors) but is never emitted.
+    let folded = fold_traits_collected(raw_program)
+    if folded.diags.len > 0 { return diags_error(folded.diags) }
+    let program = canon_class_bases(folded.program)
+    let pre = pre_walk(program, collect(program))
+    if pre.diags.len > 0 { return diags_error(pre.diags) }
+    let types = pre.types
+    let cenv = pre.env
+    mut items: []TItem = teko::list::empty()
+    mut mainbody: []TStatement = teko::list::empty()   // the loose top-level statements (the virtual-main), for label validation
+    mut cur = cenv   // threaded virtual-main scope: each loose binding extends it for the next statement (mirrors typer.c's `cur`)
+    mut i = 0
+    loop {
+        if i >= program.items.len { break }
+        let it = program.items[i]
+        // (#41) mirror typer.c (tk_type_program line 749: `cur.cur_ns = it.namespace;`): set the
+        // namespace being type-checked on the THREADED virtual-main scope BEFORE typing a loose
+        // top-level statement, so an UNQUALIFIED same-namespace call from main.tks (e.g.
+        // `use_counter(21)` resolving to a fn defined in another file of the same project) matches
+        // via lookup_call's `b.ns == env.cur_ns` clause. Without this, loose statements were typed
+        // with cur_ns="" (from env_empty) → cross-file top-level fns reported "unknown function".
+        // with_ns preserves cur's accumulated bindings (prior loose `let`s stay visible).
+        cur = with_ns(cur, it.namespace)
+        let ienv = with_ns(cenv, it.namespace)   // (#41) resolve this item's calls in its namespace
+        // W-loc-2: the item's source file + the decl's line:col, so a type error in the
+        // flattened program resolves to file:line:col (loose statements carry no loc → file only).
+        mut line: u32 = 0
+        mut col: u32 = 0
+        match it.content {
+            parser::Function as f => { line = f.line; col = f.col }
+            parser::TypeDecl as td => { line = td.line; col = td.col }
+            parser::ConstDecl as cd => { line = cd.line; col = cd.col }
+            _ => { }
+        }
+        // a loose top-level Statement is typed directly so its node also feeds the virtual-main's
+        // label validation below (mirrors typer.c's separate `mainbody` accumulator).
+        // (C1-POS/C1.8/E2) surface_at prefers the ERROR's own line/col over the item's (inner-expr
+        // position wins), bakes file:line:col into the message (diag_at fallback), sets the STRUCTURED
+        // file/line/col (err_loc) AND preserves expected/actual (err_typed) — mirror of typer.c's
+        // surface_at. The error value now carries those adornments per the E2 contract.
+        match it.content {
+            parser::Statement as s => {
+                // type with the THREADED scope `cur` (not the base env) so a loose `let args = …`
+                // is visible to the following statements; advance `cur` to the binding's env.
+                // `with_file` here and not only in `type_item`: a loose statement is typed on THIS
+                // path, which bypasses `type_item` entirely, so without it every warning raised
+                // from a virtual-main statement would name a line in no file (measured).
+                let ts = match type_statement(s, with_file(cur, it.file), types) {
+                    TypedStmt as x => x
+                    error as e => return surface_at(it.file, line, col, e)
+                }
+                items = teko::list::push(items, ts.node)
+                mainbody = teko::list::push(mainbody, ts.node)
+                cur = ts.env
+            }
+            _ => {
+                let ti = match type_item(it, ienv, types) {
+                    TItem as x => x
+                    error as e => return surface_at(it.file, line, col, e)
+                }
+                items = teko::list::push(items, ti)
+                // (OOP A1) a struct TypeDecl also contributes its METHOD bodies as extra items.
+                match it.content {
+                    parser::TypeDecl as td => {
+                        let mitems = match type_struct_methods(td, it.namespace, it.file, ienv, types) { []TItem as x => x; error as e => return e }
+                        mut mi2 = 0
+                        loop { if mi2 >= mitems.len { break }; items = teko::list::push(items, mitems[mi2]); mi2++ }
+                        let citems = match type_type_member_consts(td, it.namespace, it.file, ienv, types) { []TItem as x => x; error as e => return e }
+                        mut ci2 = 0
+                        loop { if ci2 >= citems.len { break }; items = teko::list::push(items, citems[ci2]); ci2++ }
+                    }
+                    _ => { }
+                }
+            }
+        }
+        i++
+    }
+    let lc = check_labels(mainbody, teko::list::empty(), false, teko::list::empty())   // W5-cf-2: validate labels in the virtual-main
+    if lc.failed { return error { message = lc.message } }
+    let tp = TProgram { items = items }
+    let mono = match monomorphize(tp, types) { TProgram as mp => mp; error as e => return e }
+    inline_consts(mono)
+}

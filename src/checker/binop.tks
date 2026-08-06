@@ -1,0 +1,195 @@
+// src/checker/binop.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+ * <op> 0` terms (comparison sugar). Each adjacent pair becomes a `cmp` call compared to zero; a
+ * chained comparison folds the terms with `&&`. Operands adopt the first operand's kind.
+ *
+ * @param first  the typed (bignum) first operand
+ * @param rest   the raw comparison terms (operator + untyped operand)
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @param kind   the bignum kind of the comparison
+ * @return       the typed bool expression, or a type error
+ * @throws       when an operand cannot adopt the kind or the chain is empty
+ */
+fn type_bignum_compare(first: TExpr, rest: []parser::CmpTerm, env: Env, table: TypeTable, kind: str) -> TExpr | error {
+    mut prev = match bignum_adopt_operand(first, kind) { TExpr as te => te; error as e => return e }
+    mut acc: TExpr | null = null
+    mut i = 0
+    loop {
+        if i >= rest.len { break }
+        let cur_raw = deref_ref_value(match type_expr(rest[i].operand, env, table) { TExpr as te => te; error as e => return e })
+        let cur = match bignum_adopt_operand(cur_raw, kind) { TExpr as te => te; error as e => return e }
+        mut cmp_args: []TExpr = teko::list::push(teko::list::empty(), prev)
+        cmp_args = teko::list::push(cmp_args, cur)
+        let cmp_call = bignum_call(kind, "cmp", cmp_args, Prim { kind = PrimKind::I64 })
+        let zero = TExpr { kind = TNumber { is_float = false; value = parser::numint_of_u64(0); fval = 0.0 }; type = Prim { kind = PrimKind::I64 }; line = 0; col = 0 }
+        let term = TCmpTerm { op = rest[i].op; operand = zero }
+        let one_cmp = TExpr { kind = TCompare { first = cmp_call; rest = teko::list::push(teko::list::empty(), term) }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
+        acc = combine_and(acc, one_cmp)
+        prev = cur
+        i = i + 1
+    }
+    match acc { TExpr as te => te; null => error { message = "a comparison needs at least one operator" } }
+}
+
+/**
+ * A pair of typed binary operands after literal-adoption normalization.
+ */
+type BinOperands = struct {
+    /** The left operand. */
+    l: TExpr
+    /** The right operand. */
+    r: TExpr
+}
+
+/**
+ * adopt_binop_operands — when a binary's operands differ only because one is an untyped numeric
+ * LITERAL, retype that literal to the other (non-literal) operand's type so `line + 1` / `n % 10`
+ * type-check (C6): the non-literal operand's type wins, and the literal node is rebuilt with it. The
+ * left operand takes priority when both would adopt. Already-equal or non-adoptable operands pass
+ * through unchanged.
+ *
+ * @param l  the typed left operand
+ * @param r  the typed right operand
+ * @return   the operands with a fitting literal retyped to its partner's type
+ */
+fn adopt_binop_operands(l: TExpr, r: TExpr) -> BinOperands {
+    if type_eq(l.type, r.type) { return BinOperands { l = l; r = r } }
+    if literal_adopts(l, r.type) { return BinOperands { l = TExpr { kind = l.kind; type = r.type; line = l.line; col = l.col }; r = r } }
+    if literal_adopts(r, l.type) { return BinOperands { l = l; r = TExpr { kind = r.kind; type = l.type; line = r.line; col = r.col } } }
+    BinOperands { l = l; r = r }
+}
+
+/**
+ * err_binop_type_mismatch — wrap a binary-operand type-mismatch with rendered expected/actual types
+ * so the driver prints "expected X, found Y" (mirrors expr.c type_binary's tk_error_types wrap;
+ * C1.8/E2).
+ *
+ * @param msg  the diagnostic message
+ * @param l    the left operand (renders as "expected")
+ * @param r    the right operand (renders as "actual")
+ * @return     the type-annotated error
+ */
+fn err_binop_type_mismatch(msg: str, l: TExpr, r: TExpr) -> error {
+    teko::error::err_typed(error { message = msg }, type_render(l.type), type_render(r.type))
+}
+
+/**
+ * type_shift_binop — type a shift (`<< >>`): integer operands only (no float bit-shifts — B.38); the
+ * result takes the left operand's type.
+ *
+ * @param op  the shift operator token
+ * @param l   the typed left operand
+ * @param r   the typed right operand
+ * @return    the typed shift expression, or a type error
+ * @throws    when either operand is not an integer
+ */
+fn type_shift_binop(op: lexer::TokenKind, l: TExpr, r: TExpr) -> TExpr | error {
+    if !is_integer(l.type) || !is_integer(r.type) { return error { message = "shift needs integer operands (no float bit-shifts — B.38)" } }
+    TExpr { kind = TBinary { op = op; left = l; right = r }; type = l.type; line = 0; col = 0 }
+}
+
+/**
+ * widen_int_binop — join two INTEGER operand types under the W-RULE (`int_arith_join`,
+ * `expr.tks`, §2.1/§2.2) and widen whichever side is narrower to the common result, or
+ * surface the honest "no lossless common type" stop when none exists. Shared by
+ * `type_arith_binop` and `type_bitwise_binop` (both integer-eligible operator classes) so
+ * `+ - * / % & | ^` complete the B.22 sign-check's arithmetic sibling identically.
+ *
+ * @param op  the binary operator token, carried through to the built `TBinary`
+ * @param l   the typed left operand (an integer `Prim`)
+ * @param r   the typed right operand (an integer `Prim`)
+ * @return    the typed binary expression at the W-RULE-joined width
+ * @throws    when `l.type` and `r.type` share no lossless common integer type (W-RULE §2.2 —
+ *            equal-width mixed sign, or the unsigned side equal-or-wider than the signed side)
+ */
+fn widen_int_binop(op: lexer::TokenKind, l: TExpr, r: TExpr) -> TExpr | error {
+    let joined = match int_arith_join(prim_kind_of(l.type), prim_kind_of(r.type)) {
+        PrimKind as k => k
+        error as e => return err_binop_type_mismatch(e.message, l, r)
+    }
+    let lw = widen_operand(l, joined)
+    let rw = widen_operand(r, joined)
+    TExpr { kind = TBinary { op = op; left = lw; right = rw }; type = Prim { kind = joined }; line = 0; col = 0 }
+}
+
+/**
+ * type_arith_binop — type an arithmetic operator (`+ - * /`) over the native numeric set (ints AND
+ * floats). Same-type operands take the fast identity path; different-width same-family operands
+ * (both integer, or both float) WIDEN under the W-RULE (`widen_int_binop` / `float_arith_join`,
+ * completing B.22 into arithmetic — `cast-width-hygiene-0.3.1.md` §2); a mixed-sign integer pair
+ * with no lossless common type, or a cross-family (int×float) pair, is an honest compile error
+ * demanding an explicit `to` (B.38 — int×float stays unchanged).
+ *
+ * @param op  the arithmetic operator token
+ * @param l   the typed left operand
+ * @param r   the typed right operand
+ * @return    the typed arithmetic expression, or a type error
+ * @throws    when the left operand is not numeric, the operands are int×float, or a mixed-sign
+ *            integer pair has no lossless common type (W-RULE §2.2)
+ */
+fn type_arith_binop(op: lexer::TokenKind, l: TExpr, r: TExpr) -> TExpr | error {
+    if !is_numeric(l.type) { return error { message = "arithmetic needs a numeric operand (int or float)" } }
+    if type_eq(l.type, r.type) { return TExpr { kind = TBinary { op = op; left = l; right = r }; type = l.type; line = 0; col = 0 } }
+    if is_integer(l.type) && is_integer(r.type) { return widen_int_binop(op, l, r) }
+    if is_float(l.type) && is_float(r.type) {
+        let joined = float_arith_join(prim_kind_of(l.type), prim_kind_of(r.type))
+        let lw = widen_operand(l, joined)
+        let rw = widen_operand(r, joined)
+        return TExpr { kind = TBinary { op = op; left = lw; right = rw }; type = Prim { kind = joined }; line = 0; col = 0 }
+    }
+    err_binop_type_mismatch("operands must be the same type (no promotion, no mixed int/float — B.22; use `to`)", l, r)
+}
+
+/**
+ * type_bitwise_binop — type a bitwise/remainder operator (`% & | ^`): integer operands only (not a
+ * float — B.38). Same-type operands take the fast identity path; different-width operands WIDEN
+ * under the W-RULE (`widen_int_binop`, completing B.22 into arithmetic — `cast-width-hygiene-
+ * 0.3.1.md` §2); a mixed-sign pair with no lossless common type is an honest compile error
+ * demanding an explicit `to`.
+ *
+ * @param op  the bitwise/remainder operator token
+ * @param l   the typed left operand
+ * @param r   the typed right operand
+ * @return    the typed expression, or a type error
+ * @throws    when the left operand is not an integer, the right operand is not an integer, or a
+ *            mixed-sign integer pair has no lossless common type (W-RULE §2.2)
+ */
+fn type_bitwise_binop(op: lexer::TokenKind, l: TExpr, r: TExpr) -> TExpr | error {
+    if !is_integer(l.type) { return error { message = "bitwise/remainder needs an integer (not a float — B.38)" } }
+    if type_eq(l.type, r.type) { return TExpr { kind = TBinary { op = op; left = l; right = r }; type = l.type; line = 0; col = 0 } }
+    if !is_integer(r.type) { return err_binop_type_mismatch("operands must be the same type (no promotion — B.22)", l, r) }
+    widen_int_binop(op, l, r)
+}
+
+/**
+ * type_logical_binop — type a logical operator (`&& ||`): bool operands, bool result, short-circuit
+ * (matches C + the VM).
+ *
+ * @param op  the logical operator token
+ * @param l   the typed left operand
+ * @param r   the typed right operand
+ * @return    the typed bool expression, or a type error
+ * @throws    when either operand is not a bool
+ */
+fn type_logical_binop(op: lexer::TokenKind, l: TExpr, r: TExpr) -> TExpr | error {
+    if !is_bool(l.type) || !is_bool(r.type) { return error { message = "logical `&&`/`||` need bool operands" } }
+    TExpr { kind = TBinary { op = op; left = l; right = r }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
+}
+
+/**
+ * type_binary — type a binary expression. Dispatches, in order: the `~` concat chain; the `bigint`/
+ * `dec` operator sugar (lowered to library calls); then the native operator classes — shift, arith
+ * (`+ - * /`), bitwise/remainder (`% & | ^`), and logical (`&& ||`). Operands are normalized so a
+ * fitting untyped numeric literal adopts its partner's type first (C6).
+ *
+ * @param b      the binary expression node
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       the typed binary (or lowered bignum call) expression, or a type error
+ * @throws       on a void operand, an incompatible operand type, or a non-binary operator
+ * @see          warn_redundant_cast — the D1 class-3 WARNING this emits in passing (never a failure)
+ */

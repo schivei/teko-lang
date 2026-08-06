@@ -1,0 +1,196 @@
+// src/checker/expr_access.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+    match ft {
+        Func as f => {
+            let dargs = if f.variadic { match pack_variadic_args(f, c.args, env, table) { []parser::Expr as x => x; error as e => return e } } else { match resolve_defargs(f, c.args, c.arg_names) { []parser::Expr as x => x; error as e => return e } }
+            if dargs.len != f.params.len { return error { message = "wrong number of arguments" } }
+            // Type every argument first (void rejected); strict-check / generic-infer below.
+            mut targs: []TExpr = teko::list::empty()
+            mut ti = 0
+            loop {
+                if ti >= dargs.len { break }
+                // (W10) a closure-literal ARG whose parameter is a concrete function type infers its
+                // un-annotated params from that target (ruling 3); other args type normally.
+                let is_lam = match dargs[ti].kind { parser::Lambda => true; _ => false }
+                let pt_is_func = match f.params[ti] { Func => true; _ => false }
+                // (W10b.D3) an ARRAY-literal ARG under a `[]<interface>` param types against the
+                // contract element too (heterogeneous `[]Shape` args), like the binding-annotation path.
+                let is_arr = match dargs[ti].kind { parser::ArrayLit => true; _ => false }
+                let iface_arr_target = is_arr && is_iface_slice(f.params[ti], table)
+                let a = if (is_lam && pt_is_func) || iface_arr_target || arg_wants_expected(dargs[ti], f.params[ti]) {
+                    match type_value_expected(dargs[ti], f.params[ti], env, table) { TExpr as te => te; error as e => return e }
+                } else {
+                    match type_expr(dargs[ti], env, table) { TExpr as te => te; error as e => return e }
+                }
+                if type_is_void(a.type) { return error { message = "a `void` expression cannot be passed as an argument (M.1)" } }
+                targs = teko::list::push(targs, a)
+                ti++
+            }
+            // (S4) GENERIC callee — the sig carries type-param Named's: INFER the type-params from the
+            // arg types and substitute into the return type for the call's result. The monomorph pass
+            // (post-typer) stamps the concrete instance and rewrites the callee. Type-params that appear
+            // only in the return type cannot be inferred from args (M.2 no-guessing) → honest error.
+            let all_tps = collect_sig_type_params(ft, table, teko::list::empty())
+            if all_tps.len > 0 {
+                mut param_tps: []str = teko::list::empty()
+                mut pp = 0
+                loop { if pp >= f.params.len { break }; param_tps = collect_sig_type_params(f.params[pp], table, param_tps); pp++ }
+                mut rk = 0
+                loop {
+                    if rk >= all_tps.len { break }
+                    if !is_type_param(all_tps[rk], param_tps) { return error { message = $"cannot infer type parameter {all_tps[rk]} — it appears only in the return type; annotate the call" } }
+                    rk++
+                }
+                mut s = Subst { params = param_tps; names = teko::list::empty(); types = teko::list::empty() }
+                mut gi = 0
+                loop {
+                    if gi >= targs.len { break }   // targs.len == f.params.len (arity checked above); bound by the typed-arg list
+                    s = match unify(f.params[gi], targs[gi].type, s, table) { Subst as x => x; error as e => return e }
+                    gi++
+                }
+                return TExpr { kind = TCall { callee = c.callee; args = targs; call_ns = resolved_ns; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = subst_type(f.ret, s); line = 0; col = 0 }
+            }
+            // NON-generic: each argument must WIDEN into the parameter's type (B.14 case→variant, T→T?)
+            // OR be a fitting literal that adopts it (C6) — same rule as binding/return/assign.
+            mut args: []TExpr = teko::list::empty()
+            mut i = 0
+            loop {
+                if i >= targs.len { break }
+                mut a = targs[i]
+                if !assignable_to(a.type, f.params[i], table) { a = deref_ref_value(a) }
+                // (MEM-1b-ii) AUTO-REF: a `ref<T>` param accepts a `mut` lvalue of the pointed type T —
+                // the compiler takes the reference (codegen emits `&`). Requires a `mut` variable (you
+                // can't reference an immutable binding — there'd be nothing to mutate). A value ALREADY
+                // of type `ref<T>` (e.g. forwarding a ref param) takes the normal assignable path below.
+                mut auto_reffed = false
+                match f.params[i] {
+                    Reference as rf => {
+                        if !assignable_to(a.type, f.params[i], table) && type_eq(a.type, rf.inner) {
+                            match a.kind {
+                                TVar as v => match lookup_binding(env, v.name) {
+                                    ValBinding as vb => {
+                                        if !vb.is_mut { return error { message = $"cannot take a reference to immutable `{v.name}` — declare it `mut` (a reference needs a mutable target)" } }
+                                        auto_reffed = true   // keep a.type = T; emit_call emits `&` (param is ref<T>)
+                                    }
+                                    error => return error { message = "auto-ref requires a mutable variable (a `mut` binding)" }
+                                }
+                                _ => return error { message = "a `ref<T>` argument must be a mutable variable (a `mut` binding) — only an lvalue can be referenced" }
+                            }
+                        }
+                    }
+                    _ => { }
+                }
+                if !auto_reffed {
+                    if !assignable_to(a.type, f.params[i], table) {
+                        // (C1.8/E2) attach expected/actual — THE user's reported mismatch (mirrors expr.c).
+                        match struct_iface_named_stop(a.type, f.params[i], table) { error as se => return se; null => { } }
+                        if !literal_adopts(a, f.params[i]) { return teko::error::err_typed(error { message = "argument type mismatch" }, type_render(f.params[i]), type_render(a.type)) }
+                        a = TExpr { kind = a.kind; type = f.params[i]; line = a.line; col = a.col }   // C6 literal adopts the param type
+                    } else {
+                        if !arg_keeps_narrow_type(f.params[i], a.type, table) {
+                            a = TExpr { kind = a.kind; type = f.params[i]; line = a.line; col = a.col }
+                        }
+                    }
+                }
+                args = teko::list::push(args, a)
+                i++
+            }
+            // (W10a) a CLOSURE call: the callee resolved IN-scope to a function type whose binding is a
+            // LOCAL (resolved_ns == "" — only define_fn sets a namespace). It is a `tk_closure` VALUE,
+            // so codegen calls through `((R(*)(A,B))f.fn)(args)` using the Func type for the cast.
+            let is_closure = in_scope && resolved_ns.len == 0
+            TExpr { kind = TCall { callee = c.callee; args = args; call_ns = resolved_ns; is_closure_call = is_closure; callee_type = ft; is_iface_dispatch = false; iface_slot = 0 }; type = f.ret; line = 0; col = 0 }
+        }
+        _ => error { message = $"not a function: {name}" }
+    }
+}
+
+// ---- cast `to` (C2): a DEFINED conversion is allowed; loss is caught, never silent (M.1) ----
+// Two-pronged — the ÷0/overflow/OOB lineage applied to conversions (homeostasis, Constitution §II):
+//   • a CONSTANT operand the compiler can see out of range → COMPILE ERROR (fail early — M.1);
+//   • a runtime value the compiler cannot see → the metal converts and the loss is caught at
+//     runtime (debug-panic / release-defined, exactly like overflow) — that guard is CODEGEN's,
+//     deferred (M.4). M.1 forbids only SILENT loss; a check/panic is not silent, so narrowing and
+//     signed↔unsigned ARE allowed (the value might fit — M.0 keeps the metal conversion).
+// Scoped to the seed's scalars: Bool casts and non-numeric casts are UNDEFINED (rejected). The
+// native numeric set (B.38) — int↔int (incl 128), int↔float, float↔float — is ALL defined: the
+// fit/loss is the runtime guard's (trunc toward zero, overflow/NaN/∞ → panic — §5). Decimal awaits
+// its runtime; newtype↔base awaits `resolve_named` lowering a newtype to its base — both deferred
+// (M.4). *(Redefines the early compile-forbid rule — see the Redefinitions Index; the prior rule
+// over-applied M.1, forbidding what a guard makes non-silent.)*
+
+/**
+ * numint_fits — does the signed-magnitude literal `v` fit the target integer prim `k`? (B.38 —
+ * the full int set is now u8..u64/i8..i64, the 128-bit surface types having been removed,
+ * drop-128 2026-07-24.) Replaces the old i128-carrier `value_fits` (carrier-detoxed off i128,
+ * §2.1). Floats are handled separately (`float_fits`); Bool is never a literal target. An
+ * unsigned target rejects a negative `v` first, then gates the magnitude against its max; a
+ * signed target gates the magnitude against its positive max (non-negative `v`) or against
+ * `2^(w-1)` (negative `v` — the extra headroom that admits e.g. `i8::MIN = -128`, magnitude 128).
+ *
+ * @param v  the resolved literal carrier
+ * @param k  the target integer prim kind
+ * @return   true iff `v` is representable in `k`
+ */
+fn numint_fits(v: parser::NumInt, k: PrimKind) -> bool {
+    if prim_is_float(k) { return false }   // an int literal does not fit a float type (N1/N2)
+    if k == PrimKind::U8 { return !v.neg && v.mag <= 255 }
+    if k == PrimKind::U16 { return !v.neg && v.mag <= 65535 }
+    if k == PrimKind::U32 { return !v.neg && v.mag <= 4294967295 }
+    if k == PrimKind::U64 { return !v.neg && v.mag <= 18446744073709551615 }
+    if k == PrimKind::I8 { return if v.neg { v.mag <= 128 } else { v.mag <= 127 } }
+    if k == PrimKind::I16 { return if v.neg { v.mag <= 32768 } else { v.mag <= 32767 } }
+    if k == PrimKind::I32 { return if v.neg { v.mag <= 2147483648 } else { v.mag <= 2147483647 } }
+    if k == PrimKind::I64 { return if v.neg { v.mag <= 9223372036854775808 } else { v.mag <= 9223372036854775807 } }
+    false
+}
+
+/**
+ * float_fits — does a constant FLOAT literal fit the target float prim? Seed ruling (§5): a
+ * float constant is accepted into ANY float width — precision/range loss of float CONSTANTS is
+ * permissive for now (the runtime/codegen rounding-loss note in §5 still applies). Tightening
+ * `f32` over-range to a compile error is deferred (no fail-early for float consts yet).
+ *
+ * @param v  the constant float value (unused — every width currently accepts any value)
+ * @param k  the target float prim kind
+ * @return   whether `k` is a float prim
+ */
+fn float_fits(v: f64, k: PrimKind) -> bool { prim_is_float(k) }
+
+// is `from -> to` a DEFINED conversion? Any integer↔integer is (the loss is runtime/codegen's,
+// not a type error — B). Only genuinely-undefined conversions are rejected: Bool, and crossing
+// to/from a non-numeric type. M.1 — no silent loss; M.3 — names the barrier. Reused by the
+// counter-validation (E6-2) so the rule has ONE source of truth (M.5).
+// byte casts AS u8 (B.36 "byte = u8 newtype"): byte's values ARE u8 values, so the effective
+// PrimKind for range/cast rules is U8. Bool and non-numeric types have no cast kind (rejected).
+// One source of truth (M.5) for cast_check + const_range_check.
+fn cast_kind(t: Type) -> PrimKind | error {
+    match t {
+        Prim as p => {
+            if p.kind == PrimKind::Bool { error { message = "bool casts are not defined in the seed" } }
+            else { p.kind }
+        }
+        Byte => PrimKind::U8
+        _ => error { message = "cast not defined for this type in the seed (Named/Str/Slice/… — pending)" }
+    }
+}
+
+// is `from -> to` a DEFINED conversion? Any integer/byte ↔ integer/byte is (the loss is
+// runtime/codegen's — B; byte casts AS u8 — B.36). Only Bool and non-numeric ends are rejected.
+// Reused by the counter-validation (E6-2) — ONE source of truth (M.5).
+fn cast_check(from: Type, to: Type) -> error | null {
+    if type_eq(from, to) { return null }   // same type — a no-op
+    match cast_kind(from) { PrimKind => { }; error as e => return e }
+    match cast_kind(to) { PrimKind => { }; error as e => return e }
+    null   // any numeric/byte → any numeric/byte is defined (B; byte AS u8)
+}
+
+/**
+ * const_range_check — a CONSTANT literal already out of the target's range is a compile error
+ * (M.1 — fail early); non-constant operands are guarded at runtime by codegen. Direct literals
+ * only (comptime folding deferred). Only the int-literal → int-target case is statically
+ * range-checkable (B.38, u8..u64/i8..i64); float→int / int→float / float→float constant
+ * conversions are runtime-guarded (trunc toward zero, overflow/NaN/∞ → panic — §5) — the checker

@@ -1,0 +1,195 @@
+// src/checker/special_forms.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+/**
+ * type_adopt — type-check an `adopt [name] { … }` block in void context. The body is an ordinary
+ * control-flow block (return/break/continue and nested `adopt` are ALL allowed — no defer-style
+ * rejection), typed via type_block so its bindings are scoped inside and don't leak `env`. The
+ * bound name is a codegen/region label; it introduces no binding into `env` in this increment.
+ *
+ * @param parser::AdoptStmt a  the parsed AdoptStmt
+ * @param Env env  the enclosing type environment (unchanged on return — the body is scoped)
+ * @param TypeTable table  the program type table
+ * @return TypedStmt | error  the typed statement, or a type error propagated from the body
+ */
+fn type_adopt(a: parser::AdoptStmt, env: Env, table: TypeTable) -> TypedStmt | error {
+    let tb = match type_block(a.body, env, table) { TypedBlock as x => x; error as e => return e }
+    TypedStmt { node = TAdoptStmt { name = a.name; body = tb.stmts }; env = env }
+}
+
+// ---- items + program (the evolved check_function/check_item/check_program — E5c) ----
+
+// the resolved return type: the annotation if present, else void (no `-> ret` — M.3).
+// (#109 W1) `ref_ns` = the function's declaring namespace; unused until W2's R0-R5 rules.
+fn function_return(f: parser::Function, table: TypeTable, ref_ns: str) -> Type | error {
+    if !f.has_return { return Void { } }
+    resolve_type(f.return_type, table, ref_ns)
+}
+
+// ---- C5 (DEFER scope): `return`/final-expr vs the declared return type ----
+// Every `return e` reachable as a statement must yield the declared return type, and — when the
+// body's trailing statement is an expression — that value too. A `return <member>` into a variant
+// return type is admissible (B.14 — a member is automatically the union, no cast). The FULL
+// "every path yields a value" guarantee (divergence/definite-return analysis) is a SEPARATE later
+// item (M.4): a body ending in a diverging `loop`/`if`/`match` makes NO trailing-value claim here,
+// so the seed's value-fns that end in a breakless `loop` (exits are inner `return`s) are NOT
+// false-rejected. (Lives in the typed pass — the producer; the superseded `check_*` layer is not
+// dual-walked — see the check_*/type_* duplication note in "Próximas etapas".)
+
+// is a value of type `from` admissible where `to` is expected? (B.14 — variant member inclusion.)
+// The widening rule is now the single source of truth in resolve.tks (widens_into), shared with
+// the match/`if` arm JOIN (type_join) so the binding/return/assign checks and arm unification can
+// never drift apart. A case widens into a named variant (`let s: Shape = Circle { … }`), a nested
+// case widens transitively, and `T` widens into `T?`.
+fn assignable_to(from: Type, to: Type, table: TypeTable) -> bool { widens_into(from, to, table) }
+
+/** arg_keeps_narrow_type — an argument that WIDENS into a parameter type `pt` normally ADOPTS `pt`
+    (its TExpr.type is rewritten to `pt`); but where the EMIT wraps the value at the use site, the
+    arg must KEEP its narrow `arg_type` so codegen/VM see the concrete value they must wrap. True for:
+    a case→variant widen (emit_as tags the union), a bare `T`→`T?` widen (present-wrap), a class→
+    interface/base upcast (fat-pointer build), and a `[]E_a`→`[]E_p` element widen where `E_a != E_p`
+    (the slice is REBUILT element-wise — bare `[]i64`→`[]i64?` or covariant `[]Return`→`[]Statement`;
+    #265: the native gate cc-compiles these for the first time, so a widened arg-type would hide the
+    element mismatch and cc would reject the distinct `tk_slice_*` struct). */
+fn arg_keeps_narrow_type(pt: Type, arg_type: Type, table: TypeTable) -> bool {
+    let pt_is_variant = match expand_variant(pt, table) { Variant => true; _ => false }
+    if pt_is_variant { return true }
+    let pt_is_opt = match pt { Optional => true; _ => false }
+    let arg_is_opt = match arg_type { Optional => true; _ => false }
+    if pt_is_opt && !arg_is_opt { return true }
+    if arg_class_upcast(pt, arg_type, table) { return true }
+    slice_element_widens(pt, arg_type)
+}
+
+/** arg_class_upcast — the param is an interface, (TR1) a trait, or a polymorphic base and the arg is
+    a DIFFERENT-named class conforming to it (a fat-pointer upcast the emit builds from the narrow
+    class). (#265) */
+fn arg_class_upcast(pt: Type, arg_type: Type, table: TypeTable) -> bool {
+    match pt {
+        Named as ptn => match arg_type {
+            Named as atn => (is_interface_name(ptn.name, table) || is_trait_name(ptn.name, table) || is_polymorphic_base(ptn.name, table)) && is_class_name(atn.name, table) && ptn.name != atn.name
+            _ => false
+        }
+        _ => false
+    }
+}
+
+/** slice_element_widens — both types are slices whose ELEMENTS differ (`[]E_a` → `[]E_p`, `E_a != E_p`):
+    a bare→optional element widen or a covariant case→variant element widen. The emit rebuilds the
+    slice element-wise, so the arg must keep its narrow `[]E_a` type for codegen to see the mismatch.
+    A SENTINEL empty slice (`teko::list::empty()`, element = `void`) is EXCLUDED — it carries no
+    concrete element, so it ADOPTS the param's concrete slice type (collections #4) as before. */
+fn slice_element_widens(pt: Type, arg_type: Type) -> bool {
+    match pt {
+        Slice as ps => match arg_type {
+            Slice as as_ => !type_is_void(as_.element) && !type_eq(ps.element, as_.element)
+            _ => false
+        }
+        _ => false
+    }
+}
+
+// check every `return` reachable as a statement (descend into loop bodies and `if`-blocks;
+// match-arm returns await the divergence item — arm bodies are expressions, not statements).
+fn check_returns(stmts: []TStatement, ret: Type, table: TypeTable) -> error | null {
+    mut i = 0
+    loop {
+        if i >= stmts.len { break }
+        match check_return_stmt(stmts[i], ret, table) { null => { }; error as e => return e }
+        i++
+    }
+    null
+}
+
+// the trailing value-expr of a block (its last statement, when that is an expr-statement),
+// or null. (C: tblock_trailing.)
+fn tblock_trailing(stmts: []TStatement) -> TExpr | null {
+    if stmts.len == 0 { return null }
+    match stmts[stmts.len - 1] {
+        TExprStmt as es => es.expr
+        _ => null
+    }
+}
+
+// the block's trailing value-expr IF it is a numeric literal (else null) — for the if/match
+// literal cross-adoption (a `64` branch adopts a sibling's numeric type). (C: tl/el + NUMBER tag.)
+fn trailing_number(stmts: []TStatement) -> TExpr | null {
+    match tblock_trailing(stmts) {
+        TExpr as t => match t.kind { TNumber => t; _ => null }
+        null => null
+    }
+}
+
+/**
+ * Does a numeric literal `n` fit the scalar destination `m` — an int/float prim it fits, or `byte`
+ * (= u8, B.36)? A bool or non-numeric `m` (`cast_kind` rejects it) never fits. The single-member
+ * fit test shared by the scalar and union arms of `literal_adopts`/`retype_literal`.
+ *
+ * @param n  the typed numeric-literal payload (its value/float flavor and magnitude)
+ * @param m  the candidate destination scalar type
+ * @return   true iff `n` is representable in `m` under the same range rules as a binding
+ */
+fn number_fits_member(n: TNumber, m: Type) -> bool {
+    match cast_kind(m) {
+        PrimKind as k => {
+            if n.is_float { prim_is_float(k) && float_fits(n.fval, k) }
+            else { prim_is_int(k) && numint_fits(n.value, k) }
+        }
+        error => false
+    }
+}
+
+/**
+ * The lone union MEMBER a numeric literal unambiguously adopts (C2b). A literal distributes over a
+ * union only when EXACTLY ONE member is a numeric prim/byte it fits: zero fitting members means the
+ * union takes no bare literal, and two or more (e.g. an `i8 | i32` both admitting `1`) are ambiguous
+ * — both require an explicit type, so neither adopts. Returns that sole member, else `error`.
+ *
+ * @param n        the typed numeric-literal payload
+ * @param members  the union's member types
+ * @return         the single fitting numeric member, or `error` when zero or ≥2 fit
+ * @throws         when no member fits or more than one does (the ambiguous/absent cases)
+ */
+fn union_sole_numeric_member(n: TNumber, members: []Type) -> Type | error {
+    mut found: Type = Void { }
+    mut count = 0
+    mut i = 0
+    loop {
+        if i >= members.len { break }
+        if number_fits_member(n, members[i]) { found = members[i]; count = count + 1 }
+        i++
+    }
+    if count == 1 { found } else { error { message = "not exactly one numeric union member fits the literal" } }
+}
+
+/**
+ * Does a union list the `null` member — the destination a bare `null` literal adopts (C2b)? A set
+ * membership test over the union's members, order-independent (the null-first canonical order is
+ * incidental).
+ *
+ * @param members  the union's member types
+ * @return         true iff one member is the `Null` unit type
+ */
+fn union_lists_null(members: []Type) -> bool {
+    mut i = 0
+    loop {
+        if i >= members.len { break }
+        match members[i] { Null => return true; _ => { } }
+        i++
+    }
+    false
+}
+
+/**
+ * C6/C2b — does a fitting LITERAL adopt the destination `to` (a return value, trailing expr, binding,
+ * argument, or struct-field slot)? A numeric literal adopts an int/float prim it fits or `byte`
+ * (B.36); into a UNION it adopts the sole numeric member it fits (C2b — ambiguous ≥2 does not). A
+ * bare `null` adopts a union listing `null` (or `Null` itself). RECURSES through a `match`/`if` whose
+ * every contributing arm trails an adopting literal (so `match k { U8 => 8; … } : u32` adopts, and
+ * `if b { 1 } else { null } : i32 | null` distributes each leaf over the same union). An empty/all-
+ * fitting array literal adopts a `[]E` slot element-wise.
+ *
+ * @param e   the typed literal (or `if`/`match`/array composite whose leaves are literals)
+ * @param to  the destination type the literal is checked against

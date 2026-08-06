@@ -1,0 +1,196 @@
+// src/checker/return_defer.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+ * @param pattern   the calendar pattern captured from the static spec
+ * @param env       the current typing environment
+ * @param table     the resolved type table
+ * @return          the typed `to_string` call, or a checker error if it does not resolve
+ */
+fn desugar_datetime_hole(raw_hole: parser::Expr, hole_ns: str, fn_name: str, pattern: str, env: Env, table: TypeTable) -> TExpr | error {
+    mut segs: []parser::Segment = teko::list::empty()
+    if hole_ns != "" {
+        mut qi: u64 = 0
+        mut seg_start: u64 = 0
+        loop {
+            if qi + 1 >= hole_ns.len { break }
+            if hole_ns[qi] == b':' && hole_ns[qi + 1] == b':' {
+                segs = teko::list::push(segs, parser::Segment { name = teko::str::slice(hole_ns, seg_start, qi) })
+                qi = qi + 2
+                seg_start = qi
+            } else { qi++ }
+        }
+        segs = teko::list::push(segs, parser::Segment { name = teko::str::slice_from(hole_ns, seg_start) })
+    }
+    segs = teko::list::push(segs, parser::Segment { name = fn_name })
+    let pat_expr = parser::Expr { kind = parser::StrLit { text = pattern }; line = 0; col = 0 }
+    mut args: []parser::Expr = teko::list::push(teko::list::empty(), raw_hole)
+    args = teko::list::push(args, pat_expr)
+    mut arg_names: []str = teko::list::push(teko::list::empty(), "")
+    arg_names = teko::list::push(arg_names, "")
+    let call = parser::Call { callee = parser::Path { segments = segs }; args = args; arg_names = arg_names; type_args = teko::list::empty() }
+    type_call(call, env, table)
+}
+
+fn type_interp(in: parser::Interp, env: Env, table: TypeTable) -> TExpr | error {
+    mut holes: []TExpr = teko::list::empty()
+    mut specs: []TFSpec = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= in.holes.len { break }
+        let h = match type_expr(in.holes[i], env, table) { TExpr as te => te; error as e => return e }
+        let dt_fmt = datetime_formatter_of(h.type)
+        if dt_fmt != "" && i < in.specs.len {
+            match in.specs[i].kind {
+                parser::FSpecStatic as fs => {
+                    let hole_ns = match h.type { Named as n => name_qualifier(n.name); _ => "" }
+                    let dh = match desugar_datetime_hole(in.holes[i], hole_ns, dt_fmt, fs.s, env, table) { TExpr as te => te; error as e => return e }
+                    holes = teko::list::push(holes, dh)
+                    specs = teko::list::push(specs, TFSpec { kind = TFSpecNone { } })
+                    i++
+                    continue
+                }
+                _ => { }
+            }
+        }
+        if !is_interp_formattable(h.type) {
+            return error { message = "interpolation hole type not supported in ROUND 0 (must be str/char/bool/byte/error/int/float)" }
+        }
+        holes = teko::list::push(holes, h)
+        // type-check format spec if present
+        if i < in.specs.len {
+            let raw_sp = in.specs[i]
+            let typed_sp = match raw_sp.kind {
+                parser::FSpecNone => TFSpec { kind = TFSpecNone { } }
+                parser::FSpecStatic as fs => {
+                    if !interp_is_numeric(h.type) {
+                        return error { message = "format spec requires a numeric hole (int or float)" }
+                    }
+                    TFSpec { kind = TFSpecStatic { s = fs.s } }
+                }
+                parser::FSpecDynamic as fd => {
+                    if !interp_is_numeric(h.type) {
+                        return error { message = "format spec requires a numeric hole (int or float)" }
+                    }
+                    mut dyn_args: []TExpr = teko::list::empty()
+                    mut k = 0
+                    loop {
+                        if k >= fd.args.len { break }
+                        let da = match type_expr(fd.args[k], env, table) { TExpr as te => te; error as e => return e }
+                        match da.type { Str => { }; _ => return error { message = "dynamic format spec argument must be str" } }
+                        dyn_args = teko::list::push(dyn_args, da)
+                        k++
+                    }
+                    TFSpec { kind = TFSpecDynamic { args = dyn_args } }
+                }
+            }
+            specs = teko::list::push(specs, typed_sp)
+        } else {
+            specs = teko::list::push(specs, TFSpec { kind = TFSpecNone { } })
+        }
+        i++
+    }
+    TExpr { kind = TInterp { pieces = in.pieces; holes = holes; specs = specs }; type = Str { }; line = 0; col = 0 }
+}
+
+// <expr> in [ e0, e1, … ] (Phase 2) — membership test. Type the lhs ONCE; require each element
+// be COMPARABLE to the lhs (the SAME is_comparable rule used by `==`/compare — B.22), since the
+// runtime is `lhs == e0 || lhs == e1 || …`. The empty set `x in []` is allowed (result is still
+// bool — always false). The node's `.type` is bool. C twin: type_in in expr.c.
+fn type_in(n: parser::InExpr, env: Env, table: TypeTable) -> TExpr | error {
+    let lhs = match type_expr(n.lhs, env, table) { TExpr as te => te; error as e => return e }
+    if type_is_void(lhs.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
+    // (MEM Step 0, R4) ESCAPE GATE — `in` has its own element path (it does NOT build an ArrayLit),
+    // so the literal-form gate doesn't reach it. A reference may not be an `in` operand (lhs or set
+    // element): the [a, b] set is a value-position collection of refs. Mirror in expr.c::type_in.
+    if type_contains_ref(lhs.type) { return error { message = "a reference cannot be stored in a struct/variant/collection" } }
+    mut elems: []TExpr = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= n.elems.len { break }
+        let el = match type_expr(n.elems[i], env, table) { TExpr as te => te; error as e => return e }
+        if type_is_void(el.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
+        if type_contains_ref(el.type) { return error { message = "a reference cannot be stored in a struct/variant/collection" } }
+        if !is_comparable(lhs.type, el.type) { return error { message = "`in` element is not comparable to the left-hand operand" } }
+        elems = teko::list::push(elems, el)
+        i++
+    }
+    TExpr { kind = TInExpr { lhs = lhs; elems = elems }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
+}
+
+// `[ e0, e1, … ]` (Increment B+): type every element, UNIFY to a common element type T (widening —
+// a case joins into its variant; sibling cases → their union), result `[]T`. An empty `[]` yields
+// the SENTINEL `[]Void` — exactly like `teko::list::empty()` — so a binding annotation (`: []T`)
+// adopts it and a bare unannotated `[]` is rejected by type_binding (collections #4). Spread
+// elements (`..xs`) must type as `[]T`; their element type T is widened into the unified element.
+// C twin: type_array_lit in expr.c.
+fn type_array_lit(a: parser::ArrayLit, env: Env, table: TypeTable) -> TExpr | error {
+    mut elems: []TArrayElem = teko::list::empty()
+    mut et: Type = Void { }   // sentinel for an empty `[]` (no inferable element)
+    mut i = 0
+    loop {
+        if i >= a.elements.len { break }
+        let ae = a.elements[i]
+        let el = match type_expr(ae.expr, env, table) { TExpr as te => te; error as e => return e }
+        if ae.is_spread {
+            // spread element: expr must be a `[]T` slice; contribute T as the element type
+            let spread_elem = match el.type {
+                Slice as s => s.element
+                _ => return error { message = "a spread element (`..xs`) must be a slice (`[]T`)" }
+            }
+            if type_is_void(spread_elem) { return error { message = "a spread element cannot be an untyped empty slice" } }
+            if type_is_void(et) { et = spread_elem } else { et = type_join(et, spread_elem, table) }
+        } else {
+            // plain element: original logic
+            if type_is_void(el.type) { return error { message = "a `void` expression cannot be an array element (M.1)" } }
+            if type_is_void(et) { et = el.type } else { et = type_join(et, el.type, table) }
+        }
+        elems = teko::list::push(elems, TArrayElem { is_spread = ae.is_spread; expr = el })
+        i++
+    }
+    // (MEM Step 0, R4) ESCAPE GATE — an INFERRED element type may not carry a reference. The
+    // annotated form `let xs: []Ref<T> = …` is already rejected in resolve, but the inferred
+    // element here (e.g. `[r, r]`) only surfaces now. This also rejects `a in [a, b]` (its `[a, b]`).
+    if type_contains_ref(et) { return error { message = "a reference cannot be stored in a struct/variant/collection" } }
+    // (#83) CONCRETIZE any sibling element still carrying a SENTINEL now that `et` (the join across
+    // every element) is settled. `[[], [1]]`'s inner `[]` types as `[]Void` on its own (this fn's
+    // own empty-array case, above); type_join now correctly folds `et` to the CONCRETE `[]i64`
+    // (the #83 fix), but the individual element's own `TExpr.type` is untouched — it still says
+    // `[]Void`, and codegen's array-literal case reads the element type OFF THE NODE ITSELF (not
+    // the parent's contribution), so it would still honest-stop. Retype every element whose type
+    // is a (possibly nested) sentinel form of the now-concrete `et` — same mechanism as the
+    // `push(empty(), x)` base-concretization in type_list_builtin above. Only fires when the
+    // element's type is type_eq to et (permissive-equal) AND actually carries a sentinel; a
+    // genuinely-narrower case that WIDENS into a wider et (e.g. a case into a declared variant) is
+    // left alone — codegen's emit_as wraps that at the use site instead.
+    let final_elems = if a.elements.len != 0 && !type_has_sentinel(et) {
+        mut out: []TArrayElem = teko::list::empty()
+        mut j = 0
+        loop {
+            if j >= elems.len { break }
+            let ael = elems[j]
+            let retyped = !ael.is_spread && type_has_sentinel(ael.expr.type) && type_eq(ael.expr.type, et)
+            out = teko::list::push(out, if retyped {
+                    TArrayElem { is_spread = ael.is_spread; expr = TExpr { kind = ael.expr.kind; type = et; line = ael.expr.line; col = ael.expr.col } }
+                } else {
+                    ael
+            })
+            j++
+        }
+        out
+    } else {
+        elems
+    }
+    TExpr { kind = TArrayLit { elements = final_elems }; type = Slice { element = et }; line = 0; col = 0 }
+}
+
+/**
+ * member_const_symbol — the deterministic internal name a type-member const is hoisted under and a
+ * `TypeName::NAME` reference resolves to (#594 crumb 7): the owning type's CANONICAL name joined to
+ * the member by `::`. The hoist pass (`type_type_member_consts`) and the resolver (`find_member_const`)
+ * both compute it from the SAME canonical type name, so a scalar reference matches the inliner's
+ * substitution table and an aggregate reference matches the interned rodata symbol.
+ *
+ * @param type_canonical  the owning type's canonical (`ns::Name`) identity
+ * @param member          the member const's own name

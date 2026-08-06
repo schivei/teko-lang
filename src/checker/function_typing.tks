@@ -1,0 +1,195 @@
+// src/checker/function_typing.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+/**
+ * Gate a `TBinding`: a bare-`Reference`-bound `SimpleName`, OR a `Ref<T> | null`-bound `SimpleName`
+ * whose initializer is itself a live reference (a `&x` borrow or a ref-param alias — null-union C5
+ * lifting the "references are parameter-only" restriction for the two-member ref-null shape), is a
+ * ref-to-local; the spine must prove the borrow's referent outlives it. A `Ref<T> | null` local
+ * initialized to `null` borrows nothing and cannot dangle, so it is admitted without an outlives
+ * proof. A destructure names no single ref cell.
+ *
+ * @param b      the typed binding
+ * @param spine  the function's spine fact
+ * @return       null when sound, else the R5 reject error
+ * @throws       error when the ref-to-local's referent does not provably outlive the borrow
+ */
+fn check_ref_bind_storable(b: TBinding, spine: Spine) -> error | null {
+    let is_ref_bind = match b.bound {
+        Reference => true
+        _ => is_ref_null_variant(b.bound) && type_contains_ref(b.value.type)
+    }
+    if !is_ref_bind { return null }
+    match b.target {
+        parser::SimpleName as sn => ref_borrow_or_error(spine, sn.name, b.value)
+        parser::DestructurePattern => null
+    }
+}
+
+/**
+ * Gate a `TAssign`: only a bare-`Reference` simple-name reassign is a ref-to-local; a field / deref
+ * write names no single ref-to-local pair.
+ *
+ * @param TAssign a  the typed assignment
+ * @param Spine spine  the function's spine fact
+ * @return error?  null when sound, else the reject error
+ */
+fn check_ref_assign_storable(a: TAssign, spine: Spine) -> error | null {
+    match a.kind {
+        parser::AssignKind::Simple => match a.bound { Reference => ref_borrow_or_error(spine, a.name, a.value); _ => null }
+        _ => null
+    }
+}
+
+/**
+ * The referent NAME a local ref-bind's RHS names: the borrowed local `x` of an explicit `&x`
+ * (`TBorrow` — the F1.3 borrow site) whose operand is a bare `TVar`, else the aliased source of a
+ * bare `Reference`-param read (`alias_src_name`). "" when the RHS names no single referent (an
+ * `if`/`match`/call/non-lvalue borrow), yielding a conservative `cell_of == -1` reject.
+ *
+ * @param TExpr value  the ref-bind's typed RHS
+ * @return str  the referent local's name, or "" when the RHS names none
+ */
+fn ref_bind_referent_name(value: TExpr) -> str {
+    match value.kind {
+        TBorrow as tb => match tb.operand.kind {
+            TVar as v => v.name
+            _ => ""
+        }
+        _ => alias_src_name(value)
+    }
+}
+
+/**
+ * The core spine query for one ref-to-local site: ADMIT iff `ref_target_outlives(borrow = the storage
+ * local's cell, referent = the RHS source cell)` holds. The bf writer set `bf[borrow]` to `BfParam`
+ * (a `Reference`-param alias `let r = p`) or `BfLocal` (an explicit `&x` borrow, F1.3) so the tag is
+ * meaningful; an un-nameable RHS or an un-found cell (`cell_of == -1`) is a conservative reject with
+ * the UNCHANGED R5 diagnostic (no fixture drift).
+ *
+ * @param Spine spine  the function's spine fact
+ * @param str target  the ref-to-local binding/assign's storage local name
+ * @param TExpr value  the RHS expression (its borrowed / aliased local name is the referent)
+ * @return error?  null when the borrow provably outlives, else the R5 reject error
+ */
+fn ref_borrow_or_error(spine: Spine, target: str, value: TExpr) -> error | null {
+    let borrow = cell_of(spine, target)
+    let referent = cell_of(spine, ref_bind_referent_name(value))
+    if borrow >= 0 {
+        if referent >= 0 {
+            if ref_target_outlives(spine, borrow to u32, referent to u32) { return null }
+        }
+    }
+    error { message = "a reference cannot be bound to a local (parameter-only in this version)" }
+}
+
+/**
+ * Type-checks a top-level namespace FUNCTION's body, producing the fully typed `TFunction` item
+ * (an `extern` declaration is bodyless and returns early with an empty body — its return/param
+ * marshalling is still validated).
+ *
+ * @param parser::Function f  the function to type-check
+ * @param Env env  the typing environment
+ * @param TypeTable table  the folded type table
+ * @return TFunction | error  the typed function
+ * @throws bad return/trailing value, a label failure, (U2, §2) a param/return/local of unsafe
+ *         type when `f` itself is not `unsafe` — a top-level fn has no owner to OR in (unlike a
+ *         method, see `type_method`), so only `f.is_unsafe` itself governs — or (#453) an
+ *         `#arena_size(N)` directive on an `unsafe fn` (the directive is non-`unsafe` by ruling)
+ */
+fn type_function(f: parser::Function, env: Env, table: TypeTable) -> TFunction | error {
+    if f.has_arena_size && f.is_unsafe {
+        return error { message = "`#arena_size(N)` may not precede an `unsafe fn` — the directive is non-unsafe by ruling (#453)" }
+    }
+    mut local = with_fn_unsafe(env, f.is_unsafe)
+    let tbl = type_param_table(f.type_params, f.type_constraints, "", table)   // (S4) the fn's generic type-params, opaque, in scope
+    let is_teko_rt = f.is_extern && f.from_lib == "teko_rt"   // C7.2: bypass for Teko's own runtime
+    mut i = 0
+    loop {
+        if i >= f.params.len { break }
+        if !f.params[i].has_type && f.params[i].name == "_" {
+            return error { message = "a `_` discard parameter is only allowed when implementing an interface method or overriding a base method — a plain function must name its parameters" }
+        }
+        let pt = match resolve_type(f.params[i].type_ann, tbl, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the fn's enclosing namespace
+        if f.is_extern {
+            if is_teko_rt {
+                if !teko_rt_type_ok(pt) {
+                    return error { message = "a `teko_rt` extern function parameter must be a primitive, `str`, slice, variant, or optional (C7.2)" }
+                }
+            } else {
+                if !extern_type_ok(pt, table) {
+                    return error { message = "an `extern` function parameter must be a primitive (int/float/bool), `byte`, `ptr`, `uptr`, or an `extern type` handle (C7.1a)" }
+                }
+            }
+        }
+        local = define(local, f.params[i].name, pt, false)   // params are immutable (B.21)
+        i++
+    }
+    if f.has_inject {
+        local = match seed_di_injects(f, local, tbl) { Env as e => e; error as e => return e }
+    }
+    let ret = match function_return(f, tbl, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the fn's enclosing namespace
+    if is_ref_null_variant(ret) { return error { message = "a function cannot return an optional reference (`Ref<T> | null`) — references are pass-down only (R3)" } }
+    if f.is_extern {
+        // an extern is a bodyless foreign declaration (no body to check / return-analyze).
+        // Validate the return marshals (void = no value is fine; else prim/byte only for now).
+        let ret_ok = if is_teko_rt {
+            teko_rt_type_ok(ret)
+        } else {
+            match ret { Void => true; _ => extern_type_ok(ret, table) }
+        }
+        if !ret_ok {
+            return error { message = "an `extern` function return must be a primitive (int/float/bool), `byte`, `ptr`, `uptr`, an `extern type` handle, or absent (C7.1a)" }
+        }
+        let no_body: []TStatement = teko::list::empty()
+        return TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = ret; body = no_body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = true; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
+    }
+    let tb = match type_block(f.body, local, tbl) { TypedBlock as bk => bk; error as e => return e }
+    match check_returns(tb.stmts, ret, table) { null => { }; error as e => return e }   // C5: each `return e` matches `ret`
+    match check_trailing_value(tb.stmts, ret, table) { null => { }; error as e => return e }   // C5: trailing value (when present) matches
+    match ret { Reference => match check_ref_return_passdown(tb.stmts, collect_ref_param_names(f.params, tbl, env.cur_ns)) { null => { }; error as e => return e }; _ => { } }
+    let lc = check_labels(tb.stmts, teko::list::empty(), false, teko::list::empty())   // W5-cf-2: loop labels resolve + are unique
+    if lc.failed { return error { message = lc.message } }
+    match check_must_free(f, tbl, env.cur_ns, tb.stmts, table) { null => { }; error as e => return e }
+    let ret_stmts = retype_union_returns(tb.stmts, ret, table)
+    let tf = TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = ret; body = ret_stmts; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = ""; file = ""; line = 0; col = 0; is_test = f.is_test; is_extern = false; c_symbol = f.c_symbol; from_lib = ""; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
+    match check_ref_storability(tf) { null => { }; error as e => return e }
+    tf
+}
+
+/**
+ * (OOP A1, 2026-07-01) Type-check EVERY method body on a struct TypeDecl and stamp each into a full
+ * `TFunction` item (namespace = "<owning-ns>::<StructName>", mirroring `collect_signatures`'
+ * registration exactly, so codegen and the VM mangle and resolve method calls to these SAME items).
+ *
+ * Called from both `type_program` and `type_program_with_deps`' main loops, alongside the ordinary
+ * TypeDecl pass-through — a struct with methods contributes MULTIPLE `TItem`s, not one.
+ *
+ * @param td       the struct or class declaration whose methods to type
+ * @param item_ns  the declaration's own namespace
+ * @param file     the declaration's source file (W-loc-2)
+ * @param env      the sealed top-level environment
+ * @param table    the collected type table
+ * @return         one typed item per method body
+ * @throws         when a method body fails to type
+ */
+fn type_struct_methods(td: parser::TypeDecl, item_ns: str, file: str, env: Env, table: TypeTable) -> []TItem | error {
+    // (W10b.CLASS) a class's methods are typed/stamped by this SAME pass — only the methods
+    // list's source differs; a class method is otherwise identical to a struct method. Increment
+    // 2: stamps the EFFECTIVE (base-inherited + overridden) methods against THIS class's own
+    // name — an inherited-not-overridden method's body is re-typed/re-emitted per owning class
+    // (no vtable/dispatch yet). An `abstract fn` signature (no body, never overridden by THIS
+    // class) has nothing to emit — skipped.
+    mut methods: []parser::Function = teko::list::empty()
+    mut has_base_binding = false
+    mut base_binding_name = ""
+    mut base_name = ""
+    mut is_class = false
+    mut own_names: []str = teko::list::empty()   // (W10b.CLASS) methods declared DIRECTLY on td — the base-binding is only ever injected for these (see below)
+    match td.body {
+        parser::StructBody as sb => { methods = sb.methods }
+        parser::ClassBody as cb => {
+            methods = match effective_class_methods(cb, table) { []parser::Function as f => f; error as e => return e }
+            has_base_binding = cb.has_base_binding

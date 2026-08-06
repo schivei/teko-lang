@@ -1,0 +1,196 @@
+// src/checker/free_checks.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+ *
+ * @param TFunction tf  the fully-typed function
+ * @return error?  null when every ref-to-local is spine-sound, else the R5 reject error
+ */
+fn check_ref_storability(tf: TFunction) -> error | null {
+    if !fn_has_ref_param(tf) {
+        if !stmts_have_free(tf.body) { return null }
+    }
+    check_ref_storability_block(tf.body, fn_spine(tf))
+}
+
+/**
+ * (#331 L2b) The freed target name of a `teko::mem::free(x)` call (a `teko::mem`-namespaced call
+ * whose last segment is `free`, one bare-`TVar` argument), or `""` when `e` is not such a call.
+ *
+ * @param TExpr e  the typed expression
+ * @return str  the freed variable name, or "" when not a `mem::free` call
+ */
+fn mem_free_target_name(e: TExpr) -> str {
+    match e.kind {
+        TCall as c => {
+            if c.call_ns != "teko::mem" { return "" }
+            if c.callee.segments.len == 0 { return "" }
+            if c.callee.segments[c.callee.segments.len - 1].name != "free" { return "" }
+            if c.args.len != 1 { return "" }
+            match c.args[0].kind {
+                TVar as v => v.name
+                _ => ""
+            }
+        }
+        _ => ""
+    }
+}
+
+/**
+ * (#331 L2b) The affine `mem::free` guard: the freed target must be the SOLE live handle
+ * (`is_unique_at`). A shared / `⊤` target (`let y = x; mem::free(x)`) would leave `y` dangling — the
+ * aliased-free UAF (remodel §5 / #336 HONEST-BOUNDS gap 1), invisible to static analysis AND ASan
+ * (only `TEKO_MEM_PARANOID`). This closes it statically. A non-free expression is a no-op.
+ *
+ * @param TExpr e  the typed expression (a `mem::free` call site, or anything else)
+ * @param Spine spine  the enclosing function's spine
+ * @return error?  null when the free is sound (unique target) or `e` is not a free, else the reject
+ */
+fn check_free_site(e: TExpr, spine: Spine) -> error | null {
+    let target = mem_free_target_name(e)
+    if target == "" { return null }
+    let ci = cell_of(spine, target)
+    if ci < 0 { return null }
+    if is_unique_at(spine, ci to u32) { return null }
+    error { message = $"cannot free `{target}` — it is aliased (another binding still holds it); `mem::free` requires the sole live handle" }
+}
+
+/**
+ * (#331 L2b) Does a statement block (transitively, through loop/defer/adopt bodies + if/match arms)
+ * contain a `mem::free` call? A cheap boolean scan (no spine) used by `check_ref_storability`'s
+ * fast-path: build the per-function spine ONLY when a ref parameter OR a free call is present.
+ *
+ * @param []TStatement stmts  the typed statement block
+ * @return bool  true iff a `mem::free` call is reachable in the block
+ */
+fn stmts_have_free(stmts: []TStatement) -> bool {
+    mut i = 0
+    loop {
+        if i >= stmts.len { break }
+        if stmt_has_free(stmts[i]) { return true }
+        i++
+    }
+    false
+}
+
+/** (#331 L2b) Does one statement embed a `mem::free` call (recursing into nested blocks/arms)? */
+fn stmt_has_free(s: TStatement) -> bool {
+    match s {
+        TExprStmt as es => expr_has_free(es.expr)
+        TBinding as b => expr_has_free(b.value)
+        TAssign as a => expr_has_free(a.value)
+        TReturn as r => if r.has_value { expr_has_free(r.value) } else { false }
+        TLoopStmt as l => stmts_have_free(l.init) || stmts_have_free(l.body)
+        TDeferStmt as d => stmts_have_free(d.body)
+        TAdoptStmt as a => stmts_have_free(a.body)
+        TBreakStmt => false
+        TContinueStmt => false
+    }
+}
+
+/** (#331 L2b) Does an expression embed a `mem::free` call (itself, or in an if/match arm body)? */
+fn expr_has_free(e: TExpr) -> bool {
+    if mem_free_target_name(e) != "" { return true }
+    match e.kind {
+        TIfExpr as f => if stmts_have_free(f.then_blk) { true } else { if f.has_else { stmts_have_free(f.else_blk) } else { false } }
+        TMatchExpr as m => match_arms_have_free(m)
+        _ => false
+    }
+}
+
+/** (#331 L2b) Does any match arm body embed a `mem::free` call? */
+fn match_arms_have_free(m: TMatchExpr) -> bool {
+    mut i = 0
+    loop {
+        if i >= m.arms.len { break }
+        if stmts_have_free(m.arms[i].body) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * True iff any of the function's parameters is a `Ref<T>`. The ONLY reference value obtainable today
+ * is a `Ref<T>` parameter read, so a function with no ref parameter can hold no ref-to-local — the
+ * gate skips it without building the spine (a per-function cost paid only where a ref can appear).
+ *
+ * @param TFunction tf  the typed function
+ * @return bool  true iff at least one parameter is a reference
+ */
+fn fn_has_ref_param(tf: TFunction) -> bool {
+    mut i = 0
+    loop {
+        if i >= tf.params.len { break }
+        let p = tf.params[i]
+        if p.has_type {
+            if type_ann_is_ref(p.type_ann) { return true }
+        }
+        i++
+    }
+    false
+}
+
+/**
+ * Walk a statement block, checking each ref-to-local bind/assign and recursing into nested blocks.
+ *
+ * @param []TStatement stmts  the typed statement block
+ * @param Spine spine  the function's spine fact
+ * @return error?  null when sound, else the first reject error
+ */
+fn check_ref_storability_block(stmts: []TStatement, spine: Spine) -> error | null {
+    mut i = 0
+    loop {
+        if i >= stmts.len { break }
+        match check_ref_storability_stmt(stmts[i], spine) { error as e => return e; null => { } }
+        i++
+    }
+    null
+}
+
+/**
+ * Check one statement: a ref-to-local `TBinding` / simple `TAssign` is gated by the spine; loop /
+ * defer / adopt bodies and value-position `if`/`match` arms recurse so a branch-nested ref-bind is
+ * not missed (mirrors the cell-universe walk).
+ *
+ * @param TStatement s  the typed statement
+ * @param Spine spine  the function's spine fact
+ * @return error?  null when sound, else the reject error
+ */
+fn check_ref_storability_stmt(s: TStatement, spine: Spine) -> error | null {
+    match s {
+        TBinding as b => match check_ref_bind_storable(b, spine) { error as e => return e; null => check_ref_storability_expr(b.value, spine) }
+        TAssign as a => match check_ref_assign_storable(a, spine) { error as e => return e; null => check_ref_storability_expr(a.value, spine) }
+        TLoopStmt as l => match check_ref_storability_block(l.init, spine) { error as e => return e; null => check_ref_storability_block(l.body, spine) }
+        TDeferStmt as d => check_ref_storability_block(d.body, spine)
+        TAdoptStmt as a => check_ref_storability_block(a.body, spine)
+        TReturn as r => if r.has_value { check_ref_storability_expr(r.value, spine) } else { null }
+        TExprStmt as es => check_ref_storability_expr(es.expr, spine)
+        TBreakStmt => null
+        TContinueStmt => null
+    }
+}
+
+/**
+ * Recurse the Ref-storability check into a value-position `if`/`match`'s arm bodies (each a statement
+ * block); any other expression carries no block, so it is a no-op.
+ *
+ * @param TExpr e  the typed expression
+ * @param Spine spine  the function's spine fact
+ * @return error?  null when sound, else the reject error
+ */
+fn check_ref_storability_expr(e: TExpr, spine: Spine) -> error | null {
+    match e.kind {
+        TIfExpr as f => match check_ref_storability_block(f.then_blk, spine) { error as er => return er; null => if f.has_else { check_ref_storability_block(f.else_blk, spine) } else { null } }
+        TMatchExpr as m => check_ref_storability_match(m, spine)
+        _ => check_free_site(e, spine)
+    }
+}
+
+/**
+ * Recurse the Ref-storability check into every match arm body.
+ *
+ * @param TMatchExpr m  the typed match expression
+ * @param Spine spine  the function's spine fact
+ * @return error?  null when sound, else the reject error
+ */

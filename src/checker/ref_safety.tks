@@ -1,0 +1,196 @@
+// src/checker/ref_safety.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+                }
+            }
+            TContinueStmt as c => {
+                if c.label.len == 0 {
+                    if !in_loop { return LabelCheck { failed = true; message = "`break`/`continue` outside a loop"; seen = acc } }
+                } else if !lbl_enclosing(scope, c.label) {
+                    return LabelCheck { failed = true; message = "`break`/`continue` to an unknown loop label (no enclosing loop carries that label)"; seen = acc }
+                }
+            }
+            TExprStmt as es => {
+                let t = check_labels_inexpr(es.expr, scope, in_loop, acc)
+                if t.failed { return t }
+                acc = t.seen
+            }
+            TAdoptStmt as a => {
+                let t = check_labels(a.body, scope, in_loop, acc)
+                if t.failed { return t }
+                acc = t.seen
+            }
+            _ => { }
+        }
+        i++
+    }
+    LabelCheck { failed = false; message = ""; seen = acc }
+}
+
+/**
+ * Is `v` a two-member ABSENCE union `{ null, ptr<T> }` — the ONE null-union shape the extern
+ * boundary may cross (c-types-and-marshalling-0.3.1.md §5.4.4/§9.8, crumb C2b)? This is a
+ * CHECKER-LOCAL mirror of codegen's niche test (`cg_union_niche_member` ∩ `cg_type_is_niche_able`,
+ * `codegen.tks:1868-1916`) restricted to the ONE member that is BOTH niche-able (a spare NULL
+ * bit-pattern to lower bare, with no tag word) AND already `extern_type_ok`-admissible on its own:
+ * `Ptr`. That restriction is not an approximation of the codegen predicate — it is its EXACT
+ * intersection with `extern_type_ok`'s base admit list, because every OTHER niche-able shape
+ * (`Str`, `Error`, a class `Named`) is already excluded by `extern_type_ok` for reasons that have
+ * nothing to do with nullability (a fat `{ptr,len}` value or a by-value aggregate is not a 1:1 C
+ * ABI shape either way), so checking `Ptr` alone reproduces the full predicate's admitted set
+ * without threading a `CgProg` into the checker layer. `Uptr` is excluded AUTOMATICALLY, for the
+ * right reason: an integer has no spare bit-pattern (`0` is data), so `uptr | null` can never
+ * satisfy this test — no special case needed to bar it (`c_uptr_null_union_extern_rejected`).
+ *
+ * @param v  the resolved union to test
+ * @return   true iff `v` is exactly `{ null, ptr<T> }` for some `T`
+ */
+fn extern_null_union_ok(v: Variant) -> bool {
+    if v.members.len != 2 { return false }
+    mut null_count = 0
+    mut other: Type | null = null
+    mut i = 0
+    loop {
+        if i >= v.members.len { break }
+        match v.members[i] {
+            Null => null_count = null_count + 1
+            _ => other = v.members[i]
+        }
+        i++
+    }
+    if null_count != 1 { return false }
+    match other {
+        Type as t => match t { Ptr => true; _ => false }
+        null => false
+    }
+}
+
+/**
+ * C7.1a — is `t` legal across the `extern` boundary? A primitive (int/float/bool), `byte`,
+ * `ptr`, `uptr`, an `extern type` opaque handle (a `Named` whose declaration IS an `ExternBody`),
+ * or a `ptr<T> | null` absence union (C2b, `extern_null_union_ok`) — the only shapes that marshal
+ * 1:1 across the C ABI. Rejects an ordinary Teko struct/enum/variant (unsupported by-value
+ * aggregate FFI), `str`, and a slice/optional. `void` is handled by the CALLER, for the return
+ * position only.
+ *
+ * @param t      the resolved param or return type
+ * @param table  the program's type table (to probe a `Named`'s declaration body)
+ * @return       true iff `t` may cross an `extern` signature
+ */
+fn extern_type_ok(t: Type, table: TypeTable) -> bool {
+    match t {
+        Prim => true
+        Byte => true
+        Ptr => true
+        Uptr => true
+        Named as nm => match type_table_find(table, nm.name, "") {   // (#109 W1) extern-kind probe on a resolved name — no referencing ns
+            parser::TypeDecl as td => match td.body { parser::ExternBody => true; _ => false }
+            error => false
+        }
+        Variant as v => extern_null_union_ok(v)
+        _ => false
+    }
+}
+
+// C7.2: teko_rt speaks Teko's own internal ABI (tk_str/tk_ffi_sres/tk_ffi_ures/etc.) and may
+// legally declare str/[]str/str|error/error?/i32 — allow those for `from "teko_rt"` externs.
+// `Named` is also allowed: user-defined structs declared in teko-native namespaces (e.g.
+// teko::time's DateTime/Date/…) are passed by value across the teko_rt boundary using their
+// generated C struct layout (the C side mirrors the Teko field layout exactly — SUPREME RULE).
+fn teko_rt_type_ok(t: Type) -> bool {
+    match t {
+        Str => true
+        Void => true
+        Prim => true
+        Byte => true
+        Ptr => true
+        Uptr => true
+        Slice => true   // []str, []byte, etc.
+        Variant => true   // str | error
+        Optional => true   // error?
+        Named => true   // user struct (e.g. DateTime, Date) — passed by value, layout-matched
+        _ => false
+    }
+}
+
+/**
+ * params_have_discard — does any parameter in `ps` denote the write-only DISCARD `_` (owner
+ * refinement 2026-07-15)? A discard parameter has no type and the reserved name "_" — a name the
+ * lexer can never mint for a real identifier, so the test is unambiguous.
+ *
+ * @param ps  the parameter list
+ * @return    true iff at least one parameter is a `_` discard
+ */
+fn params_have_discard(ps: []parser::Param) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= ps.len { break }
+        if !ps[i].has_type && ps[i].name == "_" { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * method_named — the first method in `ms` whose name equals `name`, or null when none matches. Used
+ * to locate the base/interface method that GOVERNS a `_` discard parameter's type by position.
+ *
+ * @param ms    the method list to scan
+ * @param name  the method name to find
+ * @return      the matching method, or null
+ */
+fn method_named(ms: []parser::Function, name: str) -> parser::Function | null {
+    mut i: u64 = 0
+    loop {
+        if i >= ms.len { break }
+        if ms[i].name == name { return ms[i] }
+        i++
+    }
+    null
+}
+
+/**
+ * type_implements_list — the interface `implements` list of the type named `name` (a class or a
+ * struct), or an empty list when the type is neither, is unknown, or lists no interfaces.
+ *
+ * @param name    the enclosing type name
+ * @param ref_ns  the referencing namespace for the type-table lookup
+ * @param table   the folded type table
+ * @return        the type's `implements` names, or an empty list
+ */
+fn type_implements_list(name: str, ref_ns: str, table: TypeTable) -> []str {
+    match type_table_find(table, name, ref_ns) {
+        parser::TypeDecl as td => match td.body {
+            parser::ClassBody as cb => cb.implements
+            parser::StructBody as sb => sb.implements
+            _ => teko::list::empty()
+        }
+        error => teko::list::empty()
+    }
+}
+
+/**
+ * find_interface_method — the interface-required method named `name` provided by any interface in
+ * `impls`, or null when none provides it. Mirrors check_one_interface's resolution (find_interface_decl
+ * then effective_interface_methods), so the governing signature seen here is exactly the one the
+ * conformance check validated.
+ *
+ * @param impls   the type's `implements` interface names
+ * @param name    the method name to find
+ * @param table   the folded type table
+ * @param ref_ns  the conforming type's namespace (interface lookups resolve here)
+ * @return        the matching interface method, or null
+ */
+fn find_interface_method(impls: []str, name: str, table: TypeTable, ref_ns: str) -> parser::Function | null {
+    mut i: u64 = 0
+    loop {
+        if i >= impls.len { break }
+        match find_interface_decl(impls[i], table, ref_ns) {
+            IfaceHit as h => match h.decl.body {
+                parser::InterfaceBody as ib => match effective_interface_methods(ib, h.ns, table, teko::list::push(teko::list::empty(), qualify(h.ns, name_last_segment(h.decl.name)))) {
+                    []parser::Function as ms => match method_named(ms, name) { parser::Function as m => return m; null => { } }
+                    error => { }
+                }
+                _ => { }

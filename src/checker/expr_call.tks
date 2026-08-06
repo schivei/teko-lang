@@ -1,0 +1,96 @@
+// src/checker/expr_call.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+        }
+        _ => { }
+    }
+    // (E7) enum ↔ integer ORDINAL cast: an enum value → its ordinal integer, an integer → the enum
+    // member (the `(byte)k` / `(TokenKind)b` the .tkb serializer relies on). cast_check is prim-only,
+    // so handle this pair here (it has the type table to detect an enum); the result type is the
+    // target. Any OTHER enum cast stays rejected by cast_check. (Mirrors expr.c type_cast's e7.)
+    let e7 = (is_enum_named(inner.type, table) && is_int_cast_end(target)) ||
+    (is_int_cast_end(inner.type) && is_enum_named(target, table))
+    let e8 = is_flags_wire_cast(inner.type, target, table)
+    if !e7 && !e8 {
+        match cast_check(inner.type, target) { null => { }; error as e => return e }
+    }
+    match const_range_check(c.expr, target) { null => { }; error as e => return e }
+    TExpr { kind = TCast { expr = inner }; type = target; line = 0; col = 0 }   // the cast's type IS the resolved target
+}
+
+// ---- field access `x.field` (C3): read a struct field; `.type` is the field's resolved type ----
+// B.29: FIELD read only (method *checking* stays deferred). M.3: nominal — resolve the receiver's
+// `Named` type to its `TypeDecl` body and read the field's declared type. Receiver must be a struct.
+
+// find a field by name in a struct body and resolve its annotation (M.3 — exact).
+fn field_type(fields: []parser::Field, field: str, table: TypeTable, ref_ns: str) -> Type | error {
+    mut i = 0
+    loop {
+        if i >= fields.len { break }
+        if fields[i].name == field { return resolve_type(fields[i].type_ann, table, ref_ns) }   // (#109 W2) field annotation resolves in the struct's OWN ns (its declaring namespace)
+        i++
+    }
+    error { message = $"no such field: {field}" }
+}
+
+/**
+ * require_narrowed — the null-union C5 deref fence (base §3d/§3f). Using a `T | null` (any
+ * null-bearing union) payload AS a bare member — a field read, or the `.value` deref of a
+ * `Ref<T> | null` — is REJECTED until the union has been narrowed to its bare member, the SAME
+ * narrowing invariant an unmatched `T | error` obeys. The two accepted narrowing scopes rebind the
+ * value to its bare member BEFORE this point (a `match` arm's pattern binding; the flow-narrowed
+ * branch of an equality guard), so reaching here with a still-`Variant` null-bearing type means the
+ * use is un-narrowed. Directs the author to the sanctioned narrowing forms.
+ *
+ * @param t  the receiver's resolved (still-union) type
+ * @return   the error demanding narrowing before the bare-member use
+ * @throws   error always (this is the reject path; the caller only calls it on a null-bearing union)
+ * @since 0.3.0.30 (null-union C5)
+ */
+fn require_narrowed(t: Type) -> error {
+    if is_ref_null_variant(t) {
+        return error { message = "cannot dereference a `Ref<T> | null` — narrow it to a bare `Ref<T>` first (`match r { null => …; Ref<T> as v => v.value }`), the deref fence keeping the never-null reference promise sound" }
+    }
+    error { message = "cannot use `.` on a `T | null` value before narrowing — narrow it first (`match x { null => …; T as v => v.… }`)" }
+}
+
+fn type_field_access(fa: parser::FieldAccess, env: Env, table: TypeTable) -> TExpr | error {
+    mut recv = match type_expr(fa.receiver, env, table) { TExpr as te => te; error as e => return e }
+    // `.len` on a `str` or a slice (`[]T`) -> u64 (W5-idx). This precedes the struct-field
+    // path: a str/slice has no struct body, so `len` is a built-in length, not a field.
+    let is_str_or_slice = match recv.type { Str => true; Slice => true; _ => false }
+    if is_str_or_slice && fa.field == "len" {
+        return TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = Prim { kind = PrimKind::U64 }; line = 0; col = 0 }
+    }
+    // error diagnostic adornments (E2): the built-in `error` value exposes its carrier fields as
+    // readable fields — message/file/expected/actual -> str, line/col -> u32. error has no struct
+    // body, so (like str/slice `.len`) this precedes the struct-field path.
+    let is_error = match recv.type { Error => true; _ => false }
+    if is_error {
+        if fa.field == "message" || fa.field == "file" || fa.field == "expected" || fa.field == "actual" {
+            return TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = Str { }; line = 0; col = 0 }
+        }
+        if fa.field == "line" || fa.field == "col" {
+            return TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = Prim { kind = PrimKind::U32 }; line = 0; col = 0 }
+        }
+        return error { message = "no such field on error (message/file/expected/actual: str; line/col: u32)" }
+    }
+    // (MEM-1b-ii) `Ref<T>.value` — the deref: reading `r.value` yields the referenced T. A Reference
+    // has no struct body and exposes ONLY `.value` (the pointed-to value); any other field is an error.
+    match recv.type {
+        Reference as rf => {
+            if fa.field == "value" {
+                return TExpr { kind = TFieldAccess { receiver = recv; field = fa.field }; type = rf.inner; line = 0; col = 0 }
+            }
+            recv = deref_ref_value(recv)
+        }
+        _ => { }
+    }
+    // (NP-OOP, issue #116) a bare `.` on a nullable receiver stays a compile error — but say WHY
+    // and point at the sanctioned readers (`?.`/`??`) instead of the generic struct message.
+    match recv.type {
+        Optional => return error { message = "cannot use `.` on a nullable value (`T?`) — read it with `?.` or `??` (REBOOT_PLAN §203)" }
+        Variant => if variant_has_null_member(recv.type) { return require_narrowed(recv.type) }
+        _ => { }

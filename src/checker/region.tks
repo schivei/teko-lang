@@ -1,0 +1,50 @@
+// src/checker/region.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+}
+
+/**
+ * (S3, issue #358) `teko::mem::region_alloc(region: uptr, init: T) -> ptr<T>` — bump-allocates a
+ * `T` INTO the region named by the `uptr` handle, copies `init` into it, and hands back a raw
+ * `ptr<T>` attached to that region's lifetime (dangling after the region is freed — the `unsafe`
+ * risk the dev owns). This is the manual, non-lexical complement to `teko::mem::buf_ptr` (which
+ * allocates a byte buffer into the ENCLOSING region); here the region is CHOSEN by the caller.
+ *
+ * The element type `T` is INFERRED from `init`'s resolved type — no method-level/free generic
+ * machinery is involved (this is a special checker+codegen builtin, not a Teko-bodied generic fn),
+ * so it sidesteps the generic-stack gaps entirely (see the #358 fixture header + DECISION_LOG).
+ * `init` may be any concrete non-void value; the returned `ptr<T>` is opaque in Teko, crossing the
+ * boundary only via the existing raw-pointer builtins (`bytes_from_ptr`, a raw `extern`).
+ *
+ * @param parser::Call c  the raw call node
+ * @param Env env  the typing environment
+ * @param TypeTable table  the folded type table
+ * @return TExpr | NotRegionOp | error  a `ptr<T>`-typed TCall (T = init's type), `NotRegionOp` if the path is not
+ *               region_alloc, or an error on wrong arity / a non-`uptr` region / a `void` init
+ */
+fn type_region_alloc(c: parser::Call, env: Env, table: TypeTable) -> TExpr | NotRegionOp | error {
+    if c.callee.segments.len < 2 { return NotRegionOp { } }
+    let last = c.callee.segments[c.callee.segments.len - 1].name
+    let prev = c.callee.segments[c.callee.segments.len - 2].name
+    if last != "region_alloc" || prev != "mem" { return NotRegionOp { } }
+    let rooted = c.callee.segments.len == 2 || c.callee.segments[0].name == "teko"
+    if !rooted { return NotRegionOp { } }
+    if c.args.len != 2 { return error { message = "teko::mem::region_alloc expects two arguments (a `uptr` region handle and the value to allocate)" } }
+    let region = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
+    let region_ok = match region.type { Uptr => true; _ => false }
+    if !region_ok { return error { message = $"teko::mem::region_alloc's first argument must be a `uptr` region handle — got `{type_render(region.type)}`" } }
+    let init = match type_expr(c.args[1], env, table) { TExpr as te => te; error as e => return e }
+    if type_is_void(init.type) { return error { message = "teko::mem::region_alloc cannot allocate a `void` value" } }
+    mut ra_args = teko::list::push(teko::list::empty(), region)
+    ra_args = teko::list::push(ra_args, init)
+    TExpr { kind = TCall { callee = c.callee; args = ra_args; call_ns = "teko::mem"; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = Ptr { inner = init.type }; line = 0; col = 0 }
+}
+
+// (2026-07-01) call-site desugar for a `params`-variadic function `f`. Two shapes:
+//   passthrough — exactly `f.params.len` raw args AND the last one is already typed `[]T`
+//     (T = the params element type) → pass through unchanged, no re-wrapping.
+//   pack — otherwise, the trailing args (0 or more) beyond the fixed prefix are collapsed into
+//     ONE synthetic array-literal `parser::Expr` (reusing array-literal codegen — Increment B+),
+//     so the rest of `type_call` sees an ordinary `f.params.len`-arity call.

@@ -1,0 +1,96 @@
+// src/checker/stmt_typing.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+    }
+    let segs = teko::list::push(teko::list::empty(), parser::Segment { name = tn })
+    let real = parser::BindPattern { type_name = parser::Path { segments = segs }; has_binding = bp.has_binding; binding = bp.binding; is_slice = false; slice_type = null; type_args = teko::list::empty() }
+    TArm { pattern = real; has_when = a.has_when; guard = guard; body = body.stmts }
+}
+
+/**
+ * type_match_arm — type ONE match arm, routing the for-each desugar's placeholder arm through the
+ * bypass (`type_foreach_elem_arm`) and every other arm through the ordinary, unmodified `type_arm`.
+ *
+ * @param a        the syntactic match arm
+ * @param subject  the match's subject type
+ * @param env      the enclosing type environment
+ * @param table    the type table
+ * @return         the typed arm, or an error
+ */
+fn type_match_arm(a: parser::Arm, subject: Type, env: Env, table: TypeTable) -> TArm | error {
+    if is_foreach_elem_placeholder(a.pattern) { return type_foreach_elem_arm(a, subject, env, table) }
+    type_arm(a, subject, env, table)
+}
+
+// validate a `?.` receiver: must be a NON-sentinel optional; enrich the disjoint-domain
+// case (an `X | error` union reads via `match`, never `?.` — the LAW's other half).
+fn safe_nav_receiver(receiver: parser::Expr, env: Env, table: TypeTable) -> TExpr | error {
+    let recv = match type_expr(receiver, env, table) { TExpr as te => te; error as e => return e }
+    let inner = match recv.type {
+        Optional as o => o.inner
+        _ => {
+            let is_error_like = match recv.type { Error => true; _ => match expand_variant(recv.type, table) { Variant => true; _ => false } }
+            if is_error_like {
+                return error { message = "`?.` reads absence (`T?`), never errors — inspect an `X | error` union with `match` (disjoint-domain law)" }
+            }
+            return error { message = "safe access `?.` needs an optional receiver (`T?`) — use `.` for a non-optional (REBOOT_PLAN §203)" }
+        }
+    }
+    match inner {
+        Void => error { message = "`?.` on a bare `null` has no member to reach (annotate the optional's type)" }
+        _ => recv
+    }
+}
+
+// `recv?.field` (REBOOT_PLAN §203): the receiver must be an OPTIONAL of a named struct or
+// class; the result is the field's type made optional — null propagates. A STRUCT inner
+// keeps the dedicated TSafeFieldAccess node; a CLASS inner desugars to the safe-nav match
+// (NP-OOP), routing through type_field_access so visibility holds EXACTLY like a bare `.`.
+fn type_safe_field_access(sfa: parser::SafeFieldAccess, line: u32, col: u32, env: Env, table: TypeTable) -> TExpr | error {
+    let recv = match safe_nav_receiver(sfa.receiver, env, table) { TExpr as te => te; error as e => return e }
+    let inner = match recv.type { Optional as o => o.inner; _ => return error { message = "internal: safe_nav_receiver guarantees an optional" } }
+    let name = match inner {
+        Named as n => n.name
+        _ => return error { message = "safe field access on a non-struct optional is not yet supported (the struct-field layer is pending — M.3)" }
+    }
+    let decl = match type_table_find(table, name, "") {   // (#109 W1) safe-field-access receiver lookup on a resolved name — no referencing ns
+        parser::TypeDecl as td => td
+        error => return error { message = $"unknown type for safe field access: {name}" }
+    }
+    // (NP-OOP, issue #116) CLASS route — desugar to the safe-nav match; the arm's field read
+    // is typed by type_field_access itself (same visibility, same `.len`/field rules).
+    match decl.body {
+        parser::ClassBody => {
+            let binder = safe_binder_name(line, col)
+            let env2 = define(env, binder, inner, false)
+            let rvar = parser::Expr { kind = parser::Var { name = binder }; line = line; col = col }
+            let fa2 = parser::FieldAccess { receiver = rvar; field = sfa.field }
+            let tf = match type_field_access(fa2, env2, table) { TExpr as te => te; error as e => return e }
+            return safe_nav_match(recv, name, binder, tf)
+        }
+        _ => { }
+    }
+    // STRUCT route — the original TSafeFieldAccess lowering (native emission is value-based).
+    let ft = match decl.body {
+        parser::StructBody as sb => match field_type(sb.fields, sfa.field, table, type_ns_of(table, name)) { Type as t => t; error as e => return e }
+        _ => return error { message = $"type {name} is not a struct (no fields)" }
+    }
+    // the result is `(field)?` — an already-optional field stays as-is (no double-wrap).
+    let rt = match ft { Optional => ft; _ => Optional { inner = ft } }
+    TExpr { kind = TSafeFieldAccess { receiver = recv; field = sfa.field }; type = rt; line = 0; col = 0 }
+}
+
+// `recv?.method(args)` (NP-OOP, issue #116): a null-propagating METHOD call on a `T?` of a
+// named struct/class/interface. Desugars to the safe-nav match; the arm's call is typed by
+// type_method_call itself — visibility, arity, defaults and interface (vtable) dispatch all
+// behave EXACTLY like a bare `.` call (no bypass through the null-propagating path).
+fn type_safe_method_call(smc: parser::SafeMethodCall, line: u32, col: u32, env: Env, table: TypeTable) -> TExpr | error {
+    let recv = match safe_nav_receiver(smc.receiver, env, table) { TExpr as te => te; error as e => return e }
+    let inner = match recv.type { Optional as o => o.inner; _ => return error { message = "internal: safe_nav_receiver guarantees an optional" } }
+    let name = match inner {
+        Named as n => n.name
+        _ => return error { message = "safe method call `?.` needs an optional of a named type (a struct, class or interface)" }
+    }
+    let decl = match type_table_find(table, name, "") {   // (#109 W1) safe-method-call receiver lookup on a resolved name — no referencing ns

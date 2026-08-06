@@ -1,0 +1,196 @@
+// src/checker/expr_control.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+            PrimKind as k => {
+                if n.is_float || !prim_is_int(k) { null }
+                else if numint_fits(n.value, k) { null }
+                else { error { message = "constant out of range for the cast target (M.1 — fail early)" } }
+            }
+            error => null   // non-numeric target: cast_check already rejected it
+        }
+        _ => null   // not a constant literal → runtime-guarded (codegen)
+    }
+}
+
+// C6 — an annotated binding `let x: T = <value>` whose value type ≠ T. A numeric LITERAL ADOPTS T
+// if it fits: the leaf stays i64 (stored AS-IS — Side D) and T lives in the binding's `bound`.
+// The fit is proven HERE at type time via `value_fits`. A NON-literal mismatch is a hard error —
+// no implicit conversion (M.2; use `to`). An out-of-range literal fails EARLY (M.1).
+// NOTE: the counter-validation does NOT yet re-prove the binding-level fit — a forged typed tree
+// `bound=u8, value=300` would currently pass revalidate. That re-proof lands with `validate_statement`
+// (deferred; named gap — §VI). The front-line type check above already rejects such source.
+fn annotated_literal_ok(value: parser::Expr, ann: Type) -> error | null {
+    match value.kind {
+        // an ARRAY LITERAL `[e0, e1, …]` annotated as `[]E` — adopts element-wise: every non-spread
+        // element must itself be a fitting bare literal for E (recurses through nested arrays via
+        // this same function). A spread element (`..xs`) is already a `[]T` value, not a literal —
+        // skip it here (its own widen/adopt was checked at array-literal typing time). Mirrors
+        // literal_adopts's TArrayLit case (the range-check side), which already recurses this way;
+        // this is the RETYPING side's twin so `let a: []u8 = [1,2,3]` type-checks (#71).
+        parser::ArrayLit as al => match ann {
+            Slice as s => {
+                mut i = 0
+                mut result: error | null = null
+                loop {
+                    if i >= al.elements.len { break }
+                    if !al.elements[i].is_spread {
+                        match annotated_literal_ok(al.elements[i].expr, s.element) {
+                            null => { }
+                            error as e => { result = e; break }
+                        }
+                    }
+                    i++
+                }
+                result
+            }
+            _ => error { message = "value type does not match annotation" }
+        }
+        parser::Unary as u => {
+            if u.op == lexer::TokenKind::Minus {
+                match u.operand.kind {
+                    parser::Number as n => match ann {
+                        Prim as p => {
+                            if n.is_float {
+                                if !prim_is_float(p.kind) { error { message = "a float literal cannot be annotated as an integer type (B.38)" } }
+                                else if float_fits(n.fval, p.kind) { null }
+                                else { error { message = "float literal out of range for the annotated type (M.1 — fail early)" } }
+                            } else {
+                                if prim_is_float(p.kind) { error { message = "an integer literal cannot be annotated as a float type (write it with a `.` — B.38)" } }
+                                else if !prim_is_signed(p.kind) { error { message = "a negative literal cannot be annotated as an unsigned type (M.1)" } }
+                                else if numint_fits(n.value, p.kind) { null }
+                                else { error { message = "literal out of range for the annotated type (M.1 — fail early)" } }
+                            }
+                        }
+                        _ => error { message = "value type does not match annotation" }
+                    }
+                    _ => error { message = "value type does not match annotation" }
+                }
+            } else {
+                error { message = "value type does not match annotation" }
+            }
+        }
+        parser::Number as n => match ann {
+            Prim as p => {
+                if n.is_float {
+                    // a float literal (3.14, 1.5e3) adopts a float annotation only (N2).
+                    if !prim_is_float(p.kind) { error { message = "a float literal cannot be annotated as an integer type (B.38)" } }
+                    else if float_fits(n.fval, p.kind) { null }
+                    else { error { message = "float literal out of range for the annotated type (M.1 — fail early)" } }
+                } else {
+                    // an integer literal adopts an integer annotation only; never a float type (N1).
+                    if prim_is_float(p.kind) { error { message = "an integer literal cannot be annotated as a float type (write it with a `.` — B.38)" } }
+                    else if numint_fits(n.value, p.kind) { null }
+                    else { error { message = "literal out of range for the annotated type (M.1 — fail early)" } }
+                }
+            }
+            _ => error { message = "value type does not match annotation" }
+        }
+        _ => error { message = "value type does not match annotation" }
+    }
+}
+
+// `x to T` — type the inner, resolve the target, demand the conversion is DEFINED, then reject a
+// CONSTANT literal already out of range (fail early — M.1). The runtime fit-check for non-constant
+// operands is codegen's (debug-panic / release-defined) — deferred (M.4).
+// (E7) is `t` a NAMED type whose declaration is an `enum`? (C: is_enum_named.)
+fn is_enum_named(t: Type, table: TypeTable) -> bool {
+    match t {
+        Named as n => match type_table_find(table, n.name, "") {   // (#109 W1) enum-kind probe on a resolved name — no referencing ns
+            parser::TypeDecl as td => match td.body { parser::EnumBody => true; _ => false }
+            error => false
+        }
+        _ => false
+    }
+}
+
+// (E7) an INTEGER cast endpoint: an int prim, or `byte` (= u8). Floats/bool excluded. (C: is_int_cast_end.)
+fn is_int_cast_end(t: Type) -> bool {
+    match t {
+        Byte => true
+        Prim as p => prim_is_int(p.kind)
+        _ => false
+    }
+}
+
+// (UTF-8 increment 1) `char to <int>` — the EXPLICIT decode of a codepoint to its scalar value.
+// Allowed for u32 (the natural codepoint width), and trivially for the wider unsigned/signed ints
+// that hold any codepoint (u64/i64). The REVERSE (`<int> to char`, an encode) is a later increment.
+fn is_char_decode_target(t: Type) -> bool {
+    match t {
+        Prim as p => p.kind == PrimKind::U32 || p.kind == PrimKind::U64 || p.kind == PrimKind::I64
+        _ => false
+    }
+}
+
+/**
+ * is_flags_wire_cast — E8 (#594 crumb 11): is `from -> to` a flags ↔ integer WIRE
+ * cast? A flags value's raw bit pattern → an integer (an object-writer
+ * `sh_flags`/`Characteristics` field needs the combined mask as a plain `uN`), or
+ * an integer → a flags value. `cast_check` is prim-only, so `type_cast` handles
+ * this pair directly — mirroring E7's enum-ordinal cast. Any OTHER flags cast
+ * stays rejected by `cast_check`.
+ *
+ * @param from   the cast's source type
+ * @param to     the cast's target type
+ * @param table  the type table (to detect a flags-declared Named type)
+ * @return       true iff the pair is a flags↔integer wire cast
+ */
+fn is_flags_wire_cast(from: Type, to: Type, table: TypeTable) -> bool {
+    (is_flags_named(from, table) && is_int_cast_end(to)) ||
+    (is_int_cast_end(from) && is_flags_named(to, table))
+}
+
+/**
+ * warn_redundant_cast — the D1 diagnostic (`cast-width-hygiene-0.3.1.md` §4/§9):
+ * a WARNING printed to stderr, never a build failure. Fires on a provable no-op
+ * `to` (class 1 — same-type; class 3 — a lossless widen the W-RULE/B.22
+ * sign-check already performs), never on a genuine narrow/widen the source
+ * still needs.
+ *
+ * WHY IT IS NO LONGER AN ERROR (owner ruling 2026-07-27, REVERSING the
+ * 2026-07-24 ruling that made it a hard failure — *"prefiro que falhe para
+ * evitarmos de cair no mesmo erro"*): *"o cast, nestes casos, não deveria ser
+ * falha, deveria ser warning, o que não nos exime de não ter warnings no
+ * próprio compilador (lembra? <= 2%)."*
+ *
+ * The reversal is not a softening of the policy — it moves enforcement to the
+ * instrument that can actually carry it. D1-as-error made a redundant cast
+ * UNSPELLABLE, and a bootstrap chain has two compilers that disagree about
+ * which spelling is redundant: the released seed applies B.22 (*"operands must
+ * be the same type — no promotion"*) and REQUIRES the cast, while a
+ * locally-built gen1 has the W-RULE (`widen_int_binop`) and therefore proves
+ * that same cast a no-op. As an error, no single source text satisfies both —
+ * measured on the wagon: 17 of the 18 B.22 casts the seed demands make gen1
+ * reject the tree outright. As a warning, one text compiles under both and the
+ * seed's demand becomes payable.
+ *
+ * The ceiling that keeps redundant casts from returning en masse is D4, and it
+ * is untouched and still HARD: ARITH-CAST-RATE ≤ 2% (`metrics.tks`,
+ * `run_arith_cast_gate` in `project.tks`) fails the build. That is why the
+ * same-type site below deliberately keeps the `TCast` node in the typed tree
+ * instead of folding it away — a warned cast must still be COUNTED by the gate,
+ * or downgrading this diagnostic would have quietly disabled the ≤2% ceiling
+ * along with it.
+ *
+ * @param t  the redundant cast's own (unchanged) type
+ * @since    0.3.1
+ */
+fn warn_redundant_cast(env: Env, e: TExpr) {
+    teko::io::eprintln($"{diag_at(env.file, e.line, e.col, "")}warning: redundant cast: this `to {type_render(e.type)}` is a provable no-op (cast-width-hygiene-0.3.1.md D1) — delete it")
+}
+
+fn type_cast(c: parser::Cast, env: Env, table: TypeTable) -> TExpr | error {
+    let inner = match type_expr(c.expr, env, table) { TExpr as te => te; error as e => return e }
+    if type_is_void(inner.type) { return error { message = "a `void` expression cannot be cast (M.1)" } }
+    let target = match resolve_type(c.target, table, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the cast's enclosing namespace
+    // D1 class 1 — same type. Warn and TYPE IT ANYWAY, returning the identity `TCast`: falling
+    // through instead would hand a non-prim same-type pair to `cast_check` (prim-only) and blame it
+    // for a construct that is merely superfluous, and dropping the node would hide the cast from the
+    // D4 ≤2% gate that now carries the policy.
+    if type_eq(inner.type, target) {
+        let noop = TExpr { kind = TCast { expr = inner }; type = target; line = inner.line; col = inner.col }
+        warn_redundant_cast(env, noop)
+        return noop
+    }

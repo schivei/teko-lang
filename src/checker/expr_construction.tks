@@ -1,0 +1,146 @@
+// src/checker/expr_construction.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+ * A single-segment path wrapping `name` (`Cell` → `Path{[Cell]}`) — the minimal path for resolving a
+ * construction-site base type through `resolve_type` (#254 L5).
+ *
+ * @param name  the single segment name
+ * @return      a one-segment path
+ * @since onda-3 (#254 L5)
+ */
+fn single_seg_path(name: str) -> parser::Path {
+    parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = name }) }
+}
+
+/**
+ * A copy of `p` with the segment at position `idx` renamed to `name` (`Cell::make`, idx 0 → `X`,
+ * yields `X::make`) — the positional twin of `rewrite_last_segment` (#254 L5). Used to rewrite a
+ * generic static call's OWNER segment (the second-to-last) to the mangled instance name.
+ *
+ * @param p     the path to rewrite
+ * @param idx   the segment position to rename
+ * @param name  the new segment name
+ * @return      `p` with segment `idx` renamed
+ * @since onda-3 (#254 L5)
+ */
+fn rewrite_segment_at(p: parser::Path, idx: u64, name: str) -> parser::Path {
+    mut segs: []parser::Segment = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= p.segments.len { break }
+        if i == idx { segs = teko::list::push(segs, parser::Segment { name = name }) }
+        else { segs = teko::list::push(segs, p.segments[i]) }
+        i++
+    }
+    parser::Path { segments = segs }
+}
+
+/**
+ * Retarget a static-call callee that carries construction-site type-args (`Cell<i64>::make(…)`) to the
+ * mangled generic-instance owner (`Cell__g__i64::make`), so `lookup_call` resolves the stamped factory
+ * `register_instance_methods` registered (#254 L5). Resolves the type-args to concrete types, mangles
+ * the base (the callee's SECOND-TO-LAST segment) via `generic_inst_name`, and rewrites that segment.
+ * A call with no type-args (or a single-segment callee) passes through unchanged → byte-identical for
+ * every existing call.
+ *
+ * @param c      the parsed static call (carrying type_args)
+ * @param table  the folded type table (arg resolution)
+ * @param ref_ns the call's enclosing namespace
+ * @return       the callee path with the owner segment mangled to the instance, or `c.callee` verbatim
+ * @throws       when a type-arg fails to resolve
+ * @since onda-3 (#254 L5)
+ */
+fn retarget_generic_static_callee(c: parser::Call, table: TypeTable, ref_ns: str) -> parser::Path | error {
+    if c.type_args.len == 0 || c.callee.segments.len < 2 { return c.callee }
+    let owner_idx = c.callee.segments.len - 2
+    let base = c.callee.segments[owner_idx].name
+    let nt = parser::NamedType { path = single_seg_path(base); args = c.type_args }
+    let rt = match resolve_type(nt, table, ref_ns) { Type as t => t; error as e => return e }
+    let inst = match rt { Named as n => n.name; _ => return c.callee }
+    rewrite_segment_at(c.callee, owner_idx, inst)
+}
+
+/**
+ * Types a call expression: resolves the callee (a builtin, a same/qualified-namespace function, or
+ * a local closure value), types every argument against the resolved signature — widening (B.14),
+ * literal-adoption (C6), generic type-param inference (S4), AUTO-REF (a `mut` lvalue passed where a
+ * `ref<T>` param is expected), and transparent auto-deref (0.3.1 — a `ref`-typed argument that does
+ * NOT already satisfy the parameter directly peels one `Reference` layer via `deref_ref_value`, so a
+ * `ref` binding is usable bare as a call argument, no `.value`; a `ref`-typed argument that already
+ * widens as-is — forwarding into a `ref T` param, or into a `ref T | null` union, the null-union R2
+ * relaxation — is left alone, never derefed away from a shape that already fits) — and produces the
+ * typed `TCall`.
+ *
+ * @param c0     the untyped call node (post generic-static-callee retargeting if type-args are given)
+ * @param env    the typing environment (bindings + current namespace)
+ * @param table  the resolved type table (signatures, decls, generics)
+ * @return       the typed call expression, its type the callee's resolved return type
+ * @throws       an unknown callee, an arity/type mismatch, or an uninferable generic type-param
+ */
+fn type_call(c0: parser::Call, env: Env, table: TypeTable) -> TExpr | error {
+    let c = if c0.type_args.len == 0 { c0 } else {
+        let rc = match retarget_generic_static_callee(c0, table, env.cur_ns) { parser::Path as p => p; error as e => return e }
+        parser::Call { callee = rc; args = c0.args; arg_names = c0.arg_names; type_args = c0.type_args }
+    }
+    match type_list_builtin(c, env, table) {   // teko::list::empty / push (generic)
+        TExpr as te => return te
+        error as e => return e
+        NotListBuiltin => { }   // not a list builtin → fall through to the ordinary call
+    }
+    match type_mem_free(c, env, table) {   // teko::mem::free (manual dealloc — []T | class)
+        TExpr as te => return te
+        error as e => return e
+        NotMemFree => { }
+    }
+    match type_region_new(c, env, table) {
+        TExpr as te => return te
+        error as e => return e
+        NotRegionOp => { }
+    }
+    match type_region_alloc(c, env, table) {
+        TExpr as te => return te
+        error as e => return e
+        NotRegionOp => { }
+    }
+    let name = c.callee.segments[c.callee.segments.len - 1].name
+    // panic / exit — injected GLOBAL diverging builtins (legislator's ruling — NO `never` type).
+    // panic(error | str) = the message; exit(<integer>) = the status code. Both terminate the
+    // program; the call's STATIC type is void, but texpr_diverges accepts it in any value position.
+    // Fire ONLY when the namespace-aware lookup finds nothing — so the runtime's own `fn panic`
+    // resolves to ITSELF (below) while every other namespace gets the injected global (#41).
+    let in_scope = match lookup_call(env, c.callee) { Type => true; error => false }
+    let teko_rooted = c.callee.segments.len == 2 && c.callee.segments[0].name == "teko"   // reserved-root `teko::exit`/`teko::panic`
+    if (c.callee.segments.len == 1 || teko_rooted) && !in_scope {
+        if name == "panic" {
+            if c.args.len != 1 { return error { message = "panic expects one argument (an `error` or a `str`)" } }
+            let a = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
+            let ok = match a.type { Str => true; Error => true; _ => false }
+            if !ok { return error { message = "panic's argument must be an `error` or a `str`" } }
+            mut pargs = teko::list::push(teko::list::empty(), a)
+            return TExpr { kind = TCall { callee = c.callee; args = pargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = Void { }; line = 0; col = 0 }
+        }
+        if name == "exit" {
+            if c.args.len != 1 { return error { message = "exit expects one argument (an integer status code)" } }
+            let a = match type_expr(c.args[0], env, table) { TExpr as te => te; error as e => return e }
+            let ok = match a.type { Prim as p => prim_is_int(p.kind); _ => false }
+            if !ok { return error { message = "exit's argument must be an integer status code" } }
+            mut eargs = teko::list::push(teko::list::empty(), a)
+            return TExpr { kind = TCall { callee = c.callee; args = eargs; call_ns = ""; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }; type = Void { }; line = 0; col = 0 }
+        }
+    }
+    // (#49) the resolved target's namespace drives the mangled C name. Only a USER function (found
+    // in the env) carries one; a builtin (fallback below) leaves it empty → codegen's call-map path.
+    let resolved_ns = match lookup_call(env, c.callee) { Type => call_ns(env, c.callee); error => "" }
+    let ft = match lookup_call(env, c.callee) {   // (#41) namespace-aware: a local or
+        Type as t => t   // a same-namespace fn (unqualified) / the qualified ns;
+        error => match builtin_fn(name) { Type as t => t; error => return error { message = $"unknown function: {name}" } }   // …then the injected builtins; else name the symbol (M.3)
+    }
+    // (W10b.CLASS residual — intern visibility) a STATIC call (`ClassName::method(…)`) is
+    // reachable under the SAME rule as an instance dot-call — check it here too, routed through
+    // the resolved method namespace. `resolved_ns` names a real class only for a class(-static-
+    // or -instance-called-as-static) method; any other qualified/unqualified call (an ordinary
+    // namespaced function) leaves this a silent no-op (find_class_body errors → skipped).
+    if resolved_ns != "" {
+        match find_class_body(class_name_from_method_ns(resolved_ns), table) {

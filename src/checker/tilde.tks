@@ -1,0 +1,90 @@
+// src/checker/tilde.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+        _ => teko::list::push(acc, e)
+    }
+}
+
+fn tilde_str_lit_text(e: parser::Expr) -> str | null {
+    match e.kind {
+        parser::StrLit as s => s.text
+        // (2026-07-01) `$"no holes"` / `$@"""no holes"""` — interpolated syntax with ZERO holes
+        // (the `verbatim` escaping flag is already resolved into `pieces` by parse time, so a
+        // 0-hole Interp is indistinguishable from a plain literal here). Rare in practice (why
+        // use `$`/`$@` with nothing to interpolate?), but foldable, so fold it — max compile-time
+        // optimization per the user's explicit ask.
+        parser::Interp as it => if it.holes.len == 0 && it.pieces.len == 1 { it.pieces[0] } else { null }
+        _ => null
+    }
+}
+
+// Constant-fold adjacent STR-LITERAL pieces at compile time (e.g. `x ~ "a" ~ "b" ~ y` folds
+// `"a" ~ "b"` into ONE literal `"ab"` first, so the runtime call becomes `concat(x, "ab", y)` —
+// 2 pieces, not 3). If EVERY piece folds into one literal, the whole `~` chain collapses to that
+// single literal at compile time — zero runtime concat calls.
+fn fold_tilde_pieces(pieces: []parser::Expr) -> []parser::Expr {
+    mut out: []parser::Expr = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= pieces.len { break }
+        match tilde_str_lit_text(pieces[i]) {
+            str as t0 => {
+                mut merged = t0
+                mut j = i + 1
+                loop {
+                    if j >= pieces.len { break }
+                    match tilde_str_lit_text(pieces[j]) {
+                        str as tj => { merged = teko::string::concat(merged, tj); j++ }
+                        null => { break }
+                    }
+                }
+                out = teko::list::push(out, parser::Expr { kind = parser::StrLit { text = merged }; line = pieces[i].line; col = pieces[i].col })
+                i = j
+            }
+            null => { out = teko::list::push(out, pieces[i]); i++ }
+        }
+    }
+    out
+}
+
+fn type_tilde_chain(b: parser::Binary, env: Env, table: TypeTable) -> TExpr | error {
+    let raw = flatten_tilde_chain(parser::Expr { kind = b; line = 0; col = 0 }, teko::list::empty())
+    let folded = fold_tilde_pieces(raw)
+    if folded.len == 1 { return type_expr(folded[0], env, table) }   // whole chain was literals — a single literal, no runtime call
+    let seg_teko = parser::Segment { name = "teko" }
+    let seg_string = parser::Segment { name = "string" }
+    let seg_concat = parser::Segment { name = "concat" }
+    mut segs: []parser::Segment = teko::list::push(teko::list::empty(), seg_teko)
+    segs = teko::list::push(segs, seg_string)
+    segs = teko::list::push(segs, seg_concat)
+    mut pos_names: []str = teko::list::empty()   // DEFARGS (2026-07-01) — this synthetic call is always all-positional
+    mut ni: u64 = 0
+    loop { if ni >= folded.len { break }; pos_names = teko::list::push(pos_names, ""); ni++ }
+    let call = parser::Call { callee = parser::Path { segments = segs }; args = folded; arg_names = pos_names; type_args = teko::list::empty() }
+    // `concat`'s own arg-widening (type_call, below) already requires every piece to be `str` —
+    // a non-str `~` operand fails there with a clear message, no separate check needed here.
+    type_call(call, env, table)
+}
+/** `~` is desugared WHOLESALE (chain-flattened + literal-folded) BEFORE the generic operand-typing
+    below — it never reaches a plain TBinary node (codegen/VM see an ordinary TCall or TStrLit,
+    nothing new to handle, mirroring how `params` needed no engine changes).
+    (S6, issue #162) operators over a constrained type-param T stay a HONEST STOP, intentionally —
+    no operator-trait exists yet to authorize `+`/`-`/… the way an interface constraint authorizes
+    a method call. `is_numeric`/`is_integer`/`is_bool` below never match a type-param's `Named{T}`
+    (opaque OR interface-mirroring), so every arm below already falls through to its own clear error
+    for a `T` operand — NO new logic is needed, and none is added here (avoids gold-plating a
+    pre-alpha surface). Real operators on T arrive with an operator-trait constraint (#176+). */
+/**
+ * deref_ref_value — the transparent auto-deref of the `ref` keyword surface (0.3.0.30 Part A). Peels
+ * ONE surface `ref`/`Reference{T}` layer off a typed expression used in a VALUE context, so the
+ * developer reads a `ref`-bound name bare (no `.value`) exactly as its referenced value. The peel
+ * lowers to the same `.value` read (`TFieldAccess` field `value` → codegen `(*p)`) the surface no
+ * longer spells. On any non-reference expression it is an identity no-op, so it fires ONLY on the new
+ * `ref` surface (the current corpus never produces a bare `Reference` in a value position). References
+ * are internally depth-1, so a single peel reaches the value.
+ *
+ * @param te  the typed operand
+ * @return    `te` with its outermost `Reference` peeled to the referenced value, else `te` unchanged
+ */

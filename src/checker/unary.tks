@@ -1,0 +1,34 @@
+// src/checker/unary.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+        if !is_numeric(o.type) { return error { message = "unary `-` needs a numeric operand (int or float)" } }
+        return TExpr { kind = TUnary { op = u.op; operand = o }; type = o.type; line = 0; col = 0 }
+    }
+    if u.op == lexer::TokenKind::Tilde {   // bitwise complement: integer-only (no float bit-flip — B.38)
+        if !is_integer(o.type) { return error { message = "unary `~` needs an integer (not a float — B.38)" } }
+        return TExpr { kind = TUnary { op = u.op; operand = o }; type = o.type; line = 0; col = 0 }
+    }
+    if u.op == lexer::TokenKind::Bang {
+        if !is_bool(o.type) { return error { message = "! needs a bool" } }
+        return TExpr { kind = TUnary { op = u.op; operand = o }; type = o.type; line = 0; col = 0 }
+    }
+    error { message = "not a unary operator" }
+}
+
+/**
+ * type_compare — type a comparison chain (`a < b <= c`), operand by operand. Each step adopts a
+ * bare numeric literal to its partner's type through the very function the binary ops use
+ * (`adopt_binop_operands`, so `c < 0x20` compares a `byte` against a `u8`-adopted literal), applies
+ * the SHARED D1 class-3 WARNING
+ * (`redundant_widen_cast_of` — the same guarded decision `type_binary` uses, so an arithmetic and a
+ * comparison spelling of the same operand pair always agree), and checks comparability.
+ *
+ * @param c      the comparison chain node
+ * @param env    the typing environment
+ * @param table  the folded type table
+ * @return       the typed comparison (always `bool`), or a type error
+ * @throws       on a `void` operand or an incomparable operand pair — NOT on a redundant widen
+ *               cast, which only warns (owner ruling 2026-07-27, `warn_redundant_cast`)
+ */

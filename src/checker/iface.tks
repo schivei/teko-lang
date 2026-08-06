@@ -1,0 +1,84 @@
+// src/checker/iface.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+    let is_has = mc.method == "has"
+    let is_all = mc.method == "all"
+    let is_any = mc.method == "any"
+    let is_none = mc.method == "none"
+    let is_add = mc.method == "add"
+    let is_rem = mc.method == "remove"
+    if !is_has && !is_all && !is_any && !is_none && !is_add && !is_rem {
+        return error { message = "unknown flags method (has/all/any/none/add/remove)" }
+    }
+    if is_add {
+        return TExpr { kind = TBinary { op = lexer::TokenKind::Pipe; left = recv; right = mask }; type = rt; line = 0; col = 0 }
+    }
+    if is_rem {
+        let notmask = TExpr { kind = TUnary { op = lexer::TokenKind::Tilde; operand = mask }; type = rt; line = 0; col = 0 }
+        return TExpr { kind = TBinary { op = lexer::TokenKind::Amp; left = recv; right = notmask }; type = rt; line = 0; col = 0 }
+    }
+    let andexpr = TExpr { kind = TBinary { op = lexer::TokenKind::Amp; left = recv; right = mask }; type = rt; line = 0; col = 0 }
+    if is_has || is_all {
+        let term = TCmpTerm { op = lexer::TokenKind::EqEq; operand = mask }
+        return TExpr { kind = TCompare { first = andexpr; rest = teko::list::push(teko::list::empty(), term) }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
+    }
+    // any/none: compare (recv & mask) against a zero-valued flags literal (the same pattern as
+    // an enum ordinal cast — codegen/VM read the NAMED flags type off the node, not the literal).
+    let zero = TExpr { kind = TNumber { is_float = false; value = parser::numint_of_u64(0); fval = 0.0 }; type = rt; line = 0; col = 0 }
+    let cmp_op = if is_none { lexer::TokenKind::EqEq } else { lexer::TokenKind::Ne }
+    let term = TCmpTerm { op = cmp_op; operand = zero }
+    TExpr { kind = TCompare { first = andexpr; rest = teko::list::push(teko::list::empty(), term) }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
+}
+
+/** (W10b.D3; generalized S6/issue #162) a resolved interface dot-call: the DECLARING interface
+    (the D3 vtable/upcast key), the resolved Function signature, and its vtable SLOT within that
+    interface's own effective-methods list. */
+type IfaceDispatch = struct { iface: str; method: parser::Function; slot: u32 }
+
+/** (S6) find `method` within `eff` (an interface's own effective methods), returning its slot. */
+fn find_method_slot(eff: []parser::Function, method: str) -> IfaceDispatch | null {
+    mut i: u64 = 0
+    loop {
+        if i >= eff.len { break }
+        if eff[i].name == method { return IfaceDispatch { iface = ""; method = eff[i]; slot = i to u32 } }
+        i++
+    }
+    null
+}
+
+/** (W10b.D2, issue #99; generalized S6/issue #162) resolve `method` on an InterfaceBody receiver
+    to its DISPATCH interface + slot. A plain interface receiver (methods.len > 0 — it declares its
+    OWN methods, so it IS the dispatch interface) resolves against ITSELF (`struct_name`). A body
+    with NO own methods (methods.len == 0) is either a genuine `interface X extends A, B {}` OR a
+    generic type-param's synthetic InterfaceBody (type_param_table; S6: an `extends` list of N real
+    interfaces, the constraint's And-union / Or-intersection surface) — BOTH shapes want the SAME
+    resolution: search EACH interface of `extends`, in order, for the first that OWNS the method
+    (method_owner_interface — the D3 vtable key), and read the slot from THAT interface's own
+    effective-methods list (never a concatenated list — the emitted vtable is per-(class,
+    interface), so the slot must agree with it). This subsumes the single-extends #99 case (the
+    search trivially finds the one interface). A method owned by no interface of `extends` is the
+    S6 "outside the authorized surface" honest stop. */
+fn resolve_iface_dispatch(ib: parser::InterfaceBody, struct_name: str, method: str, table: TypeTable) -> IfaceDispatch | error {
+    if ib.methods.len > 0 {
+        let eff = match iface_methods_by_name(struct_name, table) { []parser::Function as f => f; error as e => return e }
+        return match find_method_slot(eff, method) {
+            IfaceDispatch as d => IfaceDispatch { iface = struct_name; method = d.method; slot = d.slot }
+            null => error { message = $"no such method '{method}' on interface '{struct_name}'" }
+        }
+    }
+    let owner = match method_owner_interface(ib.extends, method, table) {
+        str as o => o
+        null => return error { message = $"method '{method}' is not guaranteed by the constraint on type parameter '{struct_name}' ({type_param_surface_message(ib.extends, table)})" }
+    }
+    let eff = match iface_methods_by_name(owner, table) { []parser::Function as f => f; error as e => return e }
+    match find_method_slot(eff, method) {
+        IfaceDispatch as d => IfaceDispatch { iface = owner; method = d.method; slot = d.slot }
+        null => error { message = $"internal: method_owner_interface named '{owner}' as owner of '{method}' but its effective methods do not contain it" }
+    }
+}
+
+/** (S6, M.1) render the type-param's authorized surface (every method name every constrained
+    interface of `extends` contributes) for the "not guaranteed by the constraint" error — so the
+    message enumerates what IS available, never just what is missing. */
