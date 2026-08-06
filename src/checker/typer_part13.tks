@@ -1,0 +1,261 @@
+// src/checker/typer.tks  (namespace 'teko::checker')
+// Each check_* (E4/E5) EVOLVES into a type_*: the SAME checks (B.22 regimes, B.20
+// `if`, B.15 `match` + exhaustiveness), but the producer BUILDS the typed node
+// instead of returning a bare Type. Predicates (is_bool/is_integer/op_is_*),
+// resolvers (resolve_type), env (lookup/define) and the pattern + exhaustiveness
+// logic (check_pattern/exhaustive) are reused from their stages — re-derivation,
+// not duplication (M.5). C1: every node, statement and item re-derived.
+use teko::lexer
+use teko::parser
+
+
+/**
+ * type_array_lit — `[ e0, e1, … ]` (Increment B+): types every element, cross-adopts a bare
+ * numeric-literal element into a sibling's CONCRETE (non-literal) type (`array_join_anchor` +
+ * `adopt_array_elem_literals`, mirroring `type_match`'s own literal cross-adoption) and then
+ * UNIFIES every element into a common element type T (widening — a case joins into its variant;
+ * sibling cases → their union), result `[]T`. An empty `[]` yields the SENTINEL `[]Void` —
+ * exactly like `teko::list::empty()` — so a binding annotation (`: []T`) adopts it and a bare
+ * unannotated `[]` is rejected by type_binding (collections #4). A spread element (`..xs`) must
+ * type as `[]T`; its own element type T contributes to (and widens into) the unified element,
+ * and is never itself a literal-adoption candidate. C twin: type_array_lit in expr.c.
+ *
+ * @param a      the parsed array literal
+ * @param env    the enclosing type environment
+ * @param table  the resolved type table
+ * @return       the typed array literal, or an error
+ */
+fn type_array_lit(a: parser::ArrayLit, env: Env, table: TypeTable) -> TExpr | error {
+    mut typed: []TArrayElem = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= a.elements.len { break }
+        let ae = a.elements[i]
+        let el = match type_expr(ae.expr, env, table) { TExpr as te => te; error as e => return e }
+        if ae.is_spread {
+            let spread_elem = match el.type {
+                Slice as s => s.element
+                _ => return error { message = "a spread element (`..xs`) must be a slice (`[]T`)" }
+            }
+            if type_is_void(spread_elem) { return error { message = "a spread element cannot be an untyped empty slice" } }
+        } else {
+            if type_is_void(el.type) { return error { message = "a `void` expression cannot be an array element (M.1)" } }
+        }
+        typed = teko::list::push(typed, TArrayElem { is_spread = ae.is_spread; expr = el })
+        i++
+    }
+    let elems = match array_join_anchor(typed) { Type as anchor => adopt_array_elem_literals(typed, anchor); null => typed }
+    mut et: Type = Void { }
+    mut i2 = 0
+    loop {
+        if i2 >= elems.len { break }
+        let contrib = array_elem_contrib_type(elems[i2])
+        if type_is_void(et) { et = contrib } else { et = type_join(et, contrib, table) }
+        i2++
+    }
+    // (MEM Step 0, R4) ESCAPE GATE — an INFERRED element type may not carry a reference. The
+    // annotated form `let xs: []Ref<T> = …` is already rejected in resolve, but the inferred
+    // element here (e.g. `[r, r]`) only surfaces now. This also rejects `a in [a, b]` (its `[a, b]`).
+    if type_contains_ref(et) { return error { message = "a reference cannot be stored in a struct/variant/collection" } }
+    // (#83) CONCRETIZE any sibling element still carrying a SENTINEL now that `et` (the join across
+    // every element) is settled. `[[], [1]]`'s inner `[]` types as `[]Void` on its own (this fn's
+    // own empty-array case, above); type_join now correctly folds `et` to the CONCRETE `[]i64`
+    // (the #83 fix), but the individual element's own `TExpr.type` is untouched — it still says
+    // `[]Void`, and codegen's array-literal case reads the element type OFF THE NODE ITSELF (not
+    // the parent's contribution), so it would still honest-stop. Retype every element whose type
+    // is a (possibly nested) sentinel form of the now-concrete `et` — same mechanism as the
+    // `push(empty(), x)` base-concretization in type_list_builtin above. Only fires when the
+    // element's type is type_eq to et (permissive-equal) AND actually carries a sentinel; a
+    // genuinely-narrower case that WIDENS into a wider et (e.g. a case into a declared variant) is
+    // left alone — codegen's emit_as wraps that at the use site instead.
+    let final_elems = if a.elements.len != 0 && !type_has_sentinel(et) {
+        mut out: []TArrayElem = teko::list::empty()
+        mut j = 0
+        loop {
+            if j >= elems.len { break }
+            let ael = elems[j]
+            let retyped = !ael.is_spread && type_has_sentinel(ael.expr.type) && type_eq(ael.expr.type, et)
+            out = teko::list::push(out, if retyped {
+                    TArrayElem { is_spread = ael.is_spread; expr = TExpr { kind = ael.expr.kind; type = et; line = ael.expr.line; col = ael.expr.col } }
+                } else {
+                    ael
+            })
+            j++
+        }
+        out
+    } else {
+        elems
+    }
+    TExpr { kind = TArrayLit { elements = final_elems }; type = Slice { element = et }; line = 0; col = 0 }
+}
+
+/**
+ * member_const_symbol — the deterministic internal name a type-member const is hoisted under and a
+ * `TypeName::NAME` reference resolves to (#594 crumb 7): the owning type's CANONICAL name joined to
+ * the member by `::`. The hoist pass (`type_type_member_consts`) and the resolver (`find_member_const`)
+ * both compute it from the SAME canonical type name, so a scalar reference matches the inliner's
+ * substitution table and an aggregate reference matches the interned rodata symbol.
+ *
+ * @param type_canonical  the owning type's canonical (`ns::Name`) identity
+ * @param member          the member const's own name
+ * @return                the hoisted const's program-unique name
+ * @since #594
+ */
+fn member_const_symbol(type_canonical: str, member: str) -> str {
+    teko::str::concat(type_canonical, teko::str::concat("::", member))
+}
+
+/**
+ * MemberConstHit — a resolved static member const TOGETHER WITH the type whose OWN body actually
+ * declares it (#594 crumb 7 visibility fix). Walking a subclass's base chain can resolve a const
+ * declared several levels up (`Sub::SECRET` reaching a `Base`-declared const); `private` reach must
+ * gate on THAT declaring type's namespace, never the path's leading (possibly-derived) type's — a
+ * private base const must not leak cross-namespace through an unrelated subclass's name.
+ *
+ * @param cd         the resolved member const declaration
+ * @param declaring  the type whose OWN body declares `cd` (the nearest one — shadowing wins)
+ */
+type MemberConstHit = struct { cd: parser::ConstDecl; declaring: parser::TypeDecl }
+
+/**
+ * resolve_member_const_hit — the nearest static member const named `seg` reachable from `owner`,
+ * walking the base chain (a subclass inherits a base's member const by name; a nearer declaration
+ * shadows a farther one — static hiding, D6) (#594 crumb 7), together with the type that ACTUALLY
+ * declares it. Checks `owner`'s OWN consts FIRST (struct/class/trait bodies alike — shadowing), only
+ * recursing into a class's base when its own body declares no such name. Returns null when no member
+ * const named `seg` exists on the type or its bases.
+ *
+ * @param owner  the type to resolve from (struct/class/abstract/trait)
+ * @param seg    the last path segment (the member const's name)
+ * @param table  the type table (to follow a class's base chain)
+ * @return       the resolved const plus its actual declaring type, or null when not found
+ * @since #594
+ */
+fn resolve_member_const_hit(owner: parser::TypeDecl, seg: str, table: TypeTable) -> MemberConstHit | null {
+    let own = body_consts(owner.body)
+    mut i: u64 = 0
+    loop {
+        if i >= own.len { break }
+        if own[i].name == seg { return MemberConstHit { cd = own[i]; declaring = owner } }
+        i++
+    }
+    match owner.body {
+        parser::ClassBody as cb => {
+            if !cb.has_base { return null }
+            let base_decl = match type_table_find(table, cb.base_name, "") { parser::TypeDecl as td => td; error => return null }
+            resolve_member_const_hit(base_decl, seg, table)
+        }
+        _ => null
+    }
+}
+
+/**
+ * member_const_visible — enforce a static member const's reach at a `TypeName::NAME` use site (#594
+ * crumb 7): a `Private` member const is reachable ONLY from its DECLARING module's namespace — NEVER
+ * the path's leading type's namespace, so `Sub::SECRET` (a private const declared on a `Base` in a
+ * different namespace) is rejected even though `Sub` inherits the name. `Pub`/`Exp` reach across
+ * namespaces (the `Exp` public-ABI distinction is exercised cross-module at crumb 8).
+ *
+ * @param hit     the resolved member const + its actual declaring type
+ * @param table   the type table (to read the declaring type's namespace)
+ * @param ref_ns  the namespace the `TypeName::NAME` reference is written in
+ * @return        null when the access is allowed, else a located visibility error
+ * @since #594
+ */
+fn member_const_visible(hit: MemberConstHit, table: TypeTable, ref_ns: str) -> error | null {
+    match hit.cd.vis {
+        parser::Visibility::Private => {
+            let decl_ns = type_ns_of(table, hit.declaring.name)
+            if decl_ns != ref_ns {
+                return teko::error::err_loc(error { message = $"member const `{hit.cd.name}` is private to `{hit.declaring.name}` — mark it `pub`/`exp` to use it from another module" }, hit.cd.line, hit.cd.col)
+            }
+            null
+        }
+        _ => null
+    }
+}
+
+/**
+ * find_member_const — resolve `TypeName::NAME` to a REFERENCE to its static member const (#594 crumb
+ * 7): a `TVar` bound to the hoisted const's program-unique name (the same name `type_type_member_consts`
+ * emits, keyed on the PATH's leading type — the hoist re-materializes an inherited const once per
+ * owning type, exactly like an inherited method is re-emitted per class), typed with the const's
+ * declared type. `func_ns` is stamped to `owner_ns` — the SAME namespace `type_type_member_consts`
+ * stamps its hoisted `TConstDecl.namespace` with (both derive from the type's own declaring
+ * namespace) — so the c8b `(name, namespace)`-keyed scalar/aggregate inliner's ref key matches the
+ * hoisted const's key and actually substitutes it. An empty `func_ns` here (the regression a
+ * positive-fixture e2e build exposed) matches the hoist ONLY at the root namespace ("" == ""); any
+ * type declared in a non-root namespace then never substitutes, so the reference survives to codegen
+ * as the raw `sym` (a `"Type::NAME"`-shaped string embedding `::`) emitted verbatim as a C
+ * identifier — invalid syntax the C compiler rejects. The inliner then substitutes a scalar's value
+ * or the aggregate's rodata address. Returns null when no such member const exists, so
+ * `type_path_expr` falls through to the enum-member arm.
+ *
+ * @param owner  the resolved leading type (struct/class/abstract/trait)
+ * @param seg    the last path segment (the member const's name)
+ * @param table  the type table (to follow the base chain + read each body's consts)
+ * @return       the typed reference to the member const, or null when not found
+ * @since #594
+ */
+fn find_member_const(owner: parser::TypeDecl, seg: str, table: TypeTable) -> TExpr | null {
+    let hit = match resolve_member_const_hit(owner, seg, table) { MemberConstHit as h => h; null => return null }
+    let owner_ns = type_ns_of(table, owner.name)
+    let rty = match resolve_type(hit.cd.ty, table, owner_ns) { Type as t => t; error => return null }
+    let sym = member_const_symbol(qualify(owner_ns, owner.name), seg)
+    TExpr { kind = TVar { name = sym; is_func = false; func_ns = owner_ns }; type = rty; line = 0; col = 0 }
+}
+
+/**
+ * ns_value_visible — enforce a namespace-qualified value's cross-module reach (#594 crumb 8c, issue
+ * #613): a `private` module-level const is reachable ONLY from its OWN declaring namespace, so
+ * `ns::NAME` naming a private const from a DIFFERENT namespace is a located visibility error — the
+ * qualified spelling never widens a private const's reach (the module-level twin of
+ * `member_const_visible`, D4/D6). A `pub`/`exp` value reaches across namespaces, and a reference from
+ * the const's own namespace is allowed. A dep's private const never reaches here — it is not seeded
+ * across the module boundary (`seed_dep_consts`), so it fails to resolve first.
+ *
+ * @param b       the resolved value binding
+ * @param ref_ns  the namespace the `ns::NAME` reference is written in
+ * @return        null when the access is allowed, else a visibility error (located at the use site by
+ *                the `type_expr` wrapper)
+ * @since #594
+ */
+fn ns_value_visible(b: ValBinding, ref_ns: str) -> error | null {
+    match b.vis {
+        parser::Visibility::Private => {
+            if b.ns != ref_ns {
+                return error { message = $"const `{b.name}` is private to `{b.ns}` — mark it `pub`/`exp` to use it from another module" }
+            }
+            null
+        }
+        _ => null
+    }
+}
+
+/**
+ * type_ns_qualified_value — the namespace-qualified VALUE fallback of `type_path_expr`, reached only
+ * when the path's leading qualifier does NOT resolve as a type, so `ns::NAME` names a module-level
+ * value — a `pub`/`exp` const or a top-level fn-value declared in namespace `ns` — rather than a
+ * `Type::Member`. Emits the SAME `TVar` a bare reference produces, stamping `func_ns` with the value's
+ * OWN full declaring namespace (`b.ns`, which the short written qualifier selects by the ends-with
+ * rule) — never the short qualifier — so the c8b `(name, namespace)`-keyed scalar inliner substitutes
+ * a qualified const identically and a qualified fn-value lowers to its `tk_closure` mangle. A name
+ * that resolves as NEITHER a type nor a value
+ * surfaces the ORIGINAL type-resolution error `type_err` (backward-compatible with the pre-#613
+ * `unknown type` diagnostic) (#594 crumb 8c, issue #613).
+ *
+ * @param pe        the parsed path expression
+ * @param member    the path's last segment (the value's bare name)
+ * @param type_err  the type-resolution error to surface when no value binding matches either
+ * @param env       the type-checking environment (value bindings + `cur_ns`)
+ * @return          the typed value reference, or a located error
+ * @throws          a visibility error for a `private` cross-namespace const, else `type_err`
+ * @since #594
+ */
+fn type_ns_qualified_value(pe: parser::PathExpr, member: str, type_err: error, env: Env) -> TExpr | error {
+    let qualifier = path_qualifier(pe.path, pe.path.segments.len - 1)
+    let b = match lookup_value_in_ns(env, member, qualifier) { ValBinding as vb => vb; error => return type_err }
+    match ns_value_visible(b, env.cur_ns) { error as e => return e; null => { } }
+    let is_fn = b.ns.len > 0 && (match b.type { Func => true; _ => false })
+    TExpr { kind = TVar { name = member; is_func = is_fn; func_ns = b.ns }; type = b.type; line = 0; col = 0 }
+}

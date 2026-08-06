@@ -1,0 +1,266 @@
+// src/checker/typer.tks  (namespace 'teko::checker')
+// Each check_* (E4/E5) EVOLVES into a type_*: the SAME checks (B.22 regimes, B.20
+// `if`, B.15 `match` + exhaustiveness), but the producer BUILDS the typed node
+// instead of returning a bare Type. Predicates (is_bool/is_integer/op_is_*),
+// resolvers (resolve_type), env (lookup/define) and the pattern + exhaustiveness
+// logic (check_pattern/exhaustive) are reused from their stages — re-derivation,
+// not duplication (M.5). C1: every node, statement and item re-derived.
+use teko::lexer
+use teko::parser
+
+fn type_param_call_error(decl: parser::TypeDecl, table: TypeTable) -> error | null {
+    if !is_type_param_decl(decl) { return null }
+    match constraint_interfaces(decl.type_constraints[0], table) {
+        []str => null
+        error as e => e
+    }
+}
+
+/**
+ * Build the direct-method-dispatch callee as a TWO-segment path whose qualifier segment carries the
+ * receiver's FULL CANONICAL class name (`ns::…::Class`) and whose last segment is the method, so
+ * `lookup_call`/`call_ns` key off the exact owning namespace and never collide with a same-bare
+ * class in a sibling namespace (#290, #109-family). The receiver's `struct_name` is already
+ * canonical (from `recv_t = Named{n.name}`), so it is placed verbatim as the single qualifier
+ * segment; `ns_matches_call_qualifier` then compares `b.ns` against that whole canonical string
+ * (equals, or ends-with `::<class>`), disambiguating two same-bare classes. Keeping the qualifier in
+ * ONE segment — rather than splitting it back to `[..ns.., Class]` — means the callee never starts
+ * with `teko`, so it never trips the interpreter's `teko`-rooted builtin name-sniffer (which would otherwise
+ * treat a method named `len`/`str`/`parse`/… on a `teko::…` class as a string builtin). Mirrors how
+ * FIELD access already resolves off the canonical `Named` via the type table (why fields never
+ * regressed). Both backends read only the LAST segment (the method) plus `TCall.call_ns`, so the
+ * qualifier's shape is transparent to codegen and the interpreter.
+ *
+ * @param struct_name  the receiver's canonical class name (`ns::…::Class`, or bare at the root ns)
+ * @param method       the dispatched method's bare name
+ * @return             the `[Class-canonical, method]` callee path
+ * @since onda-3 (#290)
+ */
+fn method_dispatch_callee(struct_name: str, method: str) -> parser::Path {
+    mut segs: []parser::Segment = teko::list::push(teko::list::empty(), parser::Segment { name = struct_name })
+    segs = teko::list::push(segs, parser::Segment { name = method })
+    parser::Path { segments = segs }
+}
+
+/** `recv.method(args)` — an INSTANCE struct-method dot-call (OOP A1, 2026-07-01). Desugars into
+    an ordinary `StructName::method(recv, ...args)` Call and delegates to `type_call` wholesale
+    (reuses arity/defargs/generics/namespace-mangling for free — the same trick `~` used for
+    `teko::string::concat`). The receiver is typed ONCE here just to discover which struct/method
+    is targeted; `type_call` re-types it (and every arg) as part of its normal argument pass.
+    Flags-typed receivers dispatch to type_flags_method (the dispatch's job, mirroring the C
+    switch's precedence — see type_dispatch's MethodCall arm), never reaching here. A bare `.` call
+    on an un-narrowed `T | null` receiver stays a compile error (NP-OOP, issue #116) — but names WHY
+    and points at the narrowing match (`require_narrowed`) instead of the deferral message. The
+    receiver-type lookup (`type_table_find`) is a resolved-name probe (#109 W1, no referencing ns); once resolved,
+    a type-param's swallowed constraint error (S6, M.1 — a trait atom / an unknown atom / a Risco-3
+    ambiguity) re-surfaces here, named, before an INTERFACE-typed receiver's DYNAMIC contract-method
+    call resolves against the interface's EFFECTIVE (extends-transitive) signature list; its index
+    there is the vtable slot both backends dispatch through. The receiver rides as args[0] (an
+    interface value, or a class instance the emitters upcast on the fly). Mirror:
+    expr.c::type_method_call. */
+fn type_method_call(mc: parser::MethodCall, env: Env, table: TypeTable) -> TExpr | error {
+    let recv_t = match type_expr(mc.receiver, env, table) { TExpr as te => te.type; error as e => return e }
+    if is_flags_named(recv_t, table) { return error { message = "method typing is deferred (B.29 / M.4)" } }
+    match recv_t {
+        Variant => if variant_has_null_member(recv_t) { return require_narrowed(recv_t) }
+        _ => { }
+    }
+    let struct_name = match recv_t { Named as n => n.name; _ => return error { message = "method typing is deferred (B.29 / M.4)" } }
+    let decl = match type_table_find(table, struct_name, "") { parser::TypeDecl as td => td; error => return error { message = "method typing is deferred (B.29 / M.4)" } }
+    match type_param_call_error(decl, table) { error as e => return e; null => { } }
+    match decl.body {
+        parser::InterfaceBody as ib => return type_contract_dispatch(ib, struct_name, mc, env, table)
+        parser::TraitBody as tb => return type_contract_dispatch(parser::InterfaceBody { extends = teko::list::empty(); methods = tb.methods }, struct_name, mc, env, table)
+        _ => { }
+    }
+    // (W10b.CLASS increment 1) a class's instance dot-call reuses this SAME desugar — only the
+    // methods list's source differs; a class's methods are otherwise typed exactly like a struct's.
+    let methods = match decl.body {
+        parser::StructBody as sb => sb.methods
+        parser::ClassBody as cb => match effective_class_methods(cb, table) { []parser::Function as f => f; error as e => return e }   // (W10b.CLASS increment 2) inherited methods are callable too
+        _ => return error { message = "method typing is deferred (B.29 / M.4)" }
+    }
+    if methods.len == 0 { return error { message = $"no such method '{mc.method}' on struct '{struct_name}'" } }
+    mut mi: u64 = 0
+    mut found = false
+    mut mfn = methods[0]   // placeholder; overwritten below iff `found` (Teko has no uninitialized values)
+    loop {
+        if mi >= methods.len { break }
+        if methods[mi].name == mc.method { found = true; mfn = methods[mi]; break }
+        mi++
+    }
+    if !found { return error { message = $"no such method '{mc.method}' on struct '{struct_name}'" } }
+    let is_instance = mfn.params.len > 0 && !mfn.params[0].has_type
+    if !is_instance { return error { message = $"'{mc.method}' is a static method — call it as {struct_name}::{mc.method}(…)" } }
+    // (W10b.CLASS residual — intern visibility) a private (default) method is reachable only
+    // from its OWN declaring class's code, or — if `intern` — a subclass's too. Struct methods
+    // stay all-public (W10b.0.A) — this check only fires for a ClassBody receiver.
+    match decl.body {
+        parser::ClassBody => {
+            let owner = match find_method_owner(struct_name, table, mc.method) { MemberOwner as mo => mo; error as e => return e }
+            if !member_accessible(owner, env.owner_type, table) {
+                return error { message = $"method '{mc.method}' is private to {owner.declaring_class}" }
+            }
+        }
+        _ => { }
+    }
+    // (#98) VIRTUAL DISPATCH through a POLYMORPHIC-BASE-typed receiver. When the receiver's STATIC
+    // type is a `virtual`/`abstract` class, the value may hold a subclass, so the call dispatches
+    // dynamically through the base's vtable — exactly the D3 mechanism, keyed on the base class as
+    // the "contract". The slot is the method's index in the base's EFFECTIVE method list (the same
+    // order codegen's `tk_vt_<Sub>_<Base>` build uses). The receiver rides args[0]; both engines
+    // resolve the CONCRETE override (interpreter by the payload's class name, native via the vtable slot).
+    // A `sealed` class is never a base — is_polymorphic_base filters it — so its calls stay direct.
+    match decl.body {
+        parser::ClassBody as bcb => {
+            if is_polymorphic_base(struct_name, table) {
+                let slot_res = base_vtable_slot(struct_name, mc.method, table)
+                match slot_res {
+                    u32 as bslot => {
+                        let bft = match method_func_type(mfn, struct_name, table, env.cur_ns) { Type as t => t; error as e => return e }   // (#109 W1) ref_ns = the call's enclosing namespace
+                        let bf = match bft { Func as ff => ff; _ => return error { message = "internal: base method signature is not a function type" } }
+                        mut bcargs: []parser::Expr = teko::list::push(teko::list::empty(), mc.receiver)
+                        mut bai: u64 = 0
+                        loop { if bai >= mc.args.len { break }; bcargs = teko::list::push(bcargs, mc.args[bai]); bai++ }
+                        mut bcnames: []str = teko::list::empty()
+                        mut bni: u64 = 0
+                        loop { if bni >= bcargs.len { break }; bcnames = teko::list::push(bcnames, ""); bni++ }
+                        let bdargs = match resolve_defargs(bf, bcargs, bcnames) { []parser::Expr as x => x; error as e => return e }
+                        if bdargs.len != bf.params.len { return error { message = "wrong number of arguments" } }
+                        mut biargs: []TExpr = teko::list::empty()
+                        mut bii: u64 = 0
+                        loop {
+                            if bii >= bdargs.len { break }
+                            mut ba = match type_expr(bdargs[bii], env, table) { TExpr as te => te; error as e => return e }
+                            if type_is_void(ba.type) { return error { message = "a `void` expression cannot be passed as an argument (M.1)" } }
+                            let bpt = bf.params[bii]
+                            ba = match coerce_argument_into(ba, bpt, table) { TExpr as x => x; error as e => return e }
+                            biargs = teko::list::push(biargs, ba)
+                            bii++
+                        }
+                        let bseg_base = parser::Segment { name = struct_name }   // the base class — the vtable key
+                        let bseg_m = parser::Segment { name = mc.method }
+                        mut bsegs: []parser::Segment = teko::list::push(teko::list::empty(), bseg_base)
+                        bsegs = teko::list::push(bsegs, bseg_m)
+                        return TExpr { kind = TCall { callee = parser::Path { segments = bsegs }; args = biargs; call_ns = ""; is_closure_call = false; callee_type = bft; is_iface_dispatch = true; iface_slot = bslot }; type = bf.ret; line = 0; col = 0 }
+                    }
+                    error => { }   // method not in the base vtable → fall through to the direct desugar (a NEW own method reachable only when receiver is statically the base)
+                }
+            }
+        }
+        _ => { }
+    }
+    let segs = method_dispatch_callee(struct_name, mc.method).segments
+    mut cargs: []parser::Expr = teko::list::push(teko::list::empty(), mc.receiver)
+    mut ai: u64 = 0
+    loop { if ai >= mc.args.len { break }; cargs = teko::list::push(cargs, mc.args[ai]); ai++ }
+    mut cnames: []str = teko::list::empty()
+    mut ni: u64 = 0
+    loop { if ni >= cargs.len { break }; cnames = teko::list::push(cnames, ""); ni++ }
+    type_call(parser::Call { callee = parser::Path { segments = segs }; args = cargs; arg_names = cnames; type_args = teko::list::empty() }, env, table)
+}
+
+/**
+ * struct_iface_named_stop — the located, named honest-stop for a STRUCT value used where an
+ * interface (or trait) VALUE is required. Returns the diagnostic error when `from` is a struct
+ * that nominally conforms to the contract `to` yet cannot up-cast into it (a struct has no stable
+ * address to back a fat pointer, resolve.tks:785); returns null otherwise, so a class `from` and a
+ * non-conforming `from` fall through to the caller's generic mismatch. The interface-value boxing
+ * of a struct is deferred to the safety spine (docs/design/interface-value-type.md §4) — this only
+ * NAMES the gap and points the user at the two surfaces that DO dispatch a struct's contract.
+ *
+ * @param from   the source (value) type at a widen/assign/arg site
+ * @param to     the destination (expected) contract type
+ * @param table  the program's type table (conformance + kind probes)
+ * @return       the located `err_typed` honest-stop, or null when the gap does not apply
+ * @see          struct_conforms_but_not_class — the predicate this diagnoses
+ * @since 0.3.0.29 interface-value keystone
+ */
+fn struct_iface_named_stop(from: Type, to: Type, table: TypeTable) -> error | null {
+    if !struct_conforms_but_not_class(from, to, table) { return null }
+    teko::error::err_typed(error { message = "a `struct` value cannot be used as the interface `<Iface>` — a struct has no stable address to dispatch through. Make the implementer a `class` (`type T = class & <Iface>`), or take it by a generic contract-bound parameter (`fn f<T: <Iface>>(x: T)`), which dispatches statically. (interface-value boxing of a struct is deferred to the safety spine — docs/design/interface-value-type.md §4)" }, type_render(to), type_render(from))
+}
+
+/**
+ * (W10b.D2/D3 / TR1) Type a dynamic contract-method dot-call `recv.method(args)` on an INTERFACE or
+ * TRAIT receiver: resolve `method` to its dispatch contract + vtable slot, type the receiver + args
+ * against the contract's effective signature (defaults live on the contract, DEFARGS rule E), and
+ * emit an `is_iface_dispatch` TCall keyed off the real contract name (the vtable/upcast key). A
+ * trait passes an InterfaceBody VIEW (`extends = []`, `methods = the trait's own method list`), so
+ * this one routine serves both contract kinds (a trait value IS a contract value — W10b.D3 reuse).
+ *
+ * @param ib          the contract's InterfaceBody (a trait's is a synthesized view)
+ * @param struct_name the resolved receiver contract name (the dispatch key)
+ * @param mc          the method-call AST node (receiver + method + args)
+ * @param env         the typing environment
+ * @param table       the folded type table
+ * @return the typed dynamic-dispatch TCall
+ * @throws when the method is not on the contract, arity/types mismatch, or a signature fails to resolve
+ */
+fn type_contract_dispatch(ib: parser::InterfaceBody, struct_name: str, mc: parser::MethodCall, env: Env, table: TypeTable) -> TExpr | error {
+    let dispatch = match resolve_iface_dispatch(ib, struct_name, mc.method, table) { IfaceDispatch as d => d; error as e => return e }
+    let iface_canon = dispatch.iface
+    let imfn = dispatch.method
+    let slot = dispatch.slot
+    let ift = match method_func_type(imfn, struct_name, table, env.cur_ns) { Type as t => t; error as e => return e }
+    let f = match ift { Func as ff => ff; _ => return error { message = "internal: interface method signature is not a function type" } }
+    mut icargs: []parser::Expr = teko::list::push(teko::list::empty(), mc.receiver)
+    mut ica: u64 = 0
+    loop { if ica >= mc.args.len { break }; icargs = teko::list::push(icargs, mc.args[ica]); ica++ }
+    mut icnames: []str = teko::list::empty()
+    mut icn: u64 = 0
+    loop { if icn >= icargs.len { break }; icnames = teko::list::push(icnames, ""); icn++ }
+    let dargs = match resolve_defargs(f, icargs, icnames) { []parser::Expr as x => x; error as e => return e }
+    if dargs.len != f.params.len { return error { message = "wrong number of arguments" } }
+    mut iargs: []TExpr = teko::list::empty()
+    mut ii: u64 = 0
+    loop {
+        if ii >= dargs.len { break }
+        mut a = match type_expr(dargs[ii], env, table) { TExpr as te => te; error as e => return e }
+        if type_is_void(a.type) { return error { message = "a `void` expression cannot be passed as an argument (M.1)" } }
+        let pt = f.params[ii]
+        a = match coerce_argument_into(a, pt, table) { TExpr as x => x; error as e => return e }
+        iargs = teko::list::push(iargs, a)
+        ii++
+    }
+    let seg_iface = parser::Segment { name = iface_canon }
+    let seg_m = parser::Segment { name = mc.method }
+    mut isegs: []parser::Segment = teko::list::push(teko::list::empty(), seg_iface)
+    isegs = teko::list::push(isegs, seg_m)
+    TExpr { kind = TCall { callee = parser::Path { segments = isegs }; args = iargs; call_ns = ""; is_closure_call = false; callee_type = ift; is_iface_dispatch = true; iface_slot = slot }; type = f.ret; line = 0; col = 0 }
+}
+
+/**
+ * A single-segment path wrapping `name` (`Cell` → `Path{[Cell]}`) — the minimal path for resolving a
+ * construction-site base type through `resolve_type` (#254 L5).
+ *
+ * @param name  the single segment name
+ * @return      a one-segment path
+ * @since onda-3 (#254 L5)
+ */
+fn single_seg_path(name: str) -> parser::Path {
+    parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = name }) }
+}
+
+/**
+ * A copy of `p` with the segment at position `idx` renamed to `name` (`Cell::make`, idx 0 → `X`,
+ * yields `X::make`) — the positional twin of `rewrite_last_segment` (#254 L5). Used to rewrite a
+ * generic static call's OWNER segment (the second-to-last) to the mangled instance name.
+ *
+ * @param p     the path to rewrite
+ * @param idx   the segment position to rename
+ * @param name  the new segment name
+ * @return      `p` with segment `idx` renamed
+ * @since onda-3 (#254 L5)
+ */
+fn rewrite_segment_at(p: parser::Path, idx: u64, name: str) -> parser::Path {
+    mut segs: []parser::Segment = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= p.segments.len { break }
+        if i == idx { segs = teko::list::push(segs, parser::Segment { name = name }) }
+        else { segs = teko::list::push(segs, p.segments[i]) }
+        i++
+    }
+    parser::Path { segments = segs }
+}

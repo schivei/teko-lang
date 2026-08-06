@@ -1,0 +1,254 @@
+// src/checker/typer.tks  (namespace 'teko::checker')
+// Each check_* (E4/E5) EVOLVES into a type_*: the SAME checks (B.22 regimes, B.20
+// `if`, B.15 `match` + exhaustiveness), but the producer BUILDS the typed node
+// instead of returning a bare Type. Predicates (is_bool/is_integer/op_is_*),
+// resolvers (resolve_type), env (lookup/define) and the pattern + exhaustiveness
+// logic (check_pattern/exhaustive) are reused from their stages — re-derivation,
+// not duplication (M.5). C1: every node, statement and item re-derived.
+use teko::lexer
+use teko::parser
+
+
+/**
+ * widen_int_into_bignum — the implicit widening of a machine INTEGER VALUE into `bigint`/`dec`, as a
+ * call to the library constructor that receives it. The owner's rule puts `bigint`/`dec` in the same
+ * sentence as the machine widths (*"o mesmo vale para floats e para bigint e decimal"*), and a
+ * bignum holds every machine integer, so this direction can never overflow and never panics.
+ *
+ * Distinct from `bignum_adopt_operand`, which handles the same target for a bare LITERAL operand of a
+ * bignum OPERATOR. That one could stay literal-only because `big + 1` is the only shape an operator
+ * meets; a declared target (`let b: bigint = some_i32`) meets real VALUES, which is precisely the
+ * case that used to be rejected with "no implicit conversion".
+ *
+ * @param v       the typed integer value
+ * @param target  the candidate target type
+ * @return        the constructor call yielding `v` as a bignum, or `null` when `target` is not a
+ *                bignum or `v` is not a machine integer
+ * @since         0.3.1
+ */
+fn widen_int_into_bignum(v: TExpr, target: Type) -> TExpr | null {
+    let kind = bignum_kind(target)
+    if kind == "" { return null }
+    if !is_integer(v.type) { return null }
+    let ctor = bignum_ctor_of(v.type)
+    let arg = bignum_ctor_argument(v, ctor)
+    bignum_call(kind, ctor, teko::list::push(teko::list::empty(), arg), bignum_named(kind))
+}
+
+/**
+ * bignum_ctor_argument — the value as the constructor's own parameter type: `of_u64` already receives
+ * the `u64` unchanged, while `of` receives an `i64`, so a narrower integer is first wrapped in the
+ * lossless widening `TCast` that both backends lower to nothing.
+ *
+ * @param v     the typed integer value
+ * @param ctor  the constructor name `bignum_ctor_of` chose
+ * @return      `v`, widened to the constructor's parameter type when it is not already that type
+ * @since       0.3.1
+ */
+fn bignum_ctor_argument(v: TExpr, ctor: str) -> TExpr {
+    if ctor == "of_u64" { return v }
+    let carrier = Prim { kind = PrimKind::I64 }
+    if type_eq(v.type, carrier) { return v }
+    TExpr { kind = TCast { expr = v }; type = carrier; line = v.line; col = v.col }
+}
+
+/**
+ * widen_value_into — the implicit WIDENING step of the value-into-target ladder: a lossless machine
+ * widening (`numeric_widens_implicitly` — the same predicate the arithmetic W-RULE uses) becomes a
+ * synthetic widening `TCast`, and a machine integer into `bigint`/`dec` becomes the library
+ * constructor call. Answers `null` when no implicit widening applies, leaving the caller's remaining
+ * rungs (literal adoption, then the honest stop) to decide.
+ *
+ * The synthetic `TCast` is deliberately a REAL node in the typed tree rather than a retyped leaf:
+ * the ARITH-CAST-RATE gate (D4) counts `TCast` nodes, so an implicit widening is COUNTED by the same
+ * meter that bounds hand-written casts instead of slipping past it.
+ *
+ * @param v       the typed value
+ * @param target  the declared target type
+ * @return        the value as a value of `target`, or `null` when it does not implicitly widen
+ * @see           numeric_widens_implicitly — the rule, its C# lineage, and its Rust divergence
+ * @since         0.3.1
+ */
+fn widen_value_into(v: TExpr, target: Type) -> TExpr | null {
+    if numeric_widens_implicitly(v.type, target) {
+        return TExpr { kind = TCast { expr = v }; type = target; line = v.line; col = v.col }
+    }
+    widen_int_into_bignum(v, target)
+}
+
+/**
+ * coerce_value_into — the ONE ladder a value climbs to reach a declared target type, in order:
+ * already admissible (`assignable_to` — B.14 case→variant, `T`→`T?`, upcasts) → implicit numeric
+ * widening (`widen_value_into`) → a fitting bare LITERAL adopting the target (`retype_literal`, C6)
+ * → the honest stop naming expected and actual.
+ *
+ * One function because the rungs used to be open-coded at every target site — assignment, field
+ * assignment, index assignment, write-through-reference — and a rung added to one was a rung missing
+ * from the others. The implicit widening is exactly the kind of rung that would have been added
+ * unevenly.
+ *
+ * @param v       the typed value
+ * @param target  the declared target type
+ * @param table   the folded type table
+ * @param what    the diagnostic message for the target kind ("assigned value does not match …")
+ * @return        the value as a value of `target`
+ * @throws        `what`, annotated with the rendered expected/actual types, when no rung applies
+ * @since         0.3.1
+ */
+/**
+ * adopt_sentinel_slice_type — an UNTYPED empty collection (`teko::list::empty()` / `[]`, whose
+ * element type is still the `Void` sentinel) ADOPTS the declared target's concrete slice type, so
+ * codegen sees the element with no back-inference (#4). Every other value KEEPS its own natural type
+ * and the target rides along as the statement's `bound`, because the emit wraps the value at the use
+ * site — clobbering a case type here made a variant member emit its own fields under the union's C
+ * type and cc reject the field designators.
+ *
+ * Extracted because the identical five lines stood in `type_binding`, `type_assign` and
+ * `type_field_assign` — three copies of one rule, the shape that decays into two of them being
+ * updated and the third not.
+ *
+ * @param v       the typed value
+ * @param target  the declared target type
+ * @return        `v` retyped to `target` when it is a sentinel empty collection and `target` is a
+ *                concrete slice, else `v` unchanged
+ */
+fn adopt_sentinel_slice_type(v: TExpr, target: Type) -> TExpr {
+    let v_is_sentinel = match v.type { Slice as vs => match vs.element { Void => true; _ => false }; _ => false }
+    if !v_is_sentinel { return v }
+    let target_is_concrete = match target { Slice as bs => match bs.element { Void => false; _ => true }; _ => false }
+    if !target_is_concrete { return v }
+    TExpr { kind = v.kind; type = target; line = v.line; col = v.col }
+}
+
+fn coerce_value_into(v: TExpr, target: Type, table: TypeTable, what: str) -> TExpr | error {
+    if assignable_to(v.type, target, table) { return v }
+    match widen_value_into(v, target) { TExpr as w => return w; null => { } }
+    if literal_adopts(v, target) { return retype_literal(v, target) }
+    teko::error::err_typed(error { message = what }, type_render(target), type_render(v.type))
+}
+
+/**
+ * coerce_argument_into — the value-into-target ladder for a CALL ARGUMENT, whose rungs differ from
+ * `coerce_value_into`'s in two ways an assignment has no equivalent of: an ALREADY-admissible argument
+ * normally ADOPTS the parameter's type, except where the emit wraps the value at the use site and the
+ * argument must keep its narrow type (`arg_keeps_narrow_type`); and a fitting literal is retyped
+ * SHALLOW (its own `.type` replaced, leaves untouched), which is what the three argument sites have
+ * always done.
+ *
+ * One function because those three sites — the plain call, the interface dispatch, and the base-class
+ * dispatch — each carried their own copy of the whole ladder, and the copies had ALREADY drifted: only
+ * one of the three consulted `struct_iface_named_stop`, so a nominal struct/interface mismatch got a
+ * precise diagnostic through a direct call and a bare "argument type mismatch" through a dispatched
+ * one. Adding the implicit-widening rung to three copies would have been the next drift.
+ *
+ * @param a      the typed argument
+ * @param pt     the parameter's declared type
+ * @param table  the folded type table
+ * @return       the argument as a value of `pt`
+ * @throws       the nominal-mismatch stop, or "argument type mismatch" with expected/actual attached
+ * @since        0.3.1
+ */
+fn coerce_argument_into(a: TExpr, pt: Type, table: TypeTable) -> TExpr | error {
+    if assignable_to(a.type, pt, table) {
+        if arg_keeps_narrow_type(pt, a.type, table) { return a }
+        return TExpr { kind = a.kind; type = pt; line = a.line; col = a.col }
+    }
+    match struct_iface_named_stop(a.type, pt, table) { error as se => return se; null => { } }
+    match widen_value_into(a, pt) { TExpr as w => return w; null => { } }
+    if literal_adopts(a, pt) { return TExpr { kind = a.kind; type = pt; line = a.line; col = a.col } }
+    teko::error::err_typed(error { message = "argument type mismatch" }, type_render(pt), type_render(a.type))
+}
+
+/** arg_keeps_narrow_type — an argument that WIDENS into a parameter type `pt` normally ADOPTS `pt`
+    (its TExpr.type is rewritten to `pt`); but where the EMIT wraps the value at the use site, the
+    arg must KEEP its narrow `arg_type` so codegen/interpreter see the concrete value they must wrap. True for:
+    a case→variant widen (emit_as tags the union, including a bare `T`→`T | null` present-wrap), a
+    class→interface/base upcast (fat-pointer build), and a `[]E_a`→`[]E_p` element widen where
+    `E_a != E_p` (the slice is REBUILT element-wise — bare `[]i64`→`[]i64 | null` or covariant
+    `[]Return`→`[]Statement`; #265: the native gate cc-compiles these for the first time, so a
+    widened arg-type would hide the element mismatch and cc would reject the distinct `tk_slice_*`
+    struct). */
+fn arg_keeps_narrow_type(pt: Type, arg_type: Type, table: TypeTable) -> bool {
+    let pt_is_variant = match expand_variant(pt, table) { Variant => true; _ => false }
+    if pt_is_variant { return true }
+    if arg_class_upcast(pt, arg_type, table) { return true }
+    slice_element_widens(pt, arg_type)
+}
+
+/** arg_class_upcast — the param is an interface, (TR1) a trait, or a polymorphic base and the arg is
+    a DIFFERENT-named class conforming to it (a fat-pointer upcast the emit builds from the narrow
+    class). (#265) */
+fn arg_class_upcast(pt: Type, arg_type: Type, table: TypeTable) -> bool {
+    match pt {
+        Named as ptn => match arg_type {
+            Named as atn => (is_interface_name(ptn.name, table) || is_trait_name(ptn.name, table) || is_polymorphic_base(ptn.name, table)) && is_class_name(atn.name, table) && ptn.name != atn.name
+            _ => false
+        }
+        _ => false
+    }
+}
+
+/** slice_element_widens — both types are slices whose ELEMENTS differ (`[]E_a` → `[]E_p`, `E_a != E_p`):
+    a bare→optional element widen or a covariant case→variant element widen. The emit rebuilds the
+    slice element-wise, so the arg must keep its narrow `[]E_a` type for codegen to see the mismatch.
+    A SENTINEL empty slice (`teko::list::empty()`, element = `void`) is EXCLUDED — it carries no
+    concrete element, so it ADOPTS the param's concrete slice type (collections #4) as before. */
+fn slice_element_widens(pt: Type, arg_type: Type) -> bool {
+    match pt {
+        Slice as ps => match arg_type {
+            Slice as as_ => !type_is_void(as_.element) && !type_eq(ps.element, as_.element)
+            _ => false
+        }
+        _ => false
+    }
+}
+
+// check every `return` reachable as a statement (descend into loop bodies and `if`-blocks;
+// match-arm returns await the divergence item — arm bodies are expressions, not statements).
+fn check_returns(stmts: []TStatement, ret: Type, table: TypeTable) -> error | null {
+    mut i = 0
+    loop {
+        if i >= stmts.len { break }
+        match check_return_stmt(stmts[i], ret, table) { null => { }; error as e => return e }
+        i++
+    }
+    null
+}
+
+// the trailing value-expr of a block (its last statement, when that is an expr-statement),
+// or null. (C: tblock_trailing.)
+fn tblock_trailing(stmts: []TStatement) -> TExpr | null {
+    if stmts.len == 0 { return null }
+    match stmts[stmts.len - 1] {
+        TExprStmt as es => es.expr
+        _ => null
+    }
+}
+
+// the block's trailing value-expr IF it is a numeric literal (else null) — for the if/match
+// literal cross-adoption (a `64` branch adopts a sibling's numeric type). (C: tl/el + NUMBER tag.)
+fn trailing_number(stmts: []TStatement) -> TExpr | null {
+    match tblock_trailing(stmts) {
+        TExpr as t => match t.kind { TNumber => t; _ => null }
+        null => null
+    }
+}
+
+/**
+ * Does a numeric literal `n` fit the scalar destination `m` — an int/float prim it fits, or `byte`
+ * (= u8, B.36)? A bool or non-numeric `m` (`cast_kind` rejects it) never fits. The single-member
+ * fit test shared by the scalar and union arms of `literal_adopts`/`retype_literal`.
+ *
+ * @param n  the typed numeric-literal payload (its value/float flavor and magnitude)
+ * @param m  the candidate destination scalar type
+ * @return   true iff `n` is representable in `m` under the same range rules as a binding
+ */
+fn number_fits_member(n: TNumber, m: Type) -> bool {
+    match cast_kind(m) {
+        PrimKind as k => {
+            if n.is_float { prim_is_float(k) && float_fits(n.fval, k) }
+            else { prim_is_int(k) && numint_fits(n.value, k) }
+        }
+        error => false
+    }
+}

@@ -1,0 +1,235 @@
+// src/checker/typer.tks  (namespace 'teko::checker')
+// Each check_* (E4/E5) EVOLVES into a type_*: the SAME checks (B.22 regimes, B.20
+// `if`, B.15 `match` + exhaustiveness), but the producer BUILDS the typed node
+// instead of returning a bare Type. Predicates (is_bool/is_integer/op_is_*),
+// resolvers (resolve_type), env (lookup/define) and the pattern + exhaustiveness
+// logic (check_pattern/exhaustive) are reused from their stages — re-derivation,
+// not duplication (M.5). C1: every node, statement and item re-derived.
+use teko::lexer
+use teko::parser
+
+
+/**
+ * adopt_match_arm_literals — rebuild every arm whose trailing value is a bare numeric literal
+ * that FITS `anchor` (`literal_adopts`) so its leaf is retyped at `anchor` instead of its bare
+ * default (`retype_literal`) — the `match` counterpart of `type_if`'s literal cross-adoption
+ * (typer.tks `type_if`), so `match k { i32 as n => n; null => 0 }` joins to `i32`, not the
+ * accidental `i32 | i64` a bare-defaulted literal would otherwise force into the union. An arm
+ * whose literal does not fit `anchor`, or whose trailing value is not a bare literal, passes
+ * through unchanged.
+ *
+ * @param arms    the typed match arms
+ * @param anchor  the type sibling literal arms adopt into
+ * @return        the arms, with every fitting literal leaf retyped at `anchor`
+ */
+fn adopt_match_arm_literals(arms: []TArm, anchor: Type) -> []TArm {
+    mut out: []TArm = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= arms.len { break }
+        let a = arms[i]
+        let next = match match_arm_literal_leaf(a) {
+            TExpr as t => if literal_adopts(t, anchor) { TArm { pattern = a.pattern; has_when = a.has_when; guard = a.guard; body = retype_block_trailing(a.body, anchor) } } else { a }
+            null => a
+        }
+        out = teko::list::push(out, next)
+        i++
+    }
+    out
+}
+
+/**
+ * type_match — `match` as a VALUE (B.15/B.20): types every arm, then unifies the NON-diverging
+ * arms' trailing types into the match's own type. A diverging arm (`return`/`panic`/`exit`)
+ * yields no value and is skipped in unification; if EVERY arm diverges the match type is void.
+ * Before the join, a bare numeric-literal arm cross-adopts a sibling's CONCRETE (non-literal)
+ * type (`match_join_anchor` + `adopt_match_arm_literals`), mirroring `type_if`'s own literal
+ * cross-adoption.
+ *
+ * @param m      the parsed match expression
+ * @param env    the enclosing type environment
+ * @param table  the resolved type table
+ * @return       the typed match expression, or an error (non-exhaustive, or an arm's own error)
+ */
+fn type_match(m: parser::MatchExpr, env: Env, table: TypeTable) -> TExpr | error {
+    let s = match type_expr(m.subject, env, table) { TExpr as te => te; error as e => return e }
+    if m.arms.len == 0 { return error { message = "a `match` needs at least one arm" } }
+    mut typed: []TArm = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= m.arms.len { break }
+        let ai = match type_match_arm(m.arms[i], s.type, env, table) { TArm as a => a; error as e => return e }
+        typed = teko::list::push(typed, ai)
+        i++
+    }
+    let arms = match match_join_anchor(typed) { Type as anchor => adopt_match_arm_literals(typed, anchor); null => typed }
+    mut have_type = false
+    mut first: Type = Void { }
+    mut j = 0
+    loop {
+        if j >= arms.len { break }
+        if !tblock_diverges(arms[j].body) {
+            let t = tblock_type(arms[j].body)
+            if !have_type { first = t; have_type = true }
+            else { first = type_join(first, t, table) }
+        }
+        j++
+    }
+    let rarms = match resolve_foreach_placeholders(m.arms, s.type) { []parser::Arm as a => a; error as e => return e }
+    if !exhaustive(rarms, s.type, table, env.cur_ns) { return error { message = "non-exhaustive `match` (cover all cases or add `_`)" } }
+    let result = if have_type { first } else { Void { } }
+    TExpr { kind = TMatchExpr { subject = s; arms = arms }; type = result; line = 0; col = 0 }
+}
+
+// ---- match as a STATEMENT: validate the arms; exhaustiveness forced; value discarded → void ----
+fn type_match_stmt(m: parser::MatchExpr, env: Env, table: TypeTable) -> TExpr | error {
+    let s = match type_expr(m.subject, env, table) { TExpr as te => te; error as e => return e }
+    mut arms: []TArm = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= m.arms.len { break }
+        let ai = match type_match_arm(m.arms[i], s.type, env, table) { TArm as a => a; error as e => return e }
+        arms = teko::list::push(arms, ai)
+        i++
+    }
+    let rarms = match resolve_foreach_placeholders(m.arms, s.type) { []parser::Arm as a => a; error as e => return e }
+    if !exhaustive(rarms, s.type, table, env.cur_ns) { return error { message = "non-exhaustive `match` (cover all cases or add `_`)" } }
+    TExpr { kind = TMatchExpr { subject = s; arms = arms }; type = Void { }; line = 0; col = 0 }
+}
+
+// ---- statements (the evolved check_* — produce the typed node + advance the env) ----
+
+// Type an expression flowing into a known EXPECTED type: a struct-literal is given that type so a
+// generic constructor `Box { … }` targets the concrete instance; anything else types normally. Used
+// at the binding level AND for struct-literal field values, so NESTED `Box { value = Box { … } }`
+// threads the expected type all the way down (S4 annotation-driven).
+fn type_value_expected(e: parser::Expr, expected: Type, env: Env, table: TypeTable) -> TExpr | error {
+    match e.kind {
+        parser::StructLit as sl => type_struct_lit(sl, expected, env, table)
+        parser::Lambda as lam => type_lambda(lam, expected, env, table)   // (W10) target type → un-annotated closure params infer (ruling 3)
+        parser::ArrayLit as al => {
+            if is_iface_slice(expected, table) { return type_array_lit_expected(al, expected, env, table) }   // (W10b.D3) []<interface> literal
+            adopt_value_to_expected(e, expected, env, table)
+        }
+        parser::NullLit => {
+            if null_widens_into(expected, table) { return TExpr { kind = TNullLit { }; type = Null { }; line = e.line; col = e.col } }
+            adopt_value_to_expected(e, expected, env, table)
+        }
+        _ => adopt_value_to_expected(e, expected, env, table)
+    }
+}
+
+/**
+ * Types a value against a known `expected` target and BORNS a fitting numeric literal (scalar,
+ * negative, or one reachable through an `if`/`match`/array composite) at that target — the single
+ * context-directed adoption path (M.5). A value already assignable to `expected` keeps its NATURAL
+ * type (a variant case stays its case type so codegen's `emit_as` wraps it); otherwise a fitting
+ * literal adopts `expected` via `literal_adopts` + `retype_literal` (the same pair `type_assign`
+ * uses), so the leaf is born at its narrow width. A non-fitting / non-literal value is returned
+ * unchanged for the caller to diagnose (M.1 fail-early messages preserved at the declaration site).
+ *
+ * @param e         the parsed value expression
+ * @param expected  the destination type the literal adopts
+ * @param env       the typing environment
+ * @param table     the program's type table
+ * @return          the typed value, its literal leaves born at `expected` when they fit, else the
+ *                  natural-typed value; propagates the first typing error
+ */
+fn adopt_value_to_expected(e: parser::Expr, expected: Type, env: Env, table: TypeTable) -> TExpr | error {
+    let t = match type_expr(e, env, table) { TExpr as te => te; error as err => return err }
+    if assignable_to(t.type, expected, table) { return t }
+    if literal_adopts(t, expected) { return retype_literal(t, expected) }
+    t
+}
+
+/**
+ * Does a parameter type accept a context-born literal — a numeric prim, `byte` (= u8), or a slice?
+ * Gates whether an `if`/`match`/array ARGUMENT is routed through `type_value_expected` so its
+ * literal leaves are born at the parameter's width (closing the args analogue of the assign-path
+ * miscompile: an over-`i64` `if`-arm arg must be born at the parameter type, not left `i64`).
+ *
+ * @param t  the parameter type
+ * @return   true iff `t` is a numeric prim, `byte`, or a slice
+ */
+fn param_takes_born_literal(t: Type) -> bool {
+    match t {
+        Byte => true
+        Prim as p => prim_is_int(p.kind) || prim_is_float(p.kind)
+        Slice => true
+        _ => false
+    }
+}
+
+/**
+ * Should this argument be typed against its parameter as an EXPECTED type? True for an `if`/`match`/
+ * array argument whose parameter accepts a born literal, so a fitting literal composite argument is
+ * born at the parameter's narrow width (rather than left `i64`/`f64` and merely outer-retyped). A
+ * non-composite or non-fitting argument is unaffected — the routed path is a no-op for it.
+ *
+ * @param arg    the parsed argument expression
+ * @param param  the parameter type it flows into
+ * @return       true iff the argument should route through `type_value_expected`
+ */
+fn arg_wants_expected(arg: parser::Expr, param: Type) -> bool {
+    let composite = match arg.kind {
+        parser::IfExpr => true
+        parser::MatchExpr => true
+        parser::ArrayLit => true
+        _ => false
+    }
+    if !composite { return false }
+    param_takes_born_literal(param)
+}
+
+/**
+ * (W10b.D3 / TR1) Is `t` a slice whose element is a NAMED contract — an interface OR a trait? The
+ * gate for the heterogeneous-array expected path below (`[]Renderable = [label, button]`).
+ *
+ * @param t     the candidate slice type
+ * @param table the folded type table
+ * @return true iff `t` is `[]Contract` for an interface or trait element
+ */
+fn is_iface_slice(t: Type, table: TypeTable) -> bool {
+    match t {
+        Slice as s => match s.element {
+            Named as n => is_interface_name(n.name, table) || is_trait_name(n.name, table)
+            _ => false
+        }
+        _ => false
+    }
+}
+
+// (W10b.D3) an ARRAY literal flowing into a `[]<interface>` slot: type each element AGAINST the
+// contract element (so `[circle, square]` under `[]Shape` never joins to an inline class union
+// the emitters cannot re-tag). Each element keeps its NARROW class type (emit_as builds the fat
+// pointer per slot); the array's own type adopts the expected `[]<interface>`. A spread element
+// contributes a whole `[]U` — U must widen into the contract element (its value covariant-
+// rebuilds element-wise instead). Mirror of expr.c::type_array_lit_expected.
+fn type_array_lit_expected(a: parser::ArrayLit, expected: Type, env: Env, table: TypeTable) -> TExpr | error {
+    let elem = match expected { Slice as s => s.element; _ => return error { message = "internal: type_array_lit_expected needs a slice expected type" } }
+    mut elems: []TArrayElem = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= a.elements.len { break }
+        let e = match type_expr(a.elements[i].expr, env, table) { TExpr as te => te; error as err2 => return err2 }
+        if a.elements[i].is_spread {
+            let selem = match e.type {
+                Slice as fs => fs.element
+                _ => return error { message = "a spread element (`..xs`) must be a slice (`[]T`)" }
+            }
+            let selem_is_void = match selem { Void => true; _ => false }
+            if selem_is_void { return error { message = "a spread element (`..xs`) must be a slice (`[]T`)" } }
+            if !assignable_to(selem, elem, table) {
+                return teko::error::err_typed(error { message = "array element type mismatch" }, type_render(elem), type_render(selem))
+            }
+        } else {
+            if type_is_void(e.type) { return error { message = "a `void` expression cannot be an array element (M.1)" } }
+            if !assignable_to(e.type, elem, table) {
+                return teko::error::err_typed(error { message = "array element type mismatch" }, type_render(elem), type_render(e.type))
+            }
+        }
+        elems = teko::list::push(elems, TArrayElem { is_spread = a.elements[i].is_spread; expr = e })   // keep the NARROW type — the emit wraps per slot
+        i++
+    }
+    TExpr { kind = TArrayLit { elements = elems }; type = expected; line = 0; col = 0 }
+}

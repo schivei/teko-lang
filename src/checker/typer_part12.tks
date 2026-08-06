@@ -1,0 +1,219 @@
+// src/checker/typer.tks  (namespace 'teko::checker')
+// Each check_* (E4/E5) EVOLVES into a type_*: the SAME checks (B.22 regimes, B.20
+// `if`, B.15 `match` + exhaustiveness), but the producer BUILDS the typed node
+// instead of returning a bare Type. Predicates (is_bool/is_integer/op_is_*),
+// resolvers (resolve_type), env (lookup/define) and the pattern + exhaustiveness
+// logic (check_pattern/exhaustive) are reused from their stages — re-derivation,
+// not duplication (M.5). C1: every node, statement and item re-derived.
+use teko::lexer
+use teko::parser
+
+
+/**
+ * Desugar a Date/Time interpolation hole with a calendar pattern into a `to_string` CALL.
+ *
+ * Rewrites `$"{d:yyyy-MM-dd}"` into `<ns>::date_to_string(d, "yyyy-MM-dd")` (or `time_to_string`),
+ * typed here so codegen and the interpreter see an ordinary str-returning call — both engines then run the
+ * SAME pure-Teko formatter, guaranteeing byte-identical output. The raw (un-typed) hole is reused
+ * as the receiver so the call's own argument typing applies uniformly.
+ *
+ * @param raw_hole  the original (un-typed) hole expression
+ * @param hole_ns   the namespace qualifier of the hole's Date/Time type ("" for a bare type)
+ * @param fn_name   the formatter name from `datetime_formatter_of` (date_to_string/time_to_string)
+ * @param pattern   the calendar pattern captured from the static spec
+ * @param env       the current typing environment
+ * @param table     the resolved type table
+ * @return          the typed `to_string` call, or a checker error if it does not resolve
+ */
+fn desugar_datetime_hole(raw_hole: parser::Expr, hole_ns: str, fn_name: str, pattern: str, env: Env, table: TypeTable) -> TExpr | error {
+    mut segs: []parser::Segment = teko::list::empty()
+    if hole_ns != "" {
+        mut qi: u64 = 0
+        mut seg_start: u64 = 0
+        loop {
+            if qi + 1 >= hole_ns.len { break }
+            if hole_ns[qi] == b':' && hole_ns[qi + 1] == b':' {
+                segs = teko::list::push(segs, parser::Segment { name = teko::str::slice(hole_ns, seg_start, qi) })
+                qi = qi + 2
+                seg_start = qi
+            } else { qi++ }
+        }
+        segs = teko::list::push(segs, parser::Segment { name = teko::str::slice_from(hole_ns, seg_start) })
+    }
+    segs = teko::list::push(segs, parser::Segment { name = fn_name })
+    let pat_expr = parser::Expr { kind = parser::StrLit { text = pattern }; line = 0; col = 0 }
+    mut args: []parser::Expr = teko::list::push(teko::list::empty(), raw_hole)
+    args = teko::list::push(args, pat_expr)
+    mut arg_names: []str = teko::list::push(teko::list::empty(), "")
+    arg_names = teko::list::push(arg_names, "")
+    let call = parser::Call { callee = parser::Path { segments = segs }; args = args; arg_names = arg_names; type_args = teko::list::empty() }
+    type_call(call, env, table)
+}
+
+fn type_interp(in: parser::Interp, env: Env, table: TypeTable) -> TExpr | error {
+    mut holes: []TExpr = teko::list::empty()
+    mut specs: []TFSpec = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= in.holes.len { break }
+        let h = match type_expr(in.holes[i], env, table) { TExpr as te => te; error as e => return e }
+        let dt_fmt = datetime_formatter_of(h.type)
+        if dt_fmt != "" && i < in.specs.len {
+            match in.specs[i].kind {
+                parser::FSpecStatic as fs => {
+                    let hole_ns = match h.type { Named as n => name_qualifier(n.name); _ => "" }
+                    let dh = match desugar_datetime_hole(in.holes[i], hole_ns, dt_fmt, fs.s, env, table) { TExpr as te => te; error as e => return e }
+                    holes = teko::list::push(holes, dh)
+                    specs = teko::list::push(specs, TFSpec { kind = TFSpecNone { } })
+                    i++
+                    continue
+                }
+                _ => { }
+            }
+        }
+        if !is_interp_formattable(h.type) {
+            return error { message = "interpolation hole type not supported in ROUND 0 (must be str/char/bool/byte/error/int/float)" }
+        }
+        holes = teko::list::push(holes, h)
+        // type-check format spec if present
+        if i < in.specs.len {
+            let raw_sp = in.specs[i]
+            let typed_sp = match raw_sp.kind {
+                parser::FSpecNone => TFSpec { kind = TFSpecNone { } }
+                parser::FSpecStatic as fs => {
+                    if !interp_is_numeric(h.type) {
+                        return error { message = "format spec requires a numeric hole (int or float)" }
+                    }
+                    TFSpec { kind = TFSpecStatic { s = fs.s } }
+                }
+                parser::FSpecDynamic as fd => {
+                    if !interp_is_numeric(h.type) {
+                        return error { message = "format spec requires a numeric hole (int or float)" }
+                    }
+                    mut dyn_args: []TExpr = teko::list::empty()
+                    mut k = 0
+                    loop {
+                        if k >= fd.args.len { break }
+                        let da = match type_expr(fd.args[k], env, table) { TExpr as te => te; error as e => return e }
+                        match da.type { Str => { }; _ => return error { message = "dynamic format spec argument must be str" } }
+                        dyn_args = teko::list::push(dyn_args, da)
+                        k++
+                    }
+                    TFSpec { kind = TFSpecDynamic { args = dyn_args } }
+                }
+            }
+            specs = teko::list::push(specs, typed_sp)
+        } else {
+            specs = teko::list::push(specs, TFSpec { kind = TFSpecNone { } })
+        }
+        i++
+    }
+    TExpr { kind = TInterp { pieces = in.pieces; holes = holes; specs = specs }; type = Str { }; line = 0; col = 0 }
+}
+
+// <expr> in [ e0, e1, … ] (Phase 2) — membership test. Type the lhs ONCE; require each element
+// be COMPARABLE to the lhs (the SAME is_comparable rule used by `==`/compare — B.22), since the
+// runtime is `lhs == e0 || lhs == e1 || …`. The empty set `x in []` is allowed (result is still
+// bool — always false). The node's `.type` is bool. C twin: type_in in expr.c.
+fn type_in(n: parser::InExpr, env: Env, table: TypeTable) -> TExpr | error {
+    let lhs = match type_expr(n.lhs, env, table) { TExpr as te => te; error as e => return e }
+    if type_is_void(lhs.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
+    // (MEM Step 0, R4) ESCAPE GATE — `in` has its own element path (it does NOT build an ArrayLit),
+    // so the literal-form gate doesn't reach it. A reference may not be an `in` operand (lhs or set
+    // element): the [a, b] set is a value-position collection of refs. Mirror in expr.c::type_in.
+    if type_contains_ref(lhs.type) { return error { message = "a reference cannot be stored in a struct/variant/collection" } }
+    mut elems: []TExpr = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= n.elems.len { break }
+        let el = match type_expr(n.elems[i], env, table) { TExpr as te => te; error as e => return e }
+        if type_is_void(el.type) { return error { message = "a `void` expression cannot be an operand (M.1)" } }
+        if type_contains_ref(el.type) { return error { message = "a reference cannot be stored in a struct/variant/collection" } }
+        if !is_comparable(lhs.type, el.type) { return error { message = "`in` element is not comparable to the left-hand operand" } }
+        elems = teko::list::push(elems, el)
+        i++
+    }
+    TExpr { kind = TInExpr { lhs = lhs; elems = elems }; type = Prim { kind = PrimKind::Bool }; line = 0; col = 0 }
+}
+
+/**
+ * array_elem_contrib_type — the type an array element CONTRIBUTES to the literal join: a spread
+ * element (`..xs`) contributes its slice's own element type (never itself, since the whole
+ * point of a spread is that `[]T` flattens into the unified `T`); any other element contributes
+ * its own type directly.
+ *
+ * @param ae  the typed array element
+ * @return    the type this element joins into the array's unified element type
+ */
+fn array_elem_contrib_type(ae: TArrayElem) -> Type {
+    if ae.is_spread {
+        match ae.expr.type { Slice as s => s.element; _ => ae.expr.type }
+    } else {
+        ae.expr.type
+    }
+}
+
+/**
+ * array_elem_bare_literal — a non-spread element's trailing bare numeric-literal leaf, or `null`
+ * when the element is a spread (never a literal candidate — its contribution is already a
+ * concrete, previously-typed `T`) or its own expression is not a bare number. The array-literal
+ * counterpart of `type_match`'s `match_arm_literal_leaf`: it gates which element is a LITERAL
+ * cross-adoption candidate rather than a genuinely concrete (pinned) type.
+ *
+ * @param ae  the typed array element
+ * @return    the element's `TNumber` leaf, or `null`
+ */
+fn array_elem_bare_literal(ae: TArrayElem) -> TExpr | null {
+    if ae.is_spread { return null }
+    match ae.expr.kind { TNumber => ae.expr; _ => null }
+}
+
+/**
+ * array_join_anchor — the first element's CONTRIBUTED type that is NOT a bare numeric literal, or
+ * `null` when every element is a bare literal (so there is no concrete type to adopt into). The
+ * array-literal counterpart of `type_match`'s `match_join_anchor`: scans every element up front,
+ * so a later concrete element still anchors an EARLIER literal one regardless of source order.
+ *
+ * @param elems  the typed array elements
+ * @return       the anchor type sibling literal elements should adopt, or `null`
+ */
+fn array_join_anchor(elems: []TArrayElem) -> Type | null {
+    mut i = 0
+    loop {
+        if i >= elems.len { break }
+        match array_elem_bare_literal(elems[i]) {
+            TExpr => { }
+            null => return array_elem_contrib_type(elems[i])
+        }
+        i++
+    }
+    null
+}
+
+/**
+ * adopt_array_elem_literals — rebuild every element whose value is a bare numeric literal that
+ * FITS `anchor` (`literal_adopts`) so its leaf is retyped at `anchor` instead of its bare default
+ * (`retype_literal`) — the array-literal counterpart of `type_match`'s `adopt_match_arm_literals`,
+ * so `[some_i32, 0]` joins to `[]i32`, not the accidental `[]<i32 | i64>` a bare-defaulted literal
+ * would otherwise force into the union. An element whose literal does not fit `anchor`, is a
+ * spread, or is not a bare literal at all, passes through unchanged.
+ *
+ * @param elems   the typed array elements
+ * @param anchor  the type sibling literal elements adopt into
+ * @return        the elements, with every fitting literal leaf retyped at `anchor`
+ */
+fn adopt_array_elem_literals(elems: []TArrayElem, anchor: Type) -> []TArrayElem {
+    mut out: []TArrayElem = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= elems.len { break }
+        let ae = elems[i]
+        let next = match array_elem_bare_literal(ae) {
+            TExpr as t => if literal_adopts(t, anchor) { TArrayElem { is_spread = false; expr = retype_literal(t, anchor) } } else { ae }
+            null => ae
+        }
+        out = teko::list::push(out, next)
+        i++
+    }
+    out
+}
