@@ -1,0 +1,257 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * widen_hole_to_f64 — an already-lowered FLOAT interpolation hole's value as a `double`, ready to
+ * ride XMM0/D0 into one of the runtime's `double`-taking text renderers.
+ *
+ * An `f32` hole is NARROWED in its register: single precision is what the value physically is, and
+ * every `tk_*` renderer this family reaches (`tk_ftoa_len`, `tk_fmt_f_len`, …, `tk_fmt_dyn_f64_len`)
+ * declares a `double` first parameter. The C route never had to think about it — it emits
+ * `tk_ftoa((double)(x))` and `cc` inserts the conversion (`codegen.tks`'s own interp arm) — so
+ * NOTHING in the shared pipeline widens the value, and this backend read a single-precision register
+ * at double width. MEASURED, before this fix, against the C route on the same program: `$"{f:F2}"`
+ * over `f: f32 = 2.5` printed `2.50` through C and `0.10` through the own backend; `$"{f:G}"`
+ * printed `2.5` and `4.65274e-310`. A wrong VALUE with no diagnostic — the exact class of defect
+ * degrau 25's corollary was written for, found by certifying the siblings of degrau 27's own stop.
+ *
+ * The widening is `LUnOp::FToF`, whose direction every backend reads off the OPERAND's width
+ * (`is_same_width_float_cast`'s own doc), so an `f32` operand makes it the widening form; an `f64`
+ * hole gets NO instruction, because an identity `FToF` would read as "convert to the other width"
+ * and silently narrow the very value it was meant to preserve.
+ *
+ * @param Lowered ho  the hole's already-lowered value
+ * @param checker::PrimKind k  the hole's own declared float PrimKind (`F32` or `F64`)
+ * @param checker::TExpr h  the hole expression (for the emitted instruction's source position)
+ * @return Lowered  the value as a `double`
+ */
+fn widen_hole_to_f64(ho: Lowered, k: checker::PrimKind, h: checker::TExpr) -> Lowered {
+    if k != checker::PrimKind::F32 { return ho }
+    let wide = ctx_alloc(ho.ctx)
+    let to_f64 = un_inst(wide.vreg, LUnOp::FToF, ho.vreg, h.line, h.col)
+    Lowered { ctx = ctx_append(wide.ctx, to_f64); vreg = wide.vreg }
+}
+
+/**
+ * lower_interp_hole_value_f64 — a float-typed interpolation hole lowered and widened to `double` in
+ * one step, the shape all three format-spec arms need before they may pass the value to a
+ * `double`-taking runtime renderer (`widen_hole_to_f64`). Extracted so the no-spec, static-spec and
+ * dynamic-spec arms cannot disagree about whether an `f32` hole was widened — which is precisely how
+ * they DID disagree with the C route until 0.3.1.0 degrau 27.
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param checker::TExpr h  the hole expression (float-typed; `hole_is_float` decides)
+ * @return Lowered | error  the hole's value as a `double`, or propagated from lowering it
+ */
+fn lower_interp_hole_value_f64(ctx: LowerCtx, h: checker::TExpr) -> Lowered | error {
+    let ho = match lower_expr(ctx, h) { Lowered as x => x; error as err => return err }
+    let k = match h.type { checker::Prim as p => p.kind; _ => return error { message = "native backend N1: a float interpolation hole must have a primitive float type (internal)" } }
+    widen_hole_to_f64(ho, k, h)
+}
+
+/**
+ * lower_interp_hole_scalar — one interpolation hole's SCALAR value, in the width the runtime renderer
+ * that consumes it declares: a float hole as a `double` (`lower_interp_hole_value_f64`), every other
+ * hole exactly as `lower_expr` produces it (an integer/`byte`/`char` hole already rides a full GPR,
+ * which is the width every `tk_*_len` integer family declares).
+ *
+ * The `is_flt` flag is passed in rather than re-derived so the caller's OWN answer to
+ * "is this hole a float?" — the same answer that picks the runtime symbol — is the one that decides
+ * whether the value is widened. A caller that resolved the symbol from one predicate and the width
+ * from another is how the static-spec arm came to hand a single-precision register to a
+ * `double`-taking renderer (0.3.1.0 degrau 27).
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param checker::TExpr h  the hole expression
+ * @param bool is_flt  the caller's own `hole_is_float(h)`
+ * @return Lowered | error  the hole's value in the renderer's declared width, or propagated
+ */
+fn lower_interp_hole_scalar(ctx: LowerCtx, h: checker::TExpr, is_flt: bool) -> Lowered | error {
+    if is_flt { return lower_interp_hole_value_f64(ctx, h) }
+    lower_expr(ctx, h)
+}
+
+/**
+ * lower_interp_hole_prim_fat — a NO-FORMAT-SPEC hole of a resolved primitive type, as its (ptr, len)
+ * pair.
+ *
+ * An INTEGER formats through the runtime's `tk_i64_to_str_len`/`tk_u64_to_str_len` by signedness,
+ * mirroring the C backend's own no-spec builders (`lower_len_out_call` recovering the length
+ * `lower_interp`'s pre-degrau-9 scalar path used to drop) (0.3.1.0 degrau 9). A FLOAT formats
+ * through `tk_ftoa_len`, which is what the C route emits for this exact hole shape
+ * (`tk_ftoa((double)(x))`, `codegen.tks`'s own natural-form arm — the oracle), reached after the
+ * `f32` widening the C route gets from `cc` for free (`lower_interp_hole_value_f64`) (0.3.1.0
+ * degrau 27, closing the sibling of the `ftoa` stop that blocked the native self-host).
+ *
+ * A `bool` hole stays out: the C route renders it as a ternary over two STATIC `tk_str` literals
+ * (`"true"`/`"false"`), not through any runtime call, so it needs a materialized-constant-string
+ * lowering this family has none of — a NAMED stop, never a guess.
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param checker::TExpr h  the hole expression
+ * @param checker::PrimKind k  the hole's resolved PrimKind
+ * @return LoweredFat | error  the rendered text's (ptr, len) pair, or a NAMED stop for `bool`
+ * @throws  for a `bool` hole, or propagated from lowering the hole's own value
+ */
+fn lower_interp_hole_prim_fat(ctx: LowerCtx, h: checker::TExpr, k: checker::PrimKind) -> LoweredFat | error {
+    if k == checker::PrimKind::Bool { return error { message = "native backend N1: bool interpolation hole not yet lowered (N2) — the C route renders it as a ternary over two static `tk_str` literals, not through a runtime call" } }
+    let is_flt = prim_is_float_kind(k)
+    let ho = match lower_interp_hole_scalar(ctx, h, is_flt) { Lowered as x => x; error as err => return err }
+    lower_len_out_call(ho.ctx, interp_hole_none_symbol(k, is_flt), single_arg(ho.vreg), h)
+}
+
+/**
+ * interp_hole_none_symbol — the runtime `_len` twin a NO-FORMAT-SPEC primitive hole renders through,
+ * mirroring `codegen.tks`'s own natural-form arm (the oracle) family for family: a float through
+ * `tk_ftoa_len` (`tk_ftoa((double)(x))` there), a signed integer through `tk_i64_to_str_len`, every
+ * other integer width — and `byte`, which the checker maps to `u8` — through `tk_u64_to_str_len`.
+ *
+ * @param checker::PrimKind k  the hole's resolved PrimKind (never `Bool`; the caller stops first)
+ * @param bool is_flt  the caller's own `prim_is_float_kind(k)`, so the symbol and the argument WIDTH
+ *                     are decided by one answer
+ * @return str  the runtime symbol name
+ */
+fn interp_hole_none_symbol(k: checker::PrimKind, is_flt: bool) -> str {
+    if is_flt { return "tk_ftoa_len" }
+    if prim_is_signed_int(k) { return "tk_i64_to_str_len" }
+    "tk_u64_to_str_len"
+}
+
+/** lower_interp_hole_none_fat — a NO-FORMAT-SPEC hole (`TFSpecNone`), as its (ptr, len) pair: a
+    `str` hole is itself a fat producer (`lower_fat_expr`); a primitive hole formats via
+    `lower_interp_hole_prim_fat`; any other hole type is out of the A1-4 subset (A1-4, #382,
+    0.3.1.0 degrau 9). */
+fn lower_interp_hole_none_fat(ctx: LowerCtx, h: checker::TExpr) -> LoweredFat | error {
+    match h.type {
+        checker::Str => lower_fat_expr(ctx, h)
+        checker::Prim as p => lower_interp_hole_prim_fat(ctx, h, p.kind)
+        _ => error { message = "native backend N1: interpolation hole of this type not yet lowered (N2)" }
+    }
+}
+
+/**
+ * fmt_static_lead_low — a static format spec's normalized (lowercased) leading character:
+ * `spec[0]` when present, else `'f'` — mirrors `emit_interp`'s own default for an EMPTY static
+ * spec (`codegen.tks`), the oracle this whole family follows byte for byte.
+ *
+ * @param spec  the static format spec text (e.g. "F2", "x", "N")
+ * @return      the lowercased leading byte
+ */
+fn fmt_static_lead_low(spec: str) -> byte {
+    let fc0 = if spec.len > 0 { spec[0] } else { b'f' }
+    if fc0 >= b'A' && fc0 <= b'Z' { (fc0 to u64 + 32) to byte } else { fc0 }
+}
+
+/**
+ * fmt_static_prec — a static spec's trailing precision/width digits, or the family's own
+ * default (1 for `d`, 6 for every other family) when none are written — the SAME parse
+ * `emit_interp` runs (`codegen.tks`), so both routes render identical text for identical specs.
+ *
+ * @param spec    the static format spec text
+ * @param fc_low  the spec's own lowercased leading character (`fmt_static_lead_low`)
+ * @return        the parsed (or defaulted) precision/width
+ */
+fn fmt_static_prec(spec: str, fc_low: byte) -> i64 {
+    mut prec: i64 = 0
+    mut has_prec = false
+    mut si: u64 = 1
+    loop {
+        if si >= spec.len { break }
+        let ch = spec[si]
+        if ch >= b'0' && ch <= b'9' { prec = prec * 10 + (ch to i64 - 48); has_prec = true }
+        si++
+    }
+    if has_prec { return prec }
+    if fc_low == b'd' { 1 } else { 6 }
+}
+
+/**
+ * fmt_static_takes_prec — whether the runtime family named by `fc_low` accepts a precision/
+ * width SECOND argument — mirrors `emit_interp`'s own `fmt_family_takes_prec` (`codegen.tks`)
+ * exactly: the hex/binary/integer-thousands helpers take only the value; every other family
+ * takes value + precision.
+ *
+ * @param fc_low  the spec's own lowercased leading character
+ * @param is_flt  whether the hole's static type is a float (f32/f64)
+ * @return        true iff the resolved `tk_fmt_*_len` twin takes a precision/width argument
+ */
+fn fmt_static_takes_prec(fc_low: byte, is_flt: bool) -> bool {
+    if fc_low == b'x' { return false }
+    if fc_low == b'b' { return false }
+    if fc_low == b'n' && !is_flt { return false }
+    true
+}
+
+/**
+ * fmt_static_symbol — the runtime `_len` twin `emit_interp`'s own dispatch would call for this
+ * static spec (`codegen.tks`, the oracle). An unrecognized leading character is refused with the
+ * SAME honest stop codegen itself raises at compile time (`"codegen: unrecognized format
+ * spec"`) — a malformed spec that has never been validated earlier in the pipeline
+ * (`checker::type_interp` only checks the HOLE's type, never the spec text), so both routes
+ * reject it identically rather than one silently guessing.
+ *
+ * @param spec    the static format spec text (needed only to tell `X` from `x`)
+ * @param fc_low  the spec's own lowercased leading character
+ * @param is_flt  whether the hole's static type is a float (f32/f64)
+ * @return        the runtime symbol name, or an honest stop for an unrecognized leading character
+ */
+fn fmt_static_symbol(spec: str, fc_low: byte, is_flt: bool) -> str | error {
+    if fc_low == b'f' { return "tk_fmt_f_len" }
+    if fc_low == b'e' { return "tk_fmt_e_len" }
+    if fc_low == b'g' { return "tk_fmt_g_len" }
+    if fc_low == b'p' { return "tk_fmt_p_len" }
+    if fc_low == b'd' { return "tk_fmt_d_len" }
+    if fc_low == b'x' { return if spec.len > 0 && spec[0] == b'X' { "tk_fmt_x_upper_len" } else { "tk_fmt_x_lower_len" } }
+    if fc_low == b'b' { return "tk_fmt_b_len" }
+    if fc_low == b'n' { return if is_flt { "tk_fmt_n_f_len" } else { "tk_fmt_n_i_len" } }
+    error { message = "native backend N1: unrecognized format spec (internal)" }
+}
+
+/**
+ * hole_is_float — whether a typed interpolation hole's own resolved type is a float prim
+ * (f32/f64). Shared by the static and dynamic format-spec lowerings, both of which split their
+ * runtime symbol choice on this exact question.
+ *
+ * @param h  the hole expression
+ * @return   true iff `h`'s type is `f32`/`f64`
+ */
+fn hole_is_float(h: checker::TExpr) -> bool {
+    match h.type { checker::Prim as p => prim_is_float_kind(p.kind); _ => false }
+}
+
+/**
+ * lower_interp_hole_static_fat — a STATIC format-spec hole (`:F2`, `:x`, `:N`, …), as its
+ * (ptr, len) pair: the spec's leading character selects one of `emit_interp`'s own ten
+ * `tk_fmt_*` runtime families (`codegen.tks`, the oracle this mirrors byte for byte — the same
+ * leading-character table, the same default precision, the same uppercase/lowercase hex split),
+ * each reached through its `_len` out-parameter twin (`lower_len_out_call`'s convention: every
+ * one of these has the SAME 2-eightbyte-struct-return shape this backend's `LCall` cannot
+ * capture directly) (0.3.1.0 degrau 19).
+ *
+ * A FLOAT hole is widened to `double` first (`lower_interp_hole_value_f64`): every float family
+ * here (`tk_fmt_f_len`, `tk_fmt_e_len`, `tk_fmt_g_len`, `tk_fmt_n_f_len`, `tk_fmt_p_len`) declares a
+ * `double` leading parameter, and an `f32` hole physically holds single precision — passing it raw
+ * was a silent wrong value measured against the C route (`widen_hole_to_f64`'s own numbers, 0.3.1.0
+ * degrau 27).
+ *
+ * @param ctx  the lowering context
+ * @param h    the hole expression (its resolved type selects int vs float rendering)
+ * @param fs   the static format spec (`fs.s`, e.g. "F2")
+ * @return     the rendered text's (ptr, len) pair
+ * @throws     propagated from the hole's own lowering, or `fmt_static_symbol`'s honest stop for
+ *             a spec whose leading character none of the ten families recognizes
+ */
+fn lower_interp_hole_static_fat(ctx: LowerCtx, h: checker::TExpr, fs: checker::TFSpecStatic) -> LoweredFat | error {
+    let is_flt = hole_is_float(h)
+    let ho = match lower_interp_hole_scalar(ctx, h, is_flt) { Lowered as x => x; error as err => return err }
+    let fc_low = fmt_static_lead_low(fs.s)
+    let sym = match fmt_static_symbol(fs.s, fc_low, is_flt) { str as s => s; error as err => return err }
+    if !fmt_static_takes_prec(fc_low, is_flt) {
+        return lower_len_out_call(ho.ctx, sym, single_arg(ho.vreg), h)
+    }
+    let precr = ctx_alloc(ho.ctx)
+    let with_prec = ctx_append(precr.ctx, const_int_inst(precr.vreg, fmt_static_prec(fs.s, fc_low), h.line, h.col))
+    lower_len_out_call(with_prec, sym, two_args(ho.vreg, precr.vreg), h)
+}
+

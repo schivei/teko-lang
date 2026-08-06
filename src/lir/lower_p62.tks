@@ -1,0 +1,245 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * stop_in_function — re-emit a lowering honest-stop naming the FUNCTION it fired in.
+ *
+ * WHY THIS EXISTS. A backend stop reaches the user through the project build, which prints one
+ * line and stops — with no file, no line, and no function. On a single-file fixture that is
+ * survivable; on `examples/regressions/bulk`, which compiles 217 fixtures in ONE build, it is not.
+ * `arithmetic operand of type `null | u64`` names the TYPE and leaves the SITE to be guessed, and
+ * guessing cost two wrong candidates: `q001` (whose `match` narrowing reading of `check_pattern` +
+ * `type_join` proves correct) and `q046` (instantiated at `i64`/`str`, never `u64`). Each fixture is
+ * its own namespace, so naming the namespace points straight at the directory.
+ *
+ * WRAPPED AT THE FUNCTION BOUNDARY, not threaded through every stop: `lower_function` is the one
+ * place that both knows the function and sees every error its body produces, so a single site buys
+ * the context for all of them. Same shape `codegen/ffi_export.tks` already uses to name an exported
+ * function on the way out.
+ *
+ * @param err  the honest-stop raised somewhere inside this function's body
+ * @param f    the function being lowered
+ * @return     the same stop, with `[in `ns::name`]` appended
+ */
+fn stop_in_function(err: error, f: checker::TFunction) -> error {
+    error { message = err.message ~ " [in `" ~ f.namespace ~ "::" ~ f.name ~ "`]" }
+}
+
+/** LoweredFunction — an `LFunc` + the interned-rodata table (A1-4, #382) and
+    the lifted closure/thunk-function table (A1-7, #382) it (and everything
+    lowered before it) grew — `lower_function`'s return so the whole-program
+    symbol numbering stays contiguous. */
+pub type LoweredFunction = struct { func: LFunc; rodata: []LRodata; lifted: []LFunc }
+
+/**
+ * close_function — fire any still-pending defer (from index 0, LIFO) and
+ * append the implicit void return if the body did not terminate the block
+ * (a void fn falling off the end, A1-2, #382 — mirrors the C backend's
+ * fn-body fall-through defer fire, `codegen.tks:6418-6429`), then return
+ * the closed context.
+ *
+ * @param LowerCtx ctx  the context after lowering the function's body
+ * @param checker::TFunction f  the function (its source position stamps the
+ *                              synthesized `ret`)
+ * @return LowerCtx | error  the closed context (its `.func` is the closed
+ *                           function; its `.rodata`/`.lifted` carry forward
+ *                           any growth the fall-through defer replay made),
+ *                           or a NAMED internal error when a pending defer
+ *                           fails to lower
+ * @implNote NP4: `emit_region_drops` runs right after `emit_region_leaves`, before the implicit
+ *           `ret_void` — a `void` fall-through carries no return value to protect, so the drop needs
+ *           no ordering relative to a box/store the way the value-returning edges do.
+ */
+fn close_function(ctx: LowerCtx, f: checker::TFunction) -> LowerCtx | error {
+    if block_terminated(ctx.func, ctx.block_id) { return ctx }
+    let replayed = match replay_defers(ctx, 0) { LowerCtx as c => c; error as err => return err }
+    let left = emit_region_leaves(replayed, f.line, f.col)
+    let dropped = emit_region_drops(left, f.line, f.col)
+    ctx_append(dropped, ret_void_inst(f.line, f.col))
+}
+
+/** block_terminated — does the block whose id is `block_id` end in a terminator (LRet/
+    LJump/LBranch)? N1 only produces LRet, so a non-empty last-inst LRet means terminated. */
+fn block_terminated(f: LFunc, block_id: u32) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= f.blocks.len { break }
+        let b = f.blocks[i]
+        if b.id == block_id { return block_ends_in_terminator(b) }
+        i++
+    }
+    false
+}
+
+/** block_ends_in_terminator — is the block's last instruction a terminator? */
+fn block_ends_in_terminator(b: LBlock) -> bool {
+    if b.insts.len == 0 { return false }
+    inst_is_terminator(b.insts[b.insts.len - 1])
+}
+
+/** inst_is_terminator — is this instruction a block terminator (LRet/LJump/LBranch)? */
+fn inst_is_terminator(inst: LInst) -> bool {
+    match inst.op {
+        LRet => true
+        LJump => true
+        LBranch => true
+        _ => false
+    }
+}
+
+/**
+ * param_ltypes — the machine class(es) of each parameter annotation, in declared order. A
+ * SCALAR parameter contributes ONE `LType`; a FAT (`str`/`[]T`) parameter (`typeexpr_is_fat`)
+ * contributes TWO — `Ptr` then `I64`, CONTRACT ORDER mirroring the C twin's
+ * `tk_str{ptr;len}` field order (`teko_rt.h`) — because the native calling convention
+ * carries a fat value as its two halves in two separate registers, never as one (the
+ * "tk_str-twin" convention, owner ruling). `lower_function`'s arity (`new_func`'s
+ * `n_params`) is DERIVED from this list's length (`ptypes.len`) rather than counted
+ * separately from `params.len`, so the two can never drift apart — this function is the
+ * ONE place responsible for how many registers a parameter list occupies.
+ *
+ * @param []parser::Param params  the parameter list to map
+ * @param []LEnumInfo enums  the program's declared-enum table (an enum-typed parameter
+ *                           carries its integer width, not `Ptr`)
+ * @param table  the program's type table (`typeexpr_is_fat`'s alias resolver, 0.3.1.0 raiz A,
+ *               crumb R0)
+ * @return []LType  each parameter's machine class(es), in declared order (a fat parameter's
+ *                  `Ptr` class immediately followed by its `I64` len class)
+ */
+fn param_ltypes(params: []parser::Param, enums: []LEnumInfo, table: checker::TypeTable) -> []LType {
+    mut out: []LType = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= params.len { break }
+        out = append_param_ltypes(out, params[i], enums, table)
+        i++
+    }
+    out
+}
+
+/**
+ * append_param_ltypes — `out` with ONE parameter's machine class(es) appended: `Ptr, I64`
+ * for a fat (`str`/`[]T`) parameter, else its single `ltype_of_typeexpr` class
+ * (`param_ltypes`'s per-parameter step, extracted so the fat/scalar branch is written once).
+ *
+ * @param []LType out  the machine-class list accumulated so far
+ * @param parser::Param p  the parameter to append
+ * @param []LEnumInfo enums  the program's declared-enum table
+ * @param table  the program's type table (`typeexpr_is_fat`'s alias resolver)
+ * @return []LType  `out` with `p`'s machine class(es) appended
+ */
+fn append_param_ltypes(out: []LType, p: parser::Param, enums: []LEnumInfo, table: checker::TypeTable) -> []LType {
+    if typeexpr_is_fat(p.type_ann, table) {
+        return teko::list::push(teko::list::push(out, LType::Ptr), LType::I64)
+    }
+    teko::list::push(out, ltype_of_typeexpr(p.type_ann, enums))
+}
+
+/**
+ * LowerPrelude — the whole-program lowering context, computed ONCE and residing in the caller's
+ * root (Group B, `docs/design/native-lowering-oom-por-funcao-0.3.1.md` §2b): the seed module
+ * (registered layouts + interned aggregate-const rodata) plus every table each per-item lowering
+ * step reads. Extracted from `lower_program` (0.3.1 C6.1) so the fused native emit driver in
+ * `project.tks` can compute it once and thread it through a per-item scoped region loop instead of
+ * `lower_program`'s own single whole-module pass. No field is per-item.
+ *
+ * @since 0.3.1 C6.1
+ */
+pub type LowerPrelude = struct {
+    /**
+     * module — the seed module: registered struct layouts and the interned aggregate-const
+     * rodata, before any function has lowered. `funcs` is empty.
+     */
+    module: LModule
+    /** layouts — the program's struct-layout table, read by every item. */
+    layouts: []LStructLayout
+    /** enums — the program's declared-enum table, read by every item. */
+    enums: []LEnumInfo
+    /** externs — the program's `extern fn` table, read by every item. */
+    externs: []LExternFn
+    /** variants — the program's variant-definition table, read by every item. */
+    variants: []LVariantDef
+    /** ref_fns — the program's `Ref<T>` reference-function table, read by every item. */
+    ref_fns: []LRefFnInfo
+    /** field_decls — the program's declared-field-type table, read by every item. */
+    field_decls: []LFieldDecls
+    /** table — the program's type table, `typeexpr_is_fat`'s alias resolver for every item. */
+    table: checker::TypeTable
+}
+
+/**
+ * lower_prelude — the whole-program setup extracted from `lower_program` (register every declared
+ * struct's layout, collect every declared enum's members, intern every Tier-A aggregate const's
+ * byte image into rodata) so it can be shared by both `lower_program`'s own loop and the fused
+ * native emit driver's per-item scoped loop. Runs `fat_divergence_guard` (whole-program, reads only
+ * `prog`); `frame_escape_guard` does NOT run here — the fused driver runs it per-item, inside each
+ * item's own scoped window (`docs/design/native-lowering-oom-por-funcao-0.3.1.md` §2c).
+ *
+ * @param prog          the whole typed program to lower
+ * @param flat_symbols  the static/shared-archive carve-out (KP16, `emit_static_lib`) — unused by
+ *                       this setup itself (it only affects a function's OWN symbol, per item), kept
+ *                       for signature symmetry with `lower_program`/`lower_item_function`
+ * @return              the whole-program context, or the `error` arm when a declared aggregate has
+ *                       no representable layout
+ * @since 0.3.1 C6.1
+ */
+pub fn lower_prelude(prog: checker::TProgram, flat_symbols: bool) -> LowerPrelude | error {
+    let table = checker::type_table_of(prog)
+    match fat_divergence_guard(prog, table, checker::type_table_rekeyed(table)) { error as e => return e; null => { } }
+    let enums = collect_enums(prog)
+    let dtable = declared_type_table(prog)
+    let layouts = match collect_struct_layouts(prog, enums, table, dtable) { []LStructLayout as ls => ls; error as e => return e }
+    let externs = collect_externs(prog)
+    let variants = collect_variant_defs(prog)
+    let ref_fns = collect_ref_fns(prog)
+    let field_decls = match collect_field_decls(prog) { []LFieldDecls as fd => fd; error as e => return e }
+    let m = match intern_aggregate_consts(register_layouts(empty_module(), layouts), prog.items, layouts, variants, enums) { LModule as x => x; error as e => return e }
+    LowerPrelude { module = m; layouts = layouts; enums = enums; externs = externs; variants = variants; ref_fns = ref_fns; field_decls = field_decls; table = table }
+}
+
+/**
+ * lower_program — the module entry: register every declared struct's layout
+ * (A1-3, #382), collect every declared enum's members (A1-5, #382), intern every
+ * Tier-A aggregate const's byte image into rodata (#594 crumb 6), lower every
+ * top-level function, and gather the loose top-level statements into a
+ * synthesized `main` (the VIRTUAL-MAIN the C backend also builds), returning
+ * `int 0` if the statements fall through. Type/use declarations otherwise carry
+ * no code. Mirrors the loop of tk_emit_c over prog.items.
+ *
+ * @param checker::TProgram prog  the whole typed program to lower
+ * @param bool flat_symbols  the static/shared-archive carve-out (KP16, `emit_static_lib`):
+ *                           when true, every top-level function's LIR symbol drops
+ *                           `TEKO_USER_PREFIX` (`mangle_fn_symbol`'s `flat`), because the whole
+ *                           lowered module IS the published contract a real host `ar`/`nm`/`ld`
+ *                           resolves — measured on `examples/toolchain/ar_link_run`, whose
+ *                           archived symbol must be `ar_link_run__add`, not
+ *                           `teko_ar_link_run__add`. Defaults to `false` (an ordinary binary,
+ *                           where every user symbol stays disjoint from the runtime's `tk_*`
+ *                           builtins).
+ * @return LModule | error  the built module (functions + rodata/globals/
+ *                          layouts, every lifted closure/thunk folded in,
+ *                          A1-7 #382); the `error` arm when a declared
+ *                          aggregate has no representable layout, or when any
+ *                          function or the virtual main fails to lower
+ */
+pub fn lower_program(prog: checker::TProgram, flat_symbols: bool = false) -> LModule | error {
+    let prelude = match lower_prelude(prog, flat_symbols) { LowerPrelude as x => x; error as e => return e }
+    mut m = prelude.module
+    mut loose: []checker::TStatement = teko::list::empty()
+    mut lifted: []LFunc = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        let step = match lower_item(m, loose, prog.items[i], prelude.layouts, prelude.enums, lifted, prelude.externs, flat_symbols, prelude.variants, prelude.table, prelude.ref_fns, prelude.field_decls) { LowerItemOut as x => x; error as err => return err }
+        m = step.module
+        loose = step.loose
+        lifted = step.lifted
+        i++
+    }
+    let vmain = match lower_virtual_main(loose, prelude.layouts, prelude.enums, m.rodata, lifted, prelude.externs, flat_symbols, prelude.variants, prelude.ref_fns, prelude.field_decls, prelude.table) { LoweredFunction as x => x; error as err => return err }
+    let whole = fold_lifted_funcs(add_func(with_rodata(m, vmain.rodata), vmain.func), vmain.lifted)
+    match frame_escape_guard(whole) { error as e => return e; null => { } }
+    whole
+}
+

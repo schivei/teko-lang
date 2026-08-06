@@ -1,0 +1,258 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * lower_fat_element_push — the FAT arm of `lower_list_push`: the pushed item is a `str`/`[]T`
+ * value, stored BY VALUE as its two-word `{ptr, len}` pair into the SAME 16-byte frame-slot shape a
+ * mutable fat local's frame slot uses (`fat_slot_bytes`/`store_fat_slot`), then passed to the
+ * runtime grow at that width (`elem_byte_stride`) — the same stride the array literal's store and
+ * the index load now use for this element (0.3.1.0 degrau 10). No boxing: this mirrors the retired
+ * C emitter's `emit_list_push`, which lowers the item into a by-value C-typed local (a `tk_str` for
+ * a `str` element) before the call — the oracle the owner's ruling points this arm at.
+ *
+ * @param base  the base slice's already-lowered (ptr, len) pair
+ * @param item  the item expression (its type is the fat element type)
+ * @param sym   the runtime grow symbol
+ * @param e     the push call expression (its source position)
+ * @return      the grown slice's (ptr, len) pair
+ * @throws      propagated from lowering the item as a fat-pointer producer
+ */
+fn lower_fat_element_push(base: LoweredFat, item: checker::TExpr, sym: str, e: checker::TExpr) -> LoweredFat | error {
+    let fo = match lower_fat_expr(base.ctx, item) { LoweredFat as x => x; error as err => return err }
+    let slot = reserve_item_slot(fo.ctx, fat_slot_bytes(), ltype_align(LType::Ptr), e)
+    let with_store = store_fat_slot(slot.ctx, slot.vreg, fo, e.line, e.col)
+    let esz = ctx_alloc(with_store)
+    let with_esz = ctx_append(esz.ctx, const_int_inst(esz.vreg, fat_slot_bytes() to i64, e.line, e.col))
+    lower_len_out_call(with_esz, sym, push_head_args(base, slot.vreg, esz.vreg), e)
+}
+
+/**
+ * push_box_bytes — how many bytes of the pushed item this backend must copy into fresh
+ * per-EXECUTION storage before the push stores its address (0 = none, the item IS its own value).
+ *
+ * A register value (`is_register_value_type`) needs no box: the item stored into the push slot is
+ * the datum itself. Every other element type is held in a `[]T` as an ADDRESS
+ * (NATIVE-AGG-SLICE-BY-ADDRESS), and the address the item lowers to belongs to an `alloca` — ONE
+ * frame slot per INSTRUCTION — so it must be boxed or a push in a loop would store one address N
+ * times.
+ *
+ * A VARIANT element is boxed at `variant_wrapper_bytes()`: degrau 6 made the wrapper's width a
+ * whole-TYPE fact (one uniform 24-byte shape for every case), which is exactly the width this stop
+ * used to be waiting for.
+ *
+ * The element type is put through `expand_named_variant` FIRST (degrau 8). A DECLARED variant
+ * (`type MInst = variant MAlu | …`) reaches this backend as a `checker::Named`, so without the
+ * expansion it never met the variant arm above: it fell to `named_box_bytes`, found no registered
+ * layout — the layout table holds `struct`/`class` bodies only, and correctly holds no variant —
+ * and stopped. The layout table was never the defect; the un-expanded nominal was, exactly as it
+ * was for the match-arm miscompilation.
+ *
+ * @param t    the concrete element type the pushed buffer holds
+ * @param ctx  the lowering context (its registered struct/class layouts pin the box width)
+ * @return     the aggregate's byte width, or 0 for a register value
+ * @throws     for an aggregate whose width is not a whole-type fact in this backend
+ *             (`unsized_aggregate_push_stop`)
+ */
+fn push_box_bytes(t: checker::Type, ctx: LowerCtx) -> u32 | error {
+    if is_register_value_type(t, ctx.enums) { return 0 to u32 }
+    match aggregate_box_bytes(t, ctx) {
+        u32 as n => n
+        null => unsized_aggregate_push_stop(aggregate_form_name(t))
+    }
+}
+
+/**
+ * aggregate_box_bytes — the WHOLE-TYPE byte width this backend copies when it must give a value of
+ * type `t` storage of its own, or `null` when the type alone fixes no such width.
+ *
+ * ONE query, two callers, and that is the point: the push's box (`push_box_bytes`) and the variant
+ * wrapper's payload box (`variant_payload_box_bytes`) are the same question — "how many bytes IS a
+ * value of this type, so a container that holds it BY ADDRESS can own a copy?"
+ * (NATIVE-AGG-SLICE-BY-ADDRESS). Two independent answers would be two chances to disagree, and a
+ * copy sized differently from its reader is a silent corruption rather than a stop.
+ *
+ * A register value answers `null` here on purpose: it needs no storage of its own, and the callers
+ * say so in their own words (the push returns 0, the payload store copies nothing).
+ *
+ * @param t    the type whose value may need storage of its own
+ * @param ctx  the lowering context (its registered layouts and declared-variant table)
+ * @return     the byte width, or `null` for a register value and for every aggregate whose width
+ *             this backend pins no whole-type answer for
+ */
+fn aggregate_box_bytes(t: checker::Type, ctx: LowerCtx) -> u32 | null {
+    if is_register_value_type(t, ctx.enums) { return null }
+    match expand_named_variant(t, ctx.variants) {
+        checker::Named as n => named_layout_bytes(n, ctx)
+        checker::Variant => variant_wrapper_bytes()
+        checker::Error => error_struct_layout().size
+        _ => null
+    }
+}
+
+/**
+ * named_layout_bytes — a nominal aggregate's width: the size of the `struct`/`class` layout
+ * registered under its name, which is the whole instance (a class's inherited fields are the PREFIX
+ * of that same layout, so one size covers the effective object), or `null` when nothing is
+ * registered under it.
+ *
+ * Reached only for a nominal that is NOT a declared variant: `aggregate_box_bytes` expands that
+ * shape away before asking, because the layout table registers `struct` and `class` bodies alone —
+ * a declared variant never had an entry here and never should have.
+ *
+ * @param n    the resolved nominal type
+ * @param ctx  the lowering context (its registered layouts)
+ * @return     the instance's byte size, or `null` for an interface or a nominal never laid out
+ */
+fn named_layout_bytes(n: checker::Named, ctx: LowerCtx) -> u32 | null {
+    match find_known_struct_layout(ctx.layouts, n.name) {
+        LStructLayout as l => l.size
+        null => null
+    }
+}
+
+/**
+ * aggregate_form_name — the human name of the aggregate FORM an element type takes, for the honest
+ * stop's message. Naming the form is what keeps a narrowed stop narrow: the reader learns which
+ * shape is still open, not merely that "an aggregate" is.
+ *
+ * @param t  the element type that is not a register value
+ * @return   the form's name, as the stop's message spells it
+ */
+fn aggregate_form_name(t: checker::Type) -> str {
+    match t {
+        checker::Named as n => teko::str::concat("the nominal type `", teko::str::concat(n.name, "`, which has no registered layout"))
+        checker::Func => "a CLOSURE, whose captured environment is a second allocation this copy would alias"
+        _ => "an aggregate this backend assigns no whole-type byte width"
+    }
+}
+
+/**
+ * unsized_aggregate_push_stop — the NAMED honest stop that survives degrau 6: a push whose element
+ * is an aggregate this backend cannot pin a WHOLE-TYPE byte width for. Two forms are now closed —
+ * the struct/class (its registered layout IS that width) and the VARIANT (degrau 6's uniform
+ * `variant_wrapper_bytes()`, the same width for every case) — and `tk_slice_elem_box` copies exactly
+ * that many bytes. What is left: an optional, whose sentinel-carrying image this backend gives no
+ * whole-type width, and a closure, whose value is one address whose captured environment is a second
+ * allocation a flat copy would alias rather than clone.
+ *
+ * @param form  the aggregate form's name (`aggregate_form_name`)
+ * @return      the honest stop, always
+ */
+fn unsized_aggregate_push_stop(form: str) -> error {
+    error { message = teko::str::concat("native backend N1: a push whose element is ", teko::str::concat(form, " — this backend holds aggregate slice elements BY ADDRESS and boxes each pushed item into fresh storage, which needs a byte width the element type alone fixes (N2)")) }
+}
+
+/**
+ * box_aggregate_value — a lowered value as something a LONGER-LIVED container (or caller) may
+ * hold: the value itself for a register value (`box_bytes` = 0), else the address of a FRESH
+ * per-EXECUTION runtime copy of the aggregate (`tk_slice_elem_box`).
+ *
+ * Four call sites need it: the slice a push grows, the tag+payload wrapper a variant
+ * construction builds, an array literal's own filled buffer (`lower_array_lit`, 0.3.1.0
+ * array-literal-escape), and the value an `LRet` carries out of the frame that produced it
+ * (`own_returned_value`, 0.3.1.0 degrau agregado-copia). All four hold (or, for the array literal
+ * and the return, ARE) an aggregate BY ADDRESS, and the address this backend lowers an aggregate
+ * to belongs to an `alloca` — ONE frame slot per INSTRUCTION, not per EXECUTION — so a container
+ * filled in a loop would otherwise hold N copies of the same address, and a value returned to the
+ * caller would point at a frame already unwound by the time it is read
+ * (NATIVE-AGG-SLICE-BY-ADDRESS).
+ *
+ * @param v           the already-lowered value (for an aggregate, the address of its frame slot)
+ * @param box_bytes   the aggregate's byte width, or 0 for a value that needs no copy
+ * @param e           the expression the copy is emitted for (its source position)
+ * @return            the value the container must store
+ */
+fn box_aggregate_value(v: Lowered, box_bytes: u32, e: checker::TExpr) -> Lowered {
+    box_aggregate_value_at(v, box_bytes, e.line, e.col)
+}
+
+/**
+ * box_aggregate_value_at — `box_aggregate_value`'s body, positioned by a bare (line, col) instead
+ * of by an expression node. The synthesized auto-return of a function's trailing tail
+ * (`lower_fn_body`) has a position but no `checker::TExpr` of its own to hand over, and inventing
+ * a placeholder expression just to carry two integers would put a fake node in the lowering path.
+ *
+ * @param v           the already-lowered value (for an aggregate, the address of its frame slot)
+ * @param box_bytes   the aggregate's byte width, or 0 for a value that needs no copy
+ * @param line        the source line to propagate onto the emitted copy
+ * @param col         the source column to propagate onto the emitted copy
+ * @return            the value the container (or the caller) may hold
+ */
+fn box_aggregate_value_at(v: Lowered, box_bytes: u32, line: u32, col: u32) -> Lowered {
+    if box_bytes == 0 { return v }
+    emit_elem_box(v, box_bytes, line, col)
+}
+
+/**
+ * emit_elem_box — the `tk_slice_elem_box` call itself, WITHOUT the "0 means no copy" shortcut its
+ * callers apply.
+ *
+ * The shortcut is right for a type-driven width (0 there means "a register value, which needs no
+ * storage of its own") and WRONG for a length-driven one: an EMPTY array literal is 0 bytes wide
+ * and still must not hand its caller a frame address. `tk_alloc` already maps `n == 0` to a unique
+ * block, so the zero-width box is a real, distinct, frame-independent pointer.
+ *
+ * @param v      the already-lowered value (the address of the bytes to copy)
+ * @param bytes  the copy width, which MAY be 0
+ * @param line   the source line to propagate onto the emitted copy
+ * @param col    the source column to propagate onto the emitted copy
+ * @return       the address of the runtime copy
+ */
+fn emit_elem_box(v: Lowered, bytes: u32, line: u32, col: u32) -> Lowered {
+    let size = ctx_alloc(v.ctx)
+    let with_size = ctx_append(size.ctx, const_int_inst(size.vreg, bytes to i64, line, col))
+    mut args: []u32 = teko::list::push(teko::list::empty(), v.vreg)
+    args = teko::list::push(args, size.vreg)
+    let boxed = ctx_alloc(with_size)
+    Lowered { ctx = ctx_append(boxed.ctx, call_inst(boxed.vreg, "tk_slice_elem_box", args, false, line, col)); vreg = boxed.vreg }
+}
+
+/**
+ * returned_aggregate_box_bytes — how many bytes a `return` must copy into storage of its own
+ * before the `LRet` carries the address out, or 0 when the returned value needs no copy.
+ *
+ * THIS IS THE ARM64 DIVERGENCE OF 0.3.1.0 (degrau agregado-copia). An aggregate's value in this
+ * backend IS the address of an `alloca` (NATIVE-AGG-SLICE-BY-ADDRESS), so `return P{…}` handed the
+ * caller the address of a frame slot the `ret` had just popped. Every read of it is a
+ * use-after-return: it survived on x86-64 because nothing the caller ran next happened to reuse
+ * those bytes, and it did NOT survive on arm64, where the very next call's prologue
+ * (`stp x29, x30, [sp, #-N]`) lands on them. The oracle agreed with that reading: the same 22
+ * probes fail 15 times on the own backend and 0 times through the C route, on the SAME host.
+ *
+ * A fat (`str`/`[]T`) return is not an aggregate here — it travels as a (ptr, len) pair through
+ * `lower_return_fat`/`lower_fn_body_fat`, whose ptr half already points at owned storage — so it
+ * answers 0 and is left alone. Everything else defers to `aggregate_box_bytes`, the SAME single
+ * query the push and the variant payload use, so a return can never disagree with a push about
+ * how wide a value of a given type is.
+ *
+ * @param t    the enclosing function's own declared return type (`LowerCtx.ret_type`)
+ * @param ctx  the lowering context (its registered layouts and declared-variant table)
+ * @return     the byte width the return must own, or 0 for a value that escapes safely as it is
+ */
+fn returned_aggregate_box_bytes(t: checker::Type, ctx: LowerCtx) -> u32 {
+    if is_fat_type(t) { return 0 to u32 }
+    match aggregate_box_bytes(t, ctx) {
+        u32 as n => n
+        null => 0 to u32
+    }
+}
+
+/**
+ * own_returned_value — the value an `LRet` may legally carry: the lowered value itself when it is
+ * self-contained, else a FRESH copy of the aggregate in storage that outlives the returning frame
+ * (`returned_aggregate_box_bytes`, `box_aggregate_value_at`).
+ *
+ * The copy is emitted CALLEE-side, before the `ret`, and that side is not a preference: a
+ * caller-side copy would have to run after the frame is already popped, and the copy itself is a
+ * call whose own prologue lands on the very bytes it was about to read.
+ *
+ * @param v     the lowered return value (for an aggregate, the address of its frame slot)
+ * @param line  the source line to propagate onto the emitted copy
+ * @param col   the source column to propagate onto the emitted copy
+ * @return      the value the `LRet` carries
+ */
+fn own_returned_value(v: Lowered, line: u32, col: u32) -> Lowered {
+    box_aggregate_value_at(v, returned_aggregate_box_bytes(v.ctx.ret_type, v.ctx), line, col)
+}
+

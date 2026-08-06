@@ -1,0 +1,253 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/** teko::lir (lowering) — TAST -> LIR for the N1 reference subset (issue #221).
+
+    The lowering mirrors the SHAPE of the C backend's expr/stmt walk (emit_expr_ctx /
+    emit_stmt): the same recursion, a different result — instead of appending text to a
+    buffer, each visit APPENDS LInsts to the current block and RETURNS the VReg that
+    carries the value. Everything is functionally threaded (a fresh LFunc per step, no
+    mutable module state), exactly like the rest of the compiler.
+
+    Reference subset (N1): integer/float literals, arithmetic/unary, locals, `to`
+    casts, direct calls (Teko-Teko + the `exit`/`panic` builtins), `let`, `return`,
+    and expression statements. Everything else honest-stops with a NAMED error (M.1/
+    M.3) — the scaffolding N2 fills in case-by-case without rewriting the walk.
+
+    LEnv — the local map name -> VReg. The checker already resolved scope; the lowering
+    only remembers "the var `x` lives in VReg N". Parallel slices threaded functionally,
+    the same shape as the checker's Env. `len_vregs`/`has_len` are a PARALLEL fat-pointer
+    side-table (A1-4, #382): a str/slice local additionally records its LENGTH VReg
+    (`has_len[i]=true`), so a `.len` read off a bound name (not just a literal receiver)
+    resolves with no memory traffic — mirrors §2.3's "no memory traffic for a length read".
+    `is_slot` is the third binding shape (list-builtin degrau): a MUTABLE fat local lives in a
+    16-byte FRAME SLOT (`vregs[i]` is the slot's address) instead of a VReg pair, because a
+    reassignment must be visible across a merge — see `lenv_bind_fat_slot`. `is_scalar_slot` is
+    the FOURTH (0.3.1.0 degrau 18): a `mut` SCALAR local whose ADDRESS escapes into a `ref<T>`
+    call argument (`lenv_bind_scalar_slot`) — same reason as a mutable fat local (its address
+    must be loop/merge-invariant AND its current value must survive a write made through the
+    escaped handle), one register instead of a pair. `slot_ltype` is `is_scalar_slot`'s OWN
+    parallel side-table: the load/store WIDTH+KIND a scalar slot's memory holds (meaningless —
+    left `LType::Void` — for every other binding shape). */
+pub type LEnv = struct { names: []str; vregs: []u32; len_vregs: []u32; has_len: []bool; is_slot: []bool; is_scalar_slot: []bool; slot_ltype: []LType }
+
+/** empty_lenv — an LEnv with no bindings (a function body's seed). */
+pub fn empty_lenv() -> LEnv {
+    LEnv {
+        names = teko::list::empty(); vregs = teko::list::empty(); len_vregs = teko::list::empty()
+        has_len = teko::list::empty(); is_slot = teko::list::empty()
+        is_scalar_slot = teko::list::empty(); slot_ltype = teko::list::empty()
+    }
+}
+
+/** lenv_bind — extend `env` with (name -> vreg), a SCALAR (non-fat) binding. A later binding
+    of the same name shadows the earlier one (lookup scans newest-first). */
+pub fn lenv_bind(env: LEnv, name: str, vreg: u32) -> LEnv {
+    LEnv {
+        names = teko::list::push(env.names, name); vregs = teko::list::push(env.vregs, vreg)
+        len_vregs = teko::list::push(env.len_vregs, 0); has_len = teko::list::push(env.has_len, false)
+        is_slot = teko::list::push(env.is_slot, false)
+        is_scalar_slot = teko::list::push(env.is_scalar_slot, false); slot_ltype = teko::list::push(env.slot_ltype, LType::Void)
+    }
+}
+
+/** lenv_bind_fat — extend `env` with (name -> ptr, len), a FAT (str/slice) binding
+    (A1-4, #382). The ptr registers under the ordinary scalar lookup too (`lenv_lookup`
+    still finds it), so a fat local used in a plain-value position keeps working unchanged. */
+pub fn lenv_bind_fat(env: LEnv, name: str, ptr: u32, len: u32) -> LEnv {
+    LEnv {
+        names = teko::list::push(env.names, name); vregs = teko::list::push(env.vregs, ptr)
+        len_vregs = teko::list::push(env.len_vregs, len); has_len = teko::list::push(env.has_len, true)
+        is_slot = teko::list::push(env.is_slot, false)
+        is_scalar_slot = teko::list::push(env.is_scalar_slot, false); slot_ltype = teko::list::push(env.slot_ltype, LType::Void)
+    }
+}
+
+/**
+ * lenv_bind_fat_slot — extend `env` with (name -> the address of a 16-byte frame slot holding the
+ * local's `{ptr, len}` pair), the MUTABLE fat local's binding shape (list-builtin degrau).
+ *
+ * WHY MEMORY AND NOT A VREG PAIR. A fat local bound to two VRegs cannot survive a reassignment
+ * inside a loop or an `if` arm: the merge machinery threads only SCALAR names as block-params
+ * (`promote_env`/`reassigned_scalars`), so the arm's fresh pair dies at the merge and the
+ * reader keeps the pre-branch one — the canonical `loop { xs = teko::list::push(xs, …) }` read
+ * back its ORIGINAL length. The slot sidesteps the merge entirely: its ADDRESS is loop-invariant
+ * (so it threads correctly as the plain scalar it registers as, `has_len=false`), and every read
+ * loads the CURRENT pair from memory. An immutable (`let`) fat local is never reassigned and stays
+ * on the register pair, so nothing that works today changes shape.
+ *
+ * @param env   the env to extend
+ * @param name  the local's name
+ * @param slot  the VReg holding the 16-byte slot's address
+ * @return      the extended env
+ */
+pub fn lenv_bind_fat_slot(env: LEnv, name: str, slot: u32) -> LEnv {
+    LEnv {
+        names = teko::list::push(env.names, name); vregs = teko::list::push(env.vregs, slot)
+        len_vregs = teko::list::push(env.len_vregs, 0); has_len = teko::list::push(env.has_len, false)
+        is_slot = teko::list::push(env.is_slot, true)
+        is_scalar_slot = teko::list::push(env.is_scalar_slot, false); slot_ltype = teko::list::push(env.slot_ltype, LType::Void)
+    }
+}
+
+/**
+ * lenv_bind_scalar_slot — extend `env` with (name -> the address of a one-word frame slot
+ * holding a `mut` SCALAR local's CURRENT value), the binding shape a local takes on the moment
+ * its address escapes into a `ref<T>` call argument (0.3.1.0 degrau 18).
+ *
+ * WHY MEMORY AND NOT A PLAIN VREG. The escaped `Ref<T>` handle may be WRITTEN THROUGH by code
+ * this function does not control (a callee, or a closure it returns) between the escape and a
+ * later plain read of the name — an SSA VReg has no memory a write through a DIFFERENT handle
+ * could ever reach, so the local must live in addressable memory for its WHOLE lifetime once any
+ * one call site takes its address (`collect_addr_taken_locals` decides this up front, from the
+ * function's own source, before any of its statements lower). Same shape `lenv_bind_fat_slot`
+ * already established for a mutable fat local, ONE word instead of a pair.
+ *
+ * @param env     the env to extend
+ * @param name    the local's name
+ * @param slot    the VReg holding the one-word slot's address
+ * @param ty      the slot's load/store machine class (the local's own `ltype_of`)
+ * @return        the extended env
+ */
+pub fn lenv_bind_scalar_slot(env: LEnv, name: str, slot: u32, ty: LType) -> LEnv {
+    LEnv {
+        names = teko::list::push(env.names, name); vregs = teko::list::push(env.vregs, slot)
+        len_vregs = teko::list::push(env.len_vregs, 0); has_len = teko::list::push(env.has_len, false)
+        is_slot = teko::list::push(env.is_slot, false)
+        is_scalar_slot = teko::list::push(env.is_scalar_slot, true); slot_ltype = teko::list::push(env.slot_ltype, ty)
+    }
+}
+
+/** LSlotLookup — the result of a fat-SLOT env lookup: whether the name's NEWEST binding is a
+    mutable fat local, and the VReg holding its 16-byte slot's address (list-builtin degrau). */
+pub type LSlotLookup = struct { found: bool; slot: u32 }
+
+/**
+ * lenv_lookup_fat_slot — is `name`'s NEWEST binding a mutable fat local (`lenv_bind_fat_slot`)?
+ * Resolving through the newest index is what makes a shadow win: a plain `let` that shadows a
+ * mutable fat local answers `found=false` and reads its own register pair, exactly as it should.
+ *
+ * @param env   the env to scan
+ * @param name  the local name to resolve
+ * @return      whether the newest binding is a fat slot + its address VReg
+ */
+pub fn lenv_lookup_fat_slot(env: LEnv, name: str) -> LSlotLookup {
+    let idx = lenv_newest_index(env, name)
+    if idx == env.names.len { return LSlotLookup { found = false; slot = 0 } }
+    if !env.is_slot[idx] { return LSlotLookup { found = false; slot = 0 } }
+    LSlotLookup { found = true; slot = env.vregs[idx] }
+}
+
+/** LScalarSlotLookup — the result of a scalar-SLOT env lookup: whether the name's NEWEST
+    binding is an address-taken `mut` scalar local, the VReg holding its one-word slot's
+    address, and the slot's own load/store machine class (0.3.1.0 degrau 18). */
+pub type LScalarSlotLookup = struct { found: bool; slot: u32; ty: LType }
+
+/**
+ * lenv_lookup_scalar_slot — is `name`'s NEWEST binding an address-taken `mut` scalar local
+ * (`lenv_bind_scalar_slot`)? Resolving through the newest index is what makes a shadow win,
+ * exactly like `lenv_lookup_fat_slot`.
+ *
+ * @param env   the env to scan
+ * @param name  the local name to resolve
+ * @return      whether the newest binding is a scalar slot + its address VReg + its LType
+ */
+pub fn lenv_lookup_scalar_slot(env: LEnv, name: str) -> LScalarSlotLookup {
+    let idx = lenv_newest_index(env, name)
+    if idx == env.names.len { return LScalarSlotLookup { found = false; slot = 0; ty = LType::Void } }
+    if !env.is_scalar_slot[idx] { return LScalarSlotLookup { found = false; slot = 0; ty = LType::Void } }
+    LScalarSlotLookup { found = true; slot = env.vregs[idx]; ty = env.slot_ltype[idx] }
+}
+
+/**
+ * lenv_newest_index — the index of the NEWEST binding of `name` in `env`
+ * (scanning newest-first, so a shadow's index wins), or `env.names.len` when
+ * `name` is unbound. The shared index primitive for reassign-in-place
+ * (`lenv_reassign`) and the merge machinery's pre-branch index capture
+ * (`merge_scalar_indices`) (#389 F1b item 3).
+ *
+ * @param LEnv env  the env to scan
+ * @param str name  the local name to locate
+ * @return u64  the newest matching index, or `env.names.len` when unbound
+ */
+fn lenv_newest_index(env: LEnv, name: str) -> u64 {
+    mut i: u64 = env.names.len
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        if env.names[i] == name { return i }
+    }
+    env.names.len
+}
+
+/**
+ * list_set_u32 — `xs` with the element at `idx` replaced by `v`, every other
+ * element passed through unchanged; `xs` is returned untouched when `idx` is
+ * out of range (a caller invariant break the reassign path never hits, since
+ * the index comes from `lenv_newest_index`) (#389 F1b item 3).
+ *
+ * @param []u32 xs  the source list
+ * @param u64 idx  the index to overwrite
+ * @param u32 v  the replacement value
+ * @return []u32  `xs` with position `idx` set to `v`
+ */
+fn list_set_u32(xs: []u32, idx: u64, v: u32) -> []u32 {
+    mut out: []u32 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if i == idx { out = teko::list::push(out, v) } else { out = teko::list::push(out, xs[i]) }
+        i++
+    }
+    out
+}
+
+/**
+ * lenv_reassign — rebind the NEWEST binding of `name` to `vreg`. For a SCALAR
+ * (`!has_len`) newest binding this updates IN PLACE (the SSA-lite reassignment
+ * update), preserving the slot's POSITION — so the binding keeps its
+ * pre-branch INDEX and the merge machinery can read the enclosing scalar's
+ * current value at that fixed index regardless of any shadow appended after it
+ * (#389 F1b item 3). Behaviour-preserving for every `lenv_lookup`: the newest
+ * `name` is still at its original index, now carrying `vreg`, so a name-keyed
+ * newest-first read returns the SAME VReg it would after the old append — the
+ * only difference is that no DUPLICATE `name` entry is left behind.
+ *
+ * For a FAT (`has_len`) newest binding, in-place update is WRONG: it would
+ * overwrite the ptr VReg while PRESERVING the old `len_vregs`/`has_len` slot,
+ * so a later fat use (`s.len`, or passing `s` on) would silently read the
+ * STALE pre-reassignment length — a miscompile item-3's index-identity
+ * threading never needed in the first place, since `reassigned_scalars`
+ * already filters merge candidates to `!has_len` (a fat local is NEVER
+ * threaded through a scalar merge, #389 F1b item 3 review). So a fat newest
+ * binding instead falls back to the OLD append behavior (`lenv_bind`, a fresh
+ * SCALAR entry with `has_len=false`): this restores the EXACT pre-item3
+ * posture — `lenv_lookup_fat`'s newest-first scan hits that fresh scalar
+ * entry first and reports `has_len=false`, so `lower_var_fat`/`lower_len_field`
+ * honest-stop on the reassigned name exactly as they did before item-3,
+ * refusing the program instead of silently returning a stale length.
+ *
+ * Also falls back to `lenv_bind` when `name` is unbound (a checker invariant
+ * break — an assign to an undeclared local never reaches lowering).
+ *
+ * @param LEnv env  the env whose newest `name` binding is updated
+ * @param str name  the reassigned local's name
+ * @param u32 vreg  the reassignment's fresh result VReg
+ * @return LEnv  `env` with the newest `name` slot updated in place (scalar) or
+ *              a fresh scalar entry appended (fat or unbound)
+ */
+pub fn lenv_reassign(env: LEnv, name: str, vreg: u32) -> LEnv {
+    let idx = lenv_newest_index(env, name)
+    if idx == env.names.len { return lenv_bind(env, name, vreg) }
+    if env.has_len[idx] { return lenv_bind(env, name, vreg) }
+    LEnv {
+        names = env.names; vregs = list_set_u32(env.vregs, idx, vreg)
+        len_vregs = env.len_vregs; has_len = env.has_len; is_slot = env.is_slot
+        is_scalar_slot = env.is_scalar_slot; slot_ltype = env.slot_ltype
+    }
+}
+
+/** LLookup — the result of an LEnv lookup: whether the name was bound + its VReg. */
+pub type LLookup = struct { found: bool; vreg: u32 }
+

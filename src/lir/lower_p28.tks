@@ -1,0 +1,249 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * bind_reference_local — bind a `ref r [: T] = d` reference local: the name takes the ADDRESS of its
+ * source and becomes a second name for that ONE cell (owner ruling 2026-07-30, `ref` is the
+ * IDENTITY axis and is born mutable), exactly as the C route's `tk_t_Ch * r = &d` does.
+ *
+ * It bypasses `own_bound_value` deliberately, and that bypass is the whole fix. That copy is the
+ * VALUE-binding rule — `let u = t` over an aggregate PLACE must not make `u` a second name for
+ * `t`'s storage — and a `ref` binding is the one binding for which making a second name IS the
+ * contract. Reaching it, a reference local bound a fresh frame slot and a 16-byte `tk_mem_copy`,
+ * so a write to `d` was invisible through `r` and a write through `r` invisible in `d`. It bypasses
+ * the `ctx.addr_taken` reification for the same reason: the handle holds a pointer VALUE, and
+ * nothing takes the address OF the handle.
+ *
+ * @param ctx   the lowering context
+ * @param b     the typed binding (its `bound` is `Reference`, its value the source place)
+ * @param name  the bound name
+ * @return      the context with `name` bound to the source's address
+ * @throws      propagated from `lower_value_into_reference`
+ * @since       0.3.1 (own-backend `ref`-binding placement gap)
+ */
+fn bind_reference_local(ctx: LowerCtx, b: checker::TBinding, name: str) -> LowerStmtOut | error {
+    let lo = match lower_value_into_reference(ctx, b.value) { Lowered as x => x; error as err => return err }
+    LowerStmtOut { ctx = ctx_bind(lo.ctx, name, lo.vreg); terminated = false }
+}
+
+/**
+ * bind_addr_taken_scalar — bind a `mut` scalar local, already known address-taken
+ * (`ctx.addr_taken`), to a fresh one-word frame slot seeded with its initial value: `alloca` the
+ * slot at the local's OWN machine class, store the just-lowered value into it, then bind the
+ * NAME to the slot's address (`lenv_bind_scalar_slot`) rather than to the value directly.
+ *
+ * @param lo    the initial value, already lowered (its context is the one extended)
+ * @param name  the local's name
+ * @param ty    the local's declared/inferred type (`ltype_of` gives the slot's width)
+ * @param line  the binding's source line
+ * @param col   the binding's source column
+ * @return      the context with the slot allocated, seeded, and bound
+ */
+fn bind_addr_taken_scalar(lo: Lowered, name: str, ty: checker::Type, line: u32, col: u32) -> LowerStmtOut {
+    let lt = ltype_of(ty, lo.ctx.enums)
+    let slot = ctx_alloc(lo.ctx)
+    let with_alloca = ctx_append(slot.ctx, alloca_inst(slot.vreg, ltype_size(lt), ltype_align(lt), line, col))
+    let with_store = ctx_append(with_alloca, store_inst(slot.vreg, lo.vreg, lt, line, col))
+    LowerStmtOut { ctx = ctx_bind_scalar_slot(with_store, name, slot.vreg, lt); terminated = false }
+}
+
+/**
+ * bind_mutable_fat — bind a MUTABLE str/slice local to a fresh 16-byte frame slot seeded with its
+ * initial pair (`alloc_fat_slot` + `lenv_bind_fat_slot`).
+ *
+ * @param fo    the initial value's (ptr, len) pair (its context is the one extended)
+ * @param name  the local's name
+ * @param line  the binding's source line
+ * @param col   the binding's source column
+ * @return      the context with the slot reserved, seeded, and bound
+ */
+fn bind_mutable_fat(fo: LoweredFat, name: str, line: u32, col: u32) -> LowerStmtOut {
+    let slot = alloc_fat_slot(fo.ctx, fo, line, col)
+    let bound = ctx_with(slot.ctx, slot.ctx.func, slot.ctx.block_id, lenv_bind_fat_slot(slot.ctx.env, name, slot.vreg))
+    LowerStmtOut { ctx = bound; terminated = false }
+}
+
+/**
+ * lower_value_into_type — lower `value` COERCED into the declared type `bound`: when `bound` is a
+ * null-bearing two-member union (`T | null`) and the value's own natural type is not already that
+ * union (a bare `null` literal, or the payload type `T` directly), build the own backend's uniform
+ * tag+payload wrapper via `lower_null_union_construct`; when `bound` is any OTHER (general,
+ * non-null-bearing) variant, `lower_value_into_variant` does the same generalized to an arbitrary
+ * member count/index; every other declared type lowers the value plainly. The checker types an
+ * assignable value at its OWN narrow type and leaves the wrap to the backend — the C backend does
+ * it in `emit_as`, on EVERY placement (binding, assign, return, argument, field), and this is the
+ * own-backend analog.
+ *
+ * EVERY own-backend placement routes through here: `lower_binding` (`b.bound`),
+ * `lower_assign_simple` and `store_assign_value` (`a.bound`), `lower_return_value`
+ * (`ctx.ret_type`), `lower_tail_expr_stmt` (`target_ty` — an if/match arm's own enclosing result
+ * type, or, via `lower_fn_body`, the enclosing function's return type, #382 degrau N2),
+ * `lower_list_push` (the slice's element type), `store_struct_field` (`find_field_decl_type`) and
+ * `lower_arg_into_param` (`callee_param_types`).
+ *
+ * THE LAST TWO WERE MISSING UNTIL DEGRAU 25, and this doc used to claim they were closed at the
+ * other end instead, by `lower_null_lit`'s honest-stop. They were not. Only the struct-literal
+ * field reached that stop (a field value IS typed against its declared type, so its bare `null`
+ * carries `checker::Null`); a call ARGUMENT is typed with no expected type at all and (pre-0.3.1)
+ * carried the legacy bare-null sentinel, which walked straight past the stop into a raw `const 0`
+ * that the callee's own `match` then read as the wrapper's base address — measured as a SIGSEGV
+ * against a C route that answered correctly. A bare `T` flowing into either placement was equally
+ * unwrapped and equally fatal. Neither placement guesses any more: each looks its declared type up
+ * in a table built for exactly that (`collect_field_decls`, `TCall.callee_type`).
+ *
+ * A `Reference` bound is the THIRD coercion, and it was missing for the same reason the other two
+ * were: the C route does it in `emit_as_r`'s very first arm (`expected` a `Reference` over a value
+ * that is not one → emit `&`), on EVERY placement, and this analog covered only the two variant
+ * shapes. Measured, `ref r: Ch = d` bound a COPY here and `&d` there.
+ *
+ * @param LowerCtx ctx  the lowering context to append the value's instructions into
+ * @param checker::Type bound  the DECLARED type of the slot the value is placed into
+ * @param checker::TExpr value  the typed value expression
+ * @return Lowered  the lowered (and, when needed, coerced) value
+ * @throws  propagated from lowering the value or the wrapper's payload
+ * @since 0.3.1 (null-union C7 own-backend gap)
+ */
+fn lower_value_into_type(ctx: LowerCtx, bound: checker::Type, value: checker::TExpr) -> Lowered | error {
+    match bound { checker::Reference => return lower_value_into_reference(ctx, value); _ => { } }
+    match expand_named_variant(bound, ctx.variants) {
+        checker::Variant as v => match null_union_shape(v) {
+            NullUnionShape as shape => lower_value_into_null_union(ctx, shape, value)
+            null => lower_value_into_variant(ctx, v, value)
+        }
+        _ => lower_expr(ctx, value)
+    }
+}
+
+/**
+ * lower_value_into_reference — the `Reference` arm of `lower_value_into_type`: what a slot declared
+ * `Reference{T}` actually holds. A value ALREADY `Reference`-typed is the pointer itself and passes
+ * through (a `ref` forwarded into another `ref`, the shape `arg_needs_auto_ref` recognizes at the
+ * argument position); a bare `T` is the checker's alias path, which deliberately leaves the source
+ * at its OWN type and leaves the address-taking to the backend — so this takes it.
+ *
+ * @param ctx    the lowering context
+ * @param value  the typed value being placed into the reference slot
+ * @return       the pointer the slot holds
+ * @throws       propagated from lowering the value, or from `lower_addr_of_place`
+ * @since        0.3.1 (own-backend `ref`-binding placement gap)
+ */
+fn lower_value_into_reference(ctx: LowerCtx, value: checker::TExpr) -> Lowered | error {
+    match value.type { checker::Reference => return lower_expr(ctx, value); _ => { } }
+    lower_addr_of_place(ctx, value)
+}
+
+/**
+ * lower_value_into_null_union — the TWO-member `checker::Variant` arm of `lower_value_into_type`: a
+ * value ALREADY typed as the union itself (re-binding or re-assigning an existing `T | null` value)
+ * passes through unwrapped; any other value (the bare `null` literal or a bare `T`) is wrapped via
+ * `lower_null_union_construct`.
+ *
+ * @param LowerCtx ctx  the lowering context to append the value's instructions into
+ * @param NullUnionShape shape  the union's payload member plus both declared indices
+ * @param checker::TExpr value  the typed value expression being placed into the union slot
+ * @return Lowered  the value's own VReg (already wrapped), or a freshly built wrapper
+ * @throws  propagated from lowering the value or the wrapper's payload
+ */
+fn lower_value_into_null_union(ctx: LowerCtx, shape: NullUnionShape, value: checker::TExpr) -> Lowered | error {
+    match expand_named_variant(value.type, ctx.variants) {
+        checker::Variant => lower_expr(ctx, value)
+        _ => lower_null_union_construct(ctx, shape, value)
+    }
+}
+
+/**
+ * lower_value_into_variant — the general (three-or-more-member, or non-null-bearing)
+ * `checker::Variant` arm of `lower_value_into_type`: a `Null`-typed value (a bare `null` literal, OR
+ * a `match`/`if` sub-expression whose OWN inferred type collapsed to bare `Null` because every one
+ * of its arms is, recursively, `null` — `checker::resolve.type_join`'s bare-null-only join) builds
+ * the absence wrapper at the union's OWN `Null` member index (`lower_variant_null_construct`); a
+ * value whose type is DIRECTLY one of `v`'s own declared members (`direct_variant_member_index` —
+ * INCLUDING a member that happens to itself be a declared variant, e.g. a bare `Inner` flowing into
+ * `-> Outer`, `Outer = variant A | Inner`) is ALWAYS wrapped via `lower_variant_construct` at its
+ * matched index; any other value (a bare case reached only through alias nesting, e.g. a `Box` or a
+ * bare `error{…}` flowing into a declared `Box | error` slot) is wrapped the same way, UNLESS its
+ * own type already expands to SOME `Variant` shape — the "value ALREADY typed as the variant itself"
+ * re-flow (the same passthrough `lower_value_into_null_union` uses for `T | null`) — in which case it
+ * passes through unwrapped.
+ *
+ * THE DIRECT-MEMBER CHECK RUNS FIRST (degrau 33, #cego-gen2), AHEAD OF the "expands to some
+ * `Variant`" passthrough test: a member that is itself a declared variant (`Inner` above) ALSO
+ * expands to a bare `Variant`, so the passthrough test alone used to take the SAME arm for it —
+ * `value`'s OWN wrapper (tagged in `Inner`'s tag space) flowed out unrewrapped, so a later `match`
+ * against `v`'s members read `Inner`'s tag as if it were `v`'s — a silent WRONG ANSWER (measured: a
+ * `Holder{node: Inner}.node` returned as `Outer` matched the WRONG arm, reading `Inner`'s boxed
+ * payload through `Outer`'s unrelated field layout) — the general three-or-more-member twin of the
+ * two-level `Outer = variant P | Q` bug `lower_variant_construct`'s own doc already names (degrau
+ * 23, direct vs. nested). Checking DIRECT membership first (rather than widening the passthrough
+ * test to "is it the SAME declared variant as `v`") keeps every OTHER passthrough this function
+ * already relied on intact: a value's own type need not equal `v` structurally member-for-member
+ * for the re-flow case to be legitimate (measured: `teko::checker::eval_len_field`'s own `ConstValue
+ * | error` tail — a wider structural-equality gate honest-stopped there with "value's type is not a
+ * member of its declared variant", a REGRESSION a first attempt at this fix introduced and this
+ * narrower direct-membership-first ordering does not).
+ *
+ * THE `Null` ARM IS DEGRAU 30, and it is the WRITER half of `lower_null_pattern_test`'s reader.
+ * Without it a `return null` into a `[]byte | null | error` fell through to
+ * `lower_variant_construct`, whose by-TYPE member lookup has no `Null` case, and stopped with
+ * "value's type is not a member of its declared variant" — measured on the compiler's own
+ * `codegen::emit_variant_wrap_exact_pass`. Landing only the reader would have been worse than
+ * landing neither: the `null` arm would have tested a tag that nothing ever stored.
+ *
+ * KEYED BY `value.type`, NOT `value.kind` (native-N1-null-widen, O1 retirement): the C route wraps
+ * by `value.type`'s member key rather than by node kind (`codegen.tks:6816-6829`), so a `match`/`if`
+ * collapsed to bare `Null` by nested `type_join` folding needs the SAME ancestor-level widen a bare
+ * `TNullLit` gets — otherwise its leaf `null` literals reach `lower_null_lit` with no enclosing
+ * union coercion in sight and the own backend honest-stops (measured on the self-hosted native gate,
+ * `teko::checker::check_must_free_locals_stmt`'s own nested `match` tail).
+ *
+ * @param LowerCtx ctx  the lowering context to append the value's instructions into
+ * @param checker::Variant v  the declared variant the value is placed into
+ * @param checker::TExpr value  the typed value expression being placed into the variant slot
+ * @return Lowered  the value's own VReg (already the variant), or a freshly built wrapper
+ * @throws  propagated from lowering the value, or when its type names no member of `v`
+ * @since 0.3.1 (own-backend general variant construction, degrau N2); 0.3.1.0 degrau 30 (`null`);
+ *        native-N1-null-widen (O1 retirement — a non-literal `Null`-typed sub-tree); 0.3.1.0
+ *        degrau 33 (a variant-typed value that is itself a DIRECT member of `v`, #cego-gen2)
+ */
+fn lower_value_into_variant(ctx: LowerCtx, v: checker::Variant, value: checker::TExpr) -> Lowered | error {
+    match value.type {
+        checker::Null => return lower_variant_null_construct(ctx, v, value)
+        _ => { }
+    }
+    // SUBSUMPTION — the residual PAYLOAD-ADDRESS side of B1 (native-variant-into-variant-widen). A
+    // value whose OWN type is a MEMBER of `v` (directly, OR through an alias member's own
+    // expansion — `variant_any_member_matches`) is being WIDENED into `v` and must be RE-WRAPPED as
+    // that member, EVEN WHEN IT IS ITSELF A VARIANT: `Ty` flowing into `Ty | error` is the case
+    // `collect_sig_type_params`/`assemble_sel` reach. The former passthrough returned the NARROWER
+    // variant's own 24-byte wrapper unchanged, so a later `Ty as t` read the wider union's payload
+    // word (offset 8) — the inner wrapper's OWN payload pointer, not a boxed `Ty` — as the case
+    // address, then boxed 24 bytes from it (`tk_slice_elem_box`) → SIGSEGV. Only a value whose type
+    // is `v` ITSELF (re-flowing the SAME union) is a non-member here, and it alone passes through.
+    if variant_any_member_matches(v.members, value.type, ctx.variants) {
+        return lower_variant_construct(ctx, v, value)
+    }
+    match expand_named_variant(value.type, ctx.variants) {
+        checker::Variant as nt => {
+            // NP-widen (native-narrow-union-into-wider-variant): a value whose OWN type is a
+            // narrow union that is a STRICT SUBSET of `v` (every member of `nt` is a member of `v`,
+            // but `nt` has FEWER members, so it is not `v` itself) is the arm-join shape
+            // `type_param_reg`'s `if ifaces { InterfaceBody } else { ExternBody }` bound to a
+            // `TypeBody`-typed slot reaches. Its wrapper carries `nt`'s OWN tag numbering, which
+            // does NOT agree with `v`'s — the former passthrough handed that wrapper on unchanged, so
+            // a later `td.body as InterfaceBody` read `v`'s payload word through `nt`'s tag space and
+            // boxed a wild pointer (measured: `resolve_type_reg`'s type-param `TypeReg.decl` came out
+            // a `.text` address, then `resolve_named`'s `match td.body` dereferenced code bytes →
+            // SIGSEGV). The uniform 24-byte wrapper (`variant_wrapper_bytes`) is byte-compatible
+            // across every variant, so the widen is a payload-preserving RE-TAG into `v`'s space.
+            // Only a value whose type is `v` ITSELF (the SAME union re-flowing, `nt.len == v.len`)
+            // is a legitimate passthrough, and it alone stays on that path — byte-identical.
+            if nt.members.len < v.members.len && variant_all_members_in(nt.members, v, ctx.variants) {
+                return lower_subset_variant_widen(ctx, v, nt, value)
+            }
+            lower_expr(ctx, value)
+        }
+        _ => lower_variant_construct(ctx, v, value)
+    }
+}
+

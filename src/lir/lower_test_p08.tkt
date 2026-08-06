@@ -1,0 +1,249 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * The ENTIRE LIR text `lwt_lower_expr_text` produces for `"abc"[0] to i32`: the interned literal,
+ * the BOUNDS GUARD the read now pays, the two instructions the byte read itself costs, and NOTHING
+ * for the cast. Every line is load-bearing — the `rodata` row proves the literal's bytes were
+ * interned rather than built at runtime, `%0` takes the address of that row, `%1` materializes the
+ * fat value's length, `%2` puts the index in a register (the guard compares a register, never an
+ * address), `%3`/`%4` are the subscript's LINE and COLUMN for the positioned panic, `%5` is the
+ * unsigned `icmpltu` against the length and `branch` splits on it; `#B1` is the in-bounds block,
+ * where `%6` folds the constant element's whole byte offset into ONE `field_addr` and `%7` reads
+ * ONE byte with `load.i8`; `#B2` is the trap block, which calls the positioned
+ * `tk_panic_oob_at(line, col)` and then jumps to itself because the call does not return. There is
+ * no instruction after the `load.i8` because `byte -> i32` is a lossless widen that emits neither a
+ * conversion nor a fit guard.
+ *
+ * LINE AND COLUMN ARE BOTH `const 0` BECAUSE THE FIXTURE'S NODES CARRY NO POSITION, not because
+ * the guard drops one: every `lwt_*` builder in this file writes `line = 0; col = 0`. What the two
+ * zeros pin is that the trap takes TWO positional arguments at all, which is what makes the native
+ * panic locate the subscript exactly like the C route's does.
+ *
+ * THERE IS NO `ret` BY CONSTRUCTION, AND THAT IS THE HARNESS AND NOT THE LOWERING.
+ * `lwt_lower_expr_text` frames a synthetic `func @t() -> i64` and then calls `lower_expr` — only
+ * the expression — so no fixture routed through that helper can ever contain a `ret`, whatever it
+ * lowers. The declared `-> i64` is the frame's fixed return type, unrelated to the expression's
+ * own `i32` result. Every sibling expression fixture in this file has the same shape.
+ */
+const LWT_STR_INDEX_GUARDED_BYTE_CAST_LIR: str = "rodata .Lstr0: [97, 98, 99]\nfunc @t() -> i64 {\n  #B0:\n    %0 = global_addr @.Lstr0\n    %1 = const 3\n    %2 = const 0\n    %3 = const 0\n    %4 = const 0\n    %5 = icmpltu %2, %1\n    branch %5, #B1(), #B2()\n  #B1:\n    %6 = field_addr %0, 0\n    %7 = load.i8 %6\n  #B2:\n    call @tk_panic_oob_at(%3, %4)\n    jump #B2()\n}\n"
+
+/**
+ * Indexing a `str` BOUNDS-CHECKS the index and then reads ONE byte out of the interned literal, and
+ * widening that byte to `i32` emits NOTHING AT ALL — no conversion instruction and no fit guard —
+ * because the pair is a lossless widen (`lower_cast_fit_guard` answers
+ * `checker::cast_is_lossless_widen` and returns its context untouched, so `lower_int_cast` hands the
+ * operand's own VReg straight back). A `byte` value is representable in `i32` under the same bit
+ * pattern, so an extend would have nothing to change; the `load.i8` IS the cast's result.
+ *
+ * WHY THE READ IS GUARDED, AND WHY THAT IS WORTH A FIXTURE (0.3.1.0 leitura-fora-de-fronteira).
+ * Before the guard existed this lowering computed an element address with NO check, so an
+ * out-of-range subscript read whatever byte followed the buffer and printed it, exit 0, while the C
+ * route's own `emit_index` PANICKED on the same source at the same subscript. That divergence was
+ * measured, and under the oracle rule a native/C disagreement is a NATIVE bug until proven
+ * otherwise: a silent wrong VALUE, the most dangerous class this lane hunts. The guard closes it
+ * with the very compare the element WRITE already used (`lower_index_bounds_guard`) and traps
+ * through the SAME positioned `tk_panic_oob_at(line, col)` the C route calls, so the two routes
+ * locate an out-of-bounds subscript identically.
+ *
+ * THE CONSTANT FOLD SURVIVES THE GUARD, and that is the second thing this text pins: `%6` is still a
+ * single `field_addr` at the element's whole byte offset. The guard wants the index in a REGISTER
+ * and the address does not, so a constant subscript pays a compare and a branch and nothing else —
+ * no multiply, no runtime offset arithmetic. The dynamic-index sibling
+ * (`lwt_lowers_str_index_with_an_unfoldable_index_guards_then_strides`) pins the other half.
+ *
+ * WHY IDENTITY AND NOT ONLY ABSENCE. `LWT_STR_INDEX_GUARDED_BYTE_CAST_LIR` is the whole printed
+ * text, so it pins the strong property positively: the literal is interned as three rodata bytes,
+ * the guard is exactly one compare and one branch, the read is one `load.i8` off an offset-0
+ * `field_addr` inside the in-bounds block, and the instruction list STOPS there. An
+ * absence-of-substring assertion cannot say that, and on its own it would even pass if the lowering
+ * stopped producing text at all. The named presences then restate the guarded byte-read route in its
+ * own words — the compare, the branch, the positioned trap and the folded load — and the
+ * `zext`/`sext`/`trunc` absences restate the widen-emits-no-conversion rule, so a reader sees the
+ * rules and not only a golden blob.
+ *
+ * That the loaded byte keeps its VALUE across the widen is proved by value elsewhere by the
+ * cast-width regression fixtures, and that the guard fires on a real out-of-range subscript by
+ * `examples/regressions/own_native`'s `str_index_*` rows; this fixture owns only the emitted-LIR
+ * shape.
+ *
+ * @return void
+ */
+#test
+fn lwt_lowers_str_index_guards_then_loads_the_byte_off_rodata() {
+    let ix = lwt_index_of(lwt_strlit("abc"), lwt_num_i64(0), checker::Byte { })
+    let text = lwt_lower_expr_text(lwt_cast(ix, checker::PrimKind::I32))
+    teko::assert::is_true(text == LWT_STR_INDEX_GUARDED_BYTE_CAST_LIR)
+    teko::assert::str_contains(text, "rodata .Lstr0: [97, 98, 99]")
+    teko::assert::str_contains(text, "global_addr @.Lstr0")
+    teko::assert::str_contains(text, "icmpltu %2, %1")
+    teko::assert::str_contains(text, "branch %5, #B1(), #B2()")
+    teko::assert::str_contains(text, "call @tk_panic_oob_at(%3, %4)")
+    teko::assert::str_contains(text, "field_addr %0, 0")
+    teko::assert::str_contains(text, "load.i8")
+    teko::assert::is_false(teko::str::contains(text, "zext"))
+    teko::assert::is_false(teko::str::contains(text, "sext"))
+    teko::assert::is_false(teko::str::contains(text, "trunc"))
+}
+
+/**
+ * The ENTIRE LIR text `lwt_lower_expr_text` produces for `"abc"[0 + 0] to i32` — the SAME read with
+ * an index the lowering cannot see as a constant. `index_addr` matches on the index node's kind, so
+ * a `TBinary` takes the runtime arm no matter what the operands are: `%4` is the index the `iadd`
+ * computed, `%5`/`%6` are the subscript's line and column, `%7`/`branch` are the same guard the
+ * constant-index sibling pays, and inside `#B1` the address is now `imul` by the element STRIDE
+ * (`%8 = const 1`, one byte per `str` element) plus `iadd` onto the buffer base — where the constant
+ * index had folded that whole computation into one `field_addr`.
+ *
+ * THE INDEX IS LOWERED EXACTLY ONCE, and this text is where that is visible: `%4` feeds BOTH the
+ * guard's compare and the address's multiply. Lowering it twice would evaluate a side-effecting
+ * index expression twice and could address a different element than the one the guard cleared.
+ */
+const LWT_STR_INDEX_DYNAMIC_GUARDED_LIR: str = "rodata .Lstr0: [97, 98, 99]\nfunc @t() -> i64 {\n  #B0:\n    %0 = global_addr @.Lstr0\n    %1 = const 3\n    %2 = const 0\n    %3 = const 0\n    %4 = iadd %2, %3\n    %5 = const 0\n    %6 = const 0\n    %7 = icmpltu %4, %1\n    branch %7, #B1(), #B2()\n  #B1:\n    %8 = const 1\n    %9 = imul %4, %8\n    %10 = iadd %0, %9\n    %11 = load.i8 %10\n  #B2:\n    call @tk_panic_oob_at(%5, %6)\n    jump #B2()\n}\n"
+
+/**
+ * The DYNAMIC half of the guarded `str` read, and the reason it needs its own fixture: the guard and
+ * the address are decided by DIFFERENT questions, so pinning one index shape proves nothing about
+ * the other. `guarded_index_addr` always guards, but `index_addr` folds the offset only for a
+ * `TNumber` index — every other node, `0 + 0` included, goes through `element_addr_at`'s stride
+ * multiply. Without this text a guard that had been wired into the constant arm alone would read as
+ * fully guarded.
+ *
+ * WHY `0 + 0` AND NOT A VARIABLE. `lwt_lower_expr_text` frames an expression with no parameters and
+ * no bindings, so there is no local to index with; and the discriminator under test is the index
+ * NODE'S KIND, not where its value comes from. A `TBinary` over two literals is the smallest node
+ * the constant fold cannot take, which is exactly what selects the runtime arm here. The comptime
+ * folder never sees this AST — the fixture builds the typed nodes by hand.
+ *
+ * The named presences restate the two properties in words: the same unsigned compare against the
+ * length, the same positioned trap, the stride `imul`/`iadd` pair instead of a `field_addr`, and the
+ * ABSENCE of `field_addr` in the whole text, which is what says the fold did not happen on this arm.
+ *
+ * @return void
+ */
+#test
+fn lwt_lowers_str_index_with_an_unfoldable_index_guards_then_strides() {
+    let sum = lwt_bin(lexer::TokenKind::Plus, lwt_num_i64(0), lwt_num_i64(0), checker::PrimKind::I64)
+    let ix = lwt_index_of(lwt_strlit("abc"), sum, checker::Byte { })
+    let text = lwt_lower_expr_text(lwt_cast(ix, checker::PrimKind::I32))
+    teko::assert::is_true(text == LWT_STR_INDEX_DYNAMIC_GUARDED_LIR)
+    teko::assert::str_contains(text, "%4 = iadd %2, %3")
+    teko::assert::str_contains(text, "icmpltu %4, %1")
+    teko::assert::str_contains(text, "branch %7, #B1(), #B2()")
+    teko::assert::str_contains(text, "call @tk_panic_oob_at(%5, %6)")
+    teko::assert::str_contains(text, "%9 = imul %4, %8")
+    teko::assert::str_contains(text, "%10 = iadd %0, %9")
+    teko::assert::str_contains(text, "load.i8 %10")
+    teko::assert::is_false(teko::str::contains(text, "field_addr"))
+}
+
+/** lwt_interp — a `$"…{…}…"` node over `pieces`/`holes`, always no-spec (A1-4, #382). */
+fn lwt_interp(pieces: []str, holes: []checker::TExpr) -> checker::TExpr {
+    mut specs: []checker::TFSpec = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= holes.len { break }
+        specs = teko::list::push(specs, checker::TFSpec { kind = checker::TFSpecNone { } })
+        i++
+    }
+    checker::TExpr { kind = checker::TInterp { pieces = pieces; holes = holes; specs = specs }; type = checker::Str { }; line = 0; col = 0 }
+}
+
+#test
+fn lwt_lowers_interpolation_as_nested_str_concat_calls() {
+    let pieces = teko::list::push(teko::list::push(teko::list::empty(), "n="), "")
+    let holes = teko::list::push(teko::list::empty(), lwt_num_i64(7))
+    let text = lwt_lower_expr_text(lwt_interp(pieces, holes))
+    teko::assert::str_contains(text, "rodata .Lstr0: [110, 61]")
+    teko::assert::str_contains(text, "global_addr @.Lstr0")
+    teko::assert::str_contains(text, "call @tk_i64_to_str_len(")
+    teko::assert::str_contains(text, "call @tk_str_concat_len(")
+}
+
+/** lwt_bare_pieces — the two-piece (empty, empty) list every one-hole `TInterp` fixture
+    below needs, since only the HOLE's own spec is under test, never the surrounding text
+    (0.3.1.0 degrau 19). */
+fn lwt_bare_pieces() -> []str {
+    teko::list::push(teko::list::push(teko::list::empty(), ""), "")
+}
+
+/** lwt_interp_static — a one-hole `$"…{hole:spec}…"` node whose spec is STATIC (0.3.1.0
+    degrau 19). */
+fn lwt_interp_static(hole: checker::TExpr, spec: str) -> checker::TExpr {
+    let specs = teko::list::push(teko::list::empty(), checker::TFSpec { kind = checker::TFSpecStatic { s = spec } })
+    let holes = teko::list::push(teko::list::empty(), hole)
+    checker::TExpr { kind = checker::TInterp { pieces = lwt_bare_pieces(); holes = holes; specs = specs }; type = checker::Str { }; line = 0; col = 0 }
+}
+
+/** lwt_interp_dynamic — a one-hole `$"…{hole:[spec_arg]}…"` node whose spec is DYNAMIC, a
+    single runtime `str` argument (0.3.1.0 degrau 19). */
+fn lwt_interp_dynamic(hole: checker::TExpr, spec_arg: checker::TExpr) -> checker::TExpr {
+    let args = teko::list::push(teko::list::empty(), spec_arg)
+    let specs = teko::list::push(teko::list::empty(), checker::TFSpec { kind = checker::TFSpecDynamic { args = args } })
+    let holes = teko::list::push(teko::list::empty(), hole)
+    checker::TExpr { kind = checker::TInterp { pieces = lwt_bare_pieces(); holes = holes; specs = specs }; type = checker::Str { }; line = 0; col = 0 }
+}
+
+#test
+fn lwt_lowers_static_hex_lower_spec_as_the_len_out_call() {
+    let text = lwt_lower_expr_text(lwt_interp_static(lwt_num_i64(253), "x"))
+    teko::assert::str_contains(text, "call @tk_fmt_x_lower_len(")
+}
+
+#test
+fn lwt_lowers_static_hex_upper_spec_by_its_own_leading_case() {
+    let text = lwt_lower_expr_text(lwt_interp_static(lwt_num_i64(253), "X"))
+    teko::assert::str_contains(text, "call @tk_fmt_x_upper_len(")
+}
+
+#test
+fn lwt_lowers_static_binary_spec_as_the_len_out_call() {
+    let text = lwt_lower_expr_text(lwt_interp_static(lwt_num_i64(253), "b"))
+    teko::assert::str_contains(text, "call @tk_fmt_b_len(")
+}
+
+#test
+fn lwt_lowers_static_decimal_spec_with_no_digits_as_the_default_width_one() {
+    let text = lwt_lower_expr_text(lwt_interp_static(lwt_num_i64(6), "D"))
+    teko::assert::str_contains(text, "call @tk_fmt_d_len(")
+    teko::assert::str_contains(text, "const 1")
+}
+
+#test
+fn lwt_lowers_static_decimal_spec_parses_its_own_trailing_digits_as_the_width() {
+    let text = lwt_lower_expr_text(lwt_interp_static(lwt_num_i64(6), "D5"))
+    teko::assert::str_contains(text, "const 5")
+}
+
+#test
+fn lwt_lowers_static_int_thousands_spec_as_the_len_out_call_with_no_precision_arg() {
+    let text = lwt_lower_expr_text(lwt_interp_static(lwt_num_i64(6), "N"))
+    teko::assert::str_contains(text, "call @tk_fmt_n_i_len(")
+}
+
+#test
+fn lwt_lowers_static_float_family_spec_as_the_len_out_call_with_its_parsed_precision() {
+    let text = lwt_lower_expr_text(lwt_interp_static(lwt_fnum(3.14159), "F2"))
+    teko::assert::str_contains(text, "call @tk_fmt_f_len(")
+    teko::assert::str_contains(text, "const 2")
+}
+
+#test
+fn lwt_lowers_static_float_thousands_spec_to_the_float_twin_not_the_int_one() {
+    let text = lwt_lower_expr_text(lwt_interp_static(lwt_fnum(3.14159), "N"))
+    teko::assert::str_contains(text, "call @tk_fmt_n_f_len(")
+}
+
+#test
+fn lwt_static_spec_with_an_unrecognized_leading_character_honest_stops() {
+    let text = lwt_lower_expr_text(lwt_interp_static(lwt_num_i64(6), "Q5"))
+    teko::assert::str_contains(text, "ERR: native backend N1: unrecognized format spec")
+}
+
+#test
+fn lwt_lowers_dynamic_spec_int_as_the_dyn_i64_len_out_call() {
+    let text = lwt_lower_expr_text(lwt_interp_dynamic(lwt_num_i64(6), lwt_strlit("X")))
+    teko::assert::str_contains(text, "call @tk_fmt_dyn_i64_len(")
+}
+

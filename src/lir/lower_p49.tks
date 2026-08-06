@@ -1,0 +1,233 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * push_head_args — a push's first FOUR runtime-grow operands, in ABI order: the base slice's
+ * (ptr, len) then the stored item's (address, byte size). `lower_len_out_call` appends the
+ * trailing `&out_len` operand itself (the runtime's fifth, `tk_slice_push`/`tk_slice_push_fo`'s own
+ * `(ptr, len, &item, esz, &out_len)` shape), so this builds only the part every push shares —
+ * scalar and fat items alike route through the SAME tail (0.3.1.0 degrau 10).
+ *
+ * @param base       the base slice's already-lowered (ptr, len) pair
+ * @param item_slot  the address of the stored item
+ * @param esz        the element's byte size VReg
+ * @return           the four argument VRegs, in ABI order
+ */
+fn push_head_args(base: LoweredFat, item_slot: u32, esz: u32) -> []u32 {
+    teko::list::push(teko::list::push(two_args(base.ptr, base.len), item_slot), esz)
+}
+
+/**
+ * merge_fat_value_args — a fat-value-producing merge's PRE-scalar jump-arg pair: the arm's
+ * tail (ptr, len), in that CONTRACT ORDER (ptr, len — fixed by `lower_fat_field`/
+ * `bind_fat_param`'s own `tk_str{ptr;len}` mirror; this call never reorders it), matching the
+ * merge block's ptr-param-first, len-param-second layout — `close_arm_replaying_defers`
+ * appends the reassigned-scalar args after these two.
+ *
+ * @param ptr  the arm's tail pointer VReg (the merge's first block-param)
+ * @param len  the arm's tail length VReg (the merge's second block-param)
+ * @return     `[ptr, len]`
+ */
+fn merge_fat_value_args(ptr: u32, len: u32) -> []u32 {
+    teko::list::push(teko::list::push(teko::list::empty(), ptr), len)
+}
+
+/**
+ * LowerBlockValueFat — the FAT (`str`/`[]T`) counterpart of `LowerBlockValue`: the outcome of
+ * lowering a fat-value-producing `if`-expression arm's statement block. Either it fell
+ * through with the tail's (ptr, len) pair populated (`terminated=false` — the last statement
+ * was an expression-statement whose value IS the arm's fat result), or an inner control-flow
+ * op (a `return`) already closed the block (`terminated=true`, `ptr`/`len` unused).
+ */
+pub type LowerBlockValueFat = struct { ctx: LowerCtx; terminated: bool; ptr: u32; len: u32 }
+
+/**
+ * lower_block_value_fat — lower a FAT-value if-expression arm's statement block: every
+ * statement but the last lowers as an ordinary effect-only statement; the last is the arm's
+ * TAIL VALUE (an expression-statement), lowered through the fat (ptr, len) path rather than
+ * `lower_block_value`'s single-VReg one. Mirrors `lower_block_value`'s "last statement is the
+ * value" shape, one axis over (scalar -> fat).
+ *
+ * @param ctx   the lowering context positioned at the arm's first statement
+ * @param body  the arm's statement block (checker-guaranteed non-empty)
+ * @return      the fat value outcome
+ * @throws      when the block is empty, an inner statement fails to lower, or the tail is
+ *              neither a value-yielding expression-statement nor a terminating `return`
+ */
+fn lower_block_value_fat(ctx: LowerCtx, body: []checker::TStatement) -> LowerBlockValueFat | error {
+    if body.len == 0 { return error { message = "native backend N1: empty if-expression arm (internal)" } }
+    let pre = match lower_block_prefix_fat(ctx, body) { LowerStmtOut as x => x; error as err => return err }
+    if pre.terminated { return LowerBlockValueFat { ctx = pre.ctx; terminated = true; ptr = 0; len = 0 } }
+    lower_tail_stmt_fat(pre.ctx, body[body.len - 1])
+}
+
+/**
+ * lower_block_prefix_fat — every statement of a FAT-value block EXCEPT the last (`lower_block_value_fat`'s
+ * own "all but the tail" walk, extracted so `lower_fn_body_fat` can insert the NP4 conveyance leave
+ * BETWEEN the prefix and the tail statement without duplicating this loop).
+ *
+ * @param ctx   the lowering context positioned at the block's first statement
+ * @param body  the block's statement list (checker-guaranteed non-empty)
+ * @return      the context after every statement but the last, and whether one of them already
+ *              terminated the block (a `return`/`break`/`continue` before reaching the tail)
+ * @throws      propagated from lowering any of the prefix statements
+ * @since 0.3.1
+ */
+fn lower_block_prefix_fat(ctx: LowerCtx, body: []checker::TStatement) -> LowerStmtOut | error {
+    mut cur = ctx
+    mut i: u64 = 0
+    loop {
+        if i + 1 >= body.len { break }
+        let out = match lower_stmt(cur, body[i]) { LowerStmtOut as x => x; error as err => return err }
+        cur = out.ctx
+        if out.terminated { return LowerStmtOut { ctx = cur; terminated = true } }
+        i++
+    }
+    LowerStmtOut { ctx = cur; terminated = false }
+}
+
+/**
+ * lower_fn_tail_fat — a fat-returning function/lambda body's OWN trailing-tail statement (NP4): when
+ * it is a value-producing expression-statement (the auto-return case), its construction runs inside a
+ * conveyance BRACKET (`lower_conveyed_tail_expr_stmt_fat` — leave-before/enter-after, Mechanism 1),
+ * so the tail's own fat-producer builder call materializes its fresh buffer at `rr` (the conveyance
+ * anchor) instead of the frame region `lower_fn_body_fat`'s own `emit_region_drops` later reclaims,
+ * while restoring the frame region afterward so the UNCHANGED defer-replay-then-leave-then-drop tail
+ * of `lower_fn_body_fat` keeps running exactly where every other exit edge runs it. This is
+ * load-bearing exactly where `own_returned_value`'s aggregate axis is NOT: the fat axis has no
+ * post-hoc box (`returned_aggregate_box_bytes` answers 0 for it — its ptr "already points at owned
+ * storage" precisely BECAUSE the builder that made it ran under the right region), so the region must
+ * be right BEFORE the value is built, not fixed up after.
+ *
+ * Any OTHER tail shape (`return`/`break`/`continue`, `lower_tail_non_expr_fat`) already performs its
+ * OWN leave through `lower_stmt` (`lower_return`/`lower_return_fat`) and is left BARE — bracketing it
+ * too would double-leave and desync the region stack, so this dispatches on the SAME statement-kind
+ * split `lower_tail_stmt_fat` already makes, and only brackets the expression-statement arm.
+ *
+ * @param ctx   the lowering context, positioned after every non-tail statement
+ * @param s     the tail statement
+ * @param line  the source line to stamp the bracket's own calls with
+ * @param col   the source column to stamp
+ * @return      the fat value outcome
+ * @throws      propagated from lowering the tail statement
+ * @since 0.3.1
+ */
+fn lower_fn_tail_fat(ctx: LowerCtx, s: checker::TStatement, line: u32, col: u32) -> LowerBlockValueFat | error {
+    match s {
+        checker::TExprStmt as es => lower_conveyed_tail_expr_stmt_fat(ctx, es, line, col)
+        _ => lower_tail_non_expr_fat(ctx, s)
+    }
+}
+
+/**
+ * lower_conveyed_tail_expr_stmt_fat — `lower_fn_tail_fat`'s expression-statement arm: bracket
+ * `lower_tail_expr_stmt_fat` in `emit_region_leaves` … `emit_region_enters` (NP4), mirroring
+ * `lower_binding_conveyed`/`lower_assign_conveyed` (NP3b) exactly, one axis over (a function body's
+ * own auto-returned tail vs a named binding/assign) — INCLUDING marking `ctx.bracket_depth = 1` for
+ * the tail's own evaluation, so a NESTED escaping binding inside the tail expression (e.g. a `match`
+ * arm's own `let`) sees `bracket_depth > 0` and skips its own leave/enter rather than re-entering the
+ * frame region mid-span. The re-enter restores the frame region so `lower_fn_body_fat`'s OWN
+ * subsequent defer replay and final leave/drop run under the SAME region-stack shape every other
+ * exit edge sees them under.
+ *
+ * @param ctx  the lowering context, positioned at the tail expression-statement
+ * @param es   the tail expression-statement
+ * @param line the source line to stamp the bracket's own calls with
+ * @param col  the source column to stamp
+ * @return     the fat value outcome, its `ctx` back under the frame region
+ * @throws     propagated from `lower_tail_expr_stmt_fat`
+ * @since 0.3.1
+ */
+fn lower_conveyed_tail_expr_stmt_fat(ctx: LowerCtx, es: checker::TExprStmt, line: u32, col: u32) -> LowerBlockValueFat | error {
+    if ctx.bracket_depth > 0 { return lower_tail_expr_stmt_fat(ctx, es) }
+    let left = emit_region_leaves(ctx, line, col)
+    let marked = ctx_with_bracket_depth(left, 1)
+    let out = match lower_tail_expr_stmt_fat(marked, es) { LowerBlockValueFat as x => x; error as err => return err }
+    let entered = emit_region_enters(out.ctx, line, col)
+    LowerBlockValueFat { ctx = ctx_with_bracket_depth(entered, ctx.bracket_depth); terminated = out.terminated; ptr = out.ptr; len = out.len }
+}
+
+/**
+ * lower_tail_stmt_fat — a FAT-value if-expression arm's final statement: an
+ * expression-statement's value IS the arm's tail (ptr, len) pair; any other statement kind is
+ * delegated to `lower_tail_non_expr_fat`. Mirrors `lower_tail_stmt`'s own dispatch.
+ *
+ * @param ctx  the lowering context positioned at the tail statement
+ * @param s    the tail statement
+ * @return     the fat value outcome
+ * @throws     propagated from lowering the tail
+ */
+fn lower_tail_stmt_fat(ctx: LowerCtx, s: checker::TStatement) -> LowerBlockValueFat | error {
+    match s {
+        checker::TExprStmt as es => lower_tail_expr_stmt_fat(ctx, es)
+        _ => lower_tail_non_expr_fat(ctx, s)
+    }
+}
+
+/**
+ * lower_tail_expr_stmt_fat — a FAT-value arm's tail expression-statement: lowered through the
+ * CLOSED fat-producer set (`lower_fat_expr`), so a tail whose own producer sits outside that
+ * set (a diverging `panic`/`exit` call, a nested call result, …) honest-stops with
+ * `lower_fat_expr`'s own NAMED error rather than a fabricated placeholder. The
+ * diverging-tail defensive-constant treatment `lower_tail_expr_stmt`/`diverging_tail_value`
+ * give the SCALAR axis is deliberately NOT mirrored here: no fixture in this closure needs a
+ * diverging fat tail, and inventing untested handling for it would silently open a corner of
+ * the closed set this step never claims to close.
+ *
+ * @param ctx  the lowering context positioned at the tail statement
+ * @param es   the tail expression-statement
+ * @return     the fat value outcome (never terminated here)
+ * @throws     propagated from `lower_fat_expr`
+ */
+fn lower_tail_expr_stmt_fat(ctx: LowerCtx, es: checker::TExprStmt) -> LowerBlockValueFat | error {
+    let fo = match lower_fat_expr(ctx, es.expr) { LoweredFat as x => x; error as err => return err }
+    LowerBlockValueFat { ctx = fo.ctx; terminated = false; ptr = fo.ptr; len = fo.len }
+}
+
+/**
+ * diverging_tail_value_fat — `diverging_tail_value`'s FAT counterpart, one axis over
+ * (scalar -> fat): a FAT-value arm/function-body's tail already diverged at runtime (a breakless
+ * `loop` whose only exits are inner `return`s, a bare `if`/`match` STATEMENT every branch of
+ * which diverges, …), so materialize a defensive placeholder (ptr, len) pair — never observed,
+ * under the SAME checker trust `lower_tail_non_expr_fat`'s own doc names — instead of leaving
+ * either half unset. Kept as two plain zero constants rather than a real interned empty-string
+ * rodata entry: nothing downstream ever reads these values, so the cheapest dead-code shape wins,
+ * exactly like `diverging_tail_value`'s own single constant.
+ *
+ * @param ctx   the lowering context positioned right after the diverging tail
+ * @return      the (never-observed) placeholder fat value, NOT terminated
+ * @since 0.3.1.0 degrau 20 (native backend N1 fat-tail gap, sibling of degrau 13's scalar fix)
+ */
+fn diverging_tail_value_fat(ctx: LowerCtx) -> LowerBlockValueFat {
+    let p = ctx_alloc(ctx)
+    let with_ptr = ctx_append(p.ctx, const_int_inst(p.vreg, 0, 0, 0))
+    let l = ctx_alloc(with_ptr)
+    let with_len = ctx_append(l.ctx, const_int_inst(l.vreg, 0, 0, 0))
+    LowerBlockValueFat { ctx = with_len; terminated = false; ptr = p.vreg; len = l.vreg }
+}
+
+/**
+ * lower_tail_non_expr_fat — a FAT-value arm/function-body's non-expression-statement tail. A
+ * `return`/`break`/`continue` genuinely terminates (`lower_stmt`'s own `out.terminated`); anything
+ * else falls through this statement's OWN close WITHOUT ever having produced a (ptr, len) pair —
+ * exactly the shape `lower_tail_non_expr`'s own doc walks through in full (`check_trailing_value`,
+ * `typer.tks`, makes NO claim about a non-expression tail; the checker already trusts a breakless
+ * `loop`/diverging `if`/`match` to never actually fall through). This mirrors that SAME trust with
+ * `diverging_tail_value_fat`'s defensive placeholder rather than an honest-stop: a fat-typed tail
+ * of this shape is not a broken invariant, only a corner the scalar axis's degrau-13 fix never
+ * carried over to the fat one.
+ *
+ * @param ctx  the lowering context positioned at the tail statement
+ * @param s    the tail statement (not a `checker::TExprStmt` — `lower_tail_stmt_fat` already
+ *             routed that case to `lower_tail_expr_stmt_fat`)
+ * @return     the fat value outcome (`terminated=true` on a real `return`/`break`/`continue`, or
+ *             the diverging-tail placeholder with `terminated=false`)
+ * @throws     propagated from lowering the tail statement itself
+ */
+fn lower_tail_non_expr_fat(ctx: LowerCtx, s: checker::TStatement) -> LowerBlockValueFat | error {
+    let out = match lower_stmt(ctx, s) { LowerStmtOut as x => x; error as err => return err }
+    if out.terminated { return LowerBlockValueFat { ctx = out.ctx; terminated = true; ptr = 0; len = 0 } }
+    diverging_tail_value_fat(out.ctx)
+}
+

@@ -1,0 +1,257 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * aggregate_box_align — the alignment of the storage `aggregate_box_bytes` sizes, so an `alloca`
+ * that receives a copy of a value of type `t` is aligned the way the type's own layout demands.
+ * The size query alone is not enough for a FRAME copy (`copy_aggregate_place`): the runtime box
+ * comes back from the allocator already maximally aligned, but an `alloca` is aligned to whatever
+ * the instruction is told.
+ *
+ * @param t    the type whose value may need storage of its own
+ * @param ctx  the lowering context (its registered layouts and declared-variant table)
+ * @return     the alignment, or `null` in exactly the cases `aggregate_box_bytes` answers `null`
+ */
+fn aggregate_box_align(t: checker::Type, ctx: LowerCtx) -> u32 | null {
+    if is_register_value_type(t, ctx.enums) { return null }
+    match expand_named_variant(t, ctx.variants) {
+        checker::Named as n => named_layout_align(n, ctx)
+        checker::Variant => variant_wrapper_align()
+        checker::Error => error_struct_layout().align
+        _ => null
+    }
+}
+
+/**
+ * named_layout_align — a nominal aggregate's alignment: the `align` of the `struct`/`class` layout
+ * registered under its name, or `null` when nothing is registered under it — `named_layout_bytes`
+ * one field over, so the size and the alignment of a copy always come from the SAME layout entry.
+ *
+ * @param n    the resolved nominal type
+ * @param ctx  the lowering context (its registered layouts)
+ * @return     the instance's alignment, or `null` for a nominal never laid out
+ */
+fn named_layout_align(n: checker::Named, ctx: LowerCtx) -> u32 | null {
+    match find_known_struct_layout(ctx.layouts, n.name) {
+        LStructLayout as l => l.align
+        null => null
+    }
+}
+
+/**
+ * expr_is_aggregate_place — does `e` denote EXISTING storage someone else also names, as opposed
+ * to producing a fresh value of its own?
+ *
+ * A bound local, a field, an indexed element and a path expression all hand back the address of
+ * storage that outlives the expression; a literal, a call, an `if`/`match` value and a cast all
+ * produce their own. The distinction is the whole of the value-copy rule: only a PLACE needs a
+ * copy, because only a place can be written through afterward by the name it was read from.
+ *
+ * @param e  the expression whose value is about to be bound, assigned or embedded
+ * @return   true iff reading `e` yields storage that is still reachable under another name
+ */
+fn expr_is_aggregate_place(e: checker::TExpr) -> bool {
+    match e.kind {
+        checker::TVar => true
+        checker::TFieldAccess => true
+        checker::TIndex => true
+        checker::TPathExpr => true
+        _ => false
+    }
+}
+
+/**
+ * aggregate_place_copy_bytes — how many bytes a value must be copied over before it is bound,
+ * assigned or embedded, or 0 when no copy is owed.
+ *
+ * THE ALIASING HALF OF THE SAME DEFECT `returned_aggregate_box_bytes` fixes the lifetime half of.
+ * An aggregate's value here IS an address, so `let u = t` made `u` a SECOND NAME for `t`'s storage
+ * and `t.a = 99` was observable through `u` — where the C route, which holds an aggregate local
+ * inline and assigns it field for field, answered with the value `u` was bound to. Measured over
+ * 22 probes: 15 wrong on the own backend, 0 wrong through the C route, same host.
+ *
+ * A copy is owed only for a PLACE (`expr_is_aggregate_place`) of a type whose whole-type width is
+ * a fact (`aggregate_box_bytes`, the SAME query the push and the return use). An ARGUMENT position
+ * is deliberately NOT a caller of this: the C route passes an aggregate parameter by pointer, so a
+ * method's `self.n = …` is visible to its caller on BOTH routes, and copying at the call would
+ * break the semantics the oracle pins.
+ *
+ * @param e    the expression whose value is about to be bound, assigned or embedded
+ * @param ctx  the lowering context (its registered layouts and declared-variant table)
+ * @return     the byte width to copy, or 0 when the value is already the binder's own
+ */
+fn aggregate_place_copy_bytes(e: checker::TExpr, ctx: LowerCtx) -> u32 {
+    if !expr_is_aggregate_place(e) { return 0 to u32 }
+    match aggregate_box_bytes(e.type, ctx) {
+        u32 as n => n
+        null => 0 to u32
+    }
+}
+
+/**
+ * copy_aggregate_place — a FRAME-lifetime copy of an aggregate read out of a place: a fresh
+ * `alloca` of the type's own size/alignment plus one `tk_mem_copy` into it, the same runtime touch
+ * `copy_error_value` and `store_assign_aggregate_ref` already use (no LIR memcpy op exists).
+ *
+ * The frame is the right lifetime because the destination is a LOCAL, and every construct that can
+ * carry a local's value past the frame boxes it into runtime storage of its own on the way out —
+ * the push (`push_box_bytes`), the variant payload (`variant_payload_box_bytes`), the array
+ * literal, and now the return (`own_returned_value`). A destination whose OWN lifetime is unknown
+ * takes `box_aggregate_value` instead, which is why a struct literal's field does.
+ *
+ * `tk_mem_copy` is a CALL, and that is safe here in a way it would not be at a return: the source
+ * is live storage the caller still names, never a frame the `ret` already popped.
+ *
+ * @param ctx    the lowering context
+ * @param v      the place's already-lowered base address
+ * @param bytes  the copy width (`aggregate_place_copy_bytes`, non-zero)
+ * @param align  the copy's alignment (`aggregate_box_align`)
+ * @param line   the source line to propagate onto the emitted copy
+ * @param col    the source column to propagate onto the emitted copy
+ * @return       the fresh slot's base address
+ */
+fn copy_aggregate_place(ctx: LowerCtx, v: u32, bytes: u32, align: u32, line: u32, col: u32) -> Lowered {
+    let dst = ctx_alloc(ctx)
+    let with_alloca = ctx_append(dst.ctx, alloca_inst(dst.vreg, bytes, align, line, col))
+    let width = ctx_alloc(with_alloca)
+    let with_width = ctx_append(width.ctx, const_int_inst(width.vreg, bytes to i64, line, col))
+    let args = teko::list::push(two_args(dst.vreg, v), width.vreg)
+    Lowered { ctx = ctx_append(with_width, void_call_inst("tk_mem_copy", args, false, line, col)); vreg = dst.vreg }
+}
+
+/**
+ * own_bound_value — the value a `let`/`mut` binding or an assignment may store: the lowered value
+ * itself when it is already the binder's own, else a frame copy of the place it was read from
+ * (`aggregate_place_copy_bytes`, `copy_aggregate_place`).
+ *
+ * @param v  the already-lowered value
+ * @param e  the expression it was lowered from (its kind decides place-ness, its position the copy)
+ * @return   the value to store into the binding's slot
+ */
+fn own_bound_value(v: Lowered, e: checker::TExpr) -> Lowered {
+    let bytes = aggregate_place_copy_bytes(e, v.ctx)
+    if bytes == 0 { return v }
+    match aggregate_box_align(e.type, v.ctx) {
+        u32 as align => copy_aggregate_place(v.ctx, v.vreg, bytes, align, e.line, e.col)
+        null => v
+    }
+}
+
+/**
+ * embedded_aggregate_box_bytes — how many bytes a value written into a CONTAINER SLOT (an
+ * aggregate's field, a slice's element) must be copied into runtime storage of its own, or 0 when
+ * the value is self-contained.
+ *
+ * UNCONDITIONAL for an aggregate, and NOT gated on place-ness the way `aggregate_place_copy_bytes`
+ * is — that difference is the last of the 15 measured divergences. A container's field holds an
+ * aggregate BY ADDRESS and the container's OWN lifetime is unknown to the writer, so a field
+ * pointed at a FRESH frame `alloca` is just as wrong as one pointed at a place: `return N { p =
+ * P{…}; n = 1 }` copied the 16-byte `N` out correctly and left its `p` word aimed at the frame the
+ * `ret` popped. This is the SAME rule the push, the variant payload and the array literal already
+ * obey; the field slot was the one container that did not.
+ *
+ * @param t    the value's own type
+ * @param ctx  the lowering context (its registered layouts and declared-variant table)
+ * @return     the byte width to copy, or 0 for a value no container needs to own
+ */
+fn embedded_aggregate_box_bytes(t: checker::Type, ctx: LowerCtx) -> u32 {
+    if is_fat_type(t) { return 0 to u32 }
+    match aggregate_box_bytes(t, ctx) {
+        u32 as n => n
+        null => 0 to u32
+    }
+}
+
+/**
+ * own_embedded_value — the value a CONTAINER SLOT may hold: the lowered value itself when it is
+ * self-contained, else a RUNTIME copy of the aggregate (`box_aggregate_value`).
+ *
+ * The runtime arena rather than the frame, and that is the difference from `own_bound_value`: the
+ * destination here is a field of an aggregate, or an element of a slice, whose own lifetime the
+ * writer does not know, so the copy has to outlive the statement that wrote it — which a frame
+ * `alloca` does not promise.
+ *
+ * @param v  the already-lowered value
+ * @param e  the expression it was lowered from (its type fixes the width, its position the copy)
+ * @return   the value to store into the container's slot
+ */
+fn own_embedded_value(v: Lowered, e: checker::TExpr) -> Lowered {
+    box_aggregate_value(v, embedded_aggregate_box_bytes(e.type, v.ctx), e)
+}
+
+/**
+ * is_register_value_type — is a value of type `t` a SELF-CONTAINED register value, as opposed to
+ * the address of a frame slot this backend may reuse? True for the primitives (every integer,
+ * float, `bool`, `byte`) and for a declared `enum` (its integer carrier); false for every
+ * aggregate, whose `Ptr` machine class is an ADDRESS rather than the value itself. The distinction
+ * is invisible in `ltype_of` — a struct and a `ptr<T>` are both `Ptr` there — but it is exactly
+ * what decides whether a value may be COPIED INTO A CONTAINER that outlives its producing
+ * statement.
+ *
+ * @param t      the element type to classify
+ * @param enums  the program's declared-enum table (an enum's carrier IS a register value)
+ * @return       true iff a value of `t` is the whole datum, not a pointer to it
+ */
+fn is_register_value_type(t: checker::Type, enums: []LEnumInfo) -> bool {
+    match t {
+        checker::Prim => true
+        checker::Byte => true
+        checker::Named as n => match find_enum_info(enums, n.name) { LEnumInfo => true; null => false }
+        _ => false
+    }
+}
+
+/**
+ * push_elem_type — the CONCRETE element type of a push call. The call's own `.type` answers it
+ * directly in the ordinary case, but `type_assign` may overwrite that type with the sentinel
+ * (`[]<Void>`) when `push(xs, i)` is assigned back into a sentinel-typed `xs`, so the base
+ * argument's concretized slice type and finally the item's own type are consulted in turn. Mirrors
+ * the retired C emitter's `get_push_elem` fallback chain exactly — one recovery rule, so the two
+ * producers can never disagree about which element a given push grows.
+ *
+ * @param e   the push call expression
+ * @param cl  the call node
+ * @return    the element type the pushed buffer holds
+ * @throws    when neither the call, its base, nor its item carries a concrete type (internal)
+ */
+fn push_elem_type(e: checker::TExpr, cl: checker::TCall) -> checker::Type | error {
+    match e.type {
+        checker::Slice as sl => match sl.element { checker::Void => { }; _ => return sl.element }
+        _ => return error { message = "native backend N1: `teko::list::push` result is not a slice (internal)" }
+    }
+    if cl.args.len != 2 { return error { message = "native backend N1: `teko::list::push` result is not a concrete slice (internal)" } }
+    match cl.args[0].type {
+        checker::Slice as base_sl => match base_sl.element { checker::Void => { }; _ => return base_sl.element }
+        _ => { }
+    }
+    let it = cl.args[1].type
+    match it {
+        checker::Slice as item_sl => match item_sl.element {
+            checker::Void => return error { message = "native backend N1: `teko::list::push` result is not a concrete slice (internal)" }
+            _ => { }
+        }
+        _ => { }
+    }
+    it
+}
+
+/**
+ * reserve_item_slot — alloca a push item's frame slot, sized/aligned for `bytes`/`align`. The
+ * caller stores the item's own representation into the returned address afterward — split from the
+ * store so a scalar item's single `store_inst` (`lower_scalar_element_push`) and a fat item's two
+ * (`store_fat_slot`, `lower_fat_element_push`) can share this one allocation step (0.3.1.0 degrau
+ * 10). Each alloca is selected once and becomes ONE static frame slot, so a push inside a loop
+ * reuses its slot rather than growing the stack per iteration.
+ *
+ * @param ctx    the lowering context
+ * @param bytes  the slot's byte width
+ * @param align  the slot's byte alignment
+ * @param e      the push call expression (its source position)
+ * @return       the advanced context + the slot's address VReg
+ */
+fn reserve_item_slot(ctx: LowerCtx, bytes: u32, align: u32, e: checker::TExpr) -> Lowered {
+    let islot = ctx_alloc(ctx)
+    Lowered { ctx = ctx_append(islot.ctx, alloca_inst(islot.vreg, bytes, align, e.line, e.col)); vreg = islot.vreg }
+}
+

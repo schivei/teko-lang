@@ -1,0 +1,240 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * find_variant_def — the registered variant whose name's last segment matches `name`'s (#594 crumb
+ * 9b), or null when `name` is not a declared variant. A declared type resolves to a QUALIFIED
+ * `Named` (`ns::Op`) while `collect_variant_defs` stores the DECLARED spelling (`Op`), so the match
+ * is by last segment — the same bare-vs-qualified reconciliation `find_enum_info` uses.
+ *
+ * ONE probe serves EVERY consumer — the const serializer's tag image (`const_named_bytes`) and the
+ * construction/match expansion (`expand_named_variant`) — so the tag a rodata image carries and the
+ * tag a `match` arm compares against can never come from two different lookups.
+ *
+ * @param variants  the program's variant table
+ * @param name      the declared type name to look up (possibly qualified)
+ * @return          the matching variant definition, or null
+ */
+fn find_variant_def(variants: []LVariantDef, name: str) -> LVariantDef | null {
+    let bare = checker::name_last_segment(name)
+    mut i: u64 = 0
+    loop {
+        if i >= variants.len { break }
+        if checker::name_last_segment(variants[i].name) == bare { return variants[i] }
+        i++
+    }
+    null
+}
+
+/**
+ * const_variant_bytes — the rodata image of an EMPTY-CASE variant aggregate const (#594 crumb 9b):
+ * the constructed member's declared tag as a little-endian I32 at offset 0 (the `tag@0` half of the
+ * variant runtime image, §5.3), with no payload. The initializer's own type names the member being
+ * constructed; its index among the variant's declared members (`variants`) is the tag a later `match`
+ * compares against (`lower_variant_case_test`), so both engines agree on the case byte-for-byte. A
+ * member carrying payload fields honest-stops (payload materialization is a further follow-up beyond
+ * the payload-free `MRet {}` §6.4 targets).
+ *
+ * @param info  the const's declared variant (its expanded members, in tag order)
+ * @param init  the const's checked initializer (an empty-case member construction)
+ * @return      the 4-byte little-endian tag image
+ * @throws      when the initializer is not an empty member construction, or names no member
+ */
+fn const_variant_bytes(info: LVariantDef, init: checker::TExpr) -> []byte | error {
+    let case_name = match named_type_name(init.type) { str as s => s; error as e => return e }
+    let vm = match find_variant_member(info.ty.members, checker::name_last_segment(case_name)) { VariantMember as x => x; error as e => return e }
+    let index = vm.index
+    match init.kind {
+        checker::TStructInit as si => const_variant_tag_bytes(si, index)
+        _ => error { message = "const variant: initializer is not a member construction (Tier-A follow-up) (#594)" }
+    }
+}
+
+/**
+ * const_image_flat — a `ConstImage` wrapping a Tier-A flat byte image with EMPTY relocations and
+ * leaves (#594 T-B6): a `str`/`[]T`/variant-tag const carries no internal pointer, so it is
+ * byte-identical to the crumb-6 path.
+ *
+ * @param bytes  the flat rodata byte image
+ * @return       a `ConstImage` with `relocs`/`leaves` empty
+ * @since #594 T-B6
+ */
+fn const_image_flat(bytes: []byte) -> ConstImage {
+    ConstImage { bytes = bytes; relocs = teko::list::empty(); leaves = teko::list::empty() }
+}
+
+/**
+ * const_named_bytes — the complete rodata image of a `Named`-typed aggregate const (#594 crumb 6/9b +
+ * T-B6): a declared `variant` materializes its empty-case tag (`const_variant_bytes`, flat), any other
+ * `Named` is a struct materialized via `const_struct_bytes` (flat for a POD struct, or blob + relocs +
+ * leaves for a pointer-bearing descriptor). A `variant`-typed const's declared type resolves to a
+ * nominal `Named`, so this dispatch — variant table first, struct layout otherwise — is where the two
+ * families part.
+ *
+ * @param const_name  the const's declared name (for each fat field's leaf symbol)
+ * @param name        the const's declared type name (possibly qualified)
+ * @param init        the const's checked initializer
+ * @param layouts     the program's struct-layout table
+ * @param variants    the program's variant table
+ * @param enums       the program's declared-enum table (a fat field's enum element stride)
+ * @return            the const's complete rodata image
+ * @throws            a Tier-A-follow-up / Tier-B (T-B) honest-stop for an unmaterializable aggregate
+ * @since #594 crumb 6/9b + T-B6
+ */
+fn const_named_bytes(const_name: str, name: str, init: checker::TExpr, layouts: []LStructLayout, variants: []LVariantDef, enums: []LEnumInfo) -> ConstImage | error {
+    match find_variant_def(variants, name) {
+        LVariantDef as info => match const_variant_bytes(info, init) { []byte as b => const_image_flat(b); error as e => return e }
+        null => const_struct_bytes(const_name, name, init, layouts, enums)
+    }
+}
+
+/**
+ * serialize_const — the complete rodata image of an aggregate const, dispatched on its resolved value
+ * type (#594 crumb 6 + T-B6; 0.3.1.0 degrau const-slice): a `str` (raw UTF-8), a `[]T` (flat-scalar
+ * bytes, or fat `{ptr, len}` slots), a flat-POD or pointer-bearing struct, or an empty-case `variant`
+ * (its tag image, #594 crumb 9b). A `str`/flat-`[]T`/flat-struct/variant returns its bytes with EMPTY
+ * `relocs`/`leaves` (byte-identical to crumb 6); a pointer-bearing aggregate — a struct with a
+ * slice/`str` FIELD (the ABI descriptors) or a slice with a `str`/`[]T` ELEMENT (the runtime-symbol
+ * tables) — returns the blob with zeroed pointer slots, one `LDataReloc` per fat member, and each
+ * target array's leaf. The `_` arm (neither Str/Slice/Named) still honest-stops (no const in the corpus
+ * reaches it).
+ *
+ * @param cd       the residual typed const declaration (its name, type + checked initializer)
+ * @param layouts  the program's struct-layout table
+ * @param variants the program's variant table
+ * @param enums    the program's declared-enum table (an enum field/element's integer width)
+ * @return         the const's complete rodata image (bytes + internal relocs + leaves)
+ * @throws         a Tier-A-follow-up / Tier-B (T-B) honest-stop for an unmaterializable aggregate form
+ * @since #594 crumb 6 (bytes) + T-B6 (relocs + leaves)
+ */
+fn serialize_const(cd: checker::TConstDecl, layouts: []LStructLayout, variants: []LVariantDef, enums: []LEnumInfo) -> ConstImage | error {
+    match cd.ty {
+        checker::Str => match const_str_bytes(cd.init) { []byte as b => const_image_flat(b); error as e => return e }
+        checker::Slice as s => const_slice_image(cd.name, s.element, cd.init, enums)
+        checker::Named as n => const_named_bytes(cd.name, n.name, cd.init, layouts, variants, enums)
+        _ => error { message = "const aggregate: pointer/slice-bearing value is Tier-B (T-B), not crumb 6 (#594)" }
+    }
+}
+
+/**
+ * const_size_check_enabled — whether the native aggregate-const size/offset diagnostic
+ * (`TEKO_NATIVE_CONST_SIZE_CHECK=1`) is requested: a CI-narrowing aid (the size-mismatch sibling of
+ * the encoder's `TEKO_NATIVE_RODATA_ALIGN_CHECK`), NOT part of the ordinary output. It exists to
+ * name the exact aggregate const AND the exact fat field the native path under-sizes — the size/
+ * offset mismatch behind the macOS `ld: pointer not aligned` link failure AND the Linux/x86 gen1
+ * runtime crash (a fat field allotted 8 bytes instead of 16 shifts every following field, so a later
+ * pointer lands misaligned AND the const's own bytes read as garbage). Reads only an environment
+ * variable, so a normal build (unset) is byte-identical.
+ *
+ * @return  true iff `TEKO_NATIVE_CONST_SIZE_CHECK` is set to `"1"`
+ * @since 0.3.1.0 native-rodata-const-align
+ */
+fn const_size_check_enabled() -> bool {
+    match teko::env::var("TEKO_NATIVE_CONST_SIZE_CHECK") { str as v => v == "1"; error => false }
+}
+
+/**
+ * field_allotted_span — the byte span the registered layout reserves for the field at index `j`:
+ * the gap to the NEXT field's offset for an interior field, or the struct's total size minus this
+ * field's offset for the last field (which includes the struct's trailing alignment padding).
+ *
+ * @param layout  the struct's registered layout
+ * @param j       the field index (in `layout.field_offsets` order)
+ * @return        the field's allotted byte span
+ * @since 0.3.1.0 native-rodata-const-align
+ */
+fn field_allotted_span(layout: LStructLayout, j: u64) -> u32 {
+    if j + 1 < layout.field_names.len { return layout.field_offsets[j + 1] - layout.field_offsets[j] }
+    layout.size - layout.field_offsets[j]
+}
+
+/**
+ * check_struct_fat_spans — verify, field by field, that every field whose INITIALIZER VALUE is a fat
+ * type (`str`/`[]T` — `is_fat_type`) was allotted at least `fat_slot_bytes()` (16) bytes by the
+ * registered layout (0.3.1.0 native-rodata-const-align). This is the DECISIVE cross-check the pure
+ * alignment diagnostic could not make: the layout's per-field width came from `typeexpr_is_fat` over
+ * the field ANNOTATION, while the serializer writes a 16-byte `{ptr, len}` slot whenever the field
+ * VALUE `is_fat_type` — the two predicates the raiz-A alias bug already proved can disagree. When
+ * they do (annotation classified NON-fat → 8 bytes; value fat → 16-byte slot), the slot overflows
+ * its field, every following field shifts, a later pointer lands misaligned (macOS `ld`) and the
+ * const's bytes read as garbage (Linux/x86 gen1 crash). The honest-stop names the const, the field,
+ * and the allotted-vs-required widths.
+ *
+ * @param const_name  the owning const's declared name (for the diagnostic)
+ * @param layout      the struct's registered layout
+ * @param si          the struct-literal initializer (source of each field's value type)
+ * @return            `null` when every fat-valued field has room; the fatal honest-stop otherwise
+ * @since 0.3.1.0 native-rodata-const-align
+ */
+fn check_struct_fat_spans(const_name: str, layout: LStructLayout, si: checker::TStructInit) -> null | error {
+    mut j: u64 = 0
+    loop {
+        if j >= layout.field_names.len { break }
+        match check_struct_fat_span_at(const_name, layout, si, j) { error as e => return e; null => { } }
+        j++
+    }
+    null
+}
+
+/**
+ * check_struct_fat_span_at — the per-field body of `check_struct_fat_spans`: when the field at index
+ * `j` has a fat initializer value and the layout allotted it fewer than `fat_slot_bytes()` bytes,
+ * return the fatal honest-stop; otherwise `null`. A field the initializer does not bind is skipped
+ * (the checker guarantees a flat struct const names every field, so this is defensive only).
+ *
+ * @param const_name  the owning const's declared name (for the diagnostic)
+ * @param layout      the struct's registered layout
+ * @param si          the struct-literal initializer
+ * @param j           the field index to check
+ * @return            `null` when the field is fine or non-fat; the fatal honest-stop otherwise
+ * @since 0.3.1.0 native-rodata-const-align
+ */
+fn check_struct_fat_span_at(const_name: str, layout: LStructLayout, si: checker::TStructInit, j: u64) -> null | error {
+    let field_name = layout.field_names[j]
+    let vexpr = match struct_init_value(si, field_name) { checker::TExpr as x => x; error => return null }
+    if !fat_slot_underflows(layout, j, vexpr.type) { return null }
+    error { message = $"TEKO_NATIVE_CONST_SIZE_CHECK: const '{const_name}' fat field '{field_name}' (type '{layout.name}') was allotted {field_allotted_span(layout, j)} bytes but a fat slot needs {fat_slot_bytes()} — its layout under-sized it (a typeexpr_is_fat / is_fat_type mismatch); the following fields shift and a pointer lands misaligned" }
+}
+
+/**
+ * fat_slot_underflows — whether the layout's reserved span for the field at index `j` is too narrow
+ * to hold a value of `value_type`'s fat `{ptr, len}` image: true ONLY when the value is a fat type
+ * (`is_fat_type` — the SAME semantic predicate the store writes through) AND the layout allotted the
+ * field fewer than `fat_slot_bytes()` (16) bytes.
+ *
+ * The single width predicate the const guard (`check_struct_fat_span_at`) and the non-const store
+ * guard (`check_store_fat_span`) both read, so the two can never disagree about WHEN a fat field is
+ * under-sized — the divergence they both exist to name is measured once, here.
+ *
+ * @param layout      the struct's registered layout
+ * @param j           the field's index within `layout.field_offsets`
+ * @param value_type  the resolved type of the value being placed in the field
+ * @return            whether a fat value would overrun the field's allotted span
+ * @since 0.3.1.0 raiz A — fat-field layout unification
+ */
+fn fat_slot_underflows(layout: LStructLayout, j: u64, value_type: checker::Type) -> bool {
+    if !is_fat_type(value_type) { return false }
+    field_allotted_span(layout, j) < fat_slot_bytes()
+}
+
+/**
+ * field_index_of — the index of the field named `field` within `layout.field_names`, or `null` when
+ * the layout registers no such field (the nullable sibling of `field_offset_of`, which the store
+ * guard needs because `field_allotted_span` keys on the index, not the offset).
+ *
+ * @param layout  the struct's registered layout
+ * @param field   the field name to locate
+ * @return        the field's index, or `null` when the layout names none
+ * @since 0.3.1.0 raiz A — fat-field layout unification
+ */
+fn field_index_of(layout: LStructLayout, field: str) -> u64 | null {
+    mut i: u64 = 0
+    loop {
+        if i >= layout.field_names.len { break }
+        if layout.field_names[i] == field { return i }
+        i++
+    }
+    null
+}
+

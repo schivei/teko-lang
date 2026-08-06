@@ -1,0 +1,236 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * variant_all_members_in — is EVERY member of `nt_members` also a member of `v` (by
+ * `variant_index_of_member_type`, the SAME lookup `lower_subset_variant_widen` uses to compute each
+ * remapped tag)? The strict-subset test that guards the NP-widen re-tag: sharing the exact index
+ * lookup guarantees that whenever this answers true, the widen's per-member index computation cannot
+ * fail.
+ *
+ * @param []checker::Type nt_members  the narrow union's declared members
+ * @param checker::Variant v  the wider variant being widened into
+ * @param []LVariantDef variants  the program's declared-variant table
+ * @return bool  whether every `nt` member has a matching member (hence a tag) in `v`
+ * @since 0.3.1.0 (native-narrow-union-into-wider-variant widen)
+ */
+fn variant_all_members_in(nt_members: []checker::Type, v: checker::Variant, variants: []LVariantDef) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= nt_members.len { break }
+        match variant_index_of_member_type(v.members, nt_members[i], variants) {
+            u32 => { }
+            error => return false
+        }
+        i++
+    }
+    true
+}
+
+/**
+ * lower_subset_variant_widen — RE-TAG a narrow-union value into the WIDER variant `v`
+ * (native-narrow-union-into-wider-variant). The narrow value's wrapper and `v`'s wrapper share the
+ * uniform 24-byte `{ i32 tag@0; ptr@8; len@16 }` image (`variant_wrapper_bytes`), and the boxed
+ * payload word is identical either way — so widening is a payload-preserving copy plus a tag REMAP
+ * from `nt`'s member numbering into `v`'s. The remapped tag is computed BRANCHLESSLY as
+ * `Σ_j (narrow_tag == j) * wide_index_j` (`compute_widened_tag`) — one `ICmpEq`/`IMul`/`IAdd` triple
+ * per narrow member, no control flow, so the widen stays a straight-line lean sequence.
+ *
+ * @param LowerCtx ctx  the lowering context to append the widen's instructions into
+ * @param checker::Variant v  the wider variant being widened into
+ * @param checker::Variant nt  the narrow union the value is currently typed as
+ * @param checker::TExpr value  the narrow-union value expression
+ * @return Lowered  the widened wrapper's alloca'd base address
+ * @throws  propagated from lowering `value`, or when a narrow member names no member of `v`
+ * @since 0.3.1.0 (native-narrow-union-into-wider-variant widen)
+ */
+fn lower_subset_variant_widen(ctx: LowerCtx, v: checker::Variant, nt: checker::Variant, value: checker::TExpr) -> Lowered | error {
+    let line = value.line
+    let col = value.col
+    let nw = match lower_expr(ctx, value) { Lowered as x => x; error as err => return err }
+    // load the narrow tag (i32 @ 0)
+    let ta = ctx_alloc(nw.ctx)
+    let c_ta = ctx_append(ta.ctx, field_addr_inst(ta.vreg, nw.vreg, 0, line, col))
+    let tg = ctx_alloc(c_ta)
+    let c_tg = ctx_append(tg.ctx, load_inst(tg.vreg, ta.vreg, LType::I32, line, col))
+    // load the payload word (@8) and the length half (@16) — copied VERBATIM (the box is shared)
+    let p8a = ctx_alloc(c_tg)
+    let c_p8a = ctx_append(p8a.ctx, field_addr_inst(p8a.vreg, nw.vreg, variant_payload_offset(), line, col))
+    let p8 = ctx_alloc(c_p8a)
+    let c_p8 = ctx_append(p8.ctx, load_inst(p8.vreg, p8a.vreg, LType::Ptr, line, col))
+    let p16a = ctx_alloc(c_p8)
+    let c_p16a = ctx_append(p16a.ctx, field_addr_inst(p16a.vreg, nw.vreg, variant_payload_len_offset(), line, col))
+    let p16 = ctx_alloc(c_p16a)
+    let c_p16 = ctx_append(p16.ctx, load_inst(p16.vreg, p16a.vreg, LType::Ptr, line, col))
+    // alloca the wider wrapper and copy both payload halves
+    let base = ctx_alloc(c_p16)
+    let c_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, variant_wrapper_bytes(), variant_wrapper_align(), line, col))
+    let w8a = ctx_alloc(c_alloca)
+    let c_w8a = ctx_append(w8a.ctx, field_addr_inst(w8a.vreg, base.vreg, variant_payload_offset(), line, col))
+    let c_w8 = ctx_append(c_w8a, store_inst(w8a.vreg, p8.vreg, LType::Ptr, line, col))
+    let w16a = ctx_alloc(c_w8)
+    let c_w16a = ctx_append(w16a.ctx, field_addr_inst(w16a.vreg, base.vreg, variant_payload_len_offset(), line, col))
+    let c_w16 = ctx_append(c_w16a, store_inst(w16a.vreg, p16.vreg, LType::Ptr, line, col))
+    // compute the remapped tag in v's space and store it (i32 @ 0)
+    let wt = match compute_widened_tag(c_w16, nt, v, tg.vreg, line, col) { Lowered as x => x; error as err => return err }
+    let wta = ctx_alloc(wt.ctx)
+    let c_wta = ctx_append(wta.ctx, field_addr_inst(wta.vreg, base.vreg, 0, line, col))
+    let c_wtag = ctx_append(c_wta, store_inst(wta.vreg, wt.vreg, LType::I32, line, col))
+    Lowered { ctx = c_wtag; vreg = base.vreg }
+}
+
+/**
+ * compute_widened_tag — the RE-TAG arithmetic of `lower_subset_variant_widen`: `v`'s tag for the
+ * narrow value, computed branchlessly as `Σ_j (narrow_tag == j) * wide_index_j` over `nt`'s
+ * members. Each `ICmpEq` yields 0/1 (exactly as `lower_variant_tag_eq_test`'s tag test does), scaled
+ * by that member's index in `v` and summed — so the one true term selects `v`'s index and every
+ * other contributes 0. No branch, no merge block: a straight-line triple per narrow member.
+ *
+ * @param LowerCtx ctx  the lowering context to append the arithmetic into
+ * @param checker::Variant nt  the narrow union (its member order IS the runtime tag numbering)
+ * @param checker::Variant v  the wider variant (its member order IS the target tag numbering)
+ * @param u32 tag_vreg  the VReg holding the loaded narrow tag
+ * @param u32 line  the source line to stamp the emitted instructions with
+ * @param u32 col  the source column to stamp the emitted instructions with
+ * @return Lowered  the VReg holding the widened tag
+ * @throws  when a narrow member names no member of `v` (guarded upstream by `variant_all_members_in`)
+ * @since 0.3.1.0 (native-narrow-union-into-wider-variant widen)
+ */
+fn compute_widened_tag(ctx: LowerCtx, nt: checker::Variant, v: checker::Variant, tag_vreg: u32, line: u32, col: u32) -> Lowered | error {
+    let z = ctx_alloc(ctx)
+    mut cur = ctx_append(z.ctx, const_int_inst(z.vreg, 0, line, col))
+    mut acc = z.vreg
+    mut j: u64 = 0
+    loop {
+        if j >= nt.members.len { break }
+        let k = match variant_index_of_member_type(v.members, nt.members[j], cur.variants) { u32 as x => x to i64; error as err => return err }
+        let jc = ctx_alloc(cur)
+        let c_jc = ctx_append(jc.ctx, const_int_inst(jc.vreg, j to i64, line, col))
+        let eq = ctx_alloc(c_jc)
+        let c_eq = ctx_append(eq.ctx, bin_inst(eq.vreg, LBinOp::ICmpEq, tag_vreg, jc.vreg, line, col))
+        let kc = ctx_alloc(c_eq)
+        let c_kc = ctx_append(kc.ctx, const_int_inst(kc.vreg, k, line, col))
+        let term = ctx_alloc(c_kc)
+        let c_term = ctx_append(term.ctx, bin_inst(term.vreg, LBinOp::IMul, eq.vreg, kc.vreg, line, col))
+        let nacc = ctx_alloc(c_term)
+        cur = ctx_append(nacc.ctx, bin_inst(nacc.vreg, LBinOp::IAdd, acc, term.vreg, line, col))
+        acc = nacc.vreg
+        j++
+    }
+    Lowered { ctx = cur; vreg = acc }
+}
+
+/**
+ * lower_variant_null_construct — the `Null`-typed arm of `lower_value_into_variant`: the absence
+ * wrapper (`lower_null_absent_widened`) tagged with the union's OWN `Null` member index
+ * (`variant_null_member_index`) — the SAME lookup `lower_null_pattern_test` reads, so writer and
+ * reader cannot disagree. A union declaring no `Null` member keeps a NAMED honest stop; the checker
+ * already rejects a bare `null` in such a slot, so reaching it is an invariant break.
+ *
+ * @param LowerCtx ctx  the lowering context to append the construction's instructions into
+ * @param checker::Variant v  the declared variant the `null`-typed value is placed into
+ * @param checker::TExpr e  the `null` literal, or a `Null`-typed `match`/`if` sub-expression
+ * @return Lowered  the absence wrapper's alloca'd base address
+ * @throws  when `v` declares no `Null` member (an internal invariant break), or propagated from
+ *          lowering a non-literal `e`'s own effects
+ * @since 0.3.1.0 (degrau 30 — `null` into a union of any arity); native-N1-null-widen
+ *        (O1 retirement — the non-literal `Null`-typed sub-tree)
+ */
+fn lower_variant_null_construct(ctx: LowerCtx, v: checker::Variant, e: checker::TExpr) -> Lowered | error {
+    match variant_null_member_index(v) {
+        u32 as index => lower_null_absent_widened(ctx, index, e)
+        null => error { message = "native backend N1: a `null` value placed into a union that declares no `null` member (internal)" }
+    }
+}
+
+/** bind_target_name — the bound simple name; a destructuring pattern honest-stops. */
+fn bind_target_name(t: parser::BindTarget) -> str | error {
+    match t {
+        parser::SimpleName as sn => sn.name
+        _ => error { message = "native backend N1: destructuring binding not yet lowered (N2)" }
+    }
+}
+
+/**
+ * lower_return — `return e` (or bare `return`): a `return` leaves EVERY
+ * enclosing scope, so first fire ALL pending defers (from index 0, LIFO —
+ * mirrors the C backend's `emit_return`, `codegen.tks:5770-5773`, which
+ * fires before its own return-value TEXT so a defer's mutation of a local
+ * IS observable through the value `r.value` reads afterward), THEN lower
+ * the return value (when present), THEN emit the `LRet` terminator, closing
+ * the block (A1-2, #382).
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param checker::TReturn r  the return node
+ * @return LowerStmtOut | error  the advanced (terminated) context, or a
+ *                               NAMED internal error when a pending defer
+ *                               body fails to lower
+ * @implNote when the enclosing function's own return type is fat (`str`/`[]T`), the value
+ *           lowers through `lower_return_fat` instead — its length half is stored through the
+ *           hidden out-slot (`bind_ret_len_slot`) before the single-VReg `LRet` carries the ptr
+ *           half (call-gordo degrau, #382 N2).
+ * @implNote NP4: `emit_region_drops` runs AFTER the return value is fully computed/boxed (`own_returned_value`
+ *           for a plain return, the store for a fat one) and BEFORE the `LRet` itself — reclaiming the
+ *           frame region's non-escaping scratch on the way out, never the value the `LRet` carries
+ *           (already conveyed to `rr` by the NP3b brackets, or self-contained if a register value).
+ */
+fn lower_return(ctx: LowerCtx, r: checker::TReturn) -> LowerStmtOut | error {
+    let replayed = match replay_defers(ctx, 0) { LowerCtx as c => c; error as err => return err }
+    let left = emit_region_leaves(replayed, r.value.line, r.value.col)
+    if !r.has_value {
+        let dropped = emit_region_drops(left, r.value.line, r.value.col)
+        let vinst = ret_void_inst(r.value.line, r.value.col)
+        return LowerStmtOut { ctx = ctx_append(dropped, vinst); terminated = true }
+    }
+    if is_fat_type(left.ret_type) { return lower_return_fat(left, r) }
+    let lo = match lower_return_value(left, r.value) { Lowered as x => x; error as err => return err }
+    let owned = own_returned_value(lo, r.value.line, r.value.col)
+    let dropped = emit_region_drops(owned.ctx, r.value.line, r.value.col)
+    let inst = ret_inst(owned.vreg, r.value.line, r.value.col)
+    LowerStmtOut { ctx = ctx_append(dropped, inst); terminated = true }
+}
+
+/**
+ * lower_return_fat — an explicit `return e` whose enclosing function's own return type is fat
+ * (`str`/`[]T`): lower `e` through the (ptr, len) pair (`lower_fat_expr`), store the length half
+ * through the hidden out-slot (`ctx.ret_len_slot`, `bind_ret_len_slot`'s own register), then emit
+ * the ordinary single-VReg `LRet` carrying only the ptr half — mirrors `lower_call_fat`'s caller-
+ * side alloca+load exactly, one axis over (store vs load). Refuses (rather than storing through
+ * an unset slot) when the enclosing body never reserved one (`!ctx.has_ret_len_slot` — a fat-
+ * returning LAMBDA, which this degrau does not wire the hidden parameter for).
+ *
+ * @param ctx  the lowering context (already past the pending-defer replay AND `emit_region_leaves` —
+ *             `lower_fat_expr` therefore runs with `current == rr`, so its builder call's own fresh
+ *             buffer already lands at the conveyance anchor; no separate box exists for the fat axis,
+ *             unlike `own_returned_value`'s aggregate one, so this ordering is load-bearing for NP4)
+ * @param r    the return node (`r.has_value` already true)
+ * @return     the terminated context
+ * @throws     when the enclosing body has no reserved out-slot, or propagated from lowering `e`
+ */
+fn lower_return_fat(ctx: LowerCtx, r: checker::TReturn) -> LowerStmtOut | error {
+    if !ctx.has_ret_len_slot { return error { message = "native backend N1: a fat-typed lambda return is not yet lowered (N2)" } }
+    let fo = match lower_fat_expr(ctx, r.value) { LoweredFat as x => x; error as err => return err }
+    let stored = ctx_append(fo.ctx, store_inst(fo.ctx.ret_len_slot, fo.len, LType::I64, r.value.line, r.value.col))
+    let dropped = emit_region_drops(stored, r.value.line, r.value.col)
+    LowerStmtOut { ctx = ctx_append(dropped, ret_inst(fo.ptr, r.value.line, r.value.col)); terminated = true }
+}
+
+/**
+ * lower_return_value — an explicit `return e`'s value, coerced into the enclosing function's
+ * own declared return type (`ctx.ret_type`) exactly like the trailing-tail auto-return
+ * (`lower_tail_expr_stmt`'s doc): a diverging (`Void`-typed) value — a `panic`/`exit` call, by
+ * the checker's own invariant — passes through PLAIN (`return` already terminates the block, so
+ * a divergent value's own bits are never observed, and no variant member is `Void` to wrap it
+ * as); any other value is coerced via `lower_value_into_type` (#382, degrau N2).
+ *
+ * @param LowerCtx ctx  the lowering context to append the value's instructions into
+ * @param checker::TExpr value  the typed return value
+ * @return Lowered  the lowered (and, when the return slot is a non-null variant, coerced) value
+ * @throws  propagated from lowering or coercing `value`
+ */
+fn lower_return_value(ctx: LowerCtx, value: checker::TExpr) -> Lowered | error {
+    if type_is_void(value.type) { return lower_expr(ctx, value) }
+    lower_value_into_type(ctx, ctx.ret_type, value)
+}
+
