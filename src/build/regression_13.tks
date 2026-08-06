@@ -1,0 +1,24 @@
+/**
+ * self_exe_path — this compiler binary's absolute path, resolved from `argv[0]` against the launch
+ * cwd (BEFORE the front-end chdir's into the project). An absolute path is what a child needs,
+ * because the child may be launched with a different working directory than this process's.
+ *
+ * THE RESOLVED PATH IS PROBED, and the raw `argv[0]` wins when it does not exist. A PATH launch
+ * (`teko test .`, with the binary on `PATH` and no separator in `argv[0]`) resolves to
+ * `<cwd>/teko`, which is a file that is usually NOT there; handing that to a spawn produces an
+ * exec failure (127) instead of a compiler, and since `teko test` now re-invokes this binary for
+ * its own build stage, that would break the command for every PATH-installed user rather than
+ * only for a project with regressors. The raw name has no separator, so the spawn's `execvp`
+ * resolves it through `PATH` exactly as the user's shell did.
+ *
+ * @return the compiler's executable path
+ * @since 0.3.0.29
+ */
+fn self_exe_path() -> str {
+    let argv = teko::env::args()
+    if argv.len == 0 { return "teko" }
+    let cwd = match teko::env::cwd() { str as c => c; error => "" }
+    let a = abs_path_of(argv[0], cwd)
+    if a.len > 0 && path_exists(a) { return a }
+    argv[0]
+}

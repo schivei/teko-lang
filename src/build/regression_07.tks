@@ -1,0 +1,279 @@
+/**
+ * compile_standalone_source — build a SINGLE standalone source file `srcp` (an explicit `Given
+ * source = "<file>"`, relative to `regr_dir`, joined by the caller) as a scratch snippet project
+ * (`compile_snippet_text`) under `env`. Honest error when `srcp` cannot be read.
+ *
+ * @param exe     the absolute path to this compiler binary
+ * @param srcp    the standalone `.tks` source file to compile
+ * @param env     per-scenario child env (`K=V` tokens; 0.3.1 C2)
+ * @param prefix  the scratch-file prefix for this compile
+ * @return        the captured build outcome
+ * @since 0.3.1
+ */
+fn compile_standalone_source(exe: str, srcp: str, env: []str, prefix: str) -> CapResult {
+    let text = match teko::io::read_file(srcp) {
+        str as s => s
+        error as e => return cap_synthetic(1, teko::str::concat("cannot read source file: ", e.message))
+    }
+    compile_snippet_text(exe, text, env, prefix)
+}
+
+/**
+ * compile_inline_source — build a SINGLE inline Teko program `src_text` (from `Given source
+ * inline`) as a scratch snippet project (`compile_snippet_text`) under `env`, capturing the
+ * build's exit/stderr (the stderr carries the diagnostic a `compilation fails` inline scenario
+ * pins). No on-disk project is touched — this is the compiler-as-SUT over a snippet.
+ *
+ * @param exe       the absolute path to this compiler binary (gen1)
+ * @param src_text  the inline `.tks` program to compile
+ * @param env       per-scenario child env (`K=V` tokens; §2b) — e.g. `TEKO_TARGET=x86_64-windows`
+ * @param prefix    the scratch-file prefix for this compile
+ * @return          the captured build outcome
+ * @since 0.3.1
+ */
+fn compile_inline_source(exe: str, src_text: str, env: []str, prefix: str) -> CapResult {
+    compile_snippet_text(exe, src_text, env, prefix)
+}
+
+/**
+ * copy_dir — recursively copy `src` to `dst` (`rm -rf dst; mkdir -p dst's parent; cp -R src dst`,
+ * each step run DIRECTLY — no shell, no `&&` chaining needed since each step already blocks until
+ * done), used to provision a SCRATCH working copy of a consumer project before a dependency build
+ * populates its `packages/` — the committed fixture tree is never written (`Background: Given
+ * dependency`, 0.3.1 C4).
+ *
+ * @param src  the source directory to copy
+ * @param dst  the destination path (recreated fresh)
+ * @return     `null` on success, or an `error` when a step fails
+ * @throws     when `rm -rf`/`mkdir -p`/`cp -R` exits non-zero
+ * @since 0.3.1
+ */
+fn copy_dir(src: str, dst: str) -> null | error {
+    match rm_rf(dst) { error as e => return e; null => { } }
+    match mkdir_p(teko::str::concat(dirname_of(dst), "/")) { error as e => return e; null => { } }
+    mut argv: []str = teko::list::push(teko::list::empty(), "cp")
+    argv = teko::list::push(argv, "-R")
+    argv = teko::list::push(argv, src)
+    argv = teko::list::push(argv, dst)
+    if teko::process::run(argv) != 0 { return error { message = teko::str::concat("failed to copy directory ", src) } }
+    null
+}
+
+/**
+ * provision_dependency — build the `kind = "package"` sub-project at `dep_dir` with gen1 (`exe`)
+ * to a `.tkl`, then copy that `.tkl` into `scratch_packages/` (created if missing) so a subsequent
+ * consumer compile resolves it. The committed fixture tree is never written — the `.tkl` and the
+ * consumer build live under scratch. Mirrors `crossmodule_regressions.sh`'s build-dep → provision
+ * step. Honest error on a missing dep manifest / a failed dep build / no `.tkl` produced (M.3).
+ * The `-o` value is resolved to an ABSOLUTE path before it reaches the dep build: `teko <dir> -o
+ * <out>` chdir's INTO `<dir>` before resolving a relative `<out>`, so a scratch `<out>` computed
+ * relative to the RUNNER's own cwd (never `dep_dir`) would land inside `dep_dir` itself instead —
+ * exactly the polluted-fixture-tree outcome this whole crumb exists to avoid.
+ *
+ * @param exe               the absolute path to this compiler binary (gen1)
+ * @param dep_dir           the dependency sub-project directory (`regr_dir/<dep_subdir>`)
+ * @param scratch_packages  the scratch `packages/` dir to provision the built `.tkl` into
+ * @param prefix            the scratch-file prefix for the dep build
+ * @return                  the provisioned `.tkl` path, or an error
+ * @throws                  on a missing/malformed dep manifest, a dep build failure, or no `.tkl`
+ * @since 0.3.1
+ */
+fn provision_dependency(exe: str, dep_dir: str, scratch_packages: str, prefix: str) -> str | error {
+    match mkdir_p(teko::str::concat(scratch_packages, "/")) { error => { }; null => { } }
+    let cwd = match teko::env::cwd() { str as c => c; error => "" }
+    let dep_out = abs_path_of(prefix ~ ".depout", cwd)
+    mut argv: []str = teko::list::push(teko::list::empty(), exe)
+    argv = teko::list::push(argv, dep_dir)
+    argv = teko::list::push(argv, "-o")
+    argv = teko::list::push(argv, dep_out)
+    argv = teko::list::push(argv, "--no-verify")
+    let comp = run_captured_env(argv, "", with_regr_cov_env(teko::list::empty(), prefix ~ ".dep_compile"), prefix ~ ".dep_compile")
+    if comp.exit != 0 { return error { message = teko::str::concat("dependency build failed: ", compile_failure_message(comp)) } }
+    let entries = match teko::fs::list_dir(dep_out) { []str as e => e; error as e => return e }
+    mut tkl = ""
+    mut k: u64 = 0
+    loop {
+        if k >= entries.len { break }
+        if teko::str::ends_with(entries[k], ".tkl") { tkl = entries[k] }
+        k = k + 1
+    }
+    if tkl.len == 0 { return error { message = "dependency build produced no .tkl artifact" } }
+    let bytes = match teko::io::read_file(dep_out ~ "/" ~ tkl) { str as s => s; error as e => return e }
+    let dst = scratch_packages ~ "/" ~ tkl
+    match teko::io::write_file(dst, bytes) { error as e => return e; null => { } }
+    dst
+}
+
+/**
+ * first_line — the first line of `s` (up to, excluding, the first newline).
+ *
+ * @param s  the text
+ * @return   the first line
+ * @since 0.3.0.29
+ */
+fn first_line(s: str) -> str {
+    mut k: u64 = 0
+    loop {
+        if k >= s.len { break }
+        if s[k] == b'\n' { break }
+        k = k + 1
+    }
+    teko::str::slice(s, 0, k)
+}
+
+/**
+ * COMPILE_FAIL_TAIL_LINES — how many TRAILING lines of a failed compile's captured output the
+ * scenario's failure message reproduces. The host `cc`'s own diagnostics are the tail of that
+ * stream (the compiler prints its own "cc failed to build the generated C" line LAST), so a
+ * one-line excerpt names the symptom and hides the cause; this bound keeps the whole cause in the
+ * report without letting a pathological build dump megabytes into one gate line.
+ */
+const COMPILE_FAIL_TAIL_LINES: u64 = 40
+
+/**
+ * COMPILE_FAIL_HEAD_LINES — how many LEADING lines of a failed compile's captured output the
+ * scenario's failure message reproduces, alongside the trailing ones.
+ *
+ * THE TAIL ALONE IS A MEASURED TRAP, and this constant is the answer to it. A compiler diagnostic
+ * CASCADE runs the opposite way from a `cc` failure: the one line that names the cause comes FIRST
+ * and every line after it is a consequence. The own-backend corpus channel proved the cost — one
+ * unlexable fixture file (`unexpected character`) produced 119 consequent `unknown function` lines,
+ * the 40-line tail held nothing but consequences, and three readers of that CI log in a row
+ * diagnosed something the build had never said. Quoting BOTH ends costs sixty lines and makes the
+ * excerpt honest whichever direction the real cause lies in.
+ */
+const COMPILE_FAIL_HEAD_LINES: u64 = 20
+
+/**
+ * count_text_lines — how many lines `s` holds, ignoring trailing newlines (so `"a\n"` and `"a"`
+ * both count 1, and `""` counts 0). The measure `compile_fail_excerpt` needs to decide whether an
+ * excerpt would drop anything at all.
+ *
+ * @param s  the text to measure
+ * @return   the number of lines
+ * @since 0.3.1
+ */
+fn count_text_lines(s: str) -> u64 {
+    mut end = s.len
+    loop {
+        if end == 0 { return 0 }
+        if s[end - 1] != b'\n' { break }
+        end = end - 1
+    }
+    mut n: u64 = 1
+    mut i: u64 = 0
+    loop {
+        if i >= end { break }
+        if s[i] == b'\n' { n = n + 1 }
+        i = i + 1
+    }
+    n
+}
+
+/**
+ * head_lines — the first `n` lines of `s`, or all of `s` (trailing newlines trimmed) when it holds
+ * `n` lines or fewer. The mirror of `tail_lines`, walking forward from the start.
+ *
+ * @param s  the text
+ * @param n  how many leading lines to keep (0 → "")
+ * @return   the leading `n` lines, without a trailing newline
+ * @since 0.3.1
+ */
+fn head_lines(s: str, n: u64) -> str {
+    if n == 0 { return "" }
+    mut end = s.len
+    loop {
+        if end == 0 { break }
+        if s[end - 1] != b'\n' { break }
+        end = end - 1
+    }
+    mut stop: u64 = 0
+    mut seen: u64 = 0
+    loop {
+        if stop >= end { break }
+        if s[stop] == b'\n' {
+            seen = seen + 1
+            if seen == n { break }
+        }
+        stop = stop + 1
+    }
+    teko::str::slice(s, 0, stop)
+}
+
+/**
+ * tail_lines — the last `n` lines of `s` (trailing newline tolerant), or all of `s` when it holds
+ * `n` lines or fewer. Walks back from the end counting newlines, so nothing is copied twice.
+ *
+ * @param s  the text
+ * @param n  how many trailing lines to keep (0 → "")
+ * @return   the trailing `n` lines, without a trailing newline
+ * @since 0.3.1
+ */
+fn tail_lines(s: str, n: u64) -> str {
+    if n == 0 { return "" }
+    mut end = s.len
+    loop {
+        if end == 0 { break }
+        if s[end - 1] != b'\n' { break }
+        end = end - 1
+    }
+    mut start = end
+    mut seen: u64 = 0
+    loop {
+        if start == 0 { break }
+        if s[start - 1] == b'\n' {
+            seen = seen + 1
+            if seen == n { break }
+        }
+        start = start - 1
+    }
+    teko::str::slice(s, start, end)
+}
+
+/**
+ * compile_fail_excerpt — the quotable excerpt of a failed compile's captured stream `s`: the whole
+ * text when it is short enough, else its FIRST `COMPILE_FAIL_HEAD_LINES` lines and its LAST
+ * `COMPILE_FAIL_TAIL_LINES` lines with a line naming how many were elided in between.
+ *
+ * BOTH ENDS, BECAUSE THE CAUSE LIVES AT WHICHEVER END THE FAILURE CLASS PUTS IT (see
+ * `COMPILE_FAIL_HEAD_LINES`): a host-`cc` failure ends with its diagnostics, a compiler diagnostic
+ * cascade BEGINS with the one line that caused it. An excerpt taken from one end is a report that
+ * silently lies about the other half of the failure space, and the elision line is what keeps it
+ * from reading as a complete transcript.
+ *
+ * @param s  the captured stream (stdout or stderr) of the failed build
+ * @return   the excerpt, without a trailing newline ("" when `s` holds no lines)
+ * @since 0.3.1
+ */
+fn compile_fail_excerpt(s: str) -> str {
+    let total = count_text_lines(s)
+    let kept = COMPILE_FAIL_HEAD_LINES + COMPILE_FAIL_TAIL_LINES
+    if total <= kept { return tail_lines(s, total) }
+    let elided = total - kept
+    let head = head_lines(s, COMPILE_FAIL_HEAD_LINES)
+    let tail = tail_lines(s, COMPILE_FAIL_TAIL_LINES)
+    $"{head}\n… {elided} line(s) elided; the excerpt keeps both ends …\n{tail}"
+}
+
+/**
+ * compile_failure_message — the honest failure text for a scenario whose BUILD failed: the label
+ * plus an excerpt of what the build actually wrote, taken from BOTH ends of the stream
+ * (`compile_fail_excerpt`). The regression runner redirects the compiler child's streams to capture
+ * files, and the host `cc` the compiler spawns inherits them — so the `cc` diagnostics ARE captured;
+ * quoting only the compiler's own last line (which merely says the `cc` failed) threw the real cause
+ * away and left a CI log with no way to tell WHY (M.3: an error that will not say why is polite, not
+ * honest). `stderr` carries both streams' diagnostics; the `stdout` excerpt is the fallback for a
+ * toolchain that reports on stdout only.
+ *
+ * @param comp  the captured build outcome (non-zero `exit`)
+ * @return      the failure message, carrying the captured output excerpt
+ * @since 0.3.1
+ */
+fn compile_failure_message(comp: CapResult) -> str {
+    let err_part = compile_fail_excerpt(comp.stderr)
+    if err_part.len > 0 { return $"compile failed (exit {comp.exit}); captured output excerpt:\n{err_part}" }
+    let out_part = compile_fail_excerpt(comp.stdout)
+    if out_part.len > 0 { return $"compile failed (exit {comp.exit}); captured stdout excerpt:\n{out_part}" }
+    $"compile failed (exit {comp.exit}); the build wrote nothing to stdout or stderr"
+}
+

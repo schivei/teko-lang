@@ -1,0 +1,275 @@
+/**
+ * CapResult — the captured outcome of running a child process launched directly by the runtime
+ * (`teko::process::spawn_redirected`, never a shell): its exit status plus the bytes it wrote to
+ * stdout/stderr. `teko::process::run`/`spawn_redirected` return only the exit code, so the
+ * regression runner redirects the child's streams to scratch files (feeding stdin from one) and
+ * reads them back.
+ *
+ * @since 0.3.0.29
+ */
+type CapResult = struct {
+    /** the child's exit status (128+signo for one a signal killed, i.e. non-zero). */
+    exit: i32
+    /** the bytes the child wrote to stdout ("" when none / unreadable). */
+    stdout: str
+    /** the bytes the child wrote to stderr ("" when none / unreadable). */
+    stderr: str
+    /**
+     * monotonic ns spent OUTSIDE the child on this capture: creating the scratch directory, writing
+     * the stdin file, and reading the two capture files back (0 for a result the runner synthesized
+     * without spawning anything). Observability only — see `regr_timing.tks`.
+     */
+    harness_ns: i64
+    /**
+     * monotonic ns spent INSIDE the child process — the REAL interval between this child's own
+     * `spawn_redirected` and its own `wait_one`, never a share of a batch's wall clock (`run_pool`
+     * measures every child individually; the old `sh`-batch scaffold could only divide the batch's
+     * total evenly, which `regr_batch_capture`'s own doc comment used to document as a share, not a
+     * measurement).
+     */
+    child_ns: i64
+    /**
+     * the child's argv, space-joined for DISPLAY ONLY (never re-executed, so no quoting is needed),
+     * or "" for a result the runner synthesized without spawning anything. Carried so a failure
+     * message can quote what actually ran: an exit code alone cannot distinguish a child that ran
+     * and misbehaved from one that was never found.
+     */
+    cmd: str
+    /**
+     * the third channel's raw content (`teko::process::VERDICT_CHANNEL_ENV`'s file, migalha 10), or
+     * "" when the child never wrote one — the common case for an ordinary regressive, whose EXIT
+     * CODE is already its whole contract (§5.4: unlike a `#test` gate binary, a regression never
+     * needs to transport a panic line or an in-flight index, so this stays "" for every row today).
+     * Carried on every capture so the channel is provable end to end without a second code path: a
+     * caller that DOES write to it (a future gate binary, or a fixture proving the mechanism) reads
+     * it back here, and every caller that does not pays nothing but the one extra field.
+     */
+    chan_text: str
+}
+
+/**
+ * RegrOutcome — the verdict for one regressive: whether it passed, whether it was honest-skipped
+ * (e.g. a non-host variant with no runner), and a human-readable message for the report line.
+ *
+ * @since 0.3.0.29
+ */
+type RegrOutcome = struct {
+    /** true when every declared expectation held. */
+    ok: bool
+    /** true when the regressive could not be run here and was honest-skipped (not a failure). */
+    skipped: bool
+    /**
+     * how many capability skips this verdict AGGREGATES — the count the summary line reports so a
+     * run that skipped everything can never read as a run that checked everything (M.3). 1 for a
+     * `regr_skip` leaf, 0 for a pass/fail leaf, and the sum of its parts for an aggregate verdict
+     * built by `regr_add_skips`.
+     */
+    skips: u64
+    /** the report message (the mismatch on failure, "ok" on success, the reason on skip). */
+    message: str
+}
+
+/**
+ * regr_fail — an `RegrOutcome` describing a failure with `msg`.
+ *
+ * @param msg  the failure description
+ * @return     a failing outcome
+ * @since 0.3.0.29
+ */
+fn regr_fail(msg: str) -> RegrOutcome { RegrOutcome { ok = false; skipped = false; skips = 0; message = msg } }
+
+/**
+ * regr_pass — the passing `RegrOutcome`.
+ *
+ * @return a passing outcome
+ * @since 0.3.0.29
+ */
+fn regr_pass() -> RegrOutcome { RegrOutcome { ok = true; skipped = false; skips = 0; message = "ok" } }
+
+/**
+ * regr_skip — an honest-skipped `RegrOutcome` carrying `msg` (the reason). Not a failure: the runner
+ * reports it and does not tally it against the gate, but it DOES tally into the summary's `skipped`
+ * column (`skips = 1`) so the report never presents a skip as a check. Used for a missing host
+ * toolchain (0.3.1 C3) and for a declarative (verb-less) scenario (0.3.1 C1).
+ *
+ * @param msg  the skip reason (shown after the report label)
+ * @return     a skipped outcome carrying one skip
+ * @since 0.3.0.30
+ */
+fn regr_skip(msg: str) -> RegrOutcome { RegrOutcome { ok = true; skipped = true; skips = 1; message = msg } }
+
+/**
+ * regr_add_skips — `oc` with `extra` more aggregated capability skips folded into its `skips` tally.
+ * The aggregation primitive every level of the runner uses to carry a nested row's skip count up to
+ * the summary line, so the count survives the row → scenario → feature → file → run chain instead
+ * of being lost at the first pass verdict.
+ *
+ * @param oc     the verdict to extend
+ * @param extra  how many skips to add to its tally
+ * @return       `oc` with `skips = oc.skips + extra`
+ * @since 0.3.1
+ */
+fn regr_add_skips(oc: RegrOutcome, extra: u64) -> RegrOutcome {
+    RegrOutcome { ok = oc.ok; skipped = oc.skipped; skips = oc.skips + extra; message = oc.message }
+}
+
+/**
+ * ProcSpec — everything one captured child needs to run, gathered so the LAUNCH and the HARVEST can
+ * be separated (`spawn_spec`/`harvest_spec`): the argument vector, its working directory, the `K=V`
+ * tokens added to its environment, the bytes fed to its stdin, and the scratch-file prefix its
+ * `.in`/`.out`/`.err` are written under.
+ *
+ * @since 0.3.1.2
+ */
+type ProcSpec = struct {
+    /** the command to run; `argv[0]` is the executable. */
+    argv: []str
+    /** the child's working directory ("" or "." = the runner's own). */
+    dir: str
+    /** per-child `K=V` environment tokens ([] = inherit only). */
+    env: []str
+    /** bytes fed to the child's stdin. */
+    stdin_data: str
+    /** the scratch-file prefix (its parent directory is created; `.in`/`.out`/`.err` hang off it). */
+    prefix: str
+}
+
+/**
+ * spec_argv_display — `spec.argv`, space-joined for a failure message, NEVER re-executed and
+ * therefore never quoted — `CapResult.cmd`'s whole reason to exist is DISPLAY, and a joined string
+ * that will never reach a shell has nothing to escape.
+ *
+ * @param argv  the argument vector to render
+ * @return      the space-joined argv
+ */
+fn spec_argv_display(argv: []str) -> str {
+    mut out = ""
+    mut k: u64 = 0
+    loop {
+        if k >= argv.len { break }
+        if k > 0 { out = out ~ " " }
+        out = out ~ argv[k]
+        k = k + 1
+    }
+    out
+}
+
+/**
+ * spec_env_with_channel — `spec.env` with the THIRD CHANNEL wired in: one more `K=V` token naming
+ * `<spec.prefix>.chan` under `teko::process::VERDICT_CHANNEL_ENV`, so ANY child that knows the
+ * protocol (`teko::process::verdict_emit`) can append structured records there — a panic line, an
+ * in-flight index, a coverage image — without the runner having to know in advance whether this
+ * particular child ever will. An ordinary regressive never calls `verdict_emit`, so its `.chan`
+ * simply never gets created, and `harvest_spec` reads that absence as `chan_text = ""` (§5.4: the
+ * exit code is already its whole contract).
+ *
+ * @param spec  the spec whose env this extends
+ * @return      `spec.env` plus the channel token
+ */
+fn spec_env_with_channel(spec: ProcSpec) -> []str {
+    teko::list::push(spec.env, teko::str::concat(teko::process::VERDICT_CHANNEL_ENV, teko::str::concat("=", spec.prefix ~ ".chan")))
+}
+
+/**
+ * spawn_spec — stage `spec`'s scratch files (its parent directory, its `.in`) and launch it,
+ * WITHOUT waiting — the launch half of a capture, kept separate from `harvest_spec` so `run_pool`
+ * can hold many children in flight at once.
+ *
+ * @param spec  what to run and where its capture files live
+ * @return      the child's handle
+ * @since 0.3.1.2
+ */
+fn spawn_spec(spec: ProcSpec) -> teko::process::ProcHandle {
+    match mkdir_p(teko::str::concat(dirname_of(spec.prefix), "/")) { error => { }; null => { } }
+    match teko::io::write_file(spec.prefix ~ ".in", spec.stdin_data) { error => { }; null => { } }
+    teko::process::spawn_redirected(spec.argv, spec.dir, spec_env_with_channel(spec), spec.prefix ~ ".in", spec.prefix ~ ".out", spec.prefix ~ ".err")
+}
+
+/**
+ * harvest_spec — block on `h` and assemble `spec`'s `CapResult`, measuring the REAL interval this
+ * one child spent running (`t_spawn`..the moment `wait_one` returns) — never a share of a batch's
+ * wall clock; that is exactly the honesty `run_pool`'s doc comment promises over the old
+ * `sh`-batch scaffold's `regr_batch_capture`.
+ *
+ * @param spec         what was run
+ * @param h            the handle `spawn_spec` returned
+ * @param t_spawn      the monotonic reading taken right after `spawn_spec` returned
+ * @param t_harness0   the monotonic reading taken right before `spawn_spec` was called
+ * @return             the captured outcome
+ * @since 0.3.1.2
+ */
+fn harvest_spec(spec: ProcSpec, h: teko::process::ProcHandle, t_spawn: i64, t_harness0: i64) -> CapResult {
+    let rc = teko::process::wait_one(h)
+    let t_waited = regr_now_ns()
+    let out = match teko::io::read_file(spec.prefix ~ ".out") { str as s => s; error => "" }
+    let err = match teko::io::read_file(spec.prefix ~ ".err") { str as s => s; error => "" }
+    let chan = match teko::io::read_file(spec.prefix ~ ".chan") { str as s => s; error => "" }
+    let t_read = regr_now_ns()
+    CapResult {
+        exit = rc; stdout = out; stderr = err
+        harness_ns = (t_spawn - t_harness0) + (t_read - t_waited)
+        child_ns = t_waited - t_spawn
+        cmd = spec_argv_display(spec.argv)
+        chan_text = chan
+    }
+}
+
+/**
+ * run_captured_spec — launch `spec` and harvest it immediately — the SERIAL (one-at-a-time) capture
+ * every single-child caller (`run_captured`/`run_captured_env`/`run_captured_in_dir`) funnels
+ * through, so the serial path and `run_pool`'s parallel one share ONE spawn/harvest pair and cannot
+ * drift into two different spellings of the same invocation.
+ *
+ * @param spec  what to run and where its capture files live
+ * @return      the captured exit/stdout/stderr
+ * @since 0.3.1.2
+ */
+fn run_captured_spec(spec: ProcSpec) -> CapResult {
+    let t_start = regr_now_ns()
+    let h = spawn_spec(spec)
+    let t_spawn = regr_now_ns()
+    harvest_spec(spec, h, t_spawn, t_start)
+}
+
+/**
+ * nproc_rt — the runtime bottom of E1-C6: the OS-granted online processor count. Bound as an
+ * `extern fn` (not an injected builtin) because the build SOURCE calls it, and a fresh builtin would
+ * not be recognised by the released seed that must still compile this tree — the same seed-lowerable
+ * FFI route `src/names/names.tks` binds `tk_names_live_count` through.
+ *
+ * @return the OS-granted online CPU count, at least 1
+ * @since 0.3.1.0
+ */
+extern fn nproc_rt() -> u64 = "tk_rt_nproc" from "teko_rt"
+
+/**
+ * MEMINFO_PATH — where Linux publishes live memory accounting, one fact per line
+ * (`MemAvailable: NNNN kB` among others). Absent on macOS/Windows: `mem_job_cap_at` reads
+ * that absence as "no memory-based cap", which is exactly today's CPU-only behaviour on
+ * those hosts — this governor is additive, never a regression on a host it cannot read.
+ */
+const MEMINFO_PATH: str = "/proc/meminfo"
+
+/**
+ * MEM_AVAILABLE_LABEL — the line prefix `mem_available_kib` scans for. Not `MemFree:`:
+ * `MemFree` excludes reclaimable cache/buffers a new child can still be granted, and would
+ * undercount by exactly the memory Linux hands back on demand. `MemAvailable` is the
+ * kernel's own estimate of what a fresh allocation could actually get.
+ */
+const MEM_AVAILABLE_LABEL: str = "MemAvailable:"
+
+/**
+ * MEM_PER_JOB_KIB — the memory this governor budgets per concurrent heavy child (2 GiB).
+ *
+ * CONSERVATIVE ON PURPOSE, AND NOT A MEASURED PER-SHARD FOOTPRINT. A job count that is too
+ * low only costs wall-clock; one that is too high OOMs the runner — and OOM is strictly
+ * worse, because a run that is killed before finishing proves nothing, while a slow one
+ * still proves everything a fast one would. Sizing this to a REAL measured per-shard/
+ * per-regression-child RSS is the honest follow-up; instrumenting that measurement here
+ * would itself risk the exact OOM this constant exists to avoid, so it is not attempted in
+ * this change. Until that measurement lands, this constant only ever LOWERS the default
+ * below `nproc` — a host whose `MemAvailable` comfortably covers `nproc` jobs at this
+ * budget sees no change at all (§`os_max_of`).
+ */
+const MEM_PER_JOB_KIB: u64 = 2097152
+
