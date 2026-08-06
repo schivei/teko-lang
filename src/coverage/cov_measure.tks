@@ -1,0 +1,138 @@
+use teko::checker
+
+/**
+ * The integer percentage of a coverage count, rounded down. An empty denominator is 100%.
+ *
+ * @param c  the covered/valid coverage count
+ * @return   the percentage in [0, 100]
+ */
+fn cov_pct(c: CovCount) -> u64 { if c.val == 0 { 100 } else { c.cov * 100 / c.val } }
+
+/**
+ * The FUNCTIONS metric — distinct production functions executed over total production functions
+ * (the cov-mark sink).
+ *
+ * @param prog  the fully-typed program
+ * @return      a CovCount whose `cov` is distinct hit functions and `val` the production-fn total
+ */
+exp fn functions_coverage(prog: checker::TProgram) -> CovCount {
+    CovCount { cov = teko::cov_distinct(); val = count_prod_fns(prog) }
+}
+
+/**
+ * The LINES metric — distinct executable lines hit over total executable lines, aggregated across
+ * every production function. The coverage machinery itself (`teko::coverage`) is self-excluded.
+ *
+ * @param prog  the fully-typed program
+ * @return      a CovCount whose `cov` is hit lines and `val` the total executable lines
+ */
+exp fn line_coverage(prog: checker::TProgram) -> CovCount {
+    mut cov: u64 = 0; mut val: u64 = 0
+    mut i = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            checker::TFunction as f => {
+                if !f.is_test && f.namespace != "teko::coverage" {
+                    let w = cov_walk_block(f.body, cov_walk_empty())
+                    mut k = 0
+                    loop {
+                        if k >= w.lines.len { break }
+                        val = val + 1
+                        if teko::cov_line_hit(i to u64, w.lines[k]) { cov = cov + 1 }
+                        k = k + 1
+                    }
+                }
+            }
+            _ => { }
+        }
+        i++
+    }
+    CovCount { cov = cov; val = val }
+}
+
+/**
+ * The BRANCHES metric — taken outcomes over total outcomes across every production function's
+ * if/match sites. The coverage machinery itself (`teko::coverage`) is self-excluded.
+ *
+ * @param prog  the fully-typed program
+ * @return      a CovCount whose `cov` is taken outcomes and `val` the total outcomes
+ */
+exp fn branch_coverage(prog: checker::TProgram) -> CovCount {
+    mut cov: u64 = 0; mut val: u64 = 0
+    mut i = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            checker::TFunction as f => {
+                if !f.is_test && f.namespace != "teko::coverage" {
+                    let w = cov_walk_block(f.body, cov_walk_empty())
+                    mut s = 0
+                    loop {
+                        if s >= w.sites.len { break }
+                        mut o: u64 = 0
+                        loop {
+                            if o >= w.sites[s].n { break }
+                            if teko::cov_branch_hit(i to u64, w.sites[s].line, w.sites[s].col, o) { cov = cov + 1 }
+                            o = o + 1
+                        }
+                        val = val + w.sites[s].n
+                        s = s + 1
+                    }
+                }
+            }
+            _ => { }
+        }
+        i++
+    }
+    CovCount { cov = cov; val = val }
+}
+
+/**
+ * The BRANCH-coverage percentage — the D4 gate's `branches` floor reads this.
+ *
+ * @param prog  the fully-typed program
+ * @return      the branch-coverage percentage in [0, 100]
+ */
+exp fn branch_coverage_pct(prog: checker::TProgram) -> u64 { cov_pct(branch_coverage(prog)) }
+
+/**
+ * The LINE-coverage percentage — the D4 gate's `lines` floor reads this.
+ *
+ * @param prog  the fully-typed program
+ * @return      the line-coverage percentage in [0, 100]
+ */
+exp fn line_coverage_pct(prog: checker::TProgram) -> u64 { cov_pct(line_coverage(prog)) }
+
+/**
+ * The coverage DENOMINATOR — the count of production (non-`#test`) functions. The coverage
+ * machinery itself (`teko::coverage`) is excluded: those functions implement the report/walk and
+ * only run under `--coverage`, so counting them would permanently depress the floors — the same
+ * self-exclusion the retired interpreter carried.
+ *
+ * @param prog  the fully-typed program
+ * @return      the number of production functions counted toward the floors
+ */
+fn count_prod_fns(prog: checker::TProgram) -> u64 {
+    mut n: u64 = 0
+    mut i = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            checker::TFunction as f => { if !f.is_test && f.namespace != "teko::coverage" { n = n + 1 } }
+            _ => { }
+        }
+        i++
+    }
+    n
+}
+
+/**
+ * The FUNCTION-coverage percentage — the D4 gate's `functions` floor reads this. 100 when there
+ * are no production functions (vacuously covered).
+ *
+ * @param prog  the fully-typed program
+ * @return      the function-coverage percentage in [0, 100]
+ */
+exp fn coverage_pct(prog: checker::TProgram) -> u64 { cov_pct(functions_coverage(prog)) }
+

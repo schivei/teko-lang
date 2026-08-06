@@ -1,0 +1,274 @@
+use teko::checker
+
+/**
+ * Tally the branch taken/total for the sites on a single source line of one function.
+ *
+ * @param sites   the function's walked branch sites
+ * @param fn_idx  the program-item index of the function (the coverage sink key)
+ * @param ln      the source line whose sites are tallied
+ * @return        a `LineBr` with the taken and total outcome counts on `ln`
+ */
+fn cov_line_branch(sites: []BranchSite, fn_idx: u64, ln: u32) -> LineBr {
+    mut taken: u64 = 0; mut total: u64 = 0
+    mut s = 0
+    loop {
+        if s >= sites.len { break }
+        if sites[s].line == ln {
+            mut o: u64 = 0
+            loop { if o >= sites[s].n { break }; if teko::cov_branch_hit(fn_idx, sites[s].line, sites[s].col, o) { taken = taken + 1 }; o = o + 1 }
+            total = total + sites[s].n
+        }
+        s = s + 1
+    }
+    LineBr { taken = taken; total = total }
+}
+
+/**
+ * Tally one production function's LINE coverage: how many of its distinct executable lines were
+ * hit versus how many exist. The denominator is the walk's `lines.len`; the numerator counts the
+ * lines for which `cov_line_hit` is true for this function index.
+ *
+ * @param w       the function's walked coverage sites and distinct executable lines
+ * @param fn_idx  the program-item index of the function (the coverage sink key)
+ * @return        a CovCount whose `cov` is the hit-line count and `val` the total line count
+ */
+fn cov_fn_line_tally(w: CovWalk, fn_idx: u64) -> CovCount {
+    mut cov: u64 = 0
+    mut k = 0
+    loop {
+        if k >= w.lines.len { break }
+        if teko::cov_line_hit(fn_idx, w.lines[k]) { cov = cov + 1 }
+        k = k + 1
+    }
+    CovCount { cov = cov; val = w.lines.len }
+}
+
+/**
+ * Tally one production function's BRANCH coverage: how many condition outcomes were taken versus
+ * how many outcomes exist across every if/match site in the function.
+ *
+ * @param w       the function's walked coverage sites and distinct executable lines
+ * @param fn_idx  the program-item index of the function (the coverage sink key)
+ * @return        a CovCount whose `cov` is the taken-outcome count and `val` the total outcomes
+ */
+fn cov_fn_branch_tally(w: CovWalk, fn_idx: u64) -> CovCount {
+    mut cov: u64 = 0
+    mut val: u64 = 0
+    mut s = 0
+    loop {
+        if s >= w.sites.len { break }
+        mut o: u64 = 0
+        loop {
+            if o >= w.sites[s].n { break }
+            if teko::cov_branch_hit(fn_idx, w.sites[s].line, w.sites[s].col, o) { cov = cov + 1 }
+            o = o + 1
+        }
+        val = val + w.sites[s].n
+        s = s + 1
+    }
+    CovCount { cov = cov; val = val }
+}
+
+/**
+ * Append one Cobertura `<line …/>` element per distinct executable line of a production function
+ * onto the copy-grow byte buffer, in walk order. A line that hosts an if/match additionally
+ * carries its condition-coverage percentage. The buffer is threaded linearly (append_fo frees the
+ * superseded backing on grow), so accumulation stays O(total) rather than the O(N²) retention that
+ * repeated `str::concat` would incur.
+ *
+ * @param buf     the copy-grow byte buffer being built
+ * @param w       the function's walked coverage sites and distinct executable lines
+ * @param fn_idx  the program-item index of the function (the coverage sink key)
+ * @return        the buffer with this function's `<line>` elements appended
+ */
+fn cov_emit_lines(buf: []byte, w: CovWalk, fn_idx: u64) -> []byte {
+    mut b = buf
+    mut k = 0
+    loop {
+        if k >= w.lines.len { break }
+        let ln = w.lines[k]
+        let lhit: u64 = if teko::cov_line_hit(fn_idx, ln) { 1 to u64 } else { 0 to u64 }
+        let lb = cov_line_branch(w.sites, fn_idx, ln)
+        if lb.total > 0 {
+            let pct = lb.taken * 100 / lb.total
+            b = teko::mem::append_fo(b, $"          <line number='{ln}' hits='{lhit}' branch='true' condition-coverage='{pct}% ({lb.taken}/{lb.total})'/>\n")
+        } else {
+            b = teko::mem::append_fo(b, $"          <line number='{ln}' hits='{lhit}'/>\n")
+        }
+        k = k + 1
+    }
+    b
+}
+
+/**
+ * Append one production function's complete Cobertura `<class>` block onto the copy-grow byte
+ * buffer: the class header (line/branch rates from the supplied tallies), its single-method
+ * `<methods>` summary, and its `<lines>` (via cov_emit_lines). Attributes are single-quoted (valid
+ * XML) so no `"`-escaping is needed. The class name is namespace-qualified when the function has a
+ * namespace, otherwise the bare name.
+ *
+ * @param buf     the copy-grow byte buffer being built
+ * @param f       the production function whose class block is emitted
+ * @param fn_idx  the program-item index of the function (the coverage sink key)
+ * @param w       the function's walked coverage sites and distinct executable lines
+ * @param lt      the function's line tally (cov = hit lines, val = total lines)
+ * @param bt      the function's branch tally (cov = taken outcomes, val = total outcomes)
+ * @param fnhit   1 when the function itself was executed at least once, else 0
+ * @return        the buffer with this function's `<class>` block appended
+ */
+fn cov_emit_class(buf: []byte, f: checker::TFunction, fn_idx: u64, w: CovWalk, lt: CovCount, bt: CovCount, fnhit: u64) -> []byte {
+    cov_emit_class_fields(buf, cov_class_name(f.namespace, f.name), f.file, f.name, f.line, fn_idx, w, lt, bt, fnhit)
+}
+
+/**
+ * The namespace-qualified Cobertura class name for a function: `namespace::name` when the function
+ * has a namespace, else the bare name. Extracted so the AST-walk renderer (`cov_emit_class`) and
+ * the site-map renderer (`cov_emit_class_fields` via `cov_cobertura_of`) qualify the name the SAME
+ * way and emit byte-identical XML.
+ *
+ * @param namespace  the function's namespace ("" when it has none)
+ * @param name       the function's bare name
+ * @return           `namespace::name`, or `name` when the namespace is empty
+ */
+fn cov_class_name(namespace: str, name: str) -> str {
+    if namespace.len != 0 { teko::str::concat(namespace, "::", name) } else { name }
+}
+
+/**
+ * Append one production function's complete Cobertura `<class>` block onto the copy-grow byte buffer
+ * from its ALREADY-RESOLVED identity fields and walk. The field-level twin of `cov_emit_class`: it
+ * takes the class name, filename, method name and method line directly rather than reading them off
+ * a `checker::TFunction`, so the site-map report path (which has no typed program) renders exactly
+ * the XML the AST-walk path renders. Attributes are single-quoted (valid XML) so no `"`-escaping is
+ * needed.
+ *
+ * @param buf     the copy-grow byte buffer being built
+ * @param cname   the namespace-qualified class name (from `cov_class_name`)
+ * @param file    the source file the class reports under
+ * @param mname   the method (function) name for the `<methods>` summary
+ * @param mline   the function's own source line (the method's single `<line>` element)
+ * @param fn_idx  the program-item index of the function (the coverage sink key)
+ * @param w       the function's walked coverage sites and distinct executable lines
+ * @param lt      the function's line tally (cov = hit lines, val = total lines)
+ * @param bt      the function's branch tally (cov = taken outcomes, val = total outcomes)
+ * @param fnhit   1 when the function itself was executed at least once, else 0
+ * @return        the buffer with this function's `<class>` block appended
+ */
+fn cov_emit_class_fields(buf: []byte, cname: str, file: str, mname: str, mline: u32, fn_idx: u64, w: CovWalk, lt: CovCount, bt: CovCount, fnhit: u64) -> []byte {
+    let lrate = cov_rate_str(lt.cov, lt.val)
+    let brate = cov_rate_str(bt.cov, bt.val)
+    mut b = teko::mem::append_fo(buf, $"      <class name='{cname}' filename='{file}' line-rate='{lrate}' branch-rate='{brate}' complexity='0'>\n")
+    b = teko::mem::append_fo(b, $"        <methods><method name='{mname}' signature='()V' line-rate='{lrate}' branch-rate='{brate}'><lines><line number='{mline}' hits='{fnhit}'/></lines></method></methods>\n")
+    b = teko::mem::append_fo(b, "        <lines>\n")
+    b = cov_emit_lines(b, w, fn_idx)
+    teko::mem::append_fo(b, "        </lines>\n      </class>\n")
+}
+
+/**
+ * Build a Cobertura XML coverage report from the LAST run's marks — one `<class>` per production
+ * function (its filename is the function's source file). Each class's `<lines>` are the real
+ * executable lines (every line with an evaluated expression, hit via cov_line_hit); a line that
+ * hosts an if/match also carries its branch condition-coverage. The coverage machinery itself
+ * (`teko::coverage`) is self-excluded, exactly as the retired interpreter was, so the report never measures
+ * its own reporting code.
+ *
+ * The whole report accumulates into a copy-grow `[]byte` buffer via teko::mem::append_fo (the
+ * codegen's emitter mechanism): each append frees the superseded backing on grow, so the report
+ * costs O(final-size) memory instead of the O(N²) arena retention that repeated str::concat
+ * incurred — every intermediate prefix stayed live, ballooning to tens of GB on the compiler
+ * itself (#468). The `body` buffer holds every class, then the header/footer (which need the
+ * whole-program aggregate rates) wrap it into `out`, converted to a str exactly once at return.
+ *
+ * @param prog  the fully-typed program whose production functions are reported
+ * @return      the complete Cobertura XML document as a str
+ */
+exp fn cov_cobertura(prog: checker::TProgram) -> str {
+    mut body: []byte = teko::list::empty()
+    mut agg = CovAgg { lines_cov = 0; lines_val = 0; br_cov = 0; br_val = 0 }
+    mut i = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            checker::TFunction as f => {
+                if !f.is_test && f.namespace != "teko::coverage" {
+                    let w = cov_walk_block(f.body, cov_walk_empty())
+                    let r = cov_render_class(body, cov_class_name(f.namespace, f.name), f.file, f.name, f.line, i to u64, w)
+                    body = r.body
+                    agg = cov_agg_add(agg, r.lt, r.bt)
+                }
+            }
+            _ => { }
+        }
+        i++
+    }
+    cov_cobertura_wrap(body, agg)
+}
+
+/**
+ * Fold one class's line and branch tallies into the running whole-program aggregate.
+ *
+ * @param a   the aggregate so far
+ * @param lt  the class's line tally (cov = hit lines, val = total lines)
+ * @param bt  the class's branch tally (cov = taken outcomes, val = total outcomes)
+ * @return    `a` with `lt`/`bt` added
+ */
+fn cov_agg_add(a: CovAgg, lt: CovCount, bt: CovCount) -> CovAgg {
+    CovAgg { lines_cov = a.lines_cov + lt.cov; lines_val = a.lines_val + lt.val; br_cov = a.br_cov + bt.cov; br_val = a.br_val + bt.val }
+}
+
+/**
+ * Render ONE production function's Cobertura `<class>` block AND compute its line/branch tallies in
+ * one place, so the AST-walk path and the site-map path produce byte-identical XML and identical
+ * aggregates. Reads the function's hit/line/branch marks from the coverage sink under `fn_idx` (the
+ * program-item index the native run keyed its marks by).
+ *
+ * @param body    the copy-grow body buffer being built
+ * @param cname   the namespace-qualified class name (from `cov_class_name`)
+ * @param file    the source file the class reports under
+ * @param mname   the method (function) name
+ * @param mline   the function's own source line
+ * @param fn_idx  the program-item index of the function (the coverage sink key)
+ * @param w       the function's walked coverage sites and distinct executable lines
+ * @return        the grown body plus the class's line and branch tallies
+ */
+fn cov_render_class(body: []byte, cname: str, file: str, mname: str, mline: u32, fn_idx: u64, w: CovWalk) -> CovClassRender {
+    let lt = cov_fn_line_tally(w, fn_idx)
+    let bt = cov_fn_branch_tally(w, fn_idx)
+    let fnhit: u64 = if teko::cov_is_marked(fn_idx) { 1 to u64 } else { 0 to u64 }
+    let b = cov_emit_class_fields(body, cname, file, mname, mline, fn_idx, w, lt, bt, fnhit)
+    CovClassRender { body = b; lt = lt; bt = bt }
+}
+
+/**
+ * Wrap the accumulated `<class>` body in the Cobertura document header and footer, computing the
+ * whole-program line/branch rates from the aggregate. The single closer for both render paths, so a
+ * report built from the site-map is byte-for-byte the report built from the typed program.
+ *
+ * @param body  the accumulated `<class>` blocks
+ * @param agg   the whole-program line/branch aggregate
+ * @return      the complete Cobertura XML document as a str
+ */
+fn cov_cobertura_wrap(body: []byte, agg: CovAgg) -> str {
+    let lrate = cov_rate_str(agg.lines_cov, agg.lines_val)
+    let brate = cov_rate_str(agg.br_cov, agg.br_val)
+    mut out: []byte = teko::list::empty()
+    out = teko::mem::append_fo(out, "<?xml version='1.0' ?>\n")
+    out = teko::mem::append_fo(out, $"<coverage line-rate='{lrate}' branch-rate='{brate}' lines-covered='{agg.lines_cov}' lines-valid='{agg.lines_val}' branches-covered='{agg.br_cov}' branches-valid='{agg.br_val}' complexity='0' version='teko' timestamp='0'>\n")
+    out = teko::mem::append_fo(out, "  <sources><source>.</source></sources>\n  <packages>\n")
+    out = teko::mem::append_fo(out, $"    <package name='teko' line-rate='{lrate}' branch-rate='{brate}' complexity='0'>\n      <classes>\n")
+    out = teko::mem::append_fo(out, str(body))
+    out = teko::mem::append_fo(out, "      </classes>\n    </package>\n  </packages>\n</coverage>\n")
+    str(out)
+}
+
+/**
+ * Union a child test binary's dumped `.tkcov` into THIS process's coverage sinks, so the
+ * engine-independent static walk (functions_coverage/line_coverage/branch_coverage) reads the
+ * native gate's coverage exactly as it once read the interpreter's in-process marks. Backed by teko_rt.c's
+ * `tk_cov_merge` (the #168 cross-process protocol).
+ *
+ * @param path  the child's dumped `.tkcov` file path
+ * @return      true on a successful merge
+ */
+exp extern fn cov_merge(path: str) -> bool = "tk_cov_merge" from "teko_rt"
+

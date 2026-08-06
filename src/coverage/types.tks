@@ -1,0 +1,165 @@
+use teko::checker
+
+/**
+ * A branch-coverage SITE — one `if` (2 outcomes: then/else) or `match` (arms.len outcomes)
+ * in a walked production-function body. The native run marks the taken outcome of each site
+ * (cov_branch); the report statically enumerates every site and queries cov_branch_hit per
+ * outcome to derive taken/total. Formerly part of the retired interpreter; the walk is engine-independent.
+ */
+type BranchSite = struct {
+    /**
+     * The 1-based source line of the branching expression.
+     */
+    line: u32
+    /**
+     * The source column of the branching expression (disambiguates two sites on one line).
+     */
+    col: u32
+    /**
+     * The number of outcomes: 2 for an `if`, `arms.len` for a `match`.
+     */
+    n: u64
+}
+
+/**
+ * The accumulated coverage walk over one function: the branch SITES it contains plus the set of
+ * DISTINCT executable source lines it touches. One walk feeds the line metric, the branch metric,
+ * and the Cobertura `<line>` elements.
+ */
+type CovWalk = struct {
+    /**
+     * The branch sites (if/match) discovered in walk order.
+     */
+    sites: []BranchSite
+    /**
+     * The distinct executable source lines discovered in walk order.
+     */
+    lines: []u32
+}
+
+/**
+ * Branch taken/total over the sites that sit on one source line (a line may host more than one
+ * if/match).
+ */
+type LineBr = struct {
+    /**
+     * The number of taken outcomes across this line's sites.
+     */
+    taken: u64
+    /**
+     * The total number of outcomes across this line's sites.
+     */
+    total: u64
+}
+
+/**
+ * The running whole-program coverage totals a Cobertura render accumulates across its classes: the
+ * covered/total line counts and the taken/total branch outcomes that the document's header rates
+ * are computed from. Threaded through the class loop so the AST-walk path (`cov_cobertura`) and the
+ * site-map path (`cov_cobertura_of`) accumulate identically.
+ */
+type CovAgg = struct {
+    /** the covered executable-line count summed over every class so far. */
+    lines_cov: u64
+    /** the total executable-line count summed over every class so far. */
+    lines_val: u64
+    /** the taken branch-outcome count summed over every class so far. */
+    br_cov: u64
+    /** the total branch-outcome count summed over every class so far. */
+    br_val: u64
+}
+
+/**
+ * One rendered class plus the tallies it contributed — the return of `cov_render_class`, so the
+ * caller both grows the body buffer and folds the class's line/branch counts into the aggregate
+ * from a single computation of the walk.
+ */
+type CovClassRender = struct {
+    /** the body buffer with this class's `<class>` block appended. */
+    body: []byte
+    /** the class's line tally (cov = hit lines, val = total lines). */
+    lt: CovCount
+    /** the class's branch tally (cov = taken outcomes, val = total outcomes). */
+    bt: CovCount
+}
+
+/**
+ * A coverage count — covered / valid (numerator / denominator) for one metric. `cov_pct` rounds
+ * DOWN; an empty denominator is vacuously 100% (no code → nothing to cover).
+ */
+type CovCount = struct {
+    /**
+     * The covered count (numerator).
+     */
+    cov: u64
+    /**
+     * The valid/total count (denominator).
+     */
+    val: u64
+}
+
+/**
+ * SiteFn — ONE production function's coverage identity, frozen at build time so the report stage can
+ * render its Cobertura `<class>` and tally its floors WITHOUT the typed program. It is exactly the
+ * subset of `checker::TFunction` the coverage renderer reads (`fn_idx`, namespace, name, file,
+ * `fn_line`) plus the `CovWalk` the build stage already computed by walking the body — the AST-walk
+ * the report used to redo after re-checking the whole compiler (the ~3 GB peak C4 removes).
+ *
+ * @since 0.3.1
+ */
+type SiteFn = struct {
+    /** the program-item index of the function — the coverage sink key the native run marked by. */
+    fn_idx: u64
+    /** the function's namespace ("" when it has none). */
+    namespace: str
+    /** the function's bare name. */
+    name: str
+    /** the source file the function lives in (the class's `filename`). */
+    file: str
+    /** the function's own 1-based source line (the method's single `<line>` element). */
+    fn_line: u32
+    /** the branch sites and distinct executable lines the build stage walked from the body. */
+    walk: CovWalk
+}
+
+/**
+ * SiteMap — the whole build's serialized coverage site-map: one `SiteFn` per production function, in
+ * program-item order. Emitted by the build stage next to the gate binary and read by the report
+ * stage, which then renders coverage by JOINING this table against the merged `.tkcov` sink — never
+ * re-parsing or re-checking the source. The join reproduces the AST-walk report byte for byte
+ * because every `SiteFn` carries the same `fn_idx`, identity fields and `CovWalk` in the same order.
+ *
+ * @since 0.3.1
+ */
+exp type SiteMap = struct {
+    /** the production functions, in program-item order (the render/tally iteration order). */
+    fns: []SiteFn
+    /** the D4 ARITH-CAST-RATE denominator the build measured (arith/assignment expressions visited). */
+    arith_total: u64
+    /** the D4 ARITH-CAST-RATE numerator the build measured (of those, how many carried a conversion). */
+    arith_with_conversion: u64
+}
+
+/**
+ * SmScan — one decoded unsigned integer plus the cursor position just past its last digit, the
+ * return of `sm_uint` so the site-map parser threads a position through the blob without a mutable
+ * out-parameter.
+ */
+type SmScan = struct {
+    /** the decoded value. */
+    v: u64
+    /** the byte offset immediately after the value's last digit. */
+    pos: u64
+}
+
+/**
+ * SmFnParse — one parsed `SiteFn` plus the cursor position just past its record, the return of
+ * `sm_parse_fn`.
+ */
+type SmFnParse = struct {
+    /** the parsed production-function coverage identity. */
+    sf: SiteFn
+    /** the byte offset immediately after this record. */
+    pos: u64
+}
+
