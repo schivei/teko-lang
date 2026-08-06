@@ -1,0 +1,264 @@
+/**
+ * TkrArtifact — the outcome of resolving ONE lowered scenario's build artifact
+ * (`tkr_ensure_artifact`): the captured compile outcome, the path to the binary it runs (when the
+ * compile succeeded), and the (possibly newly-populated) shared project `RegrBuilt` cache threaded
+ * back for the caller's next row/scenario.
+ *
+ * @since 0.3.1
+ */
+type TkrArtifact = struct {
+    /** the captured build outcome for this row (inline/file/dependency/in-place fresh, or the shared project build). */
+    comp: CapResult
+    /** the path to the binary this row runs (meaningful when `comp.exit == 0`). */
+    binp: str
+    /** the (possibly newly-built) shared project cache, threaded back for the next scenario/row. */
+    built: RegrBuilt
+    /**
+     * did THIS row actually pay for a compile? False when the artifact came from the shared project
+     * cache (`RegrBuilt.done` — a second/third row of the same project `.tkr`), in which case
+     * `comp` is the FIRST row's captured outcome, replayed. The measurement must not re-count it:
+     * the grouped-row path already states the law ("counting it again per member would report a
+     * build count the run never performed"), and the shared project cache is the same situation —
+     * one build, N rows.
+     */
+    fresh: bool
+}
+
+/**
+ * tkr_artifact_fail — a `TkrArtifact` describing a resolution failure (a guard rejection, a
+ * provisioning/copy error) with `msg`, `built` threaded through unchanged.
+ *
+ * @param msg    the failure description (surfaces as `comp.stderr`)
+ * @param built  the shared project cache to thread through unchanged
+ * @return       a failing artifact
+ * @since 0.3.1
+ */
+fn tkr_artifact_fail(msg: str, built: RegrBuilt) -> TkrArtifact {
+    TkrArtifact { comp = cap_synthetic(1, msg); binp = ""; built = built; fresh = false }
+}
+
+/**
+ * tkr_ensure_artifact — resolve ONE lowered scenario's build artifact, dispatching on its declared
+ * source: an inline snippet (`compile_inline_source`) or an explicit standalone file
+ * (`compile_standalone_source`) each compile their OWN artifact, never touching the shared project
+ * cache; a `Background: Given dependency` scenario provisions a SCRATCH consumer copy
+ * (`copy_dir` + `provision_dependency`) and compiles THAT (cached per `.tkr` file, since the
+ * dependency provisioning is shared across a feature's rows); a `When built in place` scenario
+ * compiles the project CWD-relative (`compile_in_place`, also cached); anything else falls back to
+ * the ordinary shared project build (`tkr_ensure_built`). `guard_no_project_build_at_root` runs
+ * first, refusing a root-scoped scenario with no inline/explicit source before any of the above.
+ *
+ * @param exe       the absolute path to this compiler binary (gen1)
+ * @param regr_dir  the regressor project directory
+ * @param t         the lowered scenario
+ * @param prefix    the scratch-file prefix for this row
+ * @param built     the shared project cache so far
+ * @return          the resolved artifact (compile outcome, binary path, updated cache)
+ * @since 0.3.1
+ */
+fn tkr_ensure_artifact(exe: str, regr_dir: str, t: Tkr, prefix: str, built: RegrBuilt) -> TkrArtifact {
+    match guard_no_project_build_at_root(regr_dir, t) { error as e => return tkr_artifact_fail(e.message, built); null => { } }
+    if t.source_inline.len > 0 {
+        let comp = compile_inline_source(exe, t.source_inline, with_regr_cov_env(t.env, prefix), prefix)
+        return TkrArtifact { comp = comp; binp = artifact_path_for_target(snippet_project_binp(prefix), t.target); built = built; fresh = true }
+    }
+    if t.source_file.len > 0 {
+        return tkr_standalone_artifact(exe, regr_dir ~ "/" ~ t.source_file, t, prefix, built)
+    }
+    if t.dep_dir.len > 0 {
+        if regr_built_serves(built, RegrBuildKind::Dependency) { return TkrArtifact { comp = built.comp; binp = built.binp; built = built; fresh = false } }
+        let scratch_consumer = prefix ~ ".consumer"
+        match copy_dir(regr_dir, scratch_consumer) { error as e => return tkr_artifact_fail(e.message, built); null => { } }
+        match provision_dependency(exe, regr_dir ~ "/" ~ t.dep_dir, scratch_consumer ~ "/packages", prefix ~ ".dep") {
+            error as e => return tkr_artifact_fail(e.message, built)
+            str => { }
+        }
+        let comp = compile_regressive(exe, scratch_consumer, with_regr_cov_env(t.env, prefix ~ ".compile"), prefix ~ ".compile")
+        let name = match regressive_name(scratch_consumer) { str as s => s; error => "" }
+        let nb = RegrBuilt { done = true; kind = RegrBuildKind::Dependency; comp = comp; binp = artifact_path_for_target(scratch_consumer ~ "/bin/" ~ name, t.target); srcs = built.srcs }
+        return TkrArtifact { comp = nb.comp; binp = nb.binp; built = nb; fresh = true }
+    }
+    if t.in_place {
+        if regr_built_serves(built, RegrBuildKind::InPlace) { return TkrArtifact { comp = built.comp; binp = built.binp; built = built; fresh = false } }
+        let comp = compile_in_place(exe, regr_dir, with_regr_cov_env(t.env, prefix ~ ".compile"), prefix ~ ".compile")
+        let name = match regressive_name(regr_dir) { str as s => s; error => "" }
+        let nb = RegrBuilt { done = true; kind = RegrBuildKind::InPlace; comp = comp; binp = artifact_path_for_target(regr_dir ~ "/bin/" ~ name, t.target); srcs = built.srcs }
+        return TkrArtifact { comp = nb.comp; binp = nb.binp; built = nb; fresh = true }
+    }
+    let fresh = !regr_built_serves(built, RegrBuildKind::Project)
+    let nb = tkr_ensure_built(exe, regr_dir, with_regr_cov_env(t.env, prefix), prefix, built)
+    TkrArtifact { comp = nb.comp; binp = artifact_path_for_target(nb.binp, t.target); built = nb; fresh = fresh }
+}
+
+/**
+ * tkr_row_run_verdict — the RUN half of one row's verdict: execute the built binary under the
+ * scenario's `env`/`stdin`/`args` and check it via
+ * `check_run` — UNLESS the row's target is a CROSS target this host cannot exec, in which case the
+ * run is honestly SKIPPED carrying the build's own emitted-not-run note (`cross_note_for_name`,
+ *
+ * THE BINARY RUNS WITH ITS CWD IN ITS OWN SCRATCH (`<prefix>.cwd/`), not in the repository root.
+ * Any fixture that writes a RELATIVE path — the natural way to write a file-IO scenario — used to
+ * land that file in the working tree, where it survived the run and dirtied `git status`; the
+ * fixture then had to know where it was and clean up after itself, which is a workaround for the
+ * runner's own choice, not a property of the scenario. Running in a per-row scratch kills the whole
+ * class. Everything the runner hands the shell across that `cd` is ABSOLUTIZED here: the binary
+ * (`argv[0]`) and the capture-file prefix, whose `.in`/`.out`/`.err` redirections are evaluated by
+ * the shell AFTER the `cd` (the same rule `compile_in_place` already documents). The leaf-tool
+ * checks keep the runner-relative `binp` — they run in the runner's own process, not the child's.
+ * project.tks — the single source of truth C5 gave the build; the runner does not keep a second
+ * one). Deliberately `regr_skip` and NOT `tool_skip_or_fail`:
+ * `REGRESSION_REQUIRE_TOOLS` is fail-closed for a capability a lane can PROVISION, and no
+ * provisioning makes a host exec a foreign-format binary — this skip is a property of the target,
+ * not a gap in the lane.
+ *
+ * @param t       the lowered scenario
+ * @param binp    the built binary path
+ * @param prefix  the scratch-file prefix for this run
+ * @return        the run verdict, or the honest emitted-not-run skip
+ * @since 0.3.1
+ */
+fn tkr_row_run_verdict(t: Tkr, binp: str, prefix: str) -> RowVerdict {
+    if t.kind == TkrKind::EmitOnly { return emit_only_row_verdict() }
+    let cross = cross_note_for_name(t.target)
+    if cross.is_cross { return RowVerdict { outcome = regr_skip(cross.note); harness_ns = 0; run_ns = 0 } }
+    let cwd = match teko::env::cwd() { str as c => c; error => "" }
+    let rundir = prefix ~ ".cwd"
+    match mkdir_p(teko::str::concat(rundir, "/")) { error => { }; null => { } }
+    let argv = argv_with_args(abs_path_of(binp, cwd), t.args)
+    let run = run_captured_in_dir(argv, t.stdin, t.env, rundir, abs_path_of(prefix, cwd))
+    RowVerdict { outcome = check_run(t, HOST_TARGET, run); harness_ns = run.harness_ns; run_ns = run.child_ns }
+}
+
+/**
+ * emit_only_row_verdict — the verdict of a `When built` row: the row CLAIMS THE ARTEFACT, NOT THE
+ * RUN, so not running it leaves nothing unverified and the verdict is a PASS. Owner ruling
+ * 2026-07-28: *"vale incrementar o que o regressor faz (ensinar), é necessidade real."*
+ *
+ * NOT A SKIP, and the difference is the whole reason this exists. A skip says "nobody knows whether
+ * that construct works"; an `EmitOnly` row asserted the emitted object and had that assertion
+ * CHECKED (`Then object well-formed`, applied by the caller in the runner's own process). Reporting
+ * it as skipped told `no_skips_gate.sh` a claim was outstanding when none was — and the gate was
+ * right to fail on that, which is why the fix belongs HERE and not in the gate.
+ *
+ * It is consulted BEFORE the cross branch on purpose: an `EmitOnly` row never runs, on any host, so
+ * whether the target happens to be cross is irrelevant to its verdict.
+ *
+ * @return the unconditional pass an emitted-only row earns
+ * @since 0.3.1
+ */
+fn emit_only_row_verdict() -> RowVerdict {
+    RowVerdict { outcome = regr_pass(); harness_ns = 0; run_ns = 0 }
+}
+
+/**
+ * RowVerdict — one row's RUN verdict plus the measurement of that run: the harness time around the
+ * child and the time inside it. Separate from `RegrOutcome` so the verdict type stays about the
+ * verdict and never carries observability into the gate logic.
+ *
+ * @since 0.3.1
+ */
+type RowVerdict = struct {
+    /** the run's verdict (pass, honest skip, or failure). */
+    outcome: RegrOutcome
+    /** ns spent on scratch/plumbing around the run. */
+    harness_ns: i64
+    /** ns spent inside the built binary. */
+    run_ns: i64
+}
+
+/**
+ * tkr_run_one_row — run and check ONE lowered scenario against its already-resolved binary `binp`:
+ * take the run verdict (`tkr_row_run_verdict` — which honest-skips the run itself for a cross
+ * target), then apply any declared leaf-tool check (`Then object well-formed`) on top. The
+ * leaf check runs even when the RUN was skipped: a cross row's whole point is that its EMITTED
+ * object is well-formed for the target, which is checkable on this host even though the binary is not
+ * runnable here.
+ *
+ * @param t       the lowered scenario
+ * @param binp    the built binary path
+ * @param prefix  the scratch-file prefix for this run
+ * @return        the aggregate verdict (the first failure, else pass/skip), carrying the leaf-tool
+ *                 checks' own skip tally
+ * @since 0.3.1
+ */
+fn tkr_run_one_row(t: Tkr, binp: str, prefix: str) -> RowVerdict {
+    let rv = tkr_row_run_verdict(t, binp, prefix)
+    if !rv.outcome.ok { return rv }
+    mut skips: u64 = 0
+    if t.check_wellformed {
+        let wf = check_object_wellformed(sibling_object_path(binp, row_artifact_target(t.target)), tkr_effective_target(t.target))
+        if !wf.ok && !wf.skipped { return RowVerdict { outcome = wf; harness_ns = rv.harness_ns; run_ns = rv.run_ns } }
+        skips = skips + wf.skips
+    }
+    RowVerdict { outcome = regr_add_skips(rv.outcome, skips); harness_ns = rv.harness_ns; run_ns = rv.run_ns }
+}
+
+/**
+ * FeatureRunResult — the outcome of running one feature's RUN scenarios (`tkr_run_scenarios`): the
+ * aggregate verdict plus the (possibly newly-populated) shared project `RegrBuilt` cache threaded
+ * back to the caller (`run_one_tkr`) for the NEXT feature in the same `.tkr` file.
+ *
+ * @since 0.3.1
+ */
+type FeatureRunResult = struct {
+    /** the aggregate verdict across the feature's scenarios (the first failure, else pass). */
+    outcome: RegrOutcome
+    /** the shared project cache, possibly newly built by this feature's scenarios. */
+    built: RegrBuilt
+    /** every row this feature measured, in run order (observability only — `regr_timing.tks`). */
+    rows: []RowTiming
+}
+
+/**
+ * TkrRowRun — the outcome of running ONE expanded `Examples` row (`tkr_run_row`): that row's
+ * verdict plus the shared project `RegrBuilt` cache as the row left it, threaded to the next row.
+ * Distinct from `FeatureRunResult` (whose verdict spans a whole feature) so neither name lies about
+ * the scope of the verdict it carries.
+ *
+ * @since 0.3.1
+ */
+type TkrRowRun = struct {
+    /** the row's verdict: a capability skip, a pass carrying its leaf-tool skips, or a failure. */
+    outcome: RegrOutcome
+    /** the shared project cache, possibly newly built by this row. */
+    built: RegrBuilt
+    /** the row's three-phase measurement (observability only — `regr_timing.tks`). */
+    times: PhaseTimes
+}
+
+/**
+ * tkr_run_row — build and check ONE expanded scenario row. The row is honest-SKIPPED BEFORE any
+ * build when this host lacks a capability the row needs (`tkr_row_capability_skip_reason`) —
+ * probing after the build would let a missing cross-linker surface as an indistinguishable `cc`
+ * failure — else the artifact is resolved (`tkr_ensure_artifact`) and checked (`tkr_run_one_row`).
+ *
+ * @param exe       the absolute path to this compiler binary
+ * @param regr_dir  the regressor project directory
+ * @param t         the lowered row
+ * @param prefix    the scratch-file prefix for this row
+ * @param built     the shared project cache so far
+ * @param groups    the grouped builds this run made before any scenario started
+ * @return          the row's verdict plus the (possibly updated) shared cache
+ * @since 0.3.1
+ */
+fn tkr_run_row(exe: str, regr_dir: str, t: Tkr, prefix: str, built: RegrBuilt, groups: RegrGroups) -> TkrRowRun {
+    let missing = tkr_row_capability_skip_reason(t)
+    if missing.len > 0 { return TkrRowRun { outcome = tool_skip_or_fail(missing); built = built; times = phase_zero() } }
+    match regr_group_slot(groups, prefix) {
+        RegrGroupSlot as slot => return tkr_run_grouped_row(t, slot, prefix, built)
+        null => { }
+    }
+    let art = tkr_ensure_artifact(exe, regr_dir, t, prefix, built)
+    let build_times = if art.fresh {
+        PhaseTimes { harness_ns = art.comp.harness_ns; compile_ns = art.comp.child_ns; run_ns = 0; builds = 1 }
+    } else {
+        phase_zero()
+    }
+    if art.comp.exit != 0 {
+        return TkrRowRun { outcome = regr_fail(compile_failure_message(art.comp)); built = art.built; times = build_times }
+    }
+    let rv = tkr_run_one_row(t, art.binp, prefix ~ ".run")
+    let run_times = PhaseTimes { harness_ns = rv.harness_ns; compile_ns = 0; run_ns = rv.run_ns; builds = 0 }
+    TkrRowRun { outcome = rv.outcome; built = art.built; times = phase_add(build_times, run_times) }
+}
+

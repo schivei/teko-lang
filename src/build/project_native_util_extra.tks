@@ -1,0 +1,45 @@
+/**
+ * copy_ldata_relocs_to_current_region — `copy_ldata_reloc_to_current_region` applied to every
+ * entry of `relocs`, in order.
+ *
+ * @param relocs  the rodata-internal relocations to copy
+ * @return        `relocs`, each entry resident in the current region
+ * @since 0.3.1 C6.2
+ */
+fn copy_ldata_relocs_to_current_region(relocs: []teko::lir::LDataReloc) -> []teko::lir::LDataReloc {
+    mut out: []teko::lir::LDataReloc = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= relocs.len { break }
+        out = teko::list::push(out, copy_ldata_reloc_to_current_region(relocs[i]))
+        i++
+    }
+    out
+}
+
+/**
+ * copy_lrodata_to_current_region — one `LRodata` entry with `symbol`, `bytes` and `relocs` all
+ * force-copied to the current region (E4): a literal's symbol may have been SYNTHESIZED inside the
+ * item's own scratch region (`str::concat`/`rodata_symbol`), so — like a reloc's `sym` (E1,
+ * extended) — it cannot be assumed to already reside in `prog`/the root the way Tier 1's
+ * whole-program-lowered-first symbols could.
+ *
+ * @param r  the rodata entry to copy
+ * @return   `r` with every field resident in the current region
+ * @since 0.3.1 C6.2
+ *
+ * (0.3.1 C6.3-fix, arm64 native-fixpoint SIGSEGV) The macOS-arm64 native fixpoint gate's symbolized
+ * backtrace traced a SIGSEGV inside `tk_region_alloc`, reached through this function's `bytes` copy
+ * (`copy_bytes_to_current_region`) while the struct literal below built all THREE fields inline —
+ * the one call site among this crumb's copy-helpers with three sibling allocating calls, one of
+ * them (`bytes`) itself looping. The enter/leave/commit/drop region lifecycle around every caller
+ * of this function was re-verified by reading (`emit_native_x86`/`fuse_lower_item_x86` and the
+ * arm64/win twins): `commit_rodata_delta` — hence this function — always runs strictly AFTER
+ * `region_leave()` (current region = root) and strictly BEFORE the matching `region_drop` (the
+ * item's region, holding `r`'s bytes, is still alive to copy FROM), matching the Tier-1-proven
+ * `fold_lfunc_scoped_x86` window exactly; no ordering defect was found there. This edit is the
+ * defensive counterpart: each field is computed into its OWN `let` BEFORE the struct literal is
+ * built, instead of three allocating calls evaluated inline as sibling field initializers — the one
+ * structural difference from every OTHER copy-helper here that did NOT appear in the trace.
+ * Behaviorally identical (same values, same region, same order of the copies actually needed); if
+ * the crash persists after this, the next suspect is native codegen for this call shape on arm64

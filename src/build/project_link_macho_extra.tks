@@ -1,0 +1,56 @@
+/**
+ * link_object_elf_direct — the linux ELF native link WITHOUT the `cc` driver, arch-parameterized by
+ * `spec` so linux/x86-64 and linux/arm64 share ONE path: compile the two C runtime seeds to objects
+ * (`compile_runtime_objects`, the one flagged C dependency), resolve the OS linker
+ * (`resolve_linker(spec.arch, Elf)` → `ld.lld`/`ld`), and invoke it DIRECTLY with the CRT startup
+ * objects, the `spec`'s dynamic-linker path, `libc`/`libm`, the own-backend object, and the
+ * extern-reachable `[extern.libs]` link flags — the exact set the `cc` driver used to inject, now
+ * the compiler's own explicit choice. The `-m` emulation comes from `gnu_emulation_for(spec.arch,
+ * Elf)` (`elf_x86_64` / `aarch64linux`), so a wrong-arch object cannot slip through. Produces a PIE,
+ * matching the transitional link's output shape (`clang` defaults a linux executable to `-pie`).
+ *
+ * @param objfile  the own-backend ELF `.o`
+ * @param binary   the output native executable path
+ * @param m        the resolved manifest
+ * @param prog     the checked program (extern-reachability + assert seed)
+ * @param spec     the arch spec (dynamic linker + CRT dirs) for this ELF machine
+ * @return         0 on a successful compile+link, else a NAMED failing status
+ * @since 0.3.1.0 (de-C native link, arch-parameterized ELF leg)
+ */
+fn link_object_elf_direct(objfile: str, binary: str, m: Manifest, prog: checker::TProgram, spec: ElfLinkSpec) -> i32 {
+    let objs = match compile_runtime_objects(binary, m, prog) { RuntimeObjects as o => o; error as e => return fail("", e.message) }
+    let ld = match resolve_linker(spec.arch, LinkFormat::Elf) { str as s => s; error as e => return fail("", e.message) }
+    let crt = match elf_crt_dir(spec) { str as d => d; error as e => return fail("", e.message) }
+    mut argv: []str = teko::list::empty()
+    argv = teko::list::push(argv, ld)
+    argv = teko::list::push(argv, "-pie")
+    argv = teko::list::push(argv, "--eh-frame-hdr")
+    argv = teko::list::push(argv, "-m")
+    argv = teko::list::push(argv, gnu_emulation_for(spec.arch, LinkFormat::Elf))
+    argv = teko::list::push(argv, "-dynamic-linker")
+    argv = teko::list::push(argv, spec.dynamic_linker)
+    argv = teko::list::push(argv, teko::str::concat(crt, "/Scrt1.o"))
+    argv = teko::list::push(argv, teko::str::concat(crt, "/crti.o"))
+    argv = teko::list::push(argv, objfile)
+    argv = teko::list::push(argv, objs.rt_obj)
+    argv = teko::list::push(argv, objs.assert_obj)
+    argv = teko::list::push(argv, "-L")
+    argv = teko::list::push(argv, crt)
+    argv = teko::list::push(argv, "-lc")
+    let keys = link_target_keys(m)
+    argv = append_libm_flag(argv, m, keys.emit_os)
+    let reachable = reachable_libs(prog)
+    argv = append_reachable_link_flags(argv, m, reachable)
+    argv = append_reachable_os_lib_flags(argv, m, keys, reachable)
+    argv = teko::list::push(argv, teko::str::concat(crt, "/crtn.o"))
+    argv = teko::list::push(argv, "-o")
+    argv = teko::list::push(argv, binary)
+    run_direct_link(argv)
+}
+
+/**
+ * MACHO_MIN_OS_VERSION — the minimum macOS version a Mach-O this build emits declares in its
+ * `LC_BUILD_VERSION` load command. arm64 macOS begins at 11.0, so 11.0.0 is the floor `clang -###`
+ * pins on an Apple-silicon host (`-platform_version macos 11.0.0 <sdk>`); the compiler names it by
+ * hand now that the LINK is the OS linker rather than the driver.
+ */
