@@ -1,0 +1,227 @@
+// src/checker/consteval_test_b.tkt  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+ */
+fn c_var(name: str, t: Type) -> TExpr { te(TVar { name = name; is_func = false; func_ns = "teko::backend" }, t) }
+
+/**
+ * c_member — an enum member reference typed expression (`MRegClass::GPR`), a Tier-3 const leaf.
+ *
+ * @param enum_name  the enum type's name
+ * @param member     the member's name
+ * @param ordinal    the member's declared index (its runtime value)
+ * @return           the typed path expression
+ */
+fn c_member(enum_name: str, member: str, ordinal: u64) -> TExpr {
+    te(TPathExpr { enum_name = enum_name; member = member; ordinal = ordinal; value = ordinal }, Named { name = enum_name })
+}
+
+/**
+ * preg_body — the struct literal `preg`'s body builds: `MReg { id = id; reg_class = reg_class;
+ * is_phys = true }` — two parameter references and one literal.
+ *
+ * @return the constructor body's struct literal
+ */
+fn preg_body() -> TExpr {
+    mut names: []str = teko::list::push(teko::list::empty(), "id")
+    names = teko::list::push(names, "reg_class")
+    names = teko::list::push(names, "is_phys")
+    mut vals: []TExpr = teko::list::push(teko::list::empty(), c_var("id", i64t()))
+    vals = teko::list::push(vals, c_var("reg_class", Named { name = "MRegClass" }))
+    vals = teko::list::push(vals, te(TBoolLit { value = true }, boolt()))
+    te(TStructInit { field_names = names; field_vals = vals }, mregt())
+}
+
+/**
+ * c_ctor_fn — a struct-constructor TFunction named `name` in namespace `ns`, with parameters `id` and
+ * `reg_class` and a one-statement body returning `preg_body()`: the exact shape of `teko::backend`'s
+ * `preg`, the constructor the backends' five `MReg` consts are initialized by.
+ *
+ * @param name  the constructor's name
+ * @param ns    the constructor's declaring namespace
+ * @return      the typed constructor function
+ */
+fn c_ctor_fn(name: str, ns: str) -> TFunction {
+    mut ps: []parser::Param = teko::list::push(teko::list::empty(), c_param("id", "u32"))
+    ps = teko::list::push(ps, c_param("reg_class", "MRegClass"))
+    let body: []TStatement = teko::list::push(teko::list::empty(), c_ret(preg_body()))
+    TFunction { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = ps; return_type = mregt(); body = body; vis = parser::Visibility::Pub; has_doc = false; doc = ""; namespace = ns; file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = false; arena_size = 0 to u64 }
+}
+
+/**
+ * preg_ctors — the constructor table holding one `teko::backend::preg`.
+ *
+ * @return the single-entry struct-constructor table
+ */
+fn preg_ctors() -> []TFunction { teko::list::push(teko::list::empty(), c_ctor_fn("preg", "teko::backend")) }
+
+/**
+ * preg_call — the const initializer `preg(<id>, MRegClass::GPR)` as the checker types it and the fold
+ * leaves it: a call whose arguments are already collapsed literals.
+ *
+ * @param id  the physical register number the call passes
+ * @param ns  the namespace the checker resolved the call to
+ * @return    the typed call expression
+ */
+fn preg_call(id: u64, ns: str) -> TExpr {
+    mut args: []TExpr = teko::list::push(teko::list::empty(), c_num(id))
+    args = teko::list::push(args, c_member("MRegClass", "GPR", 0))
+    te(TCall { callee = path1("preg"); args = args; call_ns = ns; is_closure_call = false; callee_type = Void { }; is_iface_dispatch = false; iface_slot = 0 }, mregt())
+}
+
+/**
+ * struct_init_of — the struct literal `e` carries, asserting that it IS one (the canonicalization's
+ * whole contract).
+ *
+ * @param e  the canonicalized initializer
+ * @return   the struct literal it carries (an empty literal when the assertion fails)
+ */
+fn struct_init_of(e: TExpr) -> TStructInit {
+    match e.kind {
+        TStructInit as si => si
+        _ => {
+            teko::assert::is_true(false)
+            TStructInit { field_names = teko::list::empty(); field_vals = teko::list::empty() }
+        }
+    }
+}
+
+/**
+ * num_mag_of — the magnitude of a number-literal typed expression, for asserting that a spliced
+ * argument is exactly the one the fold produced.
+ *
+ * @param e  the typed expression that must be a number literal
+ * @return   the literal's magnitude (0 when the assertion fails)
+ */
+fn num_mag_of(e: TExpr) -> u64 {
+    match e.kind {
+        TNumber as n => n.value.mag
+        _ => {
+            teko::assert::is_true(false)
+            0 to u64
+        }
+    }
+}
+
+/**
+ * is_call — whether `e` is still an un-canonicalized call.
+ *
+ * @param e  the canonicalized expression
+ * @return   whether its kind is `TCall`
+ */
+fn is_call(e: TExpr) -> bool {
+    match e.kind {
+        TCall => true
+        _ => false
+    }
+}
+
+/**
+ * canon_preg_call_becomes_struct_literal — a const initialized by the comptime constructor call
+ * `preg(7, MRegClass::GPR)` canonicalizes to the struct literal `preg`'s own body builds, with the
+ * SAME field names in the SAME order.
+ */
+#test
+fn canon_preg_call_becomes_struct_literal() {
+    let si = struct_init_of(canonicalize_const_ctors(preg_call(7, "teko::backend"), preg_ctors()))
+    teko::assert::is_true(si.field_names.len == 3)
+    teko::assert::is_true(si.field_names[0] == "id")
+    teko::assert::is_true(si.field_names[1] == "reg_class")
+    teko::assert::is_true(si.field_names[2] == "is_phys")
+}
+
+/**
+ * canon_preg_call_preserves_the_folded_value — the canonical literal's field values are EXACTLY the
+ * ones `preg` would have returned: each parameter reference becomes the argument the fold produced
+ * (id = 7, reg_class = MRegClass::GPR) and the body's own literal survives (is_phys = true). A const
+ * whose value drifted here would be a silent miscompilation inside the register allocator.
+ */
+#test
+fn canon_preg_call_preserves_the_folded_value() {
+    let si = struct_init_of(canonicalize_const_ctors(preg_call(7, "teko::backend"), preg_ctors()))
+    teko::assert::is_true(num_mag_of(si.field_vals[0]) == 7)
+    match si.field_vals[1].kind {
+        TPathExpr as p => {
+            teko::assert::is_true(p.enum_name == "MRegClass")
+            teko::assert::is_true(p.member == "GPR")
+        }
+        _ => teko::assert::is_true(false)
+    }
+    match si.field_vals[2].kind {
+        TBoolLit as b => teko::assert::is_true(b.value)
+        _ => teko::assert::is_true(false)
+    }
+}
+
+/**
+ * canon_preg_call_keeps_the_declared_type — the canonical literal is typed as the CALL was (`MReg`),
+ * so the rodata materializer resolves the same struct layout the const declares.
+ */
+#test
+fn canon_preg_call_keeps_the_declared_type() {
+    let out = canonicalize_const_ctors(preg_call(1, "teko::backend"), preg_ctors())
+    teko::assert::is_true(type_eq(out.type, mregt()))
+}
+
+/**
+ * canon_reaches_inside_an_array_literal — an array const whose elements are constructor calls
+ * canonicalizes element-wise, so `[preg(0, GPR), preg(1, GPR)]` becomes an array of struct literals.
+ */
+#test
+fn canon_reaches_inside_an_array_literal() {
+    mut elems: []TArrayElem = teko::list::push(teko::list::empty(), TArrayElem { is_spread = false; expr = preg_call(0, "teko::backend") })
+    elems = teko::list::push(elems, TArrayElem { is_spread = false; expr = preg_call(1, "teko::backend") })
+    let arr = te(TArrayLit { elements = elems }, Slice { element = mregt() })
+    match canonicalize_const_ctors(arr, preg_ctors()).kind {
+        TArrayLit as a => {
+            teko::assert::is_true(num_mag_of(struct_init_of(a.elements[0].expr).field_vals[0]) == 0)
+            teko::assert::is_true(num_mag_of(struct_init_of(a.elements[1].expr).field_vals[0]) == 1)
+        }
+        _ => teko::assert::is_true(false)
+    }
+}
+
+/**
+ * canon_leaves_a_non_struct_constructor_alone — `teko::f64_from_bits` is allowlisted in a const
+ * initializer but returns a float, so no struct constructor resolves and the call survives untouched.
+ */
+#test
+fn canon_leaves_a_non_struct_constructor_alone() {
+    let bits: []TExpr = teko::list::push(teko::list::empty(), c_num(0))
+    let call = a_call(path2("teko", "f64_from_bits"), bits, f64t())
+    teko::assert::is_true(is_call(canonicalize_const_ctors(call, preg_ctors())))
+}
+
+/**
+ * canon_refuses_an_ambiguous_constructor — two same-named constructors in different namespaces plus a
+ * call the checker did not namespace resolve to nothing: guessing would splice a foreign body and
+ * silently change the const's value, so the call is left for lowering's honest-stop to name.
+ */
+#test
+fn canon_refuses_an_ambiguous_constructor() {
+    mut ctors: []TFunction = teko::list::push(teko::list::empty(), c_ctor_fn("preg", "teko::backend"))
+    ctors = teko::list::push(ctors, c_ctor_fn("preg", "app::other"))
+    teko::assert::is_true(is_call(canonicalize_const_ctors(preg_call(3, ""), ctors)))
+}
+
+/**
+ * canon_ignores_a_function_that_is_not_a_constructor — a callee whose body is not a single struct
+ * literal is never spliced: `collect_const_ctors` does not even record it.
+ */
+#test
+fn canon_ignores_a_function_that_is_not_a_constructor() {
+    let plain: []TItem = teko::list::push(teko::list::empty(), c_fn("noise", teko::list::push(teko::list::empty(), c_ret(c_num(1)))))
+    teko::assert::is_true(collect_const_ctors(plain).len == 0)
+}
+
+/**
+ * collect_const_ctors_records_the_struct_constructor — a function whose whole body returns a struct
+ * literal IS recorded, which is what makes `preg` resolvable at canonicalization time.
+ */
+#test
+fn collect_const_ctors_records_the_struct_constructor() {
+    let items: []TItem = teko::list::push(teko::list::empty(), c_ctor_fn("preg", "teko::backend"))
+    teko::assert::is_true(collect_const_ctors(items).len == 1)
+}

@@ -1,0 +1,206 @@
+// src/checker/rv_rv_gen.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+    }
+    error { message = $"unknown type: {name}" }
+}
+
+// A NAMED type referring to a `variant` decl → its expanded Variant. A variant decl's body IS
+// a union type-expr (A | B | …), so resolve_type on it yields the Variant with its members; the
+// members resolve to Named (resolve_named keeps user types nominal), so this terminates and does
+// NOT recurse into nested named variants. Anything else returns unchanged.
+fn expand_variant(t: Type, table: TypeTable) -> Type {
+    let name = match t {
+        Named as n => n.name
+        _ => return t   // not a named type → unchanged
+    }
+    let decl = match type_table_find(table, name, "") {   // (#109 W1) resolved-name probe, no referencing ns
+        parser::TypeDecl as td => td
+        error => return t   // not a user type → unchanged
+    }
+    match decl.body {
+        parser::VariantBody as vb => {
+            match resolve_type(vb.type_expr, table, type_ns_of(table, name)) {   // (#109 W2) variant body resolves in the variant's OWN ns (its members are written there)
+                Type as ex => ex   // the variant body's union → its Variant
+                error => t   // unresolvable → unchanged (honest fallback, like the C `ex.ok ? … : t`)
+            }
+        }
+        _ => t   // a struct/enum decl, not a variant → unchanged
+    }
+}
+
+/**
+ * ptr_widens_to_opaque — C7.19 OPAQUE-PTR DEGRADE: a typed `ptr<T>` (`from`) widens into the
+ * untyped opaque `ptr` (`to = Ptr{inner = null}`) — the reverse of `type_eq`'s `ptr_inner_eq`,
+ * which requires matching inners because it also backs strict overload/return checks. The
+ * transport-only builtin `bytes_from_ptr` takes the opaque `ptr` so ANY typed pointer (e.g.
+ * `teko::mem::buf_ptr`'s `ptr<byte>`) may flow in without a cast; a typed pointer never widens
+ * into a DIFFERENTLY typed one (no `ptr<byte>` -> `ptr<i32>`). `str_from_c`
+ * (c-types-and-marshalling-0.3.1.md §6, crumb C2) is deliberately NOT on the opaque-ptr list — it
+ * takes `ptr<byte>` directly (the design's own §5.3 rule for an address Teko reads octets from),
+ * so a caller with a `ptr<i32>` or the bare opaque `ptr` must convert explicitly rather than have
+ * the widen paper over a category mismatch.
+ */
+fn ptr_widens_to_opaque(from: Type, to: Type) -> bool {
+    match from {
+        Ptr => match to {
+            Ptr as tp => match tp.inner { null => true; Type => false }
+            _ => false
+        }
+        _ => false
+    }
+}
+
+// (#41-followon) Does a value of `from` WIDEN into `to`? The single source of truth for value-
+// position widening, shared by the return/trailing-value/assign/binding check (assignable_to
+// delegates here) and the match/`if` arm JOIN (type_join). Rules (B.14 + present-wrap §202):
+//   • type equality,
+//   • a VARIANT `from` iff EVERY member widens in (sub-variant → wider variant) — TRANSITIVE,
+//   • `T` into `T?` (and `U?`/sentinel into `T?`),
+//   • a variant MEMBER into the (named-expanded) variant — also transitive (a nested case).
+// Depth-bounded so a pathological self-referential variant cannot loop. (Mirror of resolve.c.)
+fn widens_into_at(from: Type, to: Type, table: TypeTable, depth: i64) -> bool {
+    if type_eq(from, to) { return true }
+    if depth <= 0 { return false }
+    if from_is_bare_null(from) && null_widens_into(to, table) { return true }
+    // PRESENT-WRAP first (before variant decomposition): a whole `T` (even a named variant like
+    // `TypeExpr`) wraps into `T?`. Checking this before the variant-from split keeps `TypeExpr →
+    // TypeExpr?` a single present-wrap, not a member-by-member (which would wrongly fail).
+    match to {
+        Optional as opt => {
+            if widens_into_at(from, opt.inner, table, depth - 1) { return true }   // T (or a case of T) → T?
+            match from { Optional => return true; _ => { } }   // U? / sentinel → T?
+        }
+        _ => { }
+    }
+    match expand_variant(from, table) {   // a VARIANT source decomposes into its members
+        Variant as fv => {
+            mut i = 0
+            loop {
+                if i >= fv.members.len { break }
+                if !widens_into_at(fv.members[i], to, table, depth - 1) { return false }
+                i++
+            }
+            return true
+        }
+        _ => { }
+    }
+    // COVARIANT value slices: `[]A` widens into `[]B` iff A widens into B (value/copy semantics —
+    // sound; a sentinel `Void` element is already accepted by type_eq above). `[]Str` fits `[]Type`.
+    match from {
+        Slice as fs => match to {
+            Slice as ts => return widens_into_at(fs.element, ts.element, table, depth - 1)
+            _ => { }
+        }
+        _ => { }
+    }
+    if ptr_widens_to_opaque(from, to) { return true }
+    // (W10b.D3) UPCAST — a CLASS instance widens into a contract (interface) it NOMINALLY
+    // conforms to: `let s: Shape = circle`. Classes only (reference semantics ride the object
+    // pointer into the fat-pointer `data` field); a STRUCT is pure value data — no stable
+    // address to dispatch on — so it does NOT widen (its conformance still serves `<T: I>`).
+    // (#98) A CLASS instance ALSO widens into an ANCESTOR class (`let a: Animal = dog`) — the
+    // Sub→Base upcast, reusing the SAME fat pointer (data + the base's virtual vtable). Nominal:
+    // `from` must be a (transitive) subclass of `to`, and `to` must be a polymorphic base
+    // (`abstract`/`virtual`) — a `sealed` class can never be a base, so it never widens into.
+    match from {
+        Named as fname => match to {
+            Named as tname => {
+                if is_class_name(fname.name, table) && (is_interface_name(tname.name, table) || is_trait_name(tname.name, table)) && type_conforms_to(fname.name, tname.name, table) { return true }
+                if fname.name != tname.name && is_class_name(fname.name, table) && is_polymorphic_base(tname.name, table) && subclass_reaches(fname.name, tname.name, table, 64) { return true }
+            }
+            _ => { }
+        }
+        _ => { }
+    }
+    match expand_variant(to, table) {   // a NAMED variant → its Variant (so cases widen in)
+        Variant as tv => {
+            mut j = 0
+            loop {
+                if j >= tv.members.len { break }
+                if widens_into_at(from, tv.members[j], table, depth - 1) { return true }
+                j++
+            }
+            false
+        }
+        _ => false
+    }
+}
+fn widens_into(from: Type, to: Type, table: TypeTable) -> bool { widens_into_at(from, to, table, 16) }
+
+/**
+ * Is `from` a bare `null` value — either the concrete `Null` type (null-as-union), or the legacy
+ * `Optional{Void}` bare-null sentinel that a `null` literal still carries in an optional context?
+ * Both denote the value `null`, so both widen into a union listing `null`.
+ *
+ * @param from  the source value type
+ * @return      true iff `from` is a bare `null` in either representation
+ */
+fn from_is_bare_null(from: Type) -> bool {
+    match from {
+        Null => true
+        Optional as o => match o.inner { Void => true; _ => false }
+        _ => false
+    }
+}
+
+/**
+ * null_widens_into — a bare `null` (type `Null`) is assignable into a target that is `Null` itself
+ * or a union (inline or named) listing `null` among its members (set membership, order-independent).
+ *
+ * @param target  the resolved destination type
+ * @param table   the type table (to expand a named-variant target)
+ * @return        true iff a `Null` value is assignable into `target`
+ */
+fn null_widens_into(target: Type, table: TypeTable) -> bool {
+    match target { Null => return true; _ => { } }
+    match expand_variant(target, table) {
+        Variant as v => {
+            mut i = 0
+            loop {
+                if i >= v.members.len { break }
+                match v.members[i] { Null => return true; _ => { } }
+                i++
+            }
+            false
+        }
+        _ => false
+    }
+}
+
+// ── (W10b.D3) nominal contract conformance — the interface-value upcast / constraint gates ──────
+// These live HERE (not collect.tks) because widens_into needs them and resolve sits below collect
+// in the module DAG. "Contract" wording: the mechanism is per-(type, contract) and agnostic to
+// which decl kind the contract came from (today `interface`; traits reuse it later).
+
+// is `name` declared as an interface? Mirror of resolve.c::tk_is_interface_name.
+pub fn is_interface_name(name: str, table: TypeTable) -> bool {
+    match type_table_find(table, name, "") {   // (#109 W1) kind probe on a resolved name — no referencing ns
+        parser::TypeDecl as td => match td.body { parser::InterfaceBody => true; _ => false }
+        error => false
+    }
+}
+
+// is `name` declared as a class? Mirror of resolve.c::tk_is_class_name.
+pub fn is_class_name(name: str, table: TypeTable) -> bool {
+    match type_table_find(table, name, "") {   // (#109 W1) kind probe on a resolved name — no referencing ns
+        parser::TypeDecl as td => match td.body { parser::ClassBody => true; _ => false }
+        error => false
+    }
+}
+
+/**
+ * is_struct_name — is `name` declared as a `struct` (a value type, no vtable)
+ * in the folded type table? The value-type twin of is_class_name/
+ * is_interface_name, used by the struct→interface honest-stop and by any
+ * value-vs-reference dispatch decision.
+ *
+ * @param name   a resolved (canonical or bare) type name
+ * @param table  the program's type table
+ * @return       true iff `name`'s TypeDecl body is a StructBody
+ * @see          is_class_name, is_interface_name
+ * @since 0.3.0.29 interface-value keystone
+ */
+pub fn is_struct_name(name: str, table: TypeTable) -> bool {

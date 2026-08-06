@@ -1,0 +1,269 @@
+// src/checker/spine_f.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+ * refs). Single-assignment (a local is the target of ≤ 1 binding); recurses into nested blocks so a
+ * ref-to-local inside a loop / adopter / if-match arm is not missed. Return-value threaded.
+ *
+ * @param []TStatement body  the typed statement block
+ * @param []Cell cells  the cell universe
+ * @param []BorrowedFrom bf  the borrowed-from axis so far
+ * @return []BorrowedFrom  the axis with this block's ref-to-local inheritances applied
+ */
+fn bf_transfer_block(body: []TStatement, cells: []Cell, bf: []BorrowedFrom) -> []BorrowedFrom {
+    mut acc = bf
+    mut i = 0
+    loop {
+        if i >= body.len { break }
+        acc = bf_transfer_stmt(body[i], cells, acc)
+        i++
+    }
+    acc
+}
+
+/**
+ * Descend the bf-inherit sweep into an expression's control-flow arm bodies (a value-position
+ * `if` / `match` carries a statement block per branch). Mirrors `transfer_expr`.
+ *
+ * @param TExpr e  the typed expression
+ * @param []Cell cells  the cell universe
+ * @param []BorrowedFrom bf  the borrowed-from axis so far
+ * @return []BorrowedFrom  the axis with the arm bodies' inheritances applied
+ */
+fn bf_transfer_expr(e: TExpr, cells: []Cell, bf: []BorrowedFrom) -> []BorrowedFrom {
+    match e.kind {
+        TIfExpr as f => bf_transfer_block(f.else_blk, cells, bf_transfer_block(f.then_blk, cells, bf))
+        TMatchExpr as m => bf_transfer_match(m, cells, bf)
+        _ => bf
+    }
+}
+
+/**
+ * The bf-inherit sweep over a match expression's arm bodies. Return-value threaded. Mirrors
+ * `transfer_match`.
+ *
+ * @param TMatchExpr m  the typed match expression
+ * @param []Cell cells  the cell universe
+ * @param []BorrowedFrom bf  the borrowed-from axis so far
+ * @return []BorrowedFrom  the axis with every arm body's inheritances applied
+ */
+fn bf_transfer_match(m: TMatchExpr, cells: []Cell, bf: []BorrowedFrom) -> []BorrowedFrom {
+    mut acc = bf
+    mut i = 0
+    loop {
+        if i >= m.arms.len { break }
+        acc = bf_transfer_block(m.arms[i].body, cells, acc)
+        i++
+    }
+    acc
+}
+
+/**
+ * The bf-inherit sweep for one statement. Only a `TBinding` inherits (writes `bf`); a `TAssign` never
+ * writes `bf` (the assign's borrowed-from is the single-assigned binding-time value the gate reads) —
+ * it only recurses into its value's arm bodies. Loop / defer / adopt bodies and if / match arms
+ * recurse so a nested ref-to-local is reached. Mirrors `transfer_stmt`.
+ *
+ * @param TStatement s  the typed statement
+ * @param []Cell cells  the cell universe
+ * @param []BorrowedFrom bf  the borrowed-from axis so far
+ * @return []BorrowedFrom  the axis with this statement's ref-to-local inheritance applied
+ */
+fn bf_transfer_stmt(s: TStatement, cells: []Cell, bf: []BorrowedFrom) -> []BorrowedFrom {
+    match s {
+        TBinding as b => bf_transfer_expr(b.value, cells, bf_transfer_binding(b, cells, bf))
+        TAssign as a => bf_transfer_expr(a.value, cells, bf)
+        TLoopStmt as l => bf_transfer_block(l.body, cells, bf_transfer_block(l.init, cells, bf))
+        TDeferStmt as d => bf_transfer_block(d.body, cells, bf)
+        TAdoptStmt as a => bf_transfer_block(a.body, cells, bf)
+        TReturn as r => if r.has_value { bf_transfer_expr(r.value, cells, bf) } else { bf }
+        TExprStmt as es => bf_transfer_expr(es.expr, cells, bf)
+        TBreakStmt => bf
+        TContinueStmt => bf
+    }
+}
+
+/**
+ * The bf-inherit for a binding: a ref-to-local `let r = p` (bound carries a `Reference` and the RHS
+ * is a bare `TVar`) inherits `bf[r] := bf[p]`. A non-ref bound, a non-bare RHS, or an un-found cell
+ * leaves `bf` unchanged (the gate then reads `BfNone` and conservatively rejects). A destructure
+ * pattern names no single ref cell.
+ *
+ * @param TBinding b  the typed binding
+ * @param []Cell cells  the cell universe
+ * @param []BorrowedFrom bf  the borrowed-from axis so far
+ * @return []BorrowedFrom  the axis with this binding's inheritance applied (or unchanged)
+ */
+fn bf_transfer_binding(b: TBinding, cells: []Cell, bf: []BorrowedFrom) -> []BorrowedFrom {
+    if !type_contains_ref(b.bound) { return bf }
+    match b.value.kind {
+        TVar as v => match b.target {
+            parser::SimpleName as sn => bf_inherit_at(cells, bf, sn.name, v.name)
+            parser::DestructurePattern => bf
+        }
+        TBorrow as tb => bf_seed_borrow(cells, bf, b.target, tb)
+        _ => bf
+    }
+}
+
+/**
+ * The bf-seed for a local ref-bind `mut y = &x` (F1.3 L2a): the borrow handle `y` gets `bf[y] :=
+ * BfLocal(x)` by DEFINITE ASSIGNMENT at this single syntactic `&x` site — it borrows the LOCAL
+ * referent `x` directly (never a join). A non-bare-local borrow operand, or a destructure target,
+ * names no single ref/referent pair, so `bf` is left unchanged (the gate then reads `BfNone` and
+ * conservatively rejects).
+ *
+ * @param []Cell cells  the cell universe
+ * @param []BorrowedFrom bf  the borrowed-from axis so far
+ * @param parser::BindTarget target  the ref-bind's target
+ * @param TBorrow tb  the `&x` borrow value
+ * @return []BorrowedFrom  the axis with the borrow handle's `BfLocal` seeded (or unchanged)
+ */
+fn bf_seed_borrow(cells: []Cell, bf: []BorrowedFrom, target: parser::BindTarget, tb: TBorrow) -> []BorrowedFrom {
+    match tb.operand.kind {
+        TVar as v => match target {
+            parser::SimpleName as sn => bf_seed_local_at(cells, bf, sn.name, v.name)
+            parser::DestructurePattern => bf
+        }
+        _ => bf
+    }
+}
+
+/**
+ * Write `bf[dst] := BfLocal(referent)` when the destination local `dst` is a cell in this function's
+ * universe; otherwise leave `bf` unchanged. Unlike `bf_inherit_at` (which COPIES the source cell's
+ * `bf`), this SEEDS a fresh `BfLocal` naming the borrowed referent directly — the `&x` borrow site's
+ * single definite assignment.
+ *
+ * @param []Cell cells  the cell universe
+ * @param []BorrowedFrom bf  the borrowed-from axis so far
+ * @param str dst  the ref-bind handle's target name
+ * @param str referent  the borrowed local's name
+ * @return []BorrowedFrom  the axis with `dst` borrowing `referent` as `BfLocal` (or unchanged)
+ */
+fn bf_seed_local_at(cells: []Cell, bf: []BorrowedFrom, dst: str, referent: str) -> []BorrowedFrom {
+    let di = cell_index(cells, dst, "")
+    if di < 0 { return bf }
+    set_bf(bf, di to u32, BfLocal { id = BfLocalId { name = referent } })
+}
+
+/**
+ * Write `bf[dst] := bf[src]` when both the destination local `dst` and the source `src` are cells in
+ * this function's universe; otherwise leave `bf` unchanged (a conservative non-inherit ⇒ the gate
+ * reads `BfNone` for `dst` and rejects).
+ *
+ * @param []Cell cells  the cell universe
+ * @param []BorrowedFrom bf  the borrowed-from axis so far
+ * @param str dst  the ref-to-local binding's target name
+ * @param str src  the RHS source variable name
+ * @return []BorrowedFrom  the axis with `dst` inheriting `src`'s borrowed-from (or unchanged)
+ */
+fn bf_inherit_at(cells: []Cell, bf: []BorrowedFrom, dst: str, src: str) -> []BorrowedFrom {
+    let di = cell_index(cells, dst, "")
+    if di < 0 { return bf }
+    let si = cell_index(cells, src, "")
+    if si < 0 { return bf }
+    set_bf(bf, di to u32, bf[si to u32])
+}
+
+/**
+ * The spine fact for one function — a bounded, per-function points-to / uniqueness lattice layered
+ * BESIDE `fn_escaping_vars` (the name set stays byte-identical; this only ever CERTIFIES a subset of
+ * what the name set over-marked). Builds the finite cell universe of `f`, seeds each axis at its
+ * climb-floor, then runs the monotone alias-transfer (`us`) and the adopter-confinement transfer
+ * (`pt`, §5.1) to a fixpoint. Every transfer only moves a cell UP the fixed-height (≤ 3) lattice, so
+ * it terminates in ≤ |cells| × 3 join steps (§2c.2 termination). Reads `f.params` + `f.body`; touches
+ * NO `mark_*` code.
+ *
+ * @param TFunction f  the typed function to analyze
+ * @return Spine  the per-cell points-to / borrowed-from / unique-vs-shared fact for `f`
+ * @see      docs/design/spine-layer-or-replace.md §2c.2
+ * @since    0.1.0.0-beta (#331 L1)
+ */
+pub fn fn_spine(f: TFunction) -> Spine {
+    let cells = add_block_cells(f.body, add_param_cells(f, teko::list::empty()))
+    let us = capture_block(f.body, cells, transfer_block(f.body, cells, seed_us(cells)))
+    let pt_state = pt_transfer_block(f.body, cells, 0, false, PtTransferState { pt = seed_pt(cells); next_region = 0 })
+    Spine { cells = cells; pt = pt_state.pt; bf = bf_transfer_block(f.body, cells, seed_bf(cells)); us = us }
+}
+
+/**
+ * The cell index of a bare binding / parameter (`field` = "") named `name`, or -1 when un-nameable.
+ * The L2 gates (PR-2 / PR-3) call this to key a consumed / borrowed binding into its spine cell.
+ *
+ * @param Spine s  the function's spine
+ * @param str name  the binding / parameter name
+ * @return i64  the 0-based cell index, or -1 when the name is not in this function's universe
+ */
+pub fn cell_of(s: Spine, name: str) -> i64 {
+    cell_index(s.cells, name, "")
+}
+
+/**
+ * Does the referent of a borrow OUTLIVE the borrow — i.e. may `borrow` (a `Reference` cell) be
+ * stored / bound at its site without dangling? True iff the referent (`bf(borrow)`) is a `BfParam`
+ * (a param outlives every local — the caller owns it) OR a `BfLocal` whose block encloses the borrow
+ * (checked by the gate that calls this), AND the referent is not itself `pt = PtAdopter` escaping its
+ * adopter (§5.1). `bf = BfTop` ⇒ referent unknown ⇒ FALSE (REJECT). Conservative: unknown ⇒
+ * does-not-outlive. EXPOSED for PR-2's ref-storability gate; consumed by no gate in PR-1.
+ *
+ * @param Spine s  the function's spine
+ * @param u32 borrow  the cell index of the `Reference` being stored / bound
+ * @param u32 referent  the cell index of the referent (or a sentinel when un-nameable)
+ * @return bool  true iff the borrow provably does not outlive its referent
+ */
+pub fn ref_target_outlives(s: Spine, borrow: u32, referent: u32) -> bool {
+    if borrow >= s.bf.len { return false }
+    match s.bf[borrow] {
+        BfParam => referent_not_escaping_adopter(s, referent)
+        BfLocal => referent_not_escaping_adopter(s, referent)
+        BfNone => false
+        BfTop => false
+    }
+}
+
+/**
+ * Is the referent cell NOT an `adopt { }`-confined allocation escaping its brace (§5.1)? A referent
+ * whose `pt` is `PtAdopter` is bulk-dropped at the adopter brace, so a borrow surviving it dangles —
+ * REJECT. A sentinel / out-of-range referent index is treated as escaping (conservative FALSE).
+ *
+ * @param Spine s  the function's spine
+ * @param u32 referent  the cell index of the referent
+ * @return bool  true iff the referent is not an adopter-confined allocation
+ */
+fn referent_not_escaping_adopter(s: Spine, referent: u32) -> bool {
+    if referent >= s.pt.len { return false }
+    match s.pt[referent] {
+        PtAdopter => false
+        PtFrame => true
+        PtRoot => true
+        PtParam => true
+        PtTop => true
+    }
+}
+
+/**
+ * Is `binding` the SOLE live handle — `us(binding) = UsUnique`? The affine `mem::free` /
+ * channel-send-move gate (PR-3, and the L2c consume contract below) consults this: a `UsShared` /
+ * `UsTop` cell may NOT be consumed (the aliased-free UAF, remodel §5 / #336 gap 1). Conservative:
+ * `⊤` ⇒ shared ⇒ FALSE. Any-alias-anywhere ⇒ shared at the fixpoint (a later increment may add
+ * flow-sensitivity; out of scope here). EXPOSED for PR-3; consumed by no gate in PR-1.
+ *
+ * L2c CONSUME CONTRACT (semantics only — spine-build-plan §4): a future `chan.send(x)` consume site
+ * MUST call `is_unique_at(s, cell_of(s, x))` and REJECT a shared / `⊤` target, identically to the
+ * L2b `mem::free` affine guard — one analysis, four guarantees. No channel surface exists yet, so
+ * L2c ships this documented primitive with no gate site and no fixture.
+ *
+ * @param Spine s  the function's spine
+ * @param u32 binding  the cell index of the consumed binding
+ * @return bool  true iff `binding` is provably unique (safe to free / move)
+ */
+pub fn is_unique_at(s: Spine, binding: u32) -> bool {
+    if binding >= s.us.len { return false }
+    match s.us[binding] {
+        UsUnique => true
+        UsShared => false
+        UsTop => false
+    }
+}

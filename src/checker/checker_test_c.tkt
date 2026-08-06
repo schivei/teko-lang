@@ -1,0 +1,323 @@
+// src/checker/checker_test_c.tkt  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+    let interp = TExpr { kind = TInterp { pieces = teko::list::push(teko::list::push(teko::list::empty(), "v"), ""); holes = teko::list::push(teko::list::empty(), n); specs = teko::list::push(teko::list::empty(), TFSpec { kind = TFSpecNone { } }) }; type = strt(); line = 0; col = 0 }
+    let inx = TExpr { kind = TInExpr { lhs = n; elems = teko::list::push(teko::list::empty(), tnum(2)) }; type = boolt(); line = 0; col = 0 }
+    // an if-expr value with both branches; a match with one wildcard-bodied arm.
+    let ife = TExpr { kind = TIfExpr { cond = cmp; then_blk = teko::list::push(teko::list::empty(), texpr_stmt(tnum(1))); has_else = true; else_blk = teko::list::push(teko::list::empty(), texpr_stmt(tnum(2))) }; type = i64t(); line = 0; col = 0 }
+    let genstamp = tcall1("idg", tnum(5), i64t())   // drives stamping from within the walk
+
+    // statements: binding, assign, expr, loop (with break/continue), defer, return.
+    mut body: []TStatement = teko::list::push(teko::list::empty(), TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "a" }; bound = i64t(); value = bin })
+    body = teko::list::push(body, TAssign { kind = parser::AssignKind::Simple; name = "a"; op = lexer::TokenKind::Assign; bound = i64t(); value = un; deref = false; target = no_texpr() })
+    body = teko::list::push(body, texpr_stmt(cast))
+    body = teko::list::push(body, texpr_stmt(cor))
+    body = teko::list::push(body, texpr_stmt(arr))
+    body = teko::list::push(body, texpr_stmt(interp))
+    body = teko::list::push(body, texpr_stmt(inx))
+    body = teko::list::push(body, texpr_stmt(ife))
+    body = teko::list::push(body, texpr_stmt(genstamp))
+    mut loopbody: []TStatement = teko::list::push(teko::list::empty(), TBreakStmt { label = "" })
+    loopbody = teko::list::push(loopbody, TContinueStmt { label = "" })
+    body = teko::list::push(body, TLoopStmt { label = ""; init = teko::list::empty(); body = loopbody })
+    body = teko::list::push(body, TDeferStmt { body = teko::list::push(teko::list::empty(), texpr_stmt(tnum(0))) })
+    body = teko::list::push(body, treturn(tnum(0)))
+
+    let caller = plainfn("caller", i64t(), body)
+    mut items: []TItem = teko::list::push(teko::list::empty(), idg)
+    items = teko::list::push(items, caller)
+    let mp = match monomorphize(TProgram { items = items }, empty_table()) { TProgram as x => x; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(find_titem_fn(mp, "idg__g__i64"))
+    teko::assert::is_true(find_titem_fn(mp, "caller"))
+}
+
+// =========================================================================
+// MEM Step 1 — THE ESCAPE CHECK (escape.tks). The classifier must (1) call a returned
+// allocation ESCAPING (never frame-local — a leak is safe, a UAF is a vulnerability) and
+// (2) call a purely-local allocation FRAME-LOCAL (read only through a scalar field copy).
+// =========================================================================
+
+// a typed `Node { val = <i64>; }` struct-init value (Node is the recursive value type).
+fn t_node_init(val: TExpr) -> TExpr {
+    let fnames = teko::list::push(teko::list::empty(), "val")
+    let fvals = teko::list::push(teko::list::empty(), val)
+    TExpr { kind = TStructInit { field_names = fnames; field_vals = fvals }; type = Named { name = "Node" }; line = 0; col = 0 }
+}
+// a `let n = <value>` binding (not const, not discard) to a SimpleName — returned as the raw
+// TBinding (the codegen's emit_binding receives this same destructured node).
+fn t_let(name: str, value: TExpr) -> TBinding {
+    TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = name }; bound = value.type; value = value }
+}
+// `n.val` typed as i64 (a SCALAR field read — a pure copy, so the receiver does not escape).
+fn t_field_i64(recv_name: str, field: str) -> TExpr {
+    let recv = tvar(recv_name, Named { name = "Node" })
+    TExpr { kind = TFieldAccess { receiver = recv; field = field }; type = i64t(); line = 0; col = 0 }
+}
+
+#test
+fn escape_call_argument_is_escaping() {
+    // fn f() { let n = Node { val = 5 }; use(n) }   — `n` is passed to a call ⇒ may be retained
+    // ⇒ conservatively ESCAPING (one-depth: a callee could store the argument).
+    let binding = t_let("n", t_node_init(tnum(5)))
+    mut body: []TStatement = teko::list::push(teko::list::empty(), binding)
+    body = teko::list::push(body, texpr_stmt(tcall1("use", tvar("n", Named { name = "Node" }), i64t())))
+    let f = plainfn("f", i64t(), body)
+    let esc = fn_escaping_vars(f)
+    teko::assert::is_true(str_set_has(esc, "n"))
+    teko::assert::is_true(!binding_is_frame_local(esc, binding))
+}
+
+// --- MEM Step 1 UAF FIX regression: a TAIL expr-statement is an IMPLICIT RETURN (escaping) ---
+// Codegen (emit_block_tail/emit_exprstmt_tail) drops the frame region BEFORE the implicit
+// trailing-value return, so a frame-local recursive-struct read in that tail value would be a
+// use-after-free. The escape check must AGREE with codegen and mark such a binding ESCAPING.
+
+// `Node { val = <i64>; next = <Node-typed> }` — the recursive back-edge carrying field.
+fn t_node_init2(val: TExpr, next: TExpr) -> TExpr {
+    mut fnames = teko::list::push(teko::list::empty(), "val")
+    fnames = teko::list::push(fnames, "next")
+    mut fvals = teko::list::push(teko::list::empty(), val)
+    fvals = teko::list::push(fvals, next)
+    TExpr { kind = TStructInit { field_names = fnames; field_vals = fvals }; type = Named { name = "Node" }; line = 0; col = 0 }
+}
+// `n.next` typed as Node (a NON-scalar field read — surfaces an interior pointer).
+fn t_field_node(recv_name: str, field: str) -> TExpr {
+    let recv = tvar(recv_name, Named { name = "Node" })
+    TExpr { kind = TFieldAccess { receiver = recv; field = field }; type = Named { name = "Node" }; line = 0; col = 0 }
+}
+
+#test
+fn escape_tail_implicit_return_rebox_is_escaping() {
+    // fn f() -> Node { let n = Node { val = 5; next = n }; Node { val = n.val; next = n.next } }
+    // The trailing struct-init is an IMPLICIT RETURN (no `return` keyword). It re-boxes `n.next`
+    // (a NON-scalar interior pointer) into the returned value — so `n` ESCAPES. Before the fix the
+    // tail expr-statement was DISCARDED (non-escaping) ⇒ `n` was wrongly frame-local ⇒ the frame
+    // region was dropped on the return edge, then the tail dereferenced the freed cell = UAF.
+    // The binding does NOT read `n` (no self-reference) — only the TAIL re-box does, so this test
+    // genuinely isolates the tail-position escape (not the binding RHS).
+    let binding = t_let("n", t_node_init(tnum(5)))
+    let tail = t_node_init2(t_field_i64("n", "val"), t_field_node("n", "next"))
+    mut body: []TStatement = teko::list::push(teko::list::empty(), binding)
+    body = teko::list::push(body, texpr_stmt(tail))   // implicit-return tail (no `return`)
+    let f = plainfn("f", Named { name = "Node" }, body)
+    let esc = fn_escaping_vars(f)
+    teko::assert::is_true(str_set_has(esc, "n"))   // tail value escapes ⇒ `n` escapes
+    teko::assert::is_true(!binding_is_frame_local(esc, binding))   // ⇒ NOT frame-local (routes to root)
+}
+
+#test
+fn escape_tail_safe_field_coalesce_is_escaping() {
+    // fn f() -> Node { let n = Node{…}; (n.next?.next) ?? other }
+    // The implicit-return tail reads `n.next` (a NON-scalar interior pointer) via a safe-field
+    // access whose receiver is a non-scalar field read, then COALESCES the (non-scalar) result —
+    // so `n` ESCAPES. (Reproducer A: `?.` + `??` in the implicit tail.) The safe-field RESULT type
+    // is kept NOMINAL (Node, not Optional) to dodge the VM single-field-wrapper-descent landmine
+    // [memory: VM conflates Ref/Ptr/Optional/Slice in `match`]; the native engine handles either,
+    // and what the escape check needs is only that the result is NON-scalar.
+    let binding = t_let("n", t_node_init(tnum(5)))   // binding does NOT read `n` — only the tail does
+    let nnext = t_field_node("n", "next")   // n.next : Node (non-scalar interior pointer)
+    let sfa = TExpr { kind = TSafeFieldAccess { receiver = nnext; field = "next" }; type = Named { name = "Node" }; line = 0; col = 0 }
+    let tail = TExpr { kind = TCoalesce { left = sfa; right = tvar("other", Named { name = "Node" }) }; type = Named { name = "Node" }; line = 0; col = 0 }
+    mut body: []TStatement = teko::list::push(teko::list::empty(), binding)
+    body = teko::list::push(body, texpr_stmt(tail))   // implicit-return tail (no `return`)
+    let f = plainfn("f", Named { name = "Node" }, body)
+    let esc = fn_escaping_vars(f)
+    teko::assert::is_true(str_set_has(esc, "n"))   // tail value escapes ⇒ `n` escapes
+    teko::assert::is_true(!binding_is_frame_local(esc, binding))
+}
+
+// =========================================================================
+// S2 — THE PER-BLOCK ESCAPE CHECK (escape.tks::binding_is_block_local). A binding declared in a
+// scope-introducing BLOCK may be freed at the block's exit edges ONLY when every read of it in the
+// whole function is a SAFE non-tail/non-assign read strictly inside that block. SECURITY-FIRST:
+// any read outside B, in B's tail value, or as an assignment RHS ⇒ NOT block-local (route to the
+// enclosing region — a leak is safe, a use-after-free is NEVER).
+// =========================================================================
+
+#test
+fn block_local_read_only_inside_block_is_block_local() {
+    // fn f() -> i64 { mut t=0; loop { let n = Node{val=5}; let g = n.val; t = t+g; break }; t }
+    // `n` is declared in the LOOP body and read ONLY via a scalar field copy inside it (non-tail,
+    // non-assign) ⇒ block-local ⇒ the loop body region may free it per-iteration.
+    let binding = t_let("n", t_node_init(tnum(5)))
+    mut loopbody: []TStatement = teko::list::push(teko::list::empty(), binding)
+    loopbody = teko::list::push(loopbody, t_let("g", t_field_i64("n", "val")))   // let g = n.val (scalar copy)
+    loopbody = teko::list::push(loopbody, TBreakStmt { label = "" })
+    let loopstmt = TLoopStmt { label = ""; init = teko::list::empty(); body = loopbody }
+    mut body: []TStatement = teko::list::push(teko::list::empty(), t_let("t", t_node_init(tnum(0))))
+    body = teko::list::push(body, loopstmt)
+    body = teko::list::push(body, treturn(t_field_i64("t", "val")))
+    let f = plainfn("f", i64t(), body)
+    let esc = fn_escaping_vars(f)
+    // n is NOT function-escaping (only a scalar copy is read) AND only read inside the loop body.
+    teko::assert::is_true(binding_is_block_local(esc, f.body, loopbody, false, binding))
+}
+
+// --- MEM Step 1 UAF FIX #2 regression: a SCALAR read through a BOXED HOP (`a.b.y`) escapes ---
+// The scalar non-escaping refinement is SOUND ONLY for a scalar field of a BARE local (a stack
+// member). `a.b.y` reads a scalar `.y` but THROUGH `a.b` — a boxed (recursive) field that is a
+// heap pointer into the frame region. The whole tail value is evaluated AFTER the region drop, so
+// dereferencing the freed `a.b` is a use-after-free. The refinement must route `a` to ESCAPING
+// because the field-access receiver (`a.b`) is NOT a bare TVar.
+
+#test
+fn escape_tail_scalar_through_boxed_hop_is_escaping() {
+    // fn f() -> i64 { let n = Node { val = 5 }; n.next.val }
+    // `.val` is scalar (i64) but its receiver `n.next` is a NON-scalar (boxed) interior pointer —
+    // a frame-region heap hop. The bare-TVar refinement must NOT fire (receiver is a field access,
+    // not a TVar) ⇒ `n` ESCAPES ⇒ NOT frame-local (the only sound choice — avoids the UAF).
+    let binding = t_let("n", t_node_init(tnum(5)))
+    let nnext = t_field_node("n", "next")   // n.next : Node (boxed heap hop)
+    let deep = TExpr { kind = TFieldAccess { receiver = nnext; field = "val" }; type = i64t(); line = 0; col = 0 }   // (n.next).val : i64 (scalar through a boxed hop)
+    mut body: []TStatement = teko::list::push(teko::list::empty(), binding)
+    body = teko::list::push(body, texpr_stmt(deep))   // implicit-return tail (no `return`)
+    let f = plainfn("f", i64t(), body)
+    let esc = fn_escaping_vars(f)
+    teko::assert::is_true(str_set_has(esc, "n"))   // scalar-through-boxed-hop ⇒ `n` escapes
+    teko::assert::is_true(!binding_is_frame_local(esc, binding))   // ⇒ NOT frame-local (UAF avoided)
+}
+
+#test
+fn escape_tail_index_receiver_is_escaping() {
+    // fn f() -> i64 { let n = Node { val = 5 }; arr[n.val] }
+    // An index read derefs a heap-backed slice. The index sub-expression `n.val` is evaluated
+    // post-drop too; `n.val` is a bare-TVar scalar (frame-local), but the receiver `arr` (a TVar)
+    // is read in an escaping context. This pins down that the index path propagates escaping to its
+    // receiver while still allowing a bare-TVar scalar index (`n.val`) to stay frame-local.
+    let binding = t_let("n", t_node_init(tnum(5)))
+    let arr = tvar("arr", Slice { element = i64t() })
+    let idx = t_field_i64("n", "val")   // n.val : i64 (bare-TVar scalar)
+    let tail = TExpr { kind = TIndex { receiver = arr; index = idx }; type = i64t(); line = 0; col = 0 }
+    mut body: []TStatement = teko::list::push(teko::list::empty(), binding)
+    body = teko::list::push(body, texpr_stmt(tail))   // implicit-return tail (no `return`)
+    let f = plainfn("f", i64t(), body)
+    let esc = fn_escaping_vars(f)
+    teko::assert::is_true(str_set_has(esc, "arr"))   // index receiver (heap slice) escapes
+    teko::assert::is_true(!str_set_has(esc, "n"))   // bare-TVar scalar index stays frame-local
+    teko::assert::is_true(binding_is_frame_local(esc, binding))
+}
+
+// --- OOP A1 (2026-07-01): unified method model -- struct instance + static methods ---------
+// `type Pt = struct { x: i64; fn sum(self) -> i64 { self.x }; fn origin() -> i64 { 0 } }` --
+// sum(self)=instance (1st param untyped, the receiver), origin()=static (no untyped 1st param).
+fn recv_param(name: str) -> parser::Param { parser::Param { name = name; has_type = false; type_ann = named_t("i64"); is_params = false; has_default = false; default_expr = e_num(0) } }
+// --- (W10b.IF, 2026-07-01) interface CONFORMANCE checking ------------------------------------
+// A bodyless instance-method signature `fn name(self) -> i64` (an interface member).
+fn iface_method(name: str) -> parser::Function {
+    parser::Function { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = teko::list::push(teko::list::empty(), recv_param("self")); has_return = true; return_type = named_t("i64"); body = teko::list::empty(); vis = parser::Visibility::Pub; has_doc = false; doc = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; os_guard = ""; is_intern = false; is_abstract = false; is_virtual = false; is_override = false; has_inject = false; injects = teko::list::empty(); is_unsafe = false; has_arena_size = false; arena_size = 0 to u64 }
+}
+// A concrete instance method `[vis] fn name(self) -> i64 { 0 }`.
+fn impl_method(name: str, vis: parser::Visibility) -> parser::Function {
+    parser::Function { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = teko::list::push(teko::list::empty(), recv_param("self")); has_return = true; return_type = named_t("i64"); body = one_stmt(e_num(0)); vis = vis; has_doc = false; doc = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; os_guard = ""; is_intern = false; is_abstract = false; is_virtual = false; is_override = false; has_inject = false; injects = teko::list::empty(); is_unsafe = false; has_arena_size = false; arena_size = 0 to u64 }
+}
+// A concrete method with an extra typed param `fn name(self, x: i64) -> i64 { 0 }` (signature mismatch).
+fn impl_method_arg(name: str, vis: parser::Visibility) -> parser::Function {
+    let params = teko::list::push(teko::list::push(teko::list::empty(), recv_param("self")), parser::Param { name = "x"; has_type = true; type_ann = named_t("i64"); is_params = false; has_default = false; default_expr = e_num(0) })
+    parser::Function { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = params; has_return = true; return_type = named_t("i64"); body = one_stmt(e_num(0)); vis = vis; has_doc = false; doc = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; os_guard = ""; is_intern = false; is_abstract = false; is_virtual = false; is_override = false; has_inject = false; injects = teko::list::empty(); is_unsafe = false; has_arena_size = false; arena_size = 0 to u64 }
+}
+fn iface_item(name: str, methods: []parser::Function, extends: []str) -> parser::Item {
+    parser::Item { content = parser::TypeDecl { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = parser::InterfaceBody { extends = extends; methods = methods }; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""; is_unsafe = false; must_free = false }; namespace = ""; file = "" }
+}
+fn impl_class_item(name: str, methods: []parser::Function, implements: []str) -> parser::Item {
+    parser::Item { content = parser::TypeDecl { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = parser::ClassBody { kind = parser::ClassKind::Sealed; has_base = false; base_name = ""; has_base_binding = false; base_binding_name = ""; implements = implements; fields = teko::list::empty(); methods = methods; consts = teko::list::empty() }; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""; is_unsafe = false; must_free = false }; namespace = ""; file = "" }
+}
+fn list1(x: parser::Function) -> []parser::Function { teko::list::push(teko::list::empty(), x) }
+fn slist1(s: str) -> []str { teko::list::push(teko::list::empty(), s) }
+
+// --- flags methods (C8.3, self-host ported 2026-07-01) ---------------------------------------
+fn mk_perm_flags() -> parser::TypeDecl {
+    let members = teko::list::push(teko::list::push(teko::list::empty(), "Read"), "Write")
+    parser::TypeDecl { name = "Perm"; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = parser::FlagsBody { members = members; values = teko::list::empty() }; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""; is_unsafe = false; must_free = false }
+}
+fn perm_item() -> parser::Item { parser::Item { content = mk_perm_flags(); namespace = ""; file = "" } }
+fn perm_member(name: str) -> parser::Expr { ek(parser::PathExpr { path = parser::Path { segments = teko::list::push(teko::list::push(teko::list::empty(), parser::Segment { name = "Perm" }), parser::Segment { name = name }) } }) }
+// --- (TR0, 2026-07-02) trait derivation — the FOLD + requirement/conflict rules + honest stops ---
+// A trait is declared like a struct (fields + methods, bodies optional), derived via the same
+// `&`-list as interfaces; fold_traits rewrites derivers BEFORE typing (fields flatten in, bodied
+// methods fold in, bodyless methods become requirements). See TEKO_ROADMAP_TRAITS.md TR0.
+fn tr_field(name: str) -> parser::Field { parser::Field { name = name; type_ann = named_t("i64"); vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = "" } }
+fn tr_fields1(name: str) -> []parser::Field { teko::list::push(teko::list::empty(), tr_field(name)) }
+fn trait_item(name: str, fields: []parser::Field, methods: []parser::Function) -> parser::Item {
+    parser::Item { content = parser::TypeDecl { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = parser::TraitBody { fields = fields; methods = methods; consts = teko::list::empty() }; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""; is_unsafe = false; must_free = false }; namespace = ""; file = "" }
+}
+fn deriver_struct_item(name: str, fields: []parser::Field, methods: []parser::Function, derives: []str) -> parser::Item {
+    parser::Item { content = parser::TypeDecl { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = parser::StructBody { fields = fields; methods = methods; implements = derives; consts = teko::list::empty() }; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""; is_unsafe = false; must_free = false }; namespace = ""; file = "" }
+}
+fn deriver_class_item(name: str, fields: []parser::Field, methods: []parser::Function, derives: []str) -> parser::Item {
+    parser::Item { content = parser::TypeDecl { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = parser::ClassBody { kind = parser::ClassKind::Sealed; has_base = false; base_name = ""; has_base_binding = false; base_binding_name = ""; implements = derives; fields = fields; methods = methods; consts = teko::list::empty() }; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""; is_unsafe = false; must_free = false }; namespace = ""; file = "" }
+}
+fn items2(a: parser::Item, b: parser::Item) -> []parser::Item { teko::list::push(teko::list::push(teko::list::empty(), a), b) }
+fn items3(a: parser::Item, b: parser::Item, c: parser::Item) -> []parser::Item { teko::list::push(items2(a, b), c) }
+fn tr_program_ok(items: []parser::Item) -> bool {
+    match type_program(parser::Program { items = items }) { TProgram => true; error => false }
+}
+
+#test
+fn trait_fold_class_gains_members() {
+    // a CLASS deriving a trait: folded field participates in a factory's class literal, the
+    // folded method satisfies nothing but must type-check under the deriver.
+    let tr = trait_item("Stamp", tr_fields1("at"), list1(impl_method("stamp", parser::Visibility::Private)))
+    let dv = deriver_class_item("C", teko::list::empty(), teko::list::empty(), slist1("Stamp"))
+    teko::assert::is_true(tr_program_ok(items2(tr, dv)))
+}
+
+#test
+fn trait_requirement_sig_mismatch_is_error() {
+    // the deriver provides `need(self, x)` where the trait requires `need(self)`.
+    let tr = trait_item("Need", teko::list::empty(), list1(iface_method("need")))
+    let dv = deriver_struct_item("P", tr_fields1("own"), list1(impl_method_arg("need", parser::Visibility::Private)), slist1("Need"))
+    teko::assert::is_true(!tr_program_ok(items2(tr, dv)))
+}
+
+#test
+fn trait_two_bodied_conflict_needs_deriver_override() {
+    // two traits both PROVIDE `m` — without a deriver-defined `m` it is a compile error; the
+    // deriver defining its own `m` IS the override (no implicit resolution order).
+    let t1 = trait_item("T1", teko::list::empty(), list1(impl_method("m", parser::Visibility::Private)))
+    let t2 = trait_item("T2", teko::list::empty(), list1(impl_method("m", parser::Visibility::Private)))
+    let bad = deriver_struct_item("P", tr_fields1("own"), teko::list::empty(), teko::list::push(slist1("T1"), "T2"))
+    teko::assert::is_true(!tr_program_ok(items3(t1, t2, bad)))
+    let good = deriver_struct_item("Q", tr_fields1("own"), list1(impl_method("m", parser::Visibility::Private)), teko::list::push(slist1("T1"), "T2"))
+    teko::assert::is_true(tr_program_ok(items3(t1, t2, good)))
+}
+
+#test
+fn trait_field_collision_is_error() {
+    // a trait field colliding with the deriver's own field — fields cannot be overridden.
+    let tr = trait_item("Stamp", tr_fields1("x"), teko::list::empty())
+    let dv = deriver_struct_item("P", tr_fields1("x"), teko::list::empty(), slist1("Stamp"))
+    teko::assert::is_true(!tr_program_ok(items2(tr, dv)))
+    // ... and across two derived traits.
+    let t2 = trait_item("Stamp2", tr_fields1("y"), teko::list::empty())
+    let t3 = trait_item("Stamp3", tr_fields1("y"), teko::list::empty())
+    let dv2 = deriver_struct_item("Q", tr_fields1("own"), teko::list::empty(), teko::list::push(slist1("Stamp2"), "Stamp3"))
+    teko::assert::is_true(!tr_program_ok(items3(t2, t3, dv2)))
+}
+
+#test
+fn trait_is_not_instantiable() {
+    // `Stamp { at = 1 }` — a trait literal is rejected (derive it instead).
+    let tr = trait_item("Stamp", tr_fields1("at"), teko::list::empty())
+    let lit = ek(parser::StructLit { type_path = path1("Stamp"); type_args = teko::list::empty(); field_names = teko::list::push(teko::list::empty(), "at"); field_vals = teko::list::push(teko::list::empty(), e_num(1)) })
+    let bind_v = parser::Binding { kind = parser::BindKind::Let; target = parser::SimpleName { name = "v" }; has_type = false; type_ann = named_t("i64"); value = lit }
+    teko::assert::is_true(!tr_program_ok(items2(tr, parser::Item { content = bind_v; namespace = ""; file = "" })))
+}
+
+/** (TR1 #176) build a generic `fn <name><T: <trait>>(x: T) -> i64 { <body> }` item — the shape
+    the trait-constraint negatives instantiate. `body` is the fn's statement list. */
+fn tr_generic_fn(name: str, trait_name: str, body: []parser::Statement) -> parser::Item {
+    let p = parser::Param { name = "x"; has_type = true; type_ann = named_t("T"); is_params = false; has_default = false; default_expr = e_num(0) }
+    let cons: []parser::ConstraintExpr = teko::list::push(teko::list::empty(), parser::ConstraintAtom { name = trait_name })
+    let f = parser::Function { name = name; type_params = teko::list::push(teko::list::empty(), "T"); type_constraints = cons; params = teko::list::push(teko::list::empty(), p); has_return = true; return_type = named_t("i64"); body = body; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; os_guard = ""; is_intern = false; is_abstract = false; is_virtual = false; is_override = false; has_inject = false; injects = teko::list::empty(); is_unsafe = false; has_arena_size = false; arena_size = 0 to u64 }
+    parser::Item { content = f; namespace = ""; file = "" }
+}
+
+/** (TR1 #176) a loose `let <bind> = <StructName> { <field> = 0 }` binding item (constructs a struct
+    deriver value to feed a generic-fn call). */
+fn tr_let_struct(bind: str, type_name: str, field: str) -> parser::Item {
+    let lit = ek(parser::StructLit { type_path = path1(type_name); type_args = teko::list::empty(); field_names = teko::list::push(teko::list::empty(), field); field_vals = teko::list::push(teko::list::empty(), e_num(0)) })
+    let b = parser::Binding { kind = parser::BindKind::Let; target = parser::SimpleName { name = bind }; has_type = false; type_ann = named_t("i64"); value = lit }
+    parser::Item { content = b; namespace = ""; file = "" }
+}

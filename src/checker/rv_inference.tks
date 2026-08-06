@@ -1,0 +1,206 @@
+// src/checker/rv_rv_inference.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+}
+
+/**
+ * Does the resolved `t` carry an unsafe-typed component (§2 contagion-by-composition)?
+ * The public, depth-seeded entry point over `unsafe_carrying_at` — seeded at 32 (deeper than
+ * `widens_into`'s 16 seed; see `unsafe_carrying_at`'s doc for why).
+ *
+ * @param Type t  a resolved semantic Type (a field/param/return/local's annotation)
+ * @param TypeTable table  the program's type table
+ * @return bool { unsafe_carrying_at(t, table, 32) }  true iff `t` names, or transitively wraps, an unsafe type
+ */
+pub fn unsafe_carrying(t: Type, table: TypeTable) -> bool { unsafe_carrying_at(t, table, 32) }
+
+/**
+ * Does ANY of a generic instantiation's resolved type-ARGUMENTS carry an unsafe type
+ * (`Box<Raw>`, `List<Raw>`, `Map<str, Raw>`, …)? Used at STAMP time (`instantiate_types`)
+ * so a generic instance whose substituted body embeds unsafe data becomes `is_unsafe = true`
+ * itself — otherwise a safe fn/field/local naming `Box<Raw>` would resolve to a stamped
+ * `Named{"Box__g__Raw"}` decl whose OWN `is_unsafe` is false (inherited only from the
+ * generic base template, which never mentions `Raw`), silently defeating every downstream
+ * containment gate (field/signature/local) that trusts a `Named`'s resolved decl. Marking
+ * the STAMP itself unsafe means the existing gates fire automatically, uniformly, with no
+ * separate `__g__`-name special-casing at each call site.
+ *
+ * @param []Type argtypes  the instantiation's resolved type-arguments, in declaration order
+ * @param TypeTable table  the program's type table
+ * @return bool  true iff any argument names, or transitively wraps, an unsafe type
+ */
+fn generic_args_unsafe_carrying(argtypes: []Type, table: TypeTable) -> bool {
+    mut i = 0
+    loop {
+        if i >= argtypes.len { break }
+        if unsafe_carrying(argtypes[i], table) { return true }
+        i++
+    }
+    false
+}
+
+// (#98) is `name` a POLYMORPHIC BASE — a class that MAY be inherited (`abstract`/`virtual`, never
+// `sealed`)? A Sub→Base upcast (and the base-typed dispatch/fat-pointer it enables) is only sound
+// against such a class: a `sealed` class can never be anyone's base, so a base-typed value of it
+// can only ever BE it — no polymorphism to model. Mirror of resolve.c::tk_is_polymorphic_base.
+pub fn is_polymorphic_base(name: str, table: TypeTable) -> bool {
+    match type_table_find(table, name, "") {   // (#109 W1) kind probe on a resolved name — no referencing ns
+        parser::TypeDecl as td => match td.body {
+            parser::ClassBody as cb => match cb.kind { parser::ClassKind::Sealed => false; _ => true }
+            _ => false
+        }
+        error => false
+    }
+}
+
+// (#98) does class `sub` reach ANCESTOR class `want` through the `base_name` chain, transitively?
+// Hop-bounded (cyclic inheritance is decl-rejected; the bound keeps this total regardless). Used
+// by the Sub→Base widen. Mirror of resolve.c::tk_subclass_reaches.
+pub fn subclass_reaches(sub: str, want: str, table: TypeTable, depth: i64) -> bool {
+    if depth <= 0 { return false }
+    let cb = match type_table_find(table, sub, "") {   // (#109 W1) ancestor walk on resolved names — no referencing ns
+        parser::TypeDecl as td => match td.body { parser::ClassBody as b => b; _ => return false }
+        error => return false
+    }
+    if !cb.has_base { return false }
+    if name_last_segment(cb.base_name) == name_last_segment(want) { return true }   // (#109 W3) base_name is a bare source name; `want` may be canonical — compare bare
+    subclass_reaches(cb.base_name, want, table, depth - 1)
+}
+
+// (TR0) is `name` declared as a trait? Mirror of resolve.c::tk_is_trait_name. Used by the
+// honest stops (a trait as a constraint atom / instantiation target) — the FOLD itself splits
+// the `&`-list with its own table-scan (collect.tks::split_trait_derives).
+pub fn is_trait_name(name: str, table: TypeTable) -> bool {
+    match type_table_find(table, name, "") {   // (#109 W1) kind probe on a resolved name — no referencing ns
+        parser::TypeDecl as td => match td.body { parser::TraitBody => true; _ => false }
+        error => false
+    }
+}
+
+/**
+ * (TR3) The closed set of compiler-known STRUCTURAL trait names — `Eq`, `Ord`, `Hash`, `Clone`,
+ * `Default` — whose provided method bodies the compiler SYNTHESIZES from the deriver's field view
+ * (TR2), with no surface declaration and no runtime metadata (Law M.0). Matched on the bare last
+ * segment: these are reserved trait names, unqualified. A user type of the same name is not
+ * intended (the set is closed per the trait design §5 open 4). `Hashable` is accepted as a SYNONYM
+ * of `Hash` and `Comparable` of `Ord` (the collections Map-key capability names, R1) — the
+ * structural trait IS the capability, so no parallel interface is introduced.
+ *
+ * @param name a name from a deriver's `&`-list or a constraint atom (a source or resolved name)
+ * @return true iff `name`'s last segment is one of the structural trait names (or a synonym)
+ */
+pub fn is_structural_trait(name: str) -> bool {
+    let last = name_last_segment(name)
+    last == "Eq" || last == "Ord" || last == "Hash" || last == "Clone" || last == "Default" || last == "Hashable" || last == "Comparable"
+}
+
+/**
+ * (TR3) The canonical structural-trait name of `name` — collapsing the R1 synonyms so a deriver
+ * lists ONE name per capability: `Hashable` → `Hash`, `Comparable` → `Ord`; every other structural
+ * name maps to itself. Callers pass a name already known to `is_structural_trait`; a non-structural
+ * name is returned unchanged (the caller never reaches this with one).
+ *
+ * @param name a structural-trait name (possibly a synonym), bare or qualified
+ * @return the canonical bare structural-trait name
+ */
+pub fn structural_trait_canonical(name: str) -> str {
+    let last = name_last_segment(name)
+    if last == "Hashable" { return "Hash" }
+    if last == "Comparable" { return "Ord" }
+    last
+}
+
+// does contract `sub` reach contract `want` through `extends`, transitively? Depth-bounded so a
+// (decl-rejected) cyclic `extends` can never loop here. Mirror of resolve.c::iface_extends_reaches.
+fn iface_extends_reaches(sub: str, want: str, table: TypeTable, depth: i64) -> bool {
+    if depth <= 0 { return false }
+    let ib = match type_table_find(table, sub, "") {   // (#109 W1) extends walk on resolved names — no referencing ns
+        parser::TypeDecl as td => match td.body { parser::InterfaceBody as b => b; _ => return false }
+        error => return false
+    }
+    mut i: u64 = 0
+    loop {
+        if i >= ib.extends.len { break }
+        // (#152) EXACT compare when BOTH sides are qualified (post canon_class_bases the entries
+        // are canonical whenever they resolve — a cross-ns same-bare cousin no longer conforms);
+        // a bare side (root canonical, or a synthetic type-param extends) keeps the bare compare.
+        if name_qualifier(ib.extends[i]) != "" && name_qualifier(want) != "" {
+            if ib.extends[i] == want { return true }
+        } else {
+            if name_last_segment(ib.extends[i]) == name_last_segment(want) { return true }
+        }
+        if iface_extends_reaches(ib.extends[i], want, table, depth - 1) { return true }
+        i++
+    }
+    false
+}
+
+// NOMINAL conformance: does class/struct `name` implement contract `iface` — via its OWN
+// `implements` list, an ANCESTOR class's (the class-inheritance chain), or a listed contract
+// that `extends` `iface` transitively? DECLARED conformance only (nominal, closed-world) — a
+// type that merely HAPPENS to have the methods does not conform. Hop-bounded like the extends
+// walk (cyclic inheritance is decl-rejected; the bound keeps this total regardless). Mirror of
+// resolve.c::tk_type_conforms_to.
+pub fn type_conforms_to(name: str, iface: str, table: TypeTable) -> bool {
+    mut cur = name
+    mut hops = 0
+    loop {
+        if hops >= 64 { break }
+        let td = match type_table_find(table, cur, "") { parser::TypeDecl as d => d; error => return false }   // (#109 W1) conformance walk on resolved names — no referencing ns
+        mut impls: []str = teko::list::empty()
+        mut has_base = false
+        mut base = ""
+        match td.body {
+            parser::ClassBody as cb => {
+                impls = cb.implements
+                has_base = cb.has_base
+                base = cb.base_name
+            }
+            parser::StructBody as sb => { impls = sb.implements }
+            _ => return false
+        }
+        mut i: u64 = 0
+        loop {
+            if i >= impls.len { break }
+            // (#152) EXACT when BOTH qualified (see iface_extends_reaches); bare-compat otherwise.
+            if name_qualifier(impls[i]) != "" && name_qualifier(iface) != "" {
+                if impls[i] == iface { return true }
+            } else {
+                if name_last_segment(impls[i]) == name_last_segment(iface) { return true }
+            }
+            if iface_extends_reaches(impls[i], iface, table, 64) { return true }
+            i++
+        }
+        if !has_base { return false }
+        cur = base
+        hops++
+    }
+    false
+}
+
+// (#83) Does `t` carry a SENTINEL anywhere (a Slice whose element is `Void`, or an Optional whose
+// inner is `Void`)? `type_eq` treats a sentinel as equal to ANY concrete peer (see type.tks), which
+// is right for ASSIGNABILITY but wrong for JOIN's "equal → return `a`" shortcut: if `a` is the
+// (less informative) sentinel side and `b` is concrete, blindly returning `a` silently discards
+// the concrete element type a sibling array-literal entry established (`[[], [1]]`'s inner `[]`
+// joined against `[1]`'s `[]i64` — see type_join). Recurses through Slice/Optional so a nested
+// sentinel (`[][]Void`) is still detected. Mirror: resolve.c::tk_type_has_sentinel.
+fn type_has_sentinel(t: Type) -> bool {
+    match t {
+        Slice as s => match s.element { Void => true; _ => type_has_sentinel(s.element) }
+        Optional as o => match o.inner { Void => true; _ => type_has_sentinel(o.inner) }
+        _ => false
+    }
+}
+
+// (#41-followon) Collect `t`'s members into `acc` for a union JOIN: an INLINE variant contributes
+// its members (flattened); anything else contributes itself. Deduped by type_eq. Named variants
+// stay NOMINAL (consistent with how `Type | error` keeps `Type` named). (Mirror of resolve.c.)
+fn union_collect(acc: []Type, t: Type, table: TypeTable) -> []Type {
+    match t {
+        Variant as v => {
+            mut out = acc
+            mut i = 0
+            loop {

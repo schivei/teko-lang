@@ -1,0 +1,155 @@
+// src/checker/cf_const_val.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+}
+
+/**
+ * cf_format_static — render `v` under a static spec: only an integer value has a folded static family
+ * (hex/binary/decimal/thousands); a non-integer static hole (which cannot arise from a type-checked
+ * program) is an error the caller treats as "leave runtime".
+ *
+ * @param v     the hole's comptime value
+ * @param spec  the static format spec string
+ * @return      the rendered bytes, or an error to leave the hole runtime
+ * @since #comptime-fold
+ */
+fn cf_format_static(v: ConstValue, spec: str) -> []byte | error {
+    match v.kind {
+        CVInt as ci => cf_format_static_int(ci, spec)
+        _ => error { message = "comptime fold: a static format spec on a non-integer constant is not folded (#comptime-fold)" }
+    }
+}
+
+/**
+ * cf_bytes_value — the raw bytes of a folded string/char value, the natural (`TFSpecNone`) render of a
+ * `str`/`char` hole — the same bytes the runtime emits by passing the value straight through.
+ *
+ * @param v  the hole's comptime value
+ * @return   the raw bytes, or an error when the value is not a bytes value
+ * @since #comptime-fold
+ */
+fn cf_bytes_value(v: ConstValue) -> []byte | error {
+    match v.kind {
+        CVBytes as cb => cb.data
+        _ => error { message = "comptime fold: expected a string/char constant here (#comptime-fold)" }
+    }
+}
+
+/**
+ * cf_bool_value — the natural render of a folded boolean: `"true"` or `"false"`, byte-identical to the
+ * ternary `emit_interp` emits for a bool hole.
+ *
+ * @param v  the hole's comptime value
+ * @return   the boolean's text bytes, or an error when the value is not a boolean
+ * @since #comptime-fold
+ */
+fn cf_bool_value(v: ConstValue) -> []byte | error {
+    match v.kind {
+        CVBool as cb => if cb.v { bytes_of_str("true") } else { bytes_of_str("false") }
+        _ => error { message = "comptime fold: expected a boolean constant here (#comptime-fold)" }
+    }
+}
+
+/**
+ * cf_int_none_value — the natural (`TFSpecNone`) decimal render of an integer hole of prim kind `pk`: the
+ * signed decimal (`tk_i64_to_str`) for a signed integer, the unsigned decimal (`tk_u64_to_str`)
+ * otherwise.
+ *
+ * @param ci  the integer comptime value
+ * @param pk  the hole's prim kind (drives signed vs unsigned)
+ * @return    the decimal bytes
+ * @since #comptime-fold
+ */
+fn cf_int_none_value(ci: CVInt, pk: PrimKind) -> []byte {
+    if prim_is_signed(pk) { return cf_i64_decimal(cf_as_u64(ci)) }
+    cf_u64_decimal(cf_as_u64(ci))
+}
+
+/**
+ * cf_format_none_prim — the natural render of a `Prim` hole: `"true"`/`"false"` for a bool, the signed or
+ * unsigned decimal for an integer; a float (or any other prim) is an error the caller treats as "leave
+ * runtime" (the fold never touches float formatting).
+ *
+ * @param v  the hole's comptime value
+ * @param p  the hole's `Prim` type
+ * @return   the rendered bytes, or an error to leave the hole runtime
+ * @since #comptime-fold
+ */
+fn cf_format_none_prim(v: ConstValue, p: Prim) -> []byte | error {
+    if p.kind == PrimKind::Bool { return cf_bool_value(v) }
+    if prim_is_int(p.kind) {
+        match v.kind {
+            CVInt as ci => cf_int_none_value(ci, p.kind)
+            _ => error { message = "comptime fold: expected an integer constant here (#comptime-fold)" }
+        }
+    } else {
+        error { message = "comptime fold: this prim hole type is not folded (#comptime-fold)" }
+    }
+}
+
+/**
+ * cf_format_none — the natural render of a hole with no format spec, dispatching on its resolved type:
+ * `str`/`char` pass their bytes through, `byte` renders as unsigned decimal, a `Prim` routes to
+ * `cf_format_none_prim`; every other type (error message, aggregate, float) is an error the caller
+ * treats as "leave runtime".
+ *
+ * @param v        the hole's comptime value
+ * @param hole_ty  the hole's resolved type
+ * @return         the rendered bytes, or an error to leave the hole runtime
+ * @since #comptime-fold
+ */
+fn cf_format_none(v: ConstValue, hole_ty: Type) -> []byte | error {
+    match hole_ty {
+        Str => cf_bytes_value(v)
+        Char => cf_bytes_value(v)
+        Byte => match v.kind { CVInt as ci => cf_u64_decimal(cf_as_u64(ci)); _ => error { message = "comptime fold: expected a byte constant here (#comptime-fold)" } }
+        Prim as p => cf_format_none_prim(v, p)
+        _ => error { message = "comptime fold: this interpolation hole type is not folded (#comptime-fold)" }
+    }
+}
+
+/**
+ * comptime_format — the Layer-2 comptime formatter: render `v` under `sp` exactly as the runtime
+ * formatter in `teko_rt.c` would, producing the SAME bytes. Mirrors the spec-family dispatch of
+ * `codegen.tks:emit_interp` and `fmt_family_takes_prec`, but DELIBERATELY only for the culture-invariant
+ * integer/bool families the fold can prove byte-exact: `x`/`X` hex (`tk_fmt_x_lower/_upper`), `b` binary
+ * (`tk_fmt_b`), `d` zero-padded decimal (`tk_fmt_d`), `n` comma-grouped decimal (`tk_fmt_n_i`), and the
+ * `TFSpecNone` natural forms of int/uint (`tk_i64_to_str`/`tk_u64_to_str`), byte, bool and str/char. A
+ * FLOAT family (`f`/`e`/`g`/`p`, and `n` on a float), a `TFSpecDynamic` spec, and any unrecognized spec
+ * are NOT folded — an error is returned and the caller leaves the hole runtime, because a byte-divergent
+ * fold is worse than no fold (M.3 honesty). This function is the DUPLICATION risk (§10): its output MUST
+ * be byte-identical to `teko_rt.c` for every (value, spec) pair it folds, PINNED by the format-oracle
+ * differential fixture.
+ *
+ * @param v        the const hole value (from `eval_const`)
+ * @param sp       the hole's format spec (`TFSpecNone` or `TFSpecStatic`)
+ * @param hole_ty  the hole's resolved type (selects signed/unsigned/bool/str family)
+ * @return         the formatted bytes (byte-identical to the runtime), or an error for a spec the fold
+ *                 declines (the caller then leaves the hole runtime)
+ * @throws         an error for a float / dynamic / unrecognized spec, or a value/type kind mismatch
+ * @since #comptime-fold
+ */
+pub fn comptime_format(v: ConstValue, sp: TFSpec, hole_ty: Type) -> []byte | error {
+    match sp.kind {
+        TFSpecStatic as fs => cf_format_static(v, fs.s)
+        TFSpecDynamic => error { message = "comptime fold: a dynamic format spec is not folded (#comptime-fold)" }
+        _ => cf_format_none(v, hole_ty)
+    }
+}
+
+/**
+ * cf_is_const_literal — true iff `e` is a bare const literal a folded interpolation hole may render: an
+ * INTEGER number (a float literal is excluded — the fold never formats floats), a bool, a str, a char or
+ * a byte literal. After Layer-1, a provably-const hole IS such a literal; a runtime hole (a param, a
+ * call, an IO result) is not, so the interpolation stays runtime.
+ *
+ * @param e  the (already Layer-1 folded) hole expression
+ * @return   whether the hole is a bare const literal the fold can render
+ * @since #comptime-fold
+ */
+fn cf_is_const_literal(e: TExpr) -> bool {
+    match e.kind {
+        TNumber as n => !n.is_float
+        TBoolLit => true

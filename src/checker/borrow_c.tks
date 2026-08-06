@@ -1,0 +1,234 @@
+// src/checker/borrow_c.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+ * @return       `single_borrow(idx)` when relevant, else `no_borrow()`
+ */
+fn param_borrow(idx: u32, t: Type, table: TypeTable) -> BorrowAcc {
+    if type_reaches_ref(t, table, teko::list::empty()) || type_is_func(t) {
+        return single_borrow(idx)
+    }
+    no_borrow()
+}
+
+/**
+ * Chase one more hop through a local's defining value — UNLESS `name` already occurs on `chain` (a
+ * self-referential / cyclic local), in which case the root is unresolvable and the walk widens (the
+ * safe direction; a genuinely cyclic definition cannot type-check as a normal value binding, but the
+ * guard keeps this PURE query total and terminating regardless).
+ *
+ * @param name   the local's name (about to be pushed onto `chain`)
+ * @param value  its defining expression
+ * @param ctx    the resolution context
+ * @param chain  the alias-resolution cycle guard so far
+ * @param table  the program's type table
+ * @return       the borrow contribution of the local's defining value, or `widen_borrow()` on a cycle
+ */
+fn resolve_local_borrow(name: str, value: TExpr, ctx: BorrowCtx, chain: []str, table: TypeTable) -> BorrowAcc {
+    if str_set_has(chain, name) { return widen_borrow() }
+    resolve_borrow(value, ctx, teko::list::push(chain, name), table)
+}
+
+/**
+ * Union the borrow contribution of every captured variable in a closure literal's capture list — a
+ * capture is resolved exactly like a bare variable read of the same name/type (`resolve_var_borrow`
+ * via a synthetic `TVar`), so a captured PARAM (Reference or opaque `Func`) marks its index and a
+ * captured LOCAL chases its one-hop alias the same way a direct tail read would.
+ *
+ * @param caps   the closure's captures
+ * @param ctx    the resolution context
+ * @param chain  the alias-resolution cycle guard
+ * @param table  the program's type table
+ * @return       the union of every capture's borrow contribution
+ */
+fn resolve_captures_borrow(caps: []TCapture, ctx: BorrowCtx, chain: []str, table: TypeTable) -> BorrowAcc {
+    mut acc = no_borrow()
+    mut i = 0
+    loop {
+        if i >= caps.len { break }
+        acc = union_borrow(acc, resolve_borrow(capture_as_var(caps[i]), ctx, chain, table))
+        i++
+    }
+    acc
+}
+
+/**
+ * Wrap a `TCapture` as the synthetic bare-variable-read `TExpr` `resolve_borrow` expects, so capture
+ * resolution reuses the exact same TVar/param/local logic a direct read would.
+ *
+ * @param c  the capture
+ * @return   a `TVar` typed expression reading `c.name` at `c.type`
+ */
+fn capture_as_var(c: TCapture) -> TExpr {
+    TExpr { kind = TVar { name = c.name; is_func = false; func_ns = "" }; type = c.type; line = 0; col = 0 }
+}
+
+/**
+ * Resolve a call in an escaping position: a call THROUGH a local closure VALUE (`is_closure_call`)
+ * names no statically-known callee, so it falls back on the call's own result type; a call to a
+ * NAMED function looks up its summary in `ctx.env` and, when found, composes it onto this call's
+ * arguments (`compose_call_borrow`) — an unsummarized callee (not yet known / a genuine external)
+ * falls back on the result type too, the same conservative default a recursive callee's caller sees
+ * before the driver has widened it explicitly.
+ *
+ * @param call         the call
+ * @param result_type  the call's own resolved result type (from the enclosing `TExpr`)
+ * @param ctx          the resolution context
+ * @param chain        the alias-resolution cycle guard
+ * @param table        the program's type table
+ * @return             the borrow contribution of the call's result
+ */
+fn resolve_call_borrow(call: TCall, result_type: Type, ctx: BorrowCtx, chain: []str, table: TypeTable) -> BorrowAcc {
+    if call.is_closure_call { return borrow_fallback(result_type, table) }
+    match borrow_summary_env_find(ctx.env, call_target_key(call)) {
+        BorrowSummary as callee => compose_call_borrow(call, callee, ctx, chain, table)
+        null => borrow_fallback(result_type, table)
+    }
+}
+
+/**
+ * Map a known callee's `returns_borrow_of` onto this call's actual arguments (the bottom-up
+ * composition, §B2.1(b)): a `returns_all` callee widens the caller's contribution too; otherwise
+ * union, over each borrowed callee parameter index, the borrow contribution of the ARGUMENT actually
+ * passed there (so a caller passing one of ITS OWN params through inherits that param's index).
+ *
+ * @param call    the call
+ * @param callee  the callee's own summary
+ * @param ctx     the resolution context
+ * @param chain   the alias-resolution cycle guard
+ * @param table   the program's type table
+ * @return        the composed borrow contribution
+ */
+fn compose_call_borrow(call: TCall, callee: BorrowSummary, ctx: BorrowCtx, chain: []str, table: TypeTable) -> BorrowAcc {
+    if callee.returns_all { return widen_borrow() }
+    mut acc = no_borrow()
+    mut i = 0
+    loop {
+        if i >= callee.returns_borrow_of.len { break }
+        let argi = callee.returns_borrow_of[i] to u64
+        if argi < call.args.len {
+            acc = union_borrow(acc, resolve_borrow(call.args[argi], ctx, chain, table))
+        }
+        i++
+    }
+    acc
+}
+
+/**
+ * The qualified lookup key for a call's static target: its resolved namespace + the callee path's
+ * last segment (the bare function name). Meaningless (and never consulted) for a closure call.
+ *
+ * @param c  the call
+ * @return   `qualify(c.call_ns, <bare callee name>)`
+ */
+fn call_target_key(c: TCall) -> str {
+    qualify(c.call_ns, call_last_segment(c.callee))
+}
+
+/**
+ * The last path segment of a call's callee — the bare function name a qualified or bare reference
+ * ultimately names. `""` for a (never-occurring) empty path.
+ *
+ * @param p  the callee path
+ * @return   its last segment's name, or `""` if `p` has no segments
+ */
+fn call_last_segment(p: parser::Path) -> str {
+    if p.segments.len == 0 { return "" }
+    p.segments[p.segments.len - 1].name
+}
+
+/**
+ * Union the borrow contribution of every element of an expression list (a struct-init's field
+ * values, or an array literal's elements) — any one reaching a parameter makes the WHOLE aggregate
+ * borrow it, since a struct-init/array-lit escapes as one value.
+ *
+ * @param vals   the component expressions
+ * @param ctx    the resolution context
+ * @param chain  the alias-resolution cycle guard
+ * @param table  the program's type table
+ * @return       the union of every element's borrow contribution
+ */
+fn resolve_expr_list_borrow(vals: []TExpr, ctx: BorrowCtx, chain: []str, table: TypeTable) -> BorrowAcc {
+    mut acc = no_borrow()
+    mut i = 0
+    loop {
+        if i >= vals.len { break }
+        acc = union_borrow(acc, resolve_borrow(vals[i], ctx, chain, table))
+        i++
+    }
+    acc
+}
+
+/**
+ * Project an array literal's elements down to their bare typed expressions (dropping the
+ * spread/is_spread tag — irrelevant to borrow resolution, which only cares about each element's
+ * own value).
+ *
+ * @param al  the typed array literal
+ * @return    `al.elements[i].expr`, in order
+ */
+fn array_lit_values(al: TArrayLit) -> []TExpr {
+    mut out: []TExpr = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= al.elements.len { break }
+        out = teko::list::push(out, al.elements[i].expr)
+        i++
+    }
+    out
+}
+
+/**
+ * Collect every ESCAPING/RETURN-VALUE candidate expression of a statement block: every `TReturn`'s
+ * value (wherever nested — a `return` always escapes, mirroring `escape.tks`'s `mark_stmt`), plus,
+ * when `tail` is true, the block's TRAILING value-bearing expr-statement (the implicit return).
+ * Descends into `if`/`match` branch bodies (as further tail blocks when in tail position, else only
+ * hunting for a nested `return`) and into loop/defer/adopt bodies (never in tail position — their
+ * own trailing value is not returned, but an explicit `return` inside one still is). A `TLambda`'s
+ * body is NEVER descended into (its `return`s target the closure, not this function — mirrors the
+ * spine's own shallow-closure-body bound).
+ *
+ * @param body  the statement block
+ * @param tail  true iff this block's trailing value is this function's implicit return
+ * @param acc   the escaping expressions collected so far
+ * @return      `acc` extended with this block's escaping expressions
+ */
+fn collect_escaping_values(body: []TStatement, tail: bool, acc: []TExpr) -> []TExpr {
+    mut out = acc
+    mut i = 0
+    loop {
+        if i >= body.len { break }
+        let is_last = i + 1 == body.len
+        out = collect_from_stmt(body[i], tail && is_last, out)
+        i++
+    }
+    out
+}
+
+/**
+ * Collect the escaping expressions named by one statement. `TReturn` always contributes (any
+ * position); a `TExprStmt` contributes only in `is_tail` position (else it is only scanned for a
+ * NESTED `return`); a `TBinding`/`TAssign`'s RHS is never itself a return candidate, but is still
+ * scanned for a nested `return` inside an `if`/`match` RHS; loop/defer/adopt bodies recurse with
+ * `tail = false`.
+ *
+ * @param s        the statement
+ * @param is_tail  true iff `s` is the last statement of a tail block
+ * @param acc      the escaping expressions collected so far
+ * @return         `acc` extended with `s`'s escaping expressions
+ */
+fn collect_from_stmt(s: TStatement, is_tail: bool, acc: []TExpr) -> []TExpr {
+    match s {
+        TReturn as r => if r.has_value { collect_from_expr_tail(r.value, acc) } else { acc }
+        TExprStmt as es => if is_tail { collect_from_expr_tail(es.expr, acc) } else { collect_nested_returns_expr(es.expr, acc) }
+        TBinding as b => collect_nested_returns_expr(b.value, acc)
+        TAssign as a => collect_nested_returns_expr(a.value, acc)
+        TLoopStmt as l => collect_escaping_values(l.body, false, collect_escaping_values(l.init, false, acc))
+        TDeferStmt as d => collect_escaping_values(d.body, false, acc)
+        TAdoptStmt as ad => collect_escaping_values(ad.body, false, acc)
+        TBreakStmt => acc
+        TContinueStmt => acc
+    }
+}
+

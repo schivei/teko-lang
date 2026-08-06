@@ -1,0 +1,204 @@
+// src/checker/cf_field.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+/**
+ * cf_fold_cast_operand — the fold's cast-operand gate: a bare boolean literal (the sole
+ * `bool -> numeric` cast) or an integer op-tree the fold evaluates (`cf_fold_int`, so a const index
+ * under a cast collapses). The agg-aware mirror of `cf_cast_operand_ok`.
+ *
+ * @param e    the cast operand to classify
+ * @param agg  the module-aggregate resolution table
+ * @return     whether the operand is a foldable integer op-tree or a bare boolean literal
+ * @since #comptime-fold
+ */
+fn cf_fold_cast_operand(e: TExpr, agg: AggConstMap) -> bool {
+    match e.kind {
+        TBoolLit => true
+        _ => cf_fold_int(e, agg)
+    }
+}
+
+/**
+ * cv_int_to_numint — reconstruct the sign-magnitude literal carrier a `CVInt` of
+ * width/signedness `info` re-emits as, in the SAME representation the parser/typer use (an
+ * unsigned value as its non-negative magnitude, a signed value as its signed magnitude).
+ * Replaces `cv_int_to_i128` (drop-128, 2026-07-24): with `info.width <= 64` guaranteed
+ * (`int_info`'s gate), every value this returns is provably `<= u64::MAX` in magnitude, so —
+ * unlike the old i128 carrier, which had no literal form for a u128 whose top bit was set —
+ * this NEVER returns null; the return type stays `| null` for the caller's shape (a future
+ * fold form may reintroduce an unrepresentable case). Every returned carrier round-trips:
+ * fed back to the pipeline as a `TNumber` of the same type, it lowers to exactly the folded
+ * bits on both engines, because it is indistinguishable from a hand-written literal the
+ * existing lowering already emits correctly.
+ *
+ * @param bits  the value's two's-complement bits
+ * @param info  the value's width/signedness
+ * @return      the literal carrier (never null; see above)
+ * @since #comptime-fold
+ */
+fn cv_int_to_numint(bits: u64, info: IntInfo) -> parser::NumInt | null {
+    let v = mask_to_width(bits, info.width)
+    if !info.is_signed { return parser::numint_of_u64(v) }
+    if !bit_set(v, info.width - 1) { return parser::numint_of_u64(v) }
+    if is_min_bits(v, info) { return parser::NumInt { neg = true; mag = msb_value(info.width) } }
+    parser::NumInt { neg = true; mag = twos_neg(v, info.width) }
+}
+
+/**
+ * literal_of — reconstruct a literal `TExpr` from a computed `ConstValue`, typed as `ty` and
+ * positioned at (`line`, `col`) — the inverse of `eval_const` used by the fold to splice a folded
+ * literal back into the typed AST. CF2 reconstructs the INTEGER case (a `CVInt` becomes a `TNumber`
+ * whose carrier is re-derived from the bits under `ty`); every non-integer kind (folded only from a
+ * later crumb) returns null, signalling the caller to leave the original op-tree unfolded (behavior
+ * preserved). The produced node is indistinguishable to lowering from a hand-written literal — zero
+ * runtime.
+ *
+ * @param v     the computed comptime value
+ * @param ty    the type the fold site resolved (the reconstructed literal's `.type`)
+ * @param line  the original expression's source line (diagnostics/position)
+ * @param col   the original expression's source column
+ * @return      a literal `TExpr` carrying `v` typed `ty`, or null when `v` has no literal form
+ * @since #comptime-fold
+ */
+fn literal_of(v: ConstValue, ty: Type, line: u32, col: u32) -> TExpr | null {
+    match v.kind {
+        CVInt as ci => int_literal_of(ci, ty, line, col)
+        _ => null
+    }
+}
+
+/**
+ * int_literal_of — reconstruct a `TNumber` literal from an integer comptime value `ci`, typed `ty`
+ * and positioned at (`line`, `col`), or null when `ty` is not an integer type the fold carries.
+ *
+ * @param ci    the integer comptime value
+ * @param ty    the reconstructed literal's type
+ * @param line  the original expression's source line
+ * @param col   the original expression's source column
+ * @return      the `TNumber` literal, or null when unrepresentable
+ * @since #comptime-fold
+ */
+fn int_literal_of(ci: CVInt, ty: Type, line: u32, col: u32) -> TExpr | null {
+    match int_info(ty) {
+        error => null
+        IntInfo as info => match cv_int_to_numint(ci.bits, info) {
+            null => null
+            parser::NumInt as val => TExpr { kind = TNumber { is_float = false; value = val; fval = 0.0 }; type = ty; line = line; col = col }
+        }
+    }
+}
+
+/**
+ * fold_expr — the Layer-1a fold driver (CF2): rewrite `e` so every name-free, provably-const INTEGER
+ * op-tree becomes the literal it evaluates to (`literal_of(eval_const(e))`), and every other node is
+ * rebuilt around its folded children (a partially-const tree folds its const sub-trees). Composed
+ * AFTER `inline_rw_expr`'s reference substitution, so a module const's op-tree (e.g. `~(0 to u64)`,
+ * substituted at each use) collapses to its literal on BOTH engines — the VM loads an immediate
+ * instead of re-executing the op-tree. TOTAL over `TExprKind`. A provably-const overflow / ÷0 /
+ * out-of-range surfaces as a located compile error (M.1), propagated from `eval_const`.
+ *
+ * @param e      the typed expression to fold (post reference-substitution)
+ * @param table  the type table (forwarded to the evaluator; unused for the integer subset)
+ * @param env    the environment (unused for the name-free integer subset the fold admits)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       the folded expression (a literal where provably const), or a located error
+ * @throws       a located error when a folded constant overflows / divides by zero / is out of range
+ * @since #comptime-fold
+ */
+pub fn fold_expr(e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExpr | error {
+    match e.kind {
+        TUnary => fold_op_node(e, table, env, agg)
+        TBinary => fold_op_node(e, table, env, agg)
+        TCast => fold_op_node(e, table, env, agg)
+        _ => fold_children(e, table, env, agg)
+    }
+}
+
+/**
+ * fold_op_node — fold a `~`/`-`/binary/cast node: when the whole subtree is a foldable integer
+ * op-tree (`cf_fold_int`, which admits a const index under the op-tree so an enclosing cast over
+ * `G[0]` collapses), evaluate it and splice the resulting literal; otherwise (or when the value has
+ * no literal form) rebuild the node around its folded children.
+ *
+ * @param e      the operator/cast expression to fold
+ * @param table  the type table (forwarded to the evaluator)
+ * @param env    the environment (forwarded to the evaluator)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       the folded literal, or the node rebuilt around folded children, or a located error
+ * @since #comptime-fold
+ */
+fn fold_op_node(e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExpr | error {
+    if !cf_fold_int(e, agg) { return fold_children(e, table, env, agg) }
+    match eval_const(e, table, env, agg) {
+        error as x => return x
+        ConstValue as v => fold_splice(v, e, table, env, agg)
+    }
+}
+
+/**
+ * fold_splice — splice a folded value `v` into the AST as a literal at `e`'s type/position, or (when
+ * `v` has no literal form) rebuild `e` around its folded children so foldable sub-trees still fold.
+ *
+ * @param v      the folded comptime value
+ * @param e      the original expression (its type/position for the reconstructed literal)
+ * @param table  the type table (forwarded to the child rebuild)
+ * @param env    the environment (forwarded to the child rebuild)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       the reconstructed literal, or `e` rebuilt around folded children, or a located error
+ * @since #comptime-fold
+ */
+fn fold_splice(v: ConstValue, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExpr | error {
+    match literal_of(v, e.type, e.line, e.col) {
+        TExpr as lit => lit
+        null => fold_children(e, table, env, agg)
+    }
+}
+
+/**
+ * fold_children — rebuild `e` around its folded children, recursing `fold_expr` into every
+ * sub-expression, block and format spec (the structural mirror of `inline_rw_expr`, but
+ * error-propagating so a folded overflow/÷0 surfaces). TOTAL over `TExprKind`; a leaf carries no
+ * foldable child and is returned unchanged.
+ *
+ * @param e      the typed expression to rebuild
+ * @param table  the type table (forwarded to each child fold)
+ * @param env    the environment (forwarded to each child fold)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       `e` rebuilt with folded children, or a located error from a child fold
+ * @since #comptime-fold
+ */
+fn fold_children(e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExpr | error {
+    match e.kind {
+        TNumber => e
+        TStrLit => e
+        TByteLit => e
+        TCharLit => e
+        TBoolLit => e
+        TNullLit => e
+        TPathExpr => e
+        TVar => e
+        TBinary as b => fold_binary(b, e, table, env, agg)
+        TUnary as u => fold_unary(u, e, table, env, agg)
+        TCompare as c => fold_compare(c, e, table, env, agg)
+        TCall as cl => fold_call(cl, e, table, env, agg)
+        TIfExpr as f => fold_if(f, e, table, env, agg)
+        TMatchExpr as m => fold_match(m, e, table, env, agg)
+        TCast as c => fold_cast(c, e, table, env, agg)
+        TFieldAccess as fa => fold_field(fa, e, table, env, agg)
+        TSafeFieldAccess as sfa => fold_safe_field(sfa, e, table, env, agg)
+        TCoalesce as co => fold_coalesce(co, e, table, env, agg)
+        TStructInit as si => fold_struct(si, e, table, env, agg)
+        TIndex as ix => fold_index(ix, e, table, env, agg)
+        TInterp as in => fold_rw_interp(in, e, table, env, agg)
+        TInExpr as n => fold_in(n, e, table, env, agg)
+        TArrayLit as a => fold_array(a, e, table, env, agg)
+        TLambda as lam => fold_lambda(lam, e, table, env, agg)
+        TBorrow as b => fold_borrow(b, e, table, env, agg)
+    }
+}
+
+/**
+ * fold_exprs — fold every expression in `xs` in order, propagating the first located error.
+ *

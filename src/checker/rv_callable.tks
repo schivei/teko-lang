@@ -1,0 +1,206 @@
+// src/checker/rv_rv_callable.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+ * @param members  the resolved union members (source order)
+ * @return         the members with any bare-null member collapsed to a single leading `Null`
+ */
+fn union_normalize_null(members: []Type) -> []Type {
+    mut has_null = false
+    mut i = 0
+    loop {
+        if i >= members.len { break }
+        if from_is_bare_null(members[i]) { has_null = true }
+        i++
+    }
+    if !has_null { return members }
+    mut out: []Type = teko::list::push(teko::list::empty(), Null { })
+    mut j = 0
+    loop {
+        if j >= members.len { break }
+        if !from_is_bare_null(members[j]) { out = teko::list::push(out, members[j]) }
+        j++
+    }
+    out
+}
+
+/**
+ * Collect every member of `xs` except the one at index `skip` — the SIBLING set a variant
+ * member is validated against (`variant_member_admissible` needs the other members to decide the
+ * shape-aware R2 relaxation for a `Reference`). Preserves source order of the retained members.
+ *
+ * @param xs    the full resolved member list
+ * @param skip  the index whose member is being validated (excluded from the result)
+ * @return      the members of `xs` other than `xs[skip]`, in source order
+ */
+fn variant_siblings(xs: []Type, skip: i64) -> []Type {
+    mut out: []Type = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        if i != skip { out = teko::list::push(out, xs[i]) }
+        i++
+    }
+    out
+}
+
+/**
+ * Decide whether a resolved `member` may stand in a union alongside `siblings` (the C3 replacement
+ * for the flat variant-member gate). `void` and a nullable `T?` are never members. A `Reference` is
+ * admitted ONLY as the never-null handle of a two-member `Ref<T> | null` union (R2 relaxed, owner
+ * D3) — exactly one sibling, itself a `Null`; every other stored `Reference` stays rejected (R4). An
+ * interface `Named` remains an honest stop (the #28 S4 carve-out — interface-in-union rebases on top
+ * of null-union and relaxes this arm itself). `Null` and ordinary value members are admissible.
+ *
+ * NOTE (divergence from the design signature, reported to the integrator): the design return is
+ * `null | error`; the seed-sequencing law forbids a null-union VALUE in production `src/` before C5,
+ * so the seed-safe legacy `error?` (Optional) is used — `null` = admissible, an `error` = rejected.
+ * The caller match (`{ error as e => …; null => … }`) is byte-identical between the two spellings.
+ *
+ * @param member    the resolved candidate member type
+ * @param siblings  the other resolved members already collected for this union
+ * @param table     the type table (interface-name resolution)
+ * @return          null when `member` is admissible; an error naming why not
+ * @throws          error when `member` is `void`, a nullable, an out-of-shape `Reference`, or an interface
+ * @since 0.3.0.30 (null-union C3)
+ */
+fn variant_member_admissible(member: Type, siblings: []Type, table: TypeTable) -> error | null {
+    match member {
+        Void => return error { message = "a variant member may not be `void`" }
+        Optional => return error { message = "a variant member may not be nullable (`T?`) — use `T | …` and mark the whole type `?`" }
+        Reference => {
+            if siblings.len == 1 {
+                match siblings[0] { Null => return null; _ => { } }
+            }
+            return error { message = "a reference cannot be stored in a struct/variant/collection" }
+        }
+        Named as nm => {
+            if is_interface_name(nm.name, table) {
+                return error { message = "an interface cannot be a variant member yet — bind the interface value on its own (no `I | error` unions)" }
+            }
+            null
+        }
+        _ => null
+    }
+}
+
+// resolve a syntactic TypeExpr to a pure semantic Type (recursive — B.8).
+// (#109 W1) `ref_ns` = the REFERENCING namespace (the namespace of the code that wrote `te`).
+// Threaded down every recursion (slice element / union members / fn-type params+ret / optional
+// inner) and into resolve_named/resolve_generic_inst unchanged. Reserved for W2's R0-R5 rules;
+// the W1 body IGNORES it (behavior byte-identical).
+pub fn resolve_type(te: parser::TypeExpr, table: TypeTable, ref_ns: str) -> Type | error {
+    // (#109 W1) reserved for the R0-R5 rules (W2)
+    match te {
+        // A plain name resolves as before; generic type-ARGUMENTS `Box<i64>` (S4 type-generics)
+        // resolve to the nominal instance `Named{Box__g__i64}` — the concrete decl is stamped by the
+        // instantiation pass / mono (blocker #1: reuse the Named case, no new Type variant).
+        parser::NamedType as nt => {
+            if named_type_is_null(nt) { Null { } }
+            else if nt.args.len == 0 { resolve_named(nt.path, table, ref_ns) }
+            else { resolve_generic_inst(nt, table, ref_ns) }
+        }
+        parser::SliceType as st => {
+            let el = match resolve_type(st.element, table, ref_ns) {
+                Type as t => t
+                error as e => return e
+            }
+            // (MEM Step 0, R4) ESCAPE GATE — a reference cannot be a collection element.
+            match el { Reference => return error { message = "a reference cannot be stored in a struct/variant/collection" }; _ => { } }
+            Slice { element = el }
+        }
+        parser::UnionType as ut => {
+            mut members: []Type = teko::list::empty()
+            mut i = 0
+            loop {
+                if i >= ut.members.len { break }
+                let m = match resolve_type(ut.members[i], table, ref_ns) {
+                    Type as t => t
+                    error as e => return e
+                }
+                members = teko::list::push(members, m)
+                i++
+            }
+            mut j = 0
+            loop {
+                if j >= members.len { break }
+                match variant_member_admissible(members[j], variant_siblings(members, j), table) {
+                    error as e => return e
+                    null => { }
+                }
+                j++
+            }
+            Variant { members = union_normalize_null(members) }
+        }
+        // (W10a) FunctionType `(A, B) -> R` → Func { params; ret ; variadic = false }. The return MAY be `void`
+        // (a function value can return nothing); params must be COMPLETE value types (void/ref
+        // rejected — a ref cannot be stored, R4; void is not a value, M.3).
+        parser::FunctionType as fnt => {
+            mut ps: []Type = teko::list::empty()
+            mut i = 0
+            loop {
+                if i >= fnt.params.len { break }
+                let pt = match resolve_type(fnt.params[i], table, ref_ns) { Type as t => t; error as e => return e }
+                match pt {
+                    Void => return error { message = "a function type parameter may not be `void` (M.3)" }
+                    Reference => return error { message = "a reference cannot be a function-type parameter (a ref cannot escape, R4)" }
+                    _ => { }
+                }
+                ps = teko::list::push(ps, pt)
+                i++
+            }
+            let rt = match resolve_type(fnt.ret, table, ref_ns) { Type as t => t; error as e => return e }
+            return Func { params = ps; ret = rt; variadic = false; param_names = []; n_required = (ps).len; defaults = [] }
+        }
+        parser::OptionalType as ot => {
+            // OptionalType `T?` → Optional { inner } (REBOOT_PLAN §202). The variant case
+            // above already rejects an optional as a variant member; here we just build it.
+            let in = match resolve_type(ot.inner, table, ref_ns) {
+                Type as t => t
+                error as e => return e
+            }
+            // `void?` is illegal (void is not a value — M.3); `T??` collapses to `T?`.
+            // (MEM Step 0, R2) ESCAPE GATE — a reference is NEVER null, so `Ref<T>?` is rejected.
+            match in {
+                Void => return error { message = "`void` cannot be made optional (`void?`) — void is not a value (M.3)" }
+                Reference => return error { message = "a reference cannot be nullable (a ref is never null, R2)" }
+                Optional => return in   // `T??` collapses to `T?`
+                _ => Optional { inner = in }
+            }
+        }
+    }
+}
+
+/**
+ * prim_name — (C1.8) the surface spelling of a prim kind — the same names `builtin_type`
+ * accepts (`scope.tks`), so a rendered mismatch reads in the user's own vocabulary.
+ *
+ * @param k  the prim kind to render
+ * @return   its surface spelling
+ */
+fn prim_name(k: PrimKind) -> str {
+    match k {
+        U8 => "u8"; U16 => "u16"; U32 => "u32"; U64 => "u64"
+        I8 => "i8"; I16 => "i16"; I32 => "i32"; I64 => "i64"
+        F32 => "f32"; F64 => "f64"
+        Bool => "bool"
+    }
+}
+
+// (S4) a concrete type → its symbol fragment for a mangled generic-instance name. Prim → its
+// surface spelling (i64/…), Str/Byte/Error/Void/Ptr/Uptr → fixed words, Named → the name, Slice →
+// "slice_"+elem, Optional → "opt_"+inner. Total — always yields a symbol-safe fragment. Shared by
+// resolve (type instantiation) and the mono pass so a use and its stamped decl agree byte-for-byte.
+// (#109 W3) a symbol-safe fragment of a canonical name: each "::" → "__". Keeps a generic-instance
+// name (Gen__g__teko__emit__Reader) a valid C identifier AND distinct from Gen<teko::io::Reader> —
+// name_last_segment would collide the two. Slice-based (no byte-append-to-str primitive exists).
+pub fn mangle_ns_frag(name: str) -> str {
+    mut out = ""
+    mut start: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i + 1 >= name.len { break }
+        if name[i] == b':' && name[i + 1] == b':' {
+            out = out ~ teko::str::slice(name, start, i) ~ "__"   // (#148) builtin slice — see name_last_segment
+            i = i + 2

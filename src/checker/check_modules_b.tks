@@ -1,0 +1,198 @@
+// src/checker/check_modules_b.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+ * @return       every module-system diagnostic, in program order (empty when the program is clean)
+ */
+fn check_modules(prog: parser::Program, table: TypeTable) -> []str {
+    let al = build_aliases(prog)
+    mut diags: []str = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= prog.items.len { break }
+        diags = concat_diags(diags, item_module_diags(prog.items[i], table, al))
+        i++
+    }
+    diags
+}
+
+/**
+ * The module-system diagnostics ONE top-level item contributes. A `use` item and a loose statement
+ * declare no type reference of their own and contribute none.
+ *
+ * @param it     the top-level item
+ * @param table  the collected type table
+ * @param al     the file's alias bindings
+ * @return       the item's diagnostics, in declaration order
+ * @since 0.3.1
+ */
+fn item_module_diags(it: parser::Item, table: TypeTable, al: []AliasBind) -> []str {
+    match it.content {
+        parser::Function as f => fn_module_diags(it, f, table, al)
+        parser::TypeDecl as d => type_module_diags(it, d, table, al)
+        _ => teko::list::empty()
+    }
+}
+
+/**
+ * The located diagnostic ONE type-expression contributes, or none when it is legal.
+ *
+ * (C1-POS/C1.8/E2) The inner error's own line/col wins over the declaration's, and the message is
+ * baked to `file:line:col: …` (W-loc-2) so the driver prints WHERE even when it cannot read the
+ * source back.
+ *
+ * @param it     the declaring item (its source file and namespace)
+ * @param line   the declaration's line, used when the error carries none
+ * @param col    the declaration's column, used when the error carries none
+ * @param te     the type-expression to check
+ * @param table  the table to resolve against (WITH type-params in scope, where the caller has them)
+ * @param al     the file's alias bindings
+ * @return       the diagnostic, or an empty list
+ * @since 0.3.1
+ */
+fn texpr_module_diags(it: parser::Item, line: u32, col: u32, te: parser::TypeExpr, table: TypeTable, al: []AliasBind) -> []str {
+    match check_texpr(te, it.namespace, table, al) {
+        error as e => one_diag(located_diag(it.file, line, col, e))
+        null => teko::list::empty()
+    }
+}
+
+/**
+ * A top-level function's type references: every parameter annotation, then the return type. (S4)
+ * The function's generic type-params enter the table as local types of the using namespace, so a
+ * signature written in terms of `T` checks against `T` rather than reporting it unqualified.
+ *
+ * @param it     the function's item
+ * @param f      the parsed function
+ * @param table  the collected type table
+ * @param al     the file's alias bindings
+ * @return       the function's diagnostics, in signature order
+ * @since 0.3.1
+ */
+fn fn_module_diags(it: parser::Item, f: parser::Function, table: TypeTable, al: []AliasBind) -> []str {
+    let ftbl = type_param_table(f.type_params, f.type_constraints, it.namespace, table)
+    mut diags: []str = teko::list::empty()
+    mut p = 0
+    loop {
+        if p >= f.params.len { break }
+        diags = concat_diags(diags, texpr_module_diags(it, f.line, f.col, f.params[p].type_ann, ftbl, al))
+        p++
+    }
+    if !f.has_return { return diags }
+    concat_diags(diags, texpr_module_diags(it, f.line, f.col, f.return_type, ftbl, al))
+}
+
+/**
+ * A type declaration's type references, per body kind: a struct's and a class's FIELDS (W10b.CLASS
+ * — a class's methods are checked where a struct's are, at the item walk), a variant's member, an
+ * alias's right-hand side, a flags type's member cap, an interface's method SIGNATURES (W10b.IF —
+ * each typed param plus the return), and a trait's fields AND method signatures (TR0 — a trait is
+ * struct-shaped with interface-shaped signatures). An enum declares no type-expression and a
+ * `#extern` handle is opaque (C7.1a) — both contribute none.
+ *
+ * @param it     the declaration's item
+ * @param d      the parsed type declaration
+ * @param table  the collected type table
+ * @param al     the file's alias bindings
+ * @return       the declaration's diagnostics, in declaration order
+ * @since 0.3.1
+ */
+fn type_module_diags(it: parser::Item, d: parser::TypeDecl, table: TypeTable, al: []AliasBind) -> []str {
+    match d.body {
+        parser::StructBody as sb => fields_module_diags(it, d, sb.fields, table, al)
+        parser::VariantBody as vb => texpr_module_diags(it, d.line, d.col, vb.type_expr, table, al)
+        parser::AliasBody as ab => texpr_module_diags(it, d.line, d.col, ab.alias, table, al)
+        parser::FlagsBody as fb => flags_cap_diags(it, d, fb)
+        parser::ClassBody as cb => fields_module_diags(it, d, cb.fields, table, al)
+        parser::InterfaceBody as ib => method_sigs_module_diags(it, d, ib.methods, table, al)
+        parser::TraitBody as trb => concat_diags(fields_module_diags(it, d, trb.fields, table, al), method_sigs_module_diags(it, d, trb.methods, table, al))
+        _ => teko::list::empty()
+    }
+}
+
+/**
+ * The declared-member cap of a `flags` type, as a located diagnostic list.
+ *
+ * @param it  the declaration's item
+ * @param d   the parsed type declaration
+ * @param fb  the flags body
+ * @return    the cap diagnostic, or an empty list
+ * @since 0.3.1
+ */
+fn flags_cap_diags(it: parser::Item, d: parser::TypeDecl, fb: parser::FlagsBody) -> []str {
+    match check_flags_member_cap(fb) {
+        error as e => one_diag(located_diag(it.file, d.line, d.col, e))
+        null => teko::list::empty()
+    }
+}
+
+/**
+ * Every field annotation of a struct/class/trait body, in declaration order.
+ *
+ * @param it      the declaration's item
+ * @param d       the parsed type declaration
+ * @param fields  the body's fields
+ * @param table   the collected type table
+ * @param al      the file's alias bindings
+ * @return        the fields' diagnostics, in declaration order
+ * @since 0.3.1
+ */
+fn fields_module_diags(it: parser::Item, d: parser::TypeDecl, fields: []parser::Field, table: TypeTable, al: []AliasBind) -> []str {
+    mut diags: []str = teko::list::empty()
+    mut k = 0
+    loop {
+        if k >= fields.len { break }
+        diags = concat_diags(diags, texpr_module_diags(it, d.line, d.col, fields[k].type_ann, table, al))
+        k++
+    }
+    diags
+}
+
+/**
+ * Every method SIGNATURE of an interface or trait body: each explicitly typed parameter, then the
+ * return type. An untyped parameter is a receiver, not an annotation, and is skipped.
+ *
+ * @param it       the declaration's item
+ * @param d        the parsed type declaration
+ * @param methods  the body's method signatures
+ * @param table    the collected type table
+ * @param al       the file's alias bindings
+ * @return         the signatures' diagnostics, in declaration order
+ * @since 0.3.1
+ */
+fn method_sigs_module_diags(it: parser::Item, d: parser::TypeDecl, methods: []parser::Function, table: TypeTable, al: []AliasBind) -> []str {
+    mut diags: []str = teko::list::empty()
+    mut mi = 0
+    loop {
+        if mi >= methods.len { break }
+        diags = concat_diags(diags, one_method_sig_module_diags(it, d, methods[mi], table, al))
+        mi++
+    }
+    diags
+}
+
+/**
+ * ONE method signature's type references: each explicitly typed parameter, then the return type.
+ *
+ * @param it     the declaration's item
+ * @param d      the parsed type declaration
+ * @param m      the method signature
+ * @param table  the collected type table
+ * @param al     the file's alias bindings
+ * @return       the signature's diagnostics, in signature order
+ * @since 0.3.1
+ */
+fn one_method_sig_module_diags(it: parser::Item, d: parser::TypeDecl, m: parser::Function, table: TypeTable, al: []AliasBind) -> []str {
+    mut diags: []str = teko::list::empty()
+    mut pi = 0
+    loop {
+        if pi >= m.params.len { break }
+        if m.params[pi].has_type {
+            diags = concat_diags(diags, texpr_module_diags(it, d.line, d.col, m.params[pi].type_ann, table, al))
+        }
+        pi++
+    }
+    if !m.has_return { return diags }
+    concat_diags(diags, texpr_module_diags(it, d.line, d.col, m.return_type, table, al))
+}

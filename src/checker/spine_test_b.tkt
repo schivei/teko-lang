@@ -1,0 +1,265 @@
+// src/checker/spine_test_b.tkt  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+
+/**
+ * A borrow whose referent is `pt = PtAdopter` (an `adopt { }`-confined allocation) is REJECTED by
+ * `ref_target_outlives` even for a `BfParam` borrow (§5.1 — the ADOPT escape-UAF), while a `PtFrame`
+ * / `PtRoot` / `PtParam` / `PtTop` referent is NOT rejected on that axis.
+ */
+#test fn spine_ref_target_outlives_rejects_adopter_confined_referent() {
+    let params = teko::list::push(teko::list::empty(), sp_ref_param("r"))
+    let base = fn_spine(sp_fn(params, teko::list::empty()))
+    let ri = cell_of(base, "r") to u32
+    let adopter_pt = sp_set_pt(base.pt, ri, sp_pt_adopter(0))
+    let escaping = Spine { cells = base.cells; pt = adopter_pt; bf = base.bf; us = base.us }
+    teko::assert::is_false(ref_target_outlives(escaping, ri, ri))
+    let root_pt = sp_set_pt(base.pt, ri, sp_pt_root())
+    let sound = Spine { cells = base.cells; pt = root_pt; bf = base.bf; us = base.us }
+    teko::assert::is_true(ref_target_outlives(sound, ri, ri))
+}
+
+/**
+ * A `PtFrame` points-to value.
+ *
+ * @return PointsTo { PtFrame { } }  the frame allocation site
+ */
+fn sp_pt_frame() -> PointsTo { PtFrame { } }
+
+/**
+ * A `PtRoot` points-to value.
+ *
+ * @return PointsTo { PtRoot { } }  the root allocation site
+ */
+fn sp_pt_root() -> PointsTo { PtRoot { } }
+
+/**
+ * A `PtParam` points-to value for slot `i`.
+ *
+ * @param u32 i  the parameter slot
+ * @return PointsTo { PtParam { id = PtParamId { index = i } } }  the param allocation site
+ */
+fn sp_pt_param(i: u32) -> PointsTo { PtParam { id = PtParamId { index = i } } }
+
+/**
+ * A `PtAdopter` points-to value for region `id` (concrete, not the `⊤` fallback).
+ *
+ * @param u32 id  the adopter region id
+ * @return PointsTo { PtAdopter { id = PtAdopterId { region = id; top = false } } }  the adopter allocation site
+ */
+fn sp_pt_adopter(id: u32) -> PointsTo { PtAdopter { id = PtAdopterId { region = id; top = false } } }
+
+/**
+ * A `PtTop` points-to value.
+ *
+ * @return PointsTo { PtTop { } }  the joined-over allocation site
+ */
+fn sp_pt_top() -> PointsTo { PtTop { } }
+
+/**
+ * Is a points-to value `PtTop`?
+ *
+ * @param PointsTo p  the points-to value
+ * @return bool { match p { PtTop => true; _ => false } }  true iff `PtTop`
+ */
+fn sp_pt_is_top(p: PointsTo) -> bool { match p { PtTop => true; _ => false } }
+
+/**
+ * A `BfTop` borrowed-from value.
+ *
+ * @return BorrowedFrom { BfTop { } }  the joined-over borrowed-from value
+ */
+fn sp_bf_top() -> BorrowedFrom { BfTop { } }
+
+/**
+ * A `UsUnique` unique-vs-shared value.
+ *
+ * @return Unique { UsUnique { } }  the unique value
+ */
+fn sp_us_unique() -> Unique { UsUnique { } }
+
+/**
+ * A `UsShared` unique-vs-shared value.
+ *
+ * @return Unique { UsShared { } }  the shared value
+ */
+fn sp_us_shared() -> Unique { UsShared { } }
+
+/**
+ * A `UsTop` unique-vs-shared value.
+ *
+ * @return Unique { UsTop { } }  the joined-over unique-vs-shared value
+ */
+fn sp_us_top() -> Unique { UsTop { } }
+
+/**
+ * Is a unique-vs-shared value `UsUnique`?
+ *
+ * @param Unique u  the value
+ * @return bool { match u { UsUnique => true; _ => false } }  true iff `UsUnique`
+ */
+fn sp_us_is_unique(u: Unique) -> bool { match u { UsUnique => true; _ => false } }
+
+/**
+ * Is a unique-vs-shared value `UsShared`?
+ *
+ * @param Unique u  the value
+ * @return bool { match u { UsShared => true; _ => false } }  true iff `UsShared`
+ */
+fn sp_us_is_shared(u: Unique) -> bool { match u { UsShared => true; _ => false } }
+
+/**
+ * Is a unique-vs-shared value `UsTop`?
+ *
+ * @param Unique u  the value
+ * @return bool { match u { UsTop => true; _ => false } }  true iff `UsTop`
+ */
+fn sp_us_is_top(u: Unique) -> bool { match u { UsTop => true; _ => false } }
+
+/**
+ * Return the points-to axis with index `i` replaced by `v` (a test-local rebuild-by-copy, mirroring
+ * the module's `set_us`).
+ *
+ * @param []PointsTo pt  the points-to axis
+ * @param u32 i  the cell index to replace
+ * @param PointsTo v  the new points-to value
+ * @return []PointsTo  the axis with element `i` set to `v`
+ */
+fn sp_set_pt(pt: []PointsTo, i: u32, v: PointsTo) -> []PointsTo {
+    mut acc: []PointsTo = teko::list::empty()
+    mut k = 0
+    loop {
+        if k >= pt.len { break }
+        if k to u32 == i {
+            acc = teko::list::push(acc, v)
+        } else {
+            acc = teko::list::push(acc, pt[k])
+        }
+        k++
+    }
+    acc
+}
+
+/**
+ * A `[]T` slice annotation (the parameter surface for a non-Reference collection param) is NOT a
+ * `Ref<T>` — `type_ann_is_ref` returns false.
+ *
+ * @param str name  the element type's name
+ * @return parser::TypeExpr  a `[]name` slice type annotation
+ */
+fn sp_slice_ann(name: str) -> parser::TypeExpr {
+    parser::SliceType { element = parser::NamedType { path = sp_path(name); args = teko::list::empty() } }
+}
+
+/**
+ * A `T | U` union annotation is NOT a `Ref<T>` — `type_ann_is_ref` returns false.
+ *
+ * @return parser::TypeExpr  a two-member union type annotation
+ */
+fn sp_union_ann() -> parser::TypeExpr {
+    parser::UnionType { members = teko::list::push(teko::list::push(teko::list::empty(), sp_named_ann("i64")), sp_named_ann("str")) }
+}
+
+/**
+ * A `T?` optional annotation is NOT a `Ref<T>` — `type_ann_is_ref` returns false.
+ *
+ * @return parser::TypeExpr  an optional type annotation
+ */
+fn sp_optional_ann() -> parser::TypeExpr {
+    parser::OptionalType { inner = sp_named_ann("i64") }
+}
+
+/**
+ * A `(A) -> R` function-type annotation is NOT a `Ref<T>` — `type_ann_is_ref` returns false.
+ *
+ * @return parser::TypeExpr  a function-type annotation
+ */
+fn sp_function_ann() -> parser::TypeExpr {
+    parser::FunctionType { params = teko::list::push(teko::list::empty(), sp_named_ann("i64")); ret = sp_named_ann("i64") }
+}
+
+/**
+ * A bare named-type annotation (e.g. `i64`).
+ *
+ * @param str name  the type's name
+ * @return parser::TypeExpr  a `NamedType` annotation
+ */
+fn sp_named_ann(name: str) -> parser::TypeExpr {
+    parser::NamedType { path = sp_path(name); args = teko::list::empty() }
+}
+
+/**
+ * A `NamedType` whose head is `Ref` but carries ZERO or TWO type arguments (not the legal
+ * single-arg `Ref<T>` shape) is NOT recognized as a reference by `named_head_is_ref` — the arity
+ * guard.
+ *
+ * @return parser::TypeExpr  a `Ref` named-type annotation with no type arguments
+ */
+fn sp_ref_head_no_args() -> parser::TypeExpr {
+    parser::NamedType { path = sp_path("Ref"); args = teko::list::empty() }
+}
+
+/**
+ * `type_ann_is_ref` recognizes `Ref<T>` (a single-arg `NamedType` headed `Ref`) and rejects every
+ * other syntactic type-annotation shape: a plain name, a slice, a union, an optional, a function
+ * type, and a `Ref`-headed name with the wrong arity.
+ */
+#test fn spine_type_ann_is_ref_recognizes_only_ref_and_rejects_every_other_shape() {
+    teko::assert::is_true(type_ann_is_ref(parser::NamedType { path = sp_path("Ref"); args = sp_one_arg("i64") }))
+    teko::assert::is_false(type_ann_is_ref(sp_named_ann("i64")))
+    teko::assert::is_false(type_ann_is_ref(sp_slice_ann("i64")))
+    teko::assert::is_false(type_ann_is_ref(sp_union_ann()))
+    teko::assert::is_false(type_ann_is_ref(sp_optional_ann()))
+    teko::assert::is_false(type_ann_is_ref(sp_function_ann()))
+    teko::assert::is_false(type_ann_is_ref(sp_ref_head_no_args()))
+}
+
+/**
+ * An assignment `y = x` to a simple name (`AssignKind::Simple`).
+ *
+ * @param str name  the assigned name
+ * @param TExpr value  the typed RHS
+ * @return TStatement  a `TAssign` statement
+ */
+fn sp_assign_simple(name: str, value: TExpr) -> TStatement {
+    TAssign { kind = parser::AssignKind::Simple; name = name; op = lexer::TokenKind::Assign; bound = value.type; value = value; deref = false; target = sp_no_texpr() }
+}
+
+/**
+ * A `Reference`-deref assignment `r.value = x` (`AssignKind::RefDeref`) — names no simple-alias
+ * pair, so the alias-transfer must leave both cells untouched.
+ *
+ * @param str name  the dereferenced ref's name
+ * @param TExpr value  the typed RHS
+ * @return TStatement  a `TAssign` statement of kind `RefDeref`
+ */
+fn sp_assign_refderef(name: str, value: TExpr) -> TStatement {
+    TAssign { kind = parser::AssignKind::RefDeref; name = name; op = lexer::TokenKind::Assign; bound = value.type; value = value; deref = true; target = sp_no_texpr() }
+}
+
+/**
+ * The inert placeholder typed expression a `TAssign.target` carries when `kind != Field` (never
+ * read on that path — mirrors `tast.tks`'s own `no_texpr` sentinel convention).
+ *
+ * @return TExpr  a `TNullLit` sentinel `TExpr`
+ */
+fn sp_no_texpr() -> TExpr {
+    TExpr { kind = TNullLit { }; type = Void { }; line = 0; col = 0 }
+}
+
+/**
+ * A bare `return value` statement.
+ *
+ * @param TExpr value  the typed return value
+ * @return TStatement  a `TReturn` statement with `has_value = true`
+ */
+fn sp_return(value: TExpr) -> TStatement {
+    TReturn { has_value = true; value = value }
+}
+
+/**
+ * A value-less `return` statement.
+ *
+ * @return TStatement  a `TReturn` statement with `has_value = false`

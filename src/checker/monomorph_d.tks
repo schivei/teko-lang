@@ -1,0 +1,265 @@
+// src/checker/monomorph_d.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+        TReturn as r => {
+            if r.has_value {
+                let wv = match mono_texpr(r.value, s, items, table) { WExpr as w => w; error as er => return er }
+                WStmt { stmt = TReturn { has_value = true; value = wv.expr }; insts = wv.insts }
+            } else {
+                WStmt { stmt = st; insts = teko::list::empty() }
+            }
+        }
+        TLoopStmt as l => {
+            let wi = match mono_block(l.init, s, items, table) { WBlock as w => w; error as er => return er }
+            let wb = match mono_block(l.body, s, items, table) { WBlock as w => w; error as er => return er }
+            WStmt { stmt = TLoopStmt { label = l.label; init = wi.stmts; body = wb.stmts }; insts = mono_inst_concat(wi.insts, wb.insts) }
+        }
+        TBreakStmt => WStmt { stmt = st; insts = teko::list::empty() }
+        TContinueStmt => WStmt { stmt = st; insts = teko::list::empty() }
+        TExprStmt as es => {
+            let wv = match mono_texpr(es.expr, s, items, table) { WExpr as w => w; error as er => return er }
+            WStmt { stmt = TExprStmt { expr = wv.expr }; insts = wv.insts }
+        }
+        TDeferStmt as d => {
+            let wb = match mono_block(d.body, s, items, table) { WBlock as w => w; error as er => return er }
+            WStmt { stmt = TDeferStmt { body = wb.stmts }; insts = wb.insts }
+        }
+        TAdoptStmt as a => {
+            let wb = match mono_block(a.body, s, items, table) { WBlock as w => w; error as er => return er }
+            WStmt { stmt = TAdoptStmt { name = a.name; body = wb.stmts }; insts = wb.insts }
+        }
+    }
+}
+
+// rewrite a block (a []TStatement). (C: mono_block.)
+fn mono_block(stmts: []TStatement, s: Subst, items: []TItem, table: TypeTable) -> WBlock | error {
+    // (#148 R3 DECREE) `out` is a linear chain: born empty, self-append-only, read only after the
+    // loop — so every copy-grow frees the superseded buffer (mem::push_fo; paranoid-gated).
+    mut out: []TStatement = teko::list::empty()
+    mut acc: []MonoInst = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= stmts.len { break }
+        let ws = match mono_tstmt(stmts[i], s, items, table) { WStmt as w => w; error as er => return er }
+        out = teko::mem::push_fo(out, ws.stmt)
+        acc = mono_inst_concat(acc, ws.insts)
+        i++
+    }
+    WBlock { stmts = out; insts = acc }
+}
+
+/**
+ * The generic-base name behind a stamped instance name: `Box__g__i64` → `Box` (the text before the
+ * FIRST `__g__` infix). A name with no `__g__` returns unchanged (never a stamped instance). The
+ * base is BARE — a stamped instance name carries no namespace qualifier (generic_inst_name mangles
+ * only the last segment). (#254 layer 3.)
+ *
+ * @param name  a (possibly stamped) type name
+ * @return      the base name before `__g__`, or `name` when it has no `__g__` infix
+ * @since onda-3 (#254)
+ */
+fn g_instance_base(name: str) -> str {
+    mut i: u64 = 0
+    loop {
+        if i + 5 > name.len { break }
+        if name[i] == b'_' && name[i + 1] == b'_' && name[i + 2] == b'g' && name[i + 3] == b'_' && name[i + 4] == b'_' {
+            return teko::str::slice_to(name, i)
+        }
+        i++
+    }
+    name
+}
+
+/**
+ * Does a template method's namespace (`ns::…::Base`) own the stamped instance whose base is `base`?
+ * The template method's `method_ns` is the owning type's canonical name (collect's convention), so
+ * its LAST segment names the generic base — matching it against the instance's bare base disambiguates
+ * the abstract template method from every other program function (#254 layer 3).
+ *
+ * @param method_ns  the candidate template method's namespace
+ * @param base       the stamped instance's bare base name (`g_instance_base` of the instance)
+ * @return           true iff `method_ns`'s last segment equals `base`
+ * @since onda-3 (#254)
+ */
+fn method_ns_owns_base(method_ns: str, base: str) -> bool {
+    teko::runtime::str_eq(name_last_segment(method_ns), base)
+}
+
+/**
+ * Find the ABSTRACT typed template method for a stamped instance's method — the TFunction produced by
+ * type_struct_methods over the GENERIC template (`Box::get`, return `Named{T}`), which the instance's
+ * concrete method (`Box__g__i64::get`) is stamped from (#254 layer 3). Matched by method name AND the
+ * template method's namespace owning the instance's base (name_last_segment == base). Returns null when
+ * no such template method exists (an abstract signature with no body, or a resolution the checker
+ * already reported) so the caller leaves the instance method unstamped.
+ *
+ * @param items   the typed program items (carrying the abstract template methods)
+ * @param base    the stamped instance's bare base name
+ * @param method  the method's bare name
+ * @return        the abstract template method TFunction, or null when none matches
+ * @since onda-3 (#254)
+ */
+fn find_template_method(items: []TItem, base: str, method: str) -> TFunction | null {
+    mut i = 0
+    loop {
+        if i >= items.len { break }
+        match items[i] {
+            TFunction as f => {
+                if teko::runtime::str_eq(f.name, method) && method_ns_owns_base(f.namespace, base) && !f.is_extern {
+                    return f
+                }
+            }
+            _ => { }
+        }
+        i++
+    }
+    null
+}
+
+/**
+ * The type-arg binding Subst for a stamped generic-type instance: unify each TEMPLATE field's type
+ * (a pattern that mentions the type-params `T…`) against the corresponding INSTANCE field's already-
+ * substituted concrete type, recovering `{T → concrete}` (#254 layer 3). Robust and general — a
+ * type-param of a meaningful generic type appears in at least one field; field-unification recovers
+ * it without re-parsing the mangled name. A param that unifies to nothing (a phantom param unused in
+ * every field) simply stays absent; the stamped body's `subst_type` then leaves that Named unchanged.
+ * The template's field PATTERNS are resolved with the template's type-params in scope (`ptable`), so a
+ * `value: T` field resolves to the OPAQUE `Named{T}` the pattern `unify` binds (never "unknown type: T").
+ *
+ * @param template  the generic template decl (`Box<T>`, fields mention `T`)
+ * @param inst      the stamped instance decl (`Box__g__i64`, fields are concrete)
+ * @param table     the folded type table (field-type resolution)
+ * @return          the recovered `{param → concrete}` Subst over the template's type-params
+ * @since onda-3 (#254)
+ */
+fn instance_type_subst(template: parser::TypeDecl, inst: parser::TypeDecl, table: TypeTable) -> Subst {
+    mut s = Subst { params = template.type_params; names = teko::list::empty(); types = teko::list::empty() }
+    let tf = decl_fields(template)
+    let inf = decl_fields(inst)
+    if tf.len != inf.len { return s }
+    let ptable = type_param_table(template.type_params, template.type_constraints, "", table)
+    mut i = 0
+    loop {
+        if i >= tf.len { break }
+        s = unify_field_pair(s, tf[i].type_ann, inf[i].type_ann, ptable, table)
+        i++
+    }
+    s
+}
+
+/**
+ * Extend a Subst by unifying one template field-type annotation (the pattern, mentions `T`) against
+ * the corresponding instance field-type annotation (concrete) — the per-field step of
+ * instance_type_subst (#254 layer 3). The pattern resolves with the template's type-params in scope
+ * (`ptable`) so `T` is the opaque `Named{T}` the pattern `unify` binds; the concrete side resolves
+ * against the plain table. A field whose annotation fails to resolve, or that unifies to an error,
+ * leaves the Subst unchanged (the checker's own honest stop covers a genuinely bad field).
+ *
+ * @param s        the Subst so far
+ * @param pat_ann  the template field's type annotation (the pattern)
+ * @param con_ann  the instance field's (concrete) type annotation
+ * @param ptable   the table with the template's type-params in scope (pattern resolution)
+ * @param table    the folded type table (concrete resolution)
+ * @return         the Subst extended with this field's binding, or `s` unchanged when it does not unify
+ * @since onda-3 (#254)
+ */
+fn unify_field_pair(s: Subst, pat_ann: parser::TypeExpr, con_ann: parser::TypeExpr, ptable: TypeTable, table: TypeTable) -> Subst {
+    match resolve_type(pat_ann, ptable, "") {
+        Type as pat => match resolve_type(con_ann, table, "") {
+            Type as concrete => match unify(pat, concrete, s, table) { Subst as x => x; error => s }
+            error => s
+        }
+        error => s
+    }
+}
+
+/**
+ * A type-decl's fields (struct or class body); every other body kind has none. (#254 layer 3.)
+ *
+ * @param d  the type-decl
+ * @return   the decl's fields, or an empty list for a non-struct/class body
+ * @since onda-3 (#254)
+ */
+fn decl_fields(d: parser::TypeDecl) -> []parser::Field {
+    match d.body {
+        parser::StructBody as sb => sb.fields
+        parser::ClassBody as cb => cb.fields
+        _ => teko::list::empty()
+    }
+}
+
+/**
+ * The methods a stamped instance carries (struct or class body — kept + substituted by layer 2).
+ * (#254 layer 3.)
+ *
+ * @param d  the stamped instance decl
+ * @return   the instance's methods, or an empty list for a non-struct/class body
+ * @since onda-3 (#254)
+ */
+fn mono_decl_methods(d: parser::TypeDecl) -> []parser::Function {
+    match d.body {
+        parser::StructBody as sb => sb.methods
+        parser::ClassBody as cb => cb.methods
+        _ => teko::list::empty()
+    }
+}
+
+/**
+ * Stamp one method of a stamped generic-type instance as a monomorphic free TFunction, keyed by the
+ * instance name (`Box__g__i64::get`), its ALREADY-TYPED template body rewritten through the instance's
+ * Subst — mirroring the free-fn stamp (monomorphize PHASE 2) but the callable's owner is the stamped
+ * type, so `b.get()` on a `Box<i64>` dispatches to `Box__g__i64::get`. The receiver + any `Self`-typed
+ * reference (the abstract `Named{ns::Base}`) is remapped to the instance name via the Subst's extra
+ * `base → instance` binding, so a `-> Box<T>` return / a `self`-typed param concretizes too. Reuses
+ * mono_block/subst_type/subst_typeexpr unchanged. Collects transitively-needed insts from the body.
+ *
+ * @param inst_name  the stamped instance's name (`Box__g__i64`)
+ * @param tmpl       the abstract typed template method (`Box::get`, return `Named{T}`)
+ * @param s          the instance's `{T → concrete, ns::Base → Box__g__i64}` Subst
+ * @param items      the typed program items (transitive-call discovery)
+ * @param table      the folded type table
+ * @return           the stamped method TFunction plus any transitively-discovered insts
+ * @throws           when the body rewrite fails (surfaced from mono_block)
+ * @since onda-3 (#254)
+ */
+fn stamp_one_instance_method(inst_name: str, tmpl: TFunction, s: Subst, items: []TItem, table: TypeTable) -> WFn | error {
+    mut nparams: []parser::Param = teko::list::empty()
+    mut pi = 0
+    loop {
+        if pi >= tmpl.params.len { break }
+        nparams = teko::list::push(nparams, parser::Param { name = tmpl.params[pi].name; has_type = true; type_ann = subst_typeexpr(tmpl.params[pi].type_ann, s); is_params = tmpl.params[pi].is_params; has_default = tmpl.params[pi].has_default; default_expr = tmpl.params[pi].default_expr })
+        pi++
+    }
+    let wb = match mono_block(tmpl.body, s, items, table) { WBlock as w => w; error as e => return e }
+    let no_tps: []str = teko::list::empty()
+    let no_tcs: []parser::ConstraintExpr = teko::list::empty()
+    let sf = TFunction { name = tmpl.name; type_params = no_tps; type_constraints = no_tcs; params = nparams; return_type = subst_type(tmpl.return_type, s); body = wb.stmts; vis = tmpl.vis; has_doc = tmpl.has_doc; doc = tmpl.doc; namespace = inst_name; file = tmpl.file; line = tmpl.line; col = tmpl.col; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = tmpl.has_arena_size; arena_size = tmpl.arena_size }
+    WFn { func = sf; insts = wb.insts }
+}
+
+/**
+ * The `{T → concrete}` type-arg Subst for a stamped instance, EXTENDED with the template canonical
+ * name → instance name binding, so a stamped method's receiver and every `Self`-typed / `Base<T>`
+ * reference in its body remaps to the instance (#254 layer 3). The template's canonical name is its
+ * declaring namespace joined with its base (collect canonicalizes decl names to `ns::Base`).
+ *
+ * @param template   the generic template decl
+ * @param template_ns the template's declaring namespace (from its TypeReg)
+ * @param inst       the stamped instance decl
+ * @param table      the folded type table
+ * @return           the extended Subst
+ * @since onda-3 (#254)
+ */
+fn instance_method_subst(template: parser::TypeDecl, template_ns: str, inst: parser::TypeDecl, table: TypeTable) -> Subst {
+    let base = g_instance_base(inst.name)
+    let s = instance_type_subst(template, inst, table)
+    let canon = if template_ns == "" { base } else { teko::str::concat(teko::str::concat(template_ns, "::"), base) }
+    let inst_named = Named { name = inst.name }
+    let s1 = subst_add_type_remap(s, canon, inst_named)
+    if teko::runtime::str_eq(base, canon) { return s1 }
+    subst_add_type_remap(s1, base, inst_named)
+}
+
+/**

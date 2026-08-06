@@ -1,0 +1,206 @@
+// src/checker/rv_rv_module.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+            i = i + 2
+            start = i
+        } else {
+            i++
+        }
+    }
+    out ~ teko::str::slice_from(name, start)   // (#148) builtin slice
+}
+
+// (C: tk_type_mangle.)
+pub fn type_mangle(t: Type) -> str {
+    match t {
+        Prim as p => prim_name(p.kind)
+        Str => "str"
+        Byte => "byte"
+        Char => "char"
+        Named as n => name_last_segment(n.name)   // (#109 W3) BARE last-segment — slice/opt/generic-inst suffixes stay bare (matching the syntactic cg_opt_mangle_texpr/cg_texpr_inst_name); only DIRECT tk_t_ typedefs (mangle_type_name) carry the canonical ns where the io/emit Reader collision needs distinguishing.
+        Slice as sl => teko::str::concat("slice_", type_mangle(sl.element))
+        Optional as o => teko::str::concat("opt_", type_mangle(o.inner))
+        Error => "error"
+        Void => "void"
+        Ptr as p => match p.inner { null => "ptr"; Type as t => teko::str::concat("ptr_", type_mangle(t)) }
+        Uptr => "uptr"
+        Reference as r => teko::str::concat("ref_", type_mangle(r.inner))   // (MEM-1b)
+        Variant => "variant"
+        Func => "func"
+        Null => "null"
+    }
+}
+
+// (S4) the mangled name of a generic INSTANCE: `<base>__g__<arg0>[__<arg1>…]` over the args IN
+// ORDER. The `__g__` infix marks a stamped symbol (no user name may contain it). (C: tk_generic_inst_name.)
+pub fn generic_inst_name(base: str, args: []Type) -> str {
+    mut out = teko::str::concat(base, "__g__")
+    mut i = 0
+    loop {
+        if i >= args.len { break }
+        if i > 0 { out = teko::str::concat(out, "__") }
+        out = teko::str::concat(out, type_mangle(args[i]))
+        i++
+    }
+    out
+}
+
+/**
+ * Is this struct/class literal a SELF-CONSTRUCT inside its own generic template — i.e. the base
+ * being constructed equals the enclosing method's owner type, AND that owner is generic (so no
+ * concrete instance is stamped while typing the abstract template)? Only then do we type against the
+ * abstract template body and tag the node with the phantom `Base__g__<param>` instance name that the
+ * mono pass will later remap to the concrete stamp (#254 L4/L5). A non-generic owner, or a
+ * construction of a DIFFERENT generic type, is NOT a self-construct → the ordinary
+ * expected-instance path (unchanged) applies.
+ *
+ * @param base_name    the bare base of the constructed type (`Box`)
+ * @param owner_type   the enclosing method's owner (`env.owner_type`, canonical or "")
+ * @param decl_tparams the constructed base's type-params (generic iff non-empty)
+ * @return             true iff this is a self-construct of the enclosing generic template
+ * @since onda-3 (#254 L4/L5)
+ */
+pub fn is_self_generic_construct(base_name: str, owner_type: str, decl_tparams: []str) -> bool {
+    if decl_tparams.len == 0 { return false }
+    if owner_type == "" { return false }
+    name_last_segment(owner_type) == base_name
+}
+
+/**
+ * The PHANTOM generic-instance name for a self-construct inside a generic template: the enclosing
+ * type's OWN type-params, in order, mangled exactly as `resolve_generic_inst` mangles `-> Box<T>`
+ * (`Box__g__T`). The template body's self-init, its `-> Box<T>` return, and any `Box<T>` local all
+ * carry this SAME spelling, so the mono pass's single `phantom → concrete` remap retargets them
+ * together (#254 L4/L5). Reuses `generic_inst_name` over the owner's params-as-Named so the spelling
+ * cannot drift from the resolver's.
+ *
+ * @param base_name     the bare base (`Box`)
+ * @param owner_tparams the enclosing type's type-param names (`["T"]`)
+ * @return              the phantom instance name (`Box__g__T`)
+ * @since onda-3 (#254 L4/L5)
+ */
+pub fn phantom_self_inst_name(base_name: str, owner_tparams: []str) -> str {
+    mut args: []Type = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= owner_tparams.len { break }
+        args = teko::list::push(args, Named { name = owner_tparams[i] })
+        i++
+    }
+    generic_inst_name(base_name, args)
+}
+
+// (S4) `Box<i64>` → the nominal instance `Named{Box__g__i64}`. Resolves every type-argument, then
+// validates against the generic decl's arity (the decl must exist, be generic, same count). The
+// concrete decl (fields with T→arg substituted) is stamped by the instantiation pass / mono.
+fn resolve_generic_inst(nt: parser::NamedType, table: TypeTable, ref_ns: str) -> Type | error {
+    // (#109 W1) reserved for the R0-R5 rules (W2); threaded to every resolve_type arg + the table lookup.
+    let name = nt.path.segments[nt.path.segments.len - 1].name
+    // (S-mem) the builtin generic `ptr<T>` → a typed pointer `Ptr{inner}`. `ptr<void>` ≡ the opaque
+    // `ptr` (void isn't a value type) → null inner. Not a user decl, handled before the table lookup.
+    if name == "ptr" {
+        if nt.args.len != 1 { return error { message = "`ptr<T>` takes exactly one type argument" } }
+        let argt = match resolve_type(nt.args[0], table, ref_ns) { Type as t => t; error as e => return e }
+        match argt { Void => return Ptr { inner = null }; _ => return Ptr { inner = argt } }
+    }
+    // (MEM-1b) the compiler-known generic struct `Ref<T>` → the SAFE reference `Ref{inner}` (the safe
+    // surface OVER the raw `ptr<T>`). Capitalized (a struct-like named type, reusing generics — no
+    // keyword). Unlike `ptr`, a ref is never null and never opaque, so `Ref<void>` is rejected (void
+    // is not a value) and `Ref` requires a type argument. Not a user decl — reserved, handled before
+    // the table lookup.
+    if name == "Ref" {
+        if nt.args.len != 1 { return error { message = "`Ref<T>` takes exactly one type argument" } }
+        let argt = match resolve_type(nt.args[0], table, ref_ns) { Type as t => t; error as e => return e }
+        match argt { Void => return error { message = "`Ref<void>` is invalid — void is not a value (M.3)" }; _ => { } }
+        // (W9a) ESCAPE GATE — the inner must be a VALUE TYPE. Teko has NO field/index assignment
+        // (value-functional), so a non-scalar ref is ONLY ever mutated by WHOLE-`.value` REPLACEMENT
+        // (`r.value = newWhole` — native `*r = newWhole` struct/slice copy; VM cell_set), and read
+        // by `r.value` (native `(*r)`; VM cell_get). Under the cell-IDENTITY model both are
+        // observationally identical in VM and native, exactly like scalars. So Prim, Byte, Str,
+        // Named (struct/enum/variant), Slice, Optional and Variant are all allowed. REJECT only the
+        // NON-values / aliasing hazards: Void (already above — not a value), Reference (no ref-to-ref),
+        // Ptr/Uptr (raw FFI addresses), Func (a function value carries no replaceable storage).
+        match argt {
+            Reference => return error { message = "a reference cannot target another reference (`Ref<Ref<T>>` is invalid)" }
+            Ptr => return error { message = "a reference cannot target a raw pointer (`Ref<ptr<T>>` is invalid — raw FFI addresses are not safe ref targets)" }
+            Uptr => return error { message = "a reference cannot target a raw pointer (`Ref<uptr>` is invalid — raw FFI addresses are not safe ref targets)" }
+            Func => return error { message = "a reference cannot target a function (`Ref<(…)->…>` is invalid)" }
+            _ => return Reference { inner = argt }
+        }
+    }
+    mut argtypes: []Type = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= nt.args.len { break }
+        let a = match resolve_type(nt.args[i], table, ref_ns) { Type as t => t; error as e => return e }
+        // (MEM Step 0, A) ESCAPE GATE — a reference can NEVER be a generic type ARGUMENT: carrying a
+        // `Ref<T>` into a user generic would stamp it into a struct field / return position (e.g.
+        // `Box<Ref<i64>>` → `struct { value: int64_t * }` returned by value) and escape. The template
+        // itself is validated pre-instantiation (R1–R5); the only way a Reference enters a stamped
+        // decl/fn is via a type-arg — blocked here (written) and in unify (inferred).
+        match a { Reference => return error { message = "a reference cannot be a generic type argument (it would be stored/escape)" }; _ => { } }
+        argtypes = teko::list::push(argtypes, a)
+        i++
+    }
+    match resolve_type_ref(nt.path, table, ref_ns) {   // (#109 W2) R0/R3/R4 over the WRITTEN path
+        parser::TypeDecl as td => {
+            if td.type_params.len == 0 {
+                return error { message = $"type `{name}` is not generic but was given type arguments" }
+            }
+            if td.type_params.len != nt.args.len {
+                return error { message = $"generic type `{name}` expects a different number of type arguments" }
+            }
+            Named { name = generic_inst_name(name, argtypes) }
+        }
+        NotUserType => return error { message = $"unknown generic type: {name}" }
+        error as e => return e
+    }
+}
+
+// (C1.8) render a semantic Type to a human string for diagnostics ("expected X, found Y"):
+//   prims → "i32"/… , "byte", "str", "error", "void", slice → "[]<elem>", optional → "<inner>?",
+//   variant → "A | B | …", named → "<name>". Recursion builds slice/optional/variant bottom-up.
+// Mirror of resolve.c::tk_type_render. This depends ONLY on the Type model (E2-independent — it
+// never touches the surface `error` value), so it is materialized now, not deferred to E2.
+// (A SENTINEL slice/optional — a `Void`-marker element/inner, the untyped `empty()` / bare `null`
+//  — renders its hole as "_", matching the C twin's NULL-pointer case.)
+pub fn type_render(t: Type) -> str {
+    match t {
+        Prim as p => prim_name(p.kind)
+        Byte => "byte"
+        Char => "char"
+        Str => "str"
+        Error => "error"
+        Void => "void"
+        Named as n => name_last_segment(n.name)   // (#109 W3) canonical "ns::Name" → bare "Name" for readable diagnostics
+        Slice as s => match s.element { Void => "[]_"; _ => $"[]{type_render(s.element)}" }
+        Optional as o => match o.inner { Void => "_?"; _ => $"{type_render(o.inner)}?" }
+        Variant as v => render_members(v.members)
+        Func as f => render_func(f)   // (C1.8) "(p0, …) -> ret" — full mirror of resolve.c (M.3, show what we know)
+        Ptr as p => match p.inner { null => "ptr"; Type as t => $"ptr<{type_render(t)}>" }   // ptr<T> human render
+        Uptr => "uptr"   // (C7.1a) opaque word-size unsigned
+        Reference as r => $"Ref<{type_render(r.inner)}>"   // (MEM-1b) Ref<T> human render
+        Null => "null"
+    }
+}
+
+// (C1.8) render a function type "(p0, p1, …) -> ret" — mirror of the FUNC branch of
+// resolve.c::tk_type_render (M.3, show what we know). `ret` may be void.
+fn render_func(f: Func) -> str {
+    mut params = ""
+    mut i = 0
+    loop {
+        if i >= f.params.len { break }
+        if i > 0 { params = $"{params}, " }
+        params = $"{params}{type_render(f.params[i])}"
+        i++
+    }
+    $"({params}) -> {type_render(f.ret)}"
+}
+
+// (C1.8) join variant members with " | " (e.g. "Circle | Square | Triangle"). Mirror of the
+// variant branch of resolve.c::tk_type_render.
+// A BARE `null` MEMBER RENDERS LAST, whatever position it holds internally. Owner ruling
+// 2026-07-28: *"a mensagem precisa de correção, pois ela induz a erro, não é `null | T` é

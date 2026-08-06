@@ -1,0 +1,226 @@
+// src/checker/synth_a.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+use teko::parser
+use teko::lexer
+
+/**
+ * Wrap an `ExprKind` into a position-less `parser::Expr` (synthesized nodes carry no source span).
+ *
+ * @param k the expression node kind
+ * @return the wrapped expression at line/col 0
+ */
+fn mk_expr(k: parser::ExprKind) -> parser::Expr {
+    parser::Expr { kind = k; line = 0; col = 0 }
+}
+
+/**
+ * A variable-reference expression (`name`) — used for the synthesized receiver `self` and the
+ * second parameter `other`.
+ *
+ * @param name the variable name
+ * @return a `Var` expression
+ */
+fn mk_var(name: str) -> parser::Expr {
+    mk_expr(parser::Var { name = name })
+}
+
+/**
+ * A field-access expression (`recv.field`).
+ *
+ * @param recv  the receiver expression
+ * @param field the field name
+ * @return a `FieldAccess` expression
+ */
+fn mk_field(recv: parser::Expr, field: str) -> parser::Expr {
+    mk_expr(parser::FieldAccess { receiver = recv; field = field })
+}
+
+/**
+ * A binary-operator expression (`left <op> right`) — for the ARITHMETIC/logical operators (`&&`,
+ * `*`, `^`); comparison operators (`==`/`!=`/`<`/`>`) belong in a `Compare` node (`mk_compare`).
+ *
+ * @param op    the operator token kind
+ * @param left  the left operand
+ * @param right the right operand
+ * @return a `Binary` expression
+ */
+fn mk_binary(op: lexer::TokenKind, left: parser::Expr, right: parser::Expr) -> parser::Expr {
+    mk_expr(parser::Binary { op = op; left = left; right = right })
+}
+
+/**
+ * A single-term comparison expression (`left <op> right`) — the AST models comparison operators
+ * (`==`/`!=`/`<`/`<=`/`>`/`>=`) as a `Compare` chain (kept as written, M.3), NOT as a `Binary`
+ * node; codegen/checker route them through `cmpop_c`, not `binop_c`.
+ *
+ * @param op    the comparison operator token kind
+ * @param left  the left operand
+ * @param right the right operand
+ * @return a `Compare` expression with a single continuation term
+ */
+fn mk_compare(op: lexer::TokenKind, left: parser::Expr, right: parser::Expr) -> parser::Expr {
+    let rest: []parser::CmpTerm = teko::list::push(teko::list::empty(), parser::CmpTerm { op = op; operand = right })
+    mk_expr(parser::Compare { first = left; rest = rest })
+}
+
+/**
+ * A method-call expression (`recv.method(args)`).
+ *
+ * @param recv   the receiver expression
+ * @param method the method name
+ * @param args   the argument expressions
+ * @return a `MethodCall` expression
+ */
+fn mk_method_call(recv: parser::Expr, method: str, args: []parser::Expr) -> parser::Expr {
+    mk_expr(parser::MethodCall { receiver = recv; method = method; args = args })
+}
+
+/**
+ * A namespaced-call expression over a `Path` (`seg0::seg1::…(args)`), used for the runtime str
+ * helpers (`str_hash`/`str_compare`) and a nested type's static `default()` factory.
+ *
+ * @param segments the path segment names, in order
+ * @param args      the argument expressions
+ * @return a `Call` expression whose `arg_names` are all positional
+ */
+fn mk_path_call(segments: []str, args: []parser::Expr) -> parser::Expr {
+    mut segs: []parser::Segment = teko::list::empty()
+    mut i: u64 = 0
+    loop { if i >= segments.len { break }; segs = teko::list::push(segs, parser::Segment { name = segments[i] }); i++ }
+    mut names: []str = teko::list::empty()
+    mut j: u64 = 0
+    loop { if j >= args.len { break }; names = teko::list::push(names, ""); j++ }
+    mk_expr(parser::Call { callee = parser::Path { segments = segs }; args = args; arg_names = names; type_args = teko::list::empty() })
+}
+
+/**
+ * A non-negative integer-literal expression carrying `value` (any width up to u64 —
+ * drop-128, 2026-07-24; a negative magnitude is `mk_neg_int`'s job).
+ *
+ * @param value the non-negative integer value
+ * @return a `Number` expression with `is_float = false`
+ */
+fn mk_int(value: u64) -> parser::Expr {
+    mk_expr(parser::Number { is_float = false; value = parser::numint_of_u64(value); fval = 0.0 })
+}
+
+/**
+ * A float-literal expression carrying `fval`.
+ *
+ * @param fval the float value
+ * @return a `Number` expression with `is_float = true`
+ */
+fn mk_float(fval: f64) -> parser::Expr {
+    mk_expr(parser::Number { is_float = true; value = parser::numint_of_u64(0); fval = fval })
+}
+
+/**
+ * A boolean-literal expression.
+ *
+ * @param value the boolean value
+ * @return a `BoolLit` expression
+ */
+fn mk_bool(value: bool) -> parser::Expr {
+    mk_expr(parser::BoolLit { value = value })
+}
+
+/**
+ * A negated-integer-literal expression (`-(value)`) — the parser produces a negative literal as a
+ * unary-minus over a POSITIVE `Number`, never a `Number` carrying a negative value directly. So
+ * `Ord`'s `-1` result is built this way.
+ *
+ * @param value the (non-negative) magnitude to negate
+ * @return a `Unary` minus over a positive integer literal
+ */
+fn mk_neg_int(value: u64) -> parser::Expr {
+    mk_expr(parser::Unary { op = lexer::TokenKind::Minus; operand = mk_int(value) })
+}
+
+/**
+ * A string-literal expression carrying `text`.
+ *
+ * @param text the literal text
+ * @return a `StrLit` expression
+ */
+fn mk_str(text: str) -> parser::Expr {
+    mk_expr(parser::StrLit { text = text })
+}
+
+/**
+ * A cast expression (`expr to <target>`).
+ *
+ * @param expr   the value to cast
+ * @param target the destination type
+ * @return a `Cast` expression
+ */
+fn mk_cast(expr: parser::Expr, target: parser::TypeExpr) -> parser::Expr {
+    mk_expr(parser::Cast { expr = expr; target = target })
+}
+
+/**
+ * A `return <expr>` statement.
+ *
+ * @param expr the returned value
+ * @return a `Return` statement carrying a value
+ */
+fn mk_return(expr: parser::Expr) -> parser::Statement {
+    parser::Return { has_value = true; value = expr }
+}
+
+/**
+ * An `if <cond> { return <ret> }` statement — the per-field short-circuit used by `Ord`'s
+ * lexicographic body.
+ *
+ * @param cond the condition
+ * @param ret  the value returned when the condition holds
+ * @return an `ExprStmt` wrapping an else-less `IfExpr`
+ */
+fn mk_if_return(cond: parser::Expr, ret: parser::Expr) -> parser::Statement {
+    let then_blk: []parser::Statement = teko::list::push(teko::list::empty(), mk_return(ret))
+    let else_blk: []parser::Statement = teko::list::empty()
+    parser::ExprStmt { expr = mk_expr(parser::IfExpr { cond = cond; then_blk = then_blk; has_else = false; else_blk = else_blk }) }
+}
+
+/**
+ * The `NamedType` type-expression for a bare name (e.g. the deriver `T` as a return type).
+ *
+ * @param name the type name
+ * @return a `NamedType` with a single path segment and no type-arguments
+ */
+fn mk_named_type(name: str) -> parser::TypeExpr {
+    parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = name }) }; args = teko::list::empty() }
+}
+
+/**
+ * The receiver parameter (`self`) of an instance method — untyped (`has_type = false`), so
+ * `type_method` injects the deriver type. Named `self` so the synthesized body reads naturally.
+ *
+ * @return the receiver `Param`
+ */
+fn mk_self_param() -> parser::Param {
+    parser::Param { name = "self"; has_type = false; type_ann = mk_named_type(""); is_params = false; has_default = false; default_expr = parser::no_expr() }
+}
+
+/**
+ * A fully-typed value parameter `name: <type>` — the `other: T` operand of `Eq`/`Ord`.
+ *
+ * @param name the parameter name
+ * @param ty   the parameter's declared type
+ * @return the typed `Param`
+ */
+fn mk_typed_param(name: str, ty: parser::TypeExpr) -> parser::Param {
+    parser::Param { name = name; has_type = true; type_ann = ty; is_params = false; has_default = false; default_expr = parser::no_expr() }
+}
+
+/**
+ * Assemble a synthesized method `parser::Function` — `pub`, non-generic, non-extern, non-test,
+ * carrying a doc-comment so the folded declaration is W15-conformant.
+ *
+ * @param name        the method name
+ * @param params      the parameter list (receiver first for an instance method; empty-receiver for static)
+ * @param return_type the declared return type
+ * @param body        the synthesized statement body
+ * @param doc         the doc-comment text

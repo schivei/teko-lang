@@ -1,0 +1,205 @@
+// src/checker/cf_binary.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+/**
+ * lp_record_binding — extend the map with a binding's contribution: a `let`/`const` SimpleName target
+ * whose (already-substituted) initializer is a provably-const integer op-tree (`cf_int_value`) is
+ * recorded; every other binding (a `mut`, a runtime-valued initializer, a destructure) REMOVES its
+ * name(s) from the map so a use of the shadow is never folded.
+ *
+ * @param m       the local-const map
+ * @param kind    the binding kind
+ * @param target  the binding target (a simple name or a destructure pattern)
+ * @param value   the binding's already-substituted initializer
+ * @return        `m` extended (const binding) or with the bound name(s) removed
+ * @since #comptime-fold
+ */
+fn lp_record_binding(m: LocalConstMap, kind: parser::BindKind, target: parser::BindTarget, value: TExpr) -> LocalConstMap {
+    match target {
+        parser::SimpleName as sn => lp_record_simple(m, kind, sn.name, value)
+        parser::DestructurePattern as dp => lp_remove_names(m, dp.names)
+    }
+}
+
+/**
+ * lp_record_simple — record a simple-name binding: an immutable binding of a provably-const integer
+ * op-tree is bound in the map; anything else removes the name (killing an outer const it shadows).
+ *
+ * @param m      the local-const map
+ * @param kind   the binding kind
+ * @param name   the bound name
+ * @param value  the binding's already-substituted initializer
+ * @return       `m` with `name` bound (const) or removed
+ * @since #comptime-fold
+ */
+fn lp_record_simple(m: LocalConstMap, kind: parser::BindKind, name: str, value: TExpr) -> LocalConstMap {
+    if lp_is_const_binding(kind) && cf_int_value(value) { return lp_set(m, name, value) }
+    lp_remove(m, name)
+}
+
+/**
+ * lp_var — substitute a reference to a recorded const local with a clone of its provably-const
+ * initializer (widened to the reference's resolved type when they differ, reusing the module-const
+ * path's `widen_inlined_const`). A function-value reference (`is_func`) is never a const local, and a
+ * name not in the map (a param, a runtime binding, an outer name) passes through unchanged.
+ *
+ * @param v  the reference node
+ * @param e  the original expression (returned when `v` is not a recorded const local)
+ * @param m  the local-const map
+ * @return   the substituted initializer, or `e` unchanged
+ * @since #comptime-fold
+ */
+fn lp_var(v: TVar, e: TExpr, m: LocalConstMap) -> TExpr {
+    if v.is_func { return e }
+    match lp_lookup(m, v.name) {
+        TExpr as sub => widen_inlined_const(e, sub)
+        null => e
+    }
+}
+
+/**
+ * lp_exprs — local-propagate every expression in `xs`, in order.
+ *
+ * @param xs  the expressions to rewrite
+ * @param m   the local-const map
+ * @return    the rewritten expressions, in order
+ * @since #comptime-fold
+ */
+fn lp_exprs(xs: []TExpr, m: LocalConstMap) -> []TExpr {
+    mut out: []TExpr = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, lp_expr(xs[i], m))
+        i++
+    }
+    out
+}
+
+/**
+ * lp_expr — local-propagate one typed expression: replace every reference to a recorded const local
+ * with a clone of its provably-const initializer, recursing TOTALLY into every child. A nested
+ * statement block (`if`/`match` branch) is propagated as a fresh child scope that inherits the current
+ * map but does not leak its own bindings (`lp_scope_block`). A closure literal (`TLambda`) is left
+ * UNCHANGED: its capture set was fixed by the typer, so substituting a captured local inside its body
+ * would leave a stale capture — CF3 conservatively does not fold locals across a closure boundary.
+ * TOTAL over every `TExprKind`.
+ *
+ * @param e  the typed expression to rewrite
+ * @param m  the local-const map
+ * @return   the expression with local-const references substituted
+ * @since #comptime-fold
+ */
+fn lp_expr(e: TExpr, m: LocalConstMap) -> TExpr {
+    match e.kind {
+        TNumber => e
+        TStrLit => e
+        TByteLit => e
+        TCharLit => e
+        TBoolLit => e
+        TNullLit => e
+        TPathExpr => e
+        TVar as v => lp_var(v, e, m)
+        TBinary as b => TExpr { kind = TBinary { op = b.op; left = lp_expr(b.left, m); right = lp_expr(b.right, m) }; type = e.type; line = e.line; col = e.col }
+        TUnary as u => TExpr { kind = TUnary { op = u.op; operand = lp_expr(u.operand, m) }; type = e.type; line = e.line; col = e.col }
+        TCompare as c => lp_compare(c, e, m)
+        TCall as cl => TExpr { kind = TCall { callee = cl.callee; args = lp_exprs(cl.args, m); call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot }; type = e.type; line = e.line; col = e.col }
+        TIfExpr as f => lp_if(f, e, m)
+        TMatchExpr as mm => lp_match(mm, e, m)
+        TCast as c => TExpr { kind = TCast { expr = lp_expr(c.expr, m) }; type = e.type; line = e.line; col = e.col }
+        TFieldAccess as fa => TExpr { kind = TFieldAccess { receiver = lp_expr(fa.receiver, m); field = fa.field }; type = e.type; line = e.line; col = e.col }
+        TSafeFieldAccess as sfa => TExpr { kind = TSafeFieldAccess { receiver = lp_expr(sfa.receiver, m); field = sfa.field }; type = e.type; line = e.line; col = e.col }
+        TCoalesce as co => TExpr { kind = TCoalesce { left = lp_expr(co.left, m); right = lp_expr(co.right, m) }; type = e.type; line = e.line; col = e.col }
+        TStructInit as si => TExpr { kind = TStructInit { field_names = si.field_names; field_vals = lp_exprs(si.field_vals, m) }; type = e.type; line = e.line; col = e.col }
+        TIndex as ix => TExpr { kind = TIndex { receiver = lp_expr(ix.receiver, m); index = lp_expr(ix.index, m) }; type = e.type; line = e.line; col = e.col }
+        TInterp as in => lp_interp(in, e, m)
+        TInExpr as n => TExpr { kind = TInExpr { lhs = lp_expr(n.lhs, m); elems = lp_exprs(n.elems, m) }; type = e.type; line = e.line; col = e.col }
+        TArrayLit as a => lp_array(a, e, m)
+        TLambda => e
+        TBorrow as b => TExpr { kind = TBorrow { operand = lp_expr(b.operand, m) }; type = e.type; line = e.line; col = e.col }
+    }
+}
+
+/**
+ * lp_compare — local-propagate a comparison chain's first operand and every subsequent term.
+ *
+ * @param c  the typed comparison expression
+ * @param e  the enclosing expression (its type/position)
+ * @param m  the local-const map
+ * @return   the comparison with local-const references substituted
+ * @since #comptime-fold
+ */
+fn lp_compare(c: TCompare, e: TExpr, m: LocalConstMap) -> TExpr {
+    mut terms: []TCmpTerm = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= c.rest.len { break }
+        terms = teko::list::push(terms, TCmpTerm { op = c.rest[i].op; operand = lp_expr(c.rest[i].operand, m) })
+        i++
+    }
+    TExpr { kind = TCompare { first = lp_expr(c.first, m); rest = terms }; type = e.type; line = e.line; col = e.col }
+}
+
+/**
+ * lp_if — local-propagate an `if` expression: its condition in the current scope, each branch block as
+ * a fresh child scope (a branch-local binding does not leak past the branch).
+ *
+ * @param f  the typed `if` expression
+ * @param e  the enclosing expression (its type/position)
+ * @param m  the local-const map
+ * @return   the `if` with local-const references substituted
+ * @since #comptime-fold
+ */
+fn lp_if(f: TIfExpr, e: TExpr, m: LocalConstMap) -> TExpr {
+    let cond = lp_expr(f.cond, m)
+    let then_blk = lp_scope_block(f.then_blk, m)
+    let else_blk = lp_scope_block(f.else_blk, m)
+    TExpr { kind = TIfExpr { cond = cond; then_blk = then_blk; has_else = f.has_else; else_blk = else_blk }; type = e.type; line = e.line; col = e.col }
+}
+
+/**
+ * lp_match — local-propagate a match expression: its subject in the current scope, then every arm.
+ *
+ * @param mm  the typed match expression
+ * @param e   the enclosing expression (its type/position)
+ * @param m   the local-const map
+ * @return    the match with local-const references substituted
+ * @since #comptime-fold
+ */
+fn lp_match(mm: TMatchExpr, e: TExpr, m: LocalConstMap) -> TExpr {
+    let subject = lp_expr(mm.subject, m)
+    mut arms: []TArm = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= mm.arms.len { break }
+        arms = teko::list::push(arms, lp_arm(mm.arms[i], m))
+        i++
+    }
+    TExpr { kind = TMatchExpr { subject = subject; arms = arms }; type = e.type; line = e.line; col = e.col }
+}
+
+/**
+ * lp_arm — local-propagate one match arm as a fresh child scope: the names the pattern binds shadow any
+ * outer const of the same name, so they are removed from the arm's map before its guard and body are
+ * propagated.
+ *
+ * @param arm  the typed match arm
+ * @param m    the local-const map
+ * @return     the arm with local-const references substituted
+ * @since #comptime-fold
+ */
+fn lp_arm(arm: TArm, m: LocalConstMap) -> TArm {
+    let scoped = lp_remove_names(m, pattern_binds(arm.pattern))
+    let guard = if arm.has_when { lp_expr(arm.guard, scoped) } else { arm.guard }
+    let body = lp_scope_block(arm.body, scoped)
+    TArm { pattern = arm.pattern; has_when = arm.has_when; guard = guard; body = body }
+}
+
+/**
+ * lp_interp — local-propagate a string interpolation's hole expressions and dynamic format specs.
+ *
+ * @param in  the typed interpolation expression
+ * @param e   the enclosing expression (its type/position)
+ * @param m   the local-const map

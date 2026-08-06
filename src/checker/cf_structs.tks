@@ -1,0 +1,205 @@
+// src/checker/cf_structs.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+ * @param xs     the typed expressions to fold
+ * @param table  the type table (forwarded to each fold)
+ * @param env    the environment (forwarded to each fold)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       the folded expressions in order, or the first located error
+ * @since #comptime-fold
+ */
+fn fold_exprs(xs: []TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> []TExpr | error {
+    mut out: []TExpr = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        let v = match fold_expr(xs[i], table, env, agg) { error as x => return x; TExpr as f => f }
+        out = teko::list::push(out, v)
+        i++
+    }
+    out
+}
+
+/**
+ * fold_binary — rebuild a binary node around its folded operands (the non-evaluable path: at least
+ * one operand carries a runtime leaf, so the operator itself stays runtime).
+ *
+ * @param b      the typed binary expression
+ * @param e      the enclosing expression (its type/position)
+ * @param table  the type table (forwarded to each operand fold)
+ * @param env    the environment (forwarded to each operand fold)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       the binary rebuilt with folded operands, or a located error
+ * @since #comptime-fold
+ */
+fn fold_binary(b: TBinary, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExpr | error {
+    let l = match fold_expr(b.left, table, env, agg) { error as x => return x; TExpr as v => v }
+    let r = match fold_expr(b.right, table, env, agg) { error as x => return x; TExpr as v => v }
+    TExpr { kind = TBinary { op = b.op; left = l; right = r }; type = e.type; line = e.line; col = e.col }
+}
+
+/**
+ * fold_unary — rebuild a unary node around its folded operand (the non-evaluable path: the operand
+ * carries a runtime leaf).
+ *
+ * @param u      the typed unary expression
+ * @param e      the enclosing expression (its type/position)
+ * @param table  the type table (forwarded to the operand fold)
+ * @param env    the environment (forwarded to the operand fold)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       the unary rebuilt with a folded operand, or a located error
+ * @since #comptime-fold
+ */
+fn fold_unary(u: TUnary, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExpr | error {
+    let o = match fold_expr(u.operand, table, env, agg) { error as x => return x; TExpr as v => v }
+    TExpr { kind = TUnary { op = u.op; operand = o }; type = e.type; line = e.line; col = e.col }
+}
+
+/**
+ * fold_cast — rebuild a cast node around its folded operand (the non-evaluable / non-integer path).
+ *
+ * @param c      the typed cast expression
+ * @param e      the enclosing expression (its type/position)
+ * @param table  the type table (forwarded to the operand fold)
+ * @param env    the environment (forwarded to the operand fold)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       the cast rebuilt with a folded operand, or a located error
+ * @since #comptime-fold
+ */
+fn fold_cast(c: TCast, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExpr | error {
+    let o = match fold_expr(c.expr, table, env, agg) { error as x => return x; TExpr as v => v }
+    TExpr { kind = TCast { expr = o }; type = e.type; line = e.line; col = e.col }
+}
+
+/**
+ * fold_field — fold a field access of a const receiver (CF4c/CF4d): when the whole access collapses to
+ * a literal (`cf_can_fold_field` — a `.len` of a const string/aggregate, or an integer field of a const
+ * struct), evaluate it and splice the literal (mirroring `fold_index`); otherwise rebuild the access
+ * around its folded receiver, so a runtime receiver or a not-yet-foldable field stays a runtime
+ * `TFieldAccess` (behavior identical to today).
+ *
+ * @param fa     the typed field-access expression
+ * @param e      the enclosing expression (its type/position)
+ * @param table  the type table (forwarded to the receiver fold)
+ * @param env    the environment (forwarded to the receiver fold)
+ * @param agg    the module-aggregate resolution table (resolves a module-const receiver)
+ * @return       the folded literal, or the access rebuilt with a folded receiver, or a located error
+ * @since #comptime-fold
+ */
+fn fold_field(fa: TFieldAccess, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExpr | error {
+    if cf_can_fold_field(fa, agg) {
+        match eval_const(e, table, env, agg) {
+            error as x => return x
+            ConstValue as v => return fold_splice(v, e, table, env, agg)
+        }
+    }
+    let r = match fold_expr(fa.receiver, table, env, agg) { error as x => return x; TExpr as v => v }
+    TExpr { kind = TFieldAccess { receiver = r; field = fa.field }; type = e.type; line = e.line; col = e.col }
+}
+
+/**
+ * fold_safe_field — rebuild an optional field-access node around its folded receiver.
+ *
+ * @param sfa    the typed optional field-access expression
+ * @param e      the enclosing expression (its type/position)
+ * @param table  the type table (forwarded to the receiver fold)
+ * @param env    the environment (forwarded to the receiver fold)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       the optional field access rebuilt with a folded receiver, or a located error
+ * @since #comptime-fold
+ */
+fn fold_safe_field(sfa: TSafeFieldAccess, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExpr | error {
+    let r = match fold_expr(sfa.receiver, table, env, agg) { error as x => return x; TExpr as v => v }
+    TExpr { kind = TSafeFieldAccess { receiver = r; field = sfa.field }; type = e.type; line = e.line; col = e.col }
+}
+
+/**
+ * fold_coalesce — rebuild a `??` coalesce node around its folded operands.
+ *
+ * @param co     the typed coalesce expression
+ * @param e      the enclosing expression (its type/position)
+ * @param table  the type table (forwarded to each operand fold)
+ * @param env    the environment (forwarded to each operand fold)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       the coalesce rebuilt with folded operands, or a located error
+ * @since #comptime-fold
+ */
+fn fold_coalesce(co: TCoalesce, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExpr | error {
+    let l = match fold_expr(co.left, table, env, agg) { error as x => return x; TExpr as v => v }
+    let r = match fold_expr(co.right, table, env, agg) { error as x => return x; TExpr as v => v }
+    TExpr { kind = TCoalesce { left = l; right = r }; type = e.type; line = e.line; col = e.col }
+}
+
+/**
+ * fold_index — fold an index of a const aggregate at a const index (Layer 1c): when the whole index
+ * is const-foldable (`cf_can_index` — a const-aggregate receiver at a const integer index), evaluate
+ * it and splice the element literal (mirroring `fold_op_node`); otherwise rebuild the index around its
+ * folded receiver and index, so a runtime index or receiver stays a runtime `TIndex` (behavior
+ * identical to today). An out-of-range or negative const index surfaces as a located compile error
+ * (M.1), propagated from `eval_const`.
+ *
+ * @param ix     the typed index expression
+ * @param e      the enclosing expression (its type/position)
+ * @param table  the type table (forwarded to each child fold)
+ * @param env    the environment (forwarded to each child fold)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       the folded element literal, or the index rebuilt with folded children, or a located error
+ * @since #comptime-fold
+ */
+fn fold_index(ix: TIndex, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExpr | error {
+    if cf_can_index(ix, agg) {
+        match eval_const(e, table, env, agg) {
+            error as x => return x
+            ConstValue as v => return fold_splice(v, e, table, env, agg)
+        }
+    }
+    let r = match fold_expr(ix.receiver, table, env, agg) { error as x => return x; TExpr as v => v }
+    let n = match fold_expr(ix.index, table, env, agg) { error as x => return x; TExpr as v => v }
+    TExpr { kind = TIndex { receiver = r; index = n }; type = e.type; line = e.line; col = e.col }
+}
+
+/**
+ * fold_borrow — rebuild a `&x` borrow node around its folded operand.
+ *
+ * @param b      the typed borrow expression
+ * @param e      the enclosing expression (its type/position)
+ * @param table  the type table (forwarded to the operand fold)
+ * @param env    the environment (forwarded to the operand fold)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       the borrow rebuilt with a folded operand, or a located error
+ * @since #comptime-fold
+ */
+fn fold_borrow(b: TBorrow, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExpr | error {
+    let o = match fold_expr(b.operand, table, env, agg) { error as x => return x; TExpr as v => v }
+    TExpr { kind = TBorrow { operand = o }; type = e.type; line = e.line; col = e.col }
+}
+
+/**
+ * fold_call — rebuild a call node around its folded argument expressions (the callee path carries no
+ * foldable expression).
+ *
+ * @param cl     the typed call expression
+ * @param e      the enclosing expression (its type/position)
+ * @param table  the type table (forwarded to each argument fold)
+ * @param env    the environment (forwarded to each argument fold)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       the call rebuilt with folded arguments, or a located error
+ * @since #comptime-fold
+ */
+fn fold_call(cl: TCall, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExpr | error {
+    let args = match fold_exprs(cl.args, table, env, agg) { error as x => return x; []TExpr as a => a }
+    TExpr { kind = TCall { callee = cl.callee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot }; type = e.type; line = e.line; col = e.col }
+}
+
+/**
+ * fold_struct — rebuild a struct-init node around its folded field values.
+ *
+ * @param si     the typed struct-init expression
+ * @param e      the enclosing expression (its type/position)
+ * @param table  the type table (forwarded to each field fold)
+ * @param env    the environment (forwarded to each field fold)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       the struct-init rebuilt with folded field values, or a located error
+ * @since #comptime-fold

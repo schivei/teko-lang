@@ -1,0 +1,214 @@
+// src/checker/consteval_c.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+
+/**
+ * rewrite_function — rewrite a top-level function's body, substituting every scalar module-level const
+ * reference with a clone of the const's collapsed checked initializer (#594 crumb 5). Signature,
+ * visibility, and metadata are preserved; only the body is walked.
+ *
+ * @param f    the typed function
+ * @param map  the scalar substitution table (parallel names/nss/inits)
+ * @return     the function with scalar-const references substituted in its body
+ * @since #594
+ */
+fn rewrite_function(f: TFunction, map: ScalarConstMap) -> TFunction {
+    TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = inline_rw_block(f.body, map); vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
+}
+
+/**
+ * rewrite_const_init — a copy of the aggregate const declaration `cd` with every scalar-const
+ * reference INSIDE its initializer substituted by that scalar's collapsed value (#594). A surviving
+ * aggregate const (crumb 6 materializes it in rodata, or the C backend inlines it) can reference a
+ * scalar const in a field/element (`const M: Point = Point { x = ORIGIN_X }`); inlining the scalar
+ * here means the aggregate's initializer is a pure aggregate-of-literals both backends can serialize.
+ *
+ * @param cd   the aggregate const declaration
+ * @param map  the scalar substitution table (parallel names/nss/inits)
+ * @return     `cd` with scalar-const references substituted in its initializer
+ * @since #594
+ */
+fn rewrite_const_init(cd: TConstDecl, map: ScalarConstMap) -> TConstDecl {
+    TConstDecl { name = cd.name; namespace = cd.namespace; ty = cd.ty; init = inline_rw_expr(cd.init, map); vis = cd.vis; has_doc = cd.has_doc; doc = cd.doc; line = cd.line; col = cd.col }
+}
+
+/**
+ * const_is_exported — true iff a const's visibility is `pub` or `exp`, the surface a consuming module
+ * may reach cross-module (#594 crumb 8). An exported SCALAR const survives `inline_consts` (rewritten,
+ * a lowering no-op) so its typed initializer rides the owning module's `.tkb` for the consumer to
+ * inline; a `private` scalar is dropped, having been inlined at every same-module use.
+ *
+ * @param cd  the typed const declaration
+ * @return    whether the const is part of the module's public (cross-module) surface
+ * @since #594
+ */
+fn const_is_exported(cd: TConstDecl) -> bool {
+    match cd.vis {
+        parser::Visibility::Private => false
+        parser::Visibility::Pub => true
+        parser::Visibility::Exp => true
+    }
+}
+
+/**
+ * inline_scalar_const_item — fold a SCALAR const declaration: a `private` scalar is DROPPED (it emits
+ * no code — inlined at every same-module use), while a `pub`/`exp` scalar SURVIVES (its initializer's
+ * nested scalar references collapsed by `rewrite_const_init`) so the const's value rides the module's
+ * `.tkb` and a consuming module inlines it identically (#594 crumb 8). A surviving scalar is a
+ * lowering/codegen no-op in every backend, exactly like an aggregate const's declaration.
+ *
+ * @param out  the rewritten items accumulated so far
+ * @param cd   the scalar const declaration to fold
+ * @param map  the scalar substitution table (parallel names/nss/inits)
+ * @return     `out` unchanged (private) or grown with the collapsed exported scalar const
+ * @since #594
+ */
+fn inline_scalar_const_item(out: []TItem, cd: TConstDecl, map: ScalarConstMap) -> []TItem {
+    if const_is_exported(cd) { return teko::list::push(out, rewrite_const_init(cd, map)) }
+    out
+}
+
+/**
+ * inline_place_item — fold one program item into the rewritten item list: a function's body is walked
+ * for scalar-const references; a loose statement is walked; a `private` SCALAR const declaration is
+ * DROPPED (it emits no code — no fn body, no arena) while a `pub`/`exp` scalar SURVIVES for `.tkb`
+ * export (crumb 8); an aggregate const declaration survives (its initializer's scalar references
+ * substituted, `rewrite_const_init`) for crumb-6 rodata materialization; every type/use declaration
+ * passes through unchanged (#594 crumb 5).
+ *
+ * @param out  the rewritten items accumulated so far
+ * @param it   the program item to fold
+ * @param map  the scalar substitution table (parallel names/nss/inits)
+ * @return     `out` grown with `it`'s rewritten form (or unchanged when `it` is a dropped private scalar const)
+ * @since #594
+ */
+fn inline_place_item(out: []TItem, it: TItem, map: ScalarConstMap) -> []TItem {
+    match it {
+        TFunction as f => teko::list::push(out, rewrite_function(f, map))
+        TConstDecl as cd => if is_scalar_const_type(cd.ty) { inline_scalar_const_item(out, cd, map) } else { teko::list::push(out, rewrite_const_init(cd, map)) }
+        TStatement as s => teko::list::push(out, inline_rw_stmt(s, map))
+        _ => teko::list::push(out, it)
+    }
+}
+
+/**
+ * inline_consts — rewrite the typed program, replacing every reference to a scalar module-level
+ * constant with a clone of that constant's checked initializer, in dependency order so nested const
+ * references collapse fully (#594 crumb 5). The scalar TConstDecl items are then dropped from the
+ * program (they emit no code — no fn body, no arena, no global). An AGGREGATE const is NOT inlined
+ * here — its TConstDecl passes through to lowering (crumb 6). Runs in the checker pipeline AFTER
+ * `monomorphize` and BEFORE lowering, so lowering sees no scalar const reference and never reaches a
+ * globals honest-stop for a scalar-only program. After substitution the pass composes the local-binding
+ * const-propagation (`propagate_locals`, #comptime-fold CF3) and then the CF2 fold (`fold_program`):
+ * every name-free provably-const integer op-tree — a substituted module const's `~(0 to u64)`, a
+ * propagated LOCAL `let a: u64 = 0xFF` used as `a >> 4`, or any inline literal op-tree — collapses to
+ * its literal, so BOTH engines load an immediate instead of re-executing the op-tree, and a
+ * provably-const overflow/÷0/out-of-range becomes a located compile error (M.1). The fold + propagation
+ * run for EVERY program, including a const-free one (a function-local `let a = 0xFF` folds without any
+ * module const present).
+ *
+ * @param prog  the fully typed, monomorphized program
+ * @return      the program with scalar const references substituted, scalar const decls removed,
+ *              provably-const local bindings propagated and integer op-trees folded to literals
+ * @throws      a located error when the module-level consts form a reference cycle (`const_dep_order`)
+ *              or a folded constant overflows / divides by zero / is out of range (#comptime-fold)
+ * @since #594
+ */
+pub fn inline_consts(prog: TProgram) -> TProgram | error {
+    let substituted = match substitute_module_consts(prog) { error as e => return e; TProgram as sp => sp }
+    let agg = match build_module_agg_map(substituted) { error as e => return e; ScalarConstMap as m => m }
+    fold_program(propagate_locals(substituted), agg)
+}
+
+/**
+ * const_ctor_return_value — the value a `return` statement yields, or null for a value-less `return`
+ * (whose `value` field is a placeholder the const-constructor canonicalizer must never splice).
+ *
+ * @param r  the typed return statement
+ * @return   the returned value expression, or null when the return carries no value
+ * @since #degrau-1
+ */
+fn const_ctor_return_value(r: TReturn) -> TExpr | null {
+    if !r.has_value { return null }
+    r.value
+}
+
+/**
+ * const_ctor_tail_expr — the single value expression a one-statement function body yields: the value
+ * of a `return <expr>` or the expression of a tail `<expr>` statement. Any other statement shape (a
+ * binding, a loop, an assignment) yields null, so a constructor carrying real control flow is never
+ * mistaken for one that simply builds a literal.
+ *
+ * @param st  the function body's only statement
+ * @return    the yielded value expression, or null when the statement yields no single value
+ * @since #degrau-1
+ */
+fn const_ctor_tail_expr(st: TStatement) -> TExpr | null {
+    match st {
+        TReturn as r => const_ctor_return_value(r)
+        TExprStmt as es => es.expr
+        _ => null
+    }
+}
+
+/**
+ * struct_literal_or_null — `e` itself when it is a struct literal, else null. The single place the
+ * canonicalizer decides that a constructor's body is a shape it may splice.
+ *
+ * @param e  the candidate expression
+ * @return   `e` when its kind is `TStructInit`, else null
+ * @since #degrau-1
+ */
+fn struct_literal_or_null(e: TExpr) -> TExpr | null {
+    match e.kind {
+        TStructInit => e
+        _ => null
+    }
+}
+
+/**
+ * const_ctor_literal — the struct literal a STRUCT-CONSTRUCTOR function returns, or null when `f` is
+ * not one. A struct constructor is a non-`extern` function whose whole body is ONE statement yielding
+ * a struct literal (`preg`'s `MReg { id = id; reg_class = reg_class; is_phys = true }`); any longer or
+ * differently shaped body disqualifies it, so the canonicalizer only ever reproduces a value the
+ * function itself would have returned.
+ *
+ * @param f  the typed function to classify
+ * @return   the struct literal its body yields, or null when `f` is not a struct constructor
+ * @since #degrau-1
+ */
+fn const_ctor_literal(f: TFunction) -> TExpr | null {
+    if f.is_extern { return null }
+    if f.body.len != 1 { return null }
+    match const_ctor_tail_expr(f.body[0]) {
+        TExpr as e => struct_literal_or_null(e)
+        null => null
+    }
+}
+
+/**
+ * push_when_const_ctor — accumulate `f` onto `acc` when it is a struct constructor, unchanged
+ * otherwise (the fold step of `collect_const_ctors`).
+ *
+ * @param acc  the constructors collected so far
+ * @param f    the typed function to classify
+ * @return     `acc`, grown with `f` when `f` is a struct constructor
+ * @since #degrau-1
+ */
+fn push_when_const_ctor(acc: []TFunction, f: TFunction) -> []TFunction {
+    match const_ctor_literal(f) {
+        TExpr => teko::list::push(acc, f)
+        null => acc
+    }
+}
+
+/**
+ * collect_const_ctor_item — accumulate one program item's struct constructor onto `acc`; every
+ * non-function item passes through unchanged.
+ *
+ * @param acc  the constructors collected so far
+ * @param it   the program item to fold
+ * @return     `acc`, grown when `it` is a struct-constructor function
+ * @since #degrau-1

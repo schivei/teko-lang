@@ -1,0 +1,256 @@
+// src/checker/cl_cl_conform.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+        let it = items[i]
+        match synthesize_one_decl(it, folded_table) {
+            parser::Item as synth => { out = teko::list::push(out, synth) }
+            error as e => {
+                out = teko::list::push(out, it)
+                diags = teko::list::push(diags, located_diag(it.file, item_decl_line(it), item_decl_col(it), e))
+            }
+        }
+        i++
+    }
+    ItemsOutcome { items = out; diags = diags }
+}
+
+/**
+ * The product of an item-rewriting pass that collects: the rewritten items (every one of them,
+ * failed rewrites passing through unchanged) plus the diagnostics of the ones that failed.
+ */
+type ItemsOutcome = struct {
+    /** the items after the pass, in program order */
+    items: []parser::Item
+    /** one located diagnostic per item the pass could not rewrite, in program order */
+    diags: []str
+}
+
+/**
+ * The line/column value that means "this item carries no source position of its own" — a loose
+ * top-level statement declares nothing to point at. `diag_at` reads it as unknown and omits the
+ * position rather than inventing one (M.3).
+ */
+const NO_DECL_POSITION: u32 = 0
+
+/**
+ * A top-level item's declaration LINE, for locating a diagnostic blamed on the item as a whole.
+ *
+ * @param it  the item
+ * @return    the declaration's 1-based line, or `NO_DECL_POSITION` when the item declares nothing
+ * @since 0.3.1
+ */
+fn item_decl_line(it: parser::Item) -> u32 {
+    match it.content {
+        parser::Function as f => f.line
+        parser::TypeDecl as td => td.line
+        parser::ConstDecl as cd => cd.line
+        _ => NO_DECL_POSITION
+    }
+}
+
+/**
+ * A top-level item's declaration COLUMN, the companion of `item_decl_line`.
+ *
+ * @param it  the item
+ * @return    the declaration's 1-based column, or `NO_DECL_POSITION` when the item declares nothing
+ * @since 0.3.1
+ */
+fn item_decl_col(it: parser::Item) -> u32 {
+    match it.content {
+        parser::Function as f => f.col
+        parser::TypeDecl as td => td.col
+        parser::ConstDecl as cd => cd.col
+        _ => NO_DECL_POSITION
+    }
+}
+
+/**
+ * (TR0/TR1/TR3) THE DERIVATION FOLD — rewrites each struct/class `TypeDecl` whose `&`-list names
+ * traits, in TWO passes. PASS 1 (`fold_user_traits`) folds each USER trait's fields + bodied methods
+ * into its deriver and records each (deriver, USER-trait) pair. PASS 2 (`synthesize_structural`)
+ * SYNTHESIZES each compiler-known STRUCTURAL trait's method (`Eq`/`Ord`/`Hash`/`Clone`/`Default`)
+ * into the deriver's method list over the field view computed from the PASS-1 table — so a
+ * co-derived user trait's fields and a class's full base chain are all visible to the synthesis.
+ * The trait names STAY in `implements` (TR1, Option B): one `implements` list is the single source
+ * of truth for every derived contract, so `type_conforms_to` sees the derivation and the D3
+ * vtable/upcast/constraint machinery treats a trait exactly like an interface. `check_conformance`
+ * skips the trait AND structural entries (their contracts are `check_trait_requirements` / the
+ * synthesis, not the interface path). NO-OP (the program returned unchanged) when the program
+ * declares no trait and no structural derive at all.
+ *
+ * @param program the parsed program
+ * @return the program with every trait-deriving struct/class folded, or ONE error carrying every
+ *         fold, synthesis and requirement diagnostic the pass collected
+ * @throws when a folded field/method collides unresolvably, a synthesized field shape is
+ *         unsupported, or a deriver misses a required method
+ */
+pub fn fold_traits(program: parser::Program) -> parser::Program | error {
+    let folded = fold_traits_collected(program)
+    if folded.diags.len > 0 { return diags_error(folded.diags) }
+    folded.program
+}
+
+/**
+ * The COLLECTING form of `fold_traits` — the one the checker's pre-walk drives. It runs the fold's
+ * three stages IN ORDER and cuts BETWEEN them: each stage consumes the previous stage's output, so
+ * a failed stage would make the next one report cascade errors about members the source never
+ * wrote. WITHIN a stage the walk is exhaustive: every deriver that cannot fold, every declaration
+ * that cannot synthesize, and every unsatisfied requirement is named in the same build.
+ *
+ * @param program  the parsed program
+ * @return         the folded program (the input, unchanged, when a stage cut) and every diagnostic
+ * @since 0.3.1
+ */
+fn fold_traits_collected(program: parser::Program) -> FoldOutcome {
+    let table = collect_types(program.items)
+    if !program_needs_trait_fold(program, table) { return FoldOutcome { program = program; diags = teko::list::empty() } }
+    let user = fold_user_traits(program, table)
+    if user.diags.len > 0 { return FoldOutcome { program = program; diags = user.diags } }
+    let synth = synthesize_structural(user.items, collect_types(user.items))
+    if synth.diags.len > 0 { return FoldOutcome { program = program; diags = synth.diags } }
+    FoldOutcome { program = parser::Program { items = synth.items }; diags = check_trait_requirements(user.derives, collect_types(synth.items)) }
+}
+
+/**
+ * `fold_traits_collected`'s product: the folded program plus every diagnostic the fold collected.
+ *
+ * A non-empty diagnostic list means `program` is the UNFOLDED input — derivers are missing the
+ * members the fold would have written, so the caller must cut here rather than collect against it
+ * (the HARD boundary of docs/design/all-diagnostics-pre-walk-0.3.1.md §3).
+ */
+type FoldOutcome = struct {
+    /** the folded program, or the input unchanged when the fold cut */
+    program: parser::Program
+    /** every fold/synthesis/requirement diagnostic, in program order */
+    diags: []str
+}
+
+// (#109 W0, tightened) is `reg` a monomorphization-STAMPED generic instance? The shared
+// name_is_g_instance is a naive `__g__` substring scan, and the lexer accepts `__g__` inside
+// ordinary identifiers — so a genuine USER type named e.g. `Foo__g__Bar` must NOT slip through
+// the duplicate ban on the marker alone. A registration is exempt only when ALL of:
+//   (a) the name carries the `__g__` infix,
+//   (b) the registration namespace is "" (stamped instances ALWAYS register with empty ns —
+//       resolve.tks::instantiate_types), and
+//   (c) the prefix before the FIRST `__g__` names a declared type WITH type_params somewhere
+//       in the table (a real generic base — `Foo__g__Bar` with no generic `Foo` fails this).
+// LOCAL predicate on purpose: name_is_g_instance keeps its broad substring semantics for the
+// mono pass (which only ever sees names IT stamped); only the W0 ban needs the strict form.
+fn w0_is_stamped_generic_reg(reg: TypeReg, table: TypeTable) -> bool {
+    if reg.namespace != "" { return false }
+    let name = reg.name
+    mut pos: u64 = name.len   // index of the FIRST `__g__`, or name.len when absent
+    mut i: u64 = 0
+    loop {
+        if i + 5 > name.len { break }
+        if name[i] == b'_' && name[i + 1] == b'_' && name[i + 2] == b'g' && name[i + 3] == b'_' && name[i + 4] == b'_' { pos = i; break }
+        i++
+    }
+    if pos == name.len { return false }   // no `__g__` infix at all
+    if pos == 0 { return false }   // an empty base prefix can never name a generic decl
+    let base = teko::str::slice_to(name, pos)
+    mut j: u64 = 0
+    loop {
+        if j >= table.len { break }
+        if table[j].decl.type_params.len > 0 && table[j].name == base { return true }
+        j++
+    }
+    false
+}
+
+// (#109 W0) fail-loud duplicate-registration ban — the first hardening step of the
+// namespace-aware type table redesign. Two errors, both O(n^2) over the collected table
+// (small — mirrors the interface-conflict scan above):
+//   1. same (namespace, name) registered twice = a real duplicate declaration.
+//   2. same BARE name registered under two DIFFERENT namespaces = TEMPORARILY banned (today's
+//      flat, namespace-blind lookups (type_table_find et al.) would silently conflate the two —
+//      W3 lifts this ban once resolution becomes namespace-aware).
+// EXEMPT: stamped generic-instance entries (w0_is_stamped_generic_reg — empty ns + a real
+// generic base behind the `__g__` infix) — monomorphization legitimately stamps many
+// `Base__g__<mangle>` instances that share the "" namespace bucket with every other stamped
+// instance; that's not a user-facing collision, and stamping already dedups by exact mangled
+// name (resolve.tks::instantiate_types's "already stamped" check).
+fn check_no_duplicate_types(table: TypeTable) -> []str {
+    mut diags: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= table.len { break }
+        if w0_is_stamped_generic_reg(table[i], table) { i++; continue }
+        diags = concat_diags(diags, duplicates_of_reg(table, i))
+        i++
+    }
+    diags
+}
+
+/**
+ * Every LATER registration in `table` that duplicates the entry at `at` — the inner half of the
+ * W0 ban, extracted so the outer walk stays flat. Reported against the DUPLICATE's own position,
+ * not the first declaration's, so the diagnostic points at the redeclaration a reader must delete.
+ *
+ * @param table  the collected type table
+ * @param at     the index of the registration being compared against
+ * @return       one diagnostic per duplicate found after `at` (empty when there is none)
+ * @since 0.3.1
+ */
+fn duplicates_of_reg(table: TypeTable, at: u64) -> []str {
+    mut diags: []str = teko::list::empty()
+    let reg = table[at]
+    let ns_label = if reg.namespace == "" { "<top-level>" } else { reg.namespace }
+    mut j: u64 = at + 1
+    loop {
+        if j >= table.len { break }
+        let other = table[j]
+        if !w0_is_stamped_generic_reg(other, table) && other.name == reg.name && other.namespace == reg.namespace {
+            diags = teko::list::push(diags, diag_at(other.file, other.decl.line, other.decl.col, $"duplicate type '{reg.name}' in namespace '{ns_label}'"))
+        }
+        j++
+    }
+    diags
+}
+
+/**
+ * The U2 field-composition contagion gate (§2, the 0.1.0.0-beta memory+unsafe remodel
+ * #333) — a resolved field type `ft` may carry an unsafe-typed component (directly or
+ * through `[]M`/`M?`/`Ref<M>`/`ptr<M>`/a variant member) only if the ENCLOSING decl is
+ * itself `unsafe`. A safe struct/class/trait/alias embedding an unsafe-typed field would
+ * otherwise leak unsafe data behind a safe-looking wrapper, defeating the whole point of
+ * the nominal color. Called once per field by every `validate_type_decls` body loop
+ * (struct/class/trait fields, and the alias body) — the SAME gate shape, parameterized
+ * only by which name to blame in the message.
+ *
+ * @param str decl_name  the enclosing TypeDecl's name (blamed in the error)
+ * @param bool decl_unsafe  is the enclosing TypeDecl itself `unsafe`?
+ * @param str field_name  the offending field's name (blamed in the error)
+ * @param Type ft  the field's resolved semantic type
+ * @param TypeTable table  the program's type table (for the `unsafe_carrying` leaf probe)
+ * @return error?  an error iff `ft` carries unsafe data into a non-`unsafe` decl
+ */
+fn reject_unsafe_field_contagion(decl_name: str, decl_unsafe: bool, field_name: str, ft: Type, table: TypeTable) -> error | null {
+    if decl_unsafe { return null }
+    if !unsafe_carrying(ft, table) { return null }
+    error { message = $"struct/class '{decl_name}' has an unsafe-typed field '{field_name}' — it must be declared `unsafe` (unsafe data cannot be held by a safe type; §2 contagion-by-composition)" }
+}
+
+/**
+ * The U1 STRUCTURAL-ALIAS gate (owner ruling, cargo/20-unsafe-alias-rejeitado, docs/design/
+ * c-types-and-marshalling-0.3.1.md §9.2): `unsafe` on a `type Name = <type-expr>` alias is
+ * REJECTED, never silently accepted.
+ *
+ * The owner's semantics decides this alone: `unsafe` marks a type's OWN methods as unsafe and
+ * unlocks raw pointers inside its OWN body — "se não usa, não tem pq ser unsafe". A pure alias
+ * (`AliasBody`) has no methods and no body of its own; it is TRANSPARENT (`resolve_named`,
+ * `resolve.tks:794`) — every reference resolves straight THROUGH to the aliased type-expression,
+ * and the alias's own name never survives resolution. `unsafe_carrying_at` looks the stamp up on
+ * a surviving `Named` (`resolve.tks:1158`); for an alias there is none left to find, so the
+ * modifier would otherwise compile and do NOTHING — a safe-looking wrapper could carry unsafe
+ * data straight past the contagion gate (the defect this rejects).
+ *
+ * This holds UNIFORMLY regardless of the alias's right-hand side — a structural target
+ * (`ptr<byte>`, `u64`, `[]T`, a bare union `A | B`) is the silent hole above, and an alias to
+ * ANOTHER already-`unsafe` `Named` type (`unsafe type X = RawBuf`) is equally rejected: `X`
+ * still resolves straight through to `RawBuf`, so `RawBuf`'s OWN stamp already governs every
+ * use of `X` whether or not `X` itself repeats the modifier — the capability belongs to the
+ * type being pointed AT, never to the alias name pointing at it. There is no reading of the
+ * criterion under which an alias earns a referent of its own.

@@ -1,0 +1,266 @@
+// src/checker/spine_c.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+
+/**
+ * Return the points-to axis with index `i` replaced by `v` (parallel arrays are rebuilt by copy —
+ * the compiler corpus has no in-place slice write for a value element; mirrors `set_us`).
+ *
+ * @param []PointsTo pt  the points-to axis
+ * @param u32 i  the cell index to replace
+ * @param PointsTo v  the new points-to value
+ * @return []PointsTo  the axis with element `i` set to `v`
+ */
+fn set_pt(pt: []PointsTo, i: u32, v: PointsTo) -> []PointsTo {
+    mut acc: []PointsTo = teko::list::empty()
+    mut k = 0
+    loop {
+        if k >= pt.len { break }
+        if k to u32 == i {
+            acc = teko::list::push(acc, v)
+        } else {
+            acc = teko::list::push(acc, pt[k])
+        }
+        k++
+    }
+    acc
+}
+
+/**
+ * Join `PtAdopter(region)` into the cell keyed `name` (field "" — a bare binding target), returning
+ * the updated axis. A missing cell leaves the axis unchanged (the key is not in this function's
+ * universe).
+ *
+ * @param []Cell cells  the cell universe
+ * @param []PointsTo pt  the points-to axis
+ * @param str name  the bound name allocated inside the adopter
+ * @param u32 region  the enclosing adopter's region id
+ * @return []PointsTo  the axis with the named cell joined to `PtAdopter(region)`
+ */
+fn join_pt_adopter_at(cells: []Cell, pt: []PointsTo, name: str, region: u32) -> []PointsTo {
+    let idx = cell_index(cells, name, "")
+    if idx < 0 { return pt }
+    set_pt(pt, idx to u32, pt_join(pt[idx to u32], PtAdopter { id = PtAdopterId { region = region; top = false } }))
+}
+
+/**
+ * The points-to transfer sweep over one statement block: every binding target INSIDE an `adopt { }`
+ * body (walked with `in_region` = that adopter's id) joins `PtAdopter(region)` into its cell (§5.1);
+ * a nested `adopt { }` allocates its OWN fresh region id (`state.next_region` bumped) so distinct
+ * adopters never merge into the same site. Recurses into loop / defer bodies too (their bindings
+ * inherit the SAME enclosing adopter, if any).
+ *
+ * @param []TStatement body  the typed statement block
+ * @param []Cell cells  the cell universe
+ * @param u32 in_region  the enclosing adopter's region id, valid iff `has_region`
+ * @param bool has_region  true iff this block is (transitively) inside an `adopt { }`
+ * @param PtTransferState state  the points-to axis + next-region-id counter so far
+ * @return PtTransferState  the updated transfer state
+ */
+fn pt_transfer_block(body: []TStatement, cells: []Cell, in_region: u32, has_region: bool, state: PtTransferState) -> PtTransferState {
+    mut acc = state
+    mut i = 0
+    loop {
+        if i >= body.len { break }
+        acc = pt_transfer_stmt(body[i], cells, in_region, has_region, acc)
+        i++
+    }
+    acc
+}
+
+/**
+ * Descend the points-to transfer into an expression's control-flow arm bodies under the SAME
+ * enclosing region: a statement- or value-position `if` / `match` carries a STATEMENT BLOCK per
+ * branch, and the cell universe enumerates those blocks' cells — so a binding allocated inside an
+ * in-adopter branch must still join `PtAdopter(region)`, else it stays `PtFrame` and the §5.1
+ * ADOPT-escape guard admits a borrow of it escaping the brace (an unsound under-approximation).
+ * Mirrors `add_expr_cells`; a non-branching expression carries no block, so it is a no-op.
+ *
+ * @param TExpr e  the typed expression
+ * @param []Cell cells  the cell universe
+ * @param u32 in_region  the enclosing adopter's region id, valid iff `has_region`
+ * @param bool has_region  true iff this expression is (transitively) inside an `adopt { }`
+ * @param PtTransferState state  the points-to axis + next-region-id counter so far
+ * @return PtTransferState  the updated transfer state
+ */
+fn pt_transfer_expr(e: TExpr, cells: []Cell, in_region: u32, has_region: bool, state: PtTransferState) -> PtTransferState {
+    match e.kind {
+        TIfExpr as f => pt_transfer_block(f.else_blk, cells, in_region, has_region, pt_transfer_block(f.then_blk, cells, in_region, has_region, state))
+        TMatchExpr as m => pt_transfer_match(m, cells, in_region, has_region, state)
+        _ => state
+    }
+}
+
+/**
+ * The points-to transfer over a match expression's arm bodies (each a statement block, like an
+ * if-branch) under the SAME enclosing region. State-threaded (functional accumulate).
+ *
+ * @param TMatchExpr m  the typed match expression
+ * @param []Cell cells  the cell universe
+ * @param u32 in_region  the enclosing adopter's region id, valid iff `has_region`
+ * @param bool has_region  true iff this expression is (transitively) inside an `adopt { }`
+ * @param PtTransferState state  the points-to axis + next-region-id counter so far
+ * @return PtTransferState  the updated transfer state
+ */
+fn pt_transfer_match(m: TMatchExpr, cells: []Cell, in_region: u32, has_region: bool, state: PtTransferState) -> PtTransferState {
+    mut acc = state
+    mut i = 0
+    loop {
+        if i >= m.arms.len { break }
+        acc = pt_transfer_block(m.arms[i].body, cells, in_region, has_region, acc)
+        i++
+    }
+    acc
+}
+
+/**
+ * The points-to transfer for one statement: a `TBinding` to a `SimpleName` INSIDE an adopter joins
+ * `PtAdopter(region)` into its cell; `TLoopStmt` / `TDeferStmt` bodies recurse under the SAME
+ * enclosing region; a `TAdoptStmt` opens a FRESH region for its own body (nested adopters never
+ * collapse into one site); a statement- or value-position `if` / `match` recurses into its arm
+ * bodies (`pt_transfer_expr`) under the same region so a branch-local allocation is not missed.
+ *
+ * @param TStatement s  the typed statement
+ * @param []Cell cells  the cell universe
+ * @param u32 in_region  the enclosing adopter's region id, valid iff `has_region`
+ * @param bool has_region  true iff this statement is (transitively) inside an `adopt { }`
+ * @param PtTransferState state  the points-to axis + next-region-id counter so far
+ * @return PtTransferState  the updated transfer state
+ */
+fn pt_transfer_stmt(s: TStatement, cells: []Cell, in_region: u32, has_region: bool, state: PtTransferState) -> PtTransferState {
+    match s {
+        TBinding as b => pt_transfer_expr(b.value, cells, in_region, has_region, pt_transfer_binding(b, cells, in_region, has_region, state))
+        TLoopStmt as l => pt_transfer_block(l.body, cells, in_region, has_region, pt_transfer_block(l.init, cells, in_region, has_region, state))
+        TDeferStmt as d => pt_transfer_block(d.body, cells, in_region, has_region, state)
+        TAdoptStmt as a => pt_transfer_adopt(a, cells, state)
+        TAssign as a => pt_transfer_expr(a.value, cells, in_region, has_region, state)
+        TReturn as r => if r.has_value { pt_transfer_expr(r.value, cells, in_region, has_region, state) } else { state }
+        TExprStmt as es => pt_transfer_expr(es.expr, cells, in_region, has_region, state)
+        TBreakStmt => state
+        TContinueStmt => state
+    }
+}
+
+/**
+ * Join `PtAdopter(region)` into a binding's target cell when this binding is (transitively) inside an
+ * `adopt { }` block; a binding outside any adopter (`has_region = false`) is left untouched (its `pt`
+ * stays whatever the seed / an outer join already established).
+ *
+ * @param TBinding b  the typed binding
+ * @param []Cell cells  the cell universe
+ * @param u32 in_region  the enclosing adopter's region id, valid iff `has_region`
+ * @param bool has_region  true iff this binding is (transitively) inside an `adopt { }`
+ * @param PtTransferState state  the points-to axis + next-region-id counter so far
+ * @return PtTransferState  the updated transfer state
+ */
+fn pt_transfer_binding(b: TBinding, cells: []Cell, in_region: u32, has_region: bool, state: PtTransferState) -> PtTransferState {
+    if !has_region { return state }
+    match b.target {
+        parser::SimpleName as sn => PtTransferState { pt = join_pt_adopter_at(cells, state.pt, sn.name, in_region); next_region = state.next_region }
+        parser::DestructurePattern => state
+    }
+}
+
+/**
+ * Open a FRESH region for an `adopt { }` block's own body (bumping `next_region`), then walk that
+ * body under the new region id — a nested adopter never shares its enclosing adopter's site (each
+ * lexical `adopt { }` is bulk-dropped independently).
+ *
+ * @param TAdoptStmt a  the typed adopt statement
+ * @param []Cell cells  the cell universe
+ * @param PtTransferState state  the points-to axis + next-region-id counter so far
+ * @return PtTransferState  the updated transfer state
+ */
+fn pt_transfer_adopt(a: TAdoptStmt, cells: []Cell, state: PtTransferState) -> PtTransferState {
+    let region = state.next_region
+    let opened = PtTransferState { pt = state.pt; next_region = state.next_region + 1 }
+    pt_transfer_block(a.body, cells, region, true, opened)
+}
+
+/**
+ * The lattice rank of a unique-vs-shared value (`UsUnique` = 0 < `UsShared` = 1 < `UsTop` = 2).
+ *
+ * @param Unique u  the unique-vs-shared value
+ * @return u32  its lattice rank
+ */
+fn us_rank(u: Unique) -> u32 {
+    match u {
+        UsUnique => 0
+        UsShared => 1
+        UsTop => 2
+    }
+}
+
+/**
+ * The unique-vs-shared join (least upper bound). `UsUnique` is bottom; any aliasing read climbs a
+ * cell to `UsShared`; `⊤` is `UsTop` (treated as shared). Monotone — the result rank is ≥ both
+ * inputs.
+ *
+ * @param Unique a  the current unique-vs-shared value
+ * @param Unique b  the incoming unique-vs-shared value
+ * @return Unique  the least upper bound of `a` and `b`
+ */
+fn us_join(a: Unique, b: Unique) -> Unique {
+    if us_rank(a) >= us_rank(b) { return a }
+    b
+}
+
+/**
+ * Is `e` a bare local read (a `TVar`) — the alias source shape? Mirrors `expr_is_bare_var` in
+ * `escape.tks`: only a DIRECT variable read (no field / index / call wrapping) is an alias source.
+ *
+ * @param TExpr e  the typed expression
+ * @return bool  true iff `e` is a bare `TVar` read
+ */
+fn expr_is_bare_local(e: TExpr) -> bool {
+    match e.kind {
+        TVar => true
+        _ => false
+    }
+}
+
+/**
+ * Does binding / assigning to a value at `e` create an ALIAS of a non-scalar local (`let y = x` where
+ * `x` is a bare non-scalar local)? An alias joins BOTH cells to `UsShared`. A scalar copy is not an
+ * alias (it carries no shared handle).
+ *
+ * @param TExpr e  the typed RHS expression
+ * @return bool  true iff `e` is a bare non-scalar local read (an alias source)
+ */
+fn rhs_is_alias_source(e: TExpr) -> bool {
+    if !expr_is_bare_local(e) { return false }
+    !type_is_scalar(e.type)
+}
+
+/**
+ * Join `UsShared` into the cells of both sides of an alias `dst = src` (both `dst` and the aliased
+ * `src` become shared), returning the updated axis. Return-value threaded (a functional accumulate,
+ * like the cell-building walk) so the join is deterministic on both engines.
+ *
+ * @param []Cell cells  the cell universe
+ * @param []Unique us  the unique-vs-shared axis so far
+ * @param str dst  the destination binding name
+ * @param str src  the aliased source name
+ * @return []Unique  the axis with both cells joined to `UsShared`
+ */
+fn mark_alias_shared(cells: []Cell, us: []Unique, dst: str, src: str) -> []Unique {
+    join_us_at(cells, join_us_at(cells, us, dst, ""), src, "")
+}
+
+/**
+ * Join `UsShared` into the cell keyed by `name` / `field`, returning the possibly-updated axis. A
+ * missing cell leaves the axis unchanged (the key is not in this function's universe).
+ *
+ * @param []Cell cells  the cell universe
+ * @param []Unique us  the unique-vs-shared axis
+ * @param str name  the cell's binding name
+ * @param str field  the cell's one-hop field ("" for a bare cell)
+ * @return []Unique  the axis with the named cell joined to `UsShared`
+ */
+fn join_us_at(cells: []Cell, us: []Unique, name: str, field: str) -> []Unique {
+    let idx = cell_index(cells, name, field)
+    if idx < 0 { return us }
+    set_us(us, idx to u32, us_join(us[idx to u32], UsShared { }))
+}

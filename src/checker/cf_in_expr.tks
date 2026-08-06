@@ -1,0 +1,205 @@
+// src/checker/cf_in_expr.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+    TExpr { kind = TArrayLit { elements = elems }; type = e.type; line = e.line; col = e.col }
+}
+
+/**
+ * fold_block — fold every statement in `stmts` in order, propagating the first located error.
+ *
+ * @param stmts  the typed statement block
+ * @param table  the type table (forwarded to each statement fold)
+ * @param env    the environment (forwarded to each statement fold)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       the block with each statement folded, or the first located error
+ * @since #comptime-fold
+ */
+fn fold_block(stmts: []TStatement, table: TypeTable, env: Env, agg: AggConstMap) -> []TStatement | error {
+    mut out: []TStatement = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= stmts.len { break }
+        let s = match fold_stmt(stmts[i], table, env, agg) { error as x => return x; TStatement as v => v }
+        out = teko::list::push(out, s)
+        i++
+    }
+    out
+}
+
+/**
+ * fold_stmt — fold one typed statement, folding every expression and nested block it carries. TOTAL
+ * over `TStatement`; a value-less `break`/`continue` carries no foldable expression and is returned
+ * unchanged.
+ *
+ * @param st     the typed statement to fold
+ * @param table  the type table (forwarded to each child fold)
+ * @param env    the environment (forwarded to each child fold)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       the statement with folded children, or a located error
+ * @since #comptime-fold
+ */
+fn fold_stmt(st: TStatement, table: TypeTable, env: Env, agg: AggConstMap) -> TStatement | error {
+    match st {
+        TBinding as b => {
+            let v = match fold_expr(b.value, table, env, agg) { error as x => return x; TExpr as f => f }
+            TBinding { kind = b.kind; target = b.target; bound = b.bound; value = v }
+        }
+        TAssign as a => fold_assign(a, table, env, agg)
+        TReturn as r => fold_return(r, st, table, env, agg)
+        TLoopStmt as l => {
+            let init = match fold_block(l.init, table, env, agg) { error as x => return x; []TStatement as v => v }
+            let body = match fold_block(l.body, table, env, agg) { error as x => return x; []TStatement as v => v }
+            TLoopStmt { label = l.label; init = init; body = body }
+        }
+        TBreakStmt => st
+        TContinueStmt => st
+        TExprStmt as es => {
+            let v = match fold_expr(es.expr, table, env, agg) { error as x => return x; TExpr as f => f }
+            TExprStmt { expr = v }
+        }
+        TDeferStmt as d => {
+            let body = match fold_block(d.body, table, env, agg) { error as x => return x; []TStatement as v => v }
+            TDeferStmt { body = body }
+        }
+        TAdoptStmt as a => {
+            let body = match fold_block(a.body, table, env, agg) { error as x => return x; []TStatement as v => v }
+            TAdoptStmt { name = a.name; body = body }
+        }
+    }
+}
+
+/**
+ * fold_return — fold a `return` statement's value (a value-less `return` is returned unchanged).
+ *
+ * @param r      the typed return statement
+ * @param st     the original statement (returned unchanged when value-less)
+ * @param table  the type table (forwarded to the value fold)
+ * @param env    the environment (forwarded to the value fold)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       the return with a folded value, or a located error
+ * @since #comptime-fold
+ */
+fn fold_return(r: TReturn, st: TStatement, table: TypeTable, env: Env, agg: AggConstMap) -> TStatement | error {
+    if !r.has_value { return st }
+    let v = match fold_expr(r.value, table, env, agg) { error as x => return x; TExpr as f => f }
+    TReturn { has_value = true; value = v }
+}
+
+/**
+ * fold_assign — fold an assignment's value and, for a field target, its typed LHS field-access
+ * expression (a simple/ref-deref target carries no foldable expression).
+ *
+ * @param a      the typed assignment
+ * @param table  the type table (forwarded to each child fold)
+ * @param env    the environment (forwarded to each child fold)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       the assignment with folded children, or a located error
+ * @since #comptime-fold
+ */
+fn fold_assign(a: TAssign, table: TypeTable, env: Env, agg: AggConstMap) -> TStatement | error {
+    let value = match fold_expr(a.value, table, env, agg) { error as x => return x; TExpr as f => f }
+    if parser::assign_has_target(a.kind) {
+        let target = match fold_expr(a.target, table, env, agg) { error as x => return x; TExpr as f => f }
+        return TAssign { kind = a.kind; name = a.name; op = a.op; bound = a.bound; value = value; deref = a.deref; target = target }
+    }
+    TAssign { kind = a.kind; name = a.name; op = a.op; bound = a.bound; value = value; deref = a.deref; target = a.target }
+}
+
+/**
+ * fold_empty_table — an empty type table for the CF2 fold: the name-free integer subset the fold
+ * admits never resolves a type through the table, so an empty one suffices at the wiring site.
+ *
+ * @return  an empty type table
+ * @since #comptime-fold
+ */
+fn fold_empty_table() -> TypeTable { teko::list::empty() }
+/** fold_empty_agg — the empty aggregate-const map for a predicate-fold context with no module aggregates (the analyzer's `eval_folds`). Mirrors fold_empty_table. */
+fn fold_empty_agg() -> AggConstMap { ScalarConstMap { names = teko::list::empty(); nss = teko::list::empty(); inits = teko::list::empty() } }
+
+/**
+ * fold_program — fold every item of the substituted program: a function's body, a const declaration's
+ * initializer and a loose statement each have their op-trees folded; every other item passes through
+ * unchanged. Composed after `inline_consts`'s reference substitution as the second Layer-1a pass. The
+ * `agg` map (built once by the caller from the substituted program) resolves a module-aggregate-const
+ * `TVar` receiver of a const `TIndex` so `G[0]` folds to its element on BOTH engines (Layer 1c).
+ *
+ * A const declaration's folded initializer is then CANONICALIZED (`canonicalize_const_ctors`): an
+ * allowlisted pure-constructor call returning a struct becomes the struct literal that constructor's
+ * body builds, so the rodata materializer downstream sees only the aggregate literal it already knows
+ * how to serialize. The constructor table is built ONCE here, from this program's own items.
+ *
+ * @param prog  the reference-substituted typed program
+ * @param agg   the module-aggregate resolution table (module aggregate consts, dependency-ordered)
+ * @return      the program with provably-const integer op-trees folded to literals and every const
+ *              initializer's struct-constructor call canonicalized, or a located error (a folded
+ *              constant overflow / ÷0 / out-of-range)
+ * @since #comptime-fold
+ */
+pub fn fold_program(prog: TProgram, agg: AggConstMap) -> TProgram | error {
+    let table = fold_empty_table()
+    let env = env_empty()
+    let ctors = collect_const_ctors(prog.items)
+    mut out: []TItem = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        let it = match fold_item(prog.items[i], table, env, agg, ctors) { error as x => return x; TItem as v => v }
+        out = teko::list::push(out, it)
+        i++
+    }
+    TProgram { items = out }
+}
+
+/**
+ * fold_item — fold one program item: a function's body, a const declaration's initializer or a loose
+ * statement; every other item (a type/use declaration) passes through unchanged.
+ *
+ * @param it     the program item to fold
+ * @param table  the type table (forwarded to the child fold)
+ * @param env    the environment (forwarded to the child fold)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @param ctors  the program's struct-constructor table (used only by a const declaration's canonicalization)
+ * @return       the item with its op-trees folded, or a located error
+ * @since #comptime-fold
+ */
+fn fold_item(it: TItem, table: TypeTable, env: Env, agg: AggConstMap, ctors: []TFunction) -> TItem | error {
+    match it {
+        TFunction as f => fold_function(f, table, env, agg)
+        TConstDecl as cd => fold_const_decl(cd, table, env, agg, ctors)
+        TStatement as s => match fold_stmt(s, table, env, agg) { error as x => return x; TStatement as v => v }
+        _ => it
+    }
+}
+
+/**
+ * fold_function — fold a top-level function's body; its signature, visibility and metadata are
+ * preserved.
+ *
+ * @param f      the typed function
+ * @param table  the type table (forwarded to the body fold)
+ * @param env    the environment (forwarded to the body fold)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       the function with a folded body, or a located error
+ * @since #comptime-fold
+ */
+fn fold_function(f: TFunction, table: TypeTable, env: Env, agg: AggConstMap) -> TItem | error {
+    let body = match fold_block(f.body, table, env, agg) { error as x => return x; []TStatement as v => v }
+    TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
+}
+
+/**
+ * fold_const_decl — fold a const declaration's initializer (the surviving exported scalar consts and
+ * every aggregate const collapse their op-trees to literals) and CANONICALIZE the folded result, so an
+ * allowlisted struct constructor's call (`preg(0, MRegClass::GPR)`) becomes the struct literal that
+ * constructor's body builds; the declaration's metadata is preserved. Canonicalizing here — on the
+ * fold's own output, and only for a const — is what lets the rodata materializer keep seeing nothing
+ * but aggregate literals.
+ *
+ * @param cd     the typed const declaration
+ * @param table  the type table (forwarded to the initializer fold)
+ * @param env    the environment (forwarded to the initializer fold)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @param ctors  the program's struct-constructor table (`collect_const_ctors`)
+ * @return       the const declaration with a folded, canonicalized initializer, or a located error

@@ -1,0 +1,205 @@
+// src/checker/cf_arith.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+ * into each element expression (Layer 1c). A spread element is not const-foldable in CF4 and makes
+ * the aggregate non-const; its presence — rejected by `cf_agg_value` before the fold reaches here —
+ * is a located error on the direct-eval path. Element order is index order.
+ *
+ * @param a      the typed array literal
+ * @param table  the type table (forwarded to each element eval)
+ * @param env    the environment (forwarded to each element eval)
+ * @param agg    the module-aggregate resolution table (forwarded)
+ * @return       the aggregate comptime value, or the first located element error
+ * @since #comptime-fold
+ */
+fn eval_array_agg(a: TArrayLit, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
+    mut elems: []ConstValue = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= a.elements.len { break }
+        if a.elements[i].is_spread { return error { message = "comptime fold: a spread element is not a const aggregate (#comptime-fold)" } }
+        let v = match eval_const(a.elements[i].expr, table, env, agg) { error as x => return x; ConstValue as cv => cv }
+        elems = teko::list::push(elems, v)
+        i++
+    }
+    cv_agg(elems)
+}
+
+/**
+ * eval_index_expr — evaluate a `TIndex` of a const aggregate at a const index (Layer 1c): evaluate
+ * the receiver (which must yield a `CVAgg`) and the index (which must yield a `CVInt`), then read the
+ * element. A negative index or an index `>= elems.len` is a LOCATED COMPILE ERROR (M.1;
+ * LEGISLATION:148) — a hazard the compiler can already see. A non-aggregate receiver or non-integer
+ * index reaching here is a located error (the `cf_can_index` gate proves the shape before the fold
+ * calls `eval_const`).
+ *
+ * @param ix     the typed index expression
+ * @param e      the enclosing expression (positions any error)
+ * @param table  the type table (forwarded to the child evals)
+ * @param env    the environment (forwarded to the child evals)
+ * @param agg    the module-aggregate resolution table (forwarded)
+ * @return       the element comptime value, or a located error (out-of-range / shape)
+ * @since #comptime-fold
+ */
+fn eval_index_expr(ix: TIndex, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
+    let recv = match eval_const(ix.receiver, table, env, agg) { error as x => return x; ConstValue as cv => cv }
+    let idx = match eval_const(ix.index, table, env, agg) { error as x => return x; ConstValue as cv => cv }
+    match recv.kind {
+        CVAgg as ag => eval_index_at(ag, idx, e)
+        _ => const_form_error("comptime fold: index receiver is not a const aggregate (#comptime-fold)", e)
+    }
+}
+
+/**
+ * eval_index_at — read element `idx` of the folded aggregate `ag`: the index must be a `CVInt` with a
+ * representable non-negative value strictly below `ag.elems.len`; a negative or out-of-range index is
+ * a located compile error (M.1). The bounds hazard the compiler can already see fails loudly at
+ * comptime, never as a silent wrap or a deferred runtime trap.
+ *
+ * @param ag   the folded aggregate value
+ * @param idx  the folded index value (must be a `CVInt`)
+ * @param e    the enclosing expression (positions any error)
+ * @return     the element comptime value, or a located out-of-range error
+ * @since #comptime-fold
+ */
+fn eval_index_at(ag: CVAgg, idx: ConstValue, e: TExpr) -> ConstValue | error {
+    match idx.kind {
+        CVInt as ci => eval_index_pick(ag, ci, e)
+        _ => const_form_error("comptime fold: index is not a const integer (#comptime-fold)", e)
+    }
+}
+
+/**
+ * eval_index_pick — the bounds-checked element read: recover the index's signed carrier, reject a
+ * negative or unrepresentable value, reject an index at or beyond the aggregate length, then return
+ * the element. Every rejection is a located M.1 compile error.
+ *
+ * @param ag  the folded aggregate value
+ * @param ci  the folded index integer
+ * @param e   the enclosing expression (positions any error)
+ * @return    the element comptime value, or a located out-of-range error
+ * @since #comptime-fold
+ */
+fn eval_index_pick(ag: CVAgg, ci: CVInt, e: TExpr) -> ConstValue | error {
+    let iv = match index_carrier(ci) { null => return const_form_error("comptime fold: index is out of range (#comptime-fold)", e); parser::NumInt as v => v }
+    if iv.neg { return const_form_error("comptime fold: a negative index is out of range (#comptime-fold)", e) }
+    if iv.mag >= ag.elems.len { return const_form_error("comptime fold: index is out of range for the aggregate length (#comptime-fold)", e) }
+    ag.elems[iv.mag]
+}
+
+/**
+ * index_carrier — the sign-magnitude value a const index `CVInt` denotes, or null when its type is
+ * not an integer the fold carries. Reuses `int_info`/`cv_int_to_numint`, the same reconstruction
+ * `literal_of` uses.
+ *
+ * @param ci  the folded index integer
+ * @return    the index's value, or null when unrepresentable
+ * @since #comptime-fold
+ */
+fn index_carrier(ci: CVInt) -> parser::NumInt | null {
+    match int_info(ci.ty) {
+        error => null
+        IntInfo as info => cv_int_to_numint(ci.bits, info)
+    }
+}
+
+/**
+ * eval_field_expr — evaluate a `TFieldAccess` of a const receiver (CF4c/CF4d): `.len` of a const
+ * aggregate or const string yields its element/byte count (`eval_len_field`); a struct field of a const
+ * struct yields that field's const value (`eval_struct_field`). The `cf_can_fold_field` gate proves the
+ * receiver is const and the field foldable before the fold reaches here, so a non-foldable field is a
+ * soft located error (the fold then leaves the access runtime).
+ *
+ * @param fa     the typed field-access node
+ * @param e      the enclosing expression (its type is the field's type; positions any error)
+ * @param table  the type table (forwarded to the receiver/field eval)
+ * @param env    the environment (forwarded to the receiver/field eval)
+ * @param agg    the module-aggregate resolution table (resolves a module-const receiver)
+ * @return       the field's comptime value, or a located error
+ * @since #comptime-fold
+ */
+fn eval_field_expr(fa: TFieldAccess, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
+    if is_len_field(fa) { return eval_len_field(fa, e, table, env, agg) }
+    eval_struct_field(fa, e, table, env, agg)
+}
+
+/**
+ * is_len_field — is `fa` the built-in `.len` of a `str` or slice receiver (CF4d)? The typer resolves
+ * `.len` on a `str`/`[]T` to a `u64` BEFORE the struct-field path, so a `len` field of a user struct
+ * (its receiver a `Named` type) is NOT this case and stays the struct-field fold.
+ *
+ * @param fa  the typed field-access node
+ * @return    true iff `fa` is the length of a string/slice receiver
+ * @since #comptime-fold
+ */
+fn is_len_field(fa: TFieldAccess) -> bool {
+    if fa.field != "len" { return false }
+    match fa.receiver.type {
+        Str => true
+        Slice => true
+        _ => false
+    }
+}
+
+/**
+ * eval_len_field — evaluate `recv.len` of a const string/aggregate receiver (CF4d): fold the receiver
+ * to its `CVBytes` (a string's raw bytes) or `CVAgg` (an array's elements) and return the count as the
+ * field's `u64` type. A receiver that folds to neither is a soft located error (behavior preserved: the
+ * access stays runtime).
+ *
+ * @param fa     the typed field-access node (`fa.field == "len"`)
+ * @param e      the enclosing expression (its `u64` type is the count's type; positions any error)
+ * @param table  the type table (forwarded to the receiver eval)
+ * @param env    the environment (forwarded to the receiver eval)
+ * @param agg    the module-aggregate resolution table (resolves a module-const receiver)
+ * @return       the length as a `u64` comptime value, or a located error
+ * @since #comptime-fold
+ */
+fn eval_len_field(fa: TFieldAccess, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
+    let recv = match eval_const(fa.receiver, table, env, agg) { error as x => return x; ConstValue as v => v }
+    match value_length(recv) {
+        null => const_form_error("comptime fold: `.len` receiver is not a const string or aggregate (#comptime-fold)", e)
+        u64 as n => cv_int(n, e.type)
+    }
+}
+
+/**
+ * value_length — the element/byte count of a folded aggregate/string value, or null when the value is
+ * neither (a scalar has no `.len`). A `CVAgg`'s length is its element count; a `CVBytes`'s length is its
+ * byte count (the same count `.len` reads at runtime for a `str`/`[]byte`).
+ *
+ * @param v  the folded receiver value
+ * @return   the length, or null when `v` has no length
+ * @since #comptime-fold
+ */
+fn value_length(v: ConstValue) -> u64 | null {
+    match v.kind {
+        CVAgg as ag => ag.elems.len
+        CVBytes as cb => cb.data.len
+        _ => null
+    }
+}
+
+/**
+ * eval_struct_field — evaluate `recv.field` of a const struct receiver (CF4c): resolve the receiver to
+ * its `TStructInit`, pick the initializer of the named field, and evaluate that. A receiver that is not
+ * a const struct, or a field the struct-init does not carry, is a soft located error (the fold then
+ * leaves the access runtime).
+ *
+ * @param fa     the typed field-access node
+ * @param e      the enclosing expression (its type is the field's type; positions any error)
+ * @param table  the type table (forwarded to the field-value eval)
+ * @param env    the environment (forwarded to the field-value eval)
+ * @param agg    the module-aggregate resolution table (resolves a module-const struct receiver)
+ * @return       the field's comptime value, or a located error
+ * @since #comptime-fold
+ */
+fn eval_struct_field(fa: TFieldAccess, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
+    match struct_field_init(fa.receiver, fa.field, agg) {
+        null => const_form_error("comptime fold: field-access receiver is not a const struct (#comptime-fold)", e)
+        TExpr as fv => eval_const(fv, table, env, agg)
+    }
+}
+

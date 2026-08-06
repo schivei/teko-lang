@@ -1,0 +1,280 @@
+// src/checker/cf_eval_literals.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+    eval_int_literal(n.value, e.type, e)
+}
+
+/**
+ * eval_int_literal — encode a sign-magnitude integer literal `value` as its declared type
+ * `t`, erroring when `t` is not an integer or the value is out of range for it.
+ *
+ * @param value  the literal's value (sign + 64-bit magnitude — `parser::NumInt`)
+ * @param t      the literal's declared type
+ * @param e      the enclosing expression (positions any error)
+ * @return       the integer comptime value, or a located error
+ * @since #comptime-fold
+ */
+fn eval_int_literal(value: parser::NumInt, t: Type, e: TExpr) -> ConstValue | error {
+    match int_info(t) {
+        error => return const_form_error("comptime fold: a non-integer type on an integer literal (#comptime-fold)", e)
+        IntInfo as info => encode_int_literal(value, info, t, e)
+    }
+}
+
+/**
+ * encode_int_literal — range-check `value` against the type `t` of width/signedness
+ * `info` and produce its two's-complement bits, erroring (M.1; LEGISLATION:148) when the
+ * literal is out of range for its type. Sign-magnitude (drop-128, 2026-07-24) makes the
+ * negative path direct — no `i128`-MIN-avoidance trick needed (the magnitude is already at
+ * hand): a negative value fits iff its magnitude is at most `2^(w-1)` (`i8::MIN`'s magnitude
+ * 128 fits `i8`); the two's-complement bits are `width_mask(w) - mag + 1`.
+ *
+ * @param value  the literal's value (sign + 64-bit magnitude)
+ * @param info   the type's width/signedness
+ * @param t      the literal's declared type
+ * @param e      the enclosing expression (positions any error)
+ * @return       the integer comptime value, or a located out-of-range error
+ * @since #comptime-fold
+ */
+fn encode_int_literal(value: parser::NumInt, info: IntInfo, t: Type, e: TExpr) -> ConstValue | error {
+    if value.neg {
+        if !info.is_signed { return const_form_error("negative literal is out of range for an unsigned type (#comptime-fold)", e) }
+        if value.mag > msb_value(info.width) { return const_form_error("integer literal is out of range for its type (#comptime-fold)", e) }
+        return cv_int(mask_to_width((width_mask(info.width) - value.mag) + (1 to u64), info.width), t)
+    }
+    let max = if info.is_signed { msb_value(info.width) - (1 to u64) } else { width_mask(info.width) }
+    if value.mag > max { return const_form_error("integer literal is out of range for its type (#comptime-fold)", e) }
+    cv_int(mask_to_width(value.mag, info.width), t)
+}
+
+/**
+ * eval_float_literal — encode a float literal from its f64 value into raw IEEE bits.
+ * Only f64 is folded today; an f32 (which needs the not-yet-exposed `f32_bits`
+ * primitive) and any non-float type are a located error.
+ *
+ * @param fval  the literal's f64 value
+ * @param t     the literal's declared type
+ * @param e     the enclosing expression (positions any error)
+ * @return      the float comptime value, or a located error
+ * @since #comptime-fold
+ */
+fn eval_float_literal(fval: f64, t: Type, e: TExpr) -> ConstValue | error {
+    match t {
+        Prim as p => {
+            if p.kind == PrimKind::F64 { return cv_float(teko::f64_bits(fval), false) }
+            const_form_error("comptime folding of this float width is not yet supported (only f64) (#comptime-fold)", e)
+        }
+        _ => const_form_error("comptime fold: a non-float type on a float literal (#comptime-fold)", e)
+    }
+}
+
+/**
+ * eval_cast_expr — evaluate a `to T` cast (Tier 1): fold the operand, then convert it to
+ * the cast's target type `e.type`, erroring on an out-of-range value (M.1).
+ *
+ * @param c      the typed cast node
+ * @param e      the enclosing expression (its type is the cast target; positions errors)
+ * @param table  the type table (forwarded to the operand fold)
+ * @param env    the environment (forwarded to the operand fold)
+ * @param agg    the module-aggregate resolution table (forwarded to the operand fold)
+ * @return       the converted comptime value, or a located error
+ * @since #comptime-fold
+ */
+fn eval_cast_expr(c: TCast, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
+    match eval_const(c.expr, table, env, agg) {
+        error as x => return x
+        ConstValue as v => apply_cast(v, e.type, e)
+    }
+}
+
+/**
+ * apply_cast — convert a folded value `v` to the target type `target`. The comptime fold
+ * supports integer and `byte` targets (int-to-int with an M.1 range check, and the sole
+ * `bool -> numeric` cast); a float target is a located error until the float-cast crumb.
+ *
+ * @param v       the folded operand value
+ * @param target  the cast's target type
+ * @param e       the enclosing expression (positions any error)
+ * @return        the converted comptime value, or a located error
+ * @since #comptime-fold
+ */
+fn apply_cast(v: ConstValue, target: Type, e: TExpr) -> ConstValue | error {
+    match int_info(target) {
+        IntInfo as dst => cast_to_int(v, target, dst, e)
+        error => cast_to_non_int(v, target, e)
+    }
+}
+
+/**
+ * cast_to_non_int — convert a folded value to a NON-integer cast target the comptime fold supports.
+ * The sole such target is `[]byte`: a folded `str`/`char` (`CVBytes`) coerced to `[]byte` (CF4c) folds
+ * to the byte-array const value (a `CVAgg` whose elements are the string's raw UTF-8 bytes, so an
+ * enclosing `.len`/index over the coercion also folds — the same rodata bytes the `str_to_bytes`
+ * lowering emits, materialized at the const level). Every other non-integer target is a located error
+ * until a later crumb folds it.
+ *
+ * @param v       the folded operand value
+ * @param target  the cast's target type
+ * @param e       the enclosing expression (positions any error)
+ * @return        the byte-array aggregate value, or a located error
+ * @since #comptime-fold
+ */
+fn cast_to_non_int(v: ConstValue, target: Type, e: TExpr) -> ConstValue | error {
+    if !is_byte_slice(target) { return const_form_error("comptime fold: this cast target is not yet supported (#comptime-fold)", e) }
+    match v.kind {
+        CVBytes as cb => cv_agg(bytes_to_cv_elems(cb.data))
+        _ => const_form_error("comptime fold: only a const string coerces to a byte-array const (#comptime-fold)", e)
+    }
+}
+
+/**
+ * bytes_to_cv_elems — the byte-array aggregate elements of a raw byte sequence: each byte as its own
+ * `byte`-typed `CVInt`, in order (the `str -> []byte` coercion's const value, CF4c). Index order is
+ * byte order, so an index/`.len` over the coercion reads exactly the rodata `str_to_bytes` emits.
+ *
+ * @param data  the raw bytes
+ * @return      one `byte` `CVInt` per byte, in order
+ * @since #comptime-fold
+ */
+fn bytes_to_cv_elems(data: []byte) -> []ConstValue {
+    mut out: []ConstValue = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= data.len { break }
+        out = teko::list::push(out, cv_int(data[i] to u64, Byte { }))
+        i++
+    }
+    out
+}
+
+/**
+ * is_byte_slice — is `t` the `[]byte` type (a `Slice` whose element is `byte`)? The one non-integer
+ * cast target the comptime fold coerces a const string into (CF4c).
+ *
+ * @param t  the type to classify
+ * @return   true iff `t` is `[]byte`
+ * @since #comptime-fold
+ */
+fn is_byte_slice(t: Type) -> bool {
+    match t {
+        Slice as sl => is_byte_type(sl.element)
+        _ => false
+    }
+}
+
+/**
+ * is_byte_type — is `t` the `byte` type? The element type a `[]byte` coercion target carries.
+ *
+ * @param t  the type to classify
+ * @return   true iff `t` is `byte`
+ * @since #comptime-fold
+ */
+fn is_byte_type(t: Type) -> bool {
+    match t {
+        Byte => true
+        _ => false
+    }
+}
+
+/**
+ * cast_to_int — convert a folded value to an integer target of width/signedness `dst`.
+ * A CVInt re-ranges (int-to-int); a CVBool folds to 1/0 (the only `bool -> numeric`
+ * cast Teko allows); every other kind is a located error.
+ *
+ * @param v       the folded operand value
+ * @param target  the integer target type
+ * @param dst     the target's width/signedness
+ * @param e       the enclosing expression (positions any error)
+ * @return        the integer comptime value, or a located error
+ * @since #comptime-fold
+ */
+fn cast_to_int(v: ConstValue, target: Type, dst: IntInfo, e: TExpr) -> ConstValue | error {
+    match v.kind {
+        CVInt as ci => cast_int_to_int(ci, target, dst, e)
+        CVBool as cb => cv_int(if cb.v { 1 to u64 } else { 0 to u64 }, target)
+        _ => const_form_error("comptime fold: cannot cast this constant kind to an integer (#comptime-fold)", e)
+    }
+}
+
+/**
+ * cast_int_to_int — re-range an integer value `ci` into the integer target `target` of
+ * width/signedness `dst`, erroring when the source is not an integer.
+ *
+ * @param ci      the source integer value
+ * @param target  the integer target type
+ * @param dst     the target's width/signedness
+ * @param e       the enclosing expression (positions any error)
+ * @return        the re-ranged integer value, or a located error
+ * @since #comptime-fold
+ */
+fn cast_int_to_int(ci: CVInt, target: Type, dst: IntInfo, e: TExpr) -> ConstValue | error {
+    match int_info(ci.ty) {
+        error as x => return x
+        IntInfo as src => cast_int_widths(ci.bits, src, target, dst, e)
+    }
+}
+
+/**
+ * cast_int_widths — the integer-to-integer range check + re-encode: a negative source
+ * fits only a signed target whose magnitude admits it; a non-negative source fits any
+ * target whose ceiling admits it. An out-of-range value is a located compile error,
+ * mirroring the runtime's trapping narrowing cast (M.1) rather than truncating.
+ *
+ * @param bits    the source value's bit pattern
+ * @param src     the source's width/signedness
+ * @param target  the integer target type
+ * @param dst     the target's width/signedness
+ * @param e       the enclosing expression (positions any error)
+ * @return        the re-encoded integer value, or a located out-of-range error
+ * @since #comptime-fold
+ */
+fn cast_int_widths(bits: u64, src: IntInfo, target: Type, dst: IntInfo, e: TExpr) -> ConstValue | error {
+    if is_negative(bits, src) {
+        if !dst.is_signed { return const_form_error("constant is out of range for the cast target (a negative value to an unsigned type) (#comptime-fold)", e) }
+        let m = twos_neg(bits, src.width)
+        if m > msb_value(dst.width) { return const_form_error("constant is out of range for the cast target (#comptime-fold)", e) }
+        return cv_int(twos_neg(m, dst.width), target)
+    }
+    let v = mask_to_width(bits, src.width)
+    if v > cast_max(dst) { return const_form_error("constant is out of range for the cast target (#comptime-fold)", e) }
+    cv_int(mask_to_width(v, dst.width), target)
+}
+
+/**
+ * cast_max — the largest non-negative value an integer target of width/signedness `dst`
+ * admits: its signed maximum 2^(w-1)-1, or its unsigned ceiling 2^w-1.
+ *
+ * @param dst  the target's width/signedness
+ * @return     the inclusive maximum as a u64
+ * @since #comptime-fold
+ */
+fn cast_max(dst: IntInfo) -> u64 {
+    if dst.is_signed { return msb_value(dst.width) - (1 to u64) }
+    width_mask(dst.width)
+}
+
+/**
+ * eval_unary_expr — evaluate a unary comptime expression. A leading `-` on an integer literal is a
+ * NEGATIVE LITERAL, not a negation OPERATION applied to a positive one: `-9223372036854775808` IS
+ * i64::MIN, whose positive magnitude `2^63` has no i64 form, so evaluating the operand in isolation
+ * would overflow even though the literal is in range. That form is encoded directly — the negated
+ * value `-N` range-checked against the whole expression's type via `encode_int_literal`'s negative
+ * path (the type checker's own negative-literal rule, `typer.tks`). Every other unary (`-2.5` over a
+ * float, `~x`, `-x` over a non-literal) takes the general evaluate-then-`apply_unary` path.
+ *
+ * @param u      the unary expression
+ * @param e      the enclosing expression (its type; positions any error)
+ * @param table  the type table (forwarded to the operand evaluator)
+ * @param env    the environment (module consts + provably-const locals)
+ * @param agg    the module-aggregate resolution table (forwarded to the operand evaluator)
+ * @return       the evaluated comptime value, or a located error
+ * @since #comptime-fold
+ */
+fn eval_unary_expr(u: TUnary, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
+    if u.op == lexer::TokenKind::Minus {
+        match u.operand.kind {
+            TNumber as n => if !n.is_float { return eval_int_literal(parser::numint_negate(n.value), e.type, e) }
+            _ => { }
+        }

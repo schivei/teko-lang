@@ -1,0 +1,205 @@
+// src/checker/cf_cast.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+    }
+    match eval_const(u.operand, table, env, agg) {
+        error as x => return x
+        ConstValue as v => apply_unary(u.op, v, e)
+    }
+}
+
+/**
+ * apply_unary — apply a unary operator to a folded value: integer `~`/`-` on a CVInt,
+ * `-` on a CVFloat; any other pairing is a located error.
+ *
+ * @param op  the unary operator token
+ * @param v   the folded operand value
+ * @param e   the enclosing expression (positions any error)
+ * @return    the folded value, or a located error
+ * @since #comptime-fold
+ */
+fn apply_unary(op: lexer::TokenKind, v: ConstValue, e: TExpr) -> ConstValue | error {
+    match v.kind {
+        CVInt as ci => int_unary(op, ci, e)
+        CVFloat as cf => apply_float_unary(op, cf, e)
+        _ => const_form_error("comptime fold: unsupported unary operator on this constant (#comptime-fold)", e)
+    }
+}
+
+/**
+ * int_unary — apply `~` (bitwise complement, masked to width) or unary `-` (negation) to
+ * an integer value.
+ *
+ * @param op  the unary operator token
+ * @param ci  the integer operand
+ * @param e   the enclosing expression (positions any error)
+ * @return    the folded integer value, or a located error
+ * @since #comptime-fold
+ */
+fn int_unary(op: lexer::TokenKind, ci: CVInt, e: TExpr) -> ConstValue | error {
+    match int_info(ci.ty) {
+        error as x => return x
+        IntInfo as info => int_unary_at(op, ci, info, e)
+    }
+}
+
+/**
+ * int_unary_at — apply an integer unary operator once the operand's width/signedness is
+ * known: `~` masks the complement to width, `-` negates with an M.1 overflow guard.
+ *
+ * @param op    the unary operator token
+ * @param ci    the integer operand (carries its type)
+ * @param info  the operand's width/signedness
+ * @param e     the enclosing expression (positions any error)
+ * @return      the folded integer value, or a located error
+ * @since #comptime-fold
+ */
+fn int_unary_at(op: lexer::TokenKind, ci: CVInt, info: IntInfo, e: TExpr) -> ConstValue | error {
+    let a = mask_to_width(ci.bits, info.width)
+    match op {
+        lexer::TokenKind::Tilde => cv_int(width_mask(info.width) ^ a, ci.ty)
+        lexer::TokenKind::Minus => int_negate(a, info, ci.ty, e)
+        _ => const_form_error("comptime fold: unsupported unary operator on an integer constant (#comptime-fold)", e)
+    }
+}
+
+/**
+ * int_negate — negate an integer value. Negating a signed MIN, or any non-zero unsigned
+ * value, is out of range and a located compile error (M.1); every other case is the
+ * exact two's-complement negation.
+ *
+ * @param a     the operand's bit pattern (masked to width)
+ * @param info  the operand's width/signedness
+ * @param ty    the operand's declared type (the result's type)
+ * @param e     the enclosing expression (positions any error)
+ * @return      the negated integer value, or a located out-of-range error
+ * @since #comptime-fold
+ */
+fn int_negate(a: u64, info: IntInfo, ty: Type, e: TExpr) -> ConstValue | error {
+    if !info.is_signed {
+        if mask_to_width(a, info.width) == (0 to u64) { return cv_int(0 to u64, ty) }
+        return const_form_error("negation of a non-zero unsigned constant is out of range (#comptime-fold)", e)
+    }
+    if is_min_bits(a, info) { return const_form_error("integer overflow negating a constant (a signed MIN has no positive) (#comptime-fold)", e) }
+    cv_int(twos_neg(a, info.width), ty)
+}
+
+/**
+ * apply_float_unary — apply a unary operator to a float value: only `-` (sign flip) is
+ * defined on a float; any other is a located error.
+ *
+ * @param op  the unary operator token
+ * @param cf  the float operand
+ * @param e   the enclosing expression (positions any error)
+ * @return    the folded float value, or a located error
+ * @since #comptime-fold
+ */
+fn apply_float_unary(op: lexer::TokenKind, cf: CVFloat, e: TExpr) -> ConstValue | error {
+    match op {
+        lexer::TokenKind::Minus => float_negate(cf, e)
+        _ => const_form_error("comptime fold: unsupported unary operator on a float constant (#comptime-fold)", e)
+    }
+}
+
+/**
+ * float_negate — negate an f64 value through its IEEE bits; an f32 is not yet folded.
+ *
+ * @param cf  the float operand
+ * @param e   the enclosing expression (positions any error)
+ * @return    the negated float value, or a located error
+ * @since #comptime-fold
+ */
+fn float_negate(cf: CVFloat, e: TExpr) -> ConstValue | error {
+    if cf.is_f32 { return const_form_error("comptime folding of f32 is not yet supported (#comptime-fold)", e) }
+    cv_float(teko::f64_bits(-(teko::f64_from_bits(cf.bits))), false)
+}
+
+/**
+ * eval_binary_expr — evaluate a binary `+ - * / % & | ^ << >>` expression (Tier 2): fold
+ * both operands, then apply the operator.
+ *
+ * @param bi     the typed binary node
+ * @param e      the enclosing expression (positions any error)
+ * @param table  the type table (forwarded to the operand folds)
+ * @param env    the environment (forwarded to the operand folds)
+ * @param agg    the module-aggregate resolution table (forwarded to the operand folds)
+ * @return       the folded value, or a located error
+ * @since #comptime-fold
+ */
+fn eval_binary_expr(bi: TBinary, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
+    match eval_const(bi.left, table, env, agg) {
+        error as x => return x
+        ConstValue as lv => eval_binary_right(bi, lv, e, table, env, agg)
+    }
+}
+
+/**
+ * eval_binary_right — the left operand of a binary op is folded; fold the right operand
+ * and apply the operator.
+ *
+ * @param bi     the typed binary node
+ * @param lv     the folded left value
+ * @param e      the enclosing expression (positions any error)
+ * @param table  the type table (forwarded to the right-operand fold)
+ * @param env    the environment (forwarded to the right-operand fold)
+ * @param agg    the module-aggregate resolution table (forwarded to the right-operand fold)
+ * @return       the folded value, or a located error
+ * @since #comptime-fold
+ */
+fn eval_binary_right(bi: TBinary, lv: ConstValue, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
+    match eval_const(bi.right, table, env, agg) {
+        error as y => return y
+        ConstValue as rv => apply_binary(bi.op, lv, rv, e)
+    }
+}
+
+/**
+ * agg_const_init — resolve the collapsed initializer of the module aggregate const named
+ * `(name, ns)` in `agg`, or null when no such const is recorded (a fn-value, a local, a scalar
+ * const, or a different-module name never resolves — the fold then leaves the index runtime). A thin
+ * `(name, ns)`-keyed lookup over the parallel lists, mirroring `scalar_const_init` (`consteval.tks`).
+ *
+ * @param agg   the module-aggregate resolution table
+ * @param name  the reference's name
+ * @param ns    the reference's resolved namespace (`func_ns`)
+ * @return      the const's collapsed initializer, or null
+ * @since #comptime-fold
+ */
+fn agg_const_init(agg: AggConstMap, name: str, ns: str) -> TExpr | null {
+    mut i: u64 = 0
+    loop {
+        if i >= agg.names.len { break }
+        if agg.names[i] == name && agg.nss[i] == ns { return agg.inits[i] }
+        i++
+    }
+    null
+}
+
+/**
+ * eval_agg_ref — evaluate a `TVar` reference that names a module-level aggregate const: resolve its
+ * collapsed initializer through `agg` and evaluate that (Layer 1c). A function-value reference
+ * (`is_func`) is never a const aggregate; a name absent from `agg` (a local, a scalar, a
+ * different-module name) is a soft `const_form_error` located at `e` — the `cf_agg_value`/
+ * `cf_can_index` gate proves the shape before the fold calls `eval_const`, so this arm never spuriously
+ * rejects a program: a non-foldable receiver simply stays runtime.
+ *
+ * @param v      the reference node
+ * @param e      the enclosing expression (positions any error)
+ * @param table  the type table (forwarded to the initializer eval)
+ * @param env    the environment (forwarded to the initializer eval)
+ * @param agg    the module-aggregate resolution table
+ * @return       the aggregate comptime value, or a located error
+ * @since #comptime-fold
+ */
+fn eval_agg_ref(v: TVar, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> ConstValue | error {
+    if v.is_func { return const_form_error("comptime fold: a function value is not a const aggregate (#comptime-fold)", e) }
+    match agg_const_init(agg, v.name, v.func_ns) {
+        null => const_form_error("comptime fold: this reference is not a module aggregate const (#comptime-fold)", e)
+        TExpr as init => eval_const(init, table, env, agg)
+    }
+}
+
+/**
+ * eval_array_agg — evaluate an array/slice literal's elements to a `CVAgg`, recursing `eval_const`

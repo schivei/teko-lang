@@ -1,0 +1,205 @@
+// src/checker/cf_bitwise.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+/**
+ * struct_field_init — the initializer expression of field `field` in the const struct `recv` names, or
+ * null when `recv` is not a resolvable const struct or carries no such field. Resolves an in-tree
+ * `TStructInit` receiver directly and a module-const-struct `TVar` receiver through the aggregate map
+ * (CF4c); a local struct binding — deliberately NOT propagated by `propagate_locals` — resolves to null
+ * and stays runtime.
+ *
+ * @param recv   the field-access receiver expression
+ * @param field  the accessed field's name
+ * @param agg    the module-aggregate resolution table
+ * @return       the field's initializer expression, or null
+ * @since #comptime-fold
+ */
+fn struct_field_init(recv: TExpr, field: str, agg: AggConstMap) -> TExpr | null {
+    match resolve_struct_init(recv, agg) {
+        null => null
+        TStructInit as si => field_init_by_name(si, field)
+    }
+}
+
+/**
+ * resolve_struct_init — the `TStructInit` a const-struct receiver denotes: an in-tree struct literal
+ * directly, or a module-const-struct `TVar` resolved through the aggregate map (CF4c). Every other
+ * receiver (a local binding, a runtime leaf, a non-struct const) resolves to null, so the field access
+ * stays runtime.
+ *
+ * @param recv  the field-access receiver expression
+ * @param agg   the module-aggregate resolution table
+ * @return      the struct initializer, or null when the receiver is not a const struct
+ * @since #comptime-fold
+ */
+fn resolve_struct_init(recv: TExpr, agg: AggConstMap) -> TStructInit | null {
+    match recv.kind {
+        TStructInit as si => si
+        TVar as v => resolve_struct_init_var(v, agg)
+        _ => null
+    }
+}
+
+/**
+ * resolve_struct_init_var — the `TStructInit` a `TVar` receiver names when it is a module const struct
+ * recorded in `agg`, or null otherwise (a fn-value, a local, a scalar/non-struct const, a
+ * different-module name). Mirrors `eval_agg_ref`'s resolution but keeps only the struct-init case.
+ *
+ * @param v    the reference node
+ * @param agg  the module-aggregate resolution table
+ * @return     the referenced struct initializer, or null
+ * @since #comptime-fold
+ */
+fn resolve_struct_init_var(v: TVar, agg: AggConstMap) -> TStructInit | null {
+    if v.is_func { return null }
+    match agg_const_init(agg, v.name, v.func_ns) {
+        null => null
+        TExpr as init => match init.kind {
+            TStructInit as si => si
+            _ => null
+        }
+    }
+}
+
+/**
+ * field_init_by_name — the initializer of the field named `field` in the struct-init `si`, or null when
+ * `si` carries no such field. `si.field_names`/`si.field_vals` are PARALLEL and in the struct's declared
+ * order (the checker reorders), so a name lookup returns the matching value.
+ *
+ * @param si     the resolved struct initializer
+ * @param field  the accessed field's name
+ * @return       the field's initializer expression, or null
+ * @since #comptime-fold
+ */
+fn field_init_by_name(si: TStructInit, field: str) -> TExpr | null {
+    mut i: u64 = 0
+    loop {
+        if i >= si.field_names.len { break }
+        if si.field_names[i] == field { return si.field_vals[i] }
+        i++
+    }
+    null
+}
+
+/**
+ * apply_binary — apply a binary operator to two folded operands, dispatching on their
+ * kinds: two integers to the integer op family, two f64 floats to the float op family.
+ * A mismatched or unsupported pairing is a located error.
+ *
+ * @param op  the binary operator token
+ * @param lv  the folded left value
+ * @param rv  the folded right value
+ * @param e   the enclosing expression (positions any error)
+ * @return    the folded value, or a located error
+ * @since #comptime-fold
+ */
+fn apply_binary(op: lexer::TokenKind, lv: ConstValue, rv: ConstValue, e: TExpr) -> ConstValue | error {
+    match lv.kind {
+        CVInt as li => apply_binary_int(op, li, rv, e)
+        CVFloat as lf => apply_binary_float(op, lf, rv, e)
+        _ => const_form_error("comptime fold: unsupported operand kind in a binary op (#comptime-fold)", e)
+    }
+}
+
+/**
+ * apply_binary_int — the left operand is an integer: require an integer right operand and
+ * dispatch to the integer op family.
+ *
+ * @param op  the binary operator token
+ * @param li  the folded left integer value
+ * @param rv  the folded right value
+ * @param e   the enclosing expression (positions any error)
+ * @return    the folded value, or a located error
+ * @since #comptime-fold
+ */
+fn apply_binary_int(op: lexer::TokenKind, li: CVInt, rv: ConstValue, e: TExpr) -> ConstValue | error {
+    match rv.kind {
+        CVInt as ri => int_binop(op, li, ri, e)
+        _ => const_form_error("comptime fold: mismatched operand kinds in a binary op (#comptime-fold)", e)
+    }
+}
+
+/**
+ * apply_binary_float — the left operand is a float: require a float right operand and
+ * dispatch to the float op family.
+ *
+ * @param op  the binary operator token
+ * @param lf  the folded left float value
+ * @param rv  the folded right value
+ * @param e   the enclosing expression (positions any error)
+ * @return    the folded value, or a located error
+ * @since #comptime-fold
+ */
+fn apply_binary_float(op: lexer::TokenKind, lf: CVFloat, rv: ConstValue, e: TExpr) -> ConstValue | error {
+    match rv.kind {
+        CVFloat as rf => float_binop(op, lf, rf, e)
+        _ => const_form_error("comptime fold: mismatched operand kinds in a binary op (#comptime-fold)", e)
+    }
+}
+
+/**
+ * int_binop — apply an integer binary operator, running at the LEFT operand's width and
+ * signedness (Teko requires both operands share that integer type; a shift reads its
+ * count from the right operand's value).
+ *
+ * @param op  the binary operator token
+ * @param la  the folded left integer value (carries the operation's type)
+ * @param ra  the folded right integer value
+ * @param e   the enclosing expression (positions any error)
+ * @return    the folded integer value, or a located error
+ * @since #comptime-fold
+ */
+fn int_binop(op: lexer::TokenKind, la: CVInt, ra: CVInt, e: TExpr) -> ConstValue | error {
+    match int_info(la.ty) {
+        error as x => return x
+        IntInfo as info => int_binop_dispatch(op, la, ra, info, e)
+    }
+}
+
+/**
+ * int_binop_dispatch — dispatch an integer binary operator to its arithmetic, bitwise, or
+ * shift handler once the operation's width/signedness `info` is known.
+ *
+ * @param op    the binary operator token
+ * @param la    the folded left integer value (carries the operation's type)
+ * @param ra    the folded right integer value
+ * @param info  the operation's width/signedness
+ * @param e     the enclosing expression (positions any error)
+ * @return      the folded integer value, or a located error
+ * @since #comptime-fold
+ */
+fn int_binop_dispatch(op: lexer::TokenKind, la: CVInt, ra: CVInt, info: IntInfo, e: TExpr) -> ConstValue | error {
+    let a = mask_to_width(la.bits, info.width)
+    let b = mask_to_width(ra.bits, info.width)
+    match op {
+        lexer::TokenKind::Plus => int_add(a, b, info, la.ty, e)
+        lexer::TokenKind::Minus => int_sub(a, b, info, la.ty, e)
+        lexer::TokenKind::Star => int_mul(a, b, info, la.ty, e)
+        lexer::TokenKind::Slash => int_divrem(true, a, b, info, la.ty, e)
+        lexer::TokenKind::Percent => int_divrem(false, a, b, info, la.ty, e)
+        lexer::TokenKind::Amp => cv_int(mask_to_width(a & b, info.width), la.ty)
+        lexer::TokenKind::Pipe => cv_int(mask_to_width(a | b, info.width), la.ty)
+        lexer::TokenKind::Caret => cv_int(mask_to_width(a ^ b, info.width), la.ty)
+        lexer::TokenKind::Shl => int_shift(true, la, ra, info, e)
+        lexer::TokenKind::Shr => int_shift(false, la, ra, info, e)
+        _ => const_form_error("comptime fold: unsupported binary operator on an integer constant (#comptime-fold)", e)
+    }
+}
+
+/**
+ * int_add — integer addition. The two's-complement sum is exact for the in-range case;
+ * an addition whose true result leaves the type's range is a located overflow error
+ * (M.1), never a silent wrap.
+ *
+ * @param a     the left operand's bit pattern (masked to width)
+ * @param b     the right operand's bit pattern (masked to width)
+ * @param info  the operation's width/signedness
+ * @param ty    the result's declared type
+ * @param e     the enclosing expression (positions any error)
+ * @return      the folded sum, or a located overflow error
+ * @since #comptime-fold
+ */
+fn int_add(a: u64, b: u64, info: IntInfo, ty: Type, e: TExpr) -> ConstValue | error {
+    let raw = a + b

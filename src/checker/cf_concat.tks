@@ -1,0 +1,205 @@
+// src/checker/cf_concat.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+ * @return    the interpolation with local-const references substituted
+ * @since #comptime-fold
+ */
+fn lp_interp(in: TInterp, e: TExpr, m: LocalConstMap) -> TExpr {
+    mut holes: []TExpr = teko::list::empty()
+    mut specs: []TFSpec = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= in.holes.len { break }
+        holes = teko::list::push(holes, lp_expr(in.holes[i], m))
+        if i < in.specs.len { specs = teko::list::push(specs, lp_fspec(in.specs[i], m)) }
+        i++
+    }
+    TExpr { kind = TInterp { pieces = in.pieces; holes = holes; specs = specs }; type = e.type; line = e.line; col = e.col }
+}
+
+/**
+ * lp_fspec — local-propagate a format spec: a dynamic (`:[…]`) spec's argument expressions; a
+ * none/static spec carries no expression and is returned unchanged.
+ *
+ * @param sp  the format spec
+ * @param m   the local-const map
+ * @return    the spec with local-const references substituted in its dynamic args
+ * @since #comptime-fold
+ */
+fn lp_fspec(sp: TFSpec, m: LocalConstMap) -> TFSpec {
+    match sp.kind {
+        TFSpecDynamic as fd => TFSpec { kind = TFSpecDynamic { args = lp_exprs(fd.args, m) } }
+        _ => sp
+    }
+}
+
+/**
+ * lp_array — local-propagate an array/slice literal's elements (a spread element's sub-slice included).
+ *
+ * @param a  the typed array literal
+ * @param e  the enclosing expression (its type/position)
+ * @param m  the local-const map
+ * @return   the array literal with local-const references substituted
+ * @since #comptime-fold
+ */
+fn lp_array(a: TArrayLit, e: TExpr, m: LocalConstMap) -> TExpr {
+    mut elems: []TArrayElem = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= a.elements.len { break }
+        elems = teko::list::push(elems, TArrayElem { is_spread = a.elements[i].is_spread; expr = lp_expr(a.elements[i].expr, m) })
+        i++
+    }
+    TExpr { kind = TArrayLit { elements = elems }; type = e.type; line = e.line; col = e.col }
+}
+
+/**
+ * lp_scope_block — local-propagate a nested block as a fresh child scope: it inherits the outer map but
+ * the map it leaves is discarded (a block-local binding does not leak past the block).
+ *
+ * @param stmts  the nested block's statements
+ * @param m      the inherited local-const map
+ * @return       the block with local-const references substituted
+ * @since #comptime-fold
+ */
+fn lp_scope_block(stmts: []TStatement, m: LocalConstMap) -> []TStatement { lp_block(stmts, m).stmts }
+
+/**
+ * lp_block — local-propagate a straight-line block, THREADING the map through its statements in order
+ * so a `let a = 0xFF` recorded by one statement is visible to the next (`let hi = a >> 4`). Returns both
+ * the rewritten statements and the map the block leaves (a loop's `init` hands its leaving map to the
+ * loop body).
+ *
+ * @param stmts  the block's statements
+ * @param m      the inherited local-const map
+ * @return       the rewritten statements plus the map the block leaves
+ * @since #comptime-fold
+ */
+fn lp_block(stmts: []TStatement, m: LocalConstMap) -> LpBlock {
+    mut cur = m
+    mut out: []TStatement = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= stmts.len { break }
+        let r = lp_stmt(stmts[i], cur)
+        out = teko::list::push(out, r.stmt)
+        cur = r.map
+        i++
+    }
+    LpBlock { stmts = out; map = cur }
+}
+
+/**
+ * lp_stmt — local-propagate one typed statement, returning it plus the map it leaves. A `let`/`const`
+ * binding of a provably-const integer extends the map (`lp_binding`); every other statement propagates
+ * its expressions/nested blocks and leaves the map unchanged. TOTAL over every `TStatement` case.
+ *
+ * @param st  the typed statement
+ * @param m   the local-const map
+ * @return    the statement with local-const references substituted, plus the map it leaves
+ * @since #comptime-fold
+ */
+fn lp_stmt(st: TStatement, m: LocalConstMap) -> LpStmt {
+    match st {
+        TBinding as b => lp_binding(b, m)
+        TAssign as a => LpStmt { stmt = lp_assign(a, m); map = m }
+        TReturn as r => LpStmt { stmt = lp_return(r, st, m); map = m }
+        TLoopStmt as l => LpStmt { stmt = lp_loop(l, m); map = m }
+        TBreakStmt => LpStmt { stmt = st; map = m }
+        TContinueStmt => LpStmt { stmt = st; map = m }
+        TExprStmt as es => LpStmt { stmt = TExprStmt { expr = lp_expr(es.expr, m) }; map = m }
+        TDeferStmt as d => LpStmt { stmt = TDeferStmt { body = lp_scope_block(d.body, m) }; map = m }
+        TAdoptStmt as a => LpStmt { stmt = lp_adopt(a, m); map = m }
+    }
+}
+
+/**
+ * lp_binding — local-propagate a binding: substitute local-const references in its initializer, then
+ * extend the map with the binding's contribution (recorded when it is an immutable, provably-const
+ * integer; otherwise its name is removed so a shadow is never folded).
+ *
+ * @param b  the typed binding
+ * @param m  the local-const map
+ * @return   the binding with its initializer substituted, plus the map it leaves
+ * @since #comptime-fold
+ */
+fn lp_binding(b: TBinding, m: LocalConstMap) -> LpStmt {
+    let value = lp_expr(b.value, m)
+    let m2 = lp_record_binding(m, b.kind, b.target, value)
+    LpStmt { stmt = TBinding { kind = b.kind; target = b.target; bound = b.bound; value = value }; map = m2 }
+}
+
+/**
+ * lp_loop — local-propagate a loop: its run-once `init` preamble threads its recorded consts into the
+ * loop `body`, but neither the init nor the body leak past the loop (the loop is a scope) — the caller
+ * leaves the outer map unchanged.
+ *
+ * @param l  the typed loop statement
+ * @param m  the local-const map
+ * @return   the loop with local-const references substituted
+ * @since #comptime-fold
+ */
+fn lp_loop(l: TLoopStmt, m: LocalConstMap) -> TStatement {
+    let ib = lp_block(l.init, m)
+    let body = lp_scope_block(l.body, ib.map)
+    TLoopStmt { label = l.label; init = ib.stmts; body = body }
+}
+
+/**
+ * lp_adopt — local-propagate an `adopt` region block as a fresh child scope; its optional bound region
+ * name shadows any outer const of the same name inside the body.
+ *
+ * @param a  the typed adopt statement
+ * @param m  the local-const map
+ * @return   the adopt with local-const references substituted
+ * @since #comptime-fold
+ */
+fn lp_adopt(a: TAdoptStmt, m: LocalConstMap) -> TStatement {
+    let scoped = lp_remove(m, a.name)
+    TAdoptStmt { name = a.name; body = lp_scope_block(a.body, scoped) }
+}
+
+/**
+ * lp_return — local-propagate a `return` statement's value (a value-less `return` is unchanged).
+ *
+ * @param r   the typed return statement
+ * @param st  the original statement (returned unchanged when value-less)
+ * @param m   the local-const map
+ * @return    the return with its value substituted
+ * @since #comptime-fold
+ */
+fn lp_return(r: TReturn, st: TStatement, m: LocalConstMap) -> TStatement {
+    if !r.has_value { return st }
+    TReturn { has_value = true; value = lp_expr(r.value, m) }
+}
+
+/**
+ * lp_assign — local-propagate an assignment's value and, for a field target, its typed LHS field-access
+ * expression. An assignment never targets a recorded const (the checker forbids assigning a `let`/
+ * `const`), so it leaves the map unchanged.
+ *
+ * @param a  the typed assignment
+ * @param m  the local-const map
+ * @return   the assignment with local-const references substituted
+ * @since #comptime-fold
+ */
+fn lp_assign(a: TAssign, m: LocalConstMap) -> TStatement {
+    let value = lp_expr(a.value, m)
+    if parser::assign_has_target(a.kind) {
+        return TAssign { kind = a.kind; name = a.name; op = a.op; bound = a.bound; value = value; deref = a.deref; target = lp_expr(a.target, m) }
+    }
+    TAssign { kind = a.kind; name = a.name; op = a.op; bound = a.bound; value = value; deref = a.deref; target = a.target }
+}
+
+/**
+ * lp_function — local-propagate a top-level function's body in a FRESH scope (its parameters are
+ * runtime values, never recorded); signature and metadata are preserved.
+ *
+ * @param f  the typed function
+ * @return   the function with local-const references substituted in its body
+ * @since #comptime-fold
+ */
+fn lp_function(f: TFunction) -> TItem {
+    let body = lp_block(f.body, lp_empty()).stmts

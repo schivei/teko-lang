@@ -1,0 +1,206 @@
+// src/checker/rv_rv_unification.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+            loop {
+                if i >= v.members.len { break }
+                out = union_collect(out, v.members[i], table)
+                i++
+            }
+            out
+        }
+        _ => {
+            mut i = 0
+            loop {
+                if i >= acc.len { break }
+                if type_eq(acc[i], t) { return acc }   // dedup
+                i++
+            }
+            teko::list::push(acc, t)
+        }
+    }
+}
+
+/**
+ * type_join — the JOIN (least-upper-bound) of two arm/branch types, for match/`if` value
+ * unification (B.20, #41-followon). If either widens into the other, the WIDER one; otherwise the
+ * UNION variant `a | b` (members flattened, deduped, and null-normalized) — the branch values are
+ * bare cases that each widen into this union, which in turn widens into any wider declared return
+ * variant. Mirror of resolve.c.
+ *
+ * Two invariants this function must not break:
+ *
+ * - (#83) "Equal" per `type_eq` ALSO holds sentinel-vs-concrete (`[]Void == []i64`, permissive by
+ *   design — see `type_eq`'s Slice/Optional cases). Blindly returning `a` there discards a concrete
+ *   element type when the SENTINEL is the first operand: `[[], [1]]` folds `type_join` left to
+ *   right over `[]`'s `[]Void` then `[1]`'s `[]i64`, and the accumulator was the sentinel, so the
+ *   join silently kept `[]Void` and codegen later saw an untyped empty slice (the VM, which ignores
+ *   element types, ran fine). Prefer the CONCRETE side when the two are sentinel-equal but not
+ *   `type_has_sentinel`-equal.
+ * - a union BUILT here is canonicalized through `union_normalize_null`, exactly like one written
+ *   out in source (`resolve_type`'s `UnionType` arm). Null-first is not cosmetic: the own backend
+ *   classifies a two-member absence union by `members[0]` being `Null` (`lower.null_union_payload`),
+ *   so an inferred `mut x = if c { 5 } else { null }` used to produce `Variant{i64, Null}` and be
+ *   REJECTED with "null match pattern not yet lowered", while the identical annotated
+ *   `: i64 | null` worked. One normalizer, every construction site (M.5/D39).
+ *
+ * @param a      the first branch/arm type
+ * @param b      the second branch/arm type
+ * @param table  the resolved type table (drives `widens_into`)
+ * @return       the least-upper-bound type of `a` and `b`
+ */
+fn type_join(a: Type, b: Type, table: TypeTable) -> Type {
+    if type_eq(a, b) {
+        let a_sentinel = type_has_sentinel(a)
+        let b_sentinel = type_has_sentinel(b)
+        return if a_sentinel && !b_sentinel { b } else { a }   // prefer the concrete side
+    }
+    if widens_into(a, b, table) { return b }
+    if widens_into(b, a, table) { return a }
+    let m1 = union_collect(teko::list::empty(), a, table)
+    let m2 = union_collect(m1, b, table)
+    Variant { members = union_normalize_null(m2) }
+}
+
+// ── (S4) generics inference: subst + unify ───────────────────────────────────────────────────
+// A type-param → concrete-type binding (parallel arrays). `params` is the generic's type-param
+// universe; `names`/`types` are the bindings discovered by unify. Used by type_call (call result
+// type) and the monomorph pass (stamping). (C: tk_subst.)
+pub type Subst = struct { params: []str; names: []str; types: []Type }
+
+fn is_type_param(name: str, params: []str) -> bool {
+    mut i = 0
+    loop { if i >= params.len { break }; if params[i] == name { return true }; i++ }
+    false
+}
+
+fn subst_find(s: Subst, name: str) -> Type | null {
+    mut i = 0
+    loop { if i >= s.names.len { break }; if s.names[i] == name { return s.types[i] }; i++ }
+    null
+}
+
+// substitute each BOUND type-param Named{Tp} by its concrete type. TOTAL over Type cases; structural
+// recursion. A Named that is not a bound param passes through unchanged. (C: tk_subst_type.)
+pub fn subst_type(t: Type, s: Subst) -> Type {
+    match t {
+        Named as n => match subst_find(s, n.name) { Type as ct => ct; null => t }
+        Slice as sl => Slice { element = subst_type(sl.element, s) }
+        Optional as o => Optional { inner = subst_type(o.inner, s) }
+        Reference as r => Reference { inner = subst_type(r.inner, s) }   // (MEM-1b) Ref<T> substitutes its referenced type
+        Variant as v => {
+            mut ms: []Type = teko::list::empty()
+            mut i = 0
+            loop { if i >= v.members.len { break }; ms = teko::list::push(ms, subst_type(v.members[i], s)); i++ }
+            Variant { members = union_normalize_null(ms) }
+        }
+        Func as f => {
+            mut ps: []Type = teko::list::empty()
+            mut i = 0
+            loop { if i >= f.params.len { break }; ps = teko::list::push(ps, subst_type(f.params[i], s)); i++ }
+            Func { params = ps; ret = subst_type(f.ret, s); variadic = false; param_names = []; n_required = (ps).len; defaults = [] }
+        }
+        _ => t   // Prim, Byte, Char, Str, Error, Void, Ptr, Uptr — leaves
+    }
+}
+
+// a non-concrete Void SENTINEL (`empty()` → []Void, bare `null` → Void?)? Such a type cannot pin a
+// type-param (it concretizes only in a typed slot — M.2 no-guessing). (C: tk_type_has_void_sentinel.)
+fn type_has_void_sentinel(t: Type) -> bool {
+    match t {
+        Void => true
+        Slice as sl => match sl.element { Void => true; _ => false }
+        Optional as o => match o.inner { Void => true; _ => false }
+        _ => false
+    }
+}
+
+// unify a param PATTERN (may contain type-param Named's) against a concrete ARG type, extending the
+// Subst. Binds each type-param; a re-occurrence must AGREE (S4: exact; LUB is a future refinement).
+// `[]T`/`T?` unify their element/inner by structure. REJECT a Void-sentinel arg (cannot pin T —
+// M.2). A non-type-param (concrete) pattern binds nothing (strict arg-check happens elsewhere).
+// (C: tk_unify.)
+pub fn unify(pattern: Type, arg: Type, s: Subst, table: TypeTable) -> Subst | error {
+    match pattern {
+        Named as n => {
+            if !is_type_param(n.name, s.params) { return s }
+            if type_has_void_sentinel(arg) {
+                return error { message = $"cannot infer type parameter {n.name} from an untyped empty slice / null — annotate the argument" }
+            }
+            // (MEM Step 0, B) ESCAPE GATE — a reference can NEVER be the INFERRED binding for a type
+            // parameter: `id(r)` where r: Ref<i64> would stamp `int64_t * id__g__ref_i64(int64_t *)`,
+            // returning a raw reference that outlives its target. Mirror of the written-arg gate in
+            // resolve_generic_inst (A); same message.
+            match arg { Reference => return error { message = "a reference cannot be a generic type argument (it would be stored/escape)" }; _ => { } }
+            match subst_find(s, n.name) {
+                Type as existing => {
+                    if type_eq(existing, arg) { s }
+                    else { error { message = $"type parameter {n.name} inferred as conflicting types" } }
+                }
+                null => Subst { params = s.params; names = teko::list::push(s.names, n.name); types = teko::list::push(s.types, arg) }
+            }
+        }
+        Slice as sl => match arg { Slice as asl => unify(sl.element, asl.element, s, table); _ => s }
+        Optional as o => match arg { Optional as ao => unify(o.inner, ao.inner, s, table); _ => s }
+        Reference as r => match arg { Reference as ar => unify(r.inner, ar.inner, s, table); _ => s }   // (MEM-1b)
+        _ => s
+    }
+}
+
+// the type-param names that appear in a function signature: a Named whose name is NOT a registered
+// user type (type-params live only in the per-fn scope, never the global table). In order, deduped.
+// (C: tk_collect_sig_type_params.)
+pub fn collect_sig_type_params(t: Type, table: TypeTable, acc: []str) -> []str {
+    match t {
+        Named as n => match type_table_find(table, n.name, "") {   // (#109 W1) type-param scan on resolved names — no referencing ns
+            parser::TypeDecl => acc
+            error => if is_type_param(n.name, acc) { acc } else { teko::list::push(acc, n.name) }
+        }
+        Slice as sl => collect_sig_type_params(sl.element, table, acc)
+        Optional as o => collect_sig_type_params(o.inner, table, acc)
+        Reference as r => collect_sig_type_params(r.inner, table, acc)   // (MEM-1b) Ref<T> may carry a type-param
+        Variant as v => { mut a = acc; mut i = 0; loop { if i >= v.members.len { break }; a = collect_sig_type_params(v.members[i], table, a); i++ }; a }
+        Func as f => { mut a = acc; mut i = 0; loop { if i >= f.params.len { break }; a = collect_sig_type_params(f.params[i], table, a); i++ }; collect_sig_type_params(f.ret, table, a) }
+        _ => acc
+    }
+}
+
+/**
+ * Is this named type-expr the `null` type-atom (null-as-union)? The parser carries a `null`
+ * in a type position as a single-segment, argument-free `NamedType` named "null" (`null` is a
+ * reserved keyword, so no user type ever bears that name).
+ *
+ * @param nt  the resolved-against named type-expr
+ * @return    true iff `nt` is exactly the `null` type-atom
+ */
+fn named_type_is_null(nt: parser::NamedType) -> bool {
+    if nt.args.len != 0 { return false }
+    if nt.path.segments.len != 1 { return false }
+    nt.path.segments[0].name == "null"
+}
+
+/**
+ * Canonicalize a union's member order so `null`, if present, is FIRST — leaving every other
+ * member in source order and collapsing any repeated `null` to a single leading one. Guarantees
+ * `null | error` and `error | null` share one resolved type (and one mangled typedef). A null-free
+ * member list is returned unchanged (behavior-preserving for the existing corpus).
+ *
+ * Recognizes BOTH bare-null representations `from_is_bare_null` already treats as the same value
+ * (the concrete `Null` a `null | X` annotation resolves to, AND the `Optional{Void}` sentinel a
+ * bare `null` LITERAL adopts when typed with no expected-type context, e.g. a `match` arm whose
+ * body is exactly `null`) — collapsing either into the single canonical `Null{}` leading member.
+ * Without this, a `match` joining a bare `null` arm against a concrete case (`type_join`) left the
+ * literal's `Optional{Void}` sentinel as an ordinary VARIANT MEMBER instead of `Null`, so this
+ * function's old `Null`-only test never fired: the union normalizer's whole POINT (never emit an
+ * un-normalized null-bearing union) silently failed for exactly the case a bare `null` arm
+ * produces. Downstream, both the (now-retired) C backend's `cg_union_niche_member` and the own
+ * backend's `null_union_payload` classify a null-union SOLELY by a literal `Null` member, so the
+ * un-normalized union fell through their niche/tag detection entirely — the own backend's generic
+ * BY-NAME variant lowering then bound the union's non-null case at the WRONG index (no `null`
+ * pattern has a name to look up), and the write silently landed on the wrong payload slot instead
+ * of raising an honest stop (found chasing the `bulk.tkr` KNOWN-STOP pin, `bare_null_match_arm_
+ * optional.tks`: it went from a loud "nested bare-null optional" compile error to a SILENT
+ * miscompile — the exact regression a correct normalizer here prevents).
+ *
+ * @param members  the resolved union members (source order)

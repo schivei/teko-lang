@@ -1,0 +1,256 @@
+// src/checker/cl_cl_symtab.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+ * compares only the LAST segment, so `StructName::method(…)` resolves through the SAME #41
+ * machinery as any other qualified call, with zero new resolution code. Instance dot-calls
+ * (`recv.method(…)`) desugar into exactly this same qualified-call shape (see
+ * typer.tks::type_method_call) before ever reaching lookup_call.
+ *
+ * @param items  the program's top-level items, in sorted-path order
+ * @param table  the collected type table (every type name already registered)
+ * @param env0   the environment to grow (empty for a depless project, the dep's for a seeded one)
+ * @return       the grown environment plus every signature diagnostic, in declaration order
+ */
+fn collect_signatures(items: []parser::Item, table: TypeTable, env0: Env) -> SigOutcome {
+    mut env = env0
+    mut diags: []str = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= items.len { break }
+        let step = collect_item_signature(items[i], table, env)
+        env = step.env
+        diags = concat_diags(diags, step.diags)
+        i++
+    }
+    SigOutcome { env = env; diags = diags }
+}
+
+/**
+ * The signatures ONE top-level item contributes: a function's own, a module const's declared type,
+ * or a struct/class body's methods.
+ *
+ * @param item   the top-level item
+ * @param table  the collected type table
+ * @param env    the environment so far
+ * @return       the environment after this item, plus its signature diagnostics
+ */
+fn collect_item_signature(item: parser::Item, table: TypeTable, env: Env) -> SigOutcome {
+    match item.content {
+        parser::Function as f => collect_fn_signature(item, f, table, env)
+        parser::ConstDecl as cd => collect_const_signature(item, cd, table, env)
+        parser::TypeDecl as td => collect_type_member_signatures(item, td, table, env)
+        _ => sig_unchanged(env)
+    }
+}
+
+/**
+ * A top-level function's signature. (#109 W1) `ref_ns` = the namespace the function is declared
+ * in — the referencing namespace for its param/return annotations. (#41) the binding carries that
+ * namespace so an unqualified same-namespace call resolves.
+ *
+ * @param item   the function's item (its source file and namespace)
+ * @param f      the parsed function
+ * @param table  the collected type table
+ * @param env    the environment so far
+ * @return       the environment with the function bound, or unchanged plus its diagnostic
+ */
+fn collect_fn_signature(item: parser::Item, f: parser::Function, table: TypeTable, env: Env) -> SigOutcome {
+    match func_type(f, table, item.namespace) {
+        Type as t => SigOutcome { env = define_fn(env, f.name, t, item.namespace); diags = teko::list::empty() }
+        error as e => SigOutcome { env = env; diags = one_diag(located_diag(item.file, f.line, f.col, e)) }
+    }
+}
+
+/**
+ * A module-level const's declared type (#594 crumb 2) — SIGNATURE only: the initializer is neither
+ * evaluated nor validated here.
+ *
+ * @param item   the const's item (its source file and namespace)
+ * @param cd     the parsed const declaration
+ * @param table  the collected type table
+ * @param env    the environment so far
+ * @return       the environment with the const bound, or unchanged plus its diagnostic
+ */
+fn collect_const_signature(item: parser::Item, cd: parser::ConstDecl, table: TypeTable, env: Env) -> SigOutcome {
+    match collect_const_sig(cd, table, item.namespace) {
+        Type as t => SigOutcome { env = define_const(env, cd.name, t, item.namespace, cd.vis); diags = teko::list::empty() }
+        error as e => SigOutcome { env = env; diags = one_diag(located_diag(item.file, cd.line, cd.col, e)) }
+    }
+}
+
+/**
+ * A type declaration's METHOD signatures. A struct registers its own methods; a class registers its
+ * EFFECTIVE ones (W10b.CLASS increment 2 — an inherited-but-not-overridden method is callable as
+ * `DerivedClass::method(…)` too). Every other body kind contributes none.
+ *
+ * @param item   the type declaration's item (its source file and namespace)
+ * @param td     the parsed type declaration
+ * @param table  the collected type table
+ * @param env    the environment so far
+ * @return       the environment with the body's methods bound, plus their diagnostics
+ */
+fn collect_type_member_signatures(item: parser::Item, td: parser::TypeDecl, table: TypeTable, env: Env) -> SigOutcome {
+    let method_ns = if item.namespace == "" { td.name } else { item.namespace ~ "::" ~ td.name }
+    match td.body {
+        parser::StructBody as sb => collect_method_signatures(item, td, sb.methods, method_ns, table, env)
+        parser::ClassBody as cb => {
+            let eff = match effective_class_methods(cb, table) {
+                []parser::Function as m => m
+                error as e => return SigOutcome { env = env; diags = one_diag(located_diag(item.file, td.line, td.col, e)) }
+            }
+            collect_method_signatures(item, td, eff, method_ns, table, env)
+        }
+        _ => sig_unchanged(env)
+    }
+}
+
+/**
+ * Bind one method list under `method_ns`, collecting rather than stopping — a method whose
+ * signature fails to resolve contributes its diagnostic and no binding, and the next method is
+ * still registered.
+ *
+ * (#109 W1) The referencing namespace for a method's annotations is the TYPE's declaring namespace,
+ * which is the item's own — not the method pseudo-namespace it binds under.
+ *
+ * @param item       the declaring item (its source file and namespace)
+ * @param td         the declaring type
+ * @param methods    the methods to register, in declaration order
+ * @param method_ns  the namespace key the methods bind under ("<owning-ns>::<TypeName>")
+ * @param table      the collected type table
+ * @param env        the environment so far
+ * @return           the environment with the resolvable methods bound, plus the rest's diagnostics
+ */
+fn collect_method_signatures(item: parser::Item, td: parser::TypeDecl, methods: []parser::Function, method_ns: str, table: TypeTable, env: Env) -> SigOutcome {
+    mut out = env
+    mut diags: []str = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= methods.len { break }
+        match method_func_type(methods[i], td.name, table, item.namespace) {
+            Type as t => { out = define_fn(out, methods[i].name, t, method_ns) }
+            error as e => { diags = teko::list::push(diags, located_diag(item.file, methods[i].line, methods[i].col, e)) }
+        }
+        i++
+    }
+    SigOutcome { env = out; diags = diags }
+}
+
+/**
+ * Register a stamped generic-type INSTANCE's methods (kept + signature-substituted by #254 layer 2)
+ * into the env, keyed by the instance's own bare name (`Box__g__i64`) — so a dot-call `b.get()` on a
+ * `Box__g__i64` value desugars to `Box__g__i64::get(b)` and `lookup_call` resolves it. The instance
+ * name is already canonical/bare (it is what the resolved receiver's `Named.name` carries and what the
+ * dispatch callee's qualifier is), so `method_ns` is the instance name verbatim, matching the
+ * bare dispatch qualifier the same way stamped-instance field access resolves off the bare name.
+ * A NON-generic-type body contributes nothing (its methods live on the template, registered as usual).
+ *
+ * A HARD boundary in the all-diagnostics ruling (docs/design/all-diagnostics-pre-walk-0.3.1.md
+ * §3): every instance whose method signature fails to resolve contributes its diagnostic and no
+ * binding, so the pass collects them all and the build cuts here rather than typing a dot-call
+ * against a missing method.
+ *
+ * @param env    the env to extend (the collected globals, before sealing)
+ * @param table  the folded type table (source of the stamped instances + method signatures)
+ * @return       the env with every resolvable stamped instance method registered, plus the
+ *               diagnostics of the ones that did not resolve
+ * @since onda-3 (#254)
+ */
+pub fn register_instance_methods(env: Env, table: TypeTable) -> SigOutcome {
+    mut out = env
+    mut diags: []str = teko::list::empty()
+    let insts = table_generic_instance_regs(table)
+    mut i = 0
+    loop {
+        if i >= insts.len { break }
+        let step = register_one_instance_methods(insts[i], table, out)
+        out = step.env
+        diags = concat_diags(diags, step.diags)
+        i++
+    }
+    SigOutcome { env = out; diags = diags }
+}
+
+/**
+ * Bind ONE stamped instance's methods, collecting rather than stopping. The instance name is
+ * already canonical/bare, so it IS the namespace key the dot-call desugaring probes.
+ *
+ * @param inst   the stamped instance's registration
+ * @param table  the folded type table (for signature resolution)
+ * @param env    the environment so far
+ * @return       the environment with the instance's resolvable methods bound, plus the rest's
+ *               diagnostics
+ * @since 0.3.1
+ */
+fn register_one_instance_methods(inst: TypeReg, table: TypeTable, env: Env) -> SigOutcome {
+    mut out = env
+    mut diags: []str = teko::list::empty()
+    let methods = instance_methods_of(inst.decl)
+    mut mi = 0
+    loop {
+        if mi >= methods.len { break }
+        match method_func_type(methods[mi], inst.name, table, "") {
+            Type as t => { out = define_fn(out, methods[mi].name, t, inst.name) }
+            error as e => { diags = teko::list::push(diags, located_diag(inst.file, methods[mi].line, methods[mi].col, e)) }
+        }
+        mi++
+    }
+    SigOutcome { env = out; diags = diags }
+}
+
+/**
+ * The methods a stamped generic-type instance carries (kept + substituted by #254 layer 2) — struct
+ * or class body; every other body kind has no methods. Static and instance methods alike are returned
+ * (both need registering as `Instance::method` callables).
+ *
+ * @param decl  the stamped instance's TypeDecl
+ * @return      the instance's methods, or an empty list for a non-struct/class body
+ * @since onda-3 (#254)
+ */
+fn instance_methods_of(decl: parser::TypeDecl) -> []parser::Function {
+    match decl.body {
+        parser::StructBody as sb => sb.methods
+        parser::ClassBody as cb => cb.methods
+        _ => teko::list::empty()
+    }
+}
+
+// C7.12 — reconstruct a TypeTable from a TYPED program's pass-through TypeDecl items.
+// Used by the package backend (project.tks::backend) which has a TProgram, not a
+// parser::Program. The namespace field is set to "" — sufficient for resolve_type (name
+// resolution ignores namespace; only W-vis-enforce uses it, and the header emitter does not).
+pub fn type_table_of(prog: TProgram) -> TypeTable {
+    mut table: []TypeReg = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            parser::TypeDecl as td => {
+                table = teko::list::push(table, TypeReg { name = td.name; namespace = ""; file = ""; vis = td.vis; decl = td })
+            }
+            _ => { }
+        }
+        i++
+    }
+    table
+}
+
+// (#152) canonicalize every SOURCE-WRITTEN type reference held as a STRING — a class's
+// `base_name`, a struct/class `implements` list, an interface `extends` list — to its
+// R0-R5-resolved QUALIFIED form ("ns::Name"; a root name stays bare) ONCE, at the type_program
+// entry. Every downstream hop (base chains, conformance, vtables, codegen layout) then probes an
+// exact, order-independent name instead of a bare table scan (discovery order differs per
+// platform; a type of the same bare name in ANOTHER namespace would win by scan order). An
+// unresolvable name is left AS WRITTEN — validation surfaces that specific error with the source
+// wording. NO-OP (program returned unchanged) when nothing to canonicalize. (Mirror collect.c.)
+fn canon_ref_name(name: str, table: TypeTable, ref_ns: str) -> str {
+    match resolve_name_ref(name, table, ref_ns) {
+        parser::TypeDecl as td => qualify(resolved_name_ns(name, table, ref_ns), name_last_segment(td.name))
+        error => name   // unresolvable — leave as written
+    }
+}
+fn canon_ref_list(names: []str, table: TypeTable, ref_ns: str) -> []str {
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop { if i >= names.len { break }; out = teko::list::push(out, canon_ref_name(names[i], table, ref_ns)); i++ }

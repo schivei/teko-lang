@@ -1,0 +1,205 @@
+// src/checker/cf_compare.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+    let res = mask_to_width(raw, info.width)
+    if int_add_overflows(a, b, res, raw, info) { return const_form_error("integer overflow in a constant `+` (out of range for its type) (#comptime-fold)", e) }
+    cv_int(res, ty)
+}
+
+/**
+ * int_add_overflows — does the addition leave the type's range? Signed: both operands
+ * share a sign the result does not. Unsigned: a carry beyond the width (at width 64, the
+ * carrier's own top width, a u64 carry-out — `raw` already wrapped, detected via `raw < a`
+ * — else a sum exceeding the width mask, safe because `raw` had headroom to compute
+ * unwrapped at any width below the carrier's own).
+ *
+ * @param a     the left operand's bit pattern
+ * @param b     the right operand's bit pattern
+ * @param res   the width-reduced sum
+ * @param raw   the un-reduced u64 sum
+ * @param info  the operation's width/signedness
+ * @return      true iff the addition overflows
+ * @since #comptime-fold
+ */
+fn int_add_overflows(a: u64, b: u64, res: u64, raw: u64, info: IntInfo) -> bool {
+    if info.is_signed {
+        let sa = bit_set(a, info.width - 1)
+        let sb = bit_set(b, info.width - 1)
+        let sr = bit_set(res, info.width - 1)
+        return (sa == sb) && (sr != sa)
+    }
+    if info.width >= 64 { return raw < a }
+    raw > width_mask(info.width)
+}
+
+/**
+ * int_sub — integer subtraction, computed as an addition of the two's-complement of the
+ * right operand (never an underflowing `a - b`), erroring on an out-of-range true result.
+ *
+ * @param a     the left operand's bit pattern (masked to width)
+ * @param b     the right operand's bit pattern (masked to width)
+ * @param info  the operation's width/signedness
+ * @param ty    the result's declared type
+ * @param e     the enclosing expression (positions any error)
+ * @return      the folded difference, or a located overflow error
+ * @since #comptime-fold
+ */
+fn int_sub(a: u64, b: u64, info: IntInfo, ty: Type, e: TExpr) -> ConstValue | error {
+    let res = mask_to_width(a + twos_neg(b, info.width), info.width)
+    if int_sub_overflows(a, b, res, info) { return const_form_error("integer overflow in a constant `-` (out of range for its type) (#comptime-fold)", e) }
+    cv_int(res, ty)
+}
+
+/**
+ * int_sub_overflows — does the subtraction leave the type's range? Signed: the operands'
+ * signs differ and the result's sign is not the minuend's. Unsigned: a borrow (`a < b`).
+ *
+ * @param a     the left operand's bit pattern
+ * @param b     the right operand's bit pattern
+ * @param res   the width-reduced difference
+ * @param info  the operation's width/signedness
+ * @return      true iff the subtraction overflows
+ * @since #comptime-fold
+ */
+fn int_sub_overflows(a: u64, b: u64, res: u64, info: IntInfo) -> bool {
+    if info.is_signed {
+        let sa = bit_set(a, info.width - 1)
+        let sb = bit_set(b, info.width - 1)
+        let sr = bit_set(res, info.width - 1)
+        return (sa != sb) && (sr != sa)
+    }
+    a < b
+}
+
+/**
+ * int_mul — integer multiplication. The two's-complement product's low bits are the exact
+ * in-range result; a product whose true value leaves the type's range is a located
+ * overflow error (M.1).
+ *
+ * @param a     the left operand's bit pattern (masked to width)
+ * @param b     the right operand's bit pattern (masked to width)
+ * @param info  the operation's width/signedness
+ * @param ty    the result's declared type
+ * @param e     the enclosing expression (positions any error)
+ * @return      the folded product, or a located overflow error
+ * @since #comptime-fold
+ */
+fn int_mul(a: u64, b: u64, info: IntInfo, ty: Type, e: TExpr) -> ConstValue | error {
+    let res = mask_to_width(a * b, info.width)
+    if int_mul_overflows(a, b, info) { return const_form_error("integer overflow in a constant `*` (out of range for its type) (#comptime-fold)", e) }
+    cv_int(res, ty)
+}
+
+/**
+ * int_mul_overflows — does the multiplication leave the type's range? It compares
+ * magnitudes: the product of the unsigned magnitudes must not carry out of u64 and must
+ * fit the type's magnitude ceiling (a signed result may reach 2^(w-1) only when the signs
+ * differ, i.e. the minimum).
+ *
+ * @param a     the left operand's bit pattern
+ * @param b     the right operand's bit pattern
+ * @param info  the operation's width/signedness
+ * @return      true iff the multiplication overflows
+ * @since #comptime-fold
+ */
+fn int_mul_overflows(a: u64, b: u64, info: IntInfo) -> bool {
+    if !info.is_signed { return unsigned_mul_overflows(a, b, info) }
+    signed_mul_overflows(a, b, info)
+}
+
+/**
+ * unsigned_mul_overflows — does an unsigned product leave the width? A u64 carry-out
+ * (`mul_mag_overflows`, width-agnostic), or — below the carrier's own top width (64), where
+ * a non-overflowing u64 product still has headroom to compare against the mask directly —
+ * a product exceeding the width mask.
+ *
+ * @param a     the left operand's bit pattern
+ * @param b     the right operand's bit pattern
+ * @param info  the operation's width/signedness
+ * @return      true iff the unsigned product overflows
+ * @since #comptime-fold
+ */
+fn unsigned_mul_overflows(a: u64, b: u64, info: IntInfo) -> bool {
+    if mul_mag_overflows(a, b) { return true }
+    if info.width >= 64 { return false }
+    (a * b) > width_mask(info.width)
+}
+
+/**
+ * signed_mul_overflows — does a signed product leave the width? The magnitude product must
+ * not carry out of u64 nor exceed 2^(w-1); a magnitude of exactly 2^(w-1) is in range
+ * only when the signs differ (the type minimum).
+ *
+ * @param a     the left operand's bit pattern
+ * @param b     the right operand's bit pattern
+ * @param info  the operation's width/signedness
+ * @return      true iff the signed product overflows
+ * @since #comptime-fold
+ */
+fn signed_mul_overflows(a: u64, b: u64, info: IntInfo) -> bool {
+    let ua = magnitude(a, info)
+    let ub = magnitude(b, info)
+    if mul_mag_overflows(ua, ub) { return true }
+    let cap = msb_value(info.width)
+    let prod = ua * ub
+    if prod > cap { return true }
+    if prod == cap { return bit_set(a, info.width - 1) == bit_set(b, info.width - 1) }
+    false
+}
+
+/**
+ * mul_mag_overflows — does the unsigned product `x * y` carry out of the u64 carrier?
+ * Detected without a wider type: a non-zero `x` whose product divided back does not
+ * recover `y` overflowed. Width-agnostic — sound at every width, including the carrier's
+ * own top width (64), where `x * y` may itself wrap (Teko native `*` wraps, never traps).
+ *
+ * @param x  the first magnitude
+ * @param y  the second magnitude
+ * @return   true iff `x * y` exceeds u64
+ * @since #comptime-fold
+ */
+fn mul_mag_overflows(x: u64, y: u64) -> bool { x != (0 to u64) && ((x * y) / x != y) }
+
+/**
+ * int_divrem — integer division (`is_div`) or remainder. A zero divisor and the signed
+ * `MIN / -1` overflow are located compile errors (M.1, mirroring the runtime's trapping
+ * divide); otherwise the result is the trunc-toward-zero quotient or its remainder.
+ *
+ * @param is_div  true for `/`, false for `%`
+ * @param a       the dividend's bit pattern (masked to width)
+ * @param b       the divisor's bit pattern (masked to width)
+ * @param info    the operation's width/signedness
+ * @param ty      the result's declared type
+ * @param e       the enclosing expression (positions any error)
+ * @return        the folded quotient/remainder, or a located error
+ * @throws        a located error when the divisor is zero or a signed `MIN / -1` overflows
+ * @since #comptime-fold
+ */
+fn int_divrem(is_div: bool, a: u64, b: u64, info: IntInfo, ty: Type, e: TExpr) -> ConstValue | error {
+    if mask_to_width(b, info.width) == (0 to u64) { return divrem_zero_error(is_div, e) }
+    if info.is_signed && is_min_bits(a, info) && is_all_ones(b, info.width) { return const_form_error("integer overflow in a constant signed division (MIN / -1) (#comptime-fold)", e) }
+    if !info.is_signed { return cv_int(mask_to_width(if is_div { a / b } else { a % b }, info.width), ty) }
+    let ua = magnitude(a, info)
+    let ub = magnitude(b, info)
+    if is_div { return int_div_signed(ua, ub, a, b, info, ty) }
+    int_rem_signed(ua, ub, a, info, ty)
+}
+
+/**
+ * divrem_zero_error — the located compile error for a constant divide/remainder by zero.
+ *
+ * @param is_div  true for `/`, false for `%`
+ * @param e       the enclosing expression (positions the error)
+ * @return        the located error
+ * @since #comptime-fold
+ */
+fn divrem_zero_error(is_div: bool, e: TExpr) -> error {
+    if is_div { return const_form_error("division by zero in a constant (#comptime-fold)", e) }
+    const_form_error("remainder by zero in a constant (#comptime-fold)", e)
+}
+
+/**
+ * int_div_signed — the signed quotient from magnitudes: its magnitude is `ua / ub`, and
+ * it is negative when the operand signs differ (truncation toward zero).

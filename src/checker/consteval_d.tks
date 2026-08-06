@@ -1,0 +1,214 @@
+// src/checker/consteval_d.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+ */
+fn collect_const_ctor_item(acc: []TFunction, it: TItem) -> []TFunction {
+    match it {
+        TFunction as f => push_when_const_ctor(acc, f)
+        _ => acc
+    }
+}
+
+/**
+ * collect_const_ctors — every STRUCT-CONSTRUCTOR function the program declares, in declaration order:
+ * the table `canonicalize_const_ctors` resolves a const initializer's allowlisted call against. Built
+ * ONCE per program by the fold, so canonicalization costs one linear scan plus a lookup per const.
+ *
+ * @param items  the typed program's top-level items
+ * @return       the struct-constructor functions, in declaration order
+ * @since #degrau-1
+ */
+pub fn collect_const_ctors(items: []TItem) -> []TFunction {
+    mut out: []TFunction = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= items.len { break }
+        out = collect_const_ctor_item(out, items[i])
+        i++
+    }
+    out
+}
+
+/**
+ * callee_bare_name — the LAST segment of a resolved callee path (`backend::preg` → `preg`), the name a
+ * declared function is matched by; the empty string for an empty path.
+ *
+ * @param p  the resolved callee path
+ * @return   the path's last segment name, or "" when the path has no segment
+ * @since #degrau-1
+ */
+fn callee_bare_name(p: parser::Path) -> str {
+    if p.segments.len == 0 { return "" }
+    p.segments[p.segments.len - 1].name
+}
+
+/**
+ * const_ctor_matches — whether the constructor `f` is the target of a call named `bare` resolved to
+ * namespace `call_ns`. An empty `call_ns` (a builtin/local call the checker did not namespace) matches
+ * on the bare name alone; the caller then demands UNIQUENESS, so an ambiguous bare name canonicalizes
+ * nothing rather than guessing.
+ *
+ * @param f        the candidate struct constructor
+ * @param bare     the callee path's last segment
+ * @param call_ns  the namespace the checker resolved the call to ("" when it namespaced none)
+ * @return         whether `f` is a candidate target of that call
+ * @since #degrau-1
+ */
+fn const_ctor_matches(f: TFunction, bare: str, call_ns: str) -> bool {
+    if f.name != bare { return false }
+    if call_ns == "" { return true }
+    f.namespace == call_ns
+}
+
+/**
+ * find_const_ctor — the UNIQUE struct constructor a const initializer's call targets, or null when
+ * none matches or more than one does. Ambiguity yields null on purpose: splicing the body of a
+ * same-named constructor from another namespace would silently change the const's value, which in the
+ * register allocator is a miscompilation, so an ambiguous name is left as a call for the lowering's
+ * located honest-stop to report.
+ *
+ * @param ctors    the program's struct-constructor table (`collect_const_ctors`)
+ * @param callee   the call's resolved callee path
+ * @param call_ns  the namespace the checker resolved the call to
+ * @return         the single matching constructor, or null when the match is absent or ambiguous
+ * @since #degrau-1
+ */
+fn find_const_ctor(ctors: []TFunction, callee: parser::Path, call_ns: str) -> TFunction | null {
+    let bare = callee_bare_name(callee)
+    if bare == "" { return null }
+    mut found: []TFunction = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= ctors.len { break }
+        if const_ctor_matches(ctors[i], bare, call_ns) { found = teko::list::push(found, ctors[i]) }
+        i++
+    }
+    if found.len != 1 { return null }
+    found[0]
+}
+
+/**
+ * const_ctor_arg_for_param — the argument bound to the parameter named `name`, or null when no
+ * parameter carries that name. The caller has already proven `params.len == args.len`, so the index
+ * that matches a parameter also indexes its argument.
+ *
+ * @param params  the constructor's declared parameters, in signature order
+ * @param args    the call's arguments, PARALLEL to `params`
+ * @param name    the parameter name a body reference spells
+ * @return        the bound argument expression, or null when `name` is not a parameter
+ * @since #degrau-1
+ */
+fn const_ctor_arg_for_param(params: []parser::Param, args: []TExpr, name: str) -> TExpr | null {
+    mut i: u64 = 0
+    loop {
+        if i >= params.len { break }
+        if params[i].name == name { return args[i] }
+        i++
+    }
+    null
+}
+
+/**
+ * const_ctor_var_value — the value a bare-name reference inside a constructor body stands for: the
+ * argument bound to the parameter of that name. A reference to a function VALUE, or to any name that
+ * is not a parameter, yields null and aborts the canonicalization — the value would not be reproduced
+ * faithfully.
+ *
+ * @param tv      the reference node inside the constructor's struct literal
+ * @param params  the constructor's declared parameters, in signature order
+ * @param args    the call's arguments, PARALLEL to `params`
+ * @return        the bound argument expression, or null when the reference is not a parameter
+ * @since #degrau-1
+ */
+fn const_ctor_var_value(tv: TVar, params: []parser::Param, args: []TExpr) -> TExpr | null {
+    if tv.is_func { return null }
+    const_ctor_arg_for_param(params, args, tv.name)
+}
+
+/**
+ * const_ctor_field_value — one field value of the constructor's struct literal, rewritten for the call
+ * site: a parameter reference becomes the ALREADY-FOLDED argument the call passes, a literal stands for
+ * itself, and every other form yields null so the whole canonicalization is abandoned rather than
+ * producing a value the function would not have returned.
+ *
+ * @param v       the field value as the constructor's body spells it
+ * @param params  the constructor's declared parameters, in signature order
+ * @param args    the call's arguments, PARALLEL to `params`
+ * @return        the field value at the call site, or null when it is not reproducible
+ * @since #degrau-1
+ */
+fn const_ctor_field_value(v: TExpr, params: []parser::Param, args: []TExpr) -> TExpr | null {
+    match v.kind {
+        TVar as tv => const_ctor_var_value(tv, params, args)
+        TNumber => v
+        TStrLit => v
+        TByteLit => v
+        TCharLit => v
+        TBoolLit => v
+        TPathExpr => v
+        _ => null
+    }
+}
+
+/**
+ * const_ctor_substituted — the constructor's struct literal with every field value rewritten for the
+ * call site, carried at the CALL's own type and source position (so the canonical node reports where
+ * the const initializer is written, not where the constructor is declared). Null when any field value
+ * is not reproducible.
+ *
+ * @param call    the (argument-canonicalized) call expression being replaced
+ * @param si      the constructor body's struct literal
+ * @param params  the constructor's declared parameters, in signature order
+ * @param args    the call's arguments, PARALLEL to `params`
+ * @return        the canonical struct literal, or null when a field value is not reproducible
+ * @since #degrau-1
+ */
+fn const_ctor_substituted(call: TExpr, si: TStructInit, params: []parser::Param, args: []TExpr) -> TExpr | null {
+    mut vals: []TExpr = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= si.field_vals.len { break }
+        let fv = match const_ctor_field_value(si.field_vals[i], params, args) { TExpr as x => x; null => return null }
+        vals = teko::list::push(vals, fv)
+        i++
+    }
+    TExpr { kind = TStructInit { field_names = si.field_names; field_vals = vals }; type = call.type; line = call.line; col = call.col }
+}
+
+/**
+ * canon_ctor_call — replace an allowlisted pure-constructor call by the struct literal its callee
+ * returns, or leave the call untouched when the callee is not a uniquely resolvable struct constructor
+ * (`teko::f64_from_bits` returns a float, not a struct, and stays a call). The spliced literal is the
+ * constructor's OWN body with its parameters bound to the call's already-folded arguments, so the
+ * const's value is preserved exactly.
+ *
+ * @param cl     the typed call, as the const initializer spells it
+ * @param args   the call's arguments, already canonicalized
+ * @param call   the call expression rebuilt over `args` (the value returned when no rewrite applies)
+ * @param ctors  the program's struct-constructor table
+ * @return       the canonical struct literal, or `call` unchanged
+ * @since #degrau-1
+ */
+fn canon_ctor_call(cl: TCall, args: []TExpr, call: TExpr, ctors: []TFunction) -> TExpr {
+    let f = match find_const_ctor(ctors, cl.callee, cl.call_ns) { TFunction as x => x; null => return call }
+    if f.params.len != args.len { return call }
+    let lit = match const_ctor_literal(f) { TExpr as x => x; null => return call }
+    let si = match lit.kind { TStructInit as s => s; _ => return call }
+    match const_ctor_substituted(call, si, f.params, args) { TExpr as x => x; null => call }
+}
+
+/**
+ * canon_call — canonicalize a call inside a const initializer: its arguments first, then the call
+ * itself when its callee is a struct constructor.
+ *
+ * @param cl     the typed call expression
+ * @param e      the enclosing typed expression (for its type/position)
+ * @param ctors  the program's struct-constructor table
+ * @return       the canonical struct literal, or the call rebuilt over canonical arguments
+ * @since #degrau-1
+ */
+fn canon_call(cl: TCall, e: TExpr, ctors: []TFunction) -> TExpr {
+    let args = canon_exprs(cl.args, ctors)
+    let call = TExpr { kind = TCall { callee = cl.callee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot }; type = e.type; line = e.line; col = e.col }

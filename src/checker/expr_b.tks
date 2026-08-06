@@ -1,0 +1,183 @@
+// src/checker/expr_b.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+        _ => false
+    }
+}
+
+/**
+ * cast_is_lossless_widen — does `x to <outer>` on an `inner`-typed operand WIDEN losslessly? True
+ * iff the W-RULE's own join of the two kinds is the cast's target, i.e. `outer` can hold every
+ * `inner` value. This is class-3's standing precondition (`cast-width-hygiene-0.3.1.md` §8 Risk 2):
+ * a NARROWING cast is never redundant even when the enclosing op's result type is unchanged by it,
+ * because the narrow is a CHECKED conversion that can trap and can drop bits — `n == ((len - 1) to
+ * u32)` with a `u64` `len` compares at `u64` either way, yet deleting the cast deletes a range
+ * check the author asked for.
+ *
+ * @param inner  the cast operand's own `PrimKind`
+ * @param outer  the cast's target `PrimKind`
+ * @return       true iff the cast is a lossless widen (or the identity)
+ * @since        0.3.1
+ */
+fn cast_is_lossless_widen(inner: PrimKind, outer: PrimKind) -> bool {
+    match int_arith_join(inner, outer) {
+        PrimKind as k => k == outer
+        error => false
+    }
+}
+
+/**
+ * join_unchanged_without_cast — does stripping a cast leave the binary op's result type
+ * unchanged? Joins the partner kind `other` with the PRE-cast kind `inner` and with the
+ * POST-cast kind `outer`, and reports whether both joins succeed and agree. A rejected
+ * pre-cast join (the W-RULE's mixed-sign refusal) answers false: the cast is then the
+ * reason the program type-checks, which is the opposite of redundant.
+ *
+ * @param inner  the cast operand's own `PrimKind` (before the `to`)
+ * @param outer  the cast's target `PrimKind` (after the `to`)
+ * @param other  the partner operand's `PrimKind`
+ * @return       true iff both joins resolve and resolve to the SAME kind
+ * @since        0.3.1
+ */
+fn join_unchanged_without_cast(inner: PrimKind, outer: PrimKind, other: PrimKind) -> bool {
+    match int_arith_join(inner, other) {
+        PrimKind as without => match int_arith_join(outer, other) {
+            PrimKind as with_cast => without == with_cast
+            error => false
+        }
+        error => false
+    }
+}
+
+/**
+ * redundant_widen_cast_of — the D1 class-3 decision for ONE binary op, shared by the
+ * arithmetic/bitwise site (`type_binary`) and the comparison site (`type_compare`) so the
+ * two can never drift: the type of WHICHEVER side carries a redundant lossless-widen `to`,
+ * or `null` when neither does. The W-RULE already joins mixed-width integers implicitly
+ * (`widen_int_binop`), so a hand-written widen immediately before the op changed nothing —
+ * UNLESS flagging it could cascade into changing the op's actual result type/value:
+ *
+ * - the OTHER side is a bare numeric literal: a literal adopts its partner's ACTUAL
+ *   (pre-cast) type (`adopt_binop_operands`, ahead of this check), so stripping the cast
+ *   would change what the literal adopts to (e.g. `(id to u64) + 1` with `id: u32` — remove
+ *   the cast and the literal `1` adopts `u32`, not `u64`, a real semantic change);
+ * - the OTHER side is ITSELF an explicit `to` cast: two casts can each look individually
+ *   redundant against the OTHER's post-cast type, but removing BOTH collapses the pair to
+ *   their narrower shared pre-cast width (e.g. `(a to i64) - (b to i64)` with `a`/`b`: `u32`
+ *   — deleting both turns a signed `i64` subtraction into a wrapping `u32` one, changing the
+ *   result for `a < b`). Only a cast whose partner is a NATURALLY-typed (non-cast,
+ *   non-literal) expression is safe to flag.
+ *
+ * Keeping this ONE function is the fix for the defect it replaces: the same two guards used
+ * to live only at the arithmetic site, so `(a to i64) - (b to i64)` compiled while
+ * `(a to i64) < (b to i64)` was a hard error. Since the 2026-07-27 owner ruling the verdict
+ * is a WARNING at both sites (`warn_redundant_cast`) rather than a rejection, but the two
+ * sites must still AGREE — a construct that warns as arithmetic and stays silent as a
+ * comparison would be the same drift wearing a quieter costume.
+ *
+ * Returns the offending OPERAND rather than just its type, because the D1 diagnostic became a
+ * warning (owner 2026-07-27) and a warning has no return path to be positioned on the way out:
+ * `warn_redundant_cast` must name `file:line:col` itself, and the operand is what carries the
+ * line/col (`type_expr` stamps every typed node with its source position). Returning the bare
+ * `Type` — which is all an ERROR needed, since `surface_at` positioned it later — would have
+ * silently downgraded a precisely-located diagnostic into an unlocatable one.
+ *
+ * @param l  the typed left operand
+ * @param r  the typed right operand
+ * @return   the operand carrying the redundant cast, or `null` when neither side does
+ * @since    0.3.1
+ */
+fn redundant_widen_cast_of(l: TExpr, r: TExpr) -> TExpr | null {
+    if !operand_may_flag_partner(r) && cast_widen_is_redundant(l, r.type) { return l }
+    if !operand_may_flag_partner(l) && cast_widen_is_redundant(r, l.type) { return r }
+    null
+}
+
+/**
+ * operand_may_flag_partner — is this operand one whose OWN shape blocks flagging its partner's
+ * cast? True for a bare numeric literal (it adopts its partner's pre-cast type) and for an
+ * explicit cast (deleting both casts of a pair changes the op's width), the two cascade cases
+ * `redundant_widen_cast_of` documents.
+ *
+ * @param e  the partner operand to classify
+ * @return   true when the partner is a literal or is itself a cast
+ * @since    0.3.1
+ */
+fn operand_may_flag_partner(e: TExpr) -> bool {
+    match e.kind {
+        TNumber => true
+        TCast => true
+        _ => false
+    }
+}
+
+/**
+ * op_is_shift — is `op` one of the two shift operators (`<<`, `>>`)?
+ *
+ * @param op  the binary operator token
+ * @return    true for `<<`/`>>`
+ */
+fn op_is_shift(op: lexer::TokenKind) -> bool {
+    op == lexer::TokenKind::Shl || op == lexer::TokenKind::Shr
+}
+
+/**
+ * op_is_arith — is `op` one of the strictly-arithmetic operators (`+ - * /`), legal on floats
+ * AND integers (B.38)?
+ *
+ * @param op  the binary operator token
+ * @return    true for `+`/`-`/`*`/`/`
+ */
+fn op_is_arith(op: lexer::TokenKind) -> bool {
+    op == lexer::TokenKind::Plus || op == lexer::TokenKind::Minus ||
+    op == lexer::TokenKind::Star || op == lexer::TokenKind::Slash
+}
+
+/**
+ * op_is_arith_bitwise — is `op` one of the remainder/bitwise operators (`% & | ^`), which are
+ * integer-only (no float bit-twiddling — B.38)?
+ *
+ * @param op  the binary operator token
+ * @return    true for `%`/`&`/`|`/`^`
+ */
+fn op_is_arith_bitwise(op: lexer::TokenKind) -> bool {
+    op == lexer::TokenKind::Percent ||
+    op == lexer::TokenKind::Amp || op == lexer::TokenKind::Pipe || op == lexer::TokenKind::Caret
+}
+
+// These predicates + op-regimes are the shared core of B.22 — the typed layer
+// (type_binary/type_unary/type_compare in `typer`) consumes them directly.
+
+// (C8.3) is `t` a NAMED type whose declaration is a `flags`?
+fn is_flags_named(t: Type, table: TypeTable) -> bool {
+    match t {
+        Named as n => {
+            match type_table_find(table, n.name, "") {   // (#109 W1) flags-kind probe on a resolved name — no referencing ns
+                parser::TypeDecl as d => {
+                    match d.body {
+                        parser::FlagsBody => true
+                        _ => false
+                    }
+                }
+                error => false
+            }
+        }
+        _ => false
+    }
+}
+
+// (C8.3) type-check binary bitwise ops on flags types: & | ^ on two same-flags values → flags.
+// Called from type_binary before the is_integer check.
+fn type_flags_binary(op: lexer::TokenKind, lt: Type, rt: Type, table: TypeTable) -> bool {
+    if op != lexer::TokenKind::Amp && op != lexer::TokenKind::Pipe && op != lexer::TokenKind::Caret {
+        return false
+    }
+    is_flags_named(lt, table)
+}
+
+// (C8.3) flags helper method names (has/all/any/none/add/remove).
+fn is_flags_method(name: str) -> bool {
+    name == "has" || name == "all" || name == "any" || name == "none" || name == "add" || name == "remove"
+}

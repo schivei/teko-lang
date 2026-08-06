@@ -1,0 +1,204 @@
+// src/checker/cf_indexing.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+/**
+ * cf_agg_value — true iff `e` is a const AGGREGATE the index fold may evaluate: an in-tree
+ * `TArrayLit` whose every element is a foldable const (`cf_int_value`, or a nested `cf_agg_value`), or
+ * a `TVar` (non-`is_func`) naming a module aggregate const in `agg`. A fn-value reference, a local
+ * binding, a spread element, or any runtime leaf returns false, so the index stays runtime. The gate
+ * that keeps `eval_const` from being called on a non-const receiver (the aggregate mirror of
+ * `cf_int_value`).
+ *
+ * @param e    the receiver expression to classify
+ * @param agg  the module-aggregate resolution table
+ * @return     whether `e` is a foldable const aggregate
+ * @since #comptime-fold
+ */
+fn cf_agg_value(e: TExpr, agg: AggConstMap) -> bool {
+    match e.kind {
+        TArrayLit as a => cf_array_elems_const(a, agg)
+        TVar as v => cf_var_is_agg_const(v, agg)
+        TCast as c => cf_str_to_bytes_cast(e, c, agg)
+        _ => false
+    }
+}
+
+/**
+ * cf_str_to_bytes_cast — true iff `e` is a `str -> []byte` coercion of a const string (CF4c): the cast's
+ * target is `[]byte` and its operand is a foldable const/literal string. Such a coercion folds to the
+ * byte-array const value (`cast_to_non_int`), so an enclosing `.len`/index over it also folds.
+ *
+ * @param e    the cast expression (its `.type` is the coercion target)
+ * @param c    the typed cast node
+ * @param agg  the module-aggregate resolution table
+ * @return     whether `e` is a foldable `str -> []byte` coercion
+ * @since #comptime-fold
+ */
+fn cf_str_to_bytes_cast(e: TExpr, c: TCast, agg: AggConstMap) -> bool {
+    is_byte_slice(e.type) && cf_str_value(c.expr, agg)
+}
+
+/**
+ * cf_str_value — true iff `e` is a foldable const STRING the fold reduces to its bytes (CF4c/CF4d): an
+ * in-tree `TStrLit`, or a `TVar` naming a module const string recorded in `agg`. A local string binding
+ * (not propagated by `propagate_locals`), a runtime string, or a fn-value is not foldable.
+ *
+ * @param e    the receiver expression to classify
+ * @param agg  the module-aggregate resolution table
+ * @return     whether `e` is a foldable const string
+ * @since #comptime-fold
+ */
+fn cf_str_value(e: TExpr, agg: AggConstMap) -> bool {
+    match e.kind {
+        TStrLit => true
+        TVar as v => cf_var_is_agg_const(v, agg)
+        _ => false
+    }
+}
+
+/**
+ * cf_var_is_agg_const — true iff `v` is a non-function reference naming a module aggregate const
+ * recorded in `agg`. A fn-value (`is_func`) is never a const aggregate; a name absent from `agg` (a
+ * local, a scalar const, a different-module name) is not foldable.
+ *
+ * @param v    the reference node
+ * @param agg  the module-aggregate resolution table
+ * @return     whether `v` resolves to a module aggregate const
+ * @since #comptime-fold
+ */
+fn cf_var_is_agg_const(v: TVar, agg: AggConstMap) -> bool {
+    if v.is_func { return false }
+    match agg_const_init(agg, v.name, v.func_ns) {
+        null => false
+        TExpr => true
+    }
+}
+
+/**
+ * cf_array_elems_const — true iff every element of the array literal `a` is a foldable const (a
+ * `cf_int_value` scalar or a nested `cf_agg_value`) and none is a spread. Any runtime or spread
+ * element makes the whole aggregate non-const, so the index stays runtime.
+ *
+ * @param a    the typed array literal
+ * @param agg  the module-aggregate resolution table (for a nested aggregate element)
+ * @return     whether every element is a foldable const
+ * @since #comptime-fold
+ */
+fn cf_array_elems_const(a: TArrayLit, agg: AggConstMap) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= a.elements.len { break }
+        if a.elements[i].is_spread { return false }
+        if !cf_element_const(a.elements[i].expr, agg) { return false }
+        i++
+    }
+    true
+}
+
+/**
+ * cf_element_const — true iff the array element `e` is a foldable const: a scalar integer op-tree
+ * (`cf_int_value`) or a nested const aggregate (`cf_agg_value`).
+ *
+ * @param e    the element expression
+ * @param agg  the module-aggregate resolution table (for a nested aggregate element)
+ * @return     whether `e` is a foldable const element
+ * @since #comptime-fold
+ */
+fn cf_element_const(e: TExpr, agg: AggConstMap) -> bool {
+    if cf_int_value(e) { return true }
+    cf_agg_value(e, agg)
+}
+
+/**
+ * cf_can_index — true iff the whole `TIndex` folds: a foldable const-aggregate receiver
+ * (`cf_agg_value`) AND a foldable const-integer index (`cf_int_value`). When false the index is
+ * rebuilt around its folded children (stays runtime), preserving today's behavior for a runtime index
+ * or receiver.
+ *
+ * @param ix   the typed index expression
+ * @param agg  the module-aggregate resolution table
+ * @return     whether the index expression is fully const-foldable
+ * @since #comptime-fold
+ */
+fn cf_can_index(ix: TIndex, agg: AggConstMap) -> bool {
+    cf_agg_value(ix.receiver, agg) && cf_int_value(ix.index)
+}
+
+/**
+ * cf_fold_int — the fold's integer-evaluability gate: `cf_int_value` EXTENDED with a
+ * `TIndex`-of-const-aggregate arm (agg-aware), so an enclosing cast or op-tree over a const index
+ * collapses to a single literal (`(G[0] to u64) to i32` -> `31`, not `((31 to byte) to u64) to i32`).
+ * Kept SEPARATE from `cf_int_value` so the CF3 local-binding recording gate (`lp_record_simple`) — the
+ * `seed_from_dep_qualified_value_const_and_fn` guard — keeps the name-free `cf_int_value` untouched.
+ *
+ * @param e    the typed expression to classify
+ * @param agg  the module-aggregate resolution table
+ * @return     whether `e` is an integer op-tree (possibly over a const index) the fold may evaluate
+ * @since #comptime-fold
+ */
+fn cf_fold_int(e: TExpr, agg: AggConstMap) -> bool {
+    match e.kind {
+        TNumber as n => !n.is_float && cf_is_int_type(e.type)
+        TByteLit => true
+        TCast as c => cf_is_int_type(e.type) && cf_fold_cast_operand(c.expr, agg)
+        TUnary as u => is_const_unary_op(u.op) && cf_fold_int(u.operand, agg)
+        TBinary as b => is_const_binary_op(b.op) && cf_fold_int(b.left, agg) && cf_fold_int(b.right, agg)
+        TIndex as ix => cf_can_index(ix, agg)
+        TFieldAccess as fa => cf_can_fold_field(fa, agg)
+        _ => false
+    }
+}
+
+/**
+ * cf_can_fold_field — the fold's field-access gate (the field mirror of `cf_can_index`): true iff the
+ * whole `TFieldAccess` collapses to a literal — a foldable `.len` (CF4d) or an integer struct field of a
+ * const struct (CF4c). When false the field access is rebuilt around its folded receiver (stays
+ * runtime), preserving today's behavior for a runtime receiver or a not-yet-foldable field.
+ *
+ * @param fa   the typed field-access node
+ * @param agg  the module-aggregate resolution table
+ * @return     whether the field access is fully const-foldable to a literal
+ * @since #comptime-fold
+ */
+fn cf_can_fold_field(fa: TFieldAccess, agg: AggConstMap) -> bool {
+    if is_len_field(fa) { return cf_len_receiver_const(fa, agg) }
+    cf_struct_int_field(fa, agg)
+}
+
+/**
+ * cf_len_receiver_const — true iff the `.len` receiver `fa.receiver` is a foldable const the fold can
+ * take the length of (CF4d): a const aggregate for a slice receiver (`cf_agg_value`), or a const/literal
+ * string for a `str` receiver (`cf_str_value`).
+ *
+ * @param fa   the typed `.len` field-access node
+ * @param agg  the module-aggregate resolution table
+ * @return     whether the receiver's length is const-foldable
+ * @since #comptime-fold
+ */
+fn cf_len_receiver_const(fa: TFieldAccess, agg: AggConstMap) -> bool {
+    match fa.receiver.type {
+        Str => cf_str_value(fa.receiver, agg)
+        Slice => cf_agg_value(fa.receiver, agg)
+        _ => false
+    }
+}
+
+/**
+ * cf_struct_int_field — true iff `fa` reads a field of a const struct whose value is a foldable integer
+ * op-tree (CF4c): the receiver resolves to a `TStructInit` (in-tree or a module const struct) that
+ * carries the named field, and that field's initializer is `cf_fold_int`. A non-struct receiver, an
+ * absent field, or a non-integer field value returns false (the access stays runtime).
+ *
+ * @param fa   the typed field-access node
+ * @param agg  the module-aggregate resolution table
+ * @return     whether `fa` reads a const struct's integer field
+ * @since #comptime-fold
+ */
+fn cf_struct_int_field(fa: TFieldAccess, agg: AggConstMap) -> bool {
+    match struct_field_init(fa.receiver, fa.field, agg) {
+        null => false
+        TExpr as fv => cf_fold_int(fv, agg)
+    }
+}

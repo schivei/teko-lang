@@ -1,0 +1,205 @@
+// src/checker/rv_rv_types.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+// src/checker/resolve.tks  (namespace 'teko::checker')
+
+use teko::parser
+
+/**
+ * A registered user type: its name, the NAMESPACE it was declared in (A3 provenance), the SOURCE
+ * FILE it was written in (W-loc-2), its VISIBILITY (private/pub/exp) and its parsed declaration.
+ * `namespace`/`vis` drive W-vis-enforce; `file` lets a table-walking pass
+ * (`validate_type_decls`) locate its diagnostic at `file:line:col` instead of emitting a bare,
+ * placeless message.
+ */
+type TypeReg = struct {
+    /** the type's declared name, as written */
+    name: str
+    /** the namespace the declaration was collected under (A3 provenance) */
+    namespace: str
+    /** the source file the declaration was written in ("" for a synthesized or dep-seeded entry) */
+    file: str
+    /** the declaration's visibility (private/pub/exp) */
+    vis: parser::Visibility
+    /** the parsed declaration itself */
+    decl: parser::TypeDecl
+}
+pub type TypeTable = []TypeReg
+
+// (#109 W3) the CANONICAL name of a type: "ns::Name" (bare "Name" at the root ns). The semantic
+// `Named.name` carries THIS — so two same-bare-name public types in different namespaces (teko::io::
+// Reader vs teko::emit::Reader) are DISTINCT identities (type_eq) and DISTINCT C mangles. Builtins,
+// type-params, and generic `__g__` instances stay bare (ns == "" → returns the name unchanged).
+pub fn qualify(ns: str, name: str) -> str {
+    if ns == "" { name } else { ns ~ "::" ~ name }
+}
+// (#148) qualify_eq — does `name` equal qualify(ns, bare) WITHOUT building the string? The hot
+// table scans compared a freshly-CONCATENATED "ns::Name" per candidate per lookup (measured 63M
+// concats / ~1 GB+overhead on a self-build); this byte-wise test allocates nothing.
+pub fn qualify_eq(ns: str, bare: str, name: str) -> bool {
+    if ns.len == 0 { return bare == name }
+    if name.len != ns.len + 2 + bare.len { return false }
+    mut i: u64 = 0
+    loop { if i >= ns.len { break }; if name[i] != ns[i] { return false }; i++ }
+    if name[ns.len] != b':' { return false }
+    if name[ns.len + 1] != b':' { return false }
+    mut j: u64 = 0
+    loop { if j >= bare.len { break }; if name[ns.len + 2 + j] != bare[j] { return false }; j++ }
+    true
+}
+// (#109 W3) the bare last "::"-segment of a (possibly canonical) name: "teko::emit::Reader" → "Reader",
+// "Reader" → "Reader". Manual byte-loop (mirrors class_name_from_method_ns), since last_index_of is a
+// host-only FFI edge unavailable to the VM-interpreted checker.
+pub fn name_last_segment(name: str) -> str {
+    mut last_sep: i64 = -1
+    mut i: u64 = 0
+    loop {
+        if i + 1 >= name.len { break }
+        if name[i] == b':' && name[i + 1] == b':' { last_sep = i to i64 }
+        i++
+    }
+    if last_sep < 0 { return name }
+    // (#148) the BUILTIN slice (→ tk_str_slice_from, one memcpy) — the materialized
+    // teko::runtime::str_slice_from builds byte-by-byte (a push loop + a final copy), and this
+    // helper runs per type-name comparison (measured ~144M tiny allocs on a self-build).
+    teko::str::slice_from(name, (last_sep to u64) + 2)
+}
+// (#109 W3) the namespace qualifier of a canonical name (everything before the final "::"):
+// "teko::emit::Reader" → "teko::emit"; "Reader" → "".
+pub fn name_qualifier(name: str) -> str {
+    mut last_sep: i64 = -1
+    mut i: u64 = 0
+    loop {
+        if i + 1 >= name.len { break }
+        if name[i] == b':' && name[i + 1] == b':' { last_sep = i to i64 }
+        i++
+    }
+    if last_sep < 0 { return "" }
+    teko::str::slice_to(name, last_sep to u64)   // (#148) builtin slice — see name_last_segment
+}
+
+// find a user type by name; error if not registered.
+// (#109 W3) `name` may be a CANONICAL "ns::Name" (a resolved Named.name) OR a bare source name. The
+// table entry may carry (bare name + real ns) [the typing collect table] OR (canonical name + "")
+// [the codegen/vm type_table_of re-collection]. Match when the entry's name equals `name` directly
+// OR when its qualified form qualify(ns, name) equals `name` — covering every combination. ref_ns is
+// unused (a resolved-name probe is namespace-blind; the SOURCE-reference sites use resolve_type_ref).
+fn type_table_find(table: TypeTable, name: str, ref_ns: str) -> parser::TypeDecl | error {
+    // (#152) TWO PASSES: pass 1 = exact name OR the entry's qualified form (both UNIQUE post-W0's
+    // per-namespace dup ban) — so a canonical query can never be stolen by a same-bare cousin that
+    // merely appears earlier in the table (discovery order differs per platform). Pass 2 = the
+    // legacy bare last-segment fallback (bare probes of a CANONICAL-keyed type_table_of table).
+    mut i = 0
+    loop {
+        if i >= table.len { break }
+        if table[i].name == name || qualify_eq(table[i].namespace, table[i].name, name) { return table[i].decl }   // (#148) allocation-free qualified compare
+        i++
+    }
+    mut j = 0
+    loop {
+        if j >= table.len { break }
+        if name_last_segment(table[j].name) == name { return table[j].decl }
+        j++
+    }
+    error { message = "not a user type" }
+}
+
+// (#109 W2) does the qualifier `qual` (a path's segments BEFORE the last, joined with "::") select
+// namespace `ns`? A qualifier matches when `ns` equals it OR ends with `"::" ~ qual` — so the single
+// segment `emit` matches the canonical `teko::emit`, and the absolute `teko::emit` matches exactly
+// (R0, a special case of R4). An empty qualifier (a bare 1-segment path) never reaches here.
+fn qualifier_selects_ns(ns: str, qual: str) -> bool {
+    if ns == qual { return true }
+    teko::runtime::str_ends_with(ns, "::" ~ qual)
+}
+
+// (#109 W2) join a path's FIRST `count` segments with "::" — the qualifier of a qualified reference
+// (`teko::emit::Reader` with count=2 → "teko::emit"; `lexer::Token` with count=1 → "lexer").
+fn path_qualifier(path: parser::Path, count: u64) -> str {
+    mut out = ""
+    mut i: u64 = 0
+    loop {
+        if i >= count { break }
+        if i == 0 { out = path.segments[i].name } else { out = out ~ "::" ~ path.segments[i].name }
+        i++
+    }
+    out
+}
+
+// (#109 W2) list the namespaces a bare name IS declared in (for the R3 fail-loud diagnostic), joined
+// with ", "; "" is rendered "<top-level>". O(n) scan — used only when a bare reference misses.
+fn namespaces_declaring(table: TypeTable, name: str) -> str {
+    mut out = ""
+    mut i: u64 = 0
+    loop {
+        if i >= table.len { break }
+        if table[i].name == name {
+            let label = if table[i].namespace == "" { "<top-level>" } else { table[i].namespace }
+            if out == "" { out = label } else { out = out ~ ", " ~ label }
+        }
+        i++
+    }
+    out
+}
+
+// (#109 W2) the DECLARING namespace of a type by its (resolved) name — first match, "" if unknown.
+// A struct/class field's, or a method signature's, source type annotation is written in the type's
+// OWN namespace, so resolving those annotations must reference that namespace, not the code site's.
+// Shared across the checker (collect conformance, typer field/struct-init resolution). Under W0 no
+// two types share a bare name, so the first match is unambiguous (W3 canonical names make it exact).
+fn type_ns_of(table: TypeTable, name: str) -> str {
+    mut i: u64 = 0
+    loop {
+        if i >= table.len { break }
+        // (#109 W3) `name` may be a CANONICAL "ns::Name" (a resolved Named.name) or a bare stamped
+        // `__g__` instance — match exact OR by the entry's qualified form (like type_table_find).
+        if table[i].name == name || qualify_eq(table[i].namespace, table[i].name, name) { return table[i].namespace }   // (#148) allocation-free qualified compare
+        i++
+    }
+    ""
+}
+
+/**
+ * Resolve a BARE stamped generic-instance name (`Box__g__i64`) to its TypeDecl from ANY namespace, or
+ * null when `last` is not a stamped instance name (#254 L4/L5). A stamped instance name is
+ * collision-proof — no user symbol may carry the `__g__` infix — so it is bare-visible everywhere,
+ * exactly like a root-level or type-param name. A stamped instance's own methods carry the instance
+ * name in their (normalized) signatures, and `register_instance_methods` resolves those signatures with
+ * no referencing namespace, so a bare `Box__g__i64` in a `-> Box<T>` return / `Box<T>` param must
+ * resolve regardless of the instance's declaring namespace. Consulted BEFORE the cross-namespace
+ * collision error, which would otherwise reject the bare stamped name from "".
+ *
+ * @param last  the path's last segment (the referenced type name)
+ * @param table the folded type table
+ * @return      the stamped instance's registration, or null when `last` is not a stamped instance name
+ * @since onda-3 (#254 L4/L5)
+ */
+fn resolve_bare_g_instance(last: str, table: TypeTable) -> TypeReg | null {
+    if !name_is_g_instance(last) { return null }
+    mut g: u64 = 0
+    loop {
+        if g >= table.len { break }
+        if table[g].name == last { return table[g] }
+        g++
+    }
+    null
+}
+
+/**
+ * NotUserType — the marker `resolve_type_ref` returns when a path names no registered user type: a
+ * STRUCTURED "keep looking / report it unknown" answer, distinct from the `error` arm, which is
+ * reserved for a path that DID match something and was rejected (a cross-namespace visibility
+ * violation, an ambiguous qualifier). Its two readers (`resolve_named`, the generic-instance
+ * resolver) each turn it into their own caller-facing message.
+ *
+ * It replaces a sentinel `error { message = "not a user type" }` that those readers discriminated
+ * by comparing the MESSAGE TEXT — identity by string, which any rewording silently breaks, and the
+ * breakage would surface as an internal sentinel leaking into a user-facing diagnostic.
+ */
+type NotUserType = struct { }
+
+/**
+ * (#109 W2) The namespace-aware SOURCE-reference resolver — R0-R5 — answering with the matched
+ * REGISTRATION (the decl PLUS the namespace it is declared in). `path` is the WRITTEN reference,

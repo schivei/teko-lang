@@ -1,0 +1,226 @@
+// src/checker/synth_b.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+ * @return the assembled `Function`
+ */
+fn mk_method(name: str, params: []parser::Param, return_type: parser::TypeExpr, body: []parser::Statement, doc: str) -> parser::Function {
+    parser::Function { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); params = params; has_return = true; return_type = return_type; body = body; vis = parser::Visibility::Pub; has_doc = true; doc = doc; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; os_guard = ""; is_intern = false; is_abstract = false; is_virtual = false; is_override = false; has_inject = false; injects = teko::list::empty(); is_unsafe = false; has_arena_size = false; arena_size = 0 to u64 }
+}
+
+/**
+ * (TR3) Does `t` name a struct/class that itself derives the structural trait `canon` (its folded
+ * `implements` list carries the canonical name)? A nested Named field RECURSES through this trait's
+ * method (`.eq`/`.compare`/`.hash`/`.clone`/`Name::default`) only when this holds; otherwise the
+ * synthesizer raises a located error (M.1).
+ *
+ * @param t     the field type
+ * @param canon the canonical structural-trait name
+ * @param table the folded type table
+ * @return true iff `t` is a Named struct/class deriving `canon`
+ */
+fn nested_derives(t: Type, canon: str, table: TypeTable) -> bool {
+    match t {
+        Named as n => type_conforms_to(n.name, canon, table)
+        _ => false
+    }
+}
+
+/**
+ * (TR3) Is `t` a per-field shape a structural trait can derive over in v1 — a primitive
+ * (int/float/bool), `byte`, `char`, `str`, or a nested Named that derives the SAME trait `canon`?
+ * A slice/optional/enum-or-variant Named/func/ptr/ref field is the honest-stop set (crumb 6).
+ *
+ * @param t     the field type
+ * @param canon the canonical structural-trait name
+ * @param table the folded type table
+ * @return true iff `t` is a supported field shape
+ */
+fn field_supported(t: Type, canon: str, table: TypeTable) -> bool {
+    match t {
+        Prim => true
+        Byte => true
+        Char => true
+        Str => true
+        Named => nested_derives(t, canon, table)
+        _ => false
+    }
+}
+
+/**
+ * (TR3) The u64-carrier cast target — every scalar field mixes into `Hash`'s FNV fold cast to
+ * `u64`. Used only by the Hash synthesizer.
+ *
+ * @return the `u64` `NamedType`
+ */
+fn u64_type() -> parser::TypeExpr {
+    mk_named_type("u64")
+}
+
+/**
+ * (TR3) The located error for a field shape a structural trait cannot derive over yet — names the
+ * trait, the field, and its rendered type so the message points at the exact fix.
+ *
+ * @param canon      the canonical structural-trait name
+ * @param field_name the offending field's name
+ * @param field_type the offending field's type
+ * @return the located error
+ */
+fn unsupported_field_error(canon: str, field_name: str, field_type: Type) -> error {
+    error { message = $"structural trait `{canon}` cannot derive over field `{field_name}` of type `{type_render(field_type)}` yet — slices, optionals, enums/variants, functions, and pointers are not supported in v1" }
+}
+
+/**
+ * (TR3) The located error for a nested Named field whose type does not itself derive the same
+ * structural trait — recursion needs the nested `.eq`/`.compare`/`.hash`/`.clone`/`default`.
+ *
+ * @param canon      the canonical structural-trait name
+ * @param field_name the field's name
+ * @param field_type the field's (Named) type
+ * @return the located error
+ */
+fn nested_missing_error(canon: str, field_name: str, field_type: Type) -> error {
+    error { message = $"structural trait `{canon}` over field `{field_name}` needs its type `{type_render(field_type)}` to also derive `{canon}` (nested recursion) — add `& {canon}` to that type's derivation" }
+}
+
+/**
+ * (TR3) One field's equality term for `Eq`: a nested Named recurses via `self.f.eq(other.f)`; every
+ * other supported shape (primitive/byte/char/str) is `self.f == other.f` (`str` lowers to
+ * `tk_str_eq`, codegen.tks:1574).
+ *
+ * @param fv    the field view
+ * @param canon the canonical trait name (always "Eq" here)
+ * @param table the folded type table
+ * @return the boolean term expression, or a located error for an unsupported/non-deriving field
+ */
+fn eq_field_term(fv: FieldView, canon: str, table: TypeTable) -> parser::Expr | error {
+    let sf = mk_field(mk_var("self"), fv.name)
+    let of = mk_field(mk_var("other"), fv.name)
+    match fv.type {
+        Named => {
+            if !nested_derives(fv.type, canon, table) { return nested_missing_error(canon, fv.name, fv.type) }
+            mk_method_call(sf, "eq", teko::list::push(teko::list::empty(), of))
+        }
+        _ => {
+            if !field_supported(fv.type, canon, table) { return unsupported_field_error(canon, fv.name, fv.type) }
+            mk_compare(lexer::TokenKind::EqEq, sf, of)
+        }
+    }
+}
+
+/**
+ * (TR3) SYNTHESIZE `pub fn eq(self, other: T) -> bool` — the right-folded `&&` chain of each field's
+ * equality term; an empty field set yields `return true`. Field-wise value equality (floats compare
+ * by `==`, so a NaN field makes derived `eq` non-reflexive — matches Rust's derived `PartialEq`).
+ *
+ * @param td_name    the deriver's own type name (the `other` operand type)
+ * @param field_view the deriver's fully-resolved field view
+ * @param table      the folded type table
+ * @return the synthesized `eq` method, or a located error
+ * @throws when a field shape is unsupported or a nested field does not derive `Eq`
+ */
+fn synthesize_eq(td_name: str, field_view: []FieldView, table: TypeTable) -> parser::Function | error {
+    mut acc: parser::Expr = mk_bool(true)
+    mut has = false
+    mut i: u64 = 0
+    loop {
+        if i >= field_view.len { break }
+        let term = match eq_field_term(field_view[i], "Eq", table) { parser::Expr as e => e; error as err => return err }
+        if !has { acc = term; has = true } else { acc = mk_binary(lexer::TokenKind::AndAnd, acc, term) }
+        i++
+    }
+    let body: []parser::Statement = teko::list::push(teko::list::empty(), mk_return(acc))
+    let params: []parser::Param = teko::list::push(teko::list::push(teko::list::empty(), mk_self_param()), mk_typed_param("other", mk_named_type(td_name)))
+    mk_method("eq", params, mk_named_type("bool"), body, " (TR3) Structural equality: true iff every field of `self` equals the same field of `other`. ")
+}
+
+/**
+ * (TR3) One field's u64 hash contribution for `Hash`: a nested Named recurses via `self.f.hash()`; a
+ * `str` field hashes via `teko::runtime::str_hash(self.f)`; every scalar shape (primitive/byte/char/
+ * bool) mixes its value cast to `u64` (`bool to u64` is the legal bool→numeric cast).
+ *
+ * @param fv    the field view
+ * @param canon the canonical trait name (always "Hash" here)
+ * @param table the folded type table
+ * @return the u64 hash-contribution expression, or a located error
+ */
+fn hash_field_value(fv: FieldView, canon: str, table: TypeTable) -> parser::Expr | error {
+    let sf = mk_field(mk_var("self"), fv.name)
+    match fv.type {
+        Named => {
+            if !nested_derives(fv.type, canon, table) { return nested_missing_error(canon, fv.name, fv.type) }
+            mk_method_call(sf, "hash", teko::list::empty())
+        }
+        Str => mk_path_call(teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), "teko"), "runtime"), "str_hash"), teko::list::push(teko::list::empty(), sf))
+        _ => {
+            if !field_supported(fv.type, canon, table) { return unsupported_field_error(canon, fv.name, fv.type) }
+            mk_cast(sf, u64_type())
+        }
+    }
+}
+
+/**
+ * (TR3) SYNTHESIZE `pub fn hash(self) -> u64` — an FNV-1a fold (offset basis 14695981039346656037,
+ * prime 1099511628211, u64 wraparound; the exact constants from `di.tks:306`) over each field's u64
+ * hash contribution: `mut h = seed`, then per field `h = (h ^ <value>) * prime`, then `return h`.
+ *
+ * @param field_view the deriver's fully-resolved field view
+ * @param table      the folded type table
+ * @return the synthesized `hash` method, or a located error
+ * @throws when a field shape is unsupported or a nested field does not derive `Hash`
+ */
+fn synthesize_hash(field_view: []FieldView, table: TypeTable) -> parser::Function | error {
+    mut body: []parser::Statement = teko::list::push(teko::list::empty(), parser::Binding { kind = parser::BindKind::Mut; target = parser::SimpleName { name = "h" }; has_type = true; type_ann = u64_type(); value = mk_int(14695981039346656037) })
+    mut i: u64 = 0
+    loop {
+        if i >= field_view.len { break }
+        let value = match hash_field_value(field_view[i], "Hash", table) { parser::Expr as e => e; error as err => return err }
+        let xored = mk_binary(lexer::TokenKind::Caret, mk_var("h"), value)
+        let mixed = mk_binary(lexer::TokenKind::Star, xored, mk_int(1099511628211))
+        body = teko::list::push(body, parser::Assign { kind = parser::AssignKind::Simple; name = "h"; op = lexer::TokenKind::Assign; value = mixed; deref = false; target = parser::no_expr() })
+        i++
+    }
+    body = teko::list::push(body, mk_return(mk_var("h")))
+    let params: []parser::Param = teko::list::push(teko::list::empty(), mk_self_param())
+    mk_method("hash", params, u64_type(), body, " (TR3) FNV-1a structural hash: fold each field's hash into the u64 accumulator. ")
+}
+
+/**
+ * (TR3) The per-field lexicographic short-circuit statements for `Ord`: a nested Named recurses via
+ * `let c = self.f.compare(other.f); if c != 0 { return c }`; a `str` field via
+ * `teko::runtime::str_compare`; a scalar via two guards `if self.f < other.f { return -1 }` /
+ * `if self.f > other.f { return 1 }`. Appends onto `body` in field order (first non-equal decides).
+ *
+ * @param fv    the field view
+ * @param canon the canonical trait name (always "Ord" here)
+ * @param body  the accumulating statement body
+ * @param table the folded type table
+ * @return the extended body, or a located error
+ */
+fn ord_field_stmts(fv: FieldView, canon: str, body: []parser::Statement, table: TypeTable) -> []parser::Statement | error {
+    let sf = mk_field(mk_var("self"), fv.name)
+    let of = mk_field(mk_var("other"), fv.name)
+    match fv.type {
+        Named => {
+            if !nested_derives(fv.type, canon, table) { return nested_missing_error(canon, fv.name, fv.type) }
+            let c = mk_method_call(sf, "compare", teko::list::push(teko::list::empty(), of))
+            let guard = mk_if_return(mk_compare(lexer::TokenKind::Ne, c, mk_int(0)), c)
+            teko::list::push(body, guard)
+        }
+        Str => {
+            let c = mk_path_call(teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), "teko"), "runtime"), "str_compare"), teko::list::push(teko::list::push(teko::list::empty(), sf), of))
+            let guard = mk_if_return(mk_compare(lexer::TokenKind::Ne, c, mk_int(0)), c)
+            teko::list::push(body, guard)
+        }
+        _ => {
+            if !field_supported(fv.type, canon, table) { return unsupported_field_error(canon, fv.name, fv.type) }
+            let less = mk_if_return(mk_compare(lexer::TokenKind::Lt, sf, of), mk_neg_int(1))
+            let more = mk_if_return(mk_compare(lexer::TokenKind::Gt, sf, of), mk_int(1))
+            teko::list::push(teko::list::push(body, less), more)
+        }
+    }
+}
+
+/**
+ * (TR3) SYNTHESIZE `pub fn compare(self, other: T) -> i64` — lexicographic comparison: field by

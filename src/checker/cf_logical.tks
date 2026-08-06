@@ -1,0 +1,205 @@
+// src/checker/cf_logical.tks  (namespace 'teko::checker')
+
+use teko::lexer
+use teko::parser
+
+ *
+ * @param ua    the dividend's magnitude
+ * @param ub    the divisor's magnitude
+ * @param a     the dividend's bit pattern (for its sign)
+ * @param b     the divisor's bit pattern (for its sign)
+ * @param info  the operation's width/signedness
+ * @param ty    the result's declared type
+ * @return      the folded signed quotient
+ * @since #comptime-fold
+ */
+fn int_div_signed(ua: u64, ub: u64, a: u64, b: u64, info: IntInfo, ty: Type) -> ConstValue | error {
+    let uq = ua / ub
+    let neg = bit_set(a, info.width - 1) != bit_set(b, info.width - 1)
+    let res = if neg { twos_neg(uq, info.width) } else { uq }
+    cv_int(mask_to_width(res, info.width), ty)
+}
+
+/**
+ * int_rem_signed — the signed remainder from magnitudes: its magnitude is `ua % ub`, and
+ * it takes the dividend's sign (C truncation semantics).
+ *
+ * @param ua    the dividend's magnitude
+ * @param ub    the divisor's magnitude
+ * @param a     the dividend's bit pattern (for its sign)
+ * @param info  the operation's width/signedness
+ * @param ty    the result's declared type
+ * @return      the folded signed remainder
+ * @since #comptime-fold
+ */
+fn int_rem_signed(ua: u64, ub: u64, a: u64, info: IntInfo, ty: Type) -> ConstValue | error {
+    let ur = ua % ub
+    let neg = bit_set(a, info.width - 1)
+    let res = if neg { twos_neg(ur, info.width) } else { ur }
+    cv_int(mask_to_width(res, info.width), ty)
+}
+
+/**
+ * int_shift — a `<<` or `>>` at the LEFT operand's width, with the shift count taken from
+ * the right operand's value and masked by (width - 1) — the SAME defined-wrap the runtime
+ * shift helpers apply (the `teko_rt.h` tk_shl and tk_shr families), so an out-of-range
+ * count never traps and the comptime result matches the metal bit-for-bit. A signed
+ * right shift is arithmetic (sign-preserving).
+ *
+ * @param is_left  true for `<<`, false for `>>`
+ * @param la       the folded left value (carries width/type)
+ * @param ra       the folded right value (carries the count)
+ * @param info     the left operand's width/signedness
+ * @param e        the enclosing expression (positions any error)
+ * @return         the folded shifted value, or a located error
+ * @since #comptime-fold
+ */
+fn int_shift(is_left: bool, la: CVInt, ra: CVInt, info: IntInfo, e: TExpr) -> ConstValue | error {
+    let cnt = shift_count(ra.bits, info.width)
+    let a = mask_to_width(la.bits, info.width)
+    if is_left { return cv_int(mask_to_width(a << cnt, info.width), la.ty) }
+    if is_arith_shift(a, cnt, info) { return cv_int(arith_shr(a, cnt, info), la.ty) }
+    cv_int(mask_to_width(a >> cnt, info.width), la.ty)
+}
+
+/**
+ * shift_count — the effective shift amount: the count value's low log2(width) bits (the
+ * runtime's `count & (width - 1)` mask), always in `[0, width - 1]`.
+ *
+ * @param bits  the count operand's bit pattern
+ * @param w     the shifted value's bit width
+ * @return      the masked shift amount as a u32
+ * @since #comptime-fold
+ */
+fn shift_count(bits: u64, w: u32) -> u32 { (bits & (w - 1)) to u32 }
+
+/**
+ * is_arith_shift — is this right-shift an arithmetic (sign-filling) one? Only when the
+ * type is signed, the value is negative, and the count is non-zero.
+ *
+ * @param a     the shifted value's bit pattern
+ * @param cnt   the shift amount
+ * @param info  the shifted value's width/signedness
+ * @return      true iff the shift must fill the vacated high bits with ones
+ * @since #comptime-fold
+ */
+fn is_arith_shift(a: u64, cnt: u32, info: IntInfo) -> bool { info.is_signed && cnt > 0 && bit_set(a, info.width - 1) }
+
+/**
+ * arith_shr — the arithmetic right-shift of a negative signed value: the logical shift
+ * with the `cnt` vacated high bits (within the width) filled with ones.
+ *
+ * @param a     the shifted value's bit pattern
+ * @param cnt   the shift amount (non-zero)
+ * @param info  the shifted value's width/signedness
+ * @return      the sign-preserving shifted bits, reduced to width
+ * @since #comptime-fold
+ */
+fn arith_shr(a: u64, cnt: u32, info: IntInfo) -> u64 {
+    let logical = a >> cnt
+    let fill = mask_to_width(width_mask(info.width) << (info.width - cnt), info.width)
+    mask_to_width(logical | fill, info.width)
+}
+
+/**
+ * float_binop — an f64 binary `+ - * /` through IEEE bits (mirroring the target's f64
+ * arithmetic). A `/` by zero is a located compile error (M.1, mirroring the runtime's
+ * trapping float divide); an f32 operand is not yet folded.
+ *
+ * @param op  the binary operator token
+ * @param lf  the folded left float value
+ * @param rf  the folded right float value
+ * @param e   the enclosing expression (positions any error)
+ * @return    the folded float value, or a located error
+ * @throws    a located error on a division by zero
+ * @since #comptime-fold
+ */
+fn float_binop(op: lexer::TokenKind, lf: CVFloat, rf: CVFloat, e: TExpr) -> ConstValue | error {
+    if lf.is_f32 || rf.is_f32 { return const_form_error("comptime folding of f32 is not yet supported (#comptime-fold)", e) }
+    let x = teko::f64_from_bits(lf.bits)
+    let y = teko::f64_from_bits(rf.bits)
+    match op {
+        lexer::TokenKind::Plus => cv_float(teko::f64_bits(x + y), false)
+        lexer::TokenKind::Minus => cv_float(teko::f64_bits(x - y), false)
+        lexer::TokenKind::Star => cv_float(teko::f64_bits(x * y), false)
+        lexer::TokenKind::Slash => float_div(x, y, e)
+        _ => const_form_error("comptime fold: unsupported binary operator on a float constant (#comptime-fold)", e)
+    }
+}
+
+/**
+ * float_div — an f64 division with a zero-divisor guard (mirroring the runtime's trapping
+ * float divide — M.1).
+ *
+ * @param x  the dividend
+ * @param y  the divisor
+ * @param e  the enclosing expression (positions any error)
+ * @return   the folded quotient, or a located divide-by-zero error
+ * @throws   a located error when the divisor is zero
+ * @since #comptime-fold
+ */
+fn float_div(x: f64, y: f64, e: TExpr) -> ConstValue | error {
+    if y == 0.0 { return const_form_error("float division by zero in a constant (#comptime-fold)", e) }
+    cv_float(teko::f64_bits(x / y), false)
+}
+
+/**
+ * cf_is_int_type — true iff `t` is an integer type the fold re-emits as a `TNumber` literal (a
+ * `Prim` integer i8..i64 / u8..u64, or `byte` — the removed `u128`/`i128` family has no surface
+ * type to classify, drop-128 2026-07-24). The evaluability predicate and `literal_of` both gate
+ * on this so the CF2 fold stays within the integer scalar subset (floats, chars, strings and
+ * aggregates are left unfolded for a later crumb).
+ *
+ * @param t  the type to classify
+ * @return   whether `t` is an integer/byte type the fold carries
+ * @since #comptime-fold
+ */
+fn cf_is_int_type(t: Type) -> bool {
+    match int_info(t) {
+        IntInfo => true
+        error => false
+    }
+}
+
+/**
+ * cf_int_value — true iff `e` is a name-free, provably-const INTEGER op-tree the CF2 fold evaluates:
+ * an integer literal, a byte literal, a cast to an integer type, or `~`/`-`/`+ - * / % & | ^ << >>`
+ * over such operands. It is DELIBERATELY narrower than `is_const_expr` (the grammar oracle): it
+ * excludes enum-member paths (`TPathExpr`), aggregate literals, allowlisted calls and float forms —
+ * every shape `eval_const` does not yet reduce to a scalar integer — so a `true` guarantees
+ * `eval_const` either produces a `CVInt` or raises a genuine M.1 value error (overflow / ÷0 /
+ * out-of-range), never an unsupported-form error that would spuriously fail a valid program. Because
+ * no admitted shape resolves a name, `eval_const` never touches the environment (an empty `Env`
+ * suffices at the CF2 wiring site).
+ *
+ * @param e  the typed expression to classify
+ * @return   whether `e` is an integer op-tree the fold may evaluate
+ * @since #comptime-fold
+ */
+fn cf_int_value(e: TExpr) -> bool {
+    match e.kind {
+        TNumber as n => !n.is_float && cf_is_int_type(e.type)
+        TByteLit => true
+        TCast as c => cf_is_int_type(e.type) && cf_cast_operand_ok(c.expr)
+        TUnary as u => is_const_unary_op(u.op) && cf_int_value(u.operand)
+        TBinary as b => is_const_binary_op(b.op) && cf_int_value(b.left) && cf_int_value(b.right)
+        _ => false
+    }
+}
+
+/**
+ * cf_cast_operand_ok — true iff `e` is a legal operand of an integer-target cast the fold evaluates:
+ * an integer op-tree (`cf_int_value`) or a bare boolean literal (the sole `bool -> numeric` cast Teko
+ * admits, folded by `cast_to_int` to 1/0). A boolean is admitted ONLY here, never as a bare fold root
+ * or an arithmetic operand, so a fold never reaches `eval_const`'s unsupported `CVBool` arithmetic.
+ *
+ * @param e  the cast operand to classify
+ * @return   whether the operand is a foldable integer op-tree or a bare boolean literal
+ * @since #comptime-fold
+ */
+fn cf_cast_operand_ok(e: TExpr) -> bool {
+    match e.kind {
+        TBoolLit => true
+        _ => cf_int_value(e)
+    }
+}
