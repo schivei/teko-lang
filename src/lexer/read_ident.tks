@@ -1,0 +1,107 @@
+fn read_ident(source: str, pos: u64) -> Scan {
+    mut p = pos
+    loop {
+        if p >= source.len { break }
+        if !is_ident_continue(source[p]) { break }
+        p++
+    }
+    Scan { token = Token { kind = TokenKind::Ident; text = slice(source, pos, p); line = 0; col = 0 }; next = p }
+}
+
+/**
+ * read_underscore — lex a token that starts with `_`, enforcing the write-only discard rules
+ * (owner ruling 2026-07-15). A run of underscores immediately followed by a LETTER is an
+ * ordinary identifier (`_foo`, `__bar`, `_x_1`), read whole from the first underscore. A PURE
+ * run of underscores is the discard: a single `_` is the `Underscore` token; two or more in a
+ * row (`__`, `___`) are rejected outright. A run of underscores followed by a DIGIT carries no
+ * letter, so it matches neither the identifier grammar `[_]*[a-zA-Z]+[a-zA-Z0-9_]*` nor the
+ * lone discard, and is likewise rejected.
+ *
+ * @param source  the whole source text
+ * @param pos     the byte offset of the leading `_`
+ * @return        the `Scan` for the identifier, or the single `Underscore` token
+ * @throws        when the run is two-or-more pure underscores (`__`), or an underscore run is
+ *                immediately followed by a digit (a letterless, non-identifier token)
+ */
+fn read_underscore(source: str, pos: u64) -> Scan | error {
+    mut p = pos
+    loop {
+        if p >= source.len { break }
+        if source[p] != b'_' { break }
+        p++
+    }
+    if p < source.len && is_alpha(source[p]) {
+        return read_ident(source, pos)
+    }
+    if p < source.len && is_digit(source[p]) {
+        return scan_err_at(source, pos, "`_` is the write-only discard; an identifier cannot begin with an underscore run followed by a digit")
+    }
+    if p - pos >= 2 {
+        return scan_err_at(source, pos, "`_` is the write-only discard; two or more underscores in a row (`__`) are not a valid token")
+    }
+    sym(source, pos, 1, TokenKind::Underscore)
+}
+
+// --- keywords (an ident whose text matches the table — B.19) ---
+
+/**
+ * Classifies an already-scanned identifier's text as a reserved keyword's TokenKind,
+ * or `TokenKind::Ident` if it is not reserved.
+ *
+ * A number of words are deliberately ABSENT from this table because they are
+ * CONTEXTUAL keywords — significant only in specific syntactic positions, and a
+ * plain `Ident` everywhere else (so they stay legal identifiers/path segments):
+ * `from` (see token.tks), `params`/`self`/`base` (see token.tks's W10b.CLASS note),
+ * and `unsafe` (U1, 0.1.0.0-beta memory+unsafe remodel §3 — a declaration modifier
+ * on `type`/`fn`; staying contextual is what keeps `teko::mem::unsafe` legal as a
+ * `::`-path segment).
+ *
+ * @param str text  the scanned identifier's exact text
+ * @return TokenKind  the matching reserved-keyword TokenKind, or `TokenKind::Ident`
+ */
+fn keyword_kind(text: str) -> TokenKind {
+    if text == "fn" { return TokenKind::Fn }
+    if text == "type" { return TokenKind::Type }
+    if text == "struct" { return TokenKind::Struct }
+    if text == "enum" { return TokenKind::Enum }
+    if text == "flags" { return TokenKind::Flags }
+    if text == "variant" { return TokenKind::Variant }
+    if text == "let" { return TokenKind::Let }
+    if text == "mut" { return TokenKind::Mut }
+    if text == "const" { return TokenKind::Const }
+    if text == "if" { return TokenKind::If }
+    if text == "else" { return TokenKind::Else }
+    if text == "loop" { return TokenKind::Loop }
+    if text == "break" { return TokenKind::Break }
+    if text == "continue" { return TokenKind::Continue }
+    if text == "return" { return TokenKind::Return }
+    if text == "defer" { return TokenKind::Defer }   // scoped cleanup block (C7.18)
+    if text == "match" { return TokenKind::Match }
+    if text == "when" { return TokenKind::When }
+    if text == "in" { return TokenKind::In }   // the membership operator (x in [ … ]) — Phase 2
+    if text == "as" { return TokenKind::As }
+    if text == "to" { return TokenKind::To }   // the cast operator (x to T) — F1/E7
+    if text == "use" { return TokenKind::Use }
+    if text == "pub" { return TokenKind::Pub }   // public within the project (B.9)
+    if text == "exp" { return TokenKind::Exp }
+    if text == "extern" { return TokenKind::Extern }   // foreign-function declarator (C7.1a)
+    if text == "true" { return TokenKind::True }   // bool literal (LEGISLATION §75)
+    if text == "false" { return TokenKind::False }   // bool literal (LEGISLATION §75)
+    if text == "null" { return TokenKind::Null }   // null literal (REBOOT_PLAN §202)
+    if text == "class" { return TokenKind::Class }   // W10b.CLASS (2026-07-01)
+    if text == "abstract" { return TokenKind::Abstract }
+    if text == "virtual" { return TokenKind::Virtual }
+    if text == "override" { return TokenKind::Override }
+    if text == "intern" { return TokenKind::Intern }
+    if text == "interface" { return TokenKind::Interface }   // (W10b.IF)
+    // `params` is deliberately NOT here — it's a contextual keyword like `from` (see token.tks).
+    // `self`/`base` are likewise deliberately NOT here — see token.tks's W10b.CLASS note.
+    TokenKind::Ident
+}
+
+fn keyword_or_ident(source: str, pos: u64) -> Scan {
+    let s = read_ident(source, pos)
+    let k = keyword_kind(s.token.text)
+    Scan { token = Token { kind = k; text = s.token.text; line = 0; col = 0 }; next = s.next }
+}
+

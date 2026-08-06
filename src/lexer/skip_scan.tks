@@ -1,0 +1,54 @@
+// --- whitespace & comments (pure: take pos, return the new pos) ---
+
+// skip spaces/tabs/CR — NOT newlines (a newline is a significant token, B.26).
+fn skip_spaces(source: str, pos: u64) -> u64 {
+    mut p = pos
+    loop {
+        if p >= source.len { break }
+        let c = source[p]
+        if c != b' ' && c != b'\t' && c != b'\r' { break }
+        p++
+    }
+    p
+}
+
+// skip a `//` line comment: advance to the newline (or end), leaving it for the loop.
+fn skip_line(source: str, pos: u64) -> u64 {
+    mut p = pos
+    loop {
+        if p >= source.len { break }
+        if source[p] == b'\n' { break }
+        p++
+    }
+    p
+}
+
+// skip a block comment `/* … */` (not nested); returns the pos after the `*/`.
+fn skip_block_comment(source: str, pos: u64) -> u64 | error {
+    mut p = pos + 2   // past `/*`
+    loop {
+        if p + 1 >= source.len { return error { message = "unterminated block comment" } }
+        if source[p] == b'*' && source[p + 1] == b'/' { return p + 2 }
+        p++
+    }
+}
+
+// read a DOC comment `/** … */` → a Doc token spanning the whole comment.
+fn read_doc_comment(source: str, pos: u64) -> Scan | error {
+    mut p = pos + 3   // past `/**`
+    loop {
+        if p + 1 >= source.len { return error { message = "unterminated doc comment" } }
+        if source[p] == b'*' && source[p + 1] == b'/' {
+            let end = p + 2
+            return Scan { token = Token { kind = TokenKind::Doc; text = slice(source, pos, end); line = 0; col = 0 }; next = end }
+        }
+        p++
+    }
+}
+
+// --- a token spanning n bytes from pos (the common Scan builder) ---
+
+fn sym(source: str, pos: u64, n: u64, kind: TokenKind) -> Scan {
+    Scan { token = Token { kind = kind; text = slice(source, pos, pos + n); line = 0; col = 0 }; next = pos + n }
+}
+
