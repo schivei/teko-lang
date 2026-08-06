@@ -1,0 +1,161 @@
+/**
+ * src/codegen/buffer_utils.tks (namespace 'teko::codegen') — C-source emission buffer utilities.
+ * Growable byte buffer operations for building C source text incrementally.
+ */
+
+/**
+ * cb — append a str (its UTF-8 bytes) to the C-source buffer. Functional: takes buf,
+ * returns grown buf. Uses teko::mem::append_fo for efficient bulk memcpy.
+ *
+ * @param buf  the emission buffer
+ * @param s    the string to append
+ * @return     the grown buffer
+ */
+fn cb(buf: []byte, s: str) -> []byte {
+    teko::mem::append_fo(buf, s)
+}
+
+/**
+ * cb_str — append a str span. In Teko a str IS already a {ptr,len} view, so this is
+ * identical to `cb`.
+ *
+ * @param buf  the emission buffer
+ * @param s    the string to append
+ * @return     the grown buffer
+ */
+fn cb_str(buf: []byte, s: str) -> []byte { cb(buf, s) }
+
+/**
+ * cb_byte — append a single byte.
+ *
+ * @param buf  the emission buffer
+ * @param x    the byte to append
+ * @return     the grown buffer
+ */
+fn cb_byte(buf: []byte, x: byte) -> []byte { teko::mem::push_fo(buf, x) }
+
+/**
+ * cb_i64 — append an i64 as decimal text (sign + digits high-to-low).
+ *
+ * @param buf  the emission buffer
+ * @param v    the integer value to append
+ * @return     the grown buffer
+ */
+fn cb_i64(buf: []byte, v: i64) -> []byte {
+    if v == 0 { return cb_byte(buf, b'0') }
+    mut b = buf
+    mut n = v
+    if n < 0 { b = cb_byte(b, b'-'); n = -n }
+    mut digits: []byte = teko::list::empty()
+    loop {
+        if n == 0 { break }
+        let d = (n % 10) to byte
+        digits = teko::list::push(digits, (b'0' to i64 + (d to i64)) to byte)
+        n = n / 10
+    }
+    mut i = digits.len
+    loop {
+        if i == 0 { break }
+        b = cb_byte(b, digits[i - 1])
+        i--
+    }
+    b
+}
+
+/**
+ * cb_u64_digits — append the decimal magnitude of an unsigned 64-bit value (digits
+ * collected low-to-high, emitted high-to-low / reversed).
+ *
+ * @param buf  the emission buffer
+ * @param v    the magnitude to append
+ * @return     the grown buffer
+ */
+fn cb_u64_digits(buf: []byte, v: u64) -> []byte {
+    if v == 0 { return cb_byte(buf, b'0') }
+    mut b = buf
+    mut n = v
+    mut digits: []byte = teko::list::empty()
+    loop {
+        if n == 0 { break }
+        let d = (n % 10) to byte
+        digits = teko::list::push(digits, (b'0' to i64 + (d to i64)) to byte)
+        n = n / 10
+    }
+    mut i = digits.len
+    loop {
+        if i == 0 { break }
+        b = cb_byte(b, digits[i - 1])
+        i--
+    }
+    b
+}
+
+/**
+ * cb_u64_c_expr — a u64 magnitude as a C constant expression `<dec>ULL`.
+ *
+ * @param buf  the emission buffer
+ * @param v    the magnitude to append
+ * @return     the grown buffer
+ */
+fn cb_u64_c_expr(buf: []byte, v: u64) -> []byte {
+    cb(cb_u64_digits(buf, v), "ULL")
+}
+
+/**
+ * cb_numint — append a parser::NumInt literal value as a C constant expression
+ * (sign-magnitude representation; negative case is `-(magnitude)`).
+ *
+ * @param buf  the emission buffer
+ * @param v    the sign-magnitude literal value to append
+ * @return     the grown buffer
+ */
+fn cb_numint(buf: []byte, v: parser::NumInt) -> []byte {
+    if v.neg {
+        mut b = cb(buf, "-(")
+        b = cb_u64_c_expr(b, v.mag)
+        return cb(b, ")")
+    }
+    cb_u64_c_expr(buf, v.mag)
+}
+
+/**
+ * cb_f64_literal — append a f64 as a round-trippable decimal literal. Defers to
+ * teko::ftoa which guarantees binary64 round-trip fidelity.
+ *
+ * @param buf  the emission buffer
+ * @param v    the float value to append
+ * @return     the grown buffer
+ */
+fn cb_f64_literal(buf: []byte, v: f64) -> []byte { cb(buf, teko::ftoa(v)) }
+
+/**
+ * cb_cstr_escaped — append string `s` C-escaped inside an already-open C string literal.
+ * Handles quotes, backslashes, special escapes (\n, \t, \r), and non-printable bytes
+ * (3-digit octal, fixed-width to avoid run-on digit hazard).
+ *
+ * @param buf  the emission buffer
+ * @param s    the raw string bytes to escape and append
+ * @return     the grown buffer
+ */
+fn cb_cstr_escaped(buf: []byte, s: str) -> []byte {
+    mut b = buf
+    mut i = 0
+    loop {
+        if i >= s.len { break }
+        let c = s[i]
+        if c == b'\\' { b = cb(b, "\\\\") }
+        else if c == b'"' { b = cb(b, "\\\"") }
+        else if c == b'\n' { b = cb(b, "\\n") }
+        else if c == b'\t' { b = cb(b, "\\t") }
+        else if c == b'\r' { b = cb(b, "\\r") }
+        else if c < 0x20 || c >= 0x7F {
+            b = cb_byte(b, b'\\')
+            b = cb_byte(b, (b'0' to i64 + ((c to i64 / 64) % 8)) to byte)
+            b = cb_byte(b, (b'0' to i64 + ((c to i64 / 8) % 8)) to byte)
+            b = cb_byte(b, (b'0' to i64 + (c to i64 % 8)) to byte)
+        }
+        else { b = cb_byte(b, c) }
+        i++
+    }
+    b
+}
