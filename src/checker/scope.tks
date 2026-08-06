@@ -68,21 +68,34 @@ type ValBinding = struct {
  *  `typer.tks` from `encode_x86_64.tks`. Any future checker warning inherits the same need.
  *
  *  `""` when unset (the unit tests' `env_empty`), which renders as a position with no file —
- *  degraded but never wrong. */
-pub type Env = struct { base: []ValBinding; bindings: []ValBinding; cur_ns: str; owner_type: str; di: DiRegistry; injects: []DiInjectBind; fn_unsafe: bool; file: str }
+ *  degraded but never wrong.
+ *
+ *  `base_index` (CK1, design docs/design/ck1-scoped-hash-maps-0.3.1.md) — the LATERAL hash index over
+ *  `base`. Built ONCE by `seal` over the sealed globals and carried read-only by handle through every
+ *  `with_`/`define` fork (those push into `bindings`, never `base`, so the index never goes stale). It
+ *  reorders nothing: `base`/`bindings` stay the sole source of every observable iteration; the index
+ *  only turns `lookup_binding`'s global scan from a reverse O(n) linear scan into an O(log n + c)
+ *  binary search that returns the SAME binding (design section 5). `nidx_empty()` before `seal`, where
+ *  a lookup finds nothing and falls through as before. */
+pub type Env = struct { base: []ValBinding; bindings: []ValBinding; cur_ns: str; owner_type: str; di: DiRegistry; injects: []DiInjectBind; fn_unsafe: bool; file: str; base_index: NameIndex }
 
-// an empty env (no bindings, no current namespace, not inside any class method).
-pub fn env_empty() -> Env { Env { base = teko::list::empty(); bindings = teko::list::empty(); cur_ns = ""; owner_type = ""; di = di_registry_empty(); injects = teko::list::empty(); fn_unsafe = false; file = "" } }
+/**
+ * env_empty — an empty environment: no bindings, no current namespace, not inside any class method,
+ * and an empty `base_index` (a lookup finds nothing and falls through to the empty linear segments).
+ *
+ * @return a fresh empty Env
+ */
+pub fn env_empty() -> Env { Env { base = teko::list::empty(); bindings = teko::list::empty(); cur_ns = ""; owner_type = ""; di = di_registry_empty(); injects = teko::list::empty(); fn_unsafe = false; file = ""; base_index = nidx_empty() } }
 
 /** (W10c/MEM-3) set the program DI registry once — the typer seeds it onto the base env after the
  *  DI pass so `type_function` can resolve each `#inject` binding to its provider. */
 pub fn with_di(env: Env, di: DiRegistry) -> Env {
-    Env { base = env.base; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file }
+    Env { base = env.base; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index }
 }
 
 /** (W10c/MEM-3) set the DI-injected locals in scope for the fn body about to be typed. */
 pub fn with_injects(env: Env, injects: []DiInjectBind) -> Env {
-    Env { base = env.base; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = injects; fn_unsafe = env.fn_unsafe; file = env.file }
+    Env { base = env.base; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index }
 }
 
 /**
@@ -94,7 +107,7 @@ pub fn with_injects(env: Env, injects: []DiInjectBind) -> Env {
  * @return Env  `env` with `fn_unsafe` set
  */
 pub fn with_fn_unsafe(env: Env, fn_unsafe: bool) -> Env {
-    Env { base = env.base; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = fn_unsafe; file = env.file }
+    Env { base = env.base; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = fn_unsafe; file = env.file; base_index = env.base_index }
 }
 
 /** (W10c/MEM-3) the DI-injected binding named `name` in scope, or an error if none — the signal a
@@ -109,17 +122,35 @@ pub fn lookup_inject(env: Env, name: str) -> DiInjectBind | error {
     error { message = $"no injected binding named {name}" }
 }
 
-// (#148) seal — move the accumulated bindings into the immutable `base` segment. Called ONCE per
-// collected env, at the collect→type boundary; later defines land in the fresh `bindings`.
+/**
+ * seal — move the accumulated bindings into the immutable `base` segment and build the lateral
+ * `base_index` over it. Called ONCE per collected env, at the collect->type boundary (#148); later
+ * defines land in the fresh `bindings`, never in `base`. Because `base` is set exactly here and never
+ * mutated afterwards, its hash index is built exactly here too and copied read-only by handle through
+ * every subsequent `with_*`/`define*` fork — the invariant the CK1 lookup relies on (design §10).
+ *
+ * @param env  the collected environment whose `bindings` become the sealed globals
+ * @return     `env` with `bindings` moved into `base`, a fresh empty `bindings`, and `base_index`
+ *             built over `base`
+ * @since #148
+ */
 pub fn seal(env: Env) -> Env {
     mut b = env.base
     mut i: u64 = 0
     loop { if i >= env.bindings.len { break }; b = teko::list::push(b, env.bindings[i]); i++ }
-    Env { base = b; bindings = teko::list::empty(); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file }
+    Env { base = b; bindings = teko::list::empty(); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = nidx_build(nidx_names_of(b)) }
 }
 
-// (#41) set the namespace currently being type-checked — the typed pass sets it per item.
-pub fn with_ns(env: Env, ns: str) -> Env { Env { base = env.base; bindings = env.bindings; cur_ns = ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file } }
+/**
+ * with_ns — set the namespace currently being type-checked; the typed pass sets it per item (#41).
+ * Carries `base_index` unchanged (this fork touches only `cur_ns`, never `base`).
+ *
+ * @param env  the environment to derive from
+ * @param ns   the namespace now being type-checked
+ * @return     `env` with `cur_ns` set to `ns`
+ * @since #41
+ */
+pub fn with_ns(env: Env, ns: str) -> Env { Env { base = env.base; bindings = env.bindings; cur_ns = ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index } }
 
 /**
  * with_file — set the source file of the item about to be typed. The twin of `with_ns`, set
@@ -132,11 +163,18 @@ pub fn with_ns(env: Env, ns: str) -> Env { Env { base = env.base; bindings = env
  * @return      `env` with `file` set
  * @since       0.3.1
  */
-pub fn with_file(env: Env, file: str) -> Env { Env { base = env.base; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = file } }
+pub fn with_file(env: Env, file: str) -> Env { Env { base = env.base; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = file; base_index = env.base_index } }
 
-// (W10b.CLASS) set the DECLARING class of the method body about to be typed ("" clears it —
-// used when entering a free function).
-pub fn with_owner(env: Env, owner: str) -> Env { Env { base = env.base; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = owner; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file } }
+/**
+ * with_owner — set the DECLARING class of the method body about to be typed; "" clears it (used when
+ * entering a free function) (W10b.CLASS). Carries `base_index` unchanged (only `owner_type` moves).
+ *
+ * @param env    the environment to derive from
+ * @param owner  the declaring class of the method body, or "" for a free function
+ * @return       `env` with `owner_type` set to `owner`
+ * @since W10b.CLASS
+ */
+pub fn with_owner(env: Env, owner: str) -> Env { Env { base = env.base; bindings = env.bindings; cur_ns = env.cur_ns; owner_type = owner; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index } }
 
 /**
  * binding_is_writable — the SINGLE decision point for "may this binding be written through?"
@@ -170,12 +208,23 @@ fn binding_is_writable(t: Type, is_mut: bool) -> bool {
  * @return        `env` extended with the new local binding
  */
 pub fn define(env: Env, name: str, t: Type, is_mut: bool) -> Env {
-    Env { base = env.base; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = binding_is_writable(t, is_mut); ns = ""; is_const = false; vis = parser::Visibility::Pub }); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file }
+    Env { base = env.base; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = binding_is_writable(t, is_mut); ns = ""; is_const = false; vis = parser::Visibility::Pub }); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index }
 }
 
-// (#41) define a TOP-LEVEL FUNCTION binding carrying its declaring namespace.
+/**
+ * define_fn — define a TOP-LEVEL FUNCTION binding carrying its declaring namespace (#41). Pushes into
+ * the mutable `bindings`; carries `base_index` unchanged (the index covers only the sealed `base`,
+ * which `define*` never touches).
+ *
+ * @param env   the environment to extend
+ * @param name  the function's bound identifier
+ * @param t     the function's resolved type
+ * @param ns    the namespace the function is declared in
+ * @return      `env` extended with the function binding
+ * @since #41
+ */
 pub fn define_fn(env: Env, name: str, t: Type, ns: str) -> Env {
-    Env { base = env.base; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = false; vis = parser::Visibility::Pub }); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file }
+    Env { base = env.base; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = false; vis = parser::Visibility::Pub }); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index }
 }
 
 /**
@@ -194,13 +243,47 @@ pub fn define_fn(env: Env, name: str, t: Type, ns: str) -> Env {
  * @since #594
  */
 pub fn define_const(env: Env, name: str, t: Type, ns: str, vis: parser::Visibility) -> Env {
-    Env { base = env.base; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = true; vis = vis }); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file }
+    Env { base = env.base; bindings = teko::list::push(env.bindings, ValBinding { name = name; type = t; is_mut = false; ns = ns; is_const = true; vis = vis }); cur_ns = env.cur_ns; owner_type = env.owner_type; di = env.di; injects = env.injects; fn_unsafe = env.fn_unsafe; file = env.file; base_index = env.base_index }
 }
 
 // a binding is mutable iff declared `mut` (Let and Const are immutable — B.21).
 fn bind_is_mut(k: parser::BindKind) -> bool { k == parser::BindKind::Mut }
 
-// the WHOLE binding (type + mutability), innermost first — for the `mut` write-guard (B.21).
+/**
+ * nidx_names_of — extract the ordered names `b[i].name` of a sealed base binding list, the input to
+ * `nidx_build`. Position i of the result corresponds to position i of `b`, so a slot's `pos` indexes
+ * straight back into `base`.
+ *
+ * @param b  the sealed base bindings, in their fixed order
+ * @return   the names `b[i].name`, in the same order
+ * @since 0.3.1
+ */
+fn nidx_names_of(b: []ValBinding) -> []str {
+    mut names: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= b.len { break }
+        names = teko::list::push(names, b[i].name)
+        i++
+    }
+    names
+}
+
+/**
+ * lookup_binding — the WHOLE binding (type + mutability) for `name`, innermost-first: the mutable
+ * `bindings` are scanned tail-first (locals shadow, small — unchanged), then the SEALED globals are
+ * resolved through the hash index `env.base_index` by taking the base entry with the LARGEST position
+ * whose name matches. This is byte-identical to the old reverse linear scan over `base` (design §5,
+ * "largest position ≡ reverse scan's first match"), but O(log n + c) instead of O(n): binary-search
+ * to the bucket of slots sharing the name's hash, walk it, re-test the exact name against real bytes
+ * (`env.base[p].name == name`) so a hash collision never returns the wrong record, and keep the
+ * maximum matching position.
+ *
+ * @param env   the type-checking environment
+ * @param name  the sought bare name
+ * @return      the matching binding, or an "undefined name" error
+ * @throws      when no local or global binding is named `name`
+ */
 fn lookup_binding(env: Env, name: str) -> ValBinding | error {
     mut i = env.bindings.len
     loop {
@@ -208,12 +291,17 @@ fn lookup_binding(env: Env, name: str) -> ValBinding | error {
         i = i - 1
         if env.bindings[i].name == name { return env.bindings[i] }
     }
-    mut j = env.base.len   // (#148) then the sealed globals (locals shadow)
+    let h = teko::runtime::str_hash(name)
+    mut best: i64 = -1
+    mut k = nidx_lower_bound(env.base_index, h)
     loop {
-        if j == 0 { break }
-        j = j - 1
-        if env.base[j].name == name { return env.base[j] }
+        if k >= env.base_index.slots.len { break }
+        if env.base_index.slots[k].hash != h { break }
+        let p = env.base_index.slots[k].pos
+        if env.base[p].name == name && (p to i64) > best { best = p to i64 }
+        k++
     }
+    if best >= 0 { return env.base[best to u64] }
     error { message = $"undefined name: {name}" }
 }
 

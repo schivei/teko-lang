@@ -5886,3 +5886,64 @@ fn f_generic_fn_constructs_generic() -> i64 {
     let su = gfc_seed_u(0 to u8)
     a.v + (b.v to i64) + si.v + (su.v to i64)
 }
+
+/**
+ * CK1_SHADOWED — a module-level `const` whose name a local `let` re-uses in `f_ck1_shadow_local`, so
+ * the case can prove a local binding shadows a same-named global. Part of the CK1 scoped-hash-maps
+ * regression guard (design docs/design/ck1-scoped-hash-maps-0.3.1.md §8, fixture 1).
+ */
+const CK1_SHADOWED: i64 = 100
+
+/**
+ * CK1_ALPHA — one of three same-prefixed module-level consts `f_ck1_many_globals_resolve` reads by
+ * bare name, so the case proves the `lookup_binding` hash index re-tests exact bytes and returns the
+ * right global among several. Part of the CK1 regression guard (design §8).
+ */
+const CK1_ALPHA: i64 = 11
+
+/**
+ * CK1_BETA — the second of the three CK1 discrimination consts (see `CK1_ALPHA`).
+ */
+const CK1_BETA: i64 = 22
+
+/**
+ * CK1_GAMMA — the third of the three CK1 discrimination consts (see `CK1_ALPHA`).
+ */
+const CK1_GAMMA: i64 = 33
+
+/**
+ * f_ck1_shadow_local — a local `let CK1_SHADOWED = 7` shadows the module-level `const CK1_SHADOWED`
+ * (100). `lookup_binding` scans the mutable local `bindings` tail-first BEFORE the sealed globals, so
+ * the local must win — the property the CK1 hash-index rewrite of the GLOBAL scan must not disturb
+ * (design §8, fixture 1). Returns true iff the local (7), not the global (100), resolves.
+ *
+ * @return true iff the local binding shadows the same-named global const
+ */
+fn f_ck1_shadow_local() -> bool {
+    let CK1_SHADOWED: i64 = 7
+    CK1_SHADOWED == 7
+}
+
+/**
+ * f_ck1_global_via_index — a bare reference to the module-level `const CK1_BETA` with no local of that
+ * name, so `lookup_binding` falls through the local scan and resolves the global through the sealed
+ * `base_index` hash lookup — the exact CK1.1 code path. Returns true iff the index resolves the global
+ * to its value (22).
+ *
+ * @return true iff the bare global name resolves through the base index to 22
+ */
+fn f_ck1_global_via_index() -> bool {
+    CK1_BETA == 22
+}
+
+/**
+ * f_ck1_many_globals_resolve — three same-prefixed globals read by bare name, so each resolves through
+ * the `base_index` hash bucket and the exact-name re-test picks the right one. A collision or a wrong
+ * max-position pick would return the wrong value and fail the case (design §8, fixture 3's property —
+ * the max-position pick is also unit-tested in `src/checker/nidx_test.tkt`).
+ *
+ * @return true iff CK1_ALPHA, CK1_BETA and CK1_GAMMA each resolve to their own value
+ */
+fn f_ck1_many_globals_resolve() -> bool {
+    CK1_ALPHA == 11 && CK1_BETA == 22 && CK1_GAMMA == 33
+}
