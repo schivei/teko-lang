@@ -1304,11 +1304,60 @@ fn with_type_di(node: Decl, di_kind: DiKind, has_key: bool, key: str, must_free:
     }
 }
 
+// --- loose doc-comments & the adjacency rule (ruling 2026-08-06,
+// docs/design/comments-anywhere-doc-classification-0.3.1.md) ---
+//
+// A `/** … */` reaches the parser as a Doc token (`//` and `/* */` are dropped by the lexer, so
+// they are already accepted in any position). A Doc is DOCUMENTATION only when it is adjacent —
+// no blank line — to a declaration it can annotate; anywhere else it is a LOOSE comment, accepted
+// as trivia and ignored, never "expected a declaration".
+
+// Does the token at `pos` begin a DECLARATION HEAD — an attribute, a visibility/linkage modifier,
+// or a declaration keyword? A doc classifies only when one of these immediately follows it.
+fn is_decl_head_token(tokens: []lexer::Token, pos: u64) -> bool {
+    is_kind_at(tokens, pos, lexer::TokenKind::Hash) ||
+    is_kind_at(tokens, pos, lexer::TokenKind::Pub) ||
+    is_kind_at(tokens, pos, lexer::TokenKind::Exp) ||
+    is_kind_at(tokens, pos, lexer::TokenKind::Extern) ||
+    is_kind_at(tokens, pos, lexer::TokenKind::Fn) ||
+    is_kind_at(tokens, pos, lexer::TokenKind::Type) ||
+    is_kind_at(tokens, pos, lexer::TokenKind::Flags) ||
+    is_kind_at(tokens, pos, lexer::TokenKind::Const) ||
+    is_unsafe_modifier_at(tokens, pos)
+}
+
+// Does the doc-comment at `docpos` CLASSIFY as documentation for a following declaration? Only when
+// a declaration head follows it with at most a single own-line newline between them — a blank line
+// (a second separator) or a `;` breaks the adjacency and makes it a loose comment.
+fn doc_classifies(tokens: []lexer::Token, docpos: u64) -> bool {
+    if !is_kind_at(tokens, docpos, lexer::TokenKind::Doc) { return false }
+    mut p = docpos + 1
+    if is_kind_at(tokens, p, lexer::TokenKind::Semicolon) { return false }
+    if is_kind_at(tokens, p, lexer::TokenKind::Newline) {
+        p = p + 1
+        if is_sep(tokens, p) { return false }
+    }
+    is_decl_head_token(tokens, p)
+}
+
+// Skip a run of separators AND loose doc-comments — the trivia between declarations. Stops at a
+// real token or at a CLASSIFYING doc (left in place for `parse_decl` to attach). This is what lets
+// a `/** banner */` sit at the top of a file, before a `use`, or between declarations.
+fn skip_trivia(tokens: []lexer::Token, pos: u64) -> u64 {
+    mut p = pos
+    loop {
+        if is_sep(tokens, p) { p = p + 1; continue }
+        if is_kind_at(tokens, p, lexer::TokenKind::Doc) && !doc_classifies(tokens, p) { p = p + 1; continue }
+        break
+    }
+    p
+}
+
 // a module file: the `use` header, then a loop of declarations. Rejects loose statements.
 // `pos` is 0 (file start).
 pub fn parse_module(tokens: []lexer::Token, pos: u64) -> Parsed<Module> | error {
     let hdr = match parse_use_header(tokens, pos) { ParsedList<UseDecl> as x => x; error as e => return e }
-    mut p = skip_seps(tokens, hdr.next)
+    mut p = skip_trivia(tokens, hdr.next)
     mut decls: []Decl = teko::list::empty()
     loop {
         if !has_token(tokens, p) { break }
@@ -1319,7 +1368,7 @@ pub fn parse_module(tokens: []lexer::Token, pos: u64) -> Parsed<Module> | error 
         if !is_sep(tokens, p) {
             return err_at(tokens, p, "expected ';' or a newline after a declaration")
         }
-        p = skip_seps(tokens, p)
+        p = skip_trivia(tokens, p)
     }
     Parsed<Module> { node = Module { uses = hdr.items; decls = decls }; next = p }
 }
