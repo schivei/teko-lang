@@ -454,15 +454,15 @@ fn inflate_fixed_block(state: InflateState) -> InflateState | error {
 }
 
 /**
- * The order in which code-length-alphabet lengths are transmitted in a dynamic-Huffman
- * block header (RFC 1951 §3.2.7) — a fixed permutation chosen so that trailing (likely
- * unused) entries can be omitted via `HCLEN`.
+ * CODE_LENGTH_ORDER — the order in which code-length-alphabet lengths are transmitted in a
+ * dynamic-Huffman block header (RFC 1951 §3.2.7), a fixed permutation chosen so that trailing
+ * (likely unused) entries can be omitted via `HCLEN`. A deterministic 19-entry constant, so it
+ * lives in rodata rather than being rebuilt per call (AL0 — a build-and-return producer of fixed
+ * data IS a `const`, not a function).
  *
- * @return  the 19-entry permutation array
+ * @since 0.3.1 (AL0)
  */
-fn code_length_order() -> []u32 {
-    [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
-}
+const CODE_LENGTH_ORDER: []u32 = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
 
 /**
  * The running state of decoding a dynamic block's code-length arrays (literal/length +
@@ -551,7 +551,7 @@ fn slice_u32(lengths: []u32, from: u64, to: u64) -> []u32 {
 
 /**
  * One `(position, length)` pair read while decoding the code-length alphabet's own
- * lengths — Teko has no index assignment, so the out-of-order `code_length_order()`
+ * lengths — Teko has no index assignment, so the out-of-order `CODE_LENGTH_ORDER`
  * permutation is applied by RECORDING pairs in read order and then, for each of the 19
  * positions, scanning for its match (`code_length_lengths_of`), rather than writing
  * into a mutable array by index.
@@ -565,7 +565,7 @@ type CodeLengthSlot = struct {
 
 /**
  * Read the `HCLEN` code-length-alphabet lengths (3 bits each, RFC 1951 §3.2.7), applying
- * the `code_length_order()` permutation to recover the 19 lengths in ALPHABET order
+ * the `CODE_LENGTH_ORDER` permutation to recover the 19 lengths in ALPHABET order
  * (position 0 = symbol 0, … position 18 = symbol 18). Any position not covered by
  * `HCLEN` entries is implicitly length `0` (unused).
  *
@@ -575,7 +575,7 @@ type CodeLengthSlot = struct {
  *               cursor, or an `error` on stream truncation
  */
 fn read_code_length_alphabet(r: BitReader, hclen: u32) -> CodeLengthsResult | error {
-    let order = code_length_order()
+    let order = CODE_LENGTH_ORDER
     mut cur = r
     mut slots: []CodeLengthSlot = teko::list::empty()
     mut i: u32 = 0
