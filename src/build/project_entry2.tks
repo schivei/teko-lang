@@ -1,0 +1,153 @@
+// src/build/project.tks   (namespace 'teko::build')
+//
+// The PROJECT ORCHESTRATION entry layer — the canonical Teko ORIGINAL of the project
+// surfaces in src/driver.c (project_frontend / tk_compile_project / tk_run_project) and
+// the directory resolution in main.c (project_dir_of). main.tks dispatches here:
+//   teko build <dir>  → compile_project  (front-end → native codegen)
+//   teko run   <dir>  → run_project      (front-end → native codegen + execute, debug profile)
+//   teko <projarg>    → project_dir_of   (a `.tkp` → its dir; else the dir as-is)
+//
+// FAITHFUL-NOT-LITERAL (M.3). It mirrors the C twins' SHAPE and contracts in native Teko:
+// the C uses out-params (project_frontend(dir, &prog, &manifest)); Teko has NO out-params,
+// so the shared front-end returns a small `Frontend` struct (prog + manifest), as
+// `Frontend | error`. Both entries (build/run) run the SAME front-end AND the SAME
+// codegen→cc backend; `run` additionally executes the resulting binary (the interpreter this once
+// diverged to is retired, #524).
+
+use teko::parser
+use teko::lexer
+use teko::checker
+use teko::codegen
+use teko::emit
+use teko::compress
+use teko::coverage
+
+ * git is unavailable or `<base>` is not a valid ref — the caller degrades gracefully.
+ *
+ * @param base      the git ref/sha to diff against
+ * @param out_path  the file to capture the diff into
+ * @return          git's exit status (0 on success)
+ */
+fn run_git_diff(base: str, out_path: str) -> i32 {
+    let cmd = teko::str::concat("git diff ", base, "...HEAD -- '*.tks' > ", out_path, " 2>/dev/null")
+    mut argv: []str = teko::list::push(teko::list::empty(), "sh")
+    argv = teko::list::push(argv, "-c")
+    argv = teko::list::push(argv, cmd)
+    teko::process::run(argv)
+}
+
+/**
+ * The captured `git diff <base>...HEAD` text, or an error when git is unavailable / `<base>` is not a
+ * valid ref (so the per-commit gate can degrade gracefully rather than crash — guardrail). Captures to
+ * a scratch file next to the project root, then slurps it.
+ *
+ * THE SCRATCH FILE IS SCOPED (journal J3): `teko::test::scoped(".teko-per-commit.diff")` is
+ * byte-for-byte the old literal outside a test (`teko::test::scope()` empty — the production
+ * `--per-commit-test` path is unchanged), and rooted under this run's own writer directory inside
+ * one, so two concurrent per-commit gates on the same host never share this capture file.
+ *
+ * @param base  the git ref/sha to diff against
+ * @return      the unified-diff text, or an error describing the git failure
+ * @throws      when the `git diff` invocation fails or the scratch file cannot be read
+ */
+fn per_commit_diff_text(base: str) -> str | error {
+    let out_path = teko::test::scoped(".teko-per-commit.diff")
+    if run_git_diff(base, out_path) != 0 {
+        return error { message = teko::str::concat("git diff ", base, "...HEAD failed (git unavailable or invalid base)") }
+    }
+    teko::io::read_file(out_path)
+}
+
+/**
+ * The `teko test --per-commit-test <base>` body (owner ruling 0.3.0.29 — the delta-coverage CI
+ * enforcer). Diff `<base>...HEAD` for changed `.tks` lines (`changed_line_set`), project the just-run
+ * aggregate coverage onto those lines (`cov_lines_from_cobertura` over `coverage::cov_cobertura` +
+ * `delta_line_coverage`), report the delta, and apply the SAME warn-vs-fail policy as the floors: with
+ * `--cov-validation` a below-floor delta FAILS (exit 1); otherwise it only warns. When git is
+ * unavailable or `<base>` is invalid the gate degrades gracefully — an honest warning, exit 0, never a
+ * crash. Runs AFTER the aggregate floor policy, so the coverage sinks already hold the run's marks.
+ *
+ * Takes the resolved MANIFEST (for the `[coverage] lines` floor) rather than the whole front-end:
+ * the delta gate reads only that one number and the pre-computed `pre_regr_cob` snapshot, so under
+ * the site-map report path it needs no typed program and forces no re-check.
+ *
+ * @param dir             the project directory (for the diagnostic prefix)
+ * @param m               the resolved manifest (its `cov_lines` is the delta floor)
+ * @param base            the git ref/sha to measure the delta against
+ * @param cov_validation  `--cov-validation` — enforce (fail) rather than warn on a below-floor delta
+ * @param pre_regr_cob    the Cobertura XML snapshot taken right after the `#test` gate, BEFORE the
+ *                         regression tier's `merge_regression_coverage` folds in any `.tkcov` (0.3.1
+ *                         cobertura fix): the delta gate must credit only lines a `#test` actually
+ *                         exercised, never a line merely REACHED by a regressive run
+ * @return                0 unless `cov_validation` is set AND the delta is below the [coverage] lines floor
+ * @throws                under `cov_validation`, when the delta is below the lines floor
+ */
+fn run_per_commit_test(dir: str, m: Manifest, base: str, cov_validation: bool, pre_regr_cob: str) -> i32 {
+    let diff = match per_commit_diff_text(base) {
+        str as s => s
+        error => {
+            teko::io::eprintln($"teko: warning: per-commit delta coverage skipped — `git diff {base}...HEAD` unavailable")
+            return 0
+        }
+    }
+    let cls = changed_line_set(diff)
+    let covlines = cov_lines_from_cobertura(pre_regr_cob)
+    let d = delta_line_coverage(covlines, cls)
+    teko::io::println(per_commit_report_str(base, d))
+    let pct = delta_pct(d)
+    let floor = m.cov_lines
+    if delta_floor_blocks(pct, floor, cov_validation) {
+        return fail(dir, $"per-commit delta coverage {pct}% is below the {floor}% floor ([coverage] lines) — the lines changed since {base} are undertested")
+    }
+    if pct < floor {
+        teko::io::eprintln($"teko: warning: per-commit delta coverage {pct}% is below the {floor}% floor ([coverage] lines) — the lines changed since {base} are undertested")
+    }
+    0
+}
+
+/**
+ * REGRESSION_FEED_PROJECT — the ONE project name whose regression tier compiles its scenarios with
+ * a coverage-instrumented copy of itself: the compiler's own (the reserved root name no other
+ * project may claim). Every other project's regressions compile UNRELATED snippets, and there is
+ * nothing of THAT project's own source for the marks to attribute to.
+ */
+const REGRESSION_FEED_PROJECT: str = "teko"
+
+/**
+ * build_regression_feed_exe — build the COVERAGE-INSTRUMENTED compiler the regression tier will
+ * compile its scenarios with (0.3.1 C-cov, `regressor-principal-0.3.1.md` §5.1 Cov-A), so every
+ * scenario compile marks the exact compiler-source lines it exercises. Built in the BUILD STAGE,
+ * beside the gate binary, because both are emitted from the SAME checked program and that program
+ * is exactly the memory this staging exists to hand back before the runs begin.
+ *
+ * A failed instrumented build honest-warns and leaves no binary behind (`build_regression_cov_exe`
+ * removes the stale one first), so the driver falls back to this compiler un-instrumented — the
+ * regression tier's pass/fail verdict never depends on the coverage feed succeeding.
+ *
+ * @param m     the resolved manifest (only the compiler's own project feeds coverage)
+ * @param prog  the checked program the instrumented copy is emitted from
+ * @since 0.3.1.0
+ */
+fn build_regression_feed_exe(m: Manifest, prog: checker::TProgram) -> void {
+    if m.test_regression_files.len == 0 { return }
+    if m.name != REGRESSION_FEED_PROJECT { return }
+    match build_regression_cov_exe(m, prog) {
+        str => { }
+        error as e => teko::io::println(teko::str::concat("teko: regression coverage-feed build failed (", e.message, ") — running regressions without coverage attribution"))
+    }
+}
+
+/**
+ * regression_feed_exe — the compiler binary the regression tier compiles its scenarios with: the
+ * instrumented copy the build stage produced when it exists, else `exe` (this running binary)
+ * un-instrumented. Resolved ABSOLUTE, never `bin/…`-relative: a `When built in place` scenario
+ * `cd`s into its own project directory before invoking this exe (`compile_in_place`), so a
+ * relative path would resolve against the WRONG directory.
+ *
+ * @param exe  this compiler binary's own path (the fallback, and every other project's exe)
+ * @param m    the resolved manifest
+ * @return     the exe the regression tier should compile scenarios with
+ * @since 0.3.1.0
+ */
+fn regression_feed_exe(exe: str, m: Manifest) -> str {
+    if m.name != REGRESSION_FEED_PROJECT { return exe }
