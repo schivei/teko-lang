@@ -1,0 +1,63 @@
+// src/build/init_main.tks   (namespace 'teko::build')
+//
+// Main entry point for `teko init [dir]` scaffolding.
+
+/**
+ * init_target_of — the `teko init [dir]` target directory: `args[2]` when given
+ * (`args[0]` the program, `args[1]` "init"), else "." (the current directory).
+ *
+ * @param args  the full CLI argument vector
+ * @return      the resolved target directory
+ */
+fn init_target_of(args: []str) -> str {
+    if args.len >= 3 { return args[2] }
+    "."
+}
+
+/**
+ * report_success — print what `init_run` created and the suggested next command,
+ * to stdout (a normal, successful CLI result — unlike `fail`'s stderr diagnostics).
+ *
+ * @param target         the initialized project directory
+ * @param manifest_path  the written `teko.tkp` path
+ * @param name           the project root name
+ */
+fn report_success(target: str, manifest_path: str, name: str) {
+    teko::io::println(teko::str::concat("created ", manifest_path))
+    teko::io::println(teko::str::concat("project '", name, "' initialized at ", target))
+    teko::io::println(teko::str::concat("next: teko build ", target))
+}
+
+/**
+ * init_run — the `teko init [dir]` entry point (dispatched from `main.tks`):
+ * resolve the target directory (creating it if missing, `mkdir_p`), refuse to
+ * overwrite an existing `teko.tkp` (an honest, localized error — M.3), ask the
+ * four scaffold questions (name/kind/source/description, each defaulting on an
+ * empty/EOF answer), write the manifest, create the source directory, and write
+ * the artifact-appropriate stub (never overwriting an existing source file).
+ *
+ * @param args  the full CLI argument vector (`args[2]`, if present, is the target)
+ * @return      0 on a successful scaffold, else the failing status (`fail`'s 1)
+ */
+fn init_run(args: []str) -> i32 {
+    let target = init_target_of(args)
+    match mkdir_p(target) { error as e => return fail(target, e.message); null => { } }
+    let manifest_path = join_path(target, "teko.tkp")
+    match teko::io::read_file(manifest_path) {
+        str => return fail(target, teko::str::concat("project already initialized at ", target, "; edit teko.tkp or remove it"))
+        error => { }
+    }
+    let name = match ask_name(target) { str as n => n; error as e => return fail(target, e.message) }
+    let kind = match ask_kind() { str as k => k; error as e => return fail(target, e.message) }
+    let source = prompt_line("Source directory", "src")
+    let description = prompt_line("Description", "")
+    match teko::io::write_file(manifest_path, render_manifest(name, kind, source, description)) {
+        error as e => return fail(target, e.message)
+        null => { }
+    }
+    let source_dir = join_path(target, source)
+    match mkdir_p(source_dir) { error as e => return fail(target, e.message); null => { } }
+    match write_stub(source_dir, name, kind) { error as e => return fail(target, e.message); null => { } }
+    report_success(target, manifest_path, name)
+    0
+}

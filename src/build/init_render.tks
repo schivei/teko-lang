@@ -1,0 +1,90 @@
+// src/build/init_render.tks   (namespace 'teko::build')
+//
+// Manifest and source-stub generation for `teko init` scaffolding.
+
+/**
+ * render_manifest — the `.tkp` TOML text for a freshly scaffolded project: the
+ * required `name`/`source` root keys (parse_manifest's two mandatory fields), the
+ * optional `description`, an explicit `[artifact] kind` (spelled out even for the
+ * "binary" default, matching this repo's own `teko.tkp` style), and a permissive
+ * `[coverage]` floor of 0/0/0 — a brand-new scaffold has no `.tkt` tests yet, so
+ * the D4 80%-default floors would fail its very first `teko build`; the floors are
+ * meant to be raised as the project grows real tests.
+ *
+ * @param name         the validated project root name
+ * @param kind         the validated artifact kind
+ * @param source       the source-root directory name (e.g. "src")
+ * @param description  the optional one-line description ("" to omit the key)
+ * @return             the `.tkp` manifest text, ready to write verbatim
+ */
+fn render_manifest(name: str, kind: str, source: str, description: str) -> str {
+    let header = teko::str::concat("name = \"", name, "\"\nsource = \"", source, "\"\n")
+    let with_description = if description == "" { header } else { teko::str::concat(header, "description = \"", description, "\"\n") }
+    teko::str::concat(with_description, "\n[artifact]\nkind = \"", kind, "\"\n\n[coverage]\nfunctions = 0\nlines = 0\nbranches = 0\n")
+}
+
+/**
+ * lib_stub_source — the starter `.tks` content for a library-kind scaffold
+ * (`static`/`shared`/`package`): one documented `pub fn hello() -> str` the new
+ * project can replace with its own API.
+ *
+ * @param name  the project root name (echoed in the doc comment and greeting)
+ * @return      the stub `.tks` source text
+ */
+fn lib_stub_source(name: str) -> str {
+    teko::str::concat(
+        "/**\n",
+        " * hello — a starter exported function for the \"", name, "\" library. Replace\n",
+        " * with your own API.\n",
+        " *\n",
+        " * @return a friendly greeting\n",
+        " */\n",
+        "pub fn hello() -> str {\n",
+        "    \"hello from ", name, "\"\n",
+        "}\n")
+}
+
+/**
+ * write_binary_stub — write `<source_dir>/main.tks` with a minimal, valid
+ * virtual-main body (a single `teko::io::println` call), UNLESS a `main.tks`
+ * already exists there — an existing source file is never overwritten.
+ *
+ * @param source_dir  the project's source-root directory (already created)
+ * @param name        the project root name (echoed in the greeting)
+ * @return            an `error` on a write failure, else `null`
+ */
+fn write_binary_stub(source_dir: str, name: str) -> error | null {
+    let path = join_path(source_dir, "main.tks")
+    match teko::io::read_file(path) { str => return null; error => { } }
+    teko::io::write_file(path, teko::str::concat("teko::io::println(\"hello from ", name, "\")\n"))
+}
+
+/**
+ * write_lib_stub — write `<source_dir>/<name>.tks` with `lib_stub_source`'s
+ * starter content, UNLESS that file already exists there — an existing source
+ * file is never overwritten.
+ *
+ * @param source_dir  the project's source-root directory (already created)
+ * @param name        the project root name (also the stub file's stem)
+ * @return            an `error` on a write failure, else `null`
+ */
+fn write_lib_stub(source_dir: str, name: str) -> error | null {
+    let path = join_path(source_dir, teko::str::concat(name, ".tks"))
+    match teko::io::read_file(path) { str => return null; error => { } }
+    teko::io::write_file(path, lib_stub_source(name))
+}
+
+/**
+ * write_stub — write the artifact-appropriate starter source file: `main.tks` for
+ * a `binary` scaffold (`write_binary_stub`), else a `<name>.tks` library stub
+ * (`write_lib_stub`) for `static`/`shared`/`package`.
+ *
+ * @param source_dir  the project's source-root directory (already created)
+ * @param name        the project root name
+ * @param kind        the validated artifact kind
+ * @return            an `error` on a write failure, else `null`
+ */
+fn write_stub(source_dir: str, name: str, kind: str) -> error | null {
+    if kind == "binary" { return write_binary_stub(source_dir, name) }
+    write_lib_stub(source_dir, name)
+}
