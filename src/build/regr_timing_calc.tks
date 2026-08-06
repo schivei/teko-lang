@@ -1,0 +1,74 @@
+// src/build/regr_timing_calc.tks   (namespace 'teko::build')
+//
+// Calculation and aggregation functions for regression timing measurements.
+
+/**
+ * phase_zero — an empty measurement (every phase 0, no builds), the identity for `phase_add`.
+ *
+ * @return the zero measurement
+ */
+pub fn phase_zero() -> PhaseTimes {
+    PhaseTimes { harness_ns = 0; compile_ns = 0; run_ns = 0; builds = 0 }
+}
+
+/**
+ * phase_add — the sum of two measurements, phase by phase (and build count by build count).
+ *
+ * @param a  the first measurement
+ * @param b  the second measurement
+ * @return   their sum
+ */
+pub fn phase_add(a: PhaseTimes, b: PhaseTimes) -> PhaseTimes {
+    PhaseTimes {
+        harness_ns = a.harness_ns + b.harness_ns
+        compile_ns = a.compile_ns + b.compile_ns
+        run_ns = a.run_ns + b.run_ns
+        builds = a.builds + b.builds
+    }
+}
+
+/**
+ * phase_total_ns — a measurement's wall total: the three phases added together.
+ *
+ * @param p  the measurement
+ * @return   harness + compile + run, in ns
+ */
+pub fn phase_total_ns(p: PhaseTimes) -> i64 {
+    p.harness_ns + p.compile_ns + p.run_ns
+}
+
+/**
+ * rows_total — the sum of every row's measurement (the file/phase aggregate).
+ *
+ * @param rows  the measured rows
+ * @return      their summed measurement
+ */
+pub fn rows_total(rows: []RowTiming) -> PhaseTimes {
+    mut acc = phase_zero()
+    mut i: u64 = 0
+    loop {
+        if i >= rows.len { break }
+        acc = phase_add(acc, rows[i].times)
+        i++
+    }
+    acc
+}
+
+/**
+ * rows_skipped — how many of the measured rows were honest-skipped. Reported alongside the totals so
+ * a fast file is never read as a fast file when it was in fact a mostly-skipped one (the same lesson
+ * as the `N run, S skipped, F failed` summary).
+ *
+ * @param rows  the measured rows
+ * @return      the count of skipped rows
+ */
+pub fn rows_skipped(rows: []RowTiming) -> u64 {
+    mut n: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= rows.len { break }
+        if rows[i].skipped { n = n + 1 }
+        i++
+    }
+    n
+}

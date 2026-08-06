@@ -1,0 +1,58 @@
+// src/build/regr_timing_format.tks   (namespace 'teko::build')
+//
+// Formatting functions for regression timing display.
+
+/**
+ * regr_ms_text — `ns` rendered as milliseconds, or as seconds with one decimal once it passes a
+ * second. Milliseconds are the resolution that matters here (a whole build is ~1.6 s and a phase of
+ * it can be a few ms); anything finer is runner noise.
+ *
+ * @param ns  the duration in nanoseconds
+ * @return    the rendered duration, unit suffix included
+ */
+pub fn regr_ms_text(ns: i64) -> str {
+    let ms = ns / REGR_NS_PER_MS
+    if ms < REGR_MS_PER_S { return $"{ms}ms" }
+    let tenths = ms / (REGR_MS_PER_S / 10)
+    $"{tenths / 10}.{tenths % 10}s"
+}
+
+/**
+ * regr_share_text — `part` as a whole-percent share of `whole` ("0%" when `whole` is 0, so a
+ * zero-length phase never divides by zero).
+ *
+ * @param part   the phase's own time
+ * @param whole  the total the share is taken of
+ * @return       the rendered percentage
+ */
+pub fn regr_share_text(part: i64, whole: i64) -> str {
+    if whole <= 0 { return "0%" }
+    $"{(part * REGR_PERCENT) / whole}%"
+}
+
+/**
+ * regr_totals_text — the compact totals a per-file report line carries: builds, wall total, and the
+ * three phases as shares of it.
+ *
+ * @param p  the file's summed measurement
+ * @return   the parenthesised totals text, e.g. `322 builds, 8.5s: harness 12% / compile 84% / run 4%`
+ */
+pub fn regr_totals_text(p: PhaseTimes) -> str {
+    let total = phase_total_ns(p)
+    let h = regr_share_text(p.harness_ns, total)
+    let c = regr_share_text(p.compile_ns, total)
+    let r = regr_share_text(p.run_ns, total)
+    $"{p.builds} builds, {regr_ms_text(total)}: harness {h} / compile {c} / run {r}"
+}
+
+/**
+ * regr_row_line — one row's line in a table: its three phases, its total, and its skip mark.
+ *
+ * @param rt  the measured row
+ * @return    the rendered line (no trailing newline)
+ */
+pub fn regr_row_line(rt: RowTiming) -> str {
+    let mark = if rt.skipped { " [skipped]" } else { "" }
+    let t = rt.times
+    $"    {regr_ms_text(phase_total_ns(t))}  (harness {regr_ms_text(t.harness_ns)} / compile {regr_ms_text(t.compile_ns)} / run {regr_ms_text(t.run_ns)})  {rt.feature} :: {rt.scenario}[{rt.row}]{mark}"
+}
