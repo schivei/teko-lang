@@ -5947,3 +5947,32 @@ fn f_ck1_global_via_index() -> bool {
 fn f_ck1_many_globals_resolve() -> bool {
     CK1_ALPHA == 11 && CK1_BETA == 22 && CK1_GAMMA == 33
 }
+
+/**
+ * f_ck1_ns_call — two functions of the SAME bare name `ck1_ns_probe` live in DIFFERENT namespaces
+ * (`aa` adds 1, `bb` adds 100). The base hash-index bucket for `ck1_ns_probe` holds both, so a
+ * qualified call must pick by namespace through `call_binding_matches` — the exact CK1.2 code path
+ * (`lookup_call`/`call_ns` routed through `call_base_pos`, design §8, fixture 2). A wrong-namespace
+ * pick would return the other arm's value and fail the case.
+ *
+ * @return true iff `aa::ck1_ns_probe(10)` resolves to 11 and `bb::ck1_ns_probe(10)` to 110
+ */
+fn f_ck1_ns_call() -> bool {
+    aa::ck1_ns_probe(10) == 11 && bb::ck1_ns_probe(10) == 110
+}
+
+/**
+ * f_ck1_type_same_bare — two types of the SAME last segment `Thing` coexist across namespaces
+ * (`aa::Thing` carries field `v`, `bb::Thing` carries field `w`). Resolving each QUALIFIED type
+ * reference goes through `resolve_qualified_type_reg`/`type_table_find`, which probe the `by_last`
+ * hash index keyed on `str_hash("Thing")` and re-check the qualifier — the CK1.4 code path (design
+ * §8, fixture 4). If the index conflated the two same-bare types, the field read would resolve
+ * against the wrong declaration.
+ *
+ * @return true iff `aa::Thing { v = 5 }.v` is 5 and `bb::Thing { w = 9 }.w` is 9
+ */
+fn f_ck1_type_same_bare() -> bool {
+    let t1 = aa::Thing { v = 5 }
+    let t2 = bb::Thing { w = 9 }
+    t1.v == 5 && t2.w == 9
+}
