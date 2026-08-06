@@ -1,0 +1,43 @@
+
+// assign_frees_old — may THIS self-append's copy-grow PARK the old buffer for reuse? True iff the
+// whole-fn linear-chain proof above holds for the assigned name AND the name is frame-local (an
+// escaping accumulator is denied — see name_escapes_body). PUBLIC (codegen reads it).
+pub fn assign_frees_old(fn_body: []TStatement, a: TAssign) -> bool {
+    if !assign_is_self_append(a) { return false }
+    if name_escapes_body(fn_body, a.name) { return false }
+    let st = chain_stats_block(fn_body, a.name)
+    if st.births_empty != 1 { return false }   // born exactly once, from empty()
+    if st.births_other != 0 { return false }   // no shadow / no aliasing rebirth
+    if st.other_writes != 0 { return false }   // writes are self-append only
+    let total = count_reads_block(fn_body, a.name)
+    if fn_body.len == 0 { return false }
+    let last_reads = count_reads_stmt(fn_body[fn_body.len - 1], a.name)
+    let last_st = chain_stats_stmt(fn_body[fn_body.len - 1], a.name)
+    if last_st.self_appends > 0 {
+        // the FINAL statement itself pushes (a tail loop/match building the chain): a capture inside
+        // it could precede a later push ON THE SAME PATH — unprovable syntactically. Allow only when
+        // its reads are EXACTLY its own self-append bases (no capture there at all).
+        if last_reads != last_st.self_appends { return false }
+        return total == st.self_appends
+    }
+    total - last_reads == st.self_appends   // every non-final read is a self-append base
+}
+
+// binding_is_frame_local_slice — (S2 Level-1) a SLICE binding whose buffer never leaves the frame:
+// a `let`/`mut` SIMPLE name, NOT const, NOT in the escaping set, whose bound type is a slice. Unlike
+// the struct-init predicate the value need not be an allocation site — a slice accumulator is BUILT
+// by later `xs = push(xs, …)` self-appends (each routed to the frame region); this predicate marks
+// that the frame is NEEDED and the name is a non-escaping slice. PUBLIC (the codegen reads it).
+pub fn binding_is_frame_local_slice(escaping: []str, b: TBinding) -> bool {
+    let name = match b.target {
+        parser::SimpleName as sn => sn.name
+        parser::DestructurePattern => return false
+    }
+    if name == "_" { return false }
+    if b.kind == parser::BindKind::Const { return false }
+    if str_set_has(escaping, name) { return false }
+    match b.bound {
+        Slice => true
+        _ => false
+    }
+}

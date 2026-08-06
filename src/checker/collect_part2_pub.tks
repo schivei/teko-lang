@@ -1,0 +1,55 @@
+
+/**
+ * Register a stamped generic-type INSTANCE's methods (kept + signature-substituted by #254 layer 2)
+ * into the env, keyed by the instance's own bare name (`Box__g__i64`) — so a dot-call `b.get()` on a
+ * `Box__g__i64` value desugars to `Box__g__i64::get(b)` and `lookup_call` resolves it. The instance
+ * name is already canonical/bare (it is what the resolved receiver's `Named.name` carries and what the
+ * dispatch callee's qualifier is), so `method_ns` is the instance name verbatim, matching the
+ * bare dispatch qualifier the same way stamped-instance field access resolves off the bare name.
+ * A NON-generic-type body contributes nothing (its methods live on the template, registered as usual).
+ *
+ * A HARD boundary in the all-diagnostics ruling (docs/design/all-diagnostics-pre-walk-0.3.1.md
+ * §3): every instance whose method signature fails to resolve contributes its diagnostic and no
+ * binding, so the pass collects them all and the build cuts here rather than typing a dot-call
+ * against a missing method.
+ *
+ * @param env    the env to extend (the collected globals, before sealing)
+ * @param table  the folded type table (source of the stamped instances + method signatures)
+ * @return       the env with every resolvable stamped instance method registered, plus the
+ *               diagnostics of the ones that did not resolve
+ * @since onda-3 (#254)
+ */
+pub fn register_instance_methods(env: Env, table: TypeTable) -> SigOutcome {
+    mut out = env
+    mut diags: []str = teko::list::empty()
+    let insts = table_generic_instance_regs(table)
+    mut i = 0
+    loop {
+        if i >= insts.len { break }
+        let step = register_one_instance_methods(insts[i], table, out)
+        out = step.env
+        diags = concat_diags(diags, step.diags)
+        i++
+    }
+    SigOutcome { env = out; diags = diags }
+}
+
+// C7.12 — reconstruct a TypeTable from a TYPED program's pass-through TypeDecl items.
+// Used by the package backend (project.tks::backend) which has a TProgram, not a
+// parser::Program. The namespace field is set to "" — sufficient for resolve_type (name
+// resolution ignores namespace; only W-vis-enforce uses it, and the header emitter does not).
+pub fn type_table_of(prog: TProgram) -> TypeTable {
+    mut table: []TypeReg = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            parser::TypeDecl as td => {
+                table = teko::list::push(table, TypeReg { name = td.name; namespace = ""; file = ""; vis = td.vis; decl = td })
+            }
+            _ => { }
+        }
+        i++
+    }
+    table
+}

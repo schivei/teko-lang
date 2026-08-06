@@ -1,0 +1,176 @@
+use teko::lexer
+use teko::parser
+
+/**
+ * IntInfo — the width/signedness a comptime integer op runs at: the number of value
+ * bits and whether the top bit is a sign bit. Derived from a `CVInt.ty` (a `Prim`
+ * integer or `byte`) by `int_info`; every wrap/overflow/re-emission decision reads it.
+ * `width` never exceeds 64 — the language's widest integer IS 64-bit (`u64`/`i64` were
+ * removed from the surface, drop-128, 2026-07-24), so `int_info`'s width gate is now a
+ * defensive invariant rather than a live not-evaluated-width path.
+ *
+ * @field width   the integer's bit width (8 / 16 / 32 / 64)
+ * @field is_signed  true iff the type is a signed integer (i8..i64), false for unsigned/byte
+ * @since #comptime-fold
+ */
+type IntInfo = struct { width: u32; is_signed: bool }
+
+/**
+ * cv_int — wrap a two's-complement bit pattern and its declared type into a ConstValue.
+ *
+ * @param bits  the value's raw two's-complement bits, zero-extended into u64
+ * @param ty    the declared integer type
+ * @return      the integer ConstValue
+ * @since #comptime-fold
+ */
+fn cv_int(bits: u64, ty: Type) -> ConstValue { ConstValue { kind = CVInt { bits = bits; ty = ty } } }
+
+/**
+ * cv_float — wrap raw IEEE-754 bits into a float ConstValue.
+ *
+ * @param bits    the raw IEEE-754 bits (f32 in the low 32)
+ * @param is_f32  true iff the value is an f32
+ * @return        the float ConstValue
+ * @since #comptime-fold
+ */
+fn cv_float(bits: u64, is_f32: bool) -> ConstValue { ConstValue { kind = CVFloat { bits = bits; is_f32 = is_f32 } } }
+
+/**
+ * cv_bool — wrap a boolean into a ConstValue.
+ *
+ * @param v  the boolean
+ * @return   the boolean ConstValue
+ * @since #comptime-fold
+ */
+fn cv_bool(v: bool) -> ConstValue { ConstValue { kind = CVBool { v = v } } }
+
+/**
+ * cv_bytes — wrap a raw byte sequence (a folded str/char) into a ConstValue.
+ *
+ * @param data  the raw bytes
+ * @return      the bytes ConstValue
+ * @since #comptime-fold
+ */
+fn cv_bytes(data: []byte) -> ConstValue { ConstValue { kind = CVBytes { data = data } } }
+
+/**
+ * cv_agg — wrap an ordered list of child comptime values into an aggregate ConstValue (the
+ * constructor for `CVAgg`). The children are in declaration/index order, so `eval_index_expr` reads
+ * `elems[i]` directly.
+ *
+ * @param elems  the child comptime values, in order
+ * @return       the aggregate ConstValue
+ * @since #comptime-fold
+ */
+fn cv_agg(elems: []ConstValue) -> ConstValue { ConstValue { kind = CVAgg { elems = elems } } }
+
+/**
+ * width_mask — the low-`w`-bits mask (2^w - 1) as a u64, the ceiling of an unsigned
+ * value of width `w` and the modulus a width-`w` operation reduces modulo. Width 64 is
+ * the all-ones u64 (its `1 << 64` cannot be spelled — the fold's top-width special case,
+ * moved here from 128, drop-128, 2026-07-24), every other width builds the mask from a
+ * single in-range shift.
+ *
+ * @param w  the bit width (8 / 16 / 32 / 64)
+ * @return   the mask 2^w - 1 as a u64
+ * @since #comptime-fold
+ */
+fn width_mask(w: u32) -> u64 {
+    if w >= 64 { return ~(0 to u64) }
+    (1 to u64 << w) - 1
+}
+
+/**
+ * mask_to_width — reduce a u64 bit pattern to its low `w` bits, the two's-complement
+ * normalization every width-`w` result passes through before it becomes a `CVInt.bits`.
+ *
+ * @param bits  the unreduced bit pattern
+ * @param w     the target bit width
+ * @return      `bits` with every bit at or above position `w` cleared
+ * @since #comptime-fold
+ */
+fn mask_to_width(bits: u64, w: u32) -> u64 { bits & width_mask(w) }
+
+/**
+ * bit_set — is the bit at position `pos` set in `bits`? Used to read a value's sign bit
+ * (position width-1) during signed overflow and shift decisions.
+ *
+ * @param bits  the bit pattern to inspect
+ * @param pos   the bit position (0-based)
+ * @return      true iff bit `pos` is 1
+ * @since #comptime-fold
+ */
+fn bit_set(bits: u64, pos: u32) -> bool { ((bits >> pos) & (1 to u64)) == (1 to u64) }
+
+/**
+ * msb_value — 2^(w-1), the magnitude of the most-negative signed value of width `w` and
+ * the exclusive ceiling of a signed magnitude at that width. `w` is always <= 64 (`int_info`
+ * gates it), so the shift is always in-range — no top-width special case needed here (unlike
+ * `width_mask`, whose shift amount is `w` itself, which CAN legally reach 64).
+ *
+ * @param w  the bit width
+ * @return   2^(w-1) as a u64
+ * @since #comptime-fold
+ */
+fn msb_value(w: u32) -> u64 { 1 to u64 << (w - 1) }
+
+/**
+ * is_negative — does `bits` denote a negative value under `info`? False for every
+ * unsigned type; for a signed type it is the state of the sign bit (position width-1).
+ *
+ * @param bits  the value's bit pattern
+ * @param info  the value's width/signedness
+ * @return      true iff the value is a negative signed value
+ * @since #comptime-fold
+ */
+fn is_negative(bits: u64, info: IntInfo) -> bool { info.is_signed && bit_set(mask_to_width(bits, info.width), info.width - 1) }
+
+/**
+ * twos_neg — the width-`w` two's-complement negation of `x` (2^w - x mod 2^w), computed
+ * with in-range subtraction only (never an underflowing `0 - x`), so it is safe on every
+ * engine and for every width including the carrier's own top width (64).
+ *
+ * @param x  the value to negate (its low `w` bits are used)
+ * @param w  the bit width
+ * @return   the two's-complement negation, reduced to width `w`
+ * @since #comptime-fold
+ */
+fn twos_neg(x: u64, w: u32) -> u64 { mask_to_width((width_mask(w) - mask_to_width(x, w)) + (1 to u64), w) }
+
+/**
+ * magnitude — the unsigned magnitude of the value `bits` denotes under `info`: the value
+ * itself when non-negative, its two's-complement negation when negative. The signed
+ * multiply/divide paths run on magnitudes and re-apply the sign at the end.
+ *
+ * @param bits  the value's bit pattern
+ * @param info  the value's width/signedness
+ * @return      the absolute value as a u64
+ * @since #comptime-fold
+ */
+fn magnitude(bits: u64, info: IntInfo) -> u64 {
+    if is_negative(bits, info) { return twos_neg(bits, info.width) }
+    mask_to_width(bits, info.width)
+}
+
+/**
+ * is_min_bits — does `bits` denote the most-negative value of a signed type under
+ * `info` (bit pattern 2^(w-1))? The `MIN / -1` overflow and `-MIN` overflow guards test
+ * this; always false for an unsigned type.
+ *
+ * @param bits  the value's bit pattern
+ * @param info  the value's width/signedness
+ * @return      true iff the value is the signed minimum
+ * @since #comptime-fold
+ */
+fn is_min_bits(bits: u64, info: IntInfo) -> bool { info.is_signed && mask_to_width(bits, info.width) == msb_value(info.width) }
+
+/**
+ * is_all_ones — is every low bit of `bits` set at width `w` (the bit pattern of a signed
+ * `-1`)? The signed `MIN / -1` overflow guard tests the divisor with this.
+ *
+ * @param bits  the value's bit pattern
+ * @param w     the bit width
+ * @return      true iff the low `w` bits are all 1
+ * @since #comptime-fold
+ */
+fn is_all_ones(bits: u64, w: u32) -> bool { mask_to_width(bits, w) == width_mask(w) }

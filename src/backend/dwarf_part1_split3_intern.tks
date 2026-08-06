@@ -1,0 +1,157 @@
+/**
+ * append_std_opcode_lengths — the twelve standard-opcode operand-count bytes for opcode_base 13
+ * (`00 01 01 01 01 00 00 00 01 00 00 01`), the DWARF-4 default set the golden uses.
+ *
+ * @param buf  the buffer to extend
+ * @return     `buf` followed by the twelve bytes
+ * @since 0.3.1.0
+ */
+fn append_std_opcode_lengths(buf: []byte) -> []byte {
+    let lens: []u64 = [0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1]
+    mut b = buf
+    mut i: u64 = 0
+    loop {
+        if i >= lens.len { break }
+        b = teko::list::push(b, lens[i] to byte)
+        i = i + 1
+    }
+    b
+}
+
+/**
+ * DW_LNS_COPY — the standard line opcode that appends the current row to the matrix.
+ *
+ * @since 0.3.1.0
+ */
+const DW_LNS_COPY: u64 = 0x01
+
+/**
+ * DW_LNS_ADVANCE_PC — the standard line opcode that advances the code address by a ULEB operand.
+ *
+ * @since 0.3.1.0
+ */
+const DW_LNS_ADVANCE_PC: u64 = 0x02
+
+/**
+ * DW_LNS_ADVANCE_LINE — the standard line opcode that advances the source line by an SLEB operand.
+ *
+ * @since 0.3.1.0
+ */
+const DW_LNS_ADVANCE_LINE: u64 = 0x03
+
+/**
+ * DW_LNS_SET_FILE — the standard line opcode that sets the current file register to a ULEB operand.
+ *
+ * @since 0.3.1.0
+ */
+const DW_LNS_SET_FILE: u64 = 0x04
+
+/**
+ * DW_LNS_SET_COLUMN — the standard line opcode that sets the column to a ULEB operand.
+ *
+ * @since 0.3.1.0
+ */
+const DW_LNS_SET_COLUMN: u64 = 0x05
+
+/**
+ * LINE_FIRST_FILE — the DWARF line state machine's initial file register (1). A row keeping this
+ * file emits no set_file opcode, so a single-file program's line program is unchanged.
+ *
+ * @since 0.3.1.0
+ */
+const LINE_FIRST_FILE: i64 = 1
+
+/**
+ * emit_line_row — append one line-program row to `prog`. The first row (`first` true, `prev` the
+ * initial line 1) advances the line and sets column 1 with no address advance; every later row
+ * advances the code address then the line. When the row's file differs from the running file
+ * register `cur_file`, a set_file opcode precedes the line advance; a row keeping the current file
+ * emits no set_file, so a single-file program is unchanged. Each row ends with a copy.
+ *
+ * @param prog      the program bytes so far
+ * @param row       the row to emit
+ * @param prev      the source line of the previous row (1 before the first row)
+ * @param cur_file  the file register before this row (1 before the first row)
+ * @param first     true for the first row (sets column 1, no pc advance)
+ * @return          the extended program bytes
+ * @since 0.3.1.0
+ */
+fn emit_line_row(prog: []byte, row: DwLineRow, prev: u32, cur_file: i64, first: bool) -> []byte {
+    mut b = prog
+    if !first {
+        b = teko::list::push(b, DW_LNS_ADVANCE_PC to byte)
+        b = uleb128(b, row.pc_advance)
+    }
+    if row.file != cur_file {
+        b = teko::list::push(b, DW_LNS_SET_FILE to byte)
+        b = uleb128(b, row.file to u64)
+    }
+    b = teko::list::push(b, DW_LNS_ADVANCE_LINE to byte)
+    b = sleb128(b, (row.line to i64) - (prev to i64))
+    if first {
+        b = teko::list::push(b, DW_LNS_SET_COLUMN to byte)
+        b = uleb128(b, 1 to u64)
+    }
+    teko::list::push(b, DW_LNS_COPY to byte)
+}
+
+/**
+ * line_prefix_len — the byte count of the `.debug_line` unit header fields that precede the header
+ * body (unit_length 4 + version 2 + header_length 4), so the set_address slot's offset inside the
+ * program maps to its offset inside the whole section.
+ *
+ * @return  the prefix length (10)
+ * @since 0.3.1.0
+ */
+fn line_prefix_len() -> u64 {
+    10 to u64
+}
+
+/**
+ * empty_dw_section — a `DwSection` with no bytes and no relocations, the filler `no_dwarf_sink`
+ * gives its `info`/`line` fields.
+ *
+ * @return  the empty section
+ * @since 0.3.1.0
+ */
+fn empty_dw_section() -> DwSection {
+    DwSection { bytes = teko::list::empty(); relocs = teko::list::empty() }
+}
+
+/**
+ * dw_bt_found — the found-branch `DwBaseTypeLookup` for one frozen `name`/`byte_size`/`encoding`
+ * triple, extracted so `frozen_base_type`'s guard chain stays one line per type.
+ *
+ * @param name       the frozen type's Teko name
+ * @param byte_size  the frozen type's DW_AT_byte_size
+ * @param encoding   the frozen type's DW_AT_encoding (one of the `DW_ATE_*` constants)
+ * @return           `found = true`, carrying the described base type
+ * @since 0.3.1.0
+ */
+fn dw_bt_found(name: str, byte_size: u64, encoding: u64) -> DwBaseTypeLookup {
+    DwBaseTypeLookup { found = true; base_type = DwBaseType { name = name; byte_size = byte_size; encoding = encoding } }
+}
+
+/**
+ * dw_bt_not_found — the not-found `DwBaseTypeLookup` `frozen_base_type` returns for any name outside
+ * the frozen list.
+ *
+ * @return  `found = false`, with a zeroed placeholder `base_type`
+ * @since 0.3.1.0
+ */
+fn dw_bt_not_found() -> DwBaseTypeLookup {
+    DwBaseTypeLookup { found = false; base_type = DwBaseType { name = ""; byte_size = 0 to u64; encoding = 0 to u64 } }
+}
+
+/**
+ * frozen_base_type — the D2.5 frozen registry: the ONLY Teko scalar type names the DWARF writer may
+ * describe as a `DW_TAG_base_type`, each carrying its byte size and `DW_AT_encoding`. The list is
+ * explicit and enumerated on purpose — a name outside it (a struct, a slice, `str`, or a future
+ * scalar not yet reviewed) returns `found = false`, never a guessed description. Widening the
+ * registry is a deliberate, reviewed addition to this function's guard chain, never an inferred
+ * default.
+ *
+ * @param name  the Teko scalar type name (e.g. "i32", "f64", "bool", "byte")
+ * @return      the described base type, or `found = false` when `name` is not frozen
+ * @since 0.3.1.0
+ */

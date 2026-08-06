@@ -1,0 +1,114 @@
+
+/**
+ * A fresh monotonic-clock reading, in nanoseconds — the baseline `Phase.start` records and
+ * `elapsed_str` measures against. Reads the `.ticks` field straight off
+ * `teko::time::span_monotonic_now()`'s return: that function is PURE (non-extern) — it composes
+ * `teko::time`'s private extern clock read into an ordinary `span` on the Teko side — so its
+ * result is a normal, freely-composable value; only a value fresh off an EXTERN call itself
+ * would trip the storage restriction `teko::time`'s module doc describes. This module keeps
+ * every downstream call site (`Phase.start` and every fn threading it) a plain `i64`, matching
+ * the ROUND 0 precedent of never storing a `teko::time` carrier struct here.
+ *
+ * @return a monotonic-clock ns reading
+ */
+fn now_ns() -> i64 {
+    teko::time::span_monotonic_now().ticks
+}
+
+/**
+ * `s` right-padded with spaces to at least `width` bytes — column alignment for the
+ * phase label / counter fields.
+ *
+ * @param s      the text to pad
+ * @param width  the minimum output width
+ * @return       `s`, followed by enough spaces to reach `width`
+ */
+fn pad_right(s: str, width: u64) -> str {
+    mut out = s
+    loop {
+        if out.len >= width { break }
+        out = teko::str::concat(out, " ")
+    }
+    out
+}
+
+/**
+ * `s` left-padded with spaces to at least `width` bytes — right-aligning the elapsed
+ * time column.
+ *
+ * @param s      the text to pad
+ * @param width  the minimum output width
+ * @return       enough leading spaces to reach `width`, followed by `s`
+ */
+fn pad_left(s: str, width: u64) -> str {
+    mut out = s
+    loop {
+        if out.len >= width { break }
+        out = teko::str::concat(" ", out)
+    }
+    out
+}
+
+/**
+ * The monotonic time elapsed since `start` (ns, see `now_ns`), rendered to one decimal place of
+ * seconds ("42.1", no unit suffix — the caller appends "s").
+ *
+ * The subtraction cannot overflow, and NOT because anything checks it: both operands are readings
+ * of the SAME monotonic clock, whose ns value is a small positive count since an arbitrary boot-era
+ * origin, so their difference is bounded by the process's own uptime — many orders of magnitude
+ * inside `i64`. (The pre-0.3.1 wording claimed a "checked `-` … would panic on genuine overflow";
+ * there is no such check — `TEKO_OVERFLOW_DEBUG` is defined by no build path, so `-` on `i64` is a
+ * bare machine subtract. The bound is a property of the operands, and that is what makes it safe.)
+ * A negative delta — which a monotonic clock cannot produce — floors to zero rather than rendering
+ * a negative time.
+ *
+ * @param start  the phase's recorded start time, a monotonic-clock ns reading (see `now_ns`)
+ * @return       the elapsed seconds, one decimal place, as decimal text
+ */
+fn elapsed_str(start: i64) -> str {
+    ns_seconds_str(now_ns() - start)
+}
+
+/**
+ * A raw monotonic-clock ns delta rendered to one decimal place of seconds ("42.1", no unit suffix).
+ * The shared renderer behind `elapsed_str` (a phase's `now_ns() - start`) and the top-of-command wall
+ * total (`build_clock_report`), so a phase line and the command total read in the same units. A
+ * negative delta — which a monotonic clock cannot produce — floors to zero.
+ *
+ * @param ns  the elapsed nanoseconds
+ * @return    the elapsed seconds, one decimal place, as decimal text
+ */
+fn ns_seconds_str(ns: i64) -> str {
+    let ns_u = if ns < 0 { 0 to u64 } else { ns to u64 }
+    let tenths = ns_u / 100000000
+    $"{tenths / 10}.{tenths % 10}"
+}
+
+/**
+ * The mid-phase line: the padded label followed by the current counter text, with
+ * no elapsed time or mark yet (the phase is still running).
+ *
+ * @param label  the phase name
+ * @param text   the current counter/detail text
+ * @return       the rendered mid-phase line, un-terminated (no trailing newline)
+ */
+fn mid_line(label: str, text: str) -> str {
+    teko::str::concat("  ", teko::str::concat(pad_right(label, 11), pad_right(text, 24)))
+}
+
+/**
+ * The settled line: the padded label, the final counter/detail text, the elapsed
+ * time, the `✓`/`✗` mark, and — on a failure — the diagnostic message.
+ *
+ * @param label    the phase name
+ * @param text     the final counter/detail text
+ * @param start    the phase's start time, a monotonic-clock ns reading (for the elapsed column)
+ * @param mark     "✓" (success) or "✗" (failure)
+ * @param message  the failure diagnostic, or "" on success
+ * @return         the rendered settle line, un-terminated (no trailing newline)
+ */
+fn settle_line(label: str, text: str, start: i64, mark: str, message: str) -> str {
+    let elapsed = teko::str::concat(pad_left(elapsed_str(start), 6), "s")
+    let head = teko::str::concat("  ", teko::str::concat(pad_right(label, 11), teko::str::concat(pad_right(text, 24), teko::str::concat(elapsed, teko::str::concat("  ", mark)))))
+    if message == "" { head } else { teko::str::concat(head, teko::str::concat("  ", message)) }
+}

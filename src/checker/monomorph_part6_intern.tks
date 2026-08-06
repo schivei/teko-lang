@@ -1,0 +1,46 @@
+// src/checker/monomorph.tks  (namespace 'teko::checker')
+//
+// (S4b crumb 2c) THE MONOMORPHIZATION PASS — the final piece that makes a generic
+// function actually compile + run. The parser, type-param resolution and call-site
+// inference are already done (the typer infers T and substitutes it into the call's
+// RESULT type). But a generic `fn id<T>(x: T) -> T { return x }` still reaches codegen
+// as the un-stamped `tk_t_T id(tk_t_T x)`, which `cc` rejects. This pass:
+//   1. STAMPS a concrete copy of each generic fn per distinct instantiation, and
+//   2. REWRITES every generic call to the stamped instance's mangled name.
+// It runs LAST in the typer (over the fully-typed TProgram), so codegen and the
+// test runner both receive a tree that contains ONLY concrete, monomorphic functions.
+//
+// NO-OP GUARD (safety): a program with no generic function passes through BYTE-IDENTICAL
+// — the non-generic corpus must not perturb. The total rewrite walk only runs when at
+// least one TFunction carries type_params.
+//
+// (C twin: monomorph.c / monomorph.h — tk_monomorphize.)
+use teko::parser
+
+/**
+ * Is `f` an ABSTRACT template method — a method whose OWNER type (the last segment of its namespace)
+ * is a generic template (#254 layer 3)? Such a method's body still mentions the owner's abstract
+ * `T`, so like a generic free fn it must be DROPPED from the mono output; its concrete copies are
+ * stamped per instance below. A method of a NON-generic type (or a plain free fn, ns not owning a
+ * generic) stays — so the existing corpus (no generic methods) is byte-identical.
+ *
+ * @param f      a non-generic (own type_params empty) TFunction
+ * @param table  the folded type table (to classify the owner as a generic template)
+ * @return       true iff `f`'s owner namespace names a generic template
+ * @since onda-3 (#254)
+ */
+fn is_generic_template_method(f: TFunction, table: TypeTable) -> bool {
+    if f.namespace == "" { return false }
+    match find_generic_template(table, name_last_segment(f.namespace)) { TemplateReg => true; null => false }
+}
+
+// does `kept` already contain a type-decl named `name`? (dedup for appended generic instances.)
+fn mono_kept_has_type(kept: []TItem, name: str) -> bool {
+    mut i = 0
+    loop {
+        if i >= kept.len { break }
+        match kept[i] { parser::TypeDecl as d => { if teko::runtime::str_eq(d.name, name) { return true } }; _ => { } }
+        i++
+    }
+    false
+}

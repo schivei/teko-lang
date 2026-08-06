@@ -1,0 +1,28 @@
+use teko::parser
+
+
+/**
+ * note_redundant_casts_stmt — visit `s`'s own expression(s), descending into a nested block
+ * (`loop`/`defer`/`adopt`) the same way `metrics.tks::stmt_has_conversion` does for its own metric.
+ *
+ * @param file  the declaring function's source file
+ * @param s     the statement to walk
+ * @param out   the warnings accumulated so far
+ * @return      `out`, with every redundant cast reachable from `s` appended
+ * @since 0.3.1.0 (LSP crumb C)
+ */
+fn note_redundant_casts_stmt(file: str, s: TStatement, out: []str) -> []str {
+    match s {
+        TBinding as b => note_redundant_casts_expr(file, b.value, out)
+        TAssign as a => {
+            let acc1 = note_redundant_casts_expr(file, a.value, out)
+            if parser::assign_has_target(a.kind) { note_redundant_casts_expr(file, a.target, acc1) } else { acc1 }
+        }
+        TReturn as r => if r.has_value { note_redundant_casts_expr(file, r.value, out) } else { out }
+        TLoopStmt as l => note_redundant_casts_block(file, l.body, note_redundant_casts_block(file, l.init, out))
+        TExprStmt as x => note_redundant_casts_expr(file, x.expr, out)
+        TDeferStmt as d => note_redundant_casts_block(file, d.body, out)
+        TAdoptStmt as ad => note_redundant_casts_block(file, ad.body, out)
+        _ => out
+    }
+}

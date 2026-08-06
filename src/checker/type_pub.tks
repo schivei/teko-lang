@@ -1,0 +1,96 @@
+// src/checker/type.tks  (namespace 'teko::checker')
+
+/**
+ * PrimKind — the injected scalar primitives (B.19), distinct real types. Native numeric set
+ * (B.38 / TEKO_CORRECTION_PLAN §5): unsigned/signed integers 8–64 bit and the two IEEE floats
+ * f32/f64. `dec`/`bigint` remain deferred (runtime-backed). The 128-bit widths (`u64`/`i64`)
+ * and the half-precision float (`f32`) are REMOVED (drop-128, 2026-07-24) — the surface no
+ * longer accepts them (`scope.tks::builtin_type` honest-stops on `i64`/`u64`/`f32`), so no
+ * member for them exists here; `Bool` stays LAST.
+ */
+pub type PrimKind = enum {
+    U8; U16; U32; U64
+    I8; I16; I32; I64
+    F32; F64
+    Bool
+}
+
+/**
+ * prim_width — the bit width of a prim: ints 8/16/32/64, floats 32/64, bool 1.
+ *
+ * @param k  the prim kind to measure
+ * @return   its bit width
+ */
+pub fn prim_width(k: PrimKind) -> u32 {
+    match k {
+        U8 => 8; U16 => 16; U32 => 32; U64 => 64
+        I8 => 8; I16 => 16; I32 => 32; I64 => 64
+        F32 => 32; F64 => 64
+        Bool => 1
+    }
+}
+
+/**
+ * Doctrinal correction (TEKO_CORRECTION_PLAN §3 [Z1]; Laws M.0/M.1/M.3): `Unit` (the
+ * value-less struct) is EXCISED — "returns no value" is `void`. `void` is a RETURN-ONLY
+ * marker, legal ONLY as `Func.ret`: never a value, never a binding type, never a variant
+ * member (enforced in the checker, Z2a — the model only needs to REPRESENT it). `error` is
+ * the native lowercase type — it SUPERSEDES the old capitalized `Error` / `teko::Error`.
+ * Nullability has no dedicated unary type-former: an absent value is the union `T | null`
+ * (a `Variant` carrying a `Null` member), and a variant member may not itself be a bare
+ * `null` (enforced in the checker's `variant_member_admissible`).
+ *
+ * The cases below that carry data (Teko has no payload on a bare enum — a variant case is
+ * a struct). Byte/Str/error/void are markers (no payload).
+ */
+pub type Prim = struct { kind: PrimKind }
+pub type Slice = struct { element: Type }   // []T — recursive (B.8)
+pub type Named = struct { name: str }   // a user type, equal by NAME (nominal)
+pub type Variant = struct { members: []Type }   // A | B | … (two or more); members are COMPLETE types
+pub type Func = struct { params: []Type; ret: Type; variadic: bool; param_names: []str; n_required: u64; defaults: []parser::Expr }   // (params) -> ret (ret may be void); variadic = the LAST param is a C#-style `params` slice (2026-07-01) — false for closures/FFI/lambda types, true ONLY for a declared fn whose last source param carried `params`. DEFARGS (2026-07-01): param_names PARALLEL to params (empty []str for closures/FFI/builtins — no named-call, rule B); n_required = count of LEADING params with NO default (params[n_required..] all have one, TRAILING-ONLY rule A); defaults = the n_required..params.len default EXPRESSIONS, in order (params.len - n_required entries)
+pub type Byte = struct { }   // the octet type
+pub type Char = struct { }   // a UTF-8 codepoint (1–4 bytes); distinct by tag, runtime layout == []byte
+pub type Str = struct { }   // validated UTF-8
+pub type Error = struct { }   // the native `error` (lowercase; supersedes `Error`)
+pub type Void = struct { }   // return-only marker; legal ONLY as Func.ret
+/**
+ * Ptr — the checker representation of `ptr<T>`, a TYPED machine address. The internal meta-name
+ * differs from the surface `ptr<T>` exactly as `Slice`↔`[]T`; it is the primitive inside `Ref<T>`.
+ */
+pub type Ptr = struct {
+    /** the pointed-to type, or `null` for the opaque `ptr` ≡ `ptr<void>` ≡ `*void` (pointer-only, NOT the value-`void`). */
+    inner: Type | null
+}
+/**
+ * Uptr — the checker representation of `uptr`, the opaque word-size unsigned integer FFI authors
+ * spell for a raw `void*`-style pointer (C7.1a: transport-only at the FFI boundary, never
+ * dereferenced by Teko). Owner ruling (2026-08-04, verbatim PT-BR): *"Para FFI pode se usar a
+ * união `| null` para isso e para ponteiros `void*` temos `uptr`."* — value/FFI absence is the
+ * union `T | null` (`Variant{Null,T}`, `checker::Null`), and a raw address is `uptr`. The opaque
+ * `void*` case is already `Ptr{inner=null}` (`ptr<void>`).
+ */
+pub type Uptr = struct { }   // (C7.1a) opaque word-size unsigned — transport-only at the FFI boundary
+/**
+ * Reference — (MEM-1b) the META-level representation of the SAFE reference (user surface keyword
+ * `ref`, a compiler-known "C pointer WITHOUT `*`/`&`"). The meta-name differs from the surface
+ * name exactly as `Ptr`↔`ptr<T>`, `Slice`↔`[]T` (the lowercase/distinct convention avoids the
+ * surface name colliding with this internal type-case during self-host codegen). `Ref<T>` is the
+ * internal notation within the checker; it is never user-spellable. Reuses generics (no keyword).
+ * Mutable-target only and NEVER null (R2), so `inner` is a plain `Type` and there is no
+ * opaque/bare form (unlike `Ptr`). Deref/assign via `.value`+`mut`; auto-ref when a `mut` lvalue
+ * is passed where `Reference` (i.e., `ref T`) is expected. C representation = bare `<T> *` today
+ * (the `{p, metadata}` struct wrapper waits until regions/DI add metadata fields — W9+).
+ */
+pub type Reference = struct { inner: Type }
+
+/**
+ * The `null` unit type — the sole member of its own domain, a 1-byte zero-fill
+ * value (`0b00000000`). Distinct from `void` (return-only, never a value): a
+ * `Null` IS a bindable value meaning "absent". Ratified (owner, 2026-07-19).
+ *
+ * @since null-as-union
+ */
+pub type Null = struct { }
+
+// a semantic type. (Compiler-managed indirection for the recursive cases.)
+pub type Type = variant Prim | Byte | Char | Str | Slice | Named | Variant | Func | Error | Void | Ptr | Uptr | Reference | Null

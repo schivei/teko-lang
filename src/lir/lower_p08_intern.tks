@@ -1,0 +1,216 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/** lower_expr — lower a typed expression to LIR, returning the VReg carrying its value.
+    Mirrors emit_expr_ctx's dispatch over the subset; every out-of-subset node honest-stops
+    with a NAMED error. */
+
+/**
+ * float_literal_is_wide — a float literal's declared machine width: false only when its own
+ * resolved type is `f32`, true otherwise.
+ *
+ * The `true` default is deliberate and load-bearing: a literal whose type has not resolved to a
+ * concrete float PrimKind keeps the widest, no-information-loss reading, which is exactly what
+ * every backend assumed UNCONDITIONALLY before `LConstFloat.wide` existed — so no `f64` program's
+ * lowering moves by a single instruction and the fixpoint is undisturbed.
+ *
+ * @param ctx  the lowering context (its declared-enum table, which `prim_kind_of` consults)
+ * @param e    the literal expression, carrying its own resolved type
+ * @return     true for `f64` (and for a type this backend cannot resolve), false for `f32`
+ */
+fn float_literal_is_wide(ctx: LowerCtx, e: checker::TExpr) -> bool {
+    match prim_kind_of(e.type, ctx.enums, "float literal") {
+        checker::PrimKind as p => p != checker::PrimKind::F32
+        error => true
+    }
+}
+
+/** lower_number — an integer literal -> LConstInt, a float literal -> LConstFloat (carried
+    as its exact IEEE bits, plus the literal's own declared f32/f64 width). */
+fn lower_number(ctx: LowerCtx, e: checker::TExpr, n: checker::TNumber) -> Lowered | error {
+    let r = ctx_alloc(ctx)
+    if n.is_float {
+        let finst = const_float_inst(r.vreg, teko::f64_bits(n.fval), float_literal_is_wide(ctx, e), e.line, e.col)
+        return Lowered { ctx = ctx_append(r.ctx, finst); vreg = r.vreg }
+    }
+    let inst = const_int_inst(r.vreg, parser::numint_to_i64(n.value), e.line, e.col)
+    Lowered { ctx = ctx_append(r.ctx, inst); vreg = r.vreg }
+}
+
+/**
+ * lower_var — a local variable reference -> the VReg it already lives in (no instruction; an
+ * SSA-lite value IS the var). A bare fn-as-value (`is_func`) instead builds a closure literal
+ * wrapping the referenced top-level function (A1-7, #382 — `lower_fn_value`). A name that is NOT a
+ * local and NOT a function resolves to a module-level AGGREGATE const materialized in rodata
+ * (`lower_program` interned its bytes up front, #594 crumb 6): the value is the address of that
+ * rodata symbol (`LGlobalAddr`), exactly as a struct/slice value is its base address.
+ *
+ * A MUTABLE fat local (`lenv_bind_fat_slot`) keeps its `{ptr, len}` pair in a frame slot, so its
+ * scalar view is a LOAD of the pointer half rather than the binding's own VReg (which holds the
+ * slot's address) — the same "a fat value in scalar position IS its ptr" convention
+ * `lower_call_fat_as_scalar` follows, one indirection later (list-builtin degrau). An
+ * address-taken `mut` SCALAR local (`lenv_bind_scalar_slot`, 0.3.1.0 degrau 18) is the same
+ * shape one word narrower: its binding's own VReg holds the slot's ADDRESS, so a read LOADS the
+ * current value rather than reusing that VReg directly — a write made through the escaped
+ * `Ref<T>` handle must be visible here.
+ *
+ * @param ctx  the lowering context to append the reference's instructions into
+ * @param e    the variable-reference expression (carries its source position)
+ * @param v    the typed variable node (name + fn-as-value marker)
+ * @return     the appended context plus the VReg the value lives in
+ * @throws     when the name is neither a bound local, a fn value, nor an interned aggregate const
+ */
+fn lower_var(ctx: LowerCtx, e: checker::TExpr, v: checker::TVar) -> Lowered | error {
+    if v.is_func { return lower_fn_value(ctx, e, v) }
+    let slot = lenv_lookup_fat_slot(ctx.env, v.name)
+    if slot.found { return load_fat_slot_ptr(ctx, slot.slot, e.line, e.col) }
+    let sslot = lenv_lookup_scalar_slot(ctx.env, v.name)
+    if sslot.found {
+        let r = ctx_alloc(ctx)
+        return Lowered { ctx = ctx_append(r.ctx, load_inst(r.vreg, sslot.slot, sslot.ty, e.line, e.col)); vreg = r.vreg }
+    }
+    let hit = lenv_lookup(ctx.env, v.name)
+    if hit.found { return Lowered { ctx = ctx; vreg = hit.vreg } }
+    match find_const_rodata(ctx.rodata, v.name) {
+        LRodata as r => lower_const_addr(ctx, r.symbol, e.line, e.col)
+        null => error { message = teko::str::concat("native backend N1: unbound local `", v.name, "` (internal)") }
+    }
+}
+
+/**
+ * lower_const_addr — the address of a module-level aggregate const's rodata symbol as a Ptr VReg
+ * (`%r = global_addr @<symbol>`), the value an aggregate-const reference lowers to (#594 crumb 6). A
+ * struct/variant const's "value" is this base address (field access reads through it, exactly like a
+ * `TStructInit`); a str/slice const collapses to this ptr in scalar position (its length arrives via
+ * the fat path, `lower_const_fat`).
+ *
+ * @param ctx     the lowering context to append into
+ * @param symbol  the const's already-interned rodata symbol
+ * @param line    the reference's source line
+ * @param col     the reference's source column
+ * @return        the appended context plus the base-address VReg
+ */
+fn lower_const_addr(ctx: LowerCtx, symbol: str, line: u32, col: u32) -> Lowered {
+    let r = ctx_alloc(ctx)
+    Lowered { ctx = ctx_append(r.ctx, global_addr_inst(r.vreg, symbol, line, col)); vreg = r.vreg }
+}
+
+/**
+ * find_const_rodata — the rodata entry that materializes the module-level aggregate const named
+ * `name`, or null when no such const was interned (`lower_program` interns each aggregate const under
+ * the deterministic `const_rodata_symbol(name)` symbol, #594 crumb 6). The lookup keys on that
+ * symbol, so it never collides with a string-literal `.Lstr<N>` entry.
+ *
+ * @param rodata  the module's interned-rodata table
+ * @param name    the referenced const's name
+ * @return        the matching LRodata entry, or null
+ */
+fn find_const_rodata(rodata: []LRodata, name: str) -> LRodata | null {
+    let sym = const_rodata_symbol(name)
+    mut i: u64 = 0
+    loop {
+        if i >= rodata.len { break }
+        if rodata[i].symbol == sym { return rodata[i] }
+        i++
+    }
+    null
+}
+
+/**
+ * is_short_circuit_op — is this token one of the two SHORT-CIRCUITING logical operators
+ * (`&&`, `||`)? They are the only binary operators whose right operand is conditionally
+ * evaluated, so they are lowered as control flow (`lower_logical`) and never reach
+ * `lbinop_of`'s opcode table.
+ *
+ * @param op  the binary operator token
+ * @return    true for `&&` and `||`, false for every other binary operator
+ */
+fn is_short_circuit_op(op: lexer::TokenKind) -> bool {
+    op == lexer::TokenKind::AndAnd || op == lexer::TokenKind::OrOr
+}
+
+/**
+ * short_circuit_value — the constant a short-circuiting operator merges when the LEFT operand
+ * already decides the result: 0 (false) for `&&`, 1 (true) for `||`.
+ *
+ * @param op  the short-circuiting operator token (`&&` or `||`)
+ * @return    the i64 constant the deciding arm carries to the merge block
+ */
+fn short_circuit_value(op: lexer::TokenKind) -> i64 {
+    if op == lexer::TokenKind::AndAnd { return 0 }
+    1
+}
+
+/**
+ * lower_logical — lower `a && b` / `a || b` with SHORT-CIRCUIT semantics: branch on `a`, and
+ * evaluate `b` only on the arm where `a` did not already decide the result. Three blocks, in
+ * `lower_coalesce`'s shape: a `rhs` block that lowers the right operand, a `short` block that
+ * materializes the deciding constant (`short_circuit_value`), and a merge block whose single
+ * block-arg IS the expression's value. `&&` sends true to `rhs` and false to `short`; `||` sends
+ * true to `short` and false to `rhs`.
+ *
+ * The right operand must NOT be lowered eagerly (which is what `lower_binary` does for every
+ * other operator, and why this interception happens before it): the compiler's own source is
+ * full of `p != null && p.field` guards whose right side is only well-defined when the left
+ * side held. Lowering `&&` to a bitwise `IAnd` would evaluate both sides and miscompile them.
+ *
+ * The final context is built from the RIGHT operand's OWN post-lowering context, never from the
+ * pre-branch one — `ctx_with` copies every non-`func`/`block_id`/`env` field (rodata, lifted
+ * closures, …) from its FIRST argument, so sourcing it from the pre-branch context would
+ * silently drop whatever the right operand interned (the C1-6 miscompile class `lower_coalesce`
+ * documents). Each arm closes through `close_arm_to`, so an operand that already terminated its
+ * block (a diverging call) does not get a dead second terminator.
+ *
+ * @param ctx  the lowering context to append the expression's instructions into
+ * @param e    the logical expression (carries its source line/column)
+ * @param b    the typed binary node — its `op` is `&&` or `||`, both operands typed `bool`
+ * @return     the appended context (now emitting into the merge block) plus the merge
+ *             block-param VReg holding the 0/1 result
+ * @throws     when either operand is itself out of the lowered subset
+ */
+fn lower_logical(ctx: LowerCtx, e: checker::TExpr, b: checker::TBinary) -> Lowered | error {
+    let lo = match lower_expr(ctx, b.left) { Lowered as x => x; error as err => return err }
+    let rhsb = alloc_block(lo.ctx.func)
+    let shortb = alloc_block(rhsb.func)
+    let mergeb = alloc_block(shortb.func)
+    let mp = add_block_param(mergeb.func, mergeb.block_id)
+    let is_and = b.op == lexer::TokenKind::AndAnd
+    let t_target = if is_and { rhsb.block_id } else { shortb.block_id }
+    let f_target = if is_and { shortb.block_id } else { rhsb.block_id }
+    let br = branch_inst(lo.vreg, t_target, teko::list::empty(), f_target, teko::list::empty(), e.line, e.col)
+    let ctx1 = ctx_append(ctx_with(lo.ctx, mp.func, lo.ctx.block_id, lo.ctx.env), br)
+    let shortr = ctx_alloc(ctx_goto(ctx1, shortb.block_id))
+    let with_const = ctx_append(shortr.ctx, const_int_inst(shortr.vreg, short_circuit_value(b.op), e.line, e.col))
+    let short_args = teko::list::push(teko::list::empty(), shortr.vreg)
+    let short_func = close_arm_to(with_const, mergeb.block_id, short_args, e.line, e.col)
+    let rhs_ctx = ctx_with(with_const, short_func, rhsb.block_id, ctx1.env)
+    let ro = match lower_expr(rhs_ctx, b.right) { Lowered as x => x; error as err => return err }
+    let rhs_args = teko::list::push(teko::list::empty(), ro.vreg)
+    let rhs_func = close_arm_to(ro.ctx, mergeb.block_id, rhs_args, e.line, e.col)
+    Lowered { ctx = ctx_with(ro.ctx, rhs_func, mergeb.block_id, ctx1.env); vreg = mp.vreg }
+}
+
+/**
+ * lower_binary — lower a binary expression. `&&`/`||` are intercepted FIRST and lowered as
+ * short-circuiting control flow (`lower_logical`); every other operator lowers left then right
+ * and emits the LBin chosen by the RESULT's PrimKind (the S/U/F variant picked in `lbinop_of`).
+ *
+ * @param ctx  the lowering context to append the expression's instructions into
+ * @param e    the binary expression (carries its result type and source position)
+ * @param b    the typed binary node (the operator token and both operands)
+ * @return     the appended context plus the VReg holding the expression's value
+ * @throws     when either operand is out of the lowered subset, or the operator has no LBinOp
+ *             in the lowered subset
+ */
+fn lower_binary(ctx: LowerCtx, e: checker::TExpr, b: checker::TBinary) -> Lowered | error {
+    if is_short_circuit_op(b.op) { return lower_logical(ctx, e, b) }
+    let lo = match lower_expr(ctx, b.left) { Lowered as x => x; error as err => return err }
+    let ro = match lower_expr(lo.ctx, b.right) { Lowered as x => x; error as err => return err }
+    let k = match prim_kind_of(e.type, ctx.enums, "binary result") { checker::PrimKind as p => p; error as err => return err }
+    let op = match lbinop_of(b.op, k) { LBinOp as o => o; error as err => return err }
+    let guarded = if is_int_div_or_rem(op) { lower_div_zero_guard(ro.ctx, ro.vreg, e.line, e.col) } else { ro.ctx }
+    let r = ctx_alloc(guarded)
+    let inst = bin_inst(r.vreg, op, lo.vreg, ro.vreg, e.line, e.col)
+    Lowered { ctx = ctx_append(r.ctx, inst); vreg = r.vreg }
+}

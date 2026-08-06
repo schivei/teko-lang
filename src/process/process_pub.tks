@@ -1,0 +1,357 @@
+/**
+ * run — fork/exec `args[0]` with the given argument vector and wait for it to exit.
+ *
+ * The returned status is the CHILD's: 0–255 for a child that exited, 128+signo for one killed by a
+ * signal (so an aborting child reports 134, the same number `sh` would report for it).
+ *
+ * That 128+signo shape is POSIX's, and this call reports whatever the HOST reports — on Windows
+ * there are no signals and `_spawnvp` hands back the process exit code, so an aborting child is
+ * NOT 134 there. Do not treat any particular number as "the program panicked": a panic identifies
+ * itself on stderr, with the `TK_PANIC_MARKER` line (src/runtime/teko_rt.h). PR #94 cost a lane
+ * learning this — a Windows run that panicked exactly as intended reported 127.
+ *
+ * `TK_RT_SPAWN_FAILED` (-1, src/runtime/teko_rt.h) means something else entirely — the runtime never
+ * got a child running (`args` empty, or the spawn/fork/wait failed). It is NEGATIVE on purpose: no
+ * child status can be, so "I could not run it" is distinguishable from every code a child could
+ * produce. It used to be 127, which is simultaneously `sh`'s command-not-found, the POSIX
+ * exec-failed convention, and a legal choice for a child — three diagnoses wearing one number, and
+ * a CI failure reading `exit 127` was therefore unanswerable.
+ *
+ * The `[]str` slice lowers to a (ptr, len) pair before it reaches `tk_rt_run` — the same generic
+ * slice ABI every `extern fn` with a `[]str` parameter uses, `spawn_redirected` included.
+ *
+ * `extern fn` calls require native codegen; this was once unavailable under the (now-retired)
+ * interpreter (`vm_unsupported`, C7.1a). Both `teko build` and `teko run` are native today, so
+ * `teko::process::run` works under either.
+ *
+ * @param args  the argument vector; `args[0]` is the executable
+ * @return      the child's exit status, or `TK_RT_SPAWN_FAILED` when no child ran
+ */
+pub extern fn run(args: []str) -> i32 = "tk_rt_run" from "teko_rt"
+
+/**
+ * run_quiet — the same contract as `run`, with the child's stdout/stderr redirected to the null
+ * device.
+ *
+ * (issue #73) Used by the build backend's cc flag-family probe — compiling a throwaway empty
+ * translation unit to test whether the host cc accepts clang-only flags — so a deliberately-rejected
+ * flag does not leak an "unrecognized option" diagnostic into the user's build output.
+ *
+ * @param args  the argument vector; `args[0]` is the executable
+ * @return      the child's exit status, or `TK_RT_SPAWN_FAILED` when no child ran
+ */
+pub extern fn run_quiet(args: []str) -> i32 = "tk_rt_run_quiet" from "teko_rt"
+
+/**
+ * SPAWN_FAILED — `TK_RT_SPAWN_FAILED` (src/runtime/teko_rt.h) at the Teko level: the runtime never
+ * got a child running at all, as distinct from any status a real child could report (0..255 for one
+ * that exited, 128+signo for one a signal killed — never negative). Shared by `run`/`run_quiet`'s
+ * own return and by `ProcHandle.raw`/`wait_one`'s.
+ */
+pub const SPAWN_FAILED: i32 = -1
+
+/**
+ * ProcHandle — an opaque handle to a child process `spawn_redirected` launched and that has not yet
+ * been collected by `wait_one`.
+ *
+ * Never a bare pid: on Windows what is held is a process HANDLE and on POSIX a pid, and a raw `i64`
+ * simply called "pid" would be a lie on one of the two. `raw` negative (`SPAWN_FAILED`) means no
+ * child ever started — `wait_one` reads that without blocking.
+ *
+ * A `ProcHandle` may be waited on AT MOST ONCE: POSIX reaps the pid and Windows closes the HANDLE,
+ * so a second `wait_one` on the same value is undefined on both hosts.
+ *
+ * @since 0.3.1.2
+ */
+pub type ProcHandle = struct {
+    /** the host's opaque process reference (pid on POSIX, a HANDLE cast to i64 on Windows). */
+    raw: i64
+}
+
+/**
+ * NO_FD — `TK_RT_FD_NONE` (src/runtime/teko_rt.h) at the Teko level: "this is not a descriptor".
+ * One constant for the two claims, because they are the same claim — a redirection slot that names
+ * no descriptor, and a call that produced none. Negative for the reason `SPAWN_FAILED` is: a real
+ * descriptor is `>= 0` on both hosts, so the absence can never be read as a descriptor.
+ */
+pub const NO_FD: i64 = -1
+
+/**
+ * Pipe — the two ends of one anonymous pipe: bytes written to `write_fd` are read from `read_fd`,
+ * in order, and nowhere else.
+ *
+ * BOTH ENDS ARE OWNED BY WHOEVER CALLED `pipe()`, and neither is closed by anything in this module.
+ * That matters for one specific reason, and it is the classic defect of pipes: the reader sees
+ * end-of-file only when the LAST write end anywhere in the system is closed. A parent that gives
+ * `write_fd` to a child and then forgets to `close_fd` its own copy keeps the pipe open by itself,
+ * and its read never ends — not with an error, with a hang.
+ *
+ * @since 0.3.1.0
+ */
+pub type Pipe = struct {
+    /** the reading end; `fd_fill`/`read_to_eof` consume it. */
+    read_fd: i64
+    /** the writing end; hand it to a child through `spawn_redirected_fds`, then close this copy. */
+    write_fd: i64
+}
+
+/**
+ * pipe — create one anonymous pipe and return both of its ends.
+ *
+ * NEITHER END LEAKS INTO AN UNRELATED CHILD: POSIX marks both `FD_CLOEXEC` and Windows opens the
+ * pair `_O_NOINHERIT`, so a process spawned between this call and the pipe's use never receives a
+ * copy. That is not tidiness — one forgotten copy of the write end in any process holds the pipe
+ * open forever, and the reader's end-of-file never arrives. The child that is MEANT to have an end
+ * receives it explicitly, through `spawn_redirected_fds`.
+ *
+ * @return the two ends, or the host's refusal
+ * @throws when the host could not create a pipe (descriptor table exhausted)
+ * @since 0.3.1.0
+ */
+pub fn pipe() -> Pipe | error {
+    let packed = pipe_raw()
+    if packed < 0 { return error { message = "teko::process::pipe: the host refused to create a pipe" } }
+    Pipe { read_fd = pipe_read_fd_raw(packed); write_fd = pipe_write_fd_raw(packed) }
+}
+
+/**
+ * close_fd — close one descriptor, and mean it.
+ *
+ * THE CALL THAT TURNS A HANG INTO AN END-OF-FILE. After a child has been given a pipe's write end,
+ * the parent's own copy is the only thing still holding that end open; closing it is what makes the
+ * reader's `read_to_eof` terminate when the child exits. Nothing in this module closes a descriptor
+ * on the caller's behalf — a write end may legitimately be handed to several children before the
+ * parent lets go of it, and a runtime that guessed when to close would break that.
+ *
+ * @param fd  the descriptor to close
+ * @return    nothing on success, or the host's refusal
+ * @throws    when `fd` named no open descriptor, or the host's close failed
+ * @since 0.3.1.0
+ */
+pub fn close_fd(fd: i64) -> null | error {
+    if close_fd_raw(fd) == 0 { return null }
+    error { message = "teko::process::close_fd: not an open descriptor" }
+}
+
+/**
+ * spawn_redirected — launch `argv` WITHOUT waiting for it, with its three standard streams
+ * redirected to the paths the caller names and its working directory set to `dir`.
+ *
+ * This is the primitive that materializes R3 (the parent NAMES the destination, the child writes
+ * there): a "" path inherits the corresponding descriptor of the PARENT, which is what makes a call
+ * with every path empty behave exactly like `run`, minus the wait. `env` tokens (`K=V`) are ADDED to
+ * the child's inherited environment — the parent's own environment is never touched.
+ *
+ * Every redirection target is opened by the PARENT, before the fork/`CreateProcess`, so a RELATIVE
+ * `in_path`/`out_path`/`err_path` resolves against the PARENT's own working directory, never the
+ * child's `dir` — the redirection targets are the parent's concern, the argv's own cwd is the
+ * child's, and the two do not share a base.
+ *
+ * @param argv      the child's argument vector; `argv[0]` is the executable
+ * @param dir       the child's working directory ("" = the parent's)
+ * @param env       `K=V` tokens appended to the child's inherited environment ([] = inherit only)
+ * @param in_path   the file backing the child's stdin ("" = inherit)
+ * @param out_path  the file backing the child's stdout ("" = inherit)
+ * @param err_path  the file backing the child's stderr ("" = inherit)
+ * @return          the child's handle, or a handle with `raw = SPAWN_FAILED` when none started
+ * @since 0.3.1.2
+ */
+pub fn spawn_redirected(argv: []str, dir: str, env: []str, in_path: str, out_path: str, err_path: str) -> ProcHandle {
+    ProcHandle { raw = spawn_redirected_raw(spawn_payload(argv, dir, env, in_path, out_path, err_path, NO_FD, NO_FD, NO_FD)) }
+}
+
+/**
+ * spawn_redirected_fds — `spawn_redirected`, with the child's three standard streams bound to
+ * DESCRIPTORS the caller already owns instead of to files the runtime opens.
+ *
+ * THIS IS THE CALL THAT MAKES A CAPTURE STOP BEING A FILE. Hand it a `pipe()`'s write end as
+ * `out_fd` and the child's stdout arrives in this process's memory, with no `.out` scratch file
+ * created, named, read back or deleted — which is where the `.regr-pool-*` and `.toolquery.{in,out,
+ * err}` families in the working tree come from today.
+ *
+ * OWNERSHIP DOES NOT TRANSFER, and forgetting that is the classic pipe defect. The runtime never
+ * closes a descriptor passed here; the parent keeps its own copy of the write end and MUST
+ * `close_fd` it, or the matching read end never reaches end-of-file and a reader blocks forever.
+ * That is deliberate, not an oversight: one write end may legitimately be handed to several
+ * children before the parent lets go of it.
+ *
+ * `NO_FD` in a slot means "this call names no descriptor for that stream", and the child inherits
+ * the parent's own — the same reading an empty path has in `spawn_redirected`. The two surfaces
+ * share one payload and one runtime entry point, so the path route is unchanged by this one
+ * existing.
+ *
+ * @param argv    the child's argument vector; `argv[0]` is the executable
+ * @param dir     the child's working directory ("" = the parent's)
+ * @param env     `K=V` tokens appended to the child's inherited environment ([] = inherit only)
+ * @param in_fd   the descriptor backing the child's stdin (`NO_FD` = inherit)
+ * @param out_fd  the descriptor backing the child's stdout (`NO_FD` = inherit)
+ * @param err_fd  the descriptor backing the child's stderr (`NO_FD` = inherit)
+ * @return        the child's handle, or a handle with `raw = SPAWN_FAILED` when none started
+ * @since 0.3.1.0
+ */
+pub fn spawn_redirected_fds(argv: []str, dir: str, env: []str, in_fd: i64, out_fd: i64, err_fd: i64) -> ProcHandle {
+    ProcHandle { raw = spawn_redirected_raw(spawn_payload(argv, dir, env, "", "", "", in_fd, out_fd, err_fd)) }
+}
+
+/**
+ * wait_one — block until `h` terminates and return the status it terminated with.
+ *
+ * The status is the CHILD's, with the same reading `run` documents: 0–255 for one that exited,
+ * 128+signo for one a signal killed on POSIX, and the host exit code on Windows, which has no
+ * signals. A number never identifies a panic by itself — a panic identifies itself on stderr, with
+ * the `TK_PANIC_MARKER` line.
+ *
+ * @param h  the handle `spawn_redirected` returned
+ * @return   the child's exit status, or `SPAWN_FAILED` when `h` never named a real child
+ * @since 0.3.1.2
+ */
+pub fn wait_one(h: ProcHandle) -> i32 { wait_one_raw(h.raw) }
+
+/**
+ * VERDICT_CHANNEL_ENV — the environment key naming the THIRD channel (distinct from stdin/
+ * stdout/stderr): a path a child MAY append structured records to that neither its exit code nor
+ * its captured streams carry cleanly — a panic line, an in-flight test index, a coverage image.
+ *
+ * A PATH and not a fourth file descriptor, because POSIX and Windows both offer exactly three
+ * inheritable standard streams and no portable fourth one; a path is the one destination-naming
+ * mechanism both hosts already read the same way, survives the child dying mid-write, and stays on
+ * disk to be read after the fact.
+ */
+pub const VERDICT_CHANNEL_ENV: str = "TEKO_VERDICT_CHANNEL"
+
+/**
+ * verdict_channel_path — the path this process should append its structured records to.
+ *
+ * @return the channel path named by `VERDICT_CHANNEL_ENV`, or "" when the environment names none
+ * @since 0.3.1.2
+ */
+pub fn verdict_channel_path() -> str {
+    match teko::env::var(VERDICT_CHANNEL_ENV) { str as v => v; error => "" }
+}
+
+/**
+ * verdict_emit — append one structured record to the third channel, or print it to stderr when no
+ * channel is named.
+ *
+ * THE FALLBACK IS THE POINT (R0): a binary run by hand, with no `VERDICT_CHANNEL_ENV` in its
+ * environment, still shows every record it emits — the protocol is observable without a flag.
+ *
+ * ONE APPEND PER RECORD, AND THE SHAPE IT REPLACED WAS QUADRATIC. This used to read the WHOLE
+ * channel file back, concatenate the new record onto it, and rewrite the lot. Two arena allocations
+ * the size of the file per record — and Teko's arena frees ONCE, at process exit
+ * (`tk_regions_free_all`: "free EVERY still-live region") — so N records allocated the SUM of 1..N
+ * file sizes and never returned a byte. That is what flooded the regression tier: 8.4 GB anon-rss
+ * measured on the base. `teko::io::append_file` writes only the new record, so the cost is linear
+ * and the file is never read at all.
+ *
+ * THE CROSS-PROCESS RACE NARROWS WITH IT, which is a correctness gain and not only a speed one: a
+ * read-modify-write lets a second process clobber a record the first had already written, while a
+ * POSIX `O_APPEND` write is specified to seek and write ATOMICALLY against other writers. NOT AN
+ * UNLIMITED PROMISE — a large enough record may still be split across two writes, and the size at
+ * which that begins IS NOT MEASURED HERE; the MSVC CRT implements `_O_APPEND` as a seek followed by
+ * a write, so Windows keeps the race it always had.
+ *
+ * RE-ROOTED THROUGH `teko::journal::append_raw` (journal J1 wiring): the durability point above —
+ * one `write(2)` on an O_APPEND descriptor, no user-space buffer — is EXACTLY what the journal
+ * module already owns for its own segments, so this channel reuses that one mechanism instead of
+ * `teko::io::append_file` composing the same thing a second way. `append_raw` writes the line
+ * VERBATIM, no run stamp, no writer field, no kind — the observable channel content is byte-for-byte
+ * unchanged (still one line per call, still no header this reader has to skip).
+ *
+ * @param line  one record, WITHOUT a trailing newline (one is added)
+ * @return      nothing on success, or the write failure
+ * @since 0.3.1.2
+ */
+pub fn verdict_emit(line: str) -> null | error {
+    let path = verdict_channel_path()
+    if path.len == 0 { teko::io::eprintln(line); return null }
+    teko::journal::append_raw(path, line)
+}
+
+/**
+ * fd_wait_readable — block until reading `fd` would not block, or until `timeout_ms` elapses.
+ *
+ * READY COVERS END-OF-FILE, exactly as the host's own `poll` reports it: "a read will not block" is
+ * true both when bytes are pending and when the last write end is gone. The caller tells the two
+ * apart by reading — end-of-file is the empty read, and nothing else is.
+ *
+ * A DEADLINE IS THE POINT OF THIS CALL. A read on a pipe whose write end is still open somewhere
+ * blocks forever, and a test that blocks forever does not go red — it HANGS, and a hung suite never
+ * reports at all. `false` is a value that can be asserted on; a hang is not.
+ *
+ * The two hosts are not symmetric: POSIX waits in the kernel with the exact deadline, while Windows
+ * anonymous pipes are not waitable objects and the runtime must poll them every 2 ms, so a Windows
+ * wakeup is late by up to that interval. The number is stated in `src/runtime/teko_rt.h`; the
+ * Windows arm is reasoned and compiled there, never measured, because this repository has no
+ * Windows runner.
+ *
+ * @param fd          the descriptor to watch
+ * @param timeout_ms  the deadline in milliseconds; negative waits without one
+ * @return            true when a read would not block, false when the deadline expired first
+ * @throws            when `fd` could not be observed at all
+ * @since 0.3.1.0
+ */
+pub fn fd_wait_readable(fd: i64, timeout_ms: i64) -> bool | error {
+    let r = fd_wait_readable_raw(fd, timeout_ms)
+    if r < 0 { return error { message = "teko::process::fd_wait_readable: the descriptor could not be observed" } }
+    r == 1
+}
+
+/**
+ * fd_fill — stage one buffer's worth of `fd`, under a deadline, and say how many bytes landed.
+ *
+ * ZERO IS END-OF-FILE AND ONLY END-OF-FILE: the deadline expiring and the descriptor failing both
+ * come back on the error arm, with different messages, so a caller looping until zero terminates on
+ * the writer's exit and never on a problem it failed to notice.
+ *
+ * ONE STAGING BUFFER FOR THE WHOLE PROCESS, and the constraint is stated rather than hidden: a fill
+ * discards whatever the previous one left unread, so one drain must be finished before the next
+ * begins. Enough for reading one child's stream, which is what every caller here does; a reader
+ * multiplexing several children needs a buffer per descriptor, and that belongs with the channel
+ * this change deliberately does not build.
+ *
+ * @param fd          the descriptor to read
+ * @param timeout_ms  the deadline for the wait that precedes the read
+ * @return            how many bytes were staged; 0 at end-of-file
+ * @throws            when the deadline expired, or the descriptor could not be read
+ * @since 0.3.1.0
+ */
+pub fn fd_fill(fd: i64, timeout_ms: i64) -> u64 | error {
+    let n = fd_fill_raw(fd, timeout_ms)
+    if n == FILL_TIMEOUT { return error { message = "teko::process::fd_fill: the deadline expired with neither bytes nor end-of-file; a write end is still open somewhere" } }
+    if n == FILL_ERROR { return error { message = "teko::process::fd_fill: the descriptor could not be read" } }
+    n to u64
+}
+
+/**
+ * read_to_eof — drain `fd` until end-of-file, under a TOTAL deadline.
+ *
+ * THE DEADLINE IS NOT OPTIONAL AND IT IS TOTAL, not per-read. Two failures of a pipe are silent
+ * without one: a writer that never writes, and a write end the parent forgot to close — the second
+ * being the classic defect, where the reader waits for an end-of-file that its own open descriptor
+ * is preventing. Neither produces an error from the host; both produce a wait that never returns.
+ * A test that hangs is worse than one that fails, because a hung suite reports nothing at all. So
+ * the budget shrinks across every fill, and running out is an ERROR the caller can assert on.
+ *
+ * THE RESULT IS A `str`, SO THE BYTES MUST BE UTF-8 — which is what a captured text stream is, and
+ * what Teko's `str` means. A child emitting arbitrary binary is not what this drains.
+ *
+ * @param fd           the reading end to drain
+ * @param deadline_ms  the TOTAL time this drain may take, across all of its fills
+ * @return             everything the writer sent, up to end-of-file
+ * @throws             when the deadline expired before end-of-file, a fill failed, or the bytes
+ *                     drained were not valid UTF-8
+ * @since 0.3.1.0
+ */
+pub fn read_to_eof(fd: i64, deadline_ms: i64) -> str | error {
+    let started = now_ms()
+    mut acc: []byte = teko::list::empty()
+    loop {
+        let left = deadline_ms - (now_ms() - started)
+        if left <= 0 { return deadline_expired(acc.len) }
+        let n = match fd_fill(fd, left) { u64 as v => v; error as e => return e }
+        if n == 0 { break }
+        acc = take_staged(acc, n)
+    }
+    teko::text::str_from_utf8(acc)
+}

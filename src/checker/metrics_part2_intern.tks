@@ -1,0 +1,136 @@
+// src/checker/metrics.tks  (namespace 'teko::checker')
+use teko::parser
+
+
+/**
+ * arith_cast_rate_walk_expr — visit `e` and every expression reachable from it, noting each
+ * `TBinary` over an arith/bitwise op (`op_is_arith`/`op_is_arith_bitwise`, `expr.tks`) into
+ * `w` (D4's target regime — NOT shift, NOT logical `&&`/`||`, matching the W-RULE's own
+ * scope). Descends into every `TExprKind` arm so a nested arith op inside a larger
+ * expression (an `if`/`match` arm, a call argument, …) is visited too.
+ *
+ * @param e  the expression to walk
+ * @param w  the accumulated report
+ * @return   `w` with every arith/bitwise `TBinary` reachable from `e` noted
+ */
+fn arith_cast_rate_walk_expr(e: TExpr, w: ArithCastRateReport) -> ArithCastRateReport {
+    match e.kind {
+        TBinary as b => {
+            let w1 = if op_is_arith(b.op) || op_is_arith_bitwise(b.op) { arith_cast_rate_note(w, e) } else { w }
+            arith_cast_rate_walk_expr(b.right, arith_cast_rate_walk_expr(b.left, w1))
+        }
+        TUnary as u => arith_cast_rate_walk_expr(u.operand, w)
+        TCompare as cm => {
+            mut a = arith_cast_rate_walk_expr(cm.first, w)
+            mut i = 0
+            loop { if i >= cm.rest.len { break }; a = arith_cast_rate_walk_expr(cm.rest[i].operand, a); i++ }
+            a
+        }
+        TCall as c => {
+            mut a = w
+            mut i = 0
+            loop { if i >= c.args.len { break }; a = arith_cast_rate_walk_expr(c.args[i], a); i++ }
+            a
+        }
+        TCast as c => arith_cast_rate_walk_expr(c.expr, w)
+        TIfExpr as f => {
+            let a1 = arith_cast_rate_walk_expr(f.cond, w)
+            let a2 = arith_cast_rate_walk_block(f.then_blk, a1)
+            if f.has_else { arith_cast_rate_walk_block(f.else_blk, a2) } else { a2 }
+        }
+        TMatchExpr as m => {
+            mut a = arith_cast_rate_walk_expr(m.subject, w)
+            mut i = 0
+            loop {
+                if i >= m.arms.len { break }
+                if m.arms[i].has_when { a = arith_cast_rate_walk_expr(m.arms[i].guard, a) }
+                a = arith_cast_rate_walk_block(m.arms[i].body, a)
+                i++
+            }
+            a
+        }
+        TFieldAccess as fa => arith_cast_rate_walk_expr(fa.receiver, w)
+        TIndex as ix => arith_cast_rate_walk_expr(ix.index, arith_cast_rate_walk_expr(ix.receiver, w))
+        TStructInit as si => {
+            mut a = w
+            mut i = 0
+            loop { if i >= si.field_vals.len { break }; a = arith_cast_rate_walk_expr(si.field_vals[i], a); i++ }
+            a
+        }
+        TInterp as ip => {
+            mut a = w
+            mut i = 0
+            loop {
+                if i >= ip.holes.len { break }
+                a = arith_cast_rate_walk_expr(ip.holes[i], a)
+                if i < ip.specs.len {
+                    match ip.specs[i].kind {
+                        TFSpecDynamic as fd => {
+                            mut k = 0
+                            loop { if k >= fd.args.len { break }; a = arith_cast_rate_walk_expr(fd.args[k], a); k++ }
+                        }
+                        _ => { }
+                    }
+                }
+                i++
+            }
+            a
+        }
+        TInExpr as ie => {
+            mut a = arith_cast_rate_walk_expr(ie.lhs, w)
+            mut i = 0
+            loop { if i >= ie.elems.len { break }; a = arith_cast_rate_walk_expr(ie.elems[i], a); i++ }
+            a
+        }
+        TArrayLit as al => {
+            mut a = w
+            mut i = 0
+            loop { if i >= al.elements.len { break }; a = arith_cast_rate_walk_expr(al.elements[i].expr, a); i++ }
+            a
+        }
+        TBorrow as bo => arith_cast_rate_walk_expr(bo.operand, w)
+        _ => w
+    }
+}
+
+/**
+ * arith_cast_rate_walk_stmt — visit `s`, noting its own `TBinding`/`TAssign` (D4's other two
+ * target node kinds — `TBinary` is noted by `arith_cast_rate_walk_expr` itself) and
+ * descending into its expression(s) for nested arith ops, mirroring
+ * `coverage.tks::cov_walk_stmt`'s statement shape.
+ *
+ * @param s  the statement to walk
+ * @param w  the accumulated report
+ * @return   `w` with every arith/bitwise `TBinary` plus `s`'s own `TBinding`/`TAssign`
+ *           (if any) noted
+ */
+fn arith_cast_rate_walk_stmt(s: TStatement, w: ArithCastRateReport) -> ArithCastRateReport {
+    match s {
+        TBinding as b => arith_cast_rate_walk_expr(b.value, arith_cast_rate_note(w, b.value))
+        TAssign as a => {
+            let w1 = arith_cast_rate_note(w, a.value)
+            let w2 = arith_cast_rate_walk_expr(a.value, w1)
+            if parser::assign_has_target(a.kind) { arith_cast_rate_walk_expr(a.target, w2) } else { w2 }
+        }
+        TReturn as r => if r.has_value { arith_cast_rate_walk_expr(r.value, w) } else { w }
+        TLoopStmt as l => arith_cast_rate_walk_block(l.body, arith_cast_rate_walk_block(l.init, w))
+        TExprStmt as x => arith_cast_rate_walk_expr(x.expr, w)
+        TAdoptStmt as ad => arith_cast_rate_walk_block(ad.body, w)
+        _ => w
+    }
+}
+
+/**
+ * arith_cast_rate_walk_block — walk every statement of `stmts` in order, threading the
+ * report through.
+ *
+ * @param stmts  the statement block to walk
+ * @param w      the accumulated report
+ * @return       `w` with the whole block noted
+ */
+fn arith_cast_rate_walk_block(stmts: []TStatement, w: ArithCastRateReport) -> ArithCastRateReport {
+    mut a = w
+    mut i = 0
+    loop { if i >= stmts.len { break }; a = arith_cast_rate_walk_stmt(stmts[i], a); i++ }
+    a
+}

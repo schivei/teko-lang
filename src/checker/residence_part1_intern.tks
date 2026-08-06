@@ -1,0 +1,94 @@
+// src/checker/residence.tks   (namespace 'teko::checker')
+//
+// THE RESIDENCE ORACLE (0.3.1 modelo-de-memoria-por-escopo §3b/§14). A PURE, shared checker
+// artefact: for one typed function it computes, per local binding, WHERE the value resides — the
+// tightest region tier of the scope lattice that still dominates all of its uses (the LUB the
+// spine already computes, spine.tks:495). Both lowering engines (the C route in codegen.tks and the
+// native route in lower.tks) are meant to consume this IDENTICAL plan so they never diverge in
+// routing (the escape.tks:405 warning "they must never disagree", generalized).
+//
+// SCOPE (the FOUNDATION crumbs C1-C2b): this file DEFINES the oracle. NOBODY consumes it yet — the
+// activation (the C route reading the plan, C3; the native route inheriting the lifecycle, C4) is a
+// FOLLOW-ON. Being additive, it emits no C, changes no byte of existing output, and keeps the
+// FIXPOINT trivial.
+//
+// THE MODEL it realizes (design §0/§1): every value dies at the end of its LEXICAL scope; a return
+// MOVES the value to the caller's arena; ROOT residence has EXACTLY two legitimate origins — a
+// declared `#singleton` binding OR a structural cross-thread value (chan/wait_group). A join the
+// analysis cannot tighten below the top is a MEASURED DEFECT (tier `Unresolved`), never a silent
+// leak-to-root.
+use teko::parser
+
+/**
+ * binding_name — the source name of a binding's target, or "" for a destructure pattern (which the
+ * oracle cannot key into a single residence and leaves `Unresolved`).
+ *
+ * @param b  the typed binding
+ * @return   the simple name, or "" for a destructure
+ * @since 0.3.1
+ */
+fn binding_name(b: TBinding) -> str {
+    match b.target {
+        parser::SimpleName as sn => sn.name
+        parser::DestructurePattern => ""
+    }
+}
+
+/**
+ * residence_name_in_set — membership of `name` in a string set. A local (namespace-private) helper so the
+ * oracle needs no cross-file access to `escape.tks`'s own private `str_set_has`.
+ *
+ * @param set   the string set (the frame-escape set)
+ * @param name  the candidate name
+ * @return      true iff `name` occurs in `set`
+ * @since 0.3.1
+ */
+fn residence_name_in_set(set: []str, name: str) -> bool {
+    mut i = 0
+    loop {
+        if i >= set.len { break }
+        if set[i] == name { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * binding_points_to — the transitive points-to value of a bound name in the function's spine, or a
+ * conservative default: `PtTop` for a nameless (destructure) target so it resolves to the measured
+ * `Unresolved`, and `PtFrame` for a name outside the spine's cell universe (treated frame-local,
+ * then refined by the escape fast-path).
+ *
+ * @param sp    the function's spine
+ * @param name  the bound name ("" for a destructure)
+ * @return      the points-to value
+ * @since 0.3.1
+ */
+fn binding_points_to(sp: Spine, name: str) -> PointsTo {
+    if name == "" { return PtTop { } }
+    let idx = cell_of(sp, name)
+    if idx < 0 { return PtFrame { } }
+    sp.pt[idx to u32]
+}
+
+/**
+ * plan_binding — the per-binding residence verdict: combine the `#singleton` declaration, the
+ * spine's points-to, the frame-escape membership, and the block-local fast-path into a tier.
+ *
+ * @param b          the typed binding
+ * @param fn_body    the whole function body (the read-count denominator for block-locality)
+ * @param block_body the block the binding is declared at the top level of
+ * @param is_value   whether that block yields a value (its tail is escaping)
+ * @param sp         the function's spine
+ * @param escaping   the function's frame-escape set
+ * @return           the binding's residence verdict
+ * @since 0.3.1
+ */
+fn plan_binding(b: TBinding, fn_body: []TStatement, block_body: []TStatement, is_value: bool, sp: Spine, escaping: []str) -> BindingResidence {
+    let name = binding_name(b)
+    let is_singleton = b.di_kind == parser::DiKind::Singleton
+    let pt = binding_points_to(sp, name)
+    let escapes = residence_name_in_set(escaping, name)
+    let blk_local = binding_is_block_local(escaping, fn_body, block_body, is_value, b)
+    BindingResidence { name = name; tier = residence_tier(is_singleton, pt, escapes, blk_local) }
+}

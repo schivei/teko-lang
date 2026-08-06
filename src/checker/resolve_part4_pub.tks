@@ -1,0 +1,42 @@
+pub fn type_param_table(type_params: []str, type_constraints: []parser::ConstraintExpr, ns: str, table: TypeTable) -> TypeTable {
+    if type_params.len == 0 { return table }
+    mut tbl: TypeTable = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= type_params.len { break }
+        let own_constraint = constraint_at(type_constraints, i to u64)
+        tbl = teko::list::push(tbl, type_param_reg(type_params[i], own_constraint, ns, table))
+        i++
+    }
+    mut j = 0
+    loop {
+        if j >= table.len { break }
+        tbl = teko::list::push(tbl, table[j])
+        j++
+    }
+    tbl
+}
+
+/**
+ * Build a method's type-param table PREPENDED with the enclosing type's own type-params/constraints,
+ * so a method of `Box<T>` that references `T` resolves against the OWNER's `T` instead of failing
+ * with "unknown type: T" (#254 layer 1). `owner_name` is looked up by its CANONICAL name via the
+ * two-pass exact/qualified match (never an order-dependent bare probe — #290/#109 family): a bare
+ * name absent from the table (a plain non-generic owner, a free fn, or a receiver type-param)
+ * contributes an empty prefix, keeping the result byte-identical to `type_param_table(mtps, …)` for
+ * the existing corpus (which carries ZERO generic methods).
+ *
+ * @param owner_name  the enclosing type's canonical name (`ns::…::Type`, or bare at the root ns)
+ * @param mtps        the method's own type-params
+ * @param mtcs        the method's own type-constraints
+ * @param ns          the using namespace for the synthesized type-param TypeRegs (per type_param_table)
+ * @param table       the folded type table (source of the owner's params + the canonical lookup)
+ * @return            a type-param table over `owner_tps ++ mtps` / `owner_tcs ++ mtcs`
+ * @since onda-3 (#254)
+ */
+pub fn method_type_param_table(owner_name: str, mtps: []str, mtcs: []parser::ConstraintExpr, ns: str, table: TypeTable) -> TypeTable {
+    match type_table_find(table, owner_name, "") {
+        parser::TypeDecl as td => type_param_table(concat_tps(td.type_params, mtps), concat_tcs(td.type_constraints, mtcs), ns, table)
+        error => type_param_table(mtps, mtcs, ns, table)
+    }
+}

@@ -1,0 +1,209 @@
+
+/** How many nanoseconds make up one full day — the `time`/`datetime` ticks-field modulus. */
+const NS_PER_DAY: i64 = 86400000000000
+
+/**
+ * SPAN_MAX — the largest `span`, i.e. `i64::MAX` nanoseconds (~292 years). The ceiling every
+ * arithmetic guard in this module checks against BEFORE computing, so no operation here can reach
+ * a signed overflow.
+ */
+const SPAN_MAX: i64 = 9223372036854775807
+
+/**
+ * SPAN_MIN — the most negative `span` (`-2^63` ns), spelled as a subtraction because `2^63` has no
+ * `i64` literal form.
+ */
+const SPAN_MIN: i64 = -9223372036854775808
+
+/**
+ * SPAN_MAX_WHOLE_DAYS — the largest whole-day count whose nanosecond value, PLUS a full day of
+ * sub-day remainder, still fits a `span`.
+ *
+ * PROOF: `106_750 * 86_400_000_000_000 = 9_223_200_000_000_000_000`, which is
+ * `172_036_854_775_807` below `i64::MAX` — more than one whole day of nanoseconds
+ * (`86_400_000_000_000`) of headroom. So for any `|days| <= SPAN_MAX_WHOLE_DAYS` and any
+ * `|remainder| < NS_PER_DAY`, `days * NS_PER_DAY + remainder` is exactly representable, in both
+ * signs (`i64::MIN` is one further from zero than `i64::MAX`, so the negative side has strictly
+ * more room). One more day (`106_751`) would overflow: `106_751 * NS_PER_DAY` exceeds `i64::MAX`.
+ * This is `datetime_diff`'s exact domain — ~292 years, the `span` domain the module header states.
+ */
+const SPAN_MAX_WHOLE_DAYS: i64 = 106750
+
+/**
+ * DATE_DAYS_MAX — the largest `date.days`, i.e. `i32::MAX` (~5.88M years past the epoch). Every
+ * `date` arithmetic guard checks against it before narrowing back to the `i32` carrier.
+ */
+const DATE_DAYS_MAX: i64 = 2147483647
+
+/**
+ * DATE_DAYS_MIN — the most negative `date.days`, i.e. `i32::MIN`.
+ */
+const DATE_DAYS_MIN: i64 = -2147483648
+
+/**
+ * Days since 1970-01-01, UTC, from the host wall clock. Requires native codegen (an `extern fn`
+ * call); a bare scalar so a caller can compose it into a `date` without tripping the
+ * extern-struct calling convention documented in the module doc.
+ *
+ * @return the current UTC day count
+ */
+extern fn wall_days() -> i32 = "tk_rt_wall_days" from "teko_rt"
+
+/**
+ * Nanoseconds since midnight, UTC, from the host wall clock. NATIVE-ONLY; see `wall_days`.
+ *
+ * @return the current UTC ns-of-day, always `< 86_400_000_000_000`
+ */
+extern fn wall_ns_of_day() -> u64 = "tk_rt_wall_ns_of_day" from "teko_rt"
+
+/**
+ * The host's local UTC offset, in minutes (positive = east of UTC). NATIVE-ONLY; see `wall_days`.
+ *
+ * @return the current local UTC offset, in minutes
+ */
+extern fn wall_offset_minutes() -> i16 = "tk_rt_wall_offset_minutes" from "teko_rt"
+
+/**
+ * Nanoseconds from an UNSPECIFIED monotonic origin (never compare across process runs; never
+ * subtract against a wall-clock reading). NATIVE-ONLY; see `wall_days`.
+ *
+ * @return the current monotonic-clock ns reading
+ */
+extern fn monotonic_ns() -> i64 = "tk_rt_monotonic_ns" from "teko_rt"
+
+/**
+ * Floor division (rounds towards -infinity, unlike Teko's native truncating `/`) — the shared
+ * normalization primitive `datetime_add`/`timestamp_to_datetime` use to keep a ticks-of-day
+ * value inside `[0, modulus)` even when the dividend is negative.
+ *
+ * @param a  the dividend
+ * @param b  the positive divisor
+ * @return   `a` divided by `b`, rounded towards -infinity
+ */
+fn floor_div(a: i64, b: i64) -> i64 {
+    let q = a / b
+    let r = a % b
+    if r != 0 && (r < 0) != (b < 0) { q - 1 } else { q }
+}
+
+/**
+ * date_days_checked — narrow a day count computed in `i64` back onto the `date` carrier, refusing
+ * a value outside `i32`. Every `date`-producing operation funnels through here, so the carrier is
+ * never reached by a wrapped or truncated value: the domain is checked BEFORE the narrowing, and
+ * the message names the barrier (M.3) instead of leaving a `to i32` cast panic to speak for it.
+ *
+ * @param days  the day count to place on the carrier
+ * @return      `days` as the `i32` the `date` carrier holds
+ * @throws      panics when `days` is outside `[i32::MIN, i32::MAX]`, i.e. past `date`'s ratified
+ *              +-5.88M-year domain
+ */
+fn date_days_checked(days: i64) -> i32 {
+    if days > DATE_DAYS_MAX || days < DATE_DAYS_MIN {
+        panic("teko::time: date out of range (a `date` holds +-5.88M years, the i32 day carrier)")
+    }
+    days to i32
+}
+
+/**
+ * Render `v` in decimal, left-padded with leading zeros to at least `width` DIGITS. A negative `v`
+ * keeps its `-` in front of the padded digits (`pad_zeros(-221, 4)` is `"-0221"`, the ISO-8601
+ * extended spelling of a pre-year-1 year), so the sign is never counted as a digit nor buried
+ * inside the zeros.
+ *
+ * @param v      the value to render (any sign — `civ.year` is documented negative-capable)
+ * @param width  the minimum digit width, excluding any sign
+ * @return       `v` in decimal, zero-padded on the left to `width` digits
+ */
+fn pad_zeros(v: i64, width: i64) -> str {
+    if v < 0 { return teko::str::concat("-", pad_zeros_magnitude(magnitude_of(v), width)) }
+    pad_zeros_magnitude(v to u64, width)
+}
+
+/**
+ * Render an unsigned magnitude in decimal, left-padded with leading zeros to at least `width`
+ * digits — the sign-free core `pad_zeros` wraps.
+ *
+ * @param mag    the magnitude to render
+ * @param width  the minimum digit width
+ * @return       `mag` in decimal, zero-padded on the left to `width` digits
+ */
+fn pad_zeros_magnitude(mag: u64, width: i64) -> str {
+    mut s = digits_of_magnitude(mag)
+    loop {
+        if s.len to i64 >= width { break }
+        s = teko::str::concat("0", s)
+    }
+    s
+}
+
+/**
+ * Render an integer as its plain decimal text, sign included.
+ *
+ * The pre-0.3.1 form took an `i64`, documented "non-negative", and computed each digit as
+ * `(48 + n % 10) to byte`. Teko's `%` truncates towards zero, so for a NEGATIVE `n` the remainder
+ * is negative and the digit byte came out BELOW `'0'` — the year -221 rendered as `"/."`-style
+ * garbage. `CivilDate.year` is documented negative-capable and `civil_from_days` genuinely produces
+ * it for any pre-0001-01-01 date, so that path was reachable from the public API
+ * (`date_to_string`). Splitting the sign off and rendering the MAGNITUDE makes the function total.
+ *
+ * @param v  the value to render (any sign)
+ * @return   the decimal text of `v` ("0" for zero, `-` prefixed when negative)
+ */
+fn digits_of(v: i64) -> str {
+    if v < 0 { return teko::str::concat("-", digits_of_magnitude(magnitude_of(v))) }
+    digits_of_magnitude(v to u64)
+}
+
+/**
+ * magnitude_of — the absolute value of `v` as a `u64`.
+ *
+ * PROOF THAT IT IS EXACT AT `i64::MIN`: negating `v` directly would overflow there (`2^63` is not
+ * an `i64`), so the negation is done on `v + 1` — which lies in `[i64::MIN + 1, 0]`, making
+ * `0 - (v + 1)` land in `[0, i64::MAX]`, both in range — and the missing unit is added back in the
+ * `u64` domain, where `i64::MAX + 1` is representable.
+ *
+ * @param v  the (possibly negative) value whose magnitude is wanted
+ * @return   `|v|`, exactly, for every `i64`
+ */
+fn magnitude_of(v: i64) -> u64 {
+    if v >= 0 { return v to u64 }
+    ((0 - (v + 1)) to u64) + 1
+}
+
+/**
+ * Render an unsigned magnitude as its plain decimal text — the sign-free core `digits_of` wraps.
+ *
+ * @param mag  the magnitude to render
+ * @return     the decimal digits of `mag` ("0" for zero)
+ */
+fn digits_of_magnitude(mag: u64) -> str {
+    if mag == 0 { return "0" }
+    mut digits: []byte = teko::list::empty()
+    mut n = mag
+    loop {
+        if n == 0 { break }
+        digits = teko::list::push(digits, (48 + (n % 10)) to byte)
+        n = n / 10
+    }
+    mut xs: []byte = teko::list::empty()
+    mut k = digits.len
+    loop { if k == 0 { break }; k = k - 1; xs = teko::list::push(xs, digits[k]) }
+    str(xs)
+}
+
+/**
+ * The number of leading bytes at `pattern[i]` that equal `pattern[i]` (a run of one token byte).
+ *
+ * Calendar patterns use repeated letters to select a width (`yyyy` vs `yy`, `MM` vs `M`); this
+ * counts the run so the caller can dispatch on its length.
+ *
+ * @param pattern  the format pattern
+ * @param i        the run's start index
+ * @return         the count of consecutive bytes equal to `pattern[i]`, starting at `i`
+ */
+fn run_length(pattern: str, i: u64) -> u64 {
+    let c = pattern[i]
+    mut j = i
+    loop { if j >= pattern.len { break }; if pattern[j] != c { break }; j++ }
+    j - i
+}

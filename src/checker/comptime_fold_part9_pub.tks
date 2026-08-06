@@ -1,0 +1,27 @@
+
+
+/**
+ * fold_expr — the Layer-1a fold driver (CF2): rewrite `e` so every name-free, provably-const INTEGER
+ * op-tree becomes the literal it evaluates to (`literal_of(eval_const(e))`), and every other node is
+ * rebuilt around its folded children (a partially-const tree folds its const sub-trees). Composed
+ * AFTER `inline_rw_expr`'s reference substitution, so a module const's op-tree (e.g. `~(0 to u64)`,
+ * substituted at each use) collapses to its literal at compile time, so native codegen emits an
+ * immediate instead of re-executing the op-tree. TOTAL over `TExprKind`. A provably-const overflow / ÷0 /
+ * out-of-range surfaces as a located compile error (M.1), propagated from `eval_const`.
+ *
+ * @param e      the typed expression to fold (post reference-substitution)
+ * @param table  the type table (forwarded to the evaluator; unused for the integer subset)
+ * @param env    the environment (unused for the name-free integer subset the fold admits)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       the folded expression (a literal where provably const), or a located error
+ * @throws       a located error when a folded constant overflows / divides by zero / is out of range
+ * @since #comptime-fold
+ */
+pub fn fold_expr(e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExpr | error {
+    match e.kind {
+        TUnary => fold_op_node(e, table, env, agg)
+        TBinary => fold_op_node(e, table, env, agg)
+        TCast => fold_op_node(e, table, env, agg)
+        _ => fold_children(e, table, env, agg)
+    }
+}

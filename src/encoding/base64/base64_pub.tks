@@ -1,0 +1,142 @@
+
+/**
+ * The RFC 4648 §4 standard alphabet (`+`/`/`), WITH `=` padding — the default MIME/general-
+ * purpose form (`Content-Transfer-Encoding: base64`, data URIs, PEM-adjacent text).
+ *
+ * @return      the standard, padded `Base64Alphabet`
+ */
+pub fn standard_alphabet() -> Base64Alphabet {
+    Base64Alphabet { char62 = b'+'; char63 = b'/'; padded = true }
+}
+
+/**
+ * The RFC 4648 §5 URL-and-filename-safe alphabet (`-`/`_`), WITH `=` padding — safe to embed
+ * directly in a URL path/query segment without percent-encoding `+`/`/`.
+ *
+ * @return      the URL-safe, padded `Base64Alphabet`
+ */
+pub fn url_safe_alphabet() -> Base64Alphabet {
+    Base64Alphabet { char62 = b'-'; char63 = b'_'; padded = true }
+}
+
+/**
+ * The URL-safe alphabet WITHOUT `=` padding — the compact `base64url` form used by JWT
+ * segments and other contexts where trailing padding is conventionally omitted.
+ *
+ * @return      the URL-safe, unpadded `Base64Alphabet`
+ */
+pub fn url_safe_no_pad_alphabet() -> Base64Alphabet {
+    Base64Alphabet { char62 = b'-'; char63 = b'_'; padded = false }
+}
+
+/**
+ * Encodes `data` as Base64 text under `alphabet`. Total (M.3 — a byte slice always has a valid
+ * Base64 rendering): never fails, so the return type is `str` bare.
+ *
+ * @param data      the raw bytes to encode
+ * @param alphabet  the alphabet (standard, URL-safe, or URL-safe unpadded) to render under
+ * @return          the Base64-encoded text
+ */
+pub fn encode(data: []byte, alphabet: Base64Alphabet) -> str {
+    mut out: []byte = teko::list::empty()
+    mut i: u64 = 0
+    let full_groups = data.len / 3
+    loop {
+        if i >= full_groups { break }
+        let base = i * 3
+        out = encode_full_group(out, alphabet, data[base], data[base + 1], data[base + 2])
+        i++
+    }
+    let remainder = data.len - (full_groups * 3)
+    if remainder == 1 {
+        out = encode_tail_group(out, alphabet, data[full_groups * 3], false, 0 to byte)
+    } else if remainder == 2 {
+        out = encode_tail_group(out, alphabet, data[full_groups * 3], true, data[(full_groups * 3) + 1])
+    }
+    str(out)
+}
+
+/**
+ * `encode` under the RFC 4648 §4 standard, padded alphabet — the common default.
+ *
+ * @param data  the raw bytes to encode
+ * @return      the standard-alphabet Base64 text
+ */
+pub fn encode_standard(data: []byte) -> str {
+    encode(data, standard_alphabet())
+}
+
+/**
+ * `encode` under the RFC 4648 §5 URL-safe, padded alphabet.
+ *
+ * @param data  the raw bytes to encode
+ * @return      the URL-safe Base64 text
+ */
+pub fn encode_url_safe(data: []byte) -> str {
+    encode(data, url_safe_alphabet())
+}
+
+/**
+ * `encode` under the URL-safe, UNPADDED alphabet (the `base64url`/JWT-segment convention).
+ *
+ * @param data  the raw bytes to encode
+ * @return      the URL-safe, unpadded Base64 text
+ */
+pub fn encode_url_safe_no_pad(data: []byte) -> str {
+    encode(data, url_safe_no_pad_alphabet())
+}
+
+/**
+ * Decodes Base64 `text` under `alphabet` back to raw bytes. Malformed input (an out-of-
+ * alphabet character, bad padding, or an illegal trailing group length) is a checked `error`
+ * (M.1 fail-loud), never a panic.
+ *
+ * @param text      the Base64-encoded text
+ * @param alphabet  the alphabet the text was encoded under
+ * @return          the decoded bytes, or `error` for malformed input
+ */
+pub fn decode(text: str, alphabet: Base64Alphabet) -> []byte | error {
+    let input = bytes_of_str(text)
+    let trimmed = match trim_base64_padding(input, alphabet) { Base64Trimmed as t => t; error as e => return e }
+    if !alphabet.padded {
+        match validate_unpadded_length(trimmed.body.len) { null => { }; error as e => return e }
+    }
+    let body = trimmed.body
+    let has_trailing = alphabet.padded && trimmed.pad_count > 0
+    let full_quantums = body.len / 4
+    mut out = match decode_full_quantums(teko::list::empty(), alphabet, body, full_quantums) { []byte as b => b; error as e => return e }
+    if has_trailing {
+        return decode_trailing_quantum(out, alphabet, trimmed, full_quantums * 4)
+    }
+    decode_unpadded_tail(out, alphabet, body, full_quantums)
+}
+
+/**
+ * `decode` under the RFC 4648 §4 standard, padded alphabet.
+ *
+ * @param text  the standard-alphabet Base64 text
+ * @return      the decoded bytes, or `error` for malformed input
+ */
+pub fn decode_standard(text: str) -> []byte | error {
+    decode(text, standard_alphabet())
+}
+
+/**
+ * `decode` under the RFC 4648 §5 URL-safe, padded alphabet.
+ *
+ * @param text  the URL-safe Base64 text
+ * @return      the decoded bytes, or `error` for malformed input
+ */
+pub fn decode_url_safe(text: str) -> []byte | error {
+    decode(text, url_safe_alphabet())
+}
+
+/**
+ * `decode` under the URL-safe, UNPADDED alphabet.
+ *
+ * @param text  the URL-safe, unpadded Base64 text
+ * @return      the decoded bytes, or `error` for malformed input
+ */
+pub fn decode_url_safe_no_pad(text: str) -> []byte | error {
+    decode(text, url_safe_no_pad_alphabet())
+}

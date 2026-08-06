@@ -1,0 +1,160 @@
+use teko::checker
+
+/**
+ * cov_build_sitefns — walk the typed program and collect one `SiteFn` per production function, in
+ * program-item order, applying the SAME filter the AST-walk report applies (skip `#test` functions
+ * and the coverage machinery itself). The `fn_idx` recorded is the program-item index `i`, which is
+ * exactly the sink key the native run marked by, so the report's join matches the build's marks.
+ *
+ * @param prog  the fully-typed program the build stage already holds
+ * @return      the production functions' coverage identities, in render order
+ */
+fn cov_build_sitefns(prog: checker::TProgram) -> []SiteFn {
+    mut fns: []SiteFn = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            checker::TFunction as f => {
+                if !f.is_test && f.namespace != "teko::coverage" {
+                    let w = cov_walk_block(f.body, cov_walk_empty())
+                    fns = teko::list::push(fns, SiteFn { fn_idx = i to u64; namespace = f.namespace; name = f.name; file = f.file; fn_line = f.line; walk = w })
+                }
+            }
+            _ => { }
+        }
+        i++
+    }
+    fns
+}
+
+/**
+ * cov_emit_one_sitefn — append ONE `SiteFn`'s serialized record to the blob buffer: its counts
+ * line, its three length-prefixed identity strings, its distinct lines, and its branch-site
+ * triples. The mirror of `sm_parse_fn`.
+ *
+ * @param buf  the copy-grow blob buffer being built
+ * @param sf   the production function's coverage identity to serialize
+ * @return     the buffer with `sf`'s record appended
+ */
+fn cov_emit_one_sitefn(buf: []byte, sf: SiteFn) -> []byte {
+    mut b = teko::mem::append_fo(buf, $"{sf.fn_idx} {sf.fn_line} {sf.namespace.len} {sf.name.len} {sf.file.len} {sf.walk.lines.len} {sf.walk.sites.len}\n")
+    b = teko::mem::append_fo(b, sf.namespace)
+    b = teko::mem::append_fo(b, sf.name)
+    b = teko::mem::append_fo(b, sf.file)
+    b = teko::mem::append_fo(b, "\n")
+    mut k: u64 = 0
+    loop {
+        if k >= sf.walk.lines.len { break }
+        b = teko::mem::append_fo(b, $"{sf.walk.lines[k]} ")
+        k = k + 1
+    }
+    b = teko::mem::append_fo(b, "\n")
+    mut s: u64 = 0
+    loop {
+        if s >= sf.walk.sites.len { break }
+        let st = sf.walk.sites[s]
+        b = teko::mem::append_fo(b, $"{st.line} {st.col} {st.n} ")
+        s = s + 1
+    }
+    teko::mem::append_fo(b, "\n")
+}
+
+/**
+ * sm_is_ws — is `c` a byte the site-map's whitespace-separated integer stream skips (space, tab,
+ * CR, LF)?
+ *
+ * @param c  the byte to test
+ * @return   whether `c` separates tokens
+ */
+fn sm_is_ws(c: byte) -> bool { c == b' ' || c == b'\n' || c == b'\t' || c == b'\r' }
+
+/**
+ * sm_skip_ws — advance past any run of whitespace from `p`.
+ *
+ * @param s  the blob
+ * @param p  the start offset
+ * @return   the offset of the first non-whitespace byte at or after `p` (or `s.len`)
+ */
+fn sm_skip_ws(s: str, p: u64) -> u64 {
+    mut q = p
+    loop {
+        if q >= s.len { break }
+        if !sm_is_ws(s[q]) { break }
+        q = q + 1
+    }
+    q
+}
+
+/**
+ * sm_uint — read one decimal unsigned integer from the blob, skipping any leading whitespace. The
+ * counts in the header drive how many of these each record reads, so a physical newline is just
+ * skipped as whitespace like any separator.
+ *
+ * @param s  the blob
+ * @param p  the offset to read from
+ * @return   the decoded value and the offset just past its last digit
+ */
+fn sm_uint(s: str, p: u64) -> SmScan {
+    mut q = sm_skip_ws(s, p)
+    mut n: u64 = 0
+    loop {
+        if q >= s.len { break }
+        let c = s[q]
+        if c < b'0' || c > b'9' { break }
+        n = n * 10 + (c to u64) - (b'0' to u64)
+        q = q + 1
+    }
+    SmScan { v = n; pos = q }
+}
+
+/**
+ * sm_parse_fn — parse ONE `SiteFn` record from the blob at `p`: the seven counts, the three
+ * length-sliced identity strings, the distinct lines, and the branch-site triples. The mirror of
+ * `cov_emit_one_sitefn`. The strings are taken by BYTE LENGTH (from the counts) rather than by a
+ * delimiter, so a file path's own digits or slashes cannot be mistaken for structure.
+ *
+ * @param s  the blob
+ * @param p  the offset of this record's counts line
+ * @return   the parsed function and the offset past its record, or a truncation error
+ * @throws   when the declared string lengths run past the end of the blob (a truncated site-map)
+ */
+fn sm_parse_fn(s: str, p: u64) -> SmFnParse | error {
+    let fn_idx = sm_uint(s, p)
+    let fn_line = sm_uint(s, fn_idx.pos)
+    let ns_len = sm_uint(s, fn_line.pos)
+    let name_len = sm_uint(s, ns_len.pos)
+    let file_len = sm_uint(s, name_len.pos)
+    let n_lines = sm_uint(s, file_len.pos)
+    let n_sites = sm_uint(s, n_lines.pos)
+    let bs = sm_skip_ws(s, n_sites.pos)
+    let ns_end = bs + ns_len.v
+    let name_end = ns_end + name_len.v
+    let file_end = name_end + file_len.v
+    if file_end > s.len { return error { message = "site-map: identity strings run past end of blob" } }
+    let namespace = teko::str::slice(s, bs, ns_end)
+    let name = teko::str::slice(s, ns_end, name_end)
+    let file = teko::str::slice(s, name_end, file_end)
+    mut lines: []u32 = teko::list::empty()
+    mut cur = file_end
+    mut k: u64 = 0
+    loop {
+        if k >= n_lines.v { break }
+        let u = sm_uint(s, cur)
+        lines = teko::list::push(lines, u.v to u32)
+        cur = u.pos
+        k = k + 1
+    }
+    mut sites: []BranchSite = teko::list::empty()
+    mut j: u64 = 0
+    loop {
+        if j >= n_sites.v { break }
+        let ul = sm_uint(s, cur)
+        let uc = sm_uint(s, ul.pos)
+        let un = sm_uint(s, uc.pos)
+        sites = teko::list::push(sites, BranchSite { line = ul.v to u32; col = uc.v to u32; n = un.v })
+        cur = un.pos
+        j = j + 1
+    }
+    SmFnParse { sf = SiteFn { fn_idx = fn_idx.v; namespace = namespace; name = name; file = file; fn_line = fn_line.v to u32; walk = CovWalk { sites = sites; lines = lines } }; pos = cur }
+}

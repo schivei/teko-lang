@@ -1,0 +1,183 @@
+/**
+ * three_regs — a three-register use list, in order (the `MMSub` case).
+ *
+ * @param MReg a  the first register
+ * @param MReg b  the second register
+ * @param MReg c  the third register
+ * @return []MReg  the three-element list
+ */
+fn three_regs(a: MReg, b: MReg, c: MReg) -> []MReg {
+    teko::list::push(two_regs(a, b), c)
+}
+
+/**
+ * cons_reg — `a` prepended to `rest` (the `MCallIndirect` target-plus-args
+ * use list).
+ *
+ * @param MReg a  the register to prepend
+ * @param []MReg rest  the tail
+ * @return []MReg  `a` followed by every element of `rest`
+ */
+fn cons_reg(a: MReg, rest: []MReg) -> []MReg {
+    mut out = one_reg(a)
+    mut i: u64 = 0
+    loop {
+        if i >= rest.len { break }
+        out = teko::list::push(out, rest[i])
+        i++
+    }
+    out
+}
+
+/**
+ * ir_def — a define-only decomposition (a fresh materialization / address).
+ *
+ * @param MReg d  the defined register
+ * @return InstRegs  `{has_def, def_reg=d, no uses}`
+ */
+fn ir_def(d: MReg) -> InstRegs {
+    InstRegs { has_def = true; def_reg = d; uses = teko::list::empty(); is_call = false }
+}
+
+/**
+ * ir_def_use — a define-and-use decomposition.
+ *
+ * @param MReg d  the defined register
+ * @param []MReg us  the used registers
+ * @return InstRegs  `{has_def, def_reg=d, uses=us}`
+ */
+fn ir_def_use(d: MReg, us: []MReg) -> InstRegs {
+    InstRegs { has_def = true; def_reg = d; uses = us; is_call = false }
+}
+
+/**
+ * ir_use — a use-only decomposition (a store / compare / conditional test).
+ *
+ * @param []MReg us  the used registers
+ * @return InstRegs  `{no def, uses=us}`
+ */
+fn ir_use(us: []MReg) -> InstRegs {
+    InstRegs { has_def = false; def_reg = IR_DUMMY; uses = us; is_call = false }
+}
+
+/**
+ * ir_none — an empty decomposition (a terminator with no register operand).
+ *
+ * @return InstRegs  `{no def, no uses}`
+ */
+fn ir_none() -> InstRegs {
+    InstRegs { has_def = false; def_reg = IR_DUMMY; uses = teko::list::empty(); is_call = false }
+}
+
+/**
+ * ir_call — a call decomposition: the pinned arg physregs are `uses`, the
+ * result register is a def iff the call produces one, and `is_call` marks the
+ * caller-saved clobber.
+ *
+ * @param MReg ret  the result register
+ * @param bool has_result  whether the call defines `ret`
+ * @param []MReg us  the pinned argument physregs
+ * @return InstRegs  the call decomposition
+ */
+fn ir_call(ret: MReg, has_result: bool, us: []MReg) -> InstRegs {
+    InstRegs { has_def = has_result; def_reg = ret; uses = us; is_call = true }
+}
+
+/**
+ * RegEvent — one register touch (the register, the point, and whether it is a
+ * def): the raw material `compute_intervals` groups by register.
+ *
+ * @since #384 A3-2
+ */
+type RegEvent = struct {
+    /**
+     * reg — the register touched.
+     */
+    reg: MReg
+    /**
+     * point — the program point of the touch.
+     */
+    point: u32
+    /**
+     * is_def — true iff this touch defines (writes) the register.
+     */
+    is_def: bool
+}
+
+/**
+ * reg_eq — whether two `MReg`s name the same register (id + class +
+ * physical-ness): a virtual and a physical register can share an id.
+ *
+ * @param MReg a  the first register
+ * @param MReg b  the second register
+ * @return bool  true iff they are the same register
+ */
+fn reg_eq(a: MReg, b: MReg) -> bool {
+    a.id == b.id && a.is_phys == b.is_phys && a.reg_class == b.reg_class
+}
+
+/**
+ * reg_in — whether `list` already contains a register equal to `r`.
+ *
+ * @param []MReg list  the registers seen so far
+ * @param MReg r  the register to find
+ * @return bool  true iff `r` is present
+ */
+fn reg_in(list: []MReg, r: MReg) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= list.len { break }
+        if reg_eq(list[i], r) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * is_terminator — whether `inst` ends a block (`MRet` or a branch).
+ *
+ * @param MInst inst  the instruction
+ * @return bool  true iff it is a terminator
+ */
+fn is_terminator(inst: MInst) -> bool {
+    match inst {
+        MRet => true
+        MBranch => true
+        MBranchCond => true
+        MCbz => true
+        _ => false
+    }
+}
+
+/**
+ * TargetOpt — a terminator's branch target, or `has=false` for a
+ * non-branching instruction.
+ *
+ * @since #384 A3-2
+ */
+type TargetOpt = struct {
+    /**
+     * has — true iff the instruction is a branch/jump.
+     */
+    has: bool
+    /**
+     * target — the destination machine-block id (meaningful when `has`).
+     */
+    target: u32
+}
+
+/**
+ * terminator_target — the machine-block a branch/jump transfers to, or
+ * `has=false` if `inst` is not a branch.
+ *
+ * @param MInst inst  the instruction
+ * @return TargetOpt  its branch target, or none
+ */
+fn terminator_target(inst: MInst) -> TargetOpt {
+    match inst {
+        MBranch as x => TargetOpt { has = true; target = x.target }
+        MBranchCond as x => TargetOpt { has = true; target = x.target }
+        MCbz as x => TargetOpt { has = true; target = x.target }
+        _ => TargetOpt { has = false; target = 0 }
+    }
+}

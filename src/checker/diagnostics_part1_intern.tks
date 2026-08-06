@@ -1,0 +1,191 @@
+use teko::parser
+
+/**
+ * Render a diagnostic's LOCATION and message as the one line the driver prints:
+ * `file:line:col: msg`, with any part the caller does not know omitted (M.3 — show what we know,
+ * never invent a position). W-loc-2.
+ *
+ * @param file  the source file the diagnostic belongs to ("" when unknown)
+ * @param line  the 1-based line ( 0 when unknown)
+ * @param col   the 1-based column (read only when `line` is known)
+ * @param msg   the diagnostic's own text
+ * @return      the located diagnostic line
+ */
+fn diag_at(file: str, line: u32, col: u32, msg: str) -> str {
+    if file != "" && line > 0 { return $"{file}:{line}:{col}: {msg}" }
+    if file != "" { return $"{file}: {msg}" }
+    if line > 0 { return $"{line}:{col}: {msg}" }
+    msg
+}
+
+/**
+ * Locate an already-built checker `error` at a declaration, yielding the diagnostic TEXT a
+ * collecting pass records. The error's OWN line/col wins over the declaration's when it carries
+ * one (C1-POS — an inner-expression position is more precise than the declaration's).
+ *
+ * A collecting pass records TEXT rather than the error value on purpose: a collected diagnostic
+ * is never re-thrown, only printed, so the structured position/expected/actual a re-thrown error
+ * would carry has no reader.
+ *
+ * @param file       the declaration's source file (W-loc-2)
+ * @param decl_line  the declaration's line, used when the error carries none
+ * @param decl_col   the declaration's column, used when the error carries none
+ * @param inner      the checker error to locate
+ * @return           the `file:line:col: text` diagnostic line
+ * @since 0.3.1
+ */
+fn located_diag(file: str, decl_line: u32, decl_col: u32, inner: error) -> str {
+    let line = if inner.line != 0 { inner.line } else { decl_line }
+    let col = if inner.line != 0 { inner.col } else { decl_col }
+    diag_at(file, line, col, inner.message)
+}
+
+/**
+ * `b`'s diagnostics appended to `a`'s, in order — the single way a collecting pass grows its
+ * accumulator, so report order stays exactly the order the passes walked (source, then line, then
+ * column, by construction: every walk visits `program.items` in sorted-path order and every
+ * intra-item walk visits declaration order).
+ *
+ * @param a  the diagnostics collected first
+ * @param b  the diagnostics to append
+ * @return   the concatenation, `a` before `b`
+ * @since 0.3.1
+ */
+fn concat_diags(a: []str, b: []str) -> []str {
+    if b.len == 0 { return a }
+    if a.len == 0 { return b }
+    mut out = a
+    mut i: u64 = 0
+    loop {
+        if i >= b.len { break }
+        out = teko::list::push(out, b[i])
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * The single-element diagnostic list a pass records when exactly one check failed — the common
+ * case, spelled once so no call site has to build a list by hand.
+ *
+ * @param d  the diagnostic line
+ * @return   a one-element list holding it
+ * @since 0.3.1
+ */
+fn one_diag(d: str) -> []str {
+    teko::list::push(teko::list::empty(), d)
+}
+
+/**
+ * The single `error` a collecting pass's `error`-shaped wrapper raises once it has collected
+ * everything: one value whose message is EVERY diagnostic, newline-separated. Callers that still
+ * speak `T | error` (the checker's own `#test` suite, `type_program`) keep their contract while
+ * the pass underneath reports the whole build.
+ *
+ * @param diags  the collected diagnostics, in report order (must be non-empty)
+ * @return       the joined error
+ * @since 0.3.1
+ */
+fn diags_error(diags: []str) -> error {
+    error { message = join_checker_diags(diags) }
+}
+
+/**
+ * DiagNum — the result of reading a decimal `u32` run out of a diagnostic line: the value, the index
+ * just past the last digit, and whether any digit was actually consumed (`ok` false ⇒ the position held
+ * no number). A checker-local twin of `src/lsp/diagnostics.tks`'s `ParsedNum` — duplicated rather than
+ * shared for the same reason `join_checker_diags` already is (this file's own doc), and because the
+ * checker must not depend on `teko::lsp`.
+ *
+ * @since 0.3.1.0 (LSP crumb D)
+ */
+type DiagNum = struct {
+    /** the parsed value (0 when `ok` is false). */
+    value: u32
+    /** the index of the first byte after the digit run. */
+    next: u64
+    /** true when at least one digit was read. */
+    ok: bool
+}
+
+/**
+ * diag_read_u32 — read a decimal `u32` out of `s` starting at `from`, stopping at the first non-digit.
+ *
+ * @param s     the string to read from
+ * @param from  the start index
+ * @return      the value, the index past the digits, and whether any digit was read
+ * @since 0.3.1.0 (LSP crumb D)
+ */
+fn diag_read_u32(s: str, from: u64) -> DiagNum {
+    mut i = from
+    mut n: u64 = 0
+    mut any = false
+    loop {
+        if i >= s.len { break }
+        if s[i] < b'0' || s[i] > b'9' { break }
+        n = n * 10 + ((s[i] to u64) - (b'0' to u64))
+        any = true
+        i = i + 1
+    }
+    DiagNum { value = n to u32; next = i; ok = any }
+}
+
+/**
+ * has_diag_prefix — does `s` begin with `prefix`? A local byte compare because the corpus lacks a
+ * `teko::str::starts_with` builtin (the same gap `src/lsp/diagnostics.tks::has_prefix` already works
+ * around).
+ *
+ * @param s       the string tested
+ * @param prefix  the prefix to look for
+ * @return        true when `s` starts with `prefix`
+ * @since 0.3.1.0 (LSP crumb D)
+ */
+fn has_diag_prefix(s: str, prefix: str) -> bool {
+    if s.len < prefix.len { return false }
+    mut i: u64 = 0
+    loop {
+        if i >= prefix.len { break }
+        if s[i] != prefix[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+/**
+ * matches_diag_file — does `diag` (a `collect_diagnostics`-style line) name `file` as its own leading
+ * `file:` prefix, exactly the shape `diag_at` emits for a positioned diagnostic (`file` non-empty)?
+ *
+ * @param diag  one diagnostic line
+ * @param file  the candidate file to test
+ * @return      true when `diag` begins with `file` immediately followed by `:`
+ * @since 0.3.1.0 (LSP crumb D)
+ */
+fn matches_diag_file(diag: str, file: str) -> bool {
+    if file == "" { return false }
+    if diag.len <= file.len { return false }
+    if diag[file.len] != b':' { return false }
+    has_diag_prefix(diag, file)
+}
+
+/**
+ * file_prefix_of — the FIRST entry of `files` that `diag` names as its own `file:` prefix, or `""` when
+ * none matches. `files` is the small, CLOSED set of source files the diagnosed program actually carries
+ * (`lsp_api.tks::program_files`), so this reverses `diag_at`'s concatenation WITHOUT the general
+ * ambiguity a path-less scan would carry (a file path that itself happened to contain a `:digit:digit:`
+ * run) — the closed-candidate trick crumb A's own string re-parse already relied on for the
+ * single-document case, generalized here to the whole (possibly multi-file) program.
+ *
+ * @param diag   one `collect_diagnostics`-style diagnostic line
+ * @param files  the known candidate files, tried in order
+ * @return       the matching file, or `""` when `diag` names none of them
+ * @since 0.3.1.0 (LSP crumb D)
+ */
+fn file_prefix_of(diag: str, files: []str) -> str {
+    mut i: u64 = 0
+    loop {
+        if i >= files.len { break }
+        if matches_diag_file(diag, files[i]) { return files[i] }
+        i = i + 1
+    }
+    ""
+}

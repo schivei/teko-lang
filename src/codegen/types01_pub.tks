@@ -1,0 +1,25 @@
+
+/**
+ * CgCmpRoute — which lowering an `==`/`!=` comparison TERM takes, chosen by an operand's
+ * resolved type (`cg_cmp_route_of`). `Plain` is the raw C operator (a scalar prim or an
+ * already-`==`-legal nominal); `StrEq`/`CharEq`/`SliceEq` are the three content-equality
+ * detours a `{ptr,len}`-shaped operand needs, because C's own `==` on a struct either refuses to
+ * compile (`str`/`[]T`) or silently compares the wrong thing (a `char`'s VIEW address, not its
+ * codepoint). A TAGGED-variant/member pairing (`a == null` / `a != 5` over `a: i32 | null`) is
+ * NOT one of these routes — it is recognized separately, by `cg_variant_member_cmp`, and takes
+ * priority over this dispatch entirely (see `emit_compare`'s doc for why).
+ */
+pub type CgCmpRoute = enum { Plain; StrEq; CharEq; SliceEq }
+
+/**
+ * CgSliceEqPlan — the runtime call `[]T == []T` needs for one element shape: which fixed-ABI
+ * predicate to call, and whether that predicate ALSO needs a `sizeof(T)` argument (the
+ * POD/`memcmp` route, `tk_slice_eq_bytes`, is generic over element width; the float/char/str
+ * routes are each one dedicated, element-width-baked-in predicate).
+ */
+pub type CgSliceEqPlan = struct {
+    /** the runtime predicate's C symbol. */
+    rtfn: str
+    /** whether the call needs a trailing `sizeof(<elem>)` argument. */
+    needs_size: bool
+}

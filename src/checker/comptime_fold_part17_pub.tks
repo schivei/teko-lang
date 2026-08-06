@@ -1,0 +1,26 @@
+
+/**
+ * fold_interp — the Layer-2 interpolation fold: when EVERY hole of `in` is a const literal (post
+ * Layer-1) and EVERY spec is a folded `TFSpecNone`/`TFSpecStatic` family, format each hole via
+ * `comptime_format`, concatenate with the piece literals, and return a single `TStrLit` (interned to
+ * rodata by lowering, like any string literal) — zero runtime concat/format. If ANY hole is runtime, ANY
+ * spec is `TFSpecDynamic`, or any hole/spec is a family the fold declines (float in particular), `in` is
+ * returned UNCHANGED (still a runtime `tk_str_concat` shape), preserving today's behavior. A rendering
+ * that unexpectedly errors also leaves the interpolation runtime — the fold never emits bytes it cannot
+ * prove match `teko_rt.c`.
+ *
+ * @param in     the typed interpolation (holes already Layer-1 folded)
+ * @param e      the enclosing expression (its type/position for the produced `TStrLit`)
+ * @param table  the type table (forwarded to the per-hole evaluator)
+ * @param env    the environment (module consts + provably-const locals)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       a single folded `TStrLit` when fully const, else `in` unchanged
+ * @since #comptime-fold
+ */
+pub fn fold_interp(in: TInterp, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExpr | error {
+    if !cf_interp_foldable(in) { return cf_interp_expr(in, e) }
+    match cf_interp_bytes(in, table, env, agg) {
+        error => cf_interp_expr(in, e)
+        []byte as bs => TExpr { kind = TStrLit { text = str_of_bytes(bs) }; type = e.type; line = e.line; col = e.col }
+    }
+}

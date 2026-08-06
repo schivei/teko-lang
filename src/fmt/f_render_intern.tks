@@ -1,0 +1,185 @@
+// the canonical gap (in spaces) between `prev` and `cur` on one line.
+// `prev_unary` = prev is a prefix operator (`!`, or `+`/`-`/`~` in unary position).
+fn gap(prev: FTok, cur: FTok, prev_unary: bool) -> u64 {
+    if cur.kind == FTokKind::Comment { return 3 }   // trailing comment — 3 spaces
+    if prev.kind == FTokKind::Comment { return 1 }   // code after a block comment
+    let pp = prev.kind == FTokKind::Punct
+    let cp = cur.kind == FTokKind::Punct
+    if cp && (cur.text == "," || cur.text == ";") { return 0 }
+    if pp && (prev.text == "," || prev.text == ";") { return 1 }
+    if (cp && cur.text == "::") || (pp && prev.text == "::") { return 0 }
+    if (cp && cur.text == ".") || (pp && prev.text == ".") { return 0 }
+    if cp && (cur.text == ".." || cur.text == "..=") { return 0 }
+    if pp && (prev.text == ".." || prev.text == "..=") { return 0 }
+    if cp && (cur.text == "++" || cur.text == "--") { return 0 }   // postfix
+    if prev_unary { return 0 }   // `!x`, `-x`, `~x`, `-(…)`
+    if is_angle(cur) || is_angle(prev) {
+        if cur.glued { return 0 }
+        return 1
+    }
+    if cp && (cur.text == "(" || cur.text == "[") {
+        if pp && (prev.text == "(" || prev.text == "[") { return 0 }
+        if prev.kind == FTokKind::Word {
+            if is_kw(prev.text) { return 1 }
+            return 0   // a call / an index
+        }
+        if pp && (prev.text == ")" || prev.text == "]" || prev.text == "?" || prev.text == "++" || prev.text == "--") { return 0 }
+        return 1
+    }
+    if pp && (prev.text == "(" || prev.text == "[") { return 0 }
+    if cp && (cur.text == ")" || cur.text == "]") { return 0 }
+    if cp && cur.text == "{" { return 1 }
+    if pp && prev.text == "{" { return 1 }
+    if cp && cur.text == "}" { return 1 }
+    if pp && prev.text == "}" { return 1 }
+    if pp && prev.text == "]" && cur.kind == FTokKind::Word && !is_kw(cur.text) { return 0 }   // `[]str`
+    if pp && prev.text == "#" { return 0 }   // `#test`
+    if cp && cur.text == ":" { return 0 }
+    if pp && prev.text == ":" { return 1 }
+    1
+}
+
+// ---------------------------------------------------------------------------
+// render — emit the canonical text from the raw token stream.
+// ---------------------------------------------------------------------------
+
+// append a str's bytes onto the output buffer. The output is a []byte built with the
+// AMORTIZED push (O(1) each) and turned into a str ONCE at the end — building via
+// teko::str::concat over a piece list would be a chained 2-arg concat, O(n²) in the
+// file size (measured: 30KB source → ~190MB of concat garbage before this shape).
+fn emit_str(out: []byte, s: str) -> []byte {
+    mut o = out
+    mut i: u64 = 0
+    loop {
+        if i >= s.len { break }
+        o = teko::list::push(o, s[i])
+        i = i + 1
+    }
+    o
+}
+
+fn emit_indent(out: []byte, level: u64) -> []byte {
+    mut o = out
+    mut i: u64 = 0
+    loop {
+        if i >= level * 4 { break }
+        o = teko::list::push(o, b' ')
+        i = i + 1
+    }
+    o
+}
+
+fn render(toks: []FTok) -> str {
+    mut out: []byte = teko::list::empty()
+    mut depth: u64 = 0
+    mut pending_blank = false
+    mut emitted_any = false
+    mut prev_ends_open = false   // previous emitted line ended with `(`/`[`/`{`
+    mut i: u64 = 0
+    loop {
+        if i >= toks.len { break }
+        // collect one logical line [i, j)
+        mut j = i
+        loop {
+            if j >= toks.len { break }
+            if toks[j].kind == FTokKind::Break { break }
+            j = j + 1
+        }
+        if j == i {
+            // a blank line (or the newline ending the previous line was consumed below)
+            if emitted_any { pending_blank = true }
+            i = j + 1
+            continue
+        }
+        // the pending blank line: dropped after an opener line and before a closer line
+        let first = toks[i]
+        let first_closes = first.kind == FTokKind::Punct && is_closer(first.text)
+        if pending_blank {
+            if !prev_ends_open && !first_closes {
+                out = teko::list::push(out, b'\n')
+            }
+            pending_blank = false
+        }
+        // indentation: leading closers dedent
+        mut lvl = depth
+        mut k = i
+        loop {
+            if k >= j { break }
+            let t = toks[k]
+            if t.kind == FTokKind::Punct && is_closer(t.text) {
+                if lvl > 0 { lvl = lvl - 1 }
+                k = k + 1
+                continue
+            }
+            break
+        }
+        out = emit_indent(out, lvl)
+        // emit the line's tokens with canonical gaps
+        mut prev = first
+        mut prev_unary = false
+        mut m = i
+        loop {
+            if m >= j { break }
+            let t = toks[m]
+            if m > i {
+                let g = gap(prev, t, prev_unary)
+                mut gi: u64 = 0
+                loop {
+                    if gi >= g { break }
+                    out = teko::list::push(out, b' ')
+                    gi = gi + 1
+                }
+            }
+            out = emit_str(out, t.text)
+            // unary classification for the NEXT pair
+            mut unary = false
+            if t.kind == FTokKind::Punct {
+                if t.text == "!" { unary = true }
+                if t.text == "+" || t.text == "-" || t.text == "~" {
+                    // unary when nothing operand-like precedes it (line start, after an
+                    // operator/keyword/opener, or after another prefix operator).
+                    if m == i || !ends_operand(prev) { unary = true }
+                }
+                if t.text == "(" || t.text == "[" || t.text == "{" { depth = depth + 1 }
+                if is_closer(t.text) {
+                    if depth > 0 { depth = depth - 1 }
+                }
+            }
+            prev_unary = unary
+            prev = t
+            m = m + 1
+        }
+        out = teko::list::push(out, b'\n')
+        emitted_any = true
+        prev_ends_open = prev.kind == FTokKind::Punct && is_opener(prev.text)
+        i = j + 1
+    }
+    str(out)
+}
+
+// ---------------------------------------------------------------------------
+// safety: the formatted output must carry EXACTLY the input's token stream.
+// ---------------------------------------------------------------------------
+
+fn same_stream(a: []FTok, b: []FTok) -> bool {
+    mut ia: u64 = 0
+    mut ib: u64 = 0
+    loop {
+        loop {
+            if ia >= a.len { break }
+            if a[ia].kind != FTokKind::Break { break }
+            ia = ia + 1
+        }
+        loop {
+            if ib >= b.len { break }
+            if b[ib].kind != FTokKind::Break { break }
+            ib = ib + 1
+        }
+        if ia >= a.len || ib >= b.len { break }
+        if a[ia].kind != b[ib].kind { return false }
+        if a[ia].text != b[ib].text { return false }
+        ia = ia + 1
+        ib = ib + 1
+    }
+    ia >= a.len && ib >= b.len
+}

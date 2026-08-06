@@ -1,0 +1,245 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * lower_match_arm_entry — test `arm`'s pattern against `subj`; on success,
+ * apply its bindings and (when present) test its `when` guard — a failed
+ * pattern OR a failed guard falls through to the SAME next-arm block. Returns
+ * the context positioned at the start of the arm's BODY plus the next-arm block
+ * id (A1-5, #382).
+ *
+ * @param LowerCtx ctx  the lowering context positioned at the arm's test site
+ * @param checker::TExpr e  the enclosing match expression (for its source
+ *                          position)
+ * @param checker::TArm arm  the arm to lower the entry (test/binds/guard) of
+ * @param MatchSubj subj  the match's already-lowered subject
+ * @return MatchArmEntry  the context at the arm's body start + the next-arm
+ *                        block id
+ * @throws  when the pattern test, its bindings, or its guard fail to lower
+ */
+fn lower_match_arm_entry(ctx: LowerCtx, e: checker::TExpr, arm: checker::TArm, subj: MatchSubj) -> MatchArmEntry | error {
+    let test = match lower_pattern_test(ctx, subj, arm.pattern, e.line, e.col) { PatternTest as x => x; error as err => return err }
+    let armb = alloc_block(test.ctx.func)
+    let nextb = alloc_block(armb.func)
+    let gated = close_test_to(ctx_with(test.ctx, nextb.func, test.ctx.block_id, test.ctx.env), test, armb.block_id, nextb.block_id, e.line, e.col)
+    let arm_ctx = match lower_pattern_binds(ctx_goto(gated, armb.block_id), subj, arm.pattern) { LowerCtx as c => c; error as err => return err }
+    if !arm.has_when { return MatchArmEntry { ctx = arm_ctx; next_block = nextb.block_id } }
+    lower_match_guard(arm_ctx, arm, nextb.block_id)
+}
+
+/**
+ * lower_match_guard — a `when` guard: branch on it, taking the guard-true edge
+ * into a fresh body block and falling through to `next_block` (the SAME target
+ * the pattern-test's own failure edge uses) on a false guard (A1-5, #382).
+ *
+ * @param LowerCtx ctx  the lowering context positioned at the arm's guard site
+ * @param checker::TArm arm  the guarded arm (`arm.guard` is valid — `has_when`
+ *                           is true)
+ * @param u32 next_block  the next-arm block id a false guard falls through to
+ * @return MatchArmEntry  the context at the guarded body's start + the next-arm
+ *                        block id
+ * @throws  when the guard expression fails to lower
+ */
+fn lower_match_guard(ctx: LowerCtx, arm: checker::TArm, next_block: u32) -> MatchArmEntry | error {
+    let guardo = match lower_expr(ctx, arm.guard) { Lowered as x => x; error as err => return err }
+    let guardb = alloc_block(guardo.ctx.func)
+    let guarded = append_inst(guardb.func, guardo.ctx.block_id, branch_inst(guardo.vreg, guardb.block_id, teko::list::empty(), next_block, teko::list::empty(), arm.guard.line, arm.guard.col))
+    MatchArmEntry { ctx = ctx_with(guardo.ctx, guarded, guardb.block_id, guardo.ctx.env); next_block = next_block }
+}
+
+/**
+ * lower_match_arm_value — lower one VALUE-position arm: its entry
+ * (test/binds/guard), its BODY as a tail-value block (mirrors an if-expression
+ * arm), then a jump to the merge block carrying the tail value; returns the
+ * context positioned at the next-arm test block (A1-5, #382).
+ *
+ * @param LowerCtx ctx  the lowering context positioned at the arm's test site
+ * @param checker::TExpr e  the enclosing match expression
+ * @param checker::TArm arm  the arm to lower
+ * @param MatchSubj subj  the match's already-lowered subject
+ * @param u32 merge_id  the merge block id the arm's tail value jumps to
+ * @param []str names  the reassigned scalars the merge threads, in param order
+ * @return LowerCtx  the context positioned at the next-arm test block
+ * @throws  when the arm's entry or body fails to lower
+ *
+ * @implNote the returned context is built from `bv.ctx` (the arm's own
+ * BODY-threaded context), never the incoming `ctx` — `ctx_with` copies
+ * rodata/lifted-closures from its first argument, so sourcing from `ctx`
+ * would drop whatever the arm's test/guard/body interned (the SAME class
+ * of bug `lower_coalesce`/`lower_if_value` had, C1-6 audit). Closes via
+ * `close_arm_replaying_defers` (not the bare `close_arm_to`), so a `defer`
+ * this arm registers fires only on ITS OWN match, never leaking into a
+ * sibling arm or past the merge (PR #553 review finding). The closing jump
+ * supplies `[tail_value] ++ scalar_args`, mirroring `lower_if_value`, so a
+ * scalar this arm re-assigns reaches the merge param instead of being
+ * dropped (#389 F1) — the tail value is captured PRE-defer-replay while the
+ * scalar args are re-sampled POST-replay inside `close_arm_replaying_defers`,
+ * so a `defer`'s write to a reassigned scalar propagates without disturbing
+ * the pre-defer merge value (#389 F1b item 1).
+ */
+fn lower_match_arm_value(ctx: LowerCtx, e: checker::TExpr, arm: checker::TArm, subj: MatchSubj, merge_id: u32, names: []str) -> LowerCtx | error {
+    let indices = merge_scalar_indices(ctx.env, names)
+    let step = match lower_match_arm_entry(ctx, e, arm, subj) { MatchArmEntry as x => x; error as err => return err }
+    let opened = match open_native_region(step.ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    let bv = match lower_block_value(opened, arm.body, ltype_of(e.type, ctx.enums), e.type) { LowerBlockValue as x => x; error as err => return err }
+    let closed = match close_arm_replaying_defers(bv.ctx, ctx.defers, step.ctx.region_stack, merge_id, teko::list::push(teko::list::empty(), bv.vreg), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    ctx_with(closed.ctx, closed.func, step.next_block, ctx.env)
+}
+
+/**
+ * lower_match_arms_value — fold `lower_match_arm_value` over every arm, in
+ * order, threading the "next test" position from arm to arm; the final context
+ * is the DEAD-CODE fallback position past the last arm's test (unreachable when
+ * the checker's exhaustiveness holds) (A1-5, #382).
+ *
+ * @param LowerCtx ctx  the lowering context positioned at the first arm's test
+ *                      site
+ * @param checker::TExpr e  the enclosing match expression
+ * @param []checker::TArm arms  the match's arms, in order
+ * @param MatchSubj subj  the match's already-lowered subject
+ * @param u32 merge_id  the merge block id every arm's tail value jumps to
+ * @param []str names  the reassigned scalars the merge threads, in param order
+ * @return LowerCtx  the context positioned past the last arm's test (the dead
+ *                   fallback)
+ * @throws  when any arm fails to lower
+ */
+fn lower_match_arms_value(ctx: LowerCtx, e: checker::TExpr, arms: []checker::TArm, subj: MatchSubj, merge_id: u32, names: []str) -> LowerCtx | error {
+    mut cur = ctx
+    mut i: u64 = 0
+    loop {
+        if i >= arms.len { break }
+        cur = match lower_match_arm_value(cur, e, arms[i], subj, merge_id, names) { LowerCtx as c => c; error as err => return err }
+        i++
+    }
+    cur
+}
+
+/**
+ * lower_match_value — a `match` used as a VALUE: a merge block with ONE
+ * block-arg (the result), each arm's tail value feeding it; the DEAD-CODE
+ * fallback past the last arm merges a defensive zero (the checker's
+ * exhaustiveness makes it unreachable, mirroring
+ * `emit_match_tail_fallthrough_return`'s own defensive-return spirit) (A1-5,
+ * #382).
+ *
+ * @param LowerCtx ctx  the lowering context positioned right after the subject
+ * @param checker::TExpr e  the match expression (its `.type` is the result's
+ *                          machine class)
+ * @param checker::TMatchExpr m  the typed match (subject already lowered; only
+ *                               `.arms` used)
+ * @param MatchSubj subj  the match's already-lowered subject
+ * @return Lowered  the advanced context (positioned at the merge block) + its
+ *                  result VReg
+ * @throws  when any arm fails to lower
+ *
+ * @implNote C1-6 audit: the final context is sourced from `with_zero` (the
+ *           fallback-block context, which itself carries every arm's rodata
+ *           and lifted-closure growth via `chain`), never the stale
+ *           pre-lowering `ctx` — mirrors the `lower_coalesce` fix. A scalar an
+ *           arm re-assigns is threaded through the merge as an extra param
+ *           after the value param (`add_merge_scalar_params`), mirroring
+ *           `lower_if_value`, EXCEPT a name any arm's PATTERN also binds is
+ *           excluded (`reassigned_scalars_for_match`, review round 1 Finding
+ *           2) (#389 F1).
+ */
+fn lower_match_value(ctx: LowerCtx, e: checker::TExpr, m: checker::TMatchExpr, subj: MatchSubj) -> Lowered | error {
+    let names = reassigned_scalars_for_match(m.arms, ctx.env)
+    let indices = merge_scalar_indices(ctx.env, names)
+    let mergeb = alloc_block(ctx.func)
+    let mp = add_block_param(mergeb.func, mergeb.block_id)
+    let merged = add_merge_scalar_params(mp.func, mergeb.block_id, ctx.env, names)
+    let base_ctx = ctx_with(ctx, merged.func, ctx.block_id, ctx.env)
+    let chain = match lower_match_arms_value(base_ctx, e, m.arms, subj, mergeb.block_id, names) { LowerCtx as c => c; error as err => return err }
+    let fb = ctx_alloc(chain)
+    let with_zero = ctx_append(fb.ctx, const_int_inst(fb.vreg, lfallback_const(ltype_of(e.type, ctx.enums)), e.line, e.col))
+    let fallback_args = merge_value_args(fb.vreg, arm_scalar_args(with_zero.env, indices))
+    let closed = append_inst(with_zero.func, with_zero.block_id, jump_inst(mergeb.block_id, fallback_args, e.line, e.col))
+    Lowered { ctx = ctx_with(with_zero, closed, mergeb.block_id, merged.env); vreg = mp.vreg }
+}
+
+/**
+ * lfallback_const — a dead-code fallback VALUE at machine class `rt`, for a merge edge that is
+ * PROVABLY never taken (`lower_match_value`'s exhaustiveness-guaranteed dead arm-test fallback;
+ * `diverging_tail_value`'s diverging-tail placeholder, C7): plain `0` for every narrow machine
+ * class (`I8`/`I16`/`I32`/`Ptr`), or the smallest magnitude that FORCES the wider 64-bit encoding
+ * when `rt` is `I64` — the exact class a REAL sibling edge into the same merge already produces,
+ * so this never-taken edge cannot collide with it where the merge's operands are typed by width
+ * (`LConstInt` carries no separate width field; a bare `0` always looks 32-bit-narrow by
+ * magnitude alone). The value itself is NEVER observed at runtime — only its ENCODED WIDTH
+ * matters here.
+ *
+ * @param LType rt  the merge edge's expected result machine class
+ * @return i64  a value that encodes at `rt`'s own machine class
+ * @since 0.3.1 (null-union C7 own-backend gap)
+ */
+fn lfallback_const(rt: LType) -> i64 {
+    match rt {
+        I64 => 2147483648
+        _ => 0
+    }
+}
+
+/**
+ * lower_match_arm_stmt — lower one STATEMENT-position arm: its entry
+ * (test/binds/guard), its BODY for EFFECT ONLY (mirrors an if-statement arm),
+ * then a jump to the merge block (no value); returns the context positioned at
+ * the next-arm test block (A1-5, #382).
+ *
+ * @param LowerCtx ctx  the lowering context positioned at the arm's test site
+ * @param checker::TExpr e  the enclosing match expression
+ * @param checker::TArm arm  the arm to lower
+ * @param MatchSubj subj  the match's already-lowered subject
+ * @param u32 merge_id  the merge block id the arm jumps to after its body
+ * @param []str names  the reassigned scalars the merge threads, in param order
+ * @return LowerCtx  the context positioned at the next-arm test block
+ * @throws  when the arm's entry or body fails to lower
+ *
+ * @implNote C1-6 audit: the returned context is sourced from `done` (the
+ *           post-body context, which carries this arm's rodata and
+ *           lifted-closure growth), never the stale pre-arm `ctx` — otherwise
+ *           `lower_match_arms_stmt`'s fold would drop each arm's growth in
+ *           turn, mirroring the `lower_coalesce` fix. Closes via
+ *           `close_arm_replaying_defers` (not the bare `close_arm_to`), so a
+ *           `defer` this arm registers fires only on ITS OWN match, never
+ *           leaking into a sibling arm or past the merge (PR #553 review
+ *           finding). The closing jump supplies `names`' current VRegs,
+ *           re-sampled POST-defer-replay in `close_arm_replaying_defers`, so a
+ *           scalar this arm re-assigns — INCLUDING inside a `defer` body —
+ *           reaches the merge param instead of being dropped (#389 F1/F1b
+ *           item 1).
+ */
+fn lower_match_arm_stmt(ctx: LowerCtx, e: checker::TExpr, arm: checker::TArm, subj: MatchSubj, merge_id: u32, names: []str) -> LowerCtx | error {
+    let indices = merge_scalar_indices(ctx.env, names)
+    let step = match lower_match_arm_entry(ctx, e, arm, subj) { MatchArmEntry as x => x; error as err => return err }
+    let opened = match open_native_region(step.ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    let done = match lower_block(opened, arm.body) { LowerCtx as c => c; error as err => return err }
+    let closed = match close_arm_replaying_defers(done, ctx.defers, step.ctx.region_stack, merge_id, teko::list::empty(), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    ctx_with(closed.ctx, closed.func, step.next_block, ctx.env)
+}
+
+/**
+ * lower_match_arms_stmt — fold `lower_match_arm_stmt` over every arm, mirroring
+ * `lower_match_arms_value`'s chaining (A1-5, #382).
+ *
+ * @param LowerCtx ctx  the lowering context positioned at the first arm's test
+ *                      site
+ * @param checker::TExpr e  the enclosing match expression
+ * @param []checker::TArm arms  the match's arms, in order
+ * @param MatchSubj subj  the match's already-lowered subject
+ * @param u32 merge_id  the merge block id every arm jumps to after its body
+ * @param []str names  the reassigned scalars the merge threads, in param order
+ * @return LowerCtx  the context positioned past the last arm's test (the dead
+ *                   fallback)
+ * @throws  when any arm fails to lower
+ */
+fn lower_match_arms_stmt(ctx: LowerCtx, e: checker::TExpr, arms: []checker::TArm, subj: MatchSubj, merge_id: u32, names: []str) -> LowerCtx | error {
+    mut cur = ctx
+    mut i: u64 = 0
+    loop {
+        if i >= arms.len { break }
+        cur = match lower_match_arm_stmt(cur, e, arms[i], subj, merge_id, names) { LowerCtx as c => c; error as err => return err }
+        i++
+    }
+    cur
+}

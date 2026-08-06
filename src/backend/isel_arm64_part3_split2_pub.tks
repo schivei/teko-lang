@@ -1,0 +1,36 @@
+
+/**
+ * select_lfunc — select one `LFunc` into an `MFunc`: build the mirror block
+ * skeleton, then select every block's instructions (A2-3 handles the full
+ * control-flow set — jumps, branches, and their split edge blocks).
+ *
+ * @param lir::LFunc f  the function to select
+ * @return MFunc | error  the selected function, or any instruction's own
+ *                        propagated error
+ */
+pub fn select_lfunc(f: lir::LFunc) -> MFunc | error {
+    let ctx0 = SelCtx { func = build_mirror_blocks(f); vinfo = vinfo_empty(); next_scratch = f.next_vreg; cur_block = 0; next_block = max_block_id(f) + 1 }
+    let done = match select_all_blocks(ctx0, f) { SelCtx as c => c; error as e => return e }
+    done.func
+}
+
+/**
+ * select_module — select every function of `m` into an `MModule`, carrying
+ * its rodata/globals/layouts tables through UNCHANGED (A2 never touches
+ * their bytes — that is A4's job).
+ *
+ * @param lir::LModule m  the module to select
+ * @return MModule | error  the selected module, or the first function's
+ *                          propagated error
+ */
+pub fn select_module(m: lir::LModule) -> MModule | error {
+    mut out = MModule { funcs = teko::list::empty(); rodata = m.rodata; globals = m.globals; layouts = m.layouts }
+    mut i: u64 = 0
+    loop {
+        if i >= m.funcs.len { break }
+        let mf = match select_lfunc(m.funcs[i]) { MFunc as x => x; error as e => return e }
+        out = add_mfunc(out, mf)
+        i++
+    }
+    out
+}

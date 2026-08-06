@@ -1,0 +1,57 @@
+
+/**
+ * `tcall_is_diverging_builtin` — is `c` a call to the INJECTED global `panic`/`exit` builtin,
+ * as opposed to a same-named callee the resolver actually bound to something else? The bare
+ * callee name alone cannot answer this: a project may declare its own `pub fn exit(...)` or a
+ * local closure bound to `panic`, and the resolver then targets THAT binding instead of the
+ * injected global (`type_call`'s `in_scope` gate). Every non-builtin resolution the resolver can
+ * produce for a one-segment callee carries a tell the injected builtin never does: a REAL
+ * declared function always resolves to a non-empty `call_ns` (its declaring namespace), and a
+ * local closure variable resolves with `is_closure_call` set. The injected builtin alone is
+ * constructed with an empty `call_ns`, `is_closure_call = false`, and `is_iface_dispatch = false`
+ * (`type_call`'s two `panic`/`exit` injection sites), so checking those three fields — never the
+ * name alone — is the same fronteira the lowering/emission passes consume (a `defer` scope
+ * replay fires on exactly the calls this predicate names; never duplicate this name list
+ * elsewhere).
+ *
+ * @param c  the typed call
+ * @return   true iff `c` targets the injected `panic`/`exit` builtin (not a shadowing user
+ *           declaration or local closure of the same bare name)
+ */
+pub fn tcall_is_diverging_builtin(c: TCall) -> bool {
+    if c.callee.segments.len != 1 { return false }
+    if c.call_ns.len != 0 || c.is_closure_call || c.is_iface_dispatch { return false }
+    let name = c.callee.segments[0].name
+    name == "panic" || name == "exit"
+}
+
+/**
+ * texpr_diverges — does a TYPED expression DIVERGE (never fall through to a following
+ * statement)? True for a call the resolver actually bound to the injected global `panic`/`exit`
+ * builtins (`tcall_is_diverging_builtin` — never a same-named user function or closure the
+ * resolver bound instead), for a `match` whose EVERY arm diverges, or for an `if`/`else` where
+ * BOTH branches diverge. Such an expression yields no value and never falls through, so
+ * match-as-value unification (`type_match`) skips it (B.20), and it may stand in for ANY
+ * type at a value position (the legislator's ruling: no `never` type).
+ *
+ * @param e  the typed expression
+ * @return   true iff `e` unconditionally terminates the enclosing frame (a panic/exit call, or
+ *           a fully-diverging match/if)
+ */
+pub fn texpr_diverges(e: TExpr) -> bool {
+    match e.kind {
+        TCall as c => tcall_is_diverging_builtin(c)
+        TMatchExpr as m => {
+            if m.arms.len == 0 { return false }
+            mut i = 0
+            loop {
+                if i >= m.arms.len { break }
+                if !tblock_diverges(m.arms[i].body) { return false }
+                i++
+            }
+            true
+        }
+        TIfExpr as f => f.has_else && tblock_diverges(f.then_blk) && tblock_diverges(f.else_blk)
+        _ => false
+    }
+}

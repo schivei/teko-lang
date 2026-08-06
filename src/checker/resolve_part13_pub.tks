@@ -1,0 +1,28 @@
+
+// (W9.4) normalize generic-instance references throughout a type-decl. Used by the typer to rewrite
+// BOTH the stamped instances (in the table) AND every non-generic decl item (e.g. `Wrap` whose
+// variant member is `Gen<i64>`), so the syntactic body codegen/interpreter read agrees with the resolved
+// type. A NO-OP when the body has no generic-instance reference. (C: tk_normalize_inst_decl.)
+pub fn normalize_inst_decl(d: parser::TypeDecl, table: TypeTable) -> parser::TypeDecl {
+    parser::TypeDecl { name = d.name; type_params = d.type_params; type_constraints = d.type_constraints; body = normalize_inst_body(d.body, table); vis = d.vis; has_doc = d.has_doc; doc = d.doc; line = d.line; col = d.col; di_kind = d.di_kind; has_di_key = d.has_di_key; di_key = d.di_key; is_unsafe = d.is_unsafe; must_free = d.must_free }
+}
+
+// (W9.4) normalize EVERY stamped generic-instance decl's body in the table, so table_generic_instances
+// (which the mono pass emits as program items) carries bare stamped names. Non-`__g__` entries (the
+// templates + ordinary decls) pass through unchanged here; ordinary decls are normalized as program
+// ITEMS by the typer (their bodies do not live in the emitted table). (C: tk_normalize_table_instances.)
+pub fn normalize_table_instances(table: TypeTable) -> TypeTable {
+    mut out: TypeTable = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= table.len { break }
+        if name_is_g_instance(table[i].name) {
+            let nd = normalize_inst_decl(table[i].decl, table)
+            out = teko::list::push(out, TypeReg { name = table[i].name; namespace = table[i].namespace; file = table[i].file; vis = table[i].vis; decl = nd })
+        } else {
+            out = teko::list::push(out, table[i])
+        }
+        i++
+    }
+    out
+}

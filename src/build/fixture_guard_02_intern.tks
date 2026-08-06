@@ -1,0 +1,272 @@
+/**
+ * declared_fn_name_on_line — the name a top-level `fn`/`pub fn` declaration line declares, or "" when
+ * `line` is not one.
+ *
+ * @param line  one source line
+ * @return      the declared function's name, or ""
+ * @since 0.3.1
+ */
+fn declared_fn_name_on_line(line: str) -> str {
+    mut at: u64 = 0
+    if mf_starts_with(line, "fn ") { at = 3 }
+    if mf_starts_with(line, "pub fn ") { at = 7 }
+    if at == 0 { return "" }
+    let end = ident_end_at(line, at)
+    teko::str::slice(line, at, end)
+}
+
+/**
+ * declared_fn_names — every top-level function `text` declares, in declaration order. COLUMN 0 ONLY,
+ * and the rule matters because it is the rule a pinned count is compared against: a method inside a
+ * `class` body is not a free function and could never answer a bare call.
+ *
+ * @param text  the source text to scan
+ * @return      the declared names
+ * @since 0.3.1
+ */
+fn declared_fn_names(text: str) -> []str {
+    mut out: []str = teko::list::empty()
+    mut cur: u64 = 0
+    loop {
+        if cur >= text.len { break }
+        let eol = line_end_at(text, cur)
+        let name = declared_fn_name_on_line(teko::str::slice(text, cur, eol))
+        if name.len > 0 { out = teko::list::push(out, name) }
+        cur = if eol < text.len { eol + 1 } else { eol }
+    }
+    out
+}
+
+/**
+ * count_declared_fns — how many top-level functions `text` declares (`declared_fn_names`). The
+ * measure a fixture pins a FLOOR against, so a merge that eats declarations is caught by the count
+ * even when what it ate happened to leave the braces balanced.
+ *
+ * @param text  the source text to scan
+ * @return      the number of top-level function declarations
+ * @since 0.3.1
+ */
+fn count_declared_fns(text: str) -> u64 {
+    declared_fn_names(text).len
+}
+
+/**
+ * undeclared_helper_calls — every `prefix`-family name `caller_text` calls that `decl_text` does not
+ * declare. The DIRECT form of the question the 119-line cascade answered indirectly.
+ *
+ * @param caller_text  the text doing the calling (a fixture's `main.tks`)
+ * @param decl_text    the text expected to declare them (its corpus module)
+ * @param prefix       the family prefix (e.g. `f_`)
+ * @return             the unresolved names, in first-seen order
+ * @since 0.3.1
+ */
+fn undeclared_helper_calls(caller_text: str, decl_text: str, prefix: str) -> []str {
+    let called = called_names_with_prefix(caller_text, prefix)
+    let declared = declared_fn_names(decl_text)
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= called.len { break }
+        if !list_has_str(declared, called[i]) { out = teko::list::push(out, called[i]) }
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * CodeScan — one source line with every string literal, char literal and comment blanked out, plus
+ * the literal/comment state to thread into the next line.
+ *
+ * @since 0.3.1
+ */
+type CodeScan = struct {
+    /** the line with literal and comment bytes replaced by spaces, so braces and `;` inside them cannot be mistaken for code. */
+    text: str
+    /** true when a string/char literal is still open at end-of-line. */
+    in_str: bool
+    /** true when a block comment is still open at end-of-line. */
+    in_comment: bool
+}
+
+/**
+ * code_only_line — blank out every string literal, char literal and comment byte of `line`, keeping
+ * its length so a column never shifts. The state parameters carry an unterminated literal or an open
+ * block comment in from the previous line, and the result carries them out to the next.
+ *
+ * @param line        the raw source line
+ * @param in_str      true when a literal was still open at the end of the previous line
+ * @param in_comment  true when a block comment was still open at the end of the previous line
+ * @return            the blanked line and the state to thread onward
+ * @since 0.3.1
+ */
+fn code_only_line(line: str, in_str: bool, in_comment: bool) -> CodeScan {
+    mut out = ""
+    mut k: u64 = 0
+    mut open = in_str
+    mut comment = in_comment
+    mut quote: byte = b'"'
+    loop {
+        if k >= line.len { break }
+        let c = line[k]
+        if comment {
+            if c == b'*' && k + 1 < line.len && line[k + 1] == b'/' { comment = false; out = out ~ "  "; k = k + 2; continue }
+            out = out ~ " "
+            k = k + 1
+            continue
+        }
+        if open {
+            if c == b'\\' && k + 1 < line.len { out = out ~ "  "; k = k + 2; continue }
+            if c == quote { open = false }
+            out = out ~ " "
+            k = k + 1
+            continue
+        }
+        if c == b'/' && k + 1 < line.len && line[k + 1] == b'/' { break }
+        if c == b'/' && k + 1 < line.len && line[k + 1] == b'*' { comment = true; out = out ~ "  "; k = k + 2; continue }
+        if c == b'"' || c == b'\'' { open = true; quote = c; out = out ~ " "; k = k + 1; continue }
+        out = out ~ teko::str::slice(line, k, k + 1)
+        k = k + 1
+    }
+    CodeScan { text = out; in_str = open; in_comment = comment }
+}
+
+/**
+ * code_only_text — `code_only_line` applied to every line of `text`, rejoined with newlines so line
+ * numbers and the nesting of braces are preserved while nothing inside a literal or a comment can be
+ * read as code.
+ *
+ * @param text  the whole source text
+ * @return      the blanked text, line for line
+ * @since 0.3.1
+ */
+fn code_only_text(text: str) -> str {
+    mut out = ""
+    mut cur: u64 = 0
+    mut first = true
+    mut open = false
+    mut comment = false
+    loop {
+        if cur >= text.len { break }
+        let eol = line_end_at(text, cur)
+        let scan = code_only_line(teko::str::slice(text, cur, eol), open, comment)
+        open = scan.in_str
+        comment = scan.in_comment
+        if !first { out = out ~ "\n" }
+        out = out ~ scan.text
+        first = false
+        cur = if eol < text.len { eol + 1 } else { eol }
+    }
+    out
+}
+
+/**
+ * is_decimal_byte — is `b` one of the ten decimal digits?
+ *
+ * @param b  the byte to classify
+ * @return   true for `0`..`9`
+ * @since 0.3.1
+ */
+fn is_decimal_byte(b: byte) -> bool {
+    b >= b'0' && b <= b'9'
+}
+
+/**
+ * is_bare_number — is `s` a NUMERIC LITERAL AND NOTHING ELSE (an optional sign, decimal digits,
+ * digit separators and at most one fraction point)? This is the shape whose type the checker defaults
+ * — `i64` for an integer, `f64` for a fraction — and therefore the shape that splits a `match` join
+ * on a seed that does not cross-adopt it into a concrete sibling.
+ *
+ * @param s  the arm's trailing value text, already trimmed
+ * @return   true when `s` is a bare numeric literal
+ * @since 0.3.1
+ */
+fn is_bare_number(s: str) -> bool {
+    if s.len == 0 { return false }
+    mut k: u64 = 0
+    if s[0] == b'-' { k = 1 }
+    mut digits: u64 = 0
+    mut dots: u64 = 0
+    loop {
+        if k >= s.len { break }
+        let c = s[k]
+        if is_decimal_byte(c) { digits = digits + 1; k = k + 1; continue }
+        if c == b'_' { k = k + 1; continue }
+        if c == b'.' && dots == 0 { dots = 1; k = k + 1; continue }
+        return false
+    }
+    digits > 0
+}
+
+/**
+ * ends_with_narrowing_cast — does `s` end in a cast to a numeric width a bare literal does NOT
+ * default to? Such an arm is the CONCRETE ANCHOR a bare-literal sibling would have to be
+ * cross-adopted into. A bare integer literal defaults to `i64` and a bare float literal to `f64`, so
+ * `to i64` and `to f64` already AGREE with a bare-literal sibling and are deliberately absent here:
+ * only a narrower (or differently-signed) anchor splits the join.
+ *
+ * @param s  the arm's trailing value text, already trimmed
+ * @return   true when the value ends in a narrowing numeric cast
+ * @since 0.3.1
+ */
+fn ends_with_narrowing_cast(s: str) -> bool {
+    if teko::str::ends_with(s, " to i8") { return true }
+    if teko::str::ends_with(s, " to i16") { return true }
+    if teko::str::ends_with(s, " to i32") { return true }
+    if teko::str::ends_with(s, " to u8") { return true }
+    if teko::str::ends_with(s, " to u16") { return true }
+    if teko::str::ends_with(s, " to u32") { return true }
+    if teko::str::ends_with(s, " to u64") { return true }
+    if teko::str::ends_with(s, " to f32") { return true }
+    teko::str::ends_with(s, " to byte")
+}
+
+/**
+ * arrow_index — the index of the first `=>` in `s`, or `s.len` when there is none.
+ *
+ * @param s  the text to search
+ * @return   the index of the arrow's `=`, or `s.len`
+ * @since 0.3.1
+ */
+fn arrow_index(s: str) -> u64 {
+    mut k: u64 = 0
+    loop {
+        if k + 1 >= s.len { break }
+        if s[k] == b'=' && s[k + 1] == b'>' { return k }
+        k = k + 1
+    }
+    s.len
+}
+
+/**
+ * match_arm_values — the trailing VALUE text of every arm in a `match` body, split at nesting depth
+ * zero on `;` and on newlines (the two arm separators the language allows). A nested `match` inside an
+ * arm sits at depth one or deeper, so it is never split apart and is reported as its own arm's value —
+ * which is neither a bare literal nor a narrowing cast, so it simply does not participate.
+ *
+ * @param body  the text BETWEEN the match's braces, already blanked by `code_only_text`
+ * @return      one trimmed value per arm, in source order
+ * @since 0.3.1
+ */
+fn match_arm_values(body: str) -> []str {
+    mut out: []str = teko::list::empty()
+    mut depth: i64 = 0
+    mut cur = ""
+    mut k: u64 = 0
+    loop {
+        if k > body.len { break }
+        let at_end = k == body.len
+        let c = if at_end { b'\n' } else { body[k] }
+        if c == b'(' || c == b'[' || c == b'{' { depth = depth + 1 }
+        if c == b')' || c == b']' || c == b'}' { depth = depth - 1 }
+        if depth == 0 && (c == b';' || c == b'\n') {
+            let arrow = arrow_index(cur)
+            if arrow < cur.len { out = teko::list::push(out, tkr_trim(teko::str::slice(cur, arrow + 2, cur.len))) }
+            cur = ""
+            k = k + 1
+            continue
+        }
+        if !at_end { cur = cur ~ teko::str::slice(body, k, k + 1) }
+        k = k + 1
+    }
+    out
+}

@@ -1,0 +1,258 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * lower_interp_hole_dynamic_fat — a DYNAMIC format-spec hole (`:[spec_expr]`), as its (ptr, len)
+ * pair: the hole's own value plus the runtime-evaluated spec string are flattened through to one
+ * of the three `tk_fmt_dyn_*_len` twins, split only by the hole's own numeric family (float/
+ * signed/unsigned) — the SAME split `emit_interp`'s own dynamic arm makes (`codegen.tks`)
+ * (0.3.1.0 degrau 19).
+ *
+ * A FLOAT hole is widened to `double` first (`lower_interp_hole_value_f64`), because
+ * `tk_fmt_dyn_f64_len` declares a `double` leading parameter and an `f32` hole physically holds
+ * single precision — the same silent wrong value the static arm carried (0.3.1.0 degrau 27).
+ *
+ * @param ctx  the lowering context
+ * @param h    the hole expression
+ * @param fd   the dynamic format spec (`fd.args[0]`, a runtime `str` expression)
+ * @return     the rendered text's (ptr, len) pair
+ * @throws     propagated from the hole's own lowering or the spec argument's own fat lowering
+ */
+fn lower_interp_hole_dynamic_fat(ctx: LowerCtx, h: checker::TExpr, fd: checker::TFSpecDynamic) -> LoweredFat | error {
+    let ho = match lower_interp_hole_scalar(ctx, h, hole_is_float(h)) { Lowered as x => x; error as err => return err }
+    let spec = match lower_fat_expr(ho.ctx, fd.args[0]) { LoweredFat as x => x; error as err => return err }
+    let sym = dynamic_fmt_symbol(h)
+    lower_len_out_call(spec.ctx, sym, three_args(ho.vreg, spec.ptr, spec.len), h)
+}
+
+/**
+ * dynamic_fmt_symbol — the `tk_fmt_dyn_*_len` twin for a dynamic-spec hole's own numeric
+ * family: float, signed integer, or unsigned integer — mirrors `emit_interp`'s own dynamic
+ * dispatch (`codegen.tks`) exactly (a `bool`/`byte` hole, neither float nor signed, takes the
+ * unsigned family, the same choice codegen makes for it).
+ *
+ * @param h  the hole expression (`checker::type_interp` has already proven it numeric)
+ * @return   the runtime symbol name
+ */
+fn dynamic_fmt_symbol(h: checker::TExpr) -> str {
+    if hole_is_float(h) { return "tk_fmt_dyn_f64_len" }
+    let is_sint = match h.type { checker::Prim as p => prim_is_signed_int(p.kind); _ => false }
+    if is_sint { "tk_fmt_dyn_i64_len" } else { "tk_fmt_dyn_u64_len" }
+}
+
+/** lower_interp_hole_fat — one interpolation hole's (ptr, len) pair, per its format spec
+    (A1-4, #382, 0.3.1.0 degrau 9; the static and dynamic arms closed at degrau 19). */
+fn lower_interp_hole_fat(ctx: LowerCtx, h: checker::TExpr, spec: checker::TFSpec) -> LoweredFat | error {
+    match spec.kind {
+        checker::TFSpecNone => lower_interp_hole_none_fat(ctx, h)
+        checker::TFSpecStatic as fs => lower_interp_hole_static_fat(ctx, h, fs)
+        checker::TFSpecDynamic as fd => lower_interp_hole_dynamic_fat(ctx, h, fd)
+    }
+}
+
+/**
+ * lower_interp_fat — `$"…{expr}…"` as its (ptr, len) pair: nested `tk_str_concat_len` calls over
+ * `pieces[0] ++ fmt(holes[0]) ++ pieces[1] ++ … ++ pieces[last]`, left-associative (mirrors the C
+ * backend's own nesting, `codegen.tks`'s `emit_interp`, down to the SAME runtime concatenation —
+ * only the ABI `lower_len_out_call` walks differs, since real C needs no such detour).
+ *
+ * Every piece and every hole is threaded through fully (ptr, len) — 0.3.1.0 degrau 9's own fix:
+ * the pre-degrau-9 `lower_interp` called the raw two-`tk_str`-argument runtime `tk_str_concat`
+ * with only ONE word per operand (the length silently dropped at every step, not merely at the
+ * closed producer set's boundary), which is not a missing length so much as a wrong ABI call —
+ * `tk_str_concat`'s real C signature reads two 2-eightbyte structs, and a 1-word-per-operand call
+ * leaves its second SysV argument register whatever the NEXT operand's low word happened to be.
+ * `lower_len_out_call`'s out-parameter convention sidesteps needing this backend's `LCall` to
+ * capture a 2-register return at all (the wider N2 gap `is_str_arg_builtin`'s own doc names), so
+ * every operand this function passes is now the REAL argument the runtime signature declares.
+ *
+ * @param ctx  the lowering context
+ * @param e    the interpolation expression (its source position)
+ * @param ip   the interpolation node (pieces/holes/specs)
+ * @return     the built string's (ptr, len) pair
+ * @throws     propagated from a hole's own fat lowering (a float/bool hole, a format spec, or a
+ *             hole whose type is outside the A1-4 subset)
+ */
+fn lower_interp_fat(ctx: LowerCtx, e: checker::TExpr, ip: checker::TInterp) -> LoweredFat | error {
+    let seg0 = lower_str_bytes_fat(ctx, ip.pieces[0], e.line, e.col)
+    mut cur = seg0.ctx
+    mut acc_ptr = seg0.ptr
+    mut acc_len = seg0.len
+    mut i: u64 = 0
+    loop {
+        if i >= ip.holes.len { break }
+        let spec = if i < ip.specs.len { ip.specs[i] } else { checker::TFSpec { kind = checker::TFSpecNone { } } }
+        let ho = match lower_interp_hole_fat(cur, ip.holes[i], spec) { LoweredFat as x => x; error as err => return err }
+        let with_hole = lower_len_out_call(ho.ctx, "tk_str_concat_len", four_args(acc_ptr, acc_len, ho.ptr, ho.len), e)
+        let piece = lower_str_bytes_fat(with_hole.ctx, ip.pieces[i + 1], e.line, e.col)
+        let with_piece = lower_len_out_call(piece.ctx, "tk_str_concat_len", four_args(with_hole.ptr, with_hole.len, piece.ptr, piece.len), e)
+        cur = with_piece.ctx
+        acc_ptr = with_piece.ptr
+        acc_len = with_piece.len
+        i++
+    }
+    LoweredFat { ctx = cur; ptr = acc_ptr; len = acc_len }
+}
+
+/** lower_interp — `$"…{expr}…"` in a plain (scalar) VALUE position: `lower_interp_fat`'s ptr
+    half, the length dropped — the same "a `str` scalar drops its length" convention
+    `lower_str_lit`/`lower_call_fat_as_scalar` already carry (0.3.1.0 degrau 9). */
+fn lower_interp(ctx: LowerCtx, e: checker::TExpr, ip: checker::TInterp) -> Lowered | error {
+    let fo = match lower_interp_fat(ctx, e, ip) { LoweredFat as x => x; error as err => return err }
+    Lowered { ctx = fo.ctx; vreg = fo.ptr }
+}
+
+/** lower_in_expr — `lhs in [e0, e1, …]`: the lhs lowers ONCE, then each element compares
+    equal via `ICmpEq`/`FCmpEq` (by the lhs's PrimKind), ORed together bitwise (`IOr` — the
+    comparisons are always 0/1, so a bitwise OR IS a boolean OR; `IOr` is declared but not yet
+    RUN by the interp oracle, N2 — this closes the LOWERING honest-stop only, mirroring
+    `lower_interp`'s own scope note) (A1-4, #382). A non-primitive lhs/element (e.g. a `str`
+    membership test) is out of the A1-4 subset via `prim_kind_of`'s existing honest-stop. */
+fn lower_in_expr(ctx: LowerCtx, e: checker::TExpr, ine: checker::TInExpr) -> Lowered | error {
+    if ine.elems.len == 0 { return error { message = "native backend N1: empty `in`-expression not yet lowered (N2)" } }
+    let lo = match lower_expr(ctx, ine.lhs) { Lowered as x => x; error as err => return err }
+    let k = match prim_kind_of(ine.lhs.type, ctx.enums, "in-expression lhs") { checker::PrimKind as p => p; error as err => return err }
+    let eq = if prim_is_float_kind(k) { LBinOp::FCmpEq } else { LBinOp::ICmpEq }
+    mut cur = lo.ctx
+    mut acc: u32 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= ine.elems.len { break }
+        let eo = match lower_expr(cur, ine.elems[i]) { Lowered as x => x; error as err => return err }
+        let cr = ctx_alloc(eo.ctx)
+        let with_cmp = ctx_append(cr.ctx, bin_inst(cr.vreg, eq, lo.vreg, eo.vreg, e.line, e.col))
+        if i == 0 {
+            acc = cr.vreg
+            cur = with_cmp
+        } else {
+            let orr = ctx_alloc(with_cmp)
+            cur = ctx_append(orr.ctx, bin_inst(orr.vreg, LBinOp::IOr, acc, cr.vreg, e.line, e.col))
+            acc = orr.vreg
+        }
+        i++
+    }
+    Lowered { ctx = cur; vreg = acc }
+}
+
+/**
+ * named_type_name — the canonical struct-layout-table NAME of a field/index-accessible type: a
+ * `Named` (user struct/class) type's own declared name, or `error_struct_name()`'s reserved
+ * name for the built-in `error` (its ONE constructible shape, `error { message = <str> }`,
+ * registers a synthetic single-field layout — `error_struct_layout`, #382 degrau N2). Every
+ * OTHER type shape (`str`/`[]T` — fat, read through `lower_fat_field`/`.len`, never this path;
+ * an enum — no fields, only a `match` tag test; a bare union — no fields of its own) is out of
+ * this backend's current subset.
+ *
+ * @param checker::Type t  the receiver/construction-site type to resolve
+ * @return str  the registered layout's name
+ * @throws  when `t` is a shape this backend does not yet resolve a struct layout for
+ */
+fn named_type_name(t: checker::Type) -> str | error {
+    match t {
+        checker::Named as n => n.name
+        checker::Error => error_struct_name()
+        _ => error { message = "native backend N1: field/index access on a non-struct receiver not yet lowered (N2)" }
+    }
+}
+
+/**
+ * error_struct_name — the reserved layout-table name the built-in `error` type registers under
+ * (`named_type_name`/`error_struct_layout`). `error` is a keyword, so no user `Named` struct can
+ * ever declare this literal name — there is no collision to guard against.
+ *
+ * @return str  the reserved name (`"error"`)
+ * @since 0.3.1 (own-backend `error` construction, degrau N2)
+ */
+fn error_struct_name() -> str { "error" }
+
+/**
+ * error_field_names — the built-in `error` type's six field names, in the SAME declared order
+ * the C route's `tk_error` (`src/runtime/teko_rt.h`) carries them: `message`, `file`, `line`,
+ * `col`, `expected`, `actual` (0.3.1.0 degrau 22).
+ *
+ * @return []str  the field names, in layout order
+ */
+fn error_field_names() -> []str {
+    mut names: []str = teko::list::push(teko::list::empty(), "message")
+    names = teko::list::push(names, "file")
+    names = teko::list::push(names, "line")
+    names = teko::list::push(names, "col")
+    names = teko::list::push(names, "expected")
+    names = teko::list::push(names, "actual")
+    names
+}
+
+/**
+ * error_field_types — the built-in `error` type's six field machine classes, parallel to
+ * `error_field_names()`: `Ptr` for a FAT `str` field (`message`/`file`/`expected`/`actual` —
+ * `layout_of_sized`'s packer overrides its size to 16 via `error_field_sizes`), `I32` for the
+ * two scalar `u32` diagnostic fields (`line`/`col`) (0.3.1.0 degrau 22).
+ *
+ * @return []LType  the field machine classes, parallel to `error_field_names()`
+ */
+fn error_field_types() -> []LType {
+    mut types: []LType = teko::list::push(teko::list::empty(), LType::Ptr)
+    types = teko::list::push(types, LType::Ptr)
+    types = teko::list::push(types, LType::I32)
+    types = teko::list::push(types, LType::I32)
+    types = teko::list::push(types, LType::Ptr)
+    types = teko::list::push(types, LType::Ptr)
+    types
+}
+
+/**
+ * error_field_sizes — the built-in `error` type's six field byte sizes, parallel to
+ * `error_field_types()`: a FAT `Ptr` field (a `str`) is 16 bytes (`{ptr, len}`, the SAME
+ * override `error_struct_layout`'s pre-degrau-22 single-field version already applied to
+ * `message`); every other field's size is its own `ltype_size`.
+ *
+ * @param []LType types  the field machine classes (`error_field_types()`)
+ * @return []u32  the field byte sizes, parallel to `types`
+ */
+fn error_field_sizes(types: []LType) -> []u32 {
+    mut sizes: []u32 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= types.len { break }
+        sizes = teko::list::push(sizes, error_field_size_of(types[i]))
+        i++
+    }
+    sizes
+}
+
+/**
+ * error_field_size_of — one `error` field's byte size: 16 for the FAT `str` fields (`Ptr`'s own
+ * class doubled — the pointer half plus the inline length half), else the class's plain
+ * `ltype_size` (`line`/`col`, `I32`, 4 bytes each).
+ *
+ * @param LType t  the field's machine class
+ * @return u32  its byte size within the `error` layout
+ */
+fn error_field_size_of(t: LType) -> u32 {
+    match t {
+        Ptr => ltype_size(LType::Ptr) * (2 to u32)
+        _ => ltype_size(t)
+    }
+}
+
+/**
+ * error_field_aligns — the built-in `error` type's six field alignments, parallel to
+ * `error_field_types()`: each field's own `ltype_align` (8 for a FAT `str`'s `Ptr` class, 4 for
+ * an `I32` scalar) — the same natural alignment `layout_of`'s scalar mapping would derive,
+ * `error_struct_layout` only needs it spelled out explicitly because it supplies EXPLICIT sizes
+ * too (`layout_of_sized`'s contract).
+ *
+ * @param []LType types  the field machine classes (`error_field_types()`)
+ * @return []u32  the field byte alignments, parallel to `types`
+ */
+fn error_field_aligns(types: []LType) -> []u32 {
+    mut aligns: []u32 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= types.len { break }
+        aligns = teko::list::push(aligns, ltype_align(types[i]))
+        i++
+    }
+    aligns
+}

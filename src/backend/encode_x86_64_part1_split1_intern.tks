@@ -1,0 +1,162 @@
+
+/**
+ * X86MemOp — the encoding descriptor for a memory-operand `mov`/`movsx`/SSE-
+ * family instruction: the operand-size prefix, the mandatory SSE prefix (for
+ * a float MOVSD/MOVSS transfer, `B1-fp`), the REX.W bit, whether the opcode is
+ * `0F`-escaped, the primary opcode byte, and whether the register operand is
+ * 8-bit (which forces a REX prefix when it is SIL/DIL/BPL/SPL or R8..R15, so
+ * the low byte is addressable). `load_memop_x86`/`store_memop_x86` produce it;
+ * `emit_mem_op_x86` consumes it for both loads and stores.
+ *
+ * @since #386 B1-5, B1-fp
+ */
+type X86MemOp = struct {
+    /**
+     * op66 — emit the `0x66` operand-size prefix (the 16-bit word forms).
+     */
+    op66: bool
+    /**
+     * mandatory_prefix — an SSE mandatory prefix byte (`X86_PREFIX_F2`/`F3`
+     * for a float MOVSD/MOVSS transfer), or `X86_NO_PREFIX` for every
+     * integer form (which carries its size distinction through `op66`/`rexw`
+     * instead).
+     */
+    mandatory_prefix: u32
+    /**
+     * rexw — set the REX.W bit (the 64-bit quadword / sign-extending forms).
+     */
+    rexw: bool
+    /**
+     * two_byte — the opcode is `0F`-escaped (`movsx`, and every SSE form).
+     */
+    two_byte: bool
+    /**
+     * opcode — the primary opcode byte (after any `0F` escape).
+     */
+    opcode: u32
+    /**
+     * byte_reg — the register operand is 8-bit (a byte store's source; loads
+     * zero-extend via `movzx` into a 32-bit register and never set this), so a
+     * REX prefix is forced when its id is >= 4 (SIL/DIL/BPL/SPL/R8..R15).
+     */
+    byte_reg: bool
+}
+
+/**
+ * push_byte_x86 — append the low 8 bits of `v` to `buf` as one byte, the
+ * variable-length x86 emit primitive (all bit-slicing stays in `u32`; only the
+ * final `& 0xFF` narrows to `byte`).
+ *
+ * @param []byte buf  the buffer to extend
+ * @param u32 v  the value whose low byte is appended
+ * @return []byte  `buf` followed by `v & 0xFF`
+ */
+fn push_byte_x86(buf: []byte, v: u32) -> []byte {
+    teko::list::push(buf, (v & X86_BYTE_MASK) to byte)
+}
+
+/**
+ * push_imm32_x86 — append the low 32 bits of `x` to `buf` as four little-endian
+ * bytes. The mask keeps a NEGATIVE `x` from panicking on the `to u32` cast (the
+ * two's-complement bit pattern is computed by masking, not by a signed cast).
+ *
+ * @param []byte buf  the buffer to extend
+ * @param i64 x  the value whose low 32 bits are appended (imm32 / disp32)
+ * @return []byte  `buf` followed by the four little-endian bytes
+ */
+fn push_imm32_x86(buf: []byte, x: i64) -> []byte {
+    emit_u32_le(buf, (x & X86_LOW32_MASK) to u32)
+}
+
+/**
+ * push_imm64_x86 — append the 64 bits of `x` to `buf` as eight little-endian
+ * bytes (the `movabs` immediate), split into two masked 32-bit halves so a
+ * NEGATIVE `x` never reaches a panicking signed `to u64` cast.
+ *
+ * @param []byte buf  the buffer to extend
+ * @param i64 x  the 64-bit immediate to append
+ * @return []byte  `buf` followed by the eight little-endian bytes
+ */
+fn push_imm64_x86(buf: []byte, x: i64) -> []byte {
+    let lo = (x & X86_LOW32_MASK) to u32
+    let hi = ((x >> (32)) & X86_LOW32_MASK) to u32
+    emit_u32_le(emit_u32_le(buf, lo), hi)
+}
+
+/**
+ * bit_u32 — a boolean as its 0/1 `u32` value, the bit-assembly primitive the
+ * REX-prefix builder folds into each extension field's shift. Extracted so the
+ * REX byte is composed by shifting these bits into place (bool casts are not in
+ * the bootstrap seed, so `if`-selection stands in for a `bool to u32` cast).
+ *
+ * @param bool flag  the boolean to reduce
+ * @return u32  1 when `flag`, else 0
+ */
+fn bit_u32(flag: bool) -> u32 {
+    if flag { 1 to u32 } else { 0 to u32 }
+}
+
+/**
+ * rex_x86 — the REX prefix byte value `0x40 | (W<<3) | (R<<2) | (X<<1) | B`:
+ * `W` the 64-bit operand size, `R` the ModRM.reg high bit, `X` the SIB.index
+ * high bit, `B` the ModRM.rm / SIB.base / opcode-reg high bit.
+ *
+ * @param bool w  the operand-size (REX.W) bit
+ * @param bool r  the reg-field extension (REX.R) bit
+ * @param bool x  the index-field extension (REX.X) bit
+ * @param bool b  the rm/base/opcode-reg extension (REX.B) bit
+ * @return u32  the REX prefix byte value
+ */
+fn rex_x86(w: bool, r: bool, x: bool, b: bool) -> u32 {
+    let hi = (REX_BASE | (bit_u32(w) << REX_W_SHIFT)) | (bit_u32(r) << REX_R_SHIFT)
+    (hi | (bit_u32(x) << REX_X_SHIFT)) | bit_u32(b)
+}
+
+/**
+ * push_rex_x86 — append a REX prefix to `buf` only when it carries information
+ * (any of W/R/X/B set); a bare `0x40` is elided, matching what an assembler
+ * emits for a non-byte operation. Byte operations that need the bare `0x40` to
+ * reach SIL/DIL/BPL/SPL go through `push_rex_forced_x86` instead.
+ *
+ * @param []byte buf  the buffer to extend
+ * @param bool w  the REX.W bit
+ * @param bool r  the REX.R bit
+ * @param bool x  the REX.X bit
+ * @param bool b  the REX.B bit
+ * @return []byte  `buf`, with a REX prefix appended iff it is non-trivial
+ */
+fn push_rex_x86(buf: []byte, w: bool, r: bool, x: bool, b: bool) -> []byte {
+    let v = rex_x86(w, r, x, b)
+    if v == REX_BASE { return buf }
+    push_byte_x86(buf, v)
+}
+
+/**
+ * push_rex_forced_x86 — append a REX prefix to `buf` UNCONDITIONALLY, including
+ * a bare `0x40`. Used where a byte register (SIL/DIL/BPL/SPL) needs the prefix
+ * to be addressable, or where REX.W is always required.
+ *
+ * @param []byte buf  the buffer to extend
+ * @param bool w  the REX.W bit
+ * @param bool r  the REX.R bit
+ * @param bool x  the REX.X bit
+ * @param bool b  the REX.B bit
+ * @return []byte  `buf` followed by the REX prefix byte
+ */
+fn push_rex_forced_x86(buf: []byte, w: bool, r: bool, x: bool, b: bool) -> []byte {
+    push_byte_x86(buf, rex_x86(w, r, x, b))
+}
+
+/**
+ * modrm_x86 — the ModRM byte `(mod<<6) | (reg<<3) | rm`, the addressing-mode
+ * byte every register/memory operand rides. `mod=11` is register-direct;
+ * `mod=00/01/10` select the [base], [base+disp8], [base+disp32] memory forms.
+ *
+ * @param u32 md  the 2-bit mode field
+ * @param u32 reg  the 3-bit reg / opcode-extension field
+ * @param u32 rm  the 3-bit rm field
+ * @return u32  the ModRM byte value
+ */
+fn modrm_x86(md: u32, reg: u32, rm: u32) -> u32 {
+    ((md & MODRM_MOD_MASK) << MODRM_MOD_SHIFT) | ((reg & X86_FIELD3_MASK) << X86_FIELD3_SHIFT) | (rm & X86_FIELD3_MASK)
+}

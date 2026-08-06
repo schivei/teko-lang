@@ -1,0 +1,64 @@
+
+// --- the main loop ---
+
+pub fn tokenize(source: str) -> []Token | error {
+    mut pos: u64 = 0
+    // (#148 R3 DECREE) `tokens` is a linear chain: born empty, self-append-only, read only
+    // after the loop — every copy-grow frees the superseded buffer (mem::push_fo; paranoid-gated).
+    mut tokens: []Token = teko::list::empty()
+    // location cursor: (cur_line, cur_col) is the 1-based location of byte `cur_pos`. It
+    // advances forward to each token-start `pos`; since the token starts are monotonic, the
+    // total advance work is O(N) (each byte crossed once) — replacing the old O(N²) stamping.
+    mut cur_pos: u64 = 0
+    mut cur_line: u32 = 1
+    mut cur_col: u32 = 1
+
+    loop {
+        pos = skip_spaces(source, pos)
+        if pos >= source.len { break }
+
+        // advance the cursor from cur_pos up to the token start `pos`, counting newlines.
+        loop {
+            if cur_pos >= pos { break }
+            if source[cur_pos] == b'\n' { cur_line = cur_line + 1; cur_col = 1 } else { cur_col = cur_col + 1 }
+            cur_pos = cur_pos + 1
+        }
+
+        let c = source[pos]
+
+        // `//` line comment → skip to the newline
+        if c == b'/' && at(source, pos + 1) == b'/' {
+            pos = skip_line(source, pos)
+            continue
+        }
+        // `/* … */` block & `/** … */` doc comments
+        if c == b'/' && at(source, pos + 1) == b'*' {
+            // a DOC comment `/** … */` (but NOT the empty `/**/`) becomes a Doc
+            // TOKEN (the parser attaches it to the next type/fn declaration); a plain
+            // block comment is skipped.
+            if at(source, pos + 2) == b'*' && at(source, pos + 3) != b'/' {
+                let scan = match read_doc_comment(source, pos) { Scan as sc => sc; error as e => return e }
+                tokens = teko::mem::push_fo(tokens, stamp_loc(scan.token, cur_line, cur_col))
+                pos = scan.next
+                continue
+            }
+            pos = match skip_block_comment(source, pos) { u64 as p => p; error as e => return e }
+            continue
+        }
+        // a significant newline (B.26) is a token
+        if c == b'\n' {
+            tokens = teko::mem::push_fo(tokens, stamp_loc(sym(source, pos, 1, TokenKind::Newline).token, cur_line, cur_col))
+            pos = pos + 1
+            continue
+        }
+
+        let scan = match next_token(source, pos) {
+            Scan as sc => sc
+            error as e => return e
+        }
+        tokens = teko::mem::push_fo(tokens, stamp_loc(scan.token, cur_line, cur_col))
+        pos = scan.next
+    }
+
+    tokens
+}

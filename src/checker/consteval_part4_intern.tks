@@ -1,0 +1,183 @@
+use teko::parser
+
+
+/**
+ * const_ctor_field_value — one field value of the constructor's struct literal, rewritten for the call
+ * site: a parameter reference becomes the ALREADY-FOLDED argument the call passes, a literal stands for
+ * itself, and every other form yields null so the whole canonicalization is abandoned rather than
+ * producing a value the function would not have returned.
+ *
+ * @param v       the field value as the constructor's body spells it
+ * @param params  the constructor's declared parameters, in signature order
+ * @param args    the call's arguments, PARALLEL to `params`
+ * @return        the field value at the call site, or null when it is not reproducible
+ * @since #degrau-1
+ */
+fn const_ctor_field_value(v: TExpr, params: []parser::Param, args: []TExpr) -> TExpr | null {
+    match v.kind {
+        TVar as tv => const_ctor_var_value(tv, params, args)
+        TNumber => v
+        TStrLit => v
+        TByteLit => v
+        TCharLit => v
+        TBoolLit => v
+        TPathExpr => v
+        _ => null
+    }
+}
+
+/**
+ * const_ctor_substituted — the constructor's struct literal with every field value rewritten for the
+ * call site, carried at the CALL's own type and source position (so the canonical node reports where
+ * the const initializer is written, not where the constructor is declared). Null when any field value
+ * is not reproducible.
+ *
+ * @param call    the (argument-canonicalized) call expression being replaced
+ * @param si      the constructor body's struct literal
+ * @param params  the constructor's declared parameters, in signature order
+ * @param args    the call's arguments, PARALLEL to `params`
+ * @return        the canonical struct literal, or null when a field value is not reproducible
+ * @since #degrau-1
+ */
+fn const_ctor_substituted(call: TExpr, si: TStructInit, params: []parser::Param, args: []TExpr) -> TExpr | null {
+    mut vals: []TExpr = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= si.field_vals.len { break }
+        let fv = match const_ctor_field_value(si.field_vals[i], params, args) { TExpr as x => x; null => return null }
+        vals = teko::list::push(vals, fv)
+        i++
+    }
+    TExpr { kind = TStructInit { field_names = si.field_names; field_vals = vals }; type = call.type; line = call.line; col = call.col }
+}
+
+/**
+ * canon_ctor_call — replace an allowlisted pure-constructor call by the struct literal its callee
+ * returns, or leave the call untouched when the callee is not a uniquely resolvable struct constructor
+ * (`teko::f64_from_bits` returns a float, not a struct, and stays a call). The spliced literal is the
+ * constructor's OWN body with its parameters bound to the call's already-folded arguments, so the
+ * const's value is preserved exactly.
+ *
+ * @param cl     the typed call, as the const initializer spells it
+ * @param args   the call's arguments, already canonicalized
+ * @param call   the call expression rebuilt over `args` (the value returned when no rewrite applies)
+ * @param ctors  the program's struct-constructor table
+ * @return       the canonical struct literal, or `call` unchanged
+ * @since #degrau-1
+ */
+fn canon_ctor_call(cl: TCall, args: []TExpr, call: TExpr, ctors: []TFunction) -> TExpr {
+    let f = match find_const_ctor(ctors, cl.callee, cl.call_ns) { TFunction as x => x; null => return call }
+    if f.params.len != args.len { return call }
+    let lit = match const_ctor_literal(f) { TExpr as x => x; null => return call }
+    let si = match lit.kind { TStructInit as s => s; _ => return call }
+    match const_ctor_substituted(call, si, f.params, args) { TExpr as x => x; null => call }
+}
+
+/**
+ * canon_call — canonicalize a call inside a const initializer: its arguments first, then the call
+ * itself when its callee is a struct constructor.
+ *
+ * @param cl     the typed call expression
+ * @param e      the enclosing typed expression (for its type/position)
+ * @param ctors  the program's struct-constructor table
+ * @return       the canonical struct literal, or the call rebuilt over canonical arguments
+ * @since #degrau-1
+ */
+fn canon_call(cl: TCall, e: TExpr, ctors: []TFunction) -> TExpr {
+    let args = canon_exprs(cl.args, ctors)
+    let call = TExpr { kind = TCall { callee = cl.callee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot }; type = e.type; line = e.line; col = e.col }
+    canon_ctor_call(cl, args, call, ctors)
+}
+
+/**
+ * canon_exprs — canonicalize every expression in `xs`, in order.
+ *
+ * @param xs     the expressions to canonicalize
+ * @param ctors  the program's struct-constructor table
+ * @return       the canonicalized expressions, in order
+ * @since #degrau-1
+ */
+fn canon_exprs(xs: []TExpr, ctors: []TFunction) -> []TExpr {
+    mut out: []TExpr = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, canonicalize_const_ctors(xs[i], ctors))
+        i++
+    }
+    out
+}
+
+/**
+ * canon_array — canonicalize an array/slice literal's elements (a spread's sub-slice included).
+ *
+ * @param a      the typed array literal
+ * @param e      the enclosing typed expression (for its type/position)
+ * @param ctors  the program's struct-constructor table
+ * @return       the array literal with canonicalized elements
+ * @since #degrau-1
+ */
+fn canon_array(a: TArrayLit, e: TExpr, ctors: []TFunction) -> TExpr {
+    mut elems: []TArrayElem = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= a.elements.len { break }
+        elems = teko::list::push(elems, TArrayElem { is_spread = a.elements[i].is_spread; expr = canonicalize_const_ctors(a.elements[i].expr, ctors) })
+        i++
+    }
+    TExpr { kind = TArrayLit { elements = elems }; type = e.type; line = e.line; col = e.col }
+}
+
+/**
+ * substitute_module_consts — the module-level leg of `inline_consts`: replace every scalar
+ * module-const reference with a clone of its dependency-collapsed initializer and drop the scalar
+ * TConstDecl items (#594 crumb 5). A const-free program is returned UNCHANGED (the local propagation +
+ * fold that follow apply to it regardless). Split out from `inline_consts` so the substitution stays a
+ * single-responsibility pass composed before `propagate_locals` (#comptime-fold CF3) and `fold_program`.
+ *
+ * @param prog  the fully typed, monomorphized program
+ * @return      the program with scalar module-const references substituted and scalar decls removed
+ * @throws      a located error when the module-level consts form a reference cycle (`const_dep_order`)
+ * @since #594
+ */
+fn substitute_module_consts(prog: TProgram) -> TProgram | error {
+    let consts = collect_module_consts(prog.items)
+    if consts.len == 0 { return prog }
+    let ordered = match const_dep_order(consts) { []TConstDecl as o => o; error as e => return e }
+    let smap = build_scalar_map(ordered)
+    mut out: []TItem = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        out = inline_place_item(out, prog.items[i], smap)
+        i++
+    }
+    TProgram { items = out }
+}
+
+/**
+ * build_aggregate_map — the AGGREGATE substitution table from the dependency-ordered consts (#594
+ * crumb 6, C-backend leg): the mirror of `build_scalar_map` for the NON-scalar family. Each aggregate
+ * const's initializer is collapsed against the already-collapsed initializers of the aggregate consts
+ * it references before it is itself added, so a nested aggregate reference (`const B = [..A..]; const
+ * A = [..]`) fully collapses in dependency order. A scalar const contributes no entry (scalars were
+ * already inlined + dropped by `inline_consts`).
+ *
+ * @param ordered  the module-level consts in dependency order (from `const_dep_order`)
+ * @return         the aggregate consts' names + collapsed initializers
+ * @since #594
+ */
+fn build_aggregate_map(ordered: []TConstDecl) -> ScalarConstMap {
+    mut amap = ScalarConstMap { names = teko::list::empty(); nss = teko::list::empty(); inits = teko::list::empty() }
+    mut i: u64 = 0
+    loop {
+        if i >= ordered.len { break }
+        let cd = ordered[i]
+        if !is_scalar_const_type(cd.ty) {
+            let collapsed = inline_rw_expr(cd.init, amap)
+            amap = ScalarConstMap { names = teko::list::push(amap.names, cd.name); nss = teko::list::push(amap.nss, cd.namespace); inits = teko::list::push(amap.inits, collapsed) }
+        }
+        i++
+    }
+    amap
+}

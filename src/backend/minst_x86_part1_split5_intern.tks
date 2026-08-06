@@ -1,0 +1,66 @@
+/**
+ * push_minst_block_x86 — a copy of `b` with `inst` appended to its instruction
+ * stream (an `append_minst_x86` helper, mirrors arm64's `push_minst_block`).
+ *
+ * @param MBlockX86 b  the block to extend
+ * @param MInstX86 inst  the instruction to append
+ * @return MBlockX86  the extended block
+ */
+fn push_minst_block_x86(b: MBlockX86, inst: MInstX86) -> MBlockX86 {
+    MBlockX86 { id = b.id; params = b.params; insts = teko::list::push(b.insts, inst) }
+}
+
+/**
+ * mreg_list_set_x86 — a copy of `xs` with position `index` replaced by `reg`
+ * (positions past the end are left unchanged). Mirrors arm64's `mreg_list_set`.
+ *
+ * @param []MReg xs  the register list
+ * @param u32 index  the position to replace
+ * @param MReg reg  the replacement register
+ * @return []MReg  the updated list
+ */
+fn mreg_list_set_x86(xs: []MReg, index: u32, reg: MReg) -> []MReg {
+    mut out: []MReg = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        out = teko::list::push(out, if (i to u32) == index { reg } else { xs[i] })
+        i++
+    }
+    out
+}
+
+/**
+ * wide_suffix_x86 — the printer suffix for a `wide` flag: `"q"` for the 64-bit
+ * quadword (r64) form, `"d"` for the 32-bit doubleword (r32) form.
+ *
+ * @param bool wide  the flag to render
+ * @return str  the operand-width suffix
+ */
+fn wide_suffix_x86(wide: bool) -> str {
+    if wide { "q" } else { "d" }
+}
+
+/**
+ * reg_class_sigil_x86 — the register-file marker a printed operand carries after
+ * its `%`/`%p` prefix: `"f"` for the FPR (XMM) file, empty for the GPR file
+ * (`B1-fp`). XMM ids share the GPR numbering space, so without this marker a
+ * dumped `fmov.d %p0, %p0` could mean RAX or XMM0 and a test could not tell a
+ * float move from an integer one. The GPR side stays unmarked so every
+ * pre-existing integer golden reads byte-identically.
+ *
+ * @param MRegClass c  the register's class
+ * @return str  the class marker, or the empty string for a GPR
+ */
+fn reg_class_sigil_x86(c: MRegClass) -> str {
+    if c == MRegClass::FPR { "f" } else { "" }
+}
+
+/**
+ * reg_ref_x86 — a register operand's printer text: `%N` for a virtual GPR, `%pN`
+ * for a physical one, each gaining the `f` file marker (`%fN`/`%pfN`) when the
+ * operand lives in the FPR (XMM) file.
+ *
+ * @param MReg r  the register to render
+ * @return str  the operand text
+ */

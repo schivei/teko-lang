@@ -1,0 +1,40 @@
+
+/**
+ * The reverse-FFI EXPORT GATE for an `abi="c"` artifact (FFI-D). Enforced categorically, before codegen:
+ *   * an `exp` class or interface is a COMPILE ERROR — a Teko class/interface has no stable C ABI, so it
+ *     may not cross the boundary in this slice (no shelved fallback; the owner's rejection ruling).
+ *   * an `exp` function must be FFI-safe: every parameter and the return type map to a C type, no Teko
+ *     `params []T` variadic parameter, and no unresolved generic parameter (only monomorphic export).
+ *   * two exports resolving to the SAME C symbol are a COMPILE ERROR, naming both.
+ * Non-`exp` declarations are ignored — they are internal to the artifact and never reach C.
+ *
+ * @param prog  the checked program of the `abi="c"` artifact
+ * @return      null on success
+ * @throws      on an exported class/interface, a non-FFI-safe `exp` signature, or a C-symbol collision
+ * @since 0.3.0.30 (FFI base — reverse-FFI export)
+ */
+pub fn check_ffi_export(prog: checker::TProgram) -> error | null {
+    mut seen_syms: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            checker::TFunction as f => {
+                if f.vis == parser::Visibility::Exp {
+                    match check_ffi_export_fn(f) { null => { }; error as e => return e }
+                    let sym = cg_c_export_symbol(f)
+                    if ffi_str_in(seen_syms, sym) {
+                        return error { message = teko::str::concat("reverse-FFI export collision: two exported functions resolve to the C symbol `", sym, "` — give one an explicit `exp(\"other_name\")`") }
+                    }
+                    seen_syms = teko::list::push(seen_syms, sym)
+                }
+            }
+            parser::TypeDecl as d => {
+                match check_ffi_export_type(d) { null => { }; error as e => return e }
+            }
+            _ => { }
+        }
+        i++
+    }
+    null
+}

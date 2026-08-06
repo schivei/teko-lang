@@ -1,0 +1,67 @@
+
+/**
+ * emit_bsd_ar_archive — assemble a complete BSD-format `.a` static archive
+ * for a 64-bit Mach-O member: the 8-byte global header, the `__.SYMDEF SORTED`
+ * member (`#1/<N>`-named like every other member; its `ranlib_64` entries
+ * SORTED alphabetically by symbol name, `bsd_sorted_symbols` — the `SORTED`
+ * promise — indexing every `ArSymbol` against its defining member's real file
+ * offset), then every real `ArMember` in list order (each ALSO `#1/<N>`-
+ * named). The `__.SYMDEF SORTED` payload's byte size is knowable from names/
+ * count alone (no member offset needed, since it always starts right after
+ * the fixed 8-byte global header at a KNOWN header position), so its own
+ * layout — and so the real members' starting offset — is resolved first;
+ * `bsd_layout_members` then threads the REAL members' offsets forward in one
+ * sequential pass (each one's `#1/<N>` padding depends on its own absolute
+ * offset). Consumable by `ar t`/`ar x` (lists/extracts members via the
+ * resolved `#1/<N>` name), `nm`/`nm -a` and `ld` (the `__.SYMDEF SORTED`
+ * index resolves archive-member selection without a full per-member symtab
+ * scan).
+ *
+ * @param []ArMember members  the archive's members, in emission order
+ * @param []ArSymbol symbols  the exported-symbol index (each naming its
+ *        defining member by 0-based list index)
+ * @return []byte  the finished BSD-format `.a` archive bytes
+ */
+pub fn emit_bsd_ar_archive(members: []ArMember, symbols: []ArSymbol) -> []byte {
+    let sorted = bsd_sorted_symbols(symbols)
+    let symdef_layout = bsd_name_layout(BSD_SYMDEF_NAME, AR_GLOBAL_HEADER.len to u32)
+    let payload_size = bsd_symdef_payload_size(sorted)
+    let symdef_span = bsd_member_span(symdef_layout.name_with_padding, payload_size)
+    let first_member_offset = (AR_GLOBAL_HEADER.len to u32) + symdef_span
+    let laid_out = bsd_layout_members(first_member_offset, members)
+    let symdef_data = bsd_symdef_payload(sorted, laid_out.offsets)
+    mut b: []byte = teko::list::empty()
+    b = append_bytes(b, AR_GLOBAL_HEADER)
+    b = bsd_write_member(b, symdef_layout, symdef_data, BSD_MODE_SYMDEF)
+    mut i: u64 = 0
+    loop {
+        if i >= members.len { break }
+        b = bsd_write_member(b, laid_out.layouts[i], members[i].data, BSD_MODE_MEMBER)
+        i++
+    }
+    b
+}
+
+/**
+ * emit_static_archive_macho — wrap ONE whole-program Mach-O relocatable
+ * object (`obj_name`/`obj_bytes`) into a single-member BSD-format `.a` static
+ * archive with a `__.SYMDEF SORTED` symbol table, indexing every one of
+ * `symbols`' defined, non-local entries against that lone member — the
+ * writer backing `src/build/project.tks::emit_static_lib`'s `Arm64Macho` arm.
+ * Format-
+ * specific in BOTH directions (unlike `objfile_ar.tks::emit_static_archive`'s
+ * format-agnostic input): `symbols`' names are `_`-prefixed to match
+ * `objfile_macho.tks::emit_macho`'s own string-table convention, and the
+ * container is a 64-bit BSD/Darwin archive — the format
+ * `scripts/check_ar_macho.sh`'s `ar`/`nm`/`ld` cross-check (and every
+ * Mach-O-hosting `ld`) expects.
+ *
+ * @param str obj_name  the member's bare on-disk name (`"<stem>.o"`)
+ * @param []byte obj_bytes  the Mach-O object file's bytes (own-native emitted)
+ * @param []Symbol symbols  the module's neutral symbol list (for the exported-symbol index)
+ * @return []byte  the finished BSD-format `.a` archive bytes
+ */
+pub fn emit_static_archive_macho(obj_name: str, obj_bytes: []byte, symbols: []Symbol) -> []byte {
+    let member = ArMember { name = obj_name; data = obj_bytes }
+    emit_bsd_ar_archive([member], macho_ar_symbols(symbols))
+}

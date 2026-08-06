@@ -1,0 +1,236 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * lower_tail_expr_stmt — a VALUE arm's tail expression-statement: a `Void`-typed tail is, by
+ * the checker's own invariant (`texpr_diverges`/`tblock_diverges`, `src/checker/typer.tks` —
+ * "a panic/exit call DIVERGES ... its result may stand in for ANY type at a value position"),
+ * ALWAYS a diverging call (`panic`/`exit`, or a nested match/if whose every branch diverges).
+ * Its own placeholder (unused-by-contract) VReg is never a REAL value, so a `diverging_tail_
+ * value` fallback of the arm's own `result_ty` stands in instead — the exact own-backend gap
+ * C7's `T | null` panic-hook arm exposed (the placeholder VReg colliding, by pure VReg-number
+ * coincidence, with an unrelated live value elsewhere in the function). Any other (non-Void)
+ * tail is lowered COERCED into `target_ty` (`lower_value_into_type`) — a bare case value stays
+ * unwrapped when `target_ty` is not itself a variant, and is wrapped into the uniform
+ * tag+payload shape when it is (#382, degrau N2).
+ *
+ * @param LowerCtx ctx  the lowering context positioned at the tail statement
+ * @param checker::TExprStmt es  the tail expression-statement
+ * @param LType result_ty  the enclosing arm's own expected result machine class
+ * @param checker::Type target_ty  the enclosing arm's own DECLARED checker type (the if/match
+ *                                 expression's, or — via `lower_fn_body` — the enclosing
+ *                                 function's return type)
+ * @return LowerBlockValue  the value outcome (never terminated here — a diverging tail still
+ *                          falls through with a placeholder, keeping the arm's own control-flow
+ *                          shape identical to every sibling's, C7)
+ * @throws  propagated from lowering the tail expression
+ * @since 0.3.1 (null-union C7 own-backend gap)
+ */
+fn lower_tail_expr_stmt(ctx: LowerCtx, es: checker::TExprStmt, result_ty: LType, target_ty: checker::Type) -> LowerBlockValue | error {
+    if type_is_void(es.expr.type) {
+        let diverging = match lower_expr(ctx, es.expr) { Lowered as x => x; error as err => return err }
+        return diverging_tail_value(diverging.ctx, result_ty)
+    }
+    let lo = match lower_value_into_type(ctx, target_ty, es.expr) { Lowered as x => x; error as err => return err }
+    LowerBlockValue { ctx = lo.ctx; terminated = false; vreg = lo.vreg }
+}
+
+/**
+ * diverging_tail_value — a value arm's tail already diverged at runtime
+ * (`lower_tail_expr_stmt`'s doc): materialize a defensive, WIDTH-CORRECT constant of `result_ty`
+ * instead of forwarding the diverging call's placeholder VReg. Never observed at runtime (the
+ * tail's own call already trapped/exited), but matching `result_ty`'s machine class keeps this
+ * arm's merge edge consistent with every sibling's real value (`lfallback_const`'s own
+ * width-selection doc) — and, just as importantly, lets the arm still FALL THROUGH to the
+ * shared merge rather than an early `return`, so the enclosing `if`/`match`'s own block
+ * never becomes function-terminal (which would force ITS declared type to match the function's
+ * own return type instead of staying the ordinary merge-via-block-arg shape every other
+ * construct here already uses).
+ *
+ * @param LowerCtx ctx  the lowering context positioned right after the diverging tail
+ * @param LType result_ty  the arm's expected result machine class
+ * @return LowerBlockValue  the (never-observed) placeholder value, NOT terminated
+ * @since 0.3.1 (null-union C7 own-backend gap)
+ */
+fn diverging_tail_value(ctx: LowerCtx, result_ty: LType) -> LowerBlockValue {
+    let r = ctx_alloc(ctx)
+    let with_const = ctx_append(r.ctx, const_int_inst(r.vreg, lfallback_const(result_ty), 0, 0))
+    LowerBlockValue { ctx = with_const; terminated = false; vreg = r.vreg }
+}
+
+/**
+ * lower_tail_non_expr — a value-producing arm/function-body's tail statement that is NOT an
+ * expression-statement (a `loop`, a bare `if`/`match` STATEMENT, a `TBinding`/`TAssign`, …).
+ *
+ * A `return`/`break`/`continue` genuinely terminates (`lower_stmt`'s own `out.terminated`), and
+ * closes the arm exactly like an explicit `return` (`terminated=true`, `vreg` unused). Anything
+ * else falls through this statement's OWN close (e.g. `lower_loop`'s exit block, reachable in
+ * principle through a `break` — `lower_loop`'s own doc) WITHOUT ever having produced a value of
+ * `result_ty`.
+ *
+ * That is not an invariant break: `check_trailing_value` (typer.tks) makes NO claim whatsoever
+ * about a non-expression tail — "the guard against false-rejecting a body that ends in a
+ * diverging loop/if/match" (its own doc) — so the checker ALREADY admits, e.g., a breakless
+ * `loop` whose only exits are inner `return`s, TRUSTING the programmer that every reachable path
+ * actually diverges (M.4, the full every-path-returns analysis, is a documented SEPARATE later
+ * item). The C emitter honors that exact same trust: `cg_stmt_c_terminates` returns `false` for
+ * every non-expression tail kind, and `emit_function_cov` follows a `false` with a bare
+ * `__builtin_unreachable()` — no value materialized, the fall-through is UB IF the trust is ever
+ * violated, and the checker's contract is that it never is (`codegen.tks:8659-9013`).
+ *
+ * This mirrors that same contract with a STRICTLY SAFER placeholder than raw C UB: reuse
+ * `diverging_tail_value`'s defensive, width-correct constant of `result_ty` (never observed at
+ * runtime under the checker's own guarantee) and stay `terminated=false`, so this tail's arm
+ * merges/returns through the exact same edge every sibling arm's real value takes — no separate
+ * code path, no redesign, just the established diverging-tail treatment applied to one more
+ * statement shape.
+ *
+ * @param ctx        the lowering context positioned at the tail statement
+ * @param s          the tail statement (not a `checker::TExprStmt` — `lower_tail_stmt` already
+ *                   routed that case to `lower_tail_expr_stmt`)
+ * @param result_ty  the enclosing arm/function's own result machine class (`lower_block_value`'s
+ *                   `result_ty`), threaded through to the placeholder constant's width
+ * @return           `terminated=true` (a real `return`/`break`/`continue`) or the diverging-tail
+ *                    placeholder (`terminated=false`, matching `diverging_tail_value`)
+ * @throws           propagated from lowering the tail statement itself
+ */
+fn lower_tail_non_expr(ctx: LowerCtx, s: checker::TStatement, result_ty: LType) -> LowerBlockValue | error {
+    let out = match lower_stmt(ctx, s) { LowerStmtOut as x => x; error as err => return err }
+    if out.terminated { return LowerBlockValue { ctx = out.ctx; terminated = true; vreg = 0 } }
+    diverging_tail_value(out.ctx, result_ty)
+}
+
+/** lower_if_expr — cond ? then : else via LBranch + per-arm blocks merging through a
+    block-arg. An if-EXPRESSION (its result type is not Void) merges with the arm's tail
+    value as a one-VReg block-arg; an if-STATEMENT (Void) merges with zero block-args.
+    Mirrors emit_if_value/emit_if_stmt's shape (codegen.tks), SSA-lite. */
+fn lower_if_expr(ctx: LowerCtx, e: checker::TExpr, f: checker::TIfExpr) -> Lowered | error {
+    let co = match lower_expr(ctx, f.cond) { Lowered as x => x; error as err => return err }
+    if type_is_void(e.type) { return lower_if_stmt(co.ctx, e, f, co.vreg) }
+    lower_if_value(co.ctx, e, f, co.vreg)
+}
+
+/** lower_if_stmt — the Void (no-value) shape: both arms lower their statement block for
+    effect only and merge with zero block-args; a missing `else` is a pass-through arm (jumps
+    straight to the merge). The else-arm's own context, and the final merged context, are
+    built from `then_done`/`else_done` (the ARM-THREADED context each arm's own lowering
+    actually produced), NEVER from the pre-branch `ctx` — `ctx_with` only OVERRIDES `func`/
+    `block_id`/`env` and copies every other field (rodata, lifted closures, …) from its FIRST
+    argument, so sourcing either point from `ctx` would SILENTLY DROP whatever an arm interned
+    (a genuine miscompile: a `global_addr` relocation against a symbol whose definition never
+    reached the module — the SAME class of bug `lower_coalesce` had, C1-6 audit). Each arm
+    closes via `close_arm_replaying_defers` (not the bare `close_arm_to`), so a `defer` EITHER
+    arm registers fires only on ITS OWN branch, never leaking into the other arm or past the
+    merge (PR #553 review finding). A scalar an arm RE-ASSIGNS (`reassigned_scalars`) is
+    threaded through the merge as a block-param: the merge gains one param per reassigned name,
+    each arm's closing jump supplies that name's CURRENT VReg (re-sampled POST-defer-replay in
+    `close_arm_replaying_defers`, so a `defer { s = s + 100 }` in the arm reaches the merge with
+    its post-defer value, #389 F1b item 1), and the post-merge env rebinds each to its merge
+    param — otherwise an arm-local rebind (`if c { x = 5 }`) would be DROPPED at the merge and
+    the name would read its stale pre-branch VReg past the `if` (the #389 A3-loop range-`for`
+    back-edge root: the per-iteration `if !first { i = i+1 }` step froze the counter). A branch
+    that mutates no enclosing scalar adds ZERO params and stays byte-identical (#389 F1).
+    NP5: EACH arm opens its OWN lexical region (`open_native_region`) right after the branch, closed
+    by `close_arm_replaying_defers` — a non-escaping local this arm declares dies at ITS OWN exit
+    edge, never the other arm's or the merge's. The (unentered) else arm of an if-WITHOUT-else opens
+    and immediately closes a trivial region too, so every path reaching `close_arm_replaying_defers`
+    has opened exactly one — the invariant that function relies on. */
+fn lower_if_stmt(ctx: LowerCtx, e: checker::TExpr, f: checker::TIfExpr, cond_vreg: u32) -> Lowered | error {
+    let names = reassigned_scalars(if_arm_stmts(f), ctx.env)
+    let indices = merge_scalar_indices(ctx.env, names)
+    let thenb = alloc_block(ctx.func)
+    let elseb = alloc_block(thenb.func)
+    let mergeblk = alloc_block(elseb.func)
+    let merged = add_merge_scalar_params(mergeblk.func, mergeblk.block_id, ctx.env, names)
+    let br = branch_inst(cond_vreg, thenb.block_id, teko::list::empty(), elseb.block_id, teko::list::empty(), e.line, e.col)
+    let ctx1 = ctx_append(ctx_with(ctx, merged.func, ctx.block_id, ctx.env), br)
+    let then_opened = match open_native_region(ctx_goto(ctx1, thenb.block_id), "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    let then_done = match lower_block(then_opened, f.then_blk) { LowerCtx as c => c; error as err => return err }
+    let then_closed = match close_arm_replaying_defers(then_done, ctx1.defers, ctx1.region_stack, mergeblk.block_id, teko::list::empty(), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    let else_ctx = ctx_with(then_closed.ctx, then_closed.func, elseb.block_id, ctx.env)
+    let else_opened = match open_native_region(else_ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    let else_done = if f.has_else { match lower_block(else_opened, f.else_blk) { LowerCtx as c => c; error as err => return err } } else { else_opened }
+    let else_closed = match close_arm_replaying_defers(else_done, ctx1.defers, ctx1.region_stack, mergeblk.block_id, teko::list::empty(), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    Lowered { ctx = ctx_with(else_closed.ctx, else_closed.func, mergeblk.block_id, merged.env); vreg = 0 }
+}
+
+/** lower_if_value — the value-producing shape: both arms' TAIL values become the merge
+    block's single block-arg (the if-expression's result VReg). An if-without-else used as a
+    value is out of the N1 subset (mirrors emit_if_value's own honest-stop). Mirrors
+    `lower_if_stmt`'s own arm-threading discipline: `else_ctx` and the final merged context
+    are built from `then_val.ctx`/`else_val.ctx`, never the pre-branch `ctx` (C1-6 audit); each
+    arm closes via `close_arm_replaying_defers` so its OWN defers never leak into the other arm
+    or past the merge (PR #553 review finding). A scalar an arm RE-ASSIGNS is threaded through
+    the merge exactly as in `lower_if_stmt`, EXCEPT the merge's FIRST block-param is the
+    if-expression's own result value — the reassigned-scalar params follow it, so each arm's
+    jump supplies `[tail_value] ++ scalar_args`: the tail VALUE is captured PRE-defer-replay
+    (so the merge value stays pre-defer) while the scalar args are re-sampled POST-replay inside
+    `close_arm_replaying_defers`, so a `defer`'s write to a reassigned scalar reaches its merge
+    param without disturbing the pre-defer merge value (#389 F1/F1b). */
+fn lower_if_value(ctx: LowerCtx, e: checker::TExpr, f: checker::TIfExpr, cond_vreg: u32) -> Lowered | error {
+    if !f.has_else { return error { message = "native backend N1: if-without-else used as a value not yet lowered (N2)" } }
+    let names = reassigned_scalars(if_arm_stmts(f), ctx.env)
+    let indices = merge_scalar_indices(ctx.env, names)
+    let thenb = alloc_block(ctx.func)
+    let elseb = alloc_block(thenb.func)
+    let mergeblk = alloc_block(elseb.func)
+    let mp = add_block_param(mergeblk.func, mergeblk.block_id)
+    let merged = add_merge_scalar_params(mp.func, mergeblk.block_id, ctx.env, names)
+    let br = branch_inst(cond_vreg, thenb.block_id, teko::list::empty(), elseb.block_id, teko::list::empty(), e.line, e.col)
+    let ctx1 = ctx_append(ctx_with(ctx, merged.func, ctx.block_id, ctx.env), br)
+    let result_ty = ltype_of(e.type, ctx.enums)
+    let then_opened = match open_native_region(ctx_goto(ctx1, thenb.block_id), "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    let then_val = match lower_block_value(then_opened, f.then_blk, result_ty, e.type) { LowerBlockValue as x => x; error as err => return err }
+    let then_closed = match close_arm_replaying_defers(then_val.ctx, ctx1.defers, ctx1.region_stack, mergeblk.block_id, teko::list::push(teko::list::empty(), then_val.vreg), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    let else_ctx = ctx_with(then_closed.ctx, then_closed.func, elseb.block_id, ctx.env)
+    let else_opened = match open_native_region(else_ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    let else_val = match lower_block_value(else_opened, f.else_blk, result_ty, e.type) { LowerBlockValue as x => x; error as err => return err }
+    let else_closed = match close_arm_replaying_defers(else_val.ctx, ctx1.defers, ctx1.region_stack, mergeblk.block_id, teko::list::push(teko::list::empty(), else_val.vreg), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    Lowered { ctx = ctx_with(else_closed.ctx, else_closed.func, mergeblk.block_id, merged.env); vreg = mp.vreg }
+}
+
+/**
+ * MatchSubj — a `match`'s already-lowered SUBJECT: its resolved type (drives
+ * every arm's pattern-test/bind dispatch), its scalar/base-address VReg, and
+ * (for a `str` subject) its length VReg (`is_fat=false` leaves `len` unused)
+ * (A1-5, #382).
+ */
+type MatchSubj = struct { ty: checker::Type; vreg: u32; is_fat: bool; len: u32 }
+
+/**
+ * MatchSubjOut — the context after lowering a `match`'s subject exactly ONCE,
+ * plus the subject descriptor every arm reads (A1-5, #382).
+ */
+type MatchSubjOut = struct { ctx: LowerCtx; subj: MatchSubj }
+
+/**
+ * lower_match_subject — lower `subject` ONCE: a `str`/`[]T`-typed subject
+ * through the FAT path (ptr+len, for a string arm's byte-compare); every other
+ * subject through the plain scalar/address path (an enum's ordinal, a variant's
+ * base address, a plain integer, ...) (A1-5, #382).
+ *
+ * @param LowerCtx ctx  the lowering context to append the subject's
+ *                      instructions into
+ * @param checker::TExpr subject  the match's typed subject expression
+ * @return MatchSubjOut  the advanced context + the subject descriptor every arm
+ *                       reads
+ * @throws  when the subject expression itself fails to lower (propagated)
+ */
+fn lower_match_subject(ctx: LowerCtx, subject: checker::TExpr) -> MatchSubjOut | error {
+    let sty = expand_named_variant(subject.type, ctx.variants)
+    if is_fat_type(sty) {
+        let fo = match lower_fat_expr(ctx, subject) { LoweredFat as x => x; error as err => return err }
+        return MatchSubjOut { ctx = fo.ctx; subj = MatchSubj { ty = sty; vreg = fo.ptr; is_fat = true; len = fo.len } }
+    }
+    let lo = match lower_expr(ctx, subject) { Lowered as x => x; error as err => return err }
+    MatchSubjOut { ctx = lo.ctx; subj = MatchSubj { ty = sty; vreg = lo.vreg; is_fat = false; len = 0 } }
+}
+
+/**
+ * VariantMember — one member of an inline `checker::Variant` subject resolved
+ * BY NAME: its declared INDEX (the runtime tag a variant-tag arm compares
+ * against) + its own Type (a `match` binding loads the payload at this Type's
+ * machine class) (A1-5, #382).
+ */
+type VariantMember = struct { index: u32; ty: checker::Type }

@@ -1,0 +1,51 @@
+
+/**
+ * collect_redundant_cast_warnings — every D1 redundant-cast warning of `prog` (class-1 same-type and
+ * class-3 redundant-widen, `cast-width-hygiene-0.3.1.md` D1), re-derived from the ALREADY-typed tree
+ * rather than threaded live through `typer.tks`'s deep recursive expression typer — the class-1/
+ * class-3 decisions depend only on the cast's own operand type(s), already fully resolved in the
+ * typed tree, so no re-typing or Env context is needed to re-derive them (§ module doc). A function's
+ * body is walked under its OWN `.file`; a module-level `const` initializer or a loose top-level
+ * statement carries no such field on its typed node (`TConstDecl`/`TStatement` — unlike `TFunction`),
+ * so those walk under `""` and the resulting warning is positioned by `diag_at`'s own graceful
+ * degradation (`file` unknown ⇒ the bare message, still returned, never dropped) — the same
+ * intentional compromise `initanalysis.tks::analyze_program` already makes for its own loose-body
+ * walk (`check_locals(loose, loose, "")`).
+ *
+ * @param prog  the typed program
+ * @return      one warning line per redundant cast found, in item/declaration order
+ * @since 0.3.1.0 (LSP crumb C)
+ */
+pub fn collect_redundant_cast_warnings(prog: TProgram) -> []str {
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            TFunction as f => out = note_redundant_casts_block(f.file, f.body, out)
+            TConstDecl as cd => out = note_redundant_casts_expr("", cd.init, out)
+            TStatement as s => out = note_redundant_casts_stmt("", s, out)
+            _ => { }
+        }
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * collect_warnings — every warning `prog` carries — unused private functions, then redundant casts
+ * — as located `file:line:col: warning: …` lines, the exact shape `collect_diagnostics`
+ * (`lsp_api.tks`) appends onto its error list. This is the crumb C seam: the two producers that used
+ * to ONLY print to stderr (`initanalysis.tks::warn_unused_fn`, `typer.tks::warn_redundant_cast`) now
+ * ALSO surface here as data, so the LSP's `collect_diagnostics` — and therefore its
+ * `publishDiagnostics` — carries every warning a build would print, not only its hard errors. The
+ * stderr prints are UNCHANGED (a build's console output is untouched); this is an additive second
+ * reader of the same findings, not a replacement of the first.
+ *
+ * @param prog  the typed program
+ * @return      every warning, unused-fn findings before redundant-cast findings
+ * @since 0.3.1.0 (LSP crumb C)
+ */
+pub fn collect_warnings(prog: TProgram) -> []str {
+    concat_diags(collect_unused_fn_warnings(prog), collect_redundant_cast_warnings(prog))
+}

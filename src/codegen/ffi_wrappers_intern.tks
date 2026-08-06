@@ -1,0 +1,52 @@
+/** teko::codegen — split from ffi_export.tks (mechanical, pure reorg, no logic changes). */
+use teko::checker
+use teko::parser
+
+/**
+ * Emit one export wrapper definition (`<ret> <sym>(<params>) { [return] <internal>(<args>); }`).
+ *
+ * @param buf  the wrapper buffer
+ * @param f    the exported function
+ * @return     the buffer with the wrapper appended
+ * @throws     when a part of the signature is not FFI-safe
+ * @since 0.3.0.30 (FFI base — reverse-FFI export)
+ */
+fn cg_c_export_wrapper_one(buf: []byte, f: checker::TFunction) -> []byte | error {
+    mut out = buf
+    let ret = match ffi_ctype_of_type(f.return_type) { str as s => s; error as e => return e }
+    out = cb(out, ret)
+    out = cb(out, " ")
+    out = cb(out, cg_c_export_symbol(f))
+    out = cb(out, "(")
+    out = match emit_c_header_params(out, f) { []byte as o => o; error as e => return e }
+    out = cb(out, ") { ")
+    if ret != "void" { out = cb(out, "return ") }
+    out = cb_fn_name(out, f.namespace, f.name)
+    out = cb(out, "(")
+    mut i: u64 = 0
+    loop {
+        if i >= f.params.len { break }
+        if i > 0 { out = cb(out, ", ") }
+        out = cb_ident(out, f.params[i].name)
+        i++
+    }
+    cb(out, "); }\n")
+}
+
+/**
+ * Whether `needle` is already present in `xs` (the export-collision membership test).
+ *
+ * @param xs      the accumulated C symbols
+ * @param needle  the candidate C symbol
+ * @return        true iff `needle` equals some element of `xs`
+ * @since 0.3.0.30 (FFI base — reverse-FFI export)
+ */
+fn ffi_str_in(xs: []str, needle: str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if xs[i] == needle { return true }
+        i++
+    }
+    false
+}

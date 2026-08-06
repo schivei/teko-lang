@@ -1,0 +1,61 @@
+// src/parser/ast_numint.tks   (namespace 'teko::parser')
+
+use teko::lexer
+
+
+use teko::lexer
+
+/**
+ * U64_ALL_ONES — every bit of a `u64` set (`2^64 - 1`). The subtrahend `numint_bits` negates a
+ * magnitude against, so the two's-complement negation never leaves the `u64` domain.
+ *
+ * @since 0.3.1 (drop-128-family)
+ */
+const U64_ALL_ONES: u64 = 0xFFFFFFFFFFFFFFFF
+
+/**
+ * I64_SIGN_BIT_U — `2^63` as a `u64`: the smallest bit pattern whose SIGNED reading is negative,
+ * and exactly the distance between the unsigned and the signed reading of any pattern at or above
+ * it (`signed = unsigned - 2^63 + i64::MIN`).
+ *
+ * @since 0.3.1 (drop-128-family)
+ */
+const I64_SIGN_BIT_U: u64 = 9223372036854775808
+
+/**
+ * I64_MIN — the most negative `i64` (`-2^63`). Spelled as a subtraction because `2^63` itself has
+ * no `i64` literal form (the language's largest is `i64::MAX`).
+ *
+ * @since 0.3.1 (drop-128-family)
+ */
+const I64_MIN: i64 = -9223372036854775807 - 1
+
+/**
+ * numint_bits — `v`'s 64-bit two's-complement pattern, as a `u64`: the magnitude itself when `v` is
+ * non-negative, else its two's-complement negation computed with in-range unsigned steps only (see
+ * `numint_to_i64`'s proof, step 1). The same value the frozen `.tkb` wire encoding writes as its
+ * `lo` half (`tkb_write.numint_lo`).
+ *
+ * @param v  the value whose bit pattern is wanted
+ * @return   the 64-bit pattern denoting `v`
+ * @since 0.3.1 (drop-128-family)
+ */
+fn numint_bits(v: NumInt) -> u64 {
+    if !v.neg { return v.mag }
+    if v.mag == 0 { return 0 }
+    (U64_ALL_ONES - v.mag) + 1
+}
+
+/**
+ * i64_of_u64_bits — the signed value a 64-bit pattern denotes: a straight reinterpretation, done
+ * with two in-range steps because the `u64 -> i64` cast is CHECKED (see `numint_to_i64`'s proof,
+ * steps 2 and 3).
+ *
+ * @param bits  the 64-bit two's-complement pattern
+ * @return      its signed reading
+ * @since 0.3.1 (drop-128-family)
+ */
+fn i64_of_u64_bits(bits: u64) -> i64 {
+    if bits < I64_SIGN_BIT_U { return bits to i64 }
+    ((bits - I64_SIGN_BIT_U) to i64) + I64_MIN
+}

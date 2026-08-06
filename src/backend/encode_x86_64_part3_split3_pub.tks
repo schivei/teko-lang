@@ -1,0 +1,114 @@
+/**
+ * ModuleTextX86 — the running `.text` assembly of the module: the concatenated
+ * byte image, the module-rebased relocations, the defined function symbols, and
+ * the current base (the next function's `.text` byte offset). The byte-granular
+ * x86 analog of arm64's `ModuleText`.
+ *
+ * (0.3.1 backend-memoria C2) Made `pub` so the per-function fused emit driver in `project.tks`
+ * can hold it as the ROOT-resident accumulator (Group B) across the scoped per-function windows.
+ *
+ * @since #386 B1-6
+ */
+pub type ModuleTextX86 = struct {
+    /**
+     * text — the concatenated `.text` bytes so far.
+     */
+    text: []byte
+    /**
+     * relocs — the module-rebased relocations so far.
+     */
+    relocs: []RelocX86
+    /**
+     * syms — one defined `.text` symbol per function encoded so far.
+     */
+    syms: []Symbol
+    /**
+     * base — the next function's `.text` base byte offset (the current image length).
+     */
+    base: u32
+}
+
+/**
+ * empty_module_text_x86 — the seed `ModuleTextX86`: empty image, no relocations,
+ * no symbols, base 0. (0.3.1 backend-memoria C2) `pub` so the fused emit driver seeds its
+ * root-resident accumulator with it.
+ *
+ * @return ModuleTextX86  the seed accumulator
+ */
+pub fn empty_module_text_x86() -> ModuleTextX86 {
+    ModuleTextX86 { text = teko::list::empty(); relocs = teko::list::empty(); syms = teko::list::empty(); base = 0 to u32 }
+}
+
+/**
+ * fold_encoded_func_x86 — fold ONE already-encoded function's `EncodedFuncX86` into the running
+ * module `.text` accumulator: record its GLOBAL defined symbol at the current base (section 1,
+ * `.text`), append its bytes, and rebase its function-relative relocations by the base; the base
+ * then advances by the function's byte length. The encode of `f` and this fold are SEPARATE so the
+ * fused per-function emit driver can encode inside a scoped scratch region and fold AFTER leaving
+ * it — the fold's appends land in the ROOT-resident accumulator (Group B), COPYING the bytes and
+ * the symbol/reloc `str` names (which originate in `prog`, not the scratch region) out of the
+ * still-live child before it is dropped (§2 non-escape proof). `fold_func_into_text_x86` is the
+ * non-scoped composition of `encode_func_x86` and this fold.
+ *
+ * @param ModuleTextX86 acc  the running root-resident `.text` accumulator
+ * @param EncodedFuncX86 ef  one function's encoded bytes, symbol name and function-relative relocs
+ * @return ModuleTextX86  the extended accumulator
+ * @since 0.3.1
+ */
+pub fn fold_encoded_func_x86(acc: ModuleTextX86, ef: EncodedFuncX86) -> ModuleTextX86 {
+    let sym = Symbol { name = ef.symbol; defined = true; sect = 1 to u8; offset = acc.base; local = false }
+    let text = append_bytes(acc.text, ef.bytes)
+    let relocs = rebase_relocs_x86(acc.relocs, ef.relocs, acc.base)
+    let syms = teko::list::push(acc.syms, sym)
+    let base = acc.base + (ef.bytes.len to u32)
+    ModuleTextX86 { text = text; relocs = relocs; syms = syms; base = base }
+}
+
+/**
+ * encode_module_x86 — encode every `MFuncX86` of `m`, concatenate their `.text`
+ * bytes into the module image and REBASE each function's reloc offsets by its
+ * `.text` base, intern the rodata bytes (the neutral `encode_rodata`, which is
+ * pure `LRodata → bytes + file-local Symbol` and carries no ISA), and build the
+ * symbol table in the required LOCAL-then-GLOBAL-then-UNDEFINED order: one
+ * file-local entry per rodata entry, one global entry per function, then one
+ * undefined entry per externally-referenced symbol not defined in-module. A
+ * module carrying data globals raises `B1-globals` (the N2 subset lowers none);
+ * any function's encode honest-stop propagates out. The x86 analog of arm64's
+ * `encode_module`.
+ *
+ * @param AbiDescriptor abi  the register file (`SYSV64`)
+ * @param MModuleX86 m  the fully-colored module
+ * @return EncodedModuleX86 | error  the section images + symbols + relocs, or a
+ *                                    named honest-stop
+ */
+pub fn encode_module_x86(abi: AbiDescriptor, m: MModuleX86) -> EncodedModuleX86 | error {
+    if m.globals.len > (0 to u64) { return honest_globals_x86() }
+    let mt = match encode_functions_x86(abi, m.funcs) { ModuleTextX86 as x => x; error as e => return e }
+    finish_encoded_module_x86(mt, m.rodata, m.globals)
+}
+
+/**
+ * finish_encoded_module_x86 — assemble the final `EncodedModuleX86` from an already-accumulated
+ * `.text` (`mt`, one defined symbol + rebased relocs per function) plus the module's PERSISTENT
+ * rodata/globals tables (Group B, carried by-reference the whole way — never in a scratch region,
+ * §2 exception E2): intern the rodata bytes, build the symbol table in the required
+ * LOCAL-then-GLOBAL-then-UNDEFINED order (file-local per rodata entry, global per function, then one
+ * undefined per externally-referenced symbol), and partition the relocations. A module carrying data
+ * globals raises `B1-globals` (the N2 subset lowers none). This is the module-finalize tail of
+ * `encode_module_x86` factored out so the fused per-function emit driver reaches the SAME assembly
+ * incrementally, after its per-function windows have folded into `mt`.
+ *
+ * @param ModuleTextX86 mt  the accumulated `.text` image, symbols and rebased relocs
+ * @param []lir::LRodata rodata  the module's rodata table (Group B, by-reference)
+ * @param []lir::LGlobal globals  the module's data globals (empty in the N2 subset)
+ * @return EncodedModuleX86 | error  the section images + ordered symbols + relocs, or `B1-globals`
+ * @since 0.3.1
+ */
+pub fn finish_encoded_module_x86(mt: ModuleTextX86, rodata: []lir::LRodata, globals: []lir::LGlobal) -> EncodedModuleX86 | error {
+    if globals.len > (0 to u64) { return honest_globals_x86() }
+    let rod = match encode_rodata(rodata) { ModuleRodata as x => x; error as e => return e }
+    let defined = concat_symbols(rod.syms, mt.syms)
+    let undef = collect_undefined_x86(defined, mt.relocs)
+    let symbols = concat_symbols(defined, undef)
+    EncodedModuleX86 { text = mt.text; rodata = rod.bytes; symbols = symbols; relocs = append_relocs_x86(mt.relocs, rodata_relocs_x86(rod.relocs)) }
+}

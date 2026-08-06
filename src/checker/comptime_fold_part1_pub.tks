@@ -1,0 +1,85 @@
+
+/**
+ * ConstValue — the comptime value domain: the result of evaluating a provably-const
+ * expression subtree. An integer is stored as its raw two's-complement bit pattern in
+ * a `u64` PLUS its declared type (drop-128, 2026-07-24 — the fold's internal carrier is
+ * detoxed off i64/u64; every width it EVALUATES is u8..u64/i8..i64, since that is now
+ * the whole of the language's non-bignum integer surface), so every integer family
+ * re-emits and re-wraps exactly as the metal would; a float keeps its raw bits so
+ * formatting is byte-exact; a string/bytes keeps its bytes; an aggregate holds child
+ * ConstValues in order. This domain exists ONLY inside the fold — it never escapes to
+ * lowering (the fold reconstructs a literal TExpr from it via `literal_of`).
+ *
+ * @field kind  the value's case (int / float / bool / bytes / aggregate)
+ * @since #comptime-fold
+ */
+pub type ConstValue = struct { kind: ConstValueKind }
+
+/**
+ * ConstValueKind — the case of a ConstValue.
+ *
+ * @since #comptime-fold
+ */
+pub type ConstValueKind = variant CVInt | CVFloat | CVBool | CVBytes | CVAgg
+
+/**
+ * CVInt — an integer comptime value: the two's-complement bit pattern (`bits`) as it
+ * would sit in a register of `ty`, plus the declared integer type (so a fold knows the
+ * width for wrapping/overflow checks and re-emission).
+ *
+ * @field bits  the value's raw two's-complement bits, zero-extended into u64
+ * @field ty    the declared integer type (drives width, signedness, wrap/overflow)
+ * @since #comptime-fold
+ */
+pub type CVInt = struct { bits: u64; ty: Type }
+
+/**
+ * CVFloat — a float comptime value: the raw IEEE-754 bits (so re-emission and
+ * formatting are byte-exact and never route through the host locale — M.1) plus
+ * whether it is an f32 (32 significant bits in `bits`) or f64.
+ *
+ * @field bits   the raw IEEE-754 bits (f32 in the low 32)
+ * @field is_f32 true iff the value is an f32, false for f64
+ * @since #comptime-fold
+ */
+pub type CVFloat = struct { bits: u64; is_f32: bool }
+
+/**
+ * CVBool — a boolean comptime value.
+ *
+ * @field v  the boolean
+ * @since #comptime-fold
+ */
+pub type CVBool = struct { v: bool }
+
+/**
+ * CVBytes — a string / char / []byte comptime value: the raw UTF-8 (str/char) or raw
+ * (byte-slice) bytes, exactly as they would live in rodata.
+ *
+ * @field data  the raw bytes
+ * @since #comptime-fold
+ */
+pub type CVBytes = struct { data: []byte }
+
+/**
+ * CVAgg — an aggregate (array / struct / variant) comptime value: the child values in
+ * declaration order. Indexing (`TIndex`, Layer 1c) reads `elems[i]`; struct/array
+ * re-emission rebuilds the aggregate literal from the children.
+ *
+ * @field elems  the child comptime values, in order
+ * @since #comptime-fold
+ */
+pub type CVAgg = struct { elems: []ConstValue }
+
+/**
+ * AggConstMap — the module-level AGGREGATE-const resolution table the Layer-1c (CF4) index fold
+ * reads: three PARALLEL lists (names / namespaces / collapsed initializers) over every module
+ * aggregate const, in dependency order, exactly as `build_aggregate_map` (`consteval.tks`) already
+ * produces. A `TVar` receiver of a const `TIndex` is resolved by a `(name, namespace)` lookup keyed
+ * on the reference's `func_ns` — the SAME key `inline_rw_var` uses — so the index fold and the
+ * type-checker never diverge. This table resolves ONLY module aggregate consts; a fn-value, a local
+ * binding, and a scalar const are never in it, so the CF3 fn-value/scalar invariants are untouched.
+ *
+ * @since #comptime-fold
+ */
+pub type AggConstMap = ScalarConstMap

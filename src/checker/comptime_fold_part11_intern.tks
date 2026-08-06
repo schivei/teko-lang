@@ -1,0 +1,214 @@
+use teko::lexer
+use teko::parser
+
+
+/**
+ * fold_rw_interp — fold an interpolation: first fold each hole's op-tree (Layer 1a) so a
+ * provably-const hole becomes its literal, then delegate the FINAL step to `fold_interp` (Layer 2),
+ * which collapses the whole interpolation to a single `TStrLit` when every hole is a const literal and
+ * every spec is `TFSpecNone`/`TFSpecStatic` of a foldable family — otherwise the interpolation is
+ * returned as its runtime concat shape (behavior preserved for any runtime hole or dynamic spec).
+ *
+ * @param in     the typed interpolation expression
+ * @param e      the enclosing expression (its type/position)
+ * @param table  the type table (forwarded to each hole/spec fold and to `fold_interp`)
+ * @param env    the environment (forwarded to each hole/spec fold and to `fold_interp`)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       a folded `TStrLit` when fully const, else the interpolation rebuilt with folded holes
+ *               and specs, or a located error
+ * @since #comptime-fold
+ */
+fn fold_rw_interp(in: TInterp, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExpr | error {
+    mut holes: []TExpr = teko::list::empty()
+    mut specs: []TFSpec = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= in.holes.len { break }
+        let hole = match fold_expr(in.holes[i], table, env, agg) { error as x => return x; TExpr as v => v }
+        holes = teko::list::push(holes, hole)
+        if i < in.specs.len {
+            let sp = match fold_fspec(in.specs[i], table, env, agg) { error as x => return x; TFSpec as s => s }
+            specs = teko::list::push(specs, sp)
+        }
+        i++
+    }
+    fold_interp(TInterp { pieces = in.pieces; holes = holes; specs = specs }, e, table, env, agg)
+}
+
+/**
+ * fold_fspec — fold a format spec: a dynamic (`:[…]`) spec's argument expressions are folded; a
+ * none/static spec carries no expression and is returned unchanged.
+ *
+ * @param sp     the format spec to fold
+ * @param table  the type table (forwarded to each argument fold)
+ * @param env    the environment (forwarded to each argument fold)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       the spec with folded dynamic arguments, or a located error
+ * @since #comptime-fold
+ */
+fn fold_fspec(sp: TFSpec, table: TypeTable, env: Env, agg: AggConstMap) -> TFSpec | error {
+    match sp.kind {
+        TFSpecDynamic as fd => {
+            let args = match fold_exprs(fd.args, table, env, agg) { error as x => return x; []TExpr as a => a }
+            TFSpec { kind = TFSpecDynamic { args = args } }
+        }
+        _ => sp
+    }
+}
+
+/**
+ * fold_array — rebuild an array/slice literal around its folded elements (a spread element's
+ * sub-slice expression included).
+ *
+ * @param a      the typed array literal
+ * @param e      the enclosing expression (its type/position)
+ * @param table  the type table (forwarded to each element fold)
+ * @param env    the environment (forwarded to each element fold)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       the array literal rebuilt with folded elements, or a located error
+ * @since #comptime-fold
+ */
+fn fold_array(a: TArrayLit, e: TExpr, table: TypeTable, env: Env, agg: AggConstMap) -> TExpr | error {
+    mut elems: []TArrayElem = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= a.elements.len { break }
+        let ex = match fold_expr(a.elements[i].expr, table, env, agg) { error as x => return x; TExpr as v => v }
+        elems = teko::list::push(elems, TArrayElem { is_spread = a.elements[i].is_spread; expr = ex })
+        i++
+    }
+    TExpr { kind = TArrayLit { elements = elems }; type = e.type; line = e.line; col = e.col }
+}
+
+/**
+ * fold_block — fold every statement in `stmts` in order, propagating the first located error.
+ *
+ * @param stmts  the typed statement block
+ * @param table  the type table (forwarded to each statement fold)
+ * @param env    the environment (forwarded to each statement fold)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       the block with each statement folded, or the first located error
+ * @since #comptime-fold
+ */
+fn fold_block(stmts: []TStatement, table: TypeTable, env: Env, agg: AggConstMap) -> []TStatement | error {
+    mut out: []TStatement = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= stmts.len { break }
+        let s = match fold_stmt(stmts[i], table, env, agg) { error as x => return x; TStatement as v => v }
+        out = teko::list::push(out, s)
+        i++
+    }
+    out
+}
+
+/**
+ * fold_stmt — fold one typed statement, folding every expression and nested block it carries. TOTAL
+ * over `TStatement`; a value-less `break`/`continue` carries no foldable expression and is returned
+ * unchanged.
+ *
+ * @param st     the typed statement to fold
+ * @param table  the type table (forwarded to each child fold)
+ * @param env    the environment (forwarded to each child fold)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       the statement with folded children, or a located error
+ * @since #comptime-fold
+ */
+fn fold_stmt(st: TStatement, table: TypeTable, env: Env, agg: AggConstMap) -> TStatement | error {
+    match st {
+        TBinding as b => {
+            let v = match fold_expr(b.value, table, env, agg) { error as x => return x; TExpr as f => f }
+            TBinding { kind = b.kind; target = b.target; bound = b.bound; value = v; di_kind = b.di_kind }
+        }
+        TAssign as a => fold_assign(a, table, env, agg)
+        TReturn as r => fold_return(r, st, table, env, agg)
+        TLoopStmt as l => {
+            let init = match fold_block(l.init, table, env, agg) { error as x => return x; []TStatement as v => v }
+            let body = match fold_block(l.body, table, env, agg) { error as x => return x; []TStatement as v => v }
+            TLoopStmt { label = l.label; init = init; body = body }
+        }
+        TBreakStmt => st
+        TContinueStmt => st
+        TExprStmt as es => {
+            let v = match fold_expr(es.expr, table, env, agg) { error as x => return x; TExpr as f => f }
+            TExprStmt { expr = v }
+        }
+        TDeferStmt as d => {
+            let body = match fold_block(d.body, table, env, agg) { error as x => return x; []TStatement as v => v }
+            TDeferStmt { body = body }
+        }
+        TAdoptStmt as a => {
+            let body = match fold_block(a.body, table, env, agg) { error as x => return x; []TStatement as v => v }
+            TAdoptStmt { name = a.name; body = body }
+        }
+    }
+}
+
+/**
+ * fold_return — fold a `return` statement's value (a value-less `return` is returned unchanged).
+ *
+ * @param r      the typed return statement
+ * @param st     the original statement (returned unchanged when value-less)
+ * @param table  the type table (forwarded to the value fold)
+ * @param env    the environment (forwarded to the value fold)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       the return with a folded value, or a located error
+ * @since #comptime-fold
+ */
+fn fold_return(r: TReturn, st: TStatement, table: TypeTable, env: Env, agg: AggConstMap) -> TStatement | error {
+    if !r.has_value { return st }
+    let v = match fold_expr(r.value, table, env, agg) { error as x => return x; TExpr as f => f }
+    TReturn { has_value = true; value = v }
+}
+
+/**
+ * fold_assign — fold an assignment's value and, for a field target, its typed LHS field-access
+ * expression (a simple/ref-deref target carries no foldable expression).
+ *
+ * @param a      the typed assignment
+ * @param table  the type table (forwarded to each child fold)
+ * @param env    the environment (forwarded to each child fold)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @return       the assignment with folded children, or a located error
+ * @since #comptime-fold
+ */
+fn fold_assign(a: TAssign, table: TypeTable, env: Env, agg: AggConstMap) -> TStatement | error {
+    let value = match fold_expr(a.value, table, env, agg) { error as x => return x; TExpr as f => f }
+    if parser::assign_has_target(a.kind) {
+        let target = match fold_expr(a.target, table, env, agg) { error as x => return x; TExpr as f => f }
+        return TAssign { kind = a.kind; name = a.name; op = a.op; bound = a.bound; value = value; deref = a.deref; target = target }
+    }
+    TAssign { kind = a.kind; name = a.name; op = a.op; bound = a.bound; value = value; deref = a.deref; target = a.target }
+}
+
+/**
+ * fold_empty_table — an empty type table for the CF2 fold: the name-free integer subset the fold
+ * admits never resolves a type through the table, so an empty one suffices at the wiring site.
+ *
+ * @return  an empty type table
+ * @since #comptime-fold
+ */
+fn fold_empty_table() -> TypeTable { teko::list::empty() }
+/** fold_empty_agg — the empty aggregate-const map for a predicate-fold context with no module aggregates (the analyzer's `eval_folds`). Mirrors fold_empty_table. */
+fn fold_empty_agg() -> AggConstMap { ScalarConstMap { names = teko::list::empty(); nss = teko::list::empty(); inits = teko::list::empty() } }
+
+/**
+ * fold_item — fold one program item: a function's body, a const declaration's initializer or a loose
+ * statement; every other item (a type/use declaration) passes through unchanged.
+ *
+ * @param it     the program item to fold
+ * @param table  the type table (forwarded to the child fold)
+ * @param env    the environment (forwarded to the child fold)
+ * @param agg    the module-aggregate resolution table (forwarded through the fold spine to the index fold)
+ * @param ctors  the program's struct-constructor table (used only by a const declaration's canonicalization)
+ * @return       the item with its op-trees folded, or a located error
+ * @since #comptime-fold
+ */
+fn fold_item(it: TItem, table: TypeTable, env: Env, agg: AggConstMap, ctors: []TFunction) -> TItem | error {
+    match it {
+        TFunction as f => fold_function(f, table, env, agg)
+        TConstDecl as cd => fold_const_decl(cd, table, env, agg, ctors)
+        TStatement as s => match fold_stmt(s, table, env, agg) { error as x => return x; TStatement as v => v }
+        _ => it
+    }
+}

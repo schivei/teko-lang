@@ -1,0 +1,61 @@
+
+/**
+ * Render a collected diagnostic list as the newline-separated block the driver prints. Mirrors
+ * `teko::build::join_diags`; duplicated rather than shared because the checker must not depend on
+ * the build layer.
+ *
+ * @param diags  the collected diagnostics, in report order
+ * @return       the diagnostics joined by newlines ("" for an empty list)
+ * @since 0.3.1
+ */
+pub fn join_checker_diags(diags: []str) -> str {
+    mut out = ""
+    mut i: u64 = 0
+    loop {
+        if i >= diags.len { break }
+        if i > 0 { out = out ~ "\n" }
+        out = out ~ diags[i]
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * DiagLevel — the severity of a collected diagnostic: Error for every checker type-error, Warning
+ * for a collected finding that only used to reach stderr before crumb C (`warnings.tks::collect_warnings`).
+ * A checker-side twin of the LSP's OWN `DiagSeverity` (`src/lsp/diagnostics.tks`) rather than a
+ * cross-package `use`, so `teko::checker` never depends on `teko::lsp` — the LSP wraps the checker, not
+ * the other way around (`docs/design/lsp-teko.md` §2.1).
+ *
+ * @since 0.3.1.0 (LSP crumb D)
+ */
+pub type DiagLevel = enum { Error; Warning; Info; Hint }
+
+/**
+ * Diagnostic — one positioned, structured, SEVERITY-KNOWN diagnostic: the crumb D hardening of the flat
+ * `file:line:col: msg` string `collect_diagnostics` (`lsp_api.tks`) returns alone. `severity` is stamped
+ * at the SOURCE of each finding (Error for `type_program_with_deps_pre_mono`'s own diagnostics, Warning
+ * for `warnings.tks::collect_warnings`'s) — never re-derived downstream by sniffing the rendered message
+ * text for a `"warning:"` marker, the fragile v1 heuristic `docs/design/lsp-teko.md` §3.1 names as its
+ * own "lacuna 1". `end_line`/`end_col` default to one column past the start: the checker has no source
+ * buffer to widen a range over the flagged token's own text — that widening stays the LSP's job
+ * (`src/lsp/diagnostics.tks`'s `word_end_col`, once it has the open document's buffer).
+ *
+ * @since 0.3.1.0 (LSP crumb D)
+ */
+pub type Diagnostic = struct {
+    /** the diagnostic's source file ("" when the underlying finding carries none). */
+    file: str
+    /** the 1-based line of the range start (0 when the finding carries no position). */
+    line: u32
+    /** the 1-based column of the range start (read only when `line` is known). */
+    col: u32
+    /** the 1-based line of the range end (same as `line` for a single-line finding). */
+    end_line: u32
+    /** the 1-based column just past the range end (`col + 1` when the source reports no wider range). */
+    end_col: u32
+    /** Error / Warning / Info / Hint, known at the finding's own source, never sniffed from `message`. */
+    severity: DiagLevel
+    /** the diagnostic text, with the `file:line:col:` location prefix already stripped. */
+    message: str
+}

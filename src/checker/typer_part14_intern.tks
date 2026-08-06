@@ -1,0 +1,197 @@
+// src/checker/typer.tks  (namespace 'teko::checker')
+// Each check_* (E4/E5) EVOLVES into a type_*: the SAME checks (B.22 regimes, B.20
+// `if`, B.15 `match` + exhaustiveness), but the producer BUILDS the typed node
+// instead of returning a bare Type. Predicates (is_bool/is_integer/op_is_*),
+// resolvers (resolve_type), env (lookup/define) and the pattern + exhaustiveness
+// logic (check_pattern/exhaustive) are reused from their stages — re-derivation,
+// not duplication (M.5). C1: every node, statement and item re-derived.
+use teko::lexer
+use teko::parser
+
+
+/**
+ * type_path_expr — type a two-segment path used as a VALUE. Resolution order: (1) a member const
+ * `Owner::NAME` when the leading path resolves to a struct/class/abstract/trait type (walks the base
+ * chain); (2) an enum member `E::M` (value = its declaration ordinal); (3) a flags member `E::M`
+ * (value = `1 << ordinal`, the bit index); (4) a namespace-qualified value `ns::NAME` — a `pub`/`exp`
+ * module const or a top-level fn-value in module `ns` — reached only when the leading qualifier is NOT
+ * a type (`type_ns_qualified_value`). Each backend lowers the enum/flags node without re-lookup (it
+ * carries the resolved member `value`), and the namespace arm reuses the bare-reference `TVar` shape
+ * so the const inliner and closure mangler need no qualified-specific path (#50, #594 crumb 8c).
+ *
+ * @param pe     the parsed path expression
+ * @param table  the type table (enum/flags/member-const resolution)
+ * @param env    the type-checking environment (value-binding lookup + the reference's `cur_ns`)
+ * @return       the typed value reference, or a located error
+ * @throws       when the path names no reachable member const, enum/flags member, or namespace value
+ * @since #50
+ */
+fn type_path_expr(pe: parser::PathExpr, table: TypeTable, env: Env) -> TExpr | error {
+    let p = pe.path
+    if p.segments.len < 2 { return error { message = "a path expression must name an enum or flags member (`Type::Member`)" } }
+    let member = p.segments[p.segments.len - 1].name
+    mut segs: []parser::Segment = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= p.segments.len - 1 { break }
+        segs = teko::list::push(segs, p.segments[i])
+        i++
+    }
+    let et = match resolve_named(parser::Path { segments = segs }, table, env.cur_ns) {
+        Type as t => t
+        error as e => return type_ns_qualified_value(pe, member, e, env)
+    }
+    let tname = match et { Named as n => n.name; _ => return error { message = "`Type::Member` requires a named enum or flags type" } }
+    let decl = match type_table_find(table, tname, "") { parser::TypeDecl as td => td; error => return error { message = $"unknown type in a `Type::Member` path: {tname}" } }
+    match resolve_member_const_hit(decl, member, table) {
+        MemberConstHit as hit => {
+            match member_const_visible(hit, table, env.cur_ns) { error as e => return e; null => { } }
+            match find_member_const(decl, member, table) { TExpr as mref => return mref; null => { } }
+        }
+        null => { }
+    }
+    match decl.body {
+        parser::EnumBody as eb => {
+            mut j: u64 = 0
+            loop {
+                if j >= eb.members.len { break }
+                if eb.members[j] == member { return TExpr { kind = TPathExpr { enum_name = tname; member = member; ordinal = j; value = j }; type = et; line = 0; col = 0 } }
+                j++
+            }
+            error { message = $"no member `{member}` in enum `{tname}`" }
+        }
+        parser::FlagsBody as fb => {
+            if fb.members.len > 64 { return error { message = "a flags type may declare at most 64 members (bit 63 is the last) — write this as two flags types instead" } }
+            mut j: u64 = 0
+            loop {
+                if j >= fb.members.len { break }
+                if fb.members[j] == member { return TExpr { kind = TPathExpr { enum_name = tname; member = member; ordinal = j; value = (1 to u64) << j }; type = et; line = 0; col = 0 } }
+                j++
+            }
+            error { message = $"no member `{member}` in the flags type `{tname}`" }
+        }
+        _ => error { message = "`Type::Member` requires an `enum` or `flags` type" }
+    }
+}
+
+/**
+ * type_borrow_expr — type the prefix `&x` safe-borrow expression (AL wave F1.2). The operand must
+ * be an LVALUE (currently: a bare variable — field/index lvalues are deferred to a later crumb) AND
+ * a `mut` binding: taking a reference to an immutable local would give the reference no way to
+ * mutate anything, and `&(let)` in a mutable-consuming position must be rejected (F2) — both are
+ * enforced HERE, at the borrow site, the same rule the auto-ref path (`f.params[i] as Reference`
+ * above) already applies to an implicit `ref<T>` argument. The resolved type is `Reference { inner =
+ * operand.type }`.
+ *
+ * @param b      the parsed borrow node
+ * @param env    the type environment
+ * @param table  the type table
+ * @return       the typed borrow, or an error naming the non-mutable/non-lvalue operand
+ * @throws       when the operand fails to type, is not a bare `TVar`, or names a non-`mut` binding
+ */
+fn type_borrow_expr(b: parser::Borrow, env: Env, table: TypeTable) -> TExpr | error {
+    let to = match type_expr(b.operand, env, table) { TExpr as x => x; error as e => return e }
+    match to.kind {
+        TVar as v => match lookup_binding(env, v.name) {
+            ValBinding as vb => {
+                if !vb.is_mut { return error { message = $"cannot take a reference to immutable `{v.name}` — declare it `mut` (a borrow needs a mutable target)" } }
+                TExpr { kind = TBorrow { operand = to }; type = Reference { inner = to.type }; line = 0; col = 0 }
+            }
+            error as e => e
+        }
+        _ => error { message = "only a mutable variable can be borrowed with `&` (an lvalue) — got a non-lvalue expression" }
+    }
+}
+
+// (C1-POS) inner dispatch — the raw match over the untyped Expr's `kind`. The public type_expr
+// (below) wraps this to copy each node's source position onto the typed node. The dispatch's
+// TExpr constructions are built with line=0/col=0 (designated-init parity with the C twin); the
+// wrapper overwrites them with the real e.line/e.col on success.
+fn type_dispatch(e: parser::Expr, env: Env, table: TypeTable) -> TExpr | error {
+    match e.kind {
+        parser::Number as n => type_number(n)
+        parser::StrLit as s => type_strlit(s)
+        parser::ByteLit as b => type_bytelit(b)
+        parser::CharLit as c => type_charlit(c)
+        parser::BoolLit as bl => type_boollit(bl)
+        parser::NullLit as nl => type_nulllit(nl)
+        parser::Var as v => type_var(v, env)
+        parser::Binary as b => type_binary(b, env, table)
+        parser::Unary as u => type_unary(u, env, table)
+        parser::Compare as c => type_compare(c, env, table)
+        parser::Call as cl => type_call(cl, env, table)
+        parser::IfExpr as f => type_if(f, env, table)
+        parser::MatchExpr as m => type_match(m, env, table)
+        parser::FieldAccess as fa => type_field_access(fa, env, table)
+        parser::Cast as c => type_cast(c, env, table)
+        parser::MethodCall as mc => {
+            // (C8.3) flags helper methods are typed here; (OOP A1) struct instance methods
+            // dispatch to type_method_call; anything else remains deferred. Mirror of expr.c's
+            // TK_EXPR_METHOD_CALL case (the receiver is probed once for the flags check, then
+            // re-typed inside whichever branch actually handles the call).
+            match type_expr(mc.receiver, env, table) {
+                TExpr as te => if is_flags_named(te.type, table) { type_flags_method(mc, env, table) } else { type_method_call(mc, env, table) }
+                error => type_method_call(mc, env, table)   // let it re-type and surface the real error
+            }
+        }
+        parser::PathExpr as pe => type_path_expr(pe, table, env)
+        parser::StructLit as sl => type_struct_lit(sl, Void { }, env, table)   // W4a (no expected type in expr position)
+        parser::Index as ix => type_index(ix, env, table)   // W5-idx
+        parser::Interp as in => type_interp(in, env, table)   // $"…{expr}…"
+        parser::InExpr as n => type_in(n, env, table)   // <expr> in [ … ] (Phase 2)
+        parser::ArrayLit as a => type_array_lit(a, env, table)   // [ e0, e1, … ] (Increment B+)
+        parser::Lambda as lam => type_lambda(lam, Void { }, env, table)   // (W10) no target here → un-annotated params error (ruling 3); a binding/call-arg threads the target
+        parser::Borrow as b => type_borrow_expr(b, env, table)   // &x safe borrow (AL wave F1)
+    }
+}
+
+// (C1-POS/E1/E2) public entry — wrap the dispatch to thread the source position. On success, copy
+// the untyped node's line/col onto the typed node so later passes (and the renderer) can point at
+// it (mirrors the C twin's tk_typer_expr). On failure, stamp THIS expr's position onto the error
+// UNLESS it already carries one — the innermost (most specific) expr that set it wins, so `f(g(x))`
+// blames the inner `g(x)`/`x`. E2: the error value now carries the position adornments (err_loc +
+// the line/col field reads, per the E2 contract), so this half is mirrored — no longer blocked.
+fn type_expr(e: parser::Expr, env: Env, table: TypeTable) -> TExpr | error {
+    match type_dispatch(e, env, table) {
+        TExpr as te => TExpr { kind = te.kind; type = te.type; line = e.line; col = e.col }
+        error as inner => {
+            if inner.line == 0 { teko::error::err_loc(inner, e.line, e.col) } else { inner }
+        }
+    }
+}
+
+// ---- the value-type a TYPED block yields: the last stmt's, if an ExprStmt; else void ----
+fn tblock_type(stmts: []TStatement) -> Type {
+    if stmts.len == 0 { return Void { } }
+    match stmts[stmts.len - 1] {
+        TExprStmt as es => es.expr.type
+        _ => Void { }
+    }
+}
+
+fn tblock_diverges(stmts: []TStatement) -> bool {
+    if stmts.len == 0 { return false }
+    match stmts[stmts.len - 1] {
+        TReturn => true
+        TBreakStmt => true
+        TContinueStmt => true
+        TExprStmt as es => {
+            if texpr_diverges(es.expr) { return true }   // a trailing panic/exit call diverges
+            match es.expr.kind {
+                TIfExpr as f => f.has_else && tblock_diverges(f.then_blk) && tblock_diverges(f.else_blk)
+                TMatchExpr as m => {
+                    if m.arms.len == 0 { return false }
+                    mut i = 0
+                    loop {
+                        if i >= m.arms.len { break }
+                        if !tblock_diverges(m.arms[i].body) { return false }
+                        i++
+                    }
+                    true
+                }
+                _ => false
+            }
+        }
+        _ => false
+    }
+}

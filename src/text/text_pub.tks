@@ -1,0 +1,94 @@
+
+// Well-formed UTF-8 per RFC 3629 / Unicode: reject overlong encodings, UTF-16
+// surrogates (U+D800..U+DFFF), and codepoints > U+10FFFF. The FIRST continuation
+// byte carries the tightest constraint; the rest are plain 0x80..0xBF. One
+// deterministic walk — no heuristic, no guessing (M.3).
+pub fn valid_utf8(s: []byte) -> bool {
+    mut i: u64 = 0   // u64 index (compared/subtracted against s.len : u64)
+    loop {
+        if i >= s.len { break }
+        let b = s[i]
+        if b <= 0x7F { i++; continue }   // ASCII — a single byte
+
+        let lead = match b {
+            0xC2 => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xC3 => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xC4 => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xC5 => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xC6 => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xC7 => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xC8 => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xC9 => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xCA => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xCB => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xCC => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xCD => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xCE => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xCF => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xD0 => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xD1 => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xD2 => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xD3 => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xD4 => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xD5 => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xD6 => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xD7 => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xD8 => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xD9 => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xDA => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xDB => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xDC => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xDD => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xDE => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xDF => Lead { cont = 1; lo = 0x80; hi = 0xBF }
+            0xE0 => Lead { cont = 2; lo = 0xA0; hi = 0xBF }   // no overlong
+            0xE1 => Lead { cont = 2; lo = 0x80; hi = 0xBF }
+            0xE2 => Lead { cont = 2; lo = 0x80; hi = 0xBF }
+            0xE3 => Lead { cont = 2; lo = 0x80; hi = 0xBF }
+            0xE4 => Lead { cont = 2; lo = 0x80; hi = 0xBF }
+            0xE5 => Lead { cont = 2; lo = 0x80; hi = 0xBF }
+            0xE6 => Lead { cont = 2; lo = 0x80; hi = 0xBF }
+            0xE7 => Lead { cont = 2; lo = 0x80; hi = 0xBF }
+            0xE8 => Lead { cont = 2; lo = 0x80; hi = 0xBF }
+            0xE9 => Lead { cont = 2; lo = 0x80; hi = 0xBF }
+            0xEA => Lead { cont = 2; lo = 0x80; hi = 0xBF }
+            0xEB => Lead { cont = 2; lo = 0x80; hi = 0xBF }
+            0xEC => Lead { cont = 2; lo = 0x80; hi = 0xBF }
+            0xED => Lead { cont = 2; lo = 0x80; hi = 0x9F }   // no surrogate
+            0xEE => Lead { cont = 2; lo = 0x80; hi = 0xBF }
+            0xEF => Lead { cont = 2; lo = 0x80; hi = 0xBF }
+            0xF0 => Lead { cont = 3; lo = 0x90; hi = 0xBF }   // no overlong
+            0xF1 => Lead { cont = 3; lo = 0x80; hi = 0xBF }
+            0xF2 => Lead { cont = 3; lo = 0x80; hi = 0xBF }
+            0xF3 => Lead { cont = 3; lo = 0x80; hi = 0xBF }
+            0xF4 => Lead { cont = 3; lo = 0x80; hi = 0x8F }   // <= U+10FFFF
+            _ => return false   // 0x80..0xC1, 0xF5..0xFF: invalid
+        }
+
+        if s.len - i <= lead.cont { return false }   // truncated: not enough bytes
+        if s[i + 1] < lead.lo || s[i + 1] > lead.hi { return false }
+
+        mut k: u64 = 2   // u64 index (added to i : u64, compared to lead.cont : u64)
+        loop {
+            if k > lead.cont { break }
+            let cb = s[i + k]
+            if cb < 0x80 || cb > 0xBF { return false }
+            k++
+        }
+        i = i + lead.cont + 1
+    }
+    true
+}
+
+// str_from_utf8 — the validated constructor (UTF-8 is FORCED). The ONLY door from
+// raw bytes to a str (B.36 — a str MEANS valid UTF-8, so it IS). Zero-copy on
+// success (the str views the same bytes, re-typed). Teko never guesses an
+// encoding (M.3) — it validates the one codepage it declares (UTF-8).
+pub fn str_from_utf8(b: []byte) -> str | error {
+    if !valid_utf8(b) { return error { message = "invalid UTF-8" } }
+    str(b)
+}
+
+// bytes_of_str(s: str) -> []byte — expose the raw UTF-8 bytes of a str as a []byte
+// slice. Zero-copy; the returned slice views the same memory. Registered as a builtin
+// (like str_of_bytes) in scope.c/tks; this comment is the canonical documentation.

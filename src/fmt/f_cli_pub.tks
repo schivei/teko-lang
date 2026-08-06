@@ -1,0 +1,99 @@
+
+// format_source — the pure formatter: str in, canonical str out (or a refusal).
+pub fn format_source(source: str) -> str | error {
+    match front_end_accepts(source) {
+        error as e => return e
+        null => { }
+    }
+    let toks = match scan_tokens(source) { []FTok as t => t; error as e => return e }
+    let out = render(toks)
+    let back = match scan_tokens(out) {
+        []FTok as t => t
+        error => return f_err("fmt internal error: the formatted output does not re-scan (refusing to write)")
+    }
+    if !same_stream(toks, back) {
+        return f_err("fmt internal error: formatting would alter the token stream (refusing to write)")
+    }
+    out
+}
+
+/**
+ * run_cli — argv is the FULL args (args[0]=program, args[1]="fmt"). THE CONTRACT (owner ruling
+ * 2026-07-30, `--apply` explicit):
+ *
+ *   teko fmt --check <path>…   lists every unformatted path, writes nothing, exits 1 if any
+ *   teko fmt --apply <path>…   rewrites every unformatted file in place, listing each one
+ *   teko fmt <path>…           prints this usage page — a bare run NEVER rewrites
+ *   teko fmt -                 formats stdin to stdout, touching no file
+ *   teko fmt --check -         lists `<stdin>` and exits 1 when stdin would change
+ *
+ * A single `-` path switches to run_stdin (issue #229); mixing `-` with other paths is
+ * rejected by collect_files (it is neither a directory nor a .tks/.tkt file), which is an
+ * honest refusal rather than a silently ambiguous mode.
+ *
+ * @param args  the FULL argv (args[0] the program, args[1] "fmt")
+ * @return      0 ok; 1 = --check found unformatted files (or a `-` stdin input that would
+ *              change); 2 = usage (no mode, no path) / IO / parse error
+ */
+pub fn run_cli(args: []str) -> i32 {
+    mut mode = FmtMode::Unset
+    mut paths: []str = teko::list::empty()
+    mut i: u64 = 2
+    loop {
+        if i >= args.len { break }
+        let arg = args[i]
+        i = i + 1
+        let selected = mode_of_flag(arg)
+        if selected == FmtMode::Unset {
+            paths = teko::list::push(paths, arg)
+            continue
+        }
+        mode = selected
+    }
+    if paths.len == 1 && paths[0] == STDIN_PATH {
+        return run_stdin(mode == FmtMode::Check)
+    }
+    if mode == FmtMode::Unset || paths.len == 0 {
+        return print_help_without_a_mode()
+    }
+    let check = mode == FmtMode::Check
+    mut files: []str = teko::list::empty()
+    mut pi: u64 = 0
+    loop {
+        if pi >= paths.len { break }
+        files = match collect_files(paths[pi], files) {
+            []str as f => f
+            error as e => { teko::io::eprintln(teko::str::concat("teko fmt: ", e.message)); return 2 }
+        }
+        pi = pi + 1
+    }
+    mut unformatted: u64 = 0
+    mut fi: u64 = 0
+    loop {
+        if fi >= files.len { break }
+        let path = files[fi]
+        let src = match teko::io::read_file(path) {
+            str as s => s
+            error as e => { teko::io::eprintln(teko::str::concat("teko fmt: ", path, ": ", e.message)); return 2 }
+        }
+        let out = match format_source(src) {
+            str as o => o
+            error as e => { teko::io::eprintln(teko::str::concat("teko fmt: ", path, ": ", e.message)); return 2 }
+        }
+        if out != src {
+            unformatted = unformatted + 1
+            if check {
+                teko::io::println(path)
+            } else {
+                match teko::io::write_file(path, out) {
+                    error as e => { teko::io::eprintln(teko::str::concat("teko fmt: ", path, ": ", e.message)); return 2 }
+                    null => { }
+                }
+                teko::io::println(path)
+            }
+        }
+        fi = fi + 1
+    }
+    if check && unformatted > 0 { return 1 }
+    0
+}

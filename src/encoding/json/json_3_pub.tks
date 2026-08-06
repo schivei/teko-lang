@@ -1,0 +1,52 @@
+
+// --- public decode entry point ---
+
+// decode(text) — parse a complete JSON document. Trailing (non-whitespace) input after
+// the top-level value is an error (RFC 8259 §2 — a JSON text is EXACTLY one value).
+pub fn decode(text: str) -> JsonValue | error {
+    let bytes = bytes_of_str(text)
+    let result = match parse_value(bytes, 0) { PResult as r => r; error as e => return e }
+    let after = skip_ws(bytes, result.pos)
+    if after != bytes.len {
+        return error { message = concat("json: unexpected trailing input at offset ", i64_to_str(after to i64)) }
+    }
+    result.value
+}
+
+// --- the encoder: JsonValue -> str, always total (a well-formed tree is always
+// representable, so no `| error` — mirrors teko::compress::write_zip's totality). ---
+
+pub fn encode(value: JsonValue) -> str {
+    match value {
+        JsonNull => "null"
+        JsonBool as b => if b.value { "true" } else { "false" }
+        JsonNumber as n => encode_number(n.value)
+        JsonString as s => encode_string(s.value)
+        JsonArray as a => encode_array(a.items)
+        JsonObject as o => encode_object(o.keys, o.values)
+    }
+}
+
+// --- TR4-friendly DOM accessors (public — see the "TR4-readiness" note above) ---
+
+// object_get(obj, key) — first matching value for `key` in source order, or `null`
+// (Teko's built-in nullable) when absent. Linear scan: source order + small typical
+// object sizes make this the right complexity/simplicity trade for now (matches the
+// parallel-slices shape; a hashed lookup is exactly what `teko::collections::Map`
+// integration — noted above — will later provide for large/hot-path objects).
+pub fn object_get(obj: JsonObject, key: str) -> JsonValue | null {
+    mut i: u64 = 0
+    loop {
+        if i >= obj.keys.len { break }
+        if str_eq(obj.keys[i], key) { return obj.values[i] }
+        i++
+    }
+    null
+}
+
+// array_get(arr, index) — bounds-checked element access, or `null` when out of range
+// (mirrors object_get's absent-key shape so callers handle "missing" uniformly).
+pub fn array_get(arr: JsonArray, index: u64) -> JsonValue | null {
+    if index >= arr.items.len { return null }
+    arr.items[index]
+}

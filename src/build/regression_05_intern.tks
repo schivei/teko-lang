@@ -1,0 +1,240 @@
+/**
+ * check_object_wellformed — post-build cross-check the emitted `<name>.o` with the host
+ * toolchain leaf tool for the effective target: `scripts/check_elf.sh` (ELF),
+ * `scripts/check_macho.sh` (Mach-O), `scripts/check_coff.sh` (PE/COFF). A `Then object
+ * well-formed` scenario runs this after a `backend = "own"` build. A rejected object is a FAIL;
+ * an absent tool is an honest SKIP with a named reason (never a pass) — the leaf scripts
+ * themselves already honest-skip (exit 0) when their host toolchain is absent, so a non-zero exit
+ * here is always a genuine rejection. These three scripts are the ONLY `scripts/*` that survive
+ * the regression-script cull — leaf tools, not orchestration.
+ *
+ * THE TARGET IS PASSED AS THE SECOND ARGUMENT, not merely used to pick the script. A leaf
+ * checker that derives its expectation from the HOST answers the wrong question for a cross
+ * build: an object emitted FOR `arm64-linux` ON an x86_64 host is correct AArch64, and a
+ * host-derived expectation calls it "not an X86-64 object" — a false red — while the mirror
+ * case (an x86_64 host accidentally emitting arm64 bytes for an `x86_64-linux` row) is the one
+ * the check exists to catch. Handing the checker the os-arch the build was ASKED for makes the
+ * assertion parametric in both directions at once.
+ *
+ * @param objp    the emitted object path (`<oout>/<name>.o`)
+ * @param target  the effective os-arch (selects elf/macho/coff AND the expected machine)
+ * @return        the verdict (ok / FAIL / skip-when-no-checker-for-target)
+ * @since 0.3.1
+ */
+fn check_object_wellformed(objp: str, target: str) -> RegrOutcome {
+    let script = wellformed_script_for(target)
+    if script.len == 0 { return regr_skip(teko::str::concat("no object well-formedness checker for target ", target)) }
+    mut argv: []str = teko::list::push(teko::list::empty(), script)
+    argv = teko::list::push(argv, objp)
+    argv = teko::list::push(argv, target)
+    let cap = run_captured(argv, "", objp ~ ".wellformed")
+    if cap.exit != 0 {
+        return regr_fail($"object well-formedness check failed{captured_output_block(cap)}")
+    }
+    regr_pass()
+}
+
+/**
+ * compile_regressive — build the regressive project at `regr_dir` with the current compiler `exe`
+ * (`teko <regr_dir> -o bin --no-verify`) under `env`, capturing the build's exit/stderr (the stderr
+ * carries the diagnostic a `compile_fail` regressive pins). The binary lands at
+ * `<regr_dir>/bin/<name>`.
+ *
+ * @param exe       the absolute path to this compiler binary
+ * @param regr_dir  the regressive project directory
+ * @param env       per-scenario child env (`K=V` tokens; 0.3.1 C2) — [] for the historic behavior
+ * @param prefix    the scratch-file prefix for this compile
+ * @return          the captured build outcome
+ * @since 0.3.0.29
+ */
+fn compile_regressive(exe: str, regr_dir: str, env: []str, prefix: str) -> CapResult {
+    run_captured_env(compile_regressive_argv(exe, regr_dir), "", env, prefix)
+}
+
+/**
+ * compile_regressive_argv — the argv `compile_regressive` runs. Named so the SERIAL path and the
+ * POOL path build the same command from one place; a second spelling of a build invocation is a
+ * second thing that can drift.
+ *
+ * @param exe       the absolute path to this compiler binary
+ * @param regr_dir  the regressive project directory to build
+ * @return          the argv
+ * @since 0.3.1
+ */
+fn compile_regressive_argv(exe: str, regr_dir: str) -> []str {
+    mut argv: []str = teko::list::push(teko::list::empty(), exe)
+    argv = teko::list::push(argv, regr_dir)
+    argv = teko::list::push(argv, "-o")
+    argv = teko::list::push(argv, "bin")
+    argv = teko::list::push(argv, "--no-verify")
+    argv
+}
+
+/**
+ * compile_regressive_spec — the `ProcSpec` `compile_regressive` would run, WITHOUT launching it, so
+ * a caller can hand it to `run_pool` alongside its siblings.
+ *
+ * @param exe       the absolute path to this compiler binary
+ * @param regr_dir  the regressive project directory to build
+ * @param env       per-scenario child env (`K=V` tokens)
+ * @param prefix    the scratch-file prefix this build's capture files hang off
+ * @return          the spec
+ * @since 0.3.1.2
+ */
+fn compile_regressive_spec(exe: str, regr_dir: str, env: []str, prefix: str) -> ProcSpec {
+    ProcSpec { argv = compile_regressive_argv(exe, regr_dir); dir = ""; env = env; stdin_data = ""; prefix = prefix }
+}
+
+/**
+ * compile_in_place — build the regressive project at `regr_dir` with the current compiler `exe`
+ * from WITHIN `regr_dir` (`teko . -o bin --no-verify` with the child's OWN working directory set to
+ * `regr_dir`), the #64 CWD-relative invocation shape a `When built in place` scenario exercises —
+ * distinct from `compile_regressive`, which builds `<regr_dir>` from the runner's OWN cwd without
+ * changing the child's directory. The binary lands at `<regr_dir>/bin/<name>`, same as
+ * `compile_regressive`.
+ *
+ * `prefix` NEEDS NO ABSOLUTE RESOLUTION (unlike the old `sh -c "cd … && …"` shape): every
+ * redirection target is opened by the PARENT before the child's directory changes
+ * (`spawn_redirected`'s own contract), so a relative `prefix` resolves against the RUNNER's cwd
+ * regardless of `regr_dir`.
+ *
+ * @param exe       the absolute path to this compiler binary
+ * @param regr_dir  the regressive project directory (the directory the CWD-relative build runs in)
+ * @param env       per-scenario child env (`K=V` tokens; 0.3.1 C2)
+ * @param prefix    the scratch-file prefix for this compile
+ * @return          the captured build outcome
+ * @since 0.3.1
+ */
+fn compile_in_place(exe: str, regr_dir: str, env: []str, prefix: str) -> CapResult {
+    mut argv: []str = teko::list::push(teko::list::empty(), exe)
+    argv = teko::list::push(argv, ".")
+    argv = teko::list::push(argv, "-o")
+    argv = teko::list::push(argv, "bin")
+    argv = teko::list::push(argv, "--no-verify")
+    run_captured_in_dir(argv, "", env, regr_dir, prefix)
+}
+
+/**
+ * SNIPPET_PROJECT_NAME — the fixed project name every scratch snippet project
+ * (`compile_snippet_text`) is stamped with, so the built binary's path (`<proj>/bin/<name>`) is
+ * always known to the caller without re-parsing the synthesized `.tkp`.
+ */
+const SNIPPET_PROJECT_NAME: str = "snippet"
+
+/**
+ * snippet_manifest_text — the minimal `.tkp` text every scratch snippet project is given: a
+ * `binary` artifact named `SNIPPET_PROJECT_NAME` with an (empty) `src` source root — `teko`
+ * compiles PROJECTS, never a bare `.tks` file (main.tks's CLI law), so a one-off snippet needs
+ * this synthesized wrapper.
+ *
+ * @return the `.tkp` text
+ * @since 0.3.1
+ */
+fn snippet_manifest_text() -> str {
+    "name = \"" ~ SNIPPET_PROJECT_NAME ~ "\"\nsource = \"src\"\n\n[artifact]\nkind = \"binary\"\n"
+}
+
+/**
+ * SnippetSplit — an inline snippet's source, split into its top-level DECLARATIONS (`type`/`fn`/
+ * `use`/`const`, brace-depth-scoped) and its top-level STATEMENTS, each half in original source
+ * order (`split_snippet_decls_and_stmts`).
+ *
+ * @since 0.3.1
+ */
+type SnippetSplit = struct {
+    /** the concatenated declaration chunks, in source order ("" when the snippet declares none). */
+    decls: str
+    /** the concatenated statement chunks, in source order. */
+    stmts: str
+    /**
+     * the LAST statement chunk (with its trailing separator) — a literal SUFFIX of `stmts`, never a
+     * part removed from it. It is singled out because the virtual-main rule (#423/#382) gives the
+     * last loose statement a meaning the others do not have: a non-void expression there IS the
+     * program's exit code. A grouped build moves the statements into a function body, where that
+     * rule no longer applies, so `regr_group.tks` has to see the tail separately to make the exit
+     * explicit. "" when the snippet has no statements.
+     */
+    tail: str
+}
+
+/**
+ * snippet_chunk_head_keyword_start — the byte offset where `t` (a trimmed chunk) begins its
+ * declaration head keyword, after stripping any leading modifier tokens (`pub `, `exp `,
+ * `unsafe `, `extern `, in any combination/order — e.g. `pub unsafe fn`).
+ *
+ * @param t  the trimmed chunk text
+ * @return   the offset of the first byte past every leading modifier token
+ * @since 0.3.1
+ */
+fn snippet_chunk_head_keyword_start(t: str) -> u64 {
+    mut rest = t
+    mut off: u64 = 0
+    loop {
+        let before = rest
+        if mf_starts_with(rest, "pub ") { rest = teko::str::slice(rest, 4, rest.len); off = off + 4 }
+        if mf_starts_with(rest, "exp ") { rest = teko::str::slice(rest, 4, rest.len); off = off + 4 }
+        if mf_starts_with(rest, "unsafe ") { rest = teko::str::slice(rest, 7, rest.len); off = off + 7 }
+        if mf_starts_with(rest, "extern ") { rest = teko::str::slice(rest, 7, rest.len); off = off + 7 }
+        if rest == before { break }
+    }
+    off
+}
+
+/**
+ * snippet_chunk_skip_attr_lines — the remainder of `text` after every leading bare attribute line
+ * (`#…`, one per line — e.g. `#test`) is dropped. `split_snippet_decls_and_stmts` accumulates a
+ * leading attribute onto the declaration it decorates into ONE chunk, so the head-keyword read
+ * must skip past it to find the actual declaration line.
+ *
+ * @param text  the chunk text (one or more full lines, `\n`-joined)
+ * @return      `text` with every leading attribute line removed
+ * @since 0.3.1
+ */
+fn snippet_chunk_skip_attr_lines(text: str) -> str {
+    mut rest = text
+    loop {
+        if !mf_starts_with(tkr_trim(rest), "#") { return rest }
+        mut k: u64 = 0
+        loop {
+            if k >= rest.len { break }
+            if rest[k] == b'\n' { break }
+            k = k + 1
+        }
+        if k >= rest.len { return "" }
+        rest = teko::str::slice(rest, k + 1, rest.len)
+    }
+}
+
+/**
+ * snippet_chunk_is_decl — does the top-level chunk `chunk` (past any leading attribute lines,
+ * `snippet_chunk_skip_attr_lines`) open with a declaration keyword (`type`/`fn`/`class`/`flags`/
+ * `interface`/`use`/`const`), after any leading modifier tokens (`pub`/`exp`/`unsafe`/`extern`,
+ * `snippet_chunk_head_keyword_start`)? Everything else (an expression, `let`/`mut`, `if`/`loop`,
+ * …) is a virtual-main STATEMENT.
+ *
+ * @param chunk  one top-level source chunk (brace-depth-balanced)
+ * @return       true when `chunk` is a declaration
+ * @since 0.3.1
+ */
+fn snippet_chunk_is_decl(chunk: str) -> bool {
+    let t = tkr_trim(snippet_chunk_skip_attr_lines(chunk))
+    let head = teko::str::slice(t, snippet_chunk_head_keyword_start(t), t.len)
+    mf_starts_with(head, "type ") || mf_starts_with(head, "fn ") || mf_starts_with(head, "class ") || mf_starts_with(head, "flags ") || mf_starts_with(head, "interface ") || mf_starts_with(head, "use ") || mf_starts_with(head, "const ")
+}
+
+/**
+ * BraceScan — the result of scanning one line for its net brace delta OUTSIDE string/char
+ * literals and slash-star block comments (`snippet_brace_delta`): the delta itself, plus whether
+ * the line ends INSIDE an unterminated string/char literal or an unterminated block comment,
+ * each threaded into the next line's scan.
+ *
+ * @since 0.3.1
+ */
+type BraceScan = struct {
+    /** the net `{`/`}` count outside any string/char literal, block comment, or `//` comment. */
+    delta: i64
+    /** true when the line ends inside an open (unterminated) string/char literal. */
+    in_str: bool
+    /** true when the line ends inside an open (unterminated) slash-star block comment. */
+    in_comment: bool
+}

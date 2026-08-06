@@ -1,0 +1,251 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * typeexpr_is_fat_decl_body — `typeexpr_is_fat_named`'s per-declaration step: a transparent
+ * `AliasBody` defers the fat-or-not answer to its own right-hand-side annotation
+ * (`typeexpr_is_fat_walk`); every other declaration body (struct/class/enum/flags/variant/extern/
+ * interface/trait) is NOT a fat-pointer type by construction and answers `false`.
+ *
+ * @param body     the found declaration's body
+ * @param table    the program's type table
+ * @param visited  the alias-chain recursion guard, already extended with this declaration's name
+ * @return         whether `body`, resolved through any alias, denotes `str` or `[]T`
+ */
+fn typeexpr_is_fat_decl_body(body: parser::TypeBody, table: checker::TypeTable, visited: []str) -> bool {
+    match body {
+        parser::AliasBody as ab => typeexpr_is_fat_walk(ab.alias, table, visited)
+        _ => false
+    }
+}
+
+/**
+ * typeexpr_is_fat_walk — the annotation-shape dispatch shared by `typeexpr_is_fat` (fresh chain)
+ * and `typeexpr_is_fat_decl_body` (continuing an alias chain): a `[]T` slice is fat regardless of
+ * its element (the slice value itself is the `{ptr, len}` pair, never its elements); a named
+ * annotation — BARE OR QUALIFIED — defers to `typeexpr_is_fat_named`; every other annotation shape
+ * (optional, union, function type, generic instantiation) is never fat.
+ *
+ * This doc-comment used to end that list with "multi-segment path", and that sentence WAS the bug of
+ * 0.3.1.0 degrau 31: a qualified alias of a fat type is fat, and saying otherwise made the syntactic
+ * predicate disagree with the semantic `is_fat_type` on the very same annotation.
+ *
+ * @param te       the syntactic type annotation
+ * @param table    the program's type table
+ * @param visited  the alias-chain recursion guard
+ * @return         whether `te` denotes a fat-pointer-VALUED type (`str` or `[]T`)
+ */
+fn typeexpr_is_fat_walk(te: parser::TypeExpr, table: checker::TypeTable, visited: []str) -> bool {
+    match te {
+        parser::SliceType => true
+        parser::NamedType as nt => typeexpr_is_fat_named(nt, table, visited)
+        _ => false
+    }
+}
+
+/**
+ * typeexpr_is_fat — the syntactic gate for `is_fat_type`: is the ANNOTATION `te`, resolved
+ * THROUGH any alias, a fat-pointer type?
+ *
+ * Before 2026-07-29 this asked the ANNOTATION directly — `[]T` or a literal `str` — never the
+ * type it names. A type ALIAS (`type S = str`) parses as `NamedType "S"`, which matched neither
+ * arm of that syntactic check, so `field_layout_size` reserved 8 bytes for an `s: S` field while
+ * `store_struct_field` — which asks the SEMANTIC `is_fat_type` on the field VALUE's resolved
+ * type — wrote the full 16-byte `{ptr, len}` image there, spilling into whatever field followed.
+ * The two predicates disagreed on the exact same field, and nothing enforced agreement: a LIVE
+ * miscompilation, measured with no `char` involved at all
+ * (`docs/memory/raiz-comum-dos-degraus-0.3.1.0.md` §7-quater.3-bis — `type S = str; struct H {
+ * s: S; n: i32 }` reads `h.s.len` back as `h.n`'s own value on the native route, `5` on the C
+ * route).
+ *
+ * The fix chases the alias chain itself (`typeexpr_is_fat_walk`/`typeexpr_is_fat_named`) using
+ * `checker::type_table_find` — the SAME tolerant lookup the class base-chain walk
+ * (`checker::effective_class_fields`) already resolves field layouts through, so no NEW table
+ * shape or namespace convention enters this file. A first attempt routed through
+ * `checker::resolve_type` instead (the resolver every annotation-to-semantic-type step elsewhere
+ * in this compiler uses); measured against this exact bug's own probe it failed to resolve a
+ * SINGLE-SEGMENT bare name against `checker::type_table_of`'s CANONICAL-keyed table (`"S"` vs. a
+ * registered `"aliasfield::S"`) and silently fell back to the old syntactic answer — the very
+ * "compiles and lies" outcome this lane's own restrictions forbid. `type_table_find` is the
+ * function this compiler ALREADY trusts for a bare-or-canonical lookup against that exact table
+ * shape, so this walk reuses it instead of asking `resolve_type` to do a job its own bare-name
+ * resolver (`checker::resolve_bare_type_reg`) is not built for.
+ *
+ * @param te     the field's or parameter's syntactic type annotation
+ * @param table  the program's type table (`checker::type_table_of`)
+ * @return       whether `te` denotes a fat-pointer-VALUED type (`str` or `[]T`), resolved
+ *               THROUGH any alias
+ * @see is_fat_type  the semantic predicate this now agrees with BY CONSTRUCTION for every alias
+ *                    an `is_fat_type`-typed value can carry
+ * @since 0.3.1.0 raiz A, crumb R0
+ */
+fn typeexpr_is_fat(te: parser::TypeExpr, table: checker::TypeTable) -> bool {
+    typeexpr_is_fat_walk(te, table, teko::list::empty())
+}
+
+/**
+ * field_layout_size — a field's byte size, widening a fat-pointer field (`[]T`/`str`, resolved
+ * THROUGH any alias OR through the RESOLVED declared type — `field_is_fat_resolved`) to the 16-byte
+ * `{ptr, len}` image and otherwise deferring to `field_size_of` (#594 T-B6). The 16-byte width is the
+ * layout the aggregate-const serializer writes (`{ptr@off, len@off+8}`) and the store writes
+ * (`store_fat_slot`) — sizing it off the SAME semantic predicate the store uses is what keeps the two
+ * from ever disagreeing (0.3.1.0 raiz A — fat-field layout unification).
+ *
+ * @param te      the field's syntactic type annotation (the fat-vs-scalar signal)
+ * @param ft      the field's machine class (`ltype_of_typeexpr`'s mapping)
+ * @param nested  the field's nested struct layout, when known
+ * @param table   the program's type table (`typeexpr_is_fat`'s alias resolver)
+ * @param rft     the field's RESOLVED declared type (`is_fat_type`, the store's own signal)
+ * @return        the field's byte size
+ * @since #594 T-B6
+ */
+fn field_layout_size(te: parser::TypeExpr, ft: LType, nested: LStructLayout | null, table: checker::TypeTable, rft: checker::Type) -> u32 {
+    if field_is_fat_resolved(te, table, rft) { return ltype_size(LType::Ptr) * (2 to u32) }
+    field_size_of(ft, nested)
+}
+
+/**
+ * field_is_fat_resolved — the SINGLE fat-vs-scalar verdict a field's layout is sized by, agreeing with
+ * the store BY CONSTRUCTION: a field is fat when its SYNTACTIC annotation resolves fat
+ * (`typeexpr_is_fat`, over any alias chain) OR its RESOLVED declared type is fat (`is_fat_type`, the
+ * SAME semantic predicate `store_struct_field` writes the value through). The disjunction is what
+ * closes the raiz-A bare-type-parameter gap: a generic field annotated `T` and monomorphized fat
+ * (`Owned<str>`, `Parsed<str>`) whose stamped annotation the syntactic predicate reads as thin still
+ * sizes 16 the moment the resolver sees its concrete `Str`/`Slice`, so `field_layout_size` reserves
+ * exactly the 16-byte `{ptr, len}` slot `store_fat_slot` writes — the two can no longer disagree.
+ *
+ * @param te     the field's syntactic type annotation
+ * @param table  the program's type table (`typeexpr_is_fat`'s alias resolver)
+ * @param rft    the field's RESOLVED declared type (`resolved_field_type`, `Void`/`Named "T"` when the
+ *               annotation does not resolve — those answer `is_fat_type` false, so the syntactic arm
+ *               governs unchanged)
+ * @return       whether the field holds a fat-pointer `{ptr, len}` value
+ * @since 0.3.1.0 raiz A — fat-field layout unification
+ */
+fn field_is_fat_resolved(te: parser::TypeExpr, table: checker::TypeTable, rft: checker::Type) -> bool {
+    typeexpr_is_fat(te, table) || is_fat_type(rft)
+}
+
+/**
+ * field_layout_align — a field's byte alignment, pinning a fat-pointer field (`[]T`/`str`,
+ * resolved THROUGH any alias OR through the RESOLVED declared type — `field_is_fat_resolved`) to
+ * pointer alignment and otherwise deferring to `field_align_of` (#594 T-B6).
+ *
+ * @param te      the field's syntactic type annotation (the fat-vs-scalar signal)
+ * @param ft      the field's machine class (`ltype_of_typeexpr`'s mapping)
+ * @param nested  the field's nested struct layout, when known
+ * @param table   the program's type table (`typeexpr_is_fat`'s alias resolver)
+ * @param rft     the field's RESOLVED declared type (`is_fat_type`, the store's own signal)
+ * @return        the field's byte alignment
+ * @since #594 T-B6
+ */
+fn field_layout_align(te: parser::TypeExpr, ft: LType, nested: LStructLayout | null, table: checker::TypeTable, rft: checker::Type) -> u32 {
+    if field_is_fat_resolved(te, table, rft) { return ltype_align(LType::Ptr) }
+    field_align_of(ft, nested)
+}
+
+/**
+ * collect_enums — the name + declared member list of every `enum` type
+ * declaration in `prog`, in program order (A1-5, #382 — a `match` arm's bare
+ * enum-member pattern resolves its ORDINAL through this table). A non-enum type
+ * declaration contributes no entry.
+ *
+ * @param checker::TProgram prog  the whole typed program to scan
+ * @return []LEnumInfo  every declared enum's name + member list, in program
+ *                      order
+ */
+fn collect_enums(prog: checker::TProgram) -> []LEnumInfo {
+    mut out: []LEnumInfo = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        out = collect_enum_item(out, prog.items[i])
+        i++
+    }
+    out
+}
+
+/**
+ * collect_enum_item — accumulate `it`'s enum info onto `acc`, unchanged for
+ * every other item kind.
+ *
+ * @param []LEnumInfo acc  the enum table accumulated so far
+ * @param checker::TItem it  the program item to fold
+ * @return []LEnumInfo  `acc`, with `it`'s enum info appended when applicable
+ */
+fn collect_enum_item(acc: []LEnumInfo, it: checker::TItem) -> []LEnumInfo {
+    match it {
+        parser::TypeDecl as td => collect_enum_decl(acc, td)
+        _ => acc
+    }
+}
+
+/**
+ * collect_enum_decl — accumulate `td`'s member list onto `acc` when its body is
+ * an `EnumBody`; unchanged for any other type-declaration shape
+ * (struct/class/variant/…).
+ *
+ * @param []LEnumInfo acc  the enum table accumulated so far
+ * @param parser::TypeDecl td  the type declaration to fold
+ * @return []LEnumInfo  `acc`, with `td`'s enum info appended when applicable
+ */
+fn collect_enum_decl(acc: []LEnumInfo, td: parser::TypeDecl) -> []LEnumInfo {
+    match td.body {
+        parser::EnumBody as eb => teko::list::push(acc, LEnumInfo { name = td.name; members = eb.members })
+        _ => acc
+    }
+}
+
+/**
+ * collect_externs — the namespace + name + declared foreign symbol of every
+ * `extern fn` in `prog`, in program order (C7.1a — a call to one must target
+ * that raw symbol, never the Teko mangling, or the link fails on an undefined
+ * reference to a name nobody defines). A non-function item, and a function with
+ * a body, contribute no entry.
+ *
+ * @param checker::TProgram prog  the whole typed program to scan
+ * @return []LExternFn  every declared `extern fn`'s call-resolution entry, in
+ *                      program order
+ */
+fn collect_externs(prog: checker::TProgram) -> []LExternFn {
+    mut out: []LExternFn = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        out = collect_extern_item(out, prog.items[i])
+        i++
+    }
+    out
+}
+
+/**
+ * collect_extern_item — accumulate `it`'s foreign-symbol entry onto `acc` when
+ * it is an `extern fn`; unchanged for every other item kind.
+ *
+ * @param []LExternFn acc  the extern table accumulated so far
+ * @param checker::TItem it  the program item to fold
+ * @return []LExternFn  `acc`, with `it`'s entry appended when applicable
+ */
+fn collect_extern_item(acc: []LExternFn, it: checker::TItem) -> []LExternFn {
+    match it {
+        checker::TFunction as f => collect_extern_fn(acc, f)
+        _ => acc
+    }
+}
+
+/**
+ * collect_extern_fn — accumulate `f`'s foreign-symbol entry onto `acc` when
+ * `f` is an `extern fn`; unchanged for an ordinary Teko function.
+ *
+ * @param []LExternFn acc  the extern table accumulated so far
+ * @param checker::TFunction f  the function item to fold
+ * @return []LExternFn  `acc`, with `f`'s entry appended when applicable
+ */
+fn collect_extern_fn(acc: []LExternFn, f: checker::TFunction) -> []LExternFn {
+    if !f.is_extern { return acc }
+    teko::list::push(acc, LExternFn { namespace = f.namespace; name = f.name; c_symbol = f.c_symbol })
+}
+
+/** LowerItemOut — the module + accumulated loose statements + the WHOLE-PROGRAM
+    lifted closure/thunk-function table (A1-7, #382) after folding one top-level item. */

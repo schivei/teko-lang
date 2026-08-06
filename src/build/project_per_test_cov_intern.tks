@@ -1,0 +1,294 @@
+// src/build/project.tks   (namespace 'teko::build')
+//
+// The PROJECT ORCHESTRATION entry layer — the canonical Teko ORIGINAL of the project
+// surfaces in src/driver.c (project_frontend / tk_compile_project / tk_run_project) and
+// the directory resolution in main.c (project_dir_of). main.tks dispatches here:
+//   teko build <dir>  → compile_project  (front-end → native codegen)
+//   teko run   <dir>  → run_project      (front-end → native codegen + execute, debug profile)
+//   teko <projarg>    → project_dir_of   (a `.tkp` → its dir; else the dir as-is)
+//
+// FAITHFUL-NOT-LITERAL (M.3). It mirrors the C twins' SHAPE and contracts in native Teko:
+// the C uses out-params (project_frontend(dir, &prog, &manifest)); Teko has NO out-params,
+// so the shared front-end returns a small `Frontend` struct (prog + manifest), as
+// `Frontend | error`. Both entries (build/run) run the SAME front-end AND the SAME
+// codegen→cc backend; `run` additionally executes the resulting binary (the interpreter this once
+// diverged to is retired, #524).
+
+use teko::parser
+use teko::lexer
+use teko::checker
+use teko::codegen
+use teko::emit
+use teko::compress
+use teko::coverage
+
+    0
+}
+
+/**
+ * Apply the D4 coverage-floor policy from a SITE-MAP (the staged `teko test` report path): the same
+ * warn-by-default / enforce-under-`--cov-validation` policy as `enforce_coverage_floors`, reading
+ * the measured percentages from the site-map join rather than the typed program.
+ *
+ * @param dir             the project directory (for the diagnostic prefix)
+ * @param sm              the parsed coverage site-map
+ * @param m               the resolved manifest (its `[coverage]` floors)
+ * @param cov_validation  `--cov-validation` — enforce (fail) rather than warn on an unmet floor
+ * @return                0 unless `cov_validation` is set AND a floor is unmet, in which case 1
+ * @throws                under `cov_validation`, the first unmet floor's message
+ */
+fn enforce_coverage_floors_sm(dir: str, sm: coverage::SiteMap, m: Manifest, cov_validation: bool) -> i32 {
+    if cov_validation { return coverage_gate_result_sm(dir, sm, m) }
+    warn_coverage_floors(coverage_floor_misses_sm(sm, m))
+    0
+}
+
+/** report_native_coverage — print the three engine-independent coverage metrics (function/line/branch)
+ *  the native gate populated (#265 Track A). Uses the exported percentage wrappers
+ *  (coverage::*_coverage_pct). */
+fn report_native_coverage(prog: checker::TProgram) {
+    let fcov = coverage::coverage_pct(prog)
+    let lcov = coverage::line_coverage_pct(prog)
+    let bcov = coverage::branch_coverage_pct(prog)
+    teko::io::println($"teko: coverage {fcov}% functions")
+    teko::io::println($"teko: coverage {lcov}% lines")
+    teko::io::println($"teko: coverage {bcov}% branches")
+}
+
+/**
+ * run_native_gate — (#265, lever D of #249; own-AOT-backend since 0.3.1.0 tests-native-no-c) the D4
+ * test gate run NATIVELY, BOTH halves in this process: build the gate binary through the own
+ * backend (`native_gate_build` — no `.c`, no `cc`-COMPILE of the test program; see its own doc for
+ * what "native" now means here), then run the resulting binary (`native_gate_run`). A failed assert
+ * panics with a non-zero exit (fail-fast, M.1).
+ *
+ * This is the `teko build` gate, which needs the SAME process the checked program lives in (the
+ * release rebuild reads it right after). `teko test` runs the two halves in different processes
+ * instead — see `test_project`.
+ *
+ * COVERAGE IS NOT YET MEASURED ON THIS PATH (v1 gap — see `native_gate_harness_src`'s doc): the
+ * historic C gate's `TestCov` profile wove `tk_cov_line_at`/`tk_cov_branch_at` marks into every
+ * production function body; the native backend has no such instrumentation pass yet. `native_gate_run`
+ * merges nothing and `run_gate_native` skips the floor verdict rather than compute one over
+ * coverage that was never measured — an honest gap, not a silent zero.
+ *
+ * @param dir      the project directory (for the diagnostic prefix)
+ * @param out_dir  the output directory the gate binary lands under
+ * @param pf       the gate's PARSED tree (`native_gate_build` re-checks it with the harness spliced in)
+ * @param m        the resolved manifest
+ * @param tty      render the checker/monomorph phases' in-place `\r` updates
+ * @return         0 when every test passed, else the failing status
+ * @throws         the parse/check error, or `emit_native`'s own (already reported)
+ */
+fn run_native_gate(dir: str, out_dir: str, pf: ParsedFront, m: Manifest, tty: bool) -> i32 {
+    let od = gate_out_dir(out_dir)
+    let gp = gate_paths(od, m)
+    let brc = native_gate_build(dir, od, gp, pf, m, tty)
+    if brc != 0 { return brc }
+    native_gate_run(od, gp, false)
+}
+
+/**
+ * GatePaths — the four paths of ONE gate binary, derived from the output directory and the
+ * manifest name. Named as a group because the BUILD half (which emits and compiles) and the RUN
+ * half (which executes and merges) live in different PROCESSES since the staged `teko test`
+ * driver landed: a second spelling of `<name>-tktest` in the runner would be a second thing that
+ * can drift from the emitter.
+ *
+ * @since 0.3.1.0
+ */
+type GatePaths = struct {
+    /** the binary's stem (`<name>-tktest`), also the shard scratch prefix's stem. */
+    stem: str
+    /** the emitted test-profile translation unit (`<od>/<stem>.c`). */
+    cfile: str
+    /** the compiled gate binary (`binary_output_path`, target-suffixed). */
+    binp: str
+    /** the coverage dump a single-process gate run writes (`<od>/<stem>.tkcov`). */
+    covfile: str
+}
+
+/**
+ * gate_out_dir — the output directory with any trailing `/` removed, so `<od>/<stem>` never
+ * doubles the separator.
+ *
+ * @param out_dir  the requested output directory (`-o`, default "bin")
+ * @return         the same directory without a trailing separator
+ */
+fn gate_out_dir(out_dir: str) -> str {
+    if out_dir.len > 0 && out_dir[out_dir.len - 1] == b'/' { return teko::str::slice_to(out_dir, out_dir.len - 1) }
+    out_dir
+}
+
+/**
+ * gate_paths — the `GatePaths` of the `<name>-tktest` gate binary under `od`.
+ *
+ * @param od  the output directory (no trailing separator — see `gate_out_dir`)
+ * @param m   the resolved manifest (its `name` is the stem's root)
+ * @return    the gate's stem, C file, binary and coverage-dump paths
+ * @since 0.3.1.0
+ */
+fn gate_paths(od: str, m: Manifest) -> GatePaths {
+    let stem = teko::str::concat(m.name, "-tktest")
+    GatePaths {
+        stem = stem
+        cfile = teko::str::concat(od, "/", teko::str::concat(stem, ".c"))
+        binp = binary_output_path(od, stem, resolved_target())
+        covfile = teko::str::concat(od, "/", teko::str::concat(stem, ".tkcov"))
+    }
+}
+
+/**
+ * TestRef — one `#test` function's call address: the namespace it was declared in (its
+ * `SourceFile.namespace`, "::"-joined — see `discover`) and its bare name. The native gate harness
+ * (`native_gate_harness_src`) turns each `TestRef` into a plain, fully-qualified top-level CALL
+ * statement — `<namespace>::<name>()` — exactly the syntax any other cross-namespace call already
+ * uses, so no new grammar or lowering is needed to invoke it.
+ *
+ * @since 0.3.1.0 (tests-native-no-c)
+ */
+type TestRef = struct { namespace: str; name: str }
+
+/**
+ * native_gate_test_refs — every `#test` function among `items`, in file order: the SAME predicate
+ * (`parser::Function.is_test`) `emit_test_main`'s C harness reads at the CHECKED level, read here at
+ * the PARSED level (before `frontend_check`) — one `#test` attribute, one flag, two readers.
+ *
+ * @param items  the merged, un-typed project items (`pf.parsed.items`, WITH `.tkt` tests assembled)
+ * @return       one `TestRef` per `#test` function, in the order they appear in `items`
+ * @since 0.3.1.0 (tests-native-no-c)
+ */
+fn native_gate_test_refs(items: []parser::Item) -> []TestRef {
+    mut out: []TestRef = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= items.len { break }
+        match items[i].content {
+            parser::Function as f => { if f.is_test { out = teko::list::push(out, TestRef { namespace = items[i].namespace; name = f.name }) } }
+            _ => { }
+        }
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * native_gate_drop_statements — `items` with every BARE top-level statement (`ItemKind::Statement` —
+ * `main.tks`'s own loose top-level code) removed; every `UseDecl`/`Function`/`TypeDecl`/`ConstDecl`
+ * passes through untouched, in order.
+ *
+ * WHY: the native gate's virtual main must be ONLY the test-call sequence
+ * `native_gate_harness_src` synthesizes — the project's OWN `main.tks` logic must not also run
+ * during a test gate (it would run BEFORE the appended test calls, since a project's loose
+ * statements and the harness's would otherwise both land in `prog.items` in file order). The C
+ * gate's `emit_test_main` gets the same effect for free by never reading `checker::TStatement`
+ * items at all; this native path instead drops them before the virtual main is even lowered, since
+ * `lower_virtual_main`/`emit_native_x86` (unlike the C emitter) has no test-aware mode to skip them
+ * in.
+ *
+ * @param items  the merged, un-typed project items
+ * @return       `items` with every bare top-level statement removed
+ * @since 0.3.1.0 (tests-native-no-c)
+ */
+fn native_gate_drop_statements(items: []parser::Item) -> []parser::Item {
+    mut out: []parser::Item = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= items.len { break }
+        match items[i].content {
+            parser::Statement => { }   // dropped — the harness's own calls replace the virtual main
+            _ => { out = teko::list::push(out, items[i]) }
+        }
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * native_gate_test_label — `<namespace>::<name>`, or the bare `<name>` when `t` has no namespace
+ * (never observed in practice — `discover` always seeds a non-empty root namespace — kept for
+ * defensive symmetry with `emit_test_channel_open`'s own C-side label rule).
+ *
+ * @param t  the test reference
+ * @return   the fully-qualified label/call-path text
+ * @since 0.3.1.0 (tests-native-no-c)
+ */
+fn native_gate_test_label(t: TestRef) -> str {
+    if t.namespace.len > 0 { teko::str::concat(t.namespace, "::", t.name) } else { t.name }
+}
+
+/**
+ * native_gate_harness_src — the synthetic `main.tks` TEXT for the native test gate: one bare
+ * top-level call statement per `#test`, in order — `ns::name()\n` — nothing else.
+ *
+ * THIS IS THE NATIVE GATE'S v1 CONTRACT, and it is deliberately narrower than the C gate's
+ * `emit_test_main`: FAIL-FAST (a failing `assert` panics the whole process, exactly as
+ * `run_native_gate`'s own historic doc describes — M.1), no per-test isolation/tally (the C gate's
+ * `tk_test_run` capture, owner ruling 2026-07-30 §14, needs a function-POINTER value passed to a
+ * runtime call; teko's native backend has no such calling convention to lower yet), and NO coverage
+ * instrumentation (the C gate's `tk_cov_*` marks are woven into every production function body by
+ * the C emitter's `TestCov` profile — the native backend has no per-statement instrumentation pass).
+ * `native_gate_run`/`run_gate_native` are adjusted alongside this to not fabricate a floor verdict
+ * over coverage that was never measured (see their own docs).
+ *
+ * @param refs  the ordered `#test` references (`native_gate_test_refs`)
+ * @return      the harness source text, ready to lex + `parser::parse_main_file`
+ * @since 0.3.1.0 (tests-native-no-c)
+ */
+fn native_gate_harness_src(refs: []TestRef) -> str {
+    mut b = ""
+    mut i: u64 = 0
+    loop {
+        if i >= refs.len { break }
+        b = teko::str::concat(b, teko::str::concat(native_gate_test_label(refs[i]), "()\n"))
+        i = i + 1
+    }
+    b
+}
+
+/**
+ * native_gate_harness_items — lex + parse `src` (`native_gate_harness_src`'s output) as a MAIN-FILE
+ * fragment (its grammar is `use`s + loose statements — exactly what the harness needs, nothing a
+ * `Module` grammar would even accept) and reconcile it into tagged `parser::Item`s the same way
+ * `assemble_sel` tags every real file's items: `namespace = proj_ns` (the project's own root — the
+ * harness IS a second, synthetic virtual-main body) and a `file` that can never collide with a real
+ * path, so a diagnostic pointing at it reads as what it is.
+ *
+ * @param proj_ns  the project's root namespace (`Manifest.name`) — matches how `main.tks` itself is tagged
+ * @param src      the harness source text
+ * @return         the harness's `use`/statement items, tagged, or the (should-never-happen) parse error
+ * @since 0.3.1.0 (tests-native-no-c)
+ */
+fn native_gate_harness_items(proj_ns: str, src: str) -> []parser::Item | error {
+    let tokens = match lexer::tokenize(src) { []lexer::Token as t => t; error as e => return e }
+    let mf = match parser::parse_main_file(tokens, 0) { parser::Parsed<parser::MainFile> as x => x.node; error as e => return e }
+    let raw = asm_main_items(mf)
+    mut out: []parser::Item = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= raw.len { break }
+        out = teko::list::push(out, parser::Item { content = raw[i].content; namespace = proj_ns; file = "<native-test-gate>" })
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * append_items — `a` with every entry of `b` appended, in order (the one small helper this file
+ * needs that `teko::list` does not expose generically — see `list::grow`'s own single-push shape).
+ *
+ * @param a  the base list
+ * @param b  the list to append
+ * @return   `a ++ b`
+ * @since 0.3.1.0 (tests-native-no-c)
+ */
+fn append_items(a: []parser::Item, b: []parser::Item) -> []parser::Item {
+    mut out = a
+    mut i: u64 = 0
+    loop {
+        if i >= b.len { break }
+        out = teko::list::push(out, b[i])
+        i = i + 1
+    }
+    out
+}

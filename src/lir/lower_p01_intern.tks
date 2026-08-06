@@ -1,0 +1,75 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/** teko::lir (lowering) — TAST -> LIR for the N1 reference subset (issue #221).
+
+    The lowering mirrors the SHAPE of the C backend's expr/stmt walk (emit_expr_ctx /
+    emit_stmt): the same recursion, a different result — instead of appending text to a
+    buffer, each visit APPENDS LInsts to the current block and RETURNS the VReg that
+    carries the value. Everything is functionally threaded (a fresh LFunc per step, no
+    mutable module state), exactly like the rest of the compiler.
+
+    Reference subset (N1): integer/float literals, arithmetic/unary, locals, `to`
+    casts, direct calls (Teko-Teko + the `exit`/`panic` builtins), `let`, `return`,
+    and expression statements. Everything else honest-stops with a NAMED error (M.1/
+    M.3) — the scaffolding N2 fills in case-by-case without rewriting the walk.
+
+    LEnv — the local map name -> VReg. The checker already resolved scope; the lowering
+    only remembers "the var `x` lives in VReg N". Parallel slices threaded functionally,
+    the same shape as the checker's Env. `len_vregs`/`has_len` are a PARALLEL fat-pointer
+    side-table (A1-4, #382): a str/slice local additionally records its LENGTH VReg
+    (`has_len[i]=true`), so a `.len` read off a bound name (not just a literal receiver)
+    resolves with no memory traffic — mirrors §2.3's "no memory traffic for a length read".
+    `is_slot` is the third binding shape (list-builtin degrau): a MUTABLE fat local lives in a
+    16-byte FRAME SLOT (`vregs[i]` is the slot's address) instead of a VReg pair, because a
+    reassignment must be visible across a merge — see `lenv_bind_fat_slot`. `is_scalar_slot` is
+    the FOURTH (0.3.1.0 degrau 18): a `mut` SCALAR local whose ADDRESS escapes into a `ref<T>`
+    call argument (`lenv_bind_scalar_slot`) — same reason as a mutable fat local (its address
+    must be loop/merge-invariant AND its current value must survive a write made through the
+    escaped handle), one register instead of a pair. `slot_ltype` is `is_scalar_slot`'s OWN
+    parallel side-table: the load/store WIDTH+KIND a scalar slot's memory holds (meaningless —
+    left `LType::Void` — for every other binding shape). */
+
+/**
+ * lenv_newest_index — the index of the NEWEST binding of `name` in `env`
+ * (scanning newest-first, so a shadow's index wins), or `env.names.len` when
+ * `name` is unbound. The shared index primitive for reassign-in-place
+ * (`lenv_reassign`) and the merge machinery's pre-branch index capture
+ * (`merge_scalar_indices`) (#389 F1b item 3).
+ *
+ * @param LEnv env  the env to scan
+ * @param str name  the local name to locate
+ * @return u64  the newest matching index, or `env.names.len` when unbound
+ */
+fn lenv_newest_index(env: LEnv, name: str) -> u64 {
+    mut i: u64 = env.names.len
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        if env.names[i] == name { return i }
+    }
+    env.names.len
+}
+
+/**
+ * list_set_u32 — `xs` with the element at `idx` replaced by `v`, every other
+ * element passed through unchanged; `xs` is returned untouched when `idx` is
+ * out of range (a caller invariant break the reassign path never hits, since
+ * the index comes from `lenv_newest_index`) (#389 F1b item 3).
+ *
+ * @param []u32 xs  the source list
+ * @param u64 idx  the index to overwrite
+ * @param u32 v  the replacement value
+ * @return []u32  `xs` with position `idx` set to `v`
+ */
+fn list_set_u32(xs: []u32, idx: u64, v: u32) -> []u32 {
+    mut out: []u32 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if i == idx { out = teko::list::push(out, v) } else { out = teko::list::push(out, xs[i]) }
+        i++
+    }
+    out
+}

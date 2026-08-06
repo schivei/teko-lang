@@ -1,0 +1,109 @@
+
+/**
+ * append_minst_x86 — `f` with `inst` appended to the block whose id is
+ * `block_id` (mirrors arm64's `append_minst`).
+ *
+ * MUTATES `blocks[i]` IN PLACE (an index-assign onto the local `blocks`,
+ * which aliases the SAME underlying buffer as `f.blocks` — slice value
+ * semantics copy the {ptr,len} header, not the array) INSTEAD OF rebuilding
+ * the whole `blocks` list every call. `selctx_x86_emit` calls this ONCE PER
+ * EMITTED INSTRUCTION, so the old rebuild was O(blocks × instructions) over a
+ * whole function's selection — and every untouched block was re-pushed as a
+ * SHALLOW STRUCT COPY (`nb = b`), so its own `insts` fat pointer kept
+ * aliasing the SAME instruction buffer across every one of those rebuilds.
+ * The OUTER `blocks` list itself is a self-append `mut` chain the checker
+ * proves free-old-safe (`assign_frees_old`), so each rebuild PARKED the
+ * previous `blocks` array on the free-list — while the aliased `insts`
+ * pointers those parked copies carried were still the LIVE tail some other
+ * generation's push-cache witness could authorize an in-place grow into,
+ * corrupting memory the free-list believed dead (the wild-write chase
+ * `TEKO_NATIVE_PUSH_REDZONE` caught live: a `[]MBlockX86`-sized redzone
+ * stomped by exactly this shape). Appending in place removes the O(n²) cost
+ * AND the shallow-copy generations that made the aliasing possible in the
+ * first place — there is no rebuilt array for the wrong generation to
+ * survive into.
+ *
+ * @param MFuncX86 f  the function to extend
+ * @param u32 block_id  which block's instruction stream gains `inst`
+ * @param MInstX86 inst  the instruction to append
+ * @return MFuncX86  the extended function
+ * @since 0.3.1 (native-region-crash, wild-write fix)
+ */
+pub fn append_minst_x86(f: MFuncX86, block_id: u32, inst: MInstX86) -> MFuncX86 {
+    mut blocks = f.blocks
+    mut i: u64 = 0
+    loop {
+        if i >= blocks.len { break }
+        if blocks[i].id == block_id {
+            blocks[i] = push_minst_block_x86(blocks[i], inst)
+            break
+        }
+        i++
+    }
+    MFuncX86 { symbol = f.symbol; blocks = blocks; frame = f.frame }
+}
+
+/**
+ * append_block_x86 — a copy of `f` with `blk` appended after its existing
+ * blocks (the multi-block/edge-split builder; `append_minst_x86` then targets
+ * it by id). Mirrors arm64's `append_block`.
+ *
+ * @param MFuncX86 f  the function to extend
+ * @param MBlockX86 blk  the block to append
+ * @return MFuncX86  the extended function
+ */
+pub fn append_block_x86(f: MFuncX86, blk: MBlockX86) -> MFuncX86 {
+    MFuncX86 { symbol = f.symbol; blocks = teko::list::push(f.blocks, blk); frame = f.frame }
+}
+
+/**
+ * append_frame_x86 — a copy of `f` with one frame slot reserved (one entry per
+ * selected `LAlloca`, in reservation order; the new slot's index is
+ * `f.frame.len` taken BEFORE the append). Mirrors arm64's `append_frame`.
+ *
+ * @param MFuncX86 f  the function to extend
+ * @param lir::LAlloca slot  the alloca whose byte-size/alignment the slot reuses
+ * @return MFuncX86  the extended function
+ */
+pub fn append_frame_x86(f: MFuncX86, slot: lir::LAlloca) -> MFuncX86 {
+    MFuncX86 { symbol = f.symbol; blocks = f.blocks; frame = teko::list::push(f.frame, slot) }
+}
+
+/**
+ * set_block_param_x86 — a copy of `f` in which machine block `block_id`'s
+ * parameter at `index` is replaced by `reg`. A mirror block's params are built
+ * with a provisional register class (the VReg id is known up front, the class
+ * only once a feeding edge move is selected); this refines one entry to the
+ * class carried by that value. Mirrors arm64's `set_block_param`.
+ *
+ * @param MFuncX86 f  the function to update
+ * @param u32 block_id  the block whose parameter is refined
+ * @param u32 index  the parameter position to replace
+ * @param MReg reg  the refined parameter register
+ * @return MFuncX86  the updated function
+ */
+pub fn set_block_param_x86(f: MFuncX86, block_id: u32, index: u32, reg: MReg) -> MFuncX86 {
+    mut blocks = f.blocks
+    mut i: u64 = 0
+    loop {
+        if i >= blocks.len { break }
+        if blocks[i].id == block_id {
+            blocks[i] = MBlockX86 { id = blocks[i].id; params = mreg_list_set_x86(blocks[i].params, index, reg); insts = blocks[i].insts }
+            break
+        }
+        i++
+    }
+    MFuncX86 { symbol = f.symbol; blocks = blocks; frame = f.frame }
+}
+
+/**
+ * add_mfunc_x86 — a copy of `m` with `f` appended (mirrors arm64's
+ * `add_mfunc`).
+ *
+ * @param MModuleX86 m  the module to extend
+ * @param MFuncX86 f  the function to append
+ * @return MModuleX86  the extended module
+ */
+pub fn add_mfunc_x86(m: MModuleX86, f: MFuncX86) -> MModuleX86 {
+    MModuleX86 { funcs = teko::list::push(m.funcs, f); rodata = m.rodata; globals = m.globals; layouts = m.layouts }
+}

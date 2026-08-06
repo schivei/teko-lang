@@ -1,0 +1,26 @@
+
+/**
+ * (SP-1b entry point) Compute `f`'s `BorrowSummary`: collect every escaping/return-value candidate
+ * expression of `f`'s body, resolve each one's borrow contribution against `f`'s own parameters (via
+ * the one-hop local-alias chase, the closure-capture union, and the bottom-up call composition), and
+ * union the results. A function with an empty body (e.g. an `extern fn`) trivially borrows nothing —
+ * its FFI boundary is a distinct, separately-gated surface (the Marshall open case), not modeled
+ * here.
+ *
+ * Deliberately takes `table: TypeTable` (a refinement of the design doc's 2-argument illustrative
+ * signature): `type_reaches_ref` needs it to resolve a `Named` parameter's own field shape, so a
+ * genuinely faithful implementation cannot omit it.
+ *
+ * @param f           the typed function to summarize
+ * @param table       the program's type table
+ * @param callee_sum  the bottom-up environment of already-summarized callees
+ * @return            `f`'s borrow summary
+ * @see   docs/design/safety-spine.md §B2.1(b)
+ * @since 0.3.1.0-beta (#389 SP-1)
+ */
+pub fn fn_borrow_summary(f: TFunction, table: TypeTable, callee_sum: BorrowSummaryEnv) -> BorrowSummary {
+    let ctx = borrow_ctx_of(f, callee_sum)
+    let escaping = collect_escaping_values(f.body, true, teko::list::empty())
+    let acc = fold_escaping_borrow(escaping, ctx, table)
+    BorrowSummary { returns_borrow_of = acc.idxs; returns_all = acc.all }
+}

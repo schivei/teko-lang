@@ -1,0 +1,153 @@
+const BYTE_MASK: u64 = 0xFF
+
+/**
+ * LEB_LOW7 — the low-7-bit mask for one LEB128 group.
+ *
+ * @since 0.3.1.0
+ */
+const LEB_LOW7: u64 = 0x7F
+
+/**
+ * LEB_MORE — the LEB128 continuation bit (set on every non-final group).
+ *
+ * @since 0.3.1.0
+ */
+const LEB_MORE: u64 = 0x80
+
+/**
+ * SLEB_SIGN — the sign bit of a 7-bit SLEB128 group, tested to decide termination.
+ *
+ * @since 0.3.1.0
+ */
+const SLEB_SIGN: i64 = 0x40
+
+/**
+ * SLEB_LOW7 — the signed low-7-bit mask for one SLEB128 group. The signed twin of `LEB_LOW7`, kept
+ * `i64` so the mask against the signed accumulator has a lossless common type (a same-width
+ * signed/unsigned mix has none).
+ *
+ * @since 0.3.1.0
+ */
+const SLEB_LOW7: i64 = 0x7F
+
+/**
+ * SLEB_MORE — the signed SLEB128 continuation bit. The signed twin of `LEB_MORE`, kept `i64` so it
+ * ors cleanly into a signed group.
+ *
+ * @since 0.3.1.0
+ */
+const SLEB_MORE: i64 = 0x80
+
+/**
+ * emit_byte — append the low byte of `v` to `buf`.
+ *
+ * @param buf  the buffer to extend
+ * @param v    the value whose low 8 bits are appended
+ * @return     `buf` with one byte appended
+ * @since 0.3.1.0
+ */
+fn emit_byte(buf: []byte, v: u64) -> []byte {
+    teko::list::push(buf, (v & BYTE_MASK) to byte)
+}
+
+/**
+ * emit_u16_le — append `v`'s low 16 bits to `buf`, little-endian (DWARF `data2`).
+ *
+ * @param buf  the buffer to extend
+ * @param v    the value whose low 16 bits are appended
+ * @return     `buf` followed by two little-endian bytes
+ * @since 0.3.1.0
+ */
+fn emit_u16_le(buf: []byte, v: u64) -> []byte {
+    let b0 = emit_byte(buf, v)
+    emit_byte(b0, v >> 8)
+}
+
+/**
+ * emit_u32_le_dw — append `v`'s low 32 bits to `buf`, little-endian (DWARF `sec_offset` / `data4`).
+ *
+ * @param buf  the buffer to extend
+ * @param v    the value whose low 32 bits are appended
+ * @return     `buf` followed by four little-endian bytes
+ * @since 0.3.1.0
+ */
+fn emit_u32_le_dw(buf: []byte, v: u64) -> []byte {
+    mut b = emit_byte(buf, v)
+    b = emit_byte(b, v >> 8)
+    b = emit_byte(b, v >> 16)
+    emit_byte(b, v >> 24)
+}
+
+/**
+ * emit_u64_le_dw — append `v`'s 64 bits to `buf`, little-endian (DWARF `data8`, used for the
+ * function high_pc which is a size constant, not an address).
+ *
+ * @param buf  the buffer to extend
+ * @param v    the value appended
+ * @return     `buf` followed by eight little-endian bytes
+ * @since 0.3.1.0
+ */
+fn emit_u64_le_dw(buf: []byte, v: u64) -> []byte {
+    mut b = buf
+    mut shift: u64 = 0
+    loop {
+        if shift >= 64 { break }
+        b = emit_byte(b, v >> shift)
+        shift = shift + 8
+    }
+    b
+}
+
+/**
+ * emit_addr_slot — append the 8-byte placeholder for a relocated address (DWARF `addr` form). The
+ * bytes are zero; a `DwReloc` recorded by the caller points the linker at the target symbol.
+ *
+ * @param buf  the buffer to extend
+ * @return     `buf` followed by eight zero bytes
+ * @since 0.3.1.0
+ */
+fn emit_addr_slot(buf: []byte) -> []byte {
+    emit_u64_le_dw(buf, 0 to u64)
+}
+
+/**
+ * emit_cstr — append the bytes of `s` followed by a NUL terminator (DWARF `string` form: an
+ * inline, NUL-terminated string).
+ *
+ * @param buf  the buffer to extend
+ * @param s    the string to inline
+ * @return     `buf` followed by `s`'s bytes and a NUL
+ * @since 0.3.1.0
+ */
+fn emit_cstr(buf: []byte, s: str) -> []byte {
+    mut b = buf
+    mut i: u64 = 0
+    loop {
+        if i >= s.len { break }
+        b = teko::list::push(b, s[i])
+        i = i + 1
+    }
+    teko::list::push(b, 0 to byte)
+}
+
+/**
+ * DW_TAG_COMPILE_UNIT — the DWARF tag for a compilation unit DIE.
+ *
+ * @since 0.3.1.0
+ */
+const DW_TAG_COMPILE_UNIT: u64 = 0x11
+
+/**
+ * DW_TAG_SUBPROGRAM — the DWARF tag for a subprogram (function) DIE.
+ *
+ * @since 0.3.1.0
+ */
+const DW_TAG_SUBPROGRAM: u64 = 0x2e
+
+/**
+ * DW_TAG_BASE_TYPE — the DWARF tag for a base (scalar) type DIE, the target of a variable's
+ * DW_AT_type.
+ *
+ * @since 0.3.1.0
+ */
+const DW_TAG_BASE_TYPE: u64 = 0x24

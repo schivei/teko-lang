@@ -1,0 +1,42 @@
+use teko::parser
+
+
+/** Build a located DI error (1-based line/col from the offending decl or binding). */
+fn err_di(line: u32, col: u32, message: str) -> error {
+    teko::error::err_loc(error { message = message }, line, col)
+}
+
+/** Seed a fn body's environment with its `#inject` overlay (Crumb 4): each binding becomes a local
+ *  of its resolved interface type AND a `DiInjectBind` on the env, so a later USE of the name lowers
+ *  to the provider's materializer call. The registry is read off the env (set once at program
+ *  level). A binding whose interface has no provider is caught by `check_inject_overlays`; here a
+ *  miss falls through to a plain local, so this never introduces a second diagnostic. */
+fn seed_di_injects(f: parser::Function, env: Env, tbl: TypeTable) -> Env | error {
+    mut local = env
+    mut binds: []DiInjectBind = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= f.injects.len { break }
+        let b = f.injects[i]
+        let iface = binding_iface_name(b.type_ann, env.cur_ns, tbl)
+        match resolve_provider(env.di, iface) {
+            DiProvider as p => {
+                let t = match resolve_type(named_texpr(name_last_segment(p.impl_name)), tbl, name_qualifier(p.impl_name)) { Type as ty => ty; error as e => return e }
+                local = define(local, b.name, t, false)
+                binds = teko::list::push(binds, DiInjectBind { name = b.name; iface = iface; impl_name = p.impl_name; kind = p.kind })
+            }
+            error => {
+                let t = match resolve_type(b.type_ann, tbl, env.cur_ns) { Type as ty => ty; error as e => return e }
+                local = define(local, b.name, t, false)
+            }
+        }
+        i++
+    }
+    with_injects(local, binds)
+}
+
+/** A bare single-segment `NamedType` for `name` — used to bind an injected local to its concrete
+ *  DI impl type (dispatch is static: a provider resolves to exactly one impl). */
+fn named_texpr(name: str) -> parser::TypeExpr {
+    parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = name }) }; args = teko::list::empty() }
+}

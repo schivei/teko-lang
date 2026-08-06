@@ -1,0 +1,142 @@
+
+/**
+ * uleb128 — append the unsigned LEB128 encoding of `v` to `buf` (DWARF's variable-length unsigned
+ * integer: seven value bits per byte, low group first, the high bit set on every non-final byte).
+ *
+ * @param buf  the buffer to extend
+ * @param v    the unsigned value to encode
+ * @return     `buf` followed by the ULEB128 bytes
+ * @since 0.3.1.0
+ */
+pub fn uleb128(buf: []byte, v: u64) -> []byte {
+    mut b = buf
+    mut val = v
+    loop {
+        let group = val & LEB_LOW7
+        val = val >> 7
+        if val != 0 {
+            b = teko::list::push(b, (group | LEB_MORE) to byte)
+        } else {
+            b = teko::list::push(b, group to byte)
+            break
+        }
+    }
+    b
+}
+
+/**
+ * sleb128 — append the signed LEB128 encoding of `v` to `buf` (DWARF's variable-length signed
+ * integer: seven value bits per byte, sign-extended, terminating when the remaining value and the
+ * group's sign bit agree).
+ *
+ * @param buf  the buffer to extend
+ * @param v    the signed value to encode
+ * @return     `buf` followed by the SLEB128 bytes
+ * @since 0.3.1.0
+ */
+pub fn sleb128(buf: []byte, v: i64) -> []byte {
+    mut b = buf
+    mut val = v
+    loop {
+        let group = val & SLEB_LOW7
+        val = val >> 7
+        let sign_set = (group & SLEB_SIGN) != 0
+        let done = (val == 0 && !sign_set) || (val == -1 && sign_set)
+        if done {
+            b = teko::list::push(b, group to byte)
+            break
+        }
+        b = teko::list::push(b, (group | SLEB_MORE) to byte)
+    }
+    b
+}
+
+/**
+ * DwReloc — one 8-byte address slot in an emitted DWARF section that needs an absolute
+ * (`R_X86_64_64` / `ARM64_RELOC_UNSIGNED`) relocation to `symbol` with a zero addend. The address
+ * a debugger reads is filled by the linker, not the writer.
+ *
+ * @since 0.3.1.0
+ */
+pub type DwReloc = struct {
+    /** the byte offset of the 8-byte address slot within the section. */
+    offset: u64
+    /** the target symbol name the relocation resolves against. */
+    symbol: str
+}
+
+/**
+ * DwSection — one emitted DWARF section: its raw bytes and the absolute-address relocations the
+ * object writer must attach to it.
+ *
+ * @since 0.3.1.0
+ */
+pub type DwSection = struct {
+    /** the section's raw bytes (address slots zeroed, filled by the relocations). */
+    bytes: []byte
+    /** the absolute address relocations against the section. */
+    relocs: []DwReloc
+}
+
+/**
+ * DwSubprogram — one function to describe in the compile unit: its Teko name, its 1-based
+ * declaration file index and line, the code symbol its low_pc relocates to, and its code size (the
+ * high_pc, encoded as a `data8` offset from low_pc).
+ *
+ * @since 0.3.1.0
+ */
+pub type DwSubprogram = struct {
+    /** the function's (Teko) name, inlined as the DIE's DW_AT_name. */
+    name: str
+    /** the 1-based file-table index for DW_AT_decl_file. */
+    decl_file: i64
+    /** the 1-based source line for DW_AT_decl_line. */
+    decl_line: u32
+    /** the code symbol the function's low_pc relocates against. */
+    symbol: str
+    /** the function's code size, the DW_AT_high_pc data8 offset from low_pc. */
+    code_size: u64
+}
+
+/**
+ * DwCompileUnit — the minimal DWARF-4 compile unit: the producer/language/name/comp_dir strings,
+ * the text symbol the unit's low_pc relocates to, the total text size (the unit high_pc), and the
+ * subprograms it contains.
+ *
+ * @since 0.3.1.0
+ */
+pub type DwCompileUnit = struct {
+    /** DW_AT_producer, the compiler identification string. */
+    producer: str
+    /** DW_AT_language, a DWARF language code (e.g. 0x0c = DW_LANG_C99), emitted as data2. */
+    language: u32
+    /** DW_AT_name, the primary source file name. */
+    name: str
+    /** DW_AT_comp_dir, the compilation directory. */
+    comp_dir: str
+    /** the symbol the unit's low_pc relocates against (the first text symbol). */
+    text_symbol: str
+    /** the total text size, the DW_AT_high_pc data8 offset from low_pc. */
+    text_size: u64
+    /** the functions the unit describes, in address order. */
+    subprograms: []DwSubprogram
+}
+
+/**
+ * DwLineRow — one row of the DWARF-4 line-number program: the code-address advance since the
+ * previous row, the source line at this address, and the 1-based file-table index the line belongs
+ * to. The first row's `pc_advance` is 0 (it sits at the unit's set_address) and it establishes
+ * column 1. `file` maps a row to one entry of the header's `file_names` table, so a program spanning
+ * several `.tks` sources resolves each address to its own file (the line state machine's file
+ * register defaults to 1, so a row keeping `file = 1` emits no set_file opcode).
+ *
+ * @since 0.3.1.0
+ */
+pub type DwLineRow = struct {
+    /** the code-address advance (bytes) since the previous row. */
+    pc_advance: u64
+    /** the 1-based source line at this address. */
+    line: u32
+    /** the 1-based `file_names` index this row's line belongs to (1 = the primary file). */
+    file: i64
+}

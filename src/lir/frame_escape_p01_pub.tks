@@ -1,0 +1,41 @@
+
+/**
+ * frame_escape_guard — THE GUARD. Over the WHOLE lowered module, assert that no `LRet` carries a
+ * value that is an address inside the frame the `ret` is about to pop.
+ *
+ * WHY THIS IS THE INSTRUMENT AND NOT A TEST. An aggregate's value in this backend IS an address
+ * (NATIVE-AGG-SLICE-BY-ADDRESS), so `return P{…}` handed the caller a pointer into a dead frame.
+ * That is not a stop and not a crash: it is a value that happens to still be there, or happens not
+ * to be. It survived every x86-64 leg and it did not survive arm64, where the next call's prologue
+ * (`stp x29, x30, [sp, #-N]`) lands on exactly those bytes — one fixture, `own_arith_exit`, read
+ * back `exit 25` on three arm64 legs and `exit 42` on every x86-64 one, from the same source. A
+ * defect whose only symptom is a wrong number on one architecture cannot be chased test by test.
+ *
+ * WHAT IT PROVES, stated as the invariant it is: EVERY aggregate that leaves a frame by value has
+ * been copied into storage that outlives the frame (`own_returned_value` → `tk_slice_elem_box`).
+ * The guard does not need to know which returns are aggregates — an address into the frame is
+ * illegitimate in a `ret` whatever produced it.
+ *
+ * IT IS PROVEN BY INVERSION, because a guard that cannot fail is decoration. Over the own-native
+ * corpus — the largest tree that lowers natively end to end today, the compiler's own source still
+ * stopping earlier at the live degrau — it reports 41 offending functions WITHOUT the return-side
+ * copy (31 of them before this degrau's own fixtures were added), `BoxCounter__make` among them,
+ * and 0 WITH it. It is also
+ * not blind to merges: a frame address that reaches the `ret` through a block parameter (an
+ * `if`/`match` value in tail position) is followed through the jump arguments to a fixpoint, so the
+ * analysis cannot answer "clean" by simply failing to look.
+ *
+ * AND IT IS NOT A RESTATEMENT OF THE FIX EITHER: run against the tree that ALREADY had the return
+ * copy, it still found two escapes no fixture saw — a returned CLOSURE (`build_lambda_env` /
+ * `build_closure_literal`, both halves in the frame) and the ZERO-WIDTH array literal, whose
+ * "0 means no copy" shortcut returned the `alloca` itself.
+ *
+ * @param m  the fully lowered module
+ * @return   `null` when no function returns a frame address, else a NAMED error listing them
+ * @since 0.3.1.0 degrau agregado-copia (the arm64 aggregate-copy family, closed as a family)
+ */
+pub fn frame_escape_guard(m: LModule) -> null | error {
+    let offenders = frame_escaping_funcs(m)
+    if offenders.len == 0 { return null }
+    error { message = teko::str::concat("native backend N1: ", teko::str::concat(teko::u64_to_str(offenders.len), teko::str::concat(" function(s) return an address inside their OWN frame, which the `ret` pops (internal) — ", frame_escape_lines(offenders)))) }
+}

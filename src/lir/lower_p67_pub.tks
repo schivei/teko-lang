@@ -1,0 +1,96 @@
+
+/**
+ * lower_item — fold one TItem: a function lowers into the module (given the
+ * program's struct-layout/enum tables); a loose statement accumulates for the
+ * virtual main; a type/use declaration is skipped.
+ *
+ * @param LModule m  the module accumulated so far
+ * @param []checker::TStatement loose  the loose top-level statements
+ *                                     accumulated so far
+ * @param checker::TItem it  the program item to fold
+ * @param []LStructLayout layouts  the program's struct-layout table
+ * @param []LEnumInfo enums  the program's enum table
+ * @param []LFunc lifted  the whole-program lifted closure/thunk-function
+ *                        table accumulated so far (A1-7, #382)
+ * @param []LExternFn externs  the program's `extern fn` table (C7.1a)
+ * @param bool flat_symbols  the static/shared-archive carve-out (`lower_program`'s own param,
+ *                           threaded down to the one item kind it affects: a function)
+ * @param table  the program's type table, threaded down to a function item's own params
+ *               (`typeexpr_is_fat`'s alias resolver, 0.3.1.0 raiz A, crumb R0)
+ * @param field_decls  the program's declared-field-type table (`collect_field_decls`, degrau 25),
+ *                     for the coercion a struct-literal field store and a call argument take
+ * @return LowerItemOut | error  the advanced module + loose-statement/lifted
+ *                               lists; the `error` arm when a function item
+ *                               fails to lower
+ *
+ * (0.3.1 C6.1) Made `pub` so the fused native emit driver in `project.tks` can call it directly,
+ * per item, inside its own scoped child region — the entry point the Tier 2 lowering fusion needs
+ * reachable (`docs/design/native-lowering-oom-por-funcao-0.3.1.md` §4b). Unchanged behavior.
+ */
+pub fn lower_item(m: LModule, loose: []checker::TStatement, it: checker::TItem, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, table: checker::TypeTable, ref_fns: []LRefFnInfo, field_decls: []LFieldDecls) -> LowerItemOut | error {
+    match it {
+        checker::TFunction as f => lower_item_function(m, loose, f, layouts, enums, lifted, externs, flat_symbols, variants, table, ref_fns, field_decls)
+        checker::TStatement as s => LowerItemOut { module = m; loose = teko::list::push(loose, s); lifted = lifted }
+        checker::TConstDecl as cd => lower_const_item(m, loose, cd, lifted)
+        _ => LowerItemOut { module = m; loose = loose; lifted = lifted }
+    }
+}
+
+/**
+ * lower_virtual_main — the synthesized `int main()` from the loose top-level
+ * statements: lower each, treating a trailing loose EXPRESSION statement as
+ * the program's exit-code value (mirrors `lower_fn_body`'s trailing-expression
+ * auto-return, #421 — `lower_main_tail`), and if control falls through append
+ * `%r = const 0; ret %r` when no such trailing value was found (the ABI: main
+ * returns int) (#423, #382). An explicit `exit(n)` inside diverges, so the
+ * trailing return is dead but harmless.
+ *
+ * @param []checker::TStatement loose  the program's loose top-level statements,
+ *                                     in order
+ * @param []LStructLayout layouts  the program's struct-layout table
+ * @param []LEnumInfo enums  the program's enum table
+ * @param []LRodata rodata  the whole-program interned-rodata table seeded with
+ *                          everything the program's functions already interned
+ *                          (A1-4, #382)
+ * @param []LFunc lifted  the whole-program lifted closure/thunk-function
+ *                        table accumulated so far (A1-7, #382)
+ * @param []LExternFn externs  the program's `extern fn` table (C7.1a)
+ * @param bool flat_symbols  the static/shared-archive carve-out (`mangle_fn_symbol`'s `flat`) —
+ *                           a loose top-level call to another project function must resolve the
+ *                           SAME way that function's own symbol was declared
+ * @param field_decls  the program's declared-field-type table (`collect_field_decls`, degrau 25),
+ *                     for the coercion a struct-literal field store and a call argument take
+ * @return LoweredFunction | error  the built virtual-main `LFunc` + its grown
+ *                                  rodata/lifted tables; the `error` arm when
+ *                                  any loose statement fails to lower
+ *
+ * (0.3.1 C6.1) Made `pub` so the fused native emit driver in `project.tks` can lower the
+ * virtual-main in its own scoped child region, after every item's window has already dropped
+ * (`docs/design/native-lowering-oom-por-funcao-0.3.1.md` §4). Unchanged behavior.
+ */
+pub fn lower_virtual_main(loose: []checker::TStatement, layouts: []LStructLayout, enums: []LEnumInfo, rodata: []LRodata, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, ref_fns: []LRefFnInfo = teko::list::empty(), field_decls: []LFieldDecls = teko::list::empty(), table: checker::TypeTable = teko::list::empty()) -> LoweredFunction | error {
+    let fn0 = new_func("main", 0, teko::list::empty(), LType::I32)
+    let ctx0 = LowerCtx {
+        func = fn0; block_id = 0; env = empty_lenv()
+        layouts = layouts; rodata = rodata; enums = enums; lifted = lifted
+        variants = variants
+        defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = externs
+        flat_symbols = flat_symbols; ret_type = checker::Prim { kind = checker::PrimKind::I32 }
+        has_ret_len_slot = false; ret_len_slot = 0
+        ref_fns = ref_fns; field_decls = field_decls; addr_taken = collect_addr_taken_locals(loose, ref_fns, enums); table = table
+        region_stack = teko::list::empty(); escaping = teko::list::empty(); frees_old_names = teko::list::empty(); bracket_depth = 0
+    }
+    let tail = match lower_main_tail(ctx0, loose) { LowerMainTail as x => x; error as err => return err }
+    let closed = match close_virtual_main(tail) { LowerCtx as c => c; error as err => return err }
+    LoweredFunction { func = closed.func; rodata = closed.rodata; lifted = closed.lifted }
+}
+
+/**
+ * LowerMainTail — the outcome of lowering the loose top-level statement list:
+ * either it fell through with no trailing exit-code value (`has_value=false`
+ * — the last statement was not a value-producing expression, or the body was
+ * empty/already terminated), or its last statement was a non-void EXPRESSION
+ * statement, whose value is the program's exit code (`has_value=true`, `vreg`)
+ * (#423, #382).
+ */
+pub type LowerMainTail = struct { ctx: LowerCtx; has_value: bool; vreg: u32 }

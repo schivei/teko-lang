@@ -1,0 +1,29 @@
+
+/**
+ * A `main.tks` file: the `use` header, then the VIRTUAL MAIN's body (statements). Rejects
+ * any type/function declaration.
+ *
+ * @param []lexer::Token tokens  the token stream
+ * @param u64 pos  the file start (0)
+ * @return Parsed<MainFile> | error  the parsed `MainFile` plus the resume index, or a parse error
+ */
+pub fn parse_main_file(tokens: []lexer::Token, pos: u64) -> Parsed<MainFile> | error {
+    let hdr = match parse_use_header(tokens, pos) { ParsedList<UseDecl> as x => x; error as e => return e }
+    mut p = skip_seps(tokens, hdr.next)
+    mut body: []Statement = teko::list::empty()
+    loop {
+        if !has_token(tokens, p) { break }
+        if is_decl_start(tokens, p) {
+            return err_at(tokens, p, "main.tks is a virtual main: it may not declare types or functions (only `use` + statements)")
+        }
+        let s = match parse_statement(tokens, p) { Parsed<Statement> as x => x; error as e => return e }
+        body = teko::list::push(body, s.node)
+        p = s.next
+        if !has_token(tokens, p) { break }
+        if !is_sep(tokens, p) {
+            return err_at(tokens, p, "expected ';' or a newline after a statement")
+        }
+        p = skip_seps(tokens, p)
+    }
+    Parsed<MainFile> { node = MainFile { uses = hdr.items; body = body }; next = p }
+}

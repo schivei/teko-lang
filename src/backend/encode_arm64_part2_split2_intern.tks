@@ -1,0 +1,233 @@
+/**
+ * func_any_call — whether the function makes any call.
+ *
+ * @param MFunc f  the function to scan
+ * @return bool  true iff any block contains a call
+ */
+fn func_any_call(f: MFunc) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= f.blocks.len { break }
+        if block_any_call(f.blocks[i]) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * func_any_ret — whether the function has a reachable return terminator.
+ *
+ * @param MFunc f  the function to scan
+ * @return bool  true iff any block contains an `MRet`
+ */
+fn func_any_ret(f: MFunc) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= f.blocks.len { break }
+        if block_any_ret(f.blocks[i]) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * needs_lr_save — whether LR must be preserved across the function body: true
+ * only when the function BOTH makes a call (clobbering LR) AND can return
+ * (so the clobbered LR would be read). A leaf function, or the `exit(n)`-
+ * terminated virtual-`main` (a call but no `MRet`), needs no LR save — the
+ * frameless first-light case (§3.2 first-light note).
+ *
+ * @param MFunc f  the fully-physical function
+ * @return bool  true iff the prologue must save FP/LR for LR preservation
+ */
+fn needs_lr_save(f: MFunc) -> bool {
+    func_any_call(f) && func_any_ret(f)
+}
+
+/**
+ * frame_total_size — the total 16-aligned frame size: 0 when the function is
+ * frameless (no slots, no callee-saved registers, no LR to preserve), else the
+ * slot region + the callee-saved save area (8 bytes each) + 16 for FP/LR,
+ * rounded up to 16.
+ *
+ * @param u32 slots_size  the 16-rounded slot-region size
+ * @param Saved saved  the re-derived callee-saved partition
+ * @param bool lr_save  whether FP/LR must be preserved (`needs_lr_save`)
+ * @return u32  the total frame size (0 when frameless)
+ */
+fn frame_total_size(slots_size: u32, saved: Saved, lr_save: bool) -> u32 {
+    let n_saved = (saved.gpr.len + saved.fpr.len) to u32
+    let framed = (slots_size > (0 to u32)) || (n_saved > (0 to u32)) || lr_save
+    if !framed { return 0 to u32 }
+    align_up(slots_size + (n_saved * ARM64_REG_BYTES) + ARM64_FP_LR_BYTES, ARM64_STACK_ALIGN)
+}
+
+/**
+ * out_arg_slots_of_inst — the number of outgoing stack-arg slots this
+ * instruction contributes: `index + 1` for an `MOutArg` (one-past the highest
+ * slot index used), 0 for every other instruction.
+ *
+ * @param MInst i  the instruction to inspect
+ * @return u32  the contribution to the max-slot scan
+ */
+fn out_arg_slots_of_inst(i: MInst) -> u32 {
+    match i {
+        MOutArg as x => x.index + (1 to u32)
+        _ => 0 to u32
+    }
+}
+
+/**
+ * max_out_arg_slots_of_block — the maximum one-past-index among all `MOutArg`
+ * instructions in a single block.
+ *
+ * @param MBlock b  the block to scan
+ * @return u32  the maximum slot count for this block
+ */
+fn max_out_arg_slots_of_block(b: MBlock) -> u32 {
+    mut max: u32 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= b.insts.len { break }
+        let slots = out_arg_slots_of_inst(b.insts[i])
+        if slots > max { max = slots }
+        i++
+    }
+    max
+}
+
+/**
+ * max_out_arg_slots — the maximum one-past-index among all `MOutArg`
+ * instructions in the whole function: how many 8-byte slots the outgoing
+ * stack-arg area must hold.
+ *
+ * @param MFunc f  the fully-physical function
+ * @return u32  the maximum slot count (0 if no stack args are passed)
+ */
+fn max_out_arg_slots(f: MFunc) -> u32 {
+    mut max: u32 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= f.blocks.len { break }
+        let b_max = max_out_arg_slots_of_block(f.blocks[i])
+        if b_max > max { max = b_max }
+        i++
+    }
+    max
+}
+
+/**
+ * out_arg_bytes — the size of the outgoing stack-arg area in bytes: the number
+ * of 8-byte slots, aligned up to 16 for SP alignment, or 0 when there are no
+ * stack args.
+ *
+ * @param MFunc f  the fully-physical function
+ * @return u32  the byte size of the outgoing stack-arg area (0 or ≥ 16)
+ */
+fn out_arg_bytes(f: MFunc) -> u32 {
+    let slots = max_out_arg_slots(f)
+    if slots == (0 to u32) { return 0 to u32 }
+    align_up(slots * ARM64_REG_BYTES, ARM64_STACK_ALIGN)
+}
+
+/**
+ * shift_slot_offsets — add `delta` to every element of `offsets`, returning
+ * the shifted slice. Used to push local-variable slots up past the outgoing
+ * stack-arg area when the frame includes `MOutArg` instructions.
+ *
+ * @param []u32 offsets  the original per-slot SP-relative byte offsets
+ * @param u32 delta  the byte amount to add to each offset
+ * @return []u32  the shifted offsets
+ */
+fn shift_slot_offsets(offsets: []u32, delta: u32) -> []u32 {
+    if delta == (0 to u32) { return offsets }
+    mut result: []u32 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= offsets.len { break }
+        result = teko::list::push(result, offsets[i] + delta)
+        i++
+    }
+    result
+}
+
+/**
+ * sub_sp_imm_word — `SUB sp, sp, #imm12` (the 64-bit form, Rn=Rd=SP): the
+ * prologue's stack-claim word.
+ *
+ * @param u32 imm12  the byte amount to subtract (0..4095)
+ * @return u32  the encoded instruction word
+ */
+fn sub_sp_imm_word(imm12: u32) -> u32 {
+    ARM64_SUB_IMM64_BASE | ((imm12 & ARM64_IMM12_MASK) << ARM64_IMM12_SHIFT) | (ARM64_SP_ID << ARM64_RN_SHIFT) | ARM64_SP_ID
+}
+
+/**
+ * add_sp_imm_word — `ADD dst, sp, #imm12` (the 64-bit form, Rn=SP): the
+ * stack-release word (dst=SP), the FP-setup word (dst=x29), and the resolved
+ * `MFrameAddr` word (dst=slot register) all share this shape.
+ *
+ * @param u32 dst_id  the destination register id (31=SP for `add sp,sp`)
+ * @param u32 imm12  the byte amount to add (0..4095)
+ * @return u32  the encoded instruction word
+ */
+fn add_sp_imm_word(dst_id: u32, imm12: u32) -> u32 {
+    ARM64_ADD_IMM64_BASE | ((imm12 & ARM64_IMM12_MASK) << ARM64_IMM12_SHIFT) | (ARM64_SP_ID << ARM64_RN_SHIFT) | dst_id
+}
+
+/**
+ * add_reg_imm_word — `ADD rd, rn, #imm12` (the 64-bit immediate form, no
+ * `sh`): the general two-register building block `big_offset_words` chains
+ * for a big SP-relative offset; `add_sp_imm_word` is its `rn=SP`
+ * specialization.
+ *
+ * @param u32 rn_id  the source register id
+ * @param u32 rd_id  the destination register id
+ * @param u32 imm12  the byte amount to add (0..4095)
+ * @return u32  the encoded instruction word
+ */
+fn add_reg_imm_word(rn_id: u32, rd_id: u32, imm12: u32) -> u32 {
+    ARM64_ADD_IMM64_BASE | ((imm12 & ARM64_IMM12_MASK) << ARM64_IMM12_SHIFT) | (rn_id << ARM64_RN_SHIFT) | rd_id
+}
+
+/**
+ * add_reg_imm_shifted_word — `ADD rd, rn, #imm12, LSL #12` (the `sh`-set
+ * form): the HIGH lane of a chained big-offset ADD sequence, contributing
+ * `imm12 << 12` bytes.
+ *
+ * @param u32 rn_id  the source register id
+ * @param u32 rd_id  the destination register id
+ * @param u32 imm12  the shifted 12-bit lane (contributes `imm12 << 12` bytes)
+ * @return u32  the encoded instruction word
+ */
+fn add_reg_imm_shifted_word(rn_id: u32, rd_id: u32, imm12: u32) -> u32 {
+    ARM64_ADD_IMM64_BASE | ARM64_ADD_SUB_SH_BIT | ((imm12 & ARM64_IMM12_MASK) << ARM64_IMM12_SHIFT) | (rn_id << ARM64_RN_SHIFT) | rd_id
+}
+
+/**
+ * sub_reg_imm_word — `SUB rd, rn, #imm12` (the 64-bit immediate form, no
+ * `sh`): the general two-register building block `big_offset_words` chains
+ * for a big SP-relative subtraction; `sub_sp_imm_word` is its `rn=rd=SP`
+ * specialization.
+ *
+ * @param u32 rn_id  the source register id
+ * @param u32 rd_id  the destination register id
+ * @param u32 imm12  the byte amount to subtract (0..4095)
+ * @return u32  the encoded instruction word
+ */
+fn sub_reg_imm_word(rn_id: u32, rd_id: u32, imm12: u32) -> u32 {
+    ARM64_SUB_IMM64_BASE | ((imm12 & ARM64_IMM12_MASK) << ARM64_IMM12_SHIFT) | (rn_id << ARM64_RN_SHIFT) | rd_id
+}
+
+/**
+ * sub_reg_imm_shifted_word — `SUB rd, rn, #imm12, LSL #12` (the `sh`-set
+ * form): the HIGH lane of a chained big-offset SUB sequence.
+ *
+ * @param u32 rn_id  the source register id
+ * @param u32 rd_id  the destination register id
+ * @param u32 imm12  the shifted 12-bit lane (contributes `imm12 << 12` bytes)
+ * @return u32  the encoded instruction word
+ */
+fn sub_reg_imm_shifted_word(rn_id: u32, rd_id: u32, imm12: u32) -> u32 {
+    ARM64_SUB_IMM64_BASE | ARM64_ADD_SUB_SH_BIT | ((imm12 & ARM64_IMM12_MASK) << ARM64_IMM12_SHIFT) | (rn_id << ARM64_RN_SHIFT) | rd_id
+}

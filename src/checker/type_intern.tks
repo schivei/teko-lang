@@ -1,0 +1,161 @@
+
+/**
+ * prim_is_float — true for the IEEE float prims (F32/F64).
+ *
+ * @param k  the prim kind to classify
+ * @return   whether `k` is a float
+ */
+fn prim_is_float(k: PrimKind) -> bool {
+    match k { F32 => true; F64 => true; _ => false }
+}
+
+/**
+ * prim_is_int — true for the integer prims (U8..U64, I8..I64). NOT bool, NOT float.
+ *
+ * @param k  the prim kind to classify
+ * @return   whether `k` is an integer
+ */
+fn prim_is_int(k: PrimKind) -> bool {
+    match k {
+        U8 => true; U16 => true; U32 => true; U64 => true
+        I8 => true; I16 => true; I32 => true; I64 => true
+        _ => false
+    }
+}
+
+/**
+ * prim_is_signed — true for the SIGNED integer prims (I8..I64). Floats are signed by nature, but
+ * this predicate is about INTEGER signedness — call it only for ints (it returns false for
+ * floats and bool, which carry no integer-signedness concept).
+ *
+ * @param k  the prim kind to classify
+ * @return   whether `k` is a signed integer
+ */
+fn prim_is_signed(k: PrimKind) -> bool {
+    match k {
+        I8 => true; I16 => true; I32 => true; I64 => true
+        _ => false
+    }
+}
+
+// `void` recognition (M.3): the checker (Z2a) calls this to admit void in a
+// `Func.ret` position and to reject it everywhere else (value / binding / member).
+fn type_is_void(t: Type) -> bool {
+    match t { Void => true; _ => false }
+}
+
+// (S-mem) two ptr inners equal: both null (opaque ptr) → equal; one null → not; else by type.
+fn ptr_inner_eq(a: Type | null, b: Type | null) -> bool {
+    match a {
+        null => match b { null => true; Type => false }
+        Type as ta => match b { null => false; Type as tb => type_eq(ta, tb) }
+    }
+}
+
+// nominal type equality (B.13): structural over the shape, but Named is by name.
+fn type_eq(a: Type, b: Type) -> bool {
+    match a {
+        Prim as pa => match b { Prim as pb => pa.kind == pb.kind; _ => false }
+        Byte => match b { Byte => true; _ => false }
+        Char => match b { Char => true; _ => false }   // char == char only (distinct from byte / []byte)
+        Str => match b { Str => true; _ => false }
+        Error => match b { Error => true; _ => false }   // native `error`
+        Void => match b { Void => true; _ => false }   // return-only marker
+        // []T == []U iff elements equal (built-in unary former). A `teko::list::empty()` carries
+        // the SENTINEL slice (its element is the `Void` marker; the C twin uses a NULL element
+        // pointer): it unifies with ANY concrete slice, so a bare `empty()` flows into a typed slot
+        // / a `push` whose item fixes the element type. A real slice never has a `void` element.
+        Slice as sa => match b {
+            Slice as sb => {
+                match sa.element { Void => true; _ => match sb.element { Void => true; _ => type_eq(sa.element, sb.element) } }
+            }
+            _ => false
+        }
+        Named as na => match b { Named as nb => na.name == nb.name; _ => false }
+        Variant as va => match b { Variant as vb => types_eq(va.members, vb.members); _ => false }
+        Func as fa => match b {
+            Func as fb => type_eq(fa.ret, fb.ret) && types_eq(fa.params, fb.params)
+            _ => false
+        }
+        Ptr as pa => match b { Ptr as pb => ptr_inner_eq(pa.inner, pb.inner); _ => false }   // ptr<T> equal by pointed type (null inner = opaque ptr)
+        Uptr => match b { Uptr => true; _ => false }   // (C7.1a) opaque, same-kind only
+        Reference as ra => match b { Reference as rb => type_eq(ra.inner, rb.inner); _ => false }   // (MEM-1b) Ref<T> equal by referenced type (never null)
+        Null => match b { Null => true; _ => false }
+    }
+}
+
+// element-wise equality of two type lists (same length, each equal in order).
+fn types_eq(xs: []Type, ys: []Type) -> bool {
+    if xs.len != ys.len { return false }
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        if !type_eq(xs[i], ys[i]) { return false }
+        i++
+    }
+    true
+}
+
+/**
+ * type_contains_ref — (MEM Step 0) ESCAPE-GATE PREDICATE — does `t` carry a Reference anywhere a
+ * value can be stored? The invariant: a Reference may appear ONLY as a bare scalar function
+ * PARAMETER; in EVERY other value position it is forbidden, even nested. So this returns true if
+ * `t` IS a Reference, OR a Slice whose element contains a ref, OR a Variant any of whose members
+ * contains a ref (this also covers a `Ref<T> | null` union — the ref lives as an ordinary
+ * member). Recursive. The annotated forms are already caught by resolve (R2/R4), but an INFERRED
+ * slice element (e.g. `let xs = [r, r]`) only surfaces here. C: tk_type_contains_ref.
+ *
+ * @param t  the type to scan
+ * @return   true iff `t` carries a `Reference` anywhere a value is stored
+ */
+fn type_contains_ref(t: Type) -> bool {
+    match t {
+        Reference => true
+        Slice as s => type_contains_ref(s.element)
+        Variant as v => types_contain_ref(v.members)
+        _ => false
+    }
+}
+
+// any-of helper for type_contains_ref over a variant's member list.
+fn types_contain_ref(xs: []Type) -> bool {
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        if type_contains_ref(xs[i]) { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * is_ref_null_variant — is `t` the two-member absence union `Ref<T> | null` (exactly one `Null`
+ * member and one `Reference` member, in either source order)? This is the SOLE ref-bearing shape the
+ * null-union C3 resolve gate admits (owner D3), and the ONE shape whose LOCAL binding null-union C5
+ * lifts out of the "references are parameter-only" restriction: the borrow-spine still proves the
+ * handle does not outlive its referent, and the universal narrowing invariant fences the deref (a
+ * `Ref<T> | null` cannot be dereferenced until narrowed to a bare `Ref<T>`), so the bare-reference R2
+ * promise stays sound. Any other ref-carrying type (a bare `Reference`, a slice/optional/struct that
+ * reaches a `Reference`, a `> 2`-member union) is NOT this shape and stays rejected.
+ *
+ * @param t  the resolved type to classify
+ * @return   true iff `t` is a `Variant` whose members are exactly `{ null, Reference }`
+ * @since 0.3.0.30 (null-union C5)
+ */
+fn is_ref_null_variant(t: Type) -> bool {
+    let ms = match t { Variant as v => v.members; _ => return false }
+    if ms.len != 2 { return false }
+    mut has_null = false
+    mut has_ref = false
+    mut i = 0
+    loop {
+        if i >= ms.len { break }
+        match ms[i] {
+            Null => has_null = true
+            Reference => has_ref = true
+            _ => return false
+        }
+        i++
+    }
+    has_null && has_ref
+}

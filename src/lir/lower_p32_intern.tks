@@ -1,0 +1,256 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * addr_taken_stmt — one statement's contribution to the address-taken scan: every statement
+ * shape that carries a sub-EXPRESSION or a nested statement BLOCK is descended.
+ *
+ * @param s        the statement to scan
+ * @param ref_fns  the whole-program `ref<T>` parameter-position table
+ * @param enums    the program's declared-enum table (`is_register_value_type`'s own dependency)
+ * @param acc      the names gathered so far
+ * @return         `acc` extended with this statement's address-taken names
+ */
+fn addr_taken_stmt(s: checker::TStatement, ref_fns: []LRefFnInfo, enums: []LEnumInfo, acc: []str) -> []str {
+    match s {
+        checker::TBinding as b => addr_taken_expr(b.value, ref_fns, enums, addr_taken_ref_binding(b, acc))
+        checker::TAssign as a => addr_taken_expr(a.value, ref_fns, enums, acc)
+        checker::TReturn as r => if r.has_value { addr_taken_expr(r.value, ref_fns, enums, acc) } else { acc }
+        checker::TExprStmt as es => addr_taken_expr(es.expr, ref_fns, enums, acc)
+        checker::TLoopStmt as l => addr_taken_stmts(l.body, ref_fns, enums, addr_taken_stmts(l.init, ref_fns, enums, acc))
+        checker::TDeferStmt as d => addr_taken_stmts(d.body, ref_fns, enums, acc)
+        checker::TAdoptStmt as ad => addr_taken_stmts(ad.body, ref_fns, enums, acc)
+        _ => acc
+    }
+}
+
+/**
+ * addr_taken_expr — one expression's contribution to the address-taken scan, recursing into
+ * every sub-expression and nested statement block the `TExprKind` union can carry. A `TCall`
+ * additionally contributes its OWN ref-argument names (`addr_taken_call`) before its arguments
+ * are walked as ordinary sub-expressions (an argument may itself be, or contain, another call).
+ *
+ * @param e        the expression to scan
+ * @param ref_fns  the whole-program `ref<T>` parameter-position table
+ * @param enums    the program's declared-enum table (`is_register_value_type`'s own dependency)
+ * @param acc      the names gathered so far
+ * @return         `acc` extended with every address-taken name `e` contains
+ */
+fn addr_taken_expr(e: checker::TExpr, ref_fns: []LRefFnInfo, enums: []LEnumInfo, acc: []str) -> []str {
+    match e.kind {
+        checker::TBinary as b => addr_taken_expr(b.right, ref_fns, enums, addr_taken_expr(b.left, ref_fns, enums, acc))
+        checker::TUnary as u => addr_taken_expr(u.operand, ref_fns, enums, acc)
+        checker::TCompare as c => addr_taken_compare(c, ref_fns, enums, addr_taken_expr(c.first, ref_fns, enums, acc))
+        checker::TCall as c => addr_taken_call_args(c.args, ref_fns, enums, addr_taken_call(c, ref_fns, enums, acc))
+        checker::TIfExpr as f => addr_taken_if(f, ref_fns, enums, addr_taken_expr(f.cond, ref_fns, enums, acc))
+        checker::TMatchExpr as m => addr_taken_match(m, ref_fns, enums, addr_taken_expr(m.subject, ref_fns, enums, acc))
+        checker::TCast as c => addr_taken_expr(c.expr, ref_fns, enums, acc)
+        checker::TFieldAccess as fa => addr_taken_expr(fa.receiver, ref_fns, enums, acc)
+        checker::TStructInit as si => addr_taken_expr_list(si.field_vals, ref_fns, enums, acc)
+        checker::TIndex as ix => addr_taken_expr(ix.index, ref_fns, enums, addr_taken_expr(ix.receiver, ref_fns, enums, acc))
+        checker::TInterp as ip => addr_taken_interp(ip, ref_fns, enums, addr_taken_expr_list(ip.holes, ref_fns, enums, acc))
+        checker::TInExpr as ine => addr_taken_expr_list(ine.elems, ref_fns, enums, addr_taken_expr(ine.lhs, ref_fns, enums, acc))
+        checker::TArrayLit as al => addr_taken_array_elems(al.elements, ref_fns, enums, acc)
+        checker::TLambda as lam => addr_taken_stmts(lam.body, ref_fns, enums, acc)
+        _ => acc
+    }
+}
+
+/**
+ * addr_taken_expr_list — `addr_taken_expr` folded over a plain expression list.
+ *
+ * @param es       the expressions to scan
+ * @param ref_fns  the whole-program `ref<T>` parameter-position table
+ * @param enums    the program's declared-enum table (`is_register_value_type`'s own dependency)
+ * @param acc      the names gathered so far
+ * @return         `acc` extended with every address-taken name any element contains
+ */
+fn addr_taken_expr_list(es: []checker::TExpr, ref_fns: []LRefFnInfo, enums: []LEnumInfo, acc: []str) -> []str {
+    mut out = acc
+    mut i: u64 = 0
+    loop {
+        if i >= es.len { break }
+        out = addr_taken_expr(es[i], ref_fns, enums, out)
+        i++
+    }
+    out
+}
+
+/**
+ * addr_taken_call — a `TCall` node's OWN ref-argument contribution: resolve its callee's
+ * `ref_flags` (`find_ref_flags`) and collect every argument position the flags mark, that
+ * ALSO needs reification (`arg_needs_addr_slot`).
+ *
+ * @param c        the call node
+ * @param ref_fns  the whole-program `ref<T>` parameter-position table
+ * @param enums    the program's declared-enum table (`is_register_value_type`'s own dependency)
+ * @param acc      the names gathered so far
+ * @return         `acc` extended with this call's own address-taken argument names
+ */
+fn addr_taken_call(c: checker::TCall, ref_fns: []LRefFnInfo, enums: []LEnumInfo, acc: []str) -> []str {
+    if c.callee.segments.len == 0 { return acc }
+    let last = c.callee.segments[c.callee.segments.len - 1].name
+    match find_ref_flags(ref_fns, c.call_ns, last) {
+        []bool as rf => addr_taken_call_ref_args(c.args, rf, enums, 0, acc)
+        null => acc
+    }
+}
+
+/**
+ * addr_taken_call_ref_args — `addr_taken_call`'s own per-position fold: for every index whose
+ * flag is set and whose argument needs reification, append that argument's local NAME
+ * (de-duplicated).
+ *
+ * @param args   the call's argument list
+ * @param rf     the callee's `ref_flags`
+ * @param enums  the program's declared-enum table (`is_register_value_type`'s own dependency)
+ * @param i      the next index to check
+ * @param acc    the names gathered so far
+ * @return       `acc` extended with this call's own address-taken argument names
+ */
+fn addr_taken_call_ref_args(args: []checker::TExpr, rf: []bool, enums: []LEnumInfo, i: u64, acc: []str) -> []str {
+    if i >= args.len || i >= rf.len { return acc }
+    if !rf[i] || !arg_needs_addr_slot(args[i], enums) { return addr_taken_call_ref_args(args, rf, enums, i + 1, acc) }
+    let name = match args[i].kind { checker::TVar as v => v.name; _ => "" }
+    let out = if name.len > 0 && !contains_str(acc, name) { teko::list::push(acc, name) } else { acc }
+    addr_taken_call_ref_args(args, rf, enums, i + 1, out)
+}
+
+/**
+ * addr_taken_ref_binding — a `ref r [: T] = d` binding's OWN contribution to the address-taken
+ * scan: the SOURCE local `d`, whose address the binding takes (`bind_reference_local`). It is the
+ * SECOND position the surface can take an address at, the `ref<T>` call argument being the first,
+ * and both leave the same two debts at the source's binding site:
+ *
+ * - a REGISTER-value source has no address at all until it is reified into a frame slot
+ *   (`bind_addr_taken_scalar`);
+ * - an AGGREGATE source already has one, but a later WHOLE-VALUE reassignment `d = Ch { … }` must
+ *   then write THROUGH that storage instead of rebinding the name to fresh storage
+ *   (`lower_assign_simple`), or the alias keeps naming the bytes nobody writes any more.
+ *
+ * A FAT source owes neither: a `mut` `str`/`[]T` local is unconditionally frame-slot-bound
+ * (`bind_mutable_fat`) and `lower_assign_fat` already writes both halves through that slot.
+ *
+ * @param b    the binding to inspect
+ * @param acc  the names gathered so far
+ * @return     `acc` extended with the reference source's name when one is owed
+ * @since      0.3.1 (own-backend `ref`-binding placement gap)
+ */
+fn addr_taken_ref_binding(b: checker::TBinding, acc: []str) -> []str {
+    if !ref_binding_takes_address(b) { return acc }
+    let name = match b.value.kind { checker::TVar as v => v.name; _ => "" }
+    if name.len == 0 || contains_str(acc, name) { return acc }
+    teko::list::push(acc, name)
+}
+
+/**
+ * ref_binding_takes_address — does binding `b` take the address of a local whose binding site owes
+ * something for it? True for a `Reference`-bound binding over a bare, non-fat local `TVar` that is
+ * not ALREADY a reference (a forwarded `ref q = r` carries its pointer as a plain value and owes
+ * nothing) — the same shape `arg_needs_addr_slot` asks at the argument position, minus that one's
+ * register-value narrowing, which an aggregate source's reassignment debt does not share.
+ *
+ * @param b  the binding to classify
+ * @return   whether the binding's source name must be recorded as address-taken
+ * @since    0.3.1 (own-backend `ref`-binding placement gap)
+ */
+fn ref_binding_takes_address(b: checker::TBinding) -> bool {
+    match b.bound { checker::Reference => { }; _ => return false }
+    match b.value.type { checker::Reference => return false; _ => { } }
+    if is_fat_type(b.value.type) { return false }
+    match b.value.kind { checker::TVar => true; _ => false }
+}
+
+/**
+ * addr_taken_call_args — descend into a call's OWN argument expressions as ordinary
+ * sub-expressions (an argument may itself contain another `TCall`), after `addr_taken_call`
+ * already recorded this call's own ref-argument names.
+ *
+ * @param args     the call's argument list
+ * @param ref_fns  the whole-program `ref<T>` parameter-position table
+ * @param enums    the program's declared-enum table (`is_register_value_type`'s own dependency)
+ * @param acc      the names gathered so far
+ * @return         `acc` extended with every address-taken name any argument contains
+ */
+fn addr_taken_call_args(args: []checker::TExpr, ref_fns: []LRefFnInfo, enums: []LEnumInfo, acc: []str) -> []str {
+    addr_taken_expr_list(args, ref_fns, enums, acc)
+}
+
+/**
+ * addr_taken_compare — descend into a `TCompare` chain's own operand expressions.
+ *
+ * @param c        the comparison chain
+ * @param ref_fns  the whole-program `ref<T>` parameter-position table
+ * @param enums    the program's declared-enum table (`is_register_value_type`'s own dependency)
+ * @param acc      the names gathered so far
+ * @return         `acc` extended with every address-taken name the chain's operands contain
+ */
+fn addr_taken_compare(c: checker::TCompare, ref_fns: []LRefFnInfo, enums: []LEnumInfo, acc: []str) -> []str {
+    mut out = acc
+    mut i: u64 = 0
+    loop {
+        if i >= c.rest.len { break }
+        out = addr_taken_expr(c.rest[i].operand, ref_fns, enums, out)
+        i++
+    }
+    out
+}
+
+/**
+ * addr_taken_if — descend into a nested `if`-expression's condition already having been scanned
+ * by the caller; here just its two statement blocks (the `else` block only when present).
+ *
+ * @param f        the nested if node
+ * @param ref_fns  the whole-program `ref<T>` parameter-position table
+ * @param enums    the program's declared-enum table (`is_register_value_type`'s own dependency)
+ * @param acc      the names gathered so far
+ * @return         `acc` extended with both arms' address-taken names
+ */
+fn addr_taken_if(f: checker::TIfExpr, ref_fns: []LRefFnInfo, enums: []LEnumInfo, acc: []str) -> []str {
+    let after_then = addr_taken_stmts(f.then_blk, ref_fns, enums, acc)
+    if f.has_else { return addr_taken_stmts(f.else_blk, ref_fns, enums, after_then) }
+    after_then
+}
+
+/**
+ * addr_taken_match — descend into every arm's guard (when present) and body of a nested `match`.
+ *
+ * @param m        the nested match node
+ * @param ref_fns  the whole-program `ref<T>` parameter-position table
+ * @param enums    the program's declared-enum table (`is_register_value_type`'s own dependency)
+ * @param acc      the names gathered so far
+ * @return         `acc` extended with every arm's address-taken names
+ */
+fn addr_taken_match(m: checker::TMatchExpr, ref_fns: []LRefFnInfo, enums: []LEnumInfo, acc: []str) -> []str {
+    mut out = acc
+    mut i: u64 = 0
+    loop {
+        if i >= m.arms.len { break }
+        let arm = m.arms[i]
+        if arm.has_when { out = addr_taken_expr(arm.guard, ref_fns, enums, out) }
+        out = addr_taken_stmts(arm.body, ref_fns, enums, out)
+        i++
+    }
+    out
+}
+
+/**
+ * addr_taken_array_elems — descend into every array-literal element's own expression.
+ *
+ * @param elems    the array literal's elements
+ * @param ref_fns  the whole-program `ref<T>` parameter-position table
+ * @param enums    the program's declared-enum table (`is_register_value_type`'s own dependency)
+ * @param acc      the names gathered so far
+ * @return         `acc` extended with every element's address-taken names
+ */
+fn addr_taken_array_elems(elems: []checker::TArrayElem, ref_fns: []LRefFnInfo, enums: []LEnumInfo, acc: []str) -> []str {
+    mut out = acc
+    mut i: u64 = 0
+    loop {
+        if i >= elems.len { break }
+        out = addr_taken_expr(elems[i].expr, ref_fns, enums, out)
+        i++
+    }
+    out
+}

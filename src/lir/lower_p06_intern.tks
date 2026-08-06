@@ -1,0 +1,240 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * ctx_with_defers — a copy of `ctx` with its pending-defer stack replaced by
+ * `defers` (everything else unchanged) — the one site a fresh `TDeferStmt`
+ * registration threads forward (A1-2, #382).
+ *
+ * @param LowerCtx ctx  the context to rebuild
+ * @param []checker::TDeferStmt defers  the grown defer stack
+ * @return LowerCtx  the rebuilt context
+ */
+fn ctx_with_defers(ctx: LowerCtx, defers: []checker::TDeferStmt) -> LowerCtx {
+    LowerCtx {
+        func = ctx.func; block_id = ctx.block_id; env = ctx.env
+        layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
+        variants = ctx.variants
+        defers = defers; loop_targets = ctx.loop_targets; externs = ctx.externs
+        flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
+        has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
+        ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
+        region_stack = ctx.region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
+    }
+}
+
+/**
+ * ctx_with_loops — a copy of `ctx` with its active loop-target stack
+ * replaced by `loop_targets` (everything else unchanged) — the site a
+ * `lower_loop` pushes/restores its own target (A1-2, #382).
+ *
+ * @param LowerCtx ctx  the context to rebuild
+ * @param []LoopTargets loop_targets  the replacement loop-target stack
+ * @return LowerCtx  the rebuilt context
+ */
+fn ctx_with_loops(ctx: LowerCtx, loop_targets: []LoopTargets) -> LowerCtx {
+    LowerCtx {
+        func = ctx.func; block_id = ctx.block_id; env = ctx.env
+        layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
+        variants = ctx.variants
+        defers = ctx.defers; loop_targets = loop_targets; externs = ctx.externs
+        flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
+        has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
+        ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
+        region_stack = ctx.region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
+    }
+}
+
+/** ctx_alloc — reserve a fresh VReg in the current function, returning it + the advanced
+    context. Centralizes the alloc-then-use pattern every value-producing node repeats. */
+fn ctx_alloc(ctx: LowerCtx) -> Lowered {
+    let fresh = alloc_vreg(ctx.func)
+    Lowered { ctx = ctx_with(ctx, fresh.func, ctx.block_id, ctx.env); vreg = fresh.vreg }
+}
+
+/** ctx_append — append `inst` to the current block, returning the updated context. */
+fn ctx_append(ctx: LowerCtx, inst: LInst) -> LowerCtx {
+    ctx_with(ctx, append_inst(ctx.func, ctx.block_id, inst), ctx.block_id, ctx.env)
+}
+
+/** ctx_bind — extend the context's local env with (name -> vreg). */
+fn ctx_bind(ctx: LowerCtx, name: str, vreg: u32) -> LowerCtx {
+    ctx_with(ctx, ctx.func, ctx.block_id, lenv_bind(ctx.env, name, vreg))
+}
+
+/** ctx_bind_fat — extend the context's local env with (name -> ptr, len), a FAT (str/slice)
+    binding (A1-4, #382). */
+fn ctx_bind_fat(ctx: LowerCtx, name: str, ptr: u32, len: u32) -> LowerCtx {
+    ctx_with(ctx, ctx.func, ctx.block_id, lenv_bind_fat(ctx.env, name, ptr, len))
+}
+
+/** ctx_bind_scalar_slot — extend the context's local env with (name -> the address of a
+    one-word slot), an address-taken `mut` scalar local's binding (0.3.1.0 degrau 18). */
+fn ctx_bind_scalar_slot(ctx: LowerCtx, name: str, slot: u32, ty: LType) -> LowerCtx {
+    ctx_with(ctx, ctx.func, ctx.block_id, lenv_bind_scalar_slot(ctx.env, name, slot, ty))
+}
+
+/**
+ * ctx_reassign — the `ctx_bind` mirror for a reassignment: update the newest
+ * `name` binding's VReg IN PLACE (`lenv_reassign`) rather than appending a
+ * shadow, so the enclosing scalar keeps its pre-branch index for the merge
+ * machinery (#389 F1b item 3). The ONLY reassignment carrier — every other
+ * bind site is a fresh lexical binding and stays on `ctx_bind`.
+ *
+ * @param LowerCtx ctx  the context whose local env is updated
+ * @param str name  the reassigned local's name
+ * @param u32 vreg  the reassignment's fresh result VReg
+ * @return LowerCtx  the context with `name`'s newest binding rebound in place
+ */
+fn ctx_reassign(ctx: LowerCtx, name: str, vreg: u32) -> LowerCtx {
+    ctx_with(ctx, ctx.func, ctx.block_id, lenv_reassign(ctx.env, name, vreg))
+}
+
+/**
+ * ctx_with_regions — a copy of `ctx` with its open-region stack replaced by `region_stack`
+ * (everything else unchanged) — the ONE site the native scope-memory port grows/shrinks the stack of
+ * OPEN lexical regions (`open_frame_region`/`open_native_region`), the region-axis twin of
+ * `ctx_with_defers`.
+ *
+ * @param ctx           the context to rebuild
+ * @param region_stack  the new open-region stack
+ * @return              the rebuilt context
+ * @since 0.3.1
+ */
+fn ctx_with_regions(ctx: LowerCtx, region_stack: []NativeRegionFrame) -> LowerCtx {
+    LowerCtx {
+        func = ctx.func; block_id = ctx.block_id; env = ctx.env
+        layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
+        variants = ctx.variants
+        defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
+        flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
+        has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
+        ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
+        region_stack = region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = ctx.bracket_depth
+    }
+}
+
+/**
+ * ctx_with_bracket_depth — a copy of `ctx` with its `bracket_depth` replaced (everything else
+ * unchanged) — the ONE site a conveyance bracket (`lower_binding_conveyed`/`lower_assign_conveyed`/
+ * `lower_conveyed_tail_expr_stmt_fat`, NP3b/NP4) marks itself open before lowering its bracketed RHS,
+ * so a NESTED escaping binding/assign inside that RHS can see `bracket_depth > 0` and skip
+ * re-bracketing (`binding_conveys_escape`'s callers guard on this) rather than re-entering the frame
+ * region in the middle of an already-open outer bracket.
+ *
+ * @param ctx             the context to rebuild
+ * @param bracket_depth   the new bracket-nesting depth
+ * @return                the rebuilt context
+ * @since 0.3.1
+ */
+fn ctx_with_bracket_depth(ctx: LowerCtx, bracket_depth: u32) -> LowerCtx {
+    LowerCtx {
+        func = ctx.func; block_id = ctx.block_id; env = ctx.env
+        layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
+        variants = ctx.variants
+        defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
+        flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
+        has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
+        ref_fns = ctx.ref_fns; field_decls = ctx.field_decls; addr_taken = ctx.addr_taken; table = ctx.table
+        region_stack = ctx.region_stack; escaping = ctx.escaping; frees_old_names = ctx.frees_old_names; bracket_depth = bracket_depth
+    }
+}
+
+/**
+ * one_region_arg — a one-element argument list carrying `vreg`, for the single-operand region
+ * runtime calls (`tk_region_new_u`/`tk_region_enter_u`/`tk_region_drop_u`).
+ *
+ * @param vreg  the operand VReg
+ * @return      `[vreg]`
+ * @since 0.3.1
+ */
+fn one_region_arg(vreg: u32) -> []u32 {
+    teko::list::push(teko::list::empty(), vreg)
+}
+
+/**
+ * open_frame_region — open the FUNCTION FRAME region at a function's entry (NP3): emit
+ * `rr = tk_region_root_u()` (the conveyance anchor — root through NP3-NP5, flips to
+ * `tk_region_current_u()` at the move, NP6), `fr = tk_region_new_u(rr)` (a fresh child of it), and
+ * `tk_region_enter_u(fr)` (make `fr` the current region), then push its `NativeRegionFrame` onto
+ * `ctx.region_stack`. Every `tk_alloc`/slice-grow/box the body emits now bump-allocates from `fr`.
+ * The matching `tk_region_leave()` on every normal-return edge is `emit_region_leaves`; the matching
+ * `tk_region_drop_u(fr)` is `emit_region_drops` — REACTIVATED as of NP4 (a real reclaim: `fr`'s
+ * non-escaping scratch dies with the frame; an escaping value was already conveyed to `rr` by NP3b's
+ * brackets before this drop runs, so the drop never touches it).
+ *
+ * @param ctx   the lowering context at function entry (empty `region_stack`)
+ * @param line  the source line to stamp the emitted calls with
+ * @param col   the source column to stamp
+ * @return      the context with the frame region opened, entered, and pushed
+ * @since 0.3.1
+ */
+fn open_frame_region(ctx: LowerCtx, line: u32, col: u32) -> LowerCtx {
+    let rr = ctx_alloc(ctx)
+    let with_rr = ctx_append(rr.ctx, call_inst(rr.vreg, "tk_region_root_u", teko::list::empty(), false, line, col))
+    let fr = ctx_alloc(with_rr)
+    let with_fr = ctx_append(fr.ctx, call_inst(fr.vreg, "tk_region_new_u", one_region_arg(rr.vreg), false, line, col))
+    let entered = ctx_append(with_fr, void_call_inst("tk_region_enter_u", one_region_arg(fr.vreg), false, line, col))
+    ctx_with_regions(entered, teko::list::push(entered.region_stack, NativeRegionFrame { region_vreg = fr.vreg; decl_name = ""; is_loop = false }))
+}
+
+/**
+ * emit_region_leaves — emit a `tk_region_leave()` for EVERY region open on `ctx.region_stack`,
+ * innermost (top) to outermost (the frame), at a NORMAL-return edge, so the runtime current-region
+ * stack returns to its pre-call depth on every path out. A no-op when the stack is empty (a lambda /
+ * virtual `main`, which open no frame region). Emitted after `replay_defers` and BEFORE the return
+ * value is lowered/boxed, so the value lands in the anchor region `rr` (root through NP5, the
+ * caller's region at NP6 — the move); the region-axis twin of the defer replay (§2d), balanced by
+ * construction against the single `tk_region_enter_u` each open emits. `tk_region_leave` is
+ * itself underflow-guarded, so an over-leave is a counted no-op — NP3's balancing is leak-safe.
+ * The matching `tk_region_drop_u` is a SEPARATE, later emission (`emit_region_drops`, NP4), AFTER
+ * the box, so the box never reads a freed region.
+ *
+ * @param ctx   the lowering context at the return edge
+ * @param line  the source line to stamp the emitted calls with
+ * @param col   the source column to stamp
+ * @return      the context with the `leave` calls appended
+ * @since 0.3.1
+ */
+fn emit_region_leaves(ctx: LowerCtx, line: u32, col: u32) -> LowerCtx {
+    mut cur = ctx
+    mut i = ctx.region_stack.len
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        cur = ctx_append(cur, void_call_inst("tk_region_leave", teko::list::empty(), false, line, col))
+    }
+    cur
+}
+
+/**
+ * emit_region_enters — the RE-ENTRY mirror of `emit_region_leaves`: re-push EVERY region open on
+ * `ctx.region_stack`, OUTERMOST (the frame, index 0) to INNERMOST (the top) — the same order each
+ * was originally entered in — by re-emitting `tk_region_enter_u(<region_vreg>)` for each. This is
+ * the CLOSE half of a conveyance bracket (`bracket_escaping_binding`/`bracket_escaping_assign`,
+ * NP3b): after `emit_region_leaves` detours the runtime's current-region stack away (down to the
+ * conveyance anchor `rr` — the depth *below* every entry on `ctx.region_stack`) so one RHS's
+ * escaping result materializes at `rr`, this call restores the stack to exactly the depth/contents
+ * `ctx.region_stack` already records, so every SUBSEQUENT statement keeps bump-allocating from the
+ * frame/block it was in. `ctx.region_stack` itself is UNCHANGED by either half — a bracket is a
+ * runtime-only detour around one RHS's evaluation, invisible to the compiler's own open-region
+ * bookkeeping (every entry stays logically open before, during and after the bracket). A no-op
+ * when the stack is empty, symmetric with `emit_region_leaves`.
+ *
+ * @param ctx   the lowering context (its `region_stack`, read but not modified)
+ * @param line  the source line to stamp the emitted calls with
+ * @param col   the source column to stamp
+ * @return      the context with the `enter` calls appended
+ * @since 0.3.1
+ */
+fn emit_region_enters(ctx: LowerCtx, line: u32, col: u32) -> LowerCtx {
+    mut cur = ctx
+    mut i: u64 = 0
+    loop {
+        if i >= ctx.region_stack.len { break }
+        cur = ctx_append(cur, void_call_inst("tk_region_enter_u", one_region_arg(ctx.region_stack[i].region_vreg), false, line, col))
+        i++
+    }
+    cur
+}

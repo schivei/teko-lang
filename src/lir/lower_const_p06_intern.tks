@@ -1,0 +1,246 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * collect_variant_def_decl — accumulate `td`'s expanded union onto `acc` when its body is a
+ * `VariantBody`; unchanged for any other type-declaration shape (struct/class/enum/…).
+ *
+ * @param acc    the variant table accumulated so far
+ * @param td     the type declaration to fold
+ * @param table  the program's type table, for the body's expansion
+ * @return       `acc`, with `td`'s variant definition appended when applicable
+ */
+fn collect_variant_def_decl(acc: []LVariantDef, td: parser::TypeDecl, table: checker::TypeTable) -> []LVariantDef {
+    match td.body {
+        parser::VariantBody as vb => teko::list::push(acc, LVariantDef { name = td.name; ty = variant_body_expanded(vb, checker::name_qualifier(td.name), table) })
+        _ => acc
+    }
+}
+
+/**
+ * collect_field_decls — the DECLARED field types of every field-shaped type declaration in `prog`,
+ * in program order: the checker-typed companion of `collect_struct_layouts` (degrau 25, #382).
+ *
+ * Keyed by the SAME canonical declaration name the layout table is keyed by (`td.name`, the key
+ * `find_struct_layout` probes), so one struct-literal store site resolves its offset and its
+ * DECLARED field type out of two tables that can never disagree about which declaration they
+ * describe. A `class` contributes its EFFECTIVE instance fields (`class_instance_fields` — the same
+ * base-first flattening `push_class_layout` registers), so a field inherited from a base coerces
+ * exactly like one declared on the class itself.
+ *
+ * @param prog  the whole typed program to scan
+ * @return      every field-shaped declaration's declared field types, in program order
+ * @throws      propagated from a class's base-chain walk (an unknown or non-class base — an
+ *              invariant the checker already enforces)
+ */
+fn collect_field_decls(prog: checker::TProgram) -> []LFieldDecls | error {
+    let dtable = declared_type_table(prog)
+    let ctable = checker::type_table_of(prog)
+    mut out: []LFieldDecls = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        out = match collect_field_decls_item(out, prog.items[i], dtable, ctable) {
+            []LFieldDecls as next => next
+            error as e => return e
+        }
+        i++
+    }
+    out
+}
+
+/**
+ * collect_field_decls_item — accumulate `it`'s declared field types onto `acc` when it is a
+ * field-shaped type declaration, unchanged for every other item kind.
+ *
+ * @param acc     the field-declaration table accumulated so far
+ * @param it      the typed top-level item to inspect
+ * @param dtable  the (bare name, namespace)-keyed table `checker::resolve_type` reads
+ * @param ctable  the canonically-keyed table a class's base-chain walk reads
+ * @return        `acc`, extended with `it`'s declared field types when it declares any
+ * @throws        propagated from a class's base-chain walk
+ */
+fn collect_field_decls_item(acc: []LFieldDecls, it: checker::TItem, dtable: checker::TypeTable, ctable: checker::TypeTable) -> []LFieldDecls | error {
+    match it {
+        parser::TypeDecl as td => collect_field_decls_decl(acc, td, dtable, ctable)
+        _ => acc
+    }
+}
+
+/**
+ * collect_field_decls_decl — accumulate `td`'s declared field types onto `acc` when its body is
+ * field-shaped (a `struct`'s own fields, a `class`'s effective instance fields); unchanged for any
+ * other declaration shape (enum/flags/variant/alias/interface/trait).
+ *
+ * @param acc     the field-declaration table accumulated so far
+ * @param td      the type declaration to fold
+ * @param dtable  the (bare name, namespace)-keyed table `checker::resolve_type` reads
+ * @param ctable  the canonically-keyed table a class's base-chain walk reads
+ * @return        `acc`, with `td`'s declared field types appended when applicable
+ * @throws        propagated from a class's base-chain walk
+ */
+fn collect_field_decls_decl(acc: []LFieldDecls, td: parser::TypeDecl, dtable: checker::TypeTable, ctable: checker::TypeTable) -> []LFieldDecls | error {
+    match td.body {
+        parser::StructBody as sb => teko::list::push(acc, field_decls_of(td.name, sb.fields, dtable))
+        parser::ClassBody as cb => {
+            let fields = match class_instance_fields(td.name, cb, ctable) { []parser::Field as fs => fs; error as e => return e }
+            teko::list::push(acc, field_decls_of(td.name, fields, dtable))
+        }
+        _ => acc
+    }
+}
+
+/**
+ * field_decls_of — one declaration's `LFieldDecls`: each field's syntactic annotation resolved
+ * through the checker's OWN resolver (`checker::resolve_type`, over the declaring namespace), in
+ * declared order.
+ *
+ * An annotation that does not resolve (a generic type parameter, a forward reference a synthesized
+ * fixture never declared) contributes the `Void` marker, which `find_field_decl_type` reports as
+ * "no declared type" — the store site then lowers the value plainly, exactly as it did before this
+ * table existed. Resolution never fails the whole build for a field whose type only ever mattered
+ * to a placement that does not need coercion.
+ *
+ * @param name    the declaration's canonical (declaring) name — the lookup key
+ * @param fields  the declaration's fields, in declared order
+ * @param dtable  the (bare name, namespace)-keyed table `checker::resolve_type` reads
+ * @return        the declaration's field names + resolved declared field types, parallel and in order
+ */
+fn field_decls_of(name: str, fields: []parser::Field, dtable: checker::TypeTable) -> LFieldDecls {
+    let ns = checker::name_qualifier(name)
+    mut names: []str = teko::list::empty()
+    mut types: []checker::Type = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= fields.len { break }
+        names = teko::list::push(names, fields[i].name)
+        types = teko::list::push(types, resolved_field_type(fields[i].type_ann, ns, dtable))
+        i++
+    }
+    LFieldDecls { name = name; field_names = names; field_types = types }
+}
+
+/**
+ * resolved_field_type — a field annotation as a resolved `checker::Type`, or the `Void` marker when
+ * it does not resolve (`field_decls_of`'s "no declared type" answer).
+ *
+ * @param te      the field's syntactic type annotation
+ * @param ns      the namespace the field was declared in
+ * @param dtable  the (bare name, namespace)-keyed table `checker::resolve_type` reads
+ * @return        the resolved declared type, or `Void` when the annotation does not resolve
+ */
+fn resolved_field_type(te: parser::TypeExpr, ns: str, dtable: checker::TypeTable) -> checker::Type {
+    match checker::resolve_type(te, dtable, ns) {
+        checker::Type as t => t
+        error => unresolved_named_fallback(te)
+    }
+}
+
+/**
+ * unresolved_named_fallback — the `resolved_field_type` answer for an annotation `checker::resolve_type`
+ * could not resolve. A monomorphize pass stamps a generic type instance (`Parsed__g__Decl`) with a
+ * BARE instance name — no namespace qualifier — and rewrites its `node: T` field to the concrete
+ * spelling `type_to_texpr` produces, which is itself BARE (`Decl`, not `parser::Decl`). Resolving that
+ * bare name against the field's (empty) declaring namespace then fails, and the pre-fix answer was
+ * `Void` — "place with no coercion" — so a variant-typed instance field was stored UNWRAPPED: the slot
+ * held a pointer to the bare payload, and a later `match` read `*(payload)` as the tag (a `str`'s ptr
+ * word, garbage), took no arm, and fell to the dead exhaustiveness edge (`NATIVE-AGG-SLICE-BY-ADDRESS`
+ * boxing then propagated the sentinel).
+ *
+ * A NAMED annotation is handed back as a bare `checker::Named` so the ONE consumer that needs the
+ * declared type — `union_field_placement`'s `expand_named_variant` — can still recognize a declared
+ * variant, whose whole lookup chain (`find_variant_def`) already matches by LAST SEGMENT, exactly the
+ * name-tolerant reconciliation the C route's `cg_named_is_variant` uses. A name that is NOT a declared
+ * variant expands to itself, `union_field_placement` returns `null`, and the store takes the same
+ * uncoerced path it did before — so this only ever ADDS the wrapper a variant field always needed.
+ * Any non-named annotation stays `Void` (its placement never needed a declared type).
+ *
+ * @param te  the annotation `resolve_type` could not resolve
+ * @return    a bare `Named` for a named annotation, else the `Void` "no declared type" marker
+ */
+fn unresolved_named_fallback(te: parser::TypeExpr) -> checker::Type {
+    match te {
+        parser::NamedType as nt => checker::Named { name = type_path_joined(nt.path) }
+        _ => checker::Void { }
+    }
+}
+
+/**
+ * type_path_joined — a type path's segment names joined by `::`, the spelling a nominal
+ * `checker::Named` carries. A single-segment path (`Decl`) round-trips to its bare name.
+ *
+ * @param p  the type path to render
+ * @return   the segment names joined by `::`
+ */
+fn type_path_joined(p: parser::Path) -> str {
+    mut out = ""
+    mut i: u64 = 0
+    loop {
+        if i >= p.segments.len { break }
+        if i > 0 { out = teko::str::concat(out, "::") }
+        out = teko::str::concat(out, p.segments[i].name)
+        i++
+    }
+    out
+}
+
+/**
+ * variant_body_expanded — a variant body's union type-expr as a resolved `checker::Variant`: the
+ * checker's own `resolve_type` over the program's type table, with a NOMINAL fallback
+ * (`nominal_member_types`) when the body does not resolve — a synthesized fixture whose case names
+ * are not themselves declared types is the shape that reaches it.
+ *
+ * The fallback preserves the member COUNT and ORDER, which is the load-bearing property: an index
+ * is a runtime tag, so a member silently dropped here would mis-tag every case after it.
+ *
+ * @param vb     the variant declaration's body
+ * @param ns     the namespace the variant was declared in (its members are written there)
+ * @param table  the program's type table
+ * @return       the expanded union (members in declared tag order)
+ */
+fn variant_body_expanded(vb: parser::VariantBody, ns: str, table: checker::TypeTable) -> checker::Variant {
+    let resolved = match checker::resolve_type(vb.type_expr, table, ns) {
+        checker::Type as t => t
+        error => return checker::Variant { members = nominal_member_types(vb.type_expr) }
+    }
+    match resolved {
+        checker::Variant as v => v
+        _ => checker::Variant { members = nominal_member_types(vb.type_expr) }
+    }
+}
+
+/**
+ * nominal_member_types — each member of a union type-expr as a bare nominal `checker::Named`, in
+ * source order: the resolution-free fallback of `variant_body_expanded`. A member that is not a
+ * `NamedType` still contributes an (empty-named, unnameable) entry, so the member COUNT — and with
+ * it every later member's tag — survives.
+ *
+ * @param te  the variant body's type-expr (a union of member types)
+ * @return    one nominal member type per declared member, in order
+ */
+fn nominal_member_types(te: parser::TypeExpr) -> []checker::Type {
+    match te {
+        parser::UnionType as ut => union_member_types(ut.members)
+        _ => teko::list::empty()
+    }
+}
+
+/**
+ * union_member_types — one bare `checker::Named` per member of a union type-expr, in order, named by
+ * the member path's last segment (the empty string for a non-named member — a name no pattern can
+ * spell, so it is never selected by accident).
+ *
+ * @param members  the union's member type-exprs
+ * @return         one nominal member type per member, in order
+ */
+fn union_member_types(members: []parser::TypeExpr) -> []checker::Type {
+    mut out: []checker::Type = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= members.len { break }
+        out = teko::list::push(out, checker::Named { name = union_member_name(members[i]) })
+        i++
+    }
+    out
+}

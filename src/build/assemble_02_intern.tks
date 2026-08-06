@@ -1,0 +1,60 @@
+
+/**
+ * overridden_content — the buffer `overrides` holds for `path`, or `null` when no override names
+ * that path (a plain disk read applies). The override set is the small handful of currently-open
+ * documents, never the whole project, so a linear scan is ample.
+ *
+ * @param overrides  the open buffers standing in for the disk
+ * @param path       the file path to look up
+ * @return           the override's content, or `null` when `path` is not overridden
+ * @since 0.3.1.0 (LSP crumb E)
+ */
+fn overridden_content(overrides: []FileOverride, path: str) -> str | null {
+    mut i: u64 = 0
+    loop {
+        if i >= overrides.len { break }
+        if overrides[i].path == path { return overrides[i].content }
+        i = i + 1
+    }
+    null
+}
+
+/**
+ * read_source_with_overrides — `path`'s source text: the matching `FileOverride`'s buffer when one
+ * names `path`, else the file read fresh from disk. The single read `assemble_with_overrides` makes
+ * per file, so the override substitution is one seam rather than threaded through the whole loop.
+ *
+ * @param path       the file to read
+ * @param overrides  the open buffers standing in for the disk
+ * @return           the source text, or the I/O error from a disk read that missed the override set
+ * @since 0.3.1.0 (LSP crumb E)
+ */
+fn read_source_with_overrides(path: str, overrides: []FileOverride) -> str | error {
+    match overridden_content(overrides, path) {
+        str as c => return c
+        null => { }
+    }
+    match teko::io::read_file(path) { str as s => s; error as e => return e }
+}
+
+/**
+ * append_tagged_items — `merged` with every entry of `items` appended, each RE-STAMPED with `sf`'s
+ * namespace (A3 provenance) and path (W-loc-2) — the same per-file tagging `assemble_sel`'s own
+ * loop applies before merging.
+ *
+ * @param merged  the merged item list built so far
+ * @param items   one file's reconciled item list
+ * @param sf      the source file `items` came from
+ * @return        `merged` with `items` appended, tagged with `sf`'s namespace and path
+ * @since 0.3.1.0 (LSP crumb E)
+ */
+fn append_tagged_items(merged: []parser::Item, items: []parser::Item, sf: SourceFile) -> []parser::Item {
+    mut out = merged
+    mut i: u64 = 0
+    loop {
+        if i >= items.len { break }
+        out = teko::list::push(out, parser::Item { content = items[i].content; namespace = sf.namespace; file = sf.path })
+        i = i + 1
+    }
+    out
+}

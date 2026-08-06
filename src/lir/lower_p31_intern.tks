@@ -1,0 +1,253 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * arm_scalar_args — one jump-arg per threaded scalar, read from `arm_env` at the
+ * fixed pre-branch `indices` — the ENCLOSING binding's current value at the
+ * arm's close (the reassigned VReg if the arm reassigned the enclosing scalar
+ * in place, the untouched pre-branch VReg if the arm only shadowed it at a
+ * higher index), REPLACING `jump_args_for_names`'s newest-first name lookup for
+ * if/match arm merges (#389 F1b item 3). Loops keep `jump_args_for_names` (a
+ * back-edge threads ALL promoted scalars by name, with no enclosing-vs-shadow
+ * split to make).
+ *
+ * @param LEnv arm_env  the arm-end env (its indices 0..pre_branch_len keep
+ *                      their positions — arms only append or update in place)
+ * @param []u64 indices  the threaded scalars' pre-branch indices, in param order
+ * @return []u32  each index's current VReg, in the SAME order as `indices`
+ */
+fn arm_scalar_args(arm_env: LEnv, indices: []u64) -> []u32 {
+    mut out: []u32 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= indices.len { break }
+        out = teko::list::push(out, arm_env.vregs[indices[i]])
+        i++
+    }
+    out
+}
+
+/**
+ * contains_str — is `s` present anywhere in `xs`? A tiny membership test the
+ * reassigned-scalar pre-scan uses both to de-duplicate raw hits and to keep
+ * the result in `env` order (#389 F1).
+ *
+ * @param []str xs  the list to search
+ * @param str s  the string to look for
+ * @return bool  true when some element of `xs` equals `s`
+ */
+fn contains_str(xs: []str, s: str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if xs[i] == s { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * collect_reassigned_stmts — accumulate into `acc` the target of every
+ * `TAssign` of `AssignKind::Simple` reachable in `stmts`, DESCENDING into the
+ * statement blocks of a nested statement-form `if`/`match`, a `loop`, a
+ * `defer` body, AND the value-position `if`/`match` RHS of a `let`/`mut`
+ * binding. A reassignment buried one control-flow level down still rebinds the
+ * enclosing scalar PAST that inner merge, so the OUTER merge must carry it too
+ * — the SAME drop, one level in.
+ *
+ * A `defer` body IS descended (#389 F1b item 1): a statement-arm's closing
+ * jump-args are now re-sampled from the POST-`replay_defers` env
+ * (`close_arm_replaying_defers`), so a scalar a defer body reassigns reaches
+ * the merge param with its POST-defer value — the descent is a REAL fix, not
+ * the stale param F1 removed it to avoid (F1 sampled the args PRE-replay, so a
+ * defer descent then would only have minted a param carrying the stale
+ * pre-defer VReg).
+ *
+ * A binding's value-position `if`/`match` RHS IS descended (#389 F1b item 2):
+ * `if outer { let y = if inner { x = 5; x } else { 0 } }` reassigns the
+ * enclosing `x` inside the INNER value-if, which threads `x` through its OWN
+ * merge — but the OUTER statement merge still reads `x` past it, so the outer
+ * merge must carry `x` too or the rebind is DROPPED at the outer merge.
+ *
+ * @param []checker::TStatement stmts  the statement block to scan
+ * @param []str acc  the assignment targets gathered so far
+ * @return []str  `acc` extended with every simple-assignment target found
+ */
+fn collect_reassigned_stmts(stmts: []checker::TStatement, acc: []str) -> []str {
+    mut out = acc
+    mut i: u64 = 0
+    loop {
+        if i >= stmts.len { break }
+        out = collect_reassigned_stmt(stmts[i], out)
+        i++
+    }
+    out
+}
+
+/**
+ * collect_reassigned_stmt — one statement's contribution to the
+ * reassigned-target scan: a `Simple` `TAssign` yields its `name`; a
+ * `let`/`mut` `TBinding` descends into its value-position `if`/`match` RHS
+ * (#389 F1b item 2); a statement-form `if`/`match` (a `TExprStmt`), a `loop`,
+ * and a `defer` body (#389 F1b item 1) recurse into their own statement
+ * blocks; every other statement contributes nothing (#389 F1).
+ *
+ * @param checker::TStatement s  the statement to scan
+ * @param []str acc  the assignment targets gathered so far
+ * @return []str  `acc` extended with this statement's simple-assignment
+ *                targets
+ */
+fn collect_reassigned_stmt(s: checker::TStatement, acc: []str) -> []str {
+    match s {
+        checker::TAssign as a => match a.kind { parser::AssignKind::Simple => teko::list::push(acc, a.name); _ => acc }
+        checker::TBinding as b => collect_reassigned_value_expr(b.value, acc)
+        checker::TExprStmt as es => collect_reassigned_expr_stmt(es.expr, acc)
+        checker::TLoopStmt as l => collect_reassigned_stmts(l.body, collect_reassigned_stmts(l.init, acc))
+        checker::TDeferStmt as d => collect_reassigned_stmts(d.body, acc)
+        _ => acc
+    }
+}
+
+/**
+ * collect_reassigned_expr_stmt — the reassigned-target scan of a statement's
+ * expression: only a statement-form `if`/`match` bears further statement
+ * blocks to descend into; any other expression kind contributes nothing
+ * (#389 F1).
+ *
+ * @param checker::TExpr e  the expression-statement's expression
+ * @param []str acc  the assignment targets gathered so far
+ * @return []str  `acc` extended with the nested control-flow's simple
+ *                assignments
+ */
+fn collect_reassigned_expr_stmt(e: checker::TExpr, acc: []str) -> []str {
+    match e.kind {
+        checker::TIfExpr as f => collect_reassigned_if(f, acc)
+        checker::TMatchExpr as m => collect_reassigned_match(m, acc)
+        _ => acc
+    }
+}
+
+/**
+ * collect_reassigned_value_expr — the reassigned-target scan of a binding's
+ * value-position expression: only a value-form `if`/`match` bears arm blocks
+ * whose reassignments escape into the enclosing scope PAST their own merge, so
+ * the OUTER statement merge must carry them too; any other expression kind
+ * contributes nothing (#389 F1b item 2).
+ *
+ * @param checker::TExpr e  the binding's initializer expression
+ * @param []str acc  the assignment targets gathered so far
+ * @return []str  `acc` extended with the value-if/match RHS's simple
+ *                assignments
+ */
+fn collect_reassigned_value_expr(e: checker::TExpr, acc: []str) -> []str {
+    match e.kind {
+        checker::TIfExpr as f => collect_reassigned_if(f, acc)
+        checker::TMatchExpr as m => collect_reassigned_match(m, acc)
+        _ => acc
+    }
+}
+
+/**
+ * collect_reassigned_if — descend the reassigned-target scan into both blocks
+ * of a nested statement-form `if` (the else block only when present) (#389 F1).
+ *
+ * @param checker::TIfExpr f  the nested if node
+ * @param []str acc  the assignment targets gathered so far
+ * @return []str  `acc` extended with both arms' simple assignments
+ */
+fn collect_reassigned_if(f: checker::TIfExpr, acc: []str) -> []str {
+    let after_then = collect_reassigned_stmts(f.then_blk, acc)
+    if f.has_else { return collect_reassigned_stmts(f.else_blk, after_then) }
+    after_then
+}
+
+/**
+ * collect_reassigned_match — descend the reassigned-target scan into every
+ * arm body of a nested statement-form `match` (#389 F1).
+ *
+ * @param checker::TMatchExpr m  the nested match node
+ * @param []str acc  the assignment targets gathered so far
+ * @return []str  `acc` extended with every arm body's simple assignments
+ */
+fn collect_reassigned_match(m: checker::TMatchExpr, acc: []str) -> []str {
+    mut out = acc
+    mut i: u64 = 0
+    loop {
+        if i >= m.arms.len { break }
+        out = collect_reassigned_stmts(m.arms[i].body, out)
+        i++
+    }
+    out
+}
+
+/**
+ * collect_addr_taken_locals — every `mut` scalar local name, ANYWHERE in `body`, whose ADDRESS is
+ * taken — passed as a `ref<T>` call argument (0.3.1.0 degrau 18) or aliased by a `ref r = d`
+ * binding — the set `lower_binding` consults to decide whether a binding needs a memory slot
+ * (`lenv_bind_scalar_slot`) instead of a plain VReg. Run ONCE, over the WHOLE function body,
+ * BEFORE any of its statements lower: the address can be taken anywhere after the local's own
+ * binding, so the binding site must already know its fate. An AGGREGATE-typed source is never
+ * collected (`arg_needs_addr_slot`/`ref_binding_needs_addr_slot`): its own VReg already IS its
+ * address (§ NATIVE-AGG-SLICE-BY-ADDRESS), so no reification is needed for it.
+ *
+ * Over-approximates on purpose rather than resolving scope precisely (e.g. a name that is
+ * actually a NESTED lambda's own local, shadowing an outer one of the same name, may be added to
+ * an outer scope that never needed it): the cost of a false positive is one harmless memory
+ * indirection on a local nothing ever addresses; the cost of a false negative would be a
+ * dangling-address miscompile.
+ *
+ * There is NO `ref_fns.len == 0` short-circuit any more, and its removal is part of the same fix.
+ * It read the whole scan as "about `ref` PARAMETERS", so a program that declares none — but binds
+ * `ref r = n` over a scalar — skipped the scan, left `n` in a VReg, and the binding aliased an
+ * address that never existed: measured as a SIGSEGV, not a wrong answer. The scan is about the
+ * ADDRESS, and a `ref` binding takes one.
+ *
+ * @param body     the function body (or lambda body) to scan
+ * @param ref_fns  the whole-program `ref<T>` parameter-position table
+ * @param enums    the program's declared-enum table (`is_register_value_type`'s own dependency)
+ * @return         the distinct address-taken local names found
+ */
+fn collect_addr_taken_locals(body: []checker::TStatement, ref_fns: []LRefFnInfo, enums: []LEnumInfo) -> []str {
+    addr_taken_stmts(body, ref_fns, enums, teko::list::empty())
+}
+
+/**
+ * arg_needs_addr_slot — does `arg`, at a `ref<T>` parameter position, need its OWN binding
+ * reified into a scalar memory slot? True only for a bare local reference to a REGISTER-value
+ * type (`is_register_value_type`) that is not already `Reference`-typed (a forwarded `ref`
+ * carries its OWN address as a plain value already) — the same two guards
+ * `arg_needs_auto_ref`/`lower_addr_of_arg` apply at the actual lowering site, asked here with the
+ * SAME program-wide enum table `LowerCtx.enums` carries (this walk runs BEFORE a `LowerCtx`
+ * exists for the function, so it is threaded in directly rather than through one).
+ *
+ * @param arg    the call argument to classify
+ * @param enums  the program's declared-enum table (`is_register_value_type`'s own dependency)
+ * @return       whether `arg` names a local this pre-pass must reify
+ */
+fn arg_needs_addr_slot(arg: checker::TExpr, enums: []LEnumInfo) -> bool {
+    if !arg_needs_auto_ref(arg) { return false }
+    let is_var = match arg.kind { checker::TVar => true; _ => false }
+    is_var && is_register_value_type(arg.type, enums)
+}
+
+/**
+ * addr_taken_stmts — `collect_addr_taken_locals`'s per-statement-list step: fold
+ * `addr_taken_stmt` over every statement, threading the accumulator.
+ *
+ * @param stmts    the statement list to scan
+ * @param ref_fns  the whole-program `ref<T>` parameter-position table
+ * @param enums    the program's declared-enum table (`is_register_value_type`'s own dependency)
+ * @param acc      the names gathered so far
+ * @return         `acc` extended with every address-taken name `stmts` contains
+ */
+fn addr_taken_stmts(stmts: []checker::TStatement, ref_fns: []LRefFnInfo, enums: []LEnumInfo, acc: []str) -> []str {
+    mut out = acc
+    mut i: u64 = 0
+    loop {
+        if i >= stmts.len { break }
+        out = addr_taken_stmt(stmts[i], ref_fns, enums, out)
+        i++
+    }
+    out
+}

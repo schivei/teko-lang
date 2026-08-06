@@ -1,0 +1,65 @@
+fn f_at(source: str, p: u64) -> byte {
+    if p >= source.len { return 0 }
+    source[p]
+}
+
+fn f_is_digit(c: byte) -> bool {
+    c >= b'0' && c <= b'9'
+}
+
+fn f_is_hex(c: byte) -> bool {
+    f_is_digit(c) || (c >= b'a' && c <= b'f') || (c >= b'A' && c <= b'F')
+}
+
+fn f_is_alpha(c: byte) -> bool {
+    (c >= b'a' && c <= b'z') || (c >= b'A' && c <= b'Z')
+}
+
+fn f_is_ident(c: byte) -> bool {
+    f_is_alpha(c) || f_is_digit(c) || c == b'_'
+}
+
+// a located scan error (fmt refuses the file; the real lexer would refuse it too).
+fn f_err(msg: str) -> error {
+    error { message = msg }
+}
+
+// --- spans: each mirrors the corresponding lexer.tks reader, but only finds the END ---
+
+// trim trailing spaces/tabs/CR from a `//` comment's end position.
+fn rtrim_end(source: str, start: u64, end: u64) -> u64 {
+    mut e = end
+    loop {
+        if e <= start { break }
+        let c = source[e - 1]
+        if c != b' ' && c != b'\t' && c != b'\r' { break }
+        e = e - 1
+    }
+    e
+}
+
+// ---------------------------------------------------------------------------
+// scan_tokens — the raw-token pass: the lexer's exact lexical grammar, but with
+// comments and newlines AS TOKENS and every text a raw source slice.
+// ---------------------------------------------------------------------------
+
+// the closing delimiter matches at `p`? (mirrors lexer::str_close_at.)
+fn f_close_at(source: str, p: u64, multiline: bool) -> bool {
+    if f_at(source, p) != b'"' { return false }
+    if !multiline { return true }
+    f_at(source, p + 1) == b'"' && f_at(source, p + 2) == b'"'
+}
+
+// is there a string START at pos? (mirrors lexer::is_string_start.)
+fn f_string_start(source: str, pos: u64) -> bool {
+    mut has_interp = false
+    mut has_verbatim = false
+    mut p = pos
+    loop {
+        let c = f_at(source, p)
+        if c == b'$' { if has_interp { break }; has_interp = true; p = p + 1; continue }
+        if c == b'@' { if has_verbatim { break }; has_verbatim = true; p = p + 1; continue }
+        break
+    }
+    f_at(source, p) == b'"'
+}

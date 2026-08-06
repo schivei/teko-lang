@@ -1,0 +1,263 @@
+/**
+ * snippet_line_declared_name — the bare name `line` declares at TOP LEVEL (`type`/`class`/
+ * `interface`/`flags`/`const`/`fn`, after any modifier tokens), or "" when it declares none.
+ *
+ * All six kinds share ONE claim namespace: a `type Foo` and a `fn Foo` in two different members
+ * would be claimed against each other, which over-claims by a group at worst and never lets a real
+ * collision through. Under-claiming is the expensive mistake here, not over-claiming.
+ *
+ * @param line  a top-level declaration line of a snippet's declaration half
+ * @return      the declared bare name, or ""
+ */
+fn snippet_line_declared_name(line: str) -> str {
+    let t = tkr_trim(line)
+    let head = teko::str::slice(t, snippet_chunk_head_keyword_start(t), t.len)
+    let as_type = snippet_head_ident_after(head, "type ")
+    if as_type.len > 0 { return as_type }
+    let as_class = snippet_head_ident_after(head, "class ")
+    if as_class.len > 0 { return as_class }
+    let as_iface = snippet_head_ident_after(head, "interface ")
+    if as_iface.len > 0 { return as_iface }
+    let as_flags = snippet_head_ident_after(head, "flags ")
+    if as_flags.len > 0 { return as_flags }
+    let as_const = snippet_head_ident_after(head, "const ")
+    if as_const.len > 0 { return as_const }
+    snippet_head_ident_after(head, "fn ")
+}
+
+/**
+ * snippet_declared_names — every bare name a snippet's declaration half introduces AT TOP LEVEL.
+ * The claim set a group member holds, so no other member of the same group may declare any of them.
+ *
+ * TOP LEVEL is the whole point of the brace-depth walk here, and it is not a nicety: a class's own
+ * METHODS are addressed through their type (`Dog::make`), so forty-seven members each declaring a
+ * `pub fn make()` inside their own class collide with nothing — claiming those would have forced
+ * forty-seven groups for no reason at all. Only a declaration that begins a chunk at depth 0 is
+ * claimed; the walk mirrors `split_snippet_decls_and_stmts` (the same literal-and-comment-aware
+ * `snippet_brace_delta`, the same doc-comment skip, the same "an attribute line accumulates onto
+ * the declaration it decorates" rule).
+ *
+ * @param decls  the snippet's declaration half (`SnippetSplit.decls`)
+ * @return       the declared bare names, in source order (duplicates harmless)
+ */
+fn snippet_declared_names(decls: str) -> []str {
+    mut out: []str = teko::list::empty()
+    mut depth: i64 = 0
+    mut in_chunk = false
+    mut in_str = false
+    mut in_comment = false
+    mut cur: u64 = 0
+    loop {
+        if cur >= decls.len { break }
+        mut eol = cur
+        loop {
+            if eol >= decls.len { break }
+            if decls[eol] == b'\n' { break }
+            eol = eol + 1
+        }
+        let line = teko::str::slice(decls, cur, eol)
+        let next = if eol < decls.len { eol + 1 } else { eol }
+        let trimmed = tkr_trim(line)
+        if !in_chunk && trimmed.len == 0 { cur = next; continue }
+        if !in_chunk && mf_starts_with(trimmed, "/**") { cur = snippet_skip_doc_comment(decls, cur); continue }
+        if !in_chunk && !mf_starts_with(trimmed, "#") {
+            let name = snippet_line_declared_name(trimmed)
+            if name.len > 0 { out = teko::list::push(out, name) }
+            in_chunk = true
+        }
+        let scan = snippet_brace_delta(line, in_str, in_comment)
+        depth = depth + scan.delta
+        in_str = scan.in_str
+        in_comment = scan.in_comment
+        if depth <= 0 { depth = 0; in_chunk = false }
+        cur = next
+    }
+    out
+}
+
+/**
+ * RegrNameClaim — one bare TOP-LEVEL name a group already holds. The packing constraint made explicit:
+ * a flat claim list (rather than a per-group name slice) because a slice-of-slices is not an
+ * emittable struct field, and a linear scan over a few hundred claims costs nothing next to a build.
+ */
+type RegrNameClaim = struct {
+    /** the group holding the claim. */
+    group: u64
+    /** the bare top-level name it holds. */
+    name: str
+}
+
+/**
+ * regr_claims_conflict — would adding a member declaring `names` to group `g` create a bare-name
+ * collision with what `g` already holds?
+ *
+ * @param claims  every claim made so far
+ * @param g       the candidate group
+ * @param names   the member's declared bare top-level names
+ * @return        true when the group already holds one of them
+ */
+fn regr_claims_conflict(claims: []RegrNameClaim, g: u64, names: []str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= claims.len { break }
+        let c = claims[i]
+        if c.group == g {
+            mut j: u64 = 0
+            loop {
+                if j >= names.len { break }
+                if names[j] == c.name { return true }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+/**
+ * regr_claims_add — `claims` with every name in `names` claimed for group `g`.
+ *
+ * @param claims  the claims so far
+ * @param g       the group taking the names
+ * @param names   the names to claim
+ * @return        the extended claim list
+ */
+fn regr_claims_add(claims: []RegrNameClaim, g: u64, names: []str) -> []RegrNameClaim {
+    mut out = claims
+    mut i: u64 = 0
+    loop {
+        if i >= names.len { break }
+        out = teko::list::push(out, RegrNameClaim { group = g; name = names[i] })
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * RegrPlanAcc — the plan under construction: the group keys seen so far (parallel to `specs` — and
+ * NOT distinct, since one configuration may need several groups), the configurations they stand for,
+ * the bare-name claims each group holds, the member bindings, and the running module counter. One
+ * struct so the per-file/per-feature/per-row walk threads a single value instead of five.
+ */
+type RegrPlanAcc = struct {
+    /** each group's configuration key (repeats when a configuration needed several groups). */
+    keys: []str
+    /** the configuration behind each group (parallel to `keys`). */
+    specs: []RegrGroupSpec
+    /** the bare top-level names each group holds. */
+    claims: []RegrNameClaim
+    /** every groupable row's binding, in walk order. */
+    members: []RegrGroupMember
+    /** how many members have been assigned a module name (the `m<k>` counter). */
+    next_module: u64
+}
+
+/**
+ * regr_plan_empty — the empty plan accumulator.
+ *
+ * @return an accumulator with no groups, no members and a zeroed module counter
+ */
+fn regr_plan_empty() -> RegrPlanAcc {
+    RegrPlanAcc { keys = teko::list::empty(); specs = teko::list::empty(); claims = teko::list::empty(); members = teko::list::empty(); next_module = 0 }
+}
+
+/**
+ * regr_group_for_row — the FIRST group that both matches the row's build configuration and can take
+ * its declared top-level names without a bare-name collision, or `acc.keys.len` when a new group is
+ * needed. First-fit rather than best-fit: the corpus's collisions cluster on a handful of names
+ * (`Point`, `Dog`, `Animal`, …), so first-fit already packs the bulk into one group, and a smarter
+ * packing would trade a real complexity cost for at most a build or two.
+ *
+ * @param acc    the accumulator
+ * @param gkey   the row's build-configuration key
+ * @param names  the row's declared bare top-level names
+ * @return       the group to place the row in, or `acc.keys.len` for a fresh one
+ */
+/**
+ * regr_group_solo — must a group hold members of ONE source only? ALWAYS, now.
+ *
+ * The rule used to key on the `TEKO_BACKEND=native` child-env token, because only the rows that
+ * OPTED IN to the own backend could not carry a dispatcher. The `TEKO_BACKEND` selector was
+ * EXCISED (owner ruling 2026-07-26 — the own backend is the only emission route), so every row
+ * builds native and the exemption has no rows left to exempt.
+ *
+ * A multi-member group needs a DISPATCHER, and a dispatcher needs to read a selector and compare
+ * it — which the own backend still cannot lower: `teko::env::var` returns `str | error` and a
+ * `match` over it stops with "fat-pointer receiver `match-expression` not yet lowered (N2)", and
+ * runtime string interpolation stops the same way. Until THAT honest-stop falls, a dispatcher
+ * cannot be built at all, so grouping by shared source is the only shape available.
+ *
+ * WHAT THIS COSTS, said out loud: grouping was what took the corpus from 126 builds to 44. Solo
+ * groups give that back. The way to earn it again is to close the named stop above, not to relax
+ * this rule — a relaxed rule would emit a dispatcher the backend refuses, and the corpus would go
+ * red at build time instead of honestly slow.
+ *
+ * @param gkey  the group's configuration key (unused — the answer no longer depends on it)
+ * @return      true, always
+ */
+fn regr_group_solo(gkey: str) -> bool { true }
+
+fn regr_group_for_row(acc: RegrPlanAcc, gkey: str, names: []str) -> u64 {
+    if regr_group_solo(gkey) { return acc.keys.len }
+    mut g: u64 = 0
+    loop {
+        if g >= acc.keys.len { break }
+        if acc.keys[g] == gkey && !regr_claims_conflict(acc.claims, g, names) { return g }
+        g = g + 1
+    }
+    acc.keys.len
+}
+
+/**
+ * regr_plan_add_row — fold ONE groupable row into the accumulator: place it in the first group that
+ * matches its configuration and can hold its top-level names (opening a new one when none can), claim
+ * those names for that group, and give the row a fresh module name.
+ *
+ * @param acc  the accumulator
+ * @param t    the lowered row
+ * @param key  the row's scratch-file prefix (its identity across the plan and run passes)
+ * @param src  the row's resolved snippet text (`regr_row_source` — inline body or named file)
+ * @return     the accumulator with the row bound
+ */
+fn regr_plan_add_row(acc: RegrPlanAcc, t: Tkr, key: str, src: str) -> RegrPlanAcc {
+    let gkey = regr_group_key(t)
+    match regr_plan_twin_of(acc, gkey, src) {
+        RegrGroupMember as twin => return regr_plan_reuse(acc, twin, key)
+        null => { }
+    }
+    let names = snippet_declared_names(split_snippet_decls_and_stmts(src).decls)
+    let idx = regr_group_for_row(acc, gkey, names)
+    let fresh = idx == acc.keys.len
+    let keys = if fresh { teko::list::push(acc.keys, gkey) } else { acc.keys }
+    let specs = if fresh { teko::list::push(acc.specs, RegrGroupSpec { env = t.env; target = t.target }) } else { acc.specs }
+    let member = RegrGroupMember { key = key; group = idx; module = $"m{acc.next_module}"; source = src }
+    RegrPlanAcc {
+        keys = keys; specs = specs
+        claims = regr_claims_add(acc.claims, idx, names)
+        members = teko::list::push(acc.members, member)
+        next_module = acc.next_module + 1
+    }
+}
+
+/**
+ * regr_plan_twin_of — an already-bound member of a group with configuration `gkey` whose snippet
+ * source is byte-identical to `source`, or `null` when there is none. Two rows with the same source
+ * under the same configuration are the same PROGRAM — they differ only in `args`/`stdin` and in what
+ * they expect of it — so they share one module instead of colliding with each other over every name
+ * that program declares.
+ *
+ * @param acc     the accumulator
+ * @param gkey    the row's build-configuration key
+ * @param source  the row's inline snippet source
+ * @return        the member whose module this row can reuse, or null
+ */
+fn regr_plan_twin_of(acc: RegrPlanAcc, gkey: str, source: str) -> RegrGroupMember | null {
+    mut i: u64 = 0
+    loop {
+        if i >= acc.members.len { break }
+        let mb = acc.members[i]
+        if mb.source == source && acc.keys[mb.group] == gkey { return mb }
+        i = i + 1
+    }
+    null
+}

@@ -1,0 +1,34 @@
+
+/**
+ * fold_program — fold every item of the substituted program: a function's body, a const declaration's
+ * initializer and a loose statement each have their op-trees folded; every other item passes through
+ * unchanged. Composed after `inline_consts`'s reference substitution as the second Layer-1a pass. The
+ * `agg` map (built once by the caller from the substituted program) resolves a module-aggregate-const
+ * `TVar` receiver of a const `TIndex` so `G[0]` folds to its element on BOTH engines (Layer 1c).
+ *
+ * A const declaration's folded initializer is then CANONICALIZED (`canonicalize_const_ctors`): an
+ * allowlisted pure-constructor call returning a struct becomes the struct literal that constructor's
+ * body builds, so the rodata materializer downstream sees only the aggregate literal it already knows
+ * how to serialize. The constructor table is built ONCE here, from this program's own items.
+ *
+ * @param prog  the reference-substituted typed program
+ * @param agg   the module-aggregate resolution table (module aggregate consts, dependency-ordered)
+ * @return      the program with provably-const integer op-trees folded to literals and every const
+ *              initializer's struct-constructor call canonicalized, or a located error (a folded
+ *              constant overflow / ÷0 / out-of-range)
+ * @since #comptime-fold
+ */
+pub fn fold_program(prog: TProgram, agg: AggConstMap) -> TProgram | error {
+    let table = fold_empty_table()
+    let env = env_empty()
+    let ctors = collect_const_ctors(prog.items)
+    mut out: []TItem = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        let it = match fold_item(prog.items[i], table, env, agg, ctors) { error as x => return x; TItem as v => v }
+        out = teko::list::push(out, it)
+        i++
+    }
+    TProgram { items = out }
+}

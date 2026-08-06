@@ -1,0 +1,181 @@
+// src/regex/regex.tks   (namespace 'teko::regex') — ROUND 0 minimal regex engine.
+//
+// SCOPE (ROUND 0 — the last item of the strings/encoding checklist). A real but
+// DELIBERATELY MINIMAL engine: literals, `.` (any codepoint), the quantifiers
+// `*`/`+`/`?`, character classes `[abc]` / `[a-z]` / `[^abc]`, alternation `|`,
+// grouping `(...)`, and the anchors `^`/`$`. NOT implemented (documented, later
+// rounds): escape sequences (`\d`, `\w`, `\s`, `\.`, …), bounded repetition
+// (`{m,n}`), non-greedy quantifiers, capture groups, backreferences, lookaround.
+// A bare `\` in a pattern is a compile error (M.3 — honest, not silently wrong).
+//
+// ⚠ THIS MODULE IS LOAD-BEARING FOR THE TEST GATE. Since 0.3.1 the regression runner's
+// `Then <stream> pattern = "…"` step (TkrMatchMode::Pattern — src/build/tkr.tks,
+// src/build/regression.tks::match_stream) judges scenario output by calling `is_match`
+// here. That makes this engine part of the ORACLE, not just a library: it decides whether
+// other tests passed.
+//
+// The failure that matters is ASYMMETRIC. An engine bug that matches too LITTLE turns a
+// good scenario red — loud, and someone fixes it within the hour. An engine bug that
+// matches too MUCH turns a BROKEN scenario green, silently, and nothing anywhere will ever
+// say so; the gate simply stops being a gate. Over-matching is therefore the direction that
+// must be pinned down, and the only instrument that pins it is coverage: for every operator
+// a `.tkr` pattern is allowed to use, `regex_test.tkt` must assert the NON-matching case as
+// well as the matching one — that `^` really refuses a mid-string hit, that `[0-9]+`
+// really refuses `47a`, that a quantifier does not quietly become `.*`. Adding an operator
+// (or a new `.tkr` pattern shape) without its negative test widens the oracle's blind spot.
+//
+// It was a considered choice NOT to defend this with machinery. Anchoring `Pattern` matches
+// implicitly at both ends was proposed and REFUSED (owner ruling, 2026-07-26): it would have
+// forced every scenario to write `.*<it>.*` while stopping nobody from doing precisely that,
+// so it would have bought no safety and cost every pattern its readability. The defence is
+// tests, deliberately, and it has to be maintained as one.
+//
+// ALGORITHM — a deliberate DEVIATION from Thompson's construction (a genuine design
+// tension, resolved here rather than guessed around; see the task's "STOP and report"
+// clause). Thompson's construction needs a MUTABLE transition table: each
+// sub-expression's NFA fragment carries "dangling out" edges that get PATCHED once
+// the following fragment's start state is known (the classic patch-list technique).
+// Teko's assignment model (B.4/B.21) has NO index assignment (`arr[i] = x` is not
+// expressible — `TAssign.name` is a bare variable name only) and no struct-field
+// assignment except through a `Ref<T>` (MEM-1b-ii, a narrow escape hatch this module
+// doesn't need). A plain `mut` binding only ever REBINDS the whole variable. Building
+// a patch-and-mutate transition graph purely in Teko is therefore not expressible
+// today. So this engine takes the well-known alternative shape instead — a backtracking
+// recursive matcher over an immutable AST (Kernighan & Pike's `match`/`matchstar`,
+// *The Practice of Programming* / *Beautiful Code*): parse the pattern into a RegexNode
+// tree (recursion is fine, B.8 — just not in-place mutation), then match by recursive
+// descent with backtracking, threading an explicit CONTINUATION LIST (the sibling nodes
+// still to match) since Teko closures aren't used here — first-order CPS, spelled out
+// as data. Same regular-language power for this feature subset (no backreferences), but
+// the WORST-CASE COMPLEXITY of a backtracking engine, not the linear-time guarantee of a
+// true Thompson NFA simulation — an honest, documented trade, not a hidden one. Revisit
+// if/when Teko gains in-place mutation (index assignment / mutable arrays) and a real
+// state-table NFA becomes expressible.
+//
+// A SECOND, NARROWER workaround lives in the AST shape itself: every "single child"
+// field (RStar/RPlus/ROpt/RGroup's operand) is stored as `[]RegexNode` (a ONE-element
+// slice), never a bare `inner: RegexNode`, and always read back via `[0]`. This routes
+// around a confirmed defect in the (now-retired) tree-walking interpreter (native was always unaffected): reading a
+// BARE variant-typed struct field off a variable that is itself bound by an enclosing
+// `match … as x =>` arm returns a corrupted value (reproduced in isolation — a
+// self-referential variant is not even required; any variant-typed struct field
+// triggers it). The identical field wrapped as a one-element `[]T` and read via `[0]`
+// was unaffected — slices already went through a different (correct) interpreter code path.
+// This module's workaround predates the interpreter's retirement and was never unwound.
+
+// --- the AST (RegexNode) — one named struct per arm (no inline variant bodies; the
+// canonical pattern used by e.g. checker::Type — inline anonymous variant bodies are
+// a rejected shape per project ruling). ---
+
+pub type RChar = struct { cp: u32 }   // a literal codepoint
+pub type RAny = struct { }   // `.`
+pub type RRange = struct { lo: u32; hi: u32 }   // one class member: a single cp (lo==hi) or a-b range
+pub type RClass = struct { negate: bool; ranges: []RRange }   // `[...]` / `[^...]`
+pub type RConcat = struct { parts: []RegexNode }   // sequential composition
+pub type RAlt = struct { branches: []RegexNode }   // `a|b|c`
+// `inner` is a ONE-element `[]RegexNode` (never a bare `RegexNode` field) — see the interpreter
+// workaround note above. Built via `one(node)`, read via `one_of(x.inner)`.
+pub type RStar = struct { inner: []RegexNode }   // `x*`  (0 or more, greedy)
+pub type RPlus = struct { inner: []RegexNode }   // `x+`  (1 or more, greedy)
+pub type ROpt = struct { inner: []RegexNode }   // `x?`  (0 or 1)
+pub type RGroup = struct { inner: []RegexNode }   // `(...)` — grouping only (no captures yet)
+pub type RStart = struct { }   // `^` — anchors the match to input start
+pub type REnd = struct { }   // `$` — anchors the match to input end
+pub type REmpty = struct { }   // the empty pattern / empty alternative branch
+
+pub type RegexNode = variant RChar | RAny | RClass | RConcat | RAlt | RStar | RPlus | ROpt | RGroup | RStart | REnd | REmpty
+
+// a COMPILED pattern — the parsed AST plus the source text (kept for diagnostics /
+// re-display; matching only ever reads `ast`). No struct methods yet (project ruling —
+// structs stay pure data), so every operation is a free function taking `Regex` by value.
+pub type Regex = struct { pattern: str; ast: RegexNode }
+
+// --- pattern scanning helpers (over the pattern's raw UTF-8 bytes) ---
+
+/**
+ * CPScan — one decoded pattern codepoint: its scalar value plus how many `[]byte` positions it
+ * occupied, so a caller can advance its own scan cursor by the right amount.
+ */
+pub type CPScan = struct {
+    /** the decoded Unicode scalar value */
+    cp: u32
+    /** the number of raw bytes this codepoint consumed (1-4) */
+    width: u64
+}
+
+// --- the parser: recursive descent, `[]byte` pattern -> RegexNode | error ---
+// Grammar (standard regex precedence, low to high):
+//   alt      := concat ('|' concat)*
+//   concat   := repeat*
+//   repeat   := atom ('*' | '+' | '?')?
+//   atom     := '.' | class | group | '^' | '$' | literal
+
+// a parse result: the position just past what was consumed, plus the node built.
+// Threaded through by return value (no mutable out-param — REBIND on each step,
+// the same idiom the lexer itself uses).
+pub type PState = struct { pos: u64; node: RegexNode }
+
+// compile(pattern) — parse a pattern string into a Regex, or a compile error (M.3 —
+// a malformed pattern is a checked failure, following the fallible-builtin convention
+// used by str_from_utf8 / DateTime parses elsewhere in ROUND 0).
+pub fn compile(pattern: str) -> Regex | error {
+    let bytes = bytes_of_str(pattern)
+    let parsed = match parse_alt(bytes, 0) { PState as s => s; error as e => return e }
+    if parsed.pos != bytes.len {
+        return error { message = "regex: unexpected trailing input in pattern" }
+    }
+    Regex { pattern = pattern; ast = parsed.node }
+}
+
+/**
+ * is_match — does `re`'s pattern match SOMEWHERE in `input` (the conventional "search", not
+ * "fullmatch")? Tries every start offset in turn, which for this backtracking engine is
+ * observably the same as prepending an implicit `.*?`. A `^`/`$` inside the pattern still anchors
+ * to the TRUE start/end of `input`, never to whichever offset is being tried.
+ *
+ * The pattern's continuation chain is built ONCE, before the offset loop, and every offset shares
+ * it — the whole reason the continuation is a cons chain (see `MCont`). A literal pattern
+ * therefore allocates nothing at all per offset, which is what keeps a search over a captured
+ * test stream from costing megabytes in a process that cannot free them.
+ *
+ * @param re     the compiled pattern
+ * @param input  the string to search
+ * @return       true iff the pattern matches at some offset
+ */
+pub fn is_match(re: Regex, input: str) -> bool {
+    let cps = codepoints_of(input)
+    let cont = mc_of_node(re.ast, mc_end())
+    mut start: u64 = 0
+    loop {
+        if m_cont(cont, cps, start) { return true }
+        if start >= cps.len { break }
+        start++
+    }
+    false
+}
+
+/**
+ * is_match_pattern — compile `pattern` and search `input` with it, in one call.
+ *
+ * @param pattern  the regex source
+ * @param input    the string to search
+ * @return         true iff the pattern matches at some offset
+ * @throws         the compile error of a malformed pattern (the fallible-builtin convention)
+ */
+pub fn is_match_pattern(pattern: str, input: str) -> bool | error {
+    let re = match compile(pattern) { Regex as r => r; error as e => return e }
+    is_match(re, input)
+}
+
+/**
+ * full_match — does the ENTIRE input match, start to end? The pattern is implicitly anchored on
+ * both sides regardless of any literal `^`/`$` in it.
+ *
+ * @param re     the compiled pattern
+ * @param input  the string to match
+ * @return       true iff the whole of `input` is matched by the pattern
+ */
+pub fn full_match(re: Regex, input: str) -> bool {
+    let cps = codepoints_of(input)
+    m_cont(mc_of_node(re.ast, mc_push(REnd { }, mc_end())), cps, 0)
+}

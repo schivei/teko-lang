@@ -1,0 +1,49 @@
+
+
+/**
+ * Does the referent of a borrow OUTLIVE the borrow — i.e. may `borrow` (a `Reference` cell) be
+ * stored / bound at its site without dangling? True iff the referent (`bf(borrow)`) is a `BfParam`
+ * (a param outlives every local — the caller owns it) OR a `BfLocal` whose block encloses the borrow
+ * (checked by the gate that calls this), AND the referent is not itself `pt = PtAdopter` escaping its
+ * adopter (§5.1). `bf = BfTop` ⇒ referent unknown ⇒ FALSE (REJECT). Conservative: unknown ⇒
+ * does-not-outlive. EXPOSED for PR-2's ref-storability gate; consumed by no gate in PR-1.
+ *
+ * @param Spine s  the function's spine
+ * @param u32 borrow  the cell index of the `Reference` being stored / bound
+ * @param u32 referent  the cell index of the referent (or a sentinel when un-nameable)
+ * @return bool  true iff the borrow provably does not outlive its referent
+ */
+pub fn ref_target_outlives(s: Spine, borrow: u32, referent: u32) -> bool {
+    if borrow >= s.bf.len { return false }
+    match s.bf[borrow] {
+        BfParam => referent_not_escaping_adopter(s, referent)
+        BfLocal => referent_not_escaping_adopter(s, referent)
+        BfNone => false
+        BfTop => false
+    }
+}
+
+/**
+ * Is `binding` the SOLE live handle — `us(binding) = UsUnique`? The affine `mem::free` /
+ * channel-send-move gate (PR-3, and the L2c consume contract below) consults this: a `UsShared` /
+ * `UsTop` cell may NOT be consumed (the aliased-free UAF, remodel §5 / #336 gap 1). Conservative:
+ * `⊤` ⇒ shared ⇒ FALSE. Any-alias-anywhere ⇒ shared at the fixpoint (a later increment may add
+ * flow-sensitivity; out of scope here). EXPOSED for PR-3; consumed by no gate in PR-1.
+ *
+ * L2c CONSUME CONTRACT (semantics only — spine-build-plan §4): a future `chan.send(x)` consume site
+ * MUST call `is_unique_at(s, cell_of(s, x))` and REJECT a shared / `⊤` target, identically to the
+ * L2b `mem::free` affine guard — one analysis, four guarantees. No channel surface exists yet, so
+ * L2c ships this documented primitive with no gate site and no fixture.
+ *
+ * @param Spine s  the function's spine
+ * @param u32 binding  the cell index of the consumed binding
+ * @return bool  true iff `binding` is provably unique (safe to free / move)
+ */
+pub fn is_unique_at(s: Spine, binding: u32) -> bool {
+    if binding >= s.us.len { return false }
+    match s.us[binding] {
+        UsUnique => true
+        UsShared => false
+        UsTop => false
+    }
+}

@@ -1,0 +1,218 @@
+// src/checker/collect.tks  (namespace 'teko::checker') — pass 1 (forward refs).
+use teko::parser
+
+// the top-level environment after collecting: user types + function signatures.
+type Collected = struct { types: TypeTable; env: Env }
+
+// gather ALL user type declarations first (so a forward reference resolves).
+fn collect_types(items: []parser::Item) -> TypeTable {
+    mut table: []TypeReg = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= items.len { break }
+        match items[i].content {
+            parser::TypeDecl as td => { table = teko::list::push(table, TypeReg { name = td.name; namespace = items[i].namespace; file = items[i].file; vis = td.vis; decl = td }) }
+            _ => { }
+        }
+        i++
+    }
+    table
+}
+
+// a function's signature as a FuncType (resolve its param + return types).
+// (#109 W1) `ref_ns` = the namespace the function is declared in (the referencing namespace for its
+// param/return type annotations); threaded to resolve_type, unused until W2's R0-R5 rules.
+/**
+ * The U2 fn-signature containment gate (§2, the 0.1.0.0-beta memory+unsafe remodel #333)
+ * — a resolved param/return type `t` may carry an unsafe-typed component only if the fn
+ * itself is `unsafe` (`fn_unsafe`). Calls are UNCOLORED (§2 line 87): this gate fires on
+ * the SIGNATURE only, in `func_type`/`method_func_type`, never on a call expression — the
+ * color lives on data, not on call sites.
+ *
+ * @param str fn_name  the fn's name (blamed in the error)
+ * @param bool fn_unsafe  is the fn itself `unsafe` (own flag, OR'd with the owner type for a method)?
+ * @param Type t  the resolved param or return type
+ * @param TypeTable table  the program's type table (for the `unsafe_carrying` leaf probe)
+ * @return error?  an error iff `t` carries unsafe data into a non-`unsafe` fn's signature
+ */
+fn reject_unsafe_signature_contagion(fn_name: str, fn_unsafe: bool, t: Type, table: TypeTable) -> error | null {
+    if fn_unsafe { return null }
+    if !unsafe_carrying(t, table) { return null }
+    error { message = $"safe fn '{fn_name}' names unsafe type in its signature — mark it `unsafe fn` or take/return only safe types (§2: only safe types cross the boundary)" }
+}
+
+/**
+ * const_type_located — position a type-resolution error at the const declaration's own line/col
+ * when it arrived unlocated (line 0), so `const K: Unknown = …` reports at the `const` keyword
+ * rather than at the program root (#594 crumb 2).
+ *
+ * @param e   the error `resolve_type` returned for `cd.ty`
+ * @param cd  the const declaration whose declared type failed to resolve
+ * @return    `e` positioned at the const's own line/col when it carried none
+ * @since #594
+ */
+fn const_type_located(e: error, cd: parser::ConstDecl) -> error {
+    if e.line != 0 { return e }
+    teko::error::err_loc(e, cd.line, cd.col)
+}
+
+/**
+ * collect_const_sig — resolve a module-level ConstDecl's declared type and return it, so the pass-1
+ * collector can bind the const's name to that type before pass-2 types any initializer (#594 crumb
+ * 2). Mirrors `func_type`'s role for functions: SIGNATURE only — the initializer is neither
+ * evaluated nor validated here (that is crumb 3/4). A const carries no type-params, so `cd.ty`
+ * resolves against the program's `table` directly.
+ *
+ * @param cd      the parsed const declaration
+ * @param table   the program's type table (to resolve `cd.ty`)
+ * @param ref_ns  the namespace the const is declared in (the referencing ns for `cd.ty`)
+ * @return        the const's resolved value type, or a located error on an unknown type
+ * @since #594
+ */
+fn collect_const_sig(cd: parser::ConstDecl, table: TypeTable, ref_ns: str) -> Type | error {
+    match resolve_type(cd.ty, table, ref_ns) {
+        Type as t => t
+        error as e => const_type_located(e, cd)
+    }
+}
+
+fn func_type(f: parser::Function, table: TypeTable, ref_ns: str) -> Type | error {
+    let tbl = type_param_table(f.type_params, f.type_constraints, "", table)   // (S4) the fn's generic type-params, opaque, in scope
+    mut params: []Type = teko::list::empty()
+    mut param_names: []str = teko::list::empty()
+    mut defaults: []parser::Expr = teko::list::empty()
+    mut n_required: u64 = f.params.len   // DEFARGS (2026-07-01) — the first has_default param's index; TRAILING-ONLY (rule A) means every param after it also defaults
+    mut i = 0
+    loop {
+        if i >= f.params.len { break }
+        if !f.params[i].has_type && f.params[i].name == "_" {
+            return error { message = "a `_` discard parameter is only allowed when implementing an interface method or overriding a base method — a plain function must name its parameters" }
+        }
+        let pt = match resolve_type(f.params[i].type_ann, tbl, ref_ns) {
+            Type as t => t
+            error as e => return e
+        }
+        match reject_unsafe_signature_contagion(f.name, f.is_unsafe, pt, table) { error as e => return e; null => { } }
+        params = teko::list::push(params, pt)
+        param_names = teko::list::push(param_names, f.params[i].name)
+        if f.params[i].has_default {
+            if n_required == f.params.len { n_required = i to u64 }   // first defaulted param found
+            defaults = teko::list::push(defaults, f.params[i].default_expr)
+        }
+        i++
+    }
+    // No `-> ret` ⇒ a void return (M.3) — f.return_type is the empty no_type() placeholder, NOT a
+    // value type, so it must not be resolved. Mirrors typer.tks's function typer.
+    let ret = if f.has_return {
+        match resolve_type(f.return_type, tbl, ref_ns) { Type as t => t; error as e => return e }
+    } else {
+        Void { }
+    }
+    match reject_unsafe_signature_contagion(f.name, f.is_unsafe, ret, table) { error as e => return e; null => { } }
+    let is_variadic = f.params.len > 0 && f.params[f.params.len - 1].is_params
+    Func { params = params; ret = ret; variadic = is_variadic; param_names = param_names; n_required = n_required; defaults = defaults }
+}
+
+/**
+ * (OOP A1, 2026-07-01) A struct/class METHOD's signature as a FuncType. Mirrors func_type, except the
+ * RECEIVER param (`has_type=false`, only ever index 0) resolves to `Named{struct_name}` — its type is
+ * IMPLICIT (the enclosing type), never written by the user, so it cannot go through resolve_type like
+ * an ordinary annotated param. (#254) The method's type-param table is PREPENDED with the enclosing
+ * type's own params (`method_type_param_table`), so a method of `Box<T>` referencing `T` resolves
+ * against the owner's `T` instead of "unknown type: T" — a NO-OP for a non-generic owner.
+ *
+ * @param struct_name  the enclosing type name (canonical from a dispatch, or bare from collect)
+ * @param table        the folded type table (receiver-canonicalization + owner-param lookup)
+ * @param ref_ns       the method's declaring namespace (#109 W1; threaded to resolve_type)
+ * @param f            the method whose signature is built
+ * @return             the method's Func type (receiver + params + return, all resolved)
+ * @throws             when a param or return annotation fails to resolve
+ */
+/**
+ * Is `f`, a method of `struct_name`, EFFECTIVELY unsafe (§2 line 72) — its own `is_unsafe`
+ * (always `false` at parse time; kept for symmetry with `func_type`'s check) OR'd with its
+ * enclosing type's `is_unsafe`? A method never carries its own unsafe marker: unsafe-ness
+ * attaches to the ENCLOSING `TypeDecl`, so every method of an `unsafe type` is unsafe by
+ * inheritance, uniformly — no per-method annotation to drift out of sync with the owner.
+ *
+ * @param parser::Function f  the method whose effective unsafe-ness is asked
+ * @param str struct_name  the enclosing type name (canonical from a dispatch, or bare from collect)
+ * @param str ref_ns  the method's declaring namespace
+ * @param TypeTable table  the folded type table (owner lookup)
+ * @return bool  true iff `f` or its enclosing type is `unsafe`
+ */
+fn method_is_effective_unsafe(f: parser::Function, struct_name: str, ref_ns: str, table: TypeTable) -> bool {
+    if f.is_unsafe { return true }
+    match type_table_find(table, receiver_canonical_name(struct_name, ref_ns, table), "") {
+        parser::TypeDecl as owner => owner.is_unsafe
+        error => false
+    }
+}
+
+fn method_func_type(f: parser::Function, struct_name: str, table: TypeTable, ref_ns: str) -> Type | error {
+    let tbl = method_type_param_table(receiver_canonical_name(struct_name, ref_ns, table), f.type_params, f.type_constraints, "", table)
+    let fn_unsafe = method_is_effective_unsafe(f, struct_name, ref_ns, table)
+    mut params: []Type = teko::list::empty()
+    mut param_names: []str = teko::list::empty()
+    mut defaults: []parser::Expr = teko::list::empty()
+    mut n_required: u64 = f.params.len
+    let disc_gov: parser::Function | null = if params_have_discard(f.params) { discard_governing_sig(f, struct_name, ref_ns, table) } else { null }
+    mut i = 0
+    loop {
+        if i >= f.params.len { break }
+        let pt = if !f.params[i].has_type && f.params[i].name == "_" {
+            match discard_param_type(disc_gov, i to u64, tbl, ref_ns) { Type as t => t; error as e => return e }
+        } else if !f.params[i].has_type {
+            Named { name = receiver_canonical_name(struct_name, ref_ns, table) }
+        } else {
+            match resolve_type(f.params[i].type_ann, tbl, ref_ns) { Type as t => t; error as e => return e }
+        }
+        if f.params[i].has_type {
+            match reject_unsafe_signature_contagion(f.name, fn_unsafe, pt, table) { error as e => return e; null => { } }
+        }
+        params = teko::list::push(params, pt)
+        param_names = teko::list::push(param_names, f.params[i].name)
+        if f.params[i].has_default {
+            if n_required == f.params.len { n_required = i to u64 }
+            defaults = teko::list::push(defaults, f.params[i].default_expr)
+        }
+        i++
+    }
+    let ret = if f.has_return {
+        match resolve_type(f.return_type, tbl, ref_ns) { Type as t => t; error as e => return e }
+    } else {
+        Void { }
+    }
+    match reject_unsafe_signature_contagion(f.name, fn_unsafe, ret, table) { error as e => return e; null => { } }
+    let is_variadic = f.params.len > 0 && f.params[f.params.len - 1].is_params
+    Func { params = params; ret = ret; variadic = is_variadic; param_names = param_names; n_required = n_required; defaults = defaults }
+}
+
+/**
+ * The SIGNATURE pass's product: the environment grown with every declaration whose signature
+ * resolved, plus the diagnostics of the ones that did not.
+ *
+ * This is a HARD boundary in the all-diagnostics ruling
+ * (docs/design/all-diagnostics-pre-walk-0.3.1.md §3): a declaration whose signature was rejected
+ * contributes NO binding, so a later call to that name would be reported as "undefined" — blaming
+ * the caller for the callee's defect. The pass therefore collects every signature's diagnostic and
+ * the build cuts at its boundary rather than typing bodies against a hole.
+ */
+type SigOutcome = struct {
+    /** the environment, grown with every signature that DID resolve */
+    env: Env
+    /** one located diagnostic per signature that did not resolve, in declaration order */
+    diags: []str
+}
+
+/**
+ * A `SigOutcome` that changed nothing — the identity an item with no signature to register
+ * (a `use`, a loose statement, an enum/flags/variant/extern type) returns.
+ *
+ * @param env  the environment to carry through unchanged
+ * @return     that environment with no diagnostics
+ * @since 0.3.1
+ */
+fn sig_unchanged(env: Env) -> SigOutcome {
+    SigOutcome { env = env; diags = teko::list::empty() }
+}

@@ -1,0 +1,45 @@
+/**
+ * teko::journal::segment — segment open/append/rename operations, split out of journal.tks
+ * (mechanical file-size split; no logic changes).
+ *
+ * @since 0.3.1
+ */
+
+
+/**
+ * record_line — the on-disk shape of one record, WITHOUT its trailing newline: the four fields
+ * joined by `FIELD_SEP`, in the order `fold` reads them back.
+ *
+ * @param run      the run stamp
+ * @param writer   the writer identity
+ * @param kind     the record kind
+ * @param payload  the single-line body
+ * @return         `run \t writer \t kind \t payload`
+ * @since 0.3.1
+ */
+fn record_line(run: str, writer: str, kind: str, payload: str) -> str {
+    teko::str::concat(run, FIELD_SEP, writer, FIELD_SEP, kind, FIELD_SEP, payload)
+}
+
+/**
+ * open_seg — open the segment file `path` for `run`/`writer`, returning the `Journal` that owns it
+ * and arming the polite-signal note with this run/writer's stop-record head.
+ *
+ * THE IDENTITY IS PASSED IN, NOT COMPOSED HERE, so this stays the single place a descriptor becomes
+ * a typed segment — the seam the public `open` and the unit tests both go through.
+ *
+ * @param path    the segment file to open, created when absent
+ * @param run     the run stamp records on this segment carry
+ * @param writer  the writer identity records on this segment carry
+ * @return        the opened segment
+ * @throws        when the segment could not be created (permission, disk full)
+ * @since 0.3.1
+ */
+fn open_seg(path: str, run: str, writer: str) -> Journal | error {
+    let fd = open_seg_rt(path)
+    if fd == BAD_DESCRIPTOR {
+        return error { message = teko::str::concat("teko::journal: could not open segment ", path) }
+    }
+    arm_note_rt(record_line(run, writer, KIND_STOP, ""))
+    Journal { run = run; writer = writer; seg = fd }
+}

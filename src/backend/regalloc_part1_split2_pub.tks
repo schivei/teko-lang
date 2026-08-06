@@ -1,0 +1,107 @@
+
+/**
+ * inst_regs — decompose one `MInst` into its def/use registers per the §1.1
+ * table. A flat per-case match over the 29-case `MInst` variant
+ * (`minst.tks:787`). Two subtleties the table encodes: `MMovK` is
+ * read-modify-write (its `dst` is BOTH a use and a def — `minst.tks:406`), and
+ * `MRet` carries no operand (its returned value was pre-pinned to x0/v0 by a
+ * preceding move, so the pin's interval is extended to the terminator by
+ * `compute_intervals`, not reported here).
+ *
+ * @param MInst inst  the instruction to decompose
+ * @return InstRegs  its def/use decomposition
+ */
+pub fn inst_regs(inst: MInst) -> InstRegs {
+    match inst {
+        MAlu as x => ir_def_use(x.dst, two_regs(x.a, x.b))
+        MAluImm as x => ir_def_use(x.dst, one_reg(x.a))
+        MMSub as x => ir_def_use(x.dst, three_regs(x.a, x.b, x.c))
+        MNeg as x => ir_def_use(x.dst, one_reg(x.a))
+        MMvn as x => ir_def_use(x.dst, one_reg(x.a))
+        MFAlu as x => ir_def_use(x.dst, two_regs(x.a, x.b))
+        MFNeg as x => ir_def_use(x.dst, one_reg(x.a))
+        MCmp as x => ir_use(two_regs(x.a, x.b))
+        MCmpImm as x => ir_use(one_reg(x.a))
+        MFCmp as x => ir_use(two_regs(x.a, x.b))
+        MCSet as x => ir_def(x.dst)
+        MMovZ as x => ir_def(x.dst)
+        MMovK as x => ir_def_use(x.dst, one_reg(x.dst))
+        MMovN as x => ir_def(x.dst)
+        MFMov as x => ir_def_use(x.dst, one_reg(x.src))
+        MMov as x => ir_def_use(x.dst, one_reg(x.src))
+        MExt as x => ir_def_use(x.dst, one_reg(x.a))
+        MCvt as x => ir_def_use(x.dst, one_reg(x.a))
+        MLoad as x => ir_def_use(x.dst, one_reg(x.mem.base))
+        MStore as x => ir_use(two_regs(x.src, x.mem.base))
+        MFSpill as x => if x.is_load { ir_def(x.reg) } else { ir_use(one_reg(x.reg)) }
+        MFrameAddr as x => ir_def(x.dst)
+        MAdrp as x => ir_def(x.dst)
+        MAddLo as x => ir_def_use(x.dst, one_reg(x.a))
+        MBranch => ir_none()
+        MBranchCond => ir_none()
+        MCbz as x => ir_use(one_reg(x.a))
+        MCall as x => ir_call(x.ret_reg, x.has_result, x.uses)
+        MCallIndirect as x => ir_call(x.ret_reg, x.has_result, cons_reg(x.target, x.uses))
+        MRet => ir_none()
+        MOutArg as x => ir_use(one_reg(x.src))
+        MInArg as x => ir_def(x.dst)
+    }
+}
+
+/**
+ * LiveInterval — one value's live range over the linear numbering (§3.2): the
+ * virtual value (or physical pin) `reg_id` in `reg_class`, live from `start`
+ * to `end`, `is_fixed` for a pre-colored pin, `crosses_call` iff a call point
+ * lies in `(start, end]`.
+ *
+ * @since #384 A3-2
+ */
+pub type LiveInterval = struct {
+    /**
+     * reg_id — the virtual id being colored, or the pinned physical id.
+     */
+    reg_id: u32
+    /**
+     * reg_class — which register file the value lives in.
+     */
+    reg_class: MRegClass
+    /**
+     * start — the program point of the value's def (a pin: its def or entry).
+     */
+    start: u32
+    /**
+     * end — the last-use point (a result pin: extended to the terminator).
+     */
+    end: u32
+    /**
+     * is_fixed — true for a pre-colored physical pin the allocator must not
+     * recolor.
+     */
+    is_fixed: bool
+    /**
+     * crosses_call — true iff a call point lies in `(start, end]`.
+     */
+    crosses_call: bool
+}
+
+/**
+ * IntervalSet — the computed intervals for one function: the virtual
+ * intervals to color, the fixed physical pin intervals to block, and the call
+ * points (a `crosses_call` value must avoid the caller-saved set).
+ *
+ * @since #384 A3-2
+ */
+pub type IntervalSet = struct {
+    /**
+     * virt — the virtual intervals the scan colors.
+     */
+    virt: []LiveInterval
+    /**
+     * fixed — the physical pin intervals the scan blocks.
+     */
+    fixed: []LiveInterval
+    /**
+     * call_points — the program points of every `MCall`/`MCallIndirect`.
+     */
+    call_points: []u32
+}

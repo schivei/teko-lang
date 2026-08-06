@@ -1,0 +1,161 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * const_decl_is_scalar — true iff a residual TConstDecl's declared type is SCALAR (a primitive
+ * int/float/bool, a `byte`, or a `char`), the family the crumb-5 inliner substitutes at every use
+ * site and drops from the program (#594 crumb 5). Mirrors the checker's `is_scalar_const_type`; kept
+ * local so the lowering stays self-contained.
+ *
+ * @param t  the residual const's resolved value type
+ * @return   whether `t` is a scalar (inline-at-use) const type
+ */
+fn const_decl_is_scalar(t: checker::Type) -> bool {
+    match t {
+        checker::Slice => false
+        checker::Str => false
+        checker::Named => false
+        checker::Variant => false
+        checker::Func => false
+        checker::Error => false
+        checker::Void => false
+        checker::Ptr => false
+        checker::Uptr => false
+        checker::Reference => false
+        checker::Null => false
+        checker::Prim => true
+        checker::Byte => true
+        checker::Char => true
+    }
+}
+
+/**
+ * lower_const_item — fold a residual TConstDecl in the item loop: a NO-OP for BOTH families (#594
+ * crumb 6). A SCALAR const was inlined at every use and dropped by `inline_consts` (post-monomorphize)
+ * — it emits no `LFunc`, no `LGlobal`. An AGGREGATE (Tier-A) const's byte image was already interned
+ * into rodata by `intern_aggregate_consts`, BEFORE any function lowered, and every use resolves to
+ * that rodata symbol — so the declaration itself contributes no further code here. `m.globals` stays
+ * empty for either family (rodata, never a global), so no globals honest-stop is reachable.
+ *
+ * @param m       the module accumulated so far
+ * @param loose   the loose top-level statements accumulated so far
+ * @param cd      the residual typed const declaration (unused — kept for the item-fold shape)
+ * @param lifted  the whole-program lifted closure/thunk-function table
+ * @return        the module unchanged (const decls emit no per-item code)
+ */
+fn lower_const_item(m: LModule, loose: []checker::TStatement, cd: checker::TConstDecl, lifted: []LFunc) -> LowerItemOut | error {
+    LowerItemOut { module = m; loose = loose; lifted = lifted }
+}
+
+/**
+ * lower_item_function — lower a top-level function into the module (a `#test`
+ * function is skipped — it is not part of the emitted program). Seeds the
+ * lowering with the module's CURRENT rodata table and folds the grown table
+ * back in (A1-4, #382), so string literals across every function get distinct
+ * symbols; the lifted closure/thunk table threads the same way (A1-7, #382).
+ *
+ * @param LModule m  the module accumulated so far
+ * @param []checker::TStatement loose  the loose top-level statements
+ *                                     accumulated so far
+ * @param checker::TFunction f  the function to lower
+ * @param []LStructLayout layouts  the program's struct-layout table
+ * @param []LEnumInfo enums  the program's enum table
+ * @param []LFunc lifted  the whole-program lifted closure/thunk-function
+ *                        table accumulated so far (A1-7, #382)
+ * @param []LExternFn externs  the program's `extern fn` table (C7.1a)
+ * @param bool flat_symbols  the static/shared-archive carve-out (`lower_function`'s own param)
+ * @param table  the program's type table (`lower_function`'s own param, 0.3.1.0 raiz A, crumb R0)
+ * @param field_decls  the program's declared-field-type table (`collect_field_decls`, degrau 25),
+ *                     for the coercion a struct-literal field store and a call argument take
+ * @return LowerItemOut | error  the advanced module (unchanged `loose`) + the
+ *                               grown lifted table; the `error` arm when
+ *                               `f`'s body fails to lower
+ */
+fn lower_item_function(m: LModule, loose: []checker::TStatement, f: checker::TFunction, layouts: []LStructLayout, enums: []LEnumInfo, lifted: []LFunc, externs: []LExternFn, flat_symbols: bool, variants: []LVariantDef, table: checker::TypeTable, ref_fns: []LRefFnInfo, field_decls: []LFieldDecls) -> LowerItemOut | error {
+    if f.is_test { return LowerItemOut { module = m; loose = loose; lifted = lifted } }
+    if f.is_extern { return LowerItemOut { module = m; loose = loose; lifted = lifted } }
+    let lf = match lower_function(f, layouts, m.rodata, enums, lifted, externs, flat_symbols, variants, table, ref_fns, field_decls) { LoweredFunction as x => x; error as err => return err }
+    LowerItemOut { module = add_func(with_rodata(m, lf.rodata), lf.func); loose = loose; lifted = lf.lifted }
+}
+
+/**
+ * lower_main_tail — lower every loose top-level statement but the last
+ * plainly (`lower_stmt`, stopping early on an inner terminator — a labeled
+ * top-level `return` never occurs, but an early-terminating construct is
+ * handled the same as `lower_block`'s), then resolve the LAST statement
+ * through `lower_main_tail_stmt` — the only one eligible to supply the
+ * program's exit-code value (#423, #382).
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param []checker::TStatement body  the program's loose top-level statements
+ * @return LowerMainTail | error  the advanced context, plus whether a
+ *                                trailing exit-code value was found
+ */
+fn lower_main_tail(ctx: LowerCtx, body: []checker::TStatement) -> LowerMainTail | error {
+    if body.len == 0 { return LowerMainTail { ctx = ctx; has_value = false; vreg = 0 } }
+    mut cur = ctx
+    mut i: u64 = 0
+    loop {
+        if i + 1 >= body.len { break }
+        let out = match lower_stmt(cur, body[i]) { LowerStmtOut as x => x; error as err => return err }
+        cur = out.ctx
+        if out.terminated { return LowerMainTail { ctx = cur; has_value = false; vreg = 0 } }
+        i++
+    }
+    lower_main_tail_stmt(cur, body[body.len - 1])
+}
+
+/**
+ * lower_main_tail_stmt — the loose top-level statement list's LAST statement:
+ * a non-void expression-statement's value IS the program's exit code
+ * (`lower_main_tail_expr`); every other statement kind lowers plainly, with
+ * no exit-code value (`lower_main_tail_other`) (#423, #382).
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param checker::TStatement s  the last loose top-level statement
+ * @return LowerMainTail | error  the advanced context, plus whether `s`
+ *                                supplied a trailing exit-code value
+ */
+fn lower_main_tail_stmt(ctx: LowerCtx, s: checker::TStatement) -> LowerMainTail | error {
+    match s {
+        checker::TExprStmt as es => lower_main_tail_expr(ctx, es)
+        _ => lower_main_tail_other(ctx, s)
+    }
+}
+
+/**
+ * lower_main_tail_expr — the loose top-level statement list's last statement,
+ * when it is an expression-statement: a VOID-typed expression (a diverging
+ * builtin call, or any other void call) lowers plainly with no exit-code
+ * value; a non-void expression's VReg IS the program's exit code (#423,
+ * #382).
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param checker::TExprStmt es  the trailing expression-statement
+ * @return LowerMainTail | error  the advanced context, plus `es`'s VReg when
+ *                                its type is non-void
+ */
+fn lower_main_tail_expr(ctx: LowerCtx, es: checker::TExprStmt) -> LowerMainTail | error {
+    if ltype_is_void(ltype_of(es.expr.type, ctx.enums)) {
+        let out = match lower_expr_stmt(ctx, es) { LowerStmtOut as x => x; error as err => return err }
+        return LowerMainTail { ctx = out.ctx; has_value = false; vreg = 0 }
+    }
+    let lo = match lower_expr(ctx, es.expr) { Lowered as x => x; error as err => return err }
+    LowerMainTail { ctx = lo.ctx; has_value = true; vreg = lo.vreg }
+}
+
+/**
+ * lower_main_tail_other — the loose top-level statement list's last
+ * statement, when it is anything but an expression-statement (a binding,
+ * loop, defer, …): lowers plainly, with no exit-code value (#423, #382).
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param checker::TStatement s  the trailing non-expression statement
+ * @return LowerMainTail | error  the advanced context; never an exit-code
+ *                                value
+ */
+fn lower_main_tail_other(ctx: LowerCtx, s: checker::TStatement) -> LowerMainTail | error {
+    let out = match lower_stmt(ctx, s) { LowerStmtOut as x => x; error as err => return err }
+    LowerMainTail { ctx = out.ctx; has_value = false; vreg = 0 }
+}

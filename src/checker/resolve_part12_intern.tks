@@ -1,0 +1,134 @@
+// src/checker/resolve.tks  (namespace 'teko::checker')
+use teko::parser
+
+
+/**
+ * The generic TEMPLATE registration a written instantiation site names, resolved in the namespace
+ * the site was WRITTEN in (R0/R3/R4 — the same rules `resolve_generic_inst` applies at typing, so
+ * the stamp and the use can never disagree about WHICH `Box` is meant).
+ *
+ * When the scope-correct resolution finds nothing — a reference that is not legally visible bare
+ * from `ref_ns`, which typing will reject on its own — the pass falls back to an ARITY-MATCHED bare
+ * scan so that no site the previous scope-less probe reached is silently lost. That fallback is
+ * arity-matched precisely because the old scope-less probe was not: a non-generic `Box` declared in
+ * ANY other namespace answered the probe for `Box<i64>` and the arity check then discarded the site
+ * forever, leaving `Box__g__i64` unstamped. Both paths are decided by the program, never by the
+ * order the sources were discovered in.
+ *
+ * @param nt      the written generic-type use
+ * @param table   the type table as stamped so far
+ * @param ref_ns  the namespace the use was written in
+ * @return        the template's registration, or null when no generic base of this arity exists
+ */
+fn generic_template_reg(nt: parser::NamedType, table: TypeTable, ref_ns: str) -> TypeReg | null {
+    let arity = nt.args.len
+    match resolve_type_reg(nt.path, table, ref_ns) {
+        TypeReg as r => { if r.decl.type_params.len == arity { return r } }
+        NotUserType => { }
+        error => { }
+    }
+    let name = nt.path.segments[nt.path.segments.len - 1].name
+    mut i = 0
+    loop {
+        if i >= table.len { break }
+        if name_last_segment(table[i].name) == name && table[i].decl.type_params.len == arity { return table[i] }
+        i++
+    }
+    null
+}
+
+/**
+ * Resolve one site's type-ARGUMENTS to concrete types, or null when any of them does not concretize
+ * here (a type-param inside a generic body: that site concretizes only when the OUTER generic is
+ * instantiated). Each argument is resolved in the namespace the site was written in; an argument
+ * that misses there is retried in the TEMPLATE's namespace, which covers the transitive sites read
+ * back out of an already-substituted body, where template-scoped and site-scoped spellings are
+ * mixed. Both scopes are properties of the program, so the answer never depends on table order.
+ *
+ * @param nt        the written generic-type use
+ * @param table     the type table as stamped so far
+ * @param ref_ns    the namespace the use was written in
+ * @param template  the resolved template registration (its namespace is the retry scope)
+ * @return          the concrete argument types in order, or null when one does not concretize
+ */
+fn resolve_inst_args(nt: parser::NamedType, table: TypeTable, ref_ns: str, template: TypeReg) -> []Type | null {
+    mut argtypes: []Type = teko::list::empty()
+    mut a = 0
+    loop {
+        if a >= nt.args.len { break }
+        match resolve_inst_arg(nt.args[a], table, ref_ns, template.namespace) {
+            Type as t => argtypes = teko::list::push(argtypes, t)
+            null => return null
+        }
+        a++
+    }
+    argtypes
+}
+
+/**
+ * One type-argument's concrete type: resolved in the site's namespace, retried in the template's.
+ *
+ * @param arg       the written type-argument
+ * @param table     the type table as stamped so far
+ * @param ref_ns    the namespace the use was written in
+ * @param template_ns  the template's declaring namespace (the retry scope)
+ * @return          the concrete type, or null when it resolves in neither scope
+ */
+fn resolve_inst_arg(arg: parser::TypeExpr, table: TypeTable, ref_ns: str, template_ns: str) -> Type | null {
+    match resolve_type(arg, table, ref_ns) { Type as t => return t; error => { } }
+    if template_ns == ref_ns { return null }
+    match resolve_type(arg, table, template_ns) { Type as t => t; error => null }
+}
+
+/**
+ * The concrete `TypeDecl` a template stamps at one instantiation: the template's body with its
+ * type-params substituted by the site's written arguments, renamed to the mangled instance name and
+ * stripped of its own type-params. An instance whose arguments carry unsafe data is itself unsafe
+ * (§2 contagion-by-composition), even when the template is not.
+ *
+ * @param template the generic template's registration
+ * @param mangled  the instance's mangled name (`Box__g__i64`)
+ * @param nt       the written generic-type use (its args are the substitution)
+ * @param argtypes the resolved argument types (for the unsafe-contagion probe)
+ * @param table    the type table as stamped so far
+ * @return         the concrete instance decl to stamp
+ */
+fn stamped_instance_decl(template: TypeReg, mangled: str, nt: parser::NamedType, argtypes: []Type, table: TypeTable) -> parser::TypeDecl {
+    let gen = template.decl
+    let nbody = subst_body_names(gen.body, gen.type_params, nt.args)
+    let inst_unsafe = gen.is_unsafe || generic_args_unsafe_carrying(argtypes, table)
+    parser::TypeDecl { name = mangled; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = nbody; vis = gen.vis; has_doc = false; doc = ""; line = gen.line; col = gen.col; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""; is_unsafe = inst_unsafe; must_free = gen.must_free }
+}
+
+/**
+ * StampState — the instantiation fixpoint's two carried values: the table stamped so far and the
+ * worklist of sites still to consider. Paired so one site's handling is a single pure step
+ * (`stamp_inst_site`) instead of a nest of early-outs mutating two accumulators in place.
+ */
+type StampState = struct { table: TypeTable; work: []InstSite }
+
+/**
+ * One step of the fixpoint: stamp the instance `entry` names, if it names one that is not stamped
+ * yet, and queue the uses the freshly stamped body itself names. Returns `state` UNCHANGED whenever
+ * the site does not (yet) concretize: a non-`NamedType` site, a bare reference with no arguments, a
+ * base that is not a generic of this arity (typing reports it), an argument that is still a
+ * type-param (it concretizes when the OUTER generic is instantiated, from the body re-scan), or an
+ * instance already stamped.
+ *
+ * @param entry the site plus the namespace that wrote it
+ * @param state the table + worklist carried by the fixpoint
+ * @return      the state after this site, unchanged when the site stamps nothing
+ */
+fn stamp_inst_site(entry: InstSite, state: StampState) -> StampState {
+    let nt = match entry.site { parser::NamedType as n => n; _ => return state }
+    if nt.args.len == 0 { return state }
+    let tbl = state.table
+    let template = match generic_template_reg(nt, tbl, entry.ref_ns) { TypeReg as r => r; null => return state }
+    let argtypes = match resolve_inst_args(nt, tbl, entry.ref_ns, template) { []Type as ats => ats; null => return state }
+    let mangled = generic_inst_name(nt.path.segments[nt.path.segments.len - 1].name, argtypes)
+    match type_table_find(tbl, mangled, "") { parser::TypeDecl => return state; error => { } }
+    let stamped = stamped_instance_decl(template, mangled, nt, argtypes, tbl)
+    let grown = teko::list::push(tbl, TypeReg { name = mangled; namespace = template.namespace; file = template.file; vis = template.decl.vis; decl = stamped })
+    let queued = tag_inst_sites(collect_body_insts(stamped.body, teko::list::empty()), template.namespace, state.work)
+    StampState { table = grown; work = queued }
+}

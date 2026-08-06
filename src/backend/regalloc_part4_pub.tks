@@ -1,0 +1,127 @@
+pub fn rewrite_inst(abi: AbiDescriptor, sr: ScanResult, inst: MInst, frame_base: u64) -> []MInst {
+    let ir = inst_regs(inst)
+    mut acc = UseAcc { table = teko::list::empty(); reloads = teko::list::empty(); nth = 0 to u32 }
+    mut ui: u64 = 0
+    loop {
+        if ui >= ir.uses.len { break }
+        acc = add_use_subst(abi, sr, ir.uses[ui], frame_base, acc)
+        ui++
+    }
+    mut table = acc.table
+    mut stores: []MInst = teko::list::empty()
+    if ir.has_def {
+        let d = ir.def_reg
+        if !d.is_phys {
+            let la = assign_lookup(sr, d.id)
+            if la.found {
+                if la.is_spill {
+                    let dsv = spill_scratch(abi, d.reg_class, 0 to u32)
+                    let asv = spill_scratch(abi, MRegClass::GPR, 1 to u32)
+                    if !subst_has(table, d.id) {
+                        table = teko::list::push(table, SubstEntry { vid = d.id; to = dsv })
+                    }
+                    stores = emit_spill_store(dsv, asv, frame_base + la.slot)
+                } else {
+                    if !subst_has(table, d.id) {
+                        table = teko::list::push(table, SubstEntry { vid = d.id; to = preg(la.phys, d.reg_class) })
+                    }
+                }
+            }
+        }
+    }
+    let mapped = map_minst_regs(inst, table)
+    minst_cat(minst_cat(acc.reloads, minst_single(mapped)), stores)
+}
+
+/**
+ * all_physical — whether every `MInst` operand of `f` is a physical register
+ * (the §4.1 all-physical invariant: no virtual register survived the rewrite).
+ * Block params are metadata, not executed operands, and are not checked.
+ *
+ * @param MFunc f  the colored function
+ * @return bool  true iff fully physical
+ */
+pub fn all_physical(f: MFunc) -> bool {
+    mut bi: u64 = 0
+    loop {
+        if bi >= f.blocks.len { break }
+        let b = f.blocks[bi]
+        mut ii: u64 = 0
+        loop {
+            if ii >= b.insts.len { break }
+            let ir = inst_regs(b.insts[ii])
+            if ir.has_def {
+                if !ir.def_reg.is_phys { return false }
+            }
+            mut ui: u64 = 0
+            loop {
+                if ui >= ir.uses.len { break }
+                if !ir.uses[ui].is_phys { return false }
+                ui++
+            }
+            ii++
+        }
+        bi++
+    }
+    true
+}
+
+/**
+ * regalloc_func — allocate one function end-to-end: RPO-order, number, compute
+ * intervals, scan, rewrite. A real `loop` back-edge now ALLOCATES (§6.2 LANDED,
+ * #389 F2): `compute_intervals` widens every interval live at a loop header to
+ * reach its latch (`extend_over_loops`), so a loop-carried value survives the
+ * whole body across the back-edge. The RPO order is computed once
+ * and threaded so the numbering and the natural-loop detection share one
+ * topological linearization (#443); the entry-reachable set is threaded beside
+ * it so a dead-block edge (a `match`'s unreachable fallback, A4-6 #385) is never
+ * mistaken for a loop.
+ *
+ * The FPR-spill honest-stop that used to sit between the scan and the rewrite is
+ * GONE (0.3.1.0 degrau 29): a spilled float now lowers to one `MFSpill`, so both
+ * register files spill and there is nothing left for a pre-check to reject. That
+ * closes the arm64 half of the same gap the x86 twin closed with `MFSpillX86`.
+ * `report_call_unsafe_assignments` runs on the scan's own output right before the rewrite
+ * (env-gated, `TEKO_NATIVE_CALL_SAFETY_CHECK=1` — a no-op otherwise), so a violation of the
+ * call-crossing invariant is named per-function instead of only surfacing as a distant,
+ * unattributed crash once the corrupted value is read back after a clobbering call.
+ *
+ * @param AbiDescriptor abi  the register file
+ * @param MFunc f  the selected function (virtual MRegs + ABI pins)
+ * @return MFunc | error  the fully-colored function, or a named honest-stop
+ */
+pub fn regalloc_func(abi: AbiDescriptor, f: MFunc) -> MFunc | error {
+    let order = rpo_block_order(f)
+    let numbered = number_insts(f, order)
+    let ivals = match compute_intervals(numbered, order, reachable_blocks(f)) {
+        IntervalSet as s => s
+        error as e => return e
+    }
+    let sr = linear_scan(abi, ivals)
+    report_call_unsafe_assignments(abi, ivals, sr)
+    rewrite_func(abi, f, sr)
+}
+
+/**
+ * regalloc_module — allocate every function of `m`, carrying the rodata /
+ * globals / layouts tables through unchanged (A3 touches only registers +
+ * frame, exactly as `select_module` carries them).
+ *
+ * @param AbiDescriptor abi  the register file to allocate from
+ * @param MModule m  the selected module
+ * @return MModule | error  the colored module, or the first function's error
+ */
+pub fn regalloc_module(abi: AbiDescriptor, m: MModule) -> MModule | error {
+    mut funcs: []MFunc = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= m.funcs.len { break }
+        let rf = match regalloc_func(abi, m.funcs[i]) {
+            MFunc as g => g
+            error as e => return e
+        }
+        funcs = teko::list::push(funcs, rf)
+        i++
+    }
+    MModule { funcs = funcs; rodata = m.rodata; globals = m.globals; layouts = m.layouts }
+}

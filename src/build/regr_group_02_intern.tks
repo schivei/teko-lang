@@ -1,0 +1,268 @@
+/**
+ * snippet_tail_is_assignment — is `t` an ASSIGNMENT statement (`x = e`, `p.f = e`, `xs[i] = e`, or a
+ * compound `+=`-family form)? An assignment is void, so it must not be wrapped in `exit(…)` — and it
+ * is the one void shape that opens with an ordinary expression instead of a keyword, so
+ * `snippet_tail_is_value`'s keyword tests cannot see it.
+ *
+ * Detects the FIRST line's first `=` at bracket depth 0 that is not part of a comparison (`==`,
+ * `!=`, `<=`, `>=`) nor of a match arrow (`=>`), skipping string/char literals. Depth 0 is what
+ * makes `exit(x = 1)`-shaped false positives impossible and what keeps a keyword-argument-looking
+ * `f(a = 1)` (were the language to grow one) out of the answer.
+ *
+ * @param t  the trimmed tail chunk
+ * @return   true when the chunk's first line is an assignment
+ */
+fn snippet_tail_is_assignment(t: str) -> bool {
+    mut depth: i64 = 0
+    mut open = false
+    mut quote: byte = b'"'
+    mut k: u64 = 0
+    loop {
+        if k >= t.len { break }
+        let c = t[k]
+        if c == b'\n' { break }
+        if open {
+            if c == b'\\' { k = k + 2; continue }
+            if c == quote { open = false }
+            k = k + 1
+            continue
+        }
+        if c == b'"' || c == b'\'' { open = true; quote = c; k = k + 1; continue }
+        if c == b'(' || c == b'[' || c == b'{' { depth = depth + 1; k = k + 1; continue }
+        if c == b')' || c == b']' || c == b'}' { depth = depth - 1; k = k + 1; continue }
+        if c == b'=' && depth == 0 {
+            let prev = if k > 0 { t[k - 1] } else { b' ' }
+            let next = if k + 1 < t.len { t[k + 1] } else { b' ' }
+            let is_cmp = prev == b'=' || prev == b'!' || prev == b'<' || prev == b'>' || next == b'='
+            let is_arrow = next == b'>'
+            if !is_cmp && !is_arrow { return true }
+        }
+        k = k + 1
+    }
+    false
+}
+
+/**
+ * snippet_stmts_have_return — does the snippet's STATEMENT half contain a `return` keyword anywhere?
+ * Such a snippet is refused by the fold: in the virtual main a top-level `return e` SETS THE EXIT
+ * CODE, while inside the `void entry()` the fold moves those statements into, the very same `return
+ * e` returns a value from a void function and is rejected. Rewriting it would mean deciding, per
+ * `return`, whether it exits the program or a nested lambda — a judgement this module has no way to
+ * make from source text, and one build is not worth guessing at.
+ *
+ * The scan is a WORD scan outside string/char literals, so `"return"` inside a literal never counts.
+ * A `return` inside a COMMENT does count — that only ever costs the snippet its fold, never a wrong
+ * answer, and the cheap conservative reading is the right trade here.
+ *
+ * @param stmts  the snippet's statement half (`SnippetSplit.stmts`)
+ * @return       true when a `return` keyword appears in it
+ */
+fn snippet_stmts_have_return(stmts: str) -> bool {
+    mut open = false
+    mut quote: byte = b'"'
+    mut k: u64 = 0
+    loop {
+        if k >= stmts.len { break }
+        let c = stmts[k]
+        if open {
+            if c == b'\\' { k = k + 2; continue }
+            if c == quote { open = false }
+            k = k + 1
+            continue
+        }
+        if c == b'"' || c == b'\'' { open = true; quote = c; k = k + 1; continue }
+        if c == b'r' && snippet_word_at(stmts, k, "return") { return true }
+        k = k + 1
+    }
+    false
+}
+
+/**
+ * snippet_word_at — does `word` occur in `s` at `at` as a WHOLE identifier — neither preceded nor
+ * followed by an identifier byte? The keyword test behind `snippet_stmts_have_return`, so
+ * `returned_value` is not mistaken for a `return`.
+ *
+ * @param s     the text
+ * @param at    the candidate start offset
+ * @param word  the keyword to match
+ * @return      true when `word` sits at `at` on identifier boundaries
+ */
+fn snippet_word_at(s: str, at: u64, word: str) -> bool {
+    if at + word.len > s.len { return false }
+    if teko::str::slice(s, at, at + word.len) != word { return false }
+    if at > 0 && snippet_is_ident_byte(s[at - 1]) { return false }
+    let after = at + word.len
+    if after < s.len && snippet_is_ident_byte(s[after]) { return false }
+    true
+}
+
+/**
+ * snippet_is_ident_byte — is `c` a byte an identifier may contain (letter, digit, `_`)? The
+ * word-boundary predicate.
+ *
+ * @param c  the byte
+ * @return   true for a letter, a digit or `_`
+ */
+fn snippet_is_ident_byte(c: byte) -> bool {
+    is_ascii_alpha(c) || (c >= b'0' && c <= b'9') || c == b'_'
+}
+
+/**
+ * regr_env_has — does `env` carry the exact `K=V` token `tok`?
+ *
+ * @param env  the row's child env
+ * @param tok  the token to look for
+ * @return     true when present
+ */
+fn regr_env_has(env: []str, tok: str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= env.len { break }
+        if env[i] == tok { return true }
+        i = i + 1
+    }
+    false
+}
+
+/**
+ * regr_group_module_text — the generated module file for ONE member snippet: its top-level
+ * DECLARATIONS verbatim, then its top-level STATEMENTS wrapped in `pub fn entry()`.
+ *
+ * Declarations and statements land in the SAME file (and therefore the same namespace), which is
+ * strictly better than the ungrouped shape's `main.tks` + `src/regr_decls.tks` split — a snippet's
+ * statements go on seeing its own declarations unqualified, while another member's same-named
+ * declaration is a different namespace entirely.
+ *
+ * @param src_text  the member's inline snippet source
+ * @return          the module file's whole text
+ */
+fn regr_group_module_text(src_text: str) -> str {
+    let split = split_snippet_decls_and_stmts(src_text)
+    let head = teko::str::slice(split.stmts, 0, split.stmts.len - split.tail.len)
+    let tail = tkr_trim(split.tail)
+    let body = if snippet_tail_is_value(tail) { head ~ "exit(" ~ tail ~ ")\n" } else { head ~ tail ~ "\n" }
+    split.decls ~ "\n/** The scenario body this group member runs. */\npub fn entry() {\n" ~ body ~ "}\n"
+}
+
+/**
+ * regr_group_manifest_text — the generated `.tkp` of a group project: a `binary` artifact named
+ * `REGR_GROUP_PROJECT_NAME` rooted at `src`, so every `src/m<k>/` directory becomes its own
+ * namespace (`discover`'s directory rule) and the generated `main.tks` at the project root stays the
+ * virtual-main entry.
+ *
+ * @return the `.tkp` text
+ */
+fn regr_group_manifest_text() -> str {
+    "name = \"" ~ REGR_GROUP_PROJECT_NAME ~ "\"\nsource = \"src\"\n\n[artifact]\nkind = \"binary\"\n"
+}
+
+/**
+ * regr_group_dispatch_line — the generated `main.tks` line that routes the selector to ONE member's
+ * `entry()`. `hit` is set BEFORE the call so an entry that DIVERGES (`exit(…)`, the common case)
+ * and one that FALLS THROUGH are handled by the same line.
+ *
+ * @param module  the member's namespace segment
+ * @return        the dispatcher line
+ */
+fn regr_group_dispatch_line(module: str) -> str {
+    $"if regr_entry == \"{module}\" {{ regr_hit = true; {module}::entry() }}\n"
+}
+
+/**
+ * regr_group_main_text — the generated `main.tks` of a group project: read the selector, run the
+ * member it names, and end.
+ *
+ * The two exits are the whole contract. Falling off the end of the selected `entry()` is a snippet
+ * whose own virtual main fell through, which exits 0 — so the dispatcher's last statement is
+ * `exit(0)`. A selector naming NO member cannot happen (the runner sets it from this very plan) and
+ * therefore must be loud if it ever does: it names the missing entry on stderr and takes
+ * `REGR_GROUP_UNKNOWN_ENTRY_EXIT`, which the row then reports as an exit mismatch.
+ *
+ * The dispatcher deliberately contains no unreachable statement: from the compiler's view every
+ * `entry()` may return, so the trailing `exit(0)` is a reachable end, not dead code.
+ *
+ * @param dispatch  the concatenated per-member dispatcher lines
+ * @return          the `main.tks` text
+ */
+fn regr_group_main_text(dispatch: str) -> str {
+    mut out = $"let regr_entry = match teko::env::var(\"{REGR_GROUP_ENTRY_VAR}\") {{ str as v => v; error => \"\" }}\n"
+    out = out ~ "mut regr_hit = false\n"
+    out = out ~ dispatch
+    out = out ~ "if !regr_hit {\n"
+    out = out ~ "    teko::io::eprintln(teko::str::concat(\"teko: regression group: no member entry named \", regr_entry))\n"
+    out = out ~ $"    exit({REGR_GROUP_UNKNOWN_ENTRY_EXIT})\n"
+    out = out ~ "}\n"
+    out = out ~ "exit(0)\n"
+    out
+}
+
+/**
+ * regr_row_source — the SNIPPET TEXT a row contributes to a group, whichever way the row spells it:
+ * the `Given source inline` body, or the contents of the `Given source = "<file>"` file resolved
+ * against `regr_dir`. "" when the row carries neither (a project-based row) or when the named file
+ * cannot be read.
+ *
+ * A file-based row folds exactly like an inline one, and it HAS to: since the owner banned inline
+ * code in a `.tkr` ("está proibido inline code em tkr"), a `.tkr` can only name its snippet as a
+ * file — so a fold that only understood `source_inline` would have quietly charged one build per
+ * scenario for the whole corpus, which is the cost the fold exists to remove. Measured on the .31
+ * corpus at the moment the ban landed: the F5 backend-differential rows alone went from 2 grouped
+ * builds to 30 individual ones until this function existed.
+ *
+ * An unreadable file is NOT an error here: the ordinary run reports a missing `Given source` as the
+ * manifest error it is, and planning must never be the thing that reports it (the same rule
+ * `regr_plan_file` follows for an unparseable `.tkr`).
+ *
+ * @param regr_dir  the directory the row's `.tkr` lives in (a `Given source` is relative to it)
+ * @param t         the lowered row
+ * @return          the snippet text, or "" when the row has none
+ */
+fn regr_row_source(regr_dir: str, t: Tkr) -> str {
+    if t.source_inline.len > 0 { return t.source_inline }
+    if t.source_file.len == 0 { return "" }
+    match teko::io::read_file(regr_dir ~ "/" ~ t.source_file) { str as s => s; error => "" }
+}
+
+/**
+ * regr_row_groupable — may this row share a build with the other rows of its configuration? Every
+ * exclusion is stated (and argued) in this file's header; the order here is cheapest-test-first.
+ *
+ * @param regr_dir  the directory the row's `.tkr` lives in (to resolve a `Given source` file)
+ * @param t         the lowered row
+ * @return          true when the row may be folded into a group
+ */
+fn regr_row_groupable(regr_dir: str, t: Tkr) -> bool {
+    if t.kind == TkrKind::CompileFail { return false }
+    if t.dep_dir.len > 0 || t.in_place { return false }
+    if t.check_wellformed { return false }
+    if target_toolchain_skip_reason(t.target).len > 0 { return false }
+    let src = regr_row_source(regr_dir, t)
+    if src.len == 0 { return false }
+    !snippet_stmts_have_return(split_snippet_decls_and_stmts(src).stmts)
+}
+
+/**
+ * snippet_head_ident_after — the identifier that follows `kw` at the head of `head` (a chunk's text
+ * with its leading modifier tokens already stripped), or "" when `head` does not open with `kw`.
+ * The name-claim reader: `type Point = struct …` yields `Point`.
+ *
+ * @param head  the declaration head, past any `pub`/`exp`/`unsafe`/`extern` modifier
+ * @param kw    the declaration keyword to match, trailing space included (e.g. `"type "`)
+ * @return      the declared name, or "" when `head` does not start with `kw`
+ */
+fn snippet_head_ident_after(head: str, kw: str) -> str {
+    if !mf_starts_with(head, kw) { return "" }
+    mut k = kw.len
+    loop {
+        if k >= head.len { break }
+        if head[k] != b' ' && head[k] != b'\t' { break }
+        k = k + 1
+    }
+    mut e = k
+    loop {
+        if e >= head.len { break }
+        if !snippet_is_ident_byte(head[e]) { break }
+        e = e + 1
+    }
+    teko::str::slice(head, k, e)
+}

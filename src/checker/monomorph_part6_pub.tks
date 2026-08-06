@@ -1,0 +1,112 @@
+
+
+// ── the driver ───────────────────────────────────────────────────────────────────────────
+// PHASE 1 — walk every NON-generic TFunction body and every loose top-level statement (with an
+// EMPTY subst) to collect SEED instantiations + rewritten bodies; DROP generic functions from the
+// output; pass TypeDecl/UseDecl through. PHASE 2 — fixpoint: for each queued MonoInst not yet
+// stamped, look up the generic fn and STAMP it (clone with concrete param annotations + return
+// type + body rewritten through the inst's Subst, name = mangled, type_params = []), collecting
+// transitively-needed insts. A total-instantiation CEILING bounds polymorphic recursion (M.1).
+pub fn monomorphize(prog: TProgram, table: TypeTable) -> TProgram | error {
+    // NO-OP GUARD: no generic function → return UNCHANGED (the non-generic corpus is byte-identical).
+    mut any_generic = false
+    mut g = 0
+    loop {
+        if g >= prog.items.len { break }
+        match prog.items[g] {
+            TFunction as f => { if f.type_params.len > 0 { any_generic = true } }
+            parser::TypeDecl as d => { if d.type_params.len > 0 { any_generic = true } }   // (S4) generic type-decl
+            _ => { }
+        }
+        g++
+    }
+    if !any_generic { return prog }
+
+    let empty_s = Subst { params = teko::list::empty(); names = teko::list::empty(); types = teko::list::empty() }
+
+    // PHASE 1 — rewrite non-generic items; drop generic fns; collect seed insts.
+    mut kept: []TItem = teko::list::empty()
+    mut queue: []MonoInst = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            TFunction as f => {
+                let is_droppable = f.type_params.len > 0 || is_generic_template_method(f, table)
+                if !is_droppable {
+                    let wb = match mono_block(f.body, empty_s, prog.items, table) { WBlock as w => w; error as e => return e }
+                    let nf = TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = wb.stmts; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
+                    kept = teko::list::push(kept, nf)
+                    queue = mono_inst_concat(queue, wb.insts)
+                }
+            }
+            TStatement as ts => {
+                let w = match mono_tstmt(ts, empty_s, prog.items, table) { WStmt as x => x; error as e => return e }
+                kept = teko::list::push(kept, w.stmt)
+                queue = mono_inst_concat(queue, w.insts)
+            }
+            parser::TypeDecl as d => {
+                // (S4) DROP a generic type-decl TEMPLATE (`type Box<T>`); its concrete instances are
+                // appended below from the table. A non-generic decl passes through unchanged.
+                if d.type_params.len == 0 { kept = teko::list::push(kept, prog.items[i]) }
+            }
+            _ => kept = teko::list::push(kept, prog.items[i])
+        }
+        i++
+    }
+
+    let minsts = match stamp_all_instance_methods(prog.items, table) { WFnList as wl => wl; error as e => return e }
+    kept = append_instance_methods(kept, minsts.fns)
+    queue = mono_inst_concat(queue, minsts.insts)
+
+    // PHASE 2 — fixpoint stamping. The queue grows as a stamped body discovers further insts;
+    // a `stamped` ledger (mangled names) dedups. The ceiling bounds polymorphic recursion (M.1).
+    let ceiling = 5000
+    mut stamped: []MonoInst = teko::list::empty()
+    mut qi = 0
+    loop {
+        if qi >= queue.len { break }
+        let inst = queue[qi]
+        qi++
+        if mono_seen(stamped, inst.mangled) { continue }   // already stamped → skip
+        if stamped.len >= ceiling {
+            return error { message = "monomorphization exceeded the instantiation ceiling (5000) — likely unbounded polymorphic recursion" }
+        }
+        stamped = teko::list::push(stamped, inst)
+        let gf = match find_generic_fn(prog.items, inst.fn_name) {
+            TFunction as f => f
+            null => return error { message = teko::str::concat("internal: monomorph could not find generic fn ", inst.fn_name) }
+        }
+        // (W11/S6) CONSTRAINT CHECK — gate this instantiation's concrete bindings before stamping.
+        match check_constraints(gf.type_params, gf.type_constraints, inst.s, table) { error as e => return e; null => { } }
+        // STAMP: concrete param annotations, substituted return type, body rewritten through the Subst.
+        mut nparams: []parser::Param = teko::list::empty()
+        mut pi = 0
+        loop {
+            if pi >= gf.params.len { break }
+            nparams = teko::list::push(nparams, parser::Param { name = gf.params[pi].name; has_type = true; type_ann = subst_typeexpr(gf.params[pi].type_ann, inst.s); is_params = gf.params[pi].is_params; has_default = gf.params[pi].has_default; default_expr = gf.params[pi].default_expr })
+            pi++
+        }
+        let wb = match mono_block(gf.body, inst.s, prog.items, table) { WBlock as w => w; error as e => return e }
+        queue = mono_inst_concat(queue, wb.insts)
+        let no_tps: []str = teko::list::empty()
+        let no_tcs: []parser::ConstraintExpr = teko::list::empty()
+        let sf = TFunction { name = inst.mangled; type_params = no_tps; type_constraints = no_tcs; params = nparams; return_type = subst_type(gf.return_type, inst.s); body = wb.stmts; vis = gf.vis; has_doc = gf.has_doc; doc = gf.doc; namespace = gf.namespace; file = gf.file; line = gf.line; col = gf.col; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = gf.has_arena_size; arena_size = gf.arena_size }
+        kept = teko::list::push(kept, sf)
+    }
+
+    // (S4 type-generics) APPEND the concrete type-decl INSTANCES stamped by the instantiation pass
+    // (the `__g__`-marked table entries), so codegen emits the concrete struct/variant. Generic
+    // templates were dropped above. Dedup vs kept (a dep may already carry an instance).
+    let insts2 = table_generic_instances(table)
+    mut ii = 0
+    loop {
+        if ii >= insts2.len { break }
+        let d = insts2[ii]
+        ii++
+        if mono_kept_has_type(kept, d.name) { continue }
+        kept = teko::list::push(kept, d)
+    }
+
+    TProgram { items = kept }
+}

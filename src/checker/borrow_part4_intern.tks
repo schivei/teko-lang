@@ -1,0 +1,134 @@
+use teko::parser
+
+
+/**
+ * Collect `f`'s own PARAMETER names, in declaration order (index `i` names parameter `i`).
+ *
+ * @param params  the function's parameters
+ * @return        `params[i].name`, in order
+ */
+fn param_name_list(params: []parser::Param) -> []str {
+    mut out: []str = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= params.len { break }
+        out = teko::list::push(out, params[i].name)
+        i++
+    }
+    out
+}
+
+/**
+ * The 0-based index of `name` in `xs`, or -1 when absent.
+ *
+ * @param xs    the name list
+ * @param name  the name sought
+ * @return      its index, or -1
+ */
+fn str_list_index(xs: []str, name: str) -> i64 {
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        if xs[i] == name { return i }
+        i++
+    }
+    -1
+}
+
+/**
+ * Collect `f`'s TOP-LEVEL `let`/`mut` local definitions (a nested block's binding is out of scope by
+ * the time a later top-level statement could read it, so this is exact, not just bounded).
+ *
+ * @param body  the function's typed statement block
+ * @return      one `LocalDef` per top-level simple-name binding, in order
+ */
+fn collect_locals(body: []TStatement) -> []LocalDef {
+    mut out: []LocalDef = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= body.len { break }
+        out = collect_local_from_stmt(body[i], out)
+        i++
+    }
+    out
+}
+
+/**
+ * Record a `TBinding`'s local definition (a `TAssign`/other statement contributes none — see
+ * `LocalDef`'s own doc for why a later reassignment is not tracked).
+ *
+ * @param s    the statement
+ * @param acc  the local definitions collected so far
+ * @return     `acc`, plus `s`'s local definition when `s` is a `TBinding`
+ */
+fn collect_local_from_stmt(s: TStatement, acc: []LocalDef) -> []LocalDef {
+    match s {
+        TBinding as b => bind_local(b, acc)
+        _ => acc
+    }
+}
+
+/**
+ * Record a binding's target name and value as a `LocalDef` (a destructure pattern names no single
+ * local, so it is skipped — its constituent names are unresolvable and fall back conservatively at
+ * their own read sites).
+ *
+ * @param b    the binding
+ * @param acc  the local definitions collected so far
+ * @return     `acc` with `b`'s definition appended (when it binds a simple name)
+ */
+fn bind_local(b: TBinding, acc: []LocalDef) -> []LocalDef {
+    match b.target {
+        parser::SimpleName as sn => teko::list::push(acc, LocalDef { name = sn.name; value = b.value })
+        parser::DestructurePattern => acc
+    }
+}
+
+/**
+ * Look up a top-level local's defining value by name, or `null` when `name` is not a locally-defined
+ * binding.
+ *
+ * @param locals  the function's local definitions
+ * @param name    the name sought
+ * @return        its defining expression, or `null`
+ */
+fn local_def_find(locals: []LocalDef, name: str) -> TExpr | null {
+    mut i = 0
+    loop {
+        if i >= locals.len { break }
+        if locals[i].name == name { return locals[i].value }
+        i++
+    }
+    null
+}
+
+/**
+ * Build the resolution context for summarizing `f`: its parameter names, its top-level locals, and
+ * the bottom-up callee environment the driver has built so far.
+ *
+ * @param f           the function being summarized
+ * @param callee_sum  the already-known callee summaries
+ * @return            `f`'s resolution context
+ */
+fn borrow_ctx_of(f: TFunction, callee_sum: BorrowSummaryEnv) -> BorrowCtx {
+    BorrowCtx { param_names = param_name_list(f.params); locals = collect_locals(f.body); env = callee_sum }
+}
+
+/**
+ * Union the borrow contribution of every escaping candidate expression into one accumulator.
+ *
+ * @param vals   the escaping candidate expressions
+ * @param ctx    the resolution context
+ * @param table  the program's type table
+ * @return       the union of every candidate's borrow contribution
+ */
+fn fold_escaping_borrow(vals: []TExpr, ctx: BorrowCtx, table: TypeTable) -> BorrowAcc {
+    mut acc = no_borrow()
+    mut i = 0
+    loop {
+        if i >= vals.len { break }
+        acc = union_borrow(acc, resolve_borrow(vals[i], ctx, teko::list::empty(), table))
+        i++
+    }
+    acc
+}

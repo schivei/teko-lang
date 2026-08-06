@@ -1,0 +1,118 @@
+
+/**
+ * DiagSeverity — the LSP severity of a diagnostic: Error, Warning, Info, or Hint. The protocol
+ * encodes these as the integers 1..4 (`severity_code`); the enum keeps the wire mapping in one place
+ * so a producer names an intent rather than a magic number.
+ *
+ * @since 0.3.1.0 (LSP crumb A)
+ */
+pub type DiagSeverity = enum { Error; Warning; Info; Hint }
+
+/**
+ * LspDiagnostic — one positioned, structured diagnostic ready to encode as an LSP `Diagnostic`. It
+ * carries a RANGE (start and end, both 0-based as the protocol demands) and a severity — the two
+ * facts the checker's flat `file:line:col: msg` string loses. The range's start is the reported
+ * position; its end extends over the identifier token under that position (`word_end_col`) so the
+ * editor draws a visible squiggle instead of a zero-width caret.
+ *
+ * @since 0.3.1.0 (LSP crumb A)
+ */
+pub type LspDiagnostic = struct {
+    /** the 0-based line of the range start. */
+    start_line: u32
+    /** the 0-based character (UTF-16-agnostic byte column) of the range start. */
+    start_col: u32
+    /** the 0-based line of the range end (same as `start_line` for a single-token range). */
+    end_line: u32
+    /** the 0-based character just past the range end. */
+    end_col: u32
+    /** Error / Warning / Info / Hint. */
+    severity: DiagSeverity
+    /** the diagnostic text, with the `file:line:col` prefix already stripped. */
+    message: str
+}
+
+/**
+ * diagnose_document — the LSP's front-end pass over ONE open document: lex + parse + type-check the
+ * buffer and return every diagnostic as a structured, ranged `LspDiagnostic`. A lex/parse fault yields
+ * the single located diagnostic that stopped the parse; a clean parse runs the checker's
+ * `collect_diagnostics_structured` (crumb D: the whole-program, non-fail-fast, SEVERITY-KNOWN seam)
+ * and maps each `checker::Diagnostic` to a range. A clean document yields an empty list — the client
+ * then clears its squiggles.
+ *
+ * v1 checks the document in ISOLATION (no cross-file dependency resolution), so a reference to a
+ * symbol defined in another project file surfaces as unresolved; whole-project checking with an
+ * unsaved-buffer override is the design's crumb E.
+ *
+ * @param path  the document path (its diagnostics' `file`)
+ * @param text  the document buffer
+ * @return      every diagnostic of the buffer, ranged and severity-tagged (empty ⇒ clean)
+ * @since 0.3.1.0 (LSP crumb A; re-wired onto the structured seam crumb D)
+ */
+pub fn diagnose_document(path: str, text: str) -> []LspDiagnostic {
+    match document_program(path, text) {
+        parser::Program as prog => {
+            let raw = checker::collect_diagnostics_structured(prog)
+            mut out: []LspDiagnostic = teko::list::empty()
+            mut i: u64 = 0
+            loop {
+                if i >= raw.len { break }
+                out = teko::list::push(out, to_lsp_diagnostic(text, raw[i]))
+                i = i + 1
+            }
+            out
+        }
+        error as e => teko::list::push(teko::list::empty(), make_diag(text, e.line, e.col, DiagSeverity::Error, strip_leading_location(e.message)))
+    }
+}
+
+/**
+ * uri_to_path — the filesystem path of a `file://` document URI (the LSP identifies documents by
+ * URI; the front-end and the grammar choice want a path). A `file:///abs` URI yields `/abs`; a URI
+ * with no `file://` scheme is returned unchanged (best effort — the checker only reads it as a label).
+ *
+ * @param uri  the document URI
+ * @return     the filesystem path
+ * @since 0.3.1.0 (LSP crumb A)
+ */
+pub fn uri_to_path(uri: str) -> str {
+    let scheme = "file://"
+    if has_prefix(uri, scheme) { return teko::str::slice_from(uri, scheme.len) }
+    uri
+}
+
+/**
+ * publish_diagnostics — the `textDocument/publishDiagnostics` NOTIFICATION for `uri`: the server
+ * push that carries a document's current diagnostics to the client. An empty `diags` clears the
+ * document's squiggles (the protocol's contract for "now clean").
+ *
+ * @param uri    the document URI the diagnostics belong to
+ * @param diags  the document's current diagnostics (empty ⇒ clear)
+ * @return       the `publishDiagnostics` notification DOM
+ * @since 0.3.1.0 (LSP crumb A)
+ */
+pub fn publish_diagnostics(uri: str, diags: []LspDiagnostic) -> json::JsonValue {
+    mut items: []json::JsonValue = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= diags.len { break }
+        items = teko::list::push(items, encode_diagnostic(diags[i]))
+        i = i + 1
+    }
+    let params = jobj(["uri", "diagnostics"], [jstr(uri), jarr(items)])
+    jobj(["jsonrpc", "method", "params"], [jstr("2.0"), jstr("textDocument/publishDiagnostics"), params])
+}
+
+/**
+ * diagnostics_notification — run the front-end over the document at `uri` (buffer `text`) and build
+ * the `publishDiagnostics` notification the server writes back. The one call the dispatcher makes for
+ * a `didOpen`/`didChange`.
+ *
+ * @param uri   the document URI
+ * @param text  the document buffer
+ * @return      the `publishDiagnostics` notification DOM
+ * @since 0.3.1.0 (LSP crumb A)
+ */
+pub fn diagnostics_notification(uri: str, text: str) -> json::JsonValue {
+    publish_diagnostics(uri, diagnose_document(uri_to_path(uri), text))
+}

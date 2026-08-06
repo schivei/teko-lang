@@ -1,0 +1,232 @@
+use teko::lexer
+use teko::parser
+
+
+/**
+ * lp_block — local-propagate a straight-line block, THREADING the map through its statements in order
+ * so a `let a = 0xFF` recorded by one statement is visible to the next (`let hi = a >> 4`). Returns both
+ * the rewritten statements and the map the block leaves (a loop's `init` hands its leaving map to the
+ * loop body).
+ *
+ * @param stmts  the block's statements
+ * @param m      the inherited local-const map
+ * @return       the rewritten statements plus the map the block leaves
+ * @since #comptime-fold
+ */
+fn lp_block(stmts: []TStatement, m: LocalConstMap) -> LpBlock {
+    mut cur = m
+    mut out: []TStatement = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= stmts.len { break }
+        let r = lp_stmt(stmts[i], cur)
+        out = teko::list::push(out, r.stmt)
+        cur = r.map
+        i++
+    }
+    LpBlock { stmts = out; map = cur }
+}
+
+/**
+ * lp_stmt — local-propagate one typed statement, returning it plus the map it leaves. A `let`/`const`
+ * binding of a provably-const integer extends the map (`lp_binding`); every other statement propagates
+ * its expressions/nested blocks and leaves the map unchanged. TOTAL over every `TStatement` case.
+ *
+ * @param st  the typed statement
+ * @param m   the local-const map
+ * @return    the statement with local-const references substituted, plus the map it leaves
+ * @since #comptime-fold
+ */
+fn lp_stmt(st: TStatement, m: LocalConstMap) -> LpStmt {
+    match st {
+        TBinding as b => lp_binding(b, m)
+        TAssign as a => LpStmt { stmt = lp_assign(a, m); map = m }
+        TReturn as r => LpStmt { stmt = lp_return(r, st, m); map = m }
+        TLoopStmt as l => LpStmt { stmt = lp_loop(l, m); map = m }
+        TBreakStmt => LpStmt { stmt = st; map = m }
+        TContinueStmt => LpStmt { stmt = st; map = m }
+        TExprStmt as es => LpStmt { stmt = TExprStmt { expr = lp_expr(es.expr, m) }; map = m }
+        TDeferStmt as d => LpStmt { stmt = TDeferStmt { body = lp_scope_block(d.body, m) }; map = m }
+        TAdoptStmt as a => LpStmt { stmt = lp_adopt(a, m); map = m }
+    }
+}
+
+/**
+ * lp_binding — local-propagate a binding: substitute local-const references in its initializer, then
+ * extend the map with the binding's contribution (recorded when it is an immutable, provably-const
+ * integer; otherwise its name is removed so a shadow is never folded).
+ *
+ * @param b  the typed binding
+ * @param m  the local-const map
+ * @return   the binding with its initializer substituted, plus the map it leaves
+ * @since #comptime-fold
+ */
+fn lp_binding(b: TBinding, m: LocalConstMap) -> LpStmt {
+    let value = lp_expr(b.value, m)
+    let m2 = lp_record_binding(m, b.kind, b.target, value)
+    LpStmt { stmt = TBinding { kind = b.kind; target = b.target; bound = b.bound; value = value; di_kind = b.di_kind }; map = m2 }
+}
+
+/**
+ * lp_loop — local-propagate a loop: its run-once `init` preamble threads its recorded consts into the
+ * loop `body`, but neither the init nor the body leak past the loop (the loop is a scope) — the caller
+ * leaves the outer map unchanged.
+ *
+ * @param l  the typed loop statement
+ * @param m  the local-const map
+ * @return   the loop with local-const references substituted
+ * @since #comptime-fold
+ */
+fn lp_loop(l: TLoopStmt, m: LocalConstMap) -> TStatement {
+    let ib = lp_block(l.init, m)
+    let body = lp_scope_block(l.body, ib.map)
+    TLoopStmt { label = l.label; init = ib.stmts; body = body }
+}
+
+/**
+ * lp_adopt — local-propagate an `adopt` region block as a fresh child scope; its optional bound region
+ * name shadows any outer const of the same name inside the body.
+ *
+ * @param a  the typed adopt statement
+ * @param m  the local-const map
+ * @return   the adopt with local-const references substituted
+ * @since #comptime-fold
+ */
+fn lp_adopt(a: TAdoptStmt, m: LocalConstMap) -> TStatement {
+    let scoped = lp_remove(m, a.name)
+    TAdoptStmt { name = a.name; body = lp_scope_block(a.body, scoped) }
+}
+
+/**
+ * lp_return — local-propagate a `return` statement's value (a value-less `return` is unchanged).
+ *
+ * @param r   the typed return statement
+ * @param st  the original statement (returned unchanged when value-less)
+ * @param m   the local-const map
+ * @return    the return with its value substituted
+ * @since #comptime-fold
+ */
+fn lp_return(r: TReturn, st: TStatement, m: LocalConstMap) -> TStatement {
+    if !r.has_value { return st }
+    TReturn { has_value = true; value = lp_expr(r.value, m) }
+}
+
+/**
+ * lp_assign — local-propagate an assignment's value and, for a field target, its typed LHS field-access
+ * expression. An assignment never targets a recorded const (the checker forbids assigning a `let`/
+ * `const`), so it leaves the map unchanged.
+ *
+ * @param a  the typed assignment
+ * @param m  the local-const map
+ * @return   the assignment with local-const references substituted
+ * @since #comptime-fold
+ */
+fn lp_assign(a: TAssign, m: LocalConstMap) -> TStatement {
+    let value = lp_expr(a.value, m)
+    if parser::assign_has_target(a.kind) {
+        return TAssign { kind = a.kind; name = a.name; op = a.op; bound = a.bound; value = value; deref = a.deref; target = lp_expr(a.target, m) }
+    }
+    TAssign { kind = a.kind; name = a.name; op = a.op; bound = a.bound; value = value; deref = a.deref; target = a.target }
+}
+
+/**
+ * lp_function — local-propagate a top-level function's body in a FRESH scope (its parameters are
+ * runtime values, never recorded); signature and metadata are preserved.
+ *
+ * @param f  the typed function
+ * @return   the function with local-const references substituted in its body
+ * @since #comptime-fold
+ */
+fn lp_function(f: TFunction) -> TItem {
+    let body = lp_block(f.body, lp_empty()).stmts
+    TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = body; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
+}
+
+/**
+ * lp_top_item — local-propagate one top-level item: a function body in a fresh scope; a loose top-level
+ * statement (the implicit `main`'s body) threaded through the top-level map so a top-level `let a = 0xFF`
+ * folds a following `exit(a >> 4)`; every declaration passes through unchanged.
+ *
+ * @param it   the program item
+ * @param top  the top-level local-const map (threaded across loose statements)
+ * @return     the item with local-const references substituted, plus the top-level map it leaves
+ * @since #comptime-fold
+ */
+fn lp_top_item(it: TItem, top: LocalConstMap) -> LpItem {
+    match it {
+        TFunction as f => LpItem { item = lp_function(f); map = top }
+        TStatement as s => {
+            let r = lp_stmt(s, top)
+            LpItem { item = r.stmt; map = r.map }
+        }
+        _ => LpItem { item = it; map = top }
+    }
+}
+
+/**
+ * cf_single_byte — a one-element `[]byte` holding `b`, the base case the digit/character builders start
+ * from (the `"0"` of a zero-valued decimal/hex/binary render).
+ *
+ * @param b  the single byte
+ * @return   a `[]byte` of length one holding `b`
+ * @since #comptime-fold
+ */
+fn cf_single_byte(b: byte) -> []byte { teko::list::push(teko::list::empty(), b) }
+
+/**
+ * cf_append_bytes — the concatenation `a ++ b`, appending every byte of `b` onto `a` in order (the
+ * comptime formatter's piece/hole joiner and sign/pad prefixer).
+ *
+ * @param a  the prefix bytes
+ * @param b  the suffix bytes
+ * @return   the bytes of `a` followed by the bytes of `b`
+ * @since #comptime-fold
+ */
+fn cf_append_bytes(a: []byte, b: []byte) -> []byte {
+    mut out = a
+    mut i: u64 = 0
+    loop {
+        if i >= b.len { break }
+        out = teko::list::push(out, b[i])
+        i++
+    }
+    out
+}
+
+/**
+ * cf_reverse_bytes — the reverse of `a`, the last step of every digit builder (digits are produced
+ * least-significant first and emitted most-significant first).
+ *
+ * @param a  the bytes to reverse
+ * @return   the bytes of `a` in reverse order
+ * @since #comptime-fold
+ */
+fn cf_reverse_bytes(a: []byte) -> []byte {
+    mut out: []byte = teko::list::empty()
+    mut i: u64 = a.len
+    loop {
+        if i == (0 to u64) { break }
+        i--
+        out = teko::list::push(out, a[i])
+    }
+    out
+}
+
+/**
+ * cf_project_u64 — the low 64 bits of `bits` after the width/signedness `info` projection the C backend
+ * performs when it casts an interpolation hole to `uint64_t` (the argument every `tk_fmt_x_*`/`tk_fmt_b`
+ * / `tk_u64_to_str` receives). A signed value narrower than 64 bits is SIGN-EXTENDED to 64 (so `-1 to
+ * i8` renders as `FFFFFFFFFFFFFFFF` under `:X`, exactly as `(uint64_t)((int8_t)-1)` does); a width-64
+ * value passes through as-is (the carrier's own top width — `mask_to_width(masked, 64)` is a no-op).
+ *
+ * @param bits  the value's two's-complement bits
+ * @param info  the value's width/signedness
+ * @return      the 64-bit pattern the runtime formatter receives
+ * @since #comptime-fold
+ */
+fn cf_project_u64(bits: u64, info: IntInfo) -> u64 {
+    let masked = mask_to_width(bits, info.width)
+    if info.width >= 64 { return mask_to_width(masked, 64) }
+    if info.is_signed && bit_set(masked, info.width - 1) { return masked | (width_mask(64) ^ width_mask(info.width)) }
+    masked
+}

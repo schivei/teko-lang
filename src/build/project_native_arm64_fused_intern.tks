@@ -1,0 +1,294 @@
+// src/build/project.tks   (namespace 'teko::build')
+//
+// The PROJECT ORCHESTRATION entry layer — the canonical Teko ORIGINAL of the project
+// surfaces in src/driver.c (project_frontend / tk_compile_project / tk_run_project) and
+// the directory resolution in main.c (project_dir_of). main.tks dispatches here:
+//   teko build <dir>  → compile_project  (front-end → native codegen)
+//   teko run   <dir>  → run_project      (front-end → native codegen + execute, debug profile)
+//   teko <projarg>    → project_dir_of   (a `.tkp` → its dir; else the dir as-is)
+//
+// FAITHFUL-NOT-LITERAL (M.3). It mirrors the C twins' SHAPE and contracts in native Teko:
+// the C uses out-params (project_frontend(dir, &prog, &manifest)); Teko has NO out-params,
+// so the shared front-end returns a small `Frontend` struct (prog + manifest), as
+// `Frontend | error`. Both entries (build/run) run the SAME front-end AND the SAME
+// codegen→cc backend; `run` additionally executes the resulting binary (the interpreter this once
+// diverged to is retired, #524).
+
+use teko::parser
+use teko::lexer
+use teko::checker
+use teko::codegen
+use teko::emit
+use teko::compress
+use teko::coverage
+
+ * @return the cross classification for this build
+ * @since 0.3.1
+ */
+fn resolved_cross_note() -> CrossNote { cross_note(resolved_target()) }
+
+/**
+ * LinkTargetKeys — the keys a deferred `[extern.libs.<key>]` section is matched against, so the
+ * LINK line and the M.3 validators apply ONE applicability rule instead of two (D39).
+ *
+ * @since 0.3.1
+ */
+type LinkTargetKeys = struct {
+    /**
+     * The BUILD's OS as `target_os` resolves it (the `[extern] target` triple, else the host) — the
+     * pre-0.3.1 match, kept verbatim so no existing manifest changes meaning.
+     */
+    build_os: str
+    /**
+     * The RESOLVED TARGET's own OS — what "any arch of that OS" (LEGISLATION:426) means for a CROSS
+     * build, where the build host's OS is not the OS being linked for.
+     */
+    emit_os: str
+    /** The resolved target's canonical os-arch name — the ratified §4.2 arch key. */
+    os_arch: str
+}
+
+/**
+ * link_target_keys — the applicability keys for THIS build's link line: `target_os`'s answer (the
+ * historic key, unchanged), the resolved target's own OS, and the resolved target's os-arch name.
+ *
+ * @param m  the resolved manifest (its `[extern] target` triple feeds `target_os`)
+ * @return   the three keys a deferred section may match
+ * @since 0.3.1
+ */
+fn link_target_keys(m: Manifest) -> LinkTargetKeys {
+    let t = resolved_target()
+    LinkTargetKeys { build_os = target_os(m); emit_os = target_os_name(t); os_arch = target_name(t) }
+}
+
+/**
+ * target_link_keys — the applicability keys for a target judged ON ITS OWN, with no build around
+ * it: the M.3 validators ask "is this lib available FOR THIS TARGET", which is a question about the
+ * target, not about the host or the `cc` triple seam, so both OS slots are the target's own OS.
+ *
+ * @param t  the resolved own-backend target
+ * @return   the three keys a deferred section may match for `t`
+ * @since 0.3.1
+ */
+fn target_link_keys(t: NativeTarget) -> LinkTargetKeys {
+    LinkTargetKeys { build_os = target_os_name(t); emit_os = target_os_name(t); os_arch = target_name(t) }
+}
+
+/**
+ * os_lib_key_matches — does a deferred `[extern.libs.<key>]` section apply? The section key is
+ * EITHER a bare OS — matching any arch of that OS (LEGISLATION:426), which for a CROSS build means
+ * the OS being linked FOR as well as the historic `target_os` answer — OR a full os-arch name,
+ * matching exactly one target (the ratified §4.2 arch-key fill). Additive by construction: every
+ * key that matched before still matches, so no existing manifest changes meaning. An empty key
+ * (a malformed `[extern.libs.]` header) matches nothing.
+ *
+ * @param key   the section key as written in the manifest
+ * @param keys  the build's (or the target's) applicability keys
+ * @return      true iff the section's flags belong on this link line
+ * @since 0.3.1
+ */
+fn os_lib_key_matches(key: str, keys: LinkTargetKeys) -> bool {
+    if key.len == 0 { return false }
+    key == keys.build_os || key == keys.emit_os || key == keys.os_arch
+}
+
+/**
+ * strip_trailing_slash — `dir` without a single trailing `/`, so a joined
+ * `<dir>/<stem>` never doubles the separator (`./bin/` → `./bin`). Returns `dir`
+ * unchanged when it is empty or has no trailing slash.
+ *
+ * @param dir  the directory path
+ * @return     `dir` with one trailing `/` removed, if present
+ */
+fn strip_trailing_slash(dir: str) -> str {
+    if dir.len > 0 && dir[dir.len - 1] == b'/' { return teko::str::slice_to(dir, dir.len - 1) }
+    dir
+}
+
+/**
+ * mkdir_p — create `dir` and every missing parent, since `teko::fs::mkdir` is a single
+ * `mkdir(2)` (it will not create `target/debug` unless `target` already exists). Walk the
+ * path left to right, creating each `/`-terminated prefix in turn, then the full path; an
+ * already-existing level is a no-op (`tk_rt_mkdir` treats EEXIST as success). Used by the
+ * `teko run` debug builder, whose scratch dir (`target/debug`) is two levels deep.
+ *
+ * @param dir  the directory to create (with any parents it needs)
+ * @return     an `error` when a level cannot be created, else `null` on success
+ */
+fn mkdir_p(dir: str) -> error | null {
+    mut i: u64 = 0
+    loop {
+        if i >= dir.len { break }
+        if dir[i] == b'/' && i > 0 {
+            match teko::fs::mkdir(teko::str::slice_to(dir, i)) { error as e => return e; null => { } }
+        }
+        i = i + 1
+    }
+    teko::fs::mkdir(dir)
+}
+
+/**
+ * DwarfFuncFact — one function's already-known DWARF facts (D1.4/D1.5's build glue): the mangled
+ * `.text` symbol, its qualified Teko name, its declaration file/line (from the checker's
+ * `checker::TFunction`, the SAME source `.tsym` v1 already reads via `codegen::tk_emit_tsym`), and
+ * its `.text` byte offset (from the encoded module's symbol table). Everything a `--debug=lines`
+ * build can honestly describe before D1.2 (`MLineMark`) lands statement-level address→line rows —
+ * ONE row per function, at its declaration position, is a real function-granularity breakpoint, not
+ * a fabricated finer resolution.
+ *
+ * @since 0.3.1 debugger piso, D1.4/D1.5
+ */
+type DwarfFuncFact = struct {
+    /** the mangled `.text` symbol (`teko::lir::mangle_fn_symbol(f.namespace, f.name)`). */
+    symbol: str
+    /** the qualified Teko name (`ns::name`, or bare `name` with no namespace). */
+    teko_name: str
+    /** the 1-based declaration file. */
+    file: str
+    /** the 1-based declaration line. */
+    line: u32
+    /** the function's `.text` byte offset. */
+    offset: u32
+}
+
+/**
+ * DwarfSymLookup — the outcome of `dwarf_find_text_symbol` (option-struct, M.2): `found` is false
+ * when `name` names no DEFINED, GLOBAL, `.text`-section symbol in the encoded module, in which case
+ * the function was never emitted (an unreferenced or dead-code-eliminated function) and MUST NOT get
+ * a DWARF entry synthesized from a guess.
+ *
+ * @since 0.3.1 debugger piso, D1.4/D1.5
+ */
+type DwarfSymLookup = struct {
+    /** true iff `name` names a defined `.text` symbol. */
+    found: bool
+    /** the symbol's `.text` byte offset; valid only when `found`. */
+    offset: u32
+}
+
+/**
+ * dwarf_find_text_symbol — the `.text` byte offset of the defined, global symbol named `name`, or
+ * `found = false` when no such symbol exists in `symbols` (the function was never emitted).
+ *
+ * @param symbols  the encoded module's symbol table
+ * @param name     the mangled symbol name to find
+ * @return         the offset, or `found = false`
+ * @since 0.3.1 debugger piso, D1.4/D1.5
+ */
+fn dwarf_find_text_symbol(symbols: []teko::backend::Symbol, name: str) -> DwarfSymLookup {
+    mut i: u64 = 0
+    loop {
+        if i >= symbols.len { break }
+        let s = symbols[i]
+        if s.defined && !s.local && s.sect == (1 to u8) && s.name == name { return DwarfSymLookup { found = true; offset = s.offset } }
+        i = i + 1
+    }
+    DwarfSymLookup { found = false; offset = 0 to u32 }
+}
+
+/**
+ * dwarf_qualified_name — the qualified Teko name a DWARF `DW_AT_name`/`.tsym` `teko_name` shows:
+ * `ns::name` when `f` declares a namespace, else the bare `name`.
+ *
+ * @param f  the typed function
+ * @return   the qualified name
+ * @since 0.3.1 debugger piso, D1.4/D1.5
+ */
+fn dwarf_qualified_name(f: checker::TFunction) -> str {
+    if f.namespace.len == 0 { return f.name }
+    teko::str::concat(f.namespace, "::", f.name)
+}
+
+/**
+ * dwarf_func_fact_of — join one checked function against the encoded module's symbol table into a
+ * `DwarfFuncFact`, or `null` when the function was never emitted (`f.is_extern`, or dead-code
+ * elimination/no reference left no `.text` symbol behind — the honest "nothing to describe" case,
+ * never a synthesized guess).
+ *
+ * @param f        the typed function
+ * @param symbols  the encoded module's symbol table
+ * @return         the joined fact, or `null`
+ * @since 0.3.1 debugger piso, D1.4/D1.5
+ */
+fn dwarf_func_fact_of(f: checker::TFunction, symbols: []teko::backend::Symbol) -> DwarfFuncFact | null {
+    if f.is_extern { return null }
+    let sym = teko::lir::mangle_fn_symbol(f.namespace, f.name)
+    let hit = dwarf_find_text_symbol(symbols, sym)
+    if !hit.found { return null }
+    DwarfFuncFact { symbol = sym; teko_name = dwarf_qualified_name(f); file = f.file; line = f.line; offset = hit.offset }
+}
+
+/**
+ * dwarf_collect_facts — every emitted function's `DwarfFuncFact`, in `prog.items` order (unsorted —
+ * `dwarf_sort_by_offset` orders them by `.text` address, which the DWARF line program requires).
+ *
+ * @param prog     the checked program
+ * @param symbols  the encoded module's symbol table
+ * @return         the joined facts, one per emitted function
+ * @since 0.3.1 debugger piso, D1.4/D1.5
+ */
+fn dwarf_collect_facts(prog: checker::TProgram, symbols: []teko::backend::Symbol) -> []DwarfFuncFact {
+    mut out: []DwarfFuncFact = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            checker::TFunction as f => {
+                match dwarf_func_fact_of(f, symbols) {
+                    DwarfFuncFact as fact => out = teko::list::push(out, fact)
+                    null => { }
+                }
+            }
+            _ => { }
+        }
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * dwarf_insert_by_offset — `sorted` (assumed ascending by `.offset`) with `item` inserted in order.
+ * A plain insertion step — the fact list is one entry per emitted function, never large enough to
+ * need more than this.
+ *
+ * @param sorted  the ascending-by-offset facts so far
+ * @param item    the fact to insert
+ * @return        `sorted` with `item` inserted at its ascending position
+ * @since 0.3.1 debugger piso, D1.4/D1.5
+ */
+fn dwarf_insert_by_offset(sorted: []DwarfFuncFact, item: DwarfFuncFact) -> []DwarfFuncFact {
+    mut out: []DwarfFuncFact = teko::list::empty()
+    mut inserted = false
+    mut i: u64 = 0
+    loop {
+        if i >= sorted.len { break }
+        if !inserted && item.offset < sorted[i].offset {
+            out = teko::list::push(out, item)
+            inserted = true
+        }
+        out = teko::list::push(out, sorted[i])
+        i = i + 1
+    }
+    if !inserted { out = teko::list::push(out, item) }
+    out
+}
+
+/**
+ * dwarf_sort_by_offset — `facts` ordered ascending by `.text` byte offset: the DWARF line program
+ * (`dwarf::debug_line`) is a single monotonic address→line sequence anchored at ONE `set_address`
+ * relocation, so its rows must walk `.text` in emission order, not declaration order.
+ *
+ * @param facts  the unordered facts
+ * @return       the same facts, ascending by `.offset`
+ * @since 0.3.1 debugger piso, D1.4/D1.5
+ */
+fn dwarf_sort_by_offset(facts: []DwarfFuncFact) -> []DwarfFuncFact {
+    mut out: []DwarfFuncFact = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= facts.len { break }
+        out = dwarf_insert_by_offset(out, facts[i])
+        i = i + 1
+    }
+    out
+}

@@ -1,0 +1,279 @@
+/**
+ * tkr_run_grouped_row — run and check ONE row whose artifact was already built, together with every
+ * other row of its configuration, BEFORE the run started (`regr_group.tks`). The row selects its own
+ * snippet inside that artifact through the group selector (`regr_with_entry_env`) and is then checked
+ * by the very same `tkr_run_one_row` an ungrouped row goes through — the fold changes WHERE the
+ * binary came from and nothing about what is asserted of it.
+ *
+ * The row's measurement carries NO build: the one build its group paid for is accounted once, in the
+ * group's own `PhaseTimes`. Counting it again per member would report a build count the run never
+ * performed.
+ *
+ * @param t       the lowered row
+ * @param slot    the row's group artifact and selector
+ * @param prefix  the scratch-file prefix for this row
+ * @param built   the shared project cache, threaded through untouched (a grouped row never uses it)
+ * @return        the row's verdict and its run-only measurement
+ * @since 0.3.1
+ */
+fn tkr_run_grouped_row(t: Tkr, slot: RegrGroupSlot, prefix: str, built: RegrBuilt) -> TkrRowRun {
+    let rv = tkr_run_one_row(regr_with_entry_env(t, slot.module), slot.binp, prefix ~ ".run")
+    TkrRowRun {
+        outcome = rv.outcome; built = built
+        times = PhaseTimes { harness_ns = rv.harness_ns; compile_ns = 0; run_ns = rv.run_ns; builds = 0 }
+    }
+}
+
+/**
+ * regr_row_skip_line — the report line for ONE honest-skipped scenario row: WHICH row, and WHY.
+ * Shaped like the failure line it stands beside (`<scenario>[<row>]: <message>`) so a reader parses
+ * both the same way, and marked `skip` rather than `FAIL` so neither can be mistaken for the other.
+ *
+ * It exists because a COUNT is not an honest report (M.3). The run summary already says how many
+ * rows were skipped, but a bare count cannot be audited: a reader cannot tell a legitimately absent
+ * cross toolchain from a capability that silently stopped working, and the reason — which every
+ * skip already carries in its `RegrOutcome.message` — was being computed and then dropped.
+ *
+ * @param scenario  the scenario's name
+ * @param row       the expanded `Examples` row index
+ * @param reason    the honest reason the row cannot run on this host
+ * @return          the report line
+ * @since 0.3.1
+ */
+fn regr_row_skip_line(scenario: str, row: u64, reason: str) -> str {
+    $"teko: regression skip {scenario}[{row}]: {reason}"
+}
+
+/**
+ * tkr_run_scenarios — run every RUN scenario of a parsed feature, in order: a declarative
+ * (verb-less) scenario is honest-SKIPPED without touching any artifact (0.3.1 C1 — this is what
+ * lets `regressor.tkr`'s meta contract stay living documentation, never a build); every other
+ * scenario expands its `Examples` rows and hands each to `tkr_run_row`. The verdict is the FIRST
+ * failure — labelled with the scenario NAME and row index, so a red CI log names the scenario
+ * instead of leaving the reader to decode a scratch-path index — else a pass carrying the feature's
+ * whole capability-skip tally. A row that is honest-SKIPPED reports its reason on its own line
+ * (`regr_row_skip_line`) as it happens, so the summary's skip COUNT always has an auditable trail
+ * behind it. Compile-fail scenarios are handled by `tkr_run_compile_fail`.
+ *
+ * @param exe       the absolute path to this compiler binary
+ * @param regr_dir  the regressor project directory
+ * @param feat      the parsed feature
+ * @param prefix    the scratch-file prefix for the runs
+ * @param built     the shared project cache carried in from a prior feature (or fresh)
+ * @param groups    the grouped builds this run made before any scenario started
+ * @return          the aggregate run verdict plus the (possibly updated) shared cache
+ * @since 0.3.0.30
+ */
+fn tkr_run_scenarios(exe: str, regr_dir: str, feat: TkrFeature, prefix: str, built: RegrBuilt, groups: RegrGroups) -> FeatureRunResult {
+    mut cur = built
+    mut skips: u64 = 0
+    mut rows: []RowTiming = teko::list::empty()
+    mut si: u64 = 0
+    loop {
+        if si >= feat.scenarios.len { break }
+        let sc = feat.scenarios[si]
+        if tkb_scenario_is_declarative(sc) { si = si + 1; continue }
+        let specs = match tkr_expand_outline(sc) { []Tkr as xs => xs; error as e => return FeatureRunResult { outcome = regr_fail(e.message); built = cur; rows = rows } }
+        mut ri: u64 = 0
+        loop {
+            if ri >= specs.len { break }
+            let rr = tkr_run_row(exe, regr_dir, specs[ri], $"{prefix}.{si}.{ri}", cur, groups)
+            cur = rr.built
+            rows = teko::list::push(rows, RowTiming { feature = feat.name; scenario = sc.name; row = ri; skipped = rr.outcome.skipped; times = rr.times })
+            if !rr.outcome.ok && !rr.outcome.skipped {
+                return FeatureRunResult { outcome = regr_fail($"{sc.name}[{ri}]: {rr.outcome.message}"); built = cur; rows = rows }
+            }
+            if rr.outcome.skipped { teko::io::println(regr_row_skip_line(sc.name, ri, rr.outcome.message)) }
+            skips = skips + rr.outcome.skips
+            ri = ri + 1
+        }
+        si = si + 1
+    }
+    FeatureRunResult { outcome = regr_add_skips(regr_pass(), skips); built = cur; rows = rows }
+}
+
+/**
+ * regr_dir_has_single_tkp — does `regr_dir` contain EXACTLY one `.tkp` manifest? The fail-closed
+ * precondition for `tkr_compile_fail_artifact`'s multi-file fallback: a bare source directory
+ * (not a real project) must never be silently accepted as one just because the runner's own
+ * "no single .tkp manifest" infrastructure error also happens to surface as a non-zero exit,
+ * which `check_compile_fail` cannot distinguish from a genuine compiler rejection.
+ *
+ * @param regr_dir  the directory to probe
+ * @return          true when exactly one `*.tkp` entry is present, false otherwise (including an
+ *                   unreadable directory)
+ * @since 0.3.1
+ */
+fn regr_dir_has_single_tkp(regr_dir: str) -> bool {
+    let entries = match teko::fs::list_dir(regr_dir) { []str as e => e; error => return false }
+    mut count: u64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= entries.len { break }
+        if teko::str::ends_with(entries[i], ".tkp") { count = count + 1 }
+        i++
+    }
+    count == 1
+}
+
+/**
+ * tkr_compile_fail_artifact — resolve ONE compile-fail scenario's build: an inline snippet
+ * (`compile_inline_source`) or an explicit standalone file (`compile_standalone_source`), each
+ * relative to `regr_dir`; with NEITHER declared, falls back to compiling `regr_dir`'s OWN project
+ * (`compile_regressive`) — the multi-file-fixture case, where the rejected construct needs its
+ * full source tree (e.g. a construct spanning two files) and cannot be a single snippet. Guarded
+ * against the project-root recursion (`guard_no_project_build_at_root`) exactly like the RUN
+ * path, and — for the multi-file fallback specifically — fail-closed against `regr_dir` not
+ * actually being a project (`regr_dir_has_single_tkp`) or the scenario omitting the `diagnostic`
+ * it would need to assert against a real compiler-emitted message (0.3.1 M.3: an infrastructure
+ * failure must never be consumed as "the compiler rejected the construct").
+ *
+ * @param exe       the absolute path to this compiler binary
+ * @param regr_dir  the regressor project directory
+ * @param t         the lowered scenario
+ * @param prefix    the scratch-file prefix for this row
+ * @return          the captured build outcome, or an error when the scenario cannot honestly
+ *                   resolve an artifact (a guard rejection, a missing project, or no diagnostic)
+ * @throws          when `regr_dir` is the project root with no inline/explicit source, or the
+ *                   multi-file fallback has no single `.tkp` project or no declared `diagnostic`
+ * @since 0.3.1
+ */
+fn tkr_compile_fail_artifact(exe: str, regr_dir: str, t: Tkr, prefix: str, built: RegrBuilt) -> TkrArtifact | error {
+    if t.source_inline.len > 0 {
+        let comp = compile_inline_source(exe, t.source_inline, with_regr_cov_env(t.env, prefix), prefix)
+        return TkrArtifact { comp = comp; binp = ""; built = built; fresh = true }
+    }
+    if t.source_file.len > 0 {
+        return tkr_standalone_artifact(exe, regr_dir ~ "/" ~ t.source_file, t, prefix, built)
+    }
+    match guard_no_project_build_at_root(regr_dir, t) {
+        error as e => return e
+        null => { }
+    }
+    if !regr_dir_has_single_tkp(regr_dir) || t.diagnostic.len == 0 {
+        return error { message = "a compile-fail scenario with no `Given source`/`Given source inline` needs a `.tkp` project in " ~ regr_dir ~ " and a `Then diagnostic`" }
+    }
+    // The PROJECT's own failing build, CACHED across every scenario of the file exactly as a
+    // passing project build is. A `diagnostics` project holds one source file per rejected
+    // construct and the compiler reports EVERY diagnostic in ONE build (0.3.1 all-diagnostics
+    // ruling), so N scenarios pin N diagnostics against that single build — never N builds.
+    let fresh = !regr_built_serves(built, RegrBuildKind::Project)
+    let nb = tkr_ensure_built(exe, regr_dir, with_regr_cov_env(t.env, prefix), prefix, built)
+    TkrArtifact { comp = nb.comp; binp = nb.binp; built = nb; fresh = fresh }
+}
+
+/**
+ * tkr_run_compile_fail — run the compile-fail scenarios of a parsed feature, returning the same
+ * shape a RUN feature does (verdict + measured rows): a declarative
+ * scenario is honest-SKIPPED; every other scenario resolves its build artifact
+ * (`tkr_compile_fail_artifact` — an inline/explicit-file snippet, or `regr_dir`'s OWN project when
+ * neither is declared) and checks it via `check_compile_fail`. The verdict is the FIRST failure,
+ * else pass.
+ *
+ * @param exe       the absolute path to this compiler binary
+ * @param regr_dir  the regressor project directory
+ * @param feat      the parsed feature
+ * @param prefix    the scratch-file prefix for the compiles
+ * @return          the aggregate compile-fail verdict
+ * @since 0.3.0.30
+ */
+fn tkr_run_compile_fail(exe: str, regr_dir: str, feat: TkrFeature, prefix: str, built: RegrBuilt) -> FeatureRunResult {
+    mut rows: []RowTiming = teko::list::empty()
+    mut cur = built
+    mut si: u64 = 0
+    loop {
+        if si >= feat.scenarios.len { break }
+        let sc = feat.scenarios[si]
+        if tkb_scenario_is_declarative(sc) { si = si + 1; continue }
+        let specs = match tkr_expand_outline(sc) { []Tkr as xs => xs; error as e => return compile_fail_result_at(regr_fail(e.message), rows, cur) }
+        mut ri: u64 = 0
+        loop {
+            if ri >= specs.len { break }
+            let t = specs[ri]
+            let row_prefix = $"{prefix}.{si}.{ri}"
+            let art = match tkr_compile_fail_artifact(exe, regr_dir, t, row_prefix, cur) { TkrArtifact as a => a; error as e => return compile_fail_result_at(regr_fail($"{sc.name}[{ri}]: {e.message}"), rows, cur) }
+            cur = art.built
+            let comp = art.comp
+            let oc = check_compile_fail(t, comp)
+            let times = if art.fresh {
+                PhaseTimes { harness_ns = comp.harness_ns; compile_ns = comp.child_ns; run_ns = 0; builds = 1 }
+            } else {
+                phase_zero()
+            }
+            rows = teko::list::push(rows, RowTiming { feature = feat.name; scenario = sc.name; row = ri; skipped = false; times = times })
+            if !oc.ok { return compile_fail_result_at(regr_fail($"{sc.name}[{ri}]: {oc.message}"), rows, cur) }
+            ri = ri + 1
+        }
+        si = si + 1
+    }
+    compile_fail_result_at(regr_pass(), rows, cur)
+}
+
+/**
+ * compile_fail_result_at — a `FeatureRunResult` for a COMPILE-FAIL feature: its verdict, its
+ * measured rows, and the shared project cache THREADED BACK. A compile-fail feature does build the
+ * regressor project when its scenarios declare no source of their own (the `diagnostics` shape), so
+ * the slot it filled must reach the next feature — otherwise every feature would rebuild it.
+ *
+ * @param oc     the feature's verdict
+ * @param rows   the rows measured before the verdict was reached
+ * @param built  the shared project cache as this feature leaves it
+ * @return       the feature result
+ * @since 0.3.1
+ */
+fn compile_fail_result_at(oc: RegrOutcome, rows: []RowTiming, built: RegrBuilt) -> FeatureRunResult {
+    FeatureRunResult { outcome = oc; built = built; rows = rows }
+}
+
+/**
+ * tkr_feature_is_compile_fail — does the feature's first scenario classify as `compilation fails`?
+ * A feature is uniformly one kind (run-and-check OR compile-fail), so the first scenario's kind
+ * selects the runner path.
+ *
+ * @param feat  the parsed feature
+ * @return      true when the feature is a compile-fail feature
+ * @since 0.3.0.30
+ */
+fn tkr_feature_is_compile_fail(feat: TkrFeature) -> bool {
+    if feat.scenarios.len == 0 { return false }
+    match tkr_lower_scenario(feat.scenarios[0]) { Tkr as t => t.kind == TkrKind::CompileFail; error => false }
+}
+
+/**
+ * run_one_tkr — run one `.tkr` file of a regressor: parse it into `[]TkrFeature`, then for every
+ * feature dispatch on its kind — a compile-fail feature compiles each non-declarative scenario's
+ * `Given source`/`Given source inline` standalone; a RUN feature resolves and runs each
+ * non-declarative scenario's own artifact (`tkr_run_scenarios`), sharing ONE project build lazily
+ * across every RUN feature in the file. Nothing is compiled until a scenario actually needs it, so
+ * a wholly-declarative `.tkr` (living documentation) never touches the filesystem. The verdict is
+ * the FIRST failure across all features, else a pass carrying the file's whole capability-skip
+ * tally (so the run summary can report skips instead of absorbing them into "run"). Every measured
+ * row travels back with it (`TkrFileRun`) for the timing report.
+ *
+ * @param exe       the absolute path to this compiler binary
+ * @param regr_dir  the regressor project directory
+ * @param tkr_name  the `.tkr` basename inside `regr_dir`
+ * @param prefix    the scratch-file prefix for this `.tkr`
+ * @param groups    the grouped builds this run made before any scenario started
+ * @return          the aggregate verdict for the file, plus its measured rows
+ * @since 0.3.0.30
+ */
+fn run_one_tkr(exe: str, regr_dir: str, tkr_name: str, prefix: str, groups: RegrGroups) -> TkrFileRun {
+    let src = match teko::io::read_file(regr_dir ~ "/" ~ tkr_name) { str as s => s; error as e => return file_run_of(regr_fail(e.message), teko::list::empty()) }
+    let feats = match parse_tkr(src) { []TkrFeature as xs => xs; error as e => return file_run_of(regr_fail(e.message), teko::list::empty()) }
+    mut built = RegrBuilt { done = false; kind = RegrBuildKind::None; comp = cap_synthetic(0, ""); binp = ""; srcs = teko::list::empty() }
+    mut skips: u64 = 0
+    mut rows: []RowTiming = teko::list::empty()
+    mut fi: u64 = 0
+    loop {
+        if fi >= feats.len { break }
+        let feat = feats[fi]
+        let fr = run_one_feature(exe, regr_dir, feat, $"{prefix}.f{fi}", built, groups)
+        built = fr.built
+        rows = concat_row_timings(rows, fr.rows)
+        if !fr.outcome.ok && !fr.outcome.skipped { return file_run_of(fr.outcome, rows) }
+        skips = skips + fr.outcome.skips
+        fi = fi + 1
+    }
+    file_run_of(regr_add_skips(regr_pass(), skips), rows)
+}

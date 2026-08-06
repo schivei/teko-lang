@@ -1,0 +1,112 @@
+/** teko::codegen functions (split 46/49 from codegen.tks — mechanical, pure reorg, no logic changes). */
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * Phase 2 — DEFINE every dispatch thunk (deduplicated program-wide). Walks the same pairs as phase
+ * 1; for each vtable's method list emits the instance-method thunks not yet defined.
+ *
+ * @param buf       the output byte buffer to append to
+ * @param prog      the whole typed program
+ * @param vt_table  the checker's type table
+ * @return          the buffer with every dispatch thunk defined
+ * @throws          propagated from the per-vtable thunk emitter on an internal inconsistency
+ * @since #291 (trait/interface vtable dispatch UB fix)
+ */
+fn cg_emit_all_vtthunks(buf: []byte, prog: CgProg, vt_table: checker::TypeTable) -> []byte | error {
+    mut b = buf
+    mut emitted: []str = teko::list::empty()
+    mut ci = 0
+    loop {
+        if ci >= prog.items.len { break }
+        match prog.items[ci] {
+            parser::TypeDecl as cd => {
+                if match cd.body { parser::ClassBody => true; _ => false } {
+                    mut ii = 0
+                    loop {
+                        if ii >= prog.items.len { break }
+                        match prog.items[ii] {
+                            parser::TypeDecl as idd => {
+                                if cg_pair_is_iface_vtable(cd, idd, vt_table) {
+                                    let ms = match checker::iface_methods_by_name(idd.name, vt_table) { []parser::Function as f => f; error => return error { message = "codegen: interface method list failed (internal)" } }
+                                    let r = match cg_emit_vtable_thunks(b, prog, cd.name, idd.name, ms, emitted) { TThunkEmit as e => e; error as err => return err }
+                                    b = r.buf; emitted = r.emitted
+                                }
+                                if cg_pair_is_base_vtable(prog, cd, idd) {
+                                    let bms = match checker::base_vtable_methods(idd.name, vt_table) { []parser::Function as f => f; error => return error { message = "codegen: base method list failed (internal)" } }
+                                    let r = match cg_emit_vtable_thunks(b, prog, cd.name, idd.name, bms, emitted) { TThunkEmit as e => e; error as err => return err }
+                                    b = r.buf; emitted = r.emitted
+                                }
+                            }
+                            _ => { }
+                        }
+                        ii++
+                    }
+                }
+            }
+            _ => { }
+        }
+        ci++
+    }
+    b
+}
+
+/**
+ * Phase 3 — DEFINE every vtable array (slots reference the phase-2 thunks). Walks the same pairs as
+ * phases 1 and 2, emitting the interface vtable (`iface_methods_by_name` slots) and the base vtable
+ * (`base_vtable_methods` slots) for each qualifying pair.
+ *
+ * @param buf       the output byte buffer to append to
+ * @param prog      the whole typed program
+ * @param vt_table  the checker's type table
+ * @return          the buffer with every vtable definition appended
+ * @throws          propagated from the per-vtable definition emitter on an internal inconsistency
+ * @since #291 (trait/interface vtable dispatch UB fix)
+ */
+fn cg_emit_all_vtable_defs(buf: []byte, prog: CgProg, vt_table: checker::TypeTable) -> []byte | error {
+    mut b = buf
+    mut ci = 0
+    loop {
+        if ci >= prog.items.len { break }
+        match prog.items[ci] {
+            parser::TypeDecl as cd => {
+                if match cd.body { parser::ClassBody => true; _ => false } {
+                    mut ii = 0
+                    loop {
+                        if ii >= prog.items.len { break }
+                        match prog.items[ii] {
+                            parser::TypeDecl as idd => {
+                                if cg_pair_is_iface_vtable(cd, idd, vt_table) {
+                                    let ms = match checker::iface_methods_by_name(idd.name, vt_table) { []parser::Function as f => f; error => return error { message = "codegen: interface method list failed (internal)" } }
+                                    b = match cg_emit_vtable_def(b, prog, cd.name, idd.name, ms) { []byte as o => o; error as err => return err }
+                                }
+                                if cg_pair_is_base_vtable(prog, cd, idd) {
+                                    let bms = match checker::base_vtable_methods(idd.name, vt_table) { []parser::Function as f => f; error => return error { message = "codegen: base method list failed (internal)" } }
+                                    b = match cg_emit_vtable_def(b, prog, cd.name, idd.name, bms) { []byte as o => o; error as err => return err }
+                                }
+                            }
+                            _ => { }
+                        }
+                        ii++
+                    }
+                }
+            }
+            _ => { }
+        }
+        ci++
+    }
+    b
+}
+
+/** tk_emit_c — the PROGRAM emission entry (the virtual-main over loose top-level statements).
+    Kept as the public name every caller uses; delegates to tk_emit_c_mode with CgMode::Program so
+    the historical output is byte-identical (the fixpoint is intact). (#265) */
+
+fn tk_emit_c(prog0: checker::TProgram) -> str | error {
+    tk_emit_c_mode(prog0, CgMode::Program)
+}
+
+/** tk_emit_c_export — the reverse-FFI (`abi="c"`) emission entry (FFI-D): the ordinary Program
+    translation unit PLUS the C-ABI export wrappers (`cg_c_export_wrappers_text`) that expose each
+    `exp` function under its C symbol. The export GATE (`check_ffi_export`) must have passed first. */

@@ -1,0 +1,239 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * lift_lambda_symbol — the deterministic symbol for the Nth lifted lambda
+ * body — an assembler-local-style name (`.Lclo<N>`) that never collides
+ * with a Teko-visible symbol (mirrors `rodata_symbol`, A1-7 #382).
+ *
+ * @param u64 id  the lambda's reserved id
+ * @return str  the lifted body's symbol
+ */
+fn lift_lambda_symbol(id: u64) -> str {
+    teko::str::concat(".Lclo", teko::u64_to_str(id))
+}
+
+/**
+ * materialize_thunk_params — append a `param` instruction for every one of
+ * `f0`'s already-declared parameters (env at index 0, the wrapped
+ * function's own parameters after it), in order (A1-7, #382).
+ *
+ * @param LFunc f0  the thunk's (still bodyless) function shell
+ * @param u32 line  the source line to propagate onto each `param`
+ * @param u32 col  the source column to propagate onto each `param`
+ * @return LFunc  `f0` with every parameter materialized into its VReg
+ */
+fn materialize_thunk_params(f0: LFunc, line: u32, col: u32) -> LFunc {
+    mut f = f0
+    mut i: u64 = 0
+    loop {
+        if i >= f.n_params { break }
+        f = append_inst(f, 0, param_inst(i to u32, i to u32, line, col))
+        i++
+    }
+    f
+}
+
+/**
+ * thunk_forward_args — the VRegs `1..n` (skipping VReg 0, the ignored env
+ * parameter) — the argument list a thunk forwards to the wrapped function
+ * (A1-7, #382).
+ *
+ * @param u64 n  the wrapped function's own arity
+ * @return []u32  the VRegs `1..n`, in order
+ */
+fn thunk_forward_args(n: u64, has_ret_len_slot: bool) -> []u32 {
+    mut out: []u32 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= n { break }
+        out = teko::list::push(out, (i + 1) to u32)
+        i++
+    }
+    if has_ret_len_slot {
+        out = teko::list::push(out, (n + 1) to u32)
+    }
+    out
+}
+
+/**
+ * build_closure_thunk — an ENV-FIRST wrapper `LFunc` around `target_sym`: it
+ * accepts the env-first ABI (`env_first_param_types`), ignores the env
+ * parameter, and forwards its own remaining parameters straight through to
+ * `target_sym` — the bridge a bare top-level function needs to be called
+ * uniformly through `LCallIndirect` alongside a genuinely capturing lambda
+ * (A1-7, #382).
+ *
+ * @param str symbol  the thunk's own (lifted) symbol
+ * @param str target_sym  the wrapped function's already-mangled symbol
+ * @param []LType ptypes  the wrapped function's OWN parameter machine
+ *                        classes
+ * @param LType ret_ty  the wrapped function's return machine class
+ * @param u32 line  the source line to propagate onto every emitted inst
+ * @param u32 col  the source column to propagate onto every emitted inst
+ * @return LFunc  the built thunk
+ */
+fn build_closure_thunk(symbol: str, target_sym: str, ptypes: []LType, ret_ty: LType, fat_ret: bool, line: u32, col: u32) -> LFunc {
+    let env_first = env_first_param_types(ptypes)
+    let all_ptypes = if fat_ret { teko::list::push(env_first, LType::Ptr) } else { env_first }
+    let f0 = new_func(symbol, all_ptypes.len to u32, all_ptypes, ret_ty)
+    let f1 = materialize_thunk_params(f0, line, col)
+    let args = thunk_forward_args(ptypes.len, fat_ret)
+    if ltype_is_void(ret_ty) {
+        let f2 = append_inst(f1, 0, void_call_inst(target_sym, args, false, line, col))
+        return append_inst(f2, 0, ret_void_inst(line, col))
+    }
+    let r = alloc_vreg(f1)
+    let f2 = append_inst(r.func, 0, call_inst(r.vreg, target_sym, args, false, line, col, ret_ty))
+    append_inst(f2, 0, ret_inst(r.vreg, line, col))
+}
+
+/**
+ * build_closure_literal — a closure VALUE `{fn@0, env@8}` (§5.3): alloca a
+ * 16-byte slot, store `fn_symbol`'s `LFuncAddr` VReg at offset 0 and
+ * `env_vreg` at offset 8, then COPY the filled slot into runtime storage
+ * (`emit_elem_box`) — the RESULT is that copy's base address (a Ptr VReg),
+ * the same memory shape `lower_closure_fatptr` reads back (A1-7, #382).
+ *
+ * The copy is the closure's OTHER half of the same lifetime rule
+ * `build_lambda_env` documents: both words of a returned closure have to
+ * survive the frame that built it, so boxing only the env would move the
+ * dangling pointer rather than remove it.
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param str fn_symbol  the callable's (already-mangled or lifted) symbol
+ * @param u32 env_vreg  the closure's env VReg (a null-Ptr const when it
+ *                       captures nothing)
+ * @param u32 line  the source line to propagate onto every emitted inst
+ * @param u32 col  the source column to propagate onto every emitted inst
+ * @return Lowered  the advanced context + the closure struct's base address
+ */
+fn build_closure_literal(ctx: LowerCtx, fn_symbol: str, env_vreg: u32, line: u32, col: u32) -> Lowered {
+    let ptr_size = ltype_size(LType::Ptr)
+    let fnaddr = ctx_alloc(ctx)
+    let with_fnaddr = ctx_append(fnaddr.ctx, func_addr_inst(fnaddr.vreg, fn_symbol, line, col))
+    let base = ctx_alloc(with_fnaddr)
+    let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, ptr_size * 2, ptr_size, line, col))
+    let fslot = ctx_alloc(with_alloca)
+    let with_fslot_addr = ctx_append(fslot.ctx, field_addr_inst(fslot.vreg, base.vreg, 0, line, col))
+    let with_fn_store = ctx_append(with_fslot_addr, store_inst(fslot.vreg, fnaddr.vreg, LType::Ptr, line, col))
+    let eslot = ctx_alloc(with_fn_store)
+    let with_eslot_addr = ctx_append(eslot.ctx, field_addr_inst(eslot.vreg, base.vreg, ptr_size, line, col))
+    let with_env_store = ctx_append(with_eslot_addr, store_inst(eslot.vreg, env_vreg, LType::Ptr, line, col))
+    emit_elem_box(Lowered { ctx = with_env_store; vreg = base.vreg }, ptr_size * 2, line, col)
+}
+
+/**
+ * lower_fn_value — a bare top-level function used as a VALUE
+ * (`TVar.is_func`): lift an env-first THUNK wrapping it
+ * (`build_closure_thunk`) so it can be called uniformly through
+ * `LCallIndirect` alongside a genuinely capturing lambda, then build the
+ * closure literal `{fn=thunk, env=null}` — mirrors the C backend's
+ * `(tk_closure){ &<fn>, (void*)0 }` (`codegen.tks:5093-5096`), substituting
+ * the thunk for the raw function address so the ABI stays uniform (A1-7,
+ * #382).
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param checker::TExpr e  the var expression (its type is the referenced
+ *                          function's `Func` signature)
+ * @param checker::TVar v  the fn-as-value var node
+ * @return Lowered | error  the advanced context + the closure literal's base
+ *                          address, or a NAMED internal error
+ */
+fn lower_fn_value(ctx: LowerCtx, e: checker::TExpr, v: checker::TVar) -> Lowered | error {
+    let sig = match func_type_of(e.type) { checker::Func as f => f; error as err => return err }
+    let target_sym = mangle_fn_symbol(v.func_ns, v.name, ctx.flat_symbols)
+    let ptypes = types_to_ltypes(sig.params, ctx.enums)
+    let ret_ty = ltype_of(sig.ret, ctx.enums)
+    let fat_ret = is_fat_type(sig.ret)
+    let id = ctx.lifted.len
+    let thunk_sym = lift_thunk_symbol(id)
+    let thunk = build_closure_thunk(thunk_sym, target_sym, ptypes, ret_ty, fat_ret, e.line, e.col)
+    let ctx2 = ctx_with_lifted(ctx, teko::list::push(ctx.lifted, thunk))
+    let nullo = ctx_alloc(ctx2)
+    let with_null = ctx_append(nullo.ctx, const_int_inst(nullo.vreg, 0, e.line, e.col))
+    build_closure_literal(with_null, thunk_sym, nullo.vreg, e.line, e.col)
+}
+
+/**
+ * lower_closure_fatptr — load both halves of a closure value's `{fn@0,
+ * env@8}` memory layout at address `base`, reusing `lower_iface_fatptr`'s
+ * load sequence (A1-7, #382).
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param u32 base  the closure's base address (a Ptr VReg)
+ * @param u32 line  the source line to propagate onto every emitted inst
+ * @param u32 col  the source column to propagate onto every emitted inst
+ * @return ClosureFatPtr  the advanced context + the loaded target/env VRegs
+ */
+fn lower_closure_fatptr(ctx: LowerCtx, base: u32, line: u32, col: u32) -> ClosureFatPtr {
+    let fp = lower_iface_fatptr(ctx, base, line, col)
+    ClosureFatPtr { ctx = fp.ctx; target = fp.data; env = fp.vtable }
+}
+
+/**
+ * closure_call_args — the indirect-call argument list: `env` prepended to
+ * `rest`, in order — mirrors `iface_call_args`'s `data`-first shape, but for
+ * a closure's env slot (A1-7, #382).
+ *
+ * @param u32 env  the closure's env VReg (goes first)
+ * @param []u32 rest  the remaining (already-lowered) argument VRegs
+ * @return []u32  `env` followed by `rest`, in order
+ */
+fn closure_call_args(env: u32, rest: []u32) -> []u32 {
+    mut out: []u32 = teko::list::push(teko::list::empty(), env)
+    mut i: u64 = 0
+    loop {
+        if i >= rest.len { break }
+        out = teko::list::push(out, rest[i])
+        i++
+    }
+    out
+}
+
+/**
+ * lower_closure_call — a call through a LOCAL closure VALUE
+ * (`TCall.is_closure_call`): the callee's last path segment names the local
+ * (mirrors the C backend's `emit_closure_call`, which reads the same
+ * identifier) — load its `{fn, env}` halves, then `LCallIndirect` through
+ * `fn` with `env` prepended to the remaining (already-lowered) arguments
+ * (A1-7, #382).
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param checker::TExpr e  the call expression (for its type + source
+ *                          position)
+ * @param checker::TCall c  the closure-call node (`c.callee`'s last segment
+ *                          names the local closure variable)
+ * @return Lowered | error  the advanced context + the call's result VReg (0
+ *                          for a void call), or a NAMED internal error when
+ *                          the node is malformed
+ * @throws  the fat-result honest stop (below) when `e.type` is `str`/`[]T` — a closure's
+ *          hidden fat-return out-slot is not yet wired (call-gordo degrau, #382 N2)
+ */
+fn lower_closure_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | error {
+    if is_fat_type(e.type) { return error { message = "native backend N1: fat-pointer closure-call result not yet lowered (N2)" } }
+    if c.callee.segments.len == 0 { return error { message = "native backend N1: empty closure-call path (internal)" } }
+    let name = c.callee.segments[c.callee.segments.len - 1].name
+    let hit = lenv_lookup(ctx.env, name)
+    if !hit.found { return error { message = teko::str::concat("native backend N1: unbound closure local `", name, "` (internal)") } }
+    let fp = lower_closure_fatptr(ctx, hit.vreg, e.line, e.col)
+    let rest = match lower_args(fp.ctx, c.args, callee_param_types(c)) { LoweredArgs as x => x; error as err => return err }
+    lower_call_indirect(rest.ctx, e, fp.target, closure_call_args(fp.env, rest.vregs))
+}
+
+/**
+ * lower_closure_call_fat — the fat-result (`str`/`[]T`) closure-call sibling of
+ * `lower_closure_call`: resolve the local closure, prepend its env to the lowered
+ * explicit args, append one hidden length-out slot address, call indirectly through
+ * the closure target, then load the returned length back out of the slot.
+ */
+fn lower_closure_call_fat(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> LoweredFat | error {
+    if c.callee.segments.len == 0 { return error { message = "native backend N1: empty closure-call path (internal)" } }
+    let name = c.callee.segments[c.callee.segments.len - 1].name
+    let hit = lenv_lookup(ctx.env, name)
+    if !hit.found { return error { message = teko::str::concat("native backend N1: unbound closure local `", name, "` (internal)") } }
+    let fp = lower_closure_fatptr(ctx, hit.vreg, e.line, e.col)
+    let rest = match lower_args(fp.ctx, c.args, callee_param_types(c)) { LoweredArgs as x => x; error as err => return err }
+    lower_len_out_call_indirect(rest.ctx, fp.target, closure_call_args(fp.env, rest.vregs), e)
+}

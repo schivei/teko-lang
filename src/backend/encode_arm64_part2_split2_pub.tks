@@ -1,0 +1,48 @@
+
+/**
+ * compute_frame_layout — build a function's `FrameLayout`: re-derive the
+ * callee-saved save-set (§3.1), lay out the frame slots honoring each
+ * `LAlloca`'s alignment, size the whole frame (0 when frameless), and compute
+ * the outgoing stack-arg area at the bottom of the frame. A pure side-table
+ * pass — it does NOT mutate the block stream, so the A3 interp oracle stays
+ * valid on the pre-encode `MFunc`. Offsets that outrun their encodable fields
+ * are caught at emission time (`A4-bigframe`), not here.
+ *
+ * Frame layout (SP-relative, bottom to top):
+ *   [sp + 0 .. sp + out_bytes)            outgoing stack-arg area (MOutArg slots)
+ *   [sp + out_bytes .. sp + out_bytes + slots_size)  local variable slots
+ *   [sp + callee_base]                    callee-saved registers
+ *   [sp + size - 16]                      FP/LR pair
+ *
+ * @param AbiDescriptor abi  the register file (callee-saved partition)
+ * @param MFunc f  the fully-physical function
+ * @return FrameLayout  the resolved frame side-table
+ */
+pub fn compute_frame_layout(abi: AbiDescriptor, f: MFunc) -> FrameLayout {
+    let saved = collect_callee_saved(abi, f)
+    let slots = compute_slot_offsets(f.frame)
+    let out_bytes = out_arg_bytes(f)
+    let effective_slots_size = slots.slots_size + out_bytes
+    let size = frame_total_size(effective_slots_size, saved, needs_lr_save(f))
+    let shifted_offsets = shift_slot_offsets(slots.offsets, out_bytes)
+    FrameLayout {
+        size = size
+        saved_gpr = saved.gpr
+        saved_fpr = saved.fpr
+        slot_offsets = shifted_offsets
+        out_arg_base = 0
+    }
+}
+
+/**
+ * slot_offset — the SP-relative byte offset of frame slot `slot` under
+ * `layout`, the concrete displacement `MFrameAddr{slot}` resolves to (an ADD
+ * from SP). A direct lookup into the alignment-honoring per-slot map.
+ *
+ * @param FrameLayout layout  the resolved frame
+ * @param u64 slot  the frame-slot index (a valid `MFunc.frame` index)
+ * @return u32  the SP-relative byte offset
+ */
+pub fn slot_offset(layout: FrameLayout, slot: u64) -> u32 {
+    layout.slot_offsets[slot]
+}

@@ -1,0 +1,262 @@
+/**
+ * parse_tkr — read a `.tkr` (Gherkin) source into its `[]TkrFeature` (one per `Feature:` block; a
+ * file with no explicit `Feature:` is one implicit feature carrying its scenarios; an empty file is
+ * the empty list), or fail honestly (M.3). Reuses the manifest value lexers (`mf_read_quoted`/
+ * `mf_read_array`/`mf_read_int`) verbatim for every right-hand side; introduces keyword-line +
+ * Examples-table + HEX-docstring parsing, plus a RAW multi-line `"""` docstring continuation (for
+ * `Given source inline`, 0.3.1 C1) that slurps subsequent physical lines verbatim until a
+ * `"""`-only closing line. Background Given steps are prepended to every scenario (at flush).
+ *
+ * @param src  the `.tkr` file contents
+ * @return     the parsed features, or an `error` on any malformed line / unknown noun-phrase
+ * @throws     on a malformed keyword line, an unknown noun-phrase, a malformed value, or an
+ *             unterminated `"""` docstring
+ * @since 0.3.0.30
+ */
+fn parse_tkr(src: str) -> []TkrFeature | error {
+    mut p = tkr_parse_new()
+    mut cur: u64 = 0
+    loop {
+        if cur >= src.len { break }
+        mut eol = cur
+        loop {
+            if eol >= src.len { break }
+            if src[eol] == b'\n' { break }
+            eol = eol + 1
+        }
+        let raw = teko::str::slice(src, cur, eol)
+        cur = if eol < src.len { eol + 1 } else { eol }
+        let line = tkr_trim(raw)
+        if line.len == 0 || line[0] == b'#' { continue }
+        if tkr_needs_docstring_continuation(line) {
+            let body = match tkr_slurp_docstring_body(src, cur) { TkrSlurp as s => s; error as e => return e }
+            let full_line = tkr_strip_trailing_fence(line) ~ body.text
+            p = match tkr_apply_line(p, full_line) { TkrParse as np => np; error as e => return e }
+            cur = body.next
+            continue
+        }
+        p = match tkr_apply_line(p, line) { TkrParse as np => np; error as e => return e }
+    }
+    let done = tkr_flush_feature(p)
+    done.features
+}
+
+/**
+ * tkr_hex_nibble — the value 0–15 of a hex digit byte, or an error for a non-hex byte (M.3).
+ *
+ * @param c  the candidate hex digit
+ * @return   the nibble value, or an `error` when `c` is not `[0-9A-Fa-f]`
+ * @throws   on a non-hex byte
+ * @since 0.3.0.30
+ */
+fn tkr_hex_nibble(c: byte) -> u64 | error {
+    if c >= b'0' && c <= b'9' { return (c to u64) - (b'0' to u64) }
+    if c >= b'a' && c <= b'f' { return (c to u64) - (b'a' to u64) + 10 }
+    if c >= b'A' && c <= b'F' { return (c to u64) - (b'A' to u64) + 10 }
+    error { message = "tkr: non-hex byte in a HEX docstring" }
+}
+
+/**
+ * tkr_read_hex_docstring — decode a `"""<hex>"""` docstring to raw bytes, ignoring ALL ASCII
+ * whitespace between the fences. Carries CONTROL bytes (`\n`, `\0`, opcodes) LITERALLY into a
+ * `Literal` `TkrMatch`, closing the `.tkr` newline-in-quoted-literal gap. M.3 on bad hex.
+ *
+ * @param s  the source starting at (or before) the opening `"""`
+ * @param p  the cursor at the first `"`
+ * @return   the decoded bytes, or an `error` on malformed hex / an unterminated docstring
+ * @throws   on a non-hex nibble, an odd nibble count, or a missing closing `"""`
+ * @since 0.3.0.30
+ */
+fn tkr_read_hex_docstring(s: str, p: u64) -> str | error {
+    if !(mf_at(s, p) == b'"' && mf_at(s, p + 1) == b'"' && mf_at(s, p + 2) == b'"') {
+        return error { message = "tkr: expected a \"\"\" HEX docstring" }
+    }
+    mut k = p + 3
+    mut nibbles: []u64 = teko::list::empty()
+    mut closed = false
+    loop {
+        if k >= s.len { break }
+        if mf_at(s, k) == b'"' && mf_at(s, k + 1) == b'"' && mf_at(s, k + 2) == b'"' { closed = true; k = k + 3; break }
+        let c = s[k]
+        if tkr_is_ws(c) { k = k + 1; continue }
+        let n = match tkr_hex_nibble(c) { u64 as v => v; error as e => return e }
+        nibbles = teko::list::push(nibbles, n)
+        k = k + 1
+    }
+    if !closed { return error { message = "tkr: unterminated HEX docstring (missing closing \"\"\")" } }
+    if nibbles.len % 2 != 0 { return error { message = "tkr: odd hex-nibble count in a HEX docstring" } }
+    mut bytes: []byte = teko::list::empty()
+    mut j: u64 = 0
+    loop {
+        if j >= nibbles.len { break }
+        bytes = teko::list::push(bytes, (nibbles[j] * 16 + nibbles[j + 1]) to byte)
+        j = j + 2
+    }
+    match str_from_utf8(bytes) { str as out => out; error as e => e }
+}
+
+/**
+ * tkr_replace_all — every non-overlapping occurrence of `needle` in `hay` replaced by `rep`
+ * (`needle` assumed non-empty — a placeholder token `<name>`).
+ *
+ * @param hay     the text
+ * @param needle  the token to replace (non-empty)
+ * @param rep     the replacement
+ * @return        `hay` with every `needle` replaced
+ * @since 0.3.0.30
+ */
+fn tkr_replace_all(hay: str, needle: str, rep: str) -> str {
+    if needle.len == 0 { return hay }
+    mut out = ""
+    mut k: u64 = 0
+    loop {
+        if k >= hay.len { break }
+        if k + needle.len <= hay.len && teko::str::slice(hay, k, k + needle.len) == needle {
+            out = out ~ rep
+            k = k + needle.len
+        } else {
+            out = out ~ teko::str::slice(hay, k, k + 1)
+            k = k + 1
+        }
+    }
+    out
+}
+
+/**
+ * tkr_subst_row — textually substitute every `<header>` placeholder in `value` with the matching
+ * column value from `row`, BEFORE the reused `mf_read_*` lexers see it. Substitution is purely
+ * lexical, so a placeholder may sit anywhere inside a quoted string or an array element.
+ *
+ * @param value    the step value carrying `<name>` placeholders
+ * @param headers  the Examples header names
+ * @param row      the Examples row values (parallel to `headers`)
+ * @return         the substituted value
+ * @since 0.3.0.30
+ */
+fn tkr_subst_row(value: str, headers: []str, row: []str) -> str {
+    mut out = value
+    mut k: u64 = 0
+    loop {
+        if k >= headers.len { break }
+        let col = if k < row.len { row[k] } else { "" }
+        out = tkr_replace_all(out, teko::str::concat(teko::str::concat("<", headers[k]), ">"), col)
+        k = k + 1
+    }
+    out
+}
+
+/**
+ * tkr_step_subst — a copy of `step` with its `value` placeholder-substituted for `row`. A step with
+ * no placeholders (e.g. a Background step or an entry verb) is returned unchanged in effect.
+ *
+ * @param step     the step
+ * @param headers  the Examples header names
+ * @param row      the Examples row values
+ * @return         the substituted step
+ * @since 0.3.0.30
+ */
+fn tkr_step_subst(step: TkrStep, headers: []str, row: []str) -> TkrStep {
+    TkrStep {
+        phase = step.phase; noun = step.noun; verb = step.verb; osarch = step.osarch
+        value = tkr_subst_row(step.value, headers, row)
+    }
+}
+
+/**
+ * tkr_kind_for_verb — the `TkrKind` an entry verb / `it traps` selects: `compilation fails` ⇒
+ * CompileFail, `it traps` ⇒ Trap, `built and run`/`compiled` ⇒ Print (both run and check the
+ * declared streams; check_run treats Print and Exit alike bar the trap case), `built` ⇒ EmitOnly.
+ * An unknown verb is an honest error (M.3).
+ *
+ * `WHEN BUILT` — BUILD AND ASSERT THE ARTEFACT, NEVER RUN IT. Owner ruling 2026-07-28: *"vale
+ * incrementar o que o regressor faz (ensinar), é necessidade real."*
+ *
+ * The need is a CROSS row. `own_cross_x86_64_windows_emits_coff_and_skips_the_run` declares
+ * `When built and run` + `Then exit = 42`, and on any host that cannot exec a foreign-format binary
+ * the exit is never checked — so the runner honestly SKIPS it, and `no_skips_gate.sh` fails the
+ * lane. That skip was correct: the row really did leave a claim unverified.
+ *
+ * The old grammar had no way out. `Tkr.exit` is a bare `i32` with no "was it declared" bit, so a
+ * scenario omitting `Then exit` is indistinguishable from one asserting `exit = 0` — a row could
+ * not say *"I claim the OBJECT, not the RUN"*. `When built` is that sentence. Nothing is left
+ * unverified, so the row PASSES rather than skipping, and the gate keeps its teeth everywhere else.
+ *
+ * SAFE FOR THE BOOTSTRAP, and the owner named the reason: *"os testes só executam na gen2 nunca no
+ * seed."* The ladder builds dry (`--no-verify`) and never reads a `.tkr`, so only the tip needs to
+ * know this verb — a new entry keyword cannot break a seed that never parses one.
+ *
+ * @param verb  the entry verb text
+ * @return      the selected kind, or an `error` for an unknown verb
+ * @throws      when `verb` names no known entry
+ * @since 0.3.0.30
+ */
+fn tkr_kind_for_verb(verb: str) -> TkrKind | error {
+    if verb == "compilation fails" { return TkrKind::CompileFail }
+    if verb == "it traps" { return TkrKind::Trap }
+    if verb == "built" { return TkrKind::EmitOnly }
+    if verb == "built and run" || verb == "compiled" { return TkrKind::Print }
+    error { message = teko::str::concat("tkr: unknown When entry verb: ", verb) }
+}
+
+/**
+ * tkr_get_expect — the per-os-arch override accumulator in `list` for `osarch`, or a fresh
+ * inherit-everything override when absent. The caller mutates one field and puts it back.
+ *
+ * @param list    the overrides so far
+ * @param osarch  the os-arch key
+ * @return        the existing or a fresh override for `osarch`
+ * @since 0.3.0.30
+ */
+fn tkr_get_expect(list: []TkrExpect, osarch: str) -> TkrExpect {
+    mut k: u64 = 0
+    loop {
+        if k >= list.len { break }
+        if list[k].osarch == osarch { return list[k] }
+        k = k + 1
+    }
+    TkrExpect { osarch = osarch; has_exit = false; exit = 0; stdout = tkr_match_ignore(); stderr = tkr_match_ignore() }
+}
+
+/**
+ * tkr_put_expect — `list` with the override for `e.osarch` replaced by `e` (or `e` appended when
+ * absent), an upsert keyed by os-arch.
+ *
+ * @param list  the overrides so far
+ * @param e     the override to store
+ * @return      `list` with `e` upserted
+ * @since 0.3.0.30
+ */
+fn tkr_put_expect(list: []TkrExpect, e: TkrExpect) -> []TkrExpect {
+    mut out: []TkrExpect = teko::list::empty()
+    mut found = false
+    mut k: u64 = 0
+    loop {
+        if k >= list.len { break }
+        if list[k].osarch == e.osarch { out = teko::list::push(out, e); found = true } else { out = teko::list::push(out, list[k]) }
+        k = k + 1
+    }
+    if !found { out = teko::list::push(out, e) }
+    out
+}
+
+/**
+ * tkr_put_golden — `list` with the byte golden for `osarch` set to `sha` (upsert keyed by os-arch).
+ *
+ * @param list    the goldens so far
+ * @param osarch  the os-arch key
+ * @param sha     the expected artifact sha256
+ * @return        `list` with the golden upserted
+ * @since 0.3.0.30
+ */
+fn tkr_put_golden(list: []TkrGolden, osarch: str, sha: str) -> []TkrGolden {
+    mut out: []TkrGolden = teko::list::empty()
+    mut found = false
+    mut k: u64 = 0
+    loop {
+        if k >= list.len { break }
+        if list[k].osarch == osarch { out = teko::list::push(out, TkrGolden { osarch = osarch; sha256 = sha }); found = true } else { out = teko::list::push(out, list[k]) }
+        k = k + 1
+    }
+    if !found { out = teko::list::push(out, TkrGolden { osarch = osarch; sha256 = sha }) }
+    out
+}

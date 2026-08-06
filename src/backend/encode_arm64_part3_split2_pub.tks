@@ -1,0 +1,112 @@
+
+/**
+ * encode_inst_word — encode one fully-physical `MInst` to its `EncWord`, a
+ * TOTAL per-case match over the 31-case variant mirroring `print_minst`'s
+ * dispatch. The position-independent integer/control/memory subset encodes
+ * fully; branches and symbol references return placeholder words flagged for
+ * A4-3 patching; `MFrameAddr` resolves through `layout` to the real `ADD dst,
+ * sp, #off` (A4-2); the float family encodes fully too (0.3.1.0 degrau 29
+ * closed the `A4-fp` stop, the arm64 twin of the x86 `B1-fp` arc); `MOutArg`
+ * and `MInArg` handle AAPCS64 stack argument passing; big immediates,
+ * unscaled offsets, and big-frame offsets return their NAMED honest-stops.
+ *
+ * @param FrameLayout layout  the enclosing function's resolved frame (for `MFrameAddr`, `MInArg`)
+ * @param MInst inst  the instruction to encode (all operands physical)
+ * @return EncWord | error  the encoding, or a named honest-stop
+ */
+pub fn encode_inst_word(layout: FrameLayout, inst: MInst) -> EncWord | error {
+    match inst {
+        MAlu as x => encode_alu(x)
+        MAluImm as x => encode_alu_imm(x)
+        MMSub as x => encode_msub(x)
+        MNeg as x => encode_neg(x)
+        MMvn as x => encode_mvn(x)
+        MFAlu as x => encode_falu(x)
+        MFNeg as x => encode_fneg(x)
+        MCmp as x => encode_cmp(x)
+        MCmpImm as x => encode_cmp_imm(x)
+        MFCmp as x => encode_fcmp(x)
+        MCSet as x => encode_cset(x)
+        MMovZ as x => encode_movz(x)
+        MMovK as x => encode_movk(x)
+        MMovN as x => encode_movn(x)
+        MFMov as x => encode_fmov(x)
+        MMov as x => encode_mov(x)
+        MExt as x => encode_ext(x)
+        MCvt as x => encode_cvt(x)
+        MLoad as x => encode_load(x)
+        MStore as x => encode_store(x)
+        MFSpill as x => encode_fspill(layout, x)
+        MFrameAddr as x => encode_frame_addr(layout, x)
+        MAdrp as x => encode_adrp(x)
+        MAddLo as x => encode_add_lo(x)
+        MBranch as x => encode_branch(x)
+        MBranchCond as x => encode_branch_cond(x)
+        MCbz as x => encode_cbz(x)
+        MCall as x => encode_call(x)
+        MCallIndirect as x => encode_call_indirect(x)
+        MRet => encode_ret()
+        MOutArg as x => encode_out_arg(x)
+        MInArg as x => encode_in_arg(layout, x)
+    }
+}
+
+/**
+ * Reloc — one symbol relocation the object writer (A4-4) turns into a Mach-O
+ * `relocation_info` entry: the byte offset within the function's `__text` image
+ * (module-rebased at assembly) where the fixup applies, the target symbol's
+ * already-final name, and which `MRelocKind` field it patches. A2 pre-tags every
+ * symbol reference with its kind (`minst.tks:42`), so A4 owes no analysis — one
+ * `Reloc` per `MAdrp`/`MAddLo`/`MCall`.
+ *
+ * @since #385 A4-3
+ */
+pub type Reloc = struct {
+    /**
+     * offset — the byte offset of the relocated instruction word, relative to
+     * this function's `__text` base (word index times 4).
+     */
+    offset: u32
+    /**
+     * sym — the target symbol's final name (unprefixed; the writer adds `_`).
+     */
+    sym: str
+    /**
+     * kind — which ARM64 relocation this instruction owes (PAGE21/PAGEOFF12/
+     * BRANCH26).
+     */
+    kind: MRelocKind
+    /**
+     * sect — which section this relocation's patched field lives in (#594 T-B1):
+     * `Text` (the historical default — `offset` is `__text`-base-relative), or
+     * `Rodata` (a data→data pointer whose `offset` is rodata-base-relative,
+     * emitted only from T-B2 on). Every reloc the encoder builds today is `Text`.
+     */
+    sect: RelocSect
+}
+
+/**
+ * EncodedFunc — one function lowered to machine bytes: its already-final symbol,
+ * its `__text` words in layout order (prologue ++ every block's encoded
+ * instructions ++ epilogues, with intra-function branch displacements resolved),
+ * and its function-relative symbol relocations (offsets rebased to the module
+ * `__text` at assembly, A4-4). The function's byte size is `words.len * 4`.
+ *
+ * @since #385 A4-3
+ */
+pub type EncodedFunc = struct {
+    /**
+     * symbol — the function's already-final symbol (unprefixed).
+     */
+    symbol: str
+    /**
+     * words — the encoded instruction stream, in layout order (u32 words,
+     * flattened little-endian by the module writer in A4-4).
+     */
+    words: []u32
+    /**
+     * relocs — the symbol relocations, offsets relative to this function's
+     * `__text` base.
+     */
+    relocs: []Reloc
+}

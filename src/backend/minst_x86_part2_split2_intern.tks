@@ -1,0 +1,197 @@
+/**
+ * print_load_x86 — `<mov|movsx>.<size> dst, [mem]` (the `movsx` marks a
+ * sign-extending narrow load).
+ *
+ * @param MLoadX86 i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_load_x86(i: MLoadX86) -> str {
+    let mnemonic = if i.sign { "movsx" } else { "mov" }
+    teko::str::concat(mnemonic, ".", mem_size_name_x86(i.size), " ", reg_ref_x86(i.dst), ", ", mem_ref_x86(i.mem))
+}
+
+/**
+ * print_store_x86 — `mov.<size> [mem], src`.
+ *
+ * @param MStoreX86 i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_store_x86(i: MStoreX86) -> str {
+    teko::str::concat("mov.", mem_size_name_x86(i.size), " ", mem_ref_x86(i.mem), ", ", reg_ref_x86(i.src))
+}
+
+/**
+ * print_fspill_x86 — `movsd %fN, [spill #slot]` / `movsd [spill #slot], %fN`.
+ *
+ * @param MFSpillX86 i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_fspill_x86(i: MFSpillX86) -> str {
+    let slot = teko::str::concat("[spill #", teko::u64_to_str(i.slot), "]")
+    if i.is_load { return teko::str::concat("movsd ", reg_ref_x86(i.reg), ", ", slot) }
+    teko::str::concat("movsd ", slot, ", ", reg_ref_x86(i.reg))
+}
+
+/**
+ * print_out_arg_x86 — `mov.<size> [outarg #index], src`.
+ *
+ * @param MOutArgX86 i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_out_arg_x86(i: MOutArgX86) -> str {
+    teko::str::concat("mov.", mem_size_name_x86(i.size), " [outarg #", teko::u64_to_str(i.index to u64), "], ", reg_ref_x86(i.src))
+}
+
+/**
+ * print_in_arg_x86 — `mov.<size> dst, [inarg #index]`.
+ *
+ * @param MInArgX86 i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_in_arg_x86(i: MInArgX86) -> str {
+    teko::str::concat("mov.", mem_size_name_x86(i.size), " ", reg_ref_x86(i.dst), ", [inarg #", teko::u64_to_str(i.index to u64), "]")
+}
+
+/**
+ * print_frame_addr_x86 — `lea dst, [frame #slot]`.
+ *
+ * @param MFrameAddrX86 i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_frame_addr_x86(i: MFrameAddrX86) -> str {
+    teko::str::concat("lea ", reg_ref_x86(i.dst), ", [frame #", teko::u64_to_str(i.slot), "]")
+}
+
+/**
+ * print_lea_rip_x86 — `lea.<kind> dst, [rip @sym]`.
+ *
+ * @param MLeaRipX86 i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_lea_rip_x86(i: MLeaRipX86) -> str {
+    teko::str::concat("lea.", reloc_kind_name_x86(i.kind), " ", reg_ref_x86(i.dst), ", [rip @", i.sym, "]")
+}
+
+/**
+ * print_jmp_x86 — `jmp #M<target>`.
+ *
+ * @param MJmpX86 i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_jmp_x86(i: MJmpX86) -> str {
+    teko::str::concat("jmp #M", teko::u64_to_str(i.target to u64))
+}
+
+/**
+ * print_call_x86 — `call @sym(uses)`, with an optional ` variadic` marker and
+ * an optional ` -> ret_reg` result suffix.
+ *
+ * @param MCallX86 i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_call_x86(i: MCallX86) -> str {
+    mut out = teko::str::concat("call @", i.sym, "(", print_regs_x86(i.uses), ")")
+    if i.variadic { out = teko::str::concat(out, " variadic") }
+    if i.has_result { out = teko::str::concat(out, " -> ", reg_ref_x86(i.ret_reg)) }
+    out
+}
+
+/**
+ * print_call_ind_x86 — `call.indirect target(uses)`, with an optional
+ * ` -> ret_reg` result suffix.
+ *
+ * @param MCallIndX86 i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_call_ind_x86(i: MCallIndX86) -> str {
+    mut out = teko::str::concat("call.indirect ", reg_ref_x86(i.target), "(", print_regs_x86(i.uses), ")")
+    if i.has_result { out = teko::str::concat(out, " -> ", reg_ref_x86(i.ret_reg)) }
+    out
+}
+
+/**
+ * print_ret_x86 — `ret`. The returned value, if any, was already pinned by a
+ * preceding move, so `MRetX86` carries nothing further to render.
+ *
+ * @param MRetX86 i  the instruction to render (carries no fields)
+ * @return str  the rendered text
+ */
+fn print_ret_x86(i: MRetX86) -> str {
+    "ret"
+}
+
+/**
+ * print_minst_x86 — the instruction text for one `MInstX86` (no result prefix
+ * — a case's own destination operand, when it has one, already renders it).
+ *
+ * @param MInstX86 i  the instruction to render
+ * @return str  the rendered text
+ */
+fn print_minst_x86(i: MInstX86) -> str {
+    match i {
+        MMovImmX86 as x => print_movimm_x86(x)
+        MMovX86 as x => print_mov_x86(x)
+        MAluRmX86 as x => print_alu_rm_x86(x)
+        MImulX86 as x => print_imul_x86(x)
+        MDivSeqX86 as x => print_divseq_x86(x)
+        MShiftX86 as x => print_shift_x86(x)
+        MCmpX86 as x => print_cmp_x86(x)
+        MSetccX86 as x => print_setcc_x86(x)
+        MJccX86 as x => print_jcc_x86(x)
+        MNegX86 as x => print_neg_x86(x)
+        MNotX86 as x => print_not_x86(x)
+        MLoadX86 as x => print_load_x86(x)
+        MStoreX86 as x => print_store_x86(x)
+        MFrameAddrX86 as x => print_frame_addr_x86(x)
+        MLeaRipX86 as x => print_lea_rip_x86(x)
+        MJmpX86 as x => print_jmp_x86(x)
+        MCallX86 as x => print_call_x86(x)
+        MCallIndX86 as x => print_call_ind_x86(x)
+        MRetX86 as x => print_ret_x86(x)
+        MFAluX86 as x => print_falu_x86(x)
+        MFMovX86 as x => print_fmov_x86(x)
+        MFCmpX86 as x => print_fcmp_x86(x)
+        MSetPX86 as x => print_setp_x86(x)
+        MCvtX86 as x => print_cvt_x86(x)
+        MOutArgX86 as x => print_out_arg_x86(x)
+        MInArgX86 as x => print_in_arg_x86(x)
+        MFSpillX86 as x => print_fspill_x86(x)
+    }
+}
+
+/**
+ * print_mblock_x86 — a block header `  #Mn:` (with block-args when present)
+ * followed by its instructions, one per line, 4-space indented.
+ *
+ * @param MBlockX86 b  the block to render
+ * @return str  the rendered text
+ */
+fn print_mblock_x86(b: MBlockX86) -> str {
+    mut out = teko::str::concat("  #M", teko::u64_to_str(b.id to u64))
+    if b.params.len != 0 { out = teko::str::concat(out, "(", print_regs_x86(b.params), ")") }
+    out = teko::str::concat(out, ":\n")
+    mut i: u64 = 0
+    loop {
+        if i >= b.insts.len { break }
+        out = teko::str::concat(out, "    ", print_minst_x86(b.insts[i]), "\n")
+        i++
+    }
+    out
+}
+
+/**
+ * print_mfunc_x86 — a full function: `func @sym {` + its blocks + `}`.
+ *
+ * @param MFuncX86 f  the function to render
+ * @return str  the rendered text
+ */
+fn print_mfunc_x86(f: MFuncX86) -> str {
+    mut out = teko::str::concat("func @", f.symbol, " {\n")
+    mut i: u64 = 0
+    loop {
+        if i >= f.blocks.len { break }
+        out = teko::str::concat(out, print_mblock_x86(f.blocks[i]))
+        i++
+    }
+    teko::str::concat(out, "}\n")
+}

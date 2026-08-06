@@ -1,0 +1,205 @@
+
+
+/**
+ * FRAME_ESCAPE_LIMIT — how many offending functions the guard's diagnostic NAMES before it
+ * summarizes the rest as a count. A guard whose message is unbounded is a guard whose message is
+ * unreadable; a guard that names only the first is the one-stop-per-self-build treadmill this
+ * instrument exists to replace.
+ */
+const FRAME_ESCAPE_LIMIT: u64 = 20
+
+/**
+ * FrameSet — the running answer to "which VRegs of this function hold an address INSIDE its own
+ * frame", plus whether the last sweep learned anything new (the fixpoint's only stop condition).
+ */
+type FrameSet = struct {
+    /** marked — indexed by VReg id: true when that VReg holds an address inside this frame. */
+    marked: []bool
+
+    /** grew — did the last sweep mark a VReg that was not already marked? */
+    grew: bool
+}
+
+/**
+ * frame_escaping_funcs — the symbols of every function in `m` whose `ret` can carry an address
+ * inside its own frame, in module order.
+ *
+ * @param m  the fully lowered module
+ * @return   the offending symbols (empty when the invariant holds)
+ */
+fn frame_escaping_funcs(m: LModule) -> []str {
+    mut found: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= m.funcs.len { break }
+        if func_returns_frame_address(m.funcs[i]) { found = teko::list::push(found, m.funcs[i].symbol) }
+        i++
+    }
+    found
+}
+
+/**
+ * frame_escape_lines — the offending symbols as one comma-separated diagnostic tail, capped at
+ * `FRAME_ESCAPE_LIMIT` names plus a count of the rest.
+ *
+ * @param offenders  the offending symbols
+ * @return           the diagnostic tail
+ */
+fn frame_escape_lines(offenders: []str) -> str {
+    mut out: str = ""
+    mut i: u64 = 0
+    loop {
+        if i >= offenders.len || i >= FRAME_ESCAPE_LIMIT { break }
+        if i > 0 { out = teko::str::concat(out, ", ") }
+        out = teko::str::concat(out, teko::str::concat("`", teko::str::concat(offenders[i], "`")))
+        i++
+    }
+    if offenders.len <= FRAME_ESCAPE_LIMIT { return out }
+    teko::str::concat(out, teko::str::concat(" and ", teko::str::concat(teko::u64_to_str(offenders.len - FRAME_ESCAPE_LIMIT), " more")))
+}
+
+/**
+ * func_returns_frame_address — does any `LRet` of `f` carry a VReg that holds an address inside
+ * `f`'s own frame?
+ *
+ * @param f  the lowered function
+ * @return   true when at least one `ret` carries a frame address
+ */
+fn func_returns_frame_address(f: LFunc) -> bool {
+    let marks = frame_marks_of(f)
+    mut bi: u64 = 0
+    loop {
+        if bi >= f.blocks.len { break }
+        if block_returns_frame_address(f.blocks[bi], marks) { return true }
+        bi++
+    }
+    false
+}
+
+/**
+ * block_returns_frame_address — does any `LRet` of ONE block carry a flagged VReg?
+ *
+ * @param b      the block to scan
+ * @param marks  the already-computed frame-address flags of the enclosing function
+ * @return       true when at least one `ret` in `b` carries a frame address
+ */
+fn block_returns_frame_address(b: LBlock, marks: []bool) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= b.insts.len { break }
+        match b.insts[i].op {
+            LRet as r => if r.has_value && flag_at(marks, r.value) { return true }
+            _ => { }
+        }
+        i++
+    }
+    false
+}
+
+/**
+ * frame_marks_of — the fixpoint: which VRegs of `f` hold an address inside `f`'s own frame.
+ *
+ * Seeded by nothing and grown by `frame_sweep` until a sweep learns nothing new. The loop is
+ * bounded by the flag count — each sweep that reports growth marked at least one of `f.next_vreg`
+ * VRegs — so it terminates without a separate iteration cap.
+ *
+ * @param f  the lowered function
+ * @return   the frame-address flags, indexed by VReg id
+ */
+fn frame_marks_of(f: LFunc) -> []bool {
+    mut set = FrameSet { marked = false_marks(f.next_vreg); grew = true }
+    loop {
+        if !set.grew { break }
+        set = frame_sweep(f, FrameSet { marked = set.marked; grew = false })
+    }
+    set.marked
+}
+
+/**
+ * frame_sweep — ONE pass over every instruction of `f`, marking every VReg this pass can prove
+ * holds a frame address.
+ *
+ * Three rules, and they are the complete set of ways a frame address travels in this LIR: an
+ * `alloca` PRODUCES one; a `field_addr` off a frame address IS one (it is base-plus-offset, never a
+ * load); and a jump/branch ARGUMENT carries one into the target block's matching parameter. Nothing
+ * else can: a `load` yields the datum at the address rather than the address, a `call` result comes
+ * from another frame or from the allocator, and a `global_addr` names static storage.
+ *
+ * @param f    the lowered function
+ * @param set  the flags so far, with `grew` reset by the caller
+ * @return     the flags after this pass, `grew` true iff it marked something new
+ */
+fn frame_sweep(f: LFunc, set: FrameSet) -> FrameSet {
+    mut acc = set
+    mut bi: u64 = 0
+    loop {
+        if bi >= f.blocks.len { break }
+        acc = frame_sweep_block(f, acc, f.blocks[bi])
+        bi++
+    }
+    acc
+}
+
+/**
+ * frame_sweep_block — `frame_sweep` over the instructions of ONE block.
+ *
+ * @param f    the enclosing function (its blocks are the jump targets)
+ * @param set  the flags so far
+ * @param b    the block to sweep
+ * @return     the flags after this block
+ */
+fn frame_sweep_block(f: LFunc, set: FrameSet, b: LBlock) -> FrameSet {
+    mut acc = set
+    mut i: u64 = 0
+    loop {
+        if i >= b.insts.len { break }
+        acc = frame_sweep_inst(f, acc, b.insts[i])
+        i++
+    }
+    acc
+}
+
+/**
+ * frame_sweep_inst — `frame_sweep`'s three rules applied to ONE instruction.
+ *
+ * @param f     the enclosing function (its blocks are the jump targets)
+ * @param set   the flags so far
+ * @param inst  the instruction to interpret
+ * @return      the flags after this instruction
+ */
+fn frame_sweep_inst(f: LFunc, set: FrameSet, inst: LInst) -> FrameSet {
+    match inst.op {
+        LAlloca => return frame_mark(set, inst.result)
+        LFieldAddr as fa => return if flag_at(set.marked, fa.base) { frame_mark(set, inst.result) } else { set }
+        LJump as j => return frame_pass_args(f, set, j.target, j.args)
+        LBranch as br => return frame_pass_args(f, frame_pass_args(f, set, br.t_target, br.t_args), br.f_target, br.f_args)
+        _ => { }
+    }
+    set
+}
+
+/**
+ * frame_pass_args — mark the parameters of block `target` that receive a flagged argument, so a
+ * frame address that reaches a `ret` through an `if`/`match` merge is still seen.
+ *
+ * A target the module does not contain, or an argument list shorter than the parameter list, is
+ * skipped rather than guessed at: this guard reports what it can PROVE, and a malformed jump is a
+ * different defect with a different owner.
+ *
+ * @param f       the enclosing function
+ * @param set     the flags so far
+ * @param target  the jumped-to block's id
+ * @param args    the jump's arguments, positionally matching the target's parameters
+ * @return        the flags after the transfer
+ */
+fn frame_pass_args(f: LFunc, set: FrameSet, target: u32, args: []u32) -> FrameSet {
+    let params = match block_params_of(f, target) { []u32 as p => p; null => return set }
+    mut acc = set
+    mut i: u64 = 0
+    loop {
+        if i >= args.len || i >= params.len { break }
+        if flag_at(acc.marked, args[i]) { acc = frame_mark(acc, params[i]) }
+        i++
+    }
+    acc
+}

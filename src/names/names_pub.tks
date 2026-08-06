@@ -1,0 +1,154 @@
+/**
+ * STATUS_OK — the name is live, and (for a kinded query) names the kind that was asked for.
+ *
+ * The status codes below are the runtime's (`TK_NAMES_*` in `src/runtime/teko_rt.h`) and are
+ * reproduced here as the Teko-side vocabulary of `teko::names`. THE WHOLE POINT OF THE MODULE IS
+ * THAT THIS VOCABULARY EXISTS: a stale pointer is undefined behaviour and has no vocabulary, while
+ * a stale NAME answers with one of these codes, every time, for as long as the process lives.
+ */
+pub const STATUS_OK: i64 = 0
+
+/** STATUS_UNKNOWN — no such name was ever issued (the name 0 included). */
+pub const STATUS_UNKNOWN: i64 = -1
+
+/** STATUS_CLOSED — the name WAS issued and has since been closed: the stale case, reported. */
+pub const STATUS_CLOSED: i64 = -2
+
+/** STATUS_KIND — the name is live, but stands for another kind of resource than the one asked for. */
+pub const STATUS_KIND: i64 = -3
+
+/** STATUS_FULL — no name could be issued because the registry's index space is exhausted. */
+pub const STATUS_FULL: i64 = -4
+
+/** STATUS_RESERVED — a cell was asked to hold `NO_VALUE`, the one payload it cannot represent. */
+pub const STATUS_RESERVED: i64 = -5
+
+/**
+ * NO_VALUE — the payload a cell may not hold, because the runtime returns it to mean "this name did
+ * not resolve".
+ *
+ * WRITTEN AS `MIN + 1 - 1` AND NOT AS THE LITERAL, because `-9223372036854775808` is lexed as a
+ * negation of a magnitude that does not fit an `i64`; the subtraction reaches the same value through
+ * two steps that both fit. `the_reserved_payload_is_refused` (names_test.tkt) is what keeps this
+ * copy honest against the runtime's `TK_NAMES_NO_VALUE`.
+ */
+pub const NO_VALUE: i64 = -9223372036854775807 - 1
+
+/**
+ * status_text — the human sentence for a status code, so a failure names its own mode.
+ *
+ * @param status  one of the `STATUS_*` codes
+ * @return        the sentence describing it
+ */
+pub fn status_text(status: i64) -> str {
+    if status == STATUS_UNKNOWN { return "no such name was ever issued" }
+    if status == STATUS_CLOSED { return "the name was closed — it is stale" }
+    if status == STATUS_KIND { return "the name stands for another kind of resource" }
+    if status == STATUS_FULL { return "the registry has no name left to issue" }
+    if status == STATUS_RESERVED { return "a cell cannot hold the reserved payload" }
+    "the name is live"
+}
+
+/**
+ * open_cell — register one `i64` in the program region and hand back the NAME that stands for it.
+ *
+ * The cell is the first resource kind of the registry and the one Teko can hold today; a `tk_chan`
+ * will be another, registered from C through the same table. What the caller receives is a `u64` and
+ * nothing else: copying it copies a name, and a name does not age.
+ *
+ * @param value  the payload the cell holds; every `i64` except `NO_VALUE`
+ * @return       the name the cell answers to
+ * @throws       when `value` is `NO_VALUE` (the reserved payload), or the registry has no name left
+ */
+pub fn open_cell(value: i64) -> u64 | error {
+    if value == NO_VALUE { return failure("open_cell", STATUS_RESERVED) }
+    let name = cell_open_raw(value)
+    if name == 0 { return failure("open_cell", STATUS_FULL) }
+    name
+}
+
+/**
+ * read_cell — the payload the cell named by `name` holds.
+ *
+ * THE STATUS IS ASKED FOR FIRST, AND THAT ORDER IS SAFE rather than a race in waiting: a name goes
+ * live → dead exactly once and never back (a closed slot's stamp is bumped, so its old name can
+ * never be live again). A classification taken after a failed read can therefore only be the same
+ * verdict or a later one, never a friendlier one.
+ *
+ * @param name  the name to resolve
+ * @return      the payload
+ * @throws      when the name is stale, was never issued, or stands for another kind of resource
+ */
+pub fn read_cell(name: u64) -> i64 | error {
+    let status = cell_status_raw(name)
+    if status != STATUS_OK { return failure("read_cell", status) }
+    cell_read_raw(name)
+}
+
+/**
+ * close — retire a name. Every name ever issued for that slot is stale from here on, including this
+ * one; the slot itself goes back to be reused under a new stamp.
+ *
+ * @param name  the name to retire
+ * @return      nothing when the name was live and is now closed
+ * @throws      when the name was already stale, or was never issued
+ */
+pub fn close(name: u64) -> null | error {
+    let status = close_raw(name)
+    if status != STATUS_OK { return failure("close", status) }
+    null
+}
+
+/**
+ * status_of — which of the `STATUS_*` modes `name` is in, without resolving it to anything.
+ *
+ * @param name  the name to classify
+ * @return      `STATUS_OK`, or the failure mode
+ */
+pub fn status_of(name: u64) -> i64 { status_raw(name) }
+
+/**
+ * is_live — does this name still stand for something?
+ *
+ * A CALL AND NOT A CACHED FLAG, and that is the whole handle requirement: whoever holds the name
+ * asks the registry every time, so a copy of the name sees a close made through any other copy.
+ *
+ * @param name  the name to test
+ * @return      true iff the name resolves to a live resource
+ */
+pub fn is_live(name: u64) -> bool { status_raw(name) == STATUS_OK }
+
+/**
+ * live_count — how many names are live process-wide right now. The leak probe: an open followed by
+ * its close returns this to where it started.
+ *
+ * @return  the live-name count
+ */
+pub fn live_count() -> u64 { live_count_raw() }
+
+/**
+ * capacity — how many slots the registry's array holds. Its byte cost is `capacity * SLOT_BYTES`.
+ *
+ * @return  the slot count of the current array
+ */
+pub fn capacity() -> u64 { capacity_raw() }
+
+/**
+ * slot_of — the slot half of a name.
+ *
+ * A PURE DECODE, defined for a dead name as much as a live one, and that is what makes the design's
+ * inversion writable: a test can show that the SLOT really is recycled while the NAME is not.
+ *
+ * @param name  any name, live or dead
+ * @return      the slot it addresses
+ */
+pub fn slot_of(name: u64) -> u64 { slot_of_raw(name) }
+
+/**
+ * generation_of — the lifetime-stamp half of a name, the half that makes a recycled slot answer to a
+ * different name than its predecessor. Pure decode, for the same reason as `slot_of`.
+ *
+ * @param name  any name, live or dead
+ * @return      the stamp it carries
+ */
+pub fn generation_of(name: u64) -> u64 { generation_of_raw(name) }

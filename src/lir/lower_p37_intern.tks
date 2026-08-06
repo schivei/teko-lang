@@ -1,0 +1,257 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * find_variant_member — the member of `members` whose CASE NAME is
+ * `case_name`, or a NAMED internal error. A member is nameable when it is
+ * `Named` (nominal OR a generic instance — degrau 14 of 0.3.1.0 widened this
+ * from bare-nominal-only, see `variant_member_named`), the built-in `error`,
+ * or any type with a bare keyword spelling (`u32`, `byte`, `str`, … — degrau
+ * 2 of 0.3.1.0 widened this from the Named+error pair the A1-5 subset shipped
+ * with) (A1-5, #382). A `Named` member's case name is its CANONICAL name's
+ * last path segment, or — for a generic instance — the BASE its `__g__` stamp
+ * was built from (`checker::named_case_name`, #109 W3 — mirrors the checker's
+ * OWN `variant_member_by_name`), while `error`'s is the literal keyword — the
+ * ONLY spelling `error` ever reaches a match pattern under
+ * (`variant_member_named`). `case_name` itself is always the pattern's BARE
+ * last segment, so a Named member's FULL canonical name compared verbatim
+ * would reject every namespaced case, and `checker::Error`'s own `_`-arm miss
+ * would reject the built-in error case outright — both are the gap
+ * `examples/smoke/uniontest`'s `Box | error` match exposed once the earlier
+ * construction-site honest-stop stopped masking it (degrau N2).
+ *
+ * A generic BASE name is not necessarily unique WITHIN one variant/union — a
+ * user can write `variant Box<i64> | Box<str>`, two DIFFERENT cases that
+ * share ONE bare base — so a bind pattern with no type-args to disambiguate
+ * (this backend threads none through to lowering) could name either. Rather
+ * than silently binding the FIRST one (a wrong-arm miscompilation the C route
+ * never produces — THE ORACLE RULE), a second same-base generic candidate is
+ * an honest stop instead of a guess.
+ *
+ * @param []checker::Type members  the variant subject's declared members, in
+ *                                 order
+ * @param str case_name  the pattern's case name (a bind/field pattern's last
+ *                       path segment, or the literal `error`)
+ * @return VariantMember  the matching member's declared index + its own Type
+ * @throws  when no member of `members` is named `case_name` (an internal
+ *          invariant break), or when `case_name` names more than one member
+ *          via a shared generic base (an ambiguity this backend refuses
+ *          rather than resolves by position)
+ */
+fn find_variant_member(members: []checker::Type, case_name: str) -> VariantMember | error {
+    mut i: u64 = 0
+    mut first: i64 = -1
+    loop {
+        if i >= members.len { break }
+        if variant_member_named(members[i], case_name) {
+            if first >= 0 && generic_case_ambiguous(members[first to u64], members[i]) {
+                return error { message = teko::str::concat("native backend N1: ambiguous variant case `", case_name, "` — more than one member shares this generic base (internal)") }
+            }
+            if first < 0 { first = i to i64 }
+        }
+        i++
+    }
+    if first >= 0 { return VariantMember { index = first to u32; ty = members[first to u64] } }
+    error { message = teko::str::concat("native backend N1: unknown variant case `", case_name, "` (internal)") }
+}
+
+/**
+ * generic_case_ambiguous — do TWO variant members that both answered a
+ * bind pattern's `case_name` (`find_variant_member`'s ambiguity guard)
+ * actually name DIFFERENT cases? True only when both are `Named`, their FULL
+ * canonical names differ, and at least one is a generic instance — the one
+ * shape `named_case_name` can fold two DIFFERENT identities onto the SAME
+ * bare base (`Box<i64>` and `Box<str>` both answer `"Box"`). Two ordinary
+ * nominal members sharing a bare last segment is a pre-existing, narrower
+ * risk this guard leaves untouched (out of degrau 14's scope).
+ *
+ * @param checker::Type a  the first matching member
+ * @param checker::Type b  the second matching member
+ * @return bool  whether `a` and `b` are genuinely different cases wearing the
+ *               same case name
+ */
+fn generic_case_ambiguous(a: checker::Type, b: checker::Type) -> bool {
+    match a {
+        checker::Named as an => match b {
+            checker::Named as bn => an.name != bn.name && (checker::split_generic_instance_name(an.name).is_generic || checker::split_generic_instance_name(bn.name).is_generic)
+            _ => false
+        }
+        _ => false
+    }
+}
+
+/**
+ * variant_member_named — does variant member `member` carry the case name
+ * `case_name`? A `Named` member matches by `checker::named_case_name` (its
+ * CANONICAL name's last path segment, or — for a generic instance — the base
+ * before its `__g__` stamp, #109 W3); the built-in `error` member matches the
+ * literal keyword `"error"` (its ONE surface spelling — `error_struct_name`'s
+ * doc); every OTHER non-nominal member matches by its own bare keyword
+ * spelling (`checker::builtin_case_name`), which is the inverse of the very
+ * table the checker resolved the pattern through.
+ *
+ * The `builtin_case_name` arm is degrau 2 of 0.3.1.0. It used to be `_ =>
+ * false`, on the reading that "a primitive is not a case A1-5 selects by
+ * name" — but the checker had always let a pattern NAME one, because a
+ * pattern that is not a member name falls through to `builtin_type`. The
+ * compiler's own `backend::encode_alu_imm` writes `match
+ * add_sub_imm_base(i.op, neg) { u32 as b => b; error as e => return e }`, and
+ * the native self-build stopped there with "unknown variant case `u32`
+ * (internal)". A member whose type has NO keyword spelling (a slice, an
+ * optional) yields `""`, which can never equal a pattern's case name — so
+ * those stay unnameable, as they were.
+ *
+ * The `named_case_name` delegation is degrau 14 of 0.3.1.0: a generic
+ * instance's canonical name (`Parsed__g__MainFile`) carries no `::` at all,
+ * so the OLD `checker::name_last_segment` compare left it whole and
+ * unmatchable against a pattern's bare base (`Parsed`). The compiler's own
+ * `teko::build::asm_parse` writes `match parser::parse_main_file(…) {
+ * parser::Parsed<parser::MainFile> as x => x.node; … }`, and the native
+ * self-build stopped there with "unknown variant case `Parsed` (internal)".
+ *
+ * @param checker::Type member  one of the variant's declared members
+ * @param str case_name  the pattern's case name to test against
+ * @return bool  whether `member` is the case `case_name` names
+ */
+fn variant_member_named(member: checker::Type, case_name: str) -> bool {
+    match member {
+        checker::Named as n => checker::named_case_name(n.name) == case_name
+        checker::Error => case_name == error_struct_name()
+        _ => {
+            let spelling = checker::builtin_case_name(member)
+            spelling != "" && spelling == case_name
+        }
+    }
+}
+
+/**
+ * variant_member_index_of — the index of `members` whose type is `value_ty`: the BY-TYPE
+ * counterpart of `find_variant_member`'s BY-NAME lookup, used at CONSTRUCTION (a bare value
+ * flowing into a declared variant slot has no case NAME to match by, only its own resolved
+ * type — `lower_variant_construct`'s doc). Matches a `Named` member by name (mirrors
+ * `find_variant_member`) and every other member kind (`error`, a primitive, `str`, `byte`, a
+ * slice) by its own KIND (`variant_member_type_matches`) — the same NAMED-vs-non-nominal split
+ * the checker's own `variant_covered` uses to decide coverage (#382, degrau N2).
+ *
+ * @param []checker::Type members  the variant's declared members, in order
+ * @param checker::Type value_ty  the value's own resolved type
+ * @param []LVariantDef variants  the program's declared-variant table, threaded through to
+ *                                `variant_member_type_matches`'s `Named` alias-expansion arm
+ * @return u32  the matching member's declared index
+ * @throws  when no member of `members` matches `value_ty` (an internal invariant break — the
+ *          checker already guarantees an assignable value names some member)
+ */
+fn variant_member_index_of(members: []checker::Type, value_ty: checker::Type, variants: []LVariantDef) -> u32 | error {
+    mut i: u64 = 0
+    loop {
+        if i >= members.len { break }
+        if variant_member_type_matches(members[i], value_ty, variants) { return i to u32 }
+        i++
+    }
+    error { message = "native backend N1: value's type is not a member of its declared variant (internal)" }
+}
+
+/**
+ * variant_member_type_matches — does variant member `member` match a value of type `value_ty`?
+ * A `Named` member matches by canonical NAME (two structurally-equal-but-differently-named types are
+ * DIFFERENT cases), OR — when `value_ty` does not carry that same name — by RECURSING into
+ * `member`'s own declared expansion when it is itself a NAMED VARIANT ALIAS
+ * (`variant_named_member_matches`, degrau 23): a bare case constructed straight into an OUTER slot
+ * (`P{}` flowing into `-> Outer | error`, where `Outer = variant P | Q`) carries the INNER case's
+ * own type, never `Outer`'s own name, so a name-only compare never matched a value nested one
+ * alias deep — the native backend's first stop past degrau 22 (`checker::func_type`'s `-> Type |
+ * error`, `Type` itself a named variant, hit this exact shape). Every other member kind matches by
+ * its own KIND alone — the non-nominal cases this backend's A1-5+ subset constructs (`error`, a
+ * primitive/`byte`/`str`/slice) carry no further per-case identity beyond their kind (#382,
+ * degrau N2).
+ *
+ * THE NOMINAL MATCH STAYS EXACT (canonical name against canonical name, or one level of ALIAS
+ * EXPANSION) — a DECLARED variant's members are expanded into their CANONICAL names
+ * (`collect_variant_defs` resolves the body through `declared_type_table`, whose keys the
+ * checker's own resolver reads), so two same-bare-named types in different namespaces remain
+ * DISTINCT cases here. A member spelled bare, naming no declared variant, would fail this compare
+ * with a NAMED stop, never with a wrong case.
+ *
+ * @param checker::Type member  one of the variant's declared members
+ * @param checker::Type value_ty  the value's own resolved type
+ * @param []LVariantDef variants  the program's declared-variant table, for the `Named` alias-
+ *                                expansion arm
+ * @return bool  whether `member` is the case `value_ty` belongs to
+ */
+fn variant_member_type_matches(member: checker::Type, value_ty: checker::Type, variants: []LVariantDef) -> bool {
+    match member {
+        checker::Named as mn => variant_named_member_matches(mn.name, value_ty, variants)
+        checker::Error => match value_ty { checker::Error => true; _ => false }
+        checker::Prim as mp => match value_ty { checker::Prim as vp => mp.kind == vp.kind; _ => false }
+        checker::Str => match value_ty { checker::Str => true; _ => false }
+        checker::Byte => match value_ty { checker::Byte => true; _ => false }
+        checker::Slice => match value_ty { checker::Slice => true; _ => false }
+        _ => false
+    }
+}
+
+/**
+ * variant_named_member_matches — does a NAMED variant member `member_name` (a declared type's own
+ * canonical name) match a value of type `value_ty`? Matches directly when `value_ty` carries that
+ * SAME name (`variant_named_directly` — re-flowing an already-`member_name`-typed value into its
+ * own slot); otherwise, when `member_name` names a DECLARED variant (`find_variant_def`), recurses
+ * into ITS OWN members (`variant_any_member_matches`, which calls back into
+ * `variant_member_type_matches` — so an alias nested arbitrarily deep still resolves), because a
+ * bare case constructed straight into the OUTER slot carries the INNER case's type, never the
+ * alias's own name. A plain user struct (`find_variant_def` finds no entry, since it declares no
+ * `variant`) matches nothing further.
+ *
+ * @param str member_name  the `Named` member's own canonical name
+ * @param checker::Type value_ty  the value's own resolved type
+ * @param []LVariantDef variants  the program's declared-variant table
+ * @return bool  whether `member_name` — directly, or through its own declared expansion — is the
+ *               case `value_ty` belongs to
+ * @since 0.3.1.0 (degrau 23 — nested named-variant member matching, #382)
+ */
+fn variant_named_member_matches(member_name: str, value_ty: checker::Type, variants: []LVariantDef) -> bool {
+    if variant_named_directly(member_name, value_ty) { return true }
+    match find_variant_def(variants, member_name) {
+        LVariantDef as def => variant_any_member_matches(def.ty.members, value_ty, variants)
+        null => false
+    }
+}
+
+/**
+ * variant_named_directly — does `value_ty` carry the EXACT canonical name `member_name`? The
+ * plain name-equality half of `variant_named_member_matches`, split out so its alias-recursion arm
+ * stays a single readable line.
+ *
+ * @param str member_name  the `Named` member's own canonical name
+ * @param checker::Type value_ty  the value's own resolved type
+ * @return bool  whether `value_ty` is `Named { name = member_name }`
+ * @since 0.3.1.0 (degrau 23 — nested named-variant member matching, #382)
+ */
+fn variant_named_directly(member_name: str, value_ty: checker::Type) -> bool {
+    match value_ty {
+        checker::Named as vn => vn.name == member_name
+        _ => false
+    }
+}
+
+/**
+ * variant_any_member_matches — does ANY of `members` match a value of type `value_ty`
+ * (`variant_member_type_matches`)? The membership-only counterpart of `variant_member_index_of`,
+ * for a caller (`variant_named_member_matches`'s alias-recursion arm) that needs the yes/no
+ * question, not the matching index.
+ *
+ * @param []checker::Type members  the aliased variant's own declared members, in order
+ * @param checker::Type value_ty  the value's own resolved type
+ * @param []LVariantDef variants  the program's declared-variant table
+ * @return bool  whether some member of `members` matches `value_ty`
+ * @since 0.3.1.0 (degrau 23 — nested named-variant member matching, #382)
+ */
+fn variant_any_member_matches(members: []checker::Type, value_ty: checker::Type, variants: []LVariantDef) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= members.len { break }
+        if variant_member_type_matches(members[i], value_ty, variants) { return true }
+        i++
+    }
+    false
+}

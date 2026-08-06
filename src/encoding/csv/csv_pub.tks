@@ -1,0 +1,44 @@
+
+/**
+ * Renders `rows` as RFC 4180 CSV text: comma-separated fields (quoted only when required),
+ * `\r\n`-terminated records. Total (M.3): any `[]CsvRow` has a valid CSV rendering.
+ *
+ * @param rows  the records to render, in order
+ * @return      the CSV document text
+ */
+pub fn write_csv(rows: []CsvRow) -> str {
+    mut out: []byte = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= rows.len { break }
+        out = append_row(out, rows[i])
+        i++
+    }
+    str(out)
+}
+
+/**
+ * Parses `text` as an RFC 4180 CSV document into its records. A trailing newline produces no
+ * extra empty record (a document ending exactly at a terminator is the common, well-formed
+ * case); a genuinely empty final line (two consecutive terminators, or trailing text after
+ * the last terminator) still yields its row, matching real-world CSV readers.
+ *
+ * @param text  the CSV document text
+ * @return      the parsed records in source order, or `error` for an unterminated quoted field
+ */
+pub fn parse_csv(text: str) -> []CsvRow | error {
+    let input = bytes_of_str(text)
+    if input.len == 0 {
+        let no_rows: []CsvRow = teko::list::empty()
+        return no_rows
+    }
+    mut rows: []CsvRow = teko::list::empty()
+    mut pos: u64 = 0
+    loop {
+        if pos >= input.len { break }
+        let step = match parse_row(input, pos) { RowStep as s => s; error as e => return e }
+        rows = teko::list::push(rows, step.row)
+        pos = step.next
+    }
+    rows
+}

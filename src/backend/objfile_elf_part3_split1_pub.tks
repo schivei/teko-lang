@@ -1,0 +1,90 @@
+
+/**
+ * emit_elf_object — the ISA-AGNOSTIC ELF64 `ET_REL` writer (the extracted B1
+ * body): the `Elf64_Ehdr` (with the supplied `e_machine`/`e_flags`) + the
+ * section images (`.text`/`.rodata` bytes, the optional `.data.rel.ro` image for
+ * pointer-bearing consts, the `Elf64_Sym` table local-then-global with the
+ * `.rodata`/`.data.rel.ro` `STT_SECTION` symbols AND any `.text` pcrel-label
+ * locals, `.strtab`, `.shstrtab`, the `.rela.text` and optional
+ * `.rela.data.rel.ro` `Elf64_Rela` tables, and — when `obj.dwarf.present` (D1.4)
+ * — `.debug_abbrev`/`.debug_info`/`.debug_line` plus their `.rela.debug_*`
+ * tables) + the `Elf64_Shdr` headers. Enough for `cc`/`ld` to link into a
+ * runnable PIE executable against the C-built `teko_rt` (D-2 option 1
+ * bootstrap). No ISA knowledge remains past this boundary — the per-ISA
+ * `emit_elf`/`emit_elf_arm64` adapters supply the machine, flags, and every
+ * numeric reloc type (including `obj.dwarf`'s, via `elf_dwarf_of`), so E1 (the
+ * ELF static linker) reuses this verbatim. A defined function's `st_value` stays
+ * the bare section-relative `.text` offset (the exact inverse of Mach-O's
+ * rebased `n_value`). `obj.dwarf.present == false` skips every DWARF step below,
+ * so a `DebugInfo::None` build's object is BYTE-IDENTICAL to before D1.4 (the
+ * FIXPOINT this sink must never disturb).
+ *
+ * @param ElfObject obj  the machine id + flags + section images + symbols + relocs + dwarf
+ * @return []byte  the ELF64 object file bytes
+ */
+pub fn emit_elf_object(obj: ElfObject) -> []byte {
+    let part = elf_partition_data_rel_ro(obj)
+    let has_drr = part.active
+    let has_dwarf = obj.dwarf.present
+    let syms = elf_build_symbols(part.symbols)
+    let strtab = build_elf_strtab(elf_sym_names(syms))
+    let secnames = elf_section_names(has_drr, has_dwarf)
+    let shstrtab = build_elf_strtab(secnames)
+    let relas = elf_build_relas(obj.relocs, part.symbols, syms)
+    let rodata_relas = elf_build_rodata_relas(part.drr_relocs, part.symbols, syms)
+    let dwarf_info_relas = elf_resolve_relas(obj.dwarf.info_relocs, part.symbols, syms)
+    let dwarf_line_relas = elf_resolve_relas(obj.dwarf.line_relocs, part.symbols, syms)
+    let first_global = elf_first_global_index(syms)
+    let lay = compute_elf_layout(obj, part.rodata.len to u32, part.drr.len to u32, syms.len to u32, relas.len to u32, rodata_relas.len to u32, strtab.bytes.len to u32, shstrtab.bytes.len to u32, first_global, secnames.len to u32, obj.dwarf.abbrev.len to u32, obj.dwarf.info_bytes.len to u32, obj.dwarf.line_bytes.len to u32, dwarf_info_relas.len to u32, dwarf_line_relas.len to u32)
+    mut b: []byte = teko::list::empty()
+    b = emit_elf_header(b, lay, obj.e_machine, obj.e_flags, lay.nsects)
+    b = append_bytes(b, obj.text)
+    b = pad_to_mult(b, 8 to u32)
+    b = append_bytes(b, part.rodata)
+    b = pad_to_mult(b, 8 to u32)
+    b = append_bytes(b, part.drr)
+    b = pad_to_mult(b, 8 to u32)
+    b = emit_elf_symtab(b, syms, strtab)
+    b = append_bytes(b, strtab.bytes)
+    b = append_bytes(b, shstrtab.bytes)
+    b = pad_to_mult(b, 8 to u32)
+    b = emit_elf_relas(b, relas)
+    if has_drr {
+        b = pad_to_mult(b, 8 to u32)
+        b = emit_elf_relas(b, rodata_relas)
+    }
+    if has_dwarf {
+        b = emit_elf_dwarf_body(b, obj.dwarf, dwarf_info_relas, dwarf_line_relas)
+    }
+    b = pad_to_mult(b, 8 to u32)
+    emit_elf_shdrs(b, lay, shstrtab.strx, has_drr, has_dwarf)
+}
+
+/**
+ * emit_elf — the x86-64 ELF adapter (B1's entry, now delegating): map the
+ * `EncodedModuleX86` to a neutral `ElfObject` (`e_machine`=62, `e_flags`=0, each
+ * `RelocX86` lowered to an `ElfRelocReq` via `elf_reloc_type`, `dwarf` lowered to
+ * `ElfDwarfSections` via `elf_dwarf_of` under `R_X86_64_64`, D1.4) and hand it to
+ * the shared `emit_elf_object`. With `dwarf` omitted (`no_dwarf_sink()`, the
+ * `DebugInfo::None` default) the byte output is IDENTICAL to B1's pre-B2 writer
+ * (B1's goldens are the guardrail — they must stay byte-for-byte green), so the
+ * x86 differential is untouched. Data globals + `R_X86_64_64` data relocs are the
+ * `B1-globals` stop, raised earlier in `encode_module_x86`, so a B1 object never
+ * carries an `Abs64` relocation.
+ *
+ * @param EncodedModuleX86 enc  the section images + symbols + relocations
+ * @param DwarfSink dwarf  the D1.3 producer output to sink (default absent)
+ * @return []byte  the ELF64 object file bytes
+ */
+pub fn emit_elf(enc: EncodedModuleX86, dwarf: DwarfSink) -> []byte {
+    emit_elf_object(ElfObject {
+        e_machine = EM_X86_64
+        e_flags = 0 to u32
+        text = enc.text
+        rodata = enc.rodata
+        symbols = enc.symbols
+        relocs = x86_reloc_reqs(enc)
+        rodata_relocs = x86_rodata_reloc_reqs(enc)
+        dwarf = elf_dwarf_of(dwarf, R_X86_64_64)
+    })
+}

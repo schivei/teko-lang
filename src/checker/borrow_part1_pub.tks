@@ -1,0 +1,86 @@
+
+/**
+ * (SP-1a, #389/#498 the safety-spine PURE-QUERY spike) Does the type `t` TRANSITIVELY reach a
+ * `Reference` — through struct/class/trait fields, a type alias, a `variant`'s members, a
+ * collection element, an optional's inner, or a function type's params/return — such that a
+ * by-value copy of a `t` would copy a POINTER (the ref-transparent-model §7 soundness hole: copying
+ * a `Holder { r: Ref<int> }` copies `r`, not the pointee)? A purely TYPE-STRUCTURAL walk, NOT a
+ * points-to analysis. Nominal recursion is bounded by `visited` (a type name visited twice on the
+ * same path contributes no new edge), so the walk terminates; the type universe is finite per
+ * compilation. An unresolvable `Named` (an unregistered name) conservatively answers `true` (the
+ * safe over-reject direction — mirrors `escaping_value_leaks_ref`'s honest-stop).
+ *
+ * Consulted NOWHERE yet (SP-1 is a pure, unwired fact) — fixpoint is preserved by construction.
+ *
+ * @param t        the resolved type under test
+ * @param table    the program's type table (to resolve a `Named` type's own field/alias shape)
+ * @param visited  the nominal type names already entered on this path (recursion guard)
+ * @return         true iff a by-value copy of `t` carries at least one live `Reference` edge
+ * @see            docs/design/safety-spine.md §B2.1(a); docs/design/ref-transparent-model.md §7
+ * @since          0.3.1.0-beta (#389 SP-1)
+ */
+pub fn type_reaches_ref(t: Type, table: TypeTable, visited: []str) -> bool {
+    match t {
+        Reference => true
+        Slice as s => type_reaches_ref(s.element, table, visited)
+        Variant as v => types_reach_ref(v.members, table, visited)
+        Func as f => func_type_reaches_ref(f, table, visited)
+        Named as n => named_type_reaches_ref(n, table, visited)
+        _ => false
+    }
+}
+
+/**
+ * (SP-1b, #389/#498) The per-function BORROW SUMMARY: which of `f`'s parameters the RETURN VALUE
+ * (transitively) borrows. This is lifetime-elision-LITE — the ONE fact past the #330 one-hop escape
+ * ceiling that the compiler's own iterator/stream stdlib forces (28 `src/iter`/`src/io` functions
+ * return a closure capturing a `Ref`/closure parameter). It is NOT a named-lifetime system and NOT
+ * whole-program: a single bitmask per function, computed from `f`'s body in one bottom-up pass,
+ * consumed exactly ONE hop deep at each call site (by a future caller-side gate — not SP-1).
+ *
+ * @field returns_borrow_of  the 0-based parameter indices the return value borrows
+ * @field returns_all        true ⇒ un-summarizable: treat the return as borrowing every param (over-reject)
+ * @see   docs/design/safety-spine.md §B2.1(b)
+ * @since 0.3.1.0-beta (#389 SP-1)
+ */
+pub type BorrowSummary = struct { returns_borrow_of: []u32; returns_all: bool }
+
+/**
+ * A bottom-up environment of already-computed callee summaries, keyed by the callee's qualified
+ * name (`qualify(namespace, bare_name)`) — the DRIVER (not SP-1 itself) is responsible for ordering
+ * a program's functions so a callee is summarized before its callers, falling back to `returns_all`
+ * for a not-yet-summarized / recursive callee (a single monotone widening, never a full fixpoint).
+ * Parallel arrays, mirroring the `str_set_*`/`Cell` parallel-list idiom the checker already uses
+ * for small, function-scale collections.
+ *
+ * @field keys  the qualified callee names already summarized
+ * @field sums  the matching summaries, parallel to `keys` by index
+ * @since 0.3.1.0-beta (#389 SP-1)
+ */
+pub type BorrowSummaryEnv = struct { keys: []str; sums: []BorrowSummary }
+
+/**
+ * The empty borrow-summary environment — the starting point for a bottom-up driver, and what a
+ * single-function (or leaf-function) summary needs when no callee has been summarized yet.
+ *
+ * @return an environment with no summarized callees
+ * @since 0.3.1.0-beta (#389 SP-1)
+ */
+pub fn borrow_summary_env_empty() -> BorrowSummaryEnv {
+    BorrowSummaryEnv { keys = teko::list::empty(); sums = teko::list::empty() }
+}
+
+/**
+ * Record `sum` as the summary of the function named `name` in namespace `ns`, returning the grown
+ * environment (a driver builds one call at a time as it summarizes a program bottom-up).
+ *
+ * @param env   the environment so far
+ * @param ns    the function's declaring namespace ("" = top-level)
+ * @param name  the function's bare name
+ * @param sum   its computed summary
+ * @return      the environment with `name` (qualified by `ns`) bound to `sum`
+ * @since 0.3.1.0-beta (#389 SP-1)
+ */
+pub fn borrow_summary_env_insert(env: BorrowSummaryEnv, ns: str, name: str, sum: BorrowSummary) -> BorrowSummaryEnv {
+    BorrowSummaryEnv { keys = teko::list::push(env.keys, qualify(ns, name)); sums = teko::list::push(env.sums, sum) }
+}

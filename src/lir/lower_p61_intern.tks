@@ -1,0 +1,162 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * lower_fn_body_fat — `lower_fn_body`'s fat-return arm: the FAT tail-value walk
+ * (`lower_block_value_fat`, the same machinery an `if`-expression's fat arm uses) instead of the
+ * scalar one, then store the trailing value's length half through the hidden out-slot before the
+ * single-VReg `LRet` carries its ptr half — mirrors `lower_return_fat`, one axis over
+ * (explicit return vs trailing auto-return). Refuses when the enclosing body reserved no out-slot
+ * (a fat-returning lambda), exactly like `lower_return_fat`.
+ *
+ * @param ctx   the lowering context
+ * @param body  the function body's statement list (non-empty, `lower_fn_body`'s own guard)
+ * @param line  the source line to propagate onto the synthesized `ret`
+ * @param col   the source column to propagate onto the synthesized `ret`
+ * @return      the context after lowering every statement, its block already closed with the
+ *              `LRet`
+ * @throws      when the enclosing body has no reserved out-slot, or propagated from lowering the
+ *              trailing tail
+ * @implNote NP4: the prefix statements lower under the frame region UNCHANGED
+ *           (`lower_block_prefix_fat`); the tail statement lowers through `lower_fn_tail_fat`, which
+ *           BRACKETS its own construction in leave/enter when it is an expression-statement (there
+ *           is no post-hoc box on the fat axis to fix this up afterward, unlike
+ *           `own_returned_value`'s aggregate one, so the conveyance leave must precede construction),
+ *           then restores the frame region so defer replay below runs under it exactly like every
+ *           other exit edge. The FINAL `emit_region_leaves` + `emit_region_drops`, after the length is
+ *           stored and before the `LRet`, then reclaims the frame's own non-escaping scratch — the
+ *           SAME shape `lower_return`/`lower_fn_body`/`close_function` each end on.
+ */
+fn lower_fn_body_fat(ctx: LowerCtx, body: []checker::TStatement, line: u32, col: u32) -> LowerCtx | error {
+    if !ctx.has_ret_len_slot { return error { message = "native backend N1: a fat-typed lambda return is not yet lowered (N2)" } }
+    let pre = match lower_block_prefix_fat(ctx, body) { LowerStmtOut as x => x; error as err => return err }
+    if pre.terminated { return pre.ctx }
+    let tail = match lower_fn_tail_fat(pre.ctx, body[body.len - 1], line, col) { LowerBlockValueFat as x => x; error as err => return err }
+    if tail.terminated { return tail.ctx }
+    let replayed = match replay_defers(tail.ctx, 0) { LowerCtx as c => c; error as err => return err }
+    let left = emit_region_leaves(replayed, line, col)
+    let stored = ctx_append(left, store_inst(left.ret_len_slot, tail.len, LType::I64, line, col))
+    let dropped = emit_region_drops(stored, line, col)
+    ctx_append(dropped, ret_inst(tail.ptr, line, col))
+}
+
+/**
+ * ParamBind — the running state a function prologue's parameter-binding loop threads: the
+ * `LFunc` built so far, the local `LEnv` built so far, and the NEXT unused incoming register
+ * index — which register a fat parameter's second half, and the parameter that follows it,
+ * both continue from (a fat parameter occupies TWO consecutive registers; a scalar one
+ * occupies ONE).
+ */
+type ParamBind = struct {
+    /**
+     * func — the function built so far, with a `param` inst appended for every incoming
+     * register bound up to this point.
+     */
+    func: LFunc
+    /**
+     * env — the local env built so far, with every parameter's name bound up to this point
+     * (scalar via `lenv_bind`, fat via `lenv_bind_fat`).
+     */
+    env: LEnv
+    /**
+     * next_reg — the next unused incoming register index (the ptr register of the NEXT
+     * parameter, whether it turns out scalar or fat).
+     */
+    next_reg: u32
+}
+
+/**
+ * bind_fn_params — bind every declared parameter into the function prologue, in order,
+ * threading the running func/env/register-index through `bind_param` (`lower_function`'s
+ * prologue, extracted so the fat-vs-scalar branch lives in exactly one place). Named
+ * distinctly from the (retired) LIR interpreter's OWN `bind_params` (a different block-arg
+ * binder function over `[]u32` — this module has no overload-by-type, so the two cannot
+ * share a name).
+ *
+ * @param LFunc func  the (still paramless-bodied) function to extend — its entry block (id 0)
+ *                     receives one `param` inst per incoming register
+ * @param []parser::Param params  the declared parameter list, in order
+ * @param u32 line  the source line to stamp every emitted `param` inst with
+ * @param u32 col  the source column to stamp every emitted `param` inst with
+ * @param table  the program's type table — `bind_param`'s alias resolver (`typeexpr_is_fat`),
+ *               so a parameter ANNOTATED through an alias (`type S = str`) binds exactly like a
+ *               parameter annotated `str` directly (0.3.1.0 raiz A, crumb R0)
+ * @return ParamBind  the func/env with every parameter bound
+ */
+fn bind_fn_params(func: LFunc, params: []parser::Param, line: u32, col: u32, table: checker::TypeTable) -> ParamBind {
+    mut cur = ParamBind { func = func; env = empty_lenv(); next_reg = 0 }
+    mut i: u64 = 0
+    loop {
+        if i >= params.len { break }
+        cur = bind_param(cur.func, cur.env, cur.next_reg, params[i], line, col, table)
+        i++
+    }
+    cur
+}
+
+/**
+ * bind_param — bind ONE declared parameter into the function prologue: a SCALAR parameter
+ * (`!typeexpr_is_fat`) reserves ONE incoming register and binds it plainly (`lenv_bind`); a
+ * FAT (`str`/`[]T`) parameter delegates to `bind_fat_param`, which reserves TWO consecutive
+ * incoming registers — ptr FIRST, len SECOND (CONTRACT ORDER, mirroring the C twin's
+ * `tk_str{ptr;len}` field order, `teko_rt.h`) — and binds both through `lenv_bind_fat`, so a
+ * later `.len` read off the parameter resolves with NO memory traffic, exactly like a fat
+ * `let` local (#382 A1-4). THIS ORDER is exactly what every call site (`lower_arg_vregs`)
+ * must also honor — a caller/callee that disagreed on it would read the wrong VReg as a
+ * length, silently, not as a compile error.
+ *
+ * @param LFunc func  the function built so far (its params appended)
+ * @param LEnv env  the local env built so far
+ * @param u32 next_reg  the next unused incoming register index
+ * @param parser::Param p  the declared parameter to bind
+ * @param u32 line  the enclosing function's source line (stamps the `param` inst(s))
+ * @param u32 col  the enclosing function's source column (stamps the `param` inst(s))
+ * @param table  the program's type table (`typeexpr_is_fat`'s alias resolver)
+ * @return ParamBind  the advanced func/env/next_reg
+ */
+fn bind_param(func: LFunc, env: LEnv, next_reg: u32, p: parser::Param, line: u32, col: u32, table: checker::TypeTable) -> ParamBind {
+    if typeexpr_is_fat(p.type_ann, table) { return bind_fat_param(func, env, next_reg, p, line, col) }
+    let with_inst = append_inst(func, 0, param_inst(next_reg, next_reg, line, col))
+    ParamBind { func = with_inst; env = lenv_bind(env, p.name, next_reg); next_reg = next_reg + 1 }
+}
+
+/**
+ * bind_fat_param — `bind_param`'s FAT arm: append the ptr register's `param` inst at
+ * `next_reg`, then the len register's at `next_reg + 1`, and bind the name to BOTH via
+ * `lenv_bind_fat` (ptr, len — the same contract order `bind_param`'s doc names).
+ *
+ * @param LFunc func  the function built so far
+ * @param LEnv env  the local env built so far
+ * @param u32 next_reg  the ptr register's index (its len register is `next_reg + 1`)
+ * @param parser::Param p  the declared fat parameter to bind
+ * @param u32 line  the enclosing function's source line
+ * @param u32 col  the enclosing function's source column
+ * @return ParamBind  the advanced func/env/next_reg (advanced by TWO)
+ */
+fn bind_fat_param(func: LFunc, env: LEnv, next_reg: u32, p: parser::Param, line: u32, col: u32) -> ParamBind {
+    let ptr_reg = next_reg
+    let len_reg = next_reg + 1
+    let with_ptr = append_inst(func, 0, param_inst(ptr_reg, ptr_reg, line, col))
+    let with_len = append_inst(with_ptr, 0, param_inst(len_reg, len_reg, line, col))
+    ParamBind { func = with_len; env = lenv_bind_fat(env, p.name, ptr_reg, len_reg); next_reg = len_reg + 1 }
+}
+
+/**
+ * bind_ret_len_slot — reserve the ONE hidden TRAILING incoming register a `str`/`[]T`-returning
+ * `fn`'s prologue owes its caller: the address of an 8-byte slot the CALLER allocated
+ * (`lower_call_fat`'s own `alloca`) for this function's length half. Appended after every
+ * DECLARED parameter is bound (`bound.next_reg`, `lower_function`'s own call site), so it never
+ * collides with a real parameter's register — the env is passed through UNCHANGED (the slot has
+ * no source-level name; only `LowerCtx.ret_len_slot` remembers its VReg).
+ *
+ * @param bound  the `ParamBind` after every declared parameter is bound
+ * @param line   the enclosing function's source line (stamps the `param` inst)
+ * @param col    the enclosing function's source column (stamps the `param` inst)
+ * @return       the advanced `ParamBind` (its `env` unchanged, `next_reg` advanced by one)
+ */
+fn bind_ret_len_slot(bound: ParamBind, line: u32, col: u32) -> ParamBind {
+    let reg = bound.next_reg
+    let with_inst = append_inst(bound.func, 0, param_inst(reg, reg, line, col))
+    ParamBind { func = with_inst; env = bound.env; next_reg = reg + 1 }
+}

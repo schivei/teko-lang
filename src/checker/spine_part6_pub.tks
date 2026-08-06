@@ -1,0 +1,33 @@
+
+/**
+ * The spine fact for one function — a bounded, per-function points-to / uniqueness lattice layered
+ * BESIDE `fn_escaping_vars` (the name set stays byte-identical; this only ever CERTIFIES a subset of
+ * what the name set over-marked). Builds the finite cell universe of `f`, seeds each axis at its
+ * climb-floor, then runs the monotone alias-transfer (`us`) and the adopter-confinement transfer
+ * (`pt`, §5.1) to a fixpoint. Every transfer only moves a cell UP the fixed-height (≤ 3) lattice, so
+ * it terminates in ≤ |cells| × 3 join steps (§2c.2 termination). Reads `f.params` + `f.body`; touches
+ * NO `mark_*` code.
+ *
+ * @param TFunction f  the typed function to analyze
+ * @return Spine  the per-cell points-to / borrowed-from / unique-vs-shared fact for `f`
+ * @see      docs/design/spine-layer-or-replace.md §2c.2
+ * @since    0.1.0.0-beta (#331 L1)
+ */
+pub fn fn_spine(f: TFunction) -> Spine {
+    let cells = add_block_cells(f.body, add_param_cells(f, teko::list::empty()))
+    let us = capture_block(f.body, cells, transfer_block(f.body, cells, seed_us(cells)))
+    let pt_state = pt_transfer_block(f.body, cells, 0, false, PtTransferState { pt = seed_pt(cells); next_region = 0 })
+    Spine { cells = cells; pt = pt_state.pt; bf = bf_transfer_block(f.body, cells, seed_bf(cells)); us = us }
+}
+
+/**
+ * The cell index of a bare binding / parameter (`field` = "") named `name`, or -1 when un-nameable.
+ * The L2 gates (PR-2 / PR-3) call this to key a consumed / borrowed binding into its spine cell.
+ *
+ * @param Spine s  the function's spine
+ * @param str name  the binding / parameter name
+ * @return i64  the 0-based cell index, or -1 when the name is not in this function's universe
+ */
+pub fn cell_of(s: Spine, name: str) -> i64 {
+    cell_index(s.cells, name, "")
+}

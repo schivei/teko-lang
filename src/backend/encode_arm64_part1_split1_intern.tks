@@ -1,0 +1,184 @@
+
+/**
+ * MemForm — a load/store base word paired with its access scale: the pairing
+ * lets `encode_load`/`encode_store` derive the size template and the immediate
+ * scale in one `MMemSize` match, so the FPR (`S`/`D`) honest-stop is raised
+ * exactly once per memory op instead of in two separate lookups.
+ *
+ * @since #385 A4-1
+ */
+type MemForm = struct {
+    /**
+     * base — the size-and-direction template word (the LDR/STR family entry),
+     * with the immediate/register fields left zero.
+     */
+    base: u32
+    /**
+     * scale — the access width in bytes (1/2/4/8); the scaled unsigned
+     * immediate is `offset / scale`.
+     */
+    scale: u32
+}
+
+/**
+ * plain_word — an `EncWord` for a position-independent instruction: just the
+ * finished 32-bit word, with no branch displacement and no symbol relocation
+ * pending (`reloc` is `null`, not a defaulted kind).
+ *
+ * @param u32 w  the finished instruction word
+ * @return EncWord  the word with no pending fixup
+ */
+fn plain_word(w: u32) -> EncWord {
+    EncWord {
+        word = w
+        has_branch = false
+        target = 0 to u32
+        branch_form = 0 to u32
+        reloc = null
+    }
+}
+
+/**
+ * branch_word — an `EncWord` for an intra-function branch: the base word (with
+ * the displacement field still zero) plus the destination block id and which
+ * displacement field the A4-3 patch pass fills.
+ *
+ * @param u32 w  the base word (condition/register fields filled, displacement zero)
+ * @param u32 target  the destination machine-block id
+ * @param u32 form  the displacement field selector (0=imm26, 1=imm19)
+ * @return EncWord  the word flagged for branch patching
+ */
+fn branch_word(w: u32, target: u32, form: u32) -> EncWord {
+    EncWord {
+        word = w
+        has_branch = true
+        target = target
+        branch_form = form
+        reloc = null
+    }
+}
+
+/**
+ * reloc_word — an `EncWord` for a symbol reference: the placeholder word (with
+ * the immediate the linker patches left zero) plus the target symbol and the
+ * relocation kind the A4-3 assembly turns into a `Reloc` record.
+ *
+ * @param u32 w  the placeholder word (register fields filled, immediate zero)
+ * @param str sym  the target symbol's already-final name
+ * @param MRelocKind kind  which relocation this word owes
+ * @return EncWord  the word flagged for symbol relocation
+ */
+fn reloc_word(w: u32, sym: str, kind: MRelocKind) -> EncWord {
+    EncWord {
+        word = w
+        has_branch = false
+        target = 0 to u32
+        branch_form = 0 to u32
+        reloc = EncReloc { sym = sym; kind = kind }
+    }
+}
+
+/**
+ * enc_reg — a physical `MReg`'s 5-bit ISA field value: its `id` directly
+ * (x0..x30/SP=31 for GPR, v0..v31 for FPR). SP vs XZR (both id 31) is decided
+ * by the INSTRUCTION template, not the register, so no per-register
+ * disambiguation happens here.
+ *
+ * @param MReg r  a physical register (A4 runs post-regalloc)
+ * @return u32  its 5-bit ISA field value
+ */
+fn enc_reg(r: MReg) -> u32 {
+    r.id
+}
+
+/**
+ * enc_rd — the `Rd`/`Rt` destination field (bits 0-4): the register id, no
+ * shift.
+ *
+ * @param MReg r  the destination/transfer register
+ * @return u32  the register id placed in bits 0-4
+ */
+fn enc_rd(r: MReg) -> u32 {
+    enc_reg(r)
+}
+
+/**
+ * enc_rn — the `Rn` first-source field (bits 5-9): the register id shifted
+ * left by 5.
+ *
+ * @param MReg r  the first source / base register
+ * @return u32  the register id placed in bits 5-9
+ */
+fn enc_rn(r: MReg) -> u32 {
+    enc_reg(r) << ARM64_RN_SHIFT
+}
+
+/**
+ * enc_rm — the `Rm` second-source field (bits 16-20): the register id shifted
+ * left by 16.
+ *
+ * @param MReg r  the second source register
+ * @return u32  the register id placed in bits 16-20
+ */
+fn enc_rm(r: MReg) -> u32 {
+    enc_reg(r) << ARM64_RM_SHIFT
+}
+
+/**
+ * enc_ra — the `Ra` accumulator field (bits 10-14) of the MADD/MSUB form: the
+ * register id shifted left by 10.
+ *
+ * @param MReg r  the accumulator (minuend) register
+ * @return u32  the register id placed in bits 10-14
+ */
+fn enc_ra(r: MReg) -> u32 {
+    enc_reg(r) << ARM64_REG2_SHIFT
+}
+
+/**
+ * sf_bit — the size flag for a `wide` operand: `1 << 31` (the 64-bit X form),
+ * or 0 (the 32-bit W form). Every width-parametric template below is stored in
+ * its bit-31-clear (32-bit) shape, so this ORs the 64-bit form back in.
+ *
+ * @param bool wide  true for the 64-bit form
+ * @return u32  `1 << 31` when wide, else 0
+ */
+fn sf_bit(wide: bool) -> u32 {
+    if wide { (1 to u32) << ARM64_SF_SHIFT } else { 0 to u32 }
+}
+
+/**
+ * cond_code — the 4-bit AArch64 condition field for an `MCond`: the encoding
+ * B.cond tests directly, and the value CSET inverts (`^ 1`) into CSINC.
+ *
+ * @param MCond c  the condition code
+ * @return u32  its 4-bit AArch64 condition field
+ */
+fn cond_code(c: MCond) -> u32 {
+    match c {
+        EQ => ARM64_COND_EQ
+        NE => ARM64_COND_NE
+        LT => ARM64_COND_LT
+        LE => ARM64_COND_LE
+        GT => ARM64_COND_GT
+        GE => ARM64_COND_GE
+        LO => ARM64_COND_LO
+        LS => ARM64_COND_LS
+        HI => ARM64_COND_HI
+        HS => ARM64_COND_HS
+    }
+}
+
+/**
+ * ftype_bit — the `type` field's double-precision bit for a `dbl` float
+ * operand: `ARM64_FTYPE_D` (the `D` form), or 0 (the `S` form). The float
+ * family's exact counterpart of `sf_bit`: every FP template in
+ * `encode_arm64_consts.tks` is stored in its single-precision shape and ORs
+ * this bit back in for the double one.
+ *
+ * @param bool dbl  true for the 64-bit (double-precision) form
+ * @return u32  `ARM64_FTYPE_D` when dbl, else 0
+ */
+fn ftype_bit(dbl: bool) -> u32 {
+    if dbl { ARM64_FTYPE_D } else { 0 to u32 }
+}

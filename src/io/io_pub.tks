@@ -1,0 +1,110 @@
+// src/io/io.tks   (namespace 'teko::io')
+//
+// teko::io — the host I/O surface: file read/write and console output primitives.
+// These are EXTERN declarations backed by the teko_rt C runtime (teko_rt.c / teko_rt.h).
+// The checker's builtin_fn (scope.c / scope.tks) resolves these by last-segment name;
+// this file is the canonical Teko materialization of those host-FFI entries (C7.3 — SUPREME RULE).
+//
+// Return types:
+//   str | error  → tk_ffi_sres  (ok + value + err)
+//   error?       → tk_ffi_ures  (ok + err; null = success)
+//   void         → bare C call
+//
+// The `from "teko_rt"` clause is informational — the library is always linked via the
+// root teko.tkp [extern.libs] entries; `from` does NOT drive the link step today (C7.1).
+
+// teko::io::read_file(path) — slurp the whole file as UTF-8 bytes (owned copy).
+// Returns the file contents as a str, or an error on failure (missing file, permissions, …).
+pub extern fn read_file(path: str) -> str | error = "tk_rt_read_file" from "teko_rt"
+
+/** (DT3) teko::io::read_line() — read one line from stdin (the trailing newline stripped).
+    Returns the line's text, or "" when stdin has no more input — check stdin_eof() right
+    after to tell that apart from a genuine blank line (a plain `str` return, not `str |
+    error`: a brand-new host primitive with an `error`-shaped surface needs the codegen
+    host-FFI lifter to already know its name, which the RELEASED bootstrap seed's frozen
+    codegen.c cannot learn post-release — see teko_rt.h's own note). */
+pub extern fn read_line() -> str = "tk_rt_read_line" from "teko_rt"
+
+/** (DT3) teko::io::stdin_eof() — did the LAST read_line() call hit real EOF (stdin fully
+    exhausted, no more input at all)? Read this after an empty read_line() result. */
+pub extern fn stdin_eof() -> bool = "tk_rt_stdin_eof" from "teko_rt"
+
+/** (#229) teko::io::read_stdin() — slurp all of stdin until EOF (owned copy), for `teko fmt -`.
+    A bare str (no error union, unlike read_file): a `str | error` extern needs a NEW per-name
+    codegen lift (emit_host_ffi) that the CURRENTLY RELEASED seed's compiler cannot lower yet
+    (the seed is one release behind the PR that adds it), so this — like read_line()/version()
+    — has no recoverable-error channel; a genuine read failure panics. */
+pub extern fn read_stdin() -> str = "tk_rt_read_stdin" from "teko_rt"
+
+// teko::io::write_file(path, content) — (over)write the file at `path` with `content`.
+// Returns error? (null = success, non-null = error with message).
+pub extern fn write_file(path: str, content: str) -> error | null = "tk_rt_write_file" from "teko_rt"
+
+/**
+ * append_file — APPEND `content` to the file at `path`, creating it when absent.
+ *
+ * THE POINT IS WHAT IT DOES NOT DO. Appending by reading the whole file back, concatenating and
+ * rewriting it costs two allocations the size of the file per record, and Teko's arena frees ONCE,
+ * at process exit — so N records allocate the SUM of 1..N file sizes and never give a byte back.
+ * That is quadratic, and it is what flooded the regression tier's memory (8.4 GB anon-rss measured
+ * on the base). One append is linear.
+ *
+ * THE CROSS-PROCESS RACE NARROWS, AND ONLY AS FAR AS THE HOST ALLOWS. POSIX specifies a `write` to
+ * an `O_APPEND` descriptor as seek-and-write ATOMIC with respect to other writers, so two processes
+ * appending small records to one path can no longer overwrite each other. NOT AN UNLIMITED PROMISE:
+ * a write above some size may be partial and is then finished by a second one, which is no longer
+ * one atomic act — WHERE THAT SIZE LIES IS NOT MEASURED HERE. The MSVC CRT's `_O_APPEND` is
+ * documented as a seek followed by a write rather than one operation, so Windows keeps the race it
+ * always had.
+ *
+ * @param path     the file to append to; created when absent
+ * @param content  the bytes to append, exactly as given (no newline is added)
+ * @return         nothing on success, or the failure
+ * @throws         when the file could not be opened, or the bytes could not all be written
+ * @since 0.3.1.0
+ */
+pub fn append_file(path: str, content: str) -> error | null {
+    if append_file_raw(path, content) == APPEND_FAILED {
+        return error { message = "teko::io::append_file: could not append to the file" }
+    }
+    null
+}
+
+// teko::io::write_file_bytes(path, data) — write raw bytes to a file (C7.12: .tkl output).
+// Accepts a []byte slice, so binary data (e.g. ZIP archives) is written without UTF-8 reinterpretation.
+// Returns error? (null = success, non-null = error with message).
+pub extern fn write_file_bytes(path: str, data: []byte) -> error | null = "tk_rt_write_file_bytes" from "teko_rt"
+
+// teko::io::write(s) — write exactly s.len bytes to stdout; no newline, no NUL.
+// (The host output FFI bottom; the runtime's print/println lower to this.)
+pub extern fn write(s: str) -> void = "tk_write" from "teko_rt"
+
+// teko::io::ewrite(s) — write exactly s.len bytes to stderr; no newline, no NUL.
+// (The host error-output FFI bottom; eprint/eprintln/panic lower to this.)
+pub extern fn ewrite(s: str) -> void = "tk_ewrite" from "teko_rt"
+
+// teko::io::print(s) — alias for write(s); conventional console print to stdout.
+pub extern fn print(s: str) -> void = "tk_print" from "teko_rt"
+
+// teko::io::println(s) — write s to stdout followed by a single newline (0x0A).
+pub extern fn println(s: str) -> void = "tk_println" from "teko_rt"
+
+// teko::io::eprint(s) — write s to stderr; no newline.
+pub extern fn eprint(s: str) -> void = "tk_eprint" from "teko_rt"
+
+// teko::io::eprintln(s) — write s to stderr followed by a single newline (0x0A).
+pub extern fn eprintln(s: str) -> void = "tk_eprintln" from "teko_rt"
+
+/**
+ * teko::io::flush() — push everything buffered on stdout to the OS NOW.
+ *
+ * stdout is block-buffered whenever it is not a terminal — every CI run, every `> log`. A CHILD
+ * process writes to the same file description directly, so anything this process has printed but
+ * not yet flushed lands AFTER the child's output and the log reads out of order. Any caller that
+ * spawns a child which writes to the inherited stdout must flush first; the runtime bottom is the
+ * same `tk_flush_out` the test harness calls before running each test body, so a crash cannot
+ * swallow the name of the test that caused it.
+ *
+ * @since 0.3.1.0
+ */
+pub extern fn flush() -> void = "tk_flush_out" from "teko_rt"

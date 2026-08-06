@@ -1,0 +1,30 @@
+
+
+/**
+ * cast_is_lossless_widen — does `x to <outer>` on an `inner`-typed operand WIDEN losslessly? True
+ * iff the W-RULE's own join of the two kinds is the cast's target, i.e. `outer` can hold every
+ * `inner` value. This is class-3's standing precondition (`cast-width-hygiene-0.3.1.md` §8 Risk 2):
+ * a NARROWING cast is never redundant even when the enclosing op's result type is unchanged by it,
+ * because the narrow is a CHECKED conversion that can trap and can drop bits — `n == ((len - 1) to
+ * u32)` with a `u64` `len` compares at `u64` either way, yet deleting the cast deletes a range
+ * check the author asked for.
+ *
+ * ALSO the SINGLE SOURCE OF TRUTH for "does this `to` need a runtime fit guard?", asked by BOTH
+ * emission routes so the two can never disagree about which casts may lose: the native backend's
+ * `lower_cast_fit_guard` (`lir/lower.tks`) skips its guard exactly when this answers true, and the
+ * C backend's `cast_may_lose` (`codegen/codegen.tks`) is its complement by definition. Before that
+ * unification the C route carried its own width table and the native route carried none at all,
+ * which is how a `u64` value of 300 came to be stored in a `u8` on one route and rejected on the
+ * other.
+ *
+ * @param inner  the cast operand's own `PrimKind`
+ * @param outer  the cast's target `PrimKind`
+ * @return       true iff the cast is a lossless widen (or the identity)
+ * @since        0.3.1
+ */
+pub fn cast_is_lossless_widen(inner: PrimKind, outer: PrimKind) -> bool {
+    match int_arith_join(inner, outer) {
+        PrimKind as k => k == outer
+        error => false
+    }
+}

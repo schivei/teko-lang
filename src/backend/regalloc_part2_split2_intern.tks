@@ -1,0 +1,234 @@
+/**
+ * compute_intervals — the §3.2 liveness pass: one walk of the RPO-numbered
+ * stream driven by the §1.1 def/use table, producing the virtual intervals to
+ * color and the fixed pin intervals to block. Range-numbered by RPO position
+ * among the ENTRY-REACHABLE blocks (#443; dead-block edges excluded, A4-6 #385).
+ * The naive `[def, last-use]` virtual intervals are then widened over every
+ * natural loop by `extend_over_loops` (§6.2), so a value live at a loop header
+ * survives the whole body across the back-edge — the loops the honest-stop once
+ * refused now allocate correctly.
+ *
+ * @param []NumberedInst stream  the RPO-numbered instruction stream
+ * @param []u32 order  the RPO block-id order (for the natural-loop test)
+ * @param []u32 reachable  the entry-reachable block ids (for the natural-loop test)
+ * @return IntervalSet | error  the computed intervals
+ */
+fn compute_intervals(stream: []NumberedInst, order: []u32, reachable: []u32) -> IntervalSet | error {
+    let events = collect_events(stream)
+    let regs = distinct_regs(events)
+    let cps = call_points_of(stream)
+    mut virt: []LiveInterval = teko::list::empty()
+    mut fixed: []LiveInterval = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= regs.len { break }
+        let r = regs[i]
+        if r.is_phys {
+            let pins = phys_intervals(events, r, stream, cps)
+            mut j: u64 = 0
+            loop {
+                if j >= pins.len { break }
+                fixed = teko::list::push(fixed, pins[j])
+                j++
+            }
+        } else {
+            virt = teko::list::push(virt, virt_interval(events, r, cps))
+        }
+        i++
+    }
+    virt = extend_over_loops(virt, natural_loops(stream, order, reachable), cps)
+    IntervalSet { virt = virt; fixed = fixed; call_points = cps }
+}
+
+/**
+ * ActiveEntry — a currently-assigned virtual interval in the scan's active
+ * set: its vreg, the physreg it holds, its end point, and its class.
+ *
+ * @since #384 A3-3
+ */
+type ActiveEntry = struct {
+    /**
+     * vreg_id — the active virtual register.
+     */
+    vreg_id: u32
+    /**
+     * phys — the physical register it holds.
+     */
+    phys: u32
+    /**
+     * end — the interval's end point (when it frees the register).
+     */
+    end: u32
+    /**
+     * reg_class — the register file it lives in.
+     */
+    reg_class: MRegClass
+}
+
+/**
+ * interval_before — the start-order comparator (tie-break by `reg_id` for a
+ * deterministic scan, M.2): true iff `a` sorts strictly before `b`.
+ *
+ * @param LiveInterval a  the first interval
+ * @param LiveInterval b  the second interval
+ * @return bool  true iff `a` precedes `b`
+ */
+fn interval_before(a: LiveInterval, b: LiveInterval) -> bool {
+    if a.start != b.start { a.start < b.start } else { a.reg_id < b.reg_id }
+}
+
+/**
+ * run_end — the exclusive end of a merge run starting at `lo` with width
+ * `width`, clamped to `len` so a pass's final short run is handled by the same
+ * code as a full one.
+ *
+ * @param u64 lo  the run's inclusive start
+ * @param u64 width  the pass's run width
+ * @param u64 len  the sequence length
+ * @return u64  `min(lo + width, len)`
+ */
+fn run_end(lo: u64, width: u64, len: u64) -> u64 {
+    let raw = lo + width
+    if raw > len { return len }
+    raw
+}
+
+/**
+ * merge_runs — stably merge the two adjacent sorted runs `src[lo..mid)` and
+ * `src[mid..hi)` onto the tail of `out0`. The left run is taken unless the
+ * right head sorts STRICTLY before the left head, so a pair `interval_before`
+ * orders in neither direction keeps its input order. That left-bias is what
+ * makes the whole sort stable, and stability is what makes the output the
+ * same permutation the retired insertion sort produced.
+ *
+ * @param []LiveInterval src  the sequence holding both runs
+ * @param u64 lo  the left run's inclusive start
+ * @param u64 mid  the left run's exclusive end and the right run's start
+ * @param u64 hi  the right run's exclusive end
+ * @param []LiveInterval out0  the pass output built so far
+ * @return []LiveInterval  `out0` with both runs appended in sorted order
+ */
+fn merge_runs(src: []LiveInterval, lo: u64, mid: u64, hi: u64, out0: []LiveInterval) -> []LiveInterval {
+    mut out = out0
+    mut i: u64 = lo
+    mut j: u64 = mid
+    loop {
+        if i >= mid { break }
+        if j >= hi { break }
+        if interval_before(src[j], src[i]) {
+            out = teko::list::push(out, src[j])
+            j++
+            continue
+        }
+        out = teko::list::push(out, src[i])
+        i++
+    }
+    loop { if i >= mid { break }; out = teko::list::push(out, src[i]); i++ }
+    loop { if j >= hi { break }; out = teko::list::push(out, src[j]); j++ }
+    out
+}
+
+/**
+ * merge_pass — one bottom-up pass of the merge sort: every adjacent pair of
+ * `width`-wide sorted runs of `src` is merged, doubling the sorted-run length.
+ * ONE output list is built per PASS, never one per element — that is the whole
+ * point. A pass allocates O(V) and there are `ceil(log2 V)` passes, against
+ * the V allocations of O(V) bytes each the insertion sort paid.
+ *
+ * @param []LiveInterval src  the sequence, already sorted in `width`-wide runs
+ * @param u64 width  the current run width
+ * @return []LiveInterval  the same elements, sorted in `2*width`-wide runs
+ */
+fn merge_pass(src: []LiveInterval, width: u64) -> []LiveInterval {
+    mut out: []LiveInterval = teko::list::empty()
+    mut lo: u64 = 0
+    loop {
+        if lo >= src.len { break }
+        let mid = run_end(lo, width, src.len)
+        let hi = run_end(mid, width, src.len)
+        out = merge_runs(src, lo, mid, hi, out)
+        lo = hi
+    }
+    out
+}
+
+/**
+ * sort_by_start — the virtual intervals in start order (a bottom-up STABLE
+ * merge sort; deterministic tie-break by `reg_id`). O(V log V) in time and in
+ * allocated bytes, replacing an insertion sort that rebuilt the entire output
+ * list once per interval — O(V^2) on both axes, and 98.9% of the backend's
+ * copy-grow bytes as measured under `TEKO_ARENA_OBS`.
+ *
+ * The output is the SAME permutation the insertion sort produced, not merely
+ * an equivalent one, and that identity does not rest on the absence of ties.
+ * `interval_before` is a lexicographic order on the pair `(start, reg_id)`,
+ * hence a strict weak ordering; the retired insertion sort placed each
+ * interval after every already-placed interval it did not sort strictly
+ * before, which is a STABLE insertion; and `merge_runs` is a stable merge. Two
+ * stable sorts under one strict weak ordering agree element for element, so
+ * `linear_scan` walks the identical sequence and emits identical code.
+ *
+ * @param []LiveInterval virt  the virtual intervals
+ * @return []LiveInterval  the start-sorted intervals
+ */
+fn sort_by_start(virt: []LiveInterval) -> []LiveInterval {
+    mut sorted: []LiveInterval = virt
+    mut width: u64 = 1
+    loop {
+        if width >= sorted.len { break }
+        sorted = merge_pass(sorted, width)
+        width = width * 2
+    }
+    sorted
+}
+
+/**
+ * expire_active — the active entries still live at `point` (drop those whose
+ * `end` is before it, freeing their physregs).
+ *
+ * @param []ActiveEntry active  the active set
+ * @param u32 point  the current interval's start
+ * @return []ActiveEntry  the surviving active entries
+ */
+fn expire_active(active: []ActiveEntry, point: u32) -> []ActiveEntry {
+    mut out: []ActiveEntry = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= active.len { break }
+        if active[i].end >= point { out = teko::list::push(out, active[i]) }
+        i++
+    }
+    out
+}
+
+/**
+ * ranges_overlap — whether `[s1,e1]` and `[s2,e2]` share any point.
+ *
+ * @param u32 s1  the first start
+ * @param u32 e1  the first end
+ * @param u32 s2  the second start
+ * @param u32 e2  the second end
+ * @return bool  true iff they overlap
+ */
+fn ranges_overlap(s1: u32, e1: u32, s2: u32, e2: u32) -> bool {
+    s1 <= e2 && s2 <= e1
+}
+
+/**
+ * phys_held — whether an active entry currently holds physreg `phys` in
+ * `reg_class`.
+ *
+ * @param []ActiveEntry active  the active set
+ * @param u32 phys  the physreg id
+ * @param MRegClass reg_class  the register class
+ * @return bool  true iff held
+ */
+fn phys_held(active: []ActiveEntry, phys: u32, reg_class: MRegClass) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= active.len { break }
+        if active[i].phys == phys && active[i].reg_class == reg_class { return true }
+        i++
+    }
+    false
+}

@@ -1,0 +1,45 @@
+
+/**
+ * wrap_native_entry — the NATIVE (ELF/COFF/Mach-O) object's own process entry point: renames the
+ * synthesized virtual-main `LFunc` (`lower_virtual_main`, always emitted as the bare symbol
+ * `"main"`) to `NATIVE_ENTRY_VMAIN_SYMBOL`, then appends a tiny platform-ABI STUB `LFunc`, itself
+ * named `"main"`, that receives the platform's own `argc`/`argv` entry registers, forwards them
+ * to the runtime's `tk_set_args` BEFORE anything else runs, then calls the renamed virtual-main
+ * and returns its result normalized to a platform-uniform exit code (`append_exit_status_mask`) —
+ * mirroring the C emitter's own generated `main`
+ * (`codegen.tks`'s `emit_program_main_body`: `int main(int argc, char **argv) { tk_set_args(argc,
+ * argv); … }`), so `teko::env::args()` (`tk_rt_args`) observes the real process argv under the
+
+/**
+ * wrap_native_entry — the NATIVE (ELF/COFF/Mach-O) object's own process entry point: renames the
+ * synthesized virtual-main `LFunc` (`lower_virtual_main`, always emitted as the bare symbol
+ * `"main"`) to `NATIVE_ENTRY_VMAIN_SYMBOL`, then appends a tiny platform-ABI STUB `LFunc`, itself
+ * named `"main"`, that receives the platform's own `argc`/`argv` entry registers, forwards them
+ * to the runtime's `tk_set_args` BEFORE anything else runs, then calls the renamed virtual-main
+ * and returns its result normalized to a platform-uniform exit code (`append_exit_status_mask`) —
+ * mirroring the C emitter's own generated `main`
+ * (`codegen.tks`'s `emit_program_main_body`: `int main(int argc, char **argv) { tk_set_args(argc,
+ * argv); … }`), so `teko::env::args()` (`tk_rt_args`) observes the real process argv under the
+ * native backend too, instead of the runtime's zero-initialized globals (0.3.1 native-args fix).
+ *
+ * THE ENTRY STUB IS A SEPARATE `LFunc`, not a widening of `lower_virtual_main`'s own signature.
+ * Splitting it off keeps the virtual main's arity untouched, so every consumer that sizes a call
+ * off `main`'s own type entry stays in agreement with it.
+ *
+ * THE ABI SHAPE IS PLATFORM-UNIFORM, deliberately: the stub is ordinary target-independent LIR
+ * (an `I32`/`Ptr`-param, `I32`-returning function like any other), so the SAME EXISTING
+ * per-target ABI lowering (`SYSV64`/`WIN64`/`AAPCS64`, already proven for every other function's
+ * incoming int/pointer parameters) binds `argc`/`argv` to the right entry registers on both
+ * x86-64 (SysV `edi`/`rsi`, Win64 `ecx`/`rdx`) and arm64 (AAPCS64 `w0`/`x1`) — no new
+ * per-architecture code is needed in this module.
+ *
+ * @param m  the lowered, target-independent module (its own `"main"` always present —
+ *           `lower_program` unconditionally synthesizes one)
+ * @return   `m` with its virtual-main renamed and the platform-entry stub appended, or a NAMED
+ *           internal error when `m` carries no `"main"` (unreachable under `lower_program`)
+ */
+pub fn wrap_native_entry(m: LModule) -> LModule | error {
+    let renamed = match native_entry_rename_vmain(m.funcs) { []LFunc as fs => fs; error as e => return e }
+    let stubbed = teko::list::push(renamed, native_entry_stub())
+    LModule { funcs = stubbed; rodata = m.rodata; globals = m.globals; layouts = m.layouts }
+}

@@ -1,0 +1,129 @@
+// src/build/project.tks   (namespace 'teko::build')
+//
+// The PROJECT ORCHESTRATION entry layer — the canonical Teko ORIGINAL of the project
+// surfaces in src/driver.c (project_frontend / tk_compile_project / tk_run_project) and
+// the directory resolution in main.c (project_dir_of). main.tks dispatches here:
+//   teko build <dir>  → compile_project  (front-end → native codegen)
+//   teko run   <dir>  → run_project      (front-end → native codegen + execute, debug profile)
+//   teko <projarg>    → project_dir_of   (a `.tkp` → its dir; else the dir as-is)
+//
+// FAITHFUL-NOT-LITERAL (M.3). It mirrors the C twins' SHAPE and contracts in native Teko:
+// the C uses out-params (project_frontend(dir, &prog, &manifest)); Teko has NO out-params,
+// so the shared front-end returns a small `Frontend` struct (prog + manifest), as
+// `Frontend | error`. Both entries (build/run) run the SAME front-end AND the SAME
+// codegen→cc backend; `run` additionally executes the resulting binary (the interpreter this once
+// diverged to is retired, #524).
+
+use teko::parser
+use teko::lexer
+use teko::checker
+use teko::codegen
+use teko::emit
+use teko::compress
+use teko::coverage
+
+/**
+ * debug_arg_has_prefix — does `a` begin with the `--debug=` selector prefix, so its remainder is
+ * the requested level?
+ *
+ * An 8-byte prefix, guarded on length so the slice never runs past the string — deliberately the
+ * exact shape of `opt_arg_has_prefix`'s 6-byte guard: two selector flags that parse differently
+ * is how one of them ends up wrong.
+ *
+ * @param a  a single CLI argument token
+ * @return   true iff `a` is a `--debug=<value>` form
+ */
+fn debug_arg_has_prefix(a: str) -> bool {
+    a.len > 8 && teko::str::slice_to(a, 8) == "--debug="
+}
+
+/**
+ * debug_info_of_value — map the text after `--debug=` to a level, or FAIL.
+ *
+ * DELIBERATELY UNLIKE `opt_level_of_value`, which resolves a malformed suffix to level 2. An
+ * unrecognised optimization level costs speed; an unrecognised DEBUG level costs a whole
+ * debugging session spent chasing a breakpoint that silently never resolved. No silent coercion.
+ *
+ * @param v  the substring after `--debug=`
+ * @return   the level for "none"/"lines"
+ * @throws   when `v` is neither "none" nor "lines", naming both accepted values
+ */
+fn debug_info_of_value(v: str) -> DebugInfo | error {
+    if v == "none" { return DebugInfo::None }
+    if v == "lines" { return DebugInfo::Lines }
+    error { message = teko::str::concat("teko: --debug=", v, ": unknown level — accepted: none, lines") }
+}
+
+/**
+ * debug_info_of — resolve the requested debug level from the build flags.
+ *
+ * With no `--debug=` flag the level is `None` — THE DEFAULT AT EVERY PROFILE, `--release`
+ * included: debug information grows the artifacts and is never imposed. The LAST matching flag
+ * on the line wins, matching `opt_level_of`'s rule so the two axes behave the same under
+ * repetition.
+ *
+ * `--release --debug=lines` is a LEGAL, SUPPORTED pair and is not refused: it is how a release
+ * crash gets debugged, and refusing it would force a rebuild at another profile — which changes
+ * the code and erases the defect.
+ *
+ * @param args  the full CLI argument vector
+ * @return      the resolved level (`None` by default)
+ * @throws      when a `--debug=` value is not a recognised level
+ */
+fn debug_info_of(args: []str) -> DebugInfo | error {
+    mut i: u64 = 0
+    mut level = DebugInfo::None
+    loop {
+        if i >= args.len { break }
+        if debug_arg_has_prefix(args[i]) {
+            level = match debug_info_of_value(teko::str::slice_from(args[i], 8)) {
+                DebugInfo as d => d
+                error as e => return e
+            }
+        }
+        i = i + 1
+    }
+    level
+}
+
+/**
+ * has_bare_g_flag — does a bare `-g` appear anywhere in `args` from `start`?
+ *
+ * Consulted at CLI dispatch BEFORE `project_arg_of` runs, so a `-g` gets the honest rejection
+ * (`bare_g_rejected_message`) that names `--debug=lines` instead of being read as the project
+ * path. `-g` is refused rather than aliased because in gcc, clang and rustc it means FULL debug
+ * information (rustc documents it as an alias for `-C debuginfo=2`), and this compiler cannot
+ * emit that yet — an alias would promise types and variables and deliver a line table. It
+ * becomes a legal alias of `--debug=vars` only at D2.6, once that level exists.
+ *
+ * The precedent is exact and lives in this same file: `has_backend_flag` refuses the retired
+ * `--backend` by NAMING the reason rather than silently ignoring it.
+ *
+ * @param args   the full CLI argument vector
+ * @param start  the index to begin scanning from (2 for a subcommand, 1 for a bare project)
+ * @return       true iff a bare `-g` token appears anywhere from `start` onward
+ */
+fn has_bare_g_flag(args: []str, start: u64) -> bool {
+    mut i = start
+    loop {
+        if i >= args.len { break }
+        if args[i] == "-g" { return true }
+        i = i + 1
+    }
+    false
+}
+
+/**
+ * bare_g_rejected_message — the honest refusal `has_bare_g_flag` earns, naming the flag that
+ * exists in its place. Printed to stderr; the caller exits 2 (`main.tks`, mirroring the
+ * `--backend` rejection).
+ *
+ * @return the four-line refusal, ready for `teko::io::eprintln`
+ */
+fn bare_g_rejected_message() -> str {
+    teko::str::concat(
+        "teko: `-g` is not a Teko flag.\n",
+        "      In gcc, clang and rustc `-g` means FULL debug information (types and variables), and this\n",
+        "      compiler cannot emit that yet — promising it would be a lie.\n",
+        "      Use `--debug=lines` for the line table (breakpoint by .tks line, step, backtrace).")
+}

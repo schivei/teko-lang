@@ -1,0 +1,256 @@
+// src/build/project.tks   (namespace 'teko::build')
+//
+// The PROJECT ORCHESTRATION entry layer — the canonical Teko ORIGINAL of the project
+// surfaces in src/driver.c (project_frontend / tk_compile_project / tk_run_project) and
+// the directory resolution in main.c (project_dir_of). main.tks dispatches here:
+//   teko build <dir>  → compile_project  (front-end → native codegen)
+//   teko run   <dir>  → run_project      (front-end → native codegen + execute, debug profile)
+//   teko <projarg>    → project_dir_of   (a `.tkp` → its dir; else the dir as-is)
+//
+// FAITHFUL-NOT-LITERAL (M.3). It mirrors the C twins' SHAPE and contracts in native Teko:
+// the C uses out-params (project_frontend(dir, &prog, &manifest)); Teko has NO out-params,
+// so the shared front-end returns a small `Frontend` struct (prog + manifest), as
+// `Frontend | error`. Both entries (build/run) run the SAME front-end AND the SAME
+// codegen→cc backend; `run` additionally executes the resulting binary (the interpreter this once
+// diverged to is retired, #524).
+
+use teko::parser
+use teko::lexer
+use teko::checker
+use teko::codegen
+use teko::emit
+use teko::compress
+use teko::coverage
+
+ * @param cfile   the generated C translation unit
+ * @param binary  the output native executable path
+ * @param m       the resolved manifest
+ * @param prog    the checked program (extern-reachability)
+ * @param opt     the cc optimization level (0 = default/no `-O`, 2 = release seed)
+ * @param debug   the requested `--debug=` level
+ * @return        the `cc` process exit code (0 on success)
+ * @since 0.3.1 debugger piso, D1.6
+ */
+fn run_cc_for_level(cfile: str, binary: str, m: Manifest, prog: checker::TProgram, opt: i32, debug: DebugInfo) -> i32 {
+    if debug == DebugInfo::None { return run_cc(cfile, binary, m, prog, opt) }
+    invoke_cc(build_cc_argv(cfile, binary, m, prog, true, opt), binary)
+}
+
+/**
+ * link_object — link the own-backend object `objfile` into the native `binary` WITHOUT the
+ * `cc`/`clang`/`lld-link` DRIVER: on every native (non-freestanding) leg the LINK is invoked on the
+ * OS linker DIRECTLY (owner ruling 2026-07-26: "não é .c que importa, importa o linker"), so the
+ * startup/CRT/dynamic-linker/library scaffolding a C driver used to inject silently is now the
+ * compiler's OWN explicit choice. The C runtime seeds (`teko_rt.c`/`assert.c`) are still COMPILED to
+ * objects by a C compiler (`cc -c`, the one remaining C dependency, flagged for the owner — a
+ * separate de-C pass ports the runtime); only the LINK is cut off the driver.
+ *
+ * Four legs, one dispatch: linux/x86-64 and linux/arm64 share ONE arch-parameterized ELF path
+ * (`link_object_elf_direct` over `elf_link_spec`); macOS/arm64 links Mach-O directly
+ * (`link_object_macho_direct`); Windows/x86-64 links PE/COFF with `lld-link` directly
+ * (`link_object_pe_direct`). A FREESTANDING image (no libc, `-nostdlib`) still falls through to the
+ * transitional `cc`-as-linker, since its scaffolding is deliberately empty and out of this cut's
+ * scope.
+ *
+ * @param objfile  the own-backend object (from `emit_elf`/`emit_elf_arm64`/`emit_macho`/`emit_coff`)
+ * @param binary   the output native executable path
+ * @param m        the resolved manifest
+ * @param prog     the checked program (extern-reachability)
+ * @return         0 on a successful compile+link, else a NAMED failing status
+ */
+fn link_object(objfile: str, binary: str, m: Manifest, prog: checker::TProgram) -> i32 {
+    if m.freestanding { return invoke_cc(build_cc_argv(objfile, binary, m, prog, false, 0), binary) }
+    match resolved_target() {
+        NativeTarget::X8664Linux => link_object_elf_direct(objfile, binary, m, prog, elf_link_spec(LinkArch::X8664))
+        NativeTarget::Arm64Linux => link_object_elf_direct(objfile, binary, m, prog, elf_link_spec(LinkArch::Arm64))
+        NativeTarget::Arm64Macho => link_object_macho_direct(objfile, binary, m, prog)
+        NativeTarget::X8664Windows => link_object_pe_direct(objfile, binary, m, prog)
+    }
+}
+
+/**
+ * ELF_DYNLINKER_X8664 — the glibc dynamic loader a linux x86-64 PIE names in its `PT_INTERP`. The
+ * `cc` driver used to inject this; a direct `ld` link must name it by hand, exactly as `clang
+ * -### -o t t.c` shows the driver passing `-dynamic-linker /lib64/ld-linux-x86-64.so.2` to `ld`.
+ */
+const ELF_DYNLINKER_X8664: str = "/lib64/ld-linux-x86-64.so.2"
+
+/**
+ * ELF_DYNLINKER_ARM64 — the glibc dynamic loader a linux aarch64 PIE names in its `PT_INTERP`, the
+ * arm64 sibling of `ELF_DYNLINKER_X8664`. `clang -### --target=aarch64-linux-gnu` shows the driver
+ * passing `-dynamic-linker /lib/ld-linux-aarch64.so.1` to `ld` — the fixed aarch64 multiarch loader
+ * path, `/lib` not `/lib64` (aarch64 glibc keeps its loader in `/lib`).
+ */
+const ELF_DYNLINKER_ARM64: str = "/lib/ld-linux-aarch64.so.1"
+
+/**
+ * ElfLinkSpec — everything the shared ELF-direct link needs that DIFFERS between the linux legs: the
+ * machine (for `resolve_linker` and `gnu_emulation_for`), the dynamic-linker path its PIE names, and
+ * the ordered multiarch directories to probe for the CRT startup objects. Factoring these three into
+ * one spec is what lets x86-64 and arm64 share `link_object_elf_direct` verbatim instead of two
+ * copy-pasted tails that could drift.
+ *
+ * @since 0.3.1.0 (de-C native link, arch-parameterized ELF leg)
+ */
+type ElfLinkSpec = struct {
+    /** the machine the link must target — drives `resolve_linker` and the `-m` emulation. */
+    arch: LinkArch
+    /** the glibc dynamic loader this arch's PIE names in `PT_INTERP` (`-dynamic-linker`). */
+    dynamic_linker: str
+    /** the ordered multiarch directories to probe for `Scrt1.o`/`crti.o`/`crtn.o` + `libc`/`libm`. */
+    crt_dirs: []str
+}
+
+/**
+ * elf_link_spec — the `ElfLinkSpec` for one linux ELF machine: the dynamic-linker path and the
+ * ordered multiarch CRT directories that arch's glibc uses. The `x86_64-linux-gnu` / `lib64` list is
+ * kept byte-for-byte as the pre-refactor x86-64 leg carried it, so the x86-64 link line is
+ * unchanged; the `aarch64-linux-gnu` list is its arm64 mirror.
+ *
+ * @param arch  the ELF machine the link targets (`X8664` or `Arm64`)
+ * @return      the spec for that machine
+ * @since 0.3.1.0 (de-C native link, arch-parameterized ELF leg)
+ */
+fn elf_link_spec(arch: LinkArch) -> ElfLinkSpec {
+    match arch {
+        LinkArch::X8664 => {
+            mut cands: []str = teko::list::empty()
+            cands = teko::list::push(cands, "/usr/lib/x86_64-linux-gnu")
+            cands = teko::list::push(cands, "/lib/x86_64-linux-gnu")
+            cands = teko::list::push(cands, "/usr/lib64")
+            cands = teko::list::push(cands, "/usr/lib")
+            ElfLinkSpec { arch = LinkArch::X8664; dynamic_linker = ELF_DYNLINKER_X8664; crt_dirs = cands }
+        }
+        LinkArch::Arm64 => {
+            mut cands: []str = teko::list::empty()
+            cands = teko::list::push(cands, "/usr/lib/aarch64-linux-gnu")
+            cands = teko::list::push(cands, "/lib/aarch64-linux-gnu")
+            cands = teko::list::push(cands, "/usr/lib64")
+            cands = teko::list::push(cands, "/usr/lib")
+            ElfLinkSpec { arch = LinkArch::Arm64; dynamic_linker = ELF_DYNLINKER_ARM64; crt_dirs = cands }
+        }
+    }
+}
+
+/**
+ * elf_crt_dir — the multiarch directory holding this host's ELF startup objects (`Scrt1.o`,
+ * `crti.o`, `crtn.o`) and its `libc`/`libm`, found by probing `spec.crt_dirs` in order for `Scrt1.o`
+ * (the PIE C-runtime entry `_start`). The `cc` driver resolves these from its own
+ * `-print-file-name` machinery; a direct `ld` link locates them the portable way — the fixed FHS
+ * multiarch layout every glibc distro shares.
+ *
+ * @param spec  the ELF link spec whose `crt_dirs` name the ordered candidates for this arch
+ * @return      the first candidate directory that holds `Scrt1.o`, or a NAMED error when none does
+ * @since 0.3.1.0 (de-C native link, linux ELF leg)
+ */
+fn elf_crt_dir(spec: ElfLinkSpec) -> str | error {
+    mut i: u64 = 0
+    loop {
+        if i >= spec.crt_dirs.len { break }
+        if lib_file_present(teko::str::concat(spec.crt_dirs[i], "/Scrt1.o")) { return spec.crt_dirs[i] }
+        i = i + 1
+    }
+    error { message = teko::str::concat(
+        "de-C native link: no ELF startup object `Scrt1.o` for ", arch_name(spec.arch),
+        " in the standard glibc multiarch paths (", join_candidates(spec.crt_dirs),
+        ") — install libc development files, or link this target through the C driver.") }
+}
+
+/**
+ * compile_c_object_argv — the `<cc> -c` COMPILE-ONLY command that turns one C runtime seed source
+ * (`teko_rt.c` or `assert.c`) into an object, WITHOUT linking. This is the single, explicitly-flagged
+ * remaining C dependency of the native path (owner: porting `teko_rt` to Teko is a later de-C pass);
+ * the LINK never touches `cc`. Mirrors the compile half of `build_cc_argv`'s flags (the same
+ * `-std`, warning-silence, version define, and — for `assert.c` — the strong-seed switch) so the
+ * emitted object matches what the transitional `cc`-link produced byte-for-byte.
+ *
+ * @param cc       the resolved C compiler (compile-only; NOT a linker here)
+ * @param is_clang whether `cc` is clang-family (selects the `-std` spelling)
+ * @param csrc     the C source to compile
+ * @param obj      the object path to write
+ * @param rt       the runtime include dir (`-I`)
+ * @param asrt     the assert-seed include dir (`-I`)
+ * @param m        the resolved manifest (version string)
+ * @param prog     the checked program (assert-seed strength)
+ * @param strong_seed  whether to pass the strong-assert-seed define (only for `assert.c`)
+ * @return         the compile-only argument vector
+ * @since 0.3.1.0 (de-C native link, linux x86-64 leg)
+ */
+fn compile_c_object_argv(cc: str, is_clang: bool, csrc: str, obj: str, rt: str, asrt: str, m: Manifest, prog: checker::TProgram, strong_seed: bool) -> []str {
+    mut argv: []str = teko::list::empty()
+    argv = teko::list::push(argv, cc)
+    argv = teko::list::push(argv, if is_clang { "-std=c23" } else { "-std=c2x" })
+    argv = teko::list::push(argv, "-w")
+    argv = teko::list::push(argv, if is_clang { "-ferror-limit=0" } else { "-fmax-errors=0" })
+    let verval = if m.suffix.len > 0 { teko::str::concat(teko::str::concat(m.version, "-"), m.suffix) } else { m.version }
+    argv = teko::list::push(argv, teko::str::concat("-DTEKO_VERSION_STRING=", verval))
+    if strong_seed && !program_declares_assert_seed(prog) { argv = teko::list::push(argv, ASSERT_SEED_STRONG_FLAG) }
+    argv = teko::list::push(argv, "-I")
+    argv = teko::list::push(argv, rt)
+    argv = teko::list::push(argv, "-I")
+    argv = teko::list::push(argv, asrt)
+    argv = teko::list::push(argv, "-c")
+    argv = teko::list::push(argv, csrc)
+    argv = teko::list::push(argv, "-o")
+    teko::list::push(argv, obj)
+}
+
+/**
+ * RuntimeObjects — the two C-runtime seed objects every direct-link leg needs: `teko_rt.o` and
+ * `assert.o`, compiled from the seed sources by `cc -c`. Returned as a pair so `compile_runtime_objects`
+ * has one result the ELF/Mach-O/PE tails all destructure the same way.
+ *
+ * @since 0.3.1.0 (de-C native link, shared runtime-object compile)
+ */
+type RuntimeObjects = struct {
+    /** the compiled `teko_rt.c` object (the runtime: `_tk_exit`, `_tk_set_args`, `_tk_region_*`). */
+    rt_obj: str
+    /** the compiled `assert.c` object (the assert seed: `teko__assert__*`). */
+    assert_obj: str
+}
+
+/**
+ * compile_runtime_objects — compile the two C runtime seeds (`teko_rt.c`, `assert.c`) to objects
+ * next to `binary`, the ONE remaining C dependency of every direct-link leg (owner: the runtime's
+ * de-C port is a separate pass). Shared by the ELF, Mach-O and PE tails so the compile step is
+ * defined once; the LINK that follows is the OS linker, never `cc`. The compiler is `resolve_cc`
+ * (clang on macOS/Windows → Mach-O/COFF objects; the host `cc` → ELF on linux), and the flags mirror
+ * `build_cc_argv`'s compile half (`compile_c_object_argv`) so the objects match the transitional
+ * `cc`-link's byte-for-byte.
+ *
+ * @param binary  the output executable path (the objects land at `<binary>.teko_rt.o`/`.assert.o`)
+ * @param m       the resolved manifest (compiler choice, version string)
+ * @param prog    the checked program (assert-seed strength)
+ * @return        the two compiled object paths, or a NAMED error when a compile failed
+ * @since 0.3.1.0 (de-C native link, shared runtime-object compile)
+ */
+fn compile_runtime_objects(binary: str, m: Manifest, prog: checker::TProgram) -> RuntimeObjects | error {
+    let rt = rt_dir()
+    let asrt = assert_dir(rt)
+    let cc = resolve_cc(m)
+    let is_clang = cc_family_is_clang(cc, binary)
+    let rtobj = teko::str::concat(binary, ".teko_rt.o")
+    let asobj = teko::str::concat(binary, ".assert.o")
+    if teko::process::run(compile_c_object_argv(cc, is_clang, teko::str::concat(rt, "/teko_rt.c"), rtobj, rt, asrt, m, prog, false)) != 0 {
+        return error { message = "de-C native link: compiling teko_rt.c to an object failed" }
+    }
+    if teko::process::run(compile_c_object_argv(cc, is_clang, teko::str::concat(asrt, "/assert.c"), asobj, rt, asrt, m, prog, true)) != 0 {
+        return error { message = "de-C native link: compiling assert.c to an object failed" }
+    }
+    RuntimeObjects { rt_obj = rtobj; assert_obj = asobj }
+}
+
+/**
+ * run_direct_link — invoke the assembled OS-linker line and report a failure the SAME way the `cc`
+ * legs do (`report_cc_failure` re-runs verbosely). Every direct-link tail ends here so success is 0
+ * and a failure is the linker's own status, never a fabricated one.
+ *
+ * @param argv  the assembled direct-linker command (argv[0] is the OS linker)
+ * @return      0 on a clean link, else the linker's failing status
+ * @since 0.3.1.0 (de-C native link, shared runtime-object compile)
+ */
+fn run_direct_link(argv: []str) -> i32 {
+    let rc = teko::process::run(argv)
+    if rc == 0 { return 0 }
+    report_cc_failure(argv, rc)
+}

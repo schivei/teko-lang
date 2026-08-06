@@ -1,0 +1,81 @@
+
+/**
+ * method_of — the `method` name of a message DOM, or "" when absent / not a string. Drives the
+ * lifecycle decisions in `run_lsp` (exit / shutdown) without going through the full dispatcher.
+ *
+ * @param body  the message DOM
+ * @return      the method name, or ""
+ * @since 0.3.1.0
+ */
+pub fn method_of(body: json::JsonValue) -> str {
+    match object_field(body, "method") {
+        json::JsonValue as v => match as_str(v) { str as s => s; null => "" }
+        null => ""
+    }
+}
+
+/**
+ * handle_request — dispatch ONE LSP message against `store` to the updated store and the list of
+ * messages the server sends in return. Covers the lifecycle — `initialize` → capabilities;
+ * `shutdown` → a null result; `initialized` / `exit` → nothing — live diagnostics (`didOpen`/
+ * `didChange` record the buffer and push `publishDiagnostics`, `didClose` drops it and clears),
+ * `textDocument/formatting` → an in-process full-document `TextEdit[]`, `textDocument/hover` /
+ * `textDocument/definition` → the cursor's symbol resolved against crumb E's index (crumb F), and
+ * `textDocument/completion` → the document's keyword + symbol candidate list over the SAME index
+ * (crumb G). An unknown REQUEST (one carrying an `id`) gets a MethodNotFound error; an unknown
+ * notification is ignored.
+ *
+ * @param store  the open-document store to dispatch against
+ * @param req    the decoded request DOM
+ * @return       the updated store and the outgoing messages (empty for silence)
+ * @since 0.3.1.0
+ */
+pub fn handle_request(store: DocStore, req: json::JsonValue) -> Dispatch {
+    let method = match object_field(req, "method") {
+        json::JsonValue as v => match as_str(v) { str as s => s; null => return dispatch_of(store, no_messages()) }
+        null => return dispatch_of(store, no_messages())
+    }
+    let id = request_id(req)
+    if method == "initialize" { return dispatch_of(store, one_message(initialize_result(id))) }
+    if method == "shutdown" { return dispatch_of(store, one_message(response(id, jnull()))) }
+    if method == "initialized" { return dispatch_of(store, no_messages()) }
+    if method == "exit" { return dispatch_of(store, no_messages()) }
+    if method == "textDocument/didOpen" { return open_dispatch(store, req) }
+    if method == "textDocument/didChange" { return change_dispatch(store, req) }
+    if method == "textDocument/didClose" { return close_dispatch(store, req) }
+    if method == "textDocument/formatting" { return format_response(store, req) }
+    if method == "textDocument/hover" { return hover_response(store, req) }
+    if method == "textDocument/definition" { return definition_response(store, req) }
+    if method == "textDocument/completion" { return completion_response(store, req) }
+    if has_id(req) { return dispatch_of(store, one_message(error_response(id, -32601, teko::str::concat("method not found: ", method)))) }
+    dispatch_of(store, no_messages())
+}
+
+/**
+ * run_lsp — the LSP server's stdio loop: read one `Content-Length`-framed message, dispatch it,
+ * and write every produced message (a response and/or `publishDiagnostics`) back framed on stdout.
+ * Terminates on `exit` or on end of input. The exit status follows the LSP lifecycle (0 when a
+ * `shutdown` preceded the exit, else 1) — but the lane's proofs assert the framed STDOUT text,
+ * never this code.
+ *
+ * @return  0 when a `shutdown` was received before exit, else 1
+ * @since 0.3.1.0
+ */
+pub fn run_lsp() -> i32 {
+    mut shutdown_seen = false
+    mut store = store_empty()
+    loop {
+        match read_message() {
+            RpcMessage as msg => {
+                let method = method_of(msg.body)
+                if method == "exit" { break }
+                if method == "shutdown" { shutdown_seen = true }
+                let d = handle_request(store, msg.body)
+                store = d.store
+                write_all(d.out)
+            }
+            error => break
+        }
+    }
+    if shutdown_seen { 0 } else { 1 }
+}

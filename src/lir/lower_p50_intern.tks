@@ -1,0 +1,252 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * lower_if_fat — `cond ? then : else` for a fat-typed (`str`/`[]T`) if-expression: mirrors
+ * `lower_if_value`'s branch/merge shape EXACTLY, except the merge block carries TWO value
+ * block-params instead of one — the ptr FIRST, the len SECOND. That order is CONTRACT, not a
+ * detail this function may invert: it is the SAME `tk_str{ptr;len}` field order the degrau-4
+ * fat-parameter binding (`bind_fat_param`) and every other fat-producer arm in
+ * `lower_fat_expr` already commit to. The reassigned-scalar merge params (when either arm
+ * mutates an enclosing scalar) follow the ptr/len pair, exactly where `lower_if_value` puts
+ * its own scalar params after its single value param. An `if` with no `else` used as a fat
+ * value is out of the N1 subset, mirroring `lower_if_value`'s own honest-stop.
+ *
+ * Unlike `lower_if_value` (which receives an already-lowered `cond_vreg` from
+ * `lower_if_expr`), this function lowers its OWN condition: `lower_fat_expr`'s dispatch calls
+ * it directly on the whole `TIfExpr` node — there is no separate scalar/fat split at the
+ * condition step the way `lower_if_expr` performs on the RESULT type.
+ *
+ * @param ctx  the lowering context positioned right before the if's condition
+ * @param e    the if-expression node (its `.type` is `str`/`[]T`)
+ * @param f    the typed if (condition + both arms; `has_else` required)
+ * @return     the advanced context (positioned at the merge block) + its (ptr, len) pair
+ * @throws     when the if has no else, or either arm's tail fails to lower
+ * @since 0.3.1 (native backend N2 — if-expression closes as a fat-pointer producer,
+ *              cargo/20-degrau5-if-gordo)
+ */
+fn lower_if_fat(ctx: LowerCtx, e: checker::TExpr, f: checker::TIfExpr) -> LoweredFat | error {
+    if !f.has_else { return error { message = "native backend N1: if-without-else used as a fat value not yet lowered (N2)" } }
+    let co = match lower_expr(ctx, f.cond) { Lowered as x => x; error as err => return err }
+    let names = reassigned_scalars(if_arm_stmts(f), co.ctx.env)
+    let indices = merge_scalar_indices(co.ctx.env, names)
+    let thenb = alloc_block(co.ctx.func)
+    let elseb = alloc_block(thenb.func)
+    let mergeb = alloc_block(elseb.func)
+    let mpp = add_block_param(mergeb.func, mergeb.block_id)
+    let mpl = add_block_param(mpp.func, mergeb.block_id)
+    let merged = add_merge_scalar_params(mpl.func, mergeb.block_id, co.ctx.env, names)
+    let br = branch_inst(co.vreg, thenb.block_id, teko::list::empty(), elseb.block_id, teko::list::empty(), e.line, e.col)
+    let ctx1 = ctx_append(ctx_with(co.ctx, merged.func, co.ctx.block_id, co.ctx.env), br)
+    let then_opened = match open_native_region(ctx_goto(ctx1, thenb.block_id), "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    let then_fat = match lower_block_value_fat(then_opened, f.then_blk) { LowerBlockValueFat as x => x; error as err => return err }
+    let then_closed = match close_arm_replaying_defers(then_fat.ctx, ctx1.defers, ctx1.region_stack, mergeb.block_id, merge_fat_value_args(then_fat.ptr, then_fat.len), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    let else_ctx = ctx_with(then_closed.ctx, then_closed.func, elseb.block_id, co.ctx.env)
+    let else_opened = match open_native_region(else_ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    let else_fat = match lower_block_value_fat(else_opened, f.else_blk) { LowerBlockValueFat as x => x; error as err => return err }
+    let else_closed = match close_arm_replaying_defers(else_fat.ctx, ctx1.defers, ctx1.region_stack, mergeb.block_id, merge_fat_value_args(else_fat.ptr, else_fat.len), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    LoweredFat { ctx = ctx_with(else_closed.ctx, else_closed.func, mergeb.block_id, merged.env); ptr = mpp.vreg; len = mpl.vreg }
+}
+
+/**
+ * lower_match_fat — a `match` used as a FAT VALUE (`str`/`[]T`): the SAME linear test chain
+ * `lower_match_value` builds, merging TWO block-args (ptr, len) instead of one. It is
+ * `lower_match_value` and `lower_if_fat` composed — the arm chain of the first, the two-param merge
+ * of the second — so a `str`-valued `match` in tail position lowers with no new machinery
+ * (0.3.1.0 degrau 5).
+ *
+ * The subject is lowered ONCE, before the merge block exists, exactly as `lower_match` does; the
+ * reassigned-scalar merge params follow the ptr/len pair, where every other fat merge puts them.
+ *
+ * @param ctx  the lowering context positioned right before the subject
+ * @param e    the match expression node (its `.type` is `str`/`[]T`)
+ * @param m    the typed match (subject + arms)
+ * @return     the advanced context (positioned at the merge block) + its (ptr, len) pair
+ * @throws     when the subject, any pattern test, or any arm's tail fails to lower
+ * @since 0.3.1.0 (native backend N2 — the match-expression fat producer, degrau 5)
+ */
+fn lower_match_fat(ctx: LowerCtx, e: checker::TExpr, m: checker::TMatchExpr) -> LoweredFat | error {
+    let so = match lower_match_subject_conveyed(ctx, m) { MatchSubjOut as x => x; error as err => return err }
+    let names = reassigned_scalars_for_match(m.arms, so.ctx.env)
+    let indices = merge_scalar_indices(so.ctx.env, names)
+    let mergeb = alloc_block(so.ctx.func)
+    let mpp = add_block_param(mergeb.func, mergeb.block_id)
+    let mpl = add_block_param(mpp.func, mergeb.block_id)
+    let merged = add_merge_scalar_params(mpl.func, mergeb.block_id, so.ctx.env, names)
+    let base_ctx = ctx_with(so.ctx, merged.func, so.ctx.block_id, so.ctx.env)
+    let chain = match lower_match_arms_fat(base_ctx, e, m.arms, so.subj, mergeb.block_id, names) { LowerCtx as c => c; error as err => return err }
+    let closed = close_dead_fat_fallthrough(chain, mergeb.block_id, indices, e)
+    LoweredFat { ctx = ctx_with(closed, closed.func, mergeb.block_id, merged.env); ptr = mpp.vreg; len = mpl.vreg }
+}
+
+/**
+ * close_dead_fat_fallthrough — the DEAD-CODE edge past a fat match's last arm test: a defensive
+ * (ptr, len) pair jumping to the merge, mirroring `lower_match_value`'s defensive zero. The
+ * checker's exhaustiveness makes the edge unreachable, so the VALUES are never observed — only
+ * their machine class is, which is why each half takes `lfallback_const` of its OWN class (a bare
+ * `0` for the length would encode 32-bit-narrow and collide with the real edges where the merge's
+ * params are typed by width).
+ *
+ * @param ctx       the lowering context positioned past the last arm's test
+ * @param merge_id  the merge block this edge jumps to
+ * @param indices   the reassigned scalars' env indices, in merge-param order
+ * @param e         the match expression (its source position)
+ * @return          the context with the edge appended
+ */
+fn close_dead_fat_fallthrough(ctx: LowerCtx, merge_id: u32, indices: []u64, e: checker::TExpr) -> LowerCtx {
+    let zp = ctx_alloc(ctx)
+    let with_zp = ctx_append(zp.ctx, const_int_inst(zp.vreg, lfallback_const(LType::Ptr), e.line, e.col))
+    let zl = ctx_alloc(with_zp)
+    let with_zl = ctx_append(zl.ctx, const_int_inst(zl.vreg, lfallback_const(LType::I64), e.line, e.col))
+    let args = append_all_u32(merge_fat_value_args(zp.vreg, zl.vreg), arm_scalar_args(with_zl.env, indices))
+    let jumped = append_inst(with_zl.func, with_zl.block_id, jump_inst(merge_id, args, e.line, e.col))
+    ctx_with(with_zl, jumped, with_zl.block_id, with_zl.env)
+}
+
+/**
+ * lower_match_arms_fat — fold `lower_match_arm_fat` over every arm in order, threading the
+ * "next test" position from arm to arm; the returned context sits on the dead fall-through past the
+ * last arm's test. `lower_match_arms_value`'s fold, one axis over (scalar -> fat).
+ *
+ * @param ctx       the lowering context positioned at the first arm's test site
+ * @param e         the enclosing match expression
+ * @param arms      the match's arms, in order
+ * @param subj      the match's already-lowered subject
+ * @param merge_id  the merge block id every arm's tail pair jumps to
+ * @param names     the reassigned scalars the merge threads, in param order
+ * @return          the context positioned past the last arm's test
+ * @throws          when any arm fails to lower
+ */
+fn lower_match_arms_fat(ctx: LowerCtx, e: checker::TExpr, arms: []checker::TArm, subj: MatchSubj, merge_id: u32, names: []str) -> LowerCtx | error {
+    mut cur = ctx
+    mut i: u64 = 0
+    loop {
+        if i >= arms.len { break }
+        cur = match lower_match_arm_fat(cur, e, arms[i], subj, merge_id, names) { LowerCtx as c => c; error as err => return err }
+        i++
+    }
+    cur
+}
+
+/**
+ * lower_match_arm_fat — one FAT-value arm: its entry (test/binds/guard), its body as a fat tail-value
+ * block, then a jump to the merge carrying the (ptr, len) pair. `lower_match_arm_value`'s shape with
+ * `lower_block_value_fat` in place of `lower_block_value`, closed through
+ * `close_arm_replaying_defers` so an arm's own `defer` fires on ITS branch only and a scalar it
+ * re-assigns still reaches the merge params that follow the pair.
+ *
+ * @param ctx       the lowering context positioned at the arm's test site
+ * @param e         the enclosing match expression
+ * @param arm       the arm to lower
+ * @param subj      the match's already-lowered subject
+ * @param merge_id  the merge block id the arm's tail pair jumps to
+ * @param names     the reassigned scalars the merge threads, in param order
+ * @return          the context positioned at the next-arm test block
+ * @throws          when the arm's entry or body fails to lower
+ */
+fn lower_match_arm_fat(ctx: LowerCtx, e: checker::TExpr, arm: checker::TArm, subj: MatchSubj, merge_id: u32, names: []str) -> LowerCtx | error {
+    let indices = merge_scalar_indices(ctx.env, names)
+    let step = match lower_match_arm_entry(ctx, e, arm, subj) { MatchArmEntry as x => x; error as err => return err }
+    let opened = match open_native_region(step.ctx, "", false, e.line, e.col) { LowerCtx as c => c; error as err => return err }
+    let bv = match lower_block_value_fat(opened, arm.body) { LowerBlockValueFat as x => x; error as err => return err }
+    let closed = match close_arm_replaying_defers(bv.ctx, ctx.defers, step.ctx.region_stack, merge_id, merge_fat_value_args(bv.ptr, bv.len), indices, e.line, e.col) { ClosedArm as c => c; error as err => return err }
+    ctx_with(closed.ctx, closed.func, step.next_block, ctx.env)
+}
+
+/**
+ * lower_fat_field — the (ptr, len) pair of a `[]T`/`str` field of a struct receiver (#594 T-B6): lower
+ * the receiver to its base address, then read ptr = `LLoad(LFieldAddr(base, fieldoff))` (the `Ptr`
+ * class; in a rodata const the slot was relocated to the target array by T-B5/the writers) and len =
+ * `LLoad(LFieldAddr(base, fieldoff + POINTER_SIZE))` (`I64`, the inline element count). Matches the
+ * 16-byte fat-field layout (`layout_of_fields` via `field_layout_size`): ptr@fieldoff, len@fieldoff+8.
+ * This is the arm that lets both engines read an ABI-descriptor const's slice field (the C backend
+ * uses its own `.ptr`/`.len`).
+ *
+ * @param ctx  the lowering context
+ * @param fa   the field access (a struct receiver + a fat field name)
+ * @return     the (ptr, len) fat pair
+ * @throws     when the receiver is not a struct with a registered layout, or the field is unknown
+ * @since #594 T-B6
+ */
+fn lower_fat_field(ctx: LowerCtx, fa: checker::TFieldAccess) -> LoweredFat | error {
+    if is_ref_deref(fa) { return lower_ref_deref_read_fat(ctx, fa) }
+    let ro = match lower_expr(ctx, fa.receiver) { Lowered as x => x; error as e => return e }
+    let name = match named_type_name(fa.receiver.type) { str as s => s; error as e => return e }
+    let layout = match find_struct_layout(ro.ctx.layouts, name) { LStructLayout as l => l; error as e => return e }
+    let off = match field_offset_of(layout, fa.field) { u32 as o => o; error as e => return e }
+    let pa = ctx_alloc(ro.ctx)
+    let with_pa = ctx_append(pa.ctx, field_addr_inst(pa.vreg, ro.vreg, off, fa.receiver.line, fa.receiver.col))
+    let pr = ctx_alloc(with_pa)
+    let with_pr = ctx_append(pr.ctx, load_inst(pr.vreg, pa.vreg, LType::Ptr, fa.receiver.line, fa.receiver.col))
+    let la = ctx_alloc(with_pr)
+    let with_la = ctx_append(la.ctx, field_addr_inst(la.vreg, ro.vreg, off + ltype_size(LType::Ptr), fa.receiver.line, fa.receiver.col))
+    let lr = ctx_alloc(with_la)
+    LoweredFat { ctx = ctx_append(lr.ctx, load_inst(lr.vreg, la.vreg, LType::I64, fa.receiver.line, fa.receiver.col)); ptr = pr.vreg; len = lr.vreg }
+}
+
+/**
+ * lower_ref_deref_read_fat — `recv.value` on a `Reference` receiver, `T` FAT (`str`/`[]T`): the
+ * handle's own value already IS the address of the `{ptr, len}` pair (the SAME memory shape a
+ * mutable fat local's own frame slot holds, `load_fat_slot`) — reused directly rather than
+ * re-deriving the two loads.
+ *
+ * @param ctx  the lowering context
+ * @param fa   the field access (`fa.receiver` is `Reference`-typed, `fa.field` is `"value"`)
+ * @return     the dereferenced (ptr, len) pair
+ * @throws     propagated from lowering the receiver
+ */
+fn lower_ref_deref_read_fat(ctx: LowerCtx, fa: checker::TFieldAccess) -> LoweredFat | error {
+    let ro = match lower_expr(ctx, fa.receiver) { Lowered as x => x; error as e => return e }
+    load_fat_slot(ro.ctx, ro.vreg, fa.receiver.line, fa.receiver.col)
+}
+
+/**
+ * lower_var_fat — a str/slice variable reference to its (ptr, len) fat pair (A1-4, #382). A MUTABLE
+ * fat local (`lenv_bind_fat_slot`) LOADS the pair from its frame slot, so a reader always sees the
+ * most recent assignment (list-builtin degrau); an immutable local bound via `lenv_bind_fat` (a
+ * `let` of str/slice type) resolves through the FAT env with no memory traffic; a name that is
+ * NEITHER resolves to a module-level str/slice AGGREGATE const materialized in rodata (#594
+ * crumb 6), whose ptr is its rodata symbol and whose len is derived from the interned byte count.
+ *
+ * @param ctx  the lowering context
+ * @param e    the fat-valued reference expression (carries its str/slice type + source position)
+ * @param v    the typed variable node (the referenced name)
+ * @return     the (ptr, len) fat pair
+ * @throws     when the name is neither a fat local nor an interned str/slice aggregate const
+ */
+fn lower_var_fat(ctx: LowerCtx, e: checker::TExpr, v: checker::TVar) -> LoweredFat | error {
+    let slot = lenv_lookup_fat_slot(ctx.env, v.name)
+    if slot.found { return load_fat_slot(ctx, slot.slot, e.line, e.col) }
+    let hit = lenv_lookup_fat(ctx.env, v.name)
+    if hit.found && hit.has_len { return LoweredFat { ctx = ctx; ptr = hit.ptr; len = hit.len } }
+    match find_const_rodata(ctx.rodata, v.name) {
+        LRodata as r => lower_const_fat(ctx, e, r)
+        null => error { message = teko::str::concat("native backend N1: `", v.name, "` is not a fat-pointer local (internal)") }
+    }
+}
+
+/**
+ * fat_slot_bytes — the byte size of a mutable fat local's frame slot: the pointer half followed by
+ * the `u64` length half, the SAME `{ptr; len}` image `lower_fat_field` reads a fat struct field
+ * with, so the two never disagree about which half lives where.
+ *
+ * @return  the slot's size in bytes
+ */
+fn fat_slot_bytes() -> u32 { ltype_size(LType::Ptr) + ltype_size(LType::I64) }
+
+/**
+ * alloc_fat_slot — reserve the 16-byte frame slot a mutable fat local lives in and store the
+ * initial `{ptr, len}` pair into it.
+ *
+ * @param ctx   the lowering context
+ * @param fo    the initial value's (ptr, len) pair
+ * @param line  the binding's source line
+ * @param col   the binding's source column
+ * @return      the advanced context + the slot's address VReg
+ */
+fn alloc_fat_slot(ctx: LowerCtx, fo: LoweredFat, line: u32, col: u32) -> Lowered {
+    let slot = ctx_alloc(fo.ctx)
+    let with_slot = ctx_append(slot.ctx, alloca_inst(slot.vreg, fat_slot_bytes(), ltype_align(LType::Ptr), line, col))
+    Lowered { ctx = store_fat_slot(with_slot, slot.vreg, fo, line, col); vreg = slot.vreg }
+}

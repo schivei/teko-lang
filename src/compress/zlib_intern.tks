@@ -1,0 +1,33 @@
+/**
+ * `teko::compress::zlib` — RFC 1950 zlib framing (a 2-byte header + Adler-32 trailer)
+ * around a raw DEFLATE stream. Used by PNG, HTTP `Content-Encoding: deflate`, and many
+ * wire formats.
+ *
+ * Public surface:
+ *   pub fn zlib_compress(data: []byte) -> []byte
+ *   pub fn zlib_decompress(data: []byte) -> []byte | error
+ */
+
+/**
+ * `ZLIB_CMF` — the zlib `CMF` byte this module always emits: `CM = 8` (DEFLATE),
+ * `CINFO = 7` (a 32K window — the largest RFC 1950 allows, always valid
+ * regardless of how small the actual back-reference window used happens to
+ * be).
+ */
+const ZLIB_CMF: u32 = 0x78
+
+/**
+ * Choose the `FLG` byte completing a zlib header (RFC 1950 §2.2): `FDICT = 0` (no
+ * preset dictionary — this module never uses one) and the `FCHECK` low 5 bits set so
+ * that `(CMF * 256 + FLG) mod 31 == 0`. The `FLEVEL` bits (a compression-level hint,
+ * bits 6-7) are left `0` — decoders must accept any value there.
+ *
+ * @param cmf  the header's `CMF` byte (see `ZLIB_CMF`)
+ * @return     the `FLG` byte pairing with `cmf` to satisfy the header checksum
+ */
+fn zlib_flg(cmf: u32) -> u32 {
+    let base = cmf * 256
+    let remainder = base % 31
+    if remainder == 0 { return 0 }
+    31 - remainder
+}

@@ -1,0 +1,108 @@
+// src/checker/scope.tks  (namespace 'teko::checker')
+use teko::parser
+
+/**
+ * ValBinding — one value binding in the checker environment: a name, its resolved type, whether it
+ * is a `mut` local, its declaring namespace (top-level fns/consts only), and whether it names a
+ * module-level `const`. The namespace drives namespace-aware CALL resolution (#41); `is_const`
+ * distinguishes a `const` reference from an ordinary value so a forward reference resolves in pass-1
+ * and the crumb-5 inliner can find it (#594).
+ *
+ * @param name      the bound identifier
+ * @param type      the binding's resolved value type
+ * @param is_mut    true iff writes THROUGH this binding are permitted: a `mut` local, or a binding
+ *                  of `Reference` type in ANY binder position (a `ref` is mutable by definition —
+ *                  owner ruling 2026-07-30). `let`/`const`/plain params/match-binders are false
+ *                  (B.21). `define` computes it via `binding_is_writable`
+ * @param ns        the declaring namespace of a top-level fn/const; "" for locals/params (#41)
+ * @param is_const  true iff this names a module-level `const` (#594 crumb 2)
+ * @param vis       the declaring visibility of a top-level `const` — gates a namespace-qualified
+ *                  value reference `ns::NAME` across namespaces (`Pub` for locals/params/fns, which
+ *                  this arm never visibility-gates) (#594 crumb 8c, issue #613)
+ */
+type ValBinding = struct {
+    name: str
+    type: Type
+    is_mut: bool
+    ns: str
+    is_const: bool
+    vis: parser::Visibility
+}
+
+/**
+ * binding_is_writable — the SINGLE decision point for "may this binding be written through?"
+ * (owner ruling 2026-07-30). `let`/`mut` is the MUTABILITY axis; `ref` is the IDENTITY axis and is
+ * born mutable — by definition a `ref` can only be mutable, so `ref mut` does not exist and every
+ * reference binding grants write-through in EVERY binder position. A caller that knows only the
+ * declared `mut`-ness therefore ORs in the reference axis HERE instead of at each of the fourteen
+ * `define` call sites — which is exactly the defect this replaces: a `ref` PARAMETER was defined
+ * with `is_mut = false` (params are immutable — B.21) and every write through it was refused B.21.
+ *
+ * @param t       the binding's resolved value type
+ * @param is_mut  true iff the binder itself declared mutability (`mut`, or the `ref` desugar)
+ * @return        true iff writes through this binding are permitted
+ * @since         0.3.1
+ */
+fn binding_is_writable(t: Type, is_mut: bool) -> bool {
+    if is_mut { return true }
+    match t { Reference => true; _ => false }
+}
+
+// a binding is mutable iff declared `mut` (Let and Const are immutable — B.21).
+fn bind_is_mut(k: parser::BindKind) -> bool { k == parser::BindKind::Mut }
+
+// the WHOLE binding (type + mutability), innermost first — for the `mut` write-guard (B.21).
+fn lookup_binding(env: Env, name: str) -> ValBinding | error {
+    mut i = env.bindings.len
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        if env.bindings[i].name == name { return env.bindings[i] }
+    }
+    mut j = env.base.len   // (#148) then the sealed globals (locals shadow)
+    loop {
+        if j == 0 { break }
+        j = j - 1
+        if env.base[j].name == name { return env.base[j] }
+    }
+    error { message = $"undefined name: {name}" }
+}
+
+/**
+ * lookup_value_in_ns — the value binding named `name` whose declaring namespace satisfies the
+ * qualifier `ns`, or an error when none exists. Unlike `lookup_binding` (name-only, tail-first), this
+ * filters by BOTH the name AND the namespace — the resolver for a namespace-qualified value spelling
+ * `ns::name` (#594 crumb 8c, issue #613). The namespace test is `qualifier_selects_ns` (the SAME
+ * ends-with rule `lookup_call` applies to a qualified callee), so the SHORT written qualifier `m1`
+ * matches a binding declared in the project-rooted namespace `proj::m1`. The MATCHED binding's FULL
+ * namespace (`b.ns`) is what the caller stamps onto `TVar.func_ns` — never the short qualifier — so
+ * the c8b `(name, namespace)`-keyed scalar inliner (which keys on the const's OWN full namespace)
+ * substitutes a qualified const identically to a bare one. Scans the mutable bindings innermost-first,
+ * then the sealed globals (a dep's exported const/fn is a global).
+ *
+ * @param env   the type-checking environment
+ * @param name  the value's bare name (the path's last segment)
+ * @param ns    the written qualifier namespace (the path minus its last segment)
+ * @return      the matching binding, or an "unknown value: ns::name" error
+ * @since #594
+ */
+fn lookup_value_in_ns(env: Env, name: str, ns: str) -> ValBinding | error {
+    mut i = env.bindings.len
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        if env.bindings[i].name == name && qualifier_selects_ns(env.bindings[i].ns, ns) { return env.bindings[i] }
+    }
+    mut j = env.base.len
+    loop {
+        if j == 0 { break }
+        j = j - 1
+        if env.base[j].name == name && qualifier_selects_ns(env.base[j].ns, ns) { return env.base[j] }
+    }
+    error { message = $"unknown value: {ns}::{name}" }
+}
+
+// the type of a name — the common case; a thin wrapper so existing callers are unchanged.
+fn lookup(env: Env, name: str) -> Type | error {
+    match lookup_binding(env, name) { ValBinding as b => b.type; error as e => e }
+}

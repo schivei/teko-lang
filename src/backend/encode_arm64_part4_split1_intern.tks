@@ -1,0 +1,105 @@
+fn collect_word_reloc(acc: []Reloc, ew: EncWord, word_index: u64) -> []Reloc {
+    match ew.reloc {
+        null => acc
+        EncReloc as r => teko::list::push(acc, Reloc { offset = (word_index to u32) * ARM64_WORD_BYTES; sym = r.sym; kind = r.kind; sect = RelocSect::Text })
+    }
+}
+
+/**
+ * finalize_func — the patch pass: resolve every emitted `EncWord` to its final
+ * word (patching branch displacements from the recorded block offsets) and
+ * collect one `Reloc` per symbol-reference word (its offset the word index times
+ * 4). Produces the `EncodedFunc` hand-off to the A4-4 Mach-O writer.
+ *
+ * @param str symbol  the function's already-final symbol
+ * @param []EncWord words  the emitted `EncWord` stream (prologue ++ blocks)
+ * @param []BlockOffset offsets  the recorded per-block starting word indices
+ * @return EncodedFunc | error  the encoded function, or a named honest-stop
+ */
+fn finalize_func(symbol: str, words: []EncWord, offsets: []BlockOffset) -> EncodedFunc | error {
+    mut out_words: []u32 = teko::list::empty()
+    mut relocs: []Reloc = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= words.len { break }
+        let ew = words[i]
+        let w = match resolve_word(ew, i to u32, offsets) { u32 as v => v; error as e => return e }
+        out_words = teko::list::push(out_words, w)
+        relocs = collect_word_reloc(relocs, ew, i)
+        i++
+    }
+    EncodedFunc { symbol = symbol; words = out_words; relocs = relocs }
+}
+
+/**
+ * honest_globals — the named honest-stop A4-4 raises for a module carrying
+ * top-level data globals: the `__data` section + its GOT data relocs are not
+ * emitted by A4 (the N2 subset lowers no `LGlobal`, so this is unreached by the
+ * keystone corpus), and are closed when lowering starts emitting globals.
+ *
+ * @return error  the `A4-globals` named honest-stop
+ */
+fn honest_globals() -> error {
+    error { message = "A4-globals: __data section + GOT data relocs deferred (the N2 subset lowers no LGlobal)" }
+}
+
+/**
+ * append_words_le — append each u32 word of `ws` to a byte buffer as four
+ * little-endian bytes (the per-function `__text` word stream flattened into the
+ * module image).
+ *
+ * @param []byte buf  the byte buffer to extend
+ * @param []u32 ws  the instruction words to flatten
+ * @return []byte  `buf` followed by every word's little-endian bytes
+ */
+fn append_words_le(buf: []byte, ws: []u32) -> []byte {
+    mut b = buf
+    mut i: u64 = 0
+    loop {
+        if i >= ws.len { break }
+        b = emit_u32_le(b, ws[i])
+        i++
+    }
+    b
+}
+
+/**
+ * rebase_relocs — append each function-relative `Reloc` of `relocs` to `acc`
+ * with its byte offset shifted by `base` (the function's `__text` base), so the
+ * module reloc offset points at the instruction word in the concatenated image.
+ *
+ * @param []Reloc acc  the running module reloc list
+ * @param []Reloc relocs  one function's function-relative relocations
+ * @param u32 base  the function's `__text` base byte offset
+ * @return []Reloc  `acc` followed by the rebased relocations
+ */
+fn rebase_relocs(acc: []Reloc, relocs: []Reloc, base: u32) -> []Reloc {
+    mut out = acc
+    mut i: u64 = 0
+    loop {
+        if i >= relocs.len { break }
+        let r = relocs[i]
+        out = teko::list::push(out, Reloc { offset = r.offset + base; sym = r.sym; kind = r.kind; sect = r.sect })
+        i++
+    }
+    out
+}
+
+/**
+ * fold_func_into_text — encode one function and fold it into the running module
+ * `__text`: record its GLOBAL defined symbol at the current base (section 1,
+ * `__text` — a function must stay globally visible so the C runtime's `crt0`
+ * and other objects can call it), append its words as little-endian bytes, and
+ * rebase its relocs by the base. The base advances by the function's byte
+ * length (`words.len * 4`). Any named honest-stop from `encode_func` propagates
+ * out.
+ *
+ * @param AbiDescriptor abi  the register file
+ * @param ModuleText acc  the running `__text` assembly
+ * @param MFunc f  the fully-physical function to encode
+ * @return ModuleText | error  the extended assembly, or a named honest-stop
+ */
+fn fold_func_into_text(abi: AbiDescriptor, acc: ModuleText, f: MFunc) -> ModuleText | error {
+    let ef = match encode_func(abi, f) { EncodedFunc as x => x; error as e => return e }
+    fold_encoded_func(acc, ef)
+}

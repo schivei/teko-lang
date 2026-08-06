@@ -1,0 +1,225 @@
+
+/**
+ * TkrKind — the comparison policy a regressor's built artifact is checked under: `Exit` compares
+ * the exact exit code (the robust default oracle); `Print` compares exit AND stdout; `Trap` asserts
+ * a non-zero exit only (never byte-compares a trap against a platform's abort signal); `CompileFail`
+ * asserts the BUILD fails and its diagnostic contains the expected substring. This is the frozen
+ * in-memory lowering target the `.tkr` Gherkin parser lowers each scenario into (companion §1.2).
+ *
+ * `Trap` is the kind a deliberate-panic scenario wants, paired with a `stderr pattern` step: the
+ * `Then it traps` half says the program died, and the pattern half says WHICH guard killed it,
+ * and that the program chose to. Asserting an exact exit code proved neither — an abort's status
+ * is synthesised from the wait status by whatever ran the child, so it is 134 under a POSIX
+ * shell and something else on Windows, and no number distinguishes "the guard fired" from "the
+ * binary never started" (see `TK_PANIC_MARKER`, src/runtime/teko_rt.h).
+ *
+ * @since 0.3.0.29
+ */
+pub type TkrKind = enum { Exit; Print; Trap; CompileFail; EmitOnly }
+
+/**
+ * TkrMatchMode — how one output stream is checked: `Ignore` (no expectation), `Literal` (exact
+ * bytes), `Sha256` (a lowercase-hex sha256 of the bytes, for large/binary output), or `Pattern`
+ * (a `teko::regex` pattern SEARCHED for anywhere in the stream). Modelled as a tag alongside
+ * `TkrMatch.text` because Teko enums carry no payload.
+ *
+ * `Pattern` exists because some observable truths are not byte-stable across platforms while the
+ * fact they prove is. A panic writes its marker line, then a backtrace that is a symbol list on
+ * glibc and a single "unavailable on this platform" notice under musl; a positioned guard prefixes
+ * a `line:col:` that a fixture must not have to restate. `Literal` can express neither without
+ * pinning the parts that legitimately move, and the alternative the scenarios used instead —
+ * asserting the abort's exit code — was proving something the SHELL invented, not something Teko
+ * emitted (see `TK_PANIC_MARKER`, src/runtime/teko_rt.h).
+ *
+ * `Pattern` is a SEARCH, not a full match: the pattern must occur somewhere in the stream. Owner
+ * ruling 2026-07-26 — an implicit total match was proposed and refused, because it would force
+ * every pattern to be written `.*<it>.*` while stopping nobody from writing exactly that. The
+ * anchors `^` and `$` are available to any scenario that wants the strict reading, which makes
+ * exactness an explicit choice rather than a default nobody can opt out of.
+ *
+ * @since 0.3.0.29
+ */
+pub type TkrMatchMode = enum { Ignore; Literal; Sha256; Pattern }
+
+/**
+ * TkrMatch — an expected output stream: the `mode` (Ignore/Literal/Sha256/Pattern) plus `text`
+ * (the literal expected bytes for `Literal`, the lowercase-hex digest for `Sha256`, the
+ * `teko::regex` source for `Pattern`, "" for `Ignore`).
+ *
+ * @since 0.3.0.29
+ */
+pub type TkrMatch = struct {
+    /** how the stream is checked. */
+    mode: TkrMatchMode
+    /** the expected bytes (Literal), the hex sha256 (Sha256), the regex (Pattern), "" (Ignore). */
+    text: str
+}
+
+/**
+ * TkrExpect — a per-os-arch expectation override declared by a `Then on "<os-arch>"` step, for the
+ * legitimate divergences a target introduces (e.g. a Windows trap exit differing from a POSIX abort).
+ * Each field overrides the top-level expectation ONLY for the named `osarch`; `has_exit`
+ * distinguishes "override the exit code" from "leave it inherited".
+ *
+ * @since 0.3.0.29
+ */
+pub type TkrExpect = struct {
+    /** the os-arch key this override applies to (e.g. "x86_64-windows", "x86_64-linux"). */
+    osarch: str
+    /** true when this override supplies an `exit` code (else the top-level exit is inherited). */
+    has_exit: bool
+    /** the overriding exit code (meaningful only when `has_exit`). */
+    exit: i32
+    /** the overriding stdout expectation (Ignore → inherit the top-level stdout). */
+    stdout: TkrMatch
+    /** the overriding stderr expectation (Ignore → inherit the top-level stderr). */
+    stderr: TkrMatch
+}
+
+/**
+ * TkrGolden — an opt-in strict per-os-arch byte golden: the lowercase-hex sha256 of the emitted
+ * artifact for the named `osarch`. A per-target fixpoint — fragile across toolchains, so it is
+ * additive to (never a replacement for) the portable output-based expectation.
+ *
+ * @since 0.3.0.29
+ */
+pub type TkrGolden = struct {
+    /** the os-arch the golden hash pins (e.g. "x86_64-linux"). */
+    osarch: str
+    /** the expected lowercase-hex sha256 of the emitted `.o`/binary for that os-arch. */
+    sha256: str
+}
+
+/**
+ * Tkr — one lowered scenario's in-memory spec (the frozen check-layer model, NEVER a file on disk):
+ * the opaque runtime inputs (`args`/`stdin`), the expected observable outputs (`exit`/`stdout`/
+ * `stderr`, literal or hashed), the variant set to run (`targets`), per-os-arch overrides (`expect`),
+ * the kind (exit/print/trap/compile_fail), the `compile_fail` diagnostic substring, and any opt-in
+ * per-os-arch byte golden (`golden`). The `.tkr` Gherkin parser lowers each scenario into one `Tkr`
+ * (an Outline into one per Examples row); the runner's check layer consumes it (companion §1.2).
+ *
+ * @since 0.3.0.29
+ */
+pub type Tkr = struct {
+    /** argv passed to the built binary — the fold-opaque runtime operands (the opacity law). */
+    args: []str
+    /** bytes fed to the process stdin; "" when none. */
+    stdin: str
+    /** the classification driving the comparison policy. */
+    kind: TkrKind
+    /** expected exit code (ignored for `Trap`, which asserts non-zero only). */
+    exit: i32
+    /** expected stdout (Ignore/Literal/Sha256). */
+    stdout: TkrMatch
+    /** expected stderr (Ignore/Literal/Sha256). */
+    stderr: TkrMatch
+    /** the variants to run: os-arch names, `["all"]`, or `[]` → inherit `[tests] targets`. */
+    targets: []str
+    /** per-os-arch expectation overrides; empty when uniform. */
+    expect: []TkrExpect
+    /** opt-in per-os-arch byte goldens; empty when output-based. */
+    golden: []TkrGolden
+    /** for `CompileFail`: the required diagnostic substring ("" → assert failure only). */
+    diagnostic: str
+    /** an inline Teko source program (from `Given source inline`); "" when the scenario builds a dir `.tkp` or an explicit `source` file. @since 0.3.1 */
+    source_inline: str
+    /** an explicit standalone source file, relative to `regr_dir` (from `Given source`); "" when none. @since 0.3.1 */
+    source_file: str
+    /** per-scenario child env (`K=V` tokens) applied to compile AND run; from `Given env`/`Given target`. [] when none. @since 0.3.1 */
+    env: []str
+    /** the effective os-arch target (from `Given target`); "" or the `HOST_TARGET` sentinel (`"host"`) → the build host's native target. @since 0.3.1 */
+    target: str
+    /** true for the `When built in place` entry verb (the #64 CWD-relative shape: `teko build .` with CWD == `regr_dir`). @since 0.3.1 */
+    in_place: bool
+    /** the `Background: Given dependency` sub-project directory (relative to `regr_dir`); "" when the scenario needs no provisioned dependency. @since 0.3.1 */
+    dep_dir: str
+    /** true for a `Then object well-formed` step (post-build host-toolchain cross-check of the emitted `.o`). @since 0.3.1 */
+    check_wellformed: bool
+}
+
+/**
+ * TkrPhase — the Gherkin step PHASE: `Given` (opaque runtime inputs), `When` (the entry verb that
+ * classifies the exercise mode), or `Then` (the expected observable output). `And`/`But` inherit the
+ * preceding step's phase and never appear as a distinct value here.
+ *
+ * @since 0.3.0.30
+ */
+pub type TkrPhase = enum { Given; When; Then }
+
+/**
+ * TkrStep — one lowered Gherkin step: the resolved `phase`, the `noun` phrase selecting a `Tkr`
+ * field (e.g. "args", "exit", "stdout sha256", "source"), the entry `verb` for a When, the `osarch`
+ * route from an `on "<os-arch>"` prefix, and the raw TOML `value` text (already placeholder-
+ * substituted, still in surface form so the reused `mf_read_*` lexers decode it).
+ *
+ * @since 0.3.0.30
+ */
+pub type TkrStep = struct {
+    /** the resolved phase (And/But inherit the previous step's). */
+    phase: TkrPhase
+    /** the noun-phrase selecting the target `Tkr` field ("" for an entry-verb When). */
+    noun: str
+    /** the entry verb ("built and run" | "compiled" | "compilation fails" | ""). */
+    verb: str
+    /** the os-arch route from an `on "<os-arch>"` prefix ("" = top-level expectation). */
+    osarch: str
+    /** the raw TOML value text right of `=` ("" for a valueless entry verb). */
+    value: str
+}
+
+/**
+ * TkrRow — one Examples data row: the ordered `cells` (column values). A wrapper struct rather than
+ * a bare `[]str` because a `[][]str` nested-slice STRUCT FIELD is not yet emittable by the backend
+ * (the optional/slice mangle twin's gap — reported up); `[]TkrRow` sidesteps it cleanly.
+ *
+ * @since 0.3.0.30
+ */
+pub type TkrRow = struct {
+    /** the row's column values (parallel to the Examples headers). */
+    cells: []str
+}
+
+/**
+ * TkrExamples — a Scenario Outline's parameter table: `headers` (placeholder names) and `rows` (one
+ * `TkrRow` of column values per case). Empty `headers` ⇒ a plain scenario (one implicit row).
+ *
+ * @since 0.3.0.30
+ */
+pub type TkrExamples = struct {
+    /** the placeholder column names from the header row. */
+    headers: []str
+    /** one row of column values per parametrised case. */
+    rows: []TkrRow
+}
+
+/**
+ * TkrScenario — one scenario: `name`, whether it is an `outline`, its ordered `steps` (Background
+ * Given steps prepended), and its `examples` table (empty for a plain scenario).
+ *
+ * @since 0.3.0.30
+ */
+pub type TkrScenario = struct {
+    /** the scenario's free-text label (report line). */
+    name: str
+    /** true for a `Scenario Outline` (expanded per Examples row). */
+    outline: bool
+    /** the ordered steps (Background Given steps prepended). */
+    steps: []TkrStep
+    /** the parameter table (empty headers ⇒ a single implicit row). */
+    examples: TkrExamples
+}
+
+/**
+ * TkrFeature — one parsed `Feature:` block of a `.tkr` file: the `name` free text and the
+ * `scenarios` (Background already folded into each scenario's steps). A file may hold MULTIPLE
+ * features (`parse_tkr` returns `[]TkrFeature`); a project may hold multiple `.tkr` files — the
+ * file↔project relation is free (companion §1.1, #40).
+ *
+ * @since 0.3.0.30
+ */
+pub type TkrFeature = struct {
+    /** the Feature free-text label. */
+    name: str
+    /** the scenarios, each carrying the Background Given steps. */
+    scenarios: []TkrScenario
+}

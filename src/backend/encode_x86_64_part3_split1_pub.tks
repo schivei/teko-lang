@@ -1,0 +1,139 @@
+
+/**
+ * emit_prologue_x86 — the SysV/Win64 function entry sequence, or an empty list for
+ * a frameless function: `push rbp` ; `mov rbp,rsp` ; one `push` per callee-saved
+ * GPR (ascending) ; `sub rsp,#N` (elided when `N==0`; `#N` covers the local slot
+ * region plus the bottom argument-passing region — the Win64 shadow space and the
+ * outgoing stack arguments, `B1-args`). The frame size is pre-aligned so RSP is
+ * 16-aligned at every call boundary. A frame too large for the imm32 `sub` field
+ * raises `B1-bigframe`.
+ *
+ * The pushes precede the `sub` so the argument-passing region lands at RSP, which
+ * is where both ABIs define stack arguments to be and where a Win64 callee writes
+ * the shadow bytes; the total displacement is unchanged, so a function that
+ * reserves no argument region and saves no register emits byte-identical bytes.
+ *
+ * A callee-saved XMM (a non-empty `saved_fpr`, Win64-only) is saved into the slot
+ * region by `emit_saved_fpr_stores_x86` — the `B3-xmm-callee-saved` honest-stop
+ * closed 2026-07-29 alongside the float family it rode. The x86 mirror of arm64's
+ * `emit_prologue`.
+ *
+ * @param FrameLayoutX86 layout  the resolved frame
+ * @return []byte | error  the prologue bytes, or a named honest-stop
+ * @throws  `B1-bigframe` when the `sub rsp` amount overruns the imm32 field
+ */
+pub fn emit_prologue_x86(layout: FrameLayoutX86) -> []byte | error {
+    if !frame_is_framed_x86(layout) {
+        let none: []byte = teko::list::empty()
+        return none
+    }
+    let after_rbp = emit_mov_rbp_rsp_x86(emit_push_reg_x86(teko::list::empty(), X86_REG_RBP_ID))
+    let after_pushes = emit_saved_pushes_x86(after_rbp, layout)
+    let after_sub = match emit_sub_rsp_x86(after_pushes, layout.size) { []byte as w => w; error as e => return e }
+    emit_saved_fpr_stores_x86(after_sub, layout, false)
+}
+
+/**
+ * RelocX86 — one symbol relocation the B1-7 ELF writer turns into an
+ * `Elf64_Rela` (`r_offset`, `r_info = (sym<<32)|type`, `r_addend`): the
+ * `.text`-relative byte offset of the patched field (module-rebased at assembly),
+ * the target symbol's already-final name, which `RelocKindX86` it patches, and
+ * the addend. `Plt32`/`Pc32` both use addend −4 because the rel32 field is
+ * relative to the END of the 4-byte field (the next instruction pointer), so the
+ * linker's `S + A − P` must subtract the 4 bytes between the field's start
+ * (`r_offset` = P) and the next IP; `Abs64` uses addend 0. A rodata `Pc32`
+ * targets the `.rodata` section symbol at link time, and B1-7 folds the rodata
+ * byte offset into this addend. The x86 analog of arm64's `Reloc`, carrying the
+ * explicit addend ELF `.rela` needs.
+ *
+ * @since #386 B1-6
+ */
+pub type RelocX86 = struct {
+    /**
+     * offset — the byte offset of the relocated field, relative to this
+     * function's `.text` base (module-rebased at module assembly).
+     */
+    offset: u32
+    /**
+     * sym — the target symbol's final name (the runtime `tk_*` symbol, an
+     * in-module function, or a rodata/global entry).
+     */
+    sym: str
+    /**
+     * kind — which x86-64 relocation this field owes (Plt32/Pc32/Abs64).
+     */
+    kind: RelocKindX86
+    /**
+     * addend — the `r_addend` the linker adds in `S + A − P` (Plt32/Pc32: −4;
+     * Abs64: 0). B1-7 folds a rodata section offset into a Pc32 addend.
+     */
+    addend: i64
+    /**
+     * sect — which section this relocation's patched field lives in (#594 T-B1):
+     * `Text` (the historical default — `offset` is `.text`-base-relative), or
+     * `Rodata` (a data→data pointer whose `offset` is rodata-base-relative,
+     * emitted only from T-B2 on). Every reloc the encoder builds today is `Text`.
+     */
+    sect: RelocSect
+}
+
+/**
+ * EncodedFuncX86 — one function lowered to machine bytes: its already-final
+ * symbol, its `.text` byte image in layout order (prologue ++ every block's
+ * encoded instructions ++ the epilogue+`ret` expansion, with intra-function
+ * `rel32` branch displacements resolved), and its function-relative symbol
+ * relocations (offsets rebased to the module `.text` at assembly). The
+ * function's byte size is `bytes.len`. The byte-granular x86 analog of arm64's
+ * `EncodedFunc` (whose stream is `[]u32` words).
+ *
+ * @since #386 B1-6
+ */
+pub type EncodedFuncX86 = struct {
+    /**
+     * symbol — the function's already-final symbol.
+     */
+    symbol: str
+    /**
+     * bytes — the encoded `.text` byte image, in layout order, branch
+     * displacements patched.
+     */
+    bytes: []byte
+    /**
+     * relocs — the symbol relocations, offsets relative to this function's
+     * `.text` base.
+     */
+    relocs: []RelocX86
+}
+
+/**
+ * EncodedModuleX86 — the whole program lowered to section images + a flat symbol
+ * table: the concatenated `.text` bytes, the `.rodata` bytes, the local-then-
+ * global-then-undefined symbol list (the neutral `Symbol`, reused), and the
+ * module-rebased relocations. The B1-7 ELF writer turns this into an `ET_REL`
+ * object; no x86 knowledge remains past this boundary (the writer is
+ * ISA-agnostic — E1 reuses its shape). The byte-granular x86 analog of arm64's
+ * `EncodedModule`.
+ *
+ * @since #386 B1-6
+ */
+pub type EncodedModuleX86 = struct {
+    /**
+     * text — the `.text` section image (all functions concatenated).
+     */
+    text: []byte
+    /**
+     * rodata — the `.rodata` section image (interned rodata bytes concatenated).
+     */
+    rodata: []byte
+    /**
+     * symbols — the symbol table in local-then-global-then-undefined order: one
+     * file-local entry per rodata entry, one global entry per function, then one
+     * undefined entry per externally-referenced symbol.
+     */
+    symbols: []Symbol
+    /**
+     * relocs — every relocation, `.text`-section-relative (module-rebased), in
+     * emission order.
+     */
+    relocs: []RelocX86
+}

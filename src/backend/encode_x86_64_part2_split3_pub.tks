@@ -1,0 +1,50 @@
+
+/**
+ * compute_frame_layout_x86 — build a function's `FrameLayoutX86`: re-derive the
+ * callee-saved save-set by scanning the physical `MFuncX86`, lay out the frame
+ * slots honoring each `LAlloca`'s alignment (the neutral `compute_slot_offsets`),
+ * reserve the ARGUMENT-PASSING region at the very bottom of the frame — the
+ * Win64 caller-reserved shadow space (`shadow_bytes_x86` — 32 for a calling Win64
+ * function, 0 for every other ABI) plus the outgoing stack arguments
+ * (`out_arg_bytes_x86`, `B1-args`) — size the `sub rsp` region for 16-byte
+ * call-boundary alignment, and shift every slot offset above that
+ * argument-passing region so `MFrameAddrX86` resolves to `lea dst, [rsp+off]`.
+ *
+ * The argument-passing region sits at RSP and NOTHING may sit below it: both
+ * ABIs define a stack argument's address relative to the caller's RSP at the
+ * call, and Win64 lets the callee write the 32 shadow bytes at that same RSP.
+ * That is why the callee-saved pushes now precede the `sub rsp` (they used to
+ * follow it, which put them at RSP and, under Win64, in the callee's way) — the
+ * displacement is identical either way, so a function reserving no argument
+ * region and saving no register keeps byte-identical bytes.
+ *
+ * A pure side-table pass — it never mutates the block stream, so the interp
+ * oracle stays valid on the pre-encode function. The x86 mirror of arm64's
+ * `compute_frame_layout`; frames beyond the imm32 `sub` field are caught at
+ * prologue emission (`B1-bigframe`, near-N/A), not here. Both 32 and the
+ * 16-rounded outgoing region are 16-aligned, so neither reservation perturbs the
+ * alignment residue (§4.2).
+ *
+ * @param AbiDescriptor abi  the register file (callee-saved partition + shadow space)
+ * @param MFuncX86 f  the fully-physical function
+ * @return FrameLayoutX86  the resolved frame side-table
+ */
+pub fn compute_frame_layout_x86(abi: AbiDescriptor, f: MFuncX86) -> FrameLayoutX86 {
+    let saved = collect_callee_saved_x86(abi, f)
+    let slots = compute_slot_offsets(f.frame)
+    let shadow = shadow_bytes_x86(abi, f)
+    let arg_region = shadow + out_arg_bytes_x86(f)
+    let fpr_region = (saved.fpr.len to u32) * X86_XMM_SAVE_BYTES
+    let size = frame_sub_size_x86(slots.slots_size + arg_region + fpr_region, (saved.gpr.len to u32))
+    let slot_offsets = shift_slot_offsets_x86(slots.offsets, arg_region + fpr_region)
+    FrameLayoutX86 {
+        size = size
+        saved_gpr = saved.gpr
+        saved_fpr = saved.fpr
+        slot_offsets = slot_offsets
+        call_align = needs_call_align_x86(f)
+        out_arg_base = shadow
+        fpr_save_base = arg_region
+        caller_shadow = abi.shadow_space
+    }
+}

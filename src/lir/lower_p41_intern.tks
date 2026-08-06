@@ -1,0 +1,257 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * store_scalar_variant_payload — the single-word arm of `store_variant_payload`: lower `e` and
+ * store its one value (a scalar, or an AGGREGATE's address) at `variant_payload_offset()`. The
+ * wrapper's length half stays unwritten, and `bind_scalar_case_payload` never reads it.
+ *
+ * AN AGGREGATE PAYLOAD IS COPIED INTO STORAGE THE WRAPPER OWNS (`box_aggregate_value`, degrau 8).
+ * The word stored here is an ADDRESS for such a payload, and the address a struct literal lowers to
+ * belongs to an `alloca` — one frame slot per INSTRUCTION. Storing it raw made every wrapper built
+ * by the same statement share ONE payload: `loop { xs = push(xs, Circle { r = i }) }` compiled, and
+ * every element read back the LAST iteration's circle. The C route copies the payload INTO its union
+ * struct, so this is also the store that makes the two routes agree.
+ *
+ * @param LowerCtx ctx  the lowering context to append the store's instructions into
+ * @param u32 base  the wrapper's alloca'd base-address VReg
+ * @param checker::Type pty  the payload's declared type — it fixes both the payload word's machine
+ *                           class and the number of bytes the wrapper must own
+ * @param checker::TExpr e  the payload value to lower and store
+ * @return Lowered  the wrapper's base address
+ * @throws  propagated from lowering `e`, or from `variant_payload_box_bytes` when `pty` is a
+ *          non-register aggregate whose whole-type width this backend does not pin
+ * @since 0.3.1.0 (degrau 6 — the uniform 24-byte wrapper; degrau 8 — the owned payload)
+ */
+fn store_scalar_variant_payload(ctx: LowerCtx, base: u32, pty: checker::Type, e: checker::TExpr) -> Lowered | error {
+    let vo = match lower_expr(ctx, e) { Lowered as x => x; error as err => return err }
+    let box_bytes = match variant_payload_box_bytes(pty, ctx) { u32 as n => n; error as err => return err }
+    let owned = box_aggregate_value(vo, box_bytes, e)
+    let paddr = ctx_alloc(owned.ctx)
+    let with_paddr = ctx_append(paddr.ctx, field_addr_inst(paddr.vreg, base, variant_payload_offset(), e.line, e.col))
+    let with_pstore = ctx_append(with_paddr, store_inst(paddr.vreg, owned.vreg, ltype_of(pty, ctx.enums), e.line, e.col))
+    Lowered { ctx = with_pstore; vreg = base }
+}
+
+/**
+ * store_fat_variant_payload — the FAT arm of `store_variant_payload`: lower `e` through the
+ * fat-pointer producer path and store BOTH halves of its (ptr, len) pair — the pointer at
+ * `variant_payload_offset()`, the length at `variant_payload_len_offset()`.
+ *
+ * THIS IS DEGRAU 6 ITSELF. The construction used to lower a `str`/`[]T` member through the plain
+ * scalar path, which yields the POINTER alone: the length never reached the wrapper, so no reader
+ * could recover it and giving the slice pattern its match arm would only have bound a garbage
+ * `.len` in silence. The order matters — the construction learns to keep the length FIRST, the
+ * pattern learns to read it after.
+ *
+ * @param LowerCtx ctx  the lowering context to append the stores' instructions into
+ * @param u32 base  the wrapper's alloca'd base-address VReg
+ * @param checker::TExpr e  the fat payload value to lower and store
+ * @return Lowered  the wrapper's base address
+ * @throws  propagated from lowering `e` as a fat-pointer producer
+ * @since 0.3.1.0 (degrau 6 — the uniform 24-byte wrapper)
+ */
+fn store_fat_variant_payload(ctx: LowerCtx, base: u32, e: checker::TExpr) -> Lowered | error {
+    let fo = match lower_fat_expr(ctx, e) { LoweredFat as x => x; error as err => return err }
+    Lowered { ctx = store_fat_variant_payload_pair(fo.ctx, base, fo.ptr, fo.len, e.line, e.col); vreg = base }
+}
+
+/**
+ * store_fat_variant_payload_pair — write an ALREADY-LOWERED `(ptr, len)` pair into a variant
+ * wrapper's payload word and length half (`variant_payload_offset`/`variant_payload_len_offset`):
+ * the store tail `store_fat_variant_payload` factors out after lowering its own `TExpr` payload,
+ * reused as-is by a payload that never lowers a source expression at all — a runtime call's own
+ * out-parameter pair (`lower_str_from_utf8_call`'s two arms, 0.3.1.0 degrau 21).
+ *
+ * @param LowerCtx ctx  the lowering context to append the stores' instructions into
+ * @param u32 base  the wrapper's alloca'd base-address VReg
+ * @param u32 ptr  the payload's pointer half
+ * @param u32 len  the payload's length half
+ * @param u32 line  the source line to stamp the emitted instructions with
+ * @param u32 col  the source column to stamp the emitted instructions with
+ * @return LowerCtx  the advanced context
+ * @since 0.3.1.0 (degrau 6 — the uniform 24-byte wrapper; degrau 21 — factored out of
+ *        `store_fat_variant_payload`)
+ */
+fn store_fat_variant_payload_pair(ctx: LowerCtx, base: u32, ptr: u32, len: u32, line: u32, col: u32) -> LowerCtx {
+    let paddr = ctx_alloc(ctx)
+    let with_paddr = ctx_append(paddr.ctx, field_addr_inst(paddr.vreg, base, variant_payload_offset(), line, col))
+    let with_pstore = ctx_append(with_paddr, store_inst(paddr.vreg, ptr, LType::Ptr, line, col))
+    let laddr = ctx_alloc(with_pstore)
+    let with_laddr = ctx_append(laddr.ctx, field_addr_inst(laddr.vreg, base, variant_payload_len_offset(), line, col))
+    ctx_append(with_laddr, store_inst(laddr.vreg, len, LType::I64, line, col))
+}
+
+/**
+ * find_enum_info — the LEnumInfo in `enums` whose name's LAST SEGMENT matches `name`'s, or
+ * `null` (a subject/annotation naming a type that is NOT a registered enum — a bare bind
+ * pattern over it always matches, A1-5, #382; a field of it is not enum-carried).
+ *
+ * THE MATCH IS BY LAST SEGMENT, and that is not a new decision: `find_variant_def`
+ * (`lower_const.tks`) already reconciles the SAME two spellings the same way, and says why —
+ * a resolved type arrives QUALIFIED (`ns::Color`, `resolve_named`'s `qualify`) while a
+ * declaration table and a field annotation carry the DECLARED spelling (`Color`). An exact
+ * match here silently answered "not an enum" for every enum outside the root namespace, which
+ * made the ordinal test of `lower_named_bind_pattern_test` degrade to an unconditional match.
+ * ONE probe now serves both the ordinal question and the carrier-width question, so the two
+ * can never disagree about what is an enum.
+ *
+ * @param []LEnumInfo enums  the program's whole enum table
+ * @param str name  the type name to look up (bare or qualified)
+ * @return LEnumInfo?  the matching entry, or `null` when `name` is not a
+ *                     registered enum
+ */
+fn find_enum_info(enums: []LEnumInfo, name: str) -> LEnumInfo | null {
+    let bare = checker::name_last_segment(name)
+    mut i: u64 = 0
+    loop {
+        if i >= enums.len { break }
+        if checker::name_last_segment(enums[i].name) == bare { return enums[i] }
+        i++
+    }
+    null
+}
+
+/**
+ * expand_named_variant — a DECLARED variant's nominal type (`Named{"ns::Shape"}`) replaced by the
+ * expanded `checker::Variant` its declaration denotes; every other type unchanged.
+ *
+ * THIS IS THE WHOLE FIX for the declared-variant miscompilation, and it is ONE function on purpose.
+ * `checker::resolve_named` keeps a user type nominal, so `type Shape = variant Circle | Square`
+ * reaches this backend as a `Named` — while every union-shaped decision here matches on
+ * `checker::Variant`. Both halves of the union protocol therefore degenerated at once:
+ * `lower_value_into_type` built NO tag+payload wrapper, and `lower_bind_pattern_test` answered
+ * "always matches" for every arm, so the FIRST arm swallowed every subject. The two wrongs cancel
+ * on arm one (the whole-value bind reads the unwrapped payload at offset 0) and produce a SILENT
+ * WRONG ANSWER on every other — no stop, no diagnostic, a `Square` running the `Circle` arm.
+ *
+ * Expanding at the ONE place a type enters a union-shaped decision — the match subject
+ * (`lower_match_subject`) and the placement's declared type + the placed value's own type
+ * (`lower_value_into_type`) — is what keeps the two halves in agreement: construction and test read
+ * the SAME member list, in the same order, out of the same table.
+ *
+ * @param checker::Type t  the type as the checker resolved it
+ * @param []LVariantDef variants  the program's declared-variant table
+ * @return checker::Type  `t`'s expanded union when it names a declared variant, else `t` itself
+ * @since 0.3.1.0 (the declared-variant match-arm miscompilation)
+ */
+fn expand_named_variant(t: checker::Type, variants: []LVariantDef) -> checker::Type {
+    let name = match t {
+        checker::Named as n => n.name
+        _ => return t
+    }
+    match find_variant_def(variants, name) {
+        LVariantDef as def => def.ty
+        null => t
+    }
+}
+
+/**
+ * enum_member_ordinal — the declared INDEX of `member` within `ei.members` (the
+ * ordinal an enum-subject pattern tests against, mirroring the checker's own
+ * `check_enum_pattern`), or a NAMED internal error when the name is not a
+ * member (A1-5, #382).
+ *
+ * @param LEnumInfo ei  the enum's declared name + member list
+ * @param str member  the pattern's bare/qualified member name
+ * @return u32  `member`'s declared index (its ordinal)
+ * @throws  when `member` is not one of `ei.members` (an internal invariant
+ *          break)
+ */
+fn enum_member_ordinal(ei: LEnumInfo, member: str) -> u32 | error {
+    mut i: u64 = 0
+    loop {
+        if i >= ei.members.len { break }
+        if ei.members[i] == member { return i to u32 }
+        i++
+    }
+    error { message = teko::str::concat("native backend N1: unknown enum member `", member, "` (internal)") }
+}
+
+/**
+ * bind_pattern_case_name — a BindPattern's case name (its type path's LAST
+ * segment) — the name a variant/enum-subject test resolves BY (A1-5, #382).
+ *
+ * @param parser::BindPattern bp  the pattern to read the case name from
+ * @return str  the type path's last segment name
+ */
+fn bind_pattern_case_name(bp: parser::BindPattern) -> str {
+    let segs = bp.type_name.segments
+    segs[segs.len - 1].name
+}
+
+/**
+ * field_pattern_case_name — a FieldPattern's case name (its type path's LAST
+ * segment), mirroring `bind_pattern_case_name` (A1-5, #382).
+ *
+ * @param parser::FieldPattern fp  the pattern to read the case name from
+ * @return str  the type path's last segment name
+ */
+fn field_pattern_case_name(fp: parser::FieldPattern) -> str {
+    let segs = fp.type_name.segments
+    segs[segs.len - 1].name
+}
+
+/**
+ * PatternTest — one arm's pattern-test outcome: `always=true` for a test that
+ * matches UNCONDITIONALLY (a wildcard, or a bind that names no case) — the
+ * caller then emits an unconditional jump instead of a branch (§2.4); otherwise
+ * `vreg` is the bool VReg the test computed (A1-5, #382).
+ */
+type PatternTest = struct { ctx: LowerCtx; always: bool; vreg: u32 }
+
+/**
+ * lower_pattern_test — the boolean test `pat` applies to `subj`: a wildcard
+ * always matches; a scalar/string literal tests equality; a bind/field pattern
+ * tests a variant's tag OR an enum's ordinal (falling back to an unconditional
+ * whole-value bind); a `null` pattern tests a null-bearing union's tag (C7);
+ * a range/alternation pattern is out of the A1-5 subset (A1-5, #382).
+ *
+ * @param LowerCtx ctx  the lowering context to append the test's instructions
+ *                      into
+ * @param MatchSubj subj  the match's already-lowered subject
+ * @param parser::Pattern pat  the arm's syntactic pattern
+ * @param u32 line  the enclosing match expression's source line (patterns carry
+ *                  none)
+ * @param u32 col  the enclosing match expression's source column
+ * @return PatternTest  the test outcome (always-true, or a computed bool VReg)
+ * @throws  for a range/alternation/slice pattern, a `null` pattern over a
+ *          non-null-union subject, or an unresolvable case/enum name
+ */
+fn lower_pattern_test(ctx: LowerCtx, subj: MatchSubj, pat: parser::Pattern, line: u32, col: u32) -> PatternTest | error {
+    match pat {
+        parser::WildcardPattern => PatternTest { ctx = ctx; always = true; vreg = 0 }
+        parser::LiteralPattern as lp => lower_literal_pattern_test(ctx, subj, lp, line, col)
+        parser::BindPattern as bp => lower_bind_pattern_test(ctx, subj, bp, line, col)
+        parser::FieldPattern as fp => lower_field_pattern_test(ctx, subj, fp, line, col)
+        parser::RangePattern => error { message = "native backend N1: range match pattern not yet lowered (N2)" }
+        parser::AltPattern => error { message = "native backend N1: alternation (`|`) match pattern not yet lowered (N2)" }
+        parser::NullPattern => lower_null_pattern_test(ctx, subj, line, col)
+    }
+}
+
+/**
+ * lower_literal_pattern_test — a scalar-literal pattern's test: a string
+ * literal compares bytes; an integer literal compares via `ICmpEq`; a float
+ * literal or any other literal shape (the parser only ever emits
+ * number/byte/str) is out of the A1-5 subset (A1-5, #382).
+ *
+ * @param LowerCtx ctx  the lowering context to append the test's instructions
+ *                      into
+ * @param MatchSubj subj  the match's already-lowered subject
+ * @param parser::LiteralPattern lp  the literal pattern to test
+ * @param u32 line  the source line to stamp the emitted instructions with
+ * @param u32 col  the source column to stamp the emitted instructions with
+ * @return PatternTest  the computed equality test
+ * @throws  for a float literal, or a literal shape the parser never emits
+ *          (internal)
+ */
+fn lower_literal_pattern_test(ctx: LowerCtx, subj: MatchSubj, lp: parser::LiteralPattern, line: u32, col: u32) -> PatternTest | error {
+    match lp.value.kind {
+        parser::StrLit as sl => lower_str_literal_pattern_test(ctx, subj, sl.text, line, col)
+        parser::Number as n => lower_number_literal_pattern_test(ctx, subj, n, line, col)
+        parser::ByteLit as b => lower_scalar_literal_pattern_test(ctx, subj, b.value to i64, line, col)
+        _ => error { message = "native backend N1: unsupported literal match pattern (internal)" }
+    }
+}

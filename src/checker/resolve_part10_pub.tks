@@ -1,0 +1,32 @@
+
+
+/**
+ * type_render — (C1.8) render a semantic Type to a human string for diagnostics ("expected X,
+ * found Y"): prims → "i32"/…, "byte", "str", "error", "void", slice → "[]elem", variant → "A |
+ * B | …", named → "name". Recursion builds slice/variant bottom-up. Mirror of
+ * resolve.c::tk_type_render. This depends ONLY on the Type model (E2-independent — it never
+ * touches the surface `error` value), so it is materialized now, not deferred to E2. A SENTINEL
+ * slice (a `Void`-marker element, the untyped `empty()`) renders its hole as "_", matching the C
+ * twin's NULL-pointer case.
+ *
+ * @param t  the resolved type to render
+ * @return   its human-readable spelling
+ */
+pub fn type_render(t: Type) -> str {
+    match t {
+        Prim as p => prim_name(p.kind)
+        Byte => "byte"
+        Char => "char"
+        Str => "str"
+        Error => "error"
+        Void => "void"
+        Named as n => name_last_segment(n.name)   // (#109 W3) canonical "ns::Name" → bare "Name" for readable diagnostics
+        Slice as s => match s.element { Void => "[]_"; _ => $"[]{type_render(s.element)}" }
+        Variant as v => render_members(v.members)
+        Func as f => render_func(f)   // (C1.8) "(p0, …) -> ret" — full mirror of resolve.c (M.3, show what we know)
+        Ptr as p => match p.inner { null => "ptr"; Type as t => $"ptr<{type_render(t)}>" }   // ptr<T> human render
+        Uptr => "uptr"   // (C7.1a) opaque word-size unsigned
+        Reference as r => $"Ref<{type_render(r.inner)}>"   // (MEM-1b) Ref<T> human render
+        Null => "null"
+    }
+}

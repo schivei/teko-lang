@@ -1,0 +1,133 @@
+
+
+// the type-param names that appear in a function signature: a Named whose name is NOT a registered
+// user type (type-params live only in the per-fn scope, never the global table). In order, deduped.
+// A generic-INSTANCE name (`Box__g__T` — the PHANTOM a generic fn's `-> Box<T>` return resolves to
+// while `T` is abstract) is NOT a type-param: its embedded params are recovered from the BARE param
+// positions that also mention them (a param `x: T`), so treating the whole mangled name as one opaque
+// "type-param" would wrongly make `wrap<T>(x: T) -> Box<T>` look uninferable. Skip it — the corpus
+// carries no phantom in any typed signature, so this is byte-identical there. (C: tk_collect_sig_type_params.)
+pub fn collect_sig_type_params(t: Type, table: TypeTable, acc: []str) -> []str {
+    match t {
+        Named as n => {
+            if name_is_g_instance(n.name) { return acc }
+            match type_table_find(table, n.name, "") {   // (#109 W1) type-param scan on resolved names — no referencing ns
+                parser::TypeDecl => acc
+                error => if is_type_param(n.name, acc) { acc } else { teko::list::push(acc, n.name) }
+            }
+        }
+        Slice as sl => collect_sig_type_params(sl.element, table, acc)
+        Reference as r => collect_sig_type_params(r.inner, table, acc)   // (MEM-1b) Ref<T> may carry a type-param
+        Variant as v => { mut a = acc; mut i = 0; loop { if i >= v.members.len { break }; a = collect_sig_type_params(v.members[i], table, a); i++ }; a }
+        Func as f => { mut a = acc; mut i = 0; loop { if i >= f.params.len { break }; a = collect_sig_type_params(f.params[i], table, a); i++ }; collect_sig_type_params(f.ret, table, a) }
+        _ => acc
+    }
+}
+
+// resolve a syntactic TypeExpr to a pure semantic Type (recursive — B.8).
+// (#109 W1) `ref_ns` = the REFERENCING namespace (the namespace of the code that wrote `te`).
+// Threaded down every recursion (slice element / union members / fn-type params+ret / optional
+// inner) and into resolve_named/resolve_generic_inst unchanged. Reserved for W2's R0-R5 rules;
+// the W1 body IGNORES it (behavior byte-identical).
+pub fn resolve_type(te: parser::TypeExpr, table: TypeTable, ref_ns: str) -> Type | error {
+    // (#109 W1) reserved for the R0-R5 rules (W2)
+    match te {
+        // A plain name resolves as before; generic type-ARGUMENTS `Box<i64>` (S4 type-generics)
+        // resolve to the nominal instance `Named{Box__g__i64}` — the concrete decl is stamped by the
+        // instantiation pass / mono (blocker #1: reuse the Named case, no new Type variant).
+        parser::NamedType as nt => {
+            if named_type_is_null(nt) { Null { } }
+            else if nt.args.len == 0 { resolve_named(nt.path, table, ref_ns) }
+            else { resolve_generic_inst(nt, table, ref_ns) }
+        }
+        parser::SliceType as st => {
+            let el = match resolve_type(st.element, table, ref_ns) {
+                Type as t => t
+                error as e => return e
+            }
+            // (MEM Step 0, R4) ESCAPE GATE — a reference cannot be a collection element.
+            match el { Reference => return error { message = "a reference cannot be stored in a struct/variant/collection" }; _ => { } }
+            Slice { element = el }
+        }
+        parser::UnionType as ut => {
+            mut members: []Type = teko::list::empty()
+            mut i = 0
+            loop {
+                if i >= ut.members.len { break }
+                let m = match resolve_type(ut.members[i], table, ref_ns) {
+                    Type as t => t
+                    error as e => return e
+                }
+                members = teko::list::push(members, m)
+                i++
+            }
+            mut j = 0
+            loop {
+                if j >= members.len { break }
+                match variant_member_admissible(members[j], variant_siblings(members, j), table) {
+                    error as e => return e
+                    null => { }
+                }
+                j++
+            }
+            Variant { members = union_normalize_null(members) }
+        }
+        // (W10a) FunctionType `(A, B) -> R` → Func { params; ret ; variadic = false }. The return MAY be `void`
+        // (a function value can return nothing); params must be COMPLETE value types (void/ref
+        // rejected — a ref cannot be stored, R4; void is not a value, M.3).
+        parser::FunctionType as fnt => {
+            mut ps: []Type = teko::list::empty()
+            mut i = 0
+            loop {
+                if i >= fnt.params.len { break }
+                let pt = match resolve_type(fnt.params[i], table, ref_ns) { Type as t => t; error as e => return e }
+                match pt {
+                    Void => return error { message = "a function type parameter may not be `void` (M.3)" }
+                    Reference => return error { message = "a reference cannot be a function-type parameter (a ref cannot escape, R4)" }
+                    _ => { }
+                }
+                ps = teko::list::push(ps, pt)
+                i++
+            }
+            let rt = match resolve_type(fnt.ret, table, ref_ns) { Type as t => t; error as e => return e }
+            return Func { params = ps; ret = rt; variadic = false; param_names = []; n_required = (ps).len; defaults = [] }
+        }
+    }
+}
+
+/**
+ * builtin_case_name — the BARE surface spelling a non-nominal type is written under in a match
+ * arm, or `""` when the type has no such spelling. The exact INVERSE of `scope.builtin_type`'s
+ * keyword table, and it must stay that way: a match-arm pattern that is not a member name
+ * resolves through `builtin_type`, so a case a pattern can NAME is precisely a case this
+ * function can SPELL. Kept beside `prim_name` because it is the same question one level up —
+ * "how does the user write this type" — and it delegates the prim family to it rather than
+ * carrying a second copy of eleven spellings that could drift.
+ *
+ * A `Named` type deliberately returns `""`: a nominal case is selected by its canonical name's
+ * last segment (`name_last_segment`), never by a keyword, and answering here would give callers
+ * two different ways to identify the same case. So do `Slice`/`Variant`/`Func`/`Reference`/`Null`,
+ * which no bare keyword names.
+ *
+ * WHY IT EXISTS (0.3.1.0, degrau 2): the native backend resolved a variant case BY NAME and knew
+ * only `Named` + `error`, so `match add_sub_imm_base(…) { u32 as b => b; error as e => … }` — the
+ * compiler's OWN `backend::encode_alu_imm` — stopped with "unknown variant case `u32` (internal)".
+ * The checker had always accepted it (the pattern resolves through `builtin_type`); only the
+ * lowering could not name what the checker had already typed.
+ *
+ * @param t  the type to spell
+ * @return   its bare keyword spelling, or `""` when it has none
+ */
+pub fn builtin_case_name(t: Type) -> str {
+    match t {
+        Prim as p => prim_name(p.kind)
+        Byte => "byte"
+        Char => "char"
+        Str => "str"
+        Error => "error"
+        Void => "void"
+        Ptr => "ptr"
+        Uptr => "uptr"
+        _ => ""
+    }
+}

@@ -1,0 +1,261 @@
+/**
+ * TkrFileRun — one `.tkr` file's aggregate verdict plus every row it measured. The two travel
+ * together so the report line can carry the file's totals without a second traversal.
+ *
+ * @since 0.3.1
+ */
+type TkrFileRun = struct {
+    /** the file's aggregate verdict (the first failure, else a pass carrying its skip tally). */
+    outcome: RegrOutcome
+    /** every measured row of the file, in run order. */
+    rows: []RowTiming
+}
+
+/**
+ * file_run_of — a `TkrFileRun` of `oc` and `rows`.
+ *
+ * @param oc    the file's verdict
+ * @param rows  the file's measured rows
+ * @return      the file result
+ * @since 0.3.1
+ */
+fn file_run_of(oc: RegrOutcome, rows: []RowTiming) -> TkrFileRun {
+    TkrFileRun { outcome = oc; rows = rows }
+}
+
+/**
+ * run_one_feature — dispatch ONE feature on its kind: a compile-fail feature compiles each
+ * non-declarative scenario's source standalone; a RUN feature resolves and runs each scenario's own
+ * artifact, sharing the lazily-built project. Both return the same shape, so `run_one_tkr` folds
+ * verdict, cache and timings uniformly instead of branching over two result types.
+ *
+ * @param exe       the absolute path to this compiler binary
+ * @param regr_dir  the regressor project directory
+ * @param feat      the parsed feature
+ * @param prefix    the scratch-file prefix for this feature
+ * @param built     the shared project cache carried in
+ * @param groups    the grouped builds this run made before any scenario started
+ * @return          the feature's verdict, the (possibly updated) cache, and its measured rows
+ * @since 0.3.1
+ */
+fn run_one_feature(exe: str, regr_dir: str, feat: TkrFeature, prefix: str, built: RegrBuilt, groups: RegrGroups) -> FeatureRunResult {
+    if tkr_feature_is_compile_fail(feat) {
+        return tkr_run_compile_fail(exe, regr_dir, feat, prefix, built)
+    }
+    tkr_run_scenarios(exe, regr_dir, feat, prefix, built, groups)
+}
+
+/**
+ * concat_row_timings — `a` followed by `b` (the per-feature measured rows folded into the file's).
+ *
+ * @param a  the rows accumulated so far
+ * @param b  the rows to append
+ * @return   the concatenation
+ * @since 0.3.1
+ */
+fn concat_row_timings(a: []RowTiming, b: []RowTiming) -> []RowTiming {
+    mut out = a
+    mut i: u64 = 0
+    loop {
+        if i >= b.len { break }
+        out = teko::list::push(out, b[i])
+        i++
+    }
+    out
+}
+
+/**
+ * report_regressive — print one report line for a regressor's verdict (ok / FAIL / skip). A skip
+ * appends its reason when it carries one (the self-project note); a bare skip prints just the label.
+ * A PASS that aggregated capability skips says so on its own line — a file reported as a bare "ok"
+ * while some of its rows never ran would overstate what this host actually checked (M.3). Every
+ * non-skip line also carries the file's TOTALS (builds, wall time, phase shares — `regr_timing.tks`),
+ * because a build count and a phase split are what make the number actionable. Those totals are the
+ * file's OWN rows: a GROUPED build (`regr_group.tks`) belongs to no single file — one group may hold
+ * rows from several `.tkr` files — so its cost is reported on its own line before the run and
+ * accounted once in the run's summary line, never split across the files it served.
+ *
+ * @param rd    the regressor directory (the report label)
+ * @param oc    the verdict
+ * @param rows  the file's measured rows (their sum is the totals text)
+ * @since 0.3.0.29
+ */
+fn report_regressive(rd: str, oc: RegrOutcome, rows: []RowTiming) {
+    if oc.skipped {
+        if oc.message.len > 0 { teko::io::println(teko::str::concat(teko::str::concat("teko: regression skip ", rd), teko::str::concat(" ", oc.message))); return }
+        teko::io::println(teko::str::concat("teko: regression skip ", rd)); return
+    }
+    let totals = regr_totals_text(rows_total(rows))
+    if oc.ok && oc.skips > 0 { teko::io::println($"teko: regression ok {rd} ({totals}; {oc.skips} scenario row(s) skipped — capability absent on this host)"); return }
+    if oc.ok { teko::io::println($"teko: regression ok {rd} ({totals})"); return }
+    teko::io::println($"teko: regression FAIL {rd} ({totals}) — {oc.message}")
+}
+
+/**
+ * regr_sanitize — map a path to a filesystem-safe scratch stem (every non-alphanumeric byte → `_`),
+ * so each regressive's capture files do not collide.
+ *
+ * @param s  the path
+ * @return   the sanitized stem
+ * @since 0.3.0.29
+ */
+fn regr_sanitize(s: str) -> str {
+    mut out = ""
+    mut k: u64 = 0
+    loop {
+        if k >= s.len { break }
+        let c = s[k]
+        let alnum = (c >= b'a' && c <= b'z') || (c >= b'A' && c <= b'Z') || (c >= b'0' && c <= b'9')
+        if alnum { out = out ~ teko::str::slice(s, k, k + 1) } else { out = out ~ "_" }
+        k = k + 1
+    }
+    out
+}
+
+/**
+ * regr_summary_line — the one-line verdict a regression phase ends with. THREE columns, not two:
+ * `run` counts the listed `.tkr` files, `skipped` counts every capability skip aggregated out of
+ * them (a whole regressor skipped, a scenario row whose target toolchain is absent, a leaf-tool
+ * check with no checker here), and `failed` counts the files that failed. The `skipped` column is
+ * the whole point: with only `run`/`failed`, a run in which NOTHING actually executed printed
+ * "N run, 0 failed" and exited 0 — a gate reporting green for work it never did (M.3). The
+ * fail-closed answer to a skip that MUST NOT happen is `REGRESSION_REQUIRE_TOOLS=1`, which turns
+ * these skips into failures; this line is how a reader sees the skips at all.
+ *
+ * @param files   how many `.tkr` files the manifest listed (the `run` column)
+ * @param skips   how many capability skips the run aggregated (the `skipped` column)
+ * @param fails   how many files failed (the `failed` column)
+ * @return        the summary line, without a trailing newline
+ * @since 0.3.1
+ */
+fn regr_summary_line(files: u64, skips: u64, fails: u64) -> str {
+    $"teko: regressions {files} run, {skips} skipped, {fails} failed"
+}
+
+/**
+ * run_regression_sources — the CORE regression run (no anti-recursion sentinel): run every
+ * `.tkr` file named in `m.test_regression_files`, IN LIST ORDER, on the host lane, printing a
+ * report line and tallying BOTH failures and capability skips — the latter reported in their own
+ * summary column (`regr_summary_line`) so a run that skipped everything cannot read as a run that
+ * checked everything. Each entry is a FILE path (relative to the project root);
+ * its parent directory is the regressor project dir (`regr_dir`) a `built and run` scenario
+ * compiles. A listed path that does not resolve to a readable file is a MANIFEST ERROR (M.3):
+ * the run stops non-zero with the path named — never a silent skip. Returns 1 when any
+ * regressor failed (or a path was missing) AND `m.test_gate`, else 0. Called directly by tests;
+ * the `teko test` driver wraps it in `run_regression_phase`.
+ *
+ * The run OPENS with the GROUPED BUILDS (`regr_group.tks`): every inline-snippet row that shares a
+ * build configuration is folded into one generated project, built once, and reported before the
+ * first scenario executes — the owner's *"poderia executar estes builds ANTES de qualquer teste
+ * começar, mostrando a saída deles no início"*. Their cost seeds the phase total, so the summary
+ * line still accounts for every build the run paid for. A row the fold did not take (or whose group
+ * did not build) reaches `tkr_ensure_artifact` exactly as it always did.
+ *
+ * THE WORK TREE IS SCOPED (journal J3): `work` is `teko::test::scoped(REGR_WORK_DIR)`, so a `.tkt`
+ * that exercises this function directly (as `run_regression_sources_missing_path_is_a_manifest_error`
+ * does) gets its own `bin/.tkrun/<run>/<test>/bin/.regr-work`, never `rm_rf`-ing the real regression
+ * work tree a concurrent production run owns. Outside a test `teko::test::scope()` is empty and `work`
+ * is byte-for-byte `REGR_WORK_DIR`, so the production regression phase's own paths are unchanged —
+ * `merge_regression_coverage`'s literal `REGR_WORK_DIR` walk still finds every `.tkcov` this run wrote.
+ *
+ * @param exe  the absolute path to this compiler binary (compiles each regressor / snippet)
+ * @param m    the resolved manifest (its `test_regression_files`/`test_gate` drive the run)
+ * @return     0 when the tier passes (or is advisory), 1 when a failure/missing-path gates it
+ * @since 0.3.1
+ */
+fn run_regression_sources(exe: str, m: Manifest) -> i32 {
+    let work = teko::test::scoped(REGR_WORK_DIR)
+    match rm_rf(work) { error => { }; null => { } }
+    match mkdir_p(teko::str::concat(work, "/")) { error => { }; null => { } }
+    let groups = regr_build_groups(exe, regr_plan_groups(m, work), work)
+    mut fails: u64 = 0
+    mut skips: u64 = 0
+    mut phase = regr_groups_total(groups)
+    mut si: u64 = 0
+    loop {
+        if si >= m.test_regression_files.len { break }
+        let path = m.test_regression_files[si]
+        match teko::io::read_file(path) {
+            error => {
+                teko::io::println($"teko: regression FAIL {path} — listed regressor file does not exist (M.3)")
+                if regression_journal_enabled() { teko::journal::note_row_fail(path, "listed regressor file does not exist (M.3)") }
+                fails = fails + 1
+                si = si + 1
+            }
+            str => {
+                if regression_journal_enabled() { teko::journal::note_row_begin(path) }
+                let fr = run_one_tkr(exe, dirname_of(path), basename_of(path), work ~ "/" ~ regr_sanitize(path), groups)
+                report_regressive(path, fr.outcome, fr.rows)
+                if regression_journal_enabled() { note_row_outcome(path, fr.outcome) }
+                regr_print_timings(fr.rows)
+                phase = phase_add(phase, rows_total(fr.rows))
+                if !fr.outcome.ok && !fr.outcome.skipped { fails = fails + 1 }
+                skips = skips + fr.outcome.skips
+                si = si + 1
+            }
+        }
+    }
+    teko::io::println(regr_summary_line(m.test_regression_files.len, skips, fails) ~ $" ({regr_totals_text(phase)})")
+    if regression_journal_enabled() { teko::journal::note_row_end() }
+    if fails > 0 && m.test_gate { return 1 }
+    0
+}
+
+/**
+ * regression_journal_enabled — whether the journal wiring below should write for real: only when
+ * this call is NOT running inside a `#test`'s own capture (`teko::test::scope()` empty).
+ *
+ * PRODUCTION REGRESSION NEVER RUNS UNDER A `#test` CAPTURE. `run_regression_sources` is reached one
+ * of two ways: the real `teko test` driver (`run_regression_phase`, plain compiler-process control
+ * flow, no capture, `scope()` empty), or a `regression_test.tkt` fixture exercising this function
+ * DIRECTLY (`run_regression_sources_missing_path_is_a_manifest_error` and its neighbours) — which
+ * runs INSIDE this very compiler's own `#test` capture, `scope()` non-empty. Journaling the second
+ * case would write a fake finding into the real run's own `r0` segment for a label no real
+ * regression ever named — the same reasoning `teko::journal::scratch`'s own "outside a test" branch
+ * already states for scratch paths, applied to the journal wiring itself.
+ *
+ * @return true iff this is a real (non-test) regression run
+ * @since 0.3.1
+ */
+fn regression_journal_enabled() -> bool { teko::test::scope().len == 0 }
+
+/**
+ * note_row_outcome — translate one regressor file's already-decided `RegrOutcome` into the matching
+ * `teko::journal::note_row_*` call. `skip` is checked FIRST because a skip can carry `ok = true`
+ * (`regr_skip`'s own shape: "skipped for a missing capability" is not a failure), so testing `ok`
+ * first would misfile a skip as a pass.
+ *
+ * @param path  the regressor file's path (the row label)
+ * @param oc    its decided verdict
+ * @since 0.3.1
+ */
+fn note_row_outcome(path: str, oc: RegrOutcome) {
+    if oc.skipped { teko::journal::note_row_skip(path, oc.message); return }
+    if oc.ok { teko::journal::note_row_ok(path); return }
+    teko::journal::note_row_fail(path, oc.message)
+}
+
+/**
+ * TEKO_IN_REGRESSION_VAR — the environment-variable key of the anti-recursion sentinel: set once a
+ * regression phase opens so a nested `teko test` (a regressive that itself built the compiler) cannot
+ * re-enter discovery. Pinned here so the probe (`env::var`) and the set (`env::set_var`) never drift.
+ */
+const TEKO_IN_REGRESSION_VAR: str = "TEKO_IN_REGRESSION"
+
+/**
+ * run_regression_phase — the anti-recursion wrapper the `teko test` driver calls: it REFUSES to
+ * start a regression phase when `TEKO_IN_REGRESSION` is already set (so a regressive that itself
+ * built the compiler cannot re-enter discovery — the structural belt is that regressives are built,
+ * never `teko test`-ed; this sentinel is the backstop). Otherwise it sets the sentinel and runs the
+ * core.
+ *
+ * @param exe  the absolute path to this compiler binary
+ * @param m    the resolved manifest
+ * @return     0 when skipped (already inside a phase) or the tier passes, 1 on a gated failure
+ * @since 0.3.0.29
+ */
+fn run_regression_phase(exe: str, m: Manifest) -> i32 {
+    match teko::env::var(TEKO_IN_REGRESSION_VAR) { str => return 0; error => { } }
+    match teko::env::set_var(TEKO_IN_REGRESSION_VAR, "1") { error => { }; null => { } }
+    run_regression_sources(exe, m)
+}

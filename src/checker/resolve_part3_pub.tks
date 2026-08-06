@@ -1,0 +1,40 @@
+pub fn constraint_surface(c: parser::ConstraintExpr, table: TypeTable) -> []parser::Function | error {
+    match c {
+        parser::ConstraintAnd as a => {
+            let l = match constraint_surface(a.left, table) { []parser::Function as f => f; error as e => return e }
+            let r = match constraint_surface(a.right, table) { []parser::Function as f => f; error as e => return e }
+            surface_union(l, r)
+        }
+        parser::ConstraintOr as o => {
+            let l = match constraint_surface(o.left, table) { []parser::Function as f => f; error as e => return e }
+            let r = match constraint_surface(o.right, table) { []parser::Function as f => f; error as e => return e }
+            surface_intersect(l, r, table)
+        }
+        parser::ConstraintAtom as a => atom_surface(a.name, table)
+        parser::NoConstraint => { let empty_surface: []parser::Function = teko::list::empty(); empty_surface }
+    }
+}
+
+/** (S6, Risco 3) does `iface` already have a method (by NAME) present among `names`'s OWN methods
+    with a DIFFERENT signature — an ambiguous `A & B` where both declare e.g. `area` incompatibly?
+    Same name + SAME signature is fine (equivalent, kept once); same name + different signature is
+    rejected at the DEFINITION with a named error (never a silent pick). */
+pub fn method_owner_interface(ifaces: []str, method: str, table: TypeTable) -> str | null {
+    mut i = 0
+    loop {
+        if i >= ifaces.len { break }
+        let no_methods: []parser::Function = teko::list::empty()
+        let ms = match iface_methods_by_name(ifaces[i], table) { []parser::Function as f => f; error => no_methods }
+        mut j = 0
+        loop { if j >= ms.len { break }; if ms[j].name == method { return ifaces[i] }; j++ }
+        i++
+    }
+    null
+}
+
+/** (S6) the type-param's synthetic InterfaceBody `extends` list for constraint `c` — the empty list
+    (opaque ExternBody, honest stop) for NoConstraint/a struct-or-variant atom, the constraint's
+    interfaces (constraint_interfaces) otherwise. A TR1/ambiguity error here is swallowed to the
+    opaque fallback: type_param_table has no error channel (mirrors S4's total-function shape), so
+    the SAME error re-surfaces, named, the moment the body actually operates on T (crumb 4/6) or a
+    concrete instantiation is checked (check_constraints) — never silently ignored (M.1). */

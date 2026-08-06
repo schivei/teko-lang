@@ -1,0 +1,107 @@
+pub type EncReloc = struct {
+    /**
+     * sym — the relocation's target symbol, already in its final linker name.
+     */
+    sym: str
+    /**
+     * kind — which instruction field the relocation patches (`PageHi` for the
+     * `ADRP`, `PageLo` for the completing `ADD`, `Call` for a `BL`).
+     */
+    kind: MRelocKind
+}
+
+/**
+ * EncWord — one instruction's encoding outcome: its base word plus an optional
+ * pending fixup. A position-independent instruction resolves to just `word`
+ * (`has_branch` false, `reloc` null). A branch carries `has_branch=true` +
+ * `target` (the machine-block id, patched once block offsets are known in
+ * A4-3). A symbol reference carries an `EncReloc` (the `Reloc` record is
+ * materialized in A4-3).
+ *
+ * @since #385 A4-1
+ */
+pub type EncWord = struct {
+    /**
+     * word — the base 32-bit encoding (operand fields filled, branch/reloc
+     * fields left zero for later patching).
+     */
+    word: u32
+    /**
+     * has_branch — true iff `target` is an intra-function block displacement to
+     * patch after layout (A4-3).
+     */
+    has_branch: bool
+    /**
+     * target — the destination machine-block id (meaningful when `has_branch`).
+     */
+    target: u32
+    /**
+     * branch_form — which displacement field a later pass patches: 0=B(imm26),
+     * 1=B.cond/CBZ(imm19). Sizes the sign-extended range check.
+     */
+    branch_form: u32
+    /**
+     * reloc — the symbol relocation this word owes (BL/ADRP/ADDLo), or `null`
+     * when it owes none. There is no third state and no inert default.
+     */
+    reloc: EncReloc | null
+}
+
+/**
+ * FrameLayout — the resolved stack frame of one function: its total 16-aligned
+ * byte size, the ordered callee-saved registers to save/restore (re-derived by
+ * scanning the physical function, not carried by `MFunc`), and the SP-relative
+ * byte offset of every `MFunc.frame` slot. Purely a side-table the encoder
+ * reads; the block stream is never rewritten (so the A3 interp oracle, which
+ * models frame slots directly and has no SP, stays valid on the pre-encode
+ * `MFunc`). A `size` of 0 marks a frameless function (no prologue/epilogue).
+ *
+ * @since #385 A4-2
+ */
+pub type FrameLayout = struct {
+    /**
+     * size — the total frame size in bytes, rounded up to 16 (AAPCS64 SP
+     * 16-alignment); 0 for a frameless function.
+     */
+    size: u32
+    /**
+     * saved_gpr — the callee-saved GPR ids to STP/LDP (FP/LR handled
+     * separately), ascending for a deterministic prologue (M.2).
+     */
+    saved_gpr: []u32
+    /**
+     * saved_fpr — the callee-saved FPR ids to save/restore, ascending.
+     */
+    saved_fpr: []u32
+    /**
+     * slot_offsets — the SP-relative byte offset of each `MFunc.frame` entry,
+     * in frame order; `MFrameAddr{slot}` resolves to `ADD dst, sp,
+     * #slot_offsets[slot]`. Each entry honors its `LAlloca` alignment, so
+     * mixed-size/mixed-align frames (structs/arrays/spills) map correctly.
+     */
+    slot_offsets: []u32
+    /**
+     * out_arg_base — the SP-relative byte offset of the outgoing stack-arg
+     * area (always 0: the area sits at the very bottom of the frame,
+     * [sp + 0 .. sp + out_arg_bytes)). Present as a named field so the
+     * encoder can reference it symbolically without hard-coding 0.
+     */
+    out_arg_base: u32
+}
+
+/**
+ * emit_u32_le — append `w` to `buf` as four little-endian bytes (the arm64
+ * instruction-word / Mach-O little-endian-field emit primitive), the shared
+ * `[]byte` idiom (`src/compress/compress.tks`). All bit-slicing stays in u32
+ * arithmetic; only the final `& 0xFF` narrows to `byte`.
+ *
+ * @param []byte buf  the buffer to extend
+ * @param u32 w  the 32-bit word to append
+ * @return []byte  `buf` followed by w's four little-endian bytes
+ */
+pub fn emit_u32_le(buf: []byte, w: u32) -> []byte {
+    mut b = teko::list::push(buf, (w & ARM64_BYTE_MASK) to byte)
+    b = teko::list::push(b, ((w >> ((1 to u32) * ARM64_BITS_PER_BYTE)) & ARM64_BYTE_MASK) to byte)
+    b = teko::list::push(b, ((w >> ((2 to u32) * ARM64_BITS_PER_BYTE)) & ARM64_BYTE_MASK) to byte)
+    teko::list::push(b, ((w >> ((3 to u32) * ARM64_BITS_PER_BYTE)) & ARM64_BYTE_MASK) to byte)
+}

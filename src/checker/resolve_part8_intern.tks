@@ -1,0 +1,124 @@
+// src/checker/resolve.tks  (namespace 'teko::checker')
+use teko::parser
+
+/**
+ * Is this named type-expr the `null` type-atom (null-as-union)? The parser carries a `null`
+ * in a type position as a single-segment, argument-free `NamedType` named "null" (`null` is a
+ * reserved keyword, so no user type ever bears that name).
+ *
+ * @param nt  the resolved-against named type-expr
+ * @return    true iff `nt` is exactly the `null` type-atom
+ */
+fn named_type_is_null(nt: parser::NamedType) -> bool {
+    if nt.args.len != 0 { return false }
+    if nt.path.segments.len != 1 { return false }
+    nt.path.segments[0].name == "null"
+}
+
+/**
+ * Canonicalize a union's member order so `null`, if present, is FIRST — leaving every other
+ * member in source order and collapsing any repeated `null` to a single leading one. Guarantees
+ * `null | error` and `error | null` share one resolved type (and one mangled typedef). A null-free
+ * member list is returned unchanged (behavior-preserving for the existing corpus).
+ *
+ * Detects a bare-null member via `from_is_bare_null` (the concrete `Null` any `null | X`
+ * annotation, or bare `null` literal, resolves to) and collapses it to the single canonical
+ * `Null{}` leading member. Without this, both the (now-retired) C backend's
+ * `cg_union_niche_member` and the own backend's `null_union_shape` classify a null-union SOLELY by
+ * a literal `Null` member, so an un-normalized union falls through their niche/tag detection
+ * entirely — the own backend's generic BY-NAME variant lowering then binds the union's non-null
+ * case at the WRONG index (no `null` pattern has a name to look up), silently landing the write on
+ * the wrong payload slot instead of raising an honest stop (the exact regression a correct
+ * normalizer here prevents).
+ *
+ * @param members  the resolved union members (source order)
+ * @return         the members with any bare-null member collapsed to a single leading `Null`
+ */
+fn union_normalize_null(members: []Type) -> []Type {
+    mut has_null = false
+    mut i = 0
+    loop {
+        if i >= members.len { break }
+        if from_is_bare_null(members[i]) { has_null = true }
+        i++
+    }
+    if !has_null { return members }
+    mut out: []Type = teko::list::push(teko::list::empty(), Null { })
+    mut j = 0
+    loop {
+        if j >= members.len { break }
+        if !from_is_bare_null(members[j]) { out = teko::list::push(out, members[j]) }
+        j++
+    }
+    out
+}
+
+/**
+ * Collect every member of `xs` except the one at index `skip` — the SIBLING set a variant
+ * member is validated against (`variant_member_admissible` needs the other members to decide the
+ * shape-aware R2 relaxation for a `Reference`). Preserves source order of the retained members.
+ *
+ * @param xs    the full resolved member list
+ * @param skip  the index whose member is being validated (excluded from the result)
+ * @return      the members of `xs` other than `xs[skip]`, in source order
+ */
+fn variant_siblings(xs: []Type, skip: i64) -> []Type {
+    mut out: []Type = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= xs.len { break }
+        if i != skip { out = teko::list::push(out, xs[i]) }
+        i++
+    }
+    out
+}
+
+/**
+ * Decide whether a resolved `member` may stand in a union alongside `siblings` (the C3 replacement
+ * for the flat variant-member gate). `void` is never a member. A `Reference` is admitted ONLY as
+ * the never-null handle of a two-member `Ref<T> | null` union (R2 relaxed, owner D3) — exactly one
+ * sibling, itself a `Null`; every other stored `Reference` stays rejected (R4). An interface
+ * `Named` remains an honest stop (the #28 S4 carve-out — interface-in-union rebases on top of
+ * null-union and relaxes this arm itself). `Null` and ordinary value members are admissible.
+ *
+ * @param member    the resolved candidate member type
+ * @param siblings  the other resolved members already collected for this union
+ * @param table     the type table (interface-name resolution)
+ * @return          null when `member` is admissible; an error naming why not
+ * @throws          error when `member` is `void`, an out-of-shape `Reference`, or an interface
+ * @since 0.3.0.30 (null-union C3)
+ */
+fn variant_member_admissible(member: Type, siblings: []Type, table: TypeTable) -> error | null {
+    match member {
+        Void => return error { message = "a variant member may not be `void`" }
+        Reference => {
+            if siblings.len == 1 {
+                match siblings[0] { Null => return null; _ => { } }
+            }
+            return error { message = "a reference cannot be stored in a struct/variant/collection" }
+        }
+        Named as nm => {
+            if is_interface_name(nm.name, table) {
+                return error { message = "an interface cannot be a variant member yet — bind the interface value on its own (no `I | error` unions)" }
+            }
+            null
+        }
+        _ => null
+    }
+}
+
+/**
+ * prim_name — (C1.8) the surface spelling of a prim kind — the same names `builtin_type`
+ * accepts (`scope.tks`), so a rendered mismatch reads in the user's own vocabulary.
+ *
+ * @param k  the prim kind to render
+ * @return   its surface spelling
+ */
+fn prim_name(k: PrimKind) -> str {
+    match k {
+        U8 => "u8"; U16 => "u16"; U32 => "u32"; U64 => "u64"
+        I8 => "i8"; I16 => "i16"; I32 => "i32"; I64 => "i64"
+        F32 => "f32"; F64 => "f64"
+        Bool => "bool"
+    }
+}

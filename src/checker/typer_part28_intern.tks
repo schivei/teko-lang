@@ -1,0 +1,84 @@
+// src/checker/typer.tks  (namespace 'teko::checker')
+// Each check_* (E4/E5) EVOLVES into a type_*: the SAME checks (B.22 regimes, B.20
+// `if`, B.15 `match` + exhaustiveness), but the producer BUILDS the typed node
+// instead of returning a bare Type. Predicates (is_bool/is_integer/op_is_*),
+// resolvers (resolve_type), env (lookup/define) and the pattern + exhaustiveness
+// logic (check_pattern/exhaustive) are reused from their stages — re-derivation,
+// not duplication (M.5). C1: every node, statement and item re-derived.
+use teko::lexer
+use teko::parser
+
+
+// (C1.8/E2) surface an inner checker error at the program level — mirror of typer.c's surface_at.
+// PREFER the inner error's own line/col over the item's (an inner-expr position wins — C1-POS),
+// build the LOCATED message string (diag_at — file:line:col baked in, the fallback the driver
+// prints when it can't read the file), then re-attach the STRUCTURED file/line/col (err_loc) and
+// PRESERVE the inner error's expected/actual (err_typed) so a type mismatch still renders
+// "expected X, found Y" after surfacing.
+fn surface_at(file: str, item_line: u32, item_col: u32, inner: error) -> error {
+    let el = if inner.line != 0 { inner.line } else { item_line }
+    let ec = if inner.line != 0 { inner.col } else { item_col }
+    let located = error { message = diag_at(file, el, ec, inner.message) }   // located string (fallback)
+    let positioned = teko::error::err_loc(located, el, ec)   // structured position (renderer)
+    teko::error::err_typed(positioned, inner.expected, inner.actual)   // preserve expected/actual (C1.8)
+}
+
+/**
+ * The no-op `ProgressFn` `type_program_with_deps` passes to
+ * `type_program_with_deps_pre_mono` when its caller wants no per-item progress
+ * reporting (the original, pre-observability contract).
+ *
+ * @param done   how many top-level items have been typed so far (ignored)
+ * @param total  the total top-level item count (ignored)
+ */
+fn no_item_progress(done: u64, total: u64) -> void { }
+
+/**
+ * The checker's PRE-WALK product: the state the declaration-boundary item walk runs against, plus
+ * everything the six pre-walk passes had to say about the program.
+ *
+ * `cut` is the boundary verdict of docs/design/all-diagnostics-pre-walk-0.3.1.md §3 — true when a
+ * HARD pass (the signature walk, the DI registry, the stamped-instance registration) left the state
+ * it produces incomplete. The item walk must NOT run on a cut: it would type bodies against missing
+ * bindings and blame every caller for its callee's defect.
+ */
+type PreWalk = struct {
+    /** the fully stamped type table the item walk resolves against */
+    types: TypeTable
+    /** the sealed top-level environment the item walk types against */
+    env: Env
+    /** every pre-walk diagnostic, in pass order (source, then line, then column within a pass) */
+    diags: []str
+    /** did a HARD pass leave its produced state incomplete? */
+    cut: bool
+}
+
+/**
+ * Run the five pre-walk passes that follow collection and fold their diagnostics into ONE list, in
+ * pass order — the all-diagnostics ruling applied to the checker's pre-walk (issue #68).
+ *
+ * SOFT passes (`check_modules`, the DI overlay check) produce nothing the item walk reads, so their
+ * diagnostics travel WITH the item walk's and the build reports them together. HARD passes (the
+ * signature walk inside `col`, the DI registry, the stamped-instance registration) produce state a
+ * failure leaves incomplete, so each collects everything it can and then sets `cut`.
+ *
+ * @param program  the trait-folded, base-canonicalized program
+ * @param col      the collection pass's outcome (its two diagnostic classes come in with it)
+ * @return         the item walk's state, every pre-walk diagnostic, and the boundary verdict
+ * @since 0.3.1
+ */
+fn pre_walk(program: parser::Program, col: CollectOutcome) -> PreWalk {
+    let table = col.collected.types
+    let module_diags = check_modules(program, table)
+    let di = build_di_registry(program, table)
+    let overlay_diags = di_overlay_diags(program, di, table)
+    let types = instantiate_types(program, table)
+    let insts = register_instance_methods(col.collected.env, types)
+    mut diags = concat_diags(col.decl_diags, col.sig_diags)
+    diags = concat_diags(diags, module_diags)
+    diags = concat_diags(diags, di.diags)
+    diags = concat_diags(diags, overlay_diags)
+    diags = concat_diags(diags, insts.diags)
+    let cut = col.sig_diags.len > 0 || di.diags.len > 0 || insts.diags.len > 0
+    PreWalk { types = types; env = with_di(seal(insts.env), di.registry); diags = diags; cut = cut }
+}

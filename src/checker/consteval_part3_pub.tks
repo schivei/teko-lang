@@ -1,0 +1,50 @@
+
+
+/**
+ * inline_consts — rewrite the typed program, replacing every reference to a scalar module-level
+ * constant with a clone of that constant's checked initializer, in dependency order so nested const
+ * references collapse fully (#594 crumb 5). The scalar TConstDecl items are then dropped from the
+ * program (they emit no code — no fn body, no arena, no global). An AGGREGATE const is NOT inlined
+ * here — its TConstDecl passes through to lowering (crumb 6). Runs in the checker pipeline AFTER
+ * `monomorphize` and BEFORE lowering, so lowering sees no scalar const reference and never reaches a
+ * globals honest-stop for a scalar-only program. After substitution the pass composes the local-binding
+ * const-propagation (`propagate_locals`, #comptime-fold CF3) and then the CF2 fold (`fold_program`):
+ * every name-free provably-const integer op-tree — a substituted module const's `~(0 to u64)`, a
+ * propagated LOCAL `let a: u64 = 0xFF` used as `a >> 4`, or any inline literal op-tree — collapses to
+ * its literal, so BOTH engines load an immediate instead of re-executing the op-tree, and a
+ * provably-const overflow/÷0/out-of-range becomes a located compile error (M.1). The fold + propagation
+ * run for EVERY program, including a const-free one (a function-local `let a = 0xFF` folds without any
+ * module const present).
+ *
+ * @param prog  the fully typed, monomorphized program
+ * @return      the program with scalar const references substituted, scalar const decls removed,
+ *              provably-const local bindings propagated and integer op-trees folded to literals
+ * @throws      a located error when the module-level consts form a reference cycle (`const_dep_order`)
+ *              or a folded constant overflows / divides by zero / is out of range (#comptime-fold)
+ * @since #594
+ */
+pub fn inline_consts(prog: TProgram) -> TProgram | error {
+    let substituted = match substitute_module_consts(prog) { error as e => return e; TProgram as sp => sp }
+    let agg = match build_module_agg_map(substituted) { error as e => return e; ScalarConstMap as m => m }
+    fold_program(propagate_locals(substituted), agg)
+}
+
+/**
+ * collect_const_ctors — every STRUCT-CONSTRUCTOR function the program declares, in declaration order:
+ * the table `canonicalize_const_ctors` resolves a const initializer's allowlisted call against. Built
+ * ONCE per program by the fold, so canonicalization costs one linear scan plus a lookup per const.
+ *
+ * @param items  the typed program's top-level items
+ * @return       the struct-constructor functions, in declaration order
+ * @since #degrau-1
+ */
+pub fn collect_const_ctors(items: []TItem) -> []TFunction {
+    mut out: []TFunction = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= items.len { break }
+        out = collect_const_ctor_item(out, items[i])
+        i++
+    }
+    out
+}
