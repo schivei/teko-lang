@@ -1,0 +1,203 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * single_segment_name — `p`'s lone segment name, or `null` when `p` has zero or
+ * more than one segment (#414, #382).
+ *
+ * @param parser::Path p  the path to inspect
+ * @return str?  `p`'s single segment's name, or `null`
+ */
+fn single_segment_name(p: parser::Path) -> str | null {
+    if p.segments.len != 1 { return null }
+    p.segments[0].name
+}
+
+/**
+ * find_known_struct_layout — the entry of `layouts` named `name`, or `null`
+ * when none matches (a NULLABLE sibling of `find_struct_layout`: a
+ * forward-referenced or non-struct field type is a routine "not (yet)
+ * known" outcome here, not an internal invariant break) (#414, #382).
+ *
+ * @param []LStructLayout layouts  the struct-layout table to search
+ * @param str name  the struct name to look up
+ * @return LStructLayout?  the matching entry, or `null`
+ */
+fn find_known_struct_layout(layouts: []LStructLayout, name: str) -> LStructLayout | null {
+    mut i: u64 = 0
+    loop {
+        if i >= layouts.len { break }
+        if layouts[i].name == name { return layouts[i] }
+        i++
+    }
+    null
+}
+
+/**
+ * field_size_of — a field's byte size: `nested`'s own resolved size when
+ * present (a struct-by-value field), else `ft`'s scalar `ltype_size` (#414,
+ * #382).
+ *
+ * @param LType ft  the field's machine class (`ltype_of_typeexpr`'s mapping)
+ * @param LStructLayout? nested  the field's nested struct layout, when known
+ * @return u32  the field's byte size
+ */
+fn field_size_of(ft: LType, nested: LStructLayout | null) -> u32 {
+    match nested {
+        LStructLayout as l => l.size
+        null => ltype_size(ft)
+    }
+}
+
+/**
+ * field_align_of — a field's byte alignment: `nested`'s own resolved alignment
+ * when present (a struct-by-value field), else `ft`'s scalar `ltype_align`
+ * (#414, #382).
+ *
+ * @param LType ft  the field's machine class (`ltype_of_typeexpr`'s mapping)
+ * @param LStructLayout? nested  the field's nested struct layout, when known
+ * @return u32  the field's byte alignment
+ */
+fn field_align_of(ft: LType, nested: LStructLayout | null) -> u32 {
+    match nested {
+        LStructLayout as l => l.align
+        null => ltype_align(ft)
+    }
+}
+
+/**
+ * typeexpr_is_fat — true iff the syntactic annotation `te` is a fat-pointer type (a `[]T` slice or
+ * `str`), the field whose layout occupies 16 bytes `{ptr, len}` instead of the scalar fallback's
+ * 8-byte `Ptr` (#594 T-B6). A `char`/Named-by-value/`ptr<T>` is NOT fat (it is an 8-byte `Ptr` or a
+ * nested struct), so it does not match here.
+ *
+ * @param te  the field's syntactic type annotation
+ * @return    whether the field is a fat pointer (16 bytes {ptr, len})
+ * @since #594 T-B6
+ */
+fn typeexpr_is_fat(te: parser::TypeExpr) -> bool {
+    match te {
+        parser::SliceType => true
+        parser::NamedType as nt => named_single_segment_is(nt.path, "str")
+        _ => false
+    }
+}
+
+/**
+ * named_single_segment_is — true iff `p` is a single-segment path whose lone segment name equals
+ * `want` (#594 T-B6): the shape a bare `str` type annotation takes (`str`, not `a::str`).
+ *
+ * @param p     the path to inspect
+ * @param want  the segment name to match
+ * @return      whether `p` is the single segment `want`
+ * @since #594 T-B6
+ */
+fn named_single_segment_is(p: parser::Path, want: str) -> bool {
+    match single_segment_name(p) {
+        str as s => s == want
+        null => false
+    }
+}
+
+/**
+ * field_layout_size — a field's byte size, widening a fat-pointer field (`[]T`/`str`) to the 16-byte
+ * `{ptr, len}` image and otherwise deferring to `field_size_of` (#594 T-B6). The 16-byte width is the
+ * layout the aggregate-const serializer writes (`{ptr@off, len@off+8}`) and the reader loads.
+ *
+ * @param te      the field's syntactic type annotation (the fat-vs-scalar signal)
+ * @param ft      the field's machine class (`ltype_of_typeexpr`'s mapping)
+ * @param nested  the field's nested struct layout, when known
+ * @return        the field's byte size
+ * @since #594 T-B6
+ */
+fn field_layout_size(te: parser::TypeExpr, ft: LType, nested: LStructLayout | null) -> u32 {
+    if typeexpr_is_fat(te) { return ltype_size(LType::Ptr) * (2 to u32) }
+    field_size_of(ft, nested)
+}
+
+/**
+ * field_layout_align — a field's byte alignment, pinning a fat-pointer field (`[]T`/`str`) to
+ * pointer alignment and otherwise deferring to `field_align_of` (#594 T-B6).
+ *
+ * @param te      the field's syntactic type annotation (the fat-vs-scalar signal)
+ * @param ft      the field's machine class (`ltype_of_typeexpr`'s mapping)
+ * @param nested  the field's nested struct layout, when known
+ * @return        the field's byte alignment
+ * @since #594 T-B6
+ */
+fn field_layout_align(te: parser::TypeExpr, ft: LType, nested: LStructLayout | null) -> u32 {
+    if typeexpr_is_fat(te) { return ltype_align(LType::Ptr) }
+    field_align_of(ft, nested)
+}
+
+/**
+ * collect_enums — the name + declared member list of every `enum` type
+ * declaration in `prog`, in program order (A1-5, #382 — a `match` arm's bare
+ * enum-member pattern resolves its ORDINAL through this table). A non-enum type
+ * declaration contributes no entry.
+ *
+ * @param checker::TProgram prog  the whole typed program to scan
+ * @return []LEnumInfo  every declared enum's name + member list, in program
+ *                      order
+ */
+fn collect_enums(prog: checker::TProgram) -> []LEnumInfo {
+    mut out: []LEnumInfo = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        out = collect_enum_item(out, prog.items[i])
+        i++
+    }
+    out
+}
+
+/**
+ * collect_enum_item — accumulate `it`'s enum info onto `acc`, unchanged for
+ * every other item kind.
+ *
+ * @param []LEnumInfo acc  the enum table accumulated so far
+ * @param checker::TItem it  the program item to fold
+ * @return []LEnumInfo  `acc`, with `it`'s enum info appended when applicable
+ */
+fn collect_enum_item(acc: []LEnumInfo, it: checker::TItem) -> []LEnumInfo {
+    match it {
+        parser::TypeDecl as td => collect_enum_decl(acc, td)
+        _ => acc
+    }
+}
+
+/**
+ * collect_enum_decl — accumulate `td`'s member list onto `acc` when its body is
+ * an `EnumBody`; unchanged for any other type-declaration shape
+ * (struct/class/variant/…).
+ *
+ * @param []LEnumInfo acc  the enum table accumulated so far
+ * @param parser::TypeDecl td  the type declaration to fold
+ * @return []LEnumInfo  `acc`, with `td`'s enum info appended when applicable
+ */
+fn collect_enum_decl(acc: []LEnumInfo, td: parser::TypeDecl) -> []LEnumInfo {
+    match td.body {
+        parser::EnumBody as eb => teko::list::push(acc, LEnumInfo { name = td.name; members = eb.members })
+        _ => acc
+    }
+}
+
+/**
+ * collect_externs — the namespace + name + declared foreign symbol of every
+ * `extern fn` in `prog`, in program order (C7.1a — a call to one must target
+ * that raw symbol, never the Teko mangling, or the link fails on an undefined
+ * reference to a name nobody defines). A non-function item, and a function with
+ * a body, contribute no entry.
+ *
+ * @param checker::TProgram prog  the whole typed program to scan
+ * @return []LExternFn  every declared `extern fn`'s call-resolution entry, in
+ *                      program order
+ */
+fn collect_externs(prog: checker::TProgram) -> []LExternFn {
+    mut out: []LExternFn = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        out = collect_extern_item(out, prog.items[i])
+        i++

@@ -1,0 +1,305 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+/** teko::lir (interpreter oracle) — execute the LIR subset directly (issue #221, C5).
+
+    This is the FOURTH oracle of the backend. N1 delivers the lowering (TAST -> LIR), the
+    part every future target (N2-N6) inherits WHOLE; a LIR interpreter validates that
+    lowering INDEPENDENTLY of any machine code (isel/encoding/ELF are N2+). It runs on any
+    host, needs no `cc`/QEMU, and grows one case per feature as the lowering does — the
+    cheap permanent oracle of the native path, exactly as the VM is for the whole language.
+
+    Scope (N1 subset): integer const/bin/un/param/ret + a direct Teko-Teko call + the
+    `tk_exit` builtin. A call to any other runtime `tk_*` honest-stops (N1 has no str/alloc
+    in the subset). Values are the raw i64 two's-complement REGISTER carrier (drop-128,
+    2026-07-24 — was an unmasked i128 carrier that only masked at a `to` cast): every op
+    WRAPS mod 2^64, the same wrap the native backend's real 64-bit registers produce — MORE
+    faithful to the native model than the old unmasked carrier, and both interpreters
+    (`lir_interp`/`minst_interp`) apply the identical model in lockstep, so their equivalence
+    oracle is preserved. Floats are lowered (LConstFloat/F-ops) but not RUN here — the N1
+    run-fixtures are integer-only, and a float op honest-stops rather than pretend a bit-
+    level result.
+
+    IResult — an interpreter step outcome. `tag` selects: 0 = CONTINUE (a non-terminator
+    step succeeded — a placeholder the block loop advances past, never surfaced to the
+    caller), 1 = an EXIT unwind (a `tk_exit`), 2 = an ERROR (an out-of-subset op reached at
+    runtime), 3 = a RETURN value (an `ret` terminator carrying the function's result), 4 = a
+    GOTO (a `jump`/`branch` terminator carrying its chosen target block id — interp_blocks,
+    the multi-block executor, follows it; never surfaced past that). Separating CONTINUE
+    from RETURN is what lets a single block's instruction loop know when to stop — both a
+    plain `const` step and a `ret` carry a value, but only `ret` ends the block. */
+pub type IResult = struct { tag: u32; value: i64; message: str }
+
+/** ires_continue — a non-terminator step's placeholder (the block loop advances). */
+fn ires_continue() -> IResult { IResult { tag = 0; value = 0; message = "" } }
+/** ires_return — an `ret` terminator carrying the function's result value. */
+fn ires_return(v: i64) -> IResult { IResult { tag = 3; value = v; message = "" } }
+/** ires_exit — a `tk_exit` unwind carrying the exit code. */
+fn ires_exit(code: i64) -> IResult { IResult { tag = 1; value = code; message = "" } }
+/** ires_error — an out-of-subset op reached at runtime. */
+fn ires_error(msg: str) -> IResult { IResult { tag = 2; value = 0; message = msg } }
+/** ires_goto — a jump/branch's chosen target block id: a block-TRANSITION outcome, never
+    surfaced past interp_blocks (the multi-block executor that follows it). */
+fn ires_goto(target: u32) -> IResult { IResult { tag = 4; value = target to i64; message = "" } }
+
+/** is_continue — a continue placeholder (the block loop advances on this alone). */
+fn is_continue(r: IResult) -> bool { r.tag == 0 }
+/** is_return — a return-value outcome (a terminator). */
+fn is_return(r: IResult) -> bool { r.tag == 3 }
+/** is_exit — an exit-unwind outcome. */
+fn is_exit(r: IResult) -> bool { r.tag == 1 }
+/** is_ierror — an error outcome. */
+fn is_ierror(r: IResult) -> bool { r.tag == 2 }
+/** is_goto — a block-transition outcome (interp_blocks follows it to its target block). */
+fn is_goto(r: IResult) -> bool { r.tag == 4 }
+
+/** RegFile — the per-frame VReg value store: values[i] is the i64 held by VReg i,
+    `set[i]` marks it defined (a read of an unset VReg is an internal error). */
+pub type RegFile = struct { values: []i64; set: []bool }
+
+/** new_regfile — a register file sized for a function's VRegs (next_vreg slots), all unset. */
+fn new_regfile(n: u32) -> RegFile {
+    mut vals: []i64 = teko::list::empty()
+    mut set: []bool = teko::list::empty()
+    mut i: u32 = 0
+    loop {
+        if i >= n { break }
+        vals = teko::list::push(vals, 0)
+        set = teko::list::push(set, false)
+        i++
+    }
+    RegFile { values = vals; set = set }
+}
+
+/** rf_set — store `v` into VReg `r`, returning the updated register file (functional; a
+    fresh slice with the one slot rewritten). */
+fn rf_set(rf: RegFile, r: u32, v: i64) -> RegFile {
+    mut vals: []i64 = teko::list::empty()
+    mut set: []bool = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= rf.values.len { break }
+        let is_target = (i to u32) == r
+        vals = teko::list::push(vals, if is_target { v } else { rf.values[i] })
+        set = teko::list::push(set, if is_target { true } else { rf.set[i] })
+        i++
+    }
+    RegFile { values = vals; set = set }
+}
+
+/** RFRead — a register read: whether it was defined + its value. */
+pub type RFRead = struct { ok: bool; value: i64 }
+
+/** rf_get — read VReg `r`; ok=false if the slot is out of range or undefined. */
+fn rf_get(rf: RegFile, r: u32) -> RFRead {
+    let i = r to u64
+    if i >= rf.values.len { return RFRead { ok = false; value = 0 } }
+    if !rf.set[i] { return RFRead { ok = false; value = 0 } }
+    RFRead { ok = true; value = rf.values[i] }
+}
+
+/** MemStore — the interpreter's WHOLE-RUN memory (A1-3, #382, §5.1): a growable list of
+    i64 CELLS, one cell per byte-granular address (an address IS a cell index — the
+    interp is an exit-code ORACLE, not a byte-accurate layout verifier; the real byte
+    layout is validated later by the C-vs-own differential, A4). `next` is the bump
+    cursor an `alloca` advances. */
+pub type MemStore = struct { cells: []i64; next: u32 }
+
+/** empty_memstore — an empty memory (the interpreter run's seed). */
+fn empty_memstore() -> MemStore { MemStore { cells = teko::list::empty(); next = 0 } }
+
+/** MemAlloc — the outcome of reserving `bytes` fresh cells: the advanced memory + the
+    base address (the FIRST reserved cell's index). */
+pub type MemAlloc = struct { mem: MemStore; addr: i64 }
+
+/** mem_alloc — reserve `bytes` fresh zero-valued cells at the bump cursor, returning the
+    base address (a cell index) the caller stores/loads through via LFieldAddr offsets. */
+fn mem_alloc(m: MemStore, bytes: u32) -> MemAlloc {
+    let base = m.next
+    mut cells = m.cells
+    mut i: u32 = 0
+    loop {
+        if i >= bytes { break }
+        cells = teko::list::push(cells, 0)
+        i++
+    }
+    MemAlloc { mem = MemStore { cells = cells; next = m.next + bytes }; addr = base to i64 }
+}
+
+/** MemRead — a memory read: whether `addr` was a valid (in-bounds, non-negative) cell +
+    its value. */
+pub type MemRead = struct { ok: bool; value: i64 }
+
+/** mem_load — read the cell at `addr`; ok=false for a negative or out-of-bounds address. */
+fn mem_load(m: MemStore, addr: i64) -> MemRead {
+    if addr < (0) { return MemRead { ok = false; value = 0 } }
+    let idx = addr to u64
+    if idx >= m.cells.len { return MemRead { ok = false; value = 0 } }
+    MemRead { ok = true; value = m.cells[idx] }
+}
+
+/** mem_store — write `value` into the cell at `addr`, returning the updated memory
+    (functional; a fresh cell list with the one slot rewritten — mirrors rf_set). A
+    negative or out-of-bounds address is an internal error (the lowering never emits one
+    that outruns its own alloca). */
+fn mem_store(m: MemStore, addr: i64, value: i64) -> MemStore | error {
+    if addr < (0) { return error { message = "lir interp: store to a negative address (internal)" } }
+    let idx = addr to u64
+    if idx >= m.cells.len { return error { message = "lir interp: store to an out-of-bounds address (internal)" } }
+    mut cells: []i64 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= m.cells.len { break }
+        cells = teko::list::push(cells, if i == idx { value } else { m.cells[i] })
+        i++
+    }
+    MemStore { cells = cells; next = m.next }
+}
+
+/** interp_lmodule — run the function named `entry` in `m` with `args`, returning the exit
+    code the program would produce: an explicit `tk_exit(n)` yields n; a plain `ret v` from
+    the entry yields v; an out-of-subset op or a missing function yields a NEGATIVE sentinel
+    (-1) so a fixture's expected non-negative exit never collides with a failure. The whole-
+    run memory is SEEDED with every rodata entry's bytes before the entry function runs
+    (A1-4, #382), so a `load` off a `global_addr` finds real content from instruction 0. */
+pub fn interp_lmodule(m: LModule, entry: str, args: []i64) -> i64 {
+    let f = find_lfunc(m, entry)
+    if !f.found { return -1 }
+    let mem = match seed_rodata(m) { MemStore as x => x; error => return -1 }
+    let r = interp_call(m, f.func, args, 0, mem)
+    if is_exit(r.result) { return r.result.value }
+    if is_return(r.result) { return r.result.value }
+    -1
+}
+
+/** seed_rodata — a fresh memory with every entry of `m.rodata` pre-loaded, ONE CELL PER
+    BYTE, in table order — `rodata_base_of` recomputes the exact same cumulative offsets
+    purely from `m.rodata` (a STATIC, never-mutated table), so no separate address-table
+    needs threading through the interpreter: `LGlobalAddr` just re-derives its base address
+    from `m` (already a parameter everywhere) on every read (A1-4, #382). */
+fn seed_rodata(m: LModule) -> MemStore | error {
+    mut mem = empty_memstore()
+    mut i: u64 = 0
+    loop {
+        if i >= m.rodata.len { break }
+        let al = mem_alloc(mem, m.rodata[i].bytes.len to u32)
+        mem = store_bytes(al.mem, al.addr, m.rodata[i].bytes)
+        i++
+    }
+    resolve_rodata_relocs(mem, m.rodata)
+}
+
+/**
+ * resolve_entry_relocs — grava, para uma única entrada rodata cujo blob começa na
+ * célula `base`, o endereço-alvo de cada uma das suas relocations internas de ponteiro
+ * na célula do slot correspondente (#594 T-B5). Para cada `LDataReloc { offset;
+ * target }` o valor gravado é `rodata_base_of(rodata, target).addr` — o índice de
+ * célula (o "endereço" na memória da VM) da primeira célula do datum-alvo — na célula
+ * `base + offset`, que é a célula que um `LLoad` subsequente do ponteiro lê. Um
+ * `target` que não nomeia nenhuma entrada rodata é um erro interno NOMEADO (não um skip
+ * silencioso): a lowering só emite um `LDataReloc` para um símbolo que ela mesma
+ * internou, então um miss é um bug de compilador (espelha o erro de alvo desconhecido
+ * do `wasm_data_addr_of`, T-B4). O slot de 8 bytes ocupa as células
+ * `[base+offset, base+offset+8)`; só a célula baixa recebe o endereço (a VM lê o
+ * ponteiro por um load de UMA célula), as altas permanecem zero.
+ *
+ * @param MemStore mem  a memória com os bytes já semeados
+ * @param []LRodata rodata  a tabela rodata inteira (para resolver o `target`)
+ * @param LRodata entry  a entrada cujas relocs se resolvem
+ * @param i64 base  a célula-base do blob de `entry` (a soma cumulativa de comprimentos)
+ * @return MemStore | error  a memória com os slots de ponteiro escritos, ou o erro
+ *                           nomeado de alvo desconhecido / escrita interna
+ */
+fn resolve_entry_relocs(mem: MemStore, rodata: []LRodata, entry: LRodata, base: i64) -> MemStore | error {
+    mut cur = mem
+    mut j: u64 = 0
+    loop {
+        if j >= entry.relocs.len { break }
+        let r = entry.relocs[j]
+        let hit = rodata_base_of(rodata, r.target)
+        if !hit.ok { return error { message = teko::str::concat("lir interp: rodata-internal pointer targets unknown rodata symbol @", r.target) } }
+        cur = match mem_store(cur, base + r.offset, hit.addr) { MemStore as m2 => m2; error as e => return e }
+        j++
+    }
+    cur
+}
+
+/**
+ * resolve_rodata_relocs — depois de `seed_rodata` ter posto cada blob rodata
+ * byte-por-célula, sobrescreve cada slot de ponteiro rodata-INTERNO com o endereço (o
+ * índice de célula) do datum-alvo (#594 T-B5). Percorre `rodata` re-derivando a base
+ * cumulativa de cada entrada — a MESMA soma que `seed_rodata`/`rodata_base_of` fazem,
+ * então concordam sempre — e delega a resolução dos slots daquela entrada a
+ * `resolve_entry_relocs`. É o análogo VM do `wasm_relocate_rodata` (T-B4) e das
+ * relocations `.rela.rodata`/`__const`/`.rdata` dos writers nativos (T-B2/T-B3): a
+ * relocation aplicada UMA vez na carga do módulo, custo zero por load. Toda entrada tem
+ * `relocs` VAZIO até T-B6 (o produtor `serialize_const` honest-stopa agregados
+ * pointer-bearing), então isto reescreve nada e a memória fica byte-idêntica.
+ *
+ * @param MemStore mem  a memória com os bytes já semeados por `seed_rodata`
+ * @param []LRodata rodata  a tabela rodata inteira, na ordem de semeadura
+ * @return MemStore | error  a memória com todos os slots de ponteiro resolvidos, ou o
+ *                           erro nomeado propagado
+ */
+fn resolve_rodata_relocs(mem: MemStore, rodata: []LRodata) -> MemStore | error {
+    mut cur = mem
+    mut base: i64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= rodata.len { break }
+        cur = match resolve_entry_relocs(cur, rodata, rodata[i], base) { MemStore as m2 => m2; error as e => return e }
+        base = base + (rodata[i].bytes.len to i64)
+        i++
+    }
+    cur
+}
+
+/** store_bytes — write each byte of `bytes` into its own cell starting at `base` (a
+    byte-granular fill, matching the interp's cell-per-address-unit memory model — A1-4,
+    #382). A write is never out-of-bounds here (the cells were just reserved by the caller's
+    `mem_alloc` of the exact same length), so a `mem_store` error is unreachable — kept as a
+    silent no-op fallback only so the match stays total. */
+fn store_bytes(m: MemStore, base: i64, bytes: []byte) -> MemStore {
+    mut cur = m
+    mut i: u64 = 0
+    loop {
+        if i >= bytes.len { break }
+        cur = match mem_store(cur, base + (i to i64), bytes[i] to i64) { MemStore as m2 => m2; error => cur }
+        i++
+    }
+    cur
+}
+
+/** RodataHit — a rodata symbol lookup: whether it was found + its base address (A1-4,
+    #382). */
+pub type RodataHit = struct { ok: bool; addr: i64 }
+
+/** rodata_base_of — the base address `seed_rodata` gave the entry named `symbol`, computed
+    by walking `rodata` and summing byte lengths up to the match — the SAME cumulative-offset
+    walk `seed_rodata` performs, so the two always agree (A1-4, #382). */
+fn rodata_base_of(rodata: []LRodata, symbol: str) -> RodataHit {
+    mut offset: i64 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= rodata.len { break }
+        if rodata[i].symbol == symbol { return RodataHit { ok = true; addr = offset } }
+        offset = offset + (rodata[i].bytes.len to i64)
+        i++
+    }
+    RodataHit { ok = false; addr = 0 }
+}
+
+/** LFuncHit — a module function lookup result. */
+pub type LFuncHit = struct { found: bool; func: LFunc }
+
+/** find_lfunc — the function in `m` whose symbol is `sym`, or found=false. */
+fn find_lfunc(m: LModule, sym: str) -> LFuncHit {
+    mut i: u64 = 0
+    loop {
+        if i >= m.funcs.len { break }
+        if m.funcs[i].symbol == sym { return LFuncHit { found = true; func = m.funcs[i] } }
+        i++
+    }
+    LFuncHit { found = false; func = empty_lfunc() }
+}
+

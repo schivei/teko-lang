@@ -1,0 +1,278 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+    let v = mem_load(mem, a.value)
+    if !v.ok { return istep_stop(ires_error("lir interp: load from an out-of-bounds address"), rf, mem) }
+    istep_cont(rf_set(rf, inst.result, v.value), mem)
+}
+
+/** interp_store — write the CURRENT value of `st.value` into the cell at `st.addr`
+    (A1-3, #382); yields no result. */
+fn interp_store(rf: RegFile, st: LStore, mem: MemStore) -> IStep {
+    let a = rf_get(rf, st.addr)
+    let v = rf_get(rf, st.value)
+    if !a.ok || !v.ok { return istep_stop(ires_error("lir interp: store operand is an undefined VReg"), rf, mem) }
+    match mem_store(mem, a.value, v.value) {
+        MemStore as mem2 => istep_cont(rf, mem2)
+        error as e => istep_stop(ires_error(e.message), rf, mem)
+    }
+}
+
+/** interp_global_addr — resolve `g.symbol` to its SEEDED rodata base address (`rodata_base_of`
+    over `m.rodata`), storing it into the instruction's result VReg; an unknown symbol is an
+    internal error (the lowering only ever emits a `global_addr` for a symbol it itself
+    interned) (A1-4, #382). */
+fn interp_global_addr(m: LModule, rf: RegFile, inst: LInst, g: LGlobalAddr, mem: MemStore) -> IStep {
+    let hit = rodata_base_of(m.rodata, g.symbol)
+    if !hit.ok { return istep_stop(ires_error(teko::str::concat("lir interp: unknown rodata symbol @", g.symbol)), rf, mem) }
+    istep_cont(rf_set(rf, inst.result, hit.addr), mem)
+}
+
+/**
+ * interp_func_addr — resolve `fa.symbol` to its synthetic function-pointer
+ * value (`func_slot_addr`, the interp's fn-pointer model, §5.2), storing it
+ * into the instruction's result VReg — a function used as a VALUE (a bare fn
+ * reference, or a closure/thunk literal's `fn` field, A1-7 #382). An unknown
+ * symbol is an internal error (the lowering only ever emits this for a
+ * function it itself lowered or lifted into the module).
+ *
+ * @param LModule m  the module (its `funcs` table gives the synthetic
+ *                    address)
+ * @param RegFile rf  the caller's register file
+ * @param LInst inst  the enclosing instruction (its result VReg)
+ * @param LFuncAddr fa  the function-address op
+ * @param MemStore mem  the whole-run memory
+ * @return IStep  a CONTINUE with the resolved address bound, or a propagated
+ *                error
+ */
+fn interp_func_addr(m: LModule, rf: RegFile, inst: LInst, fa: LFuncAddr, mem: MemStore) -> IStep {
+    match func_slot_addr(m, fa.symbol) {
+        i64 as addr => istep_cont(rf_set(rf, inst.result, addr), mem)
+        error as e => istep_stop(ires_error(e.message), rf, mem)
+    }
+}
+
+/** EvalOut — the result of an arithmetic evaluation: a computed value, or an error message
+    when the opcode/inputs are out of the N1 run subset. */
+pub type EvalOut = struct { ok: bool; value: i64; message: str }
+
+/** eval_ok — a successful arithmetic value. */
+fn eval_ok(v: i64) -> EvalOut { EvalOut { ok = true; value = v; message = "" } }
+/** eval_err — a failed arithmetic (out-of-subset opcode or bad input). */
+fn eval_err(msg: str) -> EvalOut { EvalOut { ok = false; value = 0; message = msg } }
+
+/** interp_bin — an integer binary op: read both operands, compute, store the result. A
+    float op or a divide-by-zero honest-stops (the N1 fixtures never divide by zero). */
+fn interp_bin(rf: RegFile, inst: LInst, b: LBin, mem: MemStore) -> IStep {
+    let a = rf_get(rf, b.a)
+    let c = rf_get(rf, b.b)
+    if !a.ok || !c.ok { return istep_stop(ires_error("lir interp: binary op on an undefined VReg"), rf, mem) }
+    let r = eval_bin(b.op, a.value, c.value)
+    if !r.ok { return istep_stop(ires_error(r.message), rf, mem) }
+    istep_cont(rf_set(rf, inst.result, r.value), mem)
+}
+
+/**
+ * eval_bin — the arithmetic of an integer LBinOp over the i64 carrier.
+ *
+ * The SIGNED family uses the carrier's own operators; the UNSIGNED family (`IDivU`/`IRemU`/
+ * `IShrU`/`ICmp*U`) REINTERPRETS both operands as `u64` first and computes there. That distinction
+ * is the whole reason the LIR carries two opcode families, and it used to be thrown away: every U
+ * variant was spelled identically to its S twin. With the pre-0.3.1 i128 carrier the written
+ * justification ("the fixtures are non-negative") held; at i64 a `u64` with bit 63 set READS
+ * NEGATIVE, so `ICmpGtU(u64::MAX, 5)` answered 0 where the correct unsigned answer is 1, and
+ * `IShrU` sign-extended. This interpreter is the ORACLE the native backend is differentially
+ * validated against — a wrong oracle either masks a real backend bug or invents a false one.
+ *
+ * The bitwise ops (IAnd/IOr/IXor) are pure two's-complement bit operations, exact on the carrier
+ * for any operand and identical in both domains; `IShl` likewise (the bit pattern is the same
+ * either way). Width masking of a narrow-type result stays deferred to the phase that runs narrow
+ * types (mirroring eval_un's ZExt/SExt/Trunc identity). A zero divisor honest-stops. Float
+ * comparisons are declared (so the match documents every LBinOp) but honest-stop: the interp
+ * carries no float VALUE yet (LConstFloat itself errors — see interp_inst).
+ *
+ * @param op  the LIR binary opcode
+ * @param a   the left operand's carrier value
+ * @param b   the right operand's carrier value
+ * @return    the computed value, or the honest stop for an out-of-subset opcode / zero divisor
+ */
+fn eval_bin(op: LBinOp, a: i64, b: i64) -> EvalOut {
+    match op {
+        IAdd => eval_ok(a + b)
+        ISub => eval_ok(a - b)
+        IMul => eval_ok(a * b)
+        IDivS => eval_div(a, b)
+        IDivU => eval_div_u(a, b)
+        IRemS => eval_rem(a, b)
+        IRemU => eval_rem_u(a, b)
+        IAnd => eval_ok(a & b)
+        IOr => eval_ok(a | b)
+        IXor => eval_ok(a ^ b)
+        IShl => eval_ok(a << b)
+        IShrS => eval_ok(a >> b)
+        IShrU => eval_ok(i64_of_u64_bits(u64_bits_of_i64(a) >> u64_bits_of_i64(b)))
+        ICmpEq => eval_ok(bool_to_i64(a == b))
+        ICmpNe => eval_ok(bool_to_i64(a != b))
+        ICmpLtS => eval_ok(bool_to_i64(a < b))
+        ICmpLtU => eval_ok(bool_to_i64(u64_bits_of_i64(a) < u64_bits_of_i64(b)))
+        ICmpLeS => eval_ok(bool_to_i64(a <= b))
+        ICmpLeU => eval_ok(bool_to_i64(u64_bits_of_i64(a) <= u64_bits_of_i64(b)))
+        ICmpGtS => eval_ok(bool_to_i64(a > b))
+        ICmpGtU => eval_ok(bool_to_i64(u64_bits_of_i64(a) > u64_bits_of_i64(b)))
+        ICmpGeS => eval_ok(bool_to_i64(a >= b))
+        ICmpGeU => eval_ok(bool_to_i64(u64_bits_of_i64(a) >= u64_bits_of_i64(b)))
+        FCmpEq => eval_err("lir interp: float comparisons are out of the N1 run subset (N2)")
+        FCmpNe => eval_err("lir interp: float comparisons are out of the N1 run subset (N2)")
+        FCmpLt => eval_err("lir interp: float comparisons are out of the N1 run subset (N2)")
+        FCmpLe => eval_err("lir interp: float comparisons are out of the N1 run subset (N2)")
+        FCmpGt => eval_err("lir interp: float comparisons are out of the N1 run subset (N2)")
+        FCmpGe => eval_err("lir interp: float comparisons are out of the N1 run subset (N2)")
+        _ => eval_err("lir interp: binary opcode is out of the N1 run subset (N2)")
+    }
+}
+
+/** bool_to_i64 — a boolean as its i64 carrier value (1 = true, 0 = false) — the released
+    seed does not yet implement a `bool to <numeric>` cast (checker::cast_kind honest-stops
+    on Bool), so this picks the constant explicitly; the same representation lower_bool_and's
+    zero constant and a lowered `TBoolLit` will use. */
+fn bool_to_i64(b: bool) -> i64 { if b { 1 } else { 0 } }
+
+/**
+ * LIR_I64_SIGN_BIT_U — `2^63` as a `u64`: the smallest pattern whose SIGNED reading is negative,
+ * and exactly the distance between the unsigned and the signed reading of any pattern at or above
+ * it. The pivot both carrier reinterpretations turn on.
+ */
+const LIR_I64_SIGN_BIT_U: u64 = 9223372036854775808
+
+/**
+ * LIR_U64_ALL_ONES — every bit of a `u64` set (`2^64 - 1`), the value a negative carrier's
+ * magnitude is subtracted from to reach its unsigned reading.
+ */
+const LIR_U64_ALL_ONES: u64 = 0xFFFFFFFFFFFFFFFF
+
+/**
+ * LIR_I64_MIN — the most negative `i64` (`-2^63`), spelled as a subtraction because `2^63` has no
+ * `i64` literal form.
+ */
+const LIR_I64_MIN: i64 = -9223372036854775807 - 1
+
+/**
+ * u64_bits_of_i64 — the `u64` reading of a carrier value's 64-bit two's-complement pattern, the
+ * conversion the unsigned opcode family applies to both operands.
+ *
+ * PROOF THAT NO STEP CAN TRAP OR OVERFLOW: a non-negative value casts straight across (inside
+ * `u64`'s range, so the CHECKED `i64 -> u64` cast passes). For a negative `v`, `v + 1` lies in
+ * `[i64::MIN + 1, 0]` and `0 - (v + 1)` therefore in `[0, i64::MAX]` — both in range, no overflow
+ * even at `i64::MIN` — and subtracting that magnitude from `LIR_U64_ALL_ONES` (`2^64 - 1 - (-v - 1)`
+ * = `2^64 + v`) is an in-range unsigned subtraction. At `v == -1` the result is `u64::MAX`; at
+ * `v == i64::MIN` it is `2^63`.
+ *
+ * @param v  the carrier value
+ * @return   its unsigned reading
+ */
+fn u64_bits_of_i64(v: i64) -> u64 {
+    if v >= 0 { return v to u64 }
+    let magnitude = 0 - (v + 1)
+    LIR_U64_ALL_ONES - (magnitude to u64)
+}
+
+/**
+ * i64_of_u64_bits — the carrier value a 64-bit pattern denotes, the inverse of
+ * `u64_bits_of_i64`. A pattern below `2^63` casts straight across (inside `i64`'s positive range,
+ * so the CHECKED `u64 -> i64` cast passes); one at or above it casts `bits - 2^63` (in
+ * `[0, 2^63)`, again in range) and adds `i64::MIN`, a sum in `[i64::MIN, -1]` that cannot overflow.
+ *
+ * @param bits  the 64-bit two's-complement pattern
+ * @return      its signed carrier reading
+ */
+fn i64_of_u64_bits(bits: u64) -> i64 {
+    if bits < LIR_I64_SIGN_BIT_U { return bits to i64 }
+    ((bits - LIR_I64_SIGN_BIT_U) to i64) + LIR_I64_MIN
+}
+
+/**
+ * eval_div — SIGNED integer division with a zero-divisor guard.
+ *
+ * @param a  the dividend
+ * @param b  the divisor
+ * @return   the quotient, or the honest stop for a zero divisor
+ */
+fn eval_div(a: i64, b: i64) -> EvalOut {
+    if b == 0 { return eval_err("lir interp: divide by zero") }
+    eval_ok(a / b)
+}
+
+/**
+ * eval_rem — SIGNED integer remainder with a zero-divisor guard.
+ *
+ * @param a  the dividend
+ * @param b  the divisor
+ * @return   the remainder, or the honest stop for a zero divisor
+ */
+fn eval_rem(a: i64, b: i64) -> EvalOut {
+    if b == 0 { return eval_err("lir interp: remainder by zero") }
+    eval_ok(a % b)
+}
+
+/**
+ * eval_div_u — UNSIGNED integer division: both carrier values are reinterpreted as `u64`, divided
+ * there, and the quotient reinterpreted back. Distinct from `eval_div` for every operand with bit
+ * 63 set.
+ *
+ * @param a  the dividend's carrier value
+ * @param b  the divisor's carrier value
+ * @return   the unsigned quotient as a carrier value, or the honest stop for a zero divisor
+ */
+fn eval_div_u(a: i64, b: i64) -> EvalOut {
+    if b == 0 { return eval_err("lir interp: divide by zero") }
+    eval_ok(i64_of_u64_bits(u64_bits_of_i64(a) / u64_bits_of_i64(b)))
+}
+
+/**
+ * eval_rem_u — UNSIGNED integer remainder, the `eval_div_u` companion.
+ *
+ * @param a  the dividend's carrier value
+ * @param b  the divisor's carrier value
+ * @return   the unsigned remainder as a carrier value, or the honest stop for a zero divisor
+ */
+fn eval_rem_u(a: i64, b: i64) -> EvalOut {
+    if b == 0 { return eval_err("lir interp: remainder by zero") }
+    eval_ok(i64_of_u64_bits(u64_bits_of_i64(a) % u64_bits_of_i64(b)))
+}
+
+/** interp_un — an integer unary op: negate (INeg) or the numeric conversions, which the N1
+    interp treats as the identity over the i64 carrier (the fixtures cast between integer
+    widths that all fit the carrier; a real narrowing mask is N2 when narrow types run). A
+    float negation is out of the run subset. */
+fn interp_un(rf: RegFile, inst: LInst, u: LUn, mem: MemStore) -> IStep {
+    let a = rf_get(rf, u.a)
+    if !a.ok { return istep_stop(ires_error("lir interp: unary op on an undefined VReg"), rf, mem) }
+    let r = eval_un(u.op, a.value)
+    if !r.ok { return istep_stop(ires_error(r.message), rf, mem) }
+    istep_cont(rf_set(rf, inst.result, r.value), mem)
+}
+
+/** eval_un — the arithmetic of an integer LUnOp: INeg negates; INot is the bitwise
+    one's-complement (`~a`) over the carrier — exact for a signed operand and any non-negative
+    in-range value, with narrow-unsigned width masking deferred exactly as the cast identities
+    below defer it; ZExt/SExt/Trunc are the identity over the carrier (the fixtures' casts stay
+    within i64); a float unary honest-stops. */
+fn eval_un(op: LUnOp, a: i64) -> EvalOut {
+    match op {
+        INeg => eval_ok(-a)
+        INot => eval_ok(~a)
+        ZExt => eval_ok(a)
+        SExt => eval_ok(a)
+        Trunc => eval_ok(a)
+        _ => eval_err("lir interp: unary opcode is out of the N1 run subset (N2)")
+    }
+}
+
+/** interp_call_inst — a call: `tk_exit(n)` unwinds with exit code n; a Teko-Teko call
+    (found in the module) recurses (its memory effects flow back into `mem`); any other
+    runtime symbol honest-stops. */
+fn interp_call_inst(m: LModule, f: LFunc, inst: LInst, c: LCall, rf: RegFile, depth: u32, mem: MemStore) -> IStep {
+    let av = read_args(rf, c.args)
+    if !av.ok { return istep_stop(ires_error("lir interp: call arg is an undefined VReg"), rf, mem) }
+    if c.symbol == "tk_exit" { return interp_exit(av.values, rf, mem) }
+    let callee = find_lfunc(m, c.symbol)

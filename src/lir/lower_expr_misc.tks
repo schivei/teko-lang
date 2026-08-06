@@ -1,0 +1,203 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+ */
+fn native_builtin_symbol(last: str) -> str | null {
+    match builtin_io_symbol(last) { str as s => return s; null => { } }
+    match builtin_cov_symbol(last) { str as s => return s; null => { } }
+    builtin_arena_symbol(last)
+}
+
+/**
+ * call_symbol — the LIR symbol a direct call targets, decided by the callee's ORIGIN NAMESPACE and
+ * never by its bare name. An UNRESOLVED callee (`call_ns` empty — the checker found no declaration
+ * and fell through to `builtin_fn`) is the only one that may mean a builtin, and lowers to its
+ * runtime twin (`native_builtin_symbol`); an `extern fn` lowers to its declared FOREIGN symbol
+ * VERBATIM (C7.1a, resolved through `externs` — the same fact the C backend reads off
+ * `TFunction.is_extern`/`c_symbol`, and the reason `find_extern_symbol` is consulted BEFORE the
+ * mangler); any other Teko-Teko call lowers to the `teko_`-prefixed mangle of `call_ns::name`.
+ *
+ * Keying on the namespace is what makes the two families disjoint: before it, a user function whose
+ * bare name happened to match a builtin (`arena_push`, `one_byte`, …) was silently emitted as the
+ * RUNTIME symbol — it type-checked with the user's own arity and then never ran its own body.
+ *
+ * @param c        the checked call
+ * @param externs  the program's whole `extern fn` table
+ * @param flat     the static/shared-archive carve-out (`mangle_fn_symbol`'s `flat`): default
+ *                 `false`; a `flat` module's Teko-Teko call must resolve the SAME flat spelling
+ *                 the callee's own declaration uses (`LowerCtx.flat_symbols`, threaded in by the
+ *                 caller)
+ * @return         the symbol the LCall targets
+ * @throws         on an empty callee path, on a bare builtin the N1 subset does not lower yet, or
+ *                 on the generic `teko::list::*`/`teko::mem::push_fo` growth-builtin family
+ *                 (`is_list_builtin_call`) — it has no `.tks` declaration for `find_extern_symbol`/
+ *                 the mangler to resolve EITHER, so without this check it would silently fall
+ *                 through to `mangle_fn_symbol(c.call_ns, last, flat)` and target a symbol no
+ *                 function ever defines (a link-time failure at best). That family is now
+ *                 INTERCEPTED upstream by `lower_call_fat`/`lower_list_builtin`, which lowers it to
+ *                 the runtime's own grow entries, so this arm survives only as the backstop for a
+ *                 future caller that reaches the symbol resolver with one of them directly
+ *                 (list-builtin degrau; call-gordo degrau, #382 N2)
+ */
+fn call_symbol(c: checker::TCall, externs: []LExternFn, flat: bool = false) -> str | error {
+    let segs = c.callee.segments
+    if segs.len == 0 { return error { message = "native backend N1: empty call path (internal)" } }
+    let last = segs[segs.len - 1].name
+    if c.call_ns.len == 0 {
+        match assert_seed_symbol(c.callee) { str as s => return s; null => { } }
+        match native_builtin_symbol(last) { str as s => return s; null => { } }
+        if is_list_builtin_call(c.callee) {
+            return error { message = "native backend N1: the generic `teko::list::*`/`teko::mem::push_fo` growth builtin has no native runtime backing yet (N2)" }
+        }
+        if segs.len == 1 {
+            return error { message = teko::str::concat("native backend N1: builtin `", last, "` not yet lowered (N2)") }
+        }
+    }
+    match find_extern_symbol(externs, c.call_ns, last) {
+        str as foreign => foreign
+        null => mangle_fn_symbol(c.call_ns, last, flat)
+    }
+}
+
+/**
+ * is_list_builtin_call — recognizes a callee path shaped like the checker's OWN
+ * `teko::list::push`/`teko::list::empty`/`teko::mem::push_fo` GENERIC builtin family
+ * (`typer.tks`'s `type_list_builtin`, mirrored here since the checker leaves NO declaration
+ * behind for these — `call_ns` stays empty exactly like an `teko::assert::*`/io/cov/arena
+ * builtin, C7.1a's sibling gap). Recognized by the LAST TWO path segments (`list::push`/
+ * `list::empty`/`mem::push_fo`), rooted at `teko` (or bare `list::*`/`mem::push_fo`) — the SAME
+ * shape `type_list_builtin` matches, so the two families never disagree about which calls this
+ * one covers.
+ *
+ * @param callee  the call's callee path
+ * @return        true iff `callee` names one of the three list/mem growth builtins
+ */
+fn is_list_builtin_call(callee: parser::Path) -> bool {
+    let segs = callee.segments
+    if segs.len < 2 { return false }
+    let last = segs[segs.len - 1].name
+    let prev = segs[segs.len - 2].name
+    let is_pushfo = prev == "mem" && last == "push_fo"
+    if prev != "list" && !is_pushfo { return false }
+    segs.len == 2 || segs[0].name == "teko"
+}
+
+/**
+ * find_extern_symbol — the FOREIGN symbol declared by the `extern fn` named
+ * `ns::name`, or `null` when that callee is an ordinary Teko function (C7.1a).
+ * A linear scan mirrors the C backend's own `cg_find_function`: the table holds
+ * one entry per declared `extern`, a set small enough that an index would cost
+ * more than it saves.
+ *
+ * @param []LExternFn externs  the program's whole `extern fn` table
+ * @param str ns  the callee's resolved namespace (`TCall.call_ns`)
+ * @param str name  the callee's last path segment
+ * @return str | null  the declared C symbol, or `null` when no `extern`
+ *                     matches
+ */
+fn find_extern_symbol(externs: []LExternFn, ns: str, name: str) -> str | null {
+    mut i: u64 = 0
+    loop {
+        if i >= externs.len { break }
+        if externs[i].namespace == ns && externs[i].name == name { return externs[i].c_symbol }
+        i++
+    }
+    null
+}
+
+/**
+ * IfaceFatPtr — the two loaded halves of an interface receiver's fat
+ * pointer (§5.3: `{data@0, vtable@8}`): its object-data VReg (field 0, the
+ * value a dispatched method call rides as its own receiver arg) and its
+ * vtable-base VReg (field 1, the address `lower_iface_slot` indexes).
+ *
+ * @since #382 A1-6
+ */
+pub type IfaceFatPtr = struct { ctx: LowerCtx; data: u32; vtable: u32 }
+
+/**
+ * lower_iface_fatptr — load both halves of an interface receiver's fat
+ * pointer at address `base`: the object-data pointer (offset 0) and the
+ * vtable-base pointer (offset `ptr-size`) — mirrors the C backend's
+ * `{ .data = …, .vtable = tk_vt_<Class>_<Iface> }` layout (`codegen.tks:
+ * 4088-4116`) (A1-6, #382).
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param u32 base  the receiver's fat-pointer address (a Ptr VReg)
+ * @param u32 line  the source line (propagated onto the emitted insts)
+ * @param u32 col  the source column (propagated onto the emitted insts)
+ * @return IfaceFatPtr  the advanced context + the loaded data/vtable VRegs
+ */
+fn lower_iface_fatptr(ctx: LowerCtx, base: u32, line: u32, col: u32) -> IfaceFatPtr {
+    let ptr_size = ltype_size(LType::Ptr)
+    let data_addr = ctx_alloc(ctx)
+    let with_data_addr = ctx_append(data_addr.ctx, field_addr_inst(data_addr.vreg, base, 0, line, col))
+    let data = ctx_alloc(with_data_addr)
+    let with_data = ctx_append(data.ctx, load_inst(data.vreg, data_addr.vreg, LType::Ptr, line, col))
+    let vt_addr = ctx_alloc(with_data)
+    let with_vt_addr = ctx_append(vt_addr.ctx, field_addr_inst(vt_addr.vreg, base, ptr_size, line, col))
+    let vt = ctx_alloc(with_vt_addr)
+    let with_vt = ctx_append(vt.ctx, load_inst(vt.vreg, vt_addr.vreg, LType::Ptr, line, col))
+    IfaceFatPtr { ctx = with_vt; data = data.vreg; vtable = vt.vreg }
+}
+
+/**
+ * lower_iface_slot — load the target function address out of `vtable`'s
+ * slot `slot`: `field_addr` at byte offset `slot * ptr-size`, then `load.ptr`
+ * — mirrors the C backend's `value.vtable[slot]` (`codegen.tks:2098-2100`)
+ * (A1-6, #382).
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param u32 vtable  the vtable-base VReg (`lower_iface_fatptr`'s result)
+ * @param u32 slot  the method's vtable slot (`TCall.iface_slot`)
+ * @param u32 line  the source line (propagated onto the emitted insts)
+ * @param u32 col  the source column (propagated onto the emitted insts)
+ * @return Lowered  the advanced context + the loaded target-function VReg
+ */
+fn lower_iface_slot(ctx: LowerCtx, vtable: u32, slot: u32, line: u32, col: u32) -> Lowered {
+    let ptr_size = ltype_size(LType::Ptr)
+    let slot_addr = ctx_alloc(ctx)
+    let with_slot_addr = ctx_append(slot_addr.ctx, field_addr_inst(slot_addr.vreg, vtable, slot * ptr_size, line, col))
+    let target = ctx_alloc(with_slot_addr)
+    Lowered { ctx = ctx_append(target.ctx, load_inst(target.vreg, slot_addr.vreg, LType::Ptr, line, col)); vreg = target.vreg }
+}
+
+/**
+ * iface_call_args — the indirect-call argument list: `data` prepended to
+ * `rest`, in order — mirrors the C backend's `value.data, args…`
+ * (`codegen.tks:2101-2109`).
+ *
+ * @param u32 data  the receiver's object-data VReg (goes first)
+ * @param []u32 rest  the remaining (already-lowered) argument VRegs
+ * @return []u32  `data` followed by `rest`, in order
+ *
+ * @since #382 A1-6
+ */
+fn iface_call_args(data: u32, rest: []u32) -> []u32 {
+    mut out: []u32 = teko::list::push(teko::list::empty(), data)
+    mut i: u64 = 0
+    loop {
+        if i >= rest.len { break }
+        out = teko::list::push(out, rest[i])
+        i++
+    }
+    out
+}
+
+/**
+ * lower_call_indirect — emit the `LCallIndirect` for a resolved target +
+ * argument list. A void-returning call emits a valueless instruction and
+ * returns a dummy VReg the caller must not read; a value call allocates a
+ * result VReg (mirrors `lower_call_symbol`).
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param checker::TExpr e  the call expression (for its type + source
+ *                          position)
+ * @param u32 target  the VReg holding the resolved callee's address
+ * @param []u32 args  the (already-lowered) argument VRegs, in order
+ * @return Lowered | error  the advanced context + the call's result VReg (0
+ *                          for a void call)
+ *
+ * @since #382 A1-6
+ */
+fn lower_call_indirect(ctx: LowerCtx, e: checker::TExpr, target: u32, args: []u32) -> Lowered | error {

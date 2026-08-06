@@ -1,0 +1,202 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+
+/**
+ * lower_match_subject — lower `subject` ONCE: a `str`/`[]T`-typed subject
+ * through the FAT path (ptr+len, for a string arm's byte-compare); every other
+ * subject through the plain scalar/address path (an enum's ordinal, a variant's
+ * base address, a plain integer, ...) (A1-5, #382).
+ *
+ * @param LowerCtx ctx  the lowering context to append the subject's
+ *                      instructions into
+ * @param checker::TExpr subject  the match's typed subject expression
+ * @return MatchSubjOut  the advanced context + the subject descriptor every arm
+ *                       reads
+ * @throws  when the subject expression itself fails to lower (propagated)
+ */
+fn lower_match_subject(ctx: LowerCtx, subject: checker::TExpr) -> MatchSubjOut | error {
+    if is_fat_type(subject.type) {
+        let fo = match lower_fat_expr(ctx, subject) { LoweredFat as x => x; error as err => return err }
+        return MatchSubjOut { ctx = fo.ctx; subj = MatchSubj { ty = subject.type; vreg = fo.ptr; is_fat = true; len = fo.len } }
+    }
+    let lo = match lower_expr(ctx, subject) { Lowered as x => x; error as err => return err }
+    MatchSubjOut { ctx = lo.ctx; subj = MatchSubj { ty = subject.type; vreg = lo.vreg; is_fat = false; len = 0 } }
+}
+
+/**
+ * VariantMember — one member of an inline `checker::Variant` subject resolved
+ * BY NAME: its declared INDEX (the runtime tag a variant-tag arm compares
+ * against) + its own Type (a `match` binding loads the payload at this Type's
+ * machine class) (A1-5, #382).
+ */
+type VariantMember = struct { index: u32; ty: checker::Type }
+
+/**
+ * find_variant_member — the member of `members` whose CASE NAME is
+ * `case_name`, or a NAMED internal error (every other non-nominal member —
+ * prim/str/byte/slice/... — is not a case A1-5 selects by name; A1-6+ widens
+ * this) (A1-5, #382). A `Named` member's case name is its CANONICAL name's
+ * last path segment (`checker::resolve`'s "ns::Name" convention, #109 W3 —
+ * mirrors the checker's OWN `variant_member_by_name`), while `error`'s is the
+ * literal keyword — the ONLY spelling `error` ever reaches a match pattern
+ * under (`variant_member_named`). `case_name` itself is always the pattern's
+ * BARE last segment, so a Named member's FULL canonical name compared
+ * verbatim would reject every namespaced case, and `checker::Error`'s own
+ * `_`-arm miss would reject the built-in error case outright — both are the
+ * gap `examples/smoke/uniontest`'s `Box | error` match exposed once the
+ * earlier construction-site honest-stop stopped masking it (degrau N2).
+ *
+ * @param []checker::Type members  the variant subject's declared members, in
+ *                                 order
+ * @param str case_name  the pattern's case name (a bind/field pattern's last
+ *                       path segment, or the literal `error`)
+ * @return VariantMember  the matching member's declared index + its own Type
+ * @throws  when no member of `members` is named `case_name` (an internal
+ *          invariant break)
+ */
+fn find_variant_member(members: []checker::Type, case_name: str) -> VariantMember | error {
+    mut i: u64 = 0
+    loop {
+        if i >= members.len { break }
+        if variant_member_named(members[i], case_name) { return VariantMember { index = i to u32; ty = members[i] } }
+        i++
+    }
+    error { message = teko::str::concat("native backend N1: unknown variant case `", case_name, "` (internal)") }
+}
+
+/**
+ * variant_member_named — does variant member `member` carry the case name
+ * `case_name`? A `Named` member matches by its CANONICAL name's last path
+ * segment (`checker::name_last_segment`, #109 W3); the built-in `error`
+ * member matches the literal keyword `"error"` (its ONE surface spelling —
+ * `error_struct_name`'s doc); every other non-nominal member (a primitive,
+ * `str`, `byte`, a slice) is not a case A1-5 selects by name (degrau N2).
+ *
+ * @param checker::Type member  one of the variant's declared members
+ * @param str case_name  the pattern's case name to test against
+ * @return bool  whether `member` is the case `case_name` names
+ */
+fn variant_member_named(member: checker::Type, case_name: str) -> bool {
+    match member {
+        checker::Named as n => checker::name_last_segment(n.name) == case_name
+        checker::Error => case_name == error_struct_name()
+        _ => false
+    }
+}
+
+/**
+ * variant_member_index_of — the index of `members` whose type is `value_ty`: the BY-TYPE
+ * counterpart of `find_variant_member`'s BY-NAME lookup, used at CONSTRUCTION (a bare value
+ * flowing into a declared variant slot has no case NAME to match by, only its own resolved
+ * type — `lower_variant_construct`'s doc). Matches a `Named` member by name (mirrors
+ * `find_variant_member`) and every other member kind (`error`, a primitive, `str`, `byte`, a
+ * slice) by its own KIND (`variant_member_type_matches`) — the same NAMED-vs-non-nominal split
+ * the checker's own `variant_covered` uses to decide coverage (#382, degrau N2).
+ *
+ * @param []checker::Type members  the variant's declared members, in order
+ * @param checker::Type value_ty  the value's own resolved type
+ * @return u32  the matching member's declared index
+ * @throws  when no member of `members` matches `value_ty` (an internal invariant break — the
+ *          checker already guarantees an assignable value names some member)
+ */
+fn variant_member_index_of(members: []checker::Type, value_ty: checker::Type) -> u32 | error {
+    mut i: u64 = 0
+    loop {
+        if i >= members.len { break }
+        if variant_member_type_matches(members[i], value_ty) { return i to u32 }
+        i++
+    }
+    error { message = "native backend N1: value's type is not a member of its declared variant (internal)" }
+}
+
+/**
+ * variant_member_type_matches — does variant member `member` match a value of type `value_ty`?
+ * A `Named` member matches by canonical NAME (two structurally-equal-but-differently-named
+ * types are DIFFERENT cases); every other member kind matches by its own KIND alone — the non-
+ * nominal cases this backend's A1-5+ subset constructs (`error`, a primitive/`byte`/`str`/slice)
+ * carry no further per-case identity beyond their kind (#382, degrau N2).
+ *
+ * @param checker::Type member  one of the variant's declared members
+ * @param checker::Type value_ty  the value's own resolved type
+ * @return bool  whether `member` is the case `value_ty` belongs to
+ */
+fn variant_member_type_matches(member: checker::Type, value_ty: checker::Type) -> bool {
+    match member {
+        checker::Named as mn => match value_ty { checker::Named as vn => mn.name == vn.name; _ => false }
+        checker::Error => match value_ty { checker::Error => true; _ => false }
+        checker::Prim as mp => match value_ty { checker::Prim as vp => mp.kind == vp.kind; _ => false }
+        checker::Str => match value_ty { checker::Str => true; _ => false }
+        checker::Byte => match value_ty { checker::Byte => true; _ => false }
+        checker::Slice => match value_ty { checker::Slice => true; _ => false }
+        _ => false
+    }
+}
+
+/**
+ * null_union_payload — for a two-member absence union `{ null, X }` (the resolver's
+ * null-first canonical order, `checker::resolve.union_normalize_null`), the payload type `X`;
+ * `null` for any other member-list shape (more/fewer members, or no leading `Null`). The own
+ * backend has no niche/box optimization dial (unlike the C backend's `cg_union_niche_member`/
+ * `cg_union_box_member`, #382 predates the null-union pivot) — EVERY null-bearing two-member
+ * union uses ONE uniform tag(I32)@0 + payload@8 wrapper, the shape `lower_variant_case_test`/
+ * `lower_variant_case_bind` already read. Because the union has exactly one non-null member,
+ * a null-union arm never needs a BY-NAME case lookup: `null` is always tag 0, `X` is always
+ * tag 1.
+ *
+ * ORDER-INSENSITIVE by construction: the resolver canonicalizes null-first at every union
+ * construction site (`resolve.union_normalize_null`, called from `resolve_type` AND from
+ * `type_join`), so `members[0]` IS the `Null` in every union this backend can be handed today.
+ * This function nevertheless accepts either order — a classifier that answers "not a null union"
+ * for a union that IS one degrades into a false honest-stop (the exact defect the `type_join`
+ * normalization fixed), and the two-member check above already bounds the search.
+ *
+ * @param checker::Variant v  the resolved union type to classify
+ * @return checker::Type?  the sole non-null member, or `null` when `v` is not a two-member
+ *                         union with exactly one `Null` member
+ * @since 0.3.1 (null-union C7 own-backend gap — wasm_panic_hook)
+ */
+fn null_union_payload(v: checker::Variant) -> checker::Type | null {
+    if v.members.len != 2 { return null }
+    match v.members[0] {
+        checker::Null => match v.members[1] { checker::Null => null; _ => v.members[1] }
+        _ => match v.members[1] { checker::Null => v.members[0]; _ => null }
+    }
+}
+
+/**
+ * lower_variant_tag_eq_test — `subj.tag == index`: load the tag (field 0, `I32`) off the
+ * subject's base address, then compare against `index` — the shared test both a NAMED-case
+ * lookup (`lower_variant_case_test`) and a fixed-index null-union arm (`lower_null_pattern_test`,
+ * `lower_bind_pattern_test`'s null-union branch) reduce to (the variant runtime image is
+ * tag@0 + payload@8, per the plan's §5.3).
+ *
+ * @param LowerCtx ctx  the lowering context to append the test's instructions into
+ * @param MatchSubj subj  the match's already-lowered (base-address) subject
+ * @param i64 index  the tag value to compare the subject against
+ * @param u32 line  the source line to stamp the emitted instructions with
+ * @param u32 col  the source column to stamp the emitted instructions with
+ * @return PatternTest  the computed tag-equality test
+ */
+fn lower_variant_tag_eq_test(ctx: LowerCtx, subj: MatchSubj, index: i64, line: u32, col: u32) -> PatternTest {
+    let addr = ctx_alloc(ctx)
+    let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, subj.vreg, 0, line, col))
+    let tagr = ctx_alloc(with_addr)
+    let with_tag = ctx_append(tagr.ctx, load_inst(tagr.vreg, addr.vreg, LType::I32, line, col))
+    let cr = ctx_alloc(with_tag)
+    let with_const = ctx_append(cr.ctx, const_int_inst(cr.vreg, index, line, col))
+    let eqr = ctx_alloc(with_const)
+    PatternTest { ctx = ctx_append(eqr.ctx, bin_inst(eqr.vreg, LBinOp::ICmpEq, tagr.vreg, cr.vreg, line, col)); always = false; vreg = eqr.vreg }
+}
+
+/**
+ * bind_payload_at8 — load the case payload at the variant's fixed offset 8, of machine class
+ * `ty`, and bind it to `binding` — the shared load both a NAMED-case bind
+ * (`lower_variant_case_bind`) and a fixed-index null-union payload bind
+ * (`bind_null_union_payload`) reduce to.
+ *
+ * @param LowerCtx ctx  the lowering context to append the load's instructions into
+ * @param u32 base  the subject's base-address VReg
+ * @param LType ty  the payload's machine class
+ * @param str binding  the name to bind the loaded payload to
+ * @return LowerCtx  the context with `binding` bound to the loaded payload

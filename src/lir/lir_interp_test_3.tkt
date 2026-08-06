@@ -1,0 +1,282 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+    let nextb = alloc_block(f)
+    f = nextb.func
+    f = append_inst(f, 0, branch_inst(tagtest.vreg, armb.block_id, teko::list::empty(), nextb.block_id, teko::list::empty(), 0, 0))
+    let payaddr2 = alloc_vreg(f)
+    f = payaddr2.func
+    f = append_inst(f, armb.block_id, field_addr_inst(payaddr2.vreg, v.vreg, 8, 0, 0))
+    let payptr = alloc_vreg(f)
+    f = payptr.func
+    f = append_inst(f, armb.block_id, load_inst(payptr.vreg, payaddr2.vreg, LType::Ptr, 0, 0))
+    let fieldaddr = alloc_vreg(f)
+    f = fieldaddr.func
+    f = append_inst(f, armb.block_id, field_addr_inst(fieldaddr.vreg, payptr.vreg, 0, 0, 0))
+    let radius = alloc_vreg(f)
+    f = radius.func
+    f = append_inst(f, armb.block_id, load_inst(radius.vreg, fieldaddr.vreg, LType::I64, 0, 0))
+    let eargs = teko::list::push(teko::list::empty(), radius.vreg)
+    f = append_inst(f, armb.block_id, void_call_inst("tk_exit", eargs, false, 0, 0))
+    let deadz = alloc_vreg(f)
+    f = deadz.func
+    f = append_inst(f, armb.block_id, const_int_inst(deadz.vreg, iwt_i64(0), 0, 0))
+    f = append_inst(f, armb.block_id, ret_inst(deadz.vreg, 0, 0))
+    f = iwt_exit_const(f, nextb.block_id, 0)
+    add_func(empty_module(), f)
+}
+
+#test
+fn iwt_f18_match_variant_payload_returns_the_bound_field() {
+    teko::assert::is_true(interp_lmodule(iwt_variant_payload_exit(), "main", iwt_no_args()) == iwt_i64(42))
+}
+
+/**
+ * iwt_iface_impl_fn — one interface implementation: `func @<symbol>(%0) { ret
+ * <code> }` — its single param stands in for the vtable-dispatch `data`
+ * receiver word, ignored, so each impl just returns its OWN distinct code
+ * (A1-6, #382).
+ *
+ * @param str symbol  the implementation's already-mangled function symbol
+ * @param i64 code  the value it returns
+ * @return LFunc  the hand-built single-block function
+ */
+fn iwt_iface_impl_fn(symbol: str, code: i64) -> LFunc {
+    mut f = new_func(symbol, 1, teko::list::push(teko::list::empty(), LType::Ptr), LType::I64)
+    let r = alloc_vreg(f)
+    f = r.func
+    f = append_inst(f, 0, const_int_inst(r.vreg, iwt_i64(code), 0, 0))
+    append_inst(f, 0, ret_inst(r.vreg, 0, 0))
+}
+
+/**
+ * iwt_iface_vtable — a one-slot vtable: an 8-byte alloca whose slot 0 holds
+ * the SYNTHETIC address of `impl_symbol` (`func_slot_addr`) — the memory
+ * shape `lower_iface_slot` indexes at `field_addr %vtable, 0` (A1-6, #382).
+ *
+ * @param LFunc f0  the function to append the vtable-build into
+ * @param LModule m  the module (`impl_symbol` must already be registered in
+ *                    its `funcs`, so its synthetic address resolves)
+ * @param str impl_symbol  the implementation function this vtable's slot 0
+ *                         dispatches to
+ * @return FreshVReg | error  the advanced function + the vtable's base
+ *                            address VReg, or a NAMED error when
+ *                            `impl_symbol` is unregistered
+ */
+fn iwt_iface_vtable(f0: LFunc, m: LModule, impl_symbol: str) -> FreshVReg | error {
+    let addr = match func_slot_addr(m, impl_symbol) { i64 as a => a; error as err => return err }
+    let vt = alloc_vreg(f0)
+    mut f = vt.func
+    f = append_inst(f, 0, alloca_inst(vt.vreg, 8, 8, 0, 0))
+    let c = alloc_vreg(f)
+    f = c.func
+    f = append_inst(f, 0, const_int_inst(c.vreg, addr, 0, 0))
+    f = append_inst(f, 0, store_inst(vt.vreg, c.vreg, LType::Ptr, 0, 0))
+    FreshVReg { func = f; vreg = vt.vreg }
+}
+
+/**
+ * iwt_iface_receiver — a two-word `{data@0, vtable@8}` fat pointer: an
+ * alloca'd 16-byte slot storing a dummy `data` word + the given `vtable`
+ * address — the shape `lower_iface_fatptr` reads (A1-6, #382).
+ *
+ * @param LFunc f0  the function to append the receiver-build into
+ * @param u32 vtable  the vtable's base address VReg (`iwt_iface_vtable`'s
+ *                    result)
+ * @return FreshVReg  the advanced function + the receiver's base address
+ *                     VReg
+ */
+fn iwt_iface_receiver(f0: LFunc, vtable: u32) -> FreshVReg {
+    let recv = alloc_vreg(f0)
+    mut f = recv.func
+    f = append_inst(f, 0, alloca_inst(recv.vreg, 16, 8, 0, 0))
+    f = iwt_alloc_field(f, recv.vreg, 0, 99)
+    let addr = alloc_vreg(f)
+    f = addr.func
+    f = append_inst(f, 0, field_addr_inst(addr.vreg, recv.vreg, 8, 0, 0))
+    f = append_inst(f, 0, store_inst(addr.vreg, vtable, LType::Ptr, 0, 0))
+    FreshVReg { func = f; vreg = recv.vreg }
+}
+
+/**
+ * iwt_iface_dispatch_exit — F19: `exit(recv.speak())`, hand-built exactly as
+ * `lower_iface_call` would emit it — load the receiver's `data`/`vtable`
+ * halves, index the vtable at slot 0, `call.indirect` through the resolved
+ * target with `data` as its sole arg, `exit` the result. Two impls
+ * (`teko__demo__speak_a` / `_b`) each own vtable, so picking the OTHER
+ * receiver dispatches to the OTHER impl — proves `LCallIndirect` resolves a
+ * DIFFERENT concrete function per receiver, not a fixed target (A1-6, #382).
+ *
+ * @param bool pick_b  dispatch through the `b`-impl receiver instead of `a`
+ * @return LModule | error  the hand-built two-impl module, or a NAMED error
+ *                          when the vtable-build's symbol lookup fails
+ */
+fn iwt_iface_dispatch_exit(pick_b: bool) -> LModule | error {
+    mut m = add_func(empty_module(), iwt_iface_impl_fn("teko__demo__speak_a", 11))
+    m = add_func(m, iwt_iface_impl_fn("teko__demo__speak_b", 22))
+    mut f = new_func("main", 0, teko::list::empty(), LType::I32)
+    let vta = match iwt_iface_vtable(f, m, "teko__demo__speak_a") { FreshVReg as x => x; error as err => return err }
+    f = vta.func
+    let vtb = match iwt_iface_vtable(f, m, "teko__demo__speak_b") { FreshVReg as x => x; error as err => return err }
+    f = vtb.func
+    let recva = iwt_iface_receiver(f, vta.vreg)
+    f = recva.func
+    let recvb = iwt_iface_receiver(f, vtb.vreg)
+    f = recvb.func
+    let recv = if pick_b { recvb.vreg } else { recva.vreg }
+    let dataaddr = alloc_vreg(f)
+    f = dataaddr.func
+    f = append_inst(f, 0, field_addr_inst(dataaddr.vreg, recv, 0, 0, 0))
+    let data = alloc_vreg(f)
+    f = data.func
+    f = append_inst(f, 0, load_inst(data.vreg, dataaddr.vreg, LType::Ptr, 0, 0))
+    let vtaddr = alloc_vreg(f)
+    f = vtaddr.func
+    f = append_inst(f, 0, field_addr_inst(vtaddr.vreg, recv, 8, 0, 0))
+    let vt = alloc_vreg(f)
+    f = vt.func
+    f = append_inst(f, 0, load_inst(vt.vreg, vtaddr.vreg, LType::Ptr, 0, 0))
+    let slotaddr = alloc_vreg(f)
+    f = slotaddr.func
+    f = append_inst(f, 0, field_addr_inst(slotaddr.vreg, vt.vreg, 0, 0, 0))
+    let target = alloc_vreg(f)
+    f = target.func
+    f = append_inst(f, 0, load_inst(target.vreg, slotaddr.vreg, LType::Ptr, 0, 0))
+    let cargs = teko::list::push(teko::list::empty(), data.vreg)
+    let result = alloc_vreg(f)
+    f = result.func
+    f = append_inst(f, 0, call_indirect_inst(result.vreg, target.vreg, cargs, false, 0, 0))
+    let eargs = teko::list::push(teko::list::empty(), result.vreg)
+    f = append_inst(f, 0, void_call_inst("tk_exit", eargs, false, 0, 0))
+    let z = alloc_vreg(f)
+    f = z.func
+    f = append_inst(f, 0, const_int_inst(z.vreg, iwt_i64(0), 0, 0))
+    f = append_inst(f, 0, ret_inst(z.vreg, 0, 0))
+    add_func(m, f)
+}
+
+#test
+fn iwt_f19_iface_dispatch_picks_the_a_impl() {
+    let m = match iwt_iface_dispatch_exit(false) { LModule as x => x; error => return }
+    teko::assert::is_true(interp_lmodule(m, "main", iwt_no_args()) == iwt_i64(11))
+}
+
+#test
+fn iwt_f19_iface_dispatch_picks_the_b_impl() {
+    let m = match iwt_iface_dispatch_exit(true) { LModule as x => x; error => return }
+    teko::assert::is_true(interp_lmodule(m, "main", iwt_no_args()) == iwt_i64(22))
+}
+
+/**
+ * iwt_store_ptr_field — store `value` (a Ptr VReg) at `base + offset`
+ * (A1-7, #382 — the Ptr-typed counterpart of `iwt_alloc_field`, which stores
+ * an I64).
+ *
+ * @param LFunc f0  the function to append the store into
+ * @param u32 base  the aggregate's base address VReg
+ * @param u32 offset  the byte offset to store at
+ * @param u32 value  the Ptr VReg to store
+ * @return LFunc  the advanced function
+ */
+fn iwt_store_ptr_field(f0: LFunc, base: u32, offset: u32, value: u32) -> LFunc {
+    let a = alloc_vreg(f0)
+    let f1 = append_inst(a.func, 0, field_addr_inst(a.vreg, base, offset, 0, 0))
+    append_inst(f1, 0, store_inst(a.vreg, value, LType::Ptr, 0, 0))
+}
+
+/**
+ * iwt_load_ptr_field — load the Ptr value at `base + offset` into a fresh
+ * VReg (A1-7, #382 — the Ptr-typed counterpart of `iwt_load_field`, which
+ * loads an I64).
+ *
+ * @param LFunc f0  the function to append the load into
+ * @param u32 base  the aggregate's base address VReg
+ * @param u32 offset  the byte offset to load from
+ * @return FreshVReg  the advanced function + the loaded value's VReg
+ */
+fn iwt_load_ptr_field(f0: LFunc, base: u32, offset: u32) -> FreshVReg {
+    let a = alloc_vreg(f0)
+    let f1 = a.func
+    let l = alloc_vreg(f1)
+    let f2 = append_inst(l.func, 0, field_addr_inst(a.vreg, base, offset, 0, 0))
+    FreshVReg { func = append_inst(f2, 0, load_inst(l.vreg, a.vreg, LType::Ptr, 0, 0)); vreg = l.vreg }
+}
+
+/**
+ * iwt_build_closure — alloca a 16-byte `{fn@0, env@8}` closure struct
+ * (§5.3) storing `fn_addr`/`env_val`, returning its base address VReg — the
+ * memory shape `build_closure_literal`/`lower_closure_fatptr` share (A1-7,
+ * #382).
+ *
+ * @param LFunc f0  the function to append the closure build into
+ * @param u32 fn_addr  the callable's `LFuncAddr`-resolved VReg
+ * @param u32 env_val  the closure's env VReg (0 for a non-capturing closure)
+ * @return FreshVReg  the advanced function + the closure struct's base
+ *                     address
+ */
+fn iwt_build_closure(f0: LFunc, fn_addr: u32, env_val: u32) -> FreshVReg {
+    let base = alloc_vreg(f0)
+    mut f = base.func
+    f = append_inst(f, 0, alloca_inst(base.vreg, 16, 8, 0, 0))
+    f = iwt_store_ptr_field(f, base.vreg, 0, fn_addr)
+    f = iwt_store_ptr_field(f, base.vreg, 8, env_val)
+    FreshVReg { func = f; vreg = base.vreg }
+}
+
+/** ClosureLoad — the advanced function + a closure struct's loaded `{fn,
+    env}` halves (A1-7, #382 — mirrors `iwt_iface_receiver`'s data/vtable
+    pair, renamed for a closure's own fields). */
+type ClosureLoad = struct { func: LFunc; target: u32; env: u32 }
+
+/**
+ * iwt_load_closure — load both halves of a closure struct at `base` (A1-7,
+ * #382).
+ *
+ * @param LFunc f0  the function to append the loads into
+ * @param u32 base  the closure struct's base address VReg
+ * @return ClosureLoad  the advanced function + the loaded target/env VRegs
+ */
+fn iwt_load_closure(f0: LFunc, base: u32) -> ClosureLoad {
+    let t = iwt_load_ptr_field(f0, base, 0)
+    let e = iwt_load_ptr_field(t.func, base, 8)
+    ClosureLoad { func = e.func; target = t.vreg; env = e.vreg }
+}
+
+/**
+ * iwt_thunk_fn — a hand-built ENV-FIRST thunk wrapping `target_symbol`
+ * (A1-7, #382): `func @thunk_symbol(%0: ptr, %1: i64, %2: i64) -> i64 { %3 =
+ * call @target_symbol(%1, %2); ret %3 }` — ignores %0 (env), forwards the
+ * rest — mirrors `lower_var`'s fn-as-value thunk (`build_closure_thunk`).
+ *
+ * @param str thunk_symbol  the thunk's own symbol
+ * @param str target_symbol  the wrapped function's symbol
+ * @return LFunc  the built thunk
+ */
+fn iwt_thunk_fn(thunk_symbol: str, target_symbol: str) -> LFunc {
+    let ptypes = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), LType::Ptr), LType::I64), LType::I64)
+    mut f = new_func(thunk_symbol, 3, ptypes, LType::I64)
+    f = append_inst(f, 0, param_inst(0, 0, 0, 0))
+    f = append_inst(f, 0, param_inst(1, 1, 0, 0))
+    f = append_inst(f, 0, param_inst(2, 2, 0, 0))
+    let cargs = teko::list::push(teko::list::push(teko::list::empty(), 1 to u32), 2 to u32)
+    let r = alloc_vreg(f)
+    f = r.func
+    f = append_inst(f, 0, call_inst(r.vreg, target_symbol, cargs, false, 0, 0))
+    append_inst(f, 0, ret_inst(r.vreg, 0, 0))
+}
+
+/**
+ * iwt_fn_value_exit — F20: `let f = add; exit(f(2,3))`, hand-built exactly
+ * as `lower_var`'s fn-as-value arm + `lower_closure_call` would emit it: a
+ * closure literal `{fn=funcaddr @thunk, env=0}` calling THROUGH an env-first
+ * thunk that forwards to `teko__demo__add` — proves the `LFuncAddr` op
+ * resolves through `func_slot_addr`/`resolve_func_addr` (A1-7, #382).
+ *
+ * @return LModule  the hand-built module (`add` + its thunk + `main`)
+ */
+fn iwt_fn_value_exit() -> LModule {
+    mut m = add_func(empty_module(), iwt_add_fn())
+    m = add_func(m, iwt_thunk_fn("teko__demo__add_thunk", "teko__demo__add"))
+    mut f = new_func("main", 0, teko::list::empty(), LType::I32)
+    let fnaddr = alloc_vreg(f)
+    f = fnaddr.func

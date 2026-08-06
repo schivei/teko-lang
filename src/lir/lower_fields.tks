@@ -1,0 +1,203 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+ * a PAIR, and rebinding only the pointer half — which is what the scalar path did, since
+ * `lenv_reassign` refuses to rewrite a fat binding in place — silently kept the OLD length, so
+ * `loop { xs = teko::list::push(xs, …) }` read back its original length forever (list-builtin
+ * degrau).
+ *
+ * @param LowerCtx ctx  the lowering context to append the assignment's instructions into
+ * @param checker::TAssign a  the typed assignment (kind `Simple`)
+ * @return LowerStmtOut | error  the context with the name re-bound, or an honest stop
+ * @throws  when the name is unbound, the compound operator/type has no LIR op, or propagated
+ *          from lowering the value
+ */
+fn lower_assign_simple(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
+    if is_fat_type(a.bound) { return lower_assign_fat(ctx, a) }
+    if a.op == lexer::TokenKind::Assign {
+        let vo = match lower_value_into_type(ctx, a.bound, a.value) { Lowered as x => x; error as err => return err }
+        return LowerStmtOut { ctx = ctx_reassign(vo.ctx, a.name, vo.vreg); terminated = false }
+    }
+    let cur = lenv_lookup(ctx.env, a.name)
+    if !cur.found { return error { message = teko::str::concat("native backend N1: unbound local `", a.name, "` (internal)") } }
+    let vo = match lower_expr(ctx, a.value) { Lowered as x => x; error as err => return err }
+    let k = match prim_kind_of(a.bound, ctx.enums, "range bound") { checker::PrimKind as p => p; error as err => return err }
+    let plain = match plain_op_of_compound(a.op) { lexer::TokenKind as t => t; error as err => return err }
+    let op = match lbinop_of(plain, k) { LBinOp as o => o; error as err => return err }
+    let r = ctx_alloc(vo.ctx)
+    let inst = bin_inst(r.vreg, op, cur.vreg, vo.vreg, a.value.line, a.value.col)
+    LowerStmtOut { ctx = ctx_reassign(ctx_append(r.ctx, inst), a.name, r.vreg); terminated = false }
+}
+
+/**
+ * lower_assign_fat — `name = e` where `name` is a str/slice local: lower the value through the FAT
+ * path and store BOTH halves into the local's frame slot, so every later read (in this block, in
+ * the next loop iteration, after the enclosing `if`) sees the new pointer AND the new length.
+ *
+ * A fat target that is not slot-bound honest-stops by name: a fat PARAMETER and an immutable `let`
+ * both live in a VReg pair that no merge threads, so writing one would produce exactly the stale
+ * length this function exists to remove. Only `mut` locals (`bind_mutable_fat`) are assignable
+ * targets in Teko, so the stop is unreachable from well-typed source and stands as an invariant
+ * guard (list-builtin degrau).
+ *
+ * @param ctx  the lowering context
+ * @param a    the typed assignment (kind `Simple`, a str/slice `bound`)
+ * @return     the context with both halves stored
+ * @throws     for a compound `op=` on a fat local (no arithmetic operator applies to a slice), for
+ *             a non-slot fat target, or propagated from lowering the value
+ */
+fn lower_assign_fat(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
+    if a.op != lexer::TokenKind::Assign {
+        return error { message = teko::str::concat("native backend N1: compound assignment to the str/slice local `", a.name, "` has no arithmetic form (internal)") }
+    }
+    let slot = lenv_lookup_fat_slot(ctx.env, a.name)
+    if !slot.found {
+        return error { message = teko::str::concat("native backend N1: `", a.name, "` is assigned but is not a mutable fat local (internal)") }
+    }
+    let fo = match lower_fat_expr(ctx, a.value) { LoweredFat as x => x; error as err => return err }
+    LowerStmtOut { ctx = store_fat_slot(fo.ctx, slot.slot, fo, a.value.line, a.value.col); terminated = false }
+}
+
+/** lower_assign_field — `recv.field = e` / `recv.field op= e`: lower the receiver to its
+    base address, compute the field's address via its registered layout offset, then store
+    (a compound op first loads the current value, applies it, then stores the result). */
+fn lower_assign_field(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
+    let fa = match a.target.kind { checker::TFieldAccess as f => f; _ => return error { message = "native backend N1: field-assignment target is not a field access (internal)" } }
+    let ro = match lower_expr(ctx, fa.receiver) { Lowered as x => x; error as err => return err }
+    let name = match named_type_name(fa.receiver.type) { str as s => s; error as err => return err }
+    let layout = match find_struct_layout(ro.ctx.layouts, name) { LStructLayout as l => l; error as err => return err }
+    let off = match field_offset_of(layout, fa.field) { u32 as o => o; error as err => return err }
+    let addr = ctx_alloc(ro.ctx)
+    let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, ro.vreg, off, a.target.line, a.target.col))
+    store_assign_value(with_addr, addr.vreg, ltype_of(a.bound, ro.ctx.enums), a)
+}
+
+/**
+ * store_assign_value — the shared tail of a field assignment: a plain `=` stores the lowered RHS
+ * directly (coerced into the field's DECLARED type first, `lower_value_into_type` — a `T | null`
+ * field stores the wrapper's address, never a bare payload); a compound op loads the CURRENT field
+ * value first, applies the arithmetic, then stores the result.
+ *
+ * @param LowerCtx ctx  the lowering context to append the store's instructions into
+ * @param u32 addr  the already-computed field address VReg
+ * @param LType field_ty  the field's machine class (the store's width)
+ * @param checker::TAssign a  the typed assignment (kind `Field`)
+ * @return LowerStmtOut | error  the context with the store appended, or an honest stop
+ * @throws  when the compound operator/type has no LIR op, or propagated from lowering the value
+ */
+fn store_assign_value(ctx: LowerCtx, addr: u32, field_ty: LType, a: checker::TAssign) -> LowerStmtOut | error {
+    if a.op == lexer::TokenKind::Assign {
+        let vo = match lower_value_into_type(ctx, a.bound, a.value) { Lowered as x => x; error as err => return err }
+        return LowerStmtOut { ctx = ctx_append(vo.ctx, store_inst(addr, vo.vreg, field_ty, a.value.line, a.value.col)); terminated = false }
+    }
+    let cr = ctx_alloc(ctx)
+    let with_load = ctx_append(cr.ctx, load_inst(cr.vreg, addr, field_ty, a.value.line, a.value.col))
+    let vo = match lower_expr(with_load, a.value) { Lowered as x => x; error as err => return err }
+    let k = match prim_kind_of(a.bound, ctx.enums, "range bound") { checker::PrimKind as p => p; error as err => return err }
+    let plain = match plain_op_of_compound(a.op) { lexer::TokenKind as t => t; error as err => return err }
+    let op = match lbinop_of(plain, k) { LBinOp as o => o; error as err => return err }
+    let rr = ctx_alloc(vo.ctx)
+    let with_bin = ctx_append(rr.ctx, bin_inst(rr.vreg, op, cr.vreg, vo.vreg, a.value.line, a.value.col))
+    LowerStmtOut { ctx = ctx_append(with_bin, store_inst(addr, rr.vreg, field_ty, a.value.line, a.value.col)); terminated = false }
+}
+
+/** texpr_kind_name — a short spelling of a typed expression's kind for the honest-stop
+    message. Takes the whole TExpr (TExprKind is private to teko::checker) and matches its
+    `.kind`. */
+fn texpr_kind_name(e: checker::TExpr) -> str {
+    match e.kind {
+        checker::TNumber => "number"
+        checker::TVar => "variable"
+        checker::TStrLit => "string literal"
+        checker::TByteLit => "byte literal"
+        checker::TCharLit => "char literal"
+        checker::TBoolLit => "bool literal"
+        checker::TNullLit => "null literal"
+        checker::TBinary => "binary op"
+        checker::TUnary => "unary op"
+        checker::TCompare => "comparison"
+        checker::TCall => "call"
+        checker::TIfExpr => "if-expression"
+        checker::TMatchExpr => "match-expression"
+        checker::TCast => "cast"
+        checker::TFieldAccess => "field access"
+        checker::TSafeFieldAccess => "safe field access"
+        checker::TCoalesce => "?? coalesce"
+        checker::TStructInit => "struct literal"
+        checker::TIndex => "index"
+        checker::TInterp => "string interpolation"
+        checker::TInExpr => "in-expression"
+        checker::TPathExpr => "enum member"
+        checker::TArrayLit => "array literal"
+        checker::TLambda => "lambda"
+        checker::TBorrow => "borrow"
+    }
+}
+
+/** tstmt_kind_name — a short spelling of a TStatement for the honest-stop message. */
+fn tstmt_kind_name(s: checker::TStatement) -> str {
+    match s {
+        checker::TBinding => "binding"
+        checker::TAssign => "assignment"
+        checker::TReturn => "return"
+        checker::TLoopStmt => "loop"
+        checker::TBreakStmt => "break"
+        checker::TContinueStmt => "continue"
+        checker::TExprStmt => "expression statement"
+        checker::TDeferStmt => "defer"
+        checker::TAdoptStmt => "adopt"
+    }
+}
+
+/** lower_block — lower a statement block into the current function/block, threading the env
+    and stopping at the first terminator (a return closes the block; nothing after it is
+    reachable in the N1 straight-line subset). */
+fn lower_block(ctx: LowerCtx, body: []checker::TStatement) -> LowerCtx | error {
+    mut cur = ctx
+    mut i: u64 = 0
+    loop {
+        if i >= body.len { break }
+        let out = match lower_stmt(cur, body[i]) { LowerStmtOut as x => x; error as err => return err }
+        cur = out.ctx
+        if out.terminated { return cur }
+        i++
+    }
+    cur
+}
+
+/**
+ * lower_fn_body — lower a function/lambda body, auto-returning its TRAILING
+ * expression as the body's `LRet` value when the body falls through (no
+ * explicit `return` on every path) and the function/lambda's return machine
+ * class is non-void (#421 — mirrors the C backend's `emit_block_tail` /
+ * `emit_exprstmt_tail`: "a block's trailing NORMAL value is the function's
+ * value"). A `void`-returning function/lambda, or an empty body, lowers every
+ * statement plainly (`lower_block`) and leaves the fall-through case to the
+ * caller's own implicit-void-return close (`close_function`/
+ * `close_lambda_body`). Reuses `lower_block_value`'s "last statement is the
+ * tail value" walk, so a trailing `if`/`match` EXPRESSION in tail position
+ * already resolves through the SAME machinery an if-expression arm uses — no
+ * duplicated control-flow logic. The trailing value is coerced into `ctx.ret_type` (the
+ * function/lambda's own DECLARED return type, threaded via `LowerCtx` — `lower_block_value`'s
+ * `target_ty`) exactly like an explicit `return` (`lower_return`), so a bare case value falling
+ * through as the trailing tail of a `T | error`-returning body is wrapped into the uniform
+ * tag+payload shape too (#382, degrau N2).
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param []checker::TStatement body  the function/lambda's statement list
+ * @param LType ret_ty  the function/lambda's return machine class
+ * @param u32 line  the source line to propagate onto a synthesized `ret`
+ * @param u32 col  the source column to propagate onto a synthesized `ret`
+ * @return LowerCtx | error  the context after lowering every statement, its
+ *                           block already closed with the `LRet` when a
+ *                           trailing value was auto-returned. When the body
+ *                           has a pending defer, it fires (from index 0,
+ *                           LIFO) AFTER the trailing value is computed but
+ *                           BEFORE the auto-`ret` (A1-2, #382 — mirrors the
+ *                           C backend's value-arm ordering: tail into
+ *                           `sink` first, then its defers,
+ *                           `codegen.tks:4742-4749` — a defer here can still
+ *                           observe every body-local, but never affects the
+ *                           already-captured trailing value).
+ * @implNote a fat (`str`/`[]T`) `ctx.ret_type` routes the whole body through `lower_fn_body_fat`
+ *           instead — the trailing tail's length half stores through the hidden out-slot exactly

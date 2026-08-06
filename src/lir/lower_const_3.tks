@@ -1,0 +1,278 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+    let bare = checker::name_last_segment(case_name)
+    mut i: u64 = 0
+    loop {
+        if i >= members.len { break }
+        if checker::name_last_segment(members[i]) == bare { return i to u32 }
+        i++
+    }
+    error { message = teko::str::concat("const variant: case `", case_name, "` is not a declared member (internal) (#594)") }
+}
+
+/**
+ * const_variant_bytes — the rodata image of an EMPTY-CASE variant aggregate const (#594 crumb 9b):
+ * the constructed member's declared tag as a little-endian I32 at offset 0 (the `tag@0` half of the
+ * variant runtime image, §5.3), with no payload. The initializer's own type names the member being
+ * constructed; its index among the variant's declared members (`variants`) is the tag a later `match`
+ * compares against (`lower_variant_case_test`), so both engines agree on the case byte-for-byte. A
+ * member carrying payload fields honest-stops (payload materialization is a further follow-up beyond
+ * the payload-free `MRet {}` §6.4 targets).
+ *
+ * @param info  the const's declared variant (its member case names, in tag order)
+ * @param init  the const's checked initializer (an empty-case member construction)
+ * @return      the 4-byte little-endian tag image
+ * @throws      when the initializer is not an empty member construction, or names no member
+ */
+fn const_variant_bytes(info: LEnumInfo, init: checker::TExpr) -> []byte | error {
+    let case_name = match named_type_name(init.type) { str as s => s; error as e => return e }
+    let index = match variant_member_index(info.members, case_name) { u32 as x => x; error as e => return e }
+    match init.kind {
+        checker::TStructInit as si => const_variant_tag_bytes(si, index)
+        _ => error { message = "const variant: initializer is not a member construction (Tier-A follow-up) (#594)" }
+    }
+}
+
+/**
+ * const_image_flat — a `ConstImage` wrapping a Tier-A flat byte image with EMPTY relocations and
+ * leaves (#594 T-B6): a `str`/`[]T`/variant-tag const carries no internal pointer, so it is
+ * byte-identical to the crumb-6 path.
+ *
+ * @param bytes  the flat rodata byte image
+ * @return       a `ConstImage` with `relocs`/`leaves` empty
+ * @since #594 T-B6
+ */
+fn const_image_flat(bytes: []byte) -> ConstImage {
+    ConstImage { bytes = bytes; relocs = teko::list::empty(); leaves = teko::list::empty() }
+}
+
+/**
+ * const_named_bytes — the complete rodata image of a `Named`-typed aggregate const (#594 crumb 6/9b +
+ * T-B6): a declared `variant` materializes its empty-case tag (`const_variant_bytes`, flat), any other
+ * `Named` is a struct materialized via `const_struct_bytes` (flat for a POD struct, or blob + relocs +
+ * leaves for a pointer-bearing descriptor). A `variant`-typed const's declared type resolves to a
+ * nominal `Named`, so this dispatch — variant table first, struct layout otherwise — is where the two
+ * families part.
+ *
+ * @param const_name  the const's declared name (for each fat field's leaf symbol)
+ * @param name        the const's declared type name (possibly qualified)
+ * @param init        the const's checked initializer
+ * @param layouts     the program's struct-layout table
+ * @param variants    the program's variant table
+ * @param enums       the program's declared-enum table (a fat field's enum element stride)
+ * @return            the const's complete rodata image
+ * @throws            a Tier-A-follow-up / Tier-B (T-B) honest-stop for an unmaterializable aggregate
+ * @since #594 crumb 6/9b + T-B6
+ */
+fn const_named_bytes(const_name: str, name: str, init: checker::TExpr, layouts: []LStructLayout, variants: []LEnumInfo, enums: []LEnumInfo) -> ConstImage | error {
+    match find_variant_info(variants, name) {
+        LEnumInfo as info => match const_variant_bytes(info, init) { []byte as b => const_image_flat(b); error as e => return e }
+        null => const_struct_bytes(const_name, name, init, layouts, enums)
+    }
+}
+
+/**
+ * serialize_const — the complete rodata image of an aggregate const, dispatched on its resolved value
+ * type (#594 crumb 6 + T-B6): a `str` (raw UTF-8), a flat-scalar `[]T`, a flat-POD or pointer-bearing
+ * struct, or an empty-case `variant` (its tag image, #594 crumb 9b). A `str`/flat-`[]T`/flat-struct/
+ * variant returns its bytes with EMPTY `relocs`/`leaves` (byte-identical to crumb 6); a pointer-bearing
+ * struct (a slice/`str` field — the ABI descriptors) returns the blob with zeroed pointer slots, one
+ * `LDataReloc` per fat field, and each target array's leaf. The `_` arm (neither Str/Slice/Named) still
+ * honest-stops (no const in the corpus reaches it).
+ *
+ * @param cd       the residual typed const declaration (its name, type + checked initializer)
+ * @param layouts  the program's struct-layout table
+ * @param variants the program's variant table
+ * @param enums    the program's declared-enum table (an enum field/element's integer width)
+ * @return         the const's complete rodata image (bytes + internal relocs + leaves)
+ * @throws         a Tier-A-follow-up / Tier-B (T-B) honest-stop for an unmaterializable aggregate form
+ * @since #594 crumb 6 (bytes) + T-B6 (relocs + leaves)
+ */
+fn serialize_const(cd: checker::TConstDecl, layouts: []LStructLayout, variants: []LEnumInfo, enums: []LEnumInfo) -> ConstImage | error {
+    match cd.ty {
+        checker::Str => match const_str_bytes(cd.init) { []byte as b => const_image_flat(b); error as e => return e }
+        checker::Slice as s => match const_slice_bytes(s.element, cd.init, enums) { []byte as b => const_image_flat(b); error as e => return e }
+        checker::Named as n => const_named_bytes(cd.name, n.name, cd.init, layouts, variants, enums)
+        _ => error { message = "const aggregate: pointer/slice-bearing value is Tier-B (T-B), not crumb 6 (#594)" }
+    }
+}
+
+/**
+ * intern_aggregate_const_decl — materialize one residual TConstDecl into rodata (#594 crumb 6 + T-B6):
+ * a scalar const (already inlined + dropped by `inline_consts`) is a defensive skip; a Tier-A aggregate
+ * interns ONE entry (empty relocs); a pointer-bearing aggregate (an ABI descriptor) interns first each
+ * target-array LEAF entry (in field order, deterministic symbols) and THEN the main blob with its
+ * `LDataReloc`s. The leaves-before-blob order is deterministic (declared field order), so the cumulative
+ * bases (VM) and rebased offsets (writers) stay stable across generations.
+ *
+ * @param m        the module accumulated so far
+ * @param cd       the residual typed const declaration
+ * @param layouts  the program's struct-layout table
+ * @param variants the program's variant table
+ * @param enums    the program's declared-enum table (an enum field/element's integer width)
+ * @return         the module with the const's leaves + blob appended (unchanged for a scalar const)
+ * @throws         a Tier-A-follow-up / Tier-B (T-B) honest-stop for an unmaterializable aggregate
+ * @since #594 crumb 6 + T-B6
+ */
+fn intern_aggregate_const_decl(m: LModule, cd: checker::TConstDecl, layouts: []LStructLayout, variants: []LEnumInfo, enums: []LEnumInfo) -> LModule | error {
+    if const_decl_is_scalar(cd.ty) { return m }
+    let img = match serialize_const(cd, layouts, variants, enums) { ConstImage as x => x; error as e => return e }
+    mut cur = m
+    mut i: u64 = 0
+    loop {
+        if i >= img.leaves.len { break }
+        cur = add_rodata(cur, img.leaves[i])
+        i++
+    }
+    add_rodata(cur, LRodata { symbol = const_rodata_symbol(cd.name); bytes = img.bytes; relocs = img.relocs })
+}
+
+/**
+ * intern_aggregate_const_item — fold one program item into the module's rodata: an aggregate
+ * TConstDecl interns its byte image, every other item is a no-op (#594 crumb 6).
+ *
+ * @param m        the module accumulated so far
+ * @param it       the program item to fold
+ * @param layouts  the program's struct-layout table
+ * @param variants the program's variant table
+ * @param enums    the program's declared-enum table (an enum field/element's integer width)
+ * @return         the module with `it`'s rodata contribution (unchanged for a non-const item)
+ * @throws         a Tier-A-follow-up / Tier-B (T-B) honest-stop for an unmaterializable aggregate
+ */
+fn intern_aggregate_const_item(m: LModule, it: checker::TItem, layouts: []LStructLayout, variants: []LEnumInfo, enums: []LEnumInfo) -> LModule | error {
+    match it {
+        checker::TConstDecl as cd => intern_aggregate_const_decl(m, cd, layouts, variants, enums)
+        _ => m
+    }
+}
+
+/**
+ * intern_aggregate_consts — intern every Tier-A aggregate const's byte image into the module's rodata
+ * BEFORE any function lowers (#594 crumb 6), so each const gets ONE rodata entry, at a stable symbol,
+ * that every reference site (function body OR virtual main) resolves against `m.rodata`. `m.globals`
+ * stays empty — an aggregate const lives in rodata, never in a global, so no globals honest-stop is
+ * reachable.
+ *
+ * @param m        the module (layouts registered, rodata still empty)
+ * @param items    the typed program's top-level items
+ * @param layouts  the program's struct-layout table
+ * @param variants the program's variant table
+ * @param enums    the program's declared-enum table (an enum field/element's integer width)
+ * @return         the module with one rodata entry per Tier-A aggregate const
+ * @throws         a Tier-A-follow-up / Tier-B (T-B) honest-stop for an unmaterializable aggregate
+ */
+fn intern_aggregate_consts(m: LModule, items: []checker::TItem, layouts: []LStructLayout, variants: []LEnumInfo, enums: []LEnumInfo) -> LModule | error {
+    mut cur = m
+    mut i: u64 = 0
+    loop {
+        if i >= items.len { break }
+        cur = match intern_aggregate_const_item(cur, items[i], layouts, variants, enums) { LModule as x => x; error as e => return e }
+        i++
+    }
+    cur
+}
+
+/**
+ * collect_variants — the name + declared member spellings of every `variant` type declaration in
+ * `prog`, in program order (#594 crumb 9b). A `variant`-typed const's declared type resolves to a
+ * NOMINAL `Named` (resolve_named keeps user types nominal), never an expanded `Variant`, so the
+ * empty-case aggregate-const serializer needs the member ORDERING recovered here: the constructed
+ * case's INDEX in this list is the runtime tag a later `match` compares against
+ * (`lower_variant_case_test`). Reuses the `LEnumInfo {name, members}` shape — for the tag's purpose a
+ * variant is a named family whose member ordinals are their declared indices. A non-variant type
+ * declaration contributes no entry.
+ *
+ * @param prog  the whole typed program to scan
+ * @return      every declared variant's name + member spellings, in program order
+ */
+fn collect_variants(prog: checker::TProgram) -> []LEnumInfo {
+    mut out: []LEnumInfo = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        out = collect_variant_item(out, prog.items[i])
+        i++
+    }
+    out
+}
+
+/**
+ * collect_variant_item — accumulate `it`'s variant info onto `acc`, unchanged for every other item
+ * kind (#594 crumb 9b).
+ *
+ * @param acc  the variant table accumulated so far
+ * @param it   the program item to fold
+ * @return     `acc`, with `it`'s variant info appended when applicable
+ */
+fn collect_variant_item(acc: []LEnumInfo, it: checker::TItem) -> []LEnumInfo {
+    match it {
+        parser::TypeDecl as td => collect_variant_decl(acc, td)
+        _ => acc
+    }
+}
+
+/**
+ * collect_variant_decl — accumulate `td`'s member list onto `acc` when its body is a `VariantBody`;
+ * unchanged for any other type-declaration shape (struct/class/enum/…) (#594 crumb 9b). The member
+ * spellings come from the variant body's union type-expr, in source order.
+ *
+ * @param acc  the variant table accumulated so far
+ * @param td   the type declaration to fold
+ * @return     `acc`, with `td`'s variant info appended when applicable
+ */
+fn collect_variant_decl(acc: []LEnumInfo, td: parser::TypeDecl) -> []LEnumInfo {
+    match td.body {
+        parser::VariantBody as vb => teko::list::push(acc, LEnumInfo { name = td.name; members = variant_member_names(vb.type_expr) })
+        _ => acc
+    }
+}
+
+/**
+ * variant_member_names — the member spellings of a variant body's union type-expr, in source order
+ * (#594 crumb 9b): each member is a `NamedType` whose path's last segment names the case. A
+ * non-union body (a variant always parses as a two-or-more union) yields no members.
+ *
+ * @param te  the variant body's type-expr (a union of member types)
+ * @return    the member case names, in declared order
+ */
+fn variant_member_names(te: parser::TypeExpr) -> []str {
+    match te {
+        parser::UnionType as ut => union_member_names(ut.members)
+        _ => teko::list::empty()
+    }
+}
+
+/**
+ * union_member_names — the last-segment name of each `NamedType` member of a union type-expr, in
+ * order (#594 crumb 9b); a non-named member (unreachable for a well-formed variant of nominal cases)
+ * contributes nothing.
+ *
+ * @param members  the union's member type-exprs
+ * @return         each named member's case name, in order
+ */
+fn union_member_names(members: []parser::TypeExpr) -> []str {
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= members.len { break }
+        match members[i] {
+            parser::NamedType as nt => out = teko::list::push(out, type_path_last_name(nt.path))
+            _ => { }
+        }
+        i++
+    }
+    out
+}
+
+/**
+ * type_path_last_name — the last segment's name of a type-path (`a::B` -> `B`), or the empty string
+ * for a segment-less path (an internal invariant break the caller never produces) (#594 crumb 9b).
+ *
+ * @param p  the type path
+ * @return   the path's last segment name
+ */
+fn type_path_last_name(p: parser::Path) -> str {
+    if p.segments.len == 0 { return "" }
+    p.segments[p.segments.len - 1].name
+}

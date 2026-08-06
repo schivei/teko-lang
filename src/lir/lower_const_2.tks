@@ -1,0 +1,279 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+        let within = i >= off && i < off + src.len
+        out = teko::list::push(out, if within { src[i - off] } else { buf[i] })
+        i++
+    }
+    out
+}
+
+/**
+ * const_str_bytes — the rodata image of a `str` aggregate const: its raw UTF-8 bytes (#594 crumb 6).
+ * The initializer must be a string literal (the only const-legal `str` producer); anything else
+ * honest-stops.
+ *
+ * @param init  the const's checked initializer
+ * @return      the UTF-8 byte image
+ * @throws      when the initializer is not a string literal
+ */
+fn const_str_bytes(init: checker::TExpr) -> []byte | error {
+    match init.kind {
+        checker::TStrLit as s => str_to_bytes(s.text)
+        _ => error { message = "const str: initializer is not a string literal (Tier-A follow-up) (#594)" }
+    }
+}
+
+/**
+ * const_array_bytes — the rodata image of a `[]T` flat-scalar array literal: each element folded to
+ * its i64 value and serialized at the SAME element stride the indexer uses (`ltype_of(element)`), so
+ * a later `[i]`/`.len` read agrees byte-for-byte on both engines (#594 crumb 6). A spread element is
+ * not statically materializable and honest-stops.
+ *
+ * @param element  the slice's element type
+ * @param a        the typed array literal
+ * @param enums    the program's declared-enum table (an enum element strides at its integer width)
+ * @return         the concatenated element images
+ * @throws         when an element is a spread or is not a foldable flat scalar
+ */
+fn const_array_bytes(element: checker::Type, a: checker::TArrayLit, enums: []LEnumInfo) -> []byte | error {
+    let stride = ltype_size(ltype_of(element, enums))
+    mut out: []byte = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= a.elements.len { break }
+        if a.elements[i].is_spread { return error { message = "const slice: spread element not statically materializable (#594)" } }
+        let v = match const_fold_int(a.elements[i].expr) { i64 as x => x; error as e => return e }
+        out = append_bytes(out, serialize_le(v, stride))
+        i++
+    }
+    out
+}
+
+/**
+ * const_slice_bytes — the rodata image of a `[]T` aggregate const (#594 crumb 6): reject a
+ * pointer-bearing element (Tier-B, T-B), else materialize the array literal via `const_array_bytes`.
+ *
+ * @param element  the slice's element type
+ * @param init     the const's checked initializer
+ * @param enums    the program's declared-enum table (an enum element strides at its integer width)
+ * @return         the slice's byte image
+ * @throws         when the element is pointer-bearing (Tier-B) or the initializer is not an array literal
+ */
+fn const_slice_bytes(element: checker::Type, init: checker::TExpr, enums: []LEnumInfo) -> []byte | error {
+    if !const_is_flat_scalar(element) { return error { message = "const aggregate: slice element is pointer/slice-bearing -> Tier-B (T-B), not crumb 6 (#594)" } }
+    match init.kind {
+        checker::TArrayLit as a => const_array_bytes(element, a, enums)
+        _ => error { message = "const slice: initializer is not an array literal (Tier-A follow-up) (#594)" }
+    }
+}
+
+/**
+ * struct_init_value — the initializer expression a `TStructInit` binds to the field named `field`
+ * (#594 crumb 6). The checker guarantees a flat struct const names every field, so a miss is an
+ * invariant break, not a user error.
+ *
+ * @param si     the typed struct-literal initializer
+ * @param field  the layout field's name
+ * @return       the value expression bound to `field`
+ * @throws       when the initializer binds no such field (internal invariant break)
+ */
+fn struct_init_value(si: checker::TStructInit, field: str) -> checker::TExpr | error {
+    mut i: u64 = 0
+    loop {
+        if i >= si.field_names.len { break }
+        if si.field_names[i] == field { return si.field_vals[i] }
+        i++
+    }
+    error { message = teko::str::concat("const struct: initializer binds no field `", field, "` (internal)") }
+}
+
+/**
+ * const_struct_field_bytes — the little-endian image of one flat struct field, folding its
+ * initializer to its layout width (#594 crumb 6): reject a pointer-bearing field (Tier-B, T-B) and a
+ * float field (a documented Tier-A follow-up), else serialize the folded integer/bool/byte value.
+ *
+ * @param layout  the struct's resolved layout (for the field's machine class + size)
+ * @param si      the struct-literal initializer (source of each field's value)
+ * @param j       the layout field index being serialized
+ * @return        the field's little-endian byte image
+ * @throws        when the field is pointer-bearing, a float, or its value is not foldable
+ */
+fn const_struct_field_bytes(layout: LStructLayout, si: checker::TStructInit, j: u64) -> []byte | error {
+    let lt = layout.field_types[j]
+    if ltype_is_ptr(lt) { return error { message = teko::str::concat("const aggregate: field `", layout.field_names[j], "` is pointer/slice-bearing -> Tier-B (T-B), not crumb 6 (#594)") } }
+    if ltype_is_float(lt) { return error { message = teko::str::concat("const aggregate: float field `", layout.field_names[j], "` materialization is a Tier-A follow-up (#594)") } }
+    let vexpr = match struct_init_value(si, layout.field_names[j]) { checker::TExpr as x => x; error as e => return e }
+    let v = match const_fold_int(vexpr) { i64 as x => x; error as e => return e }
+    serialize_le(v, ltype_size(lt))
+}
+
+/**
+ * const_fat_array_bytes — the flat-scalar rodata bytes of a fat field's target array (#594 T-B6): a
+ * `str` field's raw UTF-8 (`const_str_bytes`), a `[]T` field's element images at the indexer's stride
+ * (`const_slice_bytes`). The SAME stride a later `[i]` folds against and the same bytes a standalone
+ * slice const would intern, so the leaf and any read agree byte-for-byte.
+ *
+ * @param field_ty  the field's checked type (`Str`/`Slice`)
+ * @param vexpr     the field's initializer (a string/array literal)
+ * @param enums     the program's declared-enum table (an enum element strides at its integer width)
+ * @return          the target array's flat-scalar byte image
+ * @throws          when the field is not a str/slice (internal), or the initializer is not materializable
+ * @since #594 T-B6
+ */
+fn const_fat_array_bytes(field_ty: checker::Type, vexpr: checker::TExpr, enums: []LEnumInfo) -> []byte | error {
+    match field_ty {
+        checker::Str => const_str_bytes(vexpr)
+        checker::Slice as s => const_slice_bytes(s.element, vexpr, enums)
+        _ => error { message = "const aggregate: fat field is neither str nor slice (internal) (#594)" }
+    }
+}
+
+/**
+ * const_fat_field — the 16-byte image of a fat field (`[]T`/`str`) of an aggregate const, with the
+ * pointer slot zero and the element count inline in the high slot (#594 T-B6): `{ slot_bytes = <8
+ * zero> ++ serialize_le(count, POINTER_SIZE), reloc = data_reloc(fieldoff, leaf_sym), leaf = LRodata{
+ * leaf_sym, array_bytes, relocs=[] } }`. `array_bytes` reuses `const_fat_array_bytes` (the SAME stride
+ * the indexer folds) and `count` is the element count (`const_fat_len`) — the SAME value
+ * `lower_len_field` returns, so a `.len` read agrees. The leaf symbol is `const_leaf_symbol(const_name,
+ * field_name)` (a pure function -> deterministic).
+ *
+ * @param const_name  the owning const's name (for the leaf symbol)
+ * @param field_name  the field's name (for the leaf symbol)
+ * @param fieldoff    the field's byte offset in the struct blob (the pointer slot's offset)
+ * @param field_ty    the field's checked type (`Slice`/`Str`)
+ * @param vexpr       the field's initializer (a string/array literal)
+ * @param enums       the program's declared-enum table (an enum element strides at its integer width)
+ * @return            the 16-byte slot image, the relocation, and the leaf
+ * @throws            when the initializer is not materializable (non-literal, spread, or ptr element)
+ * @since #594 T-B6
+ */
+fn const_fat_field(const_name: str, field_name: str, fieldoff: u32, field_ty: checker::Type, vexpr: checker::TExpr, enums: []LEnumInfo) -> FatFieldImage | error {
+    let array_bytes = match const_fat_array_bytes(field_ty, vexpr, enums) { []byte as x => x; error as e => return e }
+    let count = match const_fat_len(field_ty, array_bytes.len to u32, enums) { u32 as c => c; error as e => return e }
+    let leaf_sym = const_leaf_symbol(const_name, field_name)
+    let ptr_size = ltype_size(LType::Ptr)
+    let slot = append_bytes(zeros_bytes(ptr_size to u64), serialize_le(count to i64, ptr_size))
+    FatFieldImage {
+        slot_bytes = slot
+        reloc = data_reloc(fieldoff, leaf_sym)
+        leaf = LRodata { symbol = leaf_sym; bytes = array_bytes; relocs = teko::list::empty() }
+    }
+}
+
+/**
+ * const_struct_blob — the complete rodata image of a struct aggregate const (#594 crumb 6 + T-B6): a
+ * zero-filled buffer of the struct's size with each SCALAR field's little-endian value written at its
+ * layout offset (declared order, natural alignment) and each FAT field (`[]T`/`str`) written as its
+ * 16-byte `{ptr=0, len=count}` slot plus a `LDataReloc` + a leaf `LRodata` (`const_fat_field`). Padding
+ * stays zero, so a later `.field`/`.len`/`[i]` read recovers the exact value on both engines. A flat
+ * Tier-A struct yields empty `relocs`/`leaves` (byte-identical to crumb 6); an ABI descriptor yields
+ * one reloc + one leaf per slice field.
+ *
+ * @param const_name  the owning const's name (for each fat field's deterministic leaf symbol)
+ * @param layout      the struct's resolved layout (size + per-field offset/class)
+ * @param si          the typed struct-literal initializer
+ * @param enums       the program's declared-enum table (a fat field's enum element stride)
+ * @return            the struct blob + its internal relocations + its leaf entries
+ * @throws            when a non-fat pointer field (Tier-B), a float field, or a non-foldable value occurs
+ * @since #594 crumb 6 + T-B6
+ */
+fn const_struct_blob(const_name: str, layout: LStructLayout, si: checker::TStructInit, enums: []LEnumInfo) -> ConstImage | error {
+    mut buf = zeros_bytes(layout.size to u64)
+    mut relocs: []LDataReloc = teko::list::empty()
+    mut leaves: []LRodata = teko::list::empty()
+    mut j: u64 = 0
+    loop {
+        if j >= layout.field_names.len { break }
+        let field_name = layout.field_names[j]
+        let fieldoff = layout.field_offsets[j]
+        let vexpr = match struct_init_value(si, field_name) { checker::TExpr as x => x; error as e => return e }
+        if is_fat_type(vexpr.type) {
+            let ffi = match const_fat_field(const_name, field_name, fieldoff, vexpr.type, vexpr, enums) { FatFieldImage as x => x; error as e => return e }
+            buf = write_bytes_at(buf, fieldoff to u64, ffi.slot_bytes)
+            relocs = teko::list::push(relocs, ffi.reloc)
+            leaves = teko::list::push(leaves, ffi.leaf)
+        }
+        if !is_fat_type(vexpr.type) {
+            let fb = match const_struct_field_bytes(layout, si, j) { []byte as x => x; error as e => return e }
+            buf = write_bytes_at(buf, fieldoff to u64, fb)
+        }
+        j++
+    }
+    ConstImage { bytes = buf; relocs = relocs; leaves = leaves }
+}
+
+/**
+ * const_struct_bytes — the complete rodata image of a `Named` struct aggregate const (#594 crumb 6 +
+ * T-B6): resolve its registered layout and materialize its struct-literal initializer via
+ * `const_struct_blob`, threading the const's own name (for each fat field's deterministic leaf
+ * symbol).
+ *
+ * @param const_name  the const's declared name (for each fat field's leaf symbol)
+ * @param name        the struct type's canonical name
+ * @param init        the const's checked initializer
+ * @param layouts     the program's struct-layout table
+ * @param enums       the program's declared-enum table (a fat field's enum element stride)
+ * @return            the struct blob + its relocations + its leaves
+ * @throws            when the layout is unknown, the initializer is not a struct literal (the message
+ *                    names the const, its type and its source position), or a field is Tier-B
+ * @since #594 crumb 6 + T-B6
+ */
+fn const_struct_bytes(const_name: str, name: str, init: checker::TExpr, layouts: []LStructLayout, enums: []LEnumInfo) -> ConstImage | error {
+    let layout = match find_struct_layout(layouts, name) { LStructLayout as l => l; error as e => return e }
+    match init.kind {
+        checker::TStructInit as si => const_struct_blob(const_name, layout, si, enums)
+        _ => error { message = $"const struct: the initializer of '{const_name}' (type '{name}') at {init.line}:{init.col} is not a struct literal — the checker's const-constructor canonicalization (`canonicalize_const_ctors`) did not reduce it (Tier-A follow-up) (#594)" }
+    }
+}
+
+/**
+ * const_variant_tag_bytes — the little-endian I32 tag image of an EMPTY-CASE variant member (#594
+ * crumb 9b): the case's declared index serialized at the variant runtime image's `tag@0` slot (§5.3),
+ * with no payload. An initializer that binds payload fields is a non-empty case whose payload
+ * serialization is a further follow-up and honest-stops (the `MRet {}` targets §6.4
+ * requires are all payload-free empty cases).
+ *
+ * @param si     the member's struct-literal initializer (must bind no field for an empty case)
+ * @param index  the member's declared index (its runtime tag)
+ * @return       the 4-byte little-endian tag image
+ * @throws       when the initializer binds any payload field (a non-empty case)
+ */
+fn const_variant_tag_bytes(si: checker::TStructInit, index: u32) -> []byte | error {
+    if si.field_names.len > 0 { return error { message = "const variant: non-empty payload case materialization is a Tier-A follow-up (#594)" } }
+    serialize_le(index to i64, ltype_size(LType::I32))
+}
+
+/**
+ * find_variant_info — the registered variant whose name's last segment matches `name`'s (#594 crumb
+ * 9b), or null when `name` is not a declared variant. A const's declared type resolves to a QUALIFIED
+ * `Named` (`ns::Op`) while `collect_variants` stores the DECLARED spelling (`Op`), so the match is by
+ * last segment — the same bare-vs-qualified reconciliation `lower_variant_case_test` uses on case
+ * names.
+ *
+ * @param variants  the program's variant table
+ * @param name      the const's declared type name (possibly qualified)
+ * @return          the matching variant info, or null
+ */
+fn find_variant_info(variants: []LEnumInfo, name: str) -> LEnumInfo | null {
+    let bare = checker::name_last_segment(name)
+    mut i: u64 = 0
+    loop {
+        if i >= variants.len { break }
+        if checker::name_last_segment(variants[i].name) == bare { return variants[i] }
+        i++
+    }
+    null
+}
+
+/**
+ * variant_member_index — the declared index (runtime tag) of the case `case_name` among `members`
+ * (#594 crumb 9b): a last-segment match, so a qualified initializer type (`ns::RetC`) resolves against
+ * the declared member spelling (`RetC`). The index equals the ordinal `lower_variant_case_test`
+ * compares the loaded `tag@0` against, so the interned image and the match agree.
+ *
+ * @param members    the variant's declared member case names, in tag order
+ * @param case_name  the constructed member's name (possibly qualified)
+ * @return           the member's declared index (its tag)
+ * @throws           when `case_name` is not a member of `members` (an internal invariant break)
+ */

@@ -1,0 +1,226 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+pub fn lower_stmt(ctx: LowerCtx, s: checker::TStatement) -> LowerStmtOut | error {
+    match s {
+        checker::TBinding as b => lower_binding(ctx, b)
+        checker::TAssign as a => lower_assign(ctx, a)
+        checker::TReturn as r => lower_return(ctx, r)
+        checker::TExprStmt as es => lower_expr_stmt(ctx, es)
+        checker::TLoopStmt as l => lower_loop(ctx, l)
+        checker::TBreakStmt as b => lower_break(ctx, b)
+        checker::TContinueStmt as c => lower_continue(ctx, c)
+        checker::TDeferStmt as d => lower_defer(ctx, d)
+        _ => error { message = teko::str::concat("native backend N1: ", tstmt_kind_name(s), " not yet lowered (N2)") }
+    }
+}
+
+/**
+ * lower_binding — `let x = e`: a str/slice-typed binding (A1-4, #382) lowers `e` through the FAT
+ * path and binds (ptr, len); every other binding lowers `e` through `lower_value_into_type`
+ * (coercion-aware, C6/C7 null-union) and binds the single result VReg plainly.
+ *
+ * A MUTABLE fat binding (`mut xs: []T = …`) binds a 16-byte FRAME SLOT instead of the VReg pair
+ * (`lenv_bind_fat_slot`): only memory survives the merge a later reassignment sits behind
+ * (list-builtin degrau).
+ *
+ * @param LowerCtx ctx  the lowering context to append the binding's instructions into
+ * @param checker::TBinding b  the typed binding statement
+ * @return LowerStmtOut | error  the context with the name bound, or an honest stop
+ * @throws  when the target is a destructuring pattern (out of the N1 subset), or propagated
+ *          from lowering the value
+ */
+fn lower_binding(ctx: LowerCtx, b: checker::TBinding) -> LowerStmtOut | error {
+    let name = match bind_target_name(b.target) { str as s => s; error as err => return err }
+    if is_fat_type(b.bound) {
+        let fo = match lower_fat_expr(ctx, b.value) { LoweredFat as x => x; error as err => return err }
+        if b.kind == parser::BindKind::Mut { return bind_mutable_fat(fo, name, b.value.line, b.value.col) }
+        return LowerStmtOut { ctx = ctx_bind_fat(fo.ctx, name, fo.ptr, fo.len); terminated = false }
+    }
+    let lo = match lower_value_into_type(ctx, b.bound, b.value) { Lowered as x => x; error as err => return err }
+    LowerStmtOut { ctx = ctx_bind(lo.ctx, name, lo.vreg); terminated = false }
+}
+
+/**
+ * bind_mutable_fat — bind a MUTABLE str/slice local to a fresh 16-byte frame slot seeded with its
+ * initial pair (`alloc_fat_slot` + `lenv_bind_fat_slot`).
+ *
+ * @param fo    the initial value's (ptr, len) pair (its context is the one extended)
+ * @param name  the local's name
+ * @param line  the binding's source line
+ * @param col   the binding's source column
+ * @return      the context with the slot reserved, seeded, and bound
+ */
+fn bind_mutable_fat(fo: LoweredFat, name: str, line: u32, col: u32) -> LowerStmtOut {
+    let slot = alloc_fat_slot(fo.ctx, fo, line, col)
+    let bound = ctx_with(slot.ctx, slot.ctx.func, slot.ctx.block_id, lenv_bind_fat_slot(slot.ctx.env, name, slot.vreg))
+    LowerStmtOut { ctx = bound; terminated = false }
+}
+
+/**
+ * lower_value_into_type — lower `value` COERCED into the declared type `bound`: when `bound` is a
+ * null-bearing two-member union (`T | null`) and the value's own natural type is not already that
+ * union (a bare `null` literal, or the payload type `T` directly), build the own backend's uniform
+ * tag+payload wrapper via `lower_null_union_construct`; when `bound` is any OTHER (general,
+ * non-null-bearing) variant, `lower_value_into_variant` does the same generalized to an arbitrary
+ * member count/index; every other declared type lowers the value plainly. The checker types an
+ * assignable value at its OWN narrow type and leaves the wrap to the backend — the C backend does
+ * it in `emit_as`, on EVERY placement (binding, assign, return, argument, field), and this is the
+ * own-backend analog.
+ *
+ * Every own-backend placement that KNOWS its declared type routes through here: `lower_binding`
+ * (`b.bound`), `lower_assign_simple` and `store_assign_value` (`a.bound`), `lower_return_value`
+ * (`ctx.ret_type`) and `lower_tail_expr_stmt` (`target_ty` — an if/match arm's own enclosing
+ * result type, or, via `lower_fn_body`, the enclosing function's return type, #382 degrau N2). The
+ * placements that do NOT carry a declared type — a call argument (a direct call's `TCall` has no
+ * callee signature) and a struct literal field (the layout keeps machine classes, not checker
+ * types) — are closed at the other end instead, by `lower_null_lit`'s honest-stop, so no placement
+ * can write a raw `const 0` into a VReg that a later `match` reads as the wrapper's base address
+ * (that was a deref of address 0).
+ *
+ * @param LowerCtx ctx  the lowering context to append the value's instructions into
+ * @param checker::Type bound  the DECLARED type of the slot the value is placed into
+ * @param checker::TExpr value  the typed value expression
+ * @return Lowered  the lowered (and, when needed, coerced) value
+ * @throws  propagated from lowering the value or the wrapper's payload
+ * @since 0.3.1 (null-union C7 own-backend gap — wasm_panic_hook)
+ */
+fn lower_value_into_type(ctx: LowerCtx, bound: checker::Type, value: checker::TExpr) -> Lowered | error {
+    match bound {
+        checker::Variant as v => match null_union_payload(v) {
+            checker::Type as payload => lower_value_into_null_union(ctx, payload, value)
+            null => lower_value_into_variant(ctx, v, value)
+        }
+        _ => lower_expr(ctx, value)
+    }
+}
+
+/**
+ * lower_value_into_null_union — the `checker::Variant` arm of `lower_value_into_type`: a value
+ * ALREADY typed as the union itself (re-binding or re-assigning an existing `T | null` value)
+ * passes through unwrapped; any other value (the bare `null` literal or a bare `T`) is wrapped via
+ * `lower_null_union_construct`.
+ *
+ * @param LowerCtx ctx  the lowering context to append the value's instructions into
+ * @param checker::Type payload  the union's non-null member type
+ * @param checker::TExpr value  the typed value expression being placed into the union slot
+ * @return Lowered  the value's own VReg (already wrapped), or a freshly built wrapper
+ * @throws  propagated from lowering the value or the wrapper's payload
+ */
+fn lower_value_into_null_union(ctx: LowerCtx, payload: checker::Type, value: checker::TExpr) -> Lowered | error {
+    match value.type {
+        checker::Variant => lower_expr(ctx, value)
+        _ => lower_null_union_construct(ctx, payload, value)
+    }
+}
+
+/**
+ * lower_value_into_variant — the general (non-null-bearing) `checker::Variant` arm of
+ * `lower_value_into_type`: a value ALREADY typed as the variant itself (re-flowing an existing
+ * union value — the same passthrough `lower_value_into_null_union` uses for `T | null`) passes
+ * through unwrapped; any other value (a bare case, e.g. a `Box` or a bare `error{…}` flowing into
+ * a declared `Box | error` slot) is wrapped via `lower_variant_construct` at its own matched
+ * member index (#382, degrau N2).
+ *
+ * @param LowerCtx ctx  the lowering context to append the value's instructions into
+ * @param checker::Variant v  the declared variant the value is placed into
+ * @param checker::TExpr value  the typed value expression being placed into the variant slot
+ * @return Lowered  the value's own VReg (already the variant), or a freshly built wrapper
+ * @throws  propagated from lowering the value, or when its type names no member of `v`
+ * @since 0.3.1 (own-backend general variant construction, degrau N2)
+ */
+fn lower_value_into_variant(ctx: LowerCtx, v: checker::Variant, value: checker::TExpr) -> Lowered | error {
+    match value.type {
+        checker::Variant => lower_expr(ctx, value)
+        _ => lower_variant_construct(ctx, v, value)
+    }
+}
+
+/** bind_target_name — the bound simple name; a destructuring pattern honest-stops. */
+fn bind_target_name(t: parser::BindTarget) -> str | error {
+    match t {
+        parser::SimpleName as sn => sn.name
+        _ => error { message = "native backend N1: destructuring binding not yet lowered (N2)" }
+    }
+}
+
+/**
+ * lower_return — `return e` (or bare `return`): a `return` leaves EVERY
+ * enclosing scope, so first fire ALL pending defers (from index 0, LIFO —
+ * mirrors the C backend's `emit_return`, `codegen.tks:5770-5773`, which
+ * fires before its own return-value TEXT so a defer's mutation of a local
+ * IS observable through the value `r.value` reads afterward), THEN lower
+ * the return value (when present), THEN emit the `LRet` terminator, closing
+ * the block (A1-2, #382).
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param checker::TReturn r  the return node
+ * @return LowerStmtOut | error  the advanced (terminated) context, or a
+ *                               NAMED internal error when a pending defer
+ *                               body fails to lower
+ * @implNote when the enclosing function's own return type is fat (`str`/`[]T`), the value
+ *           lowers through `lower_return_fat` instead — its length half is stored through the
+ *           hidden out-slot (`bind_ret_len_slot`) before the single-VReg `LRet` carries the ptr
+ *           half (call-gordo degrau, #382 N2).
+ */
+fn lower_return(ctx: LowerCtx, r: checker::TReturn) -> LowerStmtOut | error {
+    let replayed = match replay_defers(ctx, 0) { LowerCtx as c => c; error as err => return err }
+    if !r.has_value {
+        let vinst = ret_void_inst(r.value.line, r.value.col)
+        return LowerStmtOut { ctx = ctx_append(replayed, vinst); terminated = true }
+    }
+    if is_fat_type(replayed.ret_type) { return lower_return_fat(replayed, r) }
+    let lo = match lower_return_value(replayed, r.value) { Lowered as x => x; error as err => return err }
+    let inst = ret_inst(lo.vreg, r.value.line, r.value.col)
+    LowerStmtOut { ctx = ctx_append(lo.ctx, inst); terminated = true }
+}
+
+/**
+ * lower_return_fat — an explicit `return e` whose enclosing function's own return type is fat
+ * (`str`/`[]T`): lower `e` through the (ptr, len) pair (`lower_fat_expr`), store the length half
+ * through the hidden out-slot (`ctx.ret_len_slot`, `bind_ret_len_slot`'s own register), then emit
+ * the ordinary single-VReg `LRet` carrying only the ptr half — mirrors `lower_call_fat`'s caller-
+ * side alloca+load exactly, one axis over (store vs load). Refuses (rather than storing through
+ * an unset slot) when the enclosing body never reserved one (`!ctx.has_ret_len_slot` — a fat-
+ * returning LAMBDA, which this degrau does not wire the hidden parameter for).
+ *
+ * @param ctx  the lowering context (already past the pending-defer replay)
+ * @param r    the return node (`r.has_value` already true)
+ * @return     the terminated context
+ * @throws     when the enclosing body has no reserved out-slot, or propagated from lowering `e`
+ */
+fn lower_return_fat(ctx: LowerCtx, r: checker::TReturn) -> LowerStmtOut | error {
+    if !ctx.has_ret_len_slot { return error { message = "native backend N1: a fat-typed lambda return is not yet lowered (N2)" } }
+    let fo = match lower_fat_expr(ctx, r.value) { LoweredFat as x => x; error as err => return err }
+    let stored = ctx_append(fo.ctx, store_inst(fo.ctx.ret_len_slot, fo.len, LType::I64, r.value.line, r.value.col))
+    LowerStmtOut { ctx = ctx_append(stored, ret_inst(fo.ptr, r.value.line, r.value.col)); terminated = true }
+}
+
+/**
+ * lower_return_value — an explicit `return e`'s value, coerced into the enclosing function's
+ * own declared return type (`ctx.ret_type`) exactly like the trailing-tail auto-return
+ * (`lower_tail_expr_stmt`'s doc): a diverging (`Void`-typed) value — a `panic`/`exit` call, by
+ * the checker's own invariant — passes through PLAIN (`return` already terminates the block, so
+ * a divergent value's own bits are never observed, and no variant member is `Void` to wrap it
+ * as); any other value is coerced via `lower_value_into_type` (#382, degrau N2).
+ *
+ * @param LowerCtx ctx  the lowering context to append the value's instructions into
+ * @param checker::TExpr value  the typed return value
+ * @return Lowered  the lowered (and, when the return slot is a non-null variant, coerced) value
+ * @throws  propagated from lowering or coercing `value`
+ */
+fn lower_return_value(ctx: LowerCtx, value: checker::TExpr) -> Lowered | error {
+    if type_is_void(value.type) { return lower_expr(ctx, value) }
+    lower_value_into_type(ctx, ctx.ret_type, value)
+}
+
+/** lower_expr_stmt — an expression statement: lower for effect (the call), discard the
+    VReg. */
+fn lower_expr_stmt(ctx: LowerCtx, es: checker::TExprStmt) -> LowerStmtOut | error {
+    let lo = match lower_expr(ctx, es.expr) { Lowered as x => x; error as err => return err }
+    LowerStmtOut { ctx = lo.ctx; terminated = false }
+}
+
+/**
+ * lower_defer — `defer { … }`: register the node onto the pending-defer
+ * stack (LIFO order is `replay_defers`'s job, at whichever scope exit fires

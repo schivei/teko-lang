@@ -1,0 +1,303 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+    Lowered { ctx = f.ctx; vreg = f.ptr }
+}
+
+/** lower_interp_hole_prim — a NO-FORMAT-SPEC hole of a resolved primitive type: an integer
+    formats through the runtime's `tk_i64_to_str`/`tk_u64_to_str` (by signedness, mirroring
+    the C backend's own no-spec builders); a float/bool hole is out of the A1-4 subset (A1-4,
+    #382 — TFSpecNone's full family is a later closure). */
+fn lower_interp_hole_prim(ctx: LowerCtx, h: checker::TExpr, k: checker::PrimKind) -> Lowered | error {
+    if prim_is_float_kind(k) { return error { message = "native backend N1: float interpolation hole not yet lowered (N2)" } }
+    if k == checker::PrimKind::Bool { return error { message = "native backend N1: bool interpolation hole not yet lowered (N2)" } }
+    let ho = match lower_expr(ctx, h) { Lowered as x => x; error as err => return err }
+    let sym = if prim_is_signed_int(k) { "tk_i64_to_str" } else { "tk_u64_to_str" }
+    let r = ctx_alloc(ho.ctx)
+    Lowered { ctx = ctx_append(r.ctx, call_inst(r.vreg, sym, single_arg(ho.vreg), false, h.line, h.col)); vreg = r.vreg }
+}
+
+/** lower_interp_hole_none — a NO-FORMAT-SPEC hole (`TFSpecNone`): a `str` hole passes
+    through unchanged; a primitive hole formats via `lower_interp_hole_prim`; any other hole
+    type is out of the A1-4 subset (A1-4, #382). */
+fn lower_interp_hole_none(ctx: LowerCtx, h: checker::TExpr) -> Lowered | error {
+    match h.type {
+        checker::Str => lower_expr(ctx, h)
+        checker::Prim as p => lower_interp_hole_prim(ctx, h, p.kind)
+        _ => error { message = "native backend N1: interpolation hole of this type not yet lowered (N2)" }
+    }
+}
+
+/** lower_interp_hole — one interpolation hole's str-VALUED VReg, per its format spec
+    (A1-4, #382). Only `TFSpecNone` (no `:spec`) is closed; a static (`:F2`) or dynamic
+    (`:[…]`) spec is out of the A1-4 subset — a later closure over `emit_interp`'s full
+    `tk_fmt_*` family. */
+fn lower_interp_hole(ctx: LowerCtx, h: checker::TExpr, spec: checker::TFSpec) -> Lowered | error {
+    match spec.kind {
+        checker::TFSpecNone => lower_interp_hole_none(ctx, h)
+        checker::TFSpecStatic => error { message = "native backend N1: static interpolation format spec not yet lowered (N2)" }
+        checker::TFSpecDynamic => error { message = "native backend N1: dynamic interpolation format spec not yet lowered (N2)" }
+    }
+}
+
+/** lower_interp — `$"…{expr}…"`: nested `tk_str_concat` calls over `pieces[0] ++
+    fmt(holes[0]) ++ pieces[1] ++ … ++ pieces[last]`, left-associative (mirrors the C
+    backend's own nesting, `codegen.tks`'s `emit_interp`). Not itself run by the interp oracle
+    (the concat/format symbols are runtime builtins outside the N1 run subset — honest-stops
+    gracefully AT RUNTIME like any other unrecognized call, per the existing convention); this
+    closes the LOWERING honest-stop only (A1-4, #382). */
+fn lower_interp(ctx: LowerCtx, e: checker::TExpr, ip: checker::TInterp) -> Lowered | error {
+    let seg0 = lower_interp_piece(ctx, ip.pieces[0], e.line, e.col)
+    mut cur = seg0.ctx
+    mut acc = seg0.vreg
+    mut i: u64 = 0
+    loop {
+        if i >= ip.holes.len { break }
+        let spec = if i < ip.specs.len { ip.specs[i] } else { checker::TFSpec { kind = checker::TFSpecNone { } } }
+        let ho = match lower_interp_hole(cur, ip.holes[i], spec) { Lowered as x => x; error as err => return err }
+        let cr = ctx_alloc(ho.ctx)
+        let with_concat = ctx_append(cr.ctx, call_inst(cr.vreg, "tk_str_concat", two_args(acc, ho.vreg), false, e.line, e.col))
+        let piece = lower_interp_piece(with_concat, ip.pieces[i + 1], e.line, e.col)
+        let pr = ctx_alloc(piece.ctx)
+        cur = ctx_append(pr.ctx, call_inst(pr.vreg, "tk_str_concat", two_args(cr.vreg, piece.vreg), false, e.line, e.col))
+        acc = pr.vreg
+        i++
+    }
+    Lowered { ctx = cur; vreg = acc }
+}
+
+/** lower_in_expr — `lhs in [e0, e1, …]`: the lhs lowers ONCE, then each element compares
+    equal via `ICmpEq`/`FCmpEq` (by the lhs's PrimKind), ORed together bitwise (`IOr` — the
+    comparisons are always 0/1, so a bitwise OR IS a boolean OR; `IOr` is declared but not yet
+    RUN by the interp oracle, N2 — this closes the LOWERING honest-stop only, mirroring
+    `lower_interp`'s own scope note) (A1-4, #382). A non-primitive lhs/element (e.g. a `str`
+    membership test) is out of the A1-4 subset via `prim_kind_of`'s existing honest-stop. */
+fn lower_in_expr(ctx: LowerCtx, e: checker::TExpr, ine: checker::TInExpr) -> Lowered | error {
+    if ine.elems.len == 0 { return error { message = "native backend N1: empty `in`-expression not yet lowered (N2)" } }
+    let lo = match lower_expr(ctx, ine.lhs) { Lowered as x => x; error as err => return err }
+    let k = match prim_kind_of(ine.lhs.type, ctx.enums, "in-expression lhs") { checker::PrimKind as p => p; error as err => return err }
+    let eq = if prim_is_float_kind(k) { LBinOp::FCmpEq } else { LBinOp::ICmpEq }
+    mut cur = lo.ctx
+    mut acc: u32 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= ine.elems.len { break }
+        let eo = match lower_expr(cur, ine.elems[i]) { Lowered as x => x; error as err => return err }
+        let cr = ctx_alloc(eo.ctx)
+        let with_cmp = ctx_append(cr.ctx, bin_inst(cr.vreg, eq, lo.vreg, eo.vreg, e.line, e.col))
+        if i == 0 {
+            acc = cr.vreg
+            cur = with_cmp
+        } else {
+            let orr = ctx_alloc(with_cmp)
+            cur = ctx_append(orr.ctx, bin_inst(orr.vreg, LBinOp::IOr, acc, cr.vreg, e.line, e.col))
+            acc = orr.vreg
+        }
+        i++
+    }
+    Lowered { ctx = cur; vreg = acc }
+}
+
+/**
+ * named_type_name — the canonical struct-layout-table NAME of a field/index-accessible type: a
+ * `Named` (user struct/class) type's own declared name, or `error_struct_name()`'s reserved
+ * name for the built-in `error` (its ONE constructible shape, `error { message = <str> }`,
+ * registers a synthetic single-field layout — `error_struct_layout`, #382 degrau N2). Every
+ * OTHER type shape (`str`/`[]T` — fat, read through `lower_fat_field`/`.len`, never this path;
+ * an enum — no fields, only a `match` tag test; a bare union — no fields of its own) is out of
+ * this backend's current subset.
+ *
+ * @param checker::Type t  the receiver/construction-site type to resolve
+ * @return str  the registered layout's name
+ * @throws  when `t` is a shape this backend does not yet resolve a struct layout for
+ */
+fn named_type_name(t: checker::Type) -> str | error {
+    match t {
+        checker::Named as n => n.name
+        checker::Error => error_struct_name()
+        _ => error { message = "native backend N1: field/index access on a non-struct receiver not yet lowered (N2)" }
+    }
+}
+
+/**
+ * error_struct_name — the reserved layout-table name the built-in `error` type registers under
+ * (`named_type_name`/`error_struct_layout`). `error` is a keyword, so no user `Named` struct can
+ * ever declare this literal name — there is no collision to guard against.
+ *
+ * @return str  the reserved name (`"error"`)
+ * @since 0.3.1 (own-backend `error` construction, degrau N2)
+ */
+fn error_struct_name() -> str { "error" }
+
+/**
+ * error_struct_layout — the built-in `error` type's synthetic `LStructLayout`: ONE field,
+ * `message: str` (fat, 16 bytes — `layout_of_sized`'s packer sizes/aligns it like any other
+ * FAT struct field). `error`'s only constructible shape is `error { message = <str> }` (the
+ * checker's `type_struct_lit` Error-branch), so a single `message` field is the COMPLETE
+ * representation this subset ever needs to build — the diagnostic fields (`file`/`line`/`col`/
+ * `expected`/`actual`) a checker-internal `tk_error` carries have no Teko-surface constructor
+ * and stay out of scope, unchanged from the pre-existing `lower_field_access` exclusion note
+ * (#382, degrau N2).
+ *
+ * @return LStructLayout  the registered `error` layout
+ * @since 0.3.1 (own-backend `error` construction, degrau N2)
+ */
+fn error_struct_layout() -> LStructLayout {
+    let field_names = teko::list::push(teko::list::empty(), "message")
+    let field_types = teko::list::push(teko::list::empty(), LType::Ptr)
+    let field_sizes = teko::list::push(teko::list::empty(), ltype_size(LType::Ptr) * (2 to u32))
+    let field_aligns = teko::list::push(teko::list::empty(), ltype_align(LType::Ptr))
+    layout_of_sized(error_struct_name(), field_names, field_types, field_sizes, field_aligns)
+}
+
+/** find_struct_layout — the registered LStructLayout named `name`, or a NAMED internal
+    error (the checker guarantees every Named struct type was declared, so a miss here is
+    an invariant break, not a user error). */
+fn find_struct_layout(layouts: []LStructLayout, name: str) -> LStructLayout | error {
+    mut i: u64 = 0
+    loop {
+        if i >= layouts.len { break }
+        if layouts[i].name == name { return layouts[i] }
+        i++
+    }
+    error { message = teko::str::concat("native backend N1: no layout registered for struct `", name, "` (internal)") }
+}
+
+/** field_offset_of — the byte offset of `field` within `layout`, or a NAMED internal error
+    (the checker guarantees the field exists on the struct — a miss here is an invariant
+    break). */
+fn field_offset_of(layout: LStructLayout, field: str) -> u32 | error {
+    mut i: u64 = 0
+    loop {
+        if i >= layout.field_names.len { break }
+        if layout.field_names[i] == field { return layout.field_offsets[i] }
+        i++
+    }
+    error { message = teko::str::concat("native backend N1: unknown field `", field, "` on struct `", layout.name, "` (internal)") }
+}
+
+/**
+ * field_type_of — the machine class of `field` within `layout`, or a NAMED
+ * internal error (mirrors `field_offset_of`; a `match` FieldPattern destructure
+ * reads a field it did not itself type-check, so it needs the LOAD width
+ * straight out of the layout table — A1-5, #382).
+ *
+ * @param LStructLayout layout  the struct's registered layout
+ * @param str field  the field name to look up
+ * @return LType  `field`'s registered machine class
+ * @throws  when `field` is not registered on `layout` (an internal invariant
+ *          break)
+ */
+fn field_type_of(layout: LStructLayout, field: str) -> LType | error {
+    mut i: u64 = 0
+    loop {
+        if i >= layout.field_names.len { break }
+        if layout.field_names[i] == field { return layout.field_types[i] }
+        i++
+    }
+    error { message = teko::str::concat("native backend N1: unknown field `", field, "` on struct `", layout.name, "` (internal)") }
+}
+
+/** lower_struct_init — `Name { f = v, … }`: alloca a slot sized/aligned per the struct's
+    registered layout, then store each field's lowered value at its offset (declared
+    order). The struct's "value" is its alloca'd BASE ADDRESS (a Ptr VReg) — the memory
+    model every aggregate in the A1-3 subset shares (§5.1: the interp is an exit-code
+    oracle, not a byte-accurate simulator; A2+ isel reads the real byte layout off
+    LStructLayout, not off this VReg's class). */
+fn lower_struct_init(ctx: LowerCtx, e: checker::TExpr, si: checker::TStructInit) -> Lowered | error {
+    let name = match named_type_name(e.type) { str as s => s; error as err => return err }
+    let layout = match find_struct_layout(ctx.layouts, name) { LStructLayout as l => l; error as err => return err }
+    let base = ctx_alloc(ctx)
+    let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, layout.size, layout.align, e.line, e.col))
+    store_struct_fields(with_alloca, base.vreg, layout, si.field_names, si.field_vals, e.line, e.col)
+}
+
+/** store_struct_fields — lower each field value in turn, storing it at its layout offset
+    from `base`; the result VReg is `base` itself (the struct's address, unchanged by the
+    stores). */
+fn store_struct_fields(ctx: LowerCtx, base: u32, layout: LStructLayout, field_names: []str, field_vals: []checker::TExpr, line: u32, col: u32) -> Lowered | error {
+    mut cur = ctx
+    mut i: u64 = 0
+    loop {
+        if i >= field_names.len { break }
+        let vo = match lower_expr(cur, field_vals[i]) { Lowered as x => x; error as err => return err }
+        let off = match field_offset_of(layout, field_names[i]) { u32 as o => o; error as err => return err }
+        let addr = ctx_alloc(vo.ctx)
+        let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, off, line, col))
+        cur = ctx_append(with_addr, store_inst(addr.vreg, vo.vreg, ltype_of(field_vals[i].type, cur.enums), line, col))
+        i++
+    }
+    Lowered { ctx = cur; vreg = base }
+}
+
+/** lower_field_access — `recv.field` on a struct receiver: lower the receiver to its base
+    address, compute the field's address via its registered layout offset, then load its
+    value. `.len` on a str/slice receiver (A1-4, #382) reads the receiver's ALREADY-CARRIED
+    length VReg instead — no memory traffic. An error's diagnostic fields / `Ref<T>.value`
+    remain out of the A1-3/A1-4 subset. */
+fn lower_field_access(ctx: LowerCtx, e: checker::TExpr, fa: checker::TFieldAccess) -> Lowered | error {
+    if fa.field == "len" && is_fat_type(fa.receiver.type) { return lower_len_field(ctx, fa) }
+    let ro = match lower_expr(ctx, fa.receiver) { Lowered as x => x; error as err => return err }
+    let name = match named_type_name(fa.receiver.type) { str as s => s; error as err => return err }
+    let layout = match find_struct_layout(ro.ctx.layouts, name) { LStructLayout as l => l; error as err => return err }
+    let off = match field_offset_of(layout, fa.field) { u32 as o => o; error as err => return err }
+    let addr = ctx_alloc(ro.ctx)
+    let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, ro.vreg, off, e.line, e.col))
+    let r = ctx_alloc(with_addr)
+    Lowered { ctx = ctx_append(r.ctx, load_inst(r.vreg, addr.vreg, ltype_of(e.type, r.ctx.enums), e.line, e.col)); vreg = r.vreg }
+}
+
+/** lower_len_field — `recv.len` on a str/slice receiver: the length half of the receiver's
+    already-lowered fat pair, read directly (no `load` — A1-4, #382, §2.3). */
+fn lower_len_field(ctx: LowerCtx, fa: checker::TFieldAccess) -> Lowered | error {
+    let fo = match lower_fat_expr(ctx, fa.receiver) { LoweredFat as x => x; error as err => return err }
+    Lowered { ctx = fo.ctx; vreg = fo.len }
+}
+
+/** slice_element_type — the element type of a `[]T` (Slice) type; any other receiver shape
+    (a `str`'s fat pointer arrives with A1-4) is out of the A1-3 subset. */
+fn slice_element_type(t: checker::Type) -> checker::Type | error {
+    match t {
+        checker::Slice as s => s.element
+        _ => error { message = "native backend N1: index receiver is not a slice (N2)" }
+    }
+}
+
+/** const_index_addr — a CONSTANT index folds directly into a static byte offset
+    (`index * stride`), a single `field_addr` (no runtime multiply). */
+fn const_index_addr(ctx: LowerCtx, base: u32, idx_value: i64, stride: u32, line: u32, col: u32) -> Lowered {
+    let offset = (idx_value * stride) to u32
+    let r = ctx_alloc(ctx)
+    Lowered { ctx = ctx_append(r.ctx, field_addr_inst(r.vreg, base, offset, line, col)); vreg = r.vreg }
+}
+
+/** dynamic_index_addr — a NON-constant index multiplies through an ordinary `IMul` (index
+    * stride) then `IAdd`s onto `base` — `LFieldAddr.offset` only ever carries a compile-time
+    constant, so a runtime-computed byte offset is plain integer arithmetic on the address
+    VReg instead (the plan's §2.1 resolution). */
+fn dynamic_index_addr(ctx: LowerCtx, base: u32, index: checker::TExpr, stride: u32, line: u32, col: u32) -> Lowered | error {
+    let io = match lower_expr(ctx, index) { Lowered as x => x; error as err => return err }
+    let sc = ctx_alloc(io.ctx)
+    let with_stride = ctx_append(sc.ctx, const_int_inst(sc.vreg, stride to i64, line, col))
+    let mr = ctx_alloc(with_stride)
+    let with_mul = ctx_append(mr.ctx, bin_inst(mr.vreg, LBinOp::IMul, io.vreg, sc.vreg, line, col))
+    let ar = ctx_alloc(with_mul)
+    Lowered { ctx = ctx_append(ar.ctx, bin_inst(ar.vreg, LBinOp::IAdd, base, mr.vreg, line, col)); vreg = ar.vreg }
+}
+
+/** index_addr — the element address for `recv[index]`: `const_index_addr` when `index` is
+    a literal integer (folds to a single instruction), else `dynamic_index_addr`. */
+fn index_addr(ctx: LowerCtx, base: u32, index: checker::TExpr, stride: u32, line: u32, col: u32) -> Lowered | error {
+    match index.kind {
+        checker::TNumber as n => if n.is_float { dynamic_index_addr(ctx, base, index, stride, line, col) } else { const_index_addr(ctx, base, parser::numint_to_i64(n.value), stride, line, col) }
+        _ => dynamic_index_addr(ctx, base, index, stride, line, col)
+    }
+}
+
+/** lower_index — `recv[index]`: a `str` receiver (A1-4, #382) indexes its BYTE at the fat
+    pointer's ptr half (element class I8, stride 1); a `[]T` receiver indexes its Slice
+    element (unchanged from A1-3). Either way the address is folded when `index` is a
+    constant, else computed via `index_addr`'s runtime multiply. */
+fn lower_index(ctx: LowerCtx, e: checker::TExpr, ix: checker::TIndex) -> Lowered | error {
+    match ix.receiver.type {
+        checker::Str => lower_index_str(ctx, e, ix)

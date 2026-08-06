@@ -1,0 +1,107 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+pub type LEnumInfo = struct { name: str; members: []str }
+
+/**
+ * LExternFn — one declared `extern fn`'s resolved namespace + Teko name + the
+ * FOREIGN symbol it binds to (C7.1a: `extern fn f(…) -> T = "sym"`). A call to
+ * an `extern` must target that raw symbol, NOT the Teko namespace mangling —
+ * the mangled name is defined by nobody, so the link fails on an undefined
+ * reference. The C backend already dispatches this way through
+ * `cg_find_function`/`is_extern` (`codegen.tks`); the native backend reads the
+ * same fact out of this whole-program table, threaded read-only through
+ * `LowerCtx` exactly like `enums`.
+ */
+pub type LExternFn = struct { namespace: str; name: str; c_symbol: str }
+
+/**
+ * LoopTargets — one active `loop`'s break/continue jump targets (A1-2,
+ * #382): `head` is the block a `continue` jumps to (the loop body's own
+ * entry), `exit` is the block a `break` jumps to (the block immediately
+ * after the loop), `defer_base` is `ctx.defers.len` at the loop body's
+ * entry (so a break/continue crossing this loop fires exactly the defers
+ * registered INSIDE its own body, LIFO), and `names` is the ordered list
+ * of SCALAR local names `promote_env` gave a block-arg on both `head` and
+ * `exit` — the loop head/exit are both MERGE points (the entry edge and
+ * every back/break edge flow into them), so a `break`/`continue` jump must
+ * supply, in this SAME order, the CURRENT VReg of each — mirroring the
+ * SAME block-arg merge principle an if-expression's result VReg already
+ * uses (§2.4).
+ */
+pub type LoopTargets = struct { label: str; head: u32; exit: u32; defer_base: u64; names: []str }
+
+/**
+ * LowerCtx — the lowering state threaded through the expr/stmt walk: the
+ * current LFunc being built + the id of the block instructions append to (N1
+ * always block 0) + the local env (name -> VReg) so a TVar resolves to its
+ * already-lowered value + the struct-layout table (A1-3, #382 — read-only for
+ * the whole lowering of a program, so every copy just carries the SAME slice
+ * forward) + the WHOLE-PROGRAM interned-rodata table (A1-4, #382 — grows as
+ * string literals/interpolation pieces are found, so a fresh entry mid-function
+ * is threaded forward like `func`, unlike the read-only `layouts`) + the
+ * WHOLE-PROGRAM enum table (A1-5, #382 — read-only, like `layouts`, so a
+ * `match` arm's bare enum-member pattern resolves its ordinal) + the
+ * WHOLE-PROGRAM lifted-function table (A1-7, #382 — grows like `rodata`:
+ * every closure/thunk LFunc a `TLambda`/`TVar.is_func` lowering builds is
+ * folded in here first, then into the module's `funcs` ONCE, at the very end
+ * of `lower_program` — its length also serves as the monotonic id counter a
+ * fresh lifted symbol's name embeds) + the CURRENT FUNCTION'S pending-defer
+ * stack (A1-2, #382 — every `defer { … }` reached so far, in program order;
+ * append-only, reset per function/lambda body, fired in LIFO slices by
+ * `replay_defers` at each scope exit) + the active loop-target stack (A1-2,
+ * #382 — innermost loop last, so a `break`/`continue` resolves by scanning
+ * from the end; reset per function/lambda body, since neither construct
+ * crosses a function boundary) + the WHOLE-PROGRAM `extern fn` table (C7.1a —
+ * read-only, like `layouts`/`enums`, so a call to a foreign function resolves
+ * to its declared C symbol instead of the Teko mangling) + `flat_symbols` (the static/shared-
+ * archive carve-out, read-only for the whole lowering of a program — `mangle_fn_symbol`'s `flat`
+ * argument threads through from here, both at a function's own declaration and at every
+ * `call_symbol` resolution, so the two stay consistent) + `ret_type` (the CURRENT FUNCTION/
+ * lambda's own DECLARED return type, reset per function/lambda body exactly like `defers`/
+ * `loop_targets` — `lower_return` and the trailing-tail auto-return both read it so a bare case
+ * value flowing back through a `T | error`-shaped return slot is coerced into the uniform
+ * tag+payload wrapper via `lower_value_into_type`, mirroring the C backend's `emit_return`
+ * threading `ret_type` into `emit_as_r`, #382 degrau N2) + `has_ret_len_slot`/`ret_len_slot`
+ * (the CURRENT FUNCTION'S own fat-return out-slot, reset per function/lambda body exactly like
+ * `ret_type` — a `str`/`[]T`-returning `fn` reserves ONE hidden trailing incoming register for
+ * the caller-supplied length-out address (`bind_ret_len_slot`), so `lower_return`/`lower_fn_body`
+ * can STORE the tail value's length half through it before the ordinary single-VReg `LRet`
+ * carries the ptr half — the callee-side contract `lower_call_fat`'s caller-side alloca+load
+ * mirrors exactly. `has_ret_len_slot=false` for every OTHER body (a void/scalar-returning `fn`,
+ * or a lambda — fat-returning closures are a NARROWER, still-closed gap, #382 degrau N2 call-gordo)
+ * so `lower_return`/`lower_fn_body`'s fat arm can honest-stop instead of storing through an unset
+ * slot when reached somewhere this backend does not yet wire the hidden parameter for).
+ */
+pub type LowerCtx = struct {
+    func: LFunc; block_id: u32; env: LEnv
+    layouts: []LStructLayout; rodata: []LRodata; enums: []LEnumInfo; lifted: []LFunc
+    defers: []checker::TDeferStmt; loop_targets: []LoopTargets; externs: []LExternFn
+    flat_symbols: bool; ret_type: checker::Type
+    has_ret_len_slot: bool; ret_len_slot: u32
+}
+
+/** Lowered — the result of lowering an expression: the updated context + the VReg the
+    value lives in. */
+pub type Lowered = struct { ctx: LowerCtx; vreg: u32 }
+
+/** LowerStmtOut — the result of lowering a statement: the updated context (its env may be
+    extended by a `let`) + whether the statement TERMINATED the block (a return), so the
+    caller stops emitting into a closed block. */
+pub type LowerStmtOut = struct { ctx: LowerCtx; terminated: bool }
+
+/**
+ * ctx_with — a copy of `ctx` with a new func/block_id/env, carrying its
+ * (unchanged) layouts/enums tables + its (unchanged) rodata table forward.
+ * Centralizes the fields every LowerCtx rebuild must not forget, so a future
+ * field addition touches this ONE function instead of every construction site.
+ * Use `ctx_with_rodata` when the rodata table itself grows (a string literal
+ * was just interned).
+ *
+ * @param LowerCtx ctx  the context to rebuild (its layouts/rodata/enums carry
+ *                      forward)
+ * @param LFunc func  the new current function
+ * @param u32 block_id  the new current block id
+ * @param LEnv env  the new local env
+ * @return LowerCtx  the rebuilt context
+ */

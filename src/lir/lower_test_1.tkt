@@ -1,0 +1,282 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+fn lwt_prim(k: checker::PrimKind) -> checker::Type { checker::Prim { kind = k } }
+
+fn lwt_num(v: i64, k: checker::PrimKind) -> checker::TExpr {
+    checker::TExpr { kind = checker::TNumber { is_float = false; value = parser::numint_of_i64(v); fval = 0.0 }; type = lwt_prim(k); line = 0; col = 0 }
+}
+
+fn lwt_num_i64(v: i64) -> checker::TExpr { lwt_num(v, checker::PrimKind::I64) }
+
+fn lwt_fnum(v: f64) -> checker::TExpr {
+    checker::TExpr { kind = checker::TNumber { is_float = true; value = parser::numint_of_u64(0); fval = v }; type = lwt_prim(checker::PrimKind::F64); line = 0; col = 0 }
+}
+
+fn lwt_var(name: str, k: checker::PrimKind) -> checker::TExpr {
+    checker::TExpr { kind = checker::TVar { name = name; is_func = false; func_ns = "" }; type = lwt_prim(k); line = 0; col = 0 }
+}
+
+fn lwt_bin(op: lexer::TokenKind, l: checker::TExpr, r: checker::TExpr, k: checker::PrimKind) -> checker::TExpr {
+    checker::TExpr { kind = checker::TBinary { op = op; left = l; right = r }; type = lwt_prim(k); line = 0; col = 0 }
+}
+
+fn lwt_unary(op: lexer::TokenKind, operand: checker::TExpr, k: checker::PrimKind) -> checker::TExpr {
+    checker::TExpr { kind = checker::TUnary { op = op; operand = operand }; type = lwt_prim(k); line = 0; col = 0 }
+}
+
+fn lwt_cast(inner: checker::TExpr, k: checker::PrimKind) -> checker::TExpr {
+    checker::TExpr { kind = checker::TCast { expr = inner }; type = lwt_prim(k); line = 0; col = 0 }
+}
+
+/** lwt_cmp_term — one adjacent term of a TCompare chain (`op operand`). */
+fn lwt_cmp_term(op: lexer::TokenKind, e: checker::TExpr) -> checker::TCmpTerm { checker::TCmpTerm { op = op; operand = e } }
+
+/** lwt_cmp — a TCompare node (`first` + the adjacent `terms`), always Bool-typed. */
+fn lwt_cmp(first: checker::TExpr, terms: []checker::TCmpTerm) -> checker::TExpr {
+    checker::TExpr { kind = checker::TCompare { first = first; rest = terms }; type = lwt_prim(checker::PrimKind::Bool); line = 0; col = 0 }
+}
+
+/** lwt_if_stmt — a Void (no-value) TIfExpr node, the if-STATEMENT shape. */
+fn lwt_if_stmt(cond: checker::TExpr, then_blk: []checker::TStatement, has_else: bool, else_blk: []checker::TStatement) -> checker::TExpr {
+    checker::TExpr { kind = checker::TIfExpr { cond = cond; then_blk = then_blk; has_else = has_else; else_blk = else_blk }; type = checker::Void { }; line = 0; col = 0 }
+}
+
+/** lwt_if_value — a value-producing TIfExpr node (always has an else), typed `k`. */
+fn lwt_if_value(cond: checker::TExpr, then_blk: []checker::TStatement, else_blk: []checker::TStatement, k: checker::PrimKind) -> checker::TExpr {
+    checker::TExpr { kind = checker::TIfExpr { cond = cond; then_blk = then_blk; has_else = true; else_blk = else_blk }; type = lwt_prim(k); line = 0; col = 0 }
+}
+
+fn lwt_seg(s: str) -> parser::Segment { parser::Segment { name = s } }
+fn lwt_path1(s: str) -> parser::Path { parser::Path { segments = teko::list::push(teko::list::empty(), lwt_seg(s)) } }
+
+/**
+ * lwt_path2 — a two-segment path `a::b` (the `[<Iface>, <method>]` callee
+ * shape a dynamic contract-method dispatch's `TCall.callee` carries).
+ *
+ * @param str a  the first segment's name
+ * @param str b  the second segment's name
+ * @return parser::Path  the two-segment path `a::b`
+ *
+ * @since #382 A1-6
+ */
+fn lwt_path2(a: str, b: str) -> parser::Path {
+    parser::Path { segments = teko::list::push(teko::list::push(teko::list::empty(), lwt_seg(a)), lwt_seg(b)) }
+}
+
+fn lwt_call(path: parser::Path, ns: str, args: []checker::TExpr, ret: checker::Type) -> checker::TExpr {
+    checker::TExpr {
+        kind = checker::TCall { callee = path; args = args; call_ns = ns; is_closure_call = false; callee_type = checker::Void { }; is_iface_dispatch = false; iface_slot = 0 }
+        type = ret; line = 0; col = 0
+    }
+}
+
+fn lwt_named_te(s: str) -> parser::TypeExpr { parser::NamedType { path = lwt_path1(s); args = teko::list::empty() } }
+
+fn lwt_param(name: str, tname: str) -> parser::Param {
+    parser::Param { name = name; has_type = true; type_ann = lwt_named_te(tname); is_params = false; has_default = false; default_expr = parser::no_expr() }
+}
+
+fn lwt_ret(e: checker::TExpr) -> checker::TStatement { checker::TReturn { has_value = true; value = e } }
+fn lwt_bind(name: str, e: checker::TExpr, k: checker::PrimKind) -> checker::TStatement {
+    checker::TBinding { kind = parser::BindKind::Let; target = parser::SimpleName { name = name }; bound = lwt_prim(k); value = e }
+}
+fn lwt_exprstmt(e: checker::TExpr) -> checker::TStatement { checker::TExprStmt { expr = e } }
+
+/** lwt_loop — a `TLoopStmt` node with an empty `init` (A1-2, #382 — `label` empty = unlabeled). */
+fn lwt_loop(label: str, body: []checker::TStatement) -> checker::TStatement {
+    checker::TLoopStmt { label = label; init = teko::list::empty(); body = body }
+}
+
+/** lwt_break — a `TBreakStmt` node (A1-2, #382 — `label` empty = innermost loop). */
+fn lwt_break(label: str) -> checker::TStatement { checker::TBreakStmt { label = label } }
+
+/** lwt_continue — a `TContinueStmt` node (A1-2, #382 — `label` empty = innermost loop). */
+fn lwt_continue(label: str) -> checker::TStatement { checker::TContinueStmt { label = label } }
+
+/** lwt_defer — a `TDeferStmt` node (A1-2, #382). */
+fn lwt_defer(body: []checker::TStatement) -> checker::TStatement { checker::TDeferStmt { body = body } }
+
+/** lwt_simple_assign — `name op= value` (or `name = value`), a Simple-kind
+    TAssign (A1-2, #382 — the shared shape the loop/break/defer fixtures
+    reassign a local through). */
+fn lwt_simple_assign(name: str, op: lexer::TokenKind, value: checker::TExpr, k: checker::PrimKind) -> checker::TStatement {
+    checker::TAssign { kind = parser::AssignKind::Simple; name = name; op = op; bound = lwt_prim(k); value = value; deref = false; target = checker::no_texpr() }
+}
+
+fn lwt_fn(name: str, ns: str, params: []parser::Param, ret: checker::Type, body: []checker::TStatement) -> checker::TFunction {
+    checker::TFunction {
+        name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty()
+        namespace = ns; params = params; return_type = ret; body = body
+        vis = parser::Visibility::Private; has_doc = false; doc = ""
+        file = ""; line = 0; col = 0; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""
+        has_arena_size = false; arena_size = 0 to u64
+    }
+}
+
+/** lwt_fn_item — `lwt_fn`, coerced to a `checker::TItem` (the shape a `checker::TProgram.items`
+    list needs — mirrors `lwt_extern_fn`'s own TItem-returning contract). */
+fn lwt_fn_item(name: str, ns: str, params: []parser::Param, ret: checker::Type, body: []checker::TStatement) -> checker::TItem {
+    lwt_fn(name, ns, params, ret, body)
+}
+
+/** lwt_lower_expr_text — lower a single expression (with no registered struct layouts)
+    into a fresh i64 fn body and return its printed LIR (for asserting on the emitted
+    instructions). */
+fn lwt_lower_expr_text(e: checker::TExpr) -> str {
+    lwt_lower_expr_text_with(e, teko::list::empty())
+}
+
+/** lwt_lower_expr_text_with — lwt_lower_expr_text, but threading a struct-layout table
+    (A1-3, #382) so a TStructInit/TFieldAccess/TIndex fixture can resolve its offsets. The
+    printed module folds in whatever the expression interned into rodata (A1-4, #382) and
+    whatever closure/thunk it lifted (A1-7, #382), so a string-literal or closure fixture's
+    golden dump shows its `rodata`/`{ptr,len}`/lifted-function shape too. */
+fn lwt_lower_expr_text_with(e: checker::TExpr, layouts: []LStructLayout) -> str {
+    let f0 = new_func("t", 0, teko::list::empty(), LType::I64)
+    let ctx0 = LowerCtx {
+        func = f0; block_id = 0; env = empty_lenv()
+        layouts = layouts; rodata = teko::list::empty(); enums = teko::list::empty(); lifted = teko::list::empty()
+        defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = teko::list::empty()
+        flat_symbols = false; ret_type = checker::Prim { kind = checker::PrimKind::I64 }
+        has_ret_len_slot = false; ret_len_slot = 0
+    }
+    let lo = match lower_expr(ctx0, e) { Lowered as x => x; error as err => return teko::str::concat("ERR: ", err.message) }
+    let m0 = with_rodata(add_func(empty_module(), lo.ctx.func), lo.ctx.rodata)
+    print_lmodule(lwt_fold_lifted(m0, lo.ctx.lifted))
+}
+
+/** lwt_fold_lifted — append every entry of `lifted` into `m.funcs` (mirrors `lower.tks`'s
+    own `fold_lifted_funcs`, A1-7 #382 — kept local to the test file since it is the ONLY
+    caller here that needs to fold a lifted table outside `lower_program` itself). */
+fn lwt_fold_lifted(m: LModule, lifted: []LFunc) -> LModule {
+    mut cur = m
+    mut i: u64 = 0
+    loop {
+        if i >= lifted.len { break }
+        cur = add_func(cur, lifted[i])
+        i++
+    }
+    cur
+}
+
+/**
+ * lwt_lower_expr_text_with_enums — `lwt_lower_expr_text`, but threading a declared-enum table
+ * (`#594` T-B) instead of the empty default, so an enum-typed comparison/cast/arithmetic
+ * fixture resolves through `prim_kind_of`'s `I32` ordinal carrier (or its own-named honest stop
+ * for a non-enum Named type) instead of always seeing "no enums declared".
+ *
+ * @param checker::TExpr e  the expression to lower
+ * @param []LEnumInfo enums  the declared-enum table to lower against
+ * @return str  the printed LIR module, or `"ERR: <message>"` on an honest stop
+ */
+fn lwt_lower_expr_text_with_enums(e: checker::TExpr, enums: []LEnumInfo) -> str {
+    let f0 = new_func("t", 0, teko::list::empty(), LType::I64)
+    let ctx0 = LowerCtx {
+        func = f0; block_id = 0; env = empty_lenv()
+        layouts = teko::list::empty(); rodata = teko::list::empty(); enums = enums; lifted = teko::list::empty()
+        defers = teko::list::empty(); loop_targets = teko::list::empty(); externs = teko::list::empty()
+        flat_symbols = false; ret_type = checker::Prim { kind = checker::PrimKind::I64 }
+        has_ret_len_slot = false; ret_len_slot = 0
+    }
+    let lo = match lower_expr(ctx0, e) { Lowered as x => x; error as err => return teko::str::concat("ERR: ", err.message) }
+    let m0 = with_rodata(add_func(empty_module(), lo.ctx.func), lo.ctx.rodata)
+    print_lmodule(lwt_fold_lifted(m0, lo.ctx.lifted))
+}
+
+/**
+ * lwt_color_enums — the declared-enum table for a two-member `Color` enum (`Red`, `Green`),
+ * shared by every `prim_kind_of` enum-ordinal fixture below (mirrors the existing
+ * `lwt_lowers_match_enum_member_pattern_via_registered_ordinal` fixture's own inline table).
+ *
+ * @return []LEnumInfo  a one-entry enum table naming `Color`
+ */
+fn lwt_color_enums() -> []LEnumInfo {
+    teko::list::push(teko::list::empty(), LEnumInfo { name = "Color"; members = teko::list::push(teko::list::push(teko::list::empty(), "Red"), "Green") })
+}
+
+#test
+fn lwt_ltype_of_maps_prims_to_machine_classes() {
+    teko::assert::is_true(match ltype_of(lwt_prim(checker::PrimKind::I64), teko::list::empty()) { I64 => true; _ => false })
+    teko::assert::is_true(match ltype_of(lwt_prim(checker::PrimKind::U32), teko::list::empty()) { I32 => true; _ => false })
+    teko::assert::is_true(match ltype_of(lwt_prim(checker::PrimKind::I8), teko::list::empty()) { I8 => true; _ => false })
+    teko::assert::is_true(match ltype_of(lwt_prim(checker::PrimKind::F64), teko::list::empty()) { F64 => true; _ => false })
+    teko::assert::is_true(match ltype_of(lwt_prim(checker::PrimKind::Bool), teko::list::empty()) { I8 => true; _ => false })
+}
+
+/** lwt_binop_is — did lbinop_of return exactly `want` (not an error)? */
+fn lwt_binop_is(op: lexer::TokenKind, k: checker::PrimKind, want: LBinOp) -> bool {
+    match lbinop_of(op, k) { LBinOp as o => o == want; error => false }
+}
+
+/** lwt_unop_is — did lunop_of return exactly `want` (not an error)? */
+fn lwt_unop_is(op: lexer::TokenKind, k: checker::PrimKind, want: LUnOp) -> bool {
+    match lunop_of(op, k) { LUnOp as o => o == want; error => false }
+}
+
+#test
+fn lwt_lbinop_of_picks_signedness_and_family() {
+    teko::assert::is_true(lwt_binop_is(lexer::TokenKind::Plus, checker::PrimKind::I64, LBinOp::IAdd))
+    teko::assert::is_true(lwt_binop_is(lexer::TokenKind::Slash, checker::PrimKind::I32, LBinOp::IDivS))
+    teko::assert::is_true(lwt_binop_is(lexer::TokenKind::Slash, checker::PrimKind::U32, LBinOp::IDivU))
+    teko::assert::is_true(lwt_binop_is(lexer::TokenKind::Percent, checker::PrimKind::I64, LBinOp::IRemS))
+    teko::assert::is_true(lwt_binop_is(lexer::TokenKind::Plus, checker::PrimKind::F64, LBinOp::FAdd))
+}
+
+/**
+ * lwt_lbinop_of_maps_bitwise_and_shift — the KP2 bitwise/shift lowering: `& | ^` map to
+ * IAnd/IOr/IXor, `<<` to the signedness-agnostic IShl, and `>>` to IShrS on a signed result
+ * type or IShrU on an unsigned one (the shift's signedness is the LEFT operand's, carried in
+ * the result PrimKind lbinop_of receives).
+ */
+#test
+fn lwt_lbinop_of_maps_bitwise_and_shift() {
+    teko::assert::is_true(lwt_binop_is(lexer::TokenKind::Amp, checker::PrimKind::I64, LBinOp::IAnd))
+    teko::assert::is_true(lwt_binop_is(lexer::TokenKind::Pipe, checker::PrimKind::U32, LBinOp::IOr))
+    teko::assert::is_true(lwt_binop_is(lexer::TokenKind::Caret, checker::PrimKind::I16, LBinOp::IXor))
+    teko::assert::is_true(lwt_binop_is(lexer::TokenKind::Shl, checker::PrimKind::I64, LBinOp::IShl))
+    teko::assert::is_true(lwt_binop_is(lexer::TokenKind::Shr, checker::PrimKind::I64, LBinOp::IShrS))
+    teko::assert::is_true(lwt_binop_is(lexer::TokenKind::Shr, checker::PrimKind::U64, LBinOp::IShrU))
+}
+
+/**
+ * lwt_lbinop_of_rejects_out_of_subset — a token with no arithmetic/bitwise/shift LBinOp (a
+ * logical `&&`, which lowers via its own short-circuit path, never lbinop_of) still
+ * honest-stops, so the defensive `_` arm stays reachable-safe.
+ */
+#test
+fn lwt_lbinop_of_rejects_out_of_subset() {
+    teko::assert::is_true(match lbinop_of(lexer::TokenKind::AndAnd, checker::PrimKind::I64) { LBinOp => false; error => true })
+}
+
+/**
+ * lwt_lunop_of_picks_negation_family — lunop_of maps `-` to INeg/FNeg by family and `~`
+ * (bitwise one's-complement, integer-only) to INot. `!` (Bang) is deliberately NOT mapped
+ * here: it is intercepted in lower_unary and lowered to a logical `operand == 0` (F1c fix,
+ * #389), so lunop_of returns an error for it rather than the old bitwise LUnOp::INot (which
+ * miscompiled `!` on the own backend); `~`, a genuine one's-complement, DOES map to INot.
+ */
+#test
+fn lwt_lunop_of_picks_negation_family() {
+    teko::assert::is_true(lwt_unop_is(lexer::TokenKind::Minus, checker::PrimKind::I64, LUnOp::INeg))
+    teko::assert::is_true(lwt_unop_is(lexer::TokenKind::Minus, checker::PrimKind::F64, LUnOp::FNeg))
+    teko::assert::is_true(lwt_unop_is(lexer::TokenKind::Tilde, checker::PrimKind::I64, LUnOp::INot))
+    teko::assert::is_true(lwt_unop_is(lexer::TokenKind::Tilde, checker::PrimKind::U8, LUnOp::INot))
+    teko::assert::is_true(match lunop_of(lexer::TokenKind::Bang, checker::PrimKind::Bool) { LUnOp => false; error => true })
+}
+
+/**
+ * lwt_lowers_logical_not_to_icmpeq_zero — `!` lowers to a LOGICAL-not: a `const 0`
+ * then an `icmpeq operand, 0` (F1c fix, #389), NOT a bitwise `inot`. The operand here is
+ * `1 < 2` (%2 = icmplts %0, %1); the not then emits %3 = const 0 and %4 = icmpeq %2, %3.
+ */
+#test
+fn lwt_lowers_logical_not_to_icmpeq_zero() {
+    let cond = lwt_cmp(lwt_num_i64(1), teko::list::push(teko::list::empty(), lwt_cmp_term(lexer::TokenKind::Lt, lwt_num_i64(2))))
+    let e = lwt_unary(lexer::TokenKind::Bang, cond, checker::PrimKind::Bool)
+    let text = lwt_lower_expr_text(e)
+    teko::assert::str_contains(text, "%3 = const 0")
+    teko::assert::str_contains(text, "%4 = icmpeq %2, %3")
+    teko::assert::is_true(!teko::str::contains(text, "inot"))
+}
+

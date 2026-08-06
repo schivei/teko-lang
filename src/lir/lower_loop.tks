@@ -1,0 +1,303 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+    loop {
+        if i >= names.len { break }
+        let bp = add_block_param(cur_f, block_id)
+        cur_f = bp.func
+        param_vregs = teko::list::push(param_vregs, bp.vreg)
+        i++
+    }
+    PromotedEnv { func = cur_f; env = rebind_scalars(env, names, param_vregs); names = names }
+}
+
+/**
+ * merge_value_args — a value-producing merge's jump-arg list: the arm's tail
+ * VALUE first, then one arg per reassigned scalar (in `names` order), matching
+ * the merge block's `value`-param-first, scalar-params-after layout (#389 F1).
+ *
+ * @param u32 value  the arm's tail-value VReg (the merge's first block-param)
+ * @param []u32 scalars  the reassigned-scalar args, in `names` order
+ * @return []u32  `[value] ++ scalars`
+ */
+fn merge_value_args(value: u32, scalars: []u32) -> []u32 {
+    mut out = teko::list::push(teko::list::empty(), value)
+    mut i: u64 = 0
+    loop {
+        if i >= scalars.len { break }
+        out = teko::list::push(out, scalars[i])
+        i++
+    }
+    out
+}
+
+/**
+ * if_arm_stmts — both arms of an `if` flattened into one statement block for
+ * the reassigned-scalar pre-scan: the then block always, the else block only
+ * when the `if` actually HAS one (an else-less `if`'s pass-through arm mutates
+ * nothing) (#389 F1).
+ *
+ * @param checker::TIfExpr f  the if node
+ * @return []checker::TStatement  the then block, plus the else block when present
+ */
+fn if_arm_stmts(f: checker::TIfExpr) -> []checker::TStatement {
+    if !f.has_else { return f.then_blk }
+    mut out = f.then_blk
+    mut i: u64 = 0
+    loop {
+        if i >= f.else_blk.len { break }
+        out = teko::list::push(out, f.else_blk[i])
+        i++
+    }
+    out
+}
+
+/**
+ * match_arm_stmts — every arm body of a `match` flattened into one statement
+ * block for the reassigned-scalar pre-scan (#389 F1).
+ *
+ * @param []checker::TArm arms  the match's arms
+ * @return []checker::TStatement  every arm body's statements, concatenated
+ */
+fn match_arm_stmts(arms: []checker::TArm) -> []checker::TStatement {
+    mut out: []checker::TStatement = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= arms.len { break }
+        let body = arms[i].body
+        mut j: u64 = 0
+        loop {
+            if j >= body.len { break }
+            out = teko::list::push(out, body[j])
+            j++
+        }
+        i++
+    }
+    out
+}
+
+/**
+ * find_loop_target — the loop-target the innermost matching loop resolves
+ * to: an empty `label` matches the INNERMOST active loop; a non-empty label
+ * scans from the innermost outward for the loop declared with that name —
+ * mirrors the C backend's `cg_target_defer_base` scan (`codegen.tks:
+ * 5299-5310`) (A1-2, #382).
+ *
+ * @param []LoopTargets loops  the active loop-target stack, outermost first
+ * @param str label  the break/continue's target label ("" = innermost)
+ * @return LoopTargets | error  the matching loop's targets, or a NAMED
+ *                              internal error when none match (a checker
+ *                              invariant break — a break/continue outside a
+ *                              loop never reaches lowering)
+ */
+fn find_loop_target(loops: []LoopTargets, label: str) -> LoopTargets | error {
+    mut i: u64 = loops.len
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        let lt = loops[i]
+        if label.len == 0 || lt.label == label { return lt }
+    }
+    error { message = "native backend N1: break/continue outside a loop (internal)" }
+}
+
+/**
+ * lower_break — `break`/`break L`: resolve the target loop, fire every
+ * defer registered inside its own body (LIFO, from its `defer_base`), then
+ * jump to its exit block carrying the CURRENT VReg of each of its promoted
+ * names (A1-2, #382).
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param checker::TBreakStmt b  the break node
+ * @return LowerStmtOut | error  the advanced (terminated) context, or a
+ *                               NAMED internal error when the target loop
+ *                               is unresolved or a pending defer fails to
+ *                               lower
+ */
+fn lower_break(ctx: LowerCtx, b: checker::TBreakStmt) -> LowerStmtOut | error {
+    let target = match find_loop_target(ctx.loop_targets, b.label) { LoopTargets as t => t; error as err => return err }
+    let replayed = match replay_defers(ctx, target.defer_base) { LowerCtx as c => c; error as err => return err }
+    let args = jump_args_for_names(replayed.env, target.names)
+    LowerStmtOut { ctx = ctx_append(replayed, jump_inst(target.exit, args, 0, 0)); terminated = true }
+}
+
+/**
+ * lower_continue — `continue`/`continue L`: resolve the target loop, fire
+ * every defer registered inside its own body (LIFO, from its
+ * `defer_base`), then jump BACK to its head block carrying the CURRENT
+ * VReg of each of its promoted names (A1-2, #382).
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param checker::TContinueStmt c  the continue node
+ * @return LowerStmtOut | error  the advanced (terminated) context, or a
+ *                               NAMED internal error when the target loop
+ *                               is unresolved or a pending defer fails to
+ *                               lower
+ */
+fn lower_continue(ctx: LowerCtx, c: checker::TContinueStmt) -> LowerStmtOut | error {
+    let target = match find_loop_target(ctx.loop_targets, c.label) { LoopTargets as t => t; error as err => return err }
+    let replayed = match replay_defers(ctx, target.defer_base) { LowerCtx as c2 => c2; error as err => return err }
+    let args = jump_args_for_names(replayed.env, target.names)
+    LowerStmtOut { ctx = ctx_append(replayed, jump_inst(target.head, args, 0, 0)); terminated = true }
+}
+
+/**
+ * close_loop_body — close a loop's body block: if it already ended in a
+ * terminator (an explicit `return`/`break`/`continue`), leave it as-is;
+ * otherwise fire the loop's own pending defers (registered since
+ * `defer_base`, LIFO) and append an implicit jump BACK to `head` carrying
+ * the current VReg of each promoted name — the body fell through, an
+ * ordinary `while(1)` iteration end (mirrors the C backend's
+ * `emit_loop`'s fall-through edge, `codegen.tks:5845-5850`) (A1-2, #382).
+ *
+ * @param LowerCtx ctx  the context after lowering the loop's body
+ * @param u32 head  the loop head block a fall-through implicitly continues to
+ * @param []str names  the loop's promoted-name list (head's param order)
+ * @param u64 defer_base  the defer-stack index the loop's body started at
+ * @return LowerCtx | error  the context with its body block closed, or a
+ *                           NAMED internal error when a pending defer fails
+ *                           to lower
+ */
+fn close_loop_body(ctx: LowerCtx, head: u32, names: []str, defer_base: u64) -> LowerCtx | error {
+    if block_terminated(ctx.func, ctx.block_id) { return ctx }
+    let replayed = match replay_defers(ctx, defer_base) { LowerCtx as c => c; error as err => return err }
+    let args = jump_args_for_names(replayed.env, names)
+    ctx_append(replayed, jump_inst(head, args, 0, 0))
+}
+
+/**
+ * close_loop — the context immediately after a loop statement: positioned
+ * in the exit block with `exit_env` (every promoted name now reading the
+ * exit block's OWN param — the value whichever `break` was taken carried),
+ * the loop's OWN growth (rodata/lifted/enums/layouts, from lowering its
+ * body) carried forward, and BOTH its OWN loop-target AND its OWN defer
+ * stack restored to what they were BEFORE the loop (A1-2, #382; the C1-6
+ * audit's PR #553 review finding extends the loop_targets restore to
+ * `defers`, the sibling side-carried field: every defer the body registered
+ * ALREADY fired, once per iteration/break/continue, via `close_loop_body`/
+ * `lower_break`/`lower_continue`'s own `replay_defers` calls — carrying
+ * `body_done.defers` forward instead would leave those SAME entries
+ * pending, so a later scope exit's `replay_defers(…, 0)` would fire them a
+ * SECOND time).
+ *
+ * @param LowerCtx outer  the context as it stood BEFORE the loop's BODY
+ *                        (after its `init`, so an init-registered defer
+ *                        survives too) — its `.loop_targets`/`.defers` are
+ *                        what get restored
+ * @param LowerCtx body_done  the context after the loop's body (and its
+ *                            fall-through close) finished lowering
+ * @param u32 exit_block  the loop's exit block id (the new current block)
+ * @param LEnv exit_env  the exit block's own promoted env
+ * @return LowerCtx  the context positioned after the loop
+ */
+fn close_loop(outer: LowerCtx, body_done: LowerCtx, exit_block: u32, exit_env: LEnv) -> LowerCtx {
+    LowerCtx {
+        func = body_done.func; block_id = exit_block; env = exit_env
+        layouts = body_done.layouts; rodata = body_done.rodata; enums = body_done.enums; lifted = body_done.lifted
+        defers = outer.defers; loop_targets = outer.loop_targets; externs = body_done.externs
+        flat_symbols = body_done.flat_symbols; ret_type = body_done.ret_type
+        has_ret_len_slot = body_done.has_ret_len_slot; ret_len_slot = body_done.ret_len_slot
+    }
+}
+
+/**
+ * lower_loop — a `loop { … }` statement: jump into the body's own block
+ * (`#Bhead`), lower the body there, and — when it falls through normally —
+ * fire its own pending defers before an implicit jump BACK to `#Bhead`
+ * (mirrors the C backend's `while(1){…}`, `codegen.tks:5813-5856`). The
+ * loop's exit block (`#Bexit`) follows immediately; `break` targets it,
+ * `continue` targets `#Bhead`. Both `#Bhead` and `#Bexit` are MERGE
+ * points — the loop head sees the entry edge AND every back edge, the exit
+ * sees every `break` edge — so both get one block-arg per SCALAR local live
+ * in the enclosing env (`promote_env`), threading a loop-mutated variable
+ * (a counter) correctly across iterations, exactly like an if-expression's
+ * result VReg merges through its own block-arg (§2.4) (A1-2, #382).
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param checker::TLoopStmt l  the loop node
+ * @return LowerStmtOut | error  the advanced context, positioned in
+ *                               `#Bexit` (terminated=false — code AFTER the
+ *                               loop is reachable through a `break`), or a
+ *                               NAMED internal error when the body fails to
+ *                               lower
+ */
+fn lower_loop(ctx: LowerCtx, l: checker::TLoopStmt) -> LowerStmtOut | error {
+    let ictx = match lower_block(ctx, l.init) { LowerCtx as c => c; error as err => return err }
+    let headb = alloc_block(ictx.func)
+    let exitb = alloc_block(headb.func)
+    let head_seed = promote_env(exitb.func, headb.block_id, ictx.env)
+    let exit_seed = promote_env(head_seed.func, exitb.block_id, ictx.env)
+    let entry_args = env_scalar_vregs(ictx.env)
+    let entered = append_inst(exit_seed.func, ictx.block_id, jump_inst(headb.block_id, entry_args, 0, 0))
+    let defer_base = ictx.defers.len
+    let target = LoopTargets { label = l.label; head = headb.block_id; exit = exitb.block_id; defer_base = defer_base; names = head_seed.names }
+    let body_seed = ctx_with_loops(ctx_with(ictx, entered, headb.block_id, head_seed.env), teko::list::push(ictx.loop_targets, target))
+    let body_done = match lower_block(body_seed, l.body) { LowerCtx as c => c; error as err => return err }
+    let closed = match close_loop_body(body_done, headb.block_id, head_seed.names, defer_base) { LowerCtx as c => c; error as err => return err }
+    LowerStmtOut { ctx = close_loop(ictx, closed, exitb.block_id, exit_seed.env); terminated = false }
+}
+
+/** ctx_goto — switch the context to emit into `block_id` (already allocated), keeping the
+    function/env unchanged — used after a branch/jump splits control into a fresh block. */
+fn ctx_goto(ctx: LowerCtx, block_id: u32) -> LowerCtx {
+    ctx_with(ctx, ctx.func, block_id, ctx.env)
+}
+
+/** close_arm_to — close a lowered if-arm by jumping to `target` carrying `args` as its
+    block-args, UNLESS the arm's block already ended in a terminator (an early return, or a
+    nested branch/jump) — such an arm's control never reaches this merge. */
+fn close_arm_to(ctx: LowerCtx, target: u32, args: []u32, line: u32, col: u32) -> LFunc {
+    if block_terminated(ctx.func, ctx.block_id) { return ctx.func }
+    append_inst(ctx.func, ctx.block_id, jump_inst(target, args, line, col))
+}
+
+/**
+ * ClosedArm — the outcome of `close_arm_replaying_defers`: the arm's own
+ * closed function (the merge jump appended, or unchanged when the arm
+ * already terminated) + the context a caller resumes lowering FROM (its
+ * `.defers` reset to the arm's PRE-ENTRY stack — see
+ * `close_arm_replaying_defers`'s own doc for why).
+ */
+pub type ClosedArm = struct { ctx: LowerCtx; func: LFunc }
+
+/**
+ * close_arm_replaying_defers — close a lowered if/match arm CORRECTLY
+ * scoped for its OWN defers: fire every defer the arm itself registered
+ * since entering it (LIFO, from `pre_arm_defers.len`) AFTER the arm's tail
+ * value/effects are already captured, mirroring the C backend's
+ * `emit_branch_value` (`codegen.tks:3376-3400`, which fires a branch's own
+ * defers right after its tail lands in `sink`, never letting them leak past
+ * the branch), THEN reset the pending-defer stack back to `pre_arm_defers`
+ * before jumping to `target`.
+ *
+ * Without the reset, `ctx_with`'s field-copy (the SAME mechanism the C1-6
+ * audit's rodata fix relies on) would carry the arm's own defer
+ * registrations past the merge, where a later function-exit
+ * `replay_defers(…, 0)` (`:3659`) would fire them a SECOND time —
+ * UNCONDITIONALLY, even for an arm whose branch never ran at runtime (PR
+ * #553 review finding: `if cond { defer { print("A") } }; print("B")`
+ * called with `cond=false` must print only "B", never "A"). Arrays are
+ * value types in Teko, so reusing the untouched `pre_arm_defers` slice is a
+ * free truncation — the SAME pattern `close_loop` uses to restore
+ * `loop_targets` (and, after this same audit, `defers` too — see
+ * `close_loop`'s own doc).
+ *
+ * The merge jump's block-args are `value_args` (captured PRE-replay, so a
+ * value arm's merge VALUE stays the pre-defer tail — the timing the
+ * `lwt_defer_inside_*_value_arm` goldens pin) FOLLOWED BY each reassigned
+ * enclosing scalar in `names`, each re-sampled from the POST-replay env so a
+ * `defer`'s write to one reaches its merge param with the POST-defer value.
+ * Before #389 F1b the scalar args were sampled from the arm's PRE-replay env,
+ * silently dropping any defer write to an enclosing scalar past the merge (the
+ * latent same-class miscompile F1 left as a documented residual).
+ *
+ * A terminated arm (an early `return`/`break`/`continue` already fired
+ * every defer ITS OWN scope owns, from ITS OWN base — `lower_return`/
+ * `lower_break`/`lower_continue`) never reaches `target` at all: this
+ * function skips the replay for it (mirroring `close_arm_to`'s own
+ * terminated-block no-op) but STILL resets `.defers`, since whatever the
+ * arm registered before terminating must not leak into a sibling arm or
+ * the merge either — that arm's control never reaches them.
+ *
+ * @param LowerCtx ctx  the context after lowering the arm's own body
+ * @param []checker::TDeferStmt pre_arm_defers  the defer stack as it stood

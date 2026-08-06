@@ -1,0 +1,203 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+        _ => lower_index_slice(ctx, e, ix)
+    }
+}
+
+/** lower_index_str — `recv[index]` on a `str` receiver: the byte at `index` in its rodata/
+    fat-pointer content (A1-4, #382). */
+fn lower_index_str(ctx: LowerCtx, e: checker::TExpr, ix: checker::TIndex) -> Lowered | error {
+    let ro = match lower_fat_expr(ctx, ix.receiver) { LoweredFat as x => x; error as err => return err }
+    let elem_ty = LType::I8
+    let addr_out = match index_addr(ro.ctx, ro.ptr, ix.index, ltype_size(elem_ty), e.line, e.col) { Lowered as x => x; error as err => return err }
+    let r = ctx_alloc(addr_out.ctx)
+    Lowered { ctx = ctx_append(r.ctx, load_inst(r.vreg, addr_out.vreg, elem_ty, e.line, e.col)); vreg = r.vreg }
+}
+
+/** lower_index_slice — `recv[index]` on a `[]T` receiver (A1-3 behavior, unchanged): lower
+    the receiver to its base address, compute the element's address (folded when `index` is
+    constant), then load its value. */
+fn lower_index_slice(ctx: LowerCtx, e: checker::TExpr, ix: checker::TIndex) -> Lowered | error {
+    let ro = match lower_expr(ctx, ix.receiver) { Lowered as x => x; error as err => return err }
+    match slice_element_type(ix.receiver.type) { checker::Type => { }; error as err => return err }
+    let elem_ty = ltype_of(e.type, ro.ctx.enums)
+    let addr_out = match index_addr(ro.ctx, ro.vreg, ix.index, ltype_size(elem_ty), e.line, e.col) { Lowered as x => x; error as err => return err }
+    let r = ctx_alloc(addr_out.ctx)
+    Lowered { ctx = ctx_append(r.ctx, load_inst(r.vreg, addr_out.vreg, elem_ty, e.line, e.col)); vreg = r.vreg }
+}
+
+/** lower_array_lit — `[e0, e1, …]`: alloca `elements.len * stride` bytes (the element's
+    machine size), then store each element at its constant offset. The literal's "value" is
+    its alloca'd base address, exactly like a struct literal — the length/fat-pointer
+    wrapping (`.len`, slicing, spreads) is A1-4's concern; a spread element (`..xs`) is out
+    of the A1-3 subset (its length isn't known until then). */
+fn lower_array_lit(ctx: LowerCtx, e: checker::TExpr, al: checker::TArrayLit) -> Lowered | error {
+    let elem_t = match slice_element_type(e.type) { checker::Type as t => t; error as err => return err }
+    let elem_ty = ltype_of(elem_t, ctx.enums)
+    let stride = ltype_size(elem_ty)
+    let total = (al.elements.len to u32) * stride
+    let base = ctx_alloc(ctx)
+    let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, total, ltype_align(elem_ty), e.line, e.col))
+    store_array_elements(with_alloca, base.vreg, al.elements, stride, e.line, e.col)
+}
+
+/** store_array_elements — lower each non-spread element in turn, storing it at its
+    constant `index * stride` offset from `base`; the result VReg is `base` itself. */
+fn store_array_elements(ctx: LowerCtx, base: u32, elements: []checker::TArrayElem, stride: u32, line: u32, col: u32) -> Lowered | error {
+    mut cur = ctx
+    mut i: u64 = 0
+    loop {
+        if i >= elements.len { break }
+        let elem = elements[i]
+        if elem.is_spread { return error { message = "native backend N1: spread array element not yet lowered (N2)" } }
+        let vo = match lower_expr(cur, elem.expr) { Lowered as x => x; error as err => return err }
+        let offset = (i to u32) * stride
+        let addr = ctx_alloc(vo.ctx)
+        let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, offset, line, col))
+        cur = ctx_append(with_addr, store_inst(addr.vreg, vo.vreg, ltype_of(elem.expr.type, cur.enums), line, col))
+        i++
+    }
+    Lowered { ctx = cur; vreg = base }
+}
+
+/** lower_array_lit_fat — an array literal's (ptr, len) pair: the SAME alloca+stores
+    `lower_array_lit` builds (unchanged VReg numbering for the plain scalar path — indexing
+    never needs the length), plus one more constant for its compile-time-known element count
+    (A1-4, #382). */
+fn lower_array_lit_fat(ctx: LowerCtx, e: checker::TExpr, al: checker::TArrayLit) -> LoweredFat | error {
+    let base = match lower_array_lit(ctx, e, al) { Lowered as x => x; error as err => return err }
+    let lenr = ctx_alloc(base.ctx)
+    let with_len = ctx_append(lenr.ctx, const_int_inst(lenr.vreg, al.elements.len to i64, e.line, e.col))
+    LoweredFat { ctx = with_len; ptr = base.vreg; len = lenr.vreg }
+}
+
+/** bool_lit_value — a bool literal's i64 register carrier (1 = true, 0 = false — the released
+    seed does not implement a `bool to <numeric>` cast, so this picks the constant explicitly,
+    mirroring the interp's own bool_to_i64 and lower_bool_and's zero constant). */
+fn bool_lit_value(v: bool) -> i64 { if v { 1 } else { 0 } }
+
+/** lower_byte_lit — a byte literal -> its value widened to the i64 carrier. */
+fn lower_byte_lit(ctx: LowerCtx, e: checker::TExpr, b: checker::TByteLit) -> Lowered {
+    let r = ctx_alloc(ctx)
+    Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, b.value to i64, e.line, e.col)); vreg = r.vreg }
+}
+
+/** lower_bool_lit — a bool literal -> its i64 carrier (bool_lit_value). */
+fn lower_bool_lit(ctx: LowerCtx, e: checker::TExpr, b: checker::TBoolLit) -> Lowered {
+    let r = ctx_alloc(ctx)
+    Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, bool_lit_value(b.value), e.line, e.col)); vreg = r.vreg }
+}
+
+/**
+ * lower_null_lit — a `null` literal in a position that lowers it as a VALUE: a zero (null) Ptr
+ * constant, which is the whole representation for an `Optional`-typed null.
+ *
+ * A null typed `checker::Null` is a different thing and HONEST-STOPS here. The checker gives a bare
+ * `null` the `Null` type exactly when its context is a null-bearing union (`typer.type_expr`'s
+ * `null_widens_into` arm), and in the own backend such a value must become the union's tag+payload
+ * wrapper (`lower_value_into_type`). The placements that know their declared type intercept it
+ * before this function is ever reached; anything else — a call argument, a struct-literal field —
+ * would otherwise write a raw `const 0` into a VReg that a later `match` reads as the wrapper's
+ * BASE ADDRESS, i.e. a load from address 0. Refusing to lower it names the gap instead (M.3).
+ *
+ * @param LowerCtx ctx  the lowering context to append the constant into
+ * @param checker::TExpr e  the null-literal expression (its `.type` decides value vs union)
+ * @param checker::TNullLit n  the null-literal node
+ * @return Lowered | error  the zero constant, or the honest stop for a union-typed null
+ * @throws  when the literal's type is `Null` (a union placement with no coercion site)
+ */
+fn lower_null_lit(ctx: LowerCtx, e: checker::TExpr, n: checker::TNullLit) -> Lowered | error {
+    match e.type {
+        checker::Null => return error { message = "native backend N1: a `null` in this position needs the null-union wrapper the placement does not declare a type for (N2)" }
+        _ => { }
+    }
+    let r = ctx_alloc(ctx)
+    Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, 0, e.line, e.col)); vreg = r.vreg }
+}
+
+/** lower_path_expr — `Enum::Member` -> its already-RESOLVED member value (the checker's
+    `.value`: the ordinal for a plain enum, `1 << ordinal` for a FLAGS enum). */
+fn lower_path_expr(ctx: LowerCtx, e: checker::TExpr, p: checker::TPathExpr) -> Lowered {
+    let r = ctx_alloc(ctx)
+    Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, p.value to i64, e.line, e.col)); vreg = r.vreg }
+}
+
+/** utf8_codepoint2 — the codepoint of a validated 2-byte UTF-8 sequence. */
+fn utf8_codepoint2(s: str) -> u32 {
+    let b0 = s[0] to u32
+    let b1 = s[1] to u32
+    ((b0 & 0x1F) << 6) | (b1 & 0x3F)
+}
+
+/** utf8_codepoint3 — the codepoint of a validated 3-byte UTF-8 sequence. */
+fn utf8_codepoint3(s: str) -> u32 {
+    let b0 = s[0] to u32
+    let b1 = s[1] to u32
+    let b2 = s[2] to u32
+    ((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F)
+}
+
+/** utf8_codepoint4 — the codepoint of a validated 4-byte UTF-8 sequence. */
+fn utf8_codepoint4(s: str) -> u32 {
+    let b0 = s[0] to u32
+    let b1 = s[1] to u32
+    let b2 = s[2] to u32
+    let b3 = s[3] to u32
+    ((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F)
+}
+
+/** utf8_codepoint — the single codepoint a TCharLit's raw UTF-8 bytes decode to (the lexer
+    already validated `s` is EXACTLY one codepoint, 1-4 bytes). */
+fn utf8_codepoint(s: str) -> i64 {
+    if s.len == 1 { return (s[0] to u32) to i64 }
+    if s.len == 2 { return utf8_codepoint2(s) to i64 }
+    if s.len == 3 { return utf8_codepoint3(s) to i64 }
+    utf8_codepoint4(s) to i64
+}
+
+/** lower_char_lit — a char literal -> its decoded codepoint (the LIR's scalar
+    representation of `char` — distinct from the VM/C backend's `{ptr,len}` carrier; the
+    interp is an exit-code oracle, not a layout verifier, §5.1). */
+fn lower_char_lit(ctx: LowerCtx, e: checker::TExpr, c: checker::TCharLit) -> Lowered {
+    let r = ctx_alloc(ctx)
+    Lowered { ctx = ctx_append(r.ctx, const_int_inst(r.vreg, utf8_codepoint(c.bytes), e.line, e.col)); vreg = r.vreg }
+}
+
+/** plain_op_of_compound — the plain arithmetic token a compound-assignment operator
+    applies (`+=` -> `+`, …), so assignment reuses lbinop_of's family/signedness pick. A
+    bitwise/shift compound (`&=`, `<<=`, …) is out of the A1-3 subset (lbinop_of does not
+    lower them either — N2). */
+fn plain_op_of_compound(op: lexer::TokenKind) -> lexer::TokenKind | error {
+    match op {
+        lexer::TokenKind::PlusEq => lexer::TokenKind::Plus
+        lexer::TokenKind::MinusEq => lexer::TokenKind::Minus
+        lexer::TokenKind::StarEq => lexer::TokenKind::Star
+        lexer::TokenKind::SlashEq => lexer::TokenKind::Slash
+        lexer::TokenKind::PercentEq => lexer::TokenKind::Percent
+        _ => error { message = "native backend N1: compound assignment operator not yet lowered (N2)" }
+    }
+}
+
+/** lower_assign — a TAssign: Simple (a local rebind) or Field (a struct-field write via
+    memory); a Ref-deref (`.value op= …`) is out of the A1-3 subset (Ref<T> is not yet a
+    memory-modeled type here). */
+fn lower_assign(ctx: LowerCtx, a: checker::TAssign) -> LowerStmtOut | error {
+    match a.kind {
+        parser::AssignKind::Simple => lower_assign_simple(ctx, a)
+        parser::AssignKind::Field => lower_assign_field(ctx, a)
+        parser::AssignKind::RefDeref => error { message = "native backend N1: reference deref-assignment not yet lowered (N2)" }
+        parser::AssignKind::Index => error { message = "native backend N1: slice element index-assignment not yet lowered (N2)" }
+    }
+}
+
+/**
+ * lower_assign_simple — `name = e` rebinds the env to the newly-lowered value (an SSA-lite shadow,
+ * exactly like a `let`); `name op= e` reads the CURRENT vreg, applies the arithmetic op, and
+ * rebinds to the result. The plain `=` path lowers through `lower_value_into_type` against the
+ * target's DECLARED type (`a.bound`), so re-assigning into a `T | null` local rebuilds the
+ * tag+payload wrapper the binding established — assigning the raw value would leave a later
+ * `match` reading a payload as a base address. A compound `op=` needs a `PrimKind` and so can
+ * never target a union.
+ *
+ * A str/slice target is written THROUGH ITS FRAME SLOT (`lower_assign_fat`): a fat local's value is

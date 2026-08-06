@@ -1,0 +1,77 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+const TEKO_USER_PREFIX: str = "teko_"
+
+/**
+ * The LIR symbol a Teko-Teko call target is emitted under: `TEKO_USER_PREFIX` (unless `flat`),
+ * then the namespace with each `:` replaced by `_`, then `__`, then the C-keyword-escaped bare
+ * name — byte-identical to the C backend's `cb_fn_name` in the default (non-`flat`) shape, so the
+ * native and C paths name the same symbol. An empty namespace (a lifted lambda) yields just the
+ * prefix (when not `flat`) and the escaped bare name.
+ *
+ * `flat` is the static/shared-archive carve-out (`emit_static_lib`, KP16): a `kind = "static"`/
+ * `"shared"` artifact's whole program IS the published C contract — every function's own LIR
+ * symbol is what a real host `ar`/`nm`/`ld` resolves, with no separate wrapper the way the C
+ * backend's `abi = "c"` reverse-FFI export has (`cg_c_export_symbol`) — so `TEKO_USER_PREFIX`
+ * would leak into the archived symbol table and break the consumer's `extern` declaration
+ * (measured: `examples/toolchain/ar_link_run` published `teko_ar_link_run__add` where the real
+ * archive contract is `ar_link_run__add`). `flat` strips EXACTLY the prefix, changing nothing
+ * else about the mangle, so a `flat` module's internal calls (`call_symbol`) and each function's
+ * own declared symbol still agree byte for byte — just without the user/builtin disjointness
+ * guarantee, which a whole-program archive export does not need (nothing in it is emitted
+ * against the SAME runtime `tk_*` builtins a mixed binary calls into unprefixed).
+ *
+ * `main` is the one symbol deliberately kept un-prefixed regardless of `flat`, and it never
+ * comes through here: `lower_virtual_main` builds it with `new_func("main", …)` directly.
+ *
+ * @param ns    the declaring namespace ("" for a lifted lambda)
+ * @param name  the bare function name
+ * @param flat  strip `TEKO_USER_PREFIX` (the static/shared-archive carve-out); default `false`
+ * @return      the emitted symbol
+ */
+pub fn mangle_fn_symbol(ns: str, name: str, flat: bool = false) -> str {
+    mut sym = if flat { "" } else { TEKO_USER_PREFIX }
+    if ns.len != 0 { sym = teko::str::concat(sym, mangle_ns(ns), "__") }
+    teko::str::concat(sym, escape_c_keyword(name))
+}
+
+/** mangle_ns — a namespace with every `:` byte rewritten to `_`. */
+fn mangle_ns(ns: str) -> str {
+    mut xs: []byte = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= ns.len { break }
+        let ch = if ns[i] == b':' { b'_' } else { ns[i] }
+        xs = teko::list::push(xs, ch)
+        i++
+    }
+    str(xs)
+}
+
+/** escape_c_keyword — a bare identifier with a trailing `_` when it collides with a C
+    keyword (mirrors codegen's cb_ident / cg_is_c_keyword so the symbol matches the C
+    definition). */
+fn escape_c_keyword(name: str) -> str {
+    if is_c_keyword(name) { return teko::str::concat(name, "_") }
+    name
+}
+
+/** is_c_keyword — the reserved C identifiers a mangled symbol must escape (the same set
+    the C backend's cg_is_c_keyword guards). */
+fn is_c_keyword(s: str) -> bool {
+    s == "bool" || s == "int" || s == "char" || s == "short" || s == "long" ||
+    s == "float" || s == "double" || s == "void" || s == "unsigned" || s == "signed" ||
+    s == "const" || s == "volatile" || s == "register" || s == "auto" || s == "static" ||
+    s == "struct" || s == "union" || s == "enum" || s == "return" || s == "default" ||
+    s == "goto" || s == "break" || s == "continue" || s == "case" || s == "switch" ||
+    s == "do" || s == "for" || s == "while" || s == "if" || s == "else" || s == "sizeof" ||
+    s == "typedef" || s == "extern" || s == "inline" || s == "restrict"
+}
+
+/**
+ * LEnumInfo — one declared `enum` type's name + its member spellings, in
+ * declared order (the ORDINAL a bare/qualified enum-member match pattern tests
+ * against is that member's INDEX in this list — mirrors the checker's own
+ * `check_enum_pattern`/`enum_covered` convention, A1-5, #382).
+ */

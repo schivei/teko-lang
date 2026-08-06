@@ -1,0 +1,253 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+    let ro = match lower_expr(ctx, fa.receiver) { Lowered as x => x; error as e => return e }
+    let name = match named_type_name(fa.receiver.type) { str as s => s; error as e => return e }
+    let layout = match find_struct_layout(ro.ctx.layouts, name) { LStructLayout as l => l; error as e => return e }
+    let off = match field_offset_of(layout, fa.field) { u32 as o => o; error as e => return e }
+    let pa = ctx_alloc(ro.ctx)
+    let with_pa = ctx_append(pa.ctx, field_addr_inst(pa.vreg, ro.vreg, off, fa.receiver.line, fa.receiver.col))
+    let pr = ctx_alloc(with_pa)
+    let with_pr = ctx_append(pr.ctx, load_inst(pr.vreg, pa.vreg, LType::Ptr, fa.receiver.line, fa.receiver.col))
+    let la = ctx_alloc(with_pr)
+    let with_la = ctx_append(la.ctx, field_addr_inst(la.vreg, ro.vreg, off + ltype_size(LType::Ptr), fa.receiver.line, fa.receiver.col))
+    let lr = ctx_alloc(with_la)
+    LoweredFat { ctx = ctx_append(lr.ctx, load_inst(lr.vreg, la.vreg, LType::I64, fa.receiver.line, fa.receiver.col)); ptr = pr.vreg; len = lr.vreg }
+}
+
+/**
+ * lower_var_fat — a str/slice variable reference to its (ptr, len) fat pair (A1-4, #382). A MUTABLE
+ * fat local (`lenv_bind_fat_slot`) LOADS the pair from its frame slot, so a reader always sees the
+ * most recent assignment (list-builtin degrau); an immutable local bound via `lenv_bind_fat` (a
+ * `let` of str/slice type) resolves through the FAT env with no memory traffic; a name that is
+ * NEITHER resolves to a module-level str/slice AGGREGATE const materialized in rodata (#594
+ * crumb 6), whose ptr is its rodata symbol and whose len is derived from the interned byte count.
+ *
+ * @param ctx  the lowering context
+ * @param e    the fat-valued reference expression (carries its str/slice type + source position)
+ * @param v    the typed variable node (the referenced name)
+ * @return     the (ptr, len) fat pair
+ * @throws     when the name is neither a fat local nor an interned str/slice aggregate const
+ */
+fn lower_var_fat(ctx: LowerCtx, e: checker::TExpr, v: checker::TVar) -> LoweredFat | error {
+    let slot = lenv_lookup_fat_slot(ctx.env, v.name)
+    if slot.found { return load_fat_slot(ctx, slot.slot, e.line, e.col) }
+    let hit = lenv_lookup_fat(ctx.env, v.name)
+    if hit.found && hit.has_len { return LoweredFat { ctx = ctx; ptr = hit.ptr; len = hit.len } }
+    match find_const_rodata(ctx.rodata, v.name) {
+        LRodata as r => lower_const_fat(ctx, e, r)
+        null => error { message = teko::str::concat("native backend N1: `", v.name, "` is not a fat-pointer local (internal)") }
+    }
+}
+
+/**
+ * fat_slot_bytes — the byte size of a mutable fat local's frame slot: the pointer half followed by
+ * the `u64` length half, the SAME `{ptr; len}` image `lower_fat_field` reads a fat struct field
+ * with, so the two never disagree about which half lives where.
+ *
+ * @return  the slot's size in bytes
+ */
+fn fat_slot_bytes() -> u32 { ltype_size(LType::Ptr) + ltype_size(LType::I64) }
+
+/**
+ * alloc_fat_slot — reserve the 16-byte frame slot a mutable fat local lives in and store the
+ * initial `{ptr, len}` pair into it.
+ *
+ * @param ctx   the lowering context
+ * @param fo    the initial value's (ptr, len) pair
+ * @param line  the binding's source line
+ * @param col   the binding's source column
+ * @return      the advanced context + the slot's address VReg
+ */
+fn alloc_fat_slot(ctx: LowerCtx, fo: LoweredFat, line: u32, col: u32) -> Lowered {
+    let slot = ctx_alloc(fo.ctx)
+    let with_slot = ctx_append(slot.ctx, alloca_inst(slot.vreg, fat_slot_bytes(), ltype_align(LType::Ptr), line, col))
+    Lowered { ctx = store_fat_slot(with_slot, slot.vreg, fo, line, col); vreg = slot.vreg }
+}
+
+/**
+ * store_fat_slot — write a `{ptr, len}` pair into a mutable fat local's frame slot: the pointer at
+ * offset 0 and the length at the pointer's width, the layout `load_fat_slot` reads back.
+ *
+ * @param ctx   the lowering context
+ * @param slot  the slot's address VReg
+ * @param fo    the pair to store
+ * @param line  the writing statement's source line
+ * @param col   the writing statement's source column
+ * @return      the advanced context
+ */
+fn store_fat_slot(ctx: LowerCtx, slot: u32, fo: LoweredFat, line: u32, col: u32) -> LowerCtx {
+    let with_ptr = ctx_append(ctx, store_inst(slot, fo.ptr, LType::Ptr, line, col))
+    let la = ctx_alloc(with_ptr)
+    let with_la = ctx_append(la.ctx, field_addr_inst(la.vreg, slot, ltype_size(LType::Ptr), line, col))
+    ctx_append(with_la, store_inst(la.vreg, fo.len, LType::I64, line, col))
+}
+
+/**
+ * load_fat_slot — read the CURRENT `{ptr, len}` pair out of a mutable fat local's frame slot.
+ *
+ * @param ctx   the lowering context
+ * @param slot  the slot's address VReg
+ * @param line  the reading expression's source line
+ * @param col   the reading expression's source column
+ * @return      the loaded (ptr, len) pair
+ */
+fn load_fat_slot(ctx: LowerCtx, slot: u32, line: u32, col: u32) -> LoweredFat {
+    let pr = load_fat_slot_ptr(ctx, slot, line, col)
+    let la = ctx_alloc(pr.ctx)
+    let with_la = ctx_append(la.ctx, field_addr_inst(la.vreg, slot, ltype_size(LType::Ptr), line, col))
+    let lr = ctx_alloc(with_la)
+    LoweredFat { ctx = ctx_append(lr.ctx, load_inst(lr.vreg, la.vreg, LType::I64, line, col)); ptr = pr.vreg; len = lr.vreg }
+}
+
+/**
+ * load_fat_slot_ptr — read ONLY the pointer half out of a mutable fat local's frame slot: the
+ * scalar view of a fat value (`lower_var`'s own arm), which needs no length.
+ *
+ * @param ctx   the lowering context
+ * @param slot  the slot's address VReg
+ * @param line  the reading expression's source line
+ * @param col   the reading expression's source column
+ * @return      the loaded pointer half
+ */
+fn load_fat_slot_ptr(ctx: LowerCtx, slot: u32, line: u32, col: u32) -> Lowered {
+    let pr = ctx_alloc(ctx)
+    Lowered { ctx = ctx_append(pr.ctx, load_inst(pr.vreg, slot, LType::Ptr, line, col)); vreg = pr.vreg }
+}
+
+/**
+ * lower_const_fat — a module-level str/slice aggregate const's (ptr, len) fat pair (#594 crumb 6):
+ * the ptr is the address of its interned rodata symbol (`LGlobalAddr`) and the len is its element
+ * count, derived from the interned byte count and the value's own type — a `str` counts its raw UTF-8
+ * bytes (stride 1), a `[]T` counts elements at the SAME element stride the indexer uses
+ * (`ltype_of(element)`), so a `.len` read and a `[i]` read agree.
+ *
+ * @param ctx  the lowering context to append into
+ * @param e    the fat-valued reference expression (its str/slice type + source position)
+ * @param r    the const's interned rodata entry (symbol + raw bytes)
+ * @return     the (ptr, len) fat pair
+ * @throws     when the reference's type is not a str/slice (an interned aggregate never is otherwise)
+ */
+fn lower_const_fat(ctx: LowerCtx, e: checker::TExpr, r: LRodata) -> LoweredFat | error {
+    let n = match const_fat_len(e.type, r.bytes.len to u32, ctx.enums) { u32 as x => x; error as err => return err }
+    let ptr = ctx_alloc(ctx)
+    let with_ptr = ctx_append(ptr.ctx, global_addr_inst(ptr.vreg, r.symbol, e.line, e.col))
+    let lenr = ctx_alloc(with_ptr)
+    let with_len = ctx_append(lenr.ctx, const_int_inst(lenr.vreg, n to i64, e.line, e.col))
+    LoweredFat { ctx = with_len; ptr = ptr.vreg; len = lenr.vreg }
+}
+
+/**
+ * const_fat_len — the element count of a materialized str/slice aggregate const from its interned
+ * byte length and its type (#594 crumb 6): a `str` is `byte_len` raw bytes (stride 1); a `[]T` is
+ * `byte_len / stride` where `stride = ltype_size(ltype_of(element))`, the EXACT stride
+ * `lower_index_slice` folds an index against — so the length and the indexing agree byte-for-byte on
+ * both engines.
+ *
+ * @param t         the const's resolved value type (`Str` or `Slice`)
+ * @param byte_len  the interned rodata blob's byte length
+ * @param enums     the program's declared-enum table (an enum element strides at its integer width)
+ * @return          the element count the fat pair's len half carries
+ * @throws          when `t` is neither a str nor a slice (unreachable for an interned aggregate)
+ */
+fn const_fat_len(t: checker::Type, byte_len: u32, enums: []LEnumInfo) -> u32 | error {
+    match t {
+        checker::Str => byte_len
+        checker::Slice as s => const_slice_len(s.element, byte_len, enums)
+        _ => error { message = "native backend N1: aggregate const fat receiver is not a str/slice (internal)" }
+    }
+}
+
+/**
+ * const_slice_len — a materialized `[]T` const's element count: `byte_len / stride`, with the element
+ * stride taken from `ltype_of(element)` so it matches `lower_index_slice` (#594 crumb 6). A
+ * zero-stride element (a `void`-classed type) never reaches here — the serializer rejects it — so the
+ * division is always exact.
+ *
+ * @param element   the slice's element type
+ * @param byte_len  the interned rodata blob's byte length
+ * @param enums     the program's declared-enum table (an enum element strides at its integer width)
+ * @return          the element count
+ * @throws          when the element's machine stride is zero (unreachable — rejected at serialize)
+ */
+fn const_slice_len(element: checker::Type, byte_len: u32, enums: []LEnumInfo) -> u32 | error {
+    let stride = ltype_size(ltype_of(element, enums))
+    if stride == 0 { return error { message = "native backend N1: aggregate const slice has a zero-stride element (internal)" } }
+    byte_len / stride
+}
+
+/** rodata_symbol — the deterministic symbol for the Nth interned rodata entry — an
+    assembler-local-style name (`.Lstr<N>`) that never collides with a Teko-visible symbol
+    (A1-4, #382). */
+fn rodata_symbol(index: u64) -> str {
+    teko::str::concat(".Lstr", teko::u64_to_str(index))
+}
+
+/** str_to_bytes — a str's raw UTF-8 content as a `[]byte` (the rodata entry's payload)
+    (A1-4, #382). */
+fn str_to_bytes(s: str) -> []byte {
+    mut out: []byte = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= s.len { break }
+        out = teko::list::push(out, s[i])
+        i++
+    }
+    out
+}
+
+/** InternedRodata — the updated context (its rodata table grown by one) + the fresh entry's
+    symbol (A1-4, #382). */
+pub type InternedRodata = struct { ctx: LowerCtx; symbol: str }
+
+/** intern_rodata — append a fresh rodata entry holding `text`'s UTF-8 bytes, returning the
+    advanced context + the entry's symbol (A1-4, #382). No deduplication — each call site
+    interns its own entry; a future pass may fold identical entries without changing this
+    lowering's correctness. */
+fn intern_rodata(ctx: LowerCtx, text: str) -> InternedRodata {
+    let sym = rodata_symbol(ctx.rodata.len)
+    let entry = LRodata { symbol = sym; bytes = str_to_bytes(text); relocs = teko::list::empty() }
+    InternedRodata { ctx = ctx_with_rodata(ctx, teko::list::push(ctx.rodata, entry)); symbol = sym }
+}
+
+/** lower_str_bytes_fat — materialize a raw str's UTF-8 bytes as a rodata entry + its
+    (ptr, len) fat pair — shared by a `TStrLit` and an interpolation piece literal
+    (A1-4, #382). */
+fn lower_str_bytes_fat(ctx: LowerCtx, text: str, line: u32, col: u32) -> LoweredFat {
+    let interned = intern_rodata(ctx, text)
+    let ptr = ctx_alloc(interned.ctx)
+    let with_ptr = ctx_append(ptr.ctx, global_addr_inst(ptr.vreg, interned.symbol, line, col))
+    let lenr = ctx_alloc(with_ptr)
+    let with_len = ctx_append(lenr.ctx, const_int_inst(lenr.vreg, text.len to i64, line, col))
+    LoweredFat { ctx = with_len; ptr = ptr.vreg; len = lenr.vreg }
+}
+
+/** lower_str_lit_fat — a `TStrLit`'s (ptr, len) pair (A1-4, #382). */
+fn lower_str_lit_fat(ctx: LowerCtx, e: checker::TExpr, s: checker::TStrLit) -> LoweredFat {
+    lower_str_bytes_fat(ctx, s.text, e.line, e.col)
+}
+
+/** lower_str_lit — a `TStrLit` in a plain (scalar) VALUE position: its ptr VReg (the len is
+    dropped — `str` collapses to the single Ptr machine class, matching `ltype_of`; a
+    consumer that needs the length reads it through `lower_fat_expr` instead) (A1-4, #382). */
+fn lower_str_lit(ctx: LowerCtx, e: checker::TExpr, s: checker::TStrLit) -> Lowered {
+    let f = lower_str_lit_fat(ctx, e, s)
+    Lowered { ctx = f.ctx; vreg = f.ptr }
+}
+
+/** two_args — a two-element VReg argument list (the shape every `tk_str_concat`/formatter
+    call below takes) (A1-4, #382). */
+fn two_args(a: u32, b: u32) -> []u32 {
+    teko::list::push(teko::list::push(teko::list::empty(), a), b)
+}
+
+/** single_arg — a one-element VReg argument list (A1-4, #382). */
+fn single_arg(a: u32) -> []u32 {
+    teko::list::push(teko::list::empty(), a)
+}
+
+/** lower_interp_piece — one interpolation PIECE literal (a raw str span, not a TExpr) as its
+    ptr VReg — the same rodata materialization a `TStrLit` gets, the length dropped (A1-4,
+    #382). */
+fn lower_interp_piece(ctx: LowerCtx, text: str, line: u32, col: u32) -> Lowered {
+    let f = lower_str_bytes_fat(ctx, text, line, col)

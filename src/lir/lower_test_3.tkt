@@ -1,0 +1,282 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+    let text = print_lmodule(m)
+    teko::assert::str_contains(text, "call @memcmp()")
+    teko::assert::str_contains(text, "const 32")
+    teko::assert::str_contains(text, "= ishl ")
+    teko::assert::str_contains(text, "= ishrs ")
+    teko::assert::is_true(!teko::str::contains(text, "ishru"))
+}
+
+/** lwt_extern_fn_ret — `lwt_extern_fn`, but with an explicit return type (a `u32`/`u64`/`void`
+    fixture needs a return type other than `lwt_extern_fn`'s fixed `i32`). */
+fn lwt_extern_fn_ret(name: str, ns: str, sym: str, ret: checker::Type) -> checker::TItem {
+    checker::TFunction {
+        name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty()
+        namespace = ns; params = teko::list::empty(); return_type = ret
+        body = teko::list::empty()
+        vis = parser::Visibility::Pub; has_doc = false; doc = ""
+        file = ""; line = 0; col = 0; is_test = false; is_extern = true; c_symbol = sym; from_lib = ""
+        has_arena_size = false; arena_size = 0 to u64
+    }
+}
+
+/**
+ * An `extern fn` declared `-> u64` returns the WHOLE register: there is nothing ABOVE its
+ * declared width to clean, so its call result carries straight through with no shift pair
+ * (`extern_return_narrow`'s "already the whole register" case — the same reasoning that keeps
+ * `c_aligned_alloc`'s own `u64` declaration in `examples/probes/arena_bottom/src/bottom.tks`
+ * un-narrowed).
+ *
+ * @return void
+ */
+#test
+fn lwt_extern_call_u64_return_is_not_narrowed() {
+    mut items: []checker::TItem = teko::list::push(teko::list::empty(), lwt_extern_fn_ret("c_aligned_alloc", "p", "aligned_alloc", checker::Prim { kind = checker::PrimKind::U64 }))
+    let call = lwt_call(lwt_path1("c_aligned_alloc"), "p", teko::list::empty(), checker::Prim { kind = checker::PrimKind::U64 })
+    items = teko::list::push(items, lwt_item(lwt_exprstmt(call)))
+    let m = match lower_program(checker::TProgram { items = items }) { LModule as x => x; error as err => { teko::assert::is_true(false); return } }
+    let text = print_lmodule(m)
+    teko::assert::str_contains(text, "call @aligned_alloc()")
+    teko::assert::is_true(!teko::str::contains(text, "ishl"))
+}
+
+/**
+ * An `extern fn` declared `-> void` returns no value at all: `lower_call_symbol`'s own void
+ * path never allocates a result VReg, so there is nothing for `apply_extern_return_narrow` to
+ * narrow — asserting this holds is what keeps a future edit from dereferencing a void call's
+ * dummy VReg as if it were a real result.
+ *
+ * @return void
+ */
+#test
+fn lwt_extern_call_void_return_is_not_narrowed() {
+    mut items: []checker::TItem = teko::list::push(teko::list::empty(), lwt_extern_fn_ret("c_free", "p", "free", checker::Void { }))
+    let call = lwt_call(lwt_path1("c_free"), "p", teko::list::empty(), checker::Void { })
+    items = teko::list::push(items, lwt_item(lwt_exprstmt(call)))
+    let m = match lower_program(checker::TProgram { items = items }) { LModule as x => x; error as err => { teko::assert::is_true(false); return } }
+    let text = print_lmodule(m)
+    teko::assert::str_contains(text, "call @free()")
+    teko::assert::is_true(!teko::str::contains(text, "ishl"))
+}
+
+/** lwt_item — a loose top-level statement as a TItem (the virtual-main path). */
+fn lwt_item(s: checker::TStatement) -> checker::TItem { s }
+
+/** lwt_const — a private scalar i64 module-level TConstDecl (#594 crumb-5 keystone fixture). */
+fn lwt_const(name: str, init: checker::TExpr) -> checker::TItem {
+    checker::TConstDecl { name = name; namespace = ""; ty = lwt_prim(checker::PrimKind::I64); init = init; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0 }
+}
+
+/**
+ * lwt_scalar_const_inlines_and_leaves_no_global — the crumb-5 SCALAR keystone (#594): a
+ * `const K: i64 = 41` used as `exit(K + 1)` inlines to the literal 41 through `inline_consts`, and the
+ * comptime-fold pass then folds the const-known `41 + 1` to `42`, so the lowered module carries NO
+ * reference to `K` and NO `LGlobal` (`m.globals.len == 0`) — proving the globals honest-stop is never
+ * reachable for a scalar-only program.
+ */
+#test
+fn lwt_scalar_const_inlines_and_leaves_no_global() {
+    let use_expr = lwt_bin(lexer::TokenKind::Plus, lwt_var("K", checker::PrimKind::I64), lwt_num_i64(1), checker::PrimKind::I64)
+    mut items: []checker::TItem = teko::list::empty()
+    items = teko::list::push(items, lwt_const("K", lwt_num_i64(41)))
+    items = teko::list::push(items, lwt_item(lwt_exprstmt(lwt_call(lwt_path1("exit"), "", teko::list::push(teko::list::empty(), use_expr), checker::Void { }))))
+    let inlined = match checker::inline_consts(checker::TProgram { items = items }) { checker::TProgram as p => p; error as err => { teko::assert::is_true(false); return } }
+    let m = match lower_program(inlined) { LModule as x => x; error as err => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(m.globals.len == 0)
+    let text = print_lmodule(m)
+    teko::assert::is_true(!teko::str::contains(text, "K"))
+    teko::assert::str_contains(text, "const 42")
+}
+
+/**
+ * lwt_agg_slice_const_materializes_one_rodata_entry — the crumb-6 Tier-A aggregate keystone (#594):
+ * a `const NUMS: []i64 = [10, 20]` referenced by a RUNTIME index (`NUMS[idx] + NUMS[idx]`, `idx` a
+ * mut local) interns EXACTLY ONE rodata entry (`.Lconst_NUMS`, its two i64 elements little-endian at
+ * the indexer's stride), every use resolves to that entry's `global_addr`, and `m.globals.len == 0`
+ * still holds — the aggregate lives in rodata, never a global, so no globals honest-stop is
+ * reachable. T-B1 additionally guarantees that interned rodata never carries a data-reloc today,
+ * hence `relocs.len == 0`. The index is deliberately runtime: a CONST index like `NUMS[0]` now folds
+ * to its element at comptime (CF4 Layer 1c, see examples/regressions/cf4_index_fold), so this keystone
+ * uses a mut-bound index to still exercise the rodata materialization + `global_addr` resolution path.
+ *
+ * @return void
+ */
+#test
+fn lwt_agg_slice_const_materializes_one_rodata_entry() {
+    let elems = teko::list::push(teko::list::push(teko::list::empty(), lwt_num_i64(10)), lwt_num_i64(20))
+    let slice_ty = checker::Slice { element = lwt_prim(checker::PrimKind::I64) }
+    let cd: checker::TItem = checker::TConstDecl { name = "NUMS"; namespace = ""; ty = slice_ty; init = lwt_array_lit(elems, checker::PrimKind::I64); vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0 }
+    let i64_ty = lwt_prim(checker::PrimKind::I64)
+    let idx_bind: checker::TStatement = checker::TBinding { kind = parser::BindKind::Mut; target = parser::SimpleName { name = "idx" }; bound = i64_ty; value = lwt_num_i64(0) }
+    let use0 = lwt_index(lwt_typed_var("NUMS", slice_ty), lwt_typed_var("idx", i64_ty), i64_ty)
+    let use1 = lwt_index(lwt_typed_var("NUMS", slice_ty), lwt_typed_var("idx", i64_ty), i64_ty)
+    let sum = lwt_bin(lexer::TokenKind::Plus, use0, use1, checker::PrimKind::I64)
+    mut items: []checker::TItem = teko::list::push(teko::list::empty(), cd)
+    items = teko::list::push(items, lwt_item(idx_bind))
+    items = teko::list::push(items, lwt_item(lwt_exprstmt(lwt_call(lwt_path1("exit"), "", teko::list::push(teko::list::empty(), sum), checker::Void { }))))
+    let inlined = match checker::inline_consts(checker::TProgram { items = items }) { checker::TProgram as p => p; error as err => { teko::assert::is_true(false); return } }
+    let m = match lower_program(inlined) { LModule as x => x; error as err => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(m.globals.len == 0)
+    teko::assert::is_true(m.rodata.len == 1)
+    teko::assert::is_true(m.rodata[0].symbol == ".Lconst_NUMS")
+    teko::assert::is_true(m.rodata[0].relocs.len == 0)
+    teko::assert::is_true(m.rodata[0].bytes.len == 16)
+    teko::assert::is_true(m.rodata[0].bytes[0] == (10 to byte))
+    teko::assert::is_true(m.rodata[0].bytes[8] == (20 to byte))
+    teko::assert::str_contains(print_lmodule(m), "global_addr @.Lconst_NUMS")
+}
+
+/**
+ * lwt_variant_decl — a `variant <name> = M0 | M1 | …` TypeDecl, wrapped as a `checker::TItem` (#594
+ * crumb 9b). The member names become the variant body's union of `NamedType` members, in order, so
+ * `collect_variants` recovers the tag ORDER an empty-case aggregate-const serialization needs.
+ *
+ * @param name     the variant type's name
+ * @param members  the member case names, in declared (tag) order
+ * @return         the variant type declaration, as a program item
+ */
+fn lwt_variant_decl(name: str, members: []str) -> checker::TItem {
+    mut mtes: []parser::TypeExpr = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= members.len { break }
+        mtes = teko::list::push(mtes, lwt_named_te(members[i]))
+        i++
+    }
+    parser::TypeDecl {
+        name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty()
+        body = parser::VariantBody { type_expr = parser::UnionType { members = mtes } }
+        vis = parser::Visibility::Pub; has_doc = false; doc = ""
+        line = 0; col = 0; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""
+        is_unsafe = false; must_free = false
+    }
+}
+
+/**
+ * lwt_agg_empty_variant_const_interns_its_tag_image — the crumb-9b Tier-A empty-case variant keystone
+ * (#594): a `const R: Op = RetC { }` over `variant Op = RetA | RetB | RetC` interns EXACTLY ONE rodata
+ * entry (`.Lconst_R`) whose bytes are the constructed member's declared tag — `RetC` is the third
+ * member, so the 4-byte little-endian I32 image is `[2, 0, 0, 0]` (the `tag@0` half of the variant
+ * runtime image, no payload). `m.globals.len == 0` still holds. Directly validates `serialize_const`'s
+ * variant arm (the tag `lower_variant_case_test` later compares against), independent of the own
+ * backend's downstream match dispatch.
+ *
+ * @return void
+ */
+#test
+fn lwt_agg_empty_variant_const_interns_its_tag_image() {
+    let members = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), "RetA"), "RetB"), "RetC")
+    mut items: []checker::TItem = teko::list::push(teko::list::empty(), lwt_variant_decl("Op", members))
+    let init = lwt_struct_init("RetC", teko::list::empty(), teko::list::empty())
+    let cd: checker::TItem = checker::TConstDecl { name = "R"; namespace = ""; ty = checker::Named { name = "Op" }; init = init; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0 }
+    items = teko::list::push(items, cd)
+    let m = match lower_program(checker::TProgram { items = items }) { LModule as x => x; error as err => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(m.globals.len == 0)
+    teko::assert::is_true(m.rodata.len == 1)
+    teko::assert::is_true(m.rodata[0].symbol == ".Lconst_R")
+    teko::assert::is_true(m.rodata[0].bytes.len == 4)
+    teko::assert::is_true(m.rodata[0].bytes[0] == (2 to byte))
+    teko::assert::is_true(m.rodata[0].bytes[1] == (0 to byte))
+    teko::assert::is_true(m.rodata[0].bytes[2] == (0 to byte))
+    teko::assert::is_true(m.rodata[0].bytes[3] == (0 to byte))
+}
+
+/**
+ * lwt_slice_field — a struct `parser::Field` whose annotation is a `[]<elem>` slice — the fat-pointer
+ * field shape the T-B6 layout widens to 16 bytes and the producer materializes as `{ptr->leaf, len}`
+ * (#594 T-B6).
+ *
+ * @param name        the field's name
+ * @param elem_tname  the slice element type's bare name
+ * @return            the slice-typed struct field
+ */
+fn lwt_slice_field(name: str, elem_tname: str) -> parser::Field {
+    parser::Field { name = name; type_ann = parser::SliceType { element = lwt_named_te(elem_tname) }; vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = "" }
+}
+
+/**
+ * lwt_tb6_deref_reads_second_element_and_len — the T-B6 sibling reads (#594 §7.3): `K2.xs[1]` derefs
+ * the second interned element (exit 20), and `K2.xs.len` reads the inline length half of the fat field
+ * through the new `lower_fat_field` reader (exit 2) — the two engines dereference the same target bytes.
+ *
+ * @return void
+ */
+#test
+fn lwt_tb6_deref_reads_second_element_and_len() {
+    teko::assert::is_true(lwt_tb6_deref_exit(lwt_index(lwt_tb6_k2_xs(), lwt_num_i64(1), lwt_prim(checker::PrimKind::I64))) == (20))
+    teko::assert::is_true(lwt_tb6_deref_exit(lwt_field_access(lwt_tb6_k2_xs(), "len", lwt_prim(checker::PrimKind::I64))) == (2))
+}
+
+/**
+ * lwt_tb6_k2_xs — the typed `K2.xs` fat-field access (`[]i64`) the T-B6 deref fixtures read through
+ * (#594 §7.3): a field access on the aggregate-const receiver `K2` of type `S2`.
+ *
+ * @return the typed `K2.xs` field-access expression
+ */
+fn lwt_tb6_k2_xs() -> checker::TExpr {
+    lwt_field_access(lwt_typed_var("K2", checker::Named { name = "S2" }), "xs", checker::Slice { element = lwt_prim(checker::PrimKind::I64) })
+}
+
+/**
+ * lwt_tb6_deref_exit — lower a program that binds `const K2: S2 = { xs = [10, 20]; n = 2 }` and runs
+ * `exit(<use>)` as its virtual main, then interpret it on the VM and return the exit code (#594 §7.3).
+ * The struct `S2` is declared first so its 16-byte fat-field layout is registered before the const
+ * interns.
+ *
+ * @param use_expr  the i64-typed expression the virtual main exits with (a `K2.xs[i]` or `K2.xs.len`)
+ * @return          the VM exit code of the lowered program
+ */
+fn lwt_tb6_deref_exit(use_expr: checker::TExpr) -> i64 {
+    let decl = lwt_struct_decl("S2", lwt_two_fields(lwt_slice_field("xs", "i64"), lwt_field("n", "i64")))
+    let elems = teko::list::push(teko::list::push(teko::list::empty(), lwt_num_i64(10)), lwt_num_i64(20))
+    let xs_lit = lwt_array_lit(elems, checker::PrimKind::I64)
+    let fnames = teko::list::push(teko::list::push(teko::list::empty(), "xs"), "n")
+    let fvals = teko::list::push(teko::list::push(teko::list::empty(), xs_lit), lwt_num_i64(2))
+    let si = lwt_struct_init("S2", fnames, fvals)
+    let cd: checker::TItem = checker::TConstDecl { name = "K2"; namespace = ""; ty = checker::Named { name = "S2" }; init = si; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0 }
+    let exit_call = lwt_call(lwt_path1("exit"), "", teko::list::push(teko::list::empty(), use_expr), checker::Void { })
+    mut items: []checker::TItem = teko::list::push(teko::list::empty(), decl)
+    items = teko::list::push(items, cd)
+    items = teko::list::push(items, lwt_item(lwt_exprstmt(exit_call)))
+    let m = match lower_program(checker::TProgram { items = items }) { LModule as x => x; error as err => { teko::assert::is_true(false); return (-99) } }
+    let no_args: []i64 = teko::list::empty()
+    interp_lmodule(m, "main", no_args)
+}
+
+/**
+ * lwt_typed_var — a `TVar` of an ARBITRARY resolved type `ty` (A1-5, #382 — a
+ * `match` subject is not always a scalar/Named/Optional the other `lwt_*_var`
+ * helpers cover; a `Variant`-typed subject needs this general form).
+ *
+ * @param str name  the variable's name
+ * @param checker::Type ty  the variable's resolved type
+ * @return checker::TExpr  the typed `TVar` node
+ */
+fn lwt_typed_var(name: str, ty: checker::Type) -> checker::TExpr {
+    checker::TExpr { kind = checker::TVar { name = name; is_func = false; func_ns = "" }; type = ty; line = 0; col = 0 }
+}
+
+/**
+ * lwt_wildcard_pattern — a bare `_` pattern (A1-5, #382).
+ *
+ * @return parser::Pattern  the wildcard pattern node
+ */
+fn lwt_wildcard_pattern() -> parser::Pattern { parser::WildcardPattern { } }
+
+/**
+ * lwt_int_pattern — an integer-literal pattern `v` (A1-5, #382).
+ *
+ * @param i64 v  the literal's integer value
+ * @return parser::Pattern  the literal pattern node
+ */
+fn lwt_int_pattern(v: i64) -> parser::Pattern {
+    parser::LiteralPattern { value = parser::Expr { kind = parser::Number { is_float = false; value = parser::numint_of_i64(v); fval = 0.0 }; line = 0; col = 0 } }
+}
+
+/**
+ * lwt_str_pattern — a string-literal pattern `text` (A1-5, #382).
+ *
+ * @param str text  the literal's own text
+ * @return parser::Pattern  the literal pattern node

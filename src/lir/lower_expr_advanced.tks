@@ -1,0 +1,253 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+    if type_is_void(e.type) {
+        let inst = void_call_indirect_inst(target, args, false, e.line, e.col)
+        return Lowered { ctx = ctx_append(ctx, inst); vreg = 0 }
+    }
+    let r = ctx_alloc(ctx)
+    let inst = call_indirect_inst(r.vreg, target, args, false, e.line, e.col)
+    Lowered { ctx = ctx_append(r.ctx, inst); vreg = r.vreg }
+}
+
+/**
+ * lower_iface_call — a DYNAMIC contract-method call
+ * (`TCall.is_iface_dispatch`): the receiver (`c.args[0]`) is an interface
+ * fat pointer `{data@0, vtable@8}` (§5.3) — load both halves, index the
+ * vtable at `c.iface_slot` to fetch the target function address, then call
+ * THROUGH it with `data` prepended to the remaining (already-lowered)
+ * arguments — mirrors the C backend's `value.vtable[slot](value.data,
+ * args…)` (`codegen.tks:2058-2118`).
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param checker::TExpr e  the call expression (for its type + source
+ *                          position)
+ * @param checker::TCall c  the interface-dispatch call node (`args[0]` is
+ *                          the receiver)
+ * @return Lowered | error  the advanced context + the call's result VReg (0
+ *                          for a void call), or a NAMED internal error when
+ *                          the node is malformed
+ *
+ * @since #382 A1-6
+ * @throws  the fat-result honest stop (below) when `e.type` is `str`/`[]T` — a vtable target's
+ *          hidden fat-return out-slot is not yet wired (call-gordo degrau, #382 N2)
+ */
+fn lower_iface_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | error {
+    if is_fat_type(e.type) { return error { message = "native backend N1: fat-pointer interface-dispatch result not yet lowered (N2)" } }
+    if c.args.len == 0 { return error { message = "native backend N1: malformed interface-dispatch call (internal)" } }
+    match aggregate_receiver_dispatch_stop(ctx, c.args[0].type) { error as stop => return stop; null => { } }
+    let ro = match lower_expr(ctx, c.args[0]) { Lowered as x => x; error as err => return err }
+    let fp = lower_iface_fatptr(ro.ctx, ro.vreg, e.line, e.col)
+    let tgt = lower_iface_slot(fp.ctx, fp.vtable, c.iface_slot, e.line, e.col)
+    let rest = match lower_args_from(tgt.ctx, c.args, 1) { LoweredArgs as x => x; error as err => return err }
+    lower_call_indirect(rest.ctx, e, tgt.vreg, iface_call_args(fp.data, rest.vregs))
+}
+
+/**
+ * aggregate_receiver_dispatch_stop — the NAMED honest-stop (M.3) for a dynamic dispatch whose
+ * receiver is a FIELD-SHAPED AGGREGATE instead of an interface fat pointer.
+ *
+ * The checker rewrites a method call on a `virtual`/`abstract`-class-typed receiver into the very
+ * same vtable-slot dispatch an interface call uses (typer.tks, "VIRTUAL DISPATCH through a
+ * POLYMORPHIC-BASE-typed receiver"). An interface VALUE is the fat pointer `{data@0, vtable@8}`
+ * this lowering indexes; a CLASS instance is not — it is a bare field-shaped object with no type
+ * identity in it at all, so reading its bytes 8..16 as a vtable address and calling through them
+ * jumps to whatever the second field happens to hold. Giving a polymorphic class object a vtable
+ * slot is an ABI decision (it changes the object's size and every field offset), so this backend
+ * NAMES the gap instead of guessing at it — a compile-time stop, never a silent miscompile (M.1).
+ *
+ * The discriminator needs no type table: an interface declares no fields and therefore registers
+ * NO layout, while a struct or class registers one. A receiver type with a registered layout is
+ * consequently an aggregate, and an aggregate can never be the fat pointer this path requires.
+ *
+ * @param ctx  the lowering context, for its registered struct/class layouts
+ * @param t    the receiver's resolved static type
+ * @return     `null` when the receiver is a legal fat-pointer contract value
+ * @throws     the named stop when the receiver is an aggregate (a polymorphic base class)
+ */
+fn aggregate_receiver_dispatch_stop(ctx: LowerCtx, t: checker::Type) -> error | null {
+    let name = match t { checker::Named as n => n.name; _ => return null }
+    match find_struct_layout(ctx.layouts, name) {
+        LStructLayout => error { message = teko::str::concat("native backend N1: dynamic dispatch through the polymorphic base class `", name, "` is not yet lowered — a class instance carries no vtable (N2)") }
+        error => null
+    }
+}
+
+/**
+ * func_type_of — extract the resolved `Func` signature from a checker type,
+ * or a NAMED internal error for any other shape (the checker guarantees a
+ * bare `is_func` reference's own type IS its declaring function's `Func`
+ * type — a miss here is an invariant break, A1-7 #382).
+ *
+ * @param checker::Type t  the type to narrow
+ * @return checker::Func | error  the resolved signature
+ */
+fn func_type_of(t: checker::Type) -> checker::Func | error {
+    match t {
+        checker::Func as f => f
+        _ => error { message = "native backend N1: function-value reference is not Func-typed (internal)" }
+    }
+}
+
+/**
+ * types_to_ltypes — the machine class of each resolved checker type, in
+ * order (A1-7, #382 — a closure/thunk signature's parameter machine
+ * classes).
+ *
+ * @param []checker::Type ts  the resolved types to map
+ * @param []LEnumInfo enums  the program's declared-enum table (an enum-typed
+ *                           entry carries its integer width, not `Ptr`)
+ * @return []LType  their machine classes, in order
+ */
+fn types_to_ltypes(ts: []checker::Type, enums: []LEnumInfo) -> []LType {
+    mut out: []LType = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= ts.len { break }
+        out = teko::list::push(out, ltype_of(ts[i], enums))
+        i++
+    }
+    out
+}
+
+/**
+ * ltype_is_void — is `t` the Void machine class (no value)? (A1-7, #382 — a
+ * closure/thunk with a void return skips the result-carrying `ret`.)
+ *
+ * @param LType t  the machine class to test
+ * @return bool  true for `LType::Void`
+ */
+fn ltype_is_void(t: LType) -> bool {
+    match t { Void => true; _ => false }
+}
+
+/**
+ * env_first_param_types — `Ptr` (the closure's env slot) prepended to
+ * `rest` — the ENV-FIRST ABI every lifted closure/thunk `LFunc` shares
+ * (A1-7, #382): `LCallIndirect` always passes the closure's env as the
+ * first argument, so every callable a closure literal's `fn` field may
+ * point to must accept it, whether or not it actually captures anything.
+ *
+ * @param []LType rest  the callable's OWN declared parameter machine
+ *                       classes
+ * @return []LType  `Ptr` followed by `rest`, in order
+ */
+fn env_first_param_types(rest: []LType) -> []LType {
+    mut out: []LType = teko::list::push(teko::list::empty(), LType::Ptr)
+    mut i: u64 = 0
+    loop {
+        if i >= rest.len { break }
+        out = teko::list::push(out, rest[i])
+        i++
+    }
+    out
+}
+
+/**
+ * lift_thunk_symbol — the deterministic symbol for the Nth fn-as-value
+ * thunk — an assembler-local-style name (`.Lclofn<N>`) that never collides
+ * with a Teko-visible symbol (mirrors `rodata_symbol`, A1-7 #382).
+ *
+ * @param u64 id  the thunk's reserved id (`ctx.lifted.len` at the time it
+ *                was reserved)
+ * @return str  the thunk's symbol
+ */
+fn lift_thunk_symbol(id: u64) -> str {
+    teko::str::concat(".Lclofn", teko::u64_to_str(id))
+}
+
+/**
+ * lift_lambda_symbol — the deterministic symbol for the Nth lifted lambda
+ * body — an assembler-local-style name (`.Lclo<N>`) that never collides
+ * with a Teko-visible symbol (mirrors `rodata_symbol`, A1-7 #382).
+ *
+ * @param u64 id  the lambda's reserved id
+ * @return str  the lifted body's symbol
+ */
+fn lift_lambda_symbol(id: u64) -> str {
+    teko::str::concat(".Lclo", teko::u64_to_str(id))
+}
+
+/**
+ * materialize_thunk_params — append a `param` instruction for every one of
+ * `f0`'s already-declared parameters (env at index 0, the wrapped
+ * function's own parameters after it), in order (A1-7, #382).
+ *
+ * @param LFunc f0  the thunk's (still bodyless) function shell
+ * @param u32 line  the source line to propagate onto each `param`
+ * @param u32 col  the source column to propagate onto each `param`
+ * @return LFunc  `f0` with every parameter materialized into its VReg
+ */
+fn materialize_thunk_params(f0: LFunc, line: u32, col: u32) -> LFunc {
+    mut f = f0
+    mut i: u64 = 0
+    loop {
+        if i >= f.n_params { break }
+        f = append_inst(f, 0, param_inst(i to u32, i to u32, line, col))
+        i++
+    }
+    f
+}
+
+/**
+ * thunk_forward_args — the VRegs `1..n` (skipping VReg 0, the ignored env
+ * parameter) — the argument list a thunk forwards to the wrapped function
+ * (A1-7, #382).
+ *
+ * @param u64 n  the wrapped function's own arity
+ * @return []u32  the VRegs `1..n`, in order
+ */
+fn thunk_forward_args(n: u64) -> []u32 {
+    mut out: []u32 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= n { break }
+        out = teko::list::push(out, (i + 1) to u32)
+        i++
+    }
+    out
+}
+
+/**
+ * build_closure_thunk — an ENV-FIRST wrapper `LFunc` around `target_sym`: it
+ * accepts the env-first ABI (`env_first_param_types`), ignores the env
+ * parameter, and forwards its own remaining parameters straight through to
+ * `target_sym` — the bridge a bare top-level function needs to be called
+ * uniformly through `LCallIndirect` alongside a genuinely capturing lambda
+ * (A1-7, #382).
+ *
+ * @param str symbol  the thunk's own (lifted) symbol
+ * @param str target_sym  the wrapped function's already-mangled symbol
+ * @param []LType ptypes  the wrapped function's OWN parameter machine
+ *                        classes
+ * @param LType ret_ty  the wrapped function's return machine class
+ * @param u32 line  the source line to propagate onto every emitted inst
+ * @param u32 col  the source column to propagate onto every emitted inst
+ * @return LFunc  the built thunk
+ */
+fn build_closure_thunk(symbol: str, target_sym: str, ptypes: []LType, ret_ty: LType, line: u32, col: u32) -> LFunc {
+    let all_ptypes = env_first_param_types(ptypes)
+    let f0 = new_func(symbol, (ptypes.len + 1) to u32, all_ptypes, ret_ty)
+    let f1 = materialize_thunk_params(f0, line, col)
+    let args = thunk_forward_args(ptypes.len)
+    if ltype_is_void(ret_ty) {
+        let f2 = append_inst(f1, 0, void_call_inst(target_sym, args, false, line, col))
+        return append_inst(f2, 0, ret_void_inst(line, col))
+    }
+    let r = alloc_vreg(f1)
+    let f2 = append_inst(r.func, 0, call_inst(r.vreg, target_sym, args, false, line, col))
+    append_inst(f2, 0, ret_inst(r.vreg, line, col))
+}
+
+/**
+ * build_closure_literal — a closure VALUE `{fn@0, env@8}` (§5.3): alloca a
+ * 16-byte slot, store `fn_symbol`'s `LFuncAddr` VReg at offset 0 and
+ * `env_vreg` at offset 8 — the RESULT is the slot's base address (a Ptr
+ * VReg), the same memory shape `lower_closure_fatptr` reads back (A1-7,
+ * #382).
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param str fn_symbol  the callable's (already-mangled or lifted) symbol
+ * @param u32 env_vreg  the closure's env VReg (a null-Ptr const when it
+ *                       captures nothing)
+ * @param u32 line  the source line to propagate onto every emitted inst

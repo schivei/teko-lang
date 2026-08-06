@@ -1,0 +1,90 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+ * refusing the program instead of silently returning a stale length.
+ *
+ * Also falls back to `lenv_bind` when `name` is unbound (a checker invariant
+ * break — an assign to an undeclared local never reaches lowering).
+ *
+ * @param LEnv env  the env whose newest `name` binding is updated
+ * @param str name  the reassigned local's name
+ * @param u32 vreg  the reassignment's fresh result VReg
+ * @return LEnv  `env` with the newest `name` slot updated in place (scalar) or
+ *              a fresh scalar entry appended (fat or unbound)
+ */
+pub fn lenv_reassign(env: LEnv, name: str, vreg: u32) -> LEnv {
+    let idx = lenv_newest_index(env, name)
+    if idx == env.names.len { return lenv_bind(env, name, vreg) }
+    if env.has_len[idx] { return lenv_bind(env, name, vreg) }
+    LEnv {
+        names = env.names; vregs = list_set_u32(env.vregs, idx, vreg)
+        len_vregs = env.len_vregs; has_len = env.has_len; is_slot = env.is_slot
+    }
+}
+
+/** LLookup — the result of an LEnv lookup: whether the name was bound + its VReg. */
+pub type LLookup = struct { found: bool; vreg: u32 }
+
+/** lenv_lookup — the VReg a local name binds to, scanning newest-first so a shadow wins. */
+pub fn lenv_lookup(env: LEnv, name: str) -> LLookup {
+    mut i = env.names.len
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        if env.names[i] == name { return LLookup { found = true; vreg = env.vregs[i] } }
+    }
+    LLookup { found = false; vreg = 0 }
+}
+
+/** LFatLookup — the result of a FAT env lookup: whether the name was bound, whether that
+    binding carries a length (`lenv_bind_fat` vs the plain `lenv_bind`), + its ptr/len VRegs
+    (A1-4, #382). */
+pub type LFatLookup = struct { found: bool; has_len: bool; ptr: u32; len: u32 }
+
+/** lenv_lookup_fat — the (ptr, len) pair a local name binds to, scanning newest-first
+    (A1-4, #382). `has_len=false` for a name bound via the plain scalar `lenv_bind` (an
+    invariant break if a caller then reads it as fat). */
+pub fn lenv_lookup_fat(env: LEnv, name: str) -> LFatLookup {
+    mut i = env.names.len
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        if env.names[i] == name { return LFatLookup { found = true; has_len = env.has_len[i]; ptr = env.vregs[i]; len = env.len_vregs[i] } }
+    }
+    LFatLookup { found = false; has_len = false; ptr = 0; len = 0 }
+}
+
+/**
+ * enum_carrier_ltype — the machine class EVERY declared `enum` rides in: `I32`, four bytes,
+ * four-byte aligned, the SAME width for every enum regardless of how many members it declares.
+ *
+ * THE WIDTH IS NOT CHOSEN HERE — it is read off the contract the project already ships, in three
+ * places that agree:
+ *
+ *   1. The C emitter. `codegen.tks`'s `parser::EnumBody` arm emits `typedef enum tk_t_<M> {
+ *      TK_E_<M>_<MEMBER>, … } tk_t_<M>;` — a plain C enum, compiled with no `-fshort-enums`
+ *      anywhere in the build. Measured on that emitter's own output for a two-member enum:
+ *      `sizeof == 4`, `_Alignof == 4`, and `struct { u32 id; Enum e; bool f }` lays out as
+ *      `size=12 align=4 {id@0, e@4, f@8}`. That is the size the shipping backend has always
+ *      given an enum field, so it is the size this backend owes it.
+ *   2. This backend's OWN discriminant. `lower_null_union_construct` and
+ *      `lower_variant_tag_eq_test` build `{ i32 tag; payload@8 }` and read the tag as `I32`:
+ *      the LIR already spells "a discriminant is four bytes".
+ *   3. The DELIBERATE contrast with `flags`. The same C emitter function picks a `flags` type's
+ *      carrier BY MEMBER COUNT (1–8 -> uint8_t, 9–16 -> uint16_t, 17–32 -> uint32_t, 33–64 ->
+ *      uint64_t, 65–128 -> unsigned __int128) and documents that rule inline, because a `flags`
+ *      value is a BITSET and its width is a function of how many bits it must hold. `enum` gets
+ *      no such rule there: an enum value is an ORDINAL, one member at a time, and 32 bits hold
+ *      every ordinal any declaration can produce. So the count-dependence question is already
+ *      answered — positively for `flags`, negatively for `enum` — in one function, and this
+ *      mirrors that answer instead of inventing a second one.
+ *
+ * ONE TYPE, ONE WIDTH. This same function answers for an enum used as a struct FIELD, as a
+ * function parameter, as a return, as a local, as an array element and as a union payload,
+ * because `ltype_of`/`ltype_of_typeexpr` are the single mapping every one of those sites goes
+ * through. A field carrier that disagreed with the value carrier would store eight bytes into a
+ * four-byte slot and silently trample the next field — which is precisely the failure mode this
+ * one-place answer exists to make unrepresentable.
+ *
+ * @return the machine class an `enum`-typed value and an `enum`-typed field both occupy
+ * @since #594 T-B (the enum carrier)

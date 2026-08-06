@@ -1,0 +1,275 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+fn lwt_str_pattern(text: str) -> parser::Pattern {
+    parser::LiteralPattern { value = parser::Expr { kind = parser::StrLit { text = text }; line = 0; col = 0 } }
+}
+
+/**
+ * lwt_bind_pattern — `case as binding` (a variant case-select + payload bind),
+ * or `case` (no binding) when `binding` is empty (A1-5, #382).
+ *
+ * @param str case_name  the pattern's case name
+ * @param str binding  the name to bind the payload to (empty = no binding)
+ * @return parser::Pattern  the bind pattern node
+ */
+fn lwt_bind_pattern(case_name: str, binding: str) -> parser::Pattern {
+    parser::BindPattern { type_name = lwt_path1(case_name); has_binding = binding != ""; binding = binding; is_slice = false; slice_type = null; type_args = teko::list::empty() }
+}
+
+/**
+ * lwt_arm — an UNGUARDED match arm over `pat`, whose body is `body` (A1-5,
+ * #382).
+ *
+ * @param parser::Pattern pat  the arm's pattern
+ * @param []checker::TStatement body  the arm's statement block
+ * @return checker::TArm  the typed arm node
+ */
+fn lwt_arm(pat: parser::Pattern, body: []checker::TStatement) -> checker::TArm {
+    checker::TArm { pattern = pat; has_when = false; guard = lwt_num_i64(0); body = body }
+}
+
+/**
+ * lwt_guarded_arm — a `when`-guarded match arm over `pat` (A1-5, #382).
+ *
+ * @param parser::Pattern pat  the arm's pattern
+ * @param checker::TExpr guard  the `when` guard condition
+ * @param []checker::TStatement body  the arm's statement block
+ * @return checker::TArm  the typed arm node
+ */
+fn lwt_guarded_arm(pat: parser::Pattern, guard: checker::TExpr, body: []checker::TStatement) -> checker::TArm {
+    checker::TArm { pattern = pat; has_when = true; guard = guard; body = body }
+}
+
+/**
+ * lwt_match_value — a VALUE-producing `TMatchExpr` over `subject`/`arms`, typed
+ * `k` (A1-5, #382).
+ *
+ * @param checker::TExpr subject  the match's subject expression
+ * @param []checker::TArm arms  the match's arms, in order
+ * @param checker::PrimKind k  the match expression's own resolved primitive
+ *                             type
+ * @return checker::TExpr  the typed `TMatchExpr` node
+ */
+fn lwt_match_value(subject: checker::TExpr, arms: []checker::TArm, k: checker::PrimKind) -> checker::TExpr {
+    checker::TExpr { kind = checker::TMatchExpr { subject = subject; arms = arms }; type = lwt_prim(k); line = 0; col = 0 }
+}
+
+/**
+ * lwt_variant2 — an inline `checker::Variant` of two NOMINAL (`Named`) cases,
+ * in order (A1-5, #382).
+ *
+ * @param str a  the first case's Named type name
+ * @param str b  the second case's Named type name
+ * @return checker::Type  the inline `Variant` type
+ */
+fn lwt_variant2(a: str, b: str) -> checker::Type {
+    checker::Variant { members = teko::list::push(teko::list::push(teko::list::empty(), checker::Named { name = a }), checker::Named { name = b }) }
+}
+
+/**
+ * lwt_circle_layout — `struct Circle { radius: i64 }`'s registered layout
+ * (A1-5, #382).
+ *
+ * @return LStructLayout  Circle's resolved layout
+ */
+fn lwt_circle_layout() -> LStructLayout {
+    layout_of("Circle", teko::list::push(teko::list::empty(), "radius"), teko::list::push(teko::list::empty(), LType::I64))
+}
+
+#test
+fn lwt_lowers_match_enum_member_pattern_via_registered_ordinal() {
+    let subject = lwt_typed_var("c", checker::Named { name = "Color" })
+    let arm0 = lwt_arm(lwt_bind_pattern("Red", ""), teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num_i64(10))))
+    let arm1 = lwt_arm(lwt_wildcard_pattern(), teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num_i64(0))))
+    let arms = teko::list::push(teko::list::push(teko::list::empty(), arm0), arm1)
+    let match_expr = lwt_match_value(subject, arms, checker::PrimKind::I64)
+    let params = teko::list::push(teko::list::empty(), lwt_param("c", "Color"))
+    let body = teko::list::push(teko::list::empty(), lwt_ret(match_expr))
+    let f = lwt_fn("pick_color", "teko::demo", params, checker::Prim { kind = checker::PrimKind::I64 }, body)
+    let enums = teko::list::push(teko::list::empty(), LEnumInfo { name = "Color"; members = teko::list::push(teko::list::push(teko::list::empty(), "Red"), "Green") })
+    let lf = match lower_function(f, teko::list::empty(), teko::list::empty(), enums) { LoweredFunction as r => r.func; error as err => return }
+    let text = print_lmodule(add_func(empty_module(), lf))
+    teko::assert::str_contains(text, "%2 = const 0")
+    teko::assert::str_contains(text, "%3 = icmpeq %0, %2")
+    teko::assert::str_contains(text, "branch %3, #B2(), #B3()")
+    teko::assert::str_contains(text, "  #B3:\n    jump #B4()")
+}
+
+/**
+ * An `==` comparison between two enum-typed operands resolves through `prim_kind_of`'s `I32`
+ * ordinal carrier (`enum_carrier_ltype`, #594 T-B) instead of the "non-primitive arithmetic
+ * operand" honest stop — the exact shape measured on the compiler's OWN native self-host
+ * corpus (`reg_class == MRegClass::FPR`, hundreds of sites across `src/backend/*`).
+ *
+ * @return void
+ */
+#test
+fn lwt_prim_kind_of_resolves_enum_equality_comparison() {
+    let a = lwt_typed_var("a", checker::Named { name = "Color" })
+    let b = lwt_typed_var("b", checker::Named { name = "Color" })
+    let cmp = lwt_cmp(a, teko::list::push(teko::list::empty(), lwt_cmp_term(lexer::TokenKind::EqEq, b)))
+    let params = teko::list::push(teko::list::push(teko::list::empty(), lwt_param("a", "Color")), lwt_param("b", "Color"))
+    let body = teko::list::push(teko::list::empty(), lwt_ret(cmp))
+    let f = lwt_fn("colors_eq", "teko::demo", params, checker::Prim { kind = checker::PrimKind::Bool }, body)
+    let lf = match lower_function(f, teko::list::empty(), teko::list::empty(), lwt_color_enums()) { LoweredFunction as r => r.func; error as err => return }
+    let text = print_lmodule(add_func(empty_module(), lf))
+    teko::assert::str_contains(text, "%2 = icmpeq %0, %1")
+}
+
+/**
+ * The E7 ordinal `to`-cast, enum -> int direction: an enum-typed operand widens through its
+ * `I32` ordinal carrier, sign-extending into a wider integer exactly like any other signed
+ * `I32` source (`cast_int_unop_of`) — measured on the compiler's own `.tkb` codec convention
+ * (`(byte)k` / `(TokenKind)b` ordinal round-trips, `checker/typer.tks`'s own E7 doc-comment).
+ *
+ * @return void
+ */
+#test
+fn lwt_prim_kind_of_resolves_enum_to_int_cast_widens() {
+    let inner = lwt_typed_var("c", checker::Named { name = "Color" })
+    let e = lwt_cast(inner, checker::PrimKind::I64)
+    let params = teko::list::push(teko::list::empty(), lwt_param("c", "Color"))
+    let body = teko::list::push(teko::list::empty(), lwt_ret(e))
+    let f = lwt_fn("color_ordinal", "teko::demo", params, checker::Prim { kind = checker::PrimKind::I64 }, body)
+    let lf = match lower_function(f, teko::list::empty(), teko::list::empty(), lwt_color_enums()) { LoweredFunction as r => r.func; error as err => return }
+    let text = print_lmodule(add_func(empty_module(), lf))
+    teko::assert::str_contains(text, "%1 = sext %0")
+}
+
+/**
+ * The E7 ordinal `to`-cast, int -> enum direction: an integer operand narrows into the target
+ * enum's `I32` ordinal carrier exactly like any other same-or-narrower-width int destination
+ * (`cast_int_unop_of`) — the reverse of the widening fixture above, completing the pair E7
+ * actually types both directions of.
+ *
+ * @return void
+ */
+#test
+fn lwt_prim_kind_of_resolves_int_to_enum_cast_narrows() {
+    let inner = lwt_var("n", checker::PrimKind::I64)
+    let e = checker::TExpr { kind = checker::TCast { expr = inner }; type = checker::Named { name = "Color" }; line = 0; col = 0 }
+    let params = teko::list::push(teko::list::empty(), lwt_param("n", "i64"))
+    let body = teko::list::push(teko::list::empty(), lwt_ret(e))
+    let f = lwt_fn("as_color", "teko::demo", params, checker::Named { name = "Color" }, body)
+    let lf = match lower_function(f, teko::list::empty(), teko::list::empty(), lwt_color_enums()) { LoweredFunction as r => r.func; error as err => return }
+    let text = print_lmodule(add_func(empty_module(), lf))
+    teko::assert::str_contains(text, "%1 = trunc %0")
+}
+
+/**
+ * A Named type that is NOT a declared enum (a plain struct/class, or a `flags` type — neither
+ * measured as an arithmetic operand in the compiler's own corpus) still honest-stops, under its
+ * OWN specifically-named message (`enum_ordinal_kind_of`) rather than the generic
+ * "non-primitive arithmetic operand" catch-all — so a future flags-arithmetic increment finds
+ * its own diagnostic instead of silently reusing this enum fix.
+ *
+ * @return void
+ */
+#test
+fn lwt_prim_kind_of_still_honest_stops_a_non_enum_named_type() {
+    let left = lwt_num_i64(1)
+    let right = lwt_num_i64(2)
+    let bin = checker::TExpr { kind = checker::TBinary { op = lexer::TokenKind::Plus; left = left; right = right }; type = checker::Named { name = "Circle" }; line = 0; col = 0 }
+    teko::assert::str_contains(lwt_lower_expr_text_with_enums(bin, lwt_color_enums()), "non-enum named-type")
+}
+
+#test
+fn lwt_lowers_match_when_guard_falls_through_to_next_arm() {
+    let subject = lwt_var("x", checker::PrimKind::I64)
+    let guard = lwt_cmp(subject, teko::list::push(teko::list::empty(), lwt_cmp_term(lexer::TokenKind::Gt, lwt_num_i64(0))))
+    let arm0 = lwt_guarded_arm(lwt_int_pattern(1), guard, teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num_i64(100))))
+    let arm1 = lwt_arm(lwt_wildcard_pattern(), teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num_i64(0))))
+    let arms = teko::list::push(teko::list::push(teko::list::empty(), arm0), arm1)
+    let match_expr = lwt_match_value(subject, arms, checker::PrimKind::I64)
+    let params = teko::list::push(teko::list::empty(), lwt_param("x", "i64"))
+    let body = teko::list::push(teko::list::empty(), lwt_ret(match_expr))
+    let f = lwt_fn("guarded_pick", "teko::demo", params, checker::Prim { kind = checker::PrimKind::I64 }, body)
+    let lf = match lower_function(f) { LoweredFunction as r => r.func; error as err => return }
+    let text = print_lmodule(add_func(empty_module(), lf))
+    teko::assert::str_contains(text, "branch %3, #B2(), #B3()")
+    teko::assert::str_contains(text, "branch %5, #B4(), #B3()")
+    teko::assert::str_contains(text, "  #B4:\n    %6 = const 100\n    jump #B1(%6)")
+    teko::assert::str_contains(text, "  #B3:\n    jump #B5()")
+}
+
+#test
+fn lwt_lowers_match_variant_case_binds_the_payload() {
+    let subject = lwt_typed_var("s", lwt_variant2("Circle", "Square"))
+    let payload = lwt_field_access(lwt_typed_var("c", checker::Named { name = "Circle" }), "radius", lwt_prim(checker::PrimKind::I64))
+    let arm0 = lwt_arm(lwt_bind_pattern("Circle", "c"), teko::list::push(teko::list::empty(), lwt_exprstmt(payload)))
+    let arms = teko::list::push(teko::list::empty(), arm0)
+    let match_expr = lwt_match_value(subject, arms, checker::PrimKind::I64)
+    let params = teko::list::push(teko::list::empty(), lwt_param("s", "Shape"))
+    let body = teko::list::push(teko::list::empty(), lwt_ret(match_expr))
+    let f = lwt_fn("read_case", "teko::demo", params, checker::Prim { kind = checker::PrimKind::I64 }, body)
+    let lf = match lower_function(f, lwt_one_layout(lwt_circle_layout())) { LoweredFunction as r => r.func; error as err => return }
+    let text = print_lmodule(add_func(empty_module(), lf))
+    teko::assert::str_contains(text, "%2 = field_addr %0, 0")
+    teko::assert::str_contains(text, "%3 = load.i32 %2")
+    teko::assert::str_contains(text, "%5 = icmpeq %3, %4")
+    teko::assert::str_contains(text, "%6 = field_addr %0, 8")
+    teko::assert::str_contains(text, "%7 = load.ptr %6")
+    teko::assert::str_contains(text, "%8 = field_addr %7, 0")
+    teko::assert::str_contains(text, "%9 = load.i64 %8")
+    teko::assert::str_contains(text, "jump #B1(%9)")
+    teko::assert::str_contains(text, "  #B1(%1):\n    ret %1")
+}
+
+#test
+fn lwt_lowers_match_string_arm_via_byte_compare() {
+    let subject = lwt_strlit("hi")
+    let arm0 = lwt_arm(lwt_str_pattern("hi"), teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num_i64(1))))
+    let arm1 = lwt_arm(lwt_wildcard_pattern(), teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_num_i64(0))))
+    let arms = teko::list::push(teko::list::push(teko::list::empty(), arm0), arm1)
+    let match_expr = lwt_match_value(subject, arms, checker::PrimKind::I64)
+    let text = lwt_lower_expr_text(match_expr)
+    teko::assert::str_contains(text, "rodata .Lstr0: [104, 105]")
+    teko::assert::str_contains(text, "global_addr @.Lstr0")
+    teko::assert::str_contains(text, "load.i8")
+    teko::assert::is_true(teko::str::contains(text, "icmpeq"))
+    teko::assert::str_contains(text, "branch")
+}
+
+/**
+ * lwt_defer_inside_match_value_arm_fires_only_on_that_arms_own_branch — PR
+ * #553 follow-up nit, UPDATED for #389 F1b item 1: the VALUE-producing
+ * (`lower_match_arm_value`) mirror of
+ * `lwt_defer_inside_match_arm_fires_only_on_that_arms_own_branch`: `let s=1;
+ * return match x { 1 => { defer { s = s + 100 }; s } _ => s }` — the `defer`
+ * registers ONLY inside arm0's own body, before its own tail value `s`. Arm0's
+ * own body block (`#B2`) fires it — LIFO, from the defer-delta base THIS arm
+ * itself started at — AFTER its tail value is read but BEFORE its jump.
+ *
+ * The merge now carries TWO params, `#B1(%2, %3)`: the FIRST (`%2`) is the
+ * match RESULT value, the SECOND (`%3`) the threaded enclosing scalar `s`
+ * (F1b re-adds the `TDeferStmt` descent, so the defer's `s = s + 100` is seen
+ * by the reassigned-scalar scan). CRITICALLY the VALUE arg stays PRE-defer: the
+ * tail `s` (`%1`) is captured before the defer replays, so arm0 jumps
+ * `#B1(%1, %7)` — value `%1` (pre-defer) THEN scalar `%7` (post-defer `s`,
+ * `%7 = iadd %1, %6`); `close_arm_replaying_defers` re-samples only the SCALAR
+ * arg from the post-replay env, never the value. The wildcard arm (`#B4`, via
+ * its pass-through `#B3`, no defer) jumps `#B1(%1, %1)`; the tail returns the
+ * VALUE param, `ret %2`. Before F1b the merge carried only the value param
+ * (`#B1(%2)`) and jumped `#B1(%1)` — the OLD golden shape dropped `s` at the
+ * merge; the arm block still holds its single `iadd` (defer never replayed
+ * twice). `#B1` is allocated BEFORE either arm (mirrors `lower_match_value`'s
+ * own `mergeb`-first shape), so it prints immediately followed by `#B2`'s own
+ * header, never a trailing `}` (that closes the function after the
+ * LAST-allocated block, the dead-code fallback past the last arm).
+ *
+ * @return void
+ */
+#test
+fn lwt_defer_inside_match_value_arm_fires_only_on_that_arms_own_branch() {
+    let s_plus_100 = lwt_bin(lexer::TokenKind::Plus, lwt_var("s", checker::PrimKind::I64), lwt_num_i64(100), checker::PrimKind::I64)
+    let defer_body = teko::list::push(teko::list::empty(), lwt_simple_assign("s", lexer::TokenKind::Assign, s_plus_100, checker::PrimKind::I64))
+    let subject = lwt_var("x", checker::PrimKind::I64)
+    let arm0_body = teko::list::push(teko::list::push(teko::list::empty(), lwt_defer(defer_body)), lwt_exprstmt(lwt_var("s", checker::PrimKind::I64)))
+    let arm0 = lwt_arm(lwt_int_pattern(1), arm0_body)
+    let arm1 = lwt_arm(lwt_wildcard_pattern(), teko::list::push(teko::list::empty(), lwt_exprstmt(lwt_var("s", checker::PrimKind::I64))))
+    let arms = teko::list::push(teko::list::push(teko::list::empty(), arm0), arm1)
+    let match_expr = lwt_match_value(subject, arms, checker::PrimKind::I64)
+    let body = teko::list::push(teko::list::push(teko::list::empty(), lwt_bind("s", lwt_num_i64(1), checker::PrimKind::I64)), lwt_ret(match_expr))
+    let params = teko::list::push(teko::list::empty(), lwt_param("x", "i64"))
+    let f = lwt_fn("match_value_arm_scoped", "teko::demo", params, checker::Prim { kind = checker::PrimKind::I64 }, body)

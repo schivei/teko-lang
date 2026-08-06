@@ -1,0 +1,65 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+    let r = interp_call(m, callee.func, av.values, depth + 1, mem)
+    if is_exit(r.result) { return istep_stop(r.result, rf, r.mem) }
+    if is_ierror(r.result) { return istep_stop(r.result, rf, r.mem) }
+    if !is_return(r.result) { return istep_stop(ires_error("lir interp: callee did not return a value"), rf, r.mem) }
+    if !inst.has_result { return istep_cont(rf, r.mem) }
+    istep_cont(rf_set(rf, inst.result, r.result.value), r.mem)
+}
+
+/**
+ * interp_call_indirect_inst — `LCallIndirect`: resolve `ci.target`'s CURRENT
+ * value to a module function via `resolve_func_addr` (the vtable/closure
+ * function-pointer model, §5.2), then recurse exactly like a direct call —
+ * its memory effects flow back into `mem`. An address that resolves to no
+ * function honest-stops (A1-6, #382).
+ *
+ * @param LModule m  the module (for the function-address resolution)
+ * @param LInst inst  the enclosing instruction (its result VReg, when
+ *                     value-producing)
+ * @param LCallIndirect ci  the indirect-call op
+ * @param RegFile rf  the caller's register file
+ * @param u32 depth  the recursion-depth guard
+ * @param MemStore mem  the whole-run memory
+ * @return IStep  the call's effect (a CONTINUE with the result bound, or a
+ *                propagated exit/error)
+ */
+fn interp_call_indirect_inst(m: LModule, inst: LInst, ci: LCallIndirect, rf: RegFile, depth: u32, mem: MemStore) -> IStep {
+    let t = rf_get(rf, ci.target)
+    if !t.ok { return istep_stop(ires_error("lir interp: indirect call through an undefined VReg"), rf, mem) }
+    let hit = resolve_func_addr(m, t.value)
+    if !hit.found { return istep_stop(ires_error("lir interp: indirect call target resolves to no function"), rf, mem) }
+    let av = read_args(rf, ci.args)
+    if !av.ok { return istep_stop(ires_error("lir interp: indirect-call arg is an undefined VReg"), rf, mem) }
+    let r = interp_call(m, hit.func, av.values, depth + 1, mem)
+    if is_exit(r.result) { return istep_stop(r.result, rf, r.mem) }
+    if is_ierror(r.result) { return istep_stop(r.result, rf, r.mem) }
+    if !is_return(r.result) { return istep_stop(ires_error("lir interp: indirect callee did not return a value"), rf, r.mem) }
+    if !inst.has_result { return istep_cont(rf, r.mem) }
+    istep_cont(rf_set(rf, inst.result, r.result.value), r.mem)
+}
+
+/** interp_exit — `tk_exit(n)`: unwind with exit code n (0 when called with no argument). */
+fn interp_exit(args: []i64, rf: RegFile, mem: MemStore) -> IStep {
+    let code = if args.len == 0 { 0 } else { args[0] }
+    istep_stop(ires_exit(code), rf, mem)
+}
+
+/** RFArgs — a resolved argument-value list: whether every VReg was defined + the values. */
+pub type RFArgs = struct { ok: bool; values: []i64 }
+
+/** read_args — read each argument VReg into its value; ok=false if any is undefined. */
+fn read_args(rf: RegFile, args: []u32) -> RFArgs {
+    mut vals: []i64 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= args.len { break }
+        let v = rf_get(rf, args[i])
+        if !v.ok { return RFArgs { ok = false; values = vals } }
+        vals = teko::list::push(vals, v.value)
+        i++
+    }
+    RFArgs { ok = true; values = vals }
+}

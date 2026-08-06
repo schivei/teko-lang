@@ -1,0 +1,131 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+fn ctx_with(ctx: LowerCtx, func: LFunc, block_id: u32, env: LEnv) -> LowerCtx {
+    LowerCtx {
+        func = func; block_id = block_id; env = env
+        layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
+        defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
+        flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
+        has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
+    }
+}
+
+/**
+ * ctx_with_rodata — a copy of `ctx` with its rodata table replaced by `rodata`
+ * (everything else unchanged) — the one site a fresh interned entry threads
+ * forward (A1-4, #382).
+ *
+ * @param LowerCtx ctx  the context to rebuild
+ * @param []LRodata rodata  the grown rodata table
+ * @return LowerCtx  the rebuilt context
+ */
+fn ctx_with_rodata(ctx: LowerCtx, rodata: []LRodata) -> LowerCtx {
+    LowerCtx {
+        func = ctx.func; block_id = ctx.block_id; env = ctx.env
+        layouts = ctx.layouts; rodata = rodata; enums = ctx.enums; lifted = ctx.lifted
+        defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
+        flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
+        has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
+    }
+}
+
+/**
+ * ctx_with_lifted — a copy of `ctx` with its lifted-function table replaced
+ * by `lifted` (everything else unchanged) — the one site a fresh closure/
+ * thunk LFunc threads forward (A1-7, #382).
+ *
+ * @param LowerCtx ctx  the context to rebuild
+ * @param []LFunc lifted  the grown lifted-function table
+ * @return LowerCtx  the rebuilt context
+ */
+fn ctx_with_lifted(ctx: LowerCtx, lifted: []LFunc) -> LowerCtx {
+    LowerCtx {
+        func = ctx.func; block_id = ctx.block_id; env = ctx.env
+        layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = lifted
+        defers = ctx.defers; loop_targets = ctx.loop_targets; externs = ctx.externs
+        flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
+        has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
+    }
+}
+
+/**
+ * ctx_with_defers — a copy of `ctx` with its pending-defer stack replaced by
+ * `defers` (everything else unchanged) — the one site a fresh `TDeferStmt`
+ * registration threads forward (A1-2, #382).
+ *
+ * @param LowerCtx ctx  the context to rebuild
+ * @param []checker::TDeferStmt defers  the grown defer stack
+ * @return LowerCtx  the rebuilt context
+ */
+fn ctx_with_defers(ctx: LowerCtx, defers: []checker::TDeferStmt) -> LowerCtx {
+    LowerCtx {
+        func = ctx.func; block_id = ctx.block_id; env = ctx.env
+        layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
+        defers = defers; loop_targets = ctx.loop_targets; externs = ctx.externs
+        flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
+        has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
+    }
+}
+
+/**
+ * ctx_with_loops — a copy of `ctx` with its active loop-target stack
+ * replaced by `loop_targets` (everything else unchanged) — the site a
+ * `lower_loop` pushes/restores its own target (A1-2, #382).
+ *
+ * @param LowerCtx ctx  the context to rebuild
+ * @param []LoopTargets loop_targets  the replacement loop-target stack
+ * @return LowerCtx  the rebuilt context
+ */
+fn ctx_with_loops(ctx: LowerCtx, loop_targets: []LoopTargets) -> LowerCtx {
+    LowerCtx {
+        func = ctx.func; block_id = ctx.block_id; env = ctx.env
+        layouts = ctx.layouts; rodata = ctx.rodata; enums = ctx.enums; lifted = ctx.lifted
+        defers = ctx.defers; loop_targets = loop_targets; externs = ctx.externs
+        flat_symbols = ctx.flat_symbols; ret_type = ctx.ret_type
+        has_ret_len_slot = ctx.has_ret_len_slot; ret_len_slot = ctx.ret_len_slot
+    }
+}
+
+/** ctx_alloc — reserve a fresh VReg in the current function, returning it + the advanced
+    context. Centralizes the alloc-then-use pattern every value-producing node repeats. */
+fn ctx_alloc(ctx: LowerCtx) -> Lowered {
+    let fresh = alloc_vreg(ctx.func)
+    Lowered { ctx = ctx_with(ctx, fresh.func, ctx.block_id, ctx.env); vreg = fresh.vreg }
+}
+
+/** ctx_append — append `inst` to the current block, returning the updated context. */
+fn ctx_append(ctx: LowerCtx, inst: LInst) -> LowerCtx {
+    ctx_with(ctx, append_inst(ctx.func, ctx.block_id, inst), ctx.block_id, ctx.env)
+}
+
+/** ctx_bind — extend the context's local env with (name -> vreg). */
+fn ctx_bind(ctx: LowerCtx, name: str, vreg: u32) -> LowerCtx {
+    ctx_with(ctx, ctx.func, ctx.block_id, lenv_bind(ctx.env, name, vreg))
+}
+
+/** ctx_bind_fat — extend the context's local env with (name -> ptr, len), a FAT (str/slice)
+    binding (A1-4, #382). */
+fn ctx_bind_fat(ctx: LowerCtx, name: str, ptr: u32, len: u32) -> LowerCtx {
+    ctx_with(ctx, ctx.func, ctx.block_id, lenv_bind_fat(ctx.env, name, ptr, len))
+}
+
+/**
+ * ctx_reassign — the `ctx_bind` mirror for a reassignment: update the newest
+ * `name` binding's VReg IN PLACE (`lenv_reassign`) rather than appending a
+ * shadow, so the enclosing scalar keeps its pre-branch index for the merge
+ * machinery (#389 F1b item 3). The ONLY reassignment carrier — every other
+ * bind site is a fresh lexical binding and stays on `ctx_bind`.
+ *
+ * @param LowerCtx ctx  the context whose local env is updated
+ * @param str name  the reassigned local's name
+ * @param u32 vreg  the reassignment's fresh result VReg
+ * @return LowerCtx  the context with `name`'s newest binding rebound in place
+ */
+fn ctx_reassign(ctx: LowerCtx, name: str, vreg: u32) -> LowerCtx {
+    ctx_with(ctx, ctx.func, ctx.block_id, lenv_reassign(ctx.env, name, vreg))
+}
+
+/** lower_expr — lower a typed expression to LIR, returning the VReg carrying its value.
+    Mirrors emit_expr_ctx's dispatch over the subset; every out-of-subset node honest-stops
+    with a NAMED error. */

@@ -1,0 +1,253 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+ * it) and emit nothing inline — mirrors the C backend's `dctx_register`
+ * (`codegen.tks:5273-5277`) (A1-2, #382).
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param checker::TDeferStmt d  the defer node to register
+ * @return LowerStmtOut  the context with `d` appended to `.defers`
+ *                        (terminated=false — a `defer` never closes its
+ *                        enclosing block)
+ */
+fn lower_defer(ctx: LowerCtx, d: checker::TDeferStmt) -> LowerStmtOut {
+    LowerStmtOut { ctx = ctx_with_defers(ctx, teko::list::push(ctx.defers, d)); terminated = false }
+}
+
+/**
+ * replay_defers — fire every deferred body registered at index ≥ `base` in
+ * `ctx.defers`, LIFO (innermost/most-recent first), by lowering each body's
+ * statements straight-line into the CURRENT block — mirrors the C backend's
+ * `emit_defers` (`codegen.tks:5247-5271`). A defer body never itself
+ * contains a `return`/`break`/`continue`/`defer` (checker-enforced,
+ * `typer.tks:3068-3079`), so lowering it plainly via `lower_block` never
+ * re-enters this replay (A1-2, #382).
+ *
+ * @param LowerCtx ctx  the lowering context; its OWN `.defers` stack is READ
+ *                      (not shrunk — firing is a symbolic replay over
+ *                      already-lowered source structure, not a runtime pop)
+ * @param u64 base  the defer-stack index the exiting scope started at;
+ *                  every entry at or after this index fires
+ * @return LowerCtx | error  the advanced context (its current block grown
+ *                           with the replayed instructions), or a NAMED
+ *                           internal error when a defer body fails to lower
+ */
+fn replay_defers(ctx: LowerCtx, base: u64) -> LowerCtx | error {
+    mut cur = ctx
+    mut i: u64 = ctx.defers.len
+    loop {
+        if i <= base { break }
+        i = i - 1
+        cur = match lower_block(cur, ctx.defers[i].body) { LowerCtx as c => c; error as err => return err }
+    }
+    cur
+}
+
+/**
+ * PromotedEnv — the result of giving a MERGE block (a loop's head or exit)
+ * one block-arg per SCALAR (non-fat) name in an env: the advanced function,
+ * the rebuilt env (each such name now bound to its fresh block-arg VReg,
+ * every FAT binding passed through unchanged, unpromoted), and the ordered
+ * name list a caller matches against `env_scalar_vregs` to build a jump's
+ * argument list into this block (A1-2, #382 — a loop head/exit are both
+ * MERGE points, mirroring the SAME block-arg principle an if-expression's
+ * result VReg already uses, §2.4).
+ */
+pub type PromotedEnv = struct { func: LFunc; env: LEnv; names: []str }
+
+/**
+ * promote_env — allocate one fresh block-arg VReg per SCALAR (non-fat)
+ * binding in `env`, in order, on block `block_id`; rebuild the env with
+ * those names now bound to their fresh block-arg VReg. A FAT (str/slice)
+ * binding is left UNPROMOTED — its ptr/len stay whatever they were for the
+ * whole scope; no A1-2 fixture reassigns a fat local inside a loop
+ * (A1-2, #382).
+ *
+ * @param LFunc f  the function whose block gains the params
+ * @param u32 block_id  the merge block (already allocated) to add params to
+ * @param LEnv env  the env to promote (its SHAPE — names/fat-vs-scalar —
+ *                   drives which entries get a param)
+ * @return PromotedEnv  the advanced function + the rebuilt env + the ordered
+ *                       promoted-name list
+ */
+fn promote_env(f: LFunc, block_id: u32, env: LEnv) -> PromotedEnv {
+    mut cur_f = f
+    mut new_env = empty_lenv()
+    mut names: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= env.names.len { break }
+        if env.has_len[i] {
+            new_env = lenv_bind_fat(new_env, env.names[i], env.vregs[i], env.len_vregs[i])
+        } else {
+            let bp = add_block_param(cur_f, block_id)
+            cur_f = bp.func
+            new_env = rebind_promoted(new_env, env, i, bp.vreg)
+            names = teko::list::push(names, env.names[i])
+        }
+        i++
+    }
+    PromotedEnv { func = cur_f; env = new_env; names = names }
+}
+
+/**
+ * rebind_promoted — append `env`'s binding at index `i` to `out`, now carrying `vreg` (the fresh
+ * block/merge param), PRESERVING its binding SHAPE. A mutable fat local (`is_slot`) threads its
+ * 16-byte slot's ADDRESS through the merge like any other scalar, but it must arrive on the other
+ * side still known as a slot — rebinding it plainly would leave a later read treating the address
+ * as the pointer half (list-builtin degrau).
+ *
+ * @param out   the env being rebuilt
+ * @param env   the source env
+ * @param i     the source binding's index
+ * @param vreg  the VReg the rebuilt binding carries
+ * @return      `out` extended with the rebuilt binding
+ */
+fn rebind_promoted(out: LEnv, env: LEnv, i: u64, vreg: u32) -> LEnv {
+    if env.is_slot[i] { return lenv_bind_fat_slot(out, env.names[i], vreg) }
+    lenv_bind(out, env.names[i], vreg)
+}
+
+/**
+ * env_scalar_vregs — the CURRENT VReg of each SCALAR (non-fat) binding in
+ * `env`, in order — the argument list a jump/branch into a `promote_env`'d
+ * merge block supplies (A1-2, #382).
+ *
+ * @param LEnv env  the env to read
+ * @return []u32  each non-fat binding's current VReg, in order
+ */
+fn env_scalar_vregs(env: LEnv) -> []u32 {
+    mut out: []u32 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= env.names.len { break }
+        if !env.has_len[i] { out = teko::list::push(out, env.vregs[i]) }
+        i++
+    }
+    out
+}
+
+/**
+ * jump_args_for_names — the CURRENT VReg of each name in `names` (in
+ * order), read from `env` — the argument list a `break`/`continue`/loop
+ * back-edge jump supplies into a target `promote_env`'d block whose params
+ * are exactly `names`, positionally (A1-2, #382).
+ *
+ * @param LEnv env  the env to read (the jump SITE's own, however deeply
+ *                  nested)
+ * @param []str names  the target block's promoted-name list (its param
+ *                      order)
+ * @return []u32  each name's current VReg, in the SAME order as `names`
+ */
+fn jump_args_for_names(env: LEnv, names: []str) -> []u32 {
+    mut out: []u32 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= names.len { break }
+        out = teko::list::push(out, lenv_lookup(env, names[i]).vreg)
+        i++
+    }
+    out
+}
+
+/**
+ * merge_scalar_indices — the pre-branch INDEX of each threaded name in `env`
+ * (its newest occurrence), in `names` order — computed ONCE at a merge site
+ * from the PRE-BRANCH env so every arm reads its enclosing scalar's value from
+ * the SAME fixed slot, immune to any shadow the arm appends after it (#389 F1b
+ * item 3). Each threaded name occurs once in the pre-branch env, so the newest
+ * index IS the enclosing binding's index.
+ *
+ * @param LEnv env  the pre-branch env (each threaded name occurs once)
+ * @param []str names  the threaded scalar names, in merge-param order
+ * @return []u64  each name's pre-branch index, in the SAME order as `names`
+ */
+fn merge_scalar_indices(env: LEnv, names: []str) -> []u64 {
+    mut out: []u64 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= names.len { break }
+        out = teko::list::push(out, lenv_newest_index(env, names[i]))
+        i++
+    }
+    out
+}
+
+/**
+ * arm_scalar_args — one jump-arg per threaded scalar, read from `arm_env` at the
+ * fixed pre-branch `indices` — the ENCLOSING binding's current value at the
+ * arm's close (the reassigned VReg if the arm reassigned the enclosing scalar
+ * in place, the untouched pre-branch VReg if the arm only shadowed it at a
+ * higher index), REPLACING `jump_args_for_names`'s newest-first name lookup for
+ * if/match arm merges (#389 F1b item 3). Loops keep `jump_args_for_names` (a
+ * back-edge threads ALL promoted scalars by name, with no enclosing-vs-shadow
+ * split to make).
+ *
+ * @param LEnv arm_env  the arm-end env (its indices 0..pre_branch_len keep
+ *                      their positions — arms only append or update in place)
+ * @param []u64 indices  the threaded scalars' pre-branch indices, in param order
+ * @return []u32  each index's current VReg, in the SAME order as `indices`
+ */
+fn arm_scalar_args(arm_env: LEnv, indices: []u64) -> []u32 {
+    mut out: []u32 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= indices.len { break }
+        out = teko::list::push(out, arm_env.vregs[indices[i]])
+        i++
+    }
+    out
+}
+
+/**
+ * contains_str — is `s` present anywhere in `xs`? A tiny membership test the
+ * reassigned-scalar pre-scan uses both to de-duplicate raw hits and to keep
+ * the result in `env` order (#389 F1).
+ *
+ * @param []str xs  the list to search
+ * @param str s  the string to look for
+ * @return bool  true when some element of `xs` equals `s`
+ */
+fn contains_str(xs: []str, s: str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= xs.len { break }
+        if xs[i] == s { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * collect_reassigned_stmts — accumulate into `acc` the target of every
+ * `TAssign` of `AssignKind::Simple` reachable in `stmts`, DESCENDING into the
+ * statement blocks of a nested statement-form `if`/`match`, a `loop`, a
+ * `defer` body, AND the value-position `if`/`match` RHS of a `let`/`mut`
+ * binding. A reassignment buried one control-flow level down still rebinds the
+ * enclosing scalar PAST that inner merge, so the OUTER merge must carry it too
+ * — the SAME drop, one level in.
+ *
+ * A `defer` body IS descended (#389 F1b item 1): a statement-arm's closing
+ * jump-args are now re-sampled from the POST-`replay_defers` env
+ * (`close_arm_replaying_defers`), so a scalar a defer body reassigns reaches
+ * the merge param with its POST-defer value — the descent is a REAL fix, not
+ * the stale param F1 removed it to avoid (F1 sampled the args PRE-replay, so a
+ * defer descent then would only have minted a param carrying the stale
+ * pre-defer VReg).
+ *
+ * A binding's value-position `if`/`match` RHS IS descended (#389 F1b item 2):
+ * `if outer { let y = if inner { x = 5; x } else { 0 } }` reassigns the
+ * enclosing `x` inside the INNER value-if, which threads `x` through its OWN
+ * merge — but the OUTER statement merge still reads `x` past it, so the outer
+ * merge must carry `x` too or the rebind is DROPPED at the outer merge.
+ *
+ * @param []checker::TStatement stmts  the statement block to scan
+ * @param []str acc  the assignment targets gathered so far
+ * @return []str  `acc` extended with every simple-assignment target found
+ */
+fn collect_reassigned_stmts(stmts: []checker::TStatement, acc: []str) -> []str {
+    mut out = acc
+    mut i: u64 = 0
+    loop {
+        if i >= stmts.len { break }
+        out = collect_reassigned_stmt(stmts[i], out)

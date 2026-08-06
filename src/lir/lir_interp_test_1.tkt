@@ -1,0 +1,285 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+/** iwt_i64 — the i64 carrier for a small integer literal in the interp fixtures.
+
+    Unit tests for the LIR interpreter oracle (C5, issue #221). They build the F1-F5
+    reference programs as LIR by hand and run them through interp_lmodule, asserting the
+    exit code each program produces — the oracle side of the 4-way agreement (VM / native-C
+    / LIR-interp), validating the lowering INDEPENDENTLY of any machine code. The `iwt_`
+    prefix keeps helper names from colliding with other test modules. */
+fn iwt_i64(v: i64) -> i64 { v }
+
+fn iwt_no_args() -> []i64 { teko::list::empty() }
+
+/** iwt_main_exit — build `func @main() { %0 = const <code>; call @tk_exit(%0); ... }`,
+    the F1 shape (an explicit exit). */
+fn iwt_main_exit(code: i64) -> LModule {
+    mut f = new_func("main", 0, teko::list::empty(), LType::I32)
+    let c = alloc_vreg(f)
+    f = c.func
+    f = append_inst(f, 0, const_int_inst(c.vreg, iwt_i64(code), 0, 0))
+    let args = teko::list::push(teko::list::empty(), c.vreg)
+    f = append_inst(f, 0, void_call_inst("tk_exit", args, false, 0, 0))
+    let z = alloc_vreg(f)
+    f = z.func
+    f = append_inst(f, 0, const_int_inst(z.vreg, iwt_i64(0), 0, 0))
+    f = append_inst(f, 0, ret_inst(z.vreg, 0, 0))
+    add_func(empty_module(), f)
+}
+
+#test
+fn iwt_f1_exit_returns_the_code() {
+    let m = iwt_main_exit(42)
+    teko::assert::is_true(interp_lmodule(m, "main", iwt_no_args()) == iwt_i64(42))
+}
+
+/** iwt_let_mul_exit — F2: `let x=a; let y=b; exit(x*y)` as straight-line LIR (the SSA-lite
+    values ARE the locals, so x/y are just VRegs; the product feeds tk_exit). */
+fn iwt_let_mul_exit(a: i64, b: i64) -> LModule {
+    mut f = new_func("main", 0, teko::list::empty(), LType::I32)
+    let va = alloc_vreg(f)
+    f = va.func
+    f = append_inst(f, 0, const_int_inst(va.vreg, iwt_i64(a), 0, 0))
+    let vb = alloc_vreg(f)
+    f = vb.func
+    f = append_inst(f, 0, const_int_inst(vb.vreg, iwt_i64(b), 0, 0))
+    let vp = alloc_vreg(f)
+    f = vp.func
+    f = append_inst(f, 0, bin_inst(vp.vreg, LBinOp::IMul, va.vreg, vb.vreg, 0, 0))
+    let args = teko::list::push(teko::list::empty(), vp.vreg)
+    f = append_inst(f, 0, void_call_inst("tk_exit", args, false, 0, 0))
+    let z = alloc_vreg(f)
+    f = z.func
+    f = append_inst(f, 0, const_int_inst(z.vreg, iwt_i64(0), 0, 0))
+    f = append_inst(f, 0, ret_inst(z.vreg, 0, 0))
+    add_func(empty_module(), f)
+}
+
+#test
+fn iwt_f2_let_and_mul() {
+    teko::assert::is_true(interp_lmodule(iwt_let_mul_exit(6, 7), "main", iwt_no_args()) == iwt_i64(42))
+}
+
+/** iwt_add_fn — `func @teko__demo__add(%0,%1) { %2 = iadd %0,%1; ret %2 }`. */
+fn iwt_add_fn() -> LFunc {
+    let ptypes = teko::list::push(teko::list::push(teko::list::empty(), LType::I64), LType::I64)
+    mut f = new_func("teko__demo__add", 2, ptypes, LType::I64)
+    let r = alloc_vreg(f)
+    f = r.func
+    f = append_inst(f, 0, param_inst(0, 0, 0, 0))
+    f = append_inst(f, 0, param_inst(1, 1, 0, 0))
+    f = append_inst(f, 0, bin_inst(r.vreg, LBinOp::IAdd, 0, 1, 0, 0))
+    append_inst(f, 0, ret_inst(r.vreg, 0, 0))
+}
+
+/** iwt_call_add_exit — F3: `exit(add(40, 2))` — a Teko-Teko call whose result feeds
+    tk_exit. The interpreter recurses into @teko__demo__add. */
+fn iwt_call_add_exit() -> LModule {
+    mut m = add_func(empty_module(), iwt_add_fn())
+    mut f = new_func("main", 0, teko::list::empty(), LType::I32)
+    let a = alloc_vreg(f)
+    f = a.func
+    f = append_inst(f, 0, const_int_inst(a.vreg, iwt_i64(40), 0, 0))
+    let b = alloc_vreg(f)
+    f = b.func
+    f = append_inst(f, 0, const_int_inst(b.vreg, iwt_i64(2), 0, 0))
+    let cargs = teko::list::push(teko::list::push(teko::list::empty(), a.vreg), b.vreg)
+    let rc = alloc_vreg(f)
+    f = rc.func
+    f = append_inst(f, 0, call_inst(rc.vreg, "teko__demo__add", cargs, false, 0, 0))
+    let eargs = teko::list::push(teko::list::empty(), rc.vreg)
+    f = append_inst(f, 0, void_call_inst("tk_exit", eargs, false, 0, 0))
+    let z = alloc_vreg(f)
+    f = z.func
+    f = append_inst(f, 0, const_int_inst(z.vreg, iwt_i64(0), 0, 0))
+    f = append_inst(f, 0, ret_inst(z.vreg, 0, 0))
+    add_func(m, f)
+}
+
+#test
+fn iwt_f3_teko_call_and_add() {
+    teko::assert::is_true(interp_lmodule(iwt_call_add_exit(), "main", iwt_no_args()) == iwt_i64(42))
+}
+
+/** iwt_div_exit — F4: `exit(a / b)` (signed division) — 100/7 = 14. */
+fn iwt_div_exit(a: i64, b: i64) -> LModule {
+    mut f = new_func("main", 0, teko::list::empty(), LType::I32)
+    let va = alloc_vreg(f)
+    f = va.func
+    f = append_inst(f, 0, const_int_inst(va.vreg, iwt_i64(a), 0, 0))
+    let vb = alloc_vreg(f)
+    f = vb.func
+    f = append_inst(f, 0, const_int_inst(vb.vreg, iwt_i64(b), 0, 0))
+    let vq = alloc_vreg(f)
+    f = vq.func
+    f = append_inst(f, 0, bin_inst(vq.vreg, LBinOp::IDivS, va.vreg, vb.vreg, 0, 0))
+    let args = teko::list::push(teko::list::empty(), vq.vreg)
+    f = append_inst(f, 0, void_call_inst("tk_exit", args, false, 0, 0))
+    let z = alloc_vreg(f)
+    f = z.func
+    f = append_inst(f, 0, const_int_inst(z.vreg, iwt_i64(0), 0, 0))
+    f = append_inst(f, 0, ret_inst(z.vreg, 0, 0))
+    add_func(empty_module(), f)
+}
+
+#test
+fn iwt_f4_signed_division() {
+    teko::assert::is_true(interp_lmodule(iwt_div_exit(100, 7), "main", iwt_no_args()) == iwt_i64(14))
+}
+
+/** iwt_neg_fn — `func @teko__demo__neg(%0) { %1 = ineg %0; ret %1 }`. */
+fn iwt_neg_fn() -> LFunc {
+    let ptypes = teko::list::push(teko::list::empty(), LType::I64)
+    mut f = new_func("teko__demo__neg", 1, ptypes, LType::I64)
+    let r = alloc_vreg(f)
+    f = r.func
+    f = append_inst(f, 0, param_inst(0, 0, 0, 0))
+    f = append_inst(f, 0, un_inst(r.vreg, LUnOp::INeg, 0, 0, 0))
+    append_inst(f, 0, ret_inst(r.vreg, 0, 0))
+}
+
+/** iwt_neg_exit — F5: `exit(neg(-42))` — a unary negation round-trip through a call,
+    -(-42) = 42. */
+fn iwt_neg_exit() -> LModule {
+    mut m = add_func(empty_module(), iwt_neg_fn())
+    mut f = new_func("main", 0, teko::list::empty(), LType::I32)
+    let a = alloc_vreg(f)
+    f = a.func
+    f = append_inst(f, 0, const_int_inst(a.vreg, iwt_i64(-42), 0, 0))
+    let cargs = teko::list::push(teko::list::empty(), a.vreg)
+    let rc = alloc_vreg(f)
+    f = rc.func
+    f = append_inst(f, 0, call_inst(rc.vreg, "teko__demo__neg", cargs, false, 0, 0))
+    let eargs = teko::list::push(teko::list::empty(), rc.vreg)
+    f = append_inst(f, 0, void_call_inst("tk_exit", eargs, false, 0, 0))
+    let z = alloc_vreg(f)
+    f = z.func
+    f = append_inst(f, 0, const_int_inst(z.vreg, iwt_i64(0), 0, 0))
+    f = append_inst(f, 0, ret_inst(z.vreg, 0, 0))
+    add_func(m, f)
+}
+
+#test
+fn iwt_f5_unary_neg_round_trip() {
+    teko::assert::is_true(interp_lmodule(iwt_neg_exit(), "main", iwt_no_args()) == iwt_i64(42))
+}
+
+/**
+ * iwt_binop_exit — `exit(a <op> b)`: two int consts feed a binary op whose result feeds
+ * tk_exit, exactly the iwt_let_mul_exit shape parameterized over an arbitrary LBinOp — the
+ * run-oracle probe for the KP2 bitwise/shift arms.
+ *
+ * @param op  the binary LBinOp to place between the two operands
+ * @param a   the left operand's constant value
+ * @param b   the right operand's constant value
+ * @return    the built `main`-and-exit module
+ */
+fn iwt_binop_exit(op: LBinOp, a: i64, b: i64) -> LModule {
+    mut f = new_func("main", 0, teko::list::empty(), LType::I32)
+    let va = alloc_vreg(f)
+    f = va.func
+    f = append_inst(f, 0, const_int_inst(va.vreg, iwt_i64(a), 0, 0))
+    let vb = alloc_vreg(f)
+    f = vb.func
+    f = append_inst(f, 0, const_int_inst(vb.vreg, iwt_i64(b), 0, 0))
+    let vr = alloc_vreg(f)
+    f = vr.func
+    f = append_inst(f, 0, bin_inst(vr.vreg, op, va.vreg, vb.vreg, 0, 0))
+    let args = teko::list::push(teko::list::empty(), vr.vreg)
+    f = append_inst(f, 0, void_call_inst("tk_exit", args, false, 0, 0))
+    let z = alloc_vreg(f)
+    f = z.func
+    f = append_inst(f, 0, const_int_inst(z.vreg, iwt_i64(0), 0, 0))
+    f = append_inst(f, 0, ret_inst(z.vreg, 0, 0))
+    add_func(empty_module(), f)
+}
+
+/**
+ * iwt_unop_exit — `exit(<op> a)`: one int const feeds a unary op whose result feeds tk_exit
+ * — the run-oracle probe for the KP2 INot arm.
+ *
+ * @param op  the unary LUnOp to apply to the operand
+ * @param a   the operand's constant value
+ * @return    the built `main`-and-exit module
+ */
+fn iwt_unop_exit(op: LUnOp, a: i64) -> LModule {
+    mut f = new_func("main", 0, teko::list::empty(), LType::I32)
+    let va = alloc_vreg(f)
+    f = va.func
+    f = append_inst(f, 0, const_int_inst(va.vreg, iwt_i64(a), 0, 0))
+    let vr = alloc_vreg(f)
+    f = vr.func
+    f = append_inst(f, 0, un_inst(vr.vreg, op, va.vreg, 0, 0))
+    let args = teko::list::push(teko::list::empty(), vr.vreg)
+    f = append_inst(f, 0, void_call_inst("tk_exit", args, false, 0, 0))
+    let z = alloc_vreg(f)
+    f = z.func
+    f = append_inst(f, 0, const_int_inst(z.vreg, iwt_i64(0), 0, 0))
+    f = append_inst(f, 0, ret_inst(z.vreg, 0, 0))
+    add_func(empty_module(), f)
+}
+
+/**
+ * iwt_runs_bitwise_ops — the oracle RUNS `& | ^`: `6 & 3 == 2`, `6 | 3 == 7`, `6 ^ 3 == 5`
+ * (exact two's-complement bit ops on the carrier). Before KP2 eval_bin honest-stopped these.
+ */
+#test
+fn iwt_runs_bitwise_ops() {
+    teko::assert::is_true(interp_lmodule(iwt_binop_exit(LBinOp::IAnd, 6, 3), "main", iwt_no_args()) == iwt_i64(2))
+    teko::assert::is_true(interp_lmodule(iwt_binop_exit(LBinOp::IOr, 6, 3), "main", iwt_no_args()) == iwt_i64(7))
+    teko::assert::is_true(interp_lmodule(iwt_binop_exit(LBinOp::IXor, 6, 3), "main", iwt_no_args()) == iwt_i64(5))
+}
+
+/**
+ * iwt_runs_shift_ops — the oracle RUNS `<< >>`: `5 << 3 == 40`, and both the arithmetic
+ * (IShrS) and logical (IShrU) right shift of a non-negative value agree — `40 >> 3 == 5`.
+ */
+#test
+fn iwt_runs_shift_ops() {
+    teko::assert::is_true(interp_lmodule(iwt_binop_exit(LBinOp::IShl, 5, 3), "main", iwt_no_args()) == iwt_i64(40))
+    teko::assert::is_true(interp_lmodule(iwt_binop_exit(LBinOp::IShrS, 40, 3), "main", iwt_no_args()) == iwt_i64(5))
+    teko::assert::is_true(interp_lmodule(iwt_binop_exit(LBinOp::IShrU, 40, 3), "main", iwt_no_args()) == iwt_i64(5))
+}
+
+/**
+ * iwt_runs_bitwise_not — the oracle RUNS INot (`~`): `~0 == -1`, `~(-1) == 0`, `~5 == -6`
+ * (one's-complement on the signed carrier). Before KP2 eval_un honest-stopped INot.
+ */
+#test
+fn iwt_runs_bitwise_not() {
+    teko::assert::is_true(interp_lmodule(iwt_unop_exit(LUnOp::INot, 0), "main", iwt_no_args()) == iwt_i64(-1))
+    teko::assert::is_true(interp_lmodule(iwt_unop_exit(LUnOp::INot, -1), "main", iwt_no_args()) == iwt_i64(0))
+    teko::assert::is_true(interp_lmodule(iwt_unop_exit(LUnOp::INot, 5), "main", iwt_no_args()) == iwt_i64(-6))
+}
+
+/** iwt_alloc_field — reserve a slot at `base`, store `val` at `offset`, then load it back
+    into a fresh VReg — the shared alloca/field_addr/store/load shape every A1-3 memory
+    fixture below builds on. */
+fn iwt_alloc_field(f0: LFunc, base: u32, offset: u32, val: i64) -> LFunc {
+    mut f = f0
+    let c = alloc_vreg(f)
+    f = c.func
+    f = append_inst(f, 0, const_int_inst(c.vreg, iwt_i64(val), 0, 0))
+    let a = alloc_vreg(f)
+    f = a.func
+    f = append_inst(f, 0, field_addr_inst(a.vreg, base, offset, 0, 0))
+    append_inst(f, 0, store_inst(a.vreg, c.vreg, LType::I64, 0, 0))
+}
+
+/** iwt_load_field — load the value at `base + offset` into a fresh VReg. */
+fn iwt_load_field(f0: LFunc, base: u32, offset: u32) -> FreshVReg {
+    let a = alloc_vreg(f0)
+    let f1 = a.func
+    let l = alloc_vreg(f1)
+    let f2 = append_inst(l.func, 0, field_addr_inst(a.vreg, base, offset, 0, 0))
+    FreshVReg { func = append_inst(f2, 0, load_inst(l.vreg, a.vreg, LType::I64, 0, 0)); vreg = l.vreg }
+}
+
+/** iwt_exit_sum — append `exit(a + b)` (a terminal void_call + the ABI's trailing
+    `const 0; ret`) to `f0`. */
+fn iwt_exit_sum(f0: LFunc, a: u32, b: u32) -> LFunc {
+    let s = alloc_vreg(f0)
+    mut f = s.func
+    f = append_inst(f, 0, bin_inst(s.vreg, LBinOp::IAdd, a, b, 0, 0))
+    let args = teko::list::push(teko::list::empty(), s.vreg)

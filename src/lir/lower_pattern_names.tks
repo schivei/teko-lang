@@ -1,0 +1,204 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+ */
+fn bind_payload_at8(ctx: LowerCtx, base: u32, ty: LType, binding: str) -> LowerCtx {
+    let addr = ctx_alloc(ctx)
+    let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, 8, 0, 0))
+    let r = ctx_alloc(with_addr)
+    let with_load = ctx_append(r.ctx, load_inst(r.vreg, addr.vreg, ty, 0, 0))
+    ctx_bind(with_load, binding, r.vreg)
+}
+
+/**
+ * bind_null_union_payload — `X as x` over a null-bearing two-member union subject: `x` binds
+ * the payload loaded at the fixed offset 8, of the payload type's own machine class. Needs no
+ * NAME lookup (`null_union_payload`'s doc): a two-member null union has exactly one non-null
+ * case.
+ *
+ * @param LowerCtx ctx  the lowering context to extend with the binding
+ * @param MatchSubj subj  the match's already-lowered (base-address) subject
+ * @param checker::Type payload  the union's non-null member type
+ * @param str binding  the name to bind the payload to
+ * @return LowerCtx  the context with `binding` bound to the loaded payload
+ * @since 0.3.1 (null-union C7 own-backend gap — wasm_panic_hook)
+ */
+fn bind_null_union_payload(ctx: LowerCtx, subj: MatchSubj, payload: checker::Type, binding: str) -> LowerCtx {
+    bind_payload_at8(ctx, subj.vreg, ltype_of(payload, ctx.enums), binding)
+}
+
+/**
+ * lower_null_pattern_test — a `null` pattern's test over a null-bearing two-member union
+ * subject: `subj.tag == 0` (the resolver's null-first canonical order puts `null` at index 0).
+ * Any other subject shape stays out of the A1-5 subset (`null` never matches a non-union
+ * subject).
+ *
+ * @param LowerCtx ctx  the lowering context to append the test's instructions into
+ * @param MatchSubj subj  the match's already-lowered subject
+ * @param u32 line  the source line to stamp the emitted instructions with
+ * @param u32 col  the source column to stamp the emitted instructions with
+ * @return PatternTest  the computed tag-equality test
+ * @throws  when the subject is not a null-bearing `Variant`
+ * @since 0.3.1 (null-union C7 own-backend gap — wasm_panic_hook)
+ */
+fn lower_null_pattern_test(ctx: LowerCtx, subj: MatchSubj, line: u32, col: u32) -> PatternTest | error {
+    match subj.ty {
+        checker::Variant as v => match null_union_payload(v) {
+            checker::Type => lower_variant_tag_eq_test(ctx, subj, 0, line, col)
+            null => error { message = "native backend N1: `null` match pattern not yet lowered (N2)" }
+        }
+        _ => error { message = "native backend N1: `null` match pattern not yet lowered (N2)" }
+    }
+}
+
+/**
+ * lower_null_union_construct — build the own backend's uniform tag+payload wrapper for a value
+ * coerced into a null-bearing two-member union (`null_union_payload`'s doc): allocate
+ * `{ i32 tag; <payload> }` (tag@0, payload@8 — the fixed layout `lower_variant_tag_eq_test`/
+ * `bind_payload_at8` already read), then store tag `0` for a `null` value, or tag `1` plus the
+ * lowered payload for any other value.
+ *
+ * @param LowerCtx ctx  the lowering context to append the construction's instructions into
+ * @param checker::Type payload  the union's non-null member type (drives the payload's
+ *                               machine class)
+ * @param checker::TExpr e  the value being coerced (a `TNullLit`, or an expression of the
+ *                          payload type)
+ * @return Lowered  the wrapper's alloca'd base address
+ * @throws  propagated from lowering a non-null payload expression
+ * @since 0.3.1 (null-union C7 own-backend gap — wasm_panic_hook)
+ */
+fn lower_null_union_construct(ctx: LowerCtx, payload: checker::Type, e: checker::TExpr) -> Lowered | error {
+    let pty = ltype_of(payload, ctx.enums)
+    let align = variant_wrapper_align(pty)
+    let size = (8 to u32) + ltype_size(pty)
+    let base = ctx_alloc(ctx)
+    let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, size, align, e.line, e.col))
+    match e.kind {
+        checker::TNullLit => store_variant_tag(with_alloca, base.vreg, 0, e.line, e.col)
+        _ => store_variant_payload(with_alloca, base.vreg, 1, pty, e)
+    }
+}
+
+/**
+ * lower_variant_construct — build the own backend's uniform tag+payload wrapper for a bare case
+ * `value` flowing into a GENERAL (non-null-bearing) declared variant `v`: find its member index
+ * by TYPE (`variant_member_index_of` — a bare value has no case name to match by), allocate
+ * `{ i32 tag; <payload> }` sized to `value`'s OWN payload width (tag@0, payload@8 — the SAME
+ * fixed layout `lower_variant_tag_eq_test`/`bind_payload_at8` read regardless of which case is
+ * active; a later read through this SAME instance already knows, from the tag test that matched
+ * it, to read exactly this width — `lower_null_union_construct`'s exact shape, generalized from
+ * the fixed 0/1 tag to an arbitrary member index), then store the index as the tag and the
+ * lowered value as the payload.
+ *
+ * @param LowerCtx ctx  the lowering context to append the construction's instructions into
+ * @param checker::Variant v  the declared variant `value` is placed into
+ * @param checker::TExpr value  the bare case value being wrapped
+ * @return Lowered  the wrapper's alloca'd base address
+ * @throws  propagated from lowering `value`, or when its type names no member of `v`
+ * @since 0.3.1 (own-backend general variant construction, degrau N2)
+ */
+fn lower_variant_construct(ctx: LowerCtx, v: checker::Variant, value: checker::TExpr) -> Lowered | error {
+    let index = match variant_member_index_of(v.members, value.type) { u32 as x => x; error as e => return e }
+    let pty = ltype_of(value.type, ctx.enums)
+    let align = variant_wrapper_align(pty)
+    let size = (8 to u32) + ltype_size(pty)
+    let base = ctx_alloc(ctx)
+    let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, size, align, value.line, value.col))
+    store_variant_payload(with_alloca, base.vreg, index to i64, pty, value)
+}
+
+/**
+ * variant_wrapper_align — the tag+payload wrapper's alignment: the payload's own alignment
+ * when it is wider than the `i32` tag word, else the tag word's own 4-byte alignment. Shared by
+ * every variant construction (null-bearing or general) — the wrapper shape is uniform (#382,
+ * degrau N2).
+ *
+ * @param LType pty  the payload's machine class
+ * @return u32  the wrapper's alignment in bytes
+ */
+fn variant_wrapper_align(pty: LType) -> u32 {
+    let pa = ltype_align(pty)
+    if pa > (4 to u32) { pa } else { 4 to u32 }
+}
+
+/**
+ * store_variant_tag — store `index` as the wrapper's `i32` tag word (offset 0), leaving the
+ * payload slot's bytes unspecified (a tag-only construction — the null-union's absent case —
+ * never reads them back).
+ *
+ * @param LowerCtx ctx  the lowering context to append the store's instructions into
+ * @param u32 base  the wrapper's alloca'd base-address VReg
+ * @param i64 index  the tag value to store
+ * @param u32 line  the source line to stamp the emitted instructions with
+ * @param u32 col  the source column to stamp the emitted instructions with
+ * @return Lowered  the wrapper's base address, unchanged
+ */
+fn store_variant_tag(ctx: LowerCtx, base: u32, index: i64, line: u32, col: u32) -> Lowered {
+    let tagr = ctx_alloc(ctx)
+    let with_tag = ctx_append(tagr.ctx, const_int_inst(tagr.vreg, index, line, col))
+    let addr = ctx_alloc(with_tag)
+    let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, 0, line, col))
+    let with_store = ctx_append(with_addr, store_inst(addr.vreg, tagr.vreg, LType::I32, line, col))
+    Lowered { ctx = with_store; vreg = base }
+}
+
+/**
+ * store_variant_payload — store `index` as the wrapper's tag (`store_variant_tag`) then the
+ * lowered payload `e` at the wrapper's fixed offset 8 — generalizes the null-union's hard-coded
+ * tag `1` to an arbitrary member INDEX, so the SAME store serves both the null-union's single
+ * present case and any case of a general (2+ non-null-member) variant (#382, degrau N2).
+ *
+ * @param LowerCtx ctx  the lowering context to append the construction's instructions into
+ * @param u32 base  the wrapper's alloca'd base-address VReg
+ * @param i64 index  the payload's own member index (the case being constructed)
+ * @param LType pty  the payload's machine class
+ * @param checker::TExpr e  the payload value to lower and store
+ * @return Lowered  the wrapper's base address
+ * @throws  propagated from lowering `e`
+ */
+fn store_variant_payload(ctx: LowerCtx, base: u32, index: i64, pty: LType, e: checker::TExpr) -> Lowered | error {
+    let tagged = store_variant_tag(ctx, base, index, e.line, e.col)
+    let vo = match lower_expr(tagged.ctx, e) { Lowered as x => x; error as err => return err }
+    let paddr = ctx_alloc(vo.ctx)
+    let with_paddr = ctx_append(paddr.ctx, field_addr_inst(paddr.vreg, base, 8, e.line, e.col))
+    let with_pstore = ctx_append(with_paddr, store_inst(paddr.vreg, vo.vreg, pty, e.line, e.col))
+    Lowered { ctx = with_pstore; vreg = base }
+}
+
+/**
+ * find_enum_info — the LEnumInfo in `enums` whose name's LAST SEGMENT matches `name`'s, or
+ * `null` (a subject/annotation naming a type that is NOT a registered enum — a bare bind
+ * pattern over it always matches, A1-5, #382; a field of it is not enum-carried).
+ *
+ * THE MATCH IS BY LAST SEGMENT, and that is not a new decision: `find_variant_info`
+ * (`lower_const.tks`) already reconciles the SAME two spellings the same way, and says why —
+ * a resolved type arrives QUALIFIED (`ns::Color`, `resolve_named`'s `qualify`) while a
+ * declaration table and a field annotation carry the DECLARED spelling (`Color`). An exact
+ * match here silently answered "not an enum" for every enum outside the root namespace, which
+ * made the ordinal test of `lower_named_bind_pattern_test` degrade to an unconditional match.
+ * ONE probe now serves both the ordinal question and the carrier-width question, so the two
+ * can never disagree about what is an enum.
+ *
+ * @param []LEnumInfo enums  the program's whole enum table
+ * @param str name  the type name to look up (bare or qualified)
+ * @return LEnumInfo?  the matching entry, or `null` when `name` is not a
+ *                     registered enum
+ */
+fn find_enum_info(enums: []LEnumInfo, name: str) -> LEnumInfo | null {
+    let bare = checker::name_last_segment(name)
+    mut i: u64 = 0
+    loop {
+        if i >= enums.len { break }
+        if checker::name_last_segment(enums[i].name) == bare { return enums[i] }
+        i++
+    }
+    null
+}
+
+/**
+ * enum_member_ordinal — the declared INDEX of `member` within `ei.members` (the
+ * ordinal an enum-subject pattern tests against, mirroring the checker's own
+ * `check_enum_pattern`), or a NAMED internal error when the name is not a
+ * member (A1-5, #382).
+ *
+ * @param LEnumInfo ei  the enum's declared name + member list

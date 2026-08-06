@@ -1,0 +1,216 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+ * @param u32 col  the source column to propagate onto every emitted inst
+ * @return Lowered  the advanced context + the closure struct's base address
+ */
+fn build_closure_literal(ctx: LowerCtx, fn_symbol: str, env_vreg: u32, line: u32, col: u32) -> Lowered {
+    let ptr_size = ltype_size(LType::Ptr)
+    let fnaddr = ctx_alloc(ctx)
+    let with_fnaddr = ctx_append(fnaddr.ctx, func_addr_inst(fnaddr.vreg, fn_symbol, line, col))
+    let base = ctx_alloc(with_fnaddr)
+    let with_alloca = ctx_append(base.ctx, alloca_inst(base.vreg, ptr_size * 2, ptr_size, line, col))
+    let fslot = ctx_alloc(with_alloca)
+    let with_fslot_addr = ctx_append(fslot.ctx, field_addr_inst(fslot.vreg, base.vreg, 0, line, col))
+    let with_fn_store = ctx_append(with_fslot_addr, store_inst(fslot.vreg, fnaddr.vreg, LType::Ptr, line, col))
+    let eslot = ctx_alloc(with_fn_store)
+    let with_eslot_addr = ctx_append(eslot.ctx, field_addr_inst(eslot.vreg, base.vreg, ptr_size, line, col))
+    let with_env_store = ctx_append(with_eslot_addr, store_inst(eslot.vreg, env_vreg, LType::Ptr, line, col))
+    Lowered { ctx = with_env_store; vreg = base.vreg }
+}
+
+/**
+ * lower_fn_value — a bare top-level function used as a VALUE
+ * (`TVar.is_func`): lift an env-first THUNK wrapping it
+ * (`build_closure_thunk`) so it can be called uniformly through
+ * `LCallIndirect` alongside a genuinely capturing lambda, then build the
+ * closure literal `{fn=thunk, env=null}` — mirrors the C backend's
+ * `(tk_closure){ &<fn>, (void*)0 }` (`codegen.tks:5093-5096`), substituting
+ * the thunk for the raw function address so the ABI stays uniform (A1-7,
+ * #382).
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param checker::TExpr e  the var expression (its type is the referenced
+ *                          function's `Func` signature)
+ * @param checker::TVar v  the fn-as-value var node
+ * @return Lowered | error  the advanced context + the closure literal's base
+ *                          address, or a NAMED internal error
+ */
+fn lower_fn_value(ctx: LowerCtx, e: checker::TExpr, v: checker::TVar) -> Lowered | error {
+    let sig = match func_type_of(e.type) { checker::Func as f => f; error as err => return err }
+    let target_sym = mangle_fn_symbol(v.func_ns, v.name, ctx.flat_symbols)
+    let ptypes = types_to_ltypes(sig.params, ctx.enums)
+    let ret_ty = ltype_of(sig.ret, ctx.enums)
+    let id = ctx.lifted.len
+    let thunk_sym = lift_thunk_symbol(id)
+    let thunk = build_closure_thunk(thunk_sym, target_sym, ptypes, ret_ty, e.line, e.col)
+    let ctx2 = ctx_with_lifted(ctx, teko::list::push(ctx.lifted, thunk))
+    let nullo = ctx_alloc(ctx2)
+    let with_null = ctx_append(nullo.ctx, const_int_inst(nullo.vreg, 0, e.line, e.col))
+    build_closure_literal(with_null, thunk_sym, nullo.vreg, e.line, e.col)
+}
+
+/**
+ * ClosureFatPtr — the two loaded halves of a closure value's `{fn@0, env@8}`
+ * memory layout (§5.3): the callable's function-address VReg and its
+ * captured-environment VReg. Reuses `lower_iface_fatptr`'s load sequence — a
+ * closure and an interface receiver share the identical two-Ptr-field shape
+ * (its `data`/`vtable` become this type's `target`/`env`).
+ *
+ * @since #382 A1-7
+ */
+pub type ClosureFatPtr = struct { ctx: LowerCtx; target: u32; env: u32 }
+
+/**
+ * lower_closure_fatptr — load both halves of a closure value's `{fn@0,
+ * env@8}` memory layout at address `base`, reusing `lower_iface_fatptr`'s
+ * load sequence (A1-7, #382).
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param u32 base  the closure's base address (a Ptr VReg)
+ * @param u32 line  the source line to propagate onto every emitted inst
+ * @param u32 col  the source column to propagate onto every emitted inst
+ * @return ClosureFatPtr  the advanced context + the loaded target/env VRegs
+ */
+fn lower_closure_fatptr(ctx: LowerCtx, base: u32, line: u32, col: u32) -> ClosureFatPtr {
+    let fp = lower_iface_fatptr(ctx, base, line, col)
+    ClosureFatPtr { ctx = fp.ctx; target = fp.data; env = fp.vtable }
+}
+
+/**
+ * closure_call_args — the indirect-call argument list: `env` prepended to
+ * `rest`, in order — mirrors `iface_call_args`'s `data`-first shape, but for
+ * a closure's env slot (A1-7, #382).
+ *
+ * @param u32 env  the closure's env VReg (goes first)
+ * @param []u32 rest  the remaining (already-lowered) argument VRegs
+ * @return []u32  `env` followed by `rest`, in order
+ */
+fn closure_call_args(env: u32, rest: []u32) -> []u32 {
+    mut out: []u32 = teko::list::push(teko::list::empty(), env)
+    mut i: u64 = 0
+    loop {
+        if i >= rest.len { break }
+        out = teko::list::push(out, rest[i])
+        i++
+    }
+    out
+}
+
+/**
+ * lower_closure_call — a call through a LOCAL closure VALUE
+ * (`TCall.is_closure_call`): the callee's last path segment names the local
+ * (mirrors the C backend's `emit_closure_call`, which reads the same
+ * identifier) — load its `{fn, env}` halves, then `LCallIndirect` through
+ * `fn` with `env` prepended to the remaining (already-lowered) arguments
+ * (A1-7, #382).
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param checker::TExpr e  the call expression (for its type + source
+ *                          position)
+ * @param checker::TCall c  the closure-call node (`c.callee`'s last segment
+ *                          names the local closure variable)
+ * @return Lowered | error  the advanced context + the call's result VReg (0
+ *                          for a void call), or a NAMED internal error when
+ *                          the node is malformed
+ * @throws  the fat-result honest stop (below) when `e.type` is `str`/`[]T` — a closure's
+ *          hidden fat-return out-slot is not yet wired (call-gordo degrau, #382 N2)
+ */
+fn lower_closure_call(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | error {
+    if is_fat_type(e.type) { return error { message = "native backend N1: fat-pointer closure-call result not yet lowered (N2)" } }
+    if c.callee.segments.len == 0 { return error { message = "native backend N1: empty closure-call path (internal)" } }
+    let name = c.callee.segments[c.callee.segments.len - 1].name
+    let hit = lenv_lookup(ctx.env, name)
+    if !hit.found { return error { message = teko::str::concat("native backend N1: unbound closure local `", name, "` (internal)") } }
+    let fp = lower_closure_fatptr(ctx, hit.vreg, e.line, e.col)
+    let rest = match lower_args(fp.ctx, c.args) { LoweredArgs as x => x; error as err => return err }
+    lower_call_indirect(rest.ctx, e, fp.target, closure_call_args(fp.env, rest.vregs))
+}
+
+/**
+ * lambda_capture_names — the declared name of each capture, in order (A1-7,
+ * #382 — parallels `lambda_capture_types`, the field list `layout_of`
+ * needs).
+ *
+ * @param []checker::TCapture captures  the lambda's captured-variable list
+ * @return []str  each capture's name, in order
+ */
+fn lambda_capture_names(captures: []checker::TCapture) -> []str {
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= captures.len { break }
+        out = teko::list::push(out, captures[i].name)
+        i++
+    }
+    out
+}
+
+/**
+ * lambda_capture_types — the machine class of each capture, in order
+ * (A1-7, #382 — parallels `lambda_capture_names`).
+ *
+ * @param []checker::TCapture captures  the lambda's captured-variable list
+ * @param []LEnumInfo enums  the program's declared-enum table (an enum-typed
+ *                           capture carries its integer width, not `Ptr`)
+ * @return []LType  each capture's machine class, in order
+ */
+fn lambda_capture_types(captures: []checker::TCapture, enums: []LEnumInfo) -> []LType {
+    mut out: []LType = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= captures.len { break }
+        out = teko::list::push(out, ltype_of(captures[i].type, enums))
+        i++
+    }
+    out
+}
+
+/**
+ * lambda_env_layout — the declared-order, natural-alignment layout of a
+ * lambda's env aggregate (one field per capture) — reuses `layout_of`, the
+ * same algorithm a `struct` declaration's layout gets (A1-7, #382). The
+ * layout's own name is a fixed debug label: it is never registered into
+ * `ctx.layouts` or looked up by name, only read directly by
+ * `build_lambda_env`/`bind_lambda_captures`.
+ *
+ * @param []checker::TCapture captures  the lambda's captured-variable list
+ * @param []LEnumInfo enums  the program's declared-enum table (an enum-typed
+ *                           capture occupies its integer width in the env slot)
+ * @return LStructLayout  the env aggregate's resolved layout
+ */
+fn lambda_env_layout(captures: []checker::TCapture, enums: []LEnumInfo) -> LStructLayout {
+    layout_of("<closure-env>", lambda_capture_names(captures), lambda_capture_types(captures, enums))
+}
+
+/**
+ * store_lambda_captures — store each capture's CURRENT (already-lowered)
+ * value into the env aggregate at `base`, at its layout offset — mirrors
+ * `store_struct_fields`, but sources each field from the ENCLOSING scope's
+ * already-bound local (`lenv_lookup`) rather than re-lowering an expression
+ * (A1-7, #382).
+ *
+ * @param LowerCtx ctx  the lowering context (the ENCLOSING scope — every
+ *                      capture must already be bound in `ctx.env`)
+ * @param u32 base  the env aggregate's base address (a Ptr VReg)
+ * @param LStructLayout layout  the env aggregate's resolved layout
+ * @param []checker::TCapture captures  the lambda's captured-variable list
+ * @param u32 line  the source line to propagate onto every emitted inst
+ * @param u32 col  the source column to propagate onto every emitted inst
+ * @return Lowered | error  the advanced context + `base` (unchanged by the
+ *                          stores), or a NAMED internal error when a capture
+ *                          is unbound
+ */
+fn store_lambda_captures(ctx: LowerCtx, base: u32, layout: LStructLayout, captures: []checker::TCapture, line: u32, col: u32) -> Lowered | error {
+    mut cur = ctx
+    mut i: u64 = 0
+    loop {
+        if i >= captures.len { break }
+        let hit = lenv_lookup(cur.env, captures[i].name)
+        if !hit.found { return error { message = teko::str::concat("native backend N1: unbound capture `", captures[i].name, "` (internal)") } }
+        if lenv_lookup_fat_slot(cur.env, captures[i].name).found {
+            return error { message = teko::str::concat("native backend N1: capturing the MUTABLE str/slice local `", captures[i].name, "` needs the env slot to carry both halves of its pair, not the address of its frame slot (N2)") }
+        }
+        let off = match field_offset_of(layout, captures[i].name) { u32 as o => o; error as err => return err }
+        let addr = ctx_alloc(cur)
+        let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, off, line, col))

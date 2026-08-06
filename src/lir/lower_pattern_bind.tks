@@ -1,0 +1,303 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+ * plan's §5.3) (A1-5, #382).
+ *
+ * @param LowerCtx ctx  the lowering context to append the test's instructions
+ *                      into
+ * @param MatchSubj subj  the match's already-lowered (base-address) subject
+ * @param []checker::Type members  the variant subject's declared members, in
+ *                                 order
+ * @param str case_name  the pattern's case name
+ * @param u32 line  the source line to stamp the emitted instructions with
+ * @param u32 col  the source column to stamp the emitted instructions with
+ * @return PatternTest  the computed tag-equality test
+ * @throws  when `case_name` names no member of `members`
+ */
+fn lower_variant_case_test(ctx: LowerCtx, subj: MatchSubj, members: []checker::Type, case_name: str, line: u32, col: u32) -> PatternTest | error {
+    let vm = match find_variant_member(members, case_name) { VariantMember as x => x; error as err => return err }
+    lower_variant_tag_eq_test(ctx, subj, vm.index to i64, line, col)
+}
+
+/**
+ * lower_field_pattern_test — a FieldPattern's test: the same variant-tag test a
+ * BindPattern case-select uses (a field-destructure ALSO selects a case); any
+ * other subject shape is out of the A1-5 subset (A1-5, #382).
+ *
+ * @param LowerCtx ctx  the lowering context to append the test's instructions
+ *                      into
+ * @param MatchSubj subj  the match's already-lowered subject
+ * @param parser::FieldPattern fp  the field pattern to test
+ * @param u32 line  the source line to stamp the emitted instructions with
+ * @param u32 col  the source column to stamp the emitted instructions with
+ * @return PatternTest  the computed tag-equality test
+ * @throws  when the subject is not a `Variant` type
+ */
+fn lower_field_pattern_test(ctx: LowerCtx, subj: MatchSubj, fp: parser::FieldPattern, line: u32, col: u32) -> PatternTest | error {
+    match subj.ty {
+        checker::Variant as v => lower_variant_case_test(ctx, subj, v.members, field_pattern_case_name(fp), line, col)
+        _ => error { message = "native backend N1: field match pattern over a non-variant subject not yet lowered (N2)" }
+    }
+}
+
+/**
+ * lower_pattern_binds — the bindings `pat` introduces into `ctx`'s env: a bind
+ * pattern binds a name; a field pattern destructures a variant's payload struct
+ * fields; a wildcard/ literal/range/alt pattern binds nothing (A1-5, #382).
+ *
+ * @param LowerCtx ctx  the lowering context to extend with the pattern's
+ *                      bindings
+ * @param MatchSubj subj  the match's already-lowered subject
+ * @param parser::Pattern pat  the arm's syntactic pattern
+ * @return LowerCtx  the context with every binding `pat` introduces applied
+ * @throws  when a bind/field pattern names an unresolvable variant case
+ */
+fn lower_pattern_binds(ctx: LowerCtx, subj: MatchSubj, pat: parser::Pattern) -> LowerCtx | error {
+    match pat {
+        parser::BindPattern as bp => lower_bind_pattern_binds(ctx, subj, bp)
+        parser::FieldPattern as fp => lower_field_pattern_binds(ctx, subj, fp)
+        _ => ctx
+    }
+}
+
+/**
+ * lower_bind_pattern_binds — `Foo as x`: over a null-bearing two-member `Variant` subject
+ * (C7), `x` binds the FIXED payload (no name lookup, `null_union_payload`'s doc); over any
+ * other `Variant` subject, `x` binds the case's payload found BY NAME; otherwise `x` binds
+ * the WHOLE subject VReg (or fat pair). A bindingless bind (`Foo`/`Foo as _`) binds nothing
+ * (A1-5, #382).
+ *
+ * @param LowerCtx ctx  the lowering context to extend with the pattern's
+ *                      binding
+ * @param MatchSubj subj  the match's already-lowered subject
+ * @param parser::BindPattern bp  the bind pattern to apply
+ * @return LowerCtx  the context with `bp`'s binding applied (unchanged when
+ *                   bindingless)
+ * @throws  when `bp` names an unresolvable variant case
+ */
+fn lower_bind_pattern_binds(ctx: LowerCtx, subj: MatchSubj, bp: parser::BindPattern) -> LowerCtx | error {
+    if !bp.has_binding { return ctx }
+    match subj.ty {
+        checker::Variant as v => lower_variant_bind_pattern_binds(ctx, subj, v, bp)
+        _ => bind_whole_subject(ctx, subj, bp.binding)
+    }
+}
+
+/**
+ * lower_variant_bind_pattern_binds — the `checker::Variant` arm of `lower_bind_pattern_binds`:
+ * a null-bearing two-member union binds the FIXED payload (`bind_null_union_payload`); any
+ * other variant binds its case's payload found BY NAME (`lower_variant_case_bind`).
+ *
+ * @param LowerCtx ctx  the lowering context to extend with the binding
+ * @param MatchSubj subj  the match's already-lowered subject
+ * @param checker::Variant v  the subject's resolved variant type
+ * @param parser::BindPattern bp  the bind pattern to apply (already known bindingful)
+ * @return LowerCtx  the context with `bp`'s binding applied
+ * @throws  when `bp`'s case name is not a member of `v` (non-null-union variant only)
+ */
+fn lower_variant_bind_pattern_binds(ctx: LowerCtx, subj: MatchSubj, v: checker::Variant, bp: parser::BindPattern) -> LowerCtx | error {
+    match null_union_payload(v) {
+        checker::Type as payload => bind_null_union_payload(ctx, subj, payload, bp.binding)
+        null => lower_variant_case_bind(ctx, subj, v.members, bind_pattern_case_name(bp), bp.binding)
+    }
+}
+
+/**
+ * bind_whole_subject — bind `name` to the subject's own value: its fat (ptr,
+ * len) pair when `subj.is_fat`, else its plain scalar/address VReg (A1-5,
+ * #382).
+ *
+ * @param LowerCtx ctx  the lowering context to extend with the binding
+ * @param MatchSubj subj  the match's already-lowered subject
+ * @param str name  the name to bind
+ * @return LowerCtx  the context with `name` bound to the subject's own value
+ */
+fn bind_whole_subject(ctx: LowerCtx, subj: MatchSubj, name: str) -> LowerCtx {
+    if subj.is_fat { return ctx_bind_fat(ctx, name, subj.vreg, subj.len) }
+    ctx_bind(ctx, name, subj.vreg)
+}
+
+/**
+ * lower_variant_case_bind — `Foo as x` over a variant subject: `x` binds the
+ * case's PAYLOAD (a `field_addr` + `load` at offset 8, of the case type's own
+ * machine class — a Ptr for a struct case, so the bound name reads through the
+ * case's OWN registered layout exactly like an ordinary `TFieldAccess`) (A1-5,
+ * #382).
+ *
+ * @param LowerCtx ctx  the lowering context to append the load's instructions
+ *                      into
+ * @param MatchSubj subj  the match's already-lowered (base-address) subject
+ * @param []checker::Type members  the variant subject's declared members, in
+ *                                 order
+ * @param str case_name  the pattern's case name
+ * @param str binding  the name to bind the case's payload to
+ * @return LowerCtx  the context with `binding` bound to the case's loaded
+ *                   payload
+ * @throws  when `case_name` names no member of `members`
+ */
+fn lower_variant_case_bind(ctx: LowerCtx, subj: MatchSubj, members: []checker::Type, case_name: str, binding: str) -> LowerCtx | error {
+    let vm = match find_variant_member(members, case_name) { VariantMember as x => x; error as err => return err }
+    bind_payload_at8(ctx, subj.vreg, ltype_of(vm.ty, ctx.enums), binding)
+}
+
+/**
+ * lower_field_pattern_binds — `Foo { f; g }` over a variant subject: read the
+ * case's payload POINTER (offset 8), then destructure the requested fields off
+ * its OWN registered struct layout; any other subject shape is out of the A1-5
+ * subset (A1-5, #382).
+ *
+ * @param LowerCtx ctx  the lowering context to append the destructure's
+ *                      instructions into
+ * @param MatchSubj subj  the match's already-lowered subject
+ * @param parser::FieldPattern fp  the field pattern to apply
+ * @return LowerCtx  the context with every requested field bound
+ * @throws  when the subject is not a `Variant` type, or the case is not a
+ *          struct
+ */
+fn lower_field_pattern_binds(ctx: LowerCtx, subj: MatchSubj, fp: parser::FieldPattern) -> LowerCtx | error {
+    match subj.ty {
+        checker::Variant as v => lower_variant_field_binds(ctx, subj, v.members, fp)
+        _ => error { message = "native backend N1: field match pattern over a non-variant subject not yet lowered (N2)" }
+    }
+}
+
+/**
+ * lower_variant_field_binds — resolve the named case's struct layout, load its
+ * payload base address (offset 8), then bind each requested field by its OWN
+ * registered offset/type (A1-5, #382).
+ *
+ * @param LowerCtx ctx  the lowering context to append the destructure's
+ *                      instructions into
+ * @param MatchSubj subj  the match's already-lowered (base-address) subject
+ * @param []checker::Type members  the variant subject's declared members, in
+ *                                 order
+ * @param parser::FieldPattern fp  the field pattern naming the case + its
+ *                                 requested fields
+ * @return LowerCtx  the context with every requested field bound
+ * @throws  when the case is unresolvable, not a struct, or a requested field is
+ *          unknown
+ */
+fn lower_variant_field_binds(ctx: LowerCtx, subj: MatchSubj, members: []checker::Type, fp: parser::FieldPattern) -> LowerCtx | error {
+    let vm = match find_variant_member(members, field_pattern_case_name(fp)) { VariantMember as x => x; error as err => return err }
+    let sname = match vm.ty { checker::Named as n => n.name; _ => return error { message = "native backend N1: field match pattern requires a struct case (internal)" } }
+    let layout = match find_struct_layout(ctx.layouts, sname) { LStructLayout as l => l; error as err => return err }
+    let paddr = ctx_alloc(ctx)
+    let with_paddr = ctx_append(paddr.ctx, field_addr_inst(paddr.vreg, subj.vreg, 8, 0, 0))
+    let base = ctx_alloc(with_paddr)
+    let with_base = ctx_append(base.ctx, load_inst(base.vreg, paddr.vreg, LType::Ptr, 0, 0))
+    bind_variant_fields(with_base, base.vreg, layout, fp.fields)
+}
+
+/**
+ * bind_variant_fields — bind each of `fields` (in order) to its own load off
+ * `base` via the registered `layout`'s offset/machine-class (A1-5, #382).
+ *
+ * @param LowerCtx ctx  the lowering context to append each field's load into
+ * @param u32 base  the case's own payload base address VReg
+ * @param LStructLayout layout  the case's registered struct layout
+ * @param []str fields  the requested field names, in order
+ * @return LowerCtx  the context with every field bound
+ * @throws  when a requested field is not registered on `layout`
+ */
+fn bind_variant_fields(ctx: LowerCtx, base: u32, layout: LStructLayout, fields: []str) -> LowerCtx | error {
+    mut cur = ctx
+    mut i: u64 = 0
+    loop {
+        if i >= fields.len { break }
+        let off = match field_offset_of(layout, fields[i]) { u32 as o => o; error as err => return err }
+        let fty = match field_type_of(layout, fields[i]) { LType as t => t; error as err => return err }
+        let addr = ctx_alloc(cur)
+        let with_addr = ctx_append(addr.ctx, field_addr_inst(addr.vreg, base, off, 0, 0))
+        let r = ctx_alloc(with_addr)
+        let with_load = ctx_append(r.ctx, load_inst(r.vreg, addr.vreg, fty, 0, 0))
+        cur = ctx_bind(with_load, fields[i], r.vreg)
+        i++
+    }
+    cur
+}
+
+/**
+ * MatchArmEntry — the context positioned at the START of an arm's BODY (its
+ * pattern's bindings applied, and — when present — its `when` guard already
+ * resolved TRUE) + the id of the NEXT-arm test block (the pattern's or guard's
+ * failure target), shared by the value and statement `match` lowerings (A1-5,
+ * #382).
+ */
+type MatchArmEntry = struct { ctx: LowerCtx; next_block: u32 }
+
+/**
+ * close_test_to — close the CURRENT test block: an unconditional jump for an
+ * `always` test (§2.4's "wildcard/binding arms are an unconditional jump"),
+ * else a conditional branch on the test's bool VReg (A1-5, #382).
+ *
+ * @param LowerCtx ctx  the context whose current block the terminator closes
+ * @param PatternTest test  the arm's pattern-test outcome
+ * @param u32 arm_block  the block id to enter on a match
+ * @param u32 next_block  the block id to fall through to on a non-match
+ * @param u32 line  the source line to stamp the terminator with
+ * @param u32 col  the source column to stamp the terminator with
+ * @return LowerCtx  the context with the current block closed
+ */
+fn close_test_to(ctx: LowerCtx, test: PatternTest, arm_block: u32, next_block: u32, line: u32, col: u32) -> LowerCtx {
+    if test.always { return ctx_append(ctx, jump_inst(arm_block, teko::list::empty(), line, col)) }
+    ctx_append(ctx, branch_inst(test.vreg, arm_block, teko::list::empty(), next_block, teko::list::empty(), line, col))
+}
+
+/**
+ * lower_match_arm_entry — test `arm`'s pattern against `subj`; on success,
+ * apply its bindings and (when present) test its `when` guard — a failed
+ * pattern OR a failed guard falls through to the SAME next-arm block. Returns
+ * the context positioned at the start of the arm's BODY plus the next-arm block
+ * id (A1-5, #382).
+ *
+ * @param LowerCtx ctx  the lowering context positioned at the arm's test site
+ * @param checker::TExpr e  the enclosing match expression (for its source
+ *                          position)
+ * @param checker::TArm arm  the arm to lower the entry (test/binds/guard) of
+ * @param MatchSubj subj  the match's already-lowered subject
+ * @return MatchArmEntry  the context at the arm's body start + the next-arm
+ *                        block id
+ * @throws  when the pattern test, its bindings, or its guard fail to lower
+ */
+fn lower_match_arm_entry(ctx: LowerCtx, e: checker::TExpr, arm: checker::TArm, subj: MatchSubj) -> MatchArmEntry | error {
+    let test = match lower_pattern_test(ctx, subj, arm.pattern, e.line, e.col) { PatternTest as x => x; error as err => return err }
+    let armb = alloc_block(test.ctx.func)
+    let nextb = alloc_block(armb.func)
+    let gated = close_test_to(ctx_with(test.ctx, nextb.func, test.ctx.block_id, test.ctx.env), test, armb.block_id, nextb.block_id, e.line, e.col)
+    let arm_ctx = match lower_pattern_binds(ctx_goto(gated, armb.block_id), subj, arm.pattern) { LowerCtx as c => c; error as err => return err }
+    if !arm.has_when { return MatchArmEntry { ctx = arm_ctx; next_block = nextb.block_id } }
+    lower_match_guard(arm_ctx, arm, nextb.block_id)
+}
+
+/**
+ * lower_match_guard — a `when` guard: branch on it, taking the guard-true edge
+ * into a fresh body block and falling through to `next_block` (the SAME target
+ * the pattern-test's own failure edge uses) on a false guard (A1-5, #382).
+ *
+ * @param LowerCtx ctx  the lowering context positioned at the arm's guard site
+ * @param checker::TArm arm  the guarded arm (`arm.guard` is valid — `has_when`
+ *                           is true)
+ * @param u32 next_block  the next-arm block id a false guard falls through to
+ * @return MatchArmEntry  the context at the guarded body's start + the next-arm
+ *                        block id
+ * @throws  when the guard expression fails to lower
+ */
+fn lower_match_guard(ctx: LowerCtx, arm: checker::TArm, next_block: u32) -> MatchArmEntry | error {
+    let guardo = match lower_expr(ctx, arm.guard) { Lowered as x => x; error as err => return err }
+    let guardb = alloc_block(guardo.ctx.func)
+    let guarded = append_inst(guardb.func, guardo.ctx.block_id, branch_inst(guardo.vreg, guardb.block_id, teko::list::empty(), next_block, teko::list::empty(), arm.guard.line, arm.guard.col))
+    MatchArmEntry { ctx = ctx_with(guardo.ctx, guarded, guardb.block_id, guardo.ctx.env); next_block = next_block }
+}
+
+/**
+ * lower_match_arm_value — lower one VALUE-position arm: its entry
+ * (test/binds/guard), its BODY as a tail-value block (mirrors an if-expression
+ * arm), then a jump to the merge block carrying the tail value; returns the
+ * context positioned at the next-arm test block (A1-5, #382).
+ *
+ * @param LowerCtx ctx  the lowering context positioned at the arm's test site
+ * @param checker::TExpr e  the enclosing match expression
+ * @param checker::TArm arm  the arm to lower
+ * @param MatchSubj subj  the match's already-lowered subject
+ * @param u32 merge_id  the merge block id the arm's tail value jumps to
+ * @param []str names  the reassigned scalars the merge threads, in param order

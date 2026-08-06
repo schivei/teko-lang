@@ -1,0 +1,203 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+ * to clean), a float (returned in `xmm0`/`v0`, its own separate `B1-fp` limitation), `bool`
+ * (the C ABI's "any nonzero LOW BYTE means true" convention needs a different rule than
+ * sign/zero-extension, not this one — left OPEN), and every non-primitive type (`void`, a
+ * struct/slice/interface — never a raw scalar register) all need no narrowing here.
+ *
+ * @param checker::Type t  the extern's declared return type
+ * @return ExternNarrow | null  the narrowing shape, or `null` when `t` needs none
+ */
+fn extern_return_narrow(t: checker::Type) -> ExternNarrow | null {
+    match t {
+        checker::Prim as p => extern_return_narrow_of_prim(p.kind)
+        checker::Byte => ExternNarrow { width = 8; is_signed = false }
+        _ => null
+    }
+}
+
+/**
+ * extern_return_narrow_of_prim — `extern_return_narrow`'s primitive case: `null` for a float,
+ * for `bool` (the open "nonzero low byte" gap `extern_return_narrow` documents), and for a
+ * 64-bit int (nothing narrower than the whole register to clean); the declared width +
+ * signedness for every other integer prim.
+ *
+ * @param checker::PrimKind k  the extern's declared return PrimKind
+ * @return ExternNarrow | null  the narrowing shape, or `null` when `k` needs none
+ */
+fn extern_return_narrow_of_prim(k: checker::PrimKind) -> ExternNarrow | null {
+    if prim_is_float_kind(k) { return null }
+    if k == checker::PrimKind::Bool { return null }
+    let w = prim_width_of(k)
+    if w >= 64 { return null }
+    ExternNarrow { width = w; is_signed = prim_is_signed_int(k) }
+}
+
+/**
+ * narrow_extern_return — clean an `extern fn` call's raw result to its declared width (C7.1a):
+ * a left shift by `64 - n.width`, then a right shift by the SAME amount (arithmetic when
+ * `n.is_signed`, logical otherwise) — a round trip through the top of the register that discards
+ * every bit above the declared width and sign/zero-extends the low `n.width` bits that remain.
+ * This is exactly the cleanup the C backend gets for free from `cc`'s implicit narrowing
+ * assignment (`int result = memcmp(...);`) — `LUnOp::SExt`/`ZExt` are NOT used here because
+ * both isel backends select them as a bit-preserving identity move (no per-value width to pick
+ * a real narrow form from, `isel_x86_64.tks::select_identity_mov_x86`), which is the correct
+ * choice for a cast between two Teko-produced values (already clean by construction) but would
+ * leave THIS register's garbage bits untouched; `IShl`/`IShrS`/`IShrU` are real bit ops on both
+ * targets and so are the honest fix.
+ *
+ * @param Lowered lo  the already-lowered call (its context + raw result VReg)
+ * @param ExternNarrow n  the declared width/signedness to narrow to
+ * @param u32 line  the source line to stamp the emitted instructions with
+ * @param u32 col  the source column to stamp the emitted instructions with
+ * @return Lowered  the advanced context + the narrowed VReg
+ */
+fn narrow_extern_return(lo: Lowered, n: ExternNarrow, line: u32, col: u32) -> Lowered {
+    let width: i64 = n.width to i64
+    let amount: i64 = 64 - width
+    let sc = ctx_alloc(lo.ctx)
+    let with_amount = ctx_append(sc.ctx, const_int_inst(sc.vreg, amount, line, col))
+    let shl = ctx_alloc(with_amount)
+    let with_shl = ctx_append(shl.ctx, bin_inst(shl.vreg, LBinOp::IShl, lo.vreg, sc.vreg, line, col))
+    let shr_op = if n.is_signed { LBinOp::IShrS } else { LBinOp::IShrU }
+    let shr = ctx_alloc(with_shl)
+    let with_shr = ctx_append(shr.ctx, bin_inst(shr.vreg, shr_op, shl.vreg, sc.vreg, line, col))
+    Lowered { ctx = with_shr; vreg = shr.vreg }
+}
+
+/**
+ * apply_extern_return_narrow — `lower_call`'s post-call step: when `c` resolved to a declared
+ * `extern fn` (`find_extern_symbol` non-null) whose return type demands narrowing
+ * (`extern_return_narrow`), clean `lo`'s raw result VReg (`narrow_extern_return`). A Teko-Teko
+ * call, a runtime builtin, a void call, or an extern whose return is already the whole
+ * register/needs a different rule (`extern_return_narrow`'s open cases) passes `lo` through
+ * unchanged.
+ *
+ * @param Lowered lo  the already-lowered call (its context + raw result VReg)
+ * @param []LExternFn externs  the program's whole `extern fn` table
+ * @param checker::TCall c  the call node (its resolved namespace + callee path)
+ * @param checker::TExpr e  the call expression (its type IS the callee's declared return type,
+ *                          `typer.tks:1707`'s `type = f.ret`; its source position)
+ * @return Lowered  `lo`, narrowed when the callee's declared return type demands it
+ */
+fn apply_extern_return_narrow(lo: Lowered, externs: []LExternFn, c: checker::TCall, e: checker::TExpr) -> Lowered {
+    if type_is_void(e.type) { return lo }
+    let segs = c.callee.segments
+    let last = segs[segs.len - 1].name
+    match find_extern_symbol(externs, c.call_ns, last) {
+        str as _ => match extern_return_narrow(e.type) {
+            ExternNarrow as n => narrow_extern_return(lo, n, e.line, e.col)
+            null => lo
+        }
+        null => lo
+    }
+}
+
+/** type_is_void — is `t` the Void marker (no value)? Shared by call lowering (a void call
+    emits a valueless instruction) and if-expression lowering (a Void-typed `if` is really an
+    if-STATEMENT — its merge carries zero block-args). */
+fn type_is_void(t: checker::Type) -> bool {
+    match t { checker::Void => true; _ => false }
+}
+
+/**
+ * builtin_io_symbol — the runtime twin of an ADDRESSABLE process/io builtin: `exit`/`panic`
+ * and the io group (`print`/`println`/`eprint`/`eprintln`/`write`/`ewrite`), mirroring the C
+ * backend's own bare-name builtin dispatch (`codegen.tks:2289-2297`).
+ *
+ * @param last  the call path's LAST segment (the bare builtin name)
+ * @return      the `tk_*` runtime symbol, or `null` when `last` names no io/process builtin
+ */
+fn builtin_io_symbol(last: str) -> str | null {
+    if last == "exit" { return "tk_exit" }
+    if last == "panic" { return "tk_panic_str" }
+    if last == "print" { return "tk_print" }
+    if last == "println" { return "tk_println" }
+    if last == "eprint" { return "tk_eprint" }
+    if last == "eprintln" { return "tk_eprintln" }
+    if last == "write" { return "tk_write" }
+    if last == "ewrite" { return "tk_ewrite" }
+    null
+}
+
+/**
+ * builtin_cov_symbol — the runtime twin of an ADDRESSABLE coverage-sink builtin (D3/D3-branch/
+ * D3-line, `checker/scope.tks:496-536`). The sinks are a HOST side-channel, so every one of them
+ * is a direct `tk_cov_*` call with scalar arguments only — exactly the shape the N1 call path
+ * already lowers. The compiler's own `teko::coverage` reporting reads them (`cov_distinct`,
+ * `cov_is_marked`, `cov_line_hit`, `cov_branch_hit`) and the NATIVE test gate writes them
+ * (`cov_enter`/`cov_leave` around each `#test`).
+ *
+ * @param last  the call path's LAST segment (the bare builtin name)
+ * @return      the `tk_cov_*` runtime symbol, or `null` when `last` names no coverage builtin
+ */
+fn builtin_cov_symbol(last: str) -> str | null {
+    if last == "cov_reset" { return "tk_cov_reset" }
+    if last == "cov_mark" { return "tk_cov_mark" }
+    if last == "cov_distinct" { return "tk_cov_distinct" }
+    if last == "cov_is_marked" { return "tk_cov_is_marked" }
+    if last == "cov_branches_on" { return "tk_cov_branches_on" }
+    if last == "cov_branch_reset" { return "tk_cov_branch_reset" }
+    if last == "cov_enter" { return "tk_cov_enter" }
+    if last == "cov_leave" { return "tk_cov_leave" }
+    if last == "cov_branch" { return "tk_cov_branch" }
+    if last == "cov_branch_hit" { return "tk_cov_branch_hit" }
+    if last == "cov_lines_on" { return "tk_cov_lines_on" }
+    if last == "cov_line_reset" { return "tk_cov_line_reset" }
+    if last == "cov_line" { return "tk_cov_line" }
+    if last == "cov_line_hit" { return "tk_cov_line_hit" }
+    null
+}
+
+/**
+ * builtin_arena_symbol — the runtime twin of an ADDRESSABLE root-region checkpoint builtin
+ * (#109 test-gate memory): `arena_push`/`arena_pop`/`arena_commit`. The native test gate brackets
+ * every `#test` with a push/pop pair, so the whole per-test span is bulk-freed instead of
+ * accumulating across the run.
+ *
+ * @param last  the call path's LAST segment (the bare builtin name)
+ * @return      the `tk_arena_*` runtime symbol, or `null` when `last` names no arena builtin
+ */
+fn builtin_arena_symbol(last: str) -> str | null {
+    if last == "arena_push" { return "tk_arena_push" }
+    if last == "arena_pop" { return "tk_arena_pop" }
+    if last == "arena_commit" { return "tk_arena_commit" }
+    null
+}
+
+/**
+ * assert_seed_symbol — the C ASSERT SEED symbol a `teko::assert::<name>` call lowers to when the
+ * program does not declare `teko::assert` itself (`src/assert/assert.c` realizes the trio as
+ * `teko__assert__*`; `src/assert/assert.h` is its header). Keyed on the callee PATH — the reserved
+ * `teko` root plus an `assert` parent segment — exactly as the C backend's `cg_assert_c_symbol`
+ * keys it, so the two backends name the same symbol.
+ *
+ * Without this, a program that CALLS `teko::assert::is_true` without defining it fell through to
+ * the plain mangler and emitted the bare `is_true`, which links against nothing: the native tail
+ * had no assert resolution at all and only survived because the compiler's OWN corpus declares
+ * `teko::assert`, so its mangle happened to spell the seed's symbol.
+ *
+ * @param callee  the call's callee path
+ * @return        the seed symbol, or `null` when this is not an assert-seed call
+ */
+fn assert_seed_symbol(callee: parser::Path) -> str | null {
+    let segs = callee.segments
+    if segs.len < 2 { return null }
+    if segs[0].name != "teko" { return null }
+    if segs[segs.len - 2].name != "assert" { return null }
+    let last = segs[segs.len - 1].name
+    if last == "is_true" || last == "is_false" || last == "str_contains" {
+        return teko::str::concat("teko__assert__", last)
+    }
+    null
+}
+
+/**
+ * native_builtin_symbol — the runtime symbol an ADDRESSABLE bare builtin lowers to, across the
+ * three families the N1 call path resolves DIRECTLY: io/process, coverage sinks and arena
+ * checkpoints. Split into one predicate per family so a family grows without lengthening the
+ * others.
+ *
+ * @param last  the call path's LAST segment (the bare builtin name)
+ * @return      the `tk_*` runtime symbol, or `null` when `last` names no directly-lowered builtin

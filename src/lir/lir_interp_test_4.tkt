@@ -1,0 +1,191 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+    let nullv = alloc_vreg(f)
+    f = nullv.func
+    f = append_inst(f, 0, const_int_inst(nullv.vreg, iwt_i64(0), 0, 0))
+    let clo = iwt_build_closure(f, fnaddr.vreg, nullv.vreg)
+    f = clo.func
+    let loaded = iwt_load_closure(f, clo.vreg)
+    f = loaded.func
+    let a2 = alloc_vreg(f)
+    f = a2.func
+    f = append_inst(f, 0, const_int_inst(a2.vreg, iwt_i64(2), 0, 0))
+    let a3 = alloc_vreg(f)
+    f = a3.func
+    f = append_inst(f, 0, const_int_inst(a3.vreg, iwt_i64(3), 0, 0))
+    let cargs = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), loaded.env), a2.vreg), a3.vreg)
+    let result = alloc_vreg(f)
+    f = result.func
+    f = append_inst(f, 0, call_indirect_inst(result.vreg, loaded.target, cargs, false, 0, 0))
+    let eargs = teko::list::push(teko::list::empty(), result.vreg)
+    f = append_inst(f, 0, void_call_inst("tk_exit", eargs, false, 0, 0))
+    let z = alloc_vreg(f)
+    f = z.func
+    f = append_inst(f, 0, const_int_inst(z.vreg, iwt_i64(0), 0, 0))
+    f = append_inst(f, 0, ret_inst(z.vreg, 0, 0))
+    add_func(m, f)
+}
+
+#test
+fn iwt_f20_fn_value_called_indirectly() {
+    teko::assert::is_true(interp_lmodule(iwt_fn_value_exit(), "main", iwt_no_args()) == iwt_i64(5))
+}
+
+/**
+ * iwt_lambda_env_fn — a hand-built CAPTURING lambda body: `func @.Lclo0(%0:
+ * ptr, %1: i64) -> i64 { %2 = field_addr %0, 0; %3 = load.i64 %2; %4 = iadd
+ * %1, %3; ret %4 }` — parameter 0 is the env pointer, parameter 1 is the
+ * lambda's own declared parameter `x` — mirrors `build_lambda_lfunc`'s own
+ * env-first shape for a single captured field at offset 0 (A1-7, #382).
+ *
+ * @return LFunc  the built lambda body
+ */
+fn iwt_lambda_env_fn() -> LFunc {
+    let ptypes = teko::list::push(teko::list::push(teko::list::empty(), LType::Ptr), LType::I64)
+    mut f = new_func(".Lclo0", 2, ptypes, LType::I64)
+    f = append_inst(f, 0, param_inst(0, 0, 0, 0))
+    f = append_inst(f, 0, param_inst(1, 1, 0, 0))
+    let cap = iwt_load_field(f, 0, 0)
+    f = cap.func
+    let s = alloc_vreg(f)
+    f = s.func
+    f = append_inst(f, 0, bin_inst(s.vreg, LBinOp::IAdd, 1, cap.vreg, 0, 0))
+    append_inst(f, 0, ret_inst(s.vreg, 0, 0))
+}
+
+/**
+ * iwt_lambda_capture_exit — F21: `let captured=41; let f=(x)=>x+captured;
+ * exit(f(1))`, hand-built exactly as `lower_lambda` + `lower_closure_call`
+ * would emit it: an env struct holding `captured`, a closure literal
+ * `{fn=funcaddr @.Lclo0, env}`, called indirectly — proves a captured local
+ * round-trips through the env aggregate (A1-7, #382).
+ *
+ * @return LModule  the hand-built module (the lifted lambda body + `main`)
+ */
+fn iwt_lambda_capture_exit() -> LModule {
+    mut m = add_func(empty_module(), iwt_lambda_env_fn())
+    mut f = new_func("main", 0, teko::list::empty(), LType::I32)
+    let envbase = alloc_vreg(f)
+    f = envbase.func
+    f = append_inst(f, 0, alloca_inst(envbase.vreg, 8, 8, 0, 0))
+    f = iwt_alloc_field(f, envbase.vreg, 0, 41)
+    let fnaddr = alloc_vreg(f)
+    f = fnaddr.func
+    f = append_inst(f, 0, func_addr_inst(fnaddr.vreg, ".Lclo0", 0, 0))
+    let clo = iwt_build_closure(f, fnaddr.vreg, envbase.vreg)
+    f = clo.func
+    let loaded = iwt_load_closure(f, clo.vreg)
+    f = loaded.func
+    let x = alloc_vreg(f)
+    f = x.func
+    f = append_inst(f, 0, const_int_inst(x.vreg, iwt_i64(1), 0, 0))
+    let cargs = teko::list::push(teko::list::push(teko::list::empty(), loaded.env), x.vreg)
+    let result = alloc_vreg(f)
+    f = result.func
+    f = append_inst(f, 0, call_indirect_inst(result.vreg, loaded.target, cargs, false, 0, 0))
+    let eargs = teko::list::push(teko::list::empty(), result.vreg)
+    f = append_inst(f, 0, void_call_inst("tk_exit", eargs, false, 0, 0))
+    let z = alloc_vreg(f)
+    f = z.func
+    f = append_inst(f, 0, const_int_inst(z.vreg, iwt_i64(0), 0, 0))
+    f = append_inst(f, 0, ret_inst(z.vreg, 0, 0))
+    add_func(m, f)
+}
+
+#test
+fn iwt_f21_lambda_capture_roundtrip() {
+    teko::assert::is_true(interp_lmodule(iwt_lambda_capture_exit(), "main", iwt_no_args()) == iwt_i64(42))
+}
+
+/**
+ * iwt_defer_return_exit — F9 (A1-2, #382): `let s=1; defer { s=s+100 };
+ * exit(s)` inlined straight-line (defer has NO LIR op of its own — it is
+ * pure re-lowering of its body at the exit point, so the shape a real
+ * `lower_function` would produce here is exactly this: the `iadd`
+ * appended BEFORE the value that reads it) — proves the deferred
+ * mutation is observable through the value the program exits with.
+ *
+ * @return LModule  the built one-function module
+ */
+fn iwt_defer_return_exit() -> LModule {
+    mut f = new_func("main", 0, teko::list::empty(), LType::I32)
+    let s0 = alloc_vreg(f)
+    f = s0.func
+    f = append_inst(f, 0, const_int_inst(s0.vreg, iwt_i64(1), 0, 0))
+    let hundred = alloc_vreg(f)
+    f = hundred.func
+    f = append_inst(f, 0, const_int_inst(hundred.vreg, iwt_i64(100), 0, 0))
+    let bumped = alloc_vreg(f)
+    f = bumped.func
+    f = append_inst(f, 0, bin_inst(bumped.vreg, LBinOp::IAdd, s0.vreg, hundred.vreg, 0, 0))
+    let eargs = teko::list::push(teko::list::empty(), bumped.vreg)
+    f = append_inst(f, 0, void_call_inst("tk_exit", eargs, false, 0, 0))
+    let z = alloc_vreg(f)
+    f = z.func
+    f = append_inst(f, 0, const_int_inst(z.vreg, iwt_i64(0), 0, 0))
+    f = append_inst(f, 0, ret_inst(z.vreg, 0, 0))
+    add_func(empty_module(), f)
+}
+
+#test
+fn iwt_f9_defer_observed_side_effect_via_return_value() {
+    teko::assert::is_true(interp_lmodule(iwt_defer_return_exit(), "main", iwt_no_args()) == iwt_i64(101))
+}
+
+/**
+ * iwt_bin — run one binary opcode over two carrier constants through the whole oracle and hand back
+ * the value it exits with.
+ *
+ * @param op  the LIR binary opcode under test
+ * @param a   the left operand's carrier value
+ * @param b   the right operand's carrier value
+ * @return    the value `interp_lmodule` reports for `exit(a <op> b)`
+ */
+fn iwt_bin(op: LBinOp, a: i64, b: i64) -> i64 {
+    interp_lmodule(iwt_binop_exit(op, a, b), "main", iwt_no_args())
+}
+
+/**
+ * iwt_unsigned_compares_read_the_bit_pattern_unsigned — the U comparison family treats a carrier
+ * with bit 63 set as a LARGE unsigned value, not a negative one. `-1` is the carrier for
+ * `u64::MAX`, so unsigned it is GREATER than 5 while signed it is smaller: the two families must
+ * disagree here, and before this fix they were the same code and could not.
+ */
+#test
+fn iwt_unsigned_compares_read_the_bit_pattern_unsigned() {
+    teko::assert::is_true(iwt_bin(LBinOp::ICmpGtU, -1, 5) == iwt_i64(1))
+    teko::assert::is_true(iwt_bin(LBinOp::ICmpGtS, -1, 5) == iwt_i64(0))
+    teko::assert::is_true(iwt_bin(LBinOp::ICmpLtU, -1, 5) == iwt_i64(0))
+    teko::assert::is_true(iwt_bin(LBinOp::ICmpLtS, -1, 5) == iwt_i64(1))
+    teko::assert::is_true(iwt_bin(LBinOp::ICmpGeU, -1, 5) == iwt_i64(1))
+    teko::assert::is_true(iwt_bin(LBinOp::ICmpLeU, -1, 5) == iwt_i64(0))
+    teko::assert::is_true(iwt_bin(LBinOp::ICmpLeU, 5, -1) == iwt_i64(1))
+    teko::assert::is_true(iwt_bin(LBinOp::ICmpGeU, 5, 5) == iwt_i64(1))
+}
+
+/**
+ * iwt_logical_shift_right_does_not_sign_extend — `IShrU` shifts the bit pattern LOGICALLY: the
+ * carrier `i64::MIN` is the pattern `0x8000_0000_0000_0000`, so shifting it right by one yields
+ * `0x4000_0000_0000_0000` (a positive carrier), while the arithmetic `IShrS` sign-extends to the
+ * negative half of that value.
+ */
+#test
+fn iwt_logical_shift_right_does_not_sign_extend() {
+    teko::assert::is_true(iwt_bin(LBinOp::IShrU, -9223372036854775807 - 1, 1) == iwt_i64(4611686018427387904))
+    teko::assert::is_true(iwt_bin(LBinOp::IShrS, -9223372036854775807 - 1, 1) == iwt_i64(0 - 4611686018427387904))
+    teko::assert::is_true(iwt_bin(LBinOp::IShrU, -1, 60) == iwt_i64(15))
+}
+
+/**
+ * iwt_unsigned_div_and_rem_use_the_unsigned_domain — `IDivU`/`IRemU` divide the u64 readings:
+ * `u64::MAX / 2` is `i64::MAX` (where the signed `-1 / 2` is 0) and `u64::MAX % 10` is 5 (where the
+ * signed remainder is -1).
+ */
+#test
+fn iwt_unsigned_div_and_rem_use_the_unsigned_domain() {
+    teko::assert::is_true(iwt_bin(LBinOp::IDivU, -1, 2) == iwt_i64(9223372036854775807))
+    teko::assert::is_true(iwt_bin(LBinOp::IDivS, -1, 2) == iwt_i64(0))
+    teko::assert::is_true(iwt_bin(LBinOp::IRemU, -1, 10) == iwt_i64(5))
+    teko::assert::is_true(iwt_bin(LBinOp::IRemS, -1, 10) == iwt_i64(-1))
+}

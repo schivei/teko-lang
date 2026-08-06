@@ -1,0 +1,111 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+pub fn lbinop_of(op: lexer::TokenKind, k: checker::PrimKind) -> LBinOp | error {
+    if prim_is_float_kind(k) { return lbinop_float(op) }
+    lbinop_int(op, prim_is_signed_int(k))
+}
+
+/** lbinop_float — the F-family LBinOp for an arithmetic operator token. */
+fn lbinop_float(op: lexer::TokenKind) -> LBinOp | error {
+    match op {
+        lexer::TokenKind::Plus => LBinOp::FAdd
+        lexer::TokenKind::Minus => LBinOp::FSub
+        lexer::TokenKind::Star => LBinOp::FMul
+        lexer::TokenKind::Slash => LBinOp::FDiv
+        _ => error { message = "native backend N1: float operator not yet lowered (N2)" }
+    }
+}
+
+/**
+ * lbinop_int — the integer LBinOp for an operator token, the signed/unsigned variant chosen
+ * by `signed`. Covers the arithmetic subset (`+ - * / %`), the bitwise operators (`& | ^`),
+ * and the shifts: `<<` is signedness-agnostic (IShl), while `>>` picks the arithmetic
+ * (IShrS) or logical (IShrU) right shift by `signed` — the shift's result carries the LEFT
+ * operand's type, so `signed` there is the shifted value's signedness, exactly as the
+ * checker types it.
+ *
+ * @param op      the binary operator token
+ * @param signed  true when the result's integer type is signed (selects IDivS/IRemS/IShrS
+ *                over the IDivU/IRemU/IShrU variants)
+ * @return        the integer LBinOp the operator lowers to
+ * @throws        when the token is not an integer arithmetic/bitwise/shift operator
+ */
+fn lbinop_int(op: lexer::TokenKind, signed: bool) -> LBinOp | error {
+    match op {
+        lexer::TokenKind::Plus => LBinOp::IAdd
+        lexer::TokenKind::Minus => LBinOp::ISub
+        lexer::TokenKind::Star => LBinOp::IMul
+        lexer::TokenKind::Slash => if signed { LBinOp::IDivS } else { LBinOp::IDivU }
+        lexer::TokenKind::Percent => if signed { LBinOp::IRemS } else { LBinOp::IRemU }
+        lexer::TokenKind::Amp => LBinOp::IAnd
+        lexer::TokenKind::Pipe => LBinOp::IOr
+        lexer::TokenKind::Caret => LBinOp::IXor
+        lexer::TokenKind::Shl => LBinOp::IShl
+        lexer::TokenKind::Shr => if signed { LBinOp::IShrS } else { LBinOp::IShrU }
+        _ => error { message = "native backend N1: integer operator not yet lowered (N2)" }
+    }
+}
+
+/**
+ * lunop_of — the LUnOp for a prefix operator token given the operand's PrimKind. `-` picks
+ * FNeg/INeg by family; `~` (bitwise one's-complement, integer-only per the checker) picks
+ * INot. `!` (logical-not) is NOT handled here — it is intercepted in lower_unary and lowered
+ * to a logical `operand == 0` (see lower_logical_not), so `!` never reaches the bitwise
+ * LUnOp::INot (the F1c miscompile is gone); `~`, a genuine one's-complement, DOES.
+ *
+ * @param op  the prefix operator token
+ * @param k   the operand's PrimKind (selects the float/int family for `-`)
+ * @return    the negation LUnOp for `-` (INeg/FNeg), or INot for `~`
+ * @throws    for any operator other than `-`/`~` (`!` is handled by lower_unary)
+ */
+pub fn lunop_of(op: lexer::TokenKind, k: checker::PrimKind) -> LUnOp | error {
+    match op {
+        lexer::TokenKind::Minus => if prim_is_float_kind(k) { LUnOp::FNeg } else { LUnOp::INeg }
+        lexer::TokenKind::Tilde => LUnOp::INot
+        _ => error { message = "native backend N1: unary operator not yet lowered (N2)" }
+    }
+}
+
+/** cast_unop_of — the conversion LUnOp for a numeric `to` cast from `src` to `dst`
+    machine classes. int->float = IToF, float->int = FToI, float->float = FToF, and
+    int->int widens (SExt/ZExt by source signedness) or truncates (Trunc). A same-class
+    int cast maps to Trunc (a harmless identity width); a same-class float cast to FToF. */
+fn cast_unop_of(src: checker::PrimKind, dst: checker::PrimKind) -> LUnOp {
+    let src_f = prim_is_float_kind(src)
+    let dst_f = prim_is_float_kind(dst)
+    if src_f && dst_f { return LUnOp::FToF }
+    if src_f { return LUnOp::FToI }
+    if dst_f { return LUnOp::IToF }
+    cast_int_unop_of(src, dst)
+}
+
+/** cast_int_unop_of — the int->int conversion LUnOp: widen with sign/zero extend (by the
+    SOURCE's signedness) or truncate to a narrower/equal width. Bool is excluded from casts
+    by the checker (cast direction law), so a bool source here would be an invariant break
+    — treated as unsigned (ZExt widens). */
+fn cast_int_unop_of(src: checker::PrimKind, dst: checker::PrimKind) -> LUnOp {
+    let sw = prim_width_of(src)
+    let dw = prim_width_of(dst)
+    if dw > sw { return if prim_is_signed_int(src) { LUnOp::SExt } else { LUnOp::ZExt } }
+    LUnOp::Trunc
+}
+
+/** prim_width_of — the bit width of an integer/float PrimKind (bool = 1). Local copy of
+    the width table (type.tks's is private to teko::checker). */
+fn prim_width_of(k: checker::PrimKind) -> u32 {
+    if k == checker::PrimKind::U8 || k == checker::PrimKind::I8 { return 8 }
+    if k == checker::PrimKind::U16 || k == checker::PrimKind::I16 { return 16 }
+    if k == checker::PrimKind::U32 || k == checker::PrimKind::I32 { return 32 }
+    if k == checker::PrimKind::U64 || k == checker::PrimKind::I64 { return 64 }
+    if k == checker::PrimKind::F32 { return 32 }
+    if k == checker::PrimKind::F64 { return 64 }
+    1
+}
+
+/**
+ * The prefix EVERY symbol that user code declares is emitted under (owner ruling 2026-07-27):
+ * user code is `teko_*`, the runtime's builtins are `tk_*`, so the two families are disjoint by
+ * construction. `src/codegen/codegen.tks` carries the identical constant for the C backend, and
+ * `cgt_mangle_parity_c_and_native` proves the two manglers agree byte for byte.
+ */

@@ -1,0 +1,203 @@
+use teko::checker
+use teko::lexer
+use teko::parser
+    if is_str_arg_builtin(sym) { return lower_str_arg_call(ctx, e, sym, c) }
+    let lo = match lower_args(ctx, c.args) { LoweredArgs as x => x; error as err => return err }
+    let called = match lower_call_symbol(lo.ctx, e, sym, lo.vregs) { Lowered as x => x; error as err => return err }
+    apply_extern_return_narrow(called, ctx.externs, c, e)
+}
+
+/**
+ * lower_call_fat_as_scalar — `lower_call`'s fat-result arm: `lower_call_fat`'s (ptr, len) pair,
+ * keeping only the ptr half as this SCALAR call site's own single VReg (the len half is still
+ * computed — the callee's hidden out-slot argument is never optional — just unread here, mirroring
+ * how a fat local's ptr VReg alone still resolves under `lenv_lookup`'s plain, non-fat scan).
+ *
+ * @param ctx  the lowering context
+ * @param e    the fat-typed call expression
+ * @param c    the call node
+ * @return     the advanced context + the call's ptr-half VReg
+ * @throws     propagated from `lower_call_fat`
+ */
+fn lower_call_fat_as_scalar(ctx: LowerCtx, e: checker::TExpr, c: checker::TCall) -> Lowered | error {
+    let fo = match lower_call_fat(ctx, e, c) { LoweredFat as x => x; error as err => return err }
+    Lowered { ctx = fo.ctx; vreg = fo.ptr }
+}
+
+/**
+ * is_str_arg_builtin — does the resolved runtime symbol `sym` take its LONE
+ * argument as a `tk_str` (a 2-eightbyte `{ptr; len}` struct passed BY VALUE,
+ * `teko_rt.h:45-48`)? These seven — the io group (`tk_print`/`tk_println`/
+ * `tk_eprint`/`tk_eprintln`/`tk_write`/`tk_ewrite`) plus `tk_panic_str` — are
+ * every `(tk_str) -> void`/`_Noreturn` runtime entry the N1 builtin table
+ * resolves DIRECTLY (`call_symbol`), as opposed to `tk_str_concat`/
+ * `tk_i64_to_str`/… which `lower_interp` calls by a hardcoded symbol and
+ * which stay on the plain scalar path (their own multi-register/return-value
+ * ABI is the SEPARATE, wider N2 gap `lower_fat_expr`'s own doc names —
+ * REPORTED up, not this crumb's scope).
+ *
+ * The LIR is TARGET-NEUTRAL, so it always flattens the argument into the two
+ * `(ptr, len)` operands `lower_str_arg_call` emits. On an ABI whose
+ * `max_reg_arg_bytes` is 16 (AAPCS64/SysV/LP64D) a 2-eightbyte struct
+ * decomposes into exactly two consecutive integer argument registers, so the
+ * flat pair IS the true C ABI and no backend does anything. On Win64
+ * (`max_reg_arg_bytes` 8) a 16-byte aggregate travels BY REFERENCE, so the flat
+ * pair is NOT the ABI — the x86 isel re-materializes it into a frame slot and
+ * passes that slot's address (`pin_str_pair_by_ref_x86`). This predicate is
+ * `pub` precisely so the backend reads the SAME closed list rather than
+ * re-deriving it (a second copy could drift and would fault silently).
+ *
+ * @param str sym  the resolved runtime symbol (`call_symbol`'s result)
+ * @return bool  true iff `sym` is one of the seven single-`tk_str`-arg
+ *               runtime entries
+ */
+pub fn is_str_arg_builtin(sym: str) -> bool {
+    sym == "tk_print" || sym == "tk_println" || sym == "tk_eprint" || sym == "tk_eprintln" || sym == "tk_write" || sym == "tk_ewrite" || sym == "tk_panic_str"
+}
+
+/**
+ * lower_str_arg_call — lower a call to a single-`tk_str`-argument runtime
+ * builtin (`is_str_arg_builtin`): the ONE argument through `lower_fat_expr`
+ * (its (ptr, len) pair, the A1-4 fat-pointer PRODUCER set — a literal, an
+ * array literal, or a `let`-bound fat local), emitted as a two-operand void
+ * `LCall` (`ptr` then `len`, matching `tk_str`'s field order). A call whose
+ * argument is not one of those closed producers (e.g. an interpolation or
+ * another call's result) propagates `lower_fat_expr`'s own NAMED N2
+ * honest-stop unchanged — never a fabricated/garbage-ABI call.
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param checker::TExpr e  the call expression (its source position)
+ * @param str sym  the resolved runtime symbol (`is_str_arg_builtin` true)
+ * @param checker::TCall c  the call node (its single argument)
+ * @return Lowered | error  the advanced context + a dummy 0 VReg (every
+ *                          `is_str_arg_builtin` target is void/`_Noreturn`),
+ *                          or a NAMED internal/N2 honest-stop
+ */
+fn lower_str_arg_call(ctx: LowerCtx, e: checker::TExpr, sym: str, c: checker::TCall) -> Lowered | error {
+    if c.args.len != 1 {
+        return error { message = teko::str::concat("native backend N1: `", sym, "` expects exactly one str argument (internal)") }
+    }
+    let fo = match lower_fat_expr(ctx, c.args[0]) { LoweredFat as x => x; error as err => return err }
+    let inst = void_call_inst(sym, two_args(fo.ptr, fo.len), false, e.line, e.col)
+    Lowered { ctx = ctx_append(fo.ctx, inst); vreg = 0 }
+}
+
+/** LoweredArgs — the context after lowering an argument list + the VRegs, ABI-FLATTENED, in
+    order. A fat (`str`/`[]T`) argument contributes TWO consecutive VRegs (ptr then len,
+    `lower_arg_vregs`'s contract) — so `vregs.len` is the call's actual incoming register
+    count, not necessarily `args.len`. */
+pub type LoweredArgs = struct { ctx: LowerCtx; vregs: []u32 }
+
+/**
+ * lower_args — lower every argument expression left-to-right, ABI-FLATTENING each one into
+ * its incoming register(s) (`lower_arg_vregs`).
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param []checker::TExpr args  the argument list to lower
+ * @return LoweredArgs | error  the advanced context + the lowered, flattened VRegs, in order
+ */
+fn lower_args(ctx: LowerCtx, args: []checker::TExpr) -> LoweredArgs | error {
+    lower_args_from(ctx, args, 0)
+}
+
+/**
+ * lower_args_from — lower `args[start..]` left-to-right, ABI-FLATTENING each one into its
+ * incoming register(s) (A1-6, #382 — `lower_args` is the `start=0` case; the
+ * interface-dispatch path additionally needs the TAIL of an arg list, the receiver at index 0
+ * having already been lowered separately). A fat (`str`/`[]T`) argument contributes its
+ * (ptr, len) pair (`lower_arg_vregs`) — the SAME two-register contract `lower_function`'s
+ * `bind_param` expects on the receiving end, so a caller and callee compiled by this backend
+ * never disagree on a fat argument's register count.
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param []checker::TExpr args  the full argument list
+ * @param u64 start  the first index to lower (0 lowers every argument)
+ * @return LoweredArgs | error  the advanced context + the lowered, flattened VRegs, in order
+ */
+fn lower_args_from(ctx: LowerCtx, args: []checker::TExpr, start: u64) -> LoweredArgs | error {
+    mut cur = ctx
+    mut vregs: []u32 = teko::list::empty()
+    mut i: u64 = start
+    loop {
+        if i >= args.len { break }
+        let one = match lower_arg_vregs(cur, args[i]) { LoweredArgs as x => x; error as err => return err }
+        cur = one.ctx
+        vregs = append_vregs(vregs, one.vregs)
+        i++
+    }
+    LoweredArgs { ctx = cur; vregs = vregs }
+}
+
+/**
+ * append_vregs — `xs` with every element of `more` appended, in order — the flattening step
+ * `lower_args_from`'s loop needs now that ONE argument can contribute more than one VReg.
+ *
+ * @param []u32 xs  the VReg list accumulated so far
+ * @param []u32 more  the VReg(s) to append
+ * @return []u32  `xs` followed by `more`, in order
+ */
+fn append_vregs(xs: []u32, more: []u32) -> []u32 {
+    mut out = xs
+    mut i: u64 = 0
+    loop {
+        if i >= more.len { break }
+        out = teko::list::push(out, more[i])
+        i++
+    }
+    out
+}
+
+/**
+ * lower_arg_vregs — lower ONE call argument to its ABI-flattened incoming register(s): a fat
+ * (`str`/`[]T`) argument (`is_fat_type`) flattens through `lower_fat_expr` to its (ptr, len)
+ * pair — ptr FIRST, len SECOND (CONTRACT ORDER, mirroring the C twin's `tk_str{ptr;len}` field
+ * order and the SAME order `lower_function`'s `bind_param` binds on the receiving end); every
+ * other argument lowers to its single VReg via the plain `lower_expr`.
+ *
+ * @param LowerCtx ctx  the lowering context
+ * @param checker::TExpr arg  the argument expression to lower
+ * @return LoweredArgs | error  the advanced context + the argument's VReg(s), in ABI order
+ * @throws  propagated from `lower_fat_expr` (a fat argument whose producer is outside the
+ *          closed set) or from `lower_expr`
+ */
+fn lower_arg_vregs(ctx: LowerCtx, arg: checker::TExpr) -> LoweredArgs | error {
+    if is_fat_type(arg.type) {
+        let fo = match lower_fat_expr(ctx, arg) { LoweredFat as x => x; error as err => return err }
+        return LoweredArgs { ctx = fo.ctx; vregs = two_args(fo.ptr, fo.len) }
+    }
+    let lo = match lower_expr(ctx, arg) { Lowered as x => x; error as err => return err }
+    LoweredArgs { ctx = lo.ctx; vregs = single_arg(lo.vreg) }
+}
+
+/** lower_call_symbol — emit the LCall for an ALREADY-RESOLVED symbol over an
+    already-lowered argument list. A void-returning call (a diverging builtin or a void fn)
+    emits a valueless instruction and returns a dummy VReg the caller must not read; a value
+    call allocates a result VReg. */
+fn lower_call_symbol(ctx: LowerCtx, e: checker::TExpr, sym: str, vregs: []u32) -> Lowered | error {
+    if type_is_void(e.type) {
+        let inst = void_call_inst(sym, vregs, false, e.line, e.col)
+        return Lowered { ctx = ctx_append(ctx, inst); vreg = 0 }
+    }
+    let r = ctx_alloc(ctx)
+    let inst = call_inst(r.vreg, sym, vregs, false, e.line, e.col)
+    Lowered { ctx = ctx_append(r.ctx, inst); vreg = r.vreg }
+}
+
+/**
+ * ExternNarrow — the sign/zero-extension shape an `extern fn`'s declared return type demands
+ * at its own call site: the declared width in bits (8/16/32 — the only widths narrower than a
+ * full register the checker's integer prims admit) and its signedness (`is_signed`, NOT
+ * `signed` — the C backend's struct-field emitter does not escape a reserved word the way its
+ * function-symbol mangler does, and `signed` is one, `is_c_keyword`). Produced by
+ * `extern_return_narrow`; consumed by `narrow_extern_return`.
+ */
+type ExternNarrow = struct { width: u32; is_signed: bool }
+
+/**
+ * extern_return_narrow — the `ExternNarrow` an `extern fn`'s declared return type `t` demands,
+ * or `null` when `t` needs none. SysV and Win64 both permit a callee to leave a return
+ * register's bits ABOVE its declared width unspecified (glibc's `memcmp`, declared `-> i32`, is
+ * the corpus-documented case — `examples/probes/arena_bottom/src/bottom.tks:50`), so every
+ * sub-64-bit INTEGER return (`i8`/`u8`/`i16`/`u16`/`i32`/`u32`, and `byte` — the checker's own
+ * "byte AS u8" convention `prim_kind_of` already follows) needs the CALLER to clean it. A
+ * 64-bit integer, `ptr`/`uptr` (already the whole register — nothing above the declared width
