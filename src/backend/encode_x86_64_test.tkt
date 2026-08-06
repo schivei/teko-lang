@@ -1,0 +1,1071 @@
+use teko::lir
+
+/**
+ * ex_p — a physical GPR operand with the given ISA id (a golden-vector fixture
+ * shorthand; B1 runs post-regalloc, so every operand is physical). The x86
+ * instruction-encoding numbering: RAX=0,RCX=1,RDX=2,RBX=3,RSP=4,RBP=5,RSI=6,
+ * RDI=7,R8..R15=8..15.
+ *
+ * @param u32 id  the x86 ISA register number
+ * @return MReg  the physical GPR operand
+ */
+fn ex_p(id: u32) -> MReg {
+    preg(id, MRegClass::GPR)
+}
+
+/**
+ * ex_fpr — a physical FPR (XMM) operand with the given ISA id, the fixture
+ * shorthand for the scalar SSE float golden vectors (`B1-fp`). XMM ids share the
+ * GPR numbering space (XMM0..XMM15 = 0..15), so ids >= 8 exercise the REX.R/
+ * REX.B extension bits exactly as R8..R15 do.
+ *
+ * @param u32 id  the XMM register number
+ * @return MReg  the physical FPR operand
+ */
+fn ex_fpr(id: u32) -> MReg {
+    preg(id, MRegClass::FPR)
+}
+
+/**
+ * ex_mem — a base-plus-displacement memory operand (the load/store fixture
+ * shorthand).
+ *
+ * @param MReg base  the base register
+ * @param i32 off  the byte displacement
+ * @return MMem  the memory operand
+ */
+fn ex_mem(base: MReg, off: i32) -> MMem {
+    MMem { base = base; offset = off }
+}
+
+/**
+ * ex_layout — a `FrameLayoutX86` fixture whose two frame slots sit at RSP+16 and
+ * RSP+24, letting the `MFrameAddrX86` golden pin the resolved `lea dst,
+ * [rsp+off]` (with its forced SIB byte) without routing through the B1-6
+ * `compute_frame_layout_x86`.
+ *
+ * @return FrameLayoutX86  the two-slot fixture frame
+ */
+fn ex_layout() -> FrameLayoutX86 {
+    let slots = teko::list::push(teko::list::push(teko::list::empty(), 16 to u32), 24 to u32)
+    FrameLayoutX86 { size = 32 to u32; saved_gpr = teko::list::empty(); saved_fpr = teko::list::empty(); slot_offsets = slots; call_align = false; out_arg_base = 0 to u32; fpr_save_base = 0 to u32; caller_shadow = 0 to u32 }
+}
+
+/**
+ * ex_bad — the sentinel `EncInstX86` returned when a golden fixture that must
+ * encode unexpectedly honest-stops: its single `0xFF` byte never matches a real
+ * expected encoding, so a hex assertion fails loudly rather than aborting.
+ *
+ * @return EncInstX86  the impossible-encoding sentinel
+ */
+fn ex_bad() -> EncInstX86 {
+    EncInstX86 {
+        bytes = teko::list::push(teko::list::empty(), 0xFF to byte)
+        has_branch = false
+        branch_field_off = 0 to u32
+        target = 0 to u32
+        reloc = null
+    }
+}
+
+/**
+ * ex_reloc_of — the relocation `enc` owes, unwrapped for a golden assertion, or
+ * a loud sentinel when it owes none (an impossible `field_off` and a `<none>`
+ * symbol, so the assertion that follows fails on the value instead of aborting
+ * the whole test on an un-narrowed union).
+ *
+ * @param EncInstX86 enc  the encoded instruction whose relocation is asserted
+ * @return EncRelocX86  the owed relocation, or the impossible-relocation sentinel
+ */
+fn ex_reloc_of(enc: EncInstX86) -> EncRelocX86 {
+    match enc.reloc {
+        EncRelocX86 as r => r
+        null => EncRelocX86 { field_off = 0xFFFFFFFF to u32; sym = "<none>"; kind = RelocKindX86::Abs64 }
+    }
+}
+
+/**
+ * ex_enc — encode `inst` under the fixture `ex_layout`, unwrapping the success
+ * case and falling back to the `ex_bad` sentinel on an unexpected honest-stop.
+ *
+ * @param MInstX86 inst  the instruction to encode
+ * @return EncInstX86  the encoded instruction, or the sentinel on error
+ */
+fn ex_enc(inst: MInstX86) -> EncInstX86 {
+    match encode_inst_x86(ex_layout(), inst) {
+        EncInstX86 as x => x
+        error as e => ex_bad()
+    }
+}
+
+/**
+ * ex_hex — the lowercase hex string of `inst`'s encoded bytes (two hex digits
+ * per byte, in emission order), the readable golden-vector representation.
+ *
+ * @param MInstX86 inst  the instruction to encode
+ * @return str  the encoded bytes as a hex string
+ */
+fn ex_hex(inst: MInstX86) -> str {
+    teko::crypto::to_hex(ex_enc(inst).bytes)
+}
+
+/**
+ * ex_stop — the honest-stop message `inst` produces, or `<ok>` when it encodes
+ * successfully. Lets an honest-stop test assert the named stop is raised.
+ *
+ * @param MInstX86 inst  the instruction to encode
+ * @return str  the error message, or `<ok>` when it encodes
+ */
+fn ex_stop(inst: MInstX86) -> str {
+    match encode_inst_x86(ex_layout(), inst) {
+        EncInstX86 as x => "<ok>"
+        error as e => e.message
+    }
+}
+
+/**
+ * ex_assert_hex — assert that `inst` encodes to the exact byte string `hex`
+ * (the assembler-cross-checked golden-vector check).
+ *
+ * @param MInstX86 inst  the instruction to encode
+ * @param str hex  the known-good x86-64 encoding as a hex string
+ * @return void
+ */
+fn ex_assert_hex(inst: MInstX86, hex: str) {
+    teko::assert::is_true(ex_hex(inst) == hex)
+}
+
+/**
+ * ex_assert_stop — assert that `inst` honest-stops with a message containing the
+ * named token.
+ *
+ * @param MInstX86 inst  the instruction to encode
+ * @param str name  the named-stop token expected in the message
+ * @return void
+ */
+fn ex_assert_stop(inst: MInstX86, name: str) {
+    teko::assert::str_contains(ex_stop(inst), name)
+}
+
+/**
+ * ex_assert_reloc_is_plt32 — assert a relocation kind is `Plt32` (the
+ * `RelocKindX86` cannot ride `==`, so it is matched to a name).
+ *
+ * @param RelocKindX86 kind  the relocation kind to check
+ * @return void
+ */
+fn ex_assert_reloc_is_plt32(kind: RelocKindX86) {
+    let name = match kind { Plt32 => "plt32"; Pc32 => "pc32"; Abs64 => "abs64" }
+    teko::assert::is_true(name == "plt32")
+}
+
+/**
+ * ex_assert_reloc_is_pc32 — assert a relocation kind is `Pc32`.
+ *
+ * @param RelocKindX86 kind  the relocation kind to check
+ * @return void
+ */
+fn ex_assert_reloc_is_pc32(kind: RelocKindX86) {
+    let name = match kind { Plt32 => "plt32"; Pc32 => "pc32"; Abs64 => "abs64" }
+    teko::assert::is_true(name == "pc32")
+}
+
+#test
+/**
+ * ex_encodes_the_immediate_move_forms — `mov r32, imm32`, the sign-extended
+ * `mov r64, imm32`, `movabs r64, imm64`, and the REX.B high-register variants.
+ *
+ * @return void
+ */
+fn ex_encodes_the_immediate_move_forms() {
+    ex_assert_hex(movimm_x86(ex_p(0), 42, false), "b82a000000")
+    ex_assert_hex(movimm_x86(ex_p(0), 42, true), "48c7c02a000000")
+    ex_assert_hex(movimm_x86(ex_p(3), 0x1122334455667788, true), "48bb8877665544332211")
+    ex_assert_hex(movimm_x86(ex_p(8), 5, false), "41b805000000")
+    ex_assert_hex(movimm_x86(ex_p(8), 5, true), "49c7c005000000")
+}
+
+#test
+/**
+ * ex_encodes_every_two_address_alu_op — ADD/SUB/AND/OR/XOR `r/m64, r64` over
+ * `dst=rax, src=rbx`, plus the 32-bit ADD form, covering `alu_opcode_x86`.
+ *
+ * @return void
+ */
+fn ex_encodes_every_two_address_alu_op() {
+    ex_assert_hex(alu_rm_x86(MAluOpX86::Add, ex_p(0), ex_p(3), true), "4801d8")
+    ex_assert_hex(alu_rm_x86(MAluOpX86::Sub, ex_p(0), ex_p(3), true), "4829d8")
+    ex_assert_hex(alu_rm_x86(MAluOpX86::And, ex_p(0), ex_p(3), true), "4821d8")
+    ex_assert_hex(alu_rm_x86(MAluOpX86::Or, ex_p(0), ex_p(3), true), "4809d8")
+    ex_assert_hex(alu_rm_x86(MAluOpX86::Xor, ex_p(0), ex_p(3), true), "4831d8")
+    ex_assert_hex(alu_rm_x86(MAluOpX86::Add, ex_p(0), ex_p(3), false), "01d8")
+}
+
+#test
+/**
+ * ex_encodes_the_two_operand_multiply — `imul r64, r/m64` (`0F AF`, dst in the
+ * reg field) across widths and a high register.
+ *
+ * @return void
+ */
+fn ex_encodes_the_two_operand_multiply() {
+    ex_assert_hex(imul_x86(ex_p(0), ex_p(3), true), "480fafc3")
+    ex_assert_hex(imul_x86(ex_p(0), ex_p(3), false), "0fafc3")
+    ex_assert_hex(imul_x86(ex_p(8), ex_p(9), true), "4d0fafc1")
+}
+
+#test
+/**
+ * ex_encodes_the_signed_division_sequence — `mov rax, a ; cqo ; idiv b ;
+ * mov dst, rax` (64-bit) and its 32-bit `cdq`/`idiv r32` form.
+ *
+ * @return void
+ */
+fn ex_encodes_the_signed_division_sequence() {
+    ex_assert_hex(divseq_x86(ex_p(1), ex_p(3), ex_p(3), true, false, true), "4889d8489948f7fb4889c1")
+    ex_assert_hex(divseq_x86(ex_p(0), ex_p(0), ex_p(3), true, false, false), "89c099f7fb89c0")
+}
+
+#test
+/**
+ * ex_encodes_the_unsigned_remainder_sequence — `mov rax, a ; xor edx, edx ;
+ * div b ; mov dst, rdx`, the unsigned remainder path (result read from RDX).
+ *
+ * @return void
+ */
+fn ex_encodes_the_unsigned_remainder_sequence() {
+    ex_assert_hex(divseq_x86(ex_p(6), ex_p(0), ex_p(1), false, true, true), "4889c031d248f7f14889d6")
+}
+
+#test
+/**
+ * ex_encodes_every_shift_by_cl — SHL/SHR/SAR `r/m64, cl` (`D3 /4, /5, /7`) plus
+ * the 32-bit form, covering `shift_ext_x86`.
+ *
+ * @return void
+ */
+fn ex_encodes_every_shift_by_cl() {
+    ex_assert_hex(shift_x86(MShiftOpX86::Shl, ex_p(0), true), "48d3e0")
+    ex_assert_hex(shift_x86(MShiftOpX86::Shr, ex_p(0), true), "48d3e8")
+    ex_assert_hex(shift_x86(MShiftOpX86::Sar, ex_p(0), true), "48d3f8")
+    ex_assert_hex(shift_x86(MShiftOpX86::Shl, ex_p(0), false), "d3e0")
+}
+
+#test
+/**
+ * ex_encodes_setcc_with_zero_extend — `setcc dst8 ; movzx dst32, dst8` for a
+ * low register (AL, no REX), a byte-addressable-only register (SIL, forced
+ * `0x40`), and a high register (R8B, REX extension).
+ *
+ * @return void
+ */
+fn ex_encodes_setcc_with_zero_extend() {
+    ex_assert_hex(setcc_x86(ex_p(0), MCond::LT), "0f9cc00fb6c0")
+    ex_assert_hex(setcc_x86(ex_p(6), MCond::EQ), "400f94c6400fb6f6")
+    ex_assert_hex(setcc_x86(ex_p(8), MCond::GT), "410f9fc0450fb6c0")
+}
+
+#test
+/**
+ * ex_encodes_every_condition_code — each `MCond` maps to its `setcc` opcode
+ * (`0F 90+cc`): E/NE, the signed L/LE/G/GE, and the unsigned B/BE/A/AE lanes.
+ *
+ * @return void
+ */
+fn ex_encodes_every_condition_code() {
+    ex_assert_hex(setcc_x86(ex_p(0), MCond::EQ), "0f94c00fb6c0")
+    ex_assert_hex(setcc_x86(ex_p(0), MCond::NE), "0f95c00fb6c0")
+    ex_assert_hex(setcc_x86(ex_p(0), MCond::LT), "0f9cc00fb6c0")
+    ex_assert_hex(setcc_x86(ex_p(0), MCond::LE), "0f9ec00fb6c0")
+    ex_assert_hex(setcc_x86(ex_p(0), MCond::GT), "0f9fc00fb6c0")
+    ex_assert_hex(setcc_x86(ex_p(0), MCond::GE), "0f9dc00fb6c0")
+    ex_assert_hex(setcc_x86(ex_p(0), MCond::LO), "0f92c00fb6c0")
+    ex_assert_hex(setcc_x86(ex_p(0), MCond::LS), "0f96c00fb6c0")
+    ex_assert_hex(setcc_x86(ex_p(0), MCond::HI), "0f97c00fb6c0")
+    ex_assert_hex(setcc_x86(ex_p(0), MCond::HS), "0f93c00fb6c0")
+}
+
+#test
+/**
+ * ex_encodes_the_unary_ops — `neg r/m64` (`F7 /3`) and `not r/m64` (`F7 /2`),
+ * plus the 32-bit `neg` form.
+ *
+ * @return void
+ */
+fn ex_encodes_the_unary_ops() {
+    ex_assert_hex(neg_x86(ex_p(0), true), "48f7d8")
+    ex_assert_hex(not_x86(ex_p(0), true), "48f7d0")
+    ex_assert_hex(neg_x86(ex_p(0), false), "f7d8")
+}
+
+#test
+/**
+ * ex_encodes_every_load_addressing_form — the SIB-forcing RSP base, a zero
+ * displacement, disp8/disp32 (positive and negative), a plain base, the
+ * disp-forcing RBP base, and the REX.B R12/R13 bases.
+ *
+ * @return void
+ */
+fn ex_encodes_every_load_addressing_form() {
+    ex_assert_hex(load_x86(MMemSizeX86::Q, false, ex_p(0), ex_mem(ex_p(4), 8 to i32)), "488b442408")
+    ex_assert_hex(load_x86(MMemSizeX86::Q, false, ex_p(0), ex_mem(ex_p(4), 0 to i32)), "488b0424")
+    ex_assert_hex(load_x86(MMemSizeX86::Q, false, ex_p(0), ex_mem(ex_p(4), 512 to i32)), "488b842400020000")
+    ex_assert_hex(load_x86(MMemSizeX86::Q, false, ex_p(0), ex_mem(ex_p(4), (0 to i32) - (8 to i32))), "488b4424f8")
+    ex_assert_hex(load_x86(MMemSizeX86::Q, false, ex_p(0), ex_mem(ex_p(3), 0 to i32)), "488b03")
+    ex_assert_hex(load_x86(MMemSizeX86::Q, false, ex_p(0), ex_mem(ex_p(5), 0 to i32)), "488b4500")
+    ex_assert_hex(load_x86(MMemSizeX86::Q, false, ex_p(0), ex_mem(ex_p(12), 0 to i32)), "498b0424")
+    ex_assert_hex(load_x86(MMemSizeX86::Q, false, ex_p(0), ex_mem(ex_p(13), 0 to i32)), "498b4500")
+}
+
+#test
+/**
+ * ex_encodes_every_load_width_and_sign — Q/D/W/B loads in their zero-extending
+ * size ladder (byte `movzx 0F B6`, word `movzx 0F B7`, dword `mov 8B`, qword
+ * `REX.W 8B`) and their sign-extending `movsxd`(D) / `movsx`(W/B) forms,
+ * covering `load_memop_x86` — the isel's `sign=false` zero-extend contract.
+ *
+ * @return void
+ */
+fn ex_encodes_every_load_width_and_sign() {
+    ex_assert_hex(load_x86(MMemSizeX86::D, false, ex_p(0), ex_mem(ex_p(4), 8 to i32)), "8b442408")
+    ex_assert_hex(load_x86(MMemSizeX86::D, true, ex_p(0), ex_mem(ex_p(4), 8 to i32)), "4863442408")
+    ex_assert_hex(load_x86(MMemSizeX86::W, false, ex_p(0), ex_mem(ex_p(4), 8 to i32)), "0fb7442408")
+    ex_assert_hex(load_x86(MMemSizeX86::W, true, ex_p(0), ex_mem(ex_p(4), 8 to i32)), "480fbf442408")
+    ex_assert_hex(load_x86(MMemSizeX86::B, false, ex_p(0), ex_mem(ex_p(4), 8 to i32)), "0fb6442408")
+    ex_assert_hex(load_x86(MMemSizeX86::B, true, ex_p(0), ex_mem(ex_p(4), 8 to i32)), "480fbe442408")
+}
+
+#test
+/**
+ * ex_encodes_every_store_width — Q/D/W (the `0x66`-prefixed word) and the byte
+ * store (a low `al` source, then a forced-REX `sil` source), covering
+ * `store_memop_x86` and the byte-register REX trap.
+ *
+ * @return void
+ */
+fn ex_encodes_every_store_width() {
+    ex_assert_hex(store_x86(MMemSizeX86::Q, ex_p(0), ex_mem(ex_p(4), 8 to i32)), "4889442408")
+    ex_assert_hex(store_x86(MMemSizeX86::D, ex_p(0), ex_mem(ex_p(4), 8 to i32)), "89442408")
+    ex_assert_hex(store_x86(MMemSizeX86::W, ex_p(0), ex_mem(ex_p(4), 8 to i32)), "6689442408")
+    ex_assert_hex(store_x86(MMemSizeX86::B, ex_p(0), ex_mem(ex_p(4), 8 to i32)), "88442408")
+    ex_assert_hex(store_x86(MMemSizeX86::B, ex_p(6), ex_mem(ex_p(4), 8 to i32)), "4088742408")
+}
+
+#test
+/**
+ * ex_encodes_indirect_calls_and_return — `call r/m64` (`FF /2`) across a low
+ * and a high register, and the bare `ret`.
+ *
+ * @return void
+ */
+fn ex_encodes_indirect_calls_and_return() {
+    ex_assert_hex(call_ind_x86(ex_p(0), teko::list::empty(), ex_p(0), false), "ffd0")
+    ex_assert_hex(call_ind_x86(ex_p(11), teko::list::empty(), ex_p(0), false), "41ffd3")
+    ex_assert_hex(ret_x86(), "c3")
+}
+
+#test
+/**
+ * ex_encodes_the_direct_call_reloc — `call rel32` (`E8`) is a zeroed
+ * placeholder carrying a `Plt32` relocation on the callee symbol at rel32
+ * offset 1.
+ *
+ * @return void
+ */
+fn ex_encodes_the_direct_call_reloc() {
+    let enc = ex_enc(call_x86("tk_exit", teko::list::empty(), ex_p(0), false, false))
+    teko::assert::is_true(teko::crypto::to_hex(enc.bytes) == "e800000000")
+    teko::assert::is_true(enc.reloc != null)
+    let r = ex_reloc_of(enc)
+    teko::assert::is_true(r.field_off == (1 to u32))
+    teko::assert::is_true(r.sym == "tk_exit")
+    ex_assert_reloc_is_plt32(r.kind)
+    teko::assert::is_false(enc.has_branch)
+}
+
+#test
+/**
+ * ex_encodes_the_rip_relative_lea_reloc — `lea dst, [rip+disp32]` (`REX.W 8D`,
+ * `mod=00 rm=101`) is a zeroed-disp placeholder carrying the instruction's
+ * relocation kind at disp32 offset 3; a high register sets REX.R.
+ *
+ * @return void
+ */
+fn ex_encodes_the_rip_relative_lea_reloc() {
+    let enc = ex_enc(lea_rip_x86(ex_p(0), "g", RelocKindX86::Pc32))
+    teko::assert::is_true(teko::crypto::to_hex(enc.bytes) == "488d0500000000")
+    teko::assert::is_true(enc.reloc != null)
+    let r = ex_reloc_of(enc)
+    teko::assert::is_true(r.field_off == (3 to u32))
+    teko::assert::is_true(r.sym == "g")
+    ex_assert_reloc_is_pc32(r.kind)
+    ex_assert_hex(lea_rip_x86(ex_p(10), "g", RelocKindX86::Pc32), "4c8d1500000000")
+}
+
+#test
+/**
+ * ex_a_non_relocating_instruction_owes_no_relocation_kind — the x86-64 twin of
+ * the arm64 regression that kills the inert relocation default: an instruction
+ * that references no symbol carries `reloc == null`, never a defaulted
+ * `RelocKindX86`. `plain_inst_x86` used to fill `reloc_kind =
+ * RelocKindX86::Plt32` — a CALL relocation — on every position-independent
+ * instruction, inert only because a separate `has_reloc` flag sat beside it.
+ * There is now nothing to default: a mov, a cmp, a ret and an intra-function
+ * `jmp` all owe `null`, and only `call rel32` and `lea rip`-relative owe a
+ * record at all (asserted by the two goldens above).
+ *
+ * @return void
+ */
+fn ex_a_non_relocating_instruction_owes_no_relocation_kind() {
+    teko::assert::is_true(ex_enc(mov_x86(ex_p(0), ex_p(1), true)).reloc == null)
+    teko::assert::is_true(ex_enc(cmp_x86(ex_p(0), ex_p(1), true)).reloc == null)
+    teko::assert::is_true(ex_enc(ret_x86()).reloc == null)
+    teko::assert::is_true(ex_enc(jmp_x86(0 to u32)).reloc == null)
+}
+
+#test
+/**
+ * ex_encodes_the_scalar_float_memory_moves — the SSE scalar float load/store
+ * widths (`B1-fp`): `MOVSD` is `F2 0F 10`(load)/`F2 0F 11`(store), `MOVSS` the
+ * `F3`-prefixed twin, with the mandatory prefix ahead of any REX (an XMM8..15
+ * operand sets REX.R) and the same SIB/disp8 addressing the integer forms use
+ * (RSP forces the SIB byte `0x24`, RBP forces a zero disp8). Every vector below
+ * was cross-checked against GNU `as`.
+ *
+ * @return void
+ */
+fn ex_encodes_the_scalar_float_memory_moves() {
+    ex_assert_hex(load_x86(MMemSizeX86::F64, false, ex_fpr(0), ex_mem(ex_p(4), 0 to i32)), "f20f100424")
+    ex_assert_hex(load_x86(MMemSizeX86::F32, false, ex_fpr(0), ex_mem(ex_p(4), 0 to i32)), "f30f100424")
+    ex_assert_hex(store_x86(MMemSizeX86::F64, ex_fpr(0), ex_mem(ex_p(4), 0 to i32)), "f20f110424")
+    ex_assert_hex(store_x86(MMemSizeX86::F32, ex_fpr(0), ex_mem(ex_p(4), 0 to i32)), "f30f110424")
+    ex_assert_hex(load_x86(MMemSizeX86::F64, false, ex_fpr(10), ex_mem(ex_p(5), 0 to i32)), "f2440f105500")
+    ex_assert_hex(store_x86(MMemSizeX86::F64, ex_fpr(10), ex_mem(ex_p(5), 0 to i32)), "f2440f115500")
+}
+
+#test
+/**
+ * ex_encodes_the_float_register_moves — `MFMovX86`'s three shapes (`B1-fp`):
+ * FPR-to-FPR is `MOVSD`/`MOVSS` (`F2`/`F3 0F 10`, ModRM.reg is the
+ * destination); GPR-to-FPR is `MOVQ`/`MOVD` (`66 [REX.W] 0F 6E`); FPR-to-GPR is
+ * the opposite-direction `66 [REX.W] 0F 7E`, whose ModRM.reg field holds the XMM
+ * SOURCE. Every vector below was cross-checked against GNU `as`.
+ *
+ * @return void
+ */
+fn ex_encodes_the_float_register_moves() {
+    ex_assert_hex(fmov_x86(ex_fpr(0), ex_fpr(1), true), "f20f10c1")
+    ex_assert_hex(fmov_x86(ex_fpr(0), ex_fpr(1), false), "f30f10c1")
+    ex_assert_hex(fmov_x86(ex_fpr(10), ex_fpr(11), true), "f2450f10d3")
+    ex_assert_hex(fmov_x86(ex_fpr(10), ex_fpr(11), false), "f3450f10d3")
+    ex_assert_hex(fmov_x86(ex_fpr(0), ex_p(0), true), "66480f6ec0")
+    ex_assert_hex(fmov_x86(ex_fpr(0), ex_p(0), false), "660f6ec0")
+    ex_assert_hex(fmov_x86(ex_fpr(10), ex_p(11), true), "664d0f6ed3")
+    ex_assert_hex(fmov_x86(ex_fpr(10), ex_p(11), false), "66450f6ed3")
+    ex_assert_hex(fmov_x86(ex_p(0), ex_fpr(0), true), "66480f7ec0")
+    ex_assert_hex(fmov_x86(ex_p(0), ex_fpr(0), false), "660f7ec0")
+    ex_assert_hex(fmov_x86(ex_p(11), ex_fpr(10), true), "664d0f7ed3")
+    ex_assert_hex(fmov_x86(ex_p(11), ex_fpr(10), false), "66450f7ed3")
+}
+
+#test
+/**
+ * ex_encodes_the_float_alu_family — every `MFAluOpX86` in both widths
+ * (`B1-fp`): `ADDSD`/`SUBSD`/`MULSD`/`DIVSD` are `F2 0F 58`/`5C`/`59`/`5E`, and
+ * the `SS` twins swap the mandatory prefix to `F3`; the read-modify-write
+ * destination rides ModRM.reg. Every vector below was cross-checked against GNU
+ * `as`.
+ *
+ * @return void
+ */
+fn ex_encodes_the_float_alu_family() {
+    ex_assert_hex(falu_x86(MFAluOpX86::FAdd, ex_fpr(0), ex_fpr(1), true), "f20f58c1")
+    ex_assert_hex(falu_x86(MFAluOpX86::FSub, ex_fpr(0), ex_fpr(1), true), "f20f5cc1")
+    ex_assert_hex(falu_x86(MFAluOpX86::FMul, ex_fpr(0), ex_fpr(1), true), "f20f59c1")
+    ex_assert_hex(falu_x86(MFAluOpX86::FDiv, ex_fpr(0), ex_fpr(1), true), "f20f5ec1")
+    ex_assert_hex(falu_x86(MFAluOpX86::FAdd, ex_fpr(0), ex_fpr(1), false), "f30f58c1")
+    ex_assert_hex(falu_x86(MFAluOpX86::FSub, ex_fpr(0), ex_fpr(1), false), "f30f5cc1")
+    ex_assert_hex(falu_x86(MFAluOpX86::FMul, ex_fpr(0), ex_fpr(1), false), "f30f59c1")
+    ex_assert_hex(falu_x86(MFAluOpX86::FDiv, ex_fpr(0), ex_fpr(1), false), "f30f5ec1")
+    ex_assert_hex(falu_x86(MFAluOpX86::FAdd, ex_fpr(10), ex_fpr(11), true), "f2450f58d3")
+    ex_assert_hex(falu_x86(MFAluOpX86::FDiv, ex_fpr(10), ex_fpr(11), false), "f3450f5ed3")
+}
+
+#test
+/**
+ * ex_encodes_the_float_compare_and_parity — `UCOMISD` is `66 0F 2E` and
+ * `UCOMISS` the UNPREFIXED `0F 2E` (the one form in this family carrying no
+ * mandatory prefix), its first operand on ModRM.reg; `MSetPX86` is `setp`/
+ * `setnp` (`0F 9A`/`9B`) plus the `movzx dst32, dst8` widening every `setcc`
+ * here carries, with a forced REX for a byte register at id >= 4. Every vector
+ * below was cross-checked against GNU `as`.
+ *
+ * @return void
+ */
+fn ex_encodes_the_float_compare_and_parity() {
+    ex_assert_hex(fcmp_x86(ex_fpr(0), ex_fpr(1), true), "660f2ec1")
+    ex_assert_hex(fcmp_x86(ex_fpr(0), ex_fpr(1), false), "0f2ec1")
+    ex_assert_hex(fcmp_x86(ex_fpr(10), ex_fpr(11), true), "66450f2ed3")
+    ex_assert_hex(setp_x86(ex_p(0), false), "0f9ac00fb6c0")
+    ex_assert_hex(setp_x86(ex_p(0), true), "0f9bc00fb6c0")
+    ex_assert_hex(setp_x86(ex_p(6), false), "400f9ac6400fb6f6")
+    ex_assert_hex(setp_x86(ex_p(6), true), "400f9bc6400fb6f6")
+}
+
+#test
+/**
+ * ex_encodes_the_float_conversions — every `MCvtOpX86` (`B1-fp`): `CVTSI2SD` is
+ * `F2 REX.W 0F 2A` (its GPR side always the wide form), `CVTTSD2SI` is
+ * `F2 REX.W 0F 2C` with the GPR destination on ModRM.reg, `CVTSD2SS` is
+ * `F2 0F 5A` and `CVTSS2SD` is `F3 0F 5A` (both FPR-only, so neither sets
+ * REX.W). Every vector below was cross-checked against GNU `as`.
+ *
+ * @return void
+ */
+fn ex_encodes_the_float_conversions() {
+    ex_assert_hex(cvt_x86(MCvtOpX86::Cvtsi2sd, ex_fpr(0), ex_p(0)), "f2480f2ac0")
+    ex_assert_hex(cvt_x86(MCvtOpX86::Cvttsd2si, ex_p(0), ex_fpr(0)), "f2480f2cc0")
+    ex_assert_hex(cvt_x86(MCvtOpX86::Cvtsd2ss, ex_fpr(0), ex_fpr(1)), "f20f5ac1")
+    ex_assert_hex(cvt_x86(MCvtOpX86::Cvtss2sd, ex_fpr(0), ex_fpr(1)), "f30f5ac1")
+    ex_assert_hex(cvt_x86(MCvtOpX86::Cvtsi2sd, ex_fpr(10), ex_p(11)), "f24d0f2ad3")
+    ex_assert_hex(cvt_x86(MCvtOpX86::Cvttsd2si, ex_p(11), ex_fpr(10)), "f24d0f2cda")
+}
+
+/**
+ * fx_u1 — a one-element `[]u32` (the callee-saved / slot-offset fixture builder).
+ *
+ * @param u32 a  the sole element
+ * @return []u32  the singleton list
+ */
+fn fx_u1(a: u32) -> []u32 {
+    teko::list::push(teko::list::empty(), a)
+}
+
+/**
+ * fx_u2 — a two-element `[]u32`.
+ *
+ * @param u32 a  the first element
+ * @param u32 b  the second element
+ * @return []u32  the two-element list
+ */
+fn fx_u2(a: u32, b: u32) -> []u32 {
+    teko::list::push(fx_u1(a), b)
+}
+
+/**
+ * fx_u3 — a three-element `[]u32`.
+ *
+ * @param u32 a  the first element
+ * @param u32 b  the second element
+ * @param u32 c  the third element
+ * @return []u32  the three-element list
+ */
+fn fx_u3(a: u32, b: u32, c: u32) -> []u32 {
+    teko::list::push(fx_u2(a, b), c)
+}
+
+/**
+ * fx_none_u32 — the empty `[]u32` (the no-callee-saved / no-slots fixture).
+ *
+ * @return []u32  the empty list
+ */
+fn fx_none_u32() -> []u32 {
+    teko::list::empty()
+}
+
+/**
+ * fx_frame — a `FrameLayoutX86` built directly from a `sub rsp` size, a
+ * callee-saved GPR list, and the RSP-relative slot offsets (SysV has no
+ * callee-saved FPRs, so `saved_fpr` is always empty). Pins the prologue/epilogue
+ * byte goldens without routing through `compute_frame_layout_x86`.
+ *
+ * @param u32 size  the `sub rsp` amount
+ * @param []u32 saved  the callee-saved GPR ids to push (ascending)
+ * @param []u32 slots  the RSP-relative slot offsets
+ * @return FrameLayoutX86  the fixture frame
+ */
+fn fx_frame(size: u32, saved: []u32, slots: []u32) -> FrameLayoutX86 {
+    FrameLayoutX86 { size = size; saved_gpr = saved; saved_fpr = teko::list::empty(); slot_offsets = slots; call_align = false; out_arg_base = 0 to u32; fpr_save_base = 0 to u32; caller_shadow = 0 to u32 }
+}
+
+/**
+ * fx_prologue_hex — the hex of `layout`'s emitted prologue bytes, or `<err>` on
+ * an unexpected honest-stop (the prologue golden reader).
+ *
+ * @param FrameLayoutX86 layout  the frame to emit the prologue for
+ * @return str  the prologue bytes as hex, or `<err>`
+ */
+fn fx_prologue_hex(layout: FrameLayoutX86) -> str {
+    match emit_prologue_x86(layout) {
+        []byte as b => teko::crypto::to_hex(b)
+        error as e => "<err>"
+    }
+}
+
+/**
+ * fx_prologue_stop — the honest-stop message `layout`'s prologue raises, or
+ * `<ok>` when it emits (the bigframe-stop reader).
+ *
+ * @param FrameLayoutX86 layout  the frame to emit the prologue for
+ * @return str  the error message, or `<ok>`
+ */
+fn fx_prologue_stop(layout: FrameLayoutX86) -> str {
+    match emit_prologue_x86(layout) {
+        []byte as b => "<ok>"
+        error as e => e.message
+    }
+}
+
+/**
+ * fx_epilogue_hex — the hex of `layout`'s emitted epilogue bytes (never
+ * honest-stops: `leave` handles every frame size).
+ *
+ * @param FrameLayoutX86 layout  the frame to emit the epilogue for
+ * @return str  the epilogue bytes as hex
+ */
+fn fx_epilogue_hex(layout: FrameLayoutX86) -> str {
+    teko::crypto::to_hex(emit_epilogue_x86(layout))
+}
+
+#test
+/**
+ * ex_multi_callee_saved_frame — three callee-saved GPRs (RBX, R12, R13, the
+ * latter two REX.B-prefixed) with an 8-byte sub: pushed ascending BEFORE the
+ * `sub rsp` (so the frame's lowest bytes stay free for the argument-passing
+ * region, `B1-args`), and on the way out `add rsp,#8` puts RSP back at the top of
+ * the pushed region before the reverse pops and the final `leave`.
+ *
+ * @return void
+ */
+fn ex_multi_callee_saved_frame() {
+    let fl = fx_frame(8 to u32, fx_u3(3 to u32, 12 to u32, 13 to u32), fx_none_u32())
+    teko::assert::is_true(fx_prologue_hex(fl) == "554889e553415441554883ec08")
+    teko::assert::is_true(fx_epilogue_hex(fl) == "4883c408415d415c5bc9")
+}
+
+#test
+/**
+ * ex_large_frame_uses_imm32_sub — a frame past the imm8 field takes the wide
+ * `sub rsp, imm32` form (`48 81 EC id`, little-endian 512), still torn down by a
+ * bare `leave`.
+ *
+ * @return void
+ */
+fn ex_large_frame_uses_imm32_sub() {
+    let fl = fx_frame(512 to u32, fx_none_u32(), fx_u1(0 to u32))
+    teko::assert::is_true(fx_prologue_hex(fl) == "554889e54881ec00020000")
+    teko::assert::is_true(fx_epilogue_hex(fl) == "c9")
+}
+
+/**
+ * fx_i1 — a one-element `[]MInstX86` (the machine-block stream builder).
+ *
+ * @param MInstX86 a  the sole instruction
+ * @return []MInstX86  the singleton stream
+ */
+fn fx_i1(a: MInstX86) -> []MInstX86 {
+    teko::list::push(teko::list::empty(), a)
+}
+
+/**
+ * fx_i2 — a two-element `[]MInstX86`.
+ *
+ * @param MInstX86 a  the first instruction
+ * @param MInstX86 b  the second instruction
+ * @return []MInstX86  the two-instruction stream
+ */
+fn fx_i2(a: MInstX86, b: MInstX86) -> []MInstX86 {
+    teko::list::push(fx_i1(a), b)
+}
+
+/**
+ * fx_block — a machine block with the given id and instruction stream (empty
+ * params — the tests exercise flat straight-line and branch CFGs).
+ *
+ * @param u32 id  the block id
+ * @param []MInstX86 insts  the block's instructions
+ * @return MBlockX86  the built block
+ */
+fn fx_block(id: u32, insts: []MInstX86) -> MBlockX86 {
+    MBlockX86 { id = id; params = teko::list::empty(); insts = insts }
+}
+
+/**
+ * fx_no_frame — the empty `[]lir::LAlloca` (a function with no frame slots).
+ *
+ * @return []lir::LAlloca  the empty frame table
+ */
+fn fx_no_frame() -> []lir::LAlloca {
+    teko::list::empty()
+}
+
+/**
+ * fx_alloca_frame — a one-slot `[]lir::LAlloca` frame table.
+ *
+ * @param u32 bytes  the slot's byte size
+ * @param u32 align  the slot's alignment
+ * @return []lir::LAlloca  the single-slot frame table
+ */
+fn fx_alloca_frame(bytes: u32, align: u32) -> []lir::LAlloca {
+    teko::list::push(teko::list::empty(), lir::LAlloca { bytes = bytes; align = align })
+}
+
+/**
+ * fx_1block_func — a single-block `MFuncX86` with the given symbol, stream, and
+ * frame table.
+ *
+ * @param str sym  the function symbol
+ * @param []MInstX86 insts  the block's instructions
+ * @param []lir::LAlloca frame  the frame-slot table
+ * @return MFuncX86  the built function
+ */
+fn fx_1block_func(sym: str, insts: []MInstX86, frame: []lir::LAlloca) -> MFuncX86 {
+    MFuncX86 { symbol = sym; blocks = teko::list::push(teko::list::empty(), fx_block(0 to u32, insts)); frame = frame }
+}
+
+#test
+/**
+ * ex_func_makes_call_x86_detects_indirect — `func_makes_call_x86` is true for a
+ * function containing an indirect `call r/m64` (the `MCallIndX86` arm of the
+ * per-instruction call predicate).
+ *
+ * @return void
+ */
+fn ex_func_makes_call_x86_detects_indirect() {
+    let ind = call_ind_x86(ex_p(0), teko::list::empty(), ex_p(0), false)
+    let f = fx_1block_func("main", fx_i1(ind), fx_no_frame())
+    teko::assert::is_true(func_makes_call_x86(f))
+}
+
+/**
+ * fx_xmm_frame — a `FrameLayoutX86` fixture carrying callee-saved XMMs (the
+ * Win64-only shape: XMM6..XMM15 are nonvolatile there), their 16-byte save slots
+ * starting at RSP+`fpr_save_base`.
+ *
+ * @param u32 size  the `sub rsp` amount
+ * @param []u32 saved_fpr  the callee-saved XMM ids, ascending
+ * @param u32 fpr_save_base  the RSP-relative offset of the first save slot
+ * @return FrameLayoutX86  the fixture frame
+ */
+fn fx_xmm_frame(size: u32, saved_fpr: []u32, fpr_save_base: u32) -> FrameLayoutX86 {
+    FrameLayoutX86 { size = size; saved_gpr = fx_none_u32(); saved_fpr = saved_fpr; slot_offsets = fx_none_u32(); call_align = false; out_arg_base = 0 to u32; fpr_save_base = fpr_save_base; caller_shadow = 0 to u32 }
+}
+
+#test
+/**
+ * ex_win64_callee_saved_xmm_rides_movaps — a frame carrying callee-saved XMMs
+ * saves each one with an aligned `movaps [rsp+off], xmm` after the `sub rsp` and
+ * reloads it with `movaps xmm, [rsp+off]` on the way out, ascending id order, 16
+ * bytes apart (`B3-xmm-callee-saved`, closed 2026-07-29 — this used to be an
+ * honest-stop that refused to emit a prologue at all). `movaps`, not `movsd`:
+ * Win64's promise covers all 128 bits of XMM6..XMM15. A high XMM sets REX.R.
+ * Cross-checked against GNU `as`.
+ *
+ * @return void
+ */
+fn ex_win64_callee_saved_xmm_rides_movaps() {
+    let one = fx_xmm_frame(16 to u32, fx_u1(6 to u32), 0 to u32)
+    teko::assert::is_true(fx_prologue_hex(one) == "554889e54883ec100f293424")
+    teko::assert::is_true(fx_epilogue_hex(one) == "0f283424c9")
+    let two = fx_xmm_frame(48 to u32, fx_u2(6 to u32, 15 to u32), 16 to u32)
+    teko::assert::is_true(fx_prologue_hex(two) == "554889e54883ec300f29742410440f297c2420")
+    teko::assert::is_true(fx_epilogue_hex(two) == "0f28742410440f287c2420c9")
+}
+
+/**
+ * fx_func_stop — the honest-stop message `f`'s `encode_func_x86` raises, or
+ * `<ok>` when it encodes.
+ *
+ * @param MFuncX86 f  the function to encode
+ * @return str  the error message, or `<ok>`
+ */
+fn fx_func_stop(f: MFuncX86) -> str {
+    match encode_func_x86(SYSV64, f) {
+        EncodedFuncX86 as ef => "<ok>"
+        error as e => e.message
+    }
+}
+
+/**
+ * fx_encode_func — `encode_func_x86` under `SYSV64`, unwrapped to a sentinel
+ * empty function on an unexpected honest-stop so a reloc assertion fails loudly
+ * rather than aborting.
+ *
+ * @param MFuncX86 f  the function to encode
+ * @return EncodedFuncX86  the encoded function, or the sentinel
+ */
+fn fx_encode_func(f: MFuncX86) -> EncodedFuncX86 {
+    match encode_func_x86(SYSV64, f) {
+        EncodedFuncX86 as ef => ef
+        error as e => EncodedFuncX86 { symbol = "<error>"; bytes = teko::list::empty(); relocs = teko::list::empty() }
+    }
+}
+
+/**
+ * fx_reloc_kind_name — a `RelocKindX86`'s lowercase name (the kind cannot ride
+ * `==`, so it is matched to a name for assertions).
+ *
+ * @param RelocKindX86 kind  the relocation kind
+ * @return str  its lowercase name
+ */
+fn fx_reloc_kind_name(kind: RelocKindX86) -> str {
+    match kind { Plt32 => "plt32"; Pc32 => "pc32"; Abs64 => "abs64" }
+}
+
+#test
+/**
+ * ex_func_frameless_call_reloc — a frameless `main` making a single `call
+ * tk_exit` (a call, no return) encodes to `E8 00 00 00 00` with one `Plt32`
+ * relocation at rel32 offset 1, addend −4 (the keystone exit path's own-native
+ * shape).
+ *
+ * @return void
+ */
+fn ex_func_frameless_call_reloc() {
+    let f = fx_1block_func("main", fx_i1(call_x86("tk_exit", teko::list::empty(), ex_p(0), false, false)), fx_no_frame())
+    let ef = fx_encode_func(f)
+    teko::assert::is_true(teko::crypto::to_hex(ef.bytes) == "e800000000")
+    teko::assert::is_true(ef.relocs.len == 1)
+    teko::assert::is_true(ef.relocs[0].offset == (1 to u32))
+    teko::assert::is_true(ef.relocs[0].sym == "tk_exit")
+    teko::assert::is_true(fx_reloc_kind_name(ef.relocs[0].kind) == "plt32")
+    teko::assert::is_true(ef.relocs[0].addend == ((0) - (4)))
+}
+
+#test
+/**
+ * ex_func_call_then_return_gets_a_minimal_align_only_frame — the sibling axis
+ * `ex_func_frameless_call_reloc` does NOT cover: a function with ZERO frame slots and ZERO
+ * callee-saved registers that calls `tk_something` AND THEN RETURNS (unlike that fixture's
+ * `tk_exit` call, which never returns) gets a minimal `push rbp`/`mov rbp,rsp` prologue
+ * (`554889e5`) and a bare `leave` epilogue (`c9`) ahead of its own `ret` (`c3`) —
+ * `needs_call_align_x86` restoring the SysV 16-byte call-boundary alignment a genuinely
+ * frameless encoding would leave off by 8 at the call this function itself issues (0.3.1.0
+ * degrau 19 — found live: the native entry stub `wrap_native_entry` appends is exactly this
+ * shape, and the missing 8 bytes went unnoticed until a callee's OWN call chain used a
+ * strictly-aligned SSE store several frames deep).
+ *
+ * @return void
+ */
+fn ex_func_call_then_return_gets_a_minimal_align_only_frame() {
+    let f = fx_1block_func("main", fx_i2(call_x86("tk_something", teko::list::empty(), ex_p(0), false, false), ret_x86()), fx_no_frame())
+    let ef = fx_encode_func(f)
+    teko::assert::is_true(teko::crypto::to_hex(ef.bytes) == "554889e5e800000000c9c3")
+    teko::assert::is_true(ef.relocs.len == 1)
+    teko::assert::is_true(ef.relocs[0].offset == (5 to u32))
+    teko::assert::is_true(ef.relocs[0].sym == "tk_something")
+}
+
+#test
+/**
+ * ex_func_call_with_no_return_stays_frameless_even_when_named_differently —
+ * `needs_call_align_x86` is NOT keyed on the symbol `"main"`: any function whose only call
+ * never returns stays byte-identical to the pre-degrau-19 frameless encoding, confirming the
+ * fix is scoped to the call-AND-return axis alone (0.3.1.0 degrau 19).
+ *
+ * @return void
+ */
+fn ex_func_call_with_no_return_stays_frameless_even_when_named_differently() {
+    let f = fx_1block_func("teko_main", fx_i1(call_x86("tk_exit", teko::list::empty(), ex_p(0), false, false)), fx_no_frame())
+    let ef = fx_encode_func(f)
+    teko::assert::is_true(teko::crypto::to_hex(ef.bytes) == "e800000000")
+}
+
+#test
+/**
+ * ex_func_rip_lea_reloc — a `lea rax,[rip+gv]` then `ret` encodes to the
+ * zeroed-disp `lea` (`48 8D 05 00000000`) plus the bare `ret`, carrying one
+ * `Pc32` relocation at disp32 offset 3, addend −4.
+ *
+ * @return void
+ */
+fn ex_func_rip_lea_reloc() {
+    let f = fx_1block_func("main", fx_i2(lea_rip_x86(ex_p(0), "gv", RelocKindX86::Pc32), ret_x86()), fx_no_frame())
+    let ef = fx_encode_func(f)
+    teko::assert::is_true(teko::crypto::to_hex(ef.bytes) == "488d0500000000c3")
+    teko::assert::is_true(ef.relocs.len == 1)
+    teko::assert::is_true(ef.relocs[0].offset == (3 to u32))
+    teko::assert::is_true(ef.relocs[0].sym == "gv")
+    teko::assert::is_true(fx_reloc_kind_name(ef.relocs[0].kind) == "pc32")
+    teko::assert::is_true(ef.relocs[0].addend == ((0) - (4)))
+}
+
+#test
+/**
+ * ex_func_branch_to_missing_block_honest_stops — a `jmp` to a block id absent
+ * from the function raises the `B1-badblock` internal-invariant honest-stop
+ * during the patch pass.
+ *
+ * @return void
+ */
+fn ex_func_branch_to_missing_block_honest_stops() {
+    let f = fx_1block_func("g", fx_i1(jmp_x86(99 to u32)), fx_no_frame())
+    teko::assert::str_contains(fx_func_stop(f), "B1-badblock")
+}
+
+#test
+/**
+ * ex_func_bigframe_propagates — a function whose alloca forces a frame past the
+ * imm32 `sub rsp` field propagates the `B1-bigframe` stop from `emit_prologue_x86`
+ * out of `encode_func_x86`.
+ *
+ * @return void
+ */
+fn ex_func_bigframe_propagates() {
+    let f = fx_1block_func("g", fx_i1(ret_x86()), fx_alloca_frame(2147483648 to u32, 8 to u32))
+    teko::assert::str_contains(fx_func_stop(f), "B1-bigframe")
+}
+
+/**
+ * fx_patch_stop — the honest-stop message `patch_branches_x86` raises for a
+ * crafted fixup/offset pair, or `<ok>` when it patches (the direct rel32-range
+ * probe).
+ *
+ * @param []byte raw  the byte image to patch
+ * @param []BranchFixupX86 fixups  the pending fixups
+ * @param []BlockOffsetX86 offsets  the block byte offsets
+ * @return str  the error message, or `<ok>`
+ */
+fn fx_patch_stop(raw: []byte, fixups: []BranchFixupX86, offsets: []BlockOffsetX86) -> str {
+    match patch_branches_x86(raw, fixups, offsets) {
+        []byte as b => "<ok>"
+        error as e => e.message
+    }
+}
+
+#test
+/**
+ * ex_patch_far_displacement_honest_stops — a crafted branch whose target byte
+ * offset lands the rel32 displacement just past the signed 32-bit boundary
+ * (2^31) raises the `B1-farbranch` internal-invariant stop, the boundary case a
+ * real (tiny) function never reaches.
+ *
+ * @return void
+ */
+fn ex_patch_far_displacement_honest_stops() {
+    let raw = teko::list::push(teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), 0 to byte), 0 to byte), 0 to byte), 0 to byte)
+    let fixups = teko::list::push(teko::list::empty(), BranchFixupX86 { field_off = 0 to u32; target = 0 to u32 })
+    let offsets = teko::list::push(teko::list::empty(), BlockOffsetX86 { id = 0 to u32; byte = 2147483652 to u32 })
+    teko::assert::str_contains(fx_patch_stop(raw, fixups, offsets), "B1-farbranch")
+}
+
+#test
+/**
+ * ex_reloc_addend_convention — the pinned `r_addend` per kind: `Plt32`/`Pc32`
+ * carry −4 (the rel32-is-from-field-end correction the assembler oracle
+ * confirmed) and `Abs64` carries 0 (the deferred `B1-globals` data case,
+ * exercised directly since no B1-6 instruction emits it).
+ *
+ * @return void
+ */
+fn ex_reloc_addend_convention() {
+    teko::assert::is_true(reloc_addend_x86(RelocKindX86::Plt32) == ((0) - (4)))
+    teko::assert::is_true(reloc_addend_x86(RelocKindX86::Pc32) == ((0) - (4)))
+    teko::assert::is_true(reloc_addend_x86(RelocKindX86::Abs64) == (0))
+}
+
+/**
+ * fx_module_of1 — a single-function `MModuleX86` (empty rodata/globals/layouts).
+ *
+ * @param MFuncX86 f  the function
+ * @return MModuleX86  the wrapping module
+ */
+fn fx_module_of1(f: MFuncX86) -> MModuleX86 {
+    MModuleX86 { funcs = teko::list::push(teko::list::empty(), f); rodata = teko::list::empty(); globals = teko::list::empty(); layouts = teko::list::empty() }
+}
+
+/**
+ * fx_module_stop — the honest-stop message `m`'s `encode_module_x86` raises, or
+ * `<ok>` when it encodes.
+ *
+ * @param MModuleX86 m  the module to encode
+ * @return str  the error message, or `<ok>`
+ */
+fn fx_module_stop(m: MModuleX86) -> str {
+    match encode_module_x86(SYSV64, m) {
+        EncodedModuleX86 as e => "<ok>"
+        error as er => er.message
+    }
+}
+
+#test
+/**
+ * ex_module_globals_honest_stops — a module carrying a top-level data global
+ * raises the `B1-globals` named honest-stop (the `.data` section is deferred; the
+ * N2 subset lowers none).
+ *
+ * @return void
+ */
+fn ex_module_globals_honest_stops() {
+    let f = fx_1block_func("main", fx_i1(ret_x86()), fx_no_frame())
+    let globals = teko::list::push(teko::list::empty(), lir::LGlobal { symbol = "gv"; ty = lir::LType::I32; bytes = teko::list::empty() })
+    let m = MModuleX86 { funcs = teko::list::push(teko::list::empty(), f); rodata = teko::list::empty(); globals = globals; layouts = teko::list::empty() }
+    teko::assert::str_contains(fx_module_stop(m), "B1-globals")
+}
+
+#test
+/**
+ * ex_module_propagates_function_stop — a function reaching a per-function
+ * encoder stop propagates it out of `encode_module_x86` unchanged: a frame whose
+ * sole `LAlloca` overruns the signed imm32 `sub rsp` field raises
+ * `B1-bigframe` at prologue emission, and the module driver surfaces that same
+ * message rather than swallowing it.
+ *
+ * @return void
+ */
+fn ex_module_propagates_function_stop() {
+    let f = fx_1block_func("main", fx_i1(ret_x86()), fx_alloca_frame(0xFFFFFF00 to u32, 8 to u32))
+    teko::assert::str_contains(fx_module_stop(fx_module_of1(f)), "B1-bigframe")
+}
+
+/**
+ * fx_in_arg_hex — the hex of a one-block function encoded under `abi`, whose body
+ * is a single `MInArgX86{Q, RAX, 0}` load of incoming stack argument 0 followed by
+ * `ret`. The reader behind the caller-shadow goldens: the displacement inside
+ * those bytes IS `in_arg_base_x86`'s answer.
+ *
+ * @param AbiDescriptor abi  the register file to encode under
+ * @return str  the encoded bytes as hex, or `<err>` on an unexpected honest-stop
+ */
+fn fx_in_arg_hex(abi: AbiDescriptor) -> str {
+    let f = fx_1block_func("main", fx_i2(in_arg_x86(MMemSizeX86::Q, ex_p(0), 0 to u32), ret_x86()), fx_no_frame())
+    match encode_func_x86(abi, f) {
+        EncodedFuncX86 as ef => teko::crypto::to_hex(ef.bytes)
+        error as e => "<err>"
+    }
+}
+
+#test
+/**
+ * ex_win64_incoming_stack_arg_skips_the_callers_shadow — a Win64 callee reads its
+ * first INCOMING stack argument 32 bytes higher than a SysV one, because the Win64
+ * caller reserved the 32-byte home space between its own RSP and that argument.
+ *
+ * The two hex strings differ in exactly the displacement byte: SysV loads
+ * `[rsp+8]` (`488b442408`), Win64 `[rsp+40]` (`488b442428`). Before this term
+ * existed both read `[rsp+8]` while `encode_out_arg_x86` stored the argument at
+ * `[rsp+32]` of the caller — a 32-byte disagreement between the two halves of one
+ * ABI contract.
+ *
+ * @return void
+ */
+fn ex_win64_incoming_stack_arg_skips_the_callers_shadow() {
+    teko::assert::is_true(fx_in_arg_hex(SYSV64) == "488b442408c3")
+    teko::assert::is_true(fx_in_arg_hex(WIN64) == "488b442428c3")
+}
+
+#test
+/**
+ * ex_frame_layout_carries_the_callers_shadow_unconditionally — `caller_shadow`
+ * comes off the DESCRIPTOR, not off `shadow_bytes_x86`: a Win64 LEAF (which
+ * reserves no shadow of its own, so its `out_arg_base` is 0) still has 32 bytes of
+ * the CALLER's shadow below its incoming arguments.
+ *
+ * @return void
+ */
+fn ex_frame_layout_carries_the_callers_shadow_unconditionally() {
+    let leaf = fx_1block_func("main", fx_i1(ret_x86()), fx_no_frame())
+    teko::assert::is_true(compute_frame_layout_x86(WIN64, leaf).out_arg_base == (0 to u32))
+    teko::assert::is_true(compute_frame_layout_x86(WIN64, leaf).caller_shadow == (32 to u32))
+    teko::assert::is_true(compute_frame_layout_x86(SYSV64, leaf).caller_shadow == (0 to u32))
+}

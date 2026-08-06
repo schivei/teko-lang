@@ -1,0 +1,388 @@
+use teko::encoding::json
+use teko::parser
+use teko::lexer
+
+/**
+ * num_field — the JSON NUMBER value of `key` in `v` when `v` is an object holding a number there,
+ * else `null`. The one accessor `position_of` uses to read `line`/`character` off a request's
+ * `position` object.
+ *
+ * @param v    the JSON value (expected to be an object)
+ * @param key  the field name
+ * @return     the field's number, or `null` when absent / not a number / `v` not an object
+ * @since 0.3.1.0 (LSP crumb F)
+ */
+fn num_field(v: json::JsonValue, key: str) -> f64 | null {
+    let fv = match object_field(v, key) { json::JsonValue as x => x; null => return null }
+    match fv {
+        json::JsonNumber as n => n.value
+        _ => null
+    }
+}
+
+/**
+ * position_of — the 0-based cursor `Pos` (`line`/`character`) of a hover/definition request's
+ * `params.position`, or `null` when either field is missing or not a number.
+ *
+ * @param req  the hover/definition request DOM
+ * @return     the cursor position, or `null`
+ * @since 0.3.1.0 (LSP crumb F)
+ */
+fn position_of(req: json::JsonValue) -> Pos | null {
+    let params = match object_field(req, "params") { json::JsonValue as v => v; null => return null }
+    let pos = match object_field(params, "position") { json::JsonValue as v => v; null => return null }
+    let line = match num_field(pos, "line") { f64 as v => v; null => return null }
+    let character = match num_field(pos, "character") { f64 as v => v; null => return null }
+    Pos { line = line to u32; col = character to u32 }
+}
+
+/**
+ * word_at_position — the text of the `Ident` token under the 0-based cursor (`line0`, `char0`) of
+ * `text`, or `null` when no identifier token covers that position (a keyword, an operator, a
+ * literal, or empty space). Re-tokenizing the buffer is the design's own answer to references
+ * carrying no AST span (`docs/design/lsp-teko.md` §3.2 / §5.4 point 2): `Token` carries `line`/`col`
+ * (1-based), so the cursor's 1-based twin is matched against each identifier's `[start, start+len)`
+ * span.
+ *
+ * @param text   the document buffer
+ * @param line0  the 0-based cursor line
+ * @param char0  the 0-based cursor character
+ * @return       the identifier text under the cursor, or `null`
+ * @since 0.3.1.0 (LSP crumb F)
+ */
+fn word_at_position(text: str, line0: u32, char0: u32) -> str | null {
+    let tokens = match lexer::tokenize(text) { []lexer::Token as t => t; error => return null }
+    let line1 = line0 + 1
+    let col1 = char0 + 1
+    mut i: u64 = 0
+    loop {
+        if i >= tokens.len { break }
+        let t = tokens[i]
+        if t.kind == lexer::TokenKind::Ident && t.line == line1 {
+            let start = t.col
+            let end = t.col + (t.text.len to u32)
+            if col1 >= start && col1 < end { return t.text }
+        }
+        i = i + 1
+    }
+    null
+}
+
+/**
+ * symbol_named — the first entry of `syms` whose name is `name`, or `null` when none matches. The
+ * text→declaration resolution step of hover/definition, over the SAME index `build_symbol_index`
+ * produces (`docs/design/lsp-teko.md` §3.2 — v1 does no scope resolution; a name shared by two
+ * declarations returns the first).
+ *
+ * @param syms  the symbol index to search
+ * @param name  the identifier text to resolve
+ * @return      the first matching symbol, or `null`
+ * @since 0.3.1.0 (LSP crumb F)
+ */
+fn symbol_named(syms: []Symbol, name: str) -> Symbol | null {
+    mut i: u64 = 0
+    loop {
+        if i >= syms.len { break }
+        if syms[i].name == name { return syms[i] }
+        i = i + 1
+    }
+    null
+}
+
+/**
+ * resolve_symbol_at — the `Symbol` under the 0-based cursor (`line0`, `char0`) of the document
+ * `text` at `path`: the word under the cursor (`word_at_position`), resolved against the SINGLE
+ * document's own symbol index (`document_program` + `build_symbol_index` — the same per-document
+ * scope `diagnose_document` checks in, crumb A's own note; whole-project resolution is future work).
+ * `null` when the cursor sits on no identifier, the buffer does not parse, or the word names no
+ * declaration in this document.
+ *
+ * @param path   the document path (selects the grammar; stamps the resolved symbol's `file`)
+ * @param text   the document buffer
+ * @param line0  the 0-based cursor line
+ * @param char0  the 0-based cursor character
+ * @return       the symbol under the cursor, or `null`
+ * @since 0.3.1.0 (LSP crumb F)
+ */
+fn resolve_symbol_at(path: str, text: str, line0: u32, char0: u32) -> Symbol | null {
+    let word = match word_at_position(text, line0, char0) { str as w => w; null => return null }
+    let prog = match document_program(path, text) { parser::Program as p => p; error => return null }
+    symbol_named(build_symbol_index(prog), word)
+}
+
+/**
+ * hover_contents — the `MarkupContent` (`{ kind: "markdown", value }`) for `sym`'s hover: a fenced
+ * `teko` code block holding the rendered signature, then the raw doc-comment span beneath it when
+ * present (verbatim — v1 does no comment-marker stripping; the client renders the block-comment
+ * markers as-is).
+ *
+ * @param sym  the resolved symbol
+ * @return     the JSON `MarkupContent`
+ * @since 0.3.1.0 (LSP crumb F)
+ */
+fn hover_contents(sym: Symbol) -> json::JsonValue {
+    let code = teko::str::concat("```teko\n", sym.signature, "\n```")
+    let value = if sym.doc.len > 0 { teko::str::concat(code, "\n\n", sym.doc) } else { code }
+    jobj(["kind", "value"], [jstr("markdown"), jstr(value)])
+}
+
+/**
+ * path_to_uri — the `file://` URI naming `path`, the inverse of `uri_to_path`.
+ *
+ * @param path  the filesystem path
+ * @return      the `file://`-prefixed URI
+ * @since 0.3.1.0 (LSP crumb F)
+ */
+fn path_to_uri(path: str) -> str {
+    teko::str::concat("file://", path)
+}
+
+/**
+ * symbol_range — the 0-based LSP `Range` covering `sym`'s NAME (its recorded `line`/`col` through
+ * `col + name.len`), clamped to 0 when the recorded position is unset (`line`/`col` of 0 — never
+ * expected from a real declaration, but never underflowed either).
+ *
+ * @param sym  the resolved symbol
+ * @return     the JSON `Range`
+ * @since 0.3.1.0 (LSP crumb F)
+ */
+fn symbol_range(sym: Symbol) -> json::JsonValue {
+    let line0 = if sym.line > 0 { sym.line - 1 } else { 0 }
+    let col0 = if sym.col > 0 { sym.col - 1 } else { 0 }
+    let end_col = col0 + (sym.name.len to u32)
+    jobj(["start", "end"], [encode_position(line0, col0), encode_position(line0, end_col)])
+}
+
+/**
+ * definition_location — the LSP `Location` (`{ uri, range }`) naming `sym`'s definition site: the
+ * `file://` URI of its declaring file and the range over its name.
+ *
+ * @param sym  the resolved symbol
+ * @return     the JSON `Location`
+ * @since 0.3.1.0 (LSP crumb F)
+ */
+fn definition_location(sym: Symbol) -> json::JsonValue {
+    jobj(["uri", "range"], [jstr(path_to_uri(sym.file)), symbol_range(sym)])
+}
+
+/**
+ * navigation_symbol — the resolved `Symbol` a hover/definition request names, or `null` when the
+ * document is not open, the request carries no valid position, or the cursor names no symbol. The
+ * shared first step `hover_response`/`definition_response` both take.
+ *
+ * @param store  the current open-document store
+ * @param req    the hover/definition request DOM
+ * @return       the resolved symbol, or `null`
+ * @since 0.3.1.0 (LSP crumb F)
+ */
+fn navigation_symbol(store: DocStore, req: json::JsonValue) -> Symbol | null {
+    let uri = match format_uri(req) { str as u => u; null => return null }
+    let text = match store_get(store, uri) { str as t => t; null => return null }
+    let pos = match position_of(req) { Pos as p => p; null => return null }
+    resolve_symbol_at(uri_to_path(uri), text, pos.line, pos.col)
+}
+
+/**
+ * hover_response — answer `textDocument/hover`: resolve the symbol under the cursor and reply with
+ * its rendered `Hover` (`{ contents }`). A cursor on no known symbol, an unopened document, or a
+ * malformed request all answer a `null` result — the protocol's "nothing to show", never an error.
+ *
+ * @param store  the current store (read for the document text)
+ * @param req    the hover request DOM
+ * @return       the store (unchanged) and the `Hover`-or-null response
+ * @since 0.3.1.0 (LSP crumb F)
+ */
+fn hover_response(store: DocStore, req: json::JsonValue) -> Dispatch {
+    let id = request_id(req)
+    match navigation_symbol(store, req) {
+        Symbol as sym => dispatch_of(store, one_message(response(id, jobj(["contents"], [hover_contents(sym)]))))
+        null => dispatch_of(store, one_message(response(id, jnull())))
+    }
+}
+
+/**
+ * definition_response — answer `textDocument/definition`: resolve the symbol under the cursor and
+ * reply with the `Location` of its definition. A cursor on no known symbol, an unopened document, or
+ * a malformed request all answer a `null` result.
+ *
+ * @param store  the current store (read for the document text)
+ * @param req    the definition request DOM
+ * @return       the store (unchanged) and the `Location`-or-null response
+ * @since 0.3.1.0 (LSP crumb F)
+ */
+fn definition_response(store: DocStore, req: json::JsonValue) -> Dispatch {
+    let id = request_id(req)
+    match navigation_symbol(store, req) {
+        Symbol as sym => dispatch_of(store, one_message(response(id, definition_location(sym))))
+        null => dispatch_of(store, one_message(response(id, jnull())))
+    }
+}
+
+/**
+ * completion_kind_code — the LSP `CompletionItemKind` numeric code for a `Symbol`'s `SymKind`:
+ * `Function`→3 (Function), `Method`→2 (Method), `Type`→7 (Class — the closest generic code; Teko's
+ * own struct/class/enum/flags/interface bodies do not each get a distinct LSP kind in v1), `Const`→21
+ * (Constant), `Field`→5 (Field).
+ *
+ * @param kind  the symbol's kind
+ * @return      the protocol's `CompletionItemKind` code, as an `f64` (the one JSON numeric grammar)
+ * @since 0.3.1.0 (LSP crumb G)
+ */
+fn completion_kind_code(kind: SymKind) -> f64 {
+    match kind {
+        SymKind::Function => 3.0
+        SymKind::Method => 2.0
+        SymKind::Type => 7.0
+        SymKind::Const => 21.0
+        SymKind::Field => 5.0
+    }
+}
+
+/**
+ * symbol_completion_item — the LSP `CompletionItem` for one indexed `Symbol`: its `label` (the
+ * name), `kind` (`completion_kind_code`), and `detail` (the rendered signature — the same text
+ * `hover_contents` shows in its fenced code block). `documentation` is added only when the symbol
+ * carries a doc-comment, so a plain (undocumented) symbol's item stays terse.
+ *
+ * @param sym  the indexed symbol
+ * @return     the JSON `CompletionItem`
+ * @since 0.3.1.0 (LSP crumb G)
+ */
+fn symbol_completion_item(sym: Symbol) -> json::JsonValue {
+    mut keys: []str = ["label", "kind", "detail"]
+    mut values: []json::JsonValue = [jstr(sym.name), jnum(completion_kind_code(sym.kind)), jstr(sym.signature)]
+    if sym.doc.len > 0 {
+        keys = teko::list::push(keys, "documentation")
+        values = teko::list::push(values, jstr(sym.doc))
+    }
+    jobj(keys, values)
+}
+
+/**
+ * symbol_completion_items — one `CompletionItem` per entry of `syms`, in index order. The v1
+ * candidate half of completion named by `docs/design/lsp-teko.md` §3.3: every declaration of the
+ * SAME per-document index hover/go-to-def resolve against (crumb E/F), never scope-filtered — v1 is
+ * intentionally "crude but useful" (the design's own words), leaving prefix narrowing to the client.
+ *
+ * @param syms  the symbol index to render
+ * @return      one completion item per symbol
+ * @since 0.3.1.0 (LSP crumb G)
+ */
+fn symbol_completion_items(syms: []Symbol) -> []json::JsonValue {
+    mut out: []json::JsonValue = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= syms.len { break }
+        out = teko::list::push(out, symbol_completion_item(syms[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * RESERVED_KEYWORDS — every reserved keyword the lexer's `keyword_kind` table recognizes
+ * (`src/lexer/lexer.tks:333-364`), mirrored here as completion candidates, in the same order that
+ * table checks them. Deliberately EXCLUDES the CONTEXTUAL keywords `keyword_kind`'s own doc-comment
+ * names (`from`, `params`, `self`, `base`, `unsafe`) — they stay legal plain identifiers outside
+ * their triggering position, so offering them as reserved words would mislead the editor.
+ *
+ * @since 0.3.1.0 (LSP crumb G)
+ */
+const RESERVED_KEYWORDS: []str = [
+    "fn", "type", "struct", "enum", "flags", "variant", "let", "mut", "const",
+    "if", "else", "loop", "break", "continue", "return", "defer", "match", "when",
+    "in", "as", "to", "use", "pub", "exp", "extern", "true", "false", "null",
+    "class", "abstract", "virtual", "override", "intern", "interface"
+]
+
+/**
+ * keyword_completion_item — the LSP `CompletionItem` for one reserved keyword: its `label` and a
+ * `kind` of `Keyword` (14).
+ *
+ * @param word  the keyword spelling
+ * @return      the JSON `CompletionItem`
+ * @since 0.3.1.0 (LSP crumb G)
+ */
+fn keyword_completion_item(word: str) -> json::JsonValue {
+    jobj(["label", "kind"], [jstr(word), jnum(14.0)])
+}
+
+/**
+ * keyword_completion_items — one `CompletionItem` per `RESERVED_KEYWORDS` entry, in table order.
+ * Always non-empty and independent of any open document, so it is the candidate list's stable base
+ * even when there is no buffer (or no parseable buffer) to index.
+ *
+ * @return  every reserved keyword's completion item
+ * @since 0.3.1.0 (LSP crumb G)
+ */
+fn keyword_completion_items() -> []json::JsonValue {
+    mut out: []json::JsonValue = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= RESERVED_KEYWORDS.len { break }
+        out = teko::list::push(out, keyword_completion_item(RESERVED_KEYWORDS[i]))
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * append_all — `base` with every entry of `extra` appended, in order. The one list-concatenation
+ * helper completion needs to lay the symbol items after the keyword items (`teko::list` exposes no
+ * `concat` of its own).
+ *
+ * @param base   the list to extend
+ * @param extra  the entries to append, in order
+ * @return       `base` followed by `extra`
+ * @since 0.3.1.0 (LSP crumb G)
+ */
+fn append_all(base: []json::JsonValue, extra: []json::JsonValue) -> []json::JsonValue {
+    mut out = base
+    mut i: u64 = 0
+    loop {
+        if i >= extra.len { break }
+        out = teko::list::push(out, extra[i])
+        i = i + 1
+    }
+    out
+}
+
+/**
+ * document_completion_items — the full candidate list for `textDocument/completion` at `req`'s
+ * document: the reserved keywords FOLLOWED BY every symbol of the document's OWN symbol index (the
+ * same single-document scope `navigation_symbol` resolves hover/go-to-def against — crumb E's index,
+ * crumb F's own note). A malformed request (no resolvable `textDocument.uri`) yields the EMPTY list;
+ * an unopened-but-named document, or one whose buffer does not currently parse, still yields the
+ * keyword list alone — keywords are always valid candidates, parse state notwithstanding.
+ *
+ * @param store  the current open-document store
+ * @param req    the completion request DOM
+ * @return       the candidate items (keywords, plus symbols when a parseable buffer is open)
+ * @since 0.3.1.0 (LSP crumb G)
+ */
+fn document_completion_items(store: DocStore, req: json::JsonValue) -> []json::JsonValue {
+    let uri = match format_uri(req) { str as u => u; null => return teko::list::empty() }
+    let keywords = keyword_completion_items()
+    let text = match store_get(store, uri) { str as t => t; null => return keywords }
+    match document_program(uri_to_path(uri), text) {
+        parser::Program as prog => append_all(keywords, symbol_completion_items(build_symbol_index(prog)))
+        error => keywords
+    }
+}
+
+/**
+ * completion_response — answer `textDocument/completion`: build the candidate list
+ * (`document_completion_items`) and reply with it as a bare `CompletionItem[]`. Unlike hover/
+ * definition, completion never answers `null` for "nothing resolved" — an unopened or malformed
+ * request simply yields the keyword-only (or empty) list `document_completion_items` already names,
+ * so the client's completion popup degrades gracefully rather than closing outright.
+ *
+ * @param store  the current store (read for the document text)
+ * @param req    the completion request DOM
+ * @return       the store (unchanged) and the `CompletionItem[]` response
+ * @since 0.3.1.0 (LSP crumb G)
+ */
+fn completion_response(store: DocStore, req: json::JsonValue) -> Dispatch {
+    let id = request_id(req)
+    dispatch_of(store, one_message(response(id, jarr(document_completion_items(store, req)))))
+}

@@ -1,0 +1,1293 @@
+// src/checker/monomorph.tks  (namespace 'teko::checker')
+//
+// (S4b crumb 2c) THE MONOMORPHIZATION PASS — the final piece that makes a generic
+// function actually compile + run. The parser, type-param resolution and call-site
+// inference are already done (the typer infers T and substitutes it into the call's
+// RESULT type). But a generic `fn id<T>(x: T) -> T { return x }` still reaches codegen
+// as the un-stamped `tk_t_T id(tk_t_T x)`, which `cc` rejects. This pass:
+//   1. STAMPS a concrete copy of each generic fn per distinct instantiation, and
+//   2. REWRITES every generic call to the stamped instance's mangled name.
+// It runs LAST in the typer (over the fully-typed TProgram), so codegen and the
+// test runner both receive a tree that contains ONLY concrete, monomorphic functions.
+//
+// NO-OP GUARD (safety): a program with no generic function passes through BYTE-IDENTICAL
+// — the non-generic corpus must not perturb. The total rewrite walk only runs when at
+// least one TFunction carries type_params.
+//
+// (C twin: monomorph.c / monomorph.h — tk_monomorphize.)
+
+use teko::parser
+
+// A discovered instantiation: the generic fn's bare name, the mangled instance name, and
+// the Subst (type-param → concrete) that stamps it. The Subst's `names`/`types` are the
+// inferred bindings; `params` is the generic's type-param universe.
+type MonoInst = struct { fn_name: str; mangled: str; s: Subst }
+
+/**
+ * (W11/S6) CONSTRAINT CHECKING — does `concrete` satisfy the single atom `atom_name`? Runs HERE,
+ * at monomorphization (never at definition): an unconstrained `T` stays opaque at the generic's
+ * own definition; a constraint gates the CONCRETE type bound to `T` once a real instantiation
+ * exists. Membership is NOMINAL. A `variant` atom is satisfied when `concrete` equals (by `type_eq`
+ * — no structural check) one of the variant's declared MEMBER types. An INTERFACE or (TR1) TRAIT
+ * atom is satisfied when `concrete` nominally conforms (its own name, or `type_conforms_to` through
+ * the class base chain + contract `extends` closure — the same gate as the D3 upcast); classes AND
+ * structs conform here (a struct cannot become a contract VALUE, but it may instantiate a
+ * constrained generic). (TR3) A compiler-known STRUCTURAL trait atom (incl. the `Hashable`/
+ * `Comparable` synonyms, collapsed by `structural_trait_canonical`) is satisfied when `concrete`
+ * DERIVES the canonical structural trait — its folded `implements` list carries the canonical name
+ * (fold_traits keeps derives in `implements`), so `type_conforms_to` sees it; this is what lets
+ * `<K: Hashable & Eq>` bind. Any other TypeDecl kind (struct/enum/flags/alias/extern) is an exact
+ * nominal name. An atom naming no TypeDecl at all is unsatisfiable (never silently ignored — M.1).
+ *
+ * @param atom_name the constraint atom's name
+ * @param concrete  the concrete type bound to the type parameter at this instantiation
+ * @param table     the folded type table
+ * @return true iff `concrete` satisfies the atom
+ */
+fn constraint_atom_satisfied(atom_name: str, concrete: Type, table: TypeTable) -> bool {
+    if is_structural_trait(atom_name) {
+        let canon = structural_trait_canonical(atom_name)
+        return match concrete { Named as n => type_conforms_to(n.name, canon, table); _ => false }
+    }
+    match type_table_find(table, atom_name, "") {   // (#109 W1) constraint-atom probe on a resolved name — no referencing ns
+        parser::TypeDecl as td => {
+            match td.body {
+                parser::VariantBody as vb => {
+                    match resolve_type(vb.type_expr, table, "") {   // (#109 W1) variant-body expansion for constraint check — no referencing ns
+                        Type as t => match t {
+                            Variant as v => {
+                                mut i = 0
+                                loop {
+                                    if i >= v.members.len { break }
+                                    if type_eq(concrete, v.members[i]) { return true }
+                                    i++
+                                }
+                                false
+                            }
+                            _ => type_eq(concrete, t)   // a variant of one member widened to a bare type
+                        }
+                        error => false
+                    }
+                }
+                parser::InterfaceBody => match concrete { Named as n => n.name == atom_name || type_conforms_to(n.name, atom_name, table); _ => false }
+                parser::TraitBody => match concrete { Named as n => n.name == atom_name || type_conforms_to(n.name, atom_name, table); _ => false }
+                _ => match concrete { Named as n => n.name == atom_name; _ => false }   // exact nominal-name match
+            }
+        }
+        error => false   // the atom names no TypeDecl at all — unsatisfiable, never silently ignored
+    }
+}
+// The full boolean tree over atoms: `&` = both must hold, `|` = either must hold (matches the
+// parser's precedence — this just walks the already-built AND/OR tree, no precedence here).
+// The MULTI-field cases (ConstraintAnd/ConstraintOr) are matched BEFORE the single-/zero-field
+// cases (ConstraintAtom/NoConstraint) for correctness.
+fn constraint_satisfied(c: parser::ConstraintExpr, concrete: Type, table: TypeTable) -> bool {
+    match c {
+        parser::ConstraintAnd as a => constraint_satisfied(a.left, concrete, table) && constraint_satisfied(a.right, concrete, table)
+        parser::ConstraintOr as o => constraint_satisfied(o.left, concrete, table) || constraint_satisfied(o.right, concrete, table)
+        parser::ConstraintAtom as a => constraint_atom_satisfied(a.name, concrete, table)
+        parser::NoConstraint => true
+    }
+}
+/**
+ * Gate a whole instantiation: `type_params` and `type_constraints` are PARALLEL; `s` is the Subst
+ * that bound each param to a concrete type for THIS instantiation. (TR1) A trait as a constraint
+ * atom is a normal atom now — it flows into `constraint_satisfied` and is checked nominally, no
+ * honest stop.
+ *
+ * @param type_params      the generic's type-parameter names
+ * @param type_constraints the parallel constraint expression per type parameter
+ * @param s                the Subst binding each param to its concrete type
+ * @param table            the folded type table
+ * @return null when every constraint is satisfied
+ * @throws when a param is unbound, or a bound concrete type does not satisfy its constraint
+ */
+fn check_constraints(type_params: []str, type_constraints: []parser::ConstraintExpr, s: Subst, table: TypeTable) -> error | null {
+    mut i = 0
+    loop {
+        if i >= type_params.len { break }
+        match type_constraints[i] {
+            parser::NoConstraint => { }
+            _ => {
+                let bound = match subst_find_inst(s, type_params[i]) {
+                    Type as t => t
+                    null => return error { message = teko::string::concat("internal: monomorphization did not bind type parameter '", type_params[i], "'") }
+                }
+                if !constraint_satisfied(type_constraints[i], bound, table) {
+                    return error { message = teko::string::concat("type parameter '", type_params[i], "' does not satisfy its constraint at this instantiation") }
+                }
+            }
+        }
+        i++
+    }
+    null
+}
+
+// rewrite-walk carriers: a rewritten node PLUS the instantiations it discovered. Teko has
+// no out-params, so the walk RETURNS both (the C twin threads an out-list pointer).
+type WExpr = struct { expr: TExpr; insts: []MonoInst }
+type WStmt = struct { stmt: TStatement; insts: []MonoInst }
+type WBlock = struct { stmts: []TStatement; insts: []MonoInst }
+type WArm = struct { arm: TArm; insts: []MonoInst }
+/** A stamped free TFunction plus the instantiations its body discovered (#254 layer 3 — the
+    method-stamp twin of WBlock, so a stamped instance method feeds the PHASE-2 fixpoint queue). */
+type WFn = struct { func: TFunction; insts: []MonoInst }
+/** A batch of stamped instance-method TFunctions plus every instantiation their bodies discovered —
+    the whole-program method-stamp result (#254 layer 3). */
+type WFnList = struct { fns: []TFunction; insts: []MonoInst }
+
+/**
+ * mono_type_mangle — a type's symbol fragment for the mangled instance name. Prim → its surface
+ * spelling (i64/u8/f64/…), Str → "str", Byte → "byte", Named → the name, Slice → "slice_"+elem.
+ * Other shapes (Variant/Func/Error/Void/Ptr/Uptr) get a stable fragment so a name is always
+ * produced (they cannot be a phase-1 type-arg, but we never crash). (C: mono_type_mangle.)
+ *
+ * @param t  the concrete type to mangle
+ * @return   its symbol-safe name fragment
+ */
+fn mono_type_mangle(t: Type) -> str {
+    match t {
+        Prim as p => prim_name(p.kind)
+        Str => "str"
+        Byte => "byte"
+        Char => "char"
+        Named as n => name_last_segment(n.name)   // (#109 W3) BARE — the generic-FN instance symbol `fn__g__<arg>` stays a valid C identifier; stamp + call site both use this, so they agree
+        Slice as sl => { let e = mono_type_mangle(sl.element); teko::str::concat("slice_", e) }
+        Error => "error"
+        Void => "void"
+        Ptr as p => match p.inner { null => "ptr"; Type as t => teko::str::concat("ptr_", mono_type_mangle(t)) }
+        Uptr => "uptr"
+        Reference as r => teko::str::concat("ref_", mono_type_mangle(r.inner))   // (MEM-1b)
+        Variant => "variant"
+        Func => "func"
+        Null => "null"
+    }
+}
+
+// the mangled instance name: `<bare>__g__<arg0>[__<arg1>...]` over the generic's type-params
+// IN ORDER, each substituted to its concrete type. The `__g__` infix marks a stamped symbol
+// (a source identifier cannot contain it — `g` is fine, but `__g__` between two type names is
+// the synthetic marker). (C: mono_mangle_name.)
+fn mono_mangle_name(bare: str, type_params: []str, s: Subst) -> str {
+    mut out = teko::str::concat(bare, "__g__")
+    mut i = 0
+    loop {
+        if i >= type_params.len { break }
+        if i > 0 { out = teko::str::concat(out, "__") }
+        let ct = subst_type(Named { name = type_params[i] }, s)
+        out = teko::str::concat(out, mono_type_mangle(ct))
+        i++
+    }
+    out
+}
+
+// has this instance (by mangled name) already been stamped / queued? (C: mono_seen.)
+fn mono_seen(insts: []MonoInst, mangled: str) -> bool {
+    mut i = 0
+    loop {
+        if i >= insts.len { break }
+        if teko::runtime::str_eq(insts[i].mangled, mangled) { return true }
+        i++
+    }
+    false
+}
+
+// concat two MonoInst lists. (C: mono_inst_concat.)
+fn mono_inst_concat(a: []MonoInst, b: []MonoInst) -> []MonoInst {
+    mut out = a
+    mut i = 0
+    loop {
+        if i >= b.len { break }
+        out = teko::list::push(out, b[i])
+        i++
+    }
+    out
+}
+
+/**
+ * type_to_texpr — semantic `Type` → syntactic `TypeExpr`. A stamped fn's params are SYNTACTIC
+ * (`parser::Param.type_ann`, resolved by codegen at emit), so substituting the param `T` means
+ * rewriting the syntactic annotation to the concrete type's `TypeExpr`. Prim → `NamedType{[prim_name]}`,
+ * Named → `NamedType{[name]}`, Str → `NamedType`, Byte → `NamedType`, Slice → `SliceType`. A
+ * Variant is not expressible as a single `TypeExpr` (a generic param can only bind to such via a
+ * future S6) — it falls back to a Named placeholder so a `TypeExpr` is always produced.
+ * (C: type_to_texpr.)
+ *
+ * @param t  the resolved semantic type
+ * @return   the syntactic type-expr codegen re-checks against `t`
+ */
+pub fn type_to_texpr(t: Type) -> parser::TypeExpr {   // (W10) pub: codegen synthesizes lifted-lambda fn params from resolved Types
+    match t {
+        Prim as p => mono_named_texpr(prim_name(p.kind))
+        Str => mono_named_texpr("str")
+        Byte => mono_named_texpr("byte")
+        Char => mono_named_texpr("char")
+        Error => mono_named_texpr("error")
+        Named as n => mono_named_texpr(n.name)
+        Slice as sl => parser::SliceType { element = type_to_texpr(sl.element) }
+        Ptr as p => match p.inner {
+            null => mono_named_texpr("ptr")
+            Type as t => parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = "ptr" }) }; args = teko::list::push(teko::list::empty(), type_to_texpr(t)) }
+        }
+        Uptr => mono_named_texpr("uptr")
+        Reference as r => parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = "Ref" }) }; args = teko::list::push(teko::list::empty(), type_to_texpr(r.inner)) }   // (MEM-1b)
+        Null => mono_named_texpr("null")
+        Void => mono_named_texpr("void")
+        Variant => mono_named_texpr("variant")
+        Func as f => {   // (W10a) reconstruct a FunctionType `(A, B) -> R` (not a placeholder name)
+            mut ps: []parser::TypeExpr = teko::list::empty()
+            mut i = 0
+            loop { if i >= f.params.len { break }; ps = teko::list::push(ps, type_to_texpr(f.params[i])); i++ }
+            parser::FunctionType { params = ps; ret = type_to_texpr(f.ret) }
+        }
+    }
+}
+fn mono_named_texpr(name: str) -> parser::TypeExpr {
+    let seg = parser::Segment { name = name }
+    parser::NamedType { path = parser::Path { segments = teko::list::push(teko::list::empty(), seg) }; args = teko::list::empty() }
+}
+
+// substitute the type-params in a SYNTACTIC TypeExpr through a Subst: a NamedType whose last
+// segment is a bound type-param → that type's TypeExpr; otherwise recurse structurally. This
+// rewrites a stamped fn's param annotations (the `T` → the concrete spelling). (C: subst_typeexpr.)
+fn subst_typeexpr(te: parser::TypeExpr, s: Subst) -> parser::TypeExpr {
+    match te {
+        parser::NamedType as nt => {
+            if nt.path.segments.len == 1 {
+                let nm = nt.path.segments[0].name
+                if is_type_param(nm, s.params) {
+                    match subst_find_inst(s, nm) {
+                        Type as ct => return type_to_texpr(ct)
+                        null => { }
+                    }
+                }
+            }
+            parser::NamedType { path = nt.path; args = subst_typeexpr_args(nt.args, s) }
+        }
+        parser::SliceType as st => parser::SliceType { element = subst_typeexpr(st.element, s) }
+        parser::UnionType as ut => {
+            mut ms: []parser::TypeExpr = teko::list::empty()
+            mut i = 0
+            loop { if i >= ut.members.len { break }; ms = teko::list::push(ms, subst_typeexpr(ut.members[i], s)); i++ }
+            parser::UnionType { members = ms }
+        }
+        parser::FunctionType as fnt => {   // (W10a) substitute through params + return
+            mut nps: []parser::TypeExpr = teko::list::empty()
+            mut i = 0
+            loop { if i >= fnt.params.len { break }; nps = teko::list::push(nps, subst_typeexpr(fnt.params[i], s)); i++ }
+            parser::FunctionType { params = nps; ret = subst_typeexpr(fnt.ret, s) }
+        }
+    }
+}
+
+/**
+ * Substitute the type-params through a NamedType's generic argument list, so a stamped fn's
+ * `Ref<T>` / `Box<T>` / `List<T>` param annotation lowers its `T` to the concrete spelling
+ * (before this, `subst_typeexpr` rewrote only a BARE type-param, leaving a `Ref<T>` arg as the
+ * literal `T` — codegen then emitted the dangling `tk_t_T` / `tk_slice_T`). Empty for a plain
+ * name, so a non-generic NamedType round-trips unchanged (additive over the pre-borrow corpus).
+ *
+ * @param args  the NamedType's generic type-arguments, in declaration order
+ * @param s     the active `{type-param → concrete}` substitution
+ * @return      the arguments each recursively substituted through `s`
+ */
+fn subst_typeexpr_args(args: []parser::TypeExpr, s: Subst) -> []parser::TypeExpr {
+    mut out: []parser::TypeExpr = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= args.len { break }
+        out = teko::list::push(out, subst_typeexpr(args[i], s))
+        i++
+    }
+    out
+}
+
+// find a type-param's bound concrete type in a Subst (the Subst's parallel names/types arrays).
+// (resolve.tks keeps subst_find private; monomorph needs its own copy. C: subst_find_inst.)
+fn subst_find_inst(s: Subst, name: str) -> Type | null {
+    mut i = 0
+    loop {
+        if i >= s.names.len { break }
+        if teko::runtime::str_eq(s.names[i], name) { return s.types[i] }
+        i++
+    }
+    null
+}
+
+// ── the lookup of a generic TFunction by bare name ──────────────────────────────────────
+// scan the program items for a generic TFunction (type_params.len > 0) whose name matches.
+// (C: find_generic_fn.)
+fn find_generic_fn(items: []TItem, name: str) -> TFunction | null {
+    mut i = 0
+    loop {
+        if i >= items.len { break }
+        match items[i] {
+            TFunction as f => {
+                if f.type_params.len > 0 {
+                    if teko::runtime::str_eq(f.name, name) { return f }
+                }
+            }
+            _ => { }
+        }
+        i++
+    }
+    null
+}
+
+/**
+ * The vtable slot of `method` within interface `iface` — the method's index in the interface's
+ * effective (extends-transitive) method list, exactly the order codegen emits the vtable in. A
+ * lookup error (an unknown interface) collapses to null: the callers only ever pass an interface
+ * name that already resolved to a conforming InterfaceBody, so "no slot" is the sole meaningful
+ * outcome and both no-match and the impossible-error case leave the dispatch untouched (M.1: the
+ * original honest stop still fires downstream if the constraint was genuinely unsatisfiable).
+ *
+ * @param iface   the RESOLVED interface name whose effective-method list is searched
+ * @param method  the dispatched method's bare name
+ * @param table   the checker type table (interface bodies + extends closure)
+ * @return        the slot index, or null when the interface does not declare `method`
+ */
+fn iface_method_slot(iface: str, method: str, table: TypeTable) -> u32 | null {
+    let no_methods: []parser::Function = teko::list::empty()
+    let eff = match iface_methods_by_name(iface, table) { []parser::Function as f => f; error => no_methods }
+    mut i: u64 = 0
+    loop {
+        if i >= eff.len { break }
+        if teko::runtime::str_eq(eff[i].name, method) { return i to u32 }
+        i++
+    }
+    null
+}
+
+/**
+ * The interface that `class_name` ACTUALLY implements for a dispatched `method`, among all
+ * interfaces owning that method — the correct (S6) Or-constraint vtable key at a concrete
+ * instantiation. Under `<T: A | B>` where both A and B own `method`, the static dispatch key is
+ * A (the first constraint atom, method_owner_interface); a concrete arg conforming to ONLY B
+ * needs its call re-keyed to B to avoid emitting an upcast to a never-generated vtable symbol.
+ * Scans the type table for an interface that BOTH owns `method` AND that `class_name` NOMINALLY
+ * conforms to (type_conforms_to — the same gate as the D3 upcast).
+ *
+ * @param class_name  the concrete class the type-param bound to at this instantiation
+ * @param method      the dispatched method's bare name
+ * @param table       the checker type table
+ * @return            the bare name of the conformed owning interface, or null when none is found
+ *                    (a well-typed constraint always yields one; null leaves the call untouched)
+ */
+fn conformed_owner_iface(class_name: str, method: str, table: TypeTable) -> str | null {
+    mut i: u64 = 0
+    loop {
+        if i >= table.len { break }
+        let reg = table[i]
+        let is_iface = match reg.decl.body { parser::InterfaceBody => true; _ => false }
+        if is_iface && type_conforms_to(class_name, name_last_segment(reg.name), table) {
+            match iface_method_slot(name_last_segment(reg.name), method, table) {
+                u32 => return name_last_segment(reg.name)
+                null => { }
+            }
+        }
+        i++
+    }
+    null
+}
+
+/**
+ * Rewrite the interface segment (second-to-last) of a dispatch callee path to `iface`, keeping
+ * every other segment — the sibling of rewrite_last_segment for the dispatch KEY rather than the
+ * name.
+ *
+ * @param p      the dispatch callee path (`[..., iface, method]`)
+ * @param iface  the interface name to substitute at the second-to-last position
+ * @return       the path with its interface segment replaced
+ */
+fn rewrite_iface_segment(p: parser::Path, iface: str) -> parser::Path {
+    mut segs: []parser::Segment = teko::list::empty()
+    mut i: u64 = 0
+    let key_idx = p.segments.len - 2
+    loop {
+        if i >= p.segments.len { break }
+        if i == key_idx { segs = teko::list::push(segs, parser::Segment { name = iface }) }
+        else { segs = teko::list::push(segs, p.segments[i]) }
+        i++
+    }
+    parser::Path { segments = segs }
+}
+
+/**
+ * Is `name` a STRUCT (value type, no vtable) in the folded type table? The checker twin of codegen's
+ * `cg_is_class_named` — resolves the (canonical or bare-stamped) receiver name through the same
+ * qualified-aware `type_table_find` used by conformance/field resolution, so a same-bare struct in a
+ * sibling namespace is never mistaken for this one (#294, #109-family: keyed off the canonical
+ * `Named.name`, not an order-dependent bare probe). A class/interface/trait/enum/alias returns false —
+ * only a struct receiver is rewritten away from the vtable dispatch path.
+ *
+ * @param table  the folded type table
+ * @param name   the (canonical) receiver type name
+ * @return       true iff `name` resolves to a `StructBody` decl
+ * @since onda-3 (#294)
+ */
+fn is_struct_named(table: TypeTable, name: str) -> bool {
+    match type_table_find(table, name, "") {
+        parser::TypeDecl as td => match td.body { parser::StructBody => true; _ => false }
+        error => false
+    }
+}
+
+/**
+ * Build the DIRECT struct-method-dispatch callee as the two-segment path `[struct_name, method]`,
+ * whose single qualifier segment carries the receiver's FULL CANONICAL struct name so codegen and the
+ * interpreter key off the exact owning namespace (`Struct::method`), never colliding with a same-bare struct in
+ * a sibling namespace (#294). Mirrors the checker's own `method_dispatch_callee` (typer.tks) — the same
+ * shape a plain instance dot-call already lowers to; the method's TFunction namespace IS this canonical
+ * name (typer.tks:3218 `method_ns`), so setting `call_ns = struct_name` matches its definition.
+ *
+ * @param struct_name  the receiver's canonical struct name (`ns::…::Struct`, or bare at the root ns)
+ * @param method       the dispatched method's bare name
+ * @return             the `[struct_name, method]` callee path
+ * @since onda-3 (#294)
+ */
+fn struct_dispatch_callee(struct_name: str, method: str) -> parser::Path {
+    mut segs: []parser::Segment = teko::list::push(teko::list::empty(), parser::Segment { name = struct_name })
+    segs = teko::list::push(segs, parser::Segment { name = method })
+    parser::Path { segments = segs }
+}
+
+/**
+ * Rewrite a constraint-dispatch call whose CONCRETE receiver is a value-type STRUCT into a DIRECT call
+ * to that struct's stamped concrete method — a constraint is a MONOMORPHIZATION GATE, not a dynamic-
+ * dispatch promotion (#294, ruling (a) / teko-oop-w10b-design). A `<T: Contract>` body with `T` bound
+ * to a concrete struct is fully known at instantiation, so `x.measure()` lowers to a direct
+ * `Struct::measure(x)` call rather than a fat-pointer upcast the struct has no representation for (a
+ * struct is a value with no `{data,vtable}`; the class-only `emit_iface_call` would cc-reject natively
+ * and panic on the interpreter). Dynamic dispatch (the fat pointer) stays CLASS-only, exactly as before: a
+ * class/interface/trait receiver leaves `is_iface_dispatch=true` and passes through unchanged, so the
+ * vtable path is not perturbed. The direct call resolves through `find_function_ns`/`cg_find_function`
+ * like any ordinary stamped method — no new interpreter or codegen dispatch. A no-op when the receiver is not a
+ * struct, so the existing corpus (which has no constraint-bound struct dispatch) is byte-identical.
+ *
+ * @param cl     the interface-dispatch TCall (is_iface_dispatch true; args already rewritten)
+ * @param args   the rewritten args (args[0] is the receiver, carrying the concrete resolved type)
+ * @param table  the folded type table (classifies the receiver as struct vs class vs interface)
+ * @return       a DIRECT TCall keyed on the stamped struct method when the receiver is a struct; else `cl`
+ * @since onda-3 (#294)
+ */
+fn rekey_struct_constraint_dispatch(cl: TCall, args: []TExpr, table: TypeTable) -> TCall {
+    if !cl.is_iface_dispatch || cl.callee.segments.len < 2 || args.len == 0 {
+        return cl
+    }
+    let recv = match args[0].type { Named as n => n.name; _ => return cl }
+    if !is_struct_named(table, recv) { return cl }
+    let method = cl.callee.segments[cl.callee.segments.len - 1].name
+    let direct = struct_dispatch_callee(recv, method)
+    TCall { callee = direct; args = cl.args; call_ns = recv; is_closure_call = false; callee_type = cl.callee_type; is_iface_dispatch = false; iface_slot = 0 }
+}
+
+/**
+ * Re-key an interface-dispatch TCall to the interface the CONCRETE receiver implements, when the
+ * currently-keyed interface is not one the receiver conforms to. This is the S6 Or-constraint fix,
+ * applied at monomorphization: once `T` is bound to a concrete class, the dispatch key baked at
+ * typing (the first constraint atom — method_owner_interface) may name an interface the class does
+ * not implement, so we must re-key to an interface the receiver actually conforms to. When the
+ * receiver already conforms to the keyed interface (the And-constraint path, and the first-branch
+ * Or case) the call passes through UNCHANGED, so no non-Or dispatch is perturbed; when no
+ * conforming owner is found the call is likewise left as-is.
+ * An interface-value receiver (which passes through the fat pointer with no upcast) conforms to no
+ * interface as a class/struct would (type_conforms_to's class/struct-body gate), so it never finds
+ * a conformed owner here and is left untouched by construction. A constraint-bound STRUCT receiver
+ * (a value type with no vtable) is rewritten to a DIRECT stamped-method call FIRST — before any
+ * re-key or the class-only vtable path could see it (#294, ruling (a)).
+ *
+ * @param cl     the interface-dispatch TCall (is_iface_dispatch true; args already rewritten)
+ * @param args   the receiver-plus-arguments list, rewritten to concrete types for this instance
+ * @param table  the checker type table (conformance + effective-method-slot lookups)
+ * @return       the re-keyed TCall, or `cl` unchanged when re-keying does not apply
+ */
+fn rekey_iface_dispatch(cl: TCall, args: []TExpr, table: TypeTable) -> TCall {
+    let struct_direct = rekey_struct_constraint_dispatch(cl, args, table)
+    if !struct_direct.is_iface_dispatch { return struct_direct }
+    if !cl.is_iface_dispatch || cl.callee.segments.len < 2 || args.len == 0 {
+        return cl
+    }
+    let recv_class = match args[0].type { Named as n => n.name; _ => return cl }
+    let cur_iface = cl.callee.segments[cl.callee.segments.len - 2].name
+    if type_conforms_to(recv_class, cur_iface, table) { return cl }
+    let method = cl.callee.segments[cl.callee.segments.len - 1].name
+    let owner = match conformed_owner_iface(recv_class, method, table) { str as o => o; null => return cl }
+    let slot = match iface_method_slot(owner, method, table) { u32 as sv => sv; null => return cl }
+    let newcallee = rewrite_iface_segment(cl.callee, owner)
+    TCall { callee = newcallee; args = cl.args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = slot }
+}
+
+// ── the total rewrite walk ───────────────────────────────────────────────────────────────
+// For EVERY TExpr: set `.type = subst_type(e.type, s)` and recurse into ALL children. At a
+// TCall whose last-path-segment names a generic TFunction in `items`, INFER the Subst from the
+// (already-rewritten, concrete) arg types, mangle the instance name, rewrite the callee's LAST
+// segment to the mangled name (keep call_ns), and record the MonoInst. A non-generic call keeps
+// its callee (with rewritten args). The walk is TOTAL over every TExprKind / TStatement case —
+// a non-total walk would silently drop body rewrites and break the whole corpus.
+// (C: mono_texpr.)
+fn mono_texpr(e: TExpr, s: Subst, items: []TItem, table: TypeTable) -> WExpr | error {
+    let nt = subst_type(e.type, s)
+    match e.kind {
+        TNumber => WExpr { expr = TExpr { kind = e.kind; type = nt; line = e.line; col = e.col }; insts = teko::list::empty() }
+        TVar => WExpr { expr = TExpr { kind = e.kind; type = nt; line = e.line; col = e.col }; insts = teko::list::empty() }
+        TStrLit => WExpr { expr = TExpr { kind = e.kind; type = nt; line = e.line; col = e.col }; insts = teko::list::empty() }
+        TByteLit => WExpr { expr = TExpr { kind = e.kind; type = nt; line = e.line; col = e.col }; insts = teko::list::empty() }
+        TCharLit => WExpr { expr = TExpr { kind = e.kind; type = nt; line = e.line; col = e.col }; insts = teko::list::empty() }
+        TBoolLit => WExpr { expr = TExpr { kind = e.kind; type = nt; line = e.line; col = e.col }; insts = teko::list::empty() }
+        TNullLit => WExpr { expr = TExpr { kind = e.kind; type = nt; line = e.line; col = e.col }; insts = teko::list::empty() }
+        TPathExpr => WExpr { expr = TExpr { kind = e.kind; type = nt; line = e.line; col = e.col }; insts = teko::list::empty() }
+        TBinary as b => {
+            let wl = match mono_texpr(b.left, s, items, table) { WExpr as w => w; error as er => return er }
+            let wr = match mono_texpr(b.right, s, items, table) { WExpr as w => w; error as er => return er }
+            WExpr { expr = TExpr { kind = TBinary { op = b.op; left = wl.expr; right = wr.expr }; type = nt; line = e.line; col = e.col }; insts = mono_inst_concat(wl.insts, wr.insts) }
+        }
+        TUnary as u => {
+            let wo = match mono_texpr(u.operand, s, items, table) { WExpr as w => w; error as er => return er }
+            WExpr { expr = TExpr { kind = TUnary { op = u.op; operand = wo.expr }; type = nt; line = e.line; col = e.col }; insts = wo.insts }
+        }
+        TCompare as c => {
+            let wf = match mono_texpr(c.first, s, items, table) { WExpr as w => w; error as er => return er }
+            mut acc = wf.insts
+            mut terms: []TCmpTerm = teko::list::empty()
+            mut i = 0
+            loop {
+                if i >= c.rest.len { break }
+                let wt = match mono_texpr(c.rest[i].operand, s, items, table) { WExpr as w => w; error as er => return er }
+                terms = teko::list::push(terms, TCmpTerm { op = c.rest[i].op; operand = wt.expr })
+                acc = mono_inst_concat(acc, wt.insts)
+                i++
+            }
+            WExpr { expr = TExpr { kind = TCompare { first = wf.expr; rest = terms }; type = nt; line = e.line; col = e.col }; insts = acc }
+        }
+        TCall as cl => {
+            // rewrite the args FIRST (so each arg type is concrete before we infer the callee).
+            mut acc: []MonoInst = teko::list::empty()
+            mut args: []TExpr = teko::list::empty()
+            mut i = 0
+            loop {
+                if i >= cl.args.len { break }
+                let wa = match mono_texpr(cl.args[i], s, items, table) { WExpr as w => w; error as er => return er }
+                args = teko::list::push(args, wa.expr)
+                acc = mono_inst_concat(acc, wa.insts)
+                i++
+            }
+            let bare = if cl.callee.segments.len == 0 { "" } else { cl.callee.segments[cl.callee.segments.len - 1].name }
+            match find_generic_fn(items, bare) {
+                TFunction as gf => {
+                    // INFER the Subst from the rewritten arg types against the generic's param patterns.
+                    let ptable = type_param_table(gf.type_params, gf.type_constraints, "", table)
+                    mut sub = Subst { params = gf.type_params; names = teko::list::empty(); types = teko::list::empty() }
+                    mut gi = 0
+                    loop {
+                        if gi >= args.len { break }   // args.len == gf.params.len (arity checked at typing); bound by the rewritten-arg list
+                        let pat = match resolve_type(gf.params[gi].type_ann, ptable, gf.namespace) { Type as t => t; error as er => return er }   // (#109 W1) ref_ns = the generic fn's declaring namespace
+                        sub = match unify(pat, args[gi].type, sub, table) { Subst as x => x; error as er => return er }
+                        gi++
+                    }
+                    let mangled = mono_mangle_name(bare, gf.type_params, sub)
+                    // rewrite the callee's LAST segment to the mangled name (keep the leading segments + call_ns).
+                    let newcallee = rewrite_last_segment(cl.callee, mangled)
+                    let rec = MonoInst { fn_name = bare; mangled = mangled; s = sub }
+                    WExpr { expr = TExpr { kind = TCall { callee = newcallee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot }; type = nt; line = e.line; col = e.col }; insts = teko::list::push(acc, rec) }
+                }
+                null => {
+                    let passthrough = TCall { callee = cl.callee; args = args; call_ns = cl.call_ns; is_closure_call = cl.is_closure_call; callee_type = cl.callee_type; is_iface_dispatch = cl.is_iface_dispatch; iface_slot = cl.iface_slot }
+                    let rekeyed = rekey_iface_dispatch(passthrough, args, table)
+                    WExpr { expr = TExpr { kind = rekeyed; type = nt; line = e.line; col = e.col }; insts = acc }
+                }
+            }
+        }
+        TIfExpr as f => {
+            let wc = match mono_texpr(f.cond, s, items, table) { WExpr as w => w; error as er => return er }
+            let wtb = match mono_block(f.then_blk, s, items, table) { WBlock as w => w; error as er => return er }
+            mut acc = mono_inst_concat(wc.insts, wtb.insts)
+            mut eb: []TStatement = teko::list::empty()
+            if f.has_else {
+                let web = match mono_block(f.else_blk, s, items, table) { WBlock as w => w; error as er => return er }
+                eb = web.stmts
+                acc = mono_inst_concat(acc, web.insts)
+            }
+            WExpr { expr = TExpr { kind = TIfExpr { cond = wc.expr; then_blk = wtb.stmts; has_else = f.has_else; else_blk = eb }; type = nt; line = e.line; col = e.col }; insts = acc }
+        }
+        TMatchExpr as m => {
+            let ws = match mono_texpr(m.subject, s, items, table) { WExpr as w => w; error as er => return er }
+            mut acc = ws.insts
+            mut arms: []TArm = teko::list::empty()
+            mut i = 0
+            loop {
+                if i >= m.arms.len { break }
+                let wa = match mono_arm(m.arms[i], s, items, table) { WArm as w => w; error as er => return er }
+                arms = teko::list::push(arms, wa.arm)
+                acc = mono_inst_concat(acc, wa.insts)
+                i++
+            }
+            WExpr { expr = TExpr { kind = TMatchExpr { subject = ws.expr; arms = arms }; type = nt; line = e.line; col = e.col }; insts = acc }
+        }
+        TCast as c => {
+            let wi = match mono_texpr(c.expr, s, items, table) { WExpr as w => w; error as er => return er }
+            WExpr { expr = TExpr { kind = TCast { expr = wi.expr }; type = nt; line = e.line; col = e.col }; insts = wi.insts }
+        }
+        TFieldAccess as fa => {
+            let wr = match mono_texpr(fa.receiver, s, items, table) { WExpr as w => w; error as er => return er }
+            WExpr { expr = TExpr { kind = TFieldAccess { receiver = wr.expr; field = fa.field }; type = nt; line = e.line; col = e.col }; insts = wr.insts }
+        }
+        TStructInit as si => {
+            mut acc: []MonoInst = teko::list::empty()
+            mut vals: []TExpr = teko::list::empty()
+            mut i = 0
+            loop {
+                if i >= si.field_vals.len { break }
+                let wv = match mono_texpr(si.field_vals[i], s, items, table) { WExpr as w => w; error as er => return er }
+                vals = teko::list::push(vals, wv.expr)
+                acc = mono_inst_concat(acc, wv.insts)
+                i++
+            }
+            WExpr { expr = TExpr { kind = TStructInit { field_names = si.field_names; field_vals = vals }; type = nt; line = e.line; col = e.col }; insts = acc }
+        }
+        TIndex as ix => {
+            let wr = match mono_texpr(ix.receiver, s, items, table) { WExpr as w => w; error as er => return er }
+            let wi = match mono_texpr(ix.index, s, items, table) { WExpr as w => w; error as er => return er }
+            WExpr { expr = TExpr { kind = TIndex { receiver = wr.expr; index = wi.expr }; type = nt; line = e.line; col = e.col }; insts = mono_inst_concat(wr.insts, wi.insts) }
+        }
+        TInterp as in => {
+            mut acc: []MonoInst = teko::list::empty()
+            mut holes: []TExpr = teko::list::empty()
+            mut specs: []TFSpec = teko::list::empty()
+            mut i = 0
+            loop {
+                if i >= in.holes.len { break }
+                let wh = match mono_texpr(in.holes[i], s, items, table) { WExpr as w => w; error as er => return er }
+                holes = teko::list::push(holes, wh.expr)
+                acc = mono_inst_concat(acc, wh.insts)
+                if i < in.specs.len {
+                    let sp = in.specs[i]
+                    let lifted_sp = match sp.kind {
+                        TFSpecDynamic as fd => {
+                            mut dyn_args: []TExpr = teko::list::empty()
+                            mut k = 0
+                            loop {
+                                if k >= fd.args.len { break }
+                                let wa = match mono_texpr(fd.args[k], s, items, table) { WExpr as w => w; error as er => return er }
+                                dyn_args = teko::list::push(dyn_args, wa.expr)
+                                acc = mono_inst_concat(acc, wa.insts)
+                                k++
+                            }
+                            TFSpec { kind = TFSpecDynamic { args = dyn_args } }
+                        }
+                        _ => sp
+                    }
+                    specs = teko::list::push(specs, lifted_sp)
+                }
+                i++
+            }
+            WExpr { expr = TExpr { kind = TInterp { pieces = in.pieces; holes = holes; specs = specs }; type = nt; line = e.line; col = e.col }; insts = acc }
+        }
+        TInExpr as n => {
+            let wl = match mono_texpr(n.lhs, s, items, table) { WExpr as w => w; error as er => return er }
+            mut acc = wl.insts
+            mut elems: []TExpr = teko::list::empty()
+            mut i = 0
+            loop {
+                if i >= n.elems.len { break }
+                let we = match mono_texpr(n.elems[i], s, items, table) { WExpr as w => w; error as er => return er }
+                elems = teko::list::push(elems, we.expr)
+                acc = mono_inst_concat(acc, we.insts)
+                i++
+            }
+            WExpr { expr = TExpr { kind = TInExpr { lhs = wl.expr; elems = elems }; type = nt; line = e.line; col = e.col }; insts = acc }
+        }
+        TArrayLit as a => {
+            mut acc: []MonoInst = teko::list::empty()
+            mut elems: []TArrayElem = teko::list::empty()
+            mut i = 0
+            loop {
+                if i >= a.elements.len { break }
+                let we = match mono_texpr(a.elements[i].expr, s, items, table) { WExpr as w => w; error as er => return er }
+                elems = teko::list::push(elems, TArrayElem { is_spread = a.elements[i].is_spread; expr = we.expr })
+                acc = mono_inst_concat(acc, we.insts)
+                i++
+            }
+            WExpr { expr = TExpr { kind = TArrayLit { elements = elems }; type = nt; line = e.line; col = e.col }; insts = acc }
+        }
+        TLambda as lam => {   // (W10) substitute through param/capture/ret types + mono the body
+            let wb = match mono_block(lam.body, s, items, table) { WBlock as w => w; error as er => return er }
+            mut nps: []TLambdaParam = teko::list::empty()
+            mut pi = 0
+            loop { if pi >= lam.params.len { break }; nps = teko::list::push(nps, TLambdaParam { name = lam.params[pi].name; type = subst_type(lam.params[pi].type, s) }); pi++ }
+            mut ncaps: []TCapture = teko::list::empty()
+            mut ci = 0
+            loop { if ci >= lam.captures.len { break }; ncaps = teko::list::push(ncaps, TCapture { name = lam.captures[ci].name; type = subst_type(lam.captures[ci].type, s); by_ref = lam.captures[ci].by_ref }); ci++ }
+            WExpr { expr = TExpr { kind = TLambda { params = nps; body = wb.stmts; captures = ncaps; ret = subst_type(lam.ret, s); lift_id = lam.lift_id }; type = nt; line = e.line; col = e.col }; insts = wb.insts }
+        }
+        TBorrow as b => {
+            let wo = match mono_texpr(b.operand, s, items, table) { WExpr as w => w; error as er => return er }
+            WExpr { expr = TExpr { kind = TBorrow { operand = wo.expr }; type = nt; line = e.line; col = e.col }; insts = wo.insts }
+        }
+    }
+}
+
+// rewrite a path's last segment to `name`, keeping the leading segments. (C: rewrite_last_segment.)
+fn rewrite_last_segment(p: parser::Path, name: str) -> parser::Path {
+    mut segs: []parser::Segment = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= p.segments.len { break }
+        if i == p.segments.len - 1 { segs = teko::list::push(segs, parser::Segment { name = name }) }
+        else { segs = teko::list::push(segs, p.segments[i]) }
+        i++
+    }
+    parser::Path { segments = segs }
+}
+
+// rewrite a match ARM (guard + body). The pattern is syntactic (binds; not type-bearing). (C: mono_arm.)
+fn mono_arm(arm: TArm, s: Subst, items: []TItem, table: TypeTable) -> WArm | error {
+    mut acc: []MonoInst = teko::list::empty()
+    mut guard = arm.guard
+    if arm.has_when {
+        let wg = match mono_texpr(arm.guard, s, items, table) { WExpr as w => w; error as er => return er }
+        guard = wg.expr
+        acc = wg.insts
+    }
+    let wb = match mono_block(arm.body, s, items, table) { WBlock as w => w; error as er => return er }
+    acc = mono_inst_concat(acc, wb.insts)
+    WArm { arm = TArm { pattern = arm.pattern; has_when = arm.has_when; guard = guard; body = wb.stmts }; insts = acc }
+}
+
+// rewrite a TStatement. TOTAL over every case; TAssign/TBinding substitute their `bound` type. (C: mono_tstmt.)
+fn mono_tstmt(st: TStatement, s: Subst, items: []TItem, table: TypeTable) -> WStmt | error {
+    match st {
+        TBinding as b => {
+            let wv = match mono_texpr(b.value, s, items, table) { WExpr as w => w; error as er => return er }
+            WStmt { stmt = TBinding { kind = b.kind; target = b.target; bound = subst_type(b.bound, s); value = wv.expr; di_kind = b.di_kind }; insts = wv.insts }
+        }
+        TAssign as a => {
+            let wv = match mono_texpr(a.value, s, items, table) { WExpr as w => w; error as er => return er }
+            if parser::assign_has_target(a.kind) {
+                let wt = match mono_texpr(a.target, s, items, table) { WExpr as w => w; error as er => return er }
+                return WStmt { stmt = TAssign { kind = a.kind; name = a.name; op = a.op; bound = subst_type(a.bound, s); value = wv.expr; deref = a.deref; target = wt.expr }; insts = mono_inst_concat(wv.insts, wt.insts) }
+            }
+            WStmt { stmt = TAssign { kind = a.kind; name = a.name; op = a.op; bound = subst_type(a.bound, s); value = wv.expr; deref = a.deref; target = a.target }; insts = wv.insts }
+        }
+        TReturn as r => {
+            if r.has_value {
+                let wv = match mono_texpr(r.value, s, items, table) { WExpr as w => w; error as er => return er }
+                WStmt { stmt = TReturn { has_value = true; value = wv.expr }; insts = wv.insts }
+            } else {
+                WStmt { stmt = st; insts = teko::list::empty() }
+            }
+        }
+        TLoopStmt as l => {
+            let wi = match mono_block(l.init, s, items, table) { WBlock as w => w; error as er => return er }
+            let wb = match mono_block(l.body, s, items, table) { WBlock as w => w; error as er => return er }
+            WStmt { stmt = TLoopStmt { label = l.label; init = wi.stmts; body = wb.stmts }; insts = mono_inst_concat(wi.insts, wb.insts) }
+        }
+        TBreakStmt => WStmt { stmt = st; insts = teko::list::empty() }
+        TContinueStmt => WStmt { stmt = st; insts = teko::list::empty() }
+        TExprStmt as es => {
+            let wv = match mono_texpr(es.expr, s, items, table) { WExpr as w => w; error as er => return er }
+            WStmt { stmt = TExprStmt { expr = wv.expr }; insts = wv.insts }
+        }
+        TDeferStmt as d => {
+            let wb = match mono_block(d.body, s, items, table) { WBlock as w => w; error as er => return er }
+            WStmt { stmt = TDeferStmt { body = wb.stmts }; insts = wb.insts }
+        }
+        TAdoptStmt as a => {
+            let wb = match mono_block(a.body, s, items, table) { WBlock as w => w; error as er => return er }
+            WStmt { stmt = TAdoptStmt { name = a.name; body = wb.stmts }; insts = wb.insts }
+        }
+    }
+}
+
+// rewrite a block (a []TStatement). (C: mono_block.)
+fn mono_block(stmts: []TStatement, s: Subst, items: []TItem, table: TypeTable) -> WBlock | error {
+    // (#148 R3 DECREE) `out` is a linear chain: born empty, self-append-only, read only after the
+    // loop — so every copy-grow frees the superseded buffer (mem::push_fo; paranoid-gated).
+    mut out: []TStatement = teko::list::empty()
+    mut acc: []MonoInst = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= stmts.len { break }
+        let ws = match mono_tstmt(stmts[i], s, items, table) { WStmt as w => w; error as er => return er }
+        out = teko::mem::push_fo(out, ws.stmt)
+        acc = mono_inst_concat(acc, ws.insts)
+        i++
+    }
+    WBlock { stmts = out; insts = acc }
+}
+
+/**
+ * The generic-base name behind a stamped instance name: `Box__g__i64` → `Box` (the text before the
+ * FIRST `__g__` infix). A name with no `__g__` returns unchanged (never a stamped instance). The
+ * base is BARE — a stamped instance name carries no namespace qualifier (generic_inst_name mangles
+ * only the last segment). (#254 layer 3.)
+ *
+ * @param name  a (possibly stamped) type name
+ * @return      the base name before `__g__`, or `name` when it has no `__g__` infix
+ * @since onda-3 (#254)
+ */
+fn g_instance_base(name: str) -> str {
+    mut i: u64 = 0
+    loop {
+        if i + 5 > name.len { break }
+        if name[i] == b'_' && name[i + 1] == b'_' && name[i + 2] == b'g' && name[i + 3] == b'_' && name[i + 4] == b'_' {
+            return teko::str::slice_to(name, i)
+        }
+        i++
+    }
+    name
+}
+
+/**
+ * Does a template method's namespace (`ns::…::Base`) own the stamped instance whose base is `base`?
+ * The template method's `method_ns` is the owning type's canonical name (collect's convention), so
+ * its LAST segment names the generic base — matching it against the instance's bare base disambiguates
+ * the abstract template method from every other program function (#254 layer 3).
+ *
+ * @param method_ns  the candidate template method's namespace
+ * @param base       the stamped instance's bare base name (`g_instance_base` of the instance)
+ * @return           true iff `method_ns`'s last segment equals `base`
+ * @since onda-3 (#254)
+ */
+fn method_ns_owns_base(method_ns: str, base: str) -> bool {
+    teko::runtime::str_eq(name_last_segment(method_ns), base)
+}
+
+/**
+ * Find the ABSTRACT typed template method for a stamped instance's method — the TFunction produced by
+ * type_struct_methods over the GENERIC template (`Box::get`, return `Named{T}`), which the instance's
+ * concrete method (`Box__g__i64::get`) is stamped from (#254 layer 3). Matched by method name AND the
+ * template method's namespace owning the instance's base (name_last_segment == base). Returns null when
+ * no such template method exists (an abstract signature with no body, or a resolution the checker
+ * already reported) so the caller leaves the instance method unstamped.
+ *
+ * @param items   the typed program items (carrying the abstract template methods)
+ * @param base    the stamped instance's bare base name
+ * @param method  the method's bare name
+ * @return        the abstract template method TFunction, or null when none matches
+ * @since onda-3 (#254)
+ */
+fn find_template_method(items: []TItem, base: str, method: str) -> TFunction | null {
+    mut i = 0
+    loop {
+        if i >= items.len { break }
+        match items[i] {
+            TFunction as f => {
+                if teko::runtime::str_eq(f.name, method) && method_ns_owns_base(f.namespace, base) && !f.is_extern {
+                    return f
+                }
+            }
+            _ => { }
+        }
+        i++
+    }
+    null
+}
+
+/**
+ * The type-arg binding Subst for a stamped generic-type instance: unify each TEMPLATE field's type
+ * (a pattern that mentions the type-params `T…`) against the corresponding INSTANCE field's already-
+ * substituted concrete type, recovering `{T → concrete}` (#254 layer 3). Robust and general — a
+ * type-param of a meaningful generic type appears in at least one field; field-unification recovers
+ * it without re-parsing the mangled name. A param that unifies to nothing (a phantom param unused in
+ * every field) simply stays absent; the stamped body's `subst_type` then leaves that Named unchanged.
+ * The template's field PATTERNS are resolved with the template's type-params in scope (`ptable`), so a
+ * `value: T` field resolves to the OPAQUE `Named{T}` the pattern `unify` binds (never "unknown type: T").
+ *
+ * @param template  the generic template decl (`Box<T>`, fields mention `T`)
+ * @param inst      the stamped instance decl (`Box__g__i64`, fields are concrete)
+ * @param table     the folded type table (field-type resolution)
+ * @return          the recovered `{param → concrete}` Subst over the template's type-params
+ * @since onda-3 (#254)
+ */
+fn instance_type_subst(template: parser::TypeDecl, inst: parser::TypeDecl, table: TypeTable) -> Subst {
+    mut s = Subst { params = template.type_params; names = teko::list::empty(); types = teko::list::empty() }
+    let tf = decl_fields(template)
+    let inf = decl_fields(inst)
+    if tf.len != inf.len { return s }
+    let ptable = type_param_table(template.type_params, template.type_constraints, "", table)
+    mut i = 0
+    loop {
+        if i >= tf.len { break }
+        s = unify_field_pair(s, tf[i].type_ann, inf[i].type_ann, ptable, table)
+        i++
+    }
+    s
+}
+
+/**
+ * Extend a Subst by unifying one template field-type annotation (the pattern, mentions `T`) against
+ * the corresponding instance field-type annotation (concrete) — the per-field step of
+ * instance_type_subst (#254 layer 3). The pattern resolves with the template's type-params in scope
+ * (`ptable`) so `T` is the opaque `Named{T}` the pattern `unify` binds; the concrete side resolves
+ * against the plain table. A field whose annotation fails to resolve, or that unifies to an error,
+ * leaves the Subst unchanged (the checker's own honest stop covers a genuinely bad field).
+ *
+ * @param s        the Subst so far
+ * @param pat_ann  the template field's type annotation (the pattern)
+ * @param con_ann  the instance field's (concrete) type annotation
+ * @param ptable   the table with the template's type-params in scope (pattern resolution)
+ * @param table    the folded type table (concrete resolution)
+ * @return         the Subst extended with this field's binding, or `s` unchanged when it does not unify
+ * @since onda-3 (#254)
+ */
+fn unify_field_pair(s: Subst, pat_ann: parser::TypeExpr, con_ann: parser::TypeExpr, ptable: TypeTable, table: TypeTable) -> Subst {
+    match resolve_type(pat_ann, ptable, "") {
+        Type as pat => match resolve_type(con_ann, table, "") {
+            Type as concrete => match unify(pat, concrete, s, table) { Subst as x => x; error => s }
+            error => s
+        }
+        error => s
+    }
+}
+
+/**
+ * A type-decl's fields (struct or class body); every other body kind has none. (#254 layer 3.)
+ *
+ * @param d  the type-decl
+ * @return   the decl's fields, or an empty list for a non-struct/class body
+ * @since onda-3 (#254)
+ */
+fn decl_fields(d: parser::TypeDecl) -> []parser::Field {
+    match d.body {
+        parser::StructBody as sb => sb.fields
+        parser::ClassBody as cb => cb.fields
+        _ => teko::list::empty()
+    }
+}
+
+/**
+ * The methods a stamped instance carries (struct or class body — kept + substituted by layer 2).
+ * (#254 layer 3.)
+ *
+ * @param d  the stamped instance decl
+ * @return   the instance's methods, or an empty list for a non-struct/class body
+ * @since onda-3 (#254)
+ */
+fn mono_decl_methods(d: parser::TypeDecl) -> []parser::Function {
+    match d.body {
+        parser::StructBody as sb => sb.methods
+        parser::ClassBody as cb => cb.methods
+        _ => teko::list::empty()
+    }
+}
+
+/**
+ * Stamp one method of a stamped generic-type instance as a monomorphic free TFunction, keyed by the
+ * instance name (`Box__g__i64::get`), its ALREADY-TYPED template body rewritten through the instance's
+ * Subst — mirroring the free-fn stamp (monomorphize PHASE 2) but the callable's owner is the stamped
+ * type, so `b.get()` on a `Box<i64>` dispatches to `Box__g__i64::get`. The receiver + any `Self`-typed
+ * reference (the abstract `Named{ns::Base}`) is remapped to the instance name via the Subst's extra
+ * `base → instance` binding, so a `-> Box<T>` return / a `self`-typed param concretizes too. Reuses
+ * mono_block/subst_type/subst_typeexpr unchanged. Collects transitively-needed insts from the body.
+ *
+ * @param inst_name  the stamped instance's name (`Box__g__i64`)
+ * @param tmpl       the abstract typed template method (`Box::get`, return `Named{T}`)
+ * @param s          the instance's `{T → concrete, ns::Base → Box__g__i64}` Subst
+ * @param items      the typed program items (transitive-call discovery)
+ * @param table      the folded type table
+ * @return           the stamped method TFunction plus any transitively-discovered insts
+ * @throws           when the body rewrite fails (surfaced from mono_block)
+ * @since onda-3 (#254)
+ */
+fn stamp_one_instance_method(inst_name: str, tmpl: TFunction, s: Subst, items: []TItem, table: TypeTable) -> WFn | error {
+    mut nparams: []parser::Param = teko::list::empty()
+    mut pi = 0
+    loop {
+        if pi >= tmpl.params.len { break }
+        nparams = teko::list::push(nparams, parser::Param { name = tmpl.params[pi].name; has_type = true; type_ann = subst_typeexpr(tmpl.params[pi].type_ann, s); is_params = tmpl.params[pi].is_params; has_default = tmpl.params[pi].has_default; default_expr = tmpl.params[pi].default_expr })
+        pi++
+    }
+    let wb = match mono_block(tmpl.body, s, items, table) { WBlock as w => w; error as e => return e }
+    let no_tps: []str = teko::list::empty()
+    let no_tcs: []parser::ConstraintExpr = teko::list::empty()
+    let sf = TFunction { name = tmpl.name; type_params = no_tps; type_constraints = no_tcs; params = nparams; return_type = subst_type(tmpl.return_type, s); body = wb.stmts; vis = tmpl.vis; has_doc = tmpl.has_doc; doc = tmpl.doc; namespace = inst_name; file = tmpl.file; line = tmpl.line; col = tmpl.col; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = tmpl.has_arena_size; arena_size = tmpl.arena_size }
+    WFn { func = sf; insts = wb.insts }
+}
+
+/**
+ * The `{T → concrete}` type-arg Subst for a stamped instance, EXTENDED with the template canonical
+ * name → instance name binding, so a stamped method's receiver and every `Self`-typed / `Base<T>`
+ * reference in its body remaps to the instance (#254 layer 3). The template's canonical name is its
+ * declaring namespace joined with its base (collect canonicalizes decl names to `ns::Base`).
+ *
+ * @param template   the generic template decl
+ * @param template_ns the template's declaring namespace (from its TypeReg)
+ * @param inst       the stamped instance decl
+ * @param table      the folded type table
+ * @return           the extended Subst
+ * @since onda-3 (#254)
+ */
+fn instance_method_subst(template: parser::TypeDecl, template_ns: str, inst: parser::TypeDecl, table: TypeTable) -> Subst {
+    let base = g_instance_base(inst.name)
+    let s = instance_type_subst(template, inst, table)
+    let canon = if template_ns == "" { base } else { teko::str::concat(teko::str::concat(template_ns, "::"), base) }
+    let inst_named = Named { name = inst.name }
+    let s1 = subst_add_type_remap(s, canon, inst_named)
+    if teko::runtime::str_eq(base, canon) { return s1 }
+    subst_add_type_remap(s1, base, inst_named)
+}
+
+/**
+ * Add one `from-name → concrete` remap to a Subst, registering `from_name` in BOTH `params` and
+ * `names`/`types` (#254 layer 3). `params` membership lets `subst_typeexpr` rewrite the SYNTACTIC
+ * receiver annotation (it only substitutes a NamedType whose name is in `params`); `names`/`types` let
+ * `subst_type` rewrite the BODY types. Used to remap the enclosing type's canonical + bare spelling to
+ * a stamped instance, so a method's `self`-typed receiver and `Self`-typed body references concretize.
+ *
+ * @param s          the Subst so far
+ * @param from_name  the name to remap (the template's canonical or bare spelling)
+ * @param to_type    the concrete type to remap it to (the stamped instance)
+ * @return           `s` with `from_name → to_type` added to params + names/types
+ * @since onda-3 (#254)
+ */
+fn subst_add_type_remap(s: Subst, from_name: str, to_type: Type) -> Subst {
+    Subst { params = teko::list::push(s.params, from_name); names = teko::list::push(s.names, from_name); types = teko::list::push(s.types, to_type) }
+}
+
+/**
+ * The instance's method Subst (`instance_method_subst` + base/canon → instance remaps), FURTHER extended
+ * with the PHANTOM self-construct spelling `Base__g__<owner-params>` → the concrete instance — so a
+ * `Box { … }` self-init inside `Box::dup` (typed against the abstract template to `Named{Box__g__T}`)
+ * retargets to `Box__g__i64` in the stamped body (#254 L4/L5). The phantom is built from the
+ * template's OWN type-params via the same `generic_inst_name`, so it matches the spelling
+ * `type_struct_lit` tagged the self-init with. A no-op when the template has no type-params (never a
+ * self-construct) → byte-identical to the L3 Subst for the existing corpus.
+ *
+ * @param template    the generic template decl
+ * @param template_ns the template's declaring namespace
+ * @param inst        the stamped instance decl
+ * @param table       the folded type table
+ * @return            the L3 Subst extended with the phantom → instance remap
+ * @since onda-3 (#254 L4/L5)
+ */
+fn instance_method_subst_l5(template: parser::TypeDecl, template_ns: str, inst: parser::TypeDecl, table: TypeTable) -> Subst {
+    let s = instance_method_subst(template, template_ns, inst, table)
+    if template.type_params.len == 0 { return s }
+    let base = g_instance_base(inst.name)
+    let phantom = phantom_self_inst_name(base, template.type_params)
+    if teko::runtime::str_eq(phantom, inst.name) { return s }
+    subst_add_type_remap(s, phantom, Named { name = inst.name })
+}
+
+/**
+ * Stamp EVERY method of a single stamped generic-type instance, keyed by the instance name (#254
+ * layer 3). Locates the generic template for the instance's base, builds the instance's method Subst
+ * once, then stamps each carried method from its abstract typed template body. A method whose abstract
+ * template body cannot be found (an abstract signature, or one the checker already reported) is skipped
+ * — the checker's own honest stop covers it. Returns the stamped methods + their discovered insts.
+ *
+ * @param inst   the stamped instance decl (`Box__g__i64`, methods kept by layer 2)
+ * @param items  the typed program items (source of the abstract template method bodies)
+ * @param table  the folded type table (template lookup + Subst recovery)
+ * @return       the instance's stamped methods plus every transitively-discovered inst
+ * @throws       when a method-body rewrite fails (surfaced from stamp_one_instance_method)
+ * @since onda-3 (#254)
+ */
+fn stamp_instance_methods(inst: parser::TypeDecl, items: []TItem, table: TypeTable) -> WFnList | error {
+    let base = g_instance_base(inst.name)
+    let template = match find_generic_template(table, base) { TemplateReg as tr => tr; null => return WFnList { fns = teko::list::empty(); insts = teko::list::empty() } }
+    let s = instance_method_subst_l5(template.decl, template.namespace, inst, table)
+    let methods = mono_decl_methods(inst)
+    mut fns: []TFunction = teko::list::empty()
+    mut insts: []MonoInst = teko::list::empty()
+    mut mi = 0
+    loop {
+        if mi >= methods.len { break }
+        match find_template_method(items, base, methods[mi].name) {
+            TFunction as tmpl => {
+                let wf = match stamp_one_instance_method(inst.name, tmpl, s, items, table) { WFn as w => w; error as e => return e }
+                fns = teko::list::push(fns, wf.func)
+                insts = mono_inst_concat(insts, wf.insts)
+            }
+            null => { }
+        }
+        mi++
+    }
+    WFnList { fns = fns; insts = insts }
+}
+
+/**
+ * Stamp the methods of EVERY stamped generic-type instance in the table (#254 layer 3). The
+ * whole-program driver behind the mono append. A NO-OP (empty result) when no instance carries a
+ * method — the existing corpus — so the append below and the fixpoint stay byte-identical.
+ *
+ * @param items  the typed program items
+ * @param table  the folded type table
+ * @return       every stamped instance method + every inst their bodies discovered
+ * @throws       when a method-body rewrite fails
+ * @since onda-3 (#254)
+ */
+fn stamp_all_instance_methods(items: []TItem, table: TypeTable) -> WFnList | error {
+    let insts2 = table_generic_instances(table)
+    mut fns: []TFunction = teko::list::empty()
+    mut mono_insts: []MonoInst = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= insts2.len { break }
+        let wl = match stamp_instance_methods(insts2[i], items, table) { WFnList as w => w; error as e => return e }
+        mut j = 0
+        loop { if j >= wl.fns.len { break }; fns = teko::list::push(fns, wl.fns[j]); j++ }
+        mono_insts = mono_inst_concat(mono_insts, wl.insts)
+        i++
+    }
+    WFnList { fns = fns; insts = mono_insts }
+}
+
+/**
+ * Append the stamped generic-type-instance methods (#254 layer 3) to the mono output — every instance
+ * method becomes a monomorphic free TFunction keyed by the instance name, so `b.get()` on a `Box<i64>`
+ * dispatches to `Box__g__i64::get`. Seeded into the kept-items BEFORE the fixpoint drain (the caller
+ * concats the discovered insts into the queue), so a free-generic-fn call inside a method body is
+ * itself stamped. A NO-OP on an empty method list — the existing corpus — so gen1==gen2 is preserved.
+ *
+ * @param kept  the mono output so far
+ * @param fns   the stamped instance methods
+ * @return      `kept` extended with every stamped instance method
+ * @since onda-3 (#254)
+ */
+fn append_instance_methods(kept: []TItem, fns: []TFunction) -> []TItem {
+    mut out = kept
+    mut i = 0
+    loop { if i >= fns.len { break }; out = teko::list::push(out, fns[i]); i++ }
+    out
+}
+
+// ── the driver ───────────────────────────────────────────────────────────────────────────
+// PHASE 1 — walk every NON-generic TFunction body and every loose top-level statement (with an
+// EMPTY subst) to collect SEED instantiations + rewritten bodies; DROP generic functions from the
+// output; pass TypeDecl/UseDecl through. PHASE 2 — fixpoint: for each queued MonoInst not yet
+// stamped, look up the generic fn and STAMP it (clone with concrete param annotations + return
+// type + body rewritten through the inst's Subst, name = mangled, type_params = []), collecting
+// transitively-needed insts. A total-instantiation CEILING bounds polymorphic recursion (M.1).
+pub fn monomorphize(prog: TProgram, table: TypeTable) -> TProgram | error {
+    // NO-OP GUARD: no generic function → return UNCHANGED (the non-generic corpus is byte-identical).
+    mut any_generic = false
+    mut g = 0
+    loop {
+        if g >= prog.items.len { break }
+        match prog.items[g] {
+            TFunction as f => { if f.type_params.len > 0 { any_generic = true } }
+            parser::TypeDecl as d => { if d.type_params.len > 0 { any_generic = true } }   // (S4) generic type-decl
+            _ => { }
+        }
+        g++
+    }
+    if !any_generic { return prog }
+
+    let empty_s = Subst { params = teko::list::empty(); names = teko::list::empty(); types = teko::list::empty() }
+
+    // PHASE 1 — rewrite non-generic items; drop generic fns; collect seed insts.
+    mut kept: []TItem = teko::list::empty()
+    mut queue: []MonoInst = teko::list::empty()
+    mut i = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            TFunction as f => {
+                let is_droppable = f.type_params.len > 0 || is_generic_template_method(f, table)
+                if !is_droppable {
+                    let wb = match mono_block(f.body, empty_s, prog.items, table) { WBlock as w => w; error as e => return e }
+                    let nf = TFunction { name = f.name; type_params = f.type_params; type_constraints = f.type_constraints; params = f.params; return_type = f.return_type; body = wb.stmts; vis = f.vis; has_doc = f.has_doc; doc = f.doc; namespace = f.namespace; file = f.file; line = f.line; col = f.col; is_test = f.is_test; is_extern = f.is_extern; c_symbol = f.c_symbol; from_lib = f.from_lib; has_arena_size = f.has_arena_size; arena_size = f.arena_size }
+                    kept = teko::list::push(kept, nf)
+                    queue = mono_inst_concat(queue, wb.insts)
+                }
+            }
+            TStatement as ts => {
+                let w = match mono_tstmt(ts, empty_s, prog.items, table) { WStmt as x => x; error as e => return e }
+                kept = teko::list::push(kept, w.stmt)
+                queue = mono_inst_concat(queue, w.insts)
+            }
+            parser::TypeDecl as d => {
+                // (S4) DROP a generic type-decl TEMPLATE (`type Box<T>`); its concrete instances are
+                // appended below from the table. A non-generic decl passes through unchanged.
+                if d.type_params.len == 0 { kept = teko::list::push(kept, prog.items[i]) }
+            }
+            _ => kept = teko::list::push(kept, prog.items[i])
+        }
+        i++
+    }
+
+    let minsts = match stamp_all_instance_methods(prog.items, table) { WFnList as wl => wl; error as e => return e }
+    kept = append_instance_methods(kept, minsts.fns)
+    queue = mono_inst_concat(queue, minsts.insts)
+
+    // PHASE 2 — fixpoint stamping. The queue grows as a stamped body discovers further insts;
+    // a `stamped` ledger (mangled names) dedups. The ceiling bounds polymorphic recursion (M.1).
+    let ceiling = 5000
+    mut stamped: []MonoInst = teko::list::empty()
+    mut qi = 0
+    loop {
+        if qi >= queue.len { break }
+        let inst = queue[qi]
+        qi++
+        if mono_seen(stamped, inst.mangled) { continue }   // already stamped → skip
+        if stamped.len >= ceiling {
+            return error { message = "monomorphization exceeded the instantiation ceiling (5000) — likely unbounded polymorphic recursion" }
+        }
+        stamped = teko::list::push(stamped, inst)
+        let gf = match find_generic_fn(prog.items, inst.fn_name) {
+            TFunction as f => f
+            null => return error { message = teko::str::concat("internal: monomorph could not find generic fn ", inst.fn_name) }
+        }
+        // (W11/S6) CONSTRAINT CHECK — gate this instantiation's concrete bindings before stamping.
+        match check_constraints(gf.type_params, gf.type_constraints, inst.s, table) { error as e => return e; null => { } }
+        // STAMP: concrete param annotations, substituted return type, body rewritten through the Subst.
+        mut nparams: []parser::Param = teko::list::empty()
+        mut pi = 0
+        loop {
+            if pi >= gf.params.len { break }
+            nparams = teko::list::push(nparams, parser::Param { name = gf.params[pi].name; has_type = true; type_ann = subst_typeexpr(gf.params[pi].type_ann, inst.s); is_params = gf.params[pi].is_params; has_default = gf.params[pi].has_default; default_expr = gf.params[pi].default_expr })
+            pi++
+        }
+        let wb = match mono_block(gf.body, inst.s, prog.items, table) { WBlock as w => w; error as e => return e }
+        queue = mono_inst_concat(queue, wb.insts)
+        let no_tps: []str = teko::list::empty()
+        let no_tcs: []parser::ConstraintExpr = teko::list::empty()
+        let sf = TFunction { name = inst.mangled; type_params = no_tps; type_constraints = no_tcs; params = nparams; return_type = subst_type(gf.return_type, inst.s); body = wb.stmts; vis = gf.vis; has_doc = gf.has_doc; doc = gf.doc; namespace = gf.namespace; file = gf.file; line = gf.line; col = gf.col; is_test = false; is_extern = false; c_symbol = ""; from_lib = ""; has_arena_size = gf.has_arena_size; arena_size = gf.arena_size }
+        kept = teko::list::push(kept, sf)
+    }
+
+    // (S4 type-generics) APPEND the concrete type-decl INSTANCES stamped by the instantiation pass
+    // (the `__g__`-marked table entries), so codegen emits the concrete struct/variant. Generic
+    // templates were dropped above. Dedup vs kept (a dep may already carry an instance).
+    let insts2 = table_generic_instances(table)
+    mut ii = 0
+    loop {
+        if ii >= insts2.len { break }
+        let d = insts2[ii]
+        ii++
+        if mono_kept_has_type(kept, d.name) { continue }
+        kept = teko::list::push(kept, d)
+    }
+
+    TProgram { items = kept }
+}
+
+/**
+ * Is `f` an ABSTRACT template method — a method whose OWNER type (the last segment of its namespace)
+ * is a generic template (#254 layer 3)? Such a method's body still mentions the owner's abstract
+ * `T`, so like a generic free fn it must be DROPPED from the mono output; its concrete copies are
+ * stamped per instance below. A method of a NON-generic type (or a plain free fn, ns not owning a
+ * generic) stays — so the existing corpus (no generic methods) is byte-identical.
+ *
+ * @param f      a non-generic (own type_params empty) TFunction
+ * @param table  the folded type table (to classify the owner as a generic template)
+ * @return       true iff `f`'s owner namespace names a generic template
+ * @since onda-3 (#254)
+ */
+fn is_generic_template_method(f: TFunction, table: TypeTable) -> bool {
+    if f.namespace == "" { return false }
+    match find_generic_template(table, name_last_segment(f.namespace)) { TemplateReg => true; null => false }
+}
+
+// does `kept` already contain a type-decl named `name`? (dedup for appended generic instances.)
+fn mono_kept_has_type(kept: []TItem, name: str) -> bool {
+    mut i = 0
+    loop {
+        if i >= kept.len { break }
+        match kept[i] { parser::TypeDecl as d => { if teko::runtime::str_eq(d.name, name) { return true } }; _ => { } }
+        i++
+    }
+    false
+}

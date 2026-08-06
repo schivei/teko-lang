@@ -1,0 +1,375 @@
+/**
+ * teko::assert — the testing-assertion namespace. INJECTED, non-shadowable, under the reserved
+ * `teko::` root (like teko::print) — referenced by absolute path, no `use`.
+ *
+ * WHY A PAIR (M.3 — honesty). This file is the canonical Teko ORIGINAL; the C SEED realizes the same
+ * symbols in src/assert/assert.c (`teko__assert__<name>`) so that a program which CALLS an assertion
+ * without declaring `teko::assert` itself still links. The generic CALL lowering emits
+ * `teko__assert__<name>(...)` for every name `checker::assert_builtin_name` admits, so a new
+ * assertion needs no codegen change — only a signature in `checker::builtin_fn`.
+ *
+ * FAIL LOUD (M.1). A false assertion is a PANIC, not a soft return.
+ *
+ * EVERY FAILURE SAYS WHAT IT EXPECTED AND WHAT IT GOT (owner ruling 2026-07-30: "cada asserção tem
+ * de dizer o que esperava e o que obteve; uma que só diz falhou reproduz o problema que estamos a
+ * matar"). `is_true`/`is_false` are the one exception, for a reason: their whole input is a bool, so
+ * "got false" adds nothing to the assertion's own name — their message is byte-unchanged.
+ *
+ * A SCENARIO IS ADDRESSED BY NAME, NEVER BY AN EXIT CODE. `scenario_begin` names the case, every
+ * failure message is prefixed with that name, and `scenario_ok` announces `scenario <name>: ok` on the current
+ * channel. That replaces the `exit(N)`-per-case idiom, whose space holds 255 values, collides with
+ * itself, and truncates in silence (`exit(260)` is observed as 4).
+ *
+ * PANIC IS NOT ASSERTED HERE, deliberately. A panic aborts the PROCESS, so "this panics" is a
+ * process-level observable and belongs to the regression runner (`Then it traps` plus a stderr
+ * pattern), which already owns it. Teko's in-language failure channel is the `T | error` union, and
+ * `is_ok`/`is_error` assert exactly that.
+ */
+
+/**
+ * scenario_prefix_rt — `"<name>: "` for the currently named scenario, or "" when none is named.
+ *
+ * An FFI bottom because the name is PROCESS state shared with the per-test channel in
+ * src/runtime/teko_rt.c — the same store `scenario_ok_rt` writes its `ok` line through.
+ *
+ * @return  the prefix every failure message opens with (empty when no scenario is named)
+ */
+extern fn scenario_prefix_rt() -> str = "tk_assert_scenario_prefix" from "teko_rt"
+
+/**
+ * scenario_set_rt — record `name` as the scenario every later failure message is prefixed with.
+ *
+ * @param name  the scenario's name
+ */
+extern fn scenario_set_rt(name: str) -> void = "tk_assert_scenario_set" from "teko_rt"
+
+/**
+ * scenario_ok_rt — announce `scenario <name>: ok` on the current channel and clear the name.
+ */
+extern fn scenario_ok_rt() -> void = "tk_assert_scenario_ok" from "teko_rt"
+
+/**
+ * quoted — `s` wrapped in double quotes, so a message that reports text shows its BOUNDARIES: an
+ * unquoted "expected abc , got abc" hides a trailing space, which is exactly the failure a reader
+ * would otherwise call impossible.
+ *
+ * @param s  the text to quote
+ * @return   `s` between two `"` bytes
+ */
+fn quoted(s: str) -> str { teko::str::concat("\"", s, "\"") }
+
+/**
+ * fail — the ONE exit every assertion below panics through: the scenario prefix, the assertion's own
+ * name, then what it expected and what it got.
+ *
+ * @param what    the assertion's name (`eq_i64`, `str_contains`, …)
+ * @param detail  the expected-and-got clause
+ * @throws        always — this function exists to panic
+ */
+fn fail(what: str, detail: str) {
+    panic(teko::str::concat(scenario_prefix_rt(), "assertion failed: ", what, " — ", detail))
+}
+
+/**
+ * fail_bare — the exit for the two assertions whose only input is a bool. Naming what they got tells
+ * a reader nothing the assertion's name did not, so the message keeps its historic one-clause shape;
+ * the scenario prefix is empty by default, so existing call sites read byte-identically.
+ *
+ * @param what  the assertion's name
+ * @throws      always — this function exists to panic
+ */
+fn fail_bare(what: str) {
+    panic(teko::str::concat(scenario_prefix_rt(), "assertion failed: ", what))
+}
+
+/**
+ * fail_two_texts — the exit shared by every assertion whose message is a relation between two
+ * QUOTED strings, so the quoting and the clause order are written once.
+ *
+ * @param what      the assertion's name
+ * @param relation  what was demanded of `subject` (e.g. "to contain", "anything but")
+ * @param subject   the operand the relation is against
+ * @param got       the observed text
+ * @throws          always — this function exists to panic
+ */
+fn fail_two_texts(what: str, relation: str, subject: str, got: str) {
+    fail(what, teko::str::concat("expected ", relation, " ", quoted(subject), ", got ", quoted(got)))
+}
+
+/**
+ * scenario_begin — name the case that follows, so its assertions and its `ok` line address it by name
+ * instead of by an exit code.
+ *
+ * @param name  the scenario's name, as a human and a `.tkr` row both spell it
+ */
+exp fn scenario_begin(name: str) { scenario_set_rt(name) }
+
+/**
+ * scenario_ok — declare the named case PASSED: emits `scenario <name>: ok` on the current channel (a `#test`'s
+ * own channel when one is open, the real stdout otherwise) and clears the name.
+ *
+ * @throws  when no scenario is named — a silent `ok` for an unnamed case is the reporting hole this
+ *          whole mechanism exists to close
+ */
+exp fn scenario_ok() { scenario_ok_rt() }
+
+/**
+ * is_true — the predicate must hold.
+ *
+ * @param c  the predicate
+ * @throws   when `c` is false
+ */
+exp fn is_true(c: bool) {
+    if !c { fail_bare("is_true") }
+}
+
+/**
+ * is_false — the predicate must NOT hold.
+ *
+ * @param c  the predicate
+ * @throws   when `c` is true
+ */
+exp fn is_false(c: bool) {
+    if c { fail_bare("is_false") }
+}
+
+/**
+ * eq_i64 — signed integer equality.
+ *
+ * @param got   the observed value
+ * @param want  the expected value
+ * @throws      when they differ, naming both
+ */
+exp fn eq_i64(got: i64, want: i64) {
+    if got != want { fail("eq_i64", $"expected {want}, got {got}") }
+}
+
+/**
+ * ne_i64 — signed integer difference.
+ *
+ * @param got   the observed value
+ * @param want  the value it must NOT be
+ * @throws      when they are equal, naming both
+ */
+exp fn ne_i64(got: i64, want: i64) {
+    if got == want { fail("ne_i64", $"expected anything but {want}, got {got}") }
+}
+
+/**
+ * lt_i64 — the observed value must be strictly below the bound.
+ *
+ * @param got    the observed value
+ * @param bound  the exclusive upper bound
+ * @throws       when `got >= bound`, naming both
+ */
+exp fn lt_i64(got: i64, bound: i64) {
+    if got >= bound { fail("lt_i64", $"expected < {bound}, got {got}") }
+}
+
+/**
+ * le_i64 — the observed value must not exceed the bound.
+ *
+ * @param got    the observed value
+ * @param bound  the inclusive upper bound
+ * @throws       when `got > bound`, naming both
+ */
+exp fn le_i64(got: i64, bound: i64) {
+    if got > bound { fail("le_i64", $"expected <= {bound}, got {got}") }
+}
+
+/**
+ * gt_i64 — the observed value must be strictly above the bound.
+ *
+ * @param got    the observed value
+ * @param bound  the exclusive lower bound
+ * @throws       when `got <= bound`, naming both
+ */
+exp fn gt_i64(got: i64, bound: i64) {
+    if got <= bound { fail("gt_i64", $"expected > {bound}, got {got}") }
+}
+
+/**
+ * ge_i64 — the observed value must be at least the bound.
+ *
+ * @param got    the observed value
+ * @param bound  the inclusive lower bound
+ * @throws       when `got < bound`, naming both
+ */
+exp fn ge_i64(got: i64, bound: i64) {
+    if got < bound { fail("ge_i64", $"expected >= {bound}, got {got}") }
+}
+
+/**
+ * eq_u64 — unsigned integer equality.
+ *
+ * @param got   the observed value
+ * @param want  the expected value
+ * @throws      when they differ, naming both
+ */
+exp fn eq_u64(got: u64, want: u64) {
+    if got != want { fail("eq_u64", $"expected {want}, got {got}") }
+}
+
+/**
+ * eq_f64 — float equality WITHIN a tolerance, because exact binary64 equality is almost never the
+ * claim a test means to make; the tolerance is an ARGUMENT so the scenario states its own precision
+ * rather than inheriting a magic one.
+ *
+ * @param got   the observed value
+ * @param want  the expected value
+ * @param tol   the largest absolute difference that still counts as equal
+ * @throws      when `|got - want| > tol`, naming all three
+ */
+exp fn eq_f64(got: f64, want: f64, tol: f64) {
+    let diff = if got < want { want - got } else { got - want }
+    if diff > tol { fail("eq_f64", $"expected {want} within {tol}, got {got}") }
+}
+
+/**
+ * eq_str — byte equality of two strings.
+ *
+ * @param got   the observed text
+ * @param want  the expected text
+ * @throws      when they differ, quoting both
+ */
+exp fn eq_str(got: str, want: str) {
+    if got != want { fail(
+            "eq_str", teko::str::concat("expected ", quoted(want), ", got ", quoted(got))) }
+}
+
+/**
+ * ne_str — byte difference of two strings.
+ *
+ * @param got   the observed text
+ * @param want  the text it must NOT be
+ * @throws      when they are equal, quoting both
+ */
+exp fn ne_str(got: str, want: str) {
+    if got == want { fail_two_texts("ne_str", "anything but", want, got) }
+}
+
+/**
+ * str_contains — `needle` must appear in `hay`. An empty needle is contained in anything.
+ *
+ * @param hay     the text searched
+ * @param needle  the substring demanded
+ * @throws        when `needle` does not appear, quoting both
+ */
+exp fn str_contains(hay: str, needle: str) {
+    if !teko::str::contains(hay, needle) { fail_two_texts("str_contains", "to contain", needle, hay) }
+}
+
+/**
+ * str_absent — `needle` must NOT appear in `hay`.
+ *
+ * @param hay     the text searched
+ * @param needle  the substring forbidden
+ * @throws        when `needle` appears, quoting both
+ */
+exp fn str_absent(hay: str, needle: str) {
+    if teko::str::contains(hay, needle) { fail_two_texts("str_absent", "NOT to contain", needle, hay) }
+}
+
+/**
+ * str_starts_with — `hay` must open with `prefix`.
+ *
+ * @param hay     the text examined
+ * @param prefix  the opening demanded
+ * @throws        when `hay` does not open with it, quoting both
+ */
+exp fn str_starts_with(hay: str, prefix: str) {
+    if prefix.len > hay.len { fail_two_texts("str_starts_with", "to start with", prefix, hay) }
+    if teko::str::slice_to(hay, prefix.len) != prefix { fail_two_texts("str_starts_with", "to start with", prefix, hay) }
+}
+
+/**
+ * str_ends_with — `hay` must close with `suffix`.
+ *
+ * @param hay     the text examined
+ * @param suffix  the closing demanded
+ * @throws        when `hay` does not close with it, quoting both
+ */
+exp fn str_ends_with(hay: str, suffix: str) {
+    if !teko::str::ends_with(hay, suffix) { fail_two_texts("str_ends_with", "to end with", suffix, hay) }
+}
+
+/**
+ * len_eq — the length assertion for ANY sequence: pass `xs.len`, whatever `xs`'s element type is.
+ * This is how `[]T` SHAPE is asserted with no generics in the seed.
+ *
+ * @param got   the observed length
+ * @param want  the expected length
+ * @throws      when they differ, naming both
+ */
+exp fn len_eq(got: u64, want: u64) {
+    if got != want { fail("len_eq", $"expected length {want}, got {got}") }
+}
+
+/**
+ * bytes_eq — element-wise equality of two `[]byte`, reporting the FIRST differing INDEX rather than
+ * just "not equal": for a byte buffer the index is the whole diagnosis.
+ *
+ * @param got   the observed bytes
+ * @param want  the expected bytes
+ * @throws      when the lengths differ, or at the first differing index
+ */
+exp fn bytes_eq(got: []byte, want: []byte) {
+    if got.len != want.len { fail("bytes_eq", $"expected {want.len} bytes, got {got.len}") }
+    mut i: u64 = 0
+    loop {
+        if i >= got.len { break }
+        if got[i] != want[i] {
+            let w = want[i] to u64
+            let g = got[i] to u64
+            fail("bytes_eq", $"expected byte {w} at index {i}, got {g}")
+        }
+        i = i + 1
+    }
+}
+
+/**
+ * is_present — a `T | null` narrowed to its `T` member. The caller does the `match` (which is where
+ * narrowing lives) and passes whether it hit `T`, plus the member's NAME so the failure says which
+ * union it was about.
+ *
+ * @param what     the union member's name, for the message
+ * @param present  whether the caller's `match` reached the non-null arm
+ * @throws         when it did not
+ */
+exp fn is_present(what: str, present: bool) {
+    if !present { fail("is_present", teko::str::concat("expected ", what, " to be present, got null")) }
+}
+
+/**
+ * is_absent — a `T | null` that must be null.
+ *
+ * @param what     the union member's name, for the message
+ * @param present  whether the caller's `match` reached the non-null arm
+ * @throws         when it did
+ */
+exp fn is_absent(what: str, present: bool) {
+    if present { fail("is_absent", teko::str::concat("expected ", what, " to be null, got a present value")) }
+}
+
+/**
+ * is_ok — a `T | error` that must have yielded its value member.
+ *
+ * @param what  the operation's name, for the message
+ * @param ok    whether the caller's `match` reached the value arm
+ * @throws      when it reached the error arm instead
+ */
+exp fn is_ok(what: str, ok: bool) {
+    if !ok { fail("is_ok", teko::str::concat("expected ", what, " to succeed, got the error member")) }
+}
+
+/**
+ * is_error — a `T | error` that must have yielded its error member. This is the assertion a scenario
+ * uses for "this fails", in place of addressing the failure by an exit code.
+ *
+ * @param what  the operation's name, for the message
+ * @param ok    whether the caller's `match` reached the value arm
+ * @throws      when it did (i.e. the operation unexpectedly succeeded)
+ */
+exp fn is_error(what: str, ok: bool) {
+    if ok { fail("is_error", teko::str::concat("expected ", what, " to yield its error member, got a value")) }
+}

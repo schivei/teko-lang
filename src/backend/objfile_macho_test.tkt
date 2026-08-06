@@ -1,0 +1,649 @@
+use teko::lir
+
+/**
+ * mo_gpr — a physical GPR operand with the given ISA id (the object-writer
+ * fixture shorthand; A4 runs post-regalloc, every operand physical).
+ *
+ * @param u32 id  the ISA register number
+ * @return MReg  the physical GPR operand
+ */
+fn mo_gpr(id: u32) -> MReg {
+    preg(id, MRegClass::GPR)
+}
+
+/**
+ * mo_block — a machine block (no params) with the given id and instructions.
+ *
+ * @param u32 id  the block id
+ * @param []MInst insts  the block's instructions
+ * @return MBlock  the assembled block
+ */
+fn mo_block(id: u32, insts: []MInst) -> MBlock {
+    MBlock { id = id; params = teko::list::empty(); insts = insts }
+}
+
+/**
+ * mo_func — a single-block `MFunc` with an empty frame.
+ *
+ * @param str sym  the function's symbol
+ * @param []MInst insts  the block's instructions
+ * @return MFunc  the assembled function
+ */
+fn mo_func(sym: str, insts: []MInst) -> MFunc {
+    MFunc { symbol = sym; blocks = teko::list::push(teko::list::empty(), mo_block(0 to u32, insts)); frame = teko::list::empty() }
+}
+
+/**
+ * mo_no_uses — the empty `[]MReg` list, typed for the call fixtures.
+ *
+ * @return []MReg  an empty register list
+ */
+fn mo_no_uses() -> []MReg {
+    teko::list::empty()
+}
+
+/**
+ * mo_object_of — encode `m` and assemble its Mach-O object, or an empty buffer
+ * on an unexpected honest-stop (so a golden length/byte assertion fails loudly).
+ *
+ * @param MModule m  the module to encode + emit
+ * @return []byte  the Mach-O object bytes, or empty on error
+ */
+fn mo_object_of(m: MModule) -> []byte {
+    match encode_module(AAPCS64, m) {
+        EncodedModule as x => emit_macho(x, no_dwarf_sink())
+        error as e => teko::list::empty()
+    }
+}
+
+/**
+ * mo_u32_at — the little-endian u32 read from `bytes` at byte index `i` (the
+ * golden-object field reader).
+ *
+ * @param []byte bytes  the object bytes
+ * @param u64 i  the field's byte offset
+ * @return u32  the little-endian u32 at `i`
+ */
+fn mo_u32_at(bytes: []byte, i: u64) -> u32 {
+    (bytes[i] to u32) | ((bytes[i + (1 to u64)] to u32) << (8 to u32)) | ((bytes[i + (2 to u64)] to u32) << (16 to u32)) | ((bytes[i + (3 to u64)] to u32) << (24 to u32))
+}
+
+/**
+ * mo_rodata_module — a frameless `ret`-only `main` plus one rodata entry
+ * (`"hi\0"`), for the `__const`-section (nsects=2, no-reloc) golden path.
+ *
+ * @return MModule  the one-function, one-rodata module
+ */
+fn mo_rodata_module() -> MModule {
+    let bytes = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), 0x68 to byte), 0x69 to byte), 0 to byte)
+    let rodata = teko::list::push(teko::list::empty(), lir::LRodata { symbol = "s0"; bytes = bytes; relocs = teko::list::empty() })
+    let funcs = teko::list::push(teko::list::empty(), mo_func("main", teko::list::push(teko::list::empty(), RET_INST)))
+    MModule { funcs = funcs; rodata = rodata; globals = teko::list::empty(); layouts = teko::list::empty() }
+}
+
+#test
+/**
+ * rodata_module_emits_const_section — a module with rodata emits a two-section
+ * segment: `__text` (4 bytes, no relocations) plus, after the `MACHO_CONST_ALIGN`
+ * gap `text_size=4` needs to reach the next 8-byte boundary (0.3.1.0
+ * macho-const-section-align), `__const` (3 bytes at file offset 400, `addr=8`
+ * — NOT the raw `text_size`). The 4-byte gap (396..399) is zero-padded; the 3
+ * rodata bytes are `hi\0` at 400..402. The symbol table is LOCAL-then-GLOBAL:
+ * `s0` (rodata) is `N_SECT` only (0x0E, no `N_EXT`) with `n_value = const_addr +
+ * 0 = 8` (the F1 fix, now over the ALIGNED base — an ABSOLUTE address, not a
+ * bare section-relative offset); `main` is `N_SECT | N_EXT` (0x0F) with
+ * `n_value = 0`. `LC_DYSYMTAB` reports
+ * `nlocalsym=1`/`iextdefsym=1`/`nextdefsym=1`/`nundefsym=0`. The string table
+ * lists `_s0` before `_main` (locals first). The whole object is 451 bytes.
+ *
+ * @return void
+ */
+fn rodata_module_emits_const_section() {
+    let obj = mo_object_of(mo_rodata_module())
+    teko::assert::is_true(obj.len == (451 to u64))
+    teko::assert::is_true(mo_u32_at(obj, 96 to u64) == (2 to u32))
+    teko::assert::is_true(mo_u32_at(obj, 160 to u64) == (0 to u32))
+    teko::assert::is_true(mo_u32_at(obj, 164 to u64) == (0 to u32))
+    teko::assert::is_true(obj[184] == (0x5F to byte))
+    teko::assert::is_true(obj[186] == (0x63 to byte))
+    teko::assert::is_true(obj[190] == (0x74 to byte))
+    teko::assert::is_true(mo_u32_at(obj, 216 to u64) == (8 to u32))
+    teko::assert::is_true(mo_u32_at(obj, 224 to u64) == (3 to u32))
+    teko::assert::is_true(mo_u32_at(obj, 232 to u64) == (400 to u32))
+    teko::assert::is_true(mo_u32_at(obj, 392 to u64) == (0xD65F03C0 to u32))
+    teko::assert::is_true(obj[396] == (0 to byte))
+    teko::assert::is_true(obj[397] == (0 to byte))
+    teko::assert::is_true(obj[398] == (0 to byte))
+    teko::assert::is_true(obj[399] == (0 to byte))
+    teko::assert::is_true(obj[400] == (0x68 to byte))
+    teko::assert::is_true(obj[401] == (0x69 to byte))
+    teko::assert::is_true(obj[402] == (0 to byte))
+    teko::assert::is_true(mo_u32_at(obj, 324 to u64) == (1 to u32))
+    teko::assert::is_true(mo_u32_at(obj, 328 to u64) == (1 to u32))
+    teko::assert::is_true(mo_u32_at(obj, 332 to u64) == (1 to u32))
+    teko::assert::is_true(mo_u32_at(obj, 340 to u64) == (0 to u32))
+    teko::assert::is_true(obj[412] == (0x0E to byte))
+    teko::assert::is_true(obj[413] == (2 to byte))
+    teko::assert::is_true(mo_u32_at(obj, 416 to u64) == (8 to u32))
+    teko::assert::is_true(mo_u32_at(obj, 420 to u64) == (0 to u32))
+    teko::assert::is_true(obj[428] == (0x0F to byte))
+    teko::assert::is_true(obj[429] == (1 to byte))
+    teko::assert::is_true(mo_u32_at(obj, 432 to u64) == (0 to u32))
+    teko::assert::is_true(obj[441] == (0x5F to byte))
+    teko::assert::is_true(obj[442] == (0x73 to byte))
+    teko::assert::is_true(obj[443] == (0x30 to byte))
+    teko::assert::is_true(obj[444] == (0 to byte))
+    teko::assert::is_true(obj[445] == (0x5F to byte))
+    teko::assert::is_true(obj[446] == (0x6D to byte))
+}
+
+/**
+ * mo_two_syms — a two-entry defined, global symbol list, for the `sym_index`
+ * fixtures.
+ *
+ * @return []Symbol  `[a, b]`, both defined and global
+ */
+fn mo_two_syms() -> []Symbol {
+    let a = Symbol { name = "a"; defined = true; sect = 1 to u8; offset = 0 to u32; local = false }
+    let b = Symbol { name = "b"; defined = true; sect = 1 to u8; offset = 0 to u32; local = false }
+    teko::list::push(teko::list::push(teko::list::empty(), a), b)
+}
+
+#test
+/**
+ * sym_index_finds_and_sentinels — `sym_index` returns a present symbol's index
+ * and, for an absent name, the one-past-end sentinel (`symbols.len`), covering
+ * both arms of the lookup the relocation table relies on.
+ *
+ * @return void
+ */
+fn sym_index_finds_and_sentinels() {
+    let syms = mo_two_syms()
+    teko::assert::is_true(sym_index(syms, "a") == (0 to u32))
+    teko::assert::is_true(sym_index(syms, "b") == (1 to u32))
+    teko::assert::is_true(sym_index(syms, "z") == (2 to u32))
+}
+
+/**
+ * mo_rodata_reloc_module — a frameless `main` of `adrp x0,"s0"; add-lo
+ * x0,x0,"s0"; bl tk_exit` (no `ret`, so it stays frameless) plus one rodata
+ * entry `s0 = "A\0"`. Exercises all three ARM64 relocation kinds against both
+ * a DEFINED (`s0`, local `__const`) and an UNDEFINED (`tk_exit`) target in one
+ * object — the F2(a) round-trip fixture.
+ *
+ * @return MModule  the one-function, one-rodata, three-reloc module
+ */
+fn mo_rodata_reloc_module() -> MModule {
+    let insts = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(), adrp_inst(mo_gpr(0), "s0", MRelocKind::PageHi)), add_lo_inst(mo_gpr(0), mo_gpr(0), "s0", MRelocKind::PageLo)), call_inst("tk_exit", mo_no_uses(), mo_gpr(0), false, false))
+    let bytes = teko::list::push(teko::list::push(teko::list::empty(), 0x41 to byte), 0 to byte)
+    let rodata = teko::list::push(teko::list::empty(), lir::LRodata { symbol = "s0"; bytes = bytes; relocs = teko::list::empty() })
+    let funcs = teko::list::push(teko::list::empty(), mo_func("main", insts))
+    MModule { funcs = funcs; rodata = rodata; globals = teko::list::empty(); layouts = teko::list::empty() }
+}
+
+#test
+/**
+ * rodata_reloc_module_pins_symtab_and_page_relocs — the F1/F2/F3 round-trip
+ * pin: `s0` (local, `__const`) carries `n_value = const_addr(16) + 0 = 16` —
+ * `text_size(12)` rounded UP to the next `MACHO_CONST_ALIGN` (8) boundary
+ * (0.3.1.0 macho-const-section-align), the F1 fix's ABSOLUTE address now over
+ * that aligned base — and `N_SECT`-only type `0x0E` (the F3 local-symbol fix);
+ * `main` (global, `__text`) stays `N_SECT | N_EXT` (0x0F) at `n_value = 0`. The
+ * three `relocation_info` words are byte-pinned: `PAGE21`→s0 (`0x3D000000`,
+ * pc-relative, symbol index 0), `PAGEOFF12`→s0 (`0x4C000000`, absolute, same
+ * index), `BRANCH26`→tk_exit (`0x2D000002`, pc-relative, symbol index 2 — the
+ * undefined entry sorts after the two defined ones). `LC_DYSYMTAB` reports
+ * `nlocalsym=1`/`nextdefsym=1`/`nundefsym=1`. The whole object is 508 bytes.
+ *
+ * @return void
+ */
+fn rodata_reloc_module_pins_symtab_and_page_relocs() {
+    let enc = match encode_module(AAPCS64, mo_rodata_reloc_module()) {
+        EncodedModule as x => x
+        error as e => bad_enc()
+    }
+    teko::assert::is_true(enc.relocs.len == 3)
+    teko::assert::is_true(enc.symbols.len == 3)
+    let obj = emit_macho(enc, no_dwarf_sink())
+    teko::assert::is_true(obj.len == (508 to u64))
+    teko::assert::is_true(mo_u32_at(obj, 324 to u64) == (1 to u32))
+    teko::assert::is_true(mo_u32_at(obj, 328 to u64) == (1 to u32))
+    teko::assert::is_true(mo_u32_at(obj, 332 to u64) == (1 to u32))
+    teko::assert::is_true(mo_u32_at(obj, 336 to u64) == (2 to u32))
+    teko::assert::is_true(mo_u32_at(obj, 340 to u64) == (1 to u32))
+    teko::assert::is_true(mo_u32_at(obj, 412 to u64) == (0 to u32))
+    teko::assert::is_true(mo_u32_at(obj, 416 to u64) == (0x3D000000 to u32))
+    teko::assert::is_true(mo_u32_at(obj, 420 to u64) == (4 to u32))
+    teko::assert::is_true(mo_u32_at(obj, 424 to u64) == (0x4C000000 to u32))
+    teko::assert::is_true(mo_u32_at(obj, 428 to u64) == (8 to u32))
+    teko::assert::is_true(mo_u32_at(obj, 432 to u64) == (0x2D000002 to u32))
+    teko::assert::is_true(obj[444] == (0x0E to byte))
+    teko::assert::is_true(obj[445] == (2 to byte))
+    teko::assert::is_true(mo_u32_at(obj, 448 to u64) == (16 to u32))
+    teko::assert::is_true(mo_u32_at(obj, 452 to u64) == (0 to u32))
+    teko::assert::is_true(obj[460] == (0x0F to byte))
+    teko::assert::is_true(obj[461] == (1 to byte))
+    teko::assert::is_true(mo_u32_at(obj, 464 to u64) == (0 to u32))
+    teko::assert::is_true(obj[476] == (0x01 to byte))
+    teko::assert::is_true(obj[477] == (0 to byte))
+}
+
+/**
+ * bad_enc — the sentinel `EncodedModule` for a fixture that must encode but
+ * unexpectedly honest-stops (so the following assertion fails loudly).
+ *
+ * @return EncodedModule  the empty sentinel module
+ */
+fn bad_enc() -> EncodedModule {
+    EncodedModule { text = teko::list::empty(); rodata = teko::list::empty(); symbols = teko::list::empty(); relocs = teko::list::empty() }
+}
+
+/**
+ * mo_rodata_ptr_enc — a hand-built `EncodedModule` with no functions and a 16-byte
+ * `__const` = an 8-byte pointer slot (offset 0) then the target datum `0x41` (offset
+ * 8), plus a single `Abs64`/`Rodata` relocation at `__const` offset 0 targeting the
+ * `target` local. Feeds `emit_macho` directly (`encode_module` honest-stops a
+ * rodata-internal pointer), pinning the `__const` relocation the T-B3 writer emits.
+ *
+ * @return EncodedModule  the hand-built rodata-internal-pointer module
+ */
+fn mo_rodata_ptr_enc() -> EncodedModule {
+    let rodata = [0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0x41 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte, 0 to byte]
+    let ptr = Symbol { name = "ptr"; defined = true; sect = 2 to u8; offset = 0 to u32; local = true }
+    let target = Symbol { name = "target"; defined = true; sect = 2 to u8; offset = 8 to u32; local = true }
+    let rr = Reloc { offset = 0 to u32; sym = "target"; kind = MRelocKind::Abs64; sect = RelocSect::Rodata }
+    EncodedModule { text = teko::list::empty(); rodata = rodata; symbols = [ptr, target]; relocs = [rr] }
+}
+
+/**
+ * T-B3: com um data→data reloc presente, o `__const` section_64 aponta a sua própria
+ * relocation table (reloff/nreloc) e a entrada UNSIGNED (r_length=3, extern, symnum
+ * do datum-alvo) sai contígua após a tabela (vazia) do `__text`; o slot in-place
+ * permanece 0 (o addend da UNSIGNED externa é 0).
+ */
+#test
+fn tb3_macho_const_reloc_emitted() {
+    let obj = emit_macho(mo_rodata_ptr_enc(), no_dwarf_sink())
+    teko::assert::is_true(obj.len == 462)
+    teko::assert::is_true(mo_u32_at(obj, 96) == 2)
+    teko::assert::is_true(mo_u32_at(obj, 240) == 408)
+    teko::assert::is_true(mo_u32_at(obj, 244) == 1)
+    teko::assert::is_true(mo_u32_at(obj, 408) == 0)
+    teko::assert::is_true(mo_u32_at(obj, 412) == 0x0E000001)
+    teko::assert::is_true(obj[392] == (0 to byte))
+    teko::assert::is_true(obj[400] == (0x41 to byte))
+}
+
+/**
+ * MO_SECT1_OFFSET_FIELD — the byte offset of the FIRST `section_64`'s `offset`
+ * field inside a Mach-O object: 32 (`mach_header_64`) + 72 (the `LC_SEGMENT_64`
+ * command header) + 48 (`sectname`+`segname`+`addr`+`size`).
+ */
+const MO_SECT1_OFFSET_FIELD: u64 = 152 to u64
+
+/**
+ * MO_SECT1_RELOFF_FIELD — the byte offset of the first `section_64`'s `reloff`
+ * field (`MO_SECT1_OFFSET_FIELD` + 4 for `offset` + 4 for `align`).
+ */
+const MO_SECT1_RELOFF_FIELD: u64 = 160 to u64
+
+/**
+ * MO_SECT1_NRELOC_FIELD — the byte offset of the first `section_64`'s `nreloc`
+ * field (`MO_SECT1_RELOFF_FIELD` + 4).
+ */
+const MO_SECT1_NRELOC_FIELD: u64 = 164 to u64
+
+/**
+ * MO_RTYPE_SHIFT — the bit position of `r_type` inside a `relocation_info`'s
+ * packed second word (bits 28..31).
+ */
+const MO_RTYPE_SHIFT: u32 = 28 to u32
+
+/**
+ * MO_ADRP_MASK — the bit mask isolating the ADRP opcode of an ARM64 instruction
+ * word (`op` at bit 31 and `0b10000` at bits 28..24; `immlo` at 30..29, `immhi`
+ * at 23..5 and `Rd` at 4..0 are operands), so `word & MO_ADRP_MASK ==
+ * ARM64_ADRP` recognizes any ADRP whatever its page immediate or destination.
+ */
+const MO_ADRP_MASK: u32 = 0x9F000000 to u32
+
+/**
+ * MO_ADD_IMM_MASK — the bit mask isolating the 64-bit ADD-immediate opcode of an
+ * ARM64 instruction word (bits 31..24), so `word & MO_ADD_IMM_MASK ==
+ * ARM64_ADD_IMM64_BASE` recognizes any `add Xd, Xn, #imm12`.
+ */
+const MO_ADD_IMM_MASK: u32 = 0xFF000000 to u32
+
+/**
+ * mo_reloc_field_word — the packed second word (`r_pcrel`/`r_length`/`r_extern`/
+ * `r_type` + `r_symbolnum`) of the first section's `relocs[i]` entry, read out of
+ * the emitted object through its own `section_64.reloff`.
+ *
+ * @param []byte obj  the emitted Mach-O object
+ * @param u64 i  the zero-based relocation index within the first section's table
+ * @return u32  the packed `relocation_info` bitfield word
+ */
+fn mo_reloc_field_word(obj: []byte, i: u64) -> u32 {
+    let reloff = mo_u32_at(obj, MO_SECT1_RELOFF_FIELD) to u64
+    mo_u32_at(obj, reloff + MACHO_RELOC_ENTRY_SIZE * i + (4 to u64))
+}
+
+/**
+ * mo_reloc_rtype — the `r_type` field of the first section's `relocs[i]` entry:
+ * the external `ARM64_RELOC_*` number the linker reads.
+ *
+ * @param []byte obj  the emitted Mach-O object
+ * @param u64 i  the zero-based relocation index
+ * @return u32  the `r_type` value
+ */
+fn mo_reloc_rtype(obj: []byte, i: u64) -> u32 {
+    mo_reloc_field_word(obj, i) >> MO_RTYPE_SHIFT
+}
+
+/**
+ * mo_reloc_patched_word — the `__text` instruction word the first section's
+ * `relocs[i]` entry patches, read through the relocation's own `r_address` and
+ * the section's file `offset`. This is what proves a relocation type sits on the
+ * instruction encoding that can carry it.
+ *
+ * @param []byte obj  the emitted Mach-O object
+ * @param u64 i  the zero-based relocation index
+ * @return u32  the little-endian instruction word at the patch site
+ */
+fn mo_reloc_patched_word(obj: []byte, i: u64) -> u32 {
+    let reloff = mo_u32_at(obj, MO_SECT1_RELOFF_FIELD) to u64
+    let addr = mo_u32_at(obj, reloff + MACHO_RELOC_ENTRY_SIZE * i) to u64
+    let text_off = mo_u32_at(obj, MO_SECT1_OFFSET_FIELD) to u64
+    mo_u32_at(obj, text_off + addr)
+}
+
+/**
+ * mo_selected_object — the FULL producer pipeline for one LIR function: instruction
+ * selection (`select_lfunc`), encoding (`encode_module`) and the Mach-O writer
+ * (`emit_macho`). The relocation goldens below run through it rather than
+ * hand-tagging `MAdrp`/`MAddLo`, because the defect being pinned was isel choosing
+ * the wrong tag — a hand-built module cannot see it.
+ *
+ * @param lir::LFunc f  the LIR function to lower end to end
+ * @return []byte  the emitted Mach-O object bytes, or empty on an honest stop
+ */
+fn mo_selected_object(f: lir::LFunc) -> []byte {
+    let mf = match select_lfunc(f) { MFunc as x => x; error => return teko::list::empty() }
+    mo_object_of(add_mfunc(empty_mmodule(), mf))
+}
+
+/**
+ * mo_func_addr_func — a `main` that materializes the address of the function
+ * `teko__demo__f` and returns it: the minimal `LFuncAddr` producer, which isel
+ * lowers to one `ADRP` + one `ADD` pair.
+ *
+ * @return lir::LFunc  the one-`LFuncAddr` function
+ */
+fn mo_func_addr_func() -> lir::LFunc {
+    let f0 = lir::new_func("main", 0, teko::list::empty(), lir::LType::I64)
+    let v = lir::alloc_vreg(f0)
+    let s0 = lir::append_inst(v.func, 0, lir::func_addr_inst(v.vreg, "teko__demo__f", 0, 0))
+    lir::append_inst(s0, 0, lir::ret_inst(v.vreg, 0, 0))
+}
+
+/**
+ * mo_global_addr_func — a `main` that materializes the address of the rodata
+ * datum `.Lstr0` and returns it: the minimal `LGlobalAddr` producer, the twin of
+ * `mo_func_addr_func`.
+ *
+ * @return lir::LFunc  the one-`LGlobalAddr` function
+ */
+fn mo_global_addr_func() -> lir::LFunc {
+    let f0 = lir::new_func("main", 0, teko::list::empty(), lir::LType::I64)
+    let v = lir::alloc_vreg(f0)
+    let s0 = lir::append_inst(v.func, 0, lir::global_addr_inst(v.vreg, ".Lstr0", 0, 0))
+    lir::append_inst(s0, 0, lir::ret_inst(v.vreg, 0, 0))
+}
+
+/**
+ * mo_dwarf_fixture_enc — a hand-built, no-rodata `EncodedModule` (D1.5 fixture): one 4-byte
+ * `__text` function `main` and nothing else, so the object has exactly one section (`nsects = 1`)
+ * and a deterministic, self-relocating layout to read the `__DWARF` segment out of.
+ *
+ * @return EncodedModule  the one-function, no-rodata module
+ */
+fn mo_dwarf_fixture_enc() -> EncodedModule {
+    let text = [0x1F to byte, 0x20 to byte, 0x03 to byte, 0xD5 to byte]
+    let main = Symbol { name = "main"; defined = true; sect = 1 to u8; offset = 0 to u32; local = false }
+    EncodedModule { text = text; rodata = teko::list::empty(); symbols = [main]; relocs = teko::list::empty() }
+}
+
+/**
+ * mo_dwarf_sink_of — a one-function `DwarfSink` (D1.5 fixture) anchored at `sym`, built through the
+ * SAME `build_dwarf_sink` the real `--debug=lines` build glue calls. Structurally identical to the
+ * ELF writer's `el_dwarf_sink_of` fixture (D1.4).
+ *
+ * @param str sym  the `.text` symbol both the CU and the line program anchor to
+ * @param u64 code_size  the function's (and so the unit's) code size
+ * @return DwarfSink  the assembled, `present = true` sink
+ */
+fn mo_dwarf_sink_of(sym: str, code_size: u64) -> DwarfSink {
+    let sub = DwSubprogram { name = "main"; decl_file = 1; decl_line = 10 to u32; symbol = sym; code_size = code_size }
+    let cu = DwCompileUnit {
+        producer = "teko test"; language = 0x0c to u32; name = "t.tks"; comp_dir = "."
+        text_symbol = sym; text_size = code_size; subprograms = [sub]
+    }
+    let rows = [DwLineRow { pc_advance = 0 to u64; line = 10 to u32; file = 1 }]
+    build_dwarf_sink(cu, ["t.tks"], rows, code_size)
+}
+
+/**
+ * mo_main_seg_cmdsize — the byte size of the FIRST (`__TEXT`) `LC_SEGMENT_64` load command, read
+ * from its own `cmdsize` field at fixed offset 36 (`mach_header_64`'s 32 bytes + the 4-byte `cmd`
+ * field of the first load command): the self-relocating key that locates every load command AFTER
+ * it, whatever `nsects` this particular fixture carries.
+ *
+ * @param []byte obj  the emitted Mach-O object
+ * @return u64  the first segment command's `cmdsize`
+ */
+fn mo_main_seg_cmdsize(obj: []byte) -> u64 {
+    mo_u32_at(obj, 36 to u64) to u64
+}
+
+/**
+ * mo_dwarf_seg_offset — the file byte offset of the `__DWARF` `LC_SEGMENT_64` load command: right
+ * after the first (`__TEXT`) segment command, located through the object's own `cmdsize` field
+ * rather than a hardcoded constant.
+ *
+ * @param []byte obj  the emitted Mach-O object
+ * @return u64  the `__DWARF` segment command's byte offset
+ */
+fn mo_dwarf_seg_offset(obj: []byte) -> u64 {
+    32 to u64 + mo_main_seg_cmdsize(obj)
+}
+
+/**
+ * mo_dwarf_section_offset — the file byte offset of the `n`-th `section_64` inside the `__DWARF`
+ * segment (0 = `__debug_abbrev`, 1 = `__debug_info`, 2 = `__debug_line`): the segment command header
+ * is 72 bytes, each section entry 80.
+ *
+ * @param []byte obj  the emitted Mach-O object
+ * @param u64 n  the zero-based section index within `__DWARF`
+ * @return u64  that section's `section_64` byte offset
+ */
+fn mo_dwarf_section_offset(obj: []byte, n: u64) -> u64 {
+    mo_dwarf_seg_offset(obj) + (72 to u64) + (n * (80 to u64))
+}
+
+/**
+ * mo_str16_eq — whether the 16-byte fixed-width name field at `off` starts with `s` (the rest
+ * zero-padded, `emit_fixed16`'s contract).
+ *
+ * @param []byte obj  the emitted Mach-O object
+ * @param u64 off  the 16-byte field's start offset
+ * @param str s  the expected name (at most 16 bytes)
+ * @return bool  true iff the field's first `s.len` bytes equal `s`
+ */
+fn mo_str16_eq(obj: []byte, off: u64, s: str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= s.len { break }
+        if obj[off + i] != s[i] { return false }
+        i++
+    }
+    true
+}
+
+/**
+ * mo_bytes_eq — whether `a` and `b` hold the same bytes in the same order (D1.5's byte-identity
+ * regression check).
+ *
+ * @param []byte a  the first buffer
+ * @param []byte b  the second buffer
+ * @return bool  true iff `a` and `b` are byte-for-byte identical
+ */
+fn mo_bytes_eq(a: []byte, b: []byte) -> bool {
+    if a.len != b.len { return false }
+    mut i: u64 = 0
+    loop {
+        if i >= a.len { break }
+        if a[i] != b[i] { return false }
+        i++
+    }
+    true
+}
+
+#test
+/**
+ * macho_dwarf_absent_is_byte_identical — omitting `dwarf` and passing `no_dwarf_sink()` explicitly
+ * produce the SAME object, byte for byte, and `ncmds` stays 4 — the `DebugInfo::None` default (D1.5's
+ * non-negotiable: a build with no debug axis stays byte-identical to before the sink existed).
+ *
+ * @return void
+ */
+fn macho_dwarf_absent_is_byte_identical() {
+    let a = emit_macho(mo_dwarf_fixture_enc(), no_dwarf_sink())
+    let b = emit_macho(mo_dwarf_fixture_enc(), no_dwarf_sink())
+    teko::assert::eq_u64(a.len, b.len)
+    teko::assert::is_true(mo_bytes_eq(a, b))
+    teko::assert::eq_u64(mo_u32_at(a, 16 to u64) to u64, 4 to u64)
+}
+
+#test
+/**
+ * macho_dwarf_present_adds_dwarf_segment — a `--debug=lines`-shaped object (D1.5) reports `ncmds = 5`
+ * (the `mach_header_64` field at byte 16); the second `LC_SEGMENT_64` load command, located through
+ * the first segment's own `cmdsize`, is named `__DWARF`, sized `72 + 3*80 = 312` bytes, and reports
+ * `nsects = 3` — proving the SEGMENT is placed, not just its sections.
+ *
+ * @return void
+ */
+fn macho_dwarf_present_adds_dwarf_segment() {
+    let obj = emit_macho(mo_dwarf_fixture_enc(), mo_dwarf_sink_of("main", 4 to u64))
+    teko::assert::eq_u64(mo_u32_at(obj, 16 to u64) to u64, 5 to u64)
+    let seg = mo_dwarf_seg_offset(obj)
+    teko::assert::eq_u64(mo_u32_at(obj, seg) to u64, 25 to u64)
+    teko::assert::eq_u64(mo_u32_at(obj, seg + (4 to u64)) to u64, 312 to u64)
+    teko::assert::is_true(mo_str16_eq(obj, seg + (8 to u64), "__DWARF"))
+    teko::assert::eq_u64(mo_u32_at(obj, seg + (64 to u64)) to u64, 3 to u64)
+}
+
+#test
+/**
+ * macho_dwarf_sections_are_named_sized_and_flagged_debug — the three `__DWARF` sections (D1.5) are
+ * `__debug_abbrev`/`__debug_info`/`__debug_line`, each `S_ATTR_DEBUG` (0x02000000, so `ld`/`lldb`
+ * treat them as debug-only, never mapped), each sized exactly like the D1.3 producers' own output.
+ *
+ * @return void
+ */
+fn macho_dwarf_sections_are_named_sized_and_flagged_debug() {
+    let sink = mo_dwarf_sink_of("main", 4 to u64)
+    let obj = emit_macho(mo_dwarf_fixture_enc(), sink)
+    let abbrev_off = mo_dwarf_section_offset(obj, 0 to u64)
+    let info_off = mo_dwarf_section_offset(obj, 1 to u64)
+    let line_off = mo_dwarf_section_offset(obj, 2 to u64)
+    teko::assert::is_true(mo_str16_eq(obj, abbrev_off, "__debug_abbrev"))
+    teko::assert::is_true(mo_str16_eq(obj, info_off, "__debug_info"))
+    teko::assert::is_true(mo_str16_eq(obj, line_off, "__debug_line"))
+    teko::assert::eq_u64(mo_u32_at(obj, abbrev_off + (40 to u64)) to u64, debug_abbrev().len)
+    teko::assert::eq_u64(mo_u32_at(obj, info_off + (40 to u64)) to u64, sink.info.bytes.len)
+    teko::assert::eq_u64(mo_u32_at(obj, line_off + (40 to u64)) to u64, sink.line.bytes.len)
+    teko::assert::eq_u64(mo_u32_at(obj, abbrev_off + (64 to u64)) to u64, 0x02000000 to u64)
+    teko::assert::eq_u64(mo_u32_at(obj, info_off + (64 to u64)) to u64, 0x02000000 to u64)
+    teko::assert::eq_u64(mo_u32_at(obj, line_off + (64 to u64)) to u64, 0x02000000 to u64)
+}
+
+#test
+/**
+ * macho_dwarf_info_reloc_resolves_against_defined_function_symbol — the `__debug_info` section's
+ * relocation table (D1.5) has exactly one entry (the CU-level low_pc; this fixture's single
+ * subprogram shares the same address, but `debug_info` emits the CU-level slot first — see
+ * `dwarf_info_matches_golden`), `ARM64_RELOC_UNSIGNED`(0)/`r_length=3`/`r_pcrel=0`/`r_extern=1`,
+ * against `main`'s ONLY `.symtab` index (0 — the sole symbol in this no-rodata fixture).
+ *
+ * @return void
+ */
+fn macho_dwarf_info_reloc_resolves_against_defined_function_symbol() {
+    let obj = emit_macho(mo_dwarf_fixture_enc(), mo_dwarf_sink_of("main", 4 to u64))
+    let info_off = mo_dwarf_section_offset(obj, 1 to u64)
+    let reloff = mo_u32_at(obj, info_off + (56 to u64)) to u64
+    let word = mo_u32_at(obj, reloff + (4 to u64))
+    let symnum = word & (0x00FFFFFF to u32)
+    let rtype = word >> (28 to u32)
+    let pcrel = (word >> (24 to u32)) & (1 to u32)
+    let is_extern = (word >> (27 to u32)) & (1 to u32)
+    teko::assert::eq_u64(rtype to u64, 0 to u64)
+    teko::assert::eq_u64(pcrel to u64, 0 to u64)
+    teko::assert::eq_u64(is_extern to u64, 1 to u64)
+    teko::assert::eq_u64(symnum to u64, 0 to u64)
+}
+
+/**
+ * mo_assert_addr_pair_relocs — assert that the object's first two `__text`
+ * relocations are a well-formed ADRP/ADD address pair: entry 0 is
+ * `ARM64_RELOC_PAGE21` sitting on an `ADRP` word, entry 1 is
+ * `ARM64_RELOC_PAGEOFF12` sitting on a 64-bit `ADD`-immediate word, and there are
+ * exactly two.
+ *
+ * @param []byte obj  the emitted Mach-O object
+ * @return void
+ */
+fn mo_assert_addr_pair_relocs(obj: []byte) {
+    teko::assert::is_true(mo_u32_at(obj, MO_SECT1_NRELOC_FIELD) == (2 to u32))
+    teko::assert::is_true(mo_reloc_rtype(obj, 0 to u64) == ARM64_RELOC_PAGE21)
+    teko::assert::is_true(mo_reloc_rtype(obj, 1 to u64) == ARM64_RELOC_PAGEOFF12)
+    teko::assert::is_true((mo_reloc_patched_word(obj, 0 to u64) & MO_ADRP_MASK) == ARM64_ADRP)
+    teko::assert::is_true((mo_reloc_patched_word(obj, 1 to u64) & MO_ADD_IMM_MASK) == ARM64_ADD_IMM64_BASE)
+}
+
+#test
+/**
+ * an `LFuncAddr`'s ADRP/ADD pair leaves the writer as PAGE21(3)+PAGEOFF12(4).
+ * BEFORE the fix isel tagged BOTH halves `Call`, so both entries came out
+ * `ARM64_RELOC_BRANCH26`(2) — a branch relocation on an ADRP and on an ADD, which
+ * Apple's `ld` refuses to link (`ARM64_RELOC_BRANCH26 relocation on non-b/bl
+ * instruction`). The assertion is on the NUMBERS in the emitted bytes, not on the
+ * fact that anything compiled.
+ */
+fn macho_func_addr_pair_is_page21_pageoff12() {
+    mo_assert_addr_pair_relocs(mo_selected_object(mo_func_addr_func()))
+}
+
+#test
+/**
+ * the `LGlobalAddr` twin: the same ADRP/ADD pair, the same PAGE21+PAGEOFF12
+ * numbers. This half was already correct; pinning both proves the two selections
+ * agree and cannot drift apart again.
+ */
+fn macho_global_addr_pair_is_page21_pageoff12() {
+    mo_assert_addr_pair_relocs(mo_selected_object(mo_global_addr_func()))
+}
+
+#test
+/**
+ * a direct `bl` is the ONLY relocation that may be `ARM64_RELOC_BRANCH26`(2), and
+ * it lands on a `BL` word: the negative half of the pair goldens above, so a
+ * future "just make everything PAGE21" cannot pass by deleting the branch case.
+ */
+fn macho_direct_call_reloc_is_branch26_on_bl() {
+    let insts = teko::list::push(teko::list::empty(), call_inst("tk_exit", mo_no_uses(), mo_gpr(0), false, false))
+    let obj = mo_object_of(MModule { funcs = teko::list::push(teko::list::empty(), mo_func("main", insts)); rodata = teko::list::empty(); globals = teko::list::empty(); layouts = teko::list::empty() })
+    teko::assert::is_true(mo_u32_at(obj, MO_SECT1_NRELOC_FIELD) == (1 to u32))
+    teko::assert::is_true(mo_reloc_rtype(obj, 0 to u64) == ARM64_RELOC_BRANCH26)
+    teko::assert::is_true(mo_reloc_patched_word(obj, 0 to u64) == ARM64_BL)
+}

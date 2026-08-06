@@ -1,0 +1,1286 @@
+/**
+ * parse_manifest_or_die — the unreachable fallback for `regr_manifest_for` (the literal source it
+ * builds always parses); returns a trivially-valid manifest so the helper stays total.
+ *
+ * @return a minimal valid manifest
+ */
+fn parse_manifest_or_die() -> Manifest {
+    match parse_manifest("name = \"h\"\nsource = \"src\"\n") { Manifest as m => m; error => parse_manifest_or_die() }
+}
+
+/**
+ * manifest_with_regression_files — a minimal valid manifest declaring `test_regression_files` as
+ * exactly `[path]` and `gate = true` — the shared fixture builder for the run_regression_sources
+ * M.3 tests below (0.3.1 C0).
+ *
+ * @param path  the single `.tkr` path to list
+ * @return      the parsed manifest
+ */
+fn manifest_with_regression_files(path: str) -> Manifest {
+    let src = teko::str::concat(teko::str::concat("name = \"h\"\nsource = \"src\"\n[tests]\nregression = [\"", path), "\"]\ngate = true\n")
+    match parse_manifest(src) { Manifest as m => m; error => parse_manifest_or_die() }
+}
+
+#test
+/**
+ * run_regression_sources_missing_path_is_a_manifest_error — a listed `.tkr` path that does not
+ * resolve to a readable file gates the run non-zero (M.3 — never a silent skip), 0.3.1 C0.
+ *
+ * @return void
+ */
+fn run_regression_sources_missing_path_is_a_manifest_error() {
+    let m = manifest_with_regression_files("examples/regressions/__definitely_missing__.tkr")
+    teko::assert::is_true(run_regression_sources("teko", m) == 1)
+}
+
+#test
+/**
+ * run_regression_sources_scopes_its_work_tree_inside_a_test — journal J3, families #15/#17-20:
+ * `run_regression_sources`'s work tree is `teko::test::scoped(REGR_WORK_DIR)`, so calling it from
+ * INSIDE a test — as this very fixture does — never `rm_rf`s the real `bin/.regr-work` a concurrent
+ * production run owns. Plants a sentinel at the LITERAL (production) work dir first; this call's own
+ * `rm_rf` on ITS OWN scoped copy must leave the sentinel untouched.
+ *
+ * @return void
+ */
+fn run_regression_sources_scopes_its_work_tree_inside_a_test() {
+    match mkdir_p(REGR_WORK_DIR) { error => { }; null => { } }
+    let sentinel = teko::str::concat(REGR_WORK_DIR, "/j3_sentinel")
+    match teko::io::write_file(sentinel, "kept") { error => { }; null => { } }
+    let m = manifest_with_regression_files("examples/regressions/__definitely_missing__.tkr")
+    teko::assert::is_true(run_regression_sources("teko", m) == 1)
+    let back = match teko::io::read_file(sentinel) { str as s => s; error => "" }
+    teko::assert::eq_str(back, "kept")
+    match teko::fs::remove_file(sentinel) { error => { }; null => { } }
+}
+
+#test
+/**
+ * regr_summary_line_reports_skips_in_their_own_column — the M.3 fix this vagão exists for: the
+ * regression summary has THREE columns, so a run whose every regressor was skipped can no longer
+ * print "N run, 0 failed" (indistinguishable from a run that checked everything). Pins the exact
+ * line shape the CI log is read for.
+ *
+ * @return void
+ */
+fn regr_summary_line_reports_skips_in_their_own_column() {
+    teko::assert::is_true(regr_summary_line(10, 0, 0) == "teko: regressions 10 run, 0 skipped, 0 failed")
+    teko::assert::is_true(regr_summary_line(10, 40, 0) == "teko: regressions 10 run, 40 skipped, 0 failed")
+    teko::assert::is_true(regr_summary_line(10, 4, 1) == "teko: regressions 10 run, 4 skipped, 1 failed")
+}
+
+#test
+/**
+ * regr_outcome_constructors_tally_only_skips — the accounting invariant the summary rests on: a
+ * skip leaf carries one skip, a pass and a fail leaf carry none, and `regr_add_skips` accumulates
+ * onto any of them without disturbing the verdict itself.
+ *
+ * @return void
+ */
+fn regr_outcome_constructors_tally_only_skips() {
+    teko::assert::is_true(regr_skip("no qemu").skips == 1)
+    teko::assert::is_true(regr_pass().skips == 0)
+    teko::assert::is_true(regr_fail("boom").skips == 0)
+    let agg = regr_add_skips(regr_add_skips(regr_pass(), 3), 4)
+    teko::assert::is_true(agg.skips == 7)
+    teko::assert::is_true(agg.ok)
+    teko::assert::is_false(agg.skipped)
+    let kept = regr_add_skips(regr_fail("boom"), 2)
+    teko::assert::is_false(kept.ok)
+    teko::assert::is_true(kept.message == "boom")
+}
+
+#test
+/**
+ * tail_lines_keeps_the_trailing_lines — `compile_failure_message`'s excerpt primitive: the last `n`
+ * lines, trailing newline tolerant, the whole text when it is shorter than `n`, and "" for `n == 0`.
+ *
+ * @return void
+ */
+fn tail_lines_keeps_the_trailing_lines() {
+    let s = "one\ntwo\nthree\nfour\n"
+    teko::assert::is_true(tail_lines(s, 2) == "three\nfour")
+    teko::assert::is_true(tail_lines(s, 1) == "four")
+    teko::assert::is_true(tail_lines(s, 9) == "one\ntwo\nthree\nfour")
+    teko::assert::is_true(tail_lines(s, 0) == "")
+    teko::assert::is_true(tail_lines("", 3) == "")
+}
+
+#test
+/**
+ * head_lines_keeps_the_leading_lines — the mirror primitive `compile_fail_excerpt` needs: the first
+ * `n` lines, trailing newline tolerant, the whole text when it is shorter than `n`, and "" for
+ * `n == 0`.
+ *
+ * @return void
+ */
+fn head_lines_keeps_the_leading_lines() {
+    let s = "one\ntwo\nthree\nfour\n"
+    teko::assert::is_true(head_lines(s, 2) == "one\ntwo")
+    teko::assert::is_true(head_lines(s, 1) == "one")
+    teko::assert::is_true(head_lines(s, 9) == "one\ntwo\nthree\nfour")
+    teko::assert::is_true(head_lines(s, 0) == "")
+    teko::assert::is_true(head_lines("", 3) == "")
+}
+
+#test
+/**
+ * count_text_lines_ignores_trailing_newlines — the measure that decides whether an excerpt elides
+ * anything: `"a\n"` and `"a"` are both one line, an empty text is zero lines, and a run of trailing
+ * newlines adds none.
+ *
+ * @return void
+ */
+fn count_text_lines_ignores_trailing_newlines() {
+    teko::assert::is_true(count_text_lines("") == 0)
+    teko::assert::is_true(count_text_lines("\n\n") == 0)
+    teko::assert::is_true(count_text_lines("a") == 1)
+    teko::assert::is_true(count_text_lines("a\n") == 1)
+    teko::assert::is_true(count_text_lines("a\nb\nc\n") == 3)
+    teko::assert::is_true(count_text_lines("a\n\nc") == 3)
+}
+
+#test
+/**
+ * compile_fail_excerpt_keeps_the_cause_of_a_cascade — THE MEASURED DEFECT this pins. A build whose
+ * first diagnostic is the cause and whose remaining hundred-plus lines are consequences (one
+ * unlexable fixture file → 119 `unknown function` lines in the own-backend corpus channel) used to
+ * be reported by its 40-line TAIL alone, so the report carried consequences only and every reader
+ * of it diagnosed something the build never said. The excerpt keeps BOTH ends and says how many
+ * lines it dropped.
+ *
+ * @return void
+ */
+fn compile_fail_excerpt_keeps_the_cause_of_a_cascade() {
+    mut text = "teko: src/corpus.tks:3710:18: unexpected character\n"
+    mut i: u64 = 0
+    loop {
+        if i >= 119 { break }
+        text = text ~ $"main.tks:{i}:4: unknown function: f_case_{i}\n"
+        i = i + 1
+    }
+    let excerpt = compile_fail_excerpt(text)
+    teko::assert::str_contains(excerpt, "unexpected character")
+    teko::assert::str_contains(excerpt, "line(s) elided")
+    teko::assert::str_contains(excerpt, "f_case_118")
+    teko::assert::is_false(teko::str::contains(excerpt, "f_case_60"))
+}
+
+#test
+/**
+ * compile_fail_excerpt_quotes_a_short_stream_whole — a stream that fits inside the two bounds is
+ * reproduced verbatim, with no elision line inventing a truncation that never happened.
+ *
+ * @return void
+ */
+fn compile_fail_excerpt_quotes_a_short_stream_whole() {
+    teko::assert::is_true(compile_fail_excerpt("one\ntwo\nthree\n") == "one\ntwo\nthree")
+    teko::assert::is_true(compile_fail_excerpt("") == "")
+    teko::assert::is_false(teko::str::contains(compile_fail_excerpt("one\ntwo\n"), "elided"))
+}
+
+#test
+/**
+ * compile_failure_message_carries_the_cc_output — the M.3 fix behind item 5a: a scenario whose BUILD
+ * failed must report WHY. The host `cc`'s diagnostics are captured (the compiler child's streams are
+ * redirected and `cc` inherits them) but used to be discarded in favour of the compiler's own last
+ * line, which only says the `cc` failed. The message now reproduces the captured tail.
+ *
+ * @return void
+ */
+fn compile_failure_message_carries_the_cc_output() {
+    let comp = CapResult {
+        exit = 1
+        stdout = ""
+        stderr = "teko 0.3.1\nassert.c:16: undefined reference to `tk_panic'\nteko: bin/x: cc failed to build the generated C\n"
+        harness_ns = 0
+        child_ns = 0
+        cmd = ""
+        chan_text = ""
+    }
+    let msg = compile_failure_message(comp)
+    teko::assert::str_contains(msg, "undefined reference")
+    teko::assert::str_contains(msg, "cc failed to build the generated C")
+    teko::assert::str_contains(msg, "exit 1")
+}
+
+#test
+/**
+ * compile_failure_message_falls_back_to_stdout — a toolchain that reports on stdout only still gets
+ * a message with a cause in it; a build that wrote nothing at all says so instead of pretending.
+ *
+ * @return void
+ */
+fn compile_failure_message_falls_back_to_stdout() {
+    let out_only = CapResult { exit = 2; stdout = "cc: fatal error: no input files\n"; stderr = ""; harness_ns = 0; child_ns = 0; cmd = ""; chan_text = "" }
+    teko::assert::str_contains(compile_failure_message(out_only), "no input files")
+    let silent = CapResult { exit = 3; stdout = ""; stderr = ""; harness_ns = 0; child_ns = 0; cmd = ""; chan_text = "" }
+    teko::assert::str_contains(compile_failure_message(silent), "wrote nothing")
+}
+
+#test
+/**
+ * exit_mismatch_message_names_the_origin_and_quotes_the_command — the run-mismatch report has to
+ * carry the evidence that tells the three readings of a "could not run" apart.
+ *
+ * This exists because PR #94's `test / windows` produced `exit 127, expected 134` with a real panic
+ * on the captured stderr: the child had plainly run, and the message still could not say whether
+ * the exec failed, whether the spawn failed, or whether Windows translates an aborting child
+ * differently. Three assertions, one per reading:
+ *   - the spawn sentinel is NAMED, not printed as a bare -1 (nothing ran; harness/host fault);
+ *   - 127 is attributed to a failed exec, not the runtime;
+ *   - the argv that was launched is quoted whenever the capture has one.
+ *
+ * The third case is the negative: an ordinary mismatch gets NO origin gloss (a note on every line
+ * is a note nobody reads), and a synthesized capture with no command must not print an empty
+ * `argv:` line.
+ *
+ * @return void
+ */
+fn exit_mismatch_message_names_the_origin_and_quotes_the_command() {
+    let spawned = CapResult {
+        exit = SPAWN_FAILED_EXIT; stdout = ""; stderr = ""; harness_ns = 0; child_ns = 0
+        cmd = "/w/bin/x"
+        chan_text = ""
+    }
+    let m_spawn = exit_mismatch_message(spawned, 134)
+    teko::assert::str_contains(m_spawn, "could not start the child")
+    teko::assert::str_contains(m_spawn, "argv: /w/bin/x")
+
+    let notfound = CapResult {
+        exit = EXEC_FAILED_EXIT; stdout = ""; stderr = "x: command not found\n"; harness_ns = 0; child_ns = 0
+        cmd = "x"
+        chan_text = ""
+    }
+    let m_127 = exit_mismatch_message(notfound, 134)
+    teko::assert::str_contains(m_127, "could not exec")
+    teko::assert::str_contains(m_127, "command not found")
+
+    let plain = CapResult { exit = 3; stdout = ""; stderr = ""; harness_ns = 0; child_ns = 0; cmd = ""; chan_text = "" }
+    let m_plain = exit_mismatch_message(plain, 0)
+    teko::assert::str_contains(m_plain, "exit 3, expected 0")
+    teko::assert::is_false(teko::str::contains(m_plain, "argv:"))
+    teko::assert::is_false(teko::str::contains(m_plain, "could not"))
+}
+
+#test
+/**
+ * cross_cc_for_target_demands_no_cross_driver_for_any_target — the pre-build capability probe must
+ * name the SAME toolchain the build then invokes, so the two can never drift. That is now "" for
+ * EVERY target, and the empty answer is the point: no target has a dedicated cross driver any more
+ * (`default_cc_for_target`), because the MinGW one was the only one and it is banned — a cross build
+ * stops at the object instead (`build_links_binary`), so it asks for no linker at all.
+ *
+ * @return void
+ */
+fn cross_cc_for_target_demands_no_cross_driver_for_any_target() {
+    teko::assert::is_true(cross_cc_for_target("x86_64-windows") == "")
+    teko::assert::is_true(cross_cc_for_target("") == "")
+    teko::assert::is_true(cross_cc_for_target(HOST_TARGET) == "")
+    teko::assert::is_true(cross_cc_for_target("some-unknown-target") == "")
+    teko::assert::is_false(linker_is_mingw(cross_cc_for_target("x86_64-windows")))
+}
+
+#test
+/**
+ * target_toolchain_skip_reason_is_empty_for_the_host — the host row of a backend x target `Examples`
+ * table must never be pre-skipped, however it spells the host ("" or the `HOST_TARGET` sentinel).
+ *
+ * THE WINDOWS ROW IS NO LONGER PRE-SKIPPED EITHER, ON ANY HOST, AND NO LONGER DEPENDS ON MINGW BEING
+ * INSTALLED. It used to demand `x86_64-w64-mingw32-gcc` on the PATH and honest-skip without it, which
+ * is why a Linux lane had to install MinGW to keep `own_cross_x86_64_windows_emits_coff` green. That
+ * row's claim was always the OBJECT, and a cross build now emits the object and stops, so the tool it
+ * used to wait for is a tool nothing invokes.
+ *
+ * @return void
+ */
+fn target_toolchain_skip_reason_is_empty_for_the_host() {
+    teko::assert::is_true(target_toolchain_skip_reason("") == "")
+    teko::assert::is_true(target_toolchain_skip_reason(HOST_TARGET) == "")
+    teko::assert::is_true(target_toolchain_skip_reason("x86_64-windows") == "")
+}
+
+#test
+/**
+ * tkr_target_env_omits_the_host_sentinel — `Given target = "host"` (and an empty value) must export
+ * NO `TEKO_TARGET`, because the own backend's R1 host-derived default IS what an unset variable
+ * means; exporting `TEKO_TARGET=host` would earn the honest R2 unrecognised-target stop on every
+ * host. A real cross target still exports its token.
+ *
+ * @return void
+ */
+fn tkr_target_env_omits_the_host_sentinel() {
+    teko::assert::is_true(tkr_target_env(HOST_TARGET).len == 0)
+    teko::assert::is_true(tkr_target_env("").len == 0)
+    let cross = tkr_target_env("x86_64-windows")
+    teko::assert::is_true(cross.len == 1)
+    teko::assert::is_true(cross[0] == "TEKO_TARGET=x86_64-windows")
+}
+
+#test
+/**
+ * tkr_effective_target_folds_the_host_sentinel — a leaf-tool selector must receive a real os-arch:
+ * both "" and the `HOST_TARGET` sentinel resolve to this build host's own `teko::os()`, while a
+ * declared cross target passes through verbatim.
+ *
+ * @return void
+ */
+fn tkr_effective_target_folds_the_host_sentinel() {
+    teko::assert::is_true(tkr_effective_target("") == teko::os())
+    teko::assert::is_true(tkr_effective_target(HOST_TARGET) == teko::os())
+    teko::assert::is_true(tkr_effective_target("x86_64-windows") == "x86_64-windows")
+}
+
+#test
+/**
+ * guard_no_project_build_at_root_refuses_a_bare_root_scenario — a root-scoped (`regr_dir` "."/"")
+ * scenario with NO inline/explicit source is refused (it would rebuild the compiler); one WITH an
+ * inline source, or any non-root directory, is allowed through (0.3.1 C1 §1.1).
+ *
+ * @return void
+ */
+fn guard_no_project_build_at_root_refuses_a_bare_root_scenario() {
+    let bare = tkr_lower_new_for_test()
+    match guard_no_project_build_at_root(".", bare) { error => teko::assert::is_true(true); null => teko::assert::is_true(false) }
+    match guard_no_project_build_at_root("", bare) { error => teko::assert::is_true(true); null => teko::assert::is_true(false) }
+    match guard_no_project_build_at_root("examples/regressions/diagnostics", bare) { error => teko::assert::is_true(false); null => teko::assert::is_true(true) }
+}
+
+#test
+/**
+ * guard_no_project_build_at_root_also_refuses_a_bare_root_compile_fail_scenario — the guard MUST
+ * refuse a root-scoped `CompileFail`-kind scenario with no inline/explicit source exactly like
+ * any other kind (0.3.1 C5): a bare `When compilation fails` at `regr_dir == "."` would otherwise
+ * fall through to `compile_regressive(".")`, rebuilding the compiler itself. Before 0.3.1 C5 the
+ * guard special-cased `t.kind != TkrKind::CompileFail`, so this scenario shape was NEVER refused —
+ * this test pins the fix.
+ *
+ * @return void
+ */
+fn guard_no_project_build_at_root_also_refuses_a_bare_root_compile_fail_scenario() {
+    let bare_compile_fail = tkr_lower_compile_fail_new_for_test()
+    match guard_no_project_build_at_root(".", bare_compile_fail) { error => teko::assert::is_true(true); null => teko::assert::is_true(false) }
+    match guard_no_project_build_at_root("examples/regressions/diagnostics", bare_compile_fail) { error => teko::assert::is_true(false); null => teko::assert::is_true(true) }
+}
+
+#test
+/**
+ * regr_dir_has_single_tkp_requires_exactly_one_manifest — false for a real (non-project) source
+ * directory with no `.tkp` at all, true for a genuine single-project directory (0.3.1 C4).
+ *
+ * BOTH PATHS MUST EXIST ON DISK, unlike the guard tests above: `regr_dir_has_single_tkp` calls
+ * `teko::fs::list_dir` and counts real entries, so a stale path here does not merely weaken the
+ * assertion — it INVERTS it. An unreadable directory returns false, which silently turns the
+ * positive case into a failing one. That is exactly how this test broke: it pointed at
+ * `examples/regressions/cwd_build`, that regressor was retired, and the abort took the whole test
+ * binary down (exit 134) on the first lane that ever got far enough to run it.
+ *
+ * @return void
+ */
+fn regr_dir_has_single_tkp_requires_exactly_one_manifest() {
+    teko::assert::is_true(!regr_dir_has_single_tkp("src/build"))
+    teko::assert::is_true(regr_dir_has_single_tkp("examples/regressions/diagnostics"))
+}
+
+/**
+ * regr_built_empty_for_test — the EMPTY build-cache slot (`done = false`, `kind = None`), the state
+ * a `.tkr` file starts in. The compile-fail artifact resolver takes the slot so project-level
+ * rejection scenarios share ONE build; a test probing its fail-closed guards hands it an empty one
+ * so nothing is served from cache.
+ *
+ * @return an empty `RegrBuilt` slot
+ * @since 0.3.1
+ */
+fn regr_built_empty_for_test() -> RegrBuilt {
+    RegrBuilt { done = false; kind = RegrBuildKind::None; comp = cap_synthetic(0, ""); binp = ""; srcs = teko::list::empty() }
+}
+
+#test
+/**
+ * tkr_compile_fail_artifact_refuses_a_non_project_dir_with_no_source — REPRO 1 of 0.3.1 C4: a
+ * compile-fail scenario with no `Given source`/`Given source inline`, whose `regr_dir` is NOT a
+ * single-project directory (no `.tkp`), must fail-closed with an HONEST error — never fall
+ * through to `compile_regressive` and let the runner's OWN "no single .tkp manifest" infra
+ * failure be consumed by `check_compile_fail` as if it were the compiler rejecting the construct
+ * (the false-green this test pins shut).
+ *
+ * @return void
+ */
+fn tkr_compile_fail_artifact_refuses_a_non_project_dir_with_no_source() {
+    let t = tkr_lower_compile_fail_new_for_test()
+    match tkr_compile_fail_artifact("", "src/build", t, teko::test::scoped("bin/.regr-work/c4_test_probe"), regr_built_empty_for_test()) {
+        TkrArtifact => teko::assert::is_true(false)
+        error => teko::assert::is_true(true)
+    }
+}
+
+#test
+/**
+ * tkr_compile_fail_artifact_refuses_a_compile_fail_scenario_with_no_diagnostic — the multi-file
+ * fallback also fail-closes when the scenario declares no `Then diagnostic`, even over a genuine
+ * single-project directory: with no diagnostic to assert against a real compiler message, a
+ * bare non-zero exit proves nothing (0.3.1 C4 fix (2)).
+ *
+ * @return void
+ */
+fn tkr_compile_fail_artifact_refuses_a_compile_fail_scenario_with_no_diagnostic() {
+    let t = tkr_lower_compile_fail_no_diagnostic_for_test()
+    match tkr_compile_fail_artifact("", "examples/regressions/diagnostics", t, teko::test::scoped("bin/.regr-work/c4_test_probe2"), regr_built_empty_for_test()) {
+        TkrArtifact => teko::assert::is_true(false)
+        error => teko::assert::is_true(true)
+    }
+}
+
+/**
+ * tkr_lower_new_for_test — a lowered `Tkr` with no inline/explicit source, for the guard test
+ * above (a plain project-based scenario shape).
+ *
+ * @return a bare lowered spec
+ */
+fn tkr_lower_new_for_test() -> Tkr {
+    match tkr_first_lowered_or_die("Feature: f\n  Scenario: s\n    When built and run\n    Then exit = 0\n") { Tkr as t => t; error => tkr_lower_new_for_test() }
+}
+
+/**
+ * tkr_lower_compile_fail_no_diagnostic_for_test — a lowered `Tkr` of `CompileFail` kind with no
+ * inline/explicit source AND no declared `diagnostic`, for the fail-closed test above.
+ *
+ * @return a bare `CompileFail`-kind lowered spec with an empty diagnostic
+ */
+fn tkr_lower_compile_fail_no_diagnostic_for_test() -> Tkr {
+    match tkr_first_lowered_or_die("Feature: f\n  Scenario: s\n    When compilation fails\n") { Tkr as t => t; error => tkr_lower_compile_fail_no_diagnostic_for_test() }
+}
+
+/**
+ * tkr_lower_compile_fail_new_for_test — a lowered `Tkr` of `CompileFail` kind with no
+ * inline/explicit source, for the root-guard test above (the multi-file-fixture scenario shape).
+ *
+ * @return a bare `CompileFail`-kind lowered spec
+ */
+fn tkr_lower_compile_fail_new_for_test() -> Tkr {
+    match tkr_first_lowered_or_die("Feature: f\n  Scenario: s\n    When compilation fails\n    Then diagnostic = \"x\"\n") { Tkr as t => t; error => tkr_lower_compile_fail_new_for_test() }
+}
+
+/**
+ * tkr_first_lowered_or_die — parse `src` and lower its first scenario, for a fixture that is
+ * known-valid (an internal helper, not a test itself).
+ *
+ * @param src  the `.tkr` text
+ * @return     the lowered spec, or an error on a malformed fixture
+ */
+fn tkr_first_lowered_or_die(src: str) -> Tkr | error {
+    let feats = match parse_tkr(src) { []TkrFeature as f => f; error as e => return e }
+    tkr_lower_scenario(feats[0].scenarios[0])
+}
+
+#test
+/**
+ * declarative_scenario_has_no_when_verb — `tkb_scenario_is_declarative` is true for a verb-less
+ * (documentation-only) scenario and false once a `When` step is present (0.3.1 C1 §2c).
+ *
+ * @return void
+ */
+fn declarative_scenario_has_no_when_verb() {
+    let decl_src = "Feature: f\n  Scenario: doc only\n    # verified-by: something external\n"
+    match parse_tkr(decl_src) {
+        []TkrFeature as fs => teko::assert::is_true(tkb_scenario_is_declarative(fs[0].scenarios[0]))
+        error => teko::assert::is_true(false)
+    }
+    let live_src = "Feature: f\n  Scenario: s\n    When built and run\n    Then exit = 0\n"
+    match parse_tkr(live_src) {
+        []TkrFeature as fs => teko::assert::is_false(tkb_scenario_is_declarative(fs[0].scenarios[0]))
+        error => teko::assert::is_true(false)
+    }
+}
+
+#test
+/**
+ * snippet_brace_delta_ignores_a_brace_inside_a_string_literal — sub-finding (1) of the 0.3.1
+ * splitter fix: a literal `{` inside a string (`let brace = "{"`) must NOT open a brace-depth
+ * chunk that never closes, and a `fn helper() -> i64 { 7 }` declaration on the FOLLOWING line
+ * must classify as a decl, cleanly split from the surrounding statements — the false RED the
+ * unfixed splitter produced (the whole snippet fused into one non-decl chunk, `main.tks`
+ * rejected for declaring a function).
+ *
+ * @return void
+ */
+fn snippet_brace_delta_ignores_a_brace_inside_a_string_literal() {
+    let src = "let brace = \"{\"\nfn helper() -> i64 { 7 }\nexit(helper() + brace.len)\n"
+    let split = split_snippet_decls_and_stmts(src)
+    teko::assert::is_true(teko::str::contains(split.decls, "fn helper"))
+    teko::assert::is_true(!teko::str::contains(split.decls, "let brace"))
+    teko::assert::is_true(teko::str::contains(split.stmts, "let brace"))
+    teko::assert::is_true(teko::str::contains(split.stmts, "exit(helper"))
+}
+
+#test
+/**
+ * snippet_brace_delta_ignores_a_closing_brace_inside_a_string_literal — sub-finding (1)'s worse
+ * half: a literal `}` inside a string (`"}"`) inside a `fn` body must NOT close the chunk early
+ * and truncate the declaration mid-body — the unfixed splitter dropped the real closing `}`
+ * entirely, corrupting `src/regr_decls.tks` into a parse error.
+ *
+ * @return void
+ */
+fn snippet_brace_delta_ignores_a_closing_brace_inside_a_string_literal() {
+    let src = "fn f() -> str {\n    \"}\"\n}\nexit(f().len)\n"
+    let split = split_snippet_decls_and_stmts(src)
+    teko::assert::is_true(teko::str::contains(split.decls, "fn f() -> str {"))
+    teko::assert::is_true(teko::str::contains(split.decls, "\"}\""))
+    teko::assert::is_true(teko::str::contains(split.stmts, "exit(f().len)"))
+}
+
+#test
+/**
+ * snippet_chunk_is_decl_recognizes_flags_class_exp_unsafe — sub-finding (2) of the 0.3.1 splitter
+ * fix: `snippet_chunk_is_decl` used to only recognize a flat 7-way keyword chain that missed
+ * `flags`/`class`/`exp const`/`unsafe fn` entirely — each is a legal top-level declaration and
+ * must never land in `main.tks` as a (rejected) statement.
+ *
+ * @return void
+ */
+fn snippet_chunk_is_decl_recognizes_flags_class_exp_unsafe() {
+    teko::assert::is_true(snippet_chunk_is_decl("flags Cor {\n    A\n    B\n}"))
+    teko::assert::is_true(snippet_chunk_is_decl("class Box {\n    v: i64\n}"))
+    teko::assert::is_true(snippet_chunk_is_decl("exp const Q: i64 = 3"))
+    teko::assert::is_true(snippet_chunk_is_decl("unsafe fn u() -> i64 { 5 }"))
+    teko::assert::is_true(snippet_chunk_is_decl("pub unsafe fn u() -> i64 { 5 }"))
+}
+
+#test
+/**
+ * split_snippet_decls_and_stmts_keeps_an_attribute_with_its_declaration — sub-finding (3) of the
+ * 0.3.1 splitter fix: a bare attribute line (`#test`) preceding a declaration must accumulate
+ * onto the SAME chunk as the declaration it decorates, not close as its own (misclassified,
+ * non-decl) one-line chunk.
+ *
+ * @return void
+ */
+fn split_snippet_decls_and_stmts_keeps_an_attribute_with_its_declaration() {
+    let src = "#test\nfn probe() -> i64 { 1 }\nexit(probe())\n"
+    let split = split_snippet_decls_and_stmts(src)
+    teko::assert::is_true(teko::str::contains(split.decls, "#test"))
+    teko::assert::is_true(teko::str::contains(split.decls, "fn probe"))
+    teko::assert::is_true(teko::str::contains(split.stmts, "exit(probe())"))
+}
+
+/**
+ * rt_alien_target_name — a target name that is CROSS on this host and links through no cross driver
+ * of its own: `arm64-macos` everywhere but macOS, `x86_64-linux` there. The pair the cross-linkability
+ * rule's tests need in order to name a genuinely foreign target on every CI host.
+ *
+ * @return the always-cross, host-cc-linked target name for this host
+ */
+fn rt_alien_target_name() -> str {
+    if teko::os() == "macos" { return "x86_64-linux" }
+    "arm64-macos"
+}
+
+#test
+/**
+ * no_cross_row_is_pre_skipped_for_a_linker_it_never_invokes — the rule that used to convert "this host
+ * has no cross linker" into an honest pre-build skip now has nothing to convert, on any target.
+ *
+ * WHY THE ANSWER IS UNIFORMLY "": the rule's premise was that a cross build reaches the host `cc` and
+ * dies on the foreign object format. That premise is retired — a cross build now stops at the OBJECT
+ * (`links_with_cc` → `finish_native_object`), which is the only artifact it could honestly produce
+ * here and the one its rows claim. Nothing is silently degraded by the change: what the rows would
+ * have RUN is still skipped honestly, by the run-side cross check (`tkr_row_run_verdict`), and what
+ * they CLAIM (the object's format) is still checked.
+ *
+ * @return void
+ */
+fn no_cross_row_is_pre_skipped_for_a_linker_it_never_invokes() {
+    teko::assert::is_true(host_cc_cannot_link_cross_reason("") == "")
+    teko::assert::is_true(host_cc_cannot_link_cross_reason(HOST_TARGET) == "")
+    teko::assert::is_true(host_cc_cannot_link_cross_reason("x86_64-windows") == "")
+    teko::assert::is_true(host_cc_cannot_link_cross_reason("some-unknown-target") == "")
+    teko::assert::is_true(host_cc_cannot_link_cross_reason(rt_alien_target_name()) == "")
+    teko::assert::is_true(target_toolchain_skip_reason(rt_alien_target_name()) == "")
+}
+
+/**
+ * rt_row — one measured row for the timing-aggregator tests.
+ *
+ * @param feature   the enclosing feature's name
+ * @param scenario  the scenario's name
+ * @param row       the row index within the scenario
+ * @param skipped   whether the row was honest-skipped
+ * @param h         the harness nanoseconds
+ * @param c         the compile nanoseconds
+ * @param r         the run nanoseconds
+ * @param builds    how many builds the row covers
+ * @return          the assembled `RowTiming`
+ */
+fn rt_row(feature: str, scenario: str, row: u64, skipped: bool, h: i64, c: i64, r: i64, builds: u64) -> RowTiming {
+    RowTiming {
+        feature = feature; scenario = scenario; row = row; skipped = skipped
+        times = PhaseTimes { harness_ns = h; compile_ns = c; run_ns = r; builds = builds }
+    }
+}
+
+/**
+ * rt_sample_rows — the shared fixture: two features, four rows — two ordinary rows, one SKIPPED row
+ * (no time, no build) and one FAILING row that DID cost a build. The expensive row that fails is
+ * exactly the one a detractor hunt cares about, so it must be counted, not discarded.
+ *
+ * @return the four measured rows, in run order
+ */
+fn rt_sample_rows() -> []RowTiming {
+    mut rows: []RowTiming = teko::list::empty()
+    rows = teko::list::push(rows, rt_row("F1", "alpha", 0, false, 1000000, 4000000, 500000, 1))
+    rows = teko::list::push(rows, rt_row("F1", "alpha", 1, true, 0, 0, 0, 0))
+    rows = teko::list::push(rows, rt_row("F2", "beta", 0, false, 2000000, 9000000, 0, 1))
+    rows = teko::list::push(rows, rt_row("F2", "gamma", 0, false, 1000000, 3000000, 0, 1))
+    rows
+}
+
+#test
+/**
+ * regr_timing_aggregates_rows_into_the_file_total — the sum over rows is the file total, phase by
+ * phase, and the build count sums with it. The skipped row contributes ~0 and no build, but it is
+ * still one of the rows the report lists (dropping it would make the aggregate overstate coverage —
+ * the same lesson as the `N run, S skipped, F failed` summary line).
+ *
+ * @return void
+ */
+fn regr_timing_aggregates_rows_into_the_file_total() {
+    let rows = rt_sample_rows()
+    let total = rows_total(rows)
+    teko::assert::is_true(total.harness_ns == 4000000)
+    teko::assert::is_true(total.compile_ns == 16000000)
+    teko::assert::is_true(total.run_ns == 500000)
+    teko::assert::is_true(total.builds == 3)
+    teko::assert::is_true(phase_total_ns(total) == 20500000)
+    teko::assert::is_true(rows.len == 4)
+    teko::assert::is_true(rows_skipped(rows) == 1)
+}
+
+#test
+/**
+ * regr_timing_phase_add_is_associative_over_partial_sums — folding row-by-row and folding two
+ * partial sums give the same total: the ONE aggregation rule (`phase_add`) is what lets a scenario, a
+ * feature, a file and the whole phase share a single arithmetic.
+ *
+ * @return void
+ */
+fn regr_timing_phase_add_is_associative_over_partial_sums() {
+    let rows = rt_sample_rows()
+    mut first_two = phase_zero()
+    first_two = phase_add(first_two, rows[0].times)
+    first_two = phase_add(first_two, rows[1].times)
+    mut last_two = phase_zero()
+    last_two = phase_add(last_two, rows[2].times)
+    last_two = phase_add(last_two, rows[3].times)
+    let joined = phase_add(first_two, last_two)
+    let direct = rows_total(rows)
+    teko::assert::is_true(joined.harness_ns == direct.harness_ns)
+    teko::assert::is_true(joined.compile_ns == direct.compile_ns)
+    teko::assert::is_true(joined.run_ns == direct.run_ns)
+    teko::assert::is_true(joined.builds == direct.builds)
+}
+
+#test
+/**
+ * regr_timing_totals_text_reports_builds_and_phase_shares — the per-file line names the build count,
+ * the wall total and the three shares. The shares are what make the number actionable: a flat list of
+ * per-scenario totals would say "everything takes ~1.6s" and point nowhere.
+ *
+ * @return void
+ */
+fn regr_timing_totals_text_reports_builds_and_phase_shares() {
+    let text = regr_totals_text(rows_total(rt_sample_rows()))
+    teko::assert::str_contains(text, "3 builds")
+    teko::assert::str_contains(text, "compile 78%")
+    teko::assert::str_contains(text, "harness 19%")
+    teko::assert::str_contains(text, "run 2%")
+}
+
+#test
+/**
+ * regr_timing_row_line_marks_a_skipped_row — a skipped row appears in the table WITH its skip mark
+ * and its ~0 time, never silently omitted.
+ *
+ * @return void
+ */
+fn regr_timing_row_line_marks_a_skipped_row() {
+    let rows = rt_sample_rows()
+    teko::assert::str_contains(regr_row_line(rows[1]), "[skipped]")
+    teko::assert::str_contains(regr_row_line(rows[1]), "alpha[1]")
+    teko::assert::is_false(teko::str::contains(regr_row_line(rows[0]), "[skipped]"))
+}
+
+#test
+/**
+ * regr_timing_renders_sub_second_and_second_scales — durations render in ms below a second and in
+ * seconds with one decimal above it, so a 1.6-second build and a 4-millisecond phase are both
+ * readable on the same line.
+ *
+ * @return void
+ */
+fn regr_timing_renders_sub_second_and_second_scales() {
+    teko::assert::is_true(regr_ms_text(4000000) == "4ms")
+    teko::assert::is_true(regr_ms_text(1610000000) == "1.6s")
+    teko::assert::is_true(regr_ms_text(0) == "0ms")
+    teko::assert::is_true(regr_share_text(1, 0) == "0%")
+}
+
+#test
+/**
+ * arch_token_canonical_folds_the_triple_spellings — a compiler triple and this project's canonical
+ * os-arch names disagree on how to spell the same CPU, and the whole host-default capability rule is
+ * a COMPARISON between the two. Folding both sides through this function is what makes the
+ * comparison meaningful; without the `aarch64` → `arm64` fold the rule would fire on a macOS arm64
+ * host, whose `cc` reports `arm64` and whose host default IS arm64. An unknown token passes through,
+ * so a CPU nobody here knows simply never matches instead of being coerced into a wrong answer.
+ *
+ * @return void
+ */
+fn arch_token_canonical_folds_the_triple_spellings() {
+    teko::assert::is_true(arch_token_canonical("aarch64") == "arm64")
+    teko::assert::is_true(arch_token_canonical("arm64") == "arm64")
+    teko::assert::is_true(arch_token_canonical("amd64") == "x86_64")
+    teko::assert::is_true(arch_token_canonical("x64") == "x86_64")
+    teko::assert::is_true(arch_token_canonical("x86_64") == "x86_64")
+    teko::assert::is_true(arch_token_canonical("") == "")
+    teko::assert::is_true(arch_token_canonical("sparc9") == "sparc9")
+}
+
+#test
+/**
+ * tool_query_line_is_empty_when_the_tool_cannot_answer — the fail-SAFE contract every capability
+ * probe here is built on: an absent executable, or a tool that rejects the question, yields "" and
+ * never a fabricated fact. This is what makes an unmeasurable host behave exactly as it did before
+ * these rules existed, instead of being skipped on a guess.
+ *
+ * @return void
+ */
+fn tool_query_line_is_empty_when_the_tool_cannot_answer() {
+    mut absent: []str = teko::list::push(teko::list::empty(), "teko-no-such-tool-anywhere")
+    absent = teko::list::push(absent, "--version")
+    teko::assert::is_true(tool_query_line(absent) == "")
+    mut refuses: []str = teko::list::push(teko::list::empty(), "sh")
+    refuses = teko::list::push(refuses, "-c")
+    refuses = teko::list::push(refuses, "echo answer; exit 3")
+    teko::assert::is_true(tool_query_line(refuses) == "")
+    mut answers: []str = teko::list::push(teko::list::empty(), "sh")
+    answers = teko::list::push(answers, "-c")
+    answers = teko::list::push(answers, "printf 'first\\nsecond\\n'")
+    teko::assert::is_true(tool_query_line(answers) == "first")
+}
+
+#test
+/**
+ * host_cc_arch_is_canonical_or_unknown — whatever this host's `cc` reports, the reading is either ""
+ * (unmeasurable — no `cc`, or a driver with no `-dumpmachine`) or an already-canonical arch token.
+ * Asserted as that invariant rather than as a fixed value because the self-test lane runs on nine
+ * different hosts; what every one of them must satisfy is that the reading is comparable to
+ * `target_arch_name` without further folding.
+ *
+ * @return void
+ */
+fn host_cc_arch_is_canonical_or_unknown() {
+    let arch = host_cc_arch()
+    teko::assert::is_true(arch == arch_token_canonical(arch))
+    teko::assert::is_false(teko::str::contains(arch, "-"))
+}
+
+#test
+/**
+ * host_cc_cannot_link_host_default_reason_only_fires_for_an_own_host_row — the rule's three guards,
+ * each of which is an R3 obligation: a C-backend row is never touched (it never emits an object for
+ * a `NativeTarget`), an EXPLICIT cross target is never touched (that is
+ * `host_cc_cannot_link_cross_reason`'s question, and answering it twice would double-report), and a
+ * host row is judged only against the arch this host's `cc` actually targets, and only where an arch
+ * mismatch is actually fatal (ELF — the Mach-O and PE/COFF linkers are cross-arch by design). The
+ * last assertion is an EQUIVALENCE so it holds on every lane: on a host `host_default_target` names
+ * a real target for, where the arches agree — x86_64-linux, macos-arm64, windows-x86_64 — the reason
+ * is empty and nothing changes; where they cannot, it names both. On a host with NO own-backend
+ * target at all (an aarch64 linux host, an x86_64 macOS host), the reason is the DIFFERENT, honest
+ * `host_default_unsupported_skip_reason` line, which the row's own R2 error already names.
+ *
+ * @return void
+ */
+fn host_cc_cannot_link_host_default_reason_only_fires_for_an_own_host_row() {
+    teko::assert::is_true(host_cc_cannot_link_host_default_reason("", false) == "")
+    teko::assert::is_true(host_cc_cannot_link_host_default_reason(HOST_TARGET, false) == "")
+    teko::assert::is_true(host_cc_cannot_link_host_default_reason("x86_64-windows", true) == "")
+    teko::assert::is_true(host_cc_cannot_link_host_default_reason(rt_alien_target_name(), true) == "")
+    if teko_cc_env().len > 0 {
+        teko::assert::is_true(host_cc_cannot_link_host_default_reason(HOST_TARGET, true) == "")
+        return
+    }
+    let reason = host_cc_cannot_link_host_default_reason(HOST_TARGET, true)
+    match host_default_target() {
+        error as e => {
+            teko::assert::is_true(reason.len > 0)
+            teko::assert::str_contains(reason, e.message)
+            return
+        }
+        NativeTarget as h => {
+            let arch = host_cc_arch()
+            let want = target_arch_name(h)
+            if target_objfmt(h) != OBJFMT_ELF {
+                teko::assert::is_true(reason == "")
+                return
+            }
+            if arch.len == 0 || arch == want {
+                teko::assert::is_true(reason == "")
+                return
+            }
+            teko::assert::is_true(reason.len > 0)
+            teko::assert::str_contains(reason, target_name(h))
+            teko::assert::str_contains(reason, arch)
+        }
+    }
+}
+
+#test
+/**
+ * regr_row_skip_line_names_the_row_and_the_reason — an honest skip must be auditable: the line has
+ * to identify WHICH row was skipped and say WHY, and must not read as a failure. A count alone
+ * cannot be checked by anyone.
+ *
+ * @return void
+ */
+fn regr_row_skip_line_names_the_row_and_the_reason() {
+    let line = regr_row_skip_line("own_arith_exit", 1, "no aarch64-linux-gnu-gcc on PATH")
+    teko::assert::str_contains(line, "own_arith_exit[1]")
+    teko::assert::str_contains(line, "no aarch64-linux-gnu-gcc on PATH")
+    teko::assert::str_contains(line, "skip")
+    teko::assert::is_false(teko::str::contains(line, "FAIL"))
+}
+
+#test
+/**
+ * regr_src_key_separates_two_configurations_of_one_file — the cache's whole safety argument, as a
+ * law: the SAME `Given source` file under two different child envs is two DIFFERENT builds and must
+ * key apart, while the same file under the same env keys the same. Collapsing the first pair is the
+ * defect class `RegrBuilt` already produced here when it was keyed on `done` alone — a green row
+ * asserting an artifact it never built — and the F5 corpus names one file from four configurations
+ * at once, so this is a live shape, not a hypothetical.
+ *
+ * @return void
+ */
+fn regr_src_key_separates_two_configurations_of_one_file() {
+    let plain: []str = teko::list::empty()
+    let as_c = teko::list::push(teko::list::empty(), "TEKO_FOO=1")
+    let as_own = teko::list::push(teko::list::empty(), "TEKO_FOO=2")
+    teko::assert::is_true(regr_src_key("cases/x.tks", plain) == regr_src_key("cases/x.tks", plain))
+    teko::assert::is_true(regr_src_key("cases/x.tks", as_c) != regr_src_key("cases/x.tks", as_own))
+    teko::assert::is_true(regr_src_key("cases/x.tks", as_c) != regr_src_key("cases/y.tks", as_c))
+    teko::assert::is_true(regr_src_key("cases/x.tks", plain) != regr_src_key("cases/x.tks", as_c))
+}
+
+#test
+/**
+ * regr_src_cache_misses_then_hits — the lookup law: an empty slot answers `null` for every key, a
+ * remembered entry answers itself for ITS key and still `null` for another, and remembering does not
+ * disturb the project slot the same struct carries.
+ *
+ * @return void
+ */
+fn regr_src_cache_misses_then_hits() {
+    let empty = regr_built_empty_for_test()
+    match regr_src_lookup(empty, "k1") { RegrSrcBuild => teko::assert::is_true(false); null => teko::assert::is_true(true) }
+    let one = regr_src_remember(empty, RegrSrcBuild { key = "k1"; comp = cap_synthetic(1, "boom"); binp = "b1" })
+    match regr_src_lookup(one, "k1") {
+        RegrSrcBuild as hit => {
+            teko::assert::is_true(hit.binp == "b1")
+            teko::assert::is_true(hit.comp.exit == 1)
+        }
+        null => teko::assert::is_true(false)
+    }
+    match regr_src_lookup(one, "k2") { RegrSrcBuild => teko::assert::is_true(false); null => teko::assert::is_true(true) }
+    teko::assert::is_true(!one.done)
+    teko::assert::is_true(one.srcs.len == 1)
+}
+
+#test
+/**
+ * regr_jobs_of_reads_a_count_and_refuses_nonsense — the concurrency knob's parser. A positive
+ * decimal is taken as written; empty, non-numeric and zero all fall back, because the safe reading
+ * of a malformed job count is "the author did not mean to run nothing".
+ *
+ * @return void
+ */
+fn regr_jobs_of_reads_a_count_and_refuses_nonsense() {
+    teko::assert::is_true(regr_jobs_of("1") == 1)
+    teko::assert::is_true(regr_jobs_of("16") == 16)
+    teko::assert::is_true(regr_jobs_of("") == os_max())
+    teko::assert::is_true(regr_jobs_of("0") == os_max())
+    teko::assert::is_true(regr_jobs_of("many") == os_max())
+    teko::assert::is_true(regr_jobs_of("4x") == os_max())
+}
+
+#test
+/**
+ * mem_available_kib_reads_the_labeled_kb_value — the ordinary line, with the shape
+ * `/proc/meminfo` actually uses (label, run of spaces, digits, unit, more lines around it).
+ *
+ * @return void
+ */
+fn mem_available_kib_reads_the_labeled_kb_value() {
+    let content = "MemTotal:       16384000 kB\nMemAvailable:    2048576 kB\nBuffers:            1024 kB\n"
+    teko::assert::is_true(mem_available_kib(content) == 2048576)
+}
+
+#test
+/**
+ * mem_available_kib_is_zero_when_label_absent — a meminfo-shaped file that never names
+ * `MemAvailable:` (an unexpected kernel format) answers 0, never a stale/garbage number.
+ *
+ * @return void
+ */
+fn mem_available_kib_is_zero_when_label_absent() {
+    teko::assert::is_true(mem_available_kib("MemTotal:       16384000 kB\n") == 0)
+    teko::assert::is_true(mem_available_kib("") == 0)
+}
+
+#test
+/**
+ * mem_available_kib_is_zero_when_no_digit_follows — the label present but with nothing
+ * numeric after it (truncated read, or a kernel that changed the line's shape) answers 0
+ * rather than a digit-by-digit misparse of whatever text follows.
+ *
+ * @return void
+ */
+fn mem_available_kib_is_zero_when_no_digit_follows() {
+    teko::assert::is_true(mem_available_kib("MemAvailable:") == 0)
+    teko::assert::is_true(mem_available_kib("MemAvailable:    kB\n") == 0)
+}
+
+#test
+/**
+ * mem_label_end_the_two_never_found_guards — `mem_label_end`'s own edge cases, each reached
+ * by no caller today but real for a general substring search: an empty label, and a label
+ * longer than the content it is sought in. Both answer `content.len` (not found), the same
+ * sentinel a genuinely absent label answers.
+ *
+ * @return void
+ */
+fn mem_label_end_the_two_never_found_guards() {
+    teko::assert::is_true(mem_label_end("abc", "") == 3)
+    teko::assert::is_true(mem_label_end("ab", "abcdef") == 2)
+}
+
+/**
+ * memtest_low_path — this test's own scratch path for a synthetic `/proc/meminfo`-shaped
+ * file naming an availability BELOW `MEM_PER_JOB_KIB`, so the division floors at 0 and
+ * `mem_job_cap_at` must clamp it to 1 rather than answer a job count of zero.
+ *
+ * @return this test's own scratch path for the file
+ */
+fn memtest_low_path() -> str { teko::test::scoped("bin/.memtest-low.meminfo") }
+
+/**
+ * memtest_high_path — this test's own scratch path for a synthetic file naming an
+ * availability well above `MEM_PER_JOB_KIB`, so the division answers a real multi-job cap
+ * with nothing to floor.
+ *
+ * @return this test's own scratch path for the file
+ */
+fn memtest_high_path() -> str { teko::test::scoped("bin/.memtest-high.meminfo") }
+
+#test
+/**
+ * mem_job_cap_at_unreadable_path_is_no_cap — a path that does not exist (no platform
+ * detection needed to exercise this: any host can be handed a bogus path) answers
+ * `NO_MEM_CAP`, the abstain value `os_max_of` never lets win against a real CPU count.
+ *
+ * @return void
+ */
+fn mem_job_cap_at_unreadable_path_is_no_cap() {
+    teko::assert::is_true(mem_job_cap_at("/definitely/not/a/real/meminfo/path") == NO_MEM_CAP)
+}
+
+#test
+/**
+ * mem_job_cap_at_low_availability_floors_at_one — an available figure smaller than one
+ * job's budget still answers a cap of (at least) 1, never 0 — a memory-starved host may
+ * run its ONE job serially, but the governor may not ask a caller to run none at all.
+ *
+ * @return void
+ */
+fn mem_job_cap_at_low_availability_floors_at_one() {
+    let path = memtest_low_path()
+    match teko::io::write_file(path, "MemAvailable:      512 kB\n") { error => { }; null => { } }
+    teko::assert::is_true(mem_job_cap_at(path) == 1)
+}
+
+#test
+/**
+ * mem_job_cap_at_high_availability_divides_cleanly — plenty of memory answers the exact
+ * `avail / MEM_PER_JOB_KIB` quotient, unfloored, so a well-provisioned host is never capped
+ * below what it can really afford.
+ *
+ * @return void
+ */
+fn mem_job_cap_at_high_availability_divides_cleanly() {
+    let path = memtest_high_path()
+    match teko::io::write_file(path, "MemAvailable: 12582912 kB\n") { error => { }; null => { } }
+    teko::assert::is_true(mem_job_cap_at(path) == 6)
+}
+
+#test
+/**
+ * os_max_of_picks_the_smaller — the composition law: whichever governor names the LOWER
+ * ceiling wins, in every ordering (memory tighter, CPU tighter, or the two tied).
+ *
+ * @return void
+ */
+fn os_max_of_picks_the_smaller() {
+    teko::assert::is_true(os_max_of(4, 2) == 2)
+    teko::assert::is_true(os_max_of(2, 4) == 2)
+    teko::assert::is_true(os_max_of(8, 8) == 8)
+    teko::assert::is_true(os_max_of(1, NO_MEM_CAP) == 1)
+}
+
+#test
+/**
+ * regression_journal_enabled_is_false_under_the_test_capture — the ONE branch this function can be
+ * proven from inside a `#test`: every call in this whole suite runs under the capture, so
+ * `teko::test::scope()` is never empty here. The other branch (a real, non-test regression run) is
+ * environmentally unreachable from a `#test` by the same construction `teko::journal::scratch`'s own
+ * "outside a test" branch already lives with — proven instead by `regr_jobs_of_reads_a_count_and_
+ * refuses_nonsense`-style production observation, never by a unit test that would have to stop being
+ * one to reach it.
+ *
+ * @return void
+ */
+fn regression_journal_enabled_is_false_under_the_test_capture() {
+    teko::assert::is_false(regression_journal_enabled())
+}
+
+#test
+/**
+ * note_row_outcome_dispatches_skip_before_ok — `regr_skip` sets BOTH `ok = true` and `skipped =
+ * true`, so the dispatch order in `note_row_outcome` (skip checked first) is what keeps a skip from
+ * misfiling as a pass. Proven by folding this run's own journal — the labels are unique to this test
+ * so they cannot be confused with a real regressor's.
+ *
+ * @return void
+ */
+fn note_row_outcome_dispatches_skip_before_ok() {
+    let label = "note_row_outcome_dispatches_skip_before_ok (journal wiring probe)"
+    note_row_outcome(label, regr_skip("no such tool"))
+    note_row_outcome(teko::str::concat(label, "-ok"), regr_pass())
+    note_row_outcome(teko::str::concat(label, "-fail"), regr_fail("boom"))
+    let recs = teko::journal::fold(teko::journal::run_root(), teko::journal::run_id())
+    teko::assert::is_true(jn_has_row_record(recs, teko::journal::KIND_SKIP, teko::str::concat(label, "\tno such tool")))
+    teko::assert::is_true(jn_has_row_record(recs, teko::journal::KIND_OK, teko::str::concat(label, "-ok")))
+    teko::assert::is_true(jn_has_row_record(recs, teko::journal::KIND_FAIL, teko::str::concat(label, "-fail\tboom")))
+}
+
+/**
+ * jn_has_row_record — whether `recs` holds a `writer = "r0"` record of exactly `kind`/`payload`
+ * (mirrors `journal/journal_test.tkt::has_record`, restated here because that helper is private to
+ * its own file).
+ *
+ * @param recs     the folded records
+ * @param kind     the kind to find
+ * @param payload  the payload to find
+ * @return         true iff a matching `r0` record is present
+ */
+fn jn_has_row_record(recs: []teko::journal::Record, kind: str, payload: str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= recs.len { break }
+        if recs[i].writer == "r0" && recs[i].kind == kind && recs[i].payload == payload { return true }
+        i = i + 1
+    }
+    false
+}
+
+/**
+ * spec_of — a `ProcSpec` running `argv` with no stdin/env, dir "", under `prefix` — the shared
+ * fixture builder every `run_pool` test below uses.
+ *
+ * @param argv    the command to run
+ * @param prefix  the scratch prefix
+ * @return        the spec
+ */
+fn spec_of(argv: []str, prefix: str) -> ProcSpec {
+    ProcSpec { argv = argv; dir = ""; env = teko::list::empty(); stdin_data = ""; prefix = prefix }
+}
+
+/**
+ * sh_argv — `["sh", "-c", script]`, the shared argv builder every `run_pool` test below spawns
+ * DIRECTLY (never through a shell scaffold this file builds — `sh` here is simply the CHILD
+ * PROGRAM, chosen because a one-line script is the shortest way to control a test child's
+ * stdout/exit).
+ *
+ * @param script  the shell script text
+ * @return        the argv
+ */
+fn sh_argv(script: str) -> []str {
+    mut argv: []str = teko::list::push(teko::list::empty(), "sh")
+    argv = teko::list::push(argv, "-c")
+    teko::list::push(argv, script)
+}
+
+#test
+/**
+ * run_pool_runs_every_child_and_keeps_each_status — the proof that the concurrency is REAL and not
+ * merely well-shaped data: three children actually run as separate PROCESSES, each writes to its
+ * OWN capture files, and each one's distinct exit status comes back against its own index. A pool
+ * that serialized, or that crossed two children's outputs, fails here.
+ *
+ * @return void
+ */
+fn run_pool_runs_every_child_and_keeps_each_status() {
+    let w = teko::test::scoped(".regr-pool-test")
+    mut specs: []ProcSpec = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= 3 { break }
+        specs = teko::list::push(specs, spec_of(sh_argv($"echo out{i}; exit {i}"), $"{w}/child{i}"))
+        i = i + 1
+    }
+    let caps = run_pool(specs, 2)
+    teko::assert::is_true(caps.len == 3)
+    teko::assert::is_true(caps[0].exit == 0)
+    teko::assert::is_true(caps[1].exit == 1)
+    teko::assert::is_true(caps[2].exit == 2)
+    teko::assert::is_true(teko::str::contains(caps[0].stdout, "out0"))
+    teko::assert::is_true(teko::str::contains(caps[2].stdout, "out2"))
+}
+
+#test
+/**
+ * pool_order_is_row_order — durations deliberately INVERTED (row 0 sleeps longest, the last row
+ * sleeps least): `run_pool`'s report is still in SPEC order, never completion order, because each
+ * index is harvested by waiting on THAT index's own handle — the determinism law (§8): the canal is
+ * transport, never order.
+ *
+ * @return void
+ */
+fn pool_order_is_row_order() {
+    let w = teko::test::scoped(".regr-pool-order-test")
+    mut specs: []ProcSpec = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= 4 { break }
+        let sleep_hundredths = 4 - i
+        specs = teko::list::push(specs, spec_of(sh_argv($"sleep 0.0{sleep_hundredths}; echo row{i}"), $"{w}/row{i}"))
+        i = i + 1
+    }
+    let caps = run_pool(specs, 4)
+    teko::assert::is_true(caps.len == 4)
+    mut k: u64 = 0
+    loop {
+        if k >= 4 { break }
+        teko::assert::is_true(teko::str::contains(caps[k].stdout, $"row{k}"))
+        k = k + 1
+    }
+}
+
+/**
+ * crashed_child_exit_matches — whether a signal-killed child's reported exit is the one an
+ * `abort()` (`kill -ABRT $$`) is expected to leave behind on THIS host. `TkrKind::Trap`
+ * (`src/build/tkr.tks`) already establishes why an abort's synthesized status may never be
+ * byte-compared across hosts: it is "134 under a POSIX shell and something else on Windows", the
+ * wait-status encoding of the SHELL that ran the child, not anything Teko emitted. On a POSIX host
+ * this still checks the EXACT expected value (128+SIGABRT is a stable, meaningful signal); on
+ * Windows it falls back to the same non-zero-only reading `TkrKind::Trap` uses, because no fixed
+ * number is portable there.
+ *
+ * @param actual          the child's reported exit status
+ * @param posix_expected  the exact 128+signo value a POSIX host's shell reports for this abort
+ * @return                whether `actual` is the crash reading this host can honestly promise
+ * @since 0.3.1
+ */
+fn crashed_child_exit_matches(actual: i32, posix_expected: i32) -> bool {
+    if teko::os() == "windows" { return actual != 0 }
+    actual == posix_expected
+}
+
+#test
+/**
+ * pool_child_crash_does_not_stop_the_run — a signal-killed child (row 1, `kill -ABRT $$`) reports
+ * its crash status (128+signo on a POSIX host; a non-zero, host-specific status on Windows — see
+ * `crashed_child_exit_matches`) and the OTHER rows still get their own verdicts — a crash never
+ * aborts the pool, and it never bleeds into a neighbor's capture.
+ *
+ * @return void
+ */
+fn pool_child_crash_does_not_stop_the_run() {
+    let w = teko::test::scoped(".regr-pool-crash-test")
+    mut specs: []ProcSpec = teko::list::push(teko::list::empty(), spec_of(sh_argv("echo before"), $"{w}/a"))
+    specs = teko::list::push(specs, spec_of(sh_argv("kill -ABRT $$"), $"{w}/b"))
+    specs = teko::list::push(specs, spec_of(sh_argv("echo after"), $"{w}/c"))
+    let caps = run_pool(specs, 3)
+    teko::assert::is_true(caps.len == 3)
+    teko::assert::is_true(caps[0].exit == 0)
+    teko::assert::is_true(crashed_child_exit_matches(caps[1].exit, 134))
+    teko::assert::is_true(caps[2].exit == 0)
+    teko::assert::is_true(teko::str::contains(caps[0].stdout, "before"))
+    teko::assert::is_true(teko::str::contains(caps[2].stdout, "after"))
+}
+
+#test
+/**
+ * run_pool_output_identical_across_job_counts — the determinism law's headline claim, pinned: the
+ * SAME specs run at `jobs=1` (fully serial) and `jobs=6` (fully parallel — every row fits in one
+ * window) produce byte-identical exit codes and stdout, row for row. The window size is a SPEED
+ * knob, never a CORRECTNESS one.
+ *
+ * @return void
+ */
+fn run_pool_output_identical_across_job_counts() {
+    let w = teko::test::scoped(".regr-pool-determinism-test")
+    mut specs: []ProcSpec = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= 6 { break }
+        specs = teko::list::push(specs, spec_of(sh_argv($"echo v{i}; exit {i % 3}"), $"{w}/j{i}"))
+        i = i + 1
+    }
+    let serial = run_pool(specs, 1)
+    let parallel = run_pool(specs, 6)
+    teko::assert::is_true(serial.len == parallel.len)
+    mut k: u64 = 0
+    loop {
+        if k >= serial.len { break }
+        teko::assert::is_true(serial[k].exit == parallel[k].exit)
+        teko::assert::is_true(serial[k].stdout == parallel[k].stdout)
+        k = k + 1
+    }
+}
+
+#test
+/**
+ * pool_wires_the_verdict_channel_per_spec — migalha 10's reader half: `run_pool` names a distinct
+ * `TEKO_VERDICT_CHANNEL` for every spec (`spec_env_with_channel`), and a child that writes to it
+ * comes back with that content in `CapResult.chan_text` — a channel an ordinary regressive never
+ * uses, proven here by a child that DOES.
+ *
+ * @return void
+ */
+fn pool_wires_the_verdict_channel_per_spec() {
+    let w = teko::test::scoped(".regr-pool-verdict-test")
+    let spec = spec_of(sh_argv("printf channel-payload > \"$TEKO_VERDICT_CHANNEL\""), $"{w}/v")
+    let caps = run_pool(teko::list::push(teko::list::empty(), spec), 1)
+    teko::assert::is_true(caps.len == 1)
+    teko::assert::is_true(caps[0].exit == 0)
+    teko::assert::is_true(caps[0].chan_text == "channel-payload")
+}
+
+#test
+/**
+ * pool_verdict_channel_survives_child_death — the channel's whole reason to outlive `.rc` (§5.4):
+ * what a child wrote BEFORE dying (by signal, here) is still on disk after — its exit code alone
+ * (128+signo on a POSIX host, see `crashed_child_exit_matches`) could never carry the in-flight
+ * payload.
+ *
+ * @return void
+ */
+fn pool_verdict_channel_survives_child_death() {
+    let w = teko::test::scoped(".regr-pool-verdict-crash-test")
+    let spec = spec_of(sh_argv("printf in-flight > \"$TEKO_VERDICT_CHANNEL\"; kill -ABRT $$"), $"{w}/v")
+    let caps = run_pool(teko::list::push(teko::list::empty(), spec), 1)
+    teko::assert::is_true(caps.len == 1)
+    teko::assert::is_true(crashed_child_exit_matches(caps[0].exit, 134))
+    teko::assert::is_true(caps[0].chan_text == "in-flight")
+}
+
