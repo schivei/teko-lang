@@ -1,0 +1,64 @@
+// src/emit/tkb_write_typebody.tks  (namespace 'teko::emit')
+//
+// (#165 C5) StructBody / ClassBody / TypeBody / FlagsBody encoders. Pure line-count split of
+// tkb_write.tks; no behavior change.
+
+use teko::checker
+use teko::parser
+
+/** (#165 C5) a class-kind's ordinal byte — Sealed/Abstract/Virtual → 0/1/2 (the enum→int cast). */
+fn class_kind_byte(k: parser::ClassKind) -> byte { k to byte }
+
+/** (#165 C5) a StructBody: fields + methods + implements + member consts (all now ride — full fidelity). */
+fn write_struct_body(buf: []byte, t: StrTable, s: parser::StructBody) -> []byte {
+    write_constdecls(write_strs(write_functions(write_fields(write_u8(buf, 0), t, s.fields), t, s.methods), t, s.implements), t, s.consts)
+}
+
+/** (#165 C5) a ClassBody: kind + base + binding + implements + fields + methods + member consts (all ride). */
+fn write_class_body(buf: []byte, t: StrTable, c: parser::ClassBody) -> []byte {
+    mut b = write_u8(write_u8(buf, 6), class_kind_byte(c.kind))
+    b = write_u8(b, (if c.has_base { 1 } else { 0 }) to byte)
+    b = write_u32(b, st_find(t, c.base_name))
+    b = write_u8(b, (if c.has_base_binding { 1 } else { 0 }) to byte)
+    b = write_u32(b, st_find(t, c.base_binding_name))
+    b = write_strs(b, t, c.implements)
+    b = write_fields(b, t, c.fields)
+    b = write_functions(b, t, c.methods)
+    write_constdecls(b, t, c.consts)
+}
+
+/** a TypeBody: u8 tag + payload. StructBody(0)/EnumBody(1)/VariantBody(2)/AliasBody(3)/ExternBody(4)/
+    FlagsBody(5)/ClassBody(6)/InterfaceBody(7)/TraitBody(8). (#165 C5) Interface/Trait ride their
+    method SIGS after extends/fields, in declaration = vtable order; FlagsBody carries name+u64 value
+    (drop-128, 2026-07-24), still wire-shaped as a hi:lo pair (`hi` always 0) for byte compat. */
+fn write_typebody(buf: []byte, t: StrTable, tb: parser::TypeBody) -> []byte {
+    match tb {
+        parser::StructBody as s => write_struct_body(buf, t, s)
+        parser::EnumBody as e => write_strs(write_u8(buf, 1), t, e.members)
+        parser::VariantBody as v => write_typeexpr(write_u8(buf, 2), t, v.type_expr)
+        parser::AliasBody as a => write_typeexpr(write_u8(buf, 3), t, a.alias)
+        parser::ExternBody => write_u8(buf, 4)
+        parser::FlagsBody as f => write_flags_body(buf, t, f)
+        parser::ClassBody as c => write_class_body(buf, t, c)
+        parser::InterfaceBody as ib => write_functions(write_strs(write_u8(buf, 7), t, ib.extends), t, ib.methods)
+        parser::TraitBody as trb => write_constdecls(write_functions(write_fields(write_u8(buf, 8), t, trb.fields), t, trb.methods), t, trb.consts)
+    }
+}
+
+/**
+ * (C8.6) a FlagsBody: n(u64), then for each member name_idx(u32) + value hi(u64) + lo(u64). A
+ * flags member's value is a non-negative u64 magnitude (drop-128, 2026-07-24 — `hi` is always 0,
+ * keeping the wire pair shape byte-compat with the pre-drop codec, §7's wire-compat proof).
+ */
+fn write_flags_body(buf: []byte, t: StrTable, f: parser::FlagsBody) -> []byte {
+    mut sb = write_u64(write_u8(buf, 5), f.members.len)
+    mut i = 0
+    loop {
+        if i >= f.members.len { break }
+        sb = write_u32(sb, st_find(t, f.members[i]))
+        sb = write_u64(sb, 0)
+        sb = write_u64(sb, f.values[i])
+        i++
+    }
+    sb
+}
