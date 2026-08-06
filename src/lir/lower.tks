@@ -1617,6 +1617,24 @@ fn region_current_vreg(ctx: LowerCtx) -> Lowered {
  * @since 0.3.1
  */
 fn open_native_region(ctx: LowerCtx, decl_name: str, is_loop: bool, line: u32, col: u32) -> LowerCtx | error {
+    // INSIDE A CONVEYANCE BRACKET, DO NOT OPEN — the dual of `lower_binding_conveyed`'s own
+    // `bracket_depth > 0` guard (its doc, NP3b). An escaping binding/assign of a value built inside a
+    // match/if arm (`one = match d { A as f => teko::list::push(one, Item{content=f;…}) }`) already
+    // ran `emit_region_leaves` to detour the runtime's current region down to the conveyance anchor
+    // `rr`, so every alloc/box/grow of the arm's escaping value MUST land there. But an arm opens its
+    // own lexical region here (`tk_region_new_u`/`tk_region_enter_u`) BEFORE its body lowers, moving
+    // `current` back to that inner region — so the pushed element's `tk_slice_elem_box` (NATIVE-AGG-
+    // SLICE-BY-ADDRESS) allocated in the arm region, which the arm's own `tk_region_drop_u` then
+    // freed while `one` still held its address. A later alloc reused the freed chunk and the merge
+    // read of `one[k].content` boxed a wild/NULL pointer -> SIGSEGV in `tk_slice_elem_box` (the
+    // self-hosted `assemble_sel` gen2==gen3 crash; the C route is immune, holding `[]struct` BY VALUE
+    // in the routed grow region, never boxing an element into the arm's own region). The whole
+    // bracketed subtree belongs to `rr`; skipping the open keeps it there. Leak-safe, never UAF — the
+    // arm's non-escaping scratch is over-retained in `rr`, exactly as `binding_conveys_escape`'s own
+    // blind over-bracketing already accepts. Symmetric with `close_native_region`'s matching skip, so
+    // `ctx.region_stack` stays balanced across the arm. bracket_depth == 0 (every case NOT inside a
+    // conveyance bracket) is byte-identical.
+    if ctx.bracket_depth > 0 { return ctx }
     let cur = region_current_vreg(ctx)
     let bl = ctx_alloc(cur.ctx)
     let with_new = ctx_append(bl.ctx, call_inst(bl.vreg, "tk_region_new_u", one_region_arg(cur.vreg), false, line, col))
@@ -1641,6 +1659,12 @@ fn open_native_region(ctx: LowerCtx, decl_name: str, is_loop: bool, line: u32, c
  * @since 0.3.1
  */
 fn close_native_region(ctx: LowerCtx, line: u32, col: u32) -> LowerCtx | error {
+    // SYMMETRIC WITH `open_native_region`'s conveyance-bracket skip: inside a bracket the matching
+    // open emitted nothing and pushed no frame, so this close must emit nothing and pop nothing —
+    // leaving `ctx.region_stack` balanced. A `tk_region_leave`/`tk_region_drop_u` here would drop the
+    // ENCLOSING region (the frame/loop body still on top, since the arm never pushed its own) out
+    // from under the outer bracket's still-live escaping value. See the open's doc for the full crash.
+    if ctx.bracket_depth > 0 { return ctx }
     if ctx.region_stack.len == 0 {
         return error { message = "native backend N1: close_native_region with no open region (internal invariant break)" }
     }
