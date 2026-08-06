@@ -12247,8 +12247,83 @@ fn alloc_fat_slot(ctx: LowerCtx, fo: LoweredFat, line: u32, col: u32) -> Lowered
 }
 
 /**
- * store_fat_slot — write a `{ptr, len}` pair into a mutable fat local's frame slot: the pointer at
- * offset 0 and the length at the pointer's width, the layout `load_fat_slot` reads back.
+ * store_fat_image — THE unified fat-image WRITER (#112 R2): write a fat VALUE's image into the slot at
+ * `addr` — the pointer at offset 0 and the length at the pointer's width — the same image
+ * `load_fat_image` reads back. Every frame-slot / slice-element / assign / field write of a two-VReg
+ * fat value routes here (via `store_fat_slot` and the array/assign sites), so the image layout lives in
+ * ONE place; `store_fat_slot` is now its cap-less alias.
+ *
+ * `carries_cap` is the N112.3 SEAM, INERT at N112.2. A cap-carrying location (a `mut []T` slot, a slice
+ * buffer element, a `[]T` struct field / const member) will, once `slice_fat_value_bytes()` returns the
+ * three-word width, write `cap = len` at `slice_cap_word_offset()`; a cap-less location (a variant
+ * payload, a fat parameter, EVERY `str`) passes `false`. Until N112.3 the slice image is two words, so
+ * `slice_cap_word_offset()` is `null` and this flag emits NOTHING either way — byte-identical.
+ *
+ * @param ctx          the lowering context
+ * @param addr         the slot's address VReg
+ * @param fo           the (ptr, len) pair to store
+ * @param carries_cap  whether this location carries the slice `cap` word (the N112.3 seam; inert now)
+ * @param line         the writing statement's source line
+ * @param col          the writing statement's source column
+ * @return             the advanced context
+ * @since 0.3.1.0 (#112 N112.2, raiz-comum R2)
+ */
+fn store_fat_image(ctx: LowerCtx, addr: u32, fo: LoweredFat, carries_cap: bool, line: u32, col: u32) -> LowerCtx {
+    let with_ptr = ctx_append(ctx, store_inst(addr, fo.ptr, LType::Ptr, line, col))
+    let la = ctx_alloc(with_ptr)
+    let with_la = ctx_append(la.ctx, field_addr_inst(la.vreg, addr, ltype_size(LType::Ptr), line, col))
+    let with_len = ctx_append(with_la, store_inst(la.vreg, fo.len, LType::I64, line, col))
+    store_fat_image_cap(with_len, addr, fo.len, carries_cap, line, col)
+}
+
+/**
+ * store_fat_image_cap — the cap-word arm of `store_fat_image`, the N112.3 seam in isolation: when the
+ * location `carries_cap` AND the slice image actually reserves a cap word (`slice_cap_word_offset`),
+ * write `cap = len` there (the cap-seed rule, design §0 — a value store seeds `cap == len` so a copied
+ * slice always forces a realloc on its next in-place append, preserving value semantics). INERT at
+ * N112.2: `slice_cap_word_offset()` is `null` (the two-word rep has no cap word), so this is the
+ * identity and emits nothing.
+ *
+ * @param ctx          the lowering context
+ * @param addr         the slot's base address VReg (the cap word sits at `slice_cap_word_offset` from it)
+ * @param len          the length VReg, stored as the seeded `cap` (`cap == len`)
+ * @param carries_cap  whether this location carries the cap word at all
+ * @param line         the writing statement's source line
+ * @param col          the writing statement's source column
+ * @return             the advanced context (unchanged when no cap word is written)
+ * @since 0.3.1.0 (#112 N112.2, raiz-comum R2 — the N112.3 cap seam)
+ */
+fn store_fat_image_cap(ctx: LowerCtx, addr: u32, len: u32, carries_cap: bool, line: u32, col: u32) -> LowerCtx {
+    if !carries_cap { return ctx }
+    match slice_cap_word_offset() {
+        u32 as off => {
+            let ca = ctx_alloc(ctx)
+            let with_ca = ctx_append(ca.ctx, field_addr_inst(ca.vreg, addr, off, line, col))
+            ctx_append(with_ca, store_inst(ca.vreg, len, LType::I64, line, col))
+        }
+        null => ctx
+    }
+}
+
+/**
+ * slice_cap_word_offset — the byte offset of the slice `cap` word within a `[]T` value's fat image, or
+ * `null` when the slice image carries NO cap word (the two-word `{ptr, len}` rep, until N112.3). Derived
+ * from the width oracle so the cap word appears exactly when `slice_fat_value_bytes` grows past `str`'s
+ * two words: N112.3 flips `slice_fat_value_bytes` to 24 and this immediately reports offset 16.
+ *
+ * @return  the cap word's byte offset (16 once the slice rep is three-word), or `null` while it is two-word
+ * @since 0.3.1.0 (#112 N112.2, raiz-comum R2 — the N112.3 cap seam)
+ */
+fn slice_cap_word_offset() -> u32 | null {
+    if slice_fat_value_bytes() <= str_fat_value_bytes() { return null }
+    str_fat_value_bytes()
+}
+
+/**
+ * store_fat_slot — the cap-less alias of `store_fat_image` for a two-word `{ptr, len}` write (#112 R2):
+ * a mutable fat local's frame slot, a fat struct-field slot, an assign target. Passes
+ * `carries_cap = false` — the slice `mut`-local slot's cap wiring is threaded per-type at the N112.3
+ * seam (design A6); until then every such write is the two-word image, byte-identical to before.
  *
  * @param ctx   the lowering context
  * @param slot  the slot's address VReg
@@ -12258,14 +12333,33 @@ fn alloc_fat_slot(ctx: LowerCtx, fo: LoweredFat, line: u32, col: u32) -> Lowered
  * @return      the advanced context
  */
 fn store_fat_slot(ctx: LowerCtx, slot: u32, fo: LoweredFat, line: u32, col: u32) -> LowerCtx {
-    let with_ptr = ctx_append(ctx, store_inst(slot, fo.ptr, LType::Ptr, line, col))
-    let la = ctx_alloc(with_ptr)
-    let with_la = ctx_append(la.ctx, field_addr_inst(la.vreg, slot, ltype_size(LType::Ptr), line, col))
-    ctx_append(with_la, store_inst(la.vreg, fo.len, LType::I64, line, col))
+    store_fat_image(ctx, slot, fo, false, line, col)
 }
 
 /**
- * load_fat_slot — read the CURRENT `{ptr, len}` pair out of a mutable fat local's frame slot.
+ * load_fat_image — THE unified fat-image READER (#112 R2): read the CURRENT `{ptr, len}` pair out of a
+ * fat slot at `addr`. A read needs only `ptr`/`len` (the `cap` word, when present, is consumed ONLY by
+ * `grow_inplace` through a `ref` to the slot's address, never by a value read), so this is width-stable
+ * across the N112.3 flip: it reads the same two words whether or not a cap word follows them.
+ *
+ * @param ctx   the lowering context
+ * @param addr  the slot's address VReg
+ * @param line  the reading expression's source line
+ * @param col   the reading expression's source column
+ * @return      the loaded (ptr, len) pair
+ * @since 0.3.1.0 (#112 N112.2, raiz-comum R2)
+ */
+fn load_fat_image(ctx: LowerCtx, addr: u32, line: u32, col: u32) -> LoweredFat {
+    let pr = load_fat_slot_ptr(ctx, addr, line, col)
+    let la = ctx_alloc(pr.ctx)
+    let with_la = ctx_append(la.ctx, field_addr_inst(la.vreg, addr, ltype_size(LType::Ptr), line, col))
+    let lr = ctx_alloc(with_la)
+    LoweredFat { ctx = ctx_append(lr.ctx, load_inst(lr.vreg, la.vreg, LType::I64, line, col)); ptr = pr.vreg; len = lr.vreg }
+}
+
+/**
+ * load_fat_slot — the alias of `load_fat_image` for a mutable fat local's frame slot (#112 R2). Kept as
+ * the frame-slot-named entry the mutable-local read sites already spell.
  *
  * @param ctx   the lowering context
  * @param slot  the slot's address VReg
@@ -12274,11 +12368,7 @@ fn store_fat_slot(ctx: LowerCtx, slot: u32, fo: LoweredFat, line: u32, col: u32)
  * @return      the loaded (ptr, len) pair
  */
 fn load_fat_slot(ctx: LowerCtx, slot: u32, line: u32, col: u32) -> LoweredFat {
-    let pr = load_fat_slot_ptr(ctx, slot, line, col)
-    let la = ctx_alloc(pr.ctx)
-    let with_la = ctx_append(la.ctx, field_addr_inst(la.vreg, slot, ltype_size(LType::Ptr), line, col))
-    let lr = ctx_alloc(with_la)
-    LoweredFat { ctx = ctx_append(lr.ctx, load_inst(lr.vreg, la.vreg, LType::I64, line, col)); ptr = pr.vreg; len = lr.vreg }
+    load_fat_image(ctx, slot, line, col)
 }
 
 /**
