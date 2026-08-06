@@ -1,0 +1,282 @@
+/**
+ * elf_build_symbols — the object's `Elf64_Sym` table in the ELF-required
+ * LOCAL-then-GLOBAL order: the reserved null symbol, then (when rodata is
+ * present) the `.rodata` `STT_SECTION` local symbol, then every file-local
+ * `.text` label (§7.2 — none for x86), then
+ * every defined function as `GLOBAL|FUNC` at its section-relative `.text` offset
+ * (`st_shndx = 1`), then every undefined extern as `GLOBAL|NOTYPE`
+ * (`st_shndx = SHN_UNDEF`). The neutral `Symbol` list's per-rodata locals are NOT
+ * emitted individually — they are represented by the one section symbol, so
+ * `st_value` for a function stays the bare section-relative offset (never
+ * rebased, the Mach-O F1 inverse).
+ *
+ * @param []Symbol symbols  the module's neutral symbol list
+ * @return []ElfSym  the resolved symbol table, local-then-global
+ */
+fn elf_build_symbols(symbols: []Symbol) -> []ElfSym {
+    mut out: []ElfSym = teko::list::push(teko::list::empty(), ElfSym { name = ""; info = 0 to u32; shndx = 0 to u32; value = 0 to u32 })
+    if elf_has_rodata_section(symbols) {
+        out = teko::list::push(out, ElfSym { name = ""; info = st_info(STB_LOCAL, STT_SECTION) to u32; shndx = ELF_SHNDX_RODATA; value = 0 to u32 })
+    }
+    if elf_has_data_rel_ro_section(symbols) {
+        out = teko::list::push(out, ElfSym { name = ""; info = st_info(STB_LOCAL, STT_SECTION) to u32; shndx = ELF_SHNDX_DATA_REL_RO; value = 0 to u32 })
+    }
+    out = elf_append_text_locals(out, symbols)
+    out = elf_append_globals(out, symbols)
+    elf_append_undefined(out, symbols)
+}
+
+/**
+ * elf_has_data_rel_ro_section — whether the post-partition symbol list carries
+ * any moved, pointer-bearing const (a defined, local, `ELF_SECT_DATA_REL_RO`
+ * `Symbol`): gates emission of the `.data.rel.ro` `STT_SECTION` symbol that the
+ * moved data's relocations target. The `.data.rel.ro` twin of
+ * `elf_has_rodata_section`.
+ *
+ * @param []Symbol symbols  the post-partition neutral symbol list
+ * @return bool  true iff a defined `.data.rel.ro` local symbol is present
+ */
+fn elf_has_data_rel_ro_section(symbols: []Symbol) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= symbols.len { break }
+        let s = symbols[i]
+        if s.defined && s.local && s.sect == ELF_SECT_DATA_REL_RO { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * elf_sym_names — the `.strtab` name of each `ElfSym`, in symbol-table order,
+ * feeding `build_elf_strtab`. The null and `STT_SECTION` symbols contribute the
+ * empty name (offset 0).
+ *
+ * @param []ElfSym syms  the resolved symbol table
+ * @return []str  each symbol's name, in order
+ */
+fn elf_sym_names(syms: []ElfSym) -> []str {
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= syms.len { break }
+        out = teko::list::push(out, syms[i].name)
+        i++
+    }
+    out
+}
+
+/**
+ * elf_first_global_index — the index of the first non-local symbol in `syms`
+ * (`st_info` bind field `!= STB_LOCAL`), or `syms.len` when all are local. This
+ * is `.symtab`'s `sh_info`: ELF requires every local symbol to precede every
+ * global, and `sh_info` to name the boundary (the analog of Mach-O's
+ * `iextdefsym`). An off-by-one here makes `ld` reject the object.
+ *
+ * @param []ElfSym syms  the resolved symbol table (locals first)
+ * @return u32  the index of the first global symbol, or `syms.len`
+ */
+fn elf_first_global_index(syms: []ElfSym) -> u32 {
+    mut i: u64 = 0
+    loop {
+        if i >= syms.len { break }
+        if (syms[i].info >> (4 to u32)) != (0 to u32) { return i to u32 }
+        i++
+    }
+    syms.len to u32
+}
+
+/**
+ * elf_symbol_index — the symbol-table index of the symbol named `name`, or
+ * `syms.len` when absent. `elf_build_relas` packs this POST-partition index into
+ * `r_info`; because locals were sorted before globals, the index a function/
+ * extern lands at differs from its pre-partition position, so the lookup runs
+ * against the FINAL table. The absent sentinel is unreached for a well-formed
+ * module (every non-rodata reloc target is a function or an undefined extern in
+ * the table) and is covered by a direct unit test on a hand-built input.
+ *
+ * @param []ElfSym syms  the resolved symbol table
+ * @param str name  the target symbol's name
+ * @return u32  the symbol's index, or `syms.len` when not found
+ */
+fn elf_symbol_index(syms: []ElfSym, name: str) -> u32 {
+    mut i: u64 = 0
+    loop {
+        if i >= syms.len { break }
+        if syms[i].name == name { return i to u32 }
+        i++
+    }
+    syms.len to u32
+}
+
+/**
+ * elf_rodata_secsym_index — the symbol-table index of the `.rodata`
+ * `STT_SECTION` symbol (`st_info == 0x03`, `st_shndx == 2`), the target every
+ * rodata relocation resolves to, or `syms.len` when no rodata section symbol was
+ * emitted. The absent case is unreached because a rodata relocation is emitted
+ * only when the rodata datum — and thus its section symbol — exists.
+ *
+ * @param []ElfSym syms  the resolved symbol table
+ * @return u32  the `.rodata` section symbol's index, or `syms.len`
+ */
+fn elf_rodata_secsym_index(syms: []ElfSym) -> u32 {
+    elf_secsym_index_at(syms, ELF_SHNDX_RODATA)
+}
+
+/**
+ * elf_drr_secsym_index — the symbol-table index of the `.data.rel.ro`
+ * `STT_SECTION` symbol (`st_shndx == ELF_SHNDX_DATA_REL_RO`), the target every
+ * relocation whose datum MOVED to `.data.rel.ro` resolves to, or `syms.len` when
+ * no such section symbol was emitted (a module with no pointer-bearing const).
+ *
+ * @param []ElfSym syms  the resolved symbol table
+ * @return u32  the `.data.rel.ro` section symbol's index, or `syms.len`
+ */
+fn elf_drr_secsym_index(syms: []ElfSym) -> u32 {
+    elf_secsym_index_at(syms, ELF_SHNDX_DATA_REL_RO)
+}
+
+/**
+ * elf_secsym_index_at — the symbol-table index of the `STT_SECTION` local whose
+ * `st_shndx` equals `shndx`, or `syms.len` when absent. The shared scan behind
+ * `elf_rodata_secsym_index` and `elf_drr_secsym_index`.
+ *
+ * @param []ElfSym syms  the resolved symbol table
+ * @param u32 shndx  the section-header index whose section symbol is sought
+ * @return u32  that section symbol's table index, or `syms.len`
+ */
+fn elf_secsym_index_at(syms: []ElfSym, shndx: u32) -> u32 {
+    mut i: u64 = 0
+    loop {
+        if i >= syms.len { break }
+        if syms[i].info == st_info(STB_LOCAL, STT_SECTION) && syms[i].shndx == shndx { return i to u32 }
+        i++
+    }
+    syms.len to u32
+}
+
+/**
+ * R_X86_64_64 — the `Elf64_Rela` `r_info` relocation type for a 64-bit absolute
+ * address (the psABI's value 1).
+ */
+const R_X86_64_64: u32 = 1 to u32
+
+/**
+ * R_X86_64_PC32 — the `Elf64_Rela` `r_info` relocation type for a 32-bit
+ * PC-relative displacement (the psABI's value 2), which is what a
+ * `lea reg, [rip+disp32]` address materialization owes.
+ */
+const R_X86_64_PC32: u32 = 2 to u32
+
+/**
+ * R_X86_64_PLT32 — the `Elf64_Rela` `r_info` relocation type for a 32-bit
+ * PC-relative displacement to a symbol's PLT entry (the psABI's value 4), which
+ * a static link resolves to a plain PC-relative `call`.
+ */
+const R_X86_64_PLT32: u32 = 4 to u32
+
+/**
+ * elf_reloc_type — the `R_X86_64_*` relocation type for a `RelocKindX86`, one
+ * named psABI constant per kind: `PLT32` for a `Plt32` call (resolves to a plain
+ * PC-relative call under a static link, the correct choice for both the `cc`
+ * bootstrap and the future E1 linker), `PC32` for a `Pc32` rip-relative `lea`,
+ * `64` for an `Abs64` data-global address. `Abs64` is the FUTURE data path:
+ * `encode_module_x86` raises the `B1-globals` honest-stop before any `Abs64`
+ * relocation is produced, so a real B1 object never carries one, and a
+ * rip-relative `lea` only ever carries `Pc32`/`Plt32`, never `Abs64` (asserted
+ * in the tests).
+ *
+ * @param RelocKindX86 kind  the relocation kind
+ * @return u32  the `Elf64_Rela` `r_info` type field
+ */
+fn elf_reloc_type(kind: RelocKindX86) -> u32 {
+    match kind {
+        Plt32 => R_X86_64_PLT32
+        Pc32 => R_X86_64_PC32
+        Abs64 => R_X86_64_64
+    }
+}
+
+/**
+ * ElfRodataHit — the result of resolving a relocation's target against the
+ * module's rodata locals: whether the named target is a defined, file-local
+ * `.rodata` datum, and (when it is) that datum's byte offset within `.rodata`.
+ * A hit re-points the relocation at the `.rodata` section symbol and folds the
+ * offset into the addend (the ELF section-symbol idiom); a miss leaves the
+ * relocation targeting the named function/extern symbol directly.
+ *
+ * @since #386 B1-7
+ */
+type ElfRodataHit = struct {
+    /**
+     * found — true iff the relocation target is a defined section-local datum
+     * (`.rodata` OR `.data.rel.ro`).
+     */
+    found: bool
+    /**
+     * offset — the target datum's byte offset within its section (0 on a miss).
+     */
+    offset: u32
+    /**
+     * is_drr — true iff the target datum lives in `.data.rel.ro` (a moved,
+     * pointer-bearing const) rather than `.rodata`, so the caller folds onto the
+     * `.data.rel.ro` section symbol instead of the `.rodata` one.
+     */
+    is_drr: bool
+}
+
+/**
+ * elf_rodata_hit — resolve `name` against the module's rodata locals: a hit iff
+ * some `Symbol` named `name` is defined, file-local, and section-tagged
+ * `.rodata` (`ELF_SECT_RODATA`) or `.data.rel.ro` (`ELF_SECT_DATA_REL_RO`),
+ * carrying that datum's section byte offset. `elf_resolve_rela` folds a hit's
+ * offset into the relocation addend and re-targets the datum's section symbol —
+ * the `.data.rel.ro` symbol when the datum moved, the `.rodata` symbol otherwise.
+ *
+ * @param []Symbol symbols  the module's neutral symbol list (post-partition)
+ * @param str name  the relocation's target symbol name
+ * @return ElfRodataHit  whether it is a section-local datum, its offset, and its section
+ */
+fn elf_rodata_hit(symbols: []Symbol, name: str) -> ElfRodataHit {
+    mut i: u64 = 0
+    loop {
+        if i >= symbols.len { break }
+        let s = symbols[i]
+        let is_local_datum = s.defined && s.local && (s.sect == ELF_SECT_RODATA || s.sect == ELF_SECT_DATA_REL_RO)
+        if is_local_datum && s.name == name {
+            return ElfRodataHit { found = true; offset = s.offset; is_drr = s.sect == ELF_SECT_DATA_REL_RO }
+        }
+        i++
+    }
+    ElfRodataHit { found = false; offset = 0 to u32; is_drr = false }
+}
+
+/**
+ * ElfRela — one resolved `Elf64_Rela`: the `.text`-relative field offset, the
+ * POST-partition symbol-table index it targets, the `R_X86_64_*` type, and the
+ * final addend (a rodata target folds its `.rodata` byte offset onto the base
+ * `-4`, so the linker's `S + A - P` lands on the datum).
+ *
+ * @since #386 B1-7
+ */
+type ElfRela = struct {
+    /**
+     * offset — the `r_offset`: the patched field's `.text`-section-relative byte
+     * offset (module-rebased at encode).
+     */
+    offset: u32
+    /**
+     * symidx — the `r_info` symbol index (the final, post-partition table
+     * index).
+     */
+    symidx: u32
+    /**
+     * rtype — the `r_info` `R_X86_64_*` type field.
+     */
+    rtype: u32
+    /**
+     * addend — the `r_addend`: the kind's base addend, plus a rodata target's
+     * `.rodata` byte offset.
+     */
+    addend: i64
+}

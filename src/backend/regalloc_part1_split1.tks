@@ -1,0 +1,297 @@
+pub type NumberedInst = struct {
+    /**
+     * point — the instruction's linear program point (0-based, block order).
+     */
+    point: u32
+    /**
+     * block_id — the `MBlock` this instruction was flattened from.
+     */
+    block_id: u32
+    /**
+     * inst — the machine instruction at this point.
+     */
+    inst: MInst
+}
+
+/**
+ * u32_in — whether `list` contains `x`.
+ *
+ * @param []u32 list  the list to search
+ * @param u32 x  the value to find
+ * @return bool  true iff `x` is present
+ */
+fn u32_in(list: []u32, x: u32) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= list.len { break }
+        if list[i] == x { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * reverse_u32 — `list` reversed (post-order becomes reverse-post-order).
+ *
+ * @param []u32 list  the list to reverse
+ * @return []u32  the reversed list
+ */
+fn reverse_u32(list: []u32) -> []u32 {
+    mut out: []u32 = teko::list::empty()
+    mut i: u64 = list.len
+    loop {
+        if i == 0 { break }
+        i = i - 1
+        out = teko::list::push(out, list[i])
+    }
+    out
+}
+
+/**
+ * block_insts_of — the instruction list of `f`'s block with id `id`, or the
+ * empty list if no such block (a defensive default; every real target names a
+ * present block).
+ *
+ * @param MFunc f  the function to search
+ * @param u32 id  the block id
+ * @return []MInst  the block's instructions, or empty
+ */
+fn block_insts_of(f: MFunc, id: u32) -> []MInst {
+    mut i: u64 = 0
+    loop {
+        if i >= f.blocks.len { break }
+        if f.blocks[i].id == id { return f.blocks[i].insts }
+        i++
+    }
+    teko::list::empty()
+}
+
+/**
+ * block_successors — the CFG successors of `f`'s block `id`: every distinct
+ * terminator target in the block (a block ends in up to two terminators — a
+ * conditional `MBranchCond`/`MCbz` plus a trailing unconditional `MBranch`).
+ * Collected in instruction order for a deterministic RPO (M.2).
+ *
+ * @param MFunc f  the function
+ * @param u32 id  the block whose successors to enumerate
+ * @return []u32  the distinct successor block ids, in terminator order
+ */
+fn block_successors(f: MFunc, id: u32) -> []u32 {
+    let insts = block_insts_of(f, id)
+    mut out: []u32 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= insts.len { break }
+        let t = terminator_target(insts[i])
+        if t.has { out = add_unique_u32(out, t.target) }
+        i++
+    }
+    out
+}
+
+/**
+ * RpoState — the fold state of the post-order DFS: the ids already visited and
+ * the post-order accumulator (a block is appended after all its successors).
+ *
+ * @since #443
+ */
+type RpoState = struct {
+    /**
+     * visited — the block ids the DFS has already entered.
+     */
+    visited: []u32
+    /**
+     * post — the post-order sequence so far (reversed to RPO by the driver).
+     */
+    post: []u32
+}
+
+/**
+ * rpo_visit — the post-order DFS step: enter `id` (once), recurse into every
+ * successor in order, then append `id` to the post-order. Threads the visited
+ * set + accumulator functionally so no block is entered twice (the recursion
+ * is bounded by CFG nesting depth, small for structured control flow).
+ *
+ * @param MFunc f  the function whose CFG is walked
+ * @param u32 id  the block id to visit
+ * @param RpoState st  the visited set + post-order so far
+ * @return RpoState  the updated visited set + post-order
+ */
+fn rpo_visit(f: MFunc, id: u32, st: RpoState) -> RpoState {
+    if u32_in(st.visited, id) { return st }
+    let succs = block_successors(f, id)
+    mut cur = RpoState { visited = teko::list::push(st.visited, id); post = st.post }
+    mut i: u64 = 0
+    loop {
+        if i >= succs.len { break }
+        cur = rpo_visit(f, succs[i], cur)
+        i++
+    }
+    RpoState { visited = cur.visited; post = teko::list::push(cur.post, id) }
+}
+
+/**
+ * append_unvisited — `order` extended with any of `f`'s block ids not already
+ * present, in block-list order. Keeps the numbering TOTAL: an unreachable
+ * block (never reached from entry) still receives program points so no vreg is
+ * left un-numbered. Reachable functions are unchanged.
+ *
+ * @param MFunc f  the function
+ * @param []u32 order  the reachable-block order so far
+ * @return []u32  the order extended with any unreachable block ids
+ */
+fn append_unvisited(f: MFunc, order: []u32) -> []u32 {
+    mut out = order
+    mut i: u64 = 0
+    loop {
+        if i >= f.blocks.len { break }
+        let bid = f.blocks[i].id
+        if !u32_in(out, bid) { out = teko::list::push(out, bid) }
+        i++
+    }
+    out
+}
+
+/**
+ * rpo_block_order — the reverse-post-order block-id sequence of `f`, entry
+ * first: a topological linearization of the acyclic CFG (a real `loop`
+ * back-edge is the one retreating edge, detected by position, §3). The
+ * numbering + back-edge coordinate the allocator indexes by, replacing the
+ * allocation-order id proxy (#443). Unreachable blocks are appended last so
+ * the order covers every block.
+ *
+ * @param MFunc f  the selected function
+ * @return []u32  the RPO block-id order (entry first)
+ */
+fn rpo_block_order(f: MFunc) -> []u32 {
+    if f.blocks.len == 0 { return teko::list::empty() }
+    let entry = f.blocks[0].id
+    let st = rpo_visit(f, entry, RpoState { visited = teko::list::empty(); post = teko::list::empty() })
+    append_unvisited(f, reverse_u32(st.post))
+}
+
+/**
+ * reachable_blocks — the block ids reachable from `f`'s entry, via the same
+ * post-order DFS `rpo_block_order` walks (§3). A block absent from this set is
+ * dead code — for example a `match`'s defensive fallback block past an
+ * irrefutable final arm, which no branch targets because the last pattern test
+ * jumps unconditionally into its own body. `append_unvisited` still numbers
+ * such a block (keeping the numbering TOTAL), placing it LAST; the back-edge
+ * test uses this set to EXCLUDE its edges, since a dead block cannot form a
+ * loop the allocator must model (A4-6, #385 — the acyclic false-positive the
+ * `if` fix #443 did not cover for `match`).
+ *
+ * @param MFunc f  the selected function
+ * @return []u32  the entry-reachable block ids (the DFS-visited set)
+ */
+fn reachable_blocks(f: MFunc) -> []u32 {
+    if f.blocks.len == 0 { return teko::list::empty() }
+    let entry = f.blocks[0].id
+    rpo_visit(f, entry, RpoState { visited = teko::list::empty(); post = teko::list::empty() }).visited
+}
+
+/**
+ * block_pos — the position of block id `id` in the RPO `order` (its liveness
+ * rank), or `order.len` if absent (a defensive default — an absent target
+ * looks like the last position, never a spurious back-edge).
+ *
+ * @param []u32 order  the RPO block-id order
+ * @param u32 id  the block id to rank
+ * @return u64  the 0-based RPO position, or `order.len`
+ */
+fn block_pos(order: []u32, id: u32) -> u64 {
+    mut i: u64 = 0
+    loop {
+        if i >= order.len { break }
+        if order[i] == id { return i }
+        i++
+    }
+    order.len
+}
+
+/**
+ * number_insts — flatten `f`'s blocks into one linearly-numbered instruction
+ * stream in RPO block order (§3.1). RPO is a topological order of the acyclic
+ * CFG, so every def precedes all its uses — the inversion the allocation-order
+ * flattening produced for a nested `if`/`match` merge is gone (#443). Every
+ * later pass (interval computation, the scan, the rewrite) indexes liveness by
+ * these points.
+ *
+ * @param MFunc f  the selected function
+ * @param []u32 order  the RPO block-id order (from `rpo_block_order`)
+ * @return []NumberedInst  the flattened, RPO-numbered stream
+ */
+fn number_insts(f: MFunc, order: []u32) -> []NumberedInst {
+    mut out: []NumberedInst = teko::list::empty()
+    mut p: u32 = 0
+    mut bi: u64 = 0
+    loop {
+        if bi >= order.len { break }
+        let bid = order[bi]
+        let insts = block_insts_of(f, bid)
+        mut ii: u64 = 0
+        loop {
+            if ii >= insts.len { break }
+            out = teko::list::push(out, NumberedInst { point = p; block_id = bid; inst = insts[ii] })
+            p = p + 1
+            ii++
+        }
+        bi++
+    }
+    out
+}
+
+/**
+ * InstRegs — the def/use decomposition of one `MInst` (§1.1): its optional
+ * defined register, the registers it uses, and whether it is a call (which
+ * clobbers the caller-saved set). This is the single source of truth both
+ * interval computation and the rewrite read, so the def/use table lives in
+ * ONE place (M.5).
+ *
+ * @since #384 A3-2
+ */
+pub type InstRegs = struct {
+    /**
+     * has_def — true iff the instruction writes a register (`def_reg`).
+     */
+    has_def: bool
+    /**
+     * def_reg — the defined register (meaningful only when `has_def`).
+     */
+    def_reg: MReg
+    /**
+     * uses — every register the instruction reads, in operand order.
+     */
+    uses: []MReg
+    /**
+     * is_call — true for `MCall`/`MCallIndirect` (clobbers caller-saved).
+     */
+    is_call: bool
+}
+
+/**
+ * IR_DUMMY — the placeholder `def_reg` for a no-def decomposition (never read
+ * when `has_def` is false). A flat-POD `MReg` aggregate const (#594 crumb 9b).
+ */
+const IR_DUMMY: MReg = preg(0, MRegClass::GPR)
+
+/**
+ * one_reg — a single-register use list.
+ *
+ * @param MReg a  the register
+ * @return []MReg  the one-element list
+ */
+fn one_reg(a: MReg) -> []MReg {
+    teko::list::push(teko::list::empty(), a)
+}
+
+/**
+ * two_regs — a two-register use list, in order.
+ *
+ * @param MReg a  the first register
+ * @param MReg b  the second register
+ * @return []MReg  the two-element list
+ */
+fn two_regs(a: MReg, b: MReg) -> []MReg {
+    teko::list::push(one_reg(a), b)
+}

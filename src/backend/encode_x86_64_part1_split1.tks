@@ -1,0 +1,294 @@
+pub type EncRelocX86 = struct {
+    /**
+     * field_off — the byte offset WITHIN the instruction's `bytes` of the field
+     * the relocation patches (the emit pass rebases it by the instruction's
+     * start offset in the function's `.text` image).
+     */
+    field_off: u32
+    /**
+     * sym — the relocation's target symbol, already in its final linker name.
+     */
+    sym: str
+    /**
+     * kind — which psABI relocation the writer emits (`Plt32` for a direct
+     * `call`, `Pc32` for a rip-relative `lea`, `Abs64` for a data pointer).
+     */
+    kind: RelocKindX86
+}
+
+/**
+ * EncInstX86 — one x86-64 instruction's encoding outcome: its variable-length
+ * byte string plus optional pending fixups. A position-independent instruction
+ * resolves to just `bytes` (`has_branch` false, `reloc` null). An intra-function
+ * branch carries a `rel32` fixup — the byte offset WITHIN `bytes` of the 4-byte
+ * little-endian displacement field and the destination machine-block id —
+ * patched once every block's byte offset is known (the B1-6 layout pass). A
+ * symbol reference carries an `EncRelocX86`, materialized into an `Elf64_Rela`
+ * at B1-7. Mirrors arm64's `EncWord`, byte-granular instead of fixed 32-bit
+ * words.
+ *
+ * @since #386 B1-5
+ */
+pub type EncInstX86 = struct {
+    /**
+     * bytes — the instruction's encoded bytes (1..15), in order, ready to
+     * append to the function's `.text` image.
+     */
+    bytes: []byte
+    /**
+     * has_branch — true iff a `rel32` block displacement must be patched in.
+     */
+    has_branch: bool
+    /**
+     * branch_field_off — the byte offset within `bytes` of the 4-byte rel32
+     * field (meaningful when `has_branch`).
+     */
+    branch_field_off: u32
+    /**
+     * target — the destination machine-block id (meaningful when `has_branch`).
+     */
+    target: u32
+    /**
+     * reloc — the symbol relocation this instruction owes, or `null` when it
+     * owes none. There is no third state and no inert default.
+     */
+    reloc: EncRelocX86 | null
+}
+
+/**
+ * FrameLayoutX86 — the resolved stack frame of one x86-64 function: its total
+ * 16-aligned byte size, the ordered callee-saved registers to save/restore
+ * (re-derived by scanning the physical function, not carried by `MFuncX86`),
+ * and the RSP-relative byte offset of every `MFuncX86.frame` slot. Purely a
+ * side-table the encoder reads to resolve `MFrameAddrX86` to a concrete
+ * `lea dst, [rsp+off]`; the block stream is never rewritten. A `size` of 0
+ * marks a frameless function (no prologue/epilogue) UNLESS `call_align` is
+ * true, in which case a minimal alignment-only `push rbp`/`mov rbp,rsp` is
+ * still emitted (`frame_is_framed_x86`, 0.3.1.0 degrau 19). B1-5 defines the
+ * type and resolves `MFrameAddrX86` through it (the §6.1 signature); B1-6
+ * fills it via `compute_frame_layout_x86` and emits the matching
+ * prologue/epilogue. Mirrors arm64's `FrameLayout`.
+ *
+ * @since #386 B1-5
+ */
+pub type FrameLayoutX86 = struct {
+    /**
+     * size — the total frame size in bytes, rounded up to 16 (SysV 16-byte
+     * call-site alignment); 0 for a frameless function.
+     */
+    size: u32
+    /**
+     * saved_gpr — the callee-saved GPR ids to push/pop, ascending for a
+     * deterministic prologue.
+     */
+    saved_gpr: []u32
+    /**
+     * saved_fpr — the callee-saved FPR ids to save/restore, ascending.
+     */
+    saved_fpr: []u32
+    /**
+     * slot_offsets — the RSP-relative byte offset of each `MFuncX86.frame`
+     * entry, in frame order; `MFrameAddrX86{slot}` resolves to
+     * `lea dst, [rsp+slot_offsets[slot]]`.
+     */
+    slot_offsets: []u32
+    /**
+     * call_align — true iff the function needs a minimal alignment-only
+     * prologue/epilogue purely to restore 16-byte alignment at the calls it
+     * itself issues (`needs_call_align_x86`), independent of `size`/the saved
+     * lists — a function otherwise entitled to be frameless (zero slots, zero
+     * callee-saved) is NOT frameless when this is true.
+     */
+    call_align: bool
+    /**
+     * out_arg_base — the RSP-relative byte offset of the FIRST outgoing
+     * stack-argument slot (`B1-args`): 0 under SysV, and `abi.shadow_space`
+     * (32) under Win64, whose stack arguments begin just above the
+     * caller-reserved shadow area. `MOutArgX86{index}` resolves to
+     * `mov [rsp + out_arg_base + 8*index], src`.
+     */
+    out_arg_base: u32
+    /**
+     * fpr_save_base — the RSP-relative byte offset of the FIRST callee-saved XMM
+     * save slot (`B3-xmm-callee-saved`); each `saved_fpr` entry takes 16 bytes
+     * from there, ascending. Sits just above the argument-passing region and
+     * below the local slots, and is 16-aligned so `movaps` is legal.
+     */
+    fpr_save_base: u32
+    /**
+     * caller_shadow — the shadow space the CALLER reserved below the incoming
+     * stack arguments (`abi.shadow_space`: 32 under Win64, 0 everywhere else), the
+     * distance `in_arg_base_x86` must skip to reach incoming stack argument 0.
+     *
+     * NOT `shadow_bytes_x86`, and the difference is the defect it fixes: that one
+     * is 0 for a LEAF, because a leaf reserves no shadow of its OWN — but the
+     * shadow below THIS function's incoming arguments belongs to whoever called
+     * it, and every Win64 caller reserves it whether or not this callee goes on to
+     * call anything. Reading the caller-side number off the callee-side one made a
+     * Win64 callee load its fifth argument 32 bytes low, out of its own home-space
+     * area.
+     */
+    caller_shadow: u32
+}
+
+/**
+ * X86MemOp — the encoding descriptor for a memory-operand `mov`/`movsx`/SSE-
+ * family instruction: the operand-size prefix, the mandatory SSE prefix (for
+ * a float MOVSD/MOVSS transfer, `B1-fp`), the REX.W bit, whether the opcode is
+ * `0F`-escaped, the primary opcode byte, and whether the register operand is
+ * 8-bit (which forces a REX prefix when it is SIL/DIL/BPL/SPL or R8..R15, so
+ * the low byte is addressable). `load_memop_x86`/`store_memop_x86` produce it;
+ * `emit_mem_op_x86` consumes it for both loads and stores.
+ *
+ * @since #386 B1-5, B1-fp
+ */
+type X86MemOp = struct {
+    /**
+     * op66 — emit the `0x66` operand-size prefix (the 16-bit word forms).
+     */
+    op66: bool
+    /**
+     * mandatory_prefix — an SSE mandatory prefix byte (`X86_PREFIX_F2`/`F3`
+     * for a float MOVSD/MOVSS transfer), or `X86_NO_PREFIX` for every
+     * integer form (which carries its size distinction through `op66`/`rexw`
+     * instead).
+     */
+    mandatory_prefix: u32
+    /**
+     * rexw — set the REX.W bit (the 64-bit quadword / sign-extending forms).
+     */
+    rexw: bool
+    /**
+     * two_byte — the opcode is `0F`-escaped (`movsx`, and every SSE form).
+     */
+    two_byte: bool
+    /**
+     * opcode — the primary opcode byte (after any `0F` escape).
+     */
+    opcode: u32
+    /**
+     * byte_reg — the register operand is 8-bit (a byte store's source; loads
+     * zero-extend via `movzx` into a 32-bit register and never set this), so a
+     * REX prefix is forced when its id is >= 4 (SIL/DIL/BPL/SPL/R8..R15).
+     */
+    byte_reg: bool
+}
+
+/**
+ * push_byte_x86 — append the low 8 bits of `v` to `buf` as one byte, the
+ * variable-length x86 emit primitive (all bit-slicing stays in `u32`; only the
+ * final `& 0xFF` narrows to `byte`).
+ *
+ * @param []byte buf  the buffer to extend
+ * @param u32 v  the value whose low byte is appended
+ * @return []byte  `buf` followed by `v & 0xFF`
+ */
+fn push_byte_x86(buf: []byte, v: u32) -> []byte {
+    teko::list::push(buf, (v & X86_BYTE_MASK) to byte)
+}
+
+/**
+ * push_imm32_x86 — append the low 32 bits of `x` to `buf` as four little-endian
+ * bytes. The mask keeps a NEGATIVE `x` from panicking on the `to u32` cast (the
+ * two's-complement bit pattern is computed by masking, not by a signed cast).
+ *
+ * @param []byte buf  the buffer to extend
+ * @param i64 x  the value whose low 32 bits are appended (imm32 / disp32)
+ * @return []byte  `buf` followed by the four little-endian bytes
+ */
+fn push_imm32_x86(buf: []byte, x: i64) -> []byte {
+    emit_u32_le(buf, (x & X86_LOW32_MASK) to u32)
+}
+
+/**
+ * push_imm64_x86 — append the 64 bits of `x` to `buf` as eight little-endian
+ * bytes (the `movabs` immediate), split into two masked 32-bit halves so a
+ * NEGATIVE `x` never reaches a panicking signed `to u64` cast.
+ *
+ * @param []byte buf  the buffer to extend
+ * @param i64 x  the 64-bit immediate to append
+ * @return []byte  `buf` followed by the eight little-endian bytes
+ */
+fn push_imm64_x86(buf: []byte, x: i64) -> []byte {
+    let lo = (x & X86_LOW32_MASK) to u32
+    let hi = ((x >> (32)) & X86_LOW32_MASK) to u32
+    emit_u32_le(emit_u32_le(buf, lo), hi)
+}
+
+/**
+ * bit_u32 — a boolean as its 0/1 `u32` value, the bit-assembly primitive the
+ * REX-prefix builder folds into each extension field's shift. Extracted so the
+ * REX byte is composed by shifting these bits into place (bool casts are not in
+ * the bootstrap seed, so `if`-selection stands in for a `bool to u32` cast).
+ *
+ * @param bool flag  the boolean to reduce
+ * @return u32  1 when `flag`, else 0
+ */
+fn bit_u32(flag: bool) -> u32 {
+    if flag { 1 to u32 } else { 0 to u32 }
+}
+
+/**
+ * rex_x86 — the REX prefix byte value `0x40 | (W<<3) | (R<<2) | (X<<1) | B`:
+ * `W` the 64-bit operand size, `R` the ModRM.reg high bit, `X` the SIB.index
+ * high bit, `B` the ModRM.rm / SIB.base / opcode-reg high bit.
+ *
+ * @param bool w  the operand-size (REX.W) bit
+ * @param bool r  the reg-field extension (REX.R) bit
+ * @param bool x  the index-field extension (REX.X) bit
+ * @param bool b  the rm/base/opcode-reg extension (REX.B) bit
+ * @return u32  the REX prefix byte value
+ */
+fn rex_x86(w: bool, r: bool, x: bool, b: bool) -> u32 {
+    let hi = (REX_BASE | (bit_u32(w) << REX_W_SHIFT)) | (bit_u32(r) << REX_R_SHIFT)
+    (hi | (bit_u32(x) << REX_X_SHIFT)) | bit_u32(b)
+}
+
+/**
+ * push_rex_x86 — append a REX prefix to `buf` only when it carries information
+ * (any of W/R/X/B set); a bare `0x40` is elided, matching what an assembler
+ * emits for a non-byte operation. Byte operations that need the bare `0x40` to
+ * reach SIL/DIL/BPL/SPL go through `push_rex_forced_x86` instead.
+ *
+ * @param []byte buf  the buffer to extend
+ * @param bool w  the REX.W bit
+ * @param bool r  the REX.R bit
+ * @param bool x  the REX.X bit
+ * @param bool b  the REX.B bit
+ * @return []byte  `buf`, with a REX prefix appended iff it is non-trivial
+ */
+fn push_rex_x86(buf: []byte, w: bool, r: bool, x: bool, b: bool) -> []byte {
+    let v = rex_x86(w, r, x, b)
+    if v == REX_BASE { return buf }
+    push_byte_x86(buf, v)
+}
+
+/**
+ * push_rex_forced_x86 — append a REX prefix to `buf` UNCONDITIONALLY, including
+ * a bare `0x40`. Used where a byte register (SIL/DIL/BPL/SPL) needs the prefix
+ * to be addressable, or where REX.W is always required.
+ *
+ * @param []byte buf  the buffer to extend
+ * @param bool w  the REX.W bit
+ * @param bool r  the REX.R bit
+ * @param bool x  the REX.X bit
+ * @param bool b  the REX.B bit
+ * @return []byte  `buf` followed by the REX prefix byte
+ */
+fn push_rex_forced_x86(buf: []byte, w: bool, r: bool, x: bool, b: bool) -> []byte {
+    push_byte_x86(buf, rex_x86(w, r, x, b))
+}
+
+/**
+ * modrm_x86 — the ModRM byte `(mod<<6) | (reg<<3) | rm`, the addressing-mode
+ * byte every register/memory operand rides. `mod=11` is register-direct;
+ * `mod=00/01/10` select the [base], [base+disp8], [base+disp32] memory forms.
+ *
+ * @param u32 md  the 2-bit mode field
+ * @param u32 reg  the 3-bit reg / opcode-extension field
+ * @param u32 rm  the 3-bit rm field
+ * @return u32  the ModRM byte value
+ */
+fn modrm_x86(md: u32, reg: u32, rm: u32) -> u32 {
+    ((md & MODRM_MOD_MASK) << MODRM_MOD_SHIFT) | ((reg & X86_FIELD3_MASK) << X86_FIELD3_SHIFT) | (rm & X86_FIELD3_MASK)
+}

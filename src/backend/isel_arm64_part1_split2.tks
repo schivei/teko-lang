@@ -1,0 +1,288 @@
+/**
+ * selctx_scratch — reserve a fresh scratch VReg in `reg_class` (the
+ * remainder quotient, or the GPR staging register for a float constant's
+ * bit pattern).
+ *
+ * @param SelCtx ctx  the context to extend
+ * @param MRegClass reg_class  which register file the scratch lives in
+ * @return FreshScratch  the advanced context + the reserved register
+ */
+fn selctx_scratch(ctx: SelCtx, reg_class: MRegClass) -> FreshScratch {
+    let id = ctx.next_scratch
+    let advanced = SelCtx { func = ctx.func; vinfo = ctx.vinfo; next_scratch = id + 1; cur_block = ctx.cur_block; next_block = ctx.next_block }
+    FreshScratch { ctx = advanced; reg = vreg(id, reg_class) }
+}
+
+/**
+ * u64_bits_of — the 64-bit two's-complement bit pattern of `val` (drop-128, 2026-07-24 —
+ * `val` is now the i64 carrier itself, not a wider i64): a non-negative value casts
+ * directly (`i64 -> u64` is a CHECKED cast, M.1, but always passes for a non-negative
+ * source); a negative value's magnitude is formed via `-(val + 1)` (never overflowing —
+ * the classic `i64::MIN`-safe negation, avoided even at the boundary since `val + 1` and its
+ * negation both stay in range), cast to `u64` (safe — the magnitude is non-negative and `<=
+ * 2^63`), then the two's-complement pattern is `u64::MAX - magnitude + 1`.
+ *
+ * @param i64 val  the value to convert
+ * @return u64  its 64-bit two's-complement bit pattern
+ */
+fn u64_bits_of(val: i64) -> u64 {
+    if val >= (0) { return val to u64 }
+    let mag = ((0) - (val + (1))) to u64 + (1 to u64)
+    (MASK_ALL_U64 - mag) + (1 to u64)
+}
+
+/**
+ * `MASK_ALL_U64` — the all-ones 64-bit mask (`u64::MAX`), computed as the
+ * bitwise complement of zero rather than a decimal literal (the same
+ * parser-range workaround as `two_pow_64`).
+ */
+const MASK_ALL_U64: u64 = ~(0 to u64)
+
+/**
+ * mask32_u64 — the low-32-bits mask (`u32::MAX` widened to u64), derived by
+ * right-shifting the all-ones mask.
+ *
+ * @return u64  0x00000000FFFFFFFF
+ */
+fn mask32_u64() -> u64 {
+    MASK_ALL_U64 >> (32 to u64)
+}
+
+/**
+ * mask_for — the bit mask covering the register width `wide` selects: all
+ * 64 bits for the X-register form, the low 32 for the W-register form.
+ *
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @return u64  the covering mask
+ */
+fn mask_for(wide: bool) -> u64 {
+    if wide { MASK_ALL_U64 } else { mask32_u64() }
+}
+
+/**
+ * lane_count — how many 16-bit MOVZ/MOVK/MOVN lanes a register width holds:
+ * 4 for the 64-bit X form, 2 for the 32-bit W form.
+ *
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @return u32  the lane count
+ */
+fn lane_count(wide: bool) -> u32 {
+    if wide { 4 } else { 2 }
+}
+
+/**
+ * lane_shift_u32 — the bit-position of lane `i` (`i * 16`), the `shift`
+ * field every MOVZ/MOVK/MOVN instruction carries.
+ *
+ * @param u32 i  the lane index (0-3)
+ * @return u32  the lane's bit position
+ */
+fn lane_shift_u32(i: u32) -> u32 {
+    i * 16
+}
+
+/**
+ * lane_value — the 16-bit value held in lane `i` of `bits`.
+ *
+ * @param u64 bits  the full register-width bit pattern
+ * @param u32 i  the lane index (0-3)
+ * @return u32  the lane's 16-bit value
+ */
+fn lane_value(bits: u64, i: u32) -> u32 {
+    let shift = i * (16 to u64)
+    ((bits >> shift) & (65535 to u64)) to u32
+}
+
+/**
+ * count_nonzero_lanes — how many of the first `n` 16-bit lanes of `bits`
+ * are nonzero (the density test `materialize_bits` uses to pick MOVZ+MOVK
+ * vs MOVN+MOVK).
+ *
+ * @param u64 bits  the full register-width bit pattern
+ * @param u32 n  how many lanes to inspect (2 or 4)
+ * @return u32  the count of nonzero lanes
+ */
+fn count_nonzero_lanes(bits: u64, n: u32) -> u32 {
+    mut count: u32 = 0
+    mut i: u32 = 0
+    loop {
+        if i >= n { break }
+        if lane_value(bits, i) != 0 { count++ }
+        i++
+    }
+    count
+}
+
+/**
+ * first_nonzero_lane — the index of the first nonzero lane among the first
+ * `n`, or `n` itself when every inspected lane is zero (the caller treats
+ * `n` as "not found" and picks lane 0 as the anchor).
+ *
+ * @param u64 bits  the full register-width bit pattern
+ * @param u32 n  how many lanes to inspect (2 or 4)
+ * @return u32  the first nonzero lane's index, or `n` when none is nonzero
+ */
+fn first_nonzero_lane(bits: u64, n: u32) -> u32 {
+    mut i: u32 = 0
+    loop {
+        if i >= n { break }
+        if lane_value(bits, i) != 0 { return i }
+        i++
+    }
+    n
+}
+
+/**
+ * materialize_movz_chain — the MOVZ-anchored materialization: a single
+ * MOVZ at the first nonzero lane (or lane 0 with a zero immediate when
+ * `bits` is entirely zero), followed by one MOVK per remaining nonzero
+ * lane.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param MReg dst  the destination register
+ * @param u64 bits  the full register-width bit pattern to materialize
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @param u32 n  the lane count (2 or 4, from `lane_count(wide)`)
+ * @return SelCtx  the advanced context
+ */
+fn materialize_movz_chain(ctx0: SelCtx, dst: MReg, bits: u64, wide: bool, n: u32) -> SelCtx {
+    if bits == (0 to u64) {
+        return selctx_emit(ctx0, movz_inst(wide, dst, 0, 0))
+    }
+    let first = first_nonzero_lane(bits, n)
+    mut ctx = selctx_emit(ctx0, movz_inst(wide, dst, lane_value(bits, first), lane_shift_u32(first)))
+    mut i = first + 1
+    loop {
+        if i >= n { break }
+        let lv = lane_value(bits, i)
+        if lv != 0 { ctx = selctx_emit(ctx, movk_inst(wide, dst, lv, lane_shift_u32(i))) }
+        i++
+    }
+    ctx
+}
+
+/**
+ * materialize_movn_chain — the MOVN-anchored materialization (chosen when
+ * `bits`' inverse is denser): a MOVN at the first nonzero lane of the
+ * inverted pattern `nbits` (lane 0 with a zero immediate when `nbits` is
+ * entirely zero, i.e. `bits` is all-ones), then one MOVK carrying the
+ * TRUE (non-inverted) lane value for every OTHER lane where `nbits` is
+ * nonzero — MOVN's implicit all-ones fill already matches every lane
+ * where `nbits` is zero, so those need no follow-up.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param MReg dst  the destination register
+ * @param u64 bits  the true bit pattern to materialize
+ * @param u64 nbits  `bits`' bitwise complement, masked to the same width
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @param u32 n  the lane count (2 or 4, from `lane_count(wide)`)
+ * @return SelCtx  the advanced context
+ */
+fn materialize_movn_chain(ctx0: SelCtx, dst: MReg, bits: u64, nbits: u64, wide: bool, n: u32) -> SelCtx {
+    let found = first_nonzero_lane(nbits, n)
+    let anchor = if found >= n { 0 } else { found }
+    mut ctx = selctx_emit(ctx0, movn_inst(wide, dst, lane_value(nbits, anchor), lane_shift_u32(anchor)))
+    mut i: u32 = 0
+    loop {
+        if i >= n { break }
+        if i != anchor {
+            let nlv = lane_value(nbits, i)
+            if nlv != 0 { ctx = selctx_emit(ctx, movk_inst(wide, dst, lane_value(bits, i), lane_shift_u32(i))) }
+        }
+        i++
+    }
+    ctx
+}
+
+/**
+ * materialize_bits — materialize the register-width bit pattern `bits`
+ * into `dst`, picking whichever of the MOVZ+MOVK / MOVN+MOVK chains needs
+ * fewer nonzero lanes (the plan's §3.1 "minimal…MOVN for a value denser as
+ * its inverse" rule).
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param MReg dst  the destination register
+ * @param u64 bits  the full register-width bit pattern to materialize
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @return SelCtx  the advanced context
+ */
+fn materialize_bits(ctx0: SelCtx, dst: MReg, bits: u64, wide: bool) -> SelCtx {
+    let n = lane_count(wide)
+    let nbits = (~bits) & mask_for(wide)
+    let pos = count_nonzero_lanes(bits, n)
+    let neg = count_nonzero_lanes(nbits, n)
+    if pos <= neg { materialize_movz_chain(ctx0, dst, bits, wide, n) } else { materialize_movn_chain(ctx0, dst, bits, nbits, wide, n) }
+}
+
+/**
+ * materialize_int — materialize the integer literal `val` into `dst` at
+ * width `wide` (the `LConstInt` selection, and the GPR staging step of
+ * `LConstFloat`'s bit materialization): converts `val` to its two's-
+ * complement bit pattern, masks it to `wide`'s width, then emits the
+ * minimal MOVZ/MOVK/MOVN sequence. `val` is always in i64 range (the LIR's
+ * own carrier, drop-128 2026-07-24), so no register-pair materialization is
+ * ever needed.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param MReg dst  the destination register
+ * @param i64 val  the literal value to materialize
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @return SelCtx  the advanced context
+ */
+fn materialize_int(ctx0: SelCtx, dst: MReg, val: i64, wide: bool) -> SelCtx {
+    let bits = u64_bits_of(val) & mask_for(wide)
+    materialize_bits(ctx0, dst, bits, wide)
+}
+
+/**
+ * select_const_int — the `LConstInt` selection: materialize its value into
+ * a fresh 64-bit GPR (A2-2 defaults every untyped constant to the widest,
+ * no-information-loss form — matching `LConstInt.val`'s own i64 carrier
+ * choice, drop-128 2026-07-24 — since the LIR carries no per-value width
+ * for a bare constant).
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param lir::LConstInt c  the constant op
+ * @return SelCtx  the advanced context
+ */
+fn select_const_int(ctx0: SelCtx, inst: lir::LInst, c: lir::LConstInt) -> SelCtx {
+    let dst = vreg(inst.result, MRegClass::GPR)
+    let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::GPR, true)
+    materialize_int(ctx1, dst, c.val, true)
+}
+
+/**
+ * select_const_float — the `LConstFloat` selection: materialize its IEEE bit
+ * pattern into a scratch GPR via `materialize_int`, then `FMOV` it across the
+ * GPR/FPR boundary into the result (§3.1 of the isel plan). `c.bits` is decoded
+ * through `decode_signed64` FIRST (not widened directly) so the GPR staging
+ * value is the exact signed two's-complement i64 reading of the IEEE bit
+ * pattern.
+ *
+ * `LConstFloat.bits` is ALWAYS the f64 pattern, whatever `c.wide` says, so an
+ * `f32`-declared literal needs one more step: the staged f64 is NARROWED by
+ * `FCVT Sd, Dn` into the result, the same correctly-rounded conversion a C
+ * compiler performs on `float f = <double literal>;`. Skipping it is the bug the
+ * x86 twin already measured and this side still had — the value stayed an f64
+ * pattern in a register that everything downstream then read at single width,
+ * and the vinfo recorded it WIDE, so `FToF`'s direction, a compare's scalar
+ * width and a stack argument's transfer size all went wrong from one place.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param lir::LConstFloat c  the constant op
+ * @return SelCtx  the advanced context
+ */
+fn select_const_float(ctx0: SelCtx, inst: lir::LInst, c: lir::LConstFloat) -> SelCtx {
+    let dst = vreg(inst.result, MRegClass::FPR)
+    let ctx1 = selctx_set_vinfo(ctx0, inst.result, MRegClass::FPR, c.wide)
+    let scratch = selctx_scratch(ctx1, MRegClass::GPR)
+    let materialized = materialize_int(scratch.ctx, scratch.reg, decode_signed64(c.bits), true)
+    if c.wide {
+        return selctx_emit(materialized, fmov_inst(true, dst, scratch.reg))
+    }
+    let staged = selctx_scratch(materialized, MRegClass::FPR)
+    let ctx2 = selctx_emit(staged.ctx, fmov_inst(true, staged.reg, scratch.reg))
+    selctx_emit(ctx2, cvt_inst(MCvtOp::Fcvt, dst, staged.reg, true, false))
+}

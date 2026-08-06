@@ -1,0 +1,289 @@
+/**
+ * coff_symbol_index — the 0-based index of the symbol named `name` in the resolved
+ * COFF symbol table, or `syms.len` when absent. This is the `IMAGE_RELOCATION`
+ * `SymbolTableIndex` (the A4-4/B1-7-class correctness point, §5.5): the MVP emits 0
+ * aux records, so the index equals the emission position; were `B3-sectaux` to add
+ * a section-definition aux record, the indices would shift and a golden pins it.
+ * The absent sentinel is unreached for a well-formed module (every non-rodata
+ * reloc target is a defined function or an undefined extern in the table) and is
+ * covered by a direct unit test on a hand-built input.
+ *
+ * @param []CoffSymbol syms  the resolved symbol table
+ * @param str name  the target symbol's name
+ * @return u32  the symbol's index, or `syms.len` when not found
+ */
+fn coff_symbol_index(syms: []CoffSymbol, name: str) -> u32 {
+    mut i: u64 = 0
+    loop {
+        if i >= syms.len { break }
+        if syms[i].name == name { return i to u32 }
+        i++
+    }
+    syms.len to u32
+}
+
+/**
+ * coff_rodata_secsym_index — the 0-based index of the `.rdata` `STATIC` section
+ * symbol (`SectionNumber == 2`, `StorageClass == 3`), the target every rodata
+ * relocation resolves to, or `syms.len` when no rodata section symbol was emitted.
+ * The absent case is unreached because a rodata relocation is emitted only when the
+ * rodata datum — and thus its section symbol — exists, and is covered by a direct
+ * unit test on a hand-built input.
+ *
+ * @param []CoffSymbol syms  the resolved symbol table
+ * @return u32  the `.rdata` section symbol's index, or `syms.len`
+ */
+fn coff_rodata_secsym_index(syms: []CoffSymbol) -> u32 {
+    mut i: u64 = 0
+    loop {
+        if i >= syms.len { break }
+        if syms[i].section_number == (2 to u32) && syms[i].storage_class == (3 to u32) { return i to u32 }
+        i++
+    }
+    syms.len to u32
+}
+
+/**
+ * coff_reloc_type — the numeric `IMAGE_REL_AMD64_*` type for the reused
+ * `RelocKindX86` the x86 encoder already tags: `Plt32`/`Pc32` → REL32(0x0004) (a
+ * PC-relative-to-next-instruction fixup — the −4 SysV/ELF addend is IMPLICIT in
+ * the COFF REL32 definition, so it is NOT written to a reloc field the way ELF
+ * writes `r_addend`), `Abs64` → ADDR64(0x0001). The ONLY COFF-specific knowledge
+ * the writer injects (the adapter mirror of `elf_reloc_type`). `Abs64` is the
+ * FUTURE data-global path (`B3-globals`, raised earlier in `encode_module_x86`),
+ * so a real B3 object never carries an ADDR64 relocation; the arm is covered by a
+ * direct unit test.
+ *
+ * @param RelocKindX86 kind  the relocation kind the encoder tagged
+ * @return u32  the `IMAGE_RELOCATION` `Type` field value
+ */
+fn coff_reloc_type(kind: RelocKindX86) -> u32 {
+    match kind {
+        Plt32 => IMAGE_REL_AMD64_REL32
+        Pc32 => IMAGE_REL_AMD64_REL32
+        Abs64 => IMAGE_REL_AMD64_ADDR64
+    }
+}
+
+/**
+ * CoffRodataHit — the result of resolving a relocation's target against the
+ * module's rodata locals: whether the named target is a defined, file-local
+ * `.rdata` datum, and (when it is) that datum's byte offset within `.rdata`. A hit
+ * re-points the relocation at the `.rdata` section symbol and writes the offset
+ * in-place into the `.text` disp32 field (the COFF idiom that dodges per-string
+ * symbols — like Mach-O, unlike ELF's explicit `r_addend`); a miss leaves the
+ * relocation targeting the named function/extern symbol directly.
+ *
+ * @since #388 B3-3
+ */
+type CoffRodataHit = struct {
+    /** found — true iff the relocation target is a defined section-2 local. */
+    found: bool
+    /** offset — the target datum's byte offset within `.rdata` (0 on a miss). */
+    offset: u32
+}
+
+/**
+ * coff_rodata_hit — resolve `name` against the module's rodata locals: a hit iff
+ * some neutral `Symbol` named `name` is defined, file-local, and section-2 (a
+ * `.rdata` datum), carrying that datum's `.rdata` byte offset. `coff_build_relocs`
+ * re-targets a hit at the `.rdata` section symbol and `coff_apply_rodata_addends`
+ * writes the offset in-place into the disp32 field.
+ *
+ * @param []Symbol symbols  the module's neutral symbol list
+ * @param str name  the relocation's target symbol name
+ * @return CoffRodataHit  whether it is a rodata local, and its offset
+ */
+fn coff_rodata_hit(symbols: []Symbol, name: str) -> CoffRodataHit {
+    mut i: u64 = 0
+    loop {
+        if i >= symbols.len { break }
+        let s = symbols[i]
+        if s.defined && s.local && s.sect == (2 to u8) && s.name == name {
+            return CoffRodataHit { found = true; offset = s.offset }
+        }
+        i++
+    }
+    CoffRodataHit { found = false; offset = 0 to u32 }
+}
+
+/**
+ * CoffReloc — one resolved `IMAGE_RELOCATION` (10 bytes): the `.text`-section-
+ * relative `VirtualAddress` of the patched field, the 0-based `SymbolTableIndex`
+ * it targets, and the `IMAGE_REL_AMD64_*` `Type`. COFF carries NO addend field —
+ * the REL32 −4 is implicit and any rodata addend rides in-place in the `.text`
+ * bytes (§5.4), so this row holds no addend.
+ *
+ * @since #388 B3-3
+ */
+type CoffReloc = struct {
+    /** virtual_address — the patched field's `.text`-section-relative byte offset (module-rebased). */
+    virtual_address: u32
+    /** symbol_index — the 0-based `SymbolTableIndex` of the target symbol. */
+    symbol_index: u32
+    /** rtype — the `IMAGE_REL_AMD64_*` `Type` value (REL32=0x0004, ADDR64=0x0001). */
+    rtype: u32
+}
+
+/**
+ * CoffRelocParts — a `EncodedModuleX86`'s relocations split by patch-site section
+ * (#594 T-B3): `text` (`.text`-relative fixups) and `rdata` (`.rdata`-relative
+ * data→data pointers). The canonical seam, mirroring `MachoRelocParts` and ELF's
+ * bridge partition; `rdata` is EMPTY in every real compile.
+ *
+ * @since #594 T-B3
+ */
+type CoffRelocParts = struct {
+    /** text — the relocations whose patch site is in `.text` (`r.sect == Text`). */
+    text: []RelocX86
+    /** rdata — the relocations whose patch site is in `.rdata` (`r.sect == Rodata`). */
+    rdata: []RelocX86
+}
+
+/**
+ * coff_partition_relocs — split `relocs` into its `.text` and `.rdata` partitions by
+ * each reloc's `RelocSect` tag (#594 T-B3), preserving emission order within each.
+ * Today every reloc is `Text`, so `rdata` is empty and `.rdata` carries no
+ * relocation.
+ *
+ * @param []RelocX86 relocs  the module's relocations, `.sect`-tagged, in order
+ * @return CoffRelocParts  the `text` and `rdata` partitions
+ */
+fn coff_partition_relocs(relocs: []RelocX86) -> CoffRelocParts {
+    mut text: []RelocX86 = teko::list::empty()
+    mut rdata: []RelocX86 = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= relocs.len { break }
+        let r = relocs[i]
+        match r.sect {
+            Text => { text = teko::list::push(text, r) }
+            Rodata => { rdata = teko::list::push(rdata, r) }
+        }
+        i++
+    }
+    CoffRelocParts { text = text; rdata = rdata }
+}
+
+/**
+ * coff_apply_data_reloc_addends — fold every rodata-INTERNAL relocation's target
+ * offset in-place into its 8-byte pointer slot inside `.rdata` (#594 T-B3; the COFF
+ * data→data analog of `coff_apply_rodata_addends`, which folds into `.text`). For
+ * each `RelocX86` whose target is a defined section-2 local, write that datum's
+ * `.rdata` byte offset as a little-endian `u32` at the reloc's `.rdata` offset (the
+ * low word; the high word stays 0 — a rodata offset never exceeds 32 bits, and the
+ * slot is zero-initialized). The relocation itself (built by `coff_build_relocs`)
+ * points at the `.rdata` STATIC section symbol, so the linker computes
+ * `section_base(.rdata) + in_place` = the target datum's absolute address. Returns
+ * `rodata` unchanged when no relocation is a rodata hit (the byte-identity path).
+ *
+ * @param []byte rodata  the `.rdata` section image (pointer slots zero-initialized)
+ * @param []Symbol symbols  the module's neutral symbol list (for rodata resolution)
+ * @param []RelocX86 relocs  the `.rdata` partition, in emission order
+ * @return []byte  `rodata` with each data reloc's target offset folded in-place
+ */
+fn coff_apply_data_reloc_addends(rodata: []byte, symbols: []Symbol, relocs: []RelocX86) -> []byte {
+    mut buf = rodata
+    mut i: u64 = 0
+    loop {
+        if i >= relocs.len { break }
+        let r = relocs[i]
+        let hit = coff_rodata_hit(symbols, r.sym)
+        if hit.found { buf = write_u32_le_at(buf, r.offset, hit.offset) }
+        i++
+    }
+    buf
+}
+
+/**
+ * coff_build_relocs — resolve every neutral `RelocX86` into an `IMAGE_RELOCATION`
+ * row: a rodata target (a defined section-2 local) re-points at the `.rdata`
+ * section symbol (its offset is folded in-place by `coff_apply_rodata_addends`,
+ * NOT into a reloc field — COFF has none); any other target (a defined function or
+ * an undefined extern) takes that symbol's table index. The `VirtualAddress` is
+ * the encoder's module-rebased `.text`-relative field offset, unchanged; the
+ * `RelocKindX86` maps through `coff_reloc_type` (the only COFF knowledge injected).
+ *
+ * @param []Symbol symbols  the module's neutral symbol list (for rodata resolution)
+ * @param []CoffSymbol coffsyms  the resolved COFF symbol table (for target indices)
+ * @param []RelocX86 relocs  the module-rebased relocations, in emission order
+ * @return []CoffReloc  the resolved relocation rows, in emission order
+ */
+fn coff_build_relocs(symbols: []Symbol, coffsyms: []CoffSymbol, relocs: []RelocX86) -> []CoffReloc {
+    let secidx = coff_rodata_secsym_index(coffsyms)
+    mut out: []CoffReloc = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= relocs.len { break }
+        let r = relocs[i]
+        let hit = coff_rodata_hit(symbols, r.sym)
+        let symidx = if hit.found { secidx } else { coff_symbol_index(coffsyms, r.sym) }
+        out = teko::list::push(out, CoffReloc { virtual_address = r.offset; symbol_index = symidx; rtype = coff_reloc_type(r.kind) })
+        i++
+    }
+    out
+}
+
+/**
+ * coff_apply_rodata_addends — fold every rodata relocation's target offset in-place
+ * into the `.text` disp32 field (the COFF/Mach-O idiom — COFF has no `r_addend`,
+ * §5.4). For each `RelocX86` whose target is a defined section-2 local, write that
+ * datum's `.rdata` byte offset as a little-endian `u32` at the reloc's `.text`
+ * offset (the −4 is implicit in COFF REL32, so ONLY the rodata offset is written,
+ * never the base −4); a non-rodata reloc (the exit corpus's `call tk_exit` REL32)
+ * leaves the field as the encoder emitted it (0). Returns `text` unchanged when no
+ * relocation is a rodata hit.
+ *
+ * @param []byte text  the `.text` section image (rel32 fields as the encoder left them)
+ * @param []Symbol symbols  the module's neutral symbol list (for rodata resolution)
+ * @param []RelocX86 relocs  the module-rebased relocations, in emission order
+ * @return []byte  `text` with each rodata reloc's `.rdata` offset folded in-place
+ */
+fn coff_apply_rodata_addends(text: []byte, symbols: []Symbol, relocs: []RelocX86) -> []byte {
+    mut buf = text
+    mut i: u64 = 0
+    loop {
+        if i >= relocs.len { break }
+        let r = relocs[i]
+        let hit = coff_rodata_hit(symbols, r.sym)
+        if hit.found { buf = write_u32_le_at(buf, r.offset, hit.offset) }
+        i++
+    }
+    buf
+}
+
+/**
+ * CoffLayout — the resolved file offsets, sizes, and counts of a COFF object,
+ * computed BEFORE any bytes are emitted so the file header's `PointerToSymbolTable`
+ * and each section header's `PointerToRawData`/`PointerToRelocations` reference the
+ * real data positions. The emission order mirrors this exactly:
+ * `[IMAGE_FILE_HEADER][section headers][.text][.rdata][.text relocations][symbols][strtab]`
+ * (no optional header, no PE image concerns — a relocatable object, §5.1). COFF
+ * object files require no inter-record padding, so the offsets are contiguous.
+ *
+ * @since #388 B3-3
+ */
+type CoffLayout = struct {
+    /** num_sections — the section count (1 for `.text` only, 2 with `.rdata`). */
+    num_sections: u32
+    /** text_size — the `.text` `SizeOfRawData`. */
+    text_size: u32
+    /** text_offset — the file offset of the `.text` bytes (after the section headers). */
+    text_offset: u32
+    /** rdata_size — the `.rdata` `SizeOfRawData` (0 when no rodata). */
+    rdata_size: u32
+    /** rdata_offset — the file offset of the `.rdata` bytes (immediately after `.text`). */
+    rdata_offset: u32
+    /** reloc_offset — the file offset of the `.text` relocation array (after all section data). */
+    reloc_offset: u32
+    /** num_relocs — the number of `.text` relocations. */
+    num_relocs: u32
+    /** rdata_reloc_offset — the file offset of the `.rdata` relocation array (contiguous, after the `.text` array; #594 T-B3). */
+    rdata_reloc_offset: u32
+    /** num_rdata_relocs — the number of `.rdata` relocations (a data→data pointer each); 0 in every real compile, keeping the object byte-identical (#594 T-B3). */
+    num_rdata_relocs: u32
+    /** symtab_offset — the file offset of the `IMAGE_SYMBOL` table (`PointerToSymbolTable`). */
+    symtab_offset: u32
+    /** num_symbols — the symbol-record count (`NumberOfSymbols`; 0 aux records in the MVP). */
+    num_symbols: u32
+}

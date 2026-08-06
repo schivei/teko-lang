@@ -1,0 +1,295 @@
+/**
+ * rat_gpr — a physical GPR register operand with the given ISA id (a
+ * descriptor-test shorthand).
+ *
+ * @param u32 id  the physical register id
+ * @return MReg  the physical GPR register
+ */
+fn rat_gpr(id: u32) -> MReg {
+    preg(id, MRegClass::GPR)
+}
+
+/**
+ * rat_fpr — a physical FPR register operand with the given ISA id.
+ *
+ * @param u32 id  the physical register id
+ * @return MReg  the physical FPR register
+ */
+fn rat_fpr(id: u32) -> MReg {
+    preg(id, MRegClass::FPR)
+}
+
+#test
+
+fn rat_caller_and_callee_saved_partition() {
+    let abi = AAPCS64
+    teko::assert::is_true(is_caller_saved(abi, rat_gpr(0)))
+    teko::assert::is_true(!is_caller_saved(abi, rat_gpr(19)))
+    teko::assert::is_true(is_callee_saved(abi, rat_gpr(19)))
+    teko::assert::is_true(!is_callee_saved(abi, rat_gpr(0)))
+    teko::assert::is_true(!is_callee_saved(abi, rat_gpr(30)))
+    teko::assert::is_true(is_caller_saved(abi, rat_fpr(0)))
+    teko::assert::is_true(!is_caller_saved(abi, rat_fpr(8)))
+    teko::assert::is_true(is_callee_saved(abi, rat_fpr(8)))
+}
+
+/**
+ * rgt_v — a virtual GPR register operand (an A3-2 interval-test shorthand).
+ *
+ * @param u32 id  the virtual register id
+ * @return MReg  the virtual GPR register
+ */
+fn rgt_v(id: u32) -> MReg {
+    vreg(id, MRegClass::GPR)
+}
+
+/**
+ * rgt_vf — a virtual FPR register operand.
+ *
+ * @param u32 id  the virtual register id
+ * @return MReg  the virtual FPR register
+ */
+fn rgt_vf(id: u32) -> MReg {
+    vreg(id, MRegClass::FPR)
+}
+
+/**
+ * rgt_p — a physical GPR register operand (a pin).
+ *
+ * @param u32 id  the physical register id
+ * @return MReg  the physical GPR register
+ */
+fn rgt_p(id: u32) -> MReg {
+    preg(id, MRegClass::GPR)
+}
+
+/**
+ * rgt_func — a single-block `MFunc` named "main" with the given instruction
+ * stream (an interval-test fixture shorthand).
+ *
+ * @param []MInst insts  the block's instructions
+ * @return MFunc  the built function
+ */
+fn rgt_func(insts: []MInst) -> MFunc {
+    let b = MBlock { id = 0; params = teko::list::empty(); insts = insts }
+    MFunc { symbol = "main"; blocks = teko::list::push(teko::list::empty(), b); frame = teko::list::empty() }
+}
+
+/**
+ * ai_iv — a virtual GPR live interval (an A3-3 scan-test shorthand).
+ *
+ * @param u32 reg_id  the virtual register id
+ * @param u32 start  the start point
+ * @param u32 end  the end point
+ * @param bool crosses  whether it crosses a call
+ * @return LiveInterval  the interval
+ */
+fn ai_iv(reg_id: u32, start: u32, end: u32, crosses: bool) -> LiveInterval {
+    LiveInterval { reg_id = reg_id; reg_class = MRegClass::GPR; start = start; end = end; is_fixed = false; crosses_call = crosses }
+}
+
+/**
+ * ai_fixed — a fixed GPR pin interval on physreg `reg_id`.
+ *
+ * @param u32 reg_id  the physical register id
+ * @param u32 start  the start point
+ * @param u32 end  the end point
+ * @return LiveInterval  the fixed pin interval
+ */
+fn ai_fixed(reg_id: u32, start: u32, end: u32) -> LiveInterval {
+    LiveInterval { reg_id = reg_id; reg_class = MRegClass::GPR; start = start; end = end; is_fixed = true; crosses_call = false }
+}
+
+/**
+ * ai_set — an `IntervalSet` from virtual + fixed intervals (no call points).
+ *
+ * @param []LiveInterval virt  the virtual intervals
+ * @param []LiveInterval fixed  the fixed pin intervals
+ * @return IntervalSet  the interval set
+ */
+fn ai_set(virt: []LiveInterval, fixed: []LiveInterval) -> IntervalSet {
+    IntervalSet { virt = virt; fixed = fixed; call_points = teko::list::empty() }
+}
+
+/**
+ * ai_phys — the physreg `vreg_id` was assigned, or the sentinel 100000 if it
+ * was spilled or absent.
+ *
+ * @param ScanResult scan  the scan result
+ * @param u32 vreg_id  the virtual register
+ * @return u32  its physreg, or 100000
+ */
+fn ai_phys(scan: ScanResult, vreg_id: u32) -> u32 {
+    mut i: u64 = 0
+    loop {
+        if i >= scan.assignments.len { break }
+        let got = match scan.assignments[i] {
+            InReg as r => if r.vreg_id == vreg_id { r.phys } else { 100000 to u32 }
+            Spilled => 100000 to u32
+        }
+        if got != 100000 to u32 { return got }
+        i++
+    }
+    100000 to u32
+}
+
+/**
+ * ai_spilled — whether `vreg_id` was spilled.
+ *
+ * @param ScanResult scan  the scan result
+ * @param u32 vreg_id  the virtual register
+ * @return bool  true iff spilled
+ */
+fn ai_spilled(scan: ScanResult, vreg_id: u32) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= scan.assignments.len { break }
+        let sp = match scan.assignments[i] {
+            Spilled as s => s.vreg_id == vreg_id
+            InReg => false
+        }
+        if sp { return true }
+        i++
+    }
+    false
+}
+
+/**
+ * ai_tiny_abi — a two-register GPR descriptor (x0, x1) for the spill test; no
+ * caller-saved so `crosses_call` filtering does not interfere.
+ *
+ * @return AbiDescriptor  the tiny register file
+ */
+fn ai_tiny_abi() -> AbiDescriptor {
+    AbiDescriptor {
+        gpr_arg = push_range(teko::list::empty(), 0, 1)
+        fpr_arg = teko::list::empty()
+        gpr_allocatable = push_range(teko::list::empty(), 0, 1)
+        fpr_allocatable = teko::list::empty()
+        gpr_caller_saved = teko::list::empty()
+        fpr_caller_saved = teko::list::empty()
+        gpr_spill_scratch = teko::list::empty()
+        fpr_spill_scratch = teko::list::empty()
+        spill_slot_bytes = 8
+        spill_slot_align = 8
+        shadow_space = 0 to u32
+        max_reg_arg_bytes = 16 to u32
+        arg_slots_shared = false
+    }
+}
+
+#test
+
+fn ai_overlapping_fixed_pin_is_avoided() {
+    let virt = teko::list::push(teko::list::empty(), ai_iv(0, 0, 5, false))
+    let fixed = teko::list::push(teko::list::empty(), ai_fixed(0, 0, 5))
+    let scan = linear_scan(AAPCS64, ai_set(virt, fixed))
+    teko::assert::is_true(ai_phys(scan, 0) != 0)
+    teko::assert::is_true(ai_phys(scan, 0) != 100000 to u32)
+}
+
+#test
+
+fn ai_pressure_spills_furthest_next_use() {
+    let virt = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(),
+        ai_iv(0, 0, 9, false)), ai_iv(1, 1, 5, false)), ai_iv(2, 2, 3, false))
+    let scan = linear_scan(ai_tiny_abi(), ai_set(virt, teko::list::empty()))
+    teko::assert::is_true(ai_spilled(scan, 0))
+    teko::assert::is_true(!ai_spilled(scan, 2))
+    teko::assert::is_true(ai_phys(scan, 2) != 100000 to u32)
+}
+
+/**
+ * ai_call_unsafe_abi — a two-register GPR descriptor (x0, x1) with x0 marked CALLER-saved and
+ * x1 left callee-saved (absent from `gpr_caller_saved`): the minimal shape that can expose a
+ * spill-displacement pick handing a call-crossing interval the WRONG (caller-saved) register —
+ * §3.3's own invariant `furthest_active` must honor, not just `candidate_pool`'s first-choice
+ * free-register search.
+ *
+ * @return AbiDescriptor  the two-register descriptor, x0 caller-saved, x1 callee-saved
+ */
+fn ai_call_unsafe_abi() -> AbiDescriptor {
+    AbiDescriptor {
+        gpr_arg = push_range(teko::list::empty(), 0, 1)
+        fpr_arg = teko::list::empty()
+        gpr_allocatable = push_range(teko::list::empty(), 0, 1)
+        fpr_allocatable = teko::list::empty()
+        gpr_caller_saved = teko::list::push(teko::list::empty(), 0 to u32)
+        fpr_caller_saved = teko::list::empty()
+        gpr_spill_scratch = teko::list::empty()
+        fpr_spill_scratch = teko::list::empty()
+        spill_slot_bytes = 8
+        spill_slot_align = 8
+        shadow_space = 0 to u32
+        max_reg_arg_bytes = 16 to u32
+        arg_slots_shared = false
+    }
+}
+
+/**
+ * ai_call_unsafe_only_abi — a ONE-register GPR descriptor (x0 only), and that one register is
+ * CALLER-saved: the shape where a call-crossing interval under register pressure has NO
+ * call-safe displacement victim at all, so the correct outcome is spilling the call-crossing
+ * interval ITSELF rather than handing it the sole (unsafe) register.
+ *
+ * @return AbiDescriptor  the one-register descriptor, its only register caller-saved
+ */
+fn ai_call_unsafe_only_abi() -> AbiDescriptor {
+    AbiDescriptor {
+        gpr_arg = teko::list::push(teko::list::empty(), 0 to u32)
+        fpr_arg = teko::list::empty()
+        gpr_allocatable = teko::list::push(teko::list::empty(), 0 to u32)
+        fpr_allocatable = teko::list::empty()
+        gpr_caller_saved = teko::list::push(teko::list::empty(), 0 to u32)
+        fpr_caller_saved = teko::list::empty()
+        gpr_spill_scratch = teko::list::empty()
+        fpr_spill_scratch = teko::list::empty()
+        spill_slot_bytes = 8
+        spill_slot_align = 8
+        shadow_space = 0 to u32
+        max_reg_arg_bytes = 16 to u32
+        arg_slots_shared = false
+    }
+}
+
+/**
+ * ai_call_crossing_displacement_avoids_caller_saved_victim — regression for the native-region-
+ * crash root cause (`furthest_active` ignoring call-safety): under `ai_call_unsafe_abi` register
+ * pressure, a call-crossing interval (id 2) must displace the CALLEE-saved active entry (id 1,
+ * x1) rather than the furthest-end but CALLER-saved one (id 0, x0), and must land on x1 itself —
+ * never on x0, which an intervening call would clobber before id 2's own last use.
+ */
+#test
+
+fn ai_call_crossing_displacement_avoids_caller_saved_victim() {
+    let virt = teko::list::push(teko::list::push(teko::list::push(teko::list::empty(),
+        ai_iv(0, 0, 9, false)), ai_iv(1, 1, 5, false)), ai_iv(2, 2, 3, true))
+    let scan = linear_scan(ai_call_unsafe_abi(), ai_set(virt, teko::list::empty()))
+    teko::assert::is_true(ai_spilled(scan, 1))
+    teko::assert::is_true(ai_phys(scan, 2) == (1 to u32))
+}
+
+/**
+ * ai_call_crossing_spills_itself_when_every_active_is_caller_saved — regression for the same
+ * root cause, the total-exhaustion case: under `ai_call_unsafe_only_abi` (its ONE register
+ * caller-saved), a call-crossing interval under pressure has no call-safe displacement victim
+ * at all, so it must be spilled itself rather than colored into the sole, unsafe register.
+ */
+#test
+
+fn ai_call_crossing_spills_itself_when_every_active_is_caller_saved() {
+    let virt = teko::list::push(teko::list::push(teko::list::empty(),
+        ai_iv(0, 0, 9, false)), ai_iv(1, 1, 3, true))
+    let scan = linear_scan(ai_call_unsafe_only_abi(), ai_set(virt, teko::list::empty()))
+    teko::assert::is_true(ai_spilled(scan, 1))
+}
+
+/**
+ * rgt_module_of — a single-function module (empty rodata/globals/layouts).
+ *
+ * @param MFunc f  the function
+ * @return MModule  the wrapping module
+ */
+fn rgt_module_of(f: MFunc) -> MModule {
+    MModule { funcs = teko::list::push(teko::list::empty(), f); rodata = teko::list::empty(); globals = teko::list::empty(); layouts = teko::list::empty() }
+}

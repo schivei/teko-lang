@@ -1,0 +1,298 @@
+use teko::lir
+
+/**
+ * xat_bin — append `%r = op a, b` to `f0`, returning the advanced function
+ * plus the fresh result VReg (a fixture-building shorthand).
+ *
+ * @param lir::LFunc f0  the function to extend
+ * @param lir::LBinOp op  the binary op
+ * @param u32 a  the first operand VReg
+ * @param u32 b  the second operand VReg
+ * @return lir::FreshVReg  the advanced function + the result VReg
+ */
+fn xat_bin(f0: lir::LFunc, op: lir::LBinOp, a: u32, b: u32) -> lir::FreshVReg {
+    let r = lir::alloc_vreg(f0)
+    lir::FreshVReg { func = lir::append_inst(r.func, 0, lir::bin_inst(r.vreg, op, a, b, 0, 0)); vreg = r.vreg }
+}
+
+/**
+ * xat_un — append `%r = op a` to `f0`, returning the advanced function plus
+ * the fresh result VReg.
+ *
+ * @param lir::LFunc f0  the function to extend
+ * @param lir::LUnOp op  the unary op
+ * @param u32 a  the operand VReg
+ * @return lir::FreshVReg  the advanced function + the result VReg
+ */
+fn xat_un(f0: lir::LFunc, op: lir::LUnOp, a: u32) -> lir::FreshVReg {
+    let r = lir::alloc_vreg(f0)
+    lir::FreshVReg { func = lir::append_inst(r.func, 0, lir::un_inst(r.vreg, op, a, 0, 0)); vreg = r.vreg }
+}
+
+/**
+ * xat_const — append `%r = const val` to `f0`, returning the advanced function
+ * plus the fresh result VReg.
+ *
+ * @param lir::LFunc f0  the function to extend
+ * @param i64 val  the literal value
+ * @return lir::FreshVReg  the advanced function + the result VReg
+ */
+fn xat_const(f0: lir::LFunc, val: i64) -> lir::FreshVReg {
+    let r = lir::alloc_vreg(f0)
+    lir::FreshVReg { func = lir::append_inst(r.func, 0, lir::const_int_inst(r.vreg, val, 0, 0)); vreg = r.vreg }
+}
+
+/**
+ * xat_ret — append `ret value` to `f0`.
+ *
+ * @param lir::LFunc f0  the function to extend
+ * @param u32 value  the returned VReg
+ * @return lir::LFunc  the advanced function
+ */
+fn xat_ret(f0: lir::LFunc, value: u32) -> lir::LFunc {
+    lir::append_inst(f0, 0, lir::ret_inst(value, 0, 0))
+}
+
+/**
+ * xat_two_i64_params — a fresh 2-param (I64, I64) -> I64 function named `sym`,
+ * its entry block already carrying both `LParam` instructions.
+ *
+ * @param str sym  the function's symbol
+ * @return lir::LFunc  the seeded function
+ */
+fn xat_two_i64_params(sym: str) -> lir::LFunc {
+    let ptypes = teko::list::push(teko::list::push(teko::list::empty(), lir::LType::I64), lir::LType::I64)
+    mut f = lir::new_func(sym, 2, ptypes, lir::LType::I64)
+    f = lir::append_inst(f, 0, lir::param_inst(0, 0, 0, 0))
+    lir::append_inst(f, 0, lir::param_inst(1, 1, 0, 0))
+}
+
+/**
+ * xat_main_ret — a zero-param `main` seed (the straight-line fixture base).
+ *
+ * @return lir::LFunc  the seeded, empty-bodied function
+ */
+fn xat_main_ret() -> lir::LFunc {
+    lir::new_func("main", 0, teko::list::empty(), lir::LType::I32)
+}
+
+/**
+ * xat_dump — select `f` for x86-64 under the SysV ABI and render the machine
+ * module as text (the golden-dump fixtures assert against key lines of this);
+ * "" on a selection error. The SysV output is the byte-identity guardrail: it is
+ * unchanged from before the ABI descriptor was threaded, because `SYSV64` is
+ * exactly the descriptor the old code hardcoded.
+ *
+ * @param lir::LFunc f  the function to select and print
+ * @return str  the rendered machine text ("" on a selection error)
+ */
+fn xat_dump(f: lir::LFunc) -> str {
+    let mf = match select_lfunc_x86(SYSV64, f) { MFuncX86 as x => x; error => return "" }
+    minst_print_x86(add_mfunc_x86(empty_mmodule_x86(), mf))
+}
+
+/**
+ * xat_kitchen_sink — a two-param (I64,I64) function exercising every integer
+ * `LBinOp` arithmetic/bitwise/shift/compare case plus every integer `LUnOp`
+ * case (the coverage sweep for `select_bin_x86`/`select_un_x86`'s integer
+ * dispatch), ending `ret`. The float family has its own sweep,
+ * `xat_float_kitchen_sink` (`B1-fp`, closed 2026-07-29).
+ *
+ * @return lir::LFunc  the built function
+ */
+fn xat_kitchen_sink() -> lir::LFunc {
+    mut f = xat_two_i64_params("teko__demo__kitchen_sink")
+    f = xat_bin(f, lir::LBinOp::IAdd, 0, 1).func
+    f = xat_bin(f, lir::LBinOp::ISub, 0, 1).func
+    f = xat_bin(f, lir::LBinOp::IMul, 0, 1).func
+    f = xat_bin(f, lir::LBinOp::IDivS, 0, 1).func
+    f = xat_bin(f, lir::LBinOp::IDivU, 0, 1).func
+    f = xat_bin(f, lir::LBinOp::IRemS, 0, 1).func
+    f = xat_bin(f, lir::LBinOp::IRemU, 0, 1).func
+    f = xat_bin(f, lir::LBinOp::IAnd, 0, 1).func
+    f = xat_bin(f, lir::LBinOp::IOr, 0, 1).func
+    f = xat_bin(f, lir::LBinOp::IXor, 0, 1).func
+    f = xat_bin(f, lir::LBinOp::IShl, 0, 1).func
+    f = xat_bin(f, lir::LBinOp::IShrS, 0, 1).func
+    f = xat_bin(f, lir::LBinOp::IShrU, 0, 1).func
+    f = xat_bin(f, lir::LBinOp::ICmpEq, 0, 1).func
+    f = xat_bin(f, lir::LBinOp::ICmpNe, 0, 1).func
+    f = xat_bin(f, lir::LBinOp::ICmpLtS, 0, 1).func
+    f = xat_bin(f, lir::LBinOp::ICmpLtU, 0, 1).func
+    f = xat_bin(f, lir::LBinOp::ICmpLeS, 0, 1).func
+    f = xat_bin(f, lir::LBinOp::ICmpLeU, 0, 1).func
+    f = xat_bin(f, lir::LBinOp::ICmpGtS, 0, 1).func
+    f = xat_bin(f, lir::LBinOp::ICmpGtU, 0, 1).func
+    f = xat_bin(f, lir::LBinOp::ICmpGeS, 0, 1).func
+    f = xat_bin(f, lir::LBinOp::ICmpGeU, 0, 1).func
+    f = xat_un(f, lir::LUnOp::INeg, 0).func
+    f = xat_un(f, lir::LUnOp::INot, 0).func
+    f = xat_un(f, lir::LUnOp::Trunc, 0).func
+    f = xat_un(f, lir::LUnOp::ZExt, 0).func
+    let last = xat_un(f, lir::LUnOp::SExt, 0)
+    f = last.func
+    xat_ret(f, last.vreg)
+}
+
+#test
+
+fn xat_kitchen_sink_covers_every_int_bin_and_un_op() {
+    let text = xat_dump(xat_kitchen_sink())
+    teko::assert::str_contains(text, "add.q ")
+    teko::assert::str_contains(text, "sub.q ")
+    teko::assert::str_contains(text, "imul.q ")
+    teko::assert::str_contains(text, "idiv.q ")
+    teko::assert::str_contains(text, "div.q ")
+    teko::assert::str_contains(text, "irem.q ")
+    teko::assert::str_contains(text, "rem.q ")
+    teko::assert::str_contains(text, "and.q ")
+    teko::assert::str_contains(text, "or.q ")
+    teko::assert::str_contains(text, "xor.q ")
+    teko::assert::str_contains(text, "shl.q ")
+    teko::assert::str_contains(text, "sar.q ")
+    teko::assert::str_contains(text, "shr.q ")
+    teko::assert::str_contains(text, "sete ")
+    teko::assert::str_contains(text, "setne ")
+    teko::assert::str_contains(text, "setl ")
+    teko::assert::str_contains(text, "setb ")
+    teko::assert::str_contains(text, "setle ")
+    teko::assert::str_contains(text, "setbe ")
+    teko::assert::str_contains(text, "setg ")
+    teko::assert::str_contains(text, "seta ")
+    teko::assert::str_contains(text, "setge ")
+    teko::assert::str_contains(text, "setae ")
+    teko::assert::str_contains(text, "neg.q ")
+    teko::assert::str_contains(text, "not.q ")
+    teko::assert::str_contains(text, "mov.d ")
+}
+
+/**
+ * xat_one_param_func — a single-parameter function of machine class `ty` (its
+ * own return type too), its param read via `LParam` and returned directly — the
+ * coverage sweep for `select_param_x86`'s per-register-file receipt.
+ *
+ * @param lir::LType ty  the parameter's (and return's) machine class
+ * @return lir::LFunc  the built function
+ */
+fn xat_one_param_func(ty: lir::LType) -> lir::LFunc {
+    let ptypes = teko::list::push(teko::list::empty(), ty)
+    mut f = lir::new_func("teko__demo__one_param", 1, ptypes, ty)
+    f = lir::append_inst(f, 0, lir::param_inst(0, 0, 0, 0))
+    xat_ret(f, 0)
+}
+
+/**
+ * xat_select_succeeds — whether `select_lfunc_x86(f)` selects without error.
+ *
+ * @param lir::LFunc f  the function to select
+ * @return bool  whether selection succeeded
+ */
+fn xat_select_succeeds(f: lir::LFunc) -> bool {
+    match select_lfunc_x86(SYSV64, f) { MFuncX86 => true; error => false }
+}
+
+#test
+
+/**
+ * xat_param_covers_every_scalar_class — every scalar `LType` a parameter can
+ * carry now selects: the GPR widths through `MMovX86` out of the SysV integer
+ * argument register, and `F32`/`F64` through `MFMovX86` out of XMM0 (`B1-fp`,
+ * closed 2026-07-29 — both float classes used to be the float honest-stop).
+ *
+ * @return void
+ */
+fn xat_param_covers_every_scalar_class() {
+    teko::assert::is_true(xat_select_succeeds(xat_one_param_func(lir::LType::I8)))
+    teko::assert::is_true(xat_select_succeeds(xat_one_param_func(lir::LType::I16)))
+    teko::assert::is_true(xat_select_succeeds(xat_one_param_func(lir::LType::I32)))
+    teko::assert::is_true(xat_select_succeeds(xat_one_param_func(lir::LType::I64)))
+    teko::assert::is_true(xat_select_succeeds(xat_one_param_func(lir::LType::Ptr)))
+    teko::assert::is_true(xat_select_succeeds(xat_one_param_func(lir::LType::Void)))
+    teko::assert::is_true(xat_select_succeeds(xat_one_param_func(lir::LType::F32)))
+    teko::assert::is_true(xat_select_succeeds(xat_one_param_func(lir::LType::F64)))
+}
+
+#test
+
+/**
+ * xat_float_param_lands_in_xmm0_and_returns_in_xmm0 — an f64 parameter is
+ * received by an `MFMovX86` out of XMM0 (the SysV first float argument register)
+ * and returned by an `MFMovX86` into XMM0 (the float result register), the two
+ * ends of `B1-fp`'s ABI plumbing. Asserts the printed FPR operand spelling, so a
+ * regression that quietly re-routed either end through a GPR `mov` fails here.
+ *
+ * @return void
+ */
+fn xat_float_param_lands_in_xmm0_and_returns_in_xmm0() {
+    let text = xat_dump(xat_one_param_func(lir::LType::F64))
+    teko::assert::str_contains(text, "fmov.d %f0, %pf0")
+    teko::assert::str_contains(text, "fmov.d %pf0, %f0")
+}
+
+#test
+
+fn xat_field_addr_materializes_offset_then_adds() {
+    let f0 = lir::new_func("main", 0, teko::list::empty(), lir::LType::I64)
+    let base = lir::alloc_vreg(f0)
+    let fa = lir::alloc_vreg(base.func)
+    let s0 = lir::append_inst(fa.func, 0, lir::alloca_inst(base.vreg, 16, 8, 0, 0))
+    let s1 = lir::append_inst(s0, 0, lir::field_addr_inst(fa.vreg, base.vreg, 8, 0, 0))
+    let s2 = lir::append_inst(s1, 0, lir::ret_inst(fa.vreg, 0, 0))
+    let text = xat_dump(s2)
+    teko::assert::str_contains(text, "mov.q %2, #8")
+    teko::assert::str_contains(text, "mov.q %1, %0")
+    teko::assert::str_contains(text, "add.q %1, %2")
+}
+
+#test
+
+fn xat_store_i64_is_qword_mov() {
+    let f0 = lir::new_func("main", 0, teko::list::empty(), lir::LType::I64)
+    let base = lir::alloc_vreg(f0)
+    let val = lir::alloc_vreg(base.func)
+    let s0 = lir::append_inst(val.func, 0, lir::alloca_inst(base.vreg, 8, 8, 0, 0))
+    let s1 = lir::append_inst(s0, 0, lir::const_int_inst(val.vreg, 42, 0, 0))
+    let s2 = lir::append_inst(s1, 0, lir::store_inst(base.vreg, val.vreg, lir::LType::I64, 0, 0))
+    let s3 = lir::append_inst(s2, 0, lir::ret_inst(val.vreg, 0, 0))
+    teko::assert::str_contains(xat_dump(s3), "mov.q [%0 + 0], %1")
+}
+
+/**
+ * xat_load_ty_succeeds — whether an `alloca`+`load ty`+`ret` function selects
+ * for x86-64 (the coverage sweep over `mem_size_of_x86`'s every arm).
+ *
+ * @param lir::LType ty  the loaded machine class
+ * @return bool  whether selection succeeded
+ */
+fn xat_load_ty_succeeds(ty: lir::LType) -> bool {
+    let f0 = lir::new_func("main", 0, teko::list::empty(), lir::LType::I64)
+    let base = lir::alloc_vreg(f0)
+    let ld = lir::alloc_vreg(base.func)
+    let s0 = lir::append_inst(ld.func, 0, lir::alloca_inst(base.vreg, 8, 8, 0, 0))
+    let s1 = lir::append_inst(s0, 0, lir::load_inst(ld.vreg, base.vreg, ty, 0, 0))
+    let s2 = lir::append_inst(s1, 0, lir::ret_inst(ld.vreg, 0, 0))
+    match select_lfunc_x86(SYSV64, s2) { MFuncX86 => true; error => false }
+}
+
+#test
+
+/**
+ * xat_mem_size_covers_every_transfer_class — every real machine class a load can
+ * name selects, integer AND float (`B1-fp`, closed 2026-07-29 — `F32`/`F64` used
+ * to be the float honest-stop); only `Void`, which names no transfer width at
+ * all, is still rejected as malformed.
+ *
+ * @return void
+ */
+fn xat_mem_size_covers_every_transfer_class() {
+    teko::assert::is_true(xat_load_ty_succeeds(lir::LType::I8))
+    teko::assert::is_true(xat_load_ty_succeeds(lir::LType::I16))
+    teko::assert::is_true(xat_load_ty_succeeds(lir::LType::I32))
+    teko::assert::is_true(xat_load_ty_succeeds(lir::LType::I64))
+    teko::assert::is_true(xat_load_ty_succeeds(lir::LType::Ptr))
+    teko::assert::is_true(xat_load_ty_succeeds(lir::LType::F32))
+    teko::assert::is_true(xat_load_ty_succeeds(lir::LType::F64))
+    teko::assert::is_true(!xat_load_ty_succeeds(lir::LType::Void))
+}
+
+#test

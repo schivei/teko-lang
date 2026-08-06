@@ -1,0 +1,189 @@
+/**
+ * select_call_indirect — the `LCallIndirect` selection: identical argument
+ * lowering, then `MCallIndirect{target, uses, ret_reg, has_result}` (BLR
+ * through the target Ptr VReg), then the result move.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LInst inst  the enclosing instruction (its result VReg)
+ * @param lir::LCallIndirect ci  the indirect-call op
+ * @return SelCtx | error  the advanced context, or a propagated error
+ */
+fn select_call_indirect(ctx0: SelCtx, inst: lir::LInst, ci: lir::LCallIndirect) -> SelCtx | error {
+    let pinned = match pin_args(ctx0, ci.args, ci.variadic) { PinnedArgs as p => p; error as e => return e }
+    let ret_reg = call_result_reg(ci.ret_type)
+    let ctx1 = selctx_emit(pinned.ctx, call_indirect_inst(vreg(ci.target, MRegClass::GPR), pinned.uses, ret_reg, inst.has_result))
+    select_call_result(ctx1, inst, ret_reg, ci.ret_type)
+}
+
+/**
+ * select_inst — the per-`LOp` dispatch (§3 of the isel plan): with A2-5's
+ * calls (`LCall`/`LCallIndirect`) the whole `LOp` frontier now selects — the
+ * A2-2 core (`LConstInt`/`LConstFloat`/`LBin`/`LUn`/`LParam`/`LRet`), A2-3
+ * control flow (`LJump`/`LBranch`), A2-4 memory (`LAlloca`/`LFieldAddr`/
+ * `LLoad`/`LStore`/`LGlobalAddr`/`LFuncAddr`), and A2-5 calls.
+ *
+ * @param SelCtx ctx  the context to extend
+ * @param lir::LFunc f  the enclosing function (`LParam` needs its
+ *                      `param_types`)
+ * @param lir::LInst inst  the instruction to select
+ * @return SelCtx | error  the advanced context, or a propagated/named error
+ */
+fn select_inst(ctx: SelCtx, f: lir::LFunc, inst: lir::LInst) -> SelCtx | error {
+    match inst.op {
+        lir::LConstInt as c => select_const_int(ctx, inst, c)
+        lir::LConstFloat as c => select_const_float(ctx, inst, c)
+        lir::LBin as b => select_bin(ctx, f, inst, b)
+        lir::LUn as u => select_un(ctx, inst, u)
+        lir::LParam as p => select_param(ctx, f, inst, p)
+        lir::LRet as r => select_ret(ctx, r)
+        lir::LJump as j => select_jump(ctx, f, j)
+        lir::LBranch as br => select_branch(ctx, f, br)
+        lir::LAlloca as a => select_alloca(ctx, inst, a)
+        lir::LFieldAddr as fa => select_field_addr(ctx, inst, fa)
+        lir::LLoad as l => select_load(ctx, inst, l)
+        lir::LStore as s => select_store(ctx, s)
+        lir::LGlobalAddr as g => select_global_addr(ctx, inst, g)
+        lir::LCallIndirect as ci => select_call_indirect(ctx, inst, ci)
+        lir::LFuncAddr as fa => select_func_addr(ctx, inst, fa)
+        lir::LCall as c => select_call(ctx, inst, c)
+    }
+}
+
+/**
+ * select_insts — select every instruction of `insts`, in order, threading
+ * the context forward and short-circuiting on the first error.
+ *
+ * @param SelCtx ctx0  the context to extend
+ * @param lir::LFunc f  the enclosing function
+ * @param []lir::LInst insts  the instruction stream to select
+ * @return SelCtx | error  the fully-advanced context, or the first
+ *                         propagated error
+ */
+fn select_insts(ctx0: SelCtx, f: lir::LFunc, insts: []lir::LInst) -> SelCtx | error {
+    mut ctx = ctx0
+    mut i: u64 = 0
+    loop {
+        if i >= insts.len { break }
+        let stepped = match select_inst(ctx, f, insts[i]) { SelCtx as c => c; error as e => return e }
+        ctx = stepped
+        i++
+    }
+    ctx
+}
+
+/**
+ * provisional_params — a mirror block's params built from its `LBlock` param
+ * VRegs with a provisional GPR class; each entry is refined to its real class
+ * by `emit_edge_moves` when a feeding edge is selected.
+ *
+ * @param []u32 pids  the block's param VReg ids
+ * @return []MReg  the provisional param registers
+ */
+fn provisional_params(pids: []u32) -> []MReg {
+    mut out: []MReg = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= pids.len { break }
+        out = teko::list::push(out, vreg(pids[i], MRegClass::GPR))
+        i++
+    }
+    out
+}
+
+/**
+ * build_mirror_blocks — an `MFunc` with one empty machine block per `LBlock`,
+ * same id + (provisionally-classed) params, in source order. Selection then
+ * fills each block's instructions and splits edge blocks in past them.
+ *
+ * @param lir::LFunc f  the function whose block skeleton is mirrored
+ * @return MFunc  the empty-bodied mirror function
+ */
+fn build_mirror_blocks(f: lir::LFunc) -> MFunc {
+    mut blocks: []MBlock = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= f.blocks.len { break }
+        let lb = f.blocks[i]
+        blocks = teko::list::push(blocks, MBlock { id = lb.id; params = provisional_params(lb.params); insts = teko::list::empty() })
+        i++
+    }
+    MFunc { symbol = f.symbol; blocks = blocks; frame = teko::list::empty() }
+}
+
+/**
+ * max_block_id — the highest `LBlock` id in `f` (edge blocks are numbered
+ * past it so a split edge block never collides with a mirror block).
+ *
+ * @param lir::LFunc f  the function to scan
+ * @return u32  its greatest block id
+ */
+fn max_block_id(f: lir::LFunc) -> u32 {
+    mut m: u32 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= f.blocks.len { break }
+        if f.blocks[i].id > m { m = f.blocks[i].id }
+        i++
+    }
+    m
+}
+
+/**
+ * select_all_blocks — select every `LBlock` of `f` in order, retargeting the
+ * emit cursor to each block's mirror before selecting its instructions.
+ *
+ * @param SelCtx ctx0  the initial context (targeting the entry block)
+ * @param lir::LFunc f  the function to select
+ * @return SelCtx | error  the fully-advanced context, or the first error
+ */
+fn select_all_blocks(ctx0: SelCtx, f: lir::LFunc) -> SelCtx | error {
+    mut ctx = ctx0
+    mut i: u64 = 0
+    loop {
+        if i >= f.blocks.len { break }
+        let lb = f.blocks[i]
+        let switched = selctx_switch(ctx, lb.id)
+        // A `let` binding for the match — NOT `ctx = match {…return}` — for clarity and
+        // consistency with `select_insts` (mirrors the same let-then-assign pattern).
+        let stepped = match select_insts(switched, f, lb.insts) { SelCtx as c => c; error as e => return e }
+        ctx = stepped
+        i++
+    }
+    ctx
+}
+
+/**
+ * select_lfunc — select one `LFunc` into an `MFunc`: build the mirror block
+ * skeleton, then select every block's instructions (A2-3 handles the full
+ * control-flow set — jumps, branches, and their split edge blocks).
+ *
+ * @param lir::LFunc f  the function to select
+ * @return MFunc | error  the selected function, or any instruction's own
+ *                        propagated error
+ */
+pub fn select_lfunc(f: lir::LFunc) -> MFunc | error {
+    let ctx0 = SelCtx { func = build_mirror_blocks(f); vinfo = vinfo_empty(); next_scratch = f.next_vreg; cur_block = 0; next_block = max_block_id(f) + 1 }
+    let done = match select_all_blocks(ctx0, f) { SelCtx as c => c; error as e => return e }
+    done.func
+}
+
+/**
+ * select_module — select every function of `m` into an `MModule`, carrying
+ * its rodata/globals/layouts tables through UNCHANGED (A2 never touches
+ * their bytes — that is A4's job).
+ *
+ * @param lir::LModule m  the module to select
+ * @return MModule | error  the selected module, or the first function's
+ *                          propagated error
+ */
+pub fn select_module(m: lir::LModule) -> MModule | error {
+    mut out = MModule { funcs = teko::list::empty(); rodata = m.rodata; globals = m.globals; layouts = m.layouts }
+    mut i: u64 = 0
+    loop {
+        if i >= m.funcs.len { break }
+        let mf = match select_lfunc(m.funcs[i]) { MFunc as x => x; error as e => return e }
+        out = add_mfunc(out, mf)
+        i++
+    }
+    out
+}

@@ -1,0 +1,273 @@
+/**
+ * layout_zero_and_one_align_slots — an alloca with `align = 0` or `align = 1`
+ * lays out at the running offset unchanged (the guarded `align_up` no-op arm,
+ * the same contract as `lir::align_up`): slots `[{8,0},{8,1},{4,4}]` sit at
+ * `[0, 8, 16]` (slots region 32) and the FP/LR pair brings the frame to 48.
+ *
+ * @return void
+ */
+fn layout_zero_and_one_align_slots() {
+    let frame = teko::list::push(teko::list::push(teko::list::push(l_frame(), alloca_slot(8, 0)), alloca_slot(8, 1)), alloca_slot(4, 4))
+    let fl = compute_frame_layout(AAPCS64, func_of(frame, l_insts()))
+    teko::assert::is_true(fl.slot_offsets[0] == (0 to u32))
+    teko::assert::is_true(fl.slot_offsets[1] == (8 to u32))
+    teko::assert::is_true(fl.slot_offsets[2] == (16 to u32))
+    teko::assert::is_true(fl.size == (48 to u32))
+}
+
+/**
+ * i1 — a one-instruction stream, typed for the `encode_func` fixtures.
+ *
+ * @param MInst a  the sole instruction
+ * @return []MInst  `[a]`
+ */
+fn i1(a: MInst) -> []MInst {
+    teko::list::push(l_insts(), a)
+}
+
+/**
+ * i2 — a two-instruction stream, in order.
+ *
+ * @param MInst a  the first instruction
+ * @param MInst b  the second instruction
+ * @return []MInst  `[a, b]`
+ */
+fn i2(a: MInst, b: MInst) -> []MInst {
+    teko::list::push(i1(a), b)
+}
+
+/**
+ * i3 — a three-instruction stream, in order.
+ *
+ * @param MInst a  the first instruction
+ * @param MInst b  the second instruction
+ * @param MInst c  the third instruction
+ * @return []MInst  `[a, b, c]`
+ */
+fn i3(a: MInst, b: MInst, c: MInst) -> []MInst {
+    teko::list::push(i2(a, b), c)
+}
+
+/**
+ * i4 — a four-instruction stream, in order.
+ *
+ * @param MInst a  the first instruction
+ * @param MInst b  the second instruction
+ * @param MInst c  the third instruction
+ * @param MInst d  the fourth instruction
+ * @return []MInst  `[a, b, c, d]`
+ */
+fn i4(a: MInst, b: MInst, c: MInst, d: MInst) -> []MInst {
+    teko::list::push(i3(a, b, c), d)
+}
+
+/**
+ * mblock — a machine block with the given id and instruction stream and no
+ * block params, the multi-block `encode_func` fixture shorthand.
+ *
+ * @param u32 id  the block's id (a branch target)
+ * @param []MInst insts  the block's instruction stream
+ * @return MBlock  the assembled block
+ */
+fn mblock(id: u32, insts: []MInst) -> MBlock {
+    MBlock { id = id; params = teko::list::empty(); insts = insts }
+}
+
+/**
+ * l_blocks — the empty `[]MBlock` list, typed for the fixtures.
+ *
+ * @return []MBlock  an empty block list
+ */
+fn l_blocks() -> []MBlock {
+    teko::list::empty()
+}
+
+/**
+ * bl1 — a one-block list.
+ *
+ * @param MBlock a  the sole block
+ * @return []MBlock  `[a]`
+ */
+fn bl1(a: MBlock) -> []MBlock {
+    teko::list::push(l_blocks(), a)
+}
+
+/**
+ * bl2 — a two-block list, in layout order.
+ *
+ * @param MBlock a  the first block
+ * @param MBlock b  the second block
+ * @return []MBlock  `[a, b]`
+ */
+fn bl2(a: MBlock, b: MBlock) -> []MBlock {
+    teko::list::push(bl1(a), b)
+}
+
+/**
+ * bl3 — a three-block list, in layout order.
+ *
+ * @param MBlock a  the first block
+ * @param MBlock b  the second block
+ * @param MBlock c  the third block
+ * @return []MBlock  `[a, b, c]`
+ */
+fn bl3(a: MBlock, b: MBlock, c: MBlock) -> []MBlock {
+    teko::list::push(bl2(a, b), c)
+}
+
+/**
+ * bl4 — a four-block list, in layout order.
+ *
+ * @param MBlock a  the first block
+ * @param MBlock b  the second block
+ * @param MBlock c  the third block
+ * @param MBlock d  the fourth block
+ * @return []MBlock  `[a, b, c, d]`
+ */
+fn bl4(a: MBlock, b: MBlock, c: MBlock, d: MBlock) -> []MBlock {
+    teko::list::push(bl3(a, b, c), d)
+}
+
+/**
+ * func_blocks — an `MFunc` with an empty frame and the given blocks.
+ *
+ * @param []MBlock blocks  the function's blocks, in layout order
+ * @return MFunc  the assembled function
+ */
+fn func_blocks(blocks: []MBlock) -> MFunc {
+    MFunc { symbol = "t"; blocks = blocks; frame = l_frame() }
+}
+
+/**
+ * l_relocs — the empty `[]Reloc` list, typed for the sentinel func.
+ *
+ * @return []Reloc  an empty reloc list
+ */
+fn l_relocs() -> []Reloc {
+    teko::list::empty()
+}
+
+/**
+ * bad_func — the sentinel `EncodedFunc` returned when a golden fixture that must
+ * encode unexpectedly honest-stops: its single all-ones word never matches a
+ * real expected stream, so the golden length/word assertion fails loudly.
+ *
+ * @return EncodedFunc  the impossible-encoding sentinel
+ */
+fn bad_func() -> EncodedFunc {
+    EncodedFunc { symbol = "<error>"; words = l1(0xFFFFFFFF to u32); relocs = l_relocs() }
+}
+
+/**
+ * ef — encode `f` through `encode_func`, unwrapping the success case and falling
+ * back to the `bad_func` sentinel on an unexpected honest-stop.
+ *
+ * @param MFunc f  the function to encode
+ * @return EncodedFunc  the encoded function, or the sentinel on error
+ */
+fn ef(f: MFunc) -> EncodedFunc {
+    match encode_func(AAPCS64, f) {
+        EncodedFunc as x => x
+        error as e => bad_func()
+    }
+}
+
+/**
+ * ef_stop — the honest-stop message `encode_func` produces for `f`, or `<ok>`
+ * when it encodes successfully.
+ *
+ * @param MFunc f  the function to encode
+ * @return str  the error message, or `<ok>`
+ */
+fn ef_stop(f: MFunc) -> str {
+    match encode_func(AAPCS64, f) {
+        EncodedFunc as x => "<ok>"
+        error as e => e.message
+    }
+}
+
+/**
+ * kind_name — the printable name of an `MRelocKind`, for the reloc-record golden
+ * assertions.
+ *
+ * @param MRelocKind k  the relocation kind
+ * @return str  `PageHi`/`PageLo`/`Call`
+ */
+fn kind_name(k: MRelocKind) -> str {
+    match k {
+        PageHi => "PageHi"
+        PageLo => "PageLo"
+        Call => "Call"
+        Abs64 => "Abs64"
+    }
+}
+
+/**
+ * reloc_shape — an `EncWord`'s pending relocation rendered as `<sym>/<kind>`, or
+ * `<none>` when it owes none: the whole record in one comparable string, so a
+ * fixture asserts symbol AND kind together and can never read one without the
+ * other.
+ *
+ * @param EncWord ew  the encoded word whose relocation is rendered
+ * @return str  `<sym>/<kind>`, or `<none>` for a word that owes no relocation
+ */
+fn reloc_shape(ew: EncWord) -> str {
+    match ew.reloc {
+        null => "<none>"
+        EncReloc as r => teko::str::concat(r.sym, "/", kind_name(r.kind))
+    }
+}
+
+/**
+ * field_stop — the honest-stop message of a `branch_disp_field` result, or
+ * `<ok>` when it produces a field.
+ *
+ * @param u32 | error r  the `branch_disp_field` outcome
+ * @return str  the error message, or `<ok>`
+ */
+fn field_stop(r: u32 | error) -> str {
+    match r {
+        u32 as v => "<ok>"
+        error as e => e.message
+    }
+}
+
+/**
+ * neg64 — the i64 negation of a non-negative magnitude, the fixtures' shorthand
+ * for a backward/out-of-range displacement.
+ *
+ * @param i64 m  the magnitude
+ * @return i64  `-m`
+ */
+fn neg64(m: i64) -> i64 {
+    (0) - m
+}
+
+#test
+
+/**
+ * diamond_forward_branches_patch_correctly — a four-block if/match diamond with
+ * NON-topological ids (0,7,3,9 in layout order) patches every forward branch:
+ * `b.eq` (imm19, +3 words), `cbz x0` (imm19, +3), `b` (imm26, +1). The seven
+ * words are byte-exact (assembler-verified) and carry no relocations.
+ *
+ * @return void
+ */
+fn diamond_forward_branches_patch_correctly() {
+    let b0 = mblock(0 to u32, i2(cmp_inst(true, p(0), p(1)), branch_cond_inst(MCond::EQ, 3 to u32)))
+    let b1 = mblock(7 to u32, i2(movz_inst(true, p(0), 1, 0), cbz_inst(true, true, p(0), 9 to u32)))
+    let b2 = mblock(3 to u32, i2(movz_inst(true, p(0), 2, 0), branch_inst(9 to u32)))
+    let b3 = mblock(9 to u32, i1(RET_INST))
+    let e = ef(func_blocks(bl4(b0, b1, b2, b3)))
+    teko::assert::is_true(e.words.len == 7)
+    teko::assert::is_true(e.words[0] == (0xEB01001F to u32))
+    teko::assert::is_true(e.words[1] == (0x54000060 to u32))
+    teko::assert::is_true(e.words[2] == (0xD2800020 to u32))
+    teko::assert::is_true(e.words[3] == (0xB4000060 to u32))
+    teko::assert::is_true(e.words[4] == (0xD2800040 to u32))
+    teko::assert::is_true(e.words[5] == (0x14000001 to u32))
+    teko::assert::is_true(e.words[6] == (0xD65F03C0 to u32))
+    teko::assert::is_true(e.relocs.len == 0)
+}
+
+#test

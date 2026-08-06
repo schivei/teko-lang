@@ -1,0 +1,289 @@
+/**
+ * compute_macho_layout — resolve every file offset and count of the object from
+ * the `EncodedModule`, the pre-built string-table size, and the DWARF sink
+ * (D1.5): the load commands come first (their size fixes `text_offset` —
+ * `dwarf.present` inserts a second `LC_SEGMENT_64` and bumps `ncmds` 4→5), then
+ * the section data (`__text` then, when rodata is present, a `MACHO_CONST_ALIGN`
+ * gap and `__const`; #0.3.1.0 macho-const-section-align), the 4-aligned `__text`/
+ * `__const` relocation tables (UNCHANGED formula — DWARF never shifts them), then
+ * — only when `dwarf.present` — the three DWARF section images (contiguous,
+ * 4-aligned start) and their relocation tables, THEN the 8-aligned symbol table
+ * and the string table. Mirrors `emit_macho`'s emission order exactly, so the
+ * load-command offset fields point at the real data. With `dwarf.present ==
+ * false` every DWARF field here is computed but UNUSED (`symtab_offset` reads
+ * straight from `reloc_end`), so the object is BYTE-IDENTICAL to before D1.5.
+ * With `enc.rodata.len == 0` OR `text_size` already `MACHO_CONST_ALIGN`-aligned,
+ * `const_addr == text_size` (no gap), so the object is BYTE-IDENTICAL to before
+ * this fix in both cases too.
+ *
+ * @param EncodedModule enc  the section images + symbols + relocations
+ * @param u32 strtab_size  the pre-built string-table byte size
+ * @param u32 nreloc_text  the number of __text relocation entries
+ * @param u32 nreloc_const  the number of __const relocation entries
+ * @param DwarfSink dwarf  the D1.3 producer output to sink (`present` gates D1.5)
+ * @return MachoLayout  the resolved offsets + counts
+ */
+fn compute_macho_layout(enc: EncodedModule, strtab_size: u32, nreloc_text: u32, nreloc_const: u32, dwarf: DwarfSink) -> MachoLayout {
+    let has_dwarf = dwarf.present
+    let nsects: u32 = if enc.rodata.len > 0 { 2 } else { 1 }
+    let seg_cmdsize = 72 + nsects * 80
+    let dwarf_seg_cmdsize: u32 = if has_dwarf { (72 + 3 * 80) to u32 } else { 0 }
+    let sizeofcmds = seg_cmdsize + dwarf_seg_cmdsize + 24 + 24 + 80
+    let ncmds: u32 = if has_dwarf { 5 } else { 4 }
+    let text_offset = 32 + sizeofcmds
+    let text_size = enc.text.len to u32
+    let const_size = enc.rodata.len to u32
+    let const_addr: u32 = if const_size > 0 { align_up(text_size, MACHO_CONST_ALIGN) } else { text_size }
+    let const_offset = text_offset + const_addr
+    let seg_data_end = const_offset + const_size
+    let nreloc = nreloc_text
+    let reloc_offset = align_up(seg_data_end, 4)
+    let text_reloc_end = reloc_offset + (nreloc_text * MACHO_RELOC_ENTRY_SIZE)
+    let const_reloc_offset = text_reloc_end
+    let reloc_end = const_reloc_offset + (nreloc_const * MACHO_RELOC_ENTRY_SIZE)
+    let debug_abbrev_size = dwarf.abbrev.len to u32
+    let debug_info_size = dwarf.info.bytes.len to u32
+    let debug_line_size = dwarf.line.bytes.len to u32
+    let nreloc_debug_info = dwarf.info.relocs.len to u32
+    let nreloc_debug_line = dwarf.line.relocs.len to u32
+    let debug_abbrev_offset = align_up(reloc_end, 4)
+    let debug_info_offset = debug_abbrev_offset + debug_abbrev_size
+    let debug_line_offset = debug_info_offset + debug_info_size
+    let debug_info_reloc_offset = align_up(debug_line_offset + debug_line_size, 4)
+    let debug_line_reloc_offset = debug_info_reloc_offset + (nreloc_debug_info * MACHO_RELOC_ENTRY_SIZE)
+    let dwarf_reloc_end = debug_line_reloc_offset + (nreloc_debug_line * MACHO_RELOC_ENTRY_SIZE)
+    let symtab_base: u32 = if has_dwarf { dwarf_reloc_end } else { reloc_end }
+    let symtab_offset = align_up(symtab_base, 8)
+    let nsyms = enc.symbols.len to u32
+    let symtab_end = symtab_offset + nsyms * 16
+    let ndef = count_defined(enc.symbols)
+    let nlocal = count_local(enc.symbols)
+    MachoLayout {
+        ncmds = ncmds
+        nsects = nsects
+        sizeofcmds = sizeofcmds
+        text_offset = text_offset
+        text_size = text_size
+        const_addr = const_addr
+        const_offset = const_offset
+        const_size = const_size
+        reloc_offset = reloc_offset
+        nreloc = nreloc
+        const_reloc_offset = const_reloc_offset
+        nreloc_const = nreloc_const
+        symtab_offset = symtab_offset
+        nsyms = nsyms
+        strtab_offset = symtab_end
+        strtab_size = strtab_size
+        ndef = ndef
+        nlocal = nlocal
+        nundef = nsyms - ndef
+        debug_abbrev_offset = debug_abbrev_offset
+        debug_abbrev_size = debug_abbrev_size
+        debug_info_offset = debug_info_offset
+        debug_info_size = debug_info_size
+        debug_line_offset = debug_line_offset
+        debug_line_size = debug_line_size
+        debug_info_reloc_offset = debug_info_reloc_offset
+        nreloc_debug_info = nreloc_debug_info
+        debug_line_reloc_offset = debug_line_reloc_offset
+        nreloc_debug_line = nreloc_debug_line
+    }
+}
+
+/**
+ * MACHO_RELOC_ENTRY_SIZE — `sizeof(relocation_info)` (8 bytes): the fixed
+ * external size of one relocation-table entry — a 4-byte `r_address` followed
+ * by the 4-byte packed bitfield word.
+ */
+const MACHO_RELOC_ENTRY_SIZE: u32 = 8
+
+/**
+ * MACHO_MAGIC_64 — the Mach-O `mach_header_64.magic` file-magic (`MH_MAGIC_64`,
+ * `0xFEEDFACF`), identifying a 64-bit, native-endian Mach-O object to every
+ * Mach-O-aware tool (`ld`, `otool`, the kernel loader).
+ */
+const MACHO_MAGIC_64: u32 = 0xFEEDFACF
+
+/**
+ * MACHO_CPU_TYPE_ARM64 — the `mach_header_64.cputype` for arm64:
+ * `CPU_ARCH_ABI64 (0x01000000) | CPU_TYPE_ARM (12)`.
+ */
+const MACHO_CPU_TYPE_ARM64: u32 = 0x0100000C
+
+/**
+ * MACHO_LC_SEGMENT_64 — the `LC_SEGMENT_64` load-command type: the single
+ * unnamed segment carrying `__text`/`__const` in this relocatable object.
+ */
+const MACHO_LC_SEGMENT_64: u32 = 0x19
+
+/**
+ * MACHO_LC_BUILD_VERSION — the `LC_BUILD_VERSION` load-command type: the
+ * platform/minos/sdk stamp `ld` requires of a modern object.
+ */
+const MACHO_LC_BUILD_VERSION: u32 = 0x32
+
+/**
+ * MACHO_LC_DYSYMTAB — the `LC_DYSYMTAB` load-command type: the symbol-table
+ * partition (local/extdef/undef ranges) the static linker consumes.
+ */
+const MACHO_LC_DYSYMTAB: u32 = 0x0B
+
+/**
+ * MACHO_VERSION_11_0 — macOS 11.0.0 in the `LC_BUILD_VERSION` packed
+ * `xxxx.yy.zz` encoding (`0x000B0000`): the `minos` AND `sdk` floor this
+ * backend stamps (the first arm64 macOS).
+ */
+const MACHO_VERSION_11_0: u32 = 0x000B0000
+
+/**
+ * MACHO_SYM_UNDERSCORE — the ASCII `_` byte prefixed to every symbol name in
+ * the Mach-O string table (the platform's C-symbol decoration; ELF carries no
+ * such prefix).
+ */
+const MACHO_SYM_UNDERSCORE: byte = 0x5F
+
+/**
+ * MACHO_NTYPE_UNDF_EXT — the `nlist_64.n_type` for an undefined external
+ * reference: `N_UNDF | N_EXT` (0x01).
+ */
+const MACHO_NTYPE_UNDF_EXT: u32 = 0x01
+
+/**
+ * MACHO_NTYPE_SECT — the `nlist_64.n_type` for a defined, file-local symbol:
+ * `N_SECT` (0x0E) without `N_EXT`.
+ */
+const MACHO_NTYPE_SECT: u32 = 0x0E
+
+/**
+ * MACHO_NTYPE_SECT_EXT — the `nlist_64.n_type` for a defined, externally
+ * visible symbol: `N_SECT | N_EXT` (0x0F).
+ */
+const MACHO_NTYPE_SECT_EXT: u32 = 0x0F
+
+/**
+ * MACHO_CONST_ALIGN — the byte alignment the `__const` section's own START
+ * (its segment-relative `addr`, `compute_macho_layout`'s `const_addr`) is
+ * rounded up to: 8, the pointer width Apple's `ld` enforces on every
+ * `ARM64_RELOC_UNSIGNED` (`Abs64`) relocation site, and the same value the ELF
+ * writer's `rodata_offset` already aligns to (`objfile_elf.tks`'s
+ * `align_up(text_offset + text_size, 8)`) — mach-o's own `emit_section` `align`
+ * argument for `__const` (3, i.e. `1 << 3 == 8`) was already this value; only
+ * the section's OWN base offset was missing the matching round-up
+ * (#0.3.1.0 macho-const-section-align).
+ * @since 0.3.1.0 macho-const-section-align
+ */
+const MACHO_CONST_ALIGN: u32 = 8
+
+/**
+ * MACHO_BYTE_MASK — the low-byte mask (u32 lanes) the little-endian field
+ * serializers apply per lane, narrowing each slice to one `byte`.
+ */
+const MACHO_BYTE_MASK: u32 = 0xFF
+
+/**
+ * MACHO_BYTE_MASK_64 — the u64-typed low-byte mask of `emit_u64_le`'s eight
+ * lanes (same value as `MACHO_BYTE_MASK`; typed for u64 arithmetic).
+ */
+const MACHO_BYTE_MASK_64: u64 = 0xFF
+
+/**
+ * emit_header — the `mach_header_64` (32 bytes): magic `0xFEEDFACF`, cputype
+ * `CPU_TYPE_ARM64` (0x0100000C), cpusubtype 0, filetype `MH_OBJECT` (1),
+ * `lay.ncmds` load commands (4, or 5 with D1.5's `__DWARF` segment),
+ * `sizeofcmds`, flags 0, reserved 0.
+ *
+ * @param []byte buf  the (empty) buffer to extend
+ * @param MachoLayout lay  the resolved layout (for `ncmds`/`sizeofcmds`)
+ * @return []byte  `buf` followed by the 32-byte header
+ */
+fn emit_header(buf: []byte, lay: MachoLayout) -> []byte {
+    mut b = emit_u32_le(buf, MACHO_MAGIC_64)
+    b = emit_u32_le(b, MACHO_CPU_TYPE_ARM64)
+    b = emit_u32_le(b, 0)
+    b = emit_u32_le(b, 1)
+    b = emit_u32_le(b, lay.ncmds)
+    b = emit_u32_le(b, lay.sizeofcmds)
+    b = emit_u32_le(b, 0)
+    emit_u32_le(b, 0)
+}
+
+/**
+ * emit_section — one `section_64` (80 bytes): the 16-byte section and segment
+ * names, the vm `addr`/`size`, the file `offset`, the log2 `align`, the
+ * relocation `reloff`/`nreloc`, the `flags`, and three reserved words.
+ *
+ * @param []byte buf  the buffer to extend
+ * @param str sectname  the section name (at most 16 bytes)
+ * @param str segname  the segment name (at most 16 bytes)
+ * @param u32 addr  the section vm address
+ * @param u32 size  the section byte size
+ * @param u32 offset  the section file offset
+ * @param u32 align  the log2 alignment
+ * @param u32 reloff  the relocation-table file offset (0 when none)
+ * @param u32 nreloc  the relocation count
+ * @param u32 sect_flags  the section flags
+ * @return []byte  `buf` followed by the 80-byte `section_64`
+ */
+fn emit_section(buf: []byte, sectname: str, segname: str, addr: u32, size: u32, offset: u32, align: u32, reloff: u32, nreloc: u32, sect_flags: u32) -> []byte {
+    mut b = emit_fixed16(buf, sectname)
+    b = emit_fixed16(b, segname)
+    b = emit_u64_le(b, addr to u64)
+    b = emit_u64_le(b, size to u64)
+    b = emit_u32_le(b, offset)
+    b = emit_u32_le(b, align)
+    b = emit_u32_le(b, reloff)
+    b = emit_u32_le(b, nreloc)
+    b = emit_u32_le(b, sect_flags)
+    b = emit_u32_le(b, 0)
+    b = emit_u32_le(b, 0)
+    emit_u32_le(b, 0)
+}
+
+/**
+ * S_ATTR_PURE_INSTRUCTIONS — the Mach-O `section_64.flags` attribute bit (bit
+ * 31, `0x80000000`) marking a section as containing only CPU instructions, no
+ * data references.
+ */
+const S_ATTR_PURE_INSTRUCTIONS: u32 = 0x80000000
+
+/**
+ * S_ATTR_SOME_INSTRUCTIONS — the Mach-O `section_64.flags` attribute bit (bit
+ * 10, `0x00000400`) marking a section as containing at least some CPU
+ * instructions. Combined with `S_ATTR_PURE_INSTRUCTIONS` for `__text`; the two
+ * bits sit 21 positions apart — too sparse for a sequential `flags` bitmask
+ * (which auto-assigns `1 << position` starting at bit 0) — so both are plain
+ * `const`s ORed at the call site (#594 crumb 11).
+ */
+const S_ATTR_SOME_INSTRUCTIONS: u32 = 0x00000400
+
+/**
+ * S_ATTR_DEBUG — the Mach-O `section_64.flags` attribute bit (bit 25,
+ * `0x02000000`) marking a section as debugging information: every section
+ * `emit_dwarf_segment` places carries it, the standard marker that tells `ld`
+ * and every DWARF-aware tool (`dsymutil`, `lldb`) the section is never mapped
+ * at runtime and belongs to the debug-info side of the object.
+ *
+ * @since 0.3.1.0
+ */
+const S_ATTR_DEBUG: u32 = 0x02000000
+
+/**
+ * emit_segment — the single `LC_SEGMENT_64` load command (empty segment name)
+ * and its sections: `__text` (pure-instructions, carrying the relocations) and,
+ * when rodata is present, `__const`.
+ *
+ * IMPORTANT: when `__const` itself has relocations (`nreloc_const > 0`), the
+ * section is emitted under `__DATA` (still named `__const`) instead of
+ * `__TEXT`. A pointer-bearing const table needs fixups at link time; keeping it
+ * in `__TEXT` makes Apple's linker report illegal text relocations on PIE links.
+ * With no rodata relocations, we keep the historical `__TEXT,__const` placement
+ * byte-for-byte.
+ *
+ * The segment's `filesize` spans the contiguous section data; `vmsize` rounds
+ * that to 16-byte alignment.
+ *
+ * @param []byte buf  the buffer to extend
+ * @param MachoLayout lay  the resolved layout
+ * @return []byte  `buf` followed by the segment command and its sections
+ */

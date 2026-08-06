@@ -1,0 +1,290 @@
+type VInfo = struct {
+    /**
+     * reg_class — which register file (GPR/FPR) the VReg's defining op
+     * lives in.
+     */
+    reg_class: MRegClass
+    /**
+     * wide — true for the 64-bit X/D form, false for the 32-bit W/S form.
+     */
+    wide: bool
+}
+
+/**
+ * VInfoTable — the isel side-table mapping a VReg id to its `VInfo`,
+ * densely indexed (VReg ids are assigned in strictly increasing order by
+ * the LIR's own SSA allocator, so a growable positional array suffices —
+ * §3 of the isel plan, the `class_of` mechanism).
+ *
+ * @since #383 A2-2
+ */
+type VInfoTable = struct {
+    /**
+     * classes — each recorded VReg's register file, parallel to `wides`.
+     */
+    classes: []MRegClass
+    /**
+     * wides — each recorded VReg's width flag, parallel to `classes`.
+     */
+    wides: []bool
+    /**
+     * set — whether each position has actually been recorded (a growth
+     * placeholder reads as `false` until a real `vinfo_set` writes it).
+     */
+    set: []bool
+}
+
+/**
+ * vinfo_empty — a side-table with no VRegs recorded yet (a function's
+ * selection seed).
+ *
+ * @return VInfoTable  the empty table
+ */
+fn vinfo_empty() -> VInfoTable {
+    VInfoTable { classes = teko::list::empty(); wides = teko::list::empty(); set = teko::list::empty() }
+}
+
+/**
+ * vinfo_grow — pad `t` with placeholder entries (GPR/wide=true/unset) until
+ * it holds at least `n` positions, so a subsequent positional write never
+ * runs past the end of the array.
+ *
+ * @param VInfoTable t  the table to pad
+ * @param u64 n  the minimum length the padded table must reach
+ * @return VInfoTable  the padded table
+ */
+fn vinfo_grow(t: VInfoTable, n: u64) -> VInfoTable {
+    mut classes = t.classes
+    mut wides = t.wides
+    mut set = t.set
+    loop {
+        if classes.len >= n { break }
+        classes = teko::list::push(classes, MRegClass::GPR)
+        wides = teko::list::push(wides, true)
+        set = teko::list::push(set, false)
+    }
+    VInfoTable { classes = classes; wides = wides; set = set }
+}
+
+/**
+ * vinfo_set — record `reg_class`/`wide` for VReg `id`, growing the table
+ * first when `id` is past its current length.
+ *
+ * MUTATES position `id` of each of the three PARALLEL arrays IN PLACE (an
+ * index-assign — slice value semantics alias the same underlying buffer as
+ * `grown.classes`/`.wides`/`.set`) INSTEAD OF rebuilding all three from
+ * scratch. `vinfo_set` is called once per recorded VReg — every isel result —
+ * so the old rebuild was O(VRegs²) over a whole function's selection, one
+ * more instance of the same shape `append_minst`/`append_inst` had (see
+ * their own doc-comments): every untouched position was re-pushed as a
+ * shallow copy across every rebuild generation, and the outer `classes`/
+ * `wides`/`set` self-appends are each checker-proven free-old-safe, so a
+ * stale generation's buffer could be parked as dead while still being the
+ * live tail a LATER generation's push-cache witness authorized an in-place
+ * grow into.
+ *
+ * @param VInfoTable t0  the table to update
+ * @param u32 id  the VReg id being recorded
+ * @param MRegClass reg_class  its register file
+ * @param bool wide  its width flag
+ * @return VInfoTable  the updated table
+ * @since 0.3.1 (native-region-crash, wild-write fix)
+ */
+fn vinfo_set(t0: VInfoTable, id: u32, reg_class: MRegClass, wide: bool) -> VInfoTable {
+    let grown = vinfo_grow(t0, (id to u64) + 1)
+    mut classes = grown.classes
+    mut wides = grown.wides
+    mut set = grown.set
+    let i = id to u64
+    classes[i] = reg_class
+    wides[i] = wide
+    set[i] = true
+    VInfoTable { classes = classes; wides = wides; set = set }
+}
+
+/**
+ * vinfo_get — the recorded facts for VReg `id`, or a GPR/wide=true default
+ * when `id` was never recorded (defensive only — the LIR's SSA property
+ * guarantees every operand is recorded before it is read).
+ *
+ * @param VInfoTable t  the table to read
+ * @param u32 id  the VReg id to look up
+ * @return VInfo  its recorded (or default) facts
+ */
+fn vinfo_get(t: VInfoTable, id: u32) -> VInfo {
+    let i = id to u64
+    if i >= t.classes.len { return VInfo { reg_class = MRegClass::GPR; wide = true } }
+    VInfo { reg_class = t.classes[i]; wide = t.wides[i] }
+}
+
+/**
+ * MINST_I64_SIGN_BIT_U — `2^63` as a `u64`: the smallest pattern whose SIGNED
+ * reading is negative, and exactly the distance between the unsigned and the
+ * signed reading of any pattern at or above it. The twin of
+ * `parser::I64_SIGN_BIT_U` (this unit may not import the parser's private
+ * consts). Formerly defined in the now-retired machine-IR interpreter oracle
+ * (owner ruling: the interpreter is retired) — relocated here,
+ * beside `decode_signed64`, its one surviving consumer's dependency.
+ */
+const MINST_I64_SIGN_BIT_U: u64 = 9223372036854775808
+
+/**
+ * MINST_I64_MIN — the most negative `i64` (`-2^63`), spelled as a subtraction
+ * because `2^63` has no positive `i64` literal form. Formerly defined
+ * alongside `MINST_I64_SIGN_BIT_U` in the now-retired machine-IR interpreter oracle
+ * (owner ruling: the interpreter is retired) — relocated here,
+ * beside its sibling constant; `isel_x86_64.tks`'s `f64_sign_bit_mask_x86`
+ * reuses it unqualified, the same intra-package visibility
+ * `VInfoTable`/`vinfo_set` already rely on the other way around.
+ */
+const MINST_I64_MIN: i64 = -9223372036854775807 - 1
+
+/**
+ * decode_signed64 — the signed i64 value a 64-bit two's-complement bit
+ * pattern represents: a straight bit-reinterpret, shared by BOTH isel
+ * backends (`select_const_float`/`select_const_float_x86` stage an
+ * `LConstFloat`'s raw IEEE bits through it before materializing). `bits: u64
+ * -> i64` is a CHECKED same-width cross-signedness cast (M.1) that panics
+ * past `i64::MAX`, so this never casts the full pattern directly.
+ *
+ * PROOF THAT NO STEP CAN TRAP OR OVERFLOW (the twin of
+ * `parser::numint_to_i64`'s): a pattern below `2^63` casts straight across
+ * (inside `i64`'s positive range, so the checked cast passes), and a pattern
+ * at or above it casts `bits - 2^63` (in `[0, 2^63)`, again inside that
+ * range) and adds `i64::MIN` (`MINST_I64_MIN`, in `f64_sign_bit_mask_x86`'s
+ * own file), a sum in `[i64::MIN, -1]` that cannot overflow.
+ *
+ * @param u64 bits  the 64-bit bit pattern to decode
+ * @return i64  its signed value
+ */
+fn decode_signed64(bits: u64) -> i64 {
+    if bits < MINST_I64_SIGN_BIT_U { return bits to i64 }
+    ((bits - MINST_I64_SIGN_BIT_U) to i64) + MINST_I64_MIN
+}
+
+/**
+ * SelCtx — the instruction selector's threaded state: the in-progress
+ * `MFunc` (a single block, #M0, for A2-2's straight-line scope), the
+ * `class_of` side-table, and the next fresh scratch VReg id (past the
+ * source `LFunc`'s own `next_vreg`, so a materialization/remainder scratch
+ * register never collides with a LIR-numbered VReg).
+ *
+ * @since #383 A2-2
+ */
+type SelCtx = struct {
+    /**
+     * func — the machine function built so far.
+     */
+    func: MFunc
+    /**
+     * vinfo — the `class_of` side-table for every VReg selected so far.
+     */
+    vinfo: VInfoTable
+    /**
+     * next_scratch — the next fresh scratch VReg id the selector may hand
+     * out.
+     */
+    next_scratch: u32
+    /**
+     * cur_block — the machine-block id `selctx_emit` currently appends to.
+     * A2-2 only ever had #M0; A2-3 threads it so each selected `LBlock`
+     * emits into its mirror block and split edge blocks emit into their own.
+     */
+    cur_block: u32
+    /**
+     * next_block — the next fresh machine-block id `selctx_new_block` may
+     * hand out for a split edge block (starts past the highest `LBlock` id
+     * so an edge block never collides with a mirror block).
+     */
+    next_block: u32
+}
+
+/**
+ * selctx_emit — append `inst` to the selector's single machine block,
+ * returning the advanced context.
+ *
+ * @param SelCtx ctx  the context to extend
+ * @param MInst inst  the instruction to append
+ * @return SelCtx  the advanced context
+ */
+fn selctx_emit(ctx: SelCtx, inst: MInst) -> SelCtx {
+    SelCtx { func = append_minst(ctx.func, ctx.cur_block, inst); vinfo = ctx.vinfo; next_scratch = ctx.next_scratch; cur_block = ctx.cur_block; next_block = ctx.next_block }
+}
+
+/**
+ * selctx_switch — retarget the context so subsequent `selctx_emit`s append
+ * to machine block `block_id` (used when selection moves from one `LBlock`'s
+ * mirror to the next, or into a freshly-split edge block).
+ *
+ * @param SelCtx ctx  the context to retarget
+ * @param u32 block_id  the machine-block id to emit into next
+ * @return SelCtx  the retargeted context
+ */
+fn selctx_switch(ctx: SelCtx, block_id: u32) -> SelCtx {
+    SelCtx { func = ctx.func; vinfo = ctx.vinfo; next_scratch = ctx.next_scratch; cur_block = block_id; next_block = ctx.next_block }
+}
+
+/**
+ * FreshBlock — a freshly-allocated machine block (its id) plus the advanced
+ * context that reserved it and appended the empty block to the function.
+ *
+ * @since #383 A2-3
+ */
+type FreshBlock = struct {
+    /**
+     * ctx — the context with the block reserved and appended.
+     */
+    ctx: SelCtx
+    /**
+     * id — the reserved machine-block id.
+     */
+    id: u32
+}
+
+/**
+ * selctx_new_block — append a fresh empty machine block (no params — a split
+ * edge block carries its merge values as edge moves, never as block params)
+ * and hand back its id. The context's emit target is left unchanged; call
+ * `selctx_switch` to start emitting into it.
+ *
+ * @param SelCtx ctx  the context to extend
+ * @return FreshBlock  the advanced context + the reserved block id
+ */
+fn selctx_new_block(ctx: SelCtx) -> FreshBlock {
+    let id = ctx.next_block
+    let blk = MBlock { id = id; params = teko::list::empty(); insts = teko::list::empty() }
+    let advanced = SelCtx { func = append_block(ctx.func, blk); vinfo = ctx.vinfo; next_scratch = ctx.next_scratch; cur_block = ctx.cur_block; next_block = id + 1 }
+    FreshBlock { ctx = advanced; id = id }
+}
+
+/**
+ * selctx_set_vinfo — record `reg_class`/`wide` for VReg `id` in the
+ * context's side-table, returning the advanced context.
+ *
+ * @param SelCtx ctx  the context to extend
+ * @param u32 id  the VReg id being recorded
+ * @param MRegClass reg_class  its register file
+ * @param bool wide  its width flag
+ * @return SelCtx  the advanced context
+ */
+fn selctx_set_vinfo(ctx: SelCtx, id: u32, reg_class: MRegClass, wide: bool) -> SelCtx {
+    SelCtx { func = ctx.func; vinfo = vinfo_set(ctx.vinfo, id, reg_class, wide); next_scratch = ctx.next_scratch; cur_block = ctx.cur_block; next_block = ctx.next_block }
+}
+
+/**
+ * FreshScratch — a freshly-allocated scratch VReg (an isel-only temporary,
+ * never a source `LFunc` VReg id) plus the advanced context that reserved
+ * it.
+ *
+ * @since #383 A2-2
+ */
+type FreshScratch = struct {
+    /**
+     * ctx — the context with the scratch id reserved.
+     */
+    ctx: SelCtx
+    /**
+     * reg — the freshly-allocated virtual register operand.
+     */
+    reg: MReg
+}

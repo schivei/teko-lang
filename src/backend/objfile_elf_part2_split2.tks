@@ -1,0 +1,290 @@
+/**
+ * emit_elf_symtab — the `Elf64_Sym` table: one entry per resolved symbol, in
+ * local-then-global order, each carrying its `.strtab` name offset and its
+ * section-relative value.
+ *
+ * @param []byte buf  the buffer to extend
+ * @param []ElfSym syms  the resolved symbol table
+ * @param ElfStrtab strtab  the string table (for the per-symbol name offsets)
+ * @return []byte  `buf` followed by the symbol-table entries
+ */
+fn emit_elf_symtab(buf: []byte, syms: []ElfSym, strtab: ElfStrtab) -> []byte {
+    mut b = buf
+    mut i: u64 = 0
+    loop {
+        if i >= syms.len { break }
+        b = emit_elf_one_sym(b, syms[i], strtab.strx[i])
+        i++
+    }
+    b
+}
+
+/**
+ * emit_elf_relas — the `.rela.text` table: one 24-byte `Elf64_Rela` per
+ * relocation — the `.text`-relative `r_offset`, the packed
+ * `r_info = (symbol_index << 32) | type`, and the signed `r_addend` (emitted as
+ * a two's-complement 8-byte little-endian field, so a negative `-4` never
+ * reaches a panicking `to u64` cast).
+ *
+ * @param []byte buf  the buffer to extend
+ * @param []ElfRela relas  the resolved relocation rows
+ * @return []byte  `buf` followed by the relocation entries
+ */
+fn emit_elf_relas(buf: []byte, relas: []ElfRela) -> []byte {
+    mut b = buf
+    mut i: u64 = 0
+    loop {
+        if i >= relas.len { break }
+        let r = relas[i]
+        b = emit_u64_le(b, r.offset to u64)
+        b = emit_u64_le(b, elf_rela_info(r.symidx, r.rtype))
+        b = push_imm64_x86(b, r.addend)
+        i++
+    }
+    b
+}
+
+/**
+ * ElfRelocReq — one ALREADY-RESOLVED relocation the neutral ELF writer turns into
+ * an `Elf64_Rela`: the `.text`-relative field offset (`r_offset`), the target
+ * symbol NAME (resolved to an index by the writer), the NUMERIC `R_<arch>_*` type
+ * (each per-ISA encoder maps its own `RelocKind*` → the number, so the writer
+ * holds no ISA knowledge), and the addend. This is the ISA-agnostic form of
+ * `RelocX86` — the per-ISA reloc's `kind` is already lowered to `rtype`.
+ *
+ * @since #387 B2-7
+ */
+pub type ElfRelocReq = struct {
+    /**
+     * offset — the patched field's byte offset of the relocated field, relative to the base of the section the relocation patches: `.text`-base-relative in `ElfObject.relocs`, `.rodata`-base-relative in `ElfObject.rodata_relocs` (#594 T-B2) — historically always `.text`.
+     */
+    offset: u32
+    /**
+     * sym — the target symbol's final name (a function, an extern, a `.rodata`
+     * datum, or a `.text` pcrel label).
+     */
+    sym: str
+    /**
+     * rtype — the numeric `R_<arch>_*` relocation type (per-ISA-mapped).
+     */
+    rtype: u32
+    /**
+     * addend — the `r_addend`; a rodata target folds its `.rodata` offset onto
+     * this base.
+     */
+    addend: i64
+}
+
+/**
+ * ElfObject — the ISA-agnostic input to the shared ELF64 writer: the machine id
+ * (`e_machine`: EM_X86_64=62), the ABI flags (`e_flags`: 0 for x86-64), the
+ * `.text`/`.rodata` section images, the neutral `Symbol` list
+ * (local-then-global-then-undefined, now INCLUDING per-pcrel-pair `.text` label
+ * locals — §7.2), and the resolved `ElfRelocReq` rows. `emit_elf` (x86) builds
+ * this and calls `emit_elf_object`; the writer is ISA-agnostic, so E1 (the ELF
+ * static linker) reuses it unchanged.
+ *
+ * @since #387 B2-7
+ */
+pub type ElfObject = struct {
+    /**
+     * e_machine — the ELF `e_machine` (62=x86-64).
+     */
+    e_machine: u32
+    /**
+     * e_flags — the ELF `e_flags` (0=x86-64).
+     */
+    e_flags: u32
+    /**
+     * text — the `.text` section image.
+     */
+    text: []byte
+    /**
+     * rodata — the `.rodata` section image.
+     */
+    rodata: []byte
+    /**
+     * symbols — the neutral symbol list (locals incl. `.text` pcrel labels, then
+     * globals, then undefined).
+     */
+    symbols: []Symbol
+    /**
+     * relocs — the resolved relocation requests, `.text`-relative, in emission
+     * order.
+     */
+    relocs: []ElfRelocReq
+    /**
+     * rodata_relocs — the relocations whose PATCH SITE lies INSIDE `.rodata` (a
+     * Tier-B const's data→data pointer; #594 T-B2), separated from the `.text`-
+     * relative `relocs` because each one's `offset` is `.rodata`-base-relative,
+     * not `.text`-base-relative. EMPTY in every real compile today (T-B1's
+     * `encode_rodata` honest-stop keeps every producer out), which keeps the
+     * object byte-identical and every golden intact; the per-ISA bridge populates
+     * it (partitioning the `Reloc*` by `RelocSect`) only once the T-B chain opens.
+     * Each entry resolves to one `.rela.rodata` row (R_X86_64_64
+     * against the `.rodata` section symbol, the target's offset folded onto the
+     * addend).
+     */
+    rodata_relocs: []ElfRelocReq
+    /**
+     * dwarf — the DWARF sections to sink (D1.4), already lowered to the ISA-agnostic
+     * `ElfDwarfSections` shape by the per-ISA adapter (`elf_dwarf_of`). `dwarf.present == false`
+     * (`no_elf_dwarf()`) places nothing, keeping the object byte-identical to a build with no
+     * debug axis.
+     * @since 0.3.1.0
+     */
+    dwarf: ElfDwarfSections
+}
+
+/**
+ * ElfDwarfSections — the ISA-AGNOSTIC form of a `DwarfSink` (D1.3's producer output) `ElfObject`
+ * carries: every `DwReloc` already lowered to an `ElfRelocReq` under the target's absolute-64
+ * relocation type (`R_X86_64_64` or `R_AARCH64_ABS64` — the ONLY ISA knowledge `elf_dwarf_of`
+ * injects, mirroring `x86_reloc_reqs`/`arm64_reloc_reqs`). `present = false` is the
+ * `DebugInfo::None` default: `emit_elf_object` places nothing when it sees it.
+ *
+ * @since 0.3.1.0
+ */
+pub type ElfDwarfSections = struct {
+    /** true iff the three fields below carry real content to place. */
+    present: bool
+    /** the `.debug_abbrev` section bytes (valid iff `present`; never relocated). */
+    abbrev: []byte
+    /** the `.debug_info` section bytes (valid iff `present`). */
+    info_bytes: []byte
+    /** the `.debug_info` section's relocations, already `ElfRelocReq`-typed. */
+    info_relocs: []ElfRelocReq
+    /** the `.debug_line` section bytes (valid iff `present`). */
+    line_bytes: []byte
+    /** the `.debug_line` section's relocations, already `ElfRelocReq`-typed (at most one). */
+    line_relocs: []ElfRelocReq
+}
+
+/**
+ * no_elf_dwarf — the absent `ElfDwarfSections` (`present = false`), the `DebugInfo::None` default
+ * every `ElfObject` construction site not requesting DWARF supplies.
+ *
+ * @return  the absent sections
+ * @since 0.3.1.0
+ */
+fn no_elf_dwarf() -> ElfDwarfSections {
+    ElfDwarfSections { present = false; abbrev = teko::list::empty(); info_bytes = teko::list::empty(); info_relocs = teko::list::empty(); line_bytes = teko::list::empty(); line_relocs = teko::list::empty() }
+}
+
+/**
+ * elf_dwreloc_reqs — lower every `DwReloc` of `relocs` to an `ElfRelocReq` under the numeric
+ * absolute-64 relocation type `rtype`: the offset narrows to `u32` (every DWARF section is well
+ * under 4 GiB) and the addend is always 0 (a DWARF low_pc/set_address slot targets a symbol's base,
+ * never an offset into it).
+ *
+ * @param []DwReloc relocs  the producer's relocations (`.text`-symbol-targeted)
+ * @param u32 rtype  the target ISA's absolute-64 relocation type
+ * @return []ElfRelocReq  the lowered relocation requests, in the same order
+ * @since 0.3.1.0
+ */
+fn elf_dwreloc_reqs(relocs: []DwReloc, rtype: u32) -> []ElfRelocReq {
+    mut out: []ElfRelocReq = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= relocs.len { break }
+        let r = relocs[i]
+        out = teko::list::push(out, ElfRelocReq { offset = r.offset to u32; sym = r.symbol; rtype = rtype; addend = 0 })
+        i++
+    }
+    out
+}
+
+/**
+ * elf_dwarf_of — lower a `DwarfSink` (D1.3's producer output) into the ISA-agnostic
+ * `ElfDwarfSections` `emit_elf_object` consumes, under the caller-supplied absolute-64 relocation
+ * type. `present = false` (the `DebugInfo::None` default) maps straight through to `no_elf_dwarf()`,
+ * so the object writer places nothing — the D1.4 sink's only entry point from the per-ISA adapters.
+ *
+ * @param DwarfSink sink  the producer output (`present` gates everything else)
+ * @param u32 abs64_rtype  the target ISA's absolute-64 relocation type
+ * @return ElfDwarfSections  the ISA-agnostic sections `ElfObject.dwarf` carries
+ * @since 0.3.1.0
+ */
+fn elf_dwarf_of(sink: DwarfSink, abs64_rtype: u32) -> ElfDwarfSections {
+    if !sink.present { return no_elf_dwarf() }
+    ElfDwarfSections {
+        present = true
+        abbrev = sink.abbrev
+        info_bytes = sink.info.bytes
+        info_relocs = elf_dwreloc_reqs(sink.info.relocs, abs64_rtype)
+        line_bytes = sink.line.bytes
+        line_relocs = elf_dwreloc_reqs(sink.line.relocs, abs64_rtype)
+    }
+}
+
+/**
+ * ElfConstEntry — one `.rodata` datum's byte span in the ORIGINAL concatenated
+ * `.rodata` image, plus where it lands after the data-rel-ro partition: whether
+ * it moves to `.data.rel.ro` and its new byte offset within its post-partition
+ * section. Derived from the module's section-2 local symbols (one per datum, in
+ * ascending-offset emission order).
+ *
+ * @since 0.3.1
+ */
+type ElfConstEntry = struct {
+    /**
+     * name — the datum's file-local symbol name (the reloc-target key).
+     */
+    name: str
+    /**
+     * start — the datum's byte offset in the ORIGINAL `.rodata` image.
+     */
+    start: u32
+    /**
+     * end — one past the datum's last byte in the ORIGINAL image (the next
+     * datum's start, or the image length for the last datum): the span INCLUDES
+     * any inter-datum alignment padding, which rides along harmlessly.
+     */
+    end: u32
+    /**
+     * to_drr — true iff a pointer relocation patches inside this datum, so it
+     * moves to `.data.rel.ro`; false leaves it in read-only `.rodata`.
+     */
+    to_drr: bool
+    /**
+     * new_offset — the datum's 8-aligned byte offset within its POST-partition
+     * section (`.data.rel.ro` when `to_drr`, else the rebuilt `.rodata`).
+     */
+    new_offset: u32
+}
+
+/**
+ * ElfDrrPartition — the result of splitting the `.rodata` image by
+ * relocation-presence: the rebuilt pure `.rodata` bytes, the moved
+ * `.data.rel.ro` bytes, the neutral symbol list with each const datum's offset
+ * and section re-stamped, and the moved relocations rebased to `.data.rel.ro`.
+ * `active` is false (and the four passthrough fields hold the originals) when the
+ * module carries no pointer-bearing const, so the writer's output stays
+ * byte-identical to the pre-partition path.
+ *
+ * @since 0.3.1
+ */
+type ElfDrrPartition = struct {
+    /**
+     * active — true iff at least one const datum moved to `.data.rel.ro`.
+     */
+    active: bool
+    /**
+     * rodata — the pure `.rodata` bytes (originals when `!active`).
+     */
+    rodata: []byte
+    /**
+     * drr — the `.data.rel.ro` bytes (empty when `!active`).
+     */
+    drr: []byte
+    /**
+     * symbols — the neutral symbols with const-datum offsets/sections re-stamped
+     * (the originals when `!active`).
+     */
+    symbols: []Symbol
+    /**
+     * drr_relocs — the moved relocations, their `offset` rebased to be
+     * `.data.rel.ro`-relative (empty when `!active`).
+     */
+    drr_relocs: []ElfRelocReq
+}

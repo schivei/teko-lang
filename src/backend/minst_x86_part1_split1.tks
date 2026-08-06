@@ -1,0 +1,284 @@
+pub type MAluOpX86 = enum { Add; Sub; And; Or; Xor }
+
+/**
+ * MShiftOpX86 — the closed set of x86-64 variable-count shift operations
+ * `MShiftX86` selects: `Shl` (logical left), `Shr` (logical right), `Sar`
+ * (arithmetic right). The shift count rides in `CL` (isel moves the count
+ * register there first), so the shift instruction itself names only the
+ * shifted destination (§4.1).
+ *
+ * @since #386 B1-2
+ */
+pub type MShiftOpX86 = enum { Shl; Shr; Sar }
+
+/**
+ * MFAluOpX86 — the closed set of x86-64 scalar SSE float ALU operations
+ * `MFAluX86` selects: `FAdd`/`FSub`/`FMul`/`FDiv` (ADDSD/SUBSD/MULSD/DIVSD for
+ * the `dbl` f64 form, ADDSS/SUBSS/MULSS/DIVSS for the f32 form), one per
+ * `LBinOp` float-arithmetic case — the arm64 `MFAluOp` mirror (`B1-fp`,
+ * closed 2026-07-29).
+ *
+ * @since #386 B1-fp
+ */
+pub type MFAluOpX86 = enum { FAdd; FSub; FMul; FDiv }
+
+/**
+ * MCvtOpX86 — the closed set of x86-64 int/float conversion mnemonics
+ * `MCvtX86` selects: `Cvtsi2sd` (signed GPR -> f64, `LUnOp::IToF` — always the
+ * wide/f64 form, since the lowering decomposes an `int to f32` cast into
+ * `IToF`+`FToF` rather than asking for a narrow convert), `Cvttsd2si`/
+ * `Cvttss2si` (f64/f32 -> signed GPR, truncating, `LUnOp::FToI`, picked by the
+ * OPERAND's recorded width), and `Cvtsd2ss`/`Cvtss2sd` (the two directions of
+ * `LUnOp::FToF`, likewise picked by the operand's width — sound because the
+ * lowering never emits an identity `FToF`, so the two widths always differ).
+ *
+ * @since #386 B1-fp
+ */
+pub type MCvtOpX86 = enum { Cvtsi2sd; Cvttsd2si; Cvttss2si; Cvtsd2ss; Cvtss2sd }
+
+/**
+ * MMemSizeX86 — the access width an `MLoadX86`/`MStoreX86` transfers: the
+ * GPR/pointer integer widths `B` (byte, 8-bit), `W` (word, 16-bit), `D`
+ * (doubleword, 32-bit), `Q` (quadword, 64-bit), plus the SSE scalar float
+ * widths `F32`/`F64` (MOVSS/MOVSD) closed alongside the rest of the float
+ * family (`B1-fp`, 2026-07-29) — the arm64 `MMemSize` mirror, spelled `F32`/
+ * `F64` rather than reusing the letters `S`/`D` (already `X86_REG_RSP_ID`-
+ * adjacent and, for `D`, already the 32-bit INTEGER width here) so no reader
+ * has to disambiguate "D means doubleword" from "D means double" case by case.
+ *
+ * @since #386 B1-2, B1-fp
+ */
+pub type MMemSizeX86 = enum { B; W; D; Q; F32; F64 }
+
+/**
+ * RelocKindX86 — which x86-64 ELF relocation an address-materialization or
+ * call instruction owes the B1 encoder: `Plt32` (a `call rel32`,
+ * `R_X86_64_PLT32`), `Pc32` (a `lea [rip+disp32]`, `R_X86_64_PC32`), or
+ * `Abs64` (a data-global absolute, `R_X86_64_64` — the `B1-globals` stop).
+ * The IR records the kind + the already-final symbol; the B1 encoder emits the
+ * actual `Elf64_Rela` entry (§7.2).
+ *
+ * @since #386 B1-2
+ */
+pub type RelocKindX86 = enum { Plt32; Pc32; Abs64 }
+
+/**
+ * MMovImmX86 — `dst = imm` (MOV / MOVABS), the selection of `LConstInt`. The
+ * B1 encoder picks the concrete form from the value: `mov r32, imm32` /
+ * `mov r64, imm32`(sign-extended) for a 32-bit-fitting literal, or
+ * `movabs r64, imm64` for a wide literal (the arm64 MOVZ/MOVK-chain case). The
+ * IR carries the full 64-bit immediate and defers that choice to encode (§4.1).
+ *
+ * @since #386 B1-2
+ */
+pub type MMovImmX86 = struct {
+    /**
+     * dst — the destination register the immediate is written to.
+     */
+    dst: MReg
+    /**
+     * imm64 — the immediate value (the encoder narrows to imm32 when it fits).
+     */
+    imm64: i64
+    /**
+     * wide — true for the 64-bit r64 form, false for the 32-bit r32 form.
+     */
+    wide: bool
+}
+
+/**
+ * MMovX86 — `dst = src` between two GPRs (`mov r/m64, r64`), the register-copy
+ * isel inserts to seed a two-address result (§4.2), plus ordinary/edge moves
+ * and the physical-register pins that feed a fixed-register div/shift sequence.
+ *
+ * @since #386 B1-2
+ */
+pub type MMovX86 = struct {
+    /**
+     * dst — the destination register.
+     */
+    dst: MReg
+    /**
+     * src — the source register.
+     */
+    src: MReg
+    /**
+     * wide — true for the 64-bit r64 form, false for the 32-bit r32 form.
+     */
+    wide: bool
+}
+
+/**
+ * MAluRmX86 — a two-address read-modify-write ALU op: `dst = dst <op> src`
+ * (ADD/SUB/AND/OR/XOR), the second half of a three-address `LBin` lowering
+ * whose first half is an `MMovX86` copy of the left operand into `dst` (§4.2).
+ * `dst` is therefore BOTH a def and a use — the shape the shared regalloc
+ * already handles via the arm64 `MMovK` precedent.
+ *
+ * @since #386 B1-2
+ */
+pub type MAluRmX86 = struct {
+    /**
+     * op — which ALU mnemonic to emit.
+     */
+    op: MAluOpX86
+    /**
+     * dst — the destination register, read and written (the two-address tie).
+     */
+    dst: MReg
+    /**
+     * src — the second source register operand.
+     */
+    src: MReg
+    /**
+     * wide — true for the 64-bit r64 form, false for the 32-bit r32 form.
+     */
+    wide: bool
+}
+
+/**
+ * MImulX86 — a two-operand two-address signed multiply: `dst = dst * src`
+ * (`imul r64, r/m64`), the selection of `LBin` mul. Unlike the one-operand
+ * `imul`/`mul` (which pin RDX:RAX), the two-operand form needs no fixed
+ * register, so it rides the same two-address copy-first shape as `MAluRmX86`.
+ *
+ * @since #386 B1-2
+ */
+pub type MImulX86 = struct {
+    /**
+     * dst — the destination register, read and written (the two-address tie).
+     */
+    dst: MReg
+    /**
+     * src — the second source register operand.
+     */
+    src: MReg
+    /**
+     * wide — true for the 64-bit r64 form, false for the 32-bit r32 form.
+     */
+    wide: bool
+}
+
+/**
+ * MDivSeqX86 — the fixed-register division/remainder macro: `dst = a / b` (or
+ * `a % b`), the selection of `LBin` sdiv/udiv/srem/urem. x86 `idiv`/`div`
+ * divides `RDX:RAX` by the divisor, quotient into RAX and remainder into RDX,
+ * so this one IR case carries the whole sequence's operands (§4.4): isel/encode
+ * expand it to `mov rax, a` ; `cqo`(signed) or `xor edx, edx`(unsigned) ;
+ * `idiv`/`div b` ; `mov dst, rax`(quotient) or `mov dst, rdx`(remainder). The
+ * RAX/RDX pins are the fixed intervals the shared scan already avoids.
+ *
+ * @since #386 B1-2
+ */
+pub type MDivSeqX86 = struct {
+    /**
+     * dst — the destination register the quotient/remainder is written to.
+     */
+    dst: MReg
+    /**
+     * a — the dividend register (moved into RAX before the divide).
+     */
+    a: MReg
+    /**
+     * b — the divisor register (the `idiv`/`div` r/m operand).
+     */
+    b: MReg
+    /**
+     * is_signed — true for `idiv`/`cqo` (signed), false for `div`/`xor edx,
+     * edx` (unsigned). Named `is_signed` because bare `signed` is a C keyword
+     * the codegen would emit into an invalid struct field.
+     */
+    is_signed: bool
+    /**
+     * is_rem — true when the result is the remainder (from RDX), false for the
+     * quotient (from RAX).
+     */
+    is_rem: bool
+    /**
+     * wide — true for the 64-bit r64 form, false for the 32-bit r32 form.
+     */
+    wide: bool
+}
+
+/**
+ * MShiftX86 — a two-address variable-count shift: `dst = dst <op> CL`
+ * (`shl`/`shr`/`sar r/m64, cl`), the selection of `LBin` shifts. The shift
+ * count is pre-moved to `CL` by a preceding `MMovX86` (§4.1), so this case
+ * names only the shifted destination (read and written).
+ *
+ * @since #386 B1-2
+ */
+pub type MShiftX86 = struct {
+    /**
+     * op — which shift mnemonic to emit.
+     */
+    op: MShiftOpX86
+    /**
+     * dst — the shifted destination register, read and written.
+     */
+    dst: MReg
+    /**
+     * wide — true for the 64-bit r64 form, false for the 32-bit r32 form.
+     */
+    wide: bool
+}
+
+/**
+ * MCmpX86 — an integer compare (`cmp r/m64, r64`) that sets the condition
+ * flags without materializing a value; consumed by a fused `MJccX86` or
+ * followed by an `MSetccX86` when the compare is used as a plain value (§4.1).
+ *
+ * @since #386 B1-2
+ */
+pub type MCmpX86 = struct {
+    /**
+     * a — the first compared register operand.
+     */
+    a: MReg
+    /**
+     * b — the second compared register operand.
+     */
+    b: MReg
+    /**
+     * wide — true for the 64-bit r64 form, false for the 32-bit r32 form.
+     */
+    wide: bool
+}
+
+/**
+ * MSetccX86 — `dst = (cond) ? 1 : 0` (`setcc r/m8` then `movzx r32, r/m8`),
+ * materializing a preceding `MCmpX86` as a plain 0/1 value (an integer compare
+ * NOT fused into a branch). The one IR case covers both the byte set and the
+ * zero-extend (§6.3).
+ *
+ * @since #386 B1-2
+ */
+pub type MSetccX86 = struct {
+    /**
+     * dst — the destination register the 0/1 result is written to.
+     */
+    dst: MReg
+    /**
+     * cond — the condition code tested against the flags a prior compare set.
+     */
+    cond: MCond
+}
+
+/**
+ * MJccX86 — a conditional branch (`jcc rel32`) to a machine block, the
+ * fused-compare taken-edge of an `LBranch` (the analog of arm64's
+ * `MBranchCond`). The B1 encoder patches the rel32 displacement once every
+ * block's byte offset is known (§6.2).
+ *
+ * @since #386 B1-2
+ */
+pub type MJccX86 = struct {
+    /**
+     * cond — the condition code tested against the flags a prior `MCmpX86` set.
+     */
+    cond: MCond
+    /**
+     * target — the machine-block id taken when `cond` holds.
+     */
+    target: u32
+}

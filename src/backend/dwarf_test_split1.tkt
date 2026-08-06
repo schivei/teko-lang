@@ -1,0 +1,292 @@
+/**
+ * mini_unit — the compile unit of the gdb-and-lldb-verified golden
+ * (docs/design/debugger-poc/mini.s): producer "teko 0.3.1", C99, source `hello.tks`, comp_dir
+ * ".", two functions `add` (decl line 29, size 24) and `main` (decl line 40, size 35), total
+ * text 59 bytes.
+ *
+ * @return  the mini compile unit
+ */
+fn mini_unit() -> DwCompileUnit {
+    let add = DwSubprogram { name = "add"; decl_file = 1; decl_line = 29 to u32; symbol = "add"; code_size = 24 to u64 }
+    let main = DwSubprogram { name = "main"; decl_file = 1; decl_line = 40 to u32; symbol = "main"; code_size = 35 to u64 }
+    DwCompileUnit {
+        producer = "teko 0.3.1"; language = 0x0c to u32; name = "hello.tks"; comp_dir = "."
+        text_symbol = "add"; text_size = 59 to u64; subprograms = [add, main]
+    }
+}
+
+/**
+ * mini_line_rows — the address→line rows of the golden line program: the first row at set_address
+ * (line 29), then advances to lines 30, 31, 40, 41, 42.
+ *
+ * @return  the golden line rows
+ */
+fn mini_line_rows() -> []DwLineRow {
+    [
+        DwLineRow { pc_advance = 0 to u64; line = 29 to u32; file = 1 },
+        DwLineRow { pc_advance = 10 to u64; line = 30 to u32; file = 1 },
+        DwLineRow { pc_advance = 9 to u64; line = 31 to u32; file = 1 },
+        DwLineRow { pc_advance = 5 to u64; line = 40 to u32; file = 1 },
+        DwLineRow { pc_advance = 8 to u64; line = 41 to u32; file = 1 },
+        DwLineRow { pc_advance = 18 to u64; line = 42 to u32; file = 1 }
+    ]
+}
+
+/**
+ * first_mismatch — the index of the first byte where `got` and the golden `want` differ, or -1
+ * when they are byte-identical (lengths compared first). On a mismatch it prints the index and the
+ * two bytes, so a golden regression names WHERE it broke rather than failing mute.
+ *
+ * @param got   the produced bytes
+ * @param want  the golden bytes (as u64 values)
+ * @return      the first differing index, or -1 when identical
+ */
+fn first_mismatch(got: []byte, want: []u64) -> i64 {
+    if got.len != want.len {
+        teko::io::println(teko::str::concat("dwarf golden length: got ", teko::u64_to_str(got.len), " want ", teko::u64_to_str(want.len)))
+        return got.len to i64
+    }
+    mut i: u64 = 0
+    loop {
+        if i >= got.len { break }
+        if (got[i] to u64) != want[i] {
+            teko::io::println(teko::str::concat("dwarf golden byte ", teko::u64_to_str(i), ": got ", teko::u64_to_str(got[i] to u64), " want ", teko::u64_to_str(want[i])))
+            return i to i64
+        }
+        i = i + 1
+    }
+    -1
+}
+
+/**
+ * contains_pair — whether the two-byte sequence `a` then `b` appears anywhere in `hay`. Used to
+ * detect a specific line opcode + operand (e.g. DW_LNS_set_file 0x04 followed by file index 0x02)
+ * without pinning a whole golden.
+ *
+ * @param hay  the bytes to scan
+ * @param a    the first byte of the pair
+ * @param b    the second byte of the pair
+ * @return     true when some index i has hay[i] == a and hay[i+1] == b
+ */
+fn contains_pair(hay: []byte, a: u64, b: u64) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i + 1 >= hay.len { break }
+        if (hay[i] to u64) == a && (hay[i + 1] to u64) == b { return true }
+        i = i + 1
+    }
+    false
+}
+
+/**
+ * contains_triple — whether the three-byte sequence `a`, `b`, `c` appears anywhere in `hay`. Used
+ * to detect a location opcode and its multi-byte operand (DW_OP_fbreg 0x91 followed by a two-group
+ * SLEB128) without pinning a whole golden.
+ *
+ * @param hay  the bytes to scan
+ * @param a    the first byte of the triple
+ * @param b    the second byte of the triple
+ * @param c    the third byte of the triple
+ * @return     true when some index i has hay[i] == a, hay[i+1] == b, and hay[i+2] == c
+ */
+fn contains_triple(hay: []byte, a: u64, b: u64, c: u64) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i + 2 >= hay.len { break }
+        if (hay[i] to u64) == a && (hay[i + 1] to u64) == b && (hay[i + 2] to u64) == c { return true }
+        i = i + 1
+    }
+    false
+}
+
+/**
+ * golden_abbrev — the 37 `.debug_abbrev` bytes of mini.s (two abbreviations: compile_unit with
+ * children, subprogram leaf).
+ *
+ * @return  the golden abbrev bytes
+ */
+fn golden_abbrev() -> []u64 {
+    [
+        0x01, 0x11, 0x01, 0x25, 0x08, 0x13, 0x05, 0x03, 0x08, 0x1b, 0x08, 0x11, 0x01, 0x12, 0x07, 0x10,
+        0x17, 0x00, 0x00, 0x02, 0x2e, 0x00, 0x03, 0x08, 0x3a, 0x0d, 0x3b, 0x05, 0x11, 0x01, 0x12, 0x07,
+        0x3f, 0x19, 0x00, 0x00, 0x00
+    ]
+}
+
+/**
+ * golden_info — the 107 `.debug_info` bytes of mini.s (address slots zeroed, filled by the three
+ * relocations at 0x25/0x41/0x5a).
+ *
+ * @return  the golden info bytes
+ */
+fn golden_info() -> []u64 {
+    [
+        0x67, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x01, 0x74, 0x65, 0x6b, 0x6f,
+        0x20, 0x30, 0x2e, 0x33, 0x2e, 0x31, 0x00, 0x0c, 0x00, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x2e, 0x74,
+        0x6b, 0x73, 0x00, 0x2e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3b, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x61, 0x64, 0x64, 0x00, 0x01, 0x1d,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x02, 0x6d, 0x61, 0x69, 0x6e, 0x00, 0x01, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x23, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ]
+}
+
+/**
+ * golden_line — the 89 `.debug_line` bytes of mini.s (the set_address operand zeroed, filled by
+ * the single relocation at 0x2e).
+ *
+ * @return  the golden line bytes
+ */
+fn golden_line() -> []u64 {
+    [
+        0x55, 0x00, 0x00, 0x00, 0x04, 0x00, 0x21, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0xfb, 0x0e, 0x0d,
+        0x00, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x68, 0x65, 0x6c,
+        0x6c, 0x6f, 0x2e, 0x74, 0x6b, 0x73, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x09, 0x02, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x1c, 0x05, 0x01, 0x01, 0x02, 0x0a, 0x03, 0x01, 0x01,
+        0x02, 0x09, 0x03, 0x01, 0x01, 0x02, 0x05, 0x03, 0x09, 0x01, 0x02, 0x08, 0x03, 0x01, 0x01, 0x02,
+        0x12, 0x03, 0x01, 0x01, 0x02, 0x09, 0x00, 0x01, 0x01
+    ]
+}
+
+#test
+
+/**
+ * dwarf_abbrev_matches_golden — the `.debug_abbrev` producer reproduces the verified 37-byte
+ * golden exactly.
+ */
+fn dwarf_abbrev_matches_golden() {
+    teko::assert::eq_i64(first_mismatch(debug_abbrev(), golden_abbrev()), -1)
+}
+
+#test
+
+/**
+ * dwarf_info_matches_golden — the `.debug_info` producer reproduces the verified 107-byte golden
+ * exactly, and records the three low_pc relocations at 0x25 (unit), 0x41 (add), 0x5a (main).
+ */
+fn dwarf_info_matches_golden() {
+    let sec = debug_info(mini_unit())
+    teko::assert::eq_i64(first_mismatch(sec.bytes, golden_info()), -1)
+    teko::assert::len_eq(sec.relocs.len, 3 to u64)
+    teko::assert::eq_u64(sec.relocs[0].offset, 0x25 to u64)
+    teko::assert::eq_str(sec.relocs[0].symbol, "add")
+    teko::assert::eq_u64(sec.relocs[1].offset, 0x41 to u64)
+    teko::assert::eq_str(sec.relocs[1].symbol, "add")
+    teko::assert::eq_u64(sec.relocs[2].offset, 0x5a to u64)
+    teko::assert::eq_str(sec.relocs[2].symbol, "main")
+}
+
+#test
+
+/**
+ * dwarf_line_matches_golden — the `.debug_line` producer reproduces the verified 89-byte golden
+ * exactly, and records the single set_address relocation at 0x2e.
+ */
+fn dwarf_line_matches_golden() {
+    let sec = debug_line(["hello.tks"], "add", mini_line_rows(), 9 to u64)
+    teko::assert::eq_i64(first_mismatch(sec.bytes, golden_line()), -1)
+    teko::assert::len_eq(sec.relocs.len, 1 to u64)
+    teko::assert::eq_u64(sec.relocs[0].offset, 0x2e to u64)
+    teko::assert::eq_str(sec.relocs[0].symbol, "add")
+}
+
+/**
+ * two_file_rows — two rows across two files: line 5 in file 1 at address 0, then line 8 in file 2
+ * after a 4-byte advance. The second row's file differs, forcing a set_file opcode.
+ *
+ * @return  the two-file line rows
+ */
+fn two_file_rows() -> []DwLineRow {
+    [
+        DwLineRow { pc_advance = 0 to u64; line = 5 to u32; file = 1 },
+        DwLineRow { pc_advance = 4 to u64; line = 8 to u32; file = 2 }
+    ]
+}
+
+/**
+ * one_file_rows — the same two rows as `two_file_rows` but with both in file 1, so no set_file is
+ * emitted. The structural twin that isolates the set_file opcode and the extra file entry.
+ *
+ * @return  the single-file line rows
+ */
+fn one_file_rows() -> []DwLineRow {
+    [
+        DwLineRow { pc_advance = 0 to u64; line = 5 to u32; file = 1 },
+        DwLineRow { pc_advance = 4 to u64; line = 8 to u32; file = 1 }
+    ]
+}
+
+#test
+
+/**
+ * dwarf_line_multifile_emits_set_file — a row whose file differs from the running file register
+ * emits DW_LNS_set_file (0x04) with the ULEB file index (0x02), and the header gains a second
+ * file_names entry. Proved structurally against the single-file twin: the two-file section is
+ * exactly 11 bytes longer (a 9-byte second file entry "b.tks\0" + three 0-ULEBs, plus the 2-byte
+ * set_file opcode), and only the two-file program carries the set_file pair. The single-file twin
+ * carrying no set_file is the negative half that makes this a real proof, not a coincidence.
+ */
+fn dwarf_line_multifile_emits_set_file() {
+    let multi = debug_line(["a.tks", "b.tks"], "f", two_file_rows(), 4 to u64)
+    let single = debug_line(["a.tks"], "f", one_file_rows(), 4 to u64)
+    teko::assert::eq_u64(multi.bytes.len, single.bytes.len + 11 to u64)
+    teko::assert::is_true(contains_pair(multi.bytes, 0x04 to u64, 0x02 to u64))
+    teko::assert::is_true(!contains_pair(single.bytes, 0x04 to u64, 0x02 to u64))
+}
+
+#test
+
+/**
+ * build_dwarf_sink_present_matches_producers — `build_dwarf_sink` on the golden `mini_unit`
+ * assembles `present = true` plus the SAME three section images the individual D1.3 producers give
+ * directly (`debug_abbrev()`, `debug_info(mini_unit())`, `debug_line(...)`), byte for byte. This is
+ * the D1.4/D1.5 sink's only producer-side contract: it never re-derives DWARF content, only bundles
+ * what already exists.
+ */
+fn build_dwarf_sink_present_matches_producers() {
+    let sink = build_dwarf_sink(mini_unit(), ["hello.tks"], mini_line_rows(), 9 to u64)
+    teko::assert::is_true(sink.present)
+    teko::assert::eq_i64(first_mismatch(sink.abbrev, golden_abbrev()), -1)
+    teko::assert::eq_i64(first_mismatch(sink.info.bytes, golden_info()), -1)
+    teko::assert::eq_i64(first_mismatch(sink.line.bytes, golden_line()), -1)
+}
+
+#test
+
+/**
+ * no_dwarf_sink_is_absent — `no_dwarf_sink()` carries `present = false` and empty sections: the
+ * value every ELF/Mach-O writer entry point defaults to, so a `DebugInfo::None` build places
+ * nothing.
+ */
+fn no_dwarf_sink_is_absent() {
+    let sink = no_dwarf_sink()
+    teko::assert::is_true(!sink.present)
+    teko::assert::len_eq(sink.abbrev.len, 0 to u64)
+    teko::assert::len_eq(sink.info.bytes.len, 0 to u64)
+    teko::assert::len_eq(sink.line.bytes.len, 0 to u64)
+}
+
+#test
+
+/**
+ * uleb128_encodes_multibyte — a value spanning two groups (300 = 0xAC 0x02) proves the
+ * continuation-bit encoding, not just the single-byte fast path the golden exercises.
+ */
+fn uleb128_encodes_multibyte() {
+    let got = uleb128(teko::list::empty(), 300 to u64)
+    teko::assert::len_eq(got.len, 2 to u64)
+    teko::assert::is_true(got[0] == (0xac to byte))
+    teko::assert::is_true(got[1] == (0x02 to byte))
+}
+
+#test
+
+/**
+ * sleb128_encodes_negative — a negative value (-2 = 0x7e) proves the sign-terminating path the
+ * line program never hits (its deltas are all positive), guarding the general encoder.
+ */
+fn sleb128_encodes_negative() {
+    let got = sleb128(teko::list::empty(), -2)
+    teko::assert::len_eq(got.len, 1 to u64)
+    teko::assert::is_true(got[0] == (0x7e to byte))
+}

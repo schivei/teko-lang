@@ -1,0 +1,110 @@
+/**
+ * NaturalLoop — one natural loop described by two program points over the linear
+ * numbering (§6.2): `header_pt`, the first point of the loop-header block (the
+ * retreating edge's target), and `latch_pt`, the point of the retreating branch
+ * itself (the loop's highest body point in RPO). The §6.2 replacement for the
+ * old bare back-edge boolean: it DESCRIBES each loop's span so `extend_over_loops` can
+ * widen a header-live interval across the whole body. A value live at `header_pt`
+ * must stay live to `latch_pt` — the next iteration re-enters at the header.
+ *
+ * @since #389 F2
+ */
+type NaturalLoop = struct {
+    /**
+     * header_pt — the first program point of the loop-header block (the
+     * retreating edge's target); the value's live-at-header boundary.
+     */
+    header_pt: u32
+    /**
+     * latch_pt — the program point of the retreating branch (the latch block's
+     * terminator, the loop's highest body point in RPO); the widen target.
+     */
+    latch_pt: u32
+}
+
+/**
+ * block_first_point — the smallest program point of any instruction in block
+ * `block_id`, or 0 when the block has no instruction in `stream`. The stream is
+ * RPO-numbered, so this is the block's entry point (its live-in boundary), used
+ * as a loop header's `header_pt`.
+ *
+ * @param []NumberedInst stream  the RPO-numbered stream
+ * @param u32 block_id  the block whose first point to find
+ * @return u32  the block's smallest program point (0 if absent)
+ */
+fn block_first_point(stream: []NumberedInst, block_id: u32) -> u32 {
+    mut have: bool = false
+    mut best: u32 = 0
+    mut i: u64 = 0
+    loop {
+        if i >= stream.len { break }
+        let ni = stream[i]
+        if ni.block_id == block_id {
+            if !have || ni.point < best { best = ni.point; have = true }
+        }
+        i++
+    }
+    best
+}
+
+/**
+ * natural_loops — every natural loop of the reachable CFG, one per retreating
+ * (loop back-)edge (§6.2, the §3 replacement for the old bare back-edge bool
+ * `has_back_edge` once returned). A terminator on an ENTRY-REACHABLE block
+ * whose target does not follow it in RPO (`pos(target) <= pos(source)`) is a
+ * retreating edge; its target is the loop header (`header_pt =
+ * block_first_point(target)`) and its source-branch point the latch
+ * (`latch_pt`). Dead-block sources are excluded (a dead edge is not a loop,
+ * A4-6 #385) and acyclic `if`/`match` nesting has no retreating edge, so the
+ * result is empty for the acyclic subset.
+ *
+ * @param []NumberedInst stream  the RPO-numbered stream
+ * @param []u32 order  the RPO block-id order
+ * @param []u32 reachable  the entry-reachable block ids (dead-block sources are
+ *                         excluded — a dead edge is not a loop)
+ * @return []NaturalLoop  one loop span per retreating edge
+ */
+fn natural_loops(stream: []NumberedInst, order: []u32, reachable: []u32) -> []NaturalLoop {
+    mut out: []NaturalLoop = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= stream.len { break }
+        let ni = stream[i]
+        let t = terminator_target(ni.inst)
+        if t.has && u32_in(reachable, ni.block_id) {
+            if block_pos(order, t.target) <= block_pos(order, ni.block_id) {
+                out = teko::list::push(out, NaturalLoop { header_pt = block_first_point(stream, t.target); latch_pt = ni.point })
+            }
+        }
+        i++
+    }
+    out
+}
+
+/**
+ * next_terminator_point — the smallest point at-or-after `from` whose
+ * instruction is a terminator (the result-pin extension target, §1.2), or
+ * `from` if none follows.
+ *
+ * @param []NumberedInst stream  the numbered stream
+ * @param u32 from  the def point to extend from
+ * @return u32  the terminator point, or `from`
+ */
+fn next_terminator_point(stream: []NumberedInst, from: u32) -> u32 {
+    mut i: u64 = 0
+    loop {
+        if i >= stream.len { break }
+        let ni = stream[i]
+        if ni.point >= from && is_terminator(ni.inst) { return ni.point }
+        i++
+    }
+    from
+}
+
+/**
+ * collect_events — the raw def/use touches of the whole stream, in program
+ * order (a def before its uses at a shared point).
+ *
+ * @param []NumberedInst stream  the numbered stream
+ * @return []RegEvent  every register touch
+ */

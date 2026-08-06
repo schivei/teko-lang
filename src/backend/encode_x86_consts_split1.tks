@@ -1,0 +1,296 @@
+/**
+ * The named x86-64 encoding constants for `encode_x86_64`: the ModRM/SIB/REX
+ * field masks/bits, opcode bytes, and immediate/displacement range bounds the
+ * encoder assembles byte strings from, split out as a sibling of the same
+ * `backend` namespace. Each is named `X86_<ROLE>` (a bit mask/shift/field
+ * value), `X86_OP_<mnemonic>`/`X86_EXT_<mnemonic>` (an opcode byte or ModRM
+ * opcode-extension), or a `REX_`/`MODRM_` field constant; the golden hex
+ * vectors in `encode_x86_64_test.tkt` pin every value.
+ */
+
+
+/**
+ * X86_BYTE_MASK — the low-8-bits mask every byte-narrowing cast in this file
+ * runs through first (all bit-slicing stays in `u32`/`i64`; only this final
+ * `& 0xFF` narrows to `byte`). The first of this file's whole W15 sweep
+ * (crumb S2) of named ModRM/SIB/REX field masks/bits and opcode-byte constants
+ * below: each is named `X86_<ROLE>` (a bit mask/shift/field value) or
+ * `X86_OP_<mnemonic>`/`X86_EXT_<mnemonic>` (an opcode byte or ModRM
+ * opcode-extension), and its value is EXACTLY the x86-64 encoding byte the
+ * corpus's golden hex vectors (`encode_x86_64_test.tkt`) already pin — only
+ * the SOURCE SPELLING changes; every emitted byte stays identical (those
+ * goldens + `diff_c_own.sh` prove it).
+ */
+const X86_BYTE_MASK: u32 = 0xFF to u32
+
+/**
+ * X86_LOW32_MASK — the low-32-bits mask that forms a two's-complement 32-bit
+ * pattern from an `i64` without ever reaching a panicking signed cast (the
+ * imm32/disp32 split and the `rel32` patch's negative-displacement path).
+ */
+const X86_LOW32_MASK: i64 = 0xFFFFFFFF
+
+/**
+ * REX_BASE — the bare REX prefix byte with no W/R/X/B bit set: `rex_x86`'s
+ * base value, and the sentinel `push_rex_x86` compares against to elide a
+ * REX prefix that carries no information.
+ */
+const REX_BASE: u32 = 0x40 to u32
+
+/**
+ * REX_W_SHIFT — the REX byte bit position of the W (64-bit operand size) bit.
+ */
+const REX_W_SHIFT: u32 = 3 to u32
+
+/**
+ * REX_R_SHIFT — the REX byte bit position of the R (ModRM.reg extension) bit.
+ */
+const REX_R_SHIFT: u32 = 2 to u32
+
+/**
+ * REX_X_SHIFT — the REX byte bit position of the X (SIB.index extension) bit.
+ */
+const REX_X_SHIFT: u32 = 1 to u32
+
+/**
+ * REX_W_PREFIX — the bare "REX.W only" prefix byte (`REX_BASE | 1<<REX_W_SHIFT`),
+ * emitted directly wherever an instruction needs the 64-bit operand size but no
+ * register-extension bit (the `divseq`/prologue/epilogue fixed-register forms
+ * that never touch R8..R15).
+ */
+const REX_W_PREFIX: u32 = 0x48 to u32
+
+/**
+ * REX_B_PREFIX — the bare "REX.B only" prefix byte, forced before a `push`/`pop`
+ * of R8..R15 (whose opcode `+rd` field cannot itself carry the high bit).
+ */
+const REX_B_PREFIX: u32 = 0x41 to u32
+
+/**
+ * X86_REG_HIGH_BIT — a physical register id's 4th bit: set for R8..R15/XMM8..15
+ * (`reg_ext_x86`'s test) and, identically, the id range a `push`/`pop` opcode's
+ * `+rd` field must instead route through `REX_B_PREFIX`.
+ */
+const X86_REG_HIGH_BIT: u32 = 0x8 to u32
+
+/**
+ * MODRM_MOD_SHIFT — the ModRM byte bit position of the 2-bit `mod` field.
+ */
+const MODRM_MOD_SHIFT: u32 = 6 to u32
+
+/**
+ * MODRM_MOD_MASK — the 2-bit width mask of the ModRM `mod` field.
+ */
+const MODRM_MOD_MASK: u32 = 0x3 to u32
+
+/**
+ * X86_FIELD3_SHIFT — the bit position shared by ModRM.reg (`modrm_x86`) and
+ * SIB.index (`push_mem_operand_x86`'s forced-SIB byte): both are the middle
+ * 3-bit sub-field of their byte.
+ */
+const X86_FIELD3_SHIFT: u32 = 3 to u32
+
+/**
+ * X86_FIELD3_MASK — the 3-bit field mask shared by ModRM.reg, ModRM.rm, and a
+ * physical register id's low 3 bits (the bits that ride ModRM/SIB/opcode-`+rd`;
+ * the high bit needing a REX extension is masked separately by
+ * `X86_REG_HIGH_BIT`).
+ */
+const X86_FIELD3_MASK: u32 = 0x7 to u32
+
+/**
+ * MODRM_MOD_INDIRECT — the ModRM `mod=00` value: `[base]` with no displacement
+ * (or, with `rm=101`, the RIP-relative escape — see `MODRM_RM_RIP_RELATIVE`).
+ */
+const MODRM_MOD_INDIRECT: u32 = 0 to u32
+
+/**
+ * MODRM_MOD_DISP8 — the ModRM `mod=01` value: `[base+disp8]`.
+ */
+const MODRM_MOD_DISP8: u32 = 1 to u32
+
+/**
+ * MODRM_MOD_DISP32 — the ModRM `mod=10` value: `[base+disp32]`.
+ */
+const MODRM_MOD_DISP32: u32 = 2 to u32
+
+/**
+ * MODRM_MOD_REGISTER — the ModRM `mod=11` value: register-direct addressing
+ * (every reg-reg / reg-only encoding in this file rides this mod value).
+ */
+const MODRM_MOD_REGISTER: u32 = 3 to u32
+
+/**
+ * MODRM_RM_RIP_RELATIVE — the ModRM `rm=101` value under `MODRM_MOD_INDIRECT`:
+ * not a real base register, but the `[rip+disp32]` addressing escape
+ * `encode_lea_rip_x86` relies on (never confused with `X86_REG_RBP_ID`, whose
+ * numeric value coincides but whose meaning does not — RBP addressing always
+ * carries at least a disp8, per `is_rbp` in `push_mem_operand_x86`).
+ */
+const MODRM_RM_RIP_RELATIVE: u32 = 0x5 to u32
+
+/**
+ * X86_REG_RAX_ID — the RAX physical register id (the fixed dividend/quotient
+ * register of `encode_divseq_x86`).
+ */
+const X86_REG_RAX_ID: u32 = 0 to u32
+
+/**
+ * X86_REG_RDX_ID — the RDX physical register id (the fixed high-half/remainder
+ * register of `encode_divseq_x86`).
+ */
+const X86_REG_RDX_ID: u32 = 2 to u32
+
+/**
+ * X86_REG_RSP_ID — the RSP physical register id: `encode_frame_addr_x86`'s
+ * frame base, and — because RSP/R12 share this low-3-bit pattern — the same
+ * value `push_mem_operand_x86` compares a base register against to decide a
+ * SIB byte is required, and the SIB `index=100` ("no index register") field
+ * value it then emits.
+ */
+const X86_REG_RSP_ID: u32 = 4 to u32
+
+/**
+ * X86_REG_RBP_ID — the RBP physical register id: `emit_prologue_x86`'s frame-
+ * pointer save, and — because RBP/R13 share this low-3-bit pattern — the same
+ * value `push_mem_operand_x86` compares a base register against to force at
+ * least a disp8 (mod=00 with this rm would otherwise mean RIP-relative, see
+ * `MODRM_RM_RIP_RELATIVE`).
+ */
+const X86_REG_RBP_ID: u32 = 5 to u32
+
+/**
+ * X86_BYTE_REG_MIN_ID — the register id at and above which a REX prefix is
+ * required to reach the low byte (SIL/DIL/BPL/SPL are ids 4..7, which without
+ * REX alias AH/CH/DH/BH instead; R8..R15 already carry REX for other reasons).
+ * Shared by a byte-store's source register and `SETcc`'s destination.
+ */
+const X86_BYTE_REG_MIN_ID: u32 = 4 to u32
+
+/**
+ * X86_CC_E — the x86 condition-code (`tttn`) field for `MCond::EQ`.
+ */
+const X86_CC_E: u32 = 0x4 to u32
+
+/**
+ * X86_CC_NE — the x86 condition-code field for `MCond::NE`.
+ */
+const X86_CC_NE: u32 = 0x5 to u32
+
+/**
+ * X86_CC_L — the x86 condition-code field for `MCond::LT` (signed less-than).
+ */
+const X86_CC_L: u32 = 0xC to u32
+
+/**
+ * X86_CC_LE — the x86 condition-code field for `MCond::LE` (signed).
+ */
+const X86_CC_LE: u32 = 0xE to u32
+
+/**
+ * X86_CC_G — the x86 condition-code field for `MCond::GT` (signed).
+ */
+const X86_CC_G: u32 = 0xF to u32
+
+/**
+ * X86_CC_GE — the x86 condition-code field for `MCond::GE` (signed).
+ */
+const X86_CC_GE: u32 = 0xD to u32
+
+/**
+ * X86_CC_B — the x86 condition-code field for `MCond::LO` (unsigned below).
+ */
+const X86_CC_B: u32 = 0x2 to u32
+
+/**
+ * X86_CC_BE — the x86 condition-code field for `MCond::LS` (unsigned).
+ */
+const X86_CC_BE: u32 = 0x6 to u32
+
+/**
+ * X86_CC_A — the x86 condition-code field for `MCond::HI` (unsigned above).
+ */
+const X86_CC_A: u32 = 0x7 to u32
+
+/**
+ * X86_CC_AE — the x86 condition-code field for `MCond::HS` (unsigned).
+ */
+const X86_CC_AE: u32 = 0x3 to u32
+
+/**
+ * X86_CC_P — the x86 condition-code field for the PARITY flag SET (the
+ * UCOMISD/UCOMISS "unordered" result — either compared operand is NaN). Not a
+ * `cond_cc_x86` case (the shared `MCond` has no parity member, `B1-fp`); read
+ * directly by `encode_setp_x86`'s raw-cc path.
+ */
+const X86_CC_P: u32 = 0xA to u32
+
+/**
+ * X86_CC_NP — the x86 condition-code field for the PARITY flag CLEAR (the
+ * UCOMISD/UCOMISS "ordered" result).
+ */
+const X86_CC_NP: u32 = 0xB to u32
+
+/**
+ * X86_PREFIX_66 — the `0x66` mandatory SSE prefix: UCOMISD (vs UCOMISS'
+ * no-prefix) and MOVQ/MOVD's GPR/FPR crossing (`B1-fp`). The same byte value
+ * as `X86_OPERAND_SIZE_PREFIX` (the 16-bit integer operand-size override) —
+ * a coincidence of the encoding space, not a shared MEANING, so the float
+ * family names its own constant rather than reusing the integer one.
+ */
+const X86_PREFIX_66: u32 = 0x66 to u32
+
+/**
+ * X86_PREFIX_F2 — the `0xF2` mandatory SSE prefix selecting the scalar
+ * DOUBLE-precision form of a MOVSD/ADDSD/SUBSD/MULSD/DIVSD/CVTSI2SD/
+ * CVTTSD2SI/CVTSD2SS opcode (`B1-fp`).
+ */
+const X86_PREFIX_F2: u32 = 0xF2 to u32
+
+/**
+ * X86_PREFIX_F3 — the `0xF3` mandatory SSE prefix selecting the scalar
+ * SINGLE-precision form of a MOVSS/ADDSS/SUBSS/MULSS/DIVSS/CVTSS2SD opcode
+ * (`B1-fp`).
+ */
+const X86_PREFIX_F3: u32 = 0xF3 to u32
+
+/**
+ * X86_NO_PREFIX — the sentinel `mandatory_prefix`/SSE-prefix value meaning
+ * "emit no prefix byte" (UCOMISS' single-precision form carries none). `0` is
+ * never itself a legal x86 prefix byte, so it is unambiguous as a sentinel.
+ */
+const X86_NO_PREFIX: u32 = 0 to u32
+
+/**
+ * X86_OP_SSE_MOV_LOAD — the `MOVSD`/`MOVSS` reg-from-rm opcode (`0F 10`),
+ * mandatory-prefixed `F2`/`F3`: a scalar float register-register copy or
+ * memory load, reg field is the destination.
+ */
+const X86_OP_SSE_MOV_LOAD: u32 = 0x10 to u32
+
+/**
+ * X86_OP_SSE_MOV_STORE — the `MOVSD`/`MOVSS` rm-from-reg opcode (`0F 11`),
+ * mandatory-prefixed `F2`/`F3`: a scalar float memory store, reg field is the
+ * source.
+ */
+const X86_OP_SSE_MOV_STORE: u32 = 0x11 to u32
+
+/**
+ * X86_OP_SSE_ADD — the `ADDSD`/`ADDSS` opcode (`0F 58`).
+ */
+const X86_OP_SSE_ADD: u32 = 0x58 to u32
+
+/**
+ * X86_OP_SSE_MUL — the `MULSD`/`MULSS` opcode (`0F 59`).
+ */
+const X86_OP_SSE_MUL: u32 = 0x59 to u32
+
+/**
+ * X86_OP_SSE_SUB — the `SUBSD`/`SUBSS` opcode (`0F 5C`).
+ */
+const X86_OP_SSE_SUB: u32 = 0x5C to u32
+
+/**
+ * X86_OP_SSE_DIV — the `DIVSD`/`DIVSS` opcode (`0F 5E`).
+ */
+const X86_OP_SSE_DIV: u32 = 0x5E to u32

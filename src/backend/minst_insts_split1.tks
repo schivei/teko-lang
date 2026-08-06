@@ -1,0 +1,299 @@
+use teko::lir
+
+/**
+ * vreg — a virtual register operand: `id` is an abstract number the A3
+ * allocator later colors.
+ *
+ * @param u32 id  the virtual register's abstract id
+ * @param MRegClass reg_class  which register file (GPR/FPR) it lives in
+ * @return MReg  the virtual register operand
+ */
+pub fn vreg(id: u32, reg_class: MRegClass) -> MReg {
+    MReg { id = id; reg_class = reg_class; is_phys = false }
+}
+
+/**
+ * preg — a physical register operand: `id` is an ISA register number
+ * (x0..x30/SP=31 for GPR, v0..v31 for FPR).
+ *
+ * @param u32 id  the ISA register number
+ * @param MRegClass reg_class  which register file (GPR/FPR) it lives in
+ * @return MReg  the physical register operand
+ */
+pub fn preg(id: u32, reg_class: MRegClass) -> MReg {
+    MReg { id = id; reg_class = reg_class; is_phys = true }
+}
+
+/**
+ * alu_inst — a `dst = a <op> b` instruction (MAlu).
+ *
+ * @param MAluOp op  which ALU mnemonic to emit
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @param MReg dst  the destination register
+ * @param MReg a  the first source register
+ * @param MReg b  the second source register
+ * @return MInst  the built instruction
+ */
+pub fn alu_inst(op: MAluOp, wide: bool, dst: MReg, a: MReg, b: MReg) -> MInst {
+    MAlu { op = op; wide = wide; dst = dst; a = a; b = b }
+}
+
+/**
+ * alu_imm_inst — a `dst = a <op> #imm` instruction (MAluImm).
+ *
+ * @param MAluOp op  which ALU mnemonic to emit
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @param MReg dst  the destination register
+ * @param MReg a  the source register
+ * @param i64 imm  the immediate operand
+ * @return MInst  the built instruction
+ */
+pub fn alu_imm_inst(op: MAluOp, wide: bool, dst: MReg, a: MReg, imm: i64) -> MInst {
+    MAluImm { op = op; wide = wide; dst = dst; a = a; imm = imm }
+}
+
+/**
+ * msub_inst — a `dst = c - a * b` instruction (MMSub), the second half of
+ * an `IRemS`/`IRemU` lowering.
+ *
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @param MReg dst  the destination register
+ * @param MReg a  the quotient register
+ * @param MReg b  the divisor register
+ * @param MReg c  the dividend register
+ * @return MInst  the built instruction
+ */
+pub fn msub_inst(wide: bool, dst: MReg, a: MReg, b: MReg, c: MReg) -> MInst {
+    MMSub { wide = wide; dst = dst; a = a; b = b; c = c }
+}
+
+/**
+ * neg_inst — a `dst = -a` instruction (MNeg).
+ *
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @param MReg dst  the destination register
+ * @param MReg a  the source register
+ * @return MInst  the built instruction
+ */
+pub fn neg_inst(wide: bool, dst: MReg, a: MReg) -> MInst {
+    MNeg { wide = wide; dst = dst; a = a }
+}
+
+/**
+ * mvn_inst — a `dst = ~a` instruction (MMvn).
+ *
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @param MReg dst  the destination register
+ * @param MReg a  the source register
+ * @return MInst  the built instruction
+ */
+pub fn mvn_inst(wide: bool, dst: MReg, a: MReg) -> MInst {
+    MMvn { wide = wide; dst = dst; a = a }
+}
+
+/**
+ * falu_inst — a float `dst = a <op> b` instruction (MFAlu).
+ *
+ * @param MFAluOp op  which float ALU mnemonic to emit
+ * @param bool dbl  true for the f64 D form, false for f32 S
+ * @param MReg dst  the destination register
+ * @param MReg a  the first source register
+ * @param MReg b  the second source register
+ * @return MInst  the built instruction
+ */
+pub fn falu_inst(op: MFAluOp, dbl: bool, dst: MReg, a: MReg, b: MReg) -> MInst {
+    MFAlu { op = op; dbl = dbl; dst = dst; a = a; b = b }
+}
+
+/**
+ * fneg_inst — a float `dst = -a` instruction (MFNeg).
+ *
+ * @param bool dbl  true for the f64 D form, false for f32 S
+ * @param MReg dst  the destination register
+ * @param MReg a  the source register
+ * @return MInst  the built instruction
+ */
+pub fn fneg_inst(dbl: bool, dst: MReg, a: MReg) -> MInst {
+    MFNeg { dbl = dbl; dst = dst; a = a }
+}
+
+/**
+ * cmp_inst — an integer compare instruction (MCmp), setting the flags from
+ * `a` and `b` with no destination register.
+ *
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @param MReg a  the first compared register
+ * @param MReg b  the second compared register
+ * @return MInst  the built instruction
+ */
+pub fn cmp_inst(wide: bool, a: MReg, b: MReg) -> MInst {
+    MCmp { wide = wide; a = a; b = b }
+}
+
+/**
+ * cmp_imm_inst — an integer compare-against-immediate instruction
+ * (MCmpImm).
+ *
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @param MReg a  the compared register
+ * @param i64 imm  the immediate compared against
+ * @return MInst  the built instruction
+ */
+pub fn cmp_imm_inst(wide: bool, a: MReg, imm: i64) -> MInst {
+    MCmpImm { wide = wide; a = a; imm = imm }
+}
+
+/**
+ * fcmp_inst — a float compare instruction (MFCmp).
+ *
+ * @param bool dbl  true for the f64 D form, false for f32 S
+ * @param MReg a  the first compared register
+ * @param MReg b  the second compared register
+ * @return MInst  the built instruction
+ */
+pub fn fcmp_inst(dbl: bool, a: MReg, b: MReg) -> MInst {
+    MFCmp { dbl = dbl; a = a; b = b }
+}
+
+/**
+ * cset_inst — a `dst = (cond) ? 1 : 0` instruction (MCSet), materializing a
+ * preceding compare as a plain value.
+ *
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @param MReg dst  the destination register
+ * @param MCond cond  the condition code tested
+ * @return MInst  the built instruction
+ */
+pub fn cset_inst(wide: bool, dst: MReg, cond: MCond) -> MInst {
+    MCSet { wide = wide; dst = dst; cond = cond }
+}
+
+/**
+ * movz_inst — a `dst = imm16 << shift` instruction (MMovZ), one lane of an
+ * integer literal's materialization sequence.
+ *
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @param MReg dst  the destination register
+ * @param u32 imm16  the 16-bit lane value
+ * @param u32 shift  the lane's bit position (0/16/32/48)
+ * @return MInst  the built instruction
+ */
+pub fn movz_inst(wide: bool, dst: MReg, imm16: u32, shift: u32) -> MInst {
+    MMovZ { wide = wide; dst = dst; imm16 = imm16; shift = shift }
+}
+
+/**
+ * movk_inst — a `dst |= imm16 << shift` instruction (MMovK), a follow-up
+ * lane of an integer literal's materialization sequence.
+ *
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @param MReg dst  the destination register
+ * @param u32 imm16  the 16-bit lane value
+ * @param u32 shift  the lane's bit position (0/16/32/48)
+ * @return MInst  the built instruction
+ */
+pub fn movk_inst(wide: bool, dst: MReg, imm16: u32, shift: u32) -> MInst {
+    MMovK { wide = wide; dst = dst; imm16 = imm16; shift = shift }
+}
+
+/**
+ * movn_inst — a `dst = ~(imm16 << shift)` instruction (MMovN), the
+ * inverted-literal materialization form.
+ *
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @param MReg dst  the destination register
+ * @param u32 imm16  the 16-bit lane value (before inversion)
+ * @param u32 shift  the lane's bit position (0/16/32/48)
+ * @return MInst  the built instruction
+ */
+pub fn movn_inst(wide: bool, dst: MReg, imm16: u32, shift: u32) -> MInst {
+    MMovN { wide = wide; dst = dst; imm16 = imm16; shift = shift }
+}
+
+/**
+ * fmov_inst — a `dst = src` instruction across the GPR/FPR boundary or
+ * between two FPRs (MFMov).
+ *
+ * @param bool dbl  true for the f64 D form, false for f32 S
+ * @param MReg dst  the destination register
+ * @param MReg src  the source register
+ * @return MInst  the built instruction
+ */
+pub fn fmov_inst(dbl: bool, dst: MReg, src: MReg) -> MInst {
+    MFMov { dbl = dbl; dst = dst; src = src }
+}
+
+/**
+ * mov_inst — a `dst = src` instruction between two GPRs (MMov).
+ *
+ * @param bool wide  true for the 64-bit X form, false for 32-bit W
+ * @param MReg dst  the destination register
+ * @param MReg src  the source register
+ * @return MInst  the built instruction
+ */
+pub fn mov_inst(wide: bool, dst: MReg, src: MReg) -> MInst {
+    MMov { wide = wide; dst = dst; src = src }
+}
+
+/**
+ * ext_inst — a narrow sign/zero-extend instruction (MExt).
+ *
+ * @param MExtOp op  which extend mnemonic to emit
+ * @param MReg dst  the destination register
+ * @param MReg a  the source register
+ * @return MInst  the built instruction
+ */
+pub fn ext_inst(op: MExtOp, dst: MReg, a: MReg) -> MInst {
+    MExt { op = op; dst = dst; a = a }
+}
+
+/**
+ * cvt_inst — an int/float conversion instruction (MCvt).
+ *
+ * @param MCvtOp op  which conversion mnemonic to emit
+ * @param MReg dst  the destination register
+ * @param MReg a  the source register
+ * @param bool src_wide  whether `a` is the 64-bit form of its register file (X/D)
+ * @param bool dst_wide  whether `dst` is the 64-bit form of its register file (X/D)
+ * @return MInst  the built instruction
+ */
+pub fn cvt_inst(op: MCvtOp, dst: MReg, a: MReg, src_wide: bool, dst_wide: bool) -> MInst {
+    MCvt { op = op; dst = dst; a = a; src_wide = src_wide; dst_wide = dst_wide }
+}
+
+/**
+ * load_inst — a memory-load instruction (MLoad).
+ *
+ * @param MMemSize size  the access width
+ * @param bool sign  true for a sign-extending narrow load
+ * @param MReg dst  the destination register
+ * @param MMem mem  the loaded address
+ * @return MInst  the built instruction
+ */
+pub fn load_inst(size: MMemSize, sign: bool, dst: MReg, mem: MMem) -> MInst {
+    MLoad { size = size; sign = sign; dst = dst; mem = mem }
+}
+
+/**
+ * store_inst — a memory-store instruction (MStore).
+ *
+ * @param MMemSize size  the access width
+ * @param MReg src  the register holding the stored value
+ * @param MMem mem  the stored-to address
+ * @return MInst  the built instruction
+ */
+pub fn store_inst(size: MMemSize, src: MReg, mem: MMem) -> MInst {
+    MStore { size = size; src = src; mem = mem }
+}
+
+/**
+ * fspill_inst — a one-instruction FPR spill store or reload (MFSpill).
+ *
+ * @param MReg reg  the FPR saved, or reloaded into
+ * @param u64 slot  the absolute frame-slot index of the spill slot
+ * @param bool is_load  true for the reload, false for the spill store
+ * @return MInst  the built instruction
+ */
+pub fn fspill_inst(reg: MReg, slot: u64, is_load: bool) -> MInst {
+    MFSpill { reg = reg; slot = slot; is_load = is_load }
+}

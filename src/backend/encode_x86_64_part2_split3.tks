@@ -1,0 +1,224 @@
+/**
+ * out_arg_slots_of_inst_x86 — the outgoing stack-argument slot count one
+ * instruction implies: `index + 1` for an `MOutArgX86`, 0 for everything else.
+ *
+ * @param MInstX86 i  the instruction to inspect
+ * @return u32  the implied slot count
+ */
+fn out_arg_slots_of_inst_x86(i: MInstX86) -> u32 {
+    match i {
+        MOutArgX86 as x => x.index + (1 to u32)
+        _ => 0 to u32
+    }
+}
+
+/**
+ * compute_frame_layout_x86 — build a function's `FrameLayoutX86`: re-derive the
+ * callee-saved save-set by scanning the physical `MFuncX86`, lay out the frame
+ * slots honoring each `LAlloca`'s alignment (the neutral `compute_slot_offsets`),
+ * reserve the ARGUMENT-PASSING region at the very bottom of the frame — the
+ * Win64 caller-reserved shadow space (`shadow_bytes_x86` — 32 for a calling Win64
+ * function, 0 for every other ABI) plus the outgoing stack arguments
+ * (`out_arg_bytes_x86`, `B1-args`) — size the `sub rsp` region for 16-byte
+ * call-boundary alignment, and shift every slot offset above that
+ * argument-passing region so `MFrameAddrX86` resolves to `lea dst, [rsp+off]`.
+ *
+ * The argument-passing region sits at RSP and NOTHING may sit below it: both
+ * ABIs define a stack argument's address relative to the caller's RSP at the
+ * call, and Win64 lets the callee write the 32 shadow bytes at that same RSP.
+ * That is why the callee-saved pushes now precede the `sub rsp` (they used to
+ * follow it, which put them at RSP and, under Win64, in the callee's way) — the
+ * displacement is identical either way, so a function reserving no argument
+ * region and saving no register keeps byte-identical bytes.
+ *
+ * A pure side-table pass — it never mutates the block stream, so the interp
+ * oracle stays valid on the pre-encode function. The x86 mirror of arm64's
+ * `compute_frame_layout`; frames beyond the imm32 `sub` field are caught at
+ * prologue emission (`B1-bigframe`, near-N/A), not here. Both 32 and the
+ * 16-rounded outgoing region are 16-aligned, so neither reservation perturbs the
+ * alignment residue (§4.2).
+ *
+ * @param AbiDescriptor abi  the register file (callee-saved partition + shadow space)
+ * @param MFuncX86 f  the fully-physical function
+ * @return FrameLayoutX86  the resolved frame side-table
+ */
+pub fn compute_frame_layout_x86(abi: AbiDescriptor, f: MFuncX86) -> FrameLayoutX86 {
+    let saved = collect_callee_saved_x86(abi, f)
+    let slots = compute_slot_offsets(f.frame)
+    let shadow = shadow_bytes_x86(abi, f)
+    let arg_region = shadow + out_arg_bytes_x86(f)
+    let fpr_region = (saved.fpr.len to u32) * X86_XMM_SAVE_BYTES
+    let size = frame_sub_size_x86(slots.slots_size + arg_region + fpr_region, (saved.gpr.len to u32))
+    let slot_offsets = shift_slot_offsets_x86(slots.offsets, arg_region + fpr_region)
+    FrameLayoutX86 {
+        size = size
+        saved_gpr = saved.gpr
+        saved_fpr = saved.fpr
+        slot_offsets = slot_offsets
+        call_align = needs_call_align_x86(f)
+        out_arg_base = shadow
+        fpr_save_base = arg_region
+        caller_shadow = abi.shadow_space
+    }
+}
+
+/**
+ * frame_is_framed_x86 — whether a resolved frame needs a prologue/epilogue:
+ * true when the `sub rsp` region is non-empty, OR any callee-saved register is
+ * pushed, OR the frame is otherwise empty but still needs the minimal
+ * alignment-only prologue `needs_call_align_x86` names (`layout.call_align`).
+ * A framed function with an even callee-saved count and no slots has a zero
+ * `sub` amount yet is still framed (the pushes carry it), so this is NOT
+ * simply `size>0`.
+ *
+ * @param FrameLayoutX86 layout  the resolved frame
+ * @return bool  true iff a prologue/epilogue must be emitted
+ */
+fn frame_is_framed_x86(layout: FrameLayoutX86) -> bool {
+    let n_saved = (layout.saved_gpr.len + layout.saved_fpr.len) to u32
+    (layout.size > (0 to u32)) || (n_saved > (0 to u32)) || layout.call_align
+}
+
+/**
+ * honest_bigframe_x86 — the named honest-stop for a frame whose `sub rsp` amount
+ * overruns the signed 32-bit immediate field. x86's `sub rsp,imm32` covers a 2 GB
+ * frame, so this is an internal-invariant guard reached only by a pathological
+ * (constructed) frame, never a real function (named for symmetry with arm64's
+ * `A4-bigframe`, per the B1 plan §9).
+ *
+ * @return error  the `B1-bigframe` named honest-stop
+ */
+fn honest_bigframe_x86() -> error {
+    error { message = "B1-bigframe: frame size exceeds the signed imm32 sub rsp field (near-N/A — sub rsp,imm32 covers 2GB)" }
+}
+
+/**
+ * emit_mov_rbp_rsp_x86 — append `mov rbp, rsp` (`REX.W 89 /r`, `48 89 E5`), the
+ * frame-pointer setup that follows `push rbp` in the prologue.
+ *
+ * @param []byte buf  the buffer to extend
+ * @return []byte  `buf` followed by the three prologue bytes
+ */
+fn emit_mov_rbp_rsp_x86(buf: []byte) -> []byte {
+    let b = push_byte_x86(buf, REX_W_PREFIX)
+    push_byte_x86(push_byte_x86(b, X86_OP_MOV_RM_R), X86_MODRM_MOV_RBP_RSP)
+}
+
+/**
+ * emit_push_reg_x86 — append `push r64` (`50+rd`, with a `REX.B` prefix `0x41`
+ * when the id is R8..R15): the callee-saved save and the frame-pointer save.
+ *
+ * @param []byte buf  the buffer to extend
+ * @param u32 id  the physical register id to push
+ * @return []byte  `buf` followed by the push encoding
+ */
+fn emit_push_reg_x86(buf: []byte, id: u32) -> []byte {
+    let b = if (id & X86_REG_HIGH_BIT) != (0 to u32) { push_byte_x86(buf, REX_B_PREFIX) } else { buf }
+    push_byte_x86(b, X86_OP_PUSH_R64 + (id & X86_FIELD3_MASK))
+}
+
+/**
+ * emit_pop_reg_x86 — append `pop r64` (`58+rd`, with a `REX.B` prefix `0x41`
+ * when the id is R8..R15): the callee-saved restore counterpart of
+ * `emit_push_reg_x86`.
+ *
+ * @param []byte buf  the buffer to extend
+ * @param u32 id  the physical register id to pop
+ * @return []byte  `buf` followed by the pop encoding
+ */
+fn emit_pop_reg_x86(buf: []byte, id: u32) -> []byte {
+    let b = if (id & X86_REG_HIGH_BIT) != (0 to u32) { push_byte_x86(buf, REX_B_PREFIX) } else { buf }
+    push_byte_x86(b, X86_OP_POP_R64 + (id & X86_FIELD3_MASK))
+}
+
+/**
+ * emit_sub_rsp_x86 — append the stack-claim `sub rsp, #amount`: nothing for a
+ * zero amount (an even callee-saved count needs no extra realignment), the
+ * short `48 83 EC ib` form for an amount under 128, else the wide
+ * `48 81 EC id` form (little-endian imm32). An amount beyond the signed imm32
+ * field raises the `B1-bigframe` honest-stop.
+ *
+ * @param []byte buf  the buffer to extend
+ * @param u32 amount  the byte amount to subtract from RSP
+ * @return []byte | error  the extended buffer, or the `B1-bigframe` honest-stop
+ */
+fn emit_sub_rsp_x86(buf: []byte, amount: u32) -> []byte | error {
+    if amount == (0 to u32) { return buf }
+    if amount < X86_SUB_RSP_IMM8_MAX {
+        let b = push_byte_x86(push_byte_x86(push_byte_x86(buf, REX_W_PREFIX), X86_OP_GRP1_IMM8), X86_MODRM_SUB_RSP)
+        return push_byte_x86(b, amount)
+    }
+    if amount > (X86_IMM32_MAX to u32) { return honest_bigframe_x86() }
+    let b = push_byte_x86(push_byte_x86(push_byte_x86(buf, REX_W_PREFIX), X86_OP_GRP1_IMM32), X86_MODRM_SUB_RSP)
+    emit_u32_le(b, amount)
+}
+
+/**
+ * emit_add_rsp_x86 — append the stack-release `add rsp, #amount`, the teardown
+ * counterpart of `emit_sub_rsp_x86` and its exact encoding mirror (same `48 83`/
+ * `48 81` group-1 opcodes, `/0` instead of `/5`): nothing for a zero amount, the
+ * short imm8 form under 128, else the wide imm32 form. It raises no
+ * `B1-bigframe` — an amount the prologue's `sub` already accepted fits here by
+ * construction, so this takes the imm32 form for anything larger rather than
+ * duplicating a guard that cannot fire (`B1-args`).
+ *
+ * @param []byte buf  the buffer to extend
+ * @param u32 amount  the byte amount to add back to RSP
+ * @return []byte  the extended buffer
+ */
+fn emit_add_rsp_x86(buf: []byte, amount: u32) -> []byte {
+    if amount == (0 to u32) { return buf }
+    if amount < X86_SUB_RSP_IMM8_MAX {
+        let b = push_byte_x86(push_byte_x86(push_byte_x86(buf, REX_W_PREFIX), X86_OP_GRP1_IMM8), X86_MODRM_ADD_RSP)
+        return push_byte_x86(b, amount)
+    }
+    let b = push_byte_x86(push_byte_x86(push_byte_x86(buf, REX_W_PREFIX), X86_OP_GRP1_IMM32), X86_MODRM_ADD_RSP)
+    emit_u32_le(b, amount)
+}
+
+/**
+ * emit_saved_fpr_stores_x86 — save (or, when `reload`, restore) every
+ * callee-saved XMM the frame lists, one `movaps [rsp+off], xmm` / `movaps xmm,
+ * [rsp+off]` per register at its own 16-byte slot in the frame's XMM-save region
+ * (`fpr_save_base + 16*k`, ascending id order). This is the whole content of the
+ * former `B3-xmm-callee-saved` honest-stop: Win64 declares XMM6..XMM15
+ * nonvolatile, so a float value the allocator parked in one of them across a call
+ * must be preserved by us, and `movaps` (not `movsd`) is the right instruction
+ * because the ABI's promise covers all 128 bits, not the scalar low lane our own
+ * code happens to use. SysV lists every XMM as caller-saved, so `saved_fpr` is
+ * empty there and this appends nothing — the SysV bytes stay identical.
+ *
+ * The XMM-save region is 16-aligned by construction: the frame's total
+ * displacement is a multiple of 16 (`frame_sub_size_x86`) and the region sits
+ * above the likewise 16-aligned argument-passing region, so `movaps`' alignment
+ * requirement is met without a runtime check.
+ *
+ * @param []byte buf  the buffer to extend
+ * @param FrameLayoutX86 layout  the resolved frame
+ * @param bool reload  true to emit the restoring loads, false the saving stores
+ * @return []byte  `buf` followed by the save/restore encodings
+ */
+fn emit_saved_fpr_stores_x86(buf: []byte, layout: FrameLayoutX86, reload: bool) -> []byte {
+    mut b = buf
+    mut i: u64 = 0
+    loop {
+        if i >= layout.saved_fpr.len { break }
+        let off = layout.fpr_save_base + ((i to u32) * X86_XMM_SAVE_BYTES)
+        b = append_bytes(b, emit_movaps_frame_x86(layout.saved_fpr[i], off, reload).bytes)
+        i++
+    }
+    b
+}
+
+/**
+ * emit_movaps_frame_x86 — one `movaps` between XMM register `id` and the frame
+ * byte offset `off` from RSP: the store form (`0F 29`) or, when `reload`, the load
+ * form (`0F 28`). Routed through `emit_mem_op_x86` so the RSP base's mandatory SIB
+ * byte and the disp8/disp32 choice are the SAME code every other frame access
+ * uses (`B3-xmm-callee-saved`).
+ *
+ * @param u32 id  the XMM register id to save or restore
+ * @param u32 off  the RSP-relative byte offset of its 16-byte slot
+ * @param bool reload  true for the load form, false for the store form
+ * @return EncInstX86  the encoded instruction
+ */

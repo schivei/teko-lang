@@ -1,0 +1,144 @@
+/**
+ * ar_symtab_data_size — the byte length of the GNU symbol-table member's DATA
+ * (excluding its own 60-byte header): the 4-byte count, one 4-byte offset per
+ * symbol, then every symbol's NUL-terminated name — computable BEFORE any
+ * member's file offset is known, since it depends only on symbol names/count,
+ * which is exactly why the two-pass layout (`emit_ar_archive`) can size this
+ * member first and only then place the real members after it.
+ *
+ * @param []ArSymbol symbols  the archive's exported-symbol index
+ * @return u32  the symbol-table member's unpadded data byte length
+ */
+fn ar_symtab_data_size(symbols: []ArSymbol) -> u32 {
+    mut total: u32 = (4 to u32) + (symbols.len to u32) * (4 to u32)
+    mut i: u64 = 0
+    loop {
+        if i >= symbols.len { break }
+        total = total + (symbols[i].name.len to u32) + (1 to u32)
+        i++
+    }
+    total
+}
+
+/**
+ * build_ar_symtab_data — the GNU symbol-table member's DATA: the big-endian
+ * symbol count, then each symbol's DEFINING member's real file offset
+ * (`member_offsets[symbols[i].member]`, big-endian), then every symbol's
+ * NUL-terminated name — in that fixed three-block order, symbol order
+ * preserved within each block.
+ *
+ * @param []ArSymbol symbols  the archive's exported-symbol index
+ * @param []u32 member_offsets  each member's own header file offset, member order
+ * @return []byte  the symbol-table member's unpadded data bytes
+ */
+fn build_ar_symtab_data(symbols: []ArSymbol, member_offsets: []u32) -> []byte {
+    mut b: []byte = emit_u32_be(teko::list::empty(), symbols.len to u32)
+    mut i: u64 = 0
+    loop {
+        if i >= symbols.len { break }
+        b = emit_u32_be(b, member_offsets[symbols[i].member])
+        i++
+    }
+    i = 0
+    loop {
+        if i >= symbols.len { break }
+        b = emit_str_bytes(b, symbols[i].name)
+        b = teko::list::push(b, 0 to byte)
+        i++
+    }
+    b
+}
+
+/**
+ * emit_ar_archive — assemble a complete GNU-format `.a` static archive: the
+ * 8-byte global header, the GNU symbol-table member (`"/"`, indexing every
+ * `ArSymbol` against its defining member's real file offset), then every real
+ * `ArMember` in list order. A two-pass layout: the symbol table's OWN size
+ * depends only on the symbol names/count (`ar_symtab_data_size`), so the first
+ * real member's file offset — and from it, every subsequent member's offset
+ * (`ar_member_offsets`) — is known BEFORE the symbol table's per-symbol offsets
+ * are resolved (`build_ar_symtab_data`), letting the single forward pass below
+ * emit correct offsets with no backpatching. Consumable directly by `ar t`
+ * (lists members), `nm`/the GNU symbol index (finds exported symbols without
+ * scanning every member), and the system `ld` (pulls in a member once any of
+ * its indexed symbols is referenced) — the KP16 kill-C static-archive writer,
+ * own-native, no C step anywhere in the pipeline.
+ *
+ * @param []ArMember members  the archive's members, in emission order
+ * @param []ArSymbol symbols  the exported-symbol index (each naming its
+ *        defining member by 0-based list index)
+ * @return []byte | error  the finished `.a` archive bytes, or an honest-stop
+ * @throws  when a member's name does not fit `ar_member_name_field`'s short-name budget
+ */
+pub fn emit_ar_archive(members: []ArMember, symbols: []ArSymbol) -> []byte | error {
+    let symtab_size = ar_symtab_data_size(symbols)
+    let symtab_total = AR_HEADER_SIZE + symtab_size + ar_even_pad_len(symtab_size)
+    let first_member_offset = (AR_GLOBAL_HEADER.len to u32) + symtab_total
+    let offsets = ar_member_offsets(first_member_offset, members)
+    let symtab_data = build_ar_symtab_data(symbols, offsets)
+    mut b: []byte = teko::list::empty()
+    b = append_bytes(b, AR_GLOBAL_HEADER)
+    b = emit_ar_member(b, ar_pad_right(AR_SYMTAB_NAME, AR_NAME_WIDTH), symtab_data, AR_MODE_SPECIAL)
+    mut i: u64 = 0
+    loop {
+        if i >= members.len { break }
+        let name_field = match ar_member_name_field(members[i].name) { str as s => s; error as e => return e }
+        b = emit_ar_member(b, name_field, members[i].data, AR_MODE_REGULAR)
+        i++
+    }
+    b
+}
+
+/**
+ * global_symbol_names — the exported (defined, non-local) symbol names of a
+ * module's neutral `Symbol` list, in list order — the archive's public symbol
+ * index for a single-member whole-program `.a`, since the whole checked
+ * program lowers to exactly one relocatable object (#385 A4-5) and so is the
+ * archive's ENTIRE member list.
+ *
+ * @param []Symbol symbols  the module's neutral symbol list
+ * @return []str  every defined, non-local symbol's name, in list order
+ */
+fn global_symbol_names(symbols: []Symbol) -> []str {
+    mut out: []str = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= symbols.len { break }
+        let s = symbols[i]
+        if s.defined && !s.local { out = teko::list::push(out, s.name) }
+        i++
+    }
+    out
+}
+
+/**
+ * emit_static_archive — wrap ONE whole-program relocatable object (`obj_name`/
+ * `obj_bytes`) into a single-member GNU-format `.a` static archive, indexing
+ * every one of `symbols`' defined, non-local (globally-visible) entries against
+ * that lone member — the KP16 kill-C static-archive entry point
+ * (`src/build/project.tks`'s `Artifact::Static` path calls this once per ELF
+ * build, own-native, no C step). Format-agnostic in its INPUT (`obj_bytes` may
+ * be any own-emitted relocatable object), but the CONTAINER it writes is GNU ar
+ * — the format `scripts/check_ar_elf.sh`'s `ar`/`nm`/`ld` cross-check (and every
+ * ELF-hosting `ld`) expects; a Mach-O/COFF caller needing the BSD `__.SYMDEF` or
+ * MS two-linker-member convention uses `objfile_ar_macho.tks`/`objfile_ar_coff.tks`
+ * instead.
+ *
+ * @param str obj_name  the member's bare on-disk name (<=15 bytes, `"<stem>.o"`)
+ * @param []byte obj_bytes  the object file's bytes (own-native emitted)
+ * @param []Symbol symbols  the module's neutral symbol list (for the exported-symbol index)
+ * @return []byte | error  the finished `.a` archive bytes, or an honest-stop
+ * @throws  when `obj_name` does not fit the GNU short-name form's 15-byte budget
+ */
+pub fn emit_static_archive(obj_name: str, obj_bytes: []byte, symbols: []Symbol) -> []byte | error {
+    let member = ArMember { name = obj_name; data = obj_bytes }
+    let names = global_symbol_names(symbols)
+    mut ar_symbols: []ArSymbol = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= names.len { break }
+        ar_symbols = teko::list::push(ar_symbols, ArSymbol { name = names[i]; member = 0 to u64 })
+        i++
+    }
+    emit_ar_archive([member], ar_symbols)
+}
