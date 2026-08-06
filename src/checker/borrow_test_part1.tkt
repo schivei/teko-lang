@@ -1,0 +1,209 @@
+use teko::parser
+
+/**
+ * A scalar `i64` type — a value that can never carry a reachable `Reference`.
+ *
+ * The SP-1 (#389/#498) unit suite lives beside `borrow.tks` so it reaches both the PUBLIC query
+ * surface (`type_reaches_ref` / `fn_borrow_summary` / the `BorrowSummaryEnv` builders) and every
+ * private helper the two pure queries are built from, proving each lattice/walk step in isolation
+ * on hand-built `Type`/`TAST` input — mirroring `spine_test.tkt`'s own methodology.
+ *
+ * @return the `i64` primitive type
+ */
+fn bw_i64() -> Type { Prim { kind = PrimKind::I64 } }
+
+/**
+ * The `bool` primitive type.
+ *
+ * @return the `bool` primitive type
+ */
+fn bw_bool() -> Type { Prim { kind = PrimKind::Bool } }
+
+/**
+ * A `Reference` type wrapping `inner`.
+ *
+ * @param inner  the referenced type
+ * @return       `Reference { inner = inner }`
+ */
+fn bw_ref(inner: Type) -> Type { Reference { inner = inner } }
+
+/**
+ * A `Named` (user struct/class/trait/alias/…) type by bare name.
+ *
+ * @param name  the type's registered name
+ * @return      `Named { name = name }`
+ */
+fn bw_named(name: str) -> Type { Named { name = name } }
+
+/**
+ * A function (closure) TYPE with the given params/return — `variadic`/`param_names`/`defaults`
+ * carry inert defaults (never read by `type_reaches_ref`/`fn_borrow_summary`).
+ *
+ * @param params  the function type's parameter types
+ * @param ret     the function type's return type
+ * @return        the `Func` type
+ */
+fn bw_func_type(params: []Type, ret: Type) -> Type {
+    Func { params = params; ret = ret; variadic = false; param_names = teko::list::empty(); n_required = params.len; defaults = teko::list::empty() }
+}
+
+/**
+ * A single-segment syntactic path.
+ *
+ * @param name  the segment name
+ * @return      a `parser::Path` with one segment
+ */
+fn bw_path(name: str) -> parser::Path {
+    parser::Path { segments = teko::list::push(teko::list::empty(), parser::Segment { name = name }) }
+}
+
+/**
+ * A plain named-type syntactic annotation (no generic args).
+ *
+ * @param name  the annotated type's name
+ * @return      a `parser::NamedType` annotation
+ */
+fn bw_named_ann(name: str) -> parser::TypeExpr {
+    parser::NamedType { path = bw_path(name); args = teko::list::empty() }
+}
+
+/**
+ * A `Ref<inner_name>` syntactic annotation.
+ *
+ * @param inner_name  the referenced type's name
+ * @return            a `parser::NamedType` headed `Ref` with one type argument
+ */
+fn bw_ref_ann(inner_name: str) -> parser::TypeExpr {
+    parser::NamedType { path = bw_path("Ref"); args = teko::list::push(teko::list::empty(), bw_named_ann(inner_name)) }
+}
+
+/**
+ * One struct/class/trait field declaration, always `pub`/non-`intern` (the field's own visibility
+ * is irrelevant to reachability).
+ *
+ * @param name      the field's name
+ * @param type_ann  the field's syntactic type annotation
+ * @return          a `parser::Field`
+ */
+fn bw_field(name: str, type_ann: parser::TypeExpr) -> parser::Field {
+    parser::Field { name = name; type_ann = type_ann; vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = "" }
+}
+
+/**
+ * A `TypeDecl` shell with the given body and every other field at its inert default (private,
+ * undocumented, no DI, no unsafe/must_free marker) — the shape every `bw_*_decl` builder shares.
+ *
+ * @param name  the declared type's name
+ * @param body  its `TypeBody`
+ * @return      the `TypeDecl`
+ */
+fn bw_decl(name: str, body: parser::TypeBody) -> parser::TypeDecl {
+    parser::TypeDecl { name = name; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = body; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 0; col = 0; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""; is_unsafe = false; must_free = false }
+}
+
+/**
+ * A `type Name = struct { fields }` declaration.
+ *
+ * @param name    the struct's name
+ * @param fields  its fields
+ * @return        the `TypeDecl`
+ */
+fn bw_struct_decl(name: str, fields: []parser::Field) -> parser::TypeDecl {
+    bw_decl(name, parser::StructBody { fields = fields; methods = teko::list::empty(); implements = teko::list::empty(); consts = teko::list::empty() })
+}
+
+/**
+ * A `type Name = class [Base] { fields }` declaration.
+ *
+ * @param name       the class's name
+ * @param fields     its OWN fields (excluding any inherited from `base_name`)
+ * @param has_base   does it declare a base class?
+ * @param base_name  the base class's name (valid iff `has_base`)
+ * @return           the `TypeDecl`
+ */
+fn bw_class_decl(name: str, fields: []parser::Field, has_base: bool, base_name: str) -> parser::TypeDecl {
+    bw_decl(name, parser::ClassBody { kind = parser::ClassKind::Sealed; has_base = has_base; base_name = base_name; has_base_binding = false; base_binding_name = ""; implements = teko::list::empty(); fields = fields; methods = teko::list::empty(); consts = teko::list::empty() })
+}
+
+/**
+ * A `type Name = trait { fields }` declaration.
+ *
+ * @param name    the trait's name
+ * @param fields  its fields
+ * @return        the `TypeDecl`
+ */
+fn bw_trait_decl(name: str, fields: []parser::Field) -> parser::TypeDecl {
+    bw_decl(name, parser::TraitBody { fields = fields; methods = teko::list::empty(); consts = teko::list::empty() })
+}
+
+/**
+ * A `type Name = variant M1 | M2 | …` union declaration.
+ *
+ * @param name     the variant's name
+ * @param members  its member type annotations
+ * @return         the `TypeDecl`
+ */
+fn bw_variant_decl(name: str, members: []parser::TypeExpr) -> parser::TypeDecl {
+    bw_decl(name, parser::VariantBody { type_expr = parser::UnionType { members = members } })
+}
+
+/**
+ * A `type Name = enum { … }` declaration (member names are irrelevant to reachability).
+ *
+ * @param name  the enum's name
+ * @return      the `TypeDecl`
+ */
+fn bw_enum_decl(name: str) -> parser::TypeDecl {
+    bw_decl(name, parser::EnumBody { members = teko::list::empty() })
+}
+
+/**
+ * A `type Name = flags { … }` declaration.
+ *
+ * @param name  the flags type's name
+ * @return      the `TypeDecl`
+ */
+fn bw_flags_decl(name: str) -> parser::TypeDecl {
+    bw_decl(name, parser::FlagsBody { members = teko::list::empty(); values = teko::list::empty() })
+}
+
+/**
+ * A `extern type Name` opaque-handle declaration.
+ *
+ * @param name  the extern type's name
+ * @return      the `TypeDecl`
+ */
+fn bw_extern_decl(name: str) -> parser::TypeDecl {
+    bw_decl(name, parser::ExternBody { })
+}
+
+/**
+ * A `type Name = interface { … }` declaration.
+ *
+ * @param name  the interface's name
+ * @return      the `TypeDecl`
+ */
+fn bw_iface_decl(name: str) -> parser::TypeDecl {
+    bw_decl(name, parser::InterfaceBody { extends = teko::list::empty(); methods = teko::list::empty() })
+}
+
+/**
+ * A `TypeTable` registering exactly one declaration under its own name, at the root namespace.
+ *
+ * @param decl  the declaration to register
+ * @return      a one-entry `TypeTable`
+ */
+fn bw_table1(decl: parser::TypeDecl) -> TypeTable {
+    teko::list::push(teko::list::empty(), TypeReg { name = decl.name; namespace = ""; file = ""; vis = parser::Visibility::Private; decl = decl })
+}
+
+/**
+ * A `TypeTable` registering two declarations at the root namespace.
+ *
+ * @param a  the first declaration
+ * @param b  the second declaration
+ * @return   a two-entry `TypeTable`
+ */
+fn bw_table2(a: parser::TypeDecl, b: parser::TypeDecl) -> TypeTable {
+    teko::list::push(bw_table1(a), TypeReg { name = b.name; namespace = ""; file = ""; vis = parser::Visibility::Private; decl = b })
+}

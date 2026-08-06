@@ -1,0 +1,250 @@
+// src/checker/checker_test.tkt — tests for the typer (C1). #test functions the runner collects.
+// The typer is unit-tested on HAND-BUILT AST: each type_* must produce a fully typed node (happy)
+// or refuse an ill-typed one (barrier). Rewritten to current Teko (the `Expr` node-wrapper C1-POS,
+// all-fields struct literals, `Function`/`Arm`/`TypeDecl`/`Item` shapes) and module-qualified.
+use teko::parser
+
+fn float_widens_f32_f64_to_f64() {
+    let env = define(define(empty_env(), "a", f32t(), false), "b", f64t(), false)
+    let te = match type_binary(arith_binop(lexer::TokenKind::Plus), env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(prim_is(te.type, PrimKind::F64))
+}
+
+/** bitwise_widens_same_sign_u16_u64_to_u64 — `u16 & u64` (bitwise, integer-only — B.38) widens
+    under the SAME W-RULE join `type_arith_binop` uses (`widen_int_binop`), completing B.22 for
+    the bitwise/remainder operator class too. */
+#test
+fn bitwise_widens_same_sign_u16_u64_to_u64() {
+    let env = define(define(empty_env(), "a", u16t(), false), "b", u64t(), false)
+    let te = match type_binary(arith_binop(lexer::TokenKind::Amp), env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(prim_is(te.type, PrimKind::U64))
+}
+
+/** bitwise_mixed_sign_equal_width_rejected_u32_i32 — `u32 | i32` (equal width, mixed sign) has
+    no lossless common type — the same honest-stop the arithmetic class gives, now for bitwise. */
+#test
+fn bitwise_mixed_sign_equal_width_rejected_u32_i32() {
+    let env = define(define(empty_env(), "a", u32t(), false), "b", i32t(), false)
+    match type_binary(arith_binop(lexer::TokenKind::Pipe), env, empty_table()) {
+        TExpr => teko::assert::is_true(false)
+        error as e => teko::assert::str_contains(e.message, "no lossless common type")
+    }
+}
+
+/** cast_widen_binop — build `(a to <target>) <op> b`, the D1 class-3 shape: an explicit lossless
+    widen on the left, a NATURALLY-typed variable on the right (neither a literal nor a cast, so
+    `operand_may_flag_partner` does not veto the diagnostic). */
+fn cast_widen_binop(op: lexer::TokenKind, target_name: str) -> parser::Binary {
+    parser::Binary { op = op; left = ek(cast_of("a", target_name)); right = e_var("b") }
+}
+
+/** d1_class3_noop_widen_warns_but_types_arith — `(a to i64) + b` with `a: i32`, `b: i64` is D1
+    class 3: the W-RULE would join to `i64` without the cast, so the cast changed nothing. It was a
+    hard compile ERROR; the 2026-07-27 owner ruling made it a WARNING, so the expression TYPES and
+    carries the joined `i64` type. This is the behavioural half of the reversal — the printed
+    warning itself goes to stderr and is not observable from a unit test.
+
+    It replaces the `c58_d1_class3_noop_widen_still_rejected` compile-fail fixture, which was
+    deleted with the rejection it pinned: a construct that no longer fails cannot live in a
+    compile-fail channel. */
+#test
+fn d1_class3_noop_widen_warns_but_types_arith() {
+    let env = define(define(empty_env(), "a", i32t(), false), "b", i64t(), false)
+    let te = match type_binary(cast_widen_binop(lexer::TokenKind::Plus, "i64"), env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(prim_is(te.type, PrimKind::I64))
+}
+
+/** d1_class3_noop_widen_warns_but_types_compare — the SAME operand pair spelled as a comparison,
+    `(a to i64) < b`. `redundant_widen_cast_of` is shared by both sites precisely so the two can
+    never disagree, and the reversal has to hold at both: the comparison types to `bool` instead of
+    failing, exactly as the arithmetic spelling types to `i64`. */
+#test
+fn d1_class3_noop_widen_warns_but_types_compare() {
+    let env = define(define(empty_env(), "a", i32t(), false), "b", i64t(), false)
+    let crest = teko::list::push(teko::list::empty(), parser::CmpTerm { op = lexer::TokenKind::Lt; operand = e_var("b") })
+    let cmp = parser::Compare { first = ek(cast_of("a", "i64")); rest = crest }
+    let te = match type_compare(cmp, env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(prim_is(te.type, PrimKind::Bool))
+}
+
+/** d1_class1_same_type_cast_keeps_its_node — the warned same-type `x to T` must still be a `TCast`
+    in the typed tree, not folded to its operand. The D4 ≤2% ARITH-CAST-RATE gate counts `TCast`
+    nodes (`metrics.tks::expr_has_conversion`), so folding the node away would have silently
+    disabled the very ceiling the owner named as what the warning does NOT exempt us from. */
+#test
+fn d1_class1_same_type_cast_keeps_its_node() {
+    let env = define(empty_env(), "f", i32t(), false)
+    let te = match type_cast(cast_of("f", "i32"), env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    match te.kind {
+        TCast => teko::assert::is_true(true)
+        _ => teko::assert::is_true(false)
+    }
+}
+
+/**
+ * shadow_exit_func — a user-declared `pub fn exit(code: i32) -> str` signature — the exact shape
+ * D2's fixture shadows the injected `exit` builtin with (one required `i32` param, no defaults).
+ *
+ * @return  the `Func` type `type_call`'s in-scope lookup resolves for such a declaration
+ */
+fn shadow_exit_func() -> Type {
+    Func { params = teko::list::push(teko::list::empty(), i32t()); ret = strt(); variadic = false; param_names = teko::list::push(teko::list::empty(), "code"); n_required = 1; defaults = teko::list::empty() }
+}
+
+/**
+ * exit_call_expr — the untyped call node for `exit(3)`: an unqualified, single-segment callee —
+ * the exact shape the injected `panic`/`exit` builtins and a same-named user function share
+ * syntactically, and the shape `tcall_is_diverging_builtin` must tell apart by RESOLUTION.
+ *
+ * @return  the untyped `Call`
+ */
+fn exit_call_expr() -> parser::Call {
+    parser::Call { callee = path1("exit"); args = teko::list::push(teko::list::empty(), e_num(3)); arg_names = pos_names(1); type_args = teko::list::empty() }
+}
+
+/**
+ * D2 fixture (nf-n16, part 1) — a same-named user function IN SCOPE resolves over the injected
+ * `exit` builtin (`type_call`'s `in_scope` gate): the resulting call carries a real, non-empty
+ * `call_ns` and the user's OWN declared return type (`str`), never the builtin's `Void`, and
+ * `texpr_diverges`/`tcall_is_diverging_builtin` must recognize it as a NORMAL call — not a
+ * diverging one — precisely because the RESOLUTION says so, not because of its bare name.
+ */
+#test
+fn shadowed_exit_resolves_to_user_function_not_builtin() {
+    let env = with_ns(define_fn(empty_env(), "exit", shadow_exit_func(), "mymod"), "mymod")
+    let te = match type_call(exit_call_expr(), env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    match te.type { Str => teko::assert::is_true(true); _ => teko::assert::is_true(false) }
+    match te.kind {
+        TCall as c => {
+            teko::assert::is_true(c.call_ns == "mymod")
+            teko::assert::is_true(!tcall_is_diverging_builtin(c))
+        }
+        _ => teko::assert::is_true(false)
+    }
+    teko::assert::is_true(!texpr_diverges(te))
+}
+
+/**
+ * D2 fixture (nf-n16, part 2) — THE defect this closes: before the fix, `check_trailing_value`
+ * (the function-body trailing-expression check) skipped a shadowed `exit(...)` call entirely
+ * because `texpr_diverges` recognized it by BARE NAME alone, so a function declaring `-> i32`
+ * whose body trails a user `exit` that actually returns `str` type-checked — only `cc` caught the
+ * mismatch downstream, and the own-native backend has no `cc` at all (silent miscompilation). With
+ * the fix, `check_trailing_value` sees the call's TRUE type (`str`) and rejects it itself, exactly
+ * as it would any other trailing-value type mismatch.
+ */
+#test
+fn shadowed_exit_trailing_value_rejected_by_checker_not_cc() {
+    let env = with_ns(define_fn(empty_env(), "exit", shadow_exit_func(), "mymod"), "mymod")
+    let te = match type_call(exit_call_expr(), env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    let stmts: []TStatement = teko::list::push(teko::list::empty(), texpr_stmt(te))
+    match check_trailing_value(stmts, i32t(), empty_table()) {
+        error => teko::assert::is_true(true)
+        null => teko::assert::is_true(false)
+    }
+}
+
+/**
+ * D2 regression guard — an UNSHADOWED `exit(...)` (no user declaration in scope) must still
+ * resolve to the injected builtin and still diverge, so `check_trailing_value` still exempts it
+ * from the trailing-value type check exactly as before the fix. The fix narrows recognition to
+ * RESOLUTION, not name; it must never narrow which calls are STILL recognized as the true builtin.
+ */
+#test
+fn unshadowed_exit_still_diverges_and_skips_trailing_check() {
+    let te = match type_call(exit_call_expr(), empty_env(), empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(texpr_diverges(te))
+    let stmts: []TStatement = teko::list::push(teko::list::empty(), texpr_stmt(te))
+    match check_trailing_value(stmts, i32t(), empty_table()) {
+        null => teko::assert::is_true(true)
+        error => teko::assert::is_true(false)
+    }
+}
+
+/**
+ * widen_implicit_admits_same_sign_narrower — the implicit-widening rule (owner 2026-07-29) admits a
+ * narrower same-sign integer into a wider one, in BOTH signedness families. This is the direction the
+ * owner's own program needs (`mut b: i64 = 1; b = a` over an `i32` `a`), and all three of his lines
+ * were rejected before it existed.
+ */
+#test
+fn widen_implicit_admits_same_sign_narrower() {
+    teko::assert::is_true(numeric_widens_implicitly(i32t(), i64t()))
+    teko::assert::is_true(numeric_widens_implicitly(u32t(), u64t()))
+    teko::assert::is_true(numeric_widens_implicitly(u8t(), u64t()))
+}
+
+/**
+ * widen_implicit_admits_unsigned_into_strictly_wider_signed — the W-RULE's mixed-sign peer case
+ * (§2.2): lossless because every `u32` value fits an `i64`. Admitted implicitly for the SAME reason
+ * the arithmetic regime already admits it — the two regimes ask ONE predicate so they cannot drift.
+ */
+#test
+fn widen_implicit_admits_unsigned_into_strictly_wider_signed() {
+    teko::assert::is_true(numeric_widens_implicitly(u32t(), i64t()))
+}
+
+/**
+ * widen_implicit_refuses_narrowing_and_equal_width_sign_change — the implicit direction is widening
+ * ONLY. A narrowing has no implicit form at all: it must be written as a `to`, which then carries the
+ * fail-loud runtime fit guard. An equal-width sign change is not a widen either — neither type holds
+ * the whole of the other.
+ */
+#test
+fn widen_implicit_refuses_narrowing_and_equal_width_sign_change() {
+    teko::assert::is_true(!numeric_widens_implicitly(i64t(), i32t()))
+    teko::assert::is_true(!numeric_widens_implicitly(u64t(), u8t()))
+    teko::assert::is_true(!numeric_widens_implicitly(i64t(), u64t()))
+    teko::assert::is_true(!numeric_widens_implicitly(u64t(), i64t()))
+}
+
+/**
+ * widen_implicit_refuses_identity_and_crossing_the_float_boundary — an identity is not a conversion
+ * (nothing to insert), and int↔float stays explicit in both directions (B.38, unchanged).
+ */
+#test
+fn widen_implicit_refuses_identity_and_crossing_the_float_boundary() {
+    teko::assert::is_true(!numeric_widens_implicitly(i64t(), i64t()))
+    teko::assert::is_true(!numeric_widens_implicitly(i32t(), f64t()))
+    teko::assert::is_true(!numeric_widens_implicitly(f64t(), i64t()))
+}
+
+/**
+ * widen_implicit_admits_f32_into_f64_only — the float half: `f32` → `f64` is exact for every value,
+ * so it is implicit; `f64` → `f32` is not, so it stays an explicit `to`.
+ */
+#test
+fn widen_implicit_admits_f32_into_f64_only() {
+    teko::assert::is_true(numeric_widens_implicitly(f32t(), f64t()))
+    teko::assert::is_true(!numeric_widens_implicitly(f64t(), f32t()))
+}
+
+/**
+ * cast_lossless_widen_is_the_guard_decision — `cast_is_lossless_widen` is the ONE width table both
+ * emission routes ask about whether a `to` needs the runtime fit guard, so these are the exact pairs
+ * that decide it. The three that answer false are the three the native route used to get WRONG (300
+ * `to` u8 answered 300; 2^40 `to` i32 answered 0; -1 `to` u32 answered 4294967295).
+ */
+#test
+fn cast_lossless_widen_is_the_guard_decision() {
+    teko::assert::is_true(cast_is_lossless_widen(PrimKind::U8, PrimKind::U64))
+    teko::assert::is_true(cast_is_lossless_widen(PrimKind::I32, PrimKind::I64))
+    teko::assert::is_true(cast_is_lossless_widen(PrimKind::U32, PrimKind::I64))
+    teko::assert::is_true(!cast_is_lossless_widen(PrimKind::U64, PrimKind::U8))
+    teko::assert::is_true(!cast_is_lossless_widen(PrimKind::I64, PrimKind::I32))
+    teko::assert::is_true(!cast_is_lossless_widen(PrimKind::I64, PrimKind::U32))
+    teko::assert::is_true(!cast_is_lossless_widen(PrimKind::U64, PrimKind::I64))
+}
+
+/**
+ * f32_value_widens_implicitly_into_f64 — the float half of the rule, END TO END rather than as a
+ * predicate: an `f32` VALUE flows into an `f64` slot with no `to` written, and the value survives
+ * exactly (every `f32` is representable in `f64`, so the widening is exact for every input, never
+ * merely rounded).
+ *
+ * CORRECTING THE RECORD: the measurement that opened this lane reported `f32 to f64` as "rejected —
+ * the conversion between floats does not exist". It was never rejected. `cast_check` admits any
+ * numeric pair, and the observed rejection came from `print(y)` refusing a float ARGUMENT, one line
+ * past the cast. What was missing was only the IMPLICIT direction, which this test now pins.
+ */
+#test

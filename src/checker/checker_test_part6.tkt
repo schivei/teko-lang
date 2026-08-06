@@ -1,0 +1,264 @@
+// src/checker/checker_test.tkt — tests for the typer (C1). #test functions the runner collects.
+// The typer is unit-tested on HAND-BUILT AST: each type_* must produce a fully typed node (happy)
+// or refuse an ill-typed one (barrier). Rewritten to current Teko (the `Expr` node-wrapper C1-POS,
+// all-fields struct literals, `Function`/`Arm`/`TypeDecl`/`Item` shapes) and module-qualified.
+use teko::parser
+
+fn unsafe_carrying_recurses_through_every_carrier() {
+    let table = unsafe_leaf_table()
+    let m = Named { name = "M" }
+    teko::assert::is_true(unsafe_carrying(Slice { element = m }, table))
+    teko::assert::is_false(unsafe_carrying(Slice { element = i64t() }, table))
+    teko::assert::is_true(unsafe_carrying(Variant { members = teko::list::push(teko::list::push(teko::list::empty(), Null { }), m) }, table))
+    teko::assert::is_false(unsafe_carrying(Variant { members = teko::list::push(teko::list::push(teko::list::empty(), Null { }), i64t()) }, table))
+    teko::assert::is_true(unsafe_carrying(Reference { inner = m }, table))
+    teko::assert::is_false(unsafe_carrying(Reference { inner = i64t() }, table))
+    teko::assert::is_true(unsafe_carrying(Ptr { inner = m }, table))
+    teko::assert::is_false(unsafe_carrying(Ptr { inner = i64t() }, table))
+    teko::assert::is_false(unsafe_carrying(Ptr { inner = null }, table))
+}
+
+/** `unsafe_carrying` over a `Variant` recurses each member — true iff ANY member carries unsafe
+ *  data (criterion 7's variant case), and every OTHER `Type` shape not explicitly walked
+ *  (`Prim`/`Void`/`Error`/…) falls to the catch-all `_ => false` arm. `Func` is NOT a catch-all
+ *  case any more (F2, adversarial review of #333) — it is asserted separately below. */
+#test
+fn unsafe_carrying_variant_and_catch_all() {
+    let table = unsafe_leaf_table()
+    let m = Named { name = "M" }
+    let mixed = Variant { members = teko::list::push(teko::list::push(teko::list::empty(), i64t()), m) }
+    teko::assert::is_true(unsafe_carrying(mixed, table))
+    let all_safe = Variant { members = teko::list::push(teko::list::push(teko::list::empty(), i64t()), Str { }) }
+    teko::assert::is_false(unsafe_carrying(all_safe, table))
+    teko::assert::is_false(unsafe_carrying(Void { }, table))
+    teko::assert::is_false(unsafe_carrying(Error { }, table))
+}
+
+/**
+ * Builds a region-handle TypeTable (#358) — a single `#must_free` struct `Arena` with one `uptr`
+ * field `region`, the Arena shape `is_region_handle_name` recognizes structurally.
+ *
+ * @return TypeTable  a TypeTable holding exactly the region-handle `Arena` decl
+ */
+fn region_handle_table() -> TypeTable {
+    let fld = parser::Field { name = "region"; type_ann = named_t("uptr"); vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = "" }
+    let fields = teko::list::push(teko::list::empty(), fld)
+    let decl = parser::TypeDecl { name = "Arena"; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = parser::StructBody { fields = fields; methods = teko::list::empty(); implements = teko::list::empty(); consts = teko::list::empty() }; vis = parser::Visibility::Pub; has_doc = false; doc = ""; line = 0; col = 0; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""; is_unsafe = true; must_free = true }
+    teko::list::push(teko::list::empty(), TypeReg { name = "Arena"; namespace = ""; file = ""; vis = parser::Visibility::Pub; decl = decl })
+}
+
+/**
+ * Builds a `#must_free` struct table whose sole field is a NON-`uptr` (`u64`) — the near-miss the
+ * region-handle probe must REJECT (right `#must_free` + arity, wrong field type).
+ *
+ * @return TypeTable  a TypeTable with one `#must_free` single-`u64`-field struct `NotArena`
+ */
+fn non_uptr_must_free_table() -> TypeTable {
+    let fld = parser::Field { name = "n"; type_ann = named_t("u64"); vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = "" }
+    let fields = teko::list::push(teko::list::empty(), fld)
+    let decl = parser::TypeDecl { name = "NotArena"; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = parser::StructBody { fields = fields; methods = teko::list::empty(); implements = teko::list::empty(); consts = teko::list::empty() }; vis = parser::Visibility::Pub; has_doc = false; doc = ""; line = 0; col = 0; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""; is_unsafe = true; must_free = true }
+    teko::list::push(teko::list::empty(), TypeReg { name = "NotArena"; namespace = ""; file = ""; vis = parser::Visibility::Pub; decl = decl })
+}
+
+/**
+ * Builds a `#must_free` struct table with TWO `uptr` fields — the near-miss the region-handle probe
+ * must REJECT on arity (a single-field shape is required); also exercises the field-name accessor's
+ * multi-field else-branch.
+ *
+ * @return TypeTable  a TypeTable with one `#must_free` two-`uptr`-field struct `TwoField`
+ */
+fn two_field_must_free_table() -> TypeTable {
+    mut fields = teko::list::push(teko::list::empty(), parser::Field { name = "a"; type_ann = named_t("uptr"); vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = "" })
+    fields = teko::list::push(fields, parser::Field { name = "b"; type_ann = named_t("uptr"); vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = "" })
+    let decl = parser::TypeDecl { name = "TwoField"; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = parser::StructBody { fields = fields; methods = teko::list::empty(); implements = teko::list::empty(); consts = teko::list::empty() }; vis = parser::Visibility::Pub; has_doc = false; doc = ""; line = 0; col = 0; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""; is_unsafe = true; must_free = true }
+    teko::list::push(teko::list::empty(), TypeReg { name = "TwoField"; namespace = ""; file = ""; vis = parser::Visibility::Pub; decl = decl })
+}
+
+/**
+ * Builds a `#must_free` single-field struct whose field names an UNRESOLVABLE type — exercises
+ * `is_region_handle_decl`'s `resolve_type` error arm (a field type that cannot resolve is not
+ * `uptr`, so the shape is rejected without crashing).
+ *
+ * @return TypeTable  a TypeTable with one `#must_free` struct `BadField` whose field type is unknown
+ */
+fn unresolvable_field_must_free_table() -> TypeTable {
+    let fld = parser::Field { name = "x"; type_ann = named_t("NoSuchType"); vis = parser::Visibility::Pub; is_intern = false; has_doc = false; doc = "" }
+    let fields = teko::list::push(teko::list::empty(), fld)
+    let decl = parser::TypeDecl { name = "BadField"; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = parser::StructBody { fields = fields; methods = teko::list::empty(); implements = teko::list::empty(); consts = teko::list::empty() }; vis = parser::Visibility::Pub; has_doc = false; doc = ""; line = 0; col = 0; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""; is_unsafe = true; must_free = true }
+    teko::list::push(teko::list::empty(), TypeReg { name = "BadField"; namespace = ""; file = ""; vis = parser::Visibility::Pub; decl = decl })
+}
+
+/**
+ * Builds a `#must_free` NON-struct (interface) table — exercises `is_region_handle_decl`'s
+ * non-`StructBody` reject arm (the flag is set, but the body kind disqualifies it).
+ *
+ * @return TypeTable  a TypeTable with one `#must_free` interface `MustIface`
+ */
+fn must_free_iface_table() -> TypeTable {
+    let decl = parser::TypeDecl { name = "MustIface"; type_params = teko::list::empty(); type_constraints = teko::list::empty(); body = parser::InterfaceBody { extends = teko::list::empty(); methods = teko::list::empty() }; vis = parser::Visibility::Pub; has_doc = false; doc = ""; line = 0; col = 0; di_kind = parser::DiKind::None; has_di_key = false; di_key = ""; is_unsafe = false; must_free = true }
+    teko::list::push(teko::list::empty(), TypeReg { name = "MustIface"; namespace = ""; file = ""; vis = parser::Visibility::Pub; decl = decl })
+}
+
+#test
+fn region_handle_predicate_recognizes_arena() {
+    let tbl = region_handle_table()
+    teko::assert::is_false(is_region_handle_name("MustIface", must_free_iface_table()))
+    teko::assert::is_true(region_handle_field_name("MustIface", must_free_iface_table()) == "")
+    teko::assert::is_true(is_region_handle_name("Arena", tbl))
+    teko::assert::is_true(region_handle_field_name("Arena", tbl) == "region")
+    teko::assert::is_false(is_region_handle_name("Missing", tbl))
+    teko::assert::is_true(region_handle_field_name("Missing", tbl) == "")
+    teko::assert::is_false(is_region_handle_name("Foo", foo_table()))
+    teko::assert::is_true(region_handle_field_name("Foo", foo_table()) == "token")
+    teko::assert::is_false(is_region_handle_name("BadField", unresolvable_field_must_free_table()))
+    teko::assert::is_false(is_region_handle_name("NotArena", non_uptr_must_free_table()))
+    teko::assert::is_false(is_region_handle_name("TwoField", two_field_must_free_table()))
+    teko::assert::is_true(region_handle_field_name("TwoField", two_field_must_free_table()) == "")
+    teko::assert::is_false(is_region_handle_name("Color", color_enum_table()))
+    teko::assert::is_true(region_handle_field_name("Color", color_enum_table()) == "")
+}
+
+/** bigint_named — the `bigint` surface type (the runtime `BigInt` struct's canonical name). */
+fn bigint_named() -> Type { Named { name = "teko::numeric::bigint::BigInt" } }
+/** dec_named — the `dec` surface type (the runtime `Decimal` struct's canonical name). */
+fn dec_named() -> Type { Named { name = "teko::numeric::dec::Decimal" } }
+/** call_lowers_to — does a lowered operator `TExpr` call `<ns>::<fn>`? */
+fn call_lowers_to(te: TExpr, ns: str, fn_name: str) -> bool {
+    match te.kind {
+        TCall as call => call.call_ns == ns && call.callee.segments[call.callee.segments.len - 1].name == fn_name
+        _ => false
+    }
+}
+
+/** bignum_plus_lowers_to_add — `bigint + bigint` becomes a `teko::numeric::bigint::add` call. */
+#test
+fn bignum_plus_lowers_to_add() {
+    let env = define(define(empty_env(), "a", bigint_named(), false), "b", bigint_named(), false)
+    let bin = parser::Binary { op = lexer::TokenKind::Plus; left = e_var("a"); right = e_var("b") }
+    let te = match type_binary(bin, env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(call_lowers_to(te, "teko::numeric::bigint", "add"))
+}
+
+/** bignum_percent_lowers_to_rem — `bigint % bigint` becomes a `teko::numeric::bigint::rem` call. */
+#test
+fn bignum_percent_lowers_to_rem() {
+    let env = define(define(empty_env(), "a", bigint_named(), false), "b", bigint_named(), false)
+    let bin = parser::Binary { op = lexer::TokenKind::Percent; left = e_var("a"); right = e_var("b") }
+    let te = match type_binary(bin, env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(call_lowers_to(te, "teko::numeric::bigint", "rem"))
+}
+
+/** bignum_literal_adopts — `bigint + <int literal>` adopts the literal via `bigint::of`. */
+#test
+fn bignum_literal_adopts() {
+    let env = define(empty_env(), "a", bigint_named(), false)
+    let bin = parser::Binary { op = lexer::TokenKind::Plus; left = e_var("a"); right = e_num(7) }
+    let te = match type_binary(bin, env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    let adopted = match te.kind { TCall as call => call.args[1]; _ => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(call_lowers_to(adopted, "teko::numeric::bigint", "of"))
+}
+
+/** dec_percent_is_rejected — `dec % dec` is a checker error (decimals have no remainder operator). */
+#test
+fn dec_percent_is_rejected() {
+    let env = define(define(empty_env(), "a", dec_named(), false), "b", dec_named(), false)
+    let bin = parser::Binary { op = lexer::TokenKind::Percent; left = e_var("a"); right = e_var("b") }
+    match type_binary(bin, env, empty_table()) {
+        TExpr => teko::assert::is_true(false)
+        error as e => teko::assert::str_contains(e.message, "not defined on `dec`")
+    }
+}
+
+/** bignum_no_implicit_promotion — `bigint + <i64 variable>` is refused, asking for an explicit `of`. */
+#test
+fn bignum_no_implicit_promotion() {
+    let env = define(define(empty_env(), "a", bigint_named(), false), "n", i64t(), false)
+    let bin = parser::Binary { op = lexer::TokenKind::Plus; left = e_var("a"); right = e_var("n") }
+    match type_binary(bin, env, empty_table()) {
+        TExpr => teko::assert::is_true(false)
+        error as e => teko::assert::str_contains(e.message, "no implicit")
+    }
+}
+
+/** bignum_mixing_is_rejected — mixing `bigint` and `dec` in one operation is refused. */
+#test
+fn bignum_mixing_is_rejected() {
+    let env = define(define(empty_env(), "a", bigint_named(), false), "b", dec_named(), false)
+    let bin = parser::Binary { op = lexer::TokenKind::Plus; left = e_var("a"); right = e_var("b") }
+    match type_binary(bin, env, empty_table()) {
+        TExpr => teko::assert::is_true(false)
+        error as e => teko::assert::str_contains(e.message, "mix")
+    }
+}
+
+/** bignum_compare_lowers_to_cmp — `bigint < bigint` lowers to a `cmp(...) < 0` bool comparison. */
+#test
+fn bignum_compare_lowers_to_cmp() {
+    let env = define(define(empty_env(), "a", bigint_named(), false), "b", bigint_named(), false)
+    let crest = teko::list::push(teko::list::empty(), parser::CmpTerm { op = lexer::TokenKind::Lt; operand = e_var("b") })
+    let cmp = parser::Compare { first = e_var("a"); rest = crest }
+    let te = match type_compare(cmp, env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(prim_is(te.type, PrimKind::Bool))
+    let inner = match te.kind { TCompare as tc => tc.first; _ => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(call_lowers_to(inner, "teko::numeric::bigint", "cmp"))
+}
+
+/** arith_binop — build `a <op> b` from two already-bound variable names, for the W-RULE tests below. */
+fn arith_binop(op: lexer::TokenKind) -> parser::Binary {
+    parser::Binary { op = op; left = e_var("a"); right = e_var("b") }
+}
+
+/** widen_same_sign_u8_u32_to_u32 — `u8 + u32` (same signedness) widens to the LARGER width `u32`,
+    no explicit `to` needed (W-RULE §2.1). */
+#test
+fn widen_same_sign_u8_u32_to_u32() {
+    let env = define(define(empty_env(), "a", u8t(), false), "b", u32t(), false)
+    let te = match type_binary(arith_binop(lexer::TokenKind::Plus), env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(prim_is(te.type, PrimKind::U32))
+}
+
+/** widen_same_sign_i16_i64_to_i64 — `i16 + i64` (same signedness) widens to the LARGER width
+    `i64`, no explicit `to` needed (W-RULE §2.1). */
+#test
+fn widen_same_sign_i16_i64_to_i64() {
+    let env = define(define(empty_env(), "a", i16t(), false), "b", i64t(), false)
+    let te = match type_binary(arith_binop(lexer::TokenKind::Plus), env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(prim_is(te.type, PrimKind::I64))
+}
+
+/** widen_mixed_sign_peer_u8_i32_to_i32 — `u8 + i32`: the signed side (`i32`, 32 bits) is
+    STRICTLY WIDER than the unsigned side (`u8`, 8 bits), so every `u8` value fits `i32` — the
+    peer-type widen accepts it, result `i32` (D3, W-RULE §2.2 lossless branch). */
+#test
+fn widen_mixed_sign_peer_u8_i32_to_i32() {
+    let env = define(define(empty_env(), "a", u8t(), false), "b", i32t(), false)
+    let te = match type_binary(arith_binop(lexer::TokenKind::Plus), env, empty_table()) { TExpr as e => e; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(prim_is(te.type, PrimKind::I32))
+}
+
+/** mixed_sign_equal_width_rejected_u64_i64 — `u64 + i64`: EQUAL width mixed sign has NO
+    lossless common fixed-width type (Teko has no wider backstop after i64/u64) — an honest
+    compile error demanding an explicit `to` (W-RULE §2.2 fallthrough, D3). */
+#test
+fn mixed_sign_equal_width_rejected_u64_i64() {
+    let env = define(define(empty_env(), "a", u64t(), false), "b", i64t(), false)
+    match type_binary(arith_binop(lexer::TokenKind::Plus), env, empty_table()) {
+        TExpr => teko::assert::is_true(false)
+        error as e => teko::assert::str_contains(e.message, "no lossless common type")
+    }
+}
+
+/** int_float_still_rejected — `i32 + f64` stays a compile error: int×float is unchanged by the
+    W-RULE (B.38 — no implicit int↔float promotion, ever). */
+#test
+fn int_float_still_rejected() {
+    let env = define(define(empty_env(), "a", i32t(), false), "b", f64t(), false)
+    match type_binary(arith_binop(lexer::TokenKind::Plus), env, empty_table()) {
+        TExpr => teko::assert::is_true(false)
+        error as e => teko::assert::str_contains(e.message, "no mixed int/float")
+    }
+}
+
+/** float_widens_f32_f64_to_f64 — `f32 + f64` widens to the wider float (W-RULE §2.3), always
+    lossless — the float join is total, unlike the int join. */
+#test
