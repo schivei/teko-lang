@@ -1,0 +1,313 @@
+// src/build/project.tks   (namespace 'teko::build')
+//
+// The PROJECT ORCHESTRATION entry layer — the canonical Teko ORIGINAL of the project
+// surfaces in src/driver.c (project_frontend / tk_compile_project / tk_run_project) and
+// the directory resolution in main.c (project_dir_of). main.tks dispatches here:
+//   teko build <dir>  → compile_project  (front-end → native codegen)
+//   teko run   <dir>  → run_project      (front-end → native codegen + execute, debug profile)
+//   teko <projarg>    → project_dir_of   (a `.tkp` → its dir; else the dir as-is)
+//
+// FAITHFUL-NOT-LITERAL (M.3). It mirrors the C twins' SHAPE and contracts in native Teko:
+// the C uses out-params (project_frontend(dir, &prog, &manifest)); Teko has NO out-params,
+// so the shared front-end returns a small `Frontend` struct (prog + manifest), as
+// `Frontend | error`. Both entries (build/run) run the SAME front-end AND the SAME
+// codegen→cc backend; `run` additionally executes the resulting binary (the interpreter this once
+// diverged to is retired, #524).
+
+use teko::parser
+use teko::lexer
+use teko::checker
+use teko::codegen
+use teko::emit
+use teko::compress
+use teko::coverage
+
+const MACHO_MIN_OS_VERSION: str = "11.0.0"
+
+/**
+ * MACHO_SDK_VERSION_FALLBACK — the SDK version `-platform_version` carries when `xcrun
+ * --show-sdk-version` cannot be read (no Xcode/CLT on the host). Equal to the min-OS floor, which is
+ * the conservative choice: an SDK no newer than the deployment target never advertises a symbol the
+ * loader will not honour.
+ */
+const MACHO_SDK_VERSION_FALLBACK: str = MACHO_MIN_OS_VERSION
+
+/**
+ * capture_tool_line — run `argv` with its stdout redirected to a scratch file next to `binary`, and
+ * return the first trimmed line it printed (or "" when it failed or said nothing). The output-capture
+ * sibling of `teko::process::run`, used to ASK the host toolchain a question whose answer is a path
+ * or a version — `xcrun --show-sdk-path` / `--show-sdk-version` — the same spawn+read+delete shape
+ * `cc_target_triple` already uses for `-dumpmachine`.
+ *
+ * @param argv    the command to run (argv[0] is the tool)
+ * @param binary  the build's output path, used to place the scratch file
+ * @param suffix  a distinguishing scratch-file suffix (so concurrent probes never collide)
+ * @return        the first line of stdout, trimmed of a trailing `\r`, or "" on failure
+ * @since 0.3.1.0 (de-C native link, macOS leg)
+ */
+fn capture_tool_line(argv: []str, binary: str, suffix: str) -> str {
+    let outp = binary ~ suffix
+    let h = teko::process::spawn_redirected(argv, "", teko::list::empty(), "", outp, outp ~ ".err")
+    let rc = teko::process::wait_one(h)
+    let out = match teko::io::read_file(outp) { str as s => s; error => "" }
+    match teko::fs::remove_file(outp) { error => { }; null => { } }
+    match teko::fs::remove_file(outp ~ ".err") { error => { }; null => { } }
+    if rc != 0 { return "" }
+    trimmed_line(first_line(out))
+}
+
+/**
+ * xcrun_show — ASK `xcrun` one `--show-<what>` question about the active macOS SDK (`sdk-path` for
+ * `-syslibroot`, `sdk-version` for `-platform_version`), or "" when `xcrun` is absent. A direct
+ * Mach-O link must name the SDK root the `clang` driver used to resolve on its own; on a macOS host
+ * with Xcode or the Command Line Tools installed `xcrun` answers both, and on a host without them the
+ * empty answer degrades to the fallbacks rather than aborting the link.
+ *
+ * @param what    the `--show-<what>` suffix (`sdk-path` or `sdk-version`)
+ * @param binary  the build's output path (scratch-file placement)
+ * @return        `xcrun`'s answer, or "" when it could not be read
+ * @since 0.3.1.0 (de-C native link, macOS leg)
+ */
+fn xcrun_show(what: str, binary: str) -> str {
+    mut argv: []str = teko::list::empty()
+    argv = teko::list::push(argv, "xcrun")
+    argv = teko::list::push(argv, teko::str::concat("--show-", what))
+    capture_tool_line(argv, binary, teko::str::concat(".xcrun-", what))
+}
+
+/**
+ * append_macho_plist_section — the Mach-O `-sectcreate __TEXT __info_plist <plist>` the direct `ld`
+ * link takes (three separate argv tokens, NOT `build_cc_argv`'s single `-Wl,-sectcreate,...,...`
+ * string — the `-Wl,` comma-packing exists only to smuggle the flag THROUGH the `cc` driver, and a
+ * direct `ld` invocation neither needs nor accepts it). Best-effort, exactly like
+ * `append_macos_plist_flag`: a plist-write failure leaves `argv` unchanged.
+ *
+ * @param argv    the link argument vector so far
+ * @param binary  the output executable path (the plist lands at `<binary>.Info.plist`)
+ * @param m       the manifest (project identity embedded in the plist)
+ * @return        `argv` with the three `-sectcreate` tokens appended, or unchanged on a write failure
+ * @since 0.3.1.0 (de-C native link, macOS leg)
+ */
+fn append_macho_plist_section(argv: []str, binary: str, m: Manifest) -> []str {
+    let plist = teko::str::concat(binary, ".Info.plist")
+    match teko::io::write_file(plist, plist_xml(m)) {
+        error => return argv
+        null => { }
+    }
+    mut out = argv
+    out = teko::list::push(out, "-sectcreate")
+    out = teko::list::push(out, "__TEXT")
+    out = teko::list::push(out, "__info_plist")
+    teko::list::push(out, plist)
+}
+
+/**
+ * link_object_macho_direct — the macOS arm64 / Mach-O native link WITHOUT the `clang` driver:
+ * compile the two C runtime seeds to Mach-O objects (`compile_runtime_objects`), resolve the Mach-O
+ * OS linker (`resolve_linker(Arm64, Macho)` → Apple `ld` / `ld64.lld`), and invoke it DIRECTLY with
+ * the platform/SDK arguments the driver injected on its own — `-arch arm64`, `-platform_version macos
+ * <min> <sdk>`, `-syslibroot <SDK>` — plus `-lSystem` (which carries libc AND libm on macOS, so no
+ * separate `-lm`), the own-backend object, the reachable `[extern.libs]` flags, and the
+ * `__info_plist` section for `mdls`/`otool` parity. The SDK root and version are ASKED of `xcrun`
+ * (`xcrun_show`); a host without Xcode degrades to the min-OS fallbacks.
+ *
+ * @param objfile  the own-backend Mach-O `.o`
+ * @param binary   the output native executable path
+ * @param m        the resolved manifest
+ * @param prog     the checked program (extern-reachability + assert seed)
+ * @return         0 on a successful compile+link, else a NAMED failing status
+ * @since 0.3.1.0 (de-C native link, macOS arm64 leg)
+ */
+fn link_object_macho_direct(objfile: str, binary: str, m: Manifest, prog: checker::TProgram) -> i32 {
+    let objs = match compile_runtime_objects(binary, m, prog) { RuntimeObjects as o => o; error as e => return fail("", e.message) }
+    let ld = match resolve_linker(LinkArch::Arm64, LinkFormat::Macho) { str as s => s; error as e => return fail("", e.message) }
+    let sdk = xcrun_show("sdk-path", binary)
+    let sdkver = xcrun_show("sdk-version", binary)
+    mut argv: []str = teko::list::empty()
+    argv = teko::list::push(argv, ld)
+    argv = teko::list::push(argv, "-arch")
+    argv = teko::list::push(argv, arch_name(LinkArch::Arm64))
+    argv = teko::list::push(argv, "-platform_version")
+    argv = teko::list::push(argv, "macos")
+    argv = teko::list::push(argv, MACHO_MIN_OS_VERSION)
+    argv = teko::list::push(argv, if sdkver.len > 0 { sdkver } else { MACHO_SDK_VERSION_FALLBACK })
+    if sdk.len > 0 {
+        argv = teko::list::push(argv, "-syslibroot")
+        argv = teko::list::push(argv, sdk)
+    }
+    argv = teko::list::push(argv, objfile)
+    argv = teko::list::push(argv, objs.rt_obj)
+    argv = teko::list::push(argv, objs.assert_obj)
+    argv = teko::list::push(argv, "-lSystem")
+    let keys = link_target_keys(m)
+    let reachable = reachable_libs(prog)
+    argv = append_reachable_link_flags(argv, m, reachable)
+    argv = append_reachable_os_lib_flags(argv, m, keys, reachable)
+    argv = append_macho_plist_section(argv, binary, m)
+    argv = teko::list::push(argv, "-o")
+    argv = teko::list::push(argv, binary)
+    run_direct_link(argv)
+}
+
+/**
+ * PE_UCRT_DEFAULTLIB — the static UCRT C-runtime import the direct `lld-link` line names, exactly the
+ * `-defaultlib:libcmt` the `clang --target=x86_64-pc-windows-msvc` driver injects on its own (see
+ * `WINDOWS_CC_NAME`). `lld-link` resolves it (and the UCRT/Windows import libraries it pulls) from the
+ * `LIB` environment variable the MSVC toolchain sets — the same search the driver hands off to.
+ */
+const PE_UCRT_DEFAULTLIB: str = "/defaultlib:libcmt"
+
+/**
+ * PE_SUBSYSTEM_CONSOLE — the PE subsystem a Teko program links as: a console executable, whose entry
+ * the CRT (`libcmt`) supplies as `mainCRTStartup` calling the program's `main`. `lld-link` infers the
+ * entry from the subsystem, so naming the subsystem is all the direct line needs.
+ */
+const PE_SUBSYSTEM_CONSOLE: str = "/subsystem:console"
+
+/**
+ * PE_REPRODUCIBLE_FLAG — the `lld-link` reproducible-build switch (the direct form of
+ * `WINDOWS_NO_TIMESTAMP_FLAG`'s `-Wl,/Brepro`): stops the linker stamping the wall clock into the PE
+ * COFF `TimeDateStamp`, so two links of the same program are byte-identical (the FIXPOINT — see
+ * `append_windows_reproducible_flag`'s measurement).
+ */
+const PE_REPRODUCIBLE_FLAG: str = "/Brepro"
+
+/**
+ * PE_STACK_RESERVE_FLAG — the `lld-link` stack-reserve switch (the direct form of
+ * `WINDOWS_STACK_RESERVE_FLAG`'s `-Wl,/STACK:16777216`): reserves 16 MiB past the PE default's 1 MiB
+ * so the compiler's deep-but-finite recursive passes do not overflow on the OS with the smallest
+ * default stack.
+ */
+const PE_STACK_RESERVE_FLAG: str = "/stack:16777216"
+
+/**
+ * link_object_pe_direct — the Windows x86-64 / PE-COFF native link WITHOUT the `clang` driver:
+ * compile the two C runtime seeds to COFF objects (`compile_runtime_objects` → clang-msvc `cc -c`),
+ * resolve the PE linker (`resolve_linker(X8664, Pe)` → `lld-link`, never MinGW), and invoke IT
+ * DIRECTLY with the UCRT/startup scaffolding the driver used to inject — `/subsystem:console`,
+ * `/defaultlib:libcmt` (UCRT, resolved with the Windows import libs from the MSVC `LIB` env the
+ * toolchain sets) — plus the reproducible-build and widened-stack switches in their native `lld-link`
+ * spelling, and the reachable `[extern.libs]` flags. `lld-link` infers `mainCRTStartup` as the entry
+ * from the console subsystem. No `-lm`: Windows math lives in the CRT (`append_libm_flag` already
+ * omits it there).
+ *
+ * @param objfile  the own-backend PE/COFF `.obj`
+ * @param binary   the output native executable path
+ * @param m        the resolved manifest
+ * @param prog     the checked program (extern-reachability + assert seed)
+ * @return         0 on a successful compile+link, else a NAMED failing status
+ * @since 0.3.1.0 (de-C native link, windows x86-64 leg)
+ */
+fn link_object_pe_direct(objfile: str, binary: str, m: Manifest, prog: checker::TProgram) -> i32 {
+    let objs = match compile_runtime_objects(binary, m, prog) { RuntimeObjects as o => o; error as e => return fail("", e.message) }
+    let ld = match resolve_linker(LinkArch::X8664, LinkFormat::Pe) { str as s => s; error as e => return fail("", e.message) }
+    mut argv: []str = teko::list::empty()
+    argv = teko::list::push(argv, ld)
+    argv = teko::list::push(argv, "/nologo")
+    argv = teko::list::push(argv, PE_SUBSYSTEM_CONSOLE)
+    argv = teko::list::push(argv, PE_REPRODUCIBLE_FLAG)
+    argv = teko::list::push(argv, PE_STACK_RESERVE_FLAG)
+    argv = teko::list::push(argv, PE_UCRT_DEFAULTLIB)
+    argv = teko::list::push(argv, objfile)
+    argv = teko::list::push(argv, objs.rt_obj)
+    argv = teko::list::push(argv, objs.assert_obj)
+    let keys = link_target_keys(m)
+    let reachable = reachable_libs(prog)
+    argv = append_reachable_link_flags(argv, m, reachable)
+    argv = append_reachable_os_lib_flags(argv, m, keys, reachable)
+    argv = teko::list::push(argv, teko::str::concat("/out:", binary))
+    run_direct_link(argv)
+}
+
+// (C7.1k) plist_xml — a minimal macOS Info.plist carrying the project's identity, embedded into the
+// Mach-O `__TEXT,__info_plist` section by run_cc. Fields must be plain text (no XML metacharacters);
+// the seed's own metadata is. (XML-escaping of arbitrary metadata is a follow-on.)
+fn plist_xml(m: Manifest) -> str {
+    let ver = if m.version != "" { m.version } else { "0.0.0.0" }
+    let info = if m.description != "" { teko::str::concat(m.name, " — ", m.description) } else { m.name }
+    teko::str::concat(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n",
+        teko::str::concat(
+            teko::str::concat("  <key>CFBundleName</key><string>", m.name, "</string>\n"),
+            teko::str::concat(
+                teko::str::concat("  <key>CFBundleIdentifier</key><string>org.teko.", m.name, "</string>\n"),
+                teko::str::concat(
+                    teko::str::concat("  <key>CFBundleShortVersionString</key><string>", ver, "</string>\n"),
+                    teko::str::concat(
+                        teko::str::concat("  <key>CFBundleVersion</key><string>", ver, "</string>\n"),
+                        teko::str::concat("  <key>CFBundleGetInfoString</key><string>", info, "</string>\n</dict>\n</plist>\n"))))))
+}
+
+/**
+ * backend — the artifact dispatch: lower the checked program to the native
+ * `binary` and report. `stem` is the output name (the manifest `name`); artifacts
+ * land under `out_dir` (default "bin", or `-o <dir>`), created at the project root
+ * (the cwd after the front-end chdir'd). Mirrors `driver.c`. `Static` wraps the
+ * own-native whole-program object into a platform-native static archive
+ * (`emit_static_lib`, KP16 + the real-toolchain-validated Mach-O/COFF port
+ * from `theory/kp16-ar-macho-coff` — own-backend targets only; a non-native
+ * backend/target combination is a NAMED honest stop, M.3 — no fake
+ * artifact); `Shared` is still a plain honest stop (its increment has not
+ * landed); `package` emits a `.tkl`; the default
+ * `binary` kind emits C and links via `cc` — UNLESS `m.backend == Backend::Native`
+ * (the resolved `TEKO_BACKEND=native` selection, D1/#390) selects the own AOT backend
+ * (`emit_native`). The default is `Backend::C`, so a flagless build stays
+ * byte-identical (FIXPOINT).
+ *
+ * @param dir      the project directory (for diagnostics)
+ * @param stem     the output artifact name (the manifest `name`)
+ * @param out_dir  the build output directory (`-o`, default "bin")
+ * @param prog     the checked, typed program
+ * @param m        the resolved manifest
+ * @param opt      the cc optimization level for the C-backend link (0 = default, 2 = release seed)
+ * @param tty      render the `codegen`/`emit C`/`cc` phases' in-place `\r` updates
+ *                 (BUILD-OUTPUT OBSERVABILITY; the library/package honest-stop and
+ *                 packaging paths below are unaffected — only the default binary
+ *                 path is instrumented). The backend always reports — `tty` only
+ *                 selects the rendering (Tty on a terminal, Plain on a CI/log),
+ *                 never silence.
+ * @param debug    the requested `--debug=` level (D1.6): reaches `-g` on the C-backend link
+ *                 (`run_cc_for_level`) when non-`None`, and reaches the ELF/Mach-O DWARF sink on
+ *                 the own-native path (`emit_native` → `build_dwarf_sink_for`, D1.4/D1.5) — the
+ *                 SAME flag, two independent sinks, one per backend
+ * @return         0 on a successful build, else the failing status
+ */
+fn backend(dir: str, stem: str, out_dir: str, prog: checker::TProgram, m: Manifest, opt: i32, tty: bool, debug: DebugInfo) -> i32 {
+    match validate_extern_libs_for_target(m) { error as e => return fail(dir, e.message); null => { } }
+    if m.artifact == Artifact::Static {
+        return emit_static_lib(dir, stem, out_dir, prog, m)
+    }
+    if m.artifact == Artifact::Shared {
+        return fail(dir, "shared library output (.dylib/.so/.dll) is not yet implemented — planned (C7.1m)")
+    }
+    if m.artifact == Artifact::Package {
+        // C7.12: emit .tkh + .tkb (+ best-effort .tsym) → ZIP-STORE → <out_dir>/<name>-<version>.tkl
+        // trim a trailing `/` from the output dir (mirrors the Binary path below).
+        let od = if out_dir.len > 0 && out_dir[out_dir.len - 1] == b'/' { teko::str::slice_to(out_dir, out_dir.len - 1) } else { out_dir }
+        match teko::fs::mkdir(od) { error => return fail(dir, "cannot create the output directory"); null => { } }
+        // .tkh — exported interface (type signatures + docs for `exp` items)
+        let table = checker::type_table_of(prog)
+        let tkh_bytes = match emit::emit_program(prog, table) {
+            []byte as b => b
+            error as e => return fail(dir, e.message)
+        }
+        // .tkb — whole-program typed tree (C7.16 codec)
+        let tkb_bytes = emit::serialize_program(prog)
+        // .tsym — symbol map (best-effort; always added when available)
+        let tsym_str = codegen::tk_emit_tsym(prog)
+        mut tsym_bytes: []byte = teko::list::empty()
+        mut k = 0
+        loop {
+            if k >= tsym_str.len { break }
+            tsym_bytes = teko::list::push(tsym_bytes, tsym_str[k])
+            k++
+        }
+        // assemble the archive entries: <name>.tkh, <name>.tkb, <name>.tsym
+        mut entries: []compress::ZipEntry = teko::list::empty()
+        entries = teko::list::push(entries, compress::ZipEntry { name = teko::str::concat(m.name, ".tkh"); data = tkh_bytes })
+        entries = teko::list::push(entries, compress::ZipEntry { name = teko::str::concat(m.name, ".tkb"); data = tkb_bytes })
+        entries = teko::list::push(entries, compress::ZipEntry { name = teko::str::concat(m.name, ".tsym"); data = tsym_bytes })
+        let zip_bytes = compress::write_zip(entries)
+        // <out_dir>/<name>-<version>.tkl
+        let ver = if m.version == "" { "0.0.0" } else { m.version }
+        let tkl_name = teko::str::concat(m.name, "-", teko::str::concat(ver, ".tkl"))

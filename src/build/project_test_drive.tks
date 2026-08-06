@@ -1,0 +1,313 @@
+// src/build/project.tks   (namespace 'teko::build')
+//
+// The PROJECT ORCHESTRATION entry layer — the canonical Teko ORIGINAL of the project
+// surfaces in src/driver.c (project_frontend / tk_compile_project / tk_run_project) and
+// the directory resolution in main.c (project_dir_of). main.tks dispatches here:
+//   teko build <dir>  → compile_project  (front-end → native codegen)
+//   teko run   <dir>  → run_project      (front-end → native codegen + execute, debug profile)
+//   teko <projarg>    → project_dir_of   (a `.tkp` → its dir; else the dir as-is)
+//
+// FAITHFUL-NOT-LITERAL (M.3). It mirrors the C twins' SHAPE and contracts in native Teko:
+// the C uses out-params (project_frontend(dir, &prog, &manifest)); Teko has NO out-params,
+// so the shared front-end returns a small `Frontend` struct (prog + manifest), as
+// `Frontend | error`. Both entries (build/run) run the SAME front-end AND the SAME
+// codegen→cc backend; `run` additionally executes the resulting binary (the interpreter this once
+// diverged to is retired, #524).
+
+use teko::parser
+use teko::lexer
+use teko::checker
+use teko::codegen
+use teko::emit
+use teko::compress
+use teko::coverage
+
+ *
+ * @param i      the item's 0-based index in `prog.items`
+ * @param total  `prog.items.len`, for the "N/M" the line renders
+ * @param it     the item about to enter its own scoped lowering-and-encode window
+ * @return       the window-start monotonic-ns reading (`0` when the trace is disabled)
+ * @since 0.3.1
+ */
+fn trace_native_item(i: u64, total: u64, it: checker::TItem) -> i64 {
+    if !native_trace_items_enabled() { return 0 }
+    teko::io::eprint(teko::str::concat("teko: native-lowering item ", teko::str::concat(teko::u64_to_str(i + 1), teko::str::concat("/", teko::str::concat(teko::u64_to_str(total), teko::str::concat(": ", item_trace_label(it)))))))
+    native_lowering_mono_ns()
+}
+
+/**
+ * trace_native_vmain — the `trace_native_item` counterpart for the virtual-main window: OPEN its trace
+ * line (`... item (virtual-main)`) WITHOUT a trailing newline and return the timing-window start, when
+ * enabled. Closed by `trace_native_item_done` exactly like a real item, so the virtual main is timed
+ * and crash-marked the same way. A no-op returning `0` otherwise.
+ *
+ * @return  the window-start monotonic-ns reading (`0` when the trace is disabled)
+ * @since 0.3.1 native-lowering-timing
+ */
+fn trace_native_vmain() -> i64 {
+    if !native_trace_items_enabled() { return 0 }
+    teko::io::eprint("teko: native-lowering item (virtual-main)")
+    native_lowering_mono_ns()
+}
+
+/**
+ * trace_native_item_done — CLOSE the trace line `trace_native_item`/`trace_native_vmain` opened, with
+ * a trailing ` | Nns` naming how long the item's lowering-and-encode window took (`start_ns` to now),
+ * when `native_trace_items_enabled`. Called only on the item's success path, so a faulting item never
+ * reaches it and its open line stays ns-less — the crash indicator. A no-op otherwise.
+ *
+ * @param start_ns  the reading `trace_native_item`/`trace_native_vmain` returned for this item
+ * @return          void
+ * @since 0.3.1 native-lowering-timing
+ */
+fn trace_native_item_done(start_ns: i64) -> void {
+    if !native_trace_items_enabled() { return }
+    teko::io::eprintln(teko::str::concat(" | ", ns_delta_str(start_ns, native_lowering_mono_ns())))
+}
+
+/**
+ * native_region_check_enabled — whether the fused native driver's per-item region-state check
+ * (`TEKO_NATIVE_REGION_CHECK=1`) is requested: a CI-narrowing aid (mirrors
+ * `native_trace_items_enabled` and `rodata_align_check_enabled`), NOT part of the ritual's normal
+ * output. It exists for the native-region-crash SIGSEGV inside `tk_region_alloc` reached through a
+ * fused-loop copy-out (`copy_encoded_func_to_current_region_arm64` and its siblings): those copies
+ * bump-allocate into the CURRENT region, which must have returned to the ROOT once the item's
+ * `region_leave()` ran — a current region that is NOT the root there is region-stack corruption, and
+ * the very state a subsequent `tk_region_alloc` on a stale/dropped handle would fault on. Checking it
+ * turns that distant SIGSEGV into a named, controlled honest-stop at the exact item.
+ *
+ * @return  true iff `TEKO_NATIVE_REGION_CHECK` is set to `"1"`
+ * @since 0.3.1 native-region-crash
+ */
+fn native_region_check_enabled() -> bool {
+    match teko::env::var("TEKO_NATIVE_REGION_CHECK") { str as v => v == "1"; error => false }
+}
+
+/**
+ * check_current_region_is_root — when `native_region_check_enabled`, verify the CURRENT region has
+ * returned to the ROOT at the fused loop's commit point (`region_leave()` already ran for this
+ * item), and return a named honest-stop naming the item's 1-based position and both handles when it
+ * has not — instead of letting the next copy-out's `tk_region_alloc` SIGSEGV on a corrupt current
+ * region. `null` when the check is disabled (byte-identical to before this diagnostic) OR when the
+ * current region correctly equals the root; the caller propagates the error otherwise. `checkpoint`
+ * labels the site ("item N/M" or "virtual-main") for the message.
+ *
+ * @param checkpoint  a human label for the site (the item position, or the virtual-main)
+ * @return            `null` when disabled or the region state is sound; else the named honest-stop
+ * @since 0.3.1 native-region-crash
+ */
+fn check_current_region_is_root(checkpoint: str) -> error | null {
+    if !native_region_check_enabled() { return null }
+    let cur = region_current()
+    let root = region_root()
+    if cur == root { return null }
+    error { message = teko::str::concat("TEKO_NATIVE_REGION_CHECK: current region is not the root after region_leave() at ", teko::str::concat(checkpoint, teko::str::concat(" — current=", teko::str::concat(teko::u64_to_str(cur), teko::str::concat(" root=", teko::u64_to_str(root)))))) }
+}
+
+/**
+ * native_item_label — the `"item N/M"` checkpoint label (1-based `i`) for
+ * `check_current_region_is_root`'s message in the fused per-item loop.
+ *
+ * @param i      the item's 0-based index
+ * @param total  the item count
+ * @return       the `"item N/M"` label
+ * @since 0.3.1 native-region-crash
+ */
+fn native_item_label(i: u64, total: u64) -> str {
+    teko::str::concat("item ", teko::str::concat(teko::u64_to_str(i + 1), teko::str::concat("/", teko::u64_to_str(total))))
+}
+
+/**
+ * emit_native_x86 — the x86-64/ELF own-backend tail (#386 B1), FUSED lower+encode per item (0.3.1
+ * C6.3, `docs/design/native-lowering-oom-por-funcao-0.3.1.md`): compute the whole-program lowering
+ * context ONCE (`teko::lir::lower_prelude`), then for every program item — a scratch child region,
+ * lower AND encode that ONE item inside it (`fuse_lower_item_x86`), leave the region, commit its
+ * outputs to the root accumulators (`.text` bytes E1, the rodata delta E4, the loose-statement
+ * delta E6, the new-lifted count E5), THEN drop the region — bounding the native peak to
+ * `Σ(bytes) + rodata + ONE item's LIR/scratch` instead of the old `Σ(LIR + scratch of every item)`
+ * that OOM'd the native self-host. The virtual-main lowers and encodes the same way, in its own
+ * final window, once every item's region has already dropped. The assembled `.text`/rodata/symbols
+ * are wrapped in an `ET_REL` ELF64 object (`emit_elf`) and handed to `finish_native_object` (write
+ * `.o` + `cc`-link + `.tsym` + success marker) — unchanged past the encoder, so the emitted bytes
+ * are byte-identical to the pre-fusion module-at-a-time path (only WHERE the compiler's own
+ * intermediates bump-allocate changes, never their computed values).
+ * Reached only via `TEKO_TARGET=x86_64-linux`; the emitted `.o` is a linux x86-64
+ * object, so the executing C-vs-own differential runs on a linux-x86_64 host
+ * (`scripts/diff_c_own.sh`), while a macOS host still writes the `.o` for the
+ * byte / well-formedness cross-check even though `cc` cannot link an ELF there.
+ * `debug` (D1.4) sinks the DWARF sections into the ELF object when `DebugInfo::Lines`;
+ * `DebugInfo::None` reaches `emit_elf` exactly as before D1.4 (byte-identical).
+ *
+ * @param dir   the project directory (for diagnostics)
+ * @param od    the slash-stripped output directory (already created)
+ * @param stem  the output artifact name (the manifest `name`)
+ * @param prog  the checked, typed program (lowered item-by-item, not up front — C6.3)
+ * @param m     the resolved manifest (link knobs)
+ * @param debug the requested `--debug=` level (D1.4)
+ * @return      0 on a successful build+link, else the failing status
+ */
+fn emit_native_x86(dir: str, od: str, stem: str, prog: checker::TProgram, m: Manifest, debug: DebugInfo) -> i32 {
+    let prelude = match teko::lir::lower_prelude(prog, false) { teko::lir::LowerPrelude as x => x; error as e => return fail(dir, e.message) }
+    mut robase = prelude.module.rodata
+    mut loose: []checker::TStatement = teko::list::empty()
+    mut lifted_ph: []teko::lir::LFunc = teko::list::empty()
+    mut mt = teko::backend::empty_module_text_x86()
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        let t0 = trace_native_item(i, prog.items.len, prog.items[i])
+        let child = region_new(region_root())
+        region_enter(child)
+        let outcome = fuse_lower_item_x86(robase, prelude, loose, prog.items[i], lifted_ph)
+        region_leave()
+        match outcome {
+            FusedItemOut as out => {
+                match check_current_region_is_root(native_item_label(i, prog.items.len)) { error as e => return fail(dir, e.message); null => { } }
+                mt = fold_encoded_funcs_x86(mt, out.encoded)
+                robase = commit_rodata_delta(robase, out.rodata)
+                loose = commit_loose(loose, out.loose)
+                lifted_ph = extend_lifted_placeholders(lifted_ph, out.new_lifted_count)
+                region_drop(child)
+                trace_native_item_done(t0)
+            }
+            error as e => return fail(dir, e.message)
+        }
+        i++
+    }
+    let vt0 = trace_native_vmain()
+    let vchild = region_new(region_root())
+    region_enter(vchild)
+    let vmain_outcome = fuse_virtual_main_x86(loose, prelude, robase, lifted_ph)
+    region_leave()
+    match vmain_outcome {
+        FusedItemOut as out => {
+            match check_current_region_is_root("virtual-main") { error as e => return fail(dir, e.message); null => { } }
+            mt = fold_encoded_funcs_x86(mt, out.encoded)
+            robase = commit_rodata_delta(robase, out.rodata)
+            region_drop(vchild)
+            trace_native_item_done(vt0)
+            match teko::backend::finish_encoded_module_x86(mt, robase, prelude.module.globals) {
+                teko::backend::EncodedModuleX86 as enc => {
+                    let dwarf = build_dwarf_sink_for(dir, prog, enc.symbols, enc.text.len, debug)
+                    finish_native_object(dir, od, stem, teko::backend::emit_elf(enc, dwarf), prog, m)
+                }
+                error as e => fail(dir, e.message)
+            }
+        }
+        error as e => fail(dir, e.message)
+    }
+}
+
+/**
+ * copy_reloc_to_current_region_arm64 — `r` with its `sym` name force-copied to the current region
+ * (E1, the arm64 twin of `copy_reloc_to_current_region_x86`): the fused arm64 native lowering
+ * driver (C6.4) moves `mangle_fn_symbol`'s `str::concat` calls INSIDE the item's own scratch region,
+ * so `r.sym` cannot be assumed to survive the region's drop without an explicit copy.
+ *
+ * @param r  the function-relative relocation to copy
+ * @return   `r` with `sym` resident in the current region
+ * @since 0.3.1 C6.4
+ */
+fn copy_reloc_to_current_region_arm64(r: teko::backend::Reloc) -> teko::backend::Reloc {
+    teko::backend::Reloc { offset = r.offset; sym = copy_str_to_current_region(r.sym); kind = r.kind; sect = r.sect }
+}
+
+/**
+ * copy_relocs_to_current_region_arm64 — `copy_reloc_to_current_region_arm64` applied to every entry
+ * of `relocs`, in order.
+ *
+ * @param relocs  the function-relative relocations to copy
+ * @return        `relocs`, each entry resident in the current region
+ * @since 0.3.1 C6.4
+ */
+fn copy_relocs_to_current_region_arm64(relocs: []teko::backend::Reloc) -> []teko::backend::Reloc {
+    mut out: []teko::backend::Reloc = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= relocs.len { break }
+        out = teko::list::push(out, copy_reloc_to_current_region_arm64(relocs[i]))
+        i++
+    }
+    out
+}
+
+/**
+ * copy_encoded_func_to_current_region_arm64 — `ef` with its `symbol` and every reloc's `sym`
+ * force-copied to the current region (E1, extended); `words` is left as-is, because
+ * `teko::backend::fold_encoded_func`'s own `append_words_le` already flattens it word-by-word into
+ * a freshly bump-allocated buffer in the root accumulator (mirrors `copy_encoded_func_to_current_
+ * region_x86`'s treatment of `bytes`).
+ *
+ * @param ef  the encoded function to copy
+ * @return    `ef` with every `str` field resident in the current region
+ * @since 0.3.1 C6.4
+ *
+ * (0.3.1 native-region-crash) The macOS-arm64 native fixpoint gate's symbolized backtrace (head
+ * 284c91c, item 550/6691) traced a SIGSEGV inside `tk_region_alloc`, reached through this
+ * function's `relocs` copy (`tk_slice_push_fo` → `tk_slice_push_r` → `tk_region_alloc`) while the
+ * struct literal below built its `symbol` and `relocs` fields inline as sibling initializers —
+ * the ONE copy-helper on the arm64 commit path left inline while every sibling
+ * (`copy_reloc_to_current_region_arm64`, and the x86 twin `copy_encoded_func_to_current_region_x86`
+ * plus its own siblings) had already received the C6.3-fix defensive let-binding, and precisely the
+ * frame the backtrace names. The x86 twin, already hardened, runs all ~6680 items; this arm64 twin,
+ * still inline, dies mid-loop. This edit brings it to the SAME shape: each field is computed into
+ * its OWN `let` BEFORE the struct literal, instead of two allocating calls evaluated inline as
+ * sibling field initializers. Behaviorally identical (same values, same region, same order of the
+ * copies actually needed) — a pure reshaping of the emitted call sequence, matching the sibling
+ * helpers exactly; if the crash persists after this, the region-state itself is corrupt before this
+ * point (the `TEKO_NATIVE_REGION_CHECK` diagnostic added alongside this fix names that case).
+ */
+fn copy_encoded_func_to_current_region_arm64(ef: teko::backend::EncodedFunc) -> teko::backend::EncodedFunc {
+    let symbol = copy_str_to_current_region(ef.symbol)
+    let relocs = copy_relocs_to_current_region_arm64(ef.relocs)
+    teko::backend::EncodedFunc { symbol = symbol; words = ef.words; relocs = relocs }
+}
+
+/**
+ * encode_lfunc_in_region_arm64 — the per-function isel → regalloc → encode pipeline for ONE
+ * `LFunc` under the arm64/AAPCS64 register file, meant to run with a scratch region entered: the
+ * arm64 twin of `encode_lfunc_in_region_x86` — `teko::backend::select_lfunc` (LIR → virtual
+ * `MFunc`), `teko::backend::regalloc_func` (AAPCS64 coloring), then `teko::backend::encode_func`
+ * (final `__text` words + function-relative relocs + the defined symbol name). Shared by BOTH arm64
+ * tails (Mach-O and ELF) since isel/regalloc/encode never touch the object format.
+ *
+ * @param f  the lowered function to encode
+ * @return   the encoded function, or a propagated native honest-stop
+ * @since 0.3.1 C6.4
+ */
+fn encode_lfunc_in_region_arm64(f: teko::lir::LFunc) -> teko::backend::EncodedFunc | error {
+    let sel = match teko::backend::select_lfunc(f) { teko::backend::MFunc as x => x; error as e => return e }
+    let col = match teko::backend::regalloc_func(teko::backend::AAPCS64, sel) { teko::backend::MFunc as x => x; error as e => return e }
+    teko::backend::encode_func(teko::backend::AAPCS64, col)
+}
+
+/**
+ * encode_lfuncs_in_region_arm64 — encode a LIST of `LFunc` (an item's own top-level function plus
+ * its newly lifted closures/thunks) inside the scratch region the caller has already entered, each
+ * one through `encode_lfunc_in_region_arm64` (isel → regalloc → encode). The arm64 twin of
+ * `encode_lfuncs_in_region_x86`. The fused native lowering driver calls this BEFORE
+ * `region_leave()`; every returned `EncodedFunc`'s `str` fields may still reference this region's
+ * memory — the caller commits through `fold_encoded_funcs_arm64` (which copies) AFTER leaving,
+ * before the region drops.
+ *
+ * @param fs  the item's lowered functions, in emission order
+ * @return    one `EncodedFunc` per function, or the first propagated honest-stop
+ * @since 0.3.1 C6.4
+ */
+pub fn encode_lfuncs_in_region_arm64(fs: []teko::lir::LFunc) -> []teko::backend::EncodedFunc | error {
+    mut out: []teko::backend::EncodedFunc = teko::list::empty()
+    mut i: u64 = 0
+    loop {
+        if i >= fs.len { break }
+        let ef = match encode_lfunc_in_region_arm64(fs[i]) { teko::backend::EncodedFunc as x => x; error as e => return e }
+        out = teko::list::push(out, ef)
+        i++
+    }
+    out
+}
+
+/**
+ * fold_encoded_funcs_arm64 — fold a LIST of already-encoded arm64 functions into the root-resident
+ * `__text` accumulator `mt`, copying each one to the current region first (E1, extended;
+ * `copy_encoded_func_to_current_region_arm64`) so the fold's appends never retain a `str` pointing
+ * into a region the caller is about to drop. The arm64 twin of `fold_encoded_funcs_x86`. Called

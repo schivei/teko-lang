@@ -1,0 +1,293 @@
+// src/build/project.tks   (namespace 'teko::build')
+//
+// The PROJECT ORCHESTRATION entry layer — the canonical Teko ORIGINAL of the project
+// surfaces in src/driver.c (project_frontend / tk_compile_project / tk_run_project) and
+// the directory resolution in main.c (project_dir_of). main.tks dispatches here:
+//   teko build <dir>  → compile_project  (front-end → native codegen)
+//   teko run   <dir>  → run_project      (front-end → native codegen + execute, debug profile)
+//   teko <projarg>    → project_dir_of   (a `.tkp` → its dir; else the dir as-is)
+//
+// FAITHFUL-NOT-LITERAL (M.3). It mirrors the C twins' SHAPE and contracts in native Teko:
+// the C uses out-params (project_frontend(dir, &prog, &manifest)); Teko has NO out-params,
+// so the shared front-end returns a small `Frontend` struct (prog + manifest), as
+// `Frontend | error`. Both entries (build/run) run the SAME front-end AND the SAME
+// codegen→cc backend; `run` additionally executes the resulting binary (the interpreter this once
+// diverged to is retired, #524).
+
+use teko::parser
+use teko::lexer
+use teko::checker
+use teko::codegen
+use teko::emit
+use teko::compress
+use teko::coverage
+
+ * find `-l<name>` in its own (or the cross toolchain's) search paths is the linker's question, and
+ * its fail-loud miss IS the R5 default — a dev who means to blind-link one must point at its path.
+ *
+ * @param flag  the resolved link flag
+ * @param mode  the element's declared linkage mode (`LINK_MODE_SHARED` for a `shared:` element)
+ * @return      true iff the flag must be left off the link line for the blind link
+ * @since 0.3.1
+ */
+fn omit_flag_for_blind_link(flag: str, mode: str) -> bool {
+    if mode != LINK_MODE_SHARED { return false }
+    if !allow_undef_selected() { return false }
+    let path = lib_spec_path(flag)
+    if path.len == 0 { return false }
+    !lib_file_present(path)
+}
+
+/**
+ * (C7.20) append_reachable_os_lib_flags — the DEFERRED `[extern.libs.<key>]` flags (C7.1f),
+ * appended to `argv` only when their section key applies to this build (`os_lib_key_matches`: a
+ * bare OS matching the build's or the target's OS, or a full os-arch matching the resolved target —
+ * the ratified §4.2 arch-key fill) AND their originating key is in `reachable` AND the blind-link
+ * opt-in has not withdrawn it (`omit_flag_for_blind_link`). Resolved HERE, so manifest parse stays
+ * host-independent.
+ *
+ * @param argv       the link argument vector so far
+ * @param m          the resolved manifest (the deferred per-section columns)
+ * @param keys       the build's applicability keys (`link_target_keys`)
+ * @param reachable  the extern-lib keys actually reached from the program's entry points
+ * @return           `argv` with every applicable, reachable deferred flag appended in order
+ */
+fn append_reachable_os_lib_flags(argv: []str, m: Manifest, keys: LinkTargetKeys, reachable: []str) -> []str {
+    mut out = argv
+    mut oi = 0
+    loop {
+        if oi >= m.os_lib_os.len { break }
+        if os_lib_key_matches(m.os_lib_os[oi], keys) && name_in(reachable, m.os_lib_name[oi]) && !omit_flag_for_blind_link(m.os_lib_flag[oi], m.os_lib_mode[oi]) {
+            out = teko::list::push(out, m.os_lib_flag[oi])
+        }
+        oi = oi + 1
+    }
+    out
+}
+
+/**
+ * ASSERT_SEED_NAMESPACE — the namespace whose functions the C assert SEED
+ * (`src/assert/assert.c`) realizes as `teko__assert__*`. A program that declares
+ * this namespace ITSELF (only the compiler's own corpus does — `teko::` is a
+ * reserved, non-shadowable root) supplies those symbols from its own generated C,
+ * so the seed must not also define them there.
+ */
+const ASSERT_SEED_NAMESPACE: str = "teko::assert"
+
+/**
+ * ASSERT_SEED_STRONG_FLAG — the `cc` define that tells `src/assert/assert.c` it is the
+ * SOLE definition of `teko__assert__*` and must therefore emit STRONG symbols. Passed
+ * exactly when the program being built does not declare `teko::assert` itself. Absent,
+ * the seed defaults to `__attribute__((weak))` — the pre-2026-07-25 behaviour, kept as
+ * the default so a previously RELEASED seed (which cannot know about this flag) still
+ * links `teko.c` + `assert.c` together without a duplicate symbol.
+ */
+const ASSERT_SEED_STRONG_FLAG: str = "-DTK_ASSERT_SEED_STRONG"
+
+/**
+ * declares_assert_seed — does a top-level function with this `namespace`/`is_extern`
+ * pair DEFINE one of the assert seed's symbols? An `extern fn` only BINDS a foreign
+ * symbol (it emits a prototype, never a body), so it never competes with the seed —
+ * only a real, bodied declaration in the seed's namespace does.
+ *
+ * @param namespace  the function's declaring namespace
+ * @param is_extern  whether it is a bodiless foreign binding
+ * @return           true iff this declaration defines an assert-seed symbol
+ */
+fn declares_assert_seed(namespace: str, is_extern: bool) -> bool {
+    !is_extern && namespace == ASSERT_SEED_NAMESPACE
+}
+
+/**
+ * program_declares_assert_seed — does `prog` define the `teko::assert` symbols itself?
+ * True ONLY for the compiler's own corpus (`src/assert/assert.tks`), whose generated C
+ * defines `teko__assert__*` strongly. Its NEGATION is what `build_cc_argv` uses to pass
+ * `ASSERT_SEED_STRONG_FLAG`: when the program supplies no definition, the seed becomes
+ * the strong one and resolves everywhere — including PE/COFF, where GNU ld does not
+ * honour a weak definition across translation units, so the weak-only seed left every
+ * Windows program that CALLED `teko::assert` without defining it unlinkable (see the
+ * comment block in `src/assert/assert.c`).
+ *
+ * @param prog  the checked program about to be linked
+ * @return      true iff the program supplies the assert-seed symbols itself
+ */
+fn program_declares_assert_seed(prog: checker::TProgram) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            checker::TFunction as f => { if declares_assert_seed(f.namespace, f.is_extern) { return true } }
+            _ => { }
+        }
+        i = i + 1
+    }
+    false
+}
+
+/**
+ * teko_cc_env — the raw value of the `TEKO_CC` cross-linker env seam (#387 B2-8),
+ * or "" when it is unset. The seam mirrors `TEKO_BACKEND`/`TEKO_TARGET`: it lets a
+ * differential lane override the compiler `build_cc_argv` invokes without a
+ * manifest edit, so the same self-hosted `teko` cross-links the own `.o` on a host
+ * whose default `cc` cannot (the linux-x86_64 CI runner linking a PE/COFF object).
+ *
+ * @return the `TEKO_CC` value, or "" when the variable is absent
+ */
+fn teko_cc_env() -> str {
+    match teko::env::var("TEKO_CC") { str as v => v; error => "" }
+}
+
+/**
+ * default_cc_for_target — the compiler that links the own object for `t` when neither the manifest
+ * `cc` nor the `TEKO_CC` seam pins one: the HOST `cc`, for every target there is.
+ *
+ * IT USED TO NAME `x86_64-w64-mingw32-gcc` FOR `X8664Windows`, AND THAT ARM IS GONE. It was the
+ * last place in this compiler that ASKED for MinGW, and it asked BY DEFAULT — so a cross Windows
+ * build silently linked through the very toolchain the owner banned (2026-07-26, restated
+ * 2026-07-29: *"queremos sim Cross compiling quando todos os natives estiverem funcionando, mas não
+ * quero saber de mingw"*). No dedicated cross driver replaces it, because none is wanted here: a
+ * cross build whose claim is the OBJECT now stops at the object (`build_links_binary`, applied by
+ * `finish_native_object`) and needs no linker at all, and the full cross LINK arrives with the
+ * project's own linker AFTER the natives work — that order is the ruling, not an accident.
+ *
+ * EVERY ARM THEREFORE ANSWERS THE SAME, AND THE FUNCTION STAYS. It is the single place the question
+ * "does this target have a cross driver of its own?" is answered, and the regressor's pre-build
+ * capability probe reads it (`cross_cc_for_target`, `host_cc_cannot_link_cross_reason`) to conclude
+ * that a cross row needs NO cross toolchain on this host. Inlining the constant at those call sites
+ * would scatter the answer; keeping it named keeps the day a legitimate (non-MinGW) cross driver
+ * appears a one-arm change.
+ *
+ * @param t  the resolved own-backend target
+ * @return   the compiler command for `t` — the host `cc` for every target
+ */
+fn default_cc_for_target(t: NativeTarget) -> str {
+    match t {
+        NativeTarget::X8664Windows => HOST_CC_NAME
+        NativeTarget::X8664Linux => HOST_CC_NAME
+        NativeTarget::Arm64Macho => HOST_CC_NAME
+        NativeTarget::Arm64Linux => HOST_CC_NAME
+    }
+}
+
+/**
+ * WINDOWS_OS_NAME — the `teko::os()` spelling of a Windows host, in the same vocabulary
+ * `target_os_name` and the `[extern.libs.<os>]` section keys use. Named because the host-OS
+ * comparison that picks the Windows compiler default is a DECISION, not a passing string.
+ */
+const WINDOWS_OS_NAME: str = "windows"
+
+/**
+ * WINDOWS_CC_NAME — the compiler a Windows host compiles the emitted C with: `clang`, never the
+ * `cc` on the PATH.
+ *
+ * THIS ONE TOKEN IS THE WHOLE FIX. Measured on the project's own Windows runner: `cc` there IS MinGW
+ * (`cc → /c/mingw64/bin/cc`), so "the host default" and "the banned toolchain" were the same file,
+ * while the LLVM already installed on the image was never reached. Naming `clang` reaches it.
+ *
+ * AND THAT clang ALREADY TARGETS MSVC BY ITSELF, measured on the same image:
+ *
+ *     clang version 20.1.8
+ *     Target: x86_64-pc-windows-msvc
+ *     InstalledDir: C:\Program Files\LLVM\bin
+ *
+ * and `clang -### probe.c` with NO target flag invokes
+ * `...\Microsoft Visual Studio\18\Enterprise\VC\Tools\MSVC\...\bin\Hostx64\x64\link.exe` with
+ * `-defaultlib:libcmt` and the MSVC `-libpath:`. So MSVC headers, MSVC libraries and the MSVC linker
+ * are what this compiler chooses on its own — the defect was never a missing flag, it was resolving
+ * the wrong compiler.
+ *
+ * WHY NOT `cl.exe`, MEASURED RATHER THAN ASSUMED, on that runner:
+ *
+ *     clang -std=c23                                  ACCEPTS a `({ ... })` statement-expression
+ *     clang --target=x86_64-pc-windows-msvc -std=c23  ACCEPTS
+ *     cl                                              REJECTS
+ *
+ * The emitted C uses statement-expressions plus `__builtin_`/`__attribute__`, which C23 does not
+ * standardise. clang accepts them while targeting MSVC because the COMPILER is clang; MSVC
+ * contributes headers, libraries and linker, nothing more. `cl.exe` is not even invokable on that
+ * image (it lives only inside a Visual Studio developer shell), so nothing here may depend on it.
+ */
+const WINDOWS_CC_NAME: str = "clang"
+
+/**
+ * WINDOWS_MSVC_TRIPLE — the ABI the Windows default DECLARES it wants: MSVC headers, MSVC libraries
+ * and `lld-link` as the linker. Its `-msvc` tail is exactly what `triple_is_mingw` refuses to
+ * confuse with MinGW's `-gnu` one.
+ *
+ * A BELT, NOT THE FIX, and the distinction is measured: on the project's own Windows runner the
+ * `-###` invocation clang produces WITH `--target=x86_64-pc-windows-msvc` is IDENTICAL to the one it
+ * produces without it — there, the flag is a no-op, because that clang's own default target is
+ * already this triple. It is carried anyway so the ABI is a DECLARED intention rather than an
+ * inherited accident: an image whose clang defaulted to `...-windows-gnu` would otherwise hand the C
+ * route straight back to MinGW, and the flag is what makes that image fail loudly (through
+ * `invoke_cc`'s ban) instead of quietly.
+ */
+const WINDOWS_MSVC_TRIPLE: str = "x86_64-pc-windows-msvc"
+
+/**
+ * CC_TARGET_FLAG_PREFIX — the clang spelling that pins a target triple on the command line. The
+ * `--target=<triple>` form (one token) and not `-target <triple>` (two), so a default the build adds
+ * for the host can never be mistaken for the manifest's own `[extern] target` pair.
+ */
+const CC_TARGET_FLAG_PREFIX: str = "--target="
+
+/**
+ * CcChoice — the compiler the link line runs, together with the target flag that choice implies.
+ *
+ * TWO FIELDS BECAUSE A COMPILER DEFAULT CAN BE A COMMAND *PLUS* AN ABI. The Windows default is not
+ * simply "clang": it is clang aimed at MSVC, and the aim is a separate argv token. Returning the
+ * pair keeps `resolve_cc`'s precedence law readable — a PINNED compiler (manifest `cc`, `TEKO_CC`)
+ * carries an empty `target_flag`, because a caller who names the compiler also owns its target and
+ * the build must not second-guess them.
+ *
+ * @since 0.3.1
+ */
+type CcChoice = struct {
+    /** the compiler command `build_cc_argv` puts at argv[0]. */
+    cmd: str
+    /** the target-pinning flag this choice implies ("" for a pinned compiler and for every non-Windows host). */
+    target_flag: str
+}
+
+/**
+ * host_cc_choice — the compiler default for a build that pinned none: `clang --target=<MSVC>` on a
+ * Windows host, the bare host `cc` everywhere else.
+ *
+ * THE WINDOWS ARM IS THE WHOLE POINT (owner: *"odeio, eu disse ODEIO o uso de mingw, deveria usar
+ * MSVC em Windows"*). On that host the PATH's `cc` is MinGW, so the old bare-`cc` default handed
+ * the C route to the banned toolchain silently. The CHOICE OF COMPILER is what fixes it — that
+ * runner's clang already targets MSVC on its own (`WINDOWS_CC_NAME`) — and the target flag rides
+ * along to make the ABI a declared intention rather than an inherited default
+ * (`WINDOWS_MSVC_TRIPLE`).
+ *
+ * THE BAN DOES NOT FIRE ON THE HONEST PATH, and that is asserted, not hoped: the triple this default
+ * aims at is `...-windows-msvc`, and `triple_is_mingw` is false for it
+ * (`a_legitimate_toolchain_triple_is_not_mingw`). A guard zealous enough to refuse the correct
+ * toolchain would be worse than the hole it closes.
+ *
+ * EVERY OTHER HOST IS BYTE-UNCHANGED: `HOST_CC_NAME` with no flag, exactly what the line carried
+ * before, which is the condition for the product fixpoint to keep closing on Linux and macOS.
+ *
+ * @return the default compiler choice for this host
+ * @since 0.3.1
+ */
+fn host_cc_choice() -> CcChoice {
+    if teko::os() == WINDOWS_OS_NAME {
+        return CcChoice { cmd = WINDOWS_CC_NAME; target_flag = CC_TARGET_FLAG_PREFIX ~ WINDOWS_MSVC_TRIPLE }
+    }
+    CcChoice { cmd = HOST_CC_NAME; target_flag = "" }
+}
+
+/**
+ * resolve_cc_choice — pick the compiler `build_cc_argv` invokes, in the precedence order that was
+ * already law (#387 B2-8, D-D) and is preserved here exactly: the manifest `[extern] cc` override
+ * wins; then the `TEKO_CC` env seam; then this host's default (`host_cc_choice`).
+ *
+ * THE `TEKO_TARGET` ARM IS GONE, and its removal is a simplification rather than a policy change:
+ * it existed only to reach `default_cc_for_target`'s MinGW cross driver, and now that every target
+ * answers with the host `cc` the arm could not say anything the default does not. A cross build no
+ * longer needs it either — it stops at the object (`build_links_binary`).
+ *
+ * A PINNED COMPILER IS OBEYED WITHOUT A TARGET FLAG. Whoever names the compiler owns its ABI, so
+ * neither override inherits the Windows default's `--target=`; and a pinned compiler is still
+ * subject to the MinGW ban — `invoke_cc` asks whatever was resolved what it targets and refuses a
