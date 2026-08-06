@@ -394,11 +394,43 @@ fn call_binding_matches(b: ValBinding, callee: parser::Path, cur_ns: str, qualif
 }
 
 /**
+ * call_base_pos — the position in the SEALED globals of the call `callee` names, resolved through the
+ * hash index `env.base_index`: the LARGEST base position whose name matches the callee's last segment
+ * AND that `call_binding_matches` accepts, or -1 when none. Byte-identical to a reverse linear scan of
+ * `env.base` returning the first (highest-position) accepted match (design §5, "largest position ≡
+ * reverse scan's first match"), but O(log n + c): binary-search to the bucket of slots sharing the
+ * name's hash, walk it, re-test the exact name against real bytes so a hash collision never wins, and
+ * apply the SAME `call_binding_matches` predicate the linear scan applied. Shared by `lookup_call`
+ * (reads the winner's type) and `call_ns` (reads its namespace) so both resolve identically.
+ *
+ * @param env        the typing environment (sealed globals + current namespace)
+ * @param callee     the call callee path
+ * @param name       the callee's last segment (the called name)
+ * @param qualified  whether the callee carries a qualifier (`callee.segments.len > 1`)
+ * @return           the winning base position, or -1 when no global binding resolves the callee
+ * @since 0.3.1
+ */
+fn call_base_pos(env: Env, callee: parser::Path, name: str, qualified: bool) -> i64 {
+    let h = teko::runtime::str_hash(name)
+    mut best: i64 = -1
+    mut k = nidx_lower_bound(env.base_index, h)
+    loop {
+        if k >= env.base_index.slots.len { break }
+        if env.base_index.slots[k].hash != h { break }
+        let p = env.base_index.slots[k].pos
+        let b = env.base[p]
+        if b.name == name && call_binding_matches(b, callee, env.cur_ns, qualified) && (p to i64) > best { best = p to i64 }
+        k++
+    }
+    best
+}
+
+/**
  * (#41) NAMESPACE-AWARE call resolution (mirror of C `tk_env_lookup_call`): the type of the function
  * or value the callee names. An UNQUALIFIED `name` binds a LOCAL (empty ns) or a function in the
  * CURRENT namespace; a QUALIFIED `q::…::name` binds a function whose namespace satisfies the callee's
  * full qualifier (`call_binding_matches`). Scans innermost bindings first (locals shadow), then the
- * sealed globals under the same rule.
+ * sealed globals through the hash index (`call_base_pos`) under the same rule.
  *
  * @param env     the typing environment (local bindings + sealed globals + current namespace)
  * @param callee  the call callee path
@@ -415,20 +447,16 @@ fn lookup_call(env: Env, callee: parser::Path) -> Type | error {
         let b = env.bindings[i]
         if b.name == name && call_binding_matches(b, callee, env.cur_ns, qualified) { return b.type }
     }
-    mut j = env.base.len
-    loop {
-        if j == 0 { break }
-        j = j - 1
-        let b = env.base[j]
-        if b.name == name && call_binding_matches(b, callee, env.cur_ns, qualified) { return b.type }
-    }
+    let p = call_base_pos(env, callee, name, qualified)
+    if p >= 0 { return env.base[p to u64].type }
     error { message = $"undefined name: {name}" }
 }
 
 /**
- * (#49) the resolved target's declaring NAMESPACE for a call — the same scan as `lookup_call` but
- * returning the winning binding's namespace. Codegen mangles a user call by this namespace; an empty
- * string means a LOCAL (empty ns), an unresolved callee, or a builtin (use the call-map / bare name).
+ * (#49) the resolved target's declaring NAMESPACE for a call — the same resolution as `lookup_call`
+ * but returning the winning binding's namespace. Codegen mangles a user call by this namespace; an
+ * empty string means a LOCAL (empty ns), an unresolved callee, or a builtin (use the call-map / bare
+ * name).
  *
  * @param env     the typing environment
  * @param callee  the call callee path
@@ -444,13 +472,8 @@ fn call_ns(env: Env, callee: parser::Path) -> str {
         let b = env.bindings[i]
         if b.name == name && call_binding_matches(b, callee, env.cur_ns, qualified) { return b.ns }
     }
-    mut j = env.base.len
-    loop {
-        if j == 0 { break }
-        j = j - 1
-        let b = env.base[j]
-        if b.name == name && call_binding_matches(b, callee, env.cur_ns, qualified) { return b.ns }
-    }
+    let p = call_base_pos(env, callee, name, qualified)
+    if p >= 0 { return env.base[p to u64].ns }
     ""
 }
 
