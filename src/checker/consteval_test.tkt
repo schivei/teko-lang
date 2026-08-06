@@ -441,3 +441,55 @@ fn collect_const_ctors_records_the_struct_constructor() {
     let items: []TItem = teko::list::push(teko::list::empty(), c_ctor_fn("preg", "teko::backend"))
     teko::assert::is_true(collect_const_ctors(items).len == 1)
 }
+
+/**
+ * c_str_const — a private module-level `str` const named `name` in `teko::backend`, initialized by
+ * `init` — the fixture for the #594 Tier-A `const str = <other const>` collapse.
+ *
+ * @param name  the const's name
+ * @param init  the const's checked initializer
+ * @return      the typed const declaration
+ */
+fn c_str_const(name: str, init: TExpr) -> TConstDecl {
+    TConstDecl { name = name; namespace = "teko::backend"; ty = Str { }; init = init; vis = parser::Visibility::Private; has_doc = false; doc = ""; line = 1; col = 1 }
+}
+
+/**
+ * str_const_init_is — does the module const named `name` in `prog` have a STRING-LITERAL initializer
+ * whose text equals `expected`? False when the const is absent or its initializer is not a literal
+ * (e.g. still a bare reference).
+ *
+ * @param prog      the program to search
+ * @param name      the const's name
+ * @param expected  the expected literal text
+ * @return          true iff `name`'s initializer is the literal `expected`
+ */
+fn str_const_init_is(prog: TProgram, name: str, expected: str) -> bool {
+    mut i: u64 = 0
+    loop {
+        if i >= prog.items.len { break }
+        match prog.items[i] {
+            TConstDecl as cd => if cd.name == name { return match cd.init.kind { TStrLit as s => s.text == expected; _ => false } }
+            _ => { }
+        }
+        i++
+    }
+    false
+}
+
+/**
+ * collapse_agg_const_resolves_str_reference — `const B: str = A` (A another str const) has B's
+ * declaration initializer collapsed to A's string literal, so the native shared-rodata materializer
+ * serializes the value instead of honest-stopping on the bare reference (#594 Tier-A follow-up). A's
+ * own literal initializer is left unchanged.
+ */
+#test
+fn collapse_agg_const_resolves_str_reference() {
+    let a = c_str_const("A", te(TStrLit { text = "11.0.0" }, Str { }))
+    let b = c_str_const("B", c_var("A", Str { }))
+    mut items: []TItem = teko::list::push(teko::list::empty(), a)
+    items = teko::list::push(items, b)
+    let out = match collapse_agg_const_decls(TProgram { items = items }) { TProgram as p => p; error => { teko::assert::is_true(false); return } }
+    teko::assert::is_true(str_const_init_is(out, "B", "11.0.0"))
+    teko::assert::is_true(str_const_init_is(out, "A", "11.0.0"))
+}

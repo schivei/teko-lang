@@ -15012,7 +15012,13 @@ pub fn lower_prelude(prog: checker::TProgram, flat_symbols: bool) -> LowerPrelud
     let variants = collect_variant_defs(prog)
     let ref_fns = collect_ref_fns(prog)
     let field_decls = match collect_field_decls(prog) { []LFieldDecls as fd => fd; error as e => return e }
-    let m = match intern_aggregate_consts(register_layouts(empty_module(), layouts), prog.items, layouts, variants, enums) { LModule as x => x; error as e => return e }
+    // Collapse each aggregate const's DECLARATION initializer (a `const str = <other const>` reference
+    // resolved to the referenced const's literal), the #594 Tier-A follow-up: the shared-rodata
+    // materializer below serializes the referenced value instead of honest-stopping on the bare
+    // reference. The C backend already resolves this at use sites (`inline_aggregate_consts`); this
+    // gives the native path the same resolution, leaving the C-emission fixpoint byte-identical.
+    let cprog = match checker::collapse_agg_const_decls(prog) { checker::TProgram as p => p; error as e => return e }
+    let m = match intern_aggregate_consts(register_layouts(empty_module(), layouts), cprog.items, layouts, variants, enums) { LModule as x => x; error as e => return e }
     LowerPrelude { module = m; layouts = layouts; enums = enums; externs = externs; variants = variants; ref_fns = ref_fns; field_decls = field_decls; table = table }
 }
 
