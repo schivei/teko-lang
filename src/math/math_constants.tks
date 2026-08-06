@@ -1,0 +1,92 @@
+// src/math/math.tks   (namespace 'teko::math') — M0, the `teko::math` ROOT unit.
+// Per TEKO_ROADMAP_MATH.md §1 "M0 — teko::math root (common)":
+//
+//   "Constants (pi, tau, e, sqrt2, ln2, …; inf, nan producers); float classification
+//   (is_nan/is_inf/is_finite/is_normal); abs/sign/copysign; min/max/clamp (generic);
+//   integer helpers gcd/lcm/isqrt/ipow (checked). Pure Teko. Verify: .tkt."
+//
+// WHOLE-NAMESPACE GROUND RULE (§0 of the roadmap doc, quoted): "No operators — named
+// functions/methods... Errors are values. Domain/edge failures return T | error (or
+// error?), never panic." M0 has no domain failures of its own EXCEPT the integer
+// helpers (division-shaped: gcd/lcm/isqrt/ipow can overflow or hit an invalid input),
+// which per the doc are explicitly "(checked)" — they return `<int> | error` rather
+// than panicking, consistent with M1's checked_* family this unit hands off to.
+//
+// GENERIC min/max/clamp — DEVIATION FROM THE LITERAL WORDING, DOCUMENTED (M.3 honesty,
+// not silently wrong). The roadmap prose says "min/max/clamp (generic)". Verified against
+// the checker as it stands today (src/checker/expr.tks::is_numeric/is_comparable,
+// src/checker/typer.tks::type_binary/type_compare): comparison and arithmetic operators
+// only type-check against a concrete `Prim` type. A free generic `fn min<T>(a: T, b: T)`
+// body using `<`/`>` on the unconstrained (or nominally-constrained) type parameter T
+// does NOT type-check — S6 (constraint-gated operator availability on a generic type
+// parameter) is DESIGNED but not yet implemented (see teko-generics-constraints-rules
+// project memory: "OPERATING on T (members/operators) requires a constraint (S6)").
+// `examples/regressions/generic_constraints` only exercises PASS-THROUGH generics
+// (identity), never an operator on T — confirming this is not yet expressible.
+// So min/max/clamp ship here as a PER-TYPE family over the two numeric types the
+// project's own `Numeric` constraint precedent already recognizes (i64, f64) — mirrors
+// M1's own fallback wording ("Generic over the int types where possible, else a
+// per-width family"). A single truly generic entry point is a mechanical follow-up
+// once S6 lands; this is flagged, not silently narrowed.
+//
+// NO LIBM. §0 of the roadmap doc explicitly scopes M0 to constants/classification/
+// abs/sign/copysign/min/max/clamp/integer-helpers — none of these need a transcendental
+// function, so M0 needs no `extern` FFI at all (that begins at M2 `teko::math::real`,
+// a separate unit; the root `teko.tkp` manifest's `[extern.libs.*]` sections stay
+// untouched by this unit). Float classification (is_nan/is_inf/is_finite/is_normal) is
+// done via IEEE-754 bit inspection through the existing `teko::f64_bits`/
+// `teko::f64_from_bits` builtins (already wired end-to-end: checker/scope.tks,
+// codegen/codegen.tks, the interpreter's twins (retired), runtime/teko_rt.c) — no new compiler-core surface
+// needed, no libm link.
+
+// --- constants -----------------------------------------------------------------------
+
+/**
+ * `PI` — the ratio of a circle's circumference to its diameter.
+ */
+pub const PI: f64 = 3.14159265358979323846
+
+/**
+ * `TAU` — `2 * PI`, kept as its own literal (not folded from `PI`) so the
+ * value does not depend on `*` folding order.
+ */
+pub const TAU: f64 = 6.28318530717958647692
+
+/**
+ * `E` — Euler's number, the base of the natural logarithm.
+ */
+pub const E: f64 = 2.71828182845904523536
+
+/**
+ * `SQRT2` — the square root of 2.
+ */
+pub const SQRT2: f64 = 1.41421356237309504880
+
+/**
+ * `LN2` — the natural logarithm of 2.
+ */
+pub const LN2: f64 = 0.69314718055994530942
+
+/**
+ * `LN10` — the natural logarithm of 10.
+ */
+pub const LN10: f64 = 2.30258509299404568402
+
+/**
+ * `EXPONENT_MASK` — the IEEE-754 binary64 exponent field (bits 62..52, 11
+ * bits; all-ones = `0x7FF` marks inf/nan).
+ */
+const EXPONENT_MASK: u64 = 0x7FF0000000000000
+
+/**
+ * `MANTISSA_MASK` — the IEEE-754 binary64 mantissa field (bits 51..0, 52
+ * bits; zero mantissa + all-ones exponent = infinity, nonzero mantissa +
+ * all-ones exponent = NaN).
+ */
+const MANTISSA_MASK: u64 = 0x000FFFFFFFFFFFFF
+
+/**
+ * `SIGN_MASK` — the IEEE-754 binary64 sign bit (bit 63).
+ */
+const SIGN_MASK: u64 = 0x8000000000000000
+
